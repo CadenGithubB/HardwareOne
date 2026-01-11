@@ -1,0 +1,37 @@
+idf_component_register(
+    SRC_DIRS
+        Adafruit_BNO055
+        Adafruit_Unified_Sensor
+        Adafruit_BusIO
+        Adafruit_GFX_Library
+        Adafruit_SSD1306
+        Adafruit_NeoPixel
+        Adafruit_APDS9960_Library
+        STM32duino_VL53L4CX/src
+        Adafruit_MLX90640
+        Adafruit_MLX90640/utility
+        Adafruit_PWM_Servo_Driver_Library
+        Adafruit_GPS_Library/src
+        Adafruit_seesaw_Library
+        Radio/src
+
+    INCLUDE_DIRS
+        ArduinoJson
+        ArduinoJson/src
+        Adafruit_BNO055
+        Adafruit_Unified_Sensor
+        Adafruit_BusIO
+        Adafruit_GFX_Library
+        Adafruit_SSD1306
+        Adafruit_NeoPixel
+        Adafruit_APDS9960_Library
+        STM32duino_VL53L4CX/src
+        Adafruit_MLX90640
+        Adafruit_PWM_Servo_Driver_Library
+        Adafruit_GPS_Library/src
+        Adafruit_seesaw_Library
+        Radio/src
+
+    REQUIRES
+        arduino
+)
