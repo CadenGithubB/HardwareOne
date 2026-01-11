@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+managed_components/
+
+# SDK config backups
+sdkconfig.old
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# Nested git repos (have their own repos)
+components/hardwareone/icons/
+components/arduino/

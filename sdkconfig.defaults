@@ -1,0 +1,17 @@
+# Custom partition table with spiffs for LittleFS storage
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Flash size (match actual chip - 8MB detected but using 2MB in binary header)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# Arduino core requirements
+CONFIG_FREERTOS_HZ=1000
+
+# Increase main task stack size (default 3584 is too small for this app)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# BLE GATT configuration - increase attribute handles for multiple services
+CONFIG_BT_GATT_MAX_SR_ATTRIBUTES=100
+CONFIG_BT_GATT_MAX_SR_PROFILES=8
