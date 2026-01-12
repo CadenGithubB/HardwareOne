@@ -378,8 +378,10 @@ void gpsTask(void* parameter) {
 // GPS Modular Settings Registration (for safety and reliability)
 // ============================================================================
 
-// GPS settings entries - minimal but essential for safety
+// GPS settings entries
 static const SettingEntry gpsSettingEntries[] = {
+  // Core settings
+  { "autoStart", SETTING_BOOL, &gSettings.gpsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   // Device-level settings (sensor hardware behavior)
   { "device.devicePollMs", SETTING_INT, &gSettings.gpsDevicePollMs, 1000, 0, nullptr, 100, 10000, "Poll Interval (ms)", nullptr }
 };
@@ -388,7 +390,7 @@ static bool isGPSConnected() {
   return gpsConnected;
 }
 
-static const SettingsModule gpsSettingsModule = {
+extern const SettingsModule gpsSettingsModule = {
   "gps",
   "gps_pa1010d",
   gpsSettingEntries,
@@ -397,15 +399,7 @@ static const SettingsModule gpsSettingsModule = {
   "PA1010D GPS sensor settings"
 };
 
-// Auto-register on startup (matches thermal/IMU/ToF pattern)
-static struct GpsSettingsRegistrar {
-  GpsSettingsRegistrar() { registerSettingsModule(&gpsSettingsModule); }
-} _gpsSettingsRegistrar;
-
-// Register GPS settings module (legacy function - now auto-registered)
-void registerGPSSettings() {
-  registerSettingsModule(&gpsSettingsModule);
-}
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 // ============================================================================
 // GPS Command Registry

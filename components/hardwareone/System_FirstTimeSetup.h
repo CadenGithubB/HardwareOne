@@ -48,9 +48,9 @@ extern bool gFirstTimeSetupPerformed;
 void detectFirstTimeSetupState();
 
 // State access functions
-inline bool isFirstTimeSetup();
-inline void setFirstTimeSetupState(FirstTimeSetupState state);
-inline void setSetupProgressStage(SetupProgressStage stage);
+bool isFirstTimeSetup();
+void setFirstTimeSetupState(FirstTimeSetupState state);
+void setSetupProgressStage(SetupProgressStage stage);
 
 // Progress message functions
 const char* getSetupProgressMessage(SetupProgressStage stage);

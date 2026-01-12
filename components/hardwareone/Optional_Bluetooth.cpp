@@ -978,20 +978,14 @@ const SettingEntry bluetoothSettingsEntries[] = {
 const size_t bluetoothSettingsCount = sizeof(bluetoothSettingsEntries) / sizeof(bluetoothSettingsEntries[0]);
 
 // Register Bluetooth settings module
-static const SettingsModule bluetoothSettingsModule = {
+extern const SettingsModule bluetoothSettingsModule = {
   "bluetooth",
   "bluetooth",
   bluetoothSettingsEntries,
   bluetoothSettingsCount
 };
 
-// Auto-register on startup
-static struct BluetoothSettingsRegistrar {
-  BluetoothSettingsRegistrar() { 
-    extern void registerSettingsModule(const SettingsModule* module);
-    registerSettingsModule(&bluetoothSettingsModule); 
-  }
-} _bluetooth_settings_registrar;
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 // =============================================================================
 // OLED DISPLAY MODE

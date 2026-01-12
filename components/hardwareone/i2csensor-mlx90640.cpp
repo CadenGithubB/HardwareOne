@@ -39,6 +39,8 @@ extern void drainDebugRing();
 // Note: gSettings is declared in settings.h (included above)
 
 static const SettingEntry thermalSettingEntries[] = {
+  // Core settings
+  { "autoStart", SETTING_BOOL, &gSettings.thermalAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   // UI Settings (client-side visualization)
   { "ui.pollingMs",                 SETTING_INT,    &gSettings.thermalPollingMs,             250, 0, nullptr, 50, 5000, "Polling (ms)", nullptr },
   { "ui.thermalPaletteDefault",     SETTING_STRING, &gSettings.thermalPaletteDefault,        0,   0, "grayscale", 0, 0, "Default Palette", "grayscale,ironbow,rainbow,hot,cool" },
@@ -63,7 +65,7 @@ static bool isThermalConnected() {
   return thermalConnected;
 }
 
-static const SettingsModule thermalSettingsModule = {
+extern const SettingsModule thermalSettingsModule = {
   "thermal",
   "thermal_mlx90640",
   thermalSettingEntries,
@@ -72,10 +74,7 @@ static const SettingsModule thermalSettingsModule = {
   "MLX90640 thermal camera settings"
 };
 
-// Auto-register on startup
-static struct ThermalSettingsRegistrar {
-  ThermalSettingsRegistrar() { registerSettingsModule(&thermalSettingsModule); }
-} _thermalSettingsRegistrar;
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 // ============================================================================
 

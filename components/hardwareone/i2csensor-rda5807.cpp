@@ -742,8 +742,10 @@ static CommandModuleRegistrar _fmradio_cmd_registrar(fmRadioCommands, fmRadioCom
 // FM Radio Modular Settings Registration (for safety and reliability)
 // ============================================================================
 
-// FM Radio settings entries - minimal but essential for safety
+// FM Radio settings entries
 static const SettingEntry fmRadioSettingEntries[] = {
+  // Core settings
+  { "autoStart", SETTING_BOOL, &gSettings.fmRadioAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   // Device-level settings (sensor hardware behavior)
   { "device.devicePollMs", SETTING_INT, &gSettings.fmRadioDevicePollMs, 250, 0, nullptr, 100, 5000, "Poll Interval (ms)", nullptr }
 };
@@ -752,7 +754,7 @@ static bool isFMRadioConnected() {
   return fmRadioConnected;
 }
 
-static const SettingsModule fmRadioSettingsModule = {
+extern const SettingsModule fmRadioSettingsModule = {
   "fmradio",
   nullptr,
   fmRadioSettingEntries,
@@ -761,10 +763,7 @@ static const SettingsModule fmRadioSettingsModule = {
   "RDA5807 FM radio settings"
 };
 
-// Auto-register on startup (matches thermal/IMU/ToF pattern)
-static struct FmRadioSettingsRegistrar {
-  FmRadioSettingsRegistrar() { registerSettingsModule(&fmRadioSettingsModule); }
-} _fmRadioSettingsRegistrar;
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 // ============================================================================
 // FM Radio OLED Mode (Display Function + Registration)

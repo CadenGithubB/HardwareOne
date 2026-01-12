@@ -8169,11 +8169,14 @@ static CommandModuleRegistrar _espnow_cmd_registrar(espNowCommands, espNowComman
 // ============================================================================
 
 static const SettingEntry espnowSettingEntries[] = {
-  { "enabled", SETTING_BOOL, &gSettings.espnowenabled, false, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr },
-  { "mesh", SETTING_BOOL, &gSettings.espnowmesh, false, 0, nullptr, 0, 1, "Mesh Enabled", nullptr },
+  // Core ESP-NOW settings
+  { "enabled", SETTING_BOOL, &gSettings.espnowenabled, true, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr },
+  { "mesh", SETTING_BOOL, &gSettings.espnowmesh, true, 0, nullptr, 0, 1, "Mesh Mode", nullptr },
+  { "userSyncEnabled", SETTING_BOOL, &gSettings.espnowUserSyncEnabled, false, 0, nullptr, 0, 1, "User Sync Enabled", nullptr },
   { "deviceName", SETTING_STRING, &gSettings.espnowDeviceName, 0, 0, "", 0, 0, "Device Name", nullptr },
   { "firstTimeSetup", SETTING_BOOL, &gSettings.espnowFirstTimeSetup, false, 0, nullptr, 0, 1, "First Time Setup", nullptr },
   { "passphrase", SETTING_STRING, &gSettings.espnowPassphrase, 0, 0, "", 0, 0, "Passphrase", nullptr },
+  // Mesh settings
   { "meshRole", SETTING_INT, &gSettings.meshRole, 0, 0, nullptr, 0, 2, "Mesh Role", nullptr },
   { "masterMAC", SETTING_STRING, &gSettings.meshMasterMAC, 0, 0, "", 0, 0, "Master MAC", nullptr },
   { "backupMAC", SETTING_STRING, &gSettings.meshBackupMAC, 0, 0, "", 0, 0, "Backup MAC", nullptr },
@@ -8182,18 +8185,17 @@ static const SettingEntry espnowSettingEntries[] = {
   { "workerStatusInterval", SETTING_INT, &gSettings.meshWorkerStatusInterval, 30000, 0, nullptr, 5000, 120000, "Worker Status Interval (ms)", nullptr },
   { "topoDiscoveryInterval", SETTING_INT, &gSettings.meshTopoDiscoveryInterval, 0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr },
   { "topoAutoRefresh", SETTING_BOOL, &gSettings.meshTopoAutoRefresh, false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr },
-  { "heartbeatBroadcast", SETTING_BOOL, &gSettings.meshHeartbeatBroadcast, true, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr }
+  { "heartbeatBroadcast", SETTING_BOOL, &gSettings.meshHeartbeatBroadcast, false, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr },
+  { "ttl", SETTING_INT, &gSettings.meshTTL, 3, 0, nullptr, 1, 10, "TTL", nullptr },
+  { "adaptiveTTL", SETTING_BOOL, &gSettings.meshAdaptiveTTL, false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr }
 };
 
-static const SettingsModule espnowSettingsModule = {
+extern const SettingsModule espnowSettingsModule = {
   "espnow", "espnow", espnowSettingEntries,
   sizeof(espnowSettingEntries) / sizeof(espnowSettingEntries[0])
 };
 
-// Auto-register on startup
-static struct EspnowSettingsRegistrar {
-  EspnowSettingsRegistrar() { registerSettingsModule(&espnowSettingsModule); }
-} _espnowSettingsRegistrar;
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 // ============================================================================
 // ESP-NOW User Sync Toggle Command (merged from System_ESPNow_UserSync.cpp)

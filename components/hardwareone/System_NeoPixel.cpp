@@ -443,12 +443,9 @@ static const SettingEntry ledSettingEntries[] = {
   { "startupDuration", SETTING_INT, &gSettings.ledStartupDuration, 1000, 0, nullptr, 100, 10000, "Startup Duration (ms)", nullptr }
 };
 
-static const SettingsModule ledSettingsModule = {
+extern const SettingsModule ledSettingsModule = {
   "led", "led", ledSettingEntries,
   sizeof(ledSettingEntries) / sizeof(ledSettingEntries[0])
 };
 
-// Auto-register LED settings on startup
-static struct LedSettingsRegistrar {
-  LedSettingsRegistrar() { registerSettingsModule(&ledSettingsModule); }
-} _ledSettingsRegistrar;
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

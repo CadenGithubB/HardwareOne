@@ -14,9 +14,9 @@ struct CommandEntry;
 struct Settings {
   // Constructor to ensure all String members are initialized
   Settings()
-    : version(0),
-      wifiSSID(""),
+    : wifiSSID(""),
       wifiPassword(""),
+      wifiEnabled(true),
       wifiAutoReconnect(true),
       cliHistorySize(10),
       ntpServer(""),
@@ -127,6 +127,7 @@ struct Settings {
       gpsAutoStart(false),
       fmRadioAutoStart(false),
       apdsAutoStart(false),
+      httpAutoStart(true),
       bluetoothAutoStart(true),
       bluetoothRequireAuth(true),
       bleDeviceName("HardwareOne"),
@@ -142,9 +143,9 @@ struct Settings {
     // String members are now initialized in initializer list
   }
 
-  uint16_t version;
   String wifiSSID;
   String wifiPassword;
+  bool wifiEnabled;        // Enable/disable WiFi at boot (default: true)
   bool wifiAutoReconnect;
   int cliHistorySize;
   String ntpServer;
@@ -296,7 +297,7 @@ struct Settings {
   uint8_t meshTTL;                     // TTL for mesh-routed messages (default: 3, range: 1-10, updated by adaptive mode)
   bool meshAdaptiveTTL;                // Use adaptive TTL based on peer count: ceil(log2(peers))+1 (default: false)
   // Automation system
-  bool automationsEnabled;  // Enable/disable automation scheduler task and memory allocation
+  bool automationsEnabled;  // Enable/disable automation scheduler (runs from main loop)
   // I2C Hardware system
   bool i2cBusEnabled;       // Enable/disable I2C bus hardware (Wire/Wire1 init and transactions)
   bool i2cSensorsEnabled;   // Enable/disable I2C sensor subsystem (runtime toggle like automation/espnow)
@@ -328,6 +329,8 @@ struct Settings {
   bool gpsAutoStart;            // Auto-start GPS after boot
   bool fmRadioAutoStart;        // Auto-start FM radio after boot
   bool apdsAutoStart;           // Auto-start APDS gesture/color sensor after boot
+  // HTTP server settings
+  bool httpAutoStart;           // Auto-start HTTP server at boot if WiFi connected
   // Bluetooth settings
   bool bluetoothAutoStart;      // Auto-start Bluetooth at boot (enables BLE server)
   bool bluetoothRequireAuth;    // Require login before accepting BLE commands (always required, per-connection)
@@ -476,8 +479,11 @@ size_t readRegisteredSettings(JsonDocument& doc);
 // Returns number of settings written
 size_t writeRegisteredSettings(JsonDocument& doc);
 
-// Register core settings modules that need early initialization
-// Note: Peripheral modules auto-register via static constructors
+// Register ALL settings modules explicitly (called once early in boot)
+// Ensures all compiled modules are available before applying defaults
+void registerAllSettingsModules();
+
+// Legacy function - now just calls registerAllSettingsModules()
 void registerCoreSettingsModules();
 
 // Debug: print a summary of all registered settings modules

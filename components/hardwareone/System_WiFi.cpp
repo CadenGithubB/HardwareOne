@@ -25,7 +25,7 @@
 extern bool wifiConnected;
 extern void broadcastOutput(const String& msg);
 // gDebugBuffer, ensureDebugBuffer now from debug_system.h
-extern bool syncNTPAndResolve();
+extern bool syncNTPAndResolve();  // Synchronous NTP sync
 extern httpd_handle_t server;
 extern volatile uint32_t gOutputFlags;
 
@@ -753,8 +753,8 @@ bool connectWiFiSSID(const String& ssid, unsigned long timeoutMs) {
 const char* cmd_ntpsync(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Allow any authenticated user to sync NTP
-  bool success = syncNTPAndResolve();
-  return success ? "NTP sync completed" : "NTP sync failed";
+  bool ok = syncNTPAndResolve();
+  return ok ? "NTP sync complete" : "NTP sync failed";
 }
 
 const char* cmd_httpstart(const String& cmd) {
@@ -911,5 +911,43 @@ void setupWiFi() {
                 WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
   }
 }
+
+// ============================================================================
+// WiFi Settings Module
+// ============================================================================
+
+static const SettingEntry wifiSettingsEntries[] = {
+  { "ssid", SETTING_STRING, &gSettings.wifiSSID, 0, 0, "", 0, 0, "WiFi SSID", nullptr },
+  { "password", SETTING_STRING, &gSettings.wifiPassword, 0, 0, "", 0, 0, "WiFi Password", nullptr },
+  { "autoReconnect", SETTING_BOOL, &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr },
+  { "ntpServer", SETTING_STRING, &gSettings.ntpServer, 0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr },
+  { "tzOffsetMinutes", SETTING_INT, &gSettings.tzOffsetMinutes, -240, 0, nullptr, -720, 840, "Timezone Offset (min)", nullptr }
+};
+
+extern const SettingsModule wifiSettingsModule = {
+  "wifi",
+  "wifi",
+  wifiSettingsEntries,
+  sizeof(wifiSettingsEntries) / sizeof(wifiSettingsEntries[0])
+};
+
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
+
+// ============================================================================
+// HTTP Settings Module
+// ============================================================================
+
+static const SettingEntry httpSettingsEntries[] = {
+  { "autoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr }
+};
+
+extern const SettingsModule httpSettingsModule = {
+  "http",
+  "http",
+  httpSettingsEntries,
+  sizeof(httpSettingsEntries) / sizeof(httpSettingsEntries[0])
+};
+
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 #endif // ENABLE_WIFI

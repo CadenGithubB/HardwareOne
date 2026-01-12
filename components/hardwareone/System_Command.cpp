@@ -11,6 +11,7 @@
 #include "System_CLI.h"
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_Settings.h"
 
 // Forward declaration for exitToNormalBanner function (defined in cli_system.cpp)
 String exitToNormalBanner();
@@ -295,3 +296,20 @@ void printCommandModuleSummary() {
     DEBUG_COMMAND_SYSTEMF("[CommandSystem]   [%zu] '%s'", i, commandRegistry[i]->name);
   }
 }
+
+// ============================================================================
+// CLI Settings Module
+// ============================================================================
+
+static const SettingEntry cliSettingsEntries[] = {
+  { "historySize", SETTING_INT, &gSettings.cliHistorySize, 10, 0, nullptr, 1, 100, "History Size", nullptr }
+};
+
+extern const SettingsModule cliSettingsModule = {
+  "cli",
+  "cli",
+  cliSettingsEntries,
+  sizeof(cliSettingsEntries) / sizeof(cliSettingsEntries[0])
+};
+
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

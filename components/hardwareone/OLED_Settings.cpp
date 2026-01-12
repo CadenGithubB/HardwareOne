@@ -23,14 +23,11 @@ static const SettingEntry oledSettingEntries[] = {
   { "thermalColorMode", SETTING_STRING, &gSettings.oledThermalColorMode, 0, 0, "3level", 0, 0, "Thermal Color Mode", "3level,grayscale,binary" }
 };
 
-static const SettingsModule oledSettingsModule = {
+extern const SettingsModule oledSettingsModule = {
   "oled", "oled_ssd1306", oledSettingEntries,
   sizeof(oledSettingEntries) / sizeof(oledSettingEntries[0])
 };
 
-// Auto-register on startup
-static struct OledSettingsRegistrar {
-  OledSettingsRegistrar() { registerSettingsModule(&oledSettingsModule); }
-} _oledSettingsRegistrar;
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 #endif // ENABLE_OLED_DISPLAY

@@ -43,9 +43,6 @@ extern const char* SETTINGS_JSON_FILE;
 extern void fsLock(const char* owner);
 extern void fsUnlock();
 
-// Settings version constant
-static const uint16_t kSettingsVersion = 1;
-
 // CommandEntry struct is defined in system_utils.h (included at top of file)
 
 // ============================================================================
@@ -308,174 +305,34 @@ String decryptWifiPassword(const String& encryptedPassword) {
 void settingsDefaults() {
   DEBUG_STORAGEF("[Settings] Initializing default settings");
 
-  gSettings.version = kSettingsVersion;
-  gSettings.wifiSSID = "";
-  gSettings.wifiPassword = "";
-  gSettings.wifiAutoReconnect = true;
-  gSettings.cliHistorySize = 10;
+  // Register ALL settings modules BEFORE applying defaults
+  // This ensures all compiled modules are registered even on fresh boot
+  registerAllSettingsModules();
 
-  gSettings.ntpServer = "pool.ntp.org";
-  gSettings.tzOffsetMinutes = -240;  // EST (UTC-5)
-  gSettings.outSerial = true;        // default serial on
-  gSettings.outWeb = false;
-  gSettings.outTft = false;
-  // Sensors UI defaults
-  gSettings.thermalPollingMs = 250;  // 4 FPS - reasonable for web UI without overwhelming ESP32
-  // ToF UI polling aligned with device timing budget for stability
-  gSettings.tofPollingMs = 220;
-  gSettings.tofStabilityThreshold = 3;
-  gSettings.thermalPaletteDefault = "grayscale";
-  // Thermal interpolation defaults
-  gSettings.thermalInterpolationEnabled = true;
-  gSettings.thermalInterpolationSteps = 5;
-  gSettings.thermalInterpolationBufferSize = 2;
-  gSettings.thermalUpscaleFactor = 1;  // default 1x (32x24 raw) - saves PSRAM
-  // Advanced defaults
-  gSettings.thermalEWMAFactor = 0.2f;  // blend factor for new value (0..1)
-  gSettings.thermalTransitionMs = 80;
-  gSettings.tofTransitionMs = 200;
-  gSettings.tofUiMaxDistanceMm = 3400;
-  gSettings.i2cClockThermalHz = 800000;
-  gSettings.i2cClockToFHz = 200000;
-  gSettings.thermalTargetFps = 8;
-  gSettings.thermalWebMaxFps = 10;  // max UI polling FPS (1..20)
-  // Thermal rolling min/max stabilization defaults
-  gSettings.thermalRollingMinMaxEnabled = true;  // enabled by default
-  gSettings.thermalRollingMinMaxAlpha = 0.6f;    // α=0.6 for responsive smooth tracking
-  gSettings.thermalRollingMinMaxGuardC = 0.3f;   // 0.3°C guard span
-  // Temporal frame smoothing (0.0=off, 0.5=balanced, 0.7=smooth but ghosting)
-  gSettings.thermalTemporalAlpha = 0.5f;  // α=0.5 balanced: reduces jitter without much ghosting
-  // Thermal rotation (0=0°, 1=90°, 2=180°, 3=270°)
-  gSettings.thermalRotation = 0;  // No rotation by default
-  // Device-side polling defaults
-  gSettings.thermalDevicePollMs = 100;
-  // ToF timing budget is 200ms; default poll a bit slower to avoid stale/invalid frames
-  gSettings.tofDevicePollMs = 100;
-  gSettings.imuDevicePollMs = 200;
-  gSettings.gpsDevicePollMs = 1000;  // GPS typically 1Hz update rate
-  gSettings.apdsDevicePollMs = 100;  // APDS color/proximity/gesture sensor
-  gSettings.gamepadDevicePollMs = 58;  // Gamepad Seesaw controller (matches current hardcoded value)
-  gSettings.fmRadioDevicePollMs = 250;  // FM Radio RDS polling interval
-  // IMU UI defaults
-  gSettings.imuPollingMs = 200;     // 5 FPS - reasonable for web UI
-  gSettings.imuEWMAFactor = 0.1f;   // light smoothing for IMU data
-  gSettings.imuTransitionMs = 100;  // smooth but responsive transitions
-  gSettings.imuWebMaxFps = 15;      // max UI polling FPS
-  // IMU orientation correction defaults
-  gSettings.imuOrientationCorrectionEnabled = true;  // Enable by default to handle case orientation
-  gSettings.imuOrientationMode = 8;                  // 8=upside_down (default for your IMU mounting)
-  gSettings.imuPitchOffset = 0.0f;                   // No manual offset by default
-  gSettings.imuRollOffset = 0.0f;                    // No manual offset by default
-  gSettings.imuYawOffset = 0.0f;                     // No manual offset by default
-  // Debug defaults - all disabled for quiet operation
-  gSettings.debugAuthCookies = true;
-  gSettings.debugHttp = true;
-  gSettings.debugSse = true;
-  gSettings.debugCli = true;
-  gSettings.debugSensorsFrame = true;
-  gSettings.debugSensorsData = true;
-  gSettings.debugSensorsGeneral = true;
-  gSettings.debugWifi = true;
-  gSettings.debugStorage = true;
-  gSettings.debugPerformance = true;
-  gSettings.debugDateTime = true;
-  gSettings.debugCommandFlow = true;
-  gSettings.debugUsers = true;
-  gSettings.debugSystem = true;
-  gSettings.debugAutomations = true;
-  gSettings.debugLogger = true;
-  gSettings.debugEspNowStream = true;
-  gSettings.debugEspNowCore = true;
-  gSettings.debugEspNowRouter = true;
-  gSettings.debugEspNowMesh = true;
-  gSettings.debugEspNowTopo = true;
-  gSettings.debugEspNowEncryption = true;
-  gSettings.debugAutoScheduler = true;
-  gSettings.debugAutoExec = true;
-  gSettings.debugAutoCondition = true;
-  gSettings.debugAutoTiming = true;
-  gSettings.debugFmRadio = true;
-  // Auth sub-flags defaults
-  gSettings.debugAuthSessions = true;
-  gSettings.debugAuthCookies = true;
-  gSettings.debugAuthLogin = true;
-  gSettings.debugAuthBootId = true;
-  // HTTP sub-flags defaults
-  gSettings.debugHttpHandlers = true;
-  gSettings.debugHttpRequests = true;
-  gSettings.debugHttpResponses = true;
-  gSettings.debugHttpStreaming = true;
-  // WiFi sub-flags defaults
-  gSettings.debugWifiConnection = true;
-  gSettings.debugWifiConfig = true;
-  gSettings.debugWifiScanning = true;
-  gSettings.debugWifiDriver = true;
-  // Storage sub-flags defaults
-  gSettings.debugStorageFiles = true;
-  gSettings.debugStorageJson = true;
-  gSettings.debugStorageSettings = true;
-  gSettings.debugStorageMigration = true;
-  // System sub-flags defaults
-  gSettings.debugSystemBoot = true;
-  gSettings.debugSystemConfig = true;
-  gSettings.debugSystemTasks = true;
-  gSettings.debugSystemHardware = true;
-  // Users sub-flags defaults
-  gSettings.debugUsersMgmt = true;
-  gSettings.debugUsersRegister = true;
-  gSettings.debugUsersQuery = true;
-  // CLI sub-flags defaults
-  gSettings.debugCliExecution = true;
-  gSettings.debugCliQueue = true;
-  gSettings.debugCliValidation = true;
-  // Performance sub-flags defaults
-  gSettings.debugPerfStack = true;
-  gSettings.debugPerfHeap = true;
-  gSettings.debugPerfTiming = true;
-  // SSE sub-flags defaults
-  gSettings.debugSseConnection = true;
-  gSettings.debugSseEvents = true;
-  gSettings.debugSseBroadcast = true;
-  // Command Flow sub-flags defaults
-  gSettings.debugCmdflowRouting = true;
-  gSettings.debugCmdflowQueue = true;
-  gSettings.debugCmdflowContext = true;
-  gSettings.logLevel = 3;               // Default: LOG_LEVEL_DEBUG (show all debug output)
-  gSettings.debugMemory = true;
-  gSettings.debugCommandSystem = true;
-  gSettings.debugSettingsSystem = true;
-  // ESP-NOW defaults
-  gSettings.espnowenabled = true;  // default enabled to save heap
-  gSettings.espnowmesh = true;     // default to direct mode
-  // Mesh role defaults
-  gSettings.meshRole = 0;                       // 0=worker (default)
-  gSettings.meshMasterMAC = "";                 // No master assigned by default
-  gSettings.meshBackupMAC = "";                 // No backup assigned by default
-  gSettings.meshMasterHeartbeatInterval = 10000;  // 10 seconds
-  gSettings.meshFailoverTimeout = 20000;        // 20 seconds (2x heartbeat)
-  gSettings.meshWorkerStatusInterval = 30000;   // 30 seconds
-  gSettings.meshTopoDiscoveryInterval = 0;      // 0 = on-demand only
-  gSettings.meshTopoAutoRefresh = false;        // Manual refresh only
-  gSettings.meshHeartbeatBroadcast = false;     // Private mode: only send to paired devices
-  // Automation defaults
-  gSettings.automationsEnabled = false;  // default disabled to save ~16KB heap
-  // Hardware defaults (LED)
-  gSettings.ledBrightness = 100;           // 100% brightness
-  gSettings.ledStartupEnabled = true;      // Enable startup effect
-  gSettings.ledStartupEffect = "rainbow";  // Rainbow effect
-  gSettings.ledStartupColor = "cyan";      // Cyan primary color
-  gSettings.ledStartupColor2 = "magenta";  // Magenta secondary color (for fade)
-  gSettings.ledStartupDuration = 1000;     // 1 second
-  // OLED Display defaults
-  gSettings.oledEnabled = true;               // Enable OLED at boot
-  gSettings.oledAutoInit = true;              // Auto-initialize if detected
-  gSettings.oledBootMode = "logo";            // Show logo during boot
-  gSettings.oledDefaultMode = "status";       // Switch to status after boot
-  gSettings.oledBootDuration = 2000;          // 2 seconds for boot logo
-  gSettings.oledUpdateInterval = 200;         // 5 Hz refresh rate (reduced for performance)
-  gSettings.oledBrightness = 255;             // Full brightness
-  gSettings.oledThermalScale = 2.5;           // 2.5x scale for thermal (80x60)
-  gSettings.oledThermalColorMode = "3level";  // 3-level grayscale visualization
+  // ============================================================================
+  // Apply defaults from all registered settings modules
+  // Each subsystem owns its own defaults in its respective file:
+  // - cli (System_Command.cpp): historySize
+  // - wifi (System_WiFi.cpp): ssid, password, autoReconnect, ntpServer, tzOffset
+  // - http (System_WiFi.cpp): autoStart
+  // - espnow (System_ESPNow.cpp): enabled, mesh, userSync, device, mesh role/timing
+  // - automation (System_Automation.cpp): enabled
+  // - debug (System_Settings.cpp): all debug flags
+  // - output (System_Settings.cpp): outSerial, outWeb, outTft
+  // - i2c (System_I2C.cpp): bus settings, clock speeds
+  // - thermal (i2csensor-mlx90640.cpp): autoStart, polling, interpolation, EWMA, rotation
+  // - tof (i2csensor-vl53l4cx.cpp): autoStart, polling, stability, transition
+  // - imu (i2csensor-bno055.cpp): autoStart, polling, EWMA, orientation correction
+  // - gps (i2csensor-pa1010d.cpp): autoStart, polling
+  // - apds (i2csensor-apds9960.cpp): autoStart, polling
+  // - gamepad (i2csensor-seesaw.cpp): autoStart, polling
+  // - fmradio (i2csensor-rda5807.cpp): autoStart, polling
+  // - oled (OLED_Settings.cpp): enabled, autoInit, modes, brightness
+  // - led (System_NeoPixel.cpp): brightness, startup effect/color/duration
+  // - power (System_Power.cpp): mode, autoMode, thresholds
+  // - bluetooth (Optional_Bluetooth.cpp): autoStart, requireAuth, deviceName
+  // ============================================================================
+  applyRegisteredDefaults();
 }
 
 // ============================================================================
@@ -640,9 +497,9 @@ void applySettings() {
 
 void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
   // Top-level settings
-  doc["version"] = gSettings.version;
   doc["ntpServer"] = gSettings.ntpServer;
   doc["tzOffsetMinutes"] = gSettings.tzOffsetMinutes;
+  doc["wifiEnabled"] = gSettings.wifiEnabled;
   doc["wifiAutoReconnect"] = gSettings.wifiAutoReconnect;
   doc["cliHistorySize"] = gSettings.cliHistorySize;
   
@@ -891,7 +748,7 @@ bool readSettingsJson() {
   }
 
   // Top-level settings with defaults (| operator provides fallback)
-  gSettings.version = doc["version"] | 1;
+  gSettings.wifiEnabled = doc["wifiEnabled"] | true;
   gSettings.wifiAutoReconnect = doc["wifiAutoReconnect"] | true;
   gSettings.cliHistorySize = doc["cliHistorySize"] | 10;
   gSettings.ntpServer = doc["ntpServer"] | "pool.ntp.org";
@@ -1194,18 +1051,10 @@ static const SettingsModule outputSettingsModule = {
   "Output routing for serial, web, and TFT display"
 };
 
-// Auto-register debug and output modules on startup
-static struct DebugSettingsRegistrar {
-  DebugSettingsRegistrar() { registerSettingsModule(&debugSettingsModule); }
-} _debugSettingsRegistrar;
-
-static struct OutputSettingsRegistrar {
-  OutputSettingsRegistrar() { registerSettingsModule(&outputSettingsModule); }
-} _outputSettingsRegistrar;
-
 // Registry storage
 static const SettingsModule* gSettingsModules[MAX_SETTINGS_MODULES] = {nullptr};
 static size_t gSettingsModuleCount = 0;
+static bool gSettingsModulesRegistered = false;
 
 void registerSettingsModule(const SettingsModule* module) {
   if (!module) return;
@@ -1221,13 +1070,111 @@ void registerSettingsModule(const SettingsModule* module) {
   DEBUG_SYSTEMF("[Settings] Registered module: %s (%zu entries)", module->name, module->count);
 }
 
-// Register core settings modules that need early initialization
-// Note: Peripheral modules auto-register via static constructors
-void registerCoreSettingsModules() {
+// ============================================================================
+// Explicit Registration of ALL Settings Modules
+// Called once early in boot to ensure all modules are available for defaults
+// ============================================================================
+
+// Extern declarations for all settings modules
+extern const SettingsModule i2cSettingsModule;
+extern const SettingsModule cliSettingsModule;
+#if ENABLE_WIFI
+extern const SettingsModule wifiSettingsModule;
+extern const SettingsModule httpSettingsModule;
+#endif
+#if ENABLE_ESPNOW
+extern const SettingsModule espnowSettingsModule;
+#endif
+extern const SettingsModule automationSettingsModule;
+extern const SettingsModule powerSettingsModule;
+extern const SettingsModule ledSettingsModule;
+#if ENABLE_OLED_DISPLAY
+extern const SettingsModule oledSettingsModule;
+#endif
+#if ENABLE_BLUETOOTH
+extern const SettingsModule bluetoothSettingsModule;
+#endif
+#if ENABLE_THERMAL_SENSOR
+extern const SettingsModule thermalSettingsModule;
+#endif
+#if ENABLE_TOF_SENSOR
+extern const SettingsModule tofSettingsModule;
+#endif
+#if ENABLE_IMU_SENSOR
+extern const SettingsModule imuSettingsModule;
+#endif
+#if ENABLE_GAMEPAD_SENSOR
+extern const SettingsModule gamepadSettingsModule;
+#endif
+#if ENABLE_APDS_SENSOR
+extern const SettingsModule apdsSettingsModule;
+#endif
+#if ENABLE_GPS_SENSOR
+extern const SettingsModule gpsSettingsModule;
+#endif
+#if ENABLE_FMRADIO_SENSOR
+extern const SettingsModule fmRadioSettingsModule;
+#endif
+
+void registerAllSettingsModules() {
+  if (gSettingsModulesRegistered) return;  // Only register once
+  gSettingsModulesRegistered = true;
+  
+  // Core system modules
   registerSettingsModule(&debugSettingsModule);
   registerSettingsModule(&outputSettingsModule);
-  extern void registerI2CSettingsModule();
-  registerI2CSettingsModule();
+  registerSettingsModule(&i2cSettingsModule);
+  registerSettingsModule(&cliSettingsModule);
+  registerSettingsModule(&automationSettingsModule);
+  registerSettingsModule(&powerSettingsModule);
+  registerSettingsModule(&ledSettingsModule);
+  
+  // Network modules
+#if ENABLE_WIFI
+  registerSettingsModule(&wifiSettingsModule);
+  registerSettingsModule(&httpSettingsModule);
+#endif
+#if ENABLE_ESPNOW
+  registerSettingsModule(&espnowSettingsModule);
+#endif
+#if ENABLE_BLUETOOTH
+  registerSettingsModule(&bluetoothSettingsModule);
+#endif
+
+  // Display modules
+#if ENABLE_OLED_DISPLAY
+  registerSettingsModule(&oledSettingsModule);
+#endif
+
+  // Sensor modules
+#if ENABLE_THERMAL_SENSOR
+  registerSettingsModule(&thermalSettingsModule);
+#endif
+#if ENABLE_TOF_SENSOR
+  registerSettingsModule(&tofSettingsModule);
+#endif
+#if ENABLE_IMU_SENSOR
+  registerSettingsModule(&imuSettingsModule);
+#endif
+#if ENABLE_GAMEPAD_SENSOR
+  registerSettingsModule(&gamepadSettingsModule);
+#endif
+#if ENABLE_APDS_SENSOR
+  registerSettingsModule(&apdsSettingsModule);
+#endif
+#if ENABLE_GPS_SENSOR
+  registerSettingsModule(&gpsSettingsModule);
+#endif
+#if ENABLE_FMRADIO_SENSOR
+  registerSettingsModule(&fmRadioSettingsModule);
+#endif
+
+  DEBUG_SYSTEMF("[Settings] All %zu modules registered", gSettingsModuleCount);
+}
+
+// Legacy function - now just calls registerAllSettingsModules
+void registerCoreSettingsModules() {
+  registerAllSettingsModules();
 }
 
 const SettingsModule** getSettingsModules(size_t& count) {

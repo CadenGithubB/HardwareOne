@@ -363,7 +363,7 @@ static bool isGamepadConnected() {
   return gamepadConnected;
 }
 
-static const SettingsModule gamepadSettingsModule = {
+extern const SettingsModule gamepadSettingsModule = {
   "gamepad",
   nullptr,
   gamepadSettingEntries,
@@ -372,10 +372,7 @@ static const SettingsModule gamepadSettingsModule = {
   "Seesaw gamepad settings"
 };
 
-// Auto-register on startup (matches thermal/IMU/ToF pattern)
-static struct GamepadSettingsRegistrar {
-  GamepadSettingsRegistrar() { registerSettingsModule(&gamepadSettingsModule); }
-} _gamepadSettingsRegistrar;
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 // ============================================================================
 // Gamepad Command Registry
