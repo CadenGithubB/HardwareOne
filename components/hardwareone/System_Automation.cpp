@@ -660,9 +660,9 @@ bool initAutomationSystem() {
   gAutoMemoCount = 0;
   DEBUGF(DEBUG_AUTOMATIONS, "[automations] System initialized");
   
-  // Start the automation scheduler task
+  // Start the automation scheduler
   if (!startAutomationScheduler()) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[automations] WARNING: Failed to start scheduler task");
+    DEBUGF(DEBUG_AUTOMATIONS, "[automations] WARNING: Failed to start scheduler");
     return false;
   }
   
@@ -2715,20 +2715,15 @@ const char* cmd_validate_conditions(const String& cmd) {
   return "OK";
 }
 
-// Automation scheduler task
+// Automation scheduler (runs from main loop)
 // ============================================================================
 
 // NOTE: cmd_downloadautomation, cmd_autolog, and cmd_conditional are implemented
 // in the main .ino file to avoid duplication and linker conflicts.
 
-// Task handle for automation scheduler
-static TaskHandle_t gAutomationSchedulerTaskHandle = nullptr;
-
-// Notify the automation scheduler task to wake immediately
+// Notify the automation scheduler to run on next main loop iteration
 void notifyAutomationScheduler() {
-  if (gAutomationSchedulerTaskHandle) {
-    xTaskNotifyGive(gAutomationSchedulerTaskHandle);
-  }
+  gAutosDirty = true;
 }
 
 // Core scheduler logic - extracted for reuse
@@ -3038,83 +3033,15 @@ void schedulerTickMinute() {
   }
 }
 
-// FreeRTOS task wrapper for automation scheduler
-void automationSchedulerTask(void* parameter) {
-  DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler task started");
-  
-  // Track last minute to avoid duplicate runs
-  unsigned long lastMinute = millis() / 60000UL;
-  unsigned long lastStackLog = 0;
-  
-  while (true) {
-    // Stack/heap monitoring (every 30 seconds)
-    unsigned long nowMs = millis();
-    if ((nowMs - lastStackLog) >= 30000) {
-      lastStackLog = nowMs;
-      if (isDebugFlagSet(DEBUG_PERFORMANCE)) {
-        UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
-        DEBUG_PERFORMANCEF("[STACK] auto_sched watermark=%u words", (unsigned)watermark);
-      }
-      if (isDebugFlagSet(DEBUG_MEMORY)) {
-        DEBUG_MEMORYF("[HEAP] auto_sched: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
-      }
-    }
-    
-    // Wait for notification or 60 seconds (whichever comes first)
-    // This allows immediate refresh when automations are modified (gAutosDirty)
-    uint32_t notificationValue = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(60000));
-    
-    unsigned long currentMinute = millis() / 60000UL;
-    
-    // Run scheduler if:
-    // 1. We were notified (gAutosDirty flag set by automation mutations), OR
-    // 2. A new minute has elapsed
-    if (notificationValue > 0 || currentMinute != lastMinute) {
-      if (notificationValue > 0) {
-        DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler woken by notification (gAutosDirty)");
-      }
-      
-      // Run the scheduler tick
-      schedulerTickMinute();
-      
-      lastMinute = currentMinute;
-    }
-  }
-}
-
-// Start the automation scheduler task
+// Start the automation scheduler (now runs from main loop, no dedicated task)
 bool startAutomationScheduler() {
-  if (gAutomationSchedulerTaskHandle != nullptr) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler task already running");
-    return true;
-  }
-  
-  const uint32_t stackSize = 8192;  // 32KB for JSON parsing and command execution
-  BaseType_t result = xTaskCreate(
-    automationSchedulerTask,
-    "auto_sched",
-    stackSize,
-    nullptr,
-    1,  // Priority 1 (low priority)
-    &gAutomationSchedulerTaskHandle
-  );
-  
-  if (result != pdPASS) {
-    DEBUGF(DEBUG_AUTOMATIONS, "[automations] ERROR: Failed to create scheduler task");
-    return false;
-  }
-  
-  DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler task created successfully");
+  DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler enabled (runs from main loop)");
   return true;
 }
 
-// Stop the automation scheduler task
+// Stop the automation scheduler (no-op, runs from main loop)
 void stopAutomationScheduler() {
-  if (gAutomationSchedulerTaskHandle != nullptr) {
-    vTaskDelete(gAutomationSchedulerTaskHandle);
-    gAutomationSchedulerTaskHandle = nullptr;
-    DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler task stopped");
-  }
+  DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler disabled");
 }
 
 // ============================================================================
@@ -3147,3 +3074,18 @@ const size_t automationCommandsCount = sizeof(automationCommands) / sizeof(autom
 
 // Auto-register with command system
 static CommandModuleRegistrar _automation_cmd_registrar(automationCommands, automationCommandsCount, "automation");
+
+// ============================================================================
+// Automation Settings Module
+// ============================================================================
+
+static const SettingEntry automationSettingEntries[] = {
+  { "enabled", SETTING_BOOL, &gSettings.automationsEnabled, false, 0, nullptr, 0, 1, "Automations Enabled", nullptr }
+};
+
+extern const SettingsModule automationSettingsModule = {
+  "automation", "automation", automationSettingEntries,
+  sizeof(automationSettingEntries) / sizeof(automationSettingEntries[0])
+};
+
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

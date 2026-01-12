@@ -19,6 +19,9 @@
 #include "System_SensorStubs.h"
 #include "System_Settings.h"
 #include "System_UserSettings.h"
+#include "OLED_SetupWizard.h"
+#include "System_SetupWizard.h"
+#include "System_FeatureRegistry.h"
 
 // ============================================================================
 // Global Variables
@@ -80,16 +83,16 @@ void detectFirstTimeSetupState() {
   }
 }
 
-inline bool isFirstTimeSetup() {
+bool isFirstTimeSetup() {
   return gFirstTimeSetupState != SETUP_NOT_NEEDED;
 }
 
-inline void setFirstTimeSetupState(FirstTimeSetupState state) {
+void setFirstTimeSetupState(FirstTimeSetupState state) {
   gFirstTimeSetupState = state;
   DEBUG_SYSTEMF("[SETUP_STATE] State changed to: %d", (int)state);
 }
 
-inline void setSetupProgressStage(SetupProgressStage stage) {
+void setSetupProgressStage(SetupProgressStage stage) {
   gSetupProgressStage = stage;
   DEBUG_SYSTEMF("[SETUP_PROGRESS] Stage changed to: %d", (int)stage);
 }
@@ -174,113 +177,70 @@ void firstTimeSetupIfNeeded() {
   String hashedPassword = hashUserPassword(p);
   // At first-time setup, users.json does not exist yet; seed bootCounter starting at 1 and set admin bootCount to 1
   
-  // WiFi setup stage
-  setSetupProgressStage(SETUP_PROMPT_WIFI);
+  // ============================================================================
+  // Feature Configuration Wizard
+  // ============================================================================
+  setSetupProgressStage(SETUP_PROMPT_HARDWARE);
   broadcastOutput("");
-  broadcastOutput("WiFi Setup (optional - press Enter to skip)");
+  broadcastOutput("Feature Configuration...");
   
   String wifiSSID = "";
-  bool wifiSelected = false;
+  String wifiPass = "";
+  bool wifiConfigured = false;
+  
+  // Run the appropriate setup wizard based on display availability
+  SetupWizardResult wizardResult;
   
 #if ENABLE_OLED_DISPLAY
-  wifiSelected = getOLEDWiFiSelection(wifiSSID);
+  if (oledConnected && oledEnabled) {
+    // Run the OLED multi-page setup wizard
+    wizardResult = runOLEDSetupWizard();
+  } else {
+    // OLED not available - use serial wizard
+    wizardResult = runSerialSetupWizard();
+  }
 #else
-  broadcastOutput("Enter WiFi SSID (or press Enter to skip): ");
-  wifiSSID = waitForSerialInputBlocking();
-  wifiSSID.trim();
-  wifiSelected = (wifiSSID.length() > 0);
+  // No OLED compiled - use serial wizard
+  wizardResult = runSerialSetupWizard();
 #endif
   
-  if (wifiSelected && wifiSSID.length() > 0) {
-    broadcastOutput("Enter WiFi password: ");
-    String wifiPass = "";
-#if ENABLE_OLED_DISPLAY
-    wifiPass = getOLEDTextInput("WiFi Password:", true, "", 64);
-#else
-    wifiPass = waitForSerialInputBlocking();
-#endif
-    wifiPass.trim();
+  if (wizardResult.completed) {
+    broadcastOutput("Feature configuration complete.");
     
+    // Apply WiFi settings if configured
+    if (wizardResult.wifiConfigured && wizardResult.wifiSSID.length() > 0) {
+      wifiSSID = wizardResult.wifiSSID;
+      wifiPass = wizardResult.wifiPassword;
+      wifiConfigured = true;
+    }
+    
+    // Log the selections
+    broadcastOutput("Timezone: " + wizardResult.timezoneAbbrev);
+    broadcastOutput("Heap estimate: ~" + String(getEnabledFeaturesHeapEstimate()) + "KB");
+  }
+  
+  // Save WiFi credentials if configured
+  if (wifiConfigured && wifiSSID.length() > 0) {
 #if ENABLE_WIFI
-    // Save WiFi credentials using existing WiFi system functions
     extern bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden);
     extern void sortWiFiByPriority();
     extern bool saveWiFiNetworks();
     
-    upsertWiFiNetwork(wifiSSID, wifiPass, 1, false);  // Priority 1, not hidden
+    upsertWiFiNetwork(wifiSSID, wifiPass, 1, false);
     sortWiFiByPriority();
     saveWiFiNetworks();
-    broadcastOutput("WiFi credentials saved successfully");
-    
-    // Ask if WiFi should auto-connect on boot
-    broadcastOutput("Auto-connect WiFi on boot? (y/n) [default: y]: ");
-    bool wifiAuto = true;
-#if ENABLE_OLED_DISPLAY
-    wifiAuto = getOLEDYesNoPrompt("Auto-connect WiFi\non boot?", true);
+    broadcastOutput("WiFi credentials saved: " + wifiSSID);
+    gSettings.wifiAutoReconnect = true;
 #else
-    String wifiAutoChoice = waitForSerialInputBlocking();
-    wifiAutoChoice.trim();
-    wifiAutoChoice.toLowerCase();
-    wifiAuto = !(wifiAutoChoice == "n" || wifiAutoChoice == "no");
-#endif
-    
-    if (wifiAuto) {
-      gSettings.wifiAutoReconnect = true;
-      broadcastOutput("WiFi will auto-connect on boot.");
-    } else {
-      gSettings.wifiAutoReconnect = false;
-      broadcastOutput("WiFi will NOT auto-connect on boot. Use 'wificonnect' command to connect manually.");
-    }
-#else
-    broadcastOutput("WiFi disabled at compile time - credentials not saved");
+    broadcastOutput("WiFi disabled at compile time");
 #endif
   } else {
-    gSettings.wifiAutoReconnect = false;  // No credentials = no auto-connect
-    broadcastOutput("WiFi setup skipped - you can configure later via settings");
+    gSettings.wifiAutoReconnect = false;
+    broadcastOutput("WiFi setup skipped");
   }
   
-  // Hardware configuration stage
-  setSetupProgressStage(SETUP_PROMPT_HARDWARE);
-  broadcastOutput("");
-  broadcastOutput("Hardware Setup (optional)");
-  
-  bool i2cDisabledByUser = false;
-  
-#if ENABLE_I2C_SYSTEM
-  // I2C is compiled in - ask user if they want to disable it at runtime
-  broadcastOutput("Enable I2C bus? This controls OLED display and I2C sensors.");
-  broadcastOutput("Disabling saves memory but turns off OLED and all I2C devices.");
-  broadcastOutput("Enable I2C bus? (y/n) [default: y]: ");
-  
-  bool i2cEnable = true;
-#if ENABLE_OLED_DISPLAY
-  i2cEnable = getOLEDYesNoPrompt("Enable I2C bus?\n(OLED + sensors)", true);
-#else
-  String i2cChoice = waitForSerialInputBlocking();
-  i2cChoice.trim();
-  i2cChoice.toLowerCase();
-  i2cEnable = !(i2cChoice == "n" || i2cChoice == "no");
-#endif
-  
-  if (i2cEnable) {
-    gSettings.i2cBusEnabled = true;
-    gI2CBusEnabled = true;  // Update global flag immediately
-    broadcastOutput("I2C bus enabled (default)");
-  } else {
-    gSettings.i2cBusEnabled = false;
-    gSettings.i2cSensorsEnabled = false;  // Force sensors off if bus is off
-    gI2CBusEnabled = false;  // Update global flag immediately
-    i2cDisabledByUser = true;
-    broadcastOutput("I2C bus DISABLED - device will reboot to apply this setting");
-  }
-#else
-  // I2C compiled out - force settings to match and inform user
-  gSettings.i2cBusEnabled = false;
-  gSettings.i2cSensorsEnabled = false;
-  gI2CBusEnabled = false;
-  broadcastOutput("I2C bus: DISABLED (compiled out for memory savings)");
-  broadcastOutput("To enable I2C, change I2C_FEATURE_LEVEL in sensor_config.h and recompile.");
-#endif
+  // Check if I2C was disabled via wizard
+  bool i2cDisabledByUser = !gSettings.i2cBusEnabled;
   
   // Saving configuration stage
   setSetupProgressStage(SETUP_SAVING_CONFIG);
@@ -288,7 +248,6 @@ void firstTimeSetupIfNeeded() {
   
   // Build JSON with ArduinoJson
   JsonDocument doc;
-  doc["version"] = 1;
   doc["bootCounter"] = 1;
   doc["nextId"] = 2;
   
@@ -362,12 +321,14 @@ void firstTimeSetupIfNeeded() {
   broadcastOutput("");
   broadcastOutput("FIRST-TIME SETUP COMPLETE!");
   
-  // If user disabled I2C, save settings and reboot so it takes effect from boot
+  // Always save settings after wizard completes
+  extern bool writeSettingsJson();
+  writeSettingsJson();
+  
+  // If user disabled I2C, reboot so it takes effect from boot
   if (i2cDisabledByUser) {
-    extern bool writeSettingsJson();
     broadcastOutput("");
-    broadcastOutput("Saving settings and rebooting to apply I2C disabled setting...");
-    writeSettingsJson();  // Ensure settings are persisted
+    broadcastOutput("Rebooting to apply I2C disabled setting...");
 
     // Clear the OLED before reboot so the previous setup text doesn't remain
     // visible on the next boot when OLED init is skipped.

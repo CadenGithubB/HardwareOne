@@ -808,6 +808,8 @@ void tofTask(void* parameter) {
 // ============================================================================
 
 static const SettingEntry tofSettingEntries[] = {
+  // Core settings
+  { "autoStart", SETTING_BOOL, &gSettings.tofAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   // UI Settings
   { "ui.pollingMs", SETTING_INT, &gSettings.tofPollingMs, 220, 0, nullptr, 50, 5000, "Polling (ms)", nullptr },
   { "ui.stabilityThreshold", SETTING_INT, &gSettings.tofStabilityThreshold, 3, 0, nullptr, 0, 50, "Stability Threshold", nullptr },
@@ -822,7 +824,7 @@ static bool isToFConnected() {
   return tofConnected;
 }
 
-static const SettingsModule tofSettingsModule = {
+extern const SettingsModule tofSettingsModule = {
   "tof",
   "tof_vl53l4cx",
   tofSettingEntries,
@@ -831,10 +833,7 @@ static const SettingsModule tofSettingsModule = {
   "VL53L4CX time-of-flight distance sensor settings"
 };
 
-// Auto-register on startup
-static struct TofSettingsRegistrar {
-  TofSettingsRegistrar() { registerSettingsModule(&tofSettingsModule); }
-} _tofSettingsRegistrar;
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 // ============================================================================
 // ToF OLED Mode (Display Function + Registration)

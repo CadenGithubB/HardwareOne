@@ -63,8 +63,10 @@ static bool createAPDSTask() {
 // APDS Modular Settings Registration (for safety and reliability)
 // ============================================================================
 
-// APDS settings entries - minimal but essential for safety
+// APDS settings entries
 static const SettingEntry apdsSettingEntries[] = {
+  // Core settings
+  { "autoStart", SETTING_BOOL, &gSettings.apdsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   // Device-level settings (sensor hardware behavior)
   { "device.devicePollMs", SETTING_INT, &gSettings.apdsDevicePollMs, 100, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr }
 };
@@ -73,7 +75,7 @@ static bool isAPDSConnected() {
   return apdsConnected;
 }
 
-static const SettingsModule apdsSettingsModule = {
+extern const SettingsModule apdsSettingsModule = {
   "apds",
   nullptr,
   apdsSettingEntries,
@@ -82,10 +84,7 @@ static const SettingsModule apdsSettingsModule = {
   "APDS9960 gesture/color/proximity sensor settings"
 };
 
-// Auto-register on startup (matches thermal/IMU/ToF pattern)
-static struct ApdsSettingsRegistrar {
-  ApdsSettingsRegistrar() { registerSettingsModule(&apdsSettingsModule); }
-} _apdsSettingsRegistrar;
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 
 // ============================================================================

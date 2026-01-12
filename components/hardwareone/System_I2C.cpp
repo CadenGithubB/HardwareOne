@@ -13,6 +13,7 @@
 #include "System_BuildConfig.h"
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_FirstTimeSetup.h"
 #include "System_I2C.h"
 #include "System_Logging.h"
 #include "System_MemUtil.h"
@@ -312,10 +313,19 @@ const char* cmd_apdsstart_queued(const String& cmd) {
 static bool gI2CBusDisabledLogged = false;
 
 void initI2CBuses() {
-  // Copy setting to global flag
-  gI2CBusEnabled = gSettings.i2cBusEnabled;
+  // During first-time setup, force I2C enabled so OLED wizard can run
+  // User can disable I2C in wizard, which takes effect after reboot
+  bool forceForSetup = isFirstTimeSetup();
   
-  // Early exit if I2C bus is disabled via settings
+  if (forceForSetup) {
+    gI2CBusEnabled = true;
+    Serial.println("[I2C] Force-enabling for first-time setup wizard");
+  } else {
+    // Copy setting to global flag
+    gI2CBusEnabled = gSettings.i2cBusEnabled;
+  }
+  
+  // Early exit if I2C bus is disabled via settings (and not first-time setup)
   if (!gI2CBusEnabled) {
     if (!gI2CBusDisabledLogged) {
       Serial.println("[I2C] Bus disabled via settings - skipping initialization");
@@ -1304,34 +1314,70 @@ const char* cmd_sensorinfo(const String& originalCmd) {
 // Sensor Configuration Commands
 // ============================================================================
 
+// Estimated heap cost per sensor (in KB) - measured/approximated values
+// These are task stack + buffers + driver overhead
+struct SensorHeapCost {
+  const char* name;
+  const char* shortName;
+  bool* autoStartFlag;
+  uint16_t heapCostKB;  // Estimated heap usage in KB
+};
+
+static const SensorHeapCost sensorHeapCosts[] = {
+  { "Thermal Camera", "thermal", &gSettings.thermalAutoStart, 32 },  // MLX90640: large frame buffer
+  { "ToF Distance",   "tof",     &gSettings.tofAutoStart,      8 },  // VL53L4CX: moderate
+  { "IMU",            "imu",     &gSettings.imuAutoStart,     12 },  // BNO055: calibration + buffers
+  { "GPS",            "gps",     &gSettings.gpsAutoStart,      4 },  // PA1010D: NMEA parsing
+  { "FM Radio",       "fmradio", &gSettings.fmRadioAutoStart,  2 },  // RDA5807: minimal
+  { "APDS Gesture",   "apds",    &gSettings.apdsAutoStart,     4 },  // APDS9960: gesture buffers
+  { "Gamepad",        "gamepad", &gSettings.gamepadAutoStart,  2 },  // Seesaw: minimal
+};
+static const size_t sensorHeapCostCount = sizeof(sensorHeapCosts) / sizeof(sensorHeapCosts[0]);
+
+// Calculate total estimated heap for enabled sensors
+static uint32_t getEnabledSensorHeapEstimate() {
+  uint32_t total = 0;
+  for (size_t i = 0; i < sensorHeapCostCount; i++) {
+    if (*sensorHeapCosts[i].autoStartFlag) {
+      total += sensorHeapCosts[i].heapCostKB;
+    }
+  }
+  return total;
+}
+
 static const char* cmd_sensorautostart(const String& cmd) {
   extern bool gCLIValidateOnly;
   if (gCLIValidateOnly) return "VALID";
   
   int spacePos = cmd.indexOf(' ');
   
-  // No args - show current settings
+  // No args - show current settings with heap estimates
   if (spacePos < 0) {
-    static char buf[512];
-    snprintf(buf, sizeof(buf),
-      "[Sensor Auto-Start]\n"
-      "  thermal:  %s\n"
-      "  tof:      %s\n"
-      "  imu:      %s\n"
-      "  gps:      %s\n"
-      "  fmradio:  %s\n"
-      "  apds:     %s\n"
-      "  gamepad:  %s\n"
-      "Usage: sensorautostart <sensor> <on|off>\n"
-      "       sensorautostart all <on|off>",
-      gSettings.thermalAutoStart ? "on" : "off",
-      gSettings.tofAutoStart ? "on" : "off",
-      gSettings.imuAutoStart ? "on" : "off",
-      gSettings.gpsAutoStart ? "on" : "off",
-      gSettings.fmRadioAutoStart ? "on" : "off",
-      gSettings.apdsAutoStart ? "on" : "off",
-      gSettings.gamepadAutoStart ? "on" : "off"
-    );
+    static char buf[1024];
+    uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
+    uint32_t enabledCost = getEnabledSensorHeapEstimate();
+    
+    int pos = snprintf(buf, sizeof(buf),
+      "[Sensor Auto-Start] (heap estimates)\n"
+      "%-12s %-4s %s\n"
+      "─────────────────────────────────\n",
+      "Sensor", "Cost", "Status");
+    
+    for (size_t i = 0; i < sensorHeapCostCount; i++) {
+      bool enabled = *sensorHeapCosts[i].autoStartFlag;
+      pos += snprintf(buf + pos, sizeof(buf) - pos,
+        "%-12s ~%2dKB  %s\n",
+        sensorHeapCosts[i].shortName,
+        sensorHeapCosts[i].heapCostKB,
+        enabled ? "[ON]" : "off");
+    }
+    
+    pos += snprintf(buf + pos, sizeof(buf) - pos,
+      "─────────────────────────────────\n"
+      "Enabled total: ~%luKB | Free heap: %luKB\n"
+      "Usage: sensorautostart <sensor> <on|off>",
+      (unsigned long)enabledCost, (unsigned long)freeHeapKB);
+    
     return buf;
   }
   
@@ -1355,50 +1401,61 @@ static const char* cmd_sensorautostart(const String& cmd) {
     return "Value must be on/off, true/false, or 1/0";
   }
   
-  bool* targetSetting = nullptr;
-  const char* sensorName = nullptr;
+  // Find sensor in cost table
+  const SensorHeapCost* found = nullptr;
+  for (size_t i = 0; i < sensorHeapCostCount; i++) {
+    if (sensor == sensorHeapCosts[i].shortName || 
+        (sensor == "fm" && strcmp(sensorHeapCosts[i].shortName, "fmradio") == 0)) {
+      found = &sensorHeapCosts[i];
+      break;
+    }
+  }
   
-  if (sensor == "thermal") {
-    targetSetting = &gSettings.thermalAutoStart;
-    sensorName = "Thermal";
-  } else if (sensor == "tof") {
-    targetSetting = &gSettings.tofAutoStart;
-    sensorName = "ToF";
-  } else if (sensor == "imu") {
-    targetSetting = &gSettings.imuAutoStart;
-    sensorName = "IMU";
-  } else if (sensor == "gps") {
-    targetSetting = &gSettings.gpsAutoStart;
-    sensorName = "GPS";
-  } else if (sensor == "fmradio" || sensor == "fm") {
-    targetSetting = &gSettings.fmRadioAutoStart;
-    sensorName = "FM Radio";
-  } else if (sensor == "apds") {
-    targetSetting = &gSettings.apdsAutoStart;
-    sensorName = "APDS";
-  } else if (sensor == "gamepad") {
-    targetSetting = &gSettings.gamepadAutoStart;
-    sensorName = "Gamepad";
-  } else if (sensor == "all") {
-    // Set all sensors
-    gSettings.thermalAutoStart = enable;
-    gSettings.tofAutoStart = enable;
-    gSettings.imuAutoStart = enable;
-    gSettings.gpsAutoStart = enable;
-    gSettings.fmRadioAutoStart = enable;
-    gSettings.apdsAutoStart = enable;
-    gSettings.gamepadAutoStart = enable;
+  if (sensor == "all") {
+    // Set all sensors and show total heap impact
+    uint32_t totalCost = 0;
+    for (size_t i = 0; i < sensorHeapCostCount; i++) {
+      *sensorHeapCosts[i].autoStartFlag = enable;
+      if (enable) totalCost += sensorHeapCosts[i].heapCostKB;
+    }
     writeSettingsJson();
-    return enable ? "[AutoStart] All sensors enabled" : "[AutoStart] All sensors disabled";
-  } else {
+    
+    static char result[128];
+    uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
+    if (enable) {
+      snprintf(result, sizeof(result), 
+        "[AutoStart] All sensors enabled (~%luKB total, %luKB free)",
+        (unsigned long)totalCost, (unsigned long)freeHeapKB);
+    } else {
+      snprintf(result, sizeof(result), "[AutoStart] All sensors disabled");
+    }
+    return result;
+  }
+  
+  if (!found) {
     return "Unknown sensor. Options: thermal, tof, imu, gps, fmradio, apds, gamepad, all";
   }
   
-  *targetSetting = enable;
+  bool wasEnabled = *found->autoStartFlag;
+  *found->autoStartFlag = enable;
   writeSettingsJson();
   
-  static char result[64];
-  snprintf(result, sizeof(result), "[AutoStart] %s %s", sensorName, enable ? "enabled" : "disabled");
+  static char result[128];
+  uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
+  
+  if (enable && !wasEnabled) {
+    snprintf(result, sizeof(result), 
+      "[AutoStart] %s enabled (~%dKB, %luKB free after boot)",
+      found->name, found->heapCostKB, (unsigned long)(freeHeapKB - found->heapCostKB));
+  } else if (!enable && wasEnabled) {
+    snprintf(result, sizeof(result), 
+      "[AutoStart] %s disabled (+%dKB freed after reboot)",
+      found->name, found->heapCostKB);
+  } else {
+    snprintf(result, sizeof(result), 
+      "[AutoStart] %s already %s",
+      found->name, enable ? "enabled" : "disabled");
+  }
   return result;
 }
 
@@ -1792,45 +1849,23 @@ static const SettingEntry i2cSettingEntries[] = {
   { "i2cClockToFHz", SETTING_INT, &gSettings.i2cClockToFHz, 200000, 0, nullptr, 50000, 400000, "ToF I2C Clock (Hz)", nullptr }
 };
 
-static const SettingsModule i2cSettingsModule = {
+extern const SettingsModule i2cSettingsModule = {
   "i2c", "i2c", i2cSettingEntries,
   sizeof(i2cSettingEntries) / sizeof(i2cSettingEntries[0])
 };
 
-// Auto-register on startup
-static struct I2cSettingsRegistrar {
-  I2cSettingsRegistrar() { registerSettingsModule(&i2cSettingsModule); }
-} _i2cSettingsRegistrar;
-
-void registerI2CSettingsModule() {
-  registerSettingsModule(&i2cSettingsModule);
-}
-
-// ============================================================================
-// Sensor Auto-Start Settings Module
-// ============================================================================
-
-static const SettingEntry sensorAutoStartEntries[] = {
-  { "thermal", SETTING_BOOL, &gSettings.thermalAutoStart, 0, 0, nullptr, 0, 1, "Thermal Camera", nullptr },
-  { "tof", SETTING_BOOL, &gSettings.tofAutoStart, 0, 0, nullptr, 0, 1, "ToF Distance", nullptr },
-  { "imu", SETTING_BOOL, &gSettings.imuAutoStart, 0, 0, nullptr, 0, 1, "IMU", nullptr },
-  { "gps", SETTING_BOOL, &gSettings.gpsAutoStart, 0, 0, nullptr, 0, 1, "GPS", nullptr },
-  { "fmRadio", SETTING_BOOL, &gSettings.fmRadioAutoStart, 0, 0, nullptr, 0, 1, "FM Radio", nullptr },
-  { "apds", SETTING_BOOL, &gSettings.apdsAutoStart, 0, 0, nullptr, 0, 1, "APDS Gesture/Color", nullptr },
-  { "gamepad", SETTING_BOOL, &gSettings.gamepadAutoStart, 1, 0, nullptr, 0, 1, "Gamepad", nullptr }
-};
-
-static const SettingsModule sensorAutoStartModule = {
-  "sensorAutoStart", "sensorAutoStart", sensorAutoStartEntries,
-  sizeof(sensorAutoStartEntries) / sizeof(sensorAutoStartEntries[0])
-};
-
-static struct SensorAutoStartRegistrar {
-  SensorAutoStartRegistrar() { registerSettingsModule(&sensorAutoStartModule); }
-} _sensorAutoStartRegistrar;
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 // ============================================================================
 // Process Sensor Auto-Start on Boot
+// Note: autoStart settings are now in each sensor's own module:
+// - thermal (i2csensor-mlx90640.cpp)
+// - tof (i2csensor-vl53l4cx.cpp)
+// - imu (i2csensor-bno055.cpp)
+// - gps (i2csensor-pa1010d.cpp)
+// - fmradio (i2csensor-rda5807.cpp)
+// - apds (i2csensor-apds9960.cpp)
+// - gamepad (i2csensor-seesaw.cpp)
 // ============================================================================
 
 void processAutoStartSensors() {
