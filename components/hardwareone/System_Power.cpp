@@ -269,7 +269,7 @@ static const SettingEntry powerSettingEntries[] = {
   { "displayDimLevel", SETTING_INT, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr }
 };
 
-static const SettingsModule powerSettingsModule = {
+extern const SettingsModule powerSettingsModule = {
   "power",
   "power",
   powerSettingEntries,
@@ -278,11 +278,4 @@ static const SettingsModule powerSettingsModule = {
   "CPU frequency scaling and battery optimization"
 };
 
-// Auto-register with settings system
-static struct PowerSettingsRegistrar {
-  PowerSettingsRegistrar() { registerSettingsModule(&powerSettingsModule); }
-} _powerSettingsRegistrar;
-
-void registerPowerSettingsModule() {
-  registerSettingsModule(&powerSettingsModule);
-}
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

@@ -1148,6 +1148,8 @@ void imuTask(void* parameter) {
 // ============================================================================
 
 static const SettingEntry imuSettingEntries[] = {
+  // Core settings
+  { "autoStart", SETTING_BOOL, &gSettings.imuAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   // UI Settings (client-side visualization)
   { "ui.pollingMs", SETTING_INT, &gSettings.imuPollingMs, 200, 0, nullptr, 50, 2000, "Polling (ms)", nullptr },
   { "ui.ewmaFactor", SETTING_FLOAT, &gSettings.imuEWMAFactor, 0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr },
@@ -1166,7 +1168,7 @@ static bool isIMUConnected() {
   return imuConnected;
 }
 
-static const SettingsModule imuSettingsModule = {
+extern const SettingsModule imuSettingsModule = {
   "imu",
   "imu_bno055",
   imuSettingEntries,
@@ -1175,10 +1177,7 @@ static const SettingsModule imuSettingsModule = {
   "BNO055 IMU sensor settings"
 };
 
-// Auto-register on startup
-static struct ImuSettingsRegistrar {
-  ImuSettingsRegistrar() { registerSettingsModule(&imuSettingsModule); }
-} _imuSettingsRegistrar;
+// Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
 
 // ============================================================================
 // IMU OLED Mode (Display Function + Registration)
