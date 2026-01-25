@@ -2,7 +2,7 @@
  * Sensor Logging System - Data logging for sensor readings
  * 
  * Provides configurable logging of sensor data to files with:
- * - Selectable sensors (thermal, tof, imu, gamepad, apds)
+ * - Selectable sensors (thermal, tof, imu, gamepad, apds, gps)
  * - Configurable intervals and file sizes
  * - Text and CSV output formats
  * - Log rotation support
@@ -34,6 +34,11 @@
 #endif
 #if ENABLE_APDS_SENSOR
   #include "i2csensor-apds9960.h"
+#endif
+#if ENABLE_GPS_SENSOR
+  #include "i2csensor-pa1010d.h"
+  #include <Adafruit_GPS.h>
+  #include "System_Maps.h"
 #endif
 #include "System_SensorStubs.h"  // Provides stubs for disabled sensors
 
@@ -154,6 +159,23 @@ const char* buildSensorLogLine() {
     written = snprintf(pos, remaining, "imu: yaw=%.1f pitch=%.1f roll=%.1f accel=(%.2f,%.2f,%.2f) | ",
                        gImuCache.oriYaw, gImuCache.oriPitch, gImuCache.oriRoll,
                        gImuCache.accelX, gImuCache.accelY, gImuCache.accelZ);
+    pos += written;
+    remaining -= written;
+  }
+#endif
+
+#if ENABLE_GPS_SENSOR
+  // GPS data
+  if (gpsEnabled && gpsConnected && gPA1010D != nullptr && remaining > 0) {
+    if (gPA1010D->fix) {
+      written = snprintf(pos, remaining, "gps: lat=%.6f lon=%.6f alt=%.1fm speed=%.1fkn sats=%d q=%d | ",
+                         gPA1010D->latitudeDegrees, gPA1010D->longitudeDegrees,
+                         gPA1010D->altitude, gPA1010D->speed,
+                         (int)gPA1010D->satellites, (int)gPA1010D->fixquality);
+    } else {
+      written = snprintf(pos, remaining, "gps: no_fix sats=%d q=%d | ",
+                         (int)gPA1010D->satellites, (int)gPA1010D->fixquality);
+    }
     pos += written;
     remaining -= written;
   }
@@ -447,6 +469,29 @@ void sensorLogTask(void* parameter) {
     }
 #endif
 
+#if ENABLE_GPS_SENSOR
+    // GPS doesn't have a cache mutex - read directly from gPA1010D
+    snap.gpsEnabled = gpsEnabled;
+    snap.gpsConnected = gpsConnected;
+    if (gpsConnected && gPA1010D != nullptr) {
+      snap.gpsFix = gPA1010D->fix;
+      snap.gpsLatitude = gPA1010D->latitudeDegrees;
+      snap.gpsLongitude = gPA1010D->longitudeDegrees;
+      snap.gpsAltitude = gPA1010D->altitude;
+      snap.gpsSpeed = gPA1010D->speed;
+      snap.gpsSatellites = gPA1010D->satellites;
+      snap.gpsFixQuality = gPA1010D->fixquality;
+    } else {
+      snap.gpsFix = false;
+      snap.gpsLatitude = 0.0f;
+      snap.gpsLongitude = 0.0f;
+      snap.gpsAltitude = 0.0f;
+      snap.gpsSpeed = 0.0f;
+      snap.gpsSatellites = 0;
+      snap.gpsFixQuality = 0;
+    }
+#endif
+
     // Release all locks in reverse order
 #if ENABLE_APDS_SENSOR
     if (apdsLocked) xSemaphoreGive(gPeripheralCache.mutex);
@@ -587,11 +632,12 @@ void sensorLogTask(void* parameter) {
 // Command Handler
 // ============================================================================
 
-const char* cmd_sensorlog(const String& originalCmd) {
+const char* cmd_sensorlog(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) {
+  String action = args;
+  action.trim();
+  if (action.length() == 0) {
     return "Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors> [args...]\n"
            "  start <filepath> [interval_ms]: Begin logging (default 5000ms)\n"
            "  stop: Stop logging\n"
@@ -599,11 +645,8 @@ const char* cmd_sensorlog(const String& originalCmd) {
            "  format <text|csv>: Set log format (default: text)\n"
            "  maxsize <bytes>: Set max file size before rotation (default: 256000)\n"
            "  rotations <count>: Set number of old logs to keep (0-9, default: 3)\n"
-           "  sensors <thermal|tof|imu|gamepad|apds|all|none>: Select sensors to log";
+           "  sensors <thermal|tof|imu|gamepad|apds|gps|all|none>: Select sensors to log";
   }
-
-  String action = originalCmd.substring(sp1 + 1);
-  action.trim();
   int sp2 = action.indexOf(' ');
   String subCmd = (sp2 >= 0) ? action.substring(0, sp2) : action;
   subCmd.toLowerCase();
@@ -628,23 +671,25 @@ const char* cmd_sensorlog(const String& originalCmd) {
       p += n; remaining -= n;
       n = snprintf(p, remaining, "  Rotations: %u\n", (unsigned)gSensorLogMaxRotations);
       p += n; remaining -= n;
-      n = snprintf(p, remaining, "  Sensors: %s%s%s%s%s\n",
+      n = snprintf(p, remaining, "  Sensors: %s%s%s%s%s%s\n",
                    (gSensorLogMask & LOG_THERMAL) ? "thermal " : "",
                    (gSensorLogMask & LOG_TOF) ? "tof " : "",
                    (gSensorLogMask & LOG_IMU) ? "imu " : "",
                    (gSensorLogMask & LOG_GAMEPAD) ? "gamepad " : "",
-                   (gSensorLogMask & LOG_APDS) ? "apds " : "");
+                   (gSensorLogMask & LOG_APDS) ? "apds " : "",
+                   (gSensorLogMask & LOG_GPS) ? "gps " : "");
       p += n; remaining -= n;
       n = snprintf(p, remaining, "  Last write: %lus ago", (millis() - gSensorLogLastWrite) / 1000);
       return getDebugBuffer();
     } else {
-      snprintf(getDebugBuffer(), 1024, "Sensor logging is INACTIVE\nCurrent format: %s\nMax size: %u bytes\nRotations: %u\nSensors: %s%s%s%s%s",
+      snprintf(getDebugBuffer(), 1024, "Sensor logging is INACTIVE\nCurrent format: %s\nMax size: %u bytes\nRotations: %u\nSensors: %s%s%s%s%s%s",
                gSensorLogFormatCSV ? "CSV" : "TEXT", (unsigned)gSensorLogMaxSize, (unsigned)gSensorLogMaxRotations,
                (gSensorLogMask & LOG_THERMAL) ? "thermal " : "",
                (gSensorLogMask & LOG_TOF) ? "tof " : "",
                (gSensorLogMask & LOG_IMU) ? "imu " : "",
                (gSensorLogMask & LOG_GAMEPAD) ? "gamepad " : "",
-               (gSensorLogMask & LOG_APDS) ? "apds " : "");
+               (gSensorLogMask & LOG_APDS) ? "apds " : "",
+               (gSensorLogMask & LOG_GPS) ? "gps " : "");
       return getDebugBuffer();
     }
   }
@@ -729,6 +774,7 @@ const char* cmd_sensorlog(const String& originalCmd) {
         }
         if (gSensorLogMask & LOG_GAMEPAD) csvHeader += ",gamepad_x,gamepad_y,gamepad_buttons";
         if (gSensorLogMask & LOG_APDS) csvHeader += ",apds_red,apds_green,apds_blue,apds_clear,apds_proximity,apds_gesture";
+        if (gSensorLogMask & LOG_GPS) csvHeader += ",gps_fix,gps_lat,gps_lon,gps_alt,gps_speed,gps_sats,gps_quality";
         csvHeader += "\n";
         f.write((const uint8_t*)csvHeader.c_str(), csvHeader.length());
       }
@@ -859,7 +905,9 @@ const char* cmd_sensorlog(const String& originalCmd) {
       p += n; remaining -= n;
       n = snprintf(p, remaining, "  %s APDS\n", (gSensorLogMask & LOG_APDS) ? "☑" : "☐");
       p += n; remaining -= n;
-      snprintf(p, remaining, "\nUsage: sensorlog sensors <thermal|tof|imu|gamepad|apds|all|none>");
+      n = snprintf(p, remaining, "  %s GPS\n", (gSensorLogMask & LOG_GPS) ? "☑" : "☐");
+      p += n; remaining -= n;
+      snprintf(p, remaining, "\nUsage: sensorlog sensors <thermal|tof|imu|gamepad|apds|gps|all|none>");
       return getDebugBuffer();
     }
 
@@ -868,7 +916,7 @@ const char* cmd_sensorlog(const String& originalCmd) {
     sensorList.toLowerCase();
 
     if (sensorList == "all") {
-      gSensorLogMask = LOG_THERMAL | LOG_TOF | LOG_IMU | LOG_GAMEPAD | LOG_APDS;
+      gSensorLogMask = LOG_THERMAL | LOG_TOF | LOG_IMU | LOG_GAMEPAD | LOG_APDS | LOG_GPS;
       return "All sensors enabled for logging";
     }
 
@@ -889,6 +937,7 @@ const char* cmd_sensorlog(const String& originalCmd) {
       else if (sensor == "imu") gSensorLogMask |= LOG_IMU;
       else if (sensor == "gamepad") gSensorLogMask |= LOG_GAMEPAD;
       else if (sensor == "apds") gSensorLogMask |= LOG_APDS;
+      else if (sensor == "gps") gSensorLogMask |= LOG_GPS;
       else {
         snprintf(getDebugBuffer(), 1024, "Error: Unknown sensor '%s'", sensor.c_str());
         return getDebugBuffer();
@@ -898,17 +947,274 @@ const char* cmd_sensorlog(const String& originalCmd) {
       start = comma + 1;
     }
 
-    snprintf(getDebugBuffer(), 1024, "Logging enabled for: %s%s%s%s%s",
+    snprintf(getDebugBuffer(), 1024, "Logging enabled for: %s%s%s%s%s%s",
              (gSensorLogMask & LOG_THERMAL) ? "thermal " : "",
              (gSensorLogMask & LOG_TOF) ? "tof " : "",
              (gSensorLogMask & LOG_IMU) ? "imu " : "",
              (gSensorLogMask & LOG_GAMEPAD) ? "gamepad " : "",
-             (gSensorLogMask & LOG_APDS) ? "apds " : "");
+             (gSensorLogMask & LOG_APDS) ? "apds " : "",
+             (gSensorLogMask & LOG_GPS) ? "gps " : "");
     return getDebugBuffer();
   }
 
   return "Error: Unknown subcommand. Use: start, stop, status, format, maxsize, rotations, or sensors";
 }
+
+// ============================================================================
+// Dedicated GPS Track Logging
+// ============================================================================
+// Separate from general sensor logging - writes GPS-only data to dedicated files
+// Can run simultaneously with sensor logging (uses same filesystem mutex)
+
+#if ENABLE_GPS_SENSOR
+
+bool gGPSTrackLoggingEnabled = false;
+char gGPSTrackLogPath[64] = "/logs/tracks/track.txt";  // Fixed buffer in .data section
+uint32_t gGPSTrackLogIntervalMs = 1000;
+TaskHandle_t gGPSTrackLogTaskHandle = nullptr;
+
+// Helper to format current time as HH:MM:SS (from GPS or system)
+static void formatTimestamp(char* buf, size_t bufSize) {
+  #if ENABLE_GPS_SENSOR
+  if (gPA1010D && gPA1010D->fix) {
+    snprintf(buf, bufSize, "%02d:%02d:%02d", 
+             gPA1010D->hour, gPA1010D->minute, gPA1010D->seconds);
+    return;
+  }
+  #endif
+  // Fallback to millis-based time
+  unsigned long ms = millis();
+  unsigned long secs = ms / 1000;
+  snprintf(buf, bufSize, "%02lu:%02lu:%02lu", 
+           (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
+}
+
+void gpsTrackLogTask(void* parameter) {
+  INFO_LOGGINGF("GPS track logging task started: %s (interval %lums)", 
+                gGPSTrackLogPath, (unsigned long)gGPSTrackLogIntervalMs);
+  
+  unsigned long lastWriteMs = 0;
+  uint32_t pointCount = 0;
+  
+  // Signal loss tracking - prevents log spam
+  uint32_t signalLostCount = 0;    // How many intervals without signal
+  bool wasConnected = false;       // Previous state
+  
+  while (gGPSTrackLoggingEnabled) {
+    unsigned long nowMs = millis();
+    
+    if ((nowMs - lastWriteMs) < gGPSTrackLogIntervalMs) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+    lastWriteMs = nowMs;
+    
+    char timestamp[12];
+    formatTimestamp(timestamp, sizeof(timestamp));
+    
+    // Check GPS status
+    bool hasSignal = gpsEnabled && gpsConnected && gPA1010D != nullptr && gPA1010D->fix;
+    
+    if (!hasSignal) {
+      signalLostCount++;
+      
+      // Only log signal loss ONCE (first time)
+      if (signalLostCount == 1 && wasConnected) {
+        char line[64];
+        snprintf(line, sizeof(line), "%s,---,SIGNAL_LOST", timestamp);
+        
+        fsLock("gpstrack.lost");
+        File f = LittleFS.open(gGPSTrackLogPath, "a");
+        if (f) {
+          f.write((const uint8_t*)line, strlen(line));
+          f.write('\n');
+          f.close();
+        }
+        fsUnlock();
+      }
+      // Subsequent losses: don't spam the log
+      
+      wasConnected = false;
+      vTaskDelay(pdMS_TO_TICKS(500));
+      continue;
+    }
+    
+    // Signal regained after loss
+    if (signalLostCount > 0) {
+      // Log how many intervals were missed (if more than 1)
+      if (signalLostCount > 1) {
+        char line[64];
+        snprintf(line, sizeof(line), "%s,~~~,SIGNAL_REGAINED (lost %lu intervals)", 
+                 timestamp, (unsigned long)signalLostCount);
+        
+        fsLock("gpstrack.regained");
+        File f = LittleFS.open(gGPSTrackLogPath, "a");
+        if (f) {
+          f.write((const uint8_t*)line, strlen(line));
+          f.write('\n');
+          f.close();
+        }
+        fsUnlock();
+      }
+      signalLostCount = 0;
+    }
+    wasConnected = true;
+    
+    // Get GPS coordinates
+    float lat = gPA1010D->latitudeDegrees;
+    float lon = gPA1010D->longitudeDegrees;
+    if (gPA1010D->lat == 'S') lat = -lat;
+    if (gPA1010D->lon == 'W') lon = -lon;
+    
+    // Append to live track if enabled
+    if (GPSTrackManager::isLiveTracking()) {
+      GPSTrackManager::appendPoint(lat, lon);
+    }
+    
+    // Build track line with timestamp: time,lat,lon,alt,speed,sats
+    char line[128];
+    snprintf(line, sizeof(line), "%s,%.6f,%.6f,%.1f,%.1f,%d",
+             timestamp, lat, lon, 
+             gPA1010D->altitude, gPA1010D->speed, 
+             (int)gPA1010D->satellites);
+    
+    // Write to file
+    fsLock("gpstrack.append");
+    File f = LittleFS.open(gGPSTrackLogPath, "a");
+    if (f) {
+      f.write((const uint8_t*)line, strlen(line));
+      f.write('\n');
+      f.close();
+      pointCount++;
+    }
+    fsUnlock();
+  }
+  
+  INFO_LOGGINGF("GPS track logging stopped (%u points logged)", (unsigned)pointCount);
+  gGPSTrackLogTaskHandle = nullptr;
+  vTaskDelete(NULL);
+}
+
+const char* cmd_gpslog(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  
+  String action = args;
+  action.trim();
+  if (action.length() == 0) {
+    return "Usage: gpslog <start|stop|status> [filepath] [interval_ms]\n"
+           "  start [filepath] [interval_ms]: Begin GPS track logging\n"
+           "    Default path: /logs/tracks/track.txt\n"
+           "    Default interval: 1000ms\n"
+           "  stop: Stop GPS track logging\n"
+           "  status: Show current GPS track logging status\n"
+           "\nNote: This is separate from 'sensorlog' - both can run simultaneously.";
+  }
+  int sp2 = action.indexOf(' ');
+  String subCmd = (sp2 >= 0) ? action.substring(0, sp2) : action;
+  subCmd.toLowerCase();
+  
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  char* buf = getDebugBuffer();
+  
+  if (subCmd == "status") {
+    if (gGPSTrackLoggingEnabled && gGPSTrackLogTaskHandle) {
+      snprintf(buf, 1024, "GPS track logging ACTIVE\n  File: %s\n  Interval: %lums\n  GPS: %s",
+               gGPSTrackLogPath, (unsigned long)gGPSTrackLogIntervalMs,
+               (gpsConnected && gPA1010D && gPA1010D->fix) ? "fix" : "no fix");
+    } else {
+      snprintf(buf, 1024, "GPS track logging is INACTIVE\n  Default path: %s\n  Default interval: %lums",
+               gGPSTrackLogPath, (unsigned long)gGPSTrackLogIntervalMs);
+    }
+    return buf;
+  }
+  
+  if (subCmd == "stop") {
+    if (!gGPSTrackLoggingEnabled) {
+      return "GPS track logging is not running";
+    }
+    gGPSTrackLoggingEnabled = false;
+    return "GPS track logging stop requested";
+  }
+  
+  if (subCmd == "start") {
+    if (gGPSTrackLoggingEnabled) {
+      return "GPS track logging already running. Use 'gpslog stop' first.";
+    }
+    
+    // Parse optional filepath and interval (use stack buffers, no heap)
+    const char* argsStart = (sp2 >= 0) ? action.c_str() + sp2 + 1 : nullptr;
+    while (argsStart && *argsStart == ' ') argsStart++;
+    
+    if (argsStart && *argsStart != '\0') {
+      // Find filepath (first arg)
+      const char* spacePos = strchr(argsStart, ' ');
+      size_t pathLen = spacePos ? (spacePos - argsStart) : strlen(argsStart);
+      
+      if (pathLen > 0 && argsStart[0] == '/' && pathLen < sizeof(gGPSTrackLogPath)) {
+        memcpy(gGPSTrackLogPath, argsStart, pathLen);
+        gGPSTrackLogPath[pathLen] = '\0';
+      }
+      
+      // Parse interval if present
+      if (spacePos) {
+        while (*spacePos == ' ') spacePos++;
+        uint32_t interval = atoi(spacePos);
+        if (interval >= 100 && interval <= 60000) {
+          gGPSTrackLogIntervalMs = interval;
+        }
+      }
+    }
+    
+    // Ensure directory exists (use stack buffer)
+    const char* lastSlash = strrchr(gGPSTrackLogPath, '/');
+    if (lastSlash && lastSlash != gGPSTrackLogPath) {
+      char dir[64];
+      size_t dirLen = lastSlash - gGPSTrackLogPath;
+      if (dirLen < sizeof(dir)) {
+        memcpy(dir, gGPSTrackLogPath, dirLen);
+        dir[dirLen] = '\0';
+        if (!LittleFS.exists(dir)) {
+          LittleFS.mkdir(dir);
+        }
+      }
+    }
+    
+    // Create file with header
+    if (!LittleFS.exists(gGPSTrackLogPath)) {
+      fsLock("gpstrack.create");
+      File f = LittleFS.open(gGPSTrackLogPath, "w");
+      if (f) {
+        f.write((const uint8_t*)"# GPS Track Log\n", 16);
+        f.write((const uint8_t*)"# time,lat,lon,alt_m,speed_kn,satellites\n", 41);
+        f.write((const uint8_t*)"# Signal loss: time,---,SIGNAL_LOST\n", 36);
+        f.write((const uint8_t*)"# Signal regained: time,~~~,SIGNAL_REGAINED (lost N intervals)\n", 63);
+        f.close();
+      }
+      fsUnlock();
+    }
+    
+    gGPSTrackLoggingEnabled = true;
+    
+    // Start task
+    if (gGPSTrackLogTaskHandle == nullptr) {
+      xTaskCreate(gpsTrackLogTask, "gpstrack", 4096, NULL, 1, &gGPSTrackLogTaskHandle);
+    }
+    
+    snprintf(buf, 1024, "GPS track logging started\n  File: %s\n  Interval: %lums",
+             gGPSTrackLogPath, (unsigned long)gGPSTrackLogIntervalMs);
+    return buf;
+  }
+  
+  return "Usage: gpslog <start|stop|status>";
+}
+
+#else
+// Stub when GPS sensor is disabled
+const char* cmd_gpslog(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return "GPS sensor not enabled in build";
+}
+#endif
 
 // ============================================================================
 // Command Registry
@@ -923,7 +1229,13 @@ const CommandEntry sensorLoggingCommands[] = {
     "  format <text|csv>: Set log format (default: text)\n"
     "  maxsize <bytes>: Set max file size before rotation (default: 256000)\n"
     "  rotations <count>: Set number of old logs to keep (0-9, default: 3)\n"
-    "  sensors <thermal|tof|imu|gamepad|apds|all|none>: Select sensors to log" },
+    "  sensors <thermal|tof|imu|gamepad|apds|gps|all|none>: Select sensors to log" },
+  { "gpslog", "Dedicated GPS track logging: start, stop, status", false, cmd_gpslog,
+    "Usage: gpslog <start|stop|status> [filepath] [interval_ms]\n"
+    "  start [filepath] [interval_ms]: Begin GPS track logging\n"
+    "  stop: Stop GPS track logging\n"
+    "  status: Show current status\n"
+    "Note: Separate from sensorlog - both can run simultaneously" },
 };
 
 const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof(sensorLoggingCommands[0]);

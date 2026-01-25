@@ -7,6 +7,7 @@
 #if ENABLE_HTTP_SERVER
 
 #include <Arduino.h>
+#include <LittleFS.h>
 #include "WebServer_Server.h"           // httpd types, JSON_RESPONSE_SIZE, gJsonResponseBuffer
 #include "System_User.h"          // AuthContext, tgRequireAuth
 #include "System_Debug.h"         // DEBUG_* macros
@@ -26,6 +27,12 @@
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   #include "i2csensor-seesaw.h"     // gamepadEnabled, gamepadConnected
+#endif
+#if ENABLE_PRESENCE_SENSOR
+  #include "i2csensor-sths34pf80.h" // presenceEnabled, presenceConnected, gPresenceCache
+#endif
+#if ENABLE_EDGE_IMPULSE
+  #include "System_EdgeImpulse.h"
 #endif
 #if ENABLE_ESPNOW
   #include "System_ESPNow_Sensors.h"            // Remote sensor functions
@@ -212,13 +219,10 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
         // Gamepad now follows queued start paradigm; read from shared state only
         if (!gamepadEnabled || !gamepadConnected) {
-          // Log why we're rejecting
-          Serial.printf("[GAMEPAD_API] Rejecting request: enabled=%d connected=%d\n", gamepadEnabled, gamepadConnected);
           httpd_resp_set_type(req, "application/json");
           httpd_resp_send(req, "{\"val\":0,\"error\":\"not_connected\"}", HTTPD_RESP_USE_STRLEN);
           return ESP_OK;
         }
-        Serial.printf("[GAMEPAD_API] Flags OK: enabled=%d connected=%d\n", gamepadEnabled, gamepadConnected);
 
         // Read from shared state (no direct I2C access)
         uint32_t buttons = 0;
@@ -271,6 +275,79 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           httpd_resp_send(req, "{\"v\":0,\"error\":\"data_unavailable\"}", HTTPD_RESP_USE_STRLEN);
           return ESP_OK;
         }
+      } else if (sensorType == "camera") {
+#if ENABLE_CAMERA_SENSOR
+        extern const char* buildCameraStatusJson();
+        const char* json = buildCameraStatusJson();
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+#else
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"enabled\":false,\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+#endif
+      } else if (sensorType == "microphone") {
+#if ENABLE_MICROPHONE_SENSOR
+        extern const char* buildMicrophoneStatusJson();
+        const char* json = buildMicrophoneStatusJson();
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+#else
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"enabled\":false,\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+#endif
+      } else if (sensorType == "presence") {
+#if ENABLE_PRESENCE_SENSOR
+        extern bool presenceEnabled;
+        extern bool presenceConnected;
+        extern PresenceCache gPresenceCache;
+        
+        if (!presenceEnabled || !presenceConnected) {
+          httpd_resp_set_type(req, "application/json");
+          httpd_resp_send(req, "{\"error\":\"not_enabled\"}", HTTPD_RESP_USE_STRLEN);
+          return ESP_OK;
+        }
+        
+        // Read from cache
+        char buf[256];
+        bool dataValid = false;
+        float ambient = 0;
+        int16_t presenceVal = 0, motionVal = 0;
+        bool presenceDetected = false, motionDetected = false;
+        
+        if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          dataValid = gPresenceCache.dataValid;
+          ambient = gPresenceCache.ambientTemp;
+          presenceVal = gPresenceCache.presenceValue;
+          motionVal = gPresenceCache.motionValue;
+          presenceDetected = gPresenceCache.presenceDetected;
+          motionDetected = gPresenceCache.motionDetected;
+          xSemaphoreGive(gPresenceCache.mutex);
+        }
+        
+        if (!dataValid) {
+          httpd_resp_set_type(req, "application/json");
+          httpd_resp_send(req, "{\"error\":\"no_data\"}", HTTPD_RESP_USE_STRLEN);
+          return ESP_OK;
+        }
+        
+        int len = snprintf(buf, sizeof(buf),
+          "{\"ambientTemp\":%.1f,\"presenceValue\":%d,\"motionValue\":%d,\"presenceDetected\":%s,\"motionDetected\":%s}",
+          ambient, presenceVal, motionVal,
+          presenceDetected ? "true" : "false",
+          motionDetected ? "true" : "false");
+        
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, buf, len);
+        return ESP_OK;
+#else
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+#endif
       }
     }
   }
@@ -380,6 +457,445 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
 #endif
   
   return ESP_OK;
+}
+
+// Camera status endpoint (auth-protected): returns camera state
+esp_err_t handleCameraStatus(httpd_req_t* req) {
+  AuthContext ctx;
+  ctx.transport = SOURCE_WEB;
+  ctx.opaque = req;
+  ctx.path = "/api/sensors/camera/status";
+  getClientIP(req, ctx.ip);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
+
+#if ENABLE_CAMERA_SENSOR
+  extern const char* buildCameraStatusJson();
+  const char* j = buildCameraStatusJson();
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, j, HTTPD_RESP_USE_STRLEN);
+#else
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, "{\"enabled\":false,\"compiled\":false}", HTTPD_RESP_USE_STRLEN);
+#endif
+  return ESP_OK;
+}
+
+// Camera frame endpoint (auth-protected): returns JPEG frame
+esp_err_t handleCameraFrame(httpd_req_t* req) {
+  // Verbose debug logging - uncomment for troubleshooting
+  // Serial.println("[CamFrame] handleCameraFrame() ENTRY");
+  
+  AuthContext ctx;
+  ctx.transport = SOURCE_WEB;
+  ctx.opaque = req;
+  ctx.path = "/api/sensors/camera/frame";
+  getClientIP(req, ctx.ip);
+  // Serial.printf("[CamFrame] Client IP: %s\n", ctx.ip.c_str());
+  
+  if (!tgRequireAuth(ctx)) {
+    // Serial.println("[CamFrame] Auth FAILED, returning");
+    return ESP_OK;
+  }
+  // Serial.println("[CamFrame] Auth OK");
+
+#if ENABLE_CAMERA_SENSOR
+  extern bool cameraEnabled;
+  extern uint8_t* captureFrame(size_t* outLen);
+  
+  // Serial.printf("[CamFrame] cameraEnabled=%d\n", cameraEnabled);
+  
+  if (!cameraEnabled) {
+    // Serial.println("[CamFrame] Camera not enabled - returning 503");
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "Camera not enabled", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  // Serial.println("[CamFrame] Calling captureFrame()...");
+  size_t len = 0;
+  uint8_t* frame = captureFrame(&len);
+  // Serial.printf("[CamFrame] captureFrame() returned: frame=%p, len=%u\n", frame, (unsigned)len);
+  
+  if (!frame || len == 0) {
+    // Serial.printf("[CamFrame] CAPTURE FAILED! frame=%p len=%u - returning 500\n", frame, (unsigned)len);
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "Frame capture failed", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  // Serial.printf("[CamFrame] SUCCESS - sending %u bytes JPEG\n", (unsigned)len);
+  httpd_resp_set_type(req, "image/jpeg");
+  httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=frame.jpg");
+  esp_err_t sendErr = httpd_resp_send(req, (const char*)frame, len);
+  (void)sendErr; // suppress unused warning
+  // Serial.printf("[CamFrame] httpd_resp_send returned: %d\n", sendErr);
+  free(frame);
+  // Serial.println("[CamFrame] Frame freed, returning OK");
+#else
+  httpd_resp_set_status(req, "501 Not Implemented");
+  httpd_resp_set_type(req, "text/plain");
+  httpd_resp_send(req, "Camera not compiled", HTTPD_RESP_USE_STRLEN);
+#endif
+  return ESP_OK;
+}
+
+// Camera MJPEG stream endpoint (auth-protected): returns multipart JPEG stream
+esp_err_t handleCameraStream(httpd_req_t* req) {
+  AuthContext ctx;
+  ctx.transport = SOURCE_WEB;
+  ctx.opaque = req;
+  ctx.path = "/api/sensors/camera/stream";
+  getClientIP(req, ctx.ip);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
+
+#if ENABLE_CAMERA_SENSOR
+  extern bool cameraEnabled;
+  extern bool cameraStreaming;
+  extern uint8_t* captureFrame(size_t* outLen);
+  extern Settings gSettings;
+  extern String getCookieSID(httpd_req_t* req);
+  
+  if (!cameraEnabled) {
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "Camera not enabled", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  // Single-stream lock: only allow one active MJPEG client at a time.
+  // Key by session cookie SID; fall back to IP if SID missing.
+  static String s_streamOwner;
+  static unsigned long s_streamLastBeat = 0;
+  static uint32_t s_streamGen = 0;
+  String sid = getCookieSID(req);
+  String key = sid.length() ? String("sid:") + sid : String("ip:") + ctx.ip;
+  unsigned long nowMs = millis();
+  const unsigned long staleMs = 5000UL;
+  bool stale = (s_streamOwner.length() > 0) && ((long)(nowMs - s_streamLastBeat) > (long)staleMs);
+  if (s_streamOwner.length() > 0 && s_streamOwner != key && !stale) {
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "Camera stream already in use by another session", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  // Takeover semantics: if a new stream is requested (even from same session),
+  // bump generation so the old loop will exit on its next iteration.
+  s_streamOwner = key;
+  uint32_t myGen = ++s_streamGen;
+  s_streamLastBeat = nowMs;
+
+  // Set MJPEG multipart content type
+  httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
+
+  char partHeader[128];
+  unsigned long lastFrameSentMs = 0;
+  // Stream indefinitely until client disconnects (or error occurs)
+  // Previously limited to 300 frames (~30s) but users expect continuous streaming
+  
+  // Set streaming flag for status indicator
+  cameraStreaming = true;
+  
+  while (true) {
+    // Heartbeat ownership; helps new sessions take over if client drops.
+    s_streamLastBeat = millis();
+
+    // If a newer stream has taken over, exit quickly.
+    if (myGen != s_streamGen) {
+      break;
+    }
+
+    // If camera is stopped while a client is streaming, end stream promptly.
+    if (!cameraEnabled) {
+      break;
+    }
+
+ #if ENABLE_EDGE_IMPULSE
+    if (isContinuousInferenceRunning()) {
+      unsigned long now = millis();
+      int delayMs = gSettings.cameraStreamIntervalMs;
+      if (delayMs < 50) delayMs = 50;
+      if (delayMs > 2000) delayMs = 2000;
+
+      int minIntervalMs = delayMs;
+      if (gSettings.edgeImpulseIntervalMs > 0) {
+        int halfEI = gSettings.edgeImpulseIntervalMs / 2;
+        if (halfEI > minIntervalMs) minIntervalMs = halfEI;
+      }
+      if (minIntervalMs < 200) minIntervalMs = 200;
+
+      if (lastFrameSentMs && (long)(now - lastFrameSentMs) < (long)minIntervalMs) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        continue;
+      }
+    }
+ #endif
+
+    size_t len = 0;
+    uint8_t* frame = captureFrame(&len);
+    if (!frame || len == 0) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    // Send boundary and headers
+    int hdrLen = snprintf(partHeader, sizeof(partHeader),
+      "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", (unsigned)len);
+    
+    esp_err_t err = httpd_resp_send_chunk(req, partHeader, hdrLen);
+    if (err != ESP_OK) {
+      free(frame);
+      break;  // Client disconnected
+    }
+
+    // Send frame data
+    err = httpd_resp_send_chunk(req, (const char*)frame, len);
+    free(frame);
+    if (err != ESP_OK) break;
+
+    lastFrameSentMs = millis();
+
+    // Send trailing newline
+    err = httpd_resp_send_chunk(req, "\r\n", 2);
+    if (err != ESP_OK) break;
+
+    int delayMs = gSettings.cameraStreamIntervalMs;
+    if (delayMs < 50) delayMs = 50;
+    if (delayMs > 2000) delayMs = 2000;
+    vTaskDelay(pdMS_TO_TICKS(delayMs));
+  }
+
+  // Clear streaming flag when done
+  cameraStreaming = false;
+  
+  // Release stream lock if we still own it.
+  if (s_streamOwner == key && myGen == s_streamGen) {
+    s_streamOwner = "";
+  }
+
+  // End multipart stream
+  httpd_resp_send_chunk(req, NULL, 0);
+#else
+  httpd_resp_set_status(req, "501 Not Implemented");
+  httpd_resp_set_type(req, "text/plain");
+  httpd_resp_send(req, "Camera not compiled", HTTPD_RESP_USE_STRLEN);
+#endif
+  return ESP_OK;
+}
+
+// Microphone recordings list endpoint (auth-protected)
+esp_err_t handleMicRecordingsList(httpd_req_t* req) {
+  AuthContext ctx;
+  ctx.transport = SOURCE_WEB;
+  ctx.opaque = req;
+  ctx.path = "/api/recordings";
+  getClientIP(req, ctx.ip);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
+
+#if ENABLE_MICROPHONE_SENSOR
+  extern int getRecordingCount();
+  extern String getRecordingsList();
+  
+  int count = getRecordingCount();
+  String list = getRecordingsList();
+  
+  // Build JSON response
+  String json = "{\"count\":" + String(count) + ",\"files\":[";
+  
+  if (count > 0 && list.length() > 0) {
+    // Parse "name:size,name:size" format
+    int start = 0;
+    bool first = true;
+    while (start < (int)list.length()) {
+      int comma = list.indexOf(',', start);
+      if (comma < 0) comma = list.length();
+      
+      String item = list.substring(start, comma);
+      int colon = item.indexOf(':');
+      if (colon > 0) {
+        String name = item.substring(0, colon);
+        String size = item.substring(colon + 1);
+        
+        if (!first) json += ",";
+        json += "{\"name\":\"" + name + "\",\"size\":" + size + "}";
+        first = false;
+      }
+      start = comma + 1;
+    }
+  }
+  
+  json += "]}";
+  
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, json.c_str(), json.length());
+#else
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, "{\"count\":0,\"files\":[],\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+#endif
+  return ESP_OK;
+}
+
+// Microphone recording file endpoint (auth-protected) - serves WAV file for playback
+esp_err_t handleMicRecordingFile(httpd_req_t* req) {
+  AuthContext ctx;
+  ctx.transport = SOURCE_WEB;
+  ctx.opaque = req;
+  ctx.path = "/api/recordings/file";
+  getClientIP(req, ctx.ip);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
+
+#if ENABLE_MICROPHONE_SENSOR
+  // Get filename from query string
+  char query[128];
+  char filename[64] = {0};
+  
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    httpd_query_key_value(query, "name", filename, sizeof(filename));
+  }
+  
+  if (strlen(filename) == 0) {
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "Missing filename parameter", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  
+  // Construct full path
+  String path = "/recordings/" + String(filename);
+  
+  if (!LittleFS.exists(path)) {
+    httpd_resp_set_status(req, "404 Not Found");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "Recording not found", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  
+  File f = LittleFS.open(path, "r");
+  if (!f) {
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "Failed to open file", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  
+  size_t fileSize = f.size();
+  
+  // Set headers for audio playback - Content-Length is required for browser audio seeking
+  httpd_resp_set_type(req, "audio/wav");
+  char contentLen[16];
+  snprintf(contentLen, sizeof(contentLen), "%u", (unsigned)fileSize);
+  httpd_resp_set_hdr(req, "Content-Length", contentLen);
+  char contentDisp[128];
+  snprintf(contentDisp, sizeof(contentDisp), "inline; filename=\"%s\"", filename);
+  httpd_resp_set_hdr(req, "Content-Disposition", contentDisp);
+  httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
+  // CORS and caching headers for audio
+  httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+  
+  // Read file into PSRAM (we have 8MB) and send with Content-Length for proper playback
+  // Max recording is 60 sec * 16kHz * 2 bytes = ~1.9MB which fits in PSRAM
+  char* buf = (char*)heap_caps_malloc(fileSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buf) {
+    // Fallback to regular malloc for smaller files
+    buf = (char*)malloc(fileSize);
+  }
+  if (!buf) {
+    f.close();
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  
+  size_t bytesRead = f.read((uint8_t*)buf, fileSize);
+  f.close();
+  
+  // Send entire file at once - this works with Content-Length header
+  httpd_resp_send(req, buf, bytesRead);
+  free(buf);
+#else
+  httpd_resp_set_status(req, "501 Not Implemented");
+  httpd_resp_set_type(req, "text/plain");
+  httpd_resp_send(req, "Microphone not compiled", HTTPD_RESP_USE_STRLEN);
+#endif
+  return ESP_OK;
+}
+
+// Microphone recording delete endpoint (auth-protected)
+esp_err_t handleMicRecordingDelete(httpd_req_t* req) {
+  AuthContext ctx;
+  ctx.transport = SOURCE_WEB;
+  ctx.opaque = req;
+  ctx.path = "/api/recordings/delete";
+  getClientIP(req, ctx.ip);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
+
+#if ENABLE_MICROPHONE_SENSOR
+  // Get filename from query string
+  char query[128];
+  char filename[64] = {0};
+  
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    httpd_query_key_value(query, "name", filename, sizeof(filename));
+  }
+  
+  if (strlen(filename) == 0) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"Missing filename\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  
+  extern bool deleteRecording(const char* filename);
+  bool success = deleteRecording(filename);
+  
+  httpd_resp_set_type(req, "application/json");
+  if (success) {
+    httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
+  } else {
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"File not found\"}", HTTPD_RESP_USE_STRLEN);
+  }
+#else
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, "{\"success\":false,\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+#endif
+  return ESP_OK;
+}
+
+// Register all sensor-related URI handlers
+void registerSensorHandlers(httpd_handle_t server) {
+  // Sensors page
+  static httpd_uri_t sensorsPage = { .uri = "/sensors", .method = HTTP_GET, .handler = handleSensorsPage, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &sensorsPage);
+  
+  // Sensor data API
+  static httpd_uri_t sensorData = { .uri = "/api/sensors", .method = HTTP_GET, .handler = handleSensorData, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &sensorData);
+  
+  // Sensor status API
+  static httpd_uri_t sensorsStatus = { .uri = "/api/sensors/status", .method = HTTP_GET, .handler = handleSensorsStatusWithUpdates, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &sensorsStatus);
+  
+  // Remote sensors API
+  static httpd_uri_t remoteSensors = { .uri = "/api/sensors/remote", .method = HTTP_GET, .handler = handleRemoteSensors, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &remoteSensors);
+  
+  // Camera endpoints
+  static httpd_uri_t cameraStatus = { .uri = "/api/sensors/camera/status", .method = HTTP_GET, .handler = handleCameraStatus, .user_ctx = NULL };
+  static httpd_uri_t cameraFrame = { .uri = "/api/sensors/camera/frame", .method = HTTP_GET, .handler = handleCameraFrame, .user_ctx = NULL };
+  static httpd_uri_t cameraStream = { .uri = "/api/sensors/camera/stream", .method = HTTP_GET, .handler = handleCameraStream, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &cameraStatus);
+  httpd_register_uri_handler(server, &cameraFrame);
+  httpd_register_uri_handler(server, &cameraStream);
+  
+  // Microphone recording endpoints
+  static httpd_uri_t micRecordings = { .uri = "/api/recordings", .method = HTTP_GET, .handler = handleMicRecordingsList, .user_ctx = NULL };
+  static httpd_uri_t micRecordingFile = { .uri = "/api/recordings/file", .method = HTTP_GET, .handler = handleMicRecordingFile, .user_ctx = NULL };
+  static httpd_uri_t micRecordingDelete = { .uri = "/api/recordings/delete", .method = HTTP_GET, .handler = handleMicRecordingDelete, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &micRecordings);
+  httpd_register_uri_handler(server, &micRecordingFile);
+  httpd_register_uri_handler(server, &micRecordingDelete);
 }
 
 #endif // ENABLE_HTTP_SERVER

@@ -359,6 +359,15 @@ void gpsTask(void* parameter) {
         });
         
         lastGPSRead = nowMs;
+        
+        // Auto-disable if too many consecutive failures
+        if (!result) {
+          if (i2cShouldAutoDisable(I2C_ADDR_GPS, 5)) {
+            ERROR_SENSORSF("Too many consecutive GPS failures - auto-disabling");
+            gpsEnabled = false;
+            sensorStatusBumpWith("gps@auto_disabled");
+          }
+        }
       }
       
       vTaskDelay(pdMS_TO_TICKS(10));
@@ -380,10 +389,8 @@ void gpsTask(void* parameter) {
 
 // GPS settings entries
 static const SettingEntry gpsSettingEntries[] = {
-  // Core settings
-  { "autoStart", SETTING_BOOL, &gSettings.gpsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  // Device-level settings (sensor hardware behavior)
-  { "device.devicePollMs", SETTING_INT, &gSettings.gpsDevicePollMs, 1000, 0, nullptr, 100, 10000, "Poll Interval (ms)", nullptr }
+  { "gpsAutoStart",    SETTING_BOOL, &gSettings.gpsAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
+  { "gpsDevicePollMs", SETTING_INT,  &gSettings.gpsDevicePollMs, 1000, 0, nullptr, 100, 10000, "Poll Interval (ms)", nullptr }
 };
 
 static bool isGPSConnected() {

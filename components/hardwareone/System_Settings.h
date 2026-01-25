@@ -18,7 +18,8 @@ struct Settings {
       wifiPassword(""),
       wifiEnabled(true),
       wifiAutoReconnect(true),
-      cliHistorySize(10),
+      webCliHistorySize(10),
+      oledCliHistorySize(50),
       ntpServer(""),
       tzOffsetMinutes(0),
       outSerial(true),
@@ -71,17 +72,20 @@ struct Settings {
       debugEspNowStream(true),
       debugEspNowCore(true),
       debugEspNowRouter(true),
-      debugEspNowMesh(false),
-      debugEspNowTopo(false),
-      debugEspNowEncryption(false),
-      debugAutoScheduler(false),
-      debugAutoExec(false),
-      debugAutoCondition(false),
-      debugAutoTiming(false),
+      debugEspNowMesh(true),
+      debugEspNowTopo(true),
+      debugEspNowEncryption(true),
+      debugAutoScheduler(true),
+      debugAutoExec(true),
+      debugAutoCondition(true),
+      debugAutoTiming(true),
       debugMemory(true),
       debugCommandSystem(true),
       debugSettingsSystem(true),
       debugFmRadio(true),
+      debugCamera(true),
+      debugMicrophone(true),
+      debugI2C(true),  // I2C bus transactions, mutex, clock changes
       logLevel(3),                    // Default: LOG_LEVEL_DEBUG (show everything)
       memorySampleIntervalSec(30),
       espnowenabled(false),
@@ -101,7 +105,9 @@ struct Settings {
       meshHeartbeatBroadcast(true),
       meshTTL(3),
       meshAdaptiveTTL(false),
+#if ENABLE_AUTOMATION
       automationsEnabled(true),
+#endif
       i2cBusEnabled(true),
       i2cSensorsEnabled(true),
       ledBrightness(100),
@@ -127,6 +133,42 @@ struct Settings {
       gpsAutoStart(false),
       fmRadioAutoStart(false),
       apdsAutoStart(false),
+      rtcAutoStart(false),
+      rtcTimeHasBeenSet(false),  // Track if RTC time has been set by NTP or manual
+      presenceAutoStart(false),
+      presenceDevicePollMs(100),
+      cameraAutoStart(false),  // Camera does NOT auto-start by default
+      microphoneAutoStart(false),  // Microphone does NOT auto-start by default
+      microphoneSampleRate(16000),
+      microphoneGain(50),
+      microphoneBitDepth(16),
+      cameraBrightness(0),
+      cameraContrast(0),
+      cameraSaturation(0),
+      cameraSharpness(0),
+      cameraAELevel(0),
+      cameraWBMode(0),
+      cameraDenoise(0),
+      cameraSpecialEffect(0),
+      cameraHMirror(false),
+      cameraVFlip(false),
+      cameraQuality(12),
+      cameraFramesize(1),
+      cameraStreamIntervalMs(200),
+      cameraStorageLocation(0),
+      cameraCaptureFolder("/photos"),
+      cameraAutoCapture(false),
+      cameraAutoCaptureIntervalSec(60),
+      cameraMaxStoredImages(100),
+      cameraSendAfterCapture(false),
+      cameraTargetDevice(""),
+      edgeImpulseEnabled(false),
+      edgeImpulseRequireLabels(true),
+      edgeImpulseMinConfidence(0.6f),
+      edgeImpulseMaxDetections(5),
+      edgeImpulseInputSize(96),
+      edgeImpulseContinuous(false),
+      edgeImpulseIntervalMs(1000),
       httpAutoStart(true),
       bluetoothAutoStart(true),
       bluetoothRequireAuth(true),
@@ -147,7 +189,8 @@ struct Settings {
   String wifiPassword;
   bool wifiEnabled;        // Enable/disable WiFi at boot (default: true)
   bool wifiAutoReconnect;
-  int cliHistorySize;
+  int webCliHistorySize;   // Web CLI history buffer size
+  int oledCliHistorySize;  // OLED CLI history buffer size (lines)
   String ntpServer;
   int tzOffsetMinutes;
   bool outSerial;  // persist output lanes
@@ -229,6 +272,9 @@ struct Settings {
   bool debugCommandSystem;
   bool debugSettingsSystem;
   bool debugFmRadio;
+  bool debugCamera;
+  bool debugMicrophone;
+  bool debugI2C;  // I2C bus transactions, mutex, clock changes
   // Auth sub-flags
   bool debugAuthSessions;
   bool debugAuthCookies;
@@ -296,8 +342,10 @@ struct Settings {
   bool meshHeartbeatBroadcast;         // Broadcast heartbeats (true=public/discovery, false=private/paired-only)
   uint8_t meshTTL;                     // TTL for mesh-routed messages (default: 3, range: 1-10, updated by adaptive mode)
   bool meshAdaptiveTTL;                // Use adaptive TTL based on peer count: ceil(log2(peers))+1 (default: false)
+#if ENABLE_AUTOMATION
   // Automation system
   bool automationsEnabled;  // Enable/disable automation scheduler (runs from main loop)
+#endif
   // I2C Hardware system
   bool i2cBusEnabled;       // Enable/disable I2C bus hardware (Wire/Wire1 init and transactions)
   bool i2cSensorsEnabled;   // Enable/disable I2C sensor subsystem (runtime toggle like automation/espnow)
@@ -329,6 +377,46 @@ struct Settings {
   bool gpsAutoStart;            // Auto-start GPS after boot
   bool fmRadioAutoStart;        // Auto-start FM radio after boot
   bool apdsAutoStart;           // Auto-start APDS gesture/color sensor after boot
+  bool rtcAutoStart;            // Auto-start RTC (DS3231) after boot
+  bool rtcTimeHasBeenSet;       // Has RTC time been set by NTP or manual? (false = trust NTP first at boot)
+  bool presenceAutoStart;       // Auto-start STHS34PF80 presence/motion sensor after boot
+  int presenceDevicePollMs;     // STHS34PF80 polling interval (default: 100ms)
+  bool cameraAutoStart;         // Auto-start ESP32-S3 camera after boot
+  bool microphoneAutoStart;     // Auto-start ESP32-S3 PDM microphone after boot
+  // Microphone settings
+  int microphoneSampleRate;     // Sample rate in Hz (8000, 16000, 22050, 44100, 48000)
+  int microphoneGain;           // Software gain 0-100% (default 50)
+  int microphoneBitDepth;       // Bit depth (16 or 32)
+  // Camera image settings (persisted) - use int for settings system compatibility
+  int cameraBrightness;         // -2 to 2 (default 0)
+  int cameraContrast;           // -2 to 2 (default 0)
+  int cameraSaturation;         // -2 to 2 (default 0)
+  int cameraSharpness;          // -2 to 2 (default 0, OV3660 only)
+  int cameraAELevel;            // Auto-exposure level/compensation -2 to 2 (default 0)
+  int cameraWBMode;             // White balance mode 0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home (default 0)
+  int cameraDenoise;            // Denoise level 0-8 (default 0)
+  int cameraSpecialEffect;      // Special effect 0=None,1=Neg,2=Gray,3=Red,4=Green,5=Blue,6=Sepia (default 0)
+  bool cameraHMirror;           // Horizontal mirror
+  bool cameraVFlip;             // Vertical flip
+  int cameraQuality;            // JPEG quality 0-63 (lower=better, default 12)
+  int cameraFramesize;          // Framesize enum (default VGA=8)
+  int cameraStreamIntervalMs;   // MJPEG stream delay (ms) - lower=faster, default 200 (~5 fps)
+  // Camera storage settings
+  int cameraStorageLocation;    // 0=LittleFS, 1=SD, 2=Both
+  String cameraCaptureFolder;   // Folder for saved images (default: "/photos")
+  bool cameraAutoCapture;       // Enable periodic auto-capture
+  int cameraAutoCaptureIntervalSec; // Interval for auto-capture (default: 60)
+  int cameraMaxStoredImages;    // Max images before rotation (0=unlimited, default: 100)
+  bool cameraSendAfterCapture;  // Auto-send to target device after capture
+  String cameraTargetDevice;    // ESP-NOW name/MAC of target device for auto-send
+  // Edge Impulse ML settings
+  bool edgeImpulseEnabled;      // Enable Edge Impulse inference
+  bool edgeImpulseRequireLabels;
+  float edgeImpulseMinConfidence; // Minimum confidence threshold (0.0-1.0)
+  int edgeImpulseMaxDetections; // Max objects to report per frame (1-10)
+  int edgeImpulseInputSize;     // Model input size (96, 128, etc)
+  bool edgeImpulseContinuous;   // Continuous inference mode
+  int edgeImpulseIntervalMs;    // Interval between inferences in continuous mode
   // HTTP server settings
   bool httpAutoStart;           // Auto-start HTTP server at boot if WiFi connected
   // Bluetooth settings
@@ -418,7 +506,8 @@ const char* cmd_hardwareled_startupcolor2(const String& cmd);
 const char* cmd_hardwareled_startupduration(const String& cmd);
 
 // CLI Settings
-const char* cmd_clihistorysize(const String& cmd);
+const char* cmd_webclihistorysize(const String& cmd);
+const char* cmd_oledclihistorysize(const String& cmd);
 
 // ============================================================================
 // Modular Settings Registry System

@@ -20,6 +20,8 @@ enum RemoteSensorType {
   REMOTE_SENSOR_GPS = 3,
   REMOTE_SENSOR_GAMEPAD = 4,
   REMOTE_SENSOR_FMRADIO = 5,
+  REMOTE_SENSOR_CAMERA = 6,
+  REMOTE_SENSOR_MICROPHONE = 7,
   REMOTE_SENSOR_MAX
 };
 
@@ -48,10 +50,10 @@ struct RemoteSensorData {
 
 // Maximum remote devices to track
 #define MAX_REMOTE_DEVICES 8
-#define MAX_SENSORS_PER_DEVICE 6
+#define MAX_SENSORS_PER_DEVICE 8
 #define REMOTE_SENSOR_TTL_MS 30000  // 30 seconds TTL
 
-// Total cache size: 8 devices * 6 sensors * ~310 bytes = ~15KB (fixed, no heap growth)
+// Total cache size: 8 devices * 8 sensors * ~310 bytes = ~20KB (fixed, no heap growth)
 
 // Remote sensor data cache (master only)
 extern RemoteSensorData gRemoteSensorCache[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
@@ -112,6 +114,7 @@ RemoteSensorType stringToSensorType(const char* str);
 // Enable/disable all sensor ESP-NOW communication (status + data)
 void setSensorBroadcastEnabled(bool enabled);
 bool isSensorBroadcastEnabled();
+void espnowSensorStatusPeriodicTick();
 
 // ==========================
 // Thermal Data Optimization

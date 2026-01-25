@@ -107,10 +107,38 @@ const struct CommandEntry fmRadioCommands[] = {};
 const size_t fmRadioCommandsCount = 0;
 #endif
 
+#if !ENABLE_RTC_SENSOR
+// RTC stub variables (global definitions)
+// Types are defined in i2csensor-ds3231.h (always available outside #if guard)
+#include "i2csensor-ds3231.h"
+RTCCache gRTCCache = {nullptr, {0, 0, 0, 0, 0, 0, 0}, 0.0f, false, 0};
+bool rtcEnabled = false;
+bool rtcConnected = false;
+TaskHandle_t rtcTaskHandle = nullptr;
+volatile UBaseType_t gRTCWatermarkNow = 0;
+volatile UBaseType_t gRTCWatermarkMin = 0;
+const struct CommandEntry rtcCommands[] = {};
+const size_t rtcCommandsCount = 0;
+void startRTCSensorInternal() {}
+#endif
+
+#if !ENABLE_CAMERA_SENSOR
+// Camera stub variables (global definitions)
+bool cameraEnabled = false;
+bool cameraConnected = false;
+bool cameraStreaming = false;
+const char* cameraModel = "None";
+int cameraWidth = 0;
+int cameraHeight = 0;
+const struct CommandEntry cameraCommands[] = {};
+const size_t cameraCommandsCount = 0;
+#endif
+
 #if !ENABLE_BLUETOOTH
 // Bluetooth stub variables (global definitions)
 const struct CommandEntry bluetoothCommands[] = {};
 const size_t bluetoothCommandsCount = 0;
+bool bluetoothShowingStatus = false;
 #endif
 
 // =============================================================================

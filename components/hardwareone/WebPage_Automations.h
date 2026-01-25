@@ -21,7 +21,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
 </div>
 <div id='auto-system-warning' class='alert alert-warning' style='display:none;margin-top:10px'>
   <strong>Automation System Disabled</strong><br>
-  The automation system is currently disabled to save memory (~16KB heap).<br>
+  The automation system is currently disabled to save memory.<br>
   Click "Enable Automation System" above to start it instantly (no reboot required).
 </div>
 </div>
@@ -263,7 +263,7 @@ window.disableAutomationSystem = function() {
 };
 
 window.enableAutomationSystem = function() {
-  if (!confirm('Enable automation system? This will:\n\n• Allocate ~16KB heap for scheduler and buffers\n• Start the automation scheduler immediately\n• Enable all scheduled automations\n\nContinue?')) {
+  if (!confirm('Enable automation system? This will:\n\n• Start the automation scheduler immediately\n• Enable all scheduled automations\n\nContinue?')) {
     return;
   }
   fetch('/api/cli', {

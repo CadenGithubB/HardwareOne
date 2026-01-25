@@ -11,24 +11,24 @@ inline void streamSeesawGamepadSensorCard(httpd_req_t* req) {
       <div class='sensor-title'><span>Gamepad (Seesaw)</span><span class='status-indicator status-disabled' id='gamepad-status-indicator'></span></div>
       <div class='sensor-description'>Mini I2C Gamepad with joystick and buttons.</div>
       <div id='gamepad-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
-      <div class='sensor-controls'><button class='btn' id='btn-gamepad-start'>Start Polling</button><button class='btn' id='btn-gamepad-stop'>Stop Polling</button></div>
+      <div class='sensor-controls'><button class='btn' id='btn-gamepad-start'>Start Gamepad</button><button class='btn' id='btn-gamepad-stop'>Stop Gamepad</button></div>
       <div class='sensor-data' id='gamepad-data'>Gamepad data will appear here...</div>
       <div class='gamepad-row' style='margin-top:10px'>
-        <div class='joy-wrap'><canvas id='gamepad-joystick' class='joy-canvas' width='120' height='120'></canvas></div>
+        <div class='joy-wrap'><canvas id='gamepad-joystick' class='joy-canvas' width='100' height='100'></canvas></div>
         <div class='abxy-grid'>
           <div></div>
-          <div id='btn-x' class='btn btn-small' style='width:52px'>X</div>
+          <div id='btn-x' class='btn btn-small' style='width:36px;font-size:0.75rem;padding:4px'>X</div>
           <div></div>
-          <div id='btn-y' class='btn btn-small' style='width:52px'>Y</div>
+          <div id='btn-y' class='btn btn-small' style='width:36px;font-size:0.75rem;padding:4px'>Y</div>
           <div></div>
-          <div id='btn-a' class='btn btn-small' style='width:52px'>A</div>
+          <div id='btn-a' class='btn btn-small' style='width:36px;font-size:0.75rem;padding:4px'>A</div>
           <div></div>
-          <div id='btn-b' class='btn btn-small' style='width:52px'>B</div>
+          <div id='btn-b' class='btn btn-small' style='width:36px;font-size:0.75rem;padding:4px'>B</div>
           <div></div>
         </div>
-        <div style='display:flex;flex-direction:column;gap:6px;margin-left:12px'>
-          <div id='btn-select' class='btn btn-small' style='width:80px'>Select</div>
-          <div id='btn-start' class='btn btn-small' style='width:80px'>Start</div>
+        <div style='display:flex;flex-direction:column;gap:4px;margin-left:8px'>
+          <div id='btn-select' class='btn btn-small' style='width:50px;font-size:0.65rem;padding:4px'>Sel</div>
+          <div id='btn-start' class='btn btn-small' style='width:50px;font-size:0.65rem;padding:4px'>Start</div>
         </div>
       </div>
     </div>
@@ -58,7 +58,8 @@ inline void streamSeesawGamepadSensorJs(httpd_req_t* req) {
     "    var x = j.x, y = j.y, b = j.buttons;\n"
     "    var el = document.getElementById(ids.data || 'gamepad-data');\n"
     "    if (el) {\n"
-    "      el.textContent = 'X: ' + x + '  Y: ' + y + '  Buttons: ' + b;\n"
+    "      var bHex = '0x' + ((b >>> 0) & 0xFFFF).toString(16).toUpperCase().padStart(4, '0');\n"
+    "      el.textContent = 'X: ' + x + '  Y: ' + y + '  Buttons: ' + bHex;\n"
     "    }\n"
     "    var pins = {x: 6, y: 2, a: 5, b: 1, select: 0, start: 16};\n"
     "    function setBtn(id, p) {\n"
@@ -92,8 +93,12 @@ inline void streamSeesawGamepadSensorJs(httpd_req_t* req) {
     "        ctx.moveTo(10, cy);\n"
     "        ctx.lineTo(w - 10, cy);\n"
     "        ctx.stroke();\n"
-    "        var jx = cx + ((x - 512) / 512.0) * (cx - 10);\n"
-    "        var jy = cy - ((y - 512) / 512.0) * (cy - 10);\n"
+    "        var dx = x - 512, dy = y - 512;\n"
+    "        var deadzone = 30;\n"
+    "        if (Math.abs(dx) < deadzone) dx = 0;\n"
+    "        if (Math.abs(dy) < deadzone) dy = 0;\n"
+    "        var jx = cx + (dx / 512.0) * (cx - 10);\n"
+    "        var jy = cy - (dy / 512.0) * (cy - 10);\n"
     "        ctx.fillStyle = '#007bff';\n"
     "        ctx.beginPath();\n"
     "        ctx.arc(jx, jy, 8, 0, 2 * Math.PI);\n"

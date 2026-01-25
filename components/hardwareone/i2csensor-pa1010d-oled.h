@@ -4,6 +4,7 @@
 #define I2CSENSOR_PA1010D_OLED_H
 
 #include "OLED_Display.h"
+#include "OLED_Utils.h"
 #include <Adafruit_SSD1306.h>
 
 // GPS OLED display function - shows GPS data
@@ -22,11 +23,8 @@ static void displayGPSData() {
     return;
   }
   
-  // Read latest GPS data
-  char c = gPA1010D->read();
-  if (gPA1010D->newNMEAreceived()) {
-    gPA1010D->parse(gPA1010D->lastNMEA());
-  }
+  // Use cached GPS data (gpsTask continuously polls and updates gPA1010D)
+  // Do NOT call gPA1010D->read() here - causes I2C bus contention with OLED
   
   // Line 1: Fix status and satellites
   oledDisplay->print(gPA1010D->fix ? "\x10" : "\xDB");
@@ -85,18 +83,27 @@ static bool gpsOLEDModeAvailable(String* outReason) {
   return false;
 }
 
+static void gpsToggleConfirmed(void* userData) {
+  (void)userData;
+  extern bool enqueueSensorStart(SensorType sensor);
+  extern bool isInQueue(SensorType sensor);
+
+  if (gpsEnabled && gpsConnected) {
+    Serial.println("[GPS] Confirmed: Stopping GPS...");
+    gpsEnabled = false;
+  } else if (!isInQueue(SENSOR_GPS)) {
+    Serial.println("[GPS] Confirmed: Starting GPS...");
+    enqueueSensorStart(SENSOR_GPS);
+  }
+}
+
 // Input handler for GPS OLED mode - X button toggles sensor
 static bool gpsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    extern bool enqueueSensorStart(SensorType sensor);
-    extern bool isInQueue(SensorType sensor);
-    
     if (gpsEnabled && gpsConnected) {
-      Serial.println("[GPS] X button: Stopping GPS...");
-      gpsEnabled = false;
-    } else if (!isInQueue(SENSOR_GPS)) {
-      Serial.println("[GPS] X button: Starting GPS...");
-      enqueueSensorStart(SENSOR_GPS);
+      oledConfirmRequest("Stop GPS?", nullptr, gpsToggleConfirmed, nullptr, false);
+    } else {
+      oledConfirmRequest("Start GPS?", nullptr, gpsToggleConfirmed, nullptr);
     }
     return true;
   }

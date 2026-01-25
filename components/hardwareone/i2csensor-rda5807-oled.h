@@ -4,6 +4,7 @@
 #define I2CSENSOR_RDA5807_OLED_H
 
 #include "OLED_Display.h"
+#include "OLED_Utils.h"
 #include <Adafruit_SSD1306.h>
 
 // FM Radio OLED display function - shows radio data
@@ -65,18 +66,27 @@ static bool fmRadioOLEDModeAvailable(String* outReason) {
   return true;  // Always allow navigation, display function handles "not active" state
 }
 
+static void fmRadioToggleConfirmed(void* userData) {
+  (void)userData;
+  extern bool enqueueSensorStart(SensorType sensor);
+  extern bool isInQueue(SensorType sensor);
+
+  if (fmRadioEnabled && fmRadioConnected) {
+    Serial.println("[FM_RADIO] Confirmed: Stopping FM radio...");
+    fmRadioEnabled = false;
+  } else if (!isInQueue(SENSOR_FMRADIO)) {
+    Serial.println("[FM_RADIO] Confirmed: Starting FM radio...");
+    enqueueSensorStart(SENSOR_FMRADIO);
+  }
+}
+
 // Input handler for FM Radio OLED mode - X button toggles radio
 static bool fmRadioInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    extern bool enqueueSensorStart(SensorType sensor);
-    extern bool isInQueue(SensorType sensor);
-    
     if (fmRadioEnabled && fmRadioConnected) {
-      Serial.println("[FM_RADIO] X button: Stopping FM radio...");
-      fmRadioEnabled = false;
-    } else if (!isInQueue(SENSOR_FMRADIO)) {
-      Serial.println("[FM_RADIO] X button: Starting FM radio...");
-      enqueueSensorStart(SENSOR_FMRADIO);
+      oledConfirmRequest("Stop FM?", nullptr, fmRadioToggleConfirmed, nullptr, false);
+    } else {
+      oledConfirmRequest("Start FM?", nullptr, fmRadioToggleConfirmed, nullptr);
     }
     return true;
   }

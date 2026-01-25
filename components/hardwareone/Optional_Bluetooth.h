@@ -218,6 +218,17 @@ inline void bleSetStreamInterval(uint32_t, uint32_t) {}
 inline bool bleIsStreamEnabled(uint8_t) { return false; }
 inline void bleUpdateStreams() {}
 
+// OLED menu stubs
+inline void bluetoothMenuUp() {}
+inline void bluetoothMenuDown() {}
+inline void executeBluetoothAction() {}
+inline void bluetoothMenuBack() {}
+inline void displayBluetoothPage() {}
+inline bool handleBluetoothInput(uint16_t, uint16_t) { return false; }
+
+// Global state stub
+extern bool bluetoothShowingStatus;
+
 #endif // ENABLE_BLUETOOTH
 
 #endif // BLUETOOTH_SYSTEM_H

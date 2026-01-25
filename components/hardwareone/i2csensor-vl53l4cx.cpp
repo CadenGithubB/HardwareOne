@@ -29,9 +29,7 @@ extern TwoWire Wire1;
 extern Settings gSettings;
 extern bool writeSettingsJson();
 
-// I2C functions
-extern uint32_t gWire1DefaultHz;
-extern void i2cSetWire1Clock(uint32_t hz);
+// I2C functions - clock now managed by transaction wrapper
 
 // Status and output
 extern void sensorStatusBumpWith(const char* reason);
@@ -218,19 +216,8 @@ bool startToFSensorInternal() {
     DEBUG_CLIF("Failed to create ToF task");
     return false;
   }
-  // Hold I2C clock steady for ToF while enabled (bounded 50k..400k)
-  {
-    uint32_t prevClock = gWire1DefaultHz;  // Save previous clock
-    uint32_t tofHz = (gSettings.i2cClockToFHz > 0) ? gSettings.i2cClockToFHz : 200000;
-    if (tofHz < 50000) tofHz = 50000;
-    if (tofHz > 400000) tofHz = 400000;
-
-    // Only change clock if different, add settling delay
-    if (prevClock != tofHz) {
-      i2cSetWire1Clock(tofHz);
-      delay(100);  // Let I2C bus settle after clock change
-    }
-  }
+  // Clock is now managed automatically by i2cTaskWithStandardTimeout wrapper
+  // Device registration specifies ToF's clock speed (50-400kHz)
   // tofEnabled already set to true at the beginning to prevent race condition
   sensorStatusBumpWith("tofstart@queue");
   DEBUG_CLIF("SUCCESS: ToF sensor started successfully");
@@ -300,10 +287,10 @@ const char* cmd_toftransitionms(const String& cmd) {
   return "[ToF] Setting updated";
 }
 
-const char* cmd_tofuimaxdistancemm(const String& cmd) {
+const char* cmd_tofmaxdistancemm(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   const char* p = strchr(cmd.c_str(), ' ');
-  if (!p) return "Usage: tofuimaxdistancemm <100..10000>";
+  if (!p) return "Usage: tofmaxdistancemm <100..10000>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
   if (v < 100 || v > 10000) return "[ToF] Error: Max distance must be 100-10000mm";
@@ -318,8 +305,6 @@ const char* cmd_tofuimaxdistancemm(const String& cmd) {
 // ============================================================================
 
 bool initToFSensor() {
-  extern void i2cSetDefaultWire1Clock();
-  
   if (gVL53L4CX != nullptr) {
     // Sensor object exists - clean it up and reinitialize to ensure fresh state
     INFO_SENSORSF("Cleaning up existing sensor object before reinit");
@@ -343,7 +328,6 @@ bool initToFSensor() {
   
   return i2cTransaction(tofHz, 3000, [&]() -> bool {
     // Wire1 is configured centrally with runtime-configurable pins
-    i2cSetDefaultWire1Clock();
     
     // Allocate sensor object
     gVL53L4CX = new VL53L4CX();
@@ -390,7 +374,6 @@ bool initToFSensor() {
 
 bool readToFObjects() {
   // gDebugFlags now from debug_system.h
-  extern void i2cSetWire1Clock(uint32_t hz);
   
   if (!tofConnected || !tofEnabled || gVL53L4CX == nullptr) {
     if (!tofConnected) {
@@ -403,9 +386,7 @@ bool readToFObjects() {
     return false;
   }
 
-  // Set I2C speed for ToF reads (sticky - stays until next sensor changes it)
-  uint32_t tofHz = (gSettings.i2cClockToFHz > 0) ? (uint32_t)gSettings.i2cClockToFHz : 200000;
-  i2cSetWire1Clock(tofHz);
+  // Clock is managed by i2cTaskWithStandardTimeout wrapper - no manual changes needed
 
   VL53L4CX_MultiRangingData_t MultiRangingData;
   VL53L4CX_MultiRangingData_t* pMultiRangingData = &MultiRangingData;
@@ -625,12 +606,11 @@ const char* cmd_tofstabilitythreshold(const String& cmd) {
 // ToF Command Registry
 // ============================================================================
 
-const char* cmd_tofdevicepollms(const String& originalCmd) {
+const char* cmd_tofdevicepollms(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: tofDevicePollMs <100..2000>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: tofDevicePollMs <100..2000>";
   int v = valStr.toInt();
   if (v < 100) v = 100;
   if (v > 2000) v = 2000;
@@ -654,7 +634,7 @@ const CommandEntry tofCommands[] = {
   { "tofpollingms", "Set ToF UI polling interval (50..5000ms).", true, cmd_tofpollingms, "Usage: tofpollingms <50..5000>" },
   { "tofstabilitythreshold", "Set ToF stability threshold (0..50).", true, cmd_tofstabilitythreshold, "Usage: tofstabilitythreshold <0..50>" },
   { "toftransitionms", "Set ToF transition time.", true, cmd_toftransitionms, "Usage: toftransitionms <0..5000>" },
-  { "tofuimaxdistancemm", "Set ToF UI max distance.", true, cmd_tofuimaxdistancemm, "Usage: tofuimaxdistancemm <100..10000>" },
+  { "tofmaxdistancemm", "Set ToF max distance.", true, cmd_tofmaxdistancemm, "Usage: tofmaxdistancemm <100..10000>" },
   
   // Device-level settings (sensor hardware behavior)
   { "tofdevicepollms", "Set ToF device polling interval.", true, cmd_tofdevicepollms, "Usage: tofDevicePollMs <100..2000>" },
@@ -781,6 +761,15 @@ void tofTask(void* parameter) {
         
         lastToFRead = nowMs;
         
+        // Auto-disable if too many consecutive failures
+        if (!ok) {
+          if (i2cShouldAutoDisable(I2C_ADDR_TOF, 5)) {
+            ERROR_SENSORSF("Too many consecutive ToF failures - auto-disabling");
+            tofEnabled = false;
+            sensorStatusBumpWith("tof@auto_disabled");
+          }
+        }
+        
         // SAFE: Debug output AFTER transaction, with enabled check
         if (tofEnabled) {
           DEBUG_FRAMEF("ToF readObjects: %s", ok ? "ok" : "fail");
@@ -808,16 +797,13 @@ void tofTask(void* parameter) {
 // ============================================================================
 
 static const SettingEntry tofSettingEntries[] = {
-  // Core settings
-  { "autoStart", SETTING_BOOL, &gSettings.tofAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  // UI Settings
-  { "ui.pollingMs", SETTING_INT, &gSettings.tofPollingMs, 220, 0, nullptr, 50, 5000, "Polling (ms)", nullptr },
-  { "ui.stabilityThreshold", SETTING_INT, &gSettings.tofStabilityThreshold, 3, 0, nullptr, 0, 50, "Stability Threshold", nullptr },
-  { "ui.transitionMs", SETTING_INT, &gSettings.tofTransitionMs, 200, 0, nullptr, 0, 5000, "Transition (ms)", nullptr },
-  { "ui.maxDistanceMm", SETTING_INT, &gSettings.tofUiMaxDistanceMm, 3400, 0, nullptr, 100, 10000, "Max Distance (mm)", nullptr },
-  // Device Settings
-  { "device.devicePollMs", SETTING_INT, &gSettings.tofDevicePollMs, 220, 0, nullptr, 100, 2000, "Poll Interval (ms)", nullptr },
-  { "device.i2cClockHz", SETTING_INT, &gSettings.i2cClockToFHz, 200000, 0, nullptr, 50000, 400000, "I2C Clock (Hz)", nullptr }
+  { "tofAutoStart",          SETTING_BOOL, &gSettings.tofAutoStart,          0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
+  { "tofPollingMs",          SETTING_INT,  &gSettings.tofPollingMs,          220, 0, nullptr, 50, 5000, "Polling (ms)", nullptr },
+  { "tofStabilityThreshold", SETTING_INT,  &gSettings.tofStabilityThreshold, 3, 0, nullptr, 0, 50, "Stability Threshold", nullptr },
+  { "tofTransitionMs",       SETTING_INT,  &gSettings.tofTransitionMs,       200, 0, nullptr, 0, 5000, "Transition (ms)", nullptr },
+  { "tofMaxDistanceMm",      SETTING_INT,  &gSettings.tofUiMaxDistanceMm,    3400, 0, nullptr, 100, 10000, "Max Distance (mm)", nullptr },
+  { "tofDevicePollMs",       SETTING_INT,  &gSettings.tofDevicePollMs,       220, 0, nullptr, 100, 2000, "Poll Interval (ms)", nullptr },
+  { "tofI2cClockHz",         SETTING_INT,  &gSettings.i2cClockToFHz,         200000, 0, nullptr, 50000, 400000, "I2C Clock (Hz)", nullptr }
 };
 
 static bool isToFConnected() {

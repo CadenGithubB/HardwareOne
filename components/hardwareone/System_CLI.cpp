@@ -262,7 +262,7 @@ const char* renderHelpSensors() {
   const CommandModule* modules = getCommandModules(moduleCount);
   
   // Render sensor modules in a logical order
-  const char* sensorModules[] = {"thermal", "tof", "imu", "gamepad", "apds", "gps", "fmradio"};
+  const char* sensorModules[] = {"thermal", "tof", "imu", "gamepad", "apds", "gps", "fmradio", "camera"};
   const int numSensorModules = sizeof(sensorModules) / sizeof(sensorModules[0]);
   
   for (int i = 0; i < numSensorModules; i++) {
@@ -477,7 +477,8 @@ static void renderModuleHelp(const char* moduleName, const CommandEntry* command
                          strcmp(moduleName, "gamepad") == 0 || 
                          strcmp(moduleName, "apds") == 0 || 
                          strcmp(moduleName, "gps") == 0 ||
-                         strcmp(moduleName, "fmradio") == 0);
+                         strcmp(moduleName, "fmradio") == 0 ||
+                         strcmp(moduleName, "camera") == 0);
   
   bool isConnected = true;
   if (isSensorModule) {
@@ -521,7 +522,7 @@ static void renderModuleHelp(const char* moduleName, const CommandEntry* command
 static const char* cmd_help(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = cmd.substring(4);  // Remove "help"
+  String args = cmd;
   args.trim();
 
   if (args.length() == 0) {

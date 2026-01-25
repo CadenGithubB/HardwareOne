@@ -2,6 +2,7 @@
 #include <esp_adc_cal.h>
 
 #include "System_Battery.h"
+#include "System_BuildConfig.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 
@@ -25,6 +26,7 @@ static uint8_t voltageIndex = 0;
 static bool historyFilled = false;
 
 void initBattery() {
+#if ENABLE_BATTERY_MONITOR
   // Configure ADC for battery monitoring
   adc1_config_width(ADC_WIDTH_BIT_12);
   adc1_config_channel_atten(BATTERY_ADC_CHANNEL, ADC_ATTEN_DB_11);
@@ -51,9 +53,22 @@ void initBattery() {
   updateBattery();
   
   INFO_SYSTEMF("Battery monitoring initialized (pin=%d)", BATTERY_PIN);
+#else
+  // Battery monitoring disabled - set USB power state
+  gBatteryState.voltage = 5.0f;  // USB voltage
+  gBatteryState.percentage = 100.0f;
+  gBatteryState.status = BATTERY_NOT_PRESENT;
+  gBatteryState.isCharging = false;
+  INFO_SYSTEMF("Battery monitoring disabled (USB power assumed)");
+#endif
 }
 
 void updateBattery() {
+#if !ENABLE_BATTERY_MONITOR
+  // Battery monitoring disabled - no-op
+  return;
+#endif
+  
   // Read ADC value
   uint32_t adcSum = 0;
   const int samples = 16;
@@ -140,6 +155,10 @@ bool isBatteryCharging() {
 }
 
 const char* getBatteryStatusString() {
+#if !ENABLE_BATTERY_MONITOR
+  return "USB Power";
+#endif
+  
   switch (gBatteryState.status) {
     case BATTERY_CHARGING: return "Charging";
     case BATTERY_FULL: return "Full";

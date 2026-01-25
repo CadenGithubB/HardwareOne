@@ -8,8 +8,8 @@
 #include "System_User.h"
  
 // Shared JSON response buffer size (available to all modules)
-// Increased to 12KB to accommodate 64x48 thermal data (~9KB with integers)
-#define JSON_RESPONSE_SIZE 12288
+// Increased to 16KB to accommodate settings schema and 64x48 thermal data
+#define JSON_RESPONSE_SIZE 16384
 
 // Shared JSON response buffer for web handlers (size defined per TU)
 // Buffer is defined in web_server.cpp; other modules use this extern.
@@ -20,7 +20,7 @@ extern char* gJsonResponseBuffer;
 // ============================================================================
 
 // Session constants
-#define MAX_SESSIONS 5
+#define MAX_SESSIONS 3
 #define MAX_LOGOUT_REASONS 8
 
 // Multi-session support structure
@@ -34,18 +34,18 @@ struct SessionEntry {
   String ip;
   // Small ring buffer for notices to avoid drops during reconnects
   // Using fixed-size char buffers instead of String to save memory and reduce fragmentation
-  static const int NOTICE_QUEUE_SIZE = 3;  // Reduced from 8
-  static const int NOTICE_MAX_LEN = 128;   // Max notice length
-  char noticeQueue[3][128];                // 3 notices × 128 bytes = 384 bytes (vs 8 Strings × 24 bytes = 192 bytes base + heap)
+  static const int NOTICE_QUEUE_SIZE = 2;
+  static const int NOTICE_MAX_LEN = 96;
+  char noticeQueue[NOTICE_QUEUE_SIZE][NOTICE_MAX_LEN];  // 2 × 96 = 192 bytes
   int nqHead = 0;
   int nqTail = 0;
   int nqCount = 0;
   // Small ring buffer for typed SSE events (event name + JSON data)
-  static const int EVENT_QUEUE_SIZE = 3;
+  static const int EVENT_QUEUE_SIZE = 2;
   static const int EVENT_NAME_MAX = 16;
-  static const int EVENT_DATA_MAX = 192;
-  char eventNameQ[EVENT_QUEUE_SIZE][EVENT_NAME_MAX];
-  char eventDataQ[EVENT_QUEUE_SIZE][EVENT_DATA_MAX];
+  static const int EVENT_DATA_MAX = 128;
+  char eventNameQ[EVENT_QUEUE_SIZE][EVENT_NAME_MAX];  // 2 × 16 = 32 bytes
+  char eventDataQ[EVENT_QUEUE_SIZE][EVENT_DATA_MAX];  // 2 × 128 = 256 bytes
   int eqHead = 0;
   int eqTail = 0;
   int eqCount = 0;
@@ -126,8 +126,6 @@ bool sseDequeueEvent(SessionEntry& s, String& outEventName, String& outData);
 
 // HTTP page handlers
 esp_err_t handleSensorsPage(httpd_req_t* req);
-esp_err_t handleEspNowPage(httpd_req_t* req);
-esp_err_t handleGamesPage(httpd_req_t* req);
 esp_err_t handleBluetoothPage(httpd_req_t* req);
 esp_err_t handleFileRead(httpd_req_t* req);
 esp_err_t handleFileWrite(httpd_req_t* req);
@@ -187,9 +185,12 @@ esp_err_t handleAutomationsExport(httpd_req_t* req);
 // Sensor handlers (Batch 5)
 esp_err_t handleSensorData(httpd_req_t* req);
 esp_err_t handleRemoteSensors(httpd_req_t* req);
-
-// ESP-NOW API handlers
-esp_err_t handleEspNowMessages(httpd_req_t* req);
+esp_err_t handleCameraStatus(httpd_req_t* req);
+esp_err_t handleCameraFrame(httpd_req_t* req);
+esp_err_t handleCameraStream(httpd_req_t* req);
+esp_err_t handleMicRecordingsList(httpd_req_t* req);
+esp_err_t handleMicRecordingFile(httpd_req_t* req);
+esp_err_t handleMicRecordingDelete(httpd_req_t* req);
 
 // Auth logging helper (implemented in main .ino)
 void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason);

@@ -92,6 +92,10 @@ void setWizardLogLevelSelection(int sel);
 const char** getLogLevelNames();
 size_t getLogLevelCount();
 
+// Network page builder
+void rebuildNetworkSettingsPage();
+bool hasNetworkSettings();
+
 // ============================================================================
 // Wizard Actions
 // ============================================================================

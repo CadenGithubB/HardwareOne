@@ -27,6 +27,12 @@
 #if ENABLE_FMRADIO_SENSOR
   #include "i2csensor-rda5807.h"
 #endif
+#if ENABLE_CAMERA_SENSOR
+#include "System_Camera_DVP.h"
+#endif
+#if ENABLE_MICROPHONE_SENSOR
+#include "System_Microphone.h"
+#endif
 
 // External functions
 extern void broadcastOutput(const String& msg);
@@ -79,6 +85,8 @@ const char* sensorTypeToString(RemoteSensorType type) {
     case REMOTE_SENSOR_GPS: return "gps";
     case REMOTE_SENSOR_GAMEPAD: return "gamepad";
     case REMOTE_SENSOR_FMRADIO: return "fmradio";
+    case REMOTE_SENSOR_CAMERA: return "camera";
+    case REMOTE_SENSOR_MICROPHONE: return "microphone";
     default: return "unknown";
   }
 }
@@ -90,6 +98,8 @@ RemoteSensorType stringToSensorType(const char* str) {
   if (strcmp(str, "gps") == 0) return REMOTE_SENSOR_GPS;
   if (strcmp(str, "gamepad") == 0) return REMOTE_SENSOR_GAMEPAD;
   if (strcmp(str, "fmradio") == 0) return REMOTE_SENSOR_FMRADIO;
+  if (strcmp(str, "camera") == 0) return REMOTE_SENSOR_CAMERA;
+  if (strcmp(str, "microphone") == 0) return REMOTE_SENSOR_MICROPHONE;
   return REMOTE_SENSOR_THERMAL;  // Default
 }
 
@@ -345,6 +355,62 @@ void setSensorBroadcastEnabled(bool enabled) {
 
 bool isSensorBroadcastEnabled() {
   return gSensorBroadcastEnabled;
+}
+
+void espnowSensorStatusPeriodicTick() {
+  if (!gSensorBroadcastEnabled) return;
+
+  extern Settings gSettings;
+  if (!meshEnabled()) return;
+  if (gSettings.meshRole == MESH_ROLE_MASTER) return;
+
+  unsigned long now = millis();
+
+#if ENABLE_CAMERA_SENSOR
+  static unsigned long lastCameraMs = 0;
+  if ((now - lastCameraMs) >= 1000UL) {
+    lastCameraMs = now;
+
+    StaticJsonDocument<256> doc;
+    doc["type"] = MSG_TYPE_SENSOR_DATA;
+    doc["sensor"] = "camera";
+    JsonObject data = doc.createNestedObject("data");
+    data["enabled"] = cameraEnabled;
+    data["connected"] = cameraConnected;
+    data["streaming"] = cameraStreaming;
+    data["model"] = cameraModel;
+    data["width"] = cameraWidth;
+    data["height"] = cameraHeight;
+    data["psram"] = psramFound();
+
+    String message;
+    serializeJson(doc, message);
+    meshSendEnvelopeToPeers(message);
+  }
+#endif
+
+#if ENABLE_MICROPHONE_SENSOR
+  static unsigned long lastMicMs = 0;
+  if ((now - lastMicMs) >= 1000UL) {
+    lastMicMs = now;
+
+    StaticJsonDocument<256> doc;
+    doc["type"] = MSG_TYPE_SENSOR_DATA;
+    doc["sensor"] = "microphone";
+    JsonObject data = doc.createNestedObject("data");
+    data["enabled"] = micEnabled;
+    data["connected"] = micConnected;
+    data["recording"] = micRecording;
+    data["sampleRate"] = micSampleRate;
+    data["bitDepth"] = micBitDepth;
+    data["channels"] = micChannels;
+    data["level"] = (micEnabled && !micRecording) ? getAudioLevel() : 0;
+
+    String message;
+    serializeJson(doc, message);
+    meshSendEnvelopeToPeers(message);
+  }
+#endif
 }
 
 void sendSensorDataUpdate(RemoteSensorType sensorType, const String& jsonData) {
@@ -707,8 +773,8 @@ const char* cmd_espnow_sensorstatus(const String& cmd) {
     // Worker: show streaming status
     broadcastOutput("[ESP-NOW] Sensor streaming status:");
     
-    const char* sensors[] = {"thermal", "tof", "imu", "gps", "gamepad", "fmradio"};
-    for (int i = 0; i < 6; i++) {
+    const char* sensors[] = {"thermal", "tof", "imu", "gps", "gamepad", "fmradio", "camera", "microphone"};
+    for (int i = 0; i < 8; i++) {
       RemoteSensorType type = stringToSensorType(sensors[i]);
       bool enabled = isSensorDataStreamingEnabled(type);
       broadcastOutput("  " + String(sensors[i]) + ": " + (enabled ? "on" : "off"));

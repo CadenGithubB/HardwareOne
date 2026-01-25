@@ -535,9 +535,7 @@ void readIMUSensor() {
     return;
   }
 
-  // Set I2C speed for IMU reads
-  extern void i2cSetWire1Clock(uint32_t hz);
-  i2cSetWire1Clock(100000);
+  // Clock is managed by i2cDeviceTransaction wrapper - no manual changes needed
 
   sensors_event_t accelEvent;
   sensors_event_t gyroEvent;
@@ -886,12 +884,11 @@ const char* cmd_imuwebmaxfps(const String& cmd) {
 // IMU Device Settings Commands
 // ============================================================================
 
-const char* cmd_imudevicepollms(const String& originalCmd) {
+const char* cmd_imudevicepollms(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: imuDevicePollMs <50..1000>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: imuDevicePollMs <50..1000>";
   int v = valStr.toInt();
   if (v < 50) v = 50;
   if (v > 1000) v = 1000;
@@ -902,14 +899,15 @@ const char* cmd_imudevicepollms(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_imuorientationmode(const String& originalCmd) {
+const char* cmd_imuorientationmode(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) {
+  String valStr = args;
+  valStr.trim();
+  if (valStr.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "Current imuOrientationMode: %d (0=normal, 1=flip_pitch, 2=flip_roll, 3=flip_yaw, 4=flip_pitch_roll, 5=roll_180_fix, 6=rotate_90ccw, 7=alt_extreme_pitch, 8=upside_down)", gSettings.imuOrientationMode);
     return getDebugBuffer();
   }
-  int v = originalCmd.substring(sp1 + 1).toInt();
+  int v = valStr.toInt();
   if (v < 0 || v > 8) return "Error: mode must be 0-8";
   gSettings.imuOrientationMode = v;
   writeSettingsJson();
@@ -917,54 +915,58 @@ const char* cmd_imuorientationmode(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_imuorientationcorrection(const String& originalCmd) {
+const char* cmd_imuorientationcorrection(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) {
+  String valStr = args;
+  valStr.trim();
+  if (valStr.length() == 0) {
     return gSettings.imuOrientationCorrectionEnabled ? "Current imuOrientationCorrectionEnabled: 1" : "Current imuOrientationCorrectionEnabled: 0";
   }
-  int v = originalCmd.substring(sp1 + 1).toInt();
+  int v = valStr.toInt();
   gSettings.imuOrientationCorrectionEnabled = (v != 0);
   writeSettingsJson();
   return gSettings.imuOrientationCorrectionEnabled ? "imuOrientationCorrectionEnabled set to 1" : "imuOrientationCorrectionEnabled set to 0";
 }
 
-const char* cmd_imupitchoffset(const String& originalCmd) {
+const char* cmd_imupitchoffset(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) {
+  String valStr = args;
+  valStr.trim();
+  if (valStr.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "Current imuPitchOffset: %.2f", gSettings.imuPitchOffset);
     return getDebugBuffer();
   }
-  float v = originalCmd.substring(sp1 + 1).toFloat();
+  float v = valStr.toFloat();
   gSettings.imuPitchOffset = v;
   writeSettingsJson();
   snprintf(getDebugBuffer(), 1024, "imuPitchOffset set to %.2f", v);
   return getDebugBuffer();
 }
 
-const char* cmd_imurolloffset(const String& originalCmd) {
+const char* cmd_imurolloffset(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) {
+  String valStr = args;
+  valStr.trim();
+  if (valStr.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "Current imuRollOffset: %.2f", gSettings.imuRollOffset);
     return getDebugBuffer();
   }
-  float v = originalCmd.substring(sp1 + 1).toFloat();
+  float v = valStr.toFloat();
   gSettings.imuRollOffset = v;
   writeSettingsJson();
   snprintf(getDebugBuffer(), 1024, "imuRollOffset set to %.2f", v);
   return getDebugBuffer();
 }
 
-const char* cmd_imuyawoffset(const String& originalCmd) {
+const char* cmd_imuyawoffset(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) {
+  String valStr = args;
+  valStr.trim();
+  if (valStr.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "Current imuYawOffset: %.2f", gSettings.imuYawOffset);
     return getDebugBuffer();
   }
-  float v = originalCmd.substring(sp1 + 1).toFloat();
+  float v = valStr.toFloat();
   gSettings.imuYawOffset = v;
   writeSettingsJson();
   getDebugBuffer()[0] = '\0';
@@ -1124,6 +1126,15 @@ void imuTask(void* parameter) {
         });
         lastIMURead = nowMs;
         
+        // Auto-disable if too many consecutive failures
+        if (!result) {
+          if (i2cShouldAutoDisable(I2C_ADDR_IMU, 5)) {
+            ERROR_SENSORSF("Too many consecutive IMU failures - auto-disabling");
+            imuEnabled = false;
+            sensorStatusBumpWith("imu@auto_disabled");
+          }
+        }
+        
         // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW
         if (result && meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
@@ -1148,20 +1159,17 @@ void imuTask(void* parameter) {
 // ============================================================================
 
 static const SettingEntry imuSettingEntries[] = {
-  // Core settings
-  { "autoStart", SETTING_BOOL, &gSettings.imuAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  // UI Settings (client-side visualization)
-  { "ui.pollingMs", SETTING_INT, &gSettings.imuPollingMs, 200, 0, nullptr, 50, 2000, "Polling (ms)", nullptr },
-  { "ui.ewmaFactor", SETTING_FLOAT, &gSettings.imuEWMAFactor, 0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr },
-  { "ui.transitionMs", SETTING_INT, &gSettings.imuTransitionMs, 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr },
-  { "ui.webMaxFps", SETTING_INT, &gSettings.imuWebMaxFps, 15, 0, nullptr, 1, 30, "Web Max FPS", nullptr },
-  // Device-level settings (sensor hardware behavior)
-  { "device.devicePollMs", SETTING_INT, &gSettings.imuDevicePollMs, 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr },
-  { "device.orientationMode", SETTING_INT, &gSettings.imuOrientationMode, 8, 0, nullptr, 0, 8, "Orientation Mode", nullptr },
-  { "device.orientationCorrectionEnabled", SETTING_BOOL, &gSettings.imuOrientationCorrectionEnabled, true, 0, nullptr, 0, 1, "Orientation Correction", nullptr },
-  { "device.pitchOffset", SETTING_FLOAT, &gSettings.imuPitchOffset, 0, 0.0f, nullptr, -180, 180, "Pitch Offset", nullptr },
-  { "device.rollOffset", SETTING_FLOAT, &gSettings.imuRollOffset, 0, 0.0f, nullptr, -180, 180, "Roll Offset", nullptr },
-  { "device.yawOffset", SETTING_FLOAT, &gSettings.imuYawOffset, 0, 0.0f, nullptr, -180, 180, "Yaw Offset", nullptr }
+  { "imuAutoStart",                    SETTING_BOOL,  &gSettings.imuAutoStart,                    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
+  { "imuPollingMs",                    SETTING_INT,   &gSettings.imuPollingMs,                    200, 0, nullptr, 50, 2000, "Polling (ms)", nullptr },
+  { "imuEWMAFactor",                   SETTING_FLOAT, &gSettings.imuEWMAFactor,                   0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr },
+  { "imuTransitionMs",                 SETTING_INT,   &gSettings.imuTransitionMs,                 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr },
+  { "imuWebMaxFps",                    SETTING_INT,   &gSettings.imuWebMaxFps,                    15, 0, nullptr, 1, 30, "Web Max FPS", nullptr },
+  { "imuDevicePollMs",                 SETTING_INT,   &gSettings.imuDevicePollMs,                 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr },
+  { "imuOrientationMode",              SETTING_INT,   &gSettings.imuOrientationMode,              8, 0, nullptr, 0, 8, "Orientation Mode", nullptr },
+  { "imuOrientationCorrectionEnabled", SETTING_BOOL,  &gSettings.imuOrientationCorrectionEnabled, true, 0, nullptr, 0, 1, "Orientation Correction", nullptr },
+  { "imuPitchOffset",                  SETTING_FLOAT, &gSettings.imuPitchOffset,                  0, 0.0f, nullptr, -180, 180, "Pitch Offset", nullptr },
+  { "imuRollOffset",                   SETTING_FLOAT, &gSettings.imuRollOffset,                   0, 0.0f, nullptr, -180, 180, "Roll Offset", nullptr },
+  { "imuYawOffset",                    SETTING_FLOAT, &gSettings.imuYawOffset,                    0, 0.0f, nullptr, -180, 180, "Yaw Offset", nullptr }
 };
 
 static bool isIMUConnected() {

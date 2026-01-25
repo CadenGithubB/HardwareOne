@@ -204,8 +204,10 @@ inline void i2cBusHealthCheck() {
 #define I2C_ADDR_TOF        0x29
 #define I2C_ADDR_THERMAL    0x33
 #define I2C_ADDR_APDS       0x39
+#define I2C_ADDR_PRESENCE   0x5A
 #define I2C_ADDR_OLED       0x3D
 #define I2C_ADDR_GAMEPAD    0x50
+#define I2C_ADDR_DS3231     0x68
 
 // ============================================================================
 // Global Flags and Configuration

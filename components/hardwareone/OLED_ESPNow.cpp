@@ -82,8 +82,6 @@ void oledEspNowDisplay(Adafruit_SSD1306* display) {
         display->println("Press Y to set device");
         display->println("name and initialize");
         display->println();
-        display->setCursor(0, 56);
-        display->print("Y:Setup B:Back");
         break;
       case ESPNOW_VIEW_NAME_KEYBOARD:
         oledKeyboardDisplay(display);
@@ -162,12 +160,6 @@ void oledEspNowDisplayDeviceList(Adafruit_SSD1306* display) {
   
   // Render device list using scrolling system
   oledScrollRender(display, &gOLEDEspNowState.deviceList, true, true);
-  
-  // Show footer with instructions (Y opens settings)
-  display->setTextSize(1);
-  display->setTextColor(DISPLAY_COLOR_WHITE);
-  display->setCursor(0, 56);
-  display->print("A:Sel Y:Set B:Back");
 }
 
 void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
@@ -208,8 +200,6 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
     display->println("Press A to browse");
     display->println("files to send");
     display->println();
-    display->setCursor(0, 56);
-    display->print("A:Browse X:Mode B:Back");
     return;
   }
   
@@ -268,16 +258,6 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
     
     display->fillRect(scrollbarX - 1, thumbY, 3, thumbHeight, DISPLAY_COLOR_WHITE);
   }
-  
-  // Footer - show mode-specific instructions
-  display->setCursor(0, 56);
-  if (gOLEDEspNowState.interactionMode == ESPNOW_MODE_TEXT) {
-    display->print("A:Send X:Mode B:Back");
-  } else if (gOLEDEspNowState.interactionMode == ESPNOW_MODE_REMOTE) {
-    display->print("A:Remote X:Mode B:Back");
-  } else {
-    display->print("Y:Unpair X:Mode B:Back");
-  }
 }
 
 void oledEspNowDisplayModeSelect(Adafruit_SSD1306* display) {
@@ -335,8 +315,6 @@ void oledEspNowDisplayBroadcast(Adafruit_SSD1306* display) {
   display->println();
   display->println("(Not yet impl.)");
   display->println();
-  display->setCursor(0, 56);
-  display->print("B:Back");
 }
 
 bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
@@ -413,6 +391,8 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
           extern OLEDMode currentOLEDMode;
           extern void resetOLEDFileBrowser();
+          extern void pushOLEDMode(OLEDMode mode);
+          pushOLEDMode(currentOLEDMode);  // Push so B returns here
           currentOLEDMode = OLED_FILE_BROWSER;
           resetOLEDFileBrowser();
           return true;
@@ -838,11 +818,6 @@ void oledEspNowDisplayRemoteForm(Adafruit_SSD1306* display) {
   display->print("> Cmd: ");
   display->println(gOLEDEspNowState.remoteCommand.length() > 0 ? 
                    gOLEDEspNowState.remoteCommand.c_str() : "_____");
-  
-  // Footer
-  display->setTextColor(DISPLAY_COLOR_WHITE);
-  display->println();
-  display->println("A:Edit Y:Send B:Cancel");
 }
 
 bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPressed) {
@@ -1078,8 +1053,6 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
   }
   
   // Footer
-  display->setCursor(0, 56);
-  display->print("A:Edit ^v:Nav B:Back");
 }
 
 bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed) {
@@ -1177,4 +1150,159 @@ void oledEspNowApplySettingsEdit(const String& value) {
   gOLEDEspNowState.settingsEditField = -1;
 }
 
+// ============================================================================
+// Remote File Browsing State and Functions
+// ============================================================================
+
+// Remote file browser state
+struct RemoteFileBrowseState {
+  bool active;                    // Remote file browse mode active
+  bool pending;                   // Waiting for response
+  bool hasData;                   // Have data to display
+  uint8_t targetMac[6];           // Target device MAC
+  char currentPath[128];          // Current browse path
+  char items[10][64];             // File/folder names (max 10 items displayed)
+  bool isFolder[10];              // Is item a folder
+  int itemCount;                  // Number of items
+  int selectedIndex;              // Currently selected item
+  int scrollOffset;               // Scroll offset for display
+};
+static RemoteFileBrowseState gRemoteFileBrowse = {0};
+
+void oledEspNowSendBrowseRequest(const char* path) {
+  if (!gEspNow || !gEspNow->initialized || !gEspNow->encryptionEnabled) {
+    return;
+  }
+  
+  // Need credentials - for now use a stored admin credential or prompt
+  // This is a simplified version - in production you'd want stored credentials
+  gRemoteFileBrowse.pending = true;
+  strncpy(gRemoteFileBrowse.currentPath, path, sizeof(gRemoteFileBrowse.currentPath) - 1);
+  
+  // Build and send FILE_BROWSE message
+  // Note: This requires stored credentials - placeholder for now
+  broadcastOutput("[ESP-NOW] Remote file browse requires stored credentials (not yet implemented)");
+}
+
+void oledEspNowDisplayRemoteFiles(Adafruit_SSD1306* display) {
+  if (!display) return;
+  
+  display->setTextSize(1);
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+  display->setCursor(0, 0);
+  
+  if (gRemoteFileBrowse.pending) {
+    display->println("Remote Files");
+    display->println();
+    display->println("Loading...");
+    return;
+  }
+  
+  if (!gRemoteFileBrowse.hasData) {
+    display->println("Remote Files");
+    display->println();
+    display->println("No data");
+    display->println();
+    display->println("Press A to browse");
+    return;
+  }
+  
+  // Display path
+  display->print("Path: ");
+  String pathStr = gRemoteFileBrowse.currentPath;
+  if (pathStr.length() > 15) pathStr = "..." + pathStr.substring(pathStr.length() - 12);
+  display->println(pathStr);
+  
+  display->drawFastHLine(0, 9, 128, DISPLAY_COLOR_WHITE);
+  
+  // Display files
+  int startY = 12;
+  int visibleItems = 5;
+  for (int i = 0; i < visibleItems && (i + gRemoteFileBrowse.scrollOffset) < gRemoteFileBrowse.itemCount; i++) {
+    int idx = i + gRemoteFileBrowse.scrollOffset;
+    int y = startY + (i * 9);
+    
+    if (idx == gRemoteFileBrowse.selectedIndex) {
+      display->fillRect(0, y, 128, 9, DISPLAY_COLOR_WHITE);
+      display->setTextColor(DISPLAY_COLOR_BLACK);
+    } else {
+      display->setTextColor(DISPLAY_COLOR_WHITE);
+    }
+    
+    display->setCursor(2, y + 1);
+    if (gRemoteFileBrowse.isFolder[idx]) {
+      display->print("[D] ");
+    } else {
+      display->print("    ");
+    }
+    display->print(gRemoteFileBrowse.items[idx]);
+  }
+  
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+}
+
+bool oledEspNowHandleRemoteFilesInput(int deltaX, int deltaY, uint32_t newlyPressed) {
+  // Handle navigation
+  if (deltaY < 0 && gRemoteFileBrowse.selectedIndex > 0) {
+    gRemoteFileBrowse.selectedIndex--;
+    if (gRemoteFileBrowse.selectedIndex < gRemoteFileBrowse.scrollOffset) {
+      gRemoteFileBrowse.scrollOffset = gRemoteFileBrowse.selectedIndex;
+    }
+    return true;
+  }
+  if (deltaY > 0 && gRemoteFileBrowse.selectedIndex < gRemoteFileBrowse.itemCount - 1) {
+    gRemoteFileBrowse.selectedIndex++;
+    if (gRemoteFileBrowse.selectedIndex >= gRemoteFileBrowse.scrollOffset + 5) {
+      gRemoteFileBrowse.scrollOffset = gRemoteFileBrowse.selectedIndex - 4;
+    }
+    return true;
+  }
+  
+  return false;
+}
+
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
+
+// ============================================================================
+// Stub for storing remote file browse results
+// This is outside the OLED guard so it can be called from ESP-NOW handler
+// ============================================================================
+#if ENABLE_ESPNOW
+#include <ArduinoJson.h>
+
+void storeRemoteFileBrowseResult(const uint8_t* mac, const char* path, JsonArray& files) {
+#if ENABLE_OLED_DISPLAY
+  // Store results in remote file browse state
+  extern RemoteFileBrowseState gRemoteFileBrowse;
+  
+  gRemoteFileBrowse.pending = false;
+  gRemoteFileBrowse.hasData = true;
+  memcpy(gRemoteFileBrowse.targetMac, mac, 6);
+  strncpy(gRemoteFileBrowse.currentPath, path, sizeof(gRemoteFileBrowse.currentPath) - 1);
+  
+  gRemoteFileBrowse.itemCount = 0;
+  gRemoteFileBrowse.selectedIndex = 0;
+  gRemoteFileBrowse.scrollOffset = 0;
+  
+  for (JsonVariant file : files) {
+    if (gRemoteFileBrowse.itemCount >= 10) break;
+    
+    const char* name = file["name"] | "";
+    const char* type = file["type"] | "file";
+    
+    strncpy(gRemoteFileBrowse.items[gRemoteFileBrowse.itemCount], name, 63);
+    gRemoteFileBrowse.items[gRemoteFileBrowse.itemCount][63] = '\0';
+    gRemoteFileBrowse.isFolder[gRemoteFileBrowse.itemCount] = (strcmp(type, "folder") == 0);
+    gRemoteFileBrowse.itemCount++;
+  }
+  
+  INFO_ESPNOWF("[FILE_BROWSE] Stored %d items from path '%s'", gRemoteFileBrowse.itemCount, path);
+#else
+  // OLED not enabled - just log
+  (void)mac;
+  (void)path;
+  (void)files;
+#endif
+}
+
+#endif // ENABLE_ESPNOW

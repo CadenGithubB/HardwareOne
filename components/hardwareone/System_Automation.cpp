@@ -28,12 +28,15 @@
  * - Command handlers still accept String& for compatibility with command registry
  */
 
+#include "System_Automation.h"
+#include "System_BuildConfig.h"
+
+#if ENABLE_AUTOMATION
+
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <string.h>
 
-#include "System_Automation.h"
-#include "System_BuildConfig.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
@@ -63,7 +66,7 @@ extern void runUnifiedSystemCommand(const String& cmd);
 bool gAutoLogActive = false;
 String gAutoLogFile = "";
 String gAutoLogAutomationName = "";
-String gExecUser = "";
+extern String gExecUser;
 
 // Forward declarations for functions implemented in this file
 bool updateAutomationNextAt(long automationId, time_t newNextAt);
@@ -700,11 +703,11 @@ const char* cmd_automation_list(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_automation_add(const String& originalCmd) {
+const char* cmd_automation_add(const String& argsIn) {
   // Do not early-return on validate; we want to perform full argument checks
   bool validateOnly = gCLIValidateOnly;
   
-  String args = originalCmd.substring(String("automation add ").length());
+  String args = argsIn;
   args.trim();
   
   auto getVal = [&](const String& key) {
@@ -1025,11 +1028,10 @@ const char* cmd_automation_add(const String& originalCmd) {
   return "OK";
 }
 
-const char* cmd_automation_enable_disable(const String& originalCmd, bool enable) {
+const char* cmd_automation_enable_disable(const String& argsIn, bool enable) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String prefix = enable ? "automation enable " : "automation disable ";
-  String args = originalCmd.substring(prefix.length());
+  String args = argsIn;
   args.trim();
   
   auto getVal = [&](const String& key) {
@@ -1091,10 +1093,10 @@ const char* cmd_automation_enable_disable(const String& originalCmd, bool enable
   return "OK";
 }
 
-const char* cmd_automation_delete(const String& originalCmd) {
+const char* cmd_automation_delete(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String args = originalCmd.substring(String("automation delete ").length());
+  String args = argsIn;
   args.trim();
   
   auto getVal = [&](const String& key) {
@@ -1188,10 +1190,10 @@ const char* cmd_automation_delete(const String& originalCmd) {
   return "OK";
 }
 
-const char* cmd_automation_run(const String& originalCmd) {
+const char* cmd_automation_run(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String args = originalCmd.substring(String("automation run ").length());
+  String args = argsIn;
   args.trim();
   
   auto getVal = [&](const String& key) {
@@ -1458,42 +1460,52 @@ const char* cmd_automation_run(const String& originalCmd) {
 }
 
 // Main automation command dispatcher
-const char* cmd_automation(const String& originalCmd) {
+const char* cmd_automation(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String command = originalCmd;
-  command.trim();
-  command.toLowerCase();
+  String args = argsIn;
+  args.trim();
+  String argsLower = args;
+  argsLower.toLowerCase();
 
-  // Handle "automation system" commands
-  if (command == "automation system enable") {
-    gSettings.automationsEnabled = true;
-    extern bool writeSettingsJson();
-    writeSettingsJson();
-    return "Automation system enabled (restart required)";
-  } else if (command == "automation system disable") {
-    gSettings.automationsEnabled = false;
-    extern bool writeSettingsJson();
-    writeSettingsJson();
-    return "Automation system disabled (restart required)";
-  } else if (command == "automation system status") {
-    String status = String("Automation system: ") + (gSettings.automationsEnabled ? "enabled" : "disabled");
-    broadcastOutput(status);
-    return "OK";
+  // Extract subcommand (first word)
+  int sp = argsLower.indexOf(' ');
+  String subCmd = (sp >= 0) ? argsLower.substring(0, sp) : argsLower;
+  String subArgs = (sp >= 0) ? args.substring(sp + 1) : String("");
+  subArgs.trim();
+
+  // Handle "system" subcommand
+  if (subCmd == "system") {
+    if (subArgs.equalsIgnoreCase("enable")) {
+      gSettings.automationsEnabled = true;
+      extern bool writeSettingsJson();
+      writeSettingsJson();
+      return "Automation system enabled (restart required)";
+    } else if (subArgs.equalsIgnoreCase("disable")) {
+      gSettings.automationsEnabled = false;
+      extern bool writeSettingsJson();
+      writeSettingsJson();
+      return "Automation system disabled (restart required)";
+    } else if (subArgs.equalsIgnoreCase("status")) {
+      String status = String("Automation system: ") + (gSettings.automationsEnabled ? "enabled" : "disabled");
+      broadcastOutput(status);
+      return "OK";
+    }
+    return "Usage: automation system <enable|disable|status>";
   }
 
   // Handle regular automation commands
-  if (command == "automation list") {
-    return cmd_automation_list(originalCmd);
-  } else if (command.startsWith("automation add")) {
-    return cmd_automation_add(originalCmd);
-  } else if (command.startsWith("automation enable")) {
-    return cmd_automation_enable_disable(originalCmd, true);
-  } else if (command.startsWith("automation disable")) {
-    return cmd_automation_enable_disable(originalCmd, false);
-  } else if (command.startsWith("automation delete")) {
-    return cmd_automation_delete(originalCmd);
-  } else if (command == "automation sanitize") {
+  if (subCmd == "list") {
+    return cmd_automation_list(subArgs);
+  } else if (subCmd == "add") {
+    return cmd_automation_add(subArgs);
+  } else if (subCmd == "enable") {
+    return cmd_automation_enable_disable(subArgs, true);
+  } else if (subCmd == "disable") {
+    return cmd_automation_enable_disable(subArgs, false);
+  } else if (subCmd == "delete") {
+    return cmd_automation_delete(subArgs);
+  } else if (subCmd == "sanitize") {
     String json;
     if (!readText(AUTOMATIONS_JSON_FILE, json)) return "Error: failed to read automations.json";
     if (sanitizeAutomationsJson(json)) {
@@ -1505,7 +1517,7 @@ const char* cmd_automation(const String& originalCmd) {
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] CLI sanitize: no duplicate IDs found");
       return "Sanitize: no changes needed";
     }
-  } else if (command == "automation recompute") {
+  } else if (subCmd == "recompute") {
     String json;
     if (!readText(AUTOMATIONS_JSON_FILE, json)) return "Error: failed to read automations.json";
     
@@ -1573,8 +1585,8 @@ const char* cmd_automation(const String& originalCmd) {
     String result = String("Recomputed nextAt: ") + String(recomputed) + " succeeded, " + String(failed) + " failed";
     broadcastOutput(result);
     return "OK";
-  } else if (command.startsWith("automation run")) {
-    return cmd_automation_run(originalCmd);
+  } else if (subCmd == "run") {
+    return cmd_automation_run(subArgs);
   }
 
   broadcastOutput("Unknown automation command. Use: list, add, enable, disable, delete, run, sanitize, recompute");
@@ -2643,14 +2655,14 @@ extern bool appendAutoLogEntry(const char* type, const String& message);
 // Automation Logging Command
 // ============================================================================
 
-const char* cmd_autolog(const String& originalCmd) {
+const char* cmd_autolog(const String& argsIn) {
   extern bool gCLIValidateOnly;
   if (gCLIValidateOnly) return "VALID";
   
   extern bool ensureDebugBuffer();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  String args = originalCmd.substring(8);  // "autolog "
+  String args = argsIn;
   args.trim();
 
   if (args.startsWith("start ")) {
@@ -2704,7 +2716,8 @@ const char* cmd_autolog(const String& originalCmd) {
 
 // Validate conditions command
 const char* cmd_validate_conditions(const String& cmd) {
-  String conditions = cmd.substring(20);  // Skip "validate-conditions "
+  String conditions = cmd;
+  conditions.trim();
   const char* validationResult = validateConditionalHierarchy(conditions.c_str());
   // If we're in validation mode and validation passes, return "VALID"
   // Otherwise return the actual validation result (which could be an error)
@@ -3080,7 +3093,7 @@ static CommandModuleRegistrar _automation_cmd_registrar(automationCommands, auto
 // ============================================================================
 
 static const SettingEntry automationSettingEntries[] = {
-  { "enabled", SETTING_BOOL, &gSettings.automationsEnabled, false, 0, nullptr, 0, 1, "Automations Enabled", nullptr }
+  { "automationsEnabled", SETTING_BOOL, &gSettings.automationsEnabled, false, 0, nullptr, 0, 1, "Automations Enabled", nullptr }
 };
 
 extern const SettingsModule automationSettingsModule = {
@@ -3089,3 +3102,5 @@ extern const SettingsModule automationSettingsModule = {
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
+
+#endif // ENABLE_AUTOMATION

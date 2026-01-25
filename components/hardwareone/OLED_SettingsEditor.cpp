@@ -3,14 +3,48 @@
 #if ENABLE_OLED_DISPLAY
 
 #include <Adafruit_SSD1306.h>
+#include <cstring>
 
 #include "i2csensor-seesaw.h"
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
 #include "System_Debug.h"
+#include "System_I2C.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
 
+// External sensor connection flags
+#if ENABLE_THERMAL_SENSOR
+extern bool thermalConnected;
+#endif
+#if ENABLE_TOF_SENSOR
+extern bool tofConnected;
+#endif
+
+// Check if a setting entry should be visible (used for conditional I2C clock settings)
+static bool isSettingVisible(const SettingEntry* entry) {
+  if (!entry || !entry->jsonKey) return true;
+  
+  // Hide Thermal I2C clock if thermal sensor not compiled or not connected
+  if (strcmp(entry->jsonKey, "i2cClockThermalHz") == 0) {
+#if ENABLE_THERMAL_SENSOR
+    return thermalConnected;
+#else
+    return false;
+#endif
+  }
+  
+  // Hide ToF I2C clock if ToF sensor not compiled or not connected
+  if (strcmp(entry->jsonKey, "i2cClockToFHz") == 0) {
+#if ENABLE_TOF_SENSOR
+    return tofConnected;
+#else
+    return false;
+#endif
+  }
+  
+  return true;
+}
 
 extern Adafruit_SSD1306* oledDisplay;
 extern bool writeSettingsJson();
@@ -171,7 +205,7 @@ void displaySettingsEditor() {
     oledDisplay->println("ERROR:");
     oledDisplay->setCursor(0, 10);
     oledDisplay->println(gSettingsEditor.errorMessage);
-    oledDisplay->display();
+    // Note: Don't call display() here - main render loop handles it via displayUpdate()
     return;
   }
   
@@ -219,14 +253,14 @@ void displaySettingsEditor() {
       oledDisplay->print(gSettingsEditor.currentModule->name);
       oledDisplay->println(" Settings:");
       
-      // Filter to only INT and BOOL settings
+      // Filter to only INT and BOOL settings that are visible
       int visibleCount = 0;
       int visibleIndex = -1;
       
       // Count visible items and find current visible index
       for (size_t i = 0; i < gSettingsEditor.currentModule->count; i++) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
-        if (entry->type == SETTING_INT || entry->type == SETTING_BOOL) {
+        if ((entry->type == SETTING_INT || entry->type == SETTING_BOOL) && isSettingVisible(entry)) {
           if (i == (size_t)gSettingsEditor.itemIndex) {
             visibleIndex = visibleCount;
           }
@@ -251,8 +285,9 @@ void displaySettingsEditor() {
       for (size_t i = 0; i < gSettingsEditor.currentModule->count && displayedCount < maxVisibleItems; i++) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
         
-        // Skip non-int/bool settings
+        // Skip non-int/bool settings and hidden settings
         if (entry->type != SETTING_INT && entry->type != SETTING_BOOL) continue;
+        if (!isSettingVisible(entry)) continue;
         
         // Skip items before scroll offset
         if (currentVisibleIdx < scrollOffset) {
@@ -462,19 +497,19 @@ void settingsEditorUp() {
     case SETTINGS_ITEM_SELECT:
       if (!gSettingsEditor.currentModule) break;
       
-      // Find previous INT/BOOL setting
+      // Find previous INT/BOOL visible setting
       for (int i = gSettingsEditor.itemIndex - 1; i >= 0; i--) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
-        if (entry->type == SETTING_INT || entry->type == SETTING_BOOL) {
+        if ((entry->type == SETTING_INT || entry->type == SETTING_BOOL) && isSettingVisible(entry)) {
           gSettingsEditor.itemIndex = i;
           return;
         }
       }
       
-      // Wrap to last INT/BOOL setting
+      // Wrap to last INT/BOOL visible setting
       for (int i = gSettingsEditor.currentModule->count - 1; i >= 0; i--) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
-        if (entry->type == SETTING_INT || entry->type == SETTING_BOOL) {
+        if ((entry->type == SETTING_INT || entry->type == SETTING_BOOL) && isSettingVisible(entry)) {
           gSettingsEditor.itemIndex = i;
           return;
         }
@@ -503,19 +538,19 @@ void settingsEditorDown() {
     case SETTINGS_ITEM_SELECT:
       if (!gSettingsEditor.currentModule) break;
       
-      // Find next INT/BOOL setting
+      // Find next INT/BOOL visible setting
       for (size_t i = gSettingsEditor.itemIndex + 1; i < gSettingsEditor.currentModule->count; i++) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
-        if (entry->type == SETTING_INT || entry->type == SETTING_BOOL) {
+        if ((entry->type == SETTING_INT || entry->type == SETTING_BOOL) && isSettingVisible(entry)) {
           gSettingsEditor.itemIndex = i;
           return;
         }
       }
       
-      // Wrap to first INT/BOOL setting
+      // Wrap to first INT/BOOL visible setting
       for (size_t i = 0; i < gSettingsEditor.currentModule->count; i++) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
-        if (entry->type == SETTING_INT || entry->type == SETTING_BOOL) {
+        if ((entry->type == SETTING_INT || entry->type == SETTING_BOOL) && isSettingVisible(entry)) {
           gSettingsEditor.itemIndex = i;
           return;
         }
@@ -753,6 +788,16 @@ extern httpd_handle_t server;
 static int quickSelectedItem = 0;
 static const int QUICK_ITEM_COUNT = 3;  // WiFi, Bluetooth, HTTP
 
+// Status message for quick settings feedback
+static char quickStatusMsg[32] = "";
+static unsigned long quickStatusExpireMs = 0;
+
+static void setQuickStatus(const char* msg, unsigned long durationMs = 2000) {
+  strncpy(quickStatusMsg, msg, 31);
+  quickStatusMsg[31] = '\0';
+  quickStatusExpireMs = millis() + durationMs;
+}
+
 // Item names
 static const char* quickItemNames[] = {
   "WiFi",
@@ -763,11 +808,8 @@ static const char* quickItemNames[] = {
 // Get current state of each toggle
 static bool getQuickWiFiState() {
 #if ENABLE_WIFI
-  // Check if WiFi is initialized first (avoid accessing uninitialized WiFi)
-  if (!isWiFiInitialized()) {
-    return false;  // WiFi not yet initialized
-  }
-  return WiFi.isConnected();
+  // Check if WiFi radio is enabled (not just connected)
+  return (WiFi.getMode() != WIFI_MODE_NULL);
 #else
   return false;
 #endif
@@ -793,21 +835,50 @@ static bool getQuickHTTPState() {
 // Toggle functions
 static void toggleQuickWiFi() {
 #if ENABLE_WIFI
-  // Ensure WiFi is initialized (lazy init)
-  if (!ensureWiFiInitialized()) {
-    broadcastOutput("[QUICK_SETTINGS] ERROR: Failed to initialize WiFi");
-    return;
-  }
-  
-  if (WiFi.isConnected()) {
-    broadcastOutput("[QUICK_SETTINGS] Disconnecting WiFi...");
-    WiFi.disconnect(); // Decoupled from HTTP server
+  if (WiFi.getMode() != WIFI_MODE_NULL) {
+    // WiFi is ON - turn it OFF
+    setQuickStatus("WiFi OFF");
+    WiFi.disconnect();
+    WiFi.mode(WIFI_OFF);
   } else {
-    broadcastOutput("[QUICK_SETTINGS] Connecting to WiFi...");
-    runUnifiedSystemCommand("wificonnect");
+    // WiFi is OFF - turn it ON
+    setQuickStatus("WiFi ON");
+    WiFi.mode(WIFI_STA);
   }
 #else
-  broadcastOutput("[QUICK_SETTINGS] WiFi not compiled in");
+  setQuickStatus("WiFi disabled");
+#endif
+}
+
+// Confirmation callbacks for Bluetooth and HTTP toggles
+static void bluetoothToggleConfirmedQuick(void* userData) {
+  (void)userData;
+#if ENABLE_BLUETOOTH
+  extern bool isBLERunning();
+  if (isBLERunning()) {
+    setQuickStatus("Bluetooth OFF");
+    runUnifiedSystemCommand("blestop");
+  } else {
+    setQuickStatus("Bluetooth ON");
+    runUnifiedSystemCommand("blestart");
+  }
+#endif
+}
+
+static void httpToggleConfirmedQuick(void* userData) {
+  (void)userData;
+#if ENABLE_HTTP_SERVER
+  if (server != nullptr) {
+    setQuickStatus("HTTP OFF");
+    runUnifiedSystemCommand("httpstop");
+  } else {
+    if (!WiFi.isConnected()) {
+      setQuickStatus("Need WiFi first!");
+      return;
+    }
+    setQuickStatus("HTTP ON");
+    runUnifiedSystemCommand("httpstart");
+  }
 #endif
 }
 
@@ -815,28 +886,28 @@ static void toggleQuickBluetooth() {
 #if ENABLE_BLUETOOTH
   extern bool isBLERunning();
   if (isBLERunning()) {
-    broadcastOutput("[QUICK_SETTINGS] Stopping Bluetooth...");
-    runUnifiedSystemCommand("blestop");
+    oledConfirmRequest("Stop Bluetooth?", nullptr, bluetoothToggleConfirmedQuick, nullptr, false);
   } else {
-    broadcastOutput("[QUICK_SETTINGS] Starting Bluetooth...");
-    runUnifiedSystemCommand("blestart");
+    oledConfirmRequest("Start Bluetooth?", nullptr, bluetoothToggleConfirmedQuick, nullptr);
   }
 #else
-  broadcastOutput("[QUICK_SETTINGS] Bluetooth not compiled in");
+  setQuickStatus("BT disabled");
 #endif
 }
 
 static void toggleQuickHTTP() {
 #if ENABLE_HTTP_SERVER
   if (server != nullptr) {
-    broadcastOutput("[QUICK_SETTINGS] Stopping HTTP server...");
-    runUnifiedSystemCommand("httpstop");
+    oledConfirmRequest("Stop HTTP?", nullptr, httpToggleConfirmedQuick, nullptr, false);
   } else {
-    broadcastOutput("[QUICK_SETTINGS] Starting HTTP server...");
-    runUnifiedSystemCommand("httpstart");
+    if (!WiFi.isConnected()) {
+      setQuickStatus("Need WiFi first!");
+      return;
+    }
+    oledConfirmRequest("Start HTTP?", nullptr, httpToggleConfirmedQuick, nullptr);
   }
 #else
-  broadcastOutput("[QUICK_SETTINGS] HTTP server not compiled in");
+  setQuickStatus("HTTP disabled");
 #endif
 }
 
@@ -885,6 +956,16 @@ void displayQuickSettings() {
     oledDisplay->print(isEnabled ? "[ON]" : "[OFF]");
     
     yPos += 14;
+  }
+  
+  // Show status message if active
+  if (quickStatusMsg[0] != '\0' && millis() < quickStatusExpireMs) {
+    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+    oledDisplay->setCursor(0, 56);
+    oledDisplay->print(quickStatusMsg);
+  } else if (quickStatusMsg[0] != '\0') {
+    // Clear expired message
+    quickStatusMsg[0] = '\0';
   }
 }
 

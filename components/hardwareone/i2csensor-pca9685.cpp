@@ -67,7 +67,7 @@ bool initPCA9685() {
 // PCA9685/Servo Command Handlers
 // ============================================================================
 
-const char* cmd_servo(const String& command) {
+const char* cmd_servo(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
   
@@ -78,17 +78,14 @@ const char* cmd_servo(const String& command) {
     }
   }
   
-  // Parse: servo <channel> <angle>
-  int sp1 = command.indexOf(' ');
+  // Parse: <channel> <angle>
+  String rest = args;
+  rest.trim();
+  int sp1 = rest.indexOf(' ');
   if (sp1 < 0) return "Usage: servo <channel> <angle>";
   
-  String rest = command.substring(sp1 + 1);
-  rest.trim();
-  int sp2 = rest.indexOf(' ');
-  if (sp2 < 0) return "Usage: servo <channel> <angle>";
-  
-  int channel = rest.substring(0, sp2).toInt();
-  int angle = rest.substring(sp2 + 1).toInt();
+  int channel = rest.substring(0, sp1).toInt();
+  int angle = rest.substring(sp1 + 1).toInt();
   
   if (channel < 0 || channel > 15) return "[Servo] Error: Channel must be 0-15";
   if (angle < 0 || angle > 180) return "[Servo] Error: Angle must be 0-180";
@@ -113,16 +110,14 @@ const char* cmd_servo(const String& command) {
   return getDebugBuffer();
 }
 
-const char* cmd_servoprofile(const String& command) {
+const char* cmd_servoprofile(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
   
-  // Parse: servoprofile <channel> <minPulse> <maxPulse> <centerPulse> <name>
-  int sp1 = command.indexOf(' ');
-  if (sp1 < 0) return "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
-  
-  String rest = command.substring(sp1 + 1);
+  // Parse: <channel> <minPulse> <maxPulse> <centerPulse> <name>
+  String rest = args;
   rest.trim();
+  if (rest.length() == 0) return "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
   
   int sp2 = rest.indexOf(' ');
   if (sp2 < 0) return "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
@@ -197,15 +192,16 @@ const char* cmd_servolist(const String& command) {
   return "[Servo] Profile list displayed";
 }
 
-const char* cmd_servocalibrate(const String& command) {
+const char* cmd_servocalibrate(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
   
-  // Parse: servocalibrate <channel>
-  int sp = command.indexOf(' ');
-  if (sp < 0) return "Usage: servocalibrate <channel>";
+  // Parse: <channel>
+  String valStr = args;
+  valStr.trim();
+  if (valStr.length() == 0) return "Usage: servocalibrate <channel>";
   
-  int channel = command.substring(sp + 1).toInt();
+  int channel = valStr.toInt();
   if (channel < 0 || channel > 15) return "[Servo] Error: Channel must be 0-15";
   
   if (!pwmDriverConnected) {
@@ -235,7 +231,7 @@ const char* cmd_servocalibrate(const String& command) {
   return getDebugBuffer();
 }
 
-const char* cmd_pwm(const String& command) {
+const char* cmd_pwm(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
   
@@ -246,28 +242,24 @@ const char* cmd_pwm(const String& command) {
     }
   }
   
-  // Parse: pwm <channel> <value> [freq]
-  int sp1 = command.indexOf(' ');
+  // Parse: <channel> <value> [freq]
+  String rest = args;
+  rest.trim();
+  int sp1 = rest.indexOf(' ');
   if (sp1 < 0) return "Usage: pwm <channel> <value> [freq]";
   
-  String rest = command.substring(sp1 + 1);
+  int channel = rest.substring(0, sp1).toInt();
+  rest = rest.substring(sp1 + 1);
   rest.trim();
   int sp2 = rest.indexOf(' ');
-  if (sp2 < 0) return "Usage: pwm <channel> <value> [freq]";
-  
-  int channel = rest.substring(0, sp2).toInt();
-  String rest2 = rest.substring(sp2 + 1);
-  rest2.trim();
-  
-  int sp3 = rest2.indexOf(' ');
-  int value = (sp3 >= 0) ? rest2.substring(0, sp3).toInt() : rest2.toInt();
+  int value = (sp2 >= 0) ? rest.substring(0, sp2).toInt() : rest.toInt();
   
   if (channel < 0 || channel > 15) return "[Servo] Error: Channel must be 0-15";
   if (value < 0 || value > 4095) return "[Servo] Error: Value must be 0-4095";
   
   // Optional frequency parameter
-  if (sp3 >= 0) {
-    int freq = rest2.substring(sp3 + 1).toInt();
+  if (sp2 >= 0) {
+    int freq = rest.substring(sp2 + 1).toInt();
     if (freq >= 24 && freq <= 1526) {
       pwmDriver->setPWMFreq(freq);
       snprintf(getDebugBuffer(), 1024, "PWM channel %d set to %d (freq: %dHz)", channel, value, freq);
