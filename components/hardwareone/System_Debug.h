@@ -19,8 +19,9 @@
 #define DEBUG_SENSORS_DATA    0x0020
 #define DEBUG_SENSORS         0x0040
 #define DEBUG_FMRADIO         0x0080  // FM Radio operations and I2C debugging
+#define DEBUG_I2C             0x0100  // I2C bus operations, transactions, clock changes, mutex
 #define DEBUG_WIFI            0x0200
-#define DEBUG_STORAGE         0x0100
+#define DEBUG_STORAGE         0x8000  // File operations (moved from 0x0100 to avoid collision)
 #define DEBUG_PERFORMANCE     0x0400
 #define DEBUG_SYSTEM          0x4000
 #define DEBUG_USERS           0x2000
@@ -42,6 +43,8 @@
 #define DEBUG_AUTO_EXEC       0x2000000     // Bit 25
 #define DEBUG_AUTO_CONDITION  0x4000000     // Bit 26
 #define DEBUG_AUTO_TIMING     0x8000000     // Bit 27
+#define DEBUG_CAMERA          0x20000000    // Bit 29 - Camera operations
+#define DEBUG_MICROPHONE      0x0800        // Bit 11 - Microphone operations (was 0x10000000 which conflicted with AUTOMATIONS)
 
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
@@ -249,9 +252,12 @@ inline uint8_t getLogLevel() { return DEBUG_MANAGER.getLogLevel(); }
 #define DEBUG_HTTPF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_HTTP, fmt, ##__VA_ARGS__)
 #define DEBUG_SSEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SSE, fmt, ##__VA_ARGS__)
 #define DEBUG_CLIF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CLI, fmt, ##__VA_ARGS__)
+#define DEBUG_I2CF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_I2C, fmt, ##__VA_ARGS__)
 #define DEBUG_CMD_FLOWF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CMD_FLOW, fmt, ##__VA_ARGS__)
 #define DEBUG_SENSORSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SENSORS, fmt, ##__VA_ARGS__)
 #define DEBUG_FMRADIOF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_FMRADIO, fmt, ##__VA_ARGS__)
+#define DEBUG_CAMERAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CAMERA, fmt, ##__VA_ARGS__)
+#define DEBUG_MICF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MICROPHONE, fmt, ##__VA_ARGS__)
 #define DEBUG_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SENSORS_FRAME, fmt, ##__VA_ARGS__)
 #define DEBUG_DATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SENSORS_DATA, fmt, ##__VA_ARGS__)
 #define DEBUG_WIFIF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_WIFI, fmt, ##__VA_ARGS__)
@@ -309,7 +315,7 @@ inline uint8_t getLogLevel() { return DEBUG_MANAGER.getLogLevel(); }
 
 // INFO macros - Optional (controlled by debug flags)
 #define INFO_SENSORSF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_SENSORS, "[INFO][SENSORS] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_I2CF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_SENSORS, "[INFO][I2C] " fmt, ##__VA_ARGS__); } while (0)
+#define INFO_I2CF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_I2C, "[INFO][I2C] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_ESPNOWF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ESPNOW_CORE, "[INFO][ESPNOW] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_AUTOMATIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_AUTOMATIONS, "[INFO][AUTO] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_SESSIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_AUTH, "[INFO][SESSION] " fmt, ##__VA_ARGS__); } while (0)
@@ -397,6 +403,8 @@ const char* cmd_debugcli(const String& cmd);
 const char* cmd_debugsensorsframe(const String& cmd);
 const char* cmd_debugsensorsdata(const String& cmd);
 const char* cmd_debugsensorsgeneral(const String& cmd);
+const char* cmd_debugcamera(const String& cmd);
+const char* cmd_debugmicrophone(const String& cmd);
 const char* cmd_debugwifi(const String& cmd);
 const char* cmd_debugstorage(const String& cmd);
 const char* cmd_debuglogger(const String& cmd);

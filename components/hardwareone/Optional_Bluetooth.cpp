@@ -15,10 +15,9 @@
 
 #if ENABLE_BLUETOOTH
 
-#include "esp_bt.h"
-
 #include "OLED_Display.h"
 #include "OLED_SettingsEditor.h"
+#include "OLED_Utils.h"
 #include "System_BuildConfig.h"
 #include "System_Command.h"
 #include "System_Debug.h"
@@ -245,6 +244,14 @@ extern String executeCommandThroughRegistry(const String& cmd);
 
 // Forward declaration for OLED message history
 #if ENABLE_OLED_DISPLAY
+// Message history for OLED display
+#define BLE_MSG_HISTORY_SIZE 4
+#define BLE_MSG_MAX_LEN 32
+
+static char bleMessageHistory[BLE_MSG_HISTORY_SIZE][BLE_MSG_MAX_LEN];
+static uint8_t bleMessageCount = 0;
+static uint8_t bleMessageHead = 0;
+
 void bleAddMessageToHistory(const char* msg);
 #endif
 
@@ -280,7 +287,11 @@ static void processIncomingBLECommand(const char* data, size_t len) {
   
   // Add to OLED message history
   #if ENABLE_OLED_DISPLAY
-  bleAddMessageToHistory(cmdBuf);
+  {
+    char tagged[BLE_MSG_MAX_LEN];
+    snprintf(tagged, sizeof(tagged), "RX:%.*s", (int)(BLE_MSG_MAX_LEN - 4), cmdBuf);
+    bleAddMessageToHistory(tagged);
+  }
   #endif
   
   // Execute through existing command registry
@@ -575,6 +586,14 @@ bool sendBLEResponse(const char* data, size_t len) {
   pCmdResponseChar->setValue((uint8_t*)data, len);
   pCmdResponseChar->notify();  // ESP32 BLE notify() works the same
   gBLEState->responsesSent++;
+
+  #if ENABLE_OLED_DISPLAY
+  {
+    char tagged[BLE_MSG_MAX_LEN];
+    snprintf(tagged, sizeof(tagged), "TX:%.*s", (int)(BLE_MSG_MAX_LEN - 4), data ? data : "");
+    bleAddMessageToHistory(tagged);
+  }
+  #endif
   
   BLE_DEBUGF(DEBUG_BLE_DATA, "Response sent (%d bytes)", len);
   return true;
@@ -633,10 +652,21 @@ void bleApplySettings() {
 // =============================================================================
 
 static const char* cmd_blestart(const String& cmd) {
-  if (!initBluetooth()) {
+  // Pause sensor polling during BLE init to avoid interrupt contention
+  extern volatile bool gSensorPollingPaused;
+  bool wasPaused = gSensorPollingPaused;
+  gSensorPollingPaused = true;
+  vTaskDelay(pdMS_TO_TICKS(50));  // Let pending I2C ops complete
+  
+  bool initOk = initBluetooth();
+  bool advOk = initOk ? startBLEAdvertising() : false;
+  
+  gSensorPollingPaused = wasPaused;
+  
+  if (!initOk) {
     return "Failed to initialize Bluetooth";
   }
-  if (!startBLEAdvertising()) {
+  if (!advOk) {
     return "Failed to start advertising";
   }
   return "Bluetooth started and advertising";
@@ -965,14 +995,14 @@ static CommandModuleRegistrar _ble_cmd_registrar(bluetoothCommands, bluetoothCom
 
 // Settings entries for Bluetooth
 const SettingEntry bluetoothSettingsEntries[] = {
-  { "autoStart", SETTING_BOOL, &gSettings.bluetoothAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr },
-  { "requireAuth", SETTING_BOOL, &gSettings.bluetoothRequireAuth, true, 0, nullptr, 0, 1, "Require Authentication", nullptr },
-  { "deviceName", SETTING_STRING, &gSettings.bleDeviceName, true, 0, nullptr, 0, 0, "Device Name", nullptr },
-  { "txPower", SETTING_INT, &gSettings.bleTxPower, true, 3, nullptr, 0, 7, "TX Power (0-7)", nullptr },
-  { "glassesLeftMAC", SETTING_STRING, &gSettings.bleGlassesLeftMAC, false, 0, nullptr, 0, 0, "Glasses Left MAC", nullptr },
-  { "glassesRightMAC", SETTING_STRING, &gSettings.bleGlassesRightMAC, false, 0, nullptr, 0, 0, "Glasses Right MAC", nullptr },
-  { "ringMAC", SETTING_STRING, &gSettings.bleRingMAC, false, 0, nullptr, 0, 0, "Ring MAC", nullptr },
-  { "phoneMAC", SETTING_STRING, &gSettings.blePhoneMAC, false, 0, nullptr, 0, 0, "Phone MAC", nullptr }
+  { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bluetoothAutoStart,    true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr },
+  { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr },
+  { "bluetoothDeviceName",   SETTING_STRING, &gSettings.bleDeviceName,         true, 0, nullptr, 0, 0, "Device Name", nullptr },
+  { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            true, 3, nullptr, 0, 7, "TX Power (0-7)", nullptr },
+  { "bluetoothGlassesLeftMAC",  SETTING_STRING, &gSettings.bleGlassesLeftMAC,  false, 0, nullptr, 0, 0, "Glasses Left MAC", nullptr },
+  { "bluetoothGlassesRightMAC", SETTING_STRING, &gSettings.bleGlassesRightMAC, false, 0, nullptr, 0, 0, "Glasses Right MAC", nullptr },
+  { "bluetoothRingMAC",      SETTING_STRING, &gSettings.bleRingMAC,            false, 0, nullptr, 0, 0, "Ring MAC", nullptr },
+  { "bluetoothPhoneMAC",     SETTING_STRING, &gSettings.blePhoneMAC,           false, 0, nullptr, 0, 0, "Phone MAC", nullptr }
 };
 
 const size_t bluetoothSettingsCount = sizeof(bluetoothSettingsEntries) / sizeof(bluetoothSettingsEntries[0]);
@@ -993,14 +1023,6 @@ extern const SettingsModule bluetoothSettingsModule = {
 
 #if ENABLE_OLED_DISPLAY
 
-// Message history for OLED display
-#define BLE_MSG_HISTORY_SIZE 4
-#define BLE_MSG_MAX_LEN 32
-
-static char bleMessageHistory[BLE_MSG_HISTORY_SIZE][BLE_MSG_MAX_LEN];
-static uint8_t bleMessageCount = 0;
-static uint8_t bleMessageHead = 0;
-
 // Add message to history (called when command received)
 void bleAddMessageToHistory(const char* msg) {
   // Truncate if needed
@@ -1017,10 +1039,19 @@ void bleAddMessageToHistory(const char* msg) {
 
 // Menu state
 static int bluetoothMenuSelection = 0;
-static const int BLUETOOTH_MENU_ITEMS = 5;
 bool bluetoothShowingStatus = false;
 
-// Menu items
+// Get number of visible menu items based on BT state
+static int getBluetoothMenuItemCount() {
+  // When BT is off, only show: Status, Settings, Start/Stop (3 items)
+  // When BT is on and connected: show all 5 items including Disconnect
+  // When BT is on but not connected: show 4 items (no Disconnect)
+  if (!gBLEState || !gBLEState->initialized) return 3;
+  if (gBLEState->connectionState == BLE_STATE_CONNECTED) return 5;
+  return 4;  // BT on but not connected - hide Disconnect
+}
+
+// Menu items - full list, but items 3-4 only shown when BT is on
 static const char* bluetoothMenuItems[] = {
   "Status",
   "Settings",
@@ -1031,19 +1062,40 @@ static const char* bluetoothMenuItems[] = {
 
 void bluetoothMenuUp() {
   if (bluetoothShowingStatus) return;
+  int maxItems = getBluetoothMenuItemCount();
   if (bluetoothMenuSelection > 0) {
     bluetoothMenuSelection--;
   } else {
-    bluetoothMenuSelection = BLUETOOTH_MENU_ITEMS - 1;
+    bluetoothMenuSelection = maxItems - 1;
   }
 }
 
 void bluetoothMenuDown() {
   if (bluetoothShowingStatus) return;
-  if (bluetoothMenuSelection < BLUETOOTH_MENU_ITEMS - 1) {
+  int maxItems = getBluetoothMenuItemCount();
+  if (bluetoothMenuSelection < maxItems - 1) {
     bluetoothMenuSelection++;
   } else {
     bluetoothMenuSelection = 0;
+  }
+}
+
+// Confirmation callback for Bluetooth Start/Stop
+static void bluetoothToggleConfirmedMenu(void* userData) {
+  (void)userData;
+  if (gBLEState && gBLEState->initialized) {
+    deinitBluetooth();
+  } else {
+    // Pause sensor polling during BLE init to avoid interrupt contention
+    extern volatile bool gSensorPollingPaused;
+    bool wasPaused = gSensorPollingPaused;
+    gSensorPollingPaused = true;
+    vTaskDelay(pdMS_TO_TICKS(50));
+    
+    initBluetooth();
+    startBLEAdvertising();
+    
+    gSensorPollingPaused = wasPaused;
   }
 }
 
@@ -1067,10 +1119,9 @@ void executeBluetoothAction() {
       
     case 2: // Start/Stop
       if (gBLEState && gBLEState->initialized) {
-        deinitBluetooth();
+        oledConfirmRequest("Stop Bluetooth?", nullptr, bluetoothToggleConfirmedMenu, nullptr, false);
       } else {
-        initBluetooth();
-        startBLEAdvertising();
+        oledConfirmRequest("Start Bluetooth?", nullptr, bluetoothToggleConfirmedMenu, nullptr);
       }
       break;
       
@@ -1138,6 +1189,16 @@ static void displayBluetoothStatusDetail() {
     oledDisplay->print("Total: ");
     oledDisplay->println(gBLEState->totalConnections);
   }
+  if (bleMessageCount > 0) {
+    oledDisplay->println();
+    oledDisplay->println("Last:");
+    int toShow = (bleMessageCount > 2) ? 2 : bleMessageCount;
+    for (int i = 0; i < toShow; i++) {
+      int idx = (int)bleMessageHead - 1 - i;
+      while (idx < 0) idx += BLE_MSG_HISTORY_SIZE;
+      oledDisplay->println(bleMessageHistory[idx]);
+    }
+  }
 }
 
 // OLED display function for Bluetooth mode
@@ -1170,8 +1231,15 @@ static void displayBluetoothStatus() {
     oledDisplay->println("[OFF]");
   }
   
-  // Draw menu items (max 5 lines for content area)
-  for (int i = 0; i < BLUETOOTH_MENU_ITEMS; i++) {
+  // Draw menu items - only show items based on BT state
+  int visibleItems = getBluetoothMenuItemCount();
+  
+  // Clamp selection to visible range (in case BT was just turned off)
+  if (bluetoothMenuSelection >= visibleItems) {
+    bluetoothMenuSelection = visibleItems - 1;
+  }
+  
+  for (int i = 0; i < visibleItems; i++) {
     if (i == bluetoothMenuSelection) {
       oledDisplay->print("> ");
     } else {

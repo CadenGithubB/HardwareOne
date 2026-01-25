@@ -56,7 +56,9 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
   #include "WebPage_Logging.h"
   #include "WebPage_Settings.h"
   #include "WebPage_Sensors.h"
-  #include "WebPage_Automations.h"
+  #if ENABLE_AUTOMATION
+    #include "WebPage_Automations.h"
+  #endif
   #include "WebPage_ESPNow.h"
 #endif
 
@@ -101,12 +103,15 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #if ENABLE_GPS_SENSOR
   #include "i2csensor-pa1010d.h"
 #endif
+#if ENABLE_RTC_SENSOR
+  #include "i2csensor-ds3231.h"
+#endif
 #include "System_SensorStubs.h"  // Minimal stubs only where required
 #include "i2csensor-rda5807.h"
 #include "OLED_Display.h"  // Always include - wrapper functions are safe to call when disabled
 #include "System_NeoPixel.h"
 #include "System_MemoryMonitor.h"
-#if ENABLE_HTTP_SERVER
+#if ENABLE_HTTP_SERVER && ENABLE_GAMES
   #include "WebPage_Games.h"
 #endif
 #if ENABLE_WIFI
@@ -121,18 +126,32 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <ctype.h>
 #include <Wire.h>
 #include <string.h>
+#if ENABLE_GAMEPAD_SENSOR
 #include "Adafruit_seesaw.h"
+#endif
+#if ENABLE_IMU_SENSOR
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
+#endif
 #include <Adafruit_NeoPixel.h>
+#if ENABLE_APDS_SENSOR
 #include "Adafruit_APDS9960.h"
+#endif
+#if ENABLE_TOF_SENSOR
 #include "vl53l4cx_class.h"
+#endif
+#if ENABLE_THERMAL_SENSOR
 #include <Adafruit_MLX90640.h>
+#endif
+#if ENABLE_OLED_DISPLAY
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#endif
 #include <Adafruit_PWMServoDriver.h>
+#if ENABLE_GPS_SENSOR
 #include <Adafruit_GPS.h>
+#endif
 #include <vector>
 #include <functional>
 #include "System_MemUtil.h"
@@ -204,7 +223,9 @@ void broadcastOutput(const String& s, const CommandContext& ctx);
 
 // File paths (LittleFS)
 const char* SETTINGS_JSON_FILE = "/system/settings.json";  // Non-static for settings.cpp
+#if ENABLE_AUTOMATION
 const char* AUTOMATIONS_JSON_FILE = "/system/automations.json";
+#endif
 
 #include "System_Mutex.h"
 
@@ -360,7 +381,7 @@ static const size_t THERMAL_RESPONSE_SIZE = 8192;  // 8KB typically fits 32x24 f
 volatile unsigned long gWebMirrorSeq = 0;
 String gLastTFTLine;
 
-extern String gExecUser;
+String gExecUser = "";
 bool gExecIsAdmin = false;
 AuthContext gExecAuthContext;
 
@@ -417,8 +438,11 @@ extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, s
   if (isFsLockedByCurrentTask()) return;
   s_inMemLog = true;
   // Ensure /logs exists (best-effort)
-  if (!LittleFS.exists("/logs")) {
-    LittleFS.mkdir("/logs");
+  {
+    FsLockGuard guard("alloclog.ensure_logs");
+    if (!LittleFS.exists("/logs")) {
+      LittleFS.mkdir("/logs");
+    }
   }
   // Timestamp prefix with ms precision, via boot-epoch offset and esp_timer
   char tsPrefix[40];
@@ -487,8 +511,6 @@ extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, s
   // Memory allocation logging removed - LOG_ALLOC_FILE is obsolete
   s_inMemLog = false;
 }
-
-static const uint16_t kSettingsVersion = 1;
 
 #if ENABLE_HTTP_SERVER
 void sseEnqueueNotice(SessionEntry& s, const String& msg);
@@ -749,9 +771,9 @@ void setCurrentCommandContext(const CommandContext& ctx) {
 
 // -------- Command Executor Task (definition) --------
 struct ExecReq {
-  char line[2048];         // Command string (fixed buffer, max 2048 chars) - increased for ESP-NOW chunking
+  char line[2048];         // Command string (full size for ESP-NOW chunking)
   CommandContext ctx;      // Full execution context
-  char out[16384];         // Result from executeCommand() (16KB buffer for verbose output)
+  char out[2048];          // Result buffer (2KB)
   SemaphoreHandle_t done;  // Signals completion
   bool ok;                 // Success flag from executeCommand()
 };
@@ -933,43 +955,10 @@ static void heapLogSummary(const char* tag) {
                    (unsigned)main_hwm);
 }
 
-static const char* processCommand(const String& cmd) {
-  String command = cmd;
-  command.trim();
-
-  if (command.length() == 0) {
-    return "Empty command";
-  }
-
-  // Step 1: Resolve canonical command key once (case-insensitive, args preserved)
-  String resolvedKey = resolveRegistryCommandKey(command);
-
-  // Prepare original for argument slicing
-  String originalForArgs = command;
-
-  // Step 2: Split key vs args (do not alter dispatch yet)
-  String resolvedArgs;
-  int spaceIdx = resolvedKey.indexOf(' ');
-  if (spaceIdx > 0) {
-    resolvedArgs = resolvedKey.substring(spaceIdx + 1);
-    resolvedKey = resolvedKey.substring(0, spaceIdx);
-  }
-
-  // Step 3: Dispatch to handler via registry
-  const CommandEntry* entry = findCommand(resolvedKey);
-  if (entry && entry->handler) {
-    // Prefer resolved args if present, otherwise original command
-    String dispatchArg = (resolvedArgs.length() > 0) ? resolvedArgs : command;
-    return entry->handler(dispatchArg);
-  }
-
-  // Unknown command
-  return "Unknown command. Type 'help' for list.";
-}
-
 extern void ensureDeviceRegistryFile();
 extern void discoverI2CDevices();
 
+#if ENABLE_AUTOMATION
 const char* cmd_downloadautomation(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   broadcastOutput("Download automation from GitHub not yet implemented");
@@ -978,6 +967,7 @@ const char* cmd_downloadautomation(const String& cmd) {
 const char* cmd_conditional(const String& cmd) {
   return executeConditionalCommand(cmd.c_str());
 }
+#endif
 
 void hardwareone_setup() {
   // --- Initialise Serial early ---
@@ -1032,7 +1022,13 @@ void hardwareone_setup() {
   // No manual registration needed
 
   // Load settings from file if it exists (will overwrite defaults)
-  if (filesystemReady && LittleFS.exists(SETTINGS_JSON_FILE)) {
+  bool haveSettings = false;
+  if (filesystemReady) {
+    FsLockGuard guard("settings.exists");
+    haveSettings = LittleFS.exists(SETTINGS_JSON_FILE);
+  }
+
+  if (filesystemReady && haveSettings) {
     Serial.println("[DEBUG] Settings file exists, about to read");
     Serial.flush();
 
@@ -1232,6 +1228,7 @@ void hardwareone_setup() {
   }
 #endif
 
+#if ENABLE_AUTOMATION
   // Initialize automation system at boot (only if enabled in settings)
   if (gSettings.automationsEnabled) {
     if (!initAutomationSystem()) {
@@ -1240,8 +1237,9 @@ void hardwareone_setup() {
     }
     DEBUG_SYSTEMF("Automation system initialized at boot");
   } else {
-    DEBUG_SYSTEMF("Automation system disabled - skipping initialization (saves ~16KB heap)");
+    DEBUG_SYSTEMF("Automation system disabled - skipping initialization");
   }
+#endif
 
   // ========================================
   // Now safe to create command executor queue and task
@@ -1252,7 +1250,7 @@ void hardwareone_setup() {
       Serial.println("FATAL: Failed to create command exec queue");
       while (1) delay(1000);
     }
-    const uint32_t cmdExecStackWords = 4608;  // words (≈18 KB) - reduced from 24KB (peak usage 14.5KB)
+    const uint32_t cmdExecStackWords = 5120;  // words (≈20 KB) - includes NTP sync with DNS/file I/O
     if (xTaskCreateLogged(commandExecTask, "cmd_exec", cmdExecStackWords, nullptr, 1, nullptr, "cmd.exec") != pdPASS) {
       Serial.println("FATAL: Failed to create command exec task");
       while (1) delay(1000);
@@ -1263,6 +1261,8 @@ void hardwareone_setup() {
 #endif
   }
 
+  // NTP sync runs synchronously in cmd_exec task (no dedicated NTP task needed)
+
   // Initialize battery monitoring (Feather ESP32 battery on A13/GPIO35)
   initBattery();
   
@@ -1272,6 +1272,7 @@ void hardwareone_setup() {
   
   // Initialize I2C buses early for OLED boot animation
   // Centralized initialization in i2c_system.cpp
+ #if ENABLE_I2C_SYSTEM
   initI2CBuses();
   
   // Suppress ESP-IDF I2C driver NACK spam (legitimately occurs during FM radio RDS polling)
@@ -1279,6 +1280,7 @@ void hardwareone_setup() {
   // This is intentional protocol behavior, not an error - suppress routine I2C logs
   esp_log_level_set("i2c.master", ESP_LOG_WARN);  // Only show WARN and ERROR, suppress INFO/DEBUG
   DEBUG_SENSORSF("[I2C] ESP-IDF I2C driver log level set to WARN (suppresses routine NACK messages)");
+ #endif
 
   // Show modular sensor configuration (always visible during boot)
   Serial.println();
@@ -1321,6 +1323,12 @@ void hardwareone_setup() {
 #else
   Serial.println("║ ✗ GPS      │ Disabled (~5-8KB flash, ~4KB RAM saved)         ║");
 #endif
+#if ENABLE_PRESENCE_SENSOR
+  Serial.println("║ ✓ PRESENCE │ STHS34PF80 IR presence/motion sensor            ║");
+  Serial.println("║            │ Task: presenceTask() in i2csensor-sths34pf80    ║");
+#else
+  Serial.println("║ ✗ PRESENCE │ Disabled (~4-6KB flash, ~2KB RAM saved)         ║");
+#endif
   Serial.println("╠══════════════════════════════════════════════════════════════╣");
 #if ENABLE_OLED_DISPLAY
   Serial.println("║ ✓ OLED     │ SSD1306 128x64 display enabled                  ║");
@@ -1339,6 +1347,7 @@ void hardwareone_setup() {
   // Mutexes already created earlier in setup() - safe to create tasks now
 
   // Create sensor queue processor task only if I2C sensors are runtime enabled
+ #if ENABLE_I2C_SYSTEM
   if (gSettings.i2cSensorsEnabled && !queueProcessorTask) {
     const uint32_t queueStackWords = 3072;  // ~12KB (measured min free during IMU start: ~1408 bytes)
     if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue", queueStackWords, nullptr, 1, &queueProcessorTask, "sensor.queue") != pdPASS) {
@@ -1347,16 +1356,18 @@ void hardwareone_setup() {
     }
     DEBUG_SYSTEMF("Sensor queue processor task created successfully");
     Serial.println("[I2C_SENSORS] Queue processor task created (runtime enabled)");
-#if DEBUG_MEM_SUMMARY
+ #if DEBUG_MEM_SUMMARY
     heapLogSummary("boot.after_task.sensor_queue");
-#endif
+ #endif
   } else if (!gSettings.i2cSensorsEnabled) {
     Serial.println("[I2C_SENSORS] Queue processor task skipped (runtime disabled - saves ~12KB RAM)");
   }
+ #endif
 
   // Per-sensor tasks will be created lazily on first start to conserve RAM
 
   // Initialize I2C clock stack only if I2C sensors are runtime enabled  
+ #if ENABLE_I2C_SYSTEM
   if (gSettings.i2cSensorsEnabled && !gI2CClockStack) {
     gI2CClockStack = (uint32_t*)ps_alloc(kI2CClockStackMax * sizeof(uint32_t), AllocPref::PreferPSRAM, "i2c.stack");
     if (!gI2CClockStack) {
@@ -1370,6 +1381,7 @@ void hardwareone_setup() {
   if (gI2CClockStack) {
     memset(gI2CClockStack, 0, kI2CClockStackMax * sizeof(uint32_t));
   }
+ #endif
 
   // WiFi networks array already allocated early (before settings load)
   // See allocation near top of setup() before readSettingsJson()
@@ -1443,6 +1455,20 @@ void hardwareone_setup() {
   }
   rebuildExpectedAuthHeader();
 
+  // RTC early boot sync - only if RTC time has been previously set
+  // If rtcTimeHasBeenSet is false, we'll prioritize NTP at boot to get accurate time first
+#if ENABLE_RTC_SENSOR
+  if (gSettings.rtcTimeHasBeenSet) {
+    oledSetBootProgress(28, "RTC sync...");
+    if (rtcEarlyBootSync()) {
+      broadcastOutput("[Boot] System time set from RTC (previously calibrated)");
+    }
+  } else {
+    oledSetBootProgress(28, "RTC uncalibrated");
+    broadcastOutput("[Boot] RTC time not yet set - will sync from NTP if available");
+  }
+#endif
+
   // Network - WiFi auto-start enabled by default
 #if ENABLE_WIFI
   oledSetBootProgress(30, "WiFi ready...");
@@ -1466,19 +1492,15 @@ void hardwareone_setup() {
   // Update OLED animation after WiFi attempt
   oledSetBootProgress(40, wifiConnected ? "WiFi connected" : "WiFi skipped");
 
-  // NTP sync phase - separate from WiFi connection
+  // NTP sync phase - runs synchronously during boot
   if (wifiConnected) {
     oledSetBootProgress(45, "Syncing time...");
-    delay(500);  // Show "Syncing time..." message briefly before starting
-    
-    Serial.println("[DEBUG] About to call syncNTPAndResolve");
+    Serial.println("[DEBUG] Starting NTP sync");
     Serial.flush();
-    bool ntpSuccess = syncNTPAndResolve();
-    Serial.println("[DEBUG] syncNTPAndResolve completed");
+    bool ntpOk = syncNTPAndResolve();
+    Serial.println(ntpOk ? "[DEBUG] NTP sync complete" : "[DEBUG] NTP sync failed");
     Serial.flush();
-    
-    oledSetBootProgress(50, ntpSuccess ? "Time synced" : "Time sync skipped");
-    delay(1000);  // Hold "Time synced" message so user can see it
+    oledSetBootProgress(50, ntpOk ? "Time synced" : "Time sync failed");
   } else {
     oledSetBootProgress(50, "Network offline");
   }
@@ -1502,8 +1524,12 @@ void hardwareone_setup() {
   // Some sensors need 1-2 seconds to become responsive on I2C bus
   delay(2000);
   
+ #if ENABLE_I2C_SYSTEM
   discoverI2CDevices();
   DEBUG_SYSTEMF("Device discovery completed");
+ #else
+  DEBUG_SYSTEMF("I2C system disabled at compile time - skipping I2C device discovery");
+ #endif
 
   oledSetBootProgress(80, "Devices found");
 
@@ -1516,6 +1542,12 @@ void hardwareone_setup() {
 #if ENABLE_BLUETOOTH
   if (gSettings.bluetoothAutoStart) {
     oledSetBootProgress(85, "BLE init...");
+    
+    // Pause sensor polling during BLE init to avoid interrupt contention
+    bool wasPaused = gSensorPollingPaused;
+    gSensorPollingPaused = true;
+    vTaskDelay(pdMS_TO_TICKS(50));  // Let pending I2C ops complete
+    
     extern bool initBluetooth();
     extern bool startBLEAdvertising();
     if (initBluetooth()) {
@@ -1527,6 +1559,8 @@ void hardwareone_setup() {
     } else {
       broadcastOutput("Bluetooth initialization failed");
     }
+    
+    gSensorPollingPaused = wasPaused;
   } else {
     broadcastOutput("Bluetooth disabled by default. Use quick settings (SELECT button) or 'blestart' to enable.");
   }
@@ -1536,14 +1570,22 @@ void hardwareone_setup() {
   oledSetBootProgress(87, "Sensors...");
   processAutoStartSensors();
 
-  // HTTP server - auto-start if WiFi is connected
+#if ENABLE_CAMERA_SENSOR
+  // Camera auto-start (independent of I2C sensor queue)
+  if (gSettings.cameraAutoStart) {
+    runUnifiedSystemCommand("camerastart");
+  }
+#endif
+
+  // HTTP server - auto-start if enabled in settings and WiFi is connected
 #if ENABLE_HTTP_SERVER
   oledSetBootProgress(90, "HTTP ready...");
 
-  // Auto-start HTTP server if WiFi is connected
-  if (WiFi.isConnected()) {
+  if (gSettings.httpAutoStart && WiFi.isConnected()) {
     runUnifiedSystemCommand("httpstart");
     broadcastOutput("HTTP server started. Try: http://" + WiFi.localIP().toString());
+  } else if (!gSettings.httpAutoStart) {
+    broadcastOutput("HTTP server available. Use 'httpstart' or quick settings (SELECT button) to start.");
   } else {
     broadcastOutput("HTTP server not started (WiFi offline). Use quick settings (SELECT button) or 'httpstart' to start manually.");
   }
@@ -1598,12 +1640,14 @@ void hardwareone_setup() {
     broadcastOutput("✨ Startup effect completed: " + effect);
   }
 
+#if ENABLE_AUTOMATION
   // Finally, run boot automations if configured
   Serial.println("[DEBUG] About to run boot automations");
   Serial.flush();
   runAutomationsOnBoot();
   Serial.println("[DEBUG] Boot automations completed");
   Serial.flush();
+#endif
 
   // ESP-NOW auto-initialization (if enabled in settings) - moved to end of boot
   // This ensures all systems (WiFi, filesystem, settings) are fully initialized
@@ -1659,56 +1703,49 @@ void hardwareone_loop() {
   periodicMemorySample();
 
   // Periodic battery monitoring (every 10 seconds)
+#if ENABLE_BATTERY_MONITOR
   static unsigned long lastBatteryUpdate = 0;
   if (millis() - lastBatteryUpdate >= 10000) {
     lastBatteryUpdate = millis();
     updateBattery();
   }
+#endif
 
-  // Heap pressure monitoring (gated by DEBUG_MEMORY flag)
-  // Logs warning when heap drops below threshold or reaches new low
+  // Heap pressure monitoring - CONSOLIDATED into periodicMemorySample()
+  // No longer needed here - heap warnings now triggered during memory sampling
+
+  // Task pressure monitoring - comprehensive report every 1 minute
+  // Only runs when DEBUG_MEMORY is enabled (gated to reduce overhead)
   if (isDebugFlagSet(DEBUG_MEMORY)) {
-    static unsigned long lastHeapCheck = 0;
-    static size_t lowestHeapSeen = UINT32_MAX;
-    static const size_t HEAP_WARNING_THRESHOLD = 40960;  // 40KB warning threshold
-    static const unsigned long HEAP_CHECK_INTERVAL = 5000;  // Check every 5 seconds
-    
+    static unsigned long lastTaskReport = 0;
     unsigned long now = millis();
-    if (now - lastHeapCheck >= HEAP_CHECK_INTERVAL) {
-      lastHeapCheck = now;
-      size_t freeHeap = ESP.getFreeHeap();
-      size_t minFreeHeap = ESP.getMinFreeHeap();
-      
-      // Log if we hit a new low
-      if (freeHeap < lowestHeapSeen) {
-        lowestHeapSeen = freeHeap;
-        DEBUG_MEMORYF("[HEAP_MONITOR] New low: %u bytes (min_ever=%u)", 
-                      (unsigned)freeHeap, (unsigned)minFreeHeap);
-      }
-      
-      // Warning if below threshold
-      if (freeHeap < HEAP_WARNING_THRESHOLD) {
-        DEBUG_MEMORYF("[HEAP_PRESSURE] WARNING: Free heap %u bytes (threshold=%u, min_ever=%u)",
-                      (unsigned)freeHeap, (unsigned)HEAP_WARNING_THRESHOLD, (unsigned)minFreeHeap);
-      }
+    if (now - lastTaskReport >= 60000) {  // 1 minute
+      lastTaskReport = now;
+      reportAllTaskStacks();
     }
   }
 
-  // Task pressure monitoring - comprehensive report every 1 minute (DEBUG only)
-  static unsigned long lastTaskReport = 0;
-  unsigned long now = millis();
-  if (now - lastTaskReport >= 60000) {  // 1 minute
-    lastTaskReport = now;
-    reportAllTaskStacks();
+#if ENABLE_AUTOMATION
+  // Automation scheduler - runs when dirty flag set OR every 60 seconds
+  if (gSettings.automationsEnabled) {
+    static unsigned long lastAutoCheck = 0;
+    unsigned long nowAuto = millis();
+    if (gAutosDirty || (nowAuto - lastAutoCheck >= 60000)) {
+      gAutosDirty = false;
+      schedulerTickMinute();
+      lastAutoCheck = nowAuto;
+    }
   }
+#endif
 
   // Performance monitoring (gated by debug flag)
   if (isDebugFlagSet(DEBUG_PERFORMANCE)) {
     performanceCounter();
   }
 
-  // I2C bus health monitoring (runs every 30 seconds)
-  i2cBusHealthCheck();
+  // I2C bus health monitoring - REMOVED: Now event-driven
+  // Devices automatically trigger checkBusRecoveryNeeded() when they become degraded
+  // No periodic polling needed in main loop
 
   // Process ESP-NOW message retry queue
 #if ENABLE_ESPNOW

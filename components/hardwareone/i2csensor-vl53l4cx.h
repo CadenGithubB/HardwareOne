@@ -54,7 +54,7 @@ const char* cmd_tof(const String& cmd);
 const char* cmd_tofstart(const String& cmd);
 const char* cmd_tofstop(const String& cmd);
 const char* cmd_toftransitionms(const String& cmd);
-const char* cmd_tofuimaxdistancemm(const String& cmd);
+const char* cmd_tofmaxdistancemm(const String& cmd);
 const char* cmd_tofpollingms(const String& cmd);
 const char* cmd_tofstabilitythreshold(const String& cmd);
 const char* cmd_tofdevicepollms(const String& cmd);

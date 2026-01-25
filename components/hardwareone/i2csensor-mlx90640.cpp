@@ -25,8 +25,6 @@
 // External dependencies still needed
 extern TwoWire Wire1;
 extern bool writeSettingsJson();
-extern uint32_t gWire1DefaultHz;
-extern void i2cSetWire1Clock(uint32_t hz);
 extern void sensorStatusBumpWith(const char* reason);
 extern volatile bool gSensorPollingPaused;
 extern SemaphoreHandle_t i2cMutex;
@@ -39,26 +37,23 @@ extern void drainDebugRing();
 // Note: gSettings is declared in settings.h (included above)
 
 static const SettingEntry thermalSettingEntries[] = {
-  // Core settings
-  { "autoStart", SETTING_BOOL, &gSettings.thermalAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  // UI Settings (client-side visualization)
-  { "ui.pollingMs",                 SETTING_INT,    &gSettings.thermalPollingMs,             250, 0, nullptr, 50, 5000, "Polling (ms)", nullptr },
-  { "ui.thermalPaletteDefault",     SETTING_STRING, &gSettings.thermalPaletteDefault,        0,   0, "grayscale", 0, 0, "Default Palette", "grayscale,ironbow,rainbow,hot,cool" },
-  { "ui.ewmaFactor",                SETTING_FLOAT,  &gSettings.thermalEWMAFactor,            0,   0.2f, nullptr, 0, 1, "EWMA Factor", nullptr },
-  { "ui.transitionMs",              SETTING_INT,    &gSettings.thermalTransitionMs,          80,  0, nullptr, 0, 5000, "Transition (ms)", nullptr },
-  { "ui.webMaxFps",                 SETTING_INT,    &gSettings.thermalWebMaxFps,             10,  0, nullptr, 1, 30, "Web Max FPS", nullptr },
-  // Device-level settings (on-device processing, timing, upscaling)
-  { "device.upscaleFactor",         SETTING_INT,    &gSettings.thermalUpscaleFactor,         1,   0, nullptr, 1, 4, "Upscale Factor", nullptr },
-  { "device.rollingMinMaxEnabled",  SETTING_BOOL,   &gSettings.thermalRollingMinMaxEnabled,  1,   0, nullptr, 0, 1, "Rolling Min/Max", nullptr },
-  { "device.rollingMinMaxAlpha",    SETTING_FLOAT,  &gSettings.thermalRollingMinMaxAlpha,    0,   0.6f, nullptr, 0, 1, "Rolling Alpha", nullptr },
-  { "device.rollingMinMaxGuardC",   SETTING_FLOAT,  &gSettings.thermalRollingMinMaxGuardC,   0,   0.3f, nullptr, 0, 10, "Guard Celsius", nullptr },
-  { "device.interpolationEnabled",  SETTING_BOOL,   &gSettings.thermalInterpolationEnabled,  1,   0, nullptr, 0, 1, "Interpolation", nullptr },
-  { "device.interpolationSteps",    SETTING_INT,    &gSettings.thermalInterpolationSteps,    5,   0, nullptr, 1, 8, "Interp. Steps", nullptr },
-  { "device.interpolationBufferSize", SETTING_INT,  &gSettings.thermalInterpolationBufferSize, 2, 0, nullptr, 1, 10, "Interp. Buffer", nullptr },
-  { "device.targetFps",             SETTING_INT,    &gSettings.thermalTargetFps,             8,   0, nullptr, 1, 8, "Target FPS", nullptr },
-  { "device.devicePollMs",          SETTING_INT,    &gSettings.thermalDevicePollMs,          100, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr },
-  { "device.temporalAlpha",         SETTING_FLOAT,  &gSettings.thermalTemporalAlpha,         0,   0.5f, nullptr, 0, 1, "Temporal Alpha", nullptr },
-  { "device.rotation",              SETTING_INT,    &gSettings.thermalRotation,              0,   0, nullptr, 0, 3, "Rotation (0-3)", nullptr },
+  { "thermalAutoStart",             SETTING_BOOL,   &gSettings.thermalAutoStart,             0,    0, nullptr, 0, 1, "Auto-start after boot", nullptr },
+  { "thermalPollingMs",             SETTING_INT,    &gSettings.thermalPollingMs,             250,  0, nullptr, 50, 5000, "Polling (ms)", nullptr },
+  { "thermalPaletteDefault",        SETTING_STRING, &gSettings.thermalPaletteDefault,        0,    0, "grayscale", 0, 0, "Default Palette", "grayscale,ironbow,rainbow,hot,cool" },
+  { "thermalEWMAFactor",            SETTING_FLOAT,  &gSettings.thermalEWMAFactor,            0,    0.2f, nullptr, 0, 1, "EWMA Factor", nullptr },
+  { "thermalTransitionMs",          SETTING_INT,    &gSettings.thermalTransitionMs,          80,   0, nullptr, 0, 5000, "Transition (ms)", nullptr },
+  { "thermalWebMaxFps",             SETTING_INT,    &gSettings.thermalWebMaxFps,             10,   0, nullptr, 1, 30, "Web Max FPS", nullptr },
+  { "thermalUpscaleFactor",         SETTING_INT,    &gSettings.thermalUpscaleFactor,         1,    0, nullptr, 1, 4, "Upscale Factor", nullptr },
+  { "thermalRollingMinMaxEnabled",  SETTING_BOOL,   &gSettings.thermalRollingMinMaxEnabled,  1,    0, nullptr, 0, 1, "Rolling Min/Max", nullptr },
+  { "thermalRollingMinMaxAlpha",    SETTING_FLOAT,  &gSettings.thermalRollingMinMaxAlpha,    0,    0.6f, nullptr, 0, 1, "Rolling Alpha", nullptr },
+  { "thermalRollingMinMaxGuardC",   SETTING_FLOAT,  &gSettings.thermalRollingMinMaxGuardC,   0,    0.3f, nullptr, 0, 10, "Guard Celsius", nullptr },
+  { "thermalInterpolationEnabled",  SETTING_BOOL,   &gSettings.thermalInterpolationEnabled,  1,    0, nullptr, 0, 1, "Interpolation", nullptr },
+  { "thermalInterpolationSteps",    SETTING_INT,    &gSettings.thermalInterpolationSteps,    5,    0, nullptr, 1, 8, "Interp. Steps", nullptr },
+  { "thermalInterpolationBufferSize", SETTING_INT,  &gSettings.thermalInterpolationBufferSize, 2,  0, nullptr, 1, 10, "Interp. Buffer", nullptr },
+  { "thermalTargetFps",             SETTING_INT,    &gSettings.thermalTargetFps,             8,    0, nullptr, 1, 8, "Target FPS", nullptr },
+  { "thermalDevicePollMs",          SETTING_INT,    &gSettings.thermalDevicePollMs,          100,  0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr },
+  { "thermalTemporalAlpha",         SETTING_FLOAT,  &gSettings.thermalTemporalAlpha,         0,    0.5f, nullptr, 0, 1, "Temporal Alpha", nullptr },
+  { "thermalRotation",              SETTING_INT,    &gSettings.thermalRotation,              0,    0, nullptr, 0, 3, "Rotation (0-3)", nullptr },
 };
 
 static bool isThermalConnected() {
@@ -155,19 +150,9 @@ bool startThermalSensorInternal() {
   DEBUG_CLIF("[THERMAL_INTERNAL] Memory check passed: %lu bytes available",
              (unsigned long)ESP.getFreeHeap());
 
-  // Preflight: ensure I2C bus clock is set for thermal before init
-  uint32_t prevClock = gWire1DefaultHz;
-  uint32_t thermalHz = gSettings.i2cClockThermalHz > 0 ? gSettings.i2cClockThermalHz : 800000;
-  DEBUG_CLIF("[THERMAL_INTERNAL] I2C clock: prev=%lu Hz, target=%lu Hz",
-             (unsigned long)prevClock, (unsigned long)thermalHz);
-
-  // Only change clock if different, add settling delay
-  if (prevClock != thermalHz) {
-    DEBUG_CLIF("[THERMAL_INTERNAL] Changing I2C clock to %lu Hz", (unsigned long)thermalHz);
-    i2cSetWire1Clock(thermalHz);
-    delay(150);  // Longer delay for thermal's high clock speed
-    DEBUG_CLIF("[THERMAL_INTERNAL] I2C clock changed, waited 150ms for settling");
-  }
+  // Clock is now managed automatically by i2cTaskWithStandardTimeout wrapper
+  // No manual clock changes needed - device registration specifies thermal's clock speed
+  DEBUG_CLIF("[THERMAL_INTERNAL] I2C clock will be managed by transaction wrapper");
 
   // Clean up any stale memory from previous run BEFORE starting
   // CRITICAL: Memory wasn't freed during stop to avoid dying-task crashes
@@ -491,7 +476,6 @@ bool readThermalPixels() {
   extern bool mlx90640_initialized;
   extern bool lockThermalCache(TickType_t timeout);
   extern void unlockThermalCache();
-  extern void i2cSetWire1Clock(uint32_t hz);
   extern void sensorStatusBumpWith(const char* cause);
   // interpolateThermalFrame is defined at the bottom of this file
   
@@ -1237,13 +1221,8 @@ const char* cmd_thermaldiag(const String& cmd) {
         Serial.printf("[THERMAL_DIAG] Cleared degraded status before %s test\n", clockNames[i]);
       }
       
-      // Set clock speed
-      i2cSetWire1Clock(testClocks[i]);
-      delay(50);  // Settling time
-      
-      // Probe the device
-      Wire1.beginTransmission(I2C_ADDR_THERMAL);
-      uint8_t result = Wire1.endTransmission();
+      // Probe the device with mutex protection
+      uint8_t result = i2cProbeAddress(I2C_ADDR_THERMAL, testClocks[i], 200);
       
       const char* resultStr = "?";
       switch (result) {
@@ -1262,8 +1241,7 @@ const char* cmd_thermaldiag(const String& cmd) {
       delay(100);  // Gap between tests
     }
     
-    // Restore default clock
-    i2cSetWire1Clock(100000);
+    // Clock automatically restored by transaction wrapper
     
     n = snprintf(buf, remaining, "\nI2C clock restored to 100kHz\n");
     buf += n; remaining -= n;
@@ -1441,6 +1419,16 @@ void thermalTask(void* parameter) {
         
         lastThermalRead = millis();
         
+        // Auto-disable if too many consecutive failures (like gamepad does)
+        if (!ok) {
+          if (i2cShouldAutoDisable(I2C_ADDR_THERMAL, 5)) {
+            ERROR_SENSORSF("Too many consecutive thermal failures - auto-disabling");
+            thermalEnabled = false;
+            sensorStatusBumpWith("thermal@auto_disabled");
+            // Task will clean up and delete itself on next loop iteration
+          }
+        }
+        
         // SAFE: Debug output AFTER i2cTransaction completes, with enabled check
         if (thermalEnabled && thermalPendingFirstFrame && ok) {
           thermalPendingFirstFrame = false;
@@ -1468,12 +1456,11 @@ void thermalTask(void* parameter) {
 // Additional Thermal Device Commands
 // ============================================================================
 
-const char* cmd_thermaltargetfps(const String& originalCmd) {
+const char* cmd_thermaltargetfps(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: thermalTargetFps <1..8>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: thermalTargetFps <1..8>";
   int v = valStr.toInt();
   if (v < 1) v = 1;
   if (v > 8) v = 8;
@@ -1484,12 +1471,11 @@ const char* cmd_thermaltargetfps(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_thermaldevicepollms(const String& originalCmd) {
+const char* cmd_thermaldevicepollms(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: thermalDevicePollMs <100..2000>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: thermalDevicePollMs <100..2000>";
   int v = valStr.toInt();
   if (v < 100) v = 100;
   if (v > 2000) v = 2000;

@@ -201,14 +201,14 @@ String executeCommandThroughRegistry(const String& cmd) {
         // Exit help first, then execute the command
         String exitBanner = exitToNormalBanner();
         broadcastOutput(exitBanner);
-        const char* commandResult = found->handler(command);
+        const char* commandResult = found->handler(resolvedArgs);
         return String(commandResult);
       }
     }
 
-    // Execute through registry handler
-    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s", command.c_str());
-    const char* result = found->handler(command);
+    // Execute through registry handler - pass only args, not full command
+    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s (args: %s)", command.c_str(), resolvedArgs.c_str());
+    const char* result = found->handler(resolvedArgs);
     
     // Check if result indicates an error or usage issue
     // If so, append the stored usage string if available
@@ -302,7 +302,8 @@ void printCommandModuleSummary() {
 // ============================================================================
 
 static const SettingEntry cliSettingsEntries[] = {
-  { "historySize", SETTING_INT, &gSettings.cliHistorySize, 10, 0, nullptr, 1, 100, "History Size", nullptr }
+  { "webHistorySize", SETTING_INT, &gSettings.webCliHistorySize, 10, 0, nullptr, 1, 100, "Web History", nullptr },
+  { "oledHistorySize", SETTING_INT, &gSettings.oledCliHistorySize, 50, 0, nullptr, 10, 100, "OLED History", nullptr }
 };
 
 extern const SettingsModule cliSettingsModule = {

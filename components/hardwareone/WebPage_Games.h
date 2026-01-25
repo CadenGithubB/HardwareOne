@@ -2,7 +2,11 @@
 #define WEBPAGE_GAMES_H
 
 #include <Arduino.h>
+#include "System_BuildConfig.h"
+#include <esp_http_server.h>
 #include "WebServer_Utils.h"
+
+#if ENABLE_GAMES
 
 // Client-only Tilt Maze prototype
 // - Uses IMU endpoint: /api/sensors?sensor=imu
@@ -97,6 +101,7 @@ canvas#maze{background:#000;border:1px solid var(--border);border-radius:4px}
 <script>
 console.info('[GAMES] Chunk 1: bootstrap + state');
 var polling=null, lastUpdate=0, running=false;
+var i2cEnabled=false, imuEnabled=false, imuCompiled=false, gamepadEnabled=false, gamepadCompiled=false;
 var level=1, collisions=0, startMs=0;
 var canvas=document.getElementById('maze'), ctx=canvas.getContext('2d');
 var pos={x:20,y:20}, vel={x:0,y:0};
@@ -362,9 +367,38 @@ function controlSensor(sensor, action){
   return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(sensor+action)})
     .then(function(r){return r.text();}).catch(function(_){return '';});
 }
+async function checkSensorAvailability(){
+  try{
+    var sysResp=await fetch('/api/system');
+    var sysData=await sysResp.json();
+    i2cEnabled=(sysData.i2c_enabled===true);
+    if(!i2cEnabled){
+      console.warn('[GAMES] I2C is disabled - sensors unavailable');
+      return;
+    }
+    var sensResp=await fetch('/api/sensors/status');
+    var sensData=await sensResp.json();
+    imuCompiled=(sensData.imuCompiled===true);
+    imuEnabled=(sensData.imuEnabled===true);
+    gamepadCompiled=(sensData.gamepadCompiled===true);
+    gamepadEnabled=(sensData.gamepadEnabled===true);
+    console.log('[GAMES] Sensor status: i2c='+i2cEnabled+' imuCompiled='+imuCompiled+' imuEnabled='+imuEnabled+' gamepadCompiled='+gamepadCompiled+' gamepadEnabled='+gamepadEnabled);
+  }catch(e){
+    console.error('[GAMES] Failed to check sensor availability:',e);
+    i2cEnabled=false;
+    imuEnabled=false;
+    imuCompiled=false;
+    gamepadEnabled=false;
+    gamepadCompiled=false;
+  }
+}
 </script><script>console.info('[GAMES] Chunk 2A.1: sensor control');
 function startGamepadPolling(){
   if(gpPoll) return;
+  if(!i2cEnabled||!gamepadCompiled){
+    console.warn('[GAMES] Gamepad polling disabled: i2c='+i2cEnabled+' gamepadCompiled='+gamepadCompiled);
+    return;
+  }
   function tick(){
     var now=Date.now();
     if(now<gpBackoffUntil) return;
@@ -391,6 +425,13 @@ function stopGamepadPolling(){
 }
 </script><script>console.info('[GAMES] Chunk 2A.2: gamepad');
 function startCalibration(){
+  if(!i2cEnabled||!imuCompiled){
+    var hud=document.getElementById('hudCal');
+    hud.textContent='IMU unavailable: '+(i2cEnabled?'not compiled':'I2C disabled');
+    hud.style.color='#ff6b6b';
+    alert('IMU sensor is not available. I2C: '+i2cEnabled+', IMU compiled: '+imuCompiled);
+    return;
+  }
   controlSensor('imu','start').then(function(){
     var hud=document.getElementById('hudCal'); hud.textContent='Hold still... calibrating';
     hasBaseline=false; basePitch=0; baseRoll=0; calibSamples=[];
@@ -1467,6 +1508,10 @@ function applyTilt(pitch, roll){
   vel.y += (pitch/maxAng)*speed*0.10;
 }
 function pollIMU(){
+  if(!i2cEnabled||!imuCompiled){
+    console.warn('[GAMES] IMU polling skipped: i2c='+i2cEnabled+' imuCompiled='+imuCompiled);
+    return;
+  }
   var ts=Date.now();
   fetch('/api/sensors?sensor=imu&ts='+ts,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
     if(!running) return;
@@ -1595,7 +1640,20 @@ function loop(ts){ if(!running) return; var loopStart=performance.now(); var dt=
    } 
 
  } } var updateStart=performance.now(); if(!menuOpen){ updateEnemies(dt); updateProjectiles(dt); updateImpacts(); updateConeEffects(); updateDeathEffects(); step(dt); } var updateEnd=performance.now(); var drawStart=performance.now(); draw(); if(MODE3D){ drawConeEffects3D(); drawProjectiles3D(); drawImpacts3D(); drawEnemies3D(); } else { drawConeEffects2D(); drawProjectiles2D(); drawImpacts2D(); } drawHudOverlay(); drawMenuOverlay(); var drawEnd=performance.now(); var loopEnd=performance.now(); if(DEBUG_PERF){ var frameTime=loopEnd-loopStart; var updateTime=updateEnd-updateStart; var drawTime=drawEnd-drawStart; __perfFrames.push({total:frameTime,update:updateTime,draw:drawTime,dt:dt*1000,proj:projectiles.length,cone:coneEffects.length,enemy:enemies.length,impacts:impacts.length,gpValid:gpLast.valid,gpX:gpLast.x,gpY:gpLast.y}); var now=Date.now(); if(now-__perfLastLog>__perfLogInterval && __perfFrames.length>0){ var avgTotal=0,avgUpdate=0,avgDraw=0,avgDt=0,maxTotal=0,maxUpdate=0,maxDraw=0; for(var i=0;i<__perfFrames.length;i++){ var f=__perfFrames[i]; avgTotal+=f.total; avgUpdate+=f.update; avgDraw+=f.draw; avgDt+=f.dt; if(f.total>maxTotal)maxTotal=f.total; if(f.update>maxUpdate)maxUpdate=f.update; if(f.draw>maxDraw)maxDraw=f.draw; } var n=__perfFrames.length; avgTotal/=n; avgUpdate/=n; avgDraw/=n; avgDt/=n; var lastF=__perfFrames[__perfFrames.length-1]; try{ console.log('[PERF]','frames='+n,'avgTotal='+avgTotal.toFixed(1)+'ms','maxTotal='+maxTotal.toFixed(1)+'ms','avgUpdate='+avgUpdate.toFixed(1)+'ms','maxUpdate='+maxUpdate.toFixed(1)+'ms','avgDraw='+avgDraw.toFixed(1)+'ms','maxDraw='+maxDraw.toFixed(1)+'ms','avgDt='+avgDt.toFixed(1)+'ms','proj='+lastF.proj,'cone='+lastF.cone,'enemy='+lastF.enemy,'impacts='+lastF.impacts,'gpValid='+lastF.gpValid,'gpX='+lastF.gpX.toFixed(2),'gpY='+lastF.gpY.toFixed(2)); }catch(_){} __perfFrames=[]; __perfLastLog=now; } } requestAnimationFrame(loop); }
-function startGame(){ if(running) return; running=true; lastUpdate=0; calibrating=true; hasBaseline=false; calStableMs=0; CONTROL_MODE=MODE_STICK_AIM; selectPrimed=false; lastSelectDown=false; console.log('[CTRL] start CONTROL_MODE=', CONTROL_MODE); draw(); Promise.all([controlSensor('imu','start'), controlSensor('gamepad','start')]).then(function(){ polling=setInterval(pollIMU,60); requestAnimationFrame(loop); }); var chk=document.getElementById('chkCamFollow'); if(chk && chk.checked){ CAM_FOLLOW=true; } if(USE_GAMEPAD){ startGamepadPolling(); } updateHudInput(); }
+function startGame(){
+  if(!i2cEnabled){
+    alert('Cannot start game: I2C is disabled. Enable I2C in settings.');
+    return;
+  }
+  if(!imuCompiled){
+    alert('Cannot start game: IMU sensor not compiled into firmware.');
+    return;
+  }
+  if(!imuEnabled || !gamepadEnabled){
+    alert('Cannot start game: IMU and/or gamepad are disabled. Enable them in settings.');
+    return;
+  }
+  running=true; resetLevel(1); startCalibration(); lastUpdate=0; calibrating=true; hasBaseline=false; calStableMs=0; CONTROL_MODE=MODE_STICK_AIM; selectPrimed=false; lastSelectDown=false; console.log('[CTRL] start CONTROL_MODE=', CONTROL_MODE); draw(); Promise.all([controlSensor('imu','start'), controlSensor('gamepad','start')]).then(function(){ polling=setInterval(pollIMU,60); requestAnimationFrame(loop); }); var chk=document.getElementById('chkCamFollow'); if(chk && chk.checked){ CAM_FOLLOW=true; } if(USE_GAMEPAD){ startGamepadPolling(); } updateHudInput(); }
 function stopGame(){ running=false; if(polling){ try{ clearInterval(polling); }catch(_){} polling=null; } stopGamepadPolling(); controlSensor('imu','stop'); }
 function fwDebugOn(){ FW_DEBUG=true; var cmds=['debugsensorsgeneral 1','debugsensorsdata 1']; Promise.all(cmds.map(function(c){ return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(c)}).then(function(r){return r.text();}).catch(function(_){return '';}); })).then(function(){ startLogPoller(); }); }
 function fwDebugOff(){ FW_DEBUG=false; var cmds=['debugsensorsgeneral 0','debugsensorsdata 0']; Promise.all(cmds.map(function(c){ return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(c)}).then(function(r){return r.text();}).catch(function(_){return '';}); })).then(function(){ stopLogPoller(); }); }
@@ -1623,11 +1681,21 @@ var chkTexDebug=document.getElementById('chkTexDebug'); if(chkTexDebug){ chkTexD
 var chkFloorDebug=document.getElementById('chkFloorDebug'); if(chkFloorDebug){ chkFloorDebug.checked=false; DEBUG_FLOOR=false; }
 var chkDecorDebug=document.getElementById('chkDecorDebug'); if(chkDecorDebug){ chkDecorDebug.checked=true; DEBUG_DECORATIONS=true; }
 var chkCamFollow=document.getElementById('chkCamFollow'); if(chkCamFollow){ chkCamFollow.checked=true; CAM_FOLLOW=true; }
+checkSensorAvailability();
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);
 
   // Close games-wrap
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
 }
+
+void registerGamesHandlers(httpd_handle_t server);
+
+#else
+
+inline void streamGamesInner(httpd_req_t* req) { (void)req; }
+inline void registerGamesHandlers(httpd_handle_t server) { (void)server; }
+
+#endif
 
 #endif  // WEB_GAMES_H

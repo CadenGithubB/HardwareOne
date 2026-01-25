@@ -4,11 +4,8 @@
 #define I2CSENSOR_APDS9960_OLED_H
 
 #include "OLED_Display.h"
-#include <Adafruit_SSD1306.h>
-
-// Forward declaration for display function
-extern Adafruit_SSD1306* oledDisplay;
-extern bool oledConnected;
+#include "OLED_Utils.h"
+#include "HAL_Display.h"  // For gDisplay and oledDisplay macro alias
 
 // Display function for APDS OLED mode
 void displayAPDSData() {
@@ -52,19 +49,28 @@ static bool apdsOLEDModeAvailable(String* outReason) {
   return true;  // Always allow navigation
 }
 
+static void apdsToggleConfirmed(void* userData) {
+  (void)userData;
+  extern bool enqueueSensorStart(SensorType sensor);
+  extern bool isInQueue(SensorType sensor);
+
+  if (apdsColorEnabled || apdsProximityEnabled) {
+    Serial.println("[APDS] Confirmed: Stopping APDS sensor...");
+    apdsColorEnabled = false;
+    apdsProximityEnabled = false;
+  } else if (!isInQueue(SENSOR_APDS)) {
+    Serial.println("[APDS] Confirmed: Starting APDS sensor...");
+    enqueueSensorStart(SENSOR_APDS);
+  }
+}
+
 // Input handler for APDS OLED mode - X button toggles sensor
 static bool apdsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    extern bool enqueueSensorStart(SensorType sensor);
-    extern bool isInQueue(SensorType sensor);
-    
     if (apdsColorEnabled || apdsProximityEnabled) {
-      Serial.println("[APDS] X button: Stopping APDS sensor...");
-      apdsColorEnabled = false;
-      apdsProximityEnabled = false;
-    } else if (!isInQueue(SENSOR_APDS)) {
-      Serial.println("[APDS] X button: Starting APDS sensor...");
-      enqueueSensorStart(SENSOR_APDS);
+      oledConfirmRequest("Stop APDS?", nullptr, apdsToggleConfirmed, nullptr, false);
+    } else {
+      oledConfirmRequest("Start APDS?", nullptr, apdsToggleConfirmed, nullptr);
     }
     return true;
   }

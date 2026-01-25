@@ -4,6 +4,7 @@
 #define I2CSENSOR_MLX90640_OLED_H
 
 #include "OLED_Display.h"
+#include "OLED_Utils.h"
 #include <Adafruit_SSD1306.h>
 
 // Thermal OLED display function - shows thermal visualization
@@ -108,18 +109,27 @@ static bool thermalOLEDModeAvailable(String* outReason) {
   return true;  // Always allow navigation, display function handles "not active" state
 }
 
+static void thermalToggleConfirmed(void* userData) {
+  (void)userData;
+  extern bool enqueueSensorStart(SensorType sensor);
+  extern bool isInQueue(SensorType sensor);
+
+  if (thermalEnabled && thermalConnected) {
+    Serial.println("[THERMAL] Confirmed: Stopping thermal sensor...");
+    thermalEnabled = false;
+  } else if (!isInQueue(SENSOR_THERMAL)) {
+    Serial.println("[THERMAL] Confirmed: Starting thermal sensor...");
+    enqueueSensorStart(SENSOR_THERMAL);
+  }
+}
+
 // Input handler for Thermal OLED mode - X button toggles sensor
 static bool thermalInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    extern bool enqueueSensorStart(SensorType sensor);
-    extern bool isInQueue(SensorType sensor);
-    
     if (thermalEnabled && thermalConnected) {
-      Serial.println("[THERMAL] X button: Stopping thermal sensor...");
-      thermalEnabled = false;
-    } else if (!isInQueue(SENSOR_THERMAL)) {
-      Serial.println("[THERMAL] X button: Starting thermal sensor...");
-      enqueueSensorStart(SENSOR_THERMAL);
+      oledConfirmRequest("Stop Thermal?", nullptr, thermalToggleConfirmed, nullptr, false);
+    } else {
+      oledConfirmRequest("Start Thermal?", nullptr, thermalToggleConfirmed, nullptr);
     }
     return true;  // Input handled
   }

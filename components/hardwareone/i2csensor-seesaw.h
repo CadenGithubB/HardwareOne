@@ -32,10 +32,14 @@ extern ControlCache gControlCache;
 // Seesaw gamepad button bit masks (active-low, so invert before checking)
 #define GAMEPAD_BUTTON_SELECT (1 << 0)   // Select button
 #define GAMEPAD_BUTTON_B      (1 << 1)   // Button B
-#define GAMEPAD_BUTTON_Y      (1 << 4)   // Button Y
+#define GAMEPAD_BUTTON_Y      (1 << 2)   // Button Y
 #define GAMEPAD_BUTTON_A      (1 << 5)   // Button A (Select/Confirm)
 #define GAMEPAD_BUTTON_X      (1 << 6)   // Button X
 #define GAMEPAD_BUTTON_START  (1 << 16)  // Start button
+
+// Combined mask for all buttons (use this in digitalReadBulk)
+#define GAMEPAD_BUTTON_MASK   (GAMEPAD_BUTTON_SELECT | GAMEPAD_BUTTON_B | GAMEPAD_BUTTON_Y | \
+                               GAMEPAD_BUTTON_A | GAMEPAD_BUTTON_X | GAMEPAD_BUTTON_START)
 
 // Joystick calibration constants (global for all input handling)
 #define JOYSTICK_CENTER       512        // Joystick center position

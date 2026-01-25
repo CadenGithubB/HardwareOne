@@ -14,6 +14,7 @@
 #include <Wire.h>
 
 #include "System_BuildConfig.h"
+#include "System_Debug.h"
 
 // Forward declarations
 void broadcastOutput(const char* s);
@@ -128,7 +129,9 @@ enum SensorType {
   SENSOR_GAMEPAD = 3,
   SENSOR_GPS = 4,
   SENSOR_FMRADIO = 5,
-  SENSOR_APDS = 6
+  SENSOR_APDS = 6,
+  SENSOR_RTC = 7,
+  SENSOR_PRESENCE = 8
 };
 
 struct SensorStartRequest {
@@ -196,7 +199,8 @@ public:
   // Bus operations
   void initBuses();
   void performBusRecovery();
-  void healthCheck();
+  void healthCheck();  // DEPRECATED: Now event-driven via checkBusRecoveryNeeded()
+  void checkBusRecoveryNeeded();  // Event-driven recovery check (called when device degrades)
   void discoverDevices();
   
   // Sensor lifecycle
@@ -236,12 +240,20 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
                                           I2CDevice::Mode mode) -> decltype(operation()) {
   using ReturnType = decltype(operation());
   
-  if (!device || !busMutex) return ReturnType();
+  if (!device || !busMutex) {
+    DEBUG_I2CF("[TX] ABORT: device=%p busMutex=%p", device, busMutex);
+    return ReturnType();
+  }
   
   // Check if device is degraded (allow recovery after timeout)
   if (device->isDegraded()) {
+    DEBUG_I2CF("[TX] SKIP 0x%02X (%s): device degraded", device->address, device->name);
     return ReturnType();
   }
+  
+  // DEBUG_I2CF("[TX] START 0x%02X (%s) clock=%luHz timeout=%lums",
+  //            device->address, device->name, 
+  //            (unsigned long)device->clockHz, (unsigned long)device->adaptiveTimeoutMs);
   
   // Track transaction start
   uint32_t startUs = micros();
@@ -254,17 +266,34 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
   
   if (acquired != pdTRUE) {
     busMetrics.mutexTimeouts++;
+    DEBUG_I2CF("[TX] MUTEX_TIMEOUT 0x%02X (%s) waited=%luus",
+               device->address, device->name, (unsigned long)waitUs);
     return ReturnType();
   }
   
+  // Verbose mutex contention logging disabled - too noisy
+  // if (waitUs > 1000) {
+  //   DEBUG_I2CF("[TX] MUTEX_CONTENTION 0x%02X (%s) waited=%luus",
+  //              device->address, device->name, (unsigned long)waitUs);
+  // }
+  (void)waitUs;  // Suppress unused warning
+  
   // Push clock to stack
   if (!clockStackPush(device->clockHz)) {
+    DEBUG_I2CF("[TX] CLOCK_STACK_OVERFLOW 0x%02X (%s)", device->address, device->name);
     xSemaphoreGiveRecursive(busMutex);
     return ReturnType();
   }
   
   // Set device clock
+  uint32_t prevClock = currentClockHz;
   setWire1Clock(device->clockHz);
+  // Verbose clock change logging disabled - issue resolved
+  // if (prevClock != device->clockHz) {
+  //   DEBUG_I2CF("[TX] CLOCK_CHANGE 0x%02X: %luHz -> %luHz",
+  //              device->address, (unsigned long)prevClock, (unsigned long)device->clockHz);
+  // }
+  (void)prevClock;  // Suppress unused warning
   
   // Execute operation and track duration
   uint32_t txStartUs = micros();
@@ -277,6 +306,11 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
     // Restore clock
     clockStackPop();
     uint32_t restoreClock = clockStackTopOrDefault();
+    // Verbose clock restore logging disabled - issue resolved
+    // if (restoreClock != device->clockHz) {
+    //   DEBUG_I2CF("[TX] CLOCK_RESTORE 0x%02X: %luHz -> %luHz",
+    //              device->address, (unsigned long)device->clockHz, (unsigned long)restoreClock);
+    // }
     setWire1Clock(restoreClock);
     
     // Release mutex
@@ -284,6 +318,9 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
     
     // Update metrics
     updateMetrics(waitUs, txDurationUs, device->clockHz);
+    
+    // DEBUG_I2CF("[TX] DONE 0x%02X (%s) duration=%luus result=void",
+    //            device->address, device->name, (unsigned long)txDurationUs);
     
     // Health tracking (mode-dependent)
     if (mode != I2CDevice::Mode::NACK_TOLERANT) {
@@ -298,6 +335,11 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
     // Restore clock
     clockStackPop();
     uint32_t restoreClock = clockStackTopOrDefault();
+    // Verbose clock restore logging disabled - issue resolved
+    // if (restoreClock != device->clockHz) {
+    //   DEBUG_I2CF("[TX] CLOCK_RESTORE 0x%02X: %luHz -> %luHz",
+    //              device->address, (unsigned long)device->clockHz, (unsigned long)restoreClock);
+    // }
     setWire1Clock(restoreClock);
     
     // Release mutex
@@ -307,17 +349,27 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
     updateMetrics(waitUs, txDurationUs, device->clockHz);
     
     // Health tracking (mode-dependent)
+    // Verbose transaction complete logging disabled - issue resolved
     if (mode != I2CDevice::Mode::NACK_TOLERANT) {
       if constexpr (std::is_same<ReturnType, bool>::value) {
+        // DEBUG_I2CF("[TX] DONE 0x%02X (%s) duration=%luus result=%s",
+        //            device->address, device->name, (unsigned long)txDurationUs,
+        //            result ? "OK" : "FAIL");
         if (result) {
           device->recordSuccess();
         } else {
           device->recordError(I2CErrorType::NACK, 0x02);
         }
       } else {
+        // DEBUG_I2CF("[TX] DONE 0x%02X (%s) duration=%luus",
+        //            device->address, device->name, (unsigned long)txDurationUs);
         device->recordSuccess();
       }
+    } else {
+      // DEBUG_I2CF("[TX] DONE 0x%02X (%s) duration=%luus (NACK_TOLERANT)",
+      //            device->address, device->name, (unsigned long)txDurationUs);
     }
+    (void)txDurationUs;  // Suppress unused warning
     
     return result;
   }

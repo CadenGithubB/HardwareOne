@@ -49,27 +49,41 @@ extern void fsUnlock();
 // Settings Command Implementations (moved from .ino)
 // ============================================================================
 
-const char* cmd_clihistorysize(const String& originalCmd) {
+const char* cmd_webclihistorysize(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: cliHistorySize <1..100>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: webclihistorysize <1..100>";
   int v = valStr.toInt();
   if (v < 1) v = 1;
   if (v > 100) v = 100;
-  gSettings.cliHistorySize = v;
+  gSettings.webCliHistorySize = v;
   writeSettingsJson();
-  snprintf(getDebugBuffer(), 1024, "cliHistorySize set to %d", v);
+  snprintf(getDebugBuffer(), 1024, "webCliHistorySize set to %d", v);
   return getDebugBuffer();
 }
 
-const char* cmd_outserial(const String& originalCmd) {
+const char* cmd_oledclihistorysize(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  String a = (sp1 >= 0) ? originalCmd.substring(sp1 + 1) : String();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  String valStr = args;
+  valStr.trim();
+  if (valStr.length() == 0) return "Usage: oledclihistorysize <10..100>";
+  int v = valStr.toInt();
+  if (v < 10) v = 10;  // Minimum 10 lines for OLED
+  if (v > 100) v = 100;
+  gSettings.oledCliHistorySize = v;
+  writeSettingsJson();
+  snprintf(getDebugBuffer(), 1024, "oledCliHistorySize set to %d (requires reboot)", v);
+  return getDebugBuffer();
+}
+
+const char* cmd_outserial(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String a = args;
   a.trim();
   String t1, t2;
   int sp2 = a.indexOf(' ');
@@ -110,10 +124,9 @@ const char* cmd_outserial(const String& originalCmd) {
   }
 }
 
-const char* cmd_outweb(const String& originalCmd) {
+const char* cmd_outweb(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  String a = (sp1 >= 0) ? originalCmd.substring(sp1 + 1) : String();
+  String a = args;
   a.trim();
   String t1, t2;
   int sp2 = a.indexOf(' ');
@@ -181,7 +194,8 @@ const CommandEntry settingsCommands[] = {
   // Note: I2C settings are now handled by the modular registry in i2c_system.cpp
   
   // ---- CLI Settings ----
-  { "clihistorysize", "Set CLI history size.", true, cmd_clihistorysize, "Usage: cliHistorySize <1..100>" },
+  { "webclihistorysize", "Set web CLI history size.", true, cmd_webclihistorysize, "Usage: webclihistorysize <1..100>" },
+  { "oledclihistorysize", "Set OLED CLI history size (lines).", true, cmd_oledclihistorysize, "Usage: oledclihistorysize <10..100>" },
 };
 
 const size_t settingsCommandsCount = sizeof(settingsCommands) / sizeof(settingsCommands[0]);
@@ -359,6 +373,8 @@ void applySettings() {
   if (gSettings.debugSensorsFrame) setDebugFlag(DEBUG_SENSORS_FRAME);
   if (gSettings.debugSensorsData) setDebugFlag(DEBUG_SENSORS_DATA);
   if (gSettings.debugSensorsGeneral) setDebugFlag(DEBUG_SENSORS);
+  if (gSettings.debugCamera) setDebugFlag(DEBUG_CAMERA);
+  if (gSettings.debugMicrophone) setDebugFlag(DEBUG_MICROPHONE);
   if (gSettings.debugWifi) setDebugFlag(DEBUG_WIFI);
   if (gSettings.debugStorage) setDebugFlag(DEBUG_STORAGE);
   if (gSettings.debugPerformance) setDebugFlag(DEBUG_PERFORMANCE);
@@ -382,6 +398,7 @@ void applySettings() {
   if (gSettings.debugAutoCondition) setDebugFlag(DEBUG_AUTO_CONDITION);
   if (gSettings.debugAutoTiming) setDebugFlag(DEBUG_AUTO_TIMING);
   if (gSettings.debugFmRadio) setDebugFlag(DEBUG_FMRADIO);
+  if (gSettings.debugI2C) setDebugFlag(DEBUG_I2C);
 
   // Apply debug sub-flags to gDebugSubFlags and update parent flags
   // Auth sub-flags
@@ -501,7 +518,8 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
   doc["tzOffsetMinutes"] = gSettings.tzOffsetMinutes;
   doc["wifiEnabled"] = gSettings.wifiEnabled;
   doc["wifiAutoReconnect"] = gSettings.wifiAutoReconnect;
-  doc["cliHistorySize"] = gSettings.cliHistorySize;
+  doc["webCliHistorySize"] = gSettings.webCliHistorySize;
+  doc["oledCliHistorySize"] = gSettings.oledCliHistorySize;
   
   // ESP-NOW settings (nested structure)
   JsonObject espnowObj = doc["espnow"].to<JsonObject>();
@@ -538,7 +556,9 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
     doc["wifiSSID"] = gSettings.wifiSSID;
   }
   
+#if ENABLE_AUTOMATION
   doc["automationsEnabled"] = gSettings.automationsEnabled;
+#endif
 
   // Power management settings
   JsonObject powerObj = doc["power"].to<JsonObject>();
@@ -750,7 +770,8 @@ bool readSettingsJson() {
   // Top-level settings with defaults (| operator provides fallback)
   gSettings.wifiEnabled = doc["wifiEnabled"] | true;
   gSettings.wifiAutoReconnect = doc["wifiAutoReconnect"] | true;
-  gSettings.cliHistorySize = doc["cliHistorySize"] | 10;
+  gSettings.webCliHistorySize = doc["webCliHistorySize"] | 10;
+  gSettings.oledCliHistorySize = doc["oledCliHistorySize"] | 50;
   gSettings.ntpServer = doc["ntpServer"] | "pool.ntp.org";
   gSettings.tzOffsetMinutes = doc["tzOffsetMinutes"] | 0;
 
@@ -781,8 +802,10 @@ bool readSettingsJson() {
     gSettings.meshHeartbeatBroadcast = espnow["heartbeatBroadcast"] | false;
   }
   
+#if ENABLE_AUTOMATION
   // Automation settings
   gSettings.automationsEnabled = doc["automationsEnabled"] | false;
+#endif
 
   // Power management settings
   JsonObject power = doc["power"];
@@ -984,6 +1007,7 @@ static const SettingEntry debugSettingEntries[] = {
   { "commandSystem", SETTING_BOOL, &gSettings.debugCommandSystem, 0, 0, nullptr, 0, 1, "Command System", nullptr },
   { "settingsSystem", SETTING_BOOL, &gSettings.debugSettingsSystem, 0, 0, nullptr, 0, 1, "Settings System", nullptr },
   { "fmRadio", SETTING_BOOL, &gSettings.debugFmRadio, 0, 0, nullptr, 0, 1, "FM Radio", nullptr },
+  { "i2c", SETTING_BOOL, &gSettings.debugI2C, 1, 0, nullptr, 0, 1, "I2C Bus", nullptr },
   { "authSessions", SETTING_BOOL, &gSettings.debugAuthSessions, 0, 0, nullptr, 0, 1, "Auth Sessions", nullptr },
   { "authCookies", SETTING_BOOL, &gSettings.debugAuthCookies, 0, 0, nullptr, 0, 1, "Auth Cookies", nullptr },
   { "authLogin", SETTING_BOOL, &gSettings.debugAuthLogin, 0, 0, nullptr, 0, 1, "Auth Login", nullptr },
@@ -1085,7 +1109,9 @@ extern const SettingsModule httpSettingsModule;
 #if ENABLE_ESPNOW
 extern const SettingsModule espnowSettingsModule;
 #endif
+#if ENABLE_AUTOMATION
 extern const SettingsModule automationSettingsModule;
+#endif
 extern const SettingsModule powerSettingsModule;
 extern const SettingsModule ledSettingsModule;
 #if ENABLE_OLED_DISPLAY
@@ -1115,6 +1141,23 @@ extern const SettingsModule gpsSettingsModule;
 #if ENABLE_FMRADIO_SENSOR
 extern const SettingsModule fmRadioSettingsModule;
 #endif
+#if ENABLE_RTC_SENSOR
+extern const SettingsModule rtcSettingsModule;
+#endif
+
+#if ENABLE_PRESENCE_SENSOR
+extern const SettingsModule presenceSettingsModule;
+#endif
+
+#if ENABLE_CAMERA_SENSOR
+extern const SettingsModule cameraSettingsModule;
+#endif
+#if ENABLE_MICROPHONE_SENSOR
+extern const SettingsModule micSettingsModule;
+#endif
+#if ENABLE_EDGE_IMPULSE
+extern const SettingsModule edgeImpulseSettingsModule;
+#endif
 
 void registerAllSettingsModules() {
   if (gSettingsModulesRegistered) return;  // Only register once
@@ -1125,7 +1168,9 @@ void registerAllSettingsModules() {
   registerSettingsModule(&outputSettingsModule);
   registerSettingsModule(&i2cSettingsModule);
   registerSettingsModule(&cliSettingsModule);
+#if ENABLE_AUTOMATION
   registerSettingsModule(&automationSettingsModule);
+#endif
   registerSettingsModule(&powerSettingsModule);
   registerSettingsModule(&ledSettingsModule);
   
@@ -1167,6 +1212,23 @@ void registerAllSettingsModules() {
 #endif
 #if ENABLE_FMRADIO_SENSOR
   registerSettingsModule(&fmRadioSettingsModule);
+#endif
+#if ENABLE_RTC_SENSOR
+  registerSettingsModule(&rtcSettingsModule);
+#endif
+
+#if ENABLE_PRESENCE_SENSOR
+  registerSettingsModule(&presenceSettingsModule);
+#endif
+
+#if ENABLE_CAMERA_SENSOR
+  registerSettingsModule(&cameraSettingsModule);
+#endif
+#if ENABLE_MICROPHONE_SENSOR
+  registerSettingsModule(&micSettingsModule);
+#endif
+#if ENABLE_EDGE_IMPULSE
+  registerSettingsModule(&edgeImpulseSettingsModule);
 #endif
 
   DEBUG_SYSTEMF("[Settings] All %zu modules registered", gSettingsModuleCount);

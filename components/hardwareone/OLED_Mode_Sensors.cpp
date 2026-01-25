@@ -10,6 +10,14 @@
 #include "System_Settings.h"
 #include "System_I2C.h"
 
+#if ENABLE_RTC_SENSOR
+#include "i2csensor-ds3231.h"
+#endif
+
+#if ENABLE_PRESENCE_SENSOR
+#include "i2csensor-sths34pf80.h"
+#endif
+
 // External references
 extern Adafruit_SSD1306* oledDisplay;
 extern bool oledConnected;
@@ -28,6 +36,8 @@ extern bool gpsEnabled;
 extern bool gamepadConnected;
 extern bool gamepadEnabled;
 extern bool apdsConnected;
+extern bool presenceConnected;
+extern bool presenceEnabled;
 
 // Device registry
 extern ConnectedDevice connectedDevices[];
@@ -258,6 +268,30 @@ void displaySensorData() {
   oledDisplay->print("Gamepad: ");
   if (gamepadConnected && gamepadEnabled) {
     oledDisplay->println("ON");
+    activeCount++;
+  } else {
+    oledDisplay->println("off");
+  }
+#endif
+
+  // RTC sensor status
+#if ENABLE_RTC_SENSOR
+  totalCount++;
+  oledDisplay->print("RTC:     ");
+  if (rtcConnected && rtcEnabled) {
+    oledDisplay->println("ON");
+    activeCount++;
+  } else {
+    oledDisplay->println("off");
+  }
+#endif
+
+  // Presence sensor status
+#if ENABLE_PRESENCE_SENSOR
+  totalCount++;
+  oledDisplay->print("Presence:");
+  if (presenceConnected && presenceEnabled) {
+    oledDisplay->println(" ON");
     activeCount++;
   } else {
     oledDisplay->println("off");

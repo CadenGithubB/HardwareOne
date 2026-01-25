@@ -27,7 +27,22 @@
 #include "System_Command.h"  // For CommandModuleRegistrar
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
+#include "i2csensor-ds3231.h"  // RTC for time functions
 #include "System_Utils.h"
+
+extern "C" {
+  extern uint8_t _bss_start;
+  extern uint8_t _bss_end;
+  extern uint8_t _noinit_start;
+  extern uint8_t _noinit_end;
+  extern uint8_t _ext_ram_bss_start;
+  extern uint8_t _ext_ram_bss_end;
+  extern uint8_t _ext_ram_noinit_start;
+  extern uint8_t _ext_ram_noinit_end;
+}
+
+// Settings save function
+extern bool writeSettingsJson();
 
 // ============================================================================
 // Task Execution Performance Monitoring Implementation
@@ -91,20 +106,56 @@ void resetTaskMetrics() {
 extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 
 // Extern declarations for command arrays moved to individual modules
+#if ENABLE_THERMAL_SENSOR
 extern const CommandEntry thermalCommands[];
 extern const size_t thermalCommandsCount;
+#endif
+#if ENABLE_TOF_SENSOR
 extern const CommandEntry tofCommands[];
 extern const size_t tofCommandsCount;
+#endif
+#if ENABLE_IMU_SENSOR
 extern const CommandEntry imuCommands[];
 extern const size_t imuCommandsCount;
+#endif
+#if ENABLE_GAMEPAD_SENSOR
 extern const CommandEntry gamepadCommands[];
 extern const size_t gamepadCommandsCount;
+#endif
+#if ENABLE_APDS_SENSOR
 extern const CommandEntry apdsCommands[];
 extern const size_t apdsCommandsCount;
+#endif
+#if ENABLE_GPS_SENSOR
 extern const CommandEntry gpsCommands[];
 extern const size_t gpsCommandsCount;
+#endif
+#if ENABLE_FM_RADIO
 extern const CommandEntry fmRadioCommands[];
 extern const size_t fmRadioCommandsCount;
+#endif
+#if ENABLE_RTC_SENSOR
+extern const CommandEntry rtcCommands[];
+extern const size_t rtcCommandsCount;
+#endif
+#if ENABLE_PRESENCE_SENSOR
+extern const CommandEntry presenceCommands[];
+extern const size_t presenceCommandsCount;
+#endif
+#if ENABLE_CAMERA_SENSOR
+extern const CommandEntry cameraCommands[];
+extern const size_t cameraCommandsCount;
+extern bool cameraConnected;
+#endif
+#if ENABLE_EDGE_IMPULSE
+extern const CommandEntry edgeImpulseCommands[];
+extern const size_t edgeImpulseCommandsCount;
+#endif
+#if ENABLE_MICROPHONE_SENSOR
+extern const CommandEntry micCommands[];
+extern const size_t micCommandsCount;
+extern bool micConnected;
+#endif
 extern const CommandEntry userSystemCommands[];
 extern const size_t userSystemCommandsCount;
 
@@ -475,6 +526,21 @@ String jsonEscape(const String& in) {
   return out;
 }
 
+int serializeJsonArrayWithRepair(JsonArray& arr, char* buf, size_t bufSize, const char* context) {
+  size_t len = serializeJson(arr, buf, bufSize);
+  int removed = 0;
+  while (len >= bufSize && arr.size() > 0) {
+    arr.remove(0);  // Remove oldest (first) entry
+    removed++;
+    len = serializeJson(arr, buf, bufSize);
+  }
+  if (removed > 0) {
+    WARN_MEMORYF("%s JSON overflow: removed %d oldest entries to fit %zu byte buffer", 
+                 context, removed, bufSize);
+  }
+  return removed;
+}
+
 // ============================================================================
 // Date/Time Formatting Utilities
 // ============================================================================
@@ -622,6 +688,8 @@ bool writeText(const char* path, const String& in) {
 // ============================================================================
 // Command Audit Logging (Always-On)
 // ============================================================================
+
+extern bool gCLIValidateOnly;
 
 /**
  * Log command execution to audit file
@@ -938,10 +1006,10 @@ const char* cmd_voltage(const String& originalCmd) {
   return "[System] Voltage info displayed";
 }
 
-const char* cmd_cpufreq(const String& originalCmd) {
+const char* cmd_cpufreq(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = originalCmd.substring(7);  // "cpufreq "
+  String args = argsIn;
   args.trim();
 
   uint32_t currentFreq = getCpuFrequencyMhz();
@@ -974,15 +1042,14 @@ const char* cmd_cpufreq(const String& originalCmd) {
 #include <esp_sleep.h>
 #include "OLED_Display.h"
 
-const char* cmd_lightsleep(const String& originalCmd) {
+const char* cmd_lightsleep(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Parse optional duration (default 20 seconds)
   int seconds = 20;
-  int sp = originalCmd.indexOf(' ');
-  if (sp > 0) {
-    String arg = originalCmd.substring(sp + 1);
-    arg.trim();
+  String arg = args;
+  arg.trim();
+  if (arg.length() > 0) {
     int val = arg.toInt();
     if (val > 0 && val <= 3600) {
       seconds = val;
@@ -1025,7 +1092,7 @@ const char* cmd_status(const String& cmd) {
 #else
   BROADCAST_PRINTF("  WiFi: Disabled");
 #endif
-  BROADCAST_PRINTF("  Filesystem: %s", LittleFS.begin() ? "Ready" : "Error");
+  BROADCAST_PRINTF("  Filesystem: %s", filesystemReady ? "Ready" : "Error");
   BROADCAST_PRINTF("  Free Heap: %lu bytes", (unsigned long)ESP.getFreeHeap());
 
   size_t psTot = ESP.getPsramSize();
@@ -1047,6 +1114,113 @@ const char* cmd_uptime(const String& cmd) {
   return "[System] Uptime displayed";
 }
 
+const char* cmd_time(const String& cmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  
+  // Show uptime in milliseconds
+  unsigned long uptimeMs = millis();
+  BROADCAST_PRINTF("Uptime: %lu ms", uptimeMs);
+  
+  // Priority: RTC (primary) -> NTP (fallback)
+#if ENABLE_RTC_SENSOR
+  if (rtcEnabled && rtcConnected) {
+    // RTC is primary time source
+    RTCDateTime dt;
+    if (rtcReadDateTime(&dt)) {
+      char timeBuf[32];
+      snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
+               dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+      BROADCAST_PRINTF("Time: %s (RTC)", timeBuf);
+      BROADCAST_PRINTF("Temp: %.1f C", rtcReadTemperature());
+      return "OK";
+    }
+  }
+#endif
+
+  // Fallback to NTP/system time if RTC not available
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 0)) {
+    char timeBuf[32];
+    strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
+    BROADCAST_PRINTF("Time: %s (NTP)", timeBuf);
+  } else {
+    broadcastOutput("Time: Not synced (no RTC or NTP)");
+  }
+  
+  return "OK";
+}
+
+const char* cmd_timeset(const String& cmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  
+  String arg = cmd;
+  arg.trim();
+  
+  if (arg.length() == 0) {
+    return "Usage: timeset YYYY-MM-DD HH:MM:SS  or  timeset <unix_timestamp>";
+  }
+  
+  struct tm timeinfo = {0};
+  time_t t;
+  
+  // Check if it's a unix timestamp (all digits)
+  bool isUnix = true;
+  for (size_t i = 0; i < arg.length(); i++) {
+    if (!isDigit(arg[i])) {
+      isUnix = false;
+      break;
+    }
+  }
+  
+  if (isUnix) {
+    t = (time_t)arg.toInt();
+    localtime_r(&t, &timeinfo);
+  } else {
+    // Parse YYYY-MM-DD HH:MM:SS
+    int year, month, day, hour, minute, second;
+    if (sscanf(arg.c_str(), "%d-%d-%d %d:%d:%d", 
+               &year, &month, &day, &hour, &minute, &second) != 6) {
+      return "Invalid format. Use: YYYY-MM-DD HH:MM:SS or unix timestamp";
+    }
+    
+    timeinfo.tm_year = year - 1900;
+    timeinfo.tm_mon = month - 1;
+    timeinfo.tm_mday = day;
+    timeinfo.tm_hour = hour;
+    timeinfo.tm_min = minute;
+    timeinfo.tm_sec = second;
+    timeinfo.tm_isdst = -1;
+    t = mktime(&timeinfo);
+  }
+  
+  // Set system time
+  struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
+  settimeofday(&tv, nullptr);
+  
+  // Also update RTC if available
+#if ENABLE_RTC_SENSOR
+  if (rtcEnabled && rtcConnected) {
+    rtcSyncFromSystem();
+    broadcastOutput("System time and RTC updated");
+    // Mark RTC as calibrated so future boots trust RTC first
+    if (!gSettings.rtcTimeHasBeenSet) {
+      gSettings.rtcTimeHasBeenSet = true;
+      writeSettingsJson();
+      broadcastOutput("RTC marked as calibrated for future boots");
+    }
+  } else {
+    broadcastOutput("System time updated (RTC not available)");
+  }
+#else
+  broadcastOutput("System time updated");
+#endif
+  
+  char timeBuf[32];
+  strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
+  BROADCAST_PRINTF("Time set to: %s", timeBuf);
+  
+  return "OK";
+}
 
 extern bool filesystemReady;  // From filesystem.cpp
 
@@ -1077,10 +1251,10 @@ extern String decryptWifiPassword(const String& encrypted);
 extern String hashUserPassword(const String& plaintext);
 extern bool verifyUserPassword(const String& plaintext, const String& hash);
 
-const char* cmd_testencryption(const String& originalCmd) {
+const char* cmd_testencryption(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = originalCmd.substring(15);  // Remove "testencryption "
+  String args = argsIn;
   args.trim();
 
   if (args.length() == 0) {
@@ -1099,10 +1273,10 @@ const char* cmd_testencryption(const String& originalCmd) {
   return "[System] Encryption test complete";
 }
 
-const char* cmd_testpassword(const String& originalCmd) {
+const char* cmd_testpassword(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = originalCmd.substring(13);  // Remove "testpassword "
+  String args = argsIn;
   args.trim();
 
   if (args.length() == 0) {
@@ -1131,20 +1305,21 @@ const char* cmd_reboot(const String& originalCmd) {
   return "[System] Rebooting";  // Won't actually return due to restart
 }
 
-const char* cmd_broadcast(const String& cmd) {
+const char* cmd_broadcast(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = cmd.indexOf(' ');
-  if (sp < 0) return "Usage: broadcast <message>";
-  String msg = cmd.substring(sp + 1);
+  String msg = args;
+  msg.trim();
+  if (msg.length() == 0) return "Usage: broadcast <message>";
   broadcastOutput(msg);
   return "[System] Message broadcast";
 }
 
-const char* cmd_wait(const String& cmd) {
+const char* cmd_wait(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = cmd.indexOf(' ');
-  if (sp < 0) return "Usage: wait <ms>";
-  int ms = cmd.substring(sp + 1).toInt();
+  String val = args;
+  val.trim();
+  if (val.length() == 0) return "Usage: wait <ms>";
+  int ms = val.toInt();
   if (ms > 0 && ms <= 60000) delay(ms);
   return "[System] Wait complete";
 }
@@ -1271,6 +1446,22 @@ bool syncNTPAndResolve() {
   if (ntpSynced) {
     DEBUG_DATETIMEF("[syncNTPAndResolve] NTP sync completed successfully");
     broadcastOutput("[OK] NTP time synchronized successfully");
+    
+    // Sync RTC from NTP time to keep RTC accurate
+#if ENABLE_RTC_SENSOR
+    if (rtcEnabled && rtcConnected) {
+      if (rtcSyncFromSystem()) {
+        broadcastOutput("[OK] RTC updated from NTP time");
+        // Mark RTC as calibrated so future boots trust RTC first
+        if (!gSettings.rtcTimeHasBeenSet) {
+          gSettings.rtcTimeHasBeenSet = true;
+          writeSettingsJson();
+          broadcastOutput("[OK] RTC marked as calibrated for future boots");
+        }
+      }
+    }
+#endif
+    
     Serial.println("[DEBUG] About to call resolvePendingUserCreationTimes");
     Serial.flush();
     resolvePendingUserCreationTimes();
@@ -1288,7 +1479,20 @@ bool syncNTPAndResolve() {
                     WiFi.isConnected() ? "OK" : "FAIL",
                     WiFi.dnsIP().toString().c_str(),
                     WiFi.gatewayIP().toString().c_str());
-    broadcastOutput("[ERROR] NTP sync timeout - continuing with local time");
+    
+    // Try RTC as fallback time source
+#if ENABLE_RTC_SENSOR
+    if (rtcEnabled && rtcConnected) {
+      if (rtcSyncToSystem()) {
+        broadcastOutput("[OK] System time set from RTC (NTP unavailable)");
+        resolvePendingUserCreationTimes();
+        notifyAutomationScheduler();
+        return true;
+      }
+    }
+#endif
+    
+    broadcastOutput("[ERROR] NTP sync timeout - no RTC available");
     broadcastOutput("  Note: Your router may be blocking NTP (UDP port 123)");
     return false;
   }
@@ -1318,6 +1522,8 @@ const CommandEntry commands[] = {
   // ---- Core / General ----
   { "status", "Show system status (WiFi, FS, memory).", false, cmd_status },
   { "uptime", "Show device uptime.", false, cmd_uptime },
+  { "time", "Show device time (uptime + NTP if synced).", false, cmd_time },
+  { "timeset", "Set time manually: timeset YYYY-MM-DD HH:MM:SS or <unix_timestamp>.", false, cmd_timeset },
   { "memsample", "Memory snapshot with component requirements. Use 'memsample track [on|off|reset|status]' for allocation tracking.", false, cmd_memsample },
   { "memreport", "Comprehensive memory report (Task Manager style).", false, cmd_memreport },
   { "fsusage", "Show filesystem usage.", false, cmd_fsusage },
@@ -1377,15 +1583,46 @@ static const CommandModule gCommandModules[] = {
   { "oled",       "OLED display control and graphics", oledCommands,         oledCommandsCount, 0, nullptr },
   { "neopixel",   "RGB LED strip and effects", neopixelCommands,     neopixelCommandsCount, 0, nullptr },
   { "servo",      "PCA9685 servo motor control", servoCommands,        servoCommandsCount, 0, nullptr },
+#if ENABLE_THERMAL_SENSOR
   { "thermal",    "MLX90640 thermal camera (32x24)", thermalCommands,      thermalCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("thermal"); } },
+#endif
+#if ENABLE_TOF_SENSOR
   { "tof",        "VL53L4CX time-of-flight distance sensor", tofCommands,          tofCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("tof"); } },
+#endif
+#if ENABLE_IMU_SENSOR
   { "imu",        "BNO055 9-DOF orientation sensor", imuCommands,          imuCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("imu"); } },
+#endif
+#if ENABLE_GAMEPAD_SENSOR
   { "gamepad",    "Seesaw gamepad controller", gamepadCommands,      gamepadCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("gamepad"); } },
+#endif
+#if ENABLE_APDS_SENSOR
   { "apds",       "APDS9960 color, proximity, gesture sensor", apdsCommands,         apdsCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("apds"); } },
+#endif
+#if ENABLE_GPS_SENSOR
   { "gps",        "PA1010D GPS module", gpsCommands,          gpsCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("gps"); } },
+#endif
+#if ENABLE_FM_RADIO
   { "fmradio",    "RDA5807 FM radio receiver", fmRadioCommands,      fmRadioCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("fmradio"); } },
+#endif
+#if ENABLE_RTC_SENSOR
+  { "rtc",        "DS3231 precision RTC", rtcCommands,          rtcCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("rtc"); } },
+#endif
+#if ENABLE_PRESENCE_SENSOR
+  { "presence",   "STHS34PF80 IR presence/motion sensor", presenceCommands,     presenceCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("presence"); } },
+#endif
+#if ENABLE_CAMERA_SENSOR
+  { "camera",     "ESP32-S3 DVP camera sensor", cameraCommands,       cameraCommandsCount, CMD_MODULE_SENSOR, []() { return cameraConnected; } },
+#endif
+#if ENABLE_MICROPHONE_SENSOR
+  { "microphone", "PDM microphone audio sensor", micCommands,          micCommandsCount, CMD_MODULE_SENSOR, []() { return micConnected; } },
+#endif
+#if ENABLE_EDGE_IMPULSE
+  { "edgeimpulse", "Edge Impulse ML inference", edgeImpulseCommands,  edgeImpulseCommandsCount, CMD_MODULE_SENSOR, nullptr },
+#endif
   { "i2c",        "I2C bus diagnostics and scanning", i2cCommands,          i2cCommandsCount, 0, nullptr },
+#if ENABLE_AUTOMATION
   { "automation", "Scheduled tasks and conditional commands", automationCommands,   automationCommandsCount, 0, nullptr },
+#endif
   { "battery",    "Battery voltage and charge monitoring", batteryCommands,      batteryCommandsCount, 0, nullptr },
   { "debug",      "System debugging and diagnostics", debugCommands,        debugCommandsCount, 0, nullptr },
   { "settings",   "Device configuration and preferences", settingsCommands,     settingsCommandsCount, 0, nullptr },
@@ -1601,9 +1838,9 @@ struct Command {
 
 // Exec request structure (same layout as in .ino)
 struct ExecReq {
-  char line[2048];
+  char line[2048];  // Full size for ESP-NOW chunking
   CommandContext ctx;
-  char out[16384];  // 16KB output buffer for verbose commands
+  char out[2048];   // Result buffer (2KB)
   SemaphoreHandle_t done;
   bool ok;
 };
@@ -1626,6 +1863,11 @@ void printMemoryReport() {
   size_t ps_total = has_ps ? ESP.getPsramSize() : 0;
   size_t ps_free = has_ps ? ESP.getFreePsram() : 0;
   size_t ps_used = ps_total - ps_free;
+
+  size_t bss_internal_bytes = (size_t)(&(_bss_end) - &(_bss_start));
+  size_t bss_psram_bytes = (size_t)(&(_ext_ram_bss_end) - &(_ext_ram_bss_start));
+  size_t noinit_internal_bytes = (size_t)(&(_noinit_end) - &(_noinit_start));
+  size_t noinit_psram_bytes = (size_t)(&(_ext_ram_noinit_end) - &(_ext_ram_noinit_start));
 
   bool useDynamicTracking = gAllocTrackerEnabled && gAllocTrackerCount > 0;
 
@@ -1666,6 +1908,16 @@ void printMemoryReport() {
     broadcastOutput("║                                                                ║");
     broadcastOutput("║ PSRAM: Not available                                           ║");
   }
+
+  broadcastOutput("║                                                                ║");
+  BROADCAST_PRINTF("║ BSS (Internal): %7lu bytes (%3lu KB)                          ║",
+                (unsigned long)bss_internal_bytes, (unsigned long)(bss_internal_bytes / 1024));
+  BROADCAST_PRINTF("║ BSS (PSRAM):    %7lu bytes (%3lu KB)                          ║",
+                (unsigned long)bss_psram_bytes, (unsigned long)(bss_psram_bytes / 1024));
+  BROADCAST_PRINTF("║ NOINIT (Int):   %7lu bytes (%3lu KB)                          ║",
+                (unsigned long)noinit_internal_bytes, (unsigned long)(noinit_internal_bytes / 1024));
+  BROADCAST_PRINTF("║ NOINIT (PSRAM): %7lu bytes (%3lu KB)                          ║",
+                (unsigned long)noinit_psram_bytes, (unsigned long)(noinit_psram_bytes / 1024));
 
   if (gOutputFlags & OUTPUT_SERIAL) {
     Serial.println("╠════════════════════════════════════════════════════════════════╣");
@@ -2013,12 +2265,18 @@ void printMemoryReport() {
   if (gOutputFlags & OUTPUT_SERIAL) {
     Serial.println("║                                                                ║");
     Serial.println("║ [4] COMPILE-TIME I2C FEATURE LEVEL:                            ║");
-#if I2C_FEATURE_LEVEL == I2C_LEVEL_FULL
-    Serial.println("║   Level: FULL (2) - OLED + all sensors compiled in             ║");
+#if I2C_FEATURE_LEVEL == I2C_LEVEL_DISABLED
+    Serial.println("║   Level: DISABLED (0) - No I2C code compiled                   ║");
 #elif I2C_FEATURE_LEVEL == I2C_LEVEL_OLED_ONLY
     Serial.println("║   Level: OLED_ONLY (1) - OLED only, sensors excluded           ║");
+#elif I2C_FEATURE_LEVEL == I2C_LEVEL_STANDALONE
+    Serial.println("║   Level: STANDALONE (2) - OLED + Gamepad                       ║");
+#elif I2C_FEATURE_LEVEL == I2C_LEVEL_FULL
+    Serial.println("║   Level: FULL (3) - OLED + all sensors compiled in             ║");
+#elif I2C_FEATURE_LEVEL == I2C_LEVEL_CUSTOM
+    Serial.println("║   Level: CUSTOM (4) - Individual sensor selection              ║");
 #else
-    Serial.println("║   Level: DISABLED (0) - No I2C code compiled                   ║");
+    Serial.println("║   Level: UNKNOWN - Check I2C_FEATURE_LEVEL value               ║");
 #endif
     Serial.println("║   (Change I2C_FEATURE_LEVEL in sensor_config.h to modify)      ║");
     Serial.println("║                                                                ║");
@@ -2376,7 +2634,13 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
         String exitBanner = exitToNormalBanner();
         broadcastOutput(exitBanner);
         helpSuppressedPrintAndReset();
-        const char* commandResult = found->handler(normalizedCmd);
+        // Extract args only (everything after command name)
+        String args;
+        if (command.length() > foundLen) {
+          args = command.substring(foundLen);
+          args.trim();
+        }
+        const char* commandResult = found->handler(args);
         snprintf(out, outSize, "%s", commandResult);
 
         // Log output if automation logging is active
@@ -2400,10 +2664,15 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
       }
     }
 
-    // Execute handler
-    DEBUG_CMD_FLOWF("[registry_exec] executing: cmd_len=%d", normalizedCmd.length());
-    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s", normalizedCmd.c_str());
-    const char* result = found->handler(normalizedCmd);
+    // Execute handler - pass only args, not full command
+    String args;
+    if (command.length() > foundLen) {
+      args = command.substring(foundLen);
+      args.trim();
+    }
+    DEBUG_CMD_FLOWF("[registry_exec] executing: %s (args: %s)", normalizedCmd.c_str(), args.c_str());
+    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s (args: %s)", normalizedCmd.c_str(), args.c_str());
+    const char* result = found->handler(args);
     strncpy(out, result, outSize - 1);
     out[outSize - 1] = '\0';
     
@@ -2445,14 +2714,14 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
 
   // If executor queue isn't ready (very early boot) fallback to direct call
   if (gCmdExecQ == nullptr) {
-    // Allocate output buffer from PSRAM to avoid stack overflow
-    char* outBuf = (char*)ps_alloc(16384, AllocPref::PreferPSRAM, "cmd.out.direct");
+    // Allocate output buffer from PSRAM (2KB matches ExecReq.out size)
+    char* outBuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "cmd.out.direct");
     if (!outBuf) {
       out = "Error: Out of memory for command output";
       return false;
     }
     setCurrentCommandContext(cmd.ctx);
-    bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, 16384);
+    bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, 2048);
     out = outBuf;
     free(outBuf);
     return ok;
@@ -2462,8 +2731,8 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
   // execute directly instead of queuing (which would cause deadlock)
   if (cmd.ctx.origin == ORIGIN_AUTOMATION) {
     DEBUG_CMD_FLOWF("[submit] AUTOMATION - executing directly to avoid deadlock");
-    // Allocate output buffer from PSRAM to avoid stack overflow
-    char* outBuf = (char*)ps_alloc(16384, AllocPref::PreferPSRAM, "cmd.out.auto");
+    // Allocate output buffer from PSRAM (2KB matches ExecReq.out size)
+    char* outBuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "cmd.out.auto");
     if (!outBuf) {
       out = "Error: Out of memory for command output";
       return false;
@@ -2471,7 +2740,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
     setCurrentCommandContext(cmd.ctx);
     bool prevValidate = gCLIValidateOnly;
     gCLIValidateOnly = cmd.ctx.validateOnly;
-    bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, 16384);
+    bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, 2048);
     gCLIValidateOnly = prevValidate;
     out = outBuf;
     DEBUG_CMD_FLOWF("[submit] done ok=%d len=%zu", ok ? 1 : 0, strlen(outBuf));

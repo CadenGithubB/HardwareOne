@@ -20,7 +20,7 @@
 
 // Global instance
 WebMirrorBuf gWebMirror;
-size_t gWebMirrorCap = 14336;  // 14KB default capacity
+size_t gWebMirrorCap = 8192;  // 8KB default capacity (reduced from 14KB)
 
 // Constructor
 WebMirrorBuf::WebMirrorBuf()
@@ -367,14 +367,26 @@ String generateNavigation(const String& activePage, const String& username) {
   };
   link("/dashboard", "dashboard", "Dashboard");
   link("/cli", "cli", "Command Line");
+#if ENABLE_I2C_SYSTEM || ENABLE_CAMERA_SENSOR || ENABLE_MICROPHONE_SENSOR || ENABLE_ESPNOW
   link("/sensors", "sensors", "Sensors");
+#endif
+#if ENABLE_MAPS
   link("/maps", "maps", "Maps");
+#endif
+#if ENABLE_GAMES
   link("/games", "games", "Games");
+#endif
+#if ENABLE_BLUETOOTH
   link("/bluetooth", "bluetooth", "Bluetooth");
+#endif
+#if ENABLE_ESPNOW
   link("/espnow", "espnow", "ESP-NOW");
+#endif
   link("/files", "files", "Files");
   link("/logging", "logging", "Logging");
+#if ENABLE_AUTOMATION
   link("/automations", "automations", "Automations");
+#endif
   link("/settings", "settings", "Settings");
   nav += "</div>";
   nav += "<div class=\"user-info\">";

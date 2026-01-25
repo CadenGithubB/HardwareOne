@@ -97,8 +97,8 @@ window.saveSensorsUISettings = function() {
     var ttm2 = getInt('tofTransitionMs');
     if (ttm2 !== null) pushCmd('tofTransitionMs', ttm2);
     
-    var tmax = getInt('tofUiMaxDistanceMm');
-    if (tmax !== null) pushCmd('tofUiMaxDistanceMm', tmax);
+    var tmax = getInt('tofMaxDistanceMm');
+    if (tmax !== null) pushCmd('tofMaxDistanceMm', tmax);
     
     if (cmds.length === 0) {
       alert('No Client UI settings to save.');
@@ -243,7 +243,7 @@ COMMANDS THAT USE 'set' PREFIX (NEED TO VERIFY THESE EXIST):
 - set thermalEWMAFactor
 - set thermalTransitionMs
 - set tofTransitionMs
-- set tofUiMaxDistanceMm
+- set tofMaxDistanceMm
 - set hardware.led.brightness
 - set hardware.led.startupEnabled
 - set hardware.led.startupEffect
@@ -265,7 +265,7 @@ COMMANDS THAT USE 'set' PREFIX (NEED TO VERIFY THESE EXIST):
 COMMANDS WITHOUT 'set' PREFIX (CORRECT):
 - espnowenabled (FIXED!)
 - wifiautoreconnect
-- clihistorysize
+- webclihistorysize, oledclihistorysize
 - debugauthcookies, debughttp, debugsse, etc.
 - thermaltargetfps, thermaldevicepollms, etc.
 - outserial, outweb, outtft

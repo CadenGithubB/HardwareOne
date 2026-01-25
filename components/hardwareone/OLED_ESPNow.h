@@ -128,6 +128,17 @@ void oledEspNowApplySettingsEdit(const String& value);
 bool oledEspNowValidateMessagePtr(const void* msgPtr, const uint8_t* peerMac);
 bool oledEspNowValidateDevicePtr(const void* devicePtr);
 
+// Remote file browsing
+void oledEspNowSendBrowseRequest(const char* path = "/");
+void oledEspNowDisplayRemoteFiles(Adafruit_SSD1306* display);
+bool oledEspNowHandleRemoteFilesInput(int deltaX, int deltaY, uint32_t newlyPressed);
+
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
+
+// Stub for storing remote file browse results (callable from ESP-NOW handler even when OLED disabled)
+#if ENABLE_ESPNOW
+#include <ArduinoJson.h>
+void storeRemoteFileBrowseResult(const uint8_t* mac, const char* path, JsonArray& files);
+#endif
 
 #endif // OLED_ESPNOW_H

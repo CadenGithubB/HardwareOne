@@ -21,7 +21,8 @@ extern Settings gSettings;
 // ============================================================================
 
 // Debug system globals - single source of truth
-uint32_t gDebugFlags = 0;
+// DEBUG_I2C enabled by default for I2C bus debugging during boot
+uint32_t gDebugFlags = DEBUG_I2C;
 DebugSubFlags gDebugSubFlags = {}; // All sub-flags initialized to false
 char* gDebugBuffer = nullptr;
 QueueHandle_t gDebugOutputQueue = nullptr;
@@ -201,13 +202,12 @@ void debugOutputTask(void* parameter) {
   }
 }
 
-const char* cmd_loglevel(const String& originalCmd) {
+const char* cmd_loglevel(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   valStr.toLowerCase();
 
@@ -582,13 +582,12 @@ void streamDebugFlush() {
 // Debug Command Handlers
 // ============================================================================
 
-const char* cmd_outtft(const String& originalCmd) {
+const char* cmd_outtft(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Syntax:
   //   outtft <0|1> [persist|temp]
   //   outtft [persist|temp] <0|1>
-  int sp1 = originalCmd.indexOf(' ');
-  String a = (sp1 >= 0) ? originalCmd.substring(sp1 + 1) : String();
+  String a = args;
   a.trim();
   String t1, t2;
   int sp2 = a.indexOf(' ');
@@ -629,10 +628,9 @@ const char* cmd_outtft(const String& originalCmd) {
   }
 }
 
-const char* cmd_debughttp(const String& originalCmd) {
+const char* cmd_debughttp(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -657,10 +655,9 @@ const char* cmd_debughttp(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugsse(const String& originalCmd) {
+const char* cmd_debugsse(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -685,10 +682,9 @@ const char* cmd_debugsse(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugcli(const String& originalCmd) {
+const char* cmd_debugcli(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -713,10 +709,9 @@ const char* cmd_debugcli(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugsensorsframe(const String& originalCmd) {
+const char* cmd_debugsensorsframe(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -741,10 +736,9 @@ const char* cmd_debugsensorsframe(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugsensorsdata(const String& originalCmd) {
+const char* cmd_debugsensorsdata(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -769,10 +763,9 @@ const char* cmd_debugsensorsdata(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugsensorsgeneral(const String& originalCmd) {
+const char* cmd_debugsensorsgeneral(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -797,10 +790,87 @@ const char* cmd_debugsensorsgeneral(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugwifi(const String& originalCmd) {
+const char* cmd_debugcamera(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_CAMERA);
+    else clearDebugFlag(DEBUG_CAMERA);
+    return v ? "debugCamera enabled (runtime only)" : "debugCamera disabled (runtime only)";
+  } else {
+    gSettings.debugCamera = (v != 0);
+    writeSettingsJson();
+    if (v) setDebugFlag(DEBUG_CAMERA);
+    else clearDebugFlag(DEBUG_CAMERA);
+    return gSettings.debugCamera ? "debugCamera enabled (persistent)" : "debugCamera disabled (persistent)";
+  }
+}
+
+const char* cmd_debugmicrophone(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_MICROPHONE);
+    else clearDebugFlag(DEBUG_MICROPHONE);
+    return v ? "debugMicrophone enabled (runtime only)" : "debugMicrophone disabled (runtime only)";
+  } else {
+    gSettings.debugMicrophone = (v != 0);
+    writeSettingsJson();
+    if (v) setDebugFlag(DEBUG_MICROPHONE);
+    else clearDebugFlag(DEBUG_MICROPHONE);
+    return gSettings.debugMicrophone ? "debugMicrophone enabled (persistent)" : "debugMicrophone disabled (persistent)";
+  }
+}
+
+const char* cmd_debugi2c(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_I2C);
+    else clearDebugFlag(DEBUG_I2C);
+    return v ? "debugI2C enabled (runtime only)" : "debugI2C disabled (runtime only)";
+  } else {
+    gSettings.debugI2C = (v != 0);
+    writeSettingsJson();
+    if (v) setDebugFlag(DEBUG_I2C);
+    else clearDebugFlag(DEBUG_I2C);
+    return gSettings.debugI2C ? "debugI2C enabled (persistent)" : "debugI2C disabled (persistent)";
+  }
+}
+
+const char* cmd_debugwifi(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -825,10 +895,9 @@ const char* cmd_debugwifi(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugstorage(const String& originalCmd) {
+const char* cmd_debugstorage(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -853,10 +922,9 @@ const char* cmd_debugstorage(const String& originalCmd) {
   }
 }
 
-const char* cmd_debuglogger(const String& originalCmd) {
+const char* cmd_debuglogger(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -881,10 +949,9 @@ const char* cmd_debuglogger(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugautomations(const String& originalCmd) {
+const char* cmd_debugautomations(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -909,10 +976,9 @@ const char* cmd_debugautomations(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugperformance(const String& originalCmd) {
+const char* cmd_debugperformance(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -937,10 +1003,9 @@ const char* cmd_debugperformance(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugdatetime(const String& originalCmd) {
+const char* cmd_debugdatetime(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -965,10 +1030,9 @@ const char* cmd_debugdatetime(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugcommandsystem(const String& originalCmd) {
+const char* cmd_debugcommandsystem(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -996,10 +1060,9 @@ const char* cmd_debugcommandsystem(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugsettingssystem(const String& originalCmd) {
+const char* cmd_debugsettingssystem(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp = originalCmd.indexOf(' ');
-  String valStr = (sp >= 0) ? originalCmd.substring(sp + 1) : String();
+  String valStr = args;
   valStr.trim();
   int sp2 = valStr.indexOf(' ');
   String mode = "";
@@ -1027,7 +1090,7 @@ const char* cmd_debugsettingssystem(const String& originalCmd) {
   }
 }
 
-const char* cmd_debugbuffer(const String& originalCmd) {
+const char* cmd_debugbuffer(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!gDebugOutputQueue) {
@@ -1085,13 +1148,12 @@ const char* cmd_debugbuffer(const String& originalCmd) {
   return gDebugBuffer;
 }
 
-const char* cmd_debugcommandflow(const String& originalCmd) {
+const char* cmd_debugcommandflow(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugcommandflow <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugcommandflow <0|1>";
   int v = valStr.toInt();
   gSettings.debugCommandFlow = (v == 1);
   writeSettingsJson();
@@ -1099,13 +1161,12 @@ const char* cmd_debugcommandflow(const String& originalCmd) {
   return v ? "debugCommandFlow enabled" : "debugCommandFlow disabled";
 }
 
-const char* cmd_debugusers(const String& originalCmd) {
+const char* cmd_debugusers(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugusers <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugusers <0|1>";
   int v = valStr.toInt();
   gSettings.debugUsers = (v == 1);
   writeSettingsJson();
@@ -1113,13 +1174,12 @@ const char* cmd_debugusers(const String& originalCmd) {
   return v ? "debugUsers enabled" : "debugUsers disabled";
 }
 
-const char* cmd_debugsystem(const String& originalCmd) {
+const char* cmd_debugsystem(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugsystem <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugsystem <0|1>";
   int v = valStr.toInt();
   gSettings.debugSystem = (v == 1);
   writeSettingsJson();
@@ -1127,13 +1187,12 @@ const char* cmd_debugsystem(const String& originalCmd) {
   return v ? "debugSystem enabled" : "debugSystem disabled";
 }
 
-const char* cmd_debugespnowstream(const String& originalCmd) {
+const char* cmd_debugespnowstream(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugespnowstream <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugespnowstream <0|1>";
   int v = valStr.toInt();
   gSettings.debugEspNowStream = (v == 1);
   writeSettingsJson();
@@ -1141,13 +1200,12 @@ const char* cmd_debugespnowstream(const String& originalCmd) {
   return v ? "debugEspNowStream enabled" : "debugEspNowStream disabled";
 }
 
-const char* cmd_debugespnowcore(const String& originalCmd) {
+const char* cmd_debugespnowcore(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugespnowcore <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugespnowcore <0|1>";
   int v = valStr.toInt();
   gSettings.debugEspNowCore = (v == 1);
   writeSettingsJson();
@@ -1155,13 +1213,12 @@ const char* cmd_debugespnowcore(const String& originalCmd) {
   return v ? "debugEspNowCore enabled" : "debugEspNowCore disabled";
 }
 
-const char* cmd_debugespnowrouter(const String& originalCmd) {
+const char* cmd_debugespnowrouter(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugespnowrouter <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugespnowrouter <0|1>";
   int v = valStr.toInt();
   gSettings.debugEspNowRouter = (v == 1);
   writeSettingsJson();
@@ -1169,13 +1226,12 @@ const char* cmd_debugespnowrouter(const String& originalCmd) {
   return v ? "debugEspNowRouter enabled" : "debugEspNowRouter disabled";
 }
 
-const char* cmd_debugmemory(const String& originalCmd) {
+const char* cmd_debugmemory(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugmemory <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugmemory <0|1>";
   int v = valStr.toInt();
   gSettings.debugMemory = (v == 1);
   writeSettingsJson();
@@ -1183,13 +1239,12 @@ const char* cmd_debugmemory(const String& originalCmd) {
   return v ? "debugMemory enabled" : "debugMemory disabled";
 }
 
-const char* cmd_debugespnowmesh(const String& originalCmd) {
+const char* cmd_debugespnowmesh(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugespnowmesh <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugespnowmesh <0|1>";
   int v = valStr.toInt();
   gSettings.debugEspNowMesh = (v == 1);
   writeSettingsJson();
@@ -1197,13 +1252,12 @@ const char* cmd_debugespnowmesh(const String& originalCmd) {
   return v ? "debugEspNowMesh enabled" : "debugEspNowMesh disabled";
 }
 
-const char* cmd_debugespnowtopo(const String& originalCmd) {
+const char* cmd_debugespnowtopo(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugespnowtopo <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugespnowtopo <0|1>";
   int v = valStr.toInt();
   gSettings.debugEspNowTopo = (v == 1);
   writeSettingsJson();
@@ -1211,13 +1265,12 @@ const char* cmd_debugespnowtopo(const String& originalCmd) {
   return v ? "debugEspNowTopo enabled" : "debugEspNowTopo disabled";
 }
 
-const char* cmd_debugespnowencryption(const String& originalCmd) {
+const char* cmd_debugespnowencryption(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugespnowencryption <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugespnowencryption <0|1>";
   int v = valStr.toInt();
   gSettings.debugEspNowEncryption = (v == 1);
   writeSettingsJson();
@@ -1225,13 +1278,12 @@ const char* cmd_debugespnowencryption(const String& originalCmd) {
   return v ? "debugEspNowEncryption enabled" : "debugEspNowEncryption disabled";
 }
 
-const char* cmd_debugautoscheduler(const String& originalCmd) {
+const char* cmd_debugautoscheduler(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugautoscheduler <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugautoscheduler <0|1>";
   int v = valStr.toInt();
   gSettings.debugAutoScheduler = (v == 1);
   writeSettingsJson();
@@ -1239,13 +1291,12 @@ const char* cmd_debugautoscheduler(const String& originalCmd) {
   return v ? "debugAutoScheduler enabled" : "debugAutoScheduler disabled";
 }
 
-const char* cmd_debugautoexec(const String& originalCmd) {
+const char* cmd_debugautoexec(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugautoexec <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugautoexec <0|1>";
   int v = valStr.toInt();
   gSettings.debugAutoExec = (v == 1);
   writeSettingsJson();
@@ -1253,13 +1304,12 @@ const char* cmd_debugautoexec(const String& originalCmd) {
   return v ? "debugAutoExec enabled" : "debugAutoExec disabled";
 }
 
-const char* cmd_debugautocondition(const String& originalCmd) {
+const char* cmd_debugautocondition(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugautocondition <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugautocondition <0|1>";
   int v = valStr.toInt();
   gSettings.debugAutoCondition = (v == 1);
   writeSettingsJson();
@@ -1267,13 +1317,12 @@ const char* cmd_debugautocondition(const String& originalCmd) {
   return v ? "debugAutoCondition enabled" : "debugAutoCondition disabled";
 }
 
-const char* cmd_debugautotiming(const String& originalCmd) {
+const char* cmd_debugautotiming(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugautotiming <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugautotiming <0|1>";
   int v = valStr.toInt();
   gSettings.debugAutoTiming = (v == 1);
   writeSettingsJson();
@@ -1281,13 +1330,12 @@ const char* cmd_debugautotiming(const String& originalCmd) {
   return v ? "debugAutoTiming enabled" : "debugAutoTiming disabled";
 }
 
-const char* cmd_debugauthsessions(const String& originalCmd) {
+const char* cmd_debugauthsessions(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugauthsessions <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugauthsessions <0|1>";
   int v = valStr.toInt();
   gSettings.debugAuthSessions = (v == 1);
   writeSettingsJson();
@@ -1295,13 +1343,12 @@ const char* cmd_debugauthsessions(const String& originalCmd) {
   return v ? "debugAuthSessions enabled" : "debugAuthSessions disabled";
 }
 
-const char* cmd_debugauthcookies(const String& originalCmd) {
+const char* cmd_debugauthcookies(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugauthcookies <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugauthcookies <0|1>";
   int v = valStr.toInt();
   gSettings.debugAuthCookies = (v == 1);
   writeSettingsJson();
@@ -1309,13 +1356,12 @@ const char* cmd_debugauthcookies(const String& originalCmd) {
   return v ? "debugAuthCookies enabled" : "debugAuthCookies disabled";
 }
 
-const char* cmd_debugauthlogin(const String& originalCmd) {
+const char* cmd_debugauthlogin(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugauthlogin <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugauthlogin <0|1>";
   int v = valStr.toInt();
   gSettings.debugAuthLogin = (v == 1);
   writeSettingsJson();
@@ -1323,13 +1369,12 @@ const char* cmd_debugauthlogin(const String& originalCmd) {
   return v ? "debugAuthLogin enabled" : "debugAuthLogin disabled";
 }
 
-const char* cmd_debugauthbootid(const String& originalCmd) {
+const char* cmd_debugauthbootid(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugauthbootid <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugauthbootid <0|1>";
   int v = valStr.toInt();
   gSettings.debugAuthBootId = (v == 1);
   writeSettingsJson();
@@ -1424,11 +1469,12 @@ static String generateSystemLogFilename() {
   return filename;
 }
 
-const char* cmd_log(const String& originalCmd) {
+const char* cmd_log(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) {
+  String action = args;
+  action.trim();
+  if (action.length() == 0) {
     return "Usage: log <start|stop|status>\n"
            "  start [filepath] [flags=0xXXXX] [tags=0|1]: Begin system logging\n"
            "    filepath: Log file path (auto-generated if omitted)\n"
@@ -1442,9 +1488,6 @@ const char* cmd_log(const String& originalCmd) {
            "  log start flags=0x0203 tags=1\n"
            "  log start /logs/debug.log flags=0x4603 tags=0";
   }
-  
-  String action = originalCmd.substring(sp1 + 1);
-  action.trim();
   int sp2 = action.indexOf(' ');
   String subCmd = (sp2 >= 0) ? action.substring(0, sp2) : action;
   subCmd.toLowerCase();
@@ -1626,13 +1669,12 @@ const char* cmd_log(const String& originalCmd) {
 // ============================================================================
 
 // HTTP sub-flag commands
-const char* cmd_debughttphandlers(const String& originalCmd) {
+const char* cmd_debughttphandlers(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debughttphandlers <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debughttphandlers <0|1>";
   int v = valStr.toInt();
   gSettings.debugHttpHandlers = (v == 1);
   writeSettingsJson();
@@ -1640,13 +1682,12 @@ const char* cmd_debughttphandlers(const String& originalCmd) {
   return v ? "debugHttpHandlers enabled" : "debugHttpHandlers disabled";
 }
 
-const char* cmd_debughttprequests(const String& originalCmd) {
+const char* cmd_debughttprequests(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debughttprequests <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debughttprequests <0|1>";
   int v = valStr.toInt();
   gSettings.debugHttpRequests = (v == 1);
   writeSettingsJson();
@@ -1654,13 +1695,12 @@ const char* cmd_debughttprequests(const String& originalCmd) {
   return v ? "debugHttpRequests enabled" : "debugHttpRequests disabled";
 }
 
-const char* cmd_debughttpresponses(const String& originalCmd) {
+const char* cmd_debughttpresponses(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debughttpresponses <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debughttpresponses <0|1>";
   int v = valStr.toInt();
   gSettings.debugHttpResponses = (v == 1);
   writeSettingsJson();
@@ -1668,13 +1708,12 @@ const char* cmd_debughttpresponses(const String& originalCmd) {
   return v ? "debugHttpResponses enabled" : "debugHttpResponses disabled";
 }
 
-const char* cmd_debughttpstreaming(const String& originalCmd) {
+const char* cmd_debughttpstreaming(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debughttpstreaming <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debughttpstreaming <0|1>";
   int v = valStr.toInt();
   gSettings.debugHttpStreaming = (v == 1);
   writeSettingsJson();
@@ -1683,13 +1722,12 @@ const char* cmd_debughttpstreaming(const String& originalCmd) {
 }
 
 // WiFi sub-flag commands
-const char* cmd_debugwificonnection(const String& originalCmd) {
+const char* cmd_debugwificonnection(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugwificonnection <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugwificonnection <0|1>";
   int v = valStr.toInt();
   gSettings.debugWifiConnection = (v == 1);
   writeSettingsJson();
@@ -1697,13 +1735,12 @@ const char* cmd_debugwificonnection(const String& originalCmd) {
   return v ? "debugWifiConnection enabled" : "debugWifiConnection disabled";
 }
 
-const char* cmd_debugwificonfig(const String& originalCmd) {
+const char* cmd_debugwificonfig(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugwificonfig <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugwificonfig <0|1>";
   int v = valStr.toInt();
   gSettings.debugWifiConfig = (v == 1);
   writeSettingsJson();
@@ -1711,13 +1748,12 @@ const char* cmd_debugwificonfig(const String& originalCmd) {
   return v ? "debugWifiConfig enabled" : "debugWifiConfig disabled";
 }
 
-const char* cmd_debugwifiscanning(const String& originalCmd) {
+const char* cmd_debugwifiscanning(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugwifiscanning <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugwifiscanning <0|1>";
   int v = valStr.toInt();
   gSettings.debugWifiScanning = (v == 1);
   writeSettingsJson();
@@ -1725,13 +1761,12 @@ const char* cmd_debugwifiscanning(const String& originalCmd) {
   return v ? "debugWifiScanning enabled" : "debugWifiScanning disabled";
 }
 
-const char* cmd_debugwifidriver(const String& originalCmd) {
+const char* cmd_debugwifidriver(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugwifidriver <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugwifidriver <0|1>";
   int v = valStr.toInt();
   gSettings.debugWifiDriver = (v == 1);
   writeSettingsJson();
@@ -1740,13 +1775,12 @@ const char* cmd_debugwifidriver(const String& originalCmd) {
 }
 
 // Storage sub-flag commands
-const char* cmd_debugstoragefiles(const String& originalCmd) {
+const char* cmd_debugstoragefiles(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugstoragefiles <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugstoragefiles <0|1>";
   int v = valStr.toInt();
   gSettings.debugStorageFiles = (v == 1);
   writeSettingsJson();
@@ -1754,13 +1788,12 @@ const char* cmd_debugstoragefiles(const String& originalCmd) {
   return v ? "debugStorageFiles enabled" : "debugStorageFiles disabled";
 }
 
-const char* cmd_debugstoragejson(const String& originalCmd) {
+const char* cmd_debugstoragejson(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugstoragejson <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugstoragejson <0|1>";
   int v = valStr.toInt();
   gSettings.debugStorageJson = (v == 1);
   writeSettingsJson();
@@ -1768,13 +1801,12 @@ const char* cmd_debugstoragejson(const String& originalCmd) {
   return v ? "debugStorageJson enabled" : "debugStorageJson disabled";
 }
 
-const char* cmd_debugstoragesettings(const String& originalCmd) {
+const char* cmd_debugstoragesettings(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugstoragesettings <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugstoragesettings <0|1>";
   int v = valStr.toInt();
   gSettings.debugStorageSettings = (v == 1);
   writeSettingsJson();
@@ -1782,13 +1814,12 @@ const char* cmd_debugstoragesettings(const String& originalCmd) {
   return v ? "debugStorageSettings enabled" : "debugStorageSettings disabled";
 }
 
-const char* cmd_debugstoragemigration(const String& originalCmd) {
+const char* cmd_debugstoragemigration(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugstoragemigration <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugstoragemigration <0|1>";
   int v = valStr.toInt();
   gSettings.debugStorageMigration = (v == 1);
   writeSettingsJson();
@@ -1797,13 +1828,12 @@ const char* cmd_debugstoragemigration(const String& originalCmd) {
 }
 
 // System sub-flag commands
-const char* cmd_debugsystemboot(const String& originalCmd) {
+const char* cmd_debugsystemboot(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugsystemboot <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugsystemboot <0|1>";
   int v = valStr.toInt();
   gSettings.debugSystemBoot = (v == 1);
   writeSettingsJson();
@@ -1811,13 +1841,12 @@ const char* cmd_debugsystemboot(const String& originalCmd) {
   return v ? "debugSystemBoot enabled" : "debugSystemBoot disabled";
 }
 
-const char* cmd_debugsystemconfig(const String& originalCmd) {
+const char* cmd_debugsystemconfig(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugsystemconfig <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugsystemconfig <0|1>";
   int v = valStr.toInt();
   gSettings.debugSystemConfig = (v == 1);
   writeSettingsJson();
@@ -1825,13 +1854,12 @@ const char* cmd_debugsystemconfig(const String& originalCmd) {
   return v ? "debugSystemConfig enabled" : "debugSystemConfig disabled";
 }
 
-const char* cmd_debugsystemtasks(const String& originalCmd) {
+const char* cmd_debugsystemtasks(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugsystemtasks <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugsystemtasks <0|1>";
   int v = valStr.toInt();
   gSettings.debugSystemTasks = (v == 1);
   writeSettingsJson();
@@ -1839,13 +1867,12 @@ const char* cmd_debugsystemtasks(const String& originalCmd) {
   return v ? "debugSystemTasks enabled" : "debugSystemTasks disabled";
 }
 
-const char* cmd_debugsystemhardware(const String& originalCmd) {
+const char* cmd_debugsystemhardware(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugsystemhardware <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugsystemhardware <0|1>";
   int v = valStr.toInt();
   gSettings.debugSystemHardware = (v == 1);
   writeSettingsJson();
@@ -1854,13 +1881,12 @@ const char* cmd_debugsystemhardware(const String& originalCmd) {
 }
 
 // Users sub-flag commands
-const char* cmd_debugusersmgmt(const String& originalCmd) {
+const char* cmd_debugusersmgmt(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugusersmgmt <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugusersmgmt <0|1>";
   int v = valStr.toInt();
   gSettings.debugUsersMgmt = (v == 1);
   writeSettingsJson();
@@ -1868,13 +1894,12 @@ const char* cmd_debugusersmgmt(const String& originalCmd) {
   return v ? "debugUsersMgmt enabled" : "debugUsersMgmt disabled";
 }
 
-const char* cmd_debugusersregister(const String& originalCmd) {
+const char* cmd_debugusersregister(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugusersregister <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugusersregister <0|1>";
   int v = valStr.toInt();
   gSettings.debugUsersRegister = (v == 1);
   writeSettingsJson();
@@ -1882,13 +1907,12 @@ const char* cmd_debugusersregister(const String& originalCmd) {
   return v ? "debugUsersRegister enabled" : "debugUsersRegister disabled";
 }
 
-const char* cmd_debugusersquery(const String& originalCmd) {
+const char* cmd_debugusersquery(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugusersquery <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugusersquery <0|1>";
   int v = valStr.toInt();
   gSettings.debugUsersQuery = (v == 1);
   writeSettingsJson();
@@ -1897,13 +1921,12 @@ const char* cmd_debugusersquery(const String& originalCmd) {
 }
 
 // CLI sub-flag commands
-const char* cmd_debugcliexecution(const String& originalCmd) {
+const char* cmd_debugcliexecution(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugcliexecution <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugcliexecution <0|1>";
   int v = valStr.toInt();
   gSettings.debugCliExecution = (v == 1);
   writeSettingsJson();
@@ -1911,13 +1934,12 @@ const char* cmd_debugcliexecution(const String& originalCmd) {
   return v ? "debugCliExecution enabled" : "debugCliExecution disabled";
 }
 
-const char* cmd_debugcliqueue(const String& originalCmd) {
+const char* cmd_debugcliqueue(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugcliqueue <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugcliqueue <0|1>";
   int v = valStr.toInt();
   gSettings.debugCliQueue = (v == 1);
   writeSettingsJson();
@@ -1925,13 +1947,12 @@ const char* cmd_debugcliqueue(const String& originalCmd) {
   return v ? "debugCliQueue enabled" : "debugCliQueue disabled";
 }
 
-const char* cmd_debugclivalidation(const String& originalCmd) {
+const char* cmd_debugclivalidation(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugclivalidation <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugclivalidation <0|1>";
   int v = valStr.toInt();
   gSettings.debugCliValidation = (v == 1);
   writeSettingsJson();
@@ -1940,13 +1961,12 @@ const char* cmd_debugclivalidation(const String& originalCmd) {
 }
 
 // Performance sub-flag commands
-const char* cmd_debugperfstack(const String& originalCmd) {
+const char* cmd_debugperfstack(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugperfstack <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugperfstack <0|1>";
   int v = valStr.toInt();
   gSettings.debugPerfStack = (v == 1);
   writeSettingsJson();
@@ -1954,13 +1974,12 @@ const char* cmd_debugperfstack(const String& originalCmd) {
   return v ? "debugPerfStack enabled" : "debugPerfStack disabled";
 }
 
-const char* cmd_debugperfheap(const String& originalCmd) {
+const char* cmd_debugperfheap(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugperfheap <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugperfheap <0|1>";
   int v = valStr.toInt();
   gSettings.debugPerfHeap = (v == 1);
   writeSettingsJson();
@@ -1968,13 +1987,12 @@ const char* cmd_debugperfheap(const String& originalCmd) {
   return v ? "debugPerfHeap enabled" : "debugPerfHeap disabled";
 }
 
-const char* cmd_debugperftiming(const String& originalCmd) {
+const char* cmd_debugperftiming(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugperftiming <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugperftiming <0|1>";
   int v = valStr.toInt();
   gSettings.debugPerfTiming = (v == 1);
   writeSettingsJson();
@@ -1983,13 +2001,12 @@ const char* cmd_debugperftiming(const String& originalCmd) {
 }
 
 // SSE sub-flag commands
-const char* cmd_debugsseconnection(const String& originalCmd) {
+const char* cmd_debugsseconnection(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugsseconnection <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugsseconnection <0|1>";
   int v = valStr.toInt();
   gSettings.debugSseConnection = (v == 1);
   writeSettingsJson();
@@ -1997,13 +2014,12 @@ const char* cmd_debugsseconnection(const String& originalCmd) {
   return v ? "debugSseConnection enabled" : "debugSseConnection disabled";
 }
 
-const char* cmd_debugsseevents(const String& originalCmd) {
+const char* cmd_debugsseevents(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugsseevents <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugsseevents <0|1>";
   int v = valStr.toInt();
   gSettings.debugSseEvents = (v == 1);
   writeSettingsJson();
@@ -2011,13 +2027,12 @@ const char* cmd_debugsseevents(const String& originalCmd) {
   return v ? "debugSseEvents enabled" : "debugSseEvents disabled";
 }
 
-const char* cmd_debugssebroadcast(const String& originalCmd) {
+const char* cmd_debugssebroadcast(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugssebroadcast <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugssebroadcast <0|1>";
   int v = valStr.toInt();
   gSettings.debugSseBroadcast = (v == 1);
   writeSettingsJson();
@@ -2026,13 +2041,12 @@ const char* cmd_debugssebroadcast(const String& originalCmd) {
 }
 
 // Command Flow sub-flag commands
-const char* cmd_debugcmdflowrouting(const String& originalCmd) {
+const char* cmd_debugcmdflowrouting(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugcmdflowrouting <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugcmdflowrouting <0|1>";
   int v = valStr.toInt();
   gSettings.debugCmdflowRouting = (v == 1);
   writeSettingsJson();
@@ -2040,13 +2054,12 @@ const char* cmd_debugcmdflowrouting(const String& originalCmd) {
   return v ? "debugCmdflowRouting enabled" : "debugCmdflowRouting disabled";
 }
 
-const char* cmd_debugcmdflowqueue(const String& originalCmd) {
+const char* cmd_debugcmdflowqueue(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugcmdflowqueue <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugcmdflowqueue <0|1>";
   int v = valStr.toInt();
   gSettings.debugCmdflowQueue = (v == 1);
   writeSettingsJson();
@@ -2054,13 +2067,12 @@ const char* cmd_debugcmdflowqueue(const String& originalCmd) {
   return v ? "debugCmdflowQueue enabled" : "debugCmdflowQueue disabled";
 }
 
-const char* cmd_debugcmdflowcontext(const String& originalCmd) {
+const char* cmd_debugcmdflowcontext(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   extern void applySettings();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: debugcmdflowcontext <0|1>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: debugcmdflowcontext <0|1>";
   int v = valStr.toInt();
   gSettings.debugCmdflowContext = (v == 1);
   writeSettingsJson();
@@ -2080,6 +2092,9 @@ const CommandEntry debugCommands[] = {
   { "debugsensorsframe", "Debug sensor frame processing.", true, cmd_debugsensorsframe },
   { "debugsensorsdata", "Debug sensor data.", true, cmd_debugsensorsdata },
   { "debugsensorsgeneral", "Debug general sensor operations.", true, cmd_debugsensorsgeneral },
+  { "debugcamera", "Debug camera operations.", true, cmd_debugcamera },
+  { "debugmicrophone", "Debug microphone operations.", true, cmd_debugmicrophone },
+  { "debugi2c", "Debug I2C bus transactions, mutex, clock changes.", true, cmd_debugi2c },
   { "debugwifi", "Debug WiFi operations.", true, cmd_debugwifi },
   { "debugstorage", "Debug storage operations.", true, cmd_debugstorage },
   { "debugperformance", "Debug performance metrics.", true, cmd_debugperformance },

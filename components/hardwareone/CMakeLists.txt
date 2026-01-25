@@ -3,17 +3,22 @@ idf_component_register(
         HardwareOne.cpp
         i2csensor-apds9960.cpp
         i2csensor-pa1010d.cpp
-        System_GPSMapRenderer.cpp
+        System_Maps.cpp
         i2csensor-seesaw.cpp
         i2csensor-bno055.cpp
         i2csensor-mlx90640.cpp
         i2csensor-vl53l4cx.cpp
         i2csensor-rda5807.cpp
+        i2csensor-ds3231.cpp
+        i2csensor-sths34pf80.cpp
         WebServer_Events.cpp
         WebServer_Server.cpp
         WebServer_Utils.cpp
         WebPage_Sensors.cpp
-        WebPage_Waypoints.cpp
+        WebPage_Maps.cpp
+        WebPage_Games.cpp
+        WebPage_ESPNow.cpp
+        WebPage_Bluetooth.cpp
         System_Automation.cpp
         Optional_Bluetooth.cpp
         System_Battery.cpp
@@ -56,12 +61,20 @@ idf_component_register(
         System_SensorLogging.cpp
         System_SensorStubs.cpp
         System_Settings.cpp
+        System_SetupWizard.cpp
+        System_FeatureRegistry.cpp
+        OLED_SetupWizard.cpp
         System_Utils.cpp
         System_TaskUtils.cpp
         System_User.cpp
         System_Auth.cpp
         System_Users.cpp
         System_WiFi.cpp
+        System_Camera_DVP.cpp
+        System_ImageManager.cpp
+        System_EdgeImpulse.cpp
+        System_Microphone.cpp
+        System_SensorRegistry.cpp
     INCLUDE_DIRS
         .
     REQUIRES
@@ -70,4 +83,16 @@ idf_component_register(
         esp_http_server
         bt
         esp_wifi
+        esp32-camera
 )
+
+# Enable camera for XIAO ESP32S3 Sense board
+if(CONFIG_ARDUINO_VARIANT STREQUAL "XIAO_ESP32S3_SENSE")
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC XIAO_ESP32S3_SENSE_ENABLED=1)
+endif()
+
+# Force-enable camera for ESP32-S3 boards (camera driver is part of esp32-camera component)
+if(CONFIG_IDF_TARGET_ESP32S3)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC ENABLE_CAMERA_SENSOR=1)
+    message(STATUS "Camera sensor ENABLED for ESP32-S3")
+endif()

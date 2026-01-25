@@ -4,6 +4,7 @@
 #define I2CSENSOR_BNO055_OLED_H
 
 #include "OLED_Display.h"
+#include "OLED_Utils.h"
 #include <Adafruit_SSD1306.h>
 
 // Forward declaration for IMU action detection
@@ -48,18 +49,27 @@ static bool imuOLEDModeAvailable(String* outReason) {
   return true;  // Always allow navigation, display function handles "not active" state
 }
 
+static void imuToggleConfirmed(void* userData) {
+  (void)userData;
+  extern bool enqueueSensorStart(SensorType sensor);
+  extern bool isInQueue(SensorType sensor);
+
+  if (imuEnabled && imuConnected) {
+    Serial.println("[IMU] Confirmed: Stopping IMU sensor...");
+    imuEnabled = false;
+  } else if (!isInQueue(SENSOR_IMU)) {
+    Serial.println("[IMU] Confirmed: Starting IMU sensor...");
+    enqueueSensorStart(SENSOR_IMU);
+  }
+}
+
 // Input handler for IMU OLED mode - X button toggles sensor
 static bool imuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    extern bool enqueueSensorStart(SensorType sensor);
-    extern bool isInQueue(SensorType sensor);
-    
     if (imuEnabled && imuConnected) {
-      Serial.println("[IMU] X button: Stopping IMU sensor...");
-      imuEnabled = false;
-    } else if (!isInQueue(SENSOR_IMU)) {
-      Serial.println("[IMU] X button: Starting IMU sensor...");
-      enqueueSensorStart(SENSOR_IMU);
+      oledConfirmRequest("Stop IMU?", nullptr, imuToggleConfirmed, nullptr);
+    } else {
+      oledConfirmRequest("Start IMU?", nullptr, imuToggleConfirmed, nullptr);
     }
     return true;
   }

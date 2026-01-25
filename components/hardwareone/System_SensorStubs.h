@@ -188,10 +188,31 @@
   inline void startFMRadioInternal() {}
 #endif
 
+#if !ENABLE_RTC_SENSOR
+  // RTC stubs when disabled - declarations only, definitions in System_SensorStubs.cpp
+  void startRTCSensorInternal();
+#endif
+
 #if !ENABLE_BLUETOOTH
   // Bluetooth stubs when disabled
   extern const struct CommandEntry bluetoothCommands[];
   extern const size_t bluetoothCommandsCount;
+#endif
+
+#if !ENABLE_CAMERA_SENSOR
+  // Camera stubs when disabled
+  extern bool cameraEnabled;
+  extern bool cameraConnected;
+  extern bool cameraStreaming;
+  extern const char* cameraModel;
+  extern int cameraWidth;
+  extern int cameraHeight;
+  extern const struct CommandEntry cameraCommands[];
+  extern const size_t cameraCommandsCount;
+  inline bool initCamera() { return false; }
+  inline void stopCamera() {}
+  inline uint8_t* captureFrame(size_t* outLen) { if (outLen) *outLen = 0; return nullptr; }
+  inline const char* buildCameraStatusJson() { return "{}"; }
 #endif
 
 // =============================================================================

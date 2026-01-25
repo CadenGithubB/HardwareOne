@@ -65,10 +65,8 @@ static bool createAPDSTask() {
 
 // APDS settings entries
 static const SettingEntry apdsSettingEntries[] = {
-  // Core settings
-  { "autoStart", SETTING_BOOL, &gSettings.apdsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  // Device-level settings (sensor hardware behavior)
-  { "device.devicePollMs", SETTING_INT, &gSettings.apdsDevicePollMs, 100, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr }
+  { "apdsAutoStart",    SETTING_BOOL, &gSettings.apdsAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
+  { "apdsDevicePollMs", SETTING_INT,  &gSettings.apdsDevicePollMs, 100, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr }
 };
 
 static bool isAPDSConnected() {

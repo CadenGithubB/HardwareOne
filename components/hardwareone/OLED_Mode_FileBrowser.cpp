@@ -11,7 +11,7 @@
 #include "System_Icons.h"
 
 #if ENABLE_GPS_SENSOR
-#include "System_GPSMapRenderer.h"
+#include "System_Maps.h"
 #endif
 
 // External references
@@ -20,6 +20,7 @@ extern bool oledConnected;
 extern OLEDMode currentOLEDMode;
 extern FileManager* gOLEDFileManager;
 extern bool oledFileBrowserNeedsInit;
+extern void oledMenuBack();
 
 // Icon functions (from System_Icons.cpp)
 extern void drawIcon(Adafruit_SSD1306* display, const char* iconName, int x, int y, uint16_t color);
@@ -134,8 +135,9 @@ void prepareFileBrowserData() {
         break;
       case FileBrowserPendingAction::NAVIGATE_BACK:
         if (strcmp(gOLEDFileManager->getCurrentPath(), "/") == 0) {
-          currentOLEDMode = OLED_MENU;
+          fileBrowserPendingAction = FileBrowserPendingAction::NONE;
           fileBrowserRenderData.valid = false;
+          oledMenuBack();
           return;
         } else {
           gOLEDFileManager->navigateUp();

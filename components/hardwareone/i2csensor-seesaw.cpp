@@ -9,6 +9,7 @@
 #include <Adafruit_SSD1306.h>
 #include <Arduino.h>
 #include <Wire.h>
+ #include <esp_heap_caps.h>
 
 #include "OLED_Display.h"
 #include "System_Command.h"
@@ -53,6 +54,18 @@ const unsigned long kGamepadInitMinIntervalMs = 2000;
 // Gamepad watermark tracking
 volatile UBaseType_t gGamepadWatermarkMin = (UBaseType_t)0xFFFFFFFF;
 volatile UBaseType_t gGamepadWatermarkNow = (UBaseType_t)0;
+
+ static inline void gamepadLogHeap(const char* tag) {
+   if (!isDebugFlagSet(DEBUG_MEMORY)) return;
+   size_t freeHeap = ESP.getFreeHeap();
+   size_t minFree = ESP.getMinFreeHeap();
+   size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+   Serial.printf("[GAMEPAD_MEM] %s heap_free=%u heap_min=%u largest=%u\n",
+                 tag ? tag : "?",
+                 (unsigned)freeHeap,
+                 (unsigned)minFree,
+                 (unsigned)largest);
+ }
 
 // ============================================================================
 // Gamepad Sensor Command Handlers
@@ -121,16 +134,16 @@ const char* cmd_gamepadstop(const String& cmd) {
   return "[Gamepad] Stop requested; cleanup will complete asynchronously";
 }
 
-const char* cmd_gamepadautostart(const String& cmd) {
+const char* cmd_gamepadautostart(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  int spacePos = cmd.indexOf(' ');
-  if (spacePos < 0) {
+  String arg = args;
+  arg.trim();
+  
+  if (arg.length() == 0) {
     return gSettings.gamepadAutoStart ? "[Gamepad] Auto-start: enabled" : "[Gamepad] Auto-start: disabled";
   }
   
-  String arg = cmd.substring(spacePos + 1);
-  arg.trim();
   arg.toLowerCase();
   
   if (arg == "on" || arg == "true" || arg == "1") {
@@ -153,6 +166,8 @@ const char* cmd_gamepadautostart(const String& cmd) {
 const char* startGamepadInternal() {
   DEBUG_CLIF("[QUEUE] Processing Gamepad start from queue");
 
+   gamepadLogHeap("start.begin");
+
   // Check memory before creating gamepad task
   if (!checkMemoryAvailable("gamepad", nullptr)) {
     return "Insufficient memory for Gamepad sensor";
@@ -169,8 +184,11 @@ const char* startGamepadInternal() {
 
   // Initialize Seesaw
   if (!initGamepad()) {
+    gamepadLogHeap("start.init_fail");
     return "Failed to initialize Gamepad";
   }
+
+   gamepadLogHeap("start.after_init");
 
   // Mark enabled BEFORE task creation to avoid startup race where the task can self-delete
   // if it runs before gamepadEnabled is set.
@@ -190,6 +208,7 @@ const char* startGamepadInternal() {
     gamepadEnabled = false;
     return "Failed to create Gamepad task";
   }
+  gamepadLogHeap("start.after_task");
   return "SUCCESS: Gamepad initialized with dedicated task";
 }
 
@@ -216,6 +235,17 @@ bool initGamepad() {
       return false;
     }
 
+    // Soft reset to ensure clean state - fixes stuck button reads
+    Serial.println("[GAMEPAD] Performing soft reset...");
+    gGamepadSeesaw.SWReset();
+    delay(10);  // Allow reset to complete
+    
+    // Re-begin after reset
+    if (!gGamepadSeesaw.begin(I2C_ADDR_GAMEPAD)) {
+      Serial.println("[GAMEPAD] ERROR: Seesaw not responding after soft reset");
+      return false;
+    }
+
     // Verify product ID (upper 16 bits of getVersion()) should be 5743
     uint32_t version = ((gGamepadSeesaw.getVersion() >> 16) & 0xFFFF);
     Serial.printf("[GAMEPAD] Seesaw version: %lu (expected 5743)\n", (unsigned long)version);
@@ -225,18 +255,9 @@ bool initGamepad() {
     }
 
     // Configure gamepad button inputs with pullups and enable GPIO interrupts
-    // Button bit definitions from Adafruit example
-    const uint8_t BUTTON_X = 6;
-    const uint8_t BUTTON_Y = 2;
-    const uint8_t BUTTON_A = 5;
-    const uint8_t BUTTON_B = 1;
-    const uint8_t BUTTON_SELECT = 0;
-    const uint8_t BUTTON_START = 16;
-
-    uint32_t button_mask = (1UL << BUTTON_X) | (1UL << BUTTON_Y) | (1UL << BUTTON_START) | (1UL << BUTTON_A) | (1UL << BUTTON_B) | (1UL << BUTTON_SELECT);
-
-    gGamepadSeesaw.pinModeBulk(button_mask, INPUT_PULLUP);
-    gGamepadSeesaw.setGPIOInterrupts(button_mask, 1);
+    // Use GAMEPAD_BUTTON_MASK from header for consistency
+    gGamepadSeesaw.pinModeBulk(GAMEPAD_BUTTON_MASK, INPUT_PULLUP);
+    gGamepadSeesaw.setGPIOInterrupts(GAMEPAD_BUTTON_MASK, 1);
 
     Serial.println("[GAMEPAD] Seesaw hardware init complete inside lambda");
     return true;
@@ -298,8 +319,23 @@ bool initGamepadConnection() {
       return gGamepadSeesaw.begin(I2C_ADDR_GAMEPAD);
     });
     if (began) {
-      // Optional: soft reset for clean state
-      // gGamepadSeesaw.swReset(); delay(2);
+      // Soft reset for clean state, then reconfigure
+      i2cDeviceTransactionVoid(I2C_ADDR_GAMEPAD, 100000, 500, [&]() {
+        gGamepadSeesaw.SWReset();
+      });
+      delay(10);
+      
+      // Re-begin and configure pins after reset
+      bool reinit = i2cDeviceTransaction(I2C_ADDR_GAMEPAD, 100000, 500, [&]() -> bool {
+        if (!gGamepadSeesaw.begin(I2C_ADDR_GAMEPAD)) return false;
+        gGamepadSeesaw.pinModeBulk(GAMEPAD_BUTTON_MASK, INPUT_PULLUP);
+        gGamepadSeesaw.setGPIOInterrupts(GAMEPAD_BUTTON_MASK, 1);
+        return true;
+      });
+      if (!reinit) {
+        Serial.println("[GAMEPAD] Re-init after soft reset failed");
+        continue;  // Try next attempt
+      }
 
       // Validate by reading a couple of registers/values
       i2cDeviceTransactionVoid(I2C_ADDR_GAMEPAD, 100000, 500, [&]() {
@@ -339,7 +375,7 @@ void readGamepad() {
   
   // Must use I2C transaction wrapper to prevent bus contention
   i2cDeviceTransactionVoid(I2C_ADDR_GAMEPAD, 100000, 200, [&]() {
-    buttons = gGamepadSeesaw.digitalReadBulk(0xFFFFFFFF);
+    buttons = gGamepadSeesaw.digitalReadBulk(GAMEPAD_BUTTON_MASK);
     x = gGamepadSeesaw.analogRead(14);
     y = gGamepadSeesaw.analogRead(15);
   });
@@ -354,9 +390,8 @@ void readGamepad() {
 
 // Gamepad settings entries - minimal but essential for safety
 static const SettingEntry gamepadSettingEntries[] = {
-  // Device-level settings (sensor hardware behavior)
-  { "device.devicePollMs", SETTING_INT, &gSettings.gamepadDevicePollMs, 58, 0, nullptr, 10, 1000, "Poll Interval (ms)", nullptr },
-  { "autoStart", SETTING_BOOL, &gSettings.gamepadAutoStart, 1, 0, nullptr, 0, 1, "Auto-start after boot", nullptr }
+  { "gamepadDevicePollMs", SETTING_INT,  &gSettings.gamepadDevicePollMs, 58, 0, nullptr, 10, 1000, "Poll Interval (ms)", nullptr },
+  { "gamepadAutoStart",    SETTING_BOOL, &gSettings.gamepadAutoStart,    1, 0, nullptr, 0, 1, "Auto-start after boot", nullptr }
 };
 
 static bool isGamepadConnected() {
@@ -415,6 +450,7 @@ void gamepadTask(void* parameter) {
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   Serial.println("[MODULAR] gamepadTask() running from Sensor_Gamepad_Seesaw.cpp");
   Serial.printf("[GAMEPAD_TASK] Initial state: enabled=%d connected=%d\n", gamepadEnabled, gamepadConnected);
+  gamepadLogHeap("task.entry");
   unsigned long lastGamepadRead = 0;
   unsigned long lastStackLog = 0;
   unsigned long lastStateLog = 0;
@@ -489,10 +525,12 @@ void gamepadTask(void* parameter) {
         uint32_t buttons = 0;
         int rawX = 0, rawY = 0;
 
-        // Use task timeout wrapper to catch gamepad performance issues
-        auto result = i2cTaskWithStandardTimeout(I2C_ADDR_GAMEPAD, 100000, [&]() -> bool {
+        // Use shorter timeout to avoid blocking OLED updates (which have 50ms timeout)
+        // Standard timeout of 1000ms was causing OLED blackouts during slow I2C operations
+        auto result = i2cTaskWithTimeout(I2C_ADDR_GAMEPAD, 100000, 150, [&]() -> bool {
           // Exceptions are disabled (-fno-exceptions), so rely on return value only.
-          buttons = gGamepadSeesaw.digitalReadBulk(0xFFFFFFFF);
+          // Read ONLY button pins, not all 32 GPIO pins - prevents garbage from unconfigured pins
+          buttons = gGamepadSeesaw.digitalReadBulk(GAMEPAD_BUTTON_MASK);
           rawX = 1023 - gGamepadSeesaw.analogRead(14);
           rawY = 1023 - gGamepadSeesaw.analogRead(15);
           return true;
@@ -501,11 +539,12 @@ void gamepadTask(void* parameter) {
         // Honor the actual I2C read result
         readSuccess = (result == true);
         
-        // Sanity check: reject garbage reads (e.g., 0x64000000 during I2C bus contention)
-        // Valid button states have specific bit patterns - upper bits should be stable
+        // Sanity check: reject garbage reads during I2C bus contention
+        // With GAMEPAD_BUTTON_MASK, only bits 0,1,2,5,6,16 should ever be set
+        // Any other bits set indicates garbage data
         bool dataValid = true;
-        if (readSuccess && (buttons & 0xFF000000) != 0) {
-          // Upper byte should be 0 for valid reads - this is garbage data
+        if (readSuccess && (buttons & ~GAMEPAD_BUTTON_MASK) != 0) {
+          // Bits outside button mask are set - this is garbage data
           dataValid = false;
         }
 
@@ -585,17 +624,28 @@ void gamepadTask(void* parameter) {
                                      "{\"val\":1,\"x\":%d,\"y\":%d,\"buttons\":%lu}",
                                      filtX, filtY, (unsigned long)buttons);
               if (jsonLen > 0 && jsonLen < 128) {
-                // Bypass sendSensorDataUpdate's rate limiting by calling mesh directly
-                extern void meshSendEnvelopeToPeers(const String& payload);
-                JsonDocument doc;
-                doc["type"] = MSG_TYPE_SENSOR_DATA;
-                doc["sensor"] = "gamepad";
-                JsonDocument dataDoc;
-                deserializeJson(dataDoc, gamepadJson);
-                doc["data"] = dataDoc.as<JsonObject>();
-                String message;
-                serializeJson(doc, message);
-                meshSendEnvelopeToPeers(message);
+                size_t heapBefore = ESP.getFreeHeap();
+                size_t largestBefore = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+                {
+                  // Bypass sendSensorDataUpdate's rate limiting by calling mesh directly
+                  extern void meshSendEnvelopeToPeers(const String& payload);
+                  JsonDocument doc;
+                  doc["type"] = MSG_TYPE_SENSOR_DATA;
+                  doc["sensor"] = "gamepad";
+                  JsonDocument dataDoc;
+                  deserializeJson(dataDoc, gamepadJson);
+                  doc["data"] = dataDoc.as<JsonObject>();
+                  String message;
+                  serializeJson(doc, message);
+                  meshSendEnvelopeToPeers(message);
+                }
+                if (isDebugFlagSet(DEBUG_MEMORY)) {
+                  size_t heapAfter = ESP.getFreeHeap();
+                  size_t largestAfter = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+                  long heapDelta = (long)heapBefore - (long)heapAfter;
+                  long largestDelta = (long)largestBefore - (long)largestAfter;
+                  Serial.printf("[GAMEPAD_MEM] espnow_send heap_delta=%ld largest_delta=%ld\n", heapDelta, largestDelta);
+                }
                 
                 lastESPNowSend = nowMs;
                 lastFiltX = filtX;

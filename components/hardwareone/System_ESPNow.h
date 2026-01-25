@@ -41,6 +41,7 @@ String base64Encode(const uint8_t* data, size_t len);
 #define MSG_TYPE_CMD "CMD"
 #define MSG_TYPE_TEXT "TEXT"
 #define MSG_TYPE_USER_SYNC "USER_SYNC"
+#define MSG_TYPE_FILE_BROWSE "FILE_BROWSE"
 
 // Message priorities
 enum MessagePriority {
@@ -598,7 +599,8 @@ bool shouldChunk(size_t size);
 bool routerSend(Message& msg);
 bool sendDirectFragmentedV2(const uint8_t* mac, const String& payload, uint32_t msgId, bool isEncrypted, const String& deviceName);
 bool sendDirectV2Small(const uint8_t* mac, const String& payload, uint32_t msgId, bool isEncrypted, const String& deviceName);
-// Note: parseMacAddress and resolveDeviceNameOrMac are now static (internal) in espnow_system.cpp
+// Helper to resolve device name or MAC address to MAC bytes
+bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac);
 
 // Message router (internal - do not call directly)
 
@@ -684,6 +686,21 @@ bool storeMessageInPeerHistory(uint8_t* peerMac, const char* peerName, const cha
 void logFileTransferEvent(uint8_t* peerMac, const char* peerName, const char* filename, LogMessageType eventType);
 int getPeerMessages(uint8_t* peerMac, ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq);
 int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq);
+
+// File transfer to specific MAC (used by ImageManager)
+bool sendFileToMac(const uint8_t* mac, const String& localPath);
+
+#else // !ENABLE_ESPNOW
+
+// Stubs for functions called from other modules when ESP-NOW is disabled
+inline bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac) { 
+  (void)nameOrMac; (void)outMac; 
+  return false; 
+}
+inline bool sendFileToMac(const uint8_t* mac, const String& localPath) { 
+  (void)mac; (void)localPath; 
+  return false; 
+}
 
 #endif // ENABLE_ESPNOW
 

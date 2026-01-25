@@ -99,7 +99,7 @@ void startHttpServer();
 // NTP Time Synchronization
 // ============================================================================
 void setupNTP();
-bool syncNTPAndResolve();
+bool syncNTPAndResolve();  // Synchronous - runs in calling task's stack
 time_t nowEpoch();
 
 // Note: BROADCAST_PRINTF is defined as a macro in debug_system.h, not a function
@@ -166,6 +166,11 @@ String urlEncode(const char* s);
 String urlDecode(const String& s);
 String extractFormField(const String& body, const String& key);
 String jsonEscape(const String& in);
+
+// Serialize JsonArray to buffer with self-repair: removes oldest entries if overflow
+// Returns number of entries removed (0 if no overflow)
+// Usage: int removed = serializeJsonArrayWithRepair(arr, buf, bufSize, "context");
+int serializeJsonArrayWithRepair(JsonArray& arr, char* buf, size_t bufSize, const char* context);
 
 // ============================================================================
 // Date/Time Formatting Utilities

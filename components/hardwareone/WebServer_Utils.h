@@ -633,8 +633,8 @@ inline String getFileBrowserScript() {
         var file = e.target.files[0];
         if (!file) return;
         
-        if (file.size > 500 * 1024) {
-          setStatus('Error: File too large (max 500KB)', true);
+        if (file.size > 3 * 1024 * 1024) {
+          setStatus('Error: File too large (max 3MB)', true);
           input.value = '';
           return;
         }
