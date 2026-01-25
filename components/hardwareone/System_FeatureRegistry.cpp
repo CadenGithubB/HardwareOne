@@ -54,8 +54,12 @@ static bool isOledCompiled() {
 }
 
 static bool isNeoPixelCompiled() {
-  // NeoPixel is always compiled in (no separate flag)
+  // Only show NeoPixel if hardware is configured (pin and count set)
+#if defined(NEOPIXEL_PIN_DEFAULT) && NEOPIXEL_PIN_DEFAULT >= 0 && NEOPIXEL_COUNT_DEFAULT > 0
   return true;
+#else
+  return false;
+#endif
 }
 
 static bool isThermalCompiled() {
@@ -106,6 +110,22 @@ static bool isFMRadioCompiled() {
 #endif
 }
 
+static bool isCameraCompiled() {
+#if ENABLE_CAMERA_SENSOR
+  return true;
+#else
+  return false;
+#endif
+}
+
+static bool isMicrophoneCompiled() {
+#if ENABLE_MICROPHONE_SENSOR
+  return true;
+#else
+  return false;
+#endif
+}
+
 static bool isAPDSCompiled() {
 #if ENABLE_APDS_SENSOR
   return true;
@@ -116,6 +136,22 @@ static bool isAPDSCompiled() {
 
 static bool isGamepadCompiled() {
 #if ENABLE_GAMEPAD_SENSOR
+  return true;
+#else
+  return false;
+#endif
+}
+
+static bool isRTCCompiled() {
+#if ENABLE_RTC_SENSOR
+  return true;
+#else
+  return false;
+#endif
+}
+
+static bool isPresenceCompiled() {
+#if ENABLE_PRESENCE_SENSOR
   return true;
 #else
   return false;
@@ -207,16 +243,38 @@ static const FeatureEntry featureRegistry[] = {
     &gSettings.apdsAutoStart, isAPDSCompiled,
     "APDS9960 gesture/color/proximity" },
 
+  { "rtc", "RTC Clock", FEATURE_CAT_SENSOR, 2,
+    FEATURE_FLAG_RUNTIME_TOGGLE,
+    &gSettings.rtcAutoStart, isRTCCompiled,
+    "DS3231 precision real-time clock" },
+
+  { "presence", "Presence Sensor", FEATURE_CAT_SENSOR, 2,
+    FEATURE_FLAG_RUNTIME_TOGGLE,
+    &gSettings.presenceAutoStart, isPresenceCompiled,
+    "STHS34PF80 IR presence/motion detection" },
+
+  { "camera", "Camera", FEATURE_CAT_SENSOR, 18,
+    FEATURE_FLAG_RUNTIME_TOGGLE,
+    &gSettings.cameraAutoStart, isCameraCompiled,
+    "ESP32-S3 camera sensor (XIAO ESP32S3 Sense)" },
+
+  { "microphone", "Microphone", FEATURE_CAT_SENSOR, 4,
+    FEATURE_FLAG_RUNTIME_TOGGLE,
+    &gSettings.microphoneAutoStart, isMicrophoneCompiled,
+    "ESP32-S3 PDM microphone (XIAO ESP32S3 Sense)" },
+
   // === HARDWARE FEATURES (shown on first page) ===
   { "i2c", "I2C Bus", FEATURE_CAT_NETWORK, 4,
     FEATURE_FLAG_REQUIRES_REBOOT,
     &gSettings.i2cBusEnabled, isI2CCompiled,
     "I2C hardware bus (required for OLED and sensors)" },
     
+#if ENABLE_AUTOMATION
   { "automation", "Automations", FEATURE_CAT_SYSTEM, 8,
     FEATURE_FLAG_RUNTIME_TOGGLE,
     &gSettings.automationsEnabled, isAutomationCompiled,
     "Scheduled tasks and conditional logic" },
+#endif
 };
 
 static const size_t featureRegistryCount = sizeof(featureRegistry) / sizeof(featureRegistry[0]);
@@ -321,14 +379,15 @@ static const char* getCategoryName(FeatureCategory cat) {
   }
 }
 
-const char* cmd_features(const String& cmd) {
+const char* cmd_features(const String& argsIn) {
   extern bool gCLIValidateOnly;
   if (gCLIValidateOnly) return "VALID";
   
-  int spacePos = cmd.indexOf(' ');
+  String args = argsIn;
+  args.trim();
   
   // No args - show all features with heap estimates
-  if (spacePos < 0) {
+  if (args.length() == 0) {
     static char buf[2048];
     uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
     uint32_t enabledCost = getEnabledFeaturesHeapEstimate();
@@ -378,10 +437,7 @@ const char* cmd_features(const String& cmd) {
     return buf;
   }
   
-  // Parse args: features <id> [on|off]
-  String args = cmd.substring(spacePos + 1);
-  args.trim();
-  
+  // Parse args: <id> [on|off]
   int secondSpace = args.indexOf(' ');
   if (secondSpace < 0) {
     // Single arg - show feature details

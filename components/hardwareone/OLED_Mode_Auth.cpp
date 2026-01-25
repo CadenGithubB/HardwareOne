@@ -42,7 +42,10 @@ static bool loginKeyboardActive = false;
 
 // Login display function
 static void displayLoginMode() {
-  if (!oledDisplay) return;
+  if (!oledDisplay) {
+    Serial.println("[LOGIN_RENDER] FATAL: oledDisplay is null!");
+    return;
+  }
   
   // If keyboard is active, display it instead
   if (oledKeyboardIsActive()) {
@@ -50,10 +53,9 @@ static void displayLoginMode() {
     return;
   }
   
+  // Always draw at least a title so screen is never completely black
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Title - show current user if already authenticated
   oledDisplay->setCursor(0, 0);
   if (isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {
     String currentUser = getTransportUser(SOURCE_LOCAL_DISPLAY);

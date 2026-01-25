@@ -294,12 +294,9 @@ void runLEDEffect(int effectType, RGB startColor, RGB endColor, unsigned long du
 const char* cmd_ledcolor(const String& command) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String colorName = "";
-  if (command.startsWith("ledcolor ")) {
-    colorName = command.substring(9);  // Skip "ledcolor "
-    colorName.trim();
-    colorName.toLowerCase();
-  }
+  String colorName = command;
+  colorName.trim();
+  colorName.toLowerCase();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
@@ -327,11 +324,8 @@ const char* cmd_ledclear(const String& cmd) {
 const char* cmd_ledeffect(const String& command) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args;
-  if (command.startsWith("ledeffect ")) {
-    args = command.substring(10);  // Skip "ledeffect "
-    args.trim();
-  }
+  String args = command;
+  args.trim();
 
   if (args == "off" || args == "none" || args.length() == 0) {
     setLEDColor({0, 0, 0});
@@ -435,12 +429,12 @@ static CommandModuleRegistrar _neopixel_cmd_registrar(neopixelCommands, neopixel
 // ============================================================================
 
 static const SettingEntry ledSettingEntries[] = {
-  { "brightness", SETTING_INT, &gSettings.ledBrightness, 100, 0, nullptr, 0, 255, "Brightness", nullptr },
-  { "startupEnabled", SETTING_BOOL, &gSettings.ledStartupEnabled, true, 0, nullptr, 0, 1, "Startup Enabled", nullptr },
-  { "startupEffect", SETTING_STRING, &gSettings.ledStartupEffect, 0, 0, "rainbow", 0, 0, "Startup Effect", "rainbow,pulse,solid,chase,breathe" },
-  { "startupColor", SETTING_STRING, &gSettings.ledStartupColor, 0, 0, "cyan", 0, 0, "Startup Color", nullptr },
-  { "startupColor2", SETTING_STRING, &gSettings.ledStartupColor2, 0, 0, "magenta", 0, 0, "Startup Color 2", nullptr },
-  { "startupDuration", SETTING_INT, &gSettings.ledStartupDuration, 1000, 0, nullptr, 100, 10000, "Startup Duration (ms)", nullptr }
+  { "ledBrightness",      SETTING_INT,    &gSettings.ledBrightness,      100, 0, nullptr, 0, 255, "Brightness", nullptr },
+  { "ledStartupEnabled",  SETTING_BOOL,   &gSettings.ledStartupEnabled,  true, 0, nullptr, 0, 1, "Startup Enabled", nullptr },
+  { "ledStartupEffect",   SETTING_STRING, &gSettings.ledStartupEffect,   0, 0, "rainbow", 0, 0, "Startup Effect", "rainbow,pulse,solid,chase,breathe" },
+  { "ledStartupColor",    SETTING_STRING, &gSettings.ledStartupColor,    0, 0, "cyan", 0, 0, "Startup Color", nullptr },
+  { "ledStartupColor2",   SETTING_STRING, &gSettings.ledStartupColor2,   0, 0, "magenta", 0, 0, "Startup Color 2", nullptr },
+  { "ledStartupDuration", SETTING_INT,    &gSettings.ledStartupDuration, 1000, 0, nullptr, 100, 10000, "Startup Duration (ms)", nullptr }
 };
 
 extern const SettingsModule ledSettingsModule = {

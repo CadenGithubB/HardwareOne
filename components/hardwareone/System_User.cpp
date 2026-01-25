@@ -1163,10 +1163,10 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
 // User Command Handlers
 // ============================================================================
 
-const char* cmd_user_approve(const String& originalCmd) {
+const char* cmd_user_approve(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = originalCmd.substring(String("user approve ").length());
+  String username = argsIn;
   username.trim();
   DEBUG_USERSF("[users] CLI approve username=%s", username.c_str());
   String err;
@@ -1180,10 +1180,10 @@ const char* cmd_user_approve(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_deny(const String& originalCmd) {
+const char* cmd_user_deny(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = originalCmd.substring(String("user deny ").length());
+  String username = argsIn;
   username.trim();
   DEBUG_USERSF("[users] CLI deny username=%s", username.c_str());
   String err;
@@ -1197,10 +1197,10 @@ const char* cmd_user_deny(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_promote(const String& originalCmd) {
+const char* cmd_user_promote(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = originalCmd.substring(String("user promote ").length());
+  String username = argsIn;
   username.trim();
   if (username.length() == 0) return "Usage: user promote <username>";
   DEBUG_USERSF("[users] CLI promote username=%s", username.c_str());
@@ -1215,10 +1215,10 @@ const char* cmd_user_promote(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_demote(const String& originalCmd) {
+const char* cmd_user_demote(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = originalCmd.substring(String("user demote ").length());
+  String username = argsIn;
   username.trim();
   if (username.length() == 0) return "Usage: user demote <username>";
   DEBUG_USERSF("[users] CLI demote username=%s", username.c_str());
@@ -1233,10 +1233,10 @@ const char* cmd_user_demote(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_delete(const String& originalCmd) {
+const char* cmd_user_delete(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = originalCmd.substring(String("user delete ").length());
+  String username = argsIn;
   username.trim();
   if (username.length() == 0) return "Usage: user delete <username>";
   DEBUG_USERSF("[users] CLI delete username=%s", username.c_str());
@@ -1251,14 +1251,14 @@ const char* cmd_user_delete(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_list(const String& originalCmd) {
+const char* cmd_user_list(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
-  // Check if JSON output is requested
-  bool jsonOutput = (originalCmd.indexOf(" json") >= 0);
+  // Check if JSON output is requested (just check for "json" in args)
+  bool jsonOutput = (args.indexOf("json") >= 0);
   
-  DEBUG_USERSF("[USER_LIST_DEBUG] Called with cmd='%s', jsonOutput=%d", originalCmd.c_str(), jsonOutput);
+  DEBUG_USERSF("[USER_LIST_DEBUG] Called with args='%s', jsonOutput=%d", args.c_str(), jsonOutput);
 
   if (!LittleFS.exists(USERS_JSON_FILE)) {
     DEBUG_USERSF("[USER_LIST_DEBUG] File not found: %s", USERS_JSON_FILE);
@@ -1293,21 +1293,17 @@ const char* cmd_user_list(const String& originalCmd) {
   }
 
   if (jsonOutput) {
-    // Use static PSRAM buffer to serialize users array
+    // Use static PSRAM buffer - 2KB sufficient for user list
     static char* jsonBuf = nullptr;
     static const size_t kBufSize = 2048;
     if (!jsonBuf) {
       jsonBuf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "user.list.json");
-      if (!jsonBuf) {
-        ERROR_MEMORYF("Failed to allocate user list buffer");
-        return "[]";
-      }
-      INFO_SESSIONF("Allocated user list buffer at %p", jsonBuf);
+      if (!jsonBuf) return "[]";
     }
-    
-    // Serialize just the users array
     size_t len = serializeJson(users, jsonBuf, kBufSize);
-    DEBUG_USERSF("[USER_LIST_DEBUG] Serialized %d bytes: %s", len, jsonBuf);
+    if (len >= kBufSize) {
+      ERROR_MEMORYF("user list JSON truncated: %zu >= %zu", len, kBufSize);
+    }
     return jsonBuf;
   } else {
     // Stream human-readable format
@@ -1331,12 +1327,12 @@ const char* cmd_user_list(const String& originalCmd) {
   }
 }
 
-const char* cmd_pending_list(const String& originalCmd) {
+const char* cmd_pending_list(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
   // Check if JSON output is requested
-  bool jsonOutput = (originalCmd.indexOf(" json") >= 0);
+  bool jsonOutput = (args.indexOf("json") >= 0);
 
   if (!LittleFS.exists("/system/pending_users.json")) {
     if (jsonOutput) return "[]";
@@ -1371,16 +1367,15 @@ const char* cmd_pending_list(const String& originalCmd) {
   }
 
   if (jsonOutput) {
-    // Use static PSRAM buffer to serialize pending users array
+    // Use static PSRAM buffer - 2KB sufficient for pending list
     static char* jsonBuf = nullptr;
     static const size_t kBufSize = 2048;
     if (!jsonBuf) {
       jsonBuf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "pending.list.json");
       if (!jsonBuf) return "[]";
     }
-    
-    // Serialize the array
-    serializeJson(pending, jsonBuf, kBufSize);
+    // Self-repair on overflow (prevents DoS via flooding pending requests)
+    serializeJsonArrayWithRepair(pending, jsonBuf, kBufSize, "pending list");
     return jsonBuf;
   } else {
     // Stream human-readable format
@@ -1403,28 +1398,27 @@ const char* cmd_pending_list(const String& originalCmd) {
 }
 
 #if ENABLE_HTTP_SERVER
-const char* cmd_session_list(const String& originalCmd) {
+const char* cmd_session_list(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Check if JSON output is requested
-  bool jsonOutput = (originalCmd.indexOf(" json") >= 0);
+  bool jsonOutput = (args.indexOf("json") >= 0);
 
   if (jsonOutput) {
-    // Build JSON array for web UI
-    JsonDocument doc;
-    JsonArray sessions = doc.to<JsonArray>();
-    buildAllSessionsJson("", sessions);  // Empty currentSid since we don't need current flag for CLI
-     
-    // Use static PSRAM buffer to serialize sessions array
+    // Use static PSRAM buffer - 2KB sufficient for session list
     static char* jsonBuf = nullptr;
     static const size_t kBufSize = 2048;
     if (!jsonBuf) {
       jsonBuf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "session.list.json");
       if (!jsonBuf) return "[]";
     }
-    
-    // Serialize the array
-    serializeJson(sessions, jsonBuf, kBufSize);
+    JsonDocument doc;
+    JsonArray sessions = doc.to<JsonArray>();
+    buildAllSessionsJson("", sessions);
+    size_t len = serializeJson(sessions, jsonBuf, kBufSize);
+    if (len >= kBufSize) {
+      ERROR_MEMORYF("session list JSON truncated: %zu >= %zu", len, kBufSize);
+    }
     return jsonBuf;
   } else {
     // Stream human-readable format
@@ -1451,9 +1445,9 @@ const char* cmd_login(const String& originalCmd) {
   String cmd = originalCmd;
   cmd.trim();
 
-  // Parse: login <username> <password> [transport]
+  // Parse: <username> <password> [transport]
   // transport can be: serial, display, bluetooth
-  String rest = cmd.substring(6);  // skip "login "
+  String rest = cmd;
   rest.trim();
 
   int sp1 = rest.indexOf(' ');
@@ -1508,8 +1502,8 @@ const char* cmd_logout(const String& originalCmd) {
   String cmd = originalCmd;
   cmd.trim();
 
-  // Parse: logout [transport]
-  String rest = cmd.substring(7);  // skip "logout "
+  // Parse: [transport]
+  String rest = cmd;
   rest.trim();
   rest.toLowerCase();
 
@@ -1532,20 +1526,21 @@ const char* cmd_logout(const String& originalCmd) {
   return buf;
 }
 
-const char* cmd_session_revoke(const String& originalCmd) {
+const char* cmd_session_revoke(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String cmd = originalCmd;
-  cmd.trim();
-  cmd.toLowerCase();
+  String args = argsIn;
+  args.trim();
+  String argsLower = args;
+  argsLower.toLowerCase();
 
   auto defaultReason = String("Your session has been signed out by an administrator.");
 
   int revoked = 0;
 
-  if (cmd.startsWith("session revoke sid ")) {
+  if (argsLower.startsWith("sid ")) {
     // Extract SID and optional reason
-    String rest = originalCmd.substring(String("session revoke sid ").length());
+    String rest = args.substring(4);  // after "sid "
     rest.trim();
     int sp = rest.indexOf(' ');
     String sid = (sp < 0) ? rest : rest.substring(0, sp);
@@ -1571,9 +1566,9 @@ const char* cmd_session_revoke(const String& originalCmd) {
     return getDebugBuffer();
   }
 
-  if (cmd.startsWith("session revoke user ")) {
+  if (argsLower.startsWith("user ")) {
     // Extract username and optional reason
-    String rest = originalCmd.substring(String("session revoke user ").length());
+    String rest = args.substring(5);  // after "user "
     rest.trim();
     int sp = rest.indexOf(' ');
     String username = (sp < 0) ? rest : rest.substring(0, sp);
@@ -1622,17 +1617,14 @@ const char* cmd_session_revoke(const String& originalCmd) {
 }
 #endif // ENABLE_HTTP_SERVER
 
-const char* cmd_user_request(const String& originalCmd) {
+const char* cmd_user_request(const String& args) {
   //RETURN_VALID_IF_VALIDATE_CSTR();
   broadcastOutput("[DEBUG] NEW cmd_user_request function called");
   if (!filesystemReady) return "Error: LittleFS not ready";
-  // Syntax:
-  //   user request <username> <password> [confirmPassword]
-  int sp1 = originalCmd.indexOf(' ');                             // after 'user'
-  int sp2 = (sp1 >= 0) ? originalCmd.indexOf(' ', sp1 + 1) : -1;  // after 'request'
-  if (sp2 < 0) return "Usage: user request <username> <password> [confirmPassword]";
-  String rest = originalCmd.substring(sp2 + 1);
+  // Syntax: args = "<username> <password> [confirmPassword]"
+  String rest = args;
   rest.trim();
+  if (rest.length() == 0) return "Usage: user request <username> <password> [confirmPassword]";
   int spU = rest.indexOf(' ');
   if (spU < 0) return "Usage: user request <username> <password> [confirmPassword]";
   String username = rest.substring(0, spU);
@@ -2441,7 +2433,7 @@ static bool userSyncResolveDeviceNameOrMac(const String& deviceStr, uint8_t outM
  * Sends user credentials to a paired ESP-NOW device.
  * Requires admin privileges and user sync to be enabled.
  */
-const char* cmd_user_sync(const String& originalCmd) {
+const char* cmd_user_sync(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -2457,8 +2449,8 @@ const char* cmd_user_sync(const String& originalCmd) {
     return "Error: User sync disabled - enable with 'espnow usersync on'";
   }
   
-  // Parse command: user sync <username> <device> <password>
-  String args = originalCmd.substring(String("user sync ").length());
+  // Parse command args: <username> <device> <password>
+  String args = argsIn;
   args.trim();
   
   int firstSpace = args.indexOf(' ');

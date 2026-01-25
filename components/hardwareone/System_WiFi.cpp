@@ -131,7 +131,7 @@ const char* cmd_wifiadd(const String& originalCmd) {
   // upsertWiFiNetwork, sortWiFiByPriority, saveWiFiNetworks are now defined in this file
   
   // wifiadd <ssid> <pass> [priority] [hidden0|1]
-  String args = originalCmd.substring(8);
+  String args = originalCmd;
   args.trim();
   int sp1 = args.indexOf(' ');
   if (sp1 <= 0) return "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]";
@@ -165,7 +165,7 @@ const char* cmd_wifirm(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // removeWiFiNetwork, saveWiFiNetworks are now defined in this file
   
-  String ssid = originalCmd.substring(7);
+  String ssid = originalCmd;
   ssid.trim();
   if (ssid.length() == 0) return "Usage: wifirm <ssid>";
   // Networks already in memory from settings.json
@@ -185,7 +185,7 @@ const char* cmd_wifipromote(const String& originalCmd) {
   // findWiFiNetwork, sortWiFiByPriority, saveWiFiNetworks are now defined in this file
   
   // wifipromote <ssid> [newPriority]
-  String rest = originalCmd.substring(12);
+  String rest = originalCmd;
   rest.trim();
   if (rest.length() == 0) return "Usage: wifipromote <ssid> [newPriority]";
   int sp = rest.indexOf(' ');
@@ -243,11 +243,8 @@ const char* cmd_wificonnect(const String& originalCmd) {
     return "ERROR: Failed to initialize WiFi";
   }
   
-  String arg = "";
-  if (originalCmd.length() > 11) {
-    arg = originalCmd.substring(11);
-    arg.trim();
-  }
+  String arg = originalCmd;
+  arg.trim();
   String prevSSID = WiFi.isConnected() ? WiFi.SSID() : String("");
   bool connected = false;
 
@@ -319,19 +316,32 @@ const char* cmd_wifidisconnect(const String& cmd) {
 
 const char* cmd_wifiscan(const String& command) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  bool json = (command == "wifiscan json" || command == "wifiscan  json");
+  
+  // Ensure WiFi is initialized (lazy init) before scanning
+  if (!ensureWiFiInitialized()) {
+    return "ERROR: Failed to initialize WiFi";
+  }
+  
+  String args = command;
+  args.trim();
+  bool json = (args == "json");
   int n = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
   if (n < 0) return "WiFi scan failed";
 
   if (json) {
-    broadcastOutput("[");
+    // Build JSON array and return it directly (for web API consumption)
+    static String jsonResult;
+    jsonResult = "[";
     for (int i = 0; i < n; ++i) {
-      if (i > 0) broadcastOutput(",");
-      snprintf(getDebugBuffer(), 1024, "  { \"ssid\": \"%s\", \"rssi\": %ld, \"bssid\": \"%s\" }",
-               WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i), WiFi.BSSIDstr(i).c_str());
-      broadcastOutput(getDebugBuffer());
+      if (i > 0) jsonResult += ",";
+      char entry[256];
+      snprintf(entry, sizeof(entry), "{\"ssid\":\"%s\",\"rssi\":%ld,\"bssid\":\"%s\",\"channel\":%d,\"auth\":\"%d\"}",
+               WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i), WiFi.BSSIDstr(i).c_str(),
+               WiFi.channel(i), (int)WiFi.encryptionType(i));
+      jsonResult += entry;
     }
-    broadcastOutput("]");
+    jsonResult += "]";
+    return jsonResult.c_str();
   } else {
     snprintf(getDebugBuffer(), 1024, "%d networks found:", n);
     broadcastOutput(getDebugBuffer());
@@ -342,16 +352,15 @@ const char* cmd_wifiscan(const String& command) {
     }
   }
 
-  return "[WiFi] Disconnected successfully";
+  snprintf(getDebugBuffer(), 1024, "Scan complete: %d networks found", n);
+  return getDebugBuffer();
 }
 
-const char* cmd_wifitxpower(const String& originalCmd) {
+const char* cmd_wifitxpower(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  int sp = originalCmd.indexOf(' ');
-  if (sp < 0) return "Usage: wifitxpower <dBm>";
-  String valStr = originalCmd.substring(sp + 1);
+  String valStr = args;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: wifitxpower <dBm>";
   float dBm = valStr.toFloat();
@@ -381,10 +390,10 @@ const char* cmd_wifigettxpower(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_wifiautoreconnect(const String& originalCmd) {
+const char* cmd_wifiautoreconnect(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String valStr = originalCmd.substring(18);  // after "wifiautoreconnect "
+  String valStr = args;
   valStr.trim();
   int v = valStr.toInt();
   gSettings.wifiAutoReconnect = (v != 0);
@@ -917,11 +926,11 @@ void setupWiFi() {
 // ============================================================================
 
 static const SettingEntry wifiSettingsEntries[] = {
-  { "ssid", SETTING_STRING, &gSettings.wifiSSID, 0, 0, "", 0, 0, "WiFi SSID", nullptr },
-  { "password", SETTING_STRING, &gSettings.wifiPassword, 0, 0, "", 0, 0, "WiFi Password", nullptr },
-  { "autoReconnect", SETTING_BOOL, &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr },
-  { "ntpServer", SETTING_STRING, &gSettings.ntpServer, 0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr },
-  { "tzOffsetMinutes", SETTING_INT, &gSettings.tzOffsetMinutes, -240, 0, nullptr, -720, 840, "Timezone Offset (min)", nullptr }
+  { "wifiSSID",           SETTING_STRING, &gSettings.wifiSSID,          0, 0, "", 0, 0, "WiFi SSID", nullptr },
+  { "wifiPassword",       SETTING_STRING, &gSettings.wifiPassword,      0, 0, "", 0, 0, "WiFi Password", nullptr },
+  { "wifiAutoReconnect",  SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr },
+  { "wifiNtpServer",      SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr },
+  { "wifiTzOffsetMinutes",SETTING_INT,    &gSettings.tzOffsetMinutes,   -240, 0, nullptr, -720, 840, "Timezone Offset (min)", nullptr }
 };
 
 extern const SettingsModule wifiSettingsModule = {
@@ -938,7 +947,7 @@ extern const SettingsModule wifiSettingsModule = {
 // ============================================================================
 
 static const SettingEntry httpSettingsEntries[] = {
-  { "autoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr }
+  { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr }
 };
 
 extern const SettingsModule httpSettingsModule = {

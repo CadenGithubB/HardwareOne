@@ -145,6 +145,10 @@ inline void streamLoggingInner(httpd_req_t* req) {
             <input type='checkbox' id='sensor-apds' value='apds' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>APDS (color, proximity, gesture)</span>
           </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='sensor-gps' value='gps' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>GPS (position, speed, altitude)</span>
+          </label>
         </div>
         <div style='margin-top:0.5rem;display:flex;gap:0.5rem'>
           <button class='btn' onclick='selectAllSensors()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select All</button>
@@ -313,6 +317,30 @@ inline void streamLoggingInner(httpd_req_t* req) {
             <input type='checkbox' id='flag-logger' value='0x20000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Sensor Logger Internals</span>
           </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-camera' value='0x20000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Camera Operations</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-microphone' value='0x0800' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Microphone Operations</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-fmradio' value='0x0080' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>FM Radio</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-espnow' value='0x10000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Core</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-memory' value='0x40000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Memory Operations</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-security' value='0x8000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Security</span>
+          </label>
         </div>
         <div style='margin-top:0.5rem;display:flex;gap:0.5rem'>
           <button class='btn' onclick='selectAllFlags()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select All</button>
@@ -435,23 +463,20 @@ function generateDefaultFilename() {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'cmd=' + encodeURIComponent('time')
   })
-  .then(r => {
-    console.log('[LOGGING] Section 3b: Time fetch response status:', r.status);
-    return r.text();
-  })
+  .then(r => r.text())
   .then(text => {
-    console.log('[LOGGING] Section 3c: Time response text:', text);
+    console.log('[LOGGING] Section 3b: Time response:', text);
     let filename = '/logs/sensors-';
     
     // Check if we have NTP time (ISO format in response)
-    const isoMatch = text.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
+    const isoMatch = text.match(/Time:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
     if (isoMatch) {
-      // Priority 1: NTP time available - use ISO format
-      console.log('[LOGGING] Section 3d: Using NTP time:', isoMatch[1]);
+      // NTP time available - use ISO format
+      console.log('[LOGGING] Section 3c: Using NTP time:', isoMatch[1]);
       const timestamp = isoMatch[1].replace(/:/g, '-');
       filename += timestamp;
     } else {
-      // Priority 2: Use browser time
+      // Fallback to browser time
       const now = new Date();
       const timestamp = now.getFullYear() + '-' +
         String(now.getMonth() + 1).padStart(2, '0') + '-' +
@@ -459,28 +484,17 @@ function generateDefaultFilename() {
         String(now.getHours()).padStart(2, '0') + '-' +
         String(now.getMinutes()).padStart(2, '0') + '-' +
         String(now.getSeconds()).padStart(2, '0');
-      console.log('[LOGGING] Section 3e: Using browser time:', timestamp);
+      console.log('[LOGGING] Section 3d: Using browser time:', timestamp);
       filename += timestamp;
-      
-      // Priority 3: Check if we should use uptime instead (if browser time seems wrong)
-      const millisMatch = text.match(/Uptime:\s*(\d+)\s*ms/);
-      if (millisMatch && now.getFullYear() < 2020) {
-        // Browser time is clearly wrong (pre-2020), use uptime instead
-        console.log('[LOGGING] Section 3f: Browser time invalid, using uptime:', millisMatch[1]);
-        filename = '/logs/sensors-uptime-' + millisMatch[1];
-      }
     }
     
-    // Add extension based on format
     const format = document.getElementById('config-format').value;
     filename += (format === 'csv' ? '.csv' : '.log');
-    console.log('[LOGGING] Section 3g: Generated filename:', filename);
-    
+    console.log('[LOGGING] Section 3e: Generated filename:', filename);
     document.getElementById('config-path').value = filename;
   })
   .catch(e => {
-    console.warn('[LOGGING] Section 3h: Failed to get time from device, using browser time:', e);
-    // Fallback to browser time if device unreachable
+    console.warn('[LOGGING] Section 3f: Failed to get time, using browser time:', e);
     const now = new Date();
     const timestamp = now.getFullYear() + '-' +
       String(now.getMonth() + 1).padStart(2, '0') + '-' +
@@ -490,11 +504,10 @@ function generateDefaultFilename() {
       String(now.getSeconds()).padStart(2, '0');
     const format = document.getElementById('config-format').value;
     const filename = '/logs/sensors-' + timestamp + (format === 'csv' ? '.csv' : '.log');
-    console.log('[LOGGING] Section 3i: Fallback filename:', filename);
     document.getElementById('config-path').value = filename;
   });
 }
-console.log('[LOGGING] Section 3j: generateDefaultFilename defined');
+console.log('[LOGGING] Section 3g: generateDefaultFilename defined');
 </script>
 
 <script>
@@ -512,6 +525,20 @@ function refreshStatus() {
   })
   .then(text => {
     console.log('[LOGGING] Section 4c: Status response text:', text);
+    
+    // Check if command is not available
+    if (text.includes('Unknown command') || text.includes('not found')) {
+      console.log('[LOGGING] Section 4d: sensorlog command not available');
+      const statusDot = document.getElementById('status-dot');
+      const statusText = document.getElementById('status-text');
+      statusDot.style.background = '#ffc107';
+      statusText.textContent = 'Not Available';
+      statusText.style.color = '#ffc107';
+      document.getElementById('btn-start').style.display = 'none';
+      document.getElementById('btn-stop').style.display = 'none';
+      return;
+    }
+    
     const isActive = text.includes('logging ACTIVE');
     console.log('[LOGGING] Section 4d: Logging active:', isActive);
     const statusDot = document.getElementById('status-dot');
@@ -878,12 +905,16 @@ function generateSystemFilename() {
   })
   .then(r => r.text())
   .then(text => {
+    console.log('[LOGGING] System time response:', text);
     let filename = '/logs/system-';
-    const isoMatch = text.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
+    
+    // Match new format: "Time: 2024-01-22T06:18:00 (NTP synced)"
+    const isoMatch = text.match(/Time:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
     if (isoMatch) {
       const timestamp = isoMatch[1].replace(/:/g, '-');
       filename += timestamp;
     } else {
+      // Fallback to browser time
       const now = new Date();
       const timestamp = now.getFullYear() + '-' +
         String(now.getMonth() + 1).padStart(2, '0') + '-' +
@@ -892,10 +923,6 @@ function generateSystemFilename() {
         String(now.getMinutes()).padStart(2, '0') + '-' +
         String(now.getSeconds()).padStart(2, '0');
       filename += timestamp;
-      const millisMatch = text.match(/Uptime:\s*(\d+)\s*ms/);
-      if (millisMatch && now.getFullYear() < 2020) {
-        filename = '/logs/system-uptime-' + millisMatch[1];
-      }
     }
     filename += '.log';
     document.getElementById('sys-config-path').value = filename;
@@ -924,6 +951,20 @@ function refreshSystemStatus() {
   .then(r => r.text())
   .then(text => {
     console.log('[LOGGING] System status response:', text);
+    
+    // Check if command is not available
+    if (text.includes('Unknown command') || text.includes('not found')) {
+      console.log('[LOGGING] log command not available');
+      const statusDot = document.getElementById('sys-status-dot');
+      const statusText = document.getElementById('sys-status-text');
+      statusDot.style.background = '#ffc107';
+      statusText.textContent = 'Not Available';
+      statusText.style.color = '#ffc107';
+      document.getElementById('sys-btn-start').style.display = 'none';
+      document.getElementById('sys-btn-stop').style.display = 'none';
+      return;
+    }
+    
     const isActive = text.includes('logging ACTIVE');
     const statusDot = document.getElementById('sys-status-dot');
     const statusText = document.getElementById('sys-status-text');
@@ -1155,28 +1196,66 @@ function parseLogFile(text) {
   const categories = new Set();
   
   lines.forEach(line => {
-    // Parse: [timestamp] [CATEGORY] message
-    // or: [timestamp] message
-    const match = line.match(/^\[(\d+)\]\s*(?:\[([A-Z_]+)\]\s*)?(.*)$/);
+    let logLine = null;
+    
+    // Format 1: Debug logs - [timestamp] [CATEGORY] message
+    let match = line.match(/^\[(\d+)\]\s*\[([A-Z_]+)\]\s*(.*)$/);
     if (match) {
       const [, timestamp, category, message] = match;
-      const logLine = {
+      logLine = {
         timestamp: parseInt(timestamp),
-        category: category || 'UNKNOWN',
+        category: category,
         message: message.trim(),
         raw: line
       };
-      gLogLines.push(logLine);
-      if (category) categories.add(category);
-    } else {
-      // Malformed line, add as-is
-      gLogLines.push({
+      categories.add(category);
+    }
+    
+    // Format 2: Command audit logs - [timestamp] user@source command -> result
+    if (!logLine) {
+      match = line.match(/^\[(\d+)\]\s*(\w+)@(\w+)\s+(.+?)\s*->\s*(.*)$/);
+      if (match) {
+        const [, timestamp, user, source, command, result] = match;
+        const category = source.toUpperCase();
+        logLine = {
+          timestamp: parseInt(timestamp),
+          category: category,
+          user: user,
+          command: command,
+          result: result,
+          message: user + '@' + source + ' ' + command + ' -> ' + result,
+          raw: line
+        };
+        categories.add(category);
+      }
+    }
+    
+    // Format 3: Simple timestamp - [timestamp] message
+    if (!logLine) {
+      match = line.match(/^\[(\d+)\]\s*(.*)$/);
+      if (match) {
+        const [, timestamp, message] = match;
+        logLine = {
+          timestamp: parseInt(timestamp),
+          category: 'GENERAL',
+          message: message.trim(),
+          raw: line
+        };
+        categories.add('GENERAL');
+      }
+    }
+    
+    // Fallback: Malformed line, add as-is
+    if (!logLine) {
+      logLine = {
         timestamp: 0,
         category: 'UNKNOWN',
         message: line,
         raw: line
-      });
+      };
     }
+    
+    gLogLines.push(logLine);
   });
   
   // Populate category filter

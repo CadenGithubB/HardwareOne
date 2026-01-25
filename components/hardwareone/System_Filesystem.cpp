@@ -5,6 +5,8 @@
 
 #include <LittleFS.h>
 
+#include <esp_log.h>
+
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Filesystem.h"
@@ -12,6 +14,7 @@
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
+#include "System_ImageManager.h"
 
 // External dependencies
 extern bool readText(const char* path, String& out);
@@ -36,91 +39,43 @@ bool filesystemReady = false;
 // ============================================================================
 
 bool initFilesystem() {
+  ESP_LOGI("FS", "Initializing LittleFS...");
   Serial.println("[FS] Initializing LittleFS...");
+  Serial.flush();
+  delay(50);  // Allow serial to flush
   
-  // Try mounting multiple times before considering format
-  const int MAX_MOUNT_ATTEMPTS = 3;
-  const int RETRY_DELAY_MS = 500;
-  
-  for (int attempt = 1; attempt <= MAX_MOUNT_ATTEMPTS; attempt++) {
-    Serial.printf("[FS] Mount attempt %d/%d...\n", attempt, MAX_MOUNT_ATTEMPTS);
-    
-    if (LittleFS.begin(false)) {
-      Serial.println("[FS] LittleFS mounted successfully");
-      filesystemReady = true;
-      return true;  // Early return on success
-    }
-    
-    if (attempt < MAX_MOUNT_ATTEMPTS) {
-      Serial.printf("[FS] Mount failed, retrying in %dms...\n", RETRY_DELAY_MS);
-      delay(RETRY_DELAY_MS);
-    }
-  }
-  
-  // All mount attempts failed - prompt user before formatting
-  Serial.println();
-  Serial.println("╔══════════════════════════════════════════════════════════════╗");
-  Serial.println("║  FILESYSTEM MOUNT FAILED AFTER 3 ATTEMPTS                    ║");
-  Serial.println("║                                                              ║");
-  Serial.println("║  Press 'Y' within 10 seconds to FORMAT filesystem            ║");
-  Serial.println("║  Press any other key or wait to HALT boot                    ║");
-  Serial.println("║                                                              ║");
-  Serial.println("║  WARNING: Formatting will erase all stored data!             ║");
-  Serial.println("╚══════════════════════════════════════════════════════════════╝");
-  Serial.println();
-  
-  // Wait for user input with timeout
-  unsigned long startTime = millis();
-  const unsigned long TIMEOUT_MS = 10000;
-  bool formatConfirmed = false;
-  
-  while (millis() - startTime < TIMEOUT_MS) {
-    if (Serial.available()) {
-      char c = Serial.read();
-      if (c == 'Y' || c == 'y') {
-        formatConfirmed = true;
-        break;
-      } else {
-        Serial.println("[FS] Format cancelled by user");
-        break;
-      }
-    }
-    delay(100);
-  }
-  
-  if (!formatConfirmed) {
-    Serial.println("[FS] No format confirmation - halting boot");
-    Serial.println("[FS] Please check hardware or manually erase flash");
-    filesystemReady = false;
-    return false;
-  }
-  
-  // User confirmed format
-  Serial.println("[FS] Format confirmed, formatting filesystem...");
-  
-  if (LittleFS.format()) {
-    Serial.println("[FS] Format successful, mounting...");
-    if (LittleFS.begin(false)) {
-      Serial.println("[FS] LittleFS mounted after format");
-      filesystemReady = true;
-    } else {
-      Serial.println("[FS] ERROR: Mount failed even after successful format");
+  // Configure LittleFS using ESP-IDF native API (bypasses Arduino wrapper issues)
+  if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
+    ESP_LOGW("FS", "LittleFS mount failed; formatting and retrying");
+    Serial.println("[FS] Mount failed; formatting and retrying...");
+    Serial.flush();
+
+    if (!LittleFS.format()) {
+      ESP_LOGE("FS", "LittleFS format failed");
+      Serial.println("[FS] ERROR: LittleFS format failed");
+      Serial.flush();
       filesystemReady = false;
       return false;
     }
-  } else {
-    Serial.println("[FS] ERROR: Format failed");
-    // Last resort: try the built-in format-on-fail
-    Serial.println("[FS] Trying begin(true) as final fallback...");
-    if (LittleFS.begin(true)) {
-      Serial.println("[FS] LittleFS mounted via begin(true)");
-      filesystemReady = true;
-    } else {
-      Serial.println("[FS] ERROR: All filesystem initialization attempts failed");
+
+    if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
+      ESP_LOGE("FS", "LittleFS mount failed after format");
+      Serial.println("[FS] ERROR: LittleFS mount failed after format");
+      Serial.flush();
       filesystemReady = false;
       return false;
     }
   }
+  
+  ESP_LOGI("FS", "LittleFS mounted successfully");
+  Serial.println("[FS] LittleFS mounted successfully");
+  Serial.flush();
+  filesystemReady = true;
+  
+#if ENABLE_CAMERA_SENSOR
+  // Initialize ImageManager now that filesystem is ready (creates photos folder)
+  gImageManager.init();
+#endif
   
   // Ensure system directories exist
   LittleFS.mkdir("/logs");
@@ -142,6 +97,7 @@ bool initFilesystem() {
   size_t used = LittleFS.usedBytes();
   BROADCAST_PRINTF("FS Total: %zu bytes, Used: %zu, Free: %zu", total, used, total - used);
 
+#if ENABLE_AUTOMATION
   // Boot-time automations.json sanitation: ensure no duplicate IDs persist from manual edits
   // Skip if automation system is disabled
   uint32_t _dbgSaved = getDebugFlags();
@@ -173,6 +129,7 @@ bool initFilesystem() {
     DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot sanitize: /system/automations.json not found, skipping");
   }
   setDebugFlags(_dbgSaved);  // restore debug flags
+#endif
   
   return true;
 }
@@ -311,20 +268,17 @@ extern void broadcastOutput(const String& msg);
     if (gCLIValidateOnly) return "VALID"; \
   } while(0)
 
-const char* cmd_files(const String& originalCmd) {
+const char* cmd_files(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) {
     return "Error: LittleFS not ready";
   }
 
-  // Parse optional path argument from original input
+  // Parse optional path argument
   String path = "/";
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 >= 0) {
-    String rest = originalCmd.substring(sp1 + 1);
-    rest.trim();
-    if (rest.length() > 0) path = rest;
-  }
+  String argsTrimmed = args;
+  argsTrimmed.trim();
+  if (argsTrimmed.length() > 0) path = argsTrimmed;
 
   String out;
   bool ok = buildFilesListing(path, out, /*asJson=*/false);
@@ -337,14 +291,12 @@ const char* cmd_files(const String& originalCmd) {
   return "[FS] Listing complete";
 }
 
-const char* cmd_mkdir(const String& originalCmd) {
+const char* cmd_mkdir(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: mkdir <path>";
-  String path = originalCmd.substring(sp1 + 1);
+  String path = args;
   path.trim();
   if (path.length() == 0) return "Usage: mkdir <path>";
   if (!path.startsWith("/")) path = String("/") + path;
@@ -360,14 +312,12 @@ const char* cmd_mkdir(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_rmdir(const String& originalCmd) {
+const char* cmd_rmdir(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: rmdir <path>";
-  String path = originalCmd.substring(sp1 + 1);
+  String path = args;
   path.trim();
   if (path.length() == 0) return "Usage: rmdir <path>";
   if (!path.startsWith("/")) path = String("/") + path;
@@ -383,14 +333,12 @@ const char* cmd_rmdir(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_filecreate(const String& originalCmd) {
+const char* cmd_filecreate(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: filecreate <path>";
-  String path = originalCmd.substring(sp1 + 1);
+  String path = args;
   path.trim();
   if (path.length() == 0) return "Usage: filecreate <path>";
   if (!path.startsWith("/")) path = String("/") + path;
@@ -409,13 +357,11 @@ const char* cmd_filecreate(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_fileview(const String& originalCmd) {
+const char* cmd_fileview(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: fileview <path>";
-  String path = originalCmd.substring(sp1 + 1);
+  String path = args;
   path.trim();
   if (path.length() == 0) return "Usage: fileview <path>";
   if (!path.startsWith("/")) path = String("/") + path;
@@ -456,14 +402,12 @@ const char* cmd_fileview(const String& originalCmd) {
   return "[FS] File displayed";
 }
 
-const char* cmd_filedelete(const String& originalCmd) {
+const char* cmd_filedelete(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: filedelete <path>";
-  String path = originalCmd.substring(sp1 + 1);
+  String path = args;
   path.trim();
   if (path.length() == 0) return "Usage: filedelete <path>";
   if (!path.startsWith("/")) path = String("/") + path;

@@ -16,9 +16,12 @@
 #include "System_FirstTimeSetup.h"
 #include "System_I2C.h"
 #include "System_Logging.h"
+#include "System_Mutex.h"
 #include "System_MemUtil.h"
+#include "System_SensorRegistry.h"
 #include "System_SensorStubs.h"
 #include "System_Settings.h"
+#include "System_TaskUtils.h"
 #include "System_Utils.h"
 
 #if ENABLE_APDS_SENSOR
@@ -135,23 +138,10 @@ extern bool gCLIValidateOnly;
 extern TaskHandle_t imuTaskHandle;
 extern unsigned long imuLastStopTime;
 extern bool ensureDebugBuffer();
-extern uint32_t gWire1CurrentHz;
-extern uint32_t gWire1DefaultHz;
 extern void broadcastOutput(const char* s);
 
-// I2C clock management implementation
-void i2cSetWire1Clock(uint32_t hz) {
-  if (gWire1CurrentHz != hz) {
-    Wire1.setClock(hz);
-    gWire1CurrentHz = hz;
-    // Small settling delay after clock change to let bus stabilize
-    delayMicroseconds(50);
-  }
-}
-
-void i2cSetDefaultWire1Clock() {
-  i2cSetWire1Clock(gWire1DefaultHz);
-}
+// Clock management is now unified through I2CDeviceManager
+// Legacy i2cSetWire1Clock() removed - all sensors use i2cDeviceTransaction wrapper
 
 // Sensor status system dependencies
 extern volatile unsigned long gSensorStatusSeq;
@@ -175,9 +165,7 @@ extern bool thermalConnected;
 // I2C Clock Management (Wire1)
 // ============================================================================
 
-// Centralize Wire1 clock policy: 100kHz default, temporarily override for specific operations
-uint32_t gWire1DefaultHz = 100000;  // safe default for mixed sensors
-uint32_t gWire1CurrentHz = 0;
+// Clock management unified through I2CDeviceManager - legacy globals removed
 
 // Stack-based scope guard so out-of-order destruction still restores to the last active target
 const int kI2CClockStackMax = 8;
@@ -209,6 +197,8 @@ const I2CSensorEntry i2cSensors[] = {
   { 0x33, "MLX90640", "32x24 Thermal Camera", "Adafruit", false, 0x00, 2000, "Adafruit_MLX90640", "_ADAFRUIT_MLX90640_H_", "thermal", 100000, 500 },
   { 0x10, "PA1010D", "Mini GPS Module", "Adafruit", false, 0x00, 500, "Adafruit_GPS", "_ADAFRUIT_GPS_H", "gps", 100000, 200 },
   { 0x11, "RDA5807", "FM Radio Receiver", "ScoutMakes", false, 0x00, 500, "RDA5807", NULL, "fmradio", 100000, 200 },
+  { 0x68, "DS3231", "Precision RTC", "Adafruit", false, 0x00, 100, NULL, NULL, "rtc", 100000, 100 },
+  { 0x5A, "STHS34PF80", "IR Presence/Motion", "ST", false, 0x00, 200, NULL, NULL, "presence", 100000, 200 },
   
   // Detected Infrastructure (no CLI modules)
   { 0x3C, "SSD1306", "OLED 128x64 Display", "Adafruit", true, 0x3D, 0, NULL, NULL, NULL, 100000, 50 },
@@ -544,12 +534,11 @@ String identifySensor(uint8_t address) {
 
 // ========== I2C Infrastructure Commands ==========
 
-const char* cmd_i2csdapin(const String& originalCmd) {
+const char* cmd_i2csdapin(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: i2cSdaPin <0..39> (reboot required)";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: i2cSdaPin <0..39> (reboot required)";
   int v = valStr.toInt();
   if (v < 0) v = 0;
   if (v > 39) v = 39;
@@ -559,12 +548,11 @@ const char* cmd_i2csdapin(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_i2csclpin(const String& originalCmd) {
+const char* cmd_i2csclpin(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: i2cSclPin <0..39> (reboot required)";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: i2cSclPin <0..39> (reboot required)";
   int v = valStr.toInt();
   if (v < 0) v = 0;
   if (v > 39) v = 39;
@@ -574,12 +562,11 @@ const char* cmd_i2csclpin(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_i2cclockthermalhz(const String& originalCmd) {
+const char* cmd_i2cclockthermalhz(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: i2cClockThermalHz <100000..1000000>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: i2cClockThermalHz <100000..1000000>";
   int v = valStr.toInt();
   if (v < 100000) v = 100000;
   if (v > 1000000) v = 1000000;
@@ -590,12 +577,11 @@ const char* cmd_i2cclockthermalhz(const String& originalCmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_i2cclocktofhz(const String& originalCmd) {
+const char* cmd_i2cclocktofhz(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  int sp1 = originalCmd.indexOf(' ');
-  if (sp1 < 0) return "Usage: i2cClockToFHz <50000..400000>";
-  String valStr = originalCmd.substring(sp1 + 1);
+  String valStr = args;
   valStr.trim();
+  if (valStr.length() == 0) return "Usage: i2cClockToFHz <50000..400000>";
   int v = valStr.toInt();
   if (v < 50000) v = 50000;
   if (v > 400000) v = 400000;
@@ -673,8 +659,10 @@ const char* cmd_i2cstats(const String& originalCmd) {
   broadcastOutput("Wire1 (Sensor I2C):");
   BROADCAST_PRINTF("  SDA Pin: %d", gSettings.i2cSdaPin);
   BROADCAST_PRINTF("  SCL Pin: %d", gSettings.i2cSclPin);
-  BROADCAST_PRINTF("  Clock: %lu Hz", (unsigned long)gWire1CurrentHz);
-  BROADCAST_PRINTF("  Default Clock: %lu Hz", (unsigned long)gWire1DefaultHz);
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (mgr) {
+    BROADCAST_PRINTF("  Clock: Managed by I2CDeviceManager (per-device)");
+  }
   broadcastOutput("");
 
   // Sensor connection status
@@ -714,7 +702,6 @@ extern TaskHandle_t tofTaskHandle;
 extern bool readToFObjects();
 #endif
 // i2cTransaction and i2cTransactionVoid are template functions defined in .ino (no extern needed)
-extern uint32_t gWire1DefaultHz;
 extern bool thermalEnabled;
 
 // SensorCache struct is now defined in i2c_system.h
@@ -768,6 +755,11 @@ extern Adafruit_GPS* gPA1010D;
 extern TaskHandle_t gpsTaskHandle;
 #endif
 
+// RTC sensor globals
+#if ENABLE_RTC_SENSOR
+#include "i2csensor-ds3231.h"
+#endif
+
 // Shared sensor functions
 extern void drainDebugRing();
 
@@ -812,6 +804,7 @@ void ensureDeviceRegistryFile();  // Forward declaration
 static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, int addressCount);  // Smart scan
 
 static void createEmptyDeviceRegistry() {
+  FsLockGuard guard("i2c.devices.create");
   File file = LittleFS.open("/system/devices.json", "w");
   if (file) {
     file.println("{");
@@ -824,6 +817,7 @@ static void createEmptyDeviceRegistry() {
 }
 
 void ensureDeviceRegistryFile() {
+  FsLockGuard guard("i2c.devices.ensure");
   if (!LittleFS.exists("/system/devices.json")) {
     createEmptyDeviceRegistry();
   }
@@ -955,6 +949,8 @@ static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, 
 
 static void saveDeviceRegistryToJSON() {
   ensureDeviceRegistryFile();
+
+  FsLockGuard guard("i2c.devices.save");
 
   File file = LittleFS.open("/system/devices.json", "w");
   if (!file) return;
@@ -1149,10 +1145,10 @@ const char* cmd_devicefile(const String& originalCmd) {
   return "[I2C] Registry JSON displayed";
 }
 
-const char* cmd_sensors(const String& originalCmd) {
+const char* cmd_sensors(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = originalCmd.substring(7);  // "sensors"
+  String args = argsIn;
   args.trim();
 
   broadcastOutput("I2C Sensor Database:");
@@ -1219,10 +1215,10 @@ const char* cmd_sensors(const String& originalCmd) {
   return "[I2C] Sensor list displayed";
 }
 
-const char* cmd_sensorinfo(const String& originalCmd) {
+const char* cmd_sensorinfo(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = originalCmd.substring(10);  // "sensorinfo"
+  String args = argsIn;
   args.trim();
 
   if (args.length() == 0) {
@@ -1331,6 +1327,8 @@ static const SensorHeapCost sensorHeapCosts[] = {
   { "FM Radio",       "fmradio", &gSettings.fmRadioAutoStart,  2 },  // RDA5807: minimal
   { "APDS Gesture",   "apds",    &gSettings.apdsAutoStart,     4 },  // APDS9960: gesture buffers
   { "Gamepad",        "gamepad", &gSettings.gamepadAutoStart,  2 },  // Seesaw: minimal
+  { "RTC Clock",      "rtc",     &gSettings.rtcAutoStart,      2 },  // DS3231: minimal
+  { "Presence",       "presence",&gSettings.presenceAutoStart, 2 },  // STHS34PF80: minimal
 };
 static const size_t sensorHeapCostCount = sizeof(sensorHeapCosts) / sizeof(sensorHeapCosts[0]);
 
@@ -1345,14 +1343,15 @@ static uint32_t getEnabledSensorHeapEstimate() {
   return total;
 }
 
-static const char* cmd_sensorautostart(const String& cmd) {
+static const char* cmd_sensorautostart(const String& argsIn) {
   extern bool gCLIValidateOnly;
   if (gCLIValidateOnly) return "VALID";
   
-  int spacePos = cmd.indexOf(' ');
+  String args = argsIn;
+  args.trim();
   
   // No args - show current settings with heap estimates
-  if (spacePos < 0) {
+  if (args.length() == 0) {
     static char buf[1024];
     uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
     uint32_t enabledCost = getEnabledSensorHeapEstimate();
@@ -1380,9 +1379,6 @@ static const char* cmd_sensorautostart(const String& cmd) {
     
     return buf;
   }
-  
-  String args = cmd.substring(spacePos + 1);
-  args.trim();
   
   int secondSpace = args.indexOf(' ');
   if (secondSpace < 0) {
@@ -1544,6 +1540,14 @@ const char* buildSensorStatusJson() {
   doc["pwmDriverConnected"] = pwmDriverConnected;
   doc["gpsEnabled"] = gpsEnabled;
   doc["fmRadioEnabled"] = fmRadioEnabled;
+  doc["rtcEnabled"] = rtcEnabled;
+  
+#if ENABLE_PRESENCE_SENSOR
+  extern bool presenceEnabled;
+  doc["presenceEnabled"] = presenceEnabled;
+#else
+  doc["presenceEnabled"] = false;
+#endif
 
   // Compile-time capabilities (module compiled into firmware)
 #if ENABLE_THERMAL_SENSOR
@@ -1582,9 +1586,69 @@ const char* buildSensorStatusJson() {
   doc["gpsCompiled"] = false;
 #endif
 
+#if ENABLE_RTC_SENSOR
+  doc["rtcCompiled"] = true;
+#else
+  doc["rtcCompiled"] = false;
+#endif
+
+#if ENABLE_PRESENCE_SENSOR
+  doc["presenceCompiled"] = true;
+#else
+  doc["presenceCompiled"] = false;
+#endif
+
   // Not modularized yet
   doc["fmradioCompiled"] = true;
   doc["servoCompiled"] = true;
+
+#if ENABLE_CAMERA_SENSOR
+  extern bool cameraEnabled;
+  extern bool cameraStreaming;
+  doc["cameraEnabled"] = cameraEnabled;
+  doc["cameraStreaming"] = cameraStreaming;
+  doc["cameraCompiled"] = true;
+#else
+  doc["cameraEnabled"] = false;
+  doc["cameraStreaming"] = false;
+  doc["cameraCompiled"] = false;
+#endif
+
+#if ENABLE_MICROPHONE_SENSOR
+  extern bool micEnabled;
+  extern bool micRecording;
+  doc["micEnabled"] = micEnabled;
+  doc["micRecording"] = micRecording;
+  doc["micCompiled"] = true;
+#else
+  doc["micEnabled"] = false;
+  doc["micRecording"] = false;
+  doc["micCompiled"] = false;
+#endif
+
+#if ENABLE_EDGE_IMPULSE
+  extern bool isEdgeImpulseModelLoaded();
+  doc["eiEnabled"] = gSettings.edgeImpulseEnabled;
+  doc["eiModelLoaded"] = isEdgeImpulseModelLoaded();
+  doc["eiCompiled"] = true;
+#else
+  doc["eiEnabled"] = false;
+  doc["eiModelLoaded"] = false;
+  doc["eiCompiled"] = false;
+#endif
+
+  // Non-I2C sensors from registry (standardized format)
+  JsonObject sensors = doc["sensors"].to<JsonObject>();
+  for (size_t i = 0; i < nonI2CSensorsCount; i++) {
+    const NonI2CSensorEntry& s = nonI2CSensors[i];
+    JsonObject sensorObj = sensors[s.id].to<JsonObject>();
+    sensorObj["connected"] = s.getConnected ? s.getConnected() : true;
+    sensorObj["enabled"] = s.getEnabled ? s.getEnabled() : false;
+    sensorObj["task"] = s.getTask ? s.getTask() : SENSOR_TASK_NONE;
+    if (s.mlSettingsModule) {
+      sensorObj["mlModule"] = s.mlSettingsModule;
+    }
+  }
   
   // Queue status
   doc["queueDepth"] = getQueueDepth();
@@ -1594,6 +1658,8 @@ const char* buildSensorStatusJson() {
   doc["apdsQueued"] = isInQueue(SENSOR_APDS);
   doc["gpsQueued"] = isInQueue(SENSOR_GPS);
   doc["gamepadQueued"] = isInQueue(SENSOR_GAMEPAD);
+  doc["rtcQueued"] = isInQueue(SENSOR_RTC);
+  doc["presenceQueued"] = isInQueue(SENSOR_PRESENCE);
   
   // Queue positions (only if present)
   int thermalPos = getQueuePosition(SENSOR_THERMAL);
@@ -1602,6 +1668,8 @@ const char* buildSensorStatusJson() {
   int apdsPos = getQueuePosition(SENSOR_APDS);
   int gpsPos = getQueuePosition(SENSOR_GPS);
   int gamepadPos = getQueuePosition(SENSOR_GAMEPAD);
+  int rtcPos = getQueuePosition(SENSOR_RTC);
+  int presencePos = getQueuePosition(SENSOR_PRESENCE);
   
   if (thermalPos > 0) {
     doc["thermalQueuePos"] = thermalPos;
@@ -1620,6 +1688,12 @@ const char* buildSensorStatusJson() {
   }
   if (gamepadPos > 0) {
     doc["gamepadQueuePos"] = gamepadPos;
+  }
+  if (rtcPos > 0) {
+    doc["rtcQueuePos"] = rtcPos;
+  }
+  if (presencePos > 0) {
+    doc["presenceQueuePos"] = presencePos;
   }
   
   // Serialize to buffer
@@ -1688,6 +1762,12 @@ void sensorQueueProcessorTask(void* param) {
           case SENSOR_FMRADIO:
             requiredDelay = 600;  // FM radio init is relatively quick
             break;
+          case SENSOR_RTC:
+            requiredDelay = 300;  // RTC init is very quick
+            break;
+          case SENSOR_PRESENCE:
+            requiredDelay = 400;  // Presence sensor init is relatively quick
+            break;
         }
       }
 
@@ -1727,6 +1807,15 @@ void sensorQueueProcessorTask(void* param) {
           break;
         case SENSOR_FMRADIO:
           alreadyRunning = fmRadioEnabled;
+          break;
+        case SENSOR_RTC:
+          alreadyRunning = rtcEnabled;
+          break;
+        case SENSOR_PRESENCE:
+#if ENABLE_PRESENCE_SENSOR
+          extern bool presenceEnabled;
+          alreadyRunning = presenceEnabled;
+#endif
           break;
       }
 
@@ -1781,6 +1870,24 @@ void sensorQueueProcessorTask(void* param) {
           INFO_SENSORSF("FM Radio: skipped (not compiled)");
 #endif
           break;
+        case SENSOR_RTC:
+#if ENABLE_RTC_SENSOR
+          startRTCSensorInternal();
+          INFO_SENSORSF("RTC: %s", rtcEnabled ? "SUCCESS" : "FAILED");
+#else
+          INFO_SENSORSF("RTC: skipped (not compiled)");
+#endif
+          break;
+        case SENSOR_PRESENCE:
+#if ENABLE_PRESENCE_SENSOR
+          extern bool startPresenceSensorInternal();
+          extern bool presenceEnabled;
+          startPresenceSensorInternal();
+          INFO_SENSORSF("Presence: %s", presenceEnabled ? "SUCCESS" : "FAILED");
+#else
+          INFO_SENSORSF("Presence: skipped (not compiled)");
+#endif
+          break;
       }
 
       if (isDebugFlagSet(DEBUG_MEMORY)) {
@@ -1831,20 +1938,10 @@ void sensorQueueProcessorTask(void* param) {
 static const SettingEntry i2cSettingEntries[] = {
   { "i2cBusEnabled", SETTING_BOOL, &gSettings.i2cBusEnabled, 1, 0, nullptr, 0, 1, "I2C Bus Enabled (reboot required)", nullptr },
   { "i2cSensorsEnabled", SETTING_BOOL, &gSettings.i2cSensorsEnabled, 1, 0, nullptr, 0, 1, "I2C Sensors Enabled", nullptr },
-  { "i2cSdaPin", SETTING_INT, &gSettings.i2cSdaPin,
-  #if defined(ARDUINO_ADAFRUIT_FEATHER_ESP32_V2_DEV)
-    22,
-  #else
-    22,
-  #endif
-    0, nullptr, 0, 39, "I2C SDA Pin (reboot required)", nullptr },
-  { "i2cSclPin", SETTING_INT, &gSettings.i2cSclPin,
-  #if defined(ARDUINO_ADAFRUIT_FEATHER_ESP32_V2_DEV)
-    20,
-  #else
-    19,
-  #endif
-    0, nullptr, 0, 39, "I2C SCL Pin (reboot required)", nullptr },
+  { "i2cSdaPin", SETTING_INT, &gSettings.i2cSdaPin, I2C_SDA_PIN_DEFAULT,
+    0, nullptr, 0, 48, "I2C SDA Pin (reboot required)", nullptr },
+  { "i2cSclPin", SETTING_INT, &gSettings.i2cSclPin, I2C_SCL_PIN_DEFAULT,
+    0, nullptr, 0, 48, "I2C SCL Pin (reboot required)", nullptr },
   { "i2cClockThermalHz", SETTING_INT, &gSettings.i2cClockThermalHz, 800000, 0, nullptr, 100000, 1000000, "Thermal I2C Clock (Hz)", nullptr },
   { "i2cClockToFHz", SETTING_INT, &gSettings.i2cClockToFHz, 200000, 0, nullptr, 50000, 400000, "ToF I2C Clock (Hz)", nullptr }
 };
@@ -1869,12 +1966,41 @@ extern const SettingsModule i2cSettingsModule = {
 // ============================================================================
 
 void processAutoStartSensors() {
+  // Debug: Print I2C flags to diagnose auto-start issues
+  Serial.printf("[AutoStart] I2C check: i2cBus=%d i2cSensors=%d\n",
+                gSettings.i2cBusEnabled ? 1 : 0,
+                gSettings.i2cSensorsEnabled ? 1 : 0);
+  
   if (!gSettings.i2cBusEnabled || !gSettings.i2cSensorsEnabled) {
     INFO_I2CF("[AutoStart] I2C disabled, skipping sensor auto-start");
     return;
   }
+
+ #if ENABLE_I2C_SYSTEM
+  if (!queueProcessorTask) {
+    const uint32_t queueStackWords = 3072;
+    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue", queueStackWords, nullptr, 1, &queueProcessorTask, "sensor.queue") != pdPASS) {
+      Serial.println("[I2C_SENSORS] ERROR: Failed to create sensor queue processor task (late init)");
+      queueProcessorTask = nullptr;
+      return;
+    }
+    Serial.println("[I2C_SENSORS] Queue processor task created (late init)");
+  }
+ #endif
   
   INFO_I2CF("[AutoStart] Processing sensor auto-start settings...");
+  
+  // Debug: Print all auto-start flag values to diagnose first-time setup issues
+  Serial.printf("[AutoStart] Flags: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d\n",
+                gSettings.thermalAutoStart ? 1 : 0,
+                gSettings.tofAutoStart ? 1 : 0,
+                gSettings.imuAutoStart ? 1 : 0,
+                gSettings.gpsAutoStart ? 1 : 0,
+                gSettings.fmRadioAutoStart ? 1 : 0,
+                gSettings.apdsAutoStart ? 1 : 0,
+                gSettings.gamepadAutoStart ? 1 : 0,
+                gSettings.rtcAutoStart ? 1 : 0,
+                gSettings.presenceAutoStart ? 1 : 0);
   
   #if ENABLE_THERMAL_SENSOR
   if (gSettings.thermalAutoStart) {
@@ -1922,6 +2048,20 @@ void processAutoStartSensors() {
   if (gSettings.gamepadAutoStart) {
     INFO_I2CF("[AutoStart] Queuing Gamepad sensor");
     enqueueSensorStart(SENSOR_GAMEPAD);
+  }
+  #endif
+  
+  #if ENABLE_RTC_SENSOR
+  if (gSettings.rtcAutoStart) {
+    INFO_I2CF("[AutoStart] Queuing RTC sensor");
+    enqueueSensorStart(SENSOR_RTC);
+  }
+  #endif
+  
+  #if ENABLE_PRESENCE_SENSOR
+  if (gSettings.presenceAutoStart) {
+    INFO_I2CF("[AutoStart] Queuing Presence sensor");
+    enqueueSensorStart(SENSOR_PRESENCE);
   }
   #endif
   

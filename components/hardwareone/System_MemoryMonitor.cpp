@@ -5,6 +5,7 @@
 #include "System_Debug.h"
 #include "System_MemoryMonitor.h"
 #include "System_Settings.h"
+#include "System_SensorStubs.h"
 #include "System_Utils.h"
 
 // External allocation tracker (defined in system_utils.cpp)
@@ -31,6 +32,7 @@ extern bool gAllocTrackerEnabled;
 #define IMU_STACK_WORDS      4096   // ~16KB
 #define TOF_STACK_WORDS      3072   // ~12KB
 #define FMRADIO_STACK_WORDS  4608   // ~18KB
+#define PRESENCE_STACK_WORDS 3072   // ~12KB
 
 // Memory requirements registry
 // minHeapBytes = taskStackWords * 4 (bytes per word) + overhead buffer
@@ -42,6 +44,7 @@ static const MemoryRequirement gMemoryRequirements[] = {
   { "imu",           24576,    IMU_STACK_WORDS,      0 },      // 16KB stack + 8KB overhead
   { "tof",           16384,    TOF_STACK_WORDS,      0 },      // 12KB stack + 4KB overhead
   { "fmradio",       20480,    FMRADIO_STACK_WORDS,  0 },      // 18KB stack + 2KB overhead
+  { "presence",      16384,    PRESENCE_STACK_WORDS, 0 },      // 12KB stack + 4KB overhead
 };
 
 static const size_t gMemoryRequirementsCount = sizeof(gMemoryRequirements) / sizeof(MemoryRequirement);
@@ -113,6 +116,10 @@ const MemoryRequirement* getAllMemoryRequirements(size_t& outCount) {
 // Last sample timestamp (for rate limiting periodic sampling)
 static unsigned long gLastMemorySampleMs = 0;
 
+// Heap pressure monitoring state (consolidated from main loop)
+static size_t gLowestHeapSeen = UINT32_MAX;
+static const size_t HEAP_WARNING_THRESHOLD = 40960;  // 40KB warning threshold
+
 void sampleMemoryState() {
   // Gather all memory stats in one go
   size_t freeHeap = ESP.getFreeHeap();
@@ -130,6 +137,17 @@ void sampleMemoryState() {
   int heapUsedPercent = ((totalHeap - freeHeap) * 100) / totalHeap;
   int psramUsedPercent = hasPsram ? (((totalPsram - freePsram) * 100) / totalPsram) : 0;
   
+  // Heap pressure monitoring (consolidated - was separate in main loop)
+  bool isNewLow = false;
+  bool isPressured = false;
+  if (freeHeap < gLowestHeapSeen) {
+    gLowestHeapSeen = freeHeap;
+    isNewLow = true;
+  }
+  if (freeHeap < HEAP_WARNING_THRESHOLD) {
+    isPressured = true;
+  }
+  
   // Output comprehensive memory snapshot
   BROADCAST_PRINTF("[MEMSAMPLE] Heap: %lu/%lu KB (%d%% used) | Min: %lu KB | MaxAlloc: %lu KB | Largest: %lu KB",
                    (unsigned long)(freeHeap / 1024),
@@ -138,6 +156,16 @@ void sampleMemoryState() {
                    (unsigned long)(minFreeHeap / 1024),
                    (unsigned long)(maxAllocHeap / 1024),
                    (unsigned long)(largestBlock / 1024));
+  
+  // Heap pressure warnings (consolidated from main loop)
+  if (isNewLow) {
+    DEBUG_MEMORYF("[HEAP_MONITOR] New low: %u bytes (min_ever=%u)", 
+                  (unsigned)freeHeap, (unsigned)minFreeHeap);
+  }
+  if (isPressured) {
+    DEBUG_MEMORYF("[HEAP_PRESSURE] WARNING: Free heap %u bytes (threshold=%u, min_ever=%u)",
+                  (unsigned)freeHeap, (unsigned)HEAP_WARNING_THRESHOLD, (unsigned)minFreeHeap);
+  }
   
   if (hasPsram) {
     BROADCAST_PRINTF("[MEMSAMPLE] PSRAM: %lu/%lu KB (%d%% used) | Largest: %lu KB",
@@ -149,10 +177,32 @@ void sampleMemoryState() {
     broadcastOutput("[MEMSAMPLE] PSRAM: Not available");
   }
   
-  // Show component memory requirements vs available
-  broadcastOutput("[MEMSAMPLE] Component Requirements:");
+  // Show component memory requirements vs available (only for connected sensors)
+  bool anyShown = false;
   for (size_t i = 0; i < gMemoryRequirementsCount; i++) {
     const MemoryRequirement* req = &gMemoryRequirements[i];
+    
+    // Skip sensors that aren't connected
+    bool isConnected = false;
+    if (strcmp(req->component, "gamepad") == 0) {
+      isConnected = gamepadConnected;
+    } else if (strcmp(req->component, "thermal") == 0) {
+      isConnected = thermalConnected;
+    } else if (strcmp(req->component, "imu") == 0) {
+      isConnected = imuConnected;
+    } else if (strcmp(req->component, "tof") == 0) {
+      isConnected = tofConnected;
+    } else if (strcmp(req->component, "fmradio") == 0) {
+      isConnected = fmRadioConnected;
+    }
+    
+    if (!isConnected) continue;
+    
+    if (!anyShown) {
+      broadcastOutput("[MEMSAMPLE] Component Requirements:");
+      anyShown = true;
+    }
+    
     bool canStart = checkMemoryAvailable(req->component, nullptr);
     const char* status = canStart ? "OK" : "INSUFFICIENT";
     
@@ -168,7 +218,7 @@ const char* cmd_memsample(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Check for allocation tracking subcommands
-  String args = cmd.substring(10);  // Skip "memsample "
+  String args = cmd;
   args.trim();
   
   if (args.startsWith("track ")) {

@@ -129,29 +129,43 @@ void displayNetworkInfo() {
   oledDisplay->print("NETWORK ");
   
   // Show current status inline to save vertical space
-  if (WiFi.isConnected()) {
+  bool wifiConnected = WiFi.isConnected();
+  if (wifiConnected) {
     oledDisplay->print(WiFi.RSSI());
     oledDisplay->println("dBm");
   } else {
     oledDisplay->println("(off)");
   }
   
-  // Menu options
-  const char* options[] = {
-    "View Status",
-    "WiFi Management",
-    "Disconnect",
-    "Start HTTP",
-    "Stop HTTP"
-  };
+  // Menu options - dynamic based on WiFi and HTTP state
+#if ENABLE_HTTP_SERVER
+  extern httpd_handle_t server;
+  bool httpRunning = (server != nullptr);
+#else
+  bool httpRunning = false;
+#endif
+  
+  // Build dynamic menu - show Connect OR Disconnect based on state
+  const char* options[NETWORK_MENU_ITEMS];
+  options[0] = "View Status";
+  options[1] = wifiConnected ? "---" : "Connect";        // Hide Connect when connected
+  options[2] = "WiFi Management";
+  options[3] = wifiConnected ? "Disconnect" : "---";     // Hide Disconnect when not connected
+  options[4] = httpRunning ? "Stop HTTP" : "Start HTTP";
   
   for (int i = 0; i < NETWORK_MENU_ITEMS; i++) {
+    // Skip disabled options in display
+    if (strcmp(options[i], "---") == 0) {
+      continue;
+    }
     if (i == networkMenuSelection) {
       oledDisplay->print("> ");
     } else {
       oledDisplay->print("  ");
     }
-    oledDisplay->println(options[i]);
+    oledDisplay->print(options[i]);
+    if (i == 4 && httpRunning) oledDisplay->print(" *");
+    oledDisplay->println();
   }
 #else
   oledDisplay->println("=== NETWORK ===");
@@ -246,17 +260,31 @@ void displayMeshStatus() {
 // Network Menu Navigation
 // ============================================================================
 
+// Helper to check if menu item is disabled based on WiFi state
+static bool isNetworkMenuItemDisabled(int idx) {
+#if ENABLE_WIFI
+  bool wifiConnected = WiFi.isConnected();
+  if (idx == 1 && wifiConnected) return true;   // Connect disabled when connected
+  if (idx == 3 && !wifiConnected) return true;  // Disconnect disabled when not connected
+#endif
+  return false;
+}
+
 void networkMenuUp() {
   if (networkShowingStatus) return;
   if (networkShowingWiFiSubmenu) {
     oledScrollUp(&wifiSubmenuScroll);
     return;
   }
-  if (networkMenuSelection > 0) {
-    networkMenuSelection--;
-  } else {
-    networkMenuSelection = NETWORK_MENU_ITEMS - 1;
-  }
+  // Move up, skipping disabled items
+  int startIdx = networkMenuSelection;
+  do {
+    if (networkMenuSelection > 0) {
+      networkMenuSelection--;
+    } else {
+      networkMenuSelection = NETWORK_MENU_ITEMS - 1;
+    }
+  } while (isNetworkMenuItemDisabled(networkMenuSelection) && networkMenuSelection != startIdx);
 }
 
 void networkMenuDown() {
@@ -265,11 +293,26 @@ void networkMenuDown() {
     oledScrollDown(&wifiSubmenuScroll);
     return;
   }
-  if (networkMenuSelection < NETWORK_MENU_ITEMS - 1) {
-    networkMenuSelection++;
-  } else {
-    networkMenuSelection = 0;
-  }
+  // Move down, skipping disabled items
+  int startIdx = networkMenuSelection;
+  do {
+    if (networkMenuSelection < NETWORK_MENU_ITEMS - 1) {
+      networkMenuSelection++;
+    } else {
+      networkMenuSelection = 0;
+    }
+  } while (isNetworkMenuItemDisabled(networkMenuSelection) && networkMenuSelection != startIdx);
+}
+
+// Confirmation callbacks for HTTP Start/Stop
+static void httpStartConfirmedNetwork(void* userData) {
+  (void)userData;
+  executeOLEDCommand("httpstart");
+}
+
+static void httpStopConfirmedNetwork(void* userData) {
+  (void)userData;
+  executeOLEDCommand("httpstop");
 }
 
 void executeNetworkAction() {
@@ -308,21 +351,30 @@ void executeNetworkAction() {
       networkShowingStatus = true;
       break;
       
-    case 1: // WiFi Management submenu
+    case 1: // Connect (best available network)
+      executeOLEDCommand("wificonnect --best");
+      break;
+      
+    case 2: // WiFi Management submenu
       networkShowingWiFiSubmenu = true;
       initWifiSubmenuScroll();
       break;
       
-    case 2: // Disconnect
+    case 3: // Disconnect
       executeOLEDCommand("wifidisconnect");
       break;
       
-    case 3: // Start HTTP
-      executeOLEDCommand("httpstart");
-      break;
-      
-    case 4: // Stop HTTP
-      executeOLEDCommand("httpstop");
+    case 4: // Toggle HTTP (Start or Stop based on current state)
+#if ENABLE_HTTP_SERVER
+      {
+        extern httpd_handle_t server;
+        if (server != nullptr) {
+          oledConfirmRequest("Stop HTTP?", nullptr, httpStopConfirmedNetwork, nullptr, false);
+        } else {
+          oledConfirmRequest("Start HTTP?", nullptr, httpStartConfirmedNetwork, nullptr);
+        }
+      }
+#endif
       break;
   }
 }
@@ -500,33 +552,50 @@ void displayNetworkInfoRendered() {
     oledScrollRender(oledDisplay, &wifiSubmenuScroll, true, true);
     return;
   }
-  
+
+  // Render main network menu using the same dynamic hiding logic as displayNetworkInfo()
+  // (so Connect/Disconnect are hidden based on WiFi connection state).
+  if (!networkRenderData.wifiConnected && networkMenuSelection == 3) {
+    networkMenuSelection = 0;
+  }
+  if (networkRenderData.wifiConnected && networkMenuSelection == 1) {
+    networkMenuSelection = 0;
+  }
   oledDisplay->print("NETWORK ");
-  
-  // Show current status inline to save vertical space
   if (networkRenderData.wifiConnected) {
     oledDisplay->print(networkRenderData.rssi);
     oledDisplay->println("dBm");
   } else {
     oledDisplay->println("(off)");
   }
-  
-  // Menu options
-  const char* options[] = {
-    "View Status",
-    "WiFi Management",
-    "Disconnect",
-    "Start HTTP",
-    "Stop HTTP"
-  };
-  
+
+  // Menu options - dynamic based on WiFi and HTTP state
+#if ENABLE_HTTP_SERVER
+  extern httpd_handle_t server;
+  bool httpRunning = (server != nullptr);
+#else
+  bool httpRunning = false;
+#endif
+
+  const char* options[NETWORK_MENU_ITEMS];
+  options[0] = "View Status";
+  options[1] = networkRenderData.wifiConnected ? "---" : "Connect";
+  options[2] = "WiFi Management";
+  options[3] = networkRenderData.wifiConnected ? "Disconnect" : "---";
+  options[4] = httpRunning ? "Stop HTTP" : "Start HTTP";
+
   for (int i = 0; i < NETWORK_MENU_ITEMS; i++) {
+    if (strcmp(options[i], "---") == 0) {
+      continue;
+    }
     if (i == networkMenuSelection) {
       oledDisplay->print("> ");
     } else {
       oledDisplay->print("  ");
     }
-    oledDisplay->println(options[i]);
+    oledDisplay->print(options[i]);
+    if (i == 4 && httpRunning) oledDisplay->print(" *");
+    oledDisplay->println();
   }
 #else
   oledDisplay->println("=== NETWORK ===");

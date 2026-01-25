@@ -23,14 +23,16 @@
  * Get text input from user via OLED keyboard
  * Falls back to serial console if OLED unavailable
  * 
- * @param prompt Message to display to user
- * @param isPassword If true, mask characters as asterisks
- * @param initialText Pre-filled text (optional)
+ * @param prompt Text prompt to display
+ * @param isPassword If true, displays asterisks instead of characters
+ * @param initialText Initial text to populate (optional)
  * @param maxLength Maximum input length
+ * @param wasCancelled Output parameter - set to true if user cancelled (optional)
  * @return User's input string (empty if cancelled)
  */
 String getOLEDTextInput(const char* prompt, bool isPassword = false, 
-                        const char* initialText = nullptr, int maxLength = 32);
+                        const char* initialText = nullptr, int maxLength = 32,
+                        bool* wasCancelled = nullptr);
 
 /**
  * Show yes/no prompt on OLED

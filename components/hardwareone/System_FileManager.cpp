@@ -7,6 +7,7 @@
 
 #include "System_FileManager.h"
 #include "System_Filesystem.h"
+#include "System_Mutex.h"
 
 // Global instance (optional)
 FileManager* gFileManager = nullptr;
@@ -28,6 +29,8 @@ bool FileManager::navigate(const char* path) {
   
   // Ensure path starts with /
   if (path[0] != '/') return false;
+
+  FsLockGuard guard("FileManager.navigate");
   
   // Check if directory exists
   if (!LittleFS.exists(path)) return false;
@@ -127,6 +130,9 @@ bool FileManager::getItem(int index, FileEntry& entry) {
   
   // Fallback: scan filesystem if index is beyond cache
   // (This should rarely happen with FILE_MANAGER_MAX_CACHED_ITEMS=64)
+
+  FsLockGuard guard("FileManager.getItem.scan");
+
   File dir = LittleFS.open(state.currentPath);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
@@ -199,6 +205,8 @@ bool FileManager::createFolder(const char* name) {
   String fullPath = formatPath(state.currentPath, name);
   
   if (!canCreate(fullPath)) return false;
+
+  FsLockGuard guard("FileManager.createFolder");
   
   bool success = LittleFS.mkdir(fullPath.c_str());
   if (success) {
@@ -214,6 +222,8 @@ bool FileManager::createFile(const char* name) {
   String fullPath = formatPath(state.currentPath, name);
   
   if (!canCreate(fullPath)) return false;
+
+  FsLockGuard guard("FileManager.createFile");
   
   File f = LittleFS.open(fullPath.c_str(), "w");
   if (!f) return false;
@@ -231,6 +241,8 @@ bool FileManager::deleteItem() {
   String fullPath = formatPath(state.currentPath, entry.name);
   
   if (!canDelete(fullPath)) return false;
+
+  FsLockGuard guard("FileManager.deleteItem");
   
   bool success;
   if (entry.isFolder) {
@@ -258,6 +270,8 @@ bool FileManager::renameItem(const char* newName) {
   String newPath = formatPath(state.currentPath, newName);
   
   if (!canDelete(oldPath)) return false;  // Need delete permission to rename
+
+  FsLockGuard guard("FileManager.renameItem");
   
   bool success = LittleFS.rename(oldPath.c_str(), newPath.c_str());
   if (success) {
@@ -275,6 +289,8 @@ bool FileManager::readFile(const char* filename, String& content) {
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
+
+  FsLockGuard guard("FileManager.readFile");
   
   File f = LittleFS.open(fullPath.c_str(), "r");
   if (!f) {
@@ -301,6 +317,8 @@ bool FileManager::writeFile(const char* filename, const String& content) {
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
+
+  FsLockGuard guard("FileManager.writeFile");
   
   File f = LittleFS.open(fullPath.c_str(), "w");
   if (!f) {
@@ -316,6 +334,7 @@ bool FileManager::writeFile(const char* filename, const String& content) {
 }
 
 bool FileManager::getStorageStats(uint32_t& total, uint32_t& used, uint32_t& free) {
+  FsLockGuard guard("FileManager.getStorageStats");
   total = LittleFS.totalBytes();
   used = LittleFS.usedBytes();
   free = total - used;
@@ -327,6 +346,8 @@ bool FileManager::loadDirectory() {
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
+
+  FsLockGuard guard("FileManager.loadDirectory");
   
   File dir = LittleFS.open(state.currentPath);
   if (!dir || !dir.isDirectory()) {

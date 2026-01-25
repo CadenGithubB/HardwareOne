@@ -2,6 +2,8 @@
 #define WEBPAGE_ESPNOW_H
 
 #include <Arduino.h>
+#include "System_BuildConfig.h"
+#include <esp_http_server.h>
 #include "WebServer_Utils.h"
 
 // Streamed inner content for ESP-NOW page
@@ -2127,5 +2129,6 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
   httpd_resp_send_chunk(req, getFileBrowserScript().c_str(), HTTPD_RESP_USE_STRLEN);
 }
 
+void registerEspNowHandlers(httpd_handle_t server);
 
 #endif

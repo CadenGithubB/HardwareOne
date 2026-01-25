@@ -9,6 +9,10 @@
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
 
+#if ENABLE_WIFI
+#include <WiFi.h>
+#endif
+
 extern Settings gSettings;
 extern bool writeSettingsJson();
 extern String waitForSerialInputBlocking();
@@ -57,7 +61,7 @@ static SetupWizardPage currentPage = WIZARD_PAGE_FEATURES;
 static int currentSelection = 0;
 static int scrollOffset = 0;
 static int timezoneSelection = 1;  // EST default
-static int logLevelSelection = 2;  // INFO default
+static int logLevelSelection = 3;  // DEBUG default (all logging enabled)
 
 // Feature items per page
 static WizardFeatureItem featuresPage[16];
@@ -101,12 +105,52 @@ size_t getLogLevelCount() { return logLevelCount; }
 // ============================================================================
 // Heap Bar Helper
 // ============================================================================
+ 
+ static uint32_t sWizardBaselineKB = 0;
+ static bool sWizardBaselineCalibrated = false;
+ 
+ static uint32_t getWizardInfrastructureCostKB() {
+   uint32_t infraKB = 0;
+ #if ENABLE_OLED_DISPLAY
+   const FeatureEntry* i2cFeature = getFeatureById("i2c");
+   if (i2cFeature && isFeatureCompiled(i2cFeature)) infraKB += i2cFeature->heapCostKB;
+ 
+   const FeatureEntry* oledFeature = getFeatureById("oled");
+   if (oledFeature && isFeatureCompiled(oledFeature)) infraKB += oledFeature->heapCostKB;
+ 
+   const FeatureEntry* gamepadFeature = getFeatureById("gamepad");
+   if (gamepadFeature && isFeatureCompiled(gamepadFeature)) infraKB += gamepadFeature->heapCostKB;
+ #endif
+   return infraKB;
+ }
+ 
+ static void calibrateWizardBaseline() {
+   uint32_t totalHeapKB = (uint32_t)(ESP.getHeapSize() / 1024);
+   if (totalHeapKB == 0) totalHeapKB = 1;
+ 
+   uint32_t usedNowKB = (uint32_t)((ESP.getHeapSize() - ESP.getFreeHeap()) / 1024);
+   uint32_t infraKB = getWizardInfrastructureCostKB();
+ 
+   sWizardBaselineKB = (usedNowKB > infraKB) ? (usedNowKB - infraKB) : 0;
+   if (sWizardBaselineKB > totalHeapKB) sWizardBaselineKB = totalHeapKB;
+   sWizardBaselineCalibrated = true;
+ }
 
 void getHeapBarData(uint32_t* enabledKB, uint32_t* maxKB, int* percentage) {
-  *enabledKB = getEnabledFeaturesHeapEstimate();
-  *maxKB = getTotalPossibleHeapCost();
-  if (*maxKB == 0) *maxKB = 1;
-  *percentage = (*enabledKB * 100) / *maxKB;
+  uint32_t totalHeapKB = (uint32_t)(ESP.getHeapSize() / 1024);
+  if (totalHeapKB == 0) totalHeapKB = 1;
+ 
+   if (!sWizardBaselineCalibrated) {
+     calibrateWizardBaseline();
+   }
+
+  uint32_t enabledCostKB = getEnabledFeaturesHeapEstimate();
+  uint32_t estimatedUsedKB = sWizardBaselineKB + enabledCostKB;
+  if (estimatedUsedKB > totalHeapKB) estimatedUsedKB = totalHeapKB;
+
+  *enabledKB = estimatedUsedKB;
+  *maxKB = totalHeapKB;
+  *percentage = (estimatedUsedKB * 100) / totalHeapKB;
 }
 
 // ============================================================================
@@ -117,6 +161,10 @@ void initSetupWizard() {
   featuresPageCount = 0;
   sensorsPageCount = 0;
   networkPageCount = 0;
+  
+   sWizardBaselineKB = 0;
+   sWizardBaselineCalibrated = false;
+   calibrateWizardBaseline();
   
   // Build features page (network features)
   for (size_t i = 0; i < getFeatureCount(); i++) {
@@ -159,7 +207,7 @@ void initSetupWizard() {
   currentSelection = 0;
   scrollOffset = 0;
   timezoneSelection = 1;  // EST
-  logLevelSelection = 2;  // INFO
+  logLevelSelection = 3;  // DEBUG (all logging enabled)
   
   // Find current timezone in list
   for (size_t i = 0; i < timezoneCount; i++) {
@@ -179,6 +227,19 @@ void initSetupWizard() {
 void rebuildNetworkSettingsPage() {
   networkPageCount = 0;
   
+#if ENABLE_WIFI
+  // Only show WiFi auto-connect if WiFi feature is enabled
+  {
+    const FeatureEntry* wifiFeature = getFeatureById("wifi");
+    if (wifiFeature && isFeatureEnabled(wifiFeature)) {
+      networkPage[networkPageCount].label = "WiFi auto-connect";
+      networkPage[networkPageCount].boolSetting = &gSettings.wifiAutoReconnect;
+      networkPage[networkPageCount].isBool = true;
+      networkPageCount++;
+    }
+  }
+#endif
+
 #if ENABLE_HTTP_SERVER
   // Only show HTTP auto-start if HTTP feature is enabled
   {
@@ -523,11 +584,34 @@ SetupWizardResult runSerialSetupWizard() {
         Serial.println("=== WiFi Setup ===");
         printSerialHeapBar();
         Serial.println("----------------------------------------");
-        Serial.println("Enter WiFi SSID (or press Enter to skip):");
-        Serial.print("> ");
         {
-          String ssid = waitForSerialInputBlocking();
-          ssid.trim();
+#if ENABLE_WIFI
+          int n = WiFi.scanNetworks(false, true);
+          if (n > 0) {
+            Serial.printf("Found %d networks:\n", n);
+            for (int i = 0; i < n && i < 10; i++) {
+              Serial.printf("  %d. %-24s  %lddBm  %s\n",
+                i + 1,
+                WiFi.SSID(i).c_str(),
+                (long)WiFi.RSSI(i),
+                (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Secured");
+            }
+            if (n > 10) Serial.printf("  ... and %d more\n", n - 10);
+          } else {
+            Serial.println("No WiFi networks found");
+          }
+          Serial.println("----------------------------------------");
+          Serial.println("Enter WiFi network number, or type SSID (or press Enter to skip):");
+          Serial.print("> ");
+          String ssidInput = waitForSerialInputBlocking();
+          ssidInput.trim();
+          String ssid = ssidInput;
+          int idx = ssidInput.toInt();
+          if (idx > 0 && idx <= n) {
+            ssid = WiFi.SSID(idx - 1);
+          }
+          WiFi.scanDelete();
+
           if (ssid.length() > 0) {
             Serial.println("Enter WiFi password:");
             Serial.print("> ");
@@ -537,6 +621,9 @@ SetupWizardResult runSerialSetupWizard() {
             result.wifiPassword = pass;
             result.wifiConfigured = true;
           }
+#else
+          Serial.println("WiFi not compiled in this build");
+#endif
         }
         result.completed = true;
         running = false;
@@ -577,7 +664,14 @@ SetupWizardResult runSerialSetupWizard() {
   Serial.println("========================================");
   Serial.println("    CONFIGURATION COMPLETE!");
   Serial.printf("    Timezone: %s\n", result.timezoneAbbrev.c_str());
-  Serial.printf("    Heap estimate: ~%luKB\n", (unsigned long)getEnabledFeaturesHeapEstimate());
+  {
+    uint32_t usedKB = 0;
+    uint32_t totalKB = 1;
+    int pct = 0;
+    getHeapBarData(&usedKB, &totalKB, &pct);
+    uint32_t estFreeKB = (usedKB >= totalKB) ? 0 : (totalKB - usedKB);
+    Serial.printf("    Heap estimate: ~%luKB\n", (unsigned long)estFreeKB);
+  }
   Serial.println("========================================");
   Serial.println();
   

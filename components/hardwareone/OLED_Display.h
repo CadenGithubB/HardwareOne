@@ -102,7 +102,10 @@ enum OLEDMode {
   OLED_LOGIN,          // Login screen for OLED authentication
   OLED_LOGOUT,         // Logout confirmation screen
   OLED_QUICK_SETTINGS, // Quick settings panel (WiFi, Bluetooth, HTTP server toggles)
-  OLED_GPS_MAP         // GPS map view with offline maps
+  OLED_GPS_MAP,        // GPS map view with offline maps
+  OLED_MICROPHONE,     // PDM microphone VU meter and recording
+  OLED_RTC_DATA,       // RTC date/time/temperature display
+  OLED_PRESENCE_DATA   // STHS34PF80 IR presence/motion sensor view
 };
 
 // Menu item structure for OLED menu (legacy - kept for compatibility)
@@ -304,7 +307,9 @@ void displayFileBrowser();
 void displayAutomations();
 void displayEspNow();
 // displayToFData() - moved to Sensor_ToF_VL53L4CX.cpp (modular OLED mode)
-void displayAPDSData();  // APDS still in oled_display.cpp (sensor disabled)
+#if ENABLE_APDS_SENSOR
+void displayAPDSData();
+#endif
 
 // Menu navigation functions
 void oledMenuUp();
@@ -312,6 +317,12 @@ void oledMenuDown();
 void oledMenuSelect();
 void oledMenuBack();
 void resetOLEDMenu();
+
+// Sensor menu filtering & sorting (OLED_Mode_Menu.cpp)
+void sortSensorMenu();
+int getSensorMenuVisibleCount();
+int getSensorMenuActualIndex(int displayIndex);
+void invalidateSensorMenuSort();
 
 // Mode stack navigation (for submenus and back navigation)
 void pushOLEDMode(OLEDMode mode);

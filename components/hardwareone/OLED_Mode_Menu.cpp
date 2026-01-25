@@ -38,6 +38,75 @@ extern void drawIconScaled(DisplayDriver* display, const char* iconName, int x, 
 extern void enterUnavailablePage(const String& title, const String& reason);
 
 // ============================================================================
+// Sensor Menu Filtering & Sorting
+// ============================================================================
+
+// Filtered/sorted index array - only includes compiled-in sensors
+static int sensorMenuSortedIndices[20];  // Max 20 sensor items
+static int sensorMenuVisibleCount = 0;   // Number of visible (compiled-in) items
+static bool sensorMenuSorted = false;
+
+// Get sort priority for availability (lower = higher priority)
+static int getAvailabilitySortPriority(MenuAvailability avail) {
+  switch (avail) {
+    case MenuAvailability::AVAILABLE:        return 0;  // Ready - show first
+    case MenuAvailability::FEATURE_DISABLED: return 1;  // Off but available
+    case MenuAvailability::NOT_DETECTED:     return 2;  // No hardware
+    default:                                 return 3;
+  }
+}
+
+// Filter and sort the sensor menu - excludes NOT_BUILT items
+void sortSensorMenu() {
+  sensorMenuVisibleCount = 0;
+  
+  // First pass: collect only compiled-in sensors
+  for (int i = 0; i < oledSensorMenuItemCount && sensorMenuVisibleCount < 20; i++) {
+    MenuAvailability avail = getMenuAvailability(oledSensorMenuItems[i].targetMode, nullptr);
+    if (avail != MenuAvailability::NOT_BUILT) {
+      sensorMenuSortedIndices[sensorMenuVisibleCount++] = i;
+    }
+  }
+  
+  // Second pass: bubble sort by availability priority
+  for (int i = 0; i < sensorMenuVisibleCount - 1; i++) {
+    for (int j = 0; j < sensorMenuVisibleCount - i - 1; j++) {
+      int idxA = sensorMenuSortedIndices[j];
+      int idxB = sensorMenuSortedIndices[j + 1];
+      
+      MenuAvailability availA = getMenuAvailability(oledSensorMenuItems[idxA].targetMode, nullptr);
+      MenuAvailability availB = getMenuAvailability(oledSensorMenuItems[idxB].targetMode, nullptr);
+      
+      if (getAvailabilitySortPriority(availA) > getAvailabilitySortPriority(availB)) {
+        int temp = sensorMenuSortedIndices[j];
+        sensorMenuSortedIndices[j] = sensorMenuSortedIndices[j + 1];
+        sensorMenuSortedIndices[j + 1] = temp;
+      }
+    }
+  }
+  
+  sensorMenuSorted = true;
+}
+
+// Get number of visible (compiled-in) sensor menu items
+int getSensorMenuVisibleCount() {
+  if (!sensorMenuSorted) sortSensorMenu();
+  return sensorMenuVisibleCount;
+}
+
+// Get the actual menu item index from display position
+int getSensorMenuActualIndex(int displayIndex) {
+  if (!sensorMenuSorted) sortSensorMenu();
+  if (displayIndex < 0 || displayIndex >= sensorMenuVisibleCount) return 0;
+  return sensorMenuSortedIndices[displayIndex];
+}
+
+// Force re-sort on next display (call when availability might have changed)
+void invalidateSensorMenuSort() {
+  sensorMenuSorted = false;
+}
+
+// ============================================================================
 // Main Menu Display (Grid Style)
 // ============================================================================
 
@@ -70,8 +139,8 @@ void displayMenu() {
   
   // Draw battery icon in top-right corner (icon anchored at right edge, % to left)
   if (gBatteryState.status == BATTERY_NOT_PRESENT) {
-    oledDisplay->setCursor(104, 0);  // "N/A" + icon = 24px
-    oledDisplay->print("N/A");
+    oledDisplay->setCursor(104, 0);  // "USB" + icon = 24px
+    oledDisplay->print("USB");
   } else {
     int pct = (int)batteryIconState.percentage;
     int pctWidth = (pct >= 100) ? 24 : (pct >= 10) ? 18 : 12;  // 4/3/2 chars * 6px
@@ -181,8 +250,8 @@ void displayMenuListStyle() {
   
   // Draw battery icon in top-right corner (icon anchored at right edge, % to left)
   if (gBatteryState.status == BATTERY_NOT_PRESENT) {
-    oledDisplay->setCursor(104, 0);  // "N/A" + icon = 24px
-    oledDisplay->print("N/A");
+    oledDisplay->setCursor(104, 0);  // "USB" + icon = 24px
+    oledDisplay->print("USB");
   } else {
     int pct2 = (int)batteryIconState.percentage;
     int pctWidth2 = (pct2 >= 100) ? 24 : (pct2 >= 10) ? 18 : 12;  // 4/3/2 chars * 6px
@@ -295,6 +364,9 @@ void displayMenuListStyle() {
 void displaySensorMenu() {
   if (!oledDisplay || !oledConnected) return;
   
+  // Ensure menu is sorted by availability
+  if (!sensorMenuSorted) sortSensorMenu();
+  
   // Layout constants (matching main menu style)
   const int listWidth = 78;
   const int iconAreaX = 88;
@@ -312,18 +384,24 @@ void displaySensorMenu() {
   // Draw vertical separator between list and icon
   oledDisplay->drawFastVLine(84, 8, OLED_CONTENT_HEIGHT - 8, DISPLAY_COLOR_WHITE);
   
+  // Clamp selected index to visible count
+  if (oledSensorMenuSelectedIndex >= sensorMenuVisibleCount) {
+    oledSensorMenuSelectedIndex = sensorMenuVisibleCount > 0 ? sensorMenuVisibleCount - 1 : 0;
+  }
+  
   // Calculate scroll offset to keep selected item visible
   int scrollOffset = 0;
   if (oledSensorMenuSelectedIndex >= maxVisibleItems) {
     scrollOffset = oledSensorMenuSelectedIndex - maxVisibleItems + 1;
   }
   
-  // Draw menu items (text list on left)
-  for (int i = 0; i < maxVisibleItems && (scrollOffset + i) < oledSensorMenuItemCount; i++) {
-    int idx = scrollOffset + i;
+  // Draw menu items (text list on left) - using filtered/sorted indices
+  for (int i = 0; i < maxVisibleItems && (scrollOffset + i) < sensorMenuVisibleCount; i++) {
+    int displayIdx = scrollOffset + i;
+    int actualIdx = sensorMenuSortedIndices[displayIdx];  // Map to actual item
     int y = startY + i * itemHeight;
     
-    bool isSelected = (idx == oledSensorMenuSelectedIndex);
+    bool isSelected = (displayIdx == oledSensorMenuSelectedIndex);
     
     if (isSelected) {
       oledDisplay->fillRect(0, y - 1, listWidth, itemHeight, DISPLAY_COLOR_WHITE);
@@ -333,20 +411,23 @@ void displaySensorMenu() {
     }
     
     oledDisplay->setCursor(2, y);
-    oledDisplay->print(oledSensorMenuItems[idx].name);
+    oledDisplay->print(oledSensorMenuItems[actualIdx].name);
   }
   
   // Reset text color
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
+  // Get actual item index for selected display position
+  int selectedActualIdx = sensorMenuSortedIndices[oledSensorMenuSelectedIndex];
+  
   // Draw selected item's icon on the right
   const int availableIconHeight = OLED_CONTENT_HEIGHT - 10;
   int iconX = iconAreaX + (128 - iconAreaX - iconSize) / 2;
   int iconY = 10 + (availableIconHeight - iconSize - 10) / 2;
-  drawIcon(oledDisplay, oledSensorMenuItems[oledSensorMenuSelectedIndex].iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
+  drawIcon(oledDisplay, oledSensorMenuItems[selectedActualIdx].iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
   
   // Draw availability indicator
-  MenuAvailability availability = getMenuAvailability(oledSensorMenuItems[oledSensorMenuSelectedIndex].targetMode, nullptr);
+  MenuAvailability availability = getMenuAvailability(oledSensorMenuItems[selectedActualIdx].targetMode, nullptr);
   if (availability != MenuAvailability::AVAILABLE) {
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -381,14 +462,14 @@ void displaySensorMenu() {
     oledDisplay->setCursor(78, 10);
     oledDisplay->print("^");
   }
-  if (scrollOffset + maxVisibleItems < oledSensorMenuItemCount) {
+  if (scrollOffset + maxVisibleItems < sensorMenuVisibleCount) {
     int scrollDownY = OLED_CONTENT_HEIGHT - 9;
     oledDisplay->setCursor(78, scrollDownY);
     oledDisplay->print("v");
   }
   
   // Draw page indicator
-  String pageStr = String(oledSensorMenuSelectedIndex + 1) + "/" + String(oledSensorMenuItemCount);
+  String pageStr = String(oledSensorMenuSelectedIndex + 1) + "/" + String(sensorMenuVisibleCount);
   int charWidth = 6;
   int pageStrWidth = pageStr.length() * charWidth;
   oledDisplay->setCursor(128 - pageStrWidth, 0);
@@ -399,9 +480,10 @@ void displaySensorMenu() {
 // Automations Display
 // ============================================================================
 
+#if ENABLE_AUTOMATION
 void displayAutomations() {
   if (!gSettings.automationsEnabled) {
-    enterUnavailablePage("Automations", "Disabled\nRun: automation system enable\nReboot required");
+    enterUnavailablePage("Automations", "Disabled\nRun: automation system enable");
     return;
   }
 
@@ -414,6 +496,7 @@ void displayAutomations() {
   oledDisplay->println("Automations active");
   // Note: Button hints now handled by global footer
 }
+#endif
 
 // ============================================================================
 // Logo Display (with 3D animated device)

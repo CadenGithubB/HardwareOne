@@ -50,6 +50,9 @@ void updateFMRadio();
 // FM Radio I2C clock speed (100kHz for bus stability with other devices)
 static const uint32_t FM_RADIO_I2C_CLOCK = 100000;
 
+// FM Radio I2C address (RDA5807M uses 0x11)
+static const uint8_t FM_RADIO_I2C_ADDRESS = 0x11;
+
 // ============================================================================
 // FM Radio State (Global Variables)
 // ============================================================================
@@ -130,7 +133,7 @@ bool initFMRadio() {
   bool success = false;
   INFO_SENSORSF("Starting FM Radio I2C initialization");
   
-  i2cTransactionVoid(FM_RADIO_I2C_CLOCK, 1000, [&]() {
+  i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 1000, [&]() {
     DEBUG_FMRADIOF("I2C transaction started, calling radio.initWire(Wire1)");
     // Initialize the radio with Wire1 (STEMMA QT bus)
     if (!radio.initWire(Wire1)) {
@@ -182,7 +185,7 @@ void deinitFMRadio() {
   
   if (radioInitialized) {
     DEBUG_FMRADIOF("[FM_RADIO] Starting I2C transaction for deinitialization");
-    i2cTransactionVoid(FM_RADIO_I2C_CLOCK, 500, [&]() {
+    i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 500, [&]() {
       DEBUG_FMRADIOF("[FM_RADIO] Muting radio before termination");
       radio.setMute(true);
       DEBUG_FMRADIOF("[FM_RADIO] Calling radio.term() to power down chip");
@@ -235,7 +238,7 @@ void fmRadioTask(void* parameter) {
 
       // Unmute now that init succeeded
       DEBUG_FMRADIOF("[FM_RADIO_TASK] Unmuting radio for audio output");
-      i2cTransactionVoid(FM_RADIO_I2C_CLOCK, 200, [&]() {
+      i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 200, [&]() {
         radio.setMute(false);
         fmRadioMuted = false;
         DEBUG_FMRADIOF("[FM_RADIO_TASK] Radio unmuted successfully");
@@ -432,42 +435,47 @@ void updateFMRadio() {
 // Command Handlers
 // ============================================================================
 
-const char* cmd_fmradio(const String& cmd) {
+const char* cmd_fmradio(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  DEBUG_FMRADIOF("[FM_RADIO] Command received: '%s'", cmd.c_str());
+  DEBUG_FMRADIOF("[FM_RADIO] Command received: '%s'", args.c_str());
   
   // Parse subcommand
-  int spaceIdx = cmd.indexOf(' ');
-  if (spaceIdx < 0) {
+  String sub = args;
+  sub.trim();
+  
+  if (sub.length() == 0) {
     // No subcommand - show status
     DEBUG_FMRADIOF("[FM_RADIO] No subcommand, showing status");
-    return cmd_fmradio_status(cmd);
+    return cmd_fmradio_status(args);
   }
   
-  String sub = cmd.substring(spaceIdx + 1);
-  sub.trim();
-  sub.toLowerCase();
+  // Extract subcommand and sub-args
+  int spaceIdx = sub.indexOf(' ');
+  String subCmd = (spaceIdx < 0) ? sub : sub.substring(0, spaceIdx);
+  String subArgs = (spaceIdx < 0) ? "" : sub.substring(spaceIdx + 1);
+  subCmd.toLowerCase();
+  subArgs.trim();
   
-  DEBUG_FMRADIOF("[FM_RADIO] Parsed subcommand: '%s'", sub.c_str());
+  DEBUG_FMRADIOF("[FM_RADIO] Parsed subcommand: '%s'", subCmd.c_str());
   
-  if (sub.startsWith("start")) {
-    return cmd_fmradio_start(cmd);
-  } else if (sub.startsWith("stop")) {
-    return cmd_fmradio_stop(cmd);
-  } else if (sub.startsWith("tune ")) {
-    return cmd_fmradio_tune(cmd);
-  } else if (sub.startsWith("seek")) {
-    return cmd_fmradio_seek(cmd);
-  } else if (sub.startsWith("volume ") || sub.startsWith("vol ")) {
-    return cmd_fmradio_volume(cmd);
-  } else if (sub.startsWith("mute")) {
-    return cmd_fmradio_mute(cmd);
-  } else if (sub.startsWith("status")) {
-    return cmd_fmradio_status(cmd);
+  if (subCmd == "start") {
+    return cmd_fmradio_start(subArgs);
+  } else if (subCmd == "stop") {
+    return cmd_fmradio_stop(subArgs);
+  } else if (subCmd == "tune") {
+    return cmd_fmradio_tune(subArgs);
+  } else if (subCmd == "seek") {
+    return cmd_fmradio_seek(subArgs);
+  } else if (subCmd == "volume" || subCmd == "vol") {
+    return cmd_fmradio_volume(subArgs);
+  } else if (subCmd == "mute") {
+    return cmd_fmradio_mute(subArgs);
+  } else if (subCmd == "status") {
+    return cmd_fmradio_status(subArgs);
   }
   
-  DEBUG_FMRADIOF("[FM_RADIO] Unknown subcommand: '%s'", sub.c_str());
+  DEBUG_FMRADIOF("[FM_RADIO] Unknown subcommand: '%s'", subCmd.c_str());
   return "Usage: fmradio [start|stop|tune <freq>|seek [up|down]|volume <0-15>|mute|status]";
 }
 
@@ -497,17 +505,16 @@ const char* cmd_fmradio_stop(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_fmradio_tune(const String& cmd) {
+const char* cmd_fmradio_tune(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  // Parse frequency from command: "fmradio tune 103.9" or "fmradio tune 10390"
-  int tuneIdx = cmd.indexOf("tune");
-  if (tuneIdx < 0) {
+  // Parse frequency: "103.9" or "10390"
+  String freqStr = args;
+  freqStr.trim();
+  
+  if (freqStr.length() == 0) {
     return "Usage: fmradio tune <frequency> (e.g., 103.9 or 10390)";
   }
-  
-  String freqStr = cmd.substring(tuneIdx + 5);
-  freqStr.trim();
   
   float freq = freqStr.toFloat();
   uint16_t freqInt;
@@ -531,7 +538,7 @@ const char* cmd_fmradio_tune(const String& cmd) {
     }
   }
   
-  i2cTransactionVoid(FM_RADIO_I2C_CLOCK, 500, [&]() {
+  i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 500, [&]() {
     radio.setFrequency(freqInt);
     fmRadioFrequency = freqInt;
     
@@ -544,7 +551,7 @@ const char* cmd_fmradio_tune(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_fmradio_seek(const String& cmd) {
+const char* cmd_fmradio_seek(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!fmRadioConnected || !radioInitialized) {
@@ -553,11 +560,14 @@ const char* cmd_fmradio_seek(const String& cmd) {
   
   bool seekUp = true;  // Default seek up
   
-  if (cmd.indexOf("down") >= 0) {
+  String dir = args;
+  dir.trim();
+  dir.toLowerCase();
+  if (dir == "down") {
     seekUp = false;
   }
   
-  i2cTransactionVoid(FM_RADIO_I2C_CLOCK, 6000, [&]() {
+  i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 6000, [&]() {
     // mathertel library seek methods
     if (seekUp) {
       radio.seekUp(false);  // false = don't wrap
@@ -584,25 +594,18 @@ const char* cmd_fmradio_seek(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_fmradio_volume(const String& cmd) {
+const char* cmd_fmradio_volume(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  // Parse volume: "fmradio volume 8" or "fmradio vol 8"
-  int volIdx = cmd.indexOf("vol");
-  if (volIdx < 0) {
-    return "Usage: fmradio volume <0-15>";
-  }
+  // Parse volume: "8"
+  String volStr = args;
+  volStr.trim();
   
-  // Find the number after "volume" or "vol"
-  String rest = cmd.substring(volIdx);
-  int spaceIdx = rest.indexOf(' ');
-  if (spaceIdx < 0) {
+  if (volStr.length() == 0) {
     BROADCAST_PRINTF("Current volume: %d", fmRadioVolume);
     return "OK";
   }
   
-  String volStr = rest.substring(spaceIdx + 1);
-  volStr.trim();
   int vol = volStr.toInt();
   
   if (vol < 0 || vol > 15) {
@@ -615,7 +618,7 @@ const char* cmd_fmradio_volume(const String& cmd) {
     return "OK";
   }
   
-  i2cTransactionVoid(FM_RADIO_I2C_CLOCK, 200, [&]() {
+  i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 200, [&]() {
     radio.setVolume(vol);
     fmRadioVolume = vol;
   });
@@ -624,7 +627,7 @@ const char* cmd_fmradio_volume(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_fmradio_mute(const String& cmd) {
+const char* cmd_fmradio_mute(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!fmRadioConnected || !radioInitialized) {
@@ -632,10 +635,13 @@ const char* cmd_fmradio_mute(const String& cmd) {
   }
   
   // Check if this is "mute" or "unmute" command
-  bool shouldMute = (cmd.indexOf("unmute") < 0);  // If "unmute" not found, then mute
+  String arg = args;
+  arg.trim();
+  arg.toLowerCase();
+  bool shouldMute = (arg != "off" && arg != "unmute");  // Default to mute unless explicitly unmute
   fmRadioMuted = shouldMute;
   
-  i2cTransactionVoid(FM_RADIO_I2C_CLOCK, 200, [&]() {
+  i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 200, [&]() {
     radio.setMute(fmRadioMuted);
   });
   
@@ -661,7 +667,7 @@ const char* cmd_fmradio_status(const String& cmd) {
   } else {
     // Update signal info
     if (radioInitialized) {
-      i2cTransactionVoid(FM_RADIO_I2C_CLOCK, 200, [&]() {
+      i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 200, [&]() {
         RADIO_INFO ri;
         radio.getRadioInfo(&ri);
         fmRadioRSSI = ri.rssi;
@@ -744,10 +750,8 @@ static CommandModuleRegistrar _fmradio_cmd_registrar(fmRadioCommands, fmRadioCom
 
 // FM Radio settings entries
 static const SettingEntry fmRadioSettingEntries[] = {
-  // Core settings
-  { "autoStart", SETTING_BOOL, &gSettings.fmRadioAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  // Device-level settings (sensor hardware behavior)
-  { "device.devicePollMs", SETTING_INT, &gSettings.fmRadioDevicePollMs, 250, 0, nullptr, 100, 5000, "Poll Interval (ms)", nullptr }
+  { "fmRadioAutoStart",    SETTING_BOOL, &gSettings.fmRadioAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
+  { "fmRadioDevicePollMs", SETTING_INT,  &gSettings.fmRadioDevicePollMs, 250, 0, nullptr, 100, 5000, "Poll Interval (ms)", nullptr }
 };
 
 static bool isFMRadioConnected() {

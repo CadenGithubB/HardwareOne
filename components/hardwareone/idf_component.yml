@@ -1,0 +1,14 @@
+## IDF Component Manager dependency file
+## See: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/tools/idf-component-manager.html
+
+dependencies:
+  # ESP32-Camera driver for XIAO ESP32S3 Sense camera support
+  espressif/esp32-camera:
+    version: "^2.0.0"
+    rules:
+      - if: "idf_version >=5.0"
+  # TensorFlow Lite Micro for runtime ML model loading
+  espressif/esp-tflite-micro:
+    version: "^1.3.0"
+    rules:
+      - if: "idf_version >=5.0"

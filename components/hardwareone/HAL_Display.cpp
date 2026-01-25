@@ -13,6 +13,7 @@
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   #include "System_I2C.h"
   #include <Wire.h>
+  #include <freertos/semphr.h>
 #endif
 
 // Global display instance
@@ -128,7 +129,14 @@ void displayUpdate() {
   if (!gDisplay) return;
   
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  // LOW PRIORITY: Try-lock with short timeout - yield to gamepad/high-pri I2C devices
+  extern SemaphoreHandle_t i2cMutex;
+  if (i2cMutex && xSemaphoreTakeRecursive(i2cMutex, pdMS_TO_TICKS(5)) != pdTRUE) {
+    // Bus is busy - skip this refresh, try again next cycle
+    return;
+  }
   gDisplay->display();  // Push framebuffer to OLED
+  if (i2cMutex) xSemaphoreGiveRecursive(i2cMutex);
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
   // No-op for TFT (direct rendering)
 #endif

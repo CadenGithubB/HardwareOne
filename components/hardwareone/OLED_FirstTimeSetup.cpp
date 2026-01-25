@@ -26,7 +26,7 @@
 
 // Helper macro to wrap OLED operations in I2C transaction
 #define OLED_TRANSACTION(code) \
-  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 100000, 50, [&]() { code; })
+  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 100000, 500, [&]() { code; })
 
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor-seesaw.h"  // For JOYSTICK_DEADZONE
@@ -72,7 +72,11 @@ static uint32_t waitForButtonPress() {
 // ============================================================================
 
 String getOLEDTextInput(const char* prompt, bool isPassword, 
-                        const char* initialText, int maxLength) {
+                        const char* initialText, int maxLength,
+                        bool* wasCancelled) {
+  // Initialize output parameter
+  if (wasCancelled) *wasCancelled = false;
+  
   // Fallback to serial if OLED not available
   if (!isOLEDAvailable()) {
     Serial.print(prompt);
@@ -159,6 +163,7 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
   
   // Check if cancelled
   if (oledKeyboardIsCancelled()) {
+    if (wasCancelled) *wasCancelled = true;
     oledKeyboardReset();
     return "";
   }
@@ -333,7 +338,18 @@ bool getOLEDWiFiSelection(String& outSSID) {
   );
   
   WiFi.mode(WIFI_STA);
-  int networkCount = WiFi.scanNetworks();
+  int networkCount = WiFi.scanNetworks(false, true);
+
+  Serial.printf("Found %d networks:\n", networkCount);
+  for (int i = 0; i < networkCount && i < 10; i++) {
+    Serial.printf("  %d. %-24s  %lddBm\n",
+                  i + 1,
+                  WiFi.SSID(i).c_str(),
+                  (long)WiFi.RSSI(i));
+  }
+  if (networkCount > 10) {
+    Serial.printf("  ... and %d more\n", networkCount - 10);
+  }
   
   if (networkCount == 0) {
     OLED_TRANSACTION(
@@ -368,9 +384,9 @@ bool getOLEDWiFiSelection(String& outSSID) {
     else networks[i] += " +";
   }
   
-  // Add "Skip" option at the end
+  // Add "Rescan" option at the end (skip is always available via B)
   if (displayCount < maxNetworks) {
-    networks[displayCount] = "< Skip WiFi Setup >";
+    networks[displayCount] = "< Rescan WiFi >";
     displayCount++;
   }
   
@@ -443,11 +459,24 @@ bool getOLEDWiFiSelection(String& outSSID) {
       serialInput.trim();
       if (serialInput.length() > 0) {
         // Check if it's a skip command
-        if (serialInput.equalsIgnoreCase("skip") || serialInput.length() == 0) {
+        if (serialInput.equalsIgnoreCase("skip")) {
           broadcastOutput("Skipping WiFi setup");
           return false;
         }
-        // Otherwise treat as SSID
+        // Check if it's a rescan command
+        if (serialInput.equalsIgnoreCase("rescan")) {
+          broadcastOutput("Rescanning WiFi...");
+          WiFi.scanDelete();
+          return getOLEDWiFiSelection(outSSID);
+        }
+        // Check if input is a network number (1-based index)
+        int idx = serialInput.toInt();
+        if (idx > 0 && idx <= networkCount) {
+          outSSID = WiFi.SSID(idx - 1);
+          broadcastOutput(outSSID);
+          return true;
+        }
+        // Otherwise treat as literal SSID
         outSSID = serialInput;
         broadcastOutput(serialInput);
         return true;
@@ -482,9 +511,10 @@ bool getOLEDWiFiSelection(String& outSSID) {
     delay(50);
   }
   
-  // Check if user selected "Skip"
-  if (networks[selection].startsWith("< Skip")) {
-    return false;
+  // Check if user selected "Rescan"
+  if (networks[selection].startsWith("< Rescan")) {
+    WiFi.scanDelete();
+    return getOLEDWiFiSelection(outSSID);
   }
   
   // Extract SSID (remove signal strength indicator)

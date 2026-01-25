@@ -455,12 +455,17 @@ void displaySystemStatusRendered() {
   oledDisplay->println();
 
   // Battery Status (top priority)
+#if ENABLE_BATTERY_MONITOR
   oledDisplay->print("Batt: ");
   oledDisplay->print(systemStatusRenderData.batteryVoltage, 2);
   oledDisplay->print("V ");
   oledDisplay->print((int)systemStatusRenderData.batteryPercentage);
   oledDisplay->print("% ");
-  oledDisplay->println(systemStatusRenderData.batteryIcon);
+  oledDisplay->print(systemStatusRenderData.batteryIcon);
+#else
+  oledDisplay->print("Power: USB");
+#endif
+  oledDisplay->println();
 
   // WiFi Status
   if (systemStatusRenderData.wifiConnected) {

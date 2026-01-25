@@ -196,27 +196,32 @@ void I2CDeviceManager::performBusRecovery() {
 }
 
 void I2CDeviceManager::healthCheck() {
-  static unsigned long lastCheck = 0;
-  unsigned long now = millis();
-  
-  if (now - lastCheck < 30000) return;
-  lastCheck = now;
-  
+  // DEPRECATED: Health check moved to event-driven model
+  // Each device now calls checkBusRecoveryNeeded() when it becomes degraded
+  // This function is kept for backward compatibility but does nothing
+}
+
+void I2CDeviceManager::checkBusRecoveryNeeded() {
+  // Count degraded devices (called when a device becomes degraded)
   int degradedCount = 0;
   for (int i = 0; i < deviceCount; i++) {
     if (devices[i].isDegraded()) {
       degradedCount++;
-      WARN_I2CF("Device 0x%02X (%s) is degraded - errors: %d total, %d consecutive",
-                devices[i].address, devices[i].name,
-                devices[i].health.totalErrors, devices[i].health.consecutiveErrors);
     }
   }
   
-  // Trigger bus recovery if >50% degraded
-  if (deviceCount > 0 && degradedCount > deviceCount / 2) {
-    ERROR_I2CF("CRITICAL: %d/%d devices degraded - triggering bus recovery",
-               degradedCount, deviceCount);
+  // Calculate degradation percentage
+  if (deviceCount == 0) return;
+  float degradationPercent = (degradedCount * 100.0f) / deviceCount;
+  
+  // Trigger bus recovery if >66% degraded (2/3 threshold)
+  if (degradationPercent > 66.0f) {
+    ERROR_I2CF("CRITICAL: %d/%d devices degraded (%.1f%%) - triggering bus recovery",
+               degradedCount, deviceCount, degradationPercent);
     performBusRecovery();
+  } else {
+    INFO_I2CF("Bus health: %d/%d devices degraded (%.1f%%) - recovery threshold not reached",
+              degradedCount, deviceCount, degradationPercent);
   }
 }
 
@@ -485,6 +490,9 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
         ERROR_I2CF("Device 0x%02X (%s) marked DEGRADED after %d NACKs",
                    address, name, health.nackCount);
         logI2CError(address, name, health.consecutiveErrors, health.totalErrors, true);
+        
+        // Check if bus recovery is needed (decentralized check)
+        I2CDeviceManager::getInstance()->checkBusRecoveryNeeded();
       }
       break;
       
@@ -507,6 +515,9 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
         ERROR_I2CF("Device 0x%02X (%s) marked DEGRADED after %d timeouts",
                    address, name, health.timeoutCount);
         logI2CError(address, name, health.consecutiveErrors, health.totalErrors, true);
+        
+        // Check if bus recovery is needed (decentralized check)
+        I2CDeviceManager::getInstance()->checkBusRecoveryNeeded();
       }
       break;
       

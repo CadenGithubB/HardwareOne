@@ -127,15 +127,15 @@ void checkAutoPowerMode() {
 // CLI Commands
 // ============================================================================
 
-const char* cmd_power(const String& originalCmd) {
+const char* cmd_power(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  Serial.printf("[POWER_CMD] cmd_power called with: '%s'\n", originalCmd.c_str());
+  Serial.printf("[POWER_CMD] cmd_power called with: '%s'\n", argsIn.c_str());
   
   extern Settings gSettings;
   
-  // Parse command: "power" or "power mode [name]" or "power auto [on|off]"
-  String args = originalCmd.substring(5);  // Skip "power"
+  // Parse command args: "" or "mode [name]" or "auto [on|off]"
+  String args = argsIn;
   args.trim();
   Serial.printf("[POWER_CMD] args after trim: '%s'\n", args.c_str());
   
@@ -263,10 +263,10 @@ static bool isPowerModuleConnected() {
 }
 
 static const SettingEntry powerSettingEntries[] = {
-  { "mode", SETTING_INT, &gSettings.powerMode, 0, 0, nullptr, 0, 3, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver" },
-  { "autoMode", SETTING_BOOL, &gSettings.powerAutoMode, 0, 0, nullptr, 0, 1, "Auto Mode", nullptr },
-  { "batteryThreshold", SETTING_INT, &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr },
-  { "displayDimLevel", SETTING_INT, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr }
+  { "powerMode",             SETTING_INT,  &gSettings.powerMode,             0, 0, nullptr, 0, 3, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver" },
+  { "powerAutoMode",         SETTING_BOOL, &gSettings.powerAutoMode,         0, 0, nullptr, 0, 1, "Auto Mode", nullptr },
+  { "powerBatteryThreshold", SETTING_INT,  &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr },
+  { "powerDisplayDimLevel",  SETTING_INT,  &gSettings.powerDisplayDimLevel,  30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr }
 };
 
 extern const SettingsModule powerSettingsModule = {

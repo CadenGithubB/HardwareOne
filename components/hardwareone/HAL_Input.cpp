@@ -3,7 +3,9 @@
  */
 
 #include "HAL_Input.h"
+#if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor-seesaw.h"
+#endif
 
 // =============================================================================
 // Static State
@@ -17,6 +19,7 @@ static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEE
 // =============================================================================
 
 // Gamepad Seesaw button mappings (native - no fallbacks)
+#if ENABLE_GAMEPAD_SENSOR
 static const uint32_t gGamepadSeesawMapping[] = {
   GAMEPAD_BUTTON_A,      // INPUT_BUTTON_A
   GAMEPAD_BUTTON_B,      // INPUT_BUTTON_B
@@ -25,6 +28,11 @@ static const uint32_t gGamepadSeesawMapping[] = {
   GAMEPAD_BUTTON_START,  // INPUT_BUTTON_START
   GAMEPAD_BUTTON_SELECT  // INPUT_BUTTON_SELECT (bit 0)
 };
+#else
+static const uint32_t gGamepadSeesawMapping[] = {
+  0, 0, 0, 0, 0, 0
+};
+#endif
 
 // Click wheel button mappings (example - adjust for your hardware)
 static const uint32_t gClickWheelMapping[] = {
@@ -63,10 +71,12 @@ void inputAbstractionInit() {
 #endif
   
   Serial.printf("[HAL_INPUT] Initialized with controller type: %d\n", gCurrentControllerType);
+#if ENABLE_GAMEPAD_SENSOR
   Serial.printf("[HAL_INPUT] Button mappings: A=0x%08lX B=0x%08lX X=0x%08lX Y=0x%08lX START=0x%08lX\n",
                 (unsigned long)GAMEPAD_BUTTON_A, (unsigned long)GAMEPAD_BUTTON_B,
                 (unsigned long)GAMEPAD_BUTTON_X, (unsigned long)GAMEPAD_BUTTON_Y,
                 (unsigned long)GAMEPAD_BUTTON_START);
+#endif
 }
 
 InputControllerType inputGetControllerType() {

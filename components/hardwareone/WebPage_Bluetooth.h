@@ -3,9 +3,43 @@
 
 #include <Arduino.h>
 #include "WebServer_Utils.h"
+#include "System_BuildConfig.h"
+#include <esp_http_server.h>
+
+// Registration function - registers /bluetooth URI handler
+#if ENABLE_HTTP_SERVER
+void registerBluetoothHandlers(httpd_handle_t server);
+#else
+inline void registerBluetoothHandlers(httpd_handle_t) {}
+#endif
 
 // Streamed inner content for Bluetooth page
 inline void streamBluetoothInner(httpd_req_t* req) {
+#if !ENABLE_BLUETOOTH
+  // Bluetooth not compiled - show disabled message
+  httpd_resp_send_chunk(req, R"HTML(
+<div style='text-align:center;padding:2rem'>
+  <h2 style='color:var(--warning);margin-bottom:1rem'>Bluetooth Disabled</h2>
+  <p style='color:var(--muted);margin-bottom:2rem'>
+    Bluetooth has been disabled during firmware compilation to save memory and resources.
+  </p>
+  
+  <div style='background:var(--crumb-bg);padding:1.5rem;border-radius:10px;border:1px solid var(--border);max-width:500px;margin:0 auto;text-align:left'>
+    <h3 style='color:var(--panel-fg);margin:0 0 1rem 0;font-size:1rem'>To Enable Bluetooth:</h3>
+    <p style='color:var(--muted);font-size:0.9rem;margin:0'>
+      Recompile the firmware with <code style='background:rgba(0,0,0,0.1);padding:2px 6px;border-radius:3px'>ENABLE_BLUETOOTH=1</code> 
+      in your build configuration.
+    </p>
+  </div>
+  
+  <div style='margin-top:2rem'>
+    <a href='/' class='btn'>← Back to Dashboard</a>
+    <a href='/settings' class='btn' style='margin-left:1rem'>Settings</a>
+  </div>
+</div>
+)HTML", HTTPD_RESP_USE_STRLEN);
+  return;
+#endif
   // Basic CSS and layout
   httpd_resp_send_chunk(req, R"CSS(
 <style>
@@ -99,7 +133,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     var lower = (line||'').toLowerCase();
     if(lower.indexOf('connected')>=0) return 'connected';
     if(lower.indexOf('advertising')>=0) return 'advertising';
-    if(lower.indexOf('disabled')>=0 || lower.indexOf('stopped')>=0) return 'off';
+    if(lower.indexOf('disabled')>=0 || lower.indexOf('stopped')>=0 || lower.indexOf('not initialized')>=0) return 'off';
+    if(lower === 'ok' || lower.indexOf('ble status:')>=0) return 'on';
     return 'unknown';
   }
 

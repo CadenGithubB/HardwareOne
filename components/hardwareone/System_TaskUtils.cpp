@@ -64,7 +64,7 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
   BaseType_t res = xTaskCreate(pxTaskCode, pcName, usStackDepth, pvParameters, uxPriority, pxCreatedTask);
 
   // Optionally log (only when FS is ready and not inside FS critical section)
-  if (filesystemReady && !isFsLockedByCurrentTask()) {
+  if (filesystemReady && !isFsLockedByCurrentTask() && isDebugFlagSet(DEBUG_MEMORY)) {
     char tsPrefix[40];
     getTimestampPrefixMsCached(tsPrefix, sizeof(tsPrefix));
     bool ok = (tsPrefix[0] == '[');
@@ -116,6 +116,7 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
       line += String(psDelta);
     }
     // Memory allocation logging removed - LOG_ALLOC_FILE is obsolete
+    broadcastOutput(line);
   }
 
   return res;
@@ -278,45 +279,14 @@ void reportAllTaskStacks() {
   
   broadcastOutput("");
   broadcastOutput("╔══════════════════════════════════════════════════════════════════════════════╗");
-  broadcastOutput("║                    COMPREHENSIVE TASK PRESSURE REPORT                      ║");
+  broadcastOutput("║                         TASK STACK REPORT                                   ║");
   broadcastOutput("╚══════════════════════════════════════════════════════════════════════════════╝");
   
-  // Memory stats
+  // Memory stats - kept for fragmentation/warning calculations, but verbose output removed
+  // (detailed memory overview now handled by periodicMemorySample())
   size_t heapFree = ESP.getFreeHeap();
-  size_t heapTotal = ESP.getHeapSize();
-  size_t heapMin = ESP.getMinFreeHeap();
-  size_t heapUsed = heapTotal - heapFree;
-  size_t psramFree = ESP.getFreePsram();
-  size_t psramTotal = ESP.getPsramSize();
-  size_t psramUsed = psramTotal - psramFree;
-  
-  // Try to get largest free block (heap fragmentation indicator).
-  // Use INTERNAL|8BIT so this reflects internal heap only (PSRAM is tracked separately).
   size_t largestFreeBlock = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   
-  broadcastOutput("");
-  broadcastOutput("┌─────────────────────── MEMORY OVERVIEW ────────────────────┐");
-  BROADCAST_PRINTF("│ HEAP (Internal DRAM):                                          │");
-  BROADCAST_PRINTF("│   Total:      %6u KB                                         │", (unsigned)(heapTotal/1024));
-  BROADCAST_PRINTF("│   Used:       %6u KB (%2u%%)                                  │", 
-    (unsigned)(heapUsed/1024), (unsigned)((heapUsed * 100) / heapTotal));
-  BROADCAST_PRINTF("│   Free:       %6u KB (%2u%%)                                  │", 
-    (unsigned)(heapFree/1024), (unsigned)((heapFree * 100) / heapTotal));
-  BROADCAST_PRINTF("│   Min Free:   %6u KB (lowest ever)                          │", (unsigned)(heapMin/1024));
-  BROADCAST_PRINTF("│   Largest Block: %6u KB (fragmentation indicator)           │", (unsigned)(largestFreeBlock/1024));
-  BROADCAST_PRINTF("│                                                                │");
-  BROADCAST_PRINTF("│ PSRAM (External):                                              │");
-  BROADCAST_PRINTF("│   Total:      %6u KB                                         │", (unsigned)(psramTotal/1024));
-  if (psramTotal > 0) {
-    BROADCAST_PRINTF("│   Used:       %6u KB (%2u%%)                                  │", 
-      (unsigned)(psramUsed/1024), (unsigned)((psramUsed * 100) / psramTotal));
-    BROADCAST_PRINTF("│   Free:       %6u KB (%2u%%)                                  │", 
-      (unsigned)(psramFree/1024), (unsigned)((psramFree * 100) / psramTotal));
-  } else {
-    BROADCAST_PRINTF("│   Used:           0 KB ( 0%%)                                  │");
-    BROADCAST_PRINTF("│   Free:           0 KB ( 0%%)                                  │");
-  }
-  broadcastOutput("└────────────────────────────────────────────────────────────────┘");
   // Get all tasks from system
   UBaseType_t taskCount = uxTaskGetNumberOfTasks();
   static TaskStatus_t* taskArray = nullptr;

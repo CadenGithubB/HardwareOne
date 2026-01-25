@@ -46,7 +46,9 @@ extern void broadcastOutput(const String& s);
 extern void broadcastOutput(const char* s);
 extern String waitForSerialInputBlocking();
 extern String hashUserPassword(const String& plaintext);
+#if ENABLE_AUTOMATION
 extern bool writeAutomationsJsonAtomic(const String& json);
+#endif
 extern void runUnifiedSystemCommand(const String& cmd);
 extern void resolvePendingUserCreationTimes();
 
@@ -188,19 +190,15 @@ void firstTimeSetupIfNeeded() {
   String wifiPass = "";
   bool wifiConfigured = false;
   
-  // Run the appropriate setup wizard based on display availability
+  // Run unified setup wizard (works on both Serial AND OLED simultaneously)
   SetupWizardResult wizardResult;
   
 #if ENABLE_OLED_DISPLAY
-  if (oledConnected && oledEnabled) {
-    // Run the OLED multi-page setup wizard
-    wizardResult = runOLEDSetupWizard();
-  } else {
-    // OLED not available - use serial wizard
-    wizardResult = runSerialSetupWizard();
-  }
+  // Unified wizard: displays on OLED (if available) AND Serial
+  // Accepts input from either gamepad/joystick OR serial commands
+  wizardResult = runOLEDSetupWizard();
 #else
-  // No OLED compiled - use serial wizard
+  // No OLED compiled - use serial-only wizard
   wizardResult = runSerialSetupWizard();
 #endif
   
@@ -216,7 +214,14 @@ void firstTimeSetupIfNeeded() {
     
     // Log the selections
     broadcastOutput("Timezone: " + wizardResult.timezoneAbbrev);
-    broadcastOutput("Heap estimate: ~" + String(getEnabledFeaturesHeapEstimate()) + "KB");
+    {
+      uint32_t usedKB = 0;
+      uint32_t totalKB = 1;
+      int pct = 0;
+      getHeapBarData(&usedKB, &totalKB, &pct);
+      uint32_t estFreeKB = (usedKB >= totalKB) ? 0 : (totalKB - usedKB);
+      broadcastOutput("Heap estimate: ~" + String(estFreeKB) + "KB");
+    }
   }
   
   // Save WiFi credentials if configured
@@ -304,6 +309,7 @@ void firstTimeSetupIfNeeded() {
   }
 
   // Create automations.json (empty) on first-time setup
+ #if ENABLE_AUTOMATION
   if (!LittleFS.exists(AUTOMATIONS_JSON_FILE)) {
     String a = "{\n  \"version\": 1,\n  \"automations\": []\n}\n";
     if (!writeAutomationsJsonAtomic(a)) {
@@ -312,6 +318,7 @@ void firstTimeSetupIfNeeded() {
       broadcastOutput("Created /system/automations.json");
     }
   }
+ #endif
 
   // Setup complete!
   setSetupProgressStage(SETUP_FINISHED);
@@ -323,7 +330,31 @@ void firstTimeSetupIfNeeded() {
   
   // Always save settings after wizard completes
   extern bool writeSettingsJson();
+  extern void applySettings();
+  
+  // Ensure i2cSensorsEnabled is set when i2cBusEnabled is enabled
+  // The wizard only toggles i2cBusEnabled, but processAutoStartSensors checks both
+  if (gSettings.i2cBusEnabled) {
+    gSettings.i2cSensorsEnabled = true;
+  }
+  
+  // Debug: Print sensor auto-start values before saving
+  Serial.printf("[FTS] Before save: i2cBus=%d i2cSensors=%d\n",
+                gSettings.i2cBusEnabled ? 1 : 0,
+                gSettings.i2cSensorsEnabled ? 1 : 0);
+  Serial.printf("[FTS] Sensors: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d\n",
+                gSettings.thermalAutoStart ? 1 : 0,
+                gSettings.tofAutoStart ? 1 : 0,
+                gSettings.imuAutoStart ? 1 : 0,
+                gSettings.gpsAutoStart ? 1 : 0,
+                gSettings.fmRadioAutoStart ? 1 : 0,
+                gSettings.apdsAutoStart ? 1 : 0,
+                gSettings.gamepadAutoStart ? 1 : 0,
+                gSettings.rtcAutoStart ? 1 : 0,
+                gSettings.presenceAutoStart ? 1 : 0);
+  
   writeSettingsJson();
+  applySettings();  // Apply log level and other debug settings immediately
   
   // If user disabled I2C, reboot so it takes effect from boot
   if (i2cDisabledByUser) {

@@ -4,7 +4,10 @@
 #include <Arduino.h>
 #include <time.h>
 
+#include "System_BuildConfig.h"
 #include "System_Utils.h"
+
+#if ENABLE_AUTOMATION
 
 // Automation command registry
 extern const CommandEntry automationCommands[];
@@ -40,11 +43,10 @@ void suspendAutomationSystem();
 void resumeAutomationSystem();
 void runAutomationsOnBoot();
 
-// Automation scheduler task functions
+// Automation scheduler functions (runs from main loop, no dedicated task)
 bool startAutomationScheduler();
 void stopAutomationScheduler();
 void notifyAutomationScheduler();
-void automationSchedulerTask(void* parameter);
 
 // Automation file operations
 bool sanitizeAutomationsJson(String& jsonRef);
@@ -66,8 +68,7 @@ const char* cmd_validate_conditions(const String& cmd);
 // Automation execution
 void runAutomationCommandUnified(const String& cmd);
 
-// Automation scheduler task
-void automationSchedulerTask(void* parameter);
+// Automation scheduler tick (called from main loop)
 void schedulerTickMinute();
 bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userData);
 
@@ -92,5 +93,28 @@ extern bool gAutoLogActive;
 extern String gAutoLogFile;
 extern String gAutoLogAutomationName;
 extern String gExecUser;
+
+#else // !ENABLE_AUTOMATION
+
+// Stub declarations when Automation is disabled
+inline bool initAutomationSystem() { return false; }
+inline void suspendAutomationSystem() {}
+inline void resumeAutomationSystem() {}
+inline void runAutomationsOnBoot() {}
+inline bool startAutomationScheduler() { return false; }
+inline void stopAutomationScheduler() {}
+inline void notifyAutomationScheduler() {}
+inline bool sanitizeAutomationsJson(String&) { return false; }
+inline bool writeAutomationsJsonAtomic(const String&) { return false; }
+inline void schedulerTickMinute() {}
+inline const char* executeConditionalCommand(const char*) { return "disabled"; }
+inline bool evaluateCondition(const char*) { return false; }
+
+// Global state stubs
+static bool gInAutomationContext = false;
+static bool gAutosDirty = false;
+static bool gAutoLogActive = false;
+
+#endif // ENABLE_AUTOMATION
 
 #endif // AUTOMATION_SYSTEM_H

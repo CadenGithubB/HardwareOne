@@ -287,10 +287,10 @@ bool macEqual6(const uint8_t a[6], const uint8_t b[6]) {
 }
 
 // V2 reliability toggles (ack/dedup)
-const char* cmd_espnow_rel(const String& originalCmd) {
+const char* cmd_espnow_rel(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  String args = originalCmd.substring(11); // after "espnow rel"
+  String args = argsIn;
   args.trim();
   if (args.length() == 0) {
     return "Reliability status: ACK=on, dedup=on (both MANDATORY - v2 protocol)";
@@ -1450,22 +1450,28 @@ static void handleFileTransferMessage(const String& message, const uint8_t* send
       String senderMacStr = macToHexString(gActiveFileTransfer->senderMac);
       senderMacStr.replace(":", "");  // Remove colons for folder name
       String deviceDir = String("/espnow/received/") + senderMacStr;
-      
-      // Create /espnow/received parent directories
-      LittleFS.mkdir("/espnow");
-      LittleFS.mkdir("/espnow/received");
-      LittleFS.mkdir(deviceDir.c_str());
-      
-      // Open file for writing in device-specific folder
-      String filepath = deviceDir + String("/") + gActiveFileTransfer->filename;
-      gActiveFileTransferFile = LittleFS.open(filepath, "w");
+
+      {
+        FsLockGuard guard("espnow.recvfile.open");
+        LittleFS.mkdir("/espnow");
+        LittleFS.mkdir("/espnow/received");
+        LittleFS.mkdir(deviceDir.c_str());
+
+        // Open file for writing in device-specific folder
+        String filepath = deviceDir + String("/") + gActiveFileTransfer->filename;
+        gActiveFileTransferFile = LittleFS.open(filepath, "w");
+      }
       if (!gActiveFileTransferFile) {
+        String filepath = deviceDir + String("/") + gActiveFileTransfer->filename;
         ERROR_ESPNOWF("Cannot open file for writing: %s", filepath.c_str());
         delete gActiveFileTransfer;
         gActiveFileTransfer = nullptr;
         return;
       }
-      DEBUG_ESPNOWF("[FILE] Created file: %s", filepath.c_str());
+      {
+        String filepath = deviceDir + String("/") + gActiveFileTransfer->filename;
+        DEBUG_ESPNOWF("[FILE] Created file: %s", filepath.c_str());
+      }
     }
     
     // Decode base64
@@ -1473,6 +1479,7 @@ static void handleFileTransferMessage(const String& message, const uint8_t* send
     
     // Write to file
     if (gActiveFileTransferFile) {
+      FsLockGuard guard("espnow.recvfile.write");
       size_t written = gActiveFileTransferFile.write((const uint8_t*)decoded.c_str(), decoded.length());
       if (written != decoded.length()) {
         ERROR_ESPNOWF("Write failed (expected %d, wrote %d)", decoded.length(), written);
@@ -1506,6 +1513,7 @@ static void handleFileTransferMessage(const String& message, const uint8_t* send
     
     // Close file
     if (gActiveFileTransferFile) {
+      FsLockGuard guard("espnow.recvfile.close");
       gActiveFileTransferFile.close();
     }
     
@@ -1728,6 +1736,7 @@ void processMeshHeartbeats() {
   if (!meshEnabled() || gMeshActivitySuspended) return;
   
   uint32_t now = millis();
+  espnowSensorStatusPeriodicTick();
   
   // Regular heartbeat broadcast to all peers
   if (now - gLastHeartbeatSentMs >= MESH_HEARTBEAT_INTERVAL_MS) {
@@ -2265,6 +2274,9 @@ String getEspNowDeviceName(const uint8_t* mac) {
  * @note Thread-safe: uses FsLockGuard for filesystem access
  */
 static String getFirstUsername() {
+  extern bool filesystemReady;
+  if (!filesystemReady) return "";
+  FsLockGuard fsGuard("espnow.users.first");
   if (!LittleFS.exists(USERS_JSON_FILE)) return "";
 
   File f = LittleFS.open(USERS_JSON_FILE, "r");
@@ -2286,13 +2298,15 @@ static String getFirstUsername() {
 // Save ESP-NOW devices to filesystem
 static void saveEspNowDevices() {
   if (!gEspNow) return;
-  if (!LittleFS.begin()) return;
+  extern bool filesystemReady;
+  if (!filesystemReady) return;
 
   // Pause sensor polling during file I/O
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
 
+  FsLockGuard fsGuard("espnow.devices.save");
   File file = LittleFS.open(ESPNOW_DEVICES_FILE, "w");
   if (!file) {
     gSensorPollingPaused = wasPaused;
@@ -2335,13 +2349,15 @@ static void saveEspNowDevices() {
 // Load ESP-NOW devices from filesystem
 static void loadEspNowDevices() {
   if (!gEspNow) return;
-  if (!LittleFS.begin()) return;
+  extern bool filesystemReady;
+  if (!filesystemReady) return;
 
   // Pause sensor polling during file I/O
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
 
+  FsLockGuard fsGuard("espnow.devices.load");
   File file = LittleFS.open(ESPNOW_DEVICES_FILE, "r");
   if (!file) {
     gSensorPollingPaused = wasPaused;
@@ -2428,13 +2444,15 @@ static void loadEspNowDevices() {
 // This is called only when topology changes (new peer discovered, peer removed, mode change)
 // Health metrics (timestamps, counters) rebuild naturally from heartbeats after reboot
 void saveMeshPeers() {
-  if (!LittleFS.begin()) return;
+  extern bool filesystemReady;
+  if (!filesystemReady) return;
 
   // Pause sensor polling during file I/O
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
 
+  FsLockGuard fsGuard("mesh.peers.save");
   File file = LittleFS.open(MESH_PEERS_FILE, "w");
   if (!file) {
     gSensorPollingPaused = wasPaused;
@@ -2472,13 +2490,15 @@ void saveMeshPeers() {
 // Load mesh peer MAC addresses from filesystem (topology only)
 // Health metrics (timestamps, counters) will be initialized to zero and rebuild from heartbeats
 static void loadMeshPeers() {
-  if (!LittleFS.begin()) return;
+  extern bool filesystemReady;
+  if (!filesystemReady) return;
 
   // Pause sensor polling during file I/O
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
 
+  FsLockGuard fsGuard("mesh.peers.load");
   File file = LittleFS.open(MESH_PEERS_FILE, "r");
   if (!file) {
     gSensorPollingPaused = wasPaused;
@@ -4481,6 +4501,180 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
     return true;
   }
 
+  // Handle FILE_BROWSE (remote file browsing) messages
+  if (strcmp(type, MSG_TYPE_FILE_BROWSE) == 0) {
+    // Security: Only allow file browsing over encrypted connections
+    if (!ctx.isEncrypted) {
+      broadcastOutput("[ESP-NOW] SECURITY: File browse rejected - encryption required");
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Rejected from %s - not encrypted", ctx.macStr.c_str());
+      return true;
+    }
+
+    JsonObject payload = doc["pld"].as<JsonObject>();
+    const char* kind = payload["kind"] | "";
+    const char* path = payload["path"] | "/";
+
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Message from %s: kind='%s' path='%s'",
+           ctx.deviceName.c_str(), kind, path);
+
+    // Handle list_result response (we sent a browse request, remote sent back the listing)
+    // Responses don't require auth - they're replies to our requests
+    if (strcmp(kind, "list_result") == 0) {
+      bool ok = payload["ok"] | false;
+      const char* resultPath = payload["path"] | "/";
+      
+      String deviceName = ctx.deviceName.length() > 0 ? ctx.deviceName : ctx.macStr;
+      
+      if (ok) {
+        JsonArray files = payload["files"].as<JsonArray>();
+        
+        broadcastOutput("[ESP-NOW] File listing from " + deviceName + " for path: " + String(resultPath));
+        broadcastOutput("--------------------------------------------");
+        
+        if (files.size() == 0) {
+          broadcastOutput("  (empty directory)");
+        } else {
+          for (JsonVariant file : files) {
+            String name = file["name"] | "";
+            String type = file["type"] | "file";
+            String size = file["size"] | "";
+            
+            if (type == "folder") {
+              broadcastOutput("  [DIR]  " + name + "/");
+            } else {
+              broadcastOutput("  [FILE] " + name + " (" + size + ")");
+            }
+          }
+        }
+        broadcastOutput("--------------------------------------------");
+        
+        // Store the result for OLED file browser if applicable
+        extern void storeRemoteFileBrowseResult(const uint8_t* mac, const char* path, JsonArray& files);
+        storeRemoteFileBrowseResult(ctx.recvInfo->src_addr, resultPath, files);
+        
+      } else {
+        const char* error = payload["error"] | "Unknown error";
+        broadcastOutput("[ESP-NOW] File browse FAILED from " + deviceName + ": " + String(error));
+      }
+      
+      // Send ACK
+      uint32_t msgId = doc["id"] | doc["msgId"] | 0;
+      if (msgId != 0) {
+        v2_send_ack(ctx.recvInfo->src_addr, msgId);
+      }
+      
+      return true;
+    }
+
+    // For list and fetch requests, require authentication
+    const char* username = payload["user"] | "";
+    const char* password = payload["pass"] | "";
+    
+    if (strlen(username) == 0 || strlen(password) == 0) {
+      broadcastOutput("[ESP-NOW] File browse: Missing credentials");
+      return true;
+    }
+
+    if (!isValidUser(String(username), String(password))) {
+      broadcastOutput("[ESP-NOW] File browse: Authentication FAILED for user '" + String(username) + "'");
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Auth failed for user '%s'", username);
+      return true;
+    }
+
+    if (!isAdminUser(String(username))) {
+      broadcastOutput("[ESP-NOW] File browse: Admin privileges required");
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] User '%s' is not admin", username);
+      return true;
+    }
+
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Authenticated request: user='%s' kind='%s' path='%s'",
+           username, kind, path);
+
+    // Handle list request
+    if (strcmp(kind, "list") == 0) {
+      extern bool filesystemReady;
+      extern bool buildFilesListing(const String& inPath, String& out, bool asJson);
+      
+      String filesJson;
+      bool ok = false;
+      
+      if (filesystemReady) {
+        ok = buildFilesListing(String(path), filesJson, true);
+      }
+      
+      // Build response
+      JsonDocument respDoc;
+      v2_init_envelope(respDoc, MSG_TYPE_FILE_BROWSE, generateMessageId(), 
+                      gSettings.espnowDeviceName.c_str(), ctx.deviceName.c_str(), -1);
+      JsonObject pld = respDoc["pld"].to<JsonObject>();
+      pld["kind"] = "list_result";
+      pld["path"] = path;
+      pld["ok"] = ok;
+      
+      if (ok) {
+        // Parse the files JSON string into a proper JSON array
+        JsonDocument filesDoc;
+        String wrappedJson = String("[") + filesJson + "]";
+        DeserializationError err = deserializeJson(filesDoc, wrappedJson);
+        if (err == DeserializationError::Ok) {
+          pld["files"] = filesDoc.as<JsonArray>();
+        } else {
+          // Fallback: send as string
+          pld["filesRaw"] = filesJson;
+        }
+      } else {
+        pld["error"] = filesystemReady ? "Directory not found" : "Filesystem not ready";
+      }
+      
+      String respStr;
+      serializeJson(respDoc, respStr);
+      Message msg;
+      msg.payload = respStr;
+      memcpy(msg.dstMac, ctx.recvInfo->src_addr, 6);
+      msg.priority = PRIORITY_HIGH;
+      routerSend(msg);
+      
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Sent list response for path '%s' ok=%d", path, ok);
+      broadcastOutput("[ESP-NOW] File browse: Sent directory listing for " + String(path));
+      return true;
+    }
+    
+    // Handle fetch request (request to send a file back)
+    if (strcmp(kind, "fetch") == 0) {
+      extern bool filesystemReady;
+      
+      if (!filesystemReady) {
+        broadcastOutput("[ESP-NOW] File fetch: Filesystem not ready");
+        return true;
+      }
+      
+      // Use existing file send mechanism
+      String filePath = String(path);
+      {
+        FsLockGuard guard("espnow.file_fetch.exists");
+        if (!LittleFS.exists(filePath)) {
+        broadcastOutput("[ESP-NOW] File fetch: File not found: " + filePath);
+        return true;
+        }
+      }
+      
+      // Queue file for sending back to requester
+      // Reuse existing sendFile function with target MAC
+      extern bool sendFileToMac(const uint8_t* mac, const String& localPath);
+      bool sent = sendFileToMac(ctx.recvInfo->src_addr, filePath);
+      
+      if (sent) {
+        broadcastOutput("[ESP-NOW] File fetch: Sending " + filePath + " to " + ctx.deviceName);
+      } else {
+        broadcastOutput("[ESP-NOW] File fetch: Failed to send " + filePath);
+      }
+      return true;
+    }
+
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Unknown kind: %s", kind);
+    return false;
+  }
+
   // Handle USER_SYNC (user credential propagation) messages
   if (strcmp(type, MSG_TYPE_USER_SYNC) == 0) {
     // Check if user sync is enabled
@@ -5649,7 +5843,8 @@ static bool parseMacAddress(const String& macStr, uint8_t mac[6]) {
 }
 
 // Helper: Resolve device name or MAC address to MAC bytes
-static bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t mac[6]) {
+// Note: Not static - used by System_ImageManager for imagesend command
+bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t mac[6]) {
   if (!gEspNow) return false;
   
   // First try to find by device name (case-insensitive)
@@ -6213,24 +6408,21 @@ const char* cmd_espnow_resetstats(const String& cmd) {
 }
 
 // ESP-NOW pair device command
-const char* cmd_espnow_pair(const String& originalCmd) {
+const char* cmd_espnow_pair(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'espnow init' first.";
   }
 
-  String cmd = originalCmd;
-  cmd.trim();
+  String args = argsIn;
+  args.trim();
 
-  int firstSpace = cmd.indexOf(' ', 8);
+  int firstSpace = args.indexOf(' ');
   if (firstSpace < 0) return "Usage: espnow pair <mac> <name>";
 
-  int secondSpace = cmd.indexOf(' ', firstSpace + 1);
-  if (secondSpace < 0) return "Usage: espnow pair <mac> <name>";
-
-  String macStr = cmd.substring(firstSpace + 1, secondSpace);
-  String name = cmd.substring(secondSpace + 1);
+  String macStr = args.substring(0, firstSpace);
+  String name = args.substring(firstSpace + 1);
   macStr.trim();
   name.trim();
 
@@ -6283,9 +6475,9 @@ const char* cmd_espnow_pair(const String& originalCmd) {
 }
 
 // Mesh TTL command
-const char* cmd_espnow_meshttl(const String& originalCmd) {
+const char* cmd_espnow_meshttl(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = originalCmd.substring(15);
+  String args = argsIn;
   args.trim();
   
   if (args.length() == 0) {
@@ -6383,9 +6575,9 @@ const char* cmd_espnow_meshmetrics(const String& originalCmd) {
 }
 
 // ESP-NOW mode command
-const char* cmd_espnow_mode(const String& originalCmd) {
+const char* cmd_espnow_mode(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = originalCmd.substring(11);
+  String args = argsIn;
   args.trim();
   if (args.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "ESP-NOW mode: %s", getEspNowModeString());
@@ -6415,9 +6607,9 @@ const char* cmd_espnow_mode(const String& originalCmd) {
 }
 
 // ESP-NOW setname command
-const char* cmd_espnow_setname(const String& originalCmd) {
+const char* cmd_espnow_setname(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = originalCmd.substring(14);
+  String args = argsIn;
   args.trim();
   
   if (args.length() == 0) {
@@ -6469,9 +6661,9 @@ const char* cmd_espnow_setname(const String& originalCmd) {
 }
 
 // ESP-NOW heartbeat mode command
-const char* cmd_espnow_hbmode(const String& originalCmd) {
+const char* cmd_espnow_hbmode(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = originalCmd.substring(14);
+  String args = argsIn;
   args.trim();
   
   if (args.length() == 0) {
@@ -6498,9 +6690,9 @@ const char* cmd_espnow_hbmode(const String& originalCmd) {
 }
 
 // Mesh role command
-const char* cmd_espnow_meshrole(const String& originalCmd) {
+const char* cmd_espnow_meshrole(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = originalCmd.substring(16);
+  String args = argsIn;
   args.trim();
   
   if (args.length() == 0) {
@@ -6538,10 +6730,10 @@ const char* cmd_espnow_meshrole(const String& originalCmd) {
 }
 
 // V2 logging toggle
-const char* cmd_espnow_v2log(const String& originalCmd) {
+const char* cmd_espnow_v2log(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  String args = originalCmd.substring(12); // after "espnow v2log"
+  String args = argsIn;
   args.trim();
   if (args.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "v2log: %s", gV2LogEnabled ? "on" : "off");
@@ -6560,11 +6752,11 @@ const char* cmd_espnow_v2log(const String& originalCmd) {
 }
 
 // Worker status configuration
-const char* cmd_espnow_worker(const String& originalCmd) {
+const char* cmd_espnow_worker(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
-  String args = originalCmd.substring(13); // after "espnow worker"
+  String args = argsIn;
   args.trim();
   
   // Show current configuration
@@ -6646,9 +6838,9 @@ const char* cmd_espnow_worker(const String& originalCmd) {
 // V2 fragmentation is now mandatory - command removed
 
 // Mesh master command
-const char* cmd_espnow_meshmaster(const String& originalCmd) {
+const char* cmd_espnow_meshmaster(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = originalCmd.substring(18);
+  String args = argsIn;
   args.trim();
   
   if (args.length() == 0) {
@@ -6679,9 +6871,9 @@ const char* cmd_espnow_meshmaster(const String& originalCmd) {
 }
 
 // Mesh backup command
-const char* cmd_espnow_meshbackup(const String& originalCmd) {
+const char* cmd_espnow_meshbackup(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = originalCmd.substring(18);
+  String args = argsIn;
   args.trim();
   
   if (args.length() == 0) {
@@ -7235,22 +7427,16 @@ const char* cmd_espnow_meshstatus(const String& cmd) {
 }
 
 // Unpair device command
-const char* cmd_espnow_unpair(const String& originalCmd) {
+const char* cmd_espnow_unpair(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'espnow init' first.";
   }
 
-  String cmd = originalCmd;
-  cmd.trim();
-
-  int firstSpace = cmd.indexOf(' ', 10);
-  if (firstSpace < 0) return "Usage: espnow unpair <name_or_mac>";
-
-  String target = cmd.substring(firstSpace + 1);
+  String target = argsIn;
   target.trim();
-
+  
   if (target.length() == 0) {
     return "Usage: espnow unpair <name_or_mac>";
   }
@@ -7304,20 +7490,14 @@ const char* cmd_espnow_unpair(const String& originalCmd) {
 // ============================================================================
 
 // Broadcast command
-const char* cmd_espnow_broadcast(const String& originalCmd) {
+const char* cmd_espnow_broadcast(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'espnow init' first.";
   }
 
-  String cmd = originalCmd;
-  cmd.trim();
-
-  int firstSpace = cmd.indexOf(' ', 15);
-  if (firstSpace < 0) return "Usage: espnow broadcast <message>";
-
-  String message = cmd.substring(firstSpace + 1);
+  String message = argsIn;
   message.trim();
 
   if (message.length() == 0) {
@@ -7370,25 +7550,115 @@ const char* cmd_espnow_broadcast(const String& originalCmd) {
   return getDebugBuffer();
 }
 
+// Helper function to send a file to a specific MAC address
+// Used by FILE_BROWSE fetch and other internal functions
+bool sendFileToMac(const uint8_t* mac, const String& localPath) {
+  if (!gEspNow || !gEspNow->initialized) {
+    return false;
+  }
+
+  {
+    FsLockGuard guard("espnow.send_file.exists");
+    if (!LittleFS.exists(localPath)) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[sendFileToMac] File not found: %s", localPath.c_str());
+    return false;
+    }
+  }
+
+  FsLockGuard fsGuard("espnow.send_file.open");
+  File file = LittleFS.open(localPath, "r");
+  if (!file) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[sendFileToMac] Cannot open file: %s", localPath.c_str());
+    return false;
+  }
+  
+  uint32_t fileSize = file.size();
+  uint32_t maxFileSize = MAX_FILE_CHUNKS * FILE_CHUNK_DATA_BYTES;
+  if (fileSize > maxFileSize) {
+    file.close();
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[sendFileToMac] File too large: %lu bytes (max %lu)", 
+           (unsigned long)fileSize, (unsigned long)maxFileSize);
+    return false;
+  }
+  
+  String filename = localPath;
+  int lastSlash = localPath.lastIndexOf('/');
+  if (lastSlash >= 0) {
+    filename = localPath.substring(lastSlash + 1);
+  }
+  
+  int totalChunks = (fileSize + FILE_CHUNK_DATA_BYTES - 1) / FILE_CHUNK_DATA_BYTES;
+  if (totalChunks > (int)MAX_FILE_CHUNKS) totalChunks = MAX_FILE_CHUNKS;
+  
+  String hash = String(millis() % 10000);
+  
+  uint8_t myMac[6];
+  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  String srcMac = macToHexStringCompact(myMac);
+  
+  // Send FILE_START
+  String startMsg = buildFileStartMessage(srcMac.c_str(), filename.c_str(), fileSize, totalChunks, hash);
+  {
+    Message msg;
+    memcpy(msg.dstMac, mac, 6);
+    msg.payload = startMsg;
+    if (!routerSend(msg)) {
+      file.close();
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[sendFileToMac] Failed to send FILE_START");
+      return false;
+    }
+  }
+  
+  // Send chunks
+  uint8_t chunkBuf[FILE_CHUNK_DATA_BYTES];
+  int chunkIdx = 0;
+  while (file.available() && chunkIdx < totalChunks) {
+    int bytesRead = file.read(chunkBuf, FILE_CHUNK_DATA_BYTES);
+    if (bytesRead <= 0) break;
+    
+    // Base64-encode the chunk data
+    String b64 = base64Encode(chunkBuf, bytesRead);
+    String chunkMsg = buildFileChunkMessage(srcMac.c_str(), chunkIdx + 1, hash, b64);
+    Message msg;
+    memcpy(msg.dstMac, mac, 6);
+    msg.payload = chunkMsg;
+    routerSend(msg);
+    
+    chunkIdx++;
+    vTaskDelay(pdMS_TO_TICKS(20));  // Pace chunks
+  }
+  file.close();
+  
+  // Send FILE_END
+  String endMsg = buildFileEndMessage(srcMac.c_str(), hash.c_str());
+  {
+    Message msg;
+    memcpy(msg.dstMac, mac, 6);
+    msg.payload = endMsg;
+    routerSend(msg);
+  }
+  
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[sendFileToMac] Sent %s (%d chunks) to %s", 
+         filename.c_str(), chunkIdx, formatMacAddress(mac).c_str());
+  return true;
+}
+
 // Sendfile command
-const char* cmd_espnow_sendfile(const String& originalCmd) {
+const char* cmd_espnow_sendfile(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'espnow init' first.";
   }
 
-  String cmd = originalCmd;
-  cmd.trim();
+  String args = argsIn;
+  args.trim();
 
-  int firstSpace = cmd.indexOf(' ', 8);
+  int firstSpace = args.indexOf(' ');
   if (firstSpace < 0) return "Usage: espnow sendfile <name_or_mac> <filepath>";
 
-  int secondSpace = cmd.indexOf(' ', firstSpace + 1);
-  if (secondSpace < 0) return "Usage: espnow sendfile <name_or_mac> <filepath>";
-
-  String target = cmd.substring(firstSpace + 1, secondSpace);
-  String filepath = cmd.substring(secondSpace + 1);
+  String target = args.substring(0, firstSpace);
+  String filepath = args.substring(firstSpace + 1);
 
   target.trim();
   filepath.trim();
@@ -7563,32 +7833,20 @@ const char* cmd_espnow_sendfile(const String& originalCmd) {
 // ============================================================================
 
 // Set passphrase command
-const char* cmd_espnow_setpassphrase(const String& originalCmd) {
+const char* cmd_espnow_setpassphrase(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'espnow init' first.";
   }
 
-  int passphraseStart = originalCmd.indexOf("setpassphrase");
-  if (passphraseStart < 0) {
-    return "Usage: espnow setpassphrase \"your_passphrase_here\"\n"
-           "       espnow setpassphrase clear";
-  }
-
-  passphraseStart += 13;
-
-  while (passphraseStart < originalCmd.length() && originalCmd.charAt(passphraseStart) == ' ') {
-    passphraseStart++;
-  }
-
-  if (passphraseStart >= originalCmd.length()) {
-    return "Usage: espnow setpassphrase \"your_passphrase_here\"\n"
-           "       espnow setpassphrase clear";
-  }
-
-  String passphrase = originalCmd.substring(passphraseStart);
+  String passphrase = argsIn;
   passphrase.trim();
+
+  if (passphrase.length() == 0) {
+    return "Usage: espnow setpassphrase \"your_passphrase_here\"\n"
+           "       espnow setpassphrase clear";
+  }
 
   if (passphrase == "clear") {
     setEspNowPassphrase("");
@@ -7670,7 +7928,7 @@ const char* cmd_espnow_encstatus(const String& cmd) {
 }
 
 // Secure pairing command
-const char* cmd_espnow_pairsecure(const String& originalCmd) {
+const char* cmd_espnow_pairsecure(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
@@ -7681,23 +7939,12 @@ const char* cmd_espnow_pairsecure(const String& originalCmd) {
     return "Encryption not enabled. Run 'espnow setpassphrase \"your_phrase\"' first.";
   }
 
-  int pairsecureStart = originalCmd.indexOf("pairsecure");
-  if (pairsecureStart < 0) {
-    return "Usage: espnow pairsecure <mac_address> <device_name>";
-  }
-
-  pairsecureStart += 10;
-
-  while (pairsecureStart < originalCmd.length() && originalCmd.charAt(pairsecureStart) == ' ') {
-    pairsecureStart++;
-  }
-
-  if (pairsecureStart >= originalCmd.length()) {
-    return "Usage: espnow pairsecure <mac_address> <device_name>";
-  }
-
-  String args = originalCmd.substring(pairsecureStart);
+  String args = argsIn;
   args.trim();
+
+  if (args.length() == 0) {
+    return "Usage: espnow pairsecure <mac_address> <device_name>";
+  }
 
   int spacePos = args.indexOf(' ');
   if (spacePos < 0) {
@@ -7766,8 +8013,202 @@ const char* cmd_espnow_pairsecure(const String& originalCmd) {
 // ESP-NOW Remote Execution & Streaming Commands
 // ============================================================================
 
+// Remote file browse
+const char* cmd_espnow_browse(const String& argsIn) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow->initialized) {
+    return "ESP-NOW not initialized. Run 'espnow init' first.";
+  }
+
+  if (!gEspNow->encryptionEnabled) {
+    return "ESP-NOW encryption required. Set a passphrase with 'espnow setpassphrase \"your_phrase\"' and pair securely.";
+  }
+
+  String args = argsIn;
+  args.trim();
+
+  // Parse: <target> <user> <pass> [path]
+  int firstSpace = args.indexOf(' ');
+  if (firstSpace < 0) return "Usage: espnow browse <target> <username> <password> [path]";
+
+  int secondSpace = args.indexOf(' ', firstSpace + 1);
+  if (secondSpace < 0) return "Usage: espnow browse <target> <username> <password> [path]";
+
+  int thirdSpace = args.indexOf(' ', secondSpace + 1);
+  if (thirdSpace < 0) return "Usage: espnow browse <target> <username> <password> [path]";
+
+  String target = args.substring(0, firstSpace);
+  String username = args.substring(firstSpace + 1, secondSpace);
+  
+  // Find fourth space (optional path)
+  int fourthSpace = args.indexOf(' ', thirdSpace + 1);
+  String password, path;
+  if (fourthSpace < 0) {
+    password = args.substring(secondSpace + 1, thirdSpace);
+    path = args.substring(thirdSpace + 1);
+    if (path.length() == 0) path = "/";  // Default to root
+  } else {
+    password = args.substring(secondSpace + 1, thirdSpace);
+    path = args.substring(thirdSpace + 1);
+  }
+
+  target.trim();
+  username.trim();
+  password.trim();
+  path.trim();
+
+  if (target.length() == 0 || username.length() == 0 || password.length() == 0) {
+    return "Usage: espnow browse <target> <username> <password> [path]";
+  }
+
+  if (path.length() == 0) path = "/";
+
+  uint8_t targetMac[6];
+  if (!resolveDeviceNameOrMac(target, targetMac)) {
+    static char browseBuffer[256];
+    snprintf(browseBuffer, sizeof(browseBuffer),
+             "Target device '%s' not found or not paired. Pair the device first (prefer 'espnow pairsecure').",
+             target.c_str());
+    return browseBuffer;
+  }
+
+  // Build FILE_BROWSE message
+  JsonDocument doc;
+  uint8_t myMac[6];
+  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  String srcMac = macToHexStringCompact(myMac);
+  String dstMac = macToHexStringCompact(targetMac);
+  
+  v2_init_envelope(doc, MSG_TYPE_FILE_BROWSE, generateMessageId(),
+                   gSettings.espnowDeviceName.c_str(), "", -1);
+  JsonObject pld = doc["pld"].to<JsonObject>();
+  pld["kind"] = "list";
+  pld["path"] = path;
+  pld["user"] = username;
+  pld["pass"] = password;
+  
+  String browseMessage;
+  serializeJson(doc, browseMessage);
+
+  if (isMeshMode()) {
+    if (!isPairedDevice(targetMac)) {
+      BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: not paired MAC=%s", formatMacAddress(targetMac).c_str());
+      return "Rejected (mesh): device not paired. Use 'espnow pair' first.";
+    }
+    if (!espnowPeerExists(targetMac)) {
+      BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: no peer entry MAC=%s", formatMacAddress(targetMac).c_str());
+      return "Rejected (mesh): destination not in ESP-NOW peer table.";
+    }
+  }
+
+  Message msg;
+  memcpy(msg.dstMac, targetMac, 6);
+  msg.payload = browseMessage;
+  
+  static char browseBuffer[256];
+  if (!routerSend(msg)) {
+    snprintf(browseBuffer, sizeof(browseBuffer), "Failed to send browse request");
+    return browseBuffer;
+  }
+
+  snprintf(browseBuffer, sizeof(browseBuffer), "File browse request sent to %s for path: %s",
+           target.c_str(), path.c_str());
+  return browseBuffer;
+}
+
+// Remote file fetch (pull a file from remote device)
+const char* cmd_espnow_fetch(const String& argsIn) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  if (!gEspNow->initialized) {
+    return "ESP-NOW not initialized. Run 'espnow init' first.";
+  }
+
+  if (!gEspNow->encryptionEnabled) {
+    return "ESP-NOW encryption required. Set a passphrase with 'espnow setpassphrase \"your_phrase\"' and pair securely.";
+  }
+
+  String args = argsIn;
+  args.trim();
+
+  // Parse: <target> <user> <pass> <path>
+  int firstSpace = args.indexOf(' ');
+  if (firstSpace < 0) return "Usage: espnow fetch <target> <username> <password> <path>";
+
+  int secondSpace = args.indexOf(' ', firstSpace + 1);
+  if (secondSpace < 0) return "Usage: espnow fetch <target> <username> <password> <path>";
+
+  int thirdSpace = args.indexOf(' ', secondSpace + 1);
+  if (thirdSpace < 0) return "Usage: espnow fetch <target> <username> <password> <path>";
+
+  String target = args.substring(0, firstSpace);
+  String username = args.substring(firstSpace + 1, secondSpace);
+  String password = args.substring(secondSpace + 1, thirdSpace);
+  String path = args.substring(thirdSpace + 1);
+
+  target.trim();
+  username.trim();
+  password.trim();
+  path.trim();
+
+  if (target.length() == 0 || username.length() == 0 || password.length() == 0 || path.length() == 0) {
+    return "Usage: espnow fetch <target> <username> <password> <path>";
+  }
+
+  uint8_t targetMac[6];
+  if (!resolveDeviceNameOrMac(target, targetMac)) {
+    static char fetchBuffer[256];
+    snprintf(fetchBuffer, sizeof(fetchBuffer),
+             "Target device '%s' not found or not paired. Pair the device first (prefer 'espnow pairsecure').",
+             target.c_str());
+    return fetchBuffer;
+  }
+
+  // Build FILE_BROWSE fetch message
+  JsonDocument doc;
+  uint8_t myMac[6];
+  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  
+  v2_init_envelope(doc, MSG_TYPE_FILE_BROWSE, generateMessageId(),
+                   gSettings.espnowDeviceName.c_str(), "", -1);
+  JsonObject pld = doc["pld"].to<JsonObject>();
+  pld["kind"] = "fetch";
+  pld["path"] = path;
+  pld["user"] = username;
+  pld["pass"] = password;
+  
+  String fetchMessage;
+  serializeJson(doc, fetchMessage);
+
+  if (isMeshMode()) {
+    if (!isPairedDevice(targetMac)) {
+      BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: not paired MAC=%s", formatMacAddress(targetMac).c_str());
+      return "Rejected (mesh): device not paired. Use 'espnow pair' first.";
+    }
+    if (!espnowPeerExists(targetMac)) {
+      BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: no peer entry MAC=%s", formatMacAddress(targetMac).c_str());
+      return "Rejected (mesh): destination not in ESP-NOW peer table.";
+    }
+  }
+
+  Message msg;
+  memcpy(msg.dstMac, targetMac, 6);
+  msg.payload = fetchMessage;
+  
+  static char fetchBuffer[256];
+  if (!routerSend(msg)) {
+    snprintf(fetchBuffer, sizeof(fetchBuffer), "Failed to send fetch request");
+    return fetchBuffer;
+  }
+
+  snprintf(fetchBuffer, sizeof(fetchBuffer), "File fetch request sent to %s for: %s",
+           target.c_str(), path.c_str());
+  return fetchBuffer;
+}
+
 // Remote command execution
-const char* cmd_espnow_remote(const String& originalCmd) {
+const char* cmd_espnow_remote(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
@@ -7780,25 +8221,23 @@ const char* cmd_espnow_remote(const String& originalCmd) {
            "' and pair securely.";
   }
 
-  String cmd = originalCmd;
-  cmd.trim();
+  String args = argsIn;
+  args.trim();
 
-  int firstSpace = cmd.indexOf(' ', 13);
+  // Parse: <target> <username> <password> <command>
+  int firstSpace = args.indexOf(' ');
   if (firstSpace < 0) return "Usage: espnow remote <target> <username> <password> <command>";
 
-  int secondSpace = cmd.indexOf(' ', firstSpace + 1);
+  int secondSpace = args.indexOf(' ', firstSpace + 1);
   if (secondSpace < 0) return "Usage: espnow remote <target> <username> <password> <command>";
 
-  int thirdSpace = cmd.indexOf(' ', secondSpace + 1);
+  int thirdSpace = args.indexOf(' ', secondSpace + 1);
   if (thirdSpace < 0) return "Usage: espnow remote <target> <username> <password> <command>";
 
-  int fourthSpace = cmd.indexOf(' ', thirdSpace + 1);
-  if (fourthSpace < 0) return "Usage: espnow remote <target> <username> <password> <command>";
-
-  String target = cmd.substring(firstSpace + 1, secondSpace);
-  String username = cmd.substring(secondSpace + 1, thirdSpace);
-  String password = cmd.substring(thirdSpace + 1, fourthSpace);
-  String command = cmd.substring(fourthSpace + 1);
+  String target = args.substring(0, firstSpace);
+  String username = args.substring(firstSpace + 1, secondSpace);
+  String password = args.substring(secondSpace + 1, thirdSpace);
+  String command = args.substring(thirdSpace + 1);
 
   target.trim();
   username.trim();
@@ -7943,7 +8382,7 @@ const char* cmd_espnow_stopstream(const String& originalCmd) {
 }
 
 // ESP-NOW send message command (uses Message Router)
-const char* cmd_espnow_send(const String& originalCmd) {
+const char* cmd_espnow_send(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gEspNow) return "Error: ESP-NOW not initialized";
@@ -7951,20 +8390,17 @@ const char* cmd_espnow_send(const String& originalCmd) {
     return "ESP-NOW not initialized. Run 'espnow init' first.";
   }
 
-  // Parse: espnow send <name_or_mac> <message>
-  String cmd = originalCmd;
-  cmd.trim();
+  // Parse: <name_or_mac> <message>
+  String args = argsIn;
+  args.trim();
   
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] originalCmd.length()=%d", originalCmd.length());
+  DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] args.length()=%d", args.length());
 
-  int firstSpace = cmd.indexOf(' ', 8);  // after "espnow send"
+  int firstSpace = args.indexOf(' ');
   if (firstSpace < 0) return "Usage: espnow send <name_or_mac> <message>";
 
-  int secondSpace = cmd.indexOf(' ', firstSpace + 1);
-  if (secondSpace < 0) return "Usage: espnow send <name_or_mac> <message>";
-
-  String target = cmd.substring(firstSpace + 1, secondSpace);
-  String message = cmd.substring(secondSpace + 1);
+  String target = args.substring(0, firstSpace);
+  String message = args.substring(firstSpace + 1);
   target.trim();
   message.trim();
   
@@ -8040,20 +8476,18 @@ const char* cmd_espnow_send(const String& originalCmd) {
 }
 
 // Send a synthetic large text payload to trigger fragmentation paths
-const char* cmd_espnow_bigsend(const String& originalCmd) {
+const char* cmd_espnow_bigsend(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) return "ESP-NOW not initialized. Run 'espnow init' first.";
 
-  String cmd = originalCmd; // format: "espnow bigsend <mac|name> <bytes>"
-  cmd.trim();
-  int firstSpace = cmd.indexOf(' ', 13); // after "espnow bigsend"
+  String args = argsIn; // format: "<mac|name> <bytes>"
+  args.trim();
+  int firstSpace = args.indexOf(' ');
   if (firstSpace < 0) return "Usage: espnow bigsend <name_or_mac> <bytes>";
-  int secondSpace = cmd.indexOf(' ', firstSpace + 1);
-  if (secondSpace < 0) return "Usage: espnow bigsend <name_or_mac> <bytes>";
 
-  String target = cmd.substring(firstSpace + 1, secondSpace);
-  String sizeStr = cmd.substring(secondSpace + 1);
+  String target = args.substring(0, firstSpace);
+  String sizeStr = args.substring(firstSpace + 1);
   target.trim(); sizeStr.trim();
   if (target.length() == 0 || sizeStr.length() == 0) return "Usage: espnow bigsend <name_or_mac> <bytes>";
 
@@ -8132,6 +8566,8 @@ extern const CommandEntry espNowCommands[] = {
   { "espnow send", "Send message (auto-routes via mesh if enabled): 'espnow send <name_or_mac> <message>'.", false, cmd_espnow_send, "Usage: espnow send <name_or_mac> <message>" },
   { "espnow broadcast", "Broadcast message: 'espnow broadcast <message>'.", false, cmd_espnow_broadcast, "Usage: espnow broadcast <message>" },
   { "espnow sendfile", "Send file: 'espnow sendfile <name_or_mac> <filepath>'.", false, cmd_espnow_sendfile, "Usage: espnow sendfile <name_or_mac> <filepath>" },
+  { "espnow browse", "Browse remote files: 'espnow browse <name_or_mac> <user> <pass> [path]'.", false, cmd_espnow_browse, "Usage: espnow browse <target> <username> <password> [path]" },
+  { "espnow fetch", "Fetch remote file: 'espnow fetch <name_or_mac> <user> <pass> <path>'.", false, cmd_espnow_fetch, "Usage: espnow fetch <target> <username> <password> <path>" },
   { "espnow remote", "Execute remote command: 'espnow remote <name_or_mac> <user> <pass> <cmd>'.", false, cmd_espnow_remote, "Usage: espnow remote <target> <username> <password> <command>" },
   { "startstream", "Start streaming all output to ESP-NOW caller (admin, remote only).", true, cmd_espnow_startstream },
   { "stopstream", "Stop streaming output to ESP-NOW device (admin).", true, cmd_espnow_stopstream },
@@ -8169,25 +8605,23 @@ static CommandModuleRegistrar _espnow_cmd_registrar(espNowCommands, espNowComman
 // ============================================================================
 
 static const SettingEntry espnowSettingEntries[] = {
-  // Core ESP-NOW settings
-  { "enabled", SETTING_BOOL, &gSettings.espnowenabled, true, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr },
-  { "mesh", SETTING_BOOL, &gSettings.espnowmesh, true, 0, nullptr, 0, 1, "Mesh Mode", nullptr },
-  { "userSyncEnabled", SETTING_BOOL, &gSettings.espnowUserSyncEnabled, false, 0, nullptr, 0, 1, "User Sync Enabled", nullptr },
-  { "deviceName", SETTING_STRING, &gSettings.espnowDeviceName, 0, 0, "", 0, 0, "Device Name", nullptr },
-  { "firstTimeSetup", SETTING_BOOL, &gSettings.espnowFirstTimeSetup, false, 0, nullptr, 0, 1, "First Time Setup", nullptr },
-  { "passphrase", SETTING_STRING, &gSettings.espnowPassphrase, 0, 0, "", 0, 0, "Passphrase", nullptr },
-  // Mesh settings
-  { "meshRole", SETTING_INT, &gSettings.meshRole, 0, 0, nullptr, 0, 2, "Mesh Role", nullptr },
-  { "masterMAC", SETTING_STRING, &gSettings.meshMasterMAC, 0, 0, "", 0, 0, "Master MAC", nullptr },
-  { "backupMAC", SETTING_STRING, &gSettings.meshBackupMAC, 0, 0, "", 0, 0, "Backup MAC", nullptr },
-  { "masterHeartbeatInterval", SETTING_INT, &gSettings.meshMasterHeartbeatInterval, 10000, 0, nullptr, 1000, 60000, "Heartbeat Interval (ms)", nullptr },
-  { "failoverTimeout", SETTING_INT, &gSettings.meshFailoverTimeout, 20000, 0, nullptr, 5000, 120000, "Failover Timeout (ms)", nullptr },
-  { "workerStatusInterval", SETTING_INT, &gSettings.meshWorkerStatusInterval, 30000, 0, nullptr, 5000, 120000, "Worker Status Interval (ms)", nullptr },
-  { "topoDiscoveryInterval", SETTING_INT, &gSettings.meshTopoDiscoveryInterval, 0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr },
-  { "topoAutoRefresh", SETTING_BOOL, &gSettings.meshTopoAutoRefresh, false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr },
-  { "heartbeatBroadcast", SETTING_BOOL, &gSettings.meshHeartbeatBroadcast, false, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr },
-  { "ttl", SETTING_INT, &gSettings.meshTTL, 3, 0, nullptr, 1, 10, "TTL", nullptr },
-  { "adaptiveTTL", SETTING_BOOL, &gSettings.meshAdaptiveTTL, false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr }
+  { "enabled",                    SETTING_BOOL,   &gSettings.espnowenabled,              true, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr },
+  { "mesh",                       SETTING_BOOL,   &gSettings.espnowmesh,                 true, 0, nullptr, 0, 1, "Mesh Mode", nullptr },
+  { "userSyncEnabled",            SETTING_BOOL,   &gSettings.espnowUserSyncEnabled,      false, 0, nullptr, 0, 1, "User Sync Enabled", nullptr },
+  { "deviceName",                 SETTING_STRING, &gSettings.espnowDeviceName,           0, 0, "", 0, 0, "Device Name", nullptr },
+  { "firstTimeSetup",             SETTING_BOOL,   &gSettings.espnowFirstTimeSetup,       false, 0, nullptr, 0, 1, "First Time Setup", nullptr },
+  { "passphrase",                  SETTING_STRING, &gSettings.espnowPassphrase,           0, 0, "", 0, 0, "Passphrase", nullptr },
+  { "meshRole",                   SETTING_INT,    &gSettings.meshRole,                   0, 0, nullptr, 0, 2, "Mesh Role", nullptr },
+  { "masterMAC",                  SETTING_STRING, &gSettings.meshMasterMAC,              0, 0, "", 0, 0, "Master MAC", nullptr },
+  { "backupMAC",                  SETTING_STRING, &gSettings.meshBackupMAC,              0, 0, "", 0, 0, "Backup MAC", nullptr },
+  { "masterHeartbeatInterval",    SETTING_INT,    &gSettings.meshMasterHeartbeatInterval,10000, 0, nullptr, 1000, 60000, "Heartbeat Interval (ms)", nullptr },
+  { "failoverTimeout",            SETTING_INT,    &gSettings.meshFailoverTimeout,        20000, 0, nullptr, 5000, 120000, "Failover Timeout (ms)", nullptr },
+  { "workerStatusInterval",       SETTING_INT,    &gSettings.meshWorkerStatusInterval,   30000, 0, nullptr, 5000, 120000, "Worker Status Interval (ms)", nullptr },
+  { "topoDiscoveryInterval",      SETTING_INT,    &gSettings.meshTopoDiscoveryInterval,  0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr },
+  { "topoAutoRefresh",            SETTING_BOOL,   &gSettings.meshTopoAutoRefresh,        false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr },
+  { "heartbeatBroadcast",         SETTING_BOOL,   &gSettings.meshHeartbeatBroadcast,     false, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr },
+  { "meshTTL",                    SETTING_INT,    &gSettings.meshTTL,                    3, 0, nullptr, 1, 10, "TTL", nullptr },
+  { "meshAdaptiveTTL",            SETTING_BOOL,   &gSettings.meshAdaptiveTTL,            false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr }
 };
 
 extern const SettingsModule espnowSettingsModule = {
@@ -8204,12 +8638,12 @@ extern const SettingsModule espnowSettingsModule = {
 /**
  * Toggle user sync feature: espnow usersync [on|off]
  */
-const char* cmd_espnow_usersync(const String& originalCmd) {
+const char* cmd_espnow_usersync(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
-  String args = originalCmd.substring(String("espnow usersync ").length());
+  String args = argsIn;
   args.trim();
   args.toLowerCase();
   

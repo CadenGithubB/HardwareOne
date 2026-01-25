@@ -4,6 +4,7 @@
 #define I2CSENSOR_VL53L4CX_OLED_H
 
 #include "OLED_Display.h"
+#include "OLED_Utils.h"
 #include <Adafruit_SSD1306.h>
 
 // ToF OLED display function - shows distance data
@@ -55,18 +56,27 @@ static bool tofOLEDModeAvailable(String* outReason) {
   return true;  // Always allow navigation, display function handles "not active" state
 }
 
+static void tofToggleConfirmed(void* userData) {
+  (void)userData;
+  extern bool enqueueSensorStart(SensorType sensor);
+  extern bool isInQueue(SensorType sensor);
+
+  if (tofEnabled && tofConnected) {
+    Serial.println("[TOF] Confirmed: Stopping ToF sensor...");
+    tofEnabled = false;
+  } else if (!isInQueue(SENSOR_TOF)) {
+    Serial.println("[TOF] Confirmed: Starting ToF sensor...");
+    enqueueSensorStart(SENSOR_TOF);
+  }
+}
+
 // Input handler for ToF OLED mode - X button toggles sensor
 static bool tofInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    extern bool enqueueSensorStart(SensorType sensor);
-    extern bool isInQueue(SensorType sensor);
-    
     if (tofEnabled && tofConnected) {
-      Serial.println("[TOF] X button: Stopping ToF sensor...");
-      tofEnabled = false;
-    } else if (!isInQueue(SENSOR_TOF)) {
-      Serial.println("[TOF] X button: Starting ToF sensor...");
-      enqueueSensorStart(SENSOR_TOF);
+      oledConfirmRequest("Stop ToF?", nullptr, tofToggleConfirmed, nullptr, false);
+    } else {
+      oledConfirmRequest("Start ToF?", nullptr, tofToggleConfirmed, nullptr);
     }
     return true;
   }

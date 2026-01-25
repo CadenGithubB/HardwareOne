@@ -3,6 +3,20 @@
 
 // Stream settings page content using raw string literals
 static void streamSettingsInner(httpd_req_t* req) {
+  // Define togglePane early - before any HTML that uses it
+  httpd_resp_send_chunk(req, R"EARLYJS(
+<script>
+window.togglePane = function(paneId, btnId) {
+  var p = document.getElementById(paneId);
+  var b = document.getElementById(btnId);
+  if (!p || !b) { console.warn('[togglePane] Element not found:', paneId, btnId); return; }
+  var isHidden = (p.style.display === 'none' || !p.style.display);
+  p.style.display = isHidden ? 'block' : 'none';
+  b.textContent = isHidden ? 'Collapse' : 'Expand';
+};
+</script>
+)EARLYJS", HTTPD_RESP_USE_STRLEN);
+
   // Part 1: Header and WiFi section
   httpd_resp_send_chunk(req, R"SETPART1(
 <h2>System Settings</h2>
@@ -112,14 +126,14 @@ static void streamSettingsInner(httpd_req_t* req) {
 </div>
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>CLI History Size</div><div style='color:var(--muted);font-size:0.9rem'>Number of commands to keep in CLI history buffer.</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Web CLI History Size</div><div style='color:var(--muted);font-size:0.9rem'>Number of commands to keep in web CLI history buffer.</div></div>
     <button class='btn' id='btn-cli-toggle' onclick="togglePane('cli-pane','btn-cli-toggle')">Expand</button>
   </div>
   <div id='cli-pane' style='display:none;margin-top:0.75rem'>
   <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
-    <span style='color:var(--panel-fg)' title='Number of CLI commands stored in history buffer for recall'>Current: <span style='font-weight:bold;color:#667eea' id='cli-value'>-</span></span>
-    <input type='number' id='cli-input' min='1' max='100' value='10' class='form-input' style='width:80px' title='Set CLI history buffer size (1-100 commands)'>
-    <button class='btn' onclick='updateCliHistory()' title='Save new CLI history buffer size'>Update</button>
+    <span style='color:var(--panel-fg)' title='Number of CLI commands stored in web history buffer'>Current: <span style='font-weight:bold;color:#667eea' id='cli-value'>-</span></span>
+    <input type='number' id='cli-input' min='1' max='100' value='10' class='form-input' style='width:80px' title='Set web CLI history buffer size (1-100 commands)'>
+    <button class='btn' onclick='updateWebCliHistory()' title='Save new web CLI history buffer size'>Update</button>
     <button class='btn' onclick='clearCliHistory()' title='Clear all stored CLI command history'>Clear History</button>
   </div>
 </div>
@@ -162,9 +176,10 @@ static void streamSettingsInner(httpd_req_t* req) {
 </div>
 <script>
 (function(){
-  var sensorModules = ['thermal','tof','imu','gps','fmradio','gamepad','apds','power','debug','output'];
-  var sensorSections = {'thermal_mlx90640':'thermal','tof_vl53l4cx':'tof','imu_bno055':'imu','gps':'gps','fmradio':'fmradio','gamepad':'gamepad','apds':'apds','power':'power','debug':'debug','output':'output'};
-  var moduleLabels = {thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',gamepad:'Gamepad (Seesaw)',apds:'APDS (APDS9960)',power:'Power Management',debug:'Debug Flags',output:'Output Channels'};
+  var sensorModules = ['camera','microphone','thermal','tof','imu','gps','fmradio','gamepad','apds','rtc','presence'];
+  var mlSubsections = {camera:'edgeimpulse',microphone:null};
+  var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','thermal_mlx90640':'thermal','tof_vl53l4cx':'tof','imu_bno055':'imu','gps':'gps','fmradio':'fmradio','gamepad':'gamepad','apds':'apds','rtc':'rtc','presence':'presence','power':'power','debug':'debug','output':'output'};
+  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',gamepad:'Gamepad (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',power:'Power Management',debug:'Debug Flags',output:'Output Channels'};
   
   function inferType(val) {
     if (typeof val === 'boolean') return 'bool';
@@ -187,6 +202,15 @@ static void streamSettingsInner(httpd_req_t* req) {
         return '<option value="' + o + '"' + (val === o ? ' selected' : '') + '>' + o.charAt(0).toUpperCase() + o.slice(1) + '</option>';
       }).join('');
       return '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:160px">' + opts + '</select></label>';
+    } else if ((e.type === 'int' || e.type === 'float') && e.options) {
+      // Int/float with named options - render as dropdown
+      var opts = e.options.split(',').map(function(o) {
+        var parts = o.split(':');
+        var optVal = parts[0];
+        var optLabel = parts.length > 1 ? parts[1] : optVal;
+        return '<option value="' + optVal + '"' + (parseInt(val) === parseInt(optVal) ? ' selected' : '') + '>' + optLabel + '</option>';
+      }).join('');
+      return '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px">' + opts + '</select></label>';
     } else if (e.type === 'int' || e.type === 'float') {
       var step = e.type === 'float' ? '0.01' : '1';
       var minAttr = e.min !== undefined ? ' min="' + e.min + '"' : '';
@@ -212,7 +236,7 @@ static void streamSettingsInner(httpd_req_t* req) {
     return result;
   }
   
-  function renderModule(mod, settings, isOrphan) {
+  function renderModule(mod, settings, isOrphan, allModules, allSettings) {
     var section = settings[mod.section] || settings[mod.name] || {};
     var entries = mod.entries || [];
     var uiEntries = entries.filter(function(e) { return e.key.indexOf('ui.') === 0; });
@@ -270,13 +294,63 @@ static void streamSettingsInner(httpd_req_t* req) {
       html += '</div>';
     }
     if (otherEntries.length > 0) {
-      html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
-      otherEntries.forEach(function(e) { html += renderInput(e, getValue(e.key), isOrphan); });
-      html += '</div>';
+      // For camera module, separate ESP-NOW related settings
+      var espnowKeys = ['cameraSendAfterCapture', 'cameraTargetDevice'];
+      var regularEntries = otherEntries.filter(function(e) { return espnowKeys.indexOf(e.key) === -1; });
+      var espnowEntries = otherEntries.filter(function(e) { return espnowKeys.indexOf(e.key) !== -1; });
+      
+      if (regularEntries.length > 0) {
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
+        regularEntries.forEach(function(e) { html += renderInput(e, getValue(e.key), isOrphan); });
+        html += '</div>';
+      }
+      
+      if (espnowEntries.length > 0 && mod.name === 'camera') {
+        html += '<div style="font-weight:bold;margin:1rem 0 0.5rem 0;color:var(--panel-fg);border-bottom:1px solid var(--border);padding-bottom:0.25rem">📡 ESP-NOW Integration</div>';
+        html += '<div style="background:rgba(100,149,237,0.1);border-left:3px solid #6495ed;padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--muted);font-size:0.85rem">';
+        html += 'Send captured images to another device via ESP-NOW mesh network.';
+        html += '</div>';
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
+        espnowEntries.forEach(function(e) { html += renderInput(e, getValue(e.key), isOrphan); });
+        html += '</div>';
+      } else if (espnowEntries.length > 0) {
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
+        espnowEntries.forEach(function(e) { html += renderInput(e, getValue(e.key), isOrphan); });
+        html += '</div>';
+      }
     }
     if (!isOrphan) {
       html += '<button class="btn" onclick="saveDynamicSettings(\'' + mod.name + '\',\'' + mod.section + '\')">Save ' + (moduleLabels[mod.name] || mod.name) + ' Settings</button>';
     }
+    
+    // Render ML subsection if this module has one
+    var mlModName = mlSubsections[mod.name];
+    if (mlModName && allModules) {
+      var mlMod = allModules.find(function(m) { return m.name === mlModName; });
+      if (mlMod) {
+        var mlSection = allSettings[mlMod.section] || {};
+        var mlEntries = mlMod.entries || [];
+        html += '<div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)">';
+        html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">';
+        html += '<span style="font-weight:bold;color:var(--panel-fg)">Machine Learning</span>';
+        html += '<button class="btn" id="btn-' + mlModName + '-toggle" onclick="togglePane(\'' + mlModName + '-pane\',\'btn-' + mlModName + '-toggle\')">Expand</button>';
+        html += '</div>';
+        html += '<div id="' + mlModName + '-pane" style="display:none">';
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
+        mlEntries.forEach(function(e) {
+          var parts = e.key.split('.');
+          var v = mlSection;
+          for (var i = 0; i < parts.length && v; i++) v = v[parts[i]];
+          html += renderInput(e, v, isOrphan);
+        });
+        html += '</div>';
+        if (!isOrphan) {
+          html += '<button class="btn" onclick="saveDynamicSettings(\'' + mlModName + '\',\'' + mlMod.section + '\')">Save ML Settings</button>';
+        }
+        html += '</div></div>';
+      }
+    }
+    
     html += '</div></div>';
     return html;
   }
@@ -319,13 +393,14 @@ static void streamSettingsInner(httpd_req_t* req) {
     var html = '';
     
     // Render active (compiled) modules first
+    var allMods = schema.modules || [];
     relevantModules.forEach(function(mod) {
-      html += renderModule(mod, settings, false);
+      html += renderModule(mod, settings, false, allMods, settings);
     });
     
     // Render orphan modules (not compiled but settings exist)
     orphanModules.forEach(function(mod) {
-      html += renderModule(mod, settings, true);
+      html += renderModule(mod, settings, true, allMods, settings);
     });
     
     if (html === '') {
@@ -346,12 +421,8 @@ static void streamSettingsInner(httpd_req_t* req) {
     var updates = {};
     inputs.forEach(function(el) {
       var key = el.id.replace('dyn-', '').replace(/-/g, '.');
-      if (!key.startsWith(modName + '.') && !key.startsWith('ui.') && !key.startsWith('device.')) return;
-      var modKey = key;
-      if (key.startsWith('ui.') || key.startsWith('device.')) {
-        var parentMod = el.closest('[id$="-pane"]');
-        if (!parentMod || !parentMod.id.startsWith(modName)) return;
-      }
+      var parentMod = el.closest('[id$="-pane"]');
+      if (!parentMod || !parentMod.id.startsWith(modName)) return;
       var val;
       if (el.type === 'checkbox') val = el.checked ? 1 : 0;
       else if (el.type === 'number') val = el.step && el.step.indexOf('.') !== -1 ? parseFloat(el.value) : parseInt(el.value);
@@ -359,9 +430,18 @@ static void streamSettingsInner(httpd_req_t* req) {
       updates[key] = val;
     });
     
+    // For camera: if enabling auto-capture and folder is empty, set default and update UI
+    if (modName === 'camera' && updates['cameraAutoCapture'] === 1) {
+      var folderInput = document.getElementById('dyn-cameraCaptureFolder');
+      if (folderInput && !folderInput.value.trim()) {
+        folderInput.value = '/photos';
+        updates['cameraCaptureFolder'] = '/photos';
+      }
+    }
+    
     var cmds = [];
     for (var k in updates) {
-      cmds.push('set ' + section + '.' + k + ' ' + updates[k]);
+      cmds.push(k + ' ' + updates[k]);
     }
     
     if (cmds.length === 0) { alert('No settings to save'); return; }
@@ -467,7 +547,7 @@ static void streamSettingsInner(httpd_req_t* req) {
     }
   </style>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Debug Controls</div><div style='color:var(--muted);font-size:0.9rem'>Toggle debugging output categories to serial console. Default is quiet (minimal spam).</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Debug Controls</div><div style='color:var(--muted);font-size:0.9rem'>Toggle debugging output categories to serial console.</div></div>
     <button class='btn' id='btn-debug-toggle' onclick="togglePane('debug-pane','btn-debug-toggle')">Expand</button>
   </div>
   <div id='debug-pane' style='display:none;margin-top:0.75rem'>
@@ -475,6 +555,20 @@ static void streamSettingsInner(httpd_req_t* req) {
     <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:6px;padding:1rem'>
       <div style='font-weight:bold;margin-bottom:0.75rem;color:var(--panel-fg);border-bottom:1px solid #e5e7eb;padding-bottom:0.5rem'>System & Core</div>
       <div style='display:flex;flex-direction:column;gap:0.35rem'>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all authentication debug output (derived state: ON if any sub-category is ON)'>Authentication: <span style='font-weight:bold;color:#667eea' id='debugAuthGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('auth')" id='debugAuthGroup-btn' title='Toggle all auth debugging'>Toggle All</button><button class='btn' onclick="togglePane('auth-details','auth-details-btn')" id='auth-details-btn' style='font-size:0.85rem'>Expand</button></div>
+        <div id='auth-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable boot ID debug output'>Boot ID: <span style='font-weight:bold;color:#667eea' id='debugAuthBootId-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthBootId')" id='debugAuthBootId-btn' style='font-size:0.85rem' title='Toggle boot ID debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable cookie debug output'>Cookies: <span style='font-weight:bold;color:#667eea' id='debugAuthCookies-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthCookies')" id='debugAuthCookies-btn' style='font-size:0.85rem' title='Toggle cookie debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable login debug output'>Login: <span style='font-weight:bold;color:#667eea' id='debugAuthLogin-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthLogin')" id='debugAuthLogin-btn' style='font-size:0.85rem' title='Toggle login debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable session debug output'>Sessions: <span style='font-weight:bold;color:#667eea' id='debugAuthSessions-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthSessions')" id='debugAuthSessions-btn' style='font-size:0.85rem' title='Toggle session debugging'>Toggle</button></div>
+        </div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all automations debug output (derived state: ON if any sub-category is ON)'>Automations: <span style='font-weight:bold;color:#667eea' id='debugAutomationsGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('automations')" id='debugAutomationsGroup-btn' title='Toggle all automations debugging'>Toggle All</button><button class='btn' onclick="togglePane('automations-details','automations-details-btn')" id='automations-details-btn' style='font-size:0.85rem'>Expand</button></div>
+        <div id='automations-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable automations conditions debug output'>Conditions: <span style='font-weight:bold;color:#667eea' id='debugAutoCondition-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAutoCondition')" id='debugAutoCondition-btn' style='font-size:0.85rem' title='Toggle conditions debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable automations execution debug output'>Execution: <span style='font-weight:bold;color:#667eea' id='debugAutoExec-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAutoExec')" id='debugAutoExec-btn' style='font-size:0.85rem' title='Toggle execution debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable automations scheduler debug output'>Scheduler: <span style='font-weight:bold;color:#667eea' id='debugAutoScheduler-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAutoScheduler')" id='debugAutoScheduler-btn' style='font-size:0.85rem' title='Toggle scheduler debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable automations timing debug output'>Timing: <span style='font-weight:bold;color:#667eea' id='debugAutoTiming-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAutoTiming')" id='debugAutoTiming-btn' style='font-size:0.85rem' title='Toggle timing debugging'>Toggle</button></div>
+        </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all CLI debug output (derived state: ON if any sub-category is ON)'>CLI: <span style='font-weight:bold;color:#667eea' id='debugCliGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('cli')" id='debugCliGroup-btn' title='Toggle all CLI debugging'>Toggle All</button><button class='btn' onclick="togglePane('cli-details','cli-details-btn')" id='cli-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='cli-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable CLI execution debug output'>Execution: <span style='font-weight:bold;color:#667eea' id='debugCliExecution-value'>-</span></span><button class='btn' onclick="toggleDebug('debugCliExecution')" id='debugCliExecution-btn' style='font-size:0.85rem' title='Toggle execution debugging'>Toggle</button></div>
@@ -483,55 +577,41 @@ static void streamSettingsInner(httpd_req_t* req) {
         </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all command flow debug output (derived state: ON if any sub-category is ON)'>Command Flow: <span style='font-weight:bold;color:#667eea' id='debugCmdFlowGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('cmdflow')" id='debugCmdFlowGroup-btn' title='Toggle all command flow debugging'>Toggle All</button><button class='btn' onclick="togglePane('cmdflow-details','cmdflow-details-btn')" id='cmdflow-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='cmdflow-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable command routing debug output'>Routing: <span style='font-weight:bold;color:#667eea' id='debugCmdflowRouting-value'>-</span></span><button class='btn' onclick="toggleDebug('debugCmdflowRouting')" id='debugCmdflowRouting-btn' style='font-size:0.85rem' title='Toggle routing debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable command context debug output'>Context: <span style='font-weight:bold;color:#667eea' id='debugCmdflowContext-value'>-</span></span><button class='btn' onclick="toggleDebug('debugCmdflowContext')" id='debugCmdflowContext-btn' style='font-size:0.85rem' title='Toggle context debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable command queue debug output'>Queue: <span style='font-weight:bold;color:#667eea' id='debugCmdflowQueue-value'>-</span></span><button class='btn' onclick="toggleDebug('debugCmdflowQueue')" id='debugCmdflowQueue-btn' style='font-size:0.85rem' title='Toggle queue debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable command context debug output'>Context: <span style='font-weight:bold;color:#667eea' id='debugCmdflowContext-value'>-</span></span><button class='btn' onclick="toggleDebug('debugCmdflowContext')" id='debugCmdflowContext-btn' style='font-size:0.85rem' title='Toggle context debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable command routing debug output'>Routing: <span style='font-weight:bold;color:#667eea' id='debugCmdflowRouting-value'>-</span></span><button class='btn' onclick="toggleDebug('debugCmdflowRouting')" id='debugCmdflowRouting-btn' style='font-size:0.85rem' title='Toggle routing debugging'>Toggle</button></div>
         </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable modular command registry operations debug output'>Command System: <span style='font-weight:bold;color:#667eea' id='debugCommandSystem-value'>-</span></span><button class='btn' onclick="toggleDebug('debugCommandSystem')" id='debugCommandSystem-btn' title='Toggle command system debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable date/time and NTP debug output'>Date/Time & NTP: <span style='font-weight:bold;color:#667eea' id='debugDateTime-value'>-</span></span><button class='btn' onclick="toggleDebug('debugDateTime')" id='debugDateTime-btn' title='Toggle date/time debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable FM radio I2C transactions, task lifecycle, and RDS debug output'>FM Radio: <span style='font-weight:bold;color:#667eea' id='debugFmRadio-value'>-</span></span><button class='btn' onclick="toggleDebug('debugFmRadio')" id='debugFmRadio-btn' title='Toggle FM radio debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor logger internal diagnostics'>Logger Internals: <span style='font-weight:bold;color:#667eea' id='debugLogger-value'>-</span></span><button class='btn' onclick="toggleDebug('debugLogger')" id='debugLogger-btn' title='Toggle sensor logger diagnostics'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all performance debug output (derived state: ON if any sub-category is ON)'>Performance: <span style='font-weight:bold;color:#667eea' id='debugPerfGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('performance')" id='debugPerfGroup-btn' title='Toggle all performance debugging'>Toggle All</button><button class='btn' onclick="togglePane('perf-details','perf-details-btn')" id='perf-details-btn' style='font-size:0.85rem'>Expand</button></div>
+        <div id='perf-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable heap usage debug output'>Heap: <span style='font-weight:bold;color:#667eea' id='debugPerfHeap-value'>-</span></span><button class='btn' onclick="toggleDebug('debugPerfHeap')" id='debugPerfHeap-btn' style='font-size:0.85rem' title='Toggle heap debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable stack watermark debug output'>Stack: <span style='font-weight:bold;color:#667eea' id='debugPerfStack-value'>-</span></span><button class='btn' onclick="toggleDebug('debugPerfStack')" id='debugPerfStack-btn' style='font-size:0.85rem' title='Toggle stack debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable timing debug output'>Timing: <span style='font-weight:bold;color:#667eea' id='debugPerfTiming-value'>-</span></span><button class='btn' onclick="toggleDebug('debugPerfTiming')" id='debugPerfTiming-btn' style='font-size:0.85rem' title='Toggle timing debugging'>Toggle</button></div>
+        </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable settings module registration and validation debug output'>Settings System: <span style='font-weight:bold;color:#667eea' id='debugSettingsSystem-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSettingsSystem')" id='debugSettingsSystem-btn' title='Toggle settings system debugging'>Toggle</button></div>
-        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all users debug output (derived state: ON if any sub-category is ON)'>Users: <span style='font-weight:bold;color:#667eea' id='debugUsersGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('users')" id='debugUsersGroup-btn' title='Toggle all users debugging'>Toggle All</button><button class='btn' onclick="togglePane('users-details','users-details-btn')" id='users-details-btn' style='font-size:0.85rem'>Expand</button></div>
-        <div id='users-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable user management debug output'>Management: <span style='font-weight:bold;color:#667eea' id='debugUsersMgmt-value'>-</span></span><button class='btn' onclick="toggleDebug('debugUsersMgmt')" id='debugUsersMgmt-btn' style='font-size:0.85rem' title='Toggle management debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable user registration debug output'>Registration: <span style='font-weight:bold;color:#667eea' id='debugUsersRegister-value'>-</span></span><button class='btn' onclick="toggleDebug('debugUsersRegister')" id='debugUsersRegister-btn' style='font-size:0.85rem' title='Toggle registration debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable user query debug output'>Query: <span style='font-weight:bold;color:#667eea' id='debugUsersQuery-value'>-</span></span><button class='btn' onclick="toggleDebug('debugUsersQuery')" id='debugUsersQuery-btn' style='font-size:0.85rem' title='Toggle query debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all storage debug output (derived state: ON if any sub-category is ON)'>Storage: <span style='font-weight:bold;color:#667eea' id='debugStorageGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('storage')" id='debugStorageGroup-btn' title='Toggle all storage debugging'>Toggle All</button><button class='btn' onclick="togglePane('storage-details','storage-details-btn')" id='storage-details-btn' style='font-size:0.85rem'>Expand</button></div>
+        <div id='storage-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable file operations debug output'>Files: <span style='font-weight:bold;color:#667eea' id='debugStorageFiles-value'>-</span></span><button class='btn' onclick="toggleDebug('debugStorageFiles')" id='debugStorageFiles-btn' style='font-size:0.85rem' title='Toggle files debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable JSON operations debug output'>JSON: <span style='font-weight:bold;color:#667eea' id='debugStorageJson-value'>-</span></span><button class='btn' onclick="toggleDebug('debugStorageJson')" id='debugStorageJson-btn' style='font-size:0.85rem' title='Toggle JSON debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable migration debug output'>Migration: <span style='font-weight:bold;color:#667eea' id='debugStorageMigration-value'>-</span></span><button class='btn' onclick="toggleDebug('debugStorageMigration')" id='debugStorageMigration-btn' style='font-size:0.85rem' title='Toggle migration debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable settings operations debug output'>Settings: <span style='font-weight:bold;color:#667eea' id='debugStorageSettings-value'>-</span></span><button class='btn' onclick="toggleDebug('debugStorageSettings')" id='debugStorageSettings-btn' style='font-size:0.85rem' title='Toggle settings debugging'>Toggle</button></div>
         </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all system debug output (derived state: ON if any sub-category is ON)'>System: <span style='font-weight:bold;color:#667eea' id='debugSystemGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('system')" id='debugSystemGroup-btn' title='Toggle all system debugging'>Toggle All</button><button class='btn' onclick="togglePane('system-details','system-details-btn')" id='system-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='system-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable system boot debug output'>Boot: <span style='font-weight:bold;color:#667eea' id='debugSystemBoot-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSystemBoot')" id='debugSystemBoot-btn' style='font-size:0.85rem' title='Toggle boot debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable system config debug output'>Config: <span style='font-weight:bold;color:#667eea' id='debugSystemConfig-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSystemConfig')" id='debugSystemConfig-btn' style='font-size:0.85rem' title='Toggle config debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable system tasks debug output'>Tasks: <span style='font-weight:bold;color:#667eea' id='debugSystemTasks-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSystemTasks')" id='debugSystemTasks-btn' style='font-size:0.85rem' title='Toggle tasks debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable system hardware debug output'>Hardware: <span style='font-weight:bold;color:#667eea' id='debugSystemHardware-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSystemHardware')" id='debugSystemHardware-btn' style='font-size:0.85rem' title='Toggle hardware debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable system hardware debug output'>Hardware: <span style='font-weight:bold;color:#667eea' id='debugSystemHardware-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSystemHardware')" id='debugSystemHardware-btn' style='font-size:0.85rem' title='Toggle hardware debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable system tasks debug output'>Tasks: <span style='font-weight:bold;color:#667eea' id='debugSystemTasks-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSystemTasks')" id='debugSystemTasks-btn' style='font-size:0.85rem' title='Toggle tasks debugging'>Toggle</button></div>
         </div>
-        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all authentication debug output (derived state: ON if any sub-category is ON)'>Authentication: <span style='font-weight:bold;color:#667eea' id='debugAuthGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('auth')" id='debugAuthGroup-btn' title='Toggle all auth debugging'>Toggle All</button><button class='btn' onclick="togglePane('auth-details','auth-details-btn')" id='auth-details-btn' style='font-size:0.85rem'>Expand</button></div>
-        <div id='auth-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable session debug output'>Sessions: <span style='font-weight:bold;color:#667eea' id='debugAuthSessions-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthSessions')" id='debugAuthSessions-btn' style='font-size:0.85rem' title='Toggle session debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable cookie debug output'>Cookies: <span style='font-weight:bold;color:#667eea' id='debugAuthCookies-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthCookies')" id='debugAuthCookies-btn' style='font-size:0.85rem' title='Toggle cookie debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable login debug output'>Login: <span style='font-weight:bold;color:#667eea' id='debugAuthLogin-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthLogin')" id='debugAuthLogin-btn' style='font-size:0.85rem' title='Toggle login debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable boot ID debug output'>Boot ID: <span style='font-weight:bold;color:#667eea' id='debugAuthBootId-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthBootId')" id='debugAuthBootId-btn' style='font-size:0.85rem' title='Toggle boot ID debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all users debug output (derived state: ON if any sub-category is ON)'>Users: <span style='font-weight:bold;color:#667eea' id='debugUsersGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('users')" id='debugUsersGroup-btn' title='Toggle all users debugging'>Toggle All</button><button class='btn' onclick="togglePane('users-details','users-details-btn')" id='users-details-btn' style='font-size:0.85rem'>Expand</button></div>
+        <div id='users-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable user management debug output'>Management: <span style='font-weight:bold;color:#667eea' id='debugUsersMgmt-value'>-</span></span><button class='btn' onclick="toggleDebug('debugUsersMgmt')" id='debugUsersMgmt-btn' style='font-size:0.85rem' title='Toggle management debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable user query debug output'>Query: <span style='font-weight:bold;color:#667eea' id='debugUsersQuery-value'>-</span></span><button class='btn' onclick="toggleDebug('debugUsersQuery')" id='debugUsersQuery-btn' style='font-size:0.85rem' title='Toggle query debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable user registration debug output'>Registration: <span style='font-weight:bold;color:#667eea' id='debugUsersRegister-value'>-</span></span><button class='btn' onclick="toggleDebug('debugUsersRegister')" id='debugUsersRegister-btn' style='font-size:0.85rem' title='Toggle registration debugging'>Toggle</button></div>
         </div>
-        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all storage debug output (derived state: ON if any sub-category is ON)'>Storage: <span style='font-weight:bold;color:#667eea' id='debugStorageGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('storage')" id='debugStorageGroup-btn' title='Toggle all storage debugging'>Toggle All</button><button class='btn' onclick="togglePane('storage-details','storage-details-btn')" id='storage-details-btn' style='font-size:0.85rem'>Expand</button></div>
-        <div id='storage-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable file operations debug output'>Files: <span style='font-weight:bold;color:#667eea' id='debugStorageFiles-value'>-</span></span><button class='btn' onclick="toggleDebug('debugStorageFiles')" id='debugStorageFiles-btn' style='font-size:0.85rem' title='Toggle files debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable JSON operations debug output'>JSON: <span style='font-weight:bold;color:#667eea' id='debugStorageJson-value'>-</span></span><button class='btn' onclick="toggleDebug('debugStorageJson')" id='debugStorageJson-btn' style='font-size:0.85rem' title='Toggle JSON debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable settings operations debug output'>Settings: <span style='font-weight:bold;color:#667eea' id='debugStorageSettings-value'>-</span></span><button class='btn' onclick="toggleDebug('debugStorageSettings')" id='debugStorageSettings-btn' style='font-size:0.85rem' title='Toggle settings debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable migration debug output'>Migration: <span style='font-weight:bold;color:#667eea' id='debugStorageMigration-value'>-</span></span><button class='btn' onclick="toggleDebug('debugStorageMigration')" id='debugStorageMigration-btn' style='font-size:0.85rem' title='Toggle migration debugging'>Toggle</button></div>
-        </div>
-        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable date/time and NTP debug output'>Date/Time & NTP: <span style='font-weight:bold;color:#667eea' id='debugDateTime-value'>-</span></span><button class='btn' onclick="toggleDebug('debugDateTime')" id='debugDateTime-btn' title='Toggle date/time debugging'>Toggle</button></div>
-        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all performance debug output (derived state: ON if any sub-category is ON)'>Performance: <span style='font-weight:bold;color:#667eea' id='debugPerfGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('performance')" id='debugPerfGroup-btn' title='Toggle all performance debugging'>Toggle All</button><button class='btn' onclick="togglePane('perf-details','perf-details-btn')" id='perf-details-btn' style='font-size:0.85rem'>Expand</button></div>
-        <div id='perf-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable stack watermark debug output'>Stack: <span style='font-weight:bold;color:#667eea' id='debugPerfStack-value'>-</span></span><button class='btn' onclick="toggleDebug('debugPerfStack')" id='debugPerfStack-btn' style='font-size:0.85rem' title='Toggle stack debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable heap usage debug output'>Heap: <span style='font-weight:bold;color:#667eea' id='debugPerfHeap-value'>-</span></span><button class='btn' onclick="toggleDebug('debugPerfHeap')" id='debugPerfHeap-btn' style='font-size:0.85rem' title='Toggle heap debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable timing debug output'>Timing: <span style='font-weight:bold;color:#667eea' id='debugPerfTiming-value'>-</span></span><button class='btn' onclick="toggleDebug('debugPerfTiming')" id='debugPerfTiming-btn' style='font-size:0.85rem' title='Toggle timing debugging'>Toggle</button></div>
-        </div>
-        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all automations debug output (derived state: ON if any sub-category is ON)'>Automations: <span style='font-weight:bold;color:#667eea' id='debugAutomationsGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('automations')" id='debugAutomationsGroup-btn' title='Toggle all automations debugging'>Toggle All</button><button class='btn' onclick="togglePane('automations-details','automations-details-btn')" id='automations-details-btn' style='font-size:0.85rem'>Expand</button></div>
-        <div id='automations-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable automations scheduler debug output'>Scheduler: <span style='font-weight:bold;color:#667eea' id='debugAutoScheduler-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAutoScheduler')" id='debugAutoScheduler-btn' style='font-size:0.85rem' title='Toggle scheduler debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable automations execution debug output'>Execution: <span style='font-weight:bold;color:#667eea' id='debugAutoExec-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAutoExec')" id='debugAutoExec-btn' style='font-size:0.85rem' title='Toggle execution debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable automations conditions debug output'>Conditions: <span style='font-weight:bold;color:#667eea' id='debugAutoCondition-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAutoCondition')" id='debugAutoCondition-btn' style='font-size:0.85rem' title='Toggle conditions debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable automations timing debug output'>Timing: <span style='font-weight:bold;color:#667eea' id='debugAutoTiming-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAutoTiming')" id='debugAutoTiming-btn' style='font-size:0.85rem' title='Toggle timing debugging'>Toggle</button></div>
-        </div>
-        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor logger internal diagnostics'>Logger Internals: <span style='font-weight:bold;color:#667eea' id='debugLogger-value'>-</span></span><button class='btn' onclick="toggleDebug('debugLogger')" id='debugLogger-btn' title='Toggle sensor logger diagnostics'>Toggle</button></div>
-        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable FM radio I2C transactions, task lifecycle, and RDS debug output'>FM Radio: <span style='font-weight:bold;color:#667eea' id='debugFmRadio-value'>-</span></span><button class='btn' onclick="toggleDebug('debugFmRadio')" id='debugFmRadio-btn' title='Toggle FM radio debugging'>Toggle</button></div>
       </div>
     </div>
     <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:6px;padding:1rem'>
@@ -666,8 +746,8 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         if (primary) __S.state.savedSSIDs.push(primary);
         if (list && list.length) __S.state.savedSSIDs = __S.state.savedSSIDs.concat(list);
         $('wifi-value').textContent = s.wifiAutoReconnect ? 'Enabled' : 'Disabled';
-        $('cli-value').textContent = s.cliHistorySize;
-        $('cli-input').value = s.cliHistorySize;
+        $('cli-value').textContent = s.webCliHistorySize;
+        $('cli-input').value = s.webCliHistorySize;
         $('wifi-btn').textContent = s.wifiAutoReconnect ? 'Disable' : 'Enable';
         $('espnow-value').textContent = s.espnowenabled ? 'Enabled' : 'Disabled';
         $('espnow-btn').textContent = s.espnowenabled ? 'Disable' : 'Enable';
@@ -1343,16 +1423,16 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     };
     console.log('[SETTINGS] toggleEspNow defined');
     
-    // Update CLI history size
-    window.updateCliHistory = function() {
-      console.log('[SETTINGS] updateCliHistory called');
+    // Update Web CLI history size
+    window.updateWebCliHistory = function() {
+      console.log('[SETTINGS] updateWebCliHistory called');
       var v = parseInt($('cli-input').value);
-      console.log('[SETTINGS] updateCliHistory value:', v);
+      console.log('[SETTINGS] updateWebCliHistory value:', v);
       if (v < 1) {
         alert('Must be at least 1');
         return;
       }
-      var cmd = 'clihistorysize ' + v;
+      var cmd = 'webclihistorysize ' + v;
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -1361,15 +1441,15 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       })
       .then(function(r) { return r.text(); })
       .then(function(t) {
-        console.log('[SETTINGS] updateCliHistory result:', t);
+        console.log('[SETTINGS] updateWebCliHistory result:', t);
         refreshSettings();
       })
       .catch(function(e) {
-        console.error('[SETTINGS] updateCliHistory error:', e);
+        console.error('[SETTINGS] updateWebCliHistory error:', e);
         alert('Error: ' + e.message);
       });
     };
-    console.log('[SETTINGS] updateCliHistory defined');
+    console.log('[SETTINGS] updateWebCliHistory defined');
     
     // Update memory sample interval
     window.updateMemorySampleInterval = function() {
@@ -2108,8 +2188,8 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
         if (ttm !== null) pushCmd('thermaltransitionms', ttm);
         var ttm2 = getInt('tofTransitionMs');
         if (ttm2 !== null) pushCmd('toftransitionms', ttm2);
-        var tmax = getInt('tofUiMaxDistanceMm');
-        if (tmax !== null) pushCmd('tofuimaxdistancemm', tmax);
+        var tmax = getInt('tofMaxDistanceMm');
+        if (tmax !== null) pushCmd('tofmaxdistancemm', tmax);
         
         // Thermal UI settings
         pushCmd('thermalpollingms', $('thermalPollingMs'));
@@ -2122,7 +2202,7 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
         pushCmd('tofpollingms', $('tofPollingMs'));
         pushCmd('tofstabilitythreshold', $('tofStabilityThreshold'));
         pushCmd('toftransitionms', $('tofTransitionMs'));
-        pushCmd('tofuimaxdistancemm', $('tofUiMaxDistanceMm'));
+        pushCmd('tofmaxdistancemm', $('tofMaxDistanceMm'));
         
         // IMU UI settings
         pushCmd('imupollingms', $('imuPollingMs'));

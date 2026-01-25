@@ -39,8 +39,12 @@
 #include "WebPage_Auth.h"
 #include "WebPage_Logging.h"
 #include "WebPage_Maps.h"
+#include "WebPage_Sensors.h"
 #include "WebPage_Settings.h"
-#include "WebPage_Waypoints.h"
+#include "System_EdgeImpulse.h"
+
+// Filesystem ready flag (defined in System_Filesystem.cpp)
+extern bool filesystemReady;
 
 // External dependencies from .ino
 extern httpd_handle_t server;
@@ -614,15 +618,15 @@ void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg) {
 extern void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason);
 extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*));
 extern void streamSensorsContent(httpd_req_t* req);
-extern void streamEspNowContent(httpd_req_t* req);
-extern void streamGamesContent(httpd_req_t* req);
 extern bool filesystemReady;
 extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
+#if ENABLE_AUTOMATION
 extern bool sanitizeAutomationsJson(String& json);
 extern void writeAutomationsJsonAtomic(const String& json);
-extern bool readText(const char* path, String& out);
 extern const char* AUTOMATIONS_JSON_FILE;
 extern bool gAutosDirty;
+#endif
+extern bool readText(const char* path, String& out);
 extern const char* buildSensorStatusJson();
 // gSensorStatusSeq declared below
 extern void streamDashboardContent(httpd_req_t* req);
@@ -1047,39 +1051,6 @@ void logAuthAttempt(bool success, const char* path, const String& userTried, con
   appendLineWithCap(logFile, line, LOG_CAP_BYTES);
 }
 
-// Streaming content for ESP-NOW page (moved from .ino)
-void streamEspNowContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "ESP-NOW", false, u, "espnow");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamEspNowInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
-}
-
-// Streaming content for Bluetooth page
-void streamBluetoothContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Bluetooth", false, u, "bluetooth");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamBluetoothInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
-}
-
-// Streaming content for Games page (moved from .ino)
-void streamGamesContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Games", false, u, "games");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamGamesInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
-}
-
 // Streaming content for Dashboard page (moved from .ino)
 void streamDashboardContent(httpd_req_t* req) {
   String u;
@@ -1134,16 +1105,6 @@ void streamAutomationsContent(httpd_req_t* req) {
   streamEndHtml(req);
 }
 
-void streamMapsContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Maps", false, u, "maps");
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamMapsInner(req);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-  streamEndHtml(req);
-}
-
 void streamCLIContent(httpd_req_t* req) {
   String u;
   isAuthed(req, u);
@@ -1152,45 +1113,6 @@ void streamCLIContent(httpd_req_t* req) {
   streamCLIInner(req, u);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
   streamEndHtml(req);
-}
-
-esp_err_t handleEspNowPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/espnow";
-  getClientIP(req, ctx.ip);
-  if (!tgRequireAuth(ctx)) return ESP_OK;  // 401 already sent
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
-  streamPageWithContent(req, "espnow", ctx.user, streamEspNowContent);
-  return ESP_OK;
-}
-
-esp_err_t handleBluetoothPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/bluetooth";
-  getClientIP(req, ctx.ip);
-  if (!tgRequireAuth(ctx)) return ESP_OK;  // 401 already sent
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
-  streamPageWithContent(req, "bluetooth", ctx.user, streamBluetoothContent);
-  return ESP_OK;
-}
-
-esp_err_t handleGamesPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/games";
-  getClientIP(req, ctx.ip);
-  if (!tgRequireAuth(ctx)) return ESP_OK;  // 401 already sent
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
-  streamPageWithContent(req, "games", ctx.user, streamGamesContent);
-  return ESP_OK;
 }
 
 // Read raw file contents as text/plain
@@ -1247,6 +1169,8 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   path.replace("%2F", "/");
   path.replace("%20", " ");
   DEBUG_STORAGEF("[handleFileRead] Decoded path: %s", path.c_str());
+
+  FsLockGuard fsGuard("handleFileRead");
 
   File f = LittleFS.open(path, "r");
   if (!f) {
@@ -1396,6 +1320,9 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   }
 
   DEBUG_STORAGEF("[handleFileWrite] Opening file for write: %s", name.c_str());
+
+  FsLockGuard fsGuard("handleFileWrite");
+
   File f = LittleFS.open(name, "w");
   if (!f) {
     ERROR_STORAGEF("Failed to open file for write: %s", name.c_str());
@@ -1419,6 +1346,7 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   f.close();
   DEBUG_STORAGEF("[handleFileWrite] File closed, wrote %d bytes in %d chunks", content.length(), writeChunks);
 
+#if ENABLE_AUTOMATION
   // Post-save hooks for specific files
   if (name == "/system/automations.json") {
     DEBUG_STORAGEF("[handleFileWrite] Automations.json detected, running post-save hooks");
@@ -1438,6 +1366,7 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
       DEBUG_STORAGEF("[handleFileWrite] WARNING: Failed to read back automations.json");
     }
   }
+#endif
 
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
@@ -1477,14 +1406,44 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  const size_t kMaxUpload = 700 * 1024;  // bytes on wire (server-side headroom)
+  // Base64 encoding adds ~33% overhead, plus URL encoding. Allow up to 3.5MB on wire for ~2.5MB actual files.
+  // Maps are loaded fully into PSRAM, so limit size to leave room for other allocations.
+  const size_t kMaxUpload = 3584 * 1024;  // 3.5MB on wire = ~2.5MB actual
   size_t contentLen = req->content_len;
-  DEBUG_STORAGEF("[handleFileUpload] Content-Length: %d bytes (max: %d), heap=%u", contentLen, kMaxUpload, (unsigned)ESP.getFreeHeap());
+
+  // Check available storage space FIRST - more helpful error message
+  size_t totalBytes = 0;
+  size_t usedBytes = 0;
+  {
+    FsLockGuard fsGuard("handleFileUpload.stats");
+    totalBytes = LittleFS.totalBytes();
+    usedBytes = LittleFS.usedBytes();
+  }
+  size_t freeBytes = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
+  // Estimate actual file size from content length (remove ~33% base64 overhead)
+  size_t estimatedFileSize = (contentLen * 3) / 4;
+  
+  DEBUG_STORAGEF("[handleFileUpload] Content-Length: %d bytes (est file: %d), free space: %d, heap=%u", 
+                 contentLen, estimatedFileSize, freeBytes, (unsigned)ESP.getFreeHeap());
+  
+  // Check storage space first - give more specific error
+  if (estimatedFileSize > freeBytes) {
+    DEBUG_STORAGEF("[handleFileUpload] ERROR: Insufficient storage space");
+    gSensorPollingPaused = wasPaused;
+    httpd_resp_set_type(req, "application/json");
+    char errBuf[128];
+    snprintf(errBuf, sizeof(errBuf), 
+             "{\"success\":false,\"error\":\"Not enough space. File ~%.1fMB, free %.1fMB\"}", 
+             estimatedFileSize / (1024.0 * 1024.0), freeBytes / (1024.0 * 1024.0));
+    httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  
   if (contentLen > kMaxUpload) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Request too large");
     gSensorPollingPaused = wasPaused;
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"File too large (max 500KB)\"}", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"File too large (max ~2.5MB)\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
 
@@ -1520,18 +1479,13 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   size_t outLen = 0;
   size_t totalWritten = 0;
 
-  // Track free space to abort if we exceed available FS space
-  size_t freeLimit = 0;
-  {
-    size_t totalBytes = LittleFS.totalBytes();
-    size_t usedBytes = LittleFS.usedBytes();
-    freeLimit = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
-    DEBUG_STORAGEF("[handleFileUpload] FS free space at start: %d bytes", (int)freeLimit);
-  }
+  // Track free space to abort if we exceed available FS space (already computed above)
+  size_t freeLimit = freeBytes;
   bool outOfSpace = false;
 
   File file;
   bool fileOpen = false;
+  bool fsLockedForUpload = false;
 
   auto flushWrite = [&]() {
     if (outLen && fileOpen) {
@@ -1592,10 +1546,27 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       DEBUG_STORAGEF("[handleFileUpload] ERROR: Invalid or protected path: %s", path.c_str());
       return false;
     }
+    // Auto-create parent directory if it doesn't exist
+    int lastSlash = path.lastIndexOf('/');
+    if (lastSlash > 0) {
+      String parentDir = path.substring(0, lastSlash);
+      {
+        FsLockGuard fsGuard("handleFileUpload.mkdir");
+        if (!LittleFS.exists(parentDir)) {
+          DEBUG_STORAGEF("[handleFileUpload] Creating parent directory: %s", parentDir.c_str());
+          LittleFS.mkdir(parentDir);
+        }
+      }
+    }
     DEBUG_STORAGEF("[handleFileUpload] Opening file for write: %s", path.c_str());
+
+    fsLock("handleFileUpload.file");
+    fsLockedForUpload = true;
     file = LittleFS.open(path, "w");
     if (!file) {
       ERROR_STORAGEF("Failed to open file for write: %s", path.c_str());
+      fsUnlock();
+      fsLockedForUpload = false;
       return false;
     }
     fileOpen = true;
@@ -1630,6 +1601,10 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
       DEBUG_STORAGEF("[handleFileUpload] Recv error %d", ret);
       if (fileOpen) file.close();
+      if (fsLockedForUpload) {
+        fsUnlock();
+        fsLockedForUpload = false;
+      }
       free(uploadOutBuf);
       free(uploadRecvBuf);
       gSensorPollingPaused = wasPaused;
@@ -1643,8 +1618,9 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
     for (int i = 0; i < ret; i++) {
       // Yield every 64 bytes to prevent WDT timeout during base64 decoding
+      // Use delay(0) instead of taskYIELD() to ensure IDLE task runs and feeds watchdog
       if ((i & 0x3F) == 0) {
-        taskYIELD();
+        delay(0);
       }
       
       char c = buf[i];
@@ -1779,7 +1755,14 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       file.close();
       fileOpen = false;
     }
-    LittleFS.remove(path);
+    {
+      FsLockGuard fsGuard("handleFileUpload.cleanup");
+      LittleFS.remove(path);
+    }
+    if (fsLockedForUpload) {
+      fsUnlock();
+      fsLockedForUpload = false;
+    }
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Insufficient storage space during write (wrote %d / free %d)", (int)totalWritten, (int)freeLimit);
     free(uploadOutBuf);
     free(uploadRecvBuf);
@@ -1788,7 +1771,12 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     httpd_resp_send(req, "{\"success\":false,\"error\":\"Insufficient storage space\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
+
   if (fileOpen) file.close();
+  if (fsLockedForUpload) {
+    fsUnlock();
+    fsLockedForUpload = false;
+  }
 
   // Free PSRAM buffers
   free(uploadOutBuf);
@@ -1796,13 +1784,55 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   DEBUG_STORAGEF("[handleFileUpload] COMPLETE: wrote %d bytes to '%s' (binary=%s), heap delta=%d, dur=%u ms",
                  (int)totalWritten, path.c_str(), isBinary ? "true" : "false", (int)ESP.getFreeHeap() - (int)heapStart, (unsigned)(millis() - tStart));
+  
+  // Always print upload completion to serial for visibility
+  Serial.printf("[UPLOAD] %s: %d bytes written in %u ms\n", path.c_str(), (int)totalWritten, (unsigned)(millis() - tStart));
 
+#if ENABLE_AUTOMATION
   // Post-save hook: keep existing behavior for automations.json (read/validate)
   if (path == "/system/automations.json") {
     String json;
     if (readText(AUTOMATIONS_JSON_FILE, json)) {
       if (sanitizeAutomationsJson(json)) writeAutomationsJsonAtomic(json);
       else DEBUG_STORAGEF("[handleFileUpload] automations.json OK");
+    }
+  }
+#endif
+
+  // Post-save hook: auto-organize maps uploaded ANYWHERE on the filesystem
+  // Detect maps by extension OR magic bytes (HWMP), move to /maps/<base>/<base>.hwmap
+  // (stubs return false when ENABLE_MAPS=0)
+  {
+    bool isMapByExt = path.endsWith(".hwmap");
+    bool isMapByMagic = false;
+    if (!isMapByExt && !path.endsWith(".json")) {
+      isMapByMagic = isMapFileByMagic(path);
+    }
+    if (isMapByExt || isMapByMagic) {
+      String err;
+      bool ok = organizeMapFromAnyPath(path, err);
+      if (!ok) {
+        DEBUG_STORAGEF("[handleFileUpload] Map organize failed for %s: %s", path.c_str(), err.c_str());
+      } else {
+        DEBUG_STORAGEF("[handleFileUpload] Map organized from %s", path.c_str());
+      }
+    }
+  }
+
+  // Post-save hook: if legacy waypoint JSON uploaded into /maps root, place it into the map folder if possible.
+  // Expected legacy name: /maps/waypoints_<mapFileName>.json
+  if (path.startsWith("/maps/waypoints_") && path.endsWith(".json")) {
+    String fn = path;
+    if (fn.startsWith("/maps/")) fn = fn.substring(6);
+    if (fn.startsWith("/")) fn = fn.substring(1);
+    if (fn.indexOf('/') == -1) {
+      String err;
+      bool ok = tryOrganizeLegacyWaypointsAtRoot(fn, err);
+      if (!ok) {
+        DEBUG_STORAGEF("[handleFileUpload] Waypoints organize skipped/failed for %s: %s", fn.c_str(), err.c_str());
+      } else {
+        DEBUG_STORAGEF("[handleFileUpload] Waypoints organized: %s", fn.c_str());
+      }
     }
   }
 
@@ -1919,6 +1949,13 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
   getClientIP(req, ctx.ip);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
+  // Check buffer is allocated
+  if (!gJsonResponseBuffer) {
+    WARN_WEBF("[handleSettingsSchema] JSON response buffer not allocated");
+    httpd_resp_send_500(req);
+    return ESP_FAIL;
+  }
+
   // Lock shared JSON response buffer (longer timeout since this may race with settings fetch)
   if (xSemaphoreTake(gJsonResponseMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
     WARN_WEBF("[handleSettingsSchema] Mutex timeout - another request holding buffer");
@@ -1933,9 +1970,16 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
   size_t modCount = 0;
   const SettingsModule** mods = getSettingsModules(modCount);
   
+  DEBUG_HTTPF("[Schema] Building schema for %zu modules", modCount);
+  
   for (size_t m = 0; m < modCount; m++) {
     const SettingsModule* mod = mods[m];
-    if (!mod) continue;
+    if (!mod) {
+      WARN_WEBF("[Schema] Module %zu is null", m);
+      continue;
+    }
+    
+    DEBUG_HTTPF("[Schema] Processing module: %s (%zu entries)", mod->name, mod->count);
     
     JsonObject modObj = modules.add<JsonObject>();
     modObj["name"] = mod->name;
@@ -1952,6 +1996,10 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
     JsonArray entries = modObj["entries"].to<JsonArray>();
     for (size_t i = 0; i < mod->count; i++) {
       const SettingEntry* e = &mod->entries[i];
+      if (!e || !e->jsonKey) {
+        WARN_WEBF("[Schema] Module %s entry %zu has null jsonKey", mod->name, i);
+        continue;
+      }
       JsonObject entry = entries.add<JsonObject>();
       entry["key"] = e->jsonKey;
       entry["label"] = e->label ? e->label : e->jsonKey;
@@ -1989,20 +2037,27 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
   
   doc["count"] = modCount;
 
+  DEBUG_HTTPF("[Schema] Serializing schema JSON...");
+
   // Serialize to buffer
   size_t len = serializeJson(doc, gJsonResponseBuffer, JSON_RESPONSE_SIZE);
   
+  DEBUG_HTTPF("[Schema] Serialized %zu bytes (buffer size: %u)", len, (unsigned)JSON_RESPONSE_SIZE);
+  
   if (len == 0 || len >= JSON_RESPONSE_SIZE) {
+    WARN_WEBF("[Schema] Serialization failed or buffer overflow: %zu >= %u", len, (unsigned)JSON_RESPONSE_SIZE);
     xSemaphoreGive(gJsonResponseMutex);
     httpd_resp_send_500(req);
     return ESP_FAIL;
   }
 
+  DEBUG_HTTPF("[Schema] Sending schema response (%zu bytes)", len);
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
   httpd_resp_send(req, gJsonResponseBuffer, len);
 
   xSemaphoreGive(gJsonResponseMutex);
+  DEBUG_HTTPF("[Schema] Schema response sent successfully");
   return ESP_OK;
 }
 
@@ -2626,6 +2681,7 @@ esp_err_t handleCLIPage(httpd_req_t* req) {
   return ESP_OK;
 }
 
+#if ENABLE_AUTOMATION
 // Automations page handler (authenticated for all users)
 esp_err_t handleAutomationsPage(httpd_req_t* req) {
   AuthContext ctx;
@@ -2663,6 +2719,7 @@ esp_err_t handleAutomationsGet(httpd_req_t* req) {
   httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
+#endif
 
 esp_err_t handleFilesPage(httpd_req_t* req) {
   AuthContext ctx;
@@ -2687,19 +2744,6 @@ esp_err_t handleLoggingPage(httpd_req_t* req) {
   logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
 
   streamPageWithContent(req, "logging", ctx.user, streamLoggingContent);
-  return ESP_OK;
-}
-
-esp_err_t handleMapsPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/maps";
-  getClientIP(req, ctx.ip);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
-  streamPageWithContent(req, "maps", ctx.user, streamMapsContent);
   return ESP_OK;
 }
 
@@ -3376,7 +3420,15 @@ esp_err_t handleFileView(httpd_req_t* req) {
     // Header and toolbar
     httpd_resp_send_chunk(req, "<!DOCTYPE html><html><head><title>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, filename.c_str(), filename.length());
-    httpd_resp_send_chunk(req, "</title><style>body{font-family:monospace;margin:20px;background:#f5f5f5;font-size:14px;}pre{background:white;padding:15px;border-radius:5px;border:1px solid #ddd;overflow-x:auto;font-size:14px;line-height:1.4;} .bar{margin:8px 0 12px 0} .btn{display:inline-block;padding:4px 8px;border:1px solid #ccc;border-radius:4px;background:#fff;color:#000;text-decoration:none;margin-right:6px} .btn.active{background:#e9ecef;}</style></head><body><h2>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</title><style>"
+      ":root{--bg:#f5f5f5;--fg:#333;--pre-bg:white;--pre-border:#ddd;--btn-bg:#fff;--btn-border:#ccc;--btn-active:#e9ecef}"
+      "@media(prefers-color-scheme:dark){:root{--bg:#1a1a2e;--fg:#f0f0f0;--pre-bg:#16213e;--pre-border:#374151;--btn-bg:#374151;--btn-border:#4b5563;--btn-active:#4b5563}}"
+      "body{font-family:monospace;margin:20px;background:var(--bg);color:var(--fg);font-size:14px}"
+      "pre{background:var(--pre-bg);color:var(--fg);padding:15px;border-radius:5px;border:1px solid var(--pre-border);overflow-x:auto;font-size:14px;line-height:1.4}"
+      ".bar{margin:8px 0 12px 0}"
+      ".btn{display:inline-block;padding:4px 8px;border:1px solid var(--btn-border);border-radius:4px;background:var(--btn-bg);color:var(--fg);text-decoration:none;margin-right:6px}"
+      ".btn.active{background:var(--btn-active)}"
+      "</style></head><body><h2>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, displayName.c_str(), displayName.length());
     String base = String("/api/files/view?name=") + filename;
     String prettyHref = base + "&mode=pretty";
@@ -3505,6 +3557,9 @@ esp_err_t handleFileView(httpd_req_t* req) {
   uint32_t tVStart = millis();
   DEBUG_STORAGEF("[handleFileView] Non-JSON path=%s, heap=%u", path.c_str(), (unsigned)ESP.getFreeHeap());
 
+  // Serialize file operations to prevent concurrent access crashes
+  FsLockGuard fsLock("handleFileView");
+
   if (!LittleFS.exists(path)) {
     DEBUG_STORAGEF("[handleFileView] ERROR: File does not exist: %s", path.c_str());
     gSensorPollingPaused = wasPaused;
@@ -3526,8 +3581,16 @@ esp_err_t handleFileView(httpd_req_t* req) {
   size_t fileSize = file.size();
   DEBUG_STORAGEF("[handleFileView] File opened, size: %d bytes, heap=%u", fileSize, (unsigned)ESP.getFreeHeap());
 
+  // Extract filename from path for Content-Disposition header
+  String dispFilename = path;
+  int lastSlash = path.lastIndexOf('/');
+  if (lastSlash >= 0) dispFilename = path.substring(lastSlash + 1);
+  
   // Check if it's an image file
   bool isImage = path.endsWith(".jpg") || path.endsWith(".jpeg") || path.endsWith(".png") || path.endsWith(".gif") || path.endsWith(".bmp") || path.endsWith(".webp") || path.endsWith(".ico") || path.endsWith(".svg");
+  
+  // Check if it's a binary download file (e.g., .hwmap)
+  bool isBinaryDownload = path.endsWith(".hwmap");
 
   // Allocate streaming buffer from PSRAM for better throughput
   const size_t VIEW_BUF_SIZE = 4096;  // 4KB instead of 512 bytes
@@ -3578,6 +3641,35 @@ esp_err_t handleFileView(httpd_req_t* req) {
     free(viewBuf);
     httpd_resp_send_chunk(req, NULL, 0);
     DEBUG_STORAGEF("[handleFileView] Image sent: %d bytes in %d chunks, dur=%u ms", totalSent, chunkCount, (unsigned)(millis() - tVStart));
+    gSensorPollingPaused = wasPaused;
+    return ESP_OK;
+  }
+
+  // Binary download files (e.g., .hwmap) - serve with Content-Disposition for proper filename
+  if (isBinaryDownload) {
+    DEBUG_STORAGEF("[handleFileView] Binary download file detected: %s", dispFilename.c_str());
+    httpd_resp_set_type(req, "application/octet-stream");
+    String disposition = "attachment; filename=\"" + dispFilename + "\"";
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
+
+    // Stream binary data in chunks
+    size_t totalSent = 0;
+    int chunkCount = 0;
+    while (true) {
+      size_t n = file.readBytes(viewBuf, VIEW_BUF_SIZE);
+      if (n == 0) break;
+      chunkCount++;
+      totalSent += n;
+      httpd_resp_send_chunk(req, viewBuf, n);
+      if ((chunkCount % 8) == 0) {
+        DEBUG_STORAGEF("[handleFileView] Streamed %d bytes in %d chunks (heap=%u)", totalSent, chunkCount, (unsigned)ESP.getFreeHeap());
+        delay(0);  // avoid WDT while streaming
+      }
+    }
+    file.close();
+    free(viewBuf);
+    httpd_resp_send_chunk(req, NULL, 0);
+    DEBUG_STORAGEF("[handleFileView] Binary file sent: %d bytes in %d chunks, dur=%u ms", totalSent, chunkCount, (unsigned)(millis() - tVStart));
     gSensorPollingPaused = wasPaused;
     return ESP_OK;
   }
@@ -3980,6 +4072,7 @@ esp_err_t handleAdminDenyUser(httpd_req_t* req) {
   return ESP_OK;
 }
 
+#if ENABLE_AUTOMATION
 // ============================================================================
 // Automation Export Handler (Batch 5 - migrated from .ino)
 // ============================================================================
@@ -4082,6 +4175,7 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
   httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
+#endif // ENABLE_AUTOMATION
 
 // ============================================================================
 // SSE Notice Queue Helpers (moved from HardwareOnev2.1.ino)
@@ -4161,6 +4255,9 @@ void startHttpServer() {
   config.max_uri_handlers = 100;
   config.lru_purge_enable = true;
   config.stack_size = 8192;  // Increase from default 4KB to 8KB to prevent stack overflow
+  config.recv_wait_timeout = 30;  // 30 second timeout for large uploads
+  config.send_wait_timeout = 30;  // 30 second timeout for large responses
+  // Note: max header length is set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig
   if (httpd_start(&server, &config) != ESP_OK) {
     broadcastOutput("ERROR: Failed to start HTTP server");
     return;
@@ -4194,28 +4291,20 @@ void startHttpServer() {
   static httpd_uri_t iconGet = { .uri = "/api/icon", .method = HTTP_GET, .handler = handleIconGet, .user_ctx = NULL };
   static httpd_uri_t iconTestPage = { .uri = "/icons/test", .method = HTTP_GET, .handler = handleIconTestPage, .user_ctx = NULL };
   static httpd_uri_t loggingPage = { .uri = "/logging", .method = HTTP_GET, .handler = handleLoggingPage, .user_ctx = NULL };
-  static httpd_uri_t mapsPage = { .uri = "/maps", .method = HTTP_GET, .handler = handleMapsPage, .user_ctx = NULL };
-  static httpd_uri_t mapFeaturesGet = { .uri = "/api/maps/features", .method = HTTP_GET, .handler = handleMapFeaturesAPI, .user_ctx = NULL };
-  static httpd_uri_t waypointsGet = { .uri = "/api/waypoints", .method = HTTP_GET, .handler = handleWaypointsAPI, .user_ctx = NULL };
-  static httpd_uri_t waypointsPost = { .uri = "/api/waypoints", .method = HTTP_POST, .handler = handleWaypointsAPI, .user_ctx = NULL };
   static httpd_uri_t cliPage = { .uri = "/cli", .method = HTTP_GET, .handler = handleCLIPage, .user_ctx = NULL };
   static httpd_uri_t cliCmd = { .uri = "/api/cli", .method = HTTP_POST, .handler = handleCLICommand, .user_ctx = NULL };
   static httpd_uri_t logsGet = { .uri = "/api/cli/logs", .method = HTTP_GET, .handler = handleLogs, .user_ctx = NULL };
-  static httpd_uri_t sensorsPage = { .uri = "/sensors", .method = HTTP_GET, .handler = handleSensorsPage, .user_ctx = NULL };
-  static httpd_uri_t bluetoothPage = { .uri = "/bluetooth", .method = HTTP_GET, .handler = handleBluetoothPage, .user_ctx = NULL };
-  static httpd_uri_t espnowPage = { .uri = "/espnow", .method = HTTP_GET, .handler = handleEspNowPage, .user_ctx = NULL };
-  static httpd_uri_t espnowMessages = { .uri = "/api/espnow/messages", .method = HTTP_GET, .handler = handleEspNowMessages, .user_ctx = NULL };
-  static httpd_uri_t gamesPage = { .uri = "/games", .method = HTTP_GET, .handler = handleGamesPage, .user_ctx = NULL };
+#if ENABLE_AUTOMATION
   static httpd_uri_t automationsPage = { .uri = "/automations", .method = HTTP_GET, .handler = handleAutomationsPage, .user_ctx = NULL };
-  static httpd_uri_t sensorData = { .uri = "/api/sensors", .method = HTTP_GET, .handler = handleSensorData, .user_ctx = NULL };
-  static httpd_uri_t sensorsStatus = { .uri = "/api/sensors/status", .method = HTTP_GET, .handler = handleSensorsStatusWithUpdates, .user_ctx = NULL };
-  static httpd_uri_t remoteSensors = { .uri = "/api/sensors/remote", .method = HTTP_GET, .handler = handleRemoteSensors, .user_ctx = NULL };
+#endif
   static httpd_uri_t systemStatus = { .uri = "/api/system", .method = HTTP_GET, .handler = handleSystemStatus, .user_ctx = NULL };
   // Sessions (admin)
   static httpd_uri_t sessionsList = { .uri = "/api/sessions", .method = HTTP_GET, .handler = handleSessionsList, .user_ctx = NULL };
   static httpd_uri_t adminSessionsList = { .uri = "/api/admin/sessions", .method = HTTP_GET, .handler = handleAdminSessionsList, .user_ctx = NULL };
+#if ENABLE_AUTOMATION
   static httpd_uri_t automationsGet = { .uri = "/api/automations", .method = HTTP_GET, .handler = handleAutomationsGet, .user_ctx = NULL };
   static httpd_uri_t automationsExport = { .uri = "/api/automations/export", .method = HTTP_GET, .handler = handleAutomationsExport, .user_ctx = NULL };
+#endif
   static httpd_uri_t outputGet = { .uri = "/api/output", .method = HTTP_GET, .handler = handleOutputGet, .user_ctx = NULL };
   static httpd_uri_t outputTemp = { .uri = "/api/output/temp", .method = HTTP_POST, .handler = handleOutputTemp, .user_ctx = NULL };
   static httpd_uri_t regPage = { .uri = "/register", .method = HTTP_GET, .handler = handleRegisterPage, .user_ctx = NULL };
@@ -4251,35 +4340,29 @@ void startHttpServer() {
   httpd_register_uri_handler(server, &iconGet);
   httpd_register_uri_handler(server, &iconTestPage);
   httpd_register_uri_handler(server, &loggingPage);
-  httpd_register_uri_handler(server, &mapsPage);
-  httpd_register_uri_handler(server, &mapFeaturesGet);
-  httpd_register_uri_handler(server, &waypointsGet);
-  httpd_register_uri_handler(server, &waypointsPost);
+  registerMapsHandlers(server);
+  registerEdgeImpulseHandlers(server);
   httpd_register_uri_handler(server, &cliPage);
   httpd_register_uri_handler(server, &cliCmd);
   httpd_register_uri_handler(server, &logsGet);
-  httpd_register_uri_handler(server, &sensorsPage);
-  httpd_register_uri_handler(server, &bluetoothPage);
-  httpd_register_uri_handler(server, &espnowPage);
-  httpd_register_uri_handler(server, &espnowMessages);
-  httpd_register_uri_handler(server, &gamesPage);
   
-  // Register sensor API endpoints only if I2C sensors are runtime enabled
-  if (gSettings.i2cSensorsEnabled) {
-    httpd_register_uri_handler(server, &sensorData);
-    httpd_register_uri_handler(server, &sensorsStatus);
-  }
-  // Remote sensors endpoint always available (shows ESP-NOW status)
-  httpd_register_uri_handler(server, &remoteSensors);
+  // Module registration functions (sensors, bluetooth, esp-now, games)
+  registerSensorHandlers(server);
+  registerBluetoothHandlers(server);
+  registerEspNowHandlers(server);
+  registerGamesHandlers(server);
+  
   // SSE events endpoint for server-driven notices
   httpd_register_uri_handler(server, &apiEvents);
   httpd_register_uri_handler(server, &systemStatus);
   // Sessions endpoints
   httpd_register_uri_handler(server, &sessionsList);
   httpd_register_uri_handler(server, &adminSessionsList);
+#if ENABLE_AUTOMATION
   httpd_register_uri_handler(server, &automationsPage);
   httpd_register_uri_handler(server, &automationsGet);
   httpd_register_uri_handler(server, &automationsExport);
+#endif
   httpd_register_uri_handler(server, &outputGet);
   httpd_register_uri_handler(server, &outputTemp);
   httpd_register_uri_handler(server, &regPage);
@@ -4296,220 +4379,5 @@ void startHttpServer() {
 }
 
 // Web Mirror Buffer moved to WebCore_Utils.cpp
-
-// ============================================================================
-// ESP-NOW API Endpoints (merged from web_espnow_api.cpp)
-// ============================================================================
-
-#if ENABLE_ESPNOW
-
-#include "System_ESPNow.h"
-#include "System_MemUtil.h"
-
-extern EspNowState* gEspNow;
-
-static inline esp_err_t webEspnowSendChunk(httpd_req_t* req, const char* s) {
-  return httpd_resp_send_chunk(req, s, HTTPD_RESP_USE_STRLEN);
-}
-
-static inline esp_err_t webEspnowSendChunkf(httpd_req_t* req, const char* fmt, ...) {
-  char buf[192];
-  va_list args;
-  va_start(args, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, args);
-  va_end(args);
-  return httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
-}
-
-static esp_err_t webEspnowSendJsonEscapedString(httpd_req_t* req, const char* s) {
-  esp_err_t err = webEspnowSendChunk(req, "\"");
-  if (err != ESP_OK) return err;
-
-  char out[128];
-  size_t outLen = 0;
-
-  auto flush = [&]() -> esp_err_t {
-    if (outLen == 0) return ESP_OK;
-    out[outLen] = '\0';
-    esp_err_t e = httpd_resp_send_chunk(req, out, outLen);
-    outLen = 0;
-    return e;
-  };
-
-  for (const char* p = s; p && *p; ++p) {
-    const unsigned char c = (unsigned char)(*p);
-    const char* seq = nullptr;
-    char tmp[8];
-    size_t seqLen = 0;
-
-    switch (c) {
-      case '\\': seq = "\\\\"; seqLen = 2; break;
-      case '"': seq = "\\\""; seqLen = 2; break;
-      case '\b': seq = "\\b"; seqLen = 2; break;
-      case '\f': seq = "\\f"; seqLen = 2; break;
-      case '\n': seq = "\\n"; seqLen = 2; break;
-      case '\r': seq = "\\r"; seqLen = 2; break;
-      case '\t': seq = "\\t"; seqLen = 2; break;
-      default:
-        if (c < 0x20) {
-          snprintf(tmp, sizeof(tmp), "\\u%04X", (unsigned)c);
-          seq = tmp;
-          seqLen = 6;
-        } else {
-          tmp[0] = (char)c;
-          tmp[1] = '\0';
-          seq = tmp;
-          seqLen = 1;
-        }
-        break;
-    }
-
-    if (seqLen >= sizeof(out)) {
-      err = flush();
-      if (err != ESP_OK) return err;
-      err = httpd_resp_send_chunk(req, seq, seqLen);
-      if (err != ESP_OK) return err;
-      continue;
-    }
-
-    if (outLen + seqLen > (sizeof(out) - 1)) {
-      err = flush();
-      if (err != ESP_OK) return err;
-    }
-    memcpy(out + outLen, seq, seqLen);
-    outLen += seqLen;
-  }
-
-  err = flush();
-  if (err != ESP_OK) return err;
-  return webEspnowSendChunk(req, "\"");
-}
-
-/**
- * @brief Fetch received ESP-NOW text messages since lastSeq
- * @param req HTTP request (query param: ?since=<seqNum>)
- * @return ESP_OK
- * 
- * Returns JSON array of messages:
- * {
- *   "messages": [
- *     {"seq":123,"mac":"XX:XX:XX:XX:XX:XX","name":"device","msg":"text","enc":true,"ts":12345},
- *     ...
- *   ]
- * }
- */
-esp_err_t handleEspNowMessages(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/espnow/messages";
-  getClientIP(req, ctx.ip);
-  
-  if (!tgRequireAuth(ctx)) {
-    return ESP_OK;
-  }
-  
-  httpd_resp_set_type(req, "application/json");
-  
-  // Check if ESP-NOW is initialized
-  if (!gEspNow || !gEspNow->initialized) {
-    httpd_resp_send(req, "{\"messages\":[]}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  
-  // Parse query parameters: ?since=<seqNum>&mac=<MAC_ADDRESS>
-  uint32_t sinceSeq = 0;
-  uint8_t filterMac[6] = {0};
-  bool hasMacFilter = false;
-  
-  char queryBuf[128];
-  if (httpd_req_get_url_query_str(req, queryBuf, sizeof(queryBuf)) == ESP_OK) {
-    char paramBuf[32];
-    
-    // Parse 'since' parameter
-    if (httpd_query_key_value(queryBuf, "since", paramBuf, sizeof(paramBuf)) == ESP_OK) {
-      sinceSeq = (uint32_t)strtoul(paramBuf, nullptr, 10);
-    }
-    
-    // Parse optional 'mac' parameter for per-device filtering
-    if (httpd_query_key_value(queryBuf, "mac", paramBuf, sizeof(paramBuf)) == ESP_OK) {
-      // Parse MAC address (format: AA:BB:CC:DD:EE:FF or AABBCCDDEEFF)
-      if (strlen(paramBuf) >= 12) {
-        hasMacFilter = true;
-        sscanf(paramBuf, "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
-               &filterMac[0], &filterMac[1], &filterMac[2],
-               &filterMac[3], &filterMac[4], &filterMac[5]);
-      }
-    }
-  }
-  
-  // Allocate temporary buffer for messages (max 100 messages)
-  ReceivedTextMessage* messages = (ReceivedTextMessage*)ps_alloc(sizeof(ReceivedTextMessage) * 100,
-                                                                AllocPref::PreferPSRAM,
-                                                                "web.esnow.msgs");
-  if (!messages) {
-    httpd_resp_send(req, "{\"messages\":[]}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  
-  // Get messages from per-device buffers
-  int msgCount = 0;
-  if (hasMacFilter) {
-    // Get messages from specific peer
-    msgCount = getPeerMessages(filterMac, messages, 100, sinceSeq);
-  } else {
-    // Get all messages from all peers
-    msgCount = getAllMessages(messages, 100, sinceSeq);
-  }
-
-  esp_err_t err = webEspnowSendChunk(req, "{\"messages\":[");
-  for (int i = 0; i < msgCount && err == ESP_OK; i++) {
-    ReceivedTextMessage& msg = messages[i];
-
-    char macStr[18];
-    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             msg.senderMac[0], msg.senderMac[1], msg.senderMac[2],
-             msg.senderMac[3], msg.senderMac[4], msg.senderMac[5]);
-
-    if (i > 0) err = webEspnowSendChunk(req, ",");
-    if (err != ESP_OK) break;
-
-    err = webEspnowSendChunk(req, "{");
-    if (err != ESP_OK) break;
-
-    err = webEspnowSendChunkf(req, "\"seq\":%lu,", (unsigned long)msg.seqNum);
-    if (err != ESP_OK) break;
-    err = webEspnowSendChunkf(req, "\"mac\":\"%s\",", macStr);
-    if (err != ESP_OK) break;
-
-    err = webEspnowSendChunk(req, "\"name\":");
-    if (err != ESP_OK) break;
-    err = webEspnowSendJsonEscapedString(req, msg.senderName);
-    if (err != ESP_OK) break;
-    err = webEspnowSendChunk(req, ",\"msg\":");
-    if (err != ESP_OK) break;
-    err = webEspnowSendJsonEscapedString(req, msg.message);
-    if (err != ESP_OK) break;
-
-    err = webEspnowSendChunkf(req, ",\"enc\":%s", msg.encrypted ? "true" : "false");
-    if (err != ESP_OK) break;
-    err = webEspnowSendChunkf(req, ",\"ts\":%lu", (unsigned long)msg.timestamp);
-    if (err != ESP_OK) break;
-    err = webEspnowSendChunkf(req, ",\"type\":%d", (int)msg.msgType);
-    if (err != ESP_OK) break;
-
-    err = webEspnowSendChunk(req, "}");
-  }
-
-  free(messages);
-
-  if (err == ESP_OK) {
-    err = webEspnowSendChunk(req, "]}");
-  }
-  httpd_resp_send_chunk(req, NULL, 0);
-  return err;
-}
-
-#endif // ENABLE_ESPNOW
 
 #endif // ENABLE_HTTP_SERVER

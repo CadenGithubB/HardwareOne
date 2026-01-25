@@ -66,6 +66,12 @@ enum OLEDKeyboardMode {
   KEYBOARD_MODE_COUNT = 3
 };
 
+// Autocomplete provider callback types
+// Returns number of suggestions found, fills results array (up to maxResults)
+// Each result is a null-terminated string pointer (must remain valid until next call)
+#define OLED_KEYBOARD_MAX_SUGGESTIONS 8
+typedef int (*OLEDKeyboardAutocompleteFunc)(const char* input, const char** results, int maxResults, void* userData);
+
 struct OLEDKeyboardState {
   char text[OLED_KEYBOARD_MAX_LENGTH + 1];
   int textLength;
@@ -77,6 +83,14 @@ struct OLEDKeyboardState {
   bool completed;
   String title;
   int maxLength;
+  
+  // Autocomplete system (triggered by Select button)
+  OLEDKeyboardAutocompleteFunc autocompleteFunc;
+  void* autocompleteUserData;
+  bool showingSuggestions;
+  const char* suggestions[OLED_KEYBOARD_MAX_SUGGESTIONS];
+  int suggestionCount;
+  int selectedSuggestion;
 };
 
 extern const char OLED_KEYBOARD_CHARS_UPPER[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
@@ -101,6 +115,17 @@ void oledKeyboardBackspace();
 void oledKeyboardComplete();
 void oledKeyboardCancel();
 void oledKeyboardToggleMode();
+
+// Autocomplete support (Select button triggers suggestions)
+void oledKeyboardSetAutocomplete(OLEDKeyboardAutocompleteFunc func, void* userData = nullptr);
+void oledKeyboardTriggerAutocomplete();
+void oledKeyboardSelectSuggestion();
+void oledKeyboardDismissSuggestions();
+bool oledKeyboardShowingSuggestions();
+
+typedef void (*OLEDConfirmCallback)(void* userData);
+bool oledConfirmRequest(const char* line1, const char* line2, OLEDConfirmCallback onYes, void* userData, bool defaultYes = true);
+bool oledConfirmIsActive();
 
 // ============= Shared Command Execution =============
 // Execute a CLI command with OLED display authentication context
