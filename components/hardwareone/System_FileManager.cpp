@@ -8,6 +8,7 @@
 #include "System_FileManager.h"
 #include "System_Filesystem.h"
 #include "System_Mutex.h"
+#include "System_VFS.h"
 
 // Global instance (optional)
 FileManager* gFileManager = nullptr;
@@ -32,10 +33,10 @@ bool FileManager::navigate(const char* path) {
 
   FsLockGuard guard("FileManager.navigate");
   
-  // Check if directory exists
-  if (!LittleFS.exists(path)) return false;
+  // Check if directory exists (use VFS for unified access)
+  if (!VFS::exists(path)) return false;
   
-  File dir = LittleFS.open(path);
+  File dir = VFS::open(path, "r");
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     return false;
@@ -133,7 +134,7 @@ bool FileManager::getItem(int index, FileEntry& entry) {
 
   FsLockGuard guard("FileManager.getItem.scan");
 
-  File dir = LittleFS.open(state.currentPath);
+  File dir = VFS::open(state.currentPath, "r");
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     return false;
@@ -208,7 +209,7 @@ bool FileManager::createFolder(const char* name) {
 
   FsLockGuard guard("FileManager.createFolder");
   
-  bool success = LittleFS.mkdir(fullPath.c_str());
+  bool success = VFS::mkdir(fullPath);
   if (success) {
     state.dirty = true;
     loadDirectory();
@@ -225,7 +226,7 @@ bool FileManager::createFile(const char* name) {
 
   FsLockGuard guard("FileManager.createFile");
   
-  File f = LittleFS.open(fullPath.c_str(), "w");
+  File f = VFS::open(fullPath, "w", true);
   if (!f) return false;
   
   f.close();
@@ -246,9 +247,9 @@ bool FileManager::deleteItem() {
   
   bool success;
   if (entry.isFolder) {
-    success = LittleFS.rmdir(fullPath.c_str());
+    success = VFS::rmdir(fullPath);
   } else {
-    success = LittleFS.remove(fullPath.c_str());
+    success = VFS::remove(fullPath);
   }
   
   if (success) {
@@ -273,7 +274,7 @@ bool FileManager::renameItem(const char* newName) {
 
   FsLockGuard guard("FileManager.renameItem");
   
-  bool success = LittleFS.rename(oldPath.c_str(), newPath.c_str());
+  bool success = VFS::rename(oldPath, newPath);
   if (success) {
     state.dirty = true;
     loadDirectory();
@@ -292,7 +293,7 @@ bool FileManager::readFile(const char* filename, String& content) {
 
   FsLockGuard guard("FileManager.readFile");
   
-  File f = LittleFS.open(fullPath.c_str(), "r");
+  File f = VFS::open(fullPath, "r");
   if (!f) {
     gSensorPollingPaused = wasPaused;
     return false;
@@ -320,7 +321,7 @@ bool FileManager::writeFile(const char* filename, const String& content) {
 
   FsLockGuard guard("FileManager.writeFile");
   
-  File f = LittleFS.open(fullPath.c_str(), "w");
+  File f = VFS::open(fullPath, "w", true);
   if (!f) {
     gSensorPollingPaused = wasPaused;
     return false;
@@ -335,6 +336,19 @@ bool FileManager::writeFile(const char* filename, const String& content) {
 
 bool FileManager::getStorageStats(uint32_t& total, uint32_t& used, uint32_t& free) {
   FsLockGuard guard("FileManager.getStorageStats");
+  
+  // Determine storage type based on current path
+  VFS::StorageType storageType = VFS::getStorageType(state.currentPath);
+  uint64_t totalBytes = 0, usedBytes = 0, freeBytes = 0;
+  
+  if (VFS::getStats(storageType, totalBytes, usedBytes, freeBytes)) {
+    total = (uint32_t)totalBytes;
+    used = (uint32_t)usedBytes;
+    free = (uint32_t)freeBytes;
+    return true;
+  }
+  
+  // Fallback to LittleFS stats
   total = LittleFS.totalBytes();
   used = LittleFS.usedBytes();
   free = total - used;
@@ -349,7 +363,7 @@ bool FileManager::loadDirectory() {
 
   FsLockGuard guard("FileManager.loadDirectory");
   
-  File dir = LittleFS.open(state.currentPath);
+  File dir = VFS::open(state.currentPath, "r");
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     gSensorPollingPaused = wasPaused;

@@ -642,7 +642,7 @@ inline String getFileBrowserScript() {
         setStatus('Uploading ' + file.name + '...', false);
         var targetPath = currentPath === '/' ? '/' + file.name : currentPath + '/' + file.name;
         // Text files that can be safely read as text; everything else is binary
-        var isText = /\.(txt|json|csv|xml|html|htm|css|js|md|log|ini|cfg|conf|yaml|yml|sh|py|c|cpp|h|hpp)$/i.test(file.name);
+        var isText = /\.(txt|json|csv|xml|html|htm|css|js|md|log|ini|cfg|conf|yaml|yml|sh|py|c|cpp|h|hpp|crt|pem|key|pub)$/i.test(file.name);
         var isBinary = !isText;
         
         var reader = new FileReader();
@@ -772,6 +772,9 @@ inline void streamCommonCSS(httpd_req_t* req) {
     "--link:#bcd0ff;"
     "--muted:rgba(255,255,255,.75);"
     "--icon-bg:rgba(0,0,0,.55);"
+    "--code-bg:#f8f9fa;"
+    "--code-fg:#212529;"
+    "--icon-filter:none;"
     "--danger:#dc3545;"
     "--danger-hover:#c82333;"
     "}"
@@ -790,6 +793,9 @@ inline void streamCommonCSS(httpd_req_t* req) {
     "--link:#bcd0ff;"
     "--muted:rgba(255,255,255,.75);"
     "--icon-bg:rgba(0,0,0,.55);"
+    "--code-bg:#f8f9fa;"
+    "--code-fg:#212529;"
+    "--icon-filter:none;"
     "--danger:#dc3545;"
     "--danger-hover:#c82333;"
     "--success:#28a745;"
@@ -818,6 +824,9 @@ inline void streamCommonCSS(httpd_req_t* req) {
     "--link:#8ab4ff;"
     "--muted:rgba(242,242,247,.72);"
     "--icon-bg:rgba(255,255,255,.10);"
+    "--code-bg:#1e1e1e;"
+    "--code-fg:#d4d4d4;"
+    "--icon-filter:invert(1);"
     "--danger:#ff5a6a;"
     "--danger-hover:#ff3b4e;"
     "--success:#4ade80;"
@@ -889,6 +898,9 @@ inline void streamCommonCSS(httpd_req_t* req) {
     ".text-center{text-align:center}"
     ".text-muted{color:var(--muted)}"
     ".text-danger{color:var(--danger)}"
+    ".icon-invert{filter:var(--icon-filter)}"
+    "img.icon-invert{filter:var(--icon-filter)}"
+    ".menu-item img,.btn img,.settings-panel img:not(.no-invert){filter:var(--icon-filter)}"
     ".text-primary{color:#0d6efd}"
     ".text-sm{font-size:.9rem}"
     ".link-primary{color:#0d6efd}"

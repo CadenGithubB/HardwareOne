@@ -16,7 +16,7 @@
 // Models are loaded from LittleFS at runtime (.tflite files).
 //
 // Features:
-//   - Runtime model loading from /littlefs/models/
+//   - Runtime model loading from /littlefs/EI Models/
 //   - Single-shot inference via CLI command
 //   - Continuous inference mode with configurable interval
 //   - Configurable confidence threshold
@@ -24,7 +24,7 @@
 //
 // Usage:
 //   1. Train a FOMO model on Edge Impulse Studio
-//   2. Export as TensorFlow Lite (.tflite) and upload to /littlefs/models/
+//   2. Export as TensorFlow Lite (.tflite) and upload to /littlefs/EI Models/
 //   3. Load model: ei model load mymodel.tflite
 //   4. Enable: ei enable 1
 //   5. Run inference: ei detect
@@ -93,7 +93,7 @@ bool isModelLoaded();
 // Get path of currently loaded model
 const char* getLoadedModelPath();
 
-// List available models in /littlefs/models/
+// List available models in /littlefs/EI Models/
 void listAvailableModels(String& output);
 
 // ============================================================================

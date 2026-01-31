@@ -21,7 +21,7 @@ static void displayGamepadVisual() {
     oledDisplay->println();
     oledDisplay->println("Gamepad not active");
     oledDisplay->println();
-    oledDisplay->println("Use 'gamepadstart'");
+    oledDisplay->println("Use 'opengamepad'");
     oledDisplay->println("to enable");
     return;
   }
@@ -154,9 +154,9 @@ static void gamepadToggleConfirmed(void* userData) {
 static bool gamepadInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (gamepadEnabled && gamepadConnected) {
-      oledConfirmRequest("Stop gamepad?", "This disables input", gamepadToggleConfirmed, nullptr, false);
+      oledConfirmRequest("Close gamepad?", "This disables input", gamepadToggleConfirmed, nullptr, false);
     } else {
-      oledConfirmRequest("Start gamepad?", nullptr, gamepadToggleConfirmed, nullptr);
+      oledConfirmRequest("Open gamepad?", nullptr, gamepadToggleConfirmed, nullptr);
     }
     return true;
   }

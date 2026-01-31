@@ -161,6 +161,164 @@ window.togglePane = function(paneId, btnId) {
 </div>
 )SETPART3", HTTPD_RESP_USE_STRLEN);
 
+  // Part 3.5: Network Services section - renders from /api/settings/schema
+  httpd_resp_send_chunk(req, R"SETPART3_5(
+<div class='settings-panel'>
+  <div style='display:flex;align-items:center;justify-content:space-between'>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Network Services</div><div style='color:var(--muted);font-size:0.9rem'>Configure MQTT and other network integrations.</div></div>
+    <button class='btn' id='btn-network-toggle' onclick="togglePane('network-pane','btn-network-toggle')">Expand</button>
+  </div>
+  <div id='network-pane' style='display:none;margin-top:1rem;color:var(--panel-fg)'>
+    <div id='network-dynamic-container'>
+      <div style='text-align:center;padding:2rem;color:var(--muted)'>Loading network settings...</div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var networkModules = ['mqtt'];
+  var networkSections = {'mqtt':'mqtt'};
+  var networkLabels = {mqtt:'MQTT Broker'};
+  
+  function inferType(val) {
+    if (typeof val === 'boolean') return 'bool';
+    if (typeof val === 'number') return Number.isInteger(val) ? 'int' : 'float';
+    return 'string';
+  }
+  
+  function keyToLabel(key) {
+    return key.replace(/([A-Z])/g, ' $1').replace(/^./, function(s){return s.toUpperCase();}).replace(/\./g, ' > ');
+  }
+  
+  function renderNetworkInput(e, val, disabled) {
+    var id = 'net-' + e.key.replace(/\./g, '-');
+    var disAttr = disabled ? ' disabled' : '';
+    var grayStyle = disabled ? 'opacity:0.6;cursor:not-allowed;' : '';
+    if (e.type === 'bool') {
+      return '<label style="' + grayStyle + '"><input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + disAttr + ' style="margin-right:0.5rem">' + e.label + '</label>';
+    } else if (e.type === 'string' && e.secret) {
+      var placeholder = val !== undefined && val !== '' ? '(set - leave blank to keep)' : '(not set)';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
+    } else if (e.type === 'int' || e.type === 'float') {
+      var step = e.type === 'float' ? '0.01' : '1';
+      var minAttr = e.min !== undefined ? ' min="' + e.min + '"' : '';
+      var maxAttr = e.max !== undefined ? ' max="' + e.max + '"' : '';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="number" id="' + id + '" value="' + (val !== undefined ? val : e.default) + '"' + minAttr + maxAttr + ' step="' + step + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px"></label>';
+    } else {
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="text" id="' + id + '" value="' + (val || '') + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
+    }
+  }
+  
+  function renderNetworkModule(mod, settings) {
+    var section = settings[mod.section] || settings[mod.name] || {};
+    var entries = mod.entries || [];
+    var isDisconnected = mod.connected === false;
+    var statusBadge = isDisconnected ? '<span style="background:#f59e0b;color:#fff;padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>' : '';
+    
+    var html = '<div style="background:var(--panel-bg);border-radius:8px;padding:1rem 1.5rem;margin:0.5rem 0;box-shadow:0 1px 3px rgba(0,0,0,0.1);border:1px solid var(--border)">';
+    html += '<div style="display:flex;align-items:center;justify-content:space-between">';
+    html += '<div>';
+    html += '<span style="font-size:1.1rem;font-weight:bold;color:var(--panel-fg)">' + (networkLabels[mod.name] || mod.description || mod.name) + '</span>' + statusBadge;
+    if (mod.description && !networkLabels[mod.name]) {
+      html += '<div style="color:var(--muted);font-size:0.85rem;margin-top:0.25rem">' + mod.description + '</div>';
+    }
+    html += '</div>';
+    html += '<button class="btn" id="btn-' + mod.name + '-net-toggle" onclick="togglePane(\'' + mod.name + '-net-pane\',\'btn-' + mod.name + '-net-toggle\')">Expand</button>';
+    html += '</div>';
+    html += '<div id="' + mod.name + '-net-pane" style="display:none;margin-top:0.75rem">';
+    
+    if (isDisconnected) {
+      html += '<div style="background:#fef3c7;border-left:3px solid #f59e0b;padding:0.75rem;margin-bottom:1rem;color:#92400e;font-size:0.85rem">';
+      html += 'Service not available. Check WiFi connection and configuration.';
+      html += '</div>';
+    }
+    
+    function getValue(key) {
+      var parts = key.split('.');
+      var v = section;
+      for (var i = 0; i < parts.length && v; i++) v = v[parts[i]];
+      return v;
+    }
+    
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
+    entries.forEach(function(e) { html += renderNetworkInput(e, getValue(e.key), false); });
+    html += '</div>';
+    html += '<button class="btn" onclick="saveNetworkSettings(\'' + mod.name + '\',\'' + mod.section + '\')">Save ' + (networkLabels[mod.name] || mod.name) + ' Settings</button>';
+    html += '</div></div>';
+    return html;
+  }
+  
+  Promise.all([
+    fetch('/api/settings/schema', {credentials:'include'}).then(function(r){return r.json();}),
+    fetch('/api/settings', {credentials:'include'}).then(function(r){return r.json();})
+  ]).then(function(results) {
+    var schema = results[0];
+    var settingsResp = results[1];
+    var settings = settingsResp.settings || {};
+    var container = document.getElementById('network-dynamic-container');
+    if (!container) return;
+    
+    var relevantModules = (schema.modules || []).filter(function(m) {
+      return networkModules.indexOf(m.name) !== -1;
+    });
+    
+    var html = '';
+    relevantModules.forEach(function(mod) {
+      html += renderNetworkModule(mod, settings);
+    });
+    
+    if (html === '') {
+      container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--muted);font-style:italic">No network services available</div>';
+      return;
+    }
+    
+    container.innerHTML = html;
+  }).catch(function(err) {
+    console.error('[Network Settings] Schema load error:', err);
+    var container = document.getElementById('network-dynamic-container');
+    if (container) container.innerHTML = '<div style="text-align:center;padding:2rem;color:#dc3545">Failed to load network settings</div>';
+  });
+  
+  window.saveNetworkSettings = function(modName, section) {
+    var container = document.getElementById('network-dynamic-container');
+    var inputs = container.querySelectorAll('[id^="net-"]:not([disabled])');
+    var updates = {};
+    inputs.forEach(function(el) {
+      var key = el.id.replace('net-', '').replace(/-/g, '.');
+      var parentMod = el.closest('[id$="-net-pane"]');
+      if (!parentMod || !parentMod.id.startsWith(modName)) return;
+      var val;
+      if (el.type === 'checkbox') val = el.checked ? 1 : 0;
+      else if (el.type === 'number') val = el.step && el.step.indexOf('.') !== -1 ? parseFloat(el.value) : parseInt(el.value);
+      else if (el.type === 'password') {
+        if (!el.value || el.value.trim() === '') return;
+        val = el.value;
+      }
+      else val = el.value;
+      updates[key] = val;
+    });
+    
+    var cmds = [];
+    for (var k in updates) {
+      cmds.push(k + ' ' + updates[k]);
+    }
+    
+    if (cmds.length === 0) { alert('No settings to save'); return; }
+    
+    var promises = cmds.map(function(cmd) {
+      return fetch('/api/cli', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, credentials:'include', body:'cmd=' + encodeURIComponent(cmd)});
+    });
+    
+    Promise.all(promises).then(function() {
+      alert('Settings saved! Some changes may require a restart.');
+    }).catch(function(e) {
+      alert('Save failed: ' + e.message);
+    });
+  };
+})();
+</script>
+)SETPART3_5", HTTPD_RESP_USE_STRLEN);
+
   // Part 4: Dynamic Sensors section - renders from /api/settings/schema
   httpd_resp_send_chunk(req, R"SETPART4(
 <div class='settings-panel'>
@@ -197,6 +355,10 @@ window.togglePane = function(paneId, btnId) {
     var grayStyle = disabled ? 'opacity:0.6;cursor:not-allowed;' : '';
     if (e.type === 'bool') {
       return '<label style="' + grayStyle + '"><input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + disAttr + ' style="margin-right:0.5rem">' + e.label + '</label>';
+    } else if (e.type === 'string' && e.secret) {
+      // Secret field: use password input, show placeholder if set, blank = unchanged
+      var placeholder = val !== undefined && val !== '' ? '(set - leave blank to keep)' : '(not set)';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
     } else if (e.type === 'string' && e.options) {
       var opts = e.options.split(',').map(function(o) {
         return '<option value="' + o + '"' + (val === o ? ' selected' : '') + '>' + o.charAt(0).toUpperCase() + o.slice(1) + '</option>';
@@ -426,6 +588,11 @@ window.togglePane = function(paneId, btnId) {
       var val;
       if (el.type === 'checkbox') val = el.checked ? 1 : 0;
       else if (el.type === 'number') val = el.step && el.step.indexOf('.') !== -1 ? parseFloat(el.value) : parseInt(el.value);
+      else if (el.type === 'password') {
+        // Secret field: skip if blank (blank = unchanged)
+        if (!el.value || el.value.trim() === '') return;
+        val = el.value;
+      }
       else val = el.value;
       updates[key] = val;
     });
@@ -557,6 +724,7 @@ window.togglePane = function(paneId, btnId) {
       <div style='display:flex;flex-direction:column;gap:0.35rem'>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all authentication debug output (derived state: ON if any sub-category is ON)'>Authentication: <span style='font-weight:bold;color:#667eea' id='debugAuthGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('auth')" id='debugAuthGroup-btn' title='Toggle all auth debugging'>Toggle All</button><button class='btn' onclick="togglePane('auth-details','auth-details-btn')" id='auth-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='auth-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ALL authentication debug output (parent flag)'>Parent: <span style='font-weight:bold;color:#667eea' id='debugAuth-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuth')" id='debugAuth-btn' style='font-size:0.85rem' title='Toggle parent auth debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable boot ID debug output'>Boot ID: <span style='font-weight:bold;color:#667eea' id='debugAuthBootId-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthBootId')" id='debugAuthBootId-btn' style='font-size:0.85rem' title='Toggle boot ID debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable cookie debug output'>Cookies: <span style='font-weight:bold;color:#667eea' id='debugAuthCookies-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthCookies')" id='debugAuthCookies-btn' style='font-size:0.85rem' title='Toggle cookie debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable login debug output'>Login: <span style='font-weight:bold;color:#667eea' id='debugAuthLogin-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthLogin')" id='debugAuthLogin-btn' style='font-size:0.85rem' title='Toggle login debugging'>Toggle</button></div>
@@ -639,6 +807,7 @@ window.togglePane = function(paneId, btnId) {
         </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all ESP-NOW debug output (derived state: ON if any sub-category is ON)'>ESP-NOW: <span style='font-weight:bold;color:#667eea' id='debugEspNowGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('espnow')" id='debugEspNowGroup-btn' title='Toggle all ESP-NOW debugging'>Toggle All</button><button class='btn' onclick="togglePane('espnow-details','espnow-details-btn')" id='espnow-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='espnow-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ALL ESP-NOW debug output (parent flag)'>Parent: <span style='font-weight:bold;color:#667eea' id='debugEspNow-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNow')" id='debugEspNow-btn' style='font-size:0.85rem' title='Toggle parent ESP-NOW debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ESP-NOW streaming debug output'>Stream: <span style='font-weight:bold;color:#667eea' id='debugEspNowStream-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowStream')" id='debugEspNowStream-btn' style='font-size:0.85rem' title='Toggle stream debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ESP-NOW core operations debug output'>Core: <span style='font-weight:bold;color:#667eea' id='debugEspNowCore-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowCore')" id='debugEspNowCore-btn' style='font-size:0.85rem' title='Toggle core debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ESP-NOW router debug output'>Router: <span style='font-weight:bold;color:#667eea' id='debugEspNowRouter-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowRouter')" id='debugEspNowRouter-btn' style='font-size:0.85rem' title='Toggle router debugging'>Toggle</button></div>
@@ -665,6 +834,7 @@ window.togglePane = function(paneId, btnId) {
       <div style='display:flex;flex-direction:column;gap:0.35rem'>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all sensors debug output (derived state: ON if any sub-category is ON)'>Sensors: <span style='font-weight:bold;color:#667eea' id='debugSensorsGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('sensors')" id='debugSensorsGroup-btn' title='Toggle all sensors debugging'>Toggle All</button><button class='btn' onclick="togglePane('sensors-details','sensors-details-btn')" id='sensors-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='sensors-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ALL sensors debug output (parent flag)'>Parent: <span style='font-weight:bold;color:#667eea' id='debugSensors-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSensors')" id='debugSensors-btn' style='font-size:0.85rem' title='Toggle parent sensors debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable general sensor debug output'>General: <span style='font-weight:bold;color:#667eea' id='debugSensorsGeneral-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSensorsGeneral')" id='debugSensorsGeneral-btn' style='font-size:0.85rem' title='Toggle general sensor debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable sensor frame capture debug output'>Frame Capture: <span style='font-weight:bold;color:#667eea' id='debugSensorsFrame-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSensorsFrame')" id='debugSensorsFrame-btn' style='font-size:0.85rem' title='Toggle thermal frame debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable sensor data processing debug output'>Data Processing: <span style='font-weight:bold;color:#667eea' id='debugSensorsData-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSensorsData')" id='debugSensorsData-btn' style='font-size:0.85rem' title='Toggle sensor data debugging'>Toggle</button></div>
@@ -870,8 +1040,15 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         var dSG = (dbg.sensorsGeneral !== undefined ? dbg.sensorsGeneral : s.debugSensorsGeneral);
         $('debugSensorsGeneral-value').textContent = dSG ? 'Enabled' : 'Disabled';
         $('debugSensorsGeneral-btn').textContent = dSG ? 'Disable' : 'Enable';
-        // Compute derived Sensors parent state (ON if any child ON)
-        var sensorsGroupOn = dSG || dSF || dSD;
+        var dSensorsParent = (dbg.sensors !== undefined ? dbg.sensors : s.debugSensors);
+        var dSensorsParentValEl = $('debugSensors-value');
+        if (dSensorsParentValEl) {
+          dSensorsParentValEl.textContent = dSensorsParent ? 'Enabled' : 'Disabled';
+          var dSensorsParentBtnEl = $('debugSensors-btn');
+          if (dSensorsParentBtnEl) dSensorsParentBtnEl.textContent = dSensorsParent ? 'Disable' : 'Enable';
+        }
+        // Compute derived Sensors parent state (ON if parent OR any child ON)
+        var sensorsGroupOn = dSensorsParent || dSG || dSF || dSD;
         $('debugSensorsGroup-value').textContent = sensorsGroupOn ? 'Enabled' : 'Disabled';
         $('debugSensorsGroup-btn').textContent = sensorsGroupOn ? 'Disable All' : 'Enable All';
         var dESN = (dbg.espNowStream !== undefined ? dbg.espNowStream : s.debugEspNowStream);
@@ -1019,8 +1196,15 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         var dCmdflowCtx = (dbg.cmdflowContext !== undefined ? dbg.cmdflowContext : s.debugCmdflowContext);
         $('debugCmdflowContext-value').textContent = dCmdflowCtx ? 'Enabled' : 'Disabled';
         $('debugCmdflowContext-btn').textContent = dCmdflowCtx ? 'Disable' : 'Enable';
-        // Compute derived parent states (ON if any child ON)
-        var authGroupOn = dAuthSess || dAuthCook || dAuthLogin || dAuthBootId;
+        // Compute derived parent states (ON if parent OR any child ON)
+        var dAuthParent = (dbg.auth !== undefined ? dbg.auth : s.debugAuth);
+        var dAuthParentValEl = $('debugAuth-value');
+        if (dAuthParentValEl) {
+          dAuthParentValEl.textContent = dAuthParent ? 'Enabled' : 'Disabled';
+          var dAuthParentBtnEl = $('debugAuth-btn');
+          if (dAuthParentBtnEl) dAuthParentBtnEl.textContent = dAuthParent ? 'Disable' : 'Enable';
+        }
+        var authGroupOn = dAuthParent || dAuthSess || dAuthCook || dAuthLogin || dAuthBootId;
         $('debugAuthGroup-value').textContent = authGroupOn ? 'Enabled' : 'Disabled';
         $('debugAuthGroup-btn').textContent = authGroupOn ? 'Disable All' : 'Enable All';
         var httpGroupOn = dHttpHandlers || dHttpRequests || dHttpResponses || dHttpStreaming;
@@ -1050,7 +1234,14 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         var cmdflowGroupOn = dCmdflowRoute || dCmdflowQueue || dCmdflowCtx;
         $('debugCmdFlowGroup-value').textContent = cmdflowGroupOn ? 'Enabled' : 'Disabled';
         $('debugCmdFlowGroup-btn').textContent = cmdflowGroupOn ? 'Disable All' : 'Enable All';
-        var espnowGroupOn = dESN || dESNCore || dESNRouter || dESNMesh || dESNTopo || dESNEncryption;
+        var dEspNowParent = (dbg.espNow !== undefined ? dbg.espNow : s.debugEspNow);
+        var dEspNowParentValEl = $('debugEspNow-value');
+        if (dEspNowParentValEl) {
+          dEspNowParentValEl.textContent = dEspNowParent ? 'Enabled' : 'Disabled';
+          var dEspNowParentBtnEl = $('debugEspNow-btn');
+          if (dEspNowParentBtnEl) dEspNowParentBtnEl.textContent = dEspNowParent ? 'Disable' : 'Enable';
+        }
+        var espnowGroupOn = dEspNowParent || dESN || dESNCore || dESNRouter || dESNMesh || dESNTopo || dESNEncryption;
         $('debugEspNowGroup-value').textContent = espnowGroupOn ? 'Enabled' : 'Disabled';
         $('debugEspNowGroup-btn').textContent = espnowGroupOn ? 'Disable All' : 'Enable All';
         var automationsGroupOn = dAutoSched || dAutoExec || dAutoCond || dAutoTiming;
@@ -1674,6 +1865,7 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       valueEl.textContent = newVal ? 'Enabled' : 'Disabled';
       try { window.updateDebugGroupIndicators(); } catch(_) {}
       var map = {
+        debugAuth: 'debugauth',
         debugAuthCookies: 'debugauthcookies',
         debugHttp: 'debughttp',
         debugSse: 'debugsse',
@@ -1687,9 +1879,11 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
         debugAutomations: 'debugautomations',
         debugLogger: 'debuglogger',
         debugDateTime: 'debugdatetime',
+        debugSensors: 'debugsensors',
         debugSensorsGeneral: 'debugsensorsgeneral',
         debugSensorsFrame: 'debugsensorsframe',
         debugSensorsData: 'debugsensorsdata',
+        debugEspNow: 'debugespnow',
         debugEspNowStream: 'debugespnowstream',
         debugEspNowCore: 'debugespnowcore',
         debugEspNowRouter: 'debugespnowrouter',
@@ -1762,59 +1956,73 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     // Toggle debug group (parent/child semantics)
     window.toggleDebugGroup = function(group) {
       var children = [];
+      var parentFlag = null;
       var groupValueId = '';
       var groupBtnId = '';
       
       if (group === 'automations') {
         children = ['debugAutoScheduler', 'debugAutoExec', 'debugAutoCondition', 'debugAutoTiming'];
+        parentFlag = 'debugAutomations';
         groupValueId = 'debugAutomationsGroup-value';
         groupBtnId = 'debugAutomationsGroup-btn';
       } else if (group === 'espnow') {
         children = ['debugEspNowStream', 'debugEspNowCore', 'debugEspNowRouter', 'debugEspNowMesh', 'debugEspNowTopo', 'debugEspNowEncryption'];
+        parentFlag = 'debugEspNow';
         groupValueId = 'debugEspNowGroup-value';
         groupBtnId = 'debugEspNowGroup-btn';
       } else if (group === 'sensors') {
         children = ['debugSensorsGeneral', 'debugSensorsFrame', 'debugSensorsData'];
+        parentFlag = 'debugSensors';
         groupValueId = 'debugSensorsGroup-value';
         groupBtnId = 'debugSensorsGroup-btn';
       } else if (group === 'auth') {
         children = ['debugAuthSessions', 'debugAuthCookies', 'debugAuthLogin', 'debugAuthBootId'];
+        parentFlag = 'debugAuth';
         groupValueId = 'debugAuthGroup-value';
         groupBtnId = 'debugAuthGroup-btn';
       } else if (group === 'http') {
         children = ['debugHttpHandlers', 'debugHttpRequests', 'debugHttpResponses', 'debugHttpStreaming'];
+        parentFlag = 'debugHttp';
         groupValueId = 'debugHttpGroup-value';
         groupBtnId = 'debugHttpGroup-btn';
       } else if (group === 'wifi') {
         children = ['debugWifiConnection', 'debugWifiConfig', 'debugWifiScanning', 'debugWifiDriver'];
+        parentFlag = 'debugWifi';
         groupValueId = 'debugWifiGroup-value';
         groupBtnId = 'debugWifiGroup-btn';
       } else if (group === 'storage') {
         children = ['debugStorageFiles', 'debugStorageJson', 'debugStorageSettings', 'debugStorageMigration'];
+        parentFlag = 'debugStorage';
         groupValueId = 'debugStorageGroup-value';
         groupBtnId = 'debugStorageGroup-btn';
       } else if (group === 'system') {
         children = ['debugSystemBoot', 'debugSystemConfig', 'debugSystemTasks', 'debugSystemHardware'];
+        parentFlag = 'debugSystem';
         groupValueId = 'debugSystemGroup-value';
         groupBtnId = 'debugSystemGroup-btn';
       } else if (group === 'users') {
         children = ['debugUsersMgmt', 'debugUsersRegister', 'debugUsersQuery'];
+        parentFlag = 'debugUsers';
         groupValueId = 'debugUsersGroup-value';
         groupBtnId = 'debugUsersGroup-btn';
       } else if (group === 'cli') {
         children = ['debugCliExecution', 'debugCliQueue', 'debugCliValidation'];
+        parentFlag = 'debugCli';
         groupValueId = 'debugCliGroup-value';
         groupBtnId = 'debugCliGroup-btn';
       } else if (group === 'performance') {
         children = ['debugPerfStack', 'debugPerfHeap', 'debugPerfTiming'];
+        parentFlag = 'debugPerformance';
         groupValueId = 'debugPerfGroup-value';
         groupBtnId = 'debugPerfGroup-btn';
       } else if (group === 'sse') {
         children = ['debugSseConnection', 'debugSseEvents', 'debugSseBroadcast'];
+        parentFlag = 'debugSse';
         groupValueId = 'debugSseGroup-value';
         groupBtnId = 'debugSseGroup-btn';
       } else if (group === 'cmdflow') {
         children = ['debugCmdflowRouting', 'debugCmdflowQueue', 'debugCmdflowContext'];
+        parentFlag = 'debugCommandFlow';
         groupValueId = 'debugCmdFlowGroup-value';
         groupBtnId = 'debugCmdFlowGroup-btn';
       } else {
@@ -1825,18 +2033,11 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       var groupBtnEl = $(groupBtnId);
       if (!groupValueEl || !groupBtnEl) return;
       
-      // Determine current parent state (ON if any child is ON)
-      var anyChildOn = false;
-      for (var i = 0; i < children.length; i++) {
-        var childValueEl = $(children[i] + '-value');
-        if (childValueEl && childValueEl.textContent === 'Enabled') {
-          anyChildOn = true;
-          break;
-        }
-      }
+      // Determine current group state from the group label (which may reflect parent-only state)
+      var anyOn = (groupValueEl.textContent === 'Enabled');
       
-      // Toggle action: if parent is currently ON (any child on), turn all OFF; if parent is OFF, turn all ON
-      var newVal = anyChildOn ? 0 : 1;
+      // Toggle action: if group is currently ON, turn all OFF; if group is OFF, turn all ON
+      var newVal = anyOn ? 0 : 1;
       
       // Update parent UI immediately
       groupBtnEl.textContent = '...';
@@ -1916,6 +2117,34 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
         }
       }
       
+      // Also toggle the parent flag if one exists for this group
+      if (parentFlag) {
+        var parentMap = {
+          debugAutomations: 'debugautomations',
+          debugHttp: 'debughttp',
+          debugWifi: 'debugwifi',
+          debugStorage: 'debugstorage',
+          debugSystem: 'debugsystem',
+          debugUsers: 'debugusers',
+          debugCli: 'debugcli',
+          debugPerformance: 'debugperformance',
+          debugSse: 'debugsse',
+          debugCommandFlow: 'debugcommandflow',
+          debugAuth: 'debugauth',
+          debugSensors: 'debugsensors',
+          debugEspNow: 'debugespnow'
+        };
+        var parentCmd = (parentMap[parentFlag] || parentFlag.toLowerCase()) + ' ' + newVal + ' temp';
+        promises.push(
+          fetch('/api/cli', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            credentials: 'same-origin',
+            body: 'cmd=' + encodeURIComponent(parentCmd)
+          }).then(function(r) { return r.text(); })
+        );
+      }
+      
       Promise.all(promises)
         .then(function() {
           groupBtnEl.textContent = newVal ? 'Disable All' : 'Enable All';
@@ -1924,8 +2153,8 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
         })
         .catch(function(e) {
           // Revert on error
-          groupValueEl.textContent = anyChildOn ? 'Enabled' : 'Disabled';
-          groupBtnEl.textContent = anyChildOn ? 'Disable All' : 'Enable All';
+          groupValueEl.textContent = anyOn ? 'Enabled' : 'Disabled';
+          groupBtnEl.textContent = anyOn ? 'Disable All' : 'Enable All';
           groupBtnEl.disabled = false;
           try { window.updateDebugGroupIndicators(); } catch(_) {}
           alert('Error toggling group: ' + e.message);
@@ -1982,6 +2211,10 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
         var el = $(k + '-value');
         return el && (el.textContent === 'Enabled');
       };
+      var getValById = function(id) {
+        var el = $(id);
+        return el && (el.textContent === 'Enabled');
+      };
       var push = function(cmd) {
         cmds.push(cmd);
       };
@@ -2008,6 +2241,9 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
       push('debugsse ' + (sseOn ? 1 : 0));
       push('debuglogger ' + (getVal('debugLogger') ? 1 : 0));
       push('debugdatetime ' + (getVal('debugDateTime') ? 1 : 0));
+      push('debugauth ' + (getValById('debugAuthGroup-value') ? 1 : 0));
+      push('debugsensors ' + (getValById('debugSensorsGroup-value') ? 1 : 0));
+      push('debugespnow ' + (getValById('debugEspNowGroup-value') ? 1 : 0));
       push('debugsensorsgeneral ' + (getVal('debugSensorsGeneral') ? 1 : 0));
       push('debugsensorsframe ' + (getVal('debugSensorsFrame') ? 1 : 0));
       push('debugsensorsdata ' + (getVal('debugSensorsData') ? 1 : 0));
@@ -2145,7 +2381,7 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
         }).then(function(r) { return r.text(); });
       }))
       .then(function() {
-        alert('Device settings saved. Restart the thermal sensor (thermalstop + thermalstart) or reboot manually to apply upscale changes.');
+        alert('Device settings saved. Restart the thermal sensor (closethermal + openthermal) or reboot manually to apply upscale changes.');
         refreshSettings();
       })
       .catch(function() {

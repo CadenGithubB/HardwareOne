@@ -729,8 +729,9 @@ int buildFMRadioDataJSON(char* buf, size_t bufSize) {
 
 const CommandEntry fmRadioCommands[] = {
   { "fmstatus", "Show FM Radio status", false, cmd_fmradio, "Usage: fmradio [start|stop|tune <freq>|seek [up|down]|volume <0-15>|mute|status]" },
-  { "fmradio start", "Start FM Radio", false, cmd_fmradio_start },
-  { "fmradio stop", "Stop FM Radio", false, cmd_fmradio_stop },
+  // 3-level voice: "sensor" -> "radio" -> "open/close"
+  { "fmradio start", "Start FM Radio", false, cmd_fmradio_start, nullptr, "sensor", "radio", "open" },
+  { "fmradio stop", "Stop FM Radio", false, cmd_fmradio_stop, nullptr, "sensor", "radio", "close" },
   { "fmradio tune", "Tune to frequency (e.g., fmradio tune 103.9)", false, cmd_fmradio_tune, "Usage: fmradio tune <frequency> (e.g., 103.9 or 10390)" },
   { "fmradio seek", "Seek next station (up/down)", false, cmd_fmradio_seek },
   { "fmradio volume", "Set volume 0-15", false, cmd_fmradio_volume, "Usage: fmradio volume <0-15>" },

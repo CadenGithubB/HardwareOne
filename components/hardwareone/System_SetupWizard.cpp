@@ -278,6 +278,19 @@ void rebuildNetworkSettingsPage() {
     }
   }
 #endif
+
+#if ENABLE_MQTT
+  // Only show MQTT auto-start if MQTT feature is enabled
+  {
+    const FeatureEntry* mqttFeature = getFeatureById("mqtt");
+    if (mqttFeature && isFeatureEnabled(mqttFeature)) {
+      networkPage[networkPageCount].label = "MQTT auto-start";
+      networkPage[networkPageCount].boolSetting = &gSettings.mqttAutoStart;
+      networkPage[networkPageCount].isBool = true;
+      networkPageCount++;
+    }
+  }
+#endif
 }
 
 bool hasNetworkSettings() {

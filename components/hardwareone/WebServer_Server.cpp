@@ -31,17 +31,23 @@
 #include "WebServer_Server.h"
 #include "WebPage_Automations.h"
 #include "WebPage_Bluetooth.h"
+#include "WebPage_Speech.h"
 #include "WebPage_CLI.h"
 #include "WebPage_Dashboard.h"
 #include "WebPage_ESPNow.h"
 #include "WebPage_Files.h"
+#include "WebPage_MQTT.h"
 #include "WebPage_Games.h"
-#include "WebPage_Auth.h"
+#include "WebPage_Login.h"
+#include "WebPage_LoginSuccess.h"
+#include "WebPage_LoginRequired.h"
 #include "WebPage_Logging.h"
 #include "WebPage_Maps.h"
 #include "WebPage_Sensors.h"
 #include "WebPage_Settings.h"
 #include "System_EdgeImpulse.h"
+#include "System_ESPSR.h"
+#include "System_VFS.h"
 
 // Filesystem ready flag (defined in System_Filesystem.cpp)
 extern bool filesystemReady;
@@ -328,6 +334,7 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
     case SOURCE_SERIAL: transportStr = "serial"; break;
     case SOURCE_LOCAL_DISPLAY: transportStr = "display"; break;
     case SOURCE_ESPNOW: transportStr = "espnow"; break;
+    case SOURCE_MQTT: transportStr = "mqtt"; break;
     default: transportStr = "internal"; break;
   }
   
@@ -1172,7 +1179,7 @@ esp_err_t handleFileRead(httpd_req_t* req) {
 
   FsLockGuard fsGuard("handleFileRead");
 
-  File f = LittleFS.open(path, "r");
+  File f = VFS::open(path, "r");
   if (!f) {
     WARN_STORAGEF("File not found: %s", path.c_str());
     gSensorPollingPaused = wasPaused;
@@ -1323,7 +1330,7 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
 
   FsLockGuard fsGuard("handleFileWrite");
 
-  File f = LittleFS.open(name, "w");
+  File f = VFS::open(name, "w", true);
   if (!f) {
     ERROR_STORAGEF("Failed to open file for write: %s", name.c_str());
     httpd_resp_set_type(req, "application/json");
@@ -1542,8 +1549,13 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       DEBUG_STORAGEF("[handleFileUpload] ERROR: Empty path");
       return false;
     }
-    if (path.indexOf("..") >= 0 || path.startsWith("/system/")) {
-      DEBUG_STORAGEF("[handleFileUpload] ERROR: Invalid or protected path: %s", path.c_str());
+    // Block path traversal and most /system/ paths, but allow /system/certs/ for TLS certificates
+    if (path.indexOf("..") >= 0) {
+      WARN_SYSTEMF("[handleFileUpload] BLOCKED: Path traversal not allowed: %s", path.c_str());
+      return false;
+    }
+    if (path.startsWith("/system/") && !path.startsWith("/system/certs/")) {
+      WARN_SYSTEMF("[handleFileUpload] BLOCKED: Protected system path (only /system/certs/ allowed): %s", path.c_str());
       return false;
     }
     // Auto-create parent directory if it doesn't exist
@@ -1552,9 +1564,9 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       String parentDir = path.substring(0, lastSlash);
       {
         FsLockGuard fsGuard("handleFileUpload.mkdir");
-        if (!LittleFS.exists(parentDir)) {
+        if (!VFS::exists(parentDir)) {
           DEBUG_STORAGEF("[handleFileUpload] Creating parent directory: %s", parentDir.c_str());
-          LittleFS.mkdir(parentDir);
+          VFS::mkdir(parentDir);
         }
       }
     }
@@ -1562,7 +1574,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
     fsLock("handleFileUpload.file");
     fsLockedForUpload = true;
-    file = LittleFS.open(path, "w");
+    file = VFS::open(path, "w", true);
     if (!file) {
       ERROR_STORAGEF("Failed to open file for write: %s", path.c_str());
       fsUnlock();
@@ -2010,6 +2022,11 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
         case SETTING_FLOAT: entry["type"] = "float"; break;
         case SETTING_BOOL: entry["type"] = "bool"; break;
         case SETTING_STRING: entry["type"] = "string"; break;
+      }
+      
+      // Mark secret fields (passwords, etc.)
+      if (e->isSecret) {
+        entry["secret"] = true;
       }
       
       // Min/max for numeric types
@@ -3454,16 +3471,15 @@ esp_err_t handleFileView(httpd_req_t* req) {
       return ESP_OK;
     }
 
-    // Open file
-    fsLock("file.view.json.open");
-    File file = LittleFS.open(path, "r");
+    // Open file via VFS (handles both LittleFS and SD)
+    File file = VFS::open(path, "r");
     if (!file) {
-      fsUnlock();
       gSensorPollingPaused = wasPaused;
       httpd_resp_set_type(req, "text/plain");
       httpd_resp_send(req, "File not found", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
     }
+    fsLock("file.view.json.open");
 
     if (raw) {
       // Stream raw JSON: lock only during reads
@@ -3560,7 +3576,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
   // Serialize file operations to prevent concurrent access crashes
   FsLockGuard fsLock("handleFileView");
 
-  if (!LittleFS.exists(path)) {
+  if (!VFS::exists(path)) {
     DEBUG_STORAGEF("[handleFileView] ERROR: File does not exist: %s", path.c_str());
     gSensorPollingPaused = wasPaused;
     httpd_resp_set_type(req, "text/plain");
@@ -3569,7 +3585,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
   }
 
   DEBUG_STORAGEF("[handleFileView] File exists, opening: %s (heap=%u)", path.c_str(), (unsigned)ESP.getFreeHeap());
-  File file = LittleFS.open(path, "r");
+  File file = VFS::open(path, "r");
   if (!file) {
     ERROR_STORAGEF("Failed to open file: %s", path.c_str());
     gSensorPollingPaused = wasPaused;
@@ -3893,7 +3909,7 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
   bool isDir = false;
   {
     FsLockGuard guard("delete.probe");
-    File file = LittleFS.open(path, "r");
+    File file = VFS::open(path, "r");
     if (!file) {
       httpd_resp_set_type(req, "application/json");
       httpd_resp_send(req, "{\"success\":false,\"error\":\"File not found\"}", HTTPD_RESP_USE_STRLEN);
@@ -3907,9 +3923,9 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
   {
     FsLockGuard guard("web_files.delete");
     if (isDir) {
-      success = LittleFS.rmdir(path);
+      success = VFS::rmdir(path);
     } else {
-      success = LittleFS.remove(path);
+      success = VFS::remove(path);
     }
   }
 
@@ -4250,6 +4266,13 @@ void broadcastSensorStatusToAllSessions() {
 // HTTP Server Management
 // ============================================================================
 
+// Handler for browser icon requests (favicon, apple-touch-icon) - returns 204 No Content
+static esp_err_t handleBrowserIcon(httpd_req_t* req) {
+  httpd_resp_set_status(req, "204 No Content");
+  httpd_resp_send(req, NULL, 0);
+  return ESP_OK;
+}
+
 void startHttpServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 100;
@@ -4312,8 +4335,15 @@ void startHttpServer() {
   static httpd_uri_t adminPending = { .uri = "/api/admin/pending", .method = HTTP_GET, .handler = handleAdminPending, .user_ctx = NULL };
   static httpd_uri_t adminApprove = { .uri = "/api/admin/approve", .method = HTTP_POST, .handler = handleAdminApproveUser, .user_ctx = NULL };
   static httpd_uri_t adminDeny = { .uri = "/api/admin/reject", .method = HTTP_POST, .handler = handleAdminDenyUser, .user_ctx = NULL };
+  // Browser icon handlers (silence 404 warnings)
+  static httpd_uri_t favicon = { .uri = "/favicon.ico", .method = HTTP_GET, .handler = handleBrowserIcon, .user_ctx = NULL };
+  static httpd_uri_t appleTouchIcon = { .uri = "/apple-touch-icon.png", .method = HTTP_GET, .handler = handleBrowserIcon, .user_ctx = NULL };
+  static httpd_uri_t appleTouchIconPre = { .uri = "/apple-touch-icon-precomposed.png", .method = HTTP_GET, .handler = handleBrowserIcon, .user_ctx = NULL };
 
   // Register
+  httpd_register_uri_handler(server, &favicon);
+  httpd_register_uri_handler(server, &appleTouchIcon);
+  httpd_register_uri_handler(server, &appleTouchIconPre);
   httpd_register_uri_handler(server, &root);
   httpd_register_uri_handler(server, &loginGet);
   httpd_register_uri_handler(server, &loginPost);
@@ -4342,14 +4372,17 @@ void startHttpServer() {
   httpd_register_uri_handler(server, &loggingPage);
   registerMapsHandlers(server);
   registerEdgeImpulseHandlers(server);
+  registerESPSRHandlers(server);
   httpd_register_uri_handler(server, &cliPage);
   httpd_register_uri_handler(server, &cliCmd);
   httpd_register_uri_handler(server, &logsGet);
   
-  // Module registration functions (sensors, bluetooth, esp-now, games)
+  // Module registration functions (sensors, bluetooth, esp-now, games, speech)
   registerSensorHandlers(server);
   registerBluetoothHandlers(server);
+  registerSpeechPageHandlers(server);
   registerEspNowHandlers(server);
+  registerMqttHandlers(server);
   registerGamesHandlers(server);
   
   // SSE events endpoint for server-driven notices

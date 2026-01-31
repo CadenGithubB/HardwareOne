@@ -174,7 +174,7 @@ bool startIMUSensorInternal() {
     return false;
   }
   if (imuEnabled != prev) {
-    sensorStatusBumpWith("imustart@queue");
+    sensorStatusBumpWith("openimu@queue");
   }
 
   // If init was requested, block up to 3s for a result so CLI returns accurate status
@@ -220,12 +220,12 @@ const char* cmd_imustart(const String& cmd) {
 
   // Enqueue the request to centralized queue
   if (enqueueSensorStart(SENSOR_IMU)) {
-    sensorStatusBumpWith("imustart@enqueue");
+    sensorStatusBumpWith("openimu@enqueue");
     int pos = getQueuePosition(SENSOR_IMU);
-    BROADCAST_PRINTF("IMU sensor queued for start (position %d)", pos);
-    return "[IMU] Sensor queued for start";
+    BROADCAST_PRINTF("IMU sensor queued for open (position %d)", pos);
+    return "[IMU] Sensor queued for open";
   } else {
-    return "[IMU] Error: Failed to enqueue start (queue full)";
+    return "[IMU] Error: Failed to enqueue open (queue full)";
   }
 }
 
@@ -241,7 +241,7 @@ const char* cmd_imustop(const String& cmd) {
   broadcastSensorStatus(REMOTE_SENSOR_IMU, false);
 #endif
   
-  return "[IMU] Stop requested; cleanup will complete asynchronously";
+  return "[IMU] Close requested; cleanup will complete asynchronously";
 }
 
 const char* cmd_imuactions(const String& cmd) {
@@ -977,9 +977,9 @@ const char* cmd_imuyawoffset(const String& args) {
 // IMU Command Registry (Sensor-Specific)
 // ============================================================================
 const CommandEntry imuCommands[] = {
-  // Start/Stop
-  { "imustart", "Start BNO055 IMU sensor.", false, cmd_imustart },
-  { "imustop", "Stop BNO055 IMU sensor.", false, cmd_imustop },
+  // Start/Stop (3-level voice: "sensor" -> "motion sensor" -> "open/close")
+  { "openimu", "Start BNO055 IMU sensor.", false, cmd_imustart, nullptr, "sensor", "motion sensor", "open" },
+  { "closeimu", "Stop BNO055 IMU sensor.", false, cmd_imustop, nullptr, "sensor", "motion sensor", "close" },
   
   // Information
   { "imu", "Read IMU sensor data.", false, cmd_imu },

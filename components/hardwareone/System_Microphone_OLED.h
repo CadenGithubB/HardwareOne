@@ -98,9 +98,9 @@ static bool microphoneInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
   // X button: Start/Stop microphone
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (micEnabled) {
-      oledConfirmRequest("Stop mic?", nullptr, microphoneToggleConfirmed, nullptr, false);
+      oledConfirmRequest("Close mic?", nullptr, microphoneToggleConfirmed, nullptr, false);
     } else {
-      oledConfirmRequest("Start mic?", nullptr, microphoneToggleConfirmed, nullptr);
+      oledConfirmRequest("Open mic?", nullptr, microphoneToggleConfirmed, nullptr);
     }
     return true;
   }

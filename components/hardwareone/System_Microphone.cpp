@@ -62,6 +62,97 @@ static char gMicCmdBuffer[512];
 
 // Audio level tracking
 static int lastAudioLevel = 0;
+static uint32_t lastAudioLevelMs = 0;
+
+// Audio preprocessing state (shared between mic and ESP-SR)
+static int32_t gMicDcOffset = 0;
+static bool gMicDcOffsetInitialized = false;
+static float gMicBaseSoftwareGain = 24.0f;
+
+// High-pass filter state (~50Hz cutoff at 16kHz sample rate)
+// alpha = 1 / (1 + 2*pi*fc/fs) where fc=50Hz, fs=16000Hz
+static const float kHighPassAlpha = 0.9806f;
+static float gMicHighPassState = 0.0f;
+static int16_t gMicHighPassPrevIn = 0;
+
+// Pre-emphasis filter coefficient (boosts high frequencies for speech clarity)
+static const float kPreEmphCoeff = 0.97f;
+static int16_t gMicPreEmphPrevSample = 0;
+
+float getMicSoftwareGainMultiplier() {
+  if (micGain <= 0) return 0.0f;
+  return gMicBaseSoftwareGain * ((float)micGain / 50.0f);
+}
+
+int32_t getMicDcOffset() {
+  return gMicDcOffset;
+}
+
+void resetMicAudioProcessingState() {
+  gMicDcOffset = 0;
+  gMicDcOffsetInitialized = false;
+  gMicHighPassState = 0.0f;
+  gMicHighPassPrevIn = 0;
+  gMicPreEmphPrevSample = 0;
+}
+
+void applyMicAudioProcessing(int16_t* buf, size_t sampleCount, float gainMultiplier, bool filtersEnabled) {
+  if (!buf || sampleCount == 0) return;
+
+  // Use provided gain or calculate from micGain setting
+  if (gainMultiplier <= 0.0f) {
+    gainMultiplier = getMicSoftwareGainMultiplier();
+  }
+
+  // Calculate DC offset from this chunk (running average)
+  int64_t sum = 0;
+  for (size_t i = 0; i < sampleCount; i++) {
+    sum += buf[i];
+  }
+  int32_t chunkDc = (int32_t)(sum / (int64_t)sampleCount);
+
+  // Slowly adapt DC offset estimate (EMA with alpha=0.1)
+  if (!gMicDcOffsetInitialized) {
+    gMicDcOffset = chunkDc;
+    gMicDcOffsetInitialized = true;
+  } else {
+    gMicDcOffset = gMicDcOffset + (chunkDc - gMicDcOffset) / 10;
+  }
+
+  // Apply audio preprocessing pipeline:
+  // 1. DC offset removal (always)
+  // 2. High-pass filter (~50Hz cutoff) - optional
+  // 3. Pre-emphasis filter (boost high frequencies) - optional
+  // 4. Software gain (always)
+  for (size_t i = 0; i < sampleCount; i++) {
+    // Step 1: Remove DC offset
+    float sample = (float)(buf[i] - gMicDcOffset);
+    
+    if (filtersEnabled) {
+      // Step 2: High-pass filter (removes low-freq rumble/hum)
+      // y[n] = alpha * (y[n-1] + x[n] - x[n-1])
+      float hpOut = kHighPassAlpha * (gMicHighPassState + sample - (float)gMicHighPassPrevIn);
+      gMicHighPassState = hpOut;
+      gMicHighPassPrevIn = (int16_t)sample;
+      sample = hpOut;
+      
+      // Step 3: Pre-emphasis filter (boosts high frequencies for speech clarity)
+      // y[n] = x[n] - alpha * x[n-1]
+      float preEmphOut = sample - kPreEmphCoeff * (float)gMicPreEmphPrevSample;
+      gMicPreEmphPrevSample = (int16_t)sample;
+      sample = preEmphOut;
+    }
+    
+    // Step 4: Apply software gain
+    sample *= gainMultiplier;
+    
+    // Clamp to 16-bit range
+    int32_t sampleInt = (int32_t)sample;
+    if (sampleInt > 32767) sampleInt = 32767;
+    if (sampleInt < -32768) sampleInt = -32768;
+    buf[i] = (int16_t)sampleInt;
+  }
+}
 
 // WAV header structure
 struct WavHeader {
@@ -119,9 +210,29 @@ static void recordingTask(void* param) {
   uint32_t loopCount = 0;
   while (micRecording && micEnabled && recordingSamples < maxSamples) {
     size_t bytesRead = 0;
-    esp_err_t err = i2s_channel_read(rx_handle, buffer, RECORDING_CHUNK_SIZE, &bytesRead, pdMS_TO_TICKS(100));
+    esp_err_t err;
+    {
+      I2sMicLockGuard i2sGuard("mic.record.read");
+      err = i2s_channel_read(rx_handle, buffer, RECORDING_CHUNK_SIZE, &bytesRead, pdMS_TO_TICKS(100));
+    }
     
     if (err == ESP_OK && bytesRead > 0 && recordingFile) {
+      {
+        int32_t sum = 0;
+        size_t sampleCount = bytesRead / sizeof(int16_t);
+
+        applyMicAudioProcessing(buffer, sampleCount);
+
+        for (size_t i = 0; i < sampleCount; i++) {
+          int16_t v = buffer[i];
+          sum += (v < 0) ? -v : v;
+        }
+        int32_t avg = (sampleCount > 0) ? (sum / (int32_t)sampleCount) : 0;
+        int level = map(avg, 0, 16384, 0, 100);
+        level = constrain(level, 0, 100);
+        lastAudioLevel = level;
+        lastAudioLevelMs = millis();
+      }
       FsLockGuard fsGuard("mic.record.write");
       size_t written = recordingFile.write((uint8_t*)buffer, bytesRead);
       recordingSamples += bytesRead / sizeof(int16_t);
@@ -332,17 +443,25 @@ bool deleteRecording(const char* filename) {
 }
 
 bool initMicrophone() {
-  DEBUG_MICF("[MIC_INIT] ========== initMicrophone() ENTRY ==========");
-  DEBUG_MICF("[MIC_INIT] micEnabled=%d micConnected=%d", micEnabled, micConnected);
-  DEBUG_MICF("[MIC_INIT] Heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  WARN_SYSTEMF("[MIC_INIT] ########## initMicrophone() BEGIN ##########");
+  WARN_SYSTEMF("[MIC_INIT] Heap: free=%u, PSRAM_free=%u", 
+               (unsigned)esp_get_free_heap_size(), 
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  WARN_SYSTEMF("[MIC_INIT] Current state: micEnabled=%d, micConnected=%d", micEnabled, micConnected);
+
+  gMicDcOffset = 0;
+  gMicDcOffsetInitialized = false;
+
+  I2sMicLockGuard i2sGuard("mic.init");
   
   if (micEnabled) {
-    DEBUG_MICF("[MIC_INIT] Already initialized - returning true");
+    WARN_SYSTEMF("[MIC_INIT] Already initialized - returning true");
     INFO_SENSORSF("[Microphone] Already initialized");
     return true;
   }
 
   // Load settings from saved values
+  WARN_SYSTEMF("[MIC_INIT] Loading settings from gSettings...");
   if (gSettings.microphoneSampleRate >= 8000 && gSettings.microphoneSampleRate <= 48000) {
     micSampleRate = gSettings.microphoneSampleRate;
   }
@@ -353,31 +472,33 @@ bool initMicrophone() {
     micBitDepth = gSettings.microphoneBitDepth;
   }
 
-  DEBUG_MICF("[MIC_INIT] Starting initialization (new I2S PDM driver)...");
+  WARN_SYSTEMF("[MIC_INIT] Audio settings: sampleRate=%d, bitDepth=%d, channels=%d, gain=%d%%",
+               micSampleRate, micBitDepth, micChannels, micGain);
+  WARN_SYSTEMF("[MIC_INIT] Pin config: CLK=%d, DATA=%d", MIC_PDM_CLK_PIN, MIC_PDM_DATA_PIN);
   INFO_SENSORSF("[Microphone] Initializing PDM microphone...");
-  
-  DEBUG_MICF("[MIC_INIT] Audio settings: sampleRate=%d bitDepth=%d channels=%d gain=%d%%",
-             micSampleRate, micBitDepth, micChannels, micGain);
-  DEBUG_MICF("[MIC_INIT] Pin config: CLK=%d DATA=%d", MIC_PDM_CLK_PIN, MIC_PDM_DATA_PIN);
 
   // Configure I2S channel for PDM RX (new driver API)
-  DEBUG_MICF("[MIC_INIT] Creating I2S PDM RX channel...");
+  WARN_SYSTEMF("[MIC_INIT] Creating I2S channel config...");
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   chan_cfg.dma_desc_num = 4;
   chan_cfg.dma_frame_num = AUDIO_BUFFER_SIZE;
   
+  WARN_SYSTEMF("[MIC_INIT] Channel config: i2s_num=0, dma_desc_num=%d, dma_frame_num=%d",
+               (int)chan_cfg.dma_desc_num, (int)chan_cfg.dma_frame_num);
+  
+  WARN_SYSTEMF("[MIC_INIT] Calling i2s_new_channel()...");
   esp_err_t err = i2s_new_channel(&chan_cfg, NULL, &rx_handle);
-  DEBUG_MICF("[MIC_INIT] i2s_new_channel returned: 0x%x", err);
+  WARN_SYSTEMF("[MIC_INIT] i2s_new_channel returned: 0x%x (%s), handle=%p", 
+               err, esp_err_to_name(err), rx_handle);
   
   if (err != ESP_OK) {
-    DEBUG_MICF("[MIC_INIT] *** I2S CHANNEL CREATE FAILED! ***");
+    WARN_SYSTEMF("[MIC_INIT] *** I2S CHANNEL CREATE FAILED! ***");
     INFO_SENSORSF("[Microphone] Failed to create I2S channel: 0x%x", err);
     return false;
   }
-  DEBUG_MICF("[MIC_INIT] I2S channel created, handle=%p", rx_handle);
 
   // Configure PDM RX mode
-  DEBUG_MICF("[MIC_INIT] Configuring PDM RX mode...");
+  WARN_SYSTEMF("[MIC_INIT] Configuring PDM RX mode...");
   i2s_pdm_rx_config_t pdm_rx_cfg = {
     .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG((uint32_t)micSampleRate),
     .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
@@ -390,168 +511,191 @@ bool initMicrophone() {
     },
   };
   
-  DEBUG_MICF("[MIC_INIT] PDM config: sample_rate=%d, clk=%d, din=%d", 
-             micSampleRate, MIC_PDM_CLK_PIN, MIC_PDM_DATA_PIN);
+  WARN_SYSTEMF("[MIC_INIT] PDM clk_cfg: sample_rate_hz=%u, clk_src=%d, mclk_mult=%d, bclk_div=%u",
+               (unsigned)pdm_rx_cfg.clk_cfg.sample_rate_hz,
+               (int)pdm_rx_cfg.clk_cfg.clk_src,
+               (int)pdm_rx_cfg.clk_cfg.mclk_multiple,
+               (unsigned)pdm_rx_cfg.clk_cfg.bclk_div);
+  WARN_SYSTEMF("[MIC_INIT] PDM gpio_cfg: clk=%d, din=%d, clk_inv=%d",
+               (int)pdm_rx_cfg.gpio_cfg.clk, (int)pdm_rx_cfg.gpio_cfg.din,
+               (int)pdm_rx_cfg.gpio_cfg.invert_flags.clk_inv);
+  WARN_SYSTEMF("[MIC_INIT] PDM slot_cfg: data_bit_width=16, slot_mode=MONO");
   
+  WARN_SYSTEMF("[MIC_INIT] Calling i2s_channel_init_pdm_rx_mode()...");
   err = i2s_channel_init_pdm_rx_mode(rx_handle, &pdm_rx_cfg);
-  DEBUG_MICF("[MIC_INIT] i2s_channel_init_pdm_rx_mode returned: 0x%x", err);
+  WARN_SYSTEMF("[MIC_INIT] i2s_channel_init_pdm_rx_mode returned: 0x%x (%s)", err, esp_err_to_name(err));
   
   if (err != ESP_OK) {
-    DEBUG_MICF("[MIC_INIT] *** PDM RX INIT FAILED! ***");
+    WARN_SYSTEMF("[MIC_INIT] *** PDM RX INIT FAILED! ***");
     INFO_SENSORSF("[Microphone] Failed to init PDM RX: 0x%x", err);
     i2s_del_channel(rx_handle);
     rx_handle = NULL;
     return false;
   }
-  DEBUG_MICF("[MIC_INIT] PDM RX mode initialized");
 
   // Enable the channel
-  DEBUG_MICF("[MIC_INIT] Enabling I2S channel...");
+  WARN_SYSTEMF("[MIC_INIT] Calling i2s_channel_enable()...");
   err = i2s_channel_enable(rx_handle);
-  DEBUG_MICF("[MIC_INIT] i2s_channel_enable returned: 0x%x", err);
+  WARN_SYSTEMF("[MIC_INIT] i2s_channel_enable returned: 0x%x (%s)", err, esp_err_to_name(err));
   
   if (err != ESP_OK) {
-    DEBUG_MICF("[MIC_INIT] *** I2S CHANNEL ENABLE FAILED! ***");
+    WARN_SYSTEMF("[MIC_INIT] *** I2S CHANNEL ENABLE FAILED! ***");
     INFO_SENSORSF("[Microphone] Failed to enable I2S channel: 0x%x", err);
     i2s_del_channel(rx_handle);
     rx_handle = NULL;
     return false;
   }
-  DEBUG_MICF("[MIC_INIT] I2S channel enabled");
 
   // Flush initial samples (PDM needs warm-up time)
-  DEBUG_MICF("[MIC_INIT] Flushing initial PDM samples...");
+  WARN_SYSTEMF("[MIC_INIT] Starting PDM warm-up flush (10 reads of 512 bytes)...");
   int16_t flushBuf[256];
   size_t bytesRead = 0;
   int flushCount = 0;
   int successCount = 0;
   for (int i = 0; i < 10; i++) {
+    uint32_t readStart = millis();
     esp_err_t readErr = i2s_channel_read(rx_handle, flushBuf, sizeof(flushBuf), &bytesRead, pdMS_TO_TICKS(100));
+    uint32_t readMs = millis() - readStart;
     flushCount++;
     if (readErr == ESP_OK && bytesRead > 0) {
       successCount++;
-      DEBUG_MICF("[MIC_INIT] Flush %d: read %u bytes OK", i, bytesRead);
+      if (i == 9) {
+        int16_t mn = 32767, mx = -32768;
+        for (size_t j = 0; j < bytesRead / 2; j++) {
+          if (flushBuf[j] < mn) mn = flushBuf[j];
+          if (flushBuf[j] > mx) mx = flushBuf[j];
+        }
+        WARN_SYSTEMF("[MIC_INIT] Flush[%d]: %u bytes in %u ms, min=%d, max=%d", i, (unsigned)bytesRead, readMs, mn, mx);
+      }
     } else {
-      DEBUG_MICF("[MIC_INIT] Flush %d: err=0x%x bytesRead=%u", i, readErr, bytesRead);
+      WARN_SYSTEMF("[MIC_INIT] Flush[%d]: err=0x%x, bytes=%u, took %u ms", i, readErr, (unsigned)bytesRead, readMs);
     }
   }
-  DEBUG_MICF("[MIC_INIT] Flush complete: %d/%d successful reads", successCount, flushCount);
+  WARN_SYSTEMF("[MIC_INIT] Warm-up flush complete: %d/%d successful reads", successCount, flushCount);
   
   if (successCount == 0) {
-    DEBUG_MICF("[MIC_INIT] WARNING: No data received from microphone during flush!");
+    WARN_SYSTEMF("[MIC_INIT] WARNING: No data received from microphone during flush!");
     INFO_SENSORSF("[Microphone] WARNING: Microphone may not be connected or responding");
   }
 
   micEnabled = true;
   micConnected = (successCount > 0);  // Only mark connected if we got data
-  sensorStatusBumpWith("micstart");
+  sensorStatusBumpWith("openmic");
 
-  DEBUG_MICF("[MIC_INIT] ========== initMicrophone() COMPLETE ==========");
-  DEBUG_MICF("[MIC_INIT] micEnabled=%d micConnected=%d", micEnabled, micConnected);
-  DEBUG_MICF("[MIC_INIT] Final heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  WARN_SYSTEMF("[MIC_INIT] ########## initMicrophone() SUCCESS ##########");
+  WARN_SYSTEMF("[MIC_INIT] micEnabled=%d, micConnected=%d", micEnabled, micConnected);
+  WARN_SYSTEMF("[MIC_INIT] Final heap: free=%u, PSRAM_free=%u", 
+               (unsigned)esp_get_free_heap_size(), 
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   INFO_SENSORSF("[Microphone] Initialized: %dHz, %d-bit, %d channel(s)", 
                 micSampleRate, micBitDepth, micChannels);
   return true;
 }
 
 void stopMicrophone() {
-  DEBUG_MICF("[MIC_STOP] stopMicrophone() called, micEnabled=%d", micEnabled);
+  WARN_SYSTEMF("[MIC_STOP] ########## stopMicrophone() BEGIN ##########");
+  WARN_SYSTEMF("[MIC_STOP] Current state: micEnabled=%d, rx_handle=%p", micEnabled, rx_handle);
+
+  I2sMicLockGuard i2sGuard("mic.stop");
   
   if (!micEnabled) {
-    DEBUG_MICF("[MIC_STOP] Already stopped - returning");
+    WARN_SYSTEMF("[MIC_STOP] Already stopped - returning");
     INFO_SENSORSF("[Microphone] Already stopped");
     return;
   }
 
-  DEBUG_MICF("[MIC_STOP] Heap before stop: %u", esp_get_free_heap_size());
+  WARN_SYSTEMF("[MIC_STOP] Heap before stop: free=%u, PSRAM_free=%u", 
+               (unsigned)esp_get_free_heap_size(), 
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   
   if (rx_handle) {
-    DEBUG_MICF("[MIC_STOP] Disabling I2S channel...");
+    WARN_SYSTEMF("[MIC_STOP] Calling i2s_channel_disable()...");
     esp_err_t err = i2s_channel_disable(rx_handle);
-    DEBUG_MICF("[MIC_STOP] i2s_channel_disable returned: 0x%x", err);
+    WARN_SYSTEMF("[MIC_STOP] i2s_channel_disable returned: 0x%x (%s)", err, esp_err_to_name(err));
     
-    DEBUG_MICF("[MIC_STOP] Deleting I2S channel...");
+    WARN_SYSTEMF("[MIC_STOP] Calling i2s_del_channel()...");
     err = i2s_del_channel(rx_handle);
-    DEBUG_MICF("[MIC_STOP] i2s_del_channel returned: 0x%x", err);
+    WARN_SYSTEMF("[MIC_STOP] i2s_del_channel returned: 0x%x (%s)", err, esp_err_to_name(err));
     rx_handle = NULL;
   }
 
   micEnabled = false;
   micRecording = false;
-  sensorStatusBumpWith("micstop");
+  sensorStatusBumpWith("closemic");
 
-  DEBUG_MICF("[MIC_STOP] Heap after stop: %u", esp_get_free_heap_size());
-  DEBUG_MICF("[MIC_STOP] micEnabled=%d micRecording=%d", micEnabled, micRecording);
+  WARN_SYSTEMF("[MIC_STOP] ########## stopMicrophone() COMPLETE ##########");
+  WARN_SYSTEMF("[MIC_STOP] Heap after stop: free=%u, PSRAM_free=%u", 
+               (unsigned)esp_get_free_heap_size(), 
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   INFO_SENSORSF("[Microphone] Stopped");
 }
 
 int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
-  DEBUG_MICF("[MIC_CAPTURE] captureAudioSamples(count=%u) called", sampleCount);
-  DEBUG_MICF("[MIC_CAPTURE] micEnabled=%d", micEnabled);
+  WARN_SYSTEMF("[MIC_CAPTURE] captureAudioSamples(count=%u) called", (unsigned)sampleCount);
+  WARN_SYSTEMF("[MIC_CAPTURE] micEnabled=%d, rx_handle=%p", micEnabled, rx_handle);
   
   if (!micEnabled) {
-    DEBUG_MICF("[MIC_CAPTURE] Mic not enabled - returning NULL");
+    WARN_SYSTEMF("[MIC_CAPTURE] Mic not enabled - returning NULL");
     if (outLen) *outLen = 0;
     return nullptr;
   }
 
   size_t bufferSize = sampleCount * sizeof(int16_t);
-  DEBUG_MICF("[MIC_CAPTURE] Allocating %u bytes for %u samples...", bufferSize, sampleCount);
-  DEBUG_MICF("[MIC_CAPTURE] Heap before alloc: %u, PSRAM: %u", 
-             esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  WARN_SYSTEMF("[MIC_CAPTURE] Allocating %u bytes for %u samples...", (unsigned)bufferSize, (unsigned)sampleCount);
+  WARN_SYSTEMF("[MIC_CAPTURE] Heap before alloc: free=%u, PSRAM_free=%u", 
+               (unsigned)esp_get_free_heap_size(), 
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   
   int16_t* buffer = (int16_t*)ps_alloc(bufferSize, AllocPref::PreferPSRAM, "mic.samples");
-  DEBUG_MICF("[MIC_CAPTURE] ps_alloc returned: %p", buffer);
+  WARN_SYSTEMF("[MIC_CAPTURE] ps_alloc returned: %p", buffer);
   
   if (!buffer) {
-    DEBUG_MICF("[MIC_CAPTURE] *** ALLOCATION FAILED! ***");
+    WARN_SYSTEMF("[MIC_CAPTURE] *** ALLOCATION FAILED! ***");
     INFO_SENSORSF("[Microphone] Failed to allocate %u bytes", bufferSize);
     if (outLen) *outLen = 0;
     return nullptr;
   }
 
-  DEBUG_MICF("[MIC_CAPTURE] Calling i2s_channel_read(bufSize=%u)...", bufferSize);
+  WARN_SYSTEMF("[MIC_CAPTURE] Calling i2s_channel_read(handle=%p, bufSize=%u, timeout=MAX)...", rx_handle, (unsigned)bufferSize);
   unsigned long startMs = millis();
   size_t bytesRead = 0;
-  esp_err_t err = i2s_channel_read(rx_handle, buffer, bufferSize, &bytesRead, portMAX_DELAY);
+  esp_err_t err;
+  {
+    I2sMicLockGuard i2sGuard("mic.capture.read");
+    err = i2s_channel_read(rx_handle, buffer, bufferSize, &bytesRead, portMAX_DELAY);
+  }
   unsigned long elapsed = millis() - startMs;
   
-  DEBUG_MICF("[MIC_CAPTURE] i2s_channel_read returned 0x%x in %lu ms, bytesRead=%u", err, elapsed, bytesRead);
+  WARN_SYSTEMF("[MIC_CAPTURE] i2s_channel_read returned 0x%x (%s) in %lu ms, bytesRead=%u", 
+               err, esp_err_to_name(err), elapsed, (unsigned)bytesRead);
   
   if (err != ESP_OK) {
-    DEBUG_MICF("[MIC_CAPTURE] *** I2S READ FAILED! ***");
+    WARN_SYSTEMF("[MIC_CAPTURE] *** I2S READ FAILED! ***");
     INFO_SENSORSF("[Microphone] Failed to read samples: 0x%x", err);
     free(buffer);
     if (outLen) *outLen = 0;
     return nullptr;
   }
 
-  // Apply software gain
-  if (micGain != 50) {  // Only apply if not at default 50%
-    float gainMultiplier = micGain / 50.0f;  // 50% = 1.0x, 100% = 2.0x, 0% = 0.0x
-    size_t sampleCount = bytesRead / sizeof(int16_t);
-    for (size_t i = 0; i < sampleCount; i++) {
-      int32_t sample = (int32_t)(buffer[i] * gainMultiplier);
-      // Clamp to prevent overflow
-      if (sample > 32767) sample = 32767;
-      if (sample < -32768) sample = -32768;
-      buffer[i] = (int16_t)sample;
-    }
-    DEBUG_MICF("[MIC_CAPTURE] Applied gain: %d%% (multiplier: %.2f)", micGain, gainMultiplier);
-  }
+  applyMicAudioProcessing(buffer, bytesRead / sizeof(int16_t));
 
   // Log sample statistics
   if (bytesRead >= 4) {
     int16_t minVal = buffer[0], maxVal = buffer[0];
-    for (size_t i = 1; i < bytesRead / sizeof(int16_t); i++) {
+    int64_t sumAbs = 0;
+    size_t numSamples = bytesRead / sizeof(int16_t);
+    for (size_t i = 0; i < numSamples; i++) {
       if (buffer[i] < minVal) minVal = buffer[i];
       if (buffer[i] > maxVal) maxVal = buffer[i];
+      sumAbs += (buffer[i] < 0) ? -buffer[i] : buffer[i];
     }
-    DEBUG_MICF("[MIC_CAPTURE] Sample stats: min=%d max=%d range=%d", minVal, maxVal, maxVal - minVal);
+    float avgAbs = (float)sumAbs / (float)numSamples;
+    WARN_SYSTEMF("[MIC_CAPTURE] Sample stats: min=%d, max=%d, range=%d, avg_abs=%.1f", 
+                 minVal, maxVal, maxVal - minVal, avgAbs);
   }
 
   if (outLen) *outLen = bytesRead;
-  DEBUG_MICF("[MIC_CAPTURE] Returning buffer=%p, len=%u", buffer, bytesRead);
+  WARN_SYSTEMF("[MIC_CAPTURE] Returning buffer=%p, len=%u", buffer, (unsigned)bytesRead);
   return buffer;
 }
 
@@ -571,11 +715,33 @@ int getAudioLevel() {
     return 0;
   }
 
+  uint32_t now = millis();
+  if (micRecording) {
+    return lastAudioLevel;
+  }
+  if (lastAudioLevelMs != 0 && (now - lastAudioLevelMs) < 150) {
+    return lastAudioLevel;
+  }
+
   // Read a small sample to calculate level
   int16_t samples[256];
   size_t bytesRead = 0;
-  
+
+  bool took = false;
+  if (i2sMicMutex && xSemaphoreTake(i2sMicMutex, 0) == pdTRUE) {
+    took = true;
+  } else {
+    if (shouldLog) {
+      DEBUG_MICF("[MIC_LEVEL] i2sMicMutex busy; returning cached last=%d", lastAudioLevel);
+    }
+    return lastAudioLevel;
+  }
+
   esp_err_t err = i2s_channel_read(rx_handle, samples, sizeof(samples), &bytesRead, pdMS_TO_TICKS(50));
+
+  if (took && i2sMicMutex) {
+    xSemaphoreGive(i2sMicMutex);
+  }
   
   if (err != ESP_OK || bytesRead == 0) {
     if (shouldLog) {
@@ -585,9 +751,11 @@ int getAudioLevel() {
     return lastAudioLevel;
   }
 
+  size_t sampleCount = bytesRead / sizeof(int16_t);
+  applyMicAudioProcessing(samples, sampleCount);
+
   // Calculate RMS level
   int32_t sum = 0;
-  size_t sampleCount = bytesRead / sizeof(int16_t);
   int16_t minVal = samples[0], maxVal = samples[0];
   
   for (size_t i = 0; i < sampleCount; i++) {
@@ -607,6 +775,7 @@ int getAudioLevel() {
   }
   
   lastAudioLevel = level;
+  lastAudioLevelMs = now;
   return level;
 }
 
@@ -675,7 +844,7 @@ const char* cmd_micrecord(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!micEnabled) {
-    return "Microphone not enabled. Use 'micstart' first.";
+    return "Microphone not enabled. Use 'openmic' first.";
   }
 
   String arg = cmd;
@@ -847,12 +1016,103 @@ const char* cmd_micbitdepth(const String& cmd) {
   return gMicCmdBuffer;
 }
 
+// Real-time audio visualizer state
+static volatile bool gMicVisualizerRunning = false;
+static TaskHandle_t gMicVisualizerTask = nullptr;
+
+static void micVisualizerTaskFunc(void* param) {
+  const size_t bufSize = 512;
+  int16_t* samples = (int16_t*)heap_caps_malloc(bufSize * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!samples) {
+    gMicVisualizerRunning = false;
+    gMicVisualizerTask = nullptr;
+    vTaskDelete(nullptr);
+    return;
+  }
+  
+  Serial.println("\n=== AUDIO VISUALIZER (press any key to stop) ===");
+  Serial.println("Level: [--------------------] Peak | Min/Max samples");
+  
+  while (gMicVisualizerRunning && micEnabled) {
+    size_t bytesRead = 0;
+    esp_err_t err = i2s_channel_read(rx_handle, samples, bufSize * sizeof(int16_t), &bytesRead, pdMS_TO_TICKS(100));
+    
+    if (err == ESP_OK && bytesRead > 0) {
+      size_t sampleCount = bytesRead / sizeof(int16_t);
+      applyMicAudioProcessing(samples, sampleCount);
+      
+      // Calculate stats
+      int16_t minVal = 32767, maxVal = -32768;
+      int64_t sumAbs = 0;
+      for (size_t i = 0; i < sampleCount; i++) {
+        if (samples[i] < minVal) minVal = samples[i];
+        if (samples[i] > maxVal) maxVal = samples[i];
+        sumAbs += abs(samples[i]);
+      }
+      int avgAbs = (int)(sumAbs / sampleCount);
+      
+      // Map to 0-100 scale (32767 = max amplitude)
+      int level = (avgAbs * 100) / 32767;
+      if (level > 100) level = 100;
+      
+      // Create ASCII bar (40 chars wide)
+      char bar[45];
+      int barLen = (level * 40) / 100;
+      for (int i = 0; i < 40; i++) {
+        if (i < barLen) {
+          if (i < 20) bar[i] = '=';
+          else if (i < 32) bar[i] = '#';
+          else bar[i] = '!';  // Clipping warning
+        } else {
+          bar[i] = '-';
+        }
+      }
+      bar[40] = '\0';
+      
+      // Print with carriage return to overwrite line
+      Serial.printf("\r[%s] %3d%% | %6d / %6d", bar, level, minVal, maxVal);
+    }
+    
+    // Check for key press to stop
+    if (Serial.available()) {
+      while (Serial.available()) Serial.read();
+      break;
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(50));  // ~20 updates/sec
+  }
+  
+  Serial.println("\n=== VISUALIZER STOPPED ===");
+  heap_caps_free(samples);
+  gMicVisualizerRunning = false;
+  gMicVisualizerTask = nullptr;
+  vTaskDelete(nullptr);
+}
+
+const char* cmd_micviz(const String& cmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  
+  if (!micEnabled) {
+    return "Microphone not enabled. Use 'openmic' first.";
+  }
+  
+  if (gMicVisualizerRunning) {
+    gMicVisualizerRunning = false;
+    return "Stopping visualizer...";
+  }
+  
+  gMicVisualizerRunning = true;
+  xTaskCreatePinnedToCore(micVisualizerTaskFunc, "mic_viz", 4096, nullptr, 3, &gMicVisualizerTask, 0);
+  return "Visualizer started (press any key to stop)";
+}
+
 // Command registry
 const CommandEntry micCommands[] = {
   { "mic", "Microphone sensor status and control.", false, cmd_mic, "Usage: mic" },
-  { "micstart", "Start microphone sensor.", false, cmd_micstart, "Usage: micstart" },
-  { "micstop", "Stop microphone sensor.", false, cmd_micstop, "Usage: micstop" },
+  { "openmic", "Start microphone sensor.", false, cmd_micstart, nullptr, "microphone", "open" },
+  { "closemic", "Stop microphone sensor.", false, cmd_micstop, nullptr, "microphone", "close" },
   { "miclevel", "Get current audio level.", false, cmd_miclevel, "Usage: miclevel" },
+  { "micviz", "Real-time audio level visualizer.", false, cmd_micviz, "Usage: micviz (press any key to stop)" },
   { "micrecord", "Start/stop recording to WAV file.", false, cmd_micrecord, "Usage: micrecord <start|stop>" },
   { "miclist", "List saved recordings.", false, cmd_miclist, "Usage: miclist" },
   { "micdelete", "Delete recording(s).", false, cmd_micdelete, "Usage: micdelete <filename|all>" },

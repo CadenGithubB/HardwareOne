@@ -184,7 +184,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "  var reader = new FileReader();\n"
     "  reader.onload = function(e) {\n"
     "    var b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(e.target.result)));\n"
-    "    var body = 'path=/models/' + encodeURIComponent(file.name) + '&binary=1&content=' + encodeURIComponent(b64);\n"
+    "    var body = 'path=/EI Models/' + encodeURIComponent(file.name) + '&binary=1&content=' + encodeURIComponent(b64);\n"
     "    fetch('/api/files/upload', {method:'POST', credentials:'include', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:body})\n"
     "      .then(function(r){ return r.json(); })\n"
     "      .then(function(data) {\n"

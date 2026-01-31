@@ -105,10 +105,10 @@ static void rtcToggleConfirmed(void* userData) {
 
   if (rtcEnabled && rtcConnected) {
     Serial.println("[RTC] Confirmed: Stopping RTC...");
-    executeOLEDCommand("rtcstop");
+    executeOLEDCommand("closertc");
   } else {
     Serial.println("[RTC] Confirmed: Starting RTC...");
-    executeOLEDCommand("rtcstart");
+    executeOLEDCommand("openrtc");
   }
 }
 
@@ -119,9 +119,9 @@ static bool rtcInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (rtcEnabled && rtcConnected) {
-      oledConfirmRequest("Stop RTC?", nullptr, rtcToggleConfirmed, nullptr, false);
+      oledConfirmRequest("Close RTC?", nullptr, rtcToggleConfirmed, nullptr, false);
     } else {
-      oledConfirmRequest("Start RTC?", nullptr, rtcToggleConfirmed, nullptr);
+      oledConfirmRequest("Open RTC?", nullptr, rtcToggleConfirmed, nullptr);
     }
     return true;
   }

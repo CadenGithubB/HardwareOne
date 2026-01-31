@@ -11,7 +11,7 @@ inline void streamBNO055ImuSensorCard(httpd_req_t* req) {
       <div class='sensor-title'><span>Gyroscope & Accelerometer (BNO055)</span><span class='status-indicator status-disabled' id='gyro-status-indicator'></span></div>
       <div class='sensor-description'>9-axis IMU sensor for orientation, acceleration, and gyroscope data.</div>
       <div id='imu-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
-      <div class='sensor-controls'><button class='btn' id='btn-imu-start'>Start IMU</button><button class='btn' id='btn-imu-stop'>Stop IMU</button></div>
+      <div class='sensor-controls'><button class='btn' id='btn-imu-start'>Open IMU</button><button class='btn' id='btn-imu-stop'>Close IMU</button></div>
       <div class='sensor-data' id='gyro-data'>
         <div class='gyro-display-container'>
           <div style='display:flex;gap:1rem;align-items:center'>
@@ -26,7 +26,7 @@ inline void streamBNO055ImuSensorCard(httpd_req_t* req) {
 }
 
 inline void streamBNO055ImuSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-imu-start','imustart');bind('btn-imu-stop','imustop');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "bind('btn-imu-start','openimu');bind('btn-imu-stop','closeimu');", HTTPD_RESP_USE_STRLEN);
 }
 
 inline void streamBNO055ImuSensorJs(httpd_req_t* req) {

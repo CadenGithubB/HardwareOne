@@ -991,7 +991,7 @@ static void executeSubmenuAction(int submenuType, int action) {
               if (strcmp(maps[i], currentRel) == 0) { currentIdx = i; break; }
             }
             char path[128];
-            snprintf(path, sizeof(path), "/maps/%s", maps[(currentIdx + 1) % mapCount]);
+            snprintf(path, sizeof(path), "/maps/%.95s", maps[(currentIdx + 1) % mapCount]);
             MapCore::loadMapFile(path);
             gMapCenterSet = false;
             gMapManuallyPanned = false;
@@ -1012,7 +1012,7 @@ static void executeSubmenuAction(int submenuType, int action) {
               if (strcmp(maps[i], currentRel) == 0) { currentIdx = i; break; }
             }
             char path[128];
-            snprintf(path, sizeof(path), "/maps/%s", maps[(currentIdx - 1 + mapCount) % mapCount]);
+            snprintf(path, sizeof(path), "/maps/%.95s", maps[(currentIdx - 1 + mapCount) % mapCount]);
             MapCore::loadMapFile(path);
             gMapCenterSet = false;
             gMapManuallyPanned = false;

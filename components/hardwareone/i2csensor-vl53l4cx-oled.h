@@ -74,9 +74,9 @@ static void tofToggleConfirmed(void* userData) {
 static bool tofInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (tofEnabled && tofConnected) {
-      oledConfirmRequest("Stop ToF?", nullptr, tofToggleConfirmed, nullptr, false);
+      oledConfirmRequest("Close ToF?", nullptr, tofToggleConfirmed, nullptr, false);
     } else {
-      oledConfirmRequest("Start ToF?", nullptr, tofToggleConfirmed, nullptr);
+      oledConfirmRequest("Open ToF?", nullptr, tofToggleConfirmed, nullptr);
     }
     return true;
   }

@@ -382,8 +382,14 @@ String generateNavigation(const String& activePage, const String& username) {
 #if ENABLE_ESPNOW
   link("/espnow", "espnow", "ESP-NOW");
 #endif
+#if ENABLE_MQTT
+  link("/mqtt", "mqtt", "MQTT");
+#endif
   link("/files", "files", "Files");
   link("/logging", "logging", "Logging");
+#if ENABLE_ESP_SR
+  link("/speech", "speech", "Speech");
+#endif
 #if ENABLE_AUTOMATION
   link("/automations", "automations", "Automations");
 #endif

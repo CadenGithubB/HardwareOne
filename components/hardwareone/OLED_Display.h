@@ -105,7 +105,8 @@ enum OLEDMode {
   OLED_GPS_MAP,        // GPS map view with offline maps
   OLED_MICROPHONE,     // PDM microphone VU meter and recording
   OLED_RTC_DATA,       // RTC date/time/temperature display
-  OLED_PRESENCE_DATA   // STHS34PF80 IR presence/motion sensor view
+  OLED_PRESENCE_DATA,  // STHS34PF80 IR presence/motion sensor view
+  OLED_SPEECH          // ESP-SR speech recognition status and control
 };
 
 // Menu item structure for OLED menu (legacy - kept for compatibility)

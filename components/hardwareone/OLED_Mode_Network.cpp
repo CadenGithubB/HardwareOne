@@ -151,7 +151,7 @@ void displayNetworkInfo() {
   options[1] = wifiConnected ? "---" : "Connect";        // Hide Connect when connected
   options[2] = "WiFi Management";
   options[3] = wifiConnected ? "Disconnect" : "---";     // Hide Disconnect when not connected
-  options[4] = httpRunning ? "Stop HTTP" : "Start HTTP";
+  options[4] = httpRunning ? "Close HTTP" : "Open HTTP";
   
   for (int i = 0; i < NETWORK_MENU_ITEMS; i++) {
     // Skip disabled options in display
@@ -307,12 +307,12 @@ void networkMenuDown() {
 // Confirmation callbacks for HTTP Start/Stop
 static void httpStartConfirmedNetwork(void* userData) {
   (void)userData;
-  executeOLEDCommand("httpstart");
+  executeOLEDCommand("openhttp");
 }
 
 static void httpStopConfirmedNetwork(void* userData) {
   (void)userData;
-  executeOLEDCommand("httpstop");
+  executeOLEDCommand("closehttp");
 }
 
 void executeNetworkAction() {
@@ -582,7 +582,7 @@ void displayNetworkInfoRendered() {
   options[1] = networkRenderData.wifiConnected ? "---" : "Connect";
   options[2] = "WiFi Management";
   options[3] = networkRenderData.wifiConnected ? "Disconnect" : "---";
-  options[4] = httpRunning ? "Stop HTTP" : "Start HTTP";
+  options[4] = httpRunning ? "Close HTTP" : "Open HTTP";
 
   for (int i = 0; i < NETWORK_MENU_ITEMS; i++) {
     if (strcmp(options[i], "---") == 0) {

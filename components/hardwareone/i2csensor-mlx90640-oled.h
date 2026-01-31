@@ -127,9 +127,9 @@ static void thermalToggleConfirmed(void* userData) {
 static bool thermalInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (thermalEnabled && thermalConnected) {
-      oledConfirmRequest("Stop Thermal?", nullptr, thermalToggleConfirmed, nullptr, false);
+      oledConfirmRequest("Close Thermal?", nullptr, thermalToggleConfirmed, nullptr, false);
     } else {
-      oledConfirmRequest("Start Thermal?", nullptr, thermalToggleConfirmed, nullptr);
+      oledConfirmRequest("Open Thermal?", nullptr, thermalToggleConfirmed, nullptr);
     }
     return true;  // Input handled
   }

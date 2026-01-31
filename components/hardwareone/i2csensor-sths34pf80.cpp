@@ -185,14 +185,14 @@ const char* cmd_presencestart(const String& cmd) {
   }
   
   if (enqueueSensorStart(SENSOR_PRESENCE)) {
-    sensorStatusBumpWith("presencestart@enqueue");
-    if (!ensureDebugBuffer()) return "[PRESENCE] Sensor queued for start";
+    sensorStatusBumpWith("openpresence@enqueue");
+    if (!ensureDebugBuffer()) return "[PRESENCE] Sensor queued for open";
     int pos = getQueuePosition(SENSOR_PRESENCE);
-    snprintf(getDebugBuffer(), 1024, "[PRESENCE] Sensor queued for start (position %d)", pos);
+    snprintf(getDebugBuffer(), 1024, "[PRESENCE] Sensor queued for open (position %d)", pos);
     return getDebugBuffer();
   }
   
-  return "[PRESENCE] Error: Failed to enqueue start (queue full)";
+  return "[PRESENCE] Error: Failed to enqueue open (queue full)";
 }
 
 const char* cmd_presencestop(const String& cmd) {
@@ -203,15 +203,15 @@ const char* cmd_presencestop(const String& cmd) {
   }
   
   presenceEnabled = false;
-  sensorStatusBumpWith("presencestop@CLI");
-  return "[PRESENCE] Sensor stop requested; cleanup will complete asynchronously";
+  sensorStatusBumpWith("closepresence@CLI");
+  return "[PRESENCE] Sensor close requested; cleanup will complete asynchronously";
 }
 
 const char* cmd_presenceread(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!presenceConnected || !presenceEnabled) {
-    return "[PRESENCE] Error: Sensor not running - use 'presencestart' first";
+    return "[PRESENCE] Error: Sensor not running - use 'openpresence' first";
   }
   
   if (!ensureDebugBuffer()) return "[PRESENCE] Error: Debug buffer unavailable";
@@ -415,8 +415,9 @@ bool readPresenceData() {
 // ============================================================================
 
 const CommandEntry presenceCommands[] = {
-  { "presencestart", "Start STHS34PF80 IR presence/motion sensor.", false, cmd_presencestart },
-  { "presencestop", "Stop STHS34PF80 sensor.", false, cmd_presencestop },
+  // 3-level voice: "sensor" -> "presence" -> "open/close"
+  { "openpresence", "Start STHS34PF80 IR presence/motion sensor.", false, cmd_presencestart, nullptr, "sensor", "presence", "open" },
+  { "closepresence", "Stop STHS34PF80 sensor.", false, cmd_presencestop, nullptr, "sensor", "presence", "close" },
   { "presenceread", "Read STHS34PF80 presence/motion/temperature data.", false, cmd_presenceread },
   { "presencestatus", "Show STHS34PF80 sensor status.", false, cmd_presencestatus },
 };

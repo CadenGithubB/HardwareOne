@@ -19,8 +19,10 @@ idf_component_register(
         WebPage_Games.cpp
         WebPage_ESPNow.cpp
         WebPage_Bluetooth.cpp
+        WebPage_Speech.cpp
         System_Automation.cpp
         Optional_Bluetooth.cpp
+        Optional_EvenG2.cpp
         System_Battery.cpp
         System_CLI.cpp
         System_Command.cpp
@@ -55,6 +57,7 @@ idf_component_register(
         OLED_Mode_Animations.cpp
         OLED_Mode_Menu.cpp
         OLED_Mode_FileBrowser.cpp
+        OLED_Mode_Speech.cpp
         System_MemoryMonitor.cpp
         i2csensor-pca9685.cpp
         System_Hardware.cpp
@@ -70,9 +73,13 @@ idf_component_register(
         System_Auth.cpp
         System_Users.cpp
         System_WiFi.cpp
+        System_MQTT.cpp
+        WebPage_MQTT.cpp
         System_Camera_DVP.cpp
         System_ImageManager.cpp
         System_EdgeImpulse.cpp
+        System_ESPSR.cpp
+        System_VFS.cpp
         System_Microphone.cpp
         System_SensorRegistry.cpp
     INCLUDE_DIRS
@@ -84,15 +91,21 @@ idf_component_register(
         bt
         esp_wifi
         esp32-camera
+        fatfs
+        sdmmc
+        esp_driver_sdspi
+        mqtt
 )
 
-# Enable camera for XIAO ESP32S3 Sense board
-if(CONFIG_ARDUINO_VARIANT STREQUAL "XIAO_ESP32S3_SENSE")
+# Enable Sense features for ESP32-S3 boards (camera, mic, SD card on expansion board)
+# This enables SD_CS_PIN and other Sense-specific defines in System_BuildConfig.h
+if(CONFIG_IDF_TARGET_ESP32S3)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC XIAO_ESP32S3_SENSE_ENABLED=1)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC ENABLE_CAMERA_SENSOR=1)
+    message(STATUS "XIAO ESP32S3 Sense features ENABLED (camera, mic, SD card)")
 endif()
 
-# Force-enable camera for ESP32-S3 boards (camera driver is part of esp32-camera component)
-if(CONFIG_IDF_TARGET_ESP32S3)
-    target_compile_definitions(${COMPONENT_LIB} PUBLIC ENABLE_CAMERA_SENSOR=1)
-    message(STATUS "Camera sensor ENABLED for ESP32-S3")
-endif()
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -Wno-error=format-truncation
+    -Wno-error=maybe-uninitialized
+)

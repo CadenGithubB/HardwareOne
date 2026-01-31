@@ -11,7 +11,7 @@ inline void streamSeesawGamepadSensorCard(httpd_req_t* req) {
       <div class='sensor-title'><span>Gamepad (Seesaw)</span><span class='status-indicator status-disabled' id='gamepad-status-indicator'></span></div>
       <div class='sensor-description'>Mini I2C Gamepad with joystick and buttons.</div>
       <div id='gamepad-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
-      <div class='sensor-controls'><button class='btn' id='btn-gamepad-start'>Start Gamepad</button><button class='btn' id='btn-gamepad-stop'>Stop Gamepad</button></div>
+      <div class='sensor-controls'><button class='btn' id='btn-gamepad-start'>Open Gamepad</button><button class='btn' id='btn-gamepad-stop'>Close Gamepad</button></div>
       <div class='sensor-data' id='gamepad-data'>Gamepad data will appear here...</div>
       <div class='gamepad-row' style='margin-top:10px'>
         <div class='joy-wrap'><canvas id='gamepad-joystick' class='joy-canvas' width='100' height='100'></canvas></div>
@@ -37,7 +37,7 @@ inline void streamSeesawGamepadSensorCard(httpd_req_t* req) {
 }
 
 inline void streamSeesawGamepadSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-gamepad-start','gamepadstart');bind('btn-gamepad-stop','gamepadstop');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "bind('btn-gamepad-start','opengamepad');bind('btn-gamepad-stop','closegamepad');", HTTPD_RESP_USE_STRLEN);
 }
 
 inline void streamSeesawGamepadSensorJs(httpd_req_t* req) {

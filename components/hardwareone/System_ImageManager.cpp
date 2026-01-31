@@ -5,6 +5,7 @@
 #include "System_Command.h"
 #include "System_ESPNow.h"
 #include "System_Mutex.h"
+#include "System_VFS.h"
 
 #include <LittleFS.h>
 #include <SD.h>
@@ -18,8 +19,10 @@
 // Global instance
 ImageManager gImageManager;
 
-// SD card pins for XIAO ESP32S3 Sense
-#define SD_CS_PIN 21
+// SD card pins are defined in System_BuildConfig.h when available
+#ifndef SD_CS_PIN
+  #define SD_CS_PIN 21
+#endif
 
 extern Settings gSettings;
 extern bool filesystemReady;
@@ -50,19 +53,23 @@ bool ImageManager::init() {
 }
 
 bool ImageManager::initSD() {
-  // Try to initialize SD card
-  SPI.begin();
-  
-  if (SD.begin(SD_CS_PIN)) {
+  // Use VFS mount instead of reinitializing SD card ourselves
+  // This prevents conflicts with the VFS SD mount
+  if (VFS::isSDAvailable()) {
     sdAvailable = true;
-    ensureCaptureFolder(IMAGE_STORAGE_SD);
+    // Don't create capture folder here - only create when actually saving an image
+    // ensureCaptureFolder() is called in saveImage() when needed
     
-    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-    INFO_STORAGEF("[ImageManager] SD card mounted, size: %lluMB", cardSize);
+    uint64_t totalBytes, usedBytes, freeBytes;
+    if (VFS::getStats(VFS::SDCARD, totalBytes, usedBytes, freeBytes)) {
+      INFO_STORAGEF("[ImageManager] SD card available via VFS, size: %lluMB", totalBytes / (1024 * 1024));
+    } else {
+      INFO_STORAGEF("[ImageManager] SD card available via VFS");
+    }
     return true;
   } else {
     sdAvailable = false;
-    DEBUG_STORAGEF("[ImageManager] SD card not available");
+    DEBUG_STORAGEF("[ImageManager] SD card not available (VFS mount failed)");
     return false;
   }
 }
@@ -85,13 +92,24 @@ String ImageManager::getCaptureFolder(ImageStorageLocation location) {
   return prefix + folder;
 }
 
+static String sdStripPrefix(const String& path) {
+  if (path.startsWith("/sd")) {
+    String p = path.substring(3);
+    if (p.length() == 0) return "/";
+    if (!p.startsWith("/")) p = "/" + p;
+    return p;
+  }
+  return path;
+}
+
 bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
   String folder = getCaptureFolder(location);
   
   if (location == IMAGE_STORAGE_SD) {
     if (!sdAvailable) return false;
-    if (!SD.exists(folder)) {
-      if (SD.mkdir(folder)) {
+    String sdFolder = sdStripPrefix(folder);
+    if (!SD.exists(sdFolder)) {
+      if (SD.mkdir(sdFolder)) {
         INFO_STORAGEF("[ImageManager] Created folder on SD: %s", folder.c_str());
         return true;
       } else {
@@ -223,13 +241,14 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     
     if (sdAvailable) {
       ensureCaptureFolder(IMAGE_STORAGE_SD);
-      String sdPath = getCaptureFolder(IMAGE_STORAGE_SD) + "/" + filename;
-      File f = SD.open(sdPath, FILE_WRITE);
+      String sdDisplayPath = getCaptureFolder(IMAGE_STORAGE_SD) + "/" + filename;
+      String sdFsPath = sdStripPrefix(sdDisplayPath);
+      File f = SD.open(sdFsPath, FILE_WRITE);
       if (f) {
         f.write(data, len);
         f.close();
         savedSD = true;
-        INFO_STORAGEF("[ImageManager] Saved to SD: %s (%u bytes)", sdPath.c_str(), len);
+        INFO_STORAGEF("[ImageManager] Saved to SD: %s (%u bytes)", sdDisplayPath.c_str(), len);
       }
     }
     
@@ -245,7 +264,8 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
       return "";
     }
     ensureCaptureFolder(IMAGE_STORAGE_SD);
-    File f = SD.open(fullPath, FILE_WRITE);
+    String sdFsPath = sdStripPrefix(fullPath);
+    File f = SD.open(sdFsPath, FILE_WRITE);
     if (f) {
       f.write(data, len);
       f.close();
@@ -288,13 +308,15 @@ std::vector<ImageInfo> ImageManager::listImages(ImageStorageLocation location) {
   if (location == IMAGE_STORAGE_SD) {
     if (!sdAvailable) return images;
     
-    File dir = SD.open(folder);
+    File dir = SD.open(sdStripPrefix(folder));
     if (!dir || !dir.isDirectory()) return images;
     
     File file = dir.openNextFile();
     while (file) {
       if (!file.isDirectory()) {
         String name = String(file.name());
+        int lastSlash = name.lastIndexOf('/');
+        if (lastSlash >= 0) name = name.substring(lastSlash + 1);
         if (name.endsWith(".jpg") || name.endsWith(".jpeg")) {
           ImageInfo info;
           info.filename = name;

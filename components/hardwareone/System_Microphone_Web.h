@@ -35,8 +35,8 @@ inline void streamMicrophoneSensorCard(httpd_req_t* req) {
       <span class="vu-meter-label" id="mic-level-text">0%</span>
     </div>
     <div class="sensor-controls">
-      <button class="btn btn-primary" id="btn-mic-start">Start</button>
-      <button class="btn btn-secondary" id="btn-mic-stop">Stop</button>
+      <button class="btn btn-primary" id="btn-mic-start">Open</button>
+      <button class="btn btn-secondary" id="btn-mic-stop">Close</button>
       <button class="btn btn-info" id="btn-mic-record">Record</button>
       <button class="btn btn-secondary" id="btn-mic-stop-record">Stop Rec</button>
     </div>
@@ -81,7 +81,7 @@ inline void streamMicrophoneSensorCard(httpd_req_t* req) {
 
 // Stream button bindings for microphone
 inline void streamMicrophoneSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-mic-start','micstart');bind('btn-mic-stop','micstop');bind('btn-mic-record','micrecord start');bind('btn-mic-stop-record','micrecord stop');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "bind('btn-mic-start','openmic');bind('btn-mic-stop','closemic');bind('btn-mic-record','micrecord start');bind('btn-mic-stop-record','micrecord stop');", HTTPD_RESP_USE_STRLEN);
 }
 
 // Stream microphone-specific JavaScript

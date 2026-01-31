@@ -30,8 +30,8 @@ constexpr size_t kTensorArenaSize = 1280 * 1024;  // 1.25MB
 constexpr size_t kMaxModelSize = 1024 * 1024;  // 1MB
 
 // Model storage path (relative to LittleFS mount point)
-static const char* MODEL_DIR = "/models";
-static const char* DEFAULT_MODEL = "/models/default.tflite";
+static const char* MODEL_DIR = "/EI Models";
+static const char* DEFAULT_MODEL = "/EI Models/default.tflite";
 
 // ============================================================================
 // Edge Impulse Module State
@@ -101,7 +101,7 @@ static bool loadLabelsFromExplicitPath(const String& labelsPath) {
 }
 
 // Load labels file for model
-// Expected structure: /models/<modelname>/<modelname>.tflite + <modelname>.labels.txt
+// Expected structure: /EI Models/<modelname>/<modelname>.tflite + <modelname>.labels.txt
 static bool loadLabelsFromFile(const char* modelPath) {
   freeLabels();
   
@@ -756,7 +756,7 @@ static void listModelsRecursive(const String& absDir, const String& relPrefix, S
   }
 }
 
-// List available models in /littlefs/models/
+// List available models in /littlefs/EI Models/
 void listAvailableModels(String& output) {
   output = "Available models in " + String(MODEL_DIR) + ":\n";
   
@@ -1924,7 +1924,7 @@ void buildDetectionJson(const EIResults& results, String& output) {
 #include "WebServer_Server.h"
 #include "System_Auth.h"
 
-// Organize EI model files: move loose .tflite and .labels.txt into proper /models/<name>/ folders
+// Organize EI model files: move loose .tflite and .labels.txt into proper /EI Models/<name>/ folders
 static esp_err_t handleEIOrganize(httpd_req_t* req) {
   AuthContext ctx;
   ctx.transport = SOURCE_WEB;
@@ -1941,7 +1941,7 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  File dir = LittleFS.open("/models");
+  File dir = LittleFS.open(MODEL_DIR);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     httpd_resp_set_type(req, "application/json");
@@ -1964,7 +1964,7 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
 
     if (!isDir) {
       String fn = full;
-      if (fn.startsWith("/models/")) fn = fn.substring(8);
+      if (fn.startsWith("/EI Models/")) fn = fn.substring(11);
       if (fn.startsWith("/")) fn = fn.substring(1);
       // Only root-level files (no subdirs)
       if (fn.indexOf('/') == -1) {
@@ -1984,8 +1984,8 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
     String tflite = tfliteFiles[i];
     String modelName = tflite.substring(0, tflite.length() - 7); // Remove .tflite
     
-    String srcModel = "/models/" + tflite;
-    String dstDir = "/models/" + modelName;
+    String srcModel = String(MODEL_DIR) + "/" + tflite;
+    String dstDir = String(MODEL_DIR) + "/" + modelName;
     String dstModel = dstDir + "/" + tflite;
     
     // Create folder
@@ -2008,7 +2008,7 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
     
     // Look for matching labels file
     String labelsName = modelName + ".labels.txt";
-    String srcLabels = "/models/" + labelsName;
+    String srcLabels = String(MODEL_DIR) + "/" + labelsName;
     String dstLabels = dstDir + "/" + labelsName;
     
     if (LittleFS.exists(srcLabels) && !LittleFS.exists(dstLabels)) {

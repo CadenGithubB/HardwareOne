@@ -68,9 +68,9 @@ static void apdsToggleConfirmed(void* userData) {
 static bool apdsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (apdsColorEnabled || apdsProximityEnabled) {
-      oledConfirmRequest("Stop APDS?", nullptr, apdsToggleConfirmed, nullptr, false);
+      oledConfirmRequest("Close APDS?", nullptr, apdsToggleConfirmed, nullptr, false);
     } else {
-      oledConfirmRequest("Start APDS?", nullptr, apdsToggleConfirmed, nullptr);
+      oledConfirmRequest("Open APDS?", nullptr, apdsToggleConfirmed, nullptr);
     }
     return true;
   }

@@ -857,10 +857,10 @@ static void bluetoothToggleConfirmedQuick(void* userData) {
   extern bool isBLERunning();
   if (isBLERunning()) {
     setQuickStatus("Bluetooth OFF");
-    runUnifiedSystemCommand("blestop");
+    runUnifiedSystemCommand("closeble");
   } else {
     setQuickStatus("Bluetooth ON");
-    runUnifiedSystemCommand("blestart");
+    runUnifiedSystemCommand("openble");
   }
 #endif
 }
@@ -870,14 +870,14 @@ static void httpToggleConfirmedQuick(void* userData) {
 #if ENABLE_HTTP_SERVER
   if (server != nullptr) {
     setQuickStatus("HTTP OFF");
-    runUnifiedSystemCommand("httpstop");
+    runUnifiedSystemCommand("closehttp");
   } else {
     if (!WiFi.isConnected()) {
       setQuickStatus("Need WiFi first!");
       return;
     }
     setQuickStatus("HTTP ON");
-    runUnifiedSystemCommand("httpstart");
+    runUnifiedSystemCommand("openhttp");
   }
 #endif
 }

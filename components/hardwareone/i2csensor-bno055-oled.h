@@ -67,9 +67,9 @@ static void imuToggleConfirmed(void* userData) {
 static bool imuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (imuEnabled && imuConnected) {
-      oledConfirmRequest("Stop IMU?", nullptr, imuToggleConfirmed, nullptr);
+      oledConfirmRequest("Close IMU?", nullptr, imuToggleConfirmed, nullptr);
     } else {
-      oledConfirmRequest("Start IMU?", nullptr, imuToggleConfirmed, nullptr);
+      oledConfirmRequest("Open IMU?", nullptr, imuToggleConfirmed, nullptr);
     }
     return true;
   }

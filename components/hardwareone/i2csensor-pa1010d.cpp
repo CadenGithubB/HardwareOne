@@ -119,7 +119,7 @@ void startGPSInternal() {
     DEBUG_SENSORSF("[GPS_INIT] GPS task already running (handle=%p)", gpsTaskHandle);
   }
   
-  sensorStatusBumpWith("gpsstart@queue");
+  sensorStatusBumpWith("opengps@queue");
   DEBUG_SENSORSF("[GPS_INIT] GPS module initialization complete - task is now polling");
   
   // Broadcast sensor status to ESP-NOW master
@@ -153,14 +153,14 @@ const char* cmd_gpsstart(const String& cmd) {
   }
   
   if (enqueueSensorStart(SENSOR_GPS)) {
-    sensorStatusBumpWith("gpsstart@enqueue");
-    if (!ensureDebugBuffer()) return "[GPS] Sensor queued for start";
+    sensorStatusBumpWith("opengps@enqueue");
+    if (!ensureDebugBuffer()) return "[GPS] Sensor queued for open";
     int pos = getQueuePosition(SENSOR_GPS);
-    snprintf(getDebugBuffer(), 1024, "[GPS] Sensor queued for start (position %d)", pos);
+    snprintf(getDebugBuffer(), 1024, "[GPS] Sensor queued for open (position %d)", pos);
     return getDebugBuffer();
   }
   
-  return "[GPS] Error: Failed to enqueue start (queue full)";
+  return "[GPS] Error: Failed to enqueue open (queue full)";
 }
 
 const char* cmd_gpsstop(const String& cmd) {
@@ -175,7 +175,7 @@ const char* cmd_gpsstop(const String& cmd) {
   // Note: Status bump removed - can cause xQueueGenericSend crash
   // The GPS task will handle cleanup and status updates asynchronously
   
-  return "[GPS] Stop requested; cleanup will complete asynchronously";
+  return "[GPS] Close requested; cleanup will complete asynchronously";
 }
 
 const char* cmd_gps(const String& cmd) {
@@ -413,8 +413,9 @@ extern const SettingsModule gpsSettingsModule = {
 // ============================================================================
 
 const CommandEntry gpsCommands[] = {
-  { "gpsstart", "Start PA1010D GPS module.", false, cmd_gpsstart },
-  { "gpsstop", "Stop PA1010D GPS module.", false, cmd_gpsstop },
+  // 3-level voice: "sensor" -> "GPS" -> "open/close"
+  { "opengps", "Start PA1010D GPS module.", false, cmd_gpsstart, nullptr, "sensor", "GPS", "open" },
+  { "closegps", "Stop PA1010D GPS module.", false, cmd_gpsstop, nullptr, "sensor", "GPS", "close" },
   { "gps", "Read GPS location and time data.", false, cmd_gps },
 };
 

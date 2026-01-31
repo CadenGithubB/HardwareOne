@@ -335,9 +335,9 @@ const char* cmd_wifiscan(const String& command) {
     for (int i = 0; i < n; ++i) {
       if (i > 0) jsonResult += ",";
       char entry[256];
-      snprintf(entry, sizeof(entry), "{\"ssid\":\"%s\",\"rssi\":%ld,\"bssid\":\"%s\",\"channel\":%d,\"auth\":\"%d\"}",
+      snprintf(entry, sizeof(entry), "{\"ssid\":\"%s\",\"rssi\":%ld,\"bssid\":\"%s\",\"channel\":%ld,\"auth\":\"%d\"}",
                WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i), WiFi.BSSIDstr(i).c_str(),
-               WiFi.channel(i), (int)WiFi.encryptionType(i));
+               (long)WiFi.channel(i), (int)WiFi.encryptionType(i));
       jsonResult += entry;
     }
     jsonResult += "]";
@@ -820,7 +820,7 @@ const char* cmd_httpstatus(const String& cmd) {
 
 const CommandEntry wifiCommands[] = {
   // Network Management
-  { "wifiinfo", "Show current WiFi connection info.", false, cmd_wifiinfo },
+  { "wifiinfo", "Show current WiFi connection info.", false, cmd_wifiinfo, nullptr, "wifi", "status" },
   { "wifilist", "List saved WiFi networks.", false, cmd_wifilist },
   { "wifiadd", "Add/overwrite a WiFi network.", true, cmd_wifiadd, "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]" },
   { "wifirm", "Remove a WiFi network.", true, cmd_wifirm, "Usage: wifirm <ssid>" },
@@ -829,13 +829,13 @@ const CommandEntry wifiCommands[] = {
   // Connection Control
   { "wificonnect", "Connect to WiFi (auto-select or specify SSID).", false, cmd_wificonnect, "Usage: wificonnect [ssid]" },
   { "wifidisconnect", "Disconnect from WiFi.", false, cmd_wifidisconnect },
-  { "wifiscan", "Scan for available WiFi networks.", false, cmd_wifiscan },
+  { "wifiscan", "Scan for available WiFi networks.", false, cmd_wifiscan, nullptr, "wifi", "scan" },
   { "wifigettxpower", "Get WiFi TX power.", false, cmd_wifitxpower },
   
   // Network Services
   { "ntpsync", "Sync time with NTP server.", false, cmd_ntpsync },
-  { "httpstart", "Start HTTP server.", false, cmd_httpstart },
-  { "httpstop", "Stop HTTP server.", false, cmd_httpstop },
+  { "openhttp", "Start HTTP server.", false, cmd_httpstart },
+  { "closehttp", "Stop HTTP server.", false, cmd_httpstop },
   { "httpstatus", "Show HTTP server status.", false, cmd_httpstatus }
 };
 

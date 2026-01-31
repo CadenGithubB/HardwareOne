@@ -87,9 +87,9 @@ static void presenceToggleConfirmed(void* userData) {
 static bool presenceInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (presenceEnabled) {
-      oledConfirmRequest("Stop Presence?", nullptr, presenceToggleConfirmed, nullptr, false);
+      oledConfirmRequest("Close Presence?", nullptr, presenceToggleConfirmed, nullptr, false);
     } else {
-      oledConfirmRequest("Start Presence?", nullptr, presenceToggleConfirmed, nullptr);
+      oledConfirmRequest("Open Presence?", nullptr, presenceToggleConfirmed, nullptr);
     }
     return true;
   }
