@@ -84,9 +84,9 @@ static void fmRadioToggleConfirmed(void* userData) {
 static bool fmRadioInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (fmRadioEnabled && fmRadioConnected) {
-      oledConfirmRequest("Stop FM?", nullptr, fmRadioToggleConfirmed, nullptr, false);
+      oledConfirmRequest("Close FM?", nullptr, fmRadioToggleConfirmed, nullptr, false);
     } else {
-      oledConfirmRequest("Start FM?", nullptr, fmRadioToggleConfirmed, nullptr);
+      oledConfirmRequest("Open FM?", nullptr, fmRadioToggleConfirmed, nullptr);
     }
     return true;
   }

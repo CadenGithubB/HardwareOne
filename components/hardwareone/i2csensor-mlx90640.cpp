@@ -200,7 +200,7 @@ bool startThermalSensorInternal() {
     DEBUG_CLIF("[THERMAL_INTERNAL] Thermal task already exists (handle=%p)", thermalTaskHandle);
   }
   if (thermalEnabled != prev) {
-    sensorStatusBumpWith("thermalstart@queue");
+    sensorStatusBumpWith("openthermal@queue");
   }
   if (thermalEnabled && !prev) {
     thermalPendingFirstFrame = true;
@@ -262,14 +262,14 @@ const char* cmd_thermalstart(const String& cmd) {
   // Enqueue the request to centralized queue
   if (enqueueSensorStart(SENSOR_THERMAL)) {
     DEBUG_CLIF("[THERMAL_START] Successfully enqueued");
-    sensorStatusBumpWith("thermalstart@enqueue");
+    sensorStatusBumpWith("openthermal@enqueue");
     int pos = getQueuePosition(SENSOR_THERMAL);
     DEBUG_CLIF("[THERMAL_START] Queue position: %d", pos);
-    BROADCAST_PRINTF("Thermal sensor queued for start (position %d)", pos);
-    return "[Thermal] Sensor queued for start";
+    BROADCAST_PRINTF("Thermal sensor queued for open (position %d)", pos);
+    return "[Thermal] Sensor queued for open";
   } else {
     DEBUG_CLIF("[THERMAL_START] FAILED to enqueue (queue full)");
-    return "[Thermal] Error: Failed to enqueue start (queue full)";
+    return "[Thermal] Error: Failed to enqueue open (queue full)";
   }
 }
 
@@ -1266,9 +1266,9 @@ extern const char* cmd_thermaltargetfps(const String& cmd);
 extern const char* cmd_thermaldevicepollms(const String& cmd);
 
 const CommandEntry thermalCommands[] = {
-  // Start/Stop
-  { "thermalstart", "Start MLX90640 thermal sensor.", false, cmd_thermalstart },
-  { "thermalstop", "Stop MLX90640 thermal sensor.", false, cmd_thermalstop },
+  // Start/Stop (3-level voice: "sensor" -> "thermal camera" -> "open/close")
+  { "openthermal", "Start MLX90640 thermal sensor.", false, cmd_thermalstart, nullptr, "sensor", "thermal camera", "open" },
+  { "closethermal", "Stop MLX90640 thermal sensor.", false, cmd_thermalstop, nullptr, "sensor", "thermal camera", "close" },
   
   // UI Settings (client-side visualization)
   { "thermalpollingms", "Set thermal UI polling interval (50..5000ms).", true, cmd_thermalpollingms, "Usage: thermalpollingms <50..5000>" },

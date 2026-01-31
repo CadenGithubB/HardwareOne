@@ -57,6 +57,9 @@ struct Settings {
       debugHttp(true),
       debugSse(true),
       debugCli(true),
+      debugAuth(true),
+      debugSensors(true),
+      debugEspNow(true),
       debugSensorsFrame(true),
       debugSensorsData(true),
       debugSensorsGeneral(true),
@@ -70,6 +73,7 @@ struct Settings {
       debugAutomations(true),
       debugLogger(true),
       debugEspNowStream(true),
+      debugMqtt(true),
       debugEspNowCore(true),
       debugEspNowRouter(true),
       debugEspNowMesh(true),
@@ -140,7 +144,7 @@ struct Settings {
       cameraAutoStart(false),  // Camera does NOT auto-start by default
       microphoneAutoStart(false),  // Microphone does NOT auto-start by default
       microphoneSampleRate(16000),
-      microphoneGain(50),
+      microphoneGain(70),
       microphoneBitDepth(16),
       cameraBrightness(0),
       cameraContrast(0),
@@ -181,7 +185,35 @@ struct Settings {
       powerMode(0),
       powerAutoMode(false),
       powerBatteryThreshold(20),
-      powerDisplayDimLevel(30) {
+      powerDisplayDimLevel(30),
+      srAutoStart(false),
+      srModelSource(0),
+      srCommandTimeout(6000),
+      srAfeGain(1.0f),
+      srAgcMode(2),
+      srVadMode(3),
+      mqttAutoStart(false),
+      mqttHost(""),
+      mqttPort(1883),
+      mqttTLSMode(0),  // 0=None, 1=TLS (no verify), 2=TLS+Verify
+      mqttCACertPath("/system/certs/mqtt_ca.crt"),
+      mqttSubscribeExternal(false),
+      mqttSubscribeTopics(""),
+      mqttUser(""),
+      mqttPassword(""),
+      mqttBaseTopic(""),
+      mqttDiscoveryPrefix("homeassistant"),
+      mqttPublishIntervalMs(10000),
+      mqttPublishWiFi(true),
+      mqttPublishSystem(true),
+      mqttPublishThermal(true),
+      mqttPublishToF(true),
+      mqttPublishIMU(true),
+      mqttPublishPresence(true),
+      mqttPublishGPS(true),
+      mqttPublishAPDS(true),
+      mqttPublishRTC(true),
+      mqttPublishGamepad(true) {
     // String members are now initialized in initializer list
   }
 
@@ -246,6 +278,9 @@ struct Settings {
   bool debugHttp;
   bool debugSse;
   bool debugCli;
+  bool debugAuth;
+  bool debugSensors;
+  bool debugEspNow;
   bool debugSensorsFrame;
   bool debugSensorsData;
   bool debugSensorsGeneral;
@@ -259,6 +294,7 @@ struct Settings {
   bool debugAutomations;
   bool debugLogger;
   bool debugEspNowStream;
+  bool debugMqtt;
   bool debugEspNowCore;
   bool debugEspNowRouter;
   bool debugEspNowMesh;
@@ -385,7 +421,7 @@ struct Settings {
   bool microphoneAutoStart;     // Auto-start ESP32-S3 PDM microphone after boot
   // Microphone settings
   int microphoneSampleRate;     // Sample rate in Hz (8000, 16000, 22050, 44100, 48000)
-  int microphoneGain;           // Software gain 0-100% (default 50)
+  int microphoneGain;           // Software gain 0-100% (default 90)
   int microphoneBitDepth;       // Bit depth (16 or 32)
   // Camera image settings (persisted) - use int for settings system compatibility
   int cameraBrightness;         // -2 to 2 (default 0)
@@ -433,6 +469,37 @@ struct Settings {
   bool powerAutoMode;           // Auto-adjust power mode based on battery level
   uint8_t powerBatteryThreshold; // Switch to power saver below this battery % (default: 20)
   uint8_t powerDisplayDimLevel; // Brightness % in power saver modes (0-100, default: 30)
+  // ESP-SR Speech Recognition settings
+  bool srAutoStart;             // Auto-start SR at boot (default: false)
+  int srModelSource;  // 0=partition (default), 1=SD card, 2=LittleFS
+  int srCommandTimeout;         // Command listening timeout in ms after wake word (default: 6000)
+  float srAfeGain;              // AFE linear gain multiplier (0.1-10.0, default: 1.0)
+  int srAgcMode;                // AGC mode: 0=off, 1=-9dB, 2=-6dB, 3=-3dB (default: 2)
+  int srVadMode;                // VAD sensitivity: 0-4, higher=more sensitive (default: 3)
+  // MQTT Home Assistant Integration settings
+  bool mqttAutoStart;           // Auto-start MQTT client at boot if WiFi connected (default: false)
+  String mqttHost;              // MQTT broker hostname or IP (default: "")
+  int mqttPort;                 // MQTT broker port (default: 1883, 8883 for TLS)
+  int mqttTLSMode;              // 0=None, 1=TLS (no verify), 2=TLS+Verify (default: 0)
+  String mqttCACertPath;        // Path to CA certificate file for verification (default: "")
+  bool mqttSubscribeExternal;   // Subscribe to external topics for sensor data (default: false)
+  String mqttSubscribeTopics;   // Comma-separated list of topics to subscribe (default: "")
+  String mqttUser;              // MQTT username (default: "")
+  String mqttPassword;          // MQTT password - stored encrypted (default: "")
+  String mqttBaseTopic;         // Base topic for publishing (default: hardwareone/<mac>, auto-generated if empty)
+  String mqttDiscoveryPrefix;   // HA discovery prefix (default: "homeassistant")
+  int mqttPublishIntervalMs;    // Sensor data publish interval in ms (default: 10000)
+  // MQTT publish data configuration
+  bool mqttPublishWiFi;         // Include WiFi info in published data (default: true)
+  bool mqttPublishSystem;       // Include system info (uptime, heap, etc.) (default: true)
+  bool mqttPublishThermal;      // Include thermal sensor data (default: true)
+  bool mqttPublishToF;          // Include ToF sensor data (default: true)
+  bool mqttPublishIMU;          // Include IMU sensor data (default: true)
+  bool mqttPublishPresence;     // Include presence/motion sensor data (default: true)
+  bool mqttPublishGPS;          // Include GPS location data (default: true)
+  bool mqttPublishAPDS;         // Include gesture/proximity data (default: true)
+  bool mqttPublishRTC;          // Include RTC time data (default: true)
+  bool mqttPublishGamepad;      // Include gamepad input data (default: true)
 };
 
 // Global settings instance (defined in .ino)
@@ -533,6 +600,7 @@ struct SettingEntry {
   int maxVal;                 // Max value for int/float validation (0 to skip)
   const char* label;          // Human-readable label for UI display (nullptr = use jsonKey)
   const char* options;        // Comma-separated options for select fields (nullptr = none)
+  bool isSecret = false;      // If true: encrypt on disk, exclude from web API, blank input = unchanged
 };
 
 // Connection check callback - returns true if module is available/connected

@@ -346,10 +346,10 @@
   struct EspNowState {
     bool initialized;
     EspNowMode mode;
-    String deviceName;
-    uint8_t peerCount;
-    bool streamActive;
-    void* streamTarget;
+    String passphrase;
+    uint8_t channel;
+    bool encryptionEnabled;
+    void* reserved;
   };
   extern EspNowState* gEspNow;
   extern MeshPeerHealth gMeshPeers[MAX_MESH_PEERS];
@@ -367,6 +367,12 @@
   inline void cleanupTimedOutChunks() {}
   inline bool isSelfMac(const uint8_t* mac) { return false; }
   inline bool isMeshPeerAlive(MeshPeerHealth* peer) { return false; }
+#endif
+
+#if !ENABLE_MQTT
+  // MQTT stub variables (global definitions)
+  const struct CommandEntry mqttCommands[] = {};
+  const size_t mqttCommandsCount = 0;
 #endif
 
 #endif // SENSOR_STUBS_MINIMAL_H

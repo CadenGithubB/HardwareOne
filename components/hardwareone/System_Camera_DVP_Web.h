@@ -23,8 +23,8 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
       <div class='sensor-description'>ESP32-S3 DVP camera sensor (OV2640/OV3660/OV5640).</div>
       <div id='camera-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
       <div class='sensor-controls'>
-        <button class='btn' id='btn-camera-start'>Start Camera</button>
-        <button class='btn' id='btn-camera-stop' style='display:none'>Stop Camera</button>
+        <button class='btn' id='btn-camera-start'>Open Camera</button>
+        <button class='btn' id='btn-camera-stop' style='display:none'>Close Camera</button>
         <button class='btn' id='btn-camera-capture'>Capture</button>
         <button class='btn' id='btn-camera-stream'>Stream</button>
         <button class='btn' id='btn-camera-stream-stop' style='display:none'>Stop Stream</button>
@@ -127,7 +127,7 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
 
 // Stream button bindings for the camera sensor
 inline void streamCameraSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-camera-start','camerastart');bind('btn-camera-stop','camerastop');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "bind('btn-camera-start','opencamera');bind('btn-camera-stop','closecamera');", HTTPD_RESP_USE_STRLEN);
 }
 
 // Stream camera-specific JavaScript
@@ -156,7 +156,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "            s('cameraPsram', j.psram ? 'Yes' : 'No');\n"
     "          } else {\n"
     "            var stats = document.getElementById('camera-stats');\n"
-    "            if (stats) stats.textContent = 'Camera not enabled (use Start Camera button)';\n"
+    "            if (stats) stats.textContent = 'Camera not enabled (use Open Camera button)';\n"
     "          }\n"
     "        }\n"
     "        return j;\n"

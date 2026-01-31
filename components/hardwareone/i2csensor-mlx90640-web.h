@@ -11,7 +11,7 @@ inline void streamMLX90640ThermalSensorCard(httpd_req_t* req) {
       <div class='sensor-title'><span>Thermal Camera (MLX90640)</span><span class='status-indicator status-disabled' id='thermal-status-indicator'></span></div>
       <div class='sensor-description'>32x24 thermal infrared camera for temperature imaging.</div>
       <div id='thermal-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
-      <div class='sensor-controls'><button class='btn' id='btn-thermal-start'>Start Thermal</button><button class='btn' id='btn-thermal-stop'>Stop Thermal</button></div>
+      <div class='sensor-controls'><button class='btn' id='btn-thermal-start'>Open Thermal</button><button class='btn' id='btn-thermal-stop'>Close Thermal</button></div>
       <div class='sensor-data' id='thermal-data'>
         <div id='thermal-stats' style='color:#333'>Min: <span id='thermalMin'>--</span>&deg;C, Max: <span id='thermalMax'>--</span>&deg;C, Avg: <span id='thermalAvg'>--</span>&deg;C, FPS: <span id='thermalFps'>--</span></div>
         <div id='thermal-performance' style='font-size:.9em;color:#333;margin-top:5px'>Capture: --ms</div>
@@ -23,7 +23,7 @@ inline void streamMLX90640ThermalSensorCard(httpd_req_t* req) {
 }
 
 inline void streamMLX90640ThermalSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-thermal-start','thermalstart');bind('btn-thermal-stop','thermalstop');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "bind('btn-thermal-start','openthermal');bind('btn-thermal-stop','closethermal');", HTTPD_RESP_USE_STRLEN);
 }
 
 inline void streamMLX90640ThermalSensorJs(httpd_req_t* req) {

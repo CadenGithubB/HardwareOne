@@ -365,11 +365,13 @@ void applySettings() {
   gOutputFlags = flags;  // replace current routing with persisted lanes
 
   // Apply debug settings to runtime flags using accessor functions
-  setDebugFlags(0);  // Start with no flags
+  setDebugFlags(0xFFFFFFFF);  // Start with ALL flags enabled for maximum verbosity
+  if (gSettings.debugAuth) setDebugFlag(DEBUG_AUTH);
   if (gSettings.debugAuthCookies) setDebugFlag(DEBUG_AUTH);
   if (gSettings.debugHttp) setDebugFlag(DEBUG_HTTP);
   if (gSettings.debugSse) setDebugFlag(DEBUG_SSE);
   if (gSettings.debugCli) setDebugFlag(DEBUG_CLI);
+  if (gSettings.debugSensors) setDebugFlag(DEBUG_SENSORS);
   if (gSettings.debugSensorsFrame) setDebugFlag(DEBUG_SENSORS_FRAME);
   if (gSettings.debugSensorsData) setDebugFlag(DEBUG_SENSORS_DATA);
   if (gSettings.debugSensorsGeneral) setDebugFlag(DEBUG_SENSORS);
@@ -387,6 +389,7 @@ void applySettings() {
   if (gSettings.debugMemory) setDebugFlag(DEBUG_MEMORY);
   if (gSettings.debugCommandSystem) setDebugFlag(DEBUG_COMMAND_SYSTEM);
   if (gSettings.debugSettingsSystem) setDebugFlag(DEBUG_SETTINGS_SYSTEM);
+  if (gSettings.debugEspNow) setDebugFlag(DEBUG_ESPNOW_CORE);
   if (gSettings.debugEspNowStream) setDebugFlag(DEBUG_ESPNOW_STREAM);
   if (gSettings.debugEspNowCore) setDebugFlag(DEBUG_ESPNOW_CORE);
   if (gSettings.debugEspNowRouter) setDebugFlag(DEBUG_ESPNOW_ROUTER);
@@ -406,65 +409,65 @@ void applySettings() {
   gDebugSubFlags.authCookies = gSettings.debugAuthCookies;
   gDebugSubFlags.authLogin = gSettings.debugAuthLogin;
   gDebugSubFlags.authBootId = gSettings.debugAuthBootId;
-  updateParentDebugFlag(DEBUG_AUTH, gDebugSubFlags.authSessions || gDebugSubFlags.authCookies || gDebugSubFlags.authLogin || gDebugSubFlags.authBootId);
+  updateParentDebugFlag(DEBUG_AUTH, gSettings.debugAuth || gDebugSubFlags.authSessions || gDebugSubFlags.authCookies || gDebugSubFlags.authLogin || gDebugSubFlags.authBootId);
   
   // HTTP sub-flags
   gDebugSubFlags.httpHandlers = gSettings.debugHttpHandlers;
   gDebugSubFlags.httpRequests = gSettings.debugHttpRequests;
   gDebugSubFlags.httpResponses = gSettings.debugHttpResponses;
   gDebugSubFlags.httpStreaming = gSettings.debugHttpStreaming;
-  updateParentDebugFlag(DEBUG_HTTP, gDebugSubFlags.httpHandlers || gDebugSubFlags.httpRequests || gDebugSubFlags.httpResponses || gDebugSubFlags.httpStreaming);
+  updateParentDebugFlag(DEBUG_HTTP, gSettings.debugHttp || gDebugSubFlags.httpHandlers || gDebugSubFlags.httpRequests || gDebugSubFlags.httpResponses || gDebugSubFlags.httpStreaming);
   
   // WiFi sub-flags
   gDebugSubFlags.wifiConnection = gSettings.debugWifiConnection;
   gDebugSubFlags.wifiConfig = gSettings.debugWifiConfig;
   gDebugSubFlags.wifiScanning = gSettings.debugWifiScanning;
   gDebugSubFlags.wifiDriver = gSettings.debugWifiDriver;
-  updateParentDebugFlag(DEBUG_WIFI, gDebugSubFlags.wifiConnection || gDebugSubFlags.wifiConfig || gDebugSubFlags.wifiScanning || gDebugSubFlags.wifiDriver);
+  updateParentDebugFlag(DEBUG_WIFI, gSettings.debugWifi || gDebugSubFlags.wifiConnection || gDebugSubFlags.wifiConfig || gDebugSubFlags.wifiScanning || gDebugSubFlags.wifiDriver);
   
   // Storage sub-flags
   gDebugSubFlags.storageFiles = gSettings.debugStorageFiles;
   gDebugSubFlags.storageJson = gSettings.debugStorageJson;
   gDebugSubFlags.storageSettings = gSettings.debugStorageSettings;
   gDebugSubFlags.storageMigration = gSettings.debugStorageMigration;
-  updateParentDebugFlag(DEBUG_STORAGE, gDebugSubFlags.storageFiles || gDebugSubFlags.storageJson || gDebugSubFlags.storageSettings || gDebugSubFlags.storageMigration);
+  updateParentDebugFlag(DEBUG_STORAGE, gSettings.debugStorage || gDebugSubFlags.storageFiles || gDebugSubFlags.storageJson || gDebugSubFlags.storageSettings || gDebugSubFlags.storageMigration);
   
   // System sub-flags
   gDebugSubFlags.systemBoot = gSettings.debugSystemBoot;
   gDebugSubFlags.systemConfig = gSettings.debugSystemConfig;
   gDebugSubFlags.systemTasks = gSettings.debugSystemTasks;
   gDebugSubFlags.systemHardware = gSettings.debugSystemHardware;
-  updateParentDebugFlag(DEBUG_SYSTEM, gDebugSubFlags.systemBoot || gDebugSubFlags.systemConfig || gDebugSubFlags.systemTasks || gDebugSubFlags.systemHardware);
+  updateParentDebugFlag(DEBUG_SYSTEM, gSettings.debugSystem || gDebugSubFlags.systemBoot || gDebugSubFlags.systemConfig || gDebugSubFlags.systemTasks || gDebugSubFlags.systemHardware);
   
   // Users sub-flags
   gDebugSubFlags.usersMgmt = gSettings.debugUsersMgmt;
   gDebugSubFlags.usersRegister = gSettings.debugUsersRegister;
   gDebugSubFlags.usersQuery = gSettings.debugUsersQuery;
-  updateParentDebugFlag(DEBUG_USERS, gDebugSubFlags.usersMgmt || gDebugSubFlags.usersRegister || gDebugSubFlags.usersQuery);
+  updateParentDebugFlag(DEBUG_USERS, gSettings.debugUsers || gDebugSubFlags.usersMgmt || gDebugSubFlags.usersRegister || gDebugSubFlags.usersQuery);
   
   // CLI sub-flags
   gDebugSubFlags.cliExecution = gSettings.debugCliExecution;
   gDebugSubFlags.cliQueue = gSettings.debugCliQueue;
   gDebugSubFlags.cliValidation = gSettings.debugCliValidation;
-  updateParentDebugFlag(DEBUG_CLI, gDebugSubFlags.cliExecution || gDebugSubFlags.cliQueue || gDebugSubFlags.cliValidation);
+  updateParentDebugFlag(DEBUG_CLI, gSettings.debugCli || gDebugSubFlags.cliExecution || gDebugSubFlags.cliQueue || gDebugSubFlags.cliValidation);
   
   // Performance sub-flags
   gDebugSubFlags.perfStack = gSettings.debugPerfStack;
   gDebugSubFlags.perfHeap = gSettings.debugPerfHeap;
   gDebugSubFlags.perfTiming = gSettings.debugPerfTiming;
-  updateParentDebugFlag(DEBUG_PERFORMANCE, gDebugSubFlags.perfStack || gDebugSubFlags.perfHeap || gDebugSubFlags.perfTiming);
+  updateParentDebugFlag(DEBUG_PERFORMANCE, gSettings.debugPerformance || gDebugSubFlags.perfStack || gDebugSubFlags.perfHeap || gDebugSubFlags.perfTiming);
   
   // SSE sub-flags
   gDebugSubFlags.sseConnection = gSettings.debugSseConnection;
   gDebugSubFlags.sseEvents = gSettings.debugSseEvents;
   gDebugSubFlags.sseBroadcast = gSettings.debugSseBroadcast;
-  updateParentDebugFlag(DEBUG_SSE, gDebugSubFlags.sseConnection || gDebugSubFlags.sseEvents || gDebugSubFlags.sseBroadcast);
+  updateParentDebugFlag(DEBUG_SSE, gSettings.debugSse || gDebugSubFlags.sseConnection || gDebugSubFlags.sseEvents || gDebugSubFlags.sseBroadcast);
   
   // Command Flow sub-flags
   gDebugSubFlags.cmdflowRouting = gSettings.debugCmdflowRouting;
   gDebugSubFlags.cmdflowQueue = gSettings.debugCmdflowQueue;
   gDebugSubFlags.cmdflowContext = gSettings.debugCmdflowContext;
-  updateParentDebugFlag(DEBUG_CMD_FLOW, gDebugSubFlags.cmdflowRouting || gDebugSubFlags.cmdflowQueue || gDebugSubFlags.cmdflowContext);
+  updateParentDebugFlag(DEBUG_CMD_FLOW, gSettings.debugCommandFlow || gDebugSubFlags.cmdflowRouting || gDebugSubFlags.cmdflowQueue || gDebugSubFlags.cmdflowContext);
 
   // Apply severity-based log level from settings
   {
@@ -521,27 +524,8 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
   doc["webCliHistorySize"] = gSettings.webCliHistorySize;
   doc["oledCliHistorySize"] = gSettings.oledCliHistorySize;
   
-  // ESP-NOW settings (nested structure)
-  JsonObject espnowObj = doc["espnow"].to<JsonObject>();
-  espnowObj["enabled"] = gSettings.espnowenabled;
-  espnowObj["mesh"] = gSettings.espnowmesh;
-  espnowObj["userSyncEnabled"] = gSettings.espnowUserSyncEnabled;
-  espnowObj["deviceName"] = gSettings.espnowDeviceName;
-  espnowObj["firstTimeSetup"] = gSettings.espnowFirstTimeSetup;
-  // Security: Encrypt passphrase for filesystem storage (protects against file access)
-  if (!excludePasswords) {
-    String encryptedPassphrase = encryptWifiPassword(gSettings.espnowPassphrase);
-    espnowObj["passphrase"] = encryptedPassphrase;
-  }
-  espnowObj["meshRole"] = gSettings.meshRole;
-  espnowObj["masterMAC"] = gSettings.meshMasterMAC;
-  espnowObj["backupMAC"] = gSettings.meshBackupMAC;
-  espnowObj["masterHeartbeatInterval"] = gSettings.meshMasterHeartbeatInterval;
-  espnowObj["failoverTimeout"] = gSettings.meshFailoverTimeout;
-  espnowObj["workerStatusInterval"] = gSettings.meshWorkerStatusInterval;
-  espnowObj["topoDiscoveryInterval"] = gSettings.meshTopoDiscoveryInterval;
-  espnowObj["topoAutoRefresh"] = gSettings.meshTopoAutoRefresh;
-  espnowObj["heartbeatBroadcast"] = gSettings.meshHeartbeatBroadcast;
+  // ESP-NOW settings (nested structure) - now handled by modular registry
+  // Note: passphrase encryption is now automatic via isSecret flag
   
   // WiFi SSID fields for web UI
   // wifiPrimarySSID = currently connected network (preferred);
@@ -577,6 +561,40 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
     size_t registeredCount = writeRegisteredSettings(doc);
     if (registeredCount > 0) {
       DEBUG_STORAGEF("[Settings] Wrote %zu settings from registered modules", registeredCount);
+    }
+    
+    // If building for web API, remove secret fields from all modules
+    if (excludePasswords) {
+      size_t modCount = 0;
+      const SettingsModule** mods = getSettingsModules(modCount);
+      for (size_t m = 0; m < modCount; m++) {
+        const SettingsModule* mod = mods[m];
+        if (!mod) continue;
+        
+        JsonObject section = mod->jsonSection ? doc[mod->jsonSection].as<JsonObject>() : doc.as<JsonObject>();
+        if (section.isNull()) continue;
+        
+        for (size_t i = 0; i < mod->count; i++) {
+          const SettingEntry* e = &mod->entries[i];
+          if (e->isSecret && e->type == SETTING_STRING) {
+            // Remove secret field from web API response
+            const char* key = e->jsonKey;
+            JsonObject target = section;
+            const char* p = key;
+            const char* dot = strchr(p, '.');
+            while (dot) {
+              String seg = String(p).substring(0, dot - p);
+              target = target[seg.c_str()].as<JsonObject>();
+              if (target.isNull()) break;
+              p = dot + 1;
+              dot = strchr(p, '.');
+            }
+            if (!target.isNull()) {
+              target.remove(p);
+            }
+          }
+        }
+      }
     }
   }
 
@@ -777,30 +795,8 @@ bool readSettingsJson() {
 
   // Debug and output settings are now handled by modular registry - no manual fallbacks needed
 
-  // ESP-NOW settings (nested structure only)
-  JsonObject espnow = doc["espnow"];
-  if (espnow) {
-    // Parse nested espnow object
-    gSettings.espnowenabled = espnow["enabled"] | false;
-    gSettings.espnowmesh = espnow["mesh"] | false;
-    gSettings.espnowUserSyncEnabled = espnow["userSyncEnabled"] | false;
-    gSettings.espnowDeviceName = espnow["deviceName"] | "";
-    gSettings.espnowFirstTimeSetup = espnow["firstTimeSetup"] | false;
-    
-    const char* encryptedPassphrase = espnow["passphrase"] | "";
-    gSettings.espnowPassphrase = decryptWifiPassword(encryptedPassphrase);
-    
-    // Mesh role settings
-    gSettings.meshRole = espnow["meshRole"] | 0;
-    gSettings.meshMasterMAC = espnow["masterMAC"] | "";
-    gSettings.meshBackupMAC = espnow["backupMAC"] | "";
-    gSettings.meshMasterHeartbeatInterval = espnow["masterHeartbeatInterval"] | 10000;
-    gSettings.meshFailoverTimeout = espnow["failoverTimeout"] | 20000;
-    gSettings.meshWorkerStatusInterval = espnow["workerStatusInterval"] | 30000;
-    gSettings.meshTopoDiscoveryInterval = espnow["topoDiscoveryInterval"] | 0;
-    gSettings.meshTopoAutoRefresh = espnow["topoAutoRefresh"] | false;
-    gSettings.meshHeartbeatBroadcast = espnow["heartbeatBroadcast"] | false;
-  }
+  // ESP-NOW settings - now handled by modular registry
+  // Note: passphrase decryption is now automatic via isSecret flag
   
 #if ENABLE_AUTOMATION
   // Automation settings
@@ -981,6 +977,9 @@ static const SettingEntry debugSettingEntries[] = {
   { "http", SETTING_BOOL, &gSettings.debugHttp, 0, 0, nullptr, 0, 1, "HTTP", nullptr },
   { "sse", SETTING_BOOL, &gSettings.debugSse, 0, 0, nullptr, 0, 1, "SSE", nullptr },
   { "cli", SETTING_BOOL, &gSettings.debugCli, 0, 0, nullptr, 0, 1, "CLI", nullptr },
+  { "auth", SETTING_BOOL, &gSettings.debugAuth, 0, 0, nullptr, 0, 1, "Auth", nullptr },
+  { "sensors", SETTING_BOOL, &gSettings.debugSensors, 0, 0, nullptr, 0, 1, "Sensors", nullptr },
+  { "espNow", SETTING_BOOL, &gSettings.debugEspNow, 0, 0, nullptr, 0, 1, "ESP-NOW", nullptr },
   { "sensorsFrame", SETTING_BOOL, &gSettings.debugSensorsFrame, 0, 0, nullptr, 0, 1, "Sensors Frame", nullptr },
   { "sensorsData", SETTING_BOOL, &gSettings.debugSensorsData, 0, 0, nullptr, 0, 1, "Sensors Data", nullptr },
   { "sensorsGeneral", SETTING_BOOL, &gSettings.debugSensorsGeneral, 0, 0, nullptr, 0, 1, "Sensors General", nullptr },
@@ -1109,6 +1108,9 @@ extern const SettingsModule httpSettingsModule;
 #if ENABLE_ESPNOW
 extern const SettingsModule espnowSettingsModule;
 #endif
+#if ENABLE_MQTT
+extern const SettingsModule mqttSettingsModule;
+#endif
 #if ENABLE_AUTOMATION
 extern const SettingsModule automationSettingsModule;
 #endif
@@ -1158,6 +1160,9 @@ extern const SettingsModule micSettingsModule;
 #if ENABLE_EDGE_IMPULSE
 extern const SettingsModule edgeImpulseSettingsModule;
 #endif
+#if ENABLE_ESP_SR
+extern const SettingsModule espsrSettingsModule;
+#endif
 
 void registerAllSettingsModules() {
   if (gSettingsModulesRegistered) return;  // Only register once
@@ -1181,6 +1186,9 @@ void registerAllSettingsModules() {
 #endif
 #if ENABLE_ESPNOW
   registerSettingsModule(&espnowSettingsModule);
+#endif
+#if ENABLE_MQTT
+  registerSettingsModule(&mqttSettingsModule);
 #endif
 #if ENABLE_BLUETOOTH
   registerSettingsModule(&bluetoothSettingsModule);
@@ -1229,6 +1237,9 @@ void registerAllSettingsModules() {
 #endif
 #if ENABLE_EDGE_IMPULSE
   registerSettingsModule(&edgeImpulseSettingsModule);
+#endif
+#if ENABLE_ESP_SR
+  registerSettingsModule(&espsrSettingsModule);
 #endif
 
   DEBUG_SYSTEMF("[Settings] All %zu modules registered", gSettingsModuleCount);
@@ -1305,7 +1316,13 @@ size_t readRegisteredSettings(JsonDocument& doc) {
           count++;
           break;
         case SETTING_STRING:
-          *((String*)e->valuePtr) = val | (e->stringDefault ? e->stringDefault : "");
+          if (e->isSecret) {
+            // Decrypt secret strings when reading from disk
+            const char* encrypted = val | (e->stringDefault ? e->stringDefault : "");
+            *((String*)e->valuePtr) = decryptWifiPassword(encrypted);
+          } else {
+            *((String*)e->valuePtr) = val | (e->stringDefault ? e->stringDefault : "");
+          }
           count++;
           break;
       }
@@ -1382,7 +1399,17 @@ size_t writeRegisteredSettings(JsonDocument& doc) {
           count++;
           break;
         case SETTING_STRING:
-          target[leaf] = *((String*)e->valuePtr);
+          if (e->isSecret) {
+            // Encrypt secret strings before writing to disk
+            String plaintext = *((String*)e->valuePtr);
+            if (plaintext.length() > 0) {
+              target[leaf] = encryptWifiPassword(plaintext);
+            } else {
+              target[leaf] = "";
+            }
+          } else {
+            target[leaf] = *((String*)e->valuePtr);
+          }
           count++;
           break;
       }

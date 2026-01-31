@@ -626,6 +626,238 @@ static void printSerialPageStatus() {
   Serial.print("> ");
 }
 
+// ============================================================================
+// Setup Mode Selection (Basic vs Advanced)
+// ============================================================================
+
+bool getOLEDSetupModeSelection(bool& advancedMode) {
+  int selection = 0;  // 0 = Basic, 1 = Advanced
+  uint32_t lastButtons = 0;
+  bool lastButtonsInitialized = false;
+  int lastPrintedSelection = -1;
+  
+  // Reset joystick state
+  sJoyUpHeld = false;
+  sJoyDownHeld = false;
+  
+  while (true) {
+    // Print to Serial if selection changed (dual-interface support)
+    if (selection != lastPrintedSelection) {
+      Serial.println();
+      Serial.println("========================================");
+      Serial.println("       SELECT SETUP MODE");
+      Serial.println("========================================");
+      Serial.printf(" %s1. Basic Setup    - Quick start\n", selection == 0 ? ">" : " ");
+      Serial.printf(" %s2. Advanced Setup - Full configuration\n", selection == 1 ? ">" : " ");
+      Serial.println("----------------------------------------");
+      Serial.println("Serial: Enter 1 or 2");
+      Serial.println("OLED: Joystick to move, A to select");
+      Serial.print("> ");
+      lastPrintedSelection = selection;
+    }
+    
+    // Draw selection screen on OLED (if available)
+    if (oledDisplay && oledConnected) {
+      oledDisplay->clearDisplay();
+      oledDisplay->setTextSize(1);
+      oledDisplay->setTextColor(SSD1306_WHITE);
+      
+      // Title
+      oledDisplay->setCursor(20, 0);
+      oledDisplay->println("FIRST-TIME SETUP");
+      oledDisplay->drawFastHLine(0, 10, 128, SSD1306_WHITE);
+      
+      // Subtitle
+      oledDisplay->setCursor(0, 14);
+      oledDisplay->println("Select setup mode:");
+      
+      // Option 1: Basic
+      oledDisplay->setCursor(0, 28);
+      oledDisplay->print(selection == 0 ? ">" : " ");
+      oledDisplay->println(" Basic Setup");
+      oledDisplay->setCursor(12, 36);
+      oledDisplay->println("Quick start");
+      
+      // Option 2: Advanced
+      oledDisplay->setCursor(0, 46);
+      oledDisplay->print(selection == 1 ? ">" : " ");
+      oledDisplay->println(" Advanced Setup");
+      
+      // Footer
+      oledDisplay->setCursor(0, 56);
+      oledDisplay->print("A:Select  Joy:Move");
+      
+      OLED_TRANSACTION(oledDisplay->display());
+    }
+    
+    delay(50);
+    
+    // Read joystick (if OLED/gamepad available)
+    if (oledDisplay && oledConnected) {
+      JoystickNav nav = readJoystickNav();
+      
+      if (nav.up || nav.down) {
+        selection = (selection == 0) ? 1 : 0;
+        delay(150);
+        continue;
+      }
+      
+      // Read buttons
+      uint32_t buttons = lastButtons;
+      bool haveButtons = false;
+      if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (gControlCache.gamepadDataValid) {
+          buttons = gControlCache.gamepadButtons;
+          haveButtons = true;
+        }
+        xSemaphoreGive(gControlCache.mutex);
+      }
+      
+      if (haveButtons && !lastButtonsInitialized) {
+        lastButtons = buttons;
+        lastButtonsInitialized = true;
+        continue;
+      }
+      
+      uint32_t pressedNow = ~buttons;
+      uint32_t pressedLast = ~lastButtons;
+      uint32_t newButtons = pressedNow & ~pressedLast;
+      lastButtons = buttons;
+      
+      // A button = select
+      if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
+        advancedMode = (selection == 1);
+        return true;
+      }
+    }
+    
+    // Also check serial input
+    if (Serial.available()) {
+      String input = Serial.readStringUntil('\n');
+      input.trim();
+      if (input == "1" || input.equalsIgnoreCase("basic")) {
+        advancedMode = false;
+        return true;
+      } else if (input == "2" || input.equalsIgnoreCase("advanced")) {
+        advancedMode = true;
+        return true;
+      }
+    }
+  }
+  
+  return false;
+}
+
+// ============================================================================
+// Theme Selection (Light vs Dark)
+// ============================================================================
+
+bool getOLEDThemeSelection(bool& darkMode) {
+  int selection = 0;  // 0 = Light, 1 = Dark
+  uint32_t lastButtons = 0;
+  bool lastButtonsInitialized = false;
+  int lastPrintedSelection = -1;
+  
+  // Reset joystick state
+  sJoyUpHeld = false;
+  sJoyDownHeld = false;
+  
+  while (true) {
+    // Print to Serial if selection changed (dual-interface support)
+    if (selection != lastPrintedSelection) {
+      Serial.println();
+      Serial.printf(" %s1. Light (default)\n", selection == 0 ? ">" : " ");
+      Serial.printf(" %s2. Dark\n", selection == 1 ? ">" : " ");
+      Serial.print("> ");
+      lastPrintedSelection = selection;
+    }
+    
+    // Draw selection screen on OLED (if available)
+    if (oledDisplay && oledConnected) {
+      oledDisplay->clearDisplay();
+      oledDisplay->setTextSize(1);
+      oledDisplay->setTextColor(SSD1306_WHITE);
+      
+      // Title
+      oledDisplay->setCursor(24, 0);
+      oledDisplay->println("WEB UI THEME");
+      oledDisplay->drawFastHLine(0, 10, 128, SSD1306_WHITE);
+      
+      // Option 1: Light
+      oledDisplay->setCursor(0, 24);
+      oledDisplay->print(selection == 0 ? ">" : " ");
+      oledDisplay->println(" Light (default)");
+      
+      // Option 2: Dark
+      oledDisplay->setCursor(0, 36);
+      oledDisplay->print(selection == 1 ? ">" : " ");
+      oledDisplay->println(" Dark");
+      
+      // Footer
+      oledDisplay->setCursor(0, 56);
+      oledDisplay->print("A:Select  Joy:Move");
+      
+      OLED_TRANSACTION(oledDisplay->display());
+    }
+    
+    delay(50);
+    
+    // Read joystick (if OLED/gamepad available)
+    if (oledDisplay && oledConnected) {
+      JoystickNav nav = readJoystickNav();
+      
+      if (nav.up || nav.down) {
+        selection = (selection == 0) ? 1 : 0;
+        delay(150);
+        continue;
+      }
+      
+      // Read buttons
+      uint32_t buttons = lastButtons;
+      bool haveButtons = false;
+      if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (gControlCache.gamepadDataValid) {
+          buttons = gControlCache.gamepadButtons;
+          haveButtons = true;
+        }
+        xSemaphoreGive(gControlCache.mutex);
+      }
+      
+      if (haveButtons && !lastButtonsInitialized) {
+        lastButtons = buttons;
+        lastButtonsInitialized = true;
+        continue;
+      }
+      
+      uint32_t pressedNow = ~buttons;
+      uint32_t pressedLast = ~lastButtons;
+      uint32_t newButtons = pressedNow & ~pressedLast;
+      lastButtons = buttons;
+      
+      // A button = select
+      if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
+        darkMode = (selection == 1);
+        return true;
+      }
+    }
+    
+    // Also check serial input
+    if (Serial.available()) {
+      String input = Serial.readStringUntil('\n');
+      input.trim();
+      if (input == "1" || input.equalsIgnoreCase("light")) {
+        darkMode = false;
+        return true;
+      } else if (input == "2" || input.equalsIgnoreCase("dark")) {
+        darkMode = true;
+        return true;
+      }
+    }
+  }
+  
+  return false;
+}
+
 SetupWizardResult runOLEDSetupWizard() {
   SetupWizardResult result;
   result.completed = false;

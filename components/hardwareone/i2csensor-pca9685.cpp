@@ -177,7 +177,7 @@ const char* cmd_servolist(const String& command) {
     if (servoProfiles[i].configured) {
       anyConfigured = true;
       char line[128];
-      snprintf(line, sizeof(line), "%2d  %-14s  %5d  %5d  %6d  Active",
+      snprintf(line, sizeof(line), "%2d  %-14.14s  %5d  %5d  %6d  Active",
                i, servoProfiles[i].name, 
                servoProfiles[i].minPulse, servoProfiles[i].maxPulse,
                servoProfiles[i].centerPulse);

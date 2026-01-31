@@ -22,6 +22,7 @@ extern bool micRecording;
 extern int micSampleRate;
 extern int micBitDepth;
 extern int micChannels;
+extern int micGain;
 
 // Microphone initialization
 bool initMicrophone();
@@ -33,6 +34,15 @@ int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen);
 
 // Get audio level (0-100 for VU meter display)
 int getAudioLevel();
+
+// Audio preprocessing (shared with ESP-SR)
+// Applies: DC offset removal, high-pass filter, pre-emphasis, software gain
+// Pass gainMultiplier <= 0 to use default from micGain setting
+// Pass filtersEnabled = false to skip high-pass and pre-emphasis (for ESP-SR AFE testing)
+void applyMicAudioProcessing(int16_t* buf, size_t sampleCount, float gainMultiplier = 0.0f, bool filtersEnabled = true);
+void resetMicAudioProcessingState();
+float getMicSoftwareGainMultiplier();
+int32_t getMicDcOffset();
 
 // Get microphone status JSON
 const char* buildMicrophoneStatusJson();

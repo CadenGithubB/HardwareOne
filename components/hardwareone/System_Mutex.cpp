@@ -16,6 +16,7 @@ SemaphoreHandle_t i2cMutex = nullptr;
 SemaphoreHandle_t i2cHealthMutex = nullptr;
 SemaphoreHandle_t gJsonResponseMutex = nullptr;
 SemaphoreHandle_t gMeshRetryMutex = nullptr;
+SemaphoreHandle_t i2sMicMutex = nullptr;
 
 // ============================================================================
 // Initialization
@@ -26,6 +27,7 @@ void initMutexes() {
   fsMutex = xSemaphoreCreateMutex();
   gJsonResponseMutex = xSemaphoreCreateMutex();
   gMeshRetryMutex = xSemaphoreCreateMutex();
+  i2sMicMutex = xSemaphoreCreateMutex();
   
   // I2C mutexes now managed by I2CDeviceManager
   // Create legacy i2cMutex for backward compatibility during migration
@@ -36,7 +38,7 @@ void initMutexes() {
   // Log creation status
   bool allCreated = (fsMutex != nullptr) && (gJsonResponseMutex != nullptr) && 
                     (gMeshRetryMutex != nullptr) && (i2cMutex != nullptr) && 
-                    (i2cHealthMutex != nullptr);
+                    (i2cHealthMutex != nullptr) && (i2sMicMutex != nullptr);
   
   if (!allCreated) {
     if (gOutputFlags & OUTPUT_SERIAL) {
@@ -123,6 +125,23 @@ I2cLockGuard::I2cLockGuard(const char* owner) : held(false) {
 I2cLockGuard::~I2cLockGuard() {
   if (held && i2cMutex) {
     xSemaphoreGive(i2cMutex);
+  }
+}
+
+I2sMicLockGuard::I2sMicLockGuard(const char* owner) : held(false) {
+  if (i2sMicMutex) {
+    if (isHeldByCurrentTask(i2sMicMutex)) {
+      return;
+    }
+    if (xSemaphoreTake(i2sMicMutex, portMAX_DELAY) == pdTRUE) {
+      held = true;
+    }
+  }
+}
+
+I2sMicLockGuard::~I2sMicLockGuard() {
+  if (held && i2sMicMutex) {
+    xSemaphoreGive(i2sMicMutex);
   }
 }
 

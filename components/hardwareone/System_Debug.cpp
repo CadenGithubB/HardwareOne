@@ -21,8 +21,8 @@ extern Settings gSettings;
 // ============================================================================
 
 // Debug system globals - single source of truth
-// DEBUG_I2C enabled by default for I2C bus debugging during boot
-uint32_t gDebugFlags = DEBUG_I2C;
+// All debug flags enabled by default for maximum verbosity
+uint32_t gDebugFlags = 0xFFFFFFFF;
 DebugSubFlags gDebugSubFlags = {}; // All sub-flags initialized to false
 char* gDebugBuffer = nullptr;
 QueueHandle_t gDebugOutputQueue = nullptr;
@@ -1003,6 +1003,84 @@ const char* cmd_debugperformance(const String& args) {
   }
 }
 
+const char* cmd_debugauth(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_AUTH);
+    else clearDebugFlag(DEBUG_AUTH);
+    return v ? "debugAuth enabled (runtime only)" : "debugAuth disabled (runtime only)";
+  } else {
+    gSettings.debugAuth = (v != 0);
+    writeSettingsJson();
+    if (v) setDebugFlag(DEBUG_AUTH);
+    else clearDebugFlag(DEBUG_AUTH);
+    return gSettings.debugAuth ? "debugAuth enabled (persistent)" : "debugAuth disabled (persistent)";
+  }
+}
+
+const char* cmd_debugsensors(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_SENSORS);
+    else clearDebugFlag(DEBUG_SENSORS);
+    return v ? "debugSensors enabled (runtime only)" : "debugSensors disabled (runtime only)";
+  } else {
+    gSettings.debugSensors = (v != 0);
+    writeSettingsJson();
+    if (v) setDebugFlag(DEBUG_SENSORS);
+    else clearDebugFlag(DEBUG_SENSORS);
+    return gSettings.debugSensors ? "debugSensors enabled (persistent)" : "debugSensors disabled (persistent)";
+  }
+}
+
+const char* cmd_debugespnow(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_ESPNOW_CORE);
+    else clearDebugFlag(DEBUG_ESPNOW_CORE);
+    return v ? "debugEspNow enabled (runtime only)" : "debugEspNow disabled (runtime only)";
+  } else {
+    gSettings.debugEspNow = (v != 0);
+    writeSettingsJson();
+    if (v) setDebugFlag(DEBUG_ESPNOW_CORE);
+    else clearDebugFlag(DEBUG_ESPNOW_CORE);
+    return gSettings.debugEspNow ? "debugEspNow enabled (persistent)" : "debugEspNow disabled (persistent)";
+  }
+}
+
 const char* cmd_debugdatetime(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = args;
@@ -1527,7 +1605,7 @@ const char* cmd_log(const String& args) {
       fsLock("debug.log");
       gSystemLogFile.flush();
       gSystemLogFile.close();
-      gSystemLogFile = File();  // Reset handle
+      // Note: close() resets the handle internally
       gSystemLogUnflushedCount = 0;
       fsUnlock();
     }
@@ -1551,7 +1629,7 @@ const char* cmd_log(const String& args) {
       fsLock("debug.log");
       gSystemLogFile.flush();
       gSystemLogFile.close();
-      gSystemLogFile = File();
+      // Note: close() resets the handle internally
       fsUnlock();
     }
     
@@ -2089,6 +2167,9 @@ const CommandEntry debugCommands[] = {
   { "debughttp", "Debug HTTP requests.", true, cmd_debughttp },
   { "debugsse", "Debug Server-Sent Events.", true, cmd_debugsse },
   { "debugcli", "Debug CLI processing.", true, cmd_debugcli },
+  { "debugauth", "Debug authentication (parent flag).", true, cmd_debugauth, "Usage: debugauth <0|1>" },
+  { "debugsensors", "Debug sensors (parent flag).", true, cmd_debugsensors, "Usage: debugsensors <0|1>" },
+  { "debugespnow", "Debug ESP-NOW (parent flag).", true, cmd_debugespnow, "Usage: debugespnow <0|1>" },
   { "debugsensorsframe", "Debug sensor frame processing.", true, cmd_debugsensorsframe },
   { "debugsensorsdata", "Debug sensor data.", true, cmd_debugsensorsdata },
   { "debugsensorsgeneral", "Debug general sensor operations.", true, cmd_debugsensorsgeneral },

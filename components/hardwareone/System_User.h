@@ -22,7 +22,9 @@ enum CommandSource {
   SOURCE_INTERNAL = 2,
   SOURCE_ESPNOW = 3,
   SOURCE_LOCAL_DISPLAY = 4,
-  SOURCE_BLUETOOTH = 5
+  SOURCE_BLUETOOTH = 5,
+  SOURCE_MQTT = 6,
+  SOURCE_VOICE = 7
 };
 
 struct AuthContext {

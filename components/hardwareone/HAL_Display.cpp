@@ -13,7 +13,6 @@
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   #include "System_I2C.h"
   #include <Wire.h>
-  #include <freertos/semphr.h>
 #endif
 
 // Global display instance
@@ -130,7 +129,6 @@ void displayUpdate() {
   
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   // LOW PRIORITY: Try-lock with short timeout - yield to gamepad/high-pri I2C devices
-  extern SemaphoreHandle_t i2cMutex;
   if (i2cMutex && xSemaphoreTakeRecursive(i2cMutex, pdMS_TO_TICKS(5)) != pdTRUE) {
     // Bus is busy - skip this refresh, try again next cycle
     return;
@@ -157,6 +155,28 @@ void displayDim(bool dim) {
   // TFT dimming via backlight PWM (if connected)
   #if DISPLAY_BL_PIN >= 0
     analogWrite(DISPLAY_BL_PIN, dim ? 64 : 255);
+  #endif
+#endif
+}
+
+/**
+ * Set display brightness (0-255)
+ * OLED: Uses ssd1306_command for contrast control
+ * TFT: Controls backlight PWM if available
+ */
+void displaySetBrightness(uint8_t level) {
+  if (!gDisplay) return;
+  
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  // SSD1306 contrast control via command interface
+  // Contrast range is 0x00-0xFF, maps directly to level
+  gDisplay->ssd1306_command(0x81);  // Set Contrast Control
+  gDisplay->ssd1306_command(level);
+  
+#elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
+  // TFT brightness via backlight PWM
+  #if DISPLAY_BL_PIN >= 0
+    analogWrite(DISPLAY_BL_PIN, level);
   #endif
 #endif
 }

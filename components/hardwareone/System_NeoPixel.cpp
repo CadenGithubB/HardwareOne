@@ -7,21 +7,30 @@
 #include "System_Command.h"  // For CommandModuleRegistrar
 #include "System_Settings.h"        // For SettingsModule (merged from System_LED.cpp)
 #include "System_Debug.h"    // For debug macros (merged from System_LED.cpp)
+#include "System_BuildConfig.h"  // For NEOPIXEL_PIN_DEFAULT
 
-// Provide a default NeoPixel pin when building under generic ESP32 variants
-// where PIN_NEOPIXEL is not defined by the Arduino core.
-#ifndef PIN_NEOPIXEL
-#define PIN_NEOPIXEL 8
+// Use NEOPIXEL_PIN_DEFAULT from System_BuildConfig.h (board-specific)
+// Boards without NeoPixel set this to -1
+#if !defined(NEOPIXEL_PIN_DEFAULT)
+  #define NEOPIXEL_PIN_DEFAULT -1
 #endif
+
+// Determine if NeoPixel hardware is available at compile time
+#define NEOPIXEL_AVAILABLE (NEOPIXEL_PIN_DEFAULT >= 0)
 
 // External dependencies
 extern bool ensureDebugBuffer();
 extern char* getDebugBuffer();
 extern void broadcastOutput(const String& msg);
 
-// Global NeoPixel instance (1 pixel on PIN_NEOPIXEL)
+// Global NeoPixel instance - only instantiate if hardware is available
 #define NUMPIXELS 1
-Adafruit_NeoPixel pixels(NUMPIXELS, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
+#if NEOPIXEL_AVAILABLE
+  Adafruit_NeoPixel pixels(NUMPIXELS, NEOPIXEL_PIN_DEFAULT, NEO_GRB + NEO_KHZ800);
+#else
+  // Dummy instance that won't touch any GPIO pins
+  Adafruit_NeoPixel pixels(0, -1, NEO_GRB + NEO_KHZ800);
+#endif
 
 // ============================================================================
 // 64-Color Palette (stored in PROGMEM to save RAM)
@@ -129,6 +138,7 @@ const int numColors = sizeof(colorTable) / sizeof(colorTable[0]);
 // ============================================================================
 
 void initNeoPixelLED() {
+#if NEOPIXEL_AVAILABLE
   // Enable power to STEMMA QT connector on Feather V2
   // This pin powers the 3.3V regulator for I2C devices and NeoPixel
   #ifdef NEOPIXEL_I2C_POWER
@@ -140,11 +150,16 @@ void initNeoPixelLED() {
   pixels.begin();
   pixels.setBrightness(50);  // Set moderate brightness
   pixels.show();  // Initialize all pixels to 'off'
+#endif
+  // No-op on boards without NeoPixel hardware
 }
 
 void setLEDColor(RGB color) {
+#if NEOPIXEL_AVAILABLE
   pixels.setPixelColor(0, pixels.Color(color.r, color.g, color.b));
   pixels.show();
+#endif
+  // No-op on boards without NeoPixel hardware
 }
 
 bool getRGBFromName(const String& colorName, RGB& color) {
@@ -414,8 +429,8 @@ const char* cmd_ledeffect(const String& command) {
 // ============================================================================
 
 const CommandEntry neopixelCommands[] = {
-  { "ledcolor", "Set LED color by name.", false, cmd_ledcolor, "Usage: ledcolor <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>" },
-  { "ledclear", "Turn off LED.", false, cmd_ledclear },
+  { "ledcolor", "Set LED color by name.", false, cmd_ledcolor, "Usage: ledcolor <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>", "led", "change color" },
+  { "ledclear", "Turn off LED.", false, cmd_ledclear, nullptr, "led", "turn off" },
   { "ledeffect", "Run a predefined LED effect.", false, cmd_ledeffect },
 };
 

@@ -908,7 +908,7 @@ void oledEspNowSendTextMessage() {
   if (!gEspNow || gOLEDEspNowState.textMessageBuffer.length() == 0) return;
   
   // Send text message to selected device
-  extern String executeCommandThroughRegistry(const String& cmd);
+  extern void executeOLEDCommand(const String& cmd);
   
   // Format MAC address
   char macStr[18];
@@ -922,7 +922,7 @@ void oledEspNowSendTextMessage() {
   
   // Build command: espnow send <mac> <message>
   String cmd = "espnow send " + String(macStr) + " " + gOLEDEspNowState.textMessageBuffer;
-  executeCommandThroughRegistry(cmd);
+  executeOLEDCommand(cmd);
   
   // Clear buffer
   gOLEDEspNowState.textMessageBuffer = "";
@@ -941,7 +941,7 @@ void oledEspNowSendRemoteCommand() {
     return;  // Don't send if any field is empty
   }
   
-  extern String executeCommandThroughRegistry(const String& cmd);
+  extern void executeOLEDCommand(const String& cmd);
   
   // Format MAC address
   char macStr[18];
@@ -959,7 +959,7 @@ void oledEspNowSendRemoteCommand() {
                gOLEDEspNowState.remotePassword + " " +
                gOLEDEspNowState.remoteCommand;
   
-  executeCommandThroughRegistry(cmd);
+  executeOLEDCommand(cmd);
   
   // Clear form
   gOLEDEspNowState.remoteUsername = "";

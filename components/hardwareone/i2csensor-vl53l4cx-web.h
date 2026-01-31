@@ -11,7 +11,7 @@ inline void streamVL53L4CXTofSensorCard(httpd_req_t* req) {
       <div class='sensor-title'><span>ToF Distance Sensor</span><span class='status-indicator status-disabled' id='tof-status-indicator'></span></div>
       <div class='sensor-description'>VL53L4CX Time-of-Flight sensor up to ~4m.</div>
       <div id='tof-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
-      <div class='sensor-controls'><button class='btn' id='btn-tof-start'>Start ToF</button><button class='btn' id='btn-tof-stop'>Stop ToF</button></div>
+      <div class='sensor-controls'><button class='btn' id='btn-tof-start'>Open ToF</button><button class='btn' id='btn-tof-stop'>Close ToF</button></div>
       <div class='sensor-data' id='tof-data'>ToF sensor data will appear here...</div>
       <div id='tof-objects-display' style='margin-top:15px;display:none'>
         <div style='font-weight:bold;margin-bottom:10px;color:#333'>Multi-Object Detection (0-<span id='tof-range-mm'>3400</span>mm)</div>
@@ -29,7 +29,7 @@ inline void streamVL53L4CXTofSensorCard(httpd_req_t* req) {
 }
 
 inline void streamVL53L4CXTofSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-tof-start','tofstart');bind('btn-tof-stop','tofstop');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "bind('btn-tof-start','opentof');bind('btn-tof-stop','closetof');", HTTPD_RESP_USE_STRLEN);
 }
 
 inline void streamVL53L4CXTofSensorJs(httpd_req_t* req) {

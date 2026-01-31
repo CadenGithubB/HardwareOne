@@ -42,23 +42,53 @@ void resetTaskMetrics();
 // ============================================================================
 
 // Command entry structure - used by all modules to define their commands
+// Voice hierarchy: voiceCategory -> voiceSubCategory (optional) -> voiceTarget
+// Examples:
+//   2-level: { ..., "camera", nullptr, "open" }      -> "camera" -> "open"
+//   3-level: { ..., "sensor", "thermal", "open" }    -> "sensor" -> "thermal" -> "open"
 struct CommandEntry {
   const char* name;                           // canonical command name
   const char* help;                           // short help text
   bool requiresAdmin;                         // whether admin is required
   const char* (*handler)(const String& cmd);  // function pointer to command handler
   const char* usage;                          // optional longer usage string (may be nullptr)
+  const char* voiceCategory;                  // 1st level: category phrase (may be nullptr)
+  const char* voiceSubCategory;               // 2nd level: sub-category phrase (may be nullptr for 2-level)
+  const char* voiceTarget;                    // final level: action phrase (may be nullptr)
 
   constexpr CommandEntry(const char* name_,
                          const char* help_,
                          bool requiresAdmin_,
                          const char* (*handler_)(const String& cmd_),
-                         const char* usage_ = nullptr)
+                         const char* usage_ = nullptr,
+                         const char* voiceCategory_ = nullptr,
+                         const char* voiceTarget_ = nullptr)
       : name(name_),
         help(help_),
         requiresAdmin(requiresAdmin_),
         handler(handler_),
-        usage(usage_) {}
+        usage(usage_),
+        voiceCategory(voiceCategory_),
+        voiceSubCategory(nullptr),
+        voiceTarget(voiceTarget_) {}
+
+  // 3-level constructor with sub-category
+  constexpr CommandEntry(const char* name_,
+                         const char* help_,
+                         bool requiresAdmin_,
+                         const char* (*handler_)(const String& cmd_),
+                         const char* usage_,
+                         const char* voiceCategory_,
+                         const char* voiceSubCategory_,
+                         const char* voiceTarget_)
+      : name(name_),
+        help(help_),
+        requiresAdmin(requiresAdmin_),
+        handler(handler_),
+        usage(usage_),
+        voiceCategory(voiceCategory_),
+        voiceSubCategory(voiceSubCategory_),
+        voiceTarget(voiceTarget_) {}
 };
 
 // Command module flags

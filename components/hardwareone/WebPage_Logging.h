@@ -414,7 +414,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
     </div>
     
     <!-- Log Display -->
-    <div id='viewer-display' style='display:none;background:#1e1e1e;color:#d4d4d4;border-radius:8px;padding:1rem;margin:1rem 0;max-height:600px;overflow-y:auto;font-family:monospace;font-size:0.85rem;line-height:1.5'>
+    <div id='viewer-display' style='display:none;background:var(--code-bg, #1e1e1e);color:var(--code-fg, #d4d4d4);border-radius:8px;padding:1rem;margin:1rem 0;max-height:600px;overflow-y:auto;font-family:monospace;font-size:0.85rem;line-height:1.5;border:1px solid var(--border)'>
       <div id='viewer-content'>No log loaded</div>
     </div>
     

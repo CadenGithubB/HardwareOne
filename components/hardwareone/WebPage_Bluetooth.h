@@ -70,11 +70,11 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       </div>
       <div class='bt-description'>
         Control the built-in BLE peripheral and inspect current connection state.
-        This UI is a thin wrapper around the existing <code>blestart</code>, <code>blestop</code>, <code>blestatus</code>, <code>bledisconnect</code> and <code>bleadv</code> CLI commands.
+        This UI is a thin wrapper around the existing <code>openble</code>, <code>closeble</code>, <code>blestatus</code>, <code>bledisconnect</code> and <code>bleadv</code> CLI commands.
       </div>
       <div class='bt-controls'>
-        <button class='btn' id='btn-ble-start'>Start Bluetooth</button>
-        <button class='btn' id='btn-ble-stop'>Stop Bluetooth</button>
+        <button class='btn' id='btn-ble-start'>Open Bluetooth</button>
+        <button class='btn' id='btn-ble-stop'>Close Bluetooth</button>
         <button class='btn' id='btn-ble-adv'>Start Advertising</button>
         <button class='btn' id='btn-ble-disconnect'>Disconnect Client</button>
         <button class='btn' id='btn-ble-refresh'>Refresh Status</button>
@@ -174,8 +174,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 
   document.addEventListener('DOMContentLoaded', function(){
     bind('btn-ble-refresh', function(){ refreshStatus(); });
-    bind('btn-ble-start', function(){ runCommand('blestart', 'Bluetooth started'); });
-    bind('btn-ble-stop', function(){ runCommand('blestop', 'Bluetooth stopped'); });
+    bind('btn-ble-start', function(){ runCommand('openble', 'Bluetooth opened'); });
+    bind('btn-ble-stop', function(){ runCommand('closeble', 'Bluetooth closed'); });
     bind('btn-ble-adv', function(){ runCommand('bleadv', 'Advertising started'); });
     bind('btn-ble-disconnect', function(){ runCommand('bledisconnect', 'Disconnect requested'); });
     // Initial status fetch

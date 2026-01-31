@@ -119,6 +119,11 @@ const char* getSetupProgressMessage(SetupProgressStage stage) {
 // First-Time Setup Implementation
 // ============================================================================
 
+// Forward declaration for OLED setup mode selection
+#if ENABLE_OLED_DISPLAY
+extern bool getOLEDSetupModeSelection(bool& advancedMode);
+#endif
+
 void firstTimeSetupIfNeeded() {
   // Check current state instead of filesystem
   if (gFirstTimeSetupState == SETUP_NOT_NEEDED) {
@@ -136,6 +141,35 @@ void firstTimeSetupIfNeeded() {
   broadcastOutput("");
   broadcastOutput("FIRST-TIME SETUP");
   broadcastOutput("----------------");
+  
+  // ============================================================================
+  // Setup Mode Selection: Basic vs Advanced
+  // ============================================================================
+  bool advancedSetup = false;
+  
+#if ENABLE_OLED_DISPLAY
+  // Use OLED selection if available
+  if (oledEnabled && oledConnected) {
+    getOLEDSetupModeSelection(advancedSetup);
+  } else {
+#endif
+    // Serial-only mode selection
+    broadcastOutput("");
+    broadcastOutput("Select setup mode:");
+    broadcastOutput("  1. Basic Setup   - Quick start (username + password only)");
+    broadcastOutput("  2. Advanced Setup - Full configuration wizard");
+    broadcastOutput("");
+    broadcastOutput("Enter 1 or 2 (default: 1): ");
+    
+    String modeInput = waitForSerialInputBlocking();
+    modeInput.trim();
+    advancedSetup = (modeInput == "2" || modeInput.equalsIgnoreCase("advanced"));
+#if ENABLE_OLED_DISPLAY
+  }
+#endif
+
+  broadcastOutput(advancedSetup ? "Advanced setup selected." : "Basic setup selected.");
+  broadcastOutput("");
   
   // Username stage
   setSetupProgressStage(SETUP_PROMPT_USERNAME);
@@ -180,48 +214,112 @@ void firstTimeSetupIfNeeded() {
   // At first-time setup, users.json does not exist yet; seed bootCounter starting at 1 and set admin bootCount to 1
   
   // ============================================================================
-  // Feature Configuration Wizard
+  // Feature Configuration Wizard (Advanced mode only)
   // ============================================================================
-  setSetupProgressStage(SETUP_PROMPT_HARDWARE);
-  broadcastOutput("");
-  broadcastOutput("Feature Configuration...");
-  
   String wifiSSID = "";
   String wifiPass = "";
   bool wifiConfigured = false;
+  bool useDarkTheme = false;  // Theme preference (used when creating user settings)
   
-  // Run unified setup wizard (works on both Serial AND OLED simultaneously)
-  SetupWizardResult wizardResult;
-  
+  if (advancedSetup) {
+    setSetupProgressStage(SETUP_PROMPT_HARDWARE);
+    broadcastOutput("");
+    broadcastOutput("Feature Configuration...");
+    
+    // Run unified setup wizard (works on both Serial AND OLED simultaneously)
+    SetupWizardResult wizardResult;
+    
 #if ENABLE_OLED_DISPLAY
-  // Unified wizard: displays on OLED (if available) AND Serial
-  // Accepts input from either gamepad/joystick OR serial commands
-  wizardResult = runOLEDSetupWizard();
+    // Unified wizard: displays on OLED (if available) AND Serial
+    // Accepts input from either gamepad/joystick OR serial commands
+    wizardResult = runOLEDSetupWizard();
 #else
-  // No OLED compiled - use serial-only wizard
-  wizardResult = runSerialSetupWizard();
+    // No OLED compiled - use serial-only wizard
+    wizardResult = runSerialSetupWizard();
 #endif
-  
-  if (wizardResult.completed) {
-    broadcastOutput("Feature configuration complete.");
     
-    // Apply WiFi settings if configured
-    if (wizardResult.wifiConfigured && wizardResult.wifiSSID.length() > 0) {
-      wifiSSID = wizardResult.wifiSSID;
-      wifiPass = wizardResult.wifiPassword;
-      wifiConfigured = true;
+    if (wizardResult.completed) {
+      broadcastOutput("Feature configuration complete.");
+      
+      // Apply WiFi settings if configured
+      if (wizardResult.wifiConfigured && wizardResult.wifiSSID.length() > 0) {
+        wifiSSID = wizardResult.wifiSSID;
+        wifiPass = wizardResult.wifiPassword;
+        wifiConfigured = true;
+      }
+      
+      // Log the selections
+      broadcastOutput("Timezone: " + wizardResult.timezoneAbbrev);
+      {
+        uint32_t usedKB = 0;
+        uint32_t totalKB = 1;
+        int pct = 0;
+        getHeapBarData(&usedKB, &totalKB, &pct);
+        uint32_t estFreeKB = (usedKB >= totalKB) ? 0 : (totalKB - usedKB);
+        broadcastOutput("Heap estimate: ~" + String(estFreeKB) + "KB");
+      }
     }
     
-    // Log the selections
-    broadcastOutput("Timezone: " + wizardResult.timezoneAbbrev);
-    {
-      uint32_t usedKB = 0;
-      uint32_t totalKB = 1;
-      int pct = 0;
-      getHeapBarData(&usedKB, &totalKB, &pct);
-      uint32_t estFreeKB = (usedKB >= totalKB) ? 0 : (totalKB - usedKB);
-      broadcastOutput("Heap estimate: ~" + String(estFreeKB) + "KB");
+    // Device name customization (advanced mode only)
+    // Shows on both Serial AND OLED simultaneously
+    broadcastOutput("");
+    broadcastOutput("========================================");
+    broadcastOutput("       DEVICE NAME");
+    broadcastOutput("========================================");
+    broadcastOutput("Used for Bluetooth and ESP-NOW identity.");
+    broadcastOutput("Press Enter to keep default [HardwareOne]");
+    broadcastOutput("----------------------------------------");
+    String deviceName = "";
+#if ENABLE_OLED_DISPLAY
+    // OLED text input already shows prompt on screen, serial sees the broadcastOutput above
+    deviceName = getOLEDTextInput("Device Name:", false, "HardwareOne", 20);
+#else
+    deviceName = waitForSerialInputBlocking();
+#endif
+    deviceName.trim();
+    if (deviceName.length() == 0) {
+      deviceName = "HardwareOne";
     }
+    // Apply device name to BLE and ESP-NOW
+    gSettings.bleDeviceName = deviceName;
+    gSettings.espnowDeviceName = deviceName;
+    broadcastOutput("Device name set to: " + deviceName);
+    
+    // Theme preference (for web UI)
+    // Shows on both Serial AND OLED simultaneously
+    broadcastOutput("");
+    broadcastOutput("========================================");
+    broadcastOutput("       WEB UI THEME");
+    broadcastOutput("========================================");
+    broadcastOutput(" 1. Light (default)");
+    broadcastOutput(" 2. Dark");
+    broadcastOutput("----------------------------------------");
+    broadcastOutput("Enter 1 or 2: ");
+    String themeInput = "";
+#if ENABLE_OLED_DISPLAY
+    // For theme, show a simple selection on OLED too
+    extern bool getOLEDThemeSelection(bool& darkMode);
+    bool darkSelected = false;
+    if (oledEnabled && oledConnected && getOLEDThemeSelection(darkSelected)) {
+      themeInput = darkSelected ? "2" : "1";
+    } else {
+      themeInput = waitForSerialInputBlocking();
+    }
+#else
+    themeInput = waitForSerialInputBlocking();
+#endif
+    themeInput.trim();
+    // Store theme choice - will be applied when creating user settings
+    useDarkTheme = (themeInput == "2" || themeInput.equalsIgnoreCase("dark"));
+    broadcastOutput(useDarkTheme ? "Theme set to: Dark" : "Theme set to: Light");
+    
+  } else {
+    // Basic mode uses defaults (light theme already set above)
+    // Basic setup - use sensible defaults
+    broadcastOutput("");
+    broadcastOutput("Using default settings (Basic mode)");
+    gSettings.wifiAutoReconnect = true;
+    gSettings.httpAutoStart = true;
   }
   
   // Save WiFi credentials if configured
@@ -290,7 +388,7 @@ void firstTimeSetupIfNeeded() {
         String settingsPath = getUserSettingsPath(1);
         if (!LittleFS.exists(settingsPath.c_str())) {
           JsonDocument defaults;
-          defaults["theme"] = "light";
+          defaults["theme"] = useDarkTheme ? "dark" : "light";
           if (!saveUserSettings(1, defaults)) {
             broadcastOutput("ERROR: Failed to create default user settings");
           }

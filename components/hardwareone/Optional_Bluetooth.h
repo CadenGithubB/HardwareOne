@@ -98,6 +98,11 @@ struct BLEConnection {
   uint8_t deviceAddr[6];            // MAC address of connected device
   BLEDeviceType deviceType;         // Device type (identified by MAC)
   uint32_t commandsReceived;        // Commands from this device
+
+  // Per-connection CLI authentication
+  bool authed;
+  String user;
+  uint32_t lastActivityMs;
 };
 
 struct BLESystemState {
@@ -156,6 +161,13 @@ uint32_t getBLEConnectionDuration();
 // Send response back to connected client
 bool sendBLEResponse(const char* data, size_t len);
 
+// Send response to a specific BLE connection (preferred for interactive CLI)
+bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len);
+
+// BLE auth/session maintenance
+void bleClearConnectionByConnId(uint16_t connId);
+void bleSessionTick();
+
 // Data streaming pipeline API
 bool blePushSensorData(const char* jsonData, size_t len);
 bool blePushSystemStatus(const char* jsonData, size_t len);
@@ -171,6 +183,7 @@ bool bleIsStreamEnabled(uint8_t streamFlag);
 void bleUpdateStreams();
 
 // Status
+bool isBLERunning();
 void getBLEStatus(char* buffer, size_t bufferSize);
 const char* getBLEStateString();
 
@@ -204,6 +217,10 @@ inline bool isBLEConnected() { return false; }
 inline void disconnectBLE() {}
 inline uint32_t getBLEConnectionDuration() { return 0; }
 inline bool sendBLEResponse(const char*, size_t) { return false; }
+inline bool sendBLEResponseToConn(uint16_t, const char*, size_t) { return false; }
+inline void bleClearConnectionByConnId(uint16_t) {}
+inline void bleSessionTick() {}
+inline bool isBLERunning() { return false; }
 inline void getBLEStatus(char* buffer, size_t) { if (buffer) buffer[0] = '\0'; }
 inline const char* getBLEStateString() { return "disabled"; }
 inline void bleApplySettings() {}

@@ -14,7 +14,7 @@
 //   2 = STANDALONE - OLED + Gamepad
 //   3 = FULL       - OLED + all sensors
 //   4 = CUSTOM     - Use individual sensor flags below
-#define I2C_FEATURE_LEVEL       4
+#define I2C_FEATURE_LEVEL       0
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CUSTOM SENSOR SELECTION (only used when I2C_FEATURE_LEVEL = 4)
@@ -43,11 +43,11 @@
 
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640)
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_CAMERA_SENSOR    0
+#define ENABLE_CAMERA_SENSOR    1
 
 // Microphone: PDM microphone via I2S
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_MICROPHONE_SENSOR 0
+#define ENABLE_MICROPHONE_SENSOR 1
 
 // Battery Monitoring: ADC-based LiPo battery voltage monitoring
 //   0 = Disabled (shows "USB" on OLED), 1 = Enabled (Feather ESP32 GPIO35)
@@ -56,11 +56,23 @@
 
 // Bluetooth: BLE server with GATT services
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_BLUETOOTH        0
+#define ENABLE_BLUETOOTH        1
+
+// Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses
+//   0 = Disabled, 1 = Enabled (requires ENABLE_BLUETOOTH=1)
+//   When enabled, ESP32 can act as BLE central to connect to glasses
+//   This is mutually exclusive with phone BLE connections at runtime
+#define ENABLE_G2_GLASSES       1
+
+// MQTT: Home Assistant integration via MQTT broker
+//   0 = Disabled, 1 = Enabled (requires ENABLE_WIFI=1)
+#define ENABLE_MQTT             1
 
 // Edge Impulse: ML inference
 //   0 = Disabled, 1 = Enabled
 #define ENABLE_EDGE_IMPULSE     0
+
+#define ENABLE_ESP_SR           1
 
 // Games: Browser-based games web page
 //   0 = Disabled, 1 = Enabled
@@ -201,6 +213,12 @@
   #define ENABLE_ESPNOW       1
 #endif
 
+// Force ENABLE_MQTT off if WiFi is disabled (MQTT requires WiFi)
+#if !ENABLE_WIFI
+  #undef ENABLE_MQTT
+  #define ENABLE_MQTT 0
+#endif
+
 // =============================================================================
 // MEMORY SAVINGS REFERENCE
 // =============================================================================
@@ -293,8 +311,49 @@
   #define BATTERY_ADC_PIN       35
   #define BATTERY_MONITOR_AVAILABLE 1
 
-// --- Seeed Studio XIAO ESP32S3 ---
+// --- Seeed Studio XIAO ESP32S3 Sense (with camera/mic expansion) ---
+// Note: Sense uses same variant as base XIAO ESP32S3, expansion board is add-on hardware
+// To enable Sense-specific features, define XIAO_ESP32S3_SENSE_ENABLED in your build
+// IMPORTANT: This block MUST come before the base XIAO block so it matches first
+#elif defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && defined(XIAO_ESP32S3_SENSE_ENABLED))
+  #define BOARD_SUPPORTED       1
+  #define BOARD_NAME            "Seeed XIAO ESP32S3 Sense"
+  
+  // I2C Bus Configuration (same as base XIAO ESP32S3)
+  #define I2C_SDA_PIN_DEFAULT   5   // GPIO5 (D4)
+  #define I2C_SCL_PIN_DEFAULT   6   // GPIO6 (D5)
+  
+  // NeoPixel Configuration (no built-in NeoPixel)
+  #define NEOPIXEL_PIN_DEFAULT  -1
+  #define NEOPIXEL_POWER_PIN    -1
+  #define NEOPIXEL_COUNT_DEFAULT 0
+  
+  // User LED - DISABLED on Sense board (GPIO21 is used for SD_CS)
+  // The expansion board SD card takes priority over the base board LED
+  #define USER_LED_PIN          -1
+  #define USER_LED_ACTIVE_LOW   1
+  
+  // Battery Monitoring
+  #define BATTERY_ADC_PIN       -1
+  #define BATTERY_MONITOR_AVAILABLE 0
+  
+  // Sense-specific: SD Card (directly on expansion board)
+  // Verified working via sddiag: CS=21, SCK=7, MISO=8, MOSI=9
+  #define SD_CS_PIN             21  // GPIO21 (directly on expansion board)
+  #define SD_SCK_PIN            7   // GPIO7
+  #define SD_MISO_PIN           8   // GPIO8
+  #define SD_MOSI_PIN           9   // GPIO9
+  
+  // Sense-specific: Camera (directly on expansion board, I2C on GPIO39/40)
+  #define CAMERA_AVAILABLE      1
+  
+  // Sense-specific: Digital Microphone PDM
+  #define MIC_CLK_PIN           42  // GPIO42 (PDM clock)
+  #define MIC_DATA_PIN          41  // GPIO41 (PDM data)
+
+// --- Seeed Studio XIAO ESP32S3 (base board without expansion) ---
 // Set CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3" in menuconfig
+// Note: To use with Sense expansion board, define XIAO_ESP32S3_SENSE_ENABLED
 #elif defined(ARDUINO_XIAO_ESP32S3_DEV)
   #define BOARD_SUPPORTED       1
   #define BOARD_NAME            "Seeed XIAO ESP32S3"
@@ -315,44 +374,6 @@
   // Battery Monitoring (no dedicated ADC pin - requires external wiring)
   #define BATTERY_ADC_PIN       -1
   #define BATTERY_MONITOR_AVAILABLE 0
-
-// --- Seeed Studio XIAO ESP32S3 Sense (with camera/mic expansion) ---
-// Note: Sense uses same variant as base XIAO ESP32S3, expansion board is add-on hardware
-// To enable Sense-specific features, define XIAO_ESP32S3_SENSE_ENABLED in your build
-#elif defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && defined(XIAO_ESP32S3_SENSE_ENABLED))
-  #define BOARD_SUPPORTED       1
-  #define BOARD_NAME            "Seeed XIAO ESP32S3 Sense"
-  
-  // I2C Bus Configuration (same as base XIAO ESP32S3)
-  #define I2C_SDA_PIN_DEFAULT   5   // GPIO5 (D4)
-  #define I2C_SCL_PIN_DEFAULT   6   // GPIO6 (D5)
-  
-  // NeoPixel Configuration (no built-in NeoPixel)
-  #define NEOPIXEL_PIN_DEFAULT  -1
-  #define NEOPIXEL_POWER_PIN    -1
-  #define NEOPIXEL_COUNT_DEFAULT 0
-  
-  // User LED (active low on GPIO21)
-  #define USER_LED_PIN          21
-  #define USER_LED_ACTIVE_LOW   1
-  
-  // Battery Monitoring
-  #define BATTERY_ADC_PIN       -1
-  #define BATTERY_MONITOR_AVAILABLE 0
-  
-  // Sense-specific: SD Card (directly on expansion board)
-  // CS=GPIO21 conflicts with USER_LED on some pinouts - using GPIO3 per Seeed docs
-  #define SD_CS_PIN             3   // GPIO3 (directly on expansion board)
-  #define SD_SCK_PIN            7   // GPIO7
-  #define SD_MISO_PIN           8   // GPIO8
-  #define SD_MOSI_PIN           10  // GPIO10
-  
-  // Sense-specific: Camera (directly on expansion board, I2C on GPIO39/40)
-  #define CAMERA_AVAILABLE      1
-  
-  // Sense-specific: Digital Microphone PDM
-  #define MIC_CLK_PIN           42  // GPIO42 (PDM clock)
-  #define MIC_DATA_PIN          41  // GPIO41 (PDM data)
 
 // --- Seeed Studio XIAO ESP32S3 Plus (16MB flash, more GPIOs) ---
 // Set CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3_Plus" in menuconfig

@@ -3513,7 +3513,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
 #else
       // Check if Bluetooth is initialized at runtime
       if (!gBLEState || !gBLEState->initialized) {
-        if (outReason) *outReason = "Disabled\nRun: blestart";
+        if (outReason) *outReason = "Disabled\nRun: openble";
         return MenuAvailability::FEATURE_DISABLED;
       }
       return MenuAvailability::AVAILABLE;
@@ -3528,7 +3528,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
       {
         extern httpd_handle_t server;
         if (!server) {
-          if (outReason) *outReason = "Disabled\nRun: httpstart";
+          if (outReason) *outReason = "Disabled\nRun: openhttp";
           return MenuAvailability::FEATURE_DISABLED;
         }
       }
@@ -3870,23 +3870,23 @@ void handleOLEDActionButton() {
       } else if (unavailableOLEDTitle == "RTC") {
 #if ENABLE_RTC_SENSOR
         // Start RTC with confirmation
-        static auto rtcStartConfirmedUnavail = [](void* userData) {
+        static auto rtcOpenConfirmedUnavail = [](void* userData) {
           (void)userData;
-          executeOLEDCommand("rtcstart");
+          executeOLEDCommand("openrtc");
           currentOLEDMode = OLED_RTC_DATA;
         };
-        oledConfirmRequest("Start RTC?", nullptr, rtcStartConfirmedUnavail, nullptr);
+        oledConfirmRequest("Open RTC?", nullptr, rtcOpenConfirmedUnavail, nullptr);
 #endif
       } else if (unavailableOLEDTitle == "Presence") {
 #if ENABLE_PRESENCE_SENSOR
         // Start Presence with confirmation
-        static auto presenceStartConfirmedUnavail = [](void* userData) {
+        static auto presenceOpenConfirmedUnavail = [](void* userData) {
           (void)userData;
           extern bool startPresenceSensorInternal();
           startPresenceSensorInternal();
           currentOLEDMode = OLED_PRESENCE_DATA;
         };
-        oledConfirmRequest("Start Presence?", nullptr, presenceStartConfirmedUnavail, nullptr);
+        oledConfirmRequest("Open Presence?", nullptr, presenceOpenConfirmedUnavail, nullptr);
 #endif
       } else if (unavailableOLEDTitle == "FM Radio") {
         if (!isInQueue(SENSOR_FMRADIO)) enqueueSensorStart(SENSOR_FMRADIO);
@@ -3913,7 +3913,7 @@ void handleOLEDActionButton() {
       } else if (unavailableOLEDTitle == "Bluetooth") {
 #if ENABLE_BLUETOOTH
         // Initialize Bluetooth
-        executeOLEDCommand("blestart");
+        executeOLEDCommand("openble");
         currentOLEDMode = OLED_BLUETOOTH;
 #endif
       } else if (unavailableOLEDTitle == "Web") {
@@ -3921,7 +3921,7 @@ void handleOLEDActionButton() {
         // Start HTTP server with confirmation
         static auto httpStartConfirmedUnavail = [](void* userData) {
           (void)userData;
-          executeOLEDCommand("httpstart");
+          executeOLEDCommand("openhttp");
           broadcastOutput("[OLED] HTTP server started");
           currentOLEDMode = OLED_WEB_STATS;
         };
@@ -3939,12 +3939,12 @@ void handleOLEDActionButton() {
         extern httpd_handle_t server;
         static auto httpStopConfirmedWebStats = [](void* userData) {
           (void)userData;
-          executeOLEDCommand("httpstop");
+          executeOLEDCommand("closehttp");
           broadcastOutput("[OLED] HTTP server stopped");
         };
         static auto httpStartConfirmedWebStats = [](void* userData) {
           (void)userData;
-          executeOLEDCommand("httpstart");
+          executeOLEDCommand("openhttp");
           broadcastOutput("[OLED] HTTP server started");
         };
         if (server) {

@@ -103,14 +103,14 @@ const char* cmd_gamepadstart(const String& cmd) {
   }
 
   if (enqueueSensorStart(SENSOR_GAMEPAD)) {
-    sensorStatusBumpWith("gamepadstart@enqueue");
-    if (!ensureDebugBuffer()) return "[Gamepad] Sensor queued for start";
+    sensorStatusBumpWith("opengamepad@enqueue");
+    if (!ensureDebugBuffer()) return "[Gamepad] Sensor queued for open";
     int pos = getQueuePosition(SENSOR_GAMEPAD);
-    snprintf(getDebugBuffer(), 1024, "[Gamepad] Sensor queued for start (position %d)", pos);
+    snprintf(getDebugBuffer(), 1024, "[Gamepad] Sensor queued for open (position %d)", pos);
     return getDebugBuffer();
   }
 
-  return "[Gamepad] Error: Failed to enqueue start (queue full)";
+  return "[Gamepad] Error: Failed to enqueue open (queue full)";
 }
 
 const char* cmd_gamepadstop(const String& cmd) {
@@ -195,7 +195,7 @@ const char* startGamepadInternal() {
   bool prev = gamepadEnabled;
   gamepadEnabled = true;
   Serial.printf("[GAMEPAD] startGamepadInternal: Set gamepadEnabled=true (was %d), gamepadConnected=%d\n", prev, gamepadConnected);
-  if (gamepadEnabled != prev) sensorStatusBumpWith("gamepadstart@enabled");
+  if (gamepadEnabled != prev) sensorStatusBumpWith("opengamepad@enabled");
   
   // Broadcast sensor status to ESP-NOW master
 #if ENABLE_ESPNOW
@@ -414,8 +414,8 @@ extern const SettingsModule gamepadSettingsModule = {
 // ============================================================================
 
 const CommandEntry gamepadCommands[] = {
-  { "gamepadstart", "Queue start of Gamepad task (seesaw)", false, cmd_gamepadstart },
-  { "gamepadstop", "Stop Gamepad task (seesaw)", false, cmd_gamepadstop },
+  { "opengamepad", "Queue start of Gamepad task (seesaw)", false, cmd_gamepadstart },
+  { "closegamepad", "Stop Gamepad task (seesaw)", false, cmd_gamepadstop },
   { "gamepad", "Read Seesaw gamepad state (x/y/buttons).", false, cmd_gamepad },
   { "gamepadautostart", "Enable/disable gamepad auto-start after boot [on|off]", false, cmd_gamepadautostart, "Usage: gamepadautostart [on|off]" },
 };

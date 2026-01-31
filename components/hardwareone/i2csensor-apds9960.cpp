@@ -130,20 +130,20 @@ const char* cmd_apdsstart(const String& cmd) {
   }
   
   if (enqueueSensorStart(SENSOR_APDS)) {
-    sensorStatusBumpWith("apdsstart@enqueue");
-    if (!ensureDebugBuffer()) return "[APDS] Sensor queued for start";
+    sensorStatusBumpWith("openapds@enqueue");
+    if (!ensureDebugBuffer()) return "[APDS] Sensor queued for open";
     int pos = getQueuePosition(SENSOR_APDS);
-    snprintf(getDebugBuffer(), 1024, "[APDS] Sensor queued for start (position %d)", pos);
+    snprintf(getDebugBuffer(), 1024, "[APDS] Sensor queued for open (position %d)", pos);
     return getDebugBuffer();
   }
   
-  return "[APDS] Error: Failed to enqueue start (queue full)";
+  return "[APDS] Error: Failed to enqueue open (queue full)";
 }
 
-// Deprecated: Use 'apdsstart' then 'apdsmode color'
+// Deprecated: Use 'openapds' then 'apdsmode color'
 const char* cmd_apdscolorstart(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'apdsstart' to start sensor, then 'apdsmode color' to enable color sensing";
+  return "[APDS] Deprecated: Use 'openapds' to open sensor, then 'apdsmode color' to enable color sensing";
 }
 
 // Stop APDS sensor (all modes)
@@ -160,38 +160,38 @@ const char* cmd_apdsstop(const String& cmd) {
   apdsProximityEnabled = false;
   apdsGestureEnabled = false;
   
-  sensorStatusBumpWith("apdsstop@CLI");
-  return "[APDS] Sensor stop requested; cleanup will complete asynchronously";
+  sensorStatusBumpWith("closeapds@CLI");
+  return "[APDS] Sensor close requested; cleanup will complete asynchronously";
 }
 
 // Deprecated: Use 'apdsstop' or 'apdsmode color off'
 const char* cmd_apdscolorstop(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'apdsstop' to stop sensor, or 'apdsmode color off' to disable color mode";
+  return "[APDS] Deprecated: Use 'closeapds' to close sensor, or 'apdsmode color off' to disable color mode";
 }
 
-// Deprecated: Use 'apdsstart' then 'apdsmode proximity'
+// Deprecated: Use 'openapds' then 'apdsmode proximity'
 const char* cmd_apdsproximitystart(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'apdsstart' to start sensor, then 'apdsmode proximity' to enable proximity sensing";
+  return "[APDS] Deprecated: Use 'openapds' to open sensor, then 'apdsmode proximity' to enable proximity sensing";
 }
 
 // Deprecated: Use 'apdsstop' or 'apdsmode proximity off'
 const char* cmd_apdsproximitystop(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'apdsstop' to stop sensor, or 'apdsmode proximity off' to disable proximity mode";
+  return "[APDS] Deprecated: Use 'closeapds' to close sensor, or 'apdsmode proximity off' to disable proximity mode";
 }
 
-// Deprecated: Use 'apdsstart' then 'apdsmode gesture'
+// Deprecated: Use 'openapds' then 'apdsmode gesture'
 const char* cmd_apdsgesturestart(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'apdsstart' to start sensor, then 'apdsmode gesture' to enable gesture sensing";
+  return "[APDS] Deprecated: Use 'openapds' to open sensor, then 'apdsmode gesture' to enable gesture sensing";
 }
 
 // Deprecated: Use 'apdsstop' or 'apdsmode gesture off'
 const char* cmd_apdsgesturestop(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'apdsstop' to stop sensor, or 'apdsmode gesture off' to disable gesture mode";
+  return "[APDS] Deprecated: Use 'closeapds' to close sensor, or 'apdsmode gesture off' to disable gesture mode";
 }
 
 // Runtime mode control (once sensor is running)
@@ -199,7 +199,7 @@ const char* cmd_apdsmode(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!apdsConnected || gAPDS9960 == nullptr) {
-    return "[APDS] Error: Sensor not initialized - use 'apdsstart' first";
+    return "[APDS] Error: Sensor not initialized - use 'openapds' first";
   }
   
   String lc = cmd;
@@ -397,9 +397,9 @@ void readAPDSGesture() {
 // ============================================================================
 
 const CommandEntry apdsCommands[] = {
-  // Primary commands (queue-based startup, consistent with other sensors)
-  { "apdsstart", "Start APDS9960 sensor.", false, cmd_apdsstart },
-  { "apdsstop", "Stop APDS9960 sensor.", false, cmd_apdsstop },
+  // Primary commands (3-level voice: "sensor" -> "gesture" -> "open/close")
+  { "openapds", "Start APDS9960 sensor.", false, cmd_apdsstart, nullptr, "sensor", "gesture", "open" },
+  { "closeapds", "Stop APDS9960 sensor.", false, cmd_apdsstop, nullptr, "sensor", "gesture", "close" },
   { "apdsmode", "Control APDS modes: apdsmode <color|proximity|gesture> [on|off].", false, cmd_apdsmode },
   
   // Read commands
@@ -408,12 +408,12 @@ const CommandEntry apdsCommands[] = {
   { "apdsgesture", "Read APDS9960 gesture.", false, cmd_apdsgesture },
   
   // Deprecated commands (backward compatibility with deprecation warnings)
-  { "apdscolorstart", "[DEPRECATED] Use 'apdsstart' + 'apdsmode color'.", false, cmd_apdscolorstart },
-  { "apdscolorstop", "[DEPRECATED] Use 'apdsstop' or 'apdsmode color off'.", false, cmd_apdscolorstop },
-  { "apdsproximitystart", "[DEPRECATED] Use 'apdsstart' + 'apdsmode proximity'.", false, cmd_apdsproximitystart },
-  { "apdsproximitystop", "[DEPRECATED] Use 'apdsstop' or 'apdsmode proximity off'.", false, cmd_apdsproximitystop },
-  { "apdsgesturestart", "[DEPRECATED] Use 'apdsstart' + 'apdsmode gesture'.", false, cmd_apdsgesturestart },
-  { "apdsgesturestop", "[DEPRECATED] Use 'apdsstop' or 'apdsmode gesture off'.", false, cmd_apdsgesturestop },
+  { "apdscolorstart", "[DEPRECATED] Use 'openapds' + 'apdsmode color'.", false, cmd_apdscolorstart },
+  { "apdscolorstop", "[DEPRECATED] Use 'closeapds' or 'apdsmode color off'.", false, cmd_apdscolorstop },
+  { "apdsproximitystart", "[DEPRECATED] Use 'openapds' + 'apdsmode proximity'.", false, cmd_apdsproximitystart },
+  { "apdsproximitystop", "[DEPRECATED] Use 'closeapds' or 'apdsmode proximity off'.", false, cmd_apdsproximitystop },
+  { "apdsgesturestart", "[DEPRECATED] Use 'openapds' + 'apdsmode gesture'.", false, cmd_apdsgesturestart },
+  { "apdsgesturestop", "[DEPRECATED] Use 'closeapds' or 'apdsmode gesture off'.", false, cmd_apdsgesturestop },
 };
 
 const size_t apdsCommandsCount = sizeof(apdsCommands) / sizeof(apdsCommands[0]);
