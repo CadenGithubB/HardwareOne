@@ -80,7 +80,7 @@ float readToFDistance() {
     if (!tofConnected) {
       broadcastOutput("ToF sensor not connected. Check wiring.");
     } else if (!tofEnabled) {
-      broadcastOutput("ToF sensor not started. Use 'tofstart' first.");
+      broadcastOutput("ToF sensor not started. Use 'opentof' first.");
     } else {
       broadcastOutput("ToF sensor initialization failed.");
     }
@@ -219,7 +219,7 @@ bool startToFSensorInternal() {
   // Clock is now managed automatically by i2cTaskWithStandardTimeout wrapper
   // Device registration specifies ToF's clock speed (50-400kHz)
   // tofEnabled already set to true at the beginning to prevent race condition
-  sensorStatusBumpWith("tofstart@queue");
+  sensorStatusBumpWith("opentof@queue");
   DEBUG_CLIF("SUCCESS: ToF sensor started successfully");
   
   // Broadcast sensor status to ESP-NOW master
@@ -246,12 +246,12 @@ const char* cmd_tofstart(const String& cmd) {
 
   // Enqueue the request to centralized queue
   if (enqueueSensorStart(SENSOR_TOF)) {
-    sensorStatusBumpWith("tofstart@enqueue");
+    sensorStatusBumpWith("opentof@enqueue");
     int pos = getQueuePosition(SENSOR_TOF);
-    BROADCAST_PRINTF("ToF sensor queued for start (position %d)", pos);
-    return "[ToF] Sensor queued for start";
+    BROADCAST_PRINTF("ToF sensor queued for open (position %d)", pos);
+    return "[ToF] Sensor queued for open";
   } else {
-    return "[ToF] Error: Failed to enqueue start (queue full)";
+    return "[ToF] Error: Failed to enqueue open (queue full)";
   }
 }
 
@@ -271,7 +271,7 @@ const char* cmd_tofstop(const String& cmd) {
   // The ToF task will handle cleanup and status updates asynchronously
 
   // Return immediately; task will stop measurement and free resources safely
-  return "[ToF] Stop requested; cleanup will complete asynchronously";
+  return "[ToF] Close requested; cleanup will complete asynchronously";
 }
 
 const char* cmd_toftransitionms(const String& cmd) {
@@ -379,7 +379,7 @@ bool readToFObjects() {
     if (!tofConnected) {
       broadcastOutput("ToF sensor not connected. Check wiring.");
     } else if (!tofEnabled) {
-      broadcastOutput("ToF sensor not started. Use 'tofstart' first.");
+      broadcastOutput("ToF sensor not started. Use 'opentof' first.");
     } else {
       broadcastOutput("ToF sensor initialization failed.");
     }
@@ -625,9 +625,9 @@ const char* cmd_tofdevicepollms(const String& args) {
 // extern const char* cmd_tofdevicepollms(const String& cmd);
 
 const CommandEntry tofCommands[] = {
-  // Start/Stop/Read
-  { "tofstart", "Start VL53L4CX ToF sensor.", false, cmd_tofstart },
-  { "tofstop", "Stop VL53L4CX ToF sensor.", false, cmd_tofstop },
+  // Start/Stop/Read (3-level voice: "sensor" -> "time of flight" -> "open/close")
+  { "opentof", "Start VL53L4CX ToF sensor.", false, cmd_tofstart, nullptr, "sensor", "time of flight", "open" },
+  { "closetof", "Stop VL53L4CX ToF sensor.", false, cmd_tofstop, nullptr, "sensor", "time of flight", "close" },
   { "tof", "Read ToF distance sensor.", false, cmd_tof },
   
   // UI Settings (client-side visualization)

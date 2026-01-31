@@ -5,4 +5,10 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
 project(hardwareone-idf)
+
+# Add board-specific defines based on target (must be AFTER project())
+if(CONFIG_IDF_TARGET_ESP32S3)
+    add_compile_definitions(XIAO_ESP32S3_SENSE_ENABLED)
+endif()

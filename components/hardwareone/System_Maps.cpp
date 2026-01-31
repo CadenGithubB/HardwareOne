@@ -640,7 +640,7 @@ bool MapCore::autoSelectMap(float lat, float lon) {
   
   for (int i = 0; i < mapCount; i++) {
     char path[128];
-    snprintf(path, sizeof(path), "/maps/%s", maps[i]);
+    snprintf(path, sizeof(path), "/maps/%.100s", maps[i]);
     
     // Try loading to check bounds
     if (loadMapFile(path)) {

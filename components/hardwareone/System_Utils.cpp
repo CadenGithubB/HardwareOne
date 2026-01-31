@@ -29,6 +29,7 @@
 #include "System_MemoryMonitor.h"
 #include "i2csensor-ds3231.h"  // RTC for time functions
 #include "System_Utils.h"
+#include "System_ESPSR.h"
 
 extern "C" {
   extern uint8_t _bss_start;
@@ -40,6 +41,9 @@ extern "C" {
   extern uint8_t _ext_ram_noinit_start;
   extern uint8_t _ext_ram_noinit_end;
 }
+
+#pragma weak _ext_ram_noinit_start
+#pragma weak _ext_ram_noinit_end
 
 // Settings save function
 extern bool writeSettingsJson();
@@ -151,6 +155,11 @@ extern bool cameraConnected;
 extern const CommandEntry edgeImpulseCommands[];
 extern const size_t edgeImpulseCommandsCount;
 #endif
+
+ #if ENABLE_ESP_SR
+ extern const CommandEntry espsrCommands[];
+ extern const size_t espsrCommandsCount;
+ #endif
 #if ENABLE_MICROPHONE_SENSOR
 extern const CommandEntry micCommands[];
 extern const size_t micCommandsCount;
@@ -180,6 +189,7 @@ extern const size_t userSystemCommandsCount;
 #endif
 #include "System_Settings.h"
 #include "System_User.h"
+#include "System_VFS.h"  // For sdCommands (SD card management)
 #if ENABLE_THERMAL_SENSOR
   #include "i2csensor-mlx90640.h"  // For thermalCommands
 #endif
@@ -711,6 +721,10 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
     case SOURCE_WEB: source = "web"; break;
     case SOURCE_ESPNOW: source = "espnow"; break;
     case SOURCE_INTERNAL: source = "internal"; break;
+    case SOURCE_LOCAL_DISPLAY: source = "display"; break;
+    case SOURCE_BLUETOOTH: source = "bluetooth"; break;
+    case SOURCE_MQTT: source = "mqtt"; break;
+    case SOURCE_VOICE: source = "voice"; break;
     default: source = "unknown"; break;
   }
   
@@ -1520,7 +1534,7 @@ extern const char* cmd_pending_list(const String& cmd);
 // Most commands have been modularized - this contains only core system commands
 const CommandEntry commands[] = {
   // ---- Core / General ----
-  { "status", "Show system status (WiFi, FS, memory).", false, cmd_status },
+  { "status", "Show system status (WiFi, FS, memory).", false, cmd_status, nullptr, "system", "status" },
   { "uptime", "Show device uptime.", false, cmd_uptime },
   { "time", "Show device time (uptime + NTP if synced).", false, cmd_time },
   { "timeset", "Set time manually: timeset YYYY-MM-DD HH:MM:SS or <unix_timestamp>.", false, cmd_timeset },
@@ -1539,7 +1553,7 @@ const CommandEntry commands[] = {
   { "taskstats", "Detailed task statistics.", false, cmd_taskstats },
 
   // ---- Misc ----
-  { "reboot", "Reboot the system.", true, cmd_reboot },
+  { "reboot", "Reboot the system.", true, cmd_reboot, nullptr, "system", "reboot" },
   { "broadcast", "Send message to all or specific user.", true, cmd_broadcast },
   { "pending list", "List pending user requests.", true, cmd_pending_list },
   { "wait", "Delay execution for N milliseconds: wait <ms>.", false, cmd_wait },
@@ -1554,8 +1568,8 @@ extern const char* cmd_battery_status(const String& args);
 extern const char* cmd_battery_calibrate(const String& args);
 
 const CommandEntry batteryCommands[] = {
-  {"battery status", "Show battery voltage, charge level, and status", false, cmd_battery_status, nullptr},
-  {"battery calibrate", "Recalibrate battery ADC readings", false, cmd_battery_calibrate, nullptr}
+  {"battery status", "Show battery voltage, charge level, and status", false, cmd_battery_status, nullptr, "battery", "status"},
+  {"battery calibrate", "Recalibrate battery ADC readings", false, cmd_battery_calibrate}
 };
 
 const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batteryCommands[0]);
@@ -1563,6 +1577,12 @@ const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batteryComm
 // Auto-register with command system
 static CommandModuleRegistrar _core_cmd_registrar(commands, commandsCount, "core");
 static CommandModuleRegistrar _battery_cmd_registrar(batteryCommands, batteryCommandsCount, "battery");
+
+// MQTT commands (from System_MQTT.cpp)
+#if ENABLE_MQTT
+extern const CommandEntry mqttCommands[];
+extern const size_t mqttCommandsCount;
+#endif
 
 // Module registry - collects all command tables from modules
 // Now includes metadata: description, flags, isConnected callback
@@ -1576,10 +1596,16 @@ static const CommandModule gCommandModules[] = {
 #if ENABLE_ESPNOW
   { "espnow",     "ESP-NOW wireless communication (peer-to-peer, mesh)", espNowCommands,       espNowCommandsCount, CMD_MODULE_NETWORK, nullptr },
 #endif
+#if ENABLE_MQTT
+  { "mqtt",       "MQTT broker connection for Home Assistant", mqttCommands,         mqttCommandsCount, CMD_MODULE_NETWORK, nullptr },
+#endif
   #if ENABLE_BLUETOOTH
   { "bluetooth",  "Bluetooth LE control and status", bluetoothCommands, bluetoothCommandsCount, CMD_MODULE_NETWORK, nullptr },
   #endif
   { "filesystem", "File operations and storage management", filesystemCommands,   filesystemCommandsCount, 0, nullptr },
+#if defined(SD_CS_PIN)
+  { "sd",         "SD card mount, format, and info", sdCommands,           sdCommandsCount, 0, []() { return VFS::isSDAvailable(); } },
+#endif
   { "oled",       "OLED display control and graphics", oledCommands,         oledCommandsCount, 0, nullptr },
   { "neopixel",   "RGB LED strip and effects", neopixelCommands,     neopixelCommandsCount, 0, nullptr },
   { "servo",      "PCA9685 servo motor control", servoCommands,        servoCommandsCount, 0, nullptr },
@@ -1619,6 +1645,10 @@ static const CommandModule gCommandModules[] = {
 #if ENABLE_EDGE_IMPULSE
   { "edgeimpulse", "Edge Impulse ML inference", edgeImpulseCommands,  edgeImpulseCommandsCount, CMD_MODULE_SENSOR, nullptr },
 #endif
+
+ #if ENABLE_ESP_SR
+   { "espsr", "ESP-SR speech recognition", espsrCommands,  espsrCommandsCount, CMD_MODULE_SENSOR, nullptr },
+ #endif
   { "i2c",        "I2C bus diagnostics and scanning", i2cCommands,          i2cCommandsCount, 0, nullptr },
 #if ENABLE_AUTOMATION
   { "automation", "Scheduled tasks and conditional commands", automationCommands,   automationCommandsCount, 0, nullptr },
@@ -1867,7 +1897,10 @@ void printMemoryReport() {
   size_t bss_internal_bytes = (size_t)(&(_bss_end) - &(_bss_start));
   size_t bss_psram_bytes = (size_t)(&(_ext_ram_bss_end) - &(_ext_ram_bss_start));
   size_t noinit_internal_bytes = (size_t)(&(_noinit_end) - &(_noinit_start));
-  size_t noinit_psram_bytes = (size_t)(&(_ext_ram_noinit_end) - &(_ext_ram_noinit_start));
+  size_t noinit_psram_bytes = 0;
+  if (((uintptr_t)(&_ext_ram_noinit_start) != 0) && ((uintptr_t)(&_ext_ram_noinit_end) != 0)) {
+    noinit_psram_bytes = (size_t)(&(_ext_ram_noinit_end) - &(_ext_ram_noinit_start));
+  }
 
   bool useDynamicTracking = gAllocTrackerEnabled && gAllocTrackerCount > 0;
 

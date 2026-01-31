@@ -31,6 +31,8 @@ extern SemaphoreHandle_t gJsonResponseMutex;
 // ESP-NOW mesh retry queue mutex
 extern SemaphoreHandle_t gMeshRetryMutex;
 
+extern SemaphoreHandle_t i2sMicMutex;
+
 // ============================================================================
 // Initialization - call once in setup()
 // ============================================================================
@@ -82,6 +84,15 @@ struct I2cLockGuard {
   
   I2cLockGuard(const I2cLockGuard&) = delete;
   I2cLockGuard& operator=(const I2cLockGuard&) = delete;
+};
+
+struct I2sMicLockGuard {
+  bool held;
+  explicit I2sMicLockGuard(const char* owner = nullptr);
+  ~I2sMicLockGuard();
+  
+  I2sMicLockGuard(const I2sMicLockGuard&) = delete;
+  I2sMicLockGuard& operator=(const I2sMicLockGuard&) = delete;
 };
 
 /**

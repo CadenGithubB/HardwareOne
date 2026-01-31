@@ -101,9 +101,9 @@ static void gpsToggleConfirmed(void* userData) {
 static bool gpsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (gpsEnabled && gpsConnected) {
-      oledConfirmRequest("Stop GPS?", nullptr, gpsToggleConfirmed, nullptr, false);
+      oledConfirmRequest("Close GPS?", nullptr, gpsToggleConfirmed, nullptr, false);
     } else {
-      oledConfirmRequest("Start GPS?", nullptr, gpsToggleConfirmed, nullptr);
+      oledConfirmRequest("Open GPS?", nullptr, gpsToggleConfirmed, nullptr);
     }
     return true;
   }

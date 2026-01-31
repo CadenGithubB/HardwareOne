@@ -9,6 +9,16 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.0.3
+  espressif/esp-dsp:
+    component_hash: 3e7bbd487f1357a1d4944d0c85966d049501ea281b8a4c7f93f7cfedd5b7f23d
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.4.12
   espressif/esp-nn:
     component_hash: f4633a02f05fef53b80de65ade1f733ebdef637e4c8b8be4eb11f5e27f6d9f3e
     dependencies:
@@ -19,6 +29,20 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 1.1.2
+  espressif/esp-sr:
+    component_hash: 9b41fd5ae5960c393bfd3559cd6e5fa2a95c0bf833915cebafe57fb8c4e4c396
+    dependencies:
+    - name: espressif/esp-dsp
+      registry_url: https://components.espressif.com
+      require: private
+      version: <=1.5.0
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.9.5
   espressif/esp-tflite-micro:
     component_hash: 57aa3889d3c7b7a513f716c2cb8707476a5bf42971d63a6f6d38a5616d862e57
     dependencies:
@@ -93,12 +117,13 @@ dependencies:
     version: 1.20.3
 direct_dependencies:
 - chmorgan/esp-libhelix-mp3
+- espressif/esp-sr
 - espressif/esp-tflite-micro
 - espressif/esp32-camera
 - espressif/libsodium
 - espressif/mdns
 - idf
 - joltwallet/littlefs
-manifest_hash: 989a0a12c0a05ce35bbb376aa98120ec01c984e8afa2c4d43c9ff7031ff36041
-target: esp32
+manifest_hash: 6645f4c4f6e05d293a953da996fbe72a56bcc29be79578c027eb732962c1c8d2
+target: esp32s3
 version: 2.0.0

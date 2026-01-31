@@ -11,15 +11,15 @@ inline void streamDS3231RtcSensorCard(httpd_req_t* req) {
       <div class='sensor-title'><span>RTC Clock (DS3231)</span><span class='status-indicator status-disabled' id='rtc-status-indicator'></span></div>
       <div class='sensor-description'>High-precision real-time clock with temperature sensor.</div>
       <div id='rtc-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
-      <div class='sensor-controls'><button class='btn' id='btn-rtc-start'>Start RTC</button><button class='btn' id='btn-rtc-stop'>Stop RTC</button></div>
-      <div class='sensor-data' id='rtc-data'><div style="padding:1rem;text-align:center;color:#6c757d"><p style="margin:0;font-size:1.1em">RTC Stopped</p><p style="margin:0.5rem 0 0 0;font-size:0.9em">Click "Start RTC" to begin</p></div></div>
+      <div class='sensor-controls'><button class='btn' id='btn-rtc-start'>Open RTC</button><button class='btn' id='btn-rtc-stop'>Close RTC</button></div>
+      <div class='sensor-data' id='rtc-data'><div style="padding:1rem;text-align:center;color:#6c757d"><p style="margin:0;font-size:1.1em">RTC Closed</p><p style="margin:0.5rem 0 0 0;font-size:0.9em">Click "Open RTC" to begin</p></div></div>
     </div>
 
 )HTML", HTTPD_RESP_USE_STRLEN);
 }
 
 inline void streamDS3231RtcSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-rtc-start','rtcstart');bind('btn-rtc-stop','rtcstop');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "bind('btn-rtc-start','openrtc');bind('btn-rtc-stop','closertc');", HTTPD_RESP_USE_STRLEN);
 }
 
 inline void streamDS3231RtcDashboardDef(httpd_req_t* req) {
@@ -44,7 +44,7 @@ inline void streamDS3231RtcSensorJs(httpd_req_t* req) {
     "        return 'not_compiled';\n"
     "      }\n"
     "      if (!status.rtcEnabled) {\n"
-    "        el.innerHTML = '<div style=\"padding:1rem;text-align:center;color:#6c757d\"><p style=\"margin:0;font-size:1.1em\">RTC Stopped</p><p style=\"margin:0.5rem 0 0 0;font-size:0.9em\">Click \\\"Start RTC\\\" to begin</p></div>';\n"
+    "        el.innerHTML = '<div style=\"padding:1rem;text-align:center;color:#6c757d\"><p style=\"margin:0;font-size:1.1em\">RTC Closed</p><p style=\"margin:0.5rem 0 0 0;font-size:0.9em\">Click \"Open\" to begin</p></div>';\n"
     "        return 'stopped';\n"
     "      }\n"
     "      return fetch('/api/cli', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'cmd=rtc', cache: 'no-store', credentials: 'include'})\n"

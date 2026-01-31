@@ -49,7 +49,9 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <ArduinoJson.h>
 #if ENABLE_HTTP_SERVER
   #include "WebServer_Utils.h"
-  #include "WebPage_Auth.h"
+  #include "WebPage_Login.h"
+  #include "WebPage_LoginSuccess.h"
+  #include "WebPage_LoginRequired.h"
   #include "WebPage_Dashboard.h"
   #include "WebPage_CLI.h"
   #include "WebPage_Files.h"
@@ -76,6 +78,9 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_Debug.h"
 #if ENABLE_WIFI
   #include "System_WiFi.h"
+#endif
+#if ENABLE_MQTT
+  #include "System_MQTT.h"
 #endif
 #include "System_Command.h"
 #if ENABLE_HTTP_SERVER
@@ -726,6 +731,8 @@ static const char* originFrom(const AuthContext& ctx) {
     case SOURCE_SERIAL: return "serial";
     case SOURCE_ESPNOW: return "espnow";
     case SOURCE_INTERNAL: return "internal";
+    case SOURCE_MQTT: return "mqtt";
+    case SOURCE_VOICE: return "voice";
     default: return "unknown";
   }
 }
@@ -1536,7 +1543,7 @@ void hardwareone_setup() {
   // Apply OLED settings if display was initialized early
   oledApplySettings();
 
-  // Gamepad auto-initialization removed: use gamepadstart (queued) to start
+  // Gamepad auto-initialization removed: use opengamepad (queued) to start
 
   // Bluetooth - auto-start if enabled in settings
 #if ENABLE_BLUETOOTH
@@ -1562,7 +1569,7 @@ void hardwareone_setup() {
     
     gSensorPollingPaused = wasPaused;
   } else {
-    broadcastOutput("Bluetooth disabled by default. Use quick settings (SELECT button) or 'blestart' to enable.");
+    broadcastOutput("Bluetooth disabled by default. Use quick settings (SELECT button) or 'openble' to enable.");
   }
 #endif
 
@@ -1573,8 +1580,27 @@ void hardwareone_setup() {
 #if ENABLE_CAMERA_SENSOR
   // Camera auto-start (independent of I2C sensor queue)
   if (gSettings.cameraAutoStart) {
-    runUnifiedSystemCommand("camerastart");
+    runUnifiedSystemCommand("opencamera");
   }
+#endif
+
+#if ENABLE_MICROPHONE_SENSOR
+  // Microphone / ESP-SR auto-start
+  // If ESP-SR is enabled, it takes over the microphone - don't start mic separately
+  #if ENABLE_ESP_SR
+  if (gSettings.srAutoStart) {
+    broadcastOutput("Starting ESP-SR speech recognition...");
+    runUnifiedSystemCommand("sr start");
+  } else if (gSettings.microphoneAutoStart) {
+    broadcastOutput("Starting microphone sensor...");
+    runUnifiedSystemCommand("openmic");
+  }
+  #else
+  if (gSettings.microphoneAutoStart) {
+    broadcastOutput("Starting microphone sensor...");
+    runUnifiedSystemCommand("openmic");
+  }
+  #endif
 #endif
 
   // HTTP server - auto-start if enabled in settings and WiFi is connected
@@ -1582,20 +1608,35 @@ void hardwareone_setup() {
   oledSetBootProgress(90, "HTTP ready...");
 
   if (gSettings.httpAutoStart && WiFi.isConnected()) {
-    runUnifiedSystemCommand("httpstart");
+    runUnifiedSystemCommand("openhttp");
     broadcastOutput("HTTP server started. Try: http://" + WiFi.localIP().toString());
   } else if (!gSettings.httpAutoStart) {
-    broadcastOutput("HTTP server available. Use 'httpstart' or quick settings (SELECT button) to start.");
+    broadcastOutput("HTTP server available. Use 'openhttp' or quick settings (SELECT button) to start.");
   } else {
-    broadcastOutput("HTTP server not started (WiFi offline). Use quick settings (SELECT button) or 'httpstart' to start manually.");
+    broadcastOutput("HTTP server not started (WiFi offline). Use quick settings (SELECT button) or 'openhttp' to start manually.");
   }
 #else
   oledSetBootProgress(90, "HTTP disabled");
 #endif
 
+  // MQTT client - auto-start if enabled in settings and WiFi is connected
+#if ENABLE_MQTT
+  oledSetBootProgress(92, "MQTT ready...");
+
+  if (gSettings.mqttAutoStart && WiFi.isConnected()) {
+    runUnifiedSystemCommand("openmqtt");
+    broadcastOutput("[MQTT] Auto-start enabled, connecting to broker...");
+  } else if (!gSettings.mqttAutoStart) {
+    broadcastOutput("[MQTT] Available. Use 'openmqtt' to connect.");
+  } else {
+    broadcastOutput("[MQTT] Not started (WiFi offline). Use 'openmqtt' to start manually.");
+  }
+#endif
+
   oledSetBootProgress(100, "Boot complete!");
 
-  // Run LED startup effect if enabled
+  // Run LED startup effect if enabled (only on boards with NeoPixel hardware)
+#if defined(NEOPIXEL_PIN_DEFAULT) && NEOPIXEL_PIN_DEFAULT >= 0
   if (gSettings.ledStartupEnabled && gSettings.ledStartupEffect != "none") {
     RGB color1, color2;
     if (!getRGBFromName(gSettings.ledStartupColor, color1)) {
@@ -1639,6 +1680,7 @@ void hardwareone_setup() {
     }
     broadcastOutput("✨ Startup effect completed: " + effect);
   }
+#endif
 
 #if ENABLE_AUTOMATION
   // Finally, run boot automations if configured
@@ -1792,6 +1834,11 @@ void hardwareone_loop() {
   // BLE data streaming updates (auto-push sensor/system data at configured intervals)
 #if ENABLE_BLUETOOTH
   bleUpdateStreams();
+#endif
+
+  // MQTT periodic publishing and reconnect handling
+#if ENABLE_MQTT
+  mqttTick();
 #endif
 
   // Non-blocking Serial CLI

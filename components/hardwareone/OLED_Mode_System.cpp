@@ -171,7 +171,7 @@ void displayWebStats() {
   } else {
     oledDisplay->println("HTTP: Stopped");
     oledDisplay->println();
-    oledDisplay->println("Run: httpstart");
+    oledDisplay->println("Run: openhttp");
   }
 #else
   oledDisplay->println("HTTP: Disabled");

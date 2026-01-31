@@ -214,6 +214,7 @@ inline void i2cBusHealthCheck() {
 // ============================================================================
 extern bool gI2CBusEnabled;
 extern volatile bool gSensorPollingPaused;
+extern SemaphoreHandle_t i2cMutex;
 
 // ============================================================================
 // I2C Sensor Database

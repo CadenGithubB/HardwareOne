@@ -19,10 +19,13 @@
 #include "OLED_SettingsEditor.h"
 #include "OLED_Utils.h"
 #include "System_BuildConfig.h"
+#include "System_Auth.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
+
+#include <esp_gatts_api.h>
 
 // External dependencies
 extern void broadcastOutput(const char* msg);
@@ -71,7 +74,73 @@ static BLECharacteristic* pModelChar = nullptr;
 static BLECharacteristic* pFirmwareChar = nullptr;
 
 // Forward declarations
-static void processIncomingBLECommand(const char* data, size_t len);
+static void processIncomingBLECommand(uint16_t connId, const char* data, size_t len);
+
+static int findConnectionSlotByConnId(uint16_t connId) {
+  if (!gBLEState) return -1;
+  for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+    if (gBLEState->connections[i].active && gBLEState->connections[i].connId == connId) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static const char* kBleIpTag = "ble";
+static const uint32_t kBleSessionIdleTimeoutMs = 15UL * 60UL * 1000UL;  // 15 minutes
+
+static void bleMarkActivity(uint16_t connId) {
+  int slot = findConnectionSlotByConnId(connId);
+  if (slot >= 0) {
+    gBLEState->connections[slot].lastActivityMs = millis();
+  }
+}
+
+void bleClearConnectionByConnId(uint16_t connId) {
+  int slot = findConnectionSlotByConnId(connId);
+  if (slot < 0) return;
+
+  gBLEState->connections[slot].active = false;
+  gBLEState->connections[slot].connId = 0;
+  gBLEState->connections[slot].connectedSince = 0;
+  gBLEState->connections[slot].deviceName = "";
+  memset(gBLEState->connections[slot].deviceAddr, 0, sizeof(gBLEState->connections[slot].deviceAddr));
+  gBLEState->connections[slot].deviceType = BLE_DEVICE_UNKNOWN;
+  gBLEState->connections[slot].commandsReceived = 0;
+  gBLEState->connections[slot].authed = false;
+  gBLEState->connections[slot].user = "";
+  gBLEState->connections[slot].lastActivityMs = 0;
+}
+
+static bool bleIsAuthed(uint16_t connId, String& outUser) {
+  int slot = findConnectionSlotByConnId(connId);
+  if (slot < 0) return false;
+  if (!gBLEState->connections[slot].authed) return false;
+  outUser = gBLEState->connections[slot].user;
+  return outUser.length() > 0;
+}
+
+static void bleLogout(uint16_t connId) {
+  int slot = findConnectionSlotByConnId(connId);
+  if (slot < 0) return;
+  gBLEState->connections[slot].authed = false;
+  gBLEState->connections[slot].user = "";
+}
+
+static bool bleLogin(uint16_t connId, const String& user, const String& pass) {
+  if (!isValidUser(user, pass)) return false;
+  int slot = findConnectionSlotByConnId(connId);
+  if (slot < 0) return false;
+  gBLEState->connections[slot].authed = true;
+  gBLEState->connections[slot].user = user;
+  gBLEState->connections[slot].lastActivityMs = millis();
+  return true;
+}
+
+static void bleSendAuthRequired(uint16_t connId) {
+  static const char* msg = "Authentication required. Use: login <username> <password>";
+  sendBLEResponseToConn(connId, msg, strlen(msg));
+}
 
 // =============================================================================
 // DEVICE TYPE IDENTIFICATION
@@ -158,6 +227,9 @@ class ServerCallbacks : public BLEServerCallbacks {
     gBLEState->connections[slot].connectedSince = millis();
     memcpy(gBLEState->connections[slot].deviceAddr, param->connect.remote_bda, 6);
     gBLEState->connections[slot].commandsReceived = 0;
+    gBLEState->connections[slot].authed = false;
+    gBLEState->connections[slot].user = "";
+    gBLEState->connections[slot].lastActivityMs = millis();
     
     // Identify device type by MAC address
     gBLEState->connections[slot].deviceType = bleIdentifyDeviceByMAC(param->connect.remote_bda);
@@ -179,12 +251,12 @@ class ServerCallbacks : public BLEServerCallbacks {
     }
   }
   
-  void onDisconnect(BLEServer* pServer) override {
+  void onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) override {
     if (!gBLEState) return;
     
-    // Find and clear disconnected slot
-    // Note: We don't have conn_id in this callback, so we'll clear on next connect
-    // This is a limitation of the current BLE library callback signature
+    if (param) {
+      bleClearConnectionByConnId(param->disconnect.conn_id);
+    }
     
     if (gBLEState->activeConnectionCount > 0) {
       gBLEState->activeConnectionCount--;
@@ -211,12 +283,13 @@ class ServerCallbacks : public BLEServerCallbacks {
 
 // Command Request Characteristic - receives commands from client
 class CmdRequestCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* pCharacteristic) override {
+  void onWrite(BLECharacteristic* pCharacteristic, esp_ble_gatts_cb_param_t* param) override {
+    if (!param) return;
     String value = pCharacteristic->getValue();
     if (value.length() > 0) {
       gBLEState->commandsReceived++;
-      BLE_DEBUGF(DEBUG_BLE_GATT, "Command received (%d bytes)", value.length());
-      processIncomingBLECommand(value.c_str(), value.length());
+      BLE_DEBUGF(DEBUG_BLE_GATT, "Command received (%d bytes) conn_id=%u", value.length(), (unsigned)param->write.conn_id);
+      processIncomingBLECommand(param->write.conn_id, value.c_str(), value.length());
     }
   }
 };
@@ -239,8 +312,8 @@ class CmdStatusCallbacks : public BLECharacteristicCallbacks {
 // COMMAND PROCESSING
 // =============================================================================
 
-// External command execution function (from command_system.cpp)
-extern String executeCommandThroughRegistry(const String& cmd);
+extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
+extern AuthContext gExecAuthContext;
 
 // Forward declaration for OLED message history
 #if ENABLE_OLED_DISPLAY
@@ -255,7 +328,7 @@ static uint8_t bleMessageHead = 0;
 void bleAddMessageToHistory(const char* msg);
 #endif
 
-static void processIncomingBLECommand(const char* data, size_t len) {
+static void processIncomingBLECommand(uint16_t connId, const char* data, size_t len) {
   // Build printable command string (filter non-printable bytes, trim)
   String cmd;
   cmd.reserve(len);
@@ -277,6 +350,8 @@ static void processIncomingBLECommand(const char* data, size_t len) {
     BLE_DEBUGF(DEBUG_BLE_DATA, "Ignoring empty/non-printable command");
     return;
   }
+
+  bleMarkActivity(connId);
   
   // Copy to cmdBuf for logging and OLED history
   char cmdBuf[512];
@@ -294,21 +369,80 @@ static void processIncomingBLECommand(const char* data, size_t len) {
   }
   #endif
   
-  // Execute through existing command registry
-  String result = executeCommandThroughRegistry(String(cmdBuf));
-  
-  // Send response back via BLE
-  if (result.length() > 0) {
-    sendBLEResponse(result.c_str(), result.length());
-  } else {
-    // Send acknowledgment if no result
-    char ack[64];
-    char cmdAck[32];  // Limit command string length to 32 bytes
-    strncpy(cmdAck, cmdBuf, sizeof(cmdAck) - 1);
-    cmdAck[sizeof(cmdAck) - 1] = '\0';
-    snprintf(ack, sizeof(ack), "{\"cmd\":\"%s\",\"status\":\"ok\"}", cmdAck);
-    sendBLEResponse(ack, strlen(ack));
+  String lc = cmd;
+  lc.toLowerCase();
+  lc.trim();
+
+  // Session commands
+  if (lc.startsWith("login ")) {
+    String rest = cmd.substring(6);
+    rest.trim();
+    int sp = rest.indexOf(' ');
+    if (sp <= 0) {
+      const char* msg = "Usage: login <username> <password>";
+      sendBLEResponseToConn(connId, msg, strlen(msg));
+      return;
+    }
+    String u = rest.substring(0, sp);
+    String p = rest.substring(sp + 1);
+    if (bleLogin(connId, u, p)) {
+      String out = String("[ble] Login successful. User: ") + u + (isAdminUser(u) ? " (admin)" : "");
+      sendBLEResponseToConn(connId, out.c_str(), out.length());
+    } else {
+      const char* msg = "[ble] Authentication failed.";
+      sendBLEResponseToConn(connId, msg, strlen(msg));
+    }
+    return;
   }
+  if (lc == "logout") {
+    bleLogout(connId);
+    const char* msg = "[ble] Logged out.";
+    sendBLEResponseToConn(connId, msg, strlen(msg));
+    return;
+  }
+  if (lc == "whoami") {
+    String u;
+    if (bleIsAuthed(connId, u)) {
+      String out = String("You are ") + u + (isAdminUser(u) ? " (admin)" : "");
+      sendBLEResponseToConn(connId, out.c_str(), out.length());
+    } else {
+      const char* msg = "You are (unknown)";
+      sendBLEResponseToConn(connId, msg, strlen(msg));
+    }
+    return;
+  }
+
+  // Auth gate
+  if (gSettings.bluetoothRequireAuth) {
+    String u;
+    if (!bleIsAuthed(connId, u)) {
+      bleSendAuthRequired(connId);
+      return;
+    }
+  }
+
+  // Execute command with auth-aware pipeline
+  AuthContext ctx;
+  ctx.transport = SOURCE_BLUETOOTH;
+  ctx.path = "/ble/cli";
+  ctx.ip = kBleIpTag;
+  ctx.sid = "";
+  ctx.opaque = nullptr;
+  if (gSettings.bluetoothRequireAuth) {
+    String u;
+    (void)bleIsAuthed(connId, u);
+    ctx.user = u;
+  } else {
+    ctx.user = "";
+  }
+
+  static char outBuf[2048];
+  bool ok = executeCommand(ctx, cmdBuf, outBuf, sizeof(outBuf));
+  if (!ok && outBuf[0] == '\0') {
+    strncpy(outBuf, "Command execution failed", sizeof(outBuf) - 1);
+    outBuf[sizeof(outBuf) - 1] = '\0';
+  }
+  sendBLEResponseToConn(connId, outBuf, strlen(outBuf));
 }
 
 // =============================================================================
@@ -334,6 +468,9 @@ bool initBluetooth() {
     gBLEState->connections[i].active = false;
     gBLEState->connections[i].connId = 0;
     gBLEState->connections[i].deviceType = BLE_DEVICE_UNKNOWN;
+    gBLEState->connections[i].authed = false;
+    gBLEState->connections[i].user = "";
+    gBLEState->connections[i].lastActivityMs = 0;
   }
   gBLEState->activeConnectionCount = 0;
   
@@ -599,6 +736,32 @@ bool sendBLEResponse(const char* data, size_t len) {
   return true;
 }
 
+bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len) {
+  (void)connId;  // Currently using broadcast; per-conn targeting would need gatts_if access
+  
+  // Use the standard broadcast response for now
+  // The BLE library's notify() sends to all subscribed clients
+  // True per-connection targeting would require access to private BLEServer::getGattsIf()
+  return sendBLEResponse(data, len);
+}
+
+void bleSessionTick() {
+  if (!gBLEState || !isBLEConnected()) return;
+  uint32_t now = millis();
+  for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+    if (!gBLEState->connections[i].active) continue;
+    if (!gBLEState->connections[i].authed) continue;
+    if (gBLEState->connections[i].lastActivityMs == 0) continue;
+
+    if (now - gBLEState->connections[i].lastActivityMs > kBleSessionIdleTimeoutMs) {
+      String msg = String("[ble] Session expired for user '") + gBLEState->connections[i].user + "'";
+      sendBLEResponseToConn(gBLEState->connections[i].connId, msg.c_str(), msg.length());
+      gBLEState->connections[i].authed = false;
+      gBLEState->connections[i].user = "";
+    }
+  }
+}
+
 // =============================================================================
 // STATUS
 // =============================================================================
@@ -679,7 +842,7 @@ static const char* cmd_blestop(const String& cmd) {
 
 static const char* cmd_blestatus(const String& cmd) {
   if (!gBLEState || !gBLEState->initialized) {
-    return "Bluetooth not initialized. Run 'blestart' first.";
+    return "Bluetooth not initialized. Run 'openble' first.";
   }
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -889,7 +1052,7 @@ static const char* cmd_blename(const String& cmd) {
     
     if (!ensureDebugBuffer()) return "Name saved (restart BLE to apply)";
     char* buf = getDebugBuffer();
-    snprintf(buf, 1024, "BLE name set to '%s'. Restart Bluetooth to apply (blestop && blestart)", newName.c_str());
+    snprintf(buf, 1024, "BLE name set to '%s'. Restart Bluetooth to apply (closeble && openble)", newName.c_str());
     return buf;
   }
   
@@ -971,8 +1134,8 @@ static const char* cmd_bleinfo(const String& cmd) {
 // =============================================================================
 
 const CommandEntry bluetoothCommands[] = {
-  { "blestart",     "Initialize Bluetooth and start advertising",  false, cmd_blestart },
-  { "blestop",      "Stop Bluetooth and deinitialize",             false, cmd_blestop },
+  { "openble",     "Initialize Bluetooth and start advertising",  false, cmd_blestart },
+  { "closeble",      "Stop Bluetooth and deinitialize",             false, cmd_blestop },
   { "blestatus",    "Show Bluetooth connection status",            false, cmd_blestatus },
   { "bleinfo",      "Show BLE configuration and settings",         false, cmd_bleinfo },
   { "blename",      "Get/set BLE device name: blename [name]",     false, cmd_blename },
@@ -1540,6 +1703,9 @@ void bleUpdateStreams() {
   if (!gBLEState || !isBLEConnected()) return;
   
   uint32_t now = millis();
+
+  // Maintain BLE CLI sessions
+  bleSessionTick();
   
   // Stream sensor data
   if (bleIsStreamEnabled(BLE_STREAM_SENSORS)) {

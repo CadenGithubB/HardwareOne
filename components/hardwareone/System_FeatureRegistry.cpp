@@ -45,6 +45,14 @@ static bool isEspNowCompiled() {
 #endif
 }
 
+static bool isMqttCompiled() {
+#if ENABLE_MQTT
+  return true;
+#else
+  return false;
+#endif
+}
+
 static bool isOledCompiled() {
 #if ENABLE_OLED_DISPLAY
   return true;
@@ -166,6 +174,22 @@ static bool isAutomationCompiled() {
 #endif
 }
 
+static bool isESPSRCompiled() {
+#if ENABLE_ESP_SR
+  return true;
+#else
+  return false;
+#endif
+}
+
+static bool isEdgeImpulseCompiled() {
+#if ENABLE_EDGE_IMPULSE
+  return true;
+#else
+  return false;
+#endif
+}
+
 // ============================================================================
 // Feature Registry - All System Features
 // ============================================================================
@@ -195,6 +219,11 @@ static const FeatureEntry featureRegistry[] = {
     FEATURE_FLAG_RUNTIME_TOGGLE,
     &gSettings.espnowenabled, isEspNowCompiled,
     "Device-to-device mesh communication" },
+    
+  { "mqtt", "MQTT", FEATURE_CAT_NETWORK, 6,
+    FEATURE_FLAG_RUNTIME_TOGGLE,
+    &gSettings.mqttAutoStart, isMqttCompiled,
+    "Home Assistant integration via MQTT broker" },
 
   // === DISPLAY FEATURES ===
   { "oled", "OLED Display", FEATURE_CAT_DISPLAY, 4,
@@ -262,6 +291,16 @@ static const FeatureEntry featureRegistry[] = {
     FEATURE_FLAG_RUNTIME_TOGGLE,
     &gSettings.microphoneAutoStart, isMicrophoneCompiled,
     "ESP32-S3 PDM microphone (XIAO ESP32S3 Sense)" },
+
+  { "espsr", "Speech Recognition", FEATURE_CAT_SENSOR, 48,
+    FEATURE_FLAG_RUNTIME_TOGGLE,
+    &gSettings.srAutoStart, isESPSRCompiled,
+    "ESP-SR voice commands (requires microphone)" },
+
+  { "edgeimpulse", "Edge Impulse ML", FEATURE_CAT_SENSOR, 32,
+    FEATURE_FLAG_RUNTIME_TOGGLE,
+    &gSettings.edgeImpulseEnabled, isEdgeImpulseCompiled,
+    "ML inference for object detection (requires camera)" },
 
   // === HARDWARE FEATURES (shown on first page) ===
   { "i2c", "I2C Bus", FEATURE_CAT_NETWORK, 4,

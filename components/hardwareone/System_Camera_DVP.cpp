@@ -509,7 +509,7 @@ bool initCamera() {
 
   cameraConnected = true;
   cameraEnabled = true;
-  sensorStatusBumpWith("camerastart");
+  sensorStatusBumpWith("opencamera");
 
   DEBUG_CAMERAF("[CAM_INIT] ========== initCamera() COMPLETE ==========");
   DEBUG_CAMERAF("[CAM_INIT] cameraEnabled=%d cameraConnected=%d", cameraEnabled, cameraConnected);
@@ -541,7 +541,7 @@ void stopCamera() {
   
   cameraEnabled = false;
   cameraStreaming = false;
-  sensorStatusBumpWith("camerastop");
+  sensorStatusBumpWith("closecamera");
   
   DEBUG_CAMERAF("[CAM_STOP] Heap after deinit: %u", esp_get_free_heap_size());
   INFO_SENSORSF("[Camera] Stopped");
@@ -809,7 +809,7 @@ const char* cmd_camerastop(const String& cmd) {
 const char* cmd_cameracapture(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) {
-    return "Camera not enabled - run camerastart first";
+    return "Camera not enabled - run opencamera first";
   }
   
   size_t len = 0;
@@ -949,7 +949,7 @@ const char* cmd_cameraquality(const String& args) {
 const char* cmd_cameratiny(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) {
-    return "Camera not enabled - run camerastart first";
+    return "Camera not enabled - run opencamera first";
   }
   
   size_t len = 0;
@@ -1536,7 +1536,7 @@ extern ImageManager gImageManager;
 const char* cmd_camerasave(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) {
-    return "Camera not enabled - run camerastart first";
+    return "Camera not enabled - run opencamera first";
   }
   
   // Determine storage location from settings
@@ -1563,9 +1563,9 @@ const char* cmd_camerasave(const String& cmd) {
 // Command registry
 const CommandEntry cameraCommands[] = {
   {"camera",           "Show camera status",              false, cmd_camera},
-  {"camerastart",      "Initialize and start camera",     false, cmd_camerastart},
-  {"camerastop",       "Stop camera",                     false, cmd_camerastop},
-  {"cameracapture",    "Capture a single frame",          false, cmd_cameracapture},
+  {"opencamera",       "Initialize and start camera",     false, cmd_camerastart, nullptr, "camera", "open"},
+  {"closecamera",      "Stop camera",                     false, cmd_camerastop, nullptr, "camera", "close"},
+  {"cameracapture",    "Capture a single frame",          false, cmd_cameracapture, nullptr, "camera", "take picture"},
   {"camerasave",       "Save current frame to storage",   false, cmd_camerasave},
   {"camerares",        "Set camera resolution",           false, cmd_camerares},
   {"cameraframesize",  "Set resolution (0-5)",            true,  cmd_cameraframesize},

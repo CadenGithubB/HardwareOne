@@ -277,22 +277,22 @@ static const char* cmd_sensorstart_queued(SensorType sensor, const char* display
 
 const char* cmd_thermalstart_queued(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(SENSOR_THERMAL, "Thermal", thermalEnabled, "thermalstart@enqueue");
+  return cmd_sensorstart_queued(SENSOR_THERMAL, "Thermal", thermalEnabled, "openthermal@enqueue");
 }
 
 const char* cmd_tofstart_queued(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(SENSOR_TOF, "ToF", tofEnabled, "tofstart@enqueue");
+  return cmd_sensorstart_queued(SENSOR_TOF, "ToF", tofEnabled, "opentof@enqueue");
 }
 
 const char* cmd_imustart_queued(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(SENSOR_IMU, "IMU", imuEnabled, "imustart@enqueue");
+  return cmd_sensorstart_queued(SENSOR_IMU, "IMU", imuEnabled, "openimu@enqueue");
 }
 
 const char* cmd_apdsstart_queued(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(SENSOR_APDS, "APDS", apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled, "apdsstart@enqueue");
+  return cmd_sensorstart_queued(SENSOR_APDS, "APDS", apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled, "openapds@enqueue");
 }
 
 // ========== End Sensor Startup Queue System ==========
@@ -1540,7 +1540,11 @@ const char* buildSensorStatusJson() {
   doc["pwmDriverConnected"] = pwmDriverConnected;
   doc["gpsEnabled"] = gpsEnabled;
   doc["fmRadioEnabled"] = fmRadioEnabled;
+#if ENABLE_RTC_SENSOR
   doc["rtcEnabled"] = rtcEnabled;
+#else
+  doc["rtcEnabled"] = false;
+#endif
   
 #if ENABLE_PRESENCE_SENSOR
   extern bool presenceEnabled;
@@ -1809,7 +1813,9 @@ void sensorQueueProcessorTask(void* param) {
           alreadyRunning = fmRadioEnabled;
           break;
         case SENSOR_RTC:
+#if ENABLE_RTC_SENSOR
           alreadyRunning = rtcEnabled;
+#endif
           break;
         case SENSOR_PRESENCE:
 #if ENABLE_PRESENCE_SENSOR

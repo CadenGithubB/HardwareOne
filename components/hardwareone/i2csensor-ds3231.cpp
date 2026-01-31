@@ -459,7 +459,7 @@ const char* cmd_rtc(const String& cmd) {
   if (arg.length() == 0 || arg == "status") {
     // Show RTC status and current time
     if (!rtcConnected) {
-      response = "[RTC] Not connected. Use 'rtcstart' to initialize.";
+      response = "[RTC] Not connected. Use 'openrtc' to initialize.";
       return response.c_str();
     }
     
@@ -495,7 +495,7 @@ const char* cmd_rtcset(const String& cmd) {
   response = "";
   
   if (!rtcConnected) {
-    return "[RTC] Not connected. Use 'rtcstart' first.";
+    return "[RTC] Not connected. Use 'openrtc' first.";
   }
   
   String arg = cmd;
@@ -564,7 +564,7 @@ const char* cmd_rtcsync(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!rtcConnected) {
-    return "[RTC] Not connected. Use 'rtcstart' first.";
+    return "[RTC] Not connected. Use 'openrtc' first.";
   }
   
   String arg = cmd;
@@ -611,7 +611,7 @@ const char* cmd_rtcstart(const String& cmd) {
     return "[RTC] Failed to create task";
   }
   
-  return "[RTC] Started successfully";
+  return "[RTC] Opened successfully";
 }
 
 const char* cmd_rtcstop(const String& cmd) {
@@ -623,7 +623,7 @@ const char* cmd_rtcstop(const String& cmd) {
   }
   
   stopRTCSensor();
-  return "[RTC] Stopped";
+  return "[RTC] Closed";
 }
 
 // ============================================================================
@@ -659,8 +659,8 @@ extern const SettingsModule rtcSettingsModule = {
 
 const CommandEntry rtcCommands[] = {
   { "rtc",      "Show RTC status and current time.",           false, cmd_rtc,      "Usage: rtc [status|temp]" },
-  { "rtcstart", "Start DS3231 RTC sensor.",                    false, cmd_rtcstart, nullptr },
-  { "rtcstop",  "Stop DS3231 RTC sensor.",                     false, cmd_rtcstop,  nullptr },
+  { "openrtc", "Open DS3231 RTC sensor.",                    false, cmd_rtcstart, nullptr },
+  { "closertc",  "Close DS3231 RTC sensor.",                     false, cmd_rtcstop,  nullptr },
   { "rtcset",   "Set RTC time.",                               false, cmd_rtcset,   "Usage: rtcset YYYY-MM-DD HH:MM:SS  or  rtcset <unix_timestamp>" },
   { "rtcsync",  "Sync time between RTC and system.",           false, cmd_rtcsync,  "Usage: rtcsync [to|from] (to=RTC->system, from=system->RTC)" },
 };

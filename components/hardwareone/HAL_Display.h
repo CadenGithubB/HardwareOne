@@ -194,10 +194,11 @@ extern DisplayDriver* gDisplay;
 #define oledDisplay gDisplay
 
 // Display control functions
-bool displayInit();           // Initialize display hardware
-void displayClear();          // Clear entire display
-void displayUpdate();         // Update display (no-op for TFT, display() for OLED)
-void displayDim(bool dim);    // Dim display (brightness control)
+bool displayInit();                      // Initialize display hardware
+void displayClear();                     // Clear entire display
+void displayUpdate();                    // Update display (no-op for TFT, display() for OLED)
+void displayDim(bool dim);               // Dim display (on/off brightness)
+void displaySetBrightness(uint8_t level); // Set brightness 0-255 (PWM for TFT, contrast for OLED)
 
 #endif // DISPLAY_ENABLED
 

@@ -77,7 +77,7 @@ function updatePresenceCard(data) {
   if (data.connected && data.enabled) {
     statusEl.textContent = 'Active';
     statusEl.className = 'status-active';
-    toggleBtn.textContent = 'Stop';
+    toggleBtn.textContent = 'Close';
     
     if (data.dataValid) {
       document.getElementById('presence-ambient').textContent = data.ambientTemp.toFixed(1) + '°C';
@@ -97,16 +97,16 @@ function updatePresenceCard(data) {
   } else if (data.connected) {
     statusEl.textContent = 'Connected (Idle)';
     statusEl.className = 'status-idle';
-    toggleBtn.textContent = 'Start';
+    toggleBtn.textContent = 'Open';
   } else {
     statusEl.textContent = 'Not Connected';
     statusEl.className = 'status-disconnected';
-    toggleBtn.textContent = 'Start';
+    toggleBtn.textContent = 'Open';
   }
 }
 
 function togglePresence() {
-  const cmd = document.getElementById('presence-toggle').textContent === 'Start' ? 'presencestart' : 'presencestop';
+  const cmd = document.getElementById('presence-toggle').textContent === 'Open' ? 'openpresence' : 'closepresence';
   fetch('/api/command', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -130,8 +130,8 @@ inline void streamSTHS34PF80PresenceSensorCard(httpd_req_t* req) {
     <div class='sensor-value'><span class='label'>Motion:</span><span id='presence-motion'>--</span></div>
   </div>
   <div class='sensor-controls'>
-    <button class='btn' id='btn-presence-start'>Start</button>
-    <button class='btn' id='btn-presence-stop'>Stop</button>
+    <button class='btn' id='btn-presence-start'>Open</button>
+    <button class='btn' id='btn-presence-stop'>Close</button>
   </div>
 </div>
 )HTML", HTTPD_RESP_USE_STRLEN);
@@ -139,7 +139,7 @@ inline void streamSTHS34PF80PresenceSensorCard(httpd_req_t* req) {
 
 // Stream presence sensor button bindings
 inline void streamSTHS34PF80PresenceSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-presence-start','presencestart');bind('btn-presence-stop','presencestop');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "bind('btn-presence-start','openpresence');bind('btn-presence-stop','closepresence');", HTTPD_RESP_USE_STRLEN);
 }
 
 // Dashboard sensor definition for presence sensor

@@ -11,15 +11,15 @@ inline void streamPA1010DGpsSensorCard(httpd_req_t* req) {
       <div class='sensor-title'><span>GPS Module (PA1010D)</span><span class='status-indicator status-disabled' id='gps-status-indicator'></span></div>
       <div class='sensor-description'>Mini GPS module for location, time, and satellite data.</div>
       <div id='gps-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
-      <div class='sensor-controls'><button class='btn' id='btn-gps-start'>Start GPS</button><button class='btn' id='btn-gps-stop'>Stop GPS</button></div>
-      <div class='sensor-data' id='gps-data'><div style="padding:1rem;text-align:center;color:#6c757d"><p style="margin:0;font-size:1.1em">GPS Stopped</p><p style="margin:0.5rem 0 0 0;font-size:0.9em">Click "Start GPS" to begin</p></div></div>
+      <div class='sensor-controls'><button class='btn' id='btn-gps-start'>Open GPS</button><button class='btn' id='btn-gps-stop'>Close GPS</button></div>
+      <div class='sensor-data' id='gps-data'><div style="padding:1rem;text-align:center;color:#6c757d"><p style="margin:0;font-size:1.1em">GPS Closed</p><p style="margin:0.5rem 0 0 0;font-size:0.9em">Click "Open GPS" to begin</p></div></div>
     </div>
 
 )HTML", HTTPD_RESP_USE_STRLEN);
 }
 
 inline void streamPA1010DGpsSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-gps-start','gpsstart');bind('btn-gps-stop','gpsstop');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "bind('btn-gps-start','opengps');bind('btn-gps-stop','closegps');", HTTPD_RESP_USE_STRLEN);
 }
 
 inline void streamPA1010DGpsDashboardDef(httpd_req_t* req) {
@@ -44,7 +44,7 @@ inline void streamPA1010DGpsSensorJs(httpd_req_t* req) {
     "        return 'not_compiled';\n"
     "      }\n"
     "      if (!status.gpsEnabled) {\n"
-    "        el.innerHTML = '<div style=\"padding:1rem;text-align:center;color:#6c757d\"><p style=\"margin:0;font-size:1.1em\">GPS Stopped</p><p style=\"margin:0.5rem 0 0 0;font-size:0.9em\">Click \\\"Start GPS\\\" to begin</p></div>';\n"
+    "        el.innerHTML = '<div style=\"padding:1rem;text-align:center;color:#6c757d\"><p style=\"margin:0;font-size:1.1em\">GPS Closed</p><p style=\"margin:0.5rem 0 0 0;font-size:0.9em\">Click \"Open\" to begin</p></div>';\n"
     "        return 'stopped';\n"
     "      }\n"
     "      return fetch('/api/cli', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'cmd=gps', cache: 'no-store', credentials: 'include'})\n"

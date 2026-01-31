@@ -15,6 +15,7 @@
 #include "System_Settings.h"
 #include "System_Utils.h"
 #include "System_ImageManager.h"
+#include "System_VFS.h"
 
 // External dependencies
 extern bool readText(const char* path, String& out);
@@ -71,6 +72,8 @@ bool initFilesystem() {
   Serial.println("[FS] LittleFS mounted successfully");
   Serial.flush();
   filesystemReady = true;
+
+  VFS::init();
   
 #if ENABLE_CAMERA_SENSOR
   // Initialize ImageManager now that filesystem is ready (creates photos folder)
@@ -82,8 +85,7 @@ bool initFilesystem() {
   LittleFS.mkdir("/system");  // For settings, automations, devices, etc.
   LittleFS.mkdir("/system/users");  // For users.json and user settings
   LittleFS.mkdir("/system/users/user_settings");  // For per-user setting files
-  LittleFS.mkdir("/espnow");  // For ESP-NOW related files
-  LittleFS.mkdir("/espnow/received");  // For received files from ESP-NOW devices
+  LittleFS.mkdir("/espnow");  // For ESP-NOW related files (received subfolder created on-demand)
   LittleFS.mkdir("/maps");  // For GPS map files (.hwmap)
   
   DEBUG_STORAGEF("Filesystem initialized successfully");
@@ -139,14 +141,20 @@ bool initFilesystem() {
 // ============================================================================
 
 bool buildFilesListing(const String& inPath, String& out, bool asJson) {
-  String dirPath = inPath;
-  if (dirPath.length() == 0) dirPath = "/";
-  if (!dirPath.startsWith("/")) dirPath = String("/") + dirPath;
+  String dirPath = VFS::normalize(inPath);
 
   DEBUG_STORAGEF("[buildFilesListing] START path='%s' heap=%u", dirPath.c_str(), (unsigned)ESP.getFreeHeap());
 
+  // Determine if we're listing SD card content
+  bool sdRequested = (VFS::getStorageType(dirPath) == VFS::SDCARD);
+  String fsDirPath = sdRequested ? VFS::stripSdPrefix(dirPath) : dirPath;
+
   FsLockGuard _dirGuard("dir.list");
-  File root = LittleFS.open(dirPath);
+
+  // Virtual root: show /sd folder if SD is available and we're at LittleFS root
+  bool includeVirtualSd = (!sdRequested && dirPath == "/" && VFS::isSDAvailable());
+
+  File root = VFS::open(dirPath, "r");
   if (!root || !root.isDirectory()) {
     ERROR_STORAGEF("Cannot open directory '%s'", dirPath.c_str());
     if (asJson) {
@@ -160,9 +168,31 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson) {
   bool first = true;
   int fileCount = 0;
   if (!asJson) {
-    out = String("LittleFS Files (") + dirPath + "):\n";
+    out = String("Files (") + dirPath + "):\n";
   } else {
     out = "";  // array body only
+  }
+
+  // Inject virtual /sd folder at root when SD card is available
+  if (includeVirtualSd) {
+    // Count items on SD root for display
+    uint32_t sdCount = 0;
+    File sdRoot = VFS::open("/sd", "r");
+    if (sdRoot && sdRoot.isDirectory()) {
+      File child = sdRoot.openNextFile();
+      while (child) {
+        sdCount++;
+        child = sdRoot.openNextFile();
+      }
+      sdRoot.close();
+    }
+    if (asJson) {
+      out += String("{\"name\":\"sd\",\"type\":\"folder\",\"size\":\"") + String(sdCount) + String(" items\",\"count\":") + String(sdCount) + String("}");
+      first = false;
+    } else {
+      out += "  sd (" + String(sdCount) + " items) [SD Card]\n";
+      fileCount++;
+    }
   }
 
   File file = root.openNextFile();
@@ -193,7 +223,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson) {
         if (!subPath.endsWith("/")) subPath += "/";
         subPath += fileName;
         int itemCount = 0;
-        File subDir = LittleFS.open(subPath);
+        File subDir = VFS::open(subPath, "r");
         if (subDir && subDir.isDirectory()) {
           File child = subDir.openNextFile();
           while (child) {
@@ -220,7 +250,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson) {
         if (!subPath.endsWith("/")) subPath += "/";
         subPath += fileName;
         int itemCount = 0;
-        File subDir = LittleFS.open(subPath);
+        File subDir = VFS::open(subPath, "r");
         if (subDir && subDir.isDirectory()) {
           File child = subDir.openNextFile();
           while (child) {
@@ -304,7 +334,7 @@ const char* cmd_mkdir(const String& args) {
     snprintf(getDebugBuffer(), 1024, "Error: Creation not allowed: %s", path.c_str());
     return getDebugBuffer();
   }
-  if (LittleFS.mkdir(path)) {
+  if (VFS::mkdir(path)) {
     snprintf(getDebugBuffer(), 1024, "Created folder: %s", path.c_str());
   } else {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to create folder: %s", path.c_str());
@@ -325,7 +355,7 @@ const char* cmd_rmdir(const String& args) {
     snprintf(getDebugBuffer(), 1024, "Error: Removal not allowed: %s (protected system directory)", path.c_str());
     return getDebugBuffer();
   }
-  if (LittleFS.rmdir(path)) {
+  if (VFS::rmdir(path)) {
     snprintf(getDebugBuffer(), 1024, "Removed folder: %s", path.c_str());
   } else {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to remove folder (ensure it is empty): %s", path.c_str());
@@ -347,7 +377,7 @@ const char* cmd_filecreate(const String& args) {
     snprintf(getDebugBuffer(), 1024, "Error: Creation not allowed: %s", path.c_str());
     return getDebugBuffer();
   }
-  File f = LittleFS.open(path, "w");
+  File f = VFS::open(path, "w", true);
   if (!f) {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to create file: %s", path.c_str());
     return getDebugBuffer();
@@ -366,7 +396,7 @@ const char* cmd_fileview(const String& args) {
   if (path.length() == 0) return "Usage: fileview <path>";
   if (!path.startsWith("/")) path = String("/") + path;
 
-  if (!LittleFS.exists(path)) {
+  if (!VFS::exists(path)) {
     if (ensureDebugBuffer()) {
       snprintf(getDebugBuffer(), 1024, "Error: File not found: %s", path.c_str());
       broadcastOutput(getDebugBuffer());
@@ -423,8 +453,8 @@ const char* cmd_filedelete(const String& args) {
     return getDebugBuffer();
   }
   
-  if (!LittleFS.exists(path)) return "Error: File does not exist";
-  if (!LittleFS.remove(path)) return "Error: Failed to delete file";
+  if (!VFS::exists(path)) return "Error: File does not exist";
+  if (!VFS::remove(path)) return "Error: Failed to delete file";
   snprintf(getDebugBuffer(), 1024, "Deleted file: %s", path.c_str());
   return getDebugBuffer();
 }
@@ -455,7 +485,7 @@ static CommandModuleRegistrar _filesystem_cmd_registrar(filesystemCommands, file
 
 bool canDelete(const String& path) {
   // Protected system directories
-  if (path == "/logs" || path == "/system" || path == "/espnow" || path == "/Users") {
+  if (path == "/sd" || path == "/logs" || path == "/system" || path == "/espnow" || path == "/Users") {
     return false;
   }
   
