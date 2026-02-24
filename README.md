@@ -1,6 +1,6 @@
 # Hardware One
 
-> Hardware One is an ESP32-based firmware platform that turns a small microcontroller board into a capable, networked device. Attach sensors, a display, and input hardware, flash the firmware, and you have a standalone device with a web UI, an OLED interface, an ESP-NOW mesh network, and a full CLI — all configurable without recompiling.
+> Hardware One is an ESP32-based firmware platform that turns a small microcontroller board into a capable, networked device. Attach sensors, a display, and input hardware, flash the firmware, and you have a standalone device with a web UI, an OLED interface, an ESP-NOW mesh network, and a full CLI — all configurable on the fly.
 
 Built on **ESP-IDF** (not Arduino IDE). Runs on the **Seeed XIAO ESP32-S3**, **Adafruit QT PY ESP32**, and **Adafruit Feather ESP32** boards.
 
@@ -79,7 +79,7 @@ These connect via Stemma QT (or standard I2C) and work the same on any supported
 
 | Peripheral | Link |
 | ---------- | ---- |
-| SSD1306 OLED display | Any 128×64 I2C OLED |
+| SSD1306 OLED display | [ID: 326](https://www.adafruit.com/product/326) |
 | Adafruit Seesaw Gamepad | [ID: 5743](https://www.adafruit.com/product/5743) |
 | BNO055 9-DoF IMU | [ID: 4646](https://www.adafruit.com/product/4646) |
 | VL53L4CX Time-of-Flight sensor | [ID: 5425](https://www.adafruit.com/product/5425) |
