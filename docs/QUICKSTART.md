@@ -1,135 +1,137 @@
 # Quick Start Guide
 
-This guide will help you get up and running with Hardware One
+This guide will help you get up and running with Hardware One.
 
 ## Hardware Setup
 
-   - **For the 'Base Configuration', start here:**
-      - Connect your Adafruit QT PY Pico to your computer via USB-C.
-      - Continue to Software Setup.
+### Barebones
+Just your board and a USB-C cable. Connect it to your computer and continue to Software Setup.
 
-   - **For 'Hardware One (Wired)', start here:**
-      > NOTE: This assumes that you have already soldered pins to the QT PY, EYESPI Adatper and Battery BFF modules. If you dont, please do that to continue.
-      1. (**_This is optional_**) Select 0-4 STEMMA QT modules and connect them to the STEMMA QT connector of the QT PY:
-      2. USB C port first, insert the QT PY into the case. Push the QT PY flat against the bottom of the case.
-      3. Slot any connected Stemma QT sensor modules into the Case towards the top. Leave the Gamepad off to the side. Manage the cables.
-      4. Connect the EYESPI Display Cable to the EYESPI Adapter.
-      5. Slide the EYESPI display cable through the slot between the space for the battery and EYESPI Adapter, eventually placing the EYESPI Adapter flat against the bottom of the case.<br><br>
-      > NOTE: If you are going the DIY route, only continue to the next step once you have a proper diagram of the setup you want. This is where you can begin to damage components, so continue with caution.
-      6. Connect the wires like so: (put link here to a nice looking wire diagram. Need to find software for that.)<br><br>
-      7. With the device wired up, insert the Midcase (new word?) into the device to cover and protect the wires below. Make sure the Gamepad and EYESPI Display Cable are able to be accessed from above the assembled case.
-      8. Take the EYESPI Display Cable and lay it flat over the Midcase, so its available end lays in the middle, near the top. 
-      9. Place the Gamepad into its spot in the Case, over the EYESPI Display Cable, Midcase, Breadboard and EYESPI Display Module. (In that order, from the top down.)<br><br>
-      > The Case is now assembled! Now you just need to put the screen into the Top of the case, and connect the screen.
-      10. Take the Top Case, slide the screen into it, and insert the shim to keep it in place.
-      11. Attach the EYESPI Display Cable into the connector on the EYESPI Display.
-      12. Put the Top Case and the Bottom Case together, and you are finished assembling the device.
-      > **NOTE Before continuing, you MUST ensure that the QT PY, BFF Module and EYESPI Adapter modules have _both_ a positive and negative cable connected to their proper pins. Failure to complete the circuit can result in blown components or battery... complications.**
-      13.  Connect your Adafruit QT PY to your computer via USB-C
-      14.  Continue to the software setup.
-      
-   - **For 'Hardware One (Wireless)', start here:**
-      1. Place the battery in the case, taking care to route the cables into the cavity below where the QT PY will sit.
-      2. Follow all Hardware Setup steps 1 through 5 for the 'Hardware One (Wired)' setup above. Continue from here once you finish step 5.
-      6. Connect the wires like so: (put link here to a nice looking wire diagram. Need to find software for that.)<br><br>
-      > Its best to lift the battery and route the EYESPI Display Cable under the battery. If its not, the cable can crease once everything is closed up. ( Its not the end of the world, but its good to avoid. )
-      7. With the device wired up, insert the Midcase (new word?) into the device to cover and protect the wires below. Make sure the Gamepad and EYESPI Display Cable are able to be accessed from above the assembled case.
-      8. Take the EYESPI Display Cable and lay it flat over the Midcase, so its available end lays in the middle, near the top.
-      9. Place the Gamepad into its spot in the Case, over the EYESPI Display Cable, Midcase, Breadboard and EYESPI Display Module. (In that order, from the top down.)
-      10. Put the power switch of the Battery BFF Module in the 'Off' position.
-      11. Connect the battery connector to the Battery BFF, then place the Battery BFF Module into the case. Press it flat against the bottom.<br><br>
-      12. Put in the case power switch, and attach the outer piece. (wip, glue needed)<br><br>
-      > The Bottom Case is now assembled! Now you just need to put the screen into the Top Case, and connect the screen.
-      13. Take the Top Case, slide the screen into it, and insert the shim to keep it in place.
-      14. Attach the EYESPI Display Cable into the connector on the EYESPI Display.
-      15. Put the Top Case and the Bottom Case together, and you are finished assembling the device.
-      > **NOTE Before continuing, you MUST ensure that the QT PY, BFF Module and EYESPI Adapter modules have _both_ a positive and negative cable connected to their proper pins. Failure to complete the circuit can result in blown components or battery.**
-      16. Connect your Adafruit QT PY Pico to your computer via USB-C
-      17. Continue to the software setup.
-      
+### Hardware One (Standard — wired or wireless)
+
+> **NOTE:** This assumes you have already soldered headers to any modules that require them.
+
+1. Connect your I2C sensors and peripherals via Stemma QT cables. If you have more than one, use a Stemma QT hub to chain them.
+2. Connect the SSD1306 OLED display via I2C.
+3. Connect the Seesaw Gamepad via Stemma QT.
+4. If using a **wireless** build, connect your LiPo battery to the board's JST connector. Make sure the power switch is in the **Off** position before continuing.
+5. Connect the board to your computer via USB-C.
+6. Continue to Software Setup.
+
+> **Before powering on:** double-check that all power and ground connections are correct. Reversing polarity can damage components or the battery.
+
+---
 
 ## Software Setup
 
-1. Install the Arduino IDE (2.0 or later recommended)
-   - https://support.arduino.cc/hc/en-us/articles/360019833020-Download-and-install-Arduino-IDE
-2. Install the ESP32 board package
-   - https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_dev_index.json
-3. Configure the IDE:
-   - Open the Serial Monitor and set it to 115200 baud
-   - In the 'Tools' Menu at the top -
-      - Set Board to "Adafruit QT PY ESP32"
-      - Set Upload Speed to 115200
-   - Install the libraries relevant to the hardware you're using.<br><br>
-      - > NOTE: In the User Guide there is a table which features information about the necessary libraries.
- 4. Depending on which 'configuration' you choose, the program you upload to the QT PY will differ. Pick the appropriate one:
-   There are three ways this can work:
-     > - 1: If you are planning to use exactly the same hardware outlined under the Hardware Requirements, you can download the pre-prepared program specific to the hardware configuration chosen. Options can be found here:
-  Barebones
-  Wired
-  Wireless - https://github.com/CadenGithubB/HardwareOne/blob/main/Main/Main.ino
+Hardware One uses **ESP-IDF**, not Arduino IDE. If you don't have it installed:
 
-     > - This is recommended to get up and running quickly.
+- [ESP-IDF installation guide](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/index.html)
+- Install the version matching your target chip (ESP32 or ESP32-S3).
 
-  Alternatively:
+### 1. Clone the repo
 
-     > - 2: If you would like to use other hardware, or remove any code, its best for you to create your own program. The steps on how to do this are located in the UserGuide - https://github.com/CadenGithubB/HardwareOne/blob/main/UserGuide.md
-      
-5. Once you pick the program, download it.
-6. Open the Main.ino file you downloaded or made in the Arduino IDE
-7. Upload the code to your QT PY. Please be patient, this is close to the limit of the chip, so it can take a minute or two.
-> Do **NOT** let the computer fall asleep during this time. If you do, you will need to restart the upload process.
-8. Thats it for the software!
-   - If you are using the 'Base Configuration' or 'HardwareOne (Wired)' the device will already be powered on, due to the USB C cable.
-      - Sometimes resetting via the button on the QT PY is necessary if no console output is shown upon device boot / reboot
-   - If you are using 'Hardware One (wireless)', disconnect the USB Device, then switch the Battery Module Power Switch into the 'On' position. (Or 'up' towards the top of the device.)
+```bash
+git clone https://github.com/CadenGithubB/HardwareOne.git
+cd HardwareOne
+```
 
+### 2. Configure your build (optional)
+
+Open `components/hardwareone/System_BuildConfig.h` and enable or disable any features you want — sensors, web modules, ESP-NOW, MQTT, etc. The defaults are set for the standard full build. If you're happy with defaults, skip this step.
+
+### 3. Set your target board and flash
+
+```bash
+# Set the chip target (do this once, or any time you switch chip families)
+idf.py set-target esp32s3    # XIAO ESP32-S3 or QT PY ESP32-S3
+idf.py set-target esp32      # Adafruit QT PY ESP32 or Feather ESP32
+
+# Build
+idf.py build
+
+# Flash and open serial monitor (replace PORT with your device's port)
+idf.py -p PORT flash monitor
+```
+
+> You can also run `idf.py -p PORT flash monitor` directly — it will build automatically if anything has changed. The separate `build` step is useful if you want to confirm the build succeeds before connecting the device.
+
+- **XIAO / QT PY ESP32-S3:** port is usually `/dev/cu.usbmodem*` (native USB). You may need to hold the BOOT button when initiating the flash.
+- **QT PY ESP32 / Feather ESP32:** port is usually `/dev/cu.usbserial*` or `/dev/cu.SLAB*` (UART bridge).
+
+That's it. The build can take a few minutes the first time.
+
+---
+
+## Switching Between Board Families
+
+If you are switching between an **ESP32** board (QT PY, Feather) and an **ESP32-S3** board (XIAO, QT PY S3), a full clean is required — the two chip families have different architectures and the build cache is not compatible.
+
+```bash
+idf.py fullclean
+idf.py set-target esp32s3    # or esp32
+idf.py -p PORT flash monitor
+```
+
+The project includes target-specific defaults (`sdkconfig.defaults.esp32` and `sdkconfig.defaults.esp32s3`) that handle the most important differences automatically, including:
+
+- **PSRAM mode:** ESP32 uses Quad SPI PSRAM at 40 MHz; ESP32-S3 uses Octal SPI PSRAM at 80 MHz. Using the wrong mode will cause a boot failure or crash.
+- **Flash mode:** ESP32 uses `DIO`; ESP32-S3 can use `QIO`.
+- **Bluetooth:** ESP32 supports Classic BT + BLE 4.2; ESP32-S3 is **BLE 5.0 only** — no Classic Bluetooth.
+
+If you need to deviate from the defaults, run `idf.py menuconfig` after `set-target`. See [BOARD_SWITCHING.md](BOARD_SWITCHING.md) for the full per-board menuconfig reference.
+
+---
 
 ## First-Time Use
 
-Once device is flashed and powered on:
-   - You should see the boot sequence and error checking messages as it turns on, and then the main user environment once it boots up.
-   - Type `help` to see all available commands
+Once the device is flashed and powered on, you'll see the boot sequence in the serial monitor. From here, setup can happen two ways — use whichever is more convenient.
 
-### Setting Up WiFi and Web Interface
+### Option A: OLED Setup Wizard (if display is connected)
 
-**NEW**: Hardware One now includes a web-based interface for remote control and monitoring!
+On first boot, the device will launch a setup wizard on the OLED display. Navigate with the gamepad:
 
-1. **Configure WiFi** (via Serial Console):
-   ```
-   setssid YourWiFiName
-   setpass YourWiFiPassword
-   wifi
-   ```
+1. **WiFi** — enter your SSID and password.
+2. **Device name / room / zone** — set the identity used for ESP-NOW mesh.
+3. **Confirm** — settings are saved to flash. The wizard won't run again unless you reset settings.
 
-2. **Start Web Server**:
-   ```
-   webstart
-   ```
-   - The device will display its IP address (e.g., `192.168.1.100`)
-   - Open a web browser and navigate to that IP address
-   - You'll see a live dashboard with all connected sensors!
+### Option B: Serial Console
 
-3. **Web Interface Features**:
-   - Real-time sensor data visualization
-   - Start/stop sensors with buttons
-   - Execute commands remotely
-   - Live thermal camera display (if connected)
-   - Multi-object distance detection
+Open the serial monitor (115200 baud) and type commands directly:
 
-4. **Auto-start Web Server** (optional):
-   ```
-   webauto on
-   ```
-   - Web server will start automatically on boot
+```
+setssid YourWiFiName
+setpass YourWiFiPassword
+wifi
+```
 
-### Serial Console Commands
-   - Type `help` to see all available commands
-   - Use `scan` to detect connected sensors
-   - Try sensor commands like `gyro`, `thermal`, `tof`, etc.
-   - go nuts! 
+To start the web server:
+```
+webstart
+```
 
-> ## View the Readme: [Link](https://github.com/CadenGithubB/HardwareOne/blob/main/README.md)
+The device will print its IP address. Navigate to it in a browser to access the full web UI.
 
+To have the web server start automatically on every boot:
+```
+webauto on
+```
 
-> ## To take a deep dive on the capabilities of the project, check out the Userguide: [Link](https://github.com/CadenGithubB/HardwareOne/blob/main/USERGUIDE.md)
+Type `help` at any time to see all available commands. Use `scan` to detect connected I2C sensors.
+
+### Web UI
+
+Once connected, the web interface gives you:
+- Real-time sensor data
+- ESP-NOW mesh management (pair, bond, sync metadata, file transfer)
+- Remote command execution
+- MQTT configuration
+- Automations editor
+- Settings
+
+---
+
+> ## Back to the overview: [README](../README.md)
+
+> ## Full reference, commands, and configuration: [User Guide](USERGUIDE.md)
 
