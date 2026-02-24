@@ -1,5 +1,7 @@
-# ESP32-specific configuration (QT Py ESP32 Pico, etc.)
-# These override sdkconfig.defaults when target is esp32
+# ESP32-specific build configuration — REQUIRED for correct compilation
+# Loaded automatically by ESP-IDF when target is esp32 (idf.py set-target esp32)
+# Do not delete. Controls PSRAM mode, flash mode, and Bluetooth stack.
+# See docs/BOARD_SWITCHING.md for full reference.
 
 # Arduino variant
 CONFIG_ARDUINO_VARIANT="adafruit_qtpy_esp32"
