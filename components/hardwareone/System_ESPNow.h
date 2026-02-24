@@ -722,7 +722,7 @@ struct EspNowState {
   // Deferred metadata processing (set in callback, handled in task)
   bool deferredMetadataPending;
   uint8_t deferredMetadataSrcMac[6];
-  uint8_t deferredMetadataPayload[180];  // V3PayloadMetadata size
+  uint8_t deferredMetadataPayload[216];  // V3PayloadMetadata size (212) + 4 bytes padding
   
   // Linear handshake state machine (prevents overlapping file transfers)
   BondHandshakeState bondHandshakeState;  // Current handshake step

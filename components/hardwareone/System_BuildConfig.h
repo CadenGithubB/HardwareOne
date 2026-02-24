@@ -14,7 +14,7 @@
 //   2 = STANDALONE - OLED + Gamepad
 //   3 = FULL       - OLED + all sensors
 //   4 = CUSTOM     - Use individual sensor flags below
-#define I2C_FEATURE_LEVEL       0
+#define I2C_FEATURE_LEVEL       4
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CUSTOM SENSOR SELECTION (only used when I2C_FEATURE_LEVEL = 4)
@@ -25,29 +25,59 @@
   #define CUSTOM_ENABLE_OLED        1   // SSD1306 OLED display
   #define CUSTOM_ENABLE_GAMEPAD     1   // Adafruit Seesaw gamepad
   #define CUSTOM_ENABLE_GPS         1   // PA1010D GPS module
-  #define CUSTOM_ENABLE_IMU         0   // BNO055 IMU (uses ~1KB RAM)
-  #define CUSTOM_ENABLE_TOF         0   // VL53L4CX ToF sensor
+  #define CUSTOM_ENABLE_IMU         1   // BNO055 IMU (uses ~1KB RAM)
+  #define CUSTOM_ENABLE_TOF         1   // VL53L4CX ToF sensor
   #define CUSTOM_ENABLE_THERMAL     0   // MLX90640 thermal camera (uses ~3KB RAM)
   #define CUSTOM_ENABLE_APDS        0   // APDS9960 gesture/proximity
   #define CUSTOM_ENABLE_FM_RADIO    0   // RDA5807 FM radio
   #define CUSTOM_ENABLE_RTC         1   // DS3231 precision RTC
   #define CUSTOM_ENABLE_PRESENCE    1   // STHS34PF80 IR presence/motion
+  #define CUSTOM_ENABLE_SERVO      0   // PCA9685 servo controller
 #endif
 
-// Network Feature Level: Controls WiFi/HTTP/ESP-NOW
+// Network Feature Level: Controls WiFi/ESP-NOW
 //   0 = DISABLED   - No networking
 //   1 = WIFI_ONLY  - WiFi without HTTP server
 //   2 = WIFI_HTTP  - WiFi + HTTP server
 //   3 = WIFI_ESPNOW - WiFi + HTTP + ESP-NOW mesh
-#define NETWORK_FEATURE_LEVEL   3
+//   4 = CUSTOM     - Use individual CUSTOM_ENABLE_NET_* flags below
+#define NETWORK_FEATURE_LEVEL   4
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CUSTOM NETWORK SELECTION (only used when NETWORK_FEATURE_LEVEL = 4)
+// ─────────────────────────────────────────────────────────────────────────────
+#if NETWORK_FEATURE_LEVEL == 4
+  #define CUSTOM_ENABLE_NET_WIFI     1   // WiFi connectivity
+  #define CUSTOM_ENABLE_NET_HTTP     1   // HTTP server (web UI)
+  #define CUSTOM_ENABLE_NET_ESPNOW   1   // ESP-NOW mesh networking
+#endif
+
+// Web Feature Level: Controls HTTP server + which web modules are compiled
+//   0 = DISABLED   - No HTTP server, no web UI
+//   1 = CORE       - Core UI only (no extra modules)
+//   2 = STANDARD   - Core UI + common modules
+//   3 = FULL       - Core UI + all modules
+//   4 = CUSTOM     - Use individual CUSTOM_ENABLE_WEB_* flags below
+#define WEB_FEATURE_LEVEL       4
+
+#if WEB_FEATURE_LEVEL == 4
+  #define CUSTOM_ENABLE_WEB_SENSORS    1
+  #define CUSTOM_ENABLE_WEB_BLUETOOTH  1
+  #define CUSTOM_ENABLE_WEB_SPEECH     0
+  #define CUSTOM_ENABLE_WEB_ESPNOW     1
+  #define CUSTOM_ENABLE_WEB_PAIR       1
+  #define CUSTOM_ENABLE_WEB_MQTT       1
+  #define CUSTOM_ENABLE_WEB_GAMES      0
+  #define CUSTOM_ENABLE_WEB_MAPS       1
+#endif
 
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640)
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_CAMERA_SENSOR    1
+#define ENABLE_CAMERA_SENSOR    0
 
 // Microphone: PDM microphone via I2S
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_MICROPHONE_SENSOR 1
+#define ENABLE_MICROPHONE_SENSOR 0
 
 // Battery Monitoring: ADC-based LiPo battery voltage monitoring
 //   0 = Disabled (shows "USB" on OLED), 1 = Enabled (Feather ESP32 GPIO35)
@@ -56,13 +86,13 @@
 
 // Bluetooth: BLE server with GATT services
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_BLUETOOTH        1
+#define ENABLE_BLUETOOTH        0
 
 // Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses
 //   0 = Disabled, 1 = Enabled (requires ENABLE_BLUETOOTH=1)
 //   When enabled, ESP32 can act as BLE central to connect to glasses
 //   This is mutually exclusive with phone BLE connections at runtime
-#define ENABLE_G2_GLASSES       1
+#define ENABLE_G2_GLASSES       0
 
 // MQTT: Home Assistant integration via MQTT broker
 //   0 = Disabled, 1 = Enabled (requires ENABLE_WIFI=1)
@@ -72,7 +102,7 @@
 //   0 = Disabled, 1 = Enabled
 #define ENABLE_EDGE_IMPULSE     0
 
-#define ENABLE_ESP_SR           1
+#define ENABLE_ESP_SR           0
 
 // Games: Browser-based games web page
 //   0 = Disabled, 1 = Enabled
@@ -80,11 +110,16 @@
 
 // Maps: Offline maps and waypoints web page
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_MAPS             1
+#define ENABLE_MAPS             0
+
+// Bond Mode: Two-device bonded pair via ESP-NOW (master/worker)
+//   0 = Disabled, 1 = Enabled (requires ENABLE_ESPNOW=1)
+//   Master shows remote UI for worker features, manifest cached in LittleFS
+#define ENABLE_PAIRED_MODE      0
 
 // Automation: Scheduled tasks and conditional command system
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_AUTOMATION       0
+#define ENABLE_AUTOMATION       1
 
 // Display Type: Hardware display selection
 //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
@@ -109,6 +144,13 @@
 #define NET_LEVEL_WIFI_ONLY  1
 #define NET_LEVEL_WIFI_HTTP  2
 #define NET_LEVEL_WIFI_ESPNOW 3
+#define NET_LEVEL_CUSTOM     4
+
+#define WEB_LEVEL_DISABLED   0
+#define WEB_LEVEL_CORE       1
+#define WEB_LEVEL_STANDARD   2
+#define WEB_LEVEL_FULL       3
+#define WEB_LEVEL_CUSTOM     4
 
 #define DISPLAY_TYPE_NONE      0
 #define DISPLAY_TYPE_SSD1306   1
@@ -132,6 +174,7 @@
   #define ENABLE_FM_RADIO         0
   #define ENABLE_RTC_SENSOR       0
   #define ENABLE_PRESENCE_SENSOR  0
+  #define ENABLE_SERVO            0
 
 #elif I2C_FEATURE_LEVEL == I2C_LEVEL_OLED_ONLY
   // Level 1: OLED only, no sensors
@@ -146,6 +189,7 @@
   #define ENABLE_FM_RADIO         0
   #define ENABLE_RTC_SENSOR       0
   #define ENABLE_PRESENCE_SENSOR  0
+  #define ENABLE_SERVO            0
 
 #elif I2C_FEATURE_LEVEL == I2C_LEVEL_STANDALONE
   // Level 2: OLED + Gamepad for standalone device control
@@ -160,6 +204,7 @@
   #define ENABLE_FM_RADIO         0
   #define ENABLE_RTC_SENSOR       0
   #define ENABLE_PRESENCE_SENSOR  0
+  #define ENABLE_SERVO            0
 
 #elif I2C_FEATURE_LEVEL == I2C_LEVEL_FULL
   // Level 3: Everything enabled
@@ -174,6 +219,7 @@
   #define ENABLE_FM_RADIO         1
   #define ENABLE_RTC_SENSOR       1
   #define ENABLE_PRESENCE_SENSOR  1
+  #define ENABLE_SERVO            1
 
 #else  // I2C_LEVEL_CUSTOM
   // Level 4: Custom sensor selection from user config section
@@ -188,7 +234,14 @@
   #define ENABLE_FM_RADIO         CUSTOM_ENABLE_FM_RADIO
   #define ENABLE_RTC_SENSOR       CUSTOM_ENABLE_RTC
   #define ENABLE_PRESENCE_SENSOR  CUSTOM_ENABLE_PRESENCE
+  #define ENABLE_SERVO            CUSTOM_ENABLE_SERVO
 
+#endif
+
+// Override ENABLE_OLED_DISPLAY if DISPLAY_TYPE is NONE
+#if DISPLAY_TYPE == DISPLAY_TYPE_NONE
+  #undef ENABLE_OLED_DISPLAY
+  #define ENABLE_OLED_DISPLAY 0
 #endif
 
 // =============================================================================
@@ -197,26 +250,159 @@
 
 #if NETWORK_FEATURE_LEVEL == NET_LEVEL_DISABLED
   #define ENABLE_WIFI         0
-  #define ENABLE_HTTP_SERVER  0
   #define ENABLE_ESPNOW       0
 #elif NETWORK_FEATURE_LEVEL == NET_LEVEL_WIFI_ONLY
   #define ENABLE_WIFI         1
-  #define ENABLE_HTTP_SERVER  0
   #define ENABLE_ESPNOW       0
 #elif NETWORK_FEATURE_LEVEL == NET_LEVEL_WIFI_HTTP
   #define ENABLE_WIFI         1
-  #define ENABLE_HTTP_SERVER  1
   #define ENABLE_ESPNOW       0
-#else // NET_LEVEL_WIFI_ESPNOW
+#elif NETWORK_FEATURE_LEVEL == NET_LEVEL_WIFI_ESPNOW
   #define ENABLE_WIFI         1
-  #define ENABLE_HTTP_SERVER  1
   #define ENABLE_ESPNOW       1
+#else // NET_LEVEL_CUSTOM
+  #define ENABLE_WIFI         CUSTOM_ENABLE_NET_WIFI
+  #define ENABLE_ESPNOW       CUSTOM_ENABLE_NET_ESPNOW
+#endif
+
+// =============================================================================
+// DERIVED WEB FLAGS (based on WEB_FEATURE_LEVEL)
+// =============================================================================
+
+#undef ENABLE_HTTP_SERVER
+#if !ENABLE_WIFI
+  #define ENABLE_HTTP_SERVER 0
+#elif NETWORK_FEATURE_LEVEL == NET_LEVEL_CUSTOM
+  // Custom level: use explicit flag (but still gated by WEB_FEATURE_LEVEL)
+  #if !CUSTOM_ENABLE_NET_HTTP || WEB_FEATURE_LEVEL == WEB_LEVEL_DISABLED
+    #define ENABLE_HTTP_SERVER 0
+  #else
+    #define ENABLE_HTTP_SERVER 1
+  #endif
+#elif NETWORK_FEATURE_LEVEL < NET_LEVEL_WIFI_HTTP
+  #define ENABLE_HTTP_SERVER 0
+#elif WEB_FEATURE_LEVEL == WEB_LEVEL_DISABLED
+  #define ENABLE_HTTP_SERVER 0
+#else
+  #define ENABLE_HTTP_SERVER 1
+#endif
+
+#if !ENABLE_HTTP_SERVER
+  #ifndef HW_HTTPD_TYPES_DEFINED
+    #define HW_HTTPD_TYPES_DEFINED 1
+    typedef struct httpd_req httpd_req_t;
+    typedef void* httpd_handle_t;
+  #endif
+#endif
+
+#if WEB_FEATURE_LEVEL == WEB_LEVEL_DISABLED
+  #define ENABLE_WEB_SENSORS    0
+  #define ENABLE_WEB_BLUETOOTH  0
+  #define ENABLE_WEB_SPEECH     0
+  #define ENABLE_WEB_ESPNOW     0
+  #define ENABLE_WEB_PAIR       0
+  #define ENABLE_WEB_MQTT       0
+  #define ENABLE_WEB_GAMES      0
+  #define ENABLE_WEB_MAPS       0
+#elif WEB_FEATURE_LEVEL == WEB_LEVEL_CORE
+  #define ENABLE_WEB_SENSORS    0
+  #define ENABLE_WEB_BLUETOOTH  0
+  #define ENABLE_WEB_SPEECH     0
+  #define ENABLE_WEB_ESPNOW     0
+  #define ENABLE_WEB_PAIR       0
+  #define ENABLE_WEB_MQTT       0
+  #define ENABLE_WEB_GAMES      0
+  #define ENABLE_WEB_MAPS       0
+#elif WEB_FEATURE_LEVEL == WEB_LEVEL_STANDARD
+  #define ENABLE_WEB_SENSORS    1
+  #define ENABLE_WEB_BLUETOOTH  0
+  #define ENABLE_WEB_SPEECH     0
+  #define ENABLE_WEB_ESPNOW     1
+  #define ENABLE_WEB_PAIR       1
+  #define ENABLE_WEB_MQTT       1
+  #define ENABLE_WEB_GAMES      0
+  #define ENABLE_WEB_MAPS       0
+#elif WEB_FEATURE_LEVEL == WEB_LEVEL_FULL
+  #define ENABLE_WEB_SENSORS    1
+  #define ENABLE_WEB_BLUETOOTH  1
+  #define ENABLE_WEB_SPEECH     1
+  #define ENABLE_WEB_ESPNOW     1
+  #define ENABLE_WEB_PAIR       1
+  #define ENABLE_WEB_MQTT       1
+  #define ENABLE_WEB_GAMES      1
+  #define ENABLE_WEB_MAPS       1
+#else // WEB_LEVEL_CUSTOM
+  #define ENABLE_WEB_SENSORS    CUSTOM_ENABLE_WEB_SENSORS
+  #define ENABLE_WEB_BLUETOOTH  CUSTOM_ENABLE_WEB_BLUETOOTH
+  #define ENABLE_WEB_SPEECH     CUSTOM_ENABLE_WEB_SPEECH
+  #define ENABLE_WEB_ESPNOW     CUSTOM_ENABLE_WEB_ESPNOW
+  #define ENABLE_WEB_PAIR       CUSTOM_ENABLE_WEB_PAIR
+  #define ENABLE_WEB_MQTT       CUSTOM_ENABLE_WEB_MQTT
+  #define ENABLE_WEB_GAMES      CUSTOM_ENABLE_WEB_GAMES
+  #define ENABLE_WEB_MAPS       CUSTOM_ENABLE_WEB_MAPS
+#endif
+
+#if !ENABLE_HTTP_SERVER
+  #undef ENABLE_WEB_SENSORS
+  #undef ENABLE_WEB_BLUETOOTH
+  #undef ENABLE_WEB_SPEECH
+  #undef ENABLE_WEB_ESPNOW
+  #undef ENABLE_WEB_PAIR
+  #undef ENABLE_WEB_MQTT
+  #undef ENABLE_WEB_GAMES
+  #undef ENABLE_WEB_MAPS
+  #define ENABLE_WEB_SENSORS    0
+  #define ENABLE_WEB_BLUETOOTH  0
+  #define ENABLE_WEB_SPEECH     0
+  #define ENABLE_WEB_ESPNOW     0
+  #define ENABLE_WEB_PAIR       0
+  #define ENABLE_WEB_MQTT       0
+  #define ENABLE_WEB_GAMES      0
+  #define ENABLE_WEB_MAPS       0
+#endif
+
+#if !ENABLE_BLUETOOTH
+  #undef ENABLE_WEB_BLUETOOTH
+  #define ENABLE_WEB_BLUETOOTH 0
+#endif
+
+#if !ENABLE_ESP_SR
+  #undef ENABLE_WEB_SPEECH
+  #define ENABLE_WEB_SPEECH 0
+#endif
+
+#if !ENABLE_ESPNOW
+  #undef ENABLE_WEB_ESPNOW
+  #undef ENABLE_WEB_PAIR
+  #define ENABLE_WEB_ESPNOW 0
+  #define ENABLE_WEB_PAIR 0
+#endif
+
+#if !ENABLE_MQTT
+  #undef ENABLE_WEB_MQTT
+  #define ENABLE_WEB_MQTT 0
+#endif
+
+#if !ENABLE_GAMES
+  #undef ENABLE_WEB_GAMES
+  #define ENABLE_WEB_GAMES 0
+#endif
+
+#if !ENABLE_MAPS
+  #undef ENABLE_WEB_MAPS
+  #define ENABLE_WEB_MAPS 0
 #endif
 
 // Force ENABLE_MQTT off if WiFi is disabled (MQTT requires WiFi)
 #if !ENABLE_WIFI
   #undef ENABLE_MQTT
   #define ENABLE_MQTT 0
+#endif
+
+// Force ENABLE_PAIRED_MODE off if ESP-NOW is disabled (Bond Mode requires ESP-NOW)
+#if !ENABLE_ESPNOW
+  #undef ENABLE_PAIRED_MODE
+  #define ENABLE_PAIRED_MODE 0
 #endif
 
 // =============================================================================

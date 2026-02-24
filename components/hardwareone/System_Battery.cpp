@@ -5,6 +5,7 @@
 #include "System_BuildConfig.h"
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_Notifications.h"
 
 // Global battery state
 BatteryState gBatteryState = {
@@ -125,6 +126,9 @@ void updateBattery() {
   lastVoltage = gBatteryState.voltage;
   
   // Determine status
+  BatteryStatus prevStatus = gBatteryState.status;
+  bool wasCharging = (prevStatus == BATTERY_CHARGING || prevStatus == BATTERY_FULL);
+  
   if (gBatteryState.voltage < 2.0f) {
     gBatteryState.status = BATTERY_NOT_PRESENT;
   } else if (gBatteryState.isCharging && gBatteryState.voltage >= VBAT_FULL - 0.05f) {
@@ -137,6 +141,22 @@ void updateBattery() {
     gBatteryState.status = BATTERY_LOW;
   } else {
     gBatteryState.status = BATTERY_DISCHARGING;
+  }
+  
+  // Fire notifications on state transitions only
+  if (prevStatus != BATTERY_UNKNOWN) {
+    bool nowCharging = (gBatteryState.status == BATTERY_CHARGING || gBatteryState.status == BATTERY_FULL);
+    if (nowCharging && !wasCharging) {
+      notifyPowerUSBConnected();
+    } else if (!nowCharging && wasCharging) {
+      notifyPowerUSBDisconnected();
+    }
+    if (gBatteryState.status == BATTERY_LOW && prevStatus != BATTERY_LOW) {
+      notifyBatteryLow((int)gBatteryState.percentage);
+    }
+    if (gBatteryState.status == BATTERY_CRITICAL && prevStatus != BATTERY_CRITICAL) {
+      notifyBatteryCritical((int)gBatteryState.percentage);
+    }
   }
   
   gBatteryState.lastReadMs = millis();
@@ -183,8 +203,6 @@ char getBatteryIcon() {
 
 const char* cmd_battery_status(const String& args) {
   updateBattery();
-  
-  extern void broadcastOutput(const char* s);
   
   broadcastOutput("");
   broadcastOutput("╔════════════════════════════════════════╗");

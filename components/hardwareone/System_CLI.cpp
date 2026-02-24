@@ -9,12 +9,9 @@
 
 // External dependencies from main .ino
 extern bool gCLIValidateOnly;
-extern bool ensureDebugBuffer();
-extern void broadcastOutput(const String& s);
-// isSensorConnected declared in cli_system.h
 
 // Forward declarations
-static void renderModuleHelp(const char* moduleName, const CommandEntry* commands, size_t count, bool showAll);
+static void renderModuleHelp(const CommandModule* module, bool showAll);
 
 // WebMirrorBuf, gWebMirror, gWebMirrorCap defined in WebServer_Utils.h
 
@@ -143,7 +140,7 @@ const char* renderHelpSettings() {
   // Find and render the settings module
   for (size_t i = 0; i < moduleCount; i++) {
     if (strcmp(modules[i].name, "settings") == 0) {
-      renderModuleHelp(modules[i].name, modules[i].commands, modules[i].count, true);
+      renderModuleHelp(&modules[i], true);
       break;
     }
   }
@@ -174,7 +171,7 @@ const char* renderHelpAutomations() {
   // Find and render the automation module
   for (size_t i = 0; i < moduleCount; i++) {
     if (strcmp(modules[i].name, "automation") == 0) {
-      renderModuleHelp(modules[i].name, modules[i].commands, modules[i].count, true);
+      renderModuleHelp(&modules[i], true);
       break;
     }
   }
@@ -204,7 +201,7 @@ const char* renderHelpEspnow() {
   // Find and render the espnow module
   for (size_t i = 0; i < moduleCount; i++) {
     if (strcmp(modules[i].name, "espnow") == 0) {
-      renderModuleHelp(modules[i].name, modules[i].commands, modules[i].count, true);
+      renderModuleHelp(&modules[i], true);
       break;
     }
   }
@@ -212,7 +209,6 @@ const char* renderHelpEspnow() {
   broadcastOutput("────────────────────────────────────────────────────────────────");
   broadcastOutput("Navigation:");
   broadcastOutput("  • Type 'help espnow' to refresh this list");
-  broadcastOutput("  • Type 'help wifi' for WiFi network commands");
   broadcastOutput("  • Type 'back' to return to help menu");
   broadcastOutput("  • Type 'exit' to return to CLI");
   broadcastOutput("────────────────────────────────────────────────────────────────");
@@ -234,7 +230,7 @@ const char* renderHelpWifi() {
   // Find and render the wifi module
   for (size_t i = 0; i < moduleCount; i++) {
     if (strcmp(modules[i].name, "wifi") == 0) {
-      renderModuleHelp(modules[i].name, modules[i].commands, modules[i].count, true);
+      renderModuleHelp(&modules[i], true);
       break;
     }
   }
@@ -242,7 +238,6 @@ const char* renderHelpWifi() {
   broadcastOutput("────────────────────────────────────────────────────────────────");
   broadcastOutput("Navigation:");
   broadcastOutput("  • Type 'help wifi' to refresh this list");
-  broadcastOutput("  • Type 'help espnow' for ESP-NOW wireless commands");
   broadcastOutput("  • Type 'back' to return to help menu");
   broadcastOutput("  • Type 'exit' to return to CLI");
   broadcastOutput("────────────────────────────────────────────────────────────────");
@@ -261,17 +256,10 @@ const char* renderHelpSensors() {
   size_t moduleCount;
   const CommandModule* modules = getCommandModules(moduleCount);
   
-  // Render sensor modules in a logical order
-  const char* sensorModules[] = {"thermal", "tof", "imu", "gamepad", "apds", "gps", "fmradio", "camera"};
-  const int numSensorModules = sizeof(sensorModules) / sizeof(sensorModules[0]);
-  
-  for (int i = 0; i < numSensorModules; i++) {
-    // Find the module in the registry
-    for (size_t j = 0; j < moduleCount; j++) {
-      if (strcmp(modules[j].name, sensorModules[i]) == 0) {
-        renderModuleHelp(modules[j].name, modules[j].commands, modules[j].count, gShowAllCommands);
-        break;
-      }
+  // Render all sensor modules dynamically using CMD_MODULE_SENSOR flag
+  for (size_t i = 0; i < moduleCount; i++) {
+    if (modules[i].flags & CMD_MODULE_SENSOR) {
+      renderModuleHelp(&modules[i], gShowAllCommands);
     }
   }
 
@@ -308,6 +296,7 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
     out[outSize - 1] = '\0';
     gInHelpRender = false;
     return true;
+#if ENABLE_WIFI
   } else if (lc == "wifi") {
     gCLIState = CLI_HELP_WIFI;
     broadcastOutput(renderHelpWifi());
@@ -315,6 +304,8 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
     out[outSize - 1] = '\0';
     gInHelpRender = false;
     return true;
+#endif
+#if ENABLE_AUTOMATION
   } else if (lc == "automations") {
     gCLIState = CLI_HELP_AUTOMATIONS;
     broadcastOutput(renderHelpAutomations());
@@ -322,6 +313,8 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
     out[outSize - 1] = '\0';
     gInHelpRender = false;
     return true;
+#endif
+#if ENABLE_ESPNOW
   } else if (lc == "espnow") {
     gCLIState = CLI_HELP_ESPNOW;
     broadcastOutput(renderHelpEspnow());
@@ -329,6 +322,7 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
     out[outSize - 1] = '\0';
     gInHelpRender = false;
     return true;
+#endif
   } else if (lc == "sensors") {
     gCLIState = CLI_HELP_SENSORS;
     broadcastOutput(renderHelpSensors());
@@ -362,7 +356,7 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
       // Check if command matches module name
       if (lc == moduleName) {
         // Show module help using the existing help system
-        renderModuleHelp(modules[i].name, modules[i].commands, modules[i].count, false);
+        renderModuleHelp(&modules[i], false);
         strncpy(out, "OK", outSize - 1);
         out[outSize - 1] = '\0';
         gInHelpRender = false;
@@ -469,20 +463,15 @@ static void broadcastHelpUsageIndented(const char* usage) {
 }
 
 // Helper function to render help for a specific module
-static void renderModuleHelp(const char* moduleName, const CommandEntry* commands, size_t count, bool showAll) {
-  // Check if this is a sensor module that might not be connected
-  bool isSensorModule = (strcmp(moduleName, "thermal") == 0 || 
-                         strcmp(moduleName, "tof") == 0 || 
-                         strcmp(moduleName, "imu") == 0 || 
-                         strcmp(moduleName, "gamepad") == 0 || 
-                         strcmp(moduleName, "apds") == 0 || 
-                         strcmp(moduleName, "gps") == 0 ||
-                         strcmp(moduleName, "fmradio") == 0 ||
-                         strcmp(moduleName, "camera") == 0);
+static void renderModuleHelp(const CommandModule* module, bool showAll) {
+  const char* moduleName = module->name;
+  const CommandEntry* commands = module->commands;
+  size_t count = module->count;
+  bool isSensorModule = (module->flags & CMD_MODULE_SENSOR) != 0;
   
   bool isConnected = true;
-  if (isSensorModule) {
-    isConnected = isSensorConnected(moduleName);  // Now takes const char* directly
+  if (isSensorModule && module->isConnected) {
+    isConnected = module->isConnected();
   }
   
   // Show module if connected or if showing all commands
@@ -564,7 +553,7 @@ static const char* cmd_help(const String& cmd) {
       broadcastOutput("════════════════════════════════════════════════════════════════");
       broadcastOutput("");
       
-      renderModuleHelp(modules[i].name, modules[i].commands, modules[i].count, true);
+      renderModuleHelp(&modules[i], true);
       
       broadcastOutput("────────────────────────────────────────────────────────────────");
       broadcastOutput("Navigation:");

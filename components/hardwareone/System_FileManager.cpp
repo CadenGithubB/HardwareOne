@@ -270,7 +270,7 @@ bool FileManager::renameItem(const char* newName) {
   String oldPath = formatPath(state.currentPath, entry.name);
   String newPath = formatPath(state.currentPath, newName);
   
-  if (!canDelete(oldPath)) return false;  // Need delete permission to rename
+  if (!canRename(oldPath)) return false;  // Need rename permission
 
   FsLockGuard guard("FileManager.renameItem");
   

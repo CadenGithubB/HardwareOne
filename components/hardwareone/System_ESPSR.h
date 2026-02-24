@@ -3,7 +3,9 @@
 
 #include "System_BuildConfig.h"
 
+#if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
+#endif
 
 #if ENABLE_ESP_SR
 
