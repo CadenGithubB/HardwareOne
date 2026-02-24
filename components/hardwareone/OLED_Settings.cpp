@@ -17,7 +17,7 @@ static const SettingEntry oledSettingEntries[] = {
   { "oledBootMode",         SETTING_STRING, &gSettings.oledBootMode,            0, 0, "logo", 0, 0, "Boot Mode", "logo,status,thermal,off" },
   { "oledDefaultMode",      SETTING_STRING, &gSettings.oledDefaultMode,         0, 0, "status", 0, 0, "Default Mode", "status,thermal,off" },
   { "oledBootDuration",     SETTING_INT,    &gSettings.oledBootDuration,        3000, 0, nullptr, 500, 10000, "Boot Duration (ms)", nullptr },
-  { "oledUpdateInterval",   SETTING_INT,    &gSettings.oledUpdateInterval,      200, 0, nullptr, 10, 1000, "Update Interval (ms)", nullptr },
+  { "oledUpdateInterval",   SETTING_INT,    &gSettings.oledUpdateInterval,      100, 0, nullptr, 10, 1000, "Update Interval (ms)", nullptr },
   { "oledBrightness",       SETTING_INT,    &gSettings.oledBrightness,          128, 0, nullptr, 0, 255, "Brightness", nullptr },
   { "oledThermalScale",     SETTING_FLOAT,  &gSettings.oledThermalScale,        0, 2.5f, nullptr, 1, 10, "Thermal Scale", nullptr },
   { "oledThermalColorMode", SETTING_STRING, &gSettings.oledThermalColorMode,    0, 0, "3level", 0, 0, "Thermal Color Mode", "3level,grayscale,binary" }

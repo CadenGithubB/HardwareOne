@@ -46,9 +46,6 @@ static bool isSettingVisible(const SettingEntry* entry) {
   return true;
 }
 
-extern Adafruit_SSD1306* oledDisplay;
-extern bool writeSettingsJson();
-
 // Global settings editor context
 SettingsEditorContext gSettingsEditor;
 
@@ -149,13 +146,13 @@ int getSettingCurrentValue(const SettingEntry* entry) {
 // Set value to setting entry
 void setSettingValue(const SettingEntry* entry, int value) {
   if (!entry || !entry->valuePtr) return;
-  
+
   switch (entry->type) {
     case SETTING_INT:
-      *((int*)entry->valuePtr) = value;
+      setSetting(*((int*)entry->valuePtr), value);
       break;
     case SETTING_BOOL:
-      *((bool*)entry->valuePtr) = (value != 0);
+      setSetting(*((bool*)entry->valuePtr), (bool)(value != 0));
       break;
     default:
       break;
@@ -201,9 +198,9 @@ void displaySettingsEditor() {
   if (millis() < gSettingsEditor.errorDisplayUntil) {
     DEBUG_SYSTEMF("[SettingsEditor] Showing error: %s", gSettingsEditor.errorMessage.c_str());
     oledDisplay->setTextSize(1);
-    oledDisplay->setCursor(0, 0);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("ERROR:");
-    oledDisplay->setCursor(0, 10);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y + 10);
     oledDisplay->println(gSettingsEditor.errorMessage);
     // Note: Don't call display() here - main render loop handles it via displayUpdate()
     return;
@@ -212,32 +209,51 @@ void displaySettingsEditor() {
   switch (gSettingsEditor.state) {
     case SETTINGS_CATEGORY_SELECT: {
       
-      // Show category list
+      // Show category list (header shows "Config", no need for title here)
       oledDisplay->setTextSize(1);
-      oledDisplay->setCursor(0, 0);
-      oledDisplay->println("Settings Categories:");
       
       if (moduleCount == 0) {
-        oledDisplay->setCursor(0, 12);
+        oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
         oledDisplay->println("No modules found!");
       } else {
-        // Show up to 4 categories
-        int startIdx = max(0, gSettingsEditor.categoryIndex - 3);
-        int endIdx = min((int)moduleCount, startIdx + 4);
+        // Calculate scrolling window (43px content / 10px per item = 4 visible items)
+        const int lineHeight = 10;
+        const int maxVisibleItems = OLED_CONTENT_HEIGHT / lineHeight;  // 43px / 10px = 4 items
         
+        // Calculate scroll offset to keep selection visible
+        static int scrollOffset = 0;
+        if (gSettingsEditor.categoryIndex < scrollOffset) {
+          scrollOffset = gSettingsEditor.categoryIndex;
+        } else if (gSettingsEditor.categoryIndex >= scrollOffset + maxVisibleItems) {
+          scrollOffset = gSettingsEditor.categoryIndex - maxVisibleItems + 1;
+        }
         
-        int y = 12;
-        for (int i = startIdx; i < endIdx; i++) {
-          if (i == gSettingsEditor.categoryIndex) {
-            oledDisplay->fillRect(0, y - 1, 128, 10, DISPLAY_COLOR_WHITE);
+        // Draw visible categories
+        int y = OLED_CONTENT_START_Y;
+        for (int i = 0; i < maxVisibleItems && (scrollOffset + i) < (int)moduleCount; i++) {
+          int itemIdx = scrollOffset + i;
+          if (itemIdx == gSettingsEditor.categoryIndex) {
+            oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
             oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
           } else {
             oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
           }
           
-          oledDisplay->setCursor(2, y);
-          oledDisplay->println(modules[i]->name);
-          y += 10;
+          oledDisplay->setCursor(2, y + 1);
+          oledDisplay->println(modules[itemIdx]->name);
+          y += lineHeight;
+        }
+        
+        // Draw scroll indicators
+        if (scrollOffset > 0) {
+          oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+          oledDisplay->setCursor(120, OLED_CONTENT_START_Y);
+          oledDisplay->print("\x18");  // Up arrow
+        }
+        if (scrollOffset + maxVisibleItems < (int)moduleCount) {
+          oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+          oledDisplay->setCursor(120, OLED_CONTENT_START_Y + (maxVisibleItems - 1) * lineHeight);
+          oledDisplay->print("\x19");  // Down arrow
         }
       }
       
@@ -246,12 +262,10 @@ void displaySettingsEditor() {
     
     case SETTINGS_ITEM_SELECT: {
       // Show settings list for current category
+      // Header breadcrumb already shows "Set>moduleName"
       if (!gSettingsEditor.currentModule) break;
       
       oledDisplay->setTextSize(1);
-      oledDisplay->setCursor(0, 0);
-      oledDisplay->print(gSettingsEditor.currentModule->name);
-      oledDisplay->println(" Settings:");
       
       // Filter to only INT and BOOL settings that are visible
       int visibleCount = 0;
@@ -268,18 +282,21 @@ void displaySettingsEditor() {
         }
       }
       
+      // Calculate scrolling window - content starts below header
+      const int itemStartY = OLED_CONTENT_START_Y;
+      const int lineHeight = 10;
+      const int maxVisibleItems = OLED_CONTENT_HEIGHT / lineHeight;  // 4 items
+      
       // Calculate scroll offset to keep selected item visible
-      // Content area: y=12 to y=53 (42px available)
-      // Each line: 10px, so max 4 lines, but we show 3 to prevent wrapping into footer
-      const int maxVisibleItems = 3;
-      int scrollOffset = 0;
-      if (visibleIndex >= maxVisibleItems) {
-        scrollOffset = visibleIndex - maxVisibleItems + 1;
+      static int itemScrollOffset = 0;
+      if (visibleIndex < itemScrollOffset) {
+        itemScrollOffset = visibleIndex;
+      } else if (visibleIndex >= itemScrollOffset + maxVisibleItems) {
+        itemScrollOffset = visibleIndex - maxVisibleItems + 1;
       }
       
-      // Show up to 3 settings with scrolling
+      // Draw visible settings items
       int displayedCount = 0;
-      int y = 12;
       int currentVisibleIdx = 0;
       
       for (size_t i = 0; i < gSettingsEditor.currentModule->count && displayedCount < maxVisibleItems; i++) {
@@ -290,10 +307,12 @@ void displaySettingsEditor() {
         if (!isSettingVisible(entry)) continue;
         
         // Skip items before scroll offset
-        if (currentVisibleIdx < scrollOffset) {
+        if (currentVisibleIdx < itemScrollOffset) {
           currentVisibleIdx++;
           continue;
         }
+        
+        int y = itemStartY + displayedCount * lineHeight;
         
         if ((int)i == gSettingsEditor.itemIndex) {
           oledDisplay->fillRect(0, y - 1, 128, 10, DISPLAY_COLOR_WHITE);
@@ -317,21 +336,20 @@ void displaySettingsEditor() {
         oledDisplay->print(":");
         oledDisplay->print(currentVal);
         
-        y += 10;
         displayedCount++;
         currentVisibleIdx++;
       }
       
-      // Show scroll indicators if needed
-      if (scrollOffset > 0) {
+      // Draw scroll indicators
+      if (itemScrollOffset > 0) {
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-        oledDisplay->setCursor(120, 12);
-        oledDisplay->print("^");
+        oledDisplay->setCursor(120, itemStartY);
+        oledDisplay->print("\x18");  // Up arrow
       }
-      if (scrollOffset + maxVisibleItems < visibleCount) {
+      if (itemScrollOffset + maxVisibleItems < visibleCount) {
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-        oledDisplay->setCursor(120, 32);
-        oledDisplay->print("v");
+        oledDisplay->setCursor(120, itemStartY + (maxVisibleItems - 1) * lineHeight);
+        oledDisplay->print("\x19");  // Down arrow
       }
       
       break;
@@ -339,10 +357,11 @@ void displaySettingsEditor() {
     
     case SETTINGS_VALUE_EDIT: {
       // Show value editor with slider
+      // Header breadcrumb already shows "Set>moduleName"
       if (!gSettingsEditor.currentEntry) break;
       
       oledDisplay->setTextSize(1);
-      oledDisplay->setCursor(0, 0);
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
       String label = gSettingsEditor.currentEntry->label ? gSettingsEditor.currentEntry->label : gSettingsEditor.currentEntry->jsonKey;
       oledDisplay->println(label);
       
@@ -351,11 +370,11 @@ void displaySettingsEditor() {
       int minVal = gSettingsEditor.currentEntry->minVal;
       int maxVal = gSettingsEditor.currentEntry->maxVal;
       
-      drawSettingsSlider(oledDisplay, 25, minVal, maxVal, gSettingsEditor.editValue, isBool);
+      drawSettingsSlider(oledDisplay, OLED_CONTENT_START_Y + 14, minVal, maxVal, gSettingsEditor.editValue, isBool);
       
       // Show change indicator
       if (gSettingsEditor.hasChanges) {
-        oledDisplay->setCursor(0, 40);
+        oledDisplay->setCursor(0, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 10);
         oledDisplay->print("* Modified");
       }
       
@@ -619,17 +638,10 @@ void settingsEditorSelect() {
         break;
       }
       
-      // Apply value
+      // Apply and persist — setSetting() handles the flash write automatically
       setSettingValue(gSettingsEditor.currentEntry, gSettingsEditor.editValue);
-      
-      // Persist to JSON
-      if (!writeSettingsJson()) {
-        gSettingsEditor.errorMessage = "Failed to save";
-        gSettingsEditor.errorDisplayUntil = millis() + 2000;
-        break;
-      }
-      
-      DEBUG_SYSTEMF("[SettingsEditor] Saved %s = %d", 
+
+      DEBUG_SYSTEMF("[SettingsEditor] Saved %s = %d",
                     gSettingsEditor.currentEntry->jsonKey, gSettingsEditor.editValue);
       
       // Return to item select
@@ -760,35 +772,37 @@ REGISTER_OLED_MODE_MODULE(settingsOLEDModes, sizeof(settingsOLEDModes) / sizeof(
 // Quick Settings Mode (merged from oled_quick_settings.cpp)
 // ============================================================================
 
+#if ENABLE_WIFI
 #include <WiFi.h>
+#endif
+#if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
+extern httpd_handle_t server;
+#endif
 
 // Forward declaration for command execution
 extern void runUnifiedSystemCommand(const String& cmd);
 
-#if ENABLE_WIFI
-extern bool ensureWiFiInitialized();
+// ============================================================================
+// Quick Settings - Dynamic item registry based on compile flags
+// ============================================================================
 
-// Access to WiFi initialization state (defined in System_WiFi.cpp as static)
-// We'll use a helper function instead to avoid exposing static variable
-static bool isWiFiInitialized() {
-  // Try to access WiFi state - if WiFi is not initialized, this will be safe
-  // because we check the mode first
-  return (WiFi.getMode() != WIFI_MODE_NULL);
-}
-#endif
+typedef bool (*QuickGetStateFunc)();
+typedef void (*QuickToggleFunc)();
 
-static const char* TAG_QUICK = "OLED_QUICK_SETTINGS";
+struct QuickSettingsItem {
+  const char* name;
+  QuickGetStateFunc getState;
+  QuickToggleFunc toggle;
+};
 
-#if ENABLE_HTTP_SERVER
-extern httpd_handle_t server;
-#endif
+#define MAX_QUICK_ITEMS 8
+static QuickSettingsItem quickItems[MAX_QUICK_ITEMS];
+static int quickItemCount = 0;
+static bool quickItemsInitialized = false;
 
-// Quick settings state
 static int quickSelectedItem = 0;
-static const int QUICK_ITEM_COUNT = 3;  // WiFi, Bluetooth, HTTP
 
-// Status message for quick settings feedback
 static char quickStatusMsg[32] = "";
 static unsigned long quickStatusExpireMs = 0;
 
@@ -798,62 +812,38 @@ static void setQuickStatus(const char* msg, unsigned long durationMs = 2000) {
   quickStatusExpireMs = millis() + durationMs;
 }
 
-// Item names
-static const char* quickItemNames[] = {
-  "WiFi",
-  "Bluetooth",
-  "HTTP Server"
-};
+static void addQuickItem(const char* name, QuickGetStateFunc getState, QuickToggleFunc toggle) {
+  if (quickItemCount < MAX_QUICK_ITEMS) {
+    quickItems[quickItemCount] = { name, getState, toggle };
+    quickItemCount++;
+  }
+}
 
-// Get current state of each toggle
+// --- WiFi ---
+#if ENABLE_WIFI
 static bool getQuickWiFiState() {
-#if ENABLE_WIFI
-  // Check if WiFi radio is enabled (not just connected)
   return (WiFi.getMode() != WIFI_MODE_NULL);
-#else
-  return false;
-#endif
 }
-
-static bool getQuickBluetoothState() {
-#if ENABLE_BLUETOOTH
-  extern bool isBLERunning();
-  return isBLERunning();
-#else
-  return false;
-#endif
-}
-
-static bool getQuickHTTPState() {
-#if ENABLE_HTTP_SERVER
-  return (server != nullptr);
-#else
-  return false;
-#endif
-}
-
-// Toggle functions
 static void toggleQuickWiFi() {
-#if ENABLE_WIFI
   if (WiFi.getMode() != WIFI_MODE_NULL) {
-    // WiFi is ON - turn it OFF
     setQuickStatus("WiFi OFF");
     WiFi.disconnect();
     WiFi.mode(WIFI_OFF);
   } else {
-    // WiFi is OFF - turn it ON
     setQuickStatus("WiFi ON");
     WiFi.mode(WIFI_STA);
   }
-#else
-  setQuickStatus("WiFi disabled");
-#endif
 }
+#endif
 
-// Confirmation callbacks for Bluetooth and HTTP toggles
+// --- Bluetooth ---
+#if ENABLE_BLUETOOTH
+static bool getQuickBluetoothState() {
+  extern bool isBLERunning();
+  return isBLERunning();
+}
 static void bluetoothToggleConfirmedQuick(void* userData) {
   (void)userData;
-#if ENABLE_BLUETOOTH
   extern bool isBLERunning();
   if (isBLERunning()) {
     setQuickStatus("Bluetooth OFF");
@@ -862,12 +852,24 @@ static void bluetoothToggleConfirmedQuick(void* userData) {
     setQuickStatus("Bluetooth ON");
     runUnifiedSystemCommand("openble");
   }
-#endif
 }
+static void toggleQuickBluetooth() {
+  extern bool isBLERunning();
+  if (isBLERunning()) {
+    oledConfirmRequest("Stop Bluetooth?", nullptr, bluetoothToggleConfirmedQuick, nullptr, false);
+  } else {
+    oledConfirmRequest("Start Bluetooth?", nullptr, bluetoothToggleConfirmedQuick, nullptr);
+  }
+}
+#endif
 
+// --- HTTP Server ---
+#if ENABLE_HTTP_SERVER
+static bool getQuickHTTPState() {
+  return (server != nullptr);
+}
 static void httpToggleConfirmedQuick(void* userData) {
   (void)userData;
-#if ENABLE_HTTP_SERVER
   if (server != nullptr) {
     setQuickStatus("HTTP OFF");
     runUnifiedSystemCommand("closehttp");
@@ -879,24 +881,8 @@ static void httpToggleConfirmedQuick(void* userData) {
     setQuickStatus("HTTP ON");
     runUnifiedSystemCommand("openhttp");
   }
-#endif
 }
-
-static void toggleQuickBluetooth() {
-#if ENABLE_BLUETOOTH
-  extern bool isBLERunning();
-  if (isBLERunning()) {
-    oledConfirmRequest("Stop Bluetooth?", nullptr, bluetoothToggleConfirmedQuick, nullptr, false);
-  } else {
-    oledConfirmRequest("Start Bluetooth?", nullptr, bluetoothToggleConfirmedQuick, nullptr);
-  }
-#else
-  setQuickStatus("BT disabled");
-#endif
-}
-
 static void toggleQuickHTTP() {
-#if ENABLE_HTTP_SERVER
   if (server != nullptr) {
     oledConfirmRequest("Stop HTTP?", nullptr, httpToggleConfirmedQuick, nullptr, false);
   } else {
@@ -906,96 +892,103 @@ static void toggleQuickHTTP() {
     }
     oledConfirmRequest("Start HTTP?", nullptr, httpToggleConfirmedQuick, nullptr);
   }
-#else
-  setQuickStatus("HTTP disabled");
+}
+#endif
+
+static void initQuickItems() {
+  if (quickItemsInitialized) return;
+  quickItemsInitialized = true;
+  quickItemCount = 0;
+#if ENABLE_WIFI
+  addQuickItem("WiFi", getQuickWiFiState, toggleQuickWiFi);
+#endif
+#if ENABLE_BLUETOOTH
+  addQuickItem("Bluetooth", getQuickBluetoothState, toggleQuickBluetooth);
+#endif
+#if ENABLE_HTTP_SERVER
+  addQuickItem("HTTP Server", getQuickHTTPState, toggleQuickHTTP);
 #endif
 }
 
 // Display function
 void displayQuickSettings() {
-  if (!oledDisplay || !oledConnected) {
-    return;
-  }
+  if (!oledDisplay || !oledConnected) return;
+  initQuickItems();
   
-  // Note: Main loop already cleared the display, don't clear again
-  
-  // Title
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, 0);
-  oledDisplay->println("Quick Settings");
-  oledDisplay->drawLine(0, 10, 128, 10, DISPLAY_COLOR_WHITE);
   
-  // Menu items
-  int yPos = 16;
-  for (int i = 0; i < QUICK_ITEM_COUNT; i++) {
-    bool isSelected = (i == quickSelectedItem);
-    bool isEnabled = false;
-    
-    // Get state
-    switch (i) {
-      case 0: isEnabled = getQuickWiFiState(); break;
-      case 1: isEnabled = getQuickBluetoothState(); break;
-      case 2: isEnabled = getQuickHTTPState(); break;
+  // Title is shown in header, draw separator line only
+  oledDisplay->drawLine(0, OLED_CONTENT_START_Y, 128, OLED_CONTENT_START_Y, DISPLAY_COLOR_WHITE);
+  
+  if (quickItemCount == 0) {
+    oledDisplay->setCursor(4, OLED_CONTENT_START_Y + 14);
+    oledDisplay->print("No toggles available");
+  } else {
+    int yPos = OLED_CONTENT_START_Y + 6;
+    for (int i = 0; i < quickItemCount; i++) {
+      bool isSelected = (i == quickSelectedItem);
+      bool isEnabled = quickItems[i].getState ? quickItems[i].getState() : false;
+      
+      if (isSelected) {
+        oledDisplay->fillRect(0, yPos - 2, 128, 12, DISPLAY_COLOR_WHITE);
+        oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
+      } else {
+        oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+      }
+      
+      oledDisplay->setCursor(4, yPos);
+      oledDisplay->print(quickItems[i].name);
+      
+      oledDisplay->setCursor(90, yPos);
+      oledDisplay->print(isEnabled ? "[ON]" : "[OFF]");
+      
+      yPos += 14;
     }
-    
-    // Draw selection indicator
-    if (isSelected) {
-      oledDisplay->fillRect(0, yPos - 2, 128, 12, DISPLAY_COLOR_WHITE);
-      oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-    } else {
-      oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    }
-    
-    // Draw item name
-    oledDisplay->setCursor(4, yPos);
-    oledDisplay->print(quickItemNames[i]);
-    
-    // Draw state indicator
-    oledDisplay->setCursor(90, yPos);
-    oledDisplay->print(isEnabled ? "[ON]" : "[OFF]");
-    
-    yPos += 14;
   }
   
-  // Show status message if active
   if (quickStatusMsg[0] != '\0' && millis() < quickStatusExpireMs) {
+    // Draw status toast at bottom of content area (above footer)
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(0, 56);
+    oledDisplay->setCursor(0, OLED_CONTENT_HEIGHT - 10);
     oledDisplay->print(quickStatusMsg);
   } else if (quickStatusMsg[0] != '\0') {
-    // Clear expired message
     quickStatusMsg[0] = '\0';
   }
 }
 
 // Input handler
 bool quickSettingsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
+  initQuickItems();
+  if (quickItemCount == 0) {
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+      extern OLEDMode popOLEDModeStack();
+      setOLEDMode(popOLEDModeStack());
+      return true;
+    }
+    return false;
+  }
+  
   bool handled = false;
   
-  // Use centralized navigation events (computed with proper debounce/auto-repeat)
   if (gNavEvents.up) {
-    quickSelectedItem = (quickSelectedItem - 1 + QUICK_ITEM_COUNT) % QUICK_ITEM_COUNT;
+    quickSelectedItem = (quickSelectedItem - 1 + quickItemCount) % quickItemCount;
     handled = true;
   } else if (gNavEvents.down) {
-    quickSelectedItem = (quickSelectedItem + 1) % QUICK_ITEM_COUNT;
+    quickSelectedItem = (quickSelectedItem + 1) % quickItemCount;
     handled = true;
   }
   
-  // A button - toggle selected item
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    switch (quickSelectedItem) {
-      case 0: toggleQuickWiFi(); break;
-      case 1: toggleQuickBluetooth(); break;
-      case 2: toggleQuickHTTP(); break;
+    if (quickSelectedItem >= 0 && quickSelectedItem < quickItemCount && quickItems[quickSelectedItem].toggle) {
+      quickItems[quickSelectedItem].toggle();
     }
     handled = true;
   }
   
-  // B button - back to previous mode
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     extern OLEDMode popOLEDModeStack();
-    currentOLEDMode = popOLEDModeStack();
+    setOLEDMode(popOLEDModeStack());
     handled = true;
   }
   

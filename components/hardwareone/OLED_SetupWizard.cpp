@@ -27,13 +27,11 @@
 
 // Helper macro to wrap OLED operations in I2C transaction
 #define OLED_TRANSACTION(code) \
-  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 100000, 500, [&]() { code; })
+  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 400000, 500, [&]() { code; })
 
 // External references
-extern Adafruit_SSD1306* oledDisplay;
 extern bool oledConnected;
 extern Settings gSettings;
-extern bool writeSettingsJson();
 extern ControlCache gControlCache;
 
 // OLED text input
@@ -55,43 +53,35 @@ void drawWizardHeader(int pageNum, int totalPages, const char* title) {
   oledDisplay->setTextColor(SSD1306_WHITE);
   oledDisplay->setCursor(0, 0);
   
-  // Title with page number
-  char header[32];
+  // Line 1: Full page title
+  char header[22];
   snprintf(header, sizeof(header), "SETUP %d/%d: %s", pageNum, totalPages, title);
-  oledDisplay->println(header);
-}
-
-void drawHeapBar(int y) {
-  uint32_t enabledKB = 0;
-  uint32_t maxKB = 1;
+  oledDisplay->print(header);
+  
+  // Line 2: Heap bar using shared utility
+  uint32_t enabledKB = 0, maxKB = 1;
   int percentage = 0;
   getHeapBarData(&enabledKB, &maxKB, &percentage);
-  if (maxKB == 0) maxKB = 1;
+  char heapLabel[12];
+  snprintf(heapLabel, sizeof(heapLabel), "%lu/%luKB", (unsigned long)enabledKB, (unsigned long)maxKB);
+  oledDrawBar(oledDisplay, 0, 10, 70, 6, percentage, 100, heapLabel);
   
-  // Draw bar background - shorter bar to fit text
-  const int barX = 0;
-  const int barWidth = 70;
-  const int barHeight = 6;
-  
-  oledDisplay->drawRect(barX, y, barWidth, barHeight, SSD1306_WHITE);
-  
-  // Fill bar proportionally
-  int fillWidth = (barWidth - 2) * percentage / 100;
-  if (fillWidth > barWidth - 2) fillWidth = barWidth - 2;
-  if (fillWidth > 0) {
-    oledDisplay->fillRect(barX + 1, y + 1, fillWidth, barHeight - 2, SSD1306_WHITE);
-  }
-  
-  // Draw text: XX/XXXKB (compact format to fit)
-  char heapText[24];
-  snprintf(heapText, sizeof(heapText), "%lu/%luKB", (unsigned long)enabledKB, (unsigned long)maxKB);
-  oledDisplay->setCursor(barX + barWidth + 2, y);
-  oledDisplay->print(heapText);
+  // Separator below heap bar
+  oledDisplay->drawFastHLine(0, 18, 128, SSD1306_WHITE);
 }
 
+
 void drawWizardFooter(const char* leftAction, const char* rightAction, const char* backAction) {
-  oledDisplay->setCursor(0, 56);
+  // Use correct footer position: header + content area
+  const int footerStartY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
+  
+  // Draw separator line
+  oledDisplay->drawFastHLine(0, footerStartY, 128, SSD1306_WHITE);
+  
+  // Draw footer text
+  oledDisplay->setCursor(0, footerStartY + 2);
   oledDisplay->setTextSize(1);
+  oledDisplay->setTextColor(SSD1306_WHITE);
   
   // Compact format to fit 21 chars: "A:Tog >:Nxt B:Bk"
   char footer[22];
@@ -103,169 +93,131 @@ void drawWizardFooter(const char* leftAction, const char* rightAction, const cha
   oledDisplay->print(footer);
 }
 
-static void drawSeparator(int y) {
-  oledDisplay->drawFastHLine(0, y, 128, SSD1306_WHITE);
-}
 
 // ============================================================================
 // Page Renderers
 // ============================================================================
 
-static void renderFeaturesPage() {
+// Shared renderer for feature/sensor toggle lists
+static void renderToggleList(int pageNum, const char* title,
+                             WizardFeatureItem* items, size_t itemCount,
+                             const char* footerLeft, const char* footerRight,
+                             const char* footerBack) {
   oledDisplay->clearDisplay();
-  drawWizardHeader(1, 5, "Features");
-  drawHeapBar(10);
-  drawSeparator(18);
+  drawWizardHeader(pageNum, 5, title);
   
-  // Draw feature items (max 4 visible at a time)
+  // Content area: y=20 to y=52 (below 2-line header)
   const int startY = 20;
-  const int lineHeight = 9;
-  const int maxVisible = 4;
+  const int lineHeight = 10;
+  const int maxVisible = 3;
   
   int scrollOffset = getWizardScrollOffset();
   int currentSelection = getWizardCurrentSelection();
-  size_t featuresPageCount = getWizardFeaturesPageCount();
-  WizardFeatureItem* featuresPage = getWizardFeaturesPage();
   
-  for (int i = 0; i < maxVisible && (scrollOffset + i) < (int)featuresPageCount; i++) {
-    int idx = scrollOffset + i;
-    WizardFeatureItem* item = &featuresPage[idx];
-    
-    int y = startY + i * lineHeight;
-    oledDisplay->setCursor(0, y);
-    
-    // Selection indicator
-    if (idx == currentSelection) {
-      oledDisplay->print(">");
-    } else {
-      oledDisplay->print(" ");
-    }
-    
-    // Checkbox
-    bool enabled = item->setting ? *item->setting : false;
-    oledDisplay->print(enabled ? "[X]" : "[ ]");
-    
-    // Label with heap cost - truncate label to fit (max 21 chars total, ~10 for label)
-    char line[18];
-    char truncLabel[11];
-    strncpy(truncLabel, item->label, 10);
-    truncLabel[10] = '\0';
-    const char* essential = item->essential ? "*" : "";
-    snprintf(line, sizeof(line), "%.9s%s %dK", truncLabel, essential, item->heapKB);
-    oledDisplay->print(line);
+  // Adjust scroll to keep selection visible
+  if (currentSelection < scrollOffset) {
+    setWizardScrollOffset(currentSelection);
+    scrollOffset = currentSelection;
+  } else if (currentSelection >= scrollOffset + maxVisible) {
+    setWizardScrollOffset(currentSelection - maxVisible + 1);
+    scrollOffset = currentSelection - maxVisible + 1;
   }
   
-  // Scroll indicator if needed
-  if (featuresPageCount > (size_t)maxVisible) {
+  for (int i = 0; i < maxVisible && (scrollOffset + i) < (int)itemCount; i++) {
+    int idx = scrollOffset + i;
+    WizardFeatureItem* item = &items[idx];
+    
+    int y = startY + i * lineHeight;
+    bool isSelected = (idx == currentSelection);
+    
+    // Highlight bar for selected item (like main menu)
+    if (isSelected) {
+      oledDisplay->fillRect(0, y - 1, 126, lineHeight, SSD1306_WHITE);
+      oledDisplay->setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+    } else {
+      oledDisplay->setTextColor(SSD1306_WHITE);
+    }
+    
+    oledDisplay->setCursor(1, y);
+    
+    // Checkbox + label + heap cost
+    bool enabled = item->setting ? *item->setting : false;
+    char line[22];
+    const char* essential = item->essential ? "*" : "";
+    snprintf(line, sizeof(line), "%s %.10s%s %dK",
+             enabled ? "[X]" : "[ ]", item->label, essential, item->heapKB);
+    oledDisplay->print(line);
+    
+    oledDisplay->setTextColor(SSD1306_WHITE);
+  }
+  
+  // Scroll indicators
+  if (itemCount > (size_t)maxVisible) {
     if (scrollOffset > 0) {
-      oledDisplay->setCursor(120, startY);
+      oledDisplay->setCursor(121, startY);
       oledDisplay->print("^");
     }
-    if (scrollOffset + maxVisible < (int)featuresPageCount) {
-      oledDisplay->setCursor(120, startY + (maxVisible - 1) * lineHeight);
+    if (scrollOffset + maxVisible < (int)itemCount) {
+      oledDisplay->setCursor(121, startY + (maxVisible - 1) * lineHeight);
       oledDisplay->print("v");
     }
   }
   
-  drawSeparator(54);
-  drawWizardFooter("Toggle", "Next", nullptr);
+  drawWizardFooter(footerLeft, footerRight, footerBack);
   OLED_TRANSACTION(oledDisplay->display());
 }
 
+static void renderFeaturesPage() {
+  renderToggleList(1, "Features",
+                   getWizardFeaturesPage(), getWizardFeaturesPageCount(),
+                   "Toggle", "Next", nullptr);
+}
+
 static void renderSensorsPage() {
-  oledDisplay->clearDisplay();
-  drawWizardHeader(2, 5, "Sensors");
-  drawHeapBar(10);
-  drawSeparator(18);
-  
-  const int startY = 20;
-  const int lineHeight = 9;
-  const int maxVisible = 4;
-  
-  int scrollOffset = getWizardScrollOffset();
-  int currentSelection = getWizardCurrentSelection();
-  size_t sensorsPageCount = getWizardSensorsPageCount();
-  WizardFeatureItem* sensorsPage = getWizardSensorsPage();
-  
-  for (int i = 0; i < maxVisible && (scrollOffset + i) < (int)sensorsPageCount; i++) {
-    int idx = scrollOffset + i;
-    WizardFeatureItem* item = &sensorsPage[idx];
-    
-    int y = startY + i * lineHeight;
-    oledDisplay->setCursor(0, y);
-    
-    if (idx == currentSelection) {
-      oledDisplay->print(">");
-    } else {
-      oledDisplay->print(" ");
-    }
-    
-    bool enabled = item->setting ? *item->setting : false;
-    oledDisplay->print(enabled ? "[X]" : "[ ]");
-    
-    // Label with heap cost - truncate label to fit
-    char line[18];
-    char truncLabel[11];
-    strncpy(truncLabel, item->label, 10);
-    truncLabel[10] = '\0';
-    const char* essential = item->essential ? "*" : "";
-    snprintf(line, sizeof(line), "%.9s%s %dK", truncLabel, essential, item->heapKB);
-    oledDisplay->print(line);
-  }
-  
-  if (sensorsPageCount > (size_t)maxVisible) {
-    if (scrollOffset > 0) {
-      oledDisplay->setCursor(120, startY);
-      oledDisplay->print("^");
-    }
-    if (scrollOffset + maxVisible < (int)sensorsPageCount) {
-      oledDisplay->setCursor(120, startY + (maxVisible - 1) * lineHeight);
-      oledDisplay->print("v");
-    }
-  }
-  
-  drawSeparator(54);
-  drawWizardFooter("Toggle", "Next", "Back");
-  OLED_TRANSACTION(oledDisplay->display());
+  renderToggleList(2, "Sensors",
+                   getWizardSensorsPage(), getWizardSensorsPageCount(),
+                   "Toggle", "Next", "Back");
 }
 
 static void renderNetworkPage() {
   oledDisplay->clearDisplay();
   drawWizardHeader(3, 5, "Network");
-  drawHeapBar(10);
-  drawSeparator(18);
   
   const int startY = 20;
   const int lineHeight = 10;
+  const int maxVisible = 3;
   
   int currentSelection = getWizardCurrentSelection();
   size_t networkPageCount = getWizardNetworkPageCount();
   WizardNetworkItem* networkPage = getWizardNetworkPage();
   
-  for (size_t i = 0; i < networkPageCount && i < 4; i++) {
+  for (size_t i = 0; i < networkPageCount && i < (size_t)maxVisible; i++) {
     int y = startY + i * lineHeight;
-    oledDisplay->setCursor(0, y);
+    bool isSelected = ((int)i == currentSelection);
     
-    if ((int)i == currentSelection) {
-      oledDisplay->print(">");
+    // Highlight bar for selected item
+    if (isSelected) {
+      oledDisplay->fillRect(0, y - 1, 126, lineHeight, SSD1306_WHITE);
+      oledDisplay->setTextColor(SSD1306_BLACK, SSD1306_WHITE);
     } else {
-      oledDisplay->print(" ");
+      oledDisplay->setTextColor(SSD1306_WHITE);
     }
     
-    // Truncate label to fit with value
-    char truncLabel[13];
-    strncpy(truncLabel, networkPage[i].label, 12);
-    truncLabel[12] = '\0';
-    oledDisplay->print(truncLabel);
+    oledDisplay->setCursor(1, y);
     
-    // Show current value
-    oledDisplay->setCursor(84, y);
+    // Label + value
     if (networkPage[i].isBool) {
-      oledDisplay->print(*networkPage[i].boolSetting ? "[ON]" : "[OFF]");
+      bool enabled = *networkPage[i].boolSetting;
+      char line[22];
+      snprintf(line, sizeof(line), "%s %s", enabled ? "[ON] " : "[OFF]", networkPage[i].label);
+      oledDisplay->print(line);
+    } else {
+      oledDisplay->print(networkPage[i].label);
     }
+    
+    oledDisplay->setTextColor(SSD1306_WHITE);
   }
   
-  drawSeparator(54);
   drawWizardFooter("Toggle", "Next", "Back");
   OLED_TRANSACTION(oledDisplay->display());
 }
@@ -273,10 +225,9 @@ static void renderNetworkPage() {
 static void renderSystemPage() {
   oledDisplay->clearDisplay();
   drawWizardHeader(4, 5, "System");
-  drawHeapBar(10);
-  drawSeparator(18);
   
-  const int startY = 22;
+  const int startY = 20;
+  const int lineHeight = 10;
   
   int currentSelection = getWizardCurrentSelection();
   int timezoneSelection = getWizardTimezoneSelection();
@@ -285,39 +236,48 @@ static void renderSystemPage() {
   const char** logLevelNames = getLogLevelNames();
   
   // Time zone
-  oledDisplay->setCursor(0, startY);
-  oledDisplay->print(currentSelection == 0 ? ">" : " ");
+  int y0 = startY;
+  if (currentSelection == 0) {
+    oledDisplay->fillRect(0, y0 - 1, 126, lineHeight, SSD1306_WHITE);
+    oledDisplay->setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+  } else {
+    oledDisplay->setTextColor(SSD1306_WHITE);
+  }
+  oledDisplay->setCursor(1, y0);
   oledDisplay->print("Timezone: ");
   oledDisplay->print(timezones[timezoneSelection].abbrev);
+  oledDisplay->setTextColor(SSD1306_WHITE);
   
   // Log level
-  oledDisplay->setCursor(0, startY + 12);
-  oledDisplay->print(currentSelection == 1 ? ">" : " ");
+  int y1 = startY + lineHeight;
+  if (currentSelection == 1) {
+    oledDisplay->fillRect(0, y1 - 1, 126, lineHeight, SSD1306_WHITE);
+    oledDisplay->setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+  } else {
+    oledDisplay->setTextColor(SSD1306_WHITE);
+  }
+  oledDisplay->setCursor(1, y1);
   oledDisplay->print("Log level: ");
   oledDisplay->print(logLevelNames[logLevelSelection]);
+  oledDisplay->setTextColor(SSD1306_WHITE);
   
-  drawSeparator(54);
   drawWizardFooter("Change", "Next", "Back");
   OLED_TRANSACTION(oledDisplay->display());
 }
 
-static void renderWiFiPage(SetupWizardResult& result) {
+static bool renderWiFiPage(SetupWizardResult& result) {
   // Loop to allow going back from password entry to network selection
-  bool wifiSetupComplete = false;
-  
-  while (!wifiSetupComplete) {
+  // Returns true if WiFi setup completed (or skipped), false if user pressed B to go back
+  while (true) {
     // This page uses existing WiFi selection UI
     oledDisplay->clearDisplay();
     drawWizardHeader(5, 5, "WiFi");
-    drawHeapBar(10);
-    drawSeparator(18);
     
-    oledDisplay->setCursor(0, 24);
+    oledDisplay->setCursor(0, 14);
     oledDisplay->println("Select network or");
-    oledDisplay->println("press B to skip...");
+    oledDisplay->println("press B to go back");
     
-    drawSeparator(54);
-    drawWizardFooter("Select", "Done", "Skip");
+    drawWizardFooter("Select", "Done", "Back");
     OLED_TRANSACTION(oledDisplay->display());
     
     // Wait a moment then launch WiFi selector
@@ -338,10 +298,12 @@ static void renderWiFiPage(SetupWizardResult& result) {
       
       // Password entered (may be empty for open networks)
       result.wifiConfigured = true;
-      wifiSetupComplete = true;
+      return true;
     } else {
-      // WiFi selection skipped/cancelled
-      wifiSetupComplete = true;
+      // getOLEDWiFiSelection returned false = user pressed B/cancelled at network list
+      // Go back to system settings page
+      wizardPrevPage();
+      return false;
     }
   }
 }
@@ -540,7 +502,7 @@ static bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardRes
   }
   
   if ((buttons & INPUT_MASK(INPUT_BUTTON_B)) || nav.left) {
-    setWizardCurrentPage(WIZARD_PAGE_NETWORK);
+    wizardPrevPage();
     setWizardCurrentSelection(0);
     return true;
   }
@@ -562,7 +524,7 @@ static void printSerialPageStatus() {
   
   switch (page) {
     case WIZARD_PAGE_FEATURES: {
-      Serial.println("  SETUP 1/5: Features (Network)");
+      Serial.println("  SETUP 1/5: Features");
       WizardFeatureItem* items = getWizardFeaturesPage();
       size_t count = getWizardFeaturesPageCount();
       for (size_t i = 0; i < count; i++) {
@@ -647,8 +609,8 @@ bool getOLEDSetupModeSelection(bool& advancedMode) {
       Serial.println("========================================");
       Serial.println("       SELECT SETUP MODE");
       Serial.println("========================================");
-      Serial.printf(" %s1. Basic Setup    - Quick start\n", selection == 0 ? ">" : " ");
-      Serial.printf(" %s2. Advanced Setup - Full configuration\n", selection == 1 ? ">" : " ");
+      Serial.printf(" %s1. Basic Setup\n", selection == 0 ? ">" : " ");
+      Serial.printf(" %s2. Advanced Setup\n", selection == 1 ? ">" : " ");
       Serial.println("----------------------------------------");
       Serial.println("Serial: Enter 1 or 2");
       Serial.println("OLED: Joystick to move, A to select");
@@ -668,23 +630,25 @@ bool getOLEDSetupModeSelection(bool& advancedMode) {
       oledDisplay->drawFastHLine(0, 10, 128, SSD1306_WHITE);
       
       // Subtitle
-      oledDisplay->setCursor(0, 14);
+      oledDisplay->setCursor(0, 13);
       oledDisplay->println("Select setup mode:");
       
       // Option 1: Basic
-      oledDisplay->setCursor(0, 28);
+      oledDisplay->setCursor(0, 25);
       oledDisplay->print(selection == 0 ? ">" : " ");
       oledDisplay->println(" Basic Setup");
-      oledDisplay->setCursor(12, 36);
-      oledDisplay->println("Quick start");
+      oledDisplay->setCursor(12, 33);
+    
       
       // Option 2: Advanced
-      oledDisplay->setCursor(0, 46);
+      oledDisplay->setCursor(0, 43);
       oledDisplay->print(selection == 1 ? ">" : " ");
       oledDisplay->println(" Advanced Setup");
       
-      // Footer
-      oledDisplay->setCursor(0, 56);
+      // Footer at standard position (matching drawOLEDFooter)
+      const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
+      oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
+      oledDisplay->setCursor(0, footerY + 2);
       oledDisplay->print("A:Select  Joy:Move");
       
       OLED_TRANSACTION(oledDisplay->display());
@@ -793,8 +757,10 @@ bool getOLEDThemeSelection(bool& darkMode) {
       oledDisplay->print(selection == 1 ? ">" : " ");
       oledDisplay->println(" Dark");
       
-      // Footer
-      oledDisplay->setCursor(0, 56);
+      // Footer at standard position
+      const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
+      oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
+      oledDisplay->setCursor(0, footerY + 2);
       oledDisplay->print("A:Select  Joy:Move");
       
       OLED_TRANSACTION(oledDisplay->display());
@@ -916,9 +882,10 @@ SetupWizardResult runOLEDSetupWizard() {
           renderSystemPage();
           break;
         case WIZARD_PAGE_WIFI:
-          renderWiFiPage(result);
-          result.completed = true;
-          running = false;
+          if (renderWiFiPage(result)) {
+            result.completed = true;
+            running = false;
+          }
           break;
         default:
           running = false;

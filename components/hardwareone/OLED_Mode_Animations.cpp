@@ -10,7 +10,6 @@
 #include "System_FirstTimeSetup.h"
 
 // External references
-extern Adafruit_SSD1306* oledDisplay;
 extern bool oledConnected;
 extern OLEDAnimationType currentAnimation;
 extern unsigned long animationFrame;
@@ -390,8 +389,13 @@ static void showSetupCompleteMessage() {
 }
 
 static void showNormalBootProgress() {
+  // Print label with trailing dots
   if (bootProgressLabel.length() > 0) {
-    oledDisplay->println(bootProgressLabel);
+    oledDisplay->print(bootProgressLabel);
+    if (bootProgressPercent < 100) {
+      oledDisplay->print("...");
+    }
+    oledDisplay->println();
   } else {
     oledDisplay->println("Booting...");
   }
@@ -419,7 +423,7 @@ static void renderBootProgressAnimation() {
 
   oledDisplay->setTextSize(1);
   oledDisplay->setCursor(0, 0);
-  oledDisplay->println("HardwareOne v2.1");
+  oledDisplay->println("HardwareOne v0.9");
   oledDisplay->println();
 
   switch (state) {
