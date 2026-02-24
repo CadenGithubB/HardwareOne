@@ -107,7 +107,7 @@ Main menu sections:
 
 ## ESP-NOW Mesh
 
-ESP-NOW V3 is Hardware One's peer-to-peer wireless protocol. Devices discover each other, pair with a shared passphrase, and form an encrypted mesh.
+ESP-NOW V3 is Hardware One's inter-device wireless protocol. Devices pair with a shared passphrase and form an encrypted mesh.
 
 ### Pairing
 1. On both devices, go to the **Pair** tab in the web UI (or use `espnow pair` CLI).
