@@ -8,6 +8,8 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
+#include "HAL_Input.h"
+#include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
 #include "System_User.h"
@@ -23,13 +25,12 @@
 #endif
 
 // External references
-extern Adafruit_SSD1306* oledDisplay;
 extern bool oledConnected;
 extern OLEDMode currentOLEDMode;
 extern Settings gSettings;
 
 #if ENABLE_ESPNOW
-extern MeshPeerHealth gMeshPeers[];
+// gMeshPeers, gMeshPeerSlots declared in System_ESPNow.h (pointer, not array)
 extern String macToHexString(const uint8_t* mac);
 extern void macFromHexString(const String& s, uint8_t out[6]);
 extern bool isSelfMac(const uint8_t* mac);
@@ -96,8 +97,7 @@ void displayNetworkInfo() {
 #if ENABLE_WIFI
   if (networkShowingStatus) {
     // Show detailed status screen
-    oledDisplay->println("== NETWORK STATUS ==");
-    oledDisplay->println();
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     
     if (WiFi.isConnected()) {
       oledDisplay->print("SSID: ");
@@ -126,7 +126,7 @@ void displayNetworkInfo() {
     return;
   }
   
-  oledDisplay->print("NETWORK ");
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   
   // Show current status inline to save vertical space
   bool wifiConnected = WiFi.isConnected();
@@ -151,7 +151,11 @@ void displayNetworkInfo() {
   options[1] = wifiConnected ? "---" : "Connect";        // Hide Connect when connected
   options[2] = "WiFi Management";
   options[3] = wifiConnected ? "Disconnect" : "---";     // Hide Disconnect when not connected
+#if ENABLE_HTTP_SERVER
   options[4] = httpRunning ? "Close HTTP" : "Open HTTP";
+#else
+  options[4] = "---";
+#endif
   
   for (int i = 0; i < NETWORK_MENU_ITEMS; i++) {
     // Skip disabled options in display
@@ -168,8 +172,7 @@ void displayNetworkInfo() {
     oledDisplay->println();
   }
 #else
-  oledDisplay->println("=== NETWORK ===");
-  oledDisplay->println();
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->println("WiFi: Disabled");
   oledDisplay->println();
   oledDisplay->println("Compile with");
@@ -237,7 +240,7 @@ void displayMeshStatus() {
 
   // Count active peers
   int activePeers = 0;
-  for (int i = 0; i < MESH_PEER_MAX; i++) {
+  for (int i = 0; i < gMeshPeerSlots; i++) {
     if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac) && isMeshPeerAlive(&gMeshPeers[i])) {
       activePeers++;
     }
@@ -266,6 +269,9 @@ static bool isNetworkMenuItemDisabled(int idx) {
   bool wifiConnected = WiFi.isConnected();
   if (idx == 1 && wifiConnected) return true;   // Connect disabled when connected
   if (idx == 3 && !wifiConnected) return true;  // Disconnect disabled when not connected
+#endif
+#if !ENABLE_HTTP_SERVER
+  if (idx == 4) return true;  // HTTP not compiled in
 #endif
   return false;
 }
@@ -336,7 +342,7 @@ void executeNetworkAction() {
         executeOLEDCommand("wifilist");
         break;
       case 3: // Connect Best
-        executeOLEDCommand("wificonnect --best");
+        executeOLEDCommand("openwifi --best");
         networkShowingWiFiSubmenu = false;
         break;
       case 4: // Scan Networks
@@ -352,7 +358,7 @@ void executeNetworkAction() {
       break;
       
     case 1: // Connect (best available network)
-      executeOLEDCommand("wificonnect --best");
+      executeOLEDCommand("openwifi --best");
       break;
       
     case 2: // WiFi Management submenu
@@ -361,7 +367,7 @@ void executeNetworkAction() {
       break;
       
     case 3: // Disconnect
-      executeOLEDCommand("wifidisconnect");
+      executeOLEDCommand("closewifi");
       break;
       
     case 4: // Toggle HTTP (Start or Stop based on current state)
@@ -391,32 +397,76 @@ void networkMenuBack() {
 }
 
 // ============================================================================
-// Network Input Handler
+// Network Input Handler (registered via OLEDModeEntry)
 // ============================================================================
 
-bool networkInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
-  if (currentOLEDMode != OLED_NETWORK_INFO) return false;
-  
-  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
+static bool networkRegisteredInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
+  // Handle WiFi keyboard input (SSID/password entry)
+  if (wifiAddingNetwork && (wifiEnteringSSID || wifiEnteringPassword)) {
+    // Keyboard is handled by centralized keyboard handler in processGamepadMenuInput()
+    // Just check for completion/cancellation here
+    if (oledKeyboardIsCompleted()) {
+      const char* input = oledKeyboardGetText();
+      if (wifiEnteringSSID) {
+        wifiNewSSID = String(input);
+        wifiEnteringSSID = false;
+        wifiEnteringPassword = true;
+        oledKeyboardReset();
+        oledKeyboardInit("Enter Password:", "");
+      } else if (wifiEnteringPassword) {
+        wifiNewPassword = String(input);
+        String addCmd = "wifiadd \"" + wifiNewSSID + "\" \"" + wifiNewPassword + "\"";
+        executeOLEDCommand(addCmd);
+        wifiAddingNetwork = false;
+        wifiEnteringPassword = false;
+        wifiNewSSID = "";
+        wifiNewPassword = "";
+        oledKeyboardReset();
+      }
+      return true;
+    } else if (oledKeyboardIsCancelled()) {
+      wifiAddingNetwork = false;
+      wifiEnteringSSID = false;
+      wifiEnteringPassword = false;
+      wifiNewSSID = "";
+      wifiNewPassword = "";
+      oledKeyboardReset();
+      return true;
+    }
+    return false;  // Let centralized keyboard handler process input
+  }
+
+  // Navigation
+  if (networkShowingWiFiSubmenu) {
+    if (oledScrollHandleNav(&wifiSubmenuScroll)) return true;
+  } else if (!networkShowingStatus) {
+    // Main network menu nav
+    extern NavEvents gNavEvents;
+    if (gNavEvents.up || gNavEvents.left) {
+      networkMenuUp();
+      return true;
+    }
+    if (gNavEvents.down || gNavEvents.right) {
+      networkMenuDown();
+      return true;
+    }
+  }
+
+  // A/X button: Execute action
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     executeNetworkAction();
     return true;
   }
+
+  // B button: Back
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     if (networkShowingStatus || networkShowingWiFiSubmenu) {
       networkMenuBack();
       return true;
     }
-    // Let main handler do popOLEDMode
-    return false;
+    return false;  // Let main handler do oledMenuBack/popOLEDMode
   }
-  if (deltaY < -JOYSTICK_DEADZONE) {
-    networkMenuUp();
-    return true;
-  }
-  if (deltaY > JOYSTICK_DEADZONE) {
-    networkMenuDown();
-    return true;
-  }
+
   return false;
 }
 
@@ -451,9 +501,7 @@ void displayEspNow() {
     // Show initialization prompt (Y button to start)
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(0, 0);
-    oledDisplay->println("=== ESP-NOW ===");
-    oledDisplay->println();
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("ESP-NOW not");
     oledDisplay->println("initialized");
     oledDisplay->println();
@@ -514,19 +562,19 @@ void displayNetworkInfoRendered() {
   
   if (!networkRenderData.valid) {
     oledDisplay->setTextSize(1);
-    oledDisplay->setCursor(0, 0);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Network data");
     oledDisplay->println("unavailable");
     return;
   }
   
   oledDisplay->setTextSize(1);
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   
 #if ENABLE_WIFI
   if (networkShowingStatus) {
     // Show detailed status screen
-    oledDisplay->println("== NETWORK STATUS ==");
-    oledDisplay->println();
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     
     if (networkRenderData.wifiConnected) {
       oledDisplay->print("SSID: ");
@@ -582,7 +630,11 @@ void displayNetworkInfoRendered() {
   options[1] = networkRenderData.wifiConnected ? "---" : "Connect";
   options[2] = "WiFi Management";
   options[3] = networkRenderData.wifiConnected ? "Disconnect" : "---";
+#if ENABLE_HTTP_SERVER
   options[4] = httpRunning ? "Close HTTP" : "Open HTTP";
+#else
+  options[4] = "---";
+#endif
 
   for (int i = 0; i < NETWORK_MENU_ITEMS; i++) {
     if (strcmp(options[i], "---") == 0) {
@@ -598,8 +650,7 @@ void displayNetworkInfoRendered() {
     oledDisplay->println();
   }
 #else
-  oledDisplay->println("=== NETWORK ===");
-  oledDisplay->println();
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->println("WiFi: Disabled");
   oledDisplay->println();
   oledDisplay->println("Compile with");
@@ -669,18 +720,16 @@ void displayWebStatsRendered() {
   if (!oledDisplay || !oledConnected) return;
   
   if (!webStatsRenderData.valid) {
-    oledDisplay->clearDisplay();
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(0, 0);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Web Stats Error");
     return;
   }
   
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  oledDisplay->println("=== WEB SERVER ===");
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->println();
   
   // Server status
@@ -775,7 +824,7 @@ void prepareMeshStatusData() {
     
     // Count active peers OUTSIDE I2C transaction
     int activePeers = 0;
-    for (int i = 0; i < MESH_PEER_MAX; i++) {
+    for (int i = 0; i < gMeshPeerSlots; i++) {
       if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac) && isMeshPeerAlive(&gMeshPeers[i])) {
         activePeers++;
       }
@@ -795,15 +844,15 @@ void displayMeshStatusRendered() {
   if (!oledDisplay || !oledConnected) return;
   
   if (!meshStatusRenderData.valid) {
-    oledDisplay->clearDisplay();
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(0, 0);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Mesh Error");
     return;
   }
   
   oledDisplay->setTextSize(1);
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   
 #if ENABLE_ESPNOW
   if (!meshStatusRenderData.espNowEnabled) {
@@ -863,41 +912,44 @@ static int remoteSensorScrollIndex = 0;
 void displayRemoteSensors() {
   if (!oledDisplay) return;
   
-  // Clear only content area (not footer) to prevent flickering
-  oledDisplay->fillRect(0, 0, SCREEN_WIDTH, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_BLACK);
-  
+  // Content area is cleared by global render loop
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, 0);
-  oledDisplay->println("Remote Sensors");
-  oledDisplay->drawLine(0, 9, SCREEN_WIDTH - 1, 9, DISPLAY_COLOR_WHITE);
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   
-  // Check if ESP-NOW/mesh is properly configured
+  // Check if ESP-NOW is configured for receiving sensor data
+  // Works in both mesh mode (as master) and bond mode (as master)
   bool meshOn = meshEnabled();
-  bool isMaster = (gSettings.meshRole == MESH_ROLE_MASTER);
+  bool isMeshMaster = (gSettings.meshRole == MESH_ROLE_MASTER);
+  bool isPairedMaster = (gSettings.bondModeEnabled && gSettings.bondRole == 1);
+  bool canReceiveSensors = (meshOn && isMeshMaster) || isPairedMaster;
   
-  if (!meshOn) {
-    // Mesh not enabled - show setup instructions
+  if (!canReceiveSensors) {
     oledDisplay->setCursor(0, 14);
-    oledDisplay->println("Mesh not enabled!");
-    oledDisplay->println("");
-    oledDisplay->println("To enable:");
-    oledDisplay->println(" espnow mode mesh");
-    oledDisplay->println(" espnowenabled 1");
-    oledDisplay->println(" (reboot required)");
-    return;
-  }
-  
-  if (!isMaster) {
-    // Not master - show role setup instructions
-    oledDisplay->setCursor(0, 14);
-    oledDisplay->println("Not a master device!");
-    oledDisplay->println("");
-    oledDisplay->println("To set as master:");
-    oledDisplay->println(" espnow meshrole master");
-    oledDisplay->println("");
-    oledDisplay->println("Role: ");
-    oledDisplay->print(gSettings.meshRole == MESH_ROLE_WORKER ? "worker" : "backup");
+    if (gSettings.bondModeEnabled) {
+      // Bond mode but not master
+      oledDisplay->println("Bonded as worker.");
+      oledDisplay->println("");
+      oledDisplay->println("Workers send data,");
+      oledDisplay->println("masters receive.");
+      oledDisplay->println("");
+      oledDisplay->println("Use 'bond stream' to");
+      oledDisplay->println("send sensor data.");
+    } else if (meshOn && !isMeshMaster) {
+      // Mesh mode but not master
+      oledDisplay->println("Not a master device!");
+      oledDisplay->println("");
+      oledDisplay->println("To set as master:");
+      oledDisplay->println(" espnow meshrole master");
+    } else {
+      // Neither mesh nor bond mode
+      oledDisplay->println("No remote source.");
+      oledDisplay->println("");
+      oledDisplay->println("Enable mesh mode:");
+      oledDisplay->println(" espnow mode mesh");
+      oledDisplay->println("Or bond with device:");
+      oledDisplay->println(" bond connect <dev>");
+    }
     return;
   }
   
@@ -936,7 +988,7 @@ void displayRemoteSensors() {
   
   // Parse and display sensor data based on type
   if (entry->jsonLength > 0) {
-    JsonDocument doc;
+    PSRAM_JSON_DOC(doc);
     if (deserializeJson(doc, entry->jsonData) == DeserializationError::Ok) {
       switch (entry->sensorType) {
         case REMOTE_SENSOR_GAMEPAD: {
@@ -1114,11 +1166,11 @@ static bool remoteSensorsInputHandler(int deltaX, int deltaY, uint32_t newlyPres
   return false;
 }
 
-// Remote Sensors OLED mode entry
+// Remote Sensors OLED mode entry (renamed to "Pair" for paired device control)
 static const OLEDModeEntry remoteSensorsOLEDModes[] = {
   {
     OLED_REMOTE_SENSORS,       // mode enum
-    "Remote",                  // menu name
+    "Pair",                    // menu name (shows paired device capabilities)
     "notify_sensor",           // icon name
     displayRemoteSensors,      // displayFunc
     remoteSensorsAvailable,    // availFunc
@@ -1132,5 +1184,15 @@ static const OLEDModeEntry remoteSensorsOLEDModes[] = {
 REGISTER_OLED_MODE_MODULE(remoteSensorsOLEDModes, sizeof(remoteSensorsOLEDModes) / sizeof(remoteSensorsOLEDModes[0]), "RemoteSensors");
 
 #endif // ENABLE_ESPNOW
+
+// ============================================================================
+// Network Mode Registration
+// ============================================================================
+
+static const OLEDModeEntry sNetworkModes[] = {
+  { OLED_NETWORK_INFO, "Network", "wifi", displayNetworkInfo, nullptr, networkRegisteredInputHandler, false, -1 },
+};
+
+REGISTER_OLED_MODE_MODULE(sNetworkModes, sizeof(sNetworkModes) / sizeof(sNetworkModes[0]), "Network");
 
 #endif // ENABLE_OLED_DISPLAY

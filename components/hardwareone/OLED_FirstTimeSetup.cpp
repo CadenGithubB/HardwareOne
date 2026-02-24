@@ -13,6 +13,7 @@
 #include <Adafruit_SSD1306.h>
 
 #include "OLED_Display.h"
+#include "OLED_Footer.h"
 #include "OLED_Utils.h"
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
@@ -26,7 +27,7 @@
 
 // Helper macro to wrap OLED operations in I2C transaction
 #define OLED_TRANSACTION(code) \
-  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 100000, 500, [&]() { code; })
+  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 400000, 500, [&]() { code; })
 
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor-seesaw.h"  // For JOYSTICK_DEADZONE
@@ -37,11 +38,20 @@
 #endif
 
 // External references
-extern Adafruit_SSD1306* oledDisplay;
 extern bool oledConnected;
 extern bool oledEnabled;
 extern String waitForSerialInputBlocking();
 extern void updateOLEDDisplay();
+
+// Draw FTS footer at the standard position (matching drawOLEDFooter in the normal program)
+static void drawFTSFooter(const char* text) {
+  const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
+  oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
+  oledDisplay->setCursor(0, footerY + 2);
+  oledDisplay->setTextSize(1);
+  oledDisplay->setTextColor(SSD1306_WHITE);
+  oledDisplay->print(text);
+}
 
 // ============================================================================
 // Helper Functions
@@ -86,6 +96,10 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
 
   // Initialize keyboard
   oledKeyboardInit(prompt, initialText, maxLength);
+
+  // Also echo prompt to serial so users monitoring via terminal know to type here
+  Serial.print(prompt);
+  Serial.println(" (type here or use OLED keyboard):");
   
   // Store original keyboard state to modify for password mode
   bool originalActive = true;
@@ -139,6 +153,18 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
       } else {
         // Normal display
         oledKeyboardDisplay(oledDisplay);
+      }
+      
+      // Draw keyboard footer matching main keyboard style
+      {
+        const int ftrY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
+        oledDisplay->drawFastHLine(0, ftrY, 128, SSD1306_WHITE);
+        oledDisplay->setTextSize(1);
+        oledDisplay->setTextColor(SSD1306_WHITE);
+        oledDisplay->setCursor(0, ftrY + 2);
+        oledDisplay->print("A:Sel Y:Del B:");
+        oledDrawBackArrowIcon(oledDisplay, ftrY + 2);
+        oledDisplay->print(" S:OK");
       }
       
       oledDisplay->display();
@@ -265,10 +291,9 @@ bool getOLEDYesNoPrompt(const char* prompt, bool defaultYes) {
       oledDisplay->setCursor(82, optionY);
       oledDisplay->print("No");
       
-      // Instructions
+      // Footer at standard position
       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-      oledDisplay->setCursor(0, 52);
-      oledDisplay->print("L/R:Move A:OK");
+      drawFTSFooter("L/R:Move A:OK");
       
       oledDisplay->display();
     );
@@ -350,6 +375,8 @@ bool getOLEDWiFiSelection(String& outSSID) {
   if (networkCount > 10) {
     Serial.printf("  ... and %d more\n", networkCount - 10);
   }
+  Serial.println("Enter a number to select, type an SSID directly, 'rescan' to refresh, or 'skip':");
+  Serial.print("> ");
   
   if (networkCount == 0) {
     OLED_TRANSACTION(
@@ -590,8 +617,7 @@ void showOLEDMessage(const char* message, bool waitForButton) {
     }
     
     if (waitForButton) {
-      oledDisplay->setCursor(0, 52);
-      oledDisplay->print("Press A to continue");
+      drawFTSFooter("A:Continue");
     }
     
     oledDisplay->display();

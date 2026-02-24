@@ -7,6 +7,7 @@
 #if ENABLE_OLED_DISPLAY
 
 #include <Adafruit_SSD1306.h>
+#include "HAL_Input.h"
 #include "System_FileManager.h"
 #include "System_Icons.h"
 
@@ -15,12 +16,11 @@
 #endif
 
 // External references
-extern Adafruit_SSD1306* oledDisplay;
 extern bool oledConnected;
 extern OLEDMode currentOLEDMode;
 extern FileManager* gOLEDFileManager;
 extern bool oledFileBrowserNeedsInit;
-extern void oledMenuBack();
+extern bool oledMenuBack();
 
 // Icon functions (from System_Icons.cpp)
 extern void drawIcon(Adafruit_SSD1306* display, const char* iconName, int x, int y, uint16_t color);
@@ -120,7 +120,7 @@ void prepareFileBrowserData() {
               if (MapCore::loadMapFile(fullPath.c_str())) {
                 extern bool gMapCenterSet;
                 extern bool gMapManuallyPanned;
-                currentOLEDMode = OLED_GPS_MAP;
+                setOLEDMode(OLED_GPS_MAP);
                 gMapCenterSet = false;  // Reset to new map's center
                 gMapManuallyPanned = false;  // Allow GPS to track on new map
               }
@@ -182,45 +182,27 @@ void displayFileBrowserRendered() {
   if (!oledDisplay || !oledConnected) return;
   
   if (!fileBrowserRenderData.valid) {
-    oledDisplay->clearDisplay();
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(0, 0);
-    oledDisplay->println("File Browser");
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Init failed!");
     return;
   }
   
-  // Clear only content area (not footer) to prevent flickering
-  oledDisplay->fillRect(0, 0, SCREEN_WIDTH, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_BLACK);
-  
-  // Layout constants (matching menu style)
-  const int listWidth = 78;       // Width for text list area (increased from 68)
-  const int iconAreaX = 88;       // X position for icon area (after separator, shifted from 78)
+  // Layout constants (matching menu style) - adjusted for global header
+  const int listWidth = 78;       // Width for text list area
+  const int iconAreaX = 88;       // X position for icon area
   const int iconSize = 32;        // Full size icon for selected item
   const int itemHeight = 10;      // Height per item
   const int maxVisibleItems = 4;  // Items visible at once
-  const int startY = 10;          // Start Y after header
+  const int startY = OLED_CONTENT_START_Y + 1;  // Start 1px below header for even spacing
   
-  // === Header: Current Path (truncated to fit) ===
+  // Header is now drawn globally
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, 0);
-  
-  String path = String(fileBrowserRenderData.path);
-  if (path.length() > 12) {
-    // Truncate long paths: .../folder
-    int lastSlash = path.lastIndexOf('/');
-    if (lastSlash > 0 && path.length() - lastSlash < 12) {
-      path = "..." + path.substring(lastSlash);
-    } else {
-      path = path.substring(0, 9) + "...";
-    }
-  }
-  oledDisplay->print(path);
   
   // Draw vertical separator between list and icon area
-  oledDisplay->drawFastVLine(84, 8, OLED_CONTENT_HEIGHT - 8, DISPLAY_COLOR_WHITE);
+  oledDisplay->drawFastVLine(84, OLED_CONTENT_START_Y, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_WHITE);
   
   // Calculate scroll offset to keep selected item visible
   int scrollOffset = 0;
@@ -241,16 +223,16 @@ void displayFileBrowserRendered() {
       
       bool isSelected = (idx == fileBrowserRenderData.selectedIdx);
       
-      // Highlight selected item
+      // Highlight selected item (1px shorter to create gap, no -1 offset)
       if (isSelected) {
-        oledDisplay->fillRect(0, y - 1, listWidth, itemHeight, DISPLAY_COLOR_WHITE);
+        oledDisplay->fillRect(0, y, listWidth, itemHeight - 1, DISPLAY_COLOR_WHITE);
         oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
       } else {
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
       }
       
-      // Draw name (truncate to fit in list area)
-      oledDisplay->setCursor(2, y);
+      // Draw name (truncate to fit in list area, 1px down to align with highlight)
+      oledDisplay->setCursor(2, y + 1);
       String name = String(entry.name);
       if (name.length() > 13) {
         name = name.substring(0, 10) + "...";
@@ -269,10 +251,10 @@ void displayFileBrowserRendered() {
     if (selectedItemIdx >= 0 && selectedItemIdx < FILE_MANAGER_PAGE_SIZE) {
       FileEntry& selectedEntry = fileBrowserRenderData.items[selectedItemIdx];
       
-      // Draw icon (centered in icon area)
+      // Draw icon (centered in content area, not touching header)
       const int availableIconHeight = OLED_CONTENT_HEIGHT - 10;
       int iconX = iconAreaX + (128 - iconAreaX - iconSize) / 2;
-      int iconY = 10 + (availableIconHeight - iconSize - 18) / 2;  // Leave room for text below
+      int iconY = OLED_CONTENT_START_Y + (availableIconHeight - iconSize - 18) / 2;  // Relative to content area
       
       if (selectedEntry.isFolder) {
         drawIcon(oledDisplay, "folder", iconX, iconY, DISPLAY_COLOR_WHITE);
@@ -313,21 +295,14 @@ void displayFileBrowserRendered() {
   
   // Draw scroll indicators if needed (must stay within content area)
   if (scrollOffset > 0) {
-    oledDisplay->setCursor(78, 10);
+    oledDisplay->setCursor(78, OLED_CONTENT_START_Y + 1);
     oledDisplay->print("^");
   }
   if (scrollOffset + maxVisibleItems < fileBrowserRenderData.itemCount) {
-    int scrollDownY = OLED_CONTENT_HEIGHT - 9;
+    int scrollDownY = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 9;
     oledDisplay->setCursor(78, scrollDownY);
     oledDisplay->print("v");
   }
-  
-  // Draw page indicator (right-aligned in header)
-  String pageStr = String(fileBrowserRenderData.selectedIdx + 1) + "/" + String(fileBrowserRenderData.itemCount);
-  int charWidth = 6;
-  int pageStrWidth = pageStr.length() * charWidth;
-  oledDisplay->setCursor(128 - pageStrWidth, 0);
-  oledDisplay->print(pageStr);
   
   // Note: Footer navigation hints now handled by global footer system
   // Don't call display() here - let updateOLEDDisplay() render footer and display in same frame
@@ -386,6 +361,39 @@ void oledFileBrowserBack() {
   fileBrowserPendingAction = FileBrowserPendingAction::NAVIGATE_BACK;
   // Actual navigation will happen in displayFileBrowser() inside I2C transaction
 }
+
+// ============================================================================
+// File Browser Input Handler (registered via OLEDModeEntry)
+// ============================================================================
+
+static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
+  extern NavEvents gNavEvents;
+  if (gNavEvents.down) {
+    oledFileBrowserDown();
+    return true;
+  } else if (gNavEvents.up) {
+    oledFileBrowserUp();
+    return true;
+  }
+  
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
+    oledFileBrowserSelect();
+    return true;
+  }
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+    oledFileBrowserBack();
+    return true;
+  }
+  return false;
+}
+
+extern void displayFileBrowserRendered();
+
+static const OLEDModeEntry sFileBrowserModes[] = {
+  { OLED_FILE_BROWSER, "Files", "file_text", displayFileBrowserRendered, nullptr, fileBrowserInputHandler, false, -1 },
+};
+
+REGISTER_OLED_MODE_MODULE(sFileBrowserModes, sizeof(sFileBrowserModes) / sizeof(sFileBrowserModes[0]), "FileBrowser");
 
 /**
  * Reset file browser (e.g., when switching to this mode)

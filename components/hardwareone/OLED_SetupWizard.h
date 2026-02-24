@@ -19,7 +19,6 @@ SetupWizardResult runOLEDSetupWizard();
 
 // Individual page renderers (for testing/reuse)
 void drawWizardHeader(int pageNum, int totalPages, const char* title);
-void drawHeapBar(int y);
 void drawWizardFooter(const char* leftAction, const char* rightAction, const char* backAction);
 
 #endif // ENABLE_OLED_DISPLAY

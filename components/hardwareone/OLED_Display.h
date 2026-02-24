@@ -106,7 +106,13 @@ enum OLEDMode {
   OLED_MICROPHONE,     // PDM microphone VU meter and recording
   OLED_RTC_DATA,       // RTC date/time/temperature display
   OLED_PRESENCE_DATA,  // STHS34PF80 IR presence/motion sensor view
-  OLED_SPEECH          // ESP-SR speech recognition status and control
+  OLED_SPEECH,         // ESP-SR speech recognition status and control
+  OLED_REMOTE,         // Remote device UI (paired mode only)
+  OLED_UNIFIED_MENU,   // Unified local+remote actions menu
+  OLED_REMOTE_SETTINGS,// Remote device settings editor (paired mode only)
+  OLED_SET_PATTERN,    // Set gamepad pattern password
+  OLED_CHANGE_PASSWORD,// Change password for authenticated user
+  OLED_NOTIFICATIONS   // Notification history viewer
 };
 
 // Menu item structure for OLED menu (legacy - kept for compatibility)
@@ -115,6 +121,31 @@ struct OLEDMenuItem {
   const char* iconName;  // Icon name from embedded icons
   OLEDMode targetMode;   // Mode to switch to when selected
 };
+
+// Extended menu item for dynamic menus (supports remote items and submenus)
+struct OLEDMenuItemEx {
+  char name[24];         // Display name (copied, not pointer)
+  char iconName[24];     // Icon name (copied)
+  char command[48];      // CLI command to execute (for remote items)
+  OLEDMode targetMode;   // Mode to switch to (for local items, OLED_OFF for command items)
+  bool isRemote;         // True if this is a remote item
+  bool isSubmenu;        // True if this opens a submenu
+  bool needsInput;       // True if command requires user input (parsed from help at load time)
+  char submenuId[16];    // Submenu identifier (e.g., "sensors", "network", "system")
+};
+
+// Maximum dynamic menu items (local + remote)
+#define MAX_DYNAMIC_MENU_ITEMS 32
+
+// Dynamic menu state
+extern OLEDMenuItemEx gDynamicMenuItems[];
+extern int gDynamicMenuItemCount;
+
+// Build dynamic menu based on current DataSource (LOCAL/REMOTE/BOTH)
+void buildDynamicMenu();
+
+// Get filtered menu item count based on DataSource
+int getFilteredMenuItemCount();
 
 // ============================================================================
 // Modular OLED Mode Registration System
@@ -155,8 +186,12 @@ public:
 };
 
 // Macro for automatic registration in module files
+// Uses token pasting with __LINE__ to generate unique variable names,
+// allowing multiple registrations in the same translation unit.
+#define _OLED_REG_CONCAT2(a, b) a##b
+#define _OLED_REG_CONCAT(a, b) _OLED_REG_CONCAT2(a, b)
 #define REGISTER_OLED_MODE_MODULE(modes, count, name) \
-  static OLEDModeRegistrar _oled_mode_registrar(modes, count, name)
+  static OLEDModeRegistrar _OLED_REG_CONCAT(_oled_mode_registrar_, __LINE__)(modes, count, name)
 
 // ============================================================================
 // Centralized Navigation Events (computed once per frame, use in inputFunc handlers)
@@ -175,10 +210,51 @@ struct NavEvents {
 
 extern NavEvents gNavEvents;  // Global navigation events, updated each frame
 
+// =============================================================================
+// Data Source Selection (for paired mode)
+// =============================================================================
+// When paired with another device, controls whether menu items use local,
+// remote, or both data sources. Toggled via Start button when paired+online.
+enum class DataSource {
+  LOCAL,   // Use only local sensors/data
+  REMOTE,  // Use only remote sensors/data (via paired peer)
+  BOTH     // Show both local and remote data (split view or merged)
+};
+
+extern DataSource gDataSource;           // Current global data source
+extern bool gDataSourceIndicatorVisible; // Show source indicator in UI
+
+// Cycle through available data sources (called on Start button when paired)
+void oledCycleDataSource();
+
+// Get display string for current source
+const char* oledGetDataSourceLabel();
+
+// Check if remote data source is available (paired + online)
+bool oledRemoteSourceAvailable();
+
 // Menu navigation state
 extern int oledMenuSelectedIndex;
 extern const OLEDMenuItem oledMenuItems[];
 extern const int oledMenuItemCount;
+
+// Category menu system
+extern int oledMenuCategorySelected;
+extern int oledMenuCategoryItemIndex;
+extern const OLEDMenuItem oledMenuCategories[];
+extern const int oledMenuCategoryCount;
+extern const OLEDMenuItem oledMenuCategory0[];
+extern const int oledMenuCategory0Count;
+extern const OLEDMenuItem oledMenuCategory1[];
+extern const int oledMenuCategory1Count;
+extern const OLEDMenuItem oledMenuCategory2[];
+extern const int oledMenuCategory2Count;
+extern const OLEDMenuItem oledMenuCategory3[];
+extern const int oledMenuCategory3Count;
+extern const OLEDMenuItem oledMenuCategory4[];
+extern const int oledMenuCategory4Count;
+extern const OLEDMenuItem oledMenuCategory5[];
+extern const int oledMenuCategory5Count;
 
 // Menu availability enum for checking if menu items are accessible
 enum class MenuAvailability {
@@ -219,6 +295,7 @@ extern bool oledEnabled;
 
 // OLED State Variables (defined in oled_display.cpp)
 extern OLEDMode currentOLEDMode;
+void setOLEDMode(OLEDMode newMode);
 extern String customOLEDText;
 extern unsigned long oledLastUpdate;
 extern unsigned long animationFrame;
@@ -254,6 +331,7 @@ void oledMarkDirtyMode(OLEDMode mode);  // Force next render (compatibility)
 bool oledIsDirty();                // Check if anything changed since last render
 void oledClearDirty();             // Record current sequences after render
 void oledSetAlwaysDirty(bool always);  // For animations that need constant refresh
+void oledMarkDirtyUntil(unsigned long untilMs);  // Keep rendering until timestamp (for popup auto-dismiss)
 
 // Boot sequence helpers (called from setup() and loop())
 bool earlyOLEDInit();  // Probe and init OLED for boot animation
@@ -269,28 +347,17 @@ void displayMenu();
 void displayLogo();
 
 // Power mode functions (OLED_Mode_Power.cpp)
+// Navigation, actions, and input handling are now registered via REGISTER_OLED_MODE_MODULE.
+// Display functions still declared for the render switch in updateOLEDDisplay().
 void displayPower();
 void displayPowerCPU();
 void displayPowerSleep();
-void powerMenuUp();
-void powerMenuDown();
-void powerCpuUp();
-void powerCpuDown();
-void powerSleepUp();
-void powerSleepDown();
-void executePowerAction();
-void executePowerCpuAction();
-void executePowerSleepAction();
-bool powerInputHandler(int deltaX, int deltaY, uint32_t newlyPressed);
 
 // Network mode functions (OLED_Mode_Network.cpp)
+// Navigation, actions, and input handling are now registered via REGISTER_OLED_MODE_MODULE.
 void displayNetworkInfo();
 void displayMeshStatus();
-void networkMenuUp();
-void networkMenuDown();
-void executeNetworkAction();
 void networkMenuBack();
-bool networkInputHandler(int deltaX, int deltaY, uint32_t newlyPressed);
 
 // System mode functions (OLED_Mode_System.cpp)
 void displaySystemStatus();
@@ -316,8 +383,18 @@ void displayAPDSData();
 void oledMenuUp();
 void oledMenuDown();
 void oledMenuSelect();
-void oledMenuBack();
+bool oledMenuBack();  // Returns true if handled (was in submenu)
 void resetOLEDMenu();
+
+// Remote submenu functions (for grouped remote menu items)
+void buildRemoteSubmenu(const char* submenuId);
+void exitRemoteSubmenu();
+bool isInRemoteSubmenu();
+OLEDMenuItemEx* getRemoteSubmenuItems();
+int getRemoteSubmenuItemCount();
+int getRemoteSubmenuSelection();
+void setRemoteSubmenuSelection(int sel);
+const char* getRemoteSubmenuId();
 
 // Sensor menu filtering & sorting (OLED_Mode_Menu.cpp)
 void sortSensorMenu();

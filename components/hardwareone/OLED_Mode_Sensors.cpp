@@ -19,7 +19,6 @@
 #endif
 
 // External references
-extern Adafruit_SSD1306* oledDisplay;
 extern bool oledConnected;
 extern OLEDMode currentOLEDMode;
 extern Settings gSettings;
@@ -112,21 +111,17 @@ void displayConnectedSensorsRendered() {
   if (!oledDisplay || !oledConnected) return;
   
   if (!connectedSensorsRenderData.valid) {
-    oledDisplay->clearDisplay();
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(0, 0);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Sensors Error");
     return;
   }
   
-  // Clear only content area to prevent flickering
-  oledDisplay->fillRect(0, 0, SCREEN_WIDTH, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_BLACK);
-  
-  // Render content with scroll offset
+  // Render content with scroll offset (starts after header)
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  int yPos = -connectedSensorsRenderData.scrollOffset;
+  int yPos = OLED_CONTENT_START_Y - connectedSensorsRenderData.scrollOffset;
 
   // Header with sensor count
   if (yPos >= 0 && yPos < OLED_CONTENT_HEIGHT) {
@@ -193,8 +188,8 @@ void displayConnectedSensorsRendered() {
 void displaySensorData() {
   if (!oledDisplay || !oledConnected) return;
   
-  // Sensors Overview - shows status of all sensors (compact to fit in content area)
-  oledDisplay->println("SENSORS");
+  // Sensors Overview - shows status of all sensors (content starts after header)
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   
   int activeCount = 0;
   int totalCount = 0;

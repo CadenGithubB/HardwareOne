@@ -15,10 +15,10 @@
 #include "System_Logging.h"
 #include "System_Utils.h"
 #include "System_SensorLogging.h"
+#include "System_Settings.h"
 #include "System_Debug.h"
 
-// External OLED display pointer
-extern Adafruit_SSD1306* oledDisplay;
+// External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)
 extern bool gLocalDisplayAuthed;
 extern String gLocalDisplayUser;
 
@@ -46,9 +46,10 @@ static const int loggingMainMenuCount = 3;
 static const char* loggingSensorMenuItems[] = {
   "Start Logging",
   "Stop Logging",
+  "Auto-Start",
   "Configure"
 };
-static const int loggingSensorMenuCount = 3;
+static const int loggingSensorMenuCount = 4;
 
 static const char* loggingSystemMenuItems[] = {
   "Start Logging",
@@ -62,11 +63,12 @@ static const char* loggingSensorConfigItems[] = {
   "IMU",
   "Gamepad",
   "APDS",
+  "GPS",
   "Interval",
   "Format",
   "Back"
 };
-static const int loggingSensorConfigCount = 8;
+static const int loggingSensorConfigCount = 9;
 
 // Helper to draw menu items
 static void drawLoggingMenuItem(int y, const char* text, bool selected, bool enabled = true) {
@@ -108,7 +110,7 @@ static void executeLoggingCommand(const String& cmd) {
   bool success = executeCommand(ctx, cmd.c_str(), out, sizeof(out));
   
   if (!success && strlen(out) > 0) {
-    Serial.printf("[LOGGING_CMD] Command failed: %s\n", out);
+    DEBUG_SYSTEMF("[LOGGING_CMD] Command failed: %s", out);
   }
 }
 
@@ -123,10 +125,9 @@ static void displayLoggingMode() {
   
   switch (loggingCurrentState) {
     case LOG_MENU_MAIN: {
-      oledDisplay->setCursor(0, 0);
-      oledDisplay->print("Logging Control");
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
       
-      int startY = 12;
+      int startY = OLED_CONTENT_START_Y;
       for (int i = 0; i < loggingMainMenuCount; i++) {
         drawLoggingMenuItem(startY + (i * 10), loggingMainMenuItems[i], i == loggingMenuSelection);
       }
@@ -134,10 +135,7 @@ static void displayLoggingMode() {
     }
     
     case LOG_MENU_SENSOR: {
-      oledDisplay->setCursor(0, 0);
-      oledDisplay->print("Sensor Logging");
-      
-      oledDisplay->setCursor(0, 10);
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
       if (gSensorLoggingEnabled) {
         oledDisplay->print("Status: ACTIVE");
       } else {
@@ -150,16 +148,20 @@ static void displayLoggingMode() {
         if (i == 0 && gSensorLoggingEnabled) enabled = false;
         if (i == 1 && !gSensorLoggingEnabled) enabled = false;
         
-        drawLoggingMenuItem(startY + (i * 10), loggingSensorMenuItems[i], i == loggingMenuSelection, enabled);
+        char itemText[32];
+        if (i == 2) {
+          // Auto-start menu item - show current status
+          snprintf(itemText, sizeof(itemText), "Auto-Start: %s", gSettings.sensorLogAutoStart ? "ON" : "OFF");
+          drawLoggingMenuItem(startY + (i * 10), itemText, i == loggingMenuSelection, true);
+        } else {
+          drawLoggingMenuItem(startY + (i * 10), loggingSensorMenuItems[i], i == loggingMenuSelection, enabled);
+        }
       }
       break;
     }
     
     case LOG_MENU_SYSTEM: {
-      oledDisplay->setCursor(0, 0);
-      oledDisplay->print("System Logging");
-      
-      oledDisplay->setCursor(0, 10);
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
       if (gSystemLogEnabled) {
         oledDisplay->print("Status: ACTIVE");
       } else {
@@ -178,31 +180,31 @@ static void displayLoggingMode() {
     }
     
     case LOG_MENU_SENSOR_CONFIG: {
-      oledDisplay->setCursor(0, 0);
-      oledDisplay->print("Sensor Config");
-      
       int visibleStart = max(0, loggingSensorConfigSelection - 1);
       int visibleEnd = min(loggingSensorConfigCount, visibleStart + 4);
       
-      int y = 10;
+      int y = OLED_CONTENT_START_Y;
       for (int i = visibleStart; i < visibleEnd; i++) {
         bool selected = (i == loggingSensorConfigSelection);
         
         char itemText[32];
-        if (i < 5) {
+        if (i < 6) {
           bool enabled = false;
           if (i == 0) enabled = (gSensorLogMask & LOG_THERMAL);
           else if (i == 1) enabled = (gSensorLogMask & LOG_TOF);
           else if (i == 2) enabled = (gSensorLogMask & LOG_IMU);
           else if (i == 3) enabled = (gSensorLogMask & LOG_GAMEPAD);
           else if (i == 4) enabled = (gSensorLogMask & LOG_APDS);
+          else if (i == 5) enabled = (gSensorLogMask & LOG_GPS);
           
           snprintf(itemText, sizeof(itemText), "%s: %s", 
                    loggingSensorConfigItems[i], enabled ? "ON" : "OFF");
-        } else if (i == 5) {
-          snprintf(itemText, sizeof(itemText), "Int: %lums", gSensorLogIntervalMs);
         } else if (i == 6) {
-          snprintf(itemText, sizeof(itemText), "Fmt: %s", gSensorLogFormatCSV ? "CSV" : "TXT");
+          snprintf(itemText, sizeof(itemText), "Int: %lums", gSensorLogIntervalMs);
+        } else if (i == 7) {
+          const char* fmtName = (gSensorLogFormat == SENSOR_LOG_CSV) ? "CSV" :
+                               (gSensorLogFormat == SENSOR_LOG_TRACK) ? "TRK" : "TXT";
+          snprintf(itemText, sizeof(itemText), "Fmt: %s", fmtName);
         } else {
           snprintf(itemText, sizeof(itemText), "%s", loggingSensorConfigItems[i]);
         }
@@ -223,13 +225,11 @@ static void displayLoggingMode() {
     }
     
     case LOG_MENU_VIEWER: {
-      oledDisplay->setCursor(0, 0);
-      oledDisplay->print("Log Viewer");
-      oledDisplay->setCursor(0, 12);
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
       oledDisplay->print("Not implemented");
-      oledDisplay->setCursor(0, 24);
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y + 12);
       oledDisplay->print("Use CLI viewer");
-      oledDisplay->setCursor(0, 36);
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y + 24);
       oledDisplay->print("or web interface");
       break;
     }
@@ -282,6 +282,9 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
       } else if (loggingMenuSelection == 1 && gSensorLoggingEnabled) {
         executeLoggingCommand("sensorlog stop");
       } else if (loggingMenuSelection == 2) {
+        // Toggle auto-start
+        executeLoggingCommand("sensorlog autostart");
+      } else if (loggingMenuSelection == 3) {
         loggingCurrentState = LOG_MENU_SENSOR_CONFIG;
         loggingSensorConfigSelection = 0;
       }
@@ -292,24 +295,27 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         executeLoggingCommand("log stop");
       }
     } else if (loggingCurrentState == LOG_MENU_SENSOR_CONFIG) {
-      if (loggingSensorConfigSelection < 5) {
+      if (loggingSensorConfigSelection < 6) {
         uint8_t mask = 0;
         if (loggingSensorConfigSelection == 0) mask = LOG_THERMAL;
         else if (loggingSensorConfigSelection == 1) mask = LOG_TOF;
         else if (loggingSensorConfigSelection == 2) mask = LOG_IMU;
         else if (loggingSensorConfigSelection == 3) mask = LOG_GAMEPAD;
         else if (loggingSensorConfigSelection == 4) mask = LOG_APDS;
+        else if (loggingSensorConfigSelection == 5) mask = LOG_GPS;
         
         gSensorLogMask ^= mask;
-      } else if (loggingSensorConfigSelection == 5) {
+      } else if (loggingSensorConfigSelection == 6) {
         if (gSensorLogIntervalMs == 1000) gSensorLogIntervalMs = 5000;
         else if (gSensorLogIntervalMs == 5000) gSensorLogIntervalMs = 10000;
         else if (gSensorLogIntervalMs == 10000) gSensorLogIntervalMs = 30000;
         else if (gSensorLogIntervalMs == 30000) gSensorLogIntervalMs = 60000;
         else gSensorLogIntervalMs = 1000;
-      } else if (loggingSensorConfigSelection == 6) {
-        gSensorLogFormatCSV = !gSensorLogFormatCSV;
       } else if (loggingSensorConfigSelection == 7) {
+        if (gSensorLogFormat == SENSOR_LOG_TEXT) gSensorLogFormat = SENSOR_LOG_CSV;
+        else if (gSensorLogFormat == SENSOR_LOG_CSV) gSensorLogFormat = SENSOR_LOG_TRACK;
+        else gSensorLogFormat = SENSOR_LOG_TEXT;
+      } else if (loggingSensorConfigSelection == 8) {
         loggingCurrentState = LOG_MENU_SENSOR;
         loggingMenuSelection = 2;
       }

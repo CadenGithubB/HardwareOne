@@ -12,9 +12,9 @@
 #include "OLED_Utils.h"
 #include "OLED_ConsoleBuffer.h"
 #include "System_Utils.h"
+#include "System_Debug.h"
 
-// External OLED display pointer and console buffer
-extern Adafruit_SSD1306* oledDisplay;
+// External OLED console buffer (display pointer via HAL_Display.h #define oledDisplay gDisplay)
 extern OLEDConsoleBuffer gOLEDConsole;
 
 // CLI viewer state
@@ -22,7 +22,8 @@ static int cliScrollOffset = 0;
 static uint32_t cliSelectedTimestamp = 0;  // Track by timestamp (survives buffer shifts)
 static bool cliShowingDetail = false;
 static uint32_t cliDetailLockedTimestamp = 0;  // Locked message timestamp when viewing detail
-static const int CLI_MAX_VISIBLE_LINES = 5;
+// Calculate max visible lines based on content area (43px / 10px per line = 4 lines)
+static const int CLI_MAX_VISIBLE_LINES = OLED_CONTENT_HEIGHT / 10;
 
 // Helper: find index by timestamp, returns -1 if not found
 static int findIndexByTimestamp(uint32_t ts) {
@@ -43,7 +44,7 @@ int getCLIViewerSelectedIndex() {
 // CLI display function
 static void displayCLIViewer() {
   if (!oledDisplay) {
-    Serial.println("[CLI_VIEWER] oledDisplay is NULL!");
+    ERROR_SYSTEMF("[CLI_VIEWER] oledDisplay is NULL!");
     return;
   }
   
@@ -52,7 +53,7 @@ static void displayCLIViewer() {
   
   // Lock buffer for reading
   if (!gOLEDConsole.mutex || xSemaphoreTake(gOLEDConsole.mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
-    oledDisplay->setCursor(0, 0);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->print("Buffer locked...");
     return;
   }
@@ -61,7 +62,7 @@ static void displayCLIViewer() {
   
   if (totalLines == 0) {
     xSemaphoreGive(gOLEDConsole.mutex);
-    oledDisplay->setCursor(0, 0);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->print("No CLI output yet");
     return;
   }
@@ -92,7 +93,7 @@ static void displayCLIViewer() {
   int startIdx = max(0, endIdx - CLI_MAX_VISIBLE_LINES);
   int visibleCount = endIdx - startIdx;
   
-  // Detail popup - improved layout
+  // Detail popup - improved layout (in content area)
   if (cliShowingDetail && visibleCount > 0) {
     // Find locked message by timestamp (survives buffer shifts)
     int selectedIdx = findIndexByTimestamp(cliDetailLockedTimestamp);
@@ -106,27 +107,27 @@ static void displayCLIViewer() {
     uint32_t timestamp = gOLEDConsole.getTimestamp(selectedIdx);
     
     if (line) {
-      // Full screen detail view with better formatting
-      oledDisplay->fillRect(0, 0, 128, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_WHITE);
-      oledDisplay->drawRect(0, 0, 128, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_BLACK);
+      // Full screen detail view in content area
+      oledDisplay->fillRect(0, OLED_CONTENT_START_Y, 128, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_WHITE);
+      oledDisplay->drawRect(0, OLED_CONTENT_START_Y, 128, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_BLACK);
       oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
       
       // Header: Line number
-      oledDisplay->setCursor(2, 2);
+      oledDisplay->setCursor(2, OLED_CONTENT_START_Y + 2);
       oledDisplay->setTextSize(1);
       oledDisplay->printf("Line %d/%d", selectedIdx + 1, totalLines);
       
       // Timestamp (seconds since boot)
-      oledDisplay->setCursor(2, 12);
+      oledDisplay->setCursor(2, OLED_CONTENT_START_Y + 12);
       oledDisplay->printf("T: %lu.%03lu s", timestamp / 1000, timestamp % 1000);
       
       // Separator line
-      oledDisplay->drawFastHLine(2, 22, 124, DISPLAY_COLOR_BLACK);
+      oledDisplay->drawFastHLine(2, OLED_CONTENT_START_Y + 22, 124, DISPLAY_COLOR_BLACK);
       
-      // Content - word wrap across multiple lines
-      int contentY = 24;
+      // Content - word wrap across 2 lines (44px content area)
+      int contentY = OLED_CONTENT_START_Y + 24;
       int lineHeight = 10;
-      int maxLines = 3;  // 3 lines of content
+      int maxLines = 2;  // 2 lines of content fit in 44px
       int charsPerLine = 20;
       
       size_t lineLen = strlen(line);
@@ -147,9 +148,12 @@ static void displayCLIViewer() {
     return;
   }
   
-  // Normal view
-  int y = 0;
-  for (int i = startIdx; i < endIdx; i++) {
+  // Normal view (in content area) - ensure lines don't overflow into footer
+  int y = OLED_CONTENT_START_Y;
+  const int lineHeight = 10;
+  const int maxY = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - lineHeight;
+  
+  for (int i = startIdx; i < endIdx && y <= maxY; i++) {
     const char* line = gOLEDConsole.getLine(i);
     if (line) {
       bool isSelected = (i == cliSelectedIndex);
@@ -164,20 +168,20 @@ static void displayCLIViewer() {
       strncpy(truncated, line, 20);
       truncated[20] = '\0';
       oledDisplay->print(truncated);
-      y += 10;
+      y += lineHeight;
     }
   }
   
   xSemaphoreGive(gOLEDConsole.mutex);
   
-  // Scroll indicators
+  // Scroll indicators (in content area)
   if (cliScrollOffset > 0) {
-    oledDisplay->setCursor(120, 0);
-    oledDisplay->print("v");
+    oledDisplay->setCursor(120, OLED_CONTENT_START_Y);
+    oledDisplay->print("\x19");  // Down arrow (more below)
   }
   if (startIdx > 0) {
-    oledDisplay->setCursor(120, 44);
-    oledDisplay->print("^");
+    oledDisplay->setCursor(120, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 10);
+    oledDisplay->print("\x18");  // Up arrow (more above)
   }
 }
 
@@ -247,13 +251,13 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
   
   // Navigation using centralized gNavEvents (already has debounce/auto-repeat)
   if (gNavEvents.up) {
-    // Move to older message
+    // Move to older message (scroll up in history)
     if (currentIdx > 0) {
       cliSelectedTimestamp = gOLEDConsole.getTimestamp(currentIdx - 1);
     }
     handled = true;
   } else if (gNavEvents.down) {
-    // Move to newer message
+    // Move to newer message (scroll down in history)
     if (currentIdx < totalLines - 1) {
       cliSelectedTimestamp = gOLEDConsole.getTimestamp(currentIdx + 1);
     }
