@@ -1,5 +1,34 @@
-idf_component_register(
-    SRCS
+set(hw_cfg_file "${CMAKE_CURRENT_LIST_DIR}/System_BuildConfig.h")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${hw_cfg_file}")
+
+set(HW_CFG_NETWORK_FEATURE_LEVEL 0)
+set(HW_CFG_WEB_FEATURE_LEVEL 0)
+set(HW_CFG_ENABLE_MQTT 0)
+
+if(EXISTS "${hw_cfg_file}")
+    file(READ "${hw_cfg_file}" HW_CFG_CONTENT)
+    string(REGEX MATCH "#define[ \t]+NETWORK_FEATURE_LEVEL[ \t]+([0-9]+)" _net_match "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_NETWORK_FEATURE_LEVEL "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+WEB_FEATURE_LEVEL[ \t]+([0-9]+)" _web_match "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_WEB_FEATURE_LEVEL "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_MQTT[ \t]+([0-9]+)" _mqtt_match "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_MQTT "${CMAKE_MATCH_1}")
+    endif()
+endif()
+
+set(HW_CFG_ENABLE_HTTP_SERVER 0)
+if(HW_CFG_NETWORK_FEATURE_LEVEL GREATER_EQUAL 2 AND HW_CFG_WEB_FEATURE_LEVEL GREATER 0)
+    set(HW_CFG_ENABLE_HTTP_SERVER 1)
+endif()
+
+set(hardwareone_srcs
         HardwareOne.cpp
         i2csensor-apds9960.cpp
         i2csensor-pa1010d.cpp
@@ -11,17 +40,9 @@ idf_component_register(
         i2csensor-rda5807.cpp
         i2csensor-ds3231.cpp
         i2csensor-sths34pf80.cpp
-        WebServer_Events.cpp
-        WebServer_Server.cpp
-        WebServer_Utils.cpp
-        WebPage_Sensors.cpp
-        WebPage_Maps.cpp
-        WebPage_Games.cpp
-        WebPage_ESPNow.cpp
-        WebPage_Bluetooth.cpp
-        WebPage_Speech.cpp
         System_Automation.cpp
         Optional_Bluetooth.cpp
+        BLE_IDF.cpp
         Optional_EvenG2.cpp
         System_Battery.cpp
         System_CLI.cpp
@@ -57,7 +78,14 @@ idf_component_register(
         OLED_Mode_Animations.cpp
         OLED_Mode_Menu.cpp
         OLED_Mode_FileBrowser.cpp
+        OLED_Mode_Automations.cpp
         OLED_Mode_Speech.cpp
+        OLED_Mode_Remote.cpp
+        OLED_Mode_UnifiedMenu.cpp
+        OLED_Mode_RemoteSettings.cpp
+        OLED_Mode_SetPattern.cpp
+        OLED_RemoteSettings.cpp
+        OLED_UI.cpp
         System_MemoryMonitor.cpp
         i2csensor-pca9685.cpp
         System_Hardware.cpp
@@ -73,8 +101,6 @@ idf_component_register(
         System_Auth.cpp
         System_Users.cpp
         System_WiFi.cpp
-        System_MQTT.cpp
-        WebPage_MQTT.cpp
         System_Camera_DVP.cpp
         System_ImageManager.cpp
         System_EdgeImpulse.cpp
@@ -82,19 +108,55 @@ idf_component_register(
         System_VFS.cpp
         System_Microphone.cpp
         System_SensorRegistry.cpp
-    INCLUDE_DIRS
-        .
-    REQUIRES
+        System_Notifications.cpp
+)
+
+set(hardwareone_requires
         arduino
         hardwareone_libs
-        esp_http_server
         bt
         esp_wifi
         esp32-camera
         fatfs
         sdmmc
         esp_driver_sdspi
-        mqtt
+)
+
+if(HW_CFG_ENABLE_MQTT GREATER 0)
+    list(APPEND hardwareone_srcs
+            System_MQTT.cpp
+    )
+    list(APPEND hardwareone_requires mqtt)
+    message(STATUS "MQTT support ENABLED")
+else()
+    message(STATUS "MQTT support DISABLED")
+endif()
+
+if(HW_CFG_ENABLE_HTTP_SERVER)
+    list(APPEND hardwareone_srcs
+            WebServer_Events.cpp
+            WebServer_Server.cpp
+            WebServer_Utils.cpp
+            WebPage_Sensors.cpp
+            WebPage_Maps.cpp
+            WebPage_Games.cpp
+            WebPage_ESPNow.cpp
+            WebPage_ESPNow_Metadata.cpp
+            WebPage_Pair.cpp
+            WebPage_Bluetooth.cpp
+            WebPage_Speech.cpp
+            WebPage_MQTT.cpp
+    )
+    list(APPEND hardwareone_requires esp_http_server)
+endif()
+
+idf_component_register(
+    SRCS
+        ${hardwareone_srcs}
+    INCLUDE_DIRS
+        .
+    REQUIRES
+        ${hardwareone_requires}
 )
 
 # Enable Sense features for ESP32-S3 boards (camera, mic, SD card on expansion board)

@@ -138,7 +138,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
     
     <!-- Detection Log Card -->
     <div class='sr-card'>
-      <div class='sr-title'>📋 Detection Log</div>
+      <div class='sr-title'>Detection Log</div>
       <div class='sr-description'>
         Recent wake word and command detections. Log updates automatically when SR is running.
       </div>
@@ -154,7 +154,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   
   <!-- Debug & Tuning Card -->
   <div class='sr-card' style='margin-top:20px'>
-    <div class='sr-title'>🔧 Debug & Tuning</div>
+    <div class='sr-title'>Debug & Tuning</div>
     <div class='sr-description'>
       Audio gain settings and debug options to improve recognition accuracy.
     </div>
@@ -534,10 +534,10 @@ inline void streamSpeechInner(httpd_req_t* req) {
           var html = '';
           for(var k=0; k<files.length; k++){
             var f = files[k];
-            var icon = '📄';
-            if(f.endsWith('.wn')) icon = '🎤';
-            else if(f.endsWith('.txt')) icon = '📝';
-            else if(f.endsWith('.bin')) icon = '⚙️';
+            var icon = '';
+            if(f.endsWith('.wn')) icon = '';
+            else if(f.endsWith('.txt')) icon = '';
+            else if(f.endsWith('.bin')) icon = '';
             html += '<div style="padding:6px 8px;border-bottom:1px solid var(--border)">' + icon + ' ' + f + '</div>';
           }
           fileList.innerHTML = html;
