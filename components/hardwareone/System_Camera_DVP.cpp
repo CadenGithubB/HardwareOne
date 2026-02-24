@@ -20,9 +20,6 @@
 #include "System_Settings.h"
 #include <ArduinoJson.h>
 
-// SSE status broadcast
-extern void sensorStatusBumpWith(const char* reason);
-
 static SemaphoreHandle_t gCameraMutex = nullptr;
 
 static SemaphoreHandle_t getCameraMutex() {
@@ -773,7 +770,7 @@ const char* buildCameraStatusJson() {
     }
   }
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   doc["enabled"] = cameraEnabled;
   doc["connected"] = cameraConnected;
   doc["streaming"] = cameraStreaming;
@@ -851,8 +848,7 @@ const char* cmd_camerares(const String& args) {
   else return "Unknown resolution. Use: qqvga, qvga, vga, svga, xga, sxga, uxga";
   
   // Save to settings for persistence
-  gSettings.cameraFramesize = cameraFramesizeSettingFromEnum(newSize);
-  writeSettingsJson();
+  setSetting(gSettings.cameraFramesize, (int)cameraFramesizeSettingFromEnum(newSize));
   
   // If camera is running, do a full restart for reliable resolution change
   bool wasEnabled = cameraEnabled;
@@ -894,8 +890,7 @@ const char* cmd_cameraframesize(const String& args) {
     return "Framesize must be 0-5 (QVGA/VGA/SVGA/XGA/SXGA/UXGA)";
   }
   
-  gSettings.cameraFramesize = newSize;
-  writeSettingsJson();
+  setSetting(gSettings.cameraFramesize, newSize);
   
   // If camera is running, restart to apply
   bool wasEnabled = cameraEnabled;
@@ -930,8 +925,7 @@ const char* cmd_cameraquality(const String& args) {
   }
   
   // Save to settings for persistence
-  gSettings.cameraQuality = quality;
-  writeSettingsJson();
+  setSetting(gSettings.cameraQuality, quality);
   
   // Apply live if camera is running (quality can be changed without restart)
   if (cameraEnabled) {
@@ -999,8 +993,7 @@ const char* cmd_camerabrightness(const String& args) {
   int val = valStr.toInt();
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_brightness(s, val) == 0) {
-    gSettings.cameraBrightness = val;
-    writeSettingsJson();
+    setSetting(gSettings.cameraBrightness, val);
     static char result[48];
     snprintf(result, sizeof(result), "Brightness set to %d (saved)", val);
     return result;
@@ -1024,8 +1017,7 @@ const char* cmd_cameracontrast(const String& args) {
   int val = valStr.toInt();
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_contrast(s, val) == 0) {
-    gSettings.cameraContrast = val;
-    writeSettingsJson();
+    setSetting(gSettings.cameraContrast, val);
     static char result[48];
     snprintf(result, sizeof(result), "Contrast set to %d (saved)", val);
     return result;
@@ -1049,8 +1041,7 @@ const char* cmd_camerasaturation(const String& args) {
   int val = valStr.toInt();
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_saturation(s, val) == 0) {
-    gSettings.cameraSaturation = val;
-    writeSettingsJson();
+    setSetting(gSettings.cameraSaturation, val);
     static char result[48];
     snprintf(result, sizeof(result), "Saturation set to %d (saved)", val);
     return result;
@@ -1076,8 +1067,7 @@ const char* cmd_camerawb(const String& args) {
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_wb_mode(s, val) == 0) {
-    gSettings.cameraWBMode = val;
-    writeSettingsJson();
+    setSetting(gSettings.cameraWBMode, val);
     static char result[48];
     snprintf(result, sizeof(result), "WB mode set to %d (saved)", val);
     return result;
@@ -1103,8 +1093,7 @@ const char* cmd_camerasharpness(const String& args) {
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_sharpness && s->set_sharpness(s, val) == 0) {
-    gSettings.cameraSharpness = val;
-    writeSettingsJson();
+    setSetting(gSettings.cameraSharpness, val);
     static char result[48];
     snprintf(result, sizeof(result), "Sharpness set to %d (saved)", val);
     return result;
@@ -1130,8 +1119,7 @@ const char* cmd_cameradenoise(const String& args) {
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_denoise && s->set_denoise(s, val) == 0) {
-    gSettings.cameraDenoise = val;
-    writeSettingsJson();
+    setSetting(gSettings.cameraDenoise, val);
     static char result[48];
     snprintf(result, sizeof(result), "Denoise set to %d (saved)", val);
     return result;
@@ -1157,8 +1145,7 @@ const char* cmd_cameraeffect(const String& args) {
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_special_effect(s, val) == 0) {
-    gSettings.cameraSpecialEffect = val;
-    writeSettingsJson();
+    setSetting(gSettings.cameraSpecialEffect, val);
     static char result[48];
     snprintf(result, sizeof(result), "Effect set to %d (saved)", val);
     return result;
@@ -1184,8 +1171,7 @@ const char* cmd_cameraexposure(const String& args) {
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_ae_level(s, val) == 0) {
-    gSettings.cameraAELevel = val;
-    writeSettingsJson();
+    setSetting(gSettings.cameraAELevel, val);
     static char result[64];
     snprintf(result, sizeof(result), "AE Level set to %d (saved)", val);
     return result;
@@ -1232,8 +1218,7 @@ const char* cmd_camerastreaminterval(const String& args) {
 
   int val = valStr.toInt();
   if (val < 50 || val > 2000) return "cameraStreamIntervalMs must be 50-2000";
-  gSettings.cameraStreamIntervalMs = val;
-  writeSettingsJson();
+  setSetting(gSettings.cameraStreamIntervalMs, val);
   static char buf[64];
   snprintf(buf, sizeof(buf), "cameraStreamIntervalMs set to %d ms", val);
   return buf;
@@ -1331,8 +1316,7 @@ const char* cmd_camerahmirror(const String& args) {
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_hmirror(s, enable ? 1 : 0) == 0) {
-    gSettings.cameraHMirror = enable;
-    writeSettingsJson();
+    setSetting(gSettings.cameraHMirror, enable);
     return enable ? "H-Mirror enabled (saved)" : "H-Mirror disabled (saved)";
   }
   return "Failed";
@@ -1354,8 +1338,7 @@ const char* cmd_cameravflip(const String& args) {
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_vflip(s, enable ? 1 : 0) == 0) {
-    gSettings.cameraVFlip = enable;
-    writeSettingsJson();
+    setSetting(gSettings.cameraVFlip, enable);
     return enable ? "V-Flip enabled (saved)" : "V-Flip disabled (saved)";
   }
   return "Failed";
@@ -1380,9 +1363,8 @@ const char* cmd_camerarotate(const String& args) {
   if (s) {
     s->set_hmirror(s, enable ? 1 : 0);
     s->set_vflip(s, enable ? 1 : 0);
-    gSettings.cameraHMirror = enable;
-    gSettings.cameraVFlip = enable;
-    writeSettingsJson();
+    setSetting(gSettings.cameraHMirror, enable);
+    setSetting(gSettings.cameraVFlip, enable);
     return enable ? "Rotated 180° (hmirror+vflip enabled, saved)" : "Rotation disabled (saved)";
   }
   return "Failed";
@@ -1394,16 +1376,19 @@ const char* cmd_camerarotate(const String& args) {
 
 const char* cmd_cameraautostart(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args;
-  arg.trim();
-  
+  String arg = args; arg.trim();
   if (arg.length() == 0) {
-    return gSettings.cameraAutoStart ? "cameraAutoStart = true" : "cameraAutoStart = false";
+    return gSettings.cameraAutoStart ? "[Camera] Auto-start: enabled" : "[Camera] Auto-start: disabled";
   }
-  bool enable = (arg == "1" || arg.equalsIgnoreCase("true") || arg.equalsIgnoreCase("on"));
-  gSettings.cameraAutoStart = enable;
-  writeSettingsJson();
-  return enable ? "cameraAutoStart set to true" : "cameraAutoStart set to false";
+  arg.toLowerCase();
+  if (arg == "on" || arg == "true" || arg == "1") {
+    setSetting(gSettings.cameraAutoStart, true);
+    return "[Camera] Auto-start enabled";
+  } else if (arg == "off" || arg == "false" || arg == "0") {
+    setSetting(gSettings.cameraAutoStart, false);
+    return "[Camera] Auto-start disabled";
+  }
+  return "Usage: cameraautostart [on|off]";
 }
 
 const char* cmd_camerastoragelocation(const String& args) {
@@ -1418,8 +1403,7 @@ const char* cmd_camerastoragelocation(const String& args) {
   }
   int val = valStr.toInt();
   if (val < 0 || val > 2) return "Error: cameraStorageLocation must be 0-2";
-  gSettings.cameraStorageLocation = val;
-  writeSettingsJson();
+  setSetting(gSettings.cameraStorageLocation, val);
   static char buf[48];
   snprintf(buf, sizeof(buf), "cameraStorageLocation set to %d", val);
   return buf;
@@ -1435,8 +1419,7 @@ const char* cmd_cameracapturefolder(const String& args) {
     snprintf(buf, sizeof(buf), "cameraCaptureFolder = %s", gSettings.cameraCaptureFolder.c_str());
     return buf;
   }
-  gSettings.cameraCaptureFolder = val;
-  writeSettingsJson();
+  setSetting(gSettings.cameraCaptureFolder, val);
   static char buf[128];
   snprintf(buf, sizeof(buf), "cameraCaptureFolder set to %s", val.c_str());
   return buf;
@@ -1454,8 +1437,7 @@ const char* cmd_cameramaxstoredimages(const String& args) {
   }
   int val = valStr.toInt();
   if (val < 0 || val > 1000) return "Error: cameraMaxStoredImages must be 0-1000";
-  gSettings.cameraMaxStoredImages = val;
-  writeSettingsJson();
+  setSetting(gSettings.cameraMaxStoredImages, val);
   static char buf[48];
   snprintf(buf, sizeof(buf), "cameraMaxStoredImages set to %d", val);
   return buf;
@@ -1470,12 +1452,11 @@ const char* cmd_cameraautocapture(const String& args) {
     return gSettings.cameraAutoCapture ? "cameraAutoCapture = true" : "cameraAutoCapture = false";
   }
   bool enable = (arg == "1" || arg.equalsIgnoreCase("true") || arg.equalsIgnoreCase("on"));
-  gSettings.cameraAutoCapture = enable;
+  setSetting(gSettings.cameraAutoCapture, enable);
   // Set default capture folder if enabling and folder is empty
   if (enable && gSettings.cameraCaptureFolder.length() == 0) {
-    gSettings.cameraCaptureFolder = "/photos";
+    setSetting(gSettings.cameraCaptureFolder, String("/photos"));
   }
-  writeSettingsJson();
   return enable ? "cameraAutoCapture set to true" : "cameraAutoCapture set to false";
 }
 
@@ -1491,8 +1472,7 @@ const char* cmd_cameraautocaptureinterval(const String& args) {
   }
   int val = valStr.toInt();
   if (val < 10 || val > 3600) return "Error: cameraAutoCaptureInterval must be 10-3600";
-  gSettings.cameraAutoCaptureIntervalSec = val;
-  writeSettingsJson();
+  setSetting(gSettings.cameraAutoCaptureIntervalSec, val);
   static char buf[48];
   snprintf(buf, sizeof(buf), "cameraAutoCaptureInterval set to %d sec", val);
   return buf;
@@ -1507,8 +1487,7 @@ const char* cmd_camerasendaftercapture(const String& args) {
     return gSettings.cameraSendAfterCapture ? "cameraSendAfterCapture = true" : "cameraSendAfterCapture = false";
   }
   bool enable = (arg == "1" || arg.equalsIgnoreCase("true") || arg.equalsIgnoreCase("on"));
-  gSettings.cameraSendAfterCapture = enable;
-  writeSettingsJson();
+  setSetting(gSettings.cameraSendAfterCapture, enable);
   return enable ? "cameraSendAfterCapture set to true" : "cameraSendAfterCapture set to false";
 }
 
@@ -1522,8 +1501,7 @@ const char* cmd_cameratargetdevice(const String& args) {
     snprintf(buf, sizeof(buf), "cameraTargetDevice = %s", gSettings.cameraTargetDevice.c_str());
     return buf;
   }
-  gSettings.cameraTargetDevice = val;
-  writeSettingsJson();
+  setSetting(gSettings.cameraTargetDevice, val);
   static char buf[128];
   snprintf(buf, sizeof(buf), "cameraTargetDevice set to %s", val.c_str());
   return buf;
@@ -1546,8 +1524,7 @@ const char* cmd_camerasave(const String& cmd) {
   
   // Ensure capture folder exists and set default if needed
   if (gSettings.cameraCaptureFolder.length() == 0) {
-    gSettings.cameraCaptureFolder = "/photos";
-    writeSettingsJson();
+    setSetting(gSettings.cameraCaptureFolder, String("/photos"));
   }
   
   // Capture and save
@@ -1562,39 +1539,39 @@ const char* cmd_camerasave(const String& cmd) {
 
 // Command registry
 const CommandEntry cameraCommands[] = {
-  {"camera",           "Show camera status",              false, cmd_camera},
-  {"opencamera",       "Initialize and start camera",     false, cmd_camerastart, nullptr, "camera", "open"},
-  {"closecamera",      "Stop camera",                     false, cmd_camerastop, nullptr, "camera", "close"},
-  {"cameracapture",    "Capture a single frame",          false, cmd_cameracapture, nullptr, "camera", "take picture"},
+  {"cameraread",       "Read camera status",              false, cmd_camera},
+  {"opencamera",       "Start camera sensor.",            false, cmd_camerastart, nullptr, "sensor", "camera", "open"},
+  {"closecamera",      "Stop camera sensor.",             false, cmd_camerastop, nullptr, "sensor", "camera", "close"},
+  {"cameracapture",    "Capture a single frame",          false, cmd_cameracapture, nullptr, "sensor", "camera", "take picture"},
   {"camerasave",       "Save current frame to storage",   false, cmd_camerasave},
-  {"camerares",        "Set camera resolution",           false, cmd_camerares},
-  {"cameraframesize",  "Set resolution (0-5)",            true,  cmd_cameraframesize},
-  {"cameraquality",    "Set JPEG quality (0-63)",         false, cmd_cameraquality},
-  {"camerastreaminterval", "Set MJPEG stream interval (ms)", true, cmd_camerastreaminterval},
+  {"camerares",        "Set camera resolution: <res>",    false, cmd_camerares},
+  {"cameraframesize",  "Set resolution: <0-5>",           true,  cmd_cameraframesize},
+  {"cameraquality",    "Set JPEG quality: <0-63>",        false, cmd_cameraquality},
+  {"camerastreaminterval", "Stream interval: <ms>",       true, cmd_camerastreaminterval},
   {"cameratiny",       "Capture tiny frame for ESP-NOW",  false, cmd_cameratiny},
-  {"camerabrightness", "Set brightness (-2 to 2)",        false, cmd_camerabrightness},
-  {"cameracontrast",   "Set contrast (-2 to 2)",          false, cmd_cameracontrast},
-  {"camerasaturation", "Set saturation (-2 to 2)",        false, cmd_camerasaturation},
-  {"camerawb",         "White balance mode (0-4)",        true,  cmd_camerawb},
-  {"camerasharpness",  "Set sharpness (-2 to 2)",         true,  cmd_camerasharpness},
-  {"cameradenoise",    "Set denoise level (0-8)",         true,  cmd_cameradenoise},
-  {"cameraeffect",     "Special effect (0-6)",            true,  cmd_cameraeffect},
-  {"cameraexposure",   "Set AE level (-2 to 2)",          true,  cmd_cameraexposure},
-  {"cameraaec",        "Auto exposure on/off (manual)",    true,  cmd_cameraaec},
-  {"cameraaecvalue",   "Manual exposure value (0-1200)",   true,  cmd_cameraaecvalue},
-  {"cameraagc",        "Auto gain on/off (manual)",        true,  cmd_cameraagc},
-  {"cameraagcgain",    "Manual gain value (0-30)",         true,  cmd_cameraagcgain},
-  {"camerahmirror",    "Horizontal mirror (on/off)",      false, cmd_camerahmirror},
-  {"cameravflip",      "Vertical flip (on/off)",          false, cmd_cameravflip},
-  {"camerarotate",     "Rotate 180° (on/off)",            false, cmd_camerarotate},
-  {"cameraautostart",  "Auto-start camera after boot",    true,  cmd_cameraautostart},
-  {"camerastoragelocation", "Storage location (0-2)",     true,  cmd_camerastoragelocation},
-  {"cameracapturefolder",   "Photo folder path",          true,  cmd_cameracapturefolder},
-  {"cameramaxstoredimages", "Max stored images (0-1000)", true,  cmd_cameramaxstoredimages},
-  {"cameraautocapture",     "Enable auto-capture",        true,  cmd_cameraautocapture},
-  {"cameraautocaptureinterval", "Auto-capture interval (sec)", true, cmd_cameraautocaptureinterval},
-  {"camerasendaftercapture", "Send to target after capture", true, cmd_camerasendaftercapture},
-  {"cameratargetdevice",    "ESP-NOW target device name", true,  cmd_cameratargetdevice},
+  {"camerabrightness", "Set brightness: <-2..2>",         false, cmd_camerabrightness},
+  {"cameracontrast",   "Set contrast: <-2..2>",           false, cmd_cameracontrast},
+  {"camerasaturation", "Set saturation: <-2..2>",         false, cmd_camerasaturation},
+  {"camerawb",         "White balance mode: <0-4>",       true,  cmd_camerawb},
+  {"camerasharpness",  "Set sharpness: <-2..2>",          true,  cmd_camerasharpness},
+  {"cameradenoise",    "Set denoise level: <0-8>",        true,  cmd_cameradenoise},
+  {"cameraeffect",     "Special effect: <0-6>",           true,  cmd_cameraeffect},
+  {"cameraexposure",   "Set AE level: <-2..2>",           true,  cmd_cameraexposure},
+  {"cameraaec",        "Auto exposure: <on|off>",         true,  cmd_cameraaec},
+  {"cameraaecvalue",   "Exposure value: <0-1200>",        true,  cmd_cameraaecvalue},
+  {"cameraagc",        "Auto gain: <on|off>",             true,  cmd_cameraagc},
+  {"cameraagcgain",    "Gain value: <0-30>",              true,  cmd_cameraagcgain},
+  {"camerahmirror",    "Horizontal mirror: <on|off>",     false, cmd_camerahmirror},
+  {"cameravflip",      "Vertical flip: <on|off>",         false, cmd_cameravflip},
+  {"camerarotate",     "Rotate 180°: <on|off>",           false, cmd_camerarotate},
+  {"cameraautostart",  "Auto-start: <on|off>",            true,  cmd_cameraautostart},
+  {"camerastoragelocation", "Storage location: <0-2>",    true,  cmd_camerastoragelocation},
+  {"cameracapturefolder",   "Photo folder: <path>",       true,  cmd_cameracapturefolder},
+  {"cameramaxstoredimages", "Max stored: <0-1000>",       true,  cmd_cameramaxstoredimages},
+  {"cameraautocapture",     "Auto-capture: <on|off>",     true,  cmd_cameraautocapture},
+  {"cameraautocaptureinterval", "Auto-capture: <sec>",    true, cmd_cameraautocaptureinterval},
+  {"camerasendaftercapture", "Send after capture: <on|off>", true, cmd_camerasendaftercapture},
+  {"cameratargetdevice",    "Target device: <name>",      true,  cmd_cameratargetdevice},
 };
 
 static const SettingEntry cameraSettingEntries[] = {
