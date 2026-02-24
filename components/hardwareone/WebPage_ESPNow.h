@@ -627,12 +627,10 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           + '</div>'
           + '</div>'
           + '<div id="metadata-' + mac + '" style="display:none;padding:12px;background:var(--crumb-bg);border-radius:8px;min-height:200px">'
-          + '<div class="input-group" style="margin-bottom:10px">'
-          + '<input type="text" id="meta-user-' + mac + '" placeholder="Username" style="flex:1">'
-          + '<input type="password" id="meta-pass-' + mac + '" placeholder="Password" style="flex:1">'
+          + '<div style="margin-bottom:10px;text-align:right">'
           + '<button class="btn" onclick="syncMetadata(\'' + mac + '\')">Sync Metadata</button>'
           + '</div>'
-          + '<div id="metadata-content-' + mac + '"><div style="text-align:center;color:var(--panel-fg);padding:20px">Enter credentials and click Sync Metadata</div></div>'
+          + '<div id="metadata-content-' + mac + '"><div style="text-align:center;color:var(--panel-fg);padding:20px">No metadata available. Click Sync Metadata to request from device.</div></div>'
           + '</div>'
           + '<div id="automations-input-' + mac + '" style="display:none">'
           + automationsInnerHtml(mac)
@@ -780,7 +778,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
             const lowerResult = (t || '').toLowerCase();
             // Check for ACK confirmation (v2 protocol with ACK)
             if (lowerResult.indexOf('failed') >= 0 || lowerResult.indexOf('error') >= 0) {
-              statusDiv.innerHTML = '<span class="status-icon">❌</span>Failed';
+              statusDiv.innerHTML = '<span class="status-icon">✗</span>Failed';
             } else if (lowerResult.indexOf('message sent') >= 0 || lowerResult.indexOf('sent via v3') >= 0) {
               statusDiv.innerHTML = '<span class="status-icon">✓✓</span>Delivered';
             } else if (lowerResult.indexOf('sent') >= 0) {
@@ -795,7 +793,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           if (bubble) {
             bubble.className = 'message-bubble message-error';
             const statusDiv = bubble.querySelector('.message-status');
-            statusDiv.innerHTML = '<span class="status-icon">❌</span>Failed: ' + e.message;
+            statusDiv.innerHTML = '<span class="status-icon">✗</span>Failed: ' + e.message;
           }
         });
     };
@@ -827,7 +825,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           if (statusDiv) {
             statusDiv.style.background = '#d4edda';
             statusDiv.style.color = '#155724';
-            statusDiv.innerHTML = '✅ <strong>Broadcast sent successfully!</strong><br><small>Message: "' + msg + '"</small>';
+            statusDiv.innerHTML = '<strong>Broadcast sent successfully!</strong><br><small>Message: "' + msg + '"</small>';
             setTimeout(function() { 
               statusDiv.style.display = 'none'; 
             }, 5000);
@@ -839,7 +837,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
             statusDiv.style.display = 'block';
             statusDiv.style.background = '#f8d7da';
             statusDiv.style.color = '#721c24';
-            statusDiv.textContent = '❌ Broadcast failed: ' + e.message;
+            statusDiv.textContent = 'Broadcast failed: ' + e.message;
           } else {
             alert('Broadcast error: ' + e.message);
           }
@@ -874,19 +872,19 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
             if (success) {
               statDiv.style.background = '#d4edda';
               statDiv.style.color = '#155724';
-              statDiv.textContent = '✅ ' + t;
+              statDiv.textContent = t;
             } else {
               statDiv.style.background = '#f8d7da';
               statDiv.style.color = '#721c24';
-              statDiv.textContent = '❌ ' + t;
+              statDiv.textContent = t;
             }
           }
           
           // Update message log with result
           if (success) {
-            appendLogLine('log-' + mac, 'RECEIVED', '✅ File sent: ' + filename, null);
+            appendLogLine('log-' + mac, 'RECEIVED', 'File sent: ' + filename, null);
           } else {
-            appendLogLine('log-' + mac, 'ERROR', '❌ File transfer failed: ' + t, null);
+            appendLogLine('log-' + mac, 'ERROR', 'File transfer failed: ' + t, null);
           }
           
           // Clear file path input on success
@@ -899,9 +897,9 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           if (statDiv) {
             statDiv.style.background = '#f8d7da';
             statDiv.style.color = '#721c24';
-            statDiv.textContent = '❌ Error: ' + e.message;
+            statDiv.textContent = 'Error: ' + e.message;
           }
-          appendLogLine('log-' + mac, 'ERROR', '❌ File transfer error: ' + e.message, null);
+          appendLogLine('log-' + mac, 'ERROR', 'File transfer error: ' + e.message, null);
         });
     };
     window.toggleMessageType = function(mac, type) {
@@ -992,7 +990,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           btnMetadata.style.color = 'white';
           btnMetadata.style.border = '2px solid #007bff';
         }
-        // Fetch and display metadata
+        // Load cached metadata if available; don't auto-request from device
         window.loadDeviceMetadata(mac);
       } else if (type === 'automations') {
         if (automationsInput) automationsInput.style.display = 'block';
@@ -1257,7 +1255,6 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       if (path !== '/') {
         var parentPath = path.replace(/\/[^\/]+\/?$/, '') || '/';
         listHtml += '<div onclick="browseRemoteFiles(\'' + mac + '\', \'' + parentPath + '\')" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:4px;cursor:pointer;background:var(--panel-bg)" onmouseover="this.style.background=\'var(--hover-bg)\'" onmouseout="this.style.background=\'var(--panel-bg)\'">';
-        listHtml += '<span style="font-size:1.1em">📁</span>';
         listHtml += '<span style="color:var(--link)">..</span>';
         listHtml += '<span style="color:var(--muted);font-size:0.85em;margin-left:auto">(parent)</span>';
         listHtml += '</div>';
@@ -1273,13 +1270,11 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         
         if (entry.isDir) {
           listHtml += '<div onclick="browseRemoteFiles(\'' + mac + '\', \'' + fullPath + '\')" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:4px;cursor:pointer;background:var(--panel-bg)" onmouseover="this.style.background=\'var(--hover-bg)\'" onmouseout="this.style.background=\'var(--panel-bg)\'">';
-          listHtml += '<span style="font-size:1.1em">📁</span>';
           listHtml += '<span style="color:var(--link);font-weight:500">' + entry.name + '</span>';
           listHtml += '<span style="color:var(--muted);font-size:0.85em;margin-left:auto">' + entry.info + '</span>';
           listHtml += '</div>';
         } else {
           listHtml += '<div onclick="selectRemoteFile(\'' + mac + '\', \'' + fullPath + '\')" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:4px;cursor:pointer;background:var(--panel-bg)" onmouseover="this.style.background=\'var(--hover-bg)\'" onmouseout="this.style.background=\'var(--panel-bg)\'">';
-          listHtml += '<span style="font-size:1.1em">📄</span>';
           listHtml += '<span style="color:var(--panel-fg)">' + entry.name + '</span>';
           listHtml += '<span style="color:var(--muted);font-size:0.85em;margin-left:auto">' + entry.info + '</span>';
           listHtml += '</div>';
@@ -1336,7 +1331,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       }
       
       if (!container) return;
-      container.innerHTML = '<div style="text-align:center;color:var(--muted);padding:20px"><div style="margin-bottom:8px">⏳</div>Loading remote files...</div>';
+      container.innerHTML = '<div style="text-align:center;color:var(--muted);padding:20px">Loading remote files...</div>';
       if (statusDiv) statusDiv.textContent = 'Requesting directory listing from ' + mac + '...';
       
       var targetMac = String(mac || '').toUpperCase();
@@ -1419,8 +1414,15 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
               
               if (foundComplete && browseLines.length > 0) {
                 clearInterval(pollInterval);
-                // Parse and render interactive UI
-                var entries = window.parseRemoteFileListing(browseLines);
+                // Flatten multi-line messages into individual lines before parsing
+                var flatLines = [];
+                for (var li = 0; li < browseLines.length; li++) {
+                  var subLines = browseLines[li].split('\n');
+                  for (var si = 0; si < subLines.length; si++) {
+                    flatLines.push(subLines[si]);
+                  }
+                }
+                var entries = window.parseRemoteFileListing(flatLines);
                 window.renderRemoteFileExplorer(mac, browsePath, entries);
                 if (statusDiv) statusDiv.textContent = 'Browse complete - ' + entries.length + ' items in ' + browsePath;
               } else if (pollCount > 2) {
@@ -1438,37 +1440,90 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       }); // end of .finally() from seqBefore fetch
     };
     window.fetchRemoteFile = function(mac) {
-      const u = (document.getElementById('remote-user-' + mac) || {}).value || '';
-      const p = (document.getElementById('remote-pass-' + mac) || {}).value || '';
-      const remotePath = (document.getElementById('remote-fp-' + mac) || {}).value || '';
-      const statusDiv = document.getElementById('remote-fstat-' + mac);
-      
+      var u = (document.getElementById('remote-user-' + mac) || {}).value || '';
+      var p = (document.getElementById('remote-pass-' + mac) || {}).value || '';
+      var remotePath = (document.getElementById('remote-fp-' + mac) || {}).value || '';
+      var statusDiv = document.getElementById('remote-fstat-' + mac);
       if (!u || !p || !remotePath) {
         if (statusDiv) statusDiv.textContent = 'Enter username, password, and remote file path';
         return;
       }
-      
-      if (statusDiv) statusDiv.textContent = 'Fetching file from ' + mac + '...';
-      
-      const cmd = 'espnow fetch ' + mac + ' ' + u + ' ' + p + ' ' + remotePath;
+      var filename = remotePath.split('/').pop();
+      if (statusDiv) {
+        statusDiv.style.background = '#fff3cd';
+        statusDiv.style.color = '#856404';
+        statusDiv.textContent = 'Fetching ' + filename + ' from ' + mac + '...';
+      }
+      var cmd = 'espnow fetch ' + mac + ' ' + u + ' ' + p + ' ' + remotePath;
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(r => r.text())
-      .then(text => {
-        if (statusDiv) {
-          if (text.includes('File fetch request sent') || text.includes('Receiving file')) {
-            statusDiv.textContent = 'File transfer initiated. Check serial output for progress.';
-          } else {
-            statusDiv.textContent = 'Result: ' + text;
+      }).then(function(r) { return r.text(); }).then(function(text) {
+        if (!text.includes('File fetch request sent') && !text.includes('Receiving file')) {
+          if (statusDiv) {
+            statusDiv.style.background = '#f8d7da';
+            statusDiv.style.color = '#721c24';
+            statusDiv.textContent = 'Failed: ' + text;
           }
+          appendLogLine('log-' + mac, 'ERROR', 'Fetch failed: ' + text, null);
+          return;
         }
-        appendLogLine('log-' + mac, 'RECEIVED', 'Fetch result: ' + text, null);
-      })
-      .catch(e => {
-        if (statusDiv) statusDiv.textContent = 'Fetch error: ' + e.message;
+        appendLogLine('log-' + mac, 'SENT', 'Fetch request sent for: ' + filename, null);
+        fetch('/api/espnow/messages?mac=' + mac + '&since=0').then(function(r) {
+          return r.json();
+        }).then(function(data) {
+          var existing = Array.isArray(data) ? data : (data.messages || []);
+          var sinceSeq = existing.length > 0 ? (existing[existing.length - 1].seq || 0) : 0;
+          var pollCount = 0;
+          var pollMax = 15;
+          var poll = setInterval(function() {
+            pollCount++;
+            fetch('/api/espnow/messages?mac=' + mac + '&since=' + sinceSeq).then(function(r) {
+              return r.json();
+            }).then(function(msgs_data) {
+              var msgs = Array.isArray(msgs_data) ? msgs_data : (msgs_data.messages || []);
+              for (var i = msgs.length - 1; i >= 0; i--) {
+                var m = (msgs[i].msg || '');
+                if (m.includes('File sent successfully') && m.includes(filename)) {
+                  clearInterval(poll);
+                  if (statusDiv) {
+                    statusDiv.style.background = '#d4edda';
+                    statusDiv.style.color = '#155724';
+                    statusDiv.textContent = 'Received: ' + filename;
+                  }
+                  appendLogLine('log-' + mac, 'RECEIVED', 'File received: ' + filename, null);
+                  return;
+                }
+                if ((m.includes('failed') || m.includes('error') || m.includes('Error')) && m.includes(filename)) {
+                  clearInterval(poll);
+                  if (statusDiv) {
+                    statusDiv.style.background = '#f8d7da';
+                    statusDiv.style.color = '#721c24';
+                    statusDiv.textContent = 'Transfer failed: ' + m;
+                  }
+                  appendLogLine('log-' + mac, 'ERROR', 'Fetch failed: ' + m, null);
+                  return;
+                }
+              }
+              if (pollCount >= pollMax) {
+                clearInterval(poll);
+                if (statusDiv) {
+                  statusDiv.style.background = '#f8d7da';
+                  statusDiv.style.color = '#721c24';
+                  statusDiv.textContent = 'Timed out waiting for ' + filename;
+                }
+                appendLogLine('log-' + mac, 'ERROR', 'Fetch timed out: ' + filename, null);
+              }
+            }).catch(function() { if (pollCount >= pollMax) clearInterval(poll); });
+          }, 1000);
+        }).catch(function() {});
+      }).catch(function(e) {
+        if (statusDiv) {
+          statusDiv.style.background = '#f8d7da';
+          statusDiv.style.color = '#721c24';
+          statusDiv.textContent = 'Fetch error: ' + e.message;
+        }
         appendLogLine('log-' + mac, 'ERROR', 'Fetch error: ' + e.message, null);
       });
     };
@@ -1568,7 +1623,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           var metaPollCount = 0;
           var metaPollInterval = setInterval(function() {
             metaPollCount++;
-            if (metaPollCount > 8) {
+            if (metaPollCount > 10) {
               clearInterval(metaPollInterval);
               container.innerHTML = '<div style="text-align:center;color:var(--muted);padding:20px">Timed out waiting for metadata response</div>';
               return;
@@ -1915,7 +1970,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       })
       .catch(error => {
         console.error('[ESP-NOW] Mesh status fetch error:', error);
-        document.getElementById('mesh-peers-list').innerHTML = '<div style="color:var(--danger);text-align:center;">Error: ' + error + '</div>';
+        var el = document.getElementById('mesh-peers-list');
+        if (el) el.innerHTML = '<div style="color:var(--danger);text-align:center;">Error: ' + error + '</div>';
       });
       
       // Also fetch and update topology view

@@ -2,7 +2,9 @@
 #include <LittleFS.h>
 #include <stdarg.h>
 
+#include "System_BuildConfig.h"
 #include "OLED_ConsoleBuffer.h"
+#include "Optional_EvenG2.h"
 #include "System_CLI.h"
 #include "System_Command.h"
 #include "System_Debug.h"
@@ -10,6 +12,7 @@
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
+#include "System_TaskUtils.h"
 #include "System_Utils.h"
 #include "WebServer_Utils.h"
 
@@ -21,13 +24,24 @@ extern Settings gSettings;
 // ============================================================================
 
 // Debug system globals - single source of truth
-// All debug flags enabled by default for maximum verbosity
-uint32_t gDebugFlags = 0xFFFFFFFF;
+// All debug flags enabled by default for maximum verbosity (lower 32 bits)
+// This includes ALL ESP-NOW debug flags:
+//   - DEBUG_ESPNOW_CORE (0x10000)
+//   - DEBUG_ESPNOW_ROUTER (0x80000)
+//   - DEBUG_ESPNOW_MESH (0x100000)
+//   - DEBUG_ESPNOW_TOPO (0x200000)
+//   - DEBUG_ESPNOW_STREAM (0x400000)
+//   - DEBUG_ESPNOW_ENCRYPTION (0x80000000)
+// Individual sensor flags (upper 32 bits) disabled by default for cleaner output
+uint64_t gDebugFlags = 0x00000000FFFFFFFFULL;
 DebugSubFlags gDebugSubFlags = {}; // All sub-flags initialized to false
 char* gDebugBuffer = nullptr;
 QueueHandle_t gDebugOutputQueue = nullptr;
 QueueHandle_t gDebugFreeQueue = nullptr;
 volatile unsigned long gDebugDropped = 0;
+int gDebugQueueSize = DEBUG_QUEUE_SIZE_MIN; // Runtime queue size (set in initDebugSystem)
+
+volatile bool gDebugVerbose = false;
 
 // Severity-based logging level (default: show everything)
 uint8_t gLogLevel = LOG_LEVEL_DEBUG;
@@ -48,10 +62,17 @@ static const uint32_t LOG_FLUSH_INTERVAL_MS = 5000;      // Or every 5 seconds
 // Suppressed output during help (summary only)
 static volatile unsigned long gHelpSuppressedCount = 0;
 
+// G2 glasses output buffer (accumulates messages for periodic display)
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+static String gG2OutputBuffer;
+static unsigned long gG2LastFlush = 0;
+static const uint32_t G2_FLUSH_INTERVAL_MS = 2000;  // Send to glasses every 2 seconds
+static const size_t G2_BUFFER_MAX = 500;            // Max chars to buffer
+#endif
+
 
 // External dependencies from main .ino
 extern bool gCLIValidateOnly;
-extern String gLastTFTLine;
 extern volatile bool gInHelpRender;
 
 // Settings and persistence (defined in settings.h and main .ino)
@@ -194,6 +215,25 @@ void debugOutputTask(void* parameter) {
       }
       #endif
       
+      // G2 glasses output - buffer messages and flush periodically
+      #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+      if ((gOutputFlags & OUTPUT_G2) && isG2Connected()) {
+        // Append to buffer (with newline)
+        if (gG2OutputBuffer.length() + strlen(msg->text) + 2 < G2_BUFFER_MAX) {
+          gG2OutputBuffer += msg->text;
+          gG2OutputBuffer += "\n";
+        }
+        // Flush if buffer full or interval elapsed
+        unsigned long now = millis();
+        if (gG2OutputBuffer.length() >= G2_BUFFER_MAX - 50 || 
+            (now - gG2LastFlush >= G2_FLUSH_INTERVAL_MS && gG2OutputBuffer.length() > 0)) {
+          g2ShowText(gG2OutputBuffer.c_str());
+          gG2OutputBuffer = "";
+          gG2LastFlush = now;
+        }
+      }
+      #endif
+      
       // Return message to pool
       if (gDebugFreeQueue) {
         xQueueSend(gDebugFreeQueue, &msg, 0);
@@ -242,9 +282,8 @@ const char* cmd_loglevel(const String& args) {
   if (newLevel < LOG_LEVEL_ERROR) newLevel = LOG_LEVEL_ERROR;
   if (newLevel > LOG_LEVEL_DEBUG) newLevel = LOG_LEVEL_DEBUG;
 
-  gSettings.logLevel = newLevel;
+  setSetting(gSettings.logLevel, newLevel);
   DEBUG_MANAGER.setLogLevel((uint8_t)newLevel);
-  writeSettingsJson();
 
   const char* levelName = "unknown";
   switch (gSettings.logLevel) {
@@ -263,6 +302,17 @@ void initDebugSystem() {
   // IMPORTANT: Do not call DebugManager::initialize() here (it delegates back to initDebugSystem()).
   (void)DebugManager::getInstance();
 
+  // Determine queue size based on PSRAM availability
+  // PSRAM available: 128 slots in PSRAM, otherwise 64 slots in internal RAM
+  size_t psramSize = ESP.getPsramSize();
+  bool hasPsram = (psramSize > 0);
+  gDebugQueueSize = hasPsram ? DEBUG_QUEUE_SIZE_MAX : DEBUG_QUEUE_SIZE_MIN;
+  
+  if (gOutputFlags & OUTPUT_SERIAL) {
+    Serial.printf("[DEBUG] Queue size: %d slots (%s)\n", gDebugQueueSize, 
+                  hasPsram ? "PSRAM" : "internal RAM");
+  }
+
   // Allocate debug buffer in PSRAM
   if (!gDebugBuffer) {
     gDebugBuffer = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "debug.buf");
@@ -276,7 +326,7 @@ void initDebugSystem() {
 
   // Create debug free queue (pool of reusable DebugMessage pointers)
   if (!gDebugFreeQueue) {
-    gDebugFreeQueue = xQueueCreate(DEBUG_QUEUE_SIZE, sizeof(DebugMessage*));
+    gDebugFreeQueue = xQueueCreate(gDebugQueueSize, sizeof(DebugMessage*));
     if (!gDebugFreeQueue) {
       if (gOutputFlags & OUTPUT_SERIAL) {
         Serial.println("FATAL: Failed to create debug free queue");
@@ -284,8 +334,9 @@ void initDebugSystem() {
       while (1) delay(1000);
     }
 
-    // Pre-allocate the pool itself (prefer PSRAM)
-    DebugMessage* pool = (DebugMessage*)ps_alloc(DEBUG_QUEUE_SIZE * sizeof(DebugMessage), AllocPref::PreferPSRAM, "debug.pool");
+    // Pre-allocate the pool itself (prefer PSRAM if available)
+    AllocPref allocPref = hasPsram ? AllocPref::PreferPSRAM : AllocPref::PreferInternal;
+    DebugMessage* pool = (DebugMessage*)ps_alloc(gDebugQueueSize * sizeof(DebugMessage), allocPref, "debug.pool");
     if (!pool) {
       if (gOutputFlags & OUTPUT_SERIAL) {
         Serial.println("FATAL: Failed to allocate debug message pool");
@@ -294,7 +345,7 @@ void initDebugSystem() {
     }
 
     // Seed free queue with pointers into the pool
-    for (int i = 0; i < DEBUG_QUEUE_SIZE; ++i) {
+    for (int i = 0; i < gDebugQueueSize; ++i) {
       DebugMessage* p = &pool[i];
       xQueueSend(gDebugFreeQueue, &p, 0);
     }
@@ -302,14 +353,15 @@ void initDebugSystem() {
 
   // Create debug output queue (stores pointers to heap-allocated messages)
   if (!gDebugOutputQueue) {
-    gDebugOutputQueue = xQueueCreate(DEBUG_QUEUE_SIZE, sizeof(DebugMessage*));
+    gDebugOutputQueue = xQueueCreate(gDebugQueueSize, sizeof(DebugMessage*));
     if (!gDebugOutputQueue) {
       if (gOutputFlags & OUTPUT_SERIAL) {
         Serial.println("FATAL: Failed to create debug output queue");
       }
       while (1) delay(1000);
     }
-    DEBUG_SYSTEMF("Debug output queue created (%d messages)", DEBUG_QUEUE_SIZE);
+    DEBUG_SYSTEMF("Debug output queue created (%d messages in %s)", gDebugQueueSize,
+                  hasPsram ? "PSRAM" : "internal RAM");
   }
 
   // Create debug output task
@@ -317,7 +369,7 @@ void initDebugSystem() {
     BaseType_t result = xTaskCreate(
       debugOutputTask,
       "debug_out",
-      3072,  // ~12KB stack (reduced from 16KB - peak usage 8KB)
+      DEBUG_OUT_STACK_WORDS,  // ~12KB stack (reduced from 16KB - peak usage 8KB)
       nullptr,
       1,     // Low priority
       &gDebugOutputTaskHandle
@@ -482,11 +534,15 @@ void broadcastOutput(const String& s) {
     }
   }
   
-  // TFT output still direct (no queue needed for single String)
-  if (gOutputFlags & OUTPUT_TFT) gLastTFTLine = s;
 
-  // Note: ESP-NOW streaming removed from debug_system to avoid circular dependencies
-  // ESP-NOW streaming is handled in main .ino's broadcastOutput wrapper if needed
+  // ESP-NOW V3 session streaming (extern to avoid circular deps)
+#if ENABLE_ESPNOW
+  extern uint32_t gCurrentStreamCmdId;
+  extern void sendEspNowStreamMessage(const String& message);
+  if (gCurrentStreamCmdId != 0) {
+    sendEspNowStreamMessage(s);
+  }
+#endif
 }
 
 // Broadcast output - const char* overload (now uses queue)
@@ -534,8 +590,15 @@ void broadcastOutput(const char* s) {
     }
   }
   
-  // TFT output still direct
-  if (gOutputFlags & OUTPUT_TFT) gLastTFTLine = String(s);
+
+  // ESP-NOW V3 session streaming (extern to avoid circular deps)
+#if ENABLE_ESPNOW
+  extern uint32_t gCurrentStreamCmdId;
+  extern void sendEspNowStreamMessage(const String& message);
+  if (gCurrentStreamCmdId != 0) {
+    sendEspNowStreamMessage(String(s));
+  }
+#endif
 }
 
 // Print summary (and tail) of output suppressed during help; resets counters
@@ -582,11 +645,11 @@ void streamDebugFlush() {
 // Debug Command Handlers
 // ============================================================================
 
-const char* cmd_outtft(const String& args) {
+const char* cmd_outdisplay(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Syntax:
-  //   outtft <0|1> [persist|temp]
-  //   outtft [persist|temp] <0|1>
+  //   outdisplay <0|1> [persist|temp]
+  //   outdisplay [persist|temp] <0|1>
   String a = args;
   a.trim();
   String t1, t2;
@@ -614,18 +677,49 @@ const char* cmd_outtft(const String& args) {
     if (t2.length()) { modeTemp = (t2 == "temp"); }
   }
   if (v != 0) v = 1;
-  if (v < 0) return "Usage: outtft <0|1> [persist|temp]";
+  if (v < 0) return "Usage: outdisplay <0|1> [persist|temp]";
   if (modeTemp) {
-    if (v) gOutputFlags |= OUTPUT_TFT;
-    else gOutputFlags &= ~OUTPUT_TFT;
-    return v ? "outTft (runtime) set to 1" : "outTft (runtime) set to 0";
+    if (v) gOutputFlags |= OUTPUT_DISPLAY;
+    else gOutputFlags &= ~OUTPUT_DISPLAY;
+    return v ? "outDisplay (runtime) set to 1" : "outDisplay (runtime) set to 0";
   } else {
-    gSettings.outTft = (v != 0);
-    writeSettingsJson();
-    if (v) gOutputFlags |= OUTPUT_TFT;
-    else gOutputFlags &= ~OUTPUT_TFT;
-    return gSettings.outTft ? "outTft (persisted) set to 1" : "outTft (persisted) set to 0";
+    setSetting(gSettings.outDisplay, (bool)(v != 0));
+    if (v) gOutputFlags |= OUTPUT_DISPLAY;
+    else gOutputFlags &= ~OUTPUT_DISPLAY;
+    return gSettings.outDisplay ? "outDisplay (persisted) set to 1" : "outDisplay (persisted) set to 0";
   }
+}
+
+const char* cmd_outg2(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  // Syntax: outg2 <0|1>
+  String a = args;
+  a.trim();
+  int v = -1;
+  if (a.length()) {
+    v = a.toInt();
+    if (a != "0" && v == 0) v = -1;  // Invalid input
+  }
+  if (v < 0) {
+    // Show current status
+    bool enabled = (gOutputFlags & OUTPUT_G2) != 0;
+    bool connected = isG2Connected();
+    static char buf[128];
+    snprintf(buf, sizeof(buf), "G2 output: %s, G2 connected: %s", 
+             enabled ? "ON" : "OFF", connected ? "yes" : "no");
+    return buf;
+  }
+  if (v) {
+    gOutputFlags |= OUTPUT_G2;
+    return "G2 output enabled (messages will stream to glasses when connected)";
+  } else {
+    gOutputFlags &= ~OUTPUT_G2;
+    return "G2 output disabled";
+  }
+  #else
+  return "G2 glasses support not compiled (ENABLE_G2_GLASSES=0)";
+  #endif
 }
 
 const char* cmd_debughttp(const String& args) {
@@ -647,8 +741,7 @@ const char* cmd_debughttp(const String& args) {
     else clearDebugFlag(DEBUG_HTTP);
     return v ? "debugHttp enabled (runtime only)" : "debugHttp disabled (runtime only)";
   } else {
-    gSettings.debugHttp = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugHttp, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_HTTP);
     else clearDebugFlag(DEBUG_HTTP);
     return gSettings.debugHttp ? "debugHttp enabled (persistent)" : "debugHttp disabled (persistent)";
@@ -674,8 +767,7 @@ const char* cmd_debugsse(const String& args) {
     else clearDebugFlag(DEBUG_SSE);
     return v ? "debugSse enabled (runtime only)" : "debugSse disabled (runtime only)";
   } else {
-    gSettings.debugSse = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugSse, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_SSE);
     else clearDebugFlag(DEBUG_SSE);
     return gSettings.debugSse ? "debugSse enabled (persistent)" : "debugSse disabled (persistent)";
@@ -701,65 +793,10 @@ const char* cmd_debugcli(const String& args) {
     else clearDebugFlag(DEBUG_CLI);
     return v ? "debugCli enabled (runtime only)" : "debugCli disabled (runtime only)";
   } else {
-    gSettings.debugCli = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugCli, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_CLI);
     else clearDebugFlag(DEBUG_CLI);
     return gSettings.debugCli ? "debugCli enabled (persistent)" : "debugCli disabled (persistent)";
-  }
-}
-
-const char* cmd_debugsensorsframe(const String& args) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
-  valStr.trim();
-  int sp2 = valStr.indexOf(' ');
-  String mode = "";
-  if (sp2 >= 0) {
-    mode = valStr.substring(sp2 + 1);
-    valStr = valStr.substring(0, sp2);
-    mode.trim();
-  }
-  // Only "temp" or "runtime" triggers temporary mode; anything else (including empty) persists
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = valStr.toInt();
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_SENSORS_FRAME);
-    else clearDebugFlag(DEBUG_SENSORS_FRAME);
-    return v ? "debugSensorsFrame enabled (runtime only)" : "debugSensorsFrame disabled (runtime only)";
-  } else {
-    gSettings.debugSensorsFrame = (v != 0);
-    writeSettingsJson();
-    if (v) setDebugFlag(DEBUG_SENSORS_FRAME);
-    else clearDebugFlag(DEBUG_SENSORS_FRAME);
-    return gSettings.debugSensorsFrame ? "debugSensorsFrame enabled (persistent)" : "debugSensorsFrame disabled (persistent)";
-  }
-}
-
-const char* cmd_debugsensorsdata(const String& args) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
-  valStr.trim();
-  int sp2 = valStr.indexOf(' ');
-  String mode = "";
-  if (sp2 >= 0) {
-    mode = valStr.substring(sp2 + 1);
-    valStr = valStr.substring(0, sp2);
-    mode.trim();
-  }
-  // Only "temp" or "runtime" triggers temporary mode; anything else (including empty) persists
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = valStr.toInt();
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_SENSORS_DATA);
-    else clearDebugFlag(DEBUG_SENSORS_DATA);
-    return v ? "debugSensorsData enabled (runtime only)" : "debugSensorsData disabled (runtime only)";
-  } else {
-    gSettings.debugSensorsData = (v != 0);
-    writeSettingsJson();
-    if (v) setDebugFlag(DEBUG_SENSORS_DATA);
-    else clearDebugFlag(DEBUG_SENSORS_DATA);
-    return gSettings.debugSensorsData ? "debugSensorsData enabled (persistent)" : "debugSensorsData disabled (persistent)";
   }
 }
 
@@ -782,8 +819,7 @@ const char* cmd_debugsensorsgeneral(const String& args) {
     else clearDebugFlag(DEBUG_SENSORS);
     return v ? "debugSensorsGeneral enabled (runtime only)" : "debugSensorsGeneral disabled (runtime only)";
   } else {
-    gSettings.debugSensorsGeneral = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugSensorsGeneral, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_SENSORS);
     else clearDebugFlag(DEBUG_SENSORS);
     return gSettings.debugSensorsGeneral ? "debugSensorsGeneral enabled (persistent)" : "debugSensorsGeneral disabled (persistent)";
@@ -808,8 +844,7 @@ const char* cmd_debugcamera(const String& args) {
     else clearDebugFlag(DEBUG_CAMERA);
     return v ? "debugCamera enabled (runtime only)" : "debugCamera disabled (runtime only)";
   } else {
-    gSettings.debugCamera = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugCamera, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_CAMERA);
     else clearDebugFlag(DEBUG_CAMERA);
     return gSettings.debugCamera ? "debugCamera enabled (persistent)" : "debugCamera disabled (persistent)";
@@ -834,8 +869,7 @@ const char* cmd_debugmicrophone(const String& args) {
     else clearDebugFlag(DEBUG_MICROPHONE);
     return v ? "debugMicrophone enabled (runtime only)" : "debugMicrophone disabled (runtime only)";
   } else {
-    gSettings.debugMicrophone = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugMicrophone, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_MICROPHONE);
     else clearDebugFlag(DEBUG_MICROPHONE);
     return gSettings.debugMicrophone ? "debugMicrophone enabled (persistent)" : "debugMicrophone disabled (persistent)";
@@ -860,8 +894,7 @@ const char* cmd_debugi2c(const String& args) {
     else clearDebugFlag(DEBUG_I2C);
     return v ? "debugI2C enabled (runtime only)" : "debugI2C disabled (runtime only)";
   } else {
-    gSettings.debugI2C = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugI2C, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_I2C);
     else clearDebugFlag(DEBUG_I2C);
     return gSettings.debugI2C ? "debugI2C enabled (persistent)" : "debugI2C disabled (persistent)";
@@ -887,8 +920,7 @@ const char* cmd_debugwifi(const String& args) {
     else clearDebugFlag(DEBUG_WIFI);
     return v ? "debugWifi enabled (runtime only)" : "debugWifi disabled (runtime only)";
   } else {
-    gSettings.debugWifi = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugWifi, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_WIFI);
     else clearDebugFlag(DEBUG_WIFI);
     return gSettings.debugWifi ? "debugWifi enabled (persistent)" : "debugWifi disabled (persistent)";
@@ -914,8 +946,7 @@ const char* cmd_debugstorage(const String& args) {
     else clearDebugFlag(DEBUG_STORAGE);
     return v ? "debugStorage enabled (runtime only)" : "debugStorage disabled (runtime only)";
   } else {
-    gSettings.debugStorage = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugStorage, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_STORAGE);
     else clearDebugFlag(DEBUG_STORAGE);
     return gSettings.debugStorage ? "debugStorage enabled (persistent)" : "debugStorage disabled (persistent)";
@@ -941,8 +972,7 @@ const char* cmd_debuglogger(const String& args) {
     else clearDebugFlag(DEBUG_LOGGER);
     return v ? "debugLogger enabled (runtime only)" : "debugLogger disabled (runtime only)";
   } else {
-    gSettings.debugLogger = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugLogger, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_LOGGER);
     else clearDebugFlag(DEBUG_LOGGER);
     return gSettings.debugLogger ? "debugLogger enabled (persistent)" : "debugLogger disabled (persistent)";
@@ -968,8 +998,7 @@ const char* cmd_debugautomations(const String& args) {
     else clearDebugFlag(DEBUG_AUTOMATIONS);
     return v ? "debugAutomations enabled (runtime only)" : "debugAutomations disabled (runtime only)";
   } else {
-    gSettings.debugAutomations = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugAutomations, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_AUTOMATIONS);
     else clearDebugFlag(DEBUG_AUTOMATIONS);
     return gSettings.debugAutomations ? "debugAutomations enabled (persistent)" : "debugAutomations disabled (persistent)";
@@ -995,8 +1024,7 @@ const char* cmd_debugperformance(const String& args) {
     else clearDebugFlag(DEBUG_PERFORMANCE);
     return v ? "debugPerformance enabled (runtime only)" : "debugPerformance disabled (runtime only)";
   } else {
-    gSettings.debugPerformance = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugPerformance, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_PERFORMANCE);
     else clearDebugFlag(DEBUG_PERFORMANCE);
     return gSettings.debugPerformance ? "debugPerformance enabled (persistent)" : "debugPerformance disabled (persistent)";
@@ -1021,8 +1049,7 @@ const char* cmd_debugauth(const String& args) {
     else clearDebugFlag(DEBUG_AUTH);
     return v ? "debugAuth enabled (runtime only)" : "debugAuth disabled (runtime only)";
   } else {
-    gSettings.debugAuth = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugAuth, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_AUTH);
     else clearDebugFlag(DEBUG_AUTH);
     return gSettings.debugAuth ? "debugAuth enabled (persistent)" : "debugAuth disabled (persistent)";
@@ -1047,8 +1074,7 @@ const char* cmd_debugsensors(const String& args) {
     else clearDebugFlag(DEBUG_SENSORS);
     return v ? "debugSensors enabled (runtime only)" : "debugSensors disabled (runtime only)";
   } else {
-    gSettings.debugSensors = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugSensors, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_SENSORS);
     else clearDebugFlag(DEBUG_SENSORS);
     return gSettings.debugSensors ? "debugSensors enabled (persistent)" : "debugSensors disabled (persistent)";
@@ -1073,8 +1099,7 @@ const char* cmd_debugespnow(const String& args) {
     else clearDebugFlag(DEBUG_ESPNOW_CORE);
     return v ? "debugEspNow enabled (runtime only)" : "debugEspNow disabled (runtime only)";
   } else {
-    gSettings.debugEspNow = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugEspNow, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_ESPNOW_CORE);
     else clearDebugFlag(DEBUG_ESPNOW_CORE);
     return gSettings.debugEspNow ? "debugEspNow enabled (persistent)" : "debugEspNow disabled (persistent)";
@@ -1100,12 +1125,22 @@ const char* cmd_debugdatetime(const String& args) {
     else clearDebugFlag(DEBUG_SYSTEM);
     return v ? "debugDateTime enabled (runtime only)" : "debugDateTime disabled (runtime only)";
   } else {
-    gSettings.debugDateTime = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugDateTime, (bool)(v != 0));
     if (v) setDebugFlag(DEBUG_SYSTEM);
     else clearDebugFlag(DEBUG_SYSTEM);
     return gSettings.debugDateTime ? "debugDateTime enabled (persistent)" : "debugDateTime disabled (persistent)";
   }
+}
+
+const char* cmd_debugverbose(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  if (valStr.length() == 0) return gDebugVerbose ? "debugVerbose is ON" : "debugVerbose is OFF";
+  int v = valStr.toInt();
+  if (v != 0 && v != 1) return "Usage: debugverbose <0|1>";
+  gDebugVerbose = (v == 1);
+  return gDebugVerbose ? "debugVerbose enabled" : "debugVerbose disabled";
 }
 
 const char* cmd_debugcommandsystem(const String& args) {
@@ -1126,8 +1161,7 @@ const char* cmd_debugcommandsystem(const String& args) {
     return "Usage: debugcommandsystem <0|1> [temp|runtime]";
   }
   if (!modeTemp) {
-    gSettings.debugCommandSystem = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugCommandSystem, (bool)(v != 0));
   }
   if (v) setDebugFlag(DEBUG_COMMAND_SYSTEM);
   else clearDebugFlag(DEBUG_COMMAND_SYSTEM);
@@ -1156,8 +1190,7 @@ const char* cmd_debugsettingssystem(const String& args) {
     return "Usage: debugsettingssystem <0|1> [temp|runtime]";
   }
   if (!modeTemp) {
-    gSettings.debugSettingsSystem = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.debugSettingsSystem, (bool)(v != 0));
   }
   if (v) setDebugFlag(DEBUG_SETTINGS_SYSTEM);
   else clearDebugFlag(DEBUG_SETTINGS_SYSTEM);
@@ -1165,6 +1198,408 @@ const char* cmd_debugsettingssystem(const String& args) {
     return v ? "debugSettingsSystem enabled (runtime only)" : "debugSettingsSystem disabled (runtime only)";
   } else {
     return gSettings.debugSettingsSystem ? "debugSettingsSystem enabled (persistent)" : "debugSettingsSystem disabled (persistent)";
+  }
+}
+
+// Individual I2C sensor debug command handlers
+const char* cmd_debuggps(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_GPS);
+    else clearDebugFlag(DEBUG_GPS);
+    return v ? "debugGps enabled (runtime only)" : "debugGps disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugGps, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_GPS);
+    else clearDebugFlag(DEBUG_GPS);
+    return gSettings.debugGps ? "debugGps enabled (persistent)" : "debugGps disabled (persistent)";
+  }
+}
+
+const char* cmd_debugrtc(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_RTC);
+    else clearDebugFlag(DEBUG_RTC);
+    return v ? "debugRtc enabled (runtime only)" : "debugRtc disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugRtc, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_RTC);
+    else clearDebugFlag(DEBUG_RTC);
+    return gSettings.debugRtc ? "debugRtc enabled (persistent)" : "debugRtc disabled (persistent)";
+  }
+}
+
+const char* cmd_debugimu(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_IMU);
+    else clearDebugFlag(DEBUG_IMU);
+    return v ? "debugImu enabled (runtime only)" : "debugImu disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugImu, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_IMU);
+    else clearDebugFlag(DEBUG_IMU);
+    return gSettings.debugImu ? "debugImu enabled (persistent)" : "debugImu disabled (persistent)";
+  }
+}
+
+const char* cmd_debugthermal(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_THERMAL);
+    else clearDebugFlag(DEBUG_THERMAL);
+    return v ? "debugThermal enabled (runtime only)" : "debugThermal disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugThermal, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_THERMAL);
+    else clearDebugFlag(DEBUG_THERMAL);
+    return gSettings.debugThermal ? "debugThermal enabled (persistent)" : "debugThermal disabled (persistent)";
+  }
+}
+
+const char* cmd_debugtof(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_TOF);
+    else clearDebugFlag(DEBUG_TOF);
+    return v ? "debugTof enabled (runtime only)" : "debugTof disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugTof, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_TOF);
+    else clearDebugFlag(DEBUG_TOF);
+    return gSettings.debugTof ? "debugTof enabled (persistent)" : "debugTof disabled (persistent)";
+  }
+}
+
+const char* cmd_debuggamepad(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_GAMEPAD);
+    else clearDebugFlag(DEBUG_GAMEPAD);
+    return v ? "debugGamepad enabled (runtime only)" : "debugGamepad disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugGamepad, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_GAMEPAD);
+    else clearDebugFlag(DEBUG_GAMEPAD);
+    return gSettings.debugGamepad ? "debugGamepad enabled (persistent)" : "debugGamepad disabled (persistent)";
+  }
+}
+
+const char* cmd_debugapds(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_APDS);
+    else clearDebugFlag(DEBUG_APDS);
+    return v ? "debugApds enabled (runtime only)" : "debugApds disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugApds, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_APDS);
+    else clearDebugFlag(DEBUG_APDS);
+    return gSettings.debugApds ? "debugApds enabled (persistent)" : "debugApds disabled (persistent)";
+  }
+}
+
+const char* cmd_debugpresence(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_PRESENCE);
+    else clearDebugFlag(DEBUG_PRESENCE);
+    return v ? "debugPresence enabled (runtime only)" : "debugPresence disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugPresence, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_PRESENCE);
+    else clearDebugFlag(DEBUG_PRESENCE);
+    return gSettings.debugPresence ? "debugPresence enabled (persistent)" : "debugPresence disabled (persistent)";
+  }
+}
+
+// Per-sensor frame/data debug command handlers
+const char* cmd_debugthermalframe(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_THERMAL_FRAME);
+    else clearDebugFlag(DEBUG_THERMAL_FRAME);
+    return v ? "debugThermalFrame enabled (runtime only)" : "debugThermalFrame disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugThermalFrame, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_THERMAL_FRAME);
+    else clearDebugFlag(DEBUG_THERMAL_FRAME);
+    return gSettings.debugThermalFrame ? "debugThermalFrame enabled (persistent)" : "debugThermalFrame disabled (persistent)";
+  }
+}
+
+const char* cmd_debugthermaldata(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_THERMAL_DATA);
+    else clearDebugFlag(DEBUG_THERMAL_DATA);
+    return v ? "debugThermalData enabled (runtime only)" : "debugThermalData disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugThermalData, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_THERMAL_DATA);
+    else clearDebugFlag(DEBUG_THERMAL_DATA);
+    return gSettings.debugThermalData ? "debugThermalData enabled (persistent)" : "debugThermalData disabled (persistent)";
+  }
+}
+
+const char* cmd_debugtofframe(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_TOF_FRAME);
+    else clearDebugFlag(DEBUG_TOF_FRAME);
+    return v ? "debugTofFrame enabled (runtime only)" : "debugTofFrame disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugTofFrame, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_TOF_FRAME);
+    else clearDebugFlag(DEBUG_TOF_FRAME);
+    return gSettings.debugTofFrame ? "debugTofFrame enabled (persistent)" : "debugTofFrame disabled (persistent)";
+  }
+}
+
+const char* cmd_debuggamepadframe(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_GAMEPAD_FRAME);
+    else clearDebugFlag(DEBUG_GAMEPAD_FRAME);
+    return v ? "debugGamepadFrame enabled (runtime only)" : "debugGamepadFrame disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugGamepadFrame, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_GAMEPAD_FRAME);
+    else clearDebugFlag(DEBUG_GAMEPAD_FRAME);
+    return gSettings.debugGamepadFrame ? "debugGamepadFrame enabled (persistent)" : "debugGamepadFrame disabled (persistent)";
+  }
+}
+
+const char* cmd_debuggamepaddata(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_GAMEPAD_DATA);
+    else clearDebugFlag(DEBUG_GAMEPAD_DATA);
+    return v ? "debugGamepadData enabled (runtime only)" : "debugGamepadData disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugGamepadData, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_GAMEPAD_DATA);
+    else clearDebugFlag(DEBUG_GAMEPAD_DATA);
+    return gSettings.debugGamepadData ? "debugGamepadData enabled (persistent)" : "debugGamepadData disabled (persistent)";
+  }
+}
+
+const char* cmd_debugimuframe(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_IMU_FRAME);
+    else clearDebugFlag(DEBUG_IMU_FRAME);
+    return v ? "debugImuFrame enabled (runtime only)" : "debugImuFrame disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugImuFrame, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_IMU_FRAME);
+    else clearDebugFlag(DEBUG_IMU_FRAME);
+    return gSettings.debugImuFrame ? "debugImuFrame enabled (persistent)" : "debugImuFrame disabled (persistent)";
+  }
+}
+
+const char* cmd_debugimudata(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_IMU_DATA);
+    else clearDebugFlag(DEBUG_IMU_DATA);
+    return v ? "debugImuData enabled (runtime only)" : "debugImuData disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugImuData, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_IMU_DATA);
+    else clearDebugFlag(DEBUG_IMU_DATA);
+    return gSettings.debugImuData ? "debugImuData enabled (persistent)" : "debugImuData disabled (persistent)";
+  }
+}
+
+const char* cmd_debugapdsframe(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_APDS_FRAME);
+    else clearDebugFlag(DEBUG_APDS_FRAME);
+    return v ? "debugApdsFrame enabled (runtime only)" : "debugApdsFrame disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugApdsFrame, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_APDS_FRAME);
+    else clearDebugFlag(DEBUG_APDS_FRAME);
+    return gSettings.debugApdsFrame ? "debugApdsFrame enabled (persistent)" : "debugApdsFrame disabled (persistent)";
   }
 }
 
@@ -1177,36 +1612,9 @@ const char* cmd_debugbuffer(const String& args) {
 
   int depth = gDebugOutputQueue ? uxQueueMessagesWaiting(gDebugOutputQueue) : 0;
   int free = gDebugOutputQueue ? uxQueueSpacesAvailable(gDebugOutputQueue) : 0;
-  int total = DEBUG_QUEUE_SIZE;
+  int total = gDebugQueueSize;
   int pct = (depth * 100) / total;
   unsigned long dropped = gDebugDropped;
-
-  char* p = gDebugBuffer;
-  size_t remaining = 1024;
-
-  int n = snprintf(p, remaining, "Debug Output Queue Status:\n");
-  p += n;
-  remaining -= n;
-
-  n = snprintf(p, remaining, "  Size: %d messages\n", total);
-  p += n;
-  remaining -= n;
-
-  n = snprintf(p, remaining, "  Queued: %d (%d%%)\n", depth, pct);
-  p += n;
-  remaining -= n;
-
-  n = snprintf(p, remaining, "  Free: %d messages\n", free);
-  p += n;
-  remaining -= n;
-
-  n = snprintf(p, remaining, "  Dropped: %lu (queue full)\n", dropped);
-  p += n;
-  remaining -= n;
-
-  n = snprintf(p, remaining, "  Status: ");
-  p += n;
-  remaining -= n;
 
   const char* status;
   if (pct > 90) {
@@ -1219,245 +1627,378 @@ const char* cmd_debugbuffer(const String& args) {
     status = "OK - healthy";
   }
 
-  n = snprintf(p, remaining, "%s", status);
-  p += n;
-  remaining -= n;
+  // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
+  broadcastOutput("Debug Output Queue Status:");
+  BROADCAST_PRINTF("  Size: %d messages", total);
+  BROADCAST_PRINTF("  Queued: %d (%d%%)", depth, pct);
+  BROADCAST_PRINTF("  Free: %d messages", free);
+  BROADCAST_PRINTF("  Dropped: %lu (queue full)", dropped);
+  BROADCAST_PRINTF("  Status: %s", status);
 
-  return gDebugBuffer;
+  return "OK";
 }
 
 const char* cmd_debugcommandflow(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugcommandflow <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugCommandFlow = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugCommandFlow enabled" : "debugCommandFlow disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_CMD_FLOW); else clearDebugFlag(DEBUG_CMD_FLOW);
+    return v ? "debugCommandFlow enabled (runtime only)" : "debugCommandFlow disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugCommandFlow, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_CMD_FLOW); else clearDebugFlag(DEBUG_CMD_FLOW);
+    return gSettings.debugCommandFlow ? "debugCommandFlow enabled (persistent)" : "debugCommandFlow disabled (persistent)";
+  }
 }
 
 const char* cmd_debugusers(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugusers <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugUsers = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugUsers enabled" : "debugUsers disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_USERS); else clearDebugFlag(DEBUG_USERS);
+    return v ? "debugUsers enabled (runtime only)" : "debugUsers disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugUsers, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_USERS); else clearDebugFlag(DEBUG_USERS);
+    return gSettings.debugUsers ? "debugUsers enabled (persistent)" : "debugUsers disabled (persistent)";
+  }
 }
 
 const char* cmd_debugsystem(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugsystem <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugSystem = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugSystem enabled" : "debugSystem disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_SYSTEM); else clearDebugFlag(DEBUG_SYSTEM);
+    return v ? "debugSystem enabled (runtime only)" : "debugSystem disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugSystem, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_SYSTEM); else clearDebugFlag(DEBUG_SYSTEM);
+    return gSettings.debugSystem ? "debugSystem enabled (persistent)" : "debugSystem disabled (persistent)";
+  }
 }
 
 const char* cmd_debugespnowstream(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugespnowstream <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugEspNowStream = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugEspNowStream enabled" : "debugEspNowStream disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_ESPNOW_STREAM); else clearDebugFlag(DEBUG_ESPNOW_STREAM);
+    return v ? "debugEspNowStream enabled (runtime only)" : "debugEspNowStream disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugEspNowStream, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_ESPNOW_STREAM); else clearDebugFlag(DEBUG_ESPNOW_STREAM);
+    return gSettings.debugEspNowStream ? "debugEspNowStream enabled (persistent)" : "debugEspNowStream disabled (persistent)";
+  }
 }
 
 const char* cmd_debugespnowcore(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugespnowcore <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugEspNowCore = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugEspNowCore enabled" : "debugEspNowCore disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_ESPNOW_CORE); else clearDebugFlag(DEBUG_ESPNOW_CORE);
+    return v ? "debugEspNowCore enabled (runtime only)" : "debugEspNowCore disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugEspNowCore, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_ESPNOW_CORE); else clearDebugFlag(DEBUG_ESPNOW_CORE);
+    return gSettings.debugEspNowCore ? "debugEspNowCore enabled (persistent)" : "debugEspNowCore disabled (persistent)";
+  }
 }
 
 const char* cmd_debugespnowrouter(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugespnowrouter <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugEspNowRouter = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugEspNowRouter enabled" : "debugEspNowRouter disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_ESPNOW_ROUTER); else clearDebugFlag(DEBUG_ESPNOW_ROUTER);
+    return v ? "debugEspNowRouter enabled (runtime only)" : "debugEspNowRouter disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugEspNowRouter, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_ESPNOW_ROUTER); else clearDebugFlag(DEBUG_ESPNOW_ROUTER);
+    return gSettings.debugEspNowRouter ? "debugEspNowRouter enabled (persistent)" : "debugEspNowRouter disabled (persistent)";
+  }
 }
 
 const char* cmd_debugmemory(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugmemory <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugMemory = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugMemory enabled" : "debugMemory disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_MEMORY); else clearDebugFlag(DEBUG_MEMORY);
+    return v ? "debugMemory enabled (runtime only)" : "debugMemory disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugMemory, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_MEMORY); else clearDebugFlag(DEBUG_MEMORY);
+    return gSettings.debugMemory ? "debugMemory enabled (persistent)" : "debugMemory disabled (persistent)";
+  }
 }
 
 const char* cmd_debugespnowmesh(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugespnowmesh <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugEspNowMesh = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugEspNowMesh enabled" : "debugEspNowMesh disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_ESPNOW_MESH); else clearDebugFlag(DEBUG_ESPNOW_MESH);
+    return v ? "debugEspNowMesh enabled (runtime only)" : "debugEspNowMesh disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugEspNowMesh, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_ESPNOW_MESH); else clearDebugFlag(DEBUG_ESPNOW_MESH);
+    return gSettings.debugEspNowMesh ? "debugEspNowMesh enabled (persistent)" : "debugEspNowMesh disabled (persistent)";
+  }
 }
 
 const char* cmd_debugespnowtopo(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugespnowtopo <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugEspNowTopo = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugEspNowTopo enabled" : "debugEspNowTopo disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_ESPNOW_TOPO); else clearDebugFlag(DEBUG_ESPNOW_TOPO);
+    return v ? "debugEspNowTopo enabled (runtime only)" : "debugEspNowTopo disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugEspNowTopo, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_ESPNOW_TOPO); else clearDebugFlag(DEBUG_ESPNOW_TOPO);
+    return gSettings.debugEspNowTopo ? "debugEspNowTopo enabled (persistent)" : "debugEspNowTopo disabled (persistent)";
+  }
 }
 
 const char* cmd_debugespnowencryption(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugespnowencryption <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugEspNowEncryption = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugEspNowEncryption enabled" : "debugEspNowEncryption disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_ESPNOW_ENCRYPTION); else clearDebugFlag(DEBUG_ESPNOW_ENCRYPTION);
+    return v ? "debugEspNowEncryption enabled (runtime only)" : "debugEspNowEncryption disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugEspNowEncryption, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_ESPNOW_ENCRYPTION); else clearDebugFlag(DEBUG_ESPNOW_ENCRYPTION);
+    return gSettings.debugEspNowEncryption ? "debugEspNowEncryption enabled (persistent)" : "debugEspNowEncryption disabled (persistent)";
+  }
+}
+
+const char* cmd_debugespnowmetadata(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = args;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_ESPNOW_METADATA); else clearDebugFlag(DEBUG_ESPNOW_METADATA);
+    return v ? "debugEspNowMetadata enabled (runtime only)" : "debugEspNowMetadata disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugEspNowMetadata, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_ESPNOW_METADATA); else clearDebugFlag(DEBUG_ESPNOW_METADATA);
+    return gSettings.debugEspNowMetadata ? "debugEspNowMetadata enabled (persistent)" : "debugEspNowMetadata disabled (persistent)";
+  }
 }
 
 const char* cmd_debugautoscheduler(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugautoscheduler <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugAutoScheduler = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugAutoScheduler enabled" : "debugAutoScheduler disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_AUTO_SCHEDULER); else clearDebugFlag(DEBUG_AUTO_SCHEDULER);
+    return v ? "debugAutoScheduler enabled (runtime only)" : "debugAutoScheduler disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugAutoScheduler, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_AUTO_SCHEDULER); else clearDebugFlag(DEBUG_AUTO_SCHEDULER);
+    return gSettings.debugAutoScheduler ? "debugAutoScheduler enabled (persistent)" : "debugAutoScheduler disabled (persistent)";
+  }
 }
 
 const char* cmd_debugautoexec(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugautoexec <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugAutoExec = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugAutoExec enabled" : "debugAutoExec disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_AUTO_EXEC); else clearDebugFlag(DEBUG_AUTO_EXEC);
+    return v ? "debugAutoExec enabled (runtime only)" : "debugAutoExec disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugAutoExec, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_AUTO_EXEC); else clearDebugFlag(DEBUG_AUTO_EXEC);
+    return gSettings.debugAutoExec ? "debugAutoExec enabled (persistent)" : "debugAutoExec disabled (persistent)";
+  }
 }
 
 const char* cmd_debugautocondition(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugautocondition <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugAutoCondition = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugAutoCondition enabled" : "debugAutoCondition disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_AUTO_CONDITION); else clearDebugFlag(DEBUG_AUTO_CONDITION);
+    return v ? "debugAutoCondition enabled (runtime only)" : "debugAutoCondition disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugAutoCondition, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_AUTO_CONDITION); else clearDebugFlag(DEBUG_AUTO_CONDITION);
+    return gSettings.debugAutoCondition ? "debugAutoCondition enabled (persistent)" : "debugAutoCondition disabled (persistent)";
+  }
 }
 
 const char* cmd_debugautotiming(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugautotiming <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugAutoTiming = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugAutoTiming enabled" : "debugAutoTiming disabled";
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_AUTO_TIMING); else clearDebugFlag(DEBUG_AUTO_TIMING);
+    return v ? "debugAutoTiming enabled (runtime only)" : "debugAutoTiming disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugAutoTiming, (bool)(v == 1));
+    if (v) setDebugFlag(DEBUG_AUTO_TIMING); else clearDebugFlag(DEBUG_AUTO_TIMING);
+    return gSettings.debugAutoTiming ? "debugAutoTiming enabled (persistent)" : "debugAutoTiming disabled (persistent)";
+  }
 }
+
+// ============================================================================
+// Sub-flag parent sync helpers — one per group, called after any sub-flag change
+// ============================================================================
+static inline void syncAuthParent()    { updateParentDebugFlag(DEBUG_AUTH,        gSettings.debugAuth        || gDebugSubFlags.authSessions   || gDebugSubFlags.authCookies    || gDebugSubFlags.authLogin      || gDebugSubFlags.authBootId); }
+static inline void syncHttpParent()    { updateParentDebugFlag(DEBUG_HTTP,        gSettings.debugHttp        || gDebugSubFlags.httpHandlers   || gDebugSubFlags.httpRequests   || gDebugSubFlags.httpResponses  || gDebugSubFlags.httpStreaming); }
+static inline void syncWifiParent()    { updateParentDebugFlag(DEBUG_WIFI,        gSettings.debugWifi        || gDebugSubFlags.wifiConnection || gDebugSubFlags.wifiConfig     || gDebugSubFlags.wifiScanning   || gDebugSubFlags.wifiDriver); }
+static inline void syncStorageParent() { updateParentDebugFlag(DEBUG_STORAGE,     gSettings.debugStorage     || gDebugSubFlags.storageFiles   || gDebugSubFlags.storageJson    || gDebugSubFlags.storageSettings || gDebugSubFlags.storageMigration); }
+static inline void syncSystemParent()  { updateParentDebugFlag(DEBUG_SYSTEM,      gSettings.debugSystem      || gDebugSubFlags.systemBoot     || gDebugSubFlags.systemConfig   || gDebugSubFlags.systemTasks    || gDebugSubFlags.systemHardware); }
+static inline void syncUsersParent()   { updateParentDebugFlag(DEBUG_USERS,       gSettings.debugUsers       || gDebugSubFlags.usersMgmt      || gDebugSubFlags.usersRegister  || gDebugSubFlags.usersQuery); }
+static inline void syncCliParent()     { updateParentDebugFlag(DEBUG_CLI,         gSettings.debugCli         || gDebugSubFlags.cliExecution   || gDebugSubFlags.cliQueue       || gDebugSubFlags.cliValidation); }
+static inline void syncPerfParent()    { updateParentDebugFlag(DEBUG_PERFORMANCE, gSettings.debugPerformance || gDebugSubFlags.perfStack       || gDebugSubFlags.perfHeap       || gDebugSubFlags.perfTiming); }
+static inline void syncSseParent()     { updateParentDebugFlag(DEBUG_SSE,         gSettings.debugSse         || gDebugSubFlags.sseConnection  || gDebugSubFlags.sseEvents      || gDebugSubFlags.sseBroadcast); }
+static inline void syncCmdFlowParent() { updateParentDebugFlag(DEBUG_CMD_FLOW,    gSettings.debugCommandFlow || gDebugSubFlags.cmdflowRouting  || gDebugSubFlags.cmdflowQueue   || gDebugSubFlags.cmdflowContext); }
 
 const char* cmd_debugauthsessions(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugauthsessions <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugAuthSessions = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugAuthSessions enabled" : "debugAuthSessions disabled";
+  gDebugSubFlags.authSessions = (v != 0);
+  if (!modeTemp) setSetting(gSettings.debugAuthSessions, (bool)(v != 0));
+  syncAuthParent();
+  if (modeTemp) return v ? "debugAuthSessions enabled (runtime only)" : "debugAuthSessions disabled (runtime only)";
+  return gSettings.debugAuthSessions ? "debugAuthSessions enabled (persistent)" : "debugAuthSessions disabled (persistent)";
 }
 
 const char* cmd_debugauthcookies(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugauthcookies <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugAuthCookies = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugAuthCookies enabled" : "debugAuthCookies disabled";
+  gDebugSubFlags.authCookies = (v != 0);
+  if (!modeTemp) setSetting(gSettings.debugAuthCookies, (bool)(v != 0));
+  syncAuthParent();
+  if (modeTemp) return v ? "debugAuthCookies enabled (runtime only)" : "debugAuthCookies disabled (runtime only)";
+  return gSettings.debugAuthCookies ? "debugAuthCookies enabled (persistent)" : "debugAuthCookies disabled (persistent)";
 }
 
 const char* cmd_debugauthlogin(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugauthlogin <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugAuthLogin = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugAuthLogin enabled" : "debugAuthLogin disabled";
+  gDebugSubFlags.authLogin = (v != 0);
+  if (!modeTemp) setSetting(gSettings.debugAuthLogin, (bool)(v != 0));
+  syncAuthParent();
+  if (modeTemp) return v ? "debugAuthLogin enabled (runtime only)" : "debugAuthLogin disabled (runtime only)";
+  return gSettings.debugAuthLogin ? "debugAuthLogin enabled (persistent)" : "debugAuthLogin disabled (persistent)";
 }
 
 const char* cmd_debugauthbootid(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
   String valStr = args;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugauthbootid <0|1>";
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugAuthBootId = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugAuthBootId enabled" : "debugAuthBootId disabled";
+  gDebugSubFlags.authBootId = (v != 0);
+  if (!modeTemp) setSetting(gSettings.debugAuthBootId, (bool)(v != 0));
+  syncAuthParent();
+  if (modeTemp) return v ? "debugAuthBootId enabled (runtime only)" : "debugAuthBootId disabled (runtime only)";
+  return gSettings.debugAuthBootId ? "debugAuthBootId enabled (persistent)" : "debugAuthBootId disabled (persistent)";
 }
 
 const char* cmd_commandmodulesummary(const String& cmd) {
@@ -1494,8 +2035,6 @@ const char* getDebugCategoryName(uint32_t flag) {
   if (flag & DEBUG_HTTP) return "HTTP";
   if (flag & DEBUG_SSE) return "SSE";
   if (flag & DEBUG_CLI) return "CLI";
-  if (flag & DEBUG_SENSORS_FRAME) return "SENSORS_FRAME";
-  if (flag & DEBUG_SENSORS_DATA) return "SENSORS_DATA";
   if (flag & DEBUG_SENSORS) return "SENSORS";
   if (flag & DEBUG_FMRADIO) return "FMRADIO";
   if (flag & DEBUG_WIFI) return "WIFI";
@@ -1519,6 +2058,8 @@ const char* getDebugCategoryName(uint32_t flag) {
   if (flag & DEBUG_AUTO_EXEC) return "AUTO_EXEC";
   if (flag & DEBUG_AUTO_CONDITION) return "AUTO_COND";
   if (flag & DEBUG_AUTO_TIMING) return "AUTO_TIME";
+  if (flag & DEBUG_ESPNOW_ENCRYPTION) return "ESPNOW_ENCRYPTION";
+  if (flag & DEBUG_ESPNOW_METADATA) return "ESPNOW_METADATA";
   return "UNKNOWN";
 }
 
@@ -1553,18 +2094,20 @@ const char* cmd_log(const String& args) {
   String action = args;
   action.trim();
   if (action.length() == 0) {
-    return "Usage: log <start|stop|status>\n"
+    return "Usage: log <start|stop|status|autostart>\n"
            "  start [filepath] [flags=0xXXXX] [tags=0|1]: Begin system logging\n"
            "    filepath: Log file path (auto-generated if omitted)\n"
            "    flags: Debug flags to enable (e.g., flags=0x0203)\n"
            "    tags: Enable category tags (default: 1)\n"
            "  stop: Stop system logging\n"
            "  status: Show current logging status\n"
+           "  autostart: Toggle auto-start system logging on boot\n"
            "Examples:\n"
            "  log start\n"
            "  log start /logs/debug.log\n"
            "  log start flags=0x0203 tags=1\n"
-           "  log start /logs/debug.log flags=0x4603 tags=0";
+           "  log start /logs/debug.log flags=0x4603 tags=0\n"
+           "  log autostart";
   }
   int sp2 = action.indexOf(' ');
   String subCmd = (sp2 >= 0) ? action.substring(0, sp2) : action;
@@ -1580,16 +2123,21 @@ const char* cmd_log(const String& args) {
                "System logging ACTIVE\n"
                "  File: %s\n"
                "  Last write: %lus ago\n"
-               "  Output flags: 0x%02X",
-               gSystemLogPath.c_str(), ageSeconds, (unsigned)gOutputFlags);
+               "  Output flags: 0x%02X\n"
+               "  Auto-start: %s",
+               gSystemLogPath.c_str(), ageSeconds, (unsigned)gOutputFlags,
+               gSettings.systemLogAutoStart ? "ON" : "OFF");
     } else if (gSystemLogEnabled) {
       snprintf(gDebugBuffer, 1024,
                "System logging CONFIGURED but OUTPUT_FILE flag not set\n"
                "  File: %s\n"
-               "  Use 'log start' to enable",
-               gSystemLogPath.c_str());
+               "  Use 'log start' to enable\n"
+               "  Auto-start: %s",
+               gSystemLogPath.c_str(),
+               gSettings.systemLogAutoStart ? "ON" : "OFF");
     } else {
-      snprintf(gDebugBuffer, 1024, "System logging is INACTIVE");
+      snprintf(gDebugBuffer, 1024, "System logging is INACTIVE\n  Auto-start: %s",
+               gSettings.systemLogAutoStart ? "ON" : "OFF");
     }
     return gDebugBuffer;
   }
@@ -1626,7 +2174,7 @@ const char* cmd_log(const String& args) {
     
     // Ensure any previous file handle is closed (safety check)
     if (gSystemLogFile) {
-      fsLock("debug.log");
+      fsLock("log.create");
       gSystemLogFile.flush();
       gSystemLogFile.close();
       // Note: close() resets the handle internally
@@ -1635,7 +2183,7 @@ const char* cmd_log(const String& args) {
     
     // Parse arguments: log start [filepath] [flags=0xXXXX] [tags=0|1]
     String filepath;
-    uint32_t debugFlags = 0xFFFFFFFF; // Sentinel: don't change if not specified
+    uint64_t debugFlags = 0xFFFFFFFFFFFFFFFFULL; // Sentinel: don't change if not specified
     int categoryTags = -1; // Sentinel: don't change if not specified
     
     if (sp2 >= 0) {
@@ -1654,9 +2202,9 @@ const char* cmd_log(const String& args) {
           String flagsStr = token.substring(6);
           flagsStr.trim();
           if (flagsStr.startsWith("0x") || flagsStr.startsWith("0X")) {
-            debugFlags = strtoul(flagsStr.c_str() + 2, nullptr, 16);
+            debugFlags = strtoull(flagsStr.c_str() + 2, nullptr, 16);
           } else {
-            debugFlags = strtoul(flagsStr.c_str(), nullptr, 16);
+            debugFlags = strtoull(flagsStr.c_str(), nullptr, 16);
           }
         } else if (token.startsWith("tags=")) {
           String tagsStr = token.substring(5);
@@ -1686,10 +2234,10 @@ const char* cmd_log(const String& args) {
     }
     
     // Apply debug flags if specified
-    if (debugFlags != 0xFFFFFFFF) {
+    if (debugFlags != 0xFFFFFFFFFFFFFFFFULL) {
       gDebugFlags = debugFlags;
       char flagsMsg[128];
-      snprintf(flagsMsg, sizeof(flagsMsg), "Debug flags set to: 0x%08X", (unsigned)gDebugFlags);
+      snprintf(flagsMsg, sizeof(flagsMsg), "Debug flags set to: 0x%016llX", (unsigned long long)gDebugFlags);
       broadcastOutput(flagsMsg);
     }
     
@@ -1739,7 +2287,15 @@ const char* cmd_log(const String& args) {
     return gDebugBuffer;
   }
   
-  return "Error: Unknown subcommand. Use: start, stop, or status";
+  // Handle 'autostart' subcommand
+  if (subCmd == "autostart") {
+    bool newValue = !gSettings.systemLogAutoStart;
+    setSetting(gSettings.systemLogAutoStart, newValue);
+    snprintf(gDebugBuffer, 1024, "System log auto-start %s", newValue ? "ENABLED" : "DISABLED");
+    return gDebugBuffer;
+  }
+  
+  return "Error: Unknown subcommand. Use: start, stop, status, or autostart";
 }
 
 // ============================================================================
@@ -1749,413 +2305,444 @@ const char* cmd_log(const String& args) {
 // HTTP sub-flag commands
 const char* cmd_debughttphandlers(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debughttphandlers <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugHttpHandlers = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugHttpHandlers enabled" : "debugHttpHandlers disabled";
+  gDebugSubFlags.httpHandlers = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugHttpHandlers, (bool)(v!=0));
+  syncHttpParent();
+  if (modeTemp) return v ? "debugHttpHandlers enabled (runtime only)" : "debugHttpHandlers disabled (runtime only)";
+  return gSettings.debugHttpHandlers ? "debugHttpHandlers enabled (persistent)" : "debugHttpHandlers disabled (persistent)";
 }
 
 const char* cmd_debughttprequests(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debughttprequests <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugHttpRequests = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugHttpRequests enabled" : "debugHttpRequests disabled";
+  gDebugSubFlags.httpRequests = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugHttpRequests, (bool)(v!=0));
+  syncHttpParent();
+  if (modeTemp) return v ? "debugHttpRequests enabled (runtime only)" : "debugHttpRequests disabled (runtime only)";
+  return gSettings.debugHttpRequests ? "debugHttpRequests enabled (persistent)" : "debugHttpRequests disabled (persistent)";
 }
 
 const char* cmd_debughttpresponses(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debughttpresponses <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugHttpResponses = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugHttpResponses enabled" : "debugHttpResponses disabled";
+  gDebugSubFlags.httpResponses = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugHttpResponses, (bool)(v!=0));
+  syncHttpParent();
+  if (modeTemp) return v ? "debugHttpResponses enabled (runtime only)" : "debugHttpResponses disabled (runtime only)";
+  return gSettings.debugHttpResponses ? "debugHttpResponses enabled (persistent)" : "debugHttpResponses disabled (persistent)";
 }
 
 const char* cmd_debughttpstreaming(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debughttpstreaming <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugHttpStreaming = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugHttpStreaming enabled" : "debugHttpStreaming disabled";
+  gDebugSubFlags.httpStreaming = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugHttpStreaming, (bool)(v!=0));
+  syncHttpParent();
+  if (modeTemp) return v ? "debugHttpStreaming enabled (runtime only)" : "debugHttpStreaming disabled (runtime only)";
+  return gSettings.debugHttpStreaming ? "debugHttpStreaming enabled (persistent)" : "debugHttpStreaming disabled (persistent)";
 }
 
 // WiFi sub-flag commands
 const char* cmd_debugwificonnection(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugwificonnection <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugWifiConnection = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugWifiConnection enabled" : "debugWifiConnection disabled";
+  gDebugSubFlags.wifiConnection = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugWifiConnection, (bool)(v!=0));
+  syncWifiParent();
+  if (modeTemp) return v ? "debugWifiConnection enabled (runtime only)" : "debugWifiConnection disabled (runtime only)";
+  return gSettings.debugWifiConnection ? "debugWifiConnection enabled (persistent)" : "debugWifiConnection disabled (persistent)";
 }
 
 const char* cmd_debugwificonfig(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugwificonfig <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugWifiConfig = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugWifiConfig enabled" : "debugWifiConfig disabled";
+  gDebugSubFlags.wifiConfig = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugWifiConfig, (bool)(v!=0));
+  syncWifiParent();
+  if (modeTemp) return v ? "debugWifiConfig enabled (runtime only)" : "debugWifiConfig disabled (runtime only)";
+  return gSettings.debugWifiConfig ? "debugWifiConfig enabled (persistent)" : "debugWifiConfig disabled (persistent)";
 }
 
 const char* cmd_debugwifiscanning(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugwifiscanning <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugWifiScanning = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugWifiScanning enabled" : "debugWifiScanning disabled";
+  gDebugSubFlags.wifiScanning = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugWifiScanning, (bool)(v!=0));
+  syncWifiParent();
+  if (modeTemp) return v ? "debugWifiScanning enabled (runtime only)" : "debugWifiScanning disabled (runtime only)";
+  return gSettings.debugWifiScanning ? "debugWifiScanning enabled (persistent)" : "debugWifiScanning disabled (persistent)";
 }
 
 const char* cmd_debugwifidriver(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugwifidriver <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugWifiDriver = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugWifiDriver enabled" : "debugWifiDriver disabled";
+  gDebugSubFlags.wifiDriver = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugWifiDriver, (bool)(v!=0));
+  syncWifiParent();
+  if (modeTemp) return v ? "debugWifiDriver enabled (runtime only)" : "debugWifiDriver disabled (runtime only)";
+  return gSettings.debugWifiDriver ? "debugWifiDriver enabled (persistent)" : "debugWifiDriver disabled (persistent)";
 }
 
 // Storage sub-flag commands
 const char* cmd_debugstoragefiles(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugstoragefiles <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugStorageFiles = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugStorageFiles enabled" : "debugStorageFiles disabled";
+  gDebugSubFlags.storageFiles = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugStorageFiles, (bool)(v!=0));
+  syncStorageParent();
+  if (modeTemp) return v ? "debugStorageFiles enabled (runtime only)" : "debugStorageFiles disabled (runtime only)";
+  return gSettings.debugStorageFiles ? "debugStorageFiles enabled (persistent)" : "debugStorageFiles disabled (persistent)";
 }
 
 const char* cmd_debugstoragejson(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugstoragejson <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugStorageJson = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugStorageJson enabled" : "debugStorageJson disabled";
+  gDebugSubFlags.storageJson = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugStorageJson, (bool)(v!=0));
+  syncStorageParent();
+  if (modeTemp) return v ? "debugStorageJson enabled (runtime only)" : "debugStorageJson disabled (runtime only)";
+  return gSettings.debugStorageJson ? "debugStorageJson enabled (persistent)" : "debugStorageJson disabled (persistent)";
 }
 
 const char* cmd_debugstoragesettings(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugstoragesettings <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugStorageSettings = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugStorageSettings enabled" : "debugStorageSettings disabled";
+  gDebugSubFlags.storageSettings = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugStorageSettings, (bool)(v!=0));
+  syncStorageParent();
+  if (modeTemp) return v ? "debugStorageSettings enabled (runtime only)" : "debugStorageSettings disabled (runtime only)";
+  return gSettings.debugStorageSettings ? "debugStorageSettings enabled (persistent)" : "debugStorageSettings disabled (persistent)";
 }
 
 const char* cmd_debugstoragemigration(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugstoragemigration <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugStorageMigration = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugStorageMigration enabled" : "debugStorageMigration disabled";
+  gDebugSubFlags.storageMigration = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugStorageMigration, (bool)(v!=0));
+  syncStorageParent();
+  if (modeTemp) return v ? "debugStorageMigration enabled (runtime only)" : "debugStorageMigration disabled (runtime only)";
+  return gSettings.debugStorageMigration ? "debugStorageMigration enabled (persistent)" : "debugStorageMigration disabled (persistent)";
 }
 
 // System sub-flag commands
 const char* cmd_debugsystemboot(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugsystemboot <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugSystemBoot = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugSystemBoot enabled" : "debugSystemBoot disabled";
+  gDebugSubFlags.systemBoot = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugSystemBoot, (bool)(v!=0));
+  syncSystemParent();
+  if (modeTemp) return v ? "debugSystemBoot enabled (runtime only)" : "debugSystemBoot disabled (runtime only)";
+  return gSettings.debugSystemBoot ? "debugSystemBoot enabled (persistent)" : "debugSystemBoot disabled (persistent)";
 }
 
 const char* cmd_debugsystemconfig(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugsystemconfig <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugSystemConfig = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugSystemConfig enabled" : "debugSystemConfig disabled";
+  gDebugSubFlags.systemConfig = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugSystemConfig, (bool)(v!=0));
+  syncSystemParent();
+  if (modeTemp) return v ? "debugSystemConfig enabled (runtime only)" : "debugSystemConfig disabled (runtime only)";
+  return gSettings.debugSystemConfig ? "debugSystemConfig enabled (persistent)" : "debugSystemConfig disabled (persistent)";
 }
 
 const char* cmd_debugsystemtasks(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugsystemtasks <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugSystemTasks = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugSystemTasks enabled" : "debugSystemTasks disabled";
+  gDebugSubFlags.systemTasks = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugSystemTasks, (bool)(v!=0));
+  syncSystemParent();
+  if (modeTemp) return v ? "debugSystemTasks enabled (runtime only)" : "debugSystemTasks disabled (runtime only)";
+  return gSettings.debugSystemTasks ? "debugSystemTasks enabled (persistent)" : "debugSystemTasks disabled (persistent)";
 }
 
 const char* cmd_debugsystemhardware(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugsystemhardware <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugSystemHardware = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugSystemHardware enabled" : "debugSystemHardware disabled";
+  gDebugSubFlags.systemHardware = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugSystemHardware, (bool)(v!=0));
+  syncSystemParent();
+  if (modeTemp) return v ? "debugSystemHardware enabled (runtime only)" : "debugSystemHardware disabled (runtime only)";
+  return gSettings.debugSystemHardware ? "debugSystemHardware enabled (persistent)" : "debugSystemHardware disabled (persistent)";
 }
 
 // Users sub-flag commands
 const char* cmd_debugusersmgmt(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugusersmgmt <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugUsersMgmt = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugUsersMgmt enabled" : "debugUsersMgmt disabled";
+  gDebugSubFlags.usersMgmt = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugUsersMgmt, (bool)(v!=0));
+  syncUsersParent();
+  if (modeTemp) return v ? "debugUsersMgmt enabled (runtime only)" : "debugUsersMgmt disabled (runtime only)";
+  return gSettings.debugUsersMgmt ? "debugUsersMgmt enabled (persistent)" : "debugUsersMgmt disabled (persistent)";
 }
 
 const char* cmd_debugusersregister(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugusersregister <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugUsersRegister = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugUsersRegister enabled" : "debugUsersRegister disabled";
+  gDebugSubFlags.usersRegister = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugUsersRegister, (bool)(v!=0));
+  syncUsersParent();
+  if (modeTemp) return v ? "debugUsersRegister enabled (runtime only)" : "debugUsersRegister disabled (runtime only)";
+  return gSettings.debugUsersRegister ? "debugUsersRegister enabled (persistent)" : "debugUsersRegister disabled (persistent)";
 }
 
 const char* cmd_debugusersquery(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugusersquery <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugUsersQuery = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugUsersQuery enabled" : "debugUsersQuery disabled";
+  gDebugSubFlags.usersQuery = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugUsersQuery, (bool)(v!=0));
+  syncUsersParent();
+  if (modeTemp) return v ? "debugUsersQuery enabled (runtime only)" : "debugUsersQuery disabled (runtime only)";
+  return gSettings.debugUsersQuery ? "debugUsersQuery enabled (persistent)" : "debugUsersQuery disabled (persistent)";
 }
 
 // CLI sub-flag commands
 const char* cmd_debugcliexecution(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugcliexecution <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugCliExecution = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugCliExecution enabled" : "debugCliExecution disabled";
+  gDebugSubFlags.cliExecution = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugCliExecution, (bool)(v!=0));
+  syncCliParent();
+  if (modeTemp) return v ? "debugCliExecution enabled (runtime only)" : "debugCliExecution disabled (runtime only)";
+  return gSettings.debugCliExecution ? "debugCliExecution enabled (persistent)" : "debugCliExecution disabled (persistent)";
 }
 
 const char* cmd_debugcliqueue(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugcliqueue <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugCliQueue = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugCliQueue enabled" : "debugCliQueue disabled";
+  gDebugSubFlags.cliQueue = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugCliQueue, (bool)(v!=0));
+  syncCliParent();
+  if (modeTemp) return v ? "debugCliQueue enabled (runtime only)" : "debugCliQueue disabled (runtime only)";
+  return gSettings.debugCliQueue ? "debugCliQueue enabled (persistent)" : "debugCliQueue disabled (persistent)";
 }
 
 const char* cmd_debugclivalidation(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugclivalidation <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugCliValidation = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugCliValidation enabled" : "debugCliValidation disabled";
+  gDebugSubFlags.cliValidation = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugCliValidation, (bool)(v!=0));
+  syncCliParent();
+  if (modeTemp) return v ? "debugCliValidation enabled (runtime only)" : "debugCliValidation disabled (runtime only)";
+  return gSettings.debugCliValidation ? "debugCliValidation enabled (persistent)" : "debugCliValidation disabled (persistent)";
 }
 
 // Performance sub-flag commands
 const char* cmd_debugperfstack(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugperfstack <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugPerfStack = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugPerfStack enabled" : "debugPerfStack disabled";
+  gDebugSubFlags.perfStack = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugPerfStack, (bool)(v!=0));
+  syncPerfParent();
+  if (modeTemp) return v ? "debugPerfStack enabled (runtime only)" : "debugPerfStack disabled (runtime only)";
+  return gSettings.debugPerfStack ? "debugPerfStack enabled (persistent)" : "debugPerfStack disabled (persistent)";
 }
 
 const char* cmd_debugperfheap(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugperfheap <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugPerfHeap = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugPerfHeap enabled" : "debugPerfHeap disabled";
+  gDebugSubFlags.perfHeap = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugPerfHeap, (bool)(v!=0));
+  syncPerfParent();
+  if (modeTemp) return v ? "debugPerfHeap enabled (runtime only)" : "debugPerfHeap disabled (runtime only)";
+  return gSettings.debugPerfHeap ? "debugPerfHeap enabled (persistent)" : "debugPerfHeap disabled (persistent)";
 }
 
 const char* cmd_debugperftiming(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugperftiming <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugPerfTiming = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugPerfTiming enabled" : "debugPerfTiming disabled";
+  gDebugSubFlags.perfTiming = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugPerfTiming, (bool)(v!=0));
+  syncPerfParent();
+  if (modeTemp) return v ? "debugPerfTiming enabled (runtime only)" : "debugPerfTiming disabled (runtime only)";
+  return gSettings.debugPerfTiming ? "debugPerfTiming enabled (persistent)" : "debugPerfTiming disabled (persistent)";
 }
 
 // SSE sub-flag commands
 const char* cmd_debugsseconnection(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugsseconnection <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugSseConnection = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugSseConnection enabled" : "debugSseConnection disabled";
+  gDebugSubFlags.sseConnection = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugSseConnection, (bool)(v!=0));
+  syncSseParent();
+  if (modeTemp) return v ? "debugSseConnection enabled (runtime only)" : "debugSseConnection disabled (runtime only)";
+  return gSettings.debugSseConnection ? "debugSseConnection enabled (persistent)" : "debugSseConnection disabled (persistent)";
 }
 
 const char* cmd_debugsseevents(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugsseevents <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugSseEvents = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugSseEvents enabled" : "debugSseEvents disabled";
+  gDebugSubFlags.sseEvents = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugSseEvents, (bool)(v!=0));
+  syncSseParent();
+  if (modeTemp) return v ? "debugSseEvents enabled (runtime only)" : "debugSseEvents disabled (runtime only)";
+  return gSettings.debugSseEvents ? "debugSseEvents enabled (persistent)" : "debugSseEvents disabled (persistent)";
 }
 
 const char* cmd_debugssebroadcast(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugssebroadcast <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugSseBroadcast = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugSseBroadcast enabled" : "debugSseBroadcast disabled";
+  gDebugSubFlags.sseBroadcast = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugSseBroadcast, (bool)(v!=0));
+  syncSseParent();
+  if (modeTemp) return v ? "debugSseBroadcast enabled (runtime only)" : "debugSseBroadcast disabled (runtime only)";
+  return gSettings.debugSseBroadcast ? "debugSseBroadcast enabled (persistent)" : "debugSseBroadcast disabled (persistent)";
 }
 
 // Command Flow sub-flag commands
 const char* cmd_debugcmdflowrouting(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugcmdflowrouting <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugCmdflowRouting = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugCmdflowRouting enabled" : "debugCmdflowRouting disabled";
+  gDebugSubFlags.cmdflowRouting = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugCmdflowRouting, (bool)(v!=0));
+  syncCmdFlowParent();
+  if (modeTemp) return v ? "debugCmdflowRouting enabled (runtime only)" : "debugCmdflowRouting disabled (runtime only)";
+  return gSettings.debugCmdflowRouting ? "debugCmdflowRouting enabled (persistent)" : "debugCmdflowRouting disabled (persistent)";
 }
 
 const char* cmd_debugcmdflowqueue(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugcmdflowqueue <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugCmdflowQueue = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugCmdflowQueue enabled" : "debugCmdflowQueue disabled";
+  gDebugSubFlags.cmdflowQueue = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugCmdflowQueue, (bool)(v!=0));
+  syncCmdFlowParent();
+  if (modeTemp) return v ? "debugCmdflowQueue enabled (runtime only)" : "debugCmdflowQueue disabled (runtime only)";
+  return gSettings.debugCmdflowQueue ? "debugCmdflowQueue enabled (persistent)" : "debugCmdflowQueue disabled (persistent)";
 }
 
 const char* cmd_debugcmdflowcontext(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  extern void applySettings();
-  String valStr = args;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: debugcmdflowcontext <0|1>";
+  String valStr = args; valStr.trim();
+  int sp2 = valStr.indexOf(' '); String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2+1); valStr = valStr.substring(0,sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
   int v = valStr.toInt();
-  gSettings.debugCmdflowContext = (v == 1);
-  writeSettingsJson();
-  applySettings();
-  return v ? "debugCmdflowContext enabled" : "debugCmdflowContext disabled";
+  gDebugSubFlags.cmdflowContext = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugCmdflowContext, (bool)(v!=0));
+  syncCmdFlowParent();
+  if (modeTemp) return v ? "debugCmdflowContext enabled (runtime only)" : "debugCmdflowContext disabled (runtime only)";
+  return gSettings.debugCmdflowContext ? "debugCmdflowContext enabled (persistent)" : "debugCmdflowContext disabled (persistent)";
 }
 
 // ============================================================================
@@ -2170,16 +2757,31 @@ const CommandEntry debugCommands[] = {
   { "debugauth", "Debug authentication (parent flag).", true, cmd_debugauth, "Usage: debugauth <0|1>" },
   { "debugsensors", "Debug sensors (parent flag).", true, cmd_debugsensors, "Usage: debugsensors <0|1>" },
   { "debugespnow", "Debug ESP-NOW (parent flag).", true, cmd_debugespnow, "Usage: debugespnow <0|1>" },
-  { "debugsensorsframe", "Debug sensor frame processing.", true, cmd_debugsensorsframe },
-  { "debugsensorsdata", "Debug sensor data.", true, cmd_debugsensorsdata },
   { "debugsensorsgeneral", "Debug general sensor operations.", true, cmd_debugsensorsgeneral },
   { "debugcamera", "Debug camera operations.", true, cmd_debugcamera },
   { "debugmicrophone", "Debug microphone operations.", true, cmd_debugmicrophone },
+  { "debuggps", "Debug GPS sensor (PA1010D).", true, cmd_debuggps, "Usage: debuggps <0|1>" },
+  { "debugrtc", "Debug RTC sensor (DS3231).", true, cmd_debugrtc, "Usage: debugrtc <0|1>" },
+  { "debugimu", "Debug IMU sensor (BNO055).", true, cmd_debugimu, "Usage: debugimu <0|1>" },
+  { "debugthermal", "Debug thermal sensor (MLX90640).", true, cmd_debugthermal, "Usage: debugthermal <0|1>" },
+  { "debugtof", "Debug ToF sensor (VL53L4CX).", true, cmd_debugtof, "Usage: debugtof <0|1>" },
+  { "debuggamepad", "Debug gamepad (Seesaw).", true, cmd_debuggamepad, "Usage: debuggamepad <0|1>" },
+  { "debugapds", "Debug APDS sensor (APDS9960).", true, cmd_debugapds, "Usage: debugapds <0|1>" },
+  { "debugpresence", "Debug presence sensor (STHS34PF80).", true, cmd_debugpresence, "Usage: debugpresence <0|1>" },
+  { "debugthermalframe", "Debug thermal frame timing/capture.", true, cmd_debugthermalframe, "Usage: debugthermalframe <0|1>" },
+  { "debugthermaldata", "Debug thermal data processing.", true, cmd_debugthermaldata, "Usage: debugthermaldata <0|1>" },
+  { "debugtofframe", "Debug ToF frame capture.", true, cmd_debugtofframe, "Usage: debugtofframe <0|1>" },
+  { "debuggamepadframe", "Debug gamepad frame timing.", true, cmd_debuggamepadframe, "Usage: debuggamepadframe <0|1>" },
+  { "debuggamepaddata", "Debug gamepad button events.", true, cmd_debuggamepaddata, "Usage: debuggamepaddata <0|1>" },
+  { "debugimuframe", "Debug IMU frame timing.", true, cmd_debugimuframe, "Usage: debugimuframe <0|1>" },
+  { "debugimudata", "Debug IMU data updates.", true, cmd_debugimudata, "Usage: debugimudata <0|1>" },
+  { "debugapdsframe", "Debug APDS frame timing.", true, cmd_debugapdsframe, "Usage: debugapdsframe <0|1>" },
   { "debugi2c", "Debug I2C bus transactions, mutex, clock changes.", true, cmd_debugi2c },
   { "debugwifi", "Debug WiFi operations.", true, cmd_debugwifi },
   { "debugstorage", "Debug storage operations.", true, cmd_debugstorage },
   { "debugperformance", "Debug performance metrics.", true, cmd_debugperformance },
   { "debugdatetime", "Debug date/time operations.", true, cmd_debugdatetime },
+  { "debugverbose", "Global debug verbosity override (forces all debug + loglevel=DEBUG).", true, cmd_debugverbose, "Usage: debugverbose <0|1>" },
   { "debugbuffer", "Show debug ring buffer status.", false, cmd_debugbuffer },
   { "debugcommandflow", "Debug command flow.", true, cmd_debugcommandflow, "Usage: debugcommandflow <0|1>" },
   { "debugusers", "Debug user management.", true, cmd_debugusers, "Usage: debugusers <0|1>" },
@@ -2190,6 +2792,7 @@ const CommandEntry debugCommands[] = {
   { "debugespnowmesh", "Debug ESP-NOW mesh operations.", true, cmd_debugespnowmesh, "Usage: debugespnowmesh <0|1>" },
   { "debugespnowtopo", "Debug ESP-NOW topology discovery.", true, cmd_debugespnowtopo, "Usage: debugespnowtopo <0|1>" },
   { "debugespnowencryption", "Debug ESP-NOW encryption.", true, cmd_debugespnowencryption, "Usage: debugespnowencryption <0|1>" },
+  { "debugespnowmetadata", "Debug ESP-NOW metadata exchange (REQ/RESP/PUSH).", true, cmd_debugespnowmetadata, "Usage: debugespnowmetadata <0|1>" },
   { "debugautoscheduler", "Debug automations scheduler.", true, cmd_debugautoscheduler, "Usage: debugautoscheduler <0|1>" },
   { "debugautoexec", "Debug automations execution.", true, cmd_debugautoexec, "Usage: debugautoexec <0|1>" },
   { "debugautocondition", "Debug automations conditions.", true, cmd_debugautocondition, "Usage: debugautocondition <0|1>" },
@@ -2236,7 +2839,8 @@ const CommandEntry debugCommands[] = {
   { "debuglogger", "Debug sensor logger internals.", true, cmd_debuglogger },
   { "commandmodulesummary", "Show command module summary.", true, cmd_commandmodulesummary },
   { "settingsmodulesummary", "Show settings module summary.", true, cmd_settingsmodulesummary },
-  { "outtft", "Enable/disable TFT output.", true, cmd_outtft, "Usage: outtft <0|1> [persist|temp]" },
+  { "outdisplay", "Enable/disable display output.", true, cmd_outdisplay, "Usage: outdisplay <0|1> [persist|temp]" },
+  { "outg2", "Enable/disable G2 glasses output.", false, cmd_outg2, "Usage: outg2 <0|1> - streams CLI output to G2 glasses" },
   { "loglevel", "Set log level (error|warn|info|debug).", true, cmd_loglevel },
   { "log", "System-wide logging to file.", false, cmd_log, "Usage: log <start|stop|status>\n  start [filepath] [flags=0xXXXX] [tags=0|1]: Begin system logging\n    filepath: Log file path (auto-generated if omitted)\n    flags: Debug flags to enable (e.g., flags=0x0203)" },
 };
@@ -2263,7 +2867,7 @@ bool DebugManager::initialize() {
     return true;
 }
 
-void DebugManager::queueDebugMessage(uint32_t flag, const char* message) {
+void DebugManager::queueDebugMessage(uint64_t flag, const char* message) {
     if (!message) return;
     DEBUGF_QUEUE(flag, "%s", message);
 }
@@ -2292,8 +2896,8 @@ void DebugManager::shutdown() {
     // Intentionally no-op for now: existing debug system owns queues/tasks.
 }
 
-void DebugManager::setDebugFlags(uint32_t flags) { gDebugFlags = flags; }
-uint32_t DebugManager::getDebugFlags() const { return gDebugFlags; }
+void DebugManager::setDebugFlags(uint64_t flags) { gDebugFlags = flags; }
+uint64_t DebugManager::getDebugFlags() const { return gDebugFlags; }
 
 void DebugManager::setLogLevel(uint8_t level) { gLogLevel = level; }
 uint8_t DebugManager::getLogLevel() const { return gLogLevel; }
@@ -2320,9 +2924,9 @@ extern void resolvePendingUserCreationTimes();
 bool gTimeSyncedMarkerWritten = false;
 
 // Log File Path Definitions
-const char* LOG_OK_FILE = "/logs/successful_login.log";              // ~680KB cap
-const char* LOG_FAIL_FILE = "/logs/failed_login.log";                // ~680KB cap
-const char* LOG_I2C_FILE = "/logs/i2c_errors.log";                   // 64KB cap
+const char* LOG_OK_FILE = "/system/logs/successful_login.log";              // ~680KB cap
+const char* LOG_FAIL_FILE = "/system/logs/failed_login.log";                // ~680KB cap
+const char* LOG_I2C_FILE = "/system/logs/i2c_errors.log";                   // 64KB cap
 
 void logToFile(const char* path, const String& line, size_t capBytes) {
   appendLineWithCap(path, line, capBytes);
@@ -2401,4 +3005,43 @@ void logI2CRecovery(uint8_t address, const char* deviceName, int totalErrors) {
   line += String(totalErrors);
   
   appendLineWithCap(LOG_I2C_FILE, line, LOG_I2C_CAP);
+}
+
+// ============================================================================
+// System Log Auto-Start (called from boot)
+// ============================================================================
+
+void systemLogAutoStart() {
+  if (!gSettings.systemLogAutoStart) return;
+  if (gSystemLogEnabled) return;  // Already running
+  
+  // Auto-generate log filename with timestamp
+  String filepath = generateSystemLogFilename();
+  
+  // Ensure any previous file handle is closed (safety check)
+  if (gSystemLogFile) {
+    fsLock("debug.log");
+    gSystemLogFile.flush();
+    gSystemLogFile.close();
+    fsUnlock();
+  }
+  
+  // Create the log file
+  fsLock("debug.log");
+  File f = LittleFS.open(filepath.c_str(), "w");
+  if (!f) {
+    fsUnlock();
+    broadcastOutput("[SYSTEM_LOG] Auto-start failed: Could not create file: " + filepath);
+    return;
+  }
+  f.printf("# System log auto-started at %lu ms\n", millis());
+  f.close();
+  fsUnlock();
+  
+  gSystemLogPath = filepath;
+  gSystemLogEnabled = true;
+  gSystemLogLastWrite = millis();
+  gOutputFlags |= OUTPUT_FILE;
+  
+  broadcastOutput("[SYSTEM_LOG] Auto-start enabled, logging to: " + filepath);
 }
