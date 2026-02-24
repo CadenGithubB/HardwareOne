@@ -12,6 +12,7 @@
 
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   #include "System_I2C.h"
+  #include "OLED_Display.h"
   #include <Wire.h>
 #endif
 
@@ -128,13 +129,14 @@ void displayUpdate() {
   if (!gDisplay) return;
   
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
-  // LOW PRIORITY: Try-lock with short timeout - yield to gamepad/high-pri I2C devices
-  if (i2cMutex && xSemaphoreTakeRecursive(i2cMutex, pdMS_TO_TICKS(5)) != pdTRUE) {
-    // Bus is busy - skip this refresh, try again next cycle
-    return;
-  }
-  gDisplay->display();  // Push framebuffer to OLED
-  if (i2cMutex) xSemaphoreGiveRecursive(i2cMutex);
+  // Use device-aware transaction for proper clock management.
+  // Run at 400kHz to reduce bus hold time (~20ms vs ~80ms at 100kHz).
+  // SSD1306 supports up to 400kHz I2C.
+  // Short timeout (15ms) so OLED yields to higher-priority I2C devices (gamepad, sensors).
+  // If bus is busy, we skip this frame and retry next cycle - no visible flicker.
+  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 400000, 15, [&]() {
+    gDisplay->display();  // Push framebuffer to OLED (~20ms at 400kHz)
+  });
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341
   // No-op for TFT (direct rendering)
 #endif

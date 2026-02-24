@@ -572,7 +572,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
       }
       
       if (espnowEntries.length > 0 && mod.name === 'camera') {
-        html += '<div style="font-weight:bold;margin:1rem 0 0.5rem 0;color:var(--panel-fg);border-bottom:1px solid var(--border);padding-bottom:0.25rem">📡 ESP-NOW Integration</div>';
+        html += '<div style="font-weight:bold;margin:1rem 0 0.5rem 0;color:var(--panel-fg);border-bottom:1px solid var(--border);padding-bottom:0.25rem">ESP-NOW Integration</div>';
         html += '<div style="background:rgba(100,149,237,0.1);border-left:3px solid #6495ed;padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--panel-fg);font-size:0.85rem">';
         html += 'Send captured images to another device via ESP-NOW mesh network.';
         html += '</div>';
@@ -994,7 +994,8 @@ window.sendSequential = function(cmds, onDone, onFail) {
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows message routing and forwarding between devices in the mesh network'>Router: <span style='font-weight:bold;color:#667eea' id='debugEspNowRouter-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowRouter')" id='debugEspNowRouter-btn' style='font-size:0.85rem' title='Toggle router debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows mesh network formation, node discovery, and multi-hop communication'>Mesh: <span style='font-weight:bold;color:#667eea' id='debugEspNowMesh-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowMesh')" id='debugEspNowMesh-btn' style='font-size:0.85rem' title='Toggle mesh debugging'>Toggle</button></div>
           <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows network topology mapping, device relationships, and connection graph'>Topology: <span style='font-weight:bold;color:#667eea' id='debugEspNowTopo-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowTopo')" id='debugEspNowTopo-btn' style='font-size:0.85rem' title='Toggle topology debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows encryption key exchange, secure pairing, and encrypted message handling'>Encryption: <span style='font-weight:bold;color:#667eea' id='debugEspNowEncryption-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowEncryption')" id='debugEspNowEncryption-btn' style='font-size:0.85rem' title='Toggle encryption debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows encryption key exchange, secure pairing, and encrypted message handling'>Encryption: <span style='font-weight:bold;color:#667eea' id='debugEspNowEncryption-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowEncryption')" id='debugEspNowEncryption-btn' style='font-size:0.85rem' title='Toggle encryption debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows metadata REQ/RESP/PUSH frames, payload content, and storage into gMeshPeerMeta'>Metadata: <span style='font-weight:bold;color:#667eea' id='debugEspNowMetadata-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowMetadata')" id='debugEspNowMetadata-btn' style='font-size:0.85rem' title='Toggle metadata exchange debugging'>Toggle</button></div>
         </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable memory instrumentation debug output (stack, buffers)'>Memory Instrumentation: <span style='font-weight:bold;color:#667eea' id='debugMemory-value'>-</span></span><button class='btn' onclick="toggleDebug('debugMemory')" id='debugMemory-btn' title='Toggle memory debugging'>Toggle</button></div>
         <div style='display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem'><span style='color:var(--panel-fg)' title='Periodic memory sampling interval in seconds (0 to disable)'>Memory Sample Interval: <span style='font-weight:bold;color:#667eea' id='memorySampleInterval-value'>-</span>s</span><input type='number' id='memorySampleInterval-input' min='0' max='300' step='5' value='30' class='form-input' style='width:80px;margin-left:0.5rem' title='Sampling interval in seconds'><button class='btn' onclick="updateMemorySampleInterval()" id='memorySampleInterval-btn' title='Update memory sample interval'>Update</button></div>
@@ -1269,6 +1270,9 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         var dESNEncryption = (dbg.espNowEncryption !== undefined ? dbg.espNowEncryption : s.debugEspNowEncryption);
         $('debugEspNowEncryption-value').textContent = dESNEncryption ? 'Enabled' : 'Disabled';
         $('debugEspNowEncryption-btn').textContent = dESNEncryption ? 'Disable' : 'Enable';
+        var dESNMetadata = (dbg.espNowMetadata !== undefined ? dbg.espNowMetadata : s.debugEspNowMetadata);
+        $('debugEspNowMetadata-value').textContent = dESNMetadata ? 'Enabled' : 'Disabled';
+        $('debugEspNowMetadata-btn').textContent = dESNMetadata ? 'Disable' : 'Enable';
         var dAutoSched = (dbg.autoScheduler !== undefined ? dbg.autoScheduler : s.debugAutoScheduler);
         $('debugAutoScheduler-value').textContent = dAutoSched ? 'Enabled' : 'Disabled';
         $('debugAutoScheduler-btn').textContent = dAutoSched ? 'Disable' : 'Enable';
@@ -2193,7 +2197,7 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       setGroup('debugWifiGroup-value', 'debugWifiGroup-btn', ['debugWifiConnection', 'debugWifiConfig', 'debugWifiScanning', 'debugWifiDriver']);
       setGroup('debugHttpGroup-value', 'debugHttpGroup-btn', ['debugHttpHandlers', 'debugHttpRequests', 'debugHttpResponses', 'debugHttpStreaming']);
       setGroup('debugSseGroup-value', 'debugSseGroup-btn', ['debugSseConnection', 'debugSseEvents', 'debugSseBroadcast']);
-      setGroup('debugEspNowGroup-value', 'debugEspNowGroup-btn', ['debugEspNowStream', 'debugEspNowCore', 'debugEspNowRouter', 'debugEspNowMesh', 'debugEspNowTopo', 'debugEspNowEncryption']);
+      setGroup('debugEspNowGroup-value', 'debugEspNowGroup-btn', ['debugEspNowStream', 'debugEspNowCore', 'debugEspNowRouter', 'debugEspNowMesh', 'debugEspNowTopo', 'debugEspNowEncryption', 'debugEspNowMetadata']);
     };
 
     // Toggle debug flag
@@ -2220,7 +2224,7 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
         groupValueId = 'debugAutomationsGroup-value';
         groupBtnId = 'debugAutomationsGroup-btn';
       } else if (group === 'espnow') {
-        children = ['debugEspNowStream', 'debugEspNowCore', 'debugEspNowRouter', 'debugEspNowMesh', 'debugEspNowTopo', 'debugEspNowEncryption'];
+        children = ['debugEspNowStream', 'debugEspNowCore', 'debugEspNowRouter', 'debugEspNowMesh', 'debugEspNowTopo', 'debugEspNowEncryption', 'debugEspNowMetadata'];
         parentFlag = 'debugEspNow';
         groupValueId = 'debugEspNowGroup-value';
         groupBtnId = 'debugEspNowGroup-btn';
@@ -2393,6 +2397,7 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
       push('debugespnowmesh ' + (getVal('debugEspNowMesh') ? 1 : 0));
       push('debugespnowtopo ' + (getVal('debugEspNowTopo') ? 1 : 0));
       push('debugespnowencryption ' + (getVal('debugEspNowEncryption') ? 1 : 0));
+      push('debugespnowmetadata ' + (getVal('debugEspNowMetadata') ? 1 : 0));
       push('debugautoscheduler ' + (getVal('debugAutoScheduler') ? 1 : 0));
       push('debugautoexec ' + (getVal('debugAutoExec') ? 1 : 0));
       push('debugautocondition ' + (getVal('debugAutoCondition') ? 1 : 0));
