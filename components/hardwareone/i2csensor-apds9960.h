@@ -27,6 +27,7 @@ extern bool apdsColorEnabled;
 extern bool apdsProximityEnabled;
 extern bool apdsGestureEnabled;
 extern bool apdsConnected;
+extern unsigned long apdsLastStopTime;
 extern TaskHandle_t apdsTaskHandle;
 
 // APDS sensor object

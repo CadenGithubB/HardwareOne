@@ -13,14 +13,11 @@
 #include "OLED_Display.h"
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_ESPNow.h"
+#include "System_ESPNow_Sensors.h"
 #include "System_I2C.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
-
-#if ENABLE_ESPNOW
-#include "System_ESPNow.h"
-#include "System_ESPNow_Sensors.h"
-#endif
 
 // BNO055 sensor object (owned by this module)
 Adafruit_BNO055* gBNO055 = nullptr;
@@ -32,11 +29,7 @@ volatile bool imuInitResult = false;
 
 // Settings and debug
 extern Settings gSettings;
-extern void broadcastOutput(const char* msg);
-extern void sensorStatusBumpWith(const char* reason);
-extern volatile bool gSensorPollingPaused;
-extern SemaphoreHandle_t i2cMutex;
-extern void drainDebugRing();
+// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing provided by System_I2C.h
 
 // ============================================================================
 // IMU Sensor Cache (owned by this module)
@@ -73,8 +66,7 @@ volatile UBaseType_t gIMUWatermarkNow = (UBaseType_t)0;
 // BROADCAST_PRINTF now defined in debug_system.h with performance optimizations
 #define MIN_RESTART_DELAY_MS 2000
 
-// Queue system functions now in i2c_system.h (included via Sensor_IMU_BNO055.h)
-extern void sensorStatusBumpWith(const char* cause);
+// Queue system functions now in System_I2C.h
 
 // IMU sensor state (definitions)
 bool imuEnabled = false;
@@ -84,7 +76,6 @@ TaskHandle_t imuTaskHandle = nullptr;
 
 // Forward declarations
 extern bool createIMUTask();
-template<typename Func> void i2cTransactionVoid(uint32_t clockHz, uint32_t timeoutMs, Func&& operation);
 
 // ============================================================================
 // IMU Sensor Command Handlers
@@ -212,16 +203,16 @@ const char* cmd_imustart(const String& cmd) {
   if (imuEnabled) {
     return "[IMU] Error: Already running";
   }
-  if (isInQueue(SENSOR_IMU)) {
-    int pos = getQueuePosition(SENSOR_IMU);
+  if (isInQueue(I2C_DEVICE_IMU)) {
+    int pos = getQueuePosition(I2C_DEVICE_IMU);
     BROADCAST_PRINTF("IMU sensor already queued (position %d)", pos);
     return "[IMU] Already queued";
   }
 
   // Enqueue the request to centralized queue
-  if (enqueueSensorStart(SENSOR_IMU)) {
+  if (enqueueDeviceStart(I2C_DEVICE_IMU)) {
     sensorStatusBumpWith("openimu@enqueue");
-    int pos = getQueuePosition(SENSOR_IMU);
+    int pos = getQueuePosition(I2C_DEVICE_IMU);
     BROADCAST_PRINTF("IMU sensor queued for open (position %d)", pos);
     return "[IMU] Sensor queued for open";
   } else {
@@ -232,15 +223,7 @@ const char* cmd_imustart(const String& cmd) {
 const char* cmd_imustop(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  // Disable flag - task will see this and perform cleanup
-  imuEnabled = false;
-  imuLastStopTime = millis();
-  
-  // Broadcast sensor status to ESP-NOW master
-#if ENABLE_ESPNOW
-  broadcastSensorStatus(REMOTE_SENSOR_IMU, false);
-#endif
-  
+  handleDeviceStopped(I2C_DEVICE_IMU);
   return "[IMU] Close requested; cleanup will complete asynchronously";
 }
 
@@ -353,7 +336,7 @@ bool initIMUSensor() {
     }
   }
 
-  return i2cTransaction(100000, 5000, [&]() -> bool {
+  return i2cDeviceTransaction(I2C_ADDR_IMU, 100000, 5000, [&]() -> bool {
     // Wire1 already initialized in setup() - no need to call begin() again
     INFO_SENSORSF("Starting IMU initialization at 100kHz I2C clock");
 
@@ -409,8 +392,6 @@ bool initIMUSensor() {
         delay(100);
         imuConnected = true;
         
-        // Register IMU for I2C health tracking (BNO055 default address is 0x28)
-        i2cRegisterDevice(0x28, "IMU");
         INFO_SENSORSF("[IMU] BNO055 IMU sensor initialized successfully");
         return true;
       }
@@ -570,9 +551,9 @@ void readIMUSensor() {
     xSemaphoreGive(gImuCache.mutex);
 
     updateIMUActions();
-    DEBUG_DATAF("IMU data updated");
+    DEBUG_IMU_DATAF("IMU data updated");
   } else {
-    DEBUG_FRAMEF("readIMUSensor() failed to lock cache - skipping update");
+    DEBUG_IMU_FRAMEF("readIMUSensor() failed to lock cache - skipping update");
   }
 }
 // JSON Building
@@ -835,8 +816,7 @@ const char* cmd_imupollingms(const String& cmd) {
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
   if (v < 50 || v > 2000) return "Error: imuPollingMs must be 50..2000";
-  gSettings.imuPollingMs = v;
-  writeSettingsJson();
+  setSetting(gSettings.imuPollingMs, v);
   BROADCAST_PRINTF("imuPollingMs set to %d", v);
   return "OK";
 }
@@ -848,8 +828,7 @@ const char* cmd_imuewmafactor(const String& cmd) {
   while (*p == ' ') p++;  // Skip whitespace
   float f = strtof(p, nullptr);
   if (f < 0.0f || f > 1.0f) return "Error: imuEWMAFactor must be 0..1";
-  gSettings.imuEWMAFactor = f;
-  writeSettingsJson();
+  setSetting(gSettings.imuEWMAFactor, f);
   BROADCAST_PRINTF("imuEWMAFactor set to %.3f", f);
   return "OK";
 }
@@ -861,8 +840,7 @@ const char* cmd_imutransitionms(const String& cmd) {
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
   if (v < 0 || v > 1000) return "Error: imuTransitionMs must be 0..1000";
-  gSettings.imuTransitionMs = v;
-  writeSettingsJson();
+  setSetting(gSettings.imuTransitionMs, v);
   BROADCAST_PRINTF("imuTransitionMs set to %d", v);
   return "OK";
 }
@@ -874,8 +852,7 @@ const char* cmd_imuwebmaxfps(const String& cmd) {
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
   if (v < 1 || v > 30) return "Error: imuWebMaxFps must be 1..30";
-  gSettings.imuWebMaxFps = v;
-  writeSettingsJson();
+  setSetting(gSettings.imuWebMaxFps, v);
   BROADCAST_PRINTF("imuWebMaxRefreshRate set to %d", v);
   return "OK";
 }
@@ -892,9 +869,7 @@ const char* cmd_imudevicepollms(const String& args) {
   int v = valStr.toInt();
   if (v < 50) v = 50;
   if (v > 1000) v = 1000;
-  gSettings.imuDevicePollMs = v;
-  writeSettingsJson();
-  applySettings();
+  setSetting(gSettings.imuDevicePollMs, v);
   snprintf(getDebugBuffer(), 1024, "imuDevicePollMs set to %d", v);
   return getDebugBuffer();
 }
@@ -909,8 +884,7 @@ const char* cmd_imuorientationmode(const String& args) {
   }
   int v = valStr.toInt();
   if (v < 0 || v > 8) return "Error: mode must be 0-8";
-  gSettings.imuOrientationMode = v;
-  writeSettingsJson();
+  setSetting(gSettings.imuOrientationMode, v);
   snprintf(getDebugBuffer(), 1024, "imuOrientationMode set to %d", v);
   return getDebugBuffer();
 }
@@ -923,8 +897,7 @@ const char* cmd_imuorientationcorrection(const String& args) {
     return gSettings.imuOrientationCorrectionEnabled ? "Current imuOrientationCorrectionEnabled: 1" : "Current imuOrientationCorrectionEnabled: 0";
   }
   int v = valStr.toInt();
-  gSettings.imuOrientationCorrectionEnabled = (v != 0);
-  writeSettingsJson();
+  setSetting(gSettings.imuOrientationCorrectionEnabled, (bool)(v != 0));
   return gSettings.imuOrientationCorrectionEnabled ? "imuOrientationCorrectionEnabled set to 1" : "imuOrientationCorrectionEnabled set to 0";
 }
 
@@ -937,8 +910,7 @@ const char* cmd_imupitchoffset(const String& args) {
     return getDebugBuffer();
   }
   float v = valStr.toFloat();
-  gSettings.imuPitchOffset = v;
-  writeSettingsJson();
+  setSetting(gSettings.imuPitchOffset, v);
   snprintf(getDebugBuffer(), 1024, "imuPitchOffset set to %.2f", v);
   return getDebugBuffer();
 }
@@ -952,8 +924,7 @@ const char* cmd_imurolloffset(const String& args) {
     return getDebugBuffer();
   }
   float v = valStr.toFloat();
-  gSettings.imuRollOffset = v;
-  writeSettingsJson();
+  setSetting(gSettings.imuRollOffset, v);
   snprintf(getDebugBuffer(), 1024, "imuRollOffset set to %.2f", v);
   return getDebugBuffer();
 }
@@ -967,11 +938,27 @@ const char* cmd_imuyawoffset(const String& args) {
     return getDebugBuffer();
   }
   float v = valStr.toFloat();
-  gSettings.imuYawOffset = v;
-  writeSettingsJson();
+  setSetting(gSettings.imuYawOffset, v);
   getDebugBuffer()[0] = '\0';
   snprintf(getDebugBuffer(), 1024, "imuYawOffset set to %.2f", v);
   return getDebugBuffer();
+}
+
+const char* cmd_imuautostart(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = args; arg.trim();
+  if (arg.length() == 0) {
+    return gSettings.imuAutoStart ? "[IMU] Auto-start: enabled" : "[IMU] Auto-start: disabled";
+  }
+  arg.toLowerCase();
+  if (arg == "on" || arg == "true" || arg == "1") {
+    setSetting(gSettings.imuAutoStart, true);
+    return "[IMU] Auto-start enabled";
+  } else if (arg == "off" || arg == "false" || arg == "0") {
+    setSetting(gSettings.imuAutoStart, false);
+    return "[IMU] Auto-start disabled";
+  }
+  return "Usage: imuautostart [on|off]";
 }
 
 // IMU Command Registry (Sensor-Specific)
@@ -982,22 +969,25 @@ const CommandEntry imuCommands[] = {
   { "closeimu", "Stop BNO055 IMU sensor.", false, cmd_imustop, nullptr, "sensor", "motion sensor", "close" },
   
   // Information
-  { "imu", "Read IMU sensor data.", false, cmd_imu },
+  { "imuread", "Read IMU sensor data.", false, cmd_imu },
   { "imuactions", "Show IMU action detection state.", false, cmd_imuactions },
   
   // UI Settings (client-side visualization)
-  { "imupollingms", "Set IMU UI polling interval (50..2000ms).", true, cmd_imupollingms, "Usage: imupollingms <50..2000>" },
-  { "imuewmafactor", "Set IMU EWMA smoothing factor (0.0..1.0).", true, cmd_imuewmafactor, "Usage: imuewmafactor <0.0..1.0>" },
-  { "imutransitionms", "Set IMU transition animation time (0..1000ms).", true, cmd_imutransitionms, "Usage: imutransitionms <0..1000>" },
-  { "imuwebmaxfps", "Set IMU web max refresh rate (1..30).", true, cmd_imuwebmaxfps, "Usage: imuwebmaxfps <1..30>" },
+  { "imupollingms", "IMU UI polling interval: <50..2000>", true, cmd_imupollingms, "Usage: imupollingms <50..2000>" },
+  { "imuewmafactor", "IMU EWMA smoothing: <0.0..1.0>", true, cmd_imuewmafactor, "Usage: imuewmafactor <0.0..1.0>" },
+  { "imutransitionms", "IMU transition time: <0..1000>", true, cmd_imutransitionms, "Usage: imutransitionms <0..1000>" },
+  { "imuwebmaxfps", "IMU web max FPS: <1..30>", true, cmd_imuwebmaxfps, "Usage: imuwebmaxfps <1..30>" },
   
   // Device-level settings (sensor hardware behavior)
-  { "imudevicepollms", "Set IMU device polling interval (50..1000ms).", true, cmd_imudevicepollms, "Usage: imuDevicePollMs <50..1000>" },
-  { "imuorientationmode", "Set IMU orientation mode (0..8).", true, cmd_imuorientationmode },
-  { "imuorientationcorrection", "Enable/disable IMU orientation correction (0|1).", true, cmd_imuorientationcorrection },
-  { "imupitchoffset", "Set IMU pitch offset (-180..180).", true, cmd_imupitchoffset },
-  { "imurolloffset", "Set IMU roll offset (-180..180).", true, cmd_imurolloffset },
-  { "imuyawoffset", "Set IMU yaw offset (-180..180).", true, cmd_imuyawoffset }
+  { "imudevicepollms", "IMU device poll interval: <50..1000>", true, cmd_imudevicepollms, "Usage: imuDevicePollMs <50..1000>" },
+  { "imuorientationmode", "IMU orientation mode: <0..8>", true, cmd_imuorientationmode },
+  { "imuorientationcorrection", "IMU orientation correction: <0|1>", true, cmd_imuorientationcorrection },
+  { "imupitchoffset", "IMU pitch offset: <-180..180>", true, cmd_imupitchoffset },
+  { "imurolloffset", "IMU roll offset: <-180..180>", true, cmd_imurolloffset },
+  { "imuyawoffset", "IMU yaw offset: <-180..180>", true, cmd_imuyawoffset },
+  
+  // Auto-start
+  { "imuautostart", "Enable/disable IMU auto-start after boot [on|off]", false, cmd_imuautostart, "Usage: imuautostart [on|off]" },
 };
 
 const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);
@@ -1031,57 +1021,26 @@ void imuTask(void* parameter) {
   INFO_SENSORSF("[IMU] Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  Serial.println("[MODULAR] imuTask() running from Sensor_IMU_BNO055.cpp");
+  INFO_SENSORSF("[MODULAR] imuTask() running from Sensor_IMU_BNO055.cpp");
   unsigned long lastIMURead = 0;
   unsigned long lastStackLog = 0;
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
     if (!imuEnabled) {
-      // Perform safe cleanup before task deletion - RACE CONDITION FIX:
-      // Take I2C mutex to ensure no other tasks are in active IMU I2C transactions
-      if (imuConnected || gBNO055 != nullptr) {
-        // Wait for all active IMU I2C transactions to complete before cleanup
-        if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-          // Now safe to delete - no other tasks can access IMU sensor
-          imuConnected = false;
-          if (gBNO055 != nullptr) {
-            delete gBNO055;
-            gBNO055 = nullptr;
-          }
-          
-          // Invalidate cache - no locking needed since we hold i2cMutex
-          gImuCache.imuDataValid = false;
-          gImuCache.imuSeq = 0;
-          
-          // Reset initialization flags for clean restart
-          imuInitRequested = false;
-          imuInitDone = false;
-          imuInitResult = false;
-          
-          xSemaphoreGive(i2cMutex);
-          
-          // Brief delay to ensure cleanup propagates
-          vTaskDelay(pdMS_TO_TICKS(50));
-        } else {
-          // Mutex timeout - force cleanup anyway to prevent deadlock
-          imuConnected = false;
-          if (gBNO055 != nullptr) {
-            delete gBNO055;
-            gBNO055 = nullptr;
-          }
-          gImuCache.imuDataValid = false;
-          gImuCache.imuSeq = 0;
-          
-          // Reset initialization flags for clean restart
-          imuInitRequested = false;
-          imuInitDone = false;
-          imuInitResult = false;
-          
-          vTaskDelay(pdMS_TO_TICKS(100));
-        }
+      imuConnected = false;
+      if (gBNO055 != nullptr) {
+        delete gBNO055;
+        gBNO055 = nullptr;
       }
+      gImuCache.imuDataValid = false;
+      gImuCache.imuSeq = 0;
       
-      // ALWAYS delete task when disabled (consistent with thermal/ToF)
+      // Reset initialization flags for clean restart
+      imuInitRequested = false;
+      imuInitDone = false;
+      imuInitResult = false;
+      
+      INFO_SENSORSF("[IMU] Task disabled - cleaning up and deleting");
       // NOTE: Do NOT clear imuTaskHandle here - let create function use eTaskGetState()
       // to detect stale handles. Clearing here creates a race condition window.
       vTaskDelete(nullptr);
@@ -1096,6 +1055,7 @@ void imuTask(void* parameter) {
     unsigned long nowLog = millis();
     if (nowLog - lastStackLog >= 5000UL) {
       lastStackLog = nowLog;
+      if (checkTaskStackSafety("imu", IMU_STACK_WORDS, &imuEnabled)) break;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (imuEnabled) {
         DEBUG_PERFORMANCEF("[STACK] imu_task watermark_now=%u min=%u words", (unsigned)gIMUWatermarkNow, (unsigned)gIMUWatermarkMin);
@@ -1119,12 +1079,17 @@ void imuTask(void* parameter) {
       unsigned long imuPollMs = (gSettings.imuDevicePollMs > 0) ? (unsigned long)gSettings.imuDevicePollMs : 200;
       unsigned long nowMs = millis();
       if (nowMs - lastIMURead >= imuPollMs) {
-        // Use task timeout wrapper to catch IMU performance issues
-        auto result = i2cTaskWithStandardTimeout(I2C_ADDR_IMU, 100000, [&]() -> bool {
+        // IMU reads ~5ms at 100kHz; fail fast and retry next poll rather than blocking 1000ms
+        auto result = i2cTaskWithTimeout(I2C_ADDR_IMU, 100000, 100, [&]() -> bool {
           readIMUSensor();
           return true;  // Assume success for void operation
         });
         lastIMURead = nowMs;
+        
+        // Mark OLED dirty if IMU page is active (enables real-time display updates)
+        if (result && currentOLEDMode == OLED_IMU_ACTIONS) {
+          oledMarkDirty();
+        }
         
         // Auto-disable if too many consecutive failures
         if (!result) {
@@ -1137,7 +1102,16 @@ void imuTask(void* parameter) {
         
         // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW
-        if (result && meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
+        // Check mesh mode (worker role) OR bond mode (worker role)
+        bool shouldStream = false;
+        if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
+          shouldStream = true;
+        }
+        if (gSettings.bondModeEnabled && gSettings.bondRole == 0) {
+          shouldStream = true;  // Bond mode worker
+        }
+        
+        if (result && shouldStream) {
           // Build IMU JSON from cache
           char imuJson[512];
           int jsonLen = buildIMUDataJSON(imuJson, sizeof(imuJson));
@@ -1190,6 +1164,8 @@ extern const SettingsModule imuSettingsModule = {
 // ============================================================================
 // IMU OLED Mode (Display Function + Registration)
 // ============================================================================
+#if DISPLAY_TYPE > 0
 #include "i2csensor-bno055-oled.h"
+#endif
 
 #endif // ENABLE_IMU_SENSOR

@@ -5,19 +5,22 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "OLED_UI.h"
+#include "HAL_Input.h"
 #include <Adafruit_SSD1306.h>
+#if ENABLE_WIFI
+#include <WiFi.h>
+#endif
 
 // RTC OLED display function - shows date, time, and temperature
 // Respects OLED_CONTENT_HEIGHT to not overlap footer/navigation bar
 static void displayRTCData() {
-  extern Adafruit_SSD1306* oledDisplay;
-  
+  // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
+  int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
-  oledDisplay->setCursor(0, 0);
-  oledDisplay->println("=== RTC ===");
   
   if (!rtcConnected || !rtcEnabled) {
-    oledDisplay->println();
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("RTC not active");
     oledDisplay->println();
     oledDisplay->println("Press X to start");
@@ -37,11 +40,13 @@ static void displayRTCData() {
   }
   
   if (!valid) {
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("Reading RTC...");
     return;
   }
   
   // Display date
+  oledDisplay->setCursor(0, y);
   oledDisplay->print(dt.year);
   oledDisplay->print("-");
   if (dt.month < 10) oledDisplay->print("0");
@@ -58,8 +63,10 @@ static void displayRTCData() {
   } else {
     oledDisplay->println();
   }
+  y += 10;
   
   // Display time (larger) - this takes 16 pixels height
+  oledDisplay->setCursor(0, y);
   oledDisplay->setTextSize(2);
   if (dt.hour < 10) oledDisplay->print("0");
   oledDisplay->print(dt.hour);
@@ -69,11 +76,12 @@ static void displayRTCData() {
   oledDisplay->print(":");
   if (dt.second < 10) oledDisplay->print("0");
   oledDisplay->println(dt.second);
+  y += 18;  // textSize 2 = 16px + 2px spacing
   
   // Display temperature - check we're still within content area
   oledDisplay->setTextSize(1);
-  int cursorY = oledDisplay->getCursorY();
-  if (cursorY + 8 <= OLED_CONTENT_HEIGHT) {
+  if (y + 8 <= OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT) {
+    oledDisplay->setCursor(0, y);
     oledDisplay->print("Temp: ");
     oledDisplay->print(temp, 1);
     oledDisplay->println("C");
@@ -112,7 +120,25 @@ static void rtcToggleConfirmed(void* userData) {
   }
 }
 
-// Input handler for RTC OLED mode - X button toggles sensor
+static void rtcNTPSyncConfirmed(void* userData) {
+  (void)userData;
+  extern bool syncNTPAndResolve();
+  extern bool rtcSyncFromSystem();
+  
+  Serial.println("[RTC] Syncing time from NTP...");
+  if (syncNTPAndResolve()) {
+    Serial.println("[RTC] NTP sync successful, writing UTC to RTC...");
+    if (rtcSyncFromSystem()) {
+      oledNotificationBannerShow("Time synced!", PairingRibbonIcon::SUCCESS, 2000);
+    } else {
+      oledNotificationBannerShow("RTC write failed", PairingRibbonIcon::ERROR_ICON, 2000);
+    }
+  } else {
+    oledNotificationBannerShow("NTP sync failed", PairingRibbonIcon::ERROR_ICON, 2000);
+  }
+}
+
+// Input handler for RTC OLED mode - X toggles sensor, Y syncs time via NTP
 static bool rtcInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   (void)deltaX;
   (void)deltaY;
@@ -125,6 +151,21 @@ static bool rtcInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     }
     return true;
   }
+  
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
+#if ENABLE_WIFI
+    extern bool WiFi_isConnected();
+    if (WiFi.isConnected()) {
+      oledConfirmRequest("Sync NTP?", nullptr, rtcNTPSyncConfirmed, nullptr);
+    } else {
+      oledNotificationBannerShow("WiFi not connected", PairingRibbonIcon::ERROR_ICON, 2000);
+    }
+#else
+    oledNotificationBannerShow("WiFi disabled", PairingRibbonIcon::ERROR_ICON, 2000);
+#endif
+    return true;
+  }
+  
   return false;
 }
 

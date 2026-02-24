@@ -13,6 +13,7 @@
 #include "i2csensor-rda5807.h"
 #include "System_BuildConfig.h"
 #include "System_Utils.h"
+#include "System_TaskUtils.h"
 
 #if ENABLE_FM_RADIO
 
@@ -24,8 +25,10 @@
 
 #include "OLED_Display.h"
 #include "System_Command.h"
+#include "System_Notifications.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_MemoryMonitor.h"
 #include "System_Settings.h"
 
 #if ENABLE_ESPNOW
@@ -36,13 +39,8 @@
 // The RDA5807 is on Wire1 (STEMMA QT bus)
 extern TwoWire Wire1;
 
-// External dependencies
-extern void broadcastOutput(const char* s);
-extern void broadcastOutput(const String& s);
-
 // Forward declarations
 extern bool createFMRadioTask();
-extern volatile bool gSensorPollingPaused;
 void updateFMRadio();
 
 // BROADCAST_PRINTF now defined in debug_system.h with performance optimizations
@@ -169,8 +167,6 @@ bool initFMRadio() {
   });
   
   if (success) {
-    // Register FM radio for I2C health tracking
-    i2cRegisterDevice(I2C_ADDR_FM_RADIO, "FM_Radio");
     INFO_SENSORSF("FM Radio initialized successfully - RDA5807M ready at %.1f MHz, volume %d", 
                   fmRadioFrequency / 100.0, fmRadioVolume);
     sensorStatusBumpWith("fmradio initialized");
@@ -290,7 +286,16 @@ void fmRadioTask(void* parameter) {
     
     // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW
+    // Check mesh mode (worker role) OR bond mode (worker role)
+    bool shouldStream = false;
     if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
+      shouldStream = true;
+    }
+    if (gSettings.bondModeEnabled && gSettings.bondRole == 0) {
+      shouldStream = true;  // Bond mode worker
+    }
+    
+    if (shouldStream) {
       char fmJson[512];
       int jsonLen = buildFMRadioDataJSON(fmJson, sizeof(fmJson));
       if (jsonLen > 0) {
@@ -303,8 +308,9 @@ void fmRadioTask(void* parameter) {
     unsigned long now = millis();
     if (now - lastStackLog > 30000) {
       lastStackLog = now;
+      if (checkTaskStackSafety("fmradio", FMRADIO_STACK_WORDS, &fmRadioEnabled)) break;
       if (isDebugFlagSet(DEBUG_FMRADIO)) {
-        const uint32_t fmRadioStackWords = 4608;  // keep in sync with createFMRadioTask()
+        const uint32_t fmRadioStackWords = FMRADIO_STACK_WORDS;
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         DEBUG_FMRADIOF("[FM_RADIO_TASK] Stack watermark: %u bytes (%.1f%% used of %u bytes)", 
                        (unsigned)(watermark * 4),
@@ -330,6 +336,12 @@ void startFMRadioInternal() {
     return;
   }
 
+  // Check memory before creating FM Radio task
+  if (!checkMemoryAvailable("fmradio", nullptr)) {
+    DEBUG_FMRADIOF("[FM_RADIO] Insufficient memory for FM Radio sensor");
+    return;
+  }
+
   // Enable first, then let fmradio_task perform initialization on its own stack
   fmRadioEnabled = true;
   fmRadioInitRequested = true;
@@ -352,16 +364,8 @@ void startFMRadioInternal() {
 }
 
 void stopFMRadioInternal() {
-  DEBUG_FMRADIOF("[FM_RADIO] stopFMRadioInternal() called - fmRadioEnabled=%s", fmRadioEnabled ? "true" : "false");
-  
-  if (!fmRadioEnabled) {
-    DEBUG_FMRADIOF("[FM_RADIO] Already stopped, skipping shutdown");
-    return;
-  }
-  
-  // Clear enabled flag first - task will see this and delete itself
-  fmRadioEnabled = false;
-  DEBUG_FMRADIOF("[FM_RADIO] Radio enabled flag cleared - task will self-destruct");
+  // Note: fmRadioEnabled is set to false by handleDeviceStopped() before this is called
+  DEBUG_FMRADIOF("[FM_RADIO] stopFMRadioInternal() called - hardware cleanup");
   
   // Properly deinitialize the radio hardware
   if (radioInitialized) {
@@ -372,9 +376,6 @@ void stopFMRadioInternal() {
   }
   
   fmRadioMuted = true;
-  
-  // Trigger sensor status update to notify web UI
-  sensorStatusBumpWith("fmradio stopped");
   
   broadcastOutput("FM Radio stopped");
   DEBUG_FMRADIOF("[FM_RADIO] FM Radio stopped successfully");
@@ -487,7 +488,7 @@ const char* cmd_fmradio_start(const String& cmd) {
   }
   
   // Queue the FM radio start request
-  enqueueSensorStart(SENSOR_FMRADIO);
+  enqueueDeviceStart(I2C_DEVICE_FMRADIO);
   
   return "FM Radio start queued";
 }
@@ -499,8 +500,9 @@ const char* cmd_fmradio_stop(const String& cmd) {
     return "FM Radio not running";
   }
   
-  // Stop immediately (no need to queue for stop)
-  stopFMRadioInternal();
+  handleDeviceStopped(I2C_DEVICE_FMRADIO);
+  stopFMRadioInternal();  // Sensor-specific: hardware deinit
+  sensorStatusBumpWith("fmradio stopped");
   
   return "OK";
 }
@@ -624,6 +626,9 @@ const char* cmd_fmradio_volume(const String& args) {
   });
   
   BROADCAST_PRINTF("Volume set to %d", vol);
+  
+  notifyVolumeChanged(vol, 15);
+  
   return "OK";
 }
 
@@ -652,18 +657,14 @@ const char* cmd_fmradio_mute(const String& args) {
 const char* cmd_fmradio_status(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  static char statusBuf[512];
+  // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
+  broadcastOutput("FM Radio Status:");
+  BROADCAST_PRINTF("  Connected: %s", fmRadioConnected ? "Yes" : "No");
+  BROADCAST_PRINTF("  Enabled: %s", fmRadioEnabled ? "Yes" : "No");
   
   if (!fmRadioConnected) {
-    snprintf(statusBuf, sizeof(statusBuf),
-      "FM Radio Status:\n"
-      "  Connected: No\n"
-      "  Enabled: %s\n"
-      "  Stored Frequency: %.1f MHz\n"
-      "  Stored Volume: %d",
-      fmRadioEnabled ? "Yes" : "No",
-      fmRadioFrequency / 100.0,
-      fmRadioVolume);
+    BROADCAST_PRINTF("  Stored Frequency: %.1f MHz", fmRadioFrequency / 100.0);
+    BROADCAST_PRINTF("  Stored Volume: %d", fmRadioVolume);
   } else {
     // Update signal info
     if (radioInitialized) {
@@ -675,30 +676,16 @@ const char* cmd_fmradio_status(const String& cmd) {
       });
     }
     
-    snprintf(statusBuf, sizeof(statusBuf),
-      "FM Radio Status:\n"
-      "  Connected: Yes\n"
-      "  Enabled: %s\n"
-      "  Frequency: %.1f MHz\n"
-      "  Volume: %d/15\n"
-      "  Muted: %s\n"
-      "  Stereo: %s\n"
-      "  RSSI: %d\n"
-      "  Headphones: %s\n"
-      "  Station: %s\n"
-      "  Radio Text: %s",
-      fmRadioEnabled ? "Yes" : "No",
-      fmRadioFrequency / 100.0,
-      fmRadioVolume,
-      fmRadioMuted ? "Yes" : "No",
-      fmRadioStereo ? "Yes" : "No",
-      fmRadioRSSI,
-      fmRadioHeadphonesConnected ? "Yes" : "No",
-      strlen(fmRadioStationName) > 0 ? fmRadioStationName : "(none)",
-      strlen(fmRadioStationText) > 0 ? fmRadioStationText : "(none)");
+    BROADCAST_PRINTF("  Frequency: %.1f MHz", fmRadioFrequency / 100.0);
+    BROADCAST_PRINTF("  Volume: %d/15", fmRadioVolume);
+    BROADCAST_PRINTF("  Muted: %s", fmRadioMuted ? "Yes" : "No");
+    BROADCAST_PRINTF("  Stereo: %s", fmRadioStereo ? "Yes" : "No");
+    BROADCAST_PRINTF("  RSSI: %d", fmRadioRSSI);
+    BROADCAST_PRINTF("  Headphones: %s", fmRadioHeadphonesConnected ? "Yes" : "No");
+    BROADCAST_PRINTF("  Station: %s", strlen(fmRadioStationName) > 0 ? fmRadioStationName : "(none)");
+    BROADCAST_PRINTF("  Radio Text: %s", strlen(fmRadioStationText) > 0 ? fmRadioStationText : "(none)");
   }
   
-  broadcastOutput(statusBuf);
   return "OK";
 }
 
@@ -727,17 +714,36 @@ int buildFMRadioDataJSON(char* buf, size_t bufSize) {
 // Command Registration
 // ============================================================================
 
+const char* cmd_fmradioautostart(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = args; arg.trim();
+  if (arg.length() == 0) {
+    return gSettings.fmRadioAutoStart ? "[FM Radio] Auto-start: enabled" : "[FM Radio] Auto-start: disabled";
+  }
+  arg.toLowerCase();
+  if (arg == "on" || arg == "true" || arg == "1") {
+    setSetting(gSettings.fmRadioAutoStart, true);
+    return "[FM Radio] Auto-start enabled";
+  } else if (arg == "off" || arg == "false" || arg == "0") {
+    setSetting(gSettings.fmRadioAutoStart, false);
+    return "[FM Radio] Auto-start disabled";
+  }
+  return "Usage: fmradioautostart [on|off]";
+}
+
 const CommandEntry fmRadioCommands[] = {
-  { "fmstatus", "Show FM Radio status", false, cmd_fmradio, "Usage: fmradio [start|stop|tune <freq>|seek [up|down]|volume <0-15>|mute|status]" },
   // 3-level voice: "sensor" -> "radio" -> "open/close"
-  { "fmradio start", "Start FM Radio", false, cmd_fmradio_start, nullptr, "sensor", "radio", "open" },
-  { "fmradio stop", "Stop FM Radio", false, cmd_fmradio_stop, nullptr, "sensor", "radio", "close" },
-  { "fmradio tune", "Tune to frequency (e.g., fmradio tune 103.9)", false, cmd_fmradio_tune, "Usage: fmradio tune <frequency> (e.g., 103.9 or 10390)" },
-  { "fmradio seek", "Seek next station (up/down)", false, cmd_fmradio_seek },
-  { "fmradio volume", "Set volume 0-15", false, cmd_fmradio_volume, "Usage: fmradio volume <0-15>" },
+  { "openfmradio", "Start FM Radio sensor.", false, cmd_fmradio_start, nullptr, "sensor", "radio", "open" },
+  { "closefmradio", "Stop FM Radio sensor.", false, cmd_fmradio_stop, nullptr, "sensor", "radio", "close" },
+  { "fmradioread", "Read FM Radio status.", false, cmd_fmradio_status },
+  { "fmradio tune", "Tune to frequency: <freq>", false, cmd_fmradio_tune, "Usage: fmradio tune <frequency> (e.g., 103.9 or 10390)" },
+  { "fmradio seek", "Seek next station [up|down]", false, cmd_fmradio_seek },
+  { "fmradio volume", "Set volume: <0-15>", false, cmd_fmradio_volume, "Usage: fmradio volume <0-15>" },
   { "fmradio mute", "Mute audio", false, cmd_fmradio_mute },
   { "fmradio unmute", "Unmute audio", false, cmd_fmradio_mute },
-  { "fmradio status", "Show FM Radio status", false, cmd_fmradio_status },
+  
+  // Auto-start
+  { "fmradioautostart", "Enable/disable FM Radio auto-start after boot [on|off]", false, cmd_fmradioautostart, "Usage: fmradioautostart [on|off]" },
 };
 
 const size_t fmRadioCommandsCount = sizeof(fmRadioCommands) / sizeof(fmRadioCommands[0]);
@@ -773,6 +779,8 @@ extern const SettingsModule fmRadioSettingsModule = {
 // ============================================================================
 // FM Radio OLED Mode (Display Function + Registration)
 // ============================================================================
+#if DISPLAY_TYPE > 0
 #include "i2csensor-rda5807-oled.h"
+#endif
 
 #endif // ENABLE_FM_RADIO

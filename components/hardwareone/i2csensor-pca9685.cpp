@@ -4,15 +4,15 @@
  * 16-channel I2C PWM/Servo controller
  */
 
+#include "System_BuildConfig.h"
+
+#if ENABLE_SERVO
+
 #include "i2csensor-pca9685.h"
 #include "System_Utils.h"
 #include "System_Debug.h"  // For BROADCAST_PRINTF macro
 #include "System_Command.h"  // For CommandModuleRegistrar
 #include <Wire.h>
-
-// External dependencies
-extern bool ensureDebugBuffer();
-extern void broadcastOutput(const String& msg);
 
 // Validation macro
 #define RETURN_VALID_IF_VALIDATE_CSTR() \
@@ -290,3 +290,5 @@ const size_t servoCommandsCount = sizeof(servoCommands) / sizeof(servoCommands[0
 
 // Auto-register with command system
 static CommandModuleRegistrar _servo_cmd_registrar(servoCommands, servoCommandsCount, "servo");
+
+#endif // ENABLE_SERVO
