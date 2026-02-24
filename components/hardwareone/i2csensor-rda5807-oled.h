@@ -9,56 +9,53 @@
 
 // FM Radio OLED display function - shows radio data
 static void displayFmRadio() {
-  extern Adafruit_SSD1306* oledDisplay;
+  extern void oledDrawIcon(int x, int y, const char* iconName, int targetSize);
+  extern void oledDrawLevelBars(int x, int y, int level, int maxBars, int barHeight);
   
+  // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
+  int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
-  oledDisplay->setCursor(0, 0);
-  oledDisplay->println("=== FM RADIO ===");
-  oledDisplay->println();
   
   if (!fmRadioConnected || !fmRadioEnabled) {
+    oledDrawIcon(48, y + 2, "vol_mute", 16);
+    oledDisplay->setCursor(16, y + 22);
     oledDisplay->println("FM Radio not active");
-    oledDisplay->println();
-    oledDisplay->println("Press X to start");
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8);
+    oledDisplay->print("X: Start");
     return;
   }
   
-  // Line 1: Frequency (large)
+  // Frequency (large)
+  oledDisplay->setCursor(0, y);
   oledDisplay->setTextSize(2);
-  oledDisplay->printf("%.1f MHz\n", fmRadioFrequency / 100.0);
+  oledDisplay->printf("%.1f MHz", fmRadioFrequency / 100.0);
   oledDisplay->setTextSize(1);
+  y += 18;
   
-  // Line 3: Station name (if available)
+  // Station name (if available)
+  oledDisplay->setCursor(0, y);
   if (strlen(fmRadioStationName) > 0) {
-    oledDisplay->printf("Station: %s\n", fmRadioStationName);
+    oledDisplay->printf("Station: %s", fmRadioStationName);
   } else {
-    oledDisplay->println("No RDS Station");
+    oledDisplay->print("No RDS Station");
   }
+  y += 10;
   
-  // Line 4: RDS Radio Text (scrolling if needed)
+  // RDS Radio Text
+  oledDisplay->setCursor(0, y);
   if (strlen(fmRadioStationText) > 0) {
-    oledDisplay->printf("%s\n", fmRadioStationText);
-  } else {
-    oledDisplay->println();
+    oledDisplay->print(fmRadioStationText);
   }
+  y += 10;
   
-  // Line 5: Status bar with volume, RSSI, stereo, mute
+  // Status bar with volume, RSSI, stereo
+  oledDisplay->setCursor(0, y);
   oledDisplay->print("Vol:");
   oledDisplay->print(fmRadioVolume);
+  oledDisplay->print(fmRadioMuted ? "M" : "");
   oledDisplay->print(" RSSI:");
   oledDisplay->print(fmRadioRSSI);
-  
-  if (fmRadioStereo) {
-    oledDisplay->print(" ST");
-  } else {
-    oledDisplay->print(" MO");
-  }
-  
-  if (fmRadioMuted) {
-    oledDisplay->print(" MUTE");
-  }
-  
-  oledDisplay->println();
+  oledDisplay->print(fmRadioStereo ? " ST" : " MO");
 }
 
 // Availability check for FM Radio OLED mode
@@ -68,15 +65,14 @@ static bool fmRadioOLEDModeAvailable(String* outReason) {
 
 static void fmRadioToggleConfirmed(void* userData) {
   (void)userData;
-  extern bool enqueueSensorStart(SensorType sensor);
-  extern bool isInQueue(SensorType sensor);
+  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
 
   if (fmRadioEnabled && fmRadioConnected) {
     Serial.println("[FM_RADIO] Confirmed: Stopping FM radio...");
     fmRadioEnabled = false;
-  } else if (!isInQueue(SENSOR_FMRADIO)) {
+  } else if (!isInQueue(I2C_DEVICE_FMRADIO)) {
     Serial.println("[FM_RADIO] Confirmed: Starting FM radio...");
-    enqueueSensorStart(SENSOR_FMRADIO);
+    enqueueDeviceStart(I2C_DEVICE_FMRADIO);
   }
 }
 
@@ -98,7 +94,7 @@ static const OLEDModeEntry fmRadioOLEDModes[] = {
   {
     OLED_FM_RADIO,           // mode enum
     "FM Radio",              // menu name
-    "notify_cli",            // icon name
+    "radio",                 // icon name
     displayFmRadio,          // displayFunc
     fmRadioOLEDModeAvailable,// availFunc
     fmRadioInputHandler,     // inputFunc - X toggles radio

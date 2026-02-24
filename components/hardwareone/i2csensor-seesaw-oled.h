@@ -15,10 +15,9 @@ static void displayGamepadVisual() {
   if (!oledDisplay) return;
   
   oledDisplay->setTextSize(1);
-  oledDisplay->println("=== GAMEPAD ===");
   
   if (!gamepadEnabled || !gamepadConnected) {
-    oledDisplay->println();
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Gamepad not active");
     oledDisplay->println();
     oledDisplay->println("Use 'opengamepad'");
@@ -50,9 +49,19 @@ static void displayGamepadVisual() {
   // Invert buttons for active-high logic (0 = not pressed, 1 = pressed)
   uint32_t pressed = ~buttons;
   
+  // Center layout vertically in content area
+  // Content area: OLED_CONTENT_START_Y to OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT (43px)
+  // Total layout height: ~40px (text 8 + gap 2 + joystick/buttons 28 + meta buttons)
+  const int layoutHeight = 40;
+  const int layoutTopY = OLED_CONTENT_START_Y + (OLED_CONTENT_HEIGHT - layoutHeight) / 2;
+  
+  // X:nnn Y:nnn text at top of layout
+  oledDisplay->setCursor(0, layoutTopY);
+  oledDisplay->setTextSize(1);
+  oledDisplay->printf("X:%4d Y:%4d", joyX, joyY);
+  
   // Draw joystick position (left side)
-  // Joystick area: 28x28 box at position (5, 15) - constrained to content area
-  const int joyBoxX = 5, joyBoxY = 20, joyBoxSize = 28;
+  const int joyBoxX = 5, joyBoxY = layoutTopY + 10, joyBoxSize = 28;
   oledDisplay->drawRect(joyBoxX, joyBoxY, joyBoxSize, joyBoxSize, DISPLAY_COLOR_WHITE);
   
   // Map joystick (0-1023) to box position
@@ -61,18 +70,14 @@ static void displayGamepadVisual() {
   int dotY = map(joyY, 1023, 0, joyBoxY + 2, joyBoxY + joyBoxSize - 4);
   oledDisplay->fillCircle(dotX, dotY, 3, DISPLAY_COLOR_WHITE);
   
-  oledDisplay->setCursor(0, 8);
-  oledDisplay->setTextSize(1);
-  oledDisplay->printf("X:%4d Y:%4d", joyX, joyY);
-  
   // Draw buttons (right side) - visual representation
-  // Button layout similar to SNES controller, but with X/Y swapped on screen:
+  // Button layout similar to SNES controller:
   //       X
   //    Y     A
   //       B
-  //  [SEL] [START]
+  //  [SELECT] [START]
   
-  const int btnBaseX = 85, btnBaseY = 15;
+  const int btnBaseX = 85, btnBaseY = layoutTopY + 5;
   const int btnR = 5;  // Button radius
   
   // X button (top) - logical INPUT_BUTTON_X
@@ -108,27 +113,27 @@ static void displayGamepadVisual() {
   oledDisplay->print("B");
   
   // SELECT and START moved into the middle gap between joystick and ABXY
-  const int metaBtnX = 46;
-  const int metaBtnY = 40;
-  const int metaBtnW = 30;
+  const int metaBtnX = 38;
+  const int metaBtnY = layoutTopY + 30;
+  const int metaBtnW = 40;
   const int metaBtnH = 10;
   const int metaBtnR = 2;
-  
-  // START - logical INPUT_BUTTON_START
-  if (INPUT_CHECK(pressed, INPUT_BUTTON_START))
-    oledDisplay->fillRoundRect(metaBtnX, metaBtnY, metaBtnW, metaBtnH, metaBtnR, DISPLAY_COLOR_WHITE);
-  else
-    oledDisplay->drawRoundRect(metaBtnX, metaBtnY, metaBtnW, metaBtnH, metaBtnR, DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(metaBtnX + 4, metaBtnY + 2);
-  oledDisplay->print("START");
   
   // SELECT - bit 0
   if (pressed & (1 << GAMEPAD_BUTTON_SEL))
     oledDisplay->fillRoundRect(metaBtnX, metaBtnY - 14, metaBtnW, metaBtnH, metaBtnR, DISPLAY_COLOR_WHITE);
   else
     oledDisplay->drawRoundRect(metaBtnX, metaBtnY - 14, metaBtnW, metaBtnH, metaBtnR, DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(metaBtnX + 4, metaBtnY - 12);
+  oledDisplay->setCursor(metaBtnX + 3, metaBtnY - 12);
   oledDisplay->print("SELECT");
+  
+  // START - logical INPUT_BUTTON_START
+  if (INPUT_CHECK(pressed, INPUT_BUTTON_START))
+    oledDisplay->fillRoundRect(metaBtnX, metaBtnY, metaBtnW, metaBtnH, metaBtnR, DISPLAY_COLOR_WHITE);
+  else
+    oledDisplay->drawRoundRect(metaBtnX, metaBtnY, metaBtnW, metaBtnH, metaBtnR, DISPLAY_COLOR_WHITE);
+  oledDisplay->setCursor(metaBtnX + 8, metaBtnY + 2);
+  oledDisplay->print("START");
 }
 
 // Availability check for Gamepad OLED mode
@@ -138,15 +143,14 @@ static bool gamepadOLEDModeAvailable(String* outReason) {
 
 static void gamepadToggleConfirmed(void* userData) {
   (void)userData;
-  extern bool enqueueSensorStart(SensorType sensor);
-  extern bool isInQueue(SensorType sensor);
+  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
 
   if (gamepadEnabled && gamepadConnected) {
     Serial.println("[GAMEPAD] Confirmed: Stopping gamepad...");
     gamepadEnabled = false;
-  } else if (!isInQueue(SENSOR_GAMEPAD)) {
+  } else if (!isInQueue(I2C_DEVICE_GAMEPAD)) {
     Serial.println("[GAMEPAD] Confirmed: Starting gamepad...");
-    enqueueSensorStart(SENSOR_GAMEPAD);
+    enqueueDeviceStart(I2C_DEVICE_GAMEPAD);
   }
 }
 

@@ -36,6 +36,7 @@ struct RTCCache {
 extern RTCCache gRTCCache;
 extern bool rtcEnabled;
 extern bool rtcConnected;
+extern unsigned long rtcLastStopTime;
 extern TaskHandle_t rtcTaskHandle;
 
 // Command registry (always declared for stubs)
@@ -80,6 +81,9 @@ bool rtcSyncFromSystem();    // ESP32 system time -> RTC
 uint32_t rtcToUnixTime(const RTCDateTime* dt);
 void unixTimeToRTC(uint32_t unixTime, RTCDateTime* dt);
 String rtcDateTimeToString(const RTCDateTime* dt);
+
+// JSON building for ESP-NOW streaming
+int buildRTCDataJSON(char* buf, size_t bufSize);
 
 // Command handlers
 const char* cmd_rtc(const String& cmd);

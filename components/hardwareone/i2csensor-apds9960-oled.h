@@ -51,16 +51,15 @@ static bool apdsOLEDModeAvailable(String* outReason) {
 
 static void apdsToggleConfirmed(void* userData) {
   (void)userData;
-  extern bool enqueueSensorStart(SensorType sensor);
-  extern bool isInQueue(SensorType sensor);
+  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
 
   if (apdsColorEnabled || apdsProximityEnabled) {
     Serial.println("[APDS] Confirmed: Stopping APDS sensor...");
     apdsColorEnabled = false;
     apdsProximityEnabled = false;
-  } else if (!isInQueue(SENSOR_APDS)) {
+  } else if (!isInQueue(I2C_DEVICE_APDS)) {
     Serial.println("[APDS] Confirmed: Starting APDS sensor...");
-    enqueueSensorStart(SENSOR_APDS);
+    enqueueDeviceStart(I2C_DEVICE_APDS);
   }
 }
 

@@ -12,14 +12,12 @@ extern void updateIMUActions();
 
 // IMU OLED display function - shows action detection
 static void displayIMUActions() {
-  extern Adafruit_SSD1306* oledDisplay;
-  
+  // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
+  int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
-  oledDisplay->setCursor(0, 0);
-  oledDisplay->println("=== IMU ===");
-  oledDisplay->println();
 
   if (!imuConnected || !imuEnabled) {
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("IMU not active");
     oledDisplay->println();
     oledDisplay->println("Press X to start");
@@ -29,18 +27,38 @@ static void displayIMUActions() {
   // Update detections
   updateIMUActions();
 
-  // Display detected actions
-  oledDisplay->println("Monitoring...");
-  
-  // Show orientation data from cache
+  // Show orientation and acceleration data from cache
   if (gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    oledDisplay->setCursor(0, y);
     oledDisplay->print("Y:");
     oledDisplay->print((int)gImuCache.oriYaw);
     oledDisplay->print(" P:");
     oledDisplay->print((int)gImuCache.oriPitch);
     oledDisplay->print(" R:");
     oledDisplay->println((int)gImuCache.oriRoll);
+    y += 10;
+
+    oledDisplay->setCursor(0, y);
+    oledDisplay->print("Ax:");
+    oledDisplay->print(gImuCache.accelX, 1);
+    oledDisplay->print(" Ay:");
+    oledDisplay->println(gImuCache.accelY, 1);
+    y += 10;
+
+    oledDisplay->setCursor(0, y);
+    oledDisplay->print("Az:");
+    oledDisplay->print(gImuCache.accelZ, 1);
+    y += 10;
+
+    oledDisplay->setCursor(0, y);
+    oledDisplay->print("Temp:");
+    oledDisplay->print(gImuCache.imuTemp, 1);
+    oledDisplay->print("C");
+
     xSemaphoreGive(gImuCache.mutex);
+  } else {
+    oledDisplay->setCursor(0, y);
+    oledDisplay->println("Reading...");
   }
 }
 
@@ -51,15 +69,14 @@ static bool imuOLEDModeAvailable(String* outReason) {
 
 static void imuToggleConfirmed(void* userData) {
   (void)userData;
-  extern bool enqueueSensorStart(SensorType sensor);
-  extern bool isInQueue(SensorType sensor);
+  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
 
   if (imuEnabled && imuConnected) {
     Serial.println("[IMU] Confirmed: Stopping IMU sensor...");
     imuEnabled = false;
-  } else if (!isInQueue(SENSOR_IMU)) {
+  } else if (!isInQueue(I2C_DEVICE_IMU)) {
     Serial.println("[IMU] Confirmed: Starting IMU sensor...");
-    enqueueSensorStart(SENSOR_IMU);
+    enqueueDeviceStart(I2C_DEVICE_IMU);
   }
 }
 

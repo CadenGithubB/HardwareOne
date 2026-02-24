@@ -8,17 +8,16 @@
 #include "i2csensor-sths34pf80.h"
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_ESPNow.h"
+#include "System_ESPNow_Sensors.h"
 #include "System_I2C.h"
 #include "System_MemoryMonitor.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
 
-// External dependencies
-extern void sensorStatusBumpWith(const char* reason);
-extern volatile bool gSensorPollingPaused;
-extern SemaphoreHandle_t i2cMutex;
-extern void drainDebugRing();
+// External dependencies provided by System_I2C.h:
+// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing
 
 // ============================================================================
 // STHS34PF80 Register Definitions
@@ -73,6 +72,7 @@ PresenceCache gPresenceCache;
 // Presence sensor state
 bool presenceEnabled = false;
 bool presenceConnected = false;
+unsigned long presenceLastStopTime = 0;
 TaskHandle_t presenceTaskHandle = nullptr;
 
 // Helper: Create presence task if not already running
@@ -88,7 +88,7 @@ static bool createPresenceTask() {
     }
   }
   if (presenceTaskHandle == nullptr) {
-    const uint32_t presenceStack = 3072;
+    const uint32_t presenceStack = PRESENCE_STACK_WORDS;
     if (xTaskCreateLogged(presenceTask, "presence_task", presenceStack, nullptr, 1, &presenceTaskHandle, "presence") != pdPASS) {
       return false;
     }
@@ -103,7 +103,7 @@ static bool createPresenceTask() {
 
 static const SettingEntry presenceSettingEntries[] = {
   { "presenceAutoStart",    SETTING_BOOL, &gSettings.presenceAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  { "presenceDevicePollMs", SETTING_INT,  &gSettings.presenceDevicePollMs, 100, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr }
+  { "presenceDevicePollMs", SETTING_INT,  &gSettings.presenceDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr }
 };
 
 static bool isPresenceConnected() {
@@ -168,26 +168,21 @@ static int16_t readInt16(uint8_t regL) {
 const char* cmd_presencestart(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  extern bool enqueueSensorStart(SensorType sensor);
-  extern bool isInQueue(SensorType sensor);
-  extern int getQueuePosition(SensorType sensor);
-  extern bool ensureDebugBuffer();
-  
   if (presenceEnabled) {
     return "[PRESENCE] Error: Already running";
   }
   
-  if (isInQueue(SENSOR_PRESENCE)) {
+  if (isInQueue(I2C_DEVICE_PRESENCE)) {
     if (!ensureDebugBuffer()) return "[PRESENCE] Already in queue";
-    int pos = getQueuePosition(SENSOR_PRESENCE);
+    int pos = getQueuePosition(I2C_DEVICE_PRESENCE);
     snprintf(getDebugBuffer(), 1024, "[PRESENCE] Already in queue at position %d", pos);
     return getDebugBuffer();
   }
   
-  if (enqueueSensorStart(SENSOR_PRESENCE)) {
+  if (enqueueDeviceStart(I2C_DEVICE_PRESENCE)) {
     sensorStatusBumpWith("openpresence@enqueue");
     if (!ensureDebugBuffer()) return "[PRESENCE] Sensor queued for open";
-    int pos = getQueuePosition(SENSOR_PRESENCE);
+    int pos = getQueuePosition(I2C_DEVICE_PRESENCE);
     snprintf(getDebugBuffer(), 1024, "[PRESENCE] Sensor queued for open (position %d)", pos);
     return getDebugBuffer();
   }
@@ -202,7 +197,7 @@ const char* cmd_presencestop(const String& cmd) {
     return "[PRESENCE] Error: Not running";
   }
   
-  presenceEnabled = false;
+  handleDeviceStopped(I2C_DEVICE_PRESENCE);
   sensorStatusBumpWith("closepresence@CLI");
   return "[PRESENCE] Sensor close requested; cleanup will complete asynchronously";
 }
@@ -290,13 +285,16 @@ bool startPresenceSensorInternal() {
     }
   }
 
+  // Set enabled BEFORE creating task - task checks presenceEnabled on first iteration
+  // and will immediately delete itself if it's still false
+  presenceEnabled = true;
+
   // Create task
   if (!createPresenceTask()) {
+    presenceEnabled = false;
     ERROR_SENSORSF("[PRESENCE] Error: Failed to create presence task");
     return false;
   }
-
-  presenceEnabled = true;
   sensorStatusBumpWith("PRESENCE initialized");
   INFO_SENSORSF("[PRESENCE] Sensor started successfully");
   return true;
@@ -339,8 +337,9 @@ bool initPresenceSensor() {
     
     presenceConnected = true;
     
-    // Register for I2C health tracking
-    i2cRegisterDevice(I2C_ADDR_PRESENCE, "STHS34PF80");
+    // Register for I2C health tracking (use manager directly with correct clock/timeout)
+    I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+    if (mgr) mgr->registerDevice(I2C_ADDR_PRESENCE, "STHS34PF80", 100000, 200);
     return true;
   });
 }
@@ -414,18 +413,68 @@ bool readPresenceData() {
 // Presence Command Registry
 // ============================================================================
 
+const char* cmd_presenceautostart(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = args; arg.trim();
+  if (arg.length() == 0) {
+    return gSettings.presenceAutoStart ? "[Presence] Auto-start: enabled" : "[Presence] Auto-start: disabled";
+  }
+  arg.toLowerCase();
+  if (arg == "on" || arg == "true" || arg == "1") {
+    setSetting(gSettings.presenceAutoStart, true);
+    return "[Presence] Auto-start enabled";
+  } else if (arg == "off" || arg == "false" || arg == "0") {
+    setSetting(gSettings.presenceAutoStart, false);
+    return "[Presence] Auto-start disabled";
+  }
+  return "Usage: presenceautostart [on|off]";
+}
+
 const CommandEntry presenceCommands[] = {
   // 3-level voice: "sensor" -> "presence" -> "open/close"
   { "openpresence", "Start STHS34PF80 IR presence/motion sensor.", false, cmd_presencestart, nullptr, "sensor", "presence", "open" },
   { "closepresence", "Stop STHS34PF80 sensor.", false, cmd_presencestop, nullptr, "sensor", "presence", "close" },
   { "presenceread", "Read STHS34PF80 presence/motion/temperature data.", false, cmd_presenceread },
   { "presencestatus", "Show STHS34PF80 sensor status.", false, cmd_presencestatus },
+  
+  // Auto-start
+  { "presenceautostart", "Enable/disable presence auto-start after boot [on|off]", false, cmd_presenceautostart, "Usage: presenceautostart [on|off]" },
 };
 
 const size_t presenceCommandsCount = sizeof(presenceCommands) / sizeof(presenceCommands[0]);
 
 // Auto-register with command system
 static CommandModuleRegistrar _presence_cmd_registrar(presenceCommands, presenceCommandsCount, "presence");
+
+// ============================================================================
+// JSON building for ESP-NOW streaming
+// ============================================================================
+
+int buildPresenceDataJSON(char* buf, size_t bufSize) {
+  if (!buf || bufSize == 0) return 0;
+  
+  int pos = 0;
+  if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    pos = snprintf(buf, bufSize,
+                   "{\"valid\":%s,\"ambient\":%.2f,"
+                   "\"presence\":%d,\"presenceDetected\":%s,"
+                   "\"motion\":%d,\"motionDetected\":%s,"
+                   "\"tempShock\":%d,\"tempShockDetected\":%s,"
+                   "\"ts\":%lu}",
+                   gPresenceCache.dataValid ? "true" : "false",
+                   gPresenceCache.ambientTemp,
+                   gPresenceCache.presenceValue,
+                   gPresenceCache.presenceDetected ? "true" : "false",
+                   gPresenceCache.motionValue,
+                   gPresenceCache.motionDetected ? "true" : "false",
+                   gPresenceCache.tempShockValue,
+                   gPresenceCache.tempShockDetected ? "true" : "false",
+                   gPresenceCache.lastUpdate);
+    xSemaphoreGive(gPresenceCache.mutex);
+    if (pos < 0 || (size_t)pos >= bufSize) pos = 0;
+  }
+  return pos;
+}
 
 // ============================================================================
 // Presence Task Implementation
@@ -435,7 +484,7 @@ void presenceTask(void* parameter) {
   INFO_SENSORSF("[PRESENCE] Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  Serial.println("[MODULAR] presenceTask() running from i2csensor-sths34pf80.cpp");
+  INFO_SENSORSF("[MODULAR] presenceTask() running from i2csensor-sths34pf80.cpp");
   
   unsigned long lastPresenceRead = 0;
   unsigned long lastStackLog = 0;
@@ -443,25 +492,19 @@ void presenceTask(void* parameter) {
   while (true) {
     // Check if sensor disabled for graceful shutdown
     if (!presenceEnabled) {
-      if (presenceConnected) {
-        if (i2cMutex && xSemaphoreTakeRecursive(i2cMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-          presenceConnected = false;
-          gPresenceCache.dataValid = false;
-          xSemaphoreGiveRecursive(i2cMutex);
-          vTaskDelay(pdMS_TO_TICKS(50));
-        } else {
-          presenceConnected = false;
-          gPresenceCache.dataValid = false;
-          vTaskDelay(pdMS_TO_TICKS(100));
-        }
-      }
+      presenceConnected = false;
+      gPresenceCache.dataValid = false;
+      INFO_SENSORSF("[PRESENCE] Task disabled - cleaning up and deleting");
+      // NOTE: Do NOT clear presenceTaskHandle here - let create function use eTaskGetState()
+      // to detect stale handles. Clearing here creates a race condition window.
       vTaskDelete(nullptr);
     }
 
-    // Stack watermark tracking
+    // Stack watermark tracking + safety bailout
     unsigned long nowMs = millis();
     if ((nowMs - lastStackLog) >= 10000) {
       lastStackLog = nowMs;
+      if (checkTaskStackSafety("presence", PRESENCE_STACK_WORDS, &presenceEnabled)) break;
       if (presenceEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         DEBUG_PERFORMANCEF("[STACK] presence_task watermark=%u words", (unsigned)watermark);
@@ -472,22 +515,24 @@ void presenceTask(void* parameter) {
     }
     
     if (presenceEnabled && presenceConnected && !gSensorPollingPaused) {
-      unsigned long presencePollMs = (gSettings.presenceDevicePollMs > 0) ? (unsigned long)gSettings.presenceDevicePollMs : 100;
+      unsigned long presencePollMs = (gSettings.presenceDevicePollMs > 0) ? (unsigned long)gSettings.presenceDevicePollMs : 200;
       
       if ((nowMs - lastPresenceRead) >= presencePollMs) {
-        // LOW PRIORITY: Try to get bus with short timeout - yield to gamepad/other high-pri devices
-        if (i2cMutex && xSemaphoreTakeRecursive(i2cMutex, pdMS_TO_TICKS(10)) != pdTRUE) {
-          // Bus is busy - skip this cycle, let high-priority tasks (gamepad) go first
-          vTaskDelay(pdMS_TO_TICKS(20));
-          continue;
-        }
-        xSemaphoreGiveRecursive(i2cMutex);  // Release - transaction wrapper will re-acquire
-        
         bool ok = i2cTaskWithTimeout(I2C_ADDR_PRESENCE, 100000, 100, [&]() -> bool {
           return readPresenceData();
         });
         
-        if (!ok) {
+        if (ok) {
+#if ENABLE_ESPNOW
+          {
+            char presJson[256];
+            int jsonLen = buildPresenceDataJSON(presJson, sizeof(presJson));
+            if (jsonLen > 0) {
+              sendSensorDataUpdate(REMOTE_SENSOR_PRESENCE, String(presJson));
+            }
+          }
+#endif
+        } else {
           if (i2cShouldAutoDisable(I2C_ADDR_PRESENCE, 5)) {
             uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_PRESENCE);
             presenceEnabled = false;

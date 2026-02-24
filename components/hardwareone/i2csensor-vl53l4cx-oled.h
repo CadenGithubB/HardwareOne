@@ -9,14 +9,12 @@
 
 // ToF OLED display function - shows distance data
 static void displayToFData() {
-  extern Adafruit_SSD1306* oledDisplay;
-  
+  // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
+  int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
-  oledDisplay->setCursor(0, 0);
-  oledDisplay->println("=== ToF Distance ===");
-  oledDisplay->println();
 
   if (!tofConnected || !tofEnabled) {
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("ToF not active");
     oledDisplay->println();
     oledDisplay->println("Press X to start");
@@ -27,26 +25,29 @@ static void displayToFData() {
     if (gTofCache.tofDataValid && gTofCache.tofTotalObjects > 0) {
       // Show first detected object distance
       int distMM = gTofCache.tofObjects[0].distance_mm;
+      oledDisplay->setCursor(0, y);
       oledDisplay->setTextSize(2);
       oledDisplay->print(distMM);
       oledDisplay->println(" mm");
       oledDisplay->setTextSize(1);
-      oledDisplay->println();
+      y += 20;
       
       // Visual bar representation (0-2000mm range)
       int barWidth = map(constrain(distMM, 0, 2000), 0, 2000, 0, 120);
-      oledDisplay->drawRect(0, 40, 124, 10, DISPLAY_COLOR_WHITE);
-      oledDisplay->fillRect(2, 42, barWidth, 6, DISPLAY_COLOR_WHITE);
+      oledDisplay->drawRect(0, y, 124, 10, DISPLAY_COLOR_WHITE);
+      oledDisplay->fillRect(2, y + 2, barWidth, 6, DISPLAY_COLOR_WHITE);
       
-      oledDisplay->setCursor(0, 54);
+      oledDisplay->setCursor(0, y + 12);
       oledDisplay->print("0");
-      oledDisplay->setCursor(100, 54);
+      oledDisplay->setCursor(100, y + 12);
       oledDisplay->print("2000mm");
     } else {
+      oledDisplay->setCursor(0, y);
       oledDisplay->println("Waiting for data...");
     }
     xSemaphoreGive(gTofCache.mutex);
   } else {
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("ToF: Busy");
   }
 }
@@ -58,15 +59,14 @@ static bool tofOLEDModeAvailable(String* outReason) {
 
 static void tofToggleConfirmed(void* userData) {
   (void)userData;
-  extern bool enqueueSensorStart(SensorType sensor);
-  extern bool isInQueue(SensorType sensor);
+  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
 
   if (tofEnabled && tofConnected) {
     Serial.println("[TOF] Confirmed: Stopping ToF sensor...");
     tofEnabled = false;
-  } else if (!isInQueue(SENSOR_TOF)) {
+  } else if (!isInQueue(I2C_DEVICE_TOF)) {
     Serial.println("[TOF] Confirmed: Starting ToF sensor...");
-    enqueueSensorStart(SENSOR_TOF);
+    enqueueDeviceStart(I2C_DEVICE_TOF);
   }
 }
 

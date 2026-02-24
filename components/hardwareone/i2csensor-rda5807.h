@@ -17,6 +17,7 @@
 // FM Radio state
 extern bool fmRadioEnabled;
 extern bool fmRadioConnected;
+extern unsigned long fmRadioLastStopTime;
 extern bool radioInitialized;      // Radio hardware initialization status
 extern uint16_t fmRadioFrequency;  // Current frequency in 10kHz units (e.g., 10390 = 103.9 MHz)
 extern uint8_t fmRadioVolume;      // 0-15
