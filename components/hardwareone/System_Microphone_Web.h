@@ -9,7 +9,7 @@
 
 #include "System_BuildConfig.h"
 
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_WEB_SENSORS && ENABLE_MICROPHONE_SENSOR
 
 #include <esp_http_server.h>
 

@@ -4,7 +4,9 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Filesystem.h"
+#include "System_MemUtil.h"
 #include "System_Mutex.h"
+#include "System_Notifications.h"
 
 #include <LittleFS.h>
 #include <SD.h>
@@ -50,28 +52,28 @@ static bool gSdMounted = false;
 
 static bool tryMountSD() {
 #if defined(SD_CS_PIN)
-  Serial.printf("[SD] Attempting mount with pins: CS=%d", SD_CS_PIN);
+  DEBUG_STORAGEF("[SD] Attempting mount with pins: CS=%d", SD_CS_PIN);
   #if defined(SD_SCK_PIN) && defined(SD_MISO_PIN) && defined(SD_MOSI_PIN)
-  Serial.printf(", SCK=%d, MISO=%d, MOSI=%d\n", SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN);
+  DEBUG_STORAGEF("[SD] SPI pins: SCK=%d, MISO=%d, MOSI=%d", SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN);
   SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
   #else
-  Serial.println(" (using default SPI pins)");
+  DEBUG_STORAGEF("[SD] Using default SPI pins");
   SPI.begin();
   #endif
 
   // Try different SPI frequencies
   uint32_t frequencies[] = {4000000, 1000000, 400000};
   for (uint32_t freq : frequencies) {
-    Serial.printf("[SD] Trying SPI frequency: %lu Hz...\n", freq);
+    DEBUG_STORAGEF("[SD] Trying SPI frequency: %lu Hz...", freq);
     if (SD.begin(SD_CS_PIN, SPI, freq, "/sd")) {
-      Serial.printf("[SD] Mount SUCCESS at %lu Hz\n", freq);
+      INFO_STORAGEF("[SD] Mount SUCCESS at %lu Hz", freq);
       gSdMounted = true;
       return true;
     }
-    Serial.println("[SD] Mount failed at this frequency");
+    DEBUG_STORAGEF("[SD] Mount failed at this frequency");
     delay(100);
   }
-  Serial.println("[SD] All mount attempts failed");
+  WARN_STORAGEF("[SD] All mount attempts failed");
 #endif
   gSdMounted = false;
   return false;
@@ -180,11 +182,15 @@ bool remove(const String& path) {
   if (getStorageType(p) == SDCARD) {
     if (!gSdMounted) return false;
     if (p == "/sd") return false;
-    return SD.remove(stripSdPrefix(p));
+    bool ok = SD.remove(stripSdPrefix(p));
+    if (ok) notifyFileDeleted(p.c_str());
+    return ok;
   }
 
   if (!filesystemReady) return false;
-  return LittleFS.remove(p);
+  bool ok = LittleFS.remove(p);
+  if (ok) notifyFileDeleted(p.c_str());
+  return ok;
 }
 
 bool rename(const String& pathFrom, const String& pathTo) {
@@ -216,11 +222,15 @@ bool rmdir(const String& path) {
   if (getStorageType(p) == SDCARD) {
     if (!gSdMounted) return false;
     if (p == "/sd") return false;
-    return SD.rmdir(stripSdPrefix(p));
+    bool ok = SD.rmdir(stripSdPrefix(p));
+    if (ok) notifyFileDeleted(p.c_str());
+    return ok;
   }
 
   if (!filesystemReady) return false;
-  return LittleFS.rmdir(p);
+  bool ok = LittleFS.rmdir(p);
+  if (ok) notifyFileDeleted(p.c_str());
+  return ok;
 }
 
 bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint64_t& freeBytes) {
@@ -270,18 +280,18 @@ bool remountSD() {
 // Format SD card as FAT32 using ESP-IDF low-level API
 bool formatSD() {
 #if defined(SD_CS_PIN)
-  Serial.println("[SD FORMAT] Starting format process...");
+  INFO_STORAGEF("[SD FORMAT] Starting format process...");
   
   // Must unmount Arduino SD first and end SPI
   if (gSdMounted) {
-    Serial.println("[SD FORMAT] Unmounting Arduino SD...");
+    DEBUG_STORAGEF("[SD FORMAT] Unmounting Arduino SD...");
     SD.end();
     gSdMounted = false;
   }
   SPI.end();  // End Arduino SPI so ESP-IDF can take over
   
   // Initialize the SPI bus for ESP-IDF
-  Serial.printf("[SD FORMAT] Initializing SPI bus: SCK=%d, MISO=%d, MOSI=%d\n", 
+  DEBUG_STORAGEF("[SD FORMAT] Initializing SPI bus: SCK=%d, MISO=%d, MOSI=%d", 
                 SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN);
   
   spi_bus_config_t bus_cfg = {
@@ -295,10 +305,10 @@ bool formatSD() {
   
   esp_err_t ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
   if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-    Serial.printf("[SD FORMAT] SPI bus init failed: 0x%x\n", ret);
+    ERROR_STORAGEF("[SD FORMAT] SPI bus init failed: 0x%x", ret);
     return false;
   }
-  Serial.println("[SD FORMAT] SPI bus initialized");
+  DEBUG_STORAGEF("[SD FORMAT] SPI bus initialized");
   
   // Use ESP-IDF SDMMC/SPI host to format
   sdmmc_host_t host = SDSPI_HOST_DEFAULT();
@@ -308,7 +318,7 @@ bool formatSD() {
   slot_config.gpio_cs = (gpio_num_t)SD_CS_PIN;
   slot_config.host_id = SPI2_HOST;
   
-  Serial.printf("[SD FORMAT] SD slot config: CS=%d, host=%d\n", SD_CS_PIN, SPI2_HOST);
+  DEBUG_STORAGEF("[SD FORMAT] SD slot config: CS=%d, host=%d", SD_CS_PIN, SPI2_HOST);
   
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
     .format_if_mount_failed = true,
@@ -319,39 +329,39 @@ bool formatSD() {
   sdmmc_card_t* card = nullptr;
   
   // Mount with format_if_mount_failed - this will format exFAT/unformatted cards
-  Serial.println("[SD FORMAT] Attempting ESP-IDF mount...");
+  DEBUG_STORAGEF("[SD FORMAT] Attempting ESP-IDF mount...");
   ret = esp_vfs_fat_sdspi_mount("/sdformat", &host, &slot_config, &mount_config, &card);
   
   if (ret != ESP_OK) {
-    Serial.printf("[SD FORMAT] ESP-IDF mount failed: 0x%x\n", ret);
+    ERROR_STORAGEF("[SD FORMAT] ESP-IDF mount failed: 0x%x", ret);
     // Try explicit format
     if (card) {
-      Serial.println("[SD FORMAT] Trying explicit format...");
+      DEBUG_STORAGEF("[SD FORMAT] Trying explicit format...");
       ret = esp_vfs_fat_sdcard_format("/sdformat", card);
     }
     if (ret != ESP_OK) {
-      Serial.printf("[SD FORMAT] Format failed: 0x%x\n", ret);
+      ERROR_STORAGEF("[SD FORMAT] Format failed: 0x%x", ret);
       spi_bus_free(SPI2_HOST);
       return false;
     }
   } else {
-    Serial.println("[SD FORMAT] ESP-IDF mount successful, formatting...");
+    DEBUG_STORAGEF("[SD FORMAT] ESP-IDF mount successful, formatting...");
     // Mounted successfully, now format it explicitly to ensure FAT32
     ret = esp_vfs_fat_sdcard_format("/sdformat", card);
     if (ret != ESP_OK) {
-      Serial.printf("[SD FORMAT] Format failed: 0x%x\n", ret);
+      ERROR_STORAGEF("[SD FORMAT] Format failed: 0x%x", ret);
       esp_vfs_fat_sdcard_unmount("/sdformat", card);
       spi_bus_free(SPI2_HOST);
       return false;
     }
   }
   
-  Serial.println("[SD FORMAT] Format complete, unmounting ESP-IDF...");
+  INFO_STORAGEF("[SD FORMAT] Format complete, unmounting ESP-IDF...");
   // Unmount the ESP-IDF mount
   esp_vfs_fat_sdcard_unmount("/sdformat", card);
   spi_bus_free(SPI2_HOST);
   
-  Serial.println("[SD FORMAT] Remounting with Arduino SD...");
+  DEBUG_STORAGEF("[SD FORMAT] Remounting with Arduino SD...");
   // Remount with Arduino SD library
   return tryMountSD();
 #else
@@ -429,8 +439,7 @@ static const char* cmd_sdformat(const String& cmd) {
   }
   
   snprintf(buf, sizeof(buf), "Formatting SD card as FAT32... (this may take a moment)");
-  Serial.println(buf);
-  Serial.flush();
+  INFO_STORAGEF("%s", buf);
   
   if (VFS::formatSD()) {
     snprintf(buf, sizeof(buf), "SD card formatted successfully as FAT32 and mounted at /sd");
@@ -541,15 +550,15 @@ static uint8_t testSDPins(int cs, int sck, int miso, int mosi, char* buf, int* p
 
 // Raw SPI diagnostic for SD card
 static const char* cmd_sddiag(const String& cmd) {
-  static char buf[4096];
+  PSRAM_STATIC_BUF(buf, 4096);
   int pos = 0;
   
 #if !defined(SD_CS_PIN)
-  snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
+  snprintf(buf, buf_SIZE, "ERROR: SD card not supported on this board");
   return buf;
 #else
-  pos = appendf(buf, sizeof(buf), pos, "=== SD Card Diagnostics ===\n");
-  pos = appendf(buf, sizeof(buf), pos, "Build config: XIAO_ESP32S3_SENSE_ENABLED=%d\n",
+  pos = appendf(buf, buf_SIZE, pos, "=== SD Card Diagnostics ===\n");
+  pos = appendf(buf, buf_SIZE, pos, "Build config: XIAO_ESP32S3_SENSE_ENABLED=%d\n",
   #ifdef XIAO_ESP32S3_SENSE_ENABLED
     1
   #else
@@ -558,53 +567,53 @@ static const char* cmd_sddiag(const String& cmd) {
   );
   
   // Current pin configuration from build
-  pos = appendf(buf, sizeof(buf), pos, "\nConfigured Pins (System_BuildConfig.h):\n");
-  pos = appendf(buf, sizeof(buf), pos, "  CS:   GPIO%d\n", SD_CS_PIN);
+  pos = appendf(buf, buf_SIZE, pos, "\nConfigured Pins (System_BuildConfig.h):\n");
+  pos = appendf(buf, buf_SIZE, pos, "  CS:   GPIO%d\n", SD_CS_PIN);
   #if defined(SD_SCK_PIN)
-  pos = appendf(buf, sizeof(buf), pos, "  SCK:  GPIO%d\n", SD_SCK_PIN);
+  pos = appendf(buf, buf_SIZE, pos, "  SCK:  GPIO%d\n", SD_SCK_PIN);
   #endif
   #if defined(SD_MISO_PIN)
-  pos = appendf(buf, sizeof(buf), pos, "  MISO: GPIO%d\n", SD_MISO_PIN);
+  pos = appendf(buf, buf_SIZE, pos, "  MISO: GPIO%d\n", SD_MISO_PIN);
   #endif
   #if defined(SD_MOSI_PIN)
-  pos = appendf(buf, sizeof(buf), pos, "  MOSI: GPIO%d\n", SD_MOSI_PIN);
+  pos = appendf(buf, buf_SIZE, pos, "  MOSI: GPIO%d\n", SD_MOSI_PIN);
   #endif
   
   // Raw GPIO state check
-  pos = appendf(buf, sizeof(buf), pos, "\nGPIO Pin States (raw read):\n");
+  pos = appendf(buf, buf_SIZE, pos, "\nGPIO Pin States (raw read):\n");
   int pins[] = {3, 7, 8, 9, 10, 21};
   for (int p : pins) {
     pinMode(p, INPUT);
-    pos = appendf(buf, sizeof(buf), pos, "  GPIO%d: %d\n", p, digitalRead(p));
+    pos = appendf(buf, buf_SIZE, pos, "  GPIO%d: %d\n", p, digitalRead(p));
   }
   
   // Test with CONFIGURED pins first
-  pos = appendf(buf, sizeof(buf), pos, "\n=== Testing CONFIGURED pins ===");
-  uint8_t r1 = testSDPins(SD_CS_PIN, SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, buf, &pos, sizeof(buf));
+  pos = appendf(buf, buf_SIZE, pos, "\n=== Testing CONFIGURED pins ===");
+  uint8_t r1 = testSDPins(SD_CS_PIN, SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, buf, &pos, buf_SIZE);
   
   // If that failed, try alternative pin configs from Seeed docs
   if (r1 == 0xFF) {
-    pos = appendf(buf, sizeof(buf), pos, "\n=== Trying ALTERNATIVE pin configs ===");
+    pos = appendf(buf, buf_SIZE, pos, "\n=== Trying ALTERNATIVE pin configs ===");
     
     // Alt 1: CS=21, SCK=7, MISO=8, MOSI=9 (some Seeed docs)
-    uint8_t r2 = testSDPins(21, 7, 8, 9, buf, &pos, sizeof(buf));
+    uint8_t r2 = testSDPins(21, 7, 8, 9, buf, &pos, buf_SIZE);
     
     if (r2 == 0xFF) {
       // Alt 2: CS=21, SCK=7, MISO=8, MOSI=10
-      testSDPins(21, 7, 8, 10, buf, &pos, sizeof(buf));
+      testSDPins(21, 7, 8, 10, buf, &pos, buf_SIZE);
     }
   }
   
-  pos = appendf(buf, sizeof(buf), pos, "\n\n=== Summary ===\n");
-  pos = appendf(buf, sizeof(buf), pos, "SD Mount Status: %s\n", VFS::isSDAvailable() ? "Mounted" : "Not mounted");
+  pos = appendf(buf, buf_SIZE, pos, "\n\n=== Summary ===\n");
+  pos = appendf(buf, buf_SIZE, pos, "SD Mount Status: %s\n", VFS::isSDAvailable() ? "Mounted" : "Not mounted");
   
   if (r1 == 0xFF) {
-    pos = appendf(buf, sizeof(buf), pos, "\nTROUBLESHOOTING:\n");
-    pos = appendf(buf, sizeof(buf), pos, "1. Check if J3 jumper on expansion board is connected\n");
-    pos = appendf(buf, sizeof(buf), pos, "2. Try a different SD card\n");
-    pos = appendf(buf, sizeof(buf), pos, "3. Reseat the expansion board\n");
-    pos = appendf(buf, sizeof(buf), pos, "4. Clean SD card contacts\n");
-    pos = appendf(buf, sizeof(buf), pos, "5. Check if card clicks into slot\n");
+    pos = appendf(buf, buf_SIZE, pos, "\nTROUBLESHOOTING:\n");
+    pos = appendf(buf, buf_SIZE, pos, "1. Check if J3 jumper on expansion board is connected\n");
+    pos = appendf(buf, buf_SIZE, pos, "2. Try a different SD card\n");
+    pos = appendf(buf, buf_SIZE, pos, "3. Reseat the expansion board\n");
+    pos = appendf(buf, buf_SIZE, pos, "4. Clean SD card contacts\n");
+    pos = appendf(buf, buf_SIZE, pos, "5. Check if card clicks into slot\n");
   }
 
   // Also stream to Serial so output isn't lost/truncated by CLI return size limits.

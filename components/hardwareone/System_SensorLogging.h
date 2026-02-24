@@ -12,8 +12,6 @@
 #define SENSOR_LOGGING_H
 
 #include <Arduino.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 
 // Sensor selection bitmask
 #define LOG_THERMAL  (1 << 0)
@@ -22,6 +20,7 @@
 #define LOG_GAMEPAD  (1 << 3)
 #define LOG_APDS     (1 << 4)
 #define LOG_GPS      (1 << 5)
+#define LOG_PRESENCE (1 << 6)
 
 // Snapshot of sensor cache and flags for logging
 struct SensorCacheSnapshot {
@@ -76,6 +75,25 @@ struct SensorCacheSnapshot {
   float gpsSpeed;
   uint8_t gpsSatellites;
   uint8_t gpsFixQuality;
+  uint8_t gpsHour;
+  uint8_t gpsMinute;
+  uint8_t gpsSecond;
+  bool gpsHasTime;
+  // presence
+  bool presenceEnabled;
+  bool presenceConnected;
+  float presenceAmbientTemp;
+  int16_t presenceValue;
+  int16_t motionValue;
+  bool presenceDetected;
+  bool motionDetected;
+};
+
+// Sensor log format options
+enum SensorLogFormat {
+  SENSOR_LOG_TEXT = 0,
+  SENSOR_LOG_CSV  = 1,
+  SENSOR_LOG_TRACK = 2   // GPS-only compact track format with signal loss dedup
 };
 
 // Sensor logging state (extern for access from other modules)
@@ -83,35 +101,25 @@ extern bool gSensorLoggingEnabled;
 extern String gSensorLogPath;
 extern uint32_t gSensorLogIntervalMs;
 extern size_t gSensorLogMaxSize;
-extern bool gSensorLogFormatCSV;
+extern SensorLogFormat gSensorLogFormat;
 extern uint8_t gSensorLogMaxRotations;
 extern uint8_t gSensorLogMask;
-extern TaskHandle_t gSensorLogTaskHandle;
+// Sensor logging functions (called from main loop)
+void sensorLogTick();
 
-// Sensor logging functions
-void sensorLogTask(void* parameter);
-const char* buildSensorLogLine();
+// Auto-start logging with persisted parameters (called from boot)
+void sensorLogAutoStart();
 
 // Command handler
 const char* cmd_sensorlog(const String& originalCmd);
-
-// =============================================================================
-// Dedicated GPS Track Logging (separate from general sensor logging)
-// =============================================================================
-
-// GPS track logging state
-extern bool gGPSTrackLoggingEnabled;
-extern char gGPSTrackLogPath[64];  // Fixed buffer, no heap allocation
-extern uint32_t gGPSTrackLogIntervalMs;
-extern TaskHandle_t gGPSTrackLogTaskHandle;
-
-// GPS track logging functions  
-void gpsTrackLogTask(void* parameter);
-const char* cmd_gpslog(const String& originalCmd);
 
 // Command registry
 struct CommandEntry;
 extern const CommandEntry sensorLoggingCommands[];
 extern const size_t sensorLoggingCommandsCount;
+
+// Settings module
+struct SettingsModule;
+extern const SettingsModule sensorLogSettingsModule;
 
 #endif // SENSOR_LOGGING_H

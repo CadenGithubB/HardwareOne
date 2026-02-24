@@ -2,6 +2,7 @@
 #include <Arduino.h>
 extern "C" {
   #include "esp_heap_caps.h"
+  #include "esp_memory_utils.h"
 }
 
 // Pre-allocation snapshots (defined in main sketch)
@@ -201,3 +202,110 @@ inline void ps_delete(T* obj) {
   obj->~T();
   free((void*)obj);
 }
+
+// ============================================================================
+// ArduinoJson PSRAM Allocator
+// ============================================================================
+// Custom allocator for ArduinoJson v7 that uses PSRAM instead of internal heap.
+// This moves all JSON parsing/building memory to PSRAM, freeing internal RAM.
+//
+// Usage:
+//   JsonDocument doc(psramJsonAllocator());  // Uses PSRAM
+//   JsonDocument doc;                         // Uses internal heap (default)
+//
+// Or use the convenience macro:
+//   PSRAM_JSON_DOC(doc);                      // Equivalent to above
+// ============================================================================
+
+#include <ArduinoJson.h>
+
+class PsramJsonAllocator : public ArduinoJson::Allocator {
+public:
+  void* allocate(size_t size) override {
+    // Try PSRAM first, fall back to internal heap
+    if (psramAvailableRuntime() && !psramBypassGlobal()) {
+      void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+      if (p) return p;
+    }
+    return malloc(size);
+  }
+
+  void deallocate(void* ptr) override {
+    free(ptr);  // Works for both PSRAM and internal heap
+  }
+
+  void* reallocate(void* ptr, size_t new_size) override {
+    // Try PSRAM first, fall back to internal heap
+    if (!ptr) {
+      return allocate(new_size);
+    }
+    if (psramAvailableRuntime() && !psramBypassGlobal() && esp_ptr_external_ram(ptr)) {
+      void* p = heap_caps_realloc(ptr, new_size, MALLOC_CAP_SPIRAM);
+      if (p) return p;
+    }
+    return realloc(ptr, new_size);
+  }
+
+  static PsramJsonAllocator* instance() {
+    static PsramJsonAllocator allocator;
+    return &allocator;
+  }
+
+private:
+  PsramJsonAllocator() = default;
+};
+
+inline ArduinoJson::Allocator* psramJsonAllocator() {
+  return PsramJsonAllocator::instance();
+}
+
+#define PSRAM_JSON_DOC(name) JsonDocument name(psramJsonAllocator())
+
+// ============================================================================
+// PSRAM-backed static command output buffers
+// ============================================================================
+// These replace large static char[] buffers that would otherwise live in .bss
+// (internal RAM). The buffer is lazily allocated on first use and persists.
+
+// Generic PSRAM buffer helper - returns a persistent PSRAM-backed buffer
+// Usage: char* buf = getPsramBuffer<4096>("sddiag");
+template<size_t SIZE>
+inline char* getPsramBuffer(const char* tag = nullptr) {
+  static char* buf = nullptr;
+  if (!buf) {
+    buf = (char*)ps_alloc(SIZE, AllocPref::PreferPSRAM, tag);
+    if (buf) {
+      buf[0] = '\0';
+    }
+  }
+  return buf;
+}
+
+// Pre-defined buffer sizes for common use cases
+// 1KB buffer for small command outputs
+inline char* getPsramBuffer1K(const char* tag = nullptr) {
+  return getPsramBuffer<1024>(tag);
+}
+
+// 2KB buffer for medium command outputs  
+inline char* getPsramBuffer2K(const char* tag = nullptr) {
+  return getPsramBuffer<2048>(tag);
+}
+
+// 4KB buffer for large command outputs
+inline char* getPsramBuffer4K(const char* tag = nullptr) {
+  return getPsramBuffer<4096>(tag);
+}
+
+// Macro for easy static buffer replacement
+// Usage: PSRAM_STATIC_BUF(buf, 2048) replaces: static char buf[2048]
+// Note: Also defines buf_SIZE constant for use instead of sizeof(buf)
+#define PSRAM_STATIC_BUF(name, size) \
+  static char* name = nullptr; \
+  static constexpr size_t name##_SIZE = size; \
+  if (!name) { \
+    name = (char*)ps_alloc(size, AllocPref::PreferPSRAM, #name); \
+    if (name) name[0] = '\0'; \
+  } \
+  if (!name) return "Error: Failed to allocate buffer"
+

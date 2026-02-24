@@ -18,11 +18,6 @@
 // Determine if NeoPixel hardware is available at compile time
 #define NEOPIXEL_AVAILABLE (NEOPIXEL_PIN_DEFAULT >= 0)
 
-// External dependencies
-extern bool ensureDebugBuffer();
-extern char* getDebugBuffer();
-extern void broadcastOutput(const String& msg);
-
 // Global NeoPixel instance - only instantiate if hardware is available
 #define NUMPIXELS 1
 #if NEOPIXEL_AVAILABLE
@@ -429,9 +424,9 @@ const char* cmd_ledeffect(const String& command) {
 // ============================================================================
 
 const CommandEntry neopixelCommands[] = {
-  { "ledcolor", "Set LED color by name.", false, cmd_ledcolor, "Usage: ledcolor <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>", "led", "change color" },
+  { "ledcolor", "Set LED color: <color>", false, cmd_ledcolor, "Usage: ledcolor <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>", "led", "change color" },
   { "ledclear", "Turn off LED.", false, cmd_ledclear, nullptr, "led", "turn off" },
-  { "ledeffect", "Run a predefined LED effect.", false, cmd_ledeffect },
+  { "ledeffect", "Run LED effect: <effect>", false, cmd_ledeffect },
 };
 
 const size_t neopixelCommandsCount = sizeof(neopixelCommands) / sizeof(neopixelCommands[0]);

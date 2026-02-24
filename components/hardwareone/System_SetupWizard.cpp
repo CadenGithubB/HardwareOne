@@ -14,9 +14,7 @@
 #endif
 
 extern Settings gSettings;
-extern bool writeSettingsJson();
 extern String waitForSerialInputBlocking();
-extern void broadcastOutput(const String& s);
 
 // ============================================================================
 // Time Zone Data
@@ -171,7 +169,7 @@ void initSetupWizard() {
     const FeatureEntry* f = getFeatureByIndex(i);
     if (!f || !isFeatureCompiled(f)) continue;
     
-    if (f->category == FEATURE_CAT_NETWORK && featuresPageCount < 16) {
+    if ((f->category == FEATURE_CAT_NETWORK || f->category == FEATURE_CAT_SYSTEM) && featuresPageCount < 16) {
       featuresPage[featuresPageCount].id = f->id;
       featuresPage[featuresPageCount].label = f->name;
       featuresPage[featuresPageCount].heapKB = f->heapCostKB;
@@ -576,7 +574,7 @@ SetupWizardResult runSerialSetupWizard() {
     // Display current page
     switch (currentPage) {
       case WIZARD_PAGE_FEATURES:
-        printSerialFeaturePage("Network Features", featuresPage, featuresPageCount);
+        printSerialFeaturePage("Features", featuresPage, featuresPageCount);
         break;
         
       case WIZARD_PAGE_SENSORS:
@@ -614,22 +612,34 @@ SetupWizardResult runSerialSetupWizard() {
             Serial.println("No WiFi networks found");
           }
           Serial.println("----------------------------------------");
-          Serial.println("Enter WiFi network number, or type SSID (or press Enter to skip):");
+          Serial.println("Enter number to select, type an SSID directly, 'rescan' to refresh, or 'skip':");
+          Serial.println("('b' or 'back' to return to previous page)");
           Serial.print("> ");
           String ssidInput = waitForSerialInputBlocking();
           ssidInput.trim();
+          WiFi.scanDelete();
+          if (ssidInput.equalsIgnoreCase("b") || ssidInput.equalsIgnoreCase("back")) {
+            wizardPrevPage();
+            continue;
+          }
+          if (ssidInput.equalsIgnoreCase("skip") || ssidInput.length() == 0) {
+            result.completed = true;
+            running = false;
+            continue;
+          }
           String ssid = ssidInput;
           int idx = ssidInput.toInt();
           if (idx > 0 && idx <= n) {
             ssid = WiFi.SSID(idx - 1);
           }
-          WiFi.scanDelete();
-
           if (ssid.length() > 0) {
-            Serial.println("Enter WiFi password:");
+            Serial.println("Enter WiFi password (or 'b' to go back):");
             Serial.print("> ");
             String pass = waitForSerialInputBlocking();
             pass.trim();
+            if (pass.equalsIgnoreCase("b") || pass.equalsIgnoreCase("back")) {
+              continue;  // Loop back to WiFi page (re-scan)
+            }
             result.wifiSSID = ssid;
             result.wifiPassword = pass;
             result.wifiConfigured = true;

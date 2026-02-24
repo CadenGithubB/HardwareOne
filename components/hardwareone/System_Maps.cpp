@@ -889,9 +889,6 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon)
 
 #if ENABLE_OLED_DISPLAY
 
-// External OLED display pointer
-extern Adafruit_SSD1306* oledDisplay;
-
 OLEDMapRenderer::OLEDMapRenderer(Adafruit_SSD1306* display) : _display(display) {
   _width = 128;
   _height = 54;  // Leave room for footer
@@ -1294,7 +1291,7 @@ bool WaypointManager::loadWaypoints() {
   File f = LittleFS.open(wpPath, "r");
   if (!f) return false;
   
-  StaticJsonDocument<8192> doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, f);
   f.close();
   
@@ -1349,7 +1346,7 @@ bool WaypointManager::saveWaypoints() {
 
   FsLockGuard fsGuard("WaypointManager.saveWaypoints");
   
-  StaticJsonDocument<8192> doc;
+  PSRAM_JSON_DOC(doc);
   JsonArray arr = doc.createNestedArray("waypoints");
   
   for (int i = 0; i < MAX_WAYPOINTS; i++) {
@@ -2350,14 +2347,14 @@ const char* cmd_waypointfiles(const String& cmd) {
 // Command registry
 const CommandEntry mapCommands[] = {
   {"map", "Show current map info", false, cmd_map, nullptr},
-  {"mapload", "Load a map file: mapload <path>", false, cmd_mapload, nullptr},
-  {"maplist", "List available maps in /maps/", false, cmd_maplist, nullptr},
+  {"mapload", "Load map file: <path>", false, cmd_mapload, nullptr},
+  {"maplist", "List available maps", false, cmd_maplist, nullptr},
   {"whereami", "Show current location context", false, cmd_whereami, nullptr},
-  {"search", "Search map features: search <name>", false, cmd_search, nullptr},
-  {"waypoint", "Manage waypoints: list|add|del|goto|clear", false, cmd_waypoint, nullptr},
-  {"gpstrack", "Manage GPS tracks: status|load|clear", false, cmd_gpstrack, nullptr},
-  {"waypointfile", "Link file to waypoint: waypointfile <file> <wpName>", false, cmd_waypointfile, nullptr},
-  {"waypointfiles", "List/remove waypoint files: waypointfiles <name> [del <idx>]", false, cmd_waypointfiles, nullptr}
+  {"search", "Search map features: <name>", false, cmd_search, nullptr},
+  {"waypoint", "Manage waypoints: <list|add|del|goto|clear>", false, cmd_waypoint, nullptr},
+  {"gpstrack", "Manage GPS tracks: <status|load|clear>", false, cmd_gpstrack, nullptr},
+  {"waypointfile", "Link file to waypoint: <file> <wpName>", false, cmd_waypointfile, nullptr},
+  {"waypointfiles", "Waypoint files: <name> [del <idx>]", false, cmd_waypointfiles, nullptr}
 };
 const size_t mapCommandsCount = sizeof(mapCommands) / sizeof(mapCommands[0]);
 

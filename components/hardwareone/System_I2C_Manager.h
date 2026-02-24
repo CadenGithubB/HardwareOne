@@ -119,23 +119,23 @@ struct I2CBusMetrics {
 };
 
 // ============================================================================
-// Sensor Lifecycle Management
+// I2C Device Lifecycle Management
 // ============================================================================
 
-enum SensorType {
-  SENSOR_THERMAL = 0,
-  SENSOR_TOF = 1,
-  SENSOR_IMU = 2,
-  SENSOR_GAMEPAD = 3,
-  SENSOR_GPS = 4,
-  SENSOR_FMRADIO = 5,
-  SENSOR_APDS = 6,
-  SENSOR_RTC = 7,
-  SENSOR_PRESENCE = 8
+enum I2CDeviceType {
+  I2C_DEVICE_THERMAL = 0,
+  I2C_DEVICE_TOF = 1,
+  I2C_DEVICE_IMU = 2,
+  I2C_DEVICE_GAMEPAD = 3,
+  I2C_DEVICE_GPS = 4,
+  I2C_DEVICE_FMRADIO = 5,
+  I2C_DEVICE_APDS = 6,
+  I2C_DEVICE_RTC = 7,
+  I2C_DEVICE_PRESENCE = 8
 };
 
-struct SensorStartRequest {
-  SensorType sensor;
+struct I2CDeviceStartRequest {
+  I2CDeviceType device;
   unsigned long queuedAt;
 };
 
@@ -164,8 +164,8 @@ private:
   uint32_t clockStack[CLOCK_STACK_MAX];
   int clockStackDepth;
   
-  // Sensor lifecycle
-  SensorStartRequest sensorQueue[8];
+  // I2C device lifecycle
+  I2CDeviceStartRequest deviceQueue[8];
   int queueHead;
   int queueTail;
   SemaphoreHandle_t queueMutex;
@@ -199,15 +199,14 @@ public:
   // Bus operations
   void initBuses();
   void performBusRecovery();
-  void healthCheck();  // DEPRECATED: Now event-driven via checkBusRecoveryNeeded()
   void checkBusRecoveryNeeded();  // Event-driven recovery check (called when device degrades)
   void discoverDevices();
   
-  // Sensor lifecycle
-  bool enqueueSensorStart(SensorType sensor);
-  bool dequeueSensorStart(SensorStartRequest* req);
-  bool isInQueue(SensorType sensor);
-  int getQueuePosition(SensorType sensor);
+  // I2C device lifecycle
+  bool enqueueDeviceStart(I2CDeviceType sensor);
+  bool dequeueDeviceStart(I2CDeviceStartRequest* req);
+  bool isInQueue(I2CDeviceType sensor);
+  int getQueuePosition(I2CDeviceType sensor);
   int getQueueDepth();
   void pausePolling();
   void resumePolling();

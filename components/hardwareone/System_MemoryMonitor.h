@@ -33,7 +33,7 @@ const MemoryRequirement* getAllMemoryRequirements(size_t& outCount);
 
 // Sample current memory state and output to CLI
 // This is the core function called by both manual command and periodic sampling
-void sampleMemoryState();
+void sampleMemoryState(bool forceFullScan = false);
 
 // CLI command handler for manual memory sampling
 const char* cmd_memsample(const String& cmd);

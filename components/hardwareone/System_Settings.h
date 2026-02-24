@@ -24,7 +24,10 @@ struct Settings {
       tzOffsetMinutes(0),
       outSerial(true),
       outWeb(false),
-      outTft(false),
+      outDisplay(false),
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+      outG2(false),
+#endif
       thermalPollingMs(250),
       tofPollingMs(220),
       tofStabilityThreshold(3),
@@ -60,8 +63,6 @@ struct Settings {
       debugAuth(true),
       debugSensors(true),
       debugEspNow(true),
-      debugSensorsFrame(true),
-      debugSensorsData(true),
       debugSensorsGeneral(true),
       debugWifi(true),
       debugStorage(true),
@@ -87,20 +88,43 @@ struct Settings {
       debugCommandSystem(true),
       debugSettingsSystem(true),
       debugFmRadio(true),
+      debugG2(true),  // G2 smart glasses BLE connection
       debugCamera(true),
       debugMicrophone(true),
       debugI2C(true),  // I2C bus transactions, mutex, clock changes
+      debugGps(false),        // Individual sensor flags disabled by default
+      debugRtc(false),
+      debugImu(false),
+      debugThermal(false),
+      debugTof(false),
+      debugGamepad(false),
+      debugApds(false),
+      debugPresence(false),
+      debugThermalFrame(false),
+      debugThermalData(false),
+      debugTofFrame(false),
+      debugGamepadFrame(false),
+      debugGamepadData(false),
+      debugImuFrame(false),
+      debugImuData(false),
+      debugApdsFrame(false),
       logLevel(3),                    // Default: LOG_LEVEL_DEBUG (show everything)
       memorySampleIntervalSec(30),
       espnowenabled(false),
       espnowmesh(false),
       espnowUserSyncEnabled(false),
       espnowDeviceName(""),
+      espnowRoom(""),
+      espnowZone(""),
+      espnowTags(""),
+      espnowFriendlyName(""),
+      espnowStationary(false),
       espnowFirstTimeSetup(false),
       espnowPassphrase(""),
       meshRole(0),
       meshMasterMAC(""),
       meshBackupMAC(""),
+      meshBackupEnabled(false),
       meshMasterHeartbeatInterval(10000),
       meshFailoverTimeout(20000),
       meshWorkerStatusInterval(30000),
@@ -109,6 +133,17 @@ struct Settings {
       meshHeartbeatBroadcast(true),
       meshTTL(3),
       meshAdaptiveTTL(false),
+      meshPeerMax(8),
+      bondModeEnabled(false),
+      bondRole(0),
+      bondPeerMac(""),
+      bondStreamThermal(false),
+      bondStreamTof(false),
+      bondStreamImu(false),
+      bondStreamGps(false),
+      bondStreamGamepad(false),
+      bondStreamFmradio(false),
+      bondStreamPresence(false),
 #if ENABLE_AUTOMATION
       automationsEnabled(true),
 #endif
@@ -137,10 +172,16 @@ struct Settings {
       gpsAutoStart(false),
       fmRadioAutoStart(false),
       apdsAutoStart(false),
-      rtcAutoStart(false),
+      rtcAutoStart(true),
       rtcTimeHasBeenSet(false),  // Track if RTC time has been set by NTP or manual
       presenceAutoStart(false),
       presenceDevicePollMs(100),
+      sensorLogAutoStart(false),
+      sensorLogPath("/logs/sensors/sensors.txt"),
+      sensorLogIntervalMs(5000),
+      sensorLogMask(0),
+      sensorLogFormat(0),
+      systemLogAutoStart(false),
       cameraAutoStart(false),  // Camera does NOT auto-start by default
       microphoneAutoStart(false),  // Microphone does NOT auto-start by default
       microphoneSampleRate(16000),
@@ -227,7 +268,10 @@ struct Settings {
   int tzOffsetMinutes;
   bool outSerial;  // persist output lanes
   bool outWeb;
-  bool outTft;
+  bool outDisplay;
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  bool outG2;
+#endif
   // Sensors UI (non-advanced)
   int thermalPollingMs;
   int tofPollingMs;
@@ -281,8 +325,6 @@ struct Settings {
   bool debugAuth;
   bool debugSensors;
   bool debugEspNow;
-  bool debugSensorsFrame;
-  bool debugSensorsData;
   bool debugSensorsGeneral;
   bool debugWifi;
   bool debugStorage;
@@ -308,9 +350,28 @@ struct Settings {
   bool debugCommandSystem;
   bool debugSettingsSystem;
   bool debugFmRadio;
+  bool debugG2;  // G2 smart glasses BLE connection
   bool debugCamera;
   bool debugMicrophone;
   bool debugI2C;  // I2C bus transactions, mutex, clock changes
+  // Individual I2C sensor debug flags
+  bool debugGps;        // GPS (PA1010D)
+  bool debugRtc;        // RTC (DS3231)
+  bool debugImu;        // IMU (BNO055)
+  bool debugThermal;    // Thermal (MLX90640)
+  bool debugTof;        // ToF (VL53L4CX)
+  bool debugGamepad;    // Gamepad (Seesaw)
+  bool debugApds;       // APDS (APDS9960)
+  bool debugPresence;   // Presence (STHS34PF80)
+  // Per-sensor frame/data debug flags (granular timing and data processing)
+  bool debugThermalFrame;   // Thermal frame timing, capture, FPS
+  bool debugThermalData;    // Thermal data interpolation, processing
+  bool debugTofFrame;       // ToF frame capture, object detection
+  bool debugGamepadFrame;   // Gamepad frame timing, connection
+  bool debugGamepadData;    // Gamepad button press/release events
+  bool debugImuFrame;       // IMU frame timing, cache operations
+  bool debugImuData;        // IMU data updates
+  bool debugApdsFrame;      // APDS frame timing, connection
   // Auth sub-flags
   bool debugAuthSessions;
   bool debugAuthCookies;
@@ -364,22 +425,46 @@ struct Settings {
   bool espnowUserSyncEnabled;          // Enable user credential sync across devices (default: false, admin-only)
   // ESP-NOW device identity
   String espnowDeviceName;             // Device name for ESP-NOW topology (user-configurable)
+  // ESP-NOW device metadata (for mesh organization and HA discovery)
+  String espnowRoom;                   // Room assignment: "Kitchen", "Bedroom", etc.
+  String espnowZone;                   // Sub-location within room: "Counter", "Door", "Ceiling"
+  String espnowTags;                   // Comma-separated tags: "stationary,thermal,hallway"
+  String espnowFriendlyName;           // Longer display name: "Kitchen Thermal Cam"
+  bool espnowStationary;               // true = mounted/fixed, false = mobile/wearable
   bool espnowFirstTimeSetup;           // True if ESP-NOW setup has been completed
   String espnowPassphrase;             // Encryption passphrase for secure pairing (persisted)
   // Mesh role settings
   uint8_t meshRole;                    // 0=worker, 1=master, 2=backup_master
   String meshMasterMAC;                // MAC of current master (empty if this is master)
   String meshBackupMAC;                // MAC of designated backup master
+  bool meshBackupEnabled;              // Show/use backup master feature (default: false)
   uint32_t meshMasterHeartbeatInterval;  // Master heartbeat interval (ms, default: 10000)
   uint32_t meshFailoverTimeout;        // Backup promotes after this timeout (ms, default: 20000)
   uint32_t meshWorkerStatusInterval;   // Worker status report interval (ms, default: 30000)
-  uint32_t meshTopoDiscoveryInterval;  // Topology discovery interval (ms, 0=on-demand, default: 0)
-  bool meshTopoAutoRefresh;            // Auto-refresh topology (default: false)
-  bool meshHeartbeatBroadcast;         // Broadcast heartbeats (true=public/discovery, false=private/paired-only)
-  uint8_t meshTTL;                     // TTL for mesh-routed messages (default: 3, range: 1-10, updated by adaptive mode)
-  bool meshAdaptiveTTL;                // Use adaptive TTL based on peer count: ceil(log2(peers))+1 (default: false)
+  uint32_t meshTopoDiscoveryInterval;  // Topology discovery interval (ms, 0=disabled)
+  bool meshTopoAutoRefresh;            // Enable automatic topology refresh
+  bool meshHeartbeatBroadcast;         // Broadcast heartbeats to FF:FF:FF:FF:FF:FF (public mode)
+  uint8_t meshTTL;                     // Mesh TTL (1-10, default: 3)
+  bool meshAdaptiveTTL;                // Enable adaptive TTL based on peer count
+  uint8_t meshPeerMax;                 // Max mesh peer slots (1-16, default: 8, changes on reboot)
+  // Bond mode settings (two-device bonded pair)
+  bool bondModeEnabled;              // Enable paired mode (master/worker)
+  uint8_t bondRole;                  // 0=worker (compute/network), 1=master (display/gamepad)
+  String bondPeerMac;                // MAC address of paired peer device
+  // Bond mode sensor streaming (auto-enable on boot when bonded)
+  bool bondStreamThermal;              // Auto-stream thermal data to paired peer
+  bool bondStreamTof;                  // Auto-stream ToF data to paired peer
+  bool bondStreamImu;                  // Auto-stream IMU data to paired peer
+  bool bondStreamGps;                  // Auto-stream GPS data to paired peer
+  bool bondStreamGamepad;              // Auto-stream gamepad data to paired peer
+  bool bondStreamFmradio;              // Auto-stream FM radio data to paired peer
+  bool bondStreamPresence;             // Auto-stream presence sensor data to paired peer
+  // ESP-NOW buffer size settings (runtime tuning)
+  uint16_t espnowTxQueueSize;          // TX retry queue size (1-16, default: 8)
+  uint16_t espnowRxBufferSize;         // RX deferred message buffer size (64-512, default: 256)
+  uint16_t espnowChunkSize;            // Chunk size for large messages (100-220, default: 200)
+  uint16_t espnowFileChunkSize;        // File transfer chunk size (100-224, default: 224)
 #if ENABLE_AUTOMATION
-  // Automation system
   bool automationsEnabled;  // Enable/disable automation scheduler (runs from main loop)
 #endif
   // I2C Hardware system
@@ -417,6 +502,14 @@ struct Settings {
   bool rtcTimeHasBeenSet;       // Has RTC time been set by NTP or manual? (false = trust NTP first at boot)
   bool presenceAutoStart;       // Auto-start STHS34PF80 presence/motion sensor after boot
   int presenceDevicePollMs;     // STHS34PF80 polling interval (default: 100ms)
+  // Sensor Logging auto-start settings
+  bool sensorLogAutoStart;      // Auto-start sensor logging after boot with last-used parameters
+  String sensorLogPath;         // Last-used log file path (default: /logs/sensors/sensors.txt)
+  int sensorLogIntervalMs;      // Last-used polling interval in ms (default: 5000)
+  int sensorLogMask;            // Last-used sensor bitmask (0=none)
+  int sensorLogFormat;          // Last-used format (0=text, 1=csv, 2=track)
+  // System Logging auto-start setting
+  bool systemLogAutoStart;      // Auto-start system logging after boot
   bool cameraAutoStart;         // Auto-start ESP32-S3 camera after boot
   bool microphoneAutoStart;     // Auto-start ESP32-S3 PDM microphone after boot
   // Microphone settings
@@ -520,6 +613,43 @@ bool writeSettingsJson();
 // Apply settings to runtime flags
 void applySettings();
 
+// ============================================================================
+// Centralized Setting Mutator — auto-persists on change
+// ============================================================================
+// Use setSetting(gSettings.field, newValue) instead of direct assignment
+// to ensure writeSettingsJson() is called automatically.
+// Only writes to flash when the value actually changes (no churn).
+//
+// Batch mode: call beginwrite before a group of setSetting() calls, then
+// savesettings after. This defers the flash write to a single call at the end.
+// From the web UI, save buttons use this pattern automatically.
+// From the serial CLI, each setSetting() writes immediately as before.
+extern volatile bool gDeferWrites;
+
+template<typename T>
+inline void setSetting(T& field, const T& value) {
+  if (field != value) {
+    field = value;
+    if (!gDeferWrites) writeSettingsJson();
+  }
+}
+
+// String overload (avoids unnecessary copy when equal)
+inline void setSetting(String& field, const String& value) {
+  if (field != value) {
+    field = value;
+    if (!gDeferWrites) writeSettingsJson();
+  }
+}
+
+// const char* convenience overload
+inline void setSetting(String& field, const char* value) {
+  if (field != value) {
+    field = value;
+    if (!gDeferWrites) writeSettingsJson();
+  }
+}
+
 // WiFi password encryption/decryption helpers
 String encryptWifiPassword(const String& password);
 String decryptWifiPassword(const String& encryptedPassword);
@@ -617,7 +747,7 @@ struct SettingsModule {
 };
 
 // Maximum number of settings modules that can be registered
-#define MAX_SETTINGS_MODULES 16
+#define MAX_SETTINGS_MODULES 32
 
 // Register a settings module (call during setup or static init)
 void registerSettingsModule(const SettingsModule* module);
@@ -640,14 +770,17 @@ size_t writeRegisteredSettings(JsonDocument& doc);
 // Ensures all compiled modules are available before applying defaults
 void registerAllSettingsModules();
 
-// Legacy function - now just calls registerAllSettingsModules()
-void registerCoreSettingsModules();
-
 // Debug: print a summary of all registered settings modules
 void printSettingsModuleSummary();
 
 // Generic setting command handler - parses value and updates setting
 // Returns result message
 const char* handleSettingCommand(const SettingEntry* entry, const String& cmd);
+
+// Persist current settings to JSON file
+bool writeSettingsJson();
+
+// Apply persisted settings to runtime flags/state
+void applySettings();
 
 #endif // SETTINGS_H
