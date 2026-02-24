@@ -1,6 +1,6 @@
 #include "System_BuildConfig.h"
 
-#if ENABLE_HTTP_SERVER
+#if ENABLE_WEB_BLUETOOTH
 
 #include <Arduino.h>
 
@@ -20,11 +20,7 @@ static void streamBluetoothContent(httpd_req_t* req) {
 }
 
 esp_err_t handleBluetoothPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/bluetooth";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   streamPageWithContent(req, "bluetooth", ctx.user, streamBluetoothContent);

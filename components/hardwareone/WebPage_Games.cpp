@@ -1,6 +1,6 @@
 #include "System_BuildConfig.h"
 
-#if ENABLE_HTTP_SERVER && ENABLE_GAMES
+#if ENABLE_WEB_GAMES
 
 #include <Arduino.h>
 
@@ -20,13 +20,8 @@ static void streamGamesContent(httpd_req_t* req) {
 }
 
 esp_err_t handleGamesPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/games";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
 
   streamPageWithContent(req, "games", ctx.user, streamGamesContent);
   return ESP_OK;

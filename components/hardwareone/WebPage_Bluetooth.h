@@ -4,7 +4,9 @@
 #include <Arduino.h>
 #include "WebServer_Utils.h"
 #include "System_BuildConfig.h"
+#if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
+#endif
 
 // Registration function - registers /bluetooth URI handler
 #if ENABLE_HTTP_SERVER
@@ -20,13 +22,13 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(
 <div style='text-align:center;padding:2rem'>
   <h2 style='color:var(--warning);margin-bottom:1rem'>Bluetooth Disabled</h2>
-  <p style='color:var(--muted);margin-bottom:2rem'>
+  <p style='color:var(--panel-fg);margin-bottom:2rem'>
     Bluetooth has been disabled during firmware compilation to save memory and resources.
   </p>
   
   <div style='background:var(--crumb-bg);padding:1.5rem;border-radius:10px;border:1px solid var(--border);max-width:500px;margin:0 auto;text-align:left'>
     <h3 style='color:var(--panel-fg);margin:0 0 1rem 0;font-size:1rem'>To Enable Bluetooth:</h3>
-    <p style='color:var(--muted);font-size:0.9rem;margin:0'>
+    <p style='color:var(--panel-fg);font-size:0.9rem;margin:0'>
       Recompile the firmware with <code style='background:rgba(0,0,0,0.1);padding:2px 6px;border-radius:3px'>ENABLE_BLUETOOTH=1</code> 
       in your build configuration.
     </p>
@@ -55,7 +57,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 .status-disabled { background: #dc3545; }
 @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
 .bt-meta { color: var(--muted); font-size: 0.85em; margin-top: 8px; }
-.bt-warning { background:#fff3cd; border:1px solid #ffeeba; color:#856404; border-radius:6px; padding:10px 12px; font-size:0.85em; margin-top:10px; }
+.bt-warning { background:var(--warning-bg); border:1px solid var(--warning-border); border-left:4px solid var(--warning-accent); color:var(--warning-fg); border-radius:6px; padding:10px 12px; font-size:0.85em; margin-top:10px; }
 </style>
 )CSS", HTTPD_RESP_USE_STRLEN);
 

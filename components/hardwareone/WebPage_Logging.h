@@ -2,6 +2,7 @@
 #define WEBPAGE_LOGGING_H
 
 #include "WebServer_Utils.h"  // For getFileBrowserScript
+#include "System_BuildConfig.h"
 
 // Streamed inner content for logging page
 inline void streamLoggingInner(httpd_req_t* req) {
@@ -19,7 +20,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
   <div style='display:flex;align-items:center;justify-content:space-between'>
     <div>
       <div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Sensor Data Logging</div>
-      <div style='color:var(--muted);font-size:0.9rem'>Configure sensor data collection, file rotation, and output formats.</div>
+      <div style='color:var(--panel-fg);font-size:0.9rem'>Configure sensor data collection, file rotation, and output formats.</div>
     </div>
     <button class='btn' id='btn-sensor-section-toggle' onclick="togglePane('content-sensors','btn-sensor-section-toggle')">Expand</button>
   </div>
@@ -65,6 +66,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
   <div style='display:flex;gap:1rem;flex-wrap:wrap'>
     <button id='btn-start' class='btn' onclick='startLogging()' style='display:none'>Start Logging</button>
     <button id='btn-stop' class='btn' onclick='stopLogging()' style='display:none'>Stop Logging</button>
+    <button id='btn-autostart' class='btn' onclick='toggleAutoStart()'>Auto-Start: <span id='autostart-status'>Loading...</span></button>
     <button class='btn' onclick='refreshStatus()'>Refresh Status</button>
   </div>
 </div>
@@ -74,7 +76,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
   <div style='display:flex;align-items:center;justify-content:space-between'>
     <div>
       <div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Configuration</div>
-      <div style='color:var(--muted);font-size:0.9rem'>Configure logging parameters, file management, and sensor selection.</div>
+      <div style='color:var(--panel-fg);font-size:0.9rem'>Configure logging parameters, file management, and sensor selection.</div>
     </div>
     <button class='btn' id='btn-config-toggle' onclick="togglePane('config-pane','btn-config-toggle')">Expand</button>
   </div>
@@ -90,29 +92,30 @@ inline void streamLoggingInner(httpd_req_t* req) {
         <label style='display:block;margin-bottom:1rem'>
           <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>File Path:</div>
           <input id='config-path' type='text' placeholder='Generating timestamp...' class='form-input' style='width:100%;font-family:monospace'>
-          <small style='color:#6c757d'>Auto-generated with timestamp (NTP or uptime)</small>
+          <small style='color:var(--panel-fg)'>Auto-generated with timestamp (NTP or uptime)</small>
         </label>
         <label style='display:block;margin-bottom:1rem'>
           <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>Interval (ms):</div>
           <input id='config-interval' type='number' value='5000' min='100' max='3600000' class='form-input' style='width:100%'>
-          <small style='color:#6c757d'>Min: 100ms, Max: 1 hour (3600000ms)</small>
+          <small style='color:var(--panel-fg)'>Min: 100ms, Max: 1 hour (3600000ms)</small>
         </label>
         <label style='display:block;margin-bottom:1rem'>
           <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>Format:</div>
           <select id='config-format' class='form-input' style='width:100%'>
             <option value='text'>Text (Human-readable)</option>
             <option value='csv'>CSV (Structured data)</option>
+            <option value='track'>Track (GPS-only compact with signal loss dedup)</option>
           </select>
         </label>
         <label style='display:block;margin-bottom:1rem'>
           <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>Max File Size (bytes):</div>
           <input id='config-maxsize' type='number' value='256000' min='10240' max='10485760' class='form-input' style='width:100%'>
-          <small style='color:#6c757d'>Min: 10KB, Max: 10MB</small>
+          <small style='color:var(--panel-fg)'>Min: 10KB, Max: 10MB</small>
         </label>
         <label style='display:block'>
           <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>Rotations (old logs to keep):</div>
           <input id='config-rotations' type='number' value='3' min='0' max='9' class='form-input' style='width:100%'>
-          <small style='color:#6c757d'>0 = delete old logs, 1-9 = keep N old files</small>
+          <small style='color:var(--panel-fg)'>0 = delete old logs, 1-9 = keep N old files</small>
         </label>
       </div>
     </div>
@@ -124,32 +127,64 @@ inline void streamLoggingInner(httpd_req_t* req) {
         <button class='btn' id='btn-sensors-toggle' onclick="toggleConfigPane('sensors-pane','btn-sensors-toggle')" style='padding:0.25rem 0.75rem;font-size:0.85rem'>Expand</button>
       </div>
       <div id='sensors-pane' style='display:none;margin-top:0.75rem'>
-        <div class='form-input' style='background:var(--crumb-bg)'>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_THERMAL_SENSOR
+  httpd_resp_send_chunk(req, R"HTML(
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
             <input type='checkbox' id='sensor-thermal' value='thermal' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Thermal (temperature array)</span>
           </label>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_TOF_SENSOR
+  httpd_resp_send_chunk(req, R"HTML(
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
             <input type='checkbox' id='sensor-tof' value='tof' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>ToF (distance sensors)</span>
           </label>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_IMU_SENSOR
+  httpd_resp_send_chunk(req, R"HTML(
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
             <input type='checkbox' id='sensor-imu' value='imu' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>IMU (orientation, accel, gyro, temp)</span>
           </label>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_GAMEPAD_SENSOR
+  httpd_resp_send_chunk(req, R"HTML(
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
             <input type='checkbox' id='sensor-gamepad' value='gamepad' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Gamepad (buttons, joystick)</span>
           </label>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_APDS_SENSOR
+  httpd_resp_send_chunk(req, R"HTML(
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
             <input type='checkbox' id='sensor-apds' value='apds' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>APDS (color, proximity, gesture)</span>
           </label>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_GPS_SENSOR
+  httpd_resp_send_chunk(req, R"HTML(
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
             <input type='checkbox' id='sensor-gps' value='gps' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>GPS (position, speed, altitude)</span>
           </label>
-        </div>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_PRESENCE_SENSOR
+  httpd_resp_send_chunk(req, R"HTML(
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='sensor-presence' value='presence' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Presence (IR presence/motion)</span>
+          </label>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, R"HTML(
         <div style='margin-top:0.5rem;display:flex;gap:0.5rem'>
           <button class='btn' onclick='selectAllSensors()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select All</button>
           <button class='btn' onclick='selectNoSensors()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select None</button>
@@ -164,19 +199,6 @@ inline void streamLoggingInner(httpd_req_t* req) {
   </div>
 </div>
 
-<!-- Log Files Section (Sensor) -->
-<div class='settings-panel' style='background:var(--panel-bg)'>
-  <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div>
-      <div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Sensor Log Files</div>
-      <div style='color:var(--muted);font-size:0.9rem'>View and download sensor log files from /logs/</div>
-    </div>
-    <button class='btn' id='btn-files-toggle' onclick="togglePane('files-pane','btn-files-toggle')">Expand</button>
-  </div>
-  <div id='files-pane' style='display:none;margin-top:0.75rem'>
-    <div id='log-files' style='color:var(--panel-fg)'>Loading...</div>
-  </div>
-</div>
 
   </div>
 </div>
@@ -186,7 +208,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
   <div style='display:flex;align-items:center;justify-content:space-between'>
     <div>
       <div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>System Logging</div>
-      <div style='color:var(--muted);font-size:0.9rem'>Debug logging with category filtering and configurable output destinations.</div>
+      <div style='color:var(--panel-fg);font-size:0.9rem'>Debug logging with category filtering and configurable output destinations.</div>
     </div>
     <button class='btn' id='btn-system-section-toggle' onclick="togglePane('content-system','btn-system-section-toggle')">Expand</button>
   </div>
@@ -224,6 +246,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
   <div style='display:flex;gap:1rem;flex-wrap:wrap'>
     <button id='sys-btn-start' class='btn' onclick='startSystemLogging()' style='display:none'>Start System Logging</button>
     <button id='sys-btn-stop' class='btn' onclick='stopSystemLogging()' style='display:none'>Stop System Logging</button>
+    <button id='sys-btn-autostart' class='btn' onclick='toggleSystemAutoStart()'>Auto-Start: <span id='sys-autostart-status'>Loading...</span></button>
     <button class='btn' onclick='refreshSystemStatus()'>Refresh Status</button>
   </div>
 </div>
@@ -233,7 +256,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
   <div style='display:flex;align-items:center;justify-content:space-between'>
     <div>
       <div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Configuration</div>
-      <div style='color:var(--muted);font-size:0.9rem'>Configure log file path and debug message categories.</div>
+      <div style='color:var(--panel-fg);font-size:0.9rem'>Configure log file path and debug message categories.</div>
     </div>
     <button class='btn' id='btn-sys-config-toggle' onclick="togglePane('sys-config-pane','btn-sys-config-toggle')">Expand</button>
   </div>
@@ -245,7 +268,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
       <label style='display:block;margin-bottom:1rem'>
         <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>Log File Path:</div>
         <input id='sys-config-path' type='text' placeholder='Generating timestamp...' class='form-input' style='width:100%;font-family:monospace'>
-        <small style='color:#6c757d'>Auto-generated with timestamp (NTP or uptime)</small>
+        <small style='color:var(--panel-fg)'>Auto-generated with timestamp (NTP or uptime)</small>
       </label>
       <label style='display:flex;align-items:center;gap:0.5rem;cursor:pointer'>
         <input type='checkbox' id='sys-config-tags' checked style='margin:0;padding:0;width:16px;height:16px'>
@@ -255,12 +278,8 @@ inline void streamLoggingInner(httpd_req_t* req) {
     
     <!-- Debug Flags Section -->
     <div class='settings-panel'>
-      <div style='display:flex;align-items:center;justify-content:space-between'>
-        <div style='font-weight:bold;color:var(--panel-fg)'>Debug Message Categories</div>
-        <button class='btn' id='btn-sys-flags-toggle' onclick="toggleConfigPane('sys-flags-pane','btn-sys-flags-toggle')" style='padding:0.25rem 0.75rem;font-size:0.85rem'>Expand</button>
-      </div>
-      <div id='sys-flags-pane' style='display:none;margin-top:0.75rem'>
-        <div style='padding:0.5rem;background:#f8f9fa;border:1px solid #ccc;border-radius:4px;max-height:300px;overflow-y:auto'>
+      <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.75rem'>Debug Message Categories</div>
+      <div style='padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;max-height:300px;overflow-y:auto'>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
             <input type='checkbox' id='flag-auth' value='0x0001' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Authentication</span>
@@ -277,14 +296,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
             <input type='checkbox' id='flag-cli' value='0x0008' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>CLI Processing</span>
           </label>
-          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-sensors-frame' value='0x0010' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
-            <span style='font-size:0.9em;color:var(--panel-fg)'>Sensor Frame Processing</span>
-          </label>
-          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-sensors-data' value='0x0020' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
-            <span style='font-size:0.9em;color:var(--panel-fg)'>Sensor Data</span>
-          </label>
+
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
             <input type='checkbox' id='flag-sensors' value='0x0040' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>General Sensor Operations</span>
@@ -294,8 +306,8 @@ inline void streamLoggingInner(httpd_req_t* req) {
             <span style='font-size:0.9em;color:var(--panel-fg)'>WiFi Operations</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-storage' value='0x0100' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
-            <span style='font-size:0.9em;color:var(--panel-fg)'>Storage Operations</span>
+            <input type='checkbox' id='flag-storage' value='0x8000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Storage / Security</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
             <input type='checkbox' id='flag-performance' value='0x0400' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
@@ -338,14 +350,127 @@ inline void streamLoggingInner(httpd_req_t* req) {
             <span style='font-size:0.9em;color:var(--panel-fg)'>Memory Operations</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-security' value='0x8000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
-            <span style='font-size:0.9em;color:var(--panel-fg)'>Security</span>
+            <input type='checkbox' id='flag-i2c' value='0x0100' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>I2C Bus</span>
           </label>
-        </div>
-        <div style='margin-top:0.5rem;display:flex;gap:0.5rem'>
-          <button class='btn' onclick='selectAllFlags()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select All</button>
-          <button class='btn' onclick='selectNoFlags()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select None</button>
-        </div>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-cmdflow' value='0x1000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Command Flow</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-espnow-router' value='0x80000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Router</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-espnow-mesh' value='0x100000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Mesh</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-espnow-topo' value='0x200000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Topology</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-espnow-stream' value='0x400000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Stream</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-command-system' value='0x800000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Command System</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-settings-system' value='0x1000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Settings System</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-auto-exec' value='0x2000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Auto Execute</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-auto-condition' value='0x4000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Auto Condition</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-auto-timing' value='0x8000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Auto Timing</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-auto-scheduler' value='0x40000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Auto Scheduler</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-espnow-enc' value='0x80000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Encryption</span>
+          </label>
+          <div style='font-size:0.75rem;font-weight:600;color:var(--panel-fg);text-transform:uppercase;padding:0.3rem 0 0.1rem;border-bottom:1px solid var(--border);margin-top:0.5rem'>I2C Sensors</div>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-gps' value='0x100000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>GPS (PA1010D)</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-rtc' value='0x200000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>RTC (DS3231)</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-imu' value='0x400000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>IMU (BNO055)</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-thermal' value='0x800000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Thermal (MLX90640)</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-tof' value='0x1000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>ToF (VL53L4CX)</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-gamepad' value='0x2000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Gamepad (Seesaw)</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-apds' value='0x4000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>APDS (APDS9960)</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-presence' value='0x8000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Presence (STHS34PF80)</span>
+          </label>
+          <div style='font-size:0.75rem;font-weight:600;color:var(--panel-fg);text-transform:uppercase;padding:0.3rem 0 0.1rem;border-bottom:1px solid var(--border);margin-top:0.5rem'>Sensor Detail</div>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-thermal-frame' value='0x10000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Thermal Frame</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-thermal-data' value='0x20000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Thermal Data</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-tof-frame' value='0x40000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>ToF Frame</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-gamepad-frame' value='0x80000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Gamepad Frame</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-gamepad-data' value='0x100000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Gamepad Data</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-imu-frame' value='0x200000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>IMU Frame</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-imu-data' value='0x400000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>IMU Data</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-apds-frame' value='0x800000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>APDS Frame</span>
+          </label>
+      </div>
+      <div style='margin-top:0.5rem;display:flex;gap:0.5rem'>
+        <button class='btn' onclick='selectAllFlags()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select All</button>
+        <button class='btn' onclick='selectNoFlags()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select None</button>
       </div>
     </div>
     
@@ -356,29 +481,19 @@ inline void streamLoggingInner(httpd_req_t* req) {
   </div>
 </div>
 
-<!-- System Log Files Section -->
-<div class='settings-panel' style='background:var(--panel-bg)'>
-  <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div>
-      <div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>System Log Files</div>
-      <div style='color:var(--muted);font-size:0.9rem'>View and download system log files from /logs/</div>
-    </div>
-    <button class='btn' id='btn-sys-files-toggle' onclick="togglePane('sys-files-pane','btn-sys-files-toggle')">Expand</button>
-  </div>
-  <div id='sys-files-pane' style='display:none;margin-top:0.75rem'>
-    <div id='sys-log-files' style='color:var(--panel-fg)'>Loading...</div>
-  </div>
-</div>
 
   </div>
 </div>
 
-<!-- Log Viewer & Parser Section (Third Top-Level Segment) -->
+)HTML", HTTPD_RESP_USE_STRLEN);
+
+  httpd_resp_send_chunk(req, R"HTML(
+<!-- Log Viewer & File Browser Section (Third Top-Level Segment) -->
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
     <div>
-      <div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Log Viewer & Parser</div>
-      <div style='color:var(--muted);font-size:0.9rem'>Load and filter log files with category-based filtering</div>
+      <div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Log Viewer & File Browser</div>
+      <div style='color:var(--panel-fg);font-size:0.9rem'>Browse, view, filter, and download log files</div>
     </div>
     <button class='btn' id='btn-viewer-section-toggle' onclick="togglePane('content-viewer','btn-viewer-section-toggle')">Expand</button>
   </div>
@@ -387,16 +502,19 @@ inline void streamLoggingInner(httpd_req_t* req) {
 <div class='settings-panel' style='background:var(--panel-bg)'>
   <div id='viewer-pane' style='margin-top:0.75rem'>
     
-    <!-- File Selection -->
+    <!-- File Selection & Actions -->
     <div style='margin-bottom:1rem'>
-      <label style='display:block;margin-bottom:0.5rem;color:var(--panel-fg);font-weight:500'>Select Log File:</label>
+      <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem'>
+        <label style='color:var(--panel-fg);font-weight:500'>Select Log File:</label>
+        <button class='btn' id='btn-switch-logs' style='display:none;padding:0.25rem 0.75rem;font-size:0.85rem' onclick='switchLogSource()'>View System Logs</button>
+      </div>
       <div id='log-viewer-file-explorer' style='margin-top:0.5rem'></div>
     </div>
     
     <!-- Filter Controls -->
     <div id='viewer-filters' style='display:none;background:var(--panel-bg);border-radius:8px;padding:1rem;margin:1rem 0;border:1px solid var(--border)'>
       <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.75rem'>Filters</div>
-      <div style='display:grid;grid-template-columns:1fr 1fr;gap:1rem'>
+      <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem'>
         <div>
           <label style='display:block;margin-bottom:0.5rem;color:var(--panel-fg)'>Category:</label>
           <select id='viewer-category-filter' onchange='applyLogFilters()' class='form-input' style='width:100%'>
@@ -404,17 +522,27 @@ inline void streamLoggingInner(httpd_req_t* req) {
           </select>
         </div>
         <div>
+          <label style='display:block;margin-bottom:0.5rem;color:var(--panel-fg)'>Level:</label>
+          <select id='viewer-level-filter' onchange='applyLogFilters()' class='form-input' style='width:100%'>
+            <option value=''>All Levels</option>
+            <option value='ERROR'>ERROR</option>
+            <option value='WARN'>WARN</option>
+            <option value='INFO'>INFO</option>
+            <option value='DEBUG'>DEBUG</option>
+          </select>
+        </div>
+        <div>
           <label style='display:block;margin-bottom:0.5rem;color:var(--panel-fg)'>Search Text:</label>
           <input id='viewer-search' type='text' oninput='applyLogFilters()' placeholder='Search log content...' class='form-input' style='width:100%'>
         </div>
       </div>
-      <div style='margin-top:0.75rem;color:var(--muted);font-size:0.9rem'>
+      <div style='margin-top:0.75rem;color:var(--panel-fg);font-size:0.9rem'>
         <span id='viewer-stats'>No file loaded</span>
       </div>
     </div>
     
     <!-- Log Display -->
-    <div id='viewer-display' style='display:none;background:var(--code-bg, #1e1e1e);color:var(--code-fg, #d4d4d4);border-radius:8px;padding:1rem;margin:1rem 0;max-height:600px;overflow-y:auto;font-family:monospace;font-size:0.85rem;line-height:1.5;border:1px solid var(--border)'>
+    <div id='viewer-display' style='display:none;background:#12121c;color:#d4d4d4;border-radius:8px;padding:1rem;margin:1rem 0;max-height:600px;overflow-y:auto;font-family:monospace;font-size:0.85rem;line-height:1.5;border:1px solid rgba(255,255,255,0.12)'>
       <div id='viewer-content'>No log loaded</div>
     </div>
     
@@ -438,13 +566,24 @@ window.onload = function() {
     console.log('[LOGGING] Section 2a: Window loaded, starting initialization...');
     // Sensor logging initialization
     generateDefaultFilename();
-    refreshStatus(); 
-    refreshLogFiles();
+    refreshStatus();
     // System logging initialization
     generateSystemFilename();
     refreshSystemStatus();
-    refreshSystemLogFiles();
     populateLogViewerFileList();
+    
+    // Show admin log toggle if user is admin (check via settings API which includes user.isAdmin)
+    fetch('/api/settings')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data && data.user && data.user.isAdmin === true) {
+          document.getElementById('btn-switch-logs').style.display = '';
+        }
+      })
+      .catch(function(e) {
+        console.error('[LOGGING] Failed to check user role:', e);
+      });
+    
     console.log('[LOGGING] Section 2b: Initialization complete');
   } catch(e) {
     console.error('[LOGGING] Section 2: Window onload error:', e);
@@ -466,7 +605,7 @@ function generateDefaultFilename() {
   .then(r => r.text())
   .then(text => {
     console.log('[LOGGING] Section 3b: Time response:', text);
-    let filename = '/logs/sensors-';
+    let filename = '/logs/sensors/sensors-';
     
     // Check if we have NTP time (ISO format in response)
     const isoMatch = text.match(/Time:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
@@ -489,7 +628,7 @@ function generateDefaultFilename() {
     }
     
     const format = document.getElementById('config-format').value;
-    filename += (format === 'csv' ? '.csv' : '.log');
+    filename += (format === 'csv' ? '.csv' : format === 'track' ? '.txt' : '.log');
     console.log('[LOGGING] Section 3e: Generated filename:', filename);
     document.getElementById('config-path').value = filename;
   })
@@ -503,7 +642,7 @@ function generateDefaultFilename() {
       String(now.getMinutes()).padStart(2, '0') + '-' +
       String(now.getSeconds()).padStart(2, '0');
     const format = document.getElementById('config-format').value;
-    const filename = '/logs/sensors-' + timestamp + (format === 'csv' ? '.csv' : '.log');
+    const filename = '/logs/sensors/sensors-' + timestamp + (format === 'csv' ? '.csv' : format === 'track' ? '.txt' : '.log');
     document.getElementById('config-path').value = filename;
   });
 }
@@ -581,12 +720,12 @@ function refreshStatus() {
     } else {
       statusDot.style.background = '#6c757d';
       statusText.textContent = 'INACTIVE';
-      statusText.style.color = '#6c757d';
+      statusText.style.color = 'var(--panel-fg)';
       btnStart.style.display = 'inline-block';
       btnStop.style.display = 'none';
       
       // Parse current settings even when inactive
-      const formatMatch = text.match(/Current format:\s*(\w+)/);
+      const formatMatch = text.match(/Format:\s*(\w+)/);
       const maxsizeMatch = text.match(/Max size:\s*(\d+)\s*bytes/);
       const rotationsMatch = text.match(/Rotations:\s*(\d+)/);
       const sensorsMatch = text.match(/Sensors:\s*(.+)/);
@@ -597,14 +736,12 @@ function refreshStatus() {
       if (maxsizeMatch) document.getElementById('config-maxsize').value = maxsizeMatch[1];
       if (rotationsMatch) document.getElementById('config-rotations').value = rotationsMatch[1];
       
-      // Parse and set sensor checkboxes
+      // Parse and set sensor checkboxes dynamically
       if (sensorsMatch) {
-        const sensors = sensorsMatch[1].toLowerCase();
-        document.getElementById('sensor-thermal').checked = sensors.includes('thermal');
-        document.getElementById('sensor-tof').checked = sensors.includes('tof');
-        document.getElementById('sensor-imu').checked = sensors.includes('imu');
-        document.getElementById('sensor-gamepad').checked = sensors.includes('gamepad');
-        document.getElementById('sensor-apds').checked = sensors.includes('apds');
+        const sensorStr = sensorsMatch[1].toLowerCase();
+        document.querySelectorAll('#sensors-pane input[type=checkbox]').forEach(function(cb) {
+          cb.checked = sensorStr.includes(cb.value);
+        });
       }
     }
   })
@@ -613,56 +750,49 @@ function refreshStatus() {
     document.getElementById('status-text').textContent = 'Error: ' + e.message;
     document.getElementById('status-text').style.color = '#dc3545';
   });
+  
+  // Also update auto-start status
+  updateAutoStartStatus();
 }
 console.log('[LOGGING] Section 4h: refreshStatus defined');
+
+function updateAutoStartStatus() {
+  fetch('/api/cli', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'cmd=' + encodeURIComponent('sensorlog status')
+  })
+  .then(r => r.text())
+  .then(text => {
+    const autostartMatch = text.match(/Auto-start:\s*(ON|OFF)/i);
+    const statusSpan = document.getElementById('autostart-status');
+    if (autostartMatch) {
+      const isOn = autostartMatch[1].toUpperCase() === 'ON';
+      statusSpan.textContent = isOn ? 'ON' : 'OFF';
+      statusSpan.style.color = isOn ? '#28a745' : 'var(--panel-fg)';
+    } else {
+      statusSpan.textContent = '?';
+    }
+  })
+  .catch(e => console.error('[LOGGING] Auto-start status error:', e));
+}
+
+function toggleAutoStart() {
+  fetch('/api/cli', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'cmd=' + encodeURIComponent('sensorlog autostart')
+  })
+  .then(r => r.text())
+  .then(text => {
+    alert(text);
+    updateAutoStartStatus();
+  })
+  .catch(e => alert('Error toggling auto-start: ' + e.message));
+}
 </script>
 
 <script>
-console.log('[LOGGING] Section 5: Log files refresh function');
-function refreshLogFiles() {
-  console.log('[LOGGING] Section 5a: refreshLogFiles called');
-  fetch('/api/files/list?path=/logs')
-  .then(r => {
-    console.log('[LOGGING] Section 5b: Files list response:', r.status);
-    return r.json();
-  })
-  .then(d => {
-    console.log('[LOGGING] Section 5c: Files list data:', d);
-    if (d.success && d.files) {
-      const logFiles = d.files.filter(f => f.type === 'file' && (f.name.startsWith('sensors') || f.name.includes('.log') || f.name.endsWith('.csv')));
-      console.log('[LOGGING] Section 5d: Found', logFiles.length, 'log files');
-      
-      if (logFiles.length === 0) {
-        document.getElementById('log-files').innerHTML = '<p style="color:#6c757d">No log files found in /logs/</p>';
-        return;
-      }
-      
-      let html = '<table style="width:100%;border-collapse:collapse">';
-      html += '<tr style="background:#e9ecef"><th style="padding:0.5rem;text-align:left">File</th><th style="padding:0.5rem;text-align:left">Size</th><th style="padding:0.5rem;text-align:left">Actions</th></tr>';
-      
-      logFiles.forEach(f => {
-        const fullPath = '/logs/' + f.name;
-        html += '<tr style="border-bottom:1px solid #ddd">';
-        html += '<td style="padding:0.5rem;font-family:monospace;font-size:0.9rem">' + f.name + '</td>';
-        html += '<td style="padding:0.5rem">' + (f.size || '0 bytes') + '</td>';
-        html += '<td style="padding:0.5rem">';
-        html += '<button onclick="downloadLog(\'' + fullPath + '\')" class="btn" style="margin-right:0.5rem">Download</button>';
-        html += '<button onclick="viewLog(\'' + fullPath + '\')" class="btn">View</button>';
-        html += '</td></tr>';
-      });
-      
-      html += '</table>';
-      document.getElementById('log-files').innerHTML = html;
-    } else {
-      document.getElementById('log-files').innerHTML = '<p style="color:#6c757d">Unable to load log files</p>';
-    }
-  })
-  .catch(e => {
-    console.error('[LOGGING] Section 5e: Files list error:', e);
-    document.getElementById('log-files').innerHTML = '<p style="color:#dc3545">Error: ' + e.message + '</p>';
-  });
-}
-console.log('[LOGGING] Section 5f: refreshLogFiles defined');
 </script>
 
 <script>
@@ -700,7 +830,6 @@ function startLogging() {
     if (text.includes('SUCCESS') || text.includes('started')) {
       alert('Logging started successfully!');
       refreshStatus();
-      refreshLogFiles();
     } else {
       alert('Error: ' + text);
     }
@@ -754,14 +883,11 @@ function applyConfig() {
   const rotations = document.getElementById('config-rotations').value;
   console.log('[LOGGING] Section 8b: Config values - Format:', format, 'MaxSize:', maxsize, 'Rotations:', rotations);
   
-  // Build sensor list
+  // Build sensor list dynamically from compiled-in checkboxes
   const sensors = [];
-  if (document.getElementById('sensor-thermal').checked) sensors.push('thermal');
-  if (document.getElementById('sensor-tof').checked) sensors.push('tof');
-  if (document.getElementById('sensor-imu').checked) sensors.push('imu');
-  if (document.getElementById('sensor-gamepad').checked) sensors.push('gamepad');
-  if (document.getElementById('sensor-apds').checked) sensors.push('apds');
-  
+  document.querySelectorAll('#sensors-pane input[type=checkbox]').forEach(function(cb) {
+    if (cb.checked) sensors.push(cb.value);
+  });
   const sensorList = sensors.length > 0 ? sensors.join(',') : 'none';
   console.log('[LOGGING] Section 8c: Selected sensors:', sensorList);
   
@@ -817,38 +943,19 @@ console.log('[LOGGING] Section 8i: applyConfig defined');
 </script>
 
 <script>
-console.log('[LOGGING] Section 9: File operations');
-function downloadLog(path) {
-  console.log('[LOGGING] Section 9a: downloadLog called for:', path);
-  window.open('/api/files/view?name=' + encodeURIComponent(path), '_blank');
-}
-
-function viewLog(path) {
-  console.log('[LOGGING] Section 9b: viewLog called for:', path);
-  window.open('/api/files/view?name=' + encodeURIComponent(path), '_blank');
-}
-console.log('[LOGGING] Section 9c: File operations defined');
 </script>
 
 <script>
 console.log('[LOGGING] Section 10: Sensor selection helpers');
 function selectAllSensors() {
   console.log('[LOGGING] Section 10a: selectAllSensors called');
-  document.getElementById('sensor-thermal').checked = true;
-  document.getElementById('sensor-tof').checked = true;
-  document.getElementById('sensor-imu').checked = true;
-  document.getElementById('sensor-gamepad').checked = true;
-  document.getElementById('sensor-apds').checked = true;
+  document.querySelectorAll('#sensors-pane input[type=checkbox]').forEach(function(cb) { cb.checked = true; });
   console.log('[LOGGING] Section 10b: All sensors selected');
 }
 
 function selectNoSensors() {
   console.log('[LOGGING] Section 10c: selectNoSensors called');
-  document.getElementById('sensor-thermal').checked = false;
-  document.getElementById('sensor-tof').checked = false;
-  document.getElementById('sensor-imu').checked = false;
-  document.getElementById('sensor-gamepad').checked = false;
-  document.getElementById('sensor-apds').checked = false;
+  document.querySelectorAll('#sensors-pane input[type=checkbox]').forEach(function(cb) { cb.checked = false; });
   console.log('[LOGGING] Section 10d: All sensors deselected');
 }
 console.log('[LOGGING] Section 10e: Sensor selection helpers defined');
@@ -990,7 +1097,7 @@ function refreshSystemStatus() {
     } else {
       statusDot.style.background = '#6c757d';
       statusText.textContent = 'INACTIVE';
-      statusText.style.color = '#6c757d';
+      statusText.style.color = 'var(--panel-fg)';
       btnStart.style.display = 'inline-block';
       btnStop.style.display = 'none';
       
@@ -1004,6 +1111,9 @@ function refreshSystemStatus() {
     document.getElementById('sys-status-text').textContent = 'Error: ' + e.message;
     document.getElementById('sys-status-text').style.color = '#dc3545';
   });
+  
+  // Also update auto-start status
+  updateSystemAutoStartStatus();
 }
 
 function startSystemLogging() {
@@ -1020,10 +1130,10 @@ function startSystemLogging() {
     flags.push(cb.value);
   });
   
-  // Calculate combined flag value
-  let flagValue = 0;
+  // Calculate combined flag value (BigInt required for flags > bit 31)
+  let flagValue = BigInt(0);
   flags.forEach(f => {
-    flagValue |= parseInt(f);
+    flagValue |= BigInt(f);
   });
   
   // Get category tags setting
@@ -1031,7 +1141,7 @@ function startSystemLogging() {
   
   // Build command with optional flags and tags
   let cmd = 'log start ' + filepath;
-  if (flagValue > 0) {
+  if (flagValue > BigInt(0)) {
     cmd += ' flags=0x' + flagValue.toString(16);
   }
   cmd += ' tags=' + categoryTags;
@@ -1049,7 +1159,6 @@ function startSystemLogging() {
     if (text.includes('started')) {
       alert('System logging started successfully!');
       refreshSystemStatus();
-      refreshSystemLogFiles();
     } else {
       alert('Error: ' + text);
     }
@@ -1096,10 +1205,10 @@ function applySystemConfig() {
     return;
   }
   
-  // Calculate combined flag value
-  let flagValue = 0;
+  // Calculate combined flag value (BigInt required for flags > bit 31)
+  let flagValue = BigInt(0);
   flags.forEach(f => {
-    flagValue |= parseInt(f);
+    flagValue |= BigInt(f);
   });
   
   console.log('[LOGGING] Setting debug flags to:', '0x' + flagValue.toString(16));
@@ -1117,42 +1226,39 @@ function selectNoFlags() {
   document.querySelectorAll('#sys-flags-pane input[type="checkbox"]').forEach(cb => cb.checked = false);
 }
 
-function refreshSystemLogFiles() {
-  console.log('[LOGGING] refreshSystemLogFiles called');
-  fetch('/api/files/list?path=/logs')
-  .then(r => r.json())
-  .then(data => {
-    const container = document.getElementById('sys-log-files');
-    if (!data.files || data.files.length === 0) {
-      container.innerHTML = '<div style="color:#6c757d">No system log files found</div>';
-      return;
-    }
-    
-    // Filter for system log files
-    const systemLogs = data.files.filter(f => f.name.startsWith('system-') && f.name.endsWith('.log'));
-    
-    if (systemLogs.length === 0) {
-      container.innerHTML = '<div style="color:#6c757d">No system log files found</div>';
-      return;
-    }
-    
-    let html = '<div style="display:grid;gap:0.5rem">';
-    systemLogs.forEach(file => {
-      const sizeKB = (file.size !== undefined && !isNaN(file.size)) ? (file.size / 1024).toFixed(2) : '?';
-      html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:0.5rem;background:#fff;border:1px solid #dee2e6;border-radius:4px">';
-      html += '<div style="font-family:monospace;color:var(--panel-fg)">' + file.name + ' (' + sizeKB + ' KB)</div>';
-      html += '<div style="display:flex;gap:0.5rem">';
-      html += '<a href="/api/files/view?name=' + encodeURIComponent('/logs/' + file.name) + '" class="btn" style="padding:0.25rem 0.75rem;font-size:0.85rem;text-decoration:none" target="_blank">View</a>';
-      html += '<a href="/api/files/view?name=' + encodeURIComponent('/logs/' + file.name) + '&mode=raw" class="btn" style="padding:0.25rem 0.75rem;font-size:0.85rem;text-decoration:none" download>Download</a>';
-      html += '</div></div>';
-    });
-    html += '</div>';
-    container.innerHTML = html;
+function updateSystemAutoStartStatus() {
+  fetch('/api/cli', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'cmd=' + encodeURIComponent('log status')
   })
-  .catch(e => {
-    console.error('[LOGGING] System log files refresh error:', e);
-    document.getElementById('sys-log-files').innerHTML = '<div style="color:#dc3545">Error loading files: ' + e.message + '</div>';
-  });
+  .then(r => r.text())
+  .then(text => {
+    const autostartMatch = text.match(/Auto-start:\s*(ON|OFF)/i);
+    const statusSpan = document.getElementById('sys-autostart-status');
+    if (autostartMatch) {
+      const isOn = autostartMatch[1].toUpperCase() === 'ON';
+      statusSpan.textContent = isOn ? 'ON' : 'OFF';
+      statusSpan.style.color = isOn ? '#28a745' : 'var(--panel-fg)';
+    } else {
+      statusSpan.textContent = '?';
+    }
+  })
+  .catch(e => console.error('[LOGGING] System auto-start status error:', e));
+}
+
+function toggleSystemAutoStart() {
+  fetch('/api/cli', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'cmd=' + encodeURIComponent('log autostart')
+  })
+  .then(r => r.text())
+  .then(text => {
+    alert(text);
+    updateSystemAutoStartStatus();
+  })
+  .catch(e => alert('Error toggling system log auto-start: ' + e.message));
 }
 
 console.log('[LOGGING] Section 13a: System logging functions defined');
@@ -1191,7 +1297,7 @@ function loadLogFile(filepath) {
 }
 
 function parseLogFile(text) {
-  const lines = text.split('\n').filter(l => l.trim().length > 0);
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
   gLogLines = [];
   const categories = new Set();
   
@@ -1199,27 +1305,41 @@ function parseLogFile(text) {
     let logLine = null;
     
     // Format 1: Debug logs - [timestamp] [CATEGORY] message
-    let match = line.match(/^\[(\d+)\]\s*\[([A-Z_]+)\]\s*(.*)$/);
+    // Allow letters, digits, underscores, hyphens so [ESP-NOW], [CMD_SYS] etc. all match
+    let match = line.match(/^\[(\d+)\]\s*\[([A-Z][A-Z0-9_-]*)\]\s*(.*)$/);
     if (match) {
       const [, timestamp, category, message] = match;
+      const cat = category.replace(/-/g, '_');  // normalise ESP-NOW → ESP_NOW for color lookup
+      // Extract level from leading [LEVEL] prefix in message, e.g. "[ERROR][WEB] ..."
+      const levelMatch = message.match(/^\[(ERROR|WARN|INFO|DEBUG)\]\[([A-Z][A-Z0-9_-]*)\]\s*(.*)$/);
+      let level = 'DEBUG';
+      let finalCat = cat;
+      let finalMsg = message.trim();
+      if (levelMatch) {
+        level = levelMatch[1];
+        finalCat = levelMatch[2].replace(/-/g, '_');
+        finalMsg = levelMatch[3].trim();
+      }
       logLine = {
         timestamp: parseInt(timestamp),
-        category: category,
-        message: message.trim(),
+        category: finalCat,
+        level: level,
+        message: finalMsg,
         raw: line
       };
-      categories.add(category);
+      categories.add(logLine.category);
     }
     
     // Format 2: Command audit logs - [timestamp] user@source command -> result
     if (!logLine) {
-      match = line.match(/^\[(\d+)\]\s*(\w+)@(\w+)\s+(.+?)\s*->\s*(.*)$/);
+      match = line.match(/^\[(\d+)\]\s+(\w+)@(\w+)\s+(.+?)\s*->\s*(.*)$/);
       if (match) {
         const [, timestamp, user, source, command, result] = match;
         const category = source.toUpperCase();
         logLine = {
           timestamp: parseInt(timestamp),
           category: category,
+          level: 'INFO',
           user: user,
           command: command,
           result: result,
@@ -1227,21 +1347,59 @@ function parseLogFile(text) {
           raw: line
         };
         categories.add(category);
+        console.log('[LOG_PARSE] Matched command audit:', category, user, command);
+      } else {
+        // Debug: Check if line looks like command audit format
+        if (line.includes('@') && line.includes('->')) {
+          console.log('[LOG_PARSE] Failed to match command audit line:', line);
+        }
       }
     }
     
     // Format 3: Simple timestamp - [timestamp] message
+    // Try to salvage a category from an inline [TAG] prefix in the message body,
+    // since broadcastOutput() calls don't carry a debug flag to the file writer.
     if (!logLine) {
       match = line.match(/^\[(\d+)\]\s*(.*)$/);
       if (match) {
         const [, timestamp, message] = match;
-        logLine = {
-          timestamp: parseInt(timestamp),
-          category: 'GENERAL',
-          message: message.trim(),
-          raw: line
-        };
-        categories.add('GENERAL');
+        const msg = message.trim();
+        // Check for [LEVEL][CATEGORY] prefix first
+        const levelCatTag = msg.match(/^\[(ERROR|WARN|INFO|DEBUG)\]\[([A-Z][A-Z0-9_-]*)\]\s*(.*)/);
+        if (levelCatTag) {
+          const cat = levelCatTag[2].replace(/-/g, '_');
+          logLine = {
+            timestamp: parseInt(timestamp),
+            category: cat,
+            level: levelCatTag[1],
+            message: levelCatTag[3].trim(),
+            raw: line
+          };
+          categories.add(cat);
+        } else {
+          // Check if message starts with an inline [TAG] and use that as category
+          const inlineTag = msg.match(/^\[([A-Z][A-Z0-9_-]*)\]\s*(.*)/);
+          if (inlineTag) {
+            const cat = inlineTag[1].replace(/-/g, '_');
+            logLine = {
+              timestamp: parseInt(timestamp),
+              category: cat,
+              level: 'DEBUG',
+              message: inlineTag[2],
+              raw: line
+            };
+            categories.add(cat);
+          } else {
+            logLine = {
+              timestamp: parseInt(timestamp),
+              category: 'GENERAL',
+              level: 'DEBUG',
+              message: msg,
+              raw: line
+            };
+            categories.add('GENERAL');
+          }
+        }
       }
     }
     
@@ -1250,6 +1408,7 @@ function parseLogFile(text) {
       logLine = {
         timestamp: 0,
         category: 'UNKNOWN',
+        level: 'DEBUG',
         message: line,
         raw: line
       };
@@ -1274,11 +1433,15 @@ function parseLogFile(text) {
 
 function applyLogFilters() {
   const categoryFilter = document.getElementById('viewer-category-filter').value;
+  const levelFilter = document.getElementById('viewer-level-filter').value;
   const searchText = document.getElementById('viewer-search').value.toLowerCase();
   
   gFilteredLines = gLogLines.filter(line => {
     // Category filter
     if (categoryFilter && line.category !== categoryFilter) return false;
+    
+    // Level filter
+    if (levelFilter && line.level !== levelFilter) return false;
     
     // Search filter
     if (searchText && !line.raw.toLowerCase().includes(searchText)) return false;
@@ -1298,19 +1461,31 @@ function displayLogLines() {
     return;
   }
   
+  const levelColors = { 'ERROR': '#f44747', 'WARN': '#ffc107', 'INFO': '#6a9955', 'DEBUG': '#569cd6' };
   let html = '';
   gFilteredLines.forEach(line => {
     const categoryColor = getCategoryColor(line.category);
-    const timestampStr = line.timestamp.toString().padStart(10, ' ');
+    const levelColor = levelColors[line.level] || '#888';
+    const timestampStr = line.timestamp.toString();
     
     if (line.category !== 'UNKNOWN') {
       html += '<div style="margin:2px 0">';
       html += '<span style="color:#569cd6">[' + timestampStr + ']</span> ';
-      html += '<span style="color:' + categoryColor + ';font-weight:bold">[' + line.category + ']</span> ';
-      html += '<span style="color:#d4d4d4">' + escapeHtml(line.message) + '</span>';
+      html += '<span style="color:' + levelColor + ';font-weight:bold;font-size:0.8em;margin-right:3px">' + line.level + '</span>';
+      
+      // Special formatting for command audit logs (user@source format)
+      if (line.user && line.command) {
+        html += '<span style="color:' + categoryColor + ';font-weight:bold">[' + line.category + ']</span> ';
+        html += '<span style="color:var(--panel-fg);white-space:pre">' + escapeHtml(line.user) + '@' + escapeHtml(line.category.toLowerCase()) + ' ' + escapeHtml(line.command) + ' -> ' + escapeHtml(line.result) + '</span>';
+      } else {
+        // Standard debug log format
+        html += '<span style="color:' + categoryColor + ';font-weight:bold">[' + line.category + ']</span> ';
+        html += '<span style="color:var(--panel-fg);white-space:pre">' + escapeHtml(line.message) + '</span>';
+      }
+      
       html += '</div>';
     } else {
-      html += '<div style="margin:2px 0;color:#888">' + escapeHtml(line.raw) + '</div>';
+      html += '<div style="margin:2px 0;color:var(--muted);white-space:pre">' + escapeHtml(line.raw) + '</div>';
     }
   });
   
@@ -1319,23 +1494,40 @@ function displayLogLines() {
 
 function getCategoryColor(category) {
   const colors = {
-    'AUTH': '#f48771',
-    'HTTP': '#4ec9b0',
+    // Core system
+    'AUTH': '#f48771',       'SESSION': '#f48771',
+    'HTTP': '#4ec9b0',       'WEB': '#4ec9b0',
     'SSE': '#4fc1ff',
-    'CLI': '#dcdcaa',
-    'SENSORS': '#c586c0',
-    'SENSORS_FRAME': '#c586c0',
-    'SENSORS_DATA': '#c586c0',
-    'WIFI': '#ce9178',
+    'CLI': '#dcdcaa',        'CMD': '#dcdcaa',        'CMD_FLOW': '#dcdcaa',
+    'SYSTEM': '#569cd6',     'SYS': '#569cd6',        'BOOT': '#569cd6',
     'STORAGE': '#9cdcfe',
-    'PERF': '#b5cea8',
-    'SYSTEM': '#569cd6',
-    'USERS': '#f48771',
-    'AUTO': '#d7ba7d',
-    'LOGGER': '#608b4e',
-    'ESPNOW': '#d16969',
-    'MEMORY': '#b5cea8',
-    'SECURITY': '#f48771'
+    'WIFI': '#ce9178',
+    'SECURITY': '#f48771',
+    'USERS': '#f48771',      'USER': '#f48771',
+    'LOGGER': '#608b4e',     'LOG': '#608b4e',
+    // Sensors
+    'SENSORS': '#c586c0',    'SENSORS_FRAME': '#c586c0', 'SENSORS_DATA': '#c586c0',
+    'GPS': '#c586c0',        'IMU': '#c586c0',         'THERMAL': '#c586c0',
+    'TOF': '#c586c0',        'GAMEPAD': '#c586c0',     'APDS': '#c586c0',
+    'PRESENCE': '#c586c0',   'FMRADIO': '#c586c0',     'RTC': '#c586c0',
+    'CAMERA': '#c586c0',     'MIC': '#c586c0',
+    // Performance / memory
+    'PERF': '#b5cea8',       'MEMORY': '#b5cea8',      'MEM': '#b5cea8',
+    'HEAP': '#b5cea8',       'STACK': '#b5cea8',
+    // Automations
+    'AUTO': '#d7ba7d',       'AUTO_EXEC': '#d7ba7d',   'AUTO_COND': '#d7ba7d',
+    'AUTO_SCHED': '#d7ba7d', 'AUTO_TIME': '#d7ba7d',
+    // ESP-NOW (hyphens normalised to underscores by parser)
+    'ESPNOW': '#d16969',     'ESP_NOW': '#d16969',
+    'ESPNOW_CORE': '#d16969','ESPNOW_MESH': '#d16969',
+    'ESPNOW_ROUTER': '#d16969','ESPNOW_TOPO': '#d16969',
+    'ESPNOW_STREAM': '#d16969','ESPNOW_ENCRYPTION': '#d16969',
+    // Severity prefixes (from ERROR/WARN/INFO macros)
+    'ERROR': '#f44747',      'WARN': '#ffc107',        'INFO': '#6a9955',
+    // Settings / command system
+    'SETTINGS_SYS': '#9cdcfe', 'CMD_SYS': '#dcdcaa',
+    // G2 glasses, Bluetooth
+    'G2': '#9cdcfe',         'BT': '#4fc1ff',
   };
   return colors[category] || '#888';
 }
@@ -1358,15 +1550,18 @@ function updateViewerStats() {
   }
 }
 
+var currentLogSource = '/logs';  // Track current log source
+
 function populateLogViewerFileList() {
   // Initialize file explorer for log selection
   if (typeof window.createFileExplorer === 'function') {
     window.createFileExplorer({
       containerId: 'log-viewer-file-explorer',
-      path: '/logs',
+      path: currentLogSource,
       height: '250px',
-      mode: 'select',
+      mode: 'full',
       selectFilesOnly: true,
+      lockToPath: currentLogSource,  // Lock navigation to current log source
       onSelect: function(filePath) {
         console.log('[LOGGING] Selected log file:', filePath);
         loadLogFile(filePath);
@@ -1383,9 +1578,28 @@ function populateLogViewerFileList() {
   }
 }
 
+function switchLogSource() {
+  // Toggle between /logs and /system/logs
+  if (currentLogSource === '/logs') {
+    currentLogSource = '/system/logs';
+    document.getElementById('btn-switch-logs').textContent = 'View User Logs';
+  } else {
+    currentLogSource = '/logs';
+    document.getElementById('btn-switch-logs').textContent = 'View System Logs';
+  }
+  
+  // Reload file explorer with new source
+  populateLogViewerFileList();
+  
+  // Clear current log viewer
+  document.getElementById('viewer-content').innerHTML = '<div style="padding:1rem;color:var(--panel-fg)">Select a log file to view</div>';
+}
+
 console.log('[LOGGING] Section 14a: Log viewer functions defined');
 </script>
+)JS", HTTPD_RESP_USE_STRLEN);
 
+  httpd_resp_send_chunk(req, R"JS(
 <script>
 console.log('[LOGGING] Section 15: All JavaScript loaded successfully');
 </script>

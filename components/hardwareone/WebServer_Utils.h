@@ -62,7 +62,7 @@ String makeSessToken();
 // ============================================================================
 
 // Generate navigation bar for authenticated users
-String generateNavigation(const String& activePage, const String& username);
+String generateNavigation(const String& activePage, const String& username, const char* initialTheme = "light");
 
 // Generate navigation bar for public (unauthenticated) pages
 String generatePublicNavigation();
@@ -72,7 +72,8 @@ String generatePublicNavigation();
 // ============================================================================
 
 // Forward declarations
-void streamCommonCSS(httpd_req_t* req);  // Streaming CSS - no String allocation
+void streamCommonCSS(httpd_req_t* req);     // Streaming CSS - no String allocation
+void streamCommonDialogs(httpd_req_t* req); // Streaming dialog HTML+JS - no String allocation
 
 // Render a generic two-field form with two buttons using shared classes
 // title: heading for the form
@@ -151,6 +152,7 @@ inline String getFileBrowserScript() {
     //   height: string - optional height (default: '300px')
     //   mode: string - 'select' (select only), 'view' (view only), 'full' (all features, default)
     //   selectFilesOnly: boolean - if true, only files can be selected (not folders)
+    //   lockToPath: string - optional path to lock navigation to (prevents browsing outside this directory)
     // }
     
     var container = document.getElementById(config.containerId);
@@ -163,6 +165,7 @@ inline String getFileBrowserScript() {
     var explorerHeight = config.height || '300px';
     var mode = config.mode || 'full';  // 'select', 'view', or 'full'
     var selectFilesOnly = config.selectFilesOnly || false;
+    var lockToPath = config.lockToPath || null;  // Lock navigation to this path
     
     // Sanitize for JavaScript function names (no hyphens/colons allowed in JS identifiers)
     var explorerFnId = 'fexp_' + config.containerId.replace(/[^a-zA-Z0-9]/g, '_');
@@ -183,10 +186,22 @@ inline String getFileBrowserScript() {
     
     function renderBreadcrumb() {
       var parts = currentPath.split('/').filter(function(p) { return p.length > 0; });
-      var html = '<span style="cursor:pointer;color:var(--link);" onclick="' + explorerFnId + 'Navigate(\'/\')">[Root]</span>';
+      var html = '';
+      
+      // If locked to a path, show locked root instead of allowing navigation to /
+      if (lockToPath) {
+        var lockedParts = lockToPath.split('/').filter(function(p) { return p.length > 0; });
+        var displayRoot = lockedParts.length > 0 ? lockedParts[lockedParts.length - 1] : 'Root';
+        html = '<span style="color:var(--muted);">[' + displayRoot + ']</span>';
+      } else {
+        html = '<span style="cursor:pointer;color:var(--link);" onclick="' + explorerFnId + "Navigate('/')" + '">[Root]</span>';
+      }
       
       var path = '';
+      var skipCount = lockToPath ? lockToPath.split('/').filter(function(p) { return p.length > 0; }).length : 0;
       parts.forEach(function(part, idx) {
+        // Skip breadcrumb parts that are part of the locked path
+        if (idx < skipCount) return;
         path += '/' + part;
         var finalPath = path;
         html += ' <span style="color:var(--muted);">/</span> ';
@@ -263,7 +278,7 @@ inline String getFileBrowserScript() {
       var imgId = 'icon_' + iconName + '_' + Math.random().toString(36).substr(2, 9);
       var iconUrl = '/api/icon?name=' + iconName;
       logIcons('[icons] render icon=', iconName, 'url=', iconUrl);
-      var html = '<img id="' + imgId + '" src="' + iconUrl + '" width="48" height="48" style="vertical-align:middle;image-rendering:auto;display:inline-block;background:var(--icon-bg);border-radius:6px;padding:4px;box-sizing:border-box;" ';
+      var html = '<img id="' + imgId + '" src="' + iconUrl + '" width="48" height="48" style="vertical-align:middle;image-rendering:auto;display:inline-block;background:var(--icon-bg);border-radius:6px;padding:4px;box-sizing:border-box;filter:var(--icon-filter);" ';
       html += 'onerror="this.style.display=\'none\';this.nextSibling.style.display=\'inline-block\';" />';
       html += '<span style="display:none;width:48px;font-family:monospace;color:var(--muted);font-size:0.85em;text-align:center;">' + fallbackText + '</span>';
 
@@ -289,6 +304,10 @@ inline String getFileBrowserScript() {
       }
 
       return html;
+    }
+    
+    function renderActionIcon(iconName, fallbackText) {
+      return '<img src="/api/icon?name=' + iconName + '" width="20" height="20" style="vertical-align:middle;filter:var(--icon-filter);" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'inline\'"><span style="display:none;font-size:0.8em;">' + fallbackText + '</span>';
     }
     
     function loadDirectory(path) {
@@ -387,13 +406,44 @@ inline String getFileBrowserScript() {
             // Size info
             html += '<span style="color:var(--muted);font-size:0.85em;margin-left:12px;min-width:80px;text-align:right;">' + sizeInfo + '</span>';
             
-            // Delete button (only in full mode) - icon-only if available, text-only fallback
+            // Action buttons (only in full mode, respecting per-file permissions)
+            // Permission flags: PERM_READ=1, PERM_WRITE=2, PERM_DELETE=4, PERM_RENAME=8
             if (mode === 'full') {
-              var trashIconId = 'trash_' + itemPath.replace(/[^a-zA-Z0-9]/g, '_') + '_' + Math.random().toString(36).substr(2, 9);
-              html += '<button class="btn btn-small" id="' + trashIconId + '" onclick="' + explorerFnId + 'Delete(\'' + itemPath + '\',' + (isFolder ? 'true' : 'false') + ');event.stopPropagation();" ';
-              html += 'style="margin-left:8px;padding:4px 8px;">';
-              html += renderFileIcon('trash', 'Delete');
-              html += '</button>';
+              var perms = file.perms || 0;
+              var hasRead = (perms & 1) !== 0;
+              var hasWrite = (perms & 2) !== 0;
+              var hasDelete = (perms & 4) !== 0;
+              var hasRename = (perms & 8) !== 0;
+              html += '<span style="display:inline-flex;gap:2px;margin-left:8px;align-items:center;">';
+              // Download button (files only, when read permission)
+              if (!isFolder && hasRead) {
+                html += '<button class="btn btn-small" onclick="' + explorerFnId + 'Download(\'' + itemPath + '\');event.stopPropagation();" ';
+                html += 'style="padding:4px 6px;" title="Download file">';
+                html += renderActionIcon('download', 'DL');
+                html += '</button>';
+              }
+              // Edit button (files only, when onEdit callback provided and write permission)
+              if (!isFolder && config.onEdit && hasWrite) {
+                html += '<button class="btn btn-small" onclick="' + explorerFnId + 'Edit(\'' + itemPath + '\');event.stopPropagation();" ';
+                html += 'style="padding:4px 6px;" title="Edit file">';
+                html += renderActionIcon('edit', 'Edit');
+                html += '</button>';
+              }
+              // Rename button (only if rename permission)
+              if (hasRename) {
+                html += '<button class="btn btn-small" onclick="' + explorerFnId + 'Rename(\'' + itemPath + '\');event.stopPropagation();" ';
+                html += 'style="padding:4px 8px;font-size:0.8em;" title="Rename">';
+                html += 'Rename';
+                html += '</button>';
+              }
+              // Delete button (only if delete permission)
+              if (hasDelete) {
+                html += '<button class="btn btn-small" onclick="' + explorerFnId + 'Delete(\'' + itemPath + '\',' + (isFolder ? 'true' : 'false') + ');event.stopPropagation();" ';
+                html += 'style="padding:4px 6px;" title="Delete">';
+                html += renderActionIcon('trash', 'Del');
+                html += '</button>';
+              }
+              html += '</span>';
             }
             
             html += '</div>';
@@ -410,6 +460,11 @@ inline String getFileBrowserScript() {
     
     // Global navigation function (needs to be accessible from onclick)
     window[explorerFnId + 'Navigate'] = function(path) {
+      // If locked to a path, prevent navigation outside that path
+      if (lockToPath && !path.startsWith(lockToPath)) {
+        console.warn('[FileExplorer] Navigation blocked: locked to ' + lockToPath);
+        return;
+      }
       currentPath = path;
       renderBreadcrumb();
       loadDirectory(path);
@@ -455,6 +510,48 @@ inline String getFileBrowserScript() {
       })
       .catch(function(e) {
         alert('Delete error: ' + e.message);
+      });
+    };
+    
+    // Global edit function (calls onEdit callback)
+    window[explorerFnId + 'Edit'] = function(filePath) {
+      if (config.onEdit && typeof config.onEdit === 'function') {
+        config.onEdit(filePath);
+      }
+    };
+    
+    // Global download function
+    window[explorerFnId + 'Download'] = function(filePath) {
+      var filename = filePath.split('/').pop() || 'download';
+      var a = document.createElement('a');
+      a.href = '/api/files/view?name=' + encodeURIComponent(filePath) + '&mode=raw';
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    };
+    
+    // Global rename function
+    window[explorerFnId + 'Rename'] = async function(filePath) {
+      var oldName = filePath.split('/').pop();
+      var newName = await hwPrompt('Rename "' + oldName + '" to:', oldName);
+      if (!newName || newName === oldName) return;
+      
+      fetch('/api/files/rename', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'oldPath=' + encodeURIComponent(filePath) + '&newName=' + encodeURIComponent(newName)
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        if (j.success) {
+          loadDirectory(currentPath);
+        } else {
+          hwAlert('Rename failed: ' + (j.error || 'Unknown error'));
+        }
+      })
+      .catch(function(e) {
+        hwAlert('Rename error: ' + e.message);
       });
     };
     
@@ -525,7 +622,7 @@ inline String getFileBrowserScript() {
     var currentPath = config.path || '/';
     var managerHeight = config.height || '400px';
     var showActions = config.showActions !== false;
-    var mode = config.mode || 'full';
+    var mode = config.mode || 'full';  // 'select', 'view', or 'full'
     
     var managerId = 'fmgr_' + config.containerId.replace(/[^a-zA-Z0-9]/g, '_');
     var toolbarId = managerId + '_toolbar';
@@ -538,9 +635,9 @@ inline String getFileBrowserScript() {
     // Toolbar
     if (showActions) {
       html += '<div id="' + toolbarId + '" style="padding:8px;background:var(--crumb-bg);border-bottom:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;">';
-      html += '<button class="btn" onclick="' + managerId + 'CreateFolder()">New Folder</button>';
-      html += '<button class="btn" onclick="' + managerId + 'CreateFile()">New File</button>';
-      html += '<button class="btn" onclick="' + managerId + 'UploadFile()">Upload</button>';
+      html += '<button id="' + managerId + '_folder_btn" class="btn" onclick="' + managerId + 'CreateFolder()">New Folder</button>';
+      html += '<button id="' + managerId + '_file_btn" class="btn" onclick="' + managerId + 'CreateFile()">New File</button>';
+      html += '<button id="' + managerId + '_upload_btn" class="btn" onclick="' + managerId + 'UploadFile()">Upload</button>';
       html += '<button class="btn" onclick="' + managerId + 'Refresh()">Refresh</button>';
       html += '<input type="file" id="' + managerId + '_upload_input" style="display:none">';
       html += '</div>';
@@ -558,6 +655,20 @@ inline String getFileBrowserScript() {
     var explorerDiv = document.getElementById(explorerId);
     var statusDiv = document.getElementById(statusId);
     
+    function setWriteButtonsVisible(visible) {
+      var d = visible ? '' : 'none';
+      var fb = document.getElementById(managerId + '_folder_btn');
+      var fi = document.getElementById(managerId + '_file_btn');
+      var ub = document.getElementById(managerId + '_upload_btn');
+      if (fb) fb.style.display = d;
+      if (fi) fi.style.display = d;
+      if (ub) ub.style.display = d;
+    }
+    
+    function isProtectedPath(path) {
+      return path === '/system' || path.indexOf('/system/') === 0;
+    }
+    
     function setStatus(msg, isError) {
       statusDiv.textContent = msg;
       statusDiv.style.color = isError ? 'var(--danger)' : 'var(--muted)';
@@ -573,57 +684,57 @@ inline String getFileBrowserScript() {
         onSelect: function(filePath) {
           window[managerId + 'ViewFile'](filePath);
         },
+        onEdit: config.onEdit || null,
         onNavigate: function(path) {
-          // Update manager's current path when explorer navigates
           currentPath = path;
           setStatus('Path: ' + currentPath);
+          setWriteButtonsVisible(!isProtectedPath(path));
         }
       });
       setStatus('Path: ' + currentPath);
+      setWriteButtonsVisible(!isProtectedPath(currentPath));
     }
     
     // Action: Create folder
     window[managerId + 'CreateFolder'] = function() {
-      var name = prompt('Enter folder name:');
-      if (!name) return;
-      
-      var fullPath = currentPath === '/' ? '/' + name : currentPath + '/' + name;
-      setStatus('Creating folder...', false);
-      
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: 'cmd=' + encodeURIComponent('mkdir ' + fullPath)
-      })
-      .then(r => r.text())
-      .then(txt => {
-        setStatus(txt, txt.indexOf('Error') >= 0);
-        loadExplorer();
-        if (config.onRefresh) config.onRefresh();
-      })
-      .catch(e => setStatus('Error: ' + e.message, true));
+      hwPrompt('Enter folder name:').then(function(name) {
+        if (!name) return;
+        var fullPath = currentPath === '/' ? '/' + name : currentPath + '/' + name;
+        setStatus('Creating folder...', false);
+        fetch('/api/cli', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: 'cmd=' + encodeURIComponent('mkdir ' + fullPath)
+        })
+        .then(function(r) { return r.text(); })
+        .then(function(txt) {
+          setStatus(txt, txt.indexOf('Error') >= 0);
+          loadExplorer();
+          if (config.onRefresh) config.onRefresh();
+        })
+        .catch(function(e) { setStatus('Error: ' + e.message, true); });
+      });
     };
     
     // Action: Create file
     window[managerId + 'CreateFile'] = function() {
-      var name = prompt('Enter file name (with extension):');
-      if (!name) return;
-      
-      var fullPath = currentPath === '/' ? '/' + name : currentPath + '/' + name;
-      setStatus('Creating file...', false);
-      
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: 'cmd=' + encodeURIComponent('filecreate ' + fullPath)
-      })
-      .then(r => r.text())
-      .then(txt => {
-        setStatus(txt, txt.indexOf('Error') >= 0);
-        loadExplorer();
-        if (config.onRefresh) config.onRefresh();
-      })
-      .catch(e => setStatus('Error: ' + e.message, true));
+      hwPrompt('Enter file name (with extension):').then(function(name) {
+        if (!name) return;
+        var fullPath = currentPath === '/' ? '/' + name : currentPath + '/' + name;
+        setStatus('Creating file...', false);
+        fetch('/api/cli', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: 'cmd=' + encodeURIComponent('filecreate ' + fullPath)
+        })
+        .then(function(r) { return r.text(); })
+        .then(function(txt) {
+          setStatus(txt, txt.indexOf('Error') >= 0);
+          loadExplorer();
+          if (config.onRefresh) config.onRefresh();
+        })
+        .catch(function(e) { setStatus('Error: ' + e.message, true); });
+      });
     };
     
     // Action: Upload file
@@ -758,7 +869,7 @@ inline void streamCommonCSS(httpd_req_t* req) {
   // Stream CSS in chunks to avoid large String allocation
   httpd_resp_send_chunk(req,
     ":root{"
-    "--bg:linear-gradient(135deg,#667eea 0%,#764ba2 100%);"
+    "--bg:linear-gradient(135deg,#667eea 0%,#764ba2 60%);"
     "--fg:#fff;"
     "--card-bg:rgba(255,255,255,.10);"
     "--card-border:rgba(255,255,255,.20);"
@@ -771,15 +882,16 @@ inline void streamCommonCSS(httpd_req_t* req) {
     "--crumb-bg:rgba(255,255,255,.12);"
     "--link:#bcd0ff;"
     "--muted:rgba(255,255,255,.75);"
-    "--icon-bg:rgba(0,0,0,.55);"
+    "--icon-bg:transparent;"
     "--code-bg:#f8f9fa;"
     "--code-fg:#212529;"
     "--icon-filter:none;"
     "--danger:#dc3545;"
     "--danger-hover:#c82333;"
+    "--placeholder:rgba(255,255,255,.65);"
     "}"
     "html[data-theme=light]{"
-    "--bg:linear-gradient(135deg,#667eea 0%,#764ba2 100%);"
+    "--bg:linear-gradient(135deg,#667eea 0%,#764ba2 60%);"
     "--fg:#fff;"
     "--card-bg:rgba(255,255,255,.10);"
     "--card-border:rgba(255,255,255,.20);"
@@ -792,12 +904,13 @@ inline void streamCommonCSS(httpd_req_t* req) {
     "--crumb-bg:rgba(255,255,255,.12);"
     "--link:#bcd0ff;"
     "--muted:rgba(255,255,255,.75);"
-    "--icon-bg:rgba(0,0,0,.55);"
+    "--icon-bg:transparent;"
     "--code-bg:#f8f9fa;"
     "--code-fg:#212529;"
     "--icon-filter:none;"
     "--danger:#dc3545;"
     "--danger-hover:#c82333;"
+    "--placeholder:rgba(255,255,255,.65);"
     "--success:#28a745;"
     "--success-hover:#218838;"
     "--warning-bg:#fff3cd;"
@@ -839,7 +952,12 @@ inline void streamCommonCSS(httpd_req_t* req) {
     "--info-fg:#a78bfa;"
     "--info-border:rgba(56,189,248,.3);"
     "--info-accent:#0ea5e9;"
+    "--placeholder:rgba(242,242,247,.5);"
     "}"
+    "input::placeholder,textarea::placeholder{color:var(--placeholder);opacity:1}"
+    "input::-webkit-input-placeholder,textarea::-webkit-input-placeholder{color:var(--placeholder);opacity:1}"
+    "input::-moz-placeholder,textarea::-moz-placeholder{color:var(--placeholder);opacity:1}"
+    "input:-ms-input-placeholder,textarea:-ms-input-placeholder{color:var(--placeholder);opacity:1}"
     "*{margin:0;padding:0;box-sizing:border-box}"
     "body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;"
     "background:var(--bg);"
@@ -930,6 +1048,9 @@ inline void streamCommonCSS(httpd_req_t* req) {
     ".form-field label{display:block;margin-bottom:6px}"
     ".form-input{width:100%;padding:.6rem;border:1px solid var(--border);border-radius:6px;background:var(--panel-bg);color:var(--panel-fg)}"
     ".form-error{margin-bottom:.5rem}"
+    ".sys-card{background:rgba(255,255,255,0.08);border-radius:8px;padding:0.75rem;border:1px solid rgba(255,255,255,0.15)}"
+    ".sys-card-tall{grid-row:span 2;display:flex;flex-direction:column;gap:0.5rem}"
+    ".sys-card-row{display:flex;justify-content:space-between;align-items:center}"
     ".input-medium{width:260px}"
     ".settings-panel{background:var(--panel-bg);border-radius:8px;padding:1rem 1.5rem;margin:1rem 0;color:var(--panel-fg);border:1px solid var(--border)}"
     ".settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem}"
@@ -958,5 +1079,71 @@ inline void streamCommonCSS(httpd_req_t* req) {
     ".table-striped tr:nth-child(odd){background:rgba(255,255,255,.05)}", HTTPD_RESP_USE_STRLEN);
 }
 
+// Stream global themed dialog system (hwAlert/hwConfirm/hwPrompt + window.alert override).
+// Called once per authenticated page from streamBeginHtml(); zero heap allocation.
+inline void streamCommonDialogs(httpd_req_t* req) {
+  if (!req) return;
+  httpd_resp_send_chunk(req,
+    "<div id='hw-dlg' style='display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;align-items:center;justify-content:center'>"
+    "<div style='background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border);border-radius:8px;padding:1.5rem;min-width:280px;max-width:420px;box-shadow:0 8px 32px rgba(0,0,0,0.4)'>"
+    "<p id='hw-dlg-msg' style='margin-bottom:0.75rem;font-weight:500;white-space:pre-wrap'></p>"
+    "<input id='hw-dlg-inp' class='form-input' style='width:100%;margin-bottom:0.75rem;display:none' type='text'>"
+    "<div style='display:flex;gap:0.5rem;justify-content:flex-end'>"
+    "<button id='hw-dlg-cancel' class='btn' style='display:none'>Cancel</button>"
+    "<button id='hw-dlg-ok' class='btn'>OK</button>"
+    "</div></div></div>"
+    "<script>(function(){"
+    "var d=document.getElementById('hw-dlg');"
+    "var m=document.getElementById('hw-dlg-msg');"
+    "var inp=document.getElementById('hw-dlg-inp');"
+    "var ok=document.getElementById('hw-dlg-ok');"
+    "var ca=document.getElementById('hw-dlg-cancel');"
+    "var res=null;"
+    "function show(msg,mode,def){"
+      "return new Promise(function(resolve){"
+        "res=resolve;m.textContent=msg;"
+        "var ip=(mode==='prompt');var al=(mode==='alert');"
+        "inp.style.display=ip?'':'none';"
+        "inp.value=(ip&&def!=null)?def:'';"
+        "ca.style.display=al?'none':'';"
+        "d.style.display='flex';"
+        "if(ip)setTimeout(function(){inp.focus();inp.select();},50);else ok.focus();"
+      "});"
+    "}"
+    "function closeD(v){d.style.display='none';if(res){res(v);res=null;}}"
+    "ok.addEventListener('click',function(){closeD(inp.style.display!=='none'?inp.value:true);});"
+    "ca.addEventListener('click',function(){closeD(null);});"
+    "inp.addEventListener('keydown',function(e){if(e.key==='Enter')closeD(inp.value);if(e.key==='Escape')closeD(null);});"
+    "d.addEventListener('click',function(e){if(e.target===d)closeD(null);});"
+    "window.hwAlert=function(msg){return show(String(msg),'alert',null);};"
+    "window.hwConfirm=function(msg){return show(String(msg),'confirm',null);};"
+    "window.hwPrompt=function(msg,def){return show(String(msg),'prompt',def!=null?String(def):'');};"
+    "window.alert=function(msg){hwAlert(msg);};"
+    "})();</script>", HTTPD_RESP_USE_STRLEN);
+}
+
+#else  // !ENABLE_HTTP_SERVER
+
+#include <Arduino.h>
+
+struct WebMirrorBuf {
+  char* buf;
+  size_t cap;
+  size_t len;
+  WebMirrorBuf() : buf(nullptr), cap(0), len(0) {}
+  inline void init(size_t) {}
+  inline void clear() {}
+  inline void append(const String&, bool) {}
+  inline void append(const char*, bool) {}
+  inline void appendDirect(const char*, size_t, bool) {}
+  inline String snapshot() { return String(); }
+  inline size_t snapshotTo(char*, size_t) { return 0; }
+  inline void assignFrom(const String&) {}
+};
+
+extern WebMirrorBuf gWebMirror;
+extern size_t gWebMirrorCap;
+
 #endif // ENABLE_HTTP_SERVER
+
 #endif // WEBSERVER_UTILS_H

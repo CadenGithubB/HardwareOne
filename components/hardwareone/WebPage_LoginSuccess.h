@@ -11,11 +11,18 @@ void streamCommonCSS(httpd_req_t* req);
 // ============================================================================
 // Login Success Page - Full page with redirect
 // ============================================================================
-inline void streamLoginSuccessContent(httpd_req_t* req, const String& sessionId) {
+inline void streamLoginSuccessContent(httpd_req_t* req, const String& sessionId, const String& theme = "light") {
   httpd_resp_set_type(req, "text/html");
-  
-  // HTML head with meta tags and CSS
-  httpd_resp_send_chunk(req, R"LOGINSUCCESS1(<!DOCTYPE html><html><head>
+
+  bool isDark = (theme == "dark");
+  const char* bg = isDark
+    ? "linear-gradient(135deg,#07070b 0%,#151520 100%)"
+    : "linear-gradient(135deg,#667eea 0%,#764ba2 100%)";
+
+  // HTML head with data-theme so CSS variables resolve correctly
+  httpd_resp_send_chunk(req, "<!DOCTYPE html><html data-theme='", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, isDark ? "dark" : "light", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, R"LOGINSUCCESS1('><head>
 <meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Login Successful - HardwareOne</title>
@@ -29,7 +36,14 @@ inline void streamLoginSuccessContent(httpd_req_t* req, const String& sessionId)
 @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
 </style>
 <meta http-equiv='refresh' content='2;url=/dashboard'>
-</head><body>
+</head>)LOGINSUCCESS2", HTTPD_RESP_USE_STRLEN);
+
+  // Apply correct background inline (matches streamBeginHtml behaviour)
+  httpd_resp_send_chunk(req, "<body style='background:", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, bg, HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "'>", HTTPD_RESP_USE_STRLEN);
+
+  httpd_resp_send_chunk(req, R"LOGINSUCCESS2(
 <div class='content'>
 <div class='text-center'>
 <div class='card container-narrow'>
