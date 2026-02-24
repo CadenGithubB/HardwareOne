@@ -1,94 +1,124 @@
-# This project is called Hardware One. 
-> It is the combination of Adafruit hardware and libraries, with the software found in this github. Once assembled and programmed, it provides the user with a small device that can fit nearly any usecase. The device can be adjusted by adding modules such as environmental sensors, human input devices, screens or audio output, and more to accomplish whatever is required.
+# Hardware One
 
-## There are two premade configurations to choose from, in addition to the DIY option:
+> Hardware One is an ESP32-based firmware platform that turns a small microcontroller board into a capable, networked device. Attach sensors, a display, and input hardware, flash the firmware, and you have a standalone device with a web UI, an OLED interface, an ESP-NOW mesh network, and a full CLI — all configurable without recompiling.
 
-  ###   1) The '<ins>Barebones QT PY</ins>' - 
-   - This is the most basic version which utilizes only the QT PY and the serial console of an Arduino IDE to provide an interface for the device to communicate with the user.<br><br>
-   - **This version serves as a showcase as to what the QT PY can accomplish on its own.**
+Built on **ESP-IDF** (not Arduino IDE). Runs on the **Seeed XIAO ESP32-S3**, **Adafruit QT PY ESP32**, and **Adafruit Feather ESP32** families.
 
+---
 
+## Configurations
 
-  ###   2) '<ins>Hardware One</ins>' -
-  - This is the 'main' version of the project that utilizes what I will call the 'standard set of hardware and software'. Everything will be made with this setup in mind, and paired down from there for the barebones version.<br><br>
-  - **This version enables the use of Hardware One with or without a battery, to allow for usage anywhere.**
+There are three ways to use Hardware One, depending on how much hardware you want to attach:
 
------
+### 1) Barebones
+- Just the microcontroller board — no display, no sensors, no gamepad.
+- Full web UI, ESP-NOW, WiFi, CLI, and all network features still available.
+- Good starting point for headless or custom builds.
 
-For those interested in exploring the full capabilities of the QT PY / Hardware One, the DIY System offers a hands on experience.
+### 2) Hardware One (Standard)
+- The intended full build: board + SSD1306 OLED + Seesaw gamepad + a selection of I2C sensors.
+- Wired (USB power) or wireless (LiPo battery) variants.
+- Everything works out of the box.
 
-  ###   The '<ins>DIY System</ins>'  - 
-  - This is an option for tinkerers who want to customize Hardware One to their specific needs. I encourage people who do this to clone/fork the main 'Hardware One' code body. 
-  - **This is a custom approach to using the QT PY and this project.**
+### 3) DIY
+- Fork the repo, enable or disable any feature in `System_BuildConfig.h`, and build whatever you need.
+- All subsystems are individually toggleable — add new hardware by wiring it up and enabling the relevant flag.
 
------
+---
 
-## Software Features Table
-  
-<ins>Software Features Key</ins>:  
+## Software Features
 
-❌ - Not available 
+<ins>Key</ins>: ✅ Available, but able to be disabled &nbsp; ❌ Not available
 
-🟡 - Optional
+> DIY can enable or disable any feature individually via `System_BuildConfig.h`.
 
-✅ - Available
+| Feature | Barebones | Standard |
+| ------- | :-------: | :------: |
+| WiFi (connect, auto-reconnect, AP scan) | ✅ | ✅ |
+| Web UI (browser-based control & monitoring) | ✅ | ✅ |
+| Web authentication (user accounts, sessions) | ✅ | ✅ |
+| Serial / web CLI with full command system | ✅ | ✅ |
+| ESP-NOW V3 mesh (peer discovery, pairing, bonding) | ✅ | ✅ |
+| ESP-NOW metadata sync & file transfer | ✅ | ✅ |
+| MQTT (Home Assistant integration) | ✅ | ✅ |
+| Automations (scheduled & conditional commands) | ✅ | ✅ |
+| OLED display with full menu system | ❌ | ✅ |
+| Seesaw gamepad input | ❌ | ✅ |
+| BNO055 IMU (9-DoF orientation) | ❌ | ✅ |
+| VL53L4CX Time-of-Flight distance sensor | ❌ | ✅ |
+| MLX90640 / AMG8833 thermal camera | ❌ | ✅ |
+| APDS9960 gesture / proximity / RGB sensor | ❌ | ✅ |
+| PA1010D GPS + offline maps | ❌ | ✅ |
+| DS3231 RTC (hardware clock) | ❌ | ✅ |
+| STHS34PF80 IR presence / motion | ❌ | ✅ |
+| DVP camera (OV2640 / OV5640) | ❌ | ✅ |
+| BLE server + Even Realities G2 glasses client | ❌ | ✅ |
+| Edge Impulse ML inference | ❌ | ✅ |
+| Battery monitoring (LiPo voltage via ADC) | ❌ | ✅ |
+| PCA9685 servo controller | ❌ | ✅ |
 
-⌨️ - Custom Configuration - I will provide the basic building blocks so someone can edit it and keep, remove, or add new features. Please make your own versions and share them with me!
+> If a module is enabled in the build config but not physically connected, its commands will gracefully fail — nothing breaks.
 
-| ⬇️ Features / Configuration Names ➡️  | Barebones QT PY | Hardware One (Wired) | Hardware One (Wireless) | DIY System
-| ------------- | :-----------: | :-----------: | :-----------: | :-----------: |
-| Base QT PY Function (WiFi, Bluetooth, Time Keeping, i2c scanning) | ✅ | ✅ | ✅ | ✅/⌨️
-| Console Output (Via USB-C) | ✅ | ✅ | ✅ | ✅
-| Web Interface (Browser-based Control) | ✅ | ✅ | ✅ | ✅/⌨️
-| ESP-NOW (Peer to peer device communication) | ✅ | ✅ | ✅ | ✅/⌨️
-| WIP Servo Control via PCA9685 WIP | 🔨 | 🔨 | 🔨 | 🔨
-| Dedicated Input Device (Joystick + Buttons) | ❌ | ✅ | ✅ | ✅/⌨️
-| Display Output (Via an onboard screen) | ❌ | ✅ | ✅ | ✅/⌨️
-| Distance Sensor (Multi-object Detection) | ❌ | ✅ | ✅ | ✅/⌨️
-| RGB Capture + Gesture and Light Sensing | ❌ | ✅ | ✅ | ✅/⌨️
-| 6/9 DOF Gyroscope | ❌ | ✅ | ✅ | ✅/⌨️
-| 5×5 RGB NeoPixels | ❌ | 🟡 | 🟡 | 🟡/⌨️
-| Thermal Scanning | ❌ | 🟡 | 🟡 | 🟡/⌨️
-| WIP Haptic Motor WIP | 🔨 | 🔨 | 🔨 | 🔨
-| Battery Meter | ❌ | ❌ | ✅ | ✅/⌨️
-| PSRAM Optional (Works with all ESP32 configs) | ✅ | ✅ | ✅ | ✅/⌨️
-| DIY Required | ❌ | ❌ | ❌ | ✅
+---
 
------
+## Supported Hardware
 
-## Hardware Requirement Table
+### Boards — pick one
 
-<ins>Hardware Requirements Key</ins>:  
+Each device in your setup runs one board. Multiple boards can coexist on the same ESP-NOW mesh network simultaneously.
 
-❌ - Not Intended
+| Board | Camera | PDM Mic | Battery monitor | Notes |
+| ----- | :----: | :-----: | :-------------: | ----- |
+| Seeed XIAO ESP32-S3 | ✅ | ✅ | ❌ | Primary dev target |
+| Adafruit QT PY ESP32-S3 | ✅ | ✅ | ❌ | Stemma QT onboard |
+| Adafruit Feather ESP32 | ❌ | ❌ | ✅ (GPIO35) | Good for battery builds |
 
-🟡 - Optional, available in code
+### Peripherals — Stemma QT / I2C
 
-✅ - Intended
+These connect via Stemma QT (or standard I2C) and work the same on any supported board. Mix and match as needed — a hub lets you chain multiple sensors.
 
-> NOTE: **If intended modules are not connected to the respective Systems, the commands involving those modules will gracefully fail.** Fortunately, its easy to get rid of extreneous commands/programs by cloning the relevant repo, and removing the code relevant to it. See this for more inf: Link (Put link here to link to the User Guide where the breakdown of the code for each module is explained. "each module has code in the following areas: 'startup checking', 'error checking', 'connectivity', 'function', 'variables', etc")
+| Peripheral | Link |
+| ---------- | ---- |
+| SSD1306 OLED display | Any 128×64 I2C OLED |
+| Adafruit Seesaw Gamepad | [ID: 5743](https://www.adafruit.com/product/5743) |
+| BNO055 9-DoF IMU | — |
+| VL53L4CX Time-of-Flight sensor | [ID: 5425](https://www.adafruit.com/product/5425) |
+| MLX90640 32×24 Thermal Camera | — |
+| Adafruit AMG8833 8×8 Thermal Camera | [ID: 3538](https://www.adafruit.com/product/3538) |
+| APDS9960 Gesture / Light sensor | [ID: 3595](https://www.adafruit.com/product/3595) |
+| PA1010D GPS module | — |
+| DS3231 RTC | — |
+| STHS34PF80 IR presence sensor | — |
+| PCA9685 servo driver | — |
+| Stemma QT hub (for chaining) | [ID: 5625](https://www.adafruit.com/product/5625) |
 
-🛠️ - You choose! If you program capabilities for a new module, please let me know somehow so I can fold it into the mix of available options.
+### Peripherals — board-specific
 
-| ⬇️ Hardware / Configuration Names ➡️  | Barebones QT PY | Hardware One (Wired) | Hardware One (Wireless) | DIY System
-| ------------- | :-----------: | :-----------: | :-----------: | :-----------: |
-| Adafruit QT PY | ✅ | ✅ | ✅ | 🛠️
-| Mini Breadboard | ❌ | ✅ | ✅ | 🛠️
-| EYESPI Display BFF | ❌ | ✅ | ✅ | 🛠️
-| EYESPI Display | ❌ | ✅ | ✅ | 🛠️
-| Buttons + Joystick | ❌ | ✅ | ✅ | 🛠️
-| Gyroscope - 6/9DoF | ❌ | ✅ | ✅ | 🛠️
-| RGB + Gesture + Light Measuring device | ❌ | ✅ | ✅ | 🛠️
-| Distance Sensor | ❌ | ✅ | ✅ | 🛠️
-| Battery | ❌ | ❌ | ✅ | 🛠️
-| QT PY Battery BFF | ❌ | ❌ | ✅ | 🛠️
-| 5×5 NeoPixel QT PY BFF | ❌ | 🟡 | 🟡 | 🛠️
-| 32x24 Thermal Camera | ❌ | 🟡 | 🟡 | 🛠️
-| Haptic motor driver | ❌ | 🟡 | 🟡 | 🛠️
-| Stemma QT Hub (Port Duplicator / 'Dumb' Hub)| ❌ | 🟡 | 🟡 | 🛠️
-| Ability to add new hardware | ❌ | ❌ | ❌ | ✅
+| Peripheral | Compatible boards |
+| ---------- | ----------------- |
+| DVP camera (OV2640 / OV5640) | XIAO ESP32-S3, QT PY ESP32-S3 |
+| PDM microphone (I2S) | XIAO ESP32-S3, QT PY ESP32-S3 |
+| LiPo battery + BMS | Any board with a JST connector |
 
-> ## To get started, check out the Quickstart: [Link](https://github.com/CadenGithubB/HardwareOne/blob/main/QUICKSTART.md)
+---
 
+## Build System
 
-> ## To take a deep dive on the capabilities of the project, check out the Userguide: [Link](https://github.com/CadenGithubB/HardwareOne/blob/main/USERGUIDE.md)
+Hardware One uses **ESP-IDF** (not Arduino IDE). The quickest way to get going:
+
+```bash
+# Clone
+git clone https://github.com/CadenGithubB/HardwareOne.git
+cd HardwareOne
+
+# Build and flash (replace PORT with your device's serial port)
+idf.py -p PORT flash monitor
+```
+
+All user-configurable options (which sensors, which web modules, which network features) live in one file: `components/hardwareone/System_BuildConfig.h`. Flip the flags, rebuild, done.
+
+---
+
+> ## Get up and running quickly: [Quick Start Guide](docs/QUICKSTART.md)
+
+> ## Full reference, commands, and configuration: [User Guide](docs/USERGUIDE.md)
