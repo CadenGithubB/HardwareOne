@@ -75,7 +75,7 @@ Each device in your setup runs one board. Multiple boards can coexist on the sam
 
 ### Peripherals — Stemma QT / I2C
 
-These connect via Stemma QT (or standard I2C) and work the same on any supported board. Mix and match as needed — a hub lets you chain multiple sensors.
+These connect via Stemma QT (or standard I2C) and work the same on any supported board. Mix and match as needed.
 
 | Peripheral | Link |
 | ---------- | ---- |
