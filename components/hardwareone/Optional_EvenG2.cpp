@@ -13,11 +13,9 @@
 #include "Optional_Bluetooth.h"
 #include "System_Debug.h"
 #include "System_Command.h"
+#include "System_Notifications.h"
 #include <cstring>
 #include <ctime>
-
-// Forward declarations
-extern void broadcastOutput(const char* msg);
 
 // =============================================================================
 // GLOBALS
@@ -81,7 +79,7 @@ bool g2SendPacket(uint8_t serviceHi, uint8_t serviceLo, const uint8_t* payload, 
   }
   
   if (payloadLen > 500) {
-    Serial.println("[G2] Payload too large");
+    DEBUG_G2F("[G2] Payload too large");
     return false;
   }
   
@@ -127,14 +125,22 @@ static bool g2SendRawPacket(const uint8_t* packet, size_t len) {
 // =============================================================================
 
 static bool g2RunAuthHandshake() {
-  if (!gG2State || !pG2WriteChar) return false;
+  if (!gG2State || !pG2WriteChar) {
+    DEBUG_G2F("[G2-AUTH] ERROR: State or write char is null");
+    return false;
+  }
   
   gG2State->state = G2_STATE_AUTHENTICATING;
   gG2State->authAttempts++;
   
+  DEBUG_G2F("[G2-AUTH] Starting 7-packet authentication handshake...");
+  DEBUG_G2F("[G2-AUTH] Attempt #%d", gG2State->authAttempts);
+  
   uint32_t timestamp = (uint32_t)time(nullptr);
   uint8_t tsVarint[6];
   size_t tsLen = g2EncodeVarint(timestamp, tsVarint);
+  
+  DEBUG_G2F("[G2-AUTH] Using timestamp: %lu (varint len: %d)", (unsigned long)timestamp, (int)tsLen);
   
   // Transaction ID (fixed pattern from protocol)
   static const uint8_t txid[] = {0xE8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01};
@@ -144,6 +150,7 @@ static bool g2RunAuthHandshake() {
   size_t pktLen;
   
   // Auth 1: Capability query
+  DEBUG_G2F("[G2-AUTH] Sending packet 1/7 (capability query)...");
   {
     static const uint8_t auth1[] = {
       0xAA, 0x21, 0x01, 0x0C, 0x01, 0x01, 0x80, 0x00,
@@ -158,6 +165,7 @@ static bool g2RunAuthHandshake() {
   }
   
   // Auth 2: Capability response request
+  DEBUG_G2F("[G2-AUTH] Sending packet 2/7 (capability response)...");
   {
     static const uint8_t auth2[] = {
       0xAA, 0x21, 0x02, 0x0A, 0x01, 0x01, 0x80, 0x20,
@@ -172,6 +180,7 @@ static bool g2RunAuthHandshake() {
   }
   
   // Auth 3: Time sync with transaction ID
+  DEBUG_G2F("[G2-AUTH] Sending packet 3/7 (time sync)...");
   {
     uint8_t payload[32];
     size_t pos = 0;
@@ -195,6 +204,7 @@ static bool g2RunAuthHandshake() {
   }
   
   // Auth 4-5: Additional capability exchanges
+  DEBUG_G2F("[G2-AUTH] Sending packet 4/7 (capability exchange)...");
   {
     static const uint8_t auth4[] = {
       0xAA, 0x21, 0x04, 0x0C, 0x01, 0x01, 0x80, 0x00,
@@ -208,6 +218,7 @@ static bool g2RunAuthHandshake() {
     vTaskDelay(pdMS_TO_TICKS(100));
   }
   
+  DEBUG_G2F("[G2-AUTH] Sending packet 5/7 (capability exchange)...");
   {
     static const uint8_t auth5[] = {
       0xAA, 0x21, 0x05, 0x0C, 0x01, 0x01, 0x80, 0x00,
@@ -222,6 +233,7 @@ static bool g2RunAuthHandshake() {
   }
   
   // Auth 6: Final capability
+  DEBUG_G2F("[G2-AUTH] Sending packet 6/7 (final capability)...");
   {
     static const uint8_t auth6[] = {
       0xAA, 0x21, 0x06, 0x0A, 0x01, 0x01, 0x80, 0x20,
@@ -236,6 +248,7 @@ static bool g2RunAuthHandshake() {
   }
   
   // Auth 7: Final time sync
+  DEBUG_G2F("[G2-AUTH] Sending packet 7/7 (final time sync)...");
   {
     uint8_t payload[32];
     size_t pos = 0;
@@ -257,13 +270,15 @@ static bool g2RunAuthHandshake() {
     g2SendRawPacket(pkt, 8 + pos + 2);
   }
   
+  DEBUG_G2F("[G2-AUTH] Waiting 500ms for glasses to process...");
   vTaskDelay(pdMS_TO_TICKS(500));  // Wait for glasses to process
   
   gG2State->state = G2_STATE_CONNECTED;
   gG2State->seqNumber = 0x08;  // Continue from auth sequence
   gG2State->msgId = 0x14;      // Continue from auth sequence
   
-  Serial.println("[G2] Auth handshake complete");
+  DEBUG_G2F("[G2-AUTH] === HANDSHAKE COMPLETE ===");
+  DEBUG_G2F("[G2-AUTH] Packets sent: %lu", (unsigned long)gG2State->packetsSent);
   return true;
 }
 
@@ -355,7 +370,7 @@ static void g2NotifyCallback(BLERemoteCharacteristic* pChar, uint8_t* pData, siz
   // Parse packet header
   if (length < 10 || pData[0] != G2_PACKET_MAGIC) {
     if (gG2VerboseLog) {
-      Serial.printf("[G2] RX invalid (%d bytes)\n", length);
+      DEBUG_G2F("[G2] RX invalid (%d bytes)", length);
     }
     return;
   }
@@ -368,14 +383,16 @@ static void g2NotifyCallback(BLERemoteCharacteristic* pChar, uint8_t* pData, siz
   
   // Log packet for debugging/research
   if (gG2VerboseLog) {
-    Serial.printf("[G2] RX Svc:%02X-%02X Typ:%02X Seq:%02X Len:%d | ", 
-                  serviceHi, serviceLo, type, seq, payloadLen);
+    char hexBuf[80];
+    int pos = 0;
     size_t showBytes = (length < 24) ? length : 24;
-    for (size_t i = 8; i < showBytes; i++) {
-      Serial.printf("%02X ", pData[i]);
+    for (size_t i = 8; i < showBytes && pos < (int)sizeof(hexBuf) - 4; i++) {
+      pos += snprintf(hexBuf + pos, sizeof(hexBuf) - pos, "%02X ", pData[i]);
     }
-    if (length > 24) Serial.print("...");
-    Serial.println();
+    if (length > 24 && pos < (int)sizeof(hexBuf) - 4) pos += snprintf(hexBuf + pos, sizeof(hexBuf) - pos, "...");
+    hexBuf[pos] = '\0';
+    DEBUG_G2F("[G2] RX Svc:%02X-%02X Typ:%02X Seq:%02X Len:%d | %s", 
+              serviceHi, serviceLo, type, seq, payloadLen, hexBuf);
   }
   
   // Check if this is an input/touch service
@@ -390,13 +407,12 @@ static void g2NotifyCallback(BLERemoteCharacteristic* pChar, uint8_t* pData, siz
     G2EventType event = g2DecodeGesture(payload, pLen);
     
     if (event != G2_EVENT_UNKNOWN) {
-      Serial.printf("[G2] GESTURE: %s\n", g2EventTypeToString(event));
+      // NOTE: This callback runs on BLE notify task - defer heavy operations (ISR-safe pattern)
+      // Just store event for deferred processing in g2Tick()
+      gG2State->deferredGestureEvent = event;
+      gG2State->deferredGesturePending = true;
       
-      char msg[48];
-      snprintf(msg, sizeof(msg), "[G2] Gesture: %s", g2EventTypeToString(event));
-      broadcastOutput(msg);
-      
-      // Fire callback if registered
+      // Fire callback immediately (user callback should be ISR-safe)
       if (gG2State->eventCallback) {
         gG2State->eventCallback(event);
       }
@@ -417,9 +433,13 @@ public:
     String name = advertisedDevice.getName().c_str();
     
     // Check if this is an Even G2 device
-    if (name.indexOf("G2") == -1) return;
+    // Known patterns: "Even G2_32_L_XXXXXX" (left), "Even G2_32_R_XXXXXX" (right)
+    // Also accept "G2" anywhere for flexibility
+    bool isEvenG2 = name.startsWith("Even G2") || name.indexOf("G2_") != -1;
+    if (!isEvenG2) return;
     
-    Serial.printf("[G2] Found device: %s\n", name.c_str());
+    DEBUG_G2F("[G2] Found device: %s (RSSI: %d)", name.c_str(), advertisedDevice.getRSSI());
+    broadcastOutput("[G2] Found: " + name);
     
     // Check for left/right based on target
     bool isLeft = name.indexOf("_L_") != -1;
@@ -427,7 +447,7 @@ public:
     
     bool match = false;
     if (targetEye == G2_EYE_AUTO) {
-      match = true;
+      match = true;  // Accept any G2 device
     } else if (targetEye == G2_EYE_LEFT && isLeft) {
       match = true;
     } else if (targetEye == G2_EYE_RIGHT && isRight) {
@@ -443,8 +463,9 @@ public:
       
       gScanComplete = true;
       pG2Scan->stop();
-      Serial.printf("[G2] Target device found: %s @ %s\n", 
+      DEBUG_G2F("[G2] Target device found: %s @ %s", 
                     gFoundDeviceName.c_str(), gFoundDeviceAddress.c_str());
+      broadcastOutput("[G2] Connecting to " + name);
     }
   }
 };
@@ -455,11 +476,11 @@ public:
 
 class G2ClientCallbacks : public BLEClientCallbacks {
   void onConnect(BLEClient* pClient) override {
-    Serial.println("[G2] Connected to glasses");
+    DEBUG_G2F("[G2] Connected to glasses");
   }
   
   void onDisconnect(BLEClient* pClient) override {
-    Serial.println("[G2] Disconnected from glasses");
+    DEBUG_G2F("[G2] Disconnected from glasses");
     if (gG2State) {
       gG2State->state = G2_STATE_IDLE;
     }
@@ -473,42 +494,69 @@ class G2ClientCallbacks : public BLEClientCallbacks {
 // =============================================================================
 
 bool initG2Client() {
+  DEBUG_G2F("[G2-INIT] === INITIALIZING G2 CLIENT ===");
+  
   if (gG2State && gG2State->initialized) {
+    DEBUG_G2F("[G2-INIT] Already initialized");
     return true;
   }
   
   // Tear down existing BLE server if running
   if (isBLERunning()) {
-    Serial.println("[G2] Stopping BLE server mode...");
+    DEBUG_G2F("[G2-INIT] BLE server is running, stopping it...");
+    broadcastOutput("[G2] Stopping BLE server mode...");
     deinitBluetooth();
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(200));
+    DEBUG_G2F("[G2-INIT] BLE server stopped");
   }
   
+  // Fully stop and restart the Bluetooth controller to ensure clean state
+  // This is necessary because BLEDevice::deinit() doesn't fully release the controller
+  DEBUG_G2F("[G2-INIT] Stopping BT controller for clean restart...");
+  if (btStarted()) {
+    btStop();
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+  DEBUG_G2F("[G2-INIT] Starting BT controller...");
+  if (!btStart()) {
+    DEBUG_G2F("[G2-INIT] ERROR: btStart() failed");
+    broadcastOutput("[G2] ERROR: BT controller start failed");
+    return false;
+  }
+  vTaskDelay(pdMS_TO_TICKS(100));
+  
   // Allocate state
+  DEBUG_G2F("[G2-INIT] Allocating state structure...");
   gG2State = (G2ClientState*)malloc(sizeof(G2ClientState));
   if (!gG2State) {
-    Serial.println("[G2] Failed to allocate state");
+    DEBUG_G2F("[G2-INIT] ERROR: Failed to allocate state");
+    broadcastOutput("[G2] ERROR: Memory allocation failed");
     return false;
   }
   memset(gG2State, 0, sizeof(G2ClientState));
+  DEBUG_G2F("[G2-INIT] State allocated OK");
   
-  // Initialize BLE if not already
-  if (!BLEDevice::getInitialized()) {
-    BLEDevice::init("HardwareOne");
-  }
+  // Initialize BLE - force reinit since we restarted the controller
+  DEBUG_G2F("[G2-INIT] Initializing BLE stack...");
+  BLEDevice::init("HardwareOne");
+  DEBUG_G2F("[G2-INIT] BLE stack initialized");
   
   // Set global MTU
+  DEBUG_G2F("[G2-INIT] Setting MTU to %d...", G2_MTU_TARGET);
   BLEDevice::setMTU(G2_MTU_TARGET);
   
   // Create scan instance
+  DEBUG_G2F("[G2-INIT] Getting BLE scan instance...");
   pG2Scan = BLEDevice::getScan();
   if (!pG2Scan) {
-    Serial.println("[G2] Failed to get scan instance");
+    DEBUG_G2F("[G2-INIT] ERROR: Failed to get scan instance");
+    broadcastOutput("[G2] ERROR: BLE scan init failed");
     free(gG2State);
     gG2State = nullptr;
     return false;
   }
   
+  DEBUG_G2F("[G2-INIT] Configuring scan parameters...");
   pG2Scan->setActiveScan(true);
   pG2Scan->setInterval(100);
   pG2Scan->setWindow(99);
@@ -516,8 +564,8 @@ bool initG2Client() {
   gG2State->initialized = true;
   gG2State->state = G2_STATE_IDLE;
   
-  Serial.println("[G2] Client initialized");
-  broadcastOutput("[G2] Client mode initialized");
+  DEBUG_G2F("[G2-INIT] === INITIALIZATION COMPLETE ===");
+  broadcastOutput("[G2] Client mode ready");
   return true;
 }
 
@@ -543,7 +591,7 @@ void deinitG2Client() {
   pG2WriteChar = nullptr;
   pG2NotifyChar = nullptr;
   
-  Serial.println("[G2] Client deinitialized");
+  DEBUG_G2F("[G2] Client deinitialized");
 }
 
 bool isG2ClientInitialized() {
@@ -555,12 +603,22 @@ bool isG2ClientInitialized() {
 // =============================================================================
 
 bool g2Connect(G2Eye eye) {
+  DEBUG_G2F("[G2] === CONNECTION START ===");
+  broadcastOutput("[G2] Starting connection...");
+  
   if (!gG2State || !gG2State->initialized) {
-    if (!initG2Client()) return false;
+    DEBUG_G2F("[G2] Client not initialized, initializing now...");
+    broadcastOutput("[G2] Initializing client...");
+    if (!initG2Client()) {
+      DEBUG_G2F("[G2] ERROR: Failed to initialize client");
+      broadcastOutput("[G2] ERROR: Init failed");
+      return false;
+    }
   }
   
   if (gG2State->state == G2_STATE_CONNECTED) {
-    Serial.println("[G2] Already connected");
+    DEBUG_G2F("[G2] Already connected");
+    broadcastOutput("[G2] Already connected");
     return true;
   }
   
@@ -570,77 +628,129 @@ bool g2Connect(G2Eye eye) {
   gFoundDeviceName = "";
   gFoundDeviceAddress = "";
   
-  Serial.printf("[G2] Scanning for %s eye...\n", 
-                eye == G2_EYE_LEFT ? "left" : 
-                eye == G2_EYE_RIGHT ? "right" : "any");
-  broadcastOutput("[G2] Scanning for glasses...");
+  const char* eyeStr = eye == G2_EYE_LEFT ? "LEFT" : 
+                       eye == G2_EYE_RIGHT ? "RIGHT" : "AUTO";
+  DEBUG_G2F("[G2] STEP 1: Scanning for %s eye (10 sec timeout)...", eyeStr);
+  BROADCAST_PRINTF("[G2] Scanning for %s eye...", eyeStr);
+  broadcastOutput("[G2] Make sure glasses are NOT connected to phone!");
   
   // Start scan
   pG2Scan->setAdvertisedDeviceCallbacks(new G2AdvertisedDeviceCallbacks(eye), true);
   pG2Scan->start(10, false);  // 10 seconds, non-blocking
   
-  // Wait for scan completion
+  // Wait for scan completion with progress
   uint32_t scanStart = millis();
+  int lastSec = -1;
   while (!gScanComplete && millis() - scanStart < 12000) {
+    int sec = (millis() - scanStart) / 1000;
+    if (sec != lastSec && sec % 2 == 0) {
+      DEBUG_G2F("[G2] Scanning... %d sec", sec);
+      lastSec = sec;
+    }
     vTaskDelay(pdMS_TO_TICKS(100));
   }
   
+  pG2Scan->stop();  // Ensure scan is stopped
+  
   if (!gScanComplete || !pG2FoundDevice) {
     gG2State->state = G2_STATE_IDLE;
-    Serial.println("[G2] No glasses found");
-    broadcastOutput("[G2] No glasses found");
+    DEBUG_G2F("[G2] ERROR: No G2 glasses found during scan");
+    DEBUG_G2F("[G2] Check: Is Bluetooth on? Are glasses powered on? Is phone disconnected?");
+    broadcastOutput("[G2] No glasses found!");
+    broadcastOutput("[G2] Tips: Power on glasses, disconnect phone app");
     return false;
   }
   
   // Connect
   gG2State->state = G2_STATE_CONNECTING;
-  Serial.printf("[G2] Connecting to %s...\n", gFoundDeviceName.c_str());
+  DEBUG_G2F("[G2] STEP 2: Connecting to %s @ %s", 
+            gFoundDeviceName.c_str(), gFoundDeviceAddress.c_str());
+  BROADCAST_PRINTF("[G2] Connecting to %s...", gFoundDeviceName.c_str());
   
-  if (pG2Client) delete pG2Client;
+  if (pG2Client) {
+    DEBUG_G2F("[G2] Cleaning up old client...");
+    delete pG2Client;
+  }
   pG2Client = BLEDevice::createClient();
   pG2Client->setClientCallbacks(new G2ClientCallbacks());
   
+  DEBUG_G2F("[G2] Attempting BLE connection...");
   if (!pG2Client->connect(pG2FoundDevice)) {
     gG2State->state = G2_STATE_ERROR;
-    Serial.println("[G2] Connection failed");
-    broadcastOutput("[G2] Connection failed");
+    DEBUG_G2F("[G2] ERROR: BLE connection failed");
+    DEBUG_G2F("[G2] Check: Is the device still in range? Phone disconnected?");
+    broadcastOutput("[G2] Connection failed!");
     return false;
   }
+  DEBUG_G2F("[G2] BLE connection established");
+  broadcastOutput("[G2] BLE connected, negotiating MTU...");
   
   // Request MTU
+  DEBUG_G2F("[G2] STEP 3: Requesting MTU %d...", G2_MTU_TARGET);
   pG2Client->setMTU(G2_MTU_TARGET);
   gG2State->mtu = pG2Client->getMTU();
-  Serial.printf("[G2] MTU: %d\n", gG2State->mtu);
+  DEBUG_G2F("[G2] MTU negotiated: %d bytes", gG2State->mtu);
+  BROADCAST_PRINTF("[G2] MTU: %d bytes", gG2State->mtu);
   
   // Get service
+  DEBUG_G2F("[G2] STEP 4: Discovering G2 service...");
+  DEBUG_G2F("[G2] Looking for service UUID: %s", G2_SERVICE_UUID);
   BLERemoteService* pService = pG2Client->getService(BLEUUID(G2_SERVICE_UUID));
   if (!pService) {
-    Serial.println("[G2] Service not found");
+    DEBUG_G2F("[G2] ERROR: G2 service not found!");
+    DEBUG_G2F("[G2] This device may not be an Even G2 glasses");
+    broadcastOutput("[G2] ERROR: Service not found");
     g2Disconnect();
     return false;
   }
+  DEBUG_G2F("[G2] G2 service found");
+  broadcastOutput("[G2] Service found, getting characteristics...");
   
   // Get characteristics
+  DEBUG_G2F("[G2] STEP 5: Getting characteristics...");
+  DEBUG_G2F("[G2] Write char: %s", G2_CHAR_WRITE_UUID);
+  DEBUG_G2F("[G2] Notify char: %s", G2_CHAR_NOTIFY_UUID);
+  
   pG2WriteChar = pService->getCharacteristic(BLEUUID(G2_CHAR_WRITE_UUID));
   pG2NotifyChar = pService->getCharacteristic(BLEUUID(G2_CHAR_NOTIFY_UUID));
   
-  if (!pG2WriteChar || !pG2NotifyChar) {
-    Serial.println("[G2] Characteristics not found");
+  if (!pG2WriteChar) {
+    DEBUG_G2F("[G2] ERROR: Write characteristic not found");
+    broadcastOutput("[G2] ERROR: Write char missing");
     g2Disconnect();
     return false;
   }
+  DEBUG_G2F("[G2] Write characteristic found");
+  
+  if (!pG2NotifyChar) {
+    DEBUG_G2F("[G2] ERROR: Notify characteristic not found");
+    broadcastOutput("[G2] ERROR: Notify char missing");
+    g2Disconnect();
+    return false;
+  }
+  DEBUG_G2F("[G2] Notify characteristic found");
+  broadcastOutput("[G2] Characteristics OK");
   
   // Subscribe to notifications
+  DEBUG_G2F("[G2] STEP 6: Subscribing to notifications...");
   if (pG2NotifyChar->canNotify()) {
     pG2NotifyChar->registerForNotify(g2NotifyCallback);
-    Serial.println("[G2] Subscribed to notifications");
+    DEBUG_G2F("[G2] Notification subscription successful");
+    broadcastOutput("[G2] Notifications enabled");
+  } else {
+    DEBUG_G2F("[G2] WARNING: Notify characteristic doesn't support notifications");
   }
   
   vTaskDelay(pdMS_TO_TICKS(300));
   
   // Run auth handshake
+  DEBUG_G2F("[G2] STEP 7: Running authentication handshake...");
+  broadcastOutput("[G2] Authenticating (7-packet handshake)...");
+  gG2State->state = G2_STATE_AUTHENTICATING;
+  
   if (!g2RunAuthHandshake()) {
-    Serial.println("[G2] Auth handshake failed");
+    DEBUG_G2F("[G2] ERROR: Authentication handshake failed");
+    broadcastOutput("[G2] ERROR: Auth failed");
     g2Disconnect();
     return false;
   }
@@ -649,9 +759,14 @@ bool g2Connect(G2Eye eye) {
   gG2State->deviceAddress = gFoundDeviceAddress;
   gG2State->connectedSince = millis();
   
-  char msg[64];
-  snprintf(msg, sizeof(msg), "[G2] Connected to %s", gFoundDeviceName.c_str());
-  broadcastOutput(msg);
+  DEBUG_G2F("[G2] === CONNECTION COMPLETE ===");
+  DEBUG_G2F("[G2] Connected to: %s", gFoundDeviceName.c_str());
+  DEBUG_G2F("[G2] Address: %s", gFoundDeviceAddress.c_str());
+  DEBUG_G2F("[G2] MTU: %d", gG2State->mtu);
+  
+  BROADCAST_PRINTF("[G2] SUCCESS: Connected to %s", gFoundDeviceName.c_str());
+  broadcastOutput("[G2] Ready! Try: g2 show \"Hello\"");
+  notifyBleDeviceConnected(gFoundDeviceName.c_str());
   
   return true;
 }
@@ -672,8 +787,9 @@ void g2Disconnect() {
   gG2State->deviceName = "";
   gG2State->deviceAddress = "";
   
-  Serial.println("[G2] Disconnected");
+  DEBUG_G2F("[G2] Disconnected");
   broadcastOutput("[G2] Disconnected");
+  notifyBleDeviceDisconnected("G2");
 }
 
 bool isG2Connected() {
@@ -953,11 +1069,11 @@ static void g2FormatTextToPages(const char* text, String pages[], size_t& pageCo
 
 bool g2ShowText(const char* text) {
   if (!isG2Connected()) {
-    Serial.println("[G2] Not connected");
+    DEBUG_G2F("[G2] Not connected");
     return false;
   }
   
-  Serial.printf("[G2] Showing text: %s\n", text);
+  DEBUG_G2F("[G2] Showing text: %s", text);
   
   // Format text into pages
   String pages[50];
@@ -999,7 +1115,7 @@ bool g2ShowText(const char* text) {
     vTaskDelay(pdMS_TO_TICKS(100));
   }
   
-  Serial.println("[G2] Text sent");
+  DEBUG_G2F("[G2] Text sent");
   return true;
 }
 
@@ -1027,14 +1143,28 @@ void g2SetEventCallback(G2EventCallback callback) {
 }
 
 void g2Tick() {
-  // Placeholder for periodic processing
+  if (!gG2State) return;
+  
+  // Handle deferred gesture event (set by notify callback, processed here with proper stack)
+  if (gG2State->deferredGesturePending) {
+    gG2State->deferredGesturePending = false;
+    G2EventType event = gG2State->deferredGestureEvent;
+    
+    DEBUG_G2F("[G2] GESTURE: %s", g2EventTypeToString(event));
+    
+    char msg[48];
+    snprintf(msg, sizeof(msg), "[G2] Gesture: %s", g2EventTypeToString(event));
+    broadcastOutput(msg);
+  }
+  
   // Connection health check, reconnect logic, etc.
-  if (gG2State && gG2State->state == G2_STATE_CONNECTED) {
+  if (gG2State->state == G2_STATE_CONNECTED) {
     if (pG2Client && !pG2Client->isConnected()) {
-      Serial.println("[G2] Connection lost");
+      DEBUG_G2F("[G2] Connection lost");
       gG2State->state = G2_STATE_IDLE;
       pG2WriteChar = nullptr;
       pG2NotifyChar = nullptr;
+      notifyBleDeviceDisconnected("G2");
     }
   }
 }
@@ -1070,6 +1200,7 @@ void getG2Status(char* buffer, size_t bufferSize) {
 
 static const char* cmd_g2connect(const String& cmd) {
   String arg = cmd;
+  arg.replace("openg2", "");
   arg.replace("g2 connect", "");
   arg.replace("g2connect", "");
   arg.trim();
@@ -1175,14 +1306,14 @@ extern void oledMenuBack();
 static void g2DefaultGestureHandler(G2EventType event) {
   switch (event) {
     case G2_EVENT_SWIPE_UP:
-      Serial.println("[G2] -> Menu UP");
+      DEBUG_G2F("[G2] -> Menu UP");
       #if ENABLE_OLED_DISPLAY
       oledMenuUp();
       #endif
       break;
       
     case G2_EVENT_SWIPE_DOWN:
-      Serial.println("[G2] -> Menu DOWN");
+      DEBUG_G2F("[G2] -> Menu DOWN");
       #if ENABLE_OLED_DISPLAY
       oledMenuDown();
       #endif
@@ -1190,7 +1321,7 @@ static void g2DefaultGestureHandler(G2EventType event) {
       
     case G2_EVENT_TAP:
     case G2_EVENT_SWIPE_RIGHT:
-      Serial.println("[G2] -> Menu SELECT");
+      DEBUG_G2F("[G2] -> Menu SELECT");
       #if ENABLE_OLED_DISPLAY
       oledMenuSelect();
       #endif
@@ -1198,14 +1329,14 @@ static void g2DefaultGestureHandler(G2EventType event) {
       
     case G2_EVENT_LONG_PRESS:
     case G2_EVENT_SWIPE_LEFT:
-      Serial.println("[G2] -> Menu BACK");
+      DEBUG_G2F("[G2] -> Menu BACK");
       #if ENABLE_OLED_DISPLAY
       oledMenuBack();
       #endif
       break;
       
     case G2_EVENT_DOUBLE_TAP:
-      Serial.println("[G2] -> Voice arm toggle");
+      DEBUG_G2F("[G2] -> Voice arm toggle");
       // Could trigger voice arm/disarm here
       break;
       
@@ -1215,7 +1346,7 @@ static void g2DefaultGestureHandler(G2EventType event) {
 }
 
 // Enable/disable default gesture-to-menu mapping
-static bool gG2MenuNavEnabled = true;
+bool gG2MenuNavEnabled = true;
 
 static const char* cmd_g2nav(const String& cmd) {
   String arg = cmd;
@@ -1226,10 +1357,12 @@ static const char* cmd_g2nav(const String& cmd) {
   if (arg.equalsIgnoreCase("on") || arg == "1") {
     gG2MenuNavEnabled = true;
     g2SetEventCallback(g2DefaultGestureHandler);
+    notifyGestureNavToggled(true);
     return "G2 menu navigation ON";
   } else if (arg.equalsIgnoreCase("off") || arg == "0") {
     gG2MenuNavEnabled = false;
     g2SetEventCallback(nullptr);
+    notifyGestureNavToggled(false);
     return "G2 menu navigation OFF";
   }
   
@@ -1241,9 +1374,9 @@ static const char* cmd_g2nav(const String& cmd) {
 // =============================================================================
 
 const CommandEntry g2Commands[] = {
-  { "g2 connect",    "Connect to G2 glasses: g2 connect [left|right|auto]", false, cmd_g2connect },
-  { "g2 disconnect", "Disconnect from G2 glasses",                          false, cmd_g2disconnect },
-  { "g2 status",     "Show G2 glasses connection status",                   false, cmd_g2status },
+  { "openg2",        "Connect to G2 glasses: openg2 [left|right|auto]",    false, cmd_g2connect },
+  { "closeg2",       "Disconnect from G2 glasses",                          false, cmd_g2disconnect },
+  { "g2status",      "Show G2 glasses connection status",                   false, cmd_g2status },
   { "g2 show",       "Display text on G2 glasses: g2 show <text>",          false, cmd_g2show },
   { "g2 scan",       "Scan for G2 glasses",                                 false, cmd_g2scan },
   { "g2 init",       "Initialize G2 client mode (disables BLE server)",     false, cmd_g2init },

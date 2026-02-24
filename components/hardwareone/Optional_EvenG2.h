@@ -109,6 +109,10 @@ struct G2ClientState {
   
   // Event callback
   G2EventCallback eventCallback;
+  
+  // Deferred event handling (ISR-safe pattern: callback sets flag, task processes)
+  bool deferredGesturePending;
+  G2EventType deferredGestureEvent;
 };
 
 // -----------------------------------------------------------------------------

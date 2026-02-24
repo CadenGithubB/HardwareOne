@@ -5,13 +5,11 @@
 #include "System_Settings.h"
 #include "System_Debug.h"
 #include "System_Camera_DVP.h"
+#include "System_MemUtil.h"
 #include "esp_camera.h"
 #include "img_converters.h"
 #include <ArduinoJson.h>
 #include <LittleFS.h>
-
-// SSE status broadcast
-extern void sensorStatusBumpWith(const char* reason);
 
 // TensorFlow Lite Micro includes
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -318,7 +316,7 @@ const TrackedObject* getTrackedObject(int index) {
 
 // Build JSON for state changes
 void buildStateChangeJson(String& output) {
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   
   JsonArray objects = doc["trackedObjects"].to<JsonArray>();
   for (int i = 0; i < gTrackedObjectCount; i++) {
@@ -481,14 +479,8 @@ bool loadModelFromFile(const char* path) {
   }
   
   // Allocate model buffer in PSRAM if available
-  DEBUG_SYSTEMF("[EI_DEBUG] Allocating model buffer: %zu bytes in %s",
-                fileSize, psramFound() ? "PSRAM" : "DRAM");
-  
-  if (psramFound()) {
-    gModelBuffer = (uint8_t*)ps_malloc(fileSize);
-  } else {
-    gModelBuffer = (uint8_t*)malloc(fileSize);
-  }
+  DEBUG_SYSTEMF("[EI_DEBUG] Allocating model buffer: %zu bytes", fileSize);
+  gModelBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPSRAM, "ei.model");
   
   if (!gModelBuffer) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate model buffer (%zu bytes)", fileSize);
@@ -556,14 +548,8 @@ bool loadModelFromFile(const char* path) {
   DEBUG_SYSTEMF("[EI_DEBUG] Op resolver ready");
   
   // Allocate tensor arena in PSRAM
-  DEBUG_SYSTEMF("[EI_DEBUG] Allocating tensor arena: %zu KB in %s",
-                kTensorArenaSize / 1024, psramFound() ? "PSRAM" : "DRAM");
-  
-  if (psramFound()) {
-    gTensorArena = (uint8_t*)ps_malloc(kTensorArenaSize);
-  } else {
-    gTensorArena = (uint8_t*)malloc(kTensorArenaSize);
-  }
+  DEBUG_SYSTEMF("[EI_DEBUG] Allocating tensor arena: %zu KB", kTensorArenaSize / 1024);
+  gTensorArena = (uint8_t*)ps_alloc(kTensorArenaSize, AllocPref::PreferPSRAM, "ei.arena");
   
   if (!gTensorArena) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate tensor arena (%zu bytes)", kTensorArenaSize);
@@ -684,8 +670,7 @@ bool loadModelFromFile(const char* path) {
   if (gModelInputWidth > 0 && gModelInputWidth != gSettings.edgeImpulseInputSize) {
     DEBUG_SYSTEMF("[EI_DEBUG] Model input size changed: %d -> %d, reallocating buffers...",
                   gSettings.edgeImpulseInputSize, gModelInputWidth);
-    gSettings.edgeImpulseInputSize = gModelInputWidth;
-    writeSettingsJson();  // Persist the new input size
+    setSetting(gSettings.edgeImpulseInputSize, (int)gModelInputWidth);
     
     // Reallocate image buffers for new model size
     if (!allocateImageBuffers(gSettings.edgeImpulseInputSize)) {
@@ -848,19 +833,11 @@ static bool allocateImageBuffers(int inputSize) {
   gRgbBufferSize = 640 * 480 * 3;
   gResizedBufferSize = inputSize * inputSize * 3;
   
-  DEBUG_SYSTEMF("[EI_DEBUG]   Allocating: RGB=%zu bytes, Resized=%zu bytes in %s",
-                gRgbBufferSize, gResizedBufferSize, psramFound() ? "PSRAM" : "DRAM");
-  DEBUG_SYSTEMF("[EI_DEBUG]   PSRAM free before: %lu",
-                (unsigned long)(psramFound() ? ESP.getFreePsram() : ESP.getFreeHeap()));
+  DEBUG_SYSTEMF("[EI_DEBUG]   Allocating: RGB=%zu bytes, Resized=%zu bytes",
+                gRgbBufferSize, gResizedBufferSize);
   
-  // Allocate in PSRAM if available
-  if (psramFound()) {
-    gRgbBuffer = (uint8_t*)ps_malloc(gRgbBufferSize);
-    gResizedBuffer = (uint8_t*)ps_malloc(gResizedBufferSize);
-  } else {
-    gRgbBuffer = (uint8_t*)malloc(gRgbBufferSize);
-    gResizedBuffer = (uint8_t*)malloc(gResizedBufferSize);
-  }
+  gRgbBuffer = (uint8_t*)ps_alloc(gRgbBufferSize, AllocPref::PreferPSRAM, "ei.rgb");
+  gResizedBuffer = (uint8_t*)ps_alloc(gResizedBufferSize, AllocPref::PreferPSRAM, "ei.resized");
   
   if (!gRgbBuffer || !gResizedBuffer) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate image buffers");
@@ -1482,12 +1459,7 @@ EIResults runInferenceFromFile(const char* imagePath) {
   }
   
   // Allocate buffer for image file (JPEG/etc)
-  uint8_t* imgBuffer = nullptr;
-  if (psramFound()) {
-    imgBuffer = (uint8_t*)ps_malloc(fileSize);
-  } else {
-    imgBuffer = (uint8_t*)malloc(fileSize);
-  }
+  uint8_t* imgBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPSRAM, "ei.img");
   
   if (!imgBuffer) {
     imgFile.close();
@@ -1868,7 +1840,7 @@ void startContinuousInference() {
     return;
   }
   
-  gSettings.edgeImpulseContinuous = true;
+  setSetting(gSettings.edgeImpulseContinuous, true);
   DEBUG_SYSTEMF("[EI_DEBUG]   Continuous inference started, task handle=%p", gEIContinuousTask);
 }
 
@@ -1878,7 +1850,7 @@ void stopContinuousInference() {
   DEBUG_SYSTEMF("[EI_DEBUG]   Task handle: %p", gEIContinuousTask);
   
   gEIContinuousRunning = false;
-  gSettings.edgeImpulseContinuous = false;
+  setSetting(gSettings.edgeImpulseContinuous, false);
   // Task will self-delete on next loop iteration
   
   DEBUG_SYSTEMF("[EI_DEBUG]   Stop signal sent, task will exit on next iteration");
@@ -1893,7 +1865,7 @@ bool isContinuousInferenceRunning() {
 // ============================================================================
 
 void buildDetectionJson(const EIResults& results, String& output) {
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   
   doc["success"] = results.success;
   doc["inferenceTimeMs"] = results.inferenceTimeMs;
@@ -1921,18 +1893,15 @@ void buildDetectionJson(const EIResults& results, String& output) {
 // Web API Handler
 // ============================================================================
 
+#if ENABLE_HTTP_SERVER
+
 #include "WebServer_Server.h"
 #include "System_Auth.h"
 
 // Organize EI model files: move loose .tflite and .labels.txt into proper /EI Models/<name>/ folders
 static esp_err_t handleEIOrganize(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/api/ei/organize";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
 
   extern bool filesystemReady;
   if (!filesystemReady) {
@@ -2025,18 +1994,14 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
 }
 
 esp_err_t handleEdgeImpulseDetect(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/edgeimpulse/detect";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
   
   // Run inference
   EIResults results = runEdgeImpulseInference();
   
   // Build combined JSON response with detections and tracked objects
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   
   doc["success"] = results.success;
   doc["inferenceTimeMs"] = results.inferenceTimeMs;
@@ -2117,7 +2082,7 @@ const char* cmd_ei_enable(const String& cmd) {
   }
   
   int val = trimmed.toInt();
-  gSettings.edgeImpulseEnabled = (val != 0);
+  setSetting(gSettings.edgeImpulseEnabled, (bool)(val != 0));
   
   if (gSettings.edgeImpulseEnabled && !gEIInitialized) {
     initEdgeImpulse();
@@ -2232,7 +2197,7 @@ const char* cmd_ei_confidence(const String& cmd) {
   if (val < 0.0f) val = 0.0f;
   if (val > 1.0f) val = 1.0f;
   
-  gSettings.edgeImpulseMinConfidence = val;
+  setSetting(gSettings.edgeImpulseMinConfidence, val);
   snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Min confidence set to %.2f", val);
   return gEICmdBuffer;
 }
@@ -2493,5 +2458,7 @@ void registerEdgeImpulseHandlers(httpd_handle_t server) {
   httpd_register_uri_handler(server, &eiOrganizePost);
   httpd_register_uri_handler(server, &edgeImpulseDetect);
 }
+
+#endif // ENABLE_HTTP_SERVER
 
 #endif // ENABLE_EDGE_IMPULSE
