@@ -131,6 +131,7 @@ void I2CDeviceManager::initBuses() {
   // Use configurable pins from settings (defaults: SDA=22, SCL=19 for original, SDA=22, SCL=20 for Feather V2)
   Wire1.begin(gSettings.i2cSdaPin, gSettings.i2cSclPin);
   Wire1.setClock(I2C_WIRE1_DEFAULT_FREQ);
+  Wire1.setTimeOut(500);  // Abort hung transactions after 500ms; prevents interrupt WDT crash
   currentClockHz = I2C_WIRE1_DEFAULT_FREQ;
   // Glitch filter: ignore pulses < 7 APB cycles (~88ns at 80MHz).
   // Prevents spurious bus errors from EMI/noise that trigger i2c_hw_disable
