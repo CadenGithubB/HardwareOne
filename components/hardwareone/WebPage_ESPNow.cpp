@@ -1,8 +1,9 @@
 #include "System_BuildConfig.h"
 
-#if ENABLE_HTTP_SERVER
+#if ENABLE_WEB_ESPNOW
 
 #include <Arduino.h>
+#include <LittleFS.h>
 
 #include "System_User.h"
 #include "WebPage_ESPNow.h"
@@ -10,8 +11,6 @@
 #include "WebServer_Utils.h"
 
 // Forward declarations
-extern bool isAuthed(httpd_req_t* req, String& outUser);
-extern void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason);
 extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*));
 extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
 extern void streamEndHtml(httpd_req_t* req);
@@ -27,13 +26,8 @@ static void streamEspNowContent(httpd_req_t* req) {
 }
 
 static esp_err_t handleEspNowPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/espnow";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
 
   streamPageWithContent(req, "espnow", ctx.user, streamEspNowContent);
   return ESP_OK;
@@ -50,6 +44,7 @@ static esp_err_t handleEspNowPage(httpd_req_t* req) {
 
 extern EspNowState* gEspNow;
 extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
+extern esp_err_t handleEspNowMetadata(httpd_req_t* req);
 
 static inline esp_err_t webEspnowSendChunk(httpd_req_t* req, const char* s) {
   return httpd_resp_send_chunk(req, s, HTTPD_RESP_USE_STRLEN);
@@ -142,11 +137,7 @@ static esp_err_t webEspnowSendJsonEscapedString(httpd_req_t* req, const char* s)
  * }
  */
 static esp_err_t handleEspNowMessages(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/espnow/messages";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   
   if (!tgRequireAuth(ctx)) {
     return ESP_OK;
@@ -253,6 +244,187 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
   return err;
 }
 
+/**
+ * @brief Get remote device capability summary (cached from bond requestcap)
+ * @return JSON with remote capability info including human-readable names
+ */
+static esp_err_t handleEspNowRemoteCap(httpd_req_t* req) {
+  AuthContext ctx = makeWebAuthCtx(req);
+  
+  if (!tgRequireAuth(ctx)) {
+    return ESP_OK;
+  }
+  
+  httpd_resp_set_type(req, "application/json");
+  
+  if (!gEspNow || !gEspNow->lastRemoteCapValid) {
+    httpd_resp_send(req, "{\"valid\":false}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  
+  CapabilitySummary& cap = gEspNow->lastRemoteCap;
+  
+  // Get human-readable capability lists
+  String featureList = getCapabilityListLong(cap.featureMask, FEATURE_NAMES);
+  String serviceList = getCapabilityListLong(cap.serviceMask, SERVICE_NAMES);
+  String sensorList = getCapabilityListLong(cap.sensorMask, SENSOR_NAMES);
+  
+  // Build fwHash hex string
+  char fwHashHex[33];
+  for (int i = 0; i < 16; i++) {
+    snprintf(fwHashHex + (i * 2), 3, "%02x", cap.fwHash[i]);
+  }
+  
+  // Build MAC string
+  char macStr[18];
+  snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+           cap.mac[0], cap.mac[1], cap.mac[2],
+           cap.mac[3], cap.mac[4], cap.mac[5]);
+  
+  // Stream JSON response (larger due to human-readable strings)
+  esp_err_t err = webEspnowSendChunk(req, "{\"valid\":true,");
+  if (err != ESP_OK) goto done;
+  
+  err = webEspnowSendChunkf(req, "\"deviceName\":\"%s\",", cap.deviceName);
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunkf(req, "\"mac\":\"%s\",", macStr);
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunkf(req, "\"role\":%d,", (int)cap.role);
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunkf(req, "\"roleName\":\"%s\",", cap.role == 1 ? "master" : "worker");
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunkf(req, "\"fwHash\":\"%s\",", fwHashHex);
+  if (err != ESP_OK) goto done;
+  
+  // Raw masks
+  err = webEspnowSendChunkf(req, "\"featureMask\":%lu,", (unsigned long)cap.featureMask);
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunkf(req, "\"serviceMask\":%lu,", (unsigned long)cap.serviceMask);
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunkf(req, "\"sensorMask\":%lu,", (unsigned long)cap.sensorMask);
+  if (err != ESP_OK) goto done;
+  
+  // Human-readable lists
+  err = webEspnowSendChunk(req, "\"features\":");
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendJsonEscapedString(req, featureList.c_str());
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunk(req, ",\"services\":");
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendJsonEscapedString(req, serviceList.c_str());
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunk(req, ",\"sensors\":");
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendJsonEscapedString(req, sensorList.c_str());
+  if (err != ESP_OK) goto done;
+  
+  // Hardware info
+  err = webEspnowSendChunkf(req, ",\"flashSizeMB\":%lu,", (unsigned long)cap.flashSizeMB);
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunkf(req, "\"psramSizeMB\":%lu,", (unsigned long)cap.psramSizeMB);
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunkf(req, "\"wifiChannel\":%d,", (int)cap.wifiChannel);
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunkf(req, "\"uptimeSeconds\":%lu,", (unsigned long)cap.uptimeSeconds);
+  if (err != ESP_OK) goto done;
+  err = webEspnowSendChunkf(req, "\"ageMs\":%lu}", (unsigned long)(millis() - gEspNow->lastRemoteCapTime));
+  
+done:
+  httpd_resp_send_chunk(req, NULL, 0);
+  return ESP_OK;
+}
+
+/**
+ * @brief List cached remote manifests or get specific manifest content
+ * Query params: ?fwHash=<hash> to get specific manifest
+ * Without params: returns list of available manifests
+ */
+static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
+  AuthContext ctx = makeWebAuthCtx(req);
+  
+  if (!tgRequireAuth(ctx)) {
+    return ESP_OK;
+  }
+  
+  httpd_resp_set_type(req, "application/json");
+  
+  extern bool filesystemReady;
+  if (!filesystemReady) {
+    httpd_resp_send(req, "{\"error\":\"Filesystem not ready\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  
+  const char* manifestDir = "/system/manifests";
+  
+  // Check for fwHash query param
+  char queryBuf[64];
+  char fwHashParam[40] = {0};
+  if (httpd_req_get_url_query_str(req, queryBuf, sizeof(queryBuf)) == ESP_OK) {
+    httpd_query_key_value(queryBuf, "fwHash", fwHashParam, sizeof(fwHashParam));
+  }
+  
+  // If fwHash provided, return that specific manifest
+  if (strlen(fwHashParam) > 0) {
+    String path = String(manifestDir) + "/" + fwHashParam + ".json";
+    File f = LittleFS.open(path.c_str(), "r");
+    if (!f) {
+      httpd_resp_send(req, "{\"error\":\"Manifest not found\"}", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
+    
+    // Stream the manifest file content
+    webEspnowSendChunk(req, "{\"fwHash\":\"");
+    webEspnowSendChunk(req, fwHashParam);
+    webEspnowSendChunk(req, "\",\"manifest\":");
+    
+    char buf[256];
+    while (f.available()) {
+      int len = f.readBytes(buf, sizeof(buf) - 1);
+      buf[len] = '\0';
+      httpd_resp_send_chunk(req, buf, len);
+    }
+    f.close();
+    
+    webEspnowSendChunk(req, "}");
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+  }
+  
+  // No fwHash - list all cached manifests
+  if (!LittleFS.exists(manifestDir)) {
+    httpd_resp_send(req, "{\"manifests\":[]}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  
+  File dir = LittleFS.open(manifestDir);
+  if (!dir || !dir.isDirectory()) {
+    httpd_resp_send(req, "{\"manifests\":[]}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  
+  webEspnowSendChunk(req, "{\"manifests\":[");
+  bool first = true;
+  File entry;
+  while ((entry = dir.openNextFile())) {
+    if (!entry.isDirectory()) {
+      String name = entry.name();
+      if (name.endsWith(".json")) {
+        String fwHash = name.substring(0, name.length() - 5);
+        if (!first) webEspnowSendChunk(req, ",");
+        first = false;
+        webEspnowSendChunkf(req, "{\"fwHash\":\"%s\",\"size\":%d}", 
+                           fwHash.c_str(), (int)entry.size());
+      }
+    }
+    entry.close();
+  }
+  dir.close();
+  
+  webEspnowSendChunk(req, "]}");
+  httpd_resp_send_chunk(req, NULL, 0);
+  return ESP_OK;
+}
+
 #endif // ENABLE_ESPNOW
 
 // =============================================================================
@@ -266,6 +438,15 @@ void registerEspNowHandlers(httpd_handle_t server) {
 #if ENABLE_ESPNOW
   static httpd_uri_t espnowMessages = { .uri = "/api/espnow/messages", .method = HTTP_GET, .handler = handleEspNowMessages, .user_ctx = NULL };
   httpd_register_uri_handler(server, &espnowMessages);
+  
+  static httpd_uri_t espnowRemoteCap = { .uri = "/api/espnow/remotecap", .method = HTTP_GET, .handler = handleEspNowRemoteCap, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &espnowRemoteCap);
+  
+  static httpd_uri_t espnowRemoteManifest = { .uri = "/api/espnow/remotemanifest", .method = HTTP_GET, .handler = handleEspNowRemoteManifest, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &espnowRemoteManifest);
+  
+  static httpd_uri_t espnowMetadata = { .uri = "/api/espnow/metadata", .method = HTTP_GET, .handler = handleEspNowMetadata, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &espnowMetadata);
 #endif
 }
 
