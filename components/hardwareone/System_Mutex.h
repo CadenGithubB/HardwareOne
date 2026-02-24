@@ -19,17 +19,17 @@
 // Filesystem mutex - protects LittleFS access (not thread-safe)
 extern SemaphoreHandle_t fsMutex;
 
-// I2C bus mutex - protects Wire/Wire1 transactions
+// I2C bus mutex - set by initI2CManager() to the manager's recursive mutex
 extern SemaphoreHandle_t i2cMutex;
-
-// I2C health tracking mutex - protects device health array and clock stack
-extern SemaphoreHandle_t i2cHealthMutex;
 
 // JSON response buffer mutex - protects shared gJsonResponseBuffer
 extern SemaphoreHandle_t gJsonResponseMutex;
 
 // ESP-NOW mesh retry queue mutex
 extern SemaphoreHandle_t gMeshRetryMutex;
+
+// ESP-NOW file transfer mutex - protects gActiveFileTransfer state
+extern SemaphoreHandle_t gFileTransferMutex;
 
 extern SemaphoreHandle_t i2sMicMutex;
 
@@ -124,6 +124,48 @@ struct MeshRetryGuard {
   
   MeshRetryGuard(const MeshRetryGuard&) = delete;
   MeshRetryGuard& operator=(const MeshRetryGuard&) = delete;
+};
+
+/**
+ * FileTransferGuard - RAII guard for ESP-NOW file transfer state mutex
+ */
+struct FileTransferGuard {
+  bool held;
+  explicit FileTransferGuard(const char* owner = nullptr);
+  ~FileTransferGuard();
+  
+  FileTransferGuard(const FileTransferGuard&) = delete;
+  FileTransferGuard& operator=(const FileTransferGuard&) = delete;
+};
+
+// ESP-NOW topology streams mutex - protects gTopoStreams, gTopoDeviceCache, gPeerBuffer
+extern SemaphoreHandle_t gTopoStreamsMutex;
+
+// ESP-NOW chunked message mutex - protects gActiveMessage
+extern SemaphoreHandle_t gChunkedMsgMutex;
+
+/**
+ * TopoStreamsGuard - RAII guard for topology streams state mutex
+ */
+struct TopoStreamsGuard {
+  bool held;
+  explicit TopoStreamsGuard(const char* owner = nullptr);
+  ~TopoStreamsGuard();
+  
+  TopoStreamsGuard(const TopoStreamsGuard&) = delete;
+  TopoStreamsGuard& operator=(const TopoStreamsGuard&) = delete;
+};
+
+/**
+ * ChunkedMsgGuard - RAII guard for chunked message state mutex
+ */
+struct ChunkedMsgGuard {
+  bool held;
+  explicit ChunkedMsgGuard(const char* owner = nullptr);
+  ~ChunkedMsgGuard();
+  
+  ChunkedMsgGuard(const ChunkedMsgGuard&) = delete;
+  ChunkedMsgGuard& operator=(const ChunkedMsgGuard&) = delete;
 };
 
 // ============================================================================

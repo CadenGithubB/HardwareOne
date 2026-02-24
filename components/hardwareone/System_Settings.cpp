@@ -7,11 +7,15 @@
 #if ENABLE_ESPNOW
   #include "System_ESPNow.h" // EspNowMode enum
 #endif
+#include "System_MemUtil.h"  // PSRAM_JSON_DOC macro
 #include "System_SensorStubs.h" // Network stubs when disabled
 #include "System_Utils.h"    // RETURN_VALID_IF_VALIDATE_CSTR macro
 #include "System_Command.h"  // For CommandModuleRegistrar
+#include "System_Notifications.h"
 #include <LittleFS.h>
 #include <esp_system.h>
+#include "mbedtls/aes.h"
+#include "mbedtls/sha256.h"
 #if ENABLE_WIFI
   #include <WiFi.h>
   #include <WiFiUdp.h>
@@ -39,6 +43,9 @@ extern volatile uint32_t gOutputFlags;
 // File paths - need to be non-static in .ino for access from .cpp files
 extern const char* SETTINGS_JSON_FILE;
 
+// Deferred write flag — when true, setSetting() updates RAM only; savesettings writes once
+volatile bool gDeferWrites = false;
+
 // Filesystem locking
 extern void fsLock(const char* owner);
 extern void fsUnlock();
@@ -59,8 +66,7 @@ const char* cmd_webclihistorysize(const String& args) {
   int v = valStr.toInt();
   if (v < 1) v = 1;
   if (v > 100) v = 100;
-  gSettings.webCliHistorySize = v;
-  writeSettingsJson();
+  setSetting(gSettings.webCliHistorySize, v);
   snprintf(getDebugBuffer(), 1024, "webCliHistorySize set to %d", v);
   return getDebugBuffer();
 }
@@ -75,8 +81,7 @@ const char* cmd_oledclihistorysize(const String& args) {
   int v = valStr.toInt();
   if (v < 10) v = 10;  // Minimum 10 lines for OLED
   if (v > 100) v = 100;
-  gSettings.oledCliHistorySize = v;
-  writeSettingsJson();
+  setSetting(gSettings.oledCliHistorySize, v);
   snprintf(getDebugBuffer(), 1024, "oledCliHistorySize set to %d (requires reboot)", v);
   return getDebugBuffer();
 }
@@ -116,8 +121,7 @@ const char* cmd_outserial(const String& args) {
     else gOutputFlags &= ~OUTPUT_SERIAL;
     return v ? "outSerial (runtime) set to 1" : "outSerial (runtime) set to 0";
   } else {
-    gSettings.outSerial = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.outSerial, (bool)(v != 0));
     if (v) gOutputFlags |= OUTPUT_SERIAL;
     else gOutputFlags &= ~OUTPUT_SERIAL;
     return gSettings.outSerial ? "outSerial (persisted) set to 1" : "outSerial (persisted) set to 0";
@@ -159,8 +163,7 @@ const char* cmd_outweb(const String& args) {
     else gOutputFlags &= ~OUTPUT_WEB;
     return v ? "outWeb (runtime) set to 1" : "outWeb (runtime) set to 0";
   } else {
-    gSettings.outWeb = (v != 0);
-    writeSettingsJson();
+    setSetting(gSettings.outWeb, (bool)(v != 0));
     if (v) gOutputFlags |= OUTPUT_WEB;
     else gOutputFlags &= ~OUTPUT_WEB;
     return gSettings.outWeb ? "outWeb (persisted) set to 1" : "outWeb (persisted) set to 0";
@@ -171,16 +174,19 @@ const char* cmd_outweb(const String& args) {
 // Settings Command Registry
 // ============================================================================
 
+const char* cmd_beginwrite(const String& args);
+const char* cmd_savesettings(const String& args);
+
 const CommandEntry settingsCommands[] = {
 #if ENABLE_WIFI
   // ---- WiFi Network Settings ----
-  { "wifitxpower", "Set WiFi TX power in dBm.", true, cmd_wifitxpower },
-  { "wifiautoreconnect", "Enable/disable WiFi auto-reconnect.", true, cmd_wifiautoreconnect },
+  { "wifitxpower", "Set WiFi TX power: <dBm>", true, cmd_wifitxpower },
+  { "wifiautoreconnect", "WiFi auto-reconnect: <0|1>", true, cmd_wifiautoreconnect },
   
   // ---- System Time Settings ----
-  { "ntpserver", "Set NTP server hostname.", true, cmd_ntpserver, "Usage: ntpserver <host>" },
+  { "ntpserver", "Set NTP server: <hostname>", true, cmd_ntpserver, "Usage: ntpserver <host>" },
 #endif
-  { "tzoffsetminutes", "Set timezone offset in minutes (-720..720).", true, cmd_tzoffsetminutes, "Usage: tzoffsetminutes <-720..720>" },
+  { "tzoffsetminutes", "Set timezone offset: <-720..720>", true, cmd_tzoffsetminutes, "Usage: tzoffsetminutes <-720..720>" },
   
   // Note: Thermal and ToF sensor settings are now in their respective sensor files:
   // - thermal_sensor.cpp: thermalCommands[]
@@ -188,14 +194,18 @@ const CommandEntry settingsCommands[] = {
   
 #if ENABLE_ESPNOW
   // ---- Device Settings ----
-  { "espnowenabled", "Enable/disable ESP-NOW (0|1, takes effect after reboot).", true, cmd_espnowenabled, "Usage: espnowenabled <0|1>" },
+  { "espnowenabled", "Enable/disable ESP-NOW: <0|1> (reboot required)", true, cmd_espnowenabled, "Usage: espnowenabled <0|1>" },
 #endif
   
   // Note: I2C settings are now handled by the modular registry in i2c_system.cpp
   
   // ---- CLI Settings ----
-  { "webclihistorysize", "Set web CLI history size.", true, cmd_webclihistorysize, "Usage: webclihistorysize <1..100>" },
-  { "oledclihistorysize", "Set OLED CLI history size (lines).", true, cmd_oledclihistorysize, "Usage: oledclihistorysize <10..100>" },
+  { "webclihistorysize", "Set web CLI history size: <1..100>", true, cmd_webclihistorysize, "Usage: webclihistorysize <1..100>" },
+  { "oledclihistorysize", "Set OLED CLI history size: <10..100>", true, cmd_oledclihistorysize, "Usage: oledclihistorysize <10..100>" },
+
+  // ---- Batch write ----
+  { "beginwrite",   "Start a batch settings update — defers flash write until savesettings.", true, cmd_beginwrite },
+  { "savesettings", "Flush deferred settings to flash (single write).",                       true, cmd_savesettings },
 };
 
 const size_t settingsCommandsCount = sizeof(settingsCommands) / sizeof(settingsCommands[0]);
@@ -241,27 +251,86 @@ String getDeviceEncryptionKey() {
 String encryptWifiPassword(const String& password) {
   if (password.length() == 0) return "";
 
-  String key = getDeviceEncryptionKey();
-  
-  // Pre-allocate buffer to avoid String concatenation in loop
-  int encLen = password.length() * 2;  // Each char becomes 2 hex digits
-  char* encBuf = (char*)malloc(encLen + 5);  // +5 for "ENC:" prefix and null terminator
-  if (!encBuf) return "";
-  
-  strcpy(encBuf, "ENC:");
-  char* ptr = encBuf + 4;
-  
-  for (int i = 0; i < password.length(); i++) {
-    char encChar = password[i] ^ key[i % key.length()];
-    // Convert to hex to ensure JSON-safe characters
-    snprintf(ptr, 3, "%02X", (uint8_t)encChar);
-    ptr += 2;
+  // Derive 16-byte AES key from device encryption key
+  String keyMaterial = getDeviceEncryptionKey();
+  uint8_t key[16];
+  uint8_t hash[32];
+  mbedtls_sha256((const uint8_t*)keyMaterial.c_str(), keyMaterial.length(), hash, 0);
+  memcpy(key, hash, 16);
+  secureClearString(keyMaterial);
+
+  // Generate random IV
+  uint8_t iv[16];
+  esp_fill_random(iv, 16);
+
+  // PKCS#7 padding
+  int paddedLen = ((password.length() / 16) + 1) * 16;
+  uint8_t* plaintext = (uint8_t*)malloc(paddedLen);
+  if (!plaintext) {
+    ERROR_MEMORYF("[AES] Failed to allocate plaintext buffer");
+    return "";
   }
-  *ptr = '\0';
   
-  String result = String(encBuf);
-  free(encBuf);
-  return result;  // Prefix to identify encrypted passwords
+  memcpy(plaintext, password.c_str(), password.length());
+  uint8_t padValue = paddedLen - password.length();
+  for (int i = password.length(); i < paddedLen; i++) {
+    plaintext[i] = padValue;
+  }
+
+  // Encrypt with AES-128-CBC
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_enc(&aes, key, 128);
+
+  uint8_t* ciphertext = (uint8_t*)malloc(paddedLen);
+  if (!ciphertext) {
+    free(plaintext);
+    mbedtls_aes_free(&aes);
+    ERROR_MEMORYF("[AES] Failed to allocate ciphertext buffer");
+    return "";
+  }
+
+  // Make a copy of IV since mbedtls_aes_crypt_cbc modifies it
+  uint8_t iv_copy[16];
+  memcpy(iv_copy, iv, 16);
+  
+  int ret = mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_ENCRYPT, paddedLen, iv_copy, plaintext, ciphertext);
+  mbedtls_aes_free(&aes);
+  
+  // Securely clear plaintext
+  memset(plaintext, 0, paddedLen);
+  free(plaintext);
+
+  if (ret != 0) {
+    free(ciphertext);
+    ERROR_STORAGEF("[AES] Encryption failed: %d", ret);
+    return "";
+  }
+
+  // Encode: AES:<hex-iv>:<hex-ciphertext>
+  int resultLen = 4 + 32 + 1 + (paddedLen * 2) + 1;  // "AES:" + IV + ":" + ciphertext + null
+  char* result = (char*)malloc(resultLen);
+  if (!result) {
+    free(ciphertext);
+    ERROR_MEMORYF("[AES] Failed to allocate result buffer");
+    return "";
+  }
+
+  int pos = sprintf(result, "AES:");
+  for (int i = 0; i < 16; i++) {
+    pos += sprintf(result + pos, "%02X", iv[i]);
+  }
+  pos += sprintf(result + pos, ":");
+  for (int i = 0; i < paddedLen; i++) {
+    pos += sprintf(result + pos, "%02X", ciphertext[i]);
+  }
+
+  String output = String(result);
+  free(result);
+  free(ciphertext);
+
+  DEBUG_STORAGEF("[AES] WiFi password encrypted (len=%d)", output.length());
+  return output;
 }
 
 String decryptWifiPassword(const String& encryptedPassword) {
@@ -269,47 +338,109 @@ String decryptWifiPassword(const String& encryptedPassword) {
     return "";
   }
 
-  if (!encryptedPassword.startsWith("ENC:")) {
-    DEBUG_STORAGEF("[WiFi Password] Not encrypted, using plaintext");
-    return encryptedPassword;
-  }
-
-  DEBUG_STORAGEF("[WiFi Password] Decrypting encrypted password (len=%d)", encryptedPassword.length());
-
-  String hexData = encryptedPassword.substring(4);  // Remove "ENC:" prefix
-  String key = getDeviceEncryptionKey();
-
-  // Use char buffer to avoid String concatenation issues
-  int decryptedLen = hexData.length() / 2;
-  char* decryptedBuf = (char*)malloc(decryptedLen + 1);
-  if (!decryptedBuf) {
-    ERROR_MEMORYF("malloc failed for WiFi password decryption buffer");
+  if (!encryptedPassword.startsWith("AES:")) {
+    ERROR_STORAGEF("[AES] Invalid WiFi password format detected");
     return "";
   }
 
-  // Convert hex back to characters and decrypt
-  int outIdx = 0;
-  for (int i = 0; i < hexData.length(); i += 2) {
-    if (i + 1 < hexData.length()) {
-      // Extract two hex characters directly without creating String
-      char hexByte[3];
-      hexByte[0] = hexData[i];
-      hexByte[1] = hexData[i + 1];
-      hexByte[2] = '\0';
+  DEBUG_STORAGEF("[AES] Decrypting WiFi password (len=%d)", encryptedPassword.length());
 
-      uint8_t encChar = strtol(hexByte, NULL, 16);
-      char decChar = encChar ^ key[(i / 2) % key.length()];
-      decryptedBuf[outIdx++] = decChar;
-    }
+  // Parse: AES:<32-hex-iv>:<hex-ciphertext>
+  if (encryptedPassword.length() < 41) {  // "AES:" + 32 hex chars + ":" minimum
+    ERROR_STORAGEF("[AES] Encrypted password too short");
+    return "";
   }
-  decryptedBuf[outIdx] = '\0';
 
-  String result = String(decryptedBuf);
-  free(decryptedBuf);
+  String ivHex = encryptedPassword.substring(4, 36);  // 32 hex chars = 16 bytes
+  if (encryptedPassword[36] != ':') {
+    ERROR_STORAGEF("[AES] Missing separator after IV");
+    return "";
+  }
+  String ciphertextHex = encryptedPassword.substring(37);
 
-  DEBUG_STORAGEF("[WiFi Password] Decrypted successfully (len=%d)", result.length());
+  // Derive AES key
+  String keyMaterial = getDeviceEncryptionKey();
+  uint8_t key[16];
+  uint8_t hash[32];
+  mbedtls_sha256((const uint8_t*)keyMaterial.c_str(), keyMaterial.length(), hash, 0);
+  memcpy(key, hash, 16);
+  secureClearString(keyMaterial);
 
-  return result;
+  // Decode IV
+  uint8_t iv[16];
+  for (int i = 0; i < 16; i++) {
+    char hexByte[3] = { ivHex[i*2], ivHex[i*2+1], '\0' };
+    iv[i] = strtol(hexByte, NULL, 16);
+  }
+
+  // Decode ciphertext
+  int ciphertextLen = ciphertextHex.length() / 2;
+  uint8_t* ciphertext = (uint8_t*)malloc(ciphertextLen);
+  if (!ciphertext) {
+    ERROR_MEMORYF("[AES] Failed to allocate ciphertext buffer");
+    return "";
+  }
+
+  for (int i = 0; i < ciphertextLen; i++) {
+    char hexByte[3] = { ciphertextHex[i*2], ciphertextHex[i*2+1], '\0' };
+    ciphertext[i] = strtol(hexByte, NULL, 16);
+  }
+
+  // Decrypt with AES-128-CBC
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_dec(&aes, key, 128);
+
+  uint8_t* plaintext = (uint8_t*)malloc(ciphertextLen);
+  if (!plaintext) {
+    free(ciphertext);
+    mbedtls_aes_free(&aes);
+    ERROR_MEMORYF("[AES] Failed to allocate plaintext buffer");
+    return "";
+  }
+
+  // Make a copy of IV since mbedtls_aes_crypt_cbc modifies it
+  uint8_t iv_copy[16];
+  memcpy(iv_copy, iv, 16);
+
+  int ret = mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, ciphertextLen, iv_copy, ciphertext, plaintext);
+  mbedtls_aes_free(&aes);
+  free(ciphertext);
+
+  if (ret != 0) {
+    free(plaintext);
+    ERROR_STORAGEF("[AES] Decryption failed: %d", ret);
+    return "";
+  }
+
+  // Remove PKCS#7 padding
+  uint8_t padValue = plaintext[ciphertextLen - 1];
+  if (padValue < 1 || padValue > 16) {
+    free(plaintext);
+    ERROR_STORAGEF("[AES] Invalid padding value: %d", padValue);
+    return "";
+  }
+
+  int plaintextLen = ciphertextLen - padValue;
+  char* result = (char*)malloc(plaintextLen + 1);
+  if (!result) {
+    free(plaintext);
+    ERROR_MEMORYF("[AES] Failed to allocate result buffer");
+    return "";
+  }
+
+  memcpy(result, plaintext, plaintextLen);
+  result[plaintextLen] = '\0';
+
+  // Securely clear plaintext
+  memset(plaintext, 0, ciphertextLen);
+  free(plaintext);
+
+  String output = String(result);
+  free(result);
+
+  DEBUG_STORAGEF("[AES] WiFi password decrypted successfully (len=%d)", output.length());
+  return output;
 }
 
 // ============================================================================
@@ -332,7 +463,7 @@ void settingsDefaults() {
   // - espnow (System_ESPNow.cpp): enabled, mesh, userSync, device, mesh role/timing
   // - automation (System_Automation.cpp): enabled
   // - debug (System_Settings.cpp): all debug flags
-  // - output (System_Settings.cpp): outSerial, outWeb, outTft
+  // - output (System_Settings.cpp): outSerial, outWeb, outDisplay
   // - i2c (System_I2C.cpp): bus settings, clock speeds
   // - thermal (i2csensor-mlx90640.cpp): autoStart, polling, interpolation, EWMA, rotation
   // - tof (i2csensor-vl53l4cx.cpp): autoStart, polling, stability, transition
@@ -355,32 +486,32 @@ void settingsDefaults() {
 
 void applySettings() {
   DEBUG_SYSTEMF("[applySettings] START");
-  Serial.flush();
 
   // Apply persisted output lanes
   uint8_t flags = 0;
   if (gSettings.outSerial) flags |= OUTPUT_SERIAL;
-  if (gSettings.outTft) flags |= OUTPUT_TFT;
+  if (gSettings.outDisplay) flags |= OUTPUT_DISPLAY;
   if (gSettings.outWeb) flags |= OUTPUT_WEB;
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  if (gSettings.outG2) flags |= OUTPUT_G2;
+#endif
   gOutputFlags = flags;  // replace current routing with persisted lanes
 
   // Apply debug settings to runtime flags using accessor functions
-  setDebugFlags(0xFFFFFFFF);  // Start with ALL flags enabled for maximum verbosity
+  setDebugFlags(0);  // Start with no flags, then enable based on settings
   if (gSettings.debugAuth) setDebugFlag(DEBUG_AUTH);
   if (gSettings.debugAuthCookies) setDebugFlag(DEBUG_AUTH);
   if (gSettings.debugHttp) setDebugFlag(DEBUG_HTTP);
   if (gSettings.debugSse) setDebugFlag(DEBUG_SSE);
   if (gSettings.debugCli) setDebugFlag(DEBUG_CLI);
   if (gSettings.debugSensors) setDebugFlag(DEBUG_SENSORS);
-  if (gSettings.debugSensorsFrame) setDebugFlag(DEBUG_SENSORS_FRAME);
-  if (gSettings.debugSensorsData) setDebugFlag(DEBUG_SENSORS_DATA);
   if (gSettings.debugSensorsGeneral) setDebugFlag(DEBUG_SENSORS);
   if (gSettings.debugCamera) setDebugFlag(DEBUG_CAMERA);
   if (gSettings.debugMicrophone) setDebugFlag(DEBUG_MICROPHONE);
   if (gSettings.debugWifi) setDebugFlag(DEBUG_WIFI);
   if (gSettings.debugStorage) setDebugFlag(DEBUG_STORAGE);
   if (gSettings.debugPerformance) setDebugFlag(DEBUG_PERFORMANCE);
-  if (gSettings.debugDateTime) setDebugFlag(DEBUG_SYSTEM);  // Map to DEBUG_SYSTEM
+  if (gSettings.debugDateTime) setDebugFlag(DEBUG_SYSTEM);
   if (gSettings.debugCommandFlow) setDebugFlag(DEBUG_CMD_FLOW);
   if (gSettings.debugUsers) setDebugFlag(DEBUG_USERS);
   if (gSettings.debugSystem) setDebugFlag(DEBUG_SYSTEM);
@@ -401,7 +532,18 @@ void applySettings() {
   if (gSettings.debugAutoCondition) setDebugFlag(DEBUG_AUTO_CONDITION);
   if (gSettings.debugAutoTiming) setDebugFlag(DEBUG_AUTO_TIMING);
   if (gSettings.debugFmRadio) setDebugFlag(DEBUG_FMRADIO);
+  if (gSettings.debugG2) setDebugFlag(DEBUG_G2);
   if (gSettings.debugI2C) setDebugFlag(DEBUG_I2C);
+
+  // Apply per-sensor frame/data debug flags
+  if (gSettings.debugThermalFrame) setDebugFlag(DEBUG_THERMAL_FRAME);
+  if (gSettings.debugThermalData) setDebugFlag(DEBUG_THERMAL_DATA);
+  if (gSettings.debugTofFrame) setDebugFlag(DEBUG_TOF_FRAME);
+  if (gSettings.debugGamepadFrame) setDebugFlag(DEBUG_GAMEPAD_FRAME);
+  if (gSettings.debugGamepadData) setDebugFlag(DEBUG_GAMEPAD_DATA);
+  if (gSettings.debugImuFrame) setDebugFlag(DEBUG_IMU_FRAME);
+  if (gSettings.debugImuData) setDebugFlag(DEBUG_IMU_DATA);
+  if (gSettings.debugApdsFrame) setDebugFlag(DEBUG_APDS_FRAME);
 
   // Apply debug sub-flags to gDebugSubFlags and update parent flags
   // Auth sub-flags
@@ -479,7 +621,6 @@ void applySettings() {
   }
 
   DEBUG_SYSTEMF("[applySettings] Applied debug flags");
-  Serial.flush();
 
   // Apply ESP-NOW mode from settings (directly to gEspNow if initialized)
 #if ENABLE_ESPNOW
@@ -491,22 +632,6 @@ void applySettings() {
   // Apply power mode from settings
   #include "System_Power.h"
   applyPowerMode(gSettings.powerMode);
-
-  DEBUG_SYSTEMF("[applySettings] About to print debug test messages");
-  Serial.flush();
-
-  // Test debug statements for each logging category
-  DEBUG_AUTHF("Auth logging enabled - session validation active");
-  DEBUG_HTTPF("HTTP logging enabled - request routing active");
-  DEBUG_SSEF("SSE logging enabled - event streaming active");
-  DEBUG_CLIF("CLI logging enabled - command processing active");
-  DEBUG_SENSORSF("General sensor logging enabled - device monitoring active");
-  DEBUG_FRAMEF("Thermal frame logging enabled - MLX90640 capture tracking active");
-  DEBUG_DATAF("Thermal data logging enabled - temperature processing active");
-  DEBUG_WIFIF("WiFi logging enabled - network operations active");
-  DEBUG_STORAGEF("Storage logging enabled - filesystem operations active");
-  DEBUG_PERFORMANCEF("Performance logging enabled - loop monitoring active");
-  DEBUG_SYSTEMF("System logging enabled - boot and device operations active");
 
   DEBUG_SYSTEMF("Settings applied (I2C hardware config skipped - requires sensor restart to apply)");
 }
@@ -635,7 +760,7 @@ bool writeSettingsJson() {
   DEBUG_STORAGEF("[Settings] Writing to file using ArduinoJson");
 
   // Build JSON document (5120 bytes for settings + encrypted WiFi passwords)
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   
   // CRITICAL: Read existing settings first to preserve orphaned sensor sections
   // This allows settings from disabled sensors to persist and show as grayed-out in UI
@@ -713,6 +838,26 @@ bool writeSettingsJson() {
 
   DEBUG_STORAGEF("[Settings] Write complete");
   gSensorPollingPaused = wasPaused;
+  
+  // Push settings update to paired peer if in paired mode
+#if ENABLE_ESPNOW
+  extern Settings gSettings;
+  if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() >= 12) {
+    // Convert MAC string to bytes
+    uint8_t peerMac[6];
+    String macHex = gSettings.bondPeerMac;
+    macHex.replace(":", "");
+    for (int i = 0; i < 6; i++) {
+      char byteStr[3] = {macHex[i*2], macHex[i*2+1], '\0'};
+      peerMac[i] = (uint8_t)strtol(byteStr, nullptr, 16);
+    }
+    
+    // Send settings push notification (async, non-blocking)
+    extern void sendPairedSettings(const uint8_t* peerMac, uint32_t msgId, bool isPush);
+    sendPairedSettings(peerMac, 0, true);  // isPush=true for push notification
+  }
+#endif
+  
   return true;
 }
 
@@ -750,7 +895,7 @@ bool readSettingsJson() {
   // Use JsonDocument for parsing settings JSON
   // Size calculated: ~2.5KB base settings + ~2KB for WiFi networks with encrypted passwords
   // Encrypted passwords are ~2x longer than plaintext (hex encoding + "ENC:" prefix)
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, file);
   file.close();
 
@@ -770,9 +915,7 @@ bool readSettingsJson() {
 
   DEBUG_STORAGEF("[Settings] JSON parsed successfully, applying settings");
 
-  // Register core settings modules that need early initialization
-  // Note: Peripheral modules auto-register via static constructors
-  registerCoreSettingsModules();
+  registerAllSettingsModules();
 
   // Apply settings from registered modules first (handles defaults automatically)
   size_t registeredCount = readRegisteredSettings(doc);
@@ -817,7 +960,10 @@ bool readSettingsJson() {
   if (output) {
     gSettings.outSerial = output["serial"] | true;
     gSettings.outWeb = output["web"] | true;
-    gSettings.outTft = output["tft"] | false;
+    gSettings.outDisplay = output["display"] | false;
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+    gSettings.outG2 = output["g2"] | false;
+#endif
   }
 
   // Thermal settings are loaded by the modular registry below (no backward compatibility)
@@ -871,7 +1017,6 @@ bool readSettingsJson() {
 // Settings command implementations (migrated from .ino)
 // ============================================================================
 
-extern bool ensureDebugBuffer();
 extern void setupNTP();
 
 const char* cmd_tzoffsetminutes(const String& cmd) {
@@ -882,8 +1027,7 @@ const char* cmd_tzoffsetminutes(const String& cmd) {
   while (*p == ' ') p++;  // Skip whitespace
   int offset = atoi(p);
   if (offset < -720 || offset > 720) return "Error: timezone offset must be between -720 and 720 minutes";
-  gSettings.tzOffsetMinutes = offset;
-  writeSettingsJson();
+  setSetting(gSettings.tzOffsetMinutes, offset);
 #if ENABLE_WIFI
   setupNTP();
 #endif
@@ -939,8 +1083,7 @@ const char* cmd_ntpserver(const String& cmd) {
     return getDebugBuffer();
   }
 
-  gSettings.ntpServer = p;
-  writeSettingsJson();
+  setSetting(gSettings.ntpServer, p);
   setupNTP();
   snprintf(getDebugBuffer(), 1024, "NTP server set to %s (connectivity verified)", p);
   return getDebugBuffer();
@@ -958,8 +1101,7 @@ const char* cmd_espnowenabled(const String& cmd) {
   if (!p) return "Usage: espnowenabled <0|1>";
   while (*p == ' ') p++;  // Skip whitespace
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
-  gSettings.espnowenabled = enabled;
-  writeSettingsJson();
+  setSetting(gSettings.espnowenabled, enabled);
   snprintf(getDebugBuffer(), 1024, "espnowenabled set to %s (takes effect after reboot)", enabled ? "1" : "0");
   return getDebugBuffer();
 }
@@ -980,9 +1122,6 @@ static const SettingEntry debugSettingEntries[] = {
   { "auth", SETTING_BOOL, &gSettings.debugAuth, 0, 0, nullptr, 0, 1, "Auth", nullptr },
   { "sensors", SETTING_BOOL, &gSettings.debugSensors, 0, 0, nullptr, 0, 1, "Sensors", nullptr },
   { "espNow", SETTING_BOOL, &gSettings.debugEspNow, 0, 0, nullptr, 0, 1, "ESP-NOW", nullptr },
-  { "sensorsFrame", SETTING_BOOL, &gSettings.debugSensorsFrame, 0, 0, nullptr, 0, 1, "Sensors Frame", nullptr },
-  { "sensorsData", SETTING_BOOL, &gSettings.debugSensorsData, 0, 0, nullptr, 0, 1, "Sensors Data", nullptr },
-  { "sensorsGeneral", SETTING_BOOL, &gSettings.debugSensorsGeneral, 0, 0, nullptr, 0, 1, "Sensors General", nullptr },
   { "wifi", SETTING_BOOL, &gSettings.debugWifi, 0, 0, nullptr, 0, 1, "WiFi", nullptr },
   { "storage", SETTING_BOOL, &gSettings.debugStorage, 0, 0, nullptr, 0, 1, "Storage", nullptr },
   { "performance", SETTING_BOOL, &gSettings.debugPerformance, 0, 0, nullptr, 0, 1, "Performance", nullptr },
@@ -1006,6 +1145,7 @@ static const SettingEntry debugSettingEntries[] = {
   { "commandSystem", SETTING_BOOL, &gSettings.debugCommandSystem, 0, 0, nullptr, 0, 1, "Command System", nullptr },
   { "settingsSystem", SETTING_BOOL, &gSettings.debugSettingsSystem, 0, 0, nullptr, 0, 1, "Settings System", nullptr },
   { "fmRadio", SETTING_BOOL, &gSettings.debugFmRadio, 0, 0, nullptr, 0, 1, "FM Radio", nullptr },
+  { "g2", SETTING_BOOL, &gSettings.debugG2, 1, 0, nullptr, 0, 1, "G2 Glasses", nullptr },
   { "i2c", SETTING_BOOL, &gSettings.debugI2C, 1, 0, nullptr, 0, 1, "I2C Bus", nullptr },
   { "authSessions", SETTING_BOOL, &gSettings.debugAuthSessions, 0, 0, nullptr, 0, 1, "Auth Sessions", nullptr },
   { "authCookies", SETTING_BOOL, &gSettings.debugAuthCookies, 0, 0, nullptr, 0, 1, "Auth Cookies", nullptr },
@@ -1062,7 +1202,10 @@ static const SettingsModule debugSettingsModule = {
 static const SettingEntry outputSettingEntries[] = {
   { "serial", SETTING_BOOL, &gSettings.outSerial, 1, 0, nullptr, 0, 1, "Serial Output", nullptr },
   { "web", SETTING_BOOL, &gSettings.outWeb, 1, 0, nullptr, 0, 1, "Web Output", nullptr },
-  { "tft", SETTING_BOOL, &gSettings.outTft, 0, 0, nullptr, 0, 1, "TFT Output", nullptr }
+  { "display", SETTING_BOOL, &gSettings.outDisplay, 0, 0, nullptr, 0, 1, "Display Output", nullptr },
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  { "g2", SETTING_BOOL, &gSettings.outG2, 0, 0, nullptr, 0, 1, "G2 Glasses Output", nullptr },
+#endif
 };
 
 static const SettingsModule outputSettingsModule = {
@@ -1071,7 +1214,7 @@ static const SettingsModule outputSettingsModule = {
   outputSettingEntries,
   sizeof(outputSettingEntries) / sizeof(outputSettingEntries[0]),
   nullptr,  // Always available
-  "Output routing for serial, web, and TFT display"
+  "Output routing for serial, web, and display"
 };
 
 // Registry storage
@@ -1103,6 +1246,8 @@ extern const SettingsModule i2cSettingsModule;
 extern const SettingsModule cliSettingsModule;
 #if ENABLE_WIFI
 extern const SettingsModule wifiSettingsModule;
+#endif
+#if ENABLE_HTTP_SERVER
 extern const SettingsModule httpSettingsModule;
 #endif
 #if ENABLE_ESPNOW
@@ -1164,6 +1309,8 @@ extern const SettingsModule edgeImpulseSettingsModule;
 extern const SettingsModule espsrSettingsModule;
 #endif
 
+extern const SettingsModule sensorLogSettingsModule;
+
 void registerAllSettingsModules() {
   if (gSettingsModulesRegistered) return;  // Only register once
   gSettingsModulesRegistered = true;
@@ -1182,6 +1329,8 @@ void registerAllSettingsModules() {
   // Network modules
 #if ENABLE_WIFI
   registerSettingsModule(&wifiSettingsModule);
+#endif
+#if ENABLE_HTTP_SERVER
   registerSettingsModule(&httpSettingsModule);
 #endif
 #if ENABLE_ESPNOW
@@ -1242,13 +1391,12 @@ void registerAllSettingsModules() {
   registerSettingsModule(&espsrSettingsModule);
 #endif
 
+  // Sensor logging
+  registerSettingsModule(&sensorLogSettingsModule);
+
   DEBUG_SYSTEMF("[Settings] All %zu modules registered", gSettingsModuleCount);
 }
 
-// Legacy function - now just calls registerAllSettingsModules
-void registerCoreSettingsModules() {
-  registerAllSettingsModules();
-}
 
 const SettingsModule** getSettingsModules(size_t& count) {
   count = gSettingsModuleCount;
@@ -1458,8 +1606,9 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& cmd) {
         }
       }
       *((int*)entry->valuePtr) = v;
-      writeSettingsJson();
+      if (!gDeferWrites) writeSettingsJson();
       BROADCAST_PRINTF("%s set to %d", entry->jsonKey, v);
+      { char vBuf[16]; snprintf(vBuf, sizeof(vBuf), "%d", v); notifySettingChanged(entry->label ? entry->label : entry->jsonKey, vBuf); }
       return "[Settings] Configuration updated";
     }
     case SETTING_FLOAT: {
@@ -1472,21 +1621,24 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& cmd) {
         }
       }
       *((float*)entry->valuePtr) = f;
-      writeSettingsJson();
+      if (!gDeferWrites) writeSettingsJson();
       BROADCAST_PRINTF("%s set to %.3f", entry->jsonKey, f);
+      { char vBuf[16]; snprintf(vBuf, sizeof(vBuf), "%.3f", f); notifySettingChanged(entry->label ? entry->label : entry->jsonKey, vBuf); }
       return "[Settings] Configuration updated";
     }
     case SETTING_BOOL: {
       bool v = (*p == '1' || strncasecmp(p, "true", 4) == 0);
       *((bool*)entry->valuePtr) = v;
-      writeSettingsJson();
+      if (!gDeferWrites) writeSettingsJson();
       BROADCAST_PRINTF("%s set to %s", entry->jsonKey, v ? "true" : "false");
+      notifySettingChanged(entry->label ? entry->label : entry->jsonKey, v ? "on" : "off");
       return "[Settings] Configuration updated";
     }
     case SETTING_STRING: {
       *((String*)entry->valuePtr) = p;
-      writeSettingsJson();
+      if (!gDeferWrites) writeSettingsJson();
       BROADCAST_PRINTF("%s set to %s", entry->jsonKey, p);
+      notifySettingChanged(entry->label ? entry->label : entry->jsonKey, p);
       return "[Settings] Configuration updated";
     }
   }
@@ -1499,8 +1651,31 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& cmd) {
 
 #include "System_Mutex.h"  // For FsLockGuard
 
+// ============================================================================
+// Batch write commands
+// ============================================================================
+
+const char* cmd_beginwrite(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  gDeferWrites = true;
+  return "Write deferred — changes batched until savesettings";
+}
+
+const char* cmd_savesettings(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  gDeferWrites = false;
+  writeSettingsJson();
+  return "Settings saved";
+}
+
+// beginwrite and savesettings are registered in settingsCommands[] above.
+
+// ============================================================================
+
 String getUserSettingsPath(uint32_t userId) {
-  return String("/system/users/user_settings/") + String(userId) + ".json";
+  char pathBuf[48];
+  snprintf(pathBuf, sizeof(pathBuf), "/system/users/user_settings/%lu.json", (unsigned long)userId);
+  return String(pathBuf);
 }
 
 bool loadUserSettings(uint32_t userId, JsonDocument& doc) {
@@ -1547,8 +1722,11 @@ bool saveUserSettings(uint32_t userId, const JsonDocument& doc) {
       return false;
     }
 
-    LittleFS.remove(path.c_str());
+    // Safe atomic replace: rename first, only delete original on success.
+    // Do NOT delete the original before confirming rename succeeded —
+    // if both rename and fallback fail, the original would be permanently lost.
     if (!LittleFS.rename(tmp.c_str(), path.c_str())) {
+      // Rename failed (e.g. cross-dir); fallback to direct overwrite
       File direct = LittleFS.open(path.c_str(), "w");
       if (!direct) {
         LittleFS.remove(tmp.c_str());
@@ -1573,7 +1751,8 @@ bool mergeAndSaveUserSettings(uint32_t userId, const JsonDocument& patch) {
   if (!base.is<JsonObject>()) base.to<JsonObject>();
 
   JsonObject dst = base.as<JsonObject>();
-  JsonObjectConst src = patch.as<JsonObjectConst>();
-  dst.set(src);
+  for (JsonPairConst kv : patch.as<JsonObjectConst>()) {
+    dst[kv.key()] = kv.value();
+  }
   return saveUserSettings(userId, base);
 }

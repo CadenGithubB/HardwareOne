@@ -38,6 +38,8 @@ extern const struct SettingsModule mqttSettingsModule;
 
 #else
 
+#include <Arduino.h>
+
 // Stubs when MQTT is disabled
 inline bool startMQTT() { return false; }
 inline void stopMQTT() {}

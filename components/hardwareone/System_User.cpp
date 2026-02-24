@@ -24,20 +24,19 @@
 #include "System_UserSettings.h"
 #include "System_MemUtil.h"
 #include <Arduino.h>
+#include "mbedtls/md.h"
+#include "mbedtls/pkcs5.h"
 
 // ============================================================================
 // External Dependencies from .ino
 // ============================================================================
 
 extern bool filesystemReady;
-// gDebugBuffer, gDebugFlags, ensureDebugBuffer now from debug_system.h
-extern void broadcastOutput(const String& s);
-extern void broadcastOutput(const char* s);
 
 // Session management now in web_server.h (included above)
 
 // File paths
-#define PENDING_USERS_FILE "/system/pending_users.json"
+#define PENDING_USERS_FILE "/system/users/pending_users.json"
 
 // Memory allocation
 // Utility functions from .ino
@@ -106,6 +105,7 @@ bool tgRequireAuth(AuthContext& ctx) {
     }
     ctx.user = userTmp;
     if (ctx.ip.length() == 0) { getClientIP(req, ctx.ip); }
+    logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, "");
     return true;
   } else if (ctx.transport == SOURCE_SERIAL) {
     // Serial console auth state
@@ -119,7 +119,6 @@ bool tgRequireAuth(AuthContext& ctx) {
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
     // Local display auth state - check if auth is required via settings
     // Allow commands during boot phase (before auth is enforced)
-    extern Settings gSettings;
     extern bool oledBootModeActive;
     
     if (gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive) {
@@ -185,7 +184,6 @@ bool tgRequireAuth(AuthContext& ctx) {
     return true;
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
     // Allow commands during boot phase
-    extern Settings gSettings;
     extern bool oledBootModeActive;
     
     if (gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive) {
@@ -384,61 +382,141 @@ bool isTransportAdmin(CommandSource transport) {
 String hashUserPassword(const String& password) {
   if (password.length() == 0) return "";
 
+  // Use PBKDF2-HMAC-SHA256 for strong password hashing
   String salt = getDeviceEncryptionKey();
-  String saltedPassword = password + salt;
+  const int iterations = 10000;  // NIST minimum recommendation
+  uint8_t hash[32];  // 256-bit output
 
-  uint32_t hash = 0;
-  for (int i = 0; i < saltedPassword.length(); i++) {
-    hash = hash * 31 + (uint8_t)saltedPassword[i];
-    hash ^= (hash >> 16);
+  int ret = mbedtls_pkcs5_pbkdf2_hmac_ext(
+    MBEDTLS_MD_SHA256,
+    (const uint8_t*)password.c_str(), password.length(),
+    (const uint8_t*)salt.c_str(), salt.length(),
+    iterations,
+    32,  // Output 32 bytes (256 bits)
+    hash
+  );
+
+  secureClearString(salt);
+
+  if (ret != 0) {
+    DEBUG_AUTHF("[PBKDF2] Hash generation failed: %d", ret);
+    return "";
   }
 
-  String hashStr = String(hash, HEX);
-  while (hashStr.length() < 8) hashStr = "0" + hashStr;
+  // Encode as hex
+  char hashStr[65];
+  for (int i = 0; i < 32; i++) {
+    snprintf(hashStr + (i * 2), 3, "%02x", hash[i]);
+  }
+  hashStr[64] = '\0';
 
-  return "HASH:" + hashStr;
+  // Format: PBKDF2:iterations:hex
+  char hashFmt[80];
+  snprintf(hashFmt, sizeof(hashFmt), "PBKDF2:%d:%s", iterations, hashStr);
+  return String(hashFmt);
 }
 
 bool verifyUserPassword(const String& inputPassword, const String& storedHash) {
   if (inputPassword.length() == 0 || storedHash.length() == 0) return false;
 
-  if (!storedHash.startsWith("HASH:")) {
-    return (inputPassword == storedHash);
+  // Verify PBKDF2 format
+  if (!storedHash.startsWith("PBKDF2:")) {
+    DEBUG_AUTHF("[PBKDF2] Invalid hash format detected");
+    return false;
   }
 
-  // Hash the input password with device salt and compare
+  // Hash the input password and compare
   String inputHash = hashUserPassword(inputPassword);
   return (inputHash == storedHash);
 }
 
-// Validate a username/password against users.json
+// Update a user's text password in per-user settings file
+bool setUserPassword(const String& username, const String& newPasswordRaw) {
+  if (!filesystemReady || username.length() == 0 || newPasswordRaw.length() == 0) return false;
+  
+  // Get user ID from username
+  uint32_t userId = 0;
+  if (!getUserIdByUsername(username, userId) || userId == 0) return false;
+  
+  // Hash the password
+  String hashed = hashUserPassword(newPasswordRaw);
+  
+  // Load existing user settings
+  JsonDocument settings;
+  loadUserSettings(userId, settings);  // OK if doesn't exist yet
+  
+  // Set the password field
+  settings["password"] = hashed;
+  
+  // Save back to user settings file
+  return saveUserSettings(userId, settings);
+}
+
+// Update a user's gamepad pattern password in per-user settings file
+bool setUserGamepadPassword(const String& username, const String& newPatternRaw) {
+  if (!filesystemReady || username.length() == 0 || newPatternRaw.length() == 0) return false;
+  
+  // Get user ID from username
+  uint32_t userId = 0;
+  if (!getUserIdByUsername(username, userId) || userId == 0) return false;
+  
+  // Hash the pattern (same as text password)
+  String hashed = hashUserPassword(newPatternRaw);
+  
+  // Load existing user settings
+  JsonDocument settings;
+  loadUserSettings(userId, settings);  // OK if doesn't exist yet
+  
+  // Set the gamepad password field
+  settings["gamepad_password"] = hashed;
+  
+  // Save back to user settings file
+  return saveUserSettings(userId, settings);
+}
+
+// Check if a user has a gamepad password set (in per-user settings file)
+bool hasUserGamepadPassword(const String& username) {
+  if (!filesystemReady || username.length() == 0) return false;
+  
+  // Get user ID from username
+  uint32_t userId = 0;
+  if (!getUserIdByUsername(username, userId) || userId == 0) return false;
+  
+  // Load user settings
+  JsonDocument settings;
+  if (!loadUserSettings(userId, settings)) return false;
+  
+  // Check if gamepad_password field exists and is non-empty
+  const char* gamepadPass = settings["gamepad_password"];
+  return (gamepadPass && strlen(gamepadPass) > 0);
+}
+
+// Validate a username/password against per-user settings file
+// Checks both 'password' (text) and 'gamepad_password' (pattern) fields
 bool isValidUser(const String& u, const String& p) {
   if (!filesystemReady) return false;
-
-  if (LittleFS.exists(USERS_JSON_FILE)) {
-    String json;
-    if (!readText(USERS_JSON_FILE, json)) return false;
-    int pos = json.indexOf("\"users\"");
-    if (pos < 0) return false;
-    while (true) {
-      int uKey = json.indexOf("\"username\"", pos);
-      if (uKey < 0) break;
-      int uq1 = json.indexOf('"', json.indexOf(':', uKey) + 1);
-      int uq2 = json.indexOf('"', uq1 + 1);
-      if (uq1 < 0 || uq2 <= uq1) break;
-      String uname = json.substring(uq1 + 1, uq2);
-      int pKey = json.indexOf("\"password\"", uKey);
-      int nextU = json.indexOf("\"username\"", uKey + 1);
-      if (pKey > 0 && (nextU < 0 || pKey < nextU)) {
-        int pq1 = json.indexOf('"', json.indexOf(':', pKey) + 1);
-        int pq2 = json.indexOf('"', pq1 + 1);
-        String pass = (pq1 > 0 && pq2 > pq1) ? json.substring(pq1 + 1, pq2) : String("");
-        if (u == uname && verifyUserPassword(p, pass)) return true;
-      }
-      pos = uq2 + 1;
-    }
-    return false;
+  if (u.length() == 0 || p.length() == 0) return false;
+  
+  // Get user ID from username (verifies user exists in users.json)
+  uint32_t userId = 0;
+  if (!getUserIdByUsername(u, userId) || userId == 0) return false;
+  
+  // Load user settings containing passwords
+  JsonDocument settings;
+  if (!loadUserSettings(userId, settings)) return false;
+  
+  // Check text password
+  const char* textPass = settings["password"];
+  if (textPass && verifyUserPassword(p, String(textPass))) {
+    return true;
   }
+  
+  // Check gamepad pattern password (if set)
+  const char* gamepadPass = settings["gamepad_password"];
+  if (gamepadPass && verifyUserPassword(p, String(gamepadPass))) {
+    return true;
+  }
+  
   return false;
 }
 
@@ -453,7 +531,7 @@ bool getUserIdByUsername(const String& username, uint32_t& outUserId) {
     File f = LittleFS.open(USERS_JSON_FILE, "r");
     if (!f) return false;
 
-    JsonDocument doc;
+    PSRAM_JSON_DOC(doc);
     DeserializationError err = deserializeJson(doc, f);
     f.close();
     if (err) return false;
@@ -485,7 +563,7 @@ bool getUserRole(const String& username, String& outRole) {
   File f = LittleFS.open(USERS_JSON_FILE, "r");
   if (!f) return false;
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, f);
   f.close();
   if (err) return false;
@@ -520,19 +598,19 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   String userPassword = "";
   bool found = false;
 
-  if (!LittleFS.exists("/system/pending_users.json")) {
+  if (!LittleFS.exists(PENDING_USERS_FILE)) {
     errorOut = "User not found in pending list";
     return false;
   }
 
   // Parse pending_users.json with ArduinoJson
-  File file = LittleFS.open("/system/pending_users.json", "r");
+  File file = LittleFS.open(PENDING_USERS_FILE, "r");
   if (!file) {
     errorOut = "Could not read pending list";
     return false;
   }
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, file);
   file.close();
 
@@ -571,11 +649,11 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   if (newArray.size() == 0) {
     // Remove file if empty
     fsLock("pending_users.remove");
-    LittleFS.remove("/system/pending_users.json");
+    LittleFS.remove(PENDING_USERS_FILE);
     fsUnlock();
   } else {
     // Write updated list
-    file = LittleFS.open("/system/pending_users.json", "w");
+    file = LittleFS.open(PENDING_USERS_FILE, "w");
     if (!file) {
       errorOut = "Could not update pending list";
       return false;
@@ -593,7 +671,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   uint32_t createdUserId = 0;
   if (!LittleFS.exists(USERS_JSON_FILE)) {
     // Create users.json with the first user (ID 1) using ArduinoJson
-    JsonDocument doc;
+    PSRAM_JSON_DOC(doc);
     doc["version"] = 1;
     doc["bootCounter"] = gBootCounter;
     doc["nextId"] = 2;
@@ -602,7 +680,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     JsonObject user = users.add<JsonObject>();
     user["id"] = 1;
     user["username"] = username;
-    user["password"] = userPassword;
+    // Password now stored in per-user settings file, not here
     user["role"] = "admin";
     user["createdAt"] = (const char*)nullptr;  // null
     user["createdBy"] = "provisional";
@@ -637,7 +715,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
       return false;
     }
     
-    JsonDocument doc;  // Use dynamic document for users.json
+    PSRAM_JSON_DOC(doc);  // Use dynamic document for users.json
     DeserializationError error = deserializeJson(doc, file);
     file.close();
     
@@ -667,7 +745,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     JsonObject newUser = users.add<JsonObject>();
     newUser["id"] = nextId;
     newUser["username"] = username;
-    newUser["password"] = userPassword;
+    // Password now stored in per-user settings file, not here
     newUser["role"] = "user";
     newUser["createdAt"] = (const char*)nullptr;  // null
     newUser["createdBy"] = "provisional";
@@ -700,16 +778,16 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   if (createdUserId > 0 && filesystemReady) {
     String settingsPath = getUserSettingsPath(createdUserId);
     FsLockGuard guard("user_settings.default");
-    if (!LittleFS.exists(settingsPath.c_str())) {
-      JsonDocument defaults;
-      defaults["theme"] = "light";
-      if (!saveUserSettings(createdUserId, defaults)) {
-        WARN_SESSIONF("Failed to create default user settings for userId=%u", (unsigned)createdUserId);
-      }
+    // Create user settings with password and defaults
+    JsonDocument defaults;
+    defaults["theme"] = "light";
+    defaults["password"] = userPassword;  // Store hashed password in user settings
+    if (!saveUserSettings(createdUserId, defaults)) {
+      WARN_SESSIONF("Failed to create user settings for userId=%u", (unsigned)createdUserId);
     }
   }
 
-  broadcastOutput(String("[admin] Approved user: ") + username + " with requested password");
+  broadcastOutput(String("[admin] Approved user: ") + username);
 
   // If NTP already synced, resolve the creation timestamp immediately
   if (time(nullptr) > 0) {
@@ -726,19 +804,19 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
     return false;
   }
   
-  if (!LittleFS.exists("/system/pending_users.json")) {
+  if (!LittleFS.exists(PENDING_USERS_FILE)) {
     errorOut = "User not found in pending list";
     return false;
   }
 
   // Parse pending_users.json with ArduinoJson
-  File file = LittleFS.open("/system/pending_users.json", "r");
+  File file = LittleFS.open(PENDING_USERS_FILE, "r");
   if (!file) {
     errorOut = "Could not read pending list";
     return false;
   }
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, file);
   file.close();
 
@@ -772,10 +850,10 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
   // Write updated pending list or remove file if empty
   if (newArray.size() == 0) {
     // Remove file if empty
-    LittleFS.remove("/system/pending_users.json");
+    LittleFS.remove(PENDING_USERS_FILE);
   } else {
     // Write updated list
-    file = LittleFS.open("/system/pending_users.json", "w");
+    file = LittleFS.open(PENDING_USERS_FILE, "w");
     if (!file) {
       errorOut = "Could not update pending list";
       return false;
@@ -1017,13 +1095,18 @@ static bool demoteUserFromAdminInternal(const String& username, String& errorOut
   return true;
 }
 
-// Delete an existing user from users.json (JSON-only)
+// Delete an existing user from users.json and their settings file
 static bool deleteUserInternal(const String& username, String& errorOut) {
   DEBUG_USERSF("[users] delete internal username=%s", username.c_str());
   if (username.length() == 0) {
     errorOut = "Username required";
     return false;
   }
+  
+  // Get userId first so we can delete their settings file
+  uint32_t userId = 0;
+  getUserIdByUsername(username, userId);
+  
   if (!LittleFS.exists(USERS_JSON_FILE)) {
     errorOut = "users.json not found";
     return false;
@@ -1129,6 +1212,15 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
     errorOut = "Failed to write users.json";
     return false;
   }
+  
+  // Delete user settings file (contains password and preferences)
+  if (userId > 0) {
+    String settingsPath = getUserSettingsPath(userId);
+    if (LittleFS.exists(settingsPath.c_str())) {
+      LittleFS.remove(settingsPath.c_str());
+      DEBUG_USERSF("[users] Deleted settings file for userId=%u", (unsigned)userId);
+    }
+  }
 
   // Force logout all sessions for the deleted user
   int revokedSessions = 0;
@@ -1155,7 +1247,11 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
     revokedSessions++;  // Count serial session too
   }
 
-  broadcastOutput(String("[admin] Deleted user: ") + username + (revokedSessions > 0 ? String(" (") + String(revokedSessions) + " active session(s) terminated)" : ""));
+  if (revokedSessions > 0) {
+    BROADCAST_PRINTF("[admin] Deleted user: %s (%d active session(s) terminated)", username.c_str(), revokedSessions);
+  } else {
+    BROADCAST_PRINTF("[admin] Deleted user: %s", username.c_str());
+  }
   return true;
 }
 
@@ -1251,6 +1347,42 @@ const char* cmd_user_delete(const String& argsIn) {
   return getDebugBuffer();
 }
 
+const char* cmd_user_resetpassword(const String& argsIn) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!filesystemReady) return "Error: LittleFS not ready";
+  
+  // Parse: "username newPassword"
+  String args = argsIn;
+  args.trim();
+  
+  int spaceIdx = args.indexOf(' ');
+  if (spaceIdx < 0) return "Usage: user resetpassword <username> <newPassword>";
+  
+  String username = args.substring(0, spaceIdx);
+  String newPassword = args.substring(spaceIdx + 1);
+  username.trim();
+  newPassword.trim();
+  
+  if (username.length() == 0 || newPassword.length() == 0) {
+    return "Usage: user resetpassword <username> <newPassword>";
+  }
+  
+  if (newPassword.length() < 6) {
+    return "Error: Password must be at least 6 characters";
+  }
+  
+  // Use the existing setUserPassword function
+  if (!setUserPassword(username, newPassword)) {
+    if (!ensureDebugBuffer()) return "Error: Failed to reset password";
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to reset password for user '%s'", username.c_str());
+    return getDebugBuffer();
+  }
+  
+  if (!ensureDebugBuffer()) return "Password reset successfully";
+  snprintf(getDebugBuffer(), 1024, "Password reset successfully for user '%s'", username.c_str());
+  return getDebugBuffer();
+}
+
 const char* cmd_user_list(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
@@ -1275,7 +1407,7 @@ const char* cmd_user_list(const String& args) {
   }
 
   // Parse JSON document (2KB should be enough for users file)
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, file);
   file.close();
 
@@ -1334,14 +1466,14 @@ const char* cmd_pending_list(const String& args) {
   // Check if JSON output is requested
   bool jsonOutput = (args.indexOf("json") >= 0);
 
-  if (!LittleFS.exists("/system/pending_users.json")) {
+  if (!LittleFS.exists(PENDING_USERS_FILE)) {
     if (jsonOutput) return "[]";
     broadcastOutput("No pending users");
     return "OK";
   }
 
   // Open and parse pending users file with ArduinoJson
-  File file = LittleFS.open("/system/pending_users.json", "r");
+  File file = LittleFS.open(PENDING_USERS_FILE, "r");
   if (!file) {
     if (jsonOutput) return "[]";
     ERROR_SESSIONF("Failed to read pending users file");
@@ -1350,7 +1482,7 @@ const char* cmd_pending_list(const String& args) {
   }
 
   // Parse JSON array (1KB should be enough for pending users)
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, file);
   file.close();
 
@@ -1374,8 +1506,19 @@ const char* cmd_pending_list(const String& args) {
       jsonBuf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "pending.list.json");
       if (!jsonBuf) return "[]";
     }
-    // Self-repair on overflow (prevents DoS via flooding pending requests)
-    serializeJsonArrayWithRepair(pending, jsonBuf, kBufSize, "pending list");
+    // Build sanitized output without password hashes
+    JsonDocument sanitized;
+    JsonArray sanitizedArray = sanitized.to<JsonArray>();
+    for (JsonObject user : pending) {
+      JsonObject sanitizedUser = sanitizedArray.add<JsonObject>();
+      sanitizedUser["username"] = user["username"];
+      sanitizedUser["timestamp"] = user["timestamp"];
+      // Explicitly exclude password field for security
+    }
+    size_t len = serializeJson(sanitizedArray, jsonBuf, kBufSize);
+    if (len >= kBufSize) {
+      ERROR_MEMORYF("pending list JSON truncated: %zu >= %zu", len, kBufSize);
+    }
     return jsonBuf;
   } else {
     // Stream human-readable format
@@ -1412,7 +1555,7 @@ const char* cmd_session_list(const String& args) {
       jsonBuf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "session.list.json");
       if (!jsonBuf) return "[]";
     }
-    JsonDocument doc;
+    PSRAM_JSON_DOC(doc);
     JsonArray sessions = doc.to<JsonArray>();
     buildAllSessionsJson("", sessions);
     size_t len = serializeJson(sessions, jsonBuf, kBufSize);
@@ -1439,92 +1582,7 @@ const char* cmd_session_list(const String& args) {
   }
 }
 
-const char* cmd_login(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-
-  String cmd = originalCmd;
-  cmd.trim();
-
-  // Parse: <username> <password> [transport]
-  // transport can be: serial, display, bluetooth
-  String rest = cmd;
-  rest.trim();
-
-  int sp1 = rest.indexOf(' ');
-  if (sp1 <= 0) {
-    return "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth";
-  }
-
-  String username = rest.substring(0, sp1);
-  String remainder = rest.substring(sp1 + 1);
-  remainder.trim();
-
-  int sp2 = remainder.indexOf(' ');
-  String password;
-  String transportStr = "serial";  // default
-
-  if (sp2 > 0) {
-    password = remainder.substring(0, sp2);
-    transportStr = remainder.substring(sp2 + 1);
-    transportStr.trim();
-    transportStr.toLowerCase();
-  } else {
-    password = remainder;
-  }
-
-  // Map transport string to enum
-  CommandSource transport = SOURCE_SERIAL;
-  if (transportStr == "display") {
-    transport = SOURCE_LOCAL_DISPLAY;
-  } else if (transportStr == "bluetooth") {
-    transport = SOURCE_BLUETOOTH;
-  } else if (transportStr == "serial") {
-    transport = SOURCE_SERIAL;
-  } else {
-    return "Invalid transport. Use: serial, display, or bluetooth";
-  }
-
-  // Attempt login
-  if (loginTransport(transport, username, password)) {
-    bool isAdmin = isAdminUser(username);
-    static char buf[128];
-    snprintf(buf, sizeof(buf), "Login successful for '%s' on %s%s",
-             username.c_str(), transportStr.c_str(), isAdmin ? " (admin)" : "");
-    return buf;
-  } else {
-    return "Authentication failed";
-  }
-}
-
-const char* cmd_logout(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-
-  String cmd = originalCmd;
-  cmd.trim();
-
-  // Parse: [transport]
-  String rest = cmd;
-  rest.trim();
-  rest.toLowerCase();
-
-  CommandSource transport = SOURCE_SERIAL;  // default
-  if (rest.length() > 0) {
-    if (rest == "display") {
-      transport = SOURCE_LOCAL_DISPLAY;
-    } else if (rest == "bluetooth") {
-      transport = SOURCE_BLUETOOTH;
-    } else if (rest == "serial") {
-      transport = SOURCE_SERIAL;
-    } else {
-      return "Invalid transport. Use: serial, display, or bluetooth";
-    }
-  }
-
-  logoutTransport(transport);
-  static char buf[64];
-  snprintf(buf, sizeof(buf), "Logged out from %s", rest.length() > 0 ? rest.c_str() : "serial");
-  return buf;
-}
+// cmd_login and cmd_logout moved to System_Utils.cpp (critical system functions)
 
 const char* cmd_session_revoke(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1607,6 +1665,7 @@ const char* cmd_session_revoke(const String& argsIn) {
 }
 #else
 // Stub implementations when HTTP server is disabled
+// Note: cmd_login and cmd_logout are in System_Utils.cpp (always available)
 const char* cmd_session_list(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return "Session management requires HTTP server to be enabled";
@@ -1619,7 +1678,6 @@ const char* cmd_session_revoke(const String& originalCmd) {
 
 const char* cmd_user_request(const String& args) {
   //RETURN_VALID_IF_VALIDATE_CSTR();
-  broadcastOutput("[DEBUG] NEW cmd_user_request function called");
   if (!filesystemReady) return "Error: LittleFS not ready";
   // Syntax: args = "<username> <password> [confirmPassword]"
   String rest = args;
@@ -1642,8 +1700,8 @@ const char* cmd_user_request(const String& args) {
   DEBUG_CMD_FLOWF("[users] Adding user to pending_users.json, filesystemReady=%d", filesystemReady ? 1 : 0);
 
   String json = "[]";
-  if (LittleFS.exists("/system/pending_users.json")) {
-    if (!readText("/system/pending_users.json", json)) {
+  if (LittleFS.exists(PENDING_USERS_FILE)) {
+    if (!readText(PENDING_USERS_FILE, json)) {
       DEBUG_CMD_FLOWF("[users] ERROR: Failed to read existing /system/pending_users.json");
       return "Error: could not read pending list";
     }
@@ -1654,7 +1712,10 @@ const char* cmd_user_request(const String& args) {
 
   // Create new user entry with hashed password
   String hashedPassword = hashUserPassword(password);
-  String userEntry = "{\"username\":\"" + username + "\",\"password\":\"" + hashedPassword + "\",\"timestamp\":" + String(millis()) + "}";
+  char entryBuf[256];
+  snprintf(entryBuf, sizeof(entryBuf), "{\"username\":\"%s\",\"password\":\"%s\",\"timestamp\":%lu}",
+           username.c_str(), hashedPassword.c_str(), (unsigned long)millis());
+  String userEntry = entryBuf;
 
   // Insert into array
   if (json == "[]") {
@@ -1670,14 +1731,14 @@ const char* cmd_user_request(const String& args) {
 
   // Attempt atomic write with debug details
   DEBUG_USERSF("[users] Attempting to write /system/pending_users.json (%d bytes)", (int)json.length());
-  bool okWrite = writeText("/system/pending_users.json", json);
+  bool okWrite = writeText(PENDING_USERS_FILE, json);
   if (!okWrite) {
     ERROR_STORAGEF("writeText failed when writing pending_users.json");
     broadcastOutput("[users] ERROR: writeText failed for /system/pending_users.json");
     return "Error: could not write pending list";
   }
   size_t fsz = 0;
-  File dbgFile = LittleFS.open("/system/pending_users.json", "r");
+  File dbgFile = LittleFS.open(PENDING_USERS_FILE, "r");
   if (dbgFile) {
     fsz = dbgFile.size();
     dbgFile.close();
@@ -1858,7 +1919,7 @@ static bool formatEpochAsISO8601(time_t epoch, char* buf, size_t bufSize) {
 
 // Parse boot anchors from users.json
 static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int maxCount) {
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, usersJson);
   if (error) return 0;
 
@@ -2212,7 +2273,7 @@ void resolvePendingUserCreationTimes() {
   if (modified) {
     DEBUG_USERSF("[resolve] Writing modified users.json");
     if (writeText(USERS_JSON_FILE, usersJson)) {
-      JsonDocument doc;
+      PSRAM_JSON_DOC(doc);
       DeserializationError error = deserializeJson(doc, usersJson);
       if (!error) {
         cleanupOldBootAnchors(&doc);
@@ -2236,7 +2297,7 @@ void writeBootAnchor() {
   String usersJson;
   if (!readText(USERS_JSON_FILE, usersJson)) return;
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, usersJson);
   if (error) return;
 
@@ -2271,23 +2332,24 @@ void writeBootAnchor() {
 
 const CommandEntry userSystemCommands[] = {
   // Authentication commands
-  { "login", "Login to transport: login <user> <pass> [serial|display|bluetooth]", false, cmd_login, "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth" },
-  { "logout", "Logout from transport: logout [serial|display|bluetooth]", false, cmd_logout },
+  { "login", "Login: <user> <pass> [transport]", false, cmd_login, "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth" },
+  { "logout", "Logout [transport]", false, cmd_logout },
   
   // User management commands
-  { "user approve", "Approve pending user request.", true, cmd_user_approve },
-  { "user deny", "Deny pending user request.", true, cmd_user_deny },
-  { "user promote", "Promote user to admin.", true, cmd_user_promote, "Usage: user promote <username>" },
-  { "user demote", "Demote admin to user.", true, cmd_user_demote, "Usage: user demote <username>" },
-  { "user delete", "Delete user account.", true, cmd_user_delete, "Usage: user delete <username>" },
+  { "user approve", "Approve pending request: <username>", true, cmd_user_approve },
+  { "user deny", "Deny pending request: <username>", true, cmd_user_deny },
+  { "user promote", "Promote to admin: <username>", true, cmd_user_promote, "Usage: user promote <username>" },
+  { "user demote", "Demote from admin: <username>", true, cmd_user_demote, "Usage: user demote <username>" },
+  { "user delete", "Delete user: <username>", true, cmd_user_delete, "Usage: user delete <username>" },
+  { "user resetpassword", "Reset user password: <username> <newPassword>", true, cmd_user_resetpassword, "Usage: user resetpassword <username> <newPassword>" },
   { "user list", "List all users.", true, cmd_user_list },
-  { "user request", "Request new user account.", false, cmd_user_request, "Usage: user request <username> <password> [confirmPassword]" },
-  { "user sync", "Sync user to ESP-NOW device.", true, cmd_user_sync },
+  { "user request", "Request account: <user> <pass> [confirm]", false, cmd_user_request, "Usage: user request <username> <password> [confirmPassword]" },
+  { "user sync", "Sync user to ESP-NOW: <username> <target>", true, cmd_user_sync },
   
   // Session management commands
   { "pending list", "List pending user requests.", true, cmd_pending_list },
   { "session list", "List active sessions.", true, cmd_session_list },
-  { "session revoke", "Revoke user session.", true, cmd_session_revoke, "Usage:\n  session revoke sid <sid> [reason]\n  session revoke user <username> [reason]" }
+  { "session revoke", "Revoke session: <sid|user> [reason]", true, cmd_session_revoke, "Usage:\n  session revoke sid <sid> [reason]\n  session revoke user <username> [reason]" }
 };
 
 const size_t userSystemCommandsCount = sizeof(userSystemCommands) / sizeof(userSystemCommands[0]);
@@ -2319,7 +2381,7 @@ void loadAndIncrementBootSeq() {
       ERROR_SYSTEMF("BootSeqInit: Failed to open users.json");
     } else {
       // Parse with ArduinoJson
-      JsonDocument doc;
+      PSRAM_JSON_DOC(doc);
       DeserializationError error = deserializeJson(doc, file);
       file.close();
       
@@ -2388,10 +2450,7 @@ void loadAndIncrementBootSeq() {
 
 #include "System_ESPNow.h"
 
-// Helper to build v2 envelope (from System_ESPNow.cpp)
-extern void v2_init_envelope(JsonDocument& doc, const char* type, uint32_t id, const char* src, const char* dst, int ttl);
 extern uint32_t generateMessageId();
-extern bool routerSend(Message& msg);
 extern String getEspNowDeviceName(const uint8_t* mac);
 
 // Helper to parse MAC address or device name
@@ -2517,7 +2576,7 @@ const char* cmd_user_sync(const String& argsIn) {
              username.c_str(), role.c_str(), deviceName.c_str());
   
   // Build USER_SYNC message
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   uint32_t msgId = generateMessageId();
   
   // Get device name for source
@@ -2526,31 +2585,23 @@ const char* cmd_user_sync(const String& argsIn) {
     myDeviceName = "unknown";
   }
   
-  v2_init_envelope(doc, MSG_TYPE_USER_SYNC, msgId, myDeviceName.c_str(), deviceName.c_str(), -1);
-  
-  JsonObject payload = doc["pld"].to<JsonObject>();
+  // Build JSON payload (no V2 envelope, just the sync data)
+  JsonObject payload = doc.to<JsonObject>();
   payload["admin_user"] = adminUser;
   payload["admin_pass"] = password;  // Admin provides their own password for auth
   payload["target_user"] = username;
   payload["target_pass"] = password;  // Same password for the user being synced
   payload["role"] = role;
+  payload["src_device"] = myDeviceName;
+  payload["dst_device"] = deviceName;
   
   // Serialize to string
-  String envelope;
-  serializeJson(doc, envelope);
+  String jsonStr;
+  serializeJson(doc, jsonStr);
   
-  // Send via router
-  Message msg;
-  memcpy(msg.dstMac, targetMac, 6);
-  msg.payload = envelope;
-  msg.priority = PRIORITY_HIGH;
-  msg.type = MSG_TYPE_COMMAND;
-  msg.requiresAck = true;
-  msg.msgId = msgId;
-  msg.ttl = 3;
-  msg.maxRetries = 2;
-  
-  if (!routerSend(msg)) {
+  // Send via V3 binary protocol
+  extern bool v3_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
+  if (!v3_send_user_sync(targetMac, jsonStr.c_str(), jsonStr.length())) {
     ERROR_USERF("[USER_SYNC] Failed to send sync message to %s", deviceName.c_str());
     snprintf(getDebugBuffer(), 1024, "Error: Failed to send user sync to '%s'", deviceName.c_str());
     return getDebugBuffer();

@@ -61,6 +61,15 @@ bool isTransportAdmin(CommandSource transport);
 bool isValidUser(const String& username, const String& password);
 bool verifyUserPassword(const String& inputPassword, const String& storedHash);
 
+// Update a user's password (stores hashed)
+bool setUserPassword(const String& username, const String& newPasswordRaw);
+
+// Update a user's gamepad pattern password (stores hashed, separate from text password)
+bool setUserGamepadPassword(const String& username, const String& newPatternRaw);
+
+// Check if a user has a gamepad password set
+bool hasUserGamepadPassword(const String& username);
+
 // Lookup user ID (primary key) by username
 bool getUserIdByUsername(const String& username, uint32_t& outUserId);
 
@@ -96,6 +105,8 @@ const char* cmd_user_deny(const String& cmd);
 const char* cmd_user_promote(const String& cmd);
 const char* cmd_user_demote(const String& cmd);
 const char* cmd_user_delete(const String& cmd);
+const char* cmd_user_changepassword(const String& cmd);
+const char* cmd_user_resetpassword(const String& cmd);
 const char* cmd_user_list(const String& cmd);
 const char* cmd_user_request(const String& cmd);
 const char* cmd_user_sync(const String& cmd);

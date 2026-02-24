@@ -14,19 +14,22 @@
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro
 #include "System_Command.h"  // For CommandModuleRegistrar
+#include "System_Notifications.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
+#if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
+#endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
 // External dependencies from main .ino
 // WifiNetwork struct and gWifiNetworks are now in wifi_system.h
 extern bool wifiConnected;
-extern void broadcastOutput(const String& msg);
-// gDebugBuffer, ensureDebugBuffer now from debug_system.h
 extern bool syncNTPAndResolve();  // Synchronous NTP sync
+#if ENABLE_HTTP_SERVER
 extern httpd_handle_t server;
+#endif
 extern volatile uint32_t gOutputFlags;
 
 // Debug system globals and macros from debug_system.h (gDebugFlags, gDebugOutputQueue, DEBUG_WIFIF, etc.)
@@ -156,6 +159,7 @@ const char* cmd_wifiadd(const String& originalCmd) {
   upsertWiFiNetwork(ssid, pass, pri, hid);
   sortWiFiByPriority();
   saveWiFiNetworks();
+  notifyWiFiNetworkAdded(ssid.c_str());
   snprintf(getDebugBuffer(), 1024, "Saved network '%s' with priority %d%s",
            ssid.c_str(), pri == 0 ? 1 : pri, hid ? " (hidden)" : "");
   return getDebugBuffer();
@@ -172,6 +176,7 @@ const char* cmd_wifirm(const String& originalCmd) {
   bool ok = removeWiFiNetwork(ssid);
   if (ok) {
     saveWiFiNetworks();
+    notifyWiFiNetworkRemoved(ssid.c_str());
     snprintf(getDebugBuffer(), 1024, "Removed network '%s'", ssid.c_str());
     return getDebugBuffer();
   } else {
@@ -301,17 +306,23 @@ const char* cmd_wifidisconnect(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Stop HTTP server to free heap
+ #if ENABLE_HTTP_SERVER
   if (server != NULL) {
     httpd_stop(server);
     server = NULL;
   }
   // Disable web output flag
   gOutputFlags &= ~OUTPUT_WEB;
-  gSettings.outWeb = false;
-  writeSettingsJson();
+  setSetting(gSettings.outWeb, false);
+ #endif
   // Note: Web mirror buffer clearing removed - handled by debug_system.cpp
   WiFi.disconnect();
+  notifyWiFiDisconnected();
+ #if ENABLE_HTTP_SERVER
   return "WiFi disconnected. HTTP server stopped and web output disabled to free heap.";
+ #else
+  return "WiFi disconnected.";
+ #endif
 }
 
 const char* cmd_wifiscan(const String& command) {
@@ -396,8 +407,7 @@ const char* cmd_wifiautoreconnect(const String& args) {
   String valStr = args;
   valStr.trim();
   int v = valStr.toInt();
-  gSettings.wifiAutoReconnect = (v != 0);
-  writeSettingsJson();
+  setSetting(gSettings.wifiAutoReconnect, (bool)(v != 0));
   return gSettings.wifiAutoReconnect ? "wifiAutoReconnect set to 1" : "wifiAutoReconnect set to 0";
 }
 
@@ -720,7 +730,14 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
   if (WiFi.status() == WL_CONNECTED) {
     DEBUG_WIFIF("[connectWiFiIndex] SUCCESS! Connected to '%s', IP=%s",
                 nw.ssid.c_str(), WiFi.localIP().toString().c_str());
+    // Disable WiFi power save. WIFI_PS_MODEM (default) wakes/sleeps the modem
+    // via periph_module_enable/disable, which acquires periph_spinlock. If I2C
+    // error recovery simultaneously holds I2C_ENTER_CRITICAL on Core 0 waiting
+    // for periph_spinlock, Core 0 spins with interrupts disabled and trips the
+    // interrupt WDT. WIFI_PS_NONE eliminates this contention.
+    esp_wifi_set_ps(WIFI_PS_NONE);
     BROADCAST_PRINTF("WiFi connected: %s", WiFi.localIP().toString().c_str());
+    notifyWiFiConnected(WiFi.localIP().toString().c_str());
     gWifiNetworks[index0based].lastConnected = millis();
     saveWiFiNetworks();
     return true;
@@ -766,6 +783,7 @@ const char* cmd_ntpsync(const String& cmd) {
   return ok ? "NTP sync complete" : "NTP sync failed";
 }
 
+#if ENABLE_HTTP_SERVER
 const char* cmd_httpstart(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -798,7 +816,6 @@ const char* cmd_httpstop(const String& cmd) {
   server = NULL;
   
   // Disable web output when server stops
-  extern volatile uint32_t gOutputFlags;
   gOutputFlags &= ~OUTPUT_WEB;
   
   return "[HTTP] Server stopped successfully";
@@ -814,29 +831,41 @@ const char* cmd_httpstatus(const String& cmd) {
   }
 }
 
+#else
+
+const char* cmd_httpstart(const String& cmd) { (void)cmd; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
+const char* cmd_httpstop(const String& cmd) { (void)cmd; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
+const char* cmd_httpstatus(const String& cmd) { (void)cmd; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server: DISABLED"; }
+
+#endif
+
 // ============================================================================
 // WiFi Command Registry
 // ============================================================================
 
 const CommandEntry wifiCommands[] = {
   // Network Management
-  { "wifiinfo", "Show current WiFi connection info.", false, cmd_wifiinfo, nullptr, "wifi", "status" },
+  { "wifiread", "Read current WiFi connection info.", false, cmd_wifiinfo },
+  { "wifistatus", "Show current WiFi connection info.", false, cmd_wifiinfo, nullptr, "wifi", "status" },
   { "wifilist", "List saved WiFi networks.", false, cmd_wifilist },
-  { "wifiadd", "Add/overwrite a WiFi network.", true, cmd_wifiadd, "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]" },
-  { "wifirm", "Remove a WiFi network.", true, cmd_wifirm, "Usage: wifirm <ssid>" },
-  { "wifipromote", "Promote a WiFi network to top priority.", true, cmd_wifipromote, "Usage: wifipromote <ssid>" },
+  { "wifiadd", "Add WiFi network: <ssid> <pass> [priority] [hidden]", true, cmd_wifiadd, "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]" },
+  { "wifirm", "Remove WiFi network: <ssid>", true, cmd_wifirm, "Usage: wifirm <ssid>" },
+  { "wifipromote", "Promote WiFi to top priority: <ssid>", true, cmd_wifipromote, "Usage: wifipromote <ssid>" },
   
   // Connection Control
-  { "wificonnect", "Connect to WiFi (auto-select or specify SSID).", false, cmd_wificonnect, "Usage: wificonnect [ssid]" },
-  { "wifidisconnect", "Disconnect from WiFi.", false, cmd_wifidisconnect },
+  { "openwifi", "Connect to WiFi [ssid] (optional)", false, cmd_wificonnect, "Usage: openwifi [ssid]" },
+  { "closewifi", "Disconnect from WiFi.", false, cmd_wifidisconnect },
   { "wifiscan", "Scan for available WiFi networks.", false, cmd_wifiscan, nullptr, "wifi", "scan" },
   { "wifigettxpower", "Get WiFi TX power.", false, cmd_wifitxpower },
   
   // Network Services
   { "ntpsync", "Sync time with NTP server.", false, cmd_ntpsync },
+#if ENABLE_HTTP_SERVER
   { "openhttp", "Start HTTP server.", false, cmd_httpstart },
   { "closehttp", "Stop HTTP server.", false, cmd_httpstop },
+  { "httpread", "Read HTTP server status.", false, cmd_httpstatus },
   { "httpstatus", "Show HTTP server status.", false, cmd_httpstatus }
+#endif
 };
 
 const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);
@@ -945,6 +974,7 @@ extern const SettingsModule wifiSettingsModule = {
 // ============================================================================
 // HTTP Settings Module
 // ============================================================================
+#if ENABLE_HTTP_SERVER
 
 static const SettingEntry httpSettingsEntries[] = {
   { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr }
@@ -958,5 +988,6 @@ extern const SettingsModule httpSettingsModule = {
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
+#endif // ENABLE_HTTP_SERVER
 
 #endif // ENABLE_WIFI

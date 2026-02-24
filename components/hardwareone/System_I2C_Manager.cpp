@@ -4,6 +4,7 @@
  */
 
 #include <Wire.h>
+#include <driver/i2c.h>
 
 #include "System_Debug.h"
 #include "System_I2C_Manager.h"
@@ -26,7 +27,7 @@ I2CDeviceManager::I2CDeviceManager()
     queueHead(0), queueTail(0), queueMutex(nullptr), pollingPaused(false) {
   memset(&busMetrics, 0, sizeof(busMetrics));
   memset(clockStack, 0, sizeof(clockStack));
-  memset(sensorQueue, 0, sizeof(sensorQueue));
+  memset(deviceQueue, 0, sizeof(deviceQueue));
 }
 
 void I2CDeviceManager::initialize() {
@@ -70,6 +71,14 @@ I2CDevice* I2CDeviceManager::registerDevice(uint8_t addr, const char* name,
     // Check if already registered
     for (int i = 0; i < deviceCount; i++) {
       if (devices[i].address == addr) {
+        // Update name if upgrading from "Auto" to a real name
+        if (strcmp(devices[i].name, "Auto") == 0 && strcmp(name, "Auto") != 0) {
+          devices[i].name = name;
+          devices[i].clockHz = clockHz;
+          devices[i].adaptiveTimeoutMs = timeoutMs;
+          INFO_I2CF("Updated device 0x%02X: Auto -> %s clock=%luHz timeout=%lums",
+                    addr, name, (unsigned long)clockHz, (unsigned long)timeoutMs);
+        }
         xSemaphoreGive(managerMutex);
         return &devices[i];
       }
@@ -123,6 +132,10 @@ void I2CDeviceManager::initBuses() {
   Wire1.begin(gSettings.i2cSdaPin, gSettings.i2cSclPin);
   Wire1.setClock(I2C_WIRE1_DEFAULT_FREQ);
   currentClockHz = I2C_WIRE1_DEFAULT_FREQ;
+  // Glitch filter: ignore pulses < 7 APB cycles (~88ns at 80MHz).
+  // Prevents spurious bus errors from EMI/noise that trigger i2c_hw_disable
+  // -> I2C_ENTER_CRITICAL -> periph_spinlock deadlock -> interrupt WDT crash.
+  i2c_filter_enable(I2C_NUM_1, 7);
   
   delay(100);
   
@@ -177,6 +190,7 @@ void I2CDeviceManager::performBusRecovery() {
   Wire1.begin(gSettings.i2cSdaPin, gSettings.i2cSclPin);
   Wire1.setClock(defaultClockHz);
   currentClockHz = defaultClockHz;
+  i2c_filter_enable(I2C_NUM_1, 7);
   delay(50);
   
   // 5. Reset all device health
@@ -193,12 +207,6 @@ void I2CDeviceManager::performBusRecovery() {
   }
   
   INFO_I2CF("Bus recovery complete");
-}
-
-void I2CDeviceManager::healthCheck() {
-  // DEPRECATED: Health check moved to event-driven model
-  // Each device now calls checkBusRecoveryNeeded() when it becomes degraded
-  // This function is kept for backward compatibility but does nothing
 }
 
 void I2CDeviceManager::checkBusRecoveryNeeded() {
@@ -296,10 +304,10 @@ void I2CDeviceManager::updateHistogram(uint32_t txDurationUs) {
 
 
 // ============================================================================
-// Sensor Lifecycle Management
+// I2C Device Lifecycle Management
 // ============================================================================
 
-bool I2CDeviceManager::enqueueSensorStart(SensorType sensor) {
+bool I2CDeviceManager::enqueueDeviceStart(I2CDeviceType sensor) {
   if (!queueMutex) return false;
   
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
@@ -309,8 +317,8 @@ bool I2CDeviceManager::enqueueSensorStart(SensorType sensor) {
       return false;  // Queue full
     }
     
-    sensorQueue[queueTail].sensor = sensor;
-    sensorQueue[queueTail].queuedAt = millis();
+    deviceQueue[queueTail].device = sensor;
+    deviceQueue[queueTail].queuedAt = millis();
     queueTail = nextTail;
     
     xSemaphoreGive(queueMutex);
@@ -320,7 +328,7 @@ bool I2CDeviceManager::enqueueSensorStart(SensorType sensor) {
   return false;
 }
 
-bool I2CDeviceManager::dequeueSensorStart(SensorStartRequest* req) {
+bool I2CDeviceManager::dequeueDeviceStart(I2CDeviceStartRequest* req) {
   if (!queueMutex || !req) return false;
   
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
@@ -329,7 +337,7 @@ bool I2CDeviceManager::dequeueSensorStart(SensorStartRequest* req) {
       return false;  // Queue empty
     }
     
-    *req = sensorQueue[queueHead];
+    *req = deviceQueue[queueHead];
     queueHead = (queueHead + 1) % 8;
     
     xSemaphoreGive(queueMutex);
@@ -339,13 +347,13 @@ bool I2CDeviceManager::dequeueSensorStart(SensorStartRequest* req) {
   return false;
 }
 
-bool I2CDeviceManager::isInQueue(SensorType sensor) {
+bool I2CDeviceManager::isInQueue(I2CDeviceType sensor) {
   if (!queueMutex) return false;
   
   bool found = false;
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
     for (int i = queueHead; i != queueTail; i = (i + 1) % 8) {
-      if (sensorQueue[i].sensor == sensor) {
+      if (deviceQueue[i].device == sensor) {
         found = true;
         break;
       }
@@ -356,14 +364,14 @@ bool I2CDeviceManager::isInQueue(SensorType sensor) {
   return found;
 }
 
-int I2CDeviceManager::getQueuePosition(SensorType sensor) {
+int I2CDeviceManager::getQueuePosition(I2CDeviceType sensor) {
   if (!queueMutex) return -1;
   
   int pos = -1;
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
     int idx = 1;
     for (int i = queueHead; i != queueTail; i = (i + 1) % 8) {
-      if (sensorQueue[i].sensor == sensor) {
+      if (deviceQueue[i].device == sensor) {
         pos = idx;
         break;
       }

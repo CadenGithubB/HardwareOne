@@ -56,7 +56,7 @@ uint8_t getPowerModeDisplayBrightness(uint8_t mode) {
 }
 
 void applyPowerMode(uint8_t mode) {
-  Serial.printf("[POWER] applyPowerMode called with mode=%d\n", mode);
+  DEBUG_SYSTEMF("[POWER] applyPowerMode called with mode=%d", mode);
   
   if (mode >= POWER_MODE_COUNT) {
     ERROR_SYSTEMF("Invalid power mode: %d", mode);
@@ -64,21 +64,21 @@ void applyPowerMode(uint8_t mode) {
   }
   
   const PowerModeConfig& config = gPowerModes[mode];
-  Serial.printf("[POWER] Config: name=%s cpuFreq=%lu displayBright=%d\n", 
+  DEBUG_SYSTEMF("[POWER] Config: name=%s cpuFreq=%lu displayBright=%d", 
                 config.name, (unsigned long)config.cpuFreqMhz, config.displayBrightnessPercent);
   
   // Apply CPU frequency
   uint32_t currentFreq = getCpuFrequencyMhz();
-  Serial.printf("[POWER] Current CPU freq: %lu MHz, target: %lu MHz\n", 
+  DEBUG_SYSTEMF("[POWER] Current CPU freq: %lu MHz, target: %lu MHz", 
                 (unsigned long)currentFreq, (unsigned long)config.cpuFreqMhz);
   if (currentFreq != config.cpuFreqMhz) {
     INFO_SYSTEMF("Changing CPU frequency: %lu MHz -> %lu MHz", 
                  (unsigned long)currentFreq, (unsigned long)config.cpuFreqMhz);
     setCpuFrequencyMhz(config.cpuFreqMhz);
-    Serial.printf("[POWER] After setCpuFrequencyMhz, actual freq: %lu MHz\n", 
+    DEBUG_SYSTEMF("[POWER] After setCpuFrequencyMhz, actual freq: %lu MHz", 
                   (unsigned long)getCpuFrequencyMhz());
   } else {
-    Serial.println("[POWER] CPU frequency already at target, skipping");
+    DEBUG_SYSTEMF("[POWER] CPU frequency already at target, skipping");
   }
   
   // Apply display brightness
@@ -89,7 +89,7 @@ void applyPowerMode(uint8_t mode) {
   if (gSettings.oledBrightness != targetBrightness) {
     INFO_SYSTEMF("Adjusting display brightness: %d -> %d (mode: %s)", 
                  gSettings.oledBrightness, targetBrightness, config.name);
-    gSettings.oledBrightness = targetBrightness;
+    setSetting(gSettings.oledBrightness, (int)targetBrightness);
     
     // Apply to hardware if OLED is enabled
     #if ENABLE_OLED_DISPLAY
@@ -130,14 +130,14 @@ void checkAutoPowerMode() {
 const char* cmd_power(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  Serial.printf("[POWER_CMD] cmd_power called with: '%s'\n", argsIn.c_str());
+  DEBUG_SYSTEMF("[POWER_CMD] cmd_power called with: '%s'", argsIn.c_str());
   
   extern Settings gSettings;
   
   // Parse command args: "" or "mode [name]" or "auto [on|off]"
   String args = argsIn;
   args.trim();
-  Serial.printf("[POWER_CMD] args after trim: '%s'\n", args.c_str());
+  DEBUG_SYSTEMF("[POWER_CMD] args after trim: '%s'", args.c_str());
   
   if (args.length() == 0) {
     // Show current power status
@@ -197,13 +197,10 @@ const char* cmd_power(const String& argsIn) {
       return "Error: Invalid mode. Use: perf, balanced, saver, ultra, or 0-3";
     }
     
-    Serial.printf("[POWER_CMD] Setting gSettings.powerMode to %d\n", newMode);
-    gSettings.powerMode = newMode;
-    Serial.println("[POWER_CMD] Calling applyPowerMode...");
+    DEBUG_SYSTEMF("[POWER_CMD] Setting gSettings.powerMode to %d", newMode);
+    setSetting(gSettings.powerMode, (uint8_t)newMode);
+    DEBUG_SYSTEMF("[POWER_CMD] Calling applyPowerMode...");
     applyPowerMode(newMode);
-    Serial.println("[POWER_CMD] Calling writeSettingsJson...");
-    writeSettingsJson();
-    Serial.println("[POWER_CMD] writeSettingsJson completed");
     
     BROADCAST_PRINTF("Power mode set to: %s", getPowerModeName(newMode));
     return "[Power] Mode updated";
@@ -214,8 +211,7 @@ const char* cmd_power(const String& argsIn) {
     }
     
     bool enable = subArgs.equalsIgnoreCase("on") || subArgs.equalsIgnoreCase("true") || subArgs == "1";
-    gSettings.powerAutoMode = enable;
-    writeSettingsJson();
+    setSetting(gSettings.powerAutoMode, enable);
     
     BROADCAST_PRINTF("Auto power mode: %s", enable ? "ON" : "OFF");
     if (enable) {
@@ -233,8 +229,7 @@ const char* cmd_power(const String& argsIn) {
       return "Error: Threshold must be 0-100";
     }
     
-    gSettings.powerBatteryThreshold = threshold;
-    writeSettingsJson();
+    setSetting(gSettings.powerBatteryThreshold, (uint8_t)threshold);
     BROADCAST_PRINTF("Battery threshold set to: %d%%", threshold);
     return "[Power] Threshold updated";
     
@@ -245,7 +240,7 @@ const char* cmd_power(const String& argsIn) {
 
 // Command table
 const CommandEntry powerCommands[] = {
-  {"power", "Power management (mode, auto, threshold)", false, cmd_power, "Usage: power [mode <0-3>] [auto <on|off>] [threshold <percent>]"}
+  {"power", "Power management [mode] [auto] [threshold]", false, cmd_power, "Usage: power [mode <0-3>] [auto <on|off>] [threshold <percent>]"}
 };
 
 const size_t powerCommandsCount = sizeof(powerCommands) / sizeof(powerCommands[0]);
