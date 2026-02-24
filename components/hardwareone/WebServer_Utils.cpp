@@ -10,6 +10,7 @@
 #include "System_MemUtil.h"
 #include "System_User.h"
 #include "System_UserSettings.h"
+#include "System_Settings.h"
 #include <lwip/sockets.h>
 #include <esp_random.h>
 #include <memory>
@@ -352,7 +353,7 @@ String generatePublicNavigation() {
   return nav;
 }
 
-String generateNavigation(const String& activePage, const String& username) {
+String generateNavigation(const String& activePage, const String& username, const char* initialTheme) {
   String nav =
     "<div class=\"top-menu\">"
     "<div class=\"menu-left\">";
@@ -367,27 +368,32 @@ String generateNavigation(const String& activePage, const String& username) {
   };
   link("/dashboard", "dashboard", "Dashboard");
   link("/cli", "cli", "Command Line");
-#if ENABLE_I2C_SYSTEM || ENABLE_CAMERA_SENSOR || ENABLE_MICROPHONE_SENSOR || ENABLE_ESPNOW
+#if ENABLE_WEB_SENSORS
   link("/sensors", "sensors", "Sensors");
 #endif
-#if ENABLE_MAPS
+#if ENABLE_WEB_MAPS
   link("/maps", "maps", "Maps");
 #endif
-#if ENABLE_GAMES
+#if ENABLE_WEB_GAMES
   link("/games", "games", "Games");
 #endif
-#if ENABLE_BLUETOOTH
+#if ENABLE_WEB_BLUETOOTH
   link("/bluetooth", "bluetooth", "Bluetooth");
 #endif
-#if ENABLE_ESPNOW
+#if ENABLE_WEB_ESPNOW
   link("/espnow", "espnow", "ESP-NOW");
+#if ENABLE_WEB_PAIR
+  if (gSettings.bondModeEnabled) {
+    link("/bond", "bond", "Bond");
+  }
 #endif
-#if ENABLE_MQTT
+#endif
+#if ENABLE_WEB_MQTT
   link("/mqtt", "mqtt", "MQTT");
 #endif
   link("/files", "files", "Files");
   link("/logging", "logging", "Logging");
-#if ENABLE_ESP_SR
+#if ENABLE_WEB_SPEECH
   link("/speech", "speech", "Speech");
 #endif
 #if ENABLE_AUTOMATION
@@ -400,7 +406,7 @@ String generateNavigation(const String& activePage, const String& username) {
     nav += "<a href=\"/login\" class=\"login-btn\">Login</a>";
   } else {
     nav += "<div class=\"username\">" + username + "</div>";
-    nav += "<button type=\"button\" class=\"menu-item\" id=\"theme-toggle-icon\" onclick=\"(function(){var t=document.documentElement.dataset.theme||'light';var n=(t==='dark')?'light':'dark';if(window.hw&&window.hw.applyTheme){window.hw.applyTheme(n);window.hw.saveThemePref(n)}else{document.documentElement.dataset.theme=n}})()\" style=\"padding:0.4rem 0.8rem;min-width:auto;font-size:1.2rem;\">☀️</button>";
+    nav += "<button type=\"button\" class=\"menu-item\" id=\"theme-toggle-icon\" onclick=\"(function(){var t=document.documentElement.dataset.theme||'light';var n=(t==='dark')?'light':'dark';if(window.hw&&window.hw.applyTheme){window.hw.applyTheme(n);window.hw.saveThemePref(n)}else{document.documentElement.dataset.theme=n}})()\" style=\"padding:0.4rem 0.8rem;min-width:auto;font-size:1.2rem;\">"; nav += (initialTheme && strcmp(initialTheme, "dark") == 0) ? "\U0001F319" : "\u2600\uFE0F"; nav += "</button>";
     nav += "<a href=\"/logout\" class=\"logout-btn\">Logout</a>";
   }
   nav += "</div>";
@@ -480,10 +486,16 @@ void streamBeginHtml(httpd_req_t* req,
   streamCommonCSS(req);
   streamChunkC(req, "</style>");
 
+  // Add inline background style to prevent flash of unstyled content (FOUC)
+  // The CSS variables may not be parsed immediately, so we set the background directly
   if (isPublic) {
-    streamChunkC(req, "</head><body class=\"public\">");
+    streamChunkC(req, "</head><body class=\"public\" style=\"background:linear-gradient(135deg,#667eea 0%,#764ba2 100%)\">");
   } else {
-    streamChunkC(req, "</head><body class=\"auth\">");
+    if (strcmp(initialTheme, "dark") == 0) {
+      streamChunkC(req, "</head><body class=\"auth\" style=\"background:linear-gradient(135deg,#07070b 0%,#151520 100%)\">");
+    } else {
+      streamChunkC(req, "</head><body class=\"auth\" style=\"background:linear-gradient(135deg,#667eea 0%,#764ba2 100%)\">");
+    }
   }
 
   // Navigation
@@ -492,19 +504,87 @@ void streamBeginHtml(httpd_req_t* req,
     String nav = generatePublicNavigation();
     if (nav.length()) httpd_resp_send_chunk(req, nav.c_str(), nav.length());
   } else {
-    String nav = generateNavigation(activePage, username);
+    String nav = generateNavigation(activePage, username, initialTheme);
     if (nav.length()) httpd_resp_send_chunk(req, nav.c_str(), nav.length());
   }
 #endif
 
   // Shared lightweight client helpers (available as window.hw)
   if (!isPublic) {
-    streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});function sysTheme(){try{return (w.matchMedia&&w.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}catch(_){return 'light'}}function dbg(){try{return !!(w.localStorage&&w.localStorage.getItem('hwDebugTheme')==='1')}catch(_){return false}}function log(){try{if(dbg())console.log.apply(console,arguments)}catch(_){}}hw.updateThemeIcon=function(){var btn=document.getElementById('theme-toggle-icon');if(btn){var t=document.documentElement.dataset.theme||'light';btn.textContent=(t==='dark')?'🌙':'☀️'}};hw.applyTheme=function(pref){var v=(pref==='system'||!pref)?sysTheme():pref;document.documentElement.dataset.theme=v;hw._themePref=pref||'light';hw.updateThemeIcon();log('[theme] apply pref=',pref,'->',v)};hw.loadThemePref=function(){log('[theme] load pref from /api/user/settings');return (hw.fetchJSON?hw.fetchJSON('/api/user/settings') : fetch('/api/user/settings',{credentials:'include',cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){return r.json()})).then(function(d){var pref=(d&&d.settings&&d.settings.theme)?d.settings.theme:'light';log('[theme] loaded',pref,'raw=',d);return pref}).catch(function(e){log('[theme] load failed',e);return 'light'})};hw.saveThemePref=function(pref){var body={theme:pref};log('[theme] save',body);return (hw.postJSON?hw.postJSON('/api/user/settings',body) : fetch('/api/user/settings',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()})).then(function(d){log('[theme] save resp',d);return d}).catch(function(e){log('[theme] save failed',e);return null})};hw.initTheme=function(){var initial=document.documentElement.dataset.theme||'light';document.documentElement.dataset.theme=initial;log('[theme] init initial=',initial);hw.loadThemePref().then(function(pref){hw.applyTheme(pref)});try{var mq=w.matchMedia('(prefers-color-scheme: dark)');if(mq&&mq.addEventListener){mq.addEventListener('change',function(){if(hw._themePref==='system')hw.applyTheme('system')})}}catch(_){}};hw.cycleTheme=function(){var cur=hw._themePref||'light';var next=(cur==='light')?'dark':((cur==='dark')?'system':'light');hw.applyTheme(next);hw.saveThemePref(next)};try{hw.initTheme();}catch(_){}})(window);</script>");
+    streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});function sysTheme(){try{return (w.matchMedia&&w.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}catch(_){return 'light'}}function dbg(){try{return !!(w.localStorage&&w.localStorage.getItem('hwDebugTheme')==='1')}catch(_){return false}}function log(){try{if(dbg())console.log.apply(console,arguments)}catch(_){}}hw.updateThemeIcon=function(){var btn=document.getElementById('theme-toggle-icon');if(btn){var t=document.documentElement.dataset.theme||'light';btn.textContent=(t==='dark')?'🌙':'☀️'}};hw.applyTheme=function(pref){var v=(pref==='system'||!pref)?sysTheme():pref;document.documentElement.dataset.theme=v;hw._themePref=pref||'light';if(document.body){document.body.style.background=(v==='dark')?'linear-gradient(135deg,#07070b 0%,#151520 100%)':'linear-gradient(135deg,#667eea 0%,#764ba2 100%)'}hw.updateThemeIcon();log('[theme] apply pref=',pref,'->',v)};hw.loadThemePref=function(){log('[theme] load pref from /api/user/settings');return (hw.fetchJSON?hw.fetchJSON('/api/user/settings') : fetch('/api/user/settings',{credentials:'include',cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){return r.json()})).then(function(d){var pref=(d&&d.settings&&d.settings.theme)?d.settings.theme:'light';log('[theme] loaded',pref,'raw=',d);return pref}).catch(function(e){log('[theme] load failed',e);return 'light'})};hw.saveThemePref=function(pref){var body={theme:pref};log('[theme] save',body);return (hw.postJSON?hw.postJSON('/api/user/settings',body) : fetch('/api/user/settings',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()})).then(function(d){log('[theme] save resp',d);return d}).catch(function(e){log('[theme] save failed',e);return null})};hw.initTheme=function(){var initial=document.documentElement.dataset.theme||'light';document.documentElement.dataset.theme=initial;log('[theme] init initial=',initial);hw.loadThemePref().then(function(pref){hw.applyTheme(pref)});try{var mq=w.matchMedia('(prefers-color-scheme: dark)');if(mq&&mq.addEventListener){mq.addEventListener('change',function(){if(hw._themePref==='system')hw.applyTheme('system')})}}catch(_){}};hw.cycleTheme=function(){var cur=hw._themePref||'light';var next=(cur==='light')?'dark':((cur==='dark')?'system':'light');hw.applyTheme(next);hw.saveThemePref(next)};try{hw.initTheme();}catch(_){}})(window);</script>");
   }
   streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});hw.qs=function(s,c){return (c||document).querySelector(s)};hw.qsa=function(s,c){return (c||document).querySelectorAll(s)};hw.on=function(e,v,f){if(e)e.addEventListener(v,f)};hw._ge=function(x){return typeof x==='string'?document.getElementById(x):x};hw.setText=function(x,t){var el=hw._ge(x);if(el)el.textContent=t};hw.setHTML=function(x,h){var el=hw._ge(x);if(el)el.innerHTML=h};hw.show=function(x){var el=hw._ge(x);if(el)el.style.display=''};hw.hide=function(x){var el=hw._ge(x);if(el)el.style.display='none'};hw.toggle=function(x,sh){(sh?hw.show:hw.hide)(x)};hw.fetchJSON=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';if(!o.headers)o.headers={};o.headers['Accept']='application/json';return fetch(u,o).then(function(r){if(r.status===401){return r.json().then(function(d){if(d&&d.error==='auth_required'&&d.reload){w.location.href='/login'}throw new Error('auth_required')}).catch(function(){w.location.href='/login';throw new Error('auth_required')})}if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})};hw.postJSON=function(u,b,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/json'},o.headers||{});o.body=JSON.stringify(b||{});return hw.fetchJSON(u,o)};hw.postForm=function(u,form,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/x-www-form-urlencoded'},o.headers||{});var b=[];for(var k in (form||{})){if(Object.prototype.hasOwnProperty.call(form,k)){b.push(encodeURIComponent(k)+'='+encodeURIComponent(form[k]))}};o.body=b.join('&');if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o)};try{console.log('[HW] helpers ready');}catch(_){} })(window);</script>");
   streamChunkC(req, "<script>(function(w){var hw=w.hw||(w.hw={});hw.pollJSON=function(u,ms,cb){try{cb=cb||function(){};ms=ms||1000;var h=setInterval(function(){hw.fetchJSON(u).then(cb).catch(function(e){if(e&&e.message==='auth_required'){clearInterval(h)}})},ms);return function(){clearInterval(h)};}catch(_){return function(){}}};try{console.log('[HW] page=\"");
   streamChunkC(req, activePage.c_str());
   streamChunkC(req, "\"');}catch(_){}})(window);</script>");
+
+  // Global themed dialog system (hwAlert / hwConfirm / hwPrompt + window.alert override)
+  if (!isPublic) {
+    streamCommonDialogs(req);
+  }
+
+  // Shared notification toast system (CSS + container + JS)
+  if (!isPublic) {
+    // Toast CSS - minimal, matches OLED ribbon feel (slides from top-right)
+    streamChunkC(req,
+      "<style>"
+      "#hw-toast-wrap{position:fixed;top:60px;right:12px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:calc(100vw - 24px)}"
+      ".hw-toast{pointer-events:auto;display:flex;align-items:center;gap:8px;padding:10px 16px;border-radius:8px;"
+      "background:rgba(30,30,40,0.92);color:#fff;font:600 13px/1.3 -apple-system,sans-serif;"
+      "box-shadow:0 4px 12px rgba(0,0,0,0.3);backdrop-filter:blur(8px);"
+      "animation:hwToastIn .3s ease-out;max-width:480px;overflow-x:auto;white-space:nowrap}"
+      ".hw-toast.out{animation:hwToastOut .25s ease-in forwards}"
+      ".hw-toast-icon{flex-shrink:0;width:18px;text-align:center;font-size:14px}"
+      ".hw-toast-msg{overflow-x:auto;white-space:nowrap;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.3) transparent}"
+      ".hw-toast-msg::-webkit-scrollbar{height:4px}"
+      ".hw-toast-msg::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.3);border-radius:2px}"
+      "@keyframes hwToastIn{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:translateY(0)}}"
+      "@keyframes hwToastOut{to{opacity:0;transform:translateY(-12px)}}"
+      "[data-theme=dark] .hw-toast{background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.15)}"
+      "</style>");
+
+    // Toast container
+    streamChunkC(req, "<div id=\"hw-toast-wrap\"></div>");
+
+    // Toast JS - hw.notify(level, msg, durationMs) + SSE auto-listener
+    streamChunkC(req,
+      "<script>(function(w){'use strict';"
+      "var hw=w.hw||(w.hw={});"
+      "var icons={success:'\\u2714',error:'\\u2716',warning:'\\u26A0',info:'\\u2139'};"
+      "var wrap=null;"
+      "hw.notify=function(level,msg,ms){"
+        "if(!wrap)wrap=document.getElementById('hw-toast-wrap');"
+        "if(!wrap)return;"
+        "ms=ms||4000;"
+        "var el=document.createElement('div');"
+        "el.className='hw-toast';"
+        "var ic=icons[level]||icons.info;"
+        "el.innerHTML='<span class=\"hw-toast-icon\">'+ic+'</span><span class=\"hw-toast-msg\">'+hw._esc(msg)+'</span>';"
+        "wrap.appendChild(el);"
+        "var t=setTimeout(function(){el.classList.add('out');setTimeout(function(){if(el.parentNode)el.parentNode.removeChild(el)},300)},ms);"
+        "el.onclick=function(){clearTimeout(t);el.classList.add('out');setTimeout(function(){if(el.parentNode)el.parentNode.removeChild(el)},300)};"
+        "if(wrap.children.length>5){var old=wrap.children[0];if(old&&old.parentNode)old.parentNode.removeChild(old)}"
+      "};"
+      "hw._esc=function(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML};"
+      // SSE auto-connect for notifications (optional transport - page works without it)
+      // Reuses window.__es if Dashboard already created one; otherwise creates and stores it
+      "function sseNotify(){"
+        "if(!w.EventSource)return;"
+        "try{"
+          "var es=w.__es;"
+          "if(!es||es.readyState===2){"
+            "es=new EventSource('/api/events',{withCredentials:true});"
+            "w.__es=es;"
+            "es.onerror=function(){try{es.close()}catch(_){};w.__es=null;setTimeout(sseNotify,10000)}"
+          "}"
+          "es.addEventListener('notification',function(e){"
+            "try{var d=JSON.parse(e.data);hw.notify(d.level||'info',d.msg||'',d.ms||4000)}catch(_){}"
+          "})"
+        "}catch(_){}"
+      "}"
+      "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',sseNotify)}else{sseNotify()}"
+      "})(window);</script>");
+  }
 
   // Open content container
   streamChunkC(req, "<div class=\"content\">");

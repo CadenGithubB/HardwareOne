@@ -111,6 +111,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
       <div id='command_fields' style='margin-top:0.25rem'>
         <div id='command_buttons' class='row-inline' style='gap:0.5rem;margin-top:0.5rem'>
         <button id='btn_add_cmd' type='button' class='btn btn-small' onclick='addCommandField()' title='Add another command to execute (e.g., ledcolor red, status, broadcast message)'>+ Add Command</button>
+        <button id='btn_add_print' type='button' class='btn btn-small' onclick='addPrintField()' title='Add a print/broadcast message statement'>+ Add Print</button>
         <button id='btn_add_logic' type='button' class='btn btn-small' onclick='addLogicField()' title='Add conditional logic (IF/THEN statements for sensor-based automation)'>+ Add Logic</button>
         <button id='btn_add_wait' type='button' class='btn btn-small' onclick='addWaitField()' title='Add a wait/pause command with dropdown timing'>+ Add Wait</button>
       </div>
@@ -125,30 +126,38 @@ static void streamAutomationsInner(httpd_req_t* req) {
     </div>
   </div>
 </div>
-<div id='a_error' class='alert alert-danger' style='margin-top:0.5rem'></div>
+<div id='a_error' class='alert alert-danger' style='margin-top:0.5rem;display:none'></div>
 </div>
   )AUTOPART1", HTTPD_RESP_USE_STRLEN);
 
   // Part 2: Download/Export section and automations table
   httpd_resp_send_chunk(req, R"AUTOPART2(
 <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:8px 8px 0 0;padding:1rem;border-bottom:1px solid var(--border);margin:1rem 0 0 0'>
-<div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:8px 8px 0 0;padding:1rem;border-bottom:1px solid var(--border);margin:1rem 0 0 0'>
 <div style='display:flex;gap:2rem;align-items:flex-start;flex-wrap:wrap'>
-<div style='flex:1;min-width:300px'>
-<h3 style='margin-top:0;color:var(--panel-fg)'>Download from GitHub</h3>
-<p style='margin:0.5rem 0;color:var(--muted);font-size:0.9em'>Import automation scripts from GitHub repositories:</p>
+<div style='flex:1;min-width:280px'>
+<h3 style='margin-top:0;color:var(--panel-fg)'>Import Automation</h3>
+<p style='margin:0.5rem 0;color:var(--panel-fg);font-size:0.9em'>Import from a local JSON file:</p>
+<div style='display:flex;gap:0.5rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap'>
+<label class='btn' style='padding:0.4rem 0.8rem;cursor:pointer;font-size:0.9em'>
+  Choose File
+  <input type='file' id='import_file' accept='.json' onchange='importFromFile(this)' style='display:none'>
+</label>
+<span id='import_filename' style='font-size:0.85em;color:var(--panel-fg);opacity:0.7'>No file chosen</span>
+</div>
+<div id='import_file_status' style='font-size:0.8em;margin-bottom:0.75rem'></div>
+<p style='margin:0.5rem 0;color:var(--panel-fg);font-size:0.9em'>Or import from a GitHub URL:</p>
 <div style='margin-bottom:0.5rem'>
-<input type='text' id='github_url' placeholder='https://github.com/user/repo/blob/main/automation.json' style='width:100%;padding:0.5rem;border:1px solid #ccc;border-radius:4px;font-size:0.9em;box-sizing:border-box;background:white;color:#333'>
+<input type='text' id='github_url' placeholder='https://github.com/user/repo/blob/main/automation.json' style='width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.9em;box-sizing:border-box;background:var(--input-bg,var(--panel-bg));color:var(--panel-fg)'>
 </div>
 <div style='display:flex;gap:0.5rem;align-items:stretch;flex-wrap:wrap;margin-bottom:0.5rem'>
-<input type='text' id='github_name' placeholder='Custom name (optional)' style='flex:1;min-width:150px;padding:0.5rem;border:1px solid #ccc;border-radius:4px;font-size:0.9em;height:auto;background:white;color:#333'>
-<button onclick='downloadFromGitHub()' class='btn' style='padding:0.5rem 1rem;height:auto'>Download</button>
+<input type='text' id='github_name' placeholder='Custom name (optional)' style='flex:1;min-width:150px;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.9em;height:auto;background:var(--input-bg,var(--panel-bg));color:var(--panel-fg)'>
+<button onclick='downloadFromGitHub()' class='btn' style='padding:0.5rem 1rem;height:auto'>Import</button>
 </div>
 <div id='download_status' style='font-size:0.8em'></div>
 </div>
 <div style='flex:1;min-width:250px'>
 <h3 style='margin-top:0;color:var(--panel-fg)'>Export Automations</h3>
-<p style='margin:0.5rem 0 1rem 0;color:var(--muted);font-size:0.9em'>Download your automations as JSON backup files:</p>
+<p style='margin:0.5rem 0 1rem 0;color:var(--panel-fg);font-size:0.9em'>Download your automations as JSON backup files:</p>
 <div style='margin-bottom:0.75rem;padding:0.75rem;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)'>
 <div style='font-weight:600;font-size:0.85em;color:var(--panel-fg);margin-bottom:0.5rem'>Export Options:</div>
 <div style='display:flex;align-items:flex-start;justify-content:space-between;gap:1rem'>
@@ -157,7 +166,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
 <input type='checkbox' id='export_separate' style='cursor:pointer;margin:0;padding:0;width:16px;height:16px'>
 <span style='font-size:0.9em;color:var(--panel-fg);margin-left:0.5rem'>Separate files</span>
 </label>
-<div style='font-size:0.75em;color:var(--muted);margin-top:0.3rem;margin-left:1.5rem'>Download one automation per file</div>
+<div style='font-size:0.75em;color:var(--panel-fg);margin-top:0.3rem;margin-left:1.5rem'>Download one automation per file</div>
 </div>
 <button onclick='exportAllAutomations()' class='btn' style='margin:0;flex-shrink:0'>Export All</button>
 </div>
@@ -475,6 +484,30 @@ function addCommandField(){
   container.insertBefore(div, buttonsDiv); 
 }
 function removeCommandField(btn){ btn.parentElement.remove(); }
+function addPrintField(){ 
+  const container=document.getElementById('command_fields'); 
+  const buttonsDiv=document.getElementById('command_buttons'); 
+  const div=document.createElement('div'); 
+  div.className='cmd-field row-inline'; 
+  div.style.cssText='gap:0.5rem;margin-bottom:0.3rem'; 
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'cmd-input input-tall';
+  input.value = 'PRINT ';
+  input.placeholder = 'PRINT Your message here';
+  input.style.cssText = 'flex:1;min-width:260px;height:32px;line-height:32px;padding:0 0.5rem;box-sizing:border-box';
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'btn btn-small';
+  removeBtn.textContent = 'Remove';
+  removeBtn.onclick = function() { this.parentElement.remove(); };
+  removeBtn.style.cssText = 'height:32px;line-height:32px;padding:0 10px;box-sizing:border-box;font-size:14px;display:inline-flex;align-items:center;margin:0';
+  div.appendChild(input);
+  div.appendChild(removeBtn);
+  container.insertBefore(div, buttonsDiv);
+  input.focus();
+  input.setSelectionRange(6, 6);
+}
 </script>)AUTOPART4", HTTPD_RESP_USE_STRLEN);
 
   // Part 5: Logic field functions
@@ -493,11 +526,12 @@ function addLogicField(){
   const varSelect = document.createElement('select'); 
   varSelect.className = 'logic-var input-tall'; 
   varSelect.style.cssText = 'height:32px'; 
-  varSelect.innerHTML = '<option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option><option value="time">Time</option>'; 
+  varSelect.innerHTML = '<option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option><option value="time">Time</option><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option>'; 
+  varSelect.onchange = function() { updateValuePlaceholder(this); };
   const opSelect = document.createElement('select'); 
   opSelect.className = 'logic-operator input-tall'; 
   opSelect.style.cssText = 'height:32px;width:60px'; 
-  opSelect.innerHTML = '<option value=">">></option><option value="<"><</option><option value="=">=</option><option value=">=">=</option><option value="<="<=</option><option value="!=">!=</option>'; 
+  opSelect.innerHTML = '<option value=">">></option><option value="<"><</option><option value="=">=</option><option value=">=">>=</option><option value="<="><=</option><option value="!=">!=</option><option value="CONTAINS">CONTAINS</option>'; 
   const valueInput = document.createElement('input'); 
   valueInput.type = 'text'; 
   valueInput.className = 'logic-value input-tall'; 
@@ -528,6 +562,22 @@ function addLogicField(){
   container.insertBefore(newField, buttonsDiv); 
 }
 function removeLogicField(btn){ btn.parentElement.remove(); }
+function updateValuePlaceholder(varSelect){ 
+  try { 
+    const field=varSelect.parentElement; 
+    const valueInput=field.querySelector('.logic-value'); 
+    if(!valueInput) return;
+    const varType=varSelect.value;
+    if(varType==='room') valueInput.placeholder='Kitchen';
+    else if(varType==='zone') valueInput.placeholder='Upstairs';
+    else if(varType==='tags') valueInput.placeholder='dimmable';
+    else if(varType==='time') valueInput.placeholder='EVENING';
+    else if(varType==='motion') valueInput.placeholder='DETECTED';
+    else valueInput.placeholder='75';
+  } catch(e) { 
+    console.error('updateValuePlaceholder error:', e); 
+  } 
+}
 function updateLogicField(selectElement){ 
   try { 
     const field=selectElement.parentElement; 
@@ -581,7 +631,7 @@ function formatNextRun(nextAt){
     } else { 
       relativeStr = 'in ' + Math.floor(diffSec/86400) + 'd'; 
     } 
-    return timeStr + '<br><small style="color:var(--muted)">' + relativeStr + '</small>'; 
+    return timeStr + '<br><small style="color:var(--panel-fg)">' + relativeStr + '</small>'; 
   } catch(e){ 
     return '\u2014'; 
   } 
@@ -592,22 +642,26 @@ function renderAutos(json) {
     let autos = [];
     if (data && data.automations && Array.isArray(data.automations)) autos = data.automations;
     let html = '<table style="width:100%;border-collapse:collapse">';
-    html += '<tr style="background:#e9ecef"><th style="padding:0.5rem;text-align:left">ID</th><th style="padding:0.5rem;text-align:left">Name</th><th style="padding:0.5rem;text-align:left">Enabled</th><th style="padding:0.5rem;text-align:left">Type</th><th style="padding:0.5rem;text-align:left">Summary</th><th style="padding:0.5rem;text-align:left">Next Run</th><th style="padding:0.5rem">Actions</th></tr>';
+    html += '<tr style="background:var(--crumb-bg);color:var(--panel-fg)"><th style="padding:0.5rem;text-align:left">ID</th><th style="padding:0.5rem;text-align:left">Name</th><th style="padding:0.5rem;text-align:left">Enabled</th><th style="padding:0.5rem;text-align:left">Type</th><th style="padding:0.5rem;text-align:left">Summary</th><th style="padding:0.5rem;text-align:left">Next Run</th><th style="padding:0.5rem">Actions</th></tr>';
     if (autos.length === 0) {
-      html += '<tr><td colspan="7" style="padding:2rem;text-align:center;color:var(--muted);font-style:italic">No automations yet. Create your first automation above!</td></tr>';
+      html += '<tr><td colspan="7" style="padding:2rem;text-align:center;color:var(--panel-fg);font-style:italic">No automations yet. Create your first automation above!</td></tr>';
     } else {
       autos.forEach(a => {
         let name = a.name || '(unnamed)';
         let enabled = (a.enabled === true ? 'Yes' : 'No');
-        let t = (a.type || '').toLowerCase();
-        let type = (a.runAtBoot === true) ? 'On Boot' : (a.type || human(a.type));
+        let sched = a.schedule || {};
+        let rawType = (sched.type || a.type || '');
+        let t = rawType.toLowerCase();
+        let runAtBoot = (sched.runAtBoot === true || a.runAtBoot === true);
+        let type = runAtBoot ? 'On Boot' : rawType;
         let summary = '';
         if (t === 'attime') {
-          summary = 'At ' + (a.time || '?') + (a.days ? ' on ' + a.days : '');
+          summary = 'At ' + (sched.time || a.time || '?') + (sched.days || a.days ? ' on ' + (sched.days || a.days) : '');
+          if (sched.recurrence) summary += ' (' + sched.recurrence + ')';
         } else if (t === 'afterdelay') {
-          summary = 'After ' + (a.delayMs || '?') + ' ms';
+          summary = 'After ' + (sched.delayMs || a.delayMs || '?') + ' ms';
         } else if (t === 'interval') {
-          summary = 'Every ' + (a.intervalMs || '?') + ' ms';
+          summary = 'Every ' + (sched.intervalMs || a.intervalMs || '?') + ' ms';
         } else {
           summary = '\u2014';
         }
@@ -616,16 +670,15 @@ function renderAutos(json) {
         } else if (a.command) {
           summary += ' | cmd: ' + a.command;
         }
-        if (a.conditions && a.conditions.trim()) {
-          summary += ' | conditions: ' + a.conditions;
-        }
-        if (a.runAtBoot === true) {
+        if (runAtBoot) {
           summary += ' | Boot';
-          if (typeof a.bootDelayMs !== 'undefined' && a.bootDelayMs !== null) {
-            summary += ' (' + a.bootDelayMs + ' ms)';
+          let bootDelay = sched.bootDelayMs || a.bootDelayMs;
+          if (typeof bootDelay !== 'undefined' && bootDelay !== null) {
+            summary += ' (' + bootDelay + ' ms)';
           }
         }
-        let nextRun = formatNextRun(a.nextAt);
+        let nextAt = (sched.nextAt || a.nextAt);
+        let nextRun = formatNextRun(nextAt);
         let id = (typeof a.id !== 'undefined') ? a.id : '';
         let btns = '';
         if (id !== '') {
@@ -635,10 +688,11 @@ function renderAutos(json) {
             btns += '<button class="btn" onclick="autoToggle(' + id + ',1)" style="margin-right:0.3rem">Enable</button>';
           }
           btns += '<button class="btn" onclick="autoRun(' + id + ')" style="margin-right:0.3rem">Run</button>';
+          btns += '<button class="btn" onclick="autoEdit(' + id + ')" style="margin-right:0.3rem">Edit</button>';
           btns += '<button class="btn" onclick="autoDelete(' + id + ')" style="margin-right:0.3rem;color:#b00">Delete</button>';
           btns += '<button class="btn" onclick="exportSingleAutomation(' + id + ')">Export</button>';
         }
-        html += '<tr style="border-bottom:1px solid #ddd">';
+        html += '<tr style="border-bottom:1px solid var(--border)">';
         html += '<td style="padding:0.5rem">' + id + '</td>';
         html += '<td style="padding:0.5rem">' + name + '</td>';
         html += '<td style="padding:0.5rem">' + enabled + '</td>';
@@ -697,10 +751,12 @@ async function createAutomation(){
   const intervalUnit=(document.getElementById('a_interval_unit')?document.getElementById('a_interval_unit').value:'ms'); 
   const en=document.getElementById('a_enabled').checked; 
   const runAtBoot=document.getElementById('a_runatboot').checked; 
-  document.getElementById('a_error').textContent=''; 
+  const editIdEl=document.getElementById('a_edit_id');
+  const editId=editIdEl?editIdEl.value.trim():'';
+  document.getElementById('a_error').textContent=''; document.getElementById('a_error').style.display='none'; 
   const recur=(document.getElementById('a_recur')?document.getElementById('a_recur').value:'daily'); 
   if(type==='atTime'&&(recur==='monthly'||recur==='yearly')){ 
-    document.getElementById('a_error').textContent='Monthly/Yearly repeats are not supported yet.'; 
+    document.getElementById('a_error').textContent='Monthly/Yearly repeats are not supported yet.'; document.getElementById('a_error').style.display='block';
     return; 
   } 
   const selectedDays=[]; 
@@ -709,7 +765,7 @@ async function createAutomation(){
       if(document.getElementById('day_'+day).checked) selectedDays.push(day); 
     }); 
     if(selectedDays.length===0){ 
-      document.getElementById('a_error').textContent='Please select at least one day for a weekly schedule.'; 
+      document.getElementById('a_error').textContent='Please select at least one day for a weekly schedule.'; document.getElementById('a_error').style.display='block';
       return; 
     } 
   } 
@@ -736,6 +792,7 @@ async function createAutomation(){
   }); 
   const logicFields=document.querySelectorAll('.logic-field'); 
   const conditionalChain=[]; 
+  let logicError=false;
   logicFields.forEach(field=>{ 
     const typeSelect=field.querySelector('.logic-type'); 
     const varSelect=field.querySelector('.logic-var'); 
@@ -745,20 +802,21 @@ async function createAutomation(){
     if(typeSelect && action){ 
       const typeVal=typeSelect.value; 
       const actVal=action.value.trim(); 
-      if(typeVal && actVal){ 
-        if(typeVal==='ELSE'){ 
-          conditionalChain.push(typeVal+' '+actVal); 
-        } else if(varSelect && operatorSelect && value){ 
+      if(typeVal==='ELSE'){ 
+        if(actVal) conditionalChain.push(typeVal+' '+actVal); else logicError=true;
+      } else if(typeVal){ 
+        if(varSelect && operatorSelect && value){ 
           const varVal=varSelect.value; 
           const opVal=operatorSelect.value; 
           const valVal=value.value.trim(); 
-          if(varVal && opVal && valVal){ 
+          if(varVal && opVal && valVal && actVal){ 
             conditionalChain.push(typeVal+' '+varVal+opVal+valVal+' THEN '+actVal); 
-          } 
+          } else { logicError=true; }
         } 
       } 
     } 
   }); 
+  if(logicError){ document.getElementById('a_error').textContent='Logic field incomplete: all fields (variable, operator, value, action) are required.'; document.getElementById('a_error').style.display='block'; return; }
   if(conditionalChain.length>0){ 
     cmds.push(conditionalChain.join(' ')); 
   } 
@@ -801,25 +859,19 @@ async function createAutomation(){
         parts.push('intervalms='+intervalMs); 
       } 
     } 
-    parts.push('commands='+cmdsParam); 
+    parts.push('commands="'+cmdsParam.replace(/"/g,'\\"')+'"'); 
     parts.push('enabled='+(en?1:0)); 
     if(runAtBoot) parts.push('runatboot=1'); 
+    if(editId && idx===0) parts.push('id='+editId); 
     return parts.join(' '); 
   }; 
   const fullCmds=(times.length?times:[null]).map((t,idx)=>buildParts(t,idx)); 
-  if(conditionalChain.length>0){ 
-    const chainStr=conditionalChain.join(' '); 
-    const validationResult=await postCLIValidate('validate-conditions '+chainStr); 
-    if(validationResult!=='VALID'){ 
-      document.getElementById('a_error').textContent=validationResult; 
-      return; 
-    } 
-  } 
+  
   Promise.all(fullCmds.map(c=>postCLIValidate(c))).then(vals=>{ 
     for(let i=0;i<vals.length;i++){ 
       const v=(vals[i]||'').trim(); 
       if(v!=='VALID'){ 
-        document.getElementById('a_error').textContent=v; 
+        document.getElementById('a_error').textContent=v; document.getElementById('a_error').style.display='block';
         throw new Error('Invalid'); 
       } 
     } 
@@ -827,26 +879,31 @@ async function createAutomation(){
   }).then(results=>{ 
     const err=results.find(t=>t.toLowerCase().indexOf('error:')>=0); 
     if(err){ 
-      document.getElementById('a_error').textContent=err; 
+      document.getElementById('a_error').textContent=err; document.getElementById('a_error').style.display='block';
       return; 
     } 
-    document.getElementById('a_name').value=''; 
-    document.querySelectorAll('.time-input').forEach(input=>input.value=''); 
-    ['mon','tue','wed','thu','fri','sat','sun'].forEach(day=>{ 
-      let el=document.getElementById('day_'+day); 
-      if(el) el.checked=false; 
-    }); 
-    document.getElementById('a_delay').value=''; 
-    document.getElementById('a_interval').value=''; 
-    var elRunBoot=document.getElementById('a_runatboot'); if(elRunBoot) elRunBoot.checked=false; 
-    const cwrap=document.getElementById('command_fields'); 
-    if(cwrap){ 
-      cwrap.innerHTML='<div id="command_buttons" class="row-inline" style="gap:0.5rem;margin-top:0.5rem"><button id="btn_add_cmd" type="button" class="btn btn-small" onclick="addCommandField()" title="Add another command to execute (e.g., ledcolor red, status, broadcast message)">+ Add Command</button><button id="btn_add_logic" type="button" class="btn btn-small" onclick="addLogicField()" title="Add conditional logic (IF/THEN statements for sensor-based automation)">+ Add Logic</button><button id="btn_add_wait" type="button" class="btn btn-small" onclick="addWaitField()" title="Add a wait/pause command with dropdown timing">+ Add Wait</button></div>'; 
-    } 
-    loadAutos(); 
+    const resetForm=()=>{
+      document.getElementById('a_name').value=''; 
+      document.querySelectorAll('.time-input').forEach(input=>input.value=''); 
+      ['mon','tue','wed','thu','fri','sat','sun'].forEach(day=>{ 
+        let el=document.getElementById('day_'+day); 
+        if(el) el.checked=false; 
+      }); 
+      document.getElementById('a_delay').value=''; 
+      document.getElementById('a_interval').value=''; 
+      var elRunBoot=document.getElementById('a_runatboot'); if(elRunBoot) elRunBoot.checked=false; 
+      const cwrap=document.getElementById('command_fields'); 
+      if(cwrap){ 
+        cwrap.innerHTML='<div id="command_buttons" class="row-inline" style="gap:0.5rem;margin-top:0.5rem"><button id="btn_add_cmd" type="button" class="btn btn-small" onclick="addCommandField()" title="Add another command to execute (e.g., ledcolor red, status, broadcast message)">+ Add Command</button><button id="btn_add_print" type="button" class="btn btn-small" onclick="addPrintField()" title="Add a print/broadcast message statement">+ Add Print</button><button id="btn_add_logic" type="button" class="btn btn-small" onclick="addLogicField()" title="Add conditional logic (IF/THEN statements for sensor-based automation)">+ Add Logic</button><button id="btn_add_wait" type="button" class="btn btn-small" onclick="addWaitField()" title="Add a wait/pause command with dropdown timing">+ Add Wait</button></div>'; 
+      } 
+      const eidEl=document.getElementById('a_edit_id'); if(eidEl) eidEl.value='';
+      const addBtn=document.querySelector('button[onclick="createAutomation()"]'); if(addBtn) addBtn.textContent='Add';
+      loadAutos();
+    };
+    resetForm();
   }).catch(e=>{ 
     if(!document.getElementById('a_error').textContent){ 
-      document.getElementById('a_error').textContent='Validation error: '+e.message; 
+      document.getElementById('a_error').textContent='Validation error: '+e.message; document.getElementById('a_error').style.display='block';
     } 
   }); 
 }
@@ -868,33 +925,167 @@ function autoRun(id){
     } 
   }); 
 }
+function autoEdit(id){
+  fetch('/api/automations').then(r=>r.json()).then(data=>{
+    if(!data||!data.automations) return;
+    const a=data.automations.find(x=>String(x.id)===String(id));
+    if(!a){alert('Automation not found');return;}
+    const sched=a.schedule||{};
+    document.getElementById('a_name').value=a.name||'';
+    const typeRaw=((sched.type||a.type||'attime')).toLowerCase();
+    let typeVal='atTime';
+    if(typeRaw==='afterdelay') typeVal='afterDelay';
+    else if(typeRaw==='interval') typeVal='interval';
+    else if(typeRaw==='onboot') typeVal='onBoot';
+    document.getElementById('a_type').value=typeVal;
+    autoTypeChanged();
+    const recurEl=document.getElementById('a_recur');
+    if(recurEl){recurEl.value=(sched.recurrence||a.recurrence||'daily');recurChanged();}
+    const allTimes=sched.times||a.times||(sched.time?[sched.time]:a.time?[a.time]:[]);
+    if(typeVal==='atTime'&&allTimes.length>0){
+      const mainInput=document.querySelector('#grp_atTime .time-input');
+      if(mainInput) mainInput.value=allTimes[0];
+      const addlCont=document.getElementById('time_fields');
+      if(addlCont) addlCont.innerHTML='';
+      for(let i=1;i<allTimes.length;i++){addTimeField();const tf=document.querySelectorAll('.time-field .time-input');if(tf[i-1])tf[i-1].value=allTimes[i];}
+    }
+    if((sched.recurrence||a.recurrence||'')==='weekly'){
+      ['mon','tue','wed','thu','fri','sat','sun'].forEach(d=>{const el=document.getElementById('day_'+d);if(el)el.checked=false;});
+      (sched.days||a.days||[]).forEach(d=>{const el=document.getElementById('day_'+d.toLowerCase().substring(0,3));if(el)el.checked=true;});
+    }
+    if(typeVal==='afterDelay') document.getElementById('a_delay').value=sched.delayMs||a.delayMs||0;
+    if(typeVal==='interval') document.getElementById('a_interval').value=sched.intervalMs||a.intervalMs||0;
+    const commands=Array.isArray(a.commands)?a.commands:(a.command?[a.command]:[]);
+    const cwrap=document.getElementById('command_fields');
+    if(cwrap){
+      cwrap.innerHTML='<div id="command_buttons" class="row-inline" style="gap:0.5rem;margin-top:0.5rem"><button id="btn_add_cmd" type="button" class="btn btn-small" onclick="addCommandField()" title="Add another command to execute (e.g., ledcolor red, status, broadcast message)">+ Add Command</button><button id="btn_add_print" type="button" class="btn btn-small" onclick="addPrintField()" title="Add a print/broadcast message statement">+ Add Print</button><button id="btn_add_logic" type="button" class="btn btn-small" onclick="addLogicField()" title="Add conditional logic (IF/THEN statements for sensor-based automation)">+ Add Logic</button><button id="btn_add_wait" type="button" class="btn btn-small" onclick="addWaitField()" title="Add a wait/pause command with dropdown timing">+ Add Wait</button></div>';
+      commands.forEach(cmd=>{
+        const cmdStr=typeof cmd==='object'?(cmd.conditional||JSON.stringify(cmd)):String(cmd);
+        addCommandField();
+        const inp=cwrap.querySelectorAll('.cmd-input');
+        if(inp.length>0) inp[inp.length-1].value=cmdStr;
+      });
+    }
+    document.getElementById('a_enabled').checked=a.enabled!==false;
+    const rbEl=document.getElementById('a_runatboot');
+    if(rbEl) rbEl.checked=(sched.runAtBoot===true||a.runAtBoot===true);
+    let eidEl=document.getElementById('a_edit_id');
+    if(!eidEl){eidEl=document.createElement('input');eidEl.type='hidden';eidEl.id='a_edit_id';document.getElementById('a_name').parentElement.appendChild(eidEl);}
+    eidEl.value=id;
+    const addBtn=document.querySelector('button[onclick="createAutomation()"]');
+    if(addBtn) addBtn.textContent='Save Changes';
+    document.getElementById('a_name').scrollIntoView({behavior:'smooth',block:'center'});
+  }).catch(e=>console.error('autoEdit:',e));
+}
 </script>)AUTOPART7", HTTPD_RESP_USE_STRLEN);
 
-  // Part 8: GitHub download and export functions
+  // Part 8: Import engine, GitHub download, file import, and export functions
   httpd_resp_send_chunk(req, R"AUTOPART8(<script>
-function downloadFromGitHub(){ 
-  const url=document.getElementById('github_url').value.trim(); 
-  const name=document.getElementById('github_name').value.trim(); 
-  const status=document.getElementById('download_status'); 
-  if(!url){ 
-    status.innerHTML='<span style="color:#dc3545">Please enter a GitHub URL</span>'; 
-    return; 
-  } 
-  status.innerHTML='<span style="color:#007bff">Downloading...</span>'; 
-  let cmd='downloadautomation url='+encodeURIComponent(url); 
-  if(name) cmd+=' name='+encodeURIComponent(name); 
-  postCLI(cmd).then(r=>{ 
-    if(r.toLowerCase().indexOf('error:')>=0){ 
-      status.innerHTML='<span style="color:#dc3545">'+r+'</span>'; 
-    } else { 
-      status.innerHTML='<span style="color:#28a745">'+r+'</span>'; 
-      document.getElementById('github_url').value=''; 
-      document.getElementById('github_name').value=''; 
-      loadAutos(); 
-    } 
-  }).catch(e=>{ 
-    status.innerHTML='<span style="color:#dc3545">Network error: '+e.message+'</span>'; 
-  }); 
+// Shared import engine: takes a parsed automation JSON object (new schema) and calls 'automation add'
+function importAutomationFromJson(autoJson, statusEl){
+  const name=(autoJson.name||'').trim();
+  if(!name){
+    if(statusEl) statusEl.innerHTML='<span style="color:#dc3545">Error: missing name</span>';
+    return Promise.reject(new Error('missing name'));
+  }
+  const sched=autoJson.schedule||{};
+  const rawType=(sched.type||autoJson.type||'').toLowerCase();
+  if(!rawType){
+    if(statusEl) statusEl.innerHTML='<span style="color:#dc3545">Error: missing schedule.type</span>';
+    return Promise.reject(new Error('missing type'));
+  }
+  const parts=['automation add'];
+  parts.push('name="'+name.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
+  parts.push('type='+rawType);
+  const time=sched.time||autoJson.time||'';
+  if(time) parts.push('time='+time);
+  const recurrence=sched.recurrence||autoJson.recurrence||'';
+  if(recurrence) parts.push('recurrence='+recurrence);
+  const days=sched.days||autoJson.days||'';
+  if(days) parts.push('days='+days);
+  const delayMs=typeof sched.delayMs!=='undefined'?sched.delayMs:autoJson.delayMs;
+  if(typeof delayMs!=='undefined'&&delayMs!==null) parts.push('delayms='+delayMs);
+  const intervalMs=typeof sched.intervalMs!=='undefined'?sched.intervalMs:autoJson.intervalMs;
+  if(typeof intervalMs!=='undefined'&&intervalMs!==null) parts.push('intervalms='+intervalMs);
+  if(sched.runAtBoot===true||autoJson.runAtBoot===true) parts.push('runatboot=1');
+  const bootDelay=typeof sched.bootDelayMs!=='undefined'?sched.bootDelayMs:autoJson.bootDelayMs;
+  if(typeof bootDelay!=='undefined'&&bootDelay!==null) parts.push('bootdelayms='+bootDelay);
+  const condition=autoJson.condition||'';
+  if(condition) parts.push('condition="'+condition.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
+  const commands=Array.isArray(autoJson.commands)?autoJson.commands:(autoJson.command?[autoJson.command]:[]);
+  if(commands.length===0){
+    if(statusEl) statusEl.innerHTML='<span style="color:#dc3545">Error: missing commands</span>';
+    return Promise.reject(new Error('missing commands'));
+  }
+  const cmdsParam=commands.map(c=>typeof c==='object'?(c.conditional||JSON.stringify(c)):c).join(';');
+  parts.push('commands="'+cmdsParam.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
+  parts.push('enabled='+(autoJson.enabled!==false?1:0));
+  const cmd=parts.join(' ');
+  return postCLI(cmd).then(r=>{
+    if(r.toLowerCase().indexOf('error:')>=0){
+      if(statusEl) statusEl.innerHTML='<span style="color:#dc3545">'+r+'</span>';
+      throw new Error(r);
+    }
+    return r;
+  });
+}
+function importFromFile(input){
+  const status=document.getElementById('import_file_status');
+  const label=document.getElementById('import_filename');
+  if(!input.files||input.files.length===0) return;
+  const file=input.files[0];
+  if(label) label.textContent=file.name;
+  status.innerHTML='<span style="color:#007bff">Reading...</span>';
+  const reader=new FileReader();
+  reader.onload=function(e){
+    let parsed;
+    try{ parsed=JSON.parse(e.target.result); }
+    catch(ex){ status.innerHTML='<span style="color:#dc3545">Invalid JSON: '+ex.message+'</span>'; return; }
+    // Support single automation object or { automations: [...] } wrapper
+    const items=Array.isArray(parsed.automations)?parsed.automations:[parsed];
+    let done=0,errs=0;
+    const next=(idx)=>{
+      if(idx>=items.length){
+        status.innerHTML='<span style="color:#28a745">Imported '+done+' automation'+(done!==1?'s':'')+(errs?', '+errs+' failed':'')+' successfully</span>';
+        if(done>0) loadAutos();
+        input.value='';
+        if(label) label.textContent='No file chosen';
+        return;
+      }
+      importAutomationFromJson(items[idx],null).then(()=>{done++;next(idx+1);}).catch(()=>{errs++;next(idx+1);});
+    };
+    next(0);
+  };
+  reader.onerror=function(){ status.innerHTML='<span style="color:#dc3545">Failed to read file</span>'; };
+  reader.readAsText(file);
+}
+function downloadFromGitHub(){
+  const urlEl=document.getElementById('github_url');
+  const nameEl=document.getElementById('github_name');
+  const status=document.getElementById('download_status');
+  let url=(urlEl?urlEl.value.trim():'');
+  const customName=(nameEl?nameEl.value.trim():'');
+  if(!url){ status.innerHTML='<span style="color:#dc3545">Please enter a GitHub URL</span>'; return; }
+  // Convert github.com blob URL to raw.githubusercontent.com
+  url=url.replace('https://github.com/','https://raw.githubusercontent.com/').replace('/blob/','/')
+         .replace('http://github.com/','https://raw.githubusercontent.com/');
+  status.innerHTML='<span style="color:#007bff">Fetching from GitHub...</span>';
+  fetch(url)
+    .then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+    .then(autoJson=>{
+      if(customName) autoJson.name=customName;
+      return importAutomationFromJson(autoJson,status);
+    })
+    .then(r=>{
+      status.innerHTML='<span style="color:#28a745">Imported successfully!</span>';
+      if(urlEl) urlEl.value='';
+      if(nameEl) nameEl.value='';
+      loadAutos();
+    })
+    .catch(e=>{
+      if(!status.innerHTML.includes('dc3545'))
+        status.innerHTML='<span style="color:#dc3545">Error: '+e.message+'</span>';
+    });
 }
 function exportAllAutomations(){ 
   const status=document.getElementById('export_status'); 
@@ -909,23 +1100,26 @@ function exportAllAutomations(){
             status.innerHTML='<span style="color:#28a745">' + downloadCount + ' files downloaded separately (import-ready)</span>'; 
             return; 
           } 
-          const auto = data.automations[index]; 
+          const auto = data.automations[index];
+          const sched = auto.schedule || {};
           const exportAuto={}; 
           exportAuto.name=auto.name; 
-          if(auto.type==='attime') exportAuto.type='atTime'; 
-          else if(auto.type==='afterdelay') exportAuto.type='afterDelay'; 
-          else if(auto.type==='interval') exportAuto.type='interval'; 
-          else exportAuto.type=auto.type; 
-          if(auto.time) exportAuto.time=auto.time; 
-          if(auto.days) exportAuto.days=auto.days; 
-          if(auto.delayMs) exportAuto.delay=auto.delayMs.toString(); 
-          if(auto.intervalMs) exportAuto.interval=auto.intervalMs.toString(); 
+          if(auto.condition) exportAuto.condition=auto.condition;
+          const rawType = sched.type || auto.type || '';
+          if(rawType==='attime') exportAuto.schedule={type:'atTime'}; 
+          else if(rawType==='afterdelay') exportAuto.schedule={type:'afterDelay'}; 
+          else exportAuto.schedule={type:rawType}; 
+          if(sched.time||auto.time) exportAuto.schedule.time=sched.time||auto.time; 
+          if(sched.recurrence) exportAuto.schedule.recurrence=sched.recurrence; 
+          if(sched.days||auto.days) exportAuto.schedule.days=sched.days||auto.days; 
+          if(sched.delayMs||auto.delayMs) exportAuto.schedule.delayMs=sched.delayMs||auto.delayMs; 
+          if(sched.intervalMs||auto.intervalMs) exportAuto.schedule.intervalMs=sched.intervalMs||auto.intervalMs; 
+          if(sched.runAtBoot===true||auto.runAtBoot===true) exportAuto.schedule.runAtBoot=true; 
+          const bootDelay=sched.bootDelayMs||auto.bootDelayMs;
+          if(typeof bootDelay!=='undefined'&&bootDelay!==null) exportAuto.schedule.bootDelayMs=bootDelay; 
           if(auto.commands) exportAuto.commands=auto.commands; 
           else if(auto.command) exportAuto.commands=[auto.command]; 
-          if(auto.conditions) exportAuto.conditions=auto.conditions; 
           exportAuto.enabled=auto.enabled===true; 
-          if(auto.runAtBoot===true) exportAuto.runAtBoot=true; 
-          if(typeof auto.bootDelayMs!== 'undefined' && auto.bootDelayMs!==null) exportAuto.bootDelayMs=auto.bootDelayMs; 
           const blob=new Blob([JSON.stringify(exportAuto,null,2)],{type:'application/json'}); 
           const url=URL.createObjectURL(blob); 
           const link=document.createElement('a'); 
@@ -961,14 +1155,42 @@ function exportAllAutomations(){
     status.innerHTML=''; 
   }, 3000); 
 }
-function exportSingleAutomation(id){ 
-  const link=document.createElement('a'); 
-  link.href='/api/automations/export?id='+id; 
-  link.download=''; 
-  link.style.display='none'; 
-  document.body.appendChild(link); 
-  link.click(); 
-  document.body.removeChild(link); 
+function exportSingleAutomation(id){
+  fetch('/api/automations').then(r=>r.json()).then(data=>{
+    if(!data||!data.automations) throw new Error('No automations data');
+    const auto=data.automations.find(a=>String(a.id)===String(id));
+    if(!auto) throw new Error('Automation '+id+' not found');
+    const sched=auto.schedule||{};
+    const exportAuto={};
+    exportAuto.name=auto.name;
+    if(auto.condition) exportAuto.condition=auto.condition;
+    const rawType=(sched.type||auto.type||'');
+    const typeNorm=rawType.toLowerCase();
+    if(typeNorm==='attime') exportAuto.schedule={type:'atTime'};
+    else if(typeNorm==='afterdelay') exportAuto.schedule={type:'afterDelay'};
+    else exportAuto.schedule={type:rawType||'interval'};
+    if(sched.time||auto.time) exportAuto.schedule.time=sched.time||auto.time;
+    if(sched.recurrence) exportAuto.schedule.recurrence=sched.recurrence;
+    if(sched.days||auto.days) exportAuto.schedule.days=sched.days||auto.days;
+    const delayMs=typeof sched.delayMs!=='undefined'?sched.delayMs:auto.delayMs;
+    if(typeof delayMs!=='undefined'&&delayMs!==null) exportAuto.schedule.delayMs=delayMs;
+    const intervalMs=typeof sched.intervalMs!=='undefined'?sched.intervalMs:auto.intervalMs;
+    if(typeof intervalMs!=='undefined'&&intervalMs!==null) exportAuto.schedule.intervalMs=intervalMs;
+    if(sched.runAtBoot===true||auto.runAtBoot===true) exportAuto.schedule.runAtBoot=true;
+    const bootDelay=typeof sched.bootDelayMs!=='undefined'?sched.bootDelayMs:auto.bootDelayMs;
+    if(typeof bootDelay!=='undefined'&&bootDelay!==null) exportAuto.schedule.bootDelayMs=bootDelay;
+    // Note: nextAt is NOT exported (recomputed on import)
+    if(auto.commands) exportAuto.commands=auto.commands;
+    else if(auto.command) exportAuto.commands=[auto.command];
+    exportAuto.enabled=auto.enabled===true;
+    const safeName=(auto.name||'automation_'+id).replace(/[^a-zA-Z0-9_\-]/g,'_');
+    const blob=new Blob([JSON.stringify(exportAuto,null,2)],{type:'application/json'});
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement('a');
+    link.href=url; link.download=safeName+'.json'; link.style.display='none';
+    document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }).catch(e=>alert('Export failed: '+e.message));
 }
 </script>)AUTOPART8", HTTPD_RESP_USE_STRLEN);
 }

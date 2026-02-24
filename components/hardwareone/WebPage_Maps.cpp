@@ -1,6 +1,6 @@
 #include "System_BuildConfig.h"
 
-#if ENABLE_MAPS
+#if ENABLE_WEB_MAPS
 
 #include "WebPage_Maps.h"
 #include "WebServer_Utils.h"
@@ -11,11 +11,9 @@
 #include "System_Filesystem.h"
 #include "System_User.h"
 #include <ArduinoJson.h>
+#include "System_MemUtil.h"
 #include <LittleFS.h>
 #include <cstring>
-
-// Forward declaration for auth function (defined in WebServer_Server.cpp)
-bool isAuthed(httpd_req_t* req, String& outUser);
 
 // Forward declarations for streaming functions (defined in WebServer_Server.cpp)
 void streamPageHeader(httpd_req_t* req, const char* title);
@@ -24,7 +22,6 @@ void streamPageFooter(httpd_req_t* req);
 // Thread-safe waypoint operations using existing mutex
 extern SemaphoreHandle_t gJsonResponseMutex;
 extern bool filesystemReady;
-extern void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason);
 
 // =============================================================================
 // Maps Organize Helpers
@@ -130,13 +127,8 @@ bool tryOrganizeLegacyWaypointsAtRoot(const String& wpFileName, String& outErr) 
 }
 
 static esp_err_t handleMapsOrganize(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/api/maps/organize";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
 
   if (!filesystemReady) {
     httpd_resp_set_type(req, "application/json");
@@ -207,7 +199,11 @@ static esp_err_t handleMapsOrganize(httpd_req_t* req) {
   dir.close();
 
   httpd_resp_set_type(req, "application/json");
-  String json = "{\"success\":true,\"moved\":" + String(moved) + ",\"skipped\":" + String(skipped) + ",\"failed\":" + String(failed) + ",\"failures\":[" + details + "]}";
+  char jsonHdr[80];
+  snprintf(jsonHdr, sizeof(jsonHdr), "{\"success\":true,\"moved\":%d,\"skipped\":%d,\"failed\":%d,\"failures\":[", moved, skipped, failed);
+  String json = jsonHdr;
+  json += details;
+  json += "]}";
   httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
@@ -277,8 +273,9 @@ esp_err_t handleMapSelectAPI(httpd_req_t* req) {
   }
 
   const LoadedMap& map = MapCore::getCurrentMap();
-  String json = "{\"success\":true,\"mapName\":\"" + String(map.filename) + "\"}";
-  httpd_resp_sendstr(req, json.c_str());
+  char json[96];
+  snprintf(json, sizeof(json), "{\"success\":true,\"mapName\":\"%s\"}", map.filename);
+  httpd_resp_sendstr(req, json);
   return ESP_OK;
 }
 
@@ -305,12 +302,18 @@ esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
   
   // Build JSON response
   String json = "{";
-  json += "\"mapName\":\"" + String(map.filename) + "\",";
-  json += "\"hasNames\":" + String(map.nameCount > 0 ? "true" : "false") + ",";
-  json += "\"featureCount\":" + String(map.header.featureCount) + ",";
+  json += "\"mapName\":\"";
+  json += map.filename;
+  json += "\",\"hasNames\":";
+  json += map.nameCount > 0 ? "true" : "false";
+  json += ",\"featureCount\":";
+  json += (int)map.header.featureCount;
+  json += ",";
   
   if (map.nameCount > 0) {
-    json += "\"nameCount\":" + String(map.nameCount) + ",";
+    json += "\"nameCount\":";
+    json += map.nameCount;
+    json += ",";
     json += "\"names\":[";
     bool firstName = true;
     for (int i = 0; i < map.nameCount; i++) {
@@ -682,11 +685,8 @@ esp_err_t handleWaypointsPage(httpd_req_t* req) {
 // Maps Page Handler
 // =============================================================================
 
-// Forward declarations for auth and streaming
-extern bool tgRequireAuth(AuthContext& ctx);
-extern void getClientIP(httpd_req_t* req, String& out);
+// Forward declarations for streaming
 extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*));
-extern bool isAuthed(httpd_req_t* req, String& outUser);
 extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
 extern void streamEndHtml(httpd_req_t* req);
 
@@ -701,13 +701,8 @@ static void streamMapsContent(httpd_req_t* req) {
 }
 
 static esp_err_t handleMapsPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/maps";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
 
   streamPageWithContent(req, String("maps"), ctx.user, streamMapsContent);
   return ESP_OK;
@@ -756,7 +751,7 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
   
   if (req->method == HTTP_GET) {
     // Get waypoints list
-    StaticJsonDocument<8192> doc;
+    PSRAM_JSON_DOC(doc);
     const LoadedMap& map = MapCore::getCurrentMap();
     
     if (!map.valid) {
@@ -842,7 +837,7 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
       pos = amp + 1;
     }
     
-    StaticJsonDocument<2048> doc;
+    PSRAM_JSON_DOC(doc);
     
     if (action == "add") {
       float lat = latStr.toFloat();

@@ -3,7 +3,7 @@
 
 #include "System_BuildConfig.h"
 
-#if ENABLE_HTTP_SERVER && ENABLE_MQTT
+#if ENABLE_WEB_MQTT
 
 #include <Arduino.h>
 #include <esp_http_server.h>
@@ -16,8 +16,6 @@
 #include "WebServer_Utils.h"
 
 // Forward declarations
-extern bool isAuthed(httpd_req_t* req, String& outUser);
-extern void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason);
 extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
 extern void streamEndHtml(httpd_req_t* req);
 extern Settings gSettings;
@@ -48,6 +46,27 @@ void streamMqttInner(httpd_req_t* req) {
     "<button class=\"btn\" onclick=\"mqttRefresh()\">Refresh Status</button>"
     "</div></div>", HTTPD_RESP_USE_STRLEN);
 
+  // Purple info blurb: show when not connected
+  if (!connected) {
+    if (!gSettings.mqttHost.length()) {
+      httpd_resp_send_chunk(req,
+        "<div class='alert alert-warning' style='margin-top:12px;'>"
+        "<strong>MQTT Not Configured</strong><br>"
+        "No broker host is set. Configure your MQTT broker in "
+        "<a href='/settings' style='color:var(--warning-fg);text-decoration:underline;'>Settings</a> "
+        "to enable MQTT publishing. RAM is not allocated until MQTT is started."
+        "</div>", HTTPD_RESP_USE_STRLEN);
+    } else {
+      httpd_resp_send_chunk(req,
+        "<div class='alert alert-warning' style='margin-top:12px;'>"
+        "<strong>MQTT Disconnected</strong><br>"
+        "MQTT is configured but not currently connected. "
+        "Click <em>Connect</em> above or enable Auto-Start in Settings. "
+        "RAM for the MQTT client is only allocated when connected."
+        "</div>", HTTPD_RESP_USE_STRLEN);
+    }
+  }
+
   // Configuration section
   httpd_resp_send_chunk(req,
     "<div class=\"settings-panel\" style=\"margin-top:16px;\">"
@@ -59,7 +78,7 @@ void streamMqttInner(httpd_req_t* req) {
   if (gSettings.mqttHost.length()) {
     httpd_resp_send_chunk(req, gSettings.mqttHost.c_str(), HTTPD_RESP_USE_STRLEN);
   } else {
-    httpd_resp_send_chunk(req, "<em style=\"color:var(--muted);\">Not configured</em>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "<em style=\"color:var(--panel-fg);\">Not configured</em>", HTTPD_RESP_USE_STRLEN);
   }
   
   httpd_resp_send_chunk(req, "</td></tr><tr><td>Port</td><td id=\"cfg-port\">", HTTPD_RESP_USE_STRLEN);
@@ -72,13 +91,13 @@ void streamMqttInner(httpd_req_t* req) {
   
   // Display TLS mode as a clear status
   if (gSettings.mqttTLSMode == 0) {
-    httpd_resp_send_chunk(req, "<span style=\"color:var(--warning);\">None</span> <span style=\"font-size:0.85em;color:var(--muted);\">(unencrypted)</span>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "<span style=\"color:var(--warning);\">None</span> <span style=\"font-size:0.85em;color:var(--panel-fg);\">(unencrypted)</span>", HTTPD_RESP_USE_STRLEN);
   } else if (gSettings.mqttTLSMode == 1) {
-    httpd_resp_send_chunk(req, "<span style=\"color:var(--success);\">TLS</span> <span style=\"font-size:0.85em;color:var(--muted);\">(encrypted, trusts any server)</span>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "<span style=\"color:var(--success);\">TLS</span> <span style=\"font-size:0.85em;color:var(--panel-fg);\">(encrypted, trusts any server)</span>", HTTPD_RESP_USE_STRLEN);
   } else if (gSettings.mqttTLSMode == 2) {
     httpd_resp_send_chunk(req, "<span style=\"color:var(--success);\">TLS + Verify</span>", HTTPD_RESP_USE_STRLEN);
     if (gSettings.mqttCACertPath.length() > 0) {
-      httpd_resp_send_chunk(req, " <span style=\"font-size:0.85em;color:var(--muted);\">(", HTTPD_RESP_USE_STRLEN);
+      httpd_resp_send_chunk(req, " <span style=\"font-size:0.85em;color:var(--panel-fg);\">(", HTTPD_RESP_USE_STRLEN);
       httpd_resp_send_chunk(req, gSettings.mqttCACertPath.c_str(), HTTPD_RESP_USE_STRLEN);
       httpd_resp_send_chunk(req, ")</span>", HTTPD_RESP_USE_STRLEN);
     }
@@ -89,7 +108,7 @@ void streamMqttInner(httpd_req_t* req) {
   if (gSettings.mqttUser.length()) {
     httpd_resp_send_chunk(req, gSettings.mqttUser.c_str(), HTTPD_RESP_USE_STRLEN);
   } else {
-    httpd_resp_send_chunk(req, "<em style=\"color:var(--muted);\">None</em>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "<em style=\"color:var(--panel-fg);\">None</em>", HTTPD_RESP_USE_STRLEN);
   }
   
   httpd_resp_send_chunk(req, "</td></tr><tr><td>Password</td><td id=\"cfg-pass\">", HTTPD_RESP_USE_STRLEN);
@@ -97,7 +116,7 @@ void streamMqttInner(httpd_req_t* req) {
   if (gSettings.mqttPassword.length()) {
     httpd_resp_send_chunk(req, "********", HTTPD_RESP_USE_STRLEN);
   } else {
-    httpd_resp_send_chunk(req, "<em style=\"color:var(--muted);\">None</em>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "<em style=\"color:var(--panel-fg);\">None</em>", HTTPD_RESP_USE_STRLEN);
   }
   
   httpd_resp_send_chunk(req, "</td></tr><tr><td>Base Topic</td><td id=\"cfg-topic\">", HTTPD_RESP_USE_STRLEN);
@@ -105,7 +124,7 @@ void streamMqttInner(httpd_req_t* req) {
   if (gSettings.mqttBaseTopic.length()) {
     httpd_resp_send_chunk(req, gSettings.mqttBaseTopic.c_str(), HTTPD_RESP_USE_STRLEN);
   } else {
-    httpd_resp_send_chunk(req, "<em style=\"color:var(--muted);\">Default (hardwareone/&lt;mac&gt;)</em>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "<em style=\"color:var(--panel-fg);\">Default (hardwareone/&lt;mac&gt;)</em>", HTTPD_RESP_USE_STRLEN);
   }
   
   httpd_resp_send_chunk(req, "</td></tr><tr><td>Publish Interval</td><td id=\"cfg-interval\">", HTTPD_RESP_USE_STRLEN);
@@ -128,7 +147,7 @@ void streamMqttInner(httpd_req_t* req) {
   httpd_resp_send_chunk(req,
     "<div class=\"settings-panel\" style=\"margin-top:16px;\">"
     "<h3>Published Data</h3>"
-    "<p style=\"color:var(--muted);font-size:0.85em;margin-bottom:12px;\">"
+    "<p style=\"color:var(--panel-fg);font-size:0.85em;margin-bottom:12px;\">"
     "Configure which data is included in MQTT publications. Edit via Settings page.</p>"
     "<table class=\"table\">", HTTPD_RESP_USE_STRLEN);
   
@@ -136,85 +155,85 @@ void streamMqttInner(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "<tr><td>System Info</td><td>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, gSettings.mqttPublishSystem ? 
     "<span style=\"color:var(--success);\">✓ Enabled</span>" : 
-    "<span style=\"color:var(--muted);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
+    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
   
   // WiFi info toggle
   httpd_resp_send_chunk(req, "</td></tr><tr><td>WiFi Info</td><td>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, gSettings.mqttPublishWiFi ? 
     "<span style=\"color:var(--success);\">✓ Enabled</span>" : 
-    "<span style=\"color:var(--muted);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
+    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
   
 
 #if ENABLE_THERMAL_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>Thermal Sensor</td><td>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, gSettings.mqttPublishThermal ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--muted);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
+    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>Thermal Sensor</td><td><span style=\"color:var(--muted);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "</td></tr><tr><td>Thermal Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
 #endif
 
 #if ENABLE_TOF_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>ToF Sensor</td><td>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, gSettings.mqttPublishToF ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--muted);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
+    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>ToF Sensor</td><td><span style=\"color:var(--muted);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "</td></tr><tr><td>ToF Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
 #endif
 
 #if ENABLE_IMU_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>IMU Sensor</td><td>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, gSettings.mqttPublishIMU ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--muted);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
+    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>IMU Sensor</td><td><span style=\"color:var(--muted);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "</td></tr><tr><td>IMU Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
 #endif
 
 #if ENABLE_PRESENCE_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>Presence Sensor</td><td>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, gSettings.mqttPublishPresence ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--muted);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
+    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>Presence Sensor</td><td><span style=\"color:var(--muted);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "</td></tr><tr><td>Presence Sensor</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
 #endif
 
 #if ENABLE_GPS_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>GPS Location</td><td>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, gSettings.mqttPublishGPS ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--muted);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
+    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>GPS Location</td><td><span style=\"color:var(--muted);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "</td></tr><tr><td>GPS Location</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
 #endif
 
 #if ENABLE_APDS_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>APDS (Proximity)</td><td>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, gSettings.mqttPublishAPDS ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--muted);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
+    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>APDS (Proximity)</td><td><span style=\"color:var(--muted);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "</td></tr><tr><td>APDS (Proximity)</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
 #endif
 
 #if ENABLE_RTC_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>RTC Time</td><td>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, gSettings.mqttPublishRTC ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--muted);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
+    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>RTC Time</td><td><span style=\"color:var(--muted);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "</td></tr><tr><td>RTC Time</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
   httpd_resp_send_chunk(req, "</td></tr><tr><td>Gamepad Input</td><td>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, gSettings.mqttPublishGamepad ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
-    "<span style=\"color:var(--muted);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
+    "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>Gamepad Input</td><td><span style=\"color:var(--muted);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "</td></tr><tr><td>Gamepad Input</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
 #endif
 
   httpd_resp_send_chunk(req, "</td></tr></table></div>", HTTPD_RESP_USE_STRLEN);
@@ -228,7 +247,7 @@ void streamMqttInner(httpd_req_t* req) {
     int sensorCount = getExternalSensorCount();
     if (sensorCount == 0) {
       httpd_resp_send_chunk(req,
-        "<p style=\"color:var(--muted);font-style:italic;\">No external sensor data received yet.</p>",
+        "<p style=\"color:var(--panel-fg);font-style:italic;\">No external sensor data received yet.</p>",
         HTTPD_RESP_USE_STRLEN);
     } else {
       httpd_resp_send_chunk(req, "<table class=\"table\">", HTTPD_RESP_USE_STRLEN);
@@ -243,7 +262,7 @@ void streamMqttInner(httpd_req_t* req) {
           snprintf(row, sizeof(row),
             "<tr><td style=\"width:140px;font-weight:500;\">%s</td>"
             "<td>%s</td>"
-            "<td style=\"width:80px;color:var(--muted);font-size:0.85em;\">%lus ago</td></tr>",
+            "<td style=\"width:80px;color:var(--panel-fg);font-size:0.85em;\">%lus ago</td></tr>",
             name.c_str(),
             value.substring(0, 100).c_str(),
             ageSec);
@@ -255,7 +274,7 @@ void streamMqttInner(httpd_req_t* req) {
     }
     
     httpd_resp_send_chunk(req,
-      "<p style=\"color:var(--muted);font-size:0.85em;margin-top:8px;\">"
+      "<p style=\"color:var(--panel-fg);font-size:0.85em;margin-top:8px;\">"
       "Subscribed topics: ", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, 
       gSettings.mqttSubscribeTopics.length() > 0 ? gSettings.mqttSubscribeTopics.c_str() : "(none)",
@@ -267,12 +286,12 @@ void streamMqttInner(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(
 <div class="settings-panel" style="margin-top:16px;">
   <h3>About MQTT</h3>
-  <p style="color:var(--muted);font-size:0.9em;">
+  <p style="color:var(--panel-fg);font-size:0.9em;">
     MQTT enables this device to publish sensor data to a broker for integration with 
     home automation systems like Home Assistant. When connected, the device periodically 
     publishes a JSON blob containing cached sensor readings to the configured base topic.
   </p>
-  <p style="color:var(--muted);font-size:0.9em;margin-top:8px;">
+  <p style="color:var(--panel-fg);font-size:0.9em;margin-top:8px;">
     <strong>CLI Commands:</strong> <code>openmqtt</code>, <code>closemqtt</code>, <code>mqttstatus</code>
   </p>
 </div>
@@ -313,13 +332,8 @@ setInterval(mqttRefresh, 5000);
 
 // Full page handler
 static esp_err_t handleMqttPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/mqtt";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
 
   streamBeginHtml(req, "MQTT", false, ctx.user, "mqtt");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
@@ -331,11 +345,7 @@ static esp_err_t handleMqttPage(httpd_req_t* req) {
 
 // API endpoint for MQTT status
 static esp_err_t handleMqttStatus(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/mqtt/status";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   bool connected = isMqttConnected();

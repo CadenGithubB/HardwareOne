@@ -1,6 +1,6 @@
 #include "System_BuildConfig.h"
 
-#if ENABLE_HTTP_SERVER
+#if ENABLE_WEB_SPEECH
 
 #include <Arduino.h>
 
@@ -20,11 +20,7 @@ static void streamSpeechContent(httpd_req_t* req) {
 }
 
 esp_err_t handleSpeechPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/speech";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   streamPageWithContent(req, "speech", ctx.user, streamSpeechContent);

@@ -30,31 +30,49 @@
 #include "WebServer_Utils.h"
 #include "WebServer_Server.h"
 #include "WebPage_Automations.h"
-#include "WebPage_Bluetooth.h"
-#include "WebPage_Speech.h"
 #include "WebPage_CLI.h"
 #include "WebPage_Dashboard.h"
-#include "WebPage_ESPNow.h"
 #include "WebPage_Files.h"
-#include "WebPage_MQTT.h"
-#include "WebPage_Games.h"
 #include "WebPage_Login.h"
 #include "WebPage_LoginSuccess.h"
 #include "WebPage_LoginRequired.h"
 #include "WebPage_Logging.h"
-#include "WebPage_Maps.h"
-#include "WebPage_Sensors.h"
 #include "WebPage_Settings.h"
 #include "System_EdgeImpulse.h"
 #include "System_ESPSR.h"
+#include "System_Filesystem.h"
 #include "System_VFS.h"
+
+#if ENABLE_WEB_BLUETOOTH
+#include "WebPage_Bluetooth.h"
+#endif
+#if ENABLE_WEB_SPEECH
+#include "WebPage_Speech.h"
+#endif
+#if ENABLE_WEB_ESPNOW
+#include "WebPage_ESPNow.h"
+#endif
+#if ENABLE_WEB_PAIR
+#include "WebPage_Pair.h"
+#endif
+#if ENABLE_WEB_MQTT
+#include "WebPage_MQTT.h"
+#endif
+#if ENABLE_WEB_GAMES
+#include "WebPage_Games.h"
+#endif
+#if ENABLE_WEB_MAPS
+#include "WebPage_Maps.h"
+#endif
+#if ENABLE_WEB_SENSORS
+#include "WebPage_Sensors.h"
+#endif
 
 // Filesystem ready flag (defined in System_Filesystem.cpp)
 extern bool filesystemReady;
 
 // External dependencies from .ino
 extern httpd_handle_t server;
-extern void broadcastOutput(const String& msg);
 extern void streamCommonCSS(httpd_req_t* req);
 extern void streamDebugRecord(size_t bytes, size_t chunkSize);
 extern void streamDebugFlush();
@@ -69,11 +87,21 @@ extern void streamDebugFlush();
 void sseEnqueueNotice(SessionEntry& s, const String& msg);  // Forward declaration
 
 void broadcastNoticeToAllSessions(const String& message) {
+  if (!gSessions) return;
   DEBUG_SSEF("Broadcasting notice to all sessions: %s", message.c_str());
   for (int i = 0; i < MAX_SESSIONS; i++) {
     if (gSessions[i].sid.length() > 0) {
       sseEnqueueNotice(gSessions[i], message);
       DEBUG_SSEF("Enqueued notice for session %d (user: %s) qCount=%d", i, gSessions[i].user.c_str(), gSessions[i].nqCount);
+    }
+  }
+}
+
+void broadcastEventToAllSessions(const char* eventName, const char* jsonData) {
+  if (!gSessions || !eventName || !jsonData) return;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (gSessions[i].sid.length() > 0) {
+      sseEnqueueEvent(gSessions[i], eventName, jsonData);
     }
   }
 }
@@ -125,10 +153,6 @@ char* gJsonResponseBuffer = nullptr;
 // ============================================================================
 
 // Memory allocation
-
-// Debug macros and helpers come from debug_system.h
-extern void broadcastOutput(const String& s);
-extern void broadcastOutput(const char* s);
 
 // ============================================================================
 // Session Management Functions
@@ -271,9 +295,7 @@ String setSession(httpd_req_t* req, const String& u) {
 extern bool gSerialAuthed;
 extern String gSerialUser;
 extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
-extern void streamLoginSuccessContent(httpd_req_t* req, const String& sid);
-
-// Weak hook for external instrumentation (defined in .ino)
+extern void streamLoginSuccessContent(httpd_req_t* req, const String& sid, const String& theme);
 extern "C" void __attribute__((weak)) authSuccessDebug(const char* user,
                                                        const char* ip,
                                                        const char* path,
@@ -287,7 +309,9 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
   // Timestamp prefix with ms precision
   char tsPrefix[40];
   getTimestampPrefixMsCached(tsPrefix, sizeof(tsPrefix));
-  String prefix = tsPrefix[0] ? String(tsPrefix) : String("[BOOT ms=") + String(millis()) + "] | ";
+  char prefixFallback[48];
+  if (!tsPrefix[0]) snprintf(prefixFallback, sizeof(prefixFallback), "[BOOT ms=%lu] | ", (unsigned long)millis());
+  const char* prefix = tsPrefix[0] ? tsPrefix : prefixFallback;
 
   bool reused = false;
   String sidShort;
@@ -338,8 +362,18 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
     default: transportStr = "internal"; break;
   }
   
-  String line = prefix + String("ms=") + String(millis()) + " event=auth_success user=" + (ctx.user.length() ? ctx.user : String("<unknown>")) + " ip=" + (ctx.ip.length() ? ctx.ip : String("<none>")) + " path=" + (ctx.path.length() ? ctx.path : String("<none>")) + " sid=" + (sidShort.length() ? sidShort : String("<none>")) + " transport=" + transportStr + " reused=" + (reused ? "1" : "0") + " redirect=" + (redirectTo ? String(redirectTo) : String("<none>"));
-  appendLineWithCap(LOG_OK_FILE, line, LOG_CAP_BYTES);
+  char logLine[384];
+  snprintf(logLine, sizeof(logLine),
+           "%sms=%lu event=auth_success user=%s ip=%s path=%s sid=%s transport=%s reused=%d redirect=%s",
+           prefix, (unsigned long)millis(),
+           ctx.user.length() ? ctx.user.c_str() : "<unknown>",
+           ctx.ip.length() ? ctx.ip.c_str() : "<none>",
+           ctx.path.length() ? ctx.path.c_str() : "<none>",
+           sidShort.length() ? sidShort.c_str() : "<none>",
+           transportStr.c_str(),
+           reused ? 1 : 0,
+           redirectTo ? redirectTo : "<none>");
+  appendLineWithCap(LOG_OK_FILE, logLine, LOG_CAP_BYTES);
 
   // Weak hook for external instrumentation
   authSuccessDebug(ctx.user.c_str(), ctx.ip.c_str(), ctx.path.c_str(), ctx.sid.c_str(), redirectTo ? redirectTo : "", reused);
@@ -350,7 +384,15 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
     if (!req) return ESP_FAIL;
     // Use streaming success page (web_login_success.h), with meta refresh
     // Session ID passed for cookie setting; redirect handled inside the page implementation
-    streamLoginSuccessContent(req, ctx.sid);
+    {
+      String _theme = "light";
+      uint32_t _uid = 0;
+      if (getUserIdByUsername(ctx.user, _uid) && _uid > 0) {
+        JsonDocument _s;
+        if (loadUserSettings(_uid, _s)) { const char* _t = _s["theme"] | "light"; if (_t && strcmp(_t,"dark")==0) _theme = "dark"; }
+      }
+      streamLoginSuccessContent(req, ctx.sid, _theme);
+    }
     return ESP_OK;
   } else if (ctx.transport == SOURCE_SERIAL) {
     DEBUG_HTTPF("OK: logged in (Serial transport)");
@@ -518,6 +560,14 @@ bool isAuthedCached(httpd_req_t* req, String& outUser) {
 
 // Build JSON for all sessions (admin view)
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions) {
+  // Convert boot millis to epoch millis for display
+  time_t now = time(nullptr);
+  unsigned long currentMillis = millis();
+  int64_t epochMillis = 0;
+  if (now > 0) {
+    epochMillis = (int64_t)now * 1000LL - (int64_t)currentMillis;
+  }
+  
   // Build JSON array directly (no String allocation)
   for (int i = 0; i < MAX_SESSIONS; ++i) {
     const struct SessionEntry& s = gSessions[i];
@@ -526,9 +576,10 @@ void buildAllSessionsJson(const String& currentSid, JsonArray& sessions) {
     JsonObject session = sessions.add<JsonObject>();
     session["sid"] = s.sid;
     session["user"] = s.user;
-    session["createdAt"] = s.createdAt;
-    session["lastSeen"] = s.lastSeen;
-    session["expiresAt"] = s.expiresAt;
+    // Convert boot-relative millis to epoch millis for JavaScript Date()
+    session["createdAt"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.createdAt) : s.createdAt;
+    session["lastSeen"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.lastSeen) : s.lastSeen;
+    session["expiresAt"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.expiresAt) : s.expiresAt;
     session["ip"] = s.ip.length() ? s.ip : "-";
     session["current"] = (s.sid == currentSid);
   }
@@ -622,7 +673,6 @@ void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg) {
 
 // External dependencies from .ino
 // tgRequireAuth is now in user_system.h (included above)
-extern void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason);
 extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*));
 extern void streamSensorsContent(httpd_req_t* req);
 extern bool filesystemReady;
@@ -658,7 +708,7 @@ extern bool isValidUser(const String& username, const String& password);
 extern String extractFormField(const String& body, const String& key);
 extern String urlDecode(const String& str);
 extern String gSessUser;
-extern void streamLoginSuccessContent(httpd_req_t* req, const String& sid);
+extern void streamLoginSuccessContent(httpd_req_t* req, const String& sid, const String& theme);
 extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmdline, String& out);
 extern int findSessionIndexBySID(const String& sid);
 extern bool sseDequeueNotice(SessionEntry& s, String& out);
@@ -734,7 +784,7 @@ void streamPageWithContent(httpd_req_t* req, const String& activePage, const Str
 
 // Use DEBUG_*F macros from debug_system.h
 
-// Output flags now centralized in debug_system.h (OUTPUT_SERIAL/OUTPUT_TFT/OUTPUT_WEB)
+// Output flags now centralized in debug_system.h (OUTPUT_SERIAL/OUTPUT_DISPLAY/OUTPUT_WEB)
 
 // Command origin and output masks are now in enum above
 
@@ -744,8 +794,6 @@ void streamPageWithContent(httpd_req_t* req, const String& activePage, const Str
 // Sensor status sequence declared in header (volatile)
 
 // Utility functions (extractFormField and urlDecode declared above)
-extern void broadcastOutput(const char* s);
-extern void broadcastOutput(const String& s);
 // Logging helpers (defined in .ino)
 extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 extern void getTimestampPrefixMsCached(char* out, size_t outSize);
@@ -1012,6 +1060,20 @@ void buildSystemInfoJson(JsonDocument& doc) {
   mem["heap_total_kb"] = (int)(ESP.getHeapSize() / 1024);
   mem["psram_total_kb"] = (int)(ESP.getPsramSize() / 1024);
   mem["psram_free_kb"] = (int)(ESP.getFreePsram() / 1024);
+  
+  // Storage info (nested object with KB values)
+  JsonObject storage = doc["storage"].to<JsonObject>();
+  size_t totalBytes = 0;
+  size_t usedBytes = 0;
+  {
+    FsLockGuard fsGuard("buildSystemInfoJson.storage");
+    totalBytes = LittleFS.totalBytes();
+    usedBytes = LittleFS.usedBytes();
+  }
+  size_t freeBytes = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
+  storage["total_kb"] = (int)(totalBytes / 1024);
+  storage["used_kb"] = (int)(usedBytes / 1024);
+  storage["free_kb"] = (int)(freeBytes / 1024);
 }
 
 // ============================================================================
@@ -1130,19 +1192,13 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
   
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/files/read";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleFileRead] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
     WARN_SESSIONF("File read auth failed");
     gSensorPollingPaused = wasPaused;
     return ESP_OK;
-  }
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-  DEBUG_STORAGEF("[handleFileRead] Auth SUCCESS for user: %s", ctx.user.c_str());
+  }  DEBUG_STORAGEF("[handleFileRead] Auth SUCCESS for user: %s", ctx.user.c_str());
 
   if (!filesystemReady) {
     ERROR_STORAGEF("Filesystem not ready");
@@ -1214,18 +1270,12 @@ esp_err_t handleFileRead(httpd_req_t* req) {
 // Write file via x-www-form-urlencoded: name=<path>&content=<urlencoded text>
 esp_err_t handleFileWrite(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileWrite] START");
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/files/write";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleFileWrite] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
     WARN_SESSIONF("File write auth failed");
     return ESP_OK;
-  }
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-  DEBUG_STORAGEF("[handleFileWrite] Auth SUCCESS for user: %s", ctx.user.c_str());
+  }  DEBUG_STORAGEF("[handleFileWrite] Auth SUCCESS for user: %s", ctx.user.c_str());
 
   if (!filesystemReady) {
     ERROR_STORAGEF("Filesystem not ready");
@@ -1316,10 +1366,8 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Prevent overwriting protected files directly.
-  // Disallow edits to logs directory, system directory, and firmware binaries
-  if (name.endsWith(".bin") || name.startsWith("/logs/") || name == "/logs" || name.startsWith("logs/")
-      || name.startsWith("/system/") || name == "/system") {
+  // Use centralized permission check (also block .bin firmware files)
+  if (name.endsWith(".bin") || !canEdit(name)) {
     WARN_STORAGEF("Protected path write attempt: %s", name.c_str());
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"success\":false,\"error\":\"Writes to this path are not allowed\"}", HTTPD_RESP_USE_STRLEN);
@@ -1392,11 +1440,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   gSensorPollingPaused = true;
   DEBUG_STORAGEF("[handleFileUpload] Sensor polling paused for upload");
 
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/files/upload";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleFileUpload] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
     WARN_SESSIONF("File upload auth failed");
@@ -1549,13 +1593,14 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       DEBUG_STORAGEF("[handleFileUpload] ERROR: Empty path");
       return false;
     }
-    // Block path traversal and most /system/ paths, but allow /system/certs/ for TLS certificates
+    // Block path traversal
     if (path.indexOf("..") >= 0) {
       WARN_SYSTEMF("[handleFileUpload] BLOCKED: Path traversal not allowed: %s", path.c_str());
       return false;
     }
-    if (path.startsWith("/system/") && !path.startsWith("/system/certs/")) {
-      WARN_SYSTEMF("[handleFileUpload] BLOCKED: Protected system path (only /system/certs/ allowed): %s", path.c_str());
+    // Use centralized permission check
+    if (!canCreate(path)) {
+      WARN_SYSTEMF("[handleFileUpload] BLOCKED: Protected path: %s", path.c_str());
       return false;
     }
     // Auto-create parent directory if it doesn't exist
@@ -1811,6 +1856,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   }
 #endif
 
+ #if ENABLE_WEB_MAPS
   // Post-save hook: auto-organize maps uploaded ANYWHERE on the filesystem
   // Detect maps by extension OR magic bytes (HWMP), move to /maps/<base>/<base>.hwmap
   // (stubs return false when ENABLE_MAPS=0)
@@ -1847,6 +1893,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       }
     }
   }
+ #endif
 
   // Resume sensor polling after upload completes
   gSensorPollingPaused = wasPaused;
@@ -1860,28 +1907,16 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 // handleSensorsStatus moved to web_sensors.cpp
 
 esp_err_t handleDashboard(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/dashboard";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "dashboard");
   streamPageWithContent(req, "dashboard", ctx.user, streamDashboardContent);
   return ESP_OK;
 }
 
 esp_err_t handleSettingsPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/settings";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "settings");
   streamPageWithContent(req, "settings", ctx.user, streamSettingsContent);
   return ESP_OK;
@@ -1890,11 +1925,7 @@ esp_err_t handleSettingsPage(httpd_req_t* req) {
 // Settings API (GET): return current settings as JSON
 // OPTIMIZED: Uses static buffer with snprintf to eliminate String allocations
 esp_err_t handleSettingsGet(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/api/settings";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   // Lock shared JSON response buffer
@@ -1954,11 +1985,7 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
 
 // Settings Schema API (GET): return settings metadata for dynamic UI rendering
 esp_err_t handleSettingsSchema(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/api/settings/schema";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   // Check buffer is allocated
@@ -1976,7 +2003,7 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
   }
 
   // Build schema from registered settings modules
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   JsonArray modules = doc["modules"].to<JsonArray>();
   
   size_t modCount = 0;
@@ -2079,11 +2106,7 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
 }
 
 esp_err_t handleUserSettingsGet(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/api/user/settings";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   DEBUG_HTTPF("[UserSettings] GET enter user=%s ip=%s", ctx.user.c_str(), ctx.ip.c_str());
@@ -2124,6 +2147,10 @@ esp_err_t handleUserSettingsGet(httpd_req_t* req) {
   response["userId"] = userId;
   JsonObject settings = response["settings"].to<JsonObject>();
   settings.set(settingsDoc.as<JsonObject>());
+  
+  // Remove sensitive fields from response (passwords should never be exposed via API)
+  settings.remove("password");
+  settings.remove("gamepad_password");
 
   {
     const char* theme = settingsDoc["theme"] | "";
@@ -2140,11 +2167,7 @@ esp_err_t handleUserSettingsGet(httpd_req_t* req) {
 }
 
 esp_err_t handleUserSettingsSet(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/api/user/settings";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   DEBUG_HTTPF("[UserSettings] POST enter user=%s ip=%s content_len=%d", ctx.user.c_str(), ctx.ip.c_str(), (int)req->content_len);
@@ -2196,6 +2219,16 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req) {
     httpd_resp_send(req, "{\"success\":false,\"error\":\"invalid_json\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
+  
+  // Reject attempts to set password fields via this API (use setUserPassword instead)
+  // This prevents storing unhashed passwords
+  if (patch.containsKey("password") || patch.containsKey("gamepad_password")) {
+    DEBUG_HTTPF("[UserSettings] POST rejected password field user=%s userId=%u", ctx.user.c_str(), (unsigned)userId);
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"password_not_allowed\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
 
   {
     const char* theme = patch["theme"] | "";
@@ -2222,26 +2255,27 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req) {
 
 // Device Registry API (GET): return device registry as JSON
 esp_err_t handleDeviceRegistryGet(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/api/devices";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
-  ensureDeviceRegistryFile();
-
-  if (!LittleFS.exists("/system/devices.json")) {
-    httpd_resp_send(req, "{\"error\":\"Device registry not found\"}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-
   String regContent;
   {
     FsLockGuard guard("devices.read");
+    
+    // Ensure file exists (create if needed) - must be inside lock
+    if (!LittleFS.exists("/system/devices.json")) {
+      File f = LittleFS.open("/system/devices.json", "w");
+      if (f) {
+        f.println("{");
+        f.println("  \"devices\": []");
+        f.println("}");
+        f.close();
+      }
+    }
+    
     File file = LittleFS.open("/system/devices.json", "r");
     if (!file) {
       httpd_resp_send(req, "{\"error\":\"Could not read device registry\"}", HTTPD_RESP_USE_STRLEN);
@@ -2257,13 +2291,48 @@ esp_err_t handleDeviceRegistryGet(httpd_req_t* req) {
   return ESP_OK;
 }
 
+// Build Configuration API (GET): return compile-time feature flags
+esp_err_t handleBuildConfig(httpd_req_t* req) {
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
+
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Cache-Control", "max-age=3600"); // Cache for 1 hour since build config doesn't change
+
+  // Build JSON response with compile-time flags
+  char json[512];
+  snprintf(json, sizeof(json),
+    "{\"camera\":%s,\"microphone\":%s,\"bluetooth\":%s,\"g2glasses\":%s,"
+    "\"mqtt\":%s,\"espnow\":%s,\"edgeimpulse\":%s,\"espsr\":%s,"
+    "\"automation\":%s,\"gps\":%s,\"imu\":%s,\"thermal\":%s,"
+    "\"tof\":%s,\"gamepad\":%s,\"apds\":%s,\"fmradio\":%s,"
+    "\"rtc\":%s,\"presence\":%s}",
+    ENABLE_CAMERA_SENSOR    ? "true" : "false",
+    ENABLE_MICROPHONE_SENSOR? "true" : "false",
+    ENABLE_BLUETOOTH        ? "true" : "false",
+    ENABLE_G2_GLASSES       ? "true" : "false",
+    ENABLE_MQTT             ? "true" : "false",
+    ENABLE_ESPNOW           ? "true" : "false",
+    ENABLE_EDGE_IMPULSE     ? "true" : "false",
+    ENABLE_ESP_SR           ? "true" : "false",
+    ENABLE_AUTOMATION       ? "true" : "false",
+    ENABLE_GPS_SENSOR       ? "true" : "false",
+    ENABLE_IMU_SENSOR       ? "true" : "false",
+    ENABLE_THERMAL_SENSOR   ? "true" : "false",
+    ENABLE_TOF_SENSOR       ? "true" : "false",
+    ENABLE_GAMEPAD_SENSOR   ? "true" : "false",
+    ENABLE_APDS_SENSOR      ? "true" : "false",
+    ENABLE_FM_RADIO         ? "true" : "false",
+    ENABLE_RTC_SENSOR       ? "true" : "false",
+    ENABLE_PRESENCE_SENSOR  ? "true" : "false");
+
+  httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+  return ESP_OK;
+}
+
 esp_err_t handleSessionsList(httpd_req_t* req) {
   // Admin-only: list all active sessions
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/sessions";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
   if (!isAdminUser(ctx.user)) {
     httpd_resp_set_type(req, "application/json");
@@ -2272,7 +2341,7 @@ esp_err_t handleSessionsList(httpd_req_t* req) {
   }
   
   // Build response using ArduinoJson (no String concatenation)
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   doc["success"] = true;
   JsonArray sessions = doc["sessions"].to<JsonArray>();
   
@@ -2285,34 +2354,11 @@ esp_err_t handleSessionsList(httpd_req_t* req) {
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
-}
-
-// Helper to require admin; sends JSON error if not authed/admin
-static bool requireAdmin(httpd_req_t* req, String& uOut) {
-  String u;
-  String ip;
-  getClientIP(req, ip);
-  if (!isAuthed(req, u)) {
-    sendAuthRequiredResponse(req);
-    return false;
-  }
-  logAuthAttempt(true, req->uri, u, ip, "");
-  if (!isAdminUser(u)) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin access required\"}", HTTPD_RESP_USE_STRLEN);
-    return false;
-  }
-  uOut = u;
-  return true;
 }
 
 // Admin: list all sessions
 esp_err_t handleAdminSessionsList(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/admin/sessions";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
   if (!isAdminUser(ctx.user)) {
     httpd_resp_set_type(req, "application/json");
@@ -2320,7 +2366,7 @@ esp_err_t handleAdminSessionsList(httpd_req_t* req) {
     return ESP_OK;
   }
   // Build response using ArduinoJson (no String concatenation)
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   doc["success"] = true;
   JsonArray sessions = doc["sessions"].to<JsonArray>();
   
@@ -2335,38 +2381,36 @@ esp_err_t handleAdminSessionsList(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// GET /api/output -> returns persisted (gSettings) and runtime (gOutputFlags) for serial/web/tft
+// GET /api/output -> returns persisted (gSettings) and runtime (gOutputFlags) for serial/web/display/g2
 esp_err_t handleOutputGet(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/output";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
   int rtSerial = (gOutputFlags & OUTPUT_SERIAL) ? 1 : 0;
   int rtWeb = (gOutputFlags & OUTPUT_WEB) ? 1 : 0;
-  int rtTft = (gOutputFlags & OUTPUT_TFT) ? 1 : 0;
+  int rtDisplay = (gOutputFlags & OUTPUT_DISPLAY) ? 1 : 0;
+  int rtG2 = (gOutputFlags & OUTPUT_G2) ? 1 : 0;
   
-  char json[256];
+  char json[320];
   snprintf(json, sizeof(json),
-           "{\"success\":true,\"persisted\":{\"serial\":%d,\"web\":%d,\"tft\":%d},\"runtime\":{\"serial\":%d,\"web\":%d,\"tft\":%d}}",
+           "{\"success\":true,\"persisted\":{\"serial\":%d,\"web\":%d,\"display\":%d,\"g2\":%d},\"runtime\":{\"serial\":%d,\"web\":%d,\"display\":%d,\"g2\":%d}}",
            gSettings.outSerial ? 1 : 0,
            gSettings.outWeb ? 1 : 0,
-           gSettings.outTft ? 1 : 0,
-           rtSerial, rtWeb, rtTft);
+           gSettings.outDisplay ? 1 : 0,
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+           gSettings.outG2 ? 1 : 0,
+#else
+           0,
+#endif
+           rtSerial, rtWeb, rtDisplay, rtG2);
   
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
-// POST /api/output/temp (x-www-form-urlencoded): serial=0/1&web=0/1&tft=0/1
+// POST /api/output/temp (x-www-form-urlencoded): serial=0/1&web=0/1&display=0/1
 esp_err_t handleOutputTemp(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/output/temp";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   // Read form body
@@ -2393,7 +2437,7 @@ esp_err_t handleOutputTemp(httpd_req_t* req) {
   };
   int vSerial = getVal("serial");
   int vWeb = getVal("web");
-  int vTft = getVal("tft");
+  int vDisplay = getVal("display");
 
   // Apply to runtime flags only
   if (vSerial == 0) {
@@ -2408,21 +2452,21 @@ esp_err_t handleOutputTemp(httpd_req_t* req) {
     gOutputFlags |= OUTPUT_WEB;
   }
 
-  if (vTft == 0) {
-    gOutputFlags &= ~OUTPUT_TFT;
-  } else if (vTft == 1) {
-    gOutputFlags |= OUTPUT_TFT;
+  if (vDisplay == 0) {
+    gOutputFlags &= ~OUTPUT_DISPLAY;
+  } else if (vDisplay == 1) {
+    gOutputFlags |= OUTPUT_DISPLAY;
   }
 
   // Respond with updated runtime snapshot
   int rtSerial = (gOutputFlags & OUTPUT_SERIAL) ? 1 : 0;
   int rtWeb = (gOutputFlags & OUTPUT_WEB) ? 1 : 0;
-  int rtTft = (gOutputFlags & OUTPUT_TFT) ? 1 : 0;
+  int rtDisplay = (gOutputFlags & OUTPUT_DISPLAY) ? 1 : 0;
   
   char json[128];
   snprintf(json, sizeof(json),
-           "{\"success\":true,\"runtime\":{\"serial\":%d,\"web\":%d,\"tft\":%d}}",
-           rtSerial, rtWeb, rtTft);
+           "{\"success\":true,\"runtime\":{\"serial\":%d,\"web\":%d,\"display\":%d}}",
+           rtSerial, rtWeb, rtDisplay);
   
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
@@ -2467,11 +2511,7 @@ esp_err_t handleNotice(httpd_req_t* req) {
 
 // Auth-protected text log endpoint returning mirrored output
 esp_err_t handleLogs(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/logs";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_HTTPF("[LOGS_DEBUG] Request from %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
     WARN_SESSIONF("Logs API auth failed");
@@ -2506,11 +2546,7 @@ esp_err_t handleLogs(httpd_req_t* req) {
 
 // Enhanced sensors status endpoint with session update checking
 esp_err_t handleSensorsStatusWithUpdates(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/sensors/status-updates";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   // Check if this session needs a status update notification
@@ -2527,22 +2563,16 @@ esp_err_t handleSensorsStatusWithUpdates(httpd_req_t* req) {
   httpd_resp_set_type(req, "application/json");
   const char* baseJson = buildSensorStatusJson();
 
-  if (needsRefresh) {
-    // Add a refresh flag to trigger UI update - need to modify, so use stack buffer
-    char modifiedJson[1536];
-    size_t baseLen = strlen(baseJson);
-    if (baseLen > 0 && baseJson[baseLen - 1] == '}') {
-      // Insert needsRefresh before closing brace
-      snprintf(modifiedJson, sizeof(modifiedJson), "%.*s,\"needsRefresh\":true}", (int)(baseLen - 1), baseJson);
-      DEBUG_HTTPF("/api/sensors/status-updates by %s @ %s: json_len=%zu (with refresh)",
-                  ctx.user.c_str(), ctx.ip.c_str(), strlen(modifiedJson));
-      httpd_resp_send(req, modifiedJson, HTTPD_RESP_USE_STRLEN);
-    } else {
-      // Fallback if JSON malformed
-      DEBUG_HTTPF("/api/sensors/status-updates by %s @ %s: json_len=%zu",
-                  ctx.user.c_str(), ctx.ip.c_str(), baseLen);
-      httpd_resp_send(req, baseJson, HTTPD_RESP_USE_STRLEN);
-    }
+  size_t baseLen = strlen(baseJson);
+
+  if (needsRefresh && baseLen > 0 && baseJson[baseLen - 1] == '}') {
+    // Append needsRefresh flag using chunked transfer to avoid 1.5KB stack buffer.
+    // Send everything except the closing '}', then the suffix.
+    httpd_resp_send_chunk(req, baseJson, baseLen - 1);
+    httpd_resp_send_chunk(req, ",\"needsRefresh\":true}", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0);  // End chunked response
+    DEBUG_HTTPF("/api/sensors/status-updates by %s @ %s: json_len=%zu (with refresh)",
+                ctx.user.c_str(), ctx.ip.c_str(), baseLen + 21);
     // Clear the flag after sending the refresh notification
     if (sessIdx >= 0) {
       gSessions[sessIdx].needsStatusUpdate = false;
@@ -2550,25 +2580,21 @@ esp_err_t handleSensorsStatusWithUpdates(httpd_req_t* req) {
   } else {
     // No modification needed, send directly
     DEBUG_HTTPF("/api/sensors/status-updates by %s @ %s: json_len=%zu",
-                ctx.user.c_str(), ctx.ip.c_str(), strlen(baseJson));
-    httpd_resp_send(req, baseJson, HTTPD_RESP_USE_STRLEN);
+                ctx.user.c_str(), ctx.ip.c_str(), baseLen);
+    httpd_resp_send(req, baseJson, baseLen);
   }
   return ESP_OK;
 }
 
 // System status endpoint for dashboard one-shot fetch
 esp_err_t handleSystemStatus(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/system";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   httpd_resp_set_type(req, "application/json");
 
   // Build system info using ArduinoJson (eliminates String concatenation)
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   buildSystemInfoJson(doc);
   
   // Serialize to static buffer
@@ -2580,11 +2606,7 @@ esp_err_t handleSystemStatus(httpd_req_t* req) {
 }
 
 esp_err_t handleCLICommand(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/cli";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_CMD_FLOWF("[web.cli] enter ip=%s content_len=%d", ctx.ip.c_str(), (int)req->content_len);
   if (!tgRequireAuth(ctx)) {
     // Security log: unauthorized CLI attempt
@@ -2684,14 +2706,8 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
 }
 
 esp_err_t handleCLIPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/cli";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
 
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "cli");
   streamPageWithContent(req, "cli", ctx.user, streamCLIContent);
@@ -2701,14 +2717,8 @@ esp_err_t handleCLIPage(httpd_req_t* req) {
 #if ENABLE_AUTOMATION
 // Automations page handler (authenticated for all users)
 esp_err_t handleAutomationsPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/automations";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "automations");
   streamPageWithContent(req, "automations", ctx.user, streamAutomationsContent);
   return ESP_OK;
@@ -2716,12 +2726,8 @@ esp_err_t handleAutomationsPage(httpd_req_t* req) {
 
 // GET /api/automations: return raw automations.json
 esp_err_t handleAutomationsGet(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/automations";
-  getClientIP(req, ctx.ip);
-  if (!tgRequireAuth(ctx)) return ESP_OK;  // any authed user may read
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
 
   httpd_resp_set_type(req, "application/json");
   String json;
@@ -2739,27 +2745,15 @@ esp_err_t handleAutomationsGet(httpd_req_t* req) {
 #endif
 
 esp_err_t handleFilesPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/files";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   streamPageWithContent(req, "files", ctx.user, streamFilesContent);
   return ESP_OK;
 }
 
 esp_err_t handleLoggingPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = req ? req->uri : "/logging";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   streamPageWithContent(req, "logging", ctx.user, streamLoggingContent);
   return ESP_OK;
 }
@@ -2849,10 +2843,10 @@ esp_err_t handleLogin(httpd_req_t* req) {
   String body(buf.get());
   String u = urlDecode(extractFormField(body, "username"));
   String p = urlDecode(extractFormField(body, "password"));
-  broadcastOutput(String("[login] POST attempt: username='") + u + "', password_len=" + String(p.length()));
+  BROADCAST_PRINTF("[login] POST attempt: username='%s', password_len=%u", u.c_str(), (unsigned)p.length());
 
   bool validUser = isValidUser(u, p);
-  broadcastOutput(String("[login] isValidUser result: ") + (validUser ? "true" : "false"));
+  broadcastOutput(validUser ? "[login] isValidUser result: true" : "[login] isValidUser result: false");
 
   if (u.length() == 0 || p.length() == 0 || !validUser) {
     // Log failed authentication attempt
@@ -2900,7 +2894,15 @@ esp_err_t handleLogin(httpd_req_t* req) {
   httpd_resp_set_hdr(req, "Pragma", "no-cache");
   httpd_resp_set_hdr(req, "Expires", "0");
 
-  streamLoginSuccessContent(req, sid);
+  {
+    String _theme = "light";
+    uint32_t _uid = 0;
+    if (getUserIdByUsername(u, _uid) && _uid > 0) {
+      JsonDocument _s;
+      if (loadUserSettings(_uid, _s)) { const char* _t = _s["theme"] | "light"; if (_t && strcmp(_t,"dark")==0) _theme = "dark"; }
+    }
+    streamLoginSuccessContent(req, sid, _theme);
+  }
 
   broadcastOutput(String("[login] Safari-compatible session and cookie set for user: ") + u);
   return ESP_OK;
@@ -3126,11 +3128,7 @@ esp_err_t handleRegisterSubmit(httpd_req_t* req) {
   }
 
   // Execute the built-in command via unified pipeline so it is logged/audited
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/register/submit";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   String cmdline = String("user request ") + username + " " + password + " " + confirmPassword;
   String out;
   bool ok = executeUnifiedWebCommand(req, ctx, cmdline, out);
@@ -3197,14 +3195,8 @@ extern void fsLock(const char* tag);
 extern void fsUnlock();
 
 esp_err_t handleFilesList(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/files/list";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   // Check if filesystem is ready
   if (!filesystemReady) {
     broadcastOutput("[files] ERROR: Filesystem not ready");
@@ -3242,14 +3234,8 @@ esp_err_t handleFilesList(httpd_req_t* req) {
 }
 
 esp_err_t handleFilesStats(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/files/stats";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   if (!filesystemReady) {
     String json = "{\"success\":false,\"error\":\"Filesystem not initialized\"}";
     httpd_resp_set_type(req, "application/json");
@@ -3273,14 +3259,8 @@ esp_err_t handleFilesStats(httpd_req_t* req) {
 }
 
 esp_err_t handleFilesCreate(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/files/create";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   char buf[256];
   int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
   if (ret <= 0) {
@@ -3328,10 +3308,16 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
   if (type == "folder") {
     // Use CLI command for consistent validation and error handling
     String cmd = "mkdir " + path;
-    char result[1024];
-    bool success = executeCommand(ctx, cmd.c_str(), result, sizeof(result));
+    char* result = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "http.mkdir.result");
+    if (!result) {
+      httpd_resp_set_type(req, "application/json");
+      httpd_resp_send(req, "{\"success\":false,\"error\":\"Memory allocation failed\"}", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
+    bool success = executeCommand(ctx, cmd.c_str(), result, 512);
     httpd_resp_set_type(req, "application/json");
     String resultStr = result;
+    free(result);
     if (success && resultStr.startsWith("Created folder:")) {
       httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
     } else {
@@ -3369,17 +3355,11 @@ esp_err_t handleFileView(httpd_req_t* req) {
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
 
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/files/view";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) {
     gSensorPollingPaused = wasPaused;
     return ESP_OK;
   }
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   DEBUG_STORAGEF("[handleFileView] After auth heap=%u", (unsigned)ESP.getFreeHeap());
 
   char query[256];
@@ -3797,11 +3777,7 @@ esp_err_t handleIconGet(httpd_req_t* req) {
 }
 
 esp_err_t handleIconTestPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/icons/test";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
   
   extern const size_t EMBEDDED_ICONS_COUNT;
@@ -3810,18 +3786,29 @@ esp_err_t handleIconTestPage(httpd_req_t* req) {
   httpd_resp_set_type(req, "text/html; charset=utf-8");
   
   String html = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Icon Test</title>";
-  html += "<style>body{font-family:sans-serif;max-width:1200px;margin:20px auto;padding:20px;}";
-  html += ".icon-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:16px;margin:20px 0;}";
-  html += ".icon-item{border:1px solid #ddd;padding:12px;text-align:center;border-radius:4px;}";
-  html += ".icon-item img{image-rendering:pixelated;border:1px solid #eee;background:#222;border-radius:6px;padding:4px;box-sizing:border-box;}";
-  html += ".icon-name{font-size:0.85em;color:#666;margin-top:8px;word-break:break-all;}";
-  html += ".icon-info{font-size:0.75em;color:#999;margin-top:4px;}";
-  html += "h1{color:#333;}";
-  html += ".stats{background:#f5f5f5;padding:12px;border-radius:4px;margin:16px 0;}";
+  html += "<style>body{font-family:sans-serif;max-width:1200px;margin:20px auto;padding:20px;background:#fafafa;}";
+  html += ".controls{background:#fff;padding:12px;border-radius:8px;margin:16px 0;display:flex;gap:12px;align-items:center;box-shadow:0 1px 3px rgba(0,0,0,0.1);}";
+  html += ".controls input{padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;flex:1;max-width:300px;}";
+  html += ".controls button{padding:6px 14px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:#fff;font-size:13px;}";
+  html += ".controls button.active{background:#333;color:#fff;border-color:#333;}";
+  html += ".icon-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:12px;margin:20px 0;}";
+  html += ".icon-item{border:1px solid #e0e0e0;padding:12px;text-align:center;border-radius:8px;background:#fff;transition:transform 0.1s;}";
+  html += ".icon-item:hover{transform:scale(1.05);box-shadow:0 2px 8px rgba(0,0,0,0.12);}";
+  html += ".icon-item img{image-rendering:pixelated;image-rendering:crisp-edges;background:#1a1a2e;border-radius:6px;padding:6px;box-sizing:border-box;display:block;margin:0 auto;}";
+  html += ".icon-name{font-size:0.8em;color:#555;margin-top:8px;word-break:break-all;font-family:monospace;}";
+  html += ".icon-info{font-size:0.7em;color:#999;margin-top:2px;}";
+  html += "h1{color:#222;margin-bottom:4px;}";
+  html += ".stats{color:#666;font-size:0.9em;}";
   html += "</style></head><body>";
-  html += "<h1>Embedded Icon Test</h1>";
-  html += "<div class='stats'>Total Icons: " + String(EMBEDDED_ICONS_COUNT) + "</div>";
-  html += "<div class='icon-grid'>";
+  html += "<h1>Embedded Icons</h1>";
+  html += "<div class='stats'>" + String(EMBEDDED_ICONS_COUNT) + " icons &middot; 32&times;32 native</div>";
+  html += "<div class='controls'>";
+  html += "<input type='text' id='filter' placeholder='Filter icons...' oninput='filterIcons()'>";
+  html += "<button onclick='setSize(32)' id='b32'>32px</button>";
+  html += "<button onclick='setSize(64)' id='b64' class='active'>64px</button>";
+  html += "<button onclick='setSize(128)' id='b128'>128px</button>";
+  html += "</div>";
+  html += "<div class='icon-grid' id='grid'>";
   
   for (size_t i = 0; i < EMBEDDED_ICONS_COUNT; i++) {
     char iconName[32];
@@ -3831,14 +3818,21 @@ esp_err_t handleIconTestPage(httpd_req_t* req) {
     uint8_t height = pgm_read_byte(&EMBEDDED_ICONS[i].height);
     
     html += "<div class='icon-item'>";
-    html += "<img src='/api/icon?name=" + String(iconName) + "&debug=1&v=" + String(millis()) + "' width='32' height='32' style='image-rendering:pixelated;-webkit-image-rendering:crisp-edges;'>";
+    html += "<img src='/api/icon?name=" + String(iconName) + "' width='64' height='64'>";
     html += "<div class='icon-name'>" + String(iconName) + "</div>";
     html += "<div class='icon-info'>" + String(width) + "x" + String(height) + " (" + String(pngSize) + "B)</div>";
     html += "</div>";
   }
   
   html += "</div>";
-  html += "<p style='color:#666;margin-top:32px;'>Test via CLI: <code>iconlist</code></p>";
+  html += "<script>";
+  html += "function setSize(s){document.querySelectorAll('.icon-item img').forEach(i=>{i.width=s;i.height=s;});";
+  html += "document.querySelectorAll('.controls button').forEach(b=>b.classList.remove('active'));";
+  html += "document.getElementById('b'+s).classList.add('active');}";
+  html += "function filterIcons(){var f=document.getElementById('filter').value.toLowerCase();";
+  html += "document.querySelectorAll('.icon-item').forEach(i=>{var n=i.querySelector('.icon-name').textContent;";
+  html += "i.style.display=n.includes(f)?'':'none';});}";
+  html += "</script>";
   html += "</body></html>";
   
   httpd_resp_send(req, html.c_str(), HTTPD_RESP_USE_STRLEN);
@@ -3846,14 +3840,8 @@ esp_err_t handleIconTestPage(httpd_req_t* req) {
 }
 
 esp_err_t handleFileDelete(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/files/delete";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   // Accept name from POST body (x-www-form-urlencoded) or URL query as fallback
   String nameStr = "";
   {
@@ -3896,10 +3884,8 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
   }
   String path = "/" + nameStr;
 
-  // Basic safeguards: disallow deleting critical files and anything in /logs or /system
-  if (nameStr.length() == 0 || nameStr == "." || nameStr == ".."
-      || path == "/logs" || path.startsWith("/logs/")
-      || path == "/system" || path.startsWith("/system/")) {
+  // Use centralized permission check
+  if (nameStr.length() == 0 || nameStr == "." || nameStr == ".." || !canDelete(path)) {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"success\":false,\"error\":\"Deletion not allowed\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -3941,6 +3927,90 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
 }
 
 // ============================================================================
+// File Rename Handler
+// ============================================================================
+
+esp_err_t handleFileRename(httpd_req_t* req) {
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
+  // Read POST body
+  char buf[512];
+  int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+  if (ret <= 0) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"No data received\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  buf[ret] = '\0';
+  String body = String(buf);
+
+  // Parse oldPath and newName from POST body
+  String oldPath = "";
+  String newName = "";
+  {
+    int idx = body.indexOf("oldPath=");
+    if (idx >= 0) {
+      idx += 8;
+      int end = body.indexOf("&", idx);
+      if (end < 0) end = body.length();
+      oldPath = body.substring(idx, end);
+    }
+    idx = body.indexOf("newName=");
+    if (idx >= 0) {
+      idx += 8;
+      int end = body.indexOf("&", idx);
+      if (end < 0) end = body.length();
+      newName = body.substring(idx, end);
+    }
+  }
+
+  // URL decode
+  oldPath.replace("%2F", "/");
+  oldPath.replace("%20", " ");
+  oldPath.replace("+", " ");
+  newName.replace("%2F", "/");
+  newName.replace("%20", " ");
+  newName.replace("+", " ");
+
+  if (oldPath.length() == 0 || newName.length() == 0) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"oldPath and newName required\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  // Ensure oldPath starts with /
+  if (!oldPath.startsWith("/")) oldPath = "/" + oldPath;
+
+  // Build new path: same parent directory + new name
+  int lastSlash = oldPath.lastIndexOf('/');
+  String parentDir = (lastSlash > 0) ? oldPath.substring(0, lastSlash) : "";
+  String newPath = parentDir + "/" + newName;
+
+  // Use centralized permission check
+  if (!canRename(oldPath)) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"Rename not allowed for this file\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  bool success = false;
+  {
+    FsLockGuard guard("web_files.rename");
+    if (VFS::exists(oldPath)) {
+      success = VFS::rename(oldPath, newPath);
+    }
+  }
+
+  httpd_resp_set_type(req, "application/json");
+  if (success) {
+    httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
+  } else {
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"Rename failed\"}", HTTPD_RESP_USE_STRLEN);
+  }
+  return ESP_OK;
+}
+
+// ============================================================================
 // Admin Handlers (Batch 4 - migrated from .ino)
 // ============================================================================
 
@@ -3950,14 +4020,8 @@ extern bool approvePendingUserInternal(const String& username, String& errorOut)
 extern bool denyPendingUserInternal(const String& username, String& errorOut);
 
 esp_err_t handleAdminPending(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/admin/pending";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   // Preserve JSON error contract for this endpoint
   if (!isAdminUser(ctx.user)) {
     httpd_resp_set_type(req, "application/json");
@@ -3965,33 +4029,44 @@ esp_err_t handleAdminPending(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  String json = "{\"success\":true,\"pending\":[]}";
+  JsonDocument response;
+  response["success"] = true;
+  JsonArray pendingArray = response["pending"].to<JsonArray>();
 
-  if (LittleFS.exists("/system/pending_users.json")) {
-    String pendingJson;
-    if (readText("/system/pending_users.json", pendingJson)) {
-      // Extract just the array part and insert into response
-      if (pendingJson.startsWith("[") && pendingJson.endsWith("]")) {
-        String arrayContent = pendingJson.substring(1, pendingJson.length() - 1);
-        json = "{\"success\":true,\"pending\":[" + arrayContent + "]}";
+  if (LittleFS.exists("/system/users/pending_users.json")) {
+    File file = LittleFS.open("/system/users/pending_users.json", "r");
+    if (file) {
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, file);
+      file.close();
+      if (!err) {
+        JsonArray pending = doc.as<JsonArray>();
+        for (JsonObject user : pending) {
+          JsonObject sanitizedUser = pendingArray.add<JsonObject>();
+          sanitizedUser["username"] = user["username"];
+          sanitizedUser["timestamp"] = user["timestamp"];
+          // Explicitly exclude password field for security
+        }
       }
     }
   }
 
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+  // Serialize to response buffer
+  if (xSemaphoreTake(gJsonResponseMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    size_t len = serializeJson(response, gJsonResponseBuffer, JSON_RESPONSE_SIZE);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, gJsonResponseBuffer, len);
+    xSemaphoreGive(gJsonResponseMutex);
+  } else {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":true,\"pending\":[]}", HTTPD_RESP_USE_STRLEN);
+  }
   return ESP_OK;
 }
 
 esp_err_t handleAdminApproveUser(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/admin/approve";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   if (!isAdminUser(ctx.user)) {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin access required\"}", HTTPD_RESP_USE_STRLEN);
@@ -4033,14 +4108,8 @@ esp_err_t handleAdminApproveUser(httpd_req_t* req) {
 }
 
 esp_err_t handleAdminDenyUser(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/admin/reject";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
-
   // Preserve JSON error contract for this endpoint
   if (!isAdminUser(ctx.user)) {
     httpd_resp_set_type(req, "application/json");
@@ -4101,12 +4170,8 @@ extern bool parseJsonString(const String& json, const char* key, String& out);
 extern const char* AUTOMATIONS_JSON_FILE;
 
 esp_err_t handleAutomationsExport(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/automations/export";
-  getClientIP(req, ctx.ip);
-  if (!tgRequireAuth(ctx)) return ESP_OK;  // any authed user may export
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
 
   // Parse query parameters
   char query[512] = { 0 };
@@ -4194,7 +4259,7 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
 #endif // ENABLE_AUTOMATION
 
 // ============================================================================
-// SSE Notice Queue Helpers (moved from HardwareOnev2.1.ino)
+// SSE Notice Queue Helpers (moved from HardwareOne.ino)
 // ============================================================================
 
 void sseEnqueueNotice(SessionEntry& s, const String& msg) {
@@ -4230,7 +4295,7 @@ bool sseDequeueNotice(SessionEntry& s, String& out) {
 }
 
 // ============================================================================
-// Sensor Status Broadcast (moved from HardwareOnev2.1.ino)
+// Sensor Status Broadcast (moved from HardwareOne.ino)
 // ============================================================================
 
 void broadcastSensorStatusToAllSessions() {
@@ -4273,11 +4338,91 @@ static esp_err_t handleBrowserIcon(httpd_req_t* req) {
   return ESP_OK;
 }
 
+esp_err_t handleCliBatch(httpd_req_t* req) {
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) {
+    logAuthAttempt(false, "/api/cli/batch", String(), ctx.ip, "unauthorized");
+    return ESP_OK;
+  }
+
+  if (req->content_len == 0 || req->content_len > 32768) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"error\":\"Invalid content length\"}");
+    return ESP_OK;
+  }
+
+  std::unique_ptr<char, void(*)(void*)> buf(
+    (char*)ps_alloc(req->content_len + 1, AllocPref::PreferPSRAM, "http.batch"), free);
+  if (!buf) {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+    return ESP_FAIL;
+  }
+  int received = 0;
+  while (received < (int)req->content_len) {
+    int r = httpd_req_recv(req, buf.get() + received, req->content_len - received);
+    if (r <= 0) break;
+    received += r;
+  }
+  buf.get()[received] = '\0';
+
+  JsonDocument doc;
+  DeserializationError jerr = deserializeJson(doc, buf.get(), received);
+  if (jerr || !doc["commands"].is<JsonArray>()) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"error\":\"Expected {\\\"commands\\\":[...]} JSON body\"}");
+    return ESP_OK;
+  }
+
+  String sidForCmd = getCookieSID(req);
+  int originIdx = findSessionIndexBySID(sidForCmd);
+  int prevSkip = gBroadcastSkipSessionIdx;
+  gBroadcastSkipSessionIdx = originIdx;
+  gMeshActivitySuspended = true;
+
+  int count = 0;
+  for (JsonVariant v : doc["commands"].as<JsonArray>()) {
+    String cmd = v.as<String>();
+    cmd.trim();
+    if (cmd.length() == 0) continue;
+
+    appendCommandToFeed("web", cmd, ctx.user, ctx.ip);
+
+    Command uc;
+    uc.line = cmd;
+    uc.ctx.origin = ORIGIN_WEB;
+    uc.ctx.auth = ctx;
+    uc.ctx.id = (uint32_t)millis();
+    uc.ctx.timestampMs = (uint32_t)millis();
+    uc.ctx.outputMask = CMD_OUT_WEB | CMD_OUT_LOG;
+    uc.ctx.validateOnly = false;
+    uc.ctx.replyHandle = nullptr;
+    uc.ctx.httpReq = req;
+
+    String out;
+    submitAndExecuteSync(uc, out);
+    String redacted = redactOutputForLog(out);
+    broadcastOutput(redacted, uc.ctx);
+
+    count++;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+
+  gMeshActivitySuspended = false;
+  gBroadcastSkipSessionIdx = prevSkip;
+
+  httpd_resp_set_type(req, "application/json");
+  String resp = "{\"ok\":true,\"count\":";
+  resp += count;
+  resp += "}";
+  httpd_resp_sendstr(req, resp.c_str());
+  return ESP_OK;
+}
+
 void startHttpServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 100;
   config.lru_purge_enable = true;
-  config.stack_size = 8192;  // Increase from default 4KB to 8KB to prevent stack overflow
+  config.stack_size = 12288;  // 12KB – headroom for AuthContext Strings + chunked handlers
   config.recv_wait_timeout = 30;  // 30 second timeout for large uploads
   config.send_wait_timeout = 30;  // 30 second timeout for large responses
   // Note: max header length is set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig
@@ -4300,6 +4445,7 @@ void startHttpServer() {
   static httpd_uri_t userSettingsGet = { .uri = "/api/user/settings", .method = HTTP_GET, .handler = handleUserSettingsGet, .user_ctx = NULL };
   static httpd_uri_t userSettingsSet = { .uri = "/api/user/settings", .method = HTTP_POST, .handler = handleUserSettingsSet, .user_ctx = NULL };
   static httpd_uri_t devicesGet = { .uri = "/api/devices", .method = HTTP_GET, .handler = handleDeviceRegistryGet, .user_ctx = NULL };
+  static httpd_uri_t buildConfig = { .uri = "/api/buildconfig", .method = HTTP_GET, .handler = handleBuildConfig, .user_ctx = NULL };
   static httpd_uri_t apiNotice = { .uri = "/api/notice", .method = HTTP_GET, .handler = handleNotice, .user_ctx = NULL };
   static httpd_uri_t apiEvents = { .uri = "/api/events", .method = HTTP_GET, .handler = handleEvents, .user_ctx = NULL };
   static httpd_uri_t filesPage = { .uri = "/files", .method = HTTP_GET, .handler = handleFilesPage, .user_ctx = NULL };
@@ -4311,11 +4457,13 @@ void startHttpServer() {
   static httpd_uri_t filesRead = { .uri = "/api/files/read", .method = HTTP_GET, .handler = handleFileRead, .user_ctx = NULL };
   static httpd_uri_t filesWrite = { .uri = "/api/files/write", .method = HTTP_POST, .handler = handleFileWrite, .user_ctx = NULL };
   static httpd_uri_t filesUpload = { .uri = "/api/files/upload", .method = HTTP_POST, .handler = handleFileUpload, .user_ctx = NULL };
+  static httpd_uri_t filesRename = { .uri = "/api/files/rename", .method = HTTP_POST, .handler = handleFileRename, .user_ctx = NULL };
   static httpd_uri_t iconGet = { .uri = "/api/icon", .method = HTTP_GET, .handler = handleIconGet, .user_ctx = NULL };
   static httpd_uri_t iconTestPage = { .uri = "/icons/test", .method = HTTP_GET, .handler = handleIconTestPage, .user_ctx = NULL };
   static httpd_uri_t loggingPage = { .uri = "/logging", .method = HTTP_GET, .handler = handleLoggingPage, .user_ctx = NULL };
   static httpd_uri_t cliPage = { .uri = "/cli", .method = HTTP_GET, .handler = handleCLIPage, .user_ctx = NULL };
   static httpd_uri_t cliCmd = { .uri = "/api/cli", .method = HTTP_POST, .handler = handleCLICommand, .user_ctx = NULL };
+  static httpd_uri_t cliBatch = { .uri = "/api/cli/batch", .method = HTTP_POST, .handler = handleCliBatch, .user_ctx = NULL };
   static httpd_uri_t logsGet = { .uri = "/api/cli/logs", .method = HTTP_GET, .handler = handleLogs, .user_ctx = NULL };
 #if ENABLE_AUTOMATION
   static httpd_uri_t automationsPage = { .uri = "/automations", .method = HTTP_GET, .handler = handleAutomationsPage, .user_ctx = NULL };
@@ -4357,6 +4505,7 @@ void startHttpServer() {
   httpd_register_uri_handler(server, &userSettingsGet);
   httpd_register_uri_handler(server, &userSettingsSet);
   httpd_register_uri_handler(server, &devicesGet);
+  httpd_register_uri_handler(server, &buildConfig);
   httpd_register_uri_handler(server, &apiNotice);
   httpd_register_uri_handler(server, &filesPage);
   httpd_register_uri_handler(server, &filesList);
@@ -4367,10 +4516,13 @@ void startHttpServer() {
   httpd_register_uri_handler(server, &filesRead);
   httpd_register_uri_handler(server, &filesWrite);
   httpd_register_uri_handler(server, &filesUpload);
+  httpd_register_uri_handler(server, &filesRename);
   httpd_register_uri_handler(server, &iconGet);
   httpd_register_uri_handler(server, &iconTestPage);
   httpd_register_uri_handler(server, &loggingPage);
+ #if ENABLE_WEB_MAPS
   registerMapsHandlers(server);
+ #endif
   registerEdgeImpulseHandlers(server);
   registerESPSRHandlers(server);
   httpd_register_uri_handler(server, &cliPage);
@@ -4378,12 +4530,27 @@ void startHttpServer() {
   httpd_register_uri_handler(server, &logsGet);
   
   // Module registration functions (sensors, bluetooth, esp-now, games, speech)
+ #if ENABLE_WEB_SENSORS
   registerSensorHandlers(server);
+ #endif
+ #if ENABLE_WEB_BLUETOOTH
   registerBluetoothHandlers(server);
+ #endif
+ #if ENABLE_WEB_SPEECH
   registerSpeechPageHandlers(server);
+ #endif
+ #if ENABLE_WEB_ESPNOW
   registerEspNowHandlers(server);
+ #endif
+ #if ENABLE_WEB_PAIR
+  registerPairHandlers(server);
+ #endif
+ #if ENABLE_WEB_MQTT
   registerMqttHandlers(server);
+ #endif
+ #if ENABLE_WEB_GAMES
   registerGamesHandlers(server);
+ #endif
   
   // SSE events endpoint for server-driven notices
   httpd_register_uri_handler(server, &apiEvents);
@@ -4403,9 +4570,9 @@ void startHttpServer() {
   httpd_register_uri_handler(server, &adminPending);
   httpd_register_uri_handler(server, &adminApprove);
   httpd_register_uri_handler(server, &adminDeny);
+  httpd_register_uri_handler(server, &cliBatch);
   
   // Enable web output when server starts
-  extern volatile uint32_t gOutputFlags;
   gOutputFlags |= OUTPUT_WEB;
   
   broadcastOutput("HTTP server started");

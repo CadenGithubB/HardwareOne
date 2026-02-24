@@ -4,7 +4,9 @@
 #include <Arduino.h>
 #include "WebServer_Utils.h"
 #include "System_BuildConfig.h"
+#if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
+#endif
 
 // Registration function - registers /speech URI handler
 #if ENABLE_HTTP_SERVER
@@ -20,14 +22,14 @@ inline void streamSpeechInner(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(
 <div style='text-align:center;padding:2rem'>
   <h2 style='color:var(--warning);margin-bottom:1rem'>Speech Recognition Disabled</h2>
-  <p style='color:var(--muted);margin-bottom:2rem'>
+  <p style='color:var(--panel-fg);margin-bottom:2rem'>
     ESP-SR speech recognition has been disabled during firmware compilation.
     This feature requires ESP32-S3 with PSRAM.
   </p>
   
   <div style='background:var(--crumb-bg);padding:1.5rem;border-radius:10px;border:1px solid var(--border);max-width:500px;margin:0 auto;text-align:left'>
     <h3 style='color:var(--panel-fg);margin:0 0 1rem 0;font-size:1rem'>To Enable Speech Recognition:</h3>
-    <p style='color:var(--muted);font-size:0.9rem;margin:0'>
+    <p style='color:var(--panel-fg);font-size:0.9rem;margin:0'>
       Recompile the firmware with <code style='background:rgba(0,0,0,0.1);padding:2px 6px;border-radius:3px'>ENABLE_ESP_SR=1</code> 
       in your build configuration. Requires ESP32-S3 target with PSRAM enabled.
     </p>
@@ -99,8 +101,8 @@ inline void streamSpeechInner(httpd_req_t* req) {
       <div style='margin-top:15px'>
         <div style='display:flex;align-items:center;margin-bottom:6px'>
           <span class='vad-indicator' id='sr-vad-indicator'></span>
-          <span style='font-size:0.85em;color:var(--muted)'>Audio Level</span>
-          <span style='margin-left:auto;font-size:0.85em;color:var(--muted)'>Gain: <span id='sr-micgain-display'>--</span>%</span>
+          <span style='font-size:0.85em;color:var(--panel-fg)'>Audio Level</span>
+          <span style='margin-left:auto;font-size:0.85em;color:var(--panel-fg)'>Gain: <span id='sr-micgain-display'>--</span>%</span>
         </div>
         <div class='audio-meter'>
           <div class='audio-meter-bar' id='sr-audio-bar'></div>
@@ -129,7 +131,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
       
       <!-- Voice State Display -->
       <div id='sr-voice-state' style='margin-top:15px;padding:12px;background:var(--crumb-bg);border-radius:8px;display:none'>
-        <div style='font-size:0.85em;color:var(--muted);margin-bottom:6px'>Voice Navigation:</div>
+        <div style='font-size:0.85em;color:var(--panel-fg);margin-bottom:6px'>Voice Navigation:</div>
         <div id='sr-voice-path' style='font-family:monospace;font-size:1.1em;color:var(--link)'></div>
       </div>
     </div>
@@ -165,11 +167,11 @@ inline void streamSpeechInner(httpd_req_t* req) {
     <!-- Quick Controls -->
     <div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:15px'>
       <div>
-        <label style='display:block;margin-bottom:6px;font-size:0.85em;color:var(--muted)'>Raw Output Mode</label>
+        <label style='display:block;margin-bottom:6px;font-size:0.85em;color:var(--panel-fg)'>Raw Output Mode</label>
         <button class='btn' id='btn-sr-raw-toggle' style='width:100%'>Enable Raw</button>
       </div>
       <div>
-        <label style='display:block;margin-bottom:6px;font-size:0.85em;color:var(--muted)'>Auto-Tune</label>
+        <label style='display:block;margin-bottom:6px;font-size:0.85em;color:var(--panel-fg)'>Auto-Tune</label>
         <button class='btn' id='btn-sr-autotune-toggle' style='width:100%'>Start Auto-Tune</button>
       </div>
     </div>
@@ -179,7 +181,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
       <label style='display:block;margin-bottom:8px;font-size:0.9em;color:var(--panel-fg)'>Manual Gain Adjustment</label>
       <div style='display:grid;grid-template-columns:1fr 1fr;gap:10px'>
         <div>
-          <label style='font-size:0.8em;color:var(--muted)'>AFE Gain</label>
+          <label style='font-size:0.8em;color:var(--panel-fg)'>AFE Gain</label>
           <select id='sr-afe-gain' style='width:100%;padding:6px;border-radius:4px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg)'>
             <option value='1.0'>1.0x (Default)</option>
             <option value='2.0'>2.0x</option>
@@ -189,7 +191,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
           </select>
         </div>
         <div>
-          <label style='font-size:0.8em;color:var(--muted)'>Dynamic Gain Max</label>
+          <label style='font-size:0.8em;color:var(--panel-fg)'>Dynamic Gain Max</label>
           <select id='sr-dyngain-max' style='width:100%;padding:6px;border-radius:4px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg)'>
             <option value='0'>Disabled</option>
             <option value='1.5'>1.5x</option>
@@ -213,7 +215,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
     <div class='sr-description'>
       Loaded speech recognition models. Wake word model detects activation phrase, MultiNet recognizes commands.
     </div>
-    <div id='sr-models-info' style='color:var(--muted)'>Loading model information...</div>
+    <div id='sr-models-info' style='color:var(--panel-fg)'>Loading model information...</div>
     
     <!-- File Explorer Toggle -->
     <div style='margin-top:15px'>
@@ -232,14 +234,14 @@ inline void streamSpeechInner(httpd_req_t* req) {
           <button class='btn' id='btn-sr-refresh-models'>Refresh</button>
           <button class='btn' id='btn-sr-open-folder'>Open Folder</button>
         </div>
-        <div id='sr-file-status' style='font-size:0.85em;margin-top:6px;color:var(--muted)'></div>
+        <div id='sr-file-status' style='font-size:0.85em;margin-top:6px;color:var(--panel-fg)'></div>
       </div>
       
       <!-- File List -->
       <div style='margin-top:15px;padding-top:12px;border-top:1px solid var(--border)'>
         <label style='display:block;margin-bottom:6px;font-size:0.9em;color:var(--panel-fg)'>Files in /sd/ESP-SR Models/:</label>
         <div id='sr-file-list' style='background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;max-height:150px;overflow-y:auto;font-family:monospace;font-size:0.85em'>
-          <div style='padding:8px;color:var(--muted)'>Click Refresh to load file list...</div>
+          <div style='padding:8px;color:var(--panel-fg)'>Click Refresh to load file list...</div>
         </div>
       </div>
       
@@ -248,7 +250,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
         <label style='display:block;margin-bottom:6px;font-size:0.9em;color:var(--panel-fg)'>Upload Model File:</label>
         <input type='file' id='sr-model-file' accept='.wn,.bin,.txt' style='width:100%;margin-bottom:8px;color:var(--panel-fg)'>
         <button class='btn' id='btn-sr-upload-model' style='width:100%'>Upload Model</button>
-        <div id='sr-upload-status' style='font-size:0.85em;margin-top:6px;color:var(--muted)'></div>
+        <div id='sr-upload-status' style='font-size:0.85em;margin-top:6px;color:var(--panel-fg)'></div>
       </div>
       
       <div class='sr-info' style='margin-top:12px'>
@@ -527,7 +529,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
       // Update file list display
       if(fileList){
         if(files.length === 0){
-          fileList.innerHTML = '<div style="padding:8px;color:var(--muted)">No files found. Upload models to get started.</div>';
+          fileList.innerHTML = '<div style="padding:8px;color:var(--panel-fg)">No files found. Upload models to get started.</div>';
         } else {
           var html = '';
           for(var k=0; k<files.length; k++){
