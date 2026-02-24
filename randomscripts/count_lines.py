@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Line counter for first-party HardwareOne source code.
+Line counter for first-party HardwareOne source code. I like to see how much there is from time to time.
 Scans (flat, no recursion into subdirs):
   - components/hardwareone   — main firmware component
   - main/                    — app entry point
