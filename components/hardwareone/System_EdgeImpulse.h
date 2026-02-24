@@ -3,6 +3,10 @@
 
 #include "System_BuildConfig.h"
 
+#if ENABLE_HTTP_SERVER
+#include <esp_http_server.h>
+#endif
+
 #if ENABLE_EDGE_IMPULSE
 
 #include <Arduino.h>
@@ -139,13 +143,15 @@ const char* cmd_ei_confidence(const String& cmd);
 const char* cmd_ei_status(const String& cmd);
 
 // Web handler registration
-#include <esp_http_server.h>
+#if ENABLE_HTTP_SERVER
 void registerEdgeImpulseHandlers(httpd_handle_t server);
+#else
+inline void registerEdgeImpulseHandlers(httpd_handle_t server) { (void)server; }
+#endif
 
 #else
 
 // Stub when Edge Impulse is disabled
-#include <esp_http_server.h>
 inline void registerEdgeImpulseHandlers(httpd_handle_t server) { (void)server; }
 
 #endif // ENABLE_EDGE_IMPULSE

@@ -364,7 +364,7 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "    html += '[' + i + '] <strong>' + obj.label + '</strong>';\n"
     "    if(obj.prevLabel) html += ' <span style=\"opacity:0.6\">(was: ' + obj.prevLabel + ')</span>';\n"
     "    html += ' at (' + obj.x + ',' + obj.y + ')';\n"
-    "    if(obj.stateChanged) html += ' <span style=\"color:#ffc107\">⚡ CHANGED</span>';\n"
+    "    if(obj.stateChanged) html += ' <span style=\"color:#ffc107\">CHANGED</span>';\n"
     "    html += '</div>';\n"
     "  });\n"
     "  el.innerHTML = html;\n"

@@ -125,6 +125,20 @@ struct BLESystemState {
   uint32_t sensorStreamCount;       // Total sensor streams sent
   uint32_t systemStreamCount;       // Total system streams sent
   uint32_t eventCount;              // Total events sent
+  
+  // Deferred event handling (ISR-safe pattern: callback sets flag, task processes)
+  // Connect event
+  bool deferredConnectPending;
+  int deferredConnectSlot;
+  
+  // Disconnect event  
+  bool deferredDisconnectPending;
+  int deferredDisconnectActiveCount;
+  
+  // Command received event (for logging only - actual processing already deferred)
+  bool deferredCmdReceivedPending;
+  uint16_t deferredCmdReceivedConnId;
+  size_t deferredCmdReceivedLen;
 };
 
 extern BLESystemState* gBLEState;

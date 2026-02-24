@@ -23,13 +23,10 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
+#include "System_MemoryMonitor.h"
 #include "System_Settings.h"
 
 #include <esp_gatts_api.h>
-
-// External dependencies
-extern void broadcastOutput(const char* msg);
-extern bool ensureDebugBuffer();
 
 // Memory allocation
 
@@ -47,6 +44,10 @@ extern bool ensureDebugBuffer();
 // =============================================================================
 
 BLESystemState* gBLEState = nullptr;
+
+// BLE toggle tracking - ESP32 Bluedroid leaks ~10KB DRAM per init/deinit cycle
+static int sBLEToggleCount = 0;
+static size_t sBLEHeapBeforeInit = 0;
 
 // ESP32 BLE objects
 static BLEServer* pServer = nullptr;
@@ -205,6 +206,8 @@ BLEDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac) {
 
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) override {
+    // NOTE: This callback runs on BTC_TASK with limited stack - avoid heavy operations
+    // Use deferred flag pattern for logging (ISR-safe)
     if (!gBLEState) return;
     
     // Find free connection slot
@@ -217,11 +220,11 @@ class ServerCallbacks : public BLEServerCallbacks {
     }
     
     if (slot == -1) {
-      BLE_DEBUGF(DEBUG_BLE_CORE, "Connection rejected - max connections reached (%d)", BLE_MAX_CONNECTIONS);
+      // No logging here - callback context
       return;
     }
     
-    // Store connection info
+    // Store connection info (minimal state updates - ISR-safe)
     gBLEState->connections[slot].active = true;
     gBLEState->connections[slot].connId = param->connect.conn_id;
     gBLEState->connections[slot].connectedSince = millis();
@@ -231,7 +234,7 @@ class ServerCallbacks : public BLEServerCallbacks {
     gBLEState->connections[slot].user = "";
     gBLEState->connections[slot].lastActivityMs = millis();
     
-    // Identify device type by MAC address
+    // Identify device type by MAC address (uses static lookup - ISR-safe)
     gBLEState->connections[slot].deviceType = bleIdentifyDeviceByMAC(param->connect.remote_bda);
     gBLEState->connections[slot].deviceName = bleDeviceTypeToString(gBLEState->connections[slot].deviceType);
     
@@ -239,19 +242,19 @@ class ServerCallbacks : public BLEServerCallbacks {
     gBLEState->totalConnections++;
     gBLEState->connectionState = BLE_STATE_CONNECTED;
     
-    BLE_DEBUGF(DEBUG_BLE_CORE, "Client connected (slot %d, total active: %d/%d)", 
-               slot, gBLEState->activeConnectionCount, BLE_MAX_CONNECTIONS);
+    // Defer logging to task context
+    gBLEState->deferredConnectSlot = slot;
+    gBLEState->deferredConnectPending = true;
     
     // Keep advertising if we haven't reached max connections
     if (gBLEState->activeConnectionCount >= BLE_MAX_CONNECTIONS) {
-      BLE_DEBUGF(DEBUG_BLE_CORE, "Max connections reached - stopping advertising");
       BLEDevice::stopAdvertising();
-    } else {
-      BLE_DEBUGF(DEBUG_BLE_CORE, "Continuing advertising for additional connections");
     }
   }
   
   void onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) override {
+    // NOTE: This callback runs on BTC_TASK with limited stack - avoid heavy operations
+    // Use deferred flag pattern for logging (ISR-safe)
     if (!gBLEState) return;
     
     if (param) {
@@ -262,8 +265,9 @@ class ServerCallbacks : public BLEServerCallbacks {
       gBLEState->activeConnectionCount--;
     }
     
-    BLE_DEBUGF(DEBUG_BLE_CORE, "Client disconnected (active connections: %d)", 
-               gBLEState->activeConnectionCount);
+    // Defer logging to task context
+    gBLEState->deferredDisconnectActiveCount = gBLEState->activeConnectionCount;
+    gBLEState->deferredDisconnectPending = true;
     
     if (gBLEState->activeConnectionCount == 0) {
       gBLEState->connectionState = BLE_STATE_IDLE;
@@ -271,7 +275,6 @@ class ServerCallbacks : public BLEServerCallbacks {
     
     // Auto-restart advertising if we're below max connections
     if (gBLEState->activeConnectionCount < BLE_MAX_CONNECTIONS && gBLEState->initialized) {
-      BLE_DEBUGF(DEBUG_BLE_CORE, "Auto-restarting advertising (slots available)");
       startBLEAdvertising();
     }
   }
@@ -282,13 +285,23 @@ class ServerCallbacks : public BLEServerCallbacks {
 // =============================================================================
 
 // Command Request Characteristic - receives commands from client
+// NOTE: This callback runs on BTC_TASK with limited stack (~3KB)
+// Heavy command processing is routed through the central cmd_exec task via submitCommandAsync
 class CmdRequestCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic, esp_ble_gatts_cb_param_t* param) override {
-    if (!param) return;
+    // NOTE: Callback runs on BTC_TASK - defer logging to task context (ISR-safe pattern)
+    if (!param || !gBLEState) return;
     String value = pCharacteristic->getValue();
     if (value.length() > 0) {
       gBLEState->commandsReceived++;
-      BLE_DEBUGF(DEBUG_BLE_GATT, "Command received (%d bytes) conn_id=%u", value.length(), (unsigned)param->write.conn_id);
+      
+      // Defer logging to task context
+      gBLEState->deferredCmdReceivedConnId = param->write.conn_id;
+      gBLEState->deferredCmdReceivedLen = value.length();
+      gBLEState->deferredCmdReceivedPending = true;
+      
+      // Route to processIncomingBLECommand which handles lightweight ops directly
+      // and routes heavy commands through cmd_exec task
       processIncomingBLECommand(param->write.conn_id, value.c_str(), value.length());
     }
   }
@@ -314,6 +327,39 @@ class CmdStatusCallbacks : public BLECharacteristicCallbacks {
 
 extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
 extern AuthContext gExecAuthContext;
+
+// Async callback type (defined in HardwareOne.cpp)
+typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
+
+// Command origin enum (matches HardwareOne.cpp)
+enum CommandOrigin { ORIGIN_SERIAL, ORIGIN_WEB, ORIGIN_AUTOMATION, ORIGIN_SYSTEM };
+
+// Command context structure (matches HardwareOne.cpp)
+struct CommandContext {
+  CommandOrigin origin;
+  AuthContext auth;
+  uint32_t id;
+  uint32_t outputMask;
+  bool validateOnly;
+  void* replyHandle;
+  httpd_req_t* httpReq;
+};
+
+// Command structure (matches HardwareOne.cpp)
+struct Command {
+  String line;
+  CommandContext ctx;
+};
+
+// External async command submission
+extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
+
+// Async callback for BLE command results - called on cmd_exec task
+static void bleCommandResultCallback(bool ok, const char* result, void* userData) {
+  uint16_t connId = (uint16_t)(uintptr_t)userData;
+  BLE_DEBUGF(DEBUG_BLE_DATA, "Async command result: ok=%d len=%zu connId=%u", ok, strlen(result), connId);
+  sendBLEResponseToConn(connId, result, strlen(result));
+}
 
 // Forward declaration for OLED message history
 #if ENABLE_OLED_DISPLAY
@@ -421,28 +467,34 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
     }
   }
 
-  // Execute command with auth-aware pipeline
-  AuthContext ctx;
-  ctx.transport = SOURCE_BLUETOOTH;
-  ctx.path = "/ble/cli";
-  ctx.ip = kBleIpTag;
-  ctx.sid = "";
-  ctx.opaque = nullptr;
+  // Execute command via central cmd_exec task (avoids BTC_TASK stack overflow)
+  // Build Command structure for async submission
+  Command ucmd;
+  ucmd.line = cmdBuf;
+  ucmd.ctx.origin = ORIGIN_SYSTEM;  // BLE commands treated as system origin
+  ucmd.ctx.auth.transport = SOURCE_BLUETOOTH;
+  ucmd.ctx.auth.path = "/ble/cli";
+  ucmd.ctx.auth.ip = kBleIpTag;
+  ucmd.ctx.auth.sid = "";
+  ucmd.ctx.auth.opaque = nullptr;
   if (gSettings.bluetoothRequireAuth) {
     String u;
     (void)bleIsAuthed(connId, u);
-    ctx.user = u;
+    ucmd.ctx.auth.user = u;
   } else {
-    ctx.user = "";
+    ucmd.ctx.auth.user = "";
   }
+  ucmd.ctx.validateOnly = false;
+  ucmd.ctx.outputMask = 0;
+  ucmd.ctx.replyHandle = nullptr;
+  ucmd.ctx.httpReq = nullptr;
+  ucmd.ctx.id = (uint32_t)millis();
 
-  static char outBuf[2048];
-  bool ok = executeCommand(ctx, cmdBuf, outBuf, sizeof(outBuf));
-  if (!ok && outBuf[0] == '\0') {
-    strncpy(outBuf, "Command execution failed", sizeof(outBuf) - 1);
-    outBuf[sizeof(outBuf) - 1] = '\0';
+  // Submit async - callback will send BLE response when complete
+  if (!submitCommandAsync(ucmd, bleCommandResultCallback, (void*)(uintptr_t)connId)) {
+    const char* msg = "Error: Failed to queue command";
+    sendBLEResponseToConn(connId, msg, strlen(msg));
   }
-  sendBLEResponseToConn(connId, outBuf, strlen(outBuf));
 }
 
 // =============================================================================
@@ -454,6 +506,20 @@ bool initBluetooth() {
     BLE_DEBUGF(DEBUG_BLE_CORE, "Already initialized");
     return true;
   }
+
+  // Check memory before initializing BLE stack (~60KB DRAM for controller + host tasks)
+  if (!checkMemoryAvailable("bluetooth", nullptr)) {
+    if (sBLEToggleCount > 0) {
+      broadcastOutput("[BLE] Insufficient memory for Bluetooth (need ~60KB DRAM)");
+      broadcastOutput("[BLE] ESP32 BLE leaks ~10KB DRAM per stop/start cycle. Reboot to recover.");
+    } else {
+      broadcastOutput("[BLE] Insufficient memory for Bluetooth (need ~60KB DRAM)");
+    }
+    return false;
+  }
+  
+  // Track DRAM before init to measure leak on deinit
+  sBLEHeapBeforeInit = ESP.getFreeHeap();
   
   // Allocate state structure
   gBLEState = (BLESystemState*)ps_alloc(sizeof(BLESystemState), AllocPref::PreferPSRAM, "ble.state");
@@ -479,6 +545,15 @@ bool initBluetooth() {
   // Initialize ESP32 BLE with configured device name
   const char* deviceName = gSettings.bleDeviceName.length() > 0 ? gSettings.bleDeviceName.c_str() : "HardwareOne";
   BLEDevice::init(deviceName);
+
+  if (!BLEDevice::getInitialized()) {
+    broadcastOutput("[BLE] Init failed (controller not started)");
+    if (gBLEState) {
+      free(gBLEState);
+      gBLEState = nullptr;
+    }
+    return false;
+  }
   
   // Set TX power level (ESP_PWR_LVL_N12 to ESP_PWR_LVL_P9)
   // Map 0-7 to actual power levels
@@ -616,7 +691,9 @@ void deinitBluetooth() {
   
   // ESP32 BLE doesn't have a clean disconnect API like NimBLE
   // Just deinit the device
-  BLEDevice::deinit(true);
+  BLEDevice::deinit(false);
+
+  vTaskDelay(pdMS_TO_TICKS(25));
   
   // Clear all BLE object pointers (they're invalid after deinit)
   pServer = nullptr;
@@ -641,7 +718,17 @@ void deinitBluetooth() {
     gBLEState = nullptr;
   }
   
-  broadcastOutput("[BLE] Deinitialized");
+  sBLEToggleCount++;
+  size_t heapAfterDeinit = ESP.getFreeHeap();
+  int leaked = (int)sBLEHeapBeforeInit - (int)heapAfterDeinit;
+  if (leaked > 0) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "[BLE] Deinitialized (DRAM leak: ~%dKB this cycle, %d toggle%s total)",
+             leaked / 1024, sBLEToggleCount, sBLEToggleCount == 1 ? "" : "s");
+    broadcastOutput(buf);
+  } else {
+    broadcastOutput("[BLE] Deinitialized");
+  }
 }
 
 // =============================================================================
@@ -746,7 +833,37 @@ bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len) {
 }
 
 void bleSessionTick() {
-  if (!gBLEState || !isBLEConnected()) return;
+  if (!gBLEState) return;
+  
+  // Handle deferred connect event (set by callback, processed here with proper stack)
+  if (gBLEState->deferredConnectPending) {
+    gBLEState->deferredConnectPending = false;
+    int slot = gBLEState->deferredConnectSlot;
+    BLE_DEBUGF(DEBUG_BLE_CORE, "Client connected (slot %d, total active: %d/%d)", 
+               slot, gBLEState->activeConnectionCount, BLE_MAX_CONNECTIONS);
+    if (gBLEState->activeConnectionCount >= BLE_MAX_CONNECTIONS) {
+      BLE_DEBUGF(DEBUG_BLE_CORE, "Max connections reached - stopped advertising");
+    }
+  }
+  
+  // Handle deferred disconnect event (set by callback, processed here with proper stack)
+  if (gBLEState->deferredDisconnectPending) {
+    gBLEState->deferredDisconnectPending = false;
+    BLE_DEBUGF(DEBUG_BLE_CORE, "Client disconnected (active connections: %d)", 
+               gBLEState->deferredDisconnectActiveCount);
+    if (gBLEState->deferredDisconnectActiveCount < BLE_MAX_CONNECTIONS) {
+      BLE_DEBUGF(DEBUG_BLE_CORE, "Auto-restarted advertising (slots available)");
+    }
+  }
+  
+  // Handle deferred command received event (set by callback, processed here with proper stack)
+  if (gBLEState->deferredCmdReceivedPending) {
+    gBLEState->deferredCmdReceivedPending = false;
+    BLE_DEBUGF(DEBUG_BLE_GATT, "Command received (%d bytes) conn_id=%u", 
+               (int)gBLEState->deferredCmdReceivedLen, (unsigned)gBLEState->deferredCmdReceivedConnId);
+  }
+  
+  if (!isBLEConnected()) return;
   uint32_t now = millis();
   for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
     if (!gBLEState->connections[i].active) continue;
@@ -848,35 +965,38 @@ static const char* cmd_blestatus(const String& cmd) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
   char* buf = getDebugBuffer();
-  snprintf(buf, 1024, "BLE Status: %s", getBLEStateString());
-  broadcastOutput(buf);
+  int offset = 0;
+  int remaining = 1024;
   
-  snprintf(buf, 1024, "  Active connections: %d/%d", gBLEState->activeConnectionCount, BLE_MAX_CONNECTIONS);
-  broadcastOutput(buf);
+  // Build the full status string
+  int written = snprintf(buf + offset, remaining, "BLE Status: %s\n", getBLEStateString());
+  if (written > 0) { offset += written; remaining -= written; }
+  
+  written = snprintf(buf + offset, remaining, "Active connections: %d/%d\n", gBLEState->activeConnectionCount, BLE_MAX_CONNECTIONS);
+  if (written > 0) { offset += written; remaining -= written; }
   
   // Show each active connection
-  for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+  for (int i = 0; i < BLE_MAX_CONNECTIONS && remaining > 100; i++) {
     if (gBLEState->connections[i].active) {
       uint32_t duration = (millis() - gBLEState->connections[i].connectedSince) / 1000;
       String macStr = macToString(gBLEState->connections[i].deviceAddr);
-      snprintf(buf, 1024, "  [%d] %s", i, gBLEState->connections[i].deviceName.c_str());
-      broadcastOutput(buf);
-      snprintf(buf, 1024, "      MAC: %s | %lu sec | %lu cmds", 
-               macStr.c_str(),
-               duration,
-               gBLEState->connections[i].commandsReceived);
-      broadcastOutput(buf);
+      written = snprintf(buf + offset, remaining, "[%d] %s\n    MAC: %s | %lu sec | %lu cmds\n", 
+               i, gBLEState->connections[i].deviceName.c_str(),
+               macStr.c_str(), duration, gBLEState->connections[i].commandsReceived);
+      if (written > 0) { offset += written; remaining -= written; }
     }
   }
   
-  snprintf(buf, 1024, "  Total connections: %lu", gBLEState->totalConnections);
-  broadcastOutput(buf);
-  snprintf(buf, 1024, "  Commands received: %lu", gBLEState->commandsReceived);
-  broadcastOutput(buf);
-  snprintf(buf, 1024, "  Responses sent: %lu", gBLEState->responsesSent);
+  written = snprintf(buf + offset, remaining, "Total connections: %lu\n", gBLEState->totalConnections);
+  if (written > 0) { offset += written; remaining -= written; }
+  written = snprintf(buf + offset, remaining, "Commands received: %lu\n", gBLEState->commandsReceived);
+  if (written > 0) { offset += written; remaining -= written; }
+  written = snprintf(buf + offset, remaining, "Responses sent: %lu", gBLEState->responsesSent);
+  
+  // Also broadcast to serial for backwards compatibility
   broadcastOutput(buf);
   
-  return "OK";
+  return buf;
 }
 
 static const char* cmd_bledisconnect(const String& cmd) {
@@ -1046,9 +1166,7 @@ static const char* cmd_blename(const String& cmd) {
       return "Name must be 1-29 characters";
     }
     
-    gSettings.bleDeviceName = newName;
-    extern bool writeSettingsJson();
-    writeSettingsJson();
+    setSetting(gSettings.bleDeviceName, newName);
     
     if (!ensureDebugBuffer()) return "Name saved (restart BLE to apply)";
     char* buf = getDebugBuffer();
@@ -1077,7 +1195,7 @@ static const char* cmd_bletxpower(const String& cmd) {
       return "TX power must be 0-7 (0=min/-12dBm, 7=max/+9dBm)";
     }
     
-    gSettings.bleTxPower = level;
+    setSetting(gSettings.bleTxPower, level);
     
     // Apply immediately if BLE is running
     if (gBLEState && gBLEState->initialized) {
@@ -1086,9 +1204,6 @@ static const char* cmd_bletxpower(const String& cmd) {
       esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, powerLevel);
       esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, powerLevel);
     }
-    
-    extern bool writeSettingsJson();
-    writeSettingsJson();
     
     if (!ensureDebugBuffer()) return "TX power updated";
     char* buf = getDebugBuffer();
@@ -1129,22 +1244,44 @@ static const char* cmd_bleinfo(const String& cmd) {
   return "OK";
 }
 
+static const char* cmd_bleautostart(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = args; arg.trim();
+  if (arg.length() == 0) {
+    return gSettings.bluetoothAutoStart ? "[BLE] Auto-start: enabled" : "[BLE] Auto-start: disabled";
+  }
+  arg.toLowerCase();
+  if (arg == "on" || arg == "true" || arg == "1") {
+    setSetting(gSettings.bluetoothAutoStart, true);
+    return "[BLE] Auto-start enabled";
+  } else if (arg == "off" || arg == "false" || arg == "0") {
+    setSetting(gSettings.bluetoothAutoStart, false);
+    return "[BLE] Auto-start disabled";
+  }
+  return "Usage: bleautostart [on|off]";
+}
+
 // =============================================================================
 // COMMAND REGISTRY
 // =============================================================================
 
 const CommandEntry bluetoothCommands[] = {
-  { "openble",     "Initialize Bluetooth and start advertising",  false, cmd_blestart },
-  { "closeble",      "Stop Bluetooth and deinitialize",             false, cmd_blestop },
-  { "blestatus",    "Show Bluetooth connection status",            false, cmd_blestatus },
-  { "bleinfo",      "Show BLE configuration and settings",         false, cmd_bleinfo },
-  { "blename",      "Get/set BLE device name: blename [name]",     false, cmd_blename },
-  { "bletxpower",   "Get/set BLE TX power 0-7: bletxpower [level]",false, cmd_bletxpower },
-  { "bledisconnect","Disconnect current BLE client",               false, cmd_bledisconnect },
-  { "bleadv",       "Start BLE advertising",                       false, cmd_bleadv },
-  { "blesend",      "Send message to connected BLE client",        false, cmd_blesend },
-  { "blestream",    "Control data streaming (on|off|sensors|system|events|interval)", false, cmd_blestream },
-  { "bleevent",     "Send event notification to BLE client",       false, cmd_bleevent },
+  // Start/Stop (3-level voice: "connection" -> "bluetooth" -> "open/close")
+  { "openble",      "Start Bluetooth LE and begin advertising.", false, cmd_blestart, nullptr, "connection", "bluetooth", "open" },
+  { "closeble",     "Stop Bluetooth LE and deinitialize.",       false, cmd_blestop,  nullptr, "connection", "bluetooth", "close" },
+  { "bleread",      "Read Bluetooth connection status.",         false, cmd_blestatus },
+  { "blestatus",    "Show Bluetooth connection status.",         false, cmd_blestatus },
+  { "bleinfo",      "Show BLE configuration and settings.",      false, cmd_bleinfo },
+  { "blename",      "Get/set BLE device name [name].",           false, cmd_blename },
+  { "bletxpower",   "Get/set BLE TX power [0-7].",               false, cmd_bletxpower },
+  { "bledisconnect","Disconnect current BLE client.",            false, cmd_bledisconnect },
+  { "bleadv",       "Start BLE advertising.",                    false, cmd_bleadv },
+  { "blesend",      "Send message to BLE client: <message>.",    false, cmd_blesend },
+  { "blestream",    "Control streaming: <on|off|sensors|system>.",false, cmd_blestream },
+  { "bleevent",     "Send event to BLE client: <event>.",        false, cmd_bleevent },
+  
+  // Auto-start
+  { "bleautostart", "Enable/disable BLE auto-start after boot [on|off].", false, cmd_bleautostart, "Usage: bleautostart [on|off]" },
 };
 
 const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoothCommands[0]);
@@ -1204,27 +1341,68 @@ void bleAddMessageToHistory(const char* msg) {
 static int bluetoothMenuSelection = 0;
 bool bluetoothShowingStatus = false;
 
+// G2 Glasses submenu state
+static bool bluetoothInG2Menu = false;
+static int g2MenuSelection = 0;
+
 // Get number of visible menu items based on BT state
 static int getBluetoothMenuItemCount() {
   // When BT is off, only show: Status, Settings, Start/Stop (3 items)
-  // When BT is on and connected: show all 5 items including Disconnect
-  // When BT is on but not connected: show 4 items (no Disconnect)
+  // When BT is on and connected: show all 5 items + G2 Glasses
+  // When BT is on but not connected: show 4 items (no Disconnect) + G2 Glasses
+#if ENABLE_G2_GLASSES
+  if (!gBLEState || !gBLEState->initialized) return 4;  // +1 for G2 Glasses
+  if (gBLEState->connectionState == BLE_STATE_CONNECTED) return 6;
+  return 5;  // BT on but not connected
+#else
   if (!gBLEState || !gBLEState->initialized) return 3;
   if (gBLEState->connectionState == BLE_STATE_CONNECTED) return 5;
   return 4;  // BT on but not connected - hide Disconnect
+#endif
 }
 
-// Menu items - full list, but items 3-4 only shown when BT is on
+// Menu items - full list, items shown based on BT/G2 state
 static const char* bluetoothMenuItems[] = {
   "Status",
   "Settings",
   "Start/Stop",
+#if ENABLE_G2_GLASSES
+  "G2 Glasses >>",
+#endif
   "Advertising",
   "Disconnect"
 };
 
+#if ENABLE_G2_GLASSES
+// G2 submenu items
+static const char* g2MenuItems[] = {
+  "<< Back",
+  "Connect",
+  "Disconnect",
+  "Status",
+  "Show Text",
+  "Nav Mode"
+};
+static const int G2_MENU_ITEM_COUNT = 6;
+
+static int getG2MenuItemCount() {
+  return G2_MENU_ITEM_COUNT;
+}
+#endif
+
 void bluetoothMenuUp() {
   if (bluetoothShowingStatus) return;
+#if ENABLE_G2_GLASSES
+  if (bluetoothInG2Menu) {
+    int maxItems = getG2MenuItemCount();
+    if (g2MenuSelection > 0) {
+      g2MenuSelection--;
+    } else {
+      g2MenuSelection = maxItems - 1;
+    }
+    return;
+  }
+#endif
   int maxItems = getBluetoothMenuItemCount();
   if (bluetoothMenuSelection > 0) {
     bluetoothMenuSelection--;
@@ -1235,6 +1413,17 @@ void bluetoothMenuUp() {
 
 void bluetoothMenuDown() {
   if (bluetoothShowingStatus) return;
+#if ENABLE_G2_GLASSES
+  if (bluetoothInG2Menu) {
+    int maxItems = getG2MenuItemCount();
+    if (g2MenuSelection < maxItems - 1) {
+      g2MenuSelection++;
+    } else {
+      g2MenuSelection = 0;
+    }
+    return;
+  }
+#endif
   int maxItems = getBluetoothMenuItemCount();
   if (bluetoothMenuSelection < maxItems - 1) {
     bluetoothMenuSelection++;
@@ -1262,12 +1451,73 @@ static void bluetoothToggleConfirmedMenu(void* userData) {
   }
 }
 
+#if ENABLE_G2_GLASSES
+#include "Optional_EvenG2.h"
+
+// G2 text input buffer for Show Text feature
+static char g2TextInputBuffer[64] = "Hello from ESP32!";
+static bool g2ShowingTextInput = false;
+
+// Execute G2 submenu action
+static void executeG2Action() {
+  switch (g2MenuSelection) {
+    case 0: // Back
+      bluetoothInG2Menu = false;
+      g2MenuSelection = 0;
+      break;
+      
+    case 1: // Connect
+      if (!isG2Connected()) {
+        // Initialize G2 client if needed (this will stop BLE server mode)
+        if (!isG2ClientInitialized()) {
+          initG2Client();
+        }
+        g2Connect(G2_EYE_AUTO);
+      }
+      break;
+      
+    case 2: // Disconnect
+      if (isG2Connected()) {
+        g2Disconnect();
+      }
+      break;
+      
+    case 3: // Status
+      bluetoothShowingStatus = true;  // Reuse status display flag for G2 status
+      break;
+      
+    case 4: // Show Text
+      if (isG2Connected()) {
+        g2ShowText(g2TextInputBuffer);
+      }
+      break;
+      
+    case 5: // Nav Mode toggle
+      {
+        extern bool gG2MenuNavEnabled;
+        gG2MenuNavEnabled = !gG2MenuNavEnabled;
+      }
+      break;
+  }
+}
+#endif
+
 void executeBluetoothAction() {
   if (bluetoothShowingStatus) {
     bluetoothShowingStatus = false;
     return;
   }
   
+#if ENABLE_G2_GLASSES
+  if (bluetoothInG2Menu) {
+    executeG2Action();
+    return;
+  }
+#endif
+  
+  // Menu indices shift when G2 is enabled
+#if ENABLE_G2_GLASSES
+  // With G2: 0=Status, 1=Settings, 2=Start/Stop, 3=G2 Glasses, 4=Advertising, 5=Disconnect
   switch (bluetoothMenuSelection) {
     case 0: // Status
       bluetoothShowingStatus = true;
@@ -1276,7 +1526,51 @@ void executeBluetoothAction() {
     case 1: // Settings
       if (openSettingsEditorForModule("bluetooth")) {
         extern OLEDMode currentOLEDMode;
-        currentOLEDMode = OLED_SETTINGS;
+        setOLEDMode(OLED_SETTINGS);
+      }
+      break;
+      
+    case 2: // Start/Stop
+      if (gBLEState && gBLEState->initialized) {
+        oledConfirmRequest("Stop Bluetooth?", nullptr, bluetoothToggleConfirmedMenu, nullptr, false);
+      } else {
+        oledConfirmRequest("Start Bluetooth?", nullptr, bluetoothToggleConfirmedMenu, nullptr);
+      }
+      break;
+      
+    case 3: // G2 Glasses submenu
+      bluetoothInG2Menu = true;
+      g2MenuSelection = 0;
+      break;
+      
+    case 4: // Advertising
+      if (gBLEState && gBLEState->initialized) {
+        if (gBLEState->connectionState == BLE_STATE_ADVERTISING) {
+          stopBLEAdvertising();
+        } else {
+          startBLEAdvertising();
+        }
+      }
+      break;
+      
+    case 5: // Disconnect
+      if (gBLEState && gBLEState->initialized && 
+          gBLEState->connectionState == BLE_STATE_CONNECTED) {
+        disconnectBLE();
+      }
+      break;
+  }
+#else
+  // Without G2: 0=Status, 1=Settings, 2=Start/Stop, 3=Advertising, 4=Disconnect
+  switch (bluetoothMenuSelection) {
+    case 0: // Status
+      bluetoothShowingStatus = true;
+      break;
+      
+    case 1: // Settings
+      if (openSettingsEditorForModule("bluetooth")) {
+        extern OLEDMode currentOLEDMode;
+        setOLEDMode(OLED_SETTINGS);
       }
       break;
       
@@ -1305,9 +1599,21 @@ void executeBluetoothAction() {
       }
       break;
   }
+#endif
 }
 
 void bluetoothMenuBack() {
+#if ENABLE_G2_GLASSES
+  if (bluetoothInG2Menu) {
+    if (bluetoothShowingStatus) {
+      bluetoothShowingStatus = false;
+    } else {
+      bluetoothInG2Menu = false;
+      g2MenuSelection = 0;
+    }
+    return;
+  }
+#endif
   if (bluetoothShowingStatus) {
     bluetoothShowingStatus = false;
   }
@@ -1315,8 +1621,7 @@ void bluetoothMenuBack() {
 
 // Display detailed status screen
 static void displayBluetoothStatusDetail() {
-  oledDisplay->println("== BLE STATUS ==");
-  oledDisplay->println();
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   
   if (!gBLEState || !gBLEState->initialized) {
     oledDisplay->println("BLE: Disabled");
@@ -1332,9 +1637,13 @@ static void displayBluetoothStatusDetail() {
   if (displayName.length() > 12) displayName = displayName.substring(0, 11) + "~";
   oledDisplay->println(displayName);
   
-  // Show state
+  // Show state with advertising indicator
   oledDisplay->print("State: ");
-  oledDisplay->println(getBLEStateString());
+  if (gBLEState->connectionState == BLE_STATE_ADVERTISING) {
+    oledDisplay->println("Advertising");
+  } else {
+    oledDisplay->println(getBLEStateString());
+  }
   
   if (gBLEState->connectionState == BLE_STATE_CONNECTED) {
     oledDisplay->print("Clients: ");
@@ -1364,13 +1673,96 @@ static void displayBluetoothStatusDetail() {
   }
 }
 
+#if ENABLE_G2_GLASSES
+// Display G2 glasses status screen
+static void displayG2StatusDetail() {
+  oledDisplay->println("== G2 GLASSES ==");
+  oledDisplay->println();
+  
+  oledDisplay->print("State: ");
+  oledDisplay->println(getG2StateString());
+  
+  if (isG2Connected()) {
+    char statusBuf[64];
+    getG2Status(statusBuf, sizeof(statusBuf));
+    oledDisplay->println(statusBuf);
+    
+    extern bool gG2MenuNavEnabled;
+    oledDisplay->print("Nav Mode: ");
+    oledDisplay->println(gG2MenuNavEnabled ? "ON" : "OFF");
+  } else {
+    oledDisplay->println();
+    oledDisplay->println("Not connected.");
+    oledDisplay->println("Use Connect to");
+    oledDisplay->println("pair glasses.");
+  }
+}
+
+// Display G2 submenu
+static void displayG2Menu() {
+  // Show title with connection status
+  oledDisplay->print("G2 GLASSES ");
+  if (isG2Connected()) {
+    oledDisplay->println("[OK]");
+  } else if (isG2ClientInitialized()) {
+    G2State state = getG2State();
+    if (state == G2_STATE_SCANNING) {
+      oledDisplay->println("[SCAN]");
+    } else if (state == G2_STATE_CONNECTING || state == G2_STATE_AUTHENTICATING) {
+      oledDisplay->println("[...]");
+    } else {
+      oledDisplay->println("[--]");
+    }
+  } else {
+    oledDisplay->println("[OFF]");
+  }
+  
+  // Draw G2 menu items
+  int visibleItems = getG2MenuItemCount();
+  
+  // Clamp selection
+  if (g2MenuSelection >= visibleItems) {
+    g2MenuSelection = visibleItems - 1;
+  }
+  
+  for (int i = 0; i < visibleItems; i++) {
+    if (i == g2MenuSelection) {
+      oledDisplay->print("> ");
+    } else {
+      oledDisplay->print("  ");
+    }
+    oledDisplay->print(g2MenuItems[i]);
+    
+    // Show state indicators
+    if (i == 1) { // Connect
+      if (isG2Connected()) oledDisplay->print(" *");
+    } else if (i == 5) { // Nav Mode
+      extern bool gG2MenuNavEnabled;
+      oledDisplay->print(gG2MenuNavEnabled ? " *" : "");
+    }
+    oledDisplay->println();
+  }
+}
+#endif
+
 // OLED display function for Bluetooth mode
 static void displayBluetoothStatus() {
   if (!oledDisplay) return;
   
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(SSD1306_WHITE);
-  oledDisplay->setCursor(0, 0);
+  
+#if ENABLE_G2_GLASSES
+  // Show G2 submenu if active
+  if (bluetoothInG2Menu) {
+    if (bluetoothShowingStatus) {
+      displayG2StatusDetail();
+    } else {
+      displayG2Menu();
+    }
+    return;
+  }
+#endif
   
   // Show status detail screen or menu
   if (bluetoothShowingStatus) {
@@ -1378,23 +1770,7 @@ static void displayBluetoothStatus() {
     return;
   }
   
-  // Show title with inline status
-  oledDisplay->print("BLUETOOTH ");
-  if (gBLEState && gBLEState->initialized) {
-    if (gBLEState->connectionState == BLE_STATE_CONNECTED) {
-      oledDisplay->print("[");
-      oledDisplay->print(gBLEState->activeConnectionCount);
-      oledDisplay->println("]");
-    } else if (gBLEState->connectionState == BLE_STATE_ADVERTISING) {
-      oledDisplay->println("[ADV]");
-    } else {
-      oledDisplay->println("[ON]");
-    }
-  } else {
-    oledDisplay->println("[OFF]");
-  }
-  
-  // Draw menu items - only show items based on BT state
+  // Draw menu items with scrolling (no separate status line - show in status detail)
   int visibleItems = getBluetoothMenuItemCount();
   
   // Clamp selection to visible range (in case BT was just turned off)
@@ -1402,23 +1778,57 @@ static void displayBluetoothStatus() {
     bluetoothMenuSelection = visibleItems - 1;
   }
   
-  for (int i = 0; i < visibleItems; i++) {
-    if (i == bluetoothMenuSelection) {
+  // Calculate scrolling window (full content area for menu)
+  const int menuStartY = OLED_CONTENT_START_Y;
+  const int lineHeight = 8;
+  const int maxVisibleMenuItems = OLED_CONTENT_HEIGHT / lineHeight;  // 43px / 8px = 5 items
+  
+  // Calculate scroll offset to keep selection visible
+  static int scrollOffset = 0;
+  if (bluetoothMenuSelection < scrollOffset) {
+    scrollOffset = bluetoothMenuSelection;
+  } else if (bluetoothMenuSelection >= scrollOffset + maxVisibleMenuItems) {
+    scrollOffset = bluetoothMenuSelection - maxVisibleMenuItems + 1;
+  }
+  
+  // Draw visible menu items
+  for (int i = 0; i < maxVisibleMenuItems && (scrollOffset + i) < visibleItems; i++) {
+    int itemIdx = scrollOffset + i;
+    oledDisplay->setCursor(0, menuStartY + i * lineHeight);
+    if (itemIdx == bluetoothMenuSelection) {
       oledDisplay->print("> ");
     } else {
       oledDisplay->print("  ");
     }
-    oledDisplay->print(bluetoothMenuItems[i]);
+    oledDisplay->print(bluetoothMenuItems[itemIdx]);
     
     // Show state indicators inline
-    if (i == 2) { // Start/Stop
+    if (itemIdx == 2) { // Start/Stop
       oledDisplay->print(gBLEState && gBLEState->initialized ? " *" : "");
-    } else if (i == 3) { // Advertising
+#if ENABLE_G2_GLASSES
+    } else if (itemIdx == 3) { // G2 Glasses
+      if (isG2Connected()) oledDisplay->print(" *");
+    } else if (itemIdx == 4) { // Advertising (shifted index with G2)
       if (gBLEState && gBLEState->connectionState == BLE_STATE_ADVERTISING) {
         oledDisplay->print(" *");
       }
+#else
+    } else if (itemIdx == 3) { // Advertising (original index without G2)
+      if (gBLEState && gBLEState->connectionState == BLE_STATE_ADVERTISING) {
+        oledDisplay->print(" *");
+      }
+#endif
     }
-    oledDisplay->println();
+  }
+  
+  // Draw scroll indicators if needed
+  if (scrollOffset > 0) {
+    oledDisplay->setCursor(120, menuStartY);
+    oledDisplay->print("\x18");  // Up arrow
+  }
+  if (scrollOffset + maxVisibleMenuItems < visibleItems) {
+    oledDisplay->setCursor(120, menuStartY + (maxVisibleMenuItems - 1) * lineHeight);
+    oledDisplay->print("\x19");  // Down arrow
   }
 }
 
@@ -1447,6 +1857,12 @@ static bool bluetoothInputHandler(int deltaX, int deltaY, uint32_t newlyPressed)
   
   // B button: Back
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+#if ENABLE_G2_GLASSES
+    if (bluetoothInG2Menu) {
+      bluetoothMenuBack();
+      return true;
+    }
+#endif
     if (bluetoothShowingStatus) {
       bluetoothMenuBack();
       return true;
