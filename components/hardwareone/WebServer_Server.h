@@ -1,15 +1,18 @@
 #ifndef WEBSERVER_SERVER_H
 #define WEBSERVER_SERVER_H
 
+#include "System_BuildConfig.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
+#endif
 
 #include "System_User.h"
- 
+
 // Shared JSON response buffer size (available to all modules)
-// Increased to 16KB to accommodate settings schema and 64x48 thermal data
-#define JSON_RESPONSE_SIZE 16384
+// Increased to 32KB to accommodate expanded ESP-NOW settings schema and 64x48 thermal data
+#define JSON_RESPONSE_SIZE 32768
 
 // Shared JSON response buffer for web handlers (size defined per TU)
 // Buffer is defined in web_server.cpp; other modules use this extern.
@@ -20,7 +23,7 @@ extern char* gJsonResponseBuffer;
 // ============================================================================
 
 // Session constants
-#define MAX_SESSIONS 3
+#define MAX_SESSIONS 2
 #define MAX_LOGOUT_REASONS 8
 
 // Multi-session support structure
@@ -41,11 +44,11 @@ struct SessionEntry {
   int nqTail = 0;
   int nqCount = 0;
   // Small ring buffer for typed SSE events (event name + JSON data)
-  static const int EVENT_QUEUE_SIZE = 2;
+  static const int EVENT_QUEUE_SIZE = 4;
   static const int EVENT_NAME_MAX = 16;
   static const int EVENT_DATA_MAX = 128;
-  char eventNameQ[EVENT_QUEUE_SIZE][EVENT_NAME_MAX];  // 2 × 16 = 32 bytes
-  char eventDataQ[EVENT_QUEUE_SIZE][EVENT_DATA_MAX];  // 2 × 128 = 256 bytes
+  char eventNameQ[EVENT_QUEUE_SIZE][EVENT_NAME_MAX];  // 4 × 16 = 64 bytes
+  char eventDataQ[EVENT_QUEUE_SIZE][EVENT_DATA_MAX];  // 4 × 128 = 512 bytes
   int eqHead = 0;
   int eqTail = 0;
   int eqCount = 0;
@@ -74,6 +77,9 @@ extern volatile int gBroadcastSkipSessionIdx;
 
 // Sensor status broadcast (SSE)
 void broadcastSensorStatusToAllSessions();
+
+// Broadcast a typed SSE event to all active sessions (used by System_Notifications)
+void broadcastEventToAllSessions(const char* eventName, const char* jsonData);
 
 // ============================================================================
 // Session Management Functions
@@ -108,6 +114,16 @@ String makeSessToken();
 void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 void getClientIP(httpd_req_t* req, String& ipOut);
 
+// Construct a SOURCE_WEB AuthContext from an HTTP request (sets transport, opaque, path, ip)
+inline AuthContext makeWebAuthCtx(httpd_req_t* req) {
+  AuthContext ctx;
+  ctx.transport = SOURCE_WEB;
+  ctx.opaque = req;
+  ctx.path = req ? req->uri : "";
+  getClientIP(req, ctx.ip);
+  return ctx;
+}
+
 // Session JSON building
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
 void buildSystemInfoJson(JsonDocument& doc);
@@ -121,7 +137,7 @@ void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg);
 void sseEnqueueNotice(SessionEntry& s, const String& msg);
 bool sseDequeueNotice(SessionEntry& s, String& out);
 // Custom SSE event queue helpers
-void sseEnqueueEvent(SessionEntry& s, const char* eventName, const String& data);
+void sseEnqueueEvent(SessionEntry& s, const char* eventName, const char* data);
 bool sseDequeueEvent(SessionEntry& s, String& outEventName, String& outData);
 
 // HTTP page handlers
@@ -146,6 +162,7 @@ esp_err_t handleLogs(httpd_req_t* req);
 esp_err_t handleSensorsStatusWithUpdates(httpd_req_t* req);
 esp_err_t handleSystemStatus(httpd_req_t* req);
 esp_err_t handleCLICommand(httpd_req_t* req);
+esp_err_t handleCliBatch(httpd_req_t* req);
 esp_err_t handleCLIPage(httpd_req_t* req);
 esp_err_t handleAutomationsPage(httpd_req_t* req);
 esp_err_t handleAutomationsGet(httpd_req_t* req);

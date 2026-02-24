@@ -99,7 +99,7 @@ inline void streamCLIInner(httpd_req_t* req, const String& username) {
   <script>try{console.log('[CLI] Section Output ready');}catch(_){}</script>
   <div class='cli-input-container'>
     <span class='cli-prompt'>$</span>
-    <input type='text' id='cli-input' class='cli-input' placeholder='Enter command...' autocomplete='off'>
+    <input type='text' id='cli-input' name='command' class='cli-input' placeholder='Enter command...' autocomplete='off'>
     <button id='cli-exec' class='btn'>Execute</button>
   </div>
   <script>try{console.log('[CLI] Section Input ready');}catch(_){}</script>

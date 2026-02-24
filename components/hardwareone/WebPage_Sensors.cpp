@@ -4,7 +4,7 @@
 
 #include "System_BuildConfig.h"
 
-#if ENABLE_HTTP_SERVER
+#if ENABLE_WEB_SENSORS
 
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -27,6 +27,12 @@
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   #include "i2csensor-seesaw.h"     // gamepadEnabled, gamepadConnected
+#endif
+#if ENABLE_GPS_SENSOR
+  #include "i2csensor-pa1010d.h"    // GPSCache, gGPSCache
+#endif
+#if ENABLE_RTC_SENSOR
+  #include "i2csensor-ds3231.h"     // RTCCache, RTCDateTime, gRTCCache
 #endif
 #if ENABLE_PRESENCE_SENSOR
   #include "i2csensor-sths34pf80.h" // presenceEnabled, presenceConnected, gPresenceCache
@@ -56,14 +62,8 @@ static const size_t IMU_RESPONSE_SIZE = 512;    // 512 bytes sufficient for IMU 
 
 // GET /sensors: sensors page
 esp_err_t handleSensorsPage(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  // httpd_req_t::uri is a fixed-size char array; it is never NULL
-  ctx.path = req->uri;
-  getClientIP(req, ctx.ip);
-  if (!tgRequireAuth(ctx)) return ESP_OK;  // 401 already sent
-  logAuthAttempt(true, req->uri, ctx.user, ctx.ip, "");
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
 
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "sensors");
   streamPageWithContent(req, "sensors", ctx.user, streamSensorsContent);
@@ -72,12 +72,7 @@ esp_err_t handleSensorsPage(httpd_req_t* req) {
 
 // GET /api/sensors: multiplexed sensor JSON endpoint
 esp_err_t handleSensorData(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  // httpd_req_t::uri is a fixed-size char array; it is never NULL
-  ctx.path = req->uri;
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   // Add CORS headers to prevent access control errors
@@ -180,12 +175,10 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
 #endif
         // Always return ToF data, using stack-allocated buffer (no String allocations)
-        DEBUG_FRAMEF("handleSensorData: ToF data requested via /api/sensors?sensor=tof");
 
         // Use stack-allocated buffer for ToF response
         char tofResponseBuffer[TOF_RESPONSE_SIZE];
         int jsonLen = buildToFDataJSON(tofResponseBuffer, TOF_RESPONSE_SIZE);
-        DEBUG_FRAMEF("handleSensorData: ToF JSON response length=%d", jsonLen);
 
         // Send response
         httpd_resp_set_type(req, "application/json");
@@ -348,6 +341,178 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         httpd_resp_send(req, "{\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
 #endif
+      } else if (sensorType == "gps") {
+#if ENABLE_GPS_SENSOR
+        extern bool gpsEnabled;
+        extern bool gpsConnected;
+        extern GPSCache gGPSCache;
+        
+        if (!gpsEnabled || !gpsConnected) {
+          httpd_resp_set_type(req, "application/json");
+          httpd_resp_send(req, "{\"error\":\"not_enabled\"}", HTTPD_RESP_USE_STRLEN);
+          return ESP_OK;
+        }
+        
+        // Read from GPS cache (no I2C access)
+        char buf[512];
+        bool dataValid = false;
+        float lat = 0, lon = 0, alt = 0, speed = 0, angle = 0;
+        bool hasFix = false;
+        uint8_t quality = 0, sats = 0;
+        uint8_t hour = 0, minute = 0, second = 0, day = 0, month = 0;
+        uint16_t year = 0;
+        
+        if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          dataValid = gGPSCache.dataValid;
+          lat = gGPSCache.latitude;
+          lon = gGPSCache.longitude;
+          alt = gGPSCache.altitude;
+          speed = gGPSCache.speed;
+          angle = gGPSCache.angle;
+          hasFix = gGPSCache.hasFix;
+          quality = gGPSCache.fixQuality;
+          sats = gGPSCache.satellites;
+          hour = gGPSCache.hour;
+          minute = gGPSCache.minute;
+          second = gGPSCache.second;
+          day = gGPSCache.day;
+          month = gGPSCache.month;
+          year = gGPSCache.year;
+          xSemaphoreGive(gGPSCache.mutex);
+        }
+        
+        if (!dataValid) {
+          httpd_resp_set_type(req, "application/json");
+          httpd_resp_send(req, "{\"error\":\"no_data\"}", HTTPD_RESP_USE_STRLEN);
+          return ESP_OK;
+        }
+        
+        int len = snprintf(buf, sizeof(buf),
+          "{\"fix\":%s,\"quality\":%d,\"satellites\":%d,\"latitude\":%.6f,\"longitude\":%.6f,\"altitude\":%.1f,\"speed\":%.1f,\"angle\":%.1f,\"time\":\"%02d:%02d:%02d\",\"date\":\"%04d-%02d-%02d\"}",
+          hasFix ? "true" : "false", quality, sats, lat, lon, alt, speed, angle,
+          hour, minute, second, year, month, day);
+        
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, buf, len);
+        return ESP_OK;
+#else
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+#endif
+      } else if (sensorType == "rtc") {
+#if ENABLE_RTC_SENSOR
+        extern bool rtcEnabled;
+        extern bool rtcConnected;
+        extern RTCCache gRTCCache;
+        
+        if (!rtcEnabled || !rtcConnected) {
+          httpd_resp_set_type(req, "application/json");
+          httpd_resp_send(req, "{\"error\":\"not_enabled\"}", HTTPD_RESP_USE_STRLEN);
+          return ESP_OK;
+        }
+        
+        // Read from RTC cache (no I2C access)
+        char buf[256];
+        bool dataValid = false;
+        RTCDateTime dt = {0};
+        float temp = 0.0f;
+        
+        if (gRTCCache.mutex && xSemaphoreTake(gRTCCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          dataValid = gRTCCache.dataValid;
+          dt = gRTCCache.dateTime;
+          temp = gRTCCache.temperature;
+          xSemaphoreGive(gRTCCache.mutex);
+        }
+        
+        if (!dataValid) {
+          httpd_resp_set_type(req, "application/json");
+          httpd_resp_send(req, "{\"error\":\"no_data\"}", HTTPD_RESP_USE_STRLEN);
+          return ESP_OK;
+        }
+        
+        // RTC stores UTC time - convert to local time using gSettings.tzOffsetMinutes
+        // Manual calculation to avoid unsafe setenv/tzset that causes watchdog timeout
+        extern Settings gSettings;
+        int offsetMinutes = gSettings.tzOffsetMinutes;
+        
+        // Convert to minutes since midnight, apply offset, handle day rollover
+        int totalMinutes = dt.hour * 60 + dt.minute + offsetMinutes;
+        int localHour = dt.hour;
+        int localMinute = dt.minute;
+        int localDay = dt.day;
+        int localMonth = dt.month;
+        int localYear = dt.year;
+        
+        if (totalMinutes < 0) {
+          // Rolled back to previous day
+          totalMinutes += 1440; // 24 * 60
+          localDay--;
+          if (localDay < 1) {
+            localMonth--;
+            if (localMonth < 1) {
+              localMonth = 12;
+              localYear--;
+            }
+            // Get days in previous month
+            int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+            if (localMonth == 2 && ((localYear % 4 == 0 && localYear % 100 != 0) || (localYear % 400 == 0))) {
+              daysInMonth[1] = 29; // Leap year
+            }
+            localDay = daysInMonth[localMonth - 1];
+          }
+        } else if (totalMinutes >= 1440) {
+          // Rolled forward to next day
+          totalMinutes -= 1440;
+          localDay++;
+          int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+          if (localMonth == 2 && ((localYear % 4 == 0 && localYear % 100 != 0) || (localYear % 400 == 0))) {
+            daysInMonth[1] = 29;
+          }
+          if (localDay > daysInMonth[localMonth - 1]) {
+            localDay = 1;
+            localMonth++;
+            if (localMonth > 12) {
+              localMonth = 1;
+              localYear++;
+            }
+          }
+        }
+        
+        localHour = totalMinutes / 60;
+        localMinute = totalMinutes % 60;
+        
+        // Calculate day of week for local date using Zeller's congruence
+        int y = localYear;
+        int m = localMonth;
+        int d = localDay;
+        if (m < 3) {
+          m += 12;
+          y--;
+        }
+        int q = d;
+        int k = y % 100;
+        int j = y / 100;
+        int h = (q + ((13 * (m + 1)) / 5) + k + (k / 4) + (j / 4) - (2 * j)) % 7;
+        // Convert Zeller result (0=Sat) to standard (0=Sun)
+        int localDayOfWeek = (h + 6) % 7;
+        
+        const char* days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        const char* dayName = (localDayOfWeek >= 0 && localDayOfWeek <= 6) ? days[localDayOfWeek] : "???";
+        
+        int len = snprintf(buf, sizeof(buf),
+          "{\"year\":%d,\"month\":%d,\"day\":%d,\"dayOfWeek\":\"%s\",\"hour\":%d,\"minute\":%d,\"second\":%d,\"temperature\":%.1f}",
+          localYear, localMonth, localDay, dayName, 
+          localHour, localMinute, dt.second, temp);
+        
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, buf, len);
+        return ESP_OK;
+#else
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+#endif
       }
     }
   }
@@ -361,11 +526,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 // Sensors status endpoint (auth-protected): returns current enable flags and seq
 esp_err_t handleSensorsStatus(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleSensorsStatus] START");
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/sensors/status";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleSensorsStatus] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
     WARN_SESSIONF("Sensors status auth failed");
@@ -395,11 +556,7 @@ esp_err_t handleSensorsStatus(httpd_req_t* req) {
 
 // Remote sensors endpoint (auth-protected): returns list of remote devices with sensors
 esp_err_t handleRemoteSensors(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/sensors/remote";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   DEBUG_HTTPF("/api/sensors/remote by %s @ %s", ctx.user.c_str(), ctx.ip.c_str());
@@ -449,11 +606,16 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
   // Return list of all remote devices with sensors
   String devicesList = getRemoteDevicesListJSON();
   DEBUG_HTTPF("/api/sensors/remote list json_len=%u", (unsigned)devicesList.length());
+  // Inject "enabled":true into the response
+  String resp = devicesList;
+  if (resp.startsWith("{")) {
+    resp = "{\"enabled\":true," + resp.substring(1);
+  }
   httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, devicesList.c_str(), devicesList.length());
+  httpd_resp_send(req, resp.c_str(), resp.length());
 #else
   httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, "{\"devices\":[]}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send(req, "{\"enabled\":false,\"devices\":[]}", HTTPD_RESP_USE_STRLEN);
 #endif
   
   return ESP_OK;
@@ -461,11 +623,7 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
 
 // Camera status endpoint (auth-protected): returns camera state
 esp_err_t handleCameraStatus(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/sensors/camera/status";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
 #if ENABLE_CAMERA_SENSOR
@@ -485,11 +643,7 @@ esp_err_t handleCameraFrame(httpd_req_t* req) {
   // Verbose debug logging - uncomment for troubleshooting
   // Serial.println("[CamFrame] handleCameraFrame() ENTRY");
   
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/sensors/camera/frame";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   // Serial.printf("[CamFrame] Client IP: %s\n", ctx.ip.c_str());
   
   if (!tgRequireAuth(ctx)) {
@@ -543,11 +697,7 @@ esp_err_t handleCameraFrame(httpd_req_t* req) {
 
 // Camera MJPEG stream endpoint (auth-protected): returns multipart JPEG stream
 esp_err_t handleCameraStream(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/sensors/camera/stream";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
 #if ENABLE_CAMERA_SENSOR
@@ -688,11 +838,7 @@ esp_err_t handleCameraStream(httpd_req_t* req) {
 
 // Microphone recordings list endpoint (auth-protected)
 esp_err_t handleMicRecordingsList(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/recordings";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
 #if ENABLE_MICROPHONE_SENSOR
@@ -740,11 +886,7 @@ esp_err_t handleMicRecordingsList(httpd_req_t* req) {
 
 // Microphone recording file endpoint (auth-protected) - serves WAV file for playback
 esp_err_t handleMicRecordingFile(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/recordings/file";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
 #if ENABLE_MICROPHONE_SENSOR
@@ -825,11 +967,7 @@ esp_err_t handleMicRecordingFile(httpd_req_t* req) {
 
 // Microphone recording delete endpoint (auth-protected)
 esp_err_t handleMicRecordingDelete(httpd_req_t* req) {
-  AuthContext ctx;
-  ctx.transport = SOURCE_WEB;
-  ctx.opaque = req;
-  ctx.path = "/api/recordings/delete";
-  getClientIP(req, ctx.ip);
+  AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
 #if ENABLE_MICROPHONE_SENSOR

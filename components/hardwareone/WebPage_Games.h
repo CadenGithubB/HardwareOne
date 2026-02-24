@@ -3,7 +3,9 @@
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
+#if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
+#endif
 #include "WebServer_Utils.h"
 
 #if ENABLE_GAMES
@@ -1655,8 +1657,8 @@ function startGame(){
   }
   running=true; resetLevel(1); startCalibration(); lastUpdate=0; calibrating=true; hasBaseline=false; calStableMs=0; CONTROL_MODE=MODE_STICK_AIM; selectPrimed=false; lastSelectDown=false; console.log('[CTRL] start CONTROL_MODE=', CONTROL_MODE); draw(); Promise.all([controlSensor('imu','start'), controlSensor('gamepad','start')]).then(function(){ polling=setInterval(pollIMU,60); requestAnimationFrame(loop); }); var chk=document.getElementById('chkCamFollow'); if(chk && chk.checked){ CAM_FOLLOW=true; } if(USE_GAMEPAD){ startGamepadPolling(); } updateHudInput(); }
 function stopGame(){ running=false; if(polling){ try{ clearInterval(polling); }catch(_){} polling=null; } stopGamepadPolling(); controlSensor('imu','stop'); }
-function fwDebugOn(){ FW_DEBUG=true; var cmds=['debugsensorsgeneral 1','debugsensorsdata 1']; Promise.all(cmds.map(function(c){ return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(c)}).then(function(r){return r.text();}).catch(function(_){return '';}); })).then(function(){ startLogPoller(); }); }
-function fwDebugOff(){ FW_DEBUG=false; var cmds=['debugsensorsgeneral 0','debugsensorsdata 0']; Promise.all(cmds.map(function(c){ return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(c)}).then(function(r){return r.text();}).catch(function(_){return '';}); })).then(function(){ stopLogPoller(); }); }
+function fwDebugOn(){ FW_DEBUG=true; var cmds=['debugsensorsgeneral 1','debugimudata 1']; Promise.all(cmds.map(function(c){ return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(c)}).then(function(r){return r.text();}).catch(function(_){return '';}); })).then(function(){ startLogPoller(); }); }
+function fwDebugOff(){ FW_DEBUG=false; var cmds=['debugsensorsgeneral 0','debugimudata 0']; Promise.all(cmds.map(function(c){ return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(c)}).then(function(r){return r.text();}).catch(function(_){return '';}); })).then(function(){ stopLogPoller(); }); }
 function startLogPoller(){ if(__gamesLogPoll){ return; } __gamesLogLastLen=0; __gamesLogPoll=setInterval(function(){ if(!FW_DEBUG) return; fetch('/api/cli/logs',{cache:'no-store'}).then(function(r){return r.text();}).then(function(t){ if(typeof t!=='string') return; var s=t; if(s.length>__gamesLogLastLen){ var delta=s.substring(__gamesLogLastLen); __gamesLogLastLen=s.length; var lines=delta.split(/\\n/); for(var i=0;i<lines.length;i++){ var ln=lines[i]; if(!ln) continue; if(ln.indexOf('[DEBUG_SENSORS')>=0 || /IMU|BNO|ori|gyro|accel/i.test(ln)){ try{ console.log('[FW]', ln); }catch(_){ } } } } }).catch(function(_){ }); }, 800); }
 function stopLogPoller(){ if(__gamesLogPoll){ try{ clearInterval(__gamesLogPoll); }catch(_){} __gamesLogPoll=null; } }
 document.getElementById('btnStart').addEventListener('click', startGame);

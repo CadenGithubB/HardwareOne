@@ -14,6 +14,24 @@ window.togglePane = function(paneId, btnId) {
   p.style.display = isHidden ? 'block' : 'none';
   b.textContent = isHidden ? 'Collapse' : 'Expand';
 };
+window.sendSequential = function(cmds, onDone, onFail) {
+  var all = ['beginwrite'].concat(cmds).concat(['savesettings']);
+  fetch('/api/cli/batch', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'same-origin',
+    body: JSON.stringify({commands: all})
+  })
+  .then(function(r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  })
+  .then(function(j) {
+    if (j && j.ok) { if (onDone) onDone(); }
+    else { if (onFail) onFail(new Error(j && j.error ? j.error : 'batch failed')); }
+  })
+  .catch(function(err) { if (onFail) onFail(err); });
+};
 </script>
 )EARLYJS", HTTPD_RESP_USE_STRLEN);
 
@@ -23,7 +41,7 @@ window.togglePane = function(paneId, btnId) {
 <p>Configure your HardwareOne device settings</p>
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>WiFi Network</div><div style='color:var(--muted);font-size:0.9rem'>Current WiFi network and connection settings.</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>WiFi Network</div><div style='color:var(--panel-fg);font-size:0.9rem'>Current WiFi network and connection settings.</div></div>
     <button class='btn' id='btn-wifi-toggle' onclick="togglePane('wifi-pane','btn-wifi-toggle')">Expand</button>
   </div>
   <div id='wifi-pane' style='display:none;margin-top:0.75rem'>
@@ -46,8 +64,8 @@ window.togglePane = function(paneId, btnId) {
   </div>
   <div id='wifi-manual-panel' style='display:none;margin-top:0.75rem'>
     <div style='margin-bottom:0.5rem'>Enter hidden network credentials</div>
-    <input type='text' id='manual-ssid' placeholder='Hidden SSID' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:240px;margin-right:6px'>
-    <input type='password' id='manual-pass' placeholder='Password (leave blank if open)' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:240px;margin-right:6px'>
+    <input type='text' id='manual-ssid' placeholder='Hidden SSID' class='form-input input-medium' style='margin-right:6px'>
+    <input type='password' id='manual-pass' placeholder='Password (leave blank if open)' class='form-input input-medium' style='margin-right:6px'>
     <button class='btn' onclick="(function(){ var ssid=(document.getElementById('manual-ssid')||{}).value||''; var pass=(document.getElementById('manual-pass')||{}).value||''; if(!ssid){ alert('Enter SSID'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 1'; fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent(cmd1)}).then(function(r){return r.text();}).then(function(t1){ if(!confirm('Credentials saved for hidden network \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.')){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent('wificonnect')}); }).then(function(r){ if(!r) return ''; return r.text(); }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
   </div>
   </div>
@@ -58,7 +76,7 @@ window.togglePane = function(paneId, btnId) {
   httpd_resp_send_chunk(req, R"SETPART2(
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>System Time</div><div style='color:var(--muted);font-size:0.9rem'>Configure timezone offset and NTP server for accurate time synchronization.</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>System Time</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure timezone offset and NTP server for accurate time synchronization.</div></div>
     <button class='btn' id='btn-time-toggle' onclick="togglePane('time-pane','btn-time-toggle')">Expand</button>
   </div>
   <div id='time-pane' style='display:none;margin-top:0.75rem'>
@@ -104,7 +122,7 @@ window.togglePane = function(paneId, btnId) {
 </div>
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Output Channels</div><div style='color:var(--muted);font-size:0.9rem'>Configure persistent settings and see current runtime state. Use 'Temp On/Off' to affect only this session.</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Output Channels</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure persistent settings and see current runtime state. Use 'Temp On/Off' to affect only this session.</div></div>
     <button class='btn' id='btn-output-toggle' onclick="togglePane('output-pane','btn-output-toggle')">Expand</button>
   </div>
   <div id='output-pane' style='display:none;margin-top:0.75rem'>
@@ -118,15 +136,23 @@ window.togglePane = function(paneId, btnId) {
       <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session web output status (temporary, resets on reboot)'>Web (runtime): <span style='font-weight:bold' id='web-runtime'>-</span></span><button class='btn' id='web-temp-on' onclick="setOutputRuntime('web',1)" title='Enable web output for this session only'>Temp On</button><button class='btn' id='web-temp-off' onclick="setOutputRuntime('web',0)" title='Disable web output for this session only'>Temp Off</button></div>
     </div>
     <div style='display:flex;flex-direction:column;gap:0.35rem'>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor data output to TFT display (saved to device memory)'>TFT (persisted): <span style='font-weight:bold;color:#667eea' id='tft-value'>-</span></span><button class='btn' onclick="toggleOutput('outTft','tft')" id='tft-btn' title='Toggle persistent TFT display output setting'>Toggle</button></div>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session TFT display status (temporary, resets on reboot)'>TFT (runtime): <span style='font-weight:bold' id='tft-runtime'>-</span></span><button class='btn' id='tft-temp-on' onclick="setOutputRuntime('tft',1)" title='Enable TFT display for this session only'>Temp On</button><button class='btn' id='tft-temp-off' onclick="setOutputRuntime('tft',0)" title='Disable TFT display for this session only'>Temp Off</button></div>
+      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor data output to display (saved to device memory)'>Display (persisted): <span style='font-weight:bold;color:#667eea' id='display-value'>-</span></span><button class='btn' onclick="toggleOutput('outDisplay','display')" id='display-btn' title='Toggle persistent display output setting'>Toggle</button></div>
+      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session display status (temporary, resets on reboot)'>Display (runtime): <span style='font-weight:bold' id='display-runtime'>-</span></span><button class='btn' id='display-temp-on' onclick="setOutputRuntime('display',1)" title='Enable display output for this session only'>Temp On</button><button class='btn' id='display-temp-off' onclick="setOutputRuntime('display',0)" title='Disable display output for this session only'>Temp Off</button></div>
     </div>
-  </div>
+)SETPART2", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_G2_GLASSES
+  httpd_resp_send_chunk(req, R"SP2G(    <div style='display:flex;flex-direction:column;gap:0.35rem'>
+      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable output to G2 smart glasses (saved to device memory)'>G2 Glasses (persisted): <span style='font-weight:bold;color:#667eea' id='g2-value'>-</span></span><button class='btn' onclick="toggleOutput('outG2','g2')" id='g2-btn' title='Toggle persistent G2 glasses output setting'>Toggle</button></div>
+      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session G2 glasses status (temporary, resets on reboot)'>G2 (runtime): <span style='font-weight:bold' id='g2-runtime'>-</span></span><button class='btn' id='g2-temp-on' onclick="setOutputRuntime('g2',1)" title='Enable G2 output for this session only'>Temp On</button><button class='btn' id='g2-temp-off' onclick="setOutputRuntime('g2',0)" title='Disable G2 output for this session only'>Temp Off</button></div>
+    </div>
+)SP2G", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, R"SP2B(  </div>
 </div>
 </div>
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Web CLI History Size</div><div style='color:var(--muted);font-size:0.9rem'>Number of commands to keep in web CLI history buffer.</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Web CLI History Size</div><div style='color:var(--panel-fg);font-size:0.9rem'>Number of commands to keep in web CLI history buffer.</div></div>
     <button class='btn' id='btn-cli-toggle' onclick="togglePane('cli-pane','btn-cli-toggle')">Expand</button>
   </div>
   <div id='cli-pane' style='display:none;margin-top:0.75rem'>
@@ -138,47 +164,128 @@ window.togglePane = function(paneId, btnId) {
   </div>
 </div>
 </div>
-)SETPART2", HTTPD_RESP_USE_STRLEN);
+)SP2B", HTTPD_RESP_USE_STRLEN);
 
+#if ENABLE_ESPNOW
   // Part 3: ESP-NOW section
   httpd_resp_send_chunk(req, R"SETPART3(
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>ESP-NOW</div><div style='color:var(--muted);font-size:0.9rem'>Interdevice Communication</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>ESP-NOW</div><div style='color:var(--panel-fg);font-size:0.9rem'>Interdevice Communication & Mesh Networking</div></div>
     <button class='btn' id='btn-espnow-toggle' onclick="togglePane('espnow-pane','btn-espnow-toggle')">Expand</button>
   </div>
   <div id='espnow-pane' style='display:none;margin-top:0.75rem'>
-  <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
-    <span style='color:var(--panel-fg)' title='Enable ESP-NOW protocol on boot (requires reboot to take effect)'>Enable ESP-NOW on boot: <span style='font-weight:bold;color:#28a745' id='espnow-value'>-</span></span>
-    <button class='btn' onclick='toggleEspNow()' id='espnow-btn' title='Enable/disable ESP-NOW protocol'>Toggle</button>
-  </div>
-  <div class='alert alert-info' style='margin-top:0.75rem'>
-    <div style='color:#155724;font-size:0.9rem'>
-      <strong>Note:</strong> ESP-NOW changes take effect after reboot. When enabled, the device will automatically initialize ESP-NOW on startup.
+    <!-- Basic Settings -->
+    <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
+      <span style='color:var(--panel-fg)' title='Enable ESP-NOW protocol on boot (requires reboot to take effect)'>Enable ESP-NOW on boot: <span style='font-weight:bold;color:var(--panel-fg)' id='espnow-value'>-</span></span>
+      <button class='btn' onclick='toggleEspNow()' id='espnow-btn' title='Enable/disable ESP-NOW protocol'>Toggle</button>
     </div>
-  </div>
+    <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
+      <span style='color:var(--panel-fg)'>Mesh Mode: <span style='font-weight:bold;color:var(--panel-fg)' id='espnow-mesh-value'>-</span></span>
+      <button class='btn' onclick='toggleEspNowMesh()' id='espnow-mesh-btn'>Toggle</button>
+    </div>
+    
+    <!-- Device Identity -->
+    <div style='font-weight:bold;margin:1.5rem 0 0.75rem 0;padding-bottom:0.5rem;border-bottom:1px solid var(--border);color:var(--panel-fg)'>Device Identity</div>
+    <div style='margin-bottom:1rem'>
+      <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Device Name</label>
+      <input type='text' id='espnow-devicename' placeholder='e.g., darkblue' maxlength='20' style='max-width:320px;width:100%'>
+      <small style='color:var(--panel-fg);font-size:0.8rem'>Short identifier (1-20 chars, alphanumeric)</small>
+    </div>
+    
+    <!-- Smart Home Metadata -->
+    <div style='font-weight:bold;margin:1.5rem 0 0.75rem 0;padding-bottom:0.5rem;border-bottom:1px solid var(--border);color:var(--panel-fg)'>Smart Home Metadata</div>
+    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0.75rem;margin-bottom:1rem'>
+      <div>
+        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Friendly Name</label>
+        <input type='text' id='espnow-friendlyname' placeholder='e.g., Living Room Light' maxlength='47' style='width:100%'>
+        <small style='color:var(--panel-fg);font-size:0.8rem'>Human-readable name for displays</small>
+      </div>
+      <div>
+        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Room</label>
+        <input type='text' id='espnow-room' placeholder='e.g., Living Room' maxlength='31' style='width:100%'>
+      </div>
+      <div>
+        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Zone</label>
+        <input type='text' id='espnow-zone' placeholder='e.g., Upstairs' maxlength='31' style='width:100%'>
+      </div>
+      <div>
+        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Tags</label>
+        <input type='text' id='espnow-tags' placeholder='e.g., light,dimmable' maxlength='63' style='width:100%'>
+      </div>
+    </div>
+    <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem'>
+      <input type='checkbox' id='espnow-stationary' style='width:auto;margin:0'>
+      <label for='espnow-stationary' style='color:var(--panel-fg);cursor:pointer'>Stationary Device (fixed location)</label>
+    </div>
+    
+    <!-- Mesh Configuration -->
+    <div style='font-weight:bold;margin:1.5rem 0 0.75rem 0;padding-bottom:0.5rem;border-bottom:1px solid var(--border);color:var(--panel-fg)'>Mesh Configuration</div>
+    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem'>
+      <div>
+        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Mesh Role</label>
+        <select id='espnow-meshrole' style='width:100%'>
+          <option value='0'>Worker</option>
+          <option value='1'>Master</option>
+          <option value='2'>Backup Master</option>
+        </select>
+      </div>
+      <div>
+        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Master MAC</label>
+        <input type='text' id='espnow-mastermac' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17' style='width:100%;font-family:monospace'>
+      </div>
+      <div>
+        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Backup MAC</label>
+        <input type='text' id='espnow-backupmac' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17' style='width:100%;font-family:monospace'>
+      </div>
+    </div>
+    
+    <!-- Save Button -->
+    <div style='margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--border)'>
+      <button class='btn' onclick='saveEspNowSettings()'>Save ESP-NOW Settings</button>
+      <span id='espnow-save-status' style='margin-left:1rem;color:var(--panel-fg)'></span>
+    </div>
+    
   </div>
 </div>
 )SETPART3", HTTPD_RESP_USE_STRLEN);
+#endif // ENABLE_ESPNOW
 
+#if ENABLE_MQTT || ENABLE_HTTP_SERVER || ENABLE_BLUETOOTH
   // Part 3.5: Network Services section - renders from /api/settings/schema
   httpd_resp_send_chunk(req, R"SETPART3_5(
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Network Services</div><div style='color:var(--muted);font-size:0.9rem'>Configure MQTT and other network integrations.</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Network Services</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure network service integrations.</div></div>
     <button class='btn' id='btn-network-toggle' onclick="togglePane('network-pane','btn-network-toggle')">Expand</button>
   </div>
   <div id='network-pane' style='display:none;margin-top:1rem;color:var(--panel-fg)'>
     <div id='network-dynamic-container'>
-      <div style='text-align:center;padding:2rem;color:var(--muted)'>Loading network settings...</div>
+      <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading network settings...</div>
     </div>
   </div>
 </div>
 <script>
 (function(){
-  var networkModules = ['mqtt'];
-  var networkSections = {'mqtt':'mqtt'};
-  var networkLabels = {mqtt:'MQTT Broker'};
+  var networkModules = [)SETPART3_5", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_MQTT
+  httpd_resp_send_chunk(req, "'mqtt'", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_MQTT && (ENABLE_HTTP_SERVER || ENABLE_BLUETOOTH)
+  httpd_resp_send_chunk(req, ",", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_HTTP_SERVER
+  httpd_resp_send_chunk(req, "'http'", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_HTTP_SERVER && ENABLE_BLUETOOTH
+  httpd_resp_send_chunk(req, ",", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_BLUETOOTH
+  httpd_resp_send_chunk(req, "'bluetooth'", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, R"SETPART3_5B(];
+  var networkSections = {'mqtt':'mqtt','http':'http','bluetooth':'bluetooth'};
+  var networkLabels = {mqtt:'MQTT Broker',http:'HTTP Server',bluetooth:'Bluetooth'};
   
   function inferType(val) {
     if (typeof val === 'boolean') return 'bool';
@@ -220,7 +327,7 @@ window.togglePane = function(paneId, btnId) {
     html += '<div>';
     html += '<span style="font-size:1.1rem;font-weight:bold;color:var(--panel-fg)">' + (networkLabels[mod.name] || mod.description || mod.name) + '</span>' + statusBadge;
     if (mod.description && !networkLabels[mod.name]) {
-      html += '<div style="color:var(--muted);font-size:0.85rem;margin-top:0.25rem">' + mod.description + '</div>';
+      html += '<div style="color:var(--panel-fg);font-size:0.85rem;margin-top:0.25rem">' + mod.description + '</div>';
     }
     html += '</div>';
     html += '<button class="btn" id="btn-' + mod.name + '-net-toggle" onclick="togglePane(\'' + mod.name + '-net-pane\',\'btn-' + mod.name + '-net-toggle\')">Expand</button>';
@@ -268,7 +375,7 @@ window.togglePane = function(paneId, btnId) {
     });
     
     if (html === '') {
-      container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--muted);font-style:italic">No network services available</div>';
+      container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">No network services available</div>';
       return;
     }
     
@@ -304,40 +411,37 @@ window.togglePane = function(paneId, btnId) {
     }
     
     if (cmds.length === 0) { alert('No settings to save'); return; }
-    
-    var promises = cmds.map(function(cmd) {
-      return fetch('/api/cli', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, credentials:'include', body:'cmd=' + encodeURIComponent(cmd)});
-    });
-    
-    Promise.all(promises).then(function() {
-      alert('Settings saved! Some changes may require a restart.');
-    }).catch(function(e) {
-      alert('Save failed: ' + e.message);
-    });
+
+    sendSequential(cmds,
+      function() { alert('Settings saved! Some changes may require a restart.'); },
+      function(e) { alert('Save failed: ' + (e ? e.message : 'unknown')); }
+    );
   };
 })();
 </script>
-)SETPART3_5", HTTPD_RESP_USE_STRLEN);
+)SETPART3_5B", HTTPD_RESP_USE_STRLEN);
+#endif // ENABLE_MQTT || ENABLE_HTTP_SERVER || ENABLE_BLUETOOTH
 
   // Part 4: Dynamic Sensors section - renders from /api/settings/schema
   httpd_resp_send_chunk(req, R"SETPART4(
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Sensors</div><div style='color:var(--muted);font-size:0.9rem'>Configure sensor behavior and visualization settings.</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Sensors</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure sensor behavior and visualization settings.</div></div>
     <button class='btn' id='btn-sensors-toggle' onclick="togglePane('sensors-pane','btn-sensors-toggle')">Expand</button>
   </div>
   <div id='sensors-pane' style='display:none;margin-top:1rem;color:var(--panel-fg)'>
     <div id='sensors-dynamic-container'>
-      <div style='text-align:center;padding:2rem;color:var(--muted)'>Loading sensor settings...</div>
+      <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading sensor settings...</div>
     </div>
   </div>
 </div>
 <script>
 (function(){
-  var sensorModules = ['camera','microphone','thermal','tof','imu','gps','fmradio','gamepad','apds','rtc','presence'];
-  var mlSubsections = {camera:'edgeimpulse',microphone:null};
-  var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','thermal_mlx90640':'thermal','tof_vl53l4cx':'tof','imu_bno055':'imu','gps':'gps','fmradio':'fmradio','gamepad':'gamepad','apds':'apds','rtc':'rtc','presence':'presence','power':'power','debug':'debug','output':'output'};
-  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',gamepad:'Gamepad (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',power:'Power Management',debug:'Debug Flags',output:'Output Channels'};
+  var sensorModules = ['camera','microphone','thermal','tof','imu','gps','fmradio','apds','rtc','presence','sensorlog','espsr'];
+  var i2cModules = ['i2c'];
+  var mlSubsections = {camera:'edgeimpulse',microphone:'espsr'};
+  var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','espsr':'espsr','thermal_mlx90640':'thermal','tof_vl53l4cx':'tof','imu_bno055':'imu','gps':'gps','fmradio':'fmradio','apds':'apds','rtc':'rtc','presence':'presence','sensorlog':'sensorlog','power':'power','debug':'debug','output':'output'};
+  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',gamepad:'Gamepad (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels'};
   
   function inferType(val) {
     if (typeof val === 'boolean') return 'bool';
@@ -419,7 +523,7 @@ window.togglePane = function(paneId, btnId) {
     html += '<div>';
     html += '<span style="font-size:1.1rem;font-weight:bold;color:var(--panel-fg)">' + (moduleLabels[mod.name] || mod.description || mod.name) + '</span>' + statusBadge;
     if (mod.description && !moduleLabels[mod.name]) {
-      html += '<div style="color:var(--muted);font-size:0.85rem;margin-top:0.25rem">' + mod.description + '</div>';
+      html += '<div style="color:var(--panel-fg);font-size:0.85rem;margin-top:0.25rem">' + mod.description + '</div>';
     }
     html += '</div>';
     html += '<button class="btn" id="btn-' + mod.name + '-toggle" onclick="togglePane(\'' + mod.name + '-pane\',\'btn-' + mod.name + '-toggle\')">Expand</button>';
@@ -427,12 +531,12 @@ window.togglePane = function(paneId, btnId) {
     html += '<div id="' + mod.name + '-pane" style="display:none;margin-top:0.75rem">';
     
     if (isOrphan) {
-      html += '<div style="background:var(--crumb-bg);border-left:3px solid var(--border);padding:0.75rem;margin-bottom:1rem;color:var(--muted);font-size:0.85rem">';
+      html += '<div style="background:var(--crumb-bg);border-left:3px solid var(--border);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);font-size:0.85rem">';
       html += 'Module not included in current build. Settings are preserved but read-only.';
       html += '</div>';
     } else if (isDisconnected) {
       html += '<div style="background:#fef3c7;border-left:3px solid #f59e0b;padding:0.75rem;margin-bottom:1rem;color:#92400e;font-size:0.85rem">';
-      html += 'Module not connected. Settings can be changed but will only apply when module is connected.';
+      html += 'Module not connected, settings can still be changed.';
       html += '</div>';
     }
     
@@ -469,7 +573,7 @@ window.togglePane = function(paneId, btnId) {
       
       if (espnowEntries.length > 0 && mod.name === 'camera') {
         html += '<div style="font-weight:bold;margin:1rem 0 0.5rem 0;color:var(--panel-fg);border-bottom:1px solid var(--border);padding-bottom:0.25rem">📡 ESP-NOW Integration</div>';
-        html += '<div style="background:rgba(100,149,237,0.1);border-left:3px solid #6495ed;padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--muted);font-size:0.85rem">';
+        html += '<div style="background:rgba(100,149,237,0.1);border-left:3px solid #6495ed;padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--panel-fg);font-size:0.85rem">';
         html += 'Send captured images to another device via ESP-NOW mesh network.';
         html += '</div>';
         html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
@@ -530,8 +634,9 @@ window.togglePane = function(paneId, btnId) {
     var schemaModuleNames = (schema.modules || []).map(function(m) { return m.name; });
     var schemaSections = (schema.modules || []).map(function(m) { return m.section; });
     
+    var allKnownModules = sensorModules.concat(i2cModules);
     var relevantModules = (schema.modules || []).filter(function(m) {
-      return sensorModules.indexOf(m.name) !== -1;
+      return allKnownModules.indexOf(m.name) !== -1;
     });
     
     // Find orphaned sensor settings in JSON that aren't in schema
@@ -553,20 +658,46 @@ window.togglePane = function(paneId, btnId) {
     }
     
     var html = '';
+    var i2cHtml = '';
     
     // Render active (compiled) modules first
     var allMods = schema.modules || [];
     relevantModules.forEach(function(mod) {
-      html += renderModule(mod, settings, false, allMods, settings);
+      if (i2cModules.indexOf(mod.name) !== -1) {
+        var sec = settings[mod.section] || settings[mod.name] || {};
+        var ents = mod.entries || [];
+        i2cHtml += '<div id="i2c-pane"><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
+        ents.forEach(function(e) {
+          var parts = e.key.split('.'), v = sec;
+          for (var pi = 0; pi < parts.length && v; pi++) v = v[parts[pi]];
+          i2cHtml += renderInput(e, v, false);
+        });
+        i2cHtml += '</div><button class="btn" onclick="saveDynamicSettings(\'' + mod.name + '\',\'' + mod.section + '\')">Save I2C Bus Configuration Settings</button></div>';
+      } else {
+        html += renderModule(mod, settings, false, allMods, settings);
+      }
     });
     
     // Render orphan modules (not compiled but settings exist)
     orphanModules.forEach(function(mod) {
-      html += renderModule(mod, settings, true, allMods, settings);
+      if (i2cModules.indexOf(mod.name) !== -1) {
+        var ents = mod.entries || [];
+        i2cHtml += '<div id="i2c-pane"><div style="background:var(--crumb-bg);border-left:3px solid var(--border);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);font-size:0.85rem">Module not included in current build. Settings are preserved but read-only.</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
+        ents.forEach(function(e) { i2cHtml += renderInput(e, e.value, true); });
+        i2cHtml += '</div></div>';
+      } else {
+        html += renderModule(mod, settings, true, allMods, settings);
+      }
     });
     
+    // Populate i2c container
+    var i2cCont = document.getElementById('i2c-bus-dynamic-container');
+    if (i2cCont) {
+      i2cCont.innerHTML = i2cHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">I2C settings not available</div>';
+    }
+    
     if (html === '') {
-      container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--muted);font-style:italic">No sensor settings available</div>';
+      container.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">No sensor settings available</div>';
       return;
     }
     
@@ -578,13 +709,12 @@ window.togglePane = function(paneId, btnId) {
   });
   
   window.saveDynamicSettings = function(modName, section) {
-    var container = document.getElementById('sensors-dynamic-container');
-    var inputs = container.querySelectorAll('[id^="dyn-"]:not([disabled])');
+    var pane = document.getElementById(modName + '-pane');
+    if (!pane) { alert('Settings pane not found for: ' + modName); return; }
+    var inputs = pane.querySelectorAll('[id^="dyn-"]:not([disabled])');
     var updates = {};
     inputs.forEach(function(el) {
       var key = el.id.replace('dyn-', '').replace(/-/g, '.');
-      var parentMod = el.closest('[id$="-pane"]');
-      if (!parentMod || !parentMod.id.startsWith(modName)) return;
       var val;
       if (el.type === 'checkbox') val = el.checked ? 1 : 0;
       else if (el.type === 'number') val = el.step && el.step.indexOf('.') !== -1 ? parseFloat(el.value) : parseInt(el.value);
@@ -612,73 +742,109 @@ window.togglePane = function(paneId, btnId) {
     }
     
     if (cmds.length === 0) { alert('No settings to save'); return; }
-    
-    var promises = cmds.map(function(cmd) {
-      return fetch('/api/cli', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, credentials:'include', body:'cmd=' + encodeURIComponent(cmd)});
-    });
-    
-    Promise.all(promises).then(function() {
-      alert('Settings saved! Some changes may require a reboot.');
-    }).catch(function(e) {
-      alert('Save failed: ' + e.message);
-    });
+
+    sendSequential(cmds,
+      function() { alert('Settings saved! Some changes may require a reboot.'); },
+      function(e) { alert('Save failed: ' + (e ? e.message : 'unknown')); }
+    );
   };
 })();
 </script>
 )SETPART4", HTTPD_RESP_USE_STRLEN);
 
+  // I2C Bus Configuration section (standalone, not under Sensors)
+  httpd_resp_send_chunk(req, R"I2CPART(
+<div class='settings-panel'>
+  <div style='display:flex;align-items:center;justify-content:space-between'>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>I2C Bus Configuration</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure I2C bus pins, clock speeds, and enable/disable settings.</div></div>
+    <button class='btn' id='btn-i2cbus-toggle' onclick="togglePane('i2cbus-pane','btn-i2cbus-toggle')">Expand</button>
+  </div>
+  <div id='i2cbus-pane' style='display:none;margin-top:0.75rem'>
+    <div id='i2c-bus-dynamic-container'>
+      <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading I2C settings...</div>
+    </div>
+  </div>
+</div>
+)I2CPART", HTTPD_RESP_USE_STRLEN);
+
   // Part 6: Hardware Settings section
   httpd_resp_send_chunk(req, R"SETPART6(
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Hardware Settings</div><div style='color:var(--muted);font-size:0.9rem'>Configure onboard hardware behavior (LED, power management, etc.)</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Hardware Settings</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure onboard hardware behavior (LED, OLED, Gamepad)</div></div>
     <button class='btn' id='btn-hardware-toggle' onclick="togglePane('hardware-pane','btn-hardware-toggle')">Expand</button>
   </div>
   <div id='hardware-pane' style='display:none;margin-top:0.75rem'>
-  <div style='font-weight:bold;margin-bottom:0.75rem;color:var(--panel-fg);border-bottom:1px solid #e5e7eb;padding-bottom:0.5rem'>LED Configuration</div>
-  <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem'>
-    <label title="Global LED brightness (0-100%)">LED Brightness (%)<br><input type='number' id='ledBrightness' min='0' max='100' step='5' value='100' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:120px' title='LED brightness percentage'></label>
-    <label><input type='checkbox' id='ledStartupEnabled' style='margin-right:0.5rem'>Enable Startup Effect</label>
-  </div>
-  <div style='margin-top:1rem;padding:1rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:6px'>
-    <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem'>Startup Effect Configuration</div>
-    <div style='color:var(--muted);font-size:0.9rem;margin-bottom:0.75rem'>LED effect to run when device finishes booting.</div>
-    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
-      <label title="Effect type">Effect Type<br><select id='ledStartupEffect' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='none'>None</option><option value='rainbow'>Rainbow</option><option value='pulse'>Pulse</option><option value='fade'>Fade</option><option value='blink'>Blink</option><option value='strobe'>Strobe</option></select></label>
-      <label title="Primary color">Primary Color<br><select id='ledStartupColor' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='red'>Red</option><option value='green'>Green</option><option value='blue'>Blue</option><option value='cyan'>Cyan</option><option value='magenta'>Magenta</option><option value='yellow'>Yellow</option><option value='white'>White</option><option value='orange'>Orange</option><option value='purple'>Purple</option></select></label>
-      <label title="Secondary color (for fade effect)">Secondary Color<br><select id='ledStartupColor2' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='red'>Red</option><option value='green'>Green</option><option value='blue'>Blue</option><option value='cyan'>Cyan</option><option value='magenta'>Magenta</option><option value='yellow'>Yellow</option><option value='white'>White</option><option value='orange'>Orange</option><option value='purple'>Purple</option></select></label>
-      <label title="Effect duration in milliseconds">Duration (ms)<br><input type='number' id='ledStartupDuration' min='100' max='10000' step='100' value='1000' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Effect duration'></label>
+    <!-- LED Configuration Subsection -->
+    <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem'>
+      <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem'>
+        <div style='font-weight:bold;color:var(--panel-fg)'>LED Configuration</div>
+        <button class='btn' id='btn-led-toggle' onclick="togglePane('led-pane','btn-led-toggle')" style='font-size:0.85rem;padding:0.25rem 0.75rem'>Expand</button>
+      </div>
+      <div id='led-pane' style='display:none'>
+        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:1rem'>
+          <label title="Global LED brightness (0-100%)">LED Brightness (%)<br><input type='number' id='ledBrightness' min='0' max='100' step='5' value='100' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:120px' title='LED brightness percentage'></label>
+          <label><input type='checkbox' id='ledStartupEnabled' style='margin-right:0.5rem'>Enable Startup Effect</label>
+        </div>
+        <div style='padding:1rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;margin-bottom:1rem'>
+          <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem'>Startup Effect Configuration</div>
+          <div style='color:var(--panel-fg);font-size:0.9rem;margin-bottom:0.75rem'>LED effect to run when device finishes booting.</div>
+          <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
+            <label title="Effect type">Effect Type<br><select id='ledStartupEffect' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='none'>None</option><option value='rainbow'>Rainbow</option><option value='pulse'>Pulse</option><option value='fade'>Fade</option><option value='blink'>Blink</option><option value='strobe'>Strobe</option></select></label>
+            <label title="Primary color">Primary Color<br><select id='ledStartupColor' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='red'>Red</option><option value='green'>Green</option><option value='blue'>Blue</option><option value='cyan'>Cyan</option><option value='magenta'>Magenta</option><option value='yellow'>Yellow</option><option value='white'>White</option><option value='orange'>Orange</option><option value='purple'>Purple</option></select></label>
+            <label title="Secondary color (for fade effect)">Secondary Color<br><select id='ledStartupColor2' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='red'>Red</option><option value='green'>Green</option><option value='blue'>Blue</option><option value='cyan'>Cyan</option><option value='magenta'>Magenta</option><option value='yellow'>Yellow</option><option value='white'>White</option><option value='orange'>Orange</option><option value='purple'>Purple</option></select></label>
+            <label title="Effect duration in milliseconds">Duration (ms)<br><input type='number' id='ledStartupDuration' min='100' max='10000' step='100' value='1000' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Effect duration'></label>
+          </div>
+        </div>
+        <button class='btn' onclick="saveLEDSettings()">Save LED Settings</button>
+      </div>
     </div>
-  </div>
-  <div style='font-weight:bold;margin:1.5rem 0 0.75rem 0;color:var(--panel-fg);border-bottom:1px solid #e5e7eb;padding-bottom:0.5rem'>OLED Display Configuration</div>
-  <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem'>
-    <label><input type='checkbox' id='oledEnabled' style='margin-right:0.5rem'>Enable OLED Display</label>
-    <label><input type='checkbox' id='oledAutoInit' style='margin-right:0.5rem'>Auto-Initialize on Boot</label>
-  </div>
-  <div style='font-weight:bold;margin:1.5rem 0 0.75rem 0;color:var(--panel-fg);border-bottom:1px solid #e5e7eb;padding-bottom:0.5rem'>Gamepad Configuration</div>
-  <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem'>
-    <label><input type='checkbox' id='gamepadAutoStart' style='margin-right:0.5rem'>Auto-Start Gamepad After Boot</label>
-  </div>
-  <div style='margin-top:1rem;padding:1rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:6px'>
-    <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem'>Display Modes & Timing</div>
-    <div style='color:var(--muted);font-size:0.9rem;margin-bottom:0.75rem'>Configure what the OLED shows during boot and after.</div>
-    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
-      <label title="Mode shown during boot">Boot Mode<br><select id='oledBootMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='logo'>Logo</option><option value='status'>Status</option><option value='sensors'>Sensors</option><option value='thermal'>Thermal</option><option value='network'>Network</option><option value='off'>Off</option></select></label>
-      <label title="Mode after boot completes">Default Mode<br><select id='oledDefaultMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='logo'>Logo</option><option value='status'>Status</option><option value='sensors'>Sensors</option><option value='thermal'>Thermal</option><option value='network'>Network</option><option value='off'>Off</option></select></label>
-      <label title="Duration to show boot mode (ms)">Boot Duration (ms)<br><input type='number' id='oledBootDuration' min='0' max='60000' step='100' value='2000' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Boot mode duration'></label>
-      <label title="Display refresh interval (ms)">Update Interval (ms)<br><input type='number' id='oledUpdateInterval' min='10' max='1000' step='10' value='200' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Refresh rate'></label>
+    <!-- OLED Display Configuration Subsection -->
+    <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem'>
+      <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem'>
+        <div style='font-weight:bold;color:var(--panel-fg)'>OLED Display Configuration</div>
+        <button class='btn' id='btn-oled-toggle' onclick="togglePane('oled-pane','btn-oled-toggle')" style='font-size:0.85rem;padding:0.25rem 0.75rem'>Expand</button>
+      </div>
+      <div id='oled-pane' style='display:none'>
+        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:1rem'>
+          <label><input type='checkbox' id='oledEnabled' style='margin-right:0.5rem'>Enable OLED Display</label>
+          <label><input type='checkbox' id='oledAutoInit' style='margin-right:0.5rem'>Auto-Initialize on Boot</label>
+        </div>
+        <div style='padding:1rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;margin-bottom:1rem'>
+          <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem'>Display Modes & Timing</div>
+          <div style='color:var(--panel-fg);font-size:0.9rem;margin-bottom:0.75rem'>Configure what the OLED shows during boot and after.</div>
+          <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
+            <label title="Mode shown during boot">Boot Mode<br><select id='oledBootMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='logo'>Logo</option><option value='status'>Status</option><option value='sensors'>Sensors</option><option value='thermal'>Thermal</option><option value='network'>Network</option><option value='off'>Off</option></select></label>
+            <label title="Mode after boot completes">Default Mode<br><select id='oledDefaultMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='logo'>Logo</option><option value='status'>Status</option><option value='sensors'>Sensors</option><option value='thermal'>Thermal</option><option value='network'>Network</option><option value='off'>Off</option></select></label>
+            <label title="Duration to show boot mode (ms)">Boot Duration (ms)<br><input type='number' id='oledBootDuration' min='0' max='60000' step='100' value='2000' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Boot mode duration'></label>
+            <label title="Display refresh interval (ms)">Update Interval (ms)<br><input type='number' id='oledUpdateInterval' min='10' max='1000' step='10' value='200' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Refresh rate'></label>
+          </div>
+        </div>
+        <div style='padding:1rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;margin-bottom:1rem'>
+          <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem'>Display Settings</div>
+          <div style='color:var(--panel-fg);font-size:0.9rem;margin-bottom:0.75rem'>Brightness and thermal visualization settings.</div>
+          <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
+            <label title="Display brightness (0-255)">Brightness<br><input type='number' id='oledBrightness' min='0' max='255' step='5' value='255' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:120px' title='Brightness level'></label>
+            <label title="Thermal image scale factor">Thermal Scale<br><input type='number' id='oledThermalScale' min='0.5' max='5.0' step='0.1' value='2.5' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Scale factor'></label>
+            <label title="Thermal color mode">Thermal Color<br><select id='oledThermalColorMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='3level'>3-Level</option><option value='grayscale'>Grayscale</option></select></label>
+          </div>
+        </div>
+        <button class='btn' onclick="saveOLEDSettings()">Save OLED Settings</button>
+      </div>
     </div>
-  </div>
-  <div style='margin-top:1rem;padding:1rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:6px'>
-    <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem'>Display Settings</div>
-    <div style='color:var(--muted);font-size:0.9rem;margin-bottom:0.75rem'>Brightness and thermal visualization settings.</div>
-    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
-      <label title="Display brightness (0-255)">Brightness<br><input type='number' id='oledBrightness' min='0' max='255' step='5' value='255' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Brightness level'></label>
-      <label title="Thermal image scale factor">Thermal Scale<br><input type='number' id='oledThermalScale' min='0.5' max='5.0' step='0.1' value='2.5' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Scale factor'></label>
-      <label title="Thermal color mode">Thermal Color<br><select id='oledThermalColorMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='3level'>3-Level</option><option value='grayscale'>Grayscale</option></select></label>
+    <!-- Gamepad Configuration Subsection -->
+    <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:6px;padding:1rem'>
+      <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem'>
+        <div style='font-weight:bold;color:var(--panel-fg)'>Gamepad Configuration</div>
+        <button class='btn' id='btn-gamepad-toggle' onclick="togglePane('gamepad-pane','btn-gamepad-toggle')" style='font-size:0.85rem;padding:0.25rem 0.75rem'>Expand</button>
+      </div>
+      <div id='gamepad-pane' style='display:none'>
+        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:1rem'>
+          <label><input type='checkbox' id='gamepadAutoStart' style='margin-right:0.5rem'>Auto-Start Gamepad After Boot</label>
+        </div>
+        <button class='btn' onclick="saveGamepadSettings()">Save Gamepad Settings</button>
+      </div>
     </div>
-  </div>
-  <div style='margin-top:1rem'><button class='btn' onclick="saveHardwareSettings()">Save Hardware Settings</button></div>
   </div>
 </div>
 )SETPART6", HTTPD_RESP_USE_STRLEN);
@@ -714,21 +880,37 @@ window.togglePane = function(paneId, btnId) {
     }
   </style>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Debug Controls</div><div style='color:var(--muted);font-size:0.9rem'>Toggle debugging output categories to serial console.</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Debug Controls</div><div style='color:var(--panel-fg);font-size:0.9rem'>Toggle debugging output categories to serial console. Hover over each sub-option to read about each option.</div></div>
     <button class='btn' id='btn-debug-toggle' onclick="togglePane('debug-pane','btn-debug-toggle')">Expand</button>
   </div>
   <div id='debug-pane' style='display:none;margin-top:0.75rem'>
+  <!-- Global Log Level Control -->
+  <div style='background:var(--panel-bg);border:2px solid #667eea;border-radius:6px;padding:1rem;margin-bottom:1rem'>
+    <div style='font-weight:bold;margin-bottom:0.5rem;color:var(--panel-fg)'>Global Log Level</div>
+    <div style='color:var(--panel-fg);font-size:0.9rem;margin-bottom:0.75rem'>Controls minimum severity for all debug output below. Error (least verbose) to Debug (most verbose).</div>
+    <div style='display:flex;align-items:center;gap:0.5rem'>
+      <span style='color:var(--panel-fg)' title='Severity-based log level (errors always visible; this controls WARN/INFO/DEBUG visibility).'>Current Level: <span style='font-weight:bold;color:#667eea' id='logLevel-value'>-</span></span>
+      <select id='logLevel-select' class='form-input' style='width:180px'>
+        <option value='0'>Error (Least)</option>
+        <option value='1'>Warn</option>
+        <option value='2'>Info</option>
+        <option value='3'>Debug (Most)</option>
+      </select>
+      <button class='btn' onclick="updateLogLevel()" id='logLevel-btn' title='Apply log level'>Apply</button>
+    </div>
+  </div>
+  <!-- Debug Category Toggles -->
   <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem'>
     <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:6px;padding:1rem'>
       <div style='font-weight:bold;margin-bottom:0.75rem;color:var(--panel-fg);border-bottom:1px solid #e5e7eb;padding-bottom:0.5rem'>System & Core</div>
       <div style='display:flex;flex-direction:column;gap:0.35rem'>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all authentication debug output (derived state: ON if any sub-category is ON)'>Authentication: <span style='font-weight:bold;color:#667eea' id='debugAuthGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('auth')" id='debugAuthGroup-btn' title='Toggle all auth debugging'>Toggle All</button><button class='btn' onclick="togglePane('auth-details','auth-details-btn')" id='auth-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='auth-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ALL authentication debug output (parent flag)'>Parent: <span style='font-weight:bold;color:#667eea' id='debugAuth-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuth')" id='debugAuth-btn' style='font-size:0.85rem' title='Toggle parent auth debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable boot ID debug output'>Boot ID: <span style='font-weight:bold;color:#667eea' id='debugAuthBootId-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthBootId')" id='debugAuthBootId-btn' style='font-size:0.85rem' title='Toggle boot ID debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable cookie debug output'>Cookies: <span style='font-weight:bold;color:#667eea' id='debugAuthCookies-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthCookies')" id='debugAuthCookies-btn' style='font-size:0.85rem' title='Toggle cookie debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable login debug output'>Login: <span style='font-weight:bold;color:#667eea' id='debugAuthLogin-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthLogin')" id='debugAuthLogin-btn' style='font-size:0.85rem' title='Toggle login debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable session debug output'>Sessions: <span style='font-weight:bold;color:#667eea' id='debugAuthSessions-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthSessions')" id='debugAuthSessions-btn' style='font-size:0.85rem' title='Toggle session debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Master switch for all authentication-related debug output'>Parent: <span style='font-weight:bold;color:#667eea' id='debugAuth-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuth')" id='debugAuth-btn' style='font-size:0.85rem' title='Toggle all authentication debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows unique boot identifier generation and validation for device tracking'>Boot ID: <span style='font-weight:bold;color:#667eea' id='debugAuthBootId-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthBootId')" id='debugAuthBootId-btn' style='font-size:0.85rem' title='Toggle boot ID debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows HTTP cookie creation, parsing, and validation for session management'>Cookies: <span style='font-weight:bold;color:#667eea' id='debugAuthCookies-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthCookies')" id='debugAuthCookies-btn' style='font-size:0.85rem' title='Toggle cookie debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows login attempts, password verification, and authentication flow'>Login: <span style='font-weight:bold;color:#667eea' id='debugAuthLogin-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthLogin')" id='debugAuthLogin-btn' style='font-size:0.85rem' title='Toggle login debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows user session creation, validation, expiration, and cleanup'>Sessions: <span style='font-weight:bold;color:#667eea' id='debugAuthSessions-value'>-</span></span><button class='btn' onclick="toggleDebug('debugAuthSessions')" id='debugAuthSessions-btn' style='font-size:0.85rem' title='Toggle session debugging'>Toggle</button></div>
         </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all automations debug output (derived state: ON if any sub-category is ON)'>Automations: <span style='font-weight:bold;color:#667eea' id='debugAutomationsGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('automations')" id='debugAutomationsGroup-btn' title='Toggle all automations debugging'>Toggle All</button><button class='btn' onclick="togglePane('automations-details','automations-details-btn')" id='automations-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='automations-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
@@ -751,7 +933,6 @@ window.togglePane = function(paneId, btnId) {
         </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable modular command registry operations debug output'>Command System: <span style='font-weight:bold;color:#667eea' id='debugCommandSystem-value'>-</span></span><button class='btn' onclick="toggleDebug('debugCommandSystem')" id='debugCommandSystem-btn' title='Toggle command system debugging'>Toggle</button></div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable date/time and NTP debug output'>Date/Time & NTP: <span style='font-weight:bold;color:#667eea' id='debugDateTime-value'>-</span></span><button class='btn' onclick="toggleDebug('debugDateTime')" id='debugDateTime-btn' title='Toggle date/time debugging'>Toggle</button></div>
-        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable FM radio I2C transactions, task lifecycle, and RDS debug output'>FM Radio: <span style='font-weight:bold;color:#667eea' id='debugFmRadio-value'>-</span></span><button class='btn' onclick="toggleDebug('debugFmRadio')" id='debugFmRadio-btn' title='Toggle FM radio debugging'>Toggle</button></div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor logger internal diagnostics'>Logger Internals: <span style='font-weight:bold;color:#667eea' id='debugLogger-value'>-</span></span><button class='btn' onclick="toggleDebug('debugLogger')" id='debugLogger-btn' title='Toggle sensor logger diagnostics'>Toggle</button></div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all performance debug output (derived state: ON if any sub-category is ON)'>Performance: <span style='font-weight:bold;color:#667eea' id='debugPerfGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('performance')" id='debugPerfGroup-btn' title='Toggle all performance debugging'>Toggle All</button><button class='btn' onclick="togglePane('perf-details','perf-details-btn')" id='perf-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='perf-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
@@ -787,43 +968,33 @@ window.togglePane = function(paneId, btnId) {
       <div style='display:flex;flex-direction:column;gap:0.35rem'>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all WiFi debug output (derived state: ON if any sub-category is ON)'>WiFi: <span style='font-weight:bold;color:#667eea' id='debugWifiGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('wifi')" id='debugWifiGroup-btn' title='Toggle all WiFi debugging'>Toggle All</button><button class='btn' onclick="togglePane('wifi-details','wifi-details-btn')" id='wifi-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='wifi-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable WiFi connection debug output'>Connection: <span style='font-weight:bold;color:#667eea' id='debugWifiConnection-value'>-</span></span><button class='btn' onclick="toggleDebug('debugWifiConnection')" id='debugWifiConnection-btn' style='font-size:0.85rem' title='Toggle connection debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable WiFi config debug output'>Config: <span style='font-weight:bold;color:#667eea' id='debugWifiConfig-value'>-</span></span><button class='btn' onclick="toggleDebug('debugWifiConfig')" id='debugWifiConfig-btn' style='font-size:0.85rem' title='Toggle config debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable WiFi scanning debug output'>Scanning: <span style='font-weight:bold;color:#667eea' id='debugWifiScanning-value'>-</span></span><button class='btn' onclick="toggleDebug('debugWifiScanning')" id='debugWifiScanning-btn' style='font-size:0.85rem' title='Toggle scanning debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable WiFi driver debug output'>Driver: <span style='font-weight:bold;color:#667eea' id='debugWifiDriver-value'>-</span></span><button class='btn' onclick="toggleDebug('debugWifiDriver')" id='debugWifiDriver-btn' style='font-size:0.85rem' title='Toggle driver debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows WiFi connection attempts, status changes, and reconnection logic'>Connection: <span style='font-weight:bold;color:#667eea' id='debugWifiConnection-value'>-</span></span><button class='btn' onclick="toggleDebug('debugWifiConnection')" id='debugWifiConnection-btn' style='font-size:0.85rem' title='Toggle connection debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows WiFi configuration loading, SSID/password changes, and settings validation'>Config: <span style='font-weight:bold;color:#667eea' id='debugWifiConfig-value'>-</span></span><button class='btn' onclick="toggleDebug('debugWifiConfig')" id='debugWifiConfig-btn' style='font-size:0.85rem' title='Toggle config debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows WiFi network scanning for available access points and signal strength'>Scanning: <span style='font-weight:bold;color:#667eea' id='debugWifiScanning-value'>-</span></span><button class='btn' onclick="toggleDebug('debugWifiScanning')" id='debugWifiScanning-btn' style='font-size:0.85rem' title='Toggle scanning debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows low-level WiFi hardware driver events, power management, and radio state'>Driver: <span style='font-weight:bold;color:#667eea' id='debugWifiDriver-value'>-</span></span><button class='btn' onclick="toggleDebug('debugWifiDriver')" id='debugWifiDriver-btn' style='font-size:0.85rem' title='Toggle driver debugging'>Toggle</button></div>
         </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all HTTP debug output (derived state: ON if any sub-category is ON)'>HTTP: <span style='font-weight:bold;color:#667eea' id='debugHttpGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('http')" id='debugHttpGroup-btn' title='Toggle all HTTP debugging'>Toggle All</button><button class='btn' onclick="togglePane('http-details','http-details-btn')" id='http-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='http-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable HTTP handlers debug output'>Handlers: <span style='font-weight:bold;color:#667eea' id='debugHttpHandlers-value'>-</span></span><button class='btn' onclick="toggleDebug('debugHttpHandlers')" id='debugHttpHandlers-btn' style='font-size:0.85rem' title='Toggle handlers debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable HTTP requests debug output'>Requests: <span style='font-weight:bold;color:#667eea' id='debugHttpRequests-value'>-</span></span><button class='btn' onclick="toggleDebug('debugHttpRequests')" id='debugHttpRequests-btn' style='font-size:0.85rem' title='Toggle requests debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable HTTP responses debug output'>Responses: <span style='font-weight:bold;color:#667eea' id='debugHttpResponses-value'>-</span></span><button class='btn' onclick="toggleDebug('debugHttpResponses')" id='debugHttpResponses-btn' style='font-size:0.85rem' title='Toggle responses debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable HTTP streaming debug output'>Streaming: <span style='font-weight:bold;color:#667eea' id='debugHttpStreaming-value'>-</span></span><button class='btn' onclick="toggleDebug('debugHttpStreaming')" id='debugHttpStreaming-btn' style='font-size:0.85rem' title='Toggle streaming debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows HTTP endpoint registration, handler routing, and URL processing'>Handlers: <span style='font-weight:bold;color:#667eea' id='debugHttpHandlers-value'>-</span></span><button class='btn' onclick="toggleDebug('debugHttpHandlers')" id='debugHttpHandlers-btn' style='font-size:0.85rem' title='Toggle handlers debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows incoming HTTP requests, headers, methods, and query parameters'>Requests: <span style='font-weight:bold;color:#667eea' id='debugHttpRequests-value'>-</span></span><button class='btn' onclick="toggleDebug('debugHttpRequests')" id='debugHttpRequests-btn' style='font-size:0.85rem' title='Toggle requests debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows HTTP response generation, status codes, and content delivery'>Responses: <span style='font-weight:bold;color:#667eea' id='debugHttpResponses-value'>-</span></span><button class='btn' onclick="toggleDebug('debugHttpResponses')" id='debugHttpResponses-btn' style='font-size:0.85rem' title='Toggle responses debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows chunked transfer encoding and large file streaming operations'>Streaming: <span style='font-weight:bold;color:#667eea' id='debugHttpStreaming-value'>-</span></span><button class='btn' onclick="toggleDebug('debugHttpStreaming')" id='debugHttpStreaming-btn' style='font-size:0.85rem' title='Toggle streaming debugging'>Toggle</button></div>
         </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all SSE debug output (derived state: ON if any sub-category is ON)'>SSE: <span style='font-weight:bold;color:#667eea' id='debugSseGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('sse')" id='debugSseGroup-btn' title='Toggle all SSE debugging'>Toggle All</button><button class='btn' onclick="togglePane('sse-details','sse-details-btn')" id='sse-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='sse-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable SSE connection debug output'>Connection: <span style='font-weight:bold;color:#667eea' id='debugSseConnection-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSseConnection')" id='debugSseConnection-btn' style='font-size:0.85rem' title='Toggle connection debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable SSE events debug output'>Events: <span style='font-weight:bold;color:#667eea' id='debugSseEvents-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSseEvents')" id='debugSseEvents-btn' style='font-size:0.85rem' title='Toggle events debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable SSE broadcast debug output'>Broadcast: <span style='font-weight:bold;color:#667eea' id='debugSseBroadcast-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSseBroadcast')" id='debugSseBroadcast-btn' style='font-size:0.85rem' title='Toggle broadcast debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows Server-Sent Events client connections, keepalives, and disconnections'>Connection: <span style='font-weight:bold;color:#667eea' id='debugSseConnection-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSseConnection')" id='debugSseConnection-btn' style='font-size:0.85rem' title='Toggle connection debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows real-time event messages being sent to connected web clients'>Events: <span style='font-weight:bold;color:#667eea' id='debugSseEvents-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSseEvents')" id='debugSseEvents-btn' style='font-size:0.85rem' title='Toggle events debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows events being broadcast to all connected clients simultaneously'>Broadcast: <span style='font-weight:bold;color:#667eea' id='debugSseBroadcast-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSseBroadcast')" id='debugSseBroadcast-btn' style='font-size:0.85rem' title='Toggle broadcast debugging'>Toggle</button></div>
         </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all ESP-NOW debug output (derived state: ON if any sub-category is ON)'>ESP-NOW: <span style='font-weight:bold;color:#667eea' id='debugEspNowGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('espnow')" id='debugEspNowGroup-btn' title='Toggle all ESP-NOW debugging'>Toggle All</button><button class='btn' onclick="togglePane('espnow-details','espnow-details-btn')" id='espnow-details-btn' style='font-size:0.85rem'>Expand</button></div>
         <div id='espnow-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ALL ESP-NOW debug output (parent flag)'>Parent: <span style='font-weight:bold;color:#667eea' id='debugEspNow-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNow')" id='debugEspNow-btn' style='font-size:0.85rem' title='Toggle parent ESP-NOW debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ESP-NOW streaming debug output'>Stream: <span style='font-weight:bold;color:#667eea' id='debugEspNowStream-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowStream')" id='debugEspNowStream-btn' style='font-size:0.85rem' title='Toggle stream debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ESP-NOW core operations debug output'>Core: <span style='font-weight:bold;color:#667eea' id='debugEspNowCore-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowCore')" id='debugEspNowCore-btn' style='font-size:0.85rem' title='Toggle core debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ESP-NOW router debug output'>Router: <span style='font-weight:bold;color:#667eea' id='debugEspNowRouter-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowRouter')" id='debugEspNowRouter-btn' style='font-size:0.85rem' title='Toggle router debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ESP-NOW mesh debug output'>Mesh: <span style='font-weight:bold;color:#667eea' id='debugEspNowMesh-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowMesh')" id='debugEspNowMesh-btn' style='font-size:0.85rem' title='Toggle mesh debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ESP-NOW topology debug output'>Topology: <span style='font-weight:bold;color:#667eea' id='debugEspNowTopo-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowTopo')" id='debugEspNowTopo-btn' style='font-size:0.85rem' title='Toggle topology debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ESP-NOW encryption debug output'>Encryption: <span style='font-weight:bold;color:#667eea' id='debugEspNowEncryption-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowEncryption')" id='debugEspNowEncryption-btn' style='font-size:0.85rem' title='Toggle encryption debugging'>Toggle</button></div>
-        </div>
-        <div style='display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem'>
-          <span style='color:var(--panel-fg)' title='Severity-based log level (errors always visible; this controls WARN/INFO/DEBUG visibility).'>Log Level: <span style='font-weight:bold;color:#667eea' id='logLevel-value'>-</span></span>
-          <select id='logLevel-select' class='form-input' style='width:120px'>
-            <option value='0'>Error</option>
-            <option value='1'>Warn</option>
-            <option value='2'>Info</option>
-            <option value='3'>Debug</option>
-          </select>
-          <button class='btn' onclick="updateLogLevel()" id='logLevel-btn' title='Apply log level'>Apply</button>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Master switch for all ESP-NOW wireless mesh networking debug output'>Parent: <span style='font-weight:bold;color:#667eea' id='debugEspNow-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNow')" id='debugEspNow-btn' style='font-size:0.85rem' title='Toggle all ESP-NOW debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows data streaming over ESP-NOW for large transfers and file sharing'>Stream: <span style='font-weight:bold;color:#667eea' id='debugEspNowStream-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowStream')" id='debugEspNowStream-btn' style='font-size:0.85rem' title='Toggle stream debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows core ESP-NOW packet send/receive, peer management, and protocol handling'>Core: <span style='font-weight:bold;color:#667eea' id='debugEspNowCore-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowCore')" id='debugEspNowCore-btn' style='font-size:0.85rem' title='Toggle core debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows message routing and forwarding between devices in the mesh network'>Router: <span style='font-weight:bold;color:#667eea' id='debugEspNowRouter-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowRouter')" id='debugEspNowRouter-btn' style='font-size:0.85rem' title='Toggle router debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows mesh network formation, node discovery, and multi-hop communication'>Mesh: <span style='font-weight:bold;color:#667eea' id='debugEspNowMesh-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowMesh')" id='debugEspNowMesh-btn' style='font-size:0.85rem' title='Toggle mesh debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows network topology mapping, device relationships, and connection graph'>Topology: <span style='font-weight:bold;color:#667eea' id='debugEspNowTopo-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowTopo')" id='debugEspNowTopo-btn' style='font-size:0.85rem' title='Toggle topology debugging'>Toggle</button></div>
+          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Shows encryption key exchange, secure pairing, and encrypted message handling'>Encryption: <span style='font-weight:bold;color:#667eea' id='debugEspNowEncryption-value'>-</span></span><button class='btn' onclick="toggleDebug('debugEspNowEncryption')" id='debugEspNowEncryption-btn' style='font-size:0.85rem' title='Toggle encryption debugging'>Toggle</button></div>
         </div>
         <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable memory instrumentation debug output (stack, buffers)'>Memory Instrumentation: <span style='font-weight:bold;color:#667eea' id='debugMemory-value'>-</span></span><button class='btn' onclick="toggleDebug('debugMemory')" id='debugMemory-btn' title='Toggle memory debugging'>Toggle</button></div>
         <div style='display:flex;align-items:center;gap:0.5rem;margin-top:0.5rem'><span style='color:var(--panel-fg)' title='Periodic memory sampling interval in seconds (0 to disable)'>Memory Sample Interval: <span style='font-weight:bold;color:#667eea' id='memorySampleInterval-value'>-</span>s</span><input type='number' id='memorySampleInterval-input' min='0' max='300' step='5' value='30' class='form-input' style='width:80px;margin-left:0.5rem' title='Sampling interval in seconds'><button class='btn' onclick="updateMemorySampleInterval()" id='memorySampleInterval-btn' title='Update memory sample interval'>Update</button></div>
@@ -832,20 +1003,29 @@ window.togglePane = function(paneId, btnId) {
     <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:6px;padding:1rem'>
       <div style='font-weight:bold;margin-bottom:0.75rem;color:var(--panel-fg);border-bottom:1px solid #e5e7eb;padding-bottom:0.5rem'>Sensors & Hardware</div>
       <div style='display:flex;flex-direction:column;gap:0.35rem'>
-        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable all sensors debug output (derived state: ON if any sub-category is ON)'>Sensors: <span style='font-weight:bold;color:#667eea' id='debugSensorsGroup-value'>-</span></span><button class='btn' onclick="toggleDebugGroup('sensors')" id='debugSensorsGroup-btn' title='Toggle all sensors debugging'>Toggle All</button><button class='btn' onclick="togglePane('sensors-details','sensors-details-btn')" id='sensors-details-btn' style='font-size:0.85rem'>Expand</button></div>
-        <div id='sensors-details' style='display:none;margin-left:1rem;margin-top:0.5rem;padding-left:0.75rem;border-left:2px solid #e5e7eb'>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable ALL sensors debug output (parent flag)'>Parent: <span style='font-weight:bold;color:#667eea' id='debugSensors-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSensors')" id='debugSensors-btn' style='font-size:0.85rem' title='Toggle parent sensors debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable general sensor debug output'>General: <span style='font-weight:bold;color:#667eea' id='debugSensorsGeneral-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSensorsGeneral')" id='debugSensorsGeneral-btn' style='font-size:0.85rem' title='Toggle general sensor debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.35rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable sensor frame capture debug output'>Frame Capture: <span style='font-weight:bold;color:#667eea' id='debugSensorsFrame-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSensorsFrame')" id='debugSensorsFrame-btn' style='font-size:0.85rem' title='Toggle thermal frame debugging'>Toggle</button></div>
-          <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg);font-size:0.9rem' title='Enable/disable sensor data processing debug output'>Data Processing: <span style='font-weight:bold;color:#667eea' id='debugSensorsData-value'>-</span></span><button class='btn' onclick="toggleDebug('debugSensorsData')" id='debugSensorsData-btn' style='font-size:0.85rem' title='Toggle sensor data debugging'>Toggle</button></div>
-        </div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows APDS9960 gesture/proximity/color sensor I2C communication and readings'>APDS: <span style='font-weight:bold;color:#667eea' id='debugApds-value'>-</span></span><button class='btn' onclick="toggleDebug('debugApds')" id='debugApds-btn' title='Toggle APDS debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows camera initialization, image capture, streaming, and DVP interface operations'>Camera: <span style='font-weight:bold;color:#667eea' id='debugCamera-value'>-</span></span><button class='btn' onclick="toggleDebug('debugCamera')" id='debugCamera-btn' title='Toggle camera debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows RDA5807 FM radio tuning, station scanning, RDS decoding, and audio output'>FM Radio: <span style='font-weight:bold;color:#667eea' id='debugFmRadio-value'>-</span></span><button class='btn' onclick="toggleDebug('debugFmRadio')" id='debugFmRadio-btn' title='Toggle FM radio debugging'>Toggle</button></div>
+)SETPART7", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_G2_GLASSES
+  httpd_resp_send_chunk(req, R"SP7G(        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows Even Realities G2 smart glasses BLE connection, gesture detection, and display'>G2 Glasses: <span style='font-weight:bold;color:#667eea' id='debugG2-value'>-</span></span><button class='btn' onclick="toggleDebug('debugG2')" id='debugG2-btn' title='Toggle G2 glasses debugging'>Toggle</button></div>
+)SP7G", HTTPD_RESP_USE_STRLEN);
+#endif
+  httpd_resp_send_chunk(req, R"SP7B(        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows Adafruit Seesaw gamepad button presses, joystick movements, and I2C communication'>Gamepad: <span style='font-weight:bold;color:#667eea' id='debugGamepad-value'>-</span></span><button class='btn' onclick="toggleDebug('debugGamepad')" id='debugGamepad-btn' title='Toggle gamepad debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows PA1010D GPS NMEA sentence parsing, satellite fix status, and location data'>GPS: <span style='font-weight:bold;color:#667eea' id='debugGps-value'>-</span></span><button class='btn' onclick="toggleDebug('debugGps')" id='debugGps-btn' title='Toggle GPS debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows BNO055 IMU calibration, orientation, acceleration, and gyroscope readings'>IMU: <span style='font-weight:bold;color:#667eea' id='debugImu-value'>-</span></span><button class='btn' onclick="toggleDebug('debugImu')" id='debugImu-btn' title='Toggle IMU debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows PDM microphone I2S audio capture, gain control, and recording operations'>Microphone: <span style='font-weight:bold;color:#667eea' id='debugMicrophone-value'>-</span></span><button class='btn' onclick="toggleDebug('debugMicrophone')" id='debugMicrophone-btn' title='Toggle microphone debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows STHS34PF80 IR presence/motion detection, temperature compensation, and thresholds'>Presence: <span style='font-weight:bold;color:#667eea' id='debugPresence-value'>-</span></span><button class='btn' onclick="toggleDebug('debugPresence')" id='debugPresence-btn' title='Toggle presence debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows DS3231 precision RTC time synchronization, alarms, and temperature readings'>RTC: <span style='font-weight:bold;color:#667eea' id='debugRtc-value'>-</span></span><button class='btn' onclick="toggleDebug('debugRtc')" id='debugRtc-btn' title='Toggle RTC debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows MLX90640 thermal camera 32x24 temperature array capture and interpolation'>Thermal: <span style='font-weight:bold;color:#667eea' id='debugThermal-value'>-</span></span><button class='btn' onclick="toggleDebug('debugThermal')" id='debugThermal-btn' title='Toggle thermal debugging'>Toggle</button></div>
+        <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Shows VL53L4CX time-of-flight distance measurements, ranging modes, and calibration'>ToF: <span style='font-weight:bold;color:#667eea' id='debugTof-value'>-</span></span><button class='btn' onclick="toggleDebug('debugTof')" id='debugTof-btn' title='Toggle ToF debugging'>Toggle</button></div>
       </div>
     </div>
   </div>
   <div style='margin-top:1rem'><button class='btn' onclick="saveDebugSettings()">Save Debug Settings</button></div>
   </div>
 </div>
-)SETPART7", HTTPD_RESP_USE_STRLEN);
+)SP7B", HTTPD_RESP_USE_STRLEN);
 
   // Part 8: Admin section and page controls
   httpd_resp_send_chunk(req, R"SETPART8(
@@ -861,7 +1041,7 @@ window.togglePane = function(paneId, btnId) {
         <div style='font-weight:bold;color:var(--panel-fg)'>User Management</div>
         <button class='btn' id='btn-users-toggle' onclick="togglePane('users-pane','btn-users-toggle')">Expand</button>
       </div>
-      <div style='color:var(--muted);margin-bottom:0.75rem;font-size:0.9rem'>Manage existing users and their roles.</div>
+      <div style='color:var(--panel-fg);margin-bottom:0.75rem;font-size:0.9rem'>Manage existing users and their roles.</div>
       <div id='users-pane' style='display:none;margin-top:0.75rem'>
         <div id='users-list' style='min-height:24px;color:var(--panel-fg);margin-bottom:0.75rem'>Loading...</div>
         <button class='btn' onclick='refreshUsers()' title='Reload list of users'>Refresh Users</button>
@@ -894,11 +1074,22 @@ console.log('[SETTINGS] Part 1: Core init starting...');
     console.log('[SETTINGS] Part 1: Base objects initialized');
     
     window.onload = function() {
-      console.log('[SETTINGS] Window onload - calling refreshSettings');
+      console.log('[SETTINGS] Window onload - fetching build config and settings');
       try {
-        refreshSettings();
+        // Fetch build config first to hide unavailable debug options
+        if (typeof window.fetchBuildConfig === 'function') {
+          window.fetchBuildConfig().then(function() {
+            refreshSettings();
+          }).catch(function() {
+            // If build config fails, still load settings
+            refreshSettings();
+          });
+        } else {
+          refreshSettings();
+        }
       } catch(e) {
         console.error('[SETTINGS] onload fail', e);
+        refreshSettings();
       }
     };
     console.log('[SETTINGS] onload registered');
@@ -922,17 +1113,33 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         $('espnow-value').textContent = s.espnowenabled ? 'Enabled' : 'Disabled';
         $('espnow-btn').textContent = s.espnowenabled ? 'Disable' : 'Enable';
         
+        // Load ESP-NOW settings
+        var espnow = s.espnow || {};
+        if ($('espnow-mesh-value')) {
+          $('espnow-mesh-value').textContent = espnow.mesh ? 'Enabled' : 'Disabled';
+          $('espnow-mesh-btn').textContent = espnow.mesh ? 'Disable' : 'Enable';
+        }
+        if ($('espnow-devicename')) $('espnow-devicename').value = espnow.deviceName || '';
+        if ($('espnow-friendlyname')) $('espnow-friendlyname').value = espnow.friendlyName || '';
+        if ($('espnow-room')) $('espnow-room').value = espnow.room || '';
+        if ($('espnow-zone')) $('espnow-zone').value = espnow.zone || '';
+        if ($('espnow-tags')) $('espnow-tags').value = espnow.tags || '';
+        if ($('espnow-stationary')) $('espnow-stationary').checked = !!espnow.stationary;
+        if ($('espnow-meshrole')) $('espnow-meshrole').value = String(espnow.meshRole || 0);
+        if ($('espnow-mastermac')) $('espnow-mastermac').value = espnow.masterMAC || '';
+        if ($('espnow-backupmac')) $('espnow-backupmac').value = espnow.backupMAC || '';
+        
         var out = (s.output || {}), th = (s.thermal_mlx90640 || {}), tof = (s.tof_vl53l4cx || {}), oled = (s.oled_ssd1306 || {}), led = (s.led || {}), imu = (s.imu_bno055 || {}), i2c = (s.i2c || {}), dbg = (s.debug || {});
         var thUI = (th.ui || {}), thDev = (th.device || {}), tofUI = (tof.ui || {}), tofDev = (tof.device || {});
         var outSerial = (out.outSerial !== undefined ? out.outSerial : s.outSerial);
         var outWeb = (out.outWeb !== undefined ? out.outWeb : s.outWeb);
-        var outTft = (out.outTft !== undefined ? out.outTft : s.outTft);
+        var outDisplay = (out.outDisplay !== undefined ? out.outDisplay : s.outDisplay);
         $('serial-value').textContent = outSerial ? 'Enabled' : 'Disabled';
         $('serial-btn').textContent = outSerial ? 'Disable' : 'Enable';
         $('web-value').textContent = outWeb ? 'Enabled' : 'Disabled';
         $('web-btn').textContent = outWeb ? 'Disable' : 'Enable';
-        $('tft-value').textContent = outTft ? 'Enabled' : 'Disabled';
-        $('tft-btn').textContent = outTft ? 'Disable' : 'Enable';
+        $('display-value').textContent = outDisplay ? 'Enabled' : 'Disabled';
+        $('display-btn').textContent = outDisplay ? 'Disable' : 'Enable';
         // Sensor settings are now handled by dynamic renderer
         var dAuth = (dbg.authCookies !== undefined ? dbg.authCookies : s.debugAuthCookies);
         var dAuthValEl = $('debugAuthCookies-value');
@@ -1031,26 +1238,19 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         var dDateTime = (dbg.dateTime !== undefined ? dbg.dateTime : s.debugDateTime);
         $('debugDateTime-value').textContent = dDateTime ? 'Enabled' : 'Disabled';
         $('debugDateTime-btn').textContent = dDateTime ? 'Disable' : 'Enable';
-        var dSF = (dbg.sensorsFrame !== undefined ? dbg.sensorsFrame : s.debugSensorsFrame);
-        $('debugSensorsFrame-value').textContent = dSF ? 'Enabled' : 'Disabled';
-        $('debugSensorsFrame-btn').textContent = dSF ? 'Disable' : 'Enable';
-        var dSD = (dbg.sensorsData !== undefined ? dbg.sensorsData : s.debugSensorsData);
-        $('debugSensorsData-value').textContent = dSD ? 'Enabled' : 'Disabled';
-        $('debugSensorsData-btn').textContent = dSD ? 'Disable' : 'Enable';
-        var dSG = (dbg.sensorsGeneral !== undefined ? dbg.sensorsGeneral : s.debugSensorsGeneral);
-        $('debugSensorsGeneral-value').textContent = dSG ? 'Enabled' : 'Disabled';
-        $('debugSensorsGeneral-btn').textContent = dSG ? 'Disable' : 'Enable';
-        var dSensorsParent = (dbg.sensors !== undefined ? dbg.sensors : s.debugSensors);
-        var dSensorsParentValEl = $('debugSensors-value');
-        if (dSensorsParentValEl) {
-          dSensorsParentValEl.textContent = dSensorsParent ? 'Enabled' : 'Disabled';
-          var dSensorsParentBtnEl = $('debugSensors-btn');
-          if (dSensorsParentBtnEl) dSensorsParentBtnEl.textContent = dSensorsParent ? 'Disable' : 'Enable';
-        }
-        // Compute derived Sensors parent state (ON if parent OR any child ON)
-        var sensorsGroupOn = dSensorsParent || dSG || dSF || dSD;
-        $('debugSensorsGroup-value').textContent = sensorsGroupOn ? 'Enabled' : 'Disabled';
-        $('debugSensorsGroup-btn').textContent = sensorsGroupOn ? 'Disable All' : 'Enable All';
+        // Get individual sensor debug flags (defined later in the code)
+        var dGps = (dbg.gps !== undefined ? dbg.gps : s.debugGps);
+        var dRtc = (dbg.rtc !== undefined ? dbg.rtc : s.debugRtc);
+        var dImu = (dbg.imu !== undefined ? dbg.imu : s.debugImu);
+        var dThermal = (dbg.thermal !== undefined ? dbg.thermal : s.debugThermal);
+        var dTof = (dbg.tof !== undefined ? dbg.tof : s.debugTof);
+        var dGamepad = (dbg.gamepad !== undefined ? dbg.gamepad : s.debugGamepad);
+        var dApds = (dbg.apds !== undefined ? dbg.apds : s.debugApds);
+        var dPresence = (dbg.presence !== undefined ? dbg.presence : s.debugPresence);
+        var dCamera = (dbg.camera !== undefined ? dbg.camera : s.debugCamera);
+        var dMic = (dbg.microphone !== undefined ? dbg.microphone : s.debugMicrophone);
+        var dFmRadio = (dbg.fmRadio !== undefined ? dbg.fmRadio : s.debugFmRadio);
+        var dG2 = (dbg.g2 !== undefined ? dbg.g2 : s.debugG2);
         var dESN = (dbg.espNowStream !== undefined ? dbg.espNowStream : s.debugEspNowStream);
         $('debugEspNowStream-value').textContent = dESN ? 'Enabled' : 'Disabled';
         $('debugEspNowStream-btn').textContent = dESN ? 'Disable' : 'Enable';
@@ -1262,9 +1462,32 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         var dSetSys = (dbg.settingsSystem !== undefined ? dbg.settingsSystem : s.debugSettingsSystem);
         $('debugSettingsSystem-value').textContent = dSetSys ? 'Enabled' : 'Disabled';
         $('debugSettingsSystem-btn').textContent = dSetSys ? 'Disable' : 'Enable';
-        var dFmRadio = (dbg.fmRadio !== undefined ? dbg.fmRadio : s.debugFmRadio);
+        // Note: dFmRadio, dCamera, dMic, dG2, dGps, dRtc, dImu, dThermal, dTof, dGamepad, dApds, dPresence already declared above
         $('debugFmRadio-value').textContent = dFmRadio ? 'Enabled' : 'Disabled';
         $('debugFmRadio-btn').textContent = dFmRadio ? 'Disable' : 'Enable';
+        $('debugCamera-value').textContent = dCamera ? 'Enabled' : 'Disabled';
+        $('debugCamera-btn').textContent = dCamera ? 'Disable' : 'Enable';
+        $('debugMicrophone-value').textContent = dMic ? 'Enabled' : 'Disabled';
+        $('debugMicrophone-btn').textContent = dMic ? 'Disable' : 'Enable';
+        if ($('debugG2-value')) { $('debugG2-value').textContent = dG2 ? 'Enabled' : 'Disabled'; $('debugG2-btn').textContent = dG2 ? 'Disable' : 'Enable'; }
+        
+        // Individual I2C sensor debug flags (persistent settings)
+        $('debugGps-value').textContent = dGps ? 'Enabled' : 'Disabled';
+        $('debugGps-btn').textContent = dGps ? 'Disable' : 'Enable';
+        $('debugRtc-value').textContent = dRtc ? 'Enabled' : 'Disabled';
+        $('debugRtc-btn').textContent = dRtc ? 'Disable' : 'Enable';
+        $('debugImu-value').textContent = dImu ? 'Enabled' : 'Disabled';
+        $('debugImu-btn').textContent = dImu ? 'Disable' : 'Enable';
+        $('debugThermal-value').textContent = dThermal ? 'Enabled' : 'Disabled';
+        $('debugThermal-btn').textContent = dThermal ? 'Disable' : 'Enable';
+        $('debugTof-value').textContent = dTof ? 'Enabled' : 'Disabled';
+        $('debugTof-btn').textContent = dTof ? 'Disable' : 'Enable';
+        $('debugGamepad-value').textContent = dGamepad ? 'Enabled' : 'Disabled';
+        $('debugGamepad-btn').textContent = dGamepad ? 'Disable' : 'Enable';
+        $('debugApds-value').textContent = dApds ? 'Enabled' : 'Disabled';
+        $('debugApds-btn').textContent = dApds ? 'Disable' : 'Enable';
+        $('debugPresence-value').textContent = dPresence ? 'Enabled' : 'Disabled';
+        $('debugPresence-btn').textContent = dPresence ? 'Disable' : 'Enable';
 
         // Log level (severity-based)
         // Single source of truth: settings.debug.logLevel (modular registry)
@@ -1317,12 +1540,12 @@ console.log('[SETTINGS] Part 1: Core init starting...');
           if (d) d.value = s.ledStartupDuration;
         }
         var oledEn = $('oledEnabled');
-        if (oledEn) oledEn.checked = (oled.enabled === 1 || oled.enabled === true);
+        if (oledEn) oledEn.checked = (oled.oledEnabled === 1 || oled.oledEnabled === true);
         var oledAuto = $('oledAutoInit');
-        if (oledAuto) oledAuto.checked = (oled.autoInit === 1 || oled.autoInit === true);
+        if (oledAuto) oledAuto.checked = (oled.oledAutoInit === 1 || oled.oledAutoInit === true);
         var gamepadAuto = $('gamepadAutoStart');
-        if (gamepadAuto && s.gamepad && s.gamepad.autoStart !== undefined) {
-          gamepadAuto.checked = (s.gamepad.autoStart === 1 || s.gamepad.autoStart === true);
+        if (gamepadAuto && s.gamepad && s.gamepad.gamepadAutoStart !== undefined) {
+          gamepadAuto.checked = (s.gamepad.gamepadAutoStart === 1 || s.gamepad.gamepadAutoStart === true);
         }
         if (oled.bootMode) {
           var bm = $('oledBootMode');
@@ -1398,7 +1621,8 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         };
         set('serial-runtime', r.serial);
         set('web-runtime', r.web);
-        set('tft-runtime', r.tft);
+        set('display-runtime', r.display);
+        set('g2-runtime', r.g2);
         try {
           if (p && typeof p === 'object') {
             if (p.serial !== undefined) {
@@ -1417,24 +1641,35 @@ console.log('[SETTINGS] Part 1: Core init starting...');
                 pb2.textContent = p.web ? 'Disable' : 'Enable';
               }
             }
-            if (p.tft !== undefined) {
-              var pv3 = $('tft-value');
-              if (pv3) pv3.textContent = p.tft ? 'Enabled' : 'Disabled';
-              var pb3 = $('tft-btn');
+            if (p.display !== undefined) {
+              var pv3 = $('display-value');
+              if (pv3) pv3.textContent = p.display ? 'Enabled' : 'Disabled';
+              var pb3 = $('display-btn');
               if (pb3) {
-                pb3.textContent = p.tft ? 'Disable' : 'Enable';
+                pb3.textContent = p.display ? 'Disable' : 'Enable';
+              }
+            }
+            if (p.g2 !== undefined) {
+              var pv4 = $('g2-value');
+              if (pv4) pv4.textContent = p.g2 ? 'Enabled' : 'Disabled';
+              var pb4 = $('g2-btn');
+              if (pb4) {
+                pb4.textContent = p.g2 ? 'Disable' : 'Enable';
               }
             }
           }
           var curSerial = (r.serial !== undefined) ? (String(r.serial) == '1' || r.serial === 1 || r.serial === true || String(r.serial).toLowerCase() == 'true') : !!(p && p.serial);
           var curWeb = (r.web !== undefined) ? (String(r.web) == '1' || r.web === 1 || r.web === true || String(r.web).toLowerCase() == 'true') : !!(p && p.web);
-          var curTft = (r.tft !== undefined) ? (String(r.tft) == '1' || r.tft === 1 || r.tft === true || String(r.tft).toLowerCase() == 'true') : !!(p && p.tft);
+          var curDisplay = (r.display !== undefined) ? (String(r.display) == '1' || r.display === 1 || r.display === true || String(r.display).toLowerCase() == 'true') : !!(p && p.display);
+          var curG2 = (r.g2 !== undefined) ? (String(r.g2) == '1' || r.g2 === 1 || r.g2 === true || String(r.g2).toLowerCase() == 'true') : !!(p && p.g2);
           setHidden('serial-temp-on', curSerial);
           setHidden('serial-temp-off', !curSerial);
           setHidden('web-temp-on', curWeb);
           setHidden('web-temp-off', !curWeb);
-          setHidden('tft-temp-on', curTft);
-          setHidden('tft-temp-off', !curTft);
+          setHidden('display-temp-on', curDisplay);
+          setHidden('display-temp-off', !curDisplay);
+          setHidden('g2-temp-on', curG2);
+          setHidden('g2-temp-off', !curG2);
         } catch(e) {}
       } catch(e) {}
     };
@@ -1459,7 +1694,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
     window.setOutputRuntime = function(channel, val) {
       try {
         if (!channel) return;
-        var map = {serial: 'outserial', web: 'outweb', tft: 'outtft'};
+        var map = {serial: 'outserial', web: 'outweb', display: 'outdisplay', g2: 'outg2'};
         var key = map[channel];
         if (!key) return;
         var v = val ? 1 : 0;
@@ -1505,6 +1740,51 @@ console.log('[SETTINGS] Part 1: Complete');
 console.log('[SETTINGS] Part 2: API helpers starting...');
 (function() {
   try {
+    // Global build configuration cache
+    window.__buildConfig = null;
+    
+    // Fetch build configuration and hide debug options for features not compiled in
+    window.fetchBuildConfig = function() {
+      return fetch('/api/buildconfig', {credentials: 'same-origin'})
+        .then(function(r) { return r.json(); })
+        .then(function(config) {
+          window.__buildConfig = config;
+          console.log('[SETTINGS] Build config loaded:', config);
+          
+          // Hide debug options for features not compiled in
+          var hideIfDisabled = [
+            {feature: 'camera', ids: ['debugCamera-value', 'debugCamera-btn']},
+            {feature: 'microphone', ids: ['debugMicrophone-value', 'debugMicrophone-btn']},
+            {feature: 'g2glasses', ids: ['debugG2-value', 'debugG2-btn']},
+            {feature: 'apds', ids: ['debugApds-value', 'debugApds-btn']},
+            {feature: 'fmradio', ids: ['debugFmRadio-value', 'debugFmRadio-btn']},
+            {feature: 'gamepad', ids: ['debugGamepad-value', 'debugGamepad-btn']},
+            {feature: 'gps', ids: ['debugGps-value', 'debugGps-btn']},
+            {feature: 'imu', ids: ['debugImu-value', 'debugImu-btn']},
+            {feature: 'thermal', ids: ['debugThermal-value', 'debugThermal-btn']},
+            {feature: 'tof', ids: ['debugTof-value', 'debugTof-btn']},
+            {feature: 'rtc', ids: ['debugRtc-value', 'debugRtc-btn']},
+            {feature: 'presence', ids: ['debugPresence-value', 'debugPresence-btn']}
+          ];
+          
+          hideIfDisabled.forEach(function(item) {
+            if (!config[item.feature]) {
+              item.ids.forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el && el.parentElement) {
+                  el.parentElement.style.display = 'none';
+                }
+              });
+            }
+          });
+          
+          return config;
+        })
+        .catch(function(err) {
+          console.error('[SETTINGS] Failed to load build config:', err);
+        });
+    };
+    
     // Refresh settings from device
     window.refreshSettings = function() {
       console.log('[SETTINGS] refreshSettings called');
@@ -1613,6 +1893,72 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       });
     };
     console.log('[SETTINGS] toggleEspNow defined');
+    
+    // Toggle ESP-NOW mesh mode
+    window.toggleEspNowMesh = function() {
+      var cur = ($('espnow-mesh-value').textContent === 'Enabled') ? 1 : 0;
+      var v = cur ? 0 : 1;
+      var cmd = 'espnow mode ' + (v ? 'mesh' : 'direct');
+      $('espnow-mesh-btn').textContent = '...';
+      $('espnow-mesh-btn').disabled = true;
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent(cmd)
+      })
+      .then(function(r) { return r.text(); })
+      .then(function(t) {
+        refreshSettings();
+      })
+      .catch(function(e) {
+        alert('Error: ' + e.message);
+        refreshSettings();
+      });
+    };
+    
+    // Save all ESP-NOW settings
+    window.saveEspNowSettings = function() {
+      var status = $('espnow-save-status');
+      status.textContent = 'Saving...';
+      status.style.color = '#667eea';
+
+      var s = {
+        deviceName:   $('espnow-devicename').value.trim(),
+        friendlyName: $('espnow-friendlyname').value.trim(),
+        room:         $('espnow-room').value.trim(),
+        zone:         $('espnow-zone').value.trim(),
+        tags:         $('espnow-tags').value.trim(),
+        stationary:   $('espnow-stationary').checked,
+        meshRole:     parseInt($('espnow-meshrole').value),
+        masterMAC:    $('espnow-mastermac').value.trim(),
+        backupMAC:    $('espnow-backupmac').value.trim()
+      };
+
+      var cmds = [];
+      if (s.deviceName)   cmds.push('espnow setname "' + s.deviceName + '"');
+      if (s.friendlyName) cmds.push('espnow friendlyname "' + s.friendlyName + '"');
+      if (s.room)         cmds.push('espnow room "' + s.room + '"');
+      if (s.zone)         cmds.push('espnow zone "' + s.zone + '"');
+      if (s.tags)         cmds.push('espnow tags "' + s.tags + '"');
+      cmds.push('espnow stationary ' + (s.stationary ? 'on' : 'off'));
+      var roleNames = ['worker', 'master', 'backup'];
+      if (s.meshRole >= 0 && s.meshRole <= 2) cmds.push('espnow role ' + roleNames[s.meshRole]);
+      if (s.masterMAC) cmds.push('espnow mastermac ' + s.masterMAC);
+      if (s.backupMAC) cmds.push('espnow backupmac ' + s.backupMAC);
+
+      sendSequential(cmds,
+        function() {
+          status.textContent = 'Saved successfully!';
+          status.style.color = '#28a745';
+          setTimeout(function() { status.textContent = ''; refreshSettings(); }, 2000);
+        },
+        function(e) {
+          status.textContent = 'Error: ' + (e ? e.message : 'unknown');
+          status.style.color = '#dc3545';
+        }
+      );
+    };
     
     // Update Web CLI history size
     window.updateWebCliHistory = function() {
@@ -1792,7 +2138,7 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       var cmdMap = {
         outSerial: 'outserial',
         outWeb: 'outweb',
-        outTft: 'outtft'
+        outDisplay: 'outdisplay'
       };
       var key = cmdMap[setting] || setting.toLowerCase();
       var cmd = key + ' ' + newVal;
@@ -1848,109 +2194,17 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       setGroup('debugHttpGroup-value', 'debugHttpGroup-btn', ['debugHttpHandlers', 'debugHttpRequests', 'debugHttpResponses', 'debugHttpStreaming']);
       setGroup('debugSseGroup-value', 'debugSseGroup-btn', ['debugSseConnection', 'debugSseEvents', 'debugSseBroadcast']);
       setGroup('debugEspNowGroup-value', 'debugEspNowGroup-btn', ['debugEspNowStream', 'debugEspNowCore', 'debugEspNowRouter', 'debugEspNowMesh', 'debugEspNowTopo', 'debugEspNowEncryption']);
-      setGroup('debugSensorsGroup-value', 'debugSensorsGroup-btn', ['debugSensorsGeneral', 'debugSensorsFrame', 'debugSensorsData']);
     };
 
     // Toggle debug flag
     window.toggleDebug = function(setting) {
-      var valueId = setting + '-value';
-      var btnId = setting + '-btn';
-      var valueEl = $(valueId);
-      var btnEl = $(btnId);
+      var valueEl = $(setting + '-value');
+      var btnEl = $(setting + '-btn');
       if (!valueEl || !btnEl) return;
-      var cur = (valueEl.textContent === 'Enabled') ? 1 : 0;
-      var newVal = cur ? 0 : 1;
-      btnEl.textContent = '...';
-      btnEl.disabled = true;
+      var newVal = (valueEl.textContent !== 'Enabled') ? 1 : 0;
       valueEl.textContent = newVal ? 'Enabled' : 'Disabled';
+      btnEl.textContent = newVal ? 'Disable' : 'Enable';
       try { window.updateDebugGroupIndicators(); } catch(_) {}
-      var map = {
-        debugAuth: 'debugauth',
-        debugAuthCookies: 'debugauthcookies',
-        debugHttp: 'debughttp',
-        debugSse: 'debugsse',
-        debugCli: 'debugcli',
-        debugCommandFlow: 'debugcommandflow',
-        debugUsers: 'debugusers',
-        debugSystem: 'debugsystem',
-        debugWifi: 'debugwifi',
-        debugStorage: 'debugstorage',
-        debugPerformance: 'debugperformance',
-        debugAutomations: 'debugautomations',
-        debugLogger: 'debuglogger',
-        debugDateTime: 'debugdatetime',
-        debugSensors: 'debugsensors',
-        debugSensorsGeneral: 'debugsensorsgeneral',
-        debugSensorsFrame: 'debugsensorsframe',
-        debugSensorsData: 'debugsensorsdata',
-        debugEspNow: 'debugespnow',
-        debugEspNowStream: 'debugespnowstream',
-        debugEspNowCore: 'debugespnowcore',
-        debugEspNowRouter: 'debugespnowrouter',
-        debugEspNowMesh: 'debugespnowmesh',
-        debugEspNowTopo: 'debugespnowtopo',
-        debugEspNowEncryption: 'debugespnowencryption',
-        debugAutoScheduler: 'debugautoscheduler',
-        debugAutoExec: 'debugautoexec',
-        debugAutoCondition: 'debugautocondition',
-        debugAutoTiming: 'debugautotiming',
-        debugAuthSessions: 'debugauthsessions',
-        debugAuthCookies: 'debugauthcookies',
-        debugAuthLogin: 'debugauthlogin',
-        debugAuthBootId: 'debugauthbootid',
-        debugHttpHandlers: 'debughttphandlers',
-        debugHttpRequests: 'debughttprequests',
-        debugHttpResponses: 'debughttpresponses',
-        debugHttpStreaming: 'debughttpstreaming',
-        debugWifiConnection: 'debugwificonnection',
-        debugWifiConfig: 'debugwificonfig',
-        debugWifiScanning: 'debugwifiscanning',
-        debugWifiDriver: 'debugwifidriver',
-        debugStorageFiles: 'debugstoragefiles',
-        debugStorageJson: 'debugstoragejson',
-        debugStorageSettings: 'debugstoragesettings',
-        debugStorageMigration: 'debugstoragemigration',
-        debugSystemBoot: 'debugsystemboot',
-        debugSystemConfig: 'debugsystemconfig',
-        debugSystemTasks: 'debugsystemtasks',
-        debugSystemHardware: 'debugsystemhardware',
-        debugUsersMgmt: 'debugusersmgmt',
-        debugUsersRegister: 'debugusersregister',
-        debugUsersQuery: 'debugusersquery',
-        debugCliExecution: 'debugcliexecution',
-        debugCliQueue: 'debugcliqueue',
-        debugCliValidation: 'debugclivalidation',
-        debugPerfStack: 'debugperfstack',
-        debugPerfHeap: 'debugperfheap',
-        debugPerfTiming: 'debugperftiming',
-        debugSseConnection: 'debugsseconnection',
-        debugSseEvents: 'debugsseevents',
-        debugSseBroadcast: 'debugssebroadcast',
-        debugCmdflowRouting: 'debugcmdflowrouting',
-        debugCmdflowQueue: 'debugcmdflowqueue',
-        debugCmdflowContext: 'debugcmdflowcontext'
-      };
-      var key = map[setting] || setting.toLowerCase();
-      var cmd = key + ' ' + newVal + ' temp';
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) { return r.text(); })
-      .then(function(_t) {
-        btnEl.textContent = newVal ? 'Disable' : 'Enable';
-        btnEl.disabled = false;
-        try { window.updateDebugGroupIndicators(); } catch(_) {}
-      })
-      .catch(function(e) {
-        valueEl.textContent = cur ? 'Enabled' : 'Disabled';
-        btnEl.textContent = cur ? 'Disable' : 'Enable';
-        btnEl.disabled = false;
-        try { window.updateDebugGroupIndicators(); } catch(_) {}
-        alert('Error: ' + e.message);
-      });
     };
     
     // Toggle debug group (parent/child semantics)
@@ -1971,10 +2225,10 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
         groupValueId = 'debugEspNowGroup-value';
         groupBtnId = 'debugEspNowGroup-btn';
       } else if (group === 'sensors') {
-        children = ['debugSensorsGeneral', 'debugSensorsFrame', 'debugSensorsData'];
-        parentFlag = 'debugSensors';
-        groupValueId = 'debugSensorsGroup-value';
-        groupBtnId = 'debugSensorsGroup-btn';
+        children = ['debugGPS', 'debugRTC', 'debugIMU', 'debugThermal', 'debugToF', 'debugGamepad', 'debugAPDS', 'debugPresence', 'debugCamera', 'debugMicrophone', 'debugFMRadio', 'debugG2'];
+        parentFlag = null;
+        groupValueId = null;
+        groupBtnId = null;
       } else if (group === 'auth') {
         children = ['debugAuthSessions', 'debugAuthCookies', 'debugAuthLogin', 'debugAuthBootId'];
         parentFlag = 'debugAuth';
@@ -2039,126 +2293,28 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       // Toggle action: if group is currently ON, turn all OFF; if group is OFF, turn all ON
       var newVal = anyOn ? 0 : 1;
       
-      // Update parent UI immediately
-      groupBtnEl.textContent = '...';
-      groupBtnEl.disabled = true;
+      // Update group UI state
       groupValueEl.textContent = newVal ? 'Enabled' : 'Disabled';
-      
-      // Toggle all children
-      var promises = [];
+      groupBtnEl.textContent = newVal ? 'Disable All' : 'Enable All';
+
+      // Update all child flags
       for (var i = 0; i < children.length; i++) {
         var child = children[i];
         var childValueEl = $(child + '-value');
         var childBtnEl = $(child + '-btn');
-        if (childValueEl && childBtnEl) {
-          childValueEl.textContent = newVal ? 'Enabled' : 'Disabled';
-          childBtnEl.textContent = newVal ? 'Disable' : 'Enable';
-          
-          var map = {
-            debugAutoScheduler: 'debugautoscheduler',
-            debugAutoExec: 'debugautoexec',
-            debugAutoCondition: 'debugautocondition',
-            debugAutoTiming: 'debugautotiming',
-            debugEspNowStream: 'debugespnowstream',
-            debugEspNowCore: 'debugespnowcore',
-            debugEspNowRouter: 'debugespnowrouter',
-            debugEspNowMesh: 'debugespnowmesh',
-            debugEspNowTopo: 'debugespnowtopo',
-            debugEspNowEncryption: 'debugespnowencryption',
-            debugSensorsGeneral: 'debugsensorsgeneral',
-            debugSensorsFrame: 'debugsensorsframe',
-            debugSensorsData: 'debugsensorsdata',
-            debugAuthSessions: 'debugauthsessions',
-            debugAuthCookies: 'debugauthcookies',
-            debugAuthLogin: 'debugauthlogin',
-            debugAuthBootId: 'debugauthbootid',
-            debugHttpHandlers: 'debughttphandlers',
-            debugHttpRequests: 'debughttprequests',
-            debugHttpResponses: 'debughttpresponses',
-            debugHttpStreaming: 'debughttpstreaming',
-            debugWifiConnection: 'debugwificonnection',
-            debugWifiConfig: 'debugwificonfig',
-            debugWifiScanning: 'debugwifiscanning',
-            debugWifiDriver: 'debugwifidriver',
-            debugStorageFiles: 'debugstoragefiles',
-            debugStorageJson: 'debugstoragejson',
-            debugStorageSettings: 'debugstoragesettings',
-            debugStorageMigration: 'debugstoragemigration',
-            debugSystemBoot: 'debugsystemboot',
-            debugSystemConfig: 'debugsystemconfig',
-            debugSystemTasks: 'debugsystemtasks',
-            debugSystemHardware: 'debugsystemhardware',
-            debugUsersMgmt: 'debugusersmgmt',
-            debugUsersRegister: 'debugusersregister',
-            debugUsersQuery: 'debugusersquery',
-            debugCliExecution: 'debugcliexecution',
-            debugCliQueue: 'debugcliqueue',
-            debugCliValidation: 'debugclivalidation',
-            debugPerfStack: 'debugperfstack',
-            debugPerfHeap: 'debugperfheap',
-            debugPerfTiming: 'debugperftiming',
-            debugSseConnection: 'debugsseconnection',
-            debugSseEvents: 'debugsseevents',
-            debugSseBroadcast: 'debugssebroadcast',
-            debugCmdflowRouting: 'debugcmdflowrouting',
-            debugCmdflowQueue: 'debugcmdflowqueue',
-            debugCmdflowContext: 'debugcmdflowcontext'
-          };
-          var key = map[child] || child.toLowerCase();
-          var cmd = key + ' ' + newVal + ' temp';
-          promises.push(
-            fetch('/api/cli', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-              credentials: 'same-origin',
-              body: 'cmd=' + encodeURIComponent(cmd)
-            }).then(function(r) { return r.text(); })
-          );
-        }
+        if (childValueEl) childValueEl.textContent = newVal ? 'Enabled' : 'Disabled';
+        if (childBtnEl) childBtnEl.textContent = newVal ? 'Disable' : 'Enable';
       }
-      
-      // Also toggle the parent flag if one exists for this group
+
+      // Update parent flag UI if one exists for this group
       if (parentFlag) {
-        var parentMap = {
-          debugAutomations: 'debugautomations',
-          debugHttp: 'debughttp',
-          debugWifi: 'debugwifi',
-          debugStorage: 'debugstorage',
-          debugSystem: 'debugsystem',
-          debugUsers: 'debugusers',
-          debugCli: 'debugcli',
-          debugPerformance: 'debugperformance',
-          debugSse: 'debugsse',
-          debugCommandFlow: 'debugcommandflow',
-          debugAuth: 'debugauth',
-          debugSensors: 'debugsensors',
-          debugEspNow: 'debugespnow'
-        };
-        var parentCmd = (parentMap[parentFlag] || parentFlag.toLowerCase()) + ' ' + newVal + ' temp';
-        promises.push(
-          fetch('/api/cli', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            credentials: 'same-origin',
-            body: 'cmd=' + encodeURIComponent(parentCmd)
-          }).then(function(r) { return r.text(); })
-        );
+        var parentValueEl = $(parentFlag + '-value');
+        var parentBtnEl = $(parentFlag + '-btn');
+        if (parentValueEl) parentValueEl.textContent = newVal ? 'Enabled' : 'Disabled';
+        if (parentBtnEl) parentBtnEl.textContent = newVal ? 'Disable' : 'Enable';
       }
-      
-      Promise.all(promises)
-        .then(function() {
-          groupBtnEl.textContent = newVal ? 'Disable All' : 'Enable All';
-          groupBtnEl.disabled = false;
-          try { window.updateDebugGroupIndicators(); } catch(_) {}
-        })
-        .catch(function(e) {
-          // Revert on error
-          groupValueEl.textContent = anyOn ? 'Enabled' : 'Disabled';
-          groupBtnEl.textContent = anyOn ? 'Disable All' : 'Enable All';
-          groupBtnEl.disabled = false;
-          try { window.updateDebugGroupIndicators(); } catch(_) {}
-          alert('Error toggling group: ' + e.message);
-        });
+
+      try { window.updateDebugGroupIndicators(); } catch(_) {}
     };
     
     // Disconnect WiFi
@@ -2215,38 +2371,22 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
         var el = $(id);
         return el && (el.textContent === 'Enabled');
       };
-      var push = function(cmd) {
-        cmds.push(cmd);
-      };
-      
-      var cliOn = !!(getVal('debugCliExecution') || getVal('debugCliQueue') || getVal('debugCliValidation'));
-      push('debugcli ' + (cliOn ? 1 : 0));
-      var cmdflowOn = !!(getVal('debugCmdflowRouting') || getVal('debugCmdflowQueue') || getVal('debugCmdflowContext'));
-      push('debugcommandflow ' + (cmdflowOn ? 1 : 0));
-      var usersOn = !!(getVal('debugUsersMgmt') || getVal('debugUsersRegister') || getVal('debugUsersQuery'));
-      push('debugusers ' + (usersOn ? 1 : 0));
-      var systemOn = !!(getVal('debugSystemBoot') || getVal('debugSystemConfig') || getVal('debugSystemTasks') || getVal('debugSystemHardware'));
-      push('debugsystem ' + (systemOn ? 1 : 0));
-      var wifiOn = !!(getVal('debugWifiConnection') || getVal('debugWifiConfig') || getVal('debugWifiScanning') || getVal('debugWifiDriver'));
-      push('debugwifi ' + (wifiOn ? 1 : 0));
-      var storageOn = !!(getVal('debugStorageFiles') || getVal('debugStorageJson') || getVal('debugStorageSettings') || getVal('debugStorageMigration'));
-      push('debugstorage ' + (storageOn ? 1 : 0));
-      var perfOn = !!(getVal('debugPerfStack') || getVal('debugPerfHeap') || getVal('debugPerfTiming'));
-      push('debugperformance ' + (perfOn ? 1 : 0));
-      var autosOn = !!(getVal('debugAutoScheduler') || getVal('debugAutoExec') || getVal('debugAutoCondition') || getVal('debugAutoTiming'));
-      push('debugautomations ' + (autosOn ? 1 : 0));
-      var httpOn = !!(getVal('debugHttpHandlers') || getVal('debugHttpRequests') || getVal('debugHttpResponses') || getVal('debugHttpStreaming'));
-      push('debughttp ' + (httpOn ? 1 : 0));
-      var sseOn = !!(getVal('debugSseConnection') || getVal('debugSseEvents') || getVal('debugSseBroadcast'));
-      push('debugsse ' + (sseOn ? 1 : 0));
+      var push = function(cmd) { cmds.push(cmd); };
+
+      push('debugcli ' + (getVal('debugCli') ? 1 : 0));
+      push('debugcommandflow ' + (getVal('debugCommandFlow') ? 1 : 0));
+      push('debugusers ' + (getVal('debugUsers') ? 1 : 0));
+      push('debugsystem ' + (getVal('debugSystem') ? 1 : 0));
+      push('debugwifi ' + (getVal('debugWifi') ? 1 : 0));
+      push('debugstorage ' + (getVal('debugStorage') ? 1 : 0));
+      push('debugperformance ' + (getVal('debugPerformance') ? 1 : 0));
+      push('debugautomations ' + (getVal('debugAutomations') ? 1 : 0));
+      push('debughttp ' + (getVal('debugHttp') ? 1 : 0));
+      push('debugsse ' + (getVal('debugSse') ? 1 : 0));
       push('debuglogger ' + (getVal('debugLogger') ? 1 : 0));
       push('debugdatetime ' + (getVal('debugDateTime') ? 1 : 0));
       push('debugauth ' + (getValById('debugAuthGroup-value') ? 1 : 0));
-      push('debugsensors ' + (getValById('debugSensorsGroup-value') ? 1 : 0));
       push('debugespnow ' + (getValById('debugEspNowGroup-value') ? 1 : 0));
-      push('debugsensorsgeneral ' + (getVal('debugSensorsGeneral') ? 1 : 0));
-      push('debugsensorsframe ' + (getVal('debugSensorsFrame') ? 1 : 0));
-      push('debugsensorsdata ' + (getVal('debugSensorsData') ? 1 : 0));
       push('debugespnowstream ' + (getVal('debugEspNowStream') ? 1 : 0));
       push('debugespnowcore ' + (getVal('debugEspNowCore') ? 1 : 0));
       push('debugespnowrouter ' + (getVal('debugEspNowRouter') ? 1 : 0));
@@ -2293,32 +2433,21 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
       push('debugcmdflowqueue ' + (getVal('debugCmdflowQueue') ? 1 : 0));
       push('debugcmdflowcontext ' + (getVal('debugCmdflowContext') ? 1 : 0));
       push('debugmemory ' + (getVal('debugMemory') ? 1 : 0));
-
-      // Persist log level too (so it behaves like other debug settings)
       try {
         var llSel = $('logLevel-select');
         if (llSel) {
           var v = parseInt(llSel.value, 10);
-          if (!isNaN(v) && v >= 0 && v <= 3) {
-            push('loglevel ' + v);
-          }
+          if (!isNaN(v) && v >= 0 && v <= 3) push('loglevel ' + v);
         }
       } catch(_) {}
-      
-      Promise.all(cmds.map(function(c) {
-        return fetch('/api/cli', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          credentials: 'same-origin',
-          body: 'cmd=' + encodeURIComponent(c)
-        }).then(function(r) { return r.text(); });
-      }))
-      .then(function() {
-        alert('Debug settings saved.');
-      })
-      .catch(function() {
-        alert('One or more debug commands failed.');
-      });
+
+      sendSequential(cmds,
+        function() {
+          try { if (typeof window.refreshSettings === 'function') window.refreshSettings(); } catch(_) {}
+          alert('Debug settings saved.');
+        },
+        function() { alert('One or more debug commands failed.'); }
+      );
     };
     
     // Save device sensor settings
@@ -2371,22 +2500,14 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
         alert('No device settings to save.');
         return;
       }
-      
-      Promise.all(cmds.map(function(c) {
-        return fetch('/api/cli', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          credentials: 'same-origin',
-          body: 'cmd=' + encodeURIComponent(c)
-        }).then(function(r) { return r.text(); });
-      }))
-      .then(function() {
-        alert('Device settings saved. Restart the thermal sensor (closethermal + openthermal) or reboot manually to apply upscale changes.');
-        refreshSettings();
-      })
-      .catch(function() {
-        alert('One or more device commands failed.');
-      });
+
+      sendSequential(cmds,
+        function() {
+          alert('Device settings saved. Restart the thermal sensor (closethermal + openthermal) or reboot manually to apply upscale changes.');
+          refreshSettings();
+        },
+        function() { alert('One or more device commands failed.'); }
+      );
     };
     
     // Save sensors UI settings
@@ -2450,52 +2571,42 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
           alert('No Client UI settings to save.');
           return;
         }
-        
-        Promise.all(cmds.map(function(c) {
-          return fetch('/api/cli', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            credentials: 'same-origin',
-            body: 'cmd=' + encodeURIComponent(c)
-          }).then(function(r) { return r.text(); });
-        }))
-        .then(function() {
-          try {
-            if (typeof window.refreshSettings === 'function') {
-              window.refreshSettings();
-            }
-          } catch(_) {}
-          alert('Client UI settings saved.');
-        })
-        .catch(function() {
-          alert('One or more Client UI commands failed.');
-        });
+
+        sendSequential(cmds,
+          function() {
+            try { if (typeof window.refreshSettings === 'function') window.refreshSettings(); } catch(_) {}
+            alert('Client UI settings saved.');
+          },
+          function() { alert('One or more Client UI commands failed.'); }
+        );
       } catch(e) {
         alert('Error: ' + e.message);
       }
     };
     
     // Save hardware settings
-    window.saveHardwareSettings = function() {
+    // Helper functions for hardware settings
+    var getInt = function(id) {
+      var el = $(id);
+      if (!el) return null;
+      var n = parseInt(el.value, 10);
+      return isNaN(n) ? null : n;
+    };
+    var getStr = function(id) {
+      var el = $(id);
+      if (!el) return null;
+      return String(el.value || '');
+    };
+    var getBool = function(id) {
+      var el = $(id);
+      if (!el) return null;
+      return el.checked ? 1 : 0;
+    };
+    
+    // Save LED settings
+    window.saveLEDSettings = function() {
       try {
         var cmds = [];
-        var getInt = function(id) {
-          var el = $(id);
-          if (!el) return null;
-          var n = parseInt(el.value, 10);
-          return isNaN(n) ? null : n;
-        };
-        var getStr = function(id) {
-          var el = $(id);
-          if (!el) return null;
-          return String(el.value || '');
-        };
-        var getBool = function(id) {
-          var el = $(id);
-          if (!el) return null;
-          return el.checked ? 1 : 0;
-        };
-        
         var brightness = getInt('ledBrightness');
         if (brightness !== null) cmds.push('hardwareledbrightness ' + brightness);
         var enabled = getBool('ledStartupEnabled');
@@ -2508,12 +2619,29 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
         if (color2) cmds.push('hardwareledstartupcolor2 ' + color2);
         var duration = getInt('ledStartupDuration');
         if (duration !== null) cmds.push('hardwareledstartupduration ' + duration);
+        
+        if (cmds.length === 0) {
+          alert('No LED settings to save.');
+          return;
+        }
+
+        sendSequential(cmds,
+          function() { alert('LED settings saved.'); },
+          function() { alert('One or more LED commands failed.'); }
+        );
+      } catch(e) {
+        alert('Error saving LED settings: ' + e.message);
+      }
+    };
+    
+    // Save OLED settings
+    window.saveOLEDSettings = function() {
+      try {
+        var cmds = [];
         var oledEnabled = getBool('oledEnabled');
         if (oledEnabled !== null) cmds.push('oledenabled ' + oledEnabled);
         var oledAutoInit = getBool('oledAutoInit');
         if (oledAutoInit !== null) cmds.push('oledautoinit ' + oledAutoInit);
-        var gamepadAutoStart = getBool('gamepadAutoStart');
-        if (gamepadAutoStart !== null) cmds.push('gamepadautostart ' + (gamepadAutoStart ? 'on' : 'off'));
         var oledBootMode = getStr('oledBootMode');
         if (oledBootMode) cmds.push('oledbootmode ' + oledBootMode);
         var oledDefaultMode = getStr('oledDefaultMode');
@@ -2530,26 +2658,37 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
         if (oledThermalColorMode) cmds.push('oledthermalcolormode ' + oledThermalColorMode);
         
         if (cmds.length === 0) {
-          alert('No hardware settings to save.');
+          alert('No OLED settings to save.');
           return;
         }
-        
-        Promise.all(cmds.map(function(c) {
-          return fetch('/api/cli', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            credentials: 'same-origin',
-            body: 'cmd=' + encodeURIComponent(c)
-          }).then(function(r) { return r.text(); });
-        }))
-        .then(function() {
-          alert('Hardware settings saved.');
-        })
-        .catch(function() {
-          alert('One or more hardware commands failed.');
-        });
+
+        sendSequential(cmds,
+          function() { alert('OLED settings saved.'); },
+          function() { alert('One or more OLED commands failed.'); }
+        );
       } catch(e) {
-        alert('Error saving hardware settings: ' + e.message);
+        alert('Error saving OLED settings: ' + e.message);
+      }
+    };
+    
+    // Save Gamepad settings
+    window.saveGamepadSettings = function() {
+      try {
+        var cmds = [];
+        var gamepadAutoStart = getBool('gamepadAutoStart');
+        if (gamepadAutoStart !== null) cmds.push('gamepadautostart ' + (gamepadAutoStart ? 'on' : 'off'));
+        
+        if (cmds.length === 0) {
+          alert('No Gamepad settings to save.');
+          return;
+        }
+
+        sendSequential(cmds,
+          function() { alert('Gamepad settings saved.'); },
+          function() { alert('One or more Gamepad commands failed.'); }
+        );
+      } catch(e) {
+        alert('Error saving Gamepad settings: ' + e.message);
       }
     };
     
@@ -2611,10 +2750,10 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         console.log('[SETTINGS] Visible networks:', visible.length, 'Hidden:', hiddenCount);
         var html = '<div style="margin-top:0.5rem"><strong>Nearby Networks</strong></div>';
         if (hiddenCount > 0) {
-          html += '<div style="color:var(--muted);font-size:0.85rem;margin-top:4px">' + hiddenCount + ' hidden network' + (hiddenCount > 1 ? 's' : '') + ' detected</div>';
+          html += '<div style="color:var(--panel-fg);font-size:0.85rem;margin-top:4px">' + hiddenCount + ' hidden network' + (hiddenCount > 1 ? 's' : '') + ' detected</div>';
         }
         if (visible.length === 0) {
-          html += '<div style="color:var(--muted)">No networks found.</div>';
+          html += '<div style="color:var(--panel-fg)">No networks found.</div>';
         } else {
           html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:0.5rem;margin-top:0.5rem">';
           visible.forEach(function(ap) {
@@ -2624,14 +2763,14 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             var ch = ap.channel || 0;
             var saved = (__S.state.savedSSIDs || []).indexOf(ssid) !== -1;
             var isCur = (ssid && ssid === __S.state.currentSSID);
-            var border = isCur ? '#007bff' : (saved ? '#28a745' : '#ddd');
+            var border = isCur ? '#007bff' : (saved ? '#28a745' : 'var(--border)');
             var badgeTxt = isCur ? '(Connected)' : (saved ? '(Saved)' : '');
-            var badgeColor = isCur ? '#007bff' : (saved ? '#28a745' : '#666');
+            var badgeColor = isCur ? '#007bff' : (saved ? '#28a745' : 'var(--muted)');
             var badge = badgeTxt ? '<span style="color:' + badgeColor + ';font-weight:bold;margin-left:6px">' + badgeTxt + '</span>' : '';
             var esc = encodeURIComponent(ssid);
             var needsPass = (ap.auth && ap.auth !== '0') ? 'true' : 'false';
             var btnCls = isCur ? ' vis-hidden' : '';
-            html += '<div style="background:#fff;border:1px solid ' + border + ';border-radius:6px;padding:0.5rem;display:flex;align-items:center;justify-content:space-between">' + '<div><div style="font-weight:bold">' + ssid + ' ' + badge + '</div><div style="color:var(--muted);font-size:0.85rem">RSSI ' + rssi + ' | CH ' + ch + '</div></div>' + '<button class="btn' + btnCls + '" data-ssid="' + esc + '" data-locked="' + needsPass + '" onclick="(function(b){selectSsid(decodeURIComponent(b.dataset.ssid), b.dataset.locked===\\"true\\");})(this)">Select ' + lock + '</button>' + '</div>';
+            html += '<div style="background:var(--panel-bg);color:var(--panel-fg);border:1px solid ' + border + ';border-radius:6px;padding:0.5rem;display:flex;align-items:center;justify-content:space-between">' + '<div><div style="font-weight:bold">' + ssid + ' ' + badge + '</div><div style="color:var(--panel-fg);font-size:0.85rem">RSSI ' + rssi + ' | CH ' + ch + '</div></div>' + '<button class="btn' + btnCls + '" data-ssid="' + esc + '" data-locked="' + needsPass + '" onclick="(function(b){selectSsid(decodeURIComponent(b.dataset.ssid), b.dataset.locked===\\"true\\");})(this)">Select ' + lock + '</button>' + '</div>';
           });
           html += '</div>';
         }
@@ -2706,6 +2845,19 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
     
+    function formatMillisTimestamp(millis) {
+      if (!millis || millis === 0) return 'Unknown';
+      var d = new Date(millis);
+      if (isNaN(d.getTime())) return 'Invalid';
+      return d.toLocaleString();
+    }
+    
+    function cleanIPAddress(ip) {
+      if (!ip) return '';
+      // Remove IPv6 prefix like ::FFFF: to show clean IPv4
+      return ip.replace(/^::ffff:/i, '').replace(/^::FFFF:/i, '');
+    }
+    
     window.refreshUsers = function() {
       var container = $('users-list');
       if (!container) return;
@@ -2766,7 +2918,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             html += '<div style="margin-bottom:0.25rem">';
             html += '<div onclick="toggleUserDropdown(\'' + uid + '-pending\')" style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;cursor:pointer">';
             html += '<div><strong>' + username + '</strong> <span style="color:#856404;font-size:0.85rem">(Pending)</span></div>';
-            html += '<div style="font-size:0.8rem;color:var(--muted)">▼</div></div>';
+            html += '<div style="font-size:0.8rem;color:var(--panel-fg)">▼</div></div>';
             html += '<div id="dropdown-' + uid + '-pending" style="display:none;margin-top:0.25rem;padding:0.5rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px">';
             html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap">';
             html += '<button class="btn" data-user="' + username + '" onclick="approveUserByName(this.dataset.user); toggleUserDropdown(\'' + uid + '-pending\')" style="width:100%;margin-bottom:0.25rem;font-size:0.8rem;padding:0.25rem 0.5rem" title="Approve user">Approve</button>';
@@ -2783,15 +2935,15 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           var uid = 'u' + Math.random().toString(36).substr(2, 9);
           html += '<div style="margin-bottom:0.25rem">';
           html += '<div onclick="toggleUserDropdown(\'' + uid + '\')" style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;cursor:pointer">';
-          html += '<div><strong>' + username + '</strong> ' + (isAdmin ? '<span style="color:#007bff;font-size:0.85rem">(Admin)</span>' : '<span style="color:#28a745;font-size:0.85rem">(User)</span>') + ' <span style="color:var(--muted);font-size:0.85rem">' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '') + '</span></div>';
-          html += '<div style="font-size:0.8rem;color:var(--muted)">▼</div></div>';
+          html += '<div><strong>' + username + '</strong> ' + (isAdmin ? '<span style="color:#007bff;font-size:0.85rem">(Admin)</span>' : '<span style="color:#28a745;font-size:0.85rem">(User)</span>') + ' <span style="color:var(--panel-fg);font-size:0.85rem">' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '') + '</span></div>';
+          html += '<div style="font-size:0.8rem;color:var(--panel-fg)">▼</div></div>';
           html += '<div id="dropdown-' + uid + '" style="display:none;margin-top:0.25rem;padding:0.5rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px">';
           if (sessionCount > 0) {
             html += '<div style="margin-bottom:0.5rem;font-size:0.9rem;color:var(--panel-fg)"><strong>Active Sessions:</strong></div>';
             userSessions.forEach(function(session) {
-              var ip = session.ip || '';
-              var created = session.createdAt || '';
-              var lastSeen = session.lastSeen || '';
+              var ip = cleanIPAddress(session.ip || '');
+              var created = session.createdAt ? formatMillisTimestamp(session.createdAt) : '';
+              var lastSeen = session.lastSeen ? formatMillisTimestamp(session.lastSeen) : '';
               var current = session.current || false;
               html += '<div style="background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;padding:0.5rem;margin-bottom:0.25rem;font-size:0.85rem">';
               html += '<div><strong>IP:</strong> ' + ip + ' ' + (current ? '<span style="color:#28a745;font-weight:bold">(Current)</span>' : '') + '</div>';
@@ -2806,6 +2958,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           } else {
             html += '<button class="btn" data-user="' + username + '" onclick="demoteUserByName(this.dataset.user)" title="Demote from admin">Demote</button>';
           }
+          html += '<button class="btn" data-user="' + username + '" onclick="resetUserPassword(this.dataset.user)" title="Reset password for this user">Reset Password</button>';
           html += '<button class="btn" data-user="' + username + '" onclick="deleteUserByName(this.dataset.user)" title="Delete this user">Delete</button>';
           if (sessionCount > 0) {
             html += '<button class="btn" data-user="' + username + '" onclick="revokeUserSessions(this.dataset.user)" title="Revoke all sessions for this user">Revoke Sessions</button>';
@@ -2978,6 +3131,46 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           try {
             refreshUsers();
           } catch(_) {}
+        }
+      })
+      .catch(function(e) {
+        alert('Error: ' + e.message);
+      });
+    };
+    
+    window.resetUserPassword = async function(username) {
+      if (!username) {
+        await hwAlert('Username required');
+        return;
+      }
+      var newPassword = await hwPrompt('Enter new password for user "' + username + '" (minimum 6 characters):');
+      if (!newPassword) {
+        return;
+      }
+      if (newPassword.length < 6) {
+        await hwAlert('Password must be at least 6 characters');
+        return;
+      }
+      var confirmPassword = await hwPrompt('Confirm new password for "' + username + '":');
+      if (newPassword !== confirmPassword) {
+        await hwAlert('Passwords do not match');
+        return;
+      }
+      var cmd = 'user resetpassword ' + username + ' ' + newPassword;
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent(cmd)
+      })
+      .then(function(r) {
+        return r.text();
+      })
+      .then(function(t) {
+        if (t.indexOf('Error') >= 0) {
+          alert('Error: ' + t);
+        } else {
+          alert(t);
         }
       })
       .catch(function(e) {

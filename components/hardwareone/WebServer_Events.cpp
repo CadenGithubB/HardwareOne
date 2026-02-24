@@ -5,6 +5,7 @@
 #include "WebServer_Server.h"
 #include "System_User.h"
 #include "System_Debug.h"
+#include "System_MemUtil.h"
 #include <ArduinoJson.h>
 
 // External helpers
@@ -74,8 +75,8 @@ bool sseSendNotice(httpd_req_t* req, const String& note) {
 }
 
 // Enqueue a typed SSE event (event name + JSON data) into the session's event queue
-void sseEnqueueEvent(SessionEntry& s, const char* eventName, const String& data) {
-  if (!eventName || !*eventName) return;
+void sseEnqueueEvent(SessionEntry& s, const char* eventName, const char* data) {
+  if (!eventName || !*eventName || !data) return;
   // Queue-only policy: if full, drop oldest then enqueue new
   const int cap = SessionEntry::EVENT_QUEUE_SIZE;
   // Copy name (truncate if necessary)
@@ -86,11 +87,8 @@ void sseEnqueueEvent(SessionEntry& s, const char* eventName, const String& data)
   };
   auto copyData = [&](int idx){
     // Ensure JSON payload fits; truncate if necessary
-    size_t dlen = data.length();
-    if (dlen >= (size_t)(SessionEntry::EVENT_DATA_MAX - 1)) {
-      dlen = SessionEntry::EVENT_DATA_MAX - 1;
-    }
-    memcpy(s.eventDataQ[idx], data.c_str(), dlen);
+    size_t dlen = strnlen(data, SessionEntry::EVENT_DATA_MAX - 1);
+    memcpy(s.eventDataQ[idx], data, dlen);
     s.eventDataQ[idx][dlen] = '\0';
   };
   if (s.eqCount < cap) {
@@ -143,11 +141,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
   sseDebug(String("handleEvents: incoming from ") + (ip.length() ? ip : "<no-ip>") + ", uri=" + req->uri);
 
   {
-    AuthContext ctx;
-    ctx.transport = SOURCE_WEB;
-    ctx.opaque = req;
-    ctx.path = "/api/events";
-    getClientIP(req, ctx.ip);
+    AuthContext ctx = makeWebAuthCtx(req);
     if (!tgRequireAuth(ctx)) {
       DEBUG_AUTHF("/api/events (SSE) DENIED - no valid session for IP: %s", ip.c_str());
       sseDebug("handleEvents: auth failed; sending 401");
@@ -206,7 +200,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
   // Immediately push a 'sensor-status' (if needed) and a 'system' snapshot, then keep streaming
   auto sendStatus = [&](const char* reason) {
     const char* statusJson = buildSensorStatusJson();
-    char eventData[600];
+    char eventData[1200];
     snprintf(eventData, sizeof(eventData), "event: sensor-status\ndata: %s\n\n", statusJson);
     if (isDebugFlagSet(DEBUG_SSE)) {
       DEBUG_SSEF("Sending 'sensor-status' (%zu bytes) reason=%s", strlen(eventData), reason);
@@ -218,7 +212,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
   };
 
   auto sendSystem = [&]() {
-    JsonDocument doc;
+    PSRAM_JSON_DOC(doc);
     buildSystemInfoJson(doc);
 
     char sysJsonBuf[256];

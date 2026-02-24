@@ -28,13 +28,13 @@ inline void streamFilesInner(httpd_req_t* req) {
       <h3 id='editor-title' style='margin:0;color:var(--panel-fg)'>Edit File</h3>
       <button class='btn' onclick="closeEditor()">Close</button>
     </div>
-    <div style='font-size:0.9rem;color:var(--muted);margin-bottom:0.25rem'><span id='editor-path'></span></div>
+    <div style='font-size:0.9rem;color:var(--panel-fg);margin-bottom:0.25rem'><span id='editor-path'></span></div>
     <textarea id='editor-text' style='flex:1;min-height:300px;width:70vw;max-width:85vw;box-sizing:border-box;padding:0.75rem;border:1px solid var(--border);border-radius:6px;font-family:Menlo,Consolas,monospace;font-size:13px;line-height:1.4;color:var(--panel-fg);background:var(--panel-bg);'></textarea>
     <div style='margin-top:0.6rem;display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap'>
       <button id='editor-save' class='btn' onclick="saveEditor()">Save</button>
       <button id='btn-pretty' class='btn' onclick="prettyJSON()" style='display:none'>Pretty JSON</button>
       <button id='btn-raw' class='btn' onclick="rawJSON()" style='display:none'>Raw JSON</button>
-      <span id='editor-status' style='color:var(--muted)'></span>
+      <span id='editor-status' style='color:var(--panel-fg)'></span>
     </div>
   </div>
 </div>
@@ -66,6 +66,7 @@ function initFileManager() {
     path: '/',
     height: '500px',
     showActions: true,
+    onEdit: editFile,
     onRefresh: function() {
       updateStorageStats();
     }

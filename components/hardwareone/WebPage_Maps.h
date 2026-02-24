@@ -2,7 +2,9 @@
 #define WEBPAGE_MAPS_H
 
 #include "System_BuildConfig.h"
+#if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
+#endif
 
 #if ENABLE_MAPS
 
@@ -26,7 +28,7 @@ inline void streamMapsInner(httpd_req_t* req) {
       <h3 style='margin:0 0 0.5rem 0;color:var(--panel-fg)'>Maps</h3>
       <div style='display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin:0 0 0.5rem 0'>
         <button class='btn' onclick='organizeMaps()' style='padding:6px 10px'>Organize Maps</button>
-        <span id='maps-organize-status' style='font-size:0.8rem;color:var(--muted)'></span>
+        <span id='maps-organize-status' style='font-size:0.8rem;color:var(--panel-fg)'></span>
       </div>
       <div id='maps-file-browser'></div>
     </div>
@@ -42,7 +44,7 @@ inline void streamMapsInner(httpd_req_t* req) {
   <div style='flex:2;min-width:400px'>
     <div style='background:var(--panel-bg);border-radius:8px;border:1px solid var(--border);padding:1rem'>
       <canvas id='map-canvas' width='1200' height='800' style='width:100%;background:var(--bg);border-radius:4px'></canvas>
-      <div style='display:flex;justify-content:space-between;align-items:center;margin-top:0.5rem;color:var(--muted);font-size:0.85rem'>
+      <div style='display:flex;justify-content:space-between;align-items:center;margin-top:0.5rem;color:var(--panel-fg);font-size:0.85rem'>
         <span id='zoom-info'>Zoom: 1x</span>
         <span id='rotation-info'>Rot: 0°</span>
         <span id='gps-info'>GPS: --</span>
@@ -99,7 +101,7 @@ inline void streamMapsInner(httpd_req_t* req) {
     <label style='display:flex;align-items:center;gap:4px;cursor:pointer;'><input type='checkbox' id='layer-commercial' checked onchange='renderMap()' style='width:16px;height:16px;margin:0'><span style='color:#ced4da'>Commercial</span></label>
     <label style='display:flex;align-items:center;gap:4px;cursor:pointer;'><input type='checkbox' id='layer-residential-area' checked onchange='renderMap()' style='width:16px;height:16px;margin:0'><span style='color:#dee2e6'>Res. Areas</span></label>
   </div>
-  <div style='margin-top:0.5rem;display:flex;gap:1rem;flex-wrap:wrap;font-size:0.8rem;color:var(--muted)'>
+  <div style='margin-top:0.5rem;display:flex;gap:1rem;flex-wrap:wrap;font-size:0.8rem;color:var(--panel-fg)'>
     <span><span style='display:inline-block;width:10px;height:10px;background:#ff0000;border-radius:50%;vertical-align:middle'></span> GPS</span>
     <span><span style='display:inline-block;width:10px;height:10px;background:#ffd93d;border-radius:50%;vertical-align:middle'></span> Waypoint</span>
     <span><span style='display:inline-block;width:20px;height:3px;background:#00d9ff;vertical-align:middle'></span> Track</span>
@@ -117,7 +119,7 @@ inline void streamMapsInner(httpd_req_t* req) {
     <button class='btn' id='btn-live-track' onclick='toggleLiveTrack()' style='padding:6px 12px'>Live</button>
   </div>
   <div style='display:flex;gap:8px;margin-bottom:0.5rem;align-items:center'>
-    <span style='font-size:0.85rem;color:var(--muted)'>Track Color:</span>
+    <span style='font-size:0.85rem;color:var(--panel-fg)'>Track Color:</span>
     <input type='color' id='track-color' value='#00d9ff' onchange='updateTrackColor()' style='width:40px;height:28px;border:none;background:none;cursor:pointer' />
     <select id='track-color-preset' onchange='applyColorPreset()' style='padding:4px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg);font-size:0.85rem'>
       <option value='#00d9ff'>Cyan</option>
@@ -129,7 +131,7 @@ inline void streamMapsInner(httpd_req_t* req) {
       <option value='#ffffff'>White</option>
     </select>
   </div>
-  <div id='track-info' style='font-size:0.85rem;color:var(--muted)'></div>
+  <div id='track-info' style='font-size:0.85rem;color:var(--panel-fg)'></div>
 </div>
 
 <div style='margin-top:1rem;background:var(--panel-bg);padding:1rem;border-radius:8px;border:1px solid var(--border)'>
@@ -153,7 +155,7 @@ inline void streamMapsInner(httpd_req_t* req) {
 <div style='margin-top:1rem;background:var(--panel-bg);padding:1rem;border-radius:8px;border:1px solid var(--border)'>
   <h3 style='margin:0 0 0.5rem 0;color:var(--panel-fg)'>Transit Routes</h3>
   <div id='routes-list' style='max-height:250px;overflow-y:auto;font-size:0.85rem'>
-    <div style='color:var(--muted)'>Load a map to see routes</div>
+    <div style='color:var(--panel-fg)'>Load a map to see routes</div>
   </div>
 </div>
 )HTML", HTTPD_RESP_USE_STRLEN);
@@ -197,7 +199,7 @@ function toggleWaypointMode() {
 }
 
 // Add waypoint at canvas coordinates
-function addMapWaypoint(canvasX, canvasY) {
+async function addMapWaypoint(canvasX, canvasY) {
   if (!currentMap) return;
   
   // Convert canvas coords to geo coords (inverse of toCanvas in renderMap)
@@ -229,11 +231,11 @@ function addMapWaypoint(canvasX, canvasY) {
   const lon = mapCenterX + x / scale;
   const lat = mapCenterY - y / scale;
   
-  const name = prompt('Waypoint name:', 'WP' + (waypoints.length + 1));
+  const name = await hwPrompt('Waypoint name:', 'WP' + (waypoints.length + 1));
   if (name !== null && name.trim()) {
-    const notes = prompt('Notes (optional, max 255 chars):', '') || '';
+    const notes = (await hwPrompt('Notes (optional, max 255 chars):', '')) || '';
     addWaypointViaAPI(name.trim().substring(0, 11), lat, lon, notes.substring(0, 255)).catch((err) => {
-      alert('Error: ' + (err && err.message ? err.message : err));
+      hwAlert('Error: ' + (err && err.message ? err.message : err));
     });
   }
   
@@ -404,7 +406,7 @@ async function loadMap(path) {
         <div style="margin-bottom:4px"><strong>File:</strong> ${currentMap.filename}</div>
         <div style="margin-bottom:4px"><strong>Region:</strong> ${currentMap.regionName}</div>
         <div style="margin-bottom:4px"><strong>Features:</strong> ${currentMap.features.length}</div>
-        <div style="margin-bottom:4px;font-size:0.8rem;color:var(--muted)"><strong>Types:</strong> ${typeInfo}</div>
+        <div style="margin-bottom:4px;font-size:0.8rem;color:var(--panel-fg)"><strong>Types:</strong> ${typeInfo}</div>
         <div style="margin-bottom:4px"><strong>Lat:</strong> ${minLat}° to ${maxLat}°</div>
         <div><strong>Lon:</strong> ${minLon}° to ${maxLon}°</div>
       `;
@@ -1524,9 +1526,9 @@ function showWaypointPopup(idx) {
   popup.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
       <h3 style="margin:0;color:var(--panel-fg)">${escapeHtml(wp.name)}${isTarget ? ' ⭐' : ''}</h3>
-      <button onclick="closeWaypointPopup()" style="background:none;border:none;color:var(--muted);font-size:1.5rem;cursor:pointer;padding:0;line-height:1">&times;</button>
+      <button onclick="closeWaypointPopup()" style="background:none;border:none;color:var(--panel-fg);font-size:1.5rem;cursor:pointer;padding:0;line-height:1">&times;</button>
     </div>
-    <div style="color:var(--muted);font-size:0.85rem;margin-bottom:0.5rem">
+    <div style="color:var(--panel-fg);font-size:0.85rem;margin-bottom:0.5rem">
       <div>Lat: ${wp.lat.toFixed(6)}°</div>
       <div>Lon: ${wp.lon.toFixed(6)}°</div>
     </div>
@@ -1736,7 +1738,7 @@ function escapeHtml(s) {
 async function loadWaypoints() {
   if (!currentMap) {
     document.getElementById('waypoint-status').textContent = 'Error: No map loaded';
-    document.getElementById('waypoint-list').innerHTML = '<p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0">Load a map above to manage waypoints</p>';
+    document.getElementById('waypoint-list').innerHTML = '<p style="color:var(--panel-fg);font-size:0.85rem;margin:0.5rem 0">Load a map above to manage waypoints</p>';
     return;
   }
   
@@ -1854,7 +1856,7 @@ async function addWaypointViaAPI(name, lat, lon, notes) {
 async function renameWaypoint(idx) {
   const wp = waypoints[idx];
   if (!wp) return;
-  const newName = prompt('Enter waypoint name:', wp.name);
+  const newName = await hwPrompt('Enter waypoint name:', wp.name);
   if (newName === null) return;
   const name = newName.trim().substring(0, 11);
   if (!name) return;
@@ -1868,7 +1870,7 @@ async function renameWaypoint(idx) {
     body
   });
   const data = await resp.json();
-  if (!data.success) alert('Error: ' + (data.error || 'Failed'));
+  if (!data.success) await hwAlert('Error: ' + (data.error || 'Failed'));
   await loadWaypoints();
 }
 
@@ -1876,7 +1878,7 @@ async function editWaypointNotes(idx) {
   const wp = waypoints[idx];
   if (!wp) return;
   const existing = (wp.notes || '').toString();
-  const newNotes = prompt('Enter notes (optional, max 255 chars):', existing);
+  const newNotes = await hwPrompt('Enter notes (optional, max 255 chars):', existing);
   if (newNotes === null) return;
   const notes = newNotes.substring(0, 255);
   const body = new URLSearchParams();
@@ -2031,7 +2033,7 @@ function updateRoutesList() {
   if (!el) return;
 
   if (!currentMap || !currentMap.features) {
-    el.innerHTML = '<div style="color:var(--muted)">Load a map to see routes</div>';
+    el.innerHTML = '<div style="color:var(--panel-fg)">Load a map to see routes</div>';
     return;
   }
 
@@ -2057,7 +2059,7 @@ function updateRoutesList() {
     const items = Array.from(byKey.values()).sort((a, b) => a.name.localeCompare(b.name));
     html += `<div style="margin:0 0 6px 0"><strong style="color:${sec.color}">${sec.title} (${items.length})</strong></div>`;
     if (items.length === 0) {
-      html += '<div style="color:var(--muted);margin:0 0 10px 0">None</div>';
+      html += '<div style="color:var(--panel-fg);margin:0 0 10px 0">None</div>';
       continue;
     }
 
@@ -2097,7 +2099,7 @@ function searchMapNames() {
   
   if (!currentMap || query.length < 2) {
     resultsDiv.innerHTML = query.length > 0 && query.length < 2 ? 
-      '<div style="color:var(--muted);padding:0.5rem">Type at least 2 characters...</div>' : '';
+      '<div style="color:var(--panel-fg);padding:0.5rem">Type at least 2 characters...</div>' : '';
     return;
   }
   
@@ -2114,7 +2116,7 @@ function searchMapNames() {
   }
   
   if (matches.length === 0) {
-    resultsDiv.innerHTML = '<div style="color:var(--muted);padding:0.5rem">No results found</div>';
+    resultsDiv.innerHTML = '<div style="color:var(--panel-fg);padding:0.5rem">No results found</div>';
     return;
   }
   
@@ -2303,7 +2305,7 @@ async function loadMapFeatures() {
         const color = catColors[cat] || '#888';
         html += `<div style="margin-bottom:8px">`;
         html += `<div style="color:${color};font-weight:bold;margin-bottom:4px">${catNames[cat] || cat} (${items.length})</div>`;
-        html += `<div style="color:var(--muted);padding-left:8px">`;
+        html += `<div style="color:var(--panel-fg);padding-left:8px">`;
         items.slice(0, 20).forEach(name => {
           html += `<div style="margin:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${name}</div>`;
         });
