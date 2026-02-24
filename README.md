@@ -1,6 +1,6 @@
 # Hardware One
 
-> Hardware One is an ESP32-based firmware platform that turns a small microcontroller board into a capable, networked device. Attach sensors, a display, and input hardware, flash the firmware, and you have a standalone device with a web UI, an OLED interface, an ESP-NOW mesh network, and a full CLI — all configurable on the fly.
+> Hardware One is an ESP32-based platform that turns a small microcontroller board into a capable, networked device. Attach sensors, a display, and input hardware, flash the firmware, and you have a standalone device with a web UI, an OLED interface, an ESP-NOW mesh network, and a full CLI — all configurable on the fly.
 
 Built on **ESP-IDF** (not Arduino IDE). Runs on the **Seeed XIAO ESP32-S3**, **Adafruit QT PY ESP32**, and **Adafruit Feather ESP32** boards.
 
