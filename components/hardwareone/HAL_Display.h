@@ -142,6 +142,15 @@
 
 #if DISPLAY_ENABLED
 
+// Header configuration (scales with display height)
+#if DISPLAY_HEIGHT <= 64
+  #define DISPLAY_HEADER_HEIGHT   10
+#elif DISPLAY_HEIGHT <= 128
+  #define DISPLAY_HEADER_HEIGHT   12
+#else
+  #define DISPLAY_HEADER_HEIGHT   16
+#endif
+
 // Footer configuration (scales with display height)
 #if DISPLAY_HEIGHT <= 64
   #define DISPLAY_FOOTER_HEIGHT   10
@@ -151,7 +160,9 @@
   #define DISPLAY_FOOTER_HEIGHT   20
 #endif
 
-#define DISPLAY_CONTENT_HEIGHT  (DISPLAY_HEIGHT - DISPLAY_FOOTER_HEIGHT)
+// Content area is between header and footer (with 1px gap after header)
+#define DISPLAY_CONTENT_HEIGHT  (DISPLAY_HEIGHT - DISPLAY_HEADER_HEIGHT - DISPLAY_FOOTER_HEIGHT - 1)
+#define DISPLAY_CONTENT_START_Y (DISPLAY_HEADER_HEIGHT + 1)
 
 // Convenience macros for common coordinates
 #define DISPLAY_CENTER_X        (DISPLAY_WIDTH / 2)
@@ -174,11 +185,17 @@
   #ifndef SCREEN_HEIGHT
     #define SCREEN_HEIGHT         DISPLAY_HEIGHT
   #endif
+  #ifndef OLED_HEADER_HEIGHT
+    #define OLED_HEADER_HEIGHT    DISPLAY_HEADER_HEIGHT
+  #endif
   #ifndef OLED_FOOTER_HEIGHT
     #define OLED_FOOTER_HEIGHT    DISPLAY_FOOTER_HEIGHT
   #endif
   #ifndef OLED_CONTENT_HEIGHT
     #define OLED_CONTENT_HEIGHT   DISPLAY_CONTENT_HEIGHT
+  #endif
+  #ifndef OLED_CONTENT_START_Y
+    #define OLED_CONTENT_START_Y  DISPLAY_CONTENT_START_Y
   #endif
 #endif
 

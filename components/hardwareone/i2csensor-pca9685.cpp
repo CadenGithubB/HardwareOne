@@ -160,7 +160,7 @@ const char* cmd_servoprofile(const String& args) {
   strncpy(servoProfiles[channel].name, name.c_str(), sizeof(servoProfiles[channel].name) - 1);
   servoProfiles[channel].name[sizeof(servoProfiles[channel].name) - 1] = '\0';
   
-  snprintf(getDebugBuffer(), 1024, "✓ Servo profile saved: ch%d '%s' [%d-%dµs, center:%dµs]", 
+  snprintf(getDebugBuffer(), 1024, "Servo profile saved: ch%d '%s' [%d-%dµs, center:%dµs]", 
            channel, servoProfiles[channel].name, minPulse, maxPulse, centerPulse);
   return getDebugBuffer();
 }

@@ -3,6 +3,7 @@
  */
 
 #include "HAL_Input.h"
+#include "System_Debug.h"
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor-seesaw.h"
 #endif
@@ -70,9 +71,9 @@ void inputAbstractionInit() {
   gCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEESAW;
 #endif
   
-  Serial.printf("[HAL_INPUT] Initialized with controller type: %d\n", gCurrentControllerType);
+  DEBUG_SENSORSF("[HAL_INPUT] Initialized with controller type: %d", gCurrentControllerType);
 #if ENABLE_GAMEPAD_SENSOR
-  Serial.printf("[HAL_INPUT] Button mappings: A=0x%08lX B=0x%08lX X=0x%08lX Y=0x%08lX START=0x%08lX\n",
+  DEBUG_SENSORSF("[HAL_INPUT] Button mappings: A=0x%08lX B=0x%08lX X=0x%08lX Y=0x%08lX START=0x%08lX",
                 (unsigned long)GAMEPAD_BUTTON_A, (unsigned long)GAMEPAD_BUTTON_B,
                 (unsigned long)GAMEPAD_BUTTON_X, (unsigned long)GAMEPAD_BUTTON_Y,
                 (unsigned long)GAMEPAD_BUTTON_START);
@@ -85,13 +86,13 @@ InputControllerType inputGetControllerType() {
 
 void inputSetControllerType(InputControllerType type) {
   gCurrentControllerType = type;
-  Serial.printf("[HAL_INPUT] Controller type changed to: %d\n", type);
+  DEBUG_SENSORSF("[HAL_INPUT] Controller type changed to: %d", type);
 }
 
 uint32_t inputGetButtonMask(InputButton button) {
   // Validate button index
   if (button < INPUT_BUTTON_A || button > INPUT_BUTTON_SELECT) {
-    Serial.printf("[HAL_INPUT] ERROR: Invalid button: %d\n", button);
+    ERROR_SENSORSF("[HAL_INPUT] Invalid button: %d", button);
     return 0;
   }
   
@@ -107,7 +108,7 @@ uint32_t inputGetButtonMask(InputButton button) {
       return gCustomMapping[button];
       
     default:
-      Serial.printf("[HAL_INPUT] ERROR: Unknown controller type: %d\n", gCurrentControllerType);
+      ERROR_SENSORSF("[HAL_INPUT] Unknown controller type: %d", gCurrentControllerType);
       return 0;
   }
 }
@@ -123,7 +124,7 @@ bool inputIsButtonPressed(uint32_t buttonState, InputButton button) {
 void inputSetCustomButtonMapping(InputButton button, uint32_t mask) {
   if (button >= INPUT_BUTTON_A && button <= INPUT_BUTTON_SELECT) {
     gCustomMapping[button] = mask;
-    Serial.printf("[HAL_INPUT] Custom mapping set: button %d = 0x%08lX\n", 
+    DEBUG_SENSORSF("[HAL_INPUT] Custom mapping set: button %d = 0x%08lX", 
                   button, (unsigned long)mask);
   }
 }
