@@ -48,15 +48,23 @@ bool initFilesystem();
  * File permission flags
  */
 enum FilePermission {
-  PERM_READ = 0x01,
-  PERM_WRITE = 0x02,
+  PERM_READ   = 0x01,
+  PERM_WRITE  = 0x02,
   PERM_DELETE = 0x04,
-  PERM_EDIT = (PERM_READ | PERM_WRITE),
-  PERM_ALL = (PERM_READ | PERM_WRITE | PERM_DELETE)
+  PERM_RENAME = 0x08,
+  PERM_EDIT   = (PERM_READ | PERM_WRITE),
+  PERM_ALL    = (PERM_READ | PERM_WRITE | PERM_DELETE | PERM_RENAME)
 };
 
 /**
- * Check if a file/folder can be deleted
+ * Check if a file can be read (blocks sensitive files with credentials/passwords)
+ * @param path Absolute path to check
+ * @return true if reading is allowed
+ */
+bool canRead(const String& path);
+
+/**
+ * Check if a file can be deleted
  * @param path Absolute path to check
  * @return true if deletion is allowed
  */
@@ -68,6 +76,13 @@ bool canDelete(const String& path);
  * @return true if editing is allowed
  */
 bool canEdit(const String& path);
+
+/**
+ * Check if a file/folder can be renamed
+ * @param path Absolute path to check
+ * @return true if renaming is allowed
+ */
+bool canRename(const String& path);
 
 /**
  * Check if a file/folder can be created in the given path

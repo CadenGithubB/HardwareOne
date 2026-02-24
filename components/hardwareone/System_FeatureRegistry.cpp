@@ -7,6 +7,7 @@
 #include "System_FeatureRegistry.h"
 #include "System_Settings.h"
 #include "System_Command.h"
+#include "System_MemUtil.h"
 #include <esp_heap_caps.h>
 
 // External settings
@@ -167,7 +168,7 @@ static bool isPresenceCompiled() {
 }
 
 static bool isAutomationCompiled() {
-#if ENABLE_AUTOMATIONS
+#if ENABLE_AUTOMATION
   return true;
 #else
   return false;
@@ -427,11 +428,11 @@ const char* cmd_features(const String& argsIn) {
   
   // No args - show all features with heap estimates
   if (args.length() == 0) {
-    static char buf[2048];
+    PSRAM_STATIC_BUF(buf, 2048);
     uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
     uint32_t enabledCost = getEnabledFeaturesHeapEstimate();
     
-    int pos = snprintf(buf, sizeof(buf),
+    int pos = snprintf(buf, buf_SIZE,
       "[Feature Manager] (heap estimates)\n"
       "═══════════════════════════════════════════\n");
     
@@ -443,7 +444,7 @@ const char* cmd_features(const String& argsIn) {
       // Print category header
       if (f->category != lastCat) {
         lastCat = f->category;
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "\n[%s]\n", getCategoryName(f->category));
+        pos += snprintf(buf + pos, buf_SIZE - pos, "\n[%s]\n", getCategoryName(f->category));
       }
       
       bool compiled = isFeatureCompiled(f);
@@ -460,12 +461,12 @@ const char* cmd_features(const String& argsIn) {
       
       const char* essential = (f->flags & FEATURE_FLAG_ESSENTIAL) ? "*" : " ";
       
-      pos += snprintf(buf + pos, sizeof(buf) - pos,
+      pos += snprintf(buf + pos, buf_SIZE - pos,
         " %s%-12s ~%2dKB  %s\n",
         essential, f->id, f->heapCostKB, status);
     }
     
-    pos += snprintf(buf + pos, sizeof(buf) - pos,
+    pos += snprintf(buf + pos, buf_SIZE - pos,
       "\n═══════════════════════════════════════════\n"
       "Enabled: ~%luKB | Free: %luKB | Max: ~%luKB\n"
       "* = essential (should stay enabled)\n"
@@ -539,7 +540,6 @@ const char* cmd_features(const String& argsIn) {
   bool wasEnabled = *f->enabledSetting;
   *f->enabledSetting = enable;
   
-  extern bool writeSettingsJson();
   writeSettingsJson();
   
   static char result[128];

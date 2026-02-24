@@ -22,6 +22,9 @@ enum RemoteSensorType {
   REMOTE_SENSOR_FMRADIO = 5,
   REMOTE_SENSOR_CAMERA = 6,
   REMOTE_SENSOR_MICROPHONE = 7,
+  REMOTE_SENSOR_RTC = 8,
+  REMOTE_SENSOR_PRESENCE = 9,
+  REMOTE_SENSOR_APDS = 10,
   REMOTE_SENSOR_MAX
 };
 
@@ -107,6 +110,9 @@ const char* sensorTypeToString(RemoteSensorType type);
 // Helper: Convert string to sensor type
 RemoteSensorType stringToSensorType(const char* str);
 
+// Find or create cache entry for a remote sensor (used by v3 handler)
+RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* deviceName, RemoteSensorType sensorType);
+
 // ==========================
 // Sensor Broadcast Control
 // ==========================
@@ -123,6 +129,31 @@ void espnowSensorStatusPeriodicTick();
 // Build thermal data JSON with integer values (no decimals) for remote streaming
 // Returns length of JSON string written to buf
 int buildThermalDataJSONInteger(char* buf, size_t bufSize);
+
+// ==========================
+// Remote GPS Data Access
+// ==========================
+
+// Structure for accessing remote GPS data
+struct RemoteGPSData {
+  bool valid;           // Data is valid and not expired
+  bool hasFix;          // GPS has valid fix
+  int fixQuality;       // Fix quality (0=invalid, 1=GPS, 2=DGPS)
+  int satellites;       // Number of satellites
+  float latitude;       // Latitude in degrees (negative = South)
+  float longitude;      // Longitude in degrees (negative = West)
+  float altitude;       // Altitude in meters
+  float speed;          // Speed in knots
+  unsigned long lastUpdate; // When data was last received
+  char deviceName[32];  // Name of device providing GPS
+};
+
+// Get remote GPS data from paired device or mesh workers
+// Returns true if valid GPS data is available from a remote source
+bool getRemoteGPSData(RemoteGPSData* outData);
+
+// Check if remote GPS data is available (quick check without full parse)
+bool hasRemoteGPSData();
 
 #endif // ENABLE_ESPNOW
 #endif // ESPNOW_SENSORS_H

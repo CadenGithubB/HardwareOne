@@ -1,6 +1,11 @@
 /**
  * System_I2C.h - Unified I2C System Interface
  * Clean interface that delegates to I2CDevice/Manager architecture
+ *
+ * This header provides: enqueueDeviceStart(), isInQueue(), getQueuePosition(),
+ * handleDeviceStopped(), sensorStatusBumpWith(), drainDebugRing(),
+ * gSensorPollingPaused, i2cMutex, i2cPingAddress(), and all I2C helpers.
+ * Include this header instead of using 'extern' declarations for these functions.
  */
 
 #ifndef I2C_SYSTEM_H
@@ -65,12 +70,12 @@ auto i2cTaskWithTimeout(uint8_t address, uint32_t clockHz, uint32_t maxMs, Func&
 }
 
 template<typename Func>
-void i2cTransactionVoid(uint32_t clockHz, uint32_t timeoutMs, Func&& operation) {
+void i2cOledTransactionVoid(uint32_t clockHz, uint32_t timeoutMs, Func&& operation) {
   i2cDeviceTransactionVoid(0x3D, clockHz, timeoutMs, std::forward<Func>(operation));
 }
 
 template<typename Func>
-auto i2cTransaction(uint32_t clockHz, uint32_t timeoutMs, Func&& operation) 
+auto i2cOledTransaction(uint32_t clockHz, uint32_t timeoutMs, Func&& operation) 
     -> decltype(operation()) {
   return i2cDeviceTransaction(0x3D, clockHz, timeoutMs, std::forward<Func>(operation));
 }
@@ -90,21 +95,53 @@ void i2cTransactionNACKTolerant(uint8_t address, uint32_t clockHz, uint32_t time
   dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::NACK_TOLERANT);
 }
 
+// ============================================================================
+// Task Stack Safety - Auto-disable sensor if stack usage exceeds threshold
+// ============================================================================
+// Call this periodically (e.g. every 10s) from any sensor task's watermark check.
+// If remaining stack drops below 5% of total, the sensor is auto-disabled and
+// the standard shutdown path at the top of the task loop handles cleanup.
+//
+// Usage:  if (checkTaskStackSafety("presence", stackWords, &presenceEnabled)) break;
+//
+// Returns true if the task should exit (enabled flag was set to false).
+inline bool checkTaskStackSafety(const char* sensorName, uint32_t totalStackWords, volatile bool* enabledFlag) {
+  UBaseType_t freeWords = uxTaskGetStackHighWaterMark(nullptr);
+  uint32_t usedPercent = (totalStackWords > 0) ? ((totalStackWords - freeWords) * 100 / totalStackWords) : 0;
+  if (freeWords < (totalStackWords / 20)) {  // Less than 5% remaining
+    // CRITICAL: About to overflow - auto-disable to prevent crash
+    extern void sensorStatusBumpWith(const char* reason);
+    char reason[64];
+    snprintf(reason, sizeof(reason), "%s@stack_overflow_bailout", sensorName);
+    if (enabledFlag) *enabledFlag = false;
+    sensorStatusBumpWith(reason);
+    // Use ERROR level logging - always visible regardless of debug flags
+    log_e("[STACK_SAFETY] %s task at %u%% stack usage (%u/%u words free) - AUTO-DISABLED",
+          sensorName, usedPercent, (unsigned)freeWords, totalStackWords);
+    return true;  // Caller should break/return to hit the shutdown path
+  }
+  return false;
+}
+
 // Ping/probe helpers - DO NOT auto-register devices during probe!
 // These are used by i2cscan to check if devices exist, not to set them up
 inline uint8_t i2cProbeAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs) {
   extern TwoWire Wire1;
-  extern SemaphoreHandle_t i2cMutex;
   extern bool gI2CBusEnabled;
   
   if (!gI2CBusEnabled) return 4;
   
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return 4;
+  
+  SemaphoreHandle_t mutex = mgr->getBusMutex();
   uint8_t err = 4;
-  if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {
+  if (mutex && xSemaphoreTakeRecursive(mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {
     Wire1.setClock(clockHz);
     Wire1.beginTransmission(address);
     err = Wire1.endTransmission();
-    xSemaphoreGive(i2cMutex);
+    Wire1.setClock(100000);
+    xSemaphoreGiveRecursive(mutex);
   }
   return err;
 }
@@ -113,25 +150,31 @@ inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs
   return (i2cProbeAddress(address, clockHz, timeoutMs) == 0);
 }
 
+// Centralized device stop handler: ESP-NOW broadcast + notification
+void handleDeviceStopped(I2CDeviceType device);
+
+// Display name for I2CDeviceType (e.g., I2C_DEVICE_IMU → "IMU")
+const char* deviceTypeDisplayName(I2CDeviceType device);
+
 // Queue functions
-inline bool enqueueSensorStart(SensorType sensor) {
+inline bool enqueueDeviceStart(I2CDeviceType device) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  return mgr ? mgr->enqueueSensorStart(sensor) : false;
+  return mgr ? mgr->enqueueDeviceStart(device) : false;
 }
 
-inline bool dequeueSensorStart(SensorStartRequest* req) {
+inline bool dequeueDeviceStart(I2CDeviceStartRequest* req) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  return mgr ? mgr->dequeueSensorStart(req) : false;
+  return mgr ? mgr->dequeueDeviceStart(req) : false;
 }
 
-inline bool isInQueue(SensorType sensor) {
+inline bool isInQueue(I2CDeviceType device) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  return mgr ? mgr->isInQueue(sensor) : false;
+  return mgr ? mgr->isInQueue(device) : false;
 }
 
-inline int getQueuePosition(SensorType sensor) {
+inline int getQueuePosition(I2CDeviceType device) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  return mgr ? mgr->getQueuePosition(sensor) : -1;
+  return mgr ? mgr->getQueuePosition(device) : -1;
 }
 
 inline int getQueueDepth() {
@@ -184,11 +227,6 @@ inline bool i2cBusRecovery() {
   if (!mgr) return false;
   mgr->performBusRecovery();
   return true;
-}
-
-inline void i2cBusHealthCheck() {
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  if (mgr) mgr->healthCheck();
 }
 
 #if ENABLE_THERMAL_SENSOR
@@ -295,7 +333,7 @@ const char* cmd_tof(const String& cmd);
 const char* cmd_imustart(const String& cmd);
 const char* cmd_imustop(const String& cmd);
 const char* cmd_imu(const String& cmd);
-const char* cmd_gamepadstart(const String& cmd);
+const char* cmd_gamepadstart_queued(const String& cmd);
 const char* cmd_gamepadstop(const String& cmd);
 const char* cmd_gamepad(const String& cmd);
 const char* cmd_apdscolor(const String& cmd);
@@ -380,42 +418,7 @@ extern volatile bool thermalPendingFirstFrame;
 // Defaults are board-specific - see System_BuildConfig.h for BOARD_NAME and pin mappings
 #define I2C_WIRE1_DEFAULT_FREQ 100000
 
-// ============================================================================
-// Legacy Compatibility Externs (for old code still using these)
-// ============================================================================
-extern uint32_t gWire1CurrentHz;
-extern uint32_t* gI2CClockStack;
-extern int gI2CClockStackDepth;
-extern const int kI2CClockStackMax;
-
-// Legacy health tracking (kept for compatibility, delegates to manager)
-#define MAX_TRACKED_I2C_DEVICES 8
-#define I2C_DEVICE_ERROR_THRESHOLD 3
-#define I2C_DEVICE_RECOVERY_TIMEOUT_MS 30000
-#define I2C_DEVICE_INIT_GRACE_PERIOD_MS 15000
-
-struct I2CDeviceHealth {
-  uint8_t address;
-  uint8_t consecutiveErrors;
-  uint16_t totalErrors;
-  bool degraded;
-  uint32_t lastErrorTime;
-  uint32_t lastSuccessTime;
-  uint32_t registrationTime;
-  const char* deviceName;
-  uint8_t nackCount;
-  uint8_t timeoutCount;
-  uint8_t busErrorCount;
-  I2CErrorType lastErrorType;
-  uint32_t adaptiveTimeoutMs;
-};
-
-extern I2CDeviceHealth gI2CDeviceHealth[MAX_TRACKED_I2C_DEVICES];
-extern int gI2CDeviceCount;
-
-// Legacy health API (delegates to manager)
-void i2cRegisterDevice(uint8_t address, const char* name);
+// Grace period reset (used during sensor re-init to clear stale error state)
 void i2cResetGracePeriod(uint8_t address);
-bool i2cAttemptDeviceRecovery(uint8_t address);
 
 #endif // I2C_SYSTEM_H

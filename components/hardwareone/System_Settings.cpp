@@ -527,6 +527,7 @@ void applySettings() {
   if (gSettings.debugEspNowMesh) setDebugFlag(DEBUG_ESPNOW_MESH);
   if (gSettings.debugEspNowTopo) setDebugFlag(DEBUG_ESPNOW_TOPO);
   if (gSettings.debugEspNowEncryption) setDebugFlag(DEBUG_ESPNOW_ENCRYPTION);
+  if (gSettings.debugEspNowMetadata) setDebugFlag(DEBUG_ESPNOW_METADATA);
   if (gSettings.debugAutoScheduler) setDebugFlag(DEBUG_AUTO_SCHEDULER);
   if (gSettings.debugAutoExec) setDebugFlag(DEBUG_AUTO_EXEC);
   if (gSettings.debugAutoCondition) setDebugFlag(DEBUG_AUTO_CONDITION);
@@ -1137,6 +1138,7 @@ static const SettingEntry debugSettingEntries[] = {
   { "espNowMesh", SETTING_BOOL, &gSettings.debugEspNowMesh, 0, 0, nullptr, 0, 1, "ESP-NOW Mesh", nullptr },
   { "espNowTopo", SETTING_BOOL, &gSettings.debugEspNowTopo, 0, 0, nullptr, 0, 1, "ESP-NOW Topology", nullptr },
   { "espNowEncryption", SETTING_BOOL, &gSettings.debugEspNowEncryption, 0, 0, nullptr, 0, 1, "ESP-NOW Encryption", nullptr },
+  { "espNowMetadata", SETTING_BOOL, &gSettings.debugEspNowMetadata, 0, 0, nullptr, 0, 1, "ESP-NOW Metadata", nullptr },
   { "autoScheduler", SETTING_BOOL, &gSettings.debugAutoScheduler, 0, 0, nullptr, 0, 1, "Automations Scheduler", nullptr },
   { "autoExec", SETTING_BOOL, &gSettings.debugAutoExec, 0, 0, nullptr, 0, 1, "Automations Execution", nullptr },
   { "autoCondition", SETTING_BOOL, &gSettings.debugAutoCondition, 0, 0, nullptr, 0, 1, "Automations Conditions", nullptr },

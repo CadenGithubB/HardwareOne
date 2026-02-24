@@ -2,9 +2,11 @@
 
 #if ENABLE_ESP_SR
 
+#include "System_Notifications.h"
 #include "System_Debug.h"
 #include "System_VFS.h"
 #include "System_BuildConfig.h"
+#include "System_MemUtil.h"
 #include "System_Microphone.h"
 #include "System_Mutex.h"
 #include "System_Command.h"
@@ -88,7 +90,6 @@ static String gVoiceArmedByIp = "";
 static uint32_t gVoiceArmedAtMs = 0;
 
 extern AuthContext gExecAuthContext;
-extern void broadcastOutput(const char* msg);
 extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
 
 static void ensureVoiceArmMutex() {
@@ -408,12 +409,12 @@ static bool loadTargetsForCategory(const char* category) {
         esp_err_t err = esp_mn_commands_add(nextId, entry->voiceTarget);
         if (err == ESP_OK) {
           addVoiceCliMapping(nextId, entry->name);  // Map target ID to CLI command
-          INFO_SRF("[HIER-DEBUG]   ✓ Added to MultiNet: id=%d phrase='%s' -> cli='%s'", 
+          INFO_SRF("[HIER-DEBUG]   OK Added to MultiNet: id=%d phrase='%s' -> cli='%s'", 
                    nextId, entry->voiceTarget, entry->name);
           nextId++;
           loaded++;
         } else {
-          WARN_SYSTEMF("[HIER-DEBUG]   ✗ Failed to add '%s': err=0x%x", entry->voiceTarget, err);
+          WARN_SYSTEMF("[HIER-DEBUG]   FAIL Failed to add '%s': err=0x%x", entry->voiceTarget, err);
         }
       } else {
         INFO_SRF("[HIER-DEBUG]   (no target - single-stage command)");
@@ -500,11 +501,11 @@ static void loadCategories() {
     esp_err_t err = esp_mn_commands_add(nextId, entry->voiceCategory);
     if (err == ESP_OK) {
       addVoiceCliMapping(nextId, entry->voiceCategory);  // Map to category name
-      INFO_SRF("[HIER-DEBUG]     ✓ Added category to MultiNet: id=%d phrase='%s'", nextId, entry->voiceCategory);
+      INFO_SRF("[HIER-DEBUG]     OK Added category to MultiNet: id=%d phrase='%s'", nextId, entry->voiceCategory);
       nextId++;
       loaded++;
     } else {
-      WARN_SYSTEMF("[HIER-DEBUG]     ✗ Failed to add category '%s': err=0x%x", entry->voiceCategory, err);
+      WARN_SYSTEMF("[HIER-DEBUG]     FAIL Failed to add category '%s': err=0x%x", entry->voiceCategory, err);
     }
   }
   
@@ -914,12 +915,15 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
         String normCat = normalizePhrase(category);
         Serial.printf("\033[1;32m[Voice] OK, %s.\033[0m\n", normCat.c_str());
         
-        static char cmdOut[2048];
-        bool ok = executeVoiceCommandAsArmedUser(cliCmd, cmdOut, sizeof(cmdOut));
+        static char* cmdOut = nullptr;
+        if (!cmdOut) cmdOut = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "sr.cmdOut");
+        if (!cmdOut) { WARN_SYSTEMF("Failed to alloc cmdOut"); return; }
+        bool ok = executeVoiceCommandAsArmedUser(cliCmd, cmdOut, 2048);
         INFO_SRF("[HIER] Result: %s", ok ? cmdOut : cmdOut);
         if (!ok) {
           broadcastOutput("[VOICE] Command rejected (voice not armed or not authorized)");
         }
+        notifyVoiceCommandResult(normCat.c_str(), ok);
         gCommandCount++;
         gLastCommand = category;
       } else {
@@ -985,12 +989,15 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
         gLastCommand = gCurrentCategory + " " + target;
       }
       
-      static char cmdOut[2048];
-      bool ok = executeVoiceCommandAsArmedUser(cliCmd, cmdOut, sizeof(cmdOut));
+      static char* cmdOut = nullptr;
+      if (!cmdOut) cmdOut = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "sr.cmdOut");
+      if (!cmdOut) { WARN_SYSTEMF("Failed to alloc cmdOut"); return; }
+      bool ok = executeVoiceCommandAsArmedUser(cliCmd, cmdOut, 2048);
       INFO_SRF("[HIER] RESULT: %s", ok ? cmdOut : cmdOut);
       if (!ok) {
         broadcastOutput("[VOICE] Command rejected (voice not armed or not authorized)");
       }
+      notifyVoiceCommandResult(normTarget.c_str(), ok);
       gCommandCount++;
     } else {
       WARN_SYSTEMF("[HIER] No CLI command found for '%s'->'%s'->'%s'!", 
@@ -1011,8 +1018,10 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
                  voiceStateToString(gVoiceState));
     if (mappedValue) {
       INFO_SRF("Voice command %d ('%s') -> CLI: %s", commandId, phrase ? phrase : "", mappedValue);
-      static char cmdOut[2048];
-      bool ok = executeVoiceCommandAsArmedUser(mappedValue, cmdOut, sizeof(cmdOut));
+      static char* cmdOut = nullptr;
+      if (!cmdOut) cmdOut = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "sr.cmdOut");
+      if (!cmdOut) { WARN_SYSTEMF("Failed to alloc cmdOut"); return; }
+      bool ok = executeVoiceCommandAsArmedUser(mappedValue, cmdOut, 2048);
       INFO_SRF("CLI result: %s", ok ? cmdOut : cmdOut);
       if (!ok) {
         broadcastOutput("[VOICE] Command rejected (voice not armed or not authorized)");
@@ -2229,6 +2238,7 @@ static void srTask(void* param) {
           // User-facing feedback
           Serial.println();
           Serial.println("\033[1;36m[Voice] Yes?\033[0m");
+          notifyVoiceListening();
           INFO_SRF("[HIER-DEBUG] Voice CLI mappings count: %u", (unsigned)gVoiceCliMappingCount);
           INFO_SRF("Wake stats: count=%u, idx=%d, model=%d, vol=%.1f dB, wake_len=%d",
                    gWakeWordCount, fetchResult->wake_word_index, fetchResult->wakenet_model_index,
@@ -2689,7 +2699,7 @@ void setESPSRCommandCallback(void (*callback)(int, const char*)) {
 }
 
 void buildESPSRStatusJson(String& output) {
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   doc["enabled"] = true;
   doc["initialized"] = gESPSRInitialized;
   doc["running"] = gESPSRRunning;
@@ -3467,8 +3477,7 @@ static const char* cmd_sr_timeout(const String& cmd) {
     return "Error: timeout must be 1000-30000 ms";
   }
   
-  gSettings.srCommandTimeout = val;
-  writeSettingsJson();
+  setSetting(gSettings.srCommandTimeout, val);
   static char buf[80];
   snprintf(buf, sizeof(buf), "Command timeout set to %d ms (%.1f sec). Saved.", val, val / 1000.0f);
   return buf;
@@ -3522,11 +3531,10 @@ static const char* cmd_sr_tuning_swgain(const String& cmd) {
   int mg = (int)lroundf((val / 24.0f) * 50.0f);
   if (mg < 0) mg = 0;
   if (mg > 100) mg = 100;
-  gSettings.microphoneGain = mg;
+  setSetting(gSettings.microphoneGain, mg);
 #if ENABLE_MICROPHONE_SENSOR
   micGain = mg;
 #endif
-  writeSettingsJson();
   float actualSwgain = 24.0f * ((float)mg / 50.0f);
   static char buf[120];
   snprintf(buf, sizeof(buf), "OK (micgain=%d%%, swgain=%.1f)", mg, actualSwgain);
@@ -3549,8 +3557,7 @@ static const char* cmd_sr_tuning_gain(const String& cmd) {
     return "Error: gain must be 0.1-10.0";
   }
   
-  gSettings.srAfeGain = val;
-  writeSettingsJson();
+  setSetting(gSettings.srAfeGain, val);
   static char buf[80];
   snprintf(buf, sizeof(buf), "AFE gain set to %.1f. Restart SR to apply.", val);
   return buf;
@@ -3572,8 +3579,7 @@ static const char* cmd_sr_tuning_agc(const String& cmd) {
     return "Error: agc must be 0-3";
   }
   
-  gSettings.srAgcMode = val;
-  writeSettingsJson();
+  setSetting(gSettings.srAgcMode, val);
   static char buf[80];
   const char* modeStr[] = {"off", "-9dB", "-6dB", "-3dB"};
   snprintf(buf, sizeof(buf), "AGC mode set to %d (%s). Restart SR to apply.", val, modeStr[val]);
@@ -3596,8 +3602,7 @@ static const char* cmd_sr_tuning_vad(const String& cmd) {
     return "Error: vad must be 0-4";
   }
   
-  gSettings.srVadMode = val;
-  writeSettingsJson();
+  setSetting(gSettings.srVadMode, val);
   static char buf[80];
   snprintf(buf, sizeof(buf), "VAD sensitivity set to %d. Restart SR to apply.", val);
   return buf;
@@ -3769,8 +3774,11 @@ static const char* cmd_sr_snip_config(const String& cmd) {
 const CommandEntry espsrCommands[] = {
   { "sr", "ESP-SR speech recognition commands.", false, cmd_sr, "Usage: sr <enable|start|stop|status|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>" },
   { "sr enable", "Enable/disable ESP-SR (compile-time flag).", true, cmd_sr_enable, "Usage: sr enable <0|1>" },
+  { "opensr", "Start ESP-SR pipeline.", false, cmd_sr_start, "Usage: opensr" },
+  { "closesr", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: closesr", "voice", "close" },
+  { "srstatus", "Show ESP-SR status.", false, cmd_sr_status, "Usage: srstatus" },
   { "sr start", "Start ESP-SR pipeline.", false, cmd_sr_start, "Usage: sr start" },
-  { "sr stop", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: sr stop", "voice", "close" },
+  { "sr stop", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: sr stop" },
   { "sr status", "Show ESP-SR status.", false, cmd_sr_status, "Usage: sr status" },
   { "voice arm", "Arm voice command execution as the current authenticated user.", false, cmd_voice_arm_cli, "Usage: voice arm" },
   { "voice disarm", "Disarm voice command execution.", false, cmd_voice_disarm_cli, "Usage: voice disarm" },

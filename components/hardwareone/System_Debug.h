@@ -9,42 +9,66 @@
 // ============================================================================
 // Debug System - Centralized debug output and ring buffer management
 // ============================================================================
+// This header provides: ensureDebugBuffer(), getDebugBuffer(), broadcastOutput(),
+// BROADCAST_PRINTF, DEBUG_*F macros, and all debug flag constants.
+// Include this header instead of using 'extern' declarations for these functions.
 
-// Debug flags (bitmask)
-#define DEBUG_AUTH            0x0001
-#define DEBUG_HTTP            0x0002
-#define DEBUG_SSE             0x0004
-#define DEBUG_CLI             0x0008
-#define DEBUG_SENSORS_FRAME   0x0010
-#define DEBUG_SENSORS_DATA    0x0020
-#define DEBUG_SENSORS         0x0040
-#define DEBUG_FMRADIO         0x0080  // FM Radio operations and I2C debugging
-#define DEBUG_I2C             0x0100  // I2C bus operations, transactions, clock changes, mutex
-#define DEBUG_WIFI            0x0200
-#define DEBUG_STORAGE         0x8000  // File operations (moved from 0x0100 to avoid collision)
-#define DEBUG_PERFORMANCE     0x0400
-#define DEBUG_SYSTEM          0x4000
-#define DEBUG_USERS           0x2000
-#define DEBUG_AUTOMATIONS     0x10000000  // Parent flag (legacy - kept for backward compat)
-#define DEBUG_LOGGER          0x20000
-#define DEBUG_ESPNOW_STREAM   0x400000
-#define DEBUG_MEMORY          0x40000
-#define DEBUG_CMD_FLOW        0x1000
-#define DEBUG_COMMAND_SYSTEM  0x800000  // Modular command registry operations
-#define DEBUG_SETTINGS_SYSTEM 0x1000000 // Settings module registration and validation
-// Additional flags used across the codebase (aligned with main .ino)
-#define DEBUG_SECURITY        0x8000
-#define DEBUG_ESPNOW_CORE     0x10000
-#define DEBUG_ESPNOW_ROUTER   0x80000
-#define DEBUG_ESPNOW_MESH     0x100000
-#define DEBUG_ESPNOW_TOPO     0x200000
-#define DEBUG_ESPNOW_ENCRYPTION 0x80000000  // Bit 31 (was 0x20000000 which collided)
-#define DEBUG_AUTO_SCHEDULER  0x40000000    // Bit 30
-#define DEBUG_AUTO_EXEC       0x2000000     // Bit 25
-#define DEBUG_AUTO_CONDITION  0x4000000     // Bit 26
-#define DEBUG_AUTO_TIMING     0x8000000     // Bit 27
-#define DEBUG_CAMERA          0x20000000    // Bit 29 - Camera operations
-#define DEBUG_MICROPHONE      0x0800        // Bit 11 - Microphone operations (was 0x10000000 which conflicted with AUTOMATIONS)
+// Debug flags (bitmask) - 64-bit mask
+// Bits 0-31: Core system and infrastructure
+#define DEBUG_AUTH            0x0001ULL
+#define DEBUG_HTTP            0x0002ULL
+#define DEBUG_SSE             0x0004ULL
+#define DEBUG_CLI             0x0008ULL
+// Bits 4-5: REMOVED - Legacy DEBUG_SENSORS_FRAME and DEBUG_SENSORS_DATA (replaced by per-sensor flags)
+#define DEBUG_SENSORS         0x0040ULL
+#define DEBUG_FMRADIO         0x0080ULL  // FM Radio operations and I2C debugging
+#define DEBUG_I2C             0x0100ULL  // I2C bus operations, transactions, clock changes, mutex
+#define DEBUG_WIFI            0x0200ULL
+#define DEBUG_PERFORMANCE     0x0400ULL
+#define DEBUG_MICROPHONE      0x0800ULL        // Bit 11 - Microphone operations
+#define DEBUG_CMD_FLOW        0x1000ULL
+#define DEBUG_USERS           0x2000ULL
+#define DEBUG_SYSTEM          0x4000ULL
+#define DEBUG_STORAGE         0x8000ULL  // File operations (NOTE: Also used by DEBUG_SECURITY and DEBUG_G2 - collision acceptable as they're related)
+#define DEBUG_SECURITY        0x8000ULL  // Bit 15 - Security (shares bit with STORAGE/G2)
+#define DEBUG_G2              0x8000ULL  // Bit 15 - G2 smart glasses BLE operations (shares bit with STORAGE/SECURITY)
+#define DEBUG_ESPNOW_CORE     0x10000ULL
+#define DEBUG_LOGGER          0x20000ULL
+#define DEBUG_MEMORY          0x40000ULL
+#define DEBUG_ESPNOW_ROUTER   0x80000ULL
+#define DEBUG_ESPNOW_MESH     0x100000ULL
+#define DEBUG_ESPNOW_TOPO     0x200000ULL
+#define DEBUG_ESPNOW_STREAM   0x400000ULL
+#define DEBUG_COMMAND_SYSTEM  0x800000ULL  // Modular command registry operations
+#define DEBUG_SETTINGS_SYSTEM 0x1000000ULL // Settings module registration and validation
+#define DEBUG_AUTO_EXEC       0x2000000ULL     // Bit 25
+#define DEBUG_AUTO_CONDITION  0x4000000ULL     // Bit 26
+#define DEBUG_AUTO_TIMING     0x8000000ULL     // Bit 27
+#define DEBUG_AUTOMATIONS     0x10000000ULL  // Parent flag (legacy - kept for backward compat)
+#define DEBUG_CAMERA          0x20000000ULL    // Bit 29 - Camera operations
+#define DEBUG_AUTO_SCHEDULER  0x40000000ULL    // Bit 30
+#define DEBUG_ESPNOW_ENCRYPTION 0x80000000ULL  // Bit 31
+
+// Bits 32-39: Individual I2C sensor debug flags
+#define DEBUG_GPS             0x100000000ULL  // Bit 32 - GPS (PA1010D)
+#define DEBUG_RTC             0x200000000ULL  // Bit 33 - RTC (DS3231)
+#define DEBUG_IMU             0x400000000ULL  // Bit 34 - IMU (BNO055)
+#define DEBUG_THERMAL         0x800000000ULL  // Bit 35 - Thermal (MLX90640)
+#define DEBUG_TOF             0x1000000000ULL // Bit 36 - ToF (VL53L4CX)
+#define DEBUG_GAMEPAD         0x2000000000ULL // Bit 37 - Gamepad (Seesaw)
+#define DEBUG_APDS            0x4000000000ULL // Bit 38 - APDS (APDS9960)
+#define DEBUG_PRESENCE        0x8000000000ULL // Bit 39 - Presence (STHS34PF80)
+
+// Bits 40-47: Per-sensor frame/data debug flags (granular timing and data processing)
+#define DEBUG_THERMAL_FRAME   0x10000000000ULL  // Bit 40 - Thermal frame timing, capture, FPS
+#define DEBUG_THERMAL_DATA    0x20000000000ULL  // Bit 41 - Thermal data interpolation, processing
+#define DEBUG_TOF_FRAME       0x40000000000ULL  // Bit 42 - ToF frame capture, object detection
+#define DEBUG_GAMEPAD_FRAME   0x80000000000ULL  // Bit 43 - Gamepad frame timing, connection
+#define DEBUG_GAMEPAD_DATA    0x100000000000ULL // Bit 44 - Gamepad button press/release events
+#define DEBUG_IMU_FRAME       0x200000000000ULL // Bit 45 - IMU frame timing, cache operations
+#define DEBUG_IMU_DATA        0x400000000000ULL // Bit 46 - IMU data updates
+#define DEBUG_APDS_FRAME      0x800000000000ULL // Bit 47 - APDS frame timing, connection
+#define DEBUG_ESPNOW_METADATA 0x1000000000000ULL // Bit 48 - ESP-NOW metadata exchange (REQ/RESP/PUSH/store)
 
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
@@ -110,8 +134,12 @@ struct DebugSubFlags {
 #define DEBUG_DATETIME        DEBUG_SYSTEM
 
 // Debug output queue configuration
-#define DEBUG_QUEUE_SIZE 64        // Number of messages that can be queued
+#define DEBUG_QUEUE_SIZE_MIN 64    // Minimum queue size (internal RAM only)
+#define DEBUG_QUEUE_SIZE_MAX 128   // Maximum queue size (with PSRAM)
 #define DEBUG_MSG_SIZE 256         // Max size of each debug message
+
+// Runtime queue size (set during init based on PSRAM availability)
+extern int gDebugQueueSize;
 
 // Debug message structure
 struct DebugMessage {
@@ -128,8 +156,8 @@ struct DebugMessage {
 #ifndef OUTPUT_SERIAL
 #define OUTPUT_SERIAL 0x01
 #endif
-#ifndef OUTPUT_TFT
-#define OUTPUT_TFT    0x02
+#ifndef OUTPUT_DISPLAY
+#define OUTPUT_DISPLAY 0x02
 #endif
 #ifndef OUTPUT_WEB
 #define OUTPUT_WEB    0x04
@@ -137,9 +165,12 @@ struct DebugMessage {
 #ifndef OUTPUT_FILE
 #define OUTPUT_FILE   0x08
 #endif
+#ifndef OUTPUT_G2
+#define OUTPUT_G2     0x10  // Even Realities G2 glasses display
+#endif
 
 // Global output routing flags (runtime). Persisted settings are in settings.cpp.
-// Use these flags to decide which sinks (serial/web/tft/file) are currently enabled.
+// Use these flags to decide which sinks (serial/web/display/file) are currently enabled.
 extern volatile uint32_t gOutputFlags;
 
 // System logging state
@@ -160,25 +191,26 @@ bool ensureDebugBuffer();
 
 // Internal globals - required for inline accessor functions below
 // DO NOT access directly - use accessor functions instead
-extern uint32_t gDebugFlags;
+extern uint64_t gDebugFlags;  // 64-bit debug flags
 extern DebugSubFlags gDebugSubFlags;
 extern char* gDebugBuffer;
 extern QueueHandle_t gDebugOutputQueue;
 extern QueueHandle_t gDebugFreeQueue;
 extern volatile unsigned long gDebugDropped;
+extern volatile bool gDebugVerbose;
 
 // Accessor functions - use these instead of direct global access
-inline uint32_t getDebugFlags() { return DEBUG_MANAGER.getDebugFlags(); }
-inline void setDebugFlags(uint32_t flags) { DEBUG_MANAGER.setDebugFlags(flags); }
-inline void setDebugFlag(uint32_t flag) { setDebugFlags(getDebugFlags() | flag); }
-inline void clearDebugFlag(uint32_t flag) { setDebugFlags(getDebugFlags() & ~flag); }
-inline bool isDebugFlagSet(uint32_t flag) { return (getDebugFlags() & flag) != 0; }
+inline uint64_t getDebugFlags() { return DEBUG_MANAGER.getDebugFlags(); }
+inline void setDebugFlags(uint64_t flags) { DEBUG_MANAGER.setDebugFlags(flags); }
+inline void setDebugFlag(uint64_t flag) { setDebugFlags(getDebugFlags() | flag); }
+inline void clearDebugFlag(uint64_t flag) { setDebugFlags(getDebugFlags() & ~flag); }
+inline bool isDebugFlagSet(uint64_t flag) { return gDebugVerbose || ((getDebugFlags() & flag) != 0); }
 
 // Sub-flag accessor functions
 inline DebugSubFlags& getDebugSubFlags() { return gDebugSubFlags; }
 
 // Helper to update parent flag when sub-flags change
-inline void updateParentDebugFlag(uint32_t parentFlag, bool anyChildEnabled) {
+inline void updateParentDebugFlag(uint64_t parentFlag, bool anyChildEnabled) {
   if (anyChildEnabled) setDebugFlag(parentFlag);
   else clearDebugFlag(parentFlag);
 }
@@ -219,7 +251,7 @@ void printToWeb(const String& s);
 
 // Global log level (default: show everything)
 extern uint8_t gLogLevel;
-inline uint8_t getLogLevel() { return DEBUG_MANAGER.getLogLevel(); }
+inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MANAGER.getLogLevel(); }
 // ============================================================================
 // Debug Macros - Safe for use from any context
 // ============================================================================
@@ -256,10 +288,19 @@ inline uint8_t getLogLevel() { return DEBUG_MANAGER.getLogLevel(); }
 #define DEBUG_CMD_FLOWF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CMD_FLOW, fmt, ##__VA_ARGS__)
 #define DEBUG_SENSORSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SENSORS, fmt, ##__VA_ARGS__)
 #define DEBUG_FMRADIOF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_FMRADIO, fmt, ##__VA_ARGS__)
+#define DEBUG_G2F(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_G2, fmt, ##__VA_ARGS__)
 #define DEBUG_CAMERAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CAMERA, fmt, ##__VA_ARGS__)
 #define DEBUG_MICF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MICROPHONE, fmt, ##__VA_ARGS__)
-#define DEBUG_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SENSORS_FRAME, fmt, ##__VA_ARGS__)
-#define DEBUG_DATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SENSORS_DATA, fmt, ##__VA_ARGS__)
+// Legacy DEBUG_FRAMEF and DEBUG_DATAF removed - use per-sensor macros instead
+#define DEBUG_THERMAL_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_THERMAL_FRAME, fmt, ##__VA_ARGS__)
+#define DEBUG_THERMAL_DATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_THERMAL_DATA, fmt, ##__VA_ARGS__)
+#define DEBUG_TOF_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_TOF_FRAME, fmt, ##__VA_ARGS__)
+#define DEBUG_GAMEPAD_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD_FRAME, fmt, ##__VA_ARGS__)
+#define DEBUG_GAMEPAD_DATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD_DATA, fmt, ##__VA_ARGS__)
+#define DEBUG_IMU_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_IMU_FRAME, fmt, ##__VA_ARGS__)
+#define DEBUG_IMU_DATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_IMU_DATA, fmt, ##__VA_ARGS__)
+#define DEBUG_APDS_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_APDS_FRAME, fmt, ##__VA_ARGS__)
+#define DEBUG_ESPNOW_METADATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ESPNOW_METADATA, fmt, ##__VA_ARGS__)
 #define DEBUG_WIFIF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_WIFI, fmt, ##__VA_ARGS__)
 #define DEBUG_STORAGEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_STORAGE, fmt, ##__VA_ARGS__)
 #define DEBUG_PERFORMANCEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_PERFORMANCE, fmt, ##__VA_ARGS__)
@@ -275,6 +316,16 @@ inline uint8_t getLogLevel() { return DEBUG_MANAGER.getLogLevel(); }
 
 // DateTime debug flag doesn't exist yet - map to SYSTEM for now
 #define DEBUG_DATETIMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SYSTEM, fmt, ##__VA_ARGS__)
+
+// Individual I2C sensor debug macros
+#define DEBUG_GPSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_GPS, fmt, ##__VA_ARGS__)
+#define DEBUG_RTCF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_RTC, fmt, ##__VA_ARGS__)
+#define DEBUG_IMUF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_IMU, fmt, ##__VA_ARGS__)
+#define DEBUG_THERMALF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_THERMAL, fmt, ##__VA_ARGS__)
+#define DEBUG_TOFF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_TOF, fmt, ##__VA_ARGS__)
+#define DEBUG_GAMEPADF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD, fmt, ##__VA_ARGS__)
+#define DEBUG_APDSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_APDS, fmt, ##__VA_ARGS__)
+#define DEBUG_PRESENCEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_PRESENCE, fmt, ##__VA_ARGS__)
 
 // Legacy compatibility macro
 #define DEBUGF(flag, fmt, ...) DEBUGF_QUEUE_DEBUG(flag, fmt, ##__VA_ARGS__)
@@ -350,6 +401,19 @@ extern void broadcastOutput(const String& msg);
     } \
   } while (0)
 
+// Category-tagged variant: embeds [CATEGORY] prefix so the log file writer and
+// log viewer parser both see a proper category without a debug flag.
+// Use instead of BROADCAST_PRINTF when the output should be filterable.
+// Example: BROADCAST_PRINTF_CAT("SYSTEM", "Boot complete in %lums", millis())
+#define BROADCAST_PRINTF_CAT(cat, fmt, ...) \
+  do { \
+    if (gOutputFlags & (OUTPUT_SERIAL | OUTPUT_WEB | OUTPUT_FILE)) { \
+      char _bpBuf[256]; \
+      snprintf(_bpBuf, sizeof(_bpBuf), "[" cat "] " fmt, ##__VA_ARGS__); \
+      broadcastOutput(_bpBuf); \
+    } \
+  } while (0)
+
 // Context-aware version for commands that need user/source attribution
 // Note: Requires CommandContext to be defined
 // PERFORMANCE: Conditional execution - check output flags BEFORE allocating stack/formatting
@@ -395,13 +459,11 @@ extern const size_t debugCommandsCount;
 // Debug Command Handlers (implemented in debug_system.cpp)
 // ============================================================================
 
-const char* cmd_outtft(const String& cmd);
+const char* cmd_outdisplay(const String& cmd);
 const char* cmd_debugauthcookies(const String& cmd);
 const char* cmd_debughttp(const String& cmd);
 const char* cmd_debugsse(const String& cmd);
 const char* cmd_debugcli(const String& cmd);
-const char* cmd_debugsensorsframe(const String& cmd);
-const char* cmd_debugsensorsdata(const String& cmd);
 const char* cmd_debugsensorsgeneral(const String& cmd);
 const char* cmd_debugcamera(const String& cmd);
 const char* cmd_debugmicrophone(const String& cmd);
@@ -414,6 +476,15 @@ const char* cmd_debugauth(const String& cmd);
 const char* cmd_debugsensors(const String& cmd);
 const char* cmd_debugespnow(const String& cmd);
 const char* cmd_debugdatetime(const String& cmd);
+const char* cmd_debuggps(const String& cmd);
+const char* cmd_debugrtc(const String& cmd);
+const char* cmd_debugimu(const String& cmd);
+const char* cmd_debugthermal(const String& cmd);
+const char* cmd_debugtof(const String& cmd);
+const char* cmd_debuggamepad(const String& cmd);
+const char* cmd_debugapds(const String& cmd);
+const char* cmd_debugpresence(const String& cmd);
+const char* cmd_debugverbose(const String& cmd);
 const char* cmd_debugbuffer(const String& cmd);
 const char* cmd_debugcommandflow(const String& cmd);
 const char* cmd_debugusers(const String& cmd);
@@ -424,6 +495,7 @@ const char* cmd_debugespnowrouter(const String& cmd);
 const char* cmd_debugespnowmesh(const String& cmd);
 const char* cmd_debugespnowtopo(const String& cmd);
 const char* cmd_debugespnowencryption(const String& cmd);
+const char* cmd_debugespnowmetadata(const String& cmd);
 const char* cmd_debugautoscheduler(const String& cmd);
 const char* cmd_debugautoexec(const String& cmd);
 const char* cmd_debugautocondition(const String& cmd);
@@ -469,6 +541,9 @@ const char* cmd_settingsmodulesummary(const String& cmd);
 
 // System logging commands
 const char* cmd_log(const String& cmd);
+
+// System log auto-start (called from boot)
+void systemLogAutoStart();
 
 // Helper: Get category name from debug flag
 const char* getDebugCategoryName(uint32_t flag);
