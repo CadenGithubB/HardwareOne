@@ -81,15 +81,15 @@ These connect via Stemma QT (or standard I2C) and work the same on any supported
 | ---------- | ---- |
 | SSD1306 OLED display | Any 128×64 I2C OLED |
 | Adafruit Seesaw Gamepad | [ID: 5743](https://www.adafruit.com/product/5743) |
-| BNO055 9-DoF IMU | — |
+| BNO055 9-DoF IMU | [ID: 4646](https://www.adafruit.com/product/4646) |
 | VL53L4CX Time-of-Flight sensor | [ID: 5425](https://www.adafruit.com/product/5425) |
-| MLX90640 32×24 Thermal Camera | — |
+| MLX90640 32×24 Thermal Camera | [ID: 4407](https://www.adafruit.com/product/4407) |
 | Adafruit AMG8833 8×8 Thermal Camera | [ID: 3538](https://www.adafruit.com/product/3538) |
 | APDS9960 Gesture / Light sensor | [ID: 3595](https://www.adafruit.com/product/3595) |
-| PA1010D GPS module | — |
-| DS3231 RTC | — |
-| STHS34PF80 IR presence sensor | — |
-| PCA9685 servo driver | — |
+| PA1010D GPS module | [ID: 4415](https://www.adafruit.com/product/4415) |
+| DS3231 RTC | [ID: 5188](https://www.adafruit.com/product/5188) |
+| STHS34PF80 IR presence sensor | [ID: 6426](https://www.adafruit.com/product/6426) |
+| PCA9685 servo driver | [ID: 815](https://www.adafruit.com/product/815) |
 | Stemma QT hub (for chaining) | [ID: 5625](https://www.adafruit.com/product/5625) |
 
 ### Peripherals — board-specific
