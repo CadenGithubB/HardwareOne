@@ -608,9 +608,24 @@ void saveMeshPeers() {
     
     if (count > 0) file.println(",");
     
+    String peerName = "";
+    if (gEspNow) {
+      for (int j = 0; j < gEspNow->deviceCount; j++) {
+        if (memcmp(gEspNow->devices[j].mac, gMeshPeers[i].mac, 6) == 0) {
+          peerName = gEspNow->devices[j].name;
+          break;
+        }
+      }
+    }
     file.print("    {\"mac\": \"");
     file.print(macToHexString(gMeshPeers[i].mac));
-    file.print("\"}");
+    file.print("\"");
+    if (peerName.length() > 0) {
+      file.print(", \"name\": \"");
+      file.print(peerName);
+      file.print("\"");
+    }
+    file.print("}");
     
     count++;
   }
@@ -624,6 +639,47 @@ void saveMeshPeers() {
   
   DEBUGF(DEBUG_ESPNOW_MESH, "[MESH] Saved role=%s, %d peer MAC addresses to filesystem", 
                 getMeshRoleString(gSettings.meshRole), count);
+}
+
+// Save named ESP-NOW devices (paired devices with names/keys) to filesystem
+static void saveEspNowDevices() {
+  if (!gEspNow) return;
+  extern bool filesystemReady;
+  if (!filesystemReady) return;
+
+  FsLockGuard fsGuard("espnow.devices.save");
+  File f = LittleFS.open(ESPNOW_DEVICES_FILE, "w");
+  if (!f) return;
+
+  f.println("{");
+  f.println("  \"devices\": [");
+  int count = 0;
+  for (int i = 0; i < gEspNow->deviceCount; i++) {
+    if (isSelfMac(gEspNow->devices[i].mac)) continue;
+    if (count > 0) f.println(",");
+    f.print("    {\"mac\":\"");
+    f.print(formatMacAddress(gEspNow->devices[i].mac));
+    f.print("\",\"name\":\"");
+    f.print(gEspNow->devices[i].name);
+    f.print("\",\"encrypted\":");
+    f.print(gEspNow->devices[i].encrypted ? "true" : "false");
+    if (gEspNow->devices[i].encrypted) {
+      f.print(",\"key\":\"");
+      for (int k = 0; k < 16; k++) {
+        char hex[3];
+        snprintf(hex, sizeof(hex), "%02x", gEspNow->devices[i].key[k]);
+        f.print(hex);
+      }
+      f.print("\"");
+    }
+    f.print("}");
+    count++;
+  }
+  f.println();
+  f.println("  ]");
+  f.println("}");
+  f.close();
+  DEBUGF(DEBUG_ESPNOW_MESH, "[ESPNOW] Saved %d device(s) to %s", count, ESPNOW_DEVICES_FILE);
 }
 
 // Load mesh peer MAC addresses from filesystem (topology only)
@@ -2882,10 +2938,17 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     }
   }
   
-  if (h->type == ESPNOW_V3_TYPE_METADATA_REQ && isEncrypted) {
+  if (h->type == ESPNOW_V3_TYPE_METADATA_REQ) {
+    DEBUG_ESPNOW_METADATAF("[METADATA] REQ received from %s (%s) msgId=%lu isPaired=%d isEncrypted=%d",
+      deviceName, macToHexString(recv_info->src_addr).c_str(), (unsigned long)h->msgId,
+      (int)isPaired, (int)isEncrypted);
     if (gEspNow) {
       memcpy(gEspNow->metadataPendingResponseMac, recv_info->src_addr, 6);
       gEspNow->bondNeedsMetadataResponse = true;
+      DEBUG_ESPNOW_METADATAF("[METADATA] bondNeedsMetadataResponse=true, will RESP to %s",
+        macToHexString(recv_info->src_addr).c_str());
+    } else {
+      WARN_ESPNOWF("[METADATA] REQ from %s ignored: gEspNow is null", deviceName);
     }
     if (h->fragCount > 1) {
       for (int i = 0; i < V3_REASM_MAX; i++) {
@@ -2901,13 +2964,27 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
 
   // === METADATA RESPONSE/PUSH ===
   if ((h->type == ESPNOW_V3_TYPE_METADATA_RESP || h->type == ESPNOW_V3_TYPE_METADATA_PUSH)) {
+    const char* metaType = (h->type == ESPNOW_V3_TYPE_METADATA_PUSH) ? "PUSH" : "RESP";
+    DEBUG_ESPNOW_METADATAF("[METADATA] %s received from %s (%s) msgId=%lu payloadLen=%u (need %u) isPaired=%d",
+      metaType, deviceName, macToHexString(recv_info->src_addr).c_str(),
+      (unsigned long)h->msgId, payloadLen, (unsigned)sizeof(V3PayloadMetadata), (int)isPaired);
     if (payloadLen >= sizeof(V3PayloadMetadata)) {
       const V3PayloadMetadata* meta = (const V3PayloadMetadata*)payload;
+      DEBUG_ESPNOW_METADATAF("[METADATA] %s payload: name='%s' friendlyName='%s' room='%s' zone='%s' tags='%s' stationary=%d",
+        metaType, meta->deviceName, meta->friendlyName, meta->room, meta->zone, meta->tags, (int)meta->stationary);
       if (gEspNow) {
+        bool wasPending = gEspNow->deferredMetadataPending;
         memcpy(gEspNow->deferredMetadataSrcMac, recv_info->src_addr, 6);
         memcpy(&gEspNow->deferredMetadataPayload, meta, sizeof(V3PayloadMetadata));
         gEspNow->deferredMetadataPending = true;
+        DEBUG_ESPNOW_METADATAF("[METADATA] %s deferred for task processing (overwrote=%d)",
+          metaType, (int)wasPending);
+      } else {
+        WARN_ESPNOWF("[METADATA] %s from %s dropped: gEspNow is null", metaType, deviceName);
       }
+    } else {
+      WARN_ESPNOWF("[METADATA] %s from %s REJECTED: payload too small (%u < %u)",
+        metaType, deviceName, payloadLen, (unsigned)sizeof(V3PayloadMetadata));
     }
     if (h->fragCount > 1) {
       for (int i = 0; i < V3_REASM_MAX; i++) {
@@ -4517,17 +4594,31 @@ static void buildMetadataPayload(V3PayloadMetadata* payload) {
  * @param force If true, bypass debounce (for explicit user requests)
  */
 void requestMetadata(const uint8_t* peerMac, bool force) {
-  if (!peerMac || !gEspNow) return;
+  if (!peerMac || !gEspNow) {
+    WARN_ESPNOWF("[METADATA] requestMetadata: null peerMac=%p gEspNow=%p", peerMac, gEspNow);
+    return;
+  }
   
   uint32_t now = millis();
-  if (!force && (now - sLastMetadataRequestMs < METADATA_DEBOUNCE_MS)) return;
+  if (!force && (now - sLastMetadataRequestMs < METADATA_DEBOUNCE_MS)) {
+    DEBUG_ESPNOW_METADATAF("[METADATA] REQ debounced (%lums < %lums) for %s",
+      (unsigned long)(now - sLastMetadataRequestMs), (unsigned long)METADATA_DEBOUNCE_MS,
+      macToHexString(peerMac).c_str());
+    return;
+  }
   sLastMetadataRequestMs = now;
   
   uint32_t msgId = generateMessageId();
+  DEBUG_ESPNOW_METADATAF("[METADATA] Sending REQ to %s msgId=%lu force=%d",
+    macToHexString(peerMac).c_str(), (unsigned long)msgId, (int)force);
   bool sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_METADATA_REQ, 0, msgId, nullptr, 0, 1);
   
   if (sent) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[METADATA] Requested from %s", macToHexString(peerMac).c_str());
+    DEBUG_ESPNOW_METADATAF("[METADATA] REQ sent OK to %s msgId=%lu",
+      macToHexString(peerMac).c_str(), (unsigned long)msgId);
+  } else {
+    WARN_ESPNOWF("[METADATA] REQ FAILED to send to %s (peer not in hw table?)",
+      macToHexString(peerMac).c_str());
   }
 }
 
@@ -4535,10 +4626,16 @@ void requestMetadata(const uint8_t* peerMac, bool force) {
  * Send metadata to peer (response or push)
  */
 static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false) {
-  if (!peerMac || !gEspNow) return;
+  if (!peerMac || !gEspNow) {
+    WARN_ESPNOWF("[METADATA] sendMetadata: null peerMac=%p gEspNow=%p", peerMac, gEspNow);
+    return;
+  }
   
   uint32_t now = millis();
-  if (!force && !isPush && (now - sLastMetadataSendMs < METADATA_DEBOUNCE_MS)) return;
+  if (!force && !isPush && (now - sLastMetadataSendMs < METADATA_DEBOUNCE_MS)) {
+    DEBUG_ESPNOW_METADATAF("[METADATA] RESP debounced for %s", macToHexString(peerMac).c_str());
+    return;
+  }
   sLastMetadataSendMs = now;
   
   V3PayloadMetadata payload;
@@ -4546,12 +4643,18 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
   
   uint32_t msgId = generateMessageId();
   uint8_t type = isPush ? ESPNOW_V3_TYPE_METADATA_PUSH : ESPNOW_V3_TYPE_METADATA_RESP;
+  DEBUG_ESPNOW_METADATAF("[METADATA] Sending %s to %s msgId=%lu payloadLen=%u name='%s' room='%s' zone='%s' tags='%s' force=%d",
+    isPush ? "PUSH" : "RESP", macToHexString(peerMac).c_str(), (unsigned long)msgId,
+    (unsigned)sizeof(payload), payload.deviceName, payload.room, payload.zone, payload.tags, (int)force);
   
   bool sent = v3_send_frame(peerMac, type, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 1);
   
   if (sent) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[METADATA] Sent %s to %s (room:%s zone:%s)", 
-           isPush ? "PUSH" : "RESP", macToHexString(peerMac).c_str(), payload.room, payload.zone);
+    DEBUG_ESPNOW_METADATAF("[METADATA] %s sent OK to %s msgId=%lu",
+      isPush ? "PUSH" : "RESP", macToHexString(peerMac).c_str(), (unsigned long)msgId);
+  } else {
+    WARN_ESPNOWF("[METADATA] %s FAILED to send to %s (peer not in hw table?)",
+      isPush ? "PUSH" : "RESP", macToHexString(peerMac).c_str());
   }
 }
 
@@ -4559,13 +4662,23 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
  * Process received metadata - store in gMeshPeerMeta
  */
 static void processMetadata(const uint8_t* srcMac, const V3PayloadMetadata* metadata) {
-  if (!srcMac || !metadata || !gMeshPeerMeta) return;
+  if (!srcMac || !metadata || !gMeshPeerMeta) {
+    WARN_ESPNOWF("[METADATA] processMetadata: null guard failed srcMac=%p metadata=%p gMeshPeerMeta=%p slots=%d",
+      srcMac, metadata, gMeshPeerMeta, gMeshPeerSlots);
+    return;
+  }
+  
+  DEBUG_ESPNOW_METADATAF("[METADATA] processMetadata: srcMac=%s slots=%d name='%s' room='%s' zone='%s' friendlyName='%s'",
+    macToHexString(srcMac).c_str(), gMeshPeerSlots,
+    metadata->deviceName, metadata->room, metadata->zone, metadata->friendlyName);
   
   // Find or create entry in gMeshPeerMeta
   int idx = -1;
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (gMeshPeerMeta[i].isActive && memcmp(gMeshPeerMeta[i].mac, srcMac, 6) == 0) {
       idx = i;
+      DEBUG_ESPNOW_METADATAF("[METADATA] processMetadata: found existing slot=%d for %s",
+        i, macToHexString(srcMac).c_str());
       break;
     }
   }
@@ -4577,24 +4690,37 @@ static void processMetadata(const uint8_t* srcMac, const V3PayloadMetadata* meta
         gMeshPeerMeta[i].clear();
         memcpy(gMeshPeerMeta[i].mac, srcMac, 6);
         gMeshPeerMeta[i].isActive = true;
+        DEBUG_ESPNOW_METADATAF("[METADATA] processMetadata: allocated new slot=%d for %s",
+          i, macToHexString(srcMac).c_str());
         break;
       }
     }
   }
   
-  if (idx == -1) return;
+  if (idx == -1) {
+    WARN_ESPNOWF("[METADATA] processMetadata: ALL %d slots full, cannot store metadata from %s",
+      gMeshPeerSlots, macToHexString(srcMac).c_str());
+    return;
+  }
   
   MeshPeerMeta* meta = &gMeshPeerMeta[idx];
   strncpy(meta->name, metadata->deviceName, sizeof(meta->name) - 1);
+  meta->name[sizeof(meta->name) - 1] = '\0';
   strncpy(meta->friendlyName, metadata->friendlyName, sizeof(meta->friendlyName) - 1);
+  meta->friendlyName[sizeof(meta->friendlyName) - 1] = '\0';
   strncpy(meta->room, metadata->room, sizeof(meta->room) - 1);
+  meta->room[sizeof(meta->room) - 1] = '\0';
   strncpy(meta->zone, metadata->zone, sizeof(meta->zone) - 1);
+  meta->zone[sizeof(meta->zone) - 1] = '\0';
   strncpy(meta->tags, metadata->tags, sizeof(meta->tags) - 1);
+  meta->tags[sizeof(meta->tags) - 1] = '\0';
   meta->stationary = (metadata->stationary != 0);
   meta->lastMetaUpdate = millis();
   
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[METADATA] Stored from %s: room=%s zone=%s", 
-         macToHexString(srcMac).c_str(), meta->room, meta->zone);
+  DEBUG_ESPNOW_METADATAF("[METADATA] processMetadata: stored slot=%d mac=%s name='%s' friendlyName='%s' room='%s' zone='%s' tags='%s' stationary=%d isActive=%d",
+    idx, macToHexString(srcMac).c_str(),
+    meta->name, meta->friendlyName, meta->room, meta->zone, meta->tags,
+    (int)meta->stationary, (int)meta->isActive);
 }
 
 /**
@@ -6633,14 +6759,18 @@ void processMeshHeartbeats() {
   // 9. Process deferred metadata response (peer requested our metadata)
   if (gEspNow->bondNeedsMetadataResponse) {
     gEspNow->bondNeedsMetadataResponse = false;
+    DEBUG_ESPNOW_METADATAF("[METADATA] Task: sending deferred RESP to %s",
+      macToHexString(gEspNow->metadataPendingResponseMac).c_str());
     sendMetadata(gEspNow->metadataPendingResponseMac, false, true);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[METADATA] Sent response to %s", macToHexString(gEspNow->metadataPendingResponseMac).c_str());
   }
   
   // 10. Process deferred received metadata (store in gMeshPeerMeta)
   if (gEspNow->deferredMetadataPending) {
     gEspNow->deferredMetadataPending = false;
+    DEBUG_ESPNOW_METADATAF("[METADATA] Task: calling processMetadata for %s gMeshPeerMeta=%p slots=%d",
+      macToHexString(gEspNow->deferredMetadataSrcMac).c_str(), gMeshPeerMeta, gMeshPeerSlots);
     processMetadata(gEspNow->deferredMetadataSrcMac, (const V3PayloadMetadata*)gEspNow->deferredMetadataPayload);
+    DEBUG_ESPNOW_METADATAF("[METADATA] Task: processMetadata complete");
   }
   
   // 11. Process deferred text messages
@@ -6656,7 +6786,7 @@ void processMeshHeartbeats() {
     char macStr[18];
     formatMacAddressBuf(gEspNow->deferredTextSrcMac, macStr, sizeof(macStr));
     BROADCAST_PRINTF("[%s%s] %s", gEspNow->deferredTextDeviceName,
-                     gEspNow->deferredTextEncrypted ? " 🔒" : "",
+                     gEspNow->deferredTextEncrypted ? " [enc]" : "",
                      gEspNow->deferredTextContent);
   }
 }
@@ -7353,6 +7483,7 @@ const char* cmd_espnow_pair(const String& argsIn) {
                   (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
   }
   saveMeshPeers();
+  saveEspNowDevices();
 
   snprintf(getDebugBuffer(), 1024, "Unencrypted device paired successfully: %s (%s)", name.c_str(), macStr.c_str());
   return getDebugBuffer();
@@ -8417,7 +8548,7 @@ const char* cmd_test_filelock(const String& cmd) {
   // Check for stale locks (30 second timeout)
   const unsigned long LOCK_TIMEOUT_MS = 30000;
   if (gFileTransferLocked && (millis() - gFileTransferLockTime > LOCK_TIMEOUT_MS)) {
-    broadcastOutput("⚠️  Stale lock detected (>30s), auto-releasing...");
+    broadcastOutput("[WARN] Stale lock detected (>30s), auto-releasing...");
     gFileTransferLocked = false;
     memset(gFileTransferOwnerMac, 0, 6);
   }
@@ -8626,6 +8757,7 @@ const char* cmd_espnow_unpair(const String& argsIn) {
   }
 
   saveMeshPeers();
+  saveEspNowDevices();
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   if (deviceName.length() > 0) {
@@ -9151,6 +9283,7 @@ const char* cmd_espnow_pairsecure(const String& argsIn) {
                   (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
   }
   saveMeshPeers();
+  saveEspNowDevices();
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   snprintf(getDebugBuffer(), 1024,
