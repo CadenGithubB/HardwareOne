@@ -13,11 +13,12 @@
 #include "OLED_Utils.h"
 #include "System_Auth.h"
 #include "System_Utils.h"
+#include "System_Notifications.h"
 #include "System_Settings.h"
 #include "i2csensor-seesaw.h"
+#include "System_Debug.h"
 
-// External OLED display pointer
-extern Adafruit_SSD1306* oledDisplay;
+// External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)
 extern OLEDMode currentOLEDMode;
 extern void resetOLEDMenu();
 extern void tryAutoStartGamepadForMenu();
@@ -43,7 +44,7 @@ static bool loginKeyboardActive = false;
 // Login display function
 static void displayLoginMode() {
   if (!oledDisplay) {
-    Serial.println("[LOGIN_RENDER] FATAL: oledDisplay is null!");
+    ERROR_SYSTEMF("[LOGIN_RENDER] FATAL: oledDisplay is null!");
     return;
   }
   
@@ -53,55 +54,63 @@ static void displayLoginMode() {
     return;
   }
   
-  // Always draw at least a title so screen is never completely black
+  // Content starts after global header - compact layout for 44px content area
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, 0);
+  
+  // Show current user if switching sessions (optional context line)
+  int yPos = OLED_CONTENT_START_Y;
   if (isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {
     String currentUser = getTransportUser(SOURCE_LOCAL_DISPLAY);
-    oledDisplay->print("Switch from: ");
+    oledDisplay->setCursor(0, yPos);
+    oledDisplay->print("User: ");
     oledDisplay->println(currentUser);
-  } else {
-    oledDisplay->println("OLED Login");
+    yPos += 10;
   }
   
-  // Field selection mode
-  oledDisplay->setCursor(0, 12);
-  oledDisplay->println("Select field:");
+  // Three fields with compact spacing (12px each = 36px total, fits in 44px)
+  const int fieldSpacing = 12;
+  const int fieldY1 = OLED_CONTENT_START_Y + (isTransportAuthenticated(SOURCE_LOCAL_DISPLAY) ? 10 : 2);
+  const int fieldY2 = fieldY1 + fieldSpacing;
+  const int fieldY3 = fieldY2 + fieldSpacing;
   
-  oledDisplay->setCursor(0, 22);
+  // Username field
   if (currentField == FIELD_USERNAME) {
-    oledDisplay->fillRect(0, 22, 128, 8, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(0, fieldY1, 128, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-    oledDisplay->print("> Username: ");
-    oledDisplay->println(usernameBuffer);
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  } else {
-    oledDisplay->println("  Username: " + usernameBuffer);
   }
+  oledDisplay->setCursor(0, fieldY1);
+  oledDisplay->print(currentField == FIELD_USERNAME ? ">" : " ");
+  oledDisplay->print("User: ");
+  oledDisplay->println(usernameBuffer.length() > 0 ? usernameBuffer : "_____");
+  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
-  oledDisplay->setCursor(0, 32);
+  // Password field
   if (currentField == FIELD_PASSWORD) {
-    oledDisplay->fillRect(0, 32, 128, 8, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(0, fieldY2, 128, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-    oledDisplay->print("> Password: ");
-    for (size_t i = 0; i < passwordBuffer.length(); i++) {
+  }
+  oledDisplay->setCursor(0, fieldY2);
+  oledDisplay->print(currentField == FIELD_PASSWORD ? ">" : " ");
+  oledDisplay->print("Pass: ");
+  if (passwordBuffer.length() > 0) {
+    for (size_t i = 0; i < min(passwordBuffer.length(), (size_t)8); i++) {
       oledDisplay->print("*");
     }
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   } else {
-    oledDisplay->println("  Password: " + String(passwordBuffer.length() > 0 ? "*****" : ""));
+    oledDisplay->print("_____");
   }
+  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
-  oledDisplay->setCursor(0, 42);
+  // Login button
   if (currentField == FIELD_LOGIN_BUTTON) {
-    oledDisplay->fillRect(0, 42, 128, 8, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(0, fieldY3, 128, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-    oledDisplay->println("> [Login]");
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  } else {
-    oledDisplay->println("  [Login]");
   }
+  oledDisplay->setCursor(0, fieldY3);
+  oledDisplay->print(currentField == FIELD_LOGIN_BUTTON ? ">" : " ");
+  oledDisplay->print("[Login]");
+  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
   // Show error message if active - overlay with centered message box
   if (millis() < errorDisplayUntil && errorMessage.length() > 0) {
@@ -110,30 +119,25 @@ static void displayLoginMode() {
     oledDisplay->drawRect(8, 20, 112, 24, DISPLAY_COLOR_WHITE);
     oledDisplay->drawRect(9, 21, 110, 22, DISPLAY_COLOR_WHITE);
     
-    // Center the message text
+    // Center the message text - truncate if too long
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    int textWidth = errorMessage.length() * 6;
+    String displayMsg = errorMessage;
+    if (displayMsg.length() > 16) {
+      displayMsg = displayMsg.substring(0, 15) + "~";
+    }
+    int textWidth = displayMsg.length() * 6;
     int textX = 64 - (textWidth / 2);
     if (textX < 12) textX = 12;
     oledDisplay->setCursor(textX, 28);
-    oledDisplay->print(errorMessage);
+    oledDisplay->print(displayMsg);
   }
 }
 
 // Login input handler
 static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) {
-  // Early return if no meaningful input (no buttons and joystick below threshold)
-  if (newlyPressed == 0 && abs(deltaX) < JOYSTICK_DEADZONE && abs(deltaY) < JOYSTICK_DEADZONE) {
-    return false;
-  }
-  
-  bool handled = false;
-  
-  // If keyboard is active, handle keyboard input
-  if (oledKeyboardIsActive()) {
-    handled = oledKeyboardHandleInput(deltaX, deltaY, newlyPressed);
-    
-    // Check if keyboard completed
+  // Keyboard input is now handled centrally in processGamepadMenuInput() before this is called.
+  // We only need to check for keyboard completion/cancellation to update our state.
+  if (loginKeyboardActive) {
     if (oledKeyboardIsCompleted()) {
       const char* input = oledKeyboardGetText();
       if (currentField == FIELD_USERNAME) {
@@ -143,6 +147,7 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
       }
       oledKeyboardReset();
       loginKeyboardActive = false;
+      return true;
     } else if (oledKeyboardIsCancelled()) {
       oledKeyboardReset();
       loginKeyboardActive = false;
@@ -150,10 +155,18 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
       if (currentField == FIELD_PASSWORD) {
         currentField = FIELD_USERNAME;
       }
+      return true;
     }
-    
-    return handled;
+    // Keyboard still active - central dispatch already handled input
+    return false;
   }
+  
+  // Early return if no meaningful input
+  if (newlyPressed == 0 && abs(deltaX) < JOYSTICK_DEADZONE && abs(deltaY) < JOYSTICK_DEADZONE) {
+    return false;
+  }
+  
+  bool handled = false;
   
   // Field selection mode
   // Navigate between fields using centralized navigation events
@@ -171,27 +184,34 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
       // Attempt login
       if (usernameBuffer.length() > 0 && passwordBuffer.length() > 0) {
         if (loginTransport(SOURCE_LOCAL_DISPLAY, usernameBuffer, passwordBuffer)) {
+          notifyLoginSuccess(usernameBuffer.c_str(), "display");
           errorMessage = "Login successful!";
           errorDisplayUntil = millis() + 2000;
+          oledMarkDirtyUntil(errorDisplayUntil);
           
-          // Reset buffers for next login
-          usernameBuffer = "";
-          passwordBuffer = "";
+          // Securely clear buffers for next login
+          secureClearString(usernameBuffer);
+          secureClearString(passwordBuffer);
           currentField = FIELD_USERNAME;
           
           // Go to menu after successful login
-          currentOLEDMode = OLED_MENU;
+          setOLEDMode(OLED_MENU);
           resetOLEDMenu();
           tryAutoStartGamepadForMenu();
           
           return true;
         } else {
+          notifyLoginFailed(usernameBuffer.c_str(), "display");
           errorMessage = "Invalid credentials";
           errorDisplayUntil = millis() + 3000;
+          oledMarkDirtyUntil(errorDisplayUntil);
         }
       } else {
-        errorMessage = "Enter username/password";
-        errorDisplayUntil = millis() + 2000;
+        if (millis() >= errorDisplayUntil) {
+          errorMessage = "Enter user/pass";
+          errorDisplayUntil = millis() + 5000;
+          oledMarkDirtyUntil(errorDisplayUntil);
+        }
       }
     } else {
       // Launch keyboard for username or password
@@ -214,17 +234,19 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
   
   // B button: Block navigation when authentication is required and user not logged in
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    extern Settings gSettings;
     if (gSettings.localDisplayRequireAuth && !isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {
       // Authentication is required and user is not logged in - block navigation
-      errorMessage = "Login required";
-      errorDisplayUntil = millis() + 2000;
+      if (millis() >= errorDisplayUntil) {
+        errorMessage = "Login required";
+        errorDisplayUntil = millis() + 5000;
+        oledMarkDirtyUntil(errorDisplayUntil);
+      }
       handled = true;
     } else {
       // User is authenticated or auth not required - allow back navigation
-      // Clear any entered credentials when leaving
-      usernameBuffer = "";
-      passwordBuffer = "";
+      // Securely clear any entered credentials when leaving
+      secureClearString(usernameBuffer);
+      secureClearString(passwordBuffer);
       currentField = FIELD_USERNAME;
     }
     // Let default handler process B button for mode change
@@ -253,19 +275,20 @@ static void displayLogoutMode() {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
+  // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
+  int y = OLED_CONTENT_START_Y;
+  
   // Check if we just logged out (message timer active)
   if (millis() < logoutMessageUntil && loggedOutUser.length() > 0) {
-    // Show "Logged Out" confirmation message
-    oledDisplay->setCursor(0, 0);
-    oledDisplay->println("=== LOGGED OUT ===");
-    oledDisplay->println();
-    
+    oledDisplay->setCursor(0, y);
     oledDisplay->print("User: ");
     oledDisplay->println(loggedOutUser);
-    oledDisplay->println();
+    y += 10;
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("Session ended");
+    y += 10;
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("successfully.");
-    
     return;
   }
   
@@ -274,24 +297,23 @@ static void displayLogoutMode() {
   bool isAuthed = isTransportAuthenticated(SOURCE_LOCAL_DISPLAY);
   
   if (!isAuthed || currentUser.length() == 0) {
-    oledDisplay->setCursor(0, 0);
-    oledDisplay->println("=== LOGOUT ===");
-    oledDisplay->println();
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("No active session");
-    oledDisplay->println();
+    y += 10;
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("Press B to return");
     return;
   }
   
   // Show logout confirmation prompt
-  oledDisplay->setCursor(0, 0);
-  oledDisplay->println("=== LOGOUT ===");
-  oledDisplay->println();
-  
+  oledDisplay->setCursor(0, y);
   oledDisplay->print("Current user: ");
   oledDisplay->println(currentUser);
-  oledDisplay->println();
+  y += 10;
+  oledDisplay->setCursor(0, y);
   oledDisplay->println("Press A to confirm");
+  y += 10;
+  oledDisplay->setCursor(0, y);
   oledDisplay->println("Press B to cancel");
 }
 
@@ -304,12 +326,12 @@ static bool handleLogoutModeInput(int deltaX, int deltaY, uint32_t newlyPressed)
   
   bool handled = false;
   
-  // If showing logout confirmation message, any button returns to menu
+  // If showing logout confirmation message, any button returns to previous mode
   if (millis() < logoutMessageUntil) {
     if (newlyPressed != 0) {
-      currentOLEDMode = OLED_MENU;
       logoutMessageUntil = 0;
       loggedOutUser = "";
+      oledMenuBack();
       handled = true;
     }
     return handled;
@@ -326,19 +348,18 @@ static bool handleLogoutModeInput(int deltaX, int deltaY, uint32_t newlyPressed)
       logoutTransport(SOURCE_LOCAL_DISPLAY);
       logoutMessageUntil = millis() + 3000;  // Show message for 3 seconds
       
-      Serial.printf("[LOGOUT] User '%s' logged out from OLED\n", loggedOutUser.c_str());
+      DEBUG_SYSTEMF("[LOGOUT] User '%s' logged out from OLED", loggedOutUser.c_str());
       handled = true;
     } else {
-      // No session to log out - just go back to menu
-      currentOLEDMode = OLED_MENU;
+      // No session to log out - go back to previous mode
+      oledMenuBack();
       handled = true;
     }
   }
   
-  // B button: Cancel logout and return to menu
+  // B button: Cancel logout - return false to let global handler call oledMenuBack()
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    currentOLEDMode = OLED_MENU;
-    handled = true;
+    return false;
   }
   
   return handled;

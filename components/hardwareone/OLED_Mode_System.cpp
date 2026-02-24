@@ -20,7 +20,6 @@
 #endif
 
 // External references
-extern Adafruit_SSD1306* oledDisplay;
 extern bool oledConnected;
 extern OLEDMode currentOLEDMode;
 extern Settings gSettings;
@@ -206,34 +205,42 @@ void displayCustomText() {
 void displayUnavailable() {
   if (!oledDisplay || !oledConnected) return;
   
+  // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
+  int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
-  oledDisplay->println("=== " + unavailableOLEDTitle + " ===");
-  oledDisplay->println();
+  
+  // Show the feature name as a label
+  oledDisplay->setCursor(0, y);
+  oledDisplay->println(unavailableOLEDTitle);
+  y += 10;
 
   if (unavailableOLEDReason.length() == 0) {
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("Not available");
   } else {
     int start = 0;
     while (start < (int)unavailableOLEDReason.length()) {
+      oledDisplay->setCursor(0, y);
       int nl = unavailableOLEDReason.indexOf('\n', start);
       if (nl < 0) {
         oledDisplay->println(unavailableOLEDReason.substring(start));
+        y += 10;
         break;
       }
       oledDisplay->println(unavailableOLEDReason.substring(start, nl));
+      y += 10;
       start = nl + 1;
     }
   }
 
-  oledDisplay->println();
-
   // Only show/perform auto-return when a timeout is active
   if (unavailableOLEDStartTime != 0) {
+    oledDisplay->setCursor(0, y + 2);
     oledDisplay->println("Returning...");
 
     const unsigned long UNAVAILABLE_TIMEOUT_MS = 5000;
     if (millis() - unavailableOLEDStartTime >= UNAVAILABLE_TIMEOUT_MS) {
-      currentOLEDMode = popOLEDMode();
+      setOLEDMode(popOLEDMode());
     }
   }
 }
@@ -298,87 +305,64 @@ void displayMemoryStatsRendered() {
   if (!oledDisplay || !oledConnected) return;
   
   if (!memoryRenderData.valid) {
-    oledDisplay->clearDisplay();
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(0, 0);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Memory Error");
     return;
   }
   
-  // Clear only content area to prevent flickering
-  oledDisplay->fillRect(0, 0, SCREEN_WIDTH, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_BLACK);
-  
+  // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
+  int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
-  // Header
-  oledDisplay->setCursor(0, 0);
-  oledDisplay->println("MEMORY");
+  const int barX = 0;
+  const int barWidth = SCREEN_WIDTH - 22;  // Leave room for percentage text
+  const int barHeight = 6;
   
-  // Internal RAM (DRAM) - compact layout
-  oledDisplay->setCursor(0, 9);
-  oledDisplay->print("Heap: ");
+  // --- Heap (DRAM) ---
+  oledDisplay->setCursor(0, y);
+  oledDisplay->print("Heap ");
   oledDisplay->print(memoryRenderData.freeHeap / 1024);
   oledDisplay->print("/");
   oledDisplay->print(memoryRenderData.totalHeap / 1024);
   oledDisplay->print("KB");
+  y += 9;
   
-  // Draw heap usage bar (smaller)
-  int barWidth = 90;
-  int barHeight = 5;
-  int barX = 10;
-  int barY = 18;
-  oledDisplay->drawRect(barX, barY, barWidth, barHeight, DISPLAY_COLOR_WHITE);
+  // Heap bar
+  oledDisplay->drawRect(barX, y, barWidth, barHeight, DISPLAY_COLOR_WHITE);
   int fillWidth = (memoryRenderData.heapPercent * (barWidth - 2)) / 100;
   if (fillWidth > 0) {
-    oledDisplay->fillRect(barX + 1, barY + 1, fillWidth, barHeight - 2, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(barX + 1, y + 1, fillWidth, barHeight - 2, DISPLAY_COLOR_WHITE);
   }
-  oledDisplay->setCursor(barX + barWidth + 2, barY - 1);
+  oledDisplay->setCursor(barWidth + 3, y - 1);
   oledDisplay->print(memoryRenderData.heapPercent);
   oledDisplay->print("%");
+  y += barHeight + 3;
   
-  // PSRAM info (compact)
+  // --- PSRAM ---
   if (memoryRenderData.hasPSRAM) {
-    oledDisplay->setCursor(0, 25);
-    oledDisplay->print("PSRAM: ");
+    oledDisplay->setCursor(0, y);
+    oledDisplay->print("PSRAM ");
     oledDisplay->print(memoryRenderData.freePSRAM / 1024);
     oledDisplay->print("/");
     oledDisplay->print(memoryRenderData.totalPSRAM / 1024);
     oledDisplay->print("KB");
+    y += 9;
     
-    // Draw PSRAM usage bar
-    int psramBarY = 33;
-    oledDisplay->drawRect(barX, psramBarY, barWidth, barHeight, DISPLAY_COLOR_WHITE);
+    // PSRAM bar
+    oledDisplay->drawRect(barX, y, barWidth, barHeight, DISPLAY_COLOR_WHITE);
     int psramFillWidth = (memoryRenderData.psramPercent * (barWidth - 2)) / 100;
     if (psramFillWidth > 0) {
-      oledDisplay->fillRect(barX + 1, psramBarY + 1, psramFillWidth, barHeight - 2, DISPLAY_COLOR_WHITE);
+      oledDisplay->fillRect(barX + 1, y + 1, psramFillWidth, barHeight - 2, DISPLAY_COLOR_WHITE);
     }
-    oledDisplay->setCursor(barX + barWidth + 2, psramBarY - 1);
+    oledDisplay->setCursor(barWidth + 3, y - 1);
     oledDisplay->print(memoryRenderData.psramPercent);
     oledDisplay->print("%");
-    
-    // Additional stats (compact, single line)
-    oledDisplay->setCursor(0, 41);
-    oledDisplay->print("Min:");
-    oledDisplay->print(memoryRenderData.minFreeHeap / 1024);
-    oledDisplay->print(" Max:");
-    oledDisplay->print(memoryRenderData.largestBlock / 1024);
-    oledDisplay->print("KB");
   } else {
-    oledDisplay->setCursor(0, 25);
-    oledDisplay->println("PSRAM: None");
-    
-    // Additional stats when no PSRAM (more space available)
-    oledDisplay->setCursor(0, 34);
-    oledDisplay->print("Min Free: ");
-    oledDisplay->print(memoryRenderData.minFreeHeap / 1024);
-    oledDisplay->println("KB");
-    
-    oledDisplay->setCursor(0, 43);
-    oledDisplay->print("Max Block: ");
-    oledDisplay->print(memoryRenderData.largestBlock / 1024);
-    oledDisplay->print("KB");
+    oledDisplay->setCursor(0, y);
+    oledDisplay->print("PSRAM: None");
   }
 }
 
@@ -451,8 +435,8 @@ void displaySystemStatusRendered() {
     return;
   }
   
-  oledDisplay->println("=== SYSTEM STATUS ===");
-  oledDisplay->println();
+  // Header shows "System Status", no need for title here
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
 
   // Battery Status (top priority)
 #if ENABLE_BATTERY_MONITOR

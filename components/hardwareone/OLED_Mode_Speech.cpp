@@ -13,7 +13,6 @@
 #include "System_ESPSR.h"
 
 // External references
-extern Adafruit_SSD1306* oledDisplay;
 extern bool oledConnected;
 extern OLEDMode currentOLEDMode;
 extern Settings gSettings;
@@ -157,10 +156,7 @@ void displaySpeechInfo() {
   }
   
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Footer hint
-  oledDisplay->setCursor(0, 56);
-  oledDisplay->print("X:Select B:Back");
+  // Footer handled by global drawOLEDFooter()
 }
 
 // ============================================================================
@@ -212,9 +208,8 @@ void speechMenuBack() {
   if (speechShowingStatus) {
     speechShowingStatus = false;
     oledMarkDirty();
-  } else {
-    popOLEDMode();
   }
+  // Top-level back is handled by global handler via oledMenuBack()
 }
 
 // ============================================================================
@@ -240,8 +235,12 @@ bool speechInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     return true;
   }
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    speechMenuBack();
-    return true;
+    if (speechShowingStatus) {
+      speechMenuBack();
+      return true;
+    }
+    // Return false to let global handler call oledMenuBack()
+    return false;
   }
   
   return false;

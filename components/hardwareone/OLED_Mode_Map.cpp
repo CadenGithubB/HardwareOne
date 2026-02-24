@@ -22,8 +22,11 @@
 #include "i2csensor-pa1010d.h"
 #endif
 
-// External OLED display pointer
-extern Adafruit_SSD1306* oledDisplay;
+#if ENABLE_ESPNOW
+#include "System_ESPNow_Sensors.h"
+#endif
+
+// External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)
 extern OLEDMode currentOLEDMode;
 
 // External map state from GPS_MapRenderer.cpp
@@ -200,11 +203,11 @@ static void drawMapInfo() {
   
   const LoadedMap& currentMap = MapCore::getCurrentMap();
   
-  oledDisplay->fillRect(0, 0, 128, 64, DISPLAY_COLOR_BLACK);
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
-  oledDisplay->setCursor(0, 0);
+  int y = OLED_CONTENT_START_Y;
+  oledDisplay->setCursor(0, y);
   if (currentMap.valid) {
     oledDisplay->print(currentMap.filename);
   } else {
@@ -213,30 +216,20 @@ static void drawMapInfo() {
   
   if (currentMap.valid) {
     char buf[32];
-    oledDisplay->setCursor(0, 10);
+    oledDisplay->setCursor(0, y + 10);
     snprintf(buf, sizeof(buf), "Features: %lu", currentMap.header.featureCount);
     oledDisplay->print(buf);
     
-    oledDisplay->setCursor(0, 20);
+    oledDisplay->setCursor(0, y + 20);
     snprintf(buf, sizeof(buf), "Zoom: %.1fx", gMapZoom);
     oledDisplay->print(buf);
     
-    oledDisplay->setCursor(0, 30);
+    oledDisplay->setCursor(0, y + 30);
     snprintf(buf, sizeof(buf), "Rot: %.0f", gMapRotation);
     oledDisplay->print(buf);
   }
   
-  oledDisplay->setCursor(0, 40);
-  char wpBuf[24];
-  snprintf(wpBuf, sizeof(wpBuf), "WPs: %d", WaypointManager::getActiveCount());
-  oledDisplay->print(wpBuf);
-  
-  oledDisplay->setCursor(0, 50);
-  char coordBuf[24];
-  snprintf(coordBuf, sizeof(coordBuf), "%.4f,%.4f", gMapCenterLat, gMapCenterLon);
-  oledDisplay->print(coordBuf);
-  
-  oledDisplay->setCursor(90, 56);
+  oledDisplay->setCursor(90, OLED_CONTENT_HEIGHT + 2);
   oledDisplay->print("B:OK");
 }
 
@@ -244,21 +237,21 @@ static void drawMapInfo() {
 static void drawTrackStatus() {
   if (!oledDisplay) return;
   
-  oledDisplay->fillRect(0, 0, 128, 64, DISPLAY_COLOR_BLACK);
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
-  oledDisplay->setCursor(0, 0);
+  int y = OLED_CONTENT_START_Y;
+  oledDisplay->setCursor(0, y);
   if (GPSTrackManager::isLiveTracking()) {
-    oledDisplay->print("== LIVE TRACKING ==");
+    oledDisplay->print("LIVE TRACKING");
   } else {
-    oledDisplay->print("== Track Status ==");
+    oledDisplay->print("Track Status");
   }
   
   if (!GPSTrackManager::hasTrack() && !GPSTrackManager::isLiveTracking()) {
     oledDisplay->setCursor(0, 16);
     oledDisplay->print("No track loaded");
-    oledDisplay->setCursor(90, 56);
+    oledDisplay->setCursor(90, OLED_CONTENT_HEIGHT + 2);
     oledDisplay->print("B:OK");
     return;
   }
@@ -302,7 +295,7 @@ static void drawTrackStatus() {
   snprintf(buf, sizeof(buf), "Coverage: %.0f%%", coverage);
   oledDisplay->print(buf);
   
-  oledDisplay->setCursor(90, 56);
+  oledDisplay->setCursor(90, OLED_CONTENT_HEIGHT + 2);
   oledDisplay->print("B:OK");
 }
 
@@ -323,7 +316,7 @@ static void drawFeatures() {
     oledDisplay->print("No names");
     oledDisplay->setCursor(0, 10);
     oledDisplay->print("(map has no names)");
-    oledDisplay->setCursor(90, 56);
+    oledDisplay->setCursor(90, OLED_CONTENT_HEIGHT + 2);
     oledDisplay->print("B:OK");
     return;
   }
@@ -347,12 +340,9 @@ static void drawFeatures() {
     displayIdx++;
   }
   
-  oledDisplay->setCursor(0, 56);
-  oledDisplay->print("</>:Cat");
-  oledDisplay->setCursor(50, 56);
-  oledDisplay->print("^v:Scrl");
-  oledDisplay->setCursor(100, 56);
-  oledDisplay->print("B:OK");
+  // Footer hints at proper Y position
+  oledDisplay->setCursor(0, OLED_CONTENT_HEIGHT + 2);
+  oledDisplay->print("</>:Cat ^v:Scrl B:OK");
 }
 
 // Route info structure for transit viewer
@@ -377,7 +367,7 @@ static void drawRoutes() {
   if (!map.valid) {
     oledDisplay->setCursor(0, 16);
     oledDisplay->print("No map loaded");
-    oledDisplay->setCursor(100, 56);
+    oledDisplay->setCursor(100, OLED_CONTENT_HEIGHT + 2);
     oledDisplay->print("B:OK");
     return;
   }
@@ -436,7 +426,7 @@ static void drawRoutes() {
   if (routeCount == 0) {
     oledDisplay->setCursor(0, 16);
     oledDisplay->print("No routes found");
-    oledDisplay->setCursor(100, 56);
+    oledDisplay->setCursor(100, OLED_CONTENT_HEIGHT + 2);
     oledDisplay->print("B:OK");
     return;
   }
@@ -464,13 +454,10 @@ static void drawRoutes() {
     oledDisplay->print(nameBuf);
   }
   
+  // Footer hints at proper Y position
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, 56);
-  oledDisplay->print("^v:Sel");
-  oledDisplay->setCursor(42, 56);
-  oledDisplay->print("A:Go X:Hl");
-  oledDisplay->setCursor(105, 56);
-  oledDisplay->print("B:X");
+  oledDisplay->setCursor(0, OLED_CONTENT_HEIGHT + 2);
+  oledDisplay->print("^v:Sel A:Go X:Hl B:X");
 }
 
 // Draw waypoint selection submenu
@@ -755,11 +742,11 @@ static void displayGPSMap() {
   }
   
   oledDisplay->setTextSize(1);
-  oledDisplay->setCursor(0, 0);
   
   float lat = 0.0f, lon = 0.0f;
   bool hasGPSFix = false;
   int satellites = 0;
+  bool usingRemoteGPS = false;
   
 #if ENABLE_GPS_SENSOR
   // Use cached GPS data (gpsTask continuously polls and updates gPA1010D)
@@ -774,6 +761,20 @@ static void displayGPSMap() {
       satellites = (int)gPA1010D->satellites;
     } else {
       satellites = (int)gPA1010D->satellites;
+    }
+  }
+#endif
+
+#if ENABLE_ESPNOW
+  // Fall back to remote GPS data if local GPS is not available or has no fix
+  if (!hasGPSFix) {
+    RemoteGPSData remoteGPS;
+    if (getRemoteGPSData(&remoteGPS)) {
+      lat = remoteGPS.latitude;
+      lon = remoteGPS.longitude;
+      hasGPSFix = true;
+      satellites = remoteGPS.satellites;
+      usingRemoteGPS = true;
     }
   }
 #endif
@@ -793,11 +794,15 @@ static void displayGPSMap() {
   const LoadedMap& map = MapCore::getCurrentMap();
   
   if (!map.valid) {
-    oledDisplay->println("=== MAP VIEWER ===");
-    oledDisplay->println();
+    // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
+    int y = OLED_CONTENT_START_Y;
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("No map loaded");
-    oledDisplay->println();
+    y += 10;
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("Upload .hwmap files");
+    y += 10;
+    oledDisplay->setCursor(0, y);
     oledDisplay->println("to /maps/ folder");
     
     if (gMapMenuOpen) {
@@ -894,8 +899,18 @@ static void displayGPSMap() {
     }
   }
   
+  // Show satellite count with source indicator
+  if (hasGPSFix) {
+    if (usingRemoteGPS) {
+      snprintf(overlayBuf, sizeof(overlayBuf), " R%dS ", satellites);  // "R" = Remote GPS
+    } else {
+      snprintf(overlayBuf, sizeof(overlayBuf), " %dS ", satellites);
+    }
+    gOLEDMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
+  }
 #if ENABLE_GPS_SENSOR
-  if (gpsEnabled) {
+  else if (gpsEnabled) {
+    // Local GPS enabled but no fix - show searching indicator
     snprintf(overlayBuf, sizeof(overlayBuf), " %dS ", satellites);
     gOLEDMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
   }
@@ -969,7 +984,7 @@ static void executeSubmenuAction(int submenuType, int action) {
             extern bool oledFileBrowserNeedsInit;
             extern void pushOLEDMode(OLEDMode mode);
             pushOLEDMode(currentOLEDMode);  // Push so B returns here
-            currentOLEDMode = OLED_FILE_BROWSER;
+            setOLEDMode(OLED_FILE_BROWSER);
             if (gOLEDFileManager) gOLEDFileManager->navigate("/maps");
             else oledFileBrowserNeedsInit = true;
             gMapMenuOpen = false;
@@ -1045,10 +1060,8 @@ static void executeSubmenuAction(int submenuType, int action) {
           break;
         case 1:  // Toggle GPS
           {
-            extern bool enqueueSensorStart(SensorType sensor);
-            extern bool isInQueue(SensorType sensor);
             if (gpsEnabled) gpsEnabled = false;
-            else if (!isInQueue(SENSOR_GPS)) enqueueSensorStart(SENSOR_GPS);
+            else if (!isInQueue(I2C_DEVICE_GPS)) enqueueDeviceStart(I2C_DEVICE_GPS);
           }
           break;
         case 2: goBackToMainMenu(); break;  // Back
@@ -1225,7 +1238,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     if (oledKeyboardIsCompleted()) {
       strncpy(gSearchResult, oledKeyboardGetText(), sizeof(gSearchResult) - 1);
       gSearchResult[sizeof(gSearchResult) - 1] = '\0';
-      Serial.printf("[MAP_SEARCH] Selected: '%s'\n", gSearchResult);
+      DEBUG_SENSORSF("[MAP_SEARCH] Selected: '%s'", gSearchResult);
       
       // Find ALL matching features (v5 tiled format - iterate through tiles)
       gSearchResultCount = 0;
@@ -1288,7 +1301,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
           gMapManuallyPanned = true;
           gSearchResultsActive = (gSearchResultCount > 1);
           
-          Serial.printf("[MAP_SEARCH] Found %d matches for '%s', showing 1/%d\n", 
+          DEBUG_SENSORSF("[MAP_SEARCH] Found %d matches for '%s', showing 1/%d", 
                        gSearchResultCount, gSearchResult, gSearchResultCount);
         }
       }
@@ -1318,7 +1331,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       // Use stored coordinates directly (v5 format stores coords, not indices)
       gMapCenterLat = gSearchResultCoords[gSearchResultCurrent].lat;
       gMapCenterLon = gSearchResultCoords[gSearchResultCurrent].lon;
-      Serial.printf("[MAP_SEARCH] Showing result %d/%d\n", 
+      DEBUG_SENSORSF("[MAP_SEARCH] Showing result %d/%d", 
                    gSearchResultCurrent + 1, gSearchResultCount);
       return true;
     }
