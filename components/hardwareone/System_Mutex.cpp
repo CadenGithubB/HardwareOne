@@ -12,10 +12,12 @@
 // ============================================================================
 
 SemaphoreHandle_t fsMutex = nullptr;
-SemaphoreHandle_t i2cMutex = nullptr;
-SemaphoreHandle_t i2cHealthMutex = nullptr;
+SemaphoreHandle_t i2cMutex = nullptr;  // Set by initI2CManager() bridge — do not allocate here
 SemaphoreHandle_t gJsonResponseMutex = nullptr;
 SemaphoreHandle_t gMeshRetryMutex = nullptr;
+SemaphoreHandle_t gFileTransferMutex = nullptr;
+SemaphoreHandle_t gTopoStreamsMutex = nullptr;
+SemaphoreHandle_t gChunkedMsgMutex = nullptr;
 SemaphoreHandle_t i2sMicMutex = nullptr;
 
 // ============================================================================
@@ -27,18 +29,18 @@ void initMutexes() {
   fsMutex = xSemaphoreCreateMutex();
   gJsonResponseMutex = xSemaphoreCreateMutex();
   gMeshRetryMutex = xSemaphoreCreateMutex();
+  gFileTransferMutex = xSemaphoreCreateMutex();
+  gTopoStreamsMutex = xSemaphoreCreateMutex();
+  gChunkedMsgMutex = xSemaphoreCreateMutex();
   i2sMicMutex = xSemaphoreCreateMutex();
   
-  // I2C mutexes now managed by I2CDeviceManager
-  // Create legacy i2cMutex for backward compatibility during migration
-  // This will be bridged to manager's busMutex after manager init
-  i2cMutex = xSemaphoreCreateRecursiveMutex();
-  i2cHealthMutex = xSemaphoreCreateMutex();
-  
+  // i2cMutex is NOT allocated here — initI2CManager() bridges it to the manager's busMutex
+
   // Log creation status
   bool allCreated = (fsMutex != nullptr) && (gJsonResponseMutex != nullptr) && 
-                    (gMeshRetryMutex != nullptr) && (i2cMutex != nullptr) && 
-                    (i2cHealthMutex != nullptr) && (i2sMicMutex != nullptr);
+                    (gMeshRetryMutex != nullptr) && (gFileTransferMutex != nullptr) &&
+                    (gTopoStreamsMutex != nullptr) && (gChunkedMsgMutex != nullptr) &&
+                    (i2sMicMutex != nullptr);
   
   if (!allCreated) {
     if (gOutputFlags & OUTPUT_SERIAL) {
@@ -112,7 +114,7 @@ void fsUnlock() {
 // ============================================================================
 // I2cLockGuard Implementation
 // ============================================================================
-// i2cMutex is a binary semaphore (no ownership tracking)
+// i2cMutex is the manager's recursive mutex (set by initI2CManager bridge)
 
 I2cLockGuard::I2cLockGuard(const char* owner) : held(false) {
   if (i2cMutex) {
@@ -196,5 +198,68 @@ MeshRetryGuard::MeshRetryGuard(const char* owner) : held(false) {
 MeshRetryGuard::~MeshRetryGuard() {
   if (held && gMeshRetryMutex) {
     xSemaphoreGive(gMeshRetryMutex);
+  }
+}
+
+// ============================================================================
+// FileTransferGuard Implementation
+// ============================================================================
+
+FileTransferGuard::FileTransferGuard(const char* owner) : held(false) {
+  if (gFileTransferMutex) {
+    if (isHeldByCurrentTask(gFileTransferMutex)) {
+      return;
+    }
+    if (xSemaphoreTake(gFileTransferMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      held = true;
+    }
+  }
+}
+
+FileTransferGuard::~FileTransferGuard() {
+  if (held && gFileTransferMutex) {
+    xSemaphoreGive(gFileTransferMutex);
+  }
+}
+
+// ============================================================================
+// TopoStreamsGuard Implementation
+// ============================================================================
+
+TopoStreamsGuard::TopoStreamsGuard(const char* owner) : held(false) {
+  if (gTopoStreamsMutex) {
+    if (isHeldByCurrentTask(gTopoStreamsMutex)) {
+      return;
+    }
+    if (xSemaphoreTake(gTopoStreamsMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      held = true;
+    }
+  }
+}
+
+TopoStreamsGuard::~TopoStreamsGuard() {
+  if (held && gTopoStreamsMutex) {
+    xSemaphoreGive(gTopoStreamsMutex);
+  }
+}
+
+// ============================================================================
+// ChunkedMsgGuard Implementation
+// ============================================================================
+
+ChunkedMsgGuard::ChunkedMsgGuard(const char* owner) : held(false) {
+  if (gChunkedMsgMutex) {
+    if (isHeldByCurrentTask(gChunkedMsgMutex)) {
+      return;
+    }
+    if (xSemaphoreTake(gChunkedMsgMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      held = true;
+    }
+  }
+}
+
+ChunkedMsgGuard::~ChunkedMsgGuard() {
+  if (held && gChunkedMsgMutex) {
+    xSemaphoreGive(gChunkedMsgMutex);
   }
 }

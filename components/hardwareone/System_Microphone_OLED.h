@@ -13,51 +13,23 @@
 
 // Microphone OLED display function - shows VU meter and recording status
 static void displayMicrophone() {
-  extern Adafruit_SSD1306* oledDisplay;
+  extern void oledDrawIcon(int x, int y, const char* iconName, int targetSize);
+  extern void oledDrawLevelBars(int x, int y, int level, int maxBars, int barHeight);
   
+  // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
+  int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
-  oledDisplay->setCursor(0, 0);
-  oledDisplay->println("=== MICROPHONE ===");
   
   if (!micEnabled) {
-    oledDisplay->println();
+    // Show muted volume icon when mic is off
+    oledDrawIcon(48, y + 2, "vol_mute", 16);
+    oledDisplay->setCursor(20, y + 22);
     oledDisplay->println("Mic not active");
-    oledDisplay->println();
-    oledDisplay->println("Press X to start");
-    oledDisplay->println("Press Y to record");
     return;
   }
   
-  // Get current audio level
+  // Get current audio level (0-100)
   int level = getAudioLevel();
-  
-  // Status line
-  oledDisplay->println();
-  oledDisplay->printf("Status: %s\n", micRecording ? "RECORDING" : "Active");
-  oledDisplay->printf("Rate: %d Hz\n", micSampleRate);
-  
-  // VU Meter visualization (horizontal bar)
-  oledDisplay->println();
-  oledDisplay->print("Level: ");
-  
-  // Draw VU meter bar
-  int barWidth = 80;  // pixels for the bar
-  int barX = 40;      // starting X position
-  int barY = 40;      // Y position
-  int barHeight = 8;
-  int fillWidth = (level * barWidth) / 100;
-  
-  // Draw outline
-  oledDisplay->drawRect(barX, barY, barWidth, barHeight, SSD1306_WHITE);
-  
-  // Fill based on level
-  if (fillWidth > 0) {
-    oledDisplay->fillRect(barX + 1, barY + 1, fillWidth - 2, barHeight - 2, SSD1306_WHITE);
-  }
-  
-  // Level percentage
-  oledDisplay->setCursor(barX + barWidth + 4, barY);
-  oledDisplay->printf("%d%%", level);
   
   // Recording indicator (blinking if recording)
   if (micRecording) {
@@ -68,13 +40,32 @@ static void displayMicrophone() {
       lastBlink = millis();
     }
     if (blinkState) {
-      oledDisplay->fillCircle(120, 4, 3, SSD1306_WHITE);  // Recording dot
+      oledDisplay->fillCircle(SCREEN_WIDTH - 8, y + 3, 3, SSD1306_WHITE);
     }
   }
   
-  // Controls hint at bottom
-  oledDisplay->setCursor(0, OLED_CONTENT_HEIGHT - 8);
-  oledDisplay->print("X:Start/Stop Y:Record");
+  // Status line
+  oledDisplay->setCursor(0, y);
+  oledDisplay->printf("%s %dHz", micRecording ? "REC" : "Active", micSampleRate);
+  y += 10;
+  
+  // VU Meter visualization (horizontal bar)
+  int barWidth = SCREEN_WIDTH - 28;
+  int barX = 0;
+  int barHeight = 10;
+  int fillWidth = (level * (barWidth - 2)) / 100;
+  
+  // Draw outline
+  oledDisplay->drawRect(barX, y, barWidth, barHeight, SSD1306_WHITE);
+  
+  // Fill based on level
+  if (fillWidth > 0) {
+    oledDisplay->fillRect(barX + 1, y + 1, fillWidth, barHeight - 2, SSD1306_WHITE);
+  }
+  
+  // Level percentage
+  oledDisplay->setCursor(barX + barWidth + 4, y + 1);
+  oledDisplay->printf("%d%%", level);
 }
 
 // Availability check for Microphone OLED mode
@@ -125,7 +116,7 @@ static const OLEDModeEntry microphoneOLEDModes[] = {
   {
     OLED_MICROPHONE,             // mode enum
     "Microphone",                // menu name
-    "notify_speaker",            // icon name (closest available)
+    "mic",                      // icon name (closest available)
     displayMicrophone,           // displayFunc
     microphoneOLEDModeAvailable, // availFunc
     microphoneInputHandler,      // inputFunc

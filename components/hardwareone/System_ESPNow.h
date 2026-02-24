@@ -35,6 +35,7 @@ String base64Encode(const uint8_t* data, size_t len);
 #define MSG_TYPE_MESH_SYS "MESH_SYS"
 #define MSG_TYPE_RESPONSE "RESPONSE"
 #define MSG_TYPE_STREAM "STREAM"
+#define MSG_TYPE_BOOT "BOOT"
 // Note: MSG_TYPE_MESH removed - mesh is a transport method (TTL-based), not a message type
 // JSON-only logical types (names chosen to avoid collision with enum MessageType)
 #define MSG_TYPE_FILE_STR "FILE"
@@ -71,6 +72,19 @@ enum MeshRole {
 enum EspNowMode { 
   ESPNOW_MODE_DIRECT = 0,
   ESPNOW_MODE_MESH = 1 
+};
+
+// ==========================
+// Bond Mode Handshake State Machine
+// ==========================
+// Linear handshake: wait for each step to complete before proceeding
+enum BondHandshakeState {
+  BOND_HS_IDLE = 0,           // Not paired or disconnected
+  BOND_HS_WAIT_HEARTBEAT,     // Waiting for first heartbeat exchange
+  BOND_HS_CAP_EXCHANGE,       // Exchanging capabilities
+  BOND_HS_MANIFEST_EXCHANGE,  // Exchanging manifests (via file transfer)
+  BOND_HS_SETTINGS_EXCHANGE,  // Exchanging settings (via file transfer)
+  BOND_HS_COMPLETE            // Handshake complete, normal operation
 };
 
 // ESP-NOW device name mapping
@@ -138,8 +152,11 @@ struct MeshTopoNode {
 // ==========================
 // Mesh Peer Health Tracking (from espnow_system.cpp)
 // ==========================
-#define MESH_PEER_MAX 16
+#define MESH_PEER_MAX 16          // Compile-time ceiling (max possible value of meshPeerMax setting)
 #define MESH_PEER_TIMEOUT_MS 30000
+
+// Runtime peer slot count (set from gSettings.meshPeerMax at boot, capped to MESH_PEER_MAX)
+extern int gMeshPeerSlots;
 
 struct MeshPeerHealth {
   uint8_t mac[6];
@@ -148,8 +165,47 @@ struct MeshPeerHealth {
   uint32_t lastAckMs;        // Last time we received MESHACK from this peer
   uint32_t heartbeatCount;   // Total heartbeats received
   uint32_t ackCount;         // Total ACKs received
+  uint32_t lastBootCounter;  // Last known boot counter from this peer
+  int8_t rssi;               // Last RSSI from heartbeat
   bool isActive;             // true if this slot is in use
 };
+
+// ==========================
+// Mesh Peer Metadata (device organization for rooms/zones/tags)
+// ==========================
+// Aggregated on master from workerStatus payloads; used for
+// room-based queries, MQTT HA bridge discovery, and OLED device list.
+struct MeshPeerMeta {
+  uint8_t mac[6];
+  char name[32];           // From espnowDeviceName
+  char friendlyName[48];   // From espnowFriendlyName
+  char room[32];           // From espnowRoom
+  char zone[32];           // From espnowZone
+  char tags[64];           // From espnowTags (comma-separated)
+  bool stationary;         // From espnowStationary
+  uint32_t sensorMask;     // From CapabilitySummary or workerStatus
+  uint32_t lastMetaUpdate; // millis() when metadata last received
+  bool isActive;           // true if this slot is in use
+
+  void clear() {
+    memset(mac, 0, 6);
+    memset(name, 0, sizeof(name));
+    memset(friendlyName, 0, sizeof(friendlyName));
+    memset(room, 0, sizeof(room));
+    memset(zone, 0, sizeof(zone));
+    memset(tags, 0, sizeof(tags));
+    stationary = false;
+    sensorMask = 0;
+    lastMetaUpdate = 0;
+    isActive = false;
+  }
+};
+
+extern MeshPeerMeta* gMeshPeerMeta;  // Dynamically allocated [gMeshPeerSlots] at init
+
+// Peer metadata helpers
+MeshPeerMeta* getMeshPeerMeta(const uint8_t mac[6], bool createIfMissing = false);
+int countMeshPeerMetaByRoom(const char* room);
 
 // ==========================
 // Mesh Retry Queue (from main .ino)
@@ -179,6 +235,35 @@ struct MeshSeenEntry {
 };
 
 // ==========================
+// Broadcast ACK Tracking
+// ==========================
+#define BROADCAST_TRACKER_SLOTS 8
+#define BROADCAST_TRACKER_MAX_PEERS 20
+#define BROADCAST_TRACKER_TIMEOUT_MS 3000
+
+struct BroadcastTracker {
+  uint32_t msgId;                                     // Message ID being tracked
+  uint32_t startMs;                                  // When broadcast started
+  uint8_t peerMacs[BROADCAST_TRACKER_MAX_PEERS][6]; // MACs we sent to
+  bool ackReceived[BROADCAST_TRACKER_MAX_PEERS];     // Which peers ACK'd
+  uint8_t expectedCount;                             // Number of peers we sent to
+  uint8_t receivedCount;                             // Number of ACKs received
+  bool active;                                       // Tracker slot in use
+  bool reported;                                     // Results already reported
+  
+  void reset() {
+    msgId = 0;
+    startMs = 0;
+    memset(peerMacs, 0, sizeof(peerMacs));
+    memset(ackReceived, 0, sizeof(ackReceived));
+    expectedCount = 0;
+    receivedCount = 0;
+    active = false;
+    reported = false;
+  }
+};
+
+// ==========================
 // Unpaired Device Tracking
 // ==========================
 #define MAX_UNPAIRED_DEVICES 16
@@ -190,6 +275,143 @@ struct UnpairedDevice {
   uint32_t lastSeenMs;
   uint32_t heartbeatCount;
 };
+
+// ==========================
+// Bond Mode Structures
+// ==========================
+
+// Capability summary - small binary report exchanged on bonding
+// Total size: 64 bytes (fits in single ESP-NOW packet)
+struct CapabilitySummary {
+  uint8_t protoVersion;        // Protocol version (1)
+  uint8_t fwHash[16];          // Firmware hash (first 16 bytes of SHA256)
+  uint8_t role;                // 0=worker, 1=master
+  uint8_t reserved1;
+  
+  // Feature masks (32 bits each)
+  uint32_t featureMask;        // Compile-time features (WiFi, BT, MQTT, etc.)
+  uint32_t serviceMask;        // Runtime services (HTTP, ESP-NOW, etc.)
+  uint32_t sensorMask;         // I2C sensors (thermal, ToF, IMU, etc.)
+  
+  // Hardware info
+  uint8_t mac[6];              // Device MAC address
+  uint8_t chipModel;           // ESP32 chip model
+  uint8_t reserved2;
+  
+  uint32_t flashSizeMB;        // Flash size in MB
+  uint32_t psramSizeMB;        // PSRAM size in MB
+  uint8_t wifiChannel;         // Current WiFi channel
+  uint8_t reserved3[3];
+  
+  char deviceName[20];         // Device name (null-terminated)
+  uint32_t uptimeSeconds;      // Uptime in seconds
+};
+
+// Bond mode message types
+#define MSG_TYPE_PAIR_CAP_REQ "PAIR_CAP_REQ"     // Request capability summary
+#define MSG_TYPE_PAIR_CAP_RESP "PAIR_CAP_RESP"   // Capability summary response
+#define MSG_TYPE_PAIR_MANIFEST_REQ "PAIR_MAN_REQ" // Request full manifest
+#define MSG_TYPE_PAIR_MANIFEST_RESP "PAIR_MAN_RESP" // Manifest response (chunked)
+
+// ==========================
+// Capability Bit Definitions
+// ==========================
+
+// Feature mask bits (compile-time capabilities)
+#define CAP_FEATURE_WIFI        (1 << 0)
+#define CAP_FEATURE_BLUETOOTH   (1 << 1)
+#define CAP_FEATURE_MQTT        (1 << 2)
+#define CAP_FEATURE_CAMERA      (1 << 3)
+#define CAP_FEATURE_MICROPHONE  (1 << 4)
+#define CAP_FEATURE_ESP_SR      (1 << 5)
+#define CAP_FEATURE_AUTOMATION  (1 << 6)
+#define CAP_FEATURE_MAPS        (1 << 7)
+#define CAP_FEATURE_OLED        (1 << 8)
+#define CAP_FEATURE_ESPNOW      (1 << 9)
+
+// Service mask bits (runtime services)
+#define CAP_SERVICE_ESPNOW      (1 << 0)
+#define CAP_SERVICE_WIFI_CONN   (1 << 1)
+#define CAP_SERVICE_HTTP        (1 << 2)
+#define CAP_SERVICE_BLUETOOTH   (1 << 3)
+
+// Sensor mask bits (I2C sensors)
+#define CAP_SENSOR_THERMAL      (1 << 0)
+#define CAP_SENSOR_TOF          (1 << 1)
+#define CAP_SENSOR_IMU          (1 << 2)
+#define CAP_SENSOR_GAMEPAD      (1 << 3)
+#define CAP_SENSOR_APDS         (1 << 4)
+#define CAP_SENSOR_GPS          (1 << 5)
+#define CAP_SENSOR_RTC          (1 << 6)
+#define CAP_SENSOR_PRESENCE     (1 << 7)
+
+// Human-readable capability names (for UI display)
+struct CapabilityName {
+  uint32_t bit;
+  const char* shortName;  // For OLED (compact)
+  const char* longName;   // For web/CLI
+};
+
+// Feature names
+static const CapabilityName FEATURE_NAMES[] = {
+  { CAP_FEATURE_WIFI,       "WiFi",   "WiFi" },
+  { CAP_FEATURE_BLUETOOTH,  "BT",     "Bluetooth" },
+  { CAP_FEATURE_MQTT,       "MQTT",   "MQTT" },
+  { CAP_FEATURE_CAMERA,     "Cam",    "Camera" },
+  { CAP_FEATURE_MICROPHONE, "Mic",    "Microphone" },
+  { CAP_FEATURE_ESP_SR,     "SR",     "Speech Recognition" },
+  { CAP_FEATURE_AUTOMATION, "Auto",   "Automation" },
+  { CAP_FEATURE_MAPS,       "Maps",   "Maps" },
+  { CAP_FEATURE_OLED,       "OLED",   "OLED Display" },
+  { CAP_FEATURE_ESPNOW,     "NOW",    "ESP-NOW" },
+  { 0, nullptr, nullptr }
+};
+
+// Service names
+static const CapabilityName SERVICE_NAMES[] = {
+  { CAP_SERVICE_ESPNOW,    "NOW",    "ESP-NOW" },
+  { CAP_SERVICE_WIFI_CONN, "WiFi",   "WiFi Connected" },
+  { CAP_SERVICE_HTTP,      "HTTP",   "HTTP Server" },
+  { CAP_SERVICE_BLUETOOTH, "BT",     "Bluetooth Active" },
+  { 0, nullptr, nullptr }
+};
+
+// Sensor names
+static const CapabilityName SENSOR_NAMES[] = {
+  { CAP_SENSOR_THERMAL,  "Therm",  "Thermal Camera" },
+  { CAP_SENSOR_TOF,      "ToF",    "Time-of-Flight" },
+  { CAP_SENSOR_IMU,      "IMU",    "IMU/Accelerometer" },
+  { CAP_SENSOR_GAMEPAD,  "Pad",    "Gamepad" },
+  { CAP_SENSOR_APDS,     "APDS",   "Gesture/Color" },
+  { CAP_SENSOR_GPS,      "GPS",    "GPS" },
+  { CAP_SENSOR_RTC,      "RTC",    "Real-Time Clock" },
+  { CAP_SENSOR_PRESENCE, "Pres",   "Presence Sensor" },
+  { 0, nullptr, nullptr }
+};
+
+// Helper: Get comma-separated list of enabled capabilities (short names for OLED)
+inline String getCapabilityListShort(uint32_t mask, const CapabilityName* names) {
+  String result;
+  for (int i = 0; names[i].shortName != nullptr; i++) {
+    if (mask & names[i].bit) {
+      if (result.length() > 0) result += ",";
+      result += names[i].shortName;
+    }
+  }
+  return result.length() > 0 ? result : String("None");
+}
+
+// Helper: Get comma-separated list of enabled capabilities (long names for web/CLI)
+inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) {
+  String result;
+  for (int i = 0; names[i].longName != nullptr; i++) {
+    if (mask & names[i].bit) {
+      if (result.length() > 0) result += ", ";
+      result += names[i].longName;
+    }
+  }
+  return result.length() > 0 ? result : String("None");
+}
 
 // ==========================
 // Message Structures
@@ -237,7 +459,7 @@ struct QueuedMessage {
 };
 
 // Per-device message buffer size based on available memory
-// With PSRAM: 100 messages per device (~18KB each), Without: 5 messages (~900 bytes each)
+// With PSRAM: 100 messages per device (~30KB each), Without: 5 messages (~1.5KB each)
 #if CONFIG_SPIRAM_SUPPORT || CONFIG_ESP32S3_SPIRAM_SUPPORT
   #define MESSAGES_PER_DEVICE 100
 #else
@@ -257,7 +479,7 @@ enum LogMessageType {
 struct ReceivedTextMessage {
   uint8_t senderMac[6];            // Sender MAC
   char senderName[32];             // Sender device name
-  char message[128];               // Message text (trimmed to 128 chars)
+  char message[256];               // Message text (trimmed to 256 chars)
   unsigned long timestamp;         // When received (millis)
   bool encrypted;                  // Whether message was encrypted
   uint32_t seqNum;                 // Sequence number for deduplication
@@ -267,7 +489,7 @@ struct ReceivedTextMessage {
   ReceivedTextMessage() : timestamp(0), encrypted(false), seqNum(0), msgType(MSG_TEXT), active(false) {
     memset(senderMac, 0, 6);
     memset(senderName, 0, 32);
-    memset(message, 0, 128);
+    memset(message, 0, 256);
   }
 };
 
@@ -354,19 +576,11 @@ struct RouterMetrics {
   uint32_t retriesAttempted;     // Total retry attempts
   uint32_t retriesSucceeded;     // Successful retries
   uint32_t queueOverflows;       // Times queue was full
-  // V2 fragmentation metrics (JSON v1 fragments)
-  uint32_t v2FragTx;             // Total fragments transmitted
-  uint32_t v2FragRx;             // Total fragments received (recognized)
-  uint32_t v2FragRxCompleted;    // Messages fully reassembled
-  uint32_t v2FragRxGc;           // Reassembly contexts GC'ed due to timeout
-  // V2 reliability metrics (acks + dedup)
-  uint32_t v2SmallTx;            // Small v2 envelopes sent
-  uint32_t v2AckTx;
-  uint32_t v2AckRx;
-  uint32_t v2DedupDrops;
-  uint32_t v2AckTimeoutSmall;
-  uint32_t v2AckTimeoutFrag;
-  
+  // V3 binary fragmentation metrics
+  uint32_t v3FragTx;             // Total V3 fragments transmitted
+  uint32_t v3FragRx;             // Total V3 fragments received
+  uint32_t v3FragRxCompleted;    // V3 messages fully reassembled
+  uint32_t v3FragRxGc;           // V3 reassembly contexts GC'ed due to timeout
   // Mesh routing metrics (per-message-type tracking)
   uint32_t meshForwardsByType[8];    // Forwards by type: [HB, ACK, MESH_SYS, FILE, CMD, TEXT, RESPONSE, STREAM]
   uint32_t meshTTLExhausted;         // Messages dropped due to TTL=0
@@ -384,8 +598,7 @@ struct RouterMetrics {
                     chunksTimedOut(0), avgSendTimeUs(0), maxSendTimeUs(0),
                     messagesQueued(0), messagesDequeued(0), retriesAttempted(0),
                     retriesSucceeded(0), queueOverflows(0),
-                    v2FragTx(0), v2FragRx(0), v2FragRxCompleted(0), v2FragRxGc(0),
-                    v2SmallTx(0), v2AckTx(0), v2AckRx(0), v2DedupDrops(0), v2AckTimeoutSmall(0), v2AckTimeoutFrag(0),
+                    v3FragTx(0), v3FragRx(0), v3FragRxCompleted(0), v3FragRxGc(0),
                     meshTTLExhausted(0), meshLoopDetected(0), meshPathLengthSum(0), 
                     meshPathLengthCount(0), meshMaxPathLength(0), meshFallbacks(0) {
     memset(meshForwardsByType, 0, sizeof(meshForwardsByType));
@@ -402,9 +615,10 @@ struct ReceivedMessage {
   bool isEncrypted;                    // Whether message was encrypted
   String deviceName;                   // Device name (if paired)
   String macStr;                       // Formatted MAC address string
+  uint32_t cmdMsgId;                   // Command message ID for response tracking
   
   ReceivedMessage() : recvInfo(nullptr), rawData(nullptr), dataLen(0), 
-                      isPaired(false), isEncrypted(false) {}
+                      isPaired(false), isEncrypted(false), cmdMsgId(0) {}
 };
 
 // ==========================
@@ -462,7 +676,8 @@ struct EspNowState {
   uint8_t queueSize;  // Current number of messages in queue
   
   // Per-device message history buffers (for web UI and OLED)
-  PeerMessageHistory peerMessageHistories[MESH_PEER_MAX];
+  // Dynamically allocated [gMeshPeerSlots] at init
+  PeerMessageHistory* peerMessageHistories;
   uint32_t globalMessageSeqNum; // Global sequence number for all messages
   
   // Statistics (non-router specific)
@@ -479,6 +694,100 @@ struct EspNowState {
   
   // Device name
   String deviceName;
+  
+  // Last received remote capability (for OLED/web display)
+  CapabilitySummary lastRemoteCap;
+  bool lastRemoteCapValid;
+  unsigned long lastRemoteCapTime;
+  
+  // Bond mode heartbeat tracking
+  uint32_t bondHeartbeatsSent;
+  uint32_t bondHeartbeatsReceived;
+  unsigned long lastBondHeartbeatSentMs;
+  unsigned long lastBondHeartbeatReceivedMs;
+  uint32_t bondPeerUptimeSec;
+  uint32_t bondPeerUptimeSecAtOffline;
+  bool bondPeerOnline;  // true if heartbeat received within timeout
+  bool bondNeedsCapabilityRequest;  // flag to request caps/manifest (set by callback, handled by task)
+  BondHandshakeState bondOnlineEventState;  // handshake state when "peer online" event fired (for debug)
+  bool bondNeedsStreamingSetup;     // flag to apply saved streaming settings (set by callback, handled by task)
+  bool bondNeedsCapabilityResponse; // flag to send capability response (deferred from callback)
+  bool bondNeedsManifestResponse;   // flag to send manifest response (deferred from callback)
+  bool bondNeedsSettingsResponse;   // flag to send settings response (deferred from callback)
+  bool bondNeedsMetadataResponse;   // flag to send metadata response (deferred from callback)
+  bool bondReceivedCapability;      // flag to log received capability (deferred from callback)
+  uint8_t bondPendingResponseMac[6]; // MAC of peer requesting cap/manifest/settings
+  uint8_t metadataPendingResponseMac[6]; // Dedicated MAC for metadata response (separate from bond exchanges)
+  
+  // Deferred metadata processing (set in callback, handled in task)
+  bool deferredMetadataPending;
+  uint8_t deferredMetadataSrcMac[6];
+  uint8_t deferredMetadataPayload[180];  // V3PayloadMetadata size
+  
+  // Linear handshake state machine (prevents overlapping file transfers)
+  BondHandshakeState bondHandshakeState;  // Current handshake step
+  uint32_t bondHandshakeStartMs;          // When current step started (for timeout)
+  uint8_t bondHandshakeRetryCount;        // Retry counter for current step (max 3)
+  bool bondCapSent;                       // We sent our capabilities
+  bool bondCapReceived;                   // We received peer's capabilities  
+  bool bondManifestSent;                  // We sent our manifest
+  bool bondManifestReceived;              // We received peer's manifest
+  bool bondSettingsSent;                  // We sent our settings
+  bool bondSettingsReceived;              // We received peer's settings
+
+  bool bondHandshakeCompletedThisBoot;
+  uint32_t bondHandshakeCompletedMs;
+  uint32_t bondLastOfflineMs;
+  uint8_t bondHandshakeCompletedPeerMac[6];
+  
+  // Bond mode session token (RAM only - never persisted)
+  // Token = HMAC-SHA256(passphrase, peerMAC || ourMAC) - proves knowledge of shared passphrase
+  // Used for authenticating remote commands without sending credentials per-command
+  uint8_t bondSessionToken[16];      // First 16 bytes of HMAC (sufficient for auth)
+  bool bondSessionTokenValid;        // True if token has been computed for current peer
+  
+  // Bond mode health scoring (minimal overhead: 16 bytes)
+  uint16_t bondHealthScore;          // 0-100 health score based on heartbeat reliability
+  uint16_t bondMissedHeartbeats;     // Consecutive missed heartbeats
+  uint16_t bondSuccessfulHeartbeats; // Consecutive successful heartbeats (for recovery)
+  int8_t bondRssiLast;               // Last RSSI value (-128 to 0)
+  int8_t bondRssiAvg;                // Running average RSSI (EMA)
+  uint32_t bondLastRssiUpdateMs;     // When RSSI was last updated
+  uint16_t bondPacketLoss;           // Packet loss estimate (0-1000 = 0.0%-100.0%)
+  uint16_t bondLatencyMs;            // Round-trip latency estimate in ms
+  
+  // Deferred message handling (ISR-safe pattern: callback sets flag, task processes)
+  // TEXT message
+  bool deferredTextPending;
+  bool deferredTextEncrypted;
+  uint8_t deferredTextSrcMac[6];
+  char deferredTextDeviceName[32];
+  char deferredTextContent[256];
+  
+  // CMD_RESP message
+  bool deferredCmdRespPending;
+  uint8_t deferredCmdRespSrcMac[6];
+  char deferredCmdRespDeviceName[32];
+  char deferredCmdRespResult[2048];
+  bool deferredCmdRespSuccess;
+  
+  // STREAM message ring buffer (replaces single-buffer to prevent overwrite loss)
+  static constexpr int STREAM_QUEUE_SIZE = 16;  // Must be power of 2
+  struct StreamQueueEntry {
+    uint8_t srcMac[6];
+    char deviceName[32];
+    char content[256];
+    bool used;  // Slot contains valid data
+  };
+  StreamQueueEntry streamQueue[STREAM_QUEUE_SIZE];
+  volatile int streamQueueHead;  // ISR writes here (producer)
+  volatile int streamQueueTail;  // Task reads here (consumer)
+  // CMD request (deferred to task for auth + execution)
+  bool deferredCmdPending;
+  uint8_t deferredCmdSrcMac[6];
+  char deferredCmdDeviceName[32];
+  char deferredCmdPayload[256];
+  uint32_t deferredCmdMsgId;
   
   // Constructor
   EspNowState() : 
@@ -511,13 +820,72 @@ struct EspNowState {
     fileTransfersReceived(0),
     lastResetTime(0),
     heartbeatPublic(true),
-    deviceName("")
+    deviceName(""),
+    lastRemoteCapValid(false),
+    lastRemoteCapTime(0),
+    bondHeartbeatsSent(0),
+    bondHeartbeatsReceived(0),
+    lastBondHeartbeatSentMs(0),
+    lastBondHeartbeatReceivedMs(0),
+    bondPeerOnline(false),
+    bondNeedsCapabilityRequest(false),
+    bondOnlineEventState(BOND_HS_IDLE),
+    bondNeedsStreamingSetup(false),
+    bondNeedsCapabilityResponse(false),
+    bondNeedsManifestResponse(false),
+    bondNeedsSettingsResponse(false),
+    bondNeedsMetadataResponse(false),
+    bondReceivedCapability(false),
+    deferredMetadataPending(false),
+    bondHandshakeState(BOND_HS_IDLE),
+    bondHandshakeStartMs(0),
+    bondHandshakeRetryCount(0),
+    bondCapSent(false),
+    bondCapReceived(false),
+    bondManifestSent(false),
+    bondManifestReceived(false),
+    bondSettingsSent(false),
+    bondSettingsReceived(false),
+    bondSessionTokenValid(false),
+    bondHealthScore(100),
+    bondMissedHeartbeats(0),
+    bondSuccessfulHeartbeats(0),
+    bondRssiLast(-100),
+    bondRssiAvg(-100),
+    bondLastRssiUpdateMs(0),
+    bondPacketLoss(0),
+    bondLatencyMs(0),
+    deferredTextPending(false),
+    deferredTextEncrypted(false),
+    deferredCmdRespPending(false),
+    deferredCmdRespSuccess(false),
+    streamQueueHead(0),
+    streamQueueTail(0),
+    deferredCmdPending(false),
+    deferredCmdMsgId(0)
   {
     memset(derivedKey, 0, 16);
+    memset(bondPendingResponseMac, 0, 6);
+    memset(metadataPendingResponseMac, 0, 6);
+    memset(bondSessionToken, 0, 16);
+    // Initialize deferred message buffers
+    memset(deferredTextSrcMac, 0, 6);
+    memset(deferredTextDeviceName, 0, sizeof(deferredTextDeviceName));
+    memset(deferredTextContent, 0, sizeof(deferredTextContent));
+    memset(deferredMetadataSrcMac, 0, 6);
+    memset(deferredMetadataPayload, 0, sizeof(deferredMetadataPayload));
+    memset(deferredCmdRespSrcMac, 0, 6);
+    memset(deferredCmdRespDeviceName, 0, sizeof(deferredCmdRespDeviceName));
+    memset(deferredCmdRespResult, 0, sizeof(deferredCmdRespResult));
+    memset(streamQueue, 0, sizeof(streamQueue));
+    memset(deferredCmdSrcMac, 0, 6);
+    memset(deferredCmdDeviceName, 0, sizeof(deferredCmdDeviceName));
+    memset(deferredCmdPayload, 0, sizeof(deferredCmdPayload));
     memset(devices, 0, sizeof(devices));
     memset(unpairedDevices, 0, sizeof(unpairedDevices));
     memset(fileAckHashExpected, 0, 16);
     memset(listBuffer, 0, 1024);
+    memset(&lastRemoteCap, 0, sizeof(lastRemoteCap));
   }
 };
 
@@ -578,6 +946,7 @@ void sendEspNowStreamMessage(const String& message);
 const char* cmd_espnow_meshrole(const String& originalCmd);
 const char* cmd_espnow_meshmaster(const String& originalCmd);
 const char* cmd_espnow_meshbackup(const String& originalCmd);
+const char* cmd_espnow_backupenable(const String& originalCmd);
 const char* cmd_espnow_meshtopo(const String& originalCmd);
 const char* cmd_espnow_toporesults(const String& cmd);
 
@@ -596,9 +965,6 @@ String formatMacAddress(const uint8_t* mac);
 const char* getMeshRoleString(uint8_t role);
 uint32_t generateMessageId();
 bool shouldChunk(size_t size);
-bool routerSend(Message& msg);
-bool sendDirectFragmentedV2(const uint8_t* mac, const String& payload, uint32_t msgId, bool isEncrypted, const String& deviceName);
-bool sendDirectV2Small(const uint8_t* mac, const String& payload, uint32_t msgId, bool isEncrypted, const String& deviceName);
 // Helper to resolve device name or MAC address to MAC bytes
 bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac);
 
@@ -638,7 +1004,7 @@ inline bool meshEnabled() {
 }
 
 // Mesh peer state (used by OLED and status views)
-extern MeshPeerHealth gMeshPeers[MESH_PEER_MAX];
+extern MeshPeerHealth* gMeshPeers;   // Dynamically allocated [gMeshPeerSlots] at init
 
 // Mesh helper utilities (moved from .ino)
 bool isMeshPeerAlive(const MeshPeerHealth* peer);
@@ -665,6 +1031,7 @@ extern uint32_t gLastTopoRequest;
 
 // Mesh message builders (for heartbeat in loop)
 String buildHeartbeat(uint32_t msgId, const char* src);
+String buildBootNotification(uint32_t msgId, const char* src, uint32_t bootCounter, uint32_t timestamp);
 
 // V2 envelope builder (for user sync and other features)
 void v2_init_envelope(JsonDocument& doc, const char* type, uint32_t msgId, const char* src, const char* dst, int ttl);
@@ -675,6 +1042,7 @@ extern bool gMeshActivitySuspended;  // Suspend mesh during HTTP requests
 void processMeshHeartbeats();  // Internal worker function (called by task)
 bool startEspNowTask();        // Start ESP-NOW heartbeat task
 void stopEspNowTask();         // Stop ESP-NOW heartbeat task
+TaskHandle_t getEspNowTaskHandle();  // Get task handle for stack monitoring
 
 // Message handling (for command execution)
 void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& result, const String& senderName);
@@ -689,6 +1057,16 @@ int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t s
 
 // File transfer to specific MAC (used by ImageManager)
 bool sendFileToMac(const uint8_t* mac, const String& localPath);
+
+// V3 binary sensor data streaming for bond mode (worker → master)
+bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t dataLen);
+
+// Check if bond mode is active and peer is online
+bool isBondModeOnline();
+
+// V3 frame sending (for remote command execution from System_Utils)
+bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
+                   const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 
 #else // !ENABLE_ESPNOW
 

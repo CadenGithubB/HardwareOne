@@ -1,5 +1,6 @@
 #include "System_SensorStubs.h"
 #include "System_Utils.h"
+#include "WebServer_Utils.h"
 
 // Forward declarations for stubs
 class Adafruit_GPS;
@@ -9,6 +10,11 @@ class Adafruit_SSD1306;
 // GLOBAL SENSOR STUB VARIABLE DEFINITIONS
 // =============================================================================
 // These provide the actual variable definitions that extern declarations reference
+
+#if !ENABLE_HTTP_SERVER
+WebMirrorBuf gWebMirror;
+size_t gWebMirrorCap = 0;
+#endif
 
 #if !ENABLE_THERMAL_SENSOR
 // Thermal stub variables (global definitions)
@@ -67,6 +73,7 @@ bool apdsConnected = false;
 bool apdsColorEnabled = false;
 bool apdsProximityEnabled = false;
 bool apdsGestureEnabled = false;
+TaskHandle_t apdsTaskHandle = nullptr;
 const struct CommandEntry apdsCommands[] = {};
 const size_t apdsCommandsCount = 0;
 #endif
@@ -76,8 +83,20 @@ const size_t apdsCommandsCount = 0;
 bool gpsEnabled = false;
 bool gpsConnected = false;
 Adafruit_GPS* gPA1010D = nullptr;
+TaskHandle_t gpsTaskHandle = nullptr;
 const struct CommandEntry gpsCommands[] = {};
 const size_t gpsCommandsCount = 0;
+#endif
+
+#if !ENABLE_PRESENCE_SENSOR
+// Presence sensor stub variables (global definitions)
+PresenceCache gPresenceCache;
+bool presenceEnabled = false;
+bool presenceConnected = false;
+unsigned long presenceLastStopTime = 0;
+TaskHandle_t presenceTaskHandle = nullptr;
+const struct CommandEntry presenceCommands[] = {};
+const size_t presenceCommandsCount = 0;
 #endif
 
 #if !ENABLE_OLED_DISPLAY
@@ -120,6 +139,19 @@ volatile UBaseType_t gRTCWatermarkMin = 0;
 const struct CommandEntry rtcCommands[] = {};
 const size_t rtcCommandsCount = 0;
 void startRTCSensorInternal() {}
+#endif
+
+#if !ENABLE_MICROPHONE_SENSOR
+// Microphone stub variables (global definitions)
+bool micEnabled = false;
+bool micConnected = false;
+bool micRecording = false;
+int micSampleRate = 0;
+int micBitDepth = 0;
+int micChannels = 0;
+int micGain = 0;
+const struct CommandEntry micCommands[] = {};
+const size_t micCommandsCount = 0;
 #endif
 
 #if !ENABLE_CAMERA_SENSOR
@@ -176,4 +208,10 @@ MeshTopoNode* gMeshTopology = nullptr;
 bool gMeshActivitySuspended = false;
 const struct CommandEntry espNowCommands[] = {};
 const size_t espNowCommandsCount = 0;
+#endif
+
+#if !ENABLE_MQTT
+// MQTT stub variables (global definitions)
+const struct CommandEntry mqttCommands[] = {};
+const size_t mqttCommandsCount = 0;
 #endif

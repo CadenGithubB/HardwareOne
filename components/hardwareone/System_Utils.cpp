@@ -22,11 +22,13 @@
 #include <time.h>
 #include "System_Utils.h"
 #include "System_Debug.h"
+#include "System_TaskUtils.h"
 #include "System_I2C.h"
 #include "System_User.h"
 #include "System_Command.h"  // For CommandModuleRegistrar
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
+#include "System_Notifications.h"
 #include "i2csensor-ds3231.h"  // RTC for time functions
 #include "System_Utils.h"
 #include "System_ESPSR.h"
@@ -45,8 +47,6 @@ extern "C" {
 #pragma weak _ext_ram_noinit_start
 #pragma weak _ext_ram_noinit_end
 
-// Settings save function
-extern bool writeSettingsJson();
 
 // ============================================================================
 // Task Execution Performance Monitoring Implementation
@@ -87,13 +87,6 @@ void taskOperationComplete(uint32_t elapsedMs, uint32_t timeoutThresholdMs) {
   }
 }
 
-void taskPerformanceError(uint8_t deviceAddr, uint32_t elapsedMs) {
-  // Performance tracking now handled by I2C manager automatically
-  // This function kept for backward compatibility but does nothing
-  (void)deviceAddr;
-  (void)elapsedMs;
-}
-
 void resetTaskMetrics() {
   gTaskMetrics.totalOperations = 0;
   gTaskMetrics.timeoutCount = 0;
@@ -101,6 +94,33 @@ void resetTaskMetrics() {
   gTaskMetrics.maxExecutionMs = 0;
   gTaskMetrics.lastResetMs = millis();
 }
+
+// ============================================================================
+// Security Utilities
+// ============================================================================
+
+// Securely clear a String's internal buffer before releasing memory
+// Uses volatile to prevent compiler from optimizing away the memset
+void secureClearString(String& s) {
+  if (s.length() == 0) return;
+  
+  // Get pointer to internal buffer and overwrite with zeros
+  // Arduino String stores data in a char array accessible via c_str() but that's const
+  // We need to use begin() which returns a non-const iterator on some platforms
+  // For ESP32/Arduino, we can cast away const since we're about to clear it anyway
+  char* buf = const_cast<char*>(s.c_str());
+  size_t len = s.length();
+  
+  // Use volatile pointer to prevent optimizer from removing the memset
+  volatile char* vbuf = buf;
+  for (size_t i = 0; i < len; i++) {
+    vbuf[i] = 0;
+  }
+  
+  // Now actually clear the String
+  s = "";
+}
+
 #include "System_Settings.h"
 #include "System_Mutex.h"   // For FsLockGuard
 #include "System_I2C.h"     // For I2CSensorEntry, ConnectedDevice, MAX_CONNECTED_DEVICES
@@ -167,6 +187,8 @@ extern bool micConnected;
 #endif
 extern const CommandEntry userSystemCommands[];
 extern const size_t userSystemCommandsCount;
+extern const CommandEntry sensorLoggingCommands[];
+extern const size_t sensorLoggingCommandsCount;
 
 // Include module headers to access their command registries
 #include "System_Filesystem.h"
@@ -178,7 +200,9 @@ extern const size_t userSystemCommandsCount;
 #endif
 #include "OLED_Display.h"
 #include "System_NeoPixel.h"
+#if ENABLE_SERVO
 #include "i2csensor-pca9685.h"
+#endif
 #include "System_Automation.h"
 #include "System_I2C.h"
 #if ENABLE_ESPNOW
@@ -216,9 +240,6 @@ extern bool filesystemReady;
 extern Settings gSettings;
 extern bool gAutoLogActive;
 extern String gAutoLogFile;
-extern bool ensureDebugBuffer();
-extern void broadcastOutput(const char* s);
-
 // ============================================================================
 // Base64 Encoding (moved from .ino)
 // ============================================================================
@@ -240,11 +261,14 @@ String base64Encode(const uint8_t* data, size_t len) {
   if (i < len) {
     uint32_t v = data[i] << 16;
     if (i + 1 < len) {
+      // 2 remaining bytes = 16 bits = 3 base64 chars + 1 padding
       v |= data[i + 1] << 8;
       out += table[(v >> 18) & 0x3F];
       out += table[(v >> 12) & 0x3F];
+      out += table[(v >> 6) & 0x3F];
       out += '=';
     } else {
+      // 1 remaining byte = 8 bits = 2 base64 chars + 2 padding
       out += table[(v >> 18) & 0x3F];
       out += table[(v >> 12) & 0x3F];
       out += '=';
@@ -752,7 +776,7 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
            resultSummary.c_str());
   
   // Append to audit log with 500KB cap (rotates automatically)
-  appendLineWithCap("/logs/command-audit.log", String(entry), 500 * 1024);
+  appendLineWithCap("/system/logs/command-audit.log", String(entry), 500 * 1024);
 }
 
 // Automation logging
@@ -1085,7 +1109,7 @@ const char* cmd_lightsleep(const String& args) {
   esp_light_sleep_start();
   
   // Execution resumes here after wake-up
-  Serial.println("[POWER] Woke from light sleep!");
+  DEBUG_SYSTEMF("Woke from light sleep!");
   
   // Turn display back on (uses abstracted function)
   oledDisplayOn();
@@ -1218,8 +1242,7 @@ const char* cmd_timeset(const String& cmd) {
     broadcastOutput("System time and RTC updated");
     // Mark RTC as calibrated so future boots trust RTC first
     if (!gSettings.rtcTimeHasBeenSet) {
-      gSettings.rtcTimeHasBeenSet = true;
-      writeSettingsJson();
+      setSetting(gSettings.rtcTimeHasBeenSet, true);
       broadcastOutput("RTC marked as calibrated for future boots");
     }
   } else {
@@ -1432,6 +1455,7 @@ bool syncNTPAndResolve() {
 
   for (int i = 0; i < maxIterations && !ntpSynced; i++) {
     delay(200);
+    oledUpdate();  // Keep boot animation running during NTP wait
 
     if (i > 0 && i % iterationsPerSecond == 0) {
       char progressMsg[64];
@@ -1468,24 +1492,19 @@ bool syncNTPAndResolve() {
         broadcastOutput("[OK] RTC updated from NTP time");
         // Mark RTC as calibrated so future boots trust RTC first
         if (!gSettings.rtcTimeHasBeenSet) {
-          gSettings.rtcTimeHasBeenSet = true;
-          writeSettingsJson();
+          setSetting(gSettings.rtcTimeHasBeenSet, true);
           broadcastOutput("[OK] RTC marked as calibrated for future boots");
         }
       }
     }
 #endif
     
-    Serial.println("[DEBUG] About to call resolvePendingUserCreationTimes");
-    Serial.flush();
+    DEBUG_SYSTEMF("About to call resolvePendingUserCreationTimes");
     resolvePendingUserCreationTimes();
-    Serial.println("[DEBUG] resolvePendingUserCreationTimes completed");
-    Serial.flush();
-    Serial.println("[DEBUG] About to call notifyAutomationScheduler");
-    Serial.flush();
+    DEBUG_SYSTEMF("resolvePendingUserCreationTimes completed");
+    DEBUG_SYSTEMF("About to call notifyAutomationScheduler");
     notifyAutomationScheduler();
-    Serial.println("[DEBUG] notifyAutomationScheduler completed");
-    Serial.flush();
+    DEBUG_SYSTEMF("notifyAutomationScheduler completed");
     return true;
   } else {
     DEBUG_DATETIMEF("[syncNTPAndResolve] TIMEOUT - NTP sync failed after %d seconds", maxWaitSeconds);
@@ -1563,7 +1582,11 @@ const CommandEntry commands[] = {
 
 const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);
 
+// Auto-register with command system
+static CommandModuleRegistrar _core_cmd_registrar(commands, commandsCount, "core");
+
 // Battery commands (from System_Battery.cpp)
+#if ENABLE_BATTERY_MONITOR
 extern const char* cmd_battery_status(const String& args);
 extern const char* cmd_battery_calibrate(const String& args);
 
@@ -1573,10 +1596,8 @@ const CommandEntry batteryCommands[] = {
 };
 
 const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batteryCommands[0]);
-
-// Auto-register with command system
-static CommandModuleRegistrar _core_cmd_registrar(commands, commandsCount, "core");
 static CommandModuleRegistrar _battery_cmd_registrar(batteryCommands, batteryCommandsCount, "battery");
+#endif
 
 // MQTT commands (from System_MQTT.cpp)
 #if ENABLE_MQTT
@@ -1608,7 +1629,9 @@ static const CommandModule gCommandModules[] = {
 #endif
   { "oled",       "OLED display control and graphics", oledCommands,         oledCommandsCount, 0, nullptr },
   { "neopixel",   "RGB LED strip and effects", neopixelCommands,     neopixelCommandsCount, 0, nullptr },
+#if ENABLE_SERVO
   { "servo",      "PCA9685 servo motor control", servoCommands,        servoCommandsCount, 0, nullptr },
+#endif
 #if ENABLE_THERMAL_SENSOR
   { "thermal",    "MLX90640 thermal camera (32x24)", thermalCommands,      thermalCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("thermal"); } },
 #endif
@@ -1653,9 +1676,12 @@ static const CommandModule gCommandModules[] = {
 #if ENABLE_AUTOMATION
   { "automation", "Scheduled tasks and conditional commands", automationCommands,   automationCommandsCount, 0, nullptr },
 #endif
+#if ENABLE_BATTERY_MONITOR
   { "battery",    "Battery voltage and charge monitoring", batteryCommands,      batteryCommandsCount, 0, nullptr },
+#endif
   { "debug",      "System debugging and diagnostics", debugCommands,        debugCommandsCount, 0, nullptr },
   { "settings",   "Device configuration and preferences", settingsCommands,     settingsCommandsCount, 0, nullptr },
+  { "sensorlog", "Sensor data logging to files", sensorLoggingCommands, sensorLoggingCommandsCount, 0, nullptr },
   { "users",      "User authentication and management", userSystemCommands,         userSystemCommandsCount, CMD_MODULE_ADMIN, nullptr },
  };
 static const size_t gCommandModulesCount = sizeof(gCommandModules) / sizeof(gCommandModules[0]);
@@ -1786,10 +1812,8 @@ void printConnectedDevicesLibraries(size_t& outTotal) {
         }
 
         if (!alreadyPrinted) {
-          if (gOutputFlags & OUTPUT_SERIAL) {
-            Serial.printf("║   - %-25s: %5u bytes               ║\n",
+          BROADCAST_PRINTF("  - %-25s: %5u bytes",
                           i2cSensors[j].libraryName, (unsigned)i2cSensors[j].libraryHeapBytes);
-          }
           printedLibraries[printedCount++] = i2cSensors[j].libraryName;
           outTotal += i2cSensors[j].libraryHeapBytes;
         }
@@ -1838,8 +1862,6 @@ extern AllocEntry gAllocTracker[];
 extern int gAllocTrackerCount;
 extern bool gAllocTrackerEnabled;
 
-extern bool ensureDebugBuffer();
-
 // External task watermark globals
 extern volatile UBaseType_t gTofWatermarkNow, gTofWatermarkMin;
 extern volatile UBaseType_t gIMUWatermarkNow, gIMUWatermarkMin;
@@ -1866,17 +1888,21 @@ struct Command {
   CommandContext ctx;
 };
 
+// Async callback type for fire-and-forget command execution
+typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
+
 // Exec request structure (same layout as in .ino)
 struct ExecReq {
   char line[2048];  // Full size for ESP-NOW chunking
   CommandContext ctx;
   char out[2048];   // Result buffer (2KB)
-  SemaphoreHandle_t done;
+  SemaphoreHandle_t done;  // NULL for async mode
   bool ok;
+  
+  // Async callback mode
+  ExecAsyncCallback asyncCallback;
+  void* asyncUserData;
 };
-
-// External functions
-extern void broadcastOutput(const char* msg);
 
 // External memory allocation function
 extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
@@ -1904,69 +1930,61 @@ void printMemoryReport() {
 
   bool useDynamicTracking = gAllocTrackerEnabled && gAllocTrackerCount > 0;
 
-  extern void broadcastOutput(const char* s);
-  
   broadcastOutput("");
-  broadcastOutput("╔════════════════════════════════════════════════════════════════╗");
-  broadcastOutput("║              BOOT MEMORY REPORT (Task Manager)                 ║");
-  broadcastOutput("╠════════════════════════════════════════════════════════════════╣");
+  broadcastOutput("========== BOOT MEMORY REPORT (Task Manager) ==========");
+  broadcastOutput("");
 
   // DRAM Summary
-  BROADCAST_PRINTF("║ DRAM (Internal Heap):                                          ║");
-  BROADCAST_PRINTF("║   Total:      %7lu bytes (%3lu KB)                            ║",
+  broadcastOutput("-- DRAM (Internal Heap) --");
+  BROADCAST_PRINTF("  Total:      %7lu bytes (%3lu KB)",
                 (unsigned long)dram_total, (unsigned long)(dram_total / 1024));
-  BROADCAST_PRINTF("║   Used:       %7lu bytes (%3lu KB) [%2u%%]                     ║",
+  BROADCAST_PRINTF("  Used:       %7lu bytes (%3lu KB) [%2u%%]",
                 (unsigned long)dram_used, (unsigned long)(dram_used / 1024),
                 (unsigned)((dram_used * 100) / dram_total));
-  BROADCAST_PRINTF("║   Free:       %7lu bytes (%3lu KB) [%2u%%]                     ║",
+  BROADCAST_PRINTF("  Free:       %7lu bytes (%3lu KB) [%2u%%]",
                 (unsigned long)dram_free, (unsigned long)(dram_free / 1024),
                 (unsigned)((dram_free * 100) / dram_total));
-  BROADCAST_PRINTF("║   Peak Used:  %7lu bytes (%3lu KB) [%2u%%]                     ║",
+  BROADCAST_PRINTF("  Peak Used:  %7lu bytes (%3lu KB) [%2u%%]",
                 (unsigned long)dram_peak_used, (unsigned long)(dram_peak_used / 1024),
                 (unsigned)((dram_peak_used * 100) / dram_total));
 
   // PSRAM Summary
   if (has_ps) {
-    broadcastOutput("║                                                                ║");
-    BROADCAST_PRINTF("║ PSRAM (External):                                              ║");
-    BROADCAST_PRINTF("║   Total:      %7lu bytes (%4lu KB)                           ║",
+    broadcastOutput("");
+    broadcastOutput("-- PSRAM (External) --");
+    BROADCAST_PRINTF("  Total:      %7lu bytes (%4lu KB)",
                   (unsigned long)ps_total, (unsigned long)(ps_total / 1024));
-    BROADCAST_PRINTF("║   Used:       %7lu bytes (%4lu KB) [%2u%%]                    ║",
+    BROADCAST_PRINTF("  Used:       %7lu bytes (%4lu KB) [%2u%%]",
                   (unsigned long)ps_used, (unsigned long)(ps_used / 1024),
                   (unsigned)((ps_used * 100) / ps_total));
-    BROADCAST_PRINTF("║   Free:       %7lu bytes (%4lu KB) [%2u%%]                    ║",
+    BROADCAST_PRINTF("  Free:       %7lu bytes (%4lu KB) [%2u%%]",
                   (unsigned long)ps_free, (unsigned long)(ps_free / 1024),
                   (unsigned)((ps_free * 100) / ps_total));
   } else {
-    broadcastOutput("║                                                                ║");
-    broadcastOutput("║ PSRAM: Not available                                           ║");
+    broadcastOutput("");
+    broadcastOutput("-- PSRAM: Not available --");
   }
 
-  broadcastOutput("║                                                                ║");
-  BROADCAST_PRINTF("║ BSS (Internal): %7lu bytes (%3lu KB)                          ║",
+  broadcastOutput("");
+  BROADCAST_PRINTF("  BSS (Internal): %7lu bytes (%3lu KB)",
                 (unsigned long)bss_internal_bytes, (unsigned long)(bss_internal_bytes / 1024));
-  BROADCAST_PRINTF("║ BSS (PSRAM):    %7lu bytes (%3lu KB)                          ║",
+  BROADCAST_PRINTF("  BSS (PSRAM):    %7lu bytes (%3lu KB)",
                 (unsigned long)bss_psram_bytes, (unsigned long)(bss_psram_bytes / 1024));
-  BROADCAST_PRINTF("║ NOINIT (Int):   %7lu bytes (%3lu KB)                          ║",
+  BROADCAST_PRINTF("  NOINIT (Int):   %7lu bytes (%3lu KB)",
                 (unsigned long)noinit_internal_bytes, (unsigned long)(noinit_internal_bytes / 1024));
-  BROADCAST_PRINTF("║ NOINIT (PSRAM): %7lu bytes (%3lu KB)                          ║",
+  BROADCAST_PRINTF("  NOINIT (PSRAM): %7lu bytes (%3lu KB)",
                 (unsigned long)noinit_psram_bytes, (unsigned long)(noinit_psram_bytes / 1024));
 
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.println("╠════════════════════════════════════════════════════════════════╣");
-    Serial.println("║ MEMORY BREAKDOWN (Hybrid Tracking):                            ║");
-    Serial.println("╠════════════════════════════════════════════════════════════════╣");
-  }
+  broadcastOutput("");
+  broadcastOutput("-- MEMORY BREAKDOWN (Hybrid Tracking) --");
 
   size_t total_known = 0;
   size_t tracked_total = 0;
 
   // ========== SECTION 1: Dynamic Allocations (ps_alloc tracked) ==========
   if (useDynamicTracking) {
-    if (gOutputFlags & OUTPUT_SERIAL) {
-      Serial.println("║                                                                ║");
-      Serial.println("║ [1] DYNAMIC ALLOCATIONS (ps_alloc tracked):                    ║");
-    }
+    broadcastOutput("");
+    broadcastOutput("[1] DYNAMIC ALLOCATIONS (ps_alloc tracked):");
 
     // Sort by size (descending)
     int sorted[64];  // MAX_ALLOC_ENTRIES
@@ -1991,28 +2009,24 @@ void printMemoryReport() {
       // Show actual memory type breakdown
       char location[12];
       if (gAllocTracker[idx].psramBytes > 0 && gAllocTracker[idx].dramBytes > 0) {
-        snprintf(location, sizeof(location), "PS+DR");  // Split allocation
+        snprintf(location, sizeof(location), "PS+DR");
       } else if (gAllocTracker[idx].psramBytes > 0) {
         snprintf(location, sizeof(location), "PSRAM");
       } else {
         snprintf(location, sizeof(location), "DRAM");
       }
 
-      if (gOutputFlags & OUTPUT_SERIAL) {
-        Serial.printf("║   %-20s %6lu bytes (%2ux) %-5s           ║\n",
+      BROADCAST_PRINTF("  %-20s %6lu bytes (%2ux) %-5s",
                       gAllocTracker[idx].tag,
                       (unsigned long)gAllocTracker[idx].totalBytes,
                       (unsigned)gAllocTracker[idx].count,
                       location);
-      }
       displayed++;
     }
 
     if (displayed < gAllocTrackerCount) {
-      if (gOutputFlags & OUTPUT_SERIAL) {
-        Serial.printf("║   ... and %d more allocations                                  ║\n",
+      BROADCAST_PRINTF("  ... and %d more allocations",
                       gAllocTrackerCount - displayed);
-      }
       // Add remaining to total
       for (int i = displayed; i < gAllocTrackerCount; i++) {
         int idx = sorted[i];
@@ -2022,18 +2036,14 @@ void printMemoryReport() {
       }
     }
 
-    if (gOutputFlags & OUTPUT_SERIAL) {
-      Serial.printf("║   Subtotal (tracked): %6lu bytes (%3lu KB)                   ║\n",
+    BROADCAST_PRINTF("  Subtotal (tracked): %6lu bytes (%3lu KB)",
                     (unsigned long)tracked_total, (unsigned long)(tracked_total / 1024));
-    }
     total_known += tracked_total;
   }
 
   // ========== SECTION 2: System Components ==========
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.println("║                                                                ║");
-    Serial.println("║ [2] SYSTEM COMPONENTS (not ps_alloc):                          ║");
-  }
+  broadcastOutput("");
+  broadcastOutput("[2] SYSTEM COMPONENTS (not ps_alloc):");
 
   size_t static_total = 0;
 
@@ -2063,23 +2073,19 @@ void printMemoryReport() {
       const char* name;
       uint32_t words;
     } appTasks[] = {
-      { "cmd_exec", 4608 },
-      { "sensor_queue", 3072 },
-      { "auto_sched", 8192 },       // Automation scheduler (JSON parsing)
-      { "espnow_hb", 8192 },        // ESP-NOW heartbeat task (mesh processing)
-      { "thermal_task", 4096 },
-      { "imu_task", 4096 },
-      { "tof_task", 3072 },
-      { "sensor_log", 4096 },
-      { "GamepadTask", 4096 },
-      { "debug_out", 3072 },        // Debug output queue processor
-      { "apds_task", 3072 },        // APDS color/proximity/gesture sensor
-      { "gps_task", 4096 },         // GPS polling task
+      { "cmd_exec_task", CMD_EXEC_STACK_WORDS },
+      { "sensor_queue_task", SENSOR_QUEUE_STACK_WORDS },
+      { "espnow_task", ESPNOW_HB_STACK_WORDS },        // ESP-NOW heartbeat task (mesh processing)
+      { "thermal_task", THERMAL_STACK_WORDS },
+      { "imu_task", IMU_STACK_WORDS },
+      { "tof_task", TOF_STACK_WORDS },
+      { "gamepad_task", GAMEPAD_STACK_WORDS },
+      { "debug_out", DEBUG_OUT_STACK_WORDS },        // Debug output queue processor
+      { "apds_task", APDS_STACK_WORDS },             // APDS color/proximity/gesture sensor
+      { "gps_task", GPS_STACK_WORDS },               // GPS polling task
     };
 
-    if (gOutputFlags & OUTPUT_SERIAL) {
-      Serial.println("║   Application Task Stacks:                                     ║");
-    }
+    broadcastOutput("  Application Task Stacks:");
 
     // First pass: show application tasks
     for (UBaseType_t i = 0; i < actualCount; i++) {
@@ -2100,27 +2106,21 @@ void printMemoryReport() {
         size_t usedBytes = allocatedBytes - freeBytes;
         app_tasks_total += allocatedBytes;
 
-        if (gOutputFlags & OUTPUT_SERIAL) {
-          Serial.printf("║     %-20s %5lu / %5lu bytes (%2u%% used)            ║\n",
+        BROADCAST_PRINTF("    %-20s %5lu / %5lu bytes (%2u%% used)",
                         taskStatusArray[i].pcTaskName,
                         (unsigned long)usedBytes,
                         (unsigned long)allocatedBytes,
                         (unsigned)((usedBytes * 100) / allocatedBytes));
-        }
       }
     }
 
-    if (gOutputFlags & OUTPUT_SERIAL) {
-      Serial.printf("║   Subtotal (app): %6lu bytes (%3lu KB)                       ║\n",
+    BROADCAST_PRINTF("  Subtotal (app): %6lu bytes (%3lu KB)",
                     (unsigned long)app_tasks_total, (unsigned long)(app_tasks_total / 1024));
-    }
     static_total += app_tasks_total;
 
     // Second pass: show system tasks
-    if (gOutputFlags & OUTPUT_SERIAL) {
-      Serial.println("║                                                                ║");
-      Serial.println("║   System Task Stacks:                                          ║");
-    }
+    broadcastOutput("");
+    broadcastOutput("  System Task Stacks:");
 
     for (UBaseType_t i = 0; i < actualCount; i++) {
       bool isSystemTask = true;
@@ -2135,11 +2135,9 @@ void printMemoryReport() {
 
       if (isSystemTask) {
         size_t freeBytes = taskStatusArray[i].usStackHighWaterMark * 4;
-        if (gOutputFlags & OUTPUT_SERIAL) {
-          Serial.printf("║     %-20s HWM: %5lu bytes                        ║\n",
+        BROADCAST_PRINTF("    %-20s HWM: %5lu bytes",
                         taskStatusArray[i].pcTaskName,
                         (unsigned long)freeBytes);
-        }
       }
     }
 
@@ -2147,50 +2145,40 @@ void printMemoryReport() {
 
   // WiFi driver estimate
   size_t wifi_estimate = 32 * 1024;  // WiFi driver ~ 32KB
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.printf("║   WiFi Driver:   ~ %6lu bytes (%2lu KB)                      ║\n",
+  BROADCAST_PRINTF("  WiFi Driver:   ~ %6lu bytes (%2lu KB)",
                   (unsigned long)wifi_estimate, (unsigned long)(wifi_estimate / 1024));
-  }
   static_total += wifi_estimate;
 
   // LVGL estimate
   size_t lvgl_estimate = 0;
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.printf("║   UI Framework:   ~ %6lu bytes (%2lu KB) (untracked)         ║\n",
+  BROADCAST_PRINTF("  UI Framework:  ~ %6lu bytes (%2lu KB) (untracked)",
                   (unsigned long)lvgl_estimate, (unsigned long)(lvgl_estimate / 1024));
-  }
 
   // FreeRTOS estimate
   size_t freertos_estimate = 8 * 1024;  // FreeRTOS ~ 8KB
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.printf("║   FreeRTOS:      ~ %6lu bytes (%2lu KB)                      ║\n",
+  BROADCAST_PRINTF("  FreeRTOS:      ~ %6lu bytes (%2lu KB)",
                   (unsigned long)freertos_estimate, (unsigned long)(freertos_estimate / 1024));
-  }
   static_total += freertos_estimate;
 
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.printf("║   Subtotal (static): %6lu bytes (%3lu KB)                    ║\n",
+  BROADCAST_PRINTF("  Subtotal (static): %6lu bytes (%3lu KB)",
                   (unsigned long)static_total, (unsigned long)(static_total / 1024));
-  }
   total_known += static_total;
 
-  // ========== SECTION 3: STATIC VARIABLES BY MODULE (NEW) ==========
-  Serial.println("║                                                                ║");
-  Serial.println("║ [3] STATIC VARIABLES BY MODULE:                                 ║");
+  // ========== SECTION 3: STATIC VARIABLES BY MODULE ==========
+  broadcastOutput("");
+  broadcastOutput("[3] STATIC VARIABLES BY MODULE:");
   
   size_t static_vars_total = 0;
   
   // First-Time Setup State Management
-  Serial.println("║   First-Time Setup State:                                      ║");
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.printf("║     gFirstTimeSetupState:        4 bytes                     ║\n");
-    Serial.printf("║     gSetupProgressStage:         4 bytes                     ║\n");
-    Serial.printf("║     gFirstTimeSetupPerformed:    1 bytes                     ║\n");
-  }
+  broadcastOutput("  First-Time Setup State:");
+  broadcastOutput("    gFirstTimeSetupState:        4 bytes");
+  broadcastOutput("    gSetupProgressStage:         4 bytes");
+  broadcastOutput("    gFirstTimeSetupPerformed:    1 bytes");
   static_vars_total += 9;
   
   // Sensor Module State Variables
-  Serial.println("║   Sensor Modules (Global State):                               ║");
+  broadcastOutput("  Sensor Modules (Global State):");
   size_t thermal_state_bytes = sizeof(gThermalCache) + sizeof(thermalEnabled) + sizeof(thermalConnected) + sizeof(thermalTaskHandle);
   size_t imu_state_bytes = sizeof(gImuCache) + sizeof(imuEnabled) + sizeof(imuConnected) + sizeof(imuTaskHandle);
   size_t tof_state_bytes = sizeof(gTofCache) + sizeof(tofEnabled) + sizeof(tofConnected) + sizeof(tofTaskHandle);
@@ -2199,87 +2187,77 @@ void printMemoryReport() {
   size_t gps_state_bytes = sizeof(gpsEnabled) + sizeof(gpsConnected);
   size_t oled_state_bytes = sizeof(oledEnabled) + sizeof(oledConnected);
 
-  if (gOutputFlags & OUTPUT_SERIAL) {
 #if ENABLE_THERMAL_SENSOR
-    Serial.printf("║     Thermal Module: %5lu bytes (enabled)                      ║\n", (unsigned long)thermal_state_bytes);
+  BROADCAST_PRINTF("    Thermal Module: %5lu bytes (enabled)", (unsigned long)thermal_state_bytes);
 #else
-    Serial.printf("║     Thermal Module: %5lu bytes (disabled/stub)                ║\n", (unsigned long)thermal_state_bytes);
+  BROADCAST_PRINTF("    Thermal Module: %5lu bytes (disabled/stub)", (unsigned long)thermal_state_bytes);
 #endif
 
 #if ENABLE_TOF_SENSOR
-    Serial.printf("║     ToF Module:     %5lu bytes (enabled)                      ║\n", (unsigned long)tof_state_bytes);
+  BROADCAST_PRINTF("    ToF Module:     %5lu bytes (enabled)", (unsigned long)tof_state_bytes);
 #else
-    Serial.printf("║     ToF Module:     %5lu bytes (disabled/stub)                ║\n", (unsigned long)tof_state_bytes);
+  BROADCAST_PRINTF("    ToF Module:     %5lu bytes (disabled/stub)", (unsigned long)tof_state_bytes);
 #endif
 
 #if ENABLE_IMU_SENSOR
-    Serial.printf("║     IMU Module:     %5lu bytes (enabled)                      ║\n", (unsigned long)imu_state_bytes);
+  BROADCAST_PRINTF("    IMU Module:     %5lu bytes (enabled)", (unsigned long)imu_state_bytes);
 #else
-    Serial.printf("║     IMU Module:     %5lu bytes (disabled/stub)                ║\n", (unsigned long)imu_state_bytes);
+  BROADCAST_PRINTF("    IMU Module:     %5lu bytes (disabled/stub)", (unsigned long)imu_state_bytes);
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
-    Serial.printf("║     Gamepad Module: %5lu bytes (enabled)                      ║\n", (unsigned long)gamepad_state_bytes);
+  BROADCAST_PRINTF("    Gamepad Module: %5lu bytes (enabled)", (unsigned long)gamepad_state_bytes);
 #else
-    Serial.printf("║     Gamepad Module: %5lu bytes (disabled/stub)                ║\n", (unsigned long)gamepad_state_bytes);
+  BROADCAST_PRINTF("    Gamepad Module: %5lu bytes (disabled/stub)", (unsigned long)gamepad_state_bytes);
 #endif
 
 #if ENABLE_APDS_SENSOR
-    Serial.printf("║     APDS Module:    %5lu bytes (enabled)                      ║\n", (unsigned long)apds_state_bytes);
+  BROADCAST_PRINTF("    APDS Module:    %5lu bytes (enabled)", (unsigned long)apds_state_bytes);
 #else
-    Serial.printf("║     APDS Module:    %5lu bytes (disabled/stub)                ║\n", (unsigned long)apds_state_bytes);
+  BROADCAST_PRINTF("    APDS Module:    %5lu bytes (disabled/stub)", (unsigned long)apds_state_bytes);
 #endif
 
 #if ENABLE_GPS_SENSOR
-    Serial.printf("║     GPS Module:     %5lu bytes (enabled)                      ║\n", (unsigned long)gps_state_bytes);
+  BROADCAST_PRINTF("    GPS Module:     %5lu bytes (enabled)", (unsigned long)gps_state_bytes);
 #else
-    Serial.printf("║     GPS Module:     %5lu bytes (disabled/stub)                ║\n", (unsigned long)gps_state_bytes);
+  BROADCAST_PRINTF("    GPS Module:     %5lu bytes (disabled/stub)", (unsigned long)gps_state_bytes);
 #endif
 
 #if ENABLE_OLED_DISPLAY
-    Serial.printf("║     OLED Module:    %5lu bytes (enabled)                      ║\n", (unsigned long)oled_state_bytes);
+  BROADCAST_PRINTF("    OLED Module:    %5lu bytes (enabled)", (unsigned long)oled_state_bytes);
 #else
-    Serial.printf("║     OLED Module:    %5lu bytes (disabled/stub)                ║\n", (unsigned long)oled_state_bytes);
+  BROADCAST_PRINTF("    OLED Module:    %5lu bytes (disabled/stub)", (unsigned long)oled_state_bytes);
 #endif
-  }
+
   static_vars_total += thermal_state_bytes + imu_state_bytes + tof_state_bytes + gamepad_state_bytes + apds_state_bytes + gps_state_bytes + oled_state_bytes;
   
   // I2C System
-  Serial.println("║   I2C System:                                                   ║");
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.printf("║     Clock Stack:                %4lu bytes                 ║\n", 
-                  (unsigned long)(gI2CClockStackDepth * 4));
-    Serial.printf("║     Mutex Objects:               ~64 bytes                  ║\n");
-  }
-  static_vars_total += (gI2CClockStackDepth * 4) + 64;
+  broadcastOutput("  I2C System:");
+  broadcastOutput("    Clock Stack:        32 bytes");  // Fixed 8-slot array inside I2CDeviceManager
+  broadcastOutput("    Mutex Objects:     ~64 bytes");
+  static_vars_total += 32 + 64;
   
   // Web System Arrays
 #if ENABLE_HTTP_SERVER
-  Serial.println("║   Web System:                                                   ║");
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.printf("║     Sessions Array:              %4lu bytes                 ║\n",
+  broadcastOutput("  Web System:");
+  BROADCAST_PRINTF("    Sessions Array:   %4lu bytes",
                   (unsigned long)(MAX_SESSIONS * sizeof(SessionEntry)));
-    Serial.printf("║     Logout Reasons Array:         %4lu bytes                 ║\n",
+  BROADCAST_PRINTF("    Logout Reasons:   %4lu bytes",
                   (unsigned long)(MAX_LOGOUT_REASONS * sizeof(LogoutReason)));
-  }
   static_vars_total += (MAX_SESSIONS * sizeof(SessionEntry)) + (MAX_LOGOUT_REASONS * sizeof(LogoutReason));
 #else
-  Serial.println("║   Web System: (disabled)                                        ║");
+  broadcastOutput("  Web System: (disabled)");
 #endif
   
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.printf("║   Subtotal (static vars): %6lu bytes (%3lu KB)               ║\n",
+  BROADCAST_PRINTF("  Subtotal (static vars): %6lu bytes (%3lu KB)",
                   (unsigned long)static_vars_total, (unsigned long)(static_vars_total / 1024));
-  }
   total_known += static_vars_total;
 
   // Connected devices
   size_t devices_lib_total = 0;
   printConnectedDevicesLibraries(devices_lib_total);
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.printf("║   Device Libraries: %6lu bytes (%3lu KB)                     ║\n",
+  BROADCAST_PRINTF("  Device Libraries: %6lu bytes (%3lu KB)",
                   (unsigned long)devices_lib_total, (unsigned long)(devices_lib_total / 1024));
-  }
   if (devices_lib_total > 0) {
     total_known += devices_lib_total;
   }
@@ -2295,138 +2273,124 @@ void printMemoryReport() {
   }
 
   // ========== SECTION 4: MODULAR SENSOR BUILD CONFIGURATION ==========
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.println("║                                                                ║");
-    Serial.println("║ [4] COMPILE-TIME I2C FEATURE LEVEL:                            ║");
+  broadcastOutput("");
+  broadcastOutput("[4] COMPILE-TIME I2C FEATURE LEVEL:");
 #if I2C_FEATURE_LEVEL == I2C_LEVEL_DISABLED
-    Serial.println("║   Level: DISABLED (0) - No I2C code compiled                   ║");
+  broadcastOutput("  Level: DISABLED (0) - No I2C code compiled");
 #elif I2C_FEATURE_LEVEL == I2C_LEVEL_OLED_ONLY
-    Serial.println("║   Level: OLED_ONLY (1) - OLED only, sensors excluded           ║");
+  broadcastOutput("  Level: OLED_ONLY (1) - OLED only, sensors excluded");
 #elif I2C_FEATURE_LEVEL == I2C_LEVEL_STANDALONE
-    Serial.println("║   Level: STANDALONE (2) - OLED + Gamepad                       ║");
+  broadcastOutput("  Level: STANDALONE (2) - OLED + Gamepad");
 #elif I2C_FEATURE_LEVEL == I2C_LEVEL_FULL
-    Serial.println("║   Level: FULL (3) - OLED + all sensors compiled in             ║");
+  broadcastOutput("  Level: FULL (3) - OLED + all sensors compiled in");
 #elif I2C_FEATURE_LEVEL == I2C_LEVEL_CUSTOM
-    Serial.println("║   Level: CUSTOM (4) - Individual sensor selection              ║");
+  broadcastOutput("  Level: CUSTOM (4) - Individual sensor selection");
 #else
-    Serial.println("║   Level: UNKNOWN - Check I2C_FEATURE_LEVEL value               ║");
+  broadcastOutput("  Level: UNKNOWN - Check I2C_FEATURE_LEVEL value");
 #endif
-    Serial.println("║   (Change I2C_FEATURE_LEVEL in sensor_config.h to modify)      ║");
-    Serial.println("║                                                                ║");
-    
-    // Count enabled sensors
-    int enabled_count = 0;
-    int disabled_count = 0;
-    
+  broadcastOutput("  (Change I2C_FEATURE_LEVEL in sensor_config.h to modify)");
+
+  // Count enabled sensors
+  int enabled_count = 0;
+  int disabled_count = 0;
+
 #if ENABLE_THERMAL_SENSOR
-    Serial.println("║   ✓ THERMAL  │ thermalTask() in Sensor_Thermal_MLX90640.cpp    ║");
-    enabled_count++;
+  broadcastOutput("  [Y] THERMAL  | thermalTask() in Sensor_Thermal_MLX90640.cpp");
+  enabled_count++;
 #else
-    Serial.println("║   ✗ THERMAL  │ Disabled (~20-25KB flash, ~15KB RAM saved)      ║");
-    disabled_count++;
+  broadcastOutput("  [N] THERMAL  | Disabled (~20-25KB flash, ~15KB RAM saved)");
+  disabled_count++;
 #endif
 
 #if ENABLE_TOF_SENSOR
-    Serial.println("║   ✓ TOF      │ tofTask() in Sensor_ToF_VL53L4CX.cpp            ║");
-    enabled_count++;
+  broadcastOutput("  [Y] TOF      | tofTask() in Sensor_ToF_VL53L4CX.cpp");
+  enabled_count++;
 #else
-    Serial.println("║   ✗ TOF      │ Disabled (~25-30KB flash, ~10KB RAM saved)      ║");
-    disabled_count++;
+  broadcastOutput("  [N] TOF      | Disabled (~25-30KB flash, ~10KB RAM saved)");
+  disabled_count++;
 #endif
 
 #if ENABLE_IMU_SENSOR
-    Serial.println("║   ✓ IMU      │ imuTask() in Sensor_IMU_BNO055.cpp              ║");
-    enabled_count++;
+  broadcastOutput("  [Y] IMU      | imuTask() in Sensor_IMU_BNO055.cpp");
+  enabled_count++;
 #else
-    Serial.println("║   ✗ IMU      │ Disabled (~12-18KB flash, ~8KB RAM saved)       ║");
-    disabled_count++;
+  broadcastOutput("  [N] IMU      | Disabled (~12-18KB flash, ~8KB RAM saved)");
+  disabled_count++;
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
-    Serial.println("║   ✓ GAMEPAD  │ gamepadTask() in Sensor_Gamepad_Seesaw.cpp      ║");
-    enabled_count++;
+  broadcastOutput("  [Y] GAMEPAD  | gamepadTask() in Sensor_Gamepad_Seesaw.cpp");
+  enabled_count++;
 #else
-    Serial.println("║   ✗ GAMEPAD  │ Disabled (~8-12KB flash, ~6KB RAM saved)        ║");
-    disabled_count++;
+  broadcastOutput("  [N] GAMEPAD  | Disabled (~8-12KB flash, ~6KB RAM saved)");
+  disabled_count++;
 #endif
 
 #if ENABLE_APDS_SENSOR
-    Serial.println("║   ✓ APDS     │ apdsTask() in Sensor_APDS_APDS9960.cpp          ║");
-    enabled_count++;
+  broadcastOutput("  [Y] APDS     | apdsTask() in Sensor_APDS_APDS9960.cpp");
+  enabled_count++;
 #else
-    Serial.println("║   ✗ APDS     │ Disabled (~6-10KB flash, ~4KB RAM saved)        ║");
-    disabled_count++;
+  broadcastOutput("  [N] APDS     | Disabled (~6-10KB flash, ~4KB RAM saved)");
+  disabled_count++;
 #endif
 
 #if ENABLE_GPS_SENSOR
-    Serial.println("║   ✓ GPS      │ gpsTask() in Sensor_GPS_PA1010D.cpp             ║");
-    enabled_count++;
+  broadcastOutput("  [Y] GPS      | gpsTask() in Sensor_GPS_PA1010D.cpp");
+  enabled_count++;
 #else
-    Serial.println("║   ✗ GPS      │ Disabled (~5-8KB flash, ~4KB RAM saved)         ║");
-    disabled_count++;
+  broadcastOutput("  [N] GPS      | Disabled (~5-8KB flash, ~4KB RAM saved)");
+  disabled_count++;
 #endif
 
 #if ENABLE_OLED_DISPLAY
-    Serial.println("║   ✓ OLED     │ Display driver enabled                          ║");
-    enabled_count++;
+  broadcastOutput("  [Y] OLED     | Display driver enabled");
+  enabled_count++;
 #else
-    Serial.println("║   ✗ OLED     │ Disabled (~8-12KB flash, ~5KB RAM saved)        ║");
-    disabled_count++;
+  broadcastOutput("  [N] OLED     | Disabled (~8-12KB flash, ~5KB RAM saved)");
+  disabled_count++;
 #endif
 
-    Serial.println("║                                                                ║");
-    Serial.printf("║   Summary: %d sensors enabled, %d disabled                      ║\n",
+  BROADCAST_PRINTF("  Summary: %d sensors enabled, %d disabled",
                   enabled_count, disabled_count);
-  }
 
-  // Summary
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.println("╠════════════════════════════════════════════════════════════════╣");
-    Serial.printf("║ TOTAL ACCOUNTED:        %6lu bytes (%3lu KB)                 ║\n",
+  // ========== TOTALS ==========
+  broadcastOutput("");
+  broadcastOutput("---------- TOTALS ----------");
+  BROADCAST_PRINTF("  TOTAL ACCOUNTED:      %6lu bytes (%3lu KB)",
                   (unsigned long)total_known, (unsigned long)(total_known / 1024));
-    Serial.printf("║ ACTUAL DRAM USED:       %6lu bytes (%3lu KB)                 ║\n",
+  BROADCAST_PRINTF("  ACTUAL DRAM USED:     %6lu bytes (%3lu KB)",
                   (unsigned long)dram_used, (unsigned long)(dram_used / 1024));
-  }
 
   if (dram_used > total_known) {
     size_t unaccounted = dram_used - total_known;
-    if (gOutputFlags & OUTPUT_SERIAL) {
-      Serial.printf("║ Unaccounted DRAM:       %6lu bytes (%3lu KB)                 ║\n",
+    BROADCAST_PRINTF("  Unaccounted DRAM:     %6lu bytes (%3lu KB)",
                     (unsigned long)unaccounted, (unsigned long)(unaccounted / 1024));
-    }
     size_t overestimate = 0;  
     if (static_total > unaccounted) {
       overestimate = static_total - unaccounted;
     }
-    if (gOutputFlags & OUTPUT_SERIAL) {
-      Serial.printf("║ Static Over-Estimate:   %6lu bytes (%3lu KB)                 ║\n",
+    BROADCAST_PRINTF("  Static Over-Estimate: %6lu bytes (%3lu KB)",
                     (unsigned long)overestimate, (unsigned long)(overestimate / 1024));
-      Serial.println("║   (Static estimates are conservative upper bounds)             ║");
-    }
+    broadcastOutput("  (Static estimates are conservative upper bounds)");
   }
 
   // Show PSRAM accounting if available
   if (has_ps && useDynamicTracking) {
-    if (gOutputFlags & OUTPUT_SERIAL) {
-      Serial.println("║                                                                ║");
-      Serial.printf("║ PSRAM ACCOUNTED:        %6lu bytes (%3lu KB)                   ║\n",
+    broadcastOutput("");
+    BROADCAST_PRINTF("  PSRAM ACCOUNTED:      %6lu bytes (%3lu KB)",
                     (unsigned long)tracked_psram, (unsigned long)(tracked_psram / 1024));
-      Serial.printf("║ ACTUAL PSRAM USED:      %6lu bytes (%3lu KB)                   ║\n",
+    BROADCAST_PRINTF("  ACTUAL PSRAM USED:    %6lu bytes (%3lu KB)",
                     (unsigned long)ps_used, (unsigned long)(ps_used / 1024));
-    }
     if (ps_used > tracked_psram) {
       size_t unaccounted_psram = ps_used - tracked_psram;
-      if (gOutputFlags & OUTPUT_SERIAL) {
-        Serial.printf("║ Unaccounted PSRAM:      %6lu bytes (%3lu KB)                   ║\n",
+      BROADCAST_PRINTF("  Unaccounted PSRAM:    %6lu bytes (%3lu KB)",
                       (unsigned long)unaccounted_psram, (unsigned long)(unaccounted_psram / 1024));
-      }
     }
   }
 
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.println("╚════════════════════════════════════════════════════════════════╝");
-    Serial.println();
-  }
+  broadcastOutput("");
+  broadcastOutput("========== END MEMORY REPORT ==========");
+  broadcastOutput("");
 }
 
 // Command handlers
@@ -2609,6 +2573,83 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     return false;
   }
 
+  // ===== REMOTE COMMAND ROUTING =====
+  // Commands prefixed with "remote:" or "@" are sent to paired device
+  // This works across ALL interfaces (OLED, web, serial, voice)
+  bool isRemoteCommand = false;
+  String actualCommand = command;
+  
+  if (command.startsWith("remote:") || command.startsWith("remote ")) {
+    isRemoteCommand = true;
+    actualCommand = command.substring(7);  // Remove "remote:" or "remote "
+    actualCommand.trim();
+  } else if (command.startsWith("@") && command.length() > 1) {
+    isRemoteCommand = true;
+    actualCommand = command.substring(1);  // Remove "@"
+    actualCommand.trim();
+  }
+  
+  if (isRemoteCommand) {
+    #if ENABLE_ESPNOW
+    extern bool isBondModeOnline();
+    extern bool isBondSessionTokenValid();
+    extern String buildBondedCommandPayload(const String& command);
+    extern bool v3_send_frame(const uint8_t* dstMac, uint8_t type, uint8_t flags, 
+                              uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
+    extern uint32_t generateMessageId();
+    extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
+    extern Settings gSettings;
+    
+    if (!isBondModeOnline()) {
+      strncpy(out, "Error: Bonded device not online", outSize - 1);
+      out[outSize - 1] = '\0';
+      return false;
+    }
+    
+    if (!isBondSessionTokenValid()) {
+      strncpy(out, "Error: No session token - set matching passphrase on both devices", outSize - 1);
+      out[outSize - 1] = '\0';
+      return false;
+    }
+    
+    uint8_t peerMac[6];
+    if (!parseMacAddress(gSettings.bondPeerMac, peerMac)) {
+      strncpy(out, "Error: Invalid bonded peer MAC", outSize - 1);
+      out[outSize - 1] = '\0';
+      return false;
+    }
+    
+    // Build authenticated command payload: @BOND:<token>:<command>
+    String payload = buildBondedCommandPayload(actualCommand);
+    if (payload.length() == 0) {
+      strncpy(out, "Error: Failed to build command payload", outSize - 1);
+      out[outSize - 1] = '\0';
+      return false;
+    }
+    
+    uint32_t msgId = generateMessageId();
+    bool sent = v3_send_frame(peerMac, 5 /* ESPNOW_V3_TYPE_CMD */, 0x01 /* ACK_REQ */, 
+                              msgId, (const uint8_t*)payload.c_str(), payload.length(), 1);
+    
+    if (sent) {
+      snprintf(out, outSize, "Remote command sent: %s", actualCommand.c_str());
+      broadcastOutput("[REMOTE] Sent to paired device: " + actualCommand);
+      return true;
+    } else {
+      strncpy(out, "Error: Failed to send remote command", outSize - 1);
+      out[outSize - 1] = '\0';
+      return false;
+    }
+    #else
+    strncpy(out, "Error: ESP-NOW not enabled", outSize - 1);
+    out[outSize - 1] = '\0';
+    return false;
+    #endif
+  }
+  
+  // Continue with local command execution
+  command = actualCommand;
+
   // Find command handler by case-insensitive prefix match
   String lc = command;
   lc.toLowerCase();
@@ -2760,27 +2801,6 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
     return ok;
   }
 
-  // AVOID DEADLOCK: If we're already running in the executor task context,
-  // execute directly instead of queuing (which would cause deadlock)
-  if (cmd.ctx.origin == ORIGIN_AUTOMATION) {
-    DEBUG_CMD_FLOWF("[submit] AUTOMATION - executing directly to avoid deadlock");
-    // Allocate output buffer from PSRAM (2KB matches ExecReq.out size)
-    char* outBuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "cmd.out.auto");
-    if (!outBuf) {
-      out = "Error: Out of memory for command output";
-      return false;
-    }
-    setCurrentCommandContext(cmd.ctx);
-    bool prevValidate = gCLIValidateOnly;
-    gCLIValidateOnly = cmd.ctx.validateOnly;
-    bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, 2048);
-    gCLIValidateOnly = prevValidate;
-    out = outBuf;
-    DEBUG_CMD_FLOWF("[submit] done ok=%d len=%zu", ok ? 1 : 0, strlen(outBuf));
-    free(outBuf);
-    return ok;
-  }
-
   // Package request
   DEBUG_CMD_FLOWF("[submitAndExecuteSync] ENTRY: cmd.line='%s' len=%d", cmd.line.c_str(), cmd.line.length());
   DEBUG_CMD_FLOWF("[submitAndExecuteSync] cmd.ctx.origin=%d validateOnly=%d", (int)cmd.ctx.origin, cmd.ctx.validateOnly ? 1 : 0);
@@ -2860,7 +2880,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
     broadcastOutput("[ERROR] Request pointer is NULL");
     return false;
   }
-  BaseType_t queueResult = xQueueSend(gCmdExecQ, &r, portMAX_DELAY);
+  BaseType_t queueResult = xQueueSend(gCmdExecQ, &r, pdMS_TO_TICKS(2000));
   DEBUG_CMD_FLOWF("[submit] xQueueSend returned: result=%d (1=success)", queueResult);
   
   if (queueResult != pdTRUE) {
@@ -2868,16 +2888,19 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
     vSemaphoreDelete(r->done);
     r->~ExecReq();
     free(r);
-    broadcastOutput("[ERROR] Failed to queue command");
+    broadcastOutput("[ERROR] Command queue full - try again");
     return false;
   }
   
   DEBUG_CMD_FLOWF("[submit] Waiting for semaphore: r->done=%p", r->done);
-  Serial.println("[DEBUG] Waiting for command executor to process command...");
-  Serial.flush();
-  xSemaphoreTake(r->done, portMAX_DELAY);
-  Serial.println("[DEBUG] Command executor finished processing");
-  Serial.flush();
+  if (xSemaphoreTake(r->done, pdMS_TO_TICKS(10000)) != pdTRUE) {
+    DEBUG_CMD_FLOWF("[submit] Command execution timed out (10s)");
+    vSemaphoreDelete(r->done);
+    r->~ExecReq();
+    free(r);
+    out = "[ERROR] Command timed out";
+    return false;
+  }
   DEBUG_CMD_FLOWF("[submit] Semaphore taken - command completed");
 
   out = r->out;  // Copy from char array to String
@@ -2890,6 +2913,51 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
 
   DEBUG_CMD_FLOWF("[submit] done ok=%d len=%d", ok ? 1 : 0, out.length());
   return ok;
+}
+
+// Async command execution - fires and forgets, callback called on cmd_exec task
+// Returns true if successfully queued, false on error
+// Callback receives: (bool ok, const char* result, void* userData)
+bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData) {
+  DEBUG_CMD_FLOWF("[submitAsync] enter: cmd.line='%s'", cmd.line.c_str());
+  
+  if (gCmdExecQ == nullptr) {
+    DEBUG_CMD_FLOWF("[submitAsync] ERROR: gCmdExecQ is NULL");
+    return false;
+  }
+  
+  if (cmd.line.length() == 0) {
+    DEBUG_CMD_FLOWF("[submitAsync] ERROR: Empty command line");
+    return false;
+  }
+  
+  // Allocate ExecReq from PSRAM
+  ExecReq* r = (ExecReq*)ps_alloc(sizeof(ExecReq), AllocPref::PreferPSRAM, "cmd.exec.async");
+  if (!r) {
+    DEBUG_CMD_FLOWF("[submitAsync] FAILED to allocate ExecReq");
+    return false;
+  }
+  new (r) ExecReq();
+  
+  // Setup request
+  strncpy(r->line, cmd.line.c_str(), sizeof(r->line) - 1);
+  r->line[sizeof(r->line) - 1] = '\0';
+  r->ctx = cmd.ctx;
+  r->done = nullptr;  // No semaphore - async mode
+  r->asyncCallback = callback;
+  r->asyncUserData = userData;
+  r->ok = false;
+  
+  // Queue for execution
+  if (xQueueSend(gCmdExecQ, &r, 0) != pdTRUE) {
+    DEBUG_CMD_FLOWF("[submitAsync] FAILED to queue command");
+    r->~ExecReq();
+    free(r);
+    return false;
+  }
+  
+  DEBUG_CMD_FLOWF("[submitAsync] Command queued successfully");
+  return true;
 }
 
 // Convenience wrapper: execute a command with an existing context and return output
@@ -3142,6 +3210,99 @@ bool drawIconScaled(Adafruit_SSD1306* display, const char* name, int x, int y, u
   }
 
   return true;
+}
+
+// ============================================================================
+// Authentication Commands (critical system functions)
+// ============================================================================
+
+const char* cmd_login(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  String cmd = originalCmd;
+  cmd.trim();
+
+  // Parse: <username> <password> [transport]
+  // transport can be: serial, display, bluetooth
+  String rest = cmd;
+  rest.trim();
+
+  int sp1 = rest.indexOf(' ');
+  if (sp1 <= 0) {
+    return "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth";
+  }
+
+  String username = rest.substring(0, sp1);
+  String remainder = rest.substring(sp1 + 1);
+  remainder.trim();
+
+  int sp2 = remainder.indexOf(' ');
+  String password;
+  String transportStr = "serial";  // default
+
+  if (sp2 > 0) {
+    password = remainder.substring(0, sp2);
+    transportStr = remainder.substring(sp2 + 1);
+    transportStr.trim();
+    transportStr.toLowerCase();
+  } else {
+    password = remainder;
+  }
+
+  // Map transport string to enum
+  CommandSource transport = SOURCE_SERIAL;
+  if (transportStr == "display") {
+    transport = SOURCE_LOCAL_DISPLAY;
+  } else if (transportStr == "bluetooth") {
+    transport = SOURCE_BLUETOOTH;
+  } else if (transportStr == "serial") {
+    transport = SOURCE_SERIAL;
+  } else {
+    return "Invalid transport. Use: serial, display, or bluetooth";
+  }
+
+  // Attempt login
+  if (loginTransport(transport, username, password)) {
+    bool isAdmin = isAdminUser(username);
+    notifyLoginSuccess(username.c_str(), transportStr.c_str());
+    static char buf[128];
+    snprintf(buf, sizeof(buf), "Login successful for '%s' on %s%s",
+             username.c_str(), transportStr.c_str(), isAdmin ? " (admin)" : "");
+    return buf;
+  } else {
+    notifyLoginFailed(username.c_str(), transportStr.c_str());
+    return "Authentication failed";
+  }
+}
+
+const char* cmd_logout(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  String cmd = originalCmd;
+  cmd.trim();
+
+  // Parse: [transport]
+  String rest = cmd;
+  rest.trim();
+  rest.toLowerCase();
+
+  CommandSource transport = SOURCE_SERIAL;  // default
+  if (rest.length() > 0) {
+    if (rest == "display") {
+      transport = SOURCE_LOCAL_DISPLAY;
+    } else if (rest == "bluetooth") {
+      transport = SOURCE_BLUETOOTH;
+    } else if (rest == "serial") {
+      transport = SOURCE_SERIAL;
+    } else {
+      return "Invalid transport. Use: serial, display, or bluetooth";
+    }
+  }
+
+  logoutTransport(transport);
+  static char buf[64];
+  snprintf(buf, sizeof(buf), "Logged out from %s", rest.length() > 0 ? rest.c_str() : "serial");
+  return buf;
 }
 
 // ============================================================================

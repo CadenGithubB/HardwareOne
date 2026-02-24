@@ -3,6 +3,8 @@
 #include "System_Mutex.h"  // For isFsLockedByCurrentTask
 #include "System_Debug.h"  // For DEBUG_CLIF macro
 #include "System_MemUtil.h"      // For ps_alloc, AllocPref
+#include "System_ESPNow.h"       // For getEspNowTaskHandle()
+#include "System_I2C.h"          // For queueProcessorTask
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -21,18 +23,23 @@ extern "C" __attribute__((weak)) UBaseType_t uxTaskGetSystemState(
   return 0;
 }
 
-// Forward declaration (implemented in HardwareOnev2.1.ino)
+// Forward declaration (implemented in HardwareOne.ino)
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 
 // External timestamp function
 extern void getTimestampPrefixMsCached(char* buf, size_t bufSize);
 
-// External task handles (defined in .ino)
+// External task handles (defined in .ino / HardwareOne.cpp / sensor modules)
 extern TaskHandle_t gamepadTaskHandle;
 extern TaskHandle_t thermalTaskHandle;
 extern TaskHandle_t imuTaskHandle;
 extern TaskHandle_t tofTaskHandle;
 extern TaskHandle_t fmRadioTaskHandle;
+extern TaskHandle_t gCmdExecTaskHandle;
+extern TaskHandle_t gpsTaskHandle;
+extern TaskHandle_t apdsTaskHandle;
+extern TaskHandle_t presenceTaskHandle;
+extern TaskHandle_t rtcTaskHandle;
 
 // External task functions (defined in sensor modules)
 extern void gamepadTask(void* parameter);
@@ -41,9 +48,19 @@ extern void imuTask(void* parameter);
 extern void tofTask(void* parameter);
 extern void fmRadioTask(void* parameter);
 
-// External sensor state flags (defined in .ino or sensor modules)
+// External sensor enabled flags (for safe stale-handle detection)
 extern bool gamepadEnabled;
 extern bool gamepadConnected;
+extern bool thermalEnabled;
+extern bool imuEnabled;
+extern bool tofEnabled;
+extern bool fmRadioEnabled;
+extern bool gpsEnabled;
+extern bool apdsColorEnabled;
+extern bool apdsProximityEnabled;
+extern bool apdsGestureEnabled;
+extern bool presenceEnabled;
+extern bool rtcEnabled;
 
 // ============================================================================
 // Task Creation with Memory Logging
@@ -135,12 +152,13 @@ bool createGamepadTask() {
     }
   }
   if (gamepadTaskHandle == nullptr) {
+    const uint32_t stackWords = GAMEPAD_STACK_WORDS;  // words (~14KB)
     BaseType_t result = xTaskCreateLogged(
       gamepadTask,
-      "GamepadTask",
-      4096,  // 4KB stack (similar to other sensor tasks)
+      "gamepad_task",
+      stackWords,
       nullptr,
-      1,  // Priority 1 (same as other sensor tasks)
+      1,
       &gamepadTaskHandle,
       "gamepad");
 
@@ -162,7 +180,7 @@ bool createThermalTask() {
     }
   }
   if (thermalTaskHandle == nullptr) {
-    const uint32_t thermalStack = 4096;  // words; ~16KB (reduced from 24KB - frame buffers moved to PSRAM)
+    const uint32_t thermalStack = THERMAL_STACK_WORDS;  // words; ~16KB (reduced from 24KB - frame buffers moved to PSRAM)
     if (xTaskCreateLogged(thermalTask, "thermal_task", thermalStack, nullptr, 1, &thermalTaskHandle, "thermal") != pdPASS) {
       return false;
     }
@@ -179,7 +197,7 @@ bool createIMUTask() {
     }
   }
   if (imuTaskHandle == nullptr) {
-    const uint32_t imuStack = 4096;  // words; ~16KB (reduced from 24KB - peak usage 11KB)
+    const uint32_t imuStack = IMU_STACK_WORDS;  // words; ~16KB (BNO055 init retries need extra stack)
     if (xTaskCreateLogged(imuTask, "imu_task", imuStack, nullptr, 1, &imuTaskHandle, "imu") != pdPASS) {
       return false;
     }
@@ -197,7 +215,7 @@ bool createToFTask() {
     }
   }
   if (tofTaskHandle == nullptr) {
-    const uint32_t tofStack = 3072;  // words; ~12KB
+    const uint32_t tofStack = TOF_STACK_WORDS;  // words; ~12KB
     if (xTaskCreateLogged(tofTask, "tof_task", tofStack, nullptr, 1, &tofTaskHandle, "tof") != pdPASS) {
       DEBUG_CLIF("tofstart: FAILED to create ToF task");
       return false;
@@ -215,7 +233,7 @@ bool createFMRadioTask() {
     }
   }
   if (fmRadioTaskHandle == nullptr) {
-    const uint32_t fmRadioStack = 4608;  // words; ~18KB
+    const uint32_t fmRadioStack = FMRADIO_STACK_WORDS;  // words; ~18KB
     if (xTaskCreateLogged(fmRadioTask, "fmradio_task", fmRadioStack, nullptr, 1, &fmRadioTaskHandle, "fmradio") != pdPASS) {
       DEBUG_CLIF("fmradiostart: FAILED to create FM Radio task");
       return false;
@@ -275,12 +293,8 @@ void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedWo
 
 // Report all sensor task stacks with comprehensive memory pressure stats
 void reportAllTaskStacks() {
-  extern void broadcastOutput(const char* s);
-  
   broadcastOutput("");
-  broadcastOutput("╔══════════════════════════════════════════════════════════════════════════════╗");
-  broadcastOutput("║                         TASK STACK REPORT                                   ║");
-  broadcastOutput("╚══════════════════════════════════════════════════════════════════════════════╝");
+  broadcastOutput("========== TASK STACK REPORT ==========");
   
   // Memory stats - kept for fragmentation/warning calculations, but verbose output removed
   // (detailed memory overview now handled by periodicMemorySample())
@@ -331,17 +345,15 @@ void reportAllTaskStacks() {
   // per-task stats are unavailable instead of printing misleading zeros.
   if (numTasks == 0) {
     broadcastOutput("");
-    broadcastOutput("┌─────────────────────── TASK BREAKDOWN ───────────────────────┐");
-    broadcastOutput("│  Per-task statistics not available (FreeRTOS trace disabled). │");
-    broadcastOutput("└────────────────────────────────────────────────────────────────┘");
+    broadcastOutput("-- TASK BREAKDOWN --");
+    broadcastOutput("  Per-task statistics not available (FreeRTOS trace disabled).");
     return;
   }
 
   broadcastOutput("");
-  BROADCAST_PRINTF("┌─────────────────────── TASK BREAKDOWN (%u tasks) ───────────────────────┐", (unsigned)numTasks);
-  broadcastOutput("│                                                                            │");
-  broadcastOutput("│  Name              Stack(KB)  Used(KB)  Free(KB)  Used%  CPU%  TCB(B)    │");
-  broadcastOutput("│  ────────────────  ─────────  ────────  ────────  ─────  ────  ─────    │");
+  BROADCAST_PRINTF("-- TASK BREAKDOWN (%u tasks) --", (unsigned)numTasks);
+  broadcastOutput("  Name              Stack(KB)  Used(KB)  Free(KB)  Used%%  CPU%%  TCB(B)");
+  broadcastOutput("  ----------------  ---------  --------  --------  -----  ----  ------");
   
   uint32_t totalStackAllocated = 0;
   uint32_t totalStackUsed = 0;
@@ -355,12 +367,22 @@ void reportAllTaskStacks() {
     uint32_t stackWords;
   };
   
-  static const KnownTask knownTasks[] = {
-    {"GamepadTask", gamepadTaskHandle, 4096},
-    {"thermal_task", thermalTaskHandle, 4096},
-    {"imu_task", imuTaskHandle, 4096},
-    {"tof_task", tofTaskHandle, 3072},
-    {"fmradio_task", fmRadioTaskHandle, 4608}
+  // Build known tasks list dynamically (some handles are runtime-resolved)
+  TaskHandle_t espnowHandle = getEspNowTaskHandle();
+  
+  const KnownTask knownTasks[] = {
+    {"espnow_task", espnowHandle, ESPNOW_HB_STACK_WORDS},
+    {"cmd_exec_task", gCmdExecTaskHandle, CMD_EXEC_STACK_WORDS},
+    {"sensor_queue_task", queueProcessorTask, SENSOR_QUEUE_STACK_WORDS},
+    {"gamepad_task", gamepadTaskHandle, GAMEPAD_STACK_WORDS},
+    {"thermal_task", thermalTaskHandle, THERMAL_STACK_WORDS},
+    {"imu_task", imuTaskHandle, IMU_STACK_WORDS},
+    {"tof_task", tofTaskHandle, TOF_STACK_WORDS},
+    {"fmradio_task", fmRadioTaskHandle, FMRADIO_STACK_WORDS},
+    {"gps_task", gpsTaskHandle, GPS_STACK_WORDS},
+    {"apds_task", apdsTaskHandle, APDS_STACK_WORDS},
+    {"presence_task", presenceTaskHandle, PRESENCE_STACK_WORDS},
+    {"rtc_task", rtcTaskHandle, RTC_STACK_WORDS}
   };
 
   auto isTaskHandleInSnapshot = [&](TaskHandle_t h) -> bool {
@@ -371,9 +393,27 @@ void reportAllTaskStacks() {
     return false;
   };
   
+  // Enabled flags for each task — if false, handle may be stale (task self-deleted)
+  const bool taskAlive[] = {
+    espnowHandle != nullptr,                                        // espnow_task
+    gCmdExecTaskHandle != nullptr,                                  // cmd_exec_task
+    queueProcessorTask != nullptr,                                  // sensor_queue_task
+    gamepadEnabled,                                                 // gamepad_task
+    thermalEnabled,                                                 // thermal_task
+    imuEnabled,                                                     // imu_task
+    tofEnabled,                                                     // tof_task
+    fmRadioEnabled,                                                 // fmradio_task
+    gpsEnabled,                                                     // gps_task
+    (apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled), // apds_task
+    presenceEnabled,                                                // presence_task
+    rtcEnabled,                                                     // rtc_task
+  };
+
   // First print known tasks
+  int ktIdx = 0;
   for (const auto& kt : knownTasks) {
-    if (!kt.handle) continue;
+    bool alive = taskAlive[ktIdx++];
+    if (!kt.handle || !alive) continue;
     if (!isTaskHandleInSnapshot(kt.handle)) continue;
     
     UBaseType_t watermark = uxTaskGetStackHighWaterMark(kt.handle);
@@ -391,7 +431,7 @@ void reportAllTaskStacks() {
       }
     }
     
-    BROADCAST_PRINTF("│  %-16s  %4u      %4u      %4u      %3u%%   %2u%%   %3u      │",
+    BROADCAST_PRINTF("  %-16s  %4u      %4u      %4u      %3u%%   %2u%%   %3u",
       kt.name,
       (unsigned)(allocBytes/1024),
       (unsigned)(usedBytes/1024),
@@ -406,14 +446,17 @@ void reportAllTaskStacks() {
   }
   
   // Print system tasks
-  broadcastOutput("│                                                                            │");
+  broadcastOutput("");
   for (UBaseType_t i = 0; i < numTasks; i++) {
     const char* name = taskArray[i].pcTaskName;
     
-    // Skip already reported sensor tasks
+    // Guard against stale snapshot entries (task deleted after uxTaskGetSystemState)
+    if (!name || (uintptr_t)name < 0x3F000000) continue;  // ESP32 valid memory starts at 0x3F...
+    
+    // Skip already reported sensor tasks (match by handle, not name, to avoid stale name ptrs)
     bool isKnown = false;
     for (const auto& kt : knownTasks) {
-      if (strcmp(name, kt.name) == 0) {
+      if (taskArray[i].xHandle == kt.handle && kt.handle != nullptr) {
         isKnown = true;
         break;
       }
@@ -431,7 +474,7 @@ void reportAllTaskStacks() {
     uint32_t usedPercent = (usedBytes * 100) / allocBytes;
     uint32_t cpuPercent = (totalRuntime > 0) ? ((taskArray[i].ulRunTimeCounter * 100) / totalRuntime) : 0;
     
-    BROADCAST_PRINTF("│  %-16s ~%4u     ~%4u      %4u     ~%3u%%   %2u%%   %3u      │",
+    BROADCAST_PRINTF("  %-16s ~%4u     ~%4u      %4u     ~%3u%%   %2u%%   %3u",
       name,
       (unsigned)(allocBytes/1024),
       (unsigned)(usedBytes/1024),
@@ -445,69 +488,69 @@ void reportAllTaskStacks() {
     totalTCBOverhead += TCB_SIZE;
   }
   
-  broadcastOutput("│  ────────────────  ─────────  ────────  ────────  ─────  ────  ─────    │");
-  BROADCAST_PRINTF("│  TOTALS:           %5u     %5u      %5u                  %4u      │",
+  broadcastOutput("  ----------------  ---------  --------  --------  -----  ----  ------");
+  BROADCAST_PRINTF("  TOTALS:           %5u     %5u      %5u                  %4u",
     (unsigned)(totalStackAllocated/1024),
     (unsigned)(totalStackUsed/1024),
     (unsigned)((totalStackAllocated - totalStackUsed)/1024),
     (unsigned)totalTCBOverhead);
-  broadcastOutput("└────────────────────────────────────────────────────────────────────────────┘");
   
   // Memory accounting summary
   broadcastOutput("");
-  broadcastOutput("┌──────────────────── MEMORY ACCOUNTING SUMMARY ─────────────────────┐");
-  BROADCAST_PRINTF("│ Task Stacks:          %6u KB                                      │", (unsigned)(totalStackAllocated/1024));
-  BROADCAST_PRINTF("│ Task Control Blocks:  %6u B  (%u tasks × %u bytes)            │", 
+  broadcastOutput("-- MEMORY ACCOUNTING SUMMARY --");
+  BROADCAST_PRINTF("  Task Stacks:          %6u KB", (unsigned)(totalStackAllocated/1024));
+  BROADCAST_PRINTF("  Task Control Blocks:  %6u B  (%u tasks x %u bytes)", 
     (unsigned)totalTCBOverhead, (unsigned)taskCount, (unsigned)TCB_SIZE);
-  BROADCAST_PRINTF("│ Total Task Overhead:  %6u KB                                      │", 
+  BROADCAST_PRINTF("  Total Task Overhead:  %6u KB", 
     (unsigned)((totalStackAllocated + totalTCBOverhead)/1024));
-  BROADCAST_PRINTF("│                                                                     │");
   unsigned fragPercent = 0;
   if (heapFree > 0) {
     fragPercent = (unsigned)((largestFreeBlock * 100) / heapFree);
   }
-  BROADCAST_PRINTF("│ Heap Fragmentation:   %2u%% (largest block vs free)                 │",
+  BROADCAST_PRINTF("  Heap Fragmentation:   %2u%% (largest block vs free)",
     fragPercent);
-  BROADCAST_PRINTF("│ Task Memory Waste:    %6u KB (allocated but unused stack)         │",
+  BROADCAST_PRINTF("  Task Memory Waste:    %6u KB (allocated but unused stack)",
     (unsigned)((totalStackAllocated - totalStackUsed)/1024));
-  broadcastOutput("└─────────────────────────────────────────────────────────────────────┘");
   
   // Warnings
   bool hasWarning = false;
   broadcastOutput("");
-  broadcastOutput("┌────────────────────────── WARNINGS & ALERTS ──────────────────────────┐");
+  broadcastOutput("-- WARNINGS & ALERTS --");
   
+  int warnIdx = 0;
   for (const auto& kt : knownTasks) {
-    if (!kt.handle) continue;
+    bool alive = taskAlive[warnIdx++];
+    if (!kt.handle || !alive) continue;
     if (!isTaskHandleInSnapshot(kt.handle)) continue;
     // Only call expensive FreeRTOS function when needed for warning check
     if (!isDebugFlagSet(DEBUG_PERFORMANCE)) continue;
     UBaseType_t watermark = uxTaskGetStackHighWaterMark(kt.handle);
     uint32_t freePercent = (watermark * 100) / kt.stackWords;
     if (freePercent < 25) {
-      BROADCAST_PRINTF("│ ⚠ %-16s CRITICAL: Only %u%% stack free!                      │", 
+      BROADCAST_PRINTF("  [!] %-16s CRITICAL: Only %u%% stack free!", 
         kt.name, (unsigned)freePercent);
       hasWarning = true;
     }
   }
   
   if (heapFree < 40960) {
-    BROADCAST_PRINTF("│ ⚠ HEAP: Only %u KB free (< 40KB threshold)                           │", 
+    BROADCAST_PRINTF("  [!] HEAP: Only %u KB free (< 40KB threshold)", 
       (unsigned)(heapFree/1024));
     hasWarning = true;
   }
   
   if (heapFree > 0 && largestFreeBlock < heapFree / 2) {
-    BROADCAST_PRINTF("│ ⚠ FRAGMENTATION: Largest block %u KB vs %u KB free                    │",
+    BROADCAST_PRINTF("  [!] FRAGMENTATION: Largest block %u KB vs %u KB free",
       (unsigned)(largestFreeBlock/1024), (unsigned)(heapFree/1024));
     hasWarning = true;
   }
   
   if (!hasWarning) {
-    broadcastOutput("│ ✓ No critical warnings - all tasks healthy                             │");
+    broadcastOutput("  [OK] No critical warnings - all tasks healthy");
   }
   
-  broadcastOutput("└─────────────────────────────────────────────────────────────────────┘");
+  broadcastOutput("");
+  broadcastOutput("========== END TASK STACK REPORT ==========");
   broadcastOutput("");
   
 }

@@ -28,8 +28,15 @@ extern TaskExecutionMetrics gTaskMetrics;
 // Task performance tracking API
 void taskOperationStart();
 void taskOperationComplete(uint32_t elapsedMs, uint32_t timeoutThresholdMs);
-void taskPerformanceError(uint8_t deviceAddr, uint32_t elapsedMs);
 void resetTaskMetrics();
+
+// ============================================================================
+// Security Utilities
+// ============================================================================
+
+// Securely clear a String's internal buffer before releasing memory
+// Prevents plaintext passwords from lingering in RAM after use
+void secureClearString(String& s);
 
 // Bring in command/context definitions for shared use
 #include "System_BuildConfig.h"
@@ -200,6 +207,8 @@ String jsonEscape(const String& in);
 // Serialize JsonArray to buffer with self-repair: removes oldest entries if overflow
 // Returns number of entries removed (0 if no overflow)
 // Usage: int removed = serializeJsonArrayWithRepair(arr, buf, bufSize, "context");
+// Note: Requires ArduinoJson.h - included here for the declaration
+#include <ArduinoJson.h>
 int serializeJsonArrayWithRepair(JsonArray& arr, char* buf, size_t bufSize, const char* context);
 
 // ============================================================================

@@ -18,9 +18,6 @@
 #include "System_Settings.h"
 #include "System_Microphone_OLED.h"
 
-// SSE status broadcast
-extern void sensorStatusBumpWith(const char* reason);
-
 // XIAO ESP32S3 Sense PDM Microphone Pins
 #define MIC_PDM_CLK_PIN     42        // PDM CLK (GPIO42 on XIAO Sense)
 #define MIC_PDM_DATA_PIN    41        // PDM DATA (GPIO41 on XIAO Sense)
@@ -950,7 +947,7 @@ const char* cmd_micsamplerate(const String& cmd) {
   }
   
   micSampleRate = rate;
-  gSettings.microphoneSampleRate = rate;
+  setSetting(gSettings.microphoneSampleRate, rate);
   
   if (wasEnabled) {
     initMicrophone();
@@ -977,7 +974,7 @@ const char* cmd_micgain(const String& cmd) {
   }
   
   micGain = gain;
-  gSettings.microphoneGain = gain;
+  setSetting(gSettings.microphoneGain, gain);
   
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Gain set to %d%% (saved)", micGain);
   return gMicCmdBuffer;
@@ -1006,7 +1003,7 @@ const char* cmd_micbitdepth(const String& cmd) {
   }
   
   micBitDepth = depth;
-  gSettings.microphoneBitDepth = depth;
+  setSetting(gSettings.microphoneBitDepth, depth);
   
   if (wasEnabled) {
     initMicrophone();
@@ -1106,11 +1103,28 @@ const char* cmd_micviz(const String& cmd) {
   return "Visualizer started (press any key to stop)";
 }
 
+const char* cmd_micautostart(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = args; arg.trim();
+  if (arg.length() == 0) {
+    return gSettings.microphoneAutoStart ? "[Mic] Auto-start: enabled" : "[Mic] Auto-start: disabled";
+  }
+  arg.toLowerCase();
+  if (arg == "on" || arg == "true" || arg == "1") {
+    setSetting(gSettings.microphoneAutoStart, true);
+    return "[Mic] Auto-start enabled";
+  } else if (arg == "off" || arg == "false" || arg == "0") {
+    setSetting(gSettings.microphoneAutoStart, false);
+    return "[Mic] Auto-start disabled";
+  }
+  return "Usage: micautostart [on|off]";
+}
+
 // Command registry
 const CommandEntry micCommands[] = {
-  { "mic", "Microphone sensor status and control.", false, cmd_mic, "Usage: mic" },
-  { "openmic", "Start microphone sensor.", false, cmd_micstart, nullptr, "microphone", "open" },
-  { "closemic", "Stop microphone sensor.", false, cmd_micstop, nullptr, "microphone", "close" },
+  { "micread", "Read microphone sensor status.", false, cmd_mic, "Usage: micread" },
+  { "openmic", "Start microphone sensor.", false, cmd_micstart, nullptr, "sensor", "microphone", "open" },
+  { "closemic", "Stop microphone sensor.", false, cmd_micstop, nullptr, "sensor", "microphone", "close" },
   { "miclevel", "Get current audio level.", false, cmd_miclevel, "Usage: miclevel" },
   { "micviz", "Real-time audio level visualizer.", false, cmd_micviz, "Usage: micviz (press any key to stop)" },
   { "micrecord", "Start/stop recording to WAV file.", false, cmd_micrecord, "Usage: micrecord <start|stop>" },
@@ -1119,6 +1133,9 @@ const CommandEntry micCommands[] = {
   { "micsamplerate", "Get/set sample rate.", false, cmd_micsamplerate, "Usage: micsamplerate [8000-48000]" },
   { "micgain", "Get/set microphone gain.", false, cmd_micgain, "Usage: micgain [0-100]" },
   { "micbitdepth", "Get/set bit depth.", false, cmd_micbitdepth, "Usage: micbitdepth [16|32]" },
+  
+  // Auto-start
+  { "micautostart", "Enable/disable microphone auto-start after boot [on|off]", false, cmd_micautostart, "Usage: micautostart [on|off]" },
 };
 
 const size_t micCommandsCount = sizeof(micCommands) / sizeof(micCommands[0]);

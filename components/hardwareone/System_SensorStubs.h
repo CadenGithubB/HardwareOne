@@ -151,6 +151,7 @@
   extern bool apdsColorEnabled;
   extern bool apdsProximityEnabled;
   extern bool apdsGestureEnabled;
+  extern TaskHandle_t apdsTaskHandle;
   extern const struct CommandEntry apdsCommands[];
   extern const size_t apdsCommandsCount;
 #endif
@@ -160,6 +161,7 @@
   extern bool gpsEnabled;
   extern bool gpsConnected;
   extern class Adafruit_GPS* gPA1010D;
+  extern TaskHandle_t gpsTaskHandle;
   extern const struct CommandEntry gpsCommands[];
   extern const size_t gpsCommandsCount;
   inline void startGPSInternal() {}
@@ -188,9 +190,40 @@
   inline void startFMRadioInternal() {}
 #endif
 
+#if !ENABLE_PRESENCE_SENSOR
+  // Presence sensor stub structure (matches real PresenceCache exactly)
+  struct PresenceCache {
+    SemaphoreHandle_t mutex = nullptr;
+    float ambientTemp = 0.0f;
+    int16_t objectTemp = 0;
+    float compObjectTemp = 0.0f;
+    int16_t presenceValue = 0;
+    int16_t motionValue = 0;
+    int16_t tempShockValue = 0;
+    bool presenceDetected = false;
+    bool motionDetected = false;
+    bool tempShockDetected = false;
+    unsigned long lastUpdate = 0;
+    bool dataValid = false;
+  };
+  extern PresenceCache gPresenceCache;
+  extern bool presenceEnabled;
+  extern bool presenceConnected;
+  extern unsigned long presenceLastStopTime;
+  extern TaskHandle_t presenceTaskHandle;
+  extern const struct CommandEntry presenceCommands[];
+  extern const size_t presenceCommandsCount;
+  // Presence stub functions
+  inline bool startPresenceSensorInternal() { return false; }
+  inline bool initPresenceSensor() { return false; }
+  inline bool readPresenceData() { return false; }
+  inline int buildPresenceDataJSON(char* buf, size_t bufSize) { return 0; }
+#endif
+
 #if !ENABLE_RTC_SENSOR
   // RTC stubs when disabled - declarations only, definitions in System_SensorStubs.cpp
   void startRTCSensorInternal();
+  inline int buildRTCDataJSON(char* buf, size_t bufSize) { return 0; }
 #endif
 
 #if !ENABLE_BLUETOOTH
@@ -213,6 +246,34 @@
   inline void stopCamera() {}
   inline uint8_t* captureFrame(size_t* outLen) { if (outLen) *outLen = 0; return nullptr; }
   inline const char* buildCameraStatusJson() { return "{}"; }
+#endif
+
+#if !ENABLE_MICROPHONE_SENSOR
+  // Microphone stubs when disabled
+  extern bool micEnabled;
+  extern bool micConnected;
+  extern bool micRecording;
+  extern int micSampleRate;
+  extern int micBitDepth;
+  extern int micChannels;
+  extern int micGain;
+  extern const struct CommandEntry micCommands[];
+  extern const size_t micCommandsCount;
+  // Microphone stub functions
+  inline bool initMicrophone() { return false; }
+  inline void stopMicrophone() {}
+  inline int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) { if (outLen) *outLen = 0; return nullptr; }
+  inline int getAudioLevel() { return 0; }
+  inline void applyMicAudioProcessing(int16_t* buf, size_t sampleCount, float gainMultiplier = 0.0f, bool filtersEnabled = true) {}
+  inline void resetMicAudioProcessingState() {}
+  inline float getMicSoftwareGainMultiplier() { return 0.0f; }
+  inline int32_t getMicDcOffset() { return 0; }
+  inline const char* buildMicrophoneStatusJson() { return "{}"; }
+  inline bool startRecording() { return false; }
+  inline void stopRecording() {}
+  inline int getRecordingCount() { return 0; }
+  inline String getRecordingsList() { return "[]"; }
+  inline bool deleteRecording(const char* filename) { return false; }
 #endif
 
 // =============================================================================
@@ -257,9 +318,12 @@
 
 #if !ENABLE_HTTP_SERVER
   // HTTP server stubs when disabled
-  struct httpd_req;
-  typedef struct httpd_req httpd_req_t;
-  typedef void* httpd_handle_t;
+  #ifndef HW_HTTPD_TYPES_DEFINED
+    #define HW_HTTPD_TYPES_DEFINED 1
+    struct httpd_req;
+    typedef struct httpd_req httpd_req_t;
+    typedef void* httpd_handle_t;
+  #endif
   typedef int esp_err_t;
   #define ESP_OK 0
   #define HTTPD_RESP_USE_STRLEN -1
@@ -304,7 +368,7 @@
   extern char* gJsonResponseBuffer;
   inline void sseEnqueueNotice(SessionEntry& s, const String& msg) {}
   inline bool sseDequeueNotice(SessionEntry& s, String& out) { return false; }
-  inline void sseEnqueueEvent(SessionEntry& s, const String& name, const String& data) {}
+  inline void sseEnqueueEvent(SessionEntry& s, const char* name, const char* data) {}
   inline String getCookieSID(httpd_req_t* req) { return ""; }
   inline int findSessionIndexBySID(const String& sid) { return -1; }
   inline esp_err_t httpd_resp_set_status(httpd_req_t* req, const char* status) { return ESP_OK; }
@@ -316,6 +380,7 @@
   extern String gBootId;
   inline void rebuildExpectedAuthHeader() {}
   inline void broadcastSensorStatusToAllSessions() {}
+  inline void broadcastEventToAllSessions(const char* eventName, const char* jsonData) {}
   inline void logAuthAttempt(bool success, const char* transport, const String& ip, const String& user, const String& reason) {}
   // Note: tgRequireAuth, tgRequireAdmin are implemented in user_system.cpp with #else stubs
   inline bool authSuccessUnified(struct AuthContext& ctx, httpd_req_t* req) { return false; }
@@ -371,8 +436,8 @@
 
 #if !ENABLE_MQTT
   // MQTT stub variables (global definitions)
-  const struct CommandEntry mqttCommands[] = {};
-  const size_t mqttCommandsCount = 0;
+  extern const struct CommandEntry mqttCommands[];
+  extern const size_t mqttCommandsCount;
 #endif
 
 #endif // SENSOR_STUBS_MINIMAL_H

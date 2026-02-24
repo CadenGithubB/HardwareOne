@@ -15,6 +15,7 @@
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 #include "System_FirstTimeSetup.h"
+#include "System_MemUtil.h"
 #include "System_I2C.h"
 #include "System_SensorStubs.h"
 #include "System_Settings.h"
@@ -42,8 +43,6 @@ extern uint32_t gBootCounter;
 extern int gWifiNetworkCount;
 
 // Utility functions
-extern void broadcastOutput(const String& s);
-extern void broadcastOutput(const char* s);
 extern String waitForSerialInputBlocking();
 extern String hashUserPassword(const String& plaintext);
 #if ENABLE_AUTOMATION
@@ -133,11 +132,6 @@ void firstTimeSetupIfNeeded() {
   // Update state for OLED animation
   setFirstTimeSetupState(SETUP_IN_PROGRESS);
   
-  // Force OLED to show first-time setup screen immediately
-  if (oledEnabled && oledConnected) {
-    updateOLEDDisplay();
-  }
-
   broadcastOutput("");
   broadcastOutput("FIRST-TIME SETUP");
   broadcastOutput("----------------");
@@ -230,9 +224,13 @@ void firstTimeSetupIfNeeded() {
     SetupWizardResult wizardResult;
     
 #if ENABLE_OLED_DISPLAY
-    // Unified wizard: displays on OLED (if available) AND Serial
-    // Accepts input from either gamepad/joystick OR serial commands
-    wizardResult = runOLEDSetupWizard();
+    // Use OLED wizard only if display is actually connected (runtime check)
+    // This ensures uniform serial-only experience when no display present
+    if (oledEnabled && oledConnected) {
+      wizardResult = runOLEDSetupWizard();
+    } else {
+      wizardResult = runSerialSetupWizard();
+    }
 #else
     // No OLED compiled - use serial-only wizard
     wizardResult = runSerialSetupWizard();
@@ -256,7 +254,7 @@ void firstTimeSetupIfNeeded() {
         int pct = 0;
         getHeapBarData(&usedKB, &totalKB, &pct);
         uint32_t estFreeKB = (usedKB >= totalKB) ? 0 : (totalKB - usedKB);
-        broadcastOutput("Heap estimate: ~" + String(estFreeKB) + "KB");
+        BROADCAST_PRINTF("Heap estimate: ~%lu KB", (unsigned long)estFreeKB);
       }
     }
     
@@ -350,7 +348,7 @@ void firstTimeSetupIfNeeded() {
   broadcastOutput("Saving configuration...");
   
   // Build JSON with ArduinoJson
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   doc["bootCounter"] = 1;
   doc["nextId"] = 2;
   
@@ -358,7 +356,7 @@ void firstTimeSetupIfNeeded() {
   JsonObject admin = users.add<JsonObject>();
   admin["id"] = 1;
   admin["username"] = u;
-  admin["password"] = hashedPassword;
+  // Password now stored in per-user settings file, not here
   admin["role"] = "admin";
   admin["createdAt"] = (const char*)nullptr;  // null
   admin["createdBy"] = "provisional";
@@ -386,12 +384,12 @@ void firstTimeSetupIfNeeded() {
 
       {
         String settingsPath = getUserSettingsPath(1);
-        if (!LittleFS.exists(settingsPath.c_str())) {
-          JsonDocument defaults;
-          defaults["theme"] = useDarkTheme ? "dark" : "light";
-          if (!saveUserSettings(1, defaults)) {
-            broadcastOutput("ERROR: Failed to create default user settings");
-          }
+        // Create user settings with password and theme
+        JsonDocument defaults;
+        defaults["theme"] = useDarkTheme ? "dark" : "light";
+        defaults["password"] = hashedPassword;  // Store password in user settings
+        if (!saveUserSettings(1, defaults)) {
+          broadcastOutput("ERROR: Failed to create user settings");
         }
       }
 
@@ -427,9 +425,6 @@ void firstTimeSetupIfNeeded() {
   broadcastOutput("FIRST-TIME SETUP COMPLETE!");
   
   // Always save settings after wizard completes
-  extern bool writeSettingsJson();
-  extern void applySettings();
-  
   // Ensure i2cSensorsEnabled is set when i2cBusEnabled is enabled
   // The wizard only toggles i2cBusEnabled, but processAutoStartSensors checks both
   if (gSettings.i2cBusEnabled) {
