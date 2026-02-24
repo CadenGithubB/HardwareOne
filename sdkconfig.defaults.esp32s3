@@ -1,5 +1,7 @@
-# ESP32-S3-specific configuration (XIAO ESP32S3 Sense, etc.)
-# These override sdkconfig.defaults when target is esp32s3
+# ESP32-S3-specific build configuration — REQUIRED for correct compilation
+# Loaded automatically by ESP-IDF when target is esp32s3 (idf.py set-target esp32s3)
+# Do not delete. Controls PSRAM mode (Octal), flash mode, and Bluetooth stack.
+# See docs/BOARD_SWITCHING.md for full reference.
 
 # Arduino variant
 CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"
