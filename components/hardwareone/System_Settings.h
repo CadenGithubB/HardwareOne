@@ -80,6 +80,7 @@ struct Settings {
       debugEspNowMesh(true),
       debugEspNowTopo(true),
       debugEspNowEncryption(true),
+      debugEspNowMetadata(false),
       debugAutoScheduler(true),
       debugAutoExec(true),
       debugAutoCondition(true),
@@ -342,6 +343,7 @@ struct Settings {
   bool debugEspNowMesh;
   bool debugEspNowTopo;
   bool debugEspNowEncryption;
+  bool debugEspNowMetadata;
   bool debugAutoScheduler;
   bool debugAutoExec;
   bool debugAutoCondition;

@@ -17,8 +17,8 @@ public:
     static DebugManager& getInstance();
     
     // Public interface (compatibility wrapper around existing debug system)
-    void setDebugFlags(uint32_t flags);
-    uint32_t getDebugFlags() const;
+    void setDebugFlags(uint64_t flags);
+    uint64_t getDebugFlags() const;
 
     void setLogLevel(uint8_t level);
     uint8_t getLogLevel() const;
@@ -33,7 +33,7 @@ public:
     bool initialize();
     
     // Queue a debug message
-    void queueDebugMessage(uint32_t flag, const char* message);
+    void queueDebugMessage(uint64_t flag, const char* message);
 
     QueueHandle_t getDebugQueue() const;
     QueueHandle_t getDebugFreeQueue() const;

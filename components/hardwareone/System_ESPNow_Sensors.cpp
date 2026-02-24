@@ -7,6 +7,7 @@
 #include "OLED_Display.h"
 #include "System_Debug.h"
 #include "System_ESPNow.h"
+#include "System_MemUtil.h"
 #include "System_Settings.h"
 
 #if ENABLE_GAMEPAD_SENSOR
@@ -35,7 +36,6 @@
 #endif
 
 // External functions
-extern void broadcastOutput(const String& msg);
 extern void meshSendEnvelopeToPeers(const String& payload);
 extern String macToHexString(const uint8_t* mac);
 
@@ -87,6 +87,9 @@ const char* sensorTypeToString(RemoteSensorType type) {
     case REMOTE_SENSOR_FMRADIO: return "fmradio";
     case REMOTE_SENSOR_CAMERA: return "camera";
     case REMOTE_SENSOR_MICROPHONE: return "microphone";
+    case REMOTE_SENSOR_RTC: return "rtc";
+    case REMOTE_SENSOR_PRESENCE: return "presence";
+    case REMOTE_SENSOR_APDS: return "apds";
     default: return "unknown";
   }
 }
@@ -100,6 +103,9 @@ RemoteSensorType stringToSensorType(const char* str) {
   if (strcmp(str, "fmradio") == 0) return REMOTE_SENSOR_FMRADIO;
   if (strcmp(str, "camera") == 0) return REMOTE_SENSOR_CAMERA;
   if (strcmp(str, "microphone") == 0) return REMOTE_SENSOR_MICROPHONE;
+  if (strcmp(str, "rtc") == 0) return REMOTE_SENSOR_RTC;
+  if (strcmp(str, "presence") == 0) return REMOTE_SENSOR_PRESENCE;
+  if (strcmp(str, "apds") == 0) return REMOTE_SENSOR_APDS;
   return REMOTE_SENSOR_THERMAL;  // Default
 }
 
@@ -115,7 +121,7 @@ static RemoteSensorData* findCacheEntry(const uint8_t* deviceMac, RemoteSensorTy
 }
 
 // Find or create cache entry
-static RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* deviceName, RemoteSensorType sensorType) {
+RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* deviceName, RemoteSensorType sensorType) {
   // Try to find existing entry
   RemoteSensorData* entry = findCacheEntry(deviceMac, sensorType);
   if (entry) return entry;
@@ -137,6 +143,24 @@ static RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const 
   return nullptr;
 }
 
+// Update remote sensor status (called from V3 message handler)
+void updateRemoteSensorStatus(const uint8_t* mac, const char* name, RemoteSensorType type, bool enabled) {
+  RemoteSensorData* entry = findOrCreateCacheEntry(mac, name, type);
+  if (entry) {
+    if (!enabled) {
+      // Mark as invalid when disabled
+      entry->valid = false;
+      DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Sensor %s disabled on %s",
+             sensorTypeToString(type), name);
+    } else {
+      // Mark as valid when enabled (data will arrive separately)
+      entry->lastUpdate = millis();
+      DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Sensor %s enabled on %s",
+             sensorTypeToString(type), name);
+    }
+  }
+}
+
 // ==========================
 // Message Handlers
 // ==========================
@@ -147,7 +171,7 @@ void handleSensorStatusMessage(const uint8_t* senderMac, const String& deviceNam
   DEBUG_SENSORSF("[SENSOR_STATUS_RX] Message length: %d bytes", message.length());
   DEBUG_SENSORSF("[SENSOR_STATUS_RX] Raw message: %.200s", message.c_str());
   
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, message);
   if (error) {
     DEBUG_SENSORSF("[SENSOR_STATUS_RX] ERROR: Failed to parse status JSON: %s", error.c_str());
@@ -187,8 +211,7 @@ void handleSensorStatusMessage(const uint8_t* senderMac, const String& deviceNam
   }
   
   // Broadcast to web clients via SSE
-  broadcastOutput("[ESP-NOW] Remote sensor " + String(sensorTypeStr) + " on " + deviceName + 
-                  " is now " + (enabled ? "enabled" : "disabled"));
+  BROADCAST_PRINTF("[ESP-NOW] Remote sensor %s on %s is now %s", sensorTypeStr, deviceName.c_str(), enabled ? "enabled" : "disabled");
 }
 
 void handleSensorDataMessage(const uint8_t* senderMac, const String& deviceName, const String& message) {
@@ -197,7 +220,7 @@ void handleSensorDataMessage(const uint8_t* senderMac, const String& deviceName,
   DEBUG_SENSORSF("[SENSOR_DATA_RX] Message length: %d bytes", message.length());
   DEBUG_SENSORSF("[SENSOR_DATA_RX] Raw message (first 200 chars): %.200s", message.c_str());
   
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, message);
   if (error) {
     DEBUG_SENSORSF("[SENSOR_DATA_RX] ERROR: Failed to parse sensor data JSON: %s", error.c_str());
@@ -276,26 +299,21 @@ void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled) {
     return;
   }
   
-  // Build status message
-  DEBUG_SENSORSF("%s", "[SENSOR_STATUS_TX] Building status message JSON");
-  JsonDocument doc;
-  doc["type"] = MSG_TYPE_SENSOR_STATUS;
-  doc["sensor"] = sensorTypeToString(sensorType);
-  doc["enabled"] = enabled;
-  
-  String message;
-  serializeJson(doc, message);
-  DEBUG_SENSORSF("[SENSOR_STATUS_TX] Message built: %d bytes", message.length());
-  DEBUG_SENSORSF("[SENSOR_STATUS_TX] Message: %s", message.c_str());
+  // Build and send V3 status message
+  DEBUG_SENSORSF("%s", "[SENSOR_STATUS_TX] Broadcasting V3 sensor status");
   
   DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Broadcasting status: %s = %s",
          sensorTypeToString(sensorType), enabled ? "enabled" : "disabled");
   
-  // Send to master (will be handled by mesh routing)
-  DEBUG_SENSORSF("%s", "[SENSOR_STATUS_TX] Calling meshSendEnvelopeToPeers()...");
-  extern void meshSendEnvelopeToPeers(const String& payload);
-  meshSendEnvelopeToPeers(message);
-  DEBUG_SENSORSF("[SENSOR_STATUS_TX] SUCCESS: Broadcast %s status", sensorTypeToString(sensorType));
+  // Send via V3 binary protocol
+  extern bool v3_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
+  bool sent = v3_broadcast_sensor_status(sensorType, enabled);
+  
+  if (sent) {
+    DEBUG_SENSORSF("[SENSOR_STATUS_TX] SUCCESS: Broadcast %s status", sensorTypeToString(sensorType));
+  } else {
+    DEBUG_SENSORSF("[SENSOR_STATUS_TX] ERROR: Failed to broadcast %s status", sensorTypeToString(sensorType));
+  }
 }
 
 void startSensorDataStreaming(RemoteSensorType sensorType) {
@@ -316,7 +334,7 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
   DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Started streaming for %s",
          sensorTypeToString(sensorType));
   
-  broadcastOutput("[ESP-NOW] Started streaming " + String(sensorTypeToString(sensorType)) + " sensor data");
+  BROADCAST_PRINTF("[ESP-NOW] Started streaming %s sensor data", sensorTypeToString(sensorType));
 }
 
 void stopSensorDataStreaming(RemoteSensorType sensorType) {
@@ -336,7 +354,7 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
   DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Stopped streaming for %s",
          sensorTypeToString(sensorType));
   
-  broadcastOutput("[ESP-NOW] Stopped streaming " + String(sensorTypeToString(sensorType)) + " sensor data");
+  BROADCAST_PRINTF("[ESP-NOW] Stopped streaming %s sensor data", sensorTypeToString(sensorType));
 }
 
  bool isSensorDataStreamingEnabled(RemoteSensorType sensorType) {
@@ -371,21 +389,20 @@ void espnowSensorStatusPeriodicTick() {
   if ((now - lastCameraMs) >= 1000UL) {
     lastCameraMs = now;
 
-    StaticJsonDocument<256> doc;
-    doc["type"] = MSG_TYPE_SENSOR_DATA;
-    doc["sensor"] = "camera";
-    JsonObject data = doc.createNestedObject("data");
-    data["enabled"] = cameraEnabled;
-    data["connected"] = cameraConnected;
-    data["streaming"] = cameraStreaming;
-    data["model"] = cameraModel;
-    data["width"] = cameraWidth;
-    data["height"] = cameraHeight;
-    data["psram"] = psramFound();
+    PSRAM_JSON_DOC(doc);
+    doc["enabled"] = cameraEnabled;
+    doc["connected"] = cameraConnected;
+    doc["streaming"] = cameraStreaming;
+    doc["model"] = cameraModel;
+    doc["width"] = cameraWidth;
+    doc["height"] = cameraHeight;
+    doc["psram"] = psramFound();
 
     String message;
     serializeJson(doc, message);
-    meshSendEnvelopeToPeers(message);
+    
+    extern bool v3_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
+    v3_broadcast_sensor_data(REMOTE_SENSOR_CAMERA, message.c_str(), message.length());
   }
 #endif
 
@@ -394,37 +411,73 @@ void espnowSensorStatusPeriodicTick() {
   if ((now - lastMicMs) >= 1000UL) {
     lastMicMs = now;
 
-    StaticJsonDocument<256> doc;
-    doc["type"] = MSG_TYPE_SENSOR_DATA;
-    doc["sensor"] = "microphone";
-    JsonObject data = doc.createNestedObject("data");
-    data["enabled"] = micEnabled;
-    data["connected"] = micConnected;
-    data["recording"] = micRecording;
-    data["sampleRate"] = micSampleRate;
-    data["bitDepth"] = micBitDepth;
-    data["channels"] = micChannels;
-    data["level"] = (micEnabled && !micRecording) ? getAudioLevel() : 0;
+    PSRAM_JSON_DOC(doc);
+    doc["enabled"] = micEnabled;
+    doc["connected"] = micConnected;
+    doc["recording"] = micRecording;
+    doc["sampleRate"] = micSampleRate;
+    doc["bitDepth"] = micBitDepth;
+    doc["channels"] = micChannels;
+    doc["level"] = (micEnabled && !micRecording) ? getAudioLevel() : 0;
 
     String message;
     serializeJson(doc, message);
-    meshSendEnvelopeToPeers(message);
+    
+    extern bool v3_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
+    v3_broadcast_sensor_data(REMOTE_SENSOR_MICROPHONE, message.c_str(), message.length());
   }
 #endif
 }
 
 void sendSensorDataUpdate(RemoteSensorType sensorType, const String& jsonData) {
-  DEBUG_SENSORSF("[SENSOR_DATA_TX] sendSensorDataUpdate() called: type=%d (%s), dataLen=%d",
-         sensorType, sensorTypeToString(sensorType), jsonData.length());
+  // Quick bail-out for disabled streaming (hot path - no logging to avoid spam)
+  if (sensorType >= REMOTE_SENSOR_MAX) return;
+  if (!gSensorStreamingEnabled[sensorType]) return;
   
-  // Check master broadcast flag first
+  // Rate limit broadcasts
+  unsigned long now = millis();
+  unsigned long timeSinceLastBroadcast = now - gLastSensorBroadcast[sensorType];
+  if (timeSinceLastBroadcast < SENSOR_BROADCAST_INTERVAL_MS) return;
+  
+  DEBUG_SENSORSF("[SENSOR_DATA_TX] sendSensorDataUpdate() type=%s dataLen=%d",
+         sensorTypeToString(sensorType), jsonData.length());
+  gLastSensorBroadcast[sensorType] = now;
+  
+  extern Settings gSettings;
+  
+  // Send via V3 binary protocol (both paired and mesh modes)
+  extern bool v3_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
+  
+  // Check for bond mode first
+  if (gSettings.bondModeEnabled && gSettings.bondRole == 0) {
+    // Bond mode worker - send via v3 binary protocol to master
+    if (isBondModeOnline()) {
+      DEBUG_SENSORSF("[SENSOR_DATA_TX] Using v3 binary protocol for bond mode");
+      
+      // Send JSON data directly via v3 (receiver will store in cache)
+      bool sent = sendBondedSensorData((uint8_t)sensorType, 
+                                       (const uint8_t*)jsonData.c_str(), 
+                                       (uint16_t)jsonData.length());
+      if (sent) {
+        DEBUG_SENSORSF("[SENSOR_DATA_TX] SUCCESS: Sent %s data via v3 to paired master", 
+                       sensorTypeToString(sensorType));
+      } else {
+        DEBUG_SENSORSF("[SENSOR_DATA_TX] FAILED: v3 send failed for %s", 
+                       sensorTypeToString(sensorType));
+      }
+      return;
+    } else {
+      DEBUG_SENSORSF("[SENSOR_DATA_TX] SKIP: Bond mode but peer not online");
+      return;
+    }
+  }
+  
+  // Mesh mode - check prerequisites and use v2 JSON
   if (!gSensorBroadcastEnabled) {
     DEBUG_SENSORSF("%s", "[SENSOR_DATA_TX] SKIP: Sensor broadcasting not enabled");
     return;
   }
   
-  // Only workers should send data to master
-  extern Settings gSettings;
   bool meshEn = meshEnabled();
   DEBUG_SENSORSF("[SENSOR_DATA_TX] Pre-checks: meshEnabled=%d, meshRole=%d (0=worker,1=master)",
          meshEn, gSettings.meshRole);
@@ -439,74 +492,16 @@ void sendSensorDataUpdate(RemoteSensorType sensorType, const String& jsonData) {
     return;
   }
   
-  // Check if streaming is enabled for this sensor
-  if (sensorType >= REMOTE_SENSOR_MAX) {
-    DEBUG_SENSORSF("[SENSOR_DATA_TX] SKIP: Invalid sensor type %d", sensorType);
-    return;
+  // Mesh mode - send via V3 binary protocol
+  DEBUG_SENSORSF("%s", "[SENSOR_DATA_TX] Using V3 binary protocol for mesh broadcast");
+  
+  bool sent = v3_broadcast_sensor_data(sensorType, jsonData.c_str(), jsonData.length());
+  if (sent) {
+    DEBUG_SENSORSF("[SENSOR_DATA_TX] SUCCESS: Broadcast %s data (mesh)", sensorTypeToString(sensorType));
+  } else {
+    DEBUG_SENSORSF("[SENSOR_DATA_TX] ERROR: Failed to broadcast %s data", sensorTypeToString(sensorType));
   }
-  
-  if (!gSensorStreamingEnabled[sensorType]) {
-    DEBUG_SENSORSF("[SENSOR_DATA_TX] SKIP: Streaming not enabled for %s (flag=%d)",
-           sensorTypeToString(sensorType), gSensorStreamingEnabled[sensorType]);
-    return;
-  }
-  
-  DEBUG_SENSORSF("[SENSOR_DATA_TX] Streaming IS enabled for %s", sensorTypeToString(sensorType));
-  
-  // Rate limit broadcasts
-  unsigned long now = millis();
-  unsigned long timeSinceLastBroadcast = now - gLastSensorBroadcast[sensorType];
-  DEBUG_SENSORSF("[SENSOR_DATA_TX] Rate limit check: now=%lu, last=%lu, delta=%lu, interval=%lu",
-         now, gLastSensorBroadcast[sensorType], timeSinceLastBroadcast, SENSOR_BROADCAST_INTERVAL_MS);
-  
-  if (timeSinceLastBroadcast < SENSOR_BROADCAST_INTERVAL_MS) {
-    DEBUG_SENSORSF("[SENSOR_DATA_TX] SKIP: Rate limited (need %lu more ms)",
-           SENSOR_BROADCAST_INTERVAL_MS - timeSinceLastBroadcast);
-    return;
-  }
-  
-  DEBUG_SENSORSF("%s", "[SENSOR_DATA_TX] Rate limit passed, proceeding with broadcast");
-  gLastSensorBroadcast[sensorType] = now;
-  
-  // Build sensor data message
-  DEBUG_SENSORSF("%s", "[SENSOR_DATA_TX] Building JSON message envelope");
-  JsonDocument doc;
-  doc["type"] = MSG_TYPE_SENSOR_DATA;
-  doc["sensor"] = sensorTypeToString(sensorType);
-  DEBUG_SENSORSF("[SENSOR_DATA_TX] Envelope: type=%s, sensor=%s", MSG_TYPE_SENSOR_DATA, sensorTypeToString(sensorType));
-  
-  // Parse the incoming JSON data and attach it
-  DEBUG_SENSORSF("[SENSOR_DATA_TX] Parsing sensor data JSON (len=%d)", jsonData.length());
-  JsonDocument dataDoc;
-  DeserializationError error = deserializeJson(dataDoc, jsonData);
-  if (error) {
-    DEBUG_SENSORSF("[SENSOR_DATA_TX] ERROR: Failed to parse sensor data JSON: %s", error.c_str());
-    DEBUG_SENSORSF("[SENSOR_DATA_TX] Raw data (first 200 chars): %.200s", jsonData.c_str());
-    DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Failed to parse sensor data for broadcast: %s", error.c_str());
-    return;
-  }
-  DEBUG_SENSORSF("%s", "[SENSOR_DATA_TX] JSON parsed successfully");
-  
-  doc["data"] = dataDoc.as<JsonObject>();
-  
-  String message;
-  serializeJson(doc, message);
-  DEBUG_SENSORSF("[SENSOR_DATA_TX] Final message built: %d bytes", message.length());
-  DEBUG_SENSORSF("[SENSOR_DATA_TX] Message preview (first 200 chars): %.200s", message.c_str());
-  
-  DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Sending %s data (%d bytes)",
-         sensorTypeToString(sensorType), message.length());
-  
-  // Send to master (will use fragmentation if needed)
-  DEBUG_SENSORSF("%s", "[SENSOR_DATA_TX] Calling meshSendEnvelopeToPeers()...");
-  extern void meshSendEnvelopeToPeers(const String& payload);
-  meshSendEnvelopeToPeers(message);
-  DEBUG_SENSORSF("[SENSOR_DATA_TX] SUCCESS: Sent %s data to master", sensorTypeToString(sensorType));
 }
-
-// ==========================
-// Web API Functions
-// ==========================
 
 String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensorType) {
   RemoteSensorData* entry = findCacheEntry(deviceMac, sensorType);
@@ -530,7 +525,7 @@ String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensor
 }
 
 String getRemoteDevicesListJSON() {
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   JsonArray devices = doc["devices"].to<JsonArray>();
   
   // Build list of unique devices with their sensors
@@ -745,13 +740,13 @@ const char* cmd_espnow_sensorstream(const String& cmd) {
     DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Calling startSensorDataStreaming(%d)", sensorType);
     startSensorDataStreaming(sensorType);
     DEBUG_SENSORSF("[SENSOR_STREAM_CMD] SUCCESS: Started streaming %s", sensorTypeToString(sensorType));
-    broadcastOutput("[ESP-NOW] Started streaming " + String(sensorTypeToString(sensorType)) + " sensor data to master");
+    BROADCAST_PRINTF("[ESP-NOW] Started streaming %s sensor data to master", sensorTypeToString(sensorType));
     return "OK: Sensor streaming started";
   } else {
     DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Calling stopSensorDataStreaming(%d)", sensorType);
     stopSensorDataStreaming(sensorType);
     DEBUG_SENSORSF("[SENSOR_STREAM_CMD] SUCCESS: Stopped streaming %s", sensorTypeToString(sensorType));
-    broadcastOutput("[ESP-NOW] Stopped streaming " + String(sensorTypeToString(sensorType)) + " sensor data");
+    BROADCAST_PRINTF("[ESP-NOW] Stopped streaming %s sensor data", sensorTypeToString(sensorType));
     return "OK: Sensor streaming stopped";
   }
 }
@@ -761,7 +756,7 @@ const char* cmd_espnow_sensorstatus(const String& cmd) {
   
   // Show current streaming status
   // Show master broadcast flag status
-  broadcastOutput("[ESP-NOW] Sensor broadcast: " + String(isSensorBroadcastEnabled() ? "ENABLED" : "DISABLED"));
+  BROADCAST_PRINTF("[ESP-NOW] Sensor broadcast: %s", isSensorBroadcastEnabled() ? "ENABLED" : "DISABLED");
   
   if (gSettings.meshRole == MESH_ROLE_MASTER) {
     // Master: show remote sensor cache status
@@ -777,7 +772,7 @@ const char* cmd_espnow_sensorstatus(const String& cmd) {
     for (int i = 0; i < 8; i++) {
       RemoteSensorType type = stringToSensorType(sensors[i]);
       bool enabled = isSensorDataStreamingEnabled(type);
-      broadcastOutput("  " + String(sensors[i]) + ": " + (enabled ? "on" : "off"));
+      BROADCAST_PRINTF("  %s: %s", sensors[i], enabled ? "on" : "off");
     }
   }
   
@@ -804,7 +799,7 @@ const char* cmd_espnow_sensorbroadcast(const String& cmd) {
   if (args.length() == 0) {
     // No argument - show current status
     bool enabled = isSensorBroadcastEnabled();
-    broadcastOutput("[ESP-NOW] Sensor broadcast is " + String(enabled ? "ENABLED" : "DISABLED"));
+    BROADCAST_PRINTF("[ESP-NOW] Sensor broadcast is %s", enabled ? "ENABLED" : "DISABLED");
     return enabled ? "Sensor broadcast: on" : "Sensor broadcast: off";
   }
   
@@ -819,6 +814,77 @@ const char* cmd_espnow_sensorbroadcast(const String& cmd) {
   } else {
     return "Usage: espnow sensorbroadcast <on|off>";
   }
+}
+
+// ==========================
+// Remote GPS Data Access
+// ==========================
+
+#include <ArduinoJson.h>
+
+bool hasRemoteGPSData() {
+  unsigned long now = millis();
+  
+  for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
+    if (gRemoteSensorCache[i].valid && 
+        gRemoteSensorCache[i].sensorType == REMOTE_SENSOR_GPS &&
+        (now - gRemoteSensorCache[i].lastUpdate) < REMOTE_SENSOR_TTL_MS) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool getRemoteGPSData(RemoteGPSData* outData) {
+  if (!outData) return false;
+  
+  memset(outData, 0, sizeof(RemoteGPSData));
+  outData->valid = false;
+  
+  unsigned long now = millis();
+  RemoteSensorData* bestEntry = nullptr;
+  unsigned long bestTime = 0;
+  
+  // Find the most recent valid GPS data from any remote device
+  for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
+    if (gRemoteSensorCache[i].valid && 
+        gRemoteSensorCache[i].sensorType == REMOTE_SENSOR_GPS &&
+        (now - gRemoteSensorCache[i].lastUpdate) < REMOTE_SENSOR_TTL_MS) {
+      
+      if (gRemoteSensorCache[i].lastUpdate > bestTime) {
+        bestEntry = &gRemoteSensorCache[i];
+        bestTime = gRemoteSensorCache[i].lastUpdate;
+      }
+    }
+  }
+  
+  if (!bestEntry || bestEntry->jsonLength == 0) {
+    return false;
+  }
+  
+  // Parse the JSON data: {"val":1,"fix":1,"quality":1,"sats":8,"lat":37.123,"lon":-122.456,"alt":100.5,"speed":0.5}
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, bestEntry->jsonData, bestEntry->jsonLength);
+  if (err) {
+    return false;
+  }
+  
+  // Extract GPS values
+  outData->hasFix = doc["fix"] | 0;
+  outData->fixQuality = doc["quality"] | 0;
+  outData->satellites = doc["sats"] | 0;
+  outData->latitude = doc["lat"] | 0.0f;
+  outData->longitude = doc["lon"] | 0.0f;
+  outData->altitude = doc["alt"] | 0.0f;
+  outData->speed = doc["speed"] | 0.0f;
+  outData->lastUpdate = bestEntry->lastUpdate;
+  strncpy(outData->deviceName, bestEntry->deviceName, sizeof(outData->deviceName) - 1);
+  outData->deviceName[sizeof(outData->deviceName) - 1] = '\0';
+  
+  // Only valid if GPS has a fix
+  outData->valid = outData->hasFix;
+  
+  return outData->valid;
 }
 
 #endif // ENABLE_ESPNOW

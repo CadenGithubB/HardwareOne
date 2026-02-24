@@ -56,17 +56,72 @@
 
 // External dependencies from .ino
 extern Settings gSettings;
-extern void broadcastOutput(const String& s);
-extern void broadcastOutput(const char* s);
 extern bool gCLIValidateOnly;
 // gDebugBuffer, gDebugFlags, ensureDebugBuffer now from debug_system.h
 extern void runUnifiedSystemCommand(const String& cmd);
+
+// Async command submission types (matches HardwareOne.cpp / System_Utils.cpp)
+typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
+enum CommandOrigin { ORIGIN_SERIAL, ORIGIN_WEB, ORIGIN_AUTOMATION, ORIGIN_SYSTEM };
+enum CmdOutputMask { CMD_OUT_SERIAL = 1 << 0, CMD_OUT_WEB = 1 << 1, CMD_OUT_LOG = 1 << 2, CMD_OUT_BROADCAST = 1 << 3 };
+struct CommandContext {
+  CommandOrigin origin;
+  AuthContext auth;
+  uint32_t id;
+  uint32_t timestampMs;
+  uint8_t outputMask;
+  bool validateOnly;
+  void* replyHandle;
+  httpd_req_t* httpReq;
+};
+struct Command {
+  String line;
+  CommandContext ctx;
+};
+extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
+
+// Queue an automation sub-command through the FreeRTOS command queue (async, non-blocking).
+// This avoids deadlock when already on cmd_exec task and avoids blocking the main loop.
+static void queueAutomationSubCommand(const char* cmd) {
+  Command uc;
+  uc.line = cmd;
+  uc.ctx.origin = ORIGIN_SYSTEM;
+  AuthContext actx;
+  actx.transport = SOURCE_INTERNAL;
+  actx.user = "system";
+  actx.ip = String();
+  actx.path = "/automation";
+  actx.opaque = nullptr;
+  uc.ctx.auth = actx;
+  uc.ctx.id = (uint32_t)millis();
+  uc.ctx.timestampMs = (uint32_t)millis();
+  uc.ctx.outputMask = CMD_OUT_LOG | CMD_OUT_BROADCAST;
+  uc.ctx.validateOnly = false;
+  uc.ctx.replyHandle = nullptr;
+  uc.ctx.httpReq = nullptr;
+  if (!submitCommandAsync(uc, nullptr, nullptr)) {
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos] FAILED to queue sub-command: %s", cmd);
+  } else {
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos] Queued sub-command: %s", cmd);
+  }
+}
+
+// Helper: check if executeConditionalCommand result is an internal status (not user-facing output)
+static bool isAutoInternalResult(const char* r) {
+  if (!r || r[0] == '\0') return true;
+  if (strcmp(r, "VALID") == 0) return true;
+  if (strcmp(r, "Conditional command completed") == 0) return true;
+  if (strstr(r, "queued") != nullptr) return true;  // "Command queued", "Conditional THEN queued", etc.
+  if (strcmp(r, "Command executed") == 0) return true;
+  return false;
+}
 
 // Automation state variables (defined here, used by .ino and this file)
 bool gAutoLogActive = false;
 String gAutoLogFile = "";
 String gAutoLogAutomationName = "";
 extern String gExecUser;
+extern bool gExecIsAdmin;
 
 // Forward declarations for functions implemented in this file
 bool updateAutomationNextAt(long automationId, time_t newNextAt);
@@ -159,6 +214,25 @@ static bool extractJsonBool(const char* json, const char* key) {
   while (*p == ' ' || *p == '\t') p++;
 
   return (strncmp(p, "true", 4) == 0);
+}
+
+// Find the closing brace of a JSON object starting at objStart, handling nested objects/arrays
+static int findJsonObjectEnd(const String& json, int objStart) {
+  int depth = 0;
+  bool inStr = false;
+  int len = (int)json.length();
+  for (int i = objStart; i < len; i++) {
+    char c = json[i];
+    if (c == '"' && (i == 0 || json[i - 1] != '\\')) inStr = !inStr;
+    if (!inStr) {
+      if (c == '{') depth++;
+      else if (c == '}') {
+        depth--;
+        if (depth == 0) return i;
+      }
+    }
+  }
+  return -1;
 }
 
 // Streaming automation parser: reads file in chunks and calls callback for each automation object
@@ -299,7 +373,7 @@ bool automationIdExistsInJson(const String& json, unsigned long id) {
 // Sanitize duplicate IDs in automations array using ArduinoJson
 bool sanitizeAutomationsJson(String& jsonRef) {
   // Use ArduinoJson for proper parsing
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, jsonRef);
   if (error) {
     DEBUGF(DEBUG_AUTOMATIONS, "[sanitize] JSON parse error: %s", error.c_str());
@@ -388,7 +462,7 @@ bool updateAutomationNextAt(long automationId, time_t newNextAt) {
   String json;
   if (!readText(AUTOMATIONS_JSON_FILE, json)) return false;
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, json);
   if (error) {
     DEBUGF(DEBUG_AUTOMATIONS, "[updateNextAt] JSON parse error: %s", error.c_str());
@@ -403,7 +477,12 @@ bool updateAutomationNextAt(long automationId, time_t newNextAt) {
   
   for (JsonObject automation : automations) {
     if (automation["id"].as<long>() == automationId) {
-      automation["nextAt"] = (unsigned long)newNextAt;
+      // Support both new nested schema (schedule.nextAt) and legacy flat schema (nextAt)
+      if (!automation["schedule"].isNull()) {
+        automation["schedule"]["nextAt"] = (unsigned long)newNextAt;
+      } else {
+        automation["nextAt"] = (unsigned long)newNextAt;
+      }
       found = true;
       DEBUGF(DEBUG_AUTO_TIMING, "[updateNextAt] id=%ld nextAt=%lu", automationId, (unsigned long)newNextAt);
       break;
@@ -445,30 +524,34 @@ void runAutomationsOnBoot() {
     if (idPos < 0) break;
     int colon = json.indexOf(':', idPos);
     if (colon < 0) break;
-    int comma = json.indexOf(',', colon + 1);
-    int braceEnd = json.indexOf('}', colon + 1);
-    if (braceEnd < 0) break;
-    if (comma < 0 || comma > braceEnd) comma = braceEnd;
-    String idStr = json.substring(colon + 1, comma);
-    idStr.trim();
-    long id = idStr.toInt();
 
     int objStart = json.lastIndexOf('{', idPos);
     if (objStart < 0) {
-      pos = braceEnd + 1;
+      pos = colon + 1;
       continue;
     }
-    String obj = json.substring(objStart, braceEnd + 1);
+
+    int objEnd = findJsonObjectEnd(json, objStart);
+    if (objEnd < 0) break;
+
+    // Extract id value
+    int comma = json.indexOf(',', colon + 1);
+    int idValEnd = (comma > 0 && comma < objEnd) ? comma : objEnd;
+    String idStr = json.substring(colon + 1, idValEnd);
+    idStr.trim();
+    long id = idStr.toInt();
+
+    String obj = json.substring(objStart, objEnd + 1);
 
     bool enabled = (obj.indexOf("\"enabled\": true") >= 0) || (obj.indexOf("\"enabled\":true") >= 0);
     if (!enabled) {
-      pos = braceEnd + 1;
+      pos = objEnd + 1;
       continue;
     }
 
     bool runAtBoot = (obj.indexOf("\"runAtBoot\": true") >= 0) || (obj.indexOf("\"runAtBoot\":true") >= 0);
     if (!runAtBoot) {
-      pos = braceEnd + 1;
+      pos = objEnd + 1;
       continue;
     }
 
@@ -501,16 +584,21 @@ void runAutomationsOnBoot() {
       }
     }
 
-    String conditions = "";
+    // Read global condition expression (new schema: just the expression, e.g. "ROOM=bedroom")
+    String condition = "";
     {
-      int condPos = obj.indexOf("\"conditions\"");
+      int condPos = obj.indexOf("\"condition\"");
+      // Make sure it's not "conditions" (the old plural key)
+      if (condPos >= 0 && obj[condPos + 11] == '"') {
+        condPos = -1; // false match on "conditions"
+      }
       if (condPos >= 0) {
         int c = obj.indexOf(':', condPos);
         int q1 = obj.indexOf('"', c + 1);
         int q2 = obj.indexOf('"', q1 + 1);
         if (q1 >= 0 && q2 > q1) {
-          conditions = obj.substring(q1 + 1, q2);
-          conditions.trim();
+          condition = obj.substring(q1 + 1, q2);
+          condition.trim();
         }
       }
     }
@@ -544,7 +632,7 @@ void runAutomationsOnBoot() {
         String body = obj.substring(arrStart + 1, arrEnd);
         int i = 0;
         while (i < (int)body.length() && cmdsCount < 64) {
-          while (i < (int)body.length() && (body[i] == ' ' || body[i] == ',')) i++;
+          while (i < (int)body.length() && (body[i] == ' ' || body[i] == ',' || body[i] == '\n' || body[i] == '\r' || body[i] == '\t')) i++;
           if (i >= (int)body.length()) break;
           if (body[i] == '"') {
             int q1 = i;
@@ -576,34 +664,23 @@ void runAutomationsOnBoot() {
     }
 
     if (cmdsCount == 0) {
-      pos = braceEnd + 1;
+      pos = objEnd + 1;
       continue;
     }
 
-    if (conditions.length() > 0) {
-      if (conditions.indexOf("ELSE") >= 0) {
-        char actionBuf[256];
-        const char* actionToExecute = evaluateConditionalChain(conditions.c_str(), actionBuf, sizeof(actionBuf));
-        if (actionToExecute && strlen(actionToExecute) > 0) {
-          const char* result = executeConditionalCommand(actionToExecute);
-
-          // Output the result (so command output is visible)
-          if (result && strlen(result) > 0 && strcmp(result, "VALID") != 0 && strcmp(result, "Conditional command completed") != 0) {
-            broadcastOutput("[Boot Automation " + String(id) + "] " + String(result));
-          }
+    // Evaluate global condition (expression-only, e.g. "ROOM=bedroom")
+    if (condition.length() > 0) {
+      String wrapped = "IF " + condition + " THEN _";
+      bool conditionMet = evaluateCondition(wrapped.c_str());
+      DEBUGF(DEBUG_AUTOMATIONS, "[automations] id=%ld boot condition='%s' result=%s",
+             id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
+      if (!conditionMet) {
+        if (gAutoLogActive) {
+          String skipMsg = "Boot automation skipped: ID=" + String(id) + " Name=" + autoName + " Condition not met: " + condition;
+          appendAutoLogEntry("AUTO_SKIP", skipMsg);
         }
-        pos = braceEnd + 1;
+        pos = objEnd + 1;
         continue;
-      } else {
-        bool conditionMet = evaluateCondition(conditions.c_str());
-        if (!conditionMet) {
-          if (gAutoLogActive) {
-            String skipMsg = "Boot automation skipped: ID=" + String(id) + " Name=" + autoName + " Condition not met: " + conditions;
-            appendAutoLogEntry("AUTO_SKIP", skipMsg);
-          }
-          pos = braceEnd + 1;
-          continue;
-        }
       }
     }
 
@@ -624,8 +701,8 @@ void runAutomationsOnBoot() {
     for (int ci = 0; ci < cmdsCount; ++ci) {
       const char* result = executeConditionalCommand(cmdsList[ci].c_str());
 
-      // Output the result (so command output is visible)
-      if (result && strlen(result) > 0 && strcmp(result, "VALID") != 0 && strcmp(result, "Conditional command completed") != 0) {
+      // Output the result (skip internal status messages - actual output comes from queue)
+      if (!isAutoInternalResult(result)) {
         broadcastOutput("[Boot Automation " + String(id) + "] " + String(result));
       }
     }
@@ -644,7 +721,7 @@ void runAutomationsOnBoot() {
       }
     }
 
-    pos = braceEnd + 1;
+    pos = objEnd + 1;
   }
 }
 
@@ -684,10 +761,10 @@ void resumeAutomationSystem() {
   DEBUGF(DEBUG_AUTOMATIONS, "[automations] System resumed");
 }
 
-// Execute automation command
+// Execute automation command (queues through FreeRTOS command queue, non-blocking)
 void runAutomationCommandUnified(const String& cmd) {
   gInAutomationContext = true;
-  runUnifiedSystemCommand(cmd);
+  queueAutomationSubCommand(cmd.c_str());
   gInAutomationContext = false;
 }
 
@@ -765,6 +842,7 @@ const char* cmd_automation_add(const String& argsIn) {
   String name = getVal("name");
   String type = getVal("type");
   String timeS = getVal("time");
+  String recurrence = getVal("recurrence");
   String days = getVal("days");
   String delayMs = getVal("delayms");
   String intervalMs = getVal("intervalms");
@@ -772,7 +850,7 @@ const char* cmd_automation_add(const String& argsIn) {
   String bootDelayMsStr = getVal("bootdelayms");
   String cmdStr = getVal("command");
   String cmdsList = getVal("commands");
-  String conditions = getVal("conditions");
+  String condition = getVal("condition");
   String enabledStr = getVal("enabled");
   
   bool enabled = (enabledStr.equalsIgnoreCase("1") || enabledStr.equalsIgnoreCase("true") || enabledStr.equalsIgnoreCase("yes"));
@@ -797,12 +875,14 @@ const char* cmd_automation_add(const String& argsIn) {
     return "ERROR";
   }
   
-  // Validate conditions syntax if provided
-  if (conditions.length() > 0) {
-    conditions.trim();
-    const char* conditionError = validateConditionSyntax(conditions.c_str());
+  // Validate global condition expression if provided (bare expression, e.g. "ROOM=bedroom")
+  // Wrap in IF...THEN to reuse validateConditionSyntax operator/structure checks
+  if (condition.length() > 0) {
+    condition.trim();
+    String wrapped = "IF " + condition + " THEN _";
+    const char* conditionError = validateConditionSyntax(wrapped.c_str());
     if (conditionError && conditionError[0] != '\0') {
-      String error = String("Error: Invalid condition - ") + conditionError;
+      String error = String("Error: Invalid condition expression - ") + conditionError;
       broadcastOutput(error);
       return error.c_str();
     }
@@ -818,12 +898,12 @@ const char* cmd_automation_add(const String& argsIn) {
       String part = s.substring(start, i);
       part.trim();
       if (part.length()) {
-        // Check if this is a conditional chain (IF...THEN... with ELSE/ELSE IF)
+        // Check if this is a conditional command (IF...THEN..., with or without ELSE/ELSE IF)
         String upperPart = part;
         upperPart.toUpperCase();
-        bool isConditionalChain = (upperPart.startsWith("IF ") && (upperPart.indexOf("ELSE IF") >= 0 || upperPart.indexOf(" ELSE ") >= 0));
+        bool isConditional = (upperPart.startsWith("IF ") && upperPart.indexOf(" THEN ") >= 0);
         
-        if (isConditionalChain) {
+        if (isConditional) {
           // Validate as a conditional chain
           const char* validationError = validateConditionalChain(part.c_str());
           if (validationError && validationError[0] != '\0') {
@@ -908,13 +988,47 @@ const char* cmd_automation_add(const String& argsIn) {
   String json;
   bool hadFile = readText(AUTOMATIONS_JSON_FILE, json);
   if (!hadFile || json.length() == 0) {
-    json = String("{\n  \"version\": 1,\n  \"automations\": []\n}\n");
+    json = String("{\n  \"version\": 2,\n  \"automations\": []\n}\n");
     if (!validateOnly) {
       writeAutomationsJsonAtomic(json);
       DEBUGF(DEBUG_AUTOMATIONS, "[autos add] created default automations.json");
     }
   }
   
+  // If a specific id= was provided and that entry already exists, remove it first
+  String idOverrideStr = getVal("id");
+  if (idOverrideStr.length() > 0) {
+    unsigned long overrideId = strtoul(idOverrideStr.c_str(), nullptr, 10);
+    if (automationIdExistsInJson(json, overrideId)) {
+      String needle = String("\"id\": ") + String(overrideId);
+      int idPos = json.indexOf(needle);
+      int aS = json.indexOf('[');
+      int aE = json.lastIndexOf(']');
+      if (idPos >= 0 && aS >= 0 && aE >= 0) {
+        int oS = json.lastIndexOf('{', idPos);
+        int oE = (oS >= 0) ? findJsonObjectEnd(json, oS) : -1;
+        if (oS >= 0 && oE >= 0) {
+          String arrTmp = json.substring(aS + 1, aE); arrTmp.trim();
+          if (arrTmp.indexOf('{') == arrTmp.lastIndexOf('{')) {
+            json = json.substring(0, aS + 1) + json.substring(aE);
+          } else {
+            int dS = oS, dE = oE + 1;
+            int cs = dE;
+            while (cs < (int)json.length() &&
+                   (json[cs]==' '||json[cs]=='\n'||json[cs]=='\r'||json[cs]=='\t')) cs++;
+            if (cs < (int)json.length() && json[cs] == ',') {
+              dE = cs + 1;
+            } else {
+              int cp = json.lastIndexOf(',', oS);
+              if (cp > aS) dS = cp;
+            }
+            json = json.substring(0, dS) + json.substring(dE);
+          }
+        }
+      }
+    }
+  }
+
   int arrStart = json.indexOf("\"automations\"");
   int bracket = (arrStart >= 0) ? json.indexOf('[', arrStart) : -1;
   int lastBracket = -1;
@@ -942,25 +1056,18 @@ const char* cmd_automation_add(const String& argsIn) {
   between.trim();
   bool empty = (between.length() == 0);
   
-  // Generate a unique id not present in current JSON
-  unsigned long id = millis();
-  int guard = 0;
-  while (automationIdExistsInJson(json, id) && guard < 100) {
-    id += 1 + (unsigned long)random(1, 100000);
-    guard++;
+  // Use provided id= if given, otherwise generate a unique one
+  unsigned long id;
+  if (idOverrideStr.length() > 0) {
+    id = strtoul(idOverrideStr.c_str(), nullptr, 10);
+  } else {
+    id = millis();
+    int guard = 0;
+    while (automationIdExistsInJson(json, id) && guard < 100) {
+      id += 1 + (unsigned long)random(1, 100000);
+      guard++;
+    }
   }
-  
-  String obj = "{\n";
-  obj += "  \"id\": " + String(id) + ",\n";
-  obj += "  \"name\": \"" + jsonEscape(name) + "\",\n";
-  obj += "  \"enabled\": " + String(enabled ? "true" : "false") + ",\n";
-  obj += "  \"type\": \"" + typeNorm + "\",\n";
-  if (typeNorm == "attime" && timeS.length() > 0) obj += "  \"time\": \"" + jsonEscape(timeS) + "\",\n";
-  if (typeNorm == "attime" && days.length() > 0) obj += "  \"days\": \"" + jsonEscape(days) + "\",\n";
-  if (typeNorm == "afterdelay" && delayMs.length() > 0) obj += "  \"delayMs\": " + delayMs + ",\n";
-  if (typeNorm == "interval" && intervalMs.length() > 0) obj += "  \"intervalMs\": " + intervalMs + ",\n";
-  if (runAtBoot) obj += "  \"runAtBoot\": true,\n";
-  if (bootDelayMsStr.length() > 0) obj += "  \"bootDelayMs\": " + bootDelayMsStr + ",\n";
   
   // Build commands array
   auto buildCommandsArray = [&](const String& csv) {
@@ -986,25 +1093,43 @@ const char* cmd_automation_add(const String& argsIn) {
   };
   
   String commandsJson = buildCommandsArray(combined);
-  obj += "  \"commands\": " + commandsJson + ",\n";
-  if (conditions.length() > 0) obj += "  \"conditions\": \"" + jsonEscape(conditions) + "\",\n";
   
-  // Compute and add nextAt field
+  // Build schedule sub-object (without nextAt first so computeNextRunTime can read it)
+  String sched = "  \"schedule\": {\n";
+  sched += "    \"type\": \"" + typeNorm + "\"";
+  if (typeNorm == "attime" && timeS.length() > 0) sched += ",\n    \"time\": \"" + jsonEscape(timeS) + "\"";
+  if (recurrence.length() > 0) sched += ",\n    \"recurrence\": \"" + jsonEscape(recurrence) + "\"";
+  if (typeNorm == "attime" && days.length() > 0) sched += ",\n    \"days\": \"" + jsonEscape(days) + "\"";
+  if (typeNorm == "afterdelay" && delayMs.length() > 0) sched += ",\n    \"delayMs\": " + delayMs;
+  if (typeNorm == "interval" && intervalMs.length() > 0) sched += ",\n    \"intervalMs\": " + intervalMs;
+  if (runAtBoot) sched += ",\n    \"runAtBoot\": true";
+  if (bootDelayMsStr.length() > 0) sched += ",\n    \"bootDelayMs\": " + bootDelayMsStr;
+  
+  // Compute nextAt using partial schedule object
+  String tempObj = "{" + sched + "\n  }\n}";
   time_t now = time(nullptr);
-  if (now > 0) {  // Valid time available
-    String objComplete = obj + "}";
-    time_t nextAt = computeNextRunTime(objComplete.c_str(), now);
-    if (nextAt > 0) {
-      obj += "  \"nextAt\": " + String((unsigned long)nextAt) + "\n";
-    } else {
-      obj += "  \"nextAt\": null\n";
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos add] Warning: could not compute nextAt for automation");
-    }
-  } else {
-    obj += "  \"nextAt\": null\n";
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos add] Warning: no valid system time for nextAt computation");
+  time_t nextAt = 0;
+  if (now > 0) {
+    nextAt = computeNextRunTime(tempObj.c_str(), now);
   }
   
+  if (nextAt > 0) {
+    sched += ",\n    \"nextAt\": " + String((unsigned long)nextAt);
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos add] nextAt=%lu", (unsigned long)nextAt);
+  } else {
+    sched += ",\n    \"nextAt\": null";
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos add] Warning: could not compute nextAt for automation");
+  }
+  sched += "\n  }";
+  
+  // Build final automation object
+  String obj = "{\n";
+  obj += "  \"id\": " + String(id) + ",\n";
+  obj += "  \"name\": \"" + jsonEscape(name) + "\",\n";
+  obj += "  \"enabled\": " + String(enabled ? "true" : "false") + ",\n";
+  if (condition.length() > 0) obj += "  \"condition\": \"" + jsonEscape(condition) + "\",\n";
+  obj += sched + ",\n";
+  obj += "  \"commands\": " + commandsJson + "\n";
   obj += "}";
   String insert = empty ? ("\n" + obj + "\n") : (",\n" + obj + "\n");
   json = json.substring(0, lastBracket) + insert + json.substring(lastBracket);
@@ -1018,12 +1143,10 @@ const char* cmd_automation_add(const String& argsIn) {
   
   DEBUGF(DEBUG_AUTOMATIONS, "[autos add] wrote automations.json (len=%d) id=%lu", json.length(), id);
   
-  if (typeNorm != "attime") {
-    gAutosDirty = true;
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos add] immediate scheduler refresh queued (type=%s)", typeNorm.c_str());
-  }
+  gAutosDirty = true;
+  DEBUGF(DEBUG_AUTOMATIONS, "[autos add] scheduler refresh queued (type=%s)", typeNorm.c_str());
   
-  String result = String("Added automation id=") + String(id) + " name=" + name;
+  String result = String(idOverrideStr.length() > 0 ? "Updated" : "Added") + " automation id=" + String(id) + " name=" + name;
   broadcastOutput(result);
   return "OK";
 }
@@ -1095,6 +1218,7 @@ const char* cmd_automation_enable_disable(const String& argsIn, bool enable) {
 
 const char* cmd_automation_delete(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gExecIsAdmin) { broadcastOutput("Error: admin required"); return "ERROR"; }
   
   String args = argsIn;
   args.trim();
@@ -1140,13 +1264,13 @@ const char* cmd_automation_delete(const String& argsIn) {
     return "ERROR";
   }
   
-  // Find object bounds
+  // Find object bounds (depth-tracked to handle nested schedule sub-object)
   int objStart = json.lastIndexOf('{', idPos);
   if (objStart < 0) {
     broadcastOutput("Error: malformed JSON");
     return "ERROR";
   }
-  int objEnd = json.indexOf('}', idPos);
+  int objEnd = findJsonObjectEnd(json, objStart);
   if (objEnd < 0) {
     broadcastOutput("Error: malformed JSON");
     return "ERROR";
@@ -1164,9 +1288,15 @@ const char* cmd_automation_delete(const String& argsIn) {
     // Multiple objects - handle comma removal
     int delStart = objStart, delEnd = objEnd + 1;
     
-    // Look for comma after the object
-    if (delEnd < (int)json.length() && json[delEnd] == ',') {
-      delEnd++;  // Include trailing comma
+    // Look for comma after the object, skipping whitespace/newlines
+    int commaSearch = delEnd;
+    while (commaSearch < (int)json.length() &&
+           (json[commaSearch] == ' ' || json[commaSearch] == '\n' ||
+            json[commaSearch] == '\r' || json[commaSearch] == '\t')) {
+      commaSearch++;
+    }
+    if (commaSearch < (int)json.length() && json[commaSearch] == ',') {
+      delEnd = commaSearch + 1;  // Include trailing comma (and whitespace before it)
     } else {
       // No trailing comma, look for leading comma
       int commaPos = json.lastIndexOf(',', objStart);
@@ -1306,7 +1436,7 @@ const char* cmd_automation_run(const String& argsIn) {
     String body = obj.substring(arrStart + 1, arrEnd);
     int i = 0;
     while (i < (int)body.length() && cmdsCount < 64) {
-      while (i < (int)body.length() && (body[i] == ' ' || body[i] == ',')) i++;
+      while (i < (int)body.length() && (body[i] == ' ' || body[i] == ',' || body[i] == '\n' || body[i] == '\r' || body[i] == '\t')) i++;
       if (i >= (int)body.length()) break;
       if (body[i] == '"') {
         int q1 = i;
@@ -1345,67 +1475,39 @@ const char* cmd_automation_run(const String& argsIn) {
     return "ERROR";
   }
   
-  // Check conditions if present
-  String conditions = "";
-  int condPos = obj.indexOf("\"conditions\"");
-  if (condPos >= 0) {
-    int condColon = obj.indexOf(':', condPos);
-    if (condColon >= 0) {
-      int condQ1 = obj.indexOf('"', condColon + 1);
-      int condQ2 = obj.indexOf('"', condQ1 + 1);
-      if (condQ1 >= 0 && condQ2 >= 0) {
-        conditions = obj.substring(condQ1 + 1, condQ2);
-        conditions.trim();
+  // Check global condition expression (new schema: just the expression, e.g. "ROOM=bedroom")
+  String condition = "";
+  {
+    int condPos = obj.indexOf("\"condition\"");
+    // Ensure it's not "conditions" (old plural key)
+    if (condPos >= 0 && obj[condPos + 11] == '"') condPos = -1;
+    if (condPos >= 0) {
+      int condColon = obj.indexOf(':', condPos);
+      if (condColon >= 0) {
+        int condQ1 = obj.indexOf('"', condColon + 1);
+        int condQ2 = obj.indexOf('"', condQ1 + 1);
+        if (condQ1 >= 0 && condQ2 >= 0) {
+          condition = obj.substring(condQ1 + 1, condQ2);
+          condition.trim();
+        }
       }
     }
   }
-  
-  // Evaluate conditions if present
-  if (conditions.length() > 0) {
-    // Check if this is a conditional chain (contains ELSE/ELSE IF)
-    if (conditions.indexOf("ELSE") >= 0) {
-      char actionBuf[256];
-      const char* actionToExecute = evaluateConditionalChain(conditions.c_str(), actionBuf, sizeof(actionBuf));
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s conditional chain result: '%s'",
-             idStr.c_str(), actionToExecute);
-      
-      if (actionToExecute && actionToExecute[0] != '\0') {
-        // Execute the specific action from the chain
-        const char* result = executeConditionalCommand(actionToExecute);
-        
-        // Output the result (so command output is visible)
-        if (result && strlen(result) > 0 && strcmp(result, "VALID") != 0 && strcmp(result, "Conditional command completed") != 0) {
-          broadcastOutput(String("[Automation ") + idStr + "] " + result);
-        }
-        
-        if (result && strncmp(result, "Error:", 6) == 0) {
-          broadcastOutput(String("Automation conditional chain error: ") + result);
-          return "ERROR";
-        }
-        
-        String successMsg = String("Ran automation id=") + idStr + " (conditional chain executed: " + actionToExecute + ")";
-        broadcastOutput(successMsg);
-        return "OK";
-      } else {
-        broadcastOutput("Automation conditional chain evaluated but no action executed");
-        return "OK";
+
+  // Evaluate global condition if present
+  if (condition.length() > 0) {
+    String wrapped = "IF " + condition + " THEN _";
+    bool conditionMet = evaluateCondition(wrapped.c_str());
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s condition='%s' result=%s",
+           idStr.c_str(), condition.c_str(), conditionMet ? "TRUE" : "FALSE");
+    if (!conditionMet) {
+      if (gAutoLogActive) {
+        String skipMsg = String("Automation skipped: ID=") + idStr + " Name=" + autoName + " Condition not met: " + condition;
+        appendAutoLogEntry("AUTO_SKIP", skipMsg);
+        gAutoLogAutomationName = "";
       }
-    } else {
-      // Simple IF/THEN condition
-      bool conditionMet = evaluateCondition(conditions.c_str());
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s condition='%s' result=%s",
-             idStr.c_str(), conditions.c_str(), conditionMet ? "TRUE" : "FALSE");
-      
-      if (!conditionMet) {
-        // Log condition not met if logging is active
-        if (gAutoLogActive) {
-          String skipMsg = String("Automation skipped: ID=") + idStr + " Name=" + autoName + " Condition not met: " + conditions;
-          appendAutoLogEntry("AUTO_SKIP", skipMsg);
-          gAutoLogAutomationName = "";
-        }
-        broadcastOutput("Automation skipped - condition not met: " + conditions);
-        return "OK";
-      }
+      broadcastOutput("Automation skipped - condition not met: " + condition);
+      return "OK";
     }
   }
   
@@ -1419,16 +1521,12 @@ const char* cmd_automation_run(const String& argsIn) {
       continue;
     }
     
-    // Execute command with conditional logic support
+    // Queue command for execution (async, non-blocking)
     const char* result = executeConditionalCommand(cmdsList[ci].c_str());
     
-    // Output the result (so command output is visible)
-    if (result && strlen(result) > 0 && strcmp(result, "VALID") != 0 && strcmp(result, "Conditional command completed") != 0) {
+    // Output the result (skip internal status messages - actual output comes from queue)
+    if (!isAutoInternalResult(result)) {
       broadcastOutput(String("[Automation ") + idStr + "] " + result);
-    }
-    
-    if (result && strncmp(result, "Error:", 6) == 0) {
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s cmd[%d] error: %s", idStr.c_str(), ci, result);
     }
   }
   
@@ -1477,19 +1575,17 @@ const char* cmd_automation(const String& argsIn) {
   // Handle "system" subcommand
   if (subCmd == "system") {
     if (subArgs.equalsIgnoreCase("enable")) {
-      gSettings.automationsEnabled = true;
-      extern bool writeSettingsJson();
-      writeSettingsJson();
-      return "Automation system enabled (restart required)";
+      setSetting(gSettings.automationsEnabled, true);
+      return "Automation system: enabled";
     } else if (subArgs.equalsIgnoreCase("disable")) {
-      gSettings.automationsEnabled = false;
-      extern bool writeSettingsJson();
-      writeSettingsJson();
-      return "Automation system disabled (restart required)";
+      setSetting(gSettings.automationsEnabled, false);
+      return "Automation system: disabled";
     } else if (subArgs.equalsIgnoreCase("status")) {
-      String status = String("Automation system: ") + (gSettings.automationsEnabled ? "enabled" : "disabled");
-      broadcastOutput(status);
-      return "OK";
+      if (gSettings.automationsEnabled) {
+        return "Automation system: enabled";
+      } else {
+        return "Automation system: disabled";
+      }
     }
     return "Usage: automation system <enable|disable|status>";
   }
@@ -1534,27 +1630,28 @@ const char* cmd_automation(const String& argsIn) {
       if (idPos < 0) break;
       int colon = json.indexOf(':', idPos);
       if (colon < 0) break;
-      int comma = json.indexOf(',', colon + 1);
-      int braceEnd = json.indexOf('}', colon + 1);
-      if (braceEnd < 0) break;
-      if (comma < 0 || comma > braceEnd) comma = braceEnd;
-      String idStr = json.substring(colon + 1, comma);
-      idStr.trim();
-      long id = idStr.toInt();
-      
-      // Extract automation object
+
       int objStart = json.lastIndexOf('{', idPos);
       if (objStart < 0) {
-        pos = braceEnd + 1;
+        pos = colon + 1;
         continue;
       }
-      String obj = json.substring(objStart, braceEnd + 1);
+      int objEnd = findJsonObjectEnd(json, objStart);
+      if (objEnd < 0) break;
+
+      int comma = json.indexOf(',', colon + 1);
+      int idValEnd = (comma > 0 && comma < objEnd) ? comma : objEnd;
+      String idStr = json.substring(colon + 1, idValEnd);
+      idStr.trim();
+      long id = idStr.toInt();
+
+      String obj = json.substring(objStart, objEnd + 1);
       
       // Check if enabled
       bool enabled = (obj.indexOf("\"enabled\": true") >= 0) || (obj.indexOf("\"enabled\":true") >= 0);
       if (!enabled) {
         DEBUGF(DEBUG_AUTOMATIONS, "[autos recompute] id=%ld skip: disabled", id);
-        pos = braceEnd + 1;
+        pos = objEnd + 1;
         continue;
       }
       
@@ -1574,7 +1671,7 @@ const char* cmd_automation(const String& argsIn) {
         DEBUGF(DEBUG_AUTOMATIONS, "[autos recompute] id=%ld could not compute nextAt", id);
       }
       
-      pos = braceEnd + 1;
+      pos = objEnd + 1;
     }
     
     if (modified) {
@@ -1678,7 +1775,7 @@ bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userD
       String body = obj.substring(arrStart + 1, arrEnd);
       int i = 0;
       while (i < (int)body.length() && cmdsCount < 64) {
-        while (i < (int)body.length() && (body[i] == ' ' || body[i] == ',')) i++;
+        while (i < (int)body.length() && (body[i] == ' ' || body[i] == ',' || body[i] == '\n' || body[i] == '\r' || body[i] == '\t')) i++;
         if (i >= (int)body.length()) break;
         if (body[i] == '"') {
           int q1 = i;
@@ -1724,58 +1821,37 @@ bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userD
         }
       }
 
-      // Check conditions if present
-      String conditions = "";
-      int condPos = obj.indexOf("\"conditions\"");
-      if (condPos >= 0) {
-        int condColon = obj.indexOf(':', condPos);
-        if (condColon >= 0) {
-          int condQ1 = obj.indexOf('"', condColon + 1);
-          int condQ2 = obj.indexOf('"', condQ1 + 1);
-          if (condQ1 >= 0 && condQ2 >= 0) {
-            conditions = obj.substring(condQ1 + 1, condQ2);
-            conditions.trim();
+      // Check global condition expression (new schema: expression only, e.g. "ROOM=bedroom")
+      String condition = "";
+      {
+        int condPos = obj.indexOf("\"condition\"");
+        if (condPos >= 0 && obj[condPos + 11] == '"') condPos = -1; // reject "conditions"
+        if (condPos >= 0) {
+          int condColon = obj.indexOf(':', condPos);
+          if (condColon >= 0) {
+            int condQ1 = obj.indexOf('"', condColon + 1);
+            int condQ2 = obj.indexOf('"', condQ1 + 1);
+            if (condQ1 >= 0 && condQ2 >= 0) {
+              condition = obj.substring(condQ1 + 1, condQ2);
+              condition.trim();
+            }
           }
         }
       }
 
-      // Evaluate conditions if present
-      if (conditions.length() > 0) {
-        // Check if this is a conditional chain (contains ELSE/ELSE IF)
-        if (conditions.indexOf("ELSE") >= 0) {
-          char actionBuf[256];
-          const char* actionToExecute = evaluateConditionalChain(conditions.c_str(), actionBuf, sizeof(actionBuf));
-          DEBUGF(DEBUG_AUTO_CONDITION, "[autos] id=%ld conditional chain result: '%s'",
-                 id, actionToExecute);
-
-          if (actionToExecute && actionToExecute[0] != '\0') {
-            // Execute the specific action from the chain
-            const char* result = executeConditionalCommand(actionToExecute);
-
-            // Output the result (so command output is visible)
-            if (result && strlen(result) > 0 && strcmp(result, "VALID") != 0 && strcmp(result, "Conditional command completed") != 0) {
-              BROADCAST_PRINTF("[Scheduled Automation %lu] %s", id, result);
-            }
-
-            if (result && strncmp(result, "Error:", 6) == 0) {
-              DEBUGF(DEBUG_AUTO_EXEC, "[autos] conditional chain error: %s", result);
-            }
+      // Evaluate global condition gate if present
+      if (condition.length() > 0) {
+        String wrapped = "IF " + condition + " THEN _";
+        bool conditionMet = evaluateCondition(wrapped.c_str());
+        DEBUGF(DEBUG_AUTO_CONDITION, "[autos] id=%ld condition='%s' result=%s",
+               id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
+        if (!conditionMet) {
+          if (gAutoLogActive) {
+            String skipMsg = "Scheduled automation skipped: ID=" + String(id) + " Name=" + autoName + " Condition not met: " + condition;
+            appendAutoLogEntry("AUTO_SKIP", skipMsg);
           }
-          return true;  // Continue processing next automation
-        } else {
-          // Simple IF/THEN condition
-          bool conditionMet = evaluateCondition(conditions.c_str());
-          DEBUGF(DEBUG_AUTO_CONDITION, "[autos] id=%ld condition='%s' result=%s",
-                 id, conditions.c_str(), conditionMet ? "TRUE" : "FALSE");
-
-          if (!conditionMet) {
-            if (gAutoLogActive) {
-              String skipMsg = "Scheduled automation skipped: ID=" + String(id) + " Name=" + autoName + " Condition not met: " + conditions;
-              appendAutoLogEntry("AUTO_SKIP", skipMsg);
-            }
-            DEBUGF(DEBUG_AUTO_CONDITION, "[autos] id=%ld skipped - condition not met: %s", id, conditions.c_str());
-            return true;  // Continue processing next automation
-          }
+          DEBUGF(DEBUG_AUTO_CONDITION, "[autos] id=%ld skipped - condition not met: %s", id, condition.c_str());
+          return true;
         }
       }
 
@@ -1792,16 +1868,12 @@ bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userD
       for (int ci = 0; ci < cmdsCount; ++ci) {
         DEBUGF(DEBUG_AUTO_EXEC, "[autos] id=%ld run cmd[%d]='%s'", id, ci, cmdsList[ci].c_str());
 
-        // Execute command with conditional logic support
+        // Queue command for execution (async, non-blocking)
         const char* result = executeConditionalCommand(cmdsList[ci].c_str());
 
-        // Output the result (so command output is visible)
-        if (result && strlen(result) > 0 && strcmp(result, "VALID") != 0 && strcmp(result, "Conditional command completed") != 0) {
+        // Output the result (skip internal status messages - actual output comes from queue)
+        if (!isAutoInternalResult(result)) {
           BROADCAST_PRINTF("[Scheduled Automation %lu] %s", id, result);
-        }
-
-        if (result && strncmp(result, "Error:", 6) == 0) {
-          DEBUGF(DEBUG_AUTO_EXEC, "[autos] id=%ld cmd[%d] error: %s", id, ci, result);
         }
       }
       ctx->executed++;
@@ -1868,18 +1940,20 @@ bool parseAtTimeMatchDays(const char* daysCsv, int tm_wday) {
 
 // Compute next run time for automation using ArduinoJson (const char* input)
 time_t computeNextRunTime(const char* automationJson, time_t fromTime) {
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, automationJson);
   if (error) {
     DEBUGF(DEBUG_AUTO_TIMING, "[computeNextRunTime] JSON parse error: %s", error.c_str());
     return 0;
   }
   
-  const char* type = doc["type"] | "";
-  
+  // Support both new nested schema (schedule.type) and legacy flat schema (type)
+  JsonVariantConst schedDoc = doc["schedule"];
+  const char* type = schedDoc.isNull() ? (doc["type"] | "") : (schedDoc["type"] | "");
+
   if (strcmp(type, "atTime") == 0 || strcmp(type, "attime") == 0) {
-    const char* timeStr = doc["time"] | "";
-    const char* daysStr = doc["days"] | "";
+    const char* timeStr = schedDoc.isNull() ? (doc["time"] | "") : (schedDoc["time"] | "");
+    const char* daysStr = schedDoc.isNull() ? (doc["days"] | "") : (schedDoc["days"] | "");
     
     // Validate time format (HH:MM)
     if (strlen(timeStr) != 5 || timeStr[2] != ':') return 0;
@@ -1938,12 +2012,12 @@ time_t computeNextRunTime(const char* automationJson, time_t fromTime) {
     return candidateTime;
 
   } else if (strcmp(type, "afterDelay") == 0 || strcmp(type, "afterdelay") == 0) {
-    int delayMs = doc["delayMs"] | 0;
+    int delayMs = schedDoc.isNull() ? (doc["delayMs"] | 0) : (schedDoc["delayMs"] | 0);
     if (delayMs <= 0) return 0;
     return fromTime + (delayMs / 1000);
 
   } else if (strcmp(type, "interval") == 0) {
-    int intervalMs = doc["intervalMs"] | 0;
+    int intervalMs = schedDoc.isNull() ? (doc["intervalMs"] | 0) : (schedDoc["intervalMs"] | 0);
     if (intervalMs <= 0) return 0;
     return fromTime + (intervalMs / 1000);
   }
@@ -1956,6 +2030,8 @@ const char* validateConditionSyntax(const char* condition) {
   const char* cond = condition;
   size_t len = strlen(condition);
   
+  DEBUGF(DEBUG_AUTOMATIONS, "[validate] Input condition: '%s'", condition);
+  
   // Skip leading whitespace
   while (*cond == ' ' || *cond == '\t') { cond++; len--; }
   
@@ -1964,6 +2040,7 @@ const char* validateConditionSyntax(const char* condition) {
       (cond[0] != 'I' && cond[0] != 'i') ||
       (cond[1] != 'F' && cond[1] != 'f') ||
       cond[2] != ' ') {
+    DEBUGF(DEBUG_AUTOMATIONS, "[validate] FAIL: Condition must start with 'IF'");
     return "Condition must start with 'IF'";
   }
 
@@ -1982,12 +2059,14 @@ const char* validateConditionSyntax(const char* condition) {
   }
   
   if (!thenPos) {
+    DEBUGF(DEBUG_AUTOMATIONS, "[validate] FAIL: Condition must contain 'THEN'");
     return "Condition must contain 'THEN'";
   }
 
   // Check condition part has content
   size_t condLen = thenPos - (cond + 3);
   if (condLen == 0) {
+    DEBUGF(DEBUG_AUTOMATIONS, "[validate] FAIL: Missing condition after 'IF'");
     return "Missing condition after 'IF'";
   }
 
@@ -1995,23 +2074,28 @@ const char* validateConditionSyntax(const char* condition) {
   const char* cmdStart = thenPos + 5;
   while (*cmdStart == ' ' || *cmdStart == '\t') cmdStart++;
   if (*cmdStart == '\0') {
+    DEBUGF(DEBUG_AUTOMATIONS, "[validate] FAIL: Missing command after 'THEN'");
     return "Missing command after 'THEN'";
   }
 
   // Validate condition has an operator
-  const char* operators[] = { ">=", "<=", "!=", ">", "<", "=" };
+  const char* operators[] = { "CONTAINS", ">=", "<=", "!=", ">", "<", "=" };
   bool hasOperator = false;
-  for (int i = 0; i < 6; i++) {
+  const char* foundOp = nullptr;
+  for (int i = 0; i < 7; i++) {
     if (strstr(cond + 3, operators[i])) {
       hasOperator = true;
+      foundOp = operators[i];
       break;
     }
   }
 
   if (!hasOperator) {
-    return "Condition must contain an operator (>, <, =, >=, <=, !=)";
+    DEBUGF(DEBUG_AUTOMATIONS, "[validate] FAIL: No operator found in condition");
+    return "Condition must contain an operator (>, <, =, >=, <=, !=, CONTAINS)";
   }
 
+  DEBUGF(DEBUG_AUTOMATIONS, "[validate] PASS: Found operator '%s'", foundOp);
   return "";
 }
 
@@ -2062,12 +2146,14 @@ bool evaluateCondition(const char* condition) {
   
   // Parse: sensor operator value
   char sensor[64] = "";
-  char op[4] = "";
+  char op[16] = "";  // Increased size for "CONTAINS"
   char value[64] = "";
-  const char* operators[] = { ">=", "<=", "!=", ">", "<", "=" };
+  const char* operators[] = { "CONTAINS", ">=", "<=", "!=", ">", "<", "=" };  // CONTAINS first for longest match
   const char* opFound = nullptr;
   
-  for (int i = 0; i < 6; i++) {
+  DEBUGF(DEBUG_AUTOMATIONS, "[eval] Parsing condition: '%s'", condStart);
+  
+  for (int i = 0; i < 7; i++) {
     const char* pos = strstr(condStart, operators[i]);
     if (pos && pos > condStart) {
       // Extract sensor
@@ -2097,7 +2183,12 @@ bool evaluateCondition(const char* condition) {
     }
   }
   
-  if (!opFound) return false;
+  if (!opFound) {
+    DEBUGF(DEBUG_AUTOMATIONS, "[eval] FAIL: No operator found in parsed condition");
+    return false;
+  }
+  
+  DEBUGF(DEBUG_AUTOMATIONS, "[eval] Parsed: sensor='%s' op='%s' value='%s'", sensor, op, value);
 
   // Get current sensor value
   float currentValue = 0;
@@ -2204,6 +2295,51 @@ bool evaluateCondition(const char* condition) {
     else if (hour >= 12 && hour < 18) strncpy(currentStringValue, "AFTERNOON", sizeof(currentStringValue) - 1);
     else if (hour >= 18 && hour < 24) strncpy(currentStringValue, "EVENING", sizeof(currentStringValue) - 1);
     else strncpy(currentStringValue, "NIGHT", sizeof(currentStringValue) - 1);
+  } else if (strcmp(sensor, "ROOM") == 0) {
+    // ESP-NOW metadata: room assignment
+    isNumeric = false;
+    if (gSettings.espnowRoom.length() > 0) {
+      strncpy(currentStringValue, gSettings.espnowRoom.c_str(), sizeof(currentStringValue) - 1);
+      currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+      // Uppercase for comparison
+      for (char* p = currentStringValue; *p; p++) {
+        if (*p >= 'a' && *p <= 'z') *p -= 32;
+      }
+    } else {
+      strncpy(currentStringValue, "NONE", sizeof(currentStringValue) - 1);
+    }
+    DEBUGF(DEBUG_AUTOMATIONS, "[eval] ROOM: current='%s' (from setting='%s')", 
+           currentStringValue, gSettings.espnowRoom.c_str());
+  } else if (strcmp(sensor, "ZONE") == 0) {
+    // ESP-NOW metadata: zone assignment
+    isNumeric = false;
+    if (gSettings.espnowZone.length() > 0) {
+      strncpy(currentStringValue, gSettings.espnowZone.c_str(), sizeof(currentStringValue) - 1);
+      currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+      // Uppercase for comparison
+      for (char* p = currentStringValue; *p; p++) {
+        if (*p >= 'a' && *p <= 'z') *p -= 32;
+      }
+    } else {
+      strncpy(currentStringValue, "NONE", sizeof(currentStringValue) - 1);
+    }
+    DEBUGF(DEBUG_AUTOMATIONS, "[eval] ZONE: current='%s' (from setting='%s')", 
+           currentStringValue, gSettings.espnowZone.c_str());
+  } else if (strcmp(sensor, "TAGS") == 0) {
+    // ESP-NOW metadata: tags (supports CONTAINS operator)
+    isNumeric = false;
+    if (gSettings.espnowTags.length() > 0) {
+      strncpy(currentStringValue, gSettings.espnowTags.c_str(), sizeof(currentStringValue) - 1);
+      currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+      // Uppercase for comparison
+      for (char* p = currentStringValue; *p; p++) {
+        if (*p >= 'a' && *p <= 'z') *p -= 32;
+      }
+    } else {
+      strncpy(currentStringValue, "NONE", sizeof(currentStringValue) - 1);
+    }
+    DEBUGF(DEBUG_AUTOMATIONS, "[eval] TAGS: current='%s' (from setting='%s')", 
+           currentStringValue, gSettings.espnowTags.c_str());
   } else {
     DEBUGF(DEBUG_AUTOMATIONS, "[condition] Unknown sensor: %s", sensor);
     return false;
@@ -2212,19 +2348,37 @@ bool evaluateCondition(const char* condition) {
   // Evaluate condition
   if (isNumeric) {
     float targetValue = atof(value);
-    if (strcmp(op, ">") == 0) return currentValue > targetValue;
-    else if (strcmp(op, "<") == 0) return currentValue < targetValue;
-    else if (strcmp(op, "=") == 0) return fabs(currentValue - targetValue) < 0.1;
-    else if (strcmp(op, ">=") == 0) return currentValue >= targetValue;
-    else if (strcmp(op, "<=") == 0) return currentValue <= targetValue;
-    else if (strcmp(op, "!=") == 0) return fabs(currentValue - targetValue) >= 0.1;
+    bool result = false;
+    if (strcmp(op, ">") == 0) result = currentValue > targetValue;
+    else if (strcmp(op, "<") == 0) result = currentValue < targetValue;
+    else if (strcmp(op, "=") == 0) result = fabs(currentValue - targetValue) < 0.1;
+    else if (strcmp(op, ">=") == 0) result = currentValue >= targetValue;
+    else if (strcmp(op, "<=") == 0) result = currentValue <= targetValue;
+    else if (strcmp(op, "!=") == 0) result = fabs(currentValue - targetValue) >= 0.1;
+    DEBUGF(DEBUG_AUTOMATIONS, "[eval] Numeric: %.2f %s %.2f = %s", 
+           currentValue, op, targetValue, result ? "TRUE" : "FALSE");
+    return result;
   } else {
     // Uppercase value for comparison
     for (char* p = value; *p; p++) {
       if (*p >= 'a' && *p <= 'z') *p -= 32;
     }
-    if (strcmp(op, "=") == 0) return strcmp(currentStringValue, value) == 0;
-    else if (strcmp(op, "!=") == 0) return strcmp(currentStringValue, value) != 0;
+    bool result = false;
+    if (strcmp(op, "=") == 0) {
+      result = strcmp(currentStringValue, value) == 0;
+      DEBUGF(DEBUG_AUTOMATIONS, "[eval] String: '%s' = '%s' = %s", 
+             currentStringValue, value, result ? "TRUE" : "FALSE");
+    } else if (strcmp(op, "!=") == 0) {
+      result = strcmp(currentStringValue, value) != 0;
+      DEBUGF(DEBUG_AUTOMATIONS, "[eval] String: '%s' != '%s' = %s", 
+             currentStringValue, value, result ? "TRUE" : "FALSE");
+    } else if (strcmp(op, "CONTAINS") == 0) {
+      // Check if currentStringValue contains value (case-insensitive substring match)
+      result = strstr(currentStringValue, value) != nullptr;
+      DEBUGF(DEBUG_AUTOMATIONS, "[eval] String: '%s' CONTAINS '%s' = %s", 
+             currentStringValue, value, result ? "TRUE" : "FALSE");
+    }
+    return result;
   }
 
   return false;
@@ -2426,6 +2580,30 @@ const char* executeConditionalCommand(const char* command) {
   const char* cmdStr = command;
   size_t cmdLen = strlen(command);
   
+  // Check for PRINT command (case-insensitive)
+  if (cmdLen >= 6) {
+    char prefix[7];
+    for (int i = 0; i < 6 && i < (int)cmdLen; i++) {
+      char c = cmdStr[i];
+      prefix[i] = (c >= 'a' && c <= 'z') ? (c - 32) : c;
+    }
+    prefix[6] = '\0';
+    
+    if (strncmp(prefix, "PRINT ", 6) == 0) {
+      // Extract message after "PRINT "
+      const char* msg = cmdStr + 6;
+      while (*msg == ' ' || *msg == '\t') msg++;
+      if (*msg != '\0') {
+        broadcastOutput(msg);
+        return "Message printed";
+      } else {
+        strncpy(errorBuf, "Error: PRINT requires a message", sizeof(errorBuf) - 1);
+        errorBuf[sizeof(errorBuf) - 1] = '\0';
+        return errorBuf;
+      }
+    }
+  }
+  
   // Check for standalone ELSE/ELSE IF (case-insensitive)
   if (cmdLen >= 7) {
     char prefix[8];
@@ -2542,19 +2720,18 @@ const char* executeConditionalCommand(const char* command) {
       DEBUGF(DEBUG_AUTOMATIONS, "[conditional] condition='%s' result=%s",
              condStart, conditionMet ? "TRUE" : "FALSE");
 
-      // Execute appropriate command
-      extern void runUnifiedSystemCommand(const String& cmd);
+      // Execute appropriate command via async queue (avoids deadlock)
       if (conditionMet) {
         if (thenCmdStart[0] != '\0') {
-          DEBUGF(DEBUG_AUTOMATIONS, "[conditional] executing THEN: %s", thenCmdStart);
-          runUnifiedSystemCommand(String(thenCmdStart));
-          return "Conditional THEN executed";
+          DEBUGF(DEBUG_AUTOMATIONS, "[conditional] queuing THEN: %s", thenCmdStart);
+          queueAutomationSubCommand(thenCmdStart);
+          return "Conditional THEN queued";
         }
       } else {
         if (elseBuf[0] != '\0') {
-          DEBUGF(DEBUG_AUTOMATIONS, "[conditional] executing ELSE: %s", elseBuf);
-          runUnifiedSystemCommand(String(elseBuf));
-          return "Conditional ELSE executed";
+          DEBUGF(DEBUG_AUTOMATIONS, "[conditional] queuing ELSE: %s", elseBuf);
+          queueAutomationSubCommand(elseBuf);
+          return "Conditional ELSE queued";
         }
       }
 
@@ -2562,10 +2739,9 @@ const char* executeConditionalCommand(const char* command) {
     }
   }
   
-  // Regular command
-  extern void runUnifiedSystemCommand(const String& cmd);
-  runUnifiedSystemCommand(String(command));
-  return "Command executed";
+  // Regular command - queue through FreeRTOS command queue (async, non-blocking)
+  queueAutomationSubCommand(command);
+  return "Command queued";
 }
 
 // Validate conditional hierarchy (const char* version)
@@ -2659,7 +2835,6 @@ const char* cmd_autolog(const String& argsIn) {
   extern bool gCLIValidateOnly;
   if (gCLIValidateOnly) return "VALID";
   
-  extern bool ensureDebugBuffer();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   String args = argsIn;
@@ -2763,21 +2938,24 @@ void schedulerTickMinute() {
     if (idPos < 0) break;
     int colon = json.indexOf(':', idPos);
     if (colon < 0) break;
+
+    // Extract the object substring using depth-tracked brace matching
+    int objStart = json.lastIndexOf('{', idPos);
+    if (objStart < 0) {
+      pos = colon + 1;
+      continue;
+    }
+    int objEnd = findJsonObjectEnd(json, objStart);
+    if (objEnd < 0) break;
+
+    // Extract id value
     int comma = json.indexOf(',', colon + 1);
-    int braceEnd = json.indexOf('}', colon + 1);
-    if (braceEnd < 0) break;
-    if (comma < 0 || comma > braceEnd) comma = braceEnd;
-    String idStr = json.substring(colon + 1, comma);
+    int idValEnd = (comma > 0 && comma < objEnd) ? comma : objEnd;
+    String idStr = json.substring(colon + 1, idValEnd);
     idStr.trim();
     long id = idStr.toInt();
 
-    // Extract the object substring
-    int objStart = json.lastIndexOf('{', idPos);
-    if (objStart < 0) {
-      pos = braceEnd + 1;
-      continue;
-    }
-    String obj = json.substring(objStart, braceEnd + 1);
+    String obj = json.substring(objStart, objEnd + 1);
 
     // Duplicate-id guard
     bool dupSeen = false;
@@ -2790,7 +2968,7 @@ void schedulerTickMinute() {
     if (dupSeen) {
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] duplicate id detected at runtime id=%ld; skipping and queuing sanitize", id);
       queueSanitize = true;
-      pos = braceEnd + 1;
+      pos = objEnd + 1;
       continue;
     }
     if (seenCount < (int)(sizeof(seenIds) / sizeof(seenIds[0]))) { seenIds[seenCount++] = id; }
@@ -2801,7 +2979,7 @@ void schedulerTickMinute() {
     bool enabled = (obj.indexOf("\"enabled\": true") >= 0) || (obj.indexOf("\"enabled\":true") >= 0);
     if (!enabled) {
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: disabled", id);
-      pos = braceEnd + 1;
+      pos = objEnd + 1;
       continue;
     }
 
@@ -2830,7 +3008,7 @@ void schedulerTickMinute() {
         DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld computed missing nextAt=%lu", id, (unsigned long)nextAt);
       } else {
         DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: could not compute nextAt", id);
-        pos = braceEnd + 1;
+        pos = objEnd + 1;
         continue;
       }
     }
@@ -2870,7 +3048,7 @@ void schedulerTickMinute() {
         String body = obj.substring(arrStart + 1, arrEnd);
         int i = 0;
         while (i < (int)body.length() && cmdsCount < 64) {
-          while (i < (int)body.length() && (body[i] == ' ' || body[i] == ',')) i++;
+          while (i < (int)body.length() && (body[i] == ' ' || body[i] == ',' || body[i] == '\n' || body[i] == '\r' || body[i] == '\t')) i++;
           if (i >= (int)body.length()) break;
           if (body[i] == '"') {
             int q1 = i;
@@ -2916,60 +3094,38 @@ void schedulerTickMinute() {
           }
         }
 
-        // Check conditions if present
-        String conditions = "";
-        int condPos = obj.indexOf("\"conditions\"");
-        if (condPos >= 0) {
-          int condColon = obj.indexOf(':', condPos);
-          if (condColon >= 0) {
-            int condQ1 = obj.indexOf('"', condColon + 1);
-            int condQ2 = obj.indexOf('"', condQ1 + 1);
-            if (condQ1 >= 0 && condQ2 >= 0) {
-              conditions = obj.substring(condQ1 + 1, condQ2);
-              conditions.trim();
+        // Check global condition expression (new schema: expression only, e.g. "ROOM=bedroom")
+        String condition = "";
+        {
+          int condPos = obj.indexOf("\"condition\"");
+          if (condPos >= 0 && obj[condPos + 11] == '"') condPos = -1; // reject "conditions"
+          if (condPos >= 0) {
+            int condColon = obj.indexOf(':', condPos);
+            if (condColon >= 0) {
+              int condQ1 = obj.indexOf('"', condColon + 1);
+              int condQ2 = obj.indexOf('"', condQ1 + 1);
+              if (condQ1 >= 0 && condQ2 >= 0) {
+                condition = obj.substring(condQ1 + 1, condQ2);
+                condition.trim();
+              }
             }
           }
         }
 
-        // Evaluate conditions if present
-        if (conditions.length() > 0) {
-          // Check if this is a conditional chain (contains ELSE/ELSE IF)
-          if (conditions.indexOf("ELSE") >= 0) {
-            char actionBuf[256];
-            const char* actionToExecute = evaluateConditionalChain(conditions.c_str(), actionBuf, sizeof(actionBuf));
-            DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld conditional chain result: '%s'",
-                   id, actionToExecute ? actionToExecute : "");
-
-            if (actionToExecute && strlen(actionToExecute) > 0) {
-              // Execute the specific action from the chain
-              const char* result = executeConditionalCommand(actionToExecute);
-
-              // Output the result (so command output is visible)
-              if (result && strlen(result) > 0 && strcmp(result, "VALID") != 0 && strcmp(result, "Conditional command completed") != 0) {
-                broadcastOutput("[Scheduled Automation " + String(id) + "] " + String(result));
-              }
-
-              if (result && strncmp(result, "Error:", 6) == 0) {
-                DEBUGF(DEBUG_AUTOMATIONS, "[autos] conditional chain error: %s", result);
-              }
+        // Evaluate global condition gate if present
+        if (condition.length() > 0) {
+          String wrapped = "IF " + condition + " THEN _";
+          bool conditionMet = evaluateCondition(wrapped.c_str());
+          DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld condition='%s' result=%s",
+                 id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
+          if (!conditionMet) {
+            if (gAutoLogActive) {
+              String skipMsg = "Scheduled automation skipped: ID=" + String(id) + " Name=" + autoName + " Condition not met: " + condition;
+              appendAutoLogEntry("AUTO_SKIP", skipMsg);
             }
-            pos = braceEnd + 1;
-            continue;  // Skip normal command execution
-          } else {
-            // Simple IF/THEN condition
-            bool conditionMet = evaluateCondition(conditions.c_str());
-            DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld condition='%s' result=%s",
-                   id, conditions.c_str(), conditionMet ? "TRUE" : "FALSE");
-
-            if (!conditionMet) {
-              if (gAutoLogActive) {
-                String skipMsg = "Scheduled automation skipped: ID=" + String(id) + " Name=" + autoName + " Condition not met: " + conditions;
-                appendAutoLogEntry("AUTO_SKIP", skipMsg);
-              }
-              DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skipped - condition not met: %s", id, conditions.c_str());
-              pos = braceEnd + 1;
-              continue;  // Skip to next automation
-            }
+            DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skipped - condition not met: %s", id, condition.c_str());
+            pos = objEnd + 1;
+            continue;
           }
         }
 
@@ -2984,16 +3140,12 @@ void schedulerTickMinute() {
         for (int ci = 0; ci < cmdsCount; ++ci) {
           DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld run cmd[%d]='%s'", id, ci, cmdsList[ci].c_str());
 
-          // Execute command with conditional logic support
+          // Queue command for execution (async, non-blocking)
           const char* result = executeConditionalCommand(cmdsList[ci].c_str());
 
-          // Output the result (so command output is visible)
-          if (result && strlen(result) > 0 && strcmp(result, "VALID") != 0 && strcmp(result, "Conditional command completed") != 0) {
+          // Output the result (skip internal status messages - actual output comes from queue)
+          if (!isAutoInternalResult(result)) {
             broadcastOutput("[Scheduled Automation " + String(id) + "] " + String(result));
-          }
-
-          if (result && strncmp(result, "Error:", 6) == 0) {
-            DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld cmd[%d] error: %s", id, ci, result);
           }
         }
         executed++;
@@ -3019,7 +3171,7 @@ void schedulerTickMinute() {
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld wait: nextAt=%lu now=%lu", id, (unsigned long)nextAt, (unsigned long)now);
     }
 
-    pos = braceEnd + 1;
+    pos = objEnd + 1;
   }
 
   DEBUGF(DEBUG_AUTOMATIONS, "[autos] evaluated=%d executed=%d", evaluated, executed);
@@ -3058,26 +3210,37 @@ void stopAutomationScheduler() {
 }
 
 // ============================================================================
+// Print / Broadcast Command
+// ============================================================================
+
+static const char* cmd_print(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (args.length() == 0) return "Usage: print <message>";
+  broadcastOutput(args.c_str());
+  return "Message printed";
+}
+
+// ============================================================================
 // Automation Command Registry
 // ============================================================================
 
 // CommandEntry struct is defined in system_utils.h (included via automation_system.h)
 
 const CommandEntry automationCommands[] = {
+  // Primary dispatcher: "automation <subcommand> [args]"
+  // Subcommands: system enable|disable|status, list, add, enable, disable, delete, run, sanitize, recompute
+  { "automation", "Automation system: automation <subcommand> [args].", false, cmd_automation,
+    "Usage: automation <system enable|disable|status | list | add | enable | disable | delete | run | sanitize | recompute>" },
 
+  // Single-word aliases for common operations (follow naming convention)
+  { "automationlist", "List all automations.", false, cmd_automation_list },
+  { "automationadd", "Add automation (same as 'automation add').", false, cmd_automation_add },
+  { "automationrun", "Run automation by ID: automationrun id=<id>.", false, cmd_automation_run },
+
+  // Utility commands
   { "autolog", "Automation logging: autolog start <file> | stop | status.", false, cmd_autolog, "Usage: autolog start <filename> | autolog stop | autolog status" },
-  { "automation system enable", "Enable automation system (requires restart).", true, cmd_automation },
-  { "automation system disable", "Disable automation system (requires restart).", true, cmd_automation },
-  { "automation system status", "Check automation system status.", false, cmd_automation },
-  { "automation add", "Add automation: automation add name=\"name\" type=atTime|afterDelay|interval time=HH:MM|delayms=N|intervalms=N commands=\"cmd1;cmd2\" [days=\"Mon,Tue\"] [enabled=1].", false, cmd_automation_add },
-  { "automation enable", "Enable automation by ID: automation enable id=<id>.", false, cmd_automation },
-  { "automation disable", "Disable automation by ID: automation disable id=<id>.", false, cmd_automation },
-  { "automation delete", "Delete automation by ID: automation delete id=<id>.", true, cmd_automation },
-  { "automation run", "Run automation by ID: automation run id=<id>.", false, cmd_automation_run },
-  { "automation sanitize", "Fix duplicate automation IDs.", true, cmd_automation },
-  { "automation recompute", "Recompute automation schedules.", true, cmd_automation },
-  { "automation list", "List all automations.", false, cmd_automation_list },
   { "validate-conditions", "Validate conditional automation syntax: validate-conditions IF temp>75 THEN ledcolor red.", true, cmd_validate_conditions },
+  { "print", "Broadcast a message to all outputs: print <message>.", false, cmd_print },
   
   // NOTE: downloadautomation and if/conditional commands are registered
   // in the main .ino file's command registry to avoid duplication
