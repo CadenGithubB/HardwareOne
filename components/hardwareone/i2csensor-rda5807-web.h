@@ -27,7 +27,7 @@ inline void streamRDA5807FmRadioSensorCard(httpd_req_t* req) {
           <button class='btn btn-small' onclick="sendCmd('fmradio volume ' + Math.max(0, parseInt(document.getElementById('fmradio-volume').innerText) - 1))">🔉 Vol-</button>
           <button class='btn btn-small' onclick="sendCmd('fmradio volume ' + Math.min(15, parseInt(document.getElementById('fmradio-volume').innerText) + 1))">🔊 Vol+</button>
         </div>
-        <div style='margin-top:10px;font-size:0.9em;color:#6c757d'>
+        <div style='margin-top:10px;font-size:0.9em;color:var(--panel-fg)'>
           Tune: <code>fmradio tune 103.9</code>
         </div>
       </div>
@@ -50,7 +50,7 @@ inline void streamRDA5807FmRadioSensorJs(httpd_req_t* req) {
 }
 
 inline void streamRDA5807FmRadioDashboardDef(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'RDA5807',key:'fmradio',name:'FM Radio (RDA5807)',desc:'FM Receiver + RDS'});", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'RDA5807',key:'fmradio',name:'FM Radio (RDA5807)',desc:'FM Receiver & RDS'});", HTTPD_RESP_USE_STRLEN);
 }
 
 #endif // RDA5807_FM_RADIO_SENSOR_WEB_H

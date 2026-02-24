@@ -15,10 +15,9 @@
 #include "System_I2C.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
-
 #if ENABLE_ESPNOW
-#include "System_ESPNow.h"
-#include "System_ESPNow_Sensors.h"
+  #include "System_ESPNow.h"
+  #include "System_ESPNow_Sensors.h"
 #endif
 
 // VL53L4CX ToF sensor object (owned by this module)
@@ -27,16 +26,11 @@ extern TwoWire Wire1;
 
 // Settings and debug
 extern Settings gSettings;
-extern bool writeSettingsJson();
 
 // I2C functions - clock now managed by transaction wrapper
 
-// Status and output
-extern void sensorStatusBumpWith(const char* reason);
-extern void broadcastOutput(const char* msg);
-extern volatile bool gSensorPollingPaused;
-extern SemaphoreHandle_t i2cMutex;
-extern void drainDebugRing();
+// External dependencies provided by System_I2C.h:
+// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing
 
 // ============================================================================
 // ToF Sensor Cache (owned by this module)
@@ -68,8 +62,7 @@ extern bool initToFSensor();
 extern void i2cSetDefaultWire1Clock();
 extern bool createToFTask();
 
-// Queue system functions now in i2c_system.h (included via Sensor_ToF_VL53L4CX.h)
-extern void sensorStatusBumpWith(const char* cause);
+// Queue system functions now in System_I2C.h
 
 // ============================================================================
 // ToF Sensor Reading Functions (moved from .ino)
@@ -89,15 +82,18 @@ float readToFDistance() {
 
   // Use i2cTransaction wrapper for safe mutex + clock management
   uint32_t clockHz = (gSettings.i2cClockToFHz > 0) ? (uint32_t)gSettings.i2cClockToFHz : 100000;
-  float result = i2cTransaction(clockHz, 200, [&]() -> float {
+  float result = i2cDeviceTransaction(I2C_ADDR_TOF, clockHz, 200, [&]() -> float {
     VL53L4CX_MultiRangingData_t MultiRangingData;
     VL53L4CX_MultiRangingData_t* pMultiRangingData = &MultiRangingData;
     uint8_t NewDataReady = 0;
     VL53L4CX_Error status;
 
-    // Wait for data ready
+    // Wait for data ready with timeout (matches 200ms measurement timing budget)
+    unsigned long startTime = millis();
     do {
       status = gVL53L4CX->VL53L4CX_GetMeasurementDataReady(&NewDataReady);
+      if (status != VL53L4CX_ERROR_NONE) return 999.9f;
+      if (millis() - startTime > 250) return 999.9f;
     } while (!NewDataReady);
 
     if ((!status) && (NewDataReady != 0)) {
@@ -126,8 +122,7 @@ float readToFDistance() {
         gVL53L4CX->VL53L4CX_ClearInterruptAndStartMeasurement();
 
         if (found_valid) {
-          String distanceData = "Distance: " + String(best_distance, 1) + " cm";
-          broadcastOutput(distanceData);
+          BROADCAST_PRINTF("Distance: %.1f cm", best_distance);
           return best_distance;
         }
       }
@@ -238,16 +233,16 @@ const char* cmd_tofstart(const String& cmd) {
   if (tofEnabled) {
     return "[ToF] Sensor already running";
   }
-  if (isInQueue(SENSOR_TOF)) {
-    int pos = getQueuePosition(SENSOR_TOF);
+  if (isInQueue(I2C_DEVICE_TOF)) {
+    int pos = getQueuePosition(I2C_DEVICE_TOF);
     BROADCAST_PRINTF("ToF sensor already queued (position %d)", pos);
     return "[ToF] Already queued";
   }
 
   // Enqueue the request to centralized queue
-  if (enqueueSensorStart(SENSOR_TOF)) {
+  if (enqueueDeviceStart(I2C_DEVICE_TOF)) {
     sensorStatusBumpWith("opentof@enqueue");
-    int pos = getQueuePosition(SENSOR_TOF);
+    int pos = getQueuePosition(I2C_DEVICE_TOF);
     BROADCAST_PRINTF("ToF sensor queued for open (position %d)", pos);
     return "[ToF] Sensor queued for open";
   } else {
@@ -258,19 +253,7 @@ const char* cmd_tofstart(const String& cmd) {
 const char* cmd_tofstop(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  // Disable flag so the task stops polling and performs cleanup itself
-  tofEnabled = false;
-  tofLastStopTime = millis();
-  
-  // Broadcast sensor status to ESP-NOW master
-#if ENABLE_ESPNOW
-  broadcastSensorStatus(REMOTE_SENSOR_TOF, false);
-#endif
-  
-  // Note: Status bump removed - was causing xQueueGenericSend crash
-  // The ToF task will handle cleanup and status updates asynchronously
-
-  // Return immediately; task will stop measurement and free resources safely
+  handleDeviceStopped(I2C_DEVICE_TOF);
   return "[ToF] Close requested; cleanup will complete asynchronously";
 }
 
@@ -281,8 +264,7 @@ const char* cmd_toftransitionms(const String& cmd) {
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
   if (v < 0 || v > 5000) return "[ToF] Error: Transition time must be 0-5000ms";
-  gSettings.tofTransitionMs = v;
-  writeSettingsJson();
+  setSetting(gSettings.tofTransitionMs, v);
   BROADCAST_PRINTF("tofTransitionMs set to %d", v);
   return "[ToF] Setting updated";
 }
@@ -294,8 +276,7 @@ const char* cmd_tofmaxdistancemm(const String& cmd) {
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
   if (v < 100 || v > 10000) return "[ToF] Error: Max distance must be 100-10000mm";
-  gSettings.tofUiMaxDistanceMm = v;
-  writeSettingsJson();
+  setSetting(gSettings.tofUiMaxDistanceMm, v);
   BROADCAST_PRINTF("tofUiMaxDistanceMm set to %d", v);
   return "[ToF] Setting updated";
 }
@@ -326,7 +307,7 @@ bool initToFSensor() {
     return false;
   }
   
-  return i2cTransaction(tofHz, 3000, [&]() -> bool {
+  return i2cDeviceTransaction(I2C_ADDR_TOF, tofHz, 3000, [&]() -> bool {
     // Wire1 is configured centrally with runtime-configurable pins
     
     // Allocate sensor object
@@ -366,8 +347,6 @@ bool initToFSensor() {
     tofConnected = true;
     // Note: tofEnabled is set by cmd_tofstart(), not here, to ensure proper status bump
     
-    // Register ToF sensor for I2C health tracking
-    i2cRegisterDevice(I2C_ADDR_TOF, "ToF");
     return true;
   });
 }
@@ -451,8 +430,8 @@ bool readToFObjects() {
 
       bool hasGoodSignal = (signal_rate > minSignalRate);
 
-      if (isDebugFlagSet(DEBUG_SENSORS_FRAME)) {
-        DEBUG_FRAMEF("ToF obj[%d]: range=%dmm, status=%d, signal=%.3f (min=%.3f), isValid=%d, hasGoodSignal=%d",
+      if (isDebugFlagSet(DEBUG_TOF_FRAME)) {
+        DEBUG_TOF_FRAMEF("ToF obj[%d]: range=%dmm, status=%d, signal=%.3f (min=%.3f), isValid=%d, hasGoodSignal=%d",
                      j, range_mm, range_status, signal_rate, minSignalRate, isValid ? 1 : 0, hasGoodSignal ? 1 : 0);
       }
 
@@ -495,8 +474,8 @@ bool readToFObjects() {
     gTofCache.tofDataValid = true;
     gTofCache.tofSeq++;
 
-    if (isDebugFlagSet(DEBUG_SENSORS_FRAME)) {
-      DEBUG_FRAMEF("readToFObjects: found=%d, valid=%d, seq=%lu",
+    if (isDebugFlagSet(DEBUG_TOF_FRAME)) {
+      DEBUG_TOF_FRAMEF("readToFObjects: found=%d, valid=%d, seq=%lu",
                    no_of_object_found, validObjectIndex,
                    (unsigned long)gTofCache.tofSeq);
     }
@@ -523,8 +502,8 @@ int buildToFDataJSON(char* buf, size_t bufSize) {
 
   if (gTofCache.mutex && xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {  // 100ms timeout for HTTP response
     if (!gTofCache.tofDataValid) {
-      if (isDebugFlagSet(DEBUG_SENSORS_FRAME)) {
-        DEBUG_FRAMEF("buildToFDataJSON: tofDataValid=%s, tofEnabled=%d, tofConnected=%d, lastUpdate=%lu",
+      if (isDebugFlagSet(DEBUG_TOF_FRAME)) {
+        DEBUG_TOF_FRAMEF("buildToFDataJSON: tofDataValid=%s, tofEnabled=%d, tofConnected=%d, lastUpdate=%lu",
                      "false", tofEnabled ? 1 : 0, tofConnected ? 1 : 0, gTofCache.tofLastUpdate);
       }
       pos = snprintf(buf, bufSize, "{\"error\":\"ToF sensor not ready\"}");
@@ -583,8 +562,7 @@ const char* cmd_tofpollingms(const String& cmd) {
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
   if (v < 50 || v > 5000) return "[ToF] Error: Polling interval must be 50-5000ms";
-  gSettings.tofPollingMs = v;
-  writeSettingsJson();
+  setSetting(gSettings.tofPollingMs, v);
   BROADCAST_PRINTF("tofPollingMs set to %d", v);
   return "[ToF] Setting updated";
 }
@@ -596,8 +574,7 @@ const char* cmd_tofstabilitythreshold(const String& cmd) {
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
   if (v < 0 || v > 50) return "[ToF] Error: Stability threshold must be 0-50";
-  gSettings.tofStabilityThreshold = v;
-  writeSettingsJson();
+  setSetting(gSettings.tofStabilityThreshold, v);
   BROADCAST_PRINTF("tofStabilityThreshold set to %d", v);
   return "[ToF] Setting updated";
 }
@@ -614,9 +591,7 @@ const char* cmd_tofdevicepollms(const String& args) {
   int v = valStr.toInt();
   if (v < 100) v = 100;
   if (v > 2000) v = 2000;
-  gSettings.tofDevicePollMs = v;
-  writeSettingsJson();
-  applySettings();
+  setSetting(gSettings.tofDevicePollMs, v);
   snprintf(getDebugBuffer(), 1024, "tofDevicePollMs set to %d", v);
   return getDebugBuffer();
 }
@@ -624,20 +599,40 @@ const char* cmd_tofdevicepollms(const String& args) {
 // External device-level command handler (defined in i2c_system.cpp)
 // extern const char* cmd_tofdevicepollms(const String& cmd);
 
+const char* cmd_tofautostart(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = args; arg.trim();
+  if (arg.length() == 0) {
+    return gSettings.tofAutoStart ? "[ToF] Auto-start: enabled" : "[ToF] Auto-start: disabled";
+  }
+  arg.toLowerCase();
+  if (arg == "on" || arg == "true" || arg == "1") {
+    setSetting(gSettings.tofAutoStart, true);
+    return "[ToF] Auto-start enabled";
+  } else if (arg == "off" || arg == "false" || arg == "0") {
+    setSetting(gSettings.tofAutoStart, false);
+    return "[ToF] Auto-start disabled";
+  }
+  return "Usage: tofautostart [on|off]";
+}
+
 const CommandEntry tofCommands[] = {
   // Start/Stop/Read (3-level voice: "sensor" -> "time of flight" -> "open/close")
   { "opentof", "Start VL53L4CX ToF sensor.", false, cmd_tofstart, nullptr, "sensor", "time of flight", "open" },
   { "closetof", "Stop VL53L4CX ToF sensor.", false, cmd_tofstop, nullptr, "sensor", "time of flight", "close" },
-  { "tof", "Read ToF distance sensor.", false, cmd_tof },
+  { "tofread", "Read ToF distance sensor.", false, cmd_tof },
   
   // UI Settings (client-side visualization)
-  { "tofpollingms", "Set ToF UI polling interval (50..5000ms).", true, cmd_tofpollingms, "Usage: tofpollingms <50..5000>" },
-  { "tofstabilitythreshold", "Set ToF stability threshold (0..50).", true, cmd_tofstabilitythreshold, "Usage: tofstabilitythreshold <0..50>" },
-  { "toftransitionms", "Set ToF transition time.", true, cmd_toftransitionms, "Usage: toftransitionms <0..5000>" },
-  { "tofmaxdistancemm", "Set ToF max distance.", true, cmd_tofmaxdistancemm, "Usage: tofmaxdistancemm <100..10000>" },
+  { "tofpollingms", "ToF UI polling: <50..5000>", true, cmd_tofpollingms, "Usage: tofpollingms <50..5000>" },
+  { "tofstabilitythreshold", "ToF stability threshold: <0..50>", true, cmd_tofstabilitythreshold, "Usage: tofstabilitythreshold <0..50>" },
+  { "toftransitionms", "ToF transition time: <0..5000>", true, cmd_toftransitionms, "Usage: toftransitionms <0..5000>" },
+  { "tofmaxdistancemm", "ToF max distance: <100..10000>", true, cmd_tofmaxdistancemm, "Usage: tofmaxdistancemm <100..10000>" },
   
   // Device-level settings (sensor hardware behavior)
-  { "tofdevicepollms", "Set ToF device polling interval.", true, cmd_tofdevicepollms, "Usage: tofDevicePollMs <100..2000>" },
+  { "tofdevicepollms", "ToF device poll: <100..2000>", true, cmd_tofdevicepollms, "Usage: tofDevicePollMs <100..2000>" },
+  
+  // Auto-start
+  { "tofautostart", "Enable/disable ToF auto-start after boot [on|off]", false, cmd_tofautostart, "Usage: tofautostart [on|off]" },
 };
 
 const size_t tofCommandsCount = sizeof(tofCommands) / sizeof(tofCommands[0]);
@@ -671,64 +666,27 @@ void tofTask(void* parameter) {
   INFO_SENSORSF("[ToF] Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  Serial.println("[MODULAR] tofTask() running from Sensor_ToF_VL53L4CX.cpp");
+  INFO_SENSORSF("[MODULAR] tofTask() running from Sensor_ToF_VL53L4CX.cpp");
   unsigned long lastToFRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
     if (!tofEnabled) {
-      // Perform safe cleanup before task deletion - RACE CONDITION FIX:
-      // Take I2C mutex to ensure no other tasks are in active ToF I2C transactions
-      if (tofConnected || gVL53L4CX != nullptr) {
-        // Wait for all active ToF I2C transactions to complete before cleanup
-        if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-          // Now safe to delete - no other tasks can access ToF sensor
-          if (gVL53L4CX != nullptr) {
-            (void)gVL53L4CX->VL53L4CX_StopMeasurement();
-          }
-          tofConnected = false;
-          if (gVL53L4CX != nullptr) {
-            delete gVL53L4CX;
-            gVL53L4CX = nullptr;
-          }
-          
-          // Invalidate cache - no locking needed since we hold i2cMutex
-          gTofCache.tofDataValid = false;
-          gTofCache.tofTotalObjects = 0;
-          for (int j = 0; j < 4; j++) {
-            gTofCache.tofObjects[j].detected = false;
-            gTofCache.tofObjects[j].valid = false;
-          }
-          
-          xSemaphoreGive(i2cMutex);
-          
-          // Brief delay to ensure cleanup propagates
-          vTaskDelay(pdMS_TO_TICKS(50));
-        } else {
-          // Mutex timeout - force cleanup anyway to prevent deadlock
-          WARN_SENSORSF("[ToF] Mutex timeout during cleanup, forcing cleanup");
-          if (gVL53L4CX != nullptr) {
-            (void)gVL53L4CX->VL53L4CX_StopMeasurement();
-          }
-          tofConnected = false;
-          if (gVL53L4CX != nullptr) {
-            delete gVL53L4CX;
-            gVL53L4CX = nullptr;
-          }
-          gTofCache.tofDataValid = false;
-          gTofCache.tofTotalObjects = 0;
-          for (int j = 0; j < 4; j++) {
-            gTofCache.tofObjects[j].detected = false;
-            gTofCache.tofObjects[j].valid = false;
-          }
-          vTaskDelay(pdMS_TO_TICKS(100));
-        }
+      if (gVL53L4CX != nullptr) {
+        (void)gVL53L4CX->VL53L4CX_StopMeasurement();
+        delete gVL53L4CX;
+        gVL53L4CX = nullptr;
       }
-      
-      // ALWAYS delete task when disabled (consistent with thermal/IMU)
+      tofConnected = false;
+      gTofCache.tofDataValid = false;
+      gTofCache.tofTotalObjects = 0;
+      for (int j = 0; j < 4; j++) {
+        gTofCache.tofObjects[j].detected = false;
+        gTofCache.tofObjects[j].valid = false;
+      }
+      INFO_SENSORSF("[ToF] Task disabled - cleaning up and deleting");
       // NOTE: Do NOT clear tofTaskHandle here - let create function use eTaskGetState()
       // to detect stale handles. Clearing here creates a race condition window.
-      INFO_SENSORSF("[ToF] Task cleanup complete, deleting task");
       vTaskDelete(nullptr);
     }
     
@@ -741,6 +699,7 @@ void tofTask(void* parameter) {
     unsigned long nowLog = millis();
     if (nowLog - lastStackLog >= 5000UL) {
       lastStackLog = nowLog;
+      if (checkTaskStackSafety("tof", TOF_STACK_WORDS, &tofEnabled)) break;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (tofEnabled) {
         DEBUG_PERFORMANCEF("[STACK] tof_task watermark_now=%u min=%u words", (unsigned)gTofWatermarkNow, (unsigned)gTofWatermarkMin);
@@ -754,8 +713,8 @@ void tofTask(void* parameter) {
         uint32_t tofHz = (gSettings.i2cClockToFHz > 0) ? (uint32_t)gSettings.i2cClockToFHz : 200000;
         bool ok = false;
         
-        // Device-aware I2C transaction with automatic health and timeout tracking (1000ms max)
-        ok = i2cTaskWithStandardTimeout(I2C_ADDR_TOF, tofHz, [&]() -> bool {
+        // ToF busy-waits up to 250ms for data ready; 500ms timeout gives headroom without over-blocking
+        ok = i2cTaskWithTimeout(I2C_ADDR_TOF, tofHz, 500, [&]() -> bool {
           return readToFObjects();
         });
         
@@ -772,12 +731,21 @@ void tofTask(void* parameter) {
         
         // SAFE: Debug output AFTER transaction, with enabled check
         if (tofEnabled) {
-          DEBUG_FRAMEF("ToF readObjects: %s", ok ? "ok" : "fail");
+          DEBUG_TOF_FRAMEF("ToF readObjects: %s", ok ? "ok" : "fail");
         }
         
         // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW
-        if (ok && meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
+        // Check mesh mode (worker role) OR bond mode (worker role)
+        bool shouldStream = false;
+        if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
+          shouldStream = true;
+        }
+        if (gSettings.bondModeEnabled && gSettings.bondRole == 0) {
+          shouldStream = true;  // Bond mode worker
+        }
+        
+        if (ok && shouldStream) {
           // Build ToF JSON from cache
           char tofJson[1024];
           int jsonLen = buildToFDataJSON(tofJson, sizeof(tofJson));
@@ -824,6 +792,8 @@ extern const SettingsModule tofSettingsModule = {
 // ============================================================================
 // ToF OLED Mode (Display Function + Registration)
 // ============================================================================
+#if DISPLAY_TYPE > 0
 #include "i2csensor-vl53l4cx-oled.h"
+#endif
 
 #endif // ENABLE_TOF_SENSOR

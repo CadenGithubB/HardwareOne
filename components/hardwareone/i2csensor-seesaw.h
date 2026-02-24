@@ -55,7 +55,7 @@ extern const unsigned long kGamepadInitMinIntervalMs;
 
 // Gamepad command handlers
 const char* cmd_gamepad(const String& cmd);
-const char* cmd_gamepadstart(const String& cmd);
+const char* cmd_gamepadstart_queued(const String& cmd);
 const char* cmd_gamepadstop(const String& cmd);
 const char* cmd_gamepadpoll(const String& cmd);
 

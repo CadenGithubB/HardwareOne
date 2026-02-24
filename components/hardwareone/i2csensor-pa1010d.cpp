@@ -10,13 +10,12 @@
 #include "OLED_Display.h"
 #include "System_Command.h"
 #include "System_Debug.h"
-#include "System_I2C.h"
-#include "System_Settings.h"
-
-#if ENABLE_ESPNOW
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sensors.h"
-#endif
+#include "System_I2C.h"
+#include "System_MemoryMonitor.h"
+#include "System_Settings.h"
+#include "System_TaskUtils.h"
 
 // Task handle (owned by this module)
 TaskHandle_t gpsTaskHandle = nullptr;
@@ -24,29 +23,48 @@ TaskHandle_t gpsTaskHandle = nullptr;
 // GPS module object (owned by this module)
 Adafruit_GPS* gPA1010D = nullptr;
 
-// External dependencies
-extern bool ensureDebugBuffer();
-extern void sensorStatusBumpWith(const char* reason);
-extern volatile bool gSensorPollingPaused;
-extern SemaphoreHandle_t i2cMutex;
-extern void drainDebugRing();
-
-// Debug macros (use centralized versions from debug_system.h)
-extern void broadcastOutput(const char* msg);
-// BROADCAST_PRINTF now defined in debug_system.h with performance optimizations
+// External dependencies provided by System_I2C.h:
+// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing
 
 // GPS sensor state (definition - matching pattern of thermal/tof/imu/gamepad sensors)
 bool gpsEnabled = false;
 bool gpsConnected = false;
 unsigned long gpsLastStopTime = 0;
 
+// GPS cache for thread-safe data access (mutex created in setup())
+GPSCache gGPSCache = {
+  .mutex = nullptr,
+  .latitude = 0.0f,
+  .longitude = 0.0f,
+  .altitude = 0.0f,
+  .speed = 0.0f,
+  .angle = 0.0f,
+  .hasFix = false,
+  .fixQuality = 0,
+  .satellites = 0,
+  .year = 0,
+  .month = 0,
+  .day = 0,
+  .hour = 0,
+  .minute = 0,
+  .second = 0,
+  .dataValid = false,
+  .lastUpdate = 0
+};
+
 // Helper function to start GPS internal (called by queue processor)
-// Moved from HardwareOnev2.1.ino to consolidate GPS initialization logic
+// Moved from HardwareOne.ino to consolidate GPS initialization logic
 void startGPSInternal() {
   INFO_SENSORSF("Starting GPS initialization...");
   
   if (gpsEnabled) {
     DEBUG_SENSORSF("[GPS_INIT] GPS already started (enabled=1)");
+    return;
+  }
+
+  // Check memory before creating GPS task
+  if (!checkMemoryAvailable("gps", nullptr)) {
+    ERROR_SENSORSF("[GPS_INIT] Insufficient memory for GPS sensor");
     return;
   }
   
@@ -61,11 +79,25 @@ void startGPSInternal() {
     DEBUG_SENSORSF("[GPS_INIT] GPS object allocated at %p", gPA1010D);
     
     DEBUG_SENSORSF("[GPS_INIT] Calling gPA1010D->begin(0x10)...");
-    if (!gPA1010D->begin(0x10)) {  // PA1010D default address
+    
+    // Retry GPS initialization with delays (GPS needs time after power-on)
+    bool initSuccess = false;
+    for (int retry = 0; retry < 3; retry++) {
+      if (retry > 0) {
+        DEBUG_SENSORSF("[GPS_INIT] Retry %d/3 after 200ms delay...", retry);
+        delay(200);
+      }
+      if (gPA1010D->begin(0x10)) {
+        initSuccess = true;
+        break;
+      }
+    }
+    
+    if (!initSuccess) {
       delete gPA1010D;
       gPA1010D = nullptr;
       gpsConnected = false;
-      ERROR_SENSORSF("Failed to initialize GPS module at 0x10");
+      ERROR_SENSORSF("Failed to initialize GPS module at 0x10 after 3 attempts");
       return;
     }
     INFO_SENSORSF("GPS module initialized successfully at I2C address 0x10");
@@ -80,8 +112,6 @@ void startGPSInternal() {
     gpsConnected = true;
     DEBUG_SENSORSF("[GPS_INIT] gpsConnected set to true");
     
-    // Register GPS for I2C health tracking (address 0x10)
-    i2cRegisterDevice(0x10, "GPS");
   }
   
   gpsEnabled = true;
@@ -100,7 +130,7 @@ void startGPSInternal() {
     BaseType_t result = xTaskCreatePinnedToCore(
       gpsTask,
       "gps_task",
-      4096,  // Stack size
+      GPS_STACK_WORDS,  // Stack size in words; ~12KB (reduced from 16KB - peak usage ~5KB)
       nullptr,
       1,  // Priority
       &gpsTaskHandle,
@@ -135,27 +165,21 @@ void startGPSInternal() {
 const char* cmd_gpsstart(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  // Use sensor queue system
-  extern bool enqueueSensorStart(SensorType sensor);
-  extern bool isInQueue(SensorType sensor);
-  extern int getQueuePosition(SensorType sensor);
-  extern bool ensureDebugBuffer();
-  
   if (gpsEnabled) {
     return "[GPS] Sensor already running";
   }
   
-  if (isInQueue(SENSOR_GPS)) {
+  if (isInQueue(I2C_DEVICE_GPS)) {
     if (!ensureDebugBuffer()) return "[GPS] Already queued";
-    int pos = getQueuePosition(SENSOR_GPS);
+    int pos = getQueuePosition(I2C_DEVICE_GPS);
     snprintf(getDebugBuffer(), 1024, "[GPS] Already queued (position %d)", pos);
     return getDebugBuffer();
   }
   
-  if (enqueueSensorStart(SENSOR_GPS)) {
+  if (enqueueDeviceStart(I2C_DEVICE_GPS)) {
     sensorStatusBumpWith("opengps@enqueue");
     if (!ensureDebugBuffer()) return "[GPS] Sensor queued for open";
-    int pos = getQueuePosition(SENSOR_GPS);
+    int pos = getQueuePosition(I2C_DEVICE_GPS);
     snprintf(getDebugBuffer(), 1024, "[GPS] Sensor queued for open (position %d)", pos);
     return getDebugBuffer();
   }
@@ -168,13 +192,7 @@ const char* cmd_gpsstop(const String& cmd) {
   
   DEBUG_SENSORSF("[GPS_STOP] GPS stop command called (current enabled=%d)", gpsEnabled ? 1 : 0);
   
-  // Disable flag - task will see this and clean up itself
-  gpsEnabled = false;
-  gpsLastStopTime = millis();
-  
-  // Note: Status bump removed - can cause xQueueGenericSend crash
-  // The GPS task will handle cleanup and status updates asynchronously
-  
+  handleDeviceStopped(I2C_DEVICE_GPS);
   return "[GPS] Close requested; cleanup will complete asynchronously";
 }
 
@@ -193,7 +211,6 @@ const char* cmd_gps(const String& cmd) {
   }
   
   // Use BROADCAST_PRINTF for each line (zero String churn)
-  extern void broadcastOutput(const char* msg);
   broadcastOutput("GPS Data:");
   broadcastOutput("=========");
   
@@ -259,7 +276,7 @@ void gpsTask(void* parameter) {
   INFO_SENSORSF("[GPS] Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  Serial.println("[MODULAR] gpsTask() running from Sensor_GPS_PA1010D.cpp");
+  INFO_SENSORSF("[MODULAR] gpsTask() running from Sensor_GPS_PA1010D.cpp");
   unsigned long lastStackLog = 0;
   unsigned long lastStatusLog = 0;
   unsigned long lastGPSRead = 0;
@@ -268,43 +285,22 @@ void gpsTask(void* parameter) {
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
     if (!gpsEnabled) {
-      // Perform safe cleanup before task deletion - RACE CONDITION FIX:
-      // Take I2C mutex to ensure no other tasks are in active GPS I2C transactions
-      if (gpsConnected || gPA1010D != nullptr) {
-        // Wait for all active GPS I2C transactions to complete before cleanup
-        if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-          // Now safe to delete - no other tasks can access GPS sensor
-          gpsConnected = false;
-          if (gPA1010D != nullptr) {
-            delete gPA1010D;
-            gPA1010D = nullptr;
-          }
-          
-          xSemaphoreGive(i2cMutex);
-          
-          // Brief delay to ensure cleanup propagates
-          vTaskDelay(pdMS_TO_TICKS(50));
-        } else {
-          // Mutex timeout - force cleanup anyway to prevent deadlock
-          gpsConnected = false;
-          if (gPA1010D != nullptr) {
-            delete gPA1010D;
-            gPA1010D = nullptr;
-          }
-          vTaskDelay(pdMS_TO_TICKS(100));
-        }
+      gpsConnected = false;
+      if (gPA1010D != nullptr) {
+        delete gPA1010D;
+        gPA1010D = nullptr;
       }
-      
-      // ALWAYS delete task when disabled (consistent with thermal/IMU/ToF/APDS)
+      INFO_SENSORSF("[GPS] Task disabled - cleaning up and deleting");
       // NOTE: Do NOT clear gpsTaskHandle here - let create function use eTaskGetState()
       // to detect stale handles. Clearing here creates a race condition window.
       vTaskDelete(nullptr);
     }
 
-    // Stack watermark tracking
+    // Stack watermark tracking + safety bailout
     unsigned long nowMs = millis();
-    if ((nowMs - lastStackLog) >= 10000) {
+    if ((nowMs - lastStackLog) >= 30000) {
       lastStackLog = nowMs;
+      if (checkTaskStackSafety("gps", GPS_STACK_WORDS, &gpsEnabled)) break;
       if (gpsEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         DEBUG_PERFORMANCEF("[STACK] gps_task watermark=%u words", (unsigned)watermark);
@@ -321,7 +317,6 @@ void gpsTask(void* parameter) {
         DEBUG_SENSORSF("[GPS_TASK] Started active polling - reading NMEA data every %lums", gpsPollMs);
         wasPolling = true;
         lastStatusLog = nowMs;
-        sensorStatusBumpWith("GPS polling started");
       }
       
       if ((nowMs - lastStatusLog) >= 30000) {
@@ -331,8 +326,8 @@ void gpsTask(void* parameter) {
       }
       
       if ((nowMs - lastGPSRead) >= gpsPollMs) {
-        // Use task timeout wrapper to catch GPS I2C performance issues
-        auto result = i2cTaskWithStandardTimeout(I2C_ADDR_GPS, 100000, [&]() -> bool {
+        // GPS reads ~10ms at 100kHz; fail fast and retry next poll rather than blocking 1000ms
+        auto result = i2cTaskWithTimeout(I2C_ADDR_GPS, 100000, 100, [&]() -> bool {
           if ((nowMs - lastGPSRead) >= gpsPollMs) {
             gPA1010D->read();
             if (gPA1010D->newNMEAreceived()) {
@@ -340,9 +335,39 @@ void gpsTask(void* parameter) {
             }
             lastGPSRead = nowMs;
             
+            // Update GPS cache for thread-safe access from web/OLED
+            if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+              gGPSCache.latitude = gPA1010D->latitudeDegrees;
+              gGPSCache.longitude = gPA1010D->longitudeDegrees;
+              gGPSCache.altitude = gPA1010D->altitude;
+              gGPSCache.speed = gPA1010D->speed;
+              gGPSCache.angle = gPA1010D->angle;
+              gGPSCache.hasFix = gPA1010D->fix;
+              gGPSCache.fixQuality = gPA1010D->fixquality;
+              gGPSCache.satellites = gPA1010D->satellites;
+              gGPSCache.year = 2000 + gPA1010D->year;
+              gGPSCache.month = gPA1010D->month;
+              gGPSCache.day = gPA1010D->day;
+              gGPSCache.hour = gPA1010D->hour;
+              gGPSCache.minute = gPA1010D->minute;
+              gGPSCache.second = gPA1010D->seconds;
+              gGPSCache.dataValid = true;
+              gGPSCache.lastUpdate = nowMs;
+              xSemaphoreGive(gGPSCache.mutex);
+            }
+            
             // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW
-            if (gPA1010D->fix && meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
+            // Check mesh mode (worker role) OR bond mode (worker role)
+            bool shouldStream = false;
+            if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
+              shouldStream = true;
+            }
+            if (gSettings.bondModeEnabled && gSettings.bondRole == 0) {
+              shouldStream = true;  // Bond mode worker
+            }
+            
+            if (gPA1010D->fix && shouldStream) {
               char gpsJson[256];
               int jsonLen = snprintf(gpsJson, sizeof(gpsJson),
                                      "{\"val\":1,\"fix\":%d,\"quality\":%d,\"sats\":%d,\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.2f,\"speed\":%.2f}",
@@ -360,6 +385,11 @@ void gpsTask(void* parameter) {
         
         lastGPSRead = nowMs;
         
+        // Mark OLED dirty if GPS page is active (enables real-time display updates)
+        if (result && currentOLEDMode == OLED_GPS_DATA) {
+          oledMarkDirty();
+        }
+        
         // Auto-disable if too many consecutive failures
         if (!result) {
           if (i2cShouldAutoDisable(I2C_ADDR_GPS, 5)) {
@@ -373,7 +403,9 @@ void gpsTask(void* parameter) {
       vTaskDelay(pdMS_TO_TICKS(10));
       drainDebugRing();
     } else {
-      if (wasPolling) {
+      if (wasPolling && (!gpsEnabled || !gpsConnected || gPA1010D == nullptr)) {
+        // Only log stop when sensor is actually disabled/disconnected,
+        // not for brief gSensorPollingPaused toggles from web requests
         DEBUG_SENSORSF("[GPS_TASK] Stopped active polling - entering idle mode");
         wasPolling = false;
       }
@@ -381,6 +413,43 @@ void gpsTask(void* parameter) {
       drainDebugRing();
     }
   }
+}
+
+// ============================================================================
+// GPS Accessor Functions (for MQTT and other modules)
+// ============================================================================
+
+bool hasGPSFix() {
+  return gPA1010D && gPA1010D->fix;
+}
+
+float getGPSLatitude() {
+  if (!gPA1010D || !gPA1010D->fix) return 0.0f;
+  float lat = gPA1010D->latitudeDegrees;
+  if (gPA1010D->lat == 'S') lat = -lat;
+  return lat;
+}
+
+float getGPSLongitude() {
+  if (!gPA1010D || !gPA1010D->fix) return 0.0f;
+  float lon = gPA1010D->longitudeDegrees;
+  if (gPA1010D->lon == 'W') lon = -lon;
+  return lon;
+}
+
+float getGPSAltitude() {
+  if (!gPA1010D || !gPA1010D->fix) return 0.0f;
+  return gPA1010D->altitude;
+}
+
+float getGPSSpeed() {
+  if (!gPA1010D || !gPA1010D->fix) return 0.0f;
+  return gPA1010D->speed * 1.852f;  // Convert knots to km/h
+}
+
+int getGPSSatellites() {
+  if (!gPA1010D) return 0;
+  return (int)gPA1010D->satellites;
 }
 
 // ============================================================================
@@ -412,11 +481,31 @@ extern const SettingsModule gpsSettingsModule = {
 // GPS Command Registry
 // ============================================================================
 
+const char* cmd_gpsautostart(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = args; arg.trim();
+  if (arg.length() == 0) {
+    return gSettings.gpsAutoStart ? "[GPS] Auto-start: enabled" : "[GPS] Auto-start: disabled";
+  }
+  arg.toLowerCase();
+  if (arg == "on" || arg == "true" || arg == "1") {
+    setSetting(gSettings.gpsAutoStart, true);
+    return "[GPS] Auto-start enabled";
+  } else if (arg == "off" || arg == "false" || arg == "0") {
+    setSetting(gSettings.gpsAutoStart, false);
+    return "[GPS] Auto-start disabled";
+  }
+  return "Usage: gpsautostart [on|off]";
+}
+
 const CommandEntry gpsCommands[] = {
   // 3-level voice: "sensor" -> "GPS" -> "open/close"
   { "opengps", "Start PA1010D GPS module.", false, cmd_gpsstart, nullptr, "sensor", "GPS", "open" },
   { "closegps", "Stop PA1010D GPS module.", false, cmd_gpsstop, nullptr, "sensor", "GPS", "close" },
-  { "gps", "Read GPS location and time data.", false, cmd_gps },
+  { "gpsread", "Read GPS location and time data.", false, cmd_gps },
+  
+  // Auto-start
+  { "gpsautostart", "Enable/disable GPS auto-start after boot [on|off]", false, cmd_gpsautostart, "Usage: gpsautostart [on|off]" },
 };
 
 const size_t gpsCommandsCount = sizeof(gpsCommands) / sizeof(gpsCommands[0]);
@@ -427,6 +516,8 @@ static CommandModuleRegistrar _gps_cmd_registrar(gpsCommands, gpsCommandsCount, 
 // ============================================================================
 // GPS OLED Mode (Display Function + Registration)
 // ============================================================================
+#if DISPLAY_TYPE > 0
 #include "i2csensor-pa1010d-oled.h"
+#endif
 
 #endif // ENABLE_GPS_SENSOR

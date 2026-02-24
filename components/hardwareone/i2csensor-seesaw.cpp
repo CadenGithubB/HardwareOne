@@ -1,6 +1,7 @@
 #include "i2csensor-seesaw.h"
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
+#include "System_MemUtil.h"
 #include "System_Utils.h"
 
 #if ENABLE_GAMEPAD_SENSOR
@@ -14,14 +15,11 @@
 #include "OLED_Display.h"
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_ESPNow.h"
+#include "System_ESPNow_Sensors.h"
 #include "System_I2C.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
-
-#if ENABLE_ESPNOW
-#include "System_ESPNow.h"
-#include "System_ESPNow_Sensors.h"
-#endif
 
 // Task handle (owned by this module)
 TaskHandle_t gamepadTaskHandle = nullptr;
@@ -32,10 +30,7 @@ Adafruit_seesaw gGamepadSeesaw(&Wire1);
 // Debug system provides DEBUG_SENSORSF macro and gDebugFlags via debug_system.h
 
 // External dependencies for task
-extern volatile bool gSensorPollingPaused;
-extern SemaphoreHandle_t i2cMutex;
-extern void drainDebugRing();
-extern void sensorStatusBumpWith(const char* reason);
+// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing provided by System_I2C.h
 
 // ============================================================================
 // Gamepad/Control Cache (owned by this module)
@@ -60,7 +55,7 @@ volatile UBaseType_t gGamepadWatermarkNow = (UBaseType_t)0;
    size_t freeHeap = ESP.getFreeHeap();
    size_t minFree = ESP.getMinFreeHeap();
    size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-   Serial.printf("[GAMEPAD_MEM] %s heap_free=%u heap_min=%u largest=%u\n",
+   DEBUG_MEMORYF("[GAMEPAD_MEM] %s heap_free=%u heap_min=%u largest=%u",
                  tag ? tag : "?",
                  (unsigned)freeHeap,
                  (unsigned)minFree,
@@ -82,55 +77,14 @@ const char* cmd_gamepad(const String& cmd) {
   return "[Gamepad] Data read complete";
 }
 
-const char* cmd_gamepadstart(const String& cmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-
-  // Use sensor queue system (consistent with other sensors)
-  extern bool enqueueSensorStart(SensorType sensor);
-  extern bool isInQueue(SensorType sensor);
-  extern int getQueuePosition(SensorType sensor);
-  extern bool ensureDebugBuffer();
-
-  if (gamepadEnabled) {
-    return "[Gamepad] Sensor already running";
-  }
-
-  if (isInQueue(SENSOR_GAMEPAD)) {
-    if (!ensureDebugBuffer()) return "[Gamepad] Already queued";
-    int pos = getQueuePosition(SENSOR_GAMEPAD);
-    snprintf(getDebugBuffer(), 1024, "[Gamepad] Already queued (position %d)", pos);
-    return getDebugBuffer();
-  }
-
-  if (enqueueSensorStart(SENSOR_GAMEPAD)) {
-    sensorStatusBumpWith("opengamepad@enqueue");
-    if (!ensureDebugBuffer()) return "[Gamepad] Sensor queued for open";
-    int pos = getQueuePosition(SENSOR_GAMEPAD);
-    snprintf(getDebugBuffer(), 1024, "[Gamepad] Sensor queued for open (position %d)", pos);
-    return getDebugBuffer();
-  }
-
-  return "[Gamepad] Error: Failed to enqueue open (queue full)";
-}
+// Centralized start handler (defined in System_I2C.cpp)
+extern const char* cmd_gamepadstart_queued(const String& cmd);
 
 const char* cmd_gamepadstop(const String& cmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  // Disable flag - task will see this and clean up itself
-  gamepadEnabled = false;
-  gamepadLastStopTime = millis();
-  Serial.printf("[GAMEPAD] cmd_gamepadstop: Set gamepadEnabled=false\n");
-  
-  // Broadcast sensor status to ESP-NOW master
-#if ENABLE_ESPNOW
-  #include "System_ESPNow_Sensors.h"
-  extern bool meshEnabled();
-  extern Settings gSettings;
-  if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
-    broadcastSensorStatus(REMOTE_SENSOR_GAMEPAD, false);
-  }
-#endif
-  
+  INFO_SENSORSF("[GAMEPAD] cmd_gamepadstop: Stop requested");
+  handleDeviceStopped(I2C_DEVICE_GAMEPAD);
   return "[Gamepad] Stop requested; cleanup will complete asynchronously";
 }
 
@@ -147,12 +101,10 @@ const char* cmd_gamepadautostart(const String& args) {
   arg.toLowerCase();
   
   if (arg == "on" || arg == "true" || arg == "1") {
-    gSettings.gamepadAutoStart = true;
-    writeSettingsJson();
+    setSetting(gSettings.gamepadAutoStart, true);
     return "[Gamepad] Auto-start enabled";
   } else if (arg == "off" || arg == "false" || arg == "0") {
-    gSettings.gamepadAutoStart = false;
-    writeSettingsJson();
+    setSetting(gSettings.gamepadAutoStart, false);
     return "[Gamepad] Auto-start disabled";
   } else {
     return "Usage: gamepadautostart [on|off]";
@@ -194,7 +146,7 @@ const char* startGamepadInternal() {
   // if it runs before gamepadEnabled is set.
   bool prev = gamepadEnabled;
   gamepadEnabled = true;
-  Serial.printf("[GAMEPAD] startGamepadInternal: Set gamepadEnabled=true (was %d), gamepadConnected=%d\n", prev, gamepadConnected);
+  DEBUG_SENSORSF("[GAMEPAD] startGamepadInternal: Set gamepadEnabled=true (was %d), gamepadConnected=%d", prev, gamepadConnected);
   if (gamepadEnabled != prev) sensorStatusBumpWith("opengamepad@enabled");
   
   // Broadcast sensor status to ESP-NOW master
@@ -219,11 +171,11 @@ const char* startGamepadInternal() {
 bool initGamepad() {
   // If we've already got a connection, consider it initialized
   if (gamepadConnected) {
-    Serial.println("[GAMEPAD] initGamepad: already connected, returning true");
+    DEBUG_SENSORSF("[GAMEPAD] initGamepad: already connected, returning true");
     return true;
   }
 
-  Serial.println("[GAMEPAD] initGamepad: starting initialization...");
+  INFO_SENSORSF("[GAMEPAD] initGamepad: starting initialization...");
 
   // Use device-aware transaction wrapper for safe mutex + clock management + health tracking
   bool initSuccess = i2cDeviceTransaction(I2C_ADDR_GAMEPAD, 100000, 3000, [&]() -> bool {
@@ -231,26 +183,26 @@ bool initGamepad() {
 
     // Attempt to begin Seesaw on 0x50 using Wire1 bus
     if (!gGamepadSeesaw.begin(I2C_ADDR_GAMEPAD)) {
-      Serial.println("[GAMEPAD] ERROR: Seesaw (Gamepad) not found at 0x50 on Wire1");
+      ERROR_SENSORSF("[GAMEPAD] Seesaw (Gamepad) not found at 0x50 on Wire1");
       return false;
     }
 
     // Soft reset to ensure clean state - fixes stuck button reads
-    Serial.println("[GAMEPAD] Performing soft reset...");
+    DEBUG_SENSORSF("[GAMEPAD] Performing soft reset...");
     gGamepadSeesaw.SWReset();
     delay(10);  // Allow reset to complete
     
     // Re-begin after reset
     if (!gGamepadSeesaw.begin(I2C_ADDR_GAMEPAD)) {
-      Serial.println("[GAMEPAD] ERROR: Seesaw not responding after soft reset");
+      ERROR_SENSORSF("[GAMEPAD] Seesaw not responding after soft reset");
       return false;
     }
 
     // Verify product ID (upper 16 bits of getVersion()) should be 5743
     uint32_t version = ((gGamepadSeesaw.getVersion() >> 16) & 0xFFFF);
-    Serial.printf("[GAMEPAD] Seesaw version: %lu (expected 5743)\n", (unsigned long)version);
+    INFO_SENSORSF("[GAMEPAD] Seesaw version: %lu (expected 5743)", (unsigned long)version);
     if (version != 5743) {
-      Serial.printf("[GAMEPAD] WARNING: Seesaw product mismatch: got %lu, expected 5743 (Mini I2C Gamepad)\n", (unsigned long)version);
+      WARN_SENSORSF("[GAMEPAD] Seesaw product mismatch: got %lu, expected 5743 (Mini I2C Gamepad)", (unsigned long)version);
       // Not fatal: continue, as other seesaw variants may still be usable
     }
 
@@ -259,21 +211,20 @@ bool initGamepad() {
     gGamepadSeesaw.pinModeBulk(GAMEPAD_BUTTON_MASK, INPUT_PULLUP);
     gGamepadSeesaw.setGPIOInterrupts(GAMEPAD_BUTTON_MASK, 1);
 
-    Serial.println("[GAMEPAD] Seesaw hardware init complete inside lambda");
+    DEBUG_SENSORSF("[GAMEPAD] Seesaw hardware init complete inside lambda");
     return true;
   });
 
-  Serial.printf("[GAMEPAD] i2cDeviceTransaction returned: %d\n", initSuccess);
+  DEBUG_SENSORSF("[GAMEPAD] i2cDeviceTransaction returned: %d", initSuccess);
 
   // Set gamepadConnected OUTSIDE the lambda (like IMU pattern)
   if (initSuccess) {
     gamepadConnected = true;
-    i2cRegisterDevice(I2C_ADDR_GAMEPAD, "Gamepad");
-    Serial.printf("[GAMEPAD] SUCCESS: gamepadConnected=%d gamepadEnabled=%d &enabled=%p &connected=%p &cache=%p\n", 
+    DEBUG_SENSORSF("[GAMEPAD] SUCCESS: gamepadConnected=%d gamepadEnabled=%d &enabled=%p &connected=%p &cache=%p", 
                   gamepadConnected, gamepadEnabled, (void*)&gamepadEnabled, (void*)&gamepadConnected, (void*)&gControlCache);
     broadcastOutput("Gamepad (Seesaw) initialized");
   } else {
-    Serial.println("[GAMEPAD] FAILED: initGamepad returning false");
+    ERROR_SENSORSF("[GAMEPAD] FAILED: initGamepad returning false");
   }
 
   return initSuccess;
@@ -333,7 +284,7 @@ bool initGamepadConnection() {
         return true;
       });
       if (!reinit) {
-        Serial.println("[GAMEPAD] Re-init after soft reset failed");
+        WARN_SENSORSF("[GAMEPAD] Re-init after soft reset failed");
         continue;  // Try next attempt
       }
 
@@ -346,10 +297,8 @@ bool initGamepadConnection() {
 
       gamepadEnabled = true;
       gamepadConnected = true;
-      Serial.printf("[GAMEPAD_DEBUG] initGamepadConnection: &enabled=%p &connected=%p &gControlCache=%p\n", (void*)&gamepadEnabled, (void*)&gamepadConnected, (void*)&gControlCache);
+      DEBUG_SENSORSF("[GAMEPAD_DEBUG] initGamepadConnection: &enabled=%p &connected=%p &gControlCache=%p", (void*)&gamepadEnabled, (void*)&gamepadConnected, (void*)&gControlCache);
       
-      // Register gamepad for I2C health tracking (may already be registered, that's OK)
-      i2cRegisterDevice(I2C_ADDR_GAMEPAD, "Gamepad");
       INFO_SENSORSF("Gamepad connected on attempt %d", attempt);
       snprintf(msg, sizeof(msg), "Gamepad: re-init success (attempt %d)", attempt);
       broadcastOutput(msg);
@@ -400,7 +349,7 @@ static bool isGamepadConnected() {
 
 extern const SettingsModule gamepadSettingsModule = {
   "gamepad",
-  nullptr,
+  "gamepad",
   gamepadSettingEntries,
   sizeof(gamepadSettingEntries) / sizeof(gamepadSettingEntries[0]),
   isGamepadConnected,
@@ -414,9 +363,9 @@ extern const SettingsModule gamepadSettingsModule = {
 // ============================================================================
 
 const CommandEntry gamepadCommands[] = {
-  { "opengamepad", "Queue start of Gamepad task (seesaw)", false, cmd_gamepadstart },
-  { "closegamepad", "Stop Gamepad task (seesaw)", false, cmd_gamepadstop },
-  { "gamepad", "Read Seesaw gamepad state (x/y/buttons).", false, cmd_gamepad },
+  { "opengamepad", "Start Seesaw gamepad sensor.", false, cmd_gamepadstart_queued, nullptr, "sensor", "gamepad", "open" },
+  { "closegamepad", "Stop Seesaw gamepad sensor.", false, cmd_gamepadstop, nullptr, "sensor", "gamepad", "close" },
+  { "gamepadread", "Read Seesaw gamepad state (x/y/buttons).", false, cmd_gamepad },
   { "gamepadautostart", "Enable/disable gamepad auto-start after boot [on|off]", false, cmd_gamepadautostart, "Usage: gamepadautostart [on|off]" },
 };
 
@@ -448,8 +397,8 @@ void gamepadTask(void* parameter) {
   INFO_SENSORSF("[Gamepad] Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  Serial.println("[MODULAR] gamepadTask() running from Sensor_Gamepad_Seesaw.cpp");
-  Serial.printf("[GAMEPAD_TASK] Initial state: enabled=%d connected=%d\n", gamepadEnabled, gamepadConnected);
+  INFO_SENSORSF("[MODULAR] gamepadTask() running from Sensor_Gamepad_Seesaw.cpp");
+  DEBUG_SENSORSF("[GAMEPAD_TASK] Initial state: enabled=%d connected=%d", gamepadEnabled, gamepadConnected);
   gamepadLogHeap("task.entry");
   unsigned long lastGamepadRead = 0;
   unsigned long lastStackLog = 0;
@@ -464,40 +413,19 @@ void gamepadTask(void* parameter) {
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
     if (!gamepadEnabled) {
-      // Perform safe cleanup before task deletion - RACE CONDITION FIX:
-      // Take I2C mutex to ensure no other tasks are in active gamepad I2C transactions
-      if (gamepadConnected) {
-        // Wait for all active gamepad I2C transactions to complete before cleanup
-        if (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-          // Now safe to cleanup - no other tasks can access gamepad sensor
-          gamepadConnected = false;
-          
-          // Invalidate cache - no locking needed since we hold i2cMutex
-          gControlCache.gamepadDataValid = false;
-          
-          xSemaphoreGive(i2cMutex);
-          
-          // Brief delay to ensure cleanup propagates
-          vTaskDelay(pdMS_TO_TICKS(50));
-        } else {
-          // Mutex timeout - force cleanup anyway to prevent deadlock
-          gamepadConnected = false;
-          gControlCache.gamepadDataValid = false;
-          vTaskDelay(pdMS_TO_TICKS(100));
-        }
-      }
-      
-      // ALWAYS delete task when disabled (consistent with thermal/IMU/ToF/APDS/GPS)
+      gamepadConnected = false;
+      gControlCache.gamepadDataValid = false;
+      INFO_SENSORSF("[GAMEPAD_TASK] Task disabled - cleaning up and deleting");
       // NOTE: Do NOT clear gamepadTaskHandle here - let create function use eTaskGetState()
       // to detect stale handles. Clearing here creates a race condition window.
-      Serial.println("[GAMEPAD_TASK] Task disabled - cleaning up and deleting");
       vTaskDelete(nullptr);
     }
 
-    // Stack watermark tracking
+    // Stack watermark tracking + safety bailout
     unsigned long nowMs = millis();
-    if ((nowMs - lastStackLog) >= 10000) {
+    if ((nowMs - lastStackLog) >= 30000) {
       lastStackLog = nowMs;
+      if (checkTaskStackSafety("gamepad", GAMEPAD_STACK_WORDS, &gamepadEnabled)) break;
       if (isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         gGamepadWatermarkNow = watermark;
@@ -511,10 +439,10 @@ void gamepadTask(void* parameter) {
       }
     }
 
-    // Periodic state logging (every 5 seconds)
-    if ((nowMs - lastStateLog) >= 5000) {
+    // Periodic state logging (every 60 seconds)
+    if ((nowMs - lastStateLog) >= 60000) {
       lastStateLog = nowMs;
-      Serial.printf("[GAMEPAD_TASK] State: enabled=%d connected=%d paused=%d dataValid=%d\n", 
+      DEBUG_SENSORSF("[GAMEPAD_TASK] State: enabled=%d connected=%d paused=%d dataValid=%d", 
                     gamepadEnabled, gamepadConnected, gSensorPollingPaused, gControlCache.gamepadDataValid);
     }
 
@@ -525,9 +453,9 @@ void gamepadTask(void* parameter) {
         uint32_t buttons = 0;
         int rawX = 0, rawY = 0;
 
-        // Use shorter timeout to avoid blocking OLED updates (which have 50ms timeout)
-        // Standard timeout of 1000ms was causing OLED blackouts during slow I2C operations
-        auto result = i2cTaskWithTimeout(I2C_ADDR_GAMEPAD, 100000, 150, [&]() -> bool {
+        // Seesaw ATSAMD09 supports 400kHz I2C - faster transactions reduce bus hold time.
+        // 200ms timeout allows waiting out an OLED display push (~20ms at 400kHz).
+        auto result = i2cTaskWithTimeout(I2C_ADDR_GAMEPAD, 400000, 200, [&]() -> bool {
           // Exceptions are disabled (-fno-exceptions), so rely on return value only.
           // Read ONLY button pins, not all 32 GPIO pins - prevents garbage from unconfigured pins
           buttons = gGamepadSeesaw.digitalReadBulk(GAMEPAD_BUTTON_MASK);
@@ -547,6 +475,11 @@ void gamepadTask(void* parameter) {
           // Bits outside button mask are set - this is garbage data
           dataValid = false;
         }
+        // Reject all-zeros: I2C bus failure (SDA stuck low) reads 0 for all bits,
+        // which with active-low buttons means "all pressed" - impossible in reality
+        if (readSuccess && (buttons & GAMEPAD_BUTTON_MASK) == 0) {
+          dataValid = false;
+        }
 
         if (readSuccess && dataValid) {
           // Note: I2CDevice::recordSuccess() called automatically by transaction
@@ -558,28 +491,50 @@ void gamepadTask(void* parameter) {
           static int lastFiltY = -1;
           static unsigned long lastESPNowSend = 0;
           
+          // Button debounce: require 2 consecutive identical reads before accepting a change.
+          // This eliminates ghost presses from single I2C bit flips (~58ms added latency).
+          static uint32_t pendingButtons = 0xFFFFFFFF;
+          static int pendingCount = 0;
+          if (buttons != lastButtons) {
+            // New value differs from accepted state - check debounce
+            if (buttons == pendingButtons) {
+              pendingCount++;
+            } else {
+              pendingButtons = buttons;
+              pendingCount = 1;
+            }
+            if (pendingCount < 2) {
+              // Not yet stable - keep old button state, still update joystick below
+              buttons = lastButtons;
+            }
+          } else {
+            // Matches accepted state - reset pending
+            pendingButtons = buttons;
+            pendingCount = 0;
+          }
+          
           // Debug: Log EVERY button state change immediately
           if (buttons != lastButtons) {
             uint32_t changed = buttons ^ lastButtons;
             uint32_t pressed = ~buttons & changed;   // Bits that went from 1 to 0 (pressed)
             uint32_t released = buttons & changed;   // Bits that went from 0 to 1 (released)
             
-            Serial.printf("[GAMEPAD_PRESS] buttons=0x%08lX changed=0x%08lX pressed=0x%08lX released=0x%08lX\n",
+            DEBUG_GAMEPAD_DATAF("[GAMEPAD_PRESS] buttons=0x%08lX changed=0x%08lX pressed=0x%08lX released=0x%08lX",
                           (unsigned long)buttons, (unsigned long)changed, 
                           (unsigned long)pressed, (unsigned long)released);
             
             // Log individual button names for clarity
-            if (pressed & GAMEPAD_BUTTON_A) Serial.println("[GAMEPAD_PRESS] A pressed");
-            if (pressed & GAMEPAD_BUTTON_B) Serial.println("[GAMEPAD_PRESS] B pressed");
-            if (pressed & GAMEPAD_BUTTON_X) Serial.println("[GAMEPAD_PRESS] X pressed");
-            if (pressed & GAMEPAD_BUTTON_Y) Serial.println("[GAMEPAD_PRESS] Y pressed");
-            if (pressed & GAMEPAD_BUTTON_START) Serial.println("[GAMEPAD_PRESS] START pressed");
+            if (pressed & GAMEPAD_BUTTON_A) DEBUG_GAMEPAD_DATAF("[GAMEPAD_PRESS] A pressed");
+            if (pressed & GAMEPAD_BUTTON_B) DEBUG_GAMEPAD_DATAF("[GAMEPAD_PRESS] B pressed");
+            if (pressed & GAMEPAD_BUTTON_X) DEBUG_GAMEPAD_DATAF("[GAMEPAD_PRESS] X pressed");
+            if (pressed & GAMEPAD_BUTTON_Y) DEBUG_GAMEPAD_DATAF("[GAMEPAD_PRESS] Y pressed");
+            if (pressed & GAMEPAD_BUTTON_START) DEBUG_GAMEPAD_DATAF("[GAMEPAD_PRESS] START pressed");
             
-            if (released & GAMEPAD_BUTTON_A) Serial.println("[GAMEPAD_PRESS] A released");
-            if (released & GAMEPAD_BUTTON_B) Serial.println("[GAMEPAD_PRESS] B released");
-            if (released & GAMEPAD_BUTTON_X) Serial.println("[GAMEPAD_PRESS] X released");
-            if (released & GAMEPAD_BUTTON_Y) Serial.println("[GAMEPAD_PRESS] Y released");
-            if (released & GAMEPAD_BUTTON_START) Serial.println("[GAMEPAD_PRESS] START released");
+            if (released & GAMEPAD_BUTTON_A) DEBUG_GAMEPAD_DATAF("[GAMEPAD_PRESS] A released");
+            if (released & GAMEPAD_BUTTON_B) DEBUG_GAMEPAD_DATAF("[GAMEPAD_PRESS] B released");
+            if (released & GAMEPAD_BUTTON_X) DEBUG_GAMEPAD_DATAF("[GAMEPAD_PRESS] X released");
+            if (released & GAMEPAD_BUTTON_Y) DEBUG_GAMEPAD_DATAF("[GAMEPAD_PRESS] Y released");
+            if (released & GAMEPAD_BUTTON_START) DEBUG_GAMEPAD_DATAF("[GAMEPAD_PRESS] START released");
             
             lastButtons = buttons;
           }
@@ -593,12 +548,17 @@ void gamepadTask(void* parameter) {
           }
 
           if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            gControlCache.gamepadButtons = buttons;
+            // Only increment seq when data actually changes to avoid unnecessary OLED re-renders
+            // Use threshold of 2 for joystick to ignore ADC noise/rounding jitter
+            bool changed = (gControlCache.gamepadButtons != buttons ||
+                            abs(gControlCache.gamepadX - filtX) > 1 ||
+                            abs(gControlCache.gamepadY - filtY) > 1);
+            gControlCache.gamepadButtons = buttons;  // Only changes after debounce
             gControlCache.gamepadX = filtX;
             gControlCache.gamepadY = filtY;
             gControlCache.gamepadLastUpdate = nowMs;
             gControlCache.gamepadDataValid = true;
-            gControlCache.gamepadSeq++;
+            if (changed) gControlCache.gamepadSeq++;
             xSemaphoreGive(gControlCache.mutex);
           }
           
@@ -627,24 +587,16 @@ void gamepadTask(void* parameter) {
                 size_t heapBefore = ESP.getFreeHeap();
                 size_t largestBefore = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
                 {
-                  // Bypass sendSensorDataUpdate's rate limiting by calling mesh directly
-                  extern void meshSendEnvelopeToPeers(const String& payload);
-                  JsonDocument doc;
-                  doc["type"] = MSG_TYPE_SENSOR_DATA;
-                  doc["sensor"] = "gamepad";
-                  JsonDocument dataDoc;
-                  deserializeJson(dataDoc, gamepadJson);
-                  doc["data"] = dataDoc.as<JsonObject>();
-                  String message;
-                  serializeJson(doc, message);
-                  meshSendEnvelopeToPeers(message);
+                  // Send gamepad data via V3 binary protocol
+                  extern bool v3_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
+                  v3_broadcast_sensor_data(REMOTE_SENSOR_GAMEPAD, gamepadJson, jsonLen);
                 }
                 if (isDebugFlagSet(DEBUG_MEMORY)) {
                   size_t heapAfter = ESP.getFreeHeap();
                   size_t largestAfter = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
                   long heapDelta = (long)heapBefore - (long)heapAfter;
                   long largestDelta = (long)largestBefore - (long)largestAfter;
-                  Serial.printf("[GAMEPAD_MEM] espnow_send heap_delta=%ld largest_delta=%ld\n", heapDelta, largestDelta);
+                  DEBUG_MEMORYF("[GAMEPAD_MEM] espnow_send heap_delta=%ld largest_delta=%ld", heapDelta, largestDelta);
                 }
                 
                 lastESPNowSend = nowMs;
@@ -658,13 +610,13 @@ void gamepadTask(void* parameter) {
           // Actual I2C transaction failure
           // Note: I2CDevice::recordError() called automatically by transaction
           uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_GAMEPAD);
-          Serial.printf("[GAMEPAD_TASK] I2C read failure (consecutive: %u)\n", errors);
+          WARN_SENSORSF("[GAMEPAD_TASK] I2C read failure (consecutive: %u)", errors);
           
           if (i2cShouldAutoDisable(I2C_ADDR_GAMEPAD, 5)) {
-            Serial.println("[GAMEPAD_TASK] Too many consecutive failures - auto-disabling");
+            ERROR_SENSORSF("[GAMEPAD_TASK] Too many consecutive failures - auto-disabling");
             gamepadEnabled = false;
             gamepadConnected = false;
-            DEBUG_FRAMEF("Gamepad auto-disabled: %u consecutive I2C failures", errors);
+            DEBUG_GAMEPAD_FRAMEF("Gamepad auto-disabled: %u consecutive I2C failures", errors);
             sensorStatusBumpWith("gamepad@auto_disabled");
           }
         } else {
@@ -683,8 +635,29 @@ void gamepadTask(void* parameter) {
 }
 
 // ============================================================================
+// Gamepad Accessor Functions (for MQTT and other modules)
+// ============================================================================
+
+int getGamepadX() {
+  if (!gamepadConnected || !gControlCache.gamepadDataValid) return 0;
+  return gControlCache.gamepadX;
+}
+
+int getGamepadY() {
+  if (!gamepadConnected || !gControlCache.gamepadDataValid) return 0;
+  return gControlCache.gamepadY;
+}
+
+uint32_t getGamepadButtons() {
+  if (!gamepadConnected || !gControlCache.gamepadDataValid) return 0;
+  return gControlCache.gamepadButtons;
+}
+
+// ============================================================================
 // Gamepad OLED Mode
 // ============================================================================
+#if DISPLAY_TYPE > 0
 #include "i2csensor-seesaw-oled.h"
+#endif
 
 #endif // ENABLE_GAMEPAD_SENSOR

@@ -9,13 +9,9 @@
 
 // Thermal OLED display function - shows thermal visualization
 static void displayThermalVisual() {
-  extern Adafruit_SSD1306* oledDisplay;
-  
   if (!thermalConnected || !thermalEnabled) {
     oledDisplay->setTextSize(1);
-    oledDisplay->setCursor(0, 0);
-    oledDisplay->println("=== THERMAL ===");
-    oledDisplay->println();
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Thermal not active");
     oledDisplay->println();
     oledDisplay->println("Press X to start");
@@ -29,8 +25,7 @@ static void displayThermalVisual() {
 
   if (!gThermalCache.thermalDataValid || !gThermalCache.thermalFrame) {
     unlockThermalCache();
-    oledDisplay->println("=== THERMAL ===");
-    oledDisplay->println();
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Waiting for");
     oledDisplay->println("thermal data...");
     return;
@@ -111,15 +106,14 @@ static bool thermalOLEDModeAvailable(String* outReason) {
 
 static void thermalToggleConfirmed(void* userData) {
   (void)userData;
-  extern bool enqueueSensorStart(SensorType sensor);
-  extern bool isInQueue(SensorType sensor);
+  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
 
   if (thermalEnabled && thermalConnected) {
     Serial.println("[THERMAL] Confirmed: Stopping thermal sensor...");
     thermalEnabled = false;
-  } else if (!isInQueue(SENSOR_THERMAL)) {
+  } else if (!isInQueue(I2C_DEVICE_THERMAL)) {
     Serial.println("[THERMAL] Confirmed: Starting thermal sensor...");
-    enqueueSensorStart(SENSOR_THERMAL);
+    enqueueDeviceStart(I2C_DEVICE_THERMAL);
   }
 }
 

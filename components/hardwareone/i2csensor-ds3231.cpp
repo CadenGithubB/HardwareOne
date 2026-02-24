@@ -11,17 +11,19 @@
 #include <time.h>
 #include <sys/time.h>
 
+#include "OLED_Display.h"
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_ESPNow.h"
+#include "System_ESPNow_Sensors.h"
 #include "System_I2C.h"
+#include "System_MemoryMonitor.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
 
 extern TwoWire Wire1;
 extern Settings gSettings;
-extern void broadcastOutput(const char* msg);
-extern void broadcastOutput(const String& msg);
 
 // RTC Cache
 RTCCache gRTCCache = {nullptr, {0}, 0.0f, false, 0};
@@ -29,6 +31,7 @@ RTCCache gRTCCache = {nullptr, {0}, 0.0f, false, 0};
 // Sensor state
 bool rtcEnabled = false;
 bool rtcConnected = false;
+unsigned long rtcLastStopTime = 0;
 TaskHandle_t rtcTaskHandle = nullptr;
 
 // Task stack watermark tracking
@@ -59,7 +62,7 @@ static uint8_t decToBcd(uint8_t dec) {
 // ============================================================================
 
 static bool rtcWriteRegister(uint8_t reg, uint8_t value) {
-  return i2cTransaction(100000, 100, [&]() -> bool {
+  return i2cDeviceTransaction(I2C_ADDR_DS3231, 100000, 100, [&]() -> bool {
     Wire1.beginTransmission(I2C_ADDR_DS3231);
     Wire1.write(reg);
     Wire1.write(value);
@@ -68,7 +71,7 @@ static bool rtcWriteRegister(uint8_t reg, uint8_t value) {
 }
 
 static bool rtcReadRegisters(uint8_t startReg, uint8_t* buffer, uint8_t count) {
-  return i2cTransaction(100000, 100, [&]() -> bool {
+  return i2cDeviceTransaction(I2C_ADDR_DS3231, 100000, 100, [&]() -> bool {
     Wire1.beginTransmission(I2C_ADDR_DS3231);
     Wire1.write(startReg);
     if (Wire1.endTransmission() != 0) return false;
@@ -107,7 +110,7 @@ bool rtcReadDateTime(RTCDateTime* dt) {
 bool rtcWriteDateTime(const RTCDateTime* dt) {
   if (!dt) return false;
   
-  return i2cTransaction(100000, 100, [&]() -> bool {
+  return i2cDeviceTransaction(I2C_ADDR_DS3231, 100000, 100, [&]() -> bool {
     Wire1.beginTransmission(I2C_ADDR_DS3231);
     Wire1.write(DS3231_REG_SECONDS);
     Wire1.write(decToBcd(dt->second));
@@ -176,7 +179,7 @@ bool rtcEarlyBootSync() {
   struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
   settimeofday(&tv, nullptr);
   
-  Serial.printf("[RTC] Early boot sync: System time set to %s\n", rtcDateTimeToString(&dt).c_str());
+  INFO_SENSORSF("[RTC] Early boot sync: System time set to %s", rtcDateTimeToString(&dt).c_str());
   return true;
 }
 
@@ -194,9 +197,20 @@ bool rtcSyncToSystem() {
   timeinfo.tm_hour = dt.hour;
   timeinfo.tm_min = dt.minute;
   timeinfo.tm_sec = dt.second;
-  timeinfo.tm_isdst = -1;
+  timeinfo.tm_isdst = 0;  // UTC has no DST
   
+  // RTC stores UTC - timegm() not available on ESP32, use mktime with TZ=UTC workaround
+  char* oldTZ = getenv("TZ");
+  setenv("TZ", "UTC0", 1);
+  tzset();
   time_t t = mktime(&timeinfo);
+  if (oldTZ) {
+    setenv("TZ", oldTZ, 1);
+  } else {
+    unsetenv("TZ");
+  }
+  tzset();
+  
   struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
   settimeofday(&tv, nullptr);
   
@@ -208,7 +222,7 @@ bool rtcSyncFromSystem() {
   time_t now;
   time(&now);
   struct tm timeinfo;
-  localtime_r(&now, &timeinfo);
+  gmtime_r(&now, &timeinfo);  // RTC stores UTC, not local time
   
   RTCDateTime dt;
   dt.year = timeinfo.tm_year + 1900;
@@ -267,6 +281,30 @@ String rtcDateTimeToString(const RTCDateTime* dt) {
 }
 
 // ============================================================================
+// JSON building for ESP-NOW streaming
+// ============================================================================
+
+int buildRTCDataJSON(char* buf, size_t bufSize) {
+  if (!buf || bufSize == 0) return 0;
+  
+  int pos = 0;
+  if (gRTCCache.mutex && xSemaphoreTake(gRTCCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    pos = snprintf(buf, bufSize,
+                   "{\"valid\":%s,\"year\":%u,\"month\":%u,\"day\":%u,"
+                   "\"hour\":%u,\"minute\":%u,\"second\":%u,"
+                   "\"temp\":%.1f,\"ts\":%lu}",
+                   gRTCCache.dataValid ? "true" : "false",
+                   gRTCCache.dateTime.year, gRTCCache.dateTime.month, gRTCCache.dateTime.day,
+                   gRTCCache.dateTime.hour, gRTCCache.dateTime.minute, gRTCCache.dateTime.second,
+                   gRTCCache.temperature,
+                   gRTCCache.lastUpdate);
+    xSemaphoreGive(gRTCCache.mutex);
+    if (pos < 0 || (size_t)pos >= bufSize) pos = 0;
+  }
+  return pos;
+}
+
+// ============================================================================
 // RTC Task
 // ============================================================================
 
@@ -275,7 +313,7 @@ static void rtcTask(void* pvParameters) {
   
   DEBUG_SENSORSF("[RTC] Task started");
   
-  // Check if system time is already valid (e.g., from NTP that ran before RTC started)
+  // Check if system time is already valid (from RTC early boot sync or NTP)
   struct tm timeinfo;
   bool systemTimeValid = false;
   if (getLocalTime(&timeinfo, 0)) {
@@ -284,14 +322,15 @@ static void rtcTask(void* pvParameters) {
   }
   
   if (systemTimeValid) {
-    // System already has valid time (likely from NTP) - sync TO RTC
-    if (rtcSyncFromSystem()) {
-      broadcastOutput("[RTC] RTC updated from system time (NTP)");
-      // Mark RTC as calibrated
-      if (!gSettings.rtcTimeHasBeenSet) {
-        gSettings.rtcTimeHasBeenSet = true;
-        writeSettingsJson();
+    // System already has valid time - if RTC is already calibrated, just verify;
+    // if not calibrated, this time likely came from NTP, so sync TO RTC
+    if (!gSettings.rtcTimeHasBeenSet) {
+      if (rtcSyncFromSystem()) {
+        broadcastOutput("[RTC] RTC calibrated from system time");
+        setSetting(gSettings.rtcTimeHasBeenSet, true);
       }
+    } else {
+      DEBUG_SENSORSF("[RTC] System time already valid from RTC early boot - no sync needed");
     }
   } else {
     // No valid system time yet - sync FROM RTC to system
@@ -301,13 +340,15 @@ static void rtcTask(void* pvParameters) {
   }
   
   unsigned long lastCacheUpdate = 0;
-  const unsigned long CACHE_UPDATE_INTERVAL = 1000;  // 1 second
+  const unsigned long CACHE_UPDATE_FAST = 1000;   // 1s when OLED is showing RTC
+  const unsigned long CACHE_UPDATE_SLOW = 30000;  // 30s otherwise (web UI ticks locally)
   
   while (rtcEnabled) {
     unsigned long now = millis();
     
-    // Update cache periodically
-    if (now - lastCacheUpdate >= CACHE_UPDATE_INTERVAL) {
+    // Poll fast when OLED is displaying RTC, slow otherwise
+    unsigned long interval = (currentOLEDMode == OLED_RTC_DATA) ? CACHE_UPDATE_FAST : CACHE_UPDATE_SLOW;
+    if (now - lastCacheUpdate >= interval) {
       RTCDateTime dt;
       float temp = rtcReadTemperature();
       
@@ -319,16 +360,36 @@ static void rtcTask(void* pvParameters) {
           gRTCCache.lastUpdate = now;
           xSemaphoreGive(gRTCCache.mutex);
         }
+        // Mark OLED dirty if RTC page is active (enables real-time display updates)
+        if (currentOLEDMode == OLED_RTC_DATA) {
+          oledMarkDirty();
+        }
+#if ENABLE_ESPNOW
+        {
+          char rtcJson[256];
+          int jsonLen = buildRTCDataJSON(rtcJson, sizeof(rtcJson));
+          if (jsonLen > 0) {
+            sendSensorDataUpdate(REMOTE_SENSOR_RTC, String(rtcJson));
+          }
+        }
+#endif
       }
       
       lastCacheUpdate = now;
     }
     
-    // Track stack watermark
+    // Track stack watermark + safety bailout (check every ~10s = 100 iterations at 100ms)
     UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
     gRTCWatermarkNow = watermark;
     if (watermark < gRTCWatermarkMin) {
       gRTCWatermarkMin = watermark;
+    }
+    {
+      static uint32_t sRtcSafetyCounter = 0;
+      if (++sRtcSafetyCounter >= 100) {
+        sRtcSafetyCounter = 0;
+        if (checkTaskStackSafety("rtc", RTC_STACK_WORDS, &rtcEnabled)) break;
+      }
     }
     
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -388,7 +449,7 @@ bool createRTCTask() {
   BaseType_t result = xTaskCreatePinnedToCore(
     rtcTask,
     "rtc_task",
-    4096,  // Increased for NTP sync logic
+    RTC_STACK_WORDS,  // Increased for NTP sync logic
     nullptr,
     1,     // Low priority
     &rtcTaskHandle,
@@ -406,7 +467,7 @@ bool createRTCTask() {
 }
 
 void stopRTCSensor() {
-  rtcEnabled = false;
+  // Note: rtcEnabled is set to false by handleDeviceStopped() before this is called
   
   // Wait for task to exit
   int timeout = 50;
@@ -427,6 +488,12 @@ void stopRTCSensor() {
 void startRTCSensorInternal() {
   if (rtcEnabled && rtcConnected) {
     DEBUG_SENSORSF("[RTC] Already running");
+    return;
+  }
+
+  // Check memory before creating RTC task
+  if (!checkMemoryAvailable("rtc", nullptr)) {
+    ERROR_SENSORSF("[RTC] Insufficient memory for RTC sensor");
     return;
   }
   
@@ -548,9 +615,7 @@ const char* cmd_rtcset(const String& cmd) {
     response = "[RTC] Time set to: " + rtcDateTimeToString(&dt);
     // Mark RTC as calibrated so future boots trust RTC first
     if (!gSettings.rtcTimeHasBeenSet) {
-      gSettings.rtcTimeHasBeenSet = true;
-      extern bool writeSettingsJson();
-      writeSettingsJson();
+      setSetting(gSettings.rtcTimeHasBeenSet, true);
       response += "\n[RTC] Marked as calibrated for future boots";
     }
   } else {
@@ -583,9 +648,7 @@ const char* cmd_rtcsync(const String& cmd) {
     if (rtcSyncFromSystem()) {
       // Mark RTC as calibrated so future boots trust RTC first
       if (!gSettings.rtcTimeHasBeenSet) {
-        gSettings.rtcTimeHasBeenSet = true;
-        extern bool writeSettingsJson();
-        writeSettingsJson();
+        setSetting(gSettings.rtcTimeHasBeenSet, true);
       }
       return "[RTC] RTC updated from system time";
     }
@@ -622,8 +685,48 @@ const char* cmd_rtcstop(const String& cmd) {
     return "[RTC] Not running";
   }
   
-  stopRTCSensor();
+  handleDeviceStopped(I2C_DEVICE_RTC);
+  stopRTCSensor();  // Sensor-specific: wait for task exit and cleanup
   return "[RTC] Closed";
+}
+
+// ============================================================================
+// RTC Accessor Functions (for MQTT and other modules)
+// ============================================================================
+
+int getRTCYear() {
+  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+  return gRTCCache.dateTime.year;
+}
+
+int getRTCMonth() {
+  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+  return gRTCCache.dateTime.month;
+}
+
+int getRTCDay() {
+  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+  return gRTCCache.dateTime.day;
+}
+
+int getRTCHour() {
+  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+  return gRTCCache.dateTime.hour;
+}
+
+int getRTCMinute() {
+  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+  return gRTCCache.dateTime.minute;
+}
+
+int getRTCSecond() {
+  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+  return gRTCCache.dateTime.second;
+}
+
+float getRTCTemperature() {
+  if (!rtcConnected || !gRTCCache.dataValid) return 0.0f;
+  return gRTCCache.temperature;
 }
 
 // ============================================================================
@@ -657,12 +760,32 @@ extern const SettingsModule rtcSettingsModule = {
 
 #include "System_Utils.h"
 
+const char* cmd_rtcautostart(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = args; arg.trim();
+  if (arg.length() == 0) {
+    return gSettings.rtcAutoStart ? "[RTC] Auto-start: enabled" : "[RTC] Auto-start: disabled";
+  }
+  arg.toLowerCase();
+  if (arg == "on" || arg == "true" || arg == "1") {
+    setSetting(gSettings.rtcAutoStart, true);
+    return "[RTC] Auto-start enabled";
+  } else if (arg == "off" || arg == "false" || arg == "0") {
+    setSetting(gSettings.rtcAutoStart, false);
+    return "[RTC] Auto-start disabled";
+  }
+  return "Usage: rtcautostart [on|off]";
+}
+
 const CommandEntry rtcCommands[] = {
-  { "rtc",      "Show RTC status and current time.",           false, cmd_rtc,      "Usage: rtc [status|temp]" },
-  { "openrtc", "Open DS3231 RTC sensor.",                    false, cmd_rtcstart, nullptr },
-  { "closertc",  "Close DS3231 RTC sensor.",                     false, cmd_rtcstop,  nullptr },
-  { "rtcset",   "Set RTC time.",                               false, cmd_rtcset,   "Usage: rtcset YYYY-MM-DD HH:MM:SS  or  rtcset <unix_timestamp>" },
-  { "rtcsync",  "Sync time between RTC and system.",           false, cmd_rtcsync,  "Usage: rtcsync [to|from] (to=RTC->system, from=system->RTC)" },
+  { "openrtc",  "Start DS3231 RTC sensor.",                    false, cmd_rtcstart, nullptr, "sensor", "clock", "open" },
+  { "closertc", "Stop DS3231 RTC sensor.",                     false, cmd_rtcstop,  nullptr, "sensor", "clock", "close" },
+  { "rtcread",   "Read RTC status [status|temp]",               false, cmd_rtc,      "Usage: rtcread [status|temp]" },
+  { "rtcset",   "Set RTC time: <datetime|timestamp>",          false, cmd_rtcset,   "Usage: rtcset YYYY-MM-DD HH:MM:SS  or  rtcset <unix_timestamp>" },
+  { "rtcsync",  "Sync time: [to|from]",                        false, cmd_rtcsync,  "Usage: rtcsync [to|from] (to=RTC->system, from=system->RTC)" },
+  
+  // Auto-start
+  { "rtcautostart", "Enable/disable RTC auto-start after boot [on|off]", false, cmd_rtcautostart, "Usage: rtcautostart [on|off]" },
 };
 const size_t rtcCommandsCount = sizeof(rtcCommands) / sizeof(rtcCommands[0]);
 
@@ -672,6 +795,8 @@ static CommandModuleRegistrar _rtc_cmd_registrar(rtcCommands, rtcCommandsCount, 
 // ============================================================================
 // RTC OLED Mode (Display Function + Registration)
 // ============================================================================
+#if DISPLAY_TYPE > 0
 #include "i2csensor-ds3231-oled.h"
+#endif
 
 #endif // ENABLE_RTC_SENSOR

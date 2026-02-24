@@ -10,7 +10,7 @@ inline void streamSeesawGamepadSensorCard(httpd_req_t* req) {
     <div class='sensor-card' id='sensor-card-gamepad'>
       <div class='sensor-title'><span>Gamepad (Seesaw)</span><span class='status-indicator status-disabled' id='gamepad-status-indicator'></span></div>
       <div class='sensor-description'>Mini I2C Gamepad with joystick and buttons.</div>
-      <div id='gamepad-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
+      <div id='gamepad-queue-status' style='display:none;background:var(--warning-bg);border:1px solid var(--warning-border);border-left:4px solid var(--warning-accent);border-radius:4px;padding:8px;margin-bottom:10px;color:var(--warning-fg);font-size:.9em'></div>
       <div class='sensor-controls'><button class='btn' id='btn-gamepad-start'>Open Gamepad</button><button class='btn' id='btn-gamepad-stop'>Close Gamepad</button></div>
       <div class='sensor-data' id='gamepad-data'>Gamepad data will appear here...</div>
       <div class='gamepad-row' style='margin-top:10px'>
@@ -65,8 +65,8 @@ inline void streamSeesawGamepadSensorJs(httpd_req_t* req) {
     "    function setBtn(id, p) {\n"
     "      var e = document.getElementById(id);\n"
     "      if (!e) return;\n"
-    "      e.style.background = p ? '#28a745' : '#f8f9fa';\n"
-    "      e.style.color = p ? '#fff' : '#333';\n"
+    "      e.style.background = p ? 'var(--success)' : 'var(--menu-item-bg)';\n"
+    "      e.style.color = p ? '#fff' : 'var(--menu-item-fg)';\n"
     "    }\n"
     "    setBtn(ids.btnX || 'btn-x', ((b & (1 << pins.x)) === 0));\n"
     "    setBtn(ids.btnY || 'btn-y', ((b & (1 << pins.y)) === 0));\n"
@@ -80,13 +80,16 @@ inline void streamSeesawGamepadSensorJs(httpd_req_t* req) {
     "        var ctx = cv.getContext('2d');\n"
     "        var w = cv.width, h = cv.height;\n"
     "        var cx = w / 2, cy = h / 2;\n"
+    "        var cs = getComputedStyle(document.documentElement);\n"
+    "        var strokeCol = cs.getPropertyValue('--panel-fg').trim() || '#000';\n"
+    "        var linkCol = cs.getPropertyValue('--link').trim() || '#007bff';\n"
     "        ctx.clearRect(0, 0, w, h);\n"
-    "        ctx.strokeStyle = '#ddd';\n"
+    "        ctx.strokeStyle = strokeCol;\n"
     "        ctx.lineWidth = 2;\n"
     "        ctx.beginPath();\n"
     "        ctx.arc(cx, cy, cx - 10, 0, 2 * Math.PI);\n"
     "        ctx.stroke();\n"
-    "        ctx.strokeStyle = '#ccc';\n"
+    "        ctx.strokeStyle = strokeCol;\n"
     "        ctx.beginPath();\n"
     "        ctx.moveTo(cx, 10);\n"
     "        ctx.lineTo(cx, h - 10);\n"
@@ -99,7 +102,7 @@ inline void streamSeesawGamepadSensorJs(httpd_req_t* req) {
     "        if (Math.abs(dy) < deadzone) dy = 0;\n"
     "        var jx = cx + (dx / 512.0) * (cx - 10);\n"
     "        var jy = cy - (dy / 512.0) * (cy - 10);\n"
-    "        ctx.fillStyle = '#007bff';\n"
+    "        ctx.fillStyle = linkCol;\n"
     "        ctx.beginPath();\n"
     "        ctx.arc(jx, jy, 8, 0, 2 * Math.PI);\n"
     "        ctx.fill();\n"
@@ -136,7 +139,7 @@ inline void streamSeesawGamepadSensorJs(httpd_req_t* req) {
 }
 
 inline void streamSeesawGamepadDashboardDef(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'Seesaw',key:'gamepad',name:'Gamepad (Seesaw)',desc:'Joystick + buttons'});", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'Seesaw',key:'gamepad',name:'Gamepad (Seesaw)',desc:'Joystick & Buttons'});", HTTPD_RESP_USE_STRLEN);
 }
 
 #endif // SEESAW_GAMEPAD_SENSOR_WEB_H
