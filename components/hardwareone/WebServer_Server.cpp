@@ -26,6 +26,7 @@
 #include "System_Settings.h"
 #include "System_User.h"
 #include "System_UserSettings.h"
+#include "System_FirstTimeSetup.h"
 #include "System_Utils.h"
 #include "WebServer_Utils.h"
 #include "WebServer_Server.h"
@@ -456,24 +457,16 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
     unsigned long now = millis();
 
     if (strcmp(ipBuf, lastDebugIP) != 0 || (now - lastDebugTime) > 5000) {
-      DEBUG_AUTHF("No session found for SID, current boot ID: %s", gBootId.c_str());
-
-      // If someone has a session cookie but we have no sessions, it's likely due to a reboot
-      // BUT: don't overwrite an existing logout reason (e.g., from intentional logout)
-      if (sid.length() > 0 && !hasLogoutReason(ipBuf)) {
-        DEBUG_AUTHF("Client has session cookie but no sessions exist - likely system restart");
-        storeLogoutReason(ipBuf, "Your session expired due to a system restart. Please log in again.");
-      }
+      DEBUG_AUTHF("No session found for SID from IP %s (stale cookie after reboot)", ipBuf);
 
       strncpy(lastDebugIP, ipBuf, sizeof(lastDebugIP) - 1);
       lastDebugIP[sizeof(lastDebugIP) - 1] = '\0';
       lastDebugTime = now;
-    } else {
-      // Still store logout reason but don't spam debug logs
-      // BUT: don't overwrite an existing logout reason (e.g., from intentional logout)
-      if (sid.length() > 0 && !hasLogoutReason(ipBuf)) {
-        storeLogoutReason(ipBuf, "Your session expired due to a system restart. Please log in again.");
-      }
+    }
+
+    // On a normal reboot (not fresh flash/setup), inform the user their session expired
+    if (!gFirstTimeSetupPerformed && !hasLogoutReason(ipBuf)) {
+      storeLogoutReason(ipBuf, "Your session expired due to a system restart. Please log in again.");
     }
 
     return false;
@@ -665,7 +658,10 @@ bool hasLogoutReason(const char* ip) {
 void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg) {
   if (idx < 0 || idx >= MAX_SESSIONS) return;
   if (gSessions[idx].sid.length() == 0) return;
-  String msg = String("[revoke] ") + (reasonMsg.length() ? reasonMsg : String("Your session has been signed out by an administrator."));
+  const char* reason = reasonMsg.length() ? reasonMsg.c_str() : "Your session has been signed out by an administrator.";
+  char msgBuf[128];
+  snprintf(msgBuf, sizeof(msgBuf), "[revoke] %s", reason);
+  String msg(msgBuf);
 
   // Mark session as revoked but keep it alive for notice delivery
   gSessions[idx].revoked = true;
@@ -820,9 +816,13 @@ bool sseSessionAliveAndRefresh(int sessIdx, const String& sid) {
     return false;
   }
   if (gSessions[sessIdx].sid != sid || sid.length() == 0) {
-    DEBUG_SSEF("Session SID mismatch or empty - stored: %s... provided: %s",
-               gSessions[sessIdx].sid.substring(0, 8).c_str(),
-               (sid.length() ? (sid.substring(0, 8) + "...").c_str() : "<none>"));
+    char storedBuf[12] = {0};
+    char providedBuf[12] = {0};
+    if (gSessions[sessIdx].sid.length() > 0) snprintf(storedBuf, sizeof(storedBuf), "%.8s...", gSessions[sessIdx].sid.c_str());
+    if (sid.length() > 0) snprintf(providedBuf, sizeof(providedBuf), "%.8s...", sid.c_str());
+    DEBUG_SSEF("Session SID mismatch or empty - stored: %s provided: %s",
+               storedBuf[0] ? storedBuf : "<empty>",
+               providedBuf[0] ? providedBuf : "<none>");
     return false;
   }
   if (gSessions[sessIdx].sid.length() == 0) {
@@ -940,7 +940,9 @@ bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& h
 
 // Build the expected Authorization header for fast comparisons
 void rebuildExpectedAuthHeader() {
-  String creds = gAuthUser + ":" + gAuthPass;
+  char credsBuf[128];
+  snprintf(credsBuf, sizeof(credsBuf), "%s:%s", gAuthUser.c_str(), gAuthPass.c_str());
+  String creds(credsBuf);
   size_t in_len = creds.length();
   size_t out_len = 0;
   unsigned char out_buf[256];
@@ -954,7 +956,9 @@ void rebuildExpectedAuthHeader() {
                             (const unsigned char*)creds.c_str(), in_len) == 0
       && out_len > 0) {
     String b64 = String((const char*)out_buf);
-    gExpectedAuthHeader = String("Basic ") + b64;
+    char authBuf[256];
+    snprintf(authBuf, sizeof(authBuf), "Basic %s", b64.c_str());
+    gExpectedAuthHeader = authBuf;
   } else {
     gExpectedAuthHeader = "";
   }
@@ -2562,8 +2566,10 @@ esp_err_t handleNotice(httpd_req_t* req) {
       }
     }
   }
-  String json = String("{\"success\":true,\"notice\":\"") + jsonEscape(note) + "\"}";
-  httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+  String escaped = jsonEscape(note);
+  char jsonBuf[256];
+  snprintf(jsonBuf, sizeof(jsonBuf), "{\"success\":true,\"notice\":\"%.*s\"}", (int)(sizeof(jsonBuf) - 40), escaped.c_str());
+  httpd_resp_send(req, jsonBuf, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -2718,7 +2724,11 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   int originIdx = findSessionIndexBySID(sidForCmd);
   int prevSkip = gBroadcastSkipSessionIdx;
   gBroadcastSkipSessionIdx = originIdx;
-  DEBUG_SSEF("CLI origin session idx=%d, sid=%s; will skip flagging this session on broadcast", originIdx, (sidForCmd.length() ? (sidForCmd.substring(0, 8) + "...").c_str() : "<none>"));
+  {
+    char sidBuf[12] = {0};
+    if (sidForCmd.length() > 0) snprintf(sidBuf, sizeof(sidBuf), "%.8s...", sidForCmd.c_str());
+    DEBUG_SSEF("CLI origin session idx=%d, sid=%s; will skip flagging this session on broadcast", originIdx, sidBuf[0] ? sidBuf : "<none>");
+  }
   DEBUG_CMD_FLOWF("[web.cli] build ctx user=%s originIdx=%d", ctx.user.c_str(), originIdx);
 
   // Build unified command and execute synchronously (queue to be added later)
@@ -2927,7 +2937,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
     return ESP_OK;
   }
   // Success -> create session immediately and set cookie in this response
-  broadcastOutput(String("[login] Login successful for user: ") + u);
+  BROADCAST_PRINTF("[login] Login successful for user: %s", u.c_str());
 
   // Log successful authentication attempt
   String ip;
@@ -2962,7 +2972,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
     streamLoginSuccessContent(req, sid, _theme);
   }
 
-  broadcastOutput(String("[login] Safari-compatible session and cookie set for user: ") + u);
+  BROADCAST_PRINTF("[login] Safari-compatible session and cookie set for user: %s", u.c_str());
   return ESP_OK;
 }
 
@@ -3053,7 +3063,7 @@ esp_err_t handleLoginSetSession(httpd_req_t* req) {
   String user = gSessUser;  // capture then clear
   setSession(req, user);
   gSessUser = "";
-  broadcastOutput(String("[login] Session set for user: ") + user);
+  BROADCAST_PRINTF("[login] Session set for user: %s", user.c_str());
 
   // Send HTML page with JavaScript redirect and cookie verification
   httpd_resp_set_type(req, "text/html");
@@ -3306,13 +3316,12 @@ esp_err_t handleFilesStats(httpd_req_t* req) {
   size_t freeBytes = totalBytes - usedBytes;
   int usagePercent = (totalBytes == 0) ? 0 : (usedBytes * 100) / totalBytes;
 
-  String json = String("{\"success\":true,\"total\":") + String(totalBytes)
-                + ",\"used\":" + String(usedBytes)
-                + ",\"free\":" + String(freeBytes)
-                + ",\"usagePercent\":" + String(usagePercent) + "}";
+  char json[128];
+  snprintf(json, sizeof(json), "{\"success\":true,\"total\":%u,\"used\":%u,\"free\":%u,\"usagePercent\":%d}",
+           (unsigned)totalBytes, (unsigned)usedBytes, (unsigned)freeBytes, usagePercent);
 
   httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
