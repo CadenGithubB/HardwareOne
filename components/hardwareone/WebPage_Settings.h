@@ -240,6 +240,40 @@ window.sendSequential = function(cmds, onDone, onFail) {
       </div>
     </div>
     
+    <!-- Bond Mode Configuration -->
+    <div style='font-weight:bold;margin:1.5rem 0 0.75rem 0;padding-bottom:0.5rem;border-bottom:1px solid var(--border);color:var(--panel-fg)'>Bond Mode (Two-Device Pairing)</div>
+    <div style='background:rgba(100,149,237,0.1);border-left:3px solid #6495ed;padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--panel-fg);font-size:0.85rem'>
+      Bond mode creates a dedicated master/worker pair for specialized applications.
+    </div>
+    <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
+      <span style='color:var(--panel-fg)'>Bond Mode Enabled: <span style='font-weight:bold;color:var(--panel-fg)' id='bond-enabled-value'>-</span></span>
+      <button class='btn' onclick='toggleBondMode()' id='bond-enabled-btn'>Toggle</button>
+    </div>
+    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem'>
+      <div>
+        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Bond Role</label>
+        <select id='bond-role' style='width:100%'>
+          <option value='0'>Worker (Compute/Network)</option>
+          <option value='1'>Master (Display/Gamepad)</option>
+        </select>
+      </div>
+      <div>
+        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Bonded Peer MAC</label>
+        <input type='text' id='bond-peermac' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17' style='width:100%;font-family:monospace'>
+      </div>
+    </div>
+    <div style='font-weight:bold;margin:1rem 0 0.5rem 0;color:var(--panel-fg)'>Auto-Stream Sensors to Bonded Peer</div>
+    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0.5rem;margin-bottom:1rem'>
+      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-thermal' style='width:auto;margin-right:0.5rem'>Thermal Camera</label>
+      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-tof' style='width:auto;margin-right:0.5rem'>Time-of-Flight</label>
+      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-imu' style='width:auto;margin-right:0.5rem'>IMU</label>
+      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-gps' style='width:auto;margin-right:0.5rem'>GPS</label>
+      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-gamepad' style='width:auto;margin-right:0.5rem'>Gamepad</label>
+      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-fmradio' style='width:auto;margin-right:0.5rem'>FM Radio</label>
+      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-rtc' style='width:auto;margin-right:0.5rem'>RTC Clock</label>
+      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-presence' style='width:auto;margin-right:0.5rem'>Presence Sensor</label>
+    </div>
+    
     <!-- Save Button -->
     <div style='margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--border)'>
       <button class='btn' onclick='saveEspNowSettings()'>Save ESP-NOW Settings</button>
@@ -1132,6 +1166,22 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         if ($('espnow-mastermac')) $('espnow-mastermac').value = espnow.masterMAC || '';
         if ($('espnow-backupmac')) $('espnow-backupmac').value = espnow.backupMAC || '';
         
+        // Load bond settings
+        if ($('bond-enabled-value')) {
+          $('bond-enabled-value').textContent = espnow.bondModeEnabled ? 'Enabled' : 'Disabled';
+          $('bond-enabled-btn').textContent = espnow.bondModeEnabled ? 'Disable' : 'Enable';
+        }
+        if ($('bond-role')) $('bond-role').value = String(espnow.bondRole || 0);
+        if ($('bond-peermac')) $('bond-peermac').value = espnow.bondPeerMac || '';
+        if ($('bond-stream-thermal')) $('bond-stream-thermal').checked = !!espnow.bondStreamThermal;
+        if ($('bond-stream-tof')) $('bond-stream-tof').checked = !!espnow.bondStreamTof;
+        if ($('bond-stream-imu')) $('bond-stream-imu').checked = !!espnow.bondStreamImu;
+        if ($('bond-stream-gps')) $('bond-stream-gps').checked = !!espnow.bondStreamGps;
+        if ($('bond-stream-gamepad')) $('bond-stream-gamepad').checked = !!espnow.bondStreamGamepad;
+        if ($('bond-stream-fmradio')) $('bond-stream-fmradio').checked = !!espnow.bondStreamFmradio;
+        if ($('bond-stream-rtc')) $('bond-stream-rtc').checked = !!espnow.bondStreamRtc;
+        if ($('bond-stream-presence')) $('bond-stream-presence').checked = !!espnow.bondStreamPresence;
+        
         var out = (s.output || {}), th = (s.thermal_mlx90640 || {}), tof = (s.tof_vl53l4cx || {}), oled = (s.oled_ssd1306 || {}), led = (s.led || {}), imu = (s.imu_bno055 || {}), i2c = (s.i2c || {}), dbg = (s.debug || {});
         var thUI = (th.ui || {}), thDev = (th.device || {}), tofUI = (tof.ui || {}), tofDev = (tof.device || {});
         var outSerial = (out.outSerial !== undefined ? out.outSerial : s.outSerial);
@@ -1923,6 +1973,19 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       });
     };
     
+    // Toggle bond mode
+    window.toggleBondMode = function() {
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent('bondmodeenabled')
+      })
+      .then(function(r) { return r.text(); })
+      .then(function(t) { refreshSettings(); })
+      .catch(function(e) { alert('Error: ' + e.message); });
+    };
+    
     // Save all ESP-NOW settings
     window.saveEspNowSettings = function() {
       var status = $('espnow-save-status');
@@ -1938,7 +2001,9 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
         stationary:   $('espnow-stationary').checked,
         meshRole:     parseInt($('espnow-meshrole').value),
         masterMAC:    $('espnow-mastermac').value.trim(),
-        backupMAC:    $('espnow-backupmac').value.trim()
+        backupMAC:    $('espnow-backupmac').value.trim(),
+        bondRole:     parseInt($('bond-role').value),
+        bondPeerMac:  $('bond-peermac').value.trim()
       };
 
       var cmds = [];
@@ -1952,6 +2017,19 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       if (s.meshRole >= 0 && s.meshRole <= 2) cmds.push('espnow role ' + roleNames[s.meshRole]);
       if (s.masterMAC) cmds.push('espnow mastermac ' + s.masterMAC);
       if (s.backupMAC) cmds.push('espnow backupmac ' + s.backupMAC);
+      
+      // Bond settings
+      var bondRoleNames = ['worker', 'master'];
+      if (s.bondRole >= 0 && s.bondRole <= 1) cmds.push('bondrole ' + s.bondRole);
+      if (s.bondPeerMac) cmds.push('bondpeermac ' + s.bondPeerMac);
+      cmds.push('bondstreamthermal ' + ($('bond-stream-thermal').checked ? '1' : '0'));
+      cmds.push('bondstreamtof ' + ($('bond-stream-tof').checked ? '1' : '0'));
+      cmds.push('bondstreamimu ' + ($('bond-stream-imu').checked ? '1' : '0'));
+      cmds.push('bondstreamgps ' + ($('bond-stream-gps').checked ? '1' : '0'));
+      cmds.push('bondstreamgamepad ' + ($('bond-stream-gamepad').checked ? '1' : '0'));
+      cmds.push('bondstreamfmradio ' + ($('bond-stream-fmradio').checked ? '1' : '0'));
+      cmds.push('bondstreamrtc ' + ($('bond-stream-rtc').checked ? '1' : '0'));
+      cmds.push('bondstreampresence ' + ($('bond-stream-presence').checked ? '1' : '0'));
 
       sendSequential(cmds,
         function() {
