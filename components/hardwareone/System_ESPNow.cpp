@@ -421,8 +421,8 @@ extern int connectedDeviceCount;
 // Settings struct is now in settings.h (included via espnow_system.h)
 
 // File paths
-static const char* ESPNOW_DEVICES_FILE = "/system/espnow_devices.json";
-static const char* MESH_PEERS_FILE = "/system/mesh_peers.json";
+static const char* ESPNOW_DEVICES_FILE = "/system/espnow/devices.json";
+static const char* MESH_PEERS_FILE = "/system/espnow/mesh_peers.json";
 
 // ============================================================================
 // GLOBAL VARIABLES
@@ -4565,11 +4565,8 @@ static bool cacheSettingsToLittleFS(const uint8_t* peerMac, const String& settin
   String filePath = dirPath + "/settings.json";
   DEBUG_ESPNOWF("[SETTINGS_CACHE] Target path: %s", filePath.c_str());
   
-  // Ensure directory exists
+  // Ensure per-peer directory exists (parent dirs created at filesystem init)
   FsLockGuard fsGuard("pair.settings.cache");
-  if (!LittleFS.exists("/system")) { LittleFS.mkdir("/system"); }
-  if (!LittleFS.exists("/system/espnow")) { LittleFS.mkdir("/system/espnow"); }
-  if (!LittleFS.exists("/system/espnow/peers")) { LittleFS.mkdir("/system/espnow/peers"); }
   if (!LittleFS.exists(dirPath.c_str())) { LittleFS.mkdir(dirPath.c_str()); }
   
   // Write settings
@@ -4720,10 +4717,6 @@ static void sendBondSettings(const uint8_t* peerMac) {
     DEBUG_ESPNOWF("[SETTINGS_SEND] Generated settings JSON: %d bytes", settingsLen);
 
     FsLockGuard guard("pair.settings.send");
-    if (!LittleFS.exists("/system")) {
-      LittleFS.mkdir("/system");
-      DEBUG_ESPNOWF("[SETTINGS_SEND] Created /system directory");
-    }
     File f = LittleFS.open(tempPath.c_str(), "w");
     if (!f) {
       ERROR_ESPNOWF("[SETTINGS_SEND] Cannot create %s", tempPath.c_str());
