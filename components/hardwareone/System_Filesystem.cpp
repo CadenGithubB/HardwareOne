@@ -84,13 +84,17 @@ bool initFilesystem() {
 #endif
   
   // Ensure system directories exist
-  LittleFS.mkdir("/logs");
+  LittleFS.mkdir("/logging_captures");
   LittleFS.mkdir("/system");  // For settings, automations, devices, etc.
-  LittleFS.mkdir("/system/logs");  // For protected system logs (audit, login, errors)
+  LittleFS.mkdir("/system/sys_logs");  // For protected system logs (login, errors, command history)
   LittleFS.mkdir("/system/users");  // For users.json and user settings
   LittleFS.mkdir("/system/users/user_settings");  // For per-user setting files
+#if ENABLE_ESPNOW
   LittleFS.mkdir("/espnow");  // For ESP-NOW related files (received subfolder created on-demand)
+#endif
+#if ENABLE_MAPS
   LittleFS.mkdir("/maps");  // For GPS map files (.hwmap)
+#endif
   
   // Migrate pending_users.json from old location to /system/users/ (one-time)
   if (LittleFS.exists("/system/pending_users.json") && !LittleFS.exists("/system/users/pending_users.json")) {
@@ -350,7 +354,7 @@ const char* cmd_mkdir(const String& args) {
   path.trim();
   if (path.length() == 0) return "Usage: mkdir <path>";
   if (!path.startsWith("/")) path = String("/") + path;
-  if (path == "/logs" || path.startsWith("/logs/") || path == "/system" || path.startsWith("/system/")) {
+  if (path == "/logging_captures" || path.startsWith("/logging_captures/") || path == "/system" || path.startsWith("/system/")) {
     snprintf(getDebugBuffer(), 1024, "Error: Creation not allowed: %s", path.c_str());
     return getDebugBuffer();
   }
@@ -371,7 +375,7 @@ const char* cmd_rmdir(const String& args) {
   path.trim();
   if (path.length() == 0) return "Usage: rmdir <path>";
   if (!path.startsWith("/")) path = String("/") + path;
-  if (path == "/logs" || path.startsWith("/logs/") || path == "/system" || path.startsWith("/system/") || path == "/Users" || path.startsWith("/Users/")) {
+  if (path == "/logging_captures" || path.startsWith("/logging_captures/") || path == "/system" || path.startsWith("/system/") || path == "/Users" || path.startsWith("/Users/")) {
     snprintf(getDebugBuffer(), 1024, "Error: Removal not allowed: %s (protected system directory)", path.c_str());
     return getDebugBuffer();
   }
@@ -393,7 +397,7 @@ const char* cmd_filecreate(const String& args) {
   if (path.length() == 0) return "Usage: filecreate <path>";
   if (!path.startsWith("/")) path = String("/") + path;
   if (path.endsWith("/")) return "Error: Path must be a file (not a directory)";
-  if (path == "/logs" || path.startsWith("/logs/") || path == "/system" || path.startsWith("/system/")) {
+  if (path == "/logging_captures" || path.startsWith("/logging_captures/") || path == "/system" || path.startsWith("/system/")) {
     snprintf(getDebugBuffer(), 1024, "Error: Creation not allowed: %s", path.c_str());
     return getDebugBuffer();
   }
@@ -489,7 +493,7 @@ const char* cmd_filedelete(const String& args) {
 const CommandEntry filesystemCommands[] = {
   { "files", "List files [path]", false, cmd_files,
     "files [path]        - List files in LittleFS (default '/')\n"
-    "Example: files /logs" },
+    "Example: files /logging_captures" },
   { "mkdir", "Create directory: <path>", true, cmd_mkdir, "Usage: mkdir <path>" },
   { "rmdir", "Remove directory: <path>", true, cmd_rmdir, "Usage: rmdir <path>" },
   { "filecreate", "Create file: <path> [content]", true, cmd_filecreate, "Usage: filecreate <path>" },
@@ -511,16 +515,16 @@ static CommandModuleRegistrar _filesystem_cmd_registrar(filesystemCommands, file
 //   IMMUTABLE     - /system/settings.json, /system/automations.json,
 //                   /system/devices.json, /system/espnow_devices.json
 //                   Can edit settings+automations, cannot delete/rename any
-//   PROTECTED_DIR - /system, /logs, /espnow, /maps, /sd — dirs themselves
+//   PROTECTED_DIR - /system, /logging_captures, /espnow, /maps, /sd — dirs themselves
 //                   Cannot rename or delete the directory
-//   SYSTEM_DATA   - /logs/*, /espnow/* — system writes; user can read+delete
+//   SYSTEM_DATA   - /logging_captures/*, /espnow/* — system writes; user can read+delete
 //   UPLOADABLE    - /system/certs/* — can upload+delete, no edit/rename
 //   USER_DATA     - /maps/*, anything else — full CRUD
 // ============================================================================
 
 // List of root directories the system creates at boot
 static bool isProtectedDirectory(const String& path) {
-  return (path == "/system" || path == "/logs" || path == "/espnow" ||
+  return (path == "/system" || path == "/logging_captures" || path == "/espnow" ||
           path == "/maps" || path == "/sd" || path == "/Users");
 }
 
@@ -580,7 +584,7 @@ bool canEdit(const String& path) {
   if (path.startsWith("/system/")) return false;
   
   // Logs: read-only (system-managed)
-  if (path.startsWith("/logs/")) return false;
+  if (path.startsWith("/logging_captures/")) return false;
   
   // ESP-NOW received files: allow editing
   // Maps: allow editing
@@ -609,13 +613,13 @@ bool canDelete(const String& path) {
   if (path.startsWith("/system/certs/")) return true;
   
   // System logs: protected from deletion (audit, login, errors)
-  if (path.startsWith("/system/logs/")) return false;
+  if (path.startsWith("/system/sys_logs/")) return false;
   
   // Other /system/ files: no deletion
   if (path.startsWith("/system/")) return false;
   
   // Logs: allow deleting individual log files
-  if (path.startsWith("/logs/")) return true;
+  if (path.startsWith("/logging_captures/")) return true;
   
   // ESP-NOW received: allow deleting
   if (path.startsWith("/espnow/")) return true;
@@ -638,7 +642,7 @@ bool canRename(const String& path) {
   if (path.startsWith("/system/")) return false;
   
   // Logs: no renaming (system-named)
-  if (path.startsWith("/logs/")) return false;
+  if (path.startsWith("/logging_captures/")) return false;
   
   // ESP-NOW received: no renaming (system-created paths)
   if (path.startsWith("/espnow/")) return false;
@@ -658,7 +662,7 @@ bool canCreate(const String& path) {
   if (path == "/system" || path.startsWith("/system/")) return false;
   
   // Logs: system-managed only
-  if (path == "/logs" || path.startsWith("/logs/")) return false;
+  if (path == "/logging_captures" || path.startsWith("/logging_captures/")) return false;
   
   // ESP-NOW: system-managed only
   if (path == "/espnow" || path.startsWith("/espnow/")) return false;

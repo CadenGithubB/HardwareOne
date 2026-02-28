@@ -86,13 +86,12 @@ static void queueAutomationSubCommand(const char* cmd) {
   Command uc;
   uc.line = cmd;
   uc.ctx.origin = ORIGIN_SYSTEM;
-  AuthContext actx;
-  actx.transport = SOURCE_INTERNAL;
-  actx.user = "system";
-  actx.ip = String();
-  actx.path = "/automation";
-  actx.opaque = nullptr;
-  uc.ctx.auth = actx;
+  uc.ctx.auth.transport = SOURCE_INTERNAL;
+  uc.ctx.auth.user = "system";
+  uc.ctx.auth.ip = "";
+  uc.ctx.auth.path = "/automation";
+  uc.ctx.auth.sid = "";
+  uc.ctx.auth.opaque = nullptr;
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
   uc.ctx.outputMask = CMD_OUT_LOG | CMD_OUT_BROADCAST;
@@ -603,7 +602,7 @@ void runAutomationsOnBoot() {
       }
     }
 
-    String cmdsList[64];
+    char* cmdsList[64];  // Array of pointers instead of String objects
     int cmdsCount = 0;
     {
       int cmdsPos = obj.indexOf("\"commands\"");
@@ -640,7 +639,10 @@ void runAutomationsOnBoot() {
             if (q2 < 0) break;
             String one = body.substring(q1 + 1, q2);
             one.trim();
-            if (one.length() && cmdsCount < 64) cmdsList[cmdsCount++] = one;
+            if (one.length() && cmdsCount < 64) {
+              cmdsList[cmdsCount] = strdup(one.c_str());  // Allocate and copy
+              if (cmdsList[cmdsCount]) cmdsCount++;
+            }
             i = q2 + 1;
           } else {
             int next = body.indexOf(',', i);
@@ -657,7 +659,10 @@ void runAutomationsOnBoot() {
           if (q1 > 0 && q2 > q1) {
             String cmd = obj.substring(q1 + 1, q2);
             cmd.trim();
-            if (cmd.length() && cmdsCount < 64) cmdsList[cmdsCount++] = cmd;
+            if (cmd.length() && cmdsCount < 64) {
+              cmdsList[cmdsCount] = strdup(cmd.c_str());  // Allocate and copy
+              if (cmdsList[cmdsCount]) cmdsCount++;
+            }
           }
         }
       }
@@ -670,13 +675,16 @@ void runAutomationsOnBoot() {
 
     // Evaluate global condition (expression-only, e.g. "ROOM=bedroom")
     if (condition.length() > 0) {
-      String wrapped = "IF " + condition + " THEN _";
-      bool conditionMet = evaluateCondition(wrapped.c_str());
+      char wrapped[384];
+      snprintf(wrapped, sizeof(wrapped), "IF %s THEN _", condition.c_str());
+      bool conditionMet = evaluateCondition(wrapped);
       DEBUGF(DEBUG_AUTOMATIONS, "[automations] id=%ld boot condition='%s' result=%s",
              id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
       if (!conditionMet) {
         if (gAutoLogActive) {
-          String skipMsg = "Boot automation skipped: ID=" + String(id) + " Name=" + autoName + " Condition not met: " + condition;
+          char skipMsg[256];
+          snprintf(skipMsg, sizeof(skipMsg), "Boot automation skipped: ID=%ld Name=%s Condition not met: %s",
+                   id, autoName.c_str(), condition.c_str());
           appendAutoLogEntry("AUTO_SKIP", skipMsg);
         }
         pos = objEnd + 1;
@@ -694,21 +702,32 @@ void runAutomationsOnBoot() {
 
     if (gAutoLogActive) {
       gAutoLogAutomationName = autoName;
-      String startMsg = "Boot automation started: ID=" + String(id) + " Name=" + autoName + " User=system";
+      char startMsg[256];
+      snprintf(startMsg, sizeof(startMsg), "Boot automation started: ID=%ld Name=%s User=system",
+               id, autoName.c_str());
       appendAutoLogEntry("AUTO_START", startMsg);
     }
 
     for (int ci = 0; ci < cmdsCount; ++ci) {
-      const char* result = executeConditionalCommand(cmdsList[ci].c_str());
+      const char* result = executeConditionalCommand(cmdsList[ci]);
 
       // Output the result (skip internal status messages - actual output comes from queue)
       if (!isAutoInternalResult(result)) {
-        broadcastOutput("[Boot Automation " + String(id) + "] " + String(result));
+        char outMsg[384];
+        snprintf(outMsg, sizeof(outMsg), "[Boot Automation %ld] %s", id, result);
+        broadcastOutput(outMsg);
       }
     }
 
+    // Free allocated command strings
+    for (int ci = 0; ci < cmdsCount; ++ci) {
+      free(cmdsList[ci]);
+    }
+
     if (gAutoLogActive) {
-      String endMsg = "Boot automation completed: ID=" + String(id) + " Name=" + autoName + " Commands=" + String(cmdsCount);
+      char endMsg[256];
+      snprintf(endMsg, sizeof(endMsg), "Boot automation completed: ID=%ld Name=%s Commands=%d",
+               id, autoName.c_str(), cmdsCount);
       appendAutoLogEntry("AUTO_END", endMsg);
     }
 

@@ -517,12 +517,12 @@ static bool isGPSDataLine(const String& line) {
   return false;
 }
 
-// Scan for GPS track files in /logs and /logs/tracks
+// Scan for GPS track files in /logging_captures and /logging_captures/tracks
 static void scanTrackFiles() {
   gTrackFileCount = 0;
   
   // Scan directories
-  const char* dirs[] = {"/logs", "/logs/tracks"};
+  const char* dirs[] = {"/logging_captures", "/logging_captures/tracks"};
   
   for (int d = 0; d < 2 && gTrackFileCount < 8; d++) {
     File root = LittleFS.open(dirs[d]);

@@ -36,7 +36,7 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `ENABLE_MICROPHONE_SENSOR` | `0` | PDM microphone via I2S |
 | `ENABLE_BATTERY_MONITOR` | `0` | LiPo voltage monitoring via ADC |
 | `ENABLE_EDGE_IMPULSE` | `0` | Edge Impulse ML inference |
-| `ENABLE_PAIRED_MODE` | `0` | Two-device bonded pair (master/worker) |
+| `ENABLE_BONDED_MODE` | `0` | Two-device bonded pair (master/worker) |
 
 When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABLE_*` flags:
 
@@ -116,7 +116,7 @@ ESP-NOW V3 is Hardware One's inter-device wireless protocol. Devices pair with a
 4. Once paired, devices appear in each other's peer list.
 
 ### Bonding (Master/Worker)
-With `ENABLE_PAIRED_MODE=1`, two devices can bond into a master/worker pair. The master gains a **Remote** tab in its web UI showing the worker's features, even if those features aren't compiled into the master.
+With `ENABLE_BONDED_MODE=1`, two devices can bond into a master/worker pair. The master gains a **Remote** tab in its web UI showing the worker's features, even if those features aren't compiled into the master.
 
 ### Metadata Sync
 Each device has a name, room, zone, and tags set in settings. The **Metadata** tab lets you pull this information from any peer. Set your own device metadata with:

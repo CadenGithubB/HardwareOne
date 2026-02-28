@@ -1098,7 +1098,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
     __S.renderSettings = function(s) {
       try {
         console.log('[SETTINGS] renderSettings called with:', s);
-        __S.state.currentSSID = (s.wifiPrimarySSID || s.wifiSSID || '');
+        __S.state.currentSSID = (s.wifiPrimarySSID || (s.wifi && s.wifi.wifiSSID) || '');
         $('wifi-ssid').textContent = __S.state.currentSSID;
         var primary = __S.state.currentSSID || '';
         var list = Array.isArray(s.wifiNetworks) 
@@ -1107,10 +1107,12 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         __S.state.savedSSIDs = [];
         if (primary) __S.state.savedSSIDs.push(primary);
         if (list && list.length) __S.state.savedSSIDs = __S.state.savedSSIDs.concat(list);
-        $('wifi-value').textContent = s.wifiAutoReconnect ? 'Enabled' : 'Disabled';
-        $('cli-value').textContent = s.webCliHistorySize;
-        $('cli-input').value = s.webCliHistorySize;
-        $('wifi-btn').textContent = s.wifiAutoReconnect ? 'Disable' : 'Enable';
+        var wifiAutoReconnect = s.wifiAutoReconnect || (s.wifi && s.wifi.wifiAutoReconnect) || false;
+        $('wifi-value').textContent = wifiAutoReconnect ? 'Enabled' : 'Disabled';
+        var webHistorySize = (s.cli && s.cli.webHistorySize) || s.webCliHistorySize || 10;
+        $('cli-value').textContent = webHistorySize;
+        $('cli-input').value = webHistorySize;
+        $('wifi-btn').textContent = wifiAutoReconnect ? 'Disable' : 'Enable';
         $('espnow-value').textContent = s.espnowenabled ? 'Enabled' : 'Disabled';
         $('espnow-btn').textContent = s.espnowenabled ? 'Disable' : 'Enable';
         

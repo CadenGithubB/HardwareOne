@@ -65,7 +65,7 @@
   #define CUSTOM_ENABLE_WEB_BLUETOOTH  1
   #define CUSTOM_ENABLE_WEB_SPEECH     0
   #define CUSTOM_ENABLE_WEB_ESPNOW     1
-  #define CUSTOM_ENABLE_WEB_PAIR       1
+  #define CUSTOM_ENABLE_WEB_BOND       1
   #define CUSTOM_ENABLE_WEB_MQTT       1
   #define CUSTOM_ENABLE_WEB_GAMES      0
   #define CUSTOM_ENABLE_WEB_MAPS       1
@@ -115,7 +115,7 @@
 // Bond Mode: Two-device bonded pair via ESP-NOW (master/worker)
 //   0 = Disabled, 1 = Enabled (requires ENABLE_ESPNOW=1)
 //   Master shows remote UI for worker features, manifest cached in LittleFS
-#define ENABLE_PAIRED_MODE      0
+#define ENABLE_BONDED_MODE      1
 
 // Automation: Scheduled tasks and conditional command system
 //   0 = Disabled, 1 = Enabled
@@ -300,7 +300,7 @@
   #define ENABLE_WEB_BLUETOOTH  0
   #define ENABLE_WEB_SPEECH     0
   #define ENABLE_WEB_ESPNOW     0
-  #define ENABLE_WEB_PAIR       0
+  #define ENABLE_WEB_BOND       0
   #define ENABLE_WEB_MQTT       0
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
@@ -309,7 +309,7 @@
   #define ENABLE_WEB_BLUETOOTH  0
   #define ENABLE_WEB_SPEECH     0
   #define ENABLE_WEB_ESPNOW     0
-  #define ENABLE_WEB_PAIR       0
+  #define ENABLE_WEB_BOND       0
   #define ENABLE_WEB_MQTT       0
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
@@ -318,7 +318,7 @@
   #define ENABLE_WEB_BLUETOOTH  0
   #define ENABLE_WEB_SPEECH     0
   #define ENABLE_WEB_ESPNOW     1
-  #define ENABLE_WEB_PAIR       1
+  #define ENABLE_WEB_BOND       1
   #define ENABLE_WEB_MQTT       1
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
@@ -327,7 +327,7 @@
   #define ENABLE_WEB_BLUETOOTH  1
   #define ENABLE_WEB_SPEECH     1
   #define ENABLE_WEB_ESPNOW     1
-  #define ENABLE_WEB_PAIR       1
+  #define ENABLE_WEB_BOND       1
   #define ENABLE_WEB_MQTT       1
   #define ENABLE_WEB_GAMES      1
   #define ENABLE_WEB_MAPS       1
@@ -336,7 +336,7 @@
   #define ENABLE_WEB_BLUETOOTH  CUSTOM_ENABLE_WEB_BLUETOOTH
   #define ENABLE_WEB_SPEECH     CUSTOM_ENABLE_WEB_SPEECH
   #define ENABLE_WEB_ESPNOW     CUSTOM_ENABLE_WEB_ESPNOW
-  #define ENABLE_WEB_PAIR       CUSTOM_ENABLE_WEB_PAIR
+  #define ENABLE_WEB_BOND       CUSTOM_ENABLE_WEB_BOND
   #define ENABLE_WEB_MQTT       CUSTOM_ENABLE_WEB_MQTT
   #define ENABLE_WEB_GAMES      CUSTOM_ENABLE_WEB_GAMES
   #define ENABLE_WEB_MAPS       CUSTOM_ENABLE_WEB_MAPS
@@ -355,7 +355,7 @@
   #define ENABLE_WEB_BLUETOOTH  0
   #define ENABLE_WEB_SPEECH     0
   #define ENABLE_WEB_ESPNOW     0
-  #define ENABLE_WEB_PAIR       0
+  #define ENABLE_WEB_BOND       0
   #define ENABLE_WEB_MQTT       0
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
@@ -373,9 +373,9 @@
 
 #if !ENABLE_ESPNOW
   #undef ENABLE_WEB_ESPNOW
-  #undef ENABLE_WEB_PAIR
+  #undef ENABLE_WEB_BOND
   #define ENABLE_WEB_ESPNOW 0
-  #define ENABLE_WEB_PAIR 0
+  #define ENABLE_WEB_BOND 0
 #endif
 
 #if !ENABLE_MQTT
@@ -399,10 +399,10 @@
   #define ENABLE_MQTT 0
 #endif
 
-// Force ENABLE_PAIRED_MODE off if ESP-NOW is disabled (Bond Mode requires ESP-NOW)
+// Force ENABLE_BONDED_MODE off if ESP-NOW is disabled (Bond Mode requires ESP-NOW)
 #if !ENABLE_ESPNOW
-  #undef ENABLE_PAIRED_MODE
-  #define ENABLE_PAIRED_MODE 0
+  #undef ENABLE_BONDED_MODE
+  #define ENABLE_BONDED_MODE 0
 #endif
 
 // =============================================================================

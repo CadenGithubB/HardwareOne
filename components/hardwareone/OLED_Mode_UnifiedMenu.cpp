@@ -1,5 +1,5 @@
 // OLED_Mode_UnifiedMenu.cpp - Unified local+remote actions menu
-// Shows actions from both local device and paired remote device
+// Shows actions from both local device and bonded remote device
 // Allows executing commands on either device from a single interface
 
 #include "OLED_Display.h"
@@ -11,7 +11,7 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 
-#if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
+#if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 extern DisplayDriver* oledDisplay;
 extern bool oledConnected;
@@ -338,7 +338,7 @@ static void buildUnifiedMenu() {
   // Build local items
   count += buildLocalMenuItems(&gUnifiedMenuItems[count], maxItems - count);
   
-  // Build remote items if paired
+  // Build remote items if bonded
   if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() > 0) {
     uint8_t peerMac[6];
     if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
@@ -617,4 +617,4 @@ static const OLEDModeEntry unifiedMenuModes[] = { unifiedMenuModeEntry };
 
 REGISTER_OLED_MODE_MODULE(unifiedMenuModes, 1, "UnifiedMenu");
 
-#endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
+#endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE

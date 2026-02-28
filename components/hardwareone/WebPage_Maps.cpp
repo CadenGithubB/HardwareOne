@@ -439,8 +439,8 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
 
   fsLock("gps.tracks.list");
   
-  // Scan /logs and /logs/tracks directories
-  const char* dirs[] = {"/logs", "/logs/tracks"};
+  // Scan /logging_captures and /logging_captures/tracks directories
+  const char* dirs[] = {"/logging_captures", "/logging_captures/tracks"};
   bool firstFile = true;
   
   for (int d = 0; d < 2; d++) {

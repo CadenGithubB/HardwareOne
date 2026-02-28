@@ -215,7 +215,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
     PSRAM_JSON_DOC(doc);
     buildSystemInfoJson(doc);
 
-    char sysJsonBuf[256];
+    static char sysJsonBuf[1024];
     size_t len = serializeJson(doc, sysJsonBuf, sizeof(sysJsonBuf));
 
     DEBUG_SSEF("Sending system event snapshot (%d bytes json)", len);
@@ -225,7 +225,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
       DEBUG_SSEF("SSE->system json: %.80s...", sysJsonBuf);
     }
 
-    char sseEventBuf[384];
+    static char sseEventBuf[1100];
     snprintf(sseEventBuf, sizeof(sseEventBuf), "event: system\ndata: %s\n\n", sysJsonBuf);
     sseWrite(req, sseEventBuf);
   };

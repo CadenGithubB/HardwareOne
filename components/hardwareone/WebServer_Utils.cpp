@@ -382,10 +382,8 @@ String generateNavigation(const String& activePage, const String& username, cons
 #endif
 #if ENABLE_WEB_ESPNOW
   link("/espnow", "espnow", "ESP-NOW");
-#if ENABLE_WEB_PAIR
-  if (gSettings.bondModeEnabled) {
-    link("/bond", "bond", "Bond");
-  }
+#if ENABLE_WEB_BOND && ENABLE_BONDED_MODE
+  link("/bond", "bond", "Bond");
 #endif
 #endif
 #if ENABLE_WEB_MQTT

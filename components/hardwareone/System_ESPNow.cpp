@@ -130,8 +130,8 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* d
 
 enum EspNowV3Type : uint8_t {
   ESPNOW_V3_TYPE_ACK          = 1,
-  ESPNOW_V3_TYPE_PAIR_CAP_REQ = 2,
-  ESPNOW_V3_TYPE_PAIR_CAP_RESP= 3,
+  ESPNOW_V3_TYPE_BOND_CAP_REQ = 2,
+  ESPNOW_V3_TYPE_BOND_CAP_RESP= 3,
   ESPNOW_V3_TYPE_TEXT         = 4,
   ESPNOW_V3_TYPE_CMD          = 5,
   ESPNOW_V3_TYPE_CMD_RESP     = 6,
@@ -146,7 +146,7 @@ enum EspNowV3Type : uint8_t {
   ESPNOW_V3_TYPE_SENSOR_DATA  = 15,  // Binary sensor data (bond mode)
   ESPNOW_V3_TYPE_SETTINGS_REQ = 16,  // Request settings from bonded device
   ESPNOW_V3_TYPE_SETTINGS_RESP= 17,  // Settings response (JSON payload)
-  ESPNOW_V3_TYPE_SETTINGS_PUSH= 18,  // Push settings update when changed
+  ESPNOW_V3_TYPE_SETTINGS_PUSH= 18,  // RESERVED (push removed — settings changes use remote commands)
   ESPNOW_V3_TYPE_METADATA_REQ = 19,  // Request peer's metadata
   ESPNOW_V3_TYPE_METADATA_RESP= 20,  // Metadata response
   ESPNOW_V3_TYPE_METADATA_PUSH= 21,  // Push metadata update (when changed)
@@ -158,6 +158,9 @@ enum EspNowV3Type : uint8_t {
   ESPNOW_V3_TYPE_WORKER_STATUS= 27,  // Worker status report to master (detailed)
   ESPNOW_V3_TYPE_SENSOR_STATUS= 28,  // Sensor status broadcast (enabled/disabled)
   ESPNOW_V3_TYPE_SENSOR_BROADCAST= 29, // Sensor data broadcast to mesh
+  ESPNOW_V3_TYPE_BOND_STATUS_REQ = 30, // Request live status from bonded peer
+  ESPNOW_V3_TYPE_BOND_STATUS_RESP= 31, // Live status response (BondPeerStatus payload)
+  ESPNOW_V3_TYPE_STREAM_CTRL     = 32, // Stream control (master->worker: start/stop sensor streaming)
 };
 
 struct __attribute__((packed)) V3PayloadHeartbeat {
@@ -213,6 +216,7 @@ struct __attribute__((packed)) V3PayloadWorkerStatus {
   // Metadata fields follow as variable JSON payload if needed
 };
 
+#if ENABLE_BONDED_MODE
 // Bond mode heartbeat payload (lightweight)
 struct __attribute__((packed)) V3PayloadBondHeartbeat {
   uint8_t role;           // Bond role (master/worker)
@@ -221,8 +225,12 @@ struct __attribute__((packed)) V3PayloadBondHeartbeat {
   uint32_t uptimeSec;     // Uptime in seconds
   uint32_t freeHeap;      // Free heap bytes
   uint32_t seqNum;        // Sequence number for tracking
+  uint32_t bootCounter;   // Persistent boot counter
+  uint32_t settingsHash;  // Hash of local settings (exclude passwords)
 };
+#endif // ENABLE_BONDED_MODE
 
+#if ENABLE_BONDED_MODE
 // Binary sensor data payload for bond mode streaming (compact, no JSON overhead)
 // Max payload is 226 bytes, header is 8 bytes, leaving 218 bytes for sensor data
 struct __attribute__((packed)) V3PayloadSensorData {
@@ -232,6 +240,13 @@ struct __attribute__((packed)) V3PayloadSensorData {
   uint32_t seqNum;        // Sequence number for ordering
   uint8_t data[];         // Variable-length sensor data (flexible array member)
 };
+// Stream control payload for bond mode (master -> worker)
+struct __attribute__((packed)) V3PayloadStreamCtrl {
+  uint8_t sensorType;   // RemoteSensorType enum value
+  uint8_t enable;       // 1 = start streaming, 0 = stop streaming
+  uint8_t reserved[2];  // Padding
+};
+#endif // ENABLE_BONDED_MODE
 
 // Sensor status payload for mesh broadcast
 struct __attribute__((packed)) V3PayloadSensorStatus {
@@ -357,11 +372,16 @@ static V3FragAckWait* v3_frag_ack_alloc(const uint8_t* dst, uint32_t msgId, uint
   return nullptr;
 }
 
+#if ENABLE_BONDED_MODE
 // Paired heartbeat constants
 static const uint32_t BOND_HEARTBEAT_INTERVAL_MS = 5000;   // Send every 5 seconds
 static const uint32_t BOND_HEARTBEAT_TIMEOUT_MS = 15000;   // Peer offline after 15s no heartbeat
 static uint32_t gLastBondHeartbeatSentMs = 0;
 static uint32_t gBondHeartbeatSeqNum = 0;
+static const uint32_t BOND_SYNC_RETRY_MS = 3000;   // Retry sync request every 3s if stuck
+
+static void resetBondSync();
+#endif
 
 // Forward declaration for v3_send_frame (implemented later)
 bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
@@ -2065,19 +2085,46 @@ static void            finalizeTopologyStream(TopologyStream* stream);
 static bool            handleJsonMessage(const ReceivedMessage& ctx);
 static bool            parseJsonMessage(const String& message, JsonDocument& doc);
 static void            updateUnpairedDevice(const uint8_t* mac, const String& name, int rssi);
+#if ENABLE_BONDED_MODE
+static bool            cacheManifestToLittleFS(const uint8_t fwHash[16], const String& manifest);
+#endif
+#if ENABLE_BONDED_MODE
 static void            processBondSettings(const uint8_t* srcMac, const String& deviceName, const String& settingsStr);
+static void            requestBondSettings(const uint8_t* peerMac);
+#endif
 static void            meshRetryDequeue(uint32_t msgId);
 
+#if ENABLE_BONDED_MODE
 // Process a received manifest from a bonded peer (bond mode handshake step)
 static void processBondModeManifestResp(const uint8_t* srcMac, const String& deviceName, const String& manifestStr) {
   if (!gEspNow) return;
-  DEBUGF(DEBUG_ESPNOW_MESH, "[MANIFEST] Received manifest from %s (%d bytes)", deviceName.c_str(), manifestStr.length());
-  gEspNow->bondManifestReceived = true;
-  if (gEspNow->bondHandshakeState == BOND_HS_MANIFEST_EXCHANGE) {
-    gEspNow->bondHandshakeState = BOND_HS_SETTINGS_EXCHANGE;
+  BROADCAST_PRINTF("[BOND_SYNC] Manifest received from %s len=%d role=%d",
+                   deviceName.c_str(), manifestStr.length(), (int)gSettings.bondRole);
+  
+  // Reject if peer is offline (stale transfer from before disconnect)
+  if (!gEspNow->bondPeerOnline) {
+    BROADCAST_PRINTF("[BOND_SYNC] REJECTED stale manifest (peer offline)");
+    return;
   }
-  BROADCAST_PRINTF("[BOND] Manifest received from %s (%d bytes)", deviceName.c_str(), manifestStr.length());
+  
+  // Validate JSON integrity — reject truncated/corrupted file transfers
+  if (manifestStr.length() < 2 || manifestStr[0] != '{' || manifestStr[manifestStr.length() - 1] != '}') {
+    BROADCAST_PRINTF("[BOND_SYNC] REJECTED corrupt manifest (len=%d, not valid JSON object)", manifestStr.length());
+    gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
+    gEspNow->bondSyncRetryCount = 0;
+    return;  // Sync tick will re-request
+  }
+  
+  gEspNow->bondManifestReceived = true;
+  gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
+  gEspNow->bondSyncRetryCount = 0;
+
+  if (gEspNow->lastRemoteCapValid) {
+    cacheManifestToLittleFS(gEspNow->lastRemoteCap.fwHash, manifestStr);
+  }
+  // Sync tick will pick up the next missing item (settings) on next iteration
 }
+#endif // ENABLE_BONDED_MODE
 
 // Forward declaration for command execution
 static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, const char* cmd);
@@ -2328,22 +2375,53 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
          deviceName, isPaired ? "YES" : "NO", 
          (h->flags & ESPNOW_V3_FLAG_ENCRYPTED) ? "YES" : "NO");
 
+#if ENABLE_BONDED_MODE
+  // Track when bond-type messages arrive but would be rejected due to isPaired=false
+  // Can't use BROADCAST_PRINTF here (ISR-like context) — use deferred counter instead
+  if (!isPaired && (h->type == ESPNOW_V3_TYPE_BOND_HEARTBEAT ||
+                    h->type == ESPNOW_V3_TYPE_BOND_CAP_REQ ||
+                    h->type == ESPNOW_V3_TYPE_BOND_CAP_RESP ||
+                    h->type == ESPNOW_V3_TYPE_MANIFEST_REQ ||
+                    h->type == ESPNOW_V3_TYPE_SETTINGS_REQ)) {
+    static volatile uint32_t sBondUnpairedRejectCount = 0;
+    static volatile uint8_t  sBondUnpairedRejectType = 0;
+    static volatile uint8_t  sBondUnpairedRejectMac[6] = {};
+    sBondUnpairedRejectCount++;
+    sBondUnpairedRejectType = h->type;
+    memcpy((void*)sBondUnpairedRejectMac, recv_info->src_addr, 6);
+    // Also set a flag on gEspNow for the task loop to pick up
+    if (gEspNow) {
+      gEspNow->bondUnpairedRejectCount = sBondUnpairedRejectCount;
+      gEspNow->bondUnpairedRejectType = sBondUnpairedRejectType;
+      memcpy(gEspNow->bondUnpairedRejectMac, (const void*)sBondUnpairedRejectMac, 6);
+    }
+  }
+#endif
+
   // === TEXT MESSAGE ===
   // NOTE: Deferred to task context - callback is ISR-like with limited stack
   if (h->type == ESPNOW_V3_TYPE_TEXT) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message detected, payload: %.80s", 
            payloadLen > 0 ? (const char*)payload : "(empty)");
     if (payloadLen > 0 && payloadLen <= ESPNOW_V3_MAX_PAYLOAD && gEspNow) {
-      size_t copyLen = (payloadLen < sizeof(gEspNow->deferredTextContent) - 1) ? payloadLen : sizeof(gEspNow->deferredTextContent) - 1;
-      memcpy(gEspNow->deferredTextContent, payload, copyLen);
-      gEspNow->deferredTextContent[copyLen] = '\0';
-      memcpy(gEspNow->deferredTextSrcMac, recv_info->src_addr, 6);
-      strncpy(gEspNow->deferredTextDeviceName, deviceName, sizeof(gEspNow->deferredTextDeviceName) - 1);
-      gEspNow->deferredTextDeviceName[sizeof(gEspNow->deferredTextDeviceName) - 1] = '\0';
-      gEspNow->deferredTextEncrypted = (h->flags & ESPNOW_V3_FLAG_ENCRYPTED) != 0;
-      gEspNow->deferredTextPending = true;
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message deferred for processing (encrypted=%s)",
-             gEspNow->deferredTextEncrypted ? "YES" : "NO");
+      int head = gEspNow->textQueueHead;
+      int nextHead = (head + 1) & (EspNowState::TEXT_QUEUE_SIZE - 1);
+      if (nextHead != gEspNow->textQueueTail) {
+        auto& slot = gEspNow->textQueue[head];
+        size_t copyLen = (payloadLen < sizeof(slot.content) - 1) ? payloadLen : sizeof(slot.content) - 1;
+        memcpy(slot.content, payload, copyLen);
+        slot.content[copyLen] = '\0';
+        memcpy(slot.srcMac, recv_info->src_addr, 6);
+        strncpy(slot.deviceName, deviceName, sizeof(slot.deviceName) - 1);
+        slot.deviceName[sizeof(slot.deviceName) - 1] = '\0';
+        slot.encrypted = (h->flags & ESPNOW_V3_FLAG_ENCRYPTED) != 0;
+        slot.used = true;
+        gEspNow->textQueueHead = nextHead;
+        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message enqueued slot=%d (encrypted=%s)",
+               head, slot.encrypted ? "YES" : "NO");
+      } else {
+        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT queue full, message dropped");
+      }
     } else {
       DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message REJECTED: payloadLen=%u gEspNow=%p",
              payloadLen, gEspNow);
@@ -2395,7 +2473,8 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     if (payloadLen >= 1 && gEspNow) {
       const V3PayloadCmdResp* resp = (const V3PayloadCmdResp*)payload;
       size_t resultLen = payloadLen - 1;
-      if (resultLen > sizeof(gEspNow->deferredCmdRespResult) - 1) resultLen = sizeof(gEspNow->deferredCmdRespResult) - 1;
+      if (resultLen > 2047) resultLen = 2047;
+      if (!gEspNow->deferredCmdRespResult) { gEspNow->deferredCmdRespPending = false; return true; }
       memcpy(gEspNow->deferredCmdRespResult, resp->result, resultLen);
       gEspNow->deferredCmdRespResult[resultLen] = '\0';
       memcpy(gEspNow->deferredCmdRespSrcMac, recv_info->src_addr, 6);
@@ -2771,39 +2850,80 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     return true;
   }
 
+#if ENABLE_BONDED_MODE
   // === BOND HEARTBEAT ===
-  if (h->type == ESPNOW_V3_TYPE_BOND_HEARTBEAT && isPaired) {
+  if (h->type == ESPNOW_V3_TYPE_BOND_HEARTBEAT && isPaired && gSettings.bondModeEnabled) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_HB_RX] from %s payloadLen=%u (need %u) isPaired=%d",
+           deviceName, payloadLen, (unsigned)sizeof(V3PayloadBondHeartbeat), (int)isPaired);
     if (payloadLen >= sizeof(V3PayloadBondHeartbeat)) {
       const V3PayloadBondHeartbeat* hb = (const V3PayloadBondHeartbeat*)payload;
       if (gEspNow) {
-        bool wasOffline = !gEspNow->bondPeerOnline;
+        bool bootChanged = (hb->bootCounter != 0 && gEspNow->bondPeerBootCounter != 0 &&
+                            hb->bootCounter != gEspNow->bondPeerBootCounter);
+        bool wasOffline = !gEspNow->bondPeerOnline || bootChanged;
+        uint32_t oldSettingsHash = gEspNow->bondPeerSettingsHash;
+
+        gEspNow->bondPeerBootCounter = hb->bootCounter;
+        gEspNow->bondPeerSettingsHash = hb->settingsHash;
+        gEspNow->bondPeerUptime = hb->uptimeSec;
+
+        if (bootChanged) {
+          resetBondSync();
+        }
+
+        // Detect live settings change: peer's hash changed while we had their settings cached
+        bool settingsChanged = (gEspNow->bondSettingsReceived && oldSettingsHash != 0 &&
+                                hb->settingsHash != 0 && hb->settingsHash != oldSettingsHash);
+        if (settingsChanged && !bootChanged) {
+          gEspNow->bondSettingsReceived = false;
+          gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
+          gEspNow->bondSyncRetryCount = 0;
+          DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_HB_RX] Peer settings hash changed 0x%08lX->0x%08lX, will re-fetch",
+                 (unsigned long)oldSettingsHash, (unsigned long)hb->settingsHash);
+        }
+
         gEspNow->lastBondHeartbeatReceivedMs = millis();
         gEspNow->bondHeartbeatsReceived++;
         gEspNow->bondPeerOnline = true;
-        gEspNow->bondPeerUptimeSec = hb->uptimeSec;
         
-        // Update RSSI (lightweight operation safe for callback)
-        gEspNow->bondRssiLast = recv_info->rx_ctrl->rssi;
-        gEspNow->bondLastRssiUpdateMs = millis();
-        // EMA: avg = 0.9*avg + 0.1*new (fixed-point to avoid float in ISR)
-        gEspNow->bondRssiAvg = (9 * gEspNow->bondRssiAvg + gEspNow->bondRssiLast) / 10;
+        // Update RSSI from rx_ctrl
+        if (recv_info->rx_ctrl) {
+          gEspNow->bondRssiLast = recv_info->rx_ctrl->rssi;
+          if (gEspNow->bondLastRssiUpdateMs == 0) {
+            gEspNow->bondRssiAvg = gEspNow->bondRssiLast;
+          } else {
+            gEspNow->bondRssiAvg = (int8_t)((9 * (int)gEspNow->bondRssiAvg + (int)gEspNow->bondRssiLast) / 10);
+          }
+          gEspNow->bondLastRssiUpdateMs = millis();
+        }
         
-        // Reset missed heartbeat counter on successful receive
-        gEspNow->bondMissedHeartbeats = 0;
-        if (gEspNow->bondSuccessfulHeartbeats < 65535) gEspNow->bondSuccessfulHeartbeats++;
+        // Worker recovery: if caps are exchanged but bondSettingsSent was never
+        // set (e.g. firmware update without wipe on an already-synced session),
+        // infer that settings were already sent and complete the worker sync.
+        // Time gate: only after 30s of caps exchanged, to avoid false-triggering
+        // during normal handshake when the master just hasn't asked for settings yet.
+        bool capExchangedLongEnough = (gEspNow->lastRemoteCapTime > 0 &&
+                                       (millis() - gEspNow->lastRemoteCapTime) > 30000);
+        if (gSettings.bondRole == 0 && !gEspNow->bondSessionTokenValid &&
+            gEspNow->lastRemoteCapValid && gEspNow->bondCapSent &&
+            !gEspNow->bondSettingsSent && capExchangedLongEnough) {
+          gEspNow->bondSettingsSent = true;
+          if (isBondSynced()) {
+            uint8_t pMac[6];
+            if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
+              computeBondSessionToken(pMac);
+            }
+            BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=0 (worker, recovered)");
+          }
+        }
         
         if (wasOffline) {
-          // NOTE: Don't use BROADCAST_PRINTF here - we're in ESP-NOW callback context (ISR-like)
-          // The logging will happen in processPairedHeartbeats() when flags are handled
-          
-          // Set flags for deferred processing - handled in processPairedHeartbeats()
-          // Don't do heavy work here (ESP-NOW callback context has limited stack)
-          // Store current handshake state for debug logging in deferred handler
-          gEspNow->bondOnlineEventState = gEspNow->bondHandshakeState;
-          gEspNow->bondNeedsCapabilityRequest = true;
-          gEspNow->bondNeedsStreamingSetup = true;  // Apply saved streaming settings
+          // Deferred: master starts sync tick
+          if (gSettings.bondRole == 1) {
+            gEspNow->bondNeedsCapabilityRequest = true;
+            // bondNeedsStreamingSetup is set after sync completes in processBondSettings()
+          }
         }
-        // NOTE: Don't use DEBUGF here - we're in ESP-NOW callback context (ISR-like)
       }
     }
     // Cleanup reassembly buffer if this was a fragmented message
@@ -2818,10 +2938,15 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     }
     return true;
   }
+#endif // ENABLE_BONDED_MODE
 
-  // === PAIR CAP REQ ===
+#if ENABLE_BONDED_MODE  
+  // === BOND CAP REQ ===
   // NOTE: Defer heavy work to main loop - callback context has limited stack and is ISR-like
-  if (h->type == ESPNOW_V3_TYPE_PAIR_CAP_REQ && isPaired) {
+  if (h->type == ESPNOW_V3_TYPE_BOND_CAP_REQ && isPaired && gSettings.bondModeEnabled) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_REQ_RX] from %s role=%d capSent=%d",
+           deviceName, (int)gSettings.bondRole,
+           gEspNow ? (int)gEspNow->bondCapSent : -1);
     if (gEspNow) {
       memcpy(gEspNow->bondPendingResponseMac, recv_info->src_addr, 6);
       gEspNow->bondNeedsCapabilityResponse = true;
@@ -2838,15 +2963,32 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     return true;
   }
 
-  // === PAIR CAP RESP ===
-  // NOTE: Defer logging to main loop - callback context is ISR-like
-  if (h->type == ESPNOW_V3_TYPE_PAIR_CAP_RESP && isPaired && payloadLen == sizeof(CapabilitySummary)) {
+  // === BOND CAP RESP ===
+  // NOTE: Defer heavy work to main loop - callback context is ISR-like
+  if (h->type == ESPNOW_V3_TYPE_BOND_CAP_RESP && isPaired && gSettings.bondModeEnabled && payloadLen == sizeof(CapabilitySummary)) {
     const CapabilitySummary* cap = (const CapabilitySummary*)payload;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] from %s role=%d capSent=%d sensorMask=0x%04lX devName='%.16s'",
+           deviceName, (int)gSettings.bondRole,
+           gEspNow ? (int)gEspNow->bondCapSent : -1,
+           (unsigned long)cap->sensorMask, cap->deviceName);
     if (gEspNow) {
       memcpy(&gEspNow->lastRemoteCap, cap, sizeof(CapabilitySummary));
       gEspNow->lastRemoteCapValid = true;
       gEspNow->lastRemoteCapTime = millis();
       gEspNow->bondReceivedCapability = true;  // Defer logging
+      gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
+      gEspNow->bondSyncRetryCount = 0;
+      gEspNow->bondSyncLastAttemptMs = 0;
+      // Send our own CAP_RESP back so the peer also gets our capabilities.
+      // Without this, the master never learns the worker's caps (one-directional exchange).
+      // bondCapSent prevents infinite ping-pong: each side sends at most once per handshake.
+      if (!gEspNow->bondCapSent) {
+        memcpy(gEspNow->bondPendingResponseMac, recv_info->src_addr, 6);
+        gEspNow->bondNeedsCapabilityResponse = true;
+        DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] queued reciprocal CAP_RESP (bondCapSent was false)");
+      } else {
+        DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] NOT sending reciprocal (bondCapSent already true)");
+      }
     }
     if (h->fragCount > 1) {
       for (int i = 0; i < V3_REASM_MAX; i++) {
@@ -2862,7 +3004,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
 
   // === SENSOR DATA (bond mode binary streaming) ===
   // NOTE: This runs in ESP-NOW callback context - minimize debug prints!
-  if (h->type == ESPNOW_V3_TYPE_SENSOR_DATA && isPaired) {
+  if (h->type == ESPNOW_V3_TYPE_SENSOR_DATA && isPaired && gSettings.bondModeEnabled) {
     if (payloadLen >= sizeof(V3PayloadSensorData)) {
       const V3PayloadSensorData* sd = (const V3PayloadSensorData*)payload;
       
@@ -2902,12 +3044,35 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     return true;
   }
 
+  // === STREAM CONTROL (bond mode: master -> worker) ===
+  // NOTE: Deferred to task context - startSensorDataStreaming creates tasks/mutexes
+  if (h->type == ESPNOW_V3_TYPE_STREAM_CTRL && isPaired && gSettings.bondModeEnabled) {
+    if (payloadLen >= 2 && gEspNow) {
+      gEspNow->bondDeferredStreamCtrlSensor = payload[0];  // sensorType
+      gEspNow->bondDeferredStreamCtrlEnable = payload[1];   // enable
+      gEspNow->bondDeferredStreamCtrlPending = true;
+      DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STREAM_CTRL_RX] sensor=%u enable=%u (deferred)", payload[0], payload[1]);
+    }
+    if (h->fragCount > 1) {
+      for (int i = 0; i < V3_REASM_MAX; i++) {
+        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
+            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
+          v3_reasm_reset(gV3Reasm[i]);
+          break;
+        }
+      }
+    }
+    return true;
+  }
+
   // === SETTINGS REQUEST ===
   // NOTE: Defer to task context - callback is ISR-like with limited stack
-  if (h->type == ESPNOW_V3_TYPE_SETTINGS_REQ && isPaired) {
+  if (h->type == ESPNOW_V3_TYPE_SETTINGS_REQ && isPaired && gSettings.bondModeEnabled) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SETTINGS_REQ_RX] from %s isPaired=%d", deviceName, (int)isPaired);
     if (gEspNow) {
       memcpy(gEspNow->bondPendingResponseMac, recv_info->src_addr, 6);
       gEspNow->bondNeedsSettingsResponse = true;
+      DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SETTINGS_REQ_RX] set bondNeedsSettingsResponse=true");
     }
     if (h->fragCount > 1) {
       for (int i = 0; i < V3_REASM_MAX; i++) {
@@ -2926,6 +3091,31 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // The file path will indicate it's a settings file (/system/_settings_out.json)
   // Processing happens in the FILE_END handler below
 
+  // === BOND STATUS REQ ===
+  if (h->type == ESPNOW_V3_TYPE_BOND_STATUS_REQ && isPaired && gSettings.bondModeEnabled) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STATUS_REQ_RX] from %s", deviceName);
+    if (gEspNow) {
+      memcpy(gEspNow->bondPendingResponseMac, recv_info->src_addr, 6);
+      gEspNow->bondNeedsStatusResponse = true;
+    }
+    return true;
+  }
+
+  // === BOND STATUS RESP ===
+  if (h->type == ESPNOW_V3_TYPE_BOND_STATUS_RESP && isPaired && gSettings.bondModeEnabled) {
+    if (payloadLen >= sizeof(BondPeerStatus) && gEspNow) {
+      memcpy(&gEspNow->bondPeerStatus, payload, sizeof(BondPeerStatus));
+      gEspNow->bondPeerStatusValid = true;
+      gEspNow->bondPeerStatusTimeMs = millis();
+      BROADCAST_PRINTF("[BOND_STATUS_RESP_RX] from %s enabled=0x%04X connected=0x%04X heap=%lu",
+             deviceName, gEspNow->bondPeerStatus.sensorEnabledMask,
+             gEspNow->bondPeerStatus.sensorConnectedMask,
+             (unsigned long)gEspNow->bondPeerStatus.freeHeap);
+    }
+    return true;
+  }
+#endif // ENABLE_BONDED_MODE
+
   // === METADATA REQUEST ===
   // Check if peer is encrypted by looking in device list
   bool isEncrypted = false;
@@ -2940,13 +3130,13 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   
   if (h->type == ESPNOW_V3_TYPE_METADATA_REQ) {
     DEBUG_ESPNOW_METADATAF("[METADATA] REQ received from %s (%s) msgId=%lu isPaired=%d isEncrypted=%d",
-      deviceName, macToHexString(recv_info->src_addr).c_str(), (unsigned long)h->msgId,
+      deviceName, MAC_STR(recv_info->src_addr), (unsigned long)h->msgId,
       (int)isPaired, (int)isEncrypted);
     if (gEspNow) {
       memcpy(gEspNow->metadataPendingResponseMac, recv_info->src_addr, 6);
       gEspNow->bondNeedsMetadataResponse = true;
       DEBUG_ESPNOW_METADATAF("[METADATA] bondNeedsMetadataResponse=true, will RESP to %s",
-        macToHexString(recv_info->src_addr).c_str());
+        MAC_STR(recv_info->src_addr));
     } else {
       WARN_ESPNOWF("[METADATA] REQ from %s ignored: gEspNow is null", deviceName);
     }
@@ -2966,7 +3156,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   if ((h->type == ESPNOW_V3_TYPE_METADATA_RESP || h->type == ESPNOW_V3_TYPE_METADATA_PUSH)) {
     const char* metaType = (h->type == ESPNOW_V3_TYPE_METADATA_PUSH) ? "PUSH" : "RESP";
     DEBUG_ESPNOW_METADATAF("[METADATA] %s received from %s (%s) msgId=%lu payloadLen=%u (need %u) isPaired=%d",
-      metaType, deviceName, macToHexString(recv_info->src_addr).c_str(),
+      metaType, deviceName, MAC_STR(recv_info->src_addr),
       (unsigned long)h->msgId, payloadLen, (unsigned)sizeof(V3PayloadMetadata), (int)isPaired);
     if (payloadLen >= sizeof(V3PayloadMetadata)) {
       const V3PayloadMetadata* meta = (const V3PayloadMetadata*)payload;
@@ -3246,15 +3436,23 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
                       ((gActiveFileTransfer->receivedChunks == gActiveFileTransfer->totalChunks) &&
                        (gActiveFileTransfer->receivedBytes == gActiveFileTransfer->totalSize));
 
-    if (fe->success && !isComplete) {
-      ERROR_ESPNOWF("[V3_FILE] Incomplete transfer: %u/%u chunks, %lu/%lu bytes",
+    if (!isComplete) {
+      BROADCAST_PRINTF("[V3_FILE] REJECTED incomplete transfer '%s': %u/%u chunks, %lu/%lu bytes",
+                   gActiveFileTransfer->filename,
                    (unsigned)gActiveFileTransfer->receivedChunks,
                    (unsigned)gActiveFileTransfer->totalChunks,
                    (unsigned long)gActiveFileTransfer->receivedBytes,
                    (unsigned long)gActiveFileTransfer->totalSize);
+      // Clean up — sync tick will re-request if this was manifest/settings
+      if (gActiveFileTransfer->chunkMap) heap_caps_free(gActiveFileTransfer->chunkMap);
+      if (gActiveFileTransfer->dataBuffer) heap_caps_free(gActiveFileTransfer->dataBuffer);
+      delete gActiveFileTransfer;
+      gActiveFileTransfer = nullptr;
+      return true;
     }
 
-    if (fe->success && isComplete && gActiveFileTransfer->dataBuffer) {
+    if (fe->success && gActiveFileTransfer->dataBuffer) {
+#if ENABLE_BONDED_MODE
       // Check if this is a manifest file - process directly from buffer without filesystem
       if (strcmp(gActiveFileTransfer->filename, "_manifest_out.json") == 0) {
         // Process manifest directly from PSRAM buffer
@@ -3272,7 +3470,9 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
         processBondSettings(gActiveFileTransfer->senderMac, senderMacStr, settingsStr);
         BROADCAST_PRINTF("[V3_FILE] Settings processed: %lu bytes", (unsigned long)gActiveFileTransfer->receivedBytes);
       } 
-      else {
+      else
+#endif // ENABLE_BONDED_MODE
+      {
         // For non-manifest files, write to filesystem (single write operation)
         String senderMacHex = macToHexString(gActiveFileTransfer->senderMac);
         senderMacHex.replace(":", "");
@@ -3360,12 +3560,15 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     return true;
   }
 
+#if ENABLE_BONDED_MODE
   // === MANIFEST REQ (v3) ===
   // NOTE: Defer heavy work to main loop - callback context has limited stack and is ISR-like
-  if (h->type == ESPNOW_V3_TYPE_MANIFEST_REQ && isPaired) {
+  if (h->type == ESPNOW_V3_TYPE_MANIFEST_REQ && isPaired && gSettings.bondModeEnabled) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_MANIFEST_REQ_RX] from %s isPaired=%d", deviceName, (int)isPaired);
     if (gEspNow) {
       memcpy(gEspNow->bondPendingResponseMac, recv_info->src_addr, 6);
       gEspNow->bondNeedsManifestResponse = true;
+      DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_MANIFEST_REQ_RX] set bondNeedsManifestResponse=true");
     }
     if (h->fragCount > 1) {
       for (int i = 0; i < V3_REASM_MAX; i++) {
@@ -3381,6 +3584,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
 
   // === MANIFEST RESP is handled via FILE_END for _manifest_out.json ===
   // (Large manifests are sent as file transfers, not as single frames)
+#endif // ENABLE_BONDED_MODE
 
   // Unknown V3 type - log and ignore
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3] Unknown type %d from %s", h->type, deviceName);
@@ -3928,9 +4132,88 @@ void processMessageQueue() {
   }
 }
 
+#if ENABLE_BONDED_MODE
 // ==========================
-// Paired Mode Helper Functions (forward declarations moved here)
+// Bond Mode Helper Functions
 // ==========================
+
+/**
+ * Build BondPeerStatus snapshot from local device state
+ * Called in task context when responding to BOND_STATUS_REQ
+ */
+static void buildLocalBondStatus(BondPeerStatus& status) {
+  memset(&status, 0, sizeof(BondPeerStatus));
+  
+  status.uptimeSec = millis() / 1000;
+  status.freeHeap = (uint32_t)ESP.getFreeHeap();
+  status.minFreeHeap = (uint32_t)ESP.getMinFreeHeap();
+  
+  // Build sensor enabled mask from runtime booleans
+  extern bool thermalEnabled, tofEnabled, imuEnabled, gamepadEnabled;
+  extern bool gpsEnabled, presenceEnabled;
+  uint16_t enabled = 0;
+#if ENABLE_THERMAL_SENSOR
+  if (thermalEnabled)  enabled |= CAP_SENSOR_THERMAL;
+#endif
+#if ENABLE_TOF_SENSOR
+  if (tofEnabled)      enabled |= CAP_SENSOR_TOF;
+#endif
+#if ENABLE_IMU_SENSOR
+  if (imuEnabled)      enabled |= CAP_SENSOR_IMU;
+#endif
+#if ENABLE_GAMEPAD_SENSOR
+  if (gamepadEnabled)  enabled |= CAP_SENSOR_GAMEPAD;
+#endif
+#if ENABLE_GPS_SENSOR
+  if (gpsEnabled)      enabled |= CAP_SENSOR_GPS;
+#endif
+#if ENABLE_PRESENCE_SENSOR
+  if (presenceEnabled) enabled |= CAP_SENSOR_PRESENCE;
+#endif
+  status.sensorEnabledMask = enabled;
+  
+  // Build sensor connected mask
+  extern bool thermalConnected, tofConnected, imuConnected, gamepadConnected;
+  extern bool gpsConnected, presenceConnected;
+  uint16_t connected = 0;
+#if ENABLE_THERMAL_SENSOR
+  if (thermalConnected)  connected |= CAP_SENSOR_THERMAL;
+#endif
+#if ENABLE_TOF_SENSOR
+  if (tofConnected)      connected |= CAP_SENSOR_TOF;
+#endif
+#if ENABLE_IMU_SENSOR
+  if (imuConnected)      connected |= CAP_SENSOR_IMU;
+#endif
+#if ENABLE_GAMEPAD_SENSOR
+  if (gamepadConnected)  connected |= CAP_SENSOR_GAMEPAD;
+#endif
+#if ENABLE_GPS_SENSOR
+  if (gpsConnected)      connected |= CAP_SENSOR_GPS;
+#endif
+#if ENABLE_PRESENCE_SENSOR
+  if (presenceConnected) connected |= CAP_SENSOR_PRESENCE;
+#endif
+  status.sensorConnectedMask = connected;
+  
+#if ENABLE_WIFI
+  status.wifiConnected = (WiFi.status() == WL_CONNECTED) ? 1 : 0;
+#endif
+#if ENABLE_BLUETOOTH
+  status.bluetoothActive = gSettings.bluetoothAutoStart ? 1 : 0;
+#endif
+#if ENABLE_HTTP_SERVER
+  status.httpActive = gSettings.httpAutoStart ? 1 : 0;
+#endif
+  // Report sync progress as a simple 0-3 value for the wire format
+  uint8_t syncProgress = 0;
+  if (gEspNow) {
+    if (gEspNow->lastRemoteCapValid) syncProgress = 1;
+    if (gEspNow->bondManifestReceived) syncProgress = 2;
+    if (gEspNow->bondSettingsReceived) syncProgress = 3;
+  }
+  status.bondHandshakeState = syncProgress;
+}
 
 /**
  * Build CapabilitySummary for this device
@@ -4212,8 +4495,34 @@ static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& mani
 }
 
 // ============================================================================
-// Settings Sync for Paired Mode
+// Settings Sync for Bond Mode
 // ============================================================================
+
+/**
+ * Compute a lightweight FNV-1a hash of device settings (excluding passwords).
+ * Stored in gEspNow->bondLocalSettingsHash and sent in bond heartbeats so the
+ * peer can detect when our settings have changed without a full exchange.
+ */
+void computeBondLocalSettingsHash() {
+  if (!gEspNow) return;
+  // FNV-1a 32-bit
+  uint32_t hash = 2166136261u;
+  // Hash a few key settings fields that the peer cares about
+  auto fnv = [&hash](const char* s) {
+    while (*s) { hash ^= (uint8_t)*s++; hash *= 16777619u; }
+  };
+  fnv(gSettings.espnowDeviceName.c_str());
+  fnv(gSettings.espnowFriendlyName.c_str());
+  fnv(gSettings.espnowRoom.c_str());
+  fnv(gSettings.espnowZone.c_str());
+  fnv(gSettings.espnowTags.c_str());
+  // Include bond role and some numeric settings
+  uint8_t role = gSettings.bondRole;
+  hash ^= role; hash *= 16777619u;
+  uint8_t stationary = gSettings.espnowStationary ? 1 : 0;
+  hash ^= stationary; hash *= 16777619u;
+  gEspNow->bondLocalSettingsHash = hash;
+}
 
 /**
  * Generate current device settings as JSON
@@ -4252,14 +4561,15 @@ static bool cacheSettingsToLittleFS(const uint8_t* peerMac, const String& settin
   snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
            peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
   
-  String dirPath = String("/cache/peers/") + macStr;
+  String dirPath = String("/system/espnow/peers/") + macStr;
   String filePath = dirPath + "/settings.json";
   DEBUG_ESPNOWF("[SETTINGS_CACHE] Target path: %s", filePath.c_str());
   
   // Ensure directory exists
   FsLockGuard fsGuard("pair.settings.cache");
-  if (!LittleFS.exists("/cache")) { LittleFS.mkdir("/cache"); }
-  if (!LittleFS.exists("/cache/peers")) { LittleFS.mkdir("/cache/peers"); }
+  if (!LittleFS.exists("/system")) { LittleFS.mkdir("/system"); }
+  if (!LittleFS.exists("/system/espnow")) { LittleFS.mkdir("/system/espnow"); }
+  if (!LittleFS.exists("/system/espnow/peers")) { LittleFS.mkdir("/system/espnow/peers"); }
   if (!LittleFS.exists(dirPath.c_str())) { LittleFS.mkdir(dirPath.c_str()); }
   
   // Write settings
@@ -4299,7 +4609,7 @@ String loadSettingsFromCache(const uint8_t* peerMac) {
   snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
            peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
   
-  String filePath = String("/cache/peers/") + macStr + "/settings.json";
+  String filePath = String("/system/espnow/peers/") + macStr + "/settings.json";
   DEBUG_ESPNOWF("[SETTINGS_LOAD] Checking path: %s", filePath.c_str());
   
   if (!LittleFS.exists(filePath.c_str())) {
@@ -4322,7 +4632,6 @@ String loadSettingsFromCache(const uint8_t* peerMac) {
 }
 
 // Debouncing state for settings transfer
-static uint32_t sLastSettingsRequestMs = 0;
 static uint32_t sLastSettingsSendMs = 0;
 static volatile bool sSettingsTransferInProgress = false;
 static const uint32_t SETTINGS_DEBOUNCE_MS = 3000;  // 3 second cooldown between requests
@@ -4334,75 +4643,43 @@ static uint32_t sLastMetadataSendMs = 0;
 static const uint32_t METADATA_DEBOUNCE_MS = 3000;  // 3 second cooldown between requests
 
 /**
- * Request settings from paired peer
- * Called after manifest exchange completes
- * Includes debouncing to prevent rapid duplicate requests
+ * Request settings from bonded peer (master only).
+ * Called from the sync tick — timing/retry is owned by the sync tick.
  */
-static void requestPairedSettings(const uint8_t* peerMac) {
-  DEBUG_ESPNOWF("[SETTINGS_REQ] requestPairedSettings called: peerMac=%p gEspNow=%p pairedEnabled=%d",
-                peerMac, gEspNow, gSettings.bondModeEnabled ? 1 : 0);
-  if (!peerMac || !gEspNow || !gSettings.bondModeEnabled) {
-    DEBUG_ESPNOWF("[SETTINGS_REQ] EXIT: precondition failed");
-    return;
-  }
-  
-  // Guard: only allow settings request if handshake is in SETTINGS_EXCHANGE or COMPLETE state
-  BondHandshakeState hsState = gEspNow->bondHandshakeState;
-  if (hsState != BOND_HS_SETTINGS_EXCHANGE && hsState != BOND_HS_COMPLETE) {
-    DEBUG_ESPNOWF("[SETTINGS_REQ] SKIP: handshake not ready (state=%d)", (int)hsState);
-    return;
-  }
-  
-  // Debounce: skip if we requested recently
+static void requestBondSettings(const uint8_t* peerMac) {
+  if (!peerMac || !gEspNow || !gSettings.bondModeEnabled) return;
+  if (gSettings.bondRole != 1) return;
+
   uint32_t now = millis();
-  if (now - sLastSettingsRequestMs < SETTINGS_DEBOUNCE_MS) {
-    DEBUG_ESPNOWF("[SETTINGS_REQ] SKIP: debounced (last=%lums ago)", 
-                  (unsigned long)(now - sLastSettingsRequestMs));
-    return;
-  }
-  sLastSettingsRequestMs = now;
+  gEspNow->bondSyncInFlight = BOND_SYNC_SETTINGS;
+  gEspNow->bondSyncLastAttemptMs = now;
+  // NOTE: retry count is managed by the sync tick retry block — don't increment here
   
   uint32_t msgId = generateMessageId();
-  
-  // Send empty payload - just a request
   bool sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_SETTINGS_REQ, 0, msgId, nullptr, 0, 1);
   
   if (sent) {
-    DEBUG_ESPNOWF("[SETTINGS_REQ] SUCCESS: Sent request (msgId=%lu)", (unsigned long)msgId);
+    DEBUG_ESPNOWF("[SETTINGS_REQ] Sent (msgId=%lu retry=%d)", (unsigned long)msgId, (int)gEspNow->bondSyncRetryCount);
   } else {
-    ERROR_ESPNOWF("[SETTINGS_REQ] Failed to send request");
+    ERROR_ESPNOWF("[SETTINGS_REQ] Failed to send");
   }
 }
 
 /**
- * Send settings to paired peer (response to request or push update)
- * Non-static so System_Settings.cpp can call for push notifications
- * Includes debouncing and heap checks to prevent WDT timeout on low-memory devices
+ * Send settings to bonded peer (response to SETTINGS_REQ during initial sync).
+ * Settings are cached by the peer for display only — never applied/mounted.
+ * Live settings changes use remote commands, not file push.
  */
-void sendPairedSettings(const uint8_t* peerMac, uint32_t msgId, bool isPush) {
-  DEBUG_ESPNOWF("[SETTINGS_SEND] sendPairedSettings called: peerMac=%p msgId=%lu isPush=%d",
-                peerMac, (unsigned long)msgId, isPush ? 1 : 0);
+static void sendBondSettings(const uint8_t* peerMac) {
+  DEBUG_ESPNOWF("[SETTINGS_SEND] sendBondSettings called");
   if (!peerMac || !gEspNow) {
     ERROR_ESPNOWF("[SETTINGS_SEND] EXIT: peerMac or gEspNow is NULL");
     return;
   }
   
-  // Guard: only allow settings send if handshake is in SETTINGS_EXCHANGE or COMPLETE state
-  // isPush=true means explicit push from settings write - only allow if handshake is COMPLETE
-  // isPush=false means part of handshake - allow if in SETTINGS_EXCHANGE or COMPLETE
-  BondHandshakeState hsState = gEspNow->bondHandshakeState;
-  if (isPush) {
-    // Push notifications only allowed after handshake is fully complete
-    if (hsState != BOND_HS_COMPLETE) {
-      DEBUG_ESPNOWF("[SETTINGS_SEND] SKIP: push not allowed (handshake=%d, need COMPLETE)", (int)hsState);
-      return;
-    }
-  } else {
-    // Handshake-triggered sends allowed in SETTINGS_EXCHANGE or COMPLETE
-    if (hsState != BOND_HS_SETTINGS_EXCHANGE && hsState != BOND_HS_COMPLETE) {
-      DEBUG_ESPNOWF("[SETTINGS_SEND] SKIP: handshake not ready (state=%d)", (int)hsState);
-      return;
-    }
+  if (!gEspNow->bondPeerOnline) {
+    DEBUG_ESPNOWF("[SETTINGS_SEND] SKIP: peer offline");
+    return;
   }
   
   // Guard: prevent overlapping transfers
@@ -4411,9 +4688,9 @@ void sendPairedSettings(const uint8_t* peerMac, uint32_t msgId, bool isPush) {
     return;
   }
   
-  // Debounce: skip if we sent recently (except for explicit push updates)
+  // Debounce: skip if we sent recently
   uint32_t now = millis();
-  if (!isPush && (now - sLastSettingsSendMs < SETTINGS_DEBOUNCE_MS)) {
+  if (now - sLastSettingsSendMs < SETTINGS_DEBOUNCE_MS) {
     DEBUG_ESPNOWF("[SETTINGS_SEND] SKIP: debounced (last=%lums ago)", 
                   (unsigned long)(now - sLastSettingsSendMs));
     return;
@@ -4464,8 +4741,9 @@ void sendPairedSettings(const uint8_t* peerMac, uint32_t msgId, bool isPush) {
   bool sent = sendFileToMac(peerMac, tempPath);
 
   if (sent) {
-    DEBUG_ESPNOWF("[SETTINGS_SEND] SUCCESS: File transfer initiated (%d bytes, %s)",
-                  settingsLen, isPush ? "push" : "response");
+    DEBUG_ESPNOWF("[SETTINGS_SEND] SUCCESS: File transfer initiated (%d bytes)",
+                  settingsLen);
+    // Session token computed in processBondSettings() when sync is confirmed
   } else {
     ERROR_ESPNOWF("[SETTINGS_SEND] sendFileToMac failed");
   }
@@ -4480,11 +4758,11 @@ void sendPairedSettings(const uint8_t* peerMac, uint32_t msgId, bool isPush) {
   sSettingsTransferInProgress = false;
 
 #if ENABLE_AUTOMATION
-  // On initial handshake (not push), also send our automation list so the peer
-  // can view what automations this device has configured.
+  // Also send our automation list so the peer can view what automations
+  // this device has configured.
   // Receiver side is already handled: FILE_END saves automations.json to
   // /espnow/received/<mac>/automations.json and broadcasts a formatted summary.
-  if (!isPush) {
+  {
     extern const char* AUTOMATIONS_JSON_FILE;
     extern bool filesystemReady;
     if (filesystemReady && LittleFS.exists(AUTOMATIONS_JSON_FILE)) {
@@ -4513,6 +4791,16 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
     return;
   }
   
+  // Validate JSON integrity — reject truncated/corrupted file transfers
+  if (settingsStr.length() < 2 || settingsStr[0] != '{' || settingsStr[settingsStr.length() - 1] != '}') {
+    BROADCAST_PRINTF("[BOND_SYNC] REJECTED corrupt settings (len=%d, not valid JSON object)", settingsStr.length());
+    if (gEspNow) {
+      gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
+      gEspNow->bondSyncRetryCount = 0;
+    }
+    return;  // Sync tick will re-request
+  }
+  
   // Cache the settings
   DEBUG_ESPNOWF("[SETTINGS_PROC] Calling cacheSettingsToLittleFS...");
   if (cacheSettingsToLittleFS(srcMac, settingsStr)) {
@@ -4523,10 +4811,38 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
     broadcastOutput("[SETTINGS] WARNING: Failed to cache settings from " + deviceName);
   }
   
-  // Signal handshake state machine that we received peer's settings
+  // Mark settings received and check if fully synced
   if (gEspNow) {
+    if (!gEspNow->bondPeerOnline) {
+      BROADCAST_PRINTF("[BOND_SYNC] REJECTED stale settings (peer offline)");
+      return;
+    }
+    
     gEspNow->bondSettingsReceived = true;
-    DEBUG_ESPNOWF("[BOND_HS] bondSettingsReceived = true");
+    gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
+    gEspNow->bondSyncRetryCount = 0;
+    gEspNow->bondSyncLastAttemptMs = 0;
+    
+    bool synced = isBondSynced();
+    BROADCAST_PRINTF("[BOND_SYNC] Settings received, synced=%d role=%d", (int)synced, (int)gSettings.bondRole);
+    
+    if (synced) {
+      // Compute session token once on first sync
+      if (!gEspNow->bondSessionTokenValid) {
+        uint8_t pMac[6];
+        if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
+          computeBondSessionToken(pMac);
+          uint32_t statusReqId = generateMessageId();
+          v3_send_frame(pMac, ESPNOW_V3_TYPE_BOND_STATUS_REQ, 0, statusReqId, nullptr, 0, 1);
+          gEspNow->bondLastStatusReqMs = millis();
+        }
+      }
+      // Master: push saved streaming prefs to worker now that sync is done
+      if (gSettings.bondRole == 1) {
+        gEspNow->bondNeedsStreamingSetup = true;
+      }
+      BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=%d", (int)gSettings.bondRole);
+    }
   }
   
   // Invalidate dynamic menu to trigger rebuild with new settings data
@@ -4569,6 +4885,8 @@ static String loadManifestFromCache(const uint8_t fwHash[16]) {
   return manifest;
 }
 
+#endif // ENABLE_BONDED_MODE
+
 // ==========================
 // Metadata Exchange Functions
 // ==========================
@@ -4603,22 +4921,22 @@ void requestMetadata(const uint8_t* peerMac, bool force) {
   if (!force && (now - sLastMetadataRequestMs < METADATA_DEBOUNCE_MS)) {
     DEBUG_ESPNOW_METADATAF("[METADATA] REQ debounced (%lums < %lums) for %s",
       (unsigned long)(now - sLastMetadataRequestMs), (unsigned long)METADATA_DEBOUNCE_MS,
-      macToHexString(peerMac).c_str());
+      MAC_STR(peerMac));
     return;
   }
   sLastMetadataRequestMs = now;
   
   uint32_t msgId = generateMessageId();
   DEBUG_ESPNOW_METADATAF("[METADATA] Sending REQ to %s msgId=%lu force=%d",
-    macToHexString(peerMac).c_str(), (unsigned long)msgId, (int)force);
+    MAC_STR(peerMac), (unsigned long)msgId, (int)force);
   bool sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_METADATA_REQ, 0, msgId, nullptr, 0, 1);
   
   if (sent) {
     DEBUG_ESPNOW_METADATAF("[METADATA] REQ sent OK to %s msgId=%lu",
-      macToHexString(peerMac).c_str(), (unsigned long)msgId);
+      MAC_STR(peerMac), (unsigned long)msgId);
   } else {
     WARN_ESPNOWF("[METADATA] REQ FAILED to send to %s (peer not in hw table?)",
-      macToHexString(peerMac).c_str());
+      MAC_STR(peerMac));
   }
 }
 
@@ -4633,7 +4951,7 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
   
   uint32_t now = millis();
   if (!force && !isPush && (now - sLastMetadataSendMs < METADATA_DEBOUNCE_MS)) {
-    DEBUG_ESPNOW_METADATAF("[METADATA] RESP debounced for %s", macToHexString(peerMac).c_str());
+    DEBUG_ESPNOW_METADATAF("[METADATA] RESP debounced for %s", MAC_STR(peerMac));
     return;
   }
   sLastMetadataSendMs = now;
@@ -4644,17 +4962,17 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
   uint32_t msgId = generateMessageId();
   uint8_t type = isPush ? ESPNOW_V3_TYPE_METADATA_PUSH : ESPNOW_V3_TYPE_METADATA_RESP;
   DEBUG_ESPNOW_METADATAF("[METADATA] Sending %s to %s msgId=%lu payloadLen=%u name='%s' room='%s' zone='%s' tags='%s' force=%d",
-    isPush ? "PUSH" : "RESP", macToHexString(peerMac).c_str(), (unsigned long)msgId,
+    isPush ? "PUSH" : "RESP", MAC_STR(peerMac), (unsigned long)msgId,
     (unsigned)sizeof(payload), payload.deviceName, payload.room, payload.zone, payload.tags, (int)force);
   
   bool sent = v3_send_frame(peerMac, type, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 1);
   
   if (sent) {
     DEBUG_ESPNOW_METADATAF("[METADATA] %s sent OK to %s msgId=%lu",
-      isPush ? "PUSH" : "RESP", macToHexString(peerMac).c_str(), (unsigned long)msgId);
+      isPush ? "PUSH" : "RESP", MAC_STR(peerMac), (unsigned long)msgId);
   } else {
     WARN_ESPNOWF("[METADATA] %s FAILED to send to %s (peer not in hw table?)",
-      isPush ? "PUSH" : "RESP", macToHexString(peerMac).c_str());
+      isPush ? "PUSH" : "RESP", MAC_STR(peerMac));
   }
 }
 
@@ -4669,7 +4987,7 @@ static void processMetadata(const uint8_t* srcMac, const V3PayloadMetadata* meta
   }
   
   DEBUG_ESPNOW_METADATAF("[METADATA] processMetadata: srcMac=%s slots=%d name='%s' room='%s' zone='%s' friendlyName='%s'",
-    macToHexString(srcMac).c_str(), gMeshPeerSlots,
+    MAC_STR(srcMac), gMeshPeerSlots,
     metadata->deviceName, metadata->room, metadata->zone, metadata->friendlyName);
   
   // Find or create entry in gMeshPeerMeta
@@ -4678,7 +4996,7 @@ static void processMetadata(const uint8_t* srcMac, const V3PayloadMetadata* meta
     if (gMeshPeerMeta[i].isActive && memcmp(gMeshPeerMeta[i].mac, srcMac, 6) == 0) {
       idx = i;
       DEBUG_ESPNOW_METADATAF("[METADATA] processMetadata: found existing slot=%d for %s",
-        i, macToHexString(srcMac).c_str());
+        i, MAC_STR(srcMac));
       break;
     }
   }
@@ -4691,7 +5009,7 @@ static void processMetadata(const uint8_t* srcMac, const V3PayloadMetadata* meta
         memcpy(gMeshPeerMeta[i].mac, srcMac, 6);
         gMeshPeerMeta[i].isActive = true;
         DEBUG_ESPNOW_METADATAF("[METADATA] processMetadata: allocated new slot=%d for %s",
-          i, macToHexString(srcMac).c_str());
+          i, MAC_STR(srcMac));
         break;
       }
     }
@@ -4699,7 +5017,7 @@ static void processMetadata(const uint8_t* srcMac, const V3PayloadMetadata* meta
   
   if (idx == -1) {
     WARN_ESPNOWF("[METADATA] processMetadata: ALL %d slots full, cannot store metadata from %s",
-      gMeshPeerSlots, macToHexString(srcMac).c_str());
+      gMeshPeerSlots, MAC_STR(srcMac));
     return;
   }
   
@@ -4718,7 +5036,7 @@ static void processMetadata(const uint8_t* srcMac, const V3PayloadMetadata* meta
   meta->lastMetaUpdate = millis();
   
   DEBUG_ESPNOW_METADATAF("[METADATA] processMetadata: stored slot=%d mac=%s name='%s' friendlyName='%s' room='%s' zone='%s' tags='%s' stationary=%d isActive=%d",
-    idx, macToHexString(srcMac).c_str(),
+    idx, MAC_STR(srcMac),
     meta->name, meta->friendlyName, meta->room, meta->zone, meta->tags,
     (int)meta->stationary, (int)meta->isActive);
 }
@@ -5110,14 +5428,16 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
     return false;
   }
   
-  // === PAIR messages now use v3 binary protocol - block v2 JSON versions ===
-  if (strcmp(type, MSG_TYPE_PAIR_CAP_REQ) == 0 ||
-      strcmp(type, MSG_TYPE_PAIR_CAP_RESP) == 0 ||
-      strcmp(type, MSG_TYPE_PAIR_MANIFEST_REQ) == 0 ||
-      strcmp(type, MSG_TYPE_PAIR_MANIFEST_RESP) == 0) {
+#if ENABLE_BONDED_MODE
+  // === BOND messages now use v3 binary protocol - block v2 JSON versions ===
+  if (strcmp(type, MSG_TYPE_BOND_CAP_REQ) == 0 ||
+      strcmp(type, MSG_TYPE_BOND_CAP_RESP) == 0 ||
+      strcmp(type, MSG_TYPE_BOND_MANIFEST_REQ) == 0 ||
+      strcmp(type, MSG_TYPE_BOND_MANIFEST_RESP) == 0) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND] Ignoring v2 JSON %s from %s - use v3 binary protocol", type, ctx.macStr.c_str());
     return true;  // Consume but don't process
   }
+#endif // ENABLE_BONDED_MODE
 
   // Handle TEXT (plain text) messages
   if (strcmp(type, MSG_TYPE_TEXT) == 0) {
@@ -5978,7 +6298,7 @@ static void addTopoDeviceName(const uint8_t* mac, const char* name) {
       // Update existing entry
       strncpy(gTopoDeviceCache[i].name, name, 31);
       gTopoDeviceCache[i].name[31] = '\0';
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO_CACHE] Updated device: %s = %s", macToHexString(mac).c_str(), name);
+      DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO_CACHE] Updated device: %s = %s", MAC_STR(mac), name);
       return;
     }
   }
@@ -5990,7 +6310,7 @@ static void addTopoDeviceName(const uint8_t* mac, const char* name) {
       strncpy(gTopoDeviceCache[i].name, name, 31);
       gTopoDeviceCache[i].name[31] = '\0';
       gTopoDeviceCache[i].active = true;
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO_CACHE] Added device: %s = %s", macToHexString(mac).c_str(), name);
+      DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO_CACHE] Added device: %s = %s", MAC_STR(mac), name);
       return;
     }
   }
@@ -6021,7 +6341,7 @@ static bool bufferPeerMessage(const String& message, uint32_t reqId, const uint8
       gPeerBuffer[i].receivedMs = millis();
       gPeerBuffer[i].active = true;
       DEBUG_ESPNOWF("[PEER_BUFFER] Buffered PEER for reqId=%lu, master=%s (slot %d)",
-                    (unsigned long)reqId, macToHexString(masterMac).c_str(), i);
+                    (unsigned long)reqId, MAC_STR(masterMac), i);
       return true;
     }
   }
@@ -6410,6 +6730,17 @@ static void loadEspNowDevices() {
     uint8_t mac[6];
     if (!parseMacAddress(String(macStr), mac)) continue;
 
+    // Check if this MAC is already loaded (prevents duplicates from corrupted JSON)
+    bool alreadyLoaded = false;
+    for (int i = 0; i < gEspNow->deviceCount; i++) {
+      if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
+        alreadyLoaded = true;
+        WARN_ESPNOWF("[ESPNOW] Skipping duplicate device in saved file: %s (%s)", name, macStr);
+        break;
+      }
+    }
+    if (alreadyLoaded) continue;
+
     EspNowDevice& dev = gEspNow->devices[gEspNow->deviceCount];
     memcpy(dev.mac, mac, 6);
     dev.name      = String(name);
@@ -6609,9 +6940,12 @@ void processMeshHeartbeats() {
     uint8_t tail = gEspNowRxTail;
     InboundRxItem& item = gEspNowRxRing[tail];
     uint8_t dstMac[6] = {};
+    wifi_pkt_rx_ctrl_t rxCtrl = {};
+    rxCtrl.rssi = item.rssi;
     esp_now_recv_info_t ri = {};
     ri.src_addr = item.src;
     ri.des_addr = dstMac;
+    ri.rx_ctrl = &rxCtrl;
     onEspNowRawRecv(&ri, item.data, (int)item.len);
     gEspNowRxTail = (uint8_t)((tail + 1) % ringSize);
   }
@@ -6675,6 +7009,7 @@ void processMeshHeartbeats() {
                      (unsigned long)gSettings.meshFailoverTimeout);
   }
 
+#if ENABLE_BONDED_MODE
   // 3. Send periodic paired-mode heartbeat if bonded
   if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() > 0) {
     if (now - gLastBondHeartbeatSentMs >= BOND_HEARTBEAT_INTERVAL_MS) {
@@ -6682,15 +7017,53 @@ void processMeshHeartbeats() {
       uint8_t bondMac[6] = {};
       if (parseMacAddress(gSettings.bondPeerMac, bondMac)) {
         V3PayloadBondHeartbeat phb = {};
-        phb.role      = gSettings.meshRole;
+        phb.role      = gSettings.bondRole;
         phb.uptimeSec = now / 1000;
         phb.freeHeap  = (uint32_t)ESP.getFreeHeap();
         phb.seqNum    = ++gBondHeartbeatSeqNum;
+        extern uint32_t gBootCounter;
+        phb.bootCounter = gBootCounter;
+        phb.settingsHash = gEspNow ? gEspNow->bondLocalSettingsHash : 0;
         wifi_ap_record_t ap2 = {};
         phb.rssi = (esp_wifi_sta_get_ap_info(&ap2) == ESP_OK) ? ap2.rssi : (int8_t)-127;
-        v3_send_frame(bondMac, ESPNOW_V3_TYPE_BOND_HEARTBEAT, 0,
+        bool sent = v3_send_frame(bondMac, ESPNOW_V3_TYPE_BOND_HEARTBEAT, 0,
                       generateMessageId(), (const uint8_t*)&phb, (uint16_t)sizeof(phb), 1);
         gEspNow->bondHeartbeatsSent++;
+        // Log every 6th heartbeat (every 30s) or first one, plus full state
+        if (gBondHeartbeatSeqNum <= 2 || gBondHeartbeatSeqNum % 6 == 0) {
+          BROADCAST_PRINTF("[BOND_HB_TX] seq=%lu sent=%d to=%s role=%d synced=%d peerOnline=%d hbRx=%lu",
+                           (unsigned long)gBondHeartbeatSeqNum, (int)sent,
+                           gSettings.bondPeerMac.c_str(), (int)gSettings.bondRole,
+                           (int)isBondSynced(), (int)gEspNow->bondPeerOnline,
+                           (unsigned long)gEspNow->bondHeartbeatsReceived);
+        }
+      } else {
+        BROADCAST_PRINTF("[BOND_HB_TX] ERROR: parseMacAddress failed for '%s'", gSettings.bondPeerMac.c_str());
+      }
+    }
+  } else if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() == 0) {
+    // Log once that bond mode is enabled but no peer MAC
+    static bool sLoggedNoPeerMac = false;
+    if (!sLoggedNoPeerMac) {
+      BROADCAST_PRINTF("[BOND] WARNING: bondModeEnabled=true but bondPeerMac is empty!");
+      sLoggedNoPeerMac = true;
+    }
+  }
+
+  if (gSettings.bondModeEnabled && gEspNow && gEspNow->bondPeerOnline &&
+      gEspNow->lastBondHeartbeatReceivedMs > 0 &&
+      (now - (uint32_t)gEspNow->lastBondHeartbeatReceivedMs) >= BOND_HEARTBEAT_TIMEOUT_MS) {
+    gEspNow->bondPeerOnline = false;
+    gEspNow->bondLastOfflineMs = now;
+    resetBondSync();
+  }
+#endif // ENABLE_BONDED_MODE
+
+  // 3c. Mark stale mesh peers offline (mirrors bond's bondPeerOnline = false pattern)
+  if (gMeshPeers) {
+    for (int i = 0; i < gMeshPeerSlots; i++) {
+      if (gMeshPeers[i].isActive && !isMeshPeerAlive(&gMeshPeers[i])) {
+        gMeshPeers[i].isActive = false;
       }
     }
   }
@@ -6706,6 +7079,19 @@ void processMeshHeartbeats() {
   if (now - sLastBroadcastCheck >= 500) {  // Check every 500ms
     sLastBroadcastCheck = now;
     broadcast_tracker_check_timeouts();
+  }
+  
+  // 6b. Clean up abandoned file transfers (no FILE_END received within 30s)
+  if (gActiveFileTransfer && gActiveFileTransfer->active &&
+      (now - gActiveFileTransfer->startTime) > 30000) {
+    BROADCAST_PRINTF("[V3_FILE] Abandoned transfer '%s' after 30s (%u/%u chunks)",
+                     gActiveFileTransfer->filename,
+                     (unsigned)gActiveFileTransfer->receivedChunks,
+                     (unsigned)gActiveFileTransfer->totalChunks);
+    if (gActiveFileTransfer->chunkMap) heap_caps_free(gActiveFileTransfer->chunkMap);
+    if (gActiveFileTransfer->dataBuffer) heap_caps_free(gActiveFileTransfer->dataBuffer);
+    delete gActiveFileTransfer;
+    gActiveFileTransfer = nullptr;
   }
   
   // 7. Process deferred CMD (remote command received from another device)
@@ -6756,11 +7142,323 @@ void processMeshHeartbeats() {
     }
   }
   
+#if ENABLE_BONDED_MODE
+  // =========================================================================
+  // BOND SYNC TICK (Option B) — master-driven, idempotent "fetch what's missing"
+  // Replaces the old 9a/9c/retry linear handshake logic.
+  // Both roles: respond to deferred request flags (9b, 9d, 9e).
+  // Master only: drive CAP → MANIFEST → SETTINGS fetch sequence.
+  // =========================================================================
+  
+  // --- Master sync tick: decide what to request next ---
+  if (gSettings.bondRole == 1 && gEspNow->bondPeerOnline && gSettings.bondModeEnabled) {
+    uint8_t peerMac[6];
+    bool macOk = (gSettings.bondPeerMac.length() > 0 && parseMacAddress(gSettings.bondPeerMac, peerMac));
+    
+    // Consume the "peer came online" trigger — just marks that we should start syncing
+    if (gEspNow->bondNeedsCapabilityRequest) {
+      gEspNow->bondNeedsCapabilityRequest = false;
+      BROADCAST_PRINTF("[BOND_SYNC] Peer online trigger consumed, starting sync tick | bootCtr=%lu",
+                       (unsigned long)gEspNow->bondPeerBootCounter);
+    }
+    
+    // Consume received capability — just log, sync tick handles the rest
+    if (gEspNow->bondReceivedCapability) {
+      gEspNow->bondReceivedCapability = false;
+      BROADCAST_PRINTF("[BOND_SYNC] CAP_RESP received | fwHash=%02X%02X%02X%02X featureMask=0x%08lX",
+                       gEspNow->lastRemoteCap.fwHash[0], gEspNow->lastRemoteCap.fwHash[1],
+                       gEspNow->lastRemoteCap.fwHash[2], gEspNow->lastRemoteCap.fwHash[3],
+                       (unsigned long)gEspNow->lastRemoteCap.featureMask);
+    }
+    
+    // Cooldown after retry exhaustion — don't re-request immediately
+    static const uint32_t BOND_SYNC_COOLDOWN_MS = 15000;
+    bool inCooldown = (gEspNow->bondSyncLastAttemptMs > 0 &&
+                       (now - gEspNow->bondSyncLastAttemptMs) < BOND_SYNC_COOLDOWN_MS);
+    
+    if (macOk && gEspNow->bondSyncInFlight == BOND_SYNC_NONE && !inCooldown) {
+      // Decide what's missing and request it (priority order: CAP > MANIFEST > SETTINGS)
+      bool haveCap = gEspNow->lastRemoteCapValid;
+      bool haveManifest = gEspNow->bondManifestReceived;
+      bool haveSettings = gEspNow->bondSettingsReceived;
+      
+      if (!haveCap) {
+        // Need capabilities
+        uint32_t reqId = generateMessageId();
+        v3_send_frame(peerMac, ESPNOW_V3_TYPE_BOND_CAP_REQ, ESPNOW_V3_FLAG_ACK_REQ, reqId, nullptr, 0, 1);
+        gEspNow->bondSyncInFlight = BOND_SYNC_CAP;
+        gEspNow->bondSyncLastAttemptMs = now;
+        gEspNow->bondSyncRetryCount = 1;
+        BROADCAST_PRINTF("[BOND_SYNC] Requesting CAP (msgId=%lu)", (unsigned long)reqId);
+      } else if (!haveManifest) {
+        // Have cap, need manifest — check cache first
+        bool haveCached = false;
+        String cached = loadManifestFromCache(gEspNow->lastRemoteCap.fwHash);
+        haveCached = (cached.length() > 0);
+        if (haveCached) {
+          gEspNow->bondManifestReceived = true;
+          BROADCAST_PRINTF("[BOND_SYNC] Manifest found in cache, skipping request");
+        } else {
+          uint32_t msgId = generateMessageId();
+          v3_send_frame(peerMac, ESPNOW_V3_TYPE_MANIFEST_REQ, ESPNOW_V3_FLAG_ACK_REQ, msgId, nullptr, 0, 1);
+          gEspNow->bondSyncInFlight = BOND_SYNC_MANIFEST;
+          gEspNow->bondSyncLastAttemptMs = now;
+          gEspNow->bondSyncRetryCount = 1;
+          BROADCAST_PRINTF("[BOND_SYNC] Requesting MANIFEST (msgId=%lu)", (unsigned long)msgId);
+        }
+      } else if (!haveSettings) {
+        // Have cap + manifest, need settings
+        requestBondSettings(peerMac);
+        gEspNow->bondSyncRetryCount = 1;
+        BROADCAST_PRINTF("[BOND_SYNC] Requesting SETTINGS");
+      }
+      // else: all synced — handshake complete is handled in processBondSettings
+    }
+    
+    // Retry logic for in-flight requests
+    if (macOk && gEspNow->bondSyncInFlight != BOND_SYNC_NONE &&
+        gEspNow->bondSyncLastAttemptMs > 0 &&
+        (now - gEspNow->bondSyncLastAttemptMs >= BOND_SYNC_RETRY_MS)) {
+      if (gEspNow->bondSyncRetryCount < 3) {
+        gEspNow->bondSyncLastAttemptMs = now;
+        gEspNow->bondSyncRetryCount++;
+        if (gEspNow->bondSyncInFlight == BOND_SYNC_CAP) {
+          v3_send_frame(peerMac, ESPNOW_V3_TYPE_BOND_CAP_REQ, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(), nullptr, 0, 1);
+          BROADCAST_PRINTF("[BOND_SYNC] Retry CAP_REQ (%d/3)", (int)gEspNow->bondSyncRetryCount);
+        } else if (gEspNow->bondSyncInFlight == BOND_SYNC_MANIFEST) {
+          v3_send_frame(peerMac, ESPNOW_V3_TYPE_MANIFEST_REQ, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(), nullptr, 0, 1);
+          BROADCAST_PRINTF("[BOND_SYNC] Retry MANIFEST_REQ (%d/3)", (int)gEspNow->bondSyncRetryCount);
+        } else if (gEspNow->bondSyncInFlight == BOND_SYNC_SETTINGS) {
+          requestBondSettings(peerMac);
+          BROADCAST_PRINTF("[BOND_SYNC] Retry SETTINGS_REQ (%d/3)", (int)gEspNow->bondSyncRetryCount);
+        }
+      } else {
+        // Max retries exhausted — reset in-flight but enforce cooldown before re-requesting.
+        // Leave bondSyncLastAttemptMs set so the cooldown check below prevents instant retry.
+        BROADCAST_PRINTF("[BOND_SYNC] %d exhausted %d retries, cooldown 15s before re-request",
+                         (int)gEspNow->bondSyncInFlight, (int)gEspNow->bondSyncRetryCount);
+        gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
+        gEspNow->bondSyncRetryCount = 0;
+        gEspNow->bondSyncLastAttemptMs = now;  // Start cooldown period
+      }
+    }
+  } else {
+    // Worker: just consume stale flags silently (master drives everything)
+    if (gEspNow->bondNeedsCapabilityRequest) {
+      gEspNow->bondNeedsCapabilityRequest = false;
+    }
+    if (gEspNow->bondReceivedCapability) {
+      gEspNow->bondReceivedCapability = false;
+    }
+  }
+
+  // 9b. Bond: peer requested our capabilities — send capability response (both roles respond)
+  if (gEspNow->bondNeedsCapabilityResponse) {
+    gEspNow->bondNeedsCapabilityResponse = false;
+    BROADCAST_PRINTF("[BOND] 9b: CAP_RESP sending | role=%d dest=%s",
+                     (int)gSettings.bondRole,
+                     MAC_STR(gEspNow->bondPendingResponseMac));
+    CapabilitySummary cap;
+    buildCapabilitySummary(cap);
+    uint32_t respId = generateMessageId();
+    bool sent = v3_send_frame(gEspNow->bondPendingResponseMac, ESPNOW_V3_TYPE_BOND_CAP_RESP,
+                  ESPNOW_V3_FLAG_ACK_REQ, respId,
+                  (const uint8_t*)&cap, (uint16_t)sizeof(cap), 1);
+    gEspNow->bondCapSent = true;
+    BROADCAST_PRINTF("[BOND] 9b: CAP_RESP sent=%d featureMask=0x%08lX", (int)sent, (unsigned long)cap.featureMask);
+  }
+
+  // 9d. Bond: peer requested our manifest — generate and send via file transfer
+  if (gEspNow->bondNeedsManifestResponse) {
+    gEspNow->bondNeedsManifestResponse = false;
+    BROADCAST_PRINTF("[BOND] 9d: bondNeedsManifestResponse consumed | role=%d dest=%s",
+                     (int)gSettings.bondRole,
+                     MAC_STR(gEspNow->bondPendingResponseMac));
+    String manifest = generateDeviceManifest();
+    BROADCAST_PRINTF("[BOND] 9d: manifest generated len=%d", manifest.length());
+    String tempPath = "/system/_manifest_out.json";
+    {
+      FsLockGuard guard("bond.manifest.send");
+      extern bool filesystemReady;
+      if (filesystemReady) {
+        if (!LittleFS.exists("/system")) LittleFS.mkdir("/system");
+        File f = LittleFS.open(tempPath.c_str(), "w");
+        if (f) { f.print(manifest); f.close(); BROADCAST_PRINTF("[BOND] 9d: manifest written to %s", tempPath.c_str()); }
+        else { BROADCAST_PRINTF("[BOND] 9d: ERROR failed to write manifest file"); }
+      } else {
+        BROADCAST_PRINTF("[BOND] 9d: ERROR filesystem not ready");
+      }
+    }
+    uint8_t destMac[6];
+    memcpy(destMac, gEspNow->bondPendingResponseMac, 6);
+    extern bool sendFileToMac(const uint8_t* mac, const String& localPath);
+    bool fileSent = sendFileToMac(destMac, tempPath);
+    BROADCAST_PRINTF("[BOND] 9d: sendFileToMac result=%d", (int)fileSent);
+    {
+      FsLockGuard guard("bond.manifest.cleanup");
+      LittleFS.remove(tempPath.c_str());
+    }
+    if (fileSent) {
+      BROADCAST_PRINTF("[BOND] 9d: manifest sent to peer");
+    }
+  }
+
+  // 9e. Bond: peer requested our settings — send settings via file transfer
+  if (gEspNow->bondNeedsSettingsResponse) {
+    gEspNow->bondNeedsSettingsResponse = false;
+    BROADCAST_PRINTF("[BOND] 9e: bondNeedsSettingsResponse consumed | role=%d dest=%s",
+                     (int)gSettings.bondRole,
+                     MAC_STR(gEspNow->bondPendingResponseMac));
+    uint8_t destMac[6];
+    memcpy(destMac, gEspNow->bondPendingResponseMac, 6);
+    sendBondSettings(destMac);
+    gEspNow->bondSettingsSent = true;
+    
+    // Worker sync-complete: capSent + settingsSent + capValid → isBondSynced() now true
+    if (gSettings.bondRole == 0 && isBondSynced() && !gEspNow->bondSessionTokenValid) {
+      uint8_t pMac[6];
+      if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
+        computeBondSessionToken(pMac);
+      }
+      BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=0 (worker)");
+    }
+  }
+
+  // 9f. Bond: streaming setup — master pushes saved streaming prefs to worker after handshake
+  if (gEspNow->bondNeedsStreamingSetup) {
+    gEspNow->bondNeedsStreamingSetup = false;
+    BROADCAST_PRINTF("[BOND] 9f: bondNeedsStreamingSetup consumed | role=%d",
+                     (int)gSettings.bondRole);
+    
+    // Only master pushes streaming prefs to worker (after full sync)
+    if (gSettings.bondRole == 1 && isBondSynced()) {
+      extern bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable);
+      struct { const char* name; bool enabled; RemoteSensorType type; } streams[] = {
+        { "thermal",  gSettings.bondStreamThermal,  REMOTE_SENSOR_THERMAL },
+        { "tof",      gSettings.bondStreamTof,      REMOTE_SENSOR_TOF },
+        { "imu",      gSettings.bondStreamImu,      REMOTE_SENSOR_IMU },
+        { "gps",      gSettings.bondStreamGps,      REMOTE_SENSOR_GPS },
+        { "gamepad",  gSettings.bondStreamGamepad,   REMOTE_SENSOR_GAMEPAD },
+        { "fmradio",  gSettings.bondStreamFmradio,   REMOTE_SENSOR_FMRADIO },
+        { "rtc",      gSettings.bondStreamRtc,       REMOTE_SENSOR_RTC },
+        { "presence", gSettings.bondStreamPresence,  REMOTE_SENSOR_PRESENCE },
+      };
+      for (auto& s : streams) {
+        if (s.enabled) {
+          BROADCAST_PRINTF("[BOND] 9f: Sending STREAM_CTRL %s ON to worker", s.name);
+          sendBondStreamCtrl(s.type, true);
+          vTaskDelay(pdMS_TO_TICKS(20));  // Small gap between sends
+        }
+      }
+    }
+  }
+
+  // 9f2. Bond: deferred STREAM_CTRL received — worker applies stream control from master
+  if (gEspNow->bondDeferredStreamCtrlPending) {
+    gEspNow->bondDeferredStreamCtrlPending = false;
+    RemoteSensorType sType = (RemoteSensorType)gEspNow->bondDeferredStreamCtrlSensor;
+    bool enable = (gEspNow->bondDeferredStreamCtrlEnable != 0);
+    
+    extern const char* sensorTypeToString(RemoteSensorType type);
+    BROADCAST_PRINTF("[BOND] STREAM_CTRL: %s %s (from master)",
+                     sensorTypeToString(sType), enable ? "ON" : "OFF");
+    
+    if (sType < REMOTE_SENSOR_MAX) {
+      if (enable) {
+        startSensorDataStreaming(sType);
+      } else {
+        stopSensorDataStreaming(sType);
+      }
+    }
+  }
+
+  // 9h. Bond: log any unpaired rejection events (deferred from ISR context)
+  {
+    static uint32_t sLastReportedRejectCount = 0;
+    if (gEspNow->bondUnpairedRejectCount > sLastReportedRejectCount) {
+      uint32_t newRejects = gEspNow->bondUnpairedRejectCount - sLastReportedRejectCount;
+      sLastReportedRejectCount = gEspNow->bondUnpairedRejectCount;
+      BROADCAST_PRINTF("[BOND] REJECTED %lu bond msg(s) from UNPAIRED %02X:%02X:%02X:%02X:%02X:%02X (type=%d, total=%lu) — run 'bond connect' or 'espnow pair'!",
+                       (unsigned long)newRejects,
+                       gEspNow->bondUnpairedRejectMac[0], gEspNow->bondUnpairedRejectMac[1],
+                       gEspNow->bondUnpairedRejectMac[2], gEspNow->bondUnpairedRejectMac[3],
+                       gEspNow->bondUnpairedRejectMac[4], gEspNow->bondUnpairedRejectMac[5],
+                       (int)gEspNow->bondUnpairedRejectType,
+                       (unsigned long)gEspNow->bondUnpairedRejectCount);
+    }
+  }
+
+  // 9i. Bond: periodic state dump (every 30s when bond mode active)
+  {
+    static uint32_t sLastBondStateDump = 0;
+    if (gSettings.bondModeEnabled && (now - sLastBondStateDump >= 30000)) {
+      sLastBondStateDump = now;
+      BROADCAST_PRINTF("[BOND_STATE] role=%d synced=%d peerOnline=%d hbTx=%lu hbRx=%lu rssi=%d rejects=%lu peer='%s' capValid=%d capSent=%d statusValid=%d connMask=0x%04X",
+                       (int)gSettings.bondRole, (int)isBondSynced(),
+                       (int)gEspNow->bondPeerOnline,
+                       (unsigned long)gEspNow->bondHeartbeatsSent,
+                       (unsigned long)gEspNow->bondHeartbeatsReceived,
+                       (int)gEspNow->bondRssiLast,
+                       (unsigned long)gEspNow->bondUnpairedRejectCount,
+                       gSettings.bondPeerMac.c_str(),
+                       (int)gEspNow->lastRemoteCapValid,
+                       (int)gEspNow->bondCapSent,
+                       (int)gEspNow->bondPeerStatusValid,
+                       (unsigned)gEspNow->bondPeerStatus.sensorConnectedMask);
+    }
+  }
+
+  // 9j. Bond: deferred status response — peer requested our live status
+  if (gEspNow->bondNeedsStatusResponse) {
+    gEspNow->bondNeedsStatusResponse = false;
+    BondPeerStatus localStatus;
+    buildLocalBondStatus(localStatus);
+    uint32_t respId = generateMessageId();
+    v3_send_frame(gEspNow->bondPendingResponseMac, ESPNOW_V3_TYPE_BOND_STATUS_RESP,
+                  0, respId, (const uint8_t*)&localStatus, sizeof(localStatus), 1);
+    BROADCAST_PRINTF("[BOND] 9j: Sent status response enabled=0x%04X connected=0x%04X heap=%lu",
+           localStatus.sensorEnabledMask, localStatus.sensorConnectedMask,
+           (unsigned long)localStatus.freeHeap);
+  }
+
+  // 9j2. Bond: proactive status push — sensor state changed locally, push to peer immediately
+  if (gEspNow->bondNeedsProactiveStatus) {
+    gEspNow->bondNeedsProactiveStatus = false;
+    if (gSettings.bondModeEnabled && isBondSynced()) {
+      uint8_t peerMac[6];
+      if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
+        BondPeerStatus localStatus;
+        buildLocalBondStatus(localStatus);
+        uint32_t respId = generateMessageId();
+        v3_send_frame(peerMac, ESPNOW_V3_TYPE_BOND_STATUS_RESP,
+                      0, respId, (const uint8_t*)&localStatus, sizeof(localStatus), 1);
+        BROADCAST_PRINTF("[BOND] 9j2: Proactive status push enabled=0x%04X connected=0x%04X",
+               localStatus.sensorEnabledMask, localStatus.sensorConnectedMask);
+      }
+    }
+  }
+
+  // 9k. Bond: periodic status request (~30s) — poll bonded peer for live status
+  {
+    static const uint32_t BOND_STATUS_POLL_MS = 30000;
+    if (gSettings.bondModeEnabled && isBondSynced() &&
+        (now - gEspNow->bondLastStatusReqMs >= BOND_STATUS_POLL_MS)) {
+      gEspNow->bondLastStatusReqMs = now;
+      uint8_t peerMac[6];
+      if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
+        uint32_t reqId = generateMessageId();
+        v3_send_frame(peerMac, ESPNOW_V3_TYPE_BOND_STATUS_REQ, 0, reqId, nullptr, 0, 1);
+        DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] 9k: Sent status request to peer");
+      }
+    }
+  }
+#endif // ENABLE_BONDED_MODE
+
   // 9. Process deferred metadata response (peer requested our metadata)
   if (gEspNow->bondNeedsMetadataResponse) {
     gEspNow->bondNeedsMetadataResponse = false;
     DEBUG_ESPNOW_METADATAF("[METADATA] Task: sending deferred RESP to %s",
-      macToHexString(gEspNow->metadataPendingResponseMac).c_str());
+      MAC_STR(gEspNow->metadataPendingResponseMac));
     sendMetadata(gEspNow->metadataPendingResponseMac, false, true);
   }
   
@@ -6768,26 +7466,43 @@ void processMeshHeartbeats() {
   if (gEspNow->deferredMetadataPending) {
     gEspNow->deferredMetadataPending = false;
     DEBUG_ESPNOW_METADATAF("[METADATA] Task: calling processMetadata for %s gMeshPeerMeta=%p slots=%d",
-      macToHexString(gEspNow->deferredMetadataSrcMac).c_str(), gMeshPeerMeta, gMeshPeerSlots);
+      MAC_STR(gEspNow->deferredMetadataSrcMac), gMeshPeerMeta, gMeshPeerSlots);
     processMetadata(gEspNow->deferredMetadataSrcMac, (const V3PayloadMetadata*)gEspNow->deferredMetadataPayload);
     DEBUG_ESPNOW_METADATAF("[METADATA] Task: processMetadata complete");
+    
+    // Log metadata to message history for web UI
+    const V3PayloadMetadata* meta = (const V3PayloadMetadata*)gEspNow->deferredMetadataPayload;
+    char metaMsg[384];
+    snprintf(metaMsg, sizeof(metaMsg), 
+             "Metadata: name=%s friendly=%s room=%s zone=%s tags=%s stationary=%d",
+             meta->deviceName, meta->friendlyName, meta->room, meta->zone, 
+             meta->tags, (int)meta->stationary);
+    
+    String devName = String(meta->deviceName);
+    if (devName.length() == 0) devName = formatMacAddress(gEspNow->deferredMetadataSrcMac);
+    storeMessageInPeerHistory(gEspNow->deferredMetadataSrcMac, devName.c_str(), 
+                              metaMsg, false, MSG_TEXT);
   }
   
-  // 11. Process deferred text messages
-  if (gEspNow->deferredTextPending) {
-    gEspNow->deferredTextPending = false;
-    
-    // Store in message history
-    storeMessageInPeerHistory(gEspNow->deferredTextSrcMac, gEspNow->deferredTextDeviceName,
-                              gEspNow->deferredTextContent, gEspNow->deferredTextEncrypted,
-                              MSG_TEXT);
-    
-    // Display the message
-    char macStr[18];
-    formatMacAddressBuf(gEspNow->deferredTextSrcMac, macStr, sizeof(macStr));
-    BROADCAST_PRINTF("[%s%s] %s", gEspNow->deferredTextDeviceName,
-                     gEspNow->deferredTextEncrypted ? " [enc]" : "",
-                     gEspNow->deferredTextContent);
+  // 11. Drain text message queue
+  {
+    int tail = gEspNow->textQueueTail;
+    int processed = 0;
+    while (tail != gEspNow->textQueueHead && processed < 4) {
+      auto& entry = gEspNow->textQueue[tail];
+      if (entry.used) {
+        String devName = String(entry.deviceName);
+        if (devName.length() == 0) devName = formatMacAddress(entry.srcMac);
+        storeMessageInPeerHistory(entry.srcMac, devName.c_str(),
+                                  entry.content, entry.encrypted, MSG_TEXT);
+        BROADCAST_PRINTF("[%s%s] %s", devName.c_str(),
+                         entry.encrypted ? " [enc]" : "", entry.content);
+        entry.used = false;
+      }
+      tail = (tail + 1) & (EspNowState::TEXT_QUEUE_SIZE - 1);
+      processed++;
+    }
+    gEspNow->textQueueTail = tail;
   }
 }
 
@@ -6864,6 +7579,20 @@ static bool initEspNow() {
       return false;
     }
     memset(gEspNow, 0, sizeof(EspNowState));
+
+    // Allocate small PSRAM buffers pulled out of the EspNowState struct
+    gEspNow->listBuffer = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "espnow.listBuf");
+    if (gEspNow->listBuffer) {
+      memset(gEspNow->listBuffer, 0, 1024);
+    } else {
+      BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate listBuffer");
+    }
+    gEspNow->deferredCmdRespResult = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "espnow.cmdResp");
+    if (gEspNow->deferredCmdRespResult) {
+      memset(gEspNow->deferredCmdRespResult, 0, 2048);
+    } else {
+      BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate deferredCmdRespResult");
+    }
 
     // Allocate per-device message history (biggest single allocation)
     size_t histSize = sizeof(PeerMessageHistory) * gMeshPeerSlots;
@@ -7021,6 +7750,32 @@ static bool initEspNow() {
   
   // Load mesh peer health data
   loadMeshPeers();
+  
+#if ENABLE_BONDED_MODE
+  // Dump bond settings at init so we can verify what was loaded from flash
+  computeBondLocalSettingsHash();
+  BROADCAST_PRINTF("[BOND_INIT] bondModeEnabled=%d bondPeerMac='%s' bondRole=%d settingsHash=0x%08lX",
+                   (int)gSettings.bondModeEnabled, gSettings.bondPeerMac.c_str(), (int)gSettings.bondRole,
+                   (unsigned long)gEspNow->bondLocalSettingsHash);
+  if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() > 0) {
+    uint8_t testMac[6];
+    bool parseOk = parseMacAddress(gSettings.bondPeerMac, testMac);
+    BROADCAST_PRINTF("[BOND_INIT] peerMac parse=%d -> %02X:%02X:%02X:%02X:%02X:%02X",
+                     (int)parseOk, testMac[0], testMac[1], testMac[2], testMac[3], testMac[4], testMac[5]);
+    // Check if peer is in our device list (required for isPaired check)
+    bool peerInDevList = false;
+    for (int i = 0; i < gEspNow->deviceCount; i++) {
+      if (memcmp(gEspNow->devices[i].mac, testMac, 6) == 0) {
+        peerInDevList = true;
+        BROADCAST_PRINTF("[BOND_INIT] peer found in devices[%d] name='%s'", i, gEspNow->devices[i].name.c_str());
+        break;
+      }
+    }
+    if (!peerInDevList) {
+      BROADCAST_PRINTF("[BOND_INIT] WARNING: bond peer NOT in device list! isPaired will be false — heartbeats will be ignored!");
+    }
+  }
+#endif
   
   // Register own device name for topology display
   // Use the device name from settings (set via 'espnow setname')
@@ -7757,7 +8512,7 @@ const char* cmd_espnow_deviceinfo(const String& argsIn) {
 
   uint8_t myMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, myMac);
-  pos += snprintf(buf + pos, 1024 - pos, "MAC:           %s", macToHexString(myMac).c_str());
+  pos += snprintf(buf + pos, 1024 - pos, "MAC:           %s", MAC_STR(myMac));
 
   return buf;
 }
@@ -7784,7 +8539,7 @@ const char* cmd_espnow_devices(const String& argsIn) {
 
     const char* displayName = gMeshPeerMeta[i].friendlyName[0]
       ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
-    if (!displayName[0]) displayName = macToHexString(gMeshPeerMeta[i].mac).c_str();
+    if (!displayName[0]) displayName = MAC_STR(gMeshPeerMeta[i].mac);
 
     pos += snprintf(buf + pos, 1024 - pos, "  %s%s [%s%s] %s",
                     displayName,
@@ -7837,7 +8592,7 @@ const char* cmd_espnow_rooms(const String& argsIn) {
 
       const char* displayName = gMeshPeerMeta[i].friendlyName[0]
         ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
-      if (!displayName[0]) displayName = macToHexString(gMeshPeerMeta[i].mac).c_str();
+      if (!displayName[0]) displayName = MAC_STR(gMeshPeerMeta[i].mac);
 
       pos += snprintf(buf + pos, 1024 - pos, "  %s [%s] (%s)\n",
                       displayName,
@@ -8438,7 +9193,7 @@ const char* cmd_test_streams(const String& cmd) {
       activeCount++;
       BROADCAST_PRINTF("  Slot %d: reqId=%lu, MAC=%s", 
                       i, (unsigned long)gTopoStreams[i].reqId,
-                      macToHexString(gTopoStreams[i].senderMac).c_str());
+                      MAC_STR(gTopoStreams[i].senderMac));
     }
   }
   BROADCAST_PRINTF("Total active streams: %d/%d", activeCount, MAX_CONCURRENT_TOPO_STREAMS);
@@ -8556,7 +9311,7 @@ const char* cmd_test_filelock(const String& cmd) {
   BROADCAST_PRINTF("Lock status: %s", gFileTransferLocked ? "LOCKED" : "FREE");
   
   if (gFileTransferLocked) {
-    BROADCAST_PRINTF("Lock owner: %s", macToHexString(gFileTransferOwnerMac).c_str());
+    BROADCAST_PRINTF("Lock owner: %s", MAC_STR(gFileTransferOwnerMac));
     BROADCAST_PRINTF("Lock age: %lums", millis() - gFileTransferLockTime);
   }
   
@@ -8565,7 +9320,7 @@ const char* cmd_test_filelock(const String& cmd) {
     gFileTransferLocked = true;
     memcpy(gFileTransferOwnerMac, testMac, 6);
     gFileTransferLockTime = millis();
-    BROADCAST_PRINTF("✓ Lock acquired by: %s", macToHexString(gFileTransferOwnerMac).c_str());
+    BROADCAST_PRINTF("✓ Lock acquired by: %s", MAC_STR(gFileTransferOwnerMac));
   } else {
     broadcastOutput("\nLock already held, releasing...");
     gFileTransferLocked = false;
@@ -8608,8 +9363,9 @@ const char* cmd_espnow_list(const String& cmd) {
   doc["count"] = listedCount;
 
   size_t needed = measureJson(doc) + 1;
-  size_t bufSize = sizeof(gEspNow->listBuffer);
+  static const size_t bufSize = 1024;
   if (needed > bufSize) needed = bufSize;
+  if (!gEspNow->listBuffer) return "{}";
   serializeJson(doc, gEspNow->listBuffer, needed);
 
   DEBUGF(DEBUG_HTTP, "[ESPNOW] list: %d devices", gEspNow->deviceCount);
@@ -8749,7 +9505,7 @@ const char* cmd_espnow_unpair(const String& argsIn) {
     for (int i = 0; i < gMeshPeerSlots; i++) {
       if (gMeshPeers[i].isActive && macEqual6(gMeshPeers[i].mac, mac)) {
         gMeshPeers[i].isActive = false;
-        DEBUG_ESPNOWF("[MESH] Removed peer from mesh list: %s", macToHexString(mac).c_str());
+        DEBUG_ESPNOWF("[MESH] Removed peer from mesh list: %s", MAC_STR(mac));
         break;
       }
     }
@@ -8952,6 +9708,8 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   return true;
 }
 
+#if ENABLE_BONDED_MODE
+
 // Check if bond mode is active and peer is online
 // NOTE: This function may be called from ISR context - NO debug prints here!
 bool isBondModeOnline() {
@@ -8961,11 +9719,25 @@ bool isBondModeOnline() {
   return gEspNow->bondPeerOnline;
 }
 
-// Send binary sensor data to paired master via v3 protocol
+// Check if bond mode is active, peer is online, AND fully synced.
+// Master: pulled cap + manifest + settings FROM worker.
+// Worker: exchanged caps + sent settings TO master (worker never receives manifest/settings).
+bool isBondSynced() {
+  if (!isBondModeOnline() || !gEspNow->lastRemoteCapValid) return false;
+  if (gSettings.bondRole == 1) {
+    // Master: pulled everything from worker
+    return gEspNow->bondManifestReceived && gEspNow->bondSettingsReceived;
+  } else {
+    // Worker: responded to master's requests
+    return gEspNow->bondCapSent && gEspNow->bondSettingsSent;
+  }
+}
+
+// Send binary sensor data to bonded master via v3 protocol
 // sensorType: RemoteSensorType enum value
 // data: JSON-encoded sensor data (will be sent as-is)
 // dataLen: length of data
-static uint32_t gPairedSensorSeqNum = 0;
+static uint32_t gBondSensorSeqNum = 0;
 
 bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t dataLen) {
   if (!isBondModeOnline()) return false;
@@ -8991,7 +9763,7 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
   sd->sensorType = sensorType;
   sd->flags = 0x01;  // Valid flag
   sd->dataLen = dataLen;
-  sd->seqNum = ++gPairedSensorSeqNum;
+  sd->seqNum = ++gBondSensorSeqNum;
   
   if (data && dataLen > 0) {
     memcpy(sd->data, data, dataLen);
@@ -9008,6 +9780,31 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
   
   return sent;
 }
+
+// Send stream control message to bonded peer (master -> worker)
+bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable) {
+  if (!isBondSynced()) return false;
+  
+  // Only master sends stream control to worker
+  if (gSettings.bondRole != 1) return false;
+  
+  uint8_t peerMac[6];
+  if (!parseMacAddress(gSettings.bondPeerMac, peerMac)) return false;
+  
+  V3PayloadStreamCtrl ctrl = {};
+  ctrl.sensorType = (uint8_t)sensorType;
+  ctrl.enable = enable ? 1 : 0;
+  
+  uint32_t msgId = generateMessageId();
+  bool sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_STREAM_CTRL, ESPNOW_V3_FLAG_ACK_REQ, 
+                            msgId, (const uint8_t*)&ctrl, sizeof(ctrl), 1);
+  
+  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STREAM_CTRL] TX %s %s -> %s",
+         sensorTypeToString(sensorType), enable ? "ON" : "OFF", sent ? "OK" : "FAIL");
+  return sent;
+}
+
+#endif // ENABLE_BONDED_MODE
 
 // Sendfile command
 const char* cmd_espnow_sendfile(const String& argsIn) {
@@ -9821,28 +10618,36 @@ const char* cmd_espnow_bigsend(const String& argsIn) {
   return getDebugBuffer();
 }
 
+#if ENABLE_BONDED_MODE
 
-#define BOND_HANDSHAKE_MAX_RETRIES 3
-
-static void resetBondHandshake() {
+static void resetBondSync() {
   if (!gEspNow) return;
-  gEspNow->bondHandshakeState = BOND_HS_IDLE;
-  gEspNow->bondHandshakeStartMs = 0;
-  gEspNow->bondHandshakeRetryCount = 0;
+  gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
+  gEspNow->bondSyncRetryCount = 0;
+  gEspNow->bondSyncLastAttemptMs = 0;
   gEspNow->bondCapSent = false;
-  gEspNow->bondCapReceived = false;
-  gEspNow->bondManifestSent = false;
   gEspNow->bondManifestReceived = false;
-  gEspNow->bondSettingsSent = false;
   gEspNow->bondSettingsReceived = false;
+  gEspNow->bondSettingsSent = false;
+  gEspNow->lastRemoteCapValid = false;
+  // Clear all pending deferred flags — stale messages from the previous
+  // session must not be processed after a role swap or sync reset.
+  gEspNow->bondNeedsCapabilityRequest = false;
+  gEspNow->bondNeedsCapabilityResponse = false;
+  gEspNow->bondReceivedCapability = false;
+  gEspNow->bondNeedsManifestResponse = false;
+  gEspNow->bondNeedsSettingsResponse = false;
+  gEspNow->bondPeerStatusValid = false;
+  gEspNow->bondNeedsProactiveStatus = false;
+  clearBondSessionToken();
 }
 
 // ============================================================================
-// Paired Mode CLI Commands
+// Bond Mode CLI Commands
 // ============================================================================
 
 /**
- * Request capability summary from paired peer
+ * Request capability summary from bonded peer
  */
 const char* cmd_bond_requestcap(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -9862,7 +10667,7 @@ const char* cmd_bond_requestcap(const String& argsIn) {
   */
   bool sent = false;
   for (int attempt = 0; attempt < 2; attempt++) {
-    sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_PAIR_CAP_REQ, ESPNOW_V3_FLAG_ACK_REQ, reqId, nullptr, 0, 1);
+    sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_BOND_CAP_REQ, ESPNOW_V3_FLAG_ACK_REQ, reqId, nullptr, 0, 1);
     if (!sent) continue;
     /* V2 ACK WAIT DEPRECATED
     if (msgAckWaitBlock(reqId, 350)) break;
@@ -9905,7 +10710,7 @@ const char* cmd_bond_showcap(const String& argsIn) {
 }
 
 /**
- * Request full manifest from paired peer (v3 binary protocol)
+ * Request full manifest from bonded peer (v3 binary protocol)
  */
 const char* cmd_bond_requestmanifest(const String& argsIn) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -10071,13 +10876,14 @@ const char* cmd_bond_connect(const String& argsIn) {
     return "Already connected to this device in bond mode.";
   }
   
-  // Enable paired mode and set peer MAC
+  // Enable bond mode and set peer MAC
   // Role is determined by MAC address comparison (higher MAC = master)
   // This ensures deterministic role assignment when both devices run 'bond connect'
   // Role-based handshake sequencing:
   // - Master (role=1) waits for worker's data, then sends its own
   // - Worker (role=0) sends data first when entering each exchange state
-  setSetting(gSettings.bondModeEnabled, true);
+  // Set peer MAC and role BEFORE enabling bond mode to avoid race window
+  // where espnow task sees bondModeEnabled=true with empty peerMac
   setSetting(gSettings.bondPeerMac, formatMacAddress(peerMac));
   
   // Determine role by comparing our MAC with peer MAC (higher MAC = master)
@@ -10085,13 +10891,16 @@ const char* cmd_bond_connect(const String& argsIn) {
   WiFi.macAddress(ourMac);
   int cmp = memcmp(ourMac, peerMac, 6);
   setSetting(gSettings.bondRole, (uint8_t)((cmp > 0) ? 1 : 0));  // Higher MAC becomes MASTER
+  
+  // Enable bond mode last — peerMac and role are already set
+  setSetting(gSettings.bondModeEnabled, true);
   INFO_ESPNOWF("[PAIR] Role assigned by MAC comparison: %s (our=%02X:%02X:%02X:%02X:%02X:%02X, peer=%02X:%02X:%02X:%02X:%02X:%02X)",
                 gSettings.bondRole == 1 ? "MASTER" : "WORKER",
                 ourMac[0], ourMac[1], ourMac[2], ourMac[3], ourMac[4], ourMac[5],
                 peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
   gEspNow->bondPeerOnline = false;  // Will be set true when heartbeat received
   gEspNow->lastBondHeartbeatReceivedMs = 0;
-  resetBondHandshake();  // Reset handshake state for fresh start
+  resetBondSync();  // Reset handshake state for fresh start
   
   String deviceName = getEspNowDeviceName(peerMac);
   if (deviceName.length() == 0) deviceName = formatMacAddress(peerMac);
@@ -10120,7 +10929,7 @@ const char* cmd_bond_disconnect(const String& argsIn) {
   String prevPeer = gSettings.bondPeerMac;
   setSetting(gSettings.bondModeEnabled, false);
   setSetting(gSettings.bondPeerMac, String(""));
-  resetBondHandshake();  // Reset handshake state
+  resetBondSync();  // Reset handshake state
   if (gEspNow) gEspNow->bondPeerOnline = false;
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -10160,33 +10969,24 @@ const char* cmd_bond_status(const String& argsIn) {
     peerStatus = gEspNow->bondPeerOnline ? "ONLINE" : "OFFLINE";
   }
   
-  // Get handshake state name
-  const char* hsStateName = "UNKNOWN";
-  if (gEspNow) {
-    switch (gEspNow->bondHandshakeState) {
-      case BOND_HS_IDLE: hsStateName = "IDLE"; break;
-      case BOND_HS_WAIT_HEARTBEAT: hsStateName = "WAIT_HEARTBEAT"; break;
-      case BOND_HS_CAP_EXCHANGE: hsStateName = "CAP_EXCHANGE"; break;
-      case BOND_HS_MANIFEST_EXCHANGE: hsStateName = "MANIFEST_EXCHANGE"; break;
-      case BOND_HS_SETTINGS_EXCHANGE: hsStateName = "SETTINGS_EXCHANGE"; break;
-      case BOND_HS_COMPLETE: hsStateName = "COMPLETE"; break;
-    }
-  }
+  // Compute sync status from helper
+  bool capOk = gEspNow ? gEspNow->lastRemoteCapValid : false;
+  bool manOk = gEspNow ? gEspNow->bondManifestReceived : false;
+  bool setOk = gEspNow ? gEspNow->bondSettingsReceived : false;
+  const char* syncLabel = isBondSynced() ? "SYNCED" : "SYNCING";
+  if (!gEspNow || !gEspNow->bondPeerOnline) syncLabel = "OFFLINE";
   
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("Bond mode: ENABLED");
   BROADCAST_PRINTF("Role: %s", gSettings.bondRole == 1 ? "master (display/gamepad)" : "worker (compute/network)");
   BROADCAST_PRINTF("Peer: %s (%s)", deviceName.c_str(), gSettings.bondPeerMac.c_str());
   BROADCAST_PRINTF("Peer status: %s", peerStatus);
-  BROADCAST_PRINTF("Handshake: %s (retry %d/%d)", hsStateName,
-                   gEspNow ? gEspNow->bondHandshakeRetryCount : 0, BOND_HANDSHAKE_MAX_RETRIES);
-  BROADCAST_PRINTF("Flags: capSent=%d capRecv=%d manSent=%d manRecv=%d setSent=%d setRecv=%d",
+  bool setSent = gEspNow ? gEspNow->bondSettingsSent : false;
+  BROADCAST_PRINTF("Sync: %s (cap=%d manifest=%d settRx=%d settTx=%d)", syncLabel, (int)capOk, (int)manOk, (int)setOk, (int)setSent);
+  BROADCAST_PRINTF("Flags: capSent=%d syncInFlight=%d retries=%d",
                    gEspNow ? gEspNow->bondCapSent : 0,
-                   gEspNow ? gEspNow->bondCapReceived : 0,
-                   gEspNow ? gEspNow->bondManifestSent : 0,
-                   gEspNow ? gEspNow->bondManifestReceived : 0,
-                   gEspNow ? gEspNow->bondSettingsSent : 0,
-                   gEspNow ? gEspNow->bondSettingsReceived : 0);
+                   gEspNow ? (int)gEspNow->bondSyncInFlight : 0,
+                   gEspNow ? (int)gEspNow->bondSyncRetryCount : 0);
   BROADCAST_PRINTF("Heartbeats sent: %lu", gEspNow ? (unsigned long)gEspNow->bondHeartbeatsSent : 0UL);
   BROADCAST_PRINTF("Heartbeats received: %lu", gEspNow ? (unsigned long)gEspNow->bondHeartbeatsReceived : 0UL);
   BROADCAST_PRINTF("Last heartbeat: %lus ago", (unsigned long)lastRecvAgo);
@@ -10211,15 +11011,58 @@ const char* cmd_bond_role(const String& argsIn) {
     return getDebugBuffer();
   }
   
+  uint8_t newRole = 255;
   if (args == "master" || args == "1") {
-    setSetting(gSettings.bondRole, (uint8_t)1);
-    return "Bond role set to: master (display/gamepad)";
+    newRole = 1;
   } else if (args == "worker" || args == "0") {
-    setSetting(gSettings.bondRole, (uint8_t)0);
-    return "Bond role set to: worker (compute/network)";
+    newRole = 0;
   } else {
     return "Usage: bond role <master|worker>";
   }
+  
+  bool changed = (newRole != gSettings.bondRole);
+  setSetting(gSettings.bondRole, newRole);
+  
+  // Reset handshake when role changes — sequencing is role-dependent
+  // (worker=initiator, master=responder). Without reset, both sides
+  // could end up waiting or both initiating simultaneously.
+  if (changed && gEspNow && gEspNow->initialized) {
+    resetBondSync();
+    // NOTE: lastRemoteCapValid is intentionally NOT cleared here — the peer's
+    // capabilities (name, sensors, features) haven't changed because our local
+    // role changed. Keeping it valid means peerName stays correct in the UI
+    // while the new handshake negotiates. It will be updated when CAP_RESP arrives.
+    gEspNow->bondPeerStatusValid = false;
+    
+    // Disable all sensor streaming — don't carry old master's prefs into new role
+    setSetting(gSettings.bondStreamThermal, false);
+    setSetting(gSettings.bondStreamTof, false);
+    setSetting(gSettings.bondStreamImu, false);
+    setSetting(gSettings.bondStreamGps, false);
+    setSetting(gSettings.bondStreamGamepad, false);
+    setSetting(gSettings.bondStreamFmradio, false);
+    setSetting(gSettings.bondStreamRtc, false);
+    setSetting(gSettings.bondStreamPresence, false);
+    // Clear runtime streaming flags too
+    for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+      stopSensorDataStreaming((RemoteSensorType)i);
+    }
+    
+    // If peer is already online and we're now master, trigger sync tick
+    if (gEspNow->bondPeerOnline && newRole == 1) {
+      gEspNow->bondNeedsCapabilityRequest = true;  // Consumed by sync tick
+      BROADCAST_PRINTF("[BOND] Role changed to master — sync tick will drive handshake");
+    } else {
+      BROADCAST_PRINTF("[BOND] Role changed to %s — handshake reset, will re-negotiate when peer online",
+                       newRole == 1 ? "master" : "worker");
+    }
+  }
+  
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  snprintf(getDebugBuffer(), 1024, "Bond role set to: %s%s",
+           newRole == 1 ? "master (display/gamepad)" : "worker (compute/network)",
+           changed ? " (handshake reset)" : " (unchanged)");
+  return getDebugBuffer();
 }
 
 /**
@@ -10257,9 +11100,9 @@ const char* cmd_bond_stream(const String& argsIn) {
     broadcastOutput("  Sensor streaming (runtime / saved):");
     bool savedFlags[] = {gSettings.bondStreamThermal, gSettings.bondStreamTof, gSettings.bondStreamImu, 
                          gSettings.bondStreamGps, gSettings.bondStreamGamepad, gSettings.bondStreamFmradio,
-                         gSettings.bondStreamPresence};
-    const char* sensors[] = {"thermal", "tof", "imu", "gps", "gamepad", "fmradio", "presence"};
-    for (int i = 0; i < 7; i++) {
+                         gSettings.bondStreamRtc, gSettings.bondStreamPresence};
+    const char* sensors[] = {"thermal", "tof", "imu", "gps", "gamepad", "fmradio", "rtc", "presence"};
+    for (int i = 0; i < 8; i++) {
       RemoteSensorType type = stringToSensorType(sensors[i]);
       bool runtime = isSensorDataStreamingEnabled(type);
       bool saved = savedFlags[i];
@@ -10315,6 +11158,7 @@ const char* cmd_bond_stream(const String& argsIn) {
     case REMOTE_SENSOR_GPS:      setSetting(gSettings.bondStreamGps, enable); break;
     case REMOTE_SENSOR_GAMEPAD:  setSetting(gSettings.bondStreamGamepad, enable); break;
     case REMOTE_SENSOR_FMRADIO:  setSetting(gSettings.bondStreamFmradio, enable); break;
+    case REMOTE_SENSOR_RTC:      setSetting(gSettings.bondStreamRtc, enable); break;
     case REMOTE_SENSOR_PRESENCE: setSetting(gSettings.bondStreamPresence, enable); break;
     default: break;
   }
@@ -10349,7 +11193,7 @@ const char* cmd_bond_testsensor(const String& argsIn) {
     testType = stringToSensorType(args.c_str());
   }
   
-  broadcastOutput("[PAIR_TEST] Testing v3 sensor data transmission...");
+  broadcastOutput("[BOND_TEST] Testing v3 sensor data transmission...");
   BROADCAST_PRINTF("  Sensor type: %s (%d)", sensorTypeToString(testType), (int)testType);
   BROADCAST_PRINTF("  Role: %s", gSettings.bondRole == 1 ? "MASTER" : "WORKER");
   BROADCAST_PRINTF("  Peer MAC: %s", gSettings.bondPeerMac.c_str());
@@ -10368,13 +11212,15 @@ const char* cmd_bond_testsensor(const String& argsIn) {
                                     (uint16_t)testJson.length());
   
   if (sent) {
-    broadcastOutput("[PAIR_TEST] SUCCESS: Test packet sent via v3");
+    broadcastOutput("[BOND_TEST] SUCCESS: Test packet sent via v3");
     return "OK: Test sensor packet sent";
   } else {
-    broadcastOutput("[PAIR_TEST] FAILED: sendBondedSensorData returned false");
+    broadcastOutput("[BOND_TEST] FAILED: sendBondedSensorData returned false");
     return "FAILED: Could not send test packet (check debug output)";
   }
 }
+
+#endif // ENABLE_BONDED_MODE
 
 // ============================================================================
 // ESP-NOW Buffer Size Configuration Command
@@ -10545,6 +11391,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnow usersync", "Enable/disable user credential sync: 'espnow usersync [on|off]'.", false, cmd_espnow_usersync },
   { "espnow requestmeta", "Request metadata from peer: 'espnow requestmeta <name_or_mac>'.", false, cmd_espnow_requestmeta, "Usage: espnow requestmeta <name_or_mac>" },
   
+#if ENABLE_BONDED_MODE
   // ---- Bond Mode Commands (1:1 handshake relationship) ----
   { "bond connect", "Connect to bonded peer device: 'bond connect <mac_or_name>'.", false, cmd_bond_connect, "Usage: bond connect <mac_or_name>" },
   { "bond disconnect", "Disconnect from bonded peer device.", false, cmd_bond_disconnect },
@@ -10557,6 +11404,7 @@ extern const CommandEntry espNowCommands[] = {
   { "bond showremotemanifest", "Show cached remote manifest(s): 'bond showremotemanifest [fwHash]'.", false, cmd_bond_showremotemanifest },
   { "bond stream", "Stream sensor data to bonded master (worker only): 'bond stream <sensor> <on|off>'.", false, cmd_bond_stream, "Usage: bond stream <sensor> <on|off>\n       bond stream (show status)" },
   { "bond testsensor", "Test v3 sensor data transmission: 'bond testsensor [sensor_type]'.", false, cmd_bond_testsensor, "Usage: bond testsensor [thermal|tof|imu|gps|gamepad|fmradio]" },
+#endif
   
   // ---- ESP-NOW Encryption ----
   { "espnow setpassphrase", "Set encryption passphrase: 'espnow setpassphrase \"phrase\"'.", true, cmd_espnow_setpassphrase, "Usage: espnow setpassphrase \"your_passphrase_here\"\n       espnow setpassphrase clear" },
@@ -10608,16 +11456,20 @@ static const SettingEntry espnowSettingEntries[] = {
   { "meshTTL",                    SETTING_INT,    &gSettings.meshTTL,                    3, 0, nullptr, 1, 10, "TTL", nullptr },
   { "meshAdaptiveTTL",            SETTING_BOOL,   &gSettings.meshAdaptiveTTL,            false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr },
   { "meshPeerMax",                SETTING_INT,    &gSettings.meshPeerMax,                8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr },
-  { "bondModeEnabled",          SETTING_BOOL,   &gSettings.bondModeEnabled,          false, 0, nullptr, 0, 1, "Paired Mode Enabled", nullptr },
-  { "bondRole",                 SETTING_INT,    &gSettings.bondRole,                 0, 0, nullptr, 0, 1, "Paired Role", nullptr },
-  { "bondPeerMac",              SETTING_STRING, &gSettings.bondPeerMac,              0, 0, "", 0, 0, "Paired Peer MAC", nullptr },
+  { "sensorBroadcastIntervalMs",  SETTING_INT,    &gSettings.sensorBroadcastIntervalMs,  1000, 0, nullptr, 100, 10000, "Sensor Broadcast Interval (ms)", nullptr },
+#if ENABLE_BONDED_MODE
+  { "bondModeEnabled",          SETTING_BOOL,   &gSettings.bondModeEnabled,          false, 0, nullptr, 0, 1, "Bond Mode Enabled", nullptr },
+  { "bondRole",                 SETTING_INT,    &gSettings.bondRole,                 0, 0, nullptr, 0, 1, "Bond Role", nullptr },
+  { "bondPeerMac",              SETTING_STRING, &gSettings.bondPeerMac,              0, 0, "", 0, 0, "Bond Peer MAC", nullptr },
   { "bondStreamThermal",          SETTING_BOOL,   &gSettings.bondStreamThermal,          false, 0, nullptr, 0, 1, "Auto-stream Thermal", nullptr },
   { "bondStreamTof",              SETTING_BOOL,   &gSettings.bondStreamTof,              false, 0, nullptr, 0, 1, "Auto-stream ToF", nullptr },
   { "bondStreamImu",              SETTING_BOOL,   &gSettings.bondStreamImu,              false, 0, nullptr, 0, 1, "Auto-stream IMU", nullptr },
   { "bondStreamGps",              SETTING_BOOL,   &gSettings.bondStreamGps,              false, 0, nullptr, 0, 1, "Auto-stream GPS", nullptr },
   { "bondStreamGamepad",          SETTING_BOOL,   &gSettings.bondStreamGamepad,          false, 0, nullptr, 0, 1, "Auto-stream Gamepad", nullptr },
   { "bondStreamFmradio",          SETTING_BOOL,   &gSettings.bondStreamFmradio,          false, 0, nullptr, 0, 1, "Auto-stream FM Radio", nullptr },
+  { "bondStreamRtc",              SETTING_BOOL,   &gSettings.bondStreamRtc,              false, 0, nullptr, 0, 1, "Auto-stream RTC", nullptr },
   { "bondStreamPresence",         SETTING_BOOL,   &gSettings.bondStreamPresence,         false, 0, nullptr, 0, 1, "Auto-stream Presence", nullptr },
+#endif
   // Buffer size settings (requires reinit to take effect)
   { "txQueueSize",                SETTING_INT,    (int*)&gSettings.espnowTxQueueSize,    8, 0, nullptr, 1, 16, "TX Queue Size", nullptr },
   { "rxBufferSize",               SETTING_INT,    (int*)&gSettings.espnowRxBufferSize,   256, 0, nullptr, 64, 512, "RX Buffer Size", nullptr },

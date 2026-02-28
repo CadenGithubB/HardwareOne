@@ -135,6 +135,8 @@ struct Settings {
       meshTTL(3),
       meshAdaptiveTTL(false),
       meshPeerMax(8),
+      sensorBroadcastIntervalMs(1000),
+#if ENABLE_BONDED_MODE
       bondModeEnabled(false),
       bondRole(0),
       bondPeerMac(""),
@@ -144,7 +146,9 @@ struct Settings {
       bondStreamGps(false),
       bondStreamGamepad(false),
       bondStreamFmradio(false),
+      bondStreamRtc(false),
       bondStreamPresence(false),
+#endif
 #if ENABLE_AUTOMATION
       automationsEnabled(true),
 #endif
@@ -449,18 +453,22 @@ struct Settings {
   uint8_t meshTTL;                     // Mesh TTL (1-10, default: 3)
   bool meshAdaptiveTTL;                // Enable adaptive TTL based on peer count
   uint8_t meshPeerMax;                 // Max mesh peer slots (1-16, default: 8, changes on reboot)
+  uint16_t sensorBroadcastIntervalMs;  // Sensor broadcast interval in ms (100-10000, default: 1000)
+#if ENABLE_BONDED_MODE
   // Bond mode settings (two-device bonded pair)
-  bool bondModeEnabled;              // Enable paired mode (master/worker)
+  bool bondModeEnabled;              // Enable bond mode (master/worker)
   uint8_t bondRole;                  // 0=worker (compute/network), 1=master (display/gamepad)
-  String bondPeerMac;                // MAC address of paired peer device
+  String bondPeerMac;                // MAC address of bonded peer device
   // Bond mode sensor streaming (auto-enable on boot when bonded)
-  bool bondStreamThermal;              // Auto-stream thermal data to paired peer
-  bool bondStreamTof;                  // Auto-stream ToF data to paired peer
-  bool bondStreamImu;                  // Auto-stream IMU data to paired peer
-  bool bondStreamGps;                  // Auto-stream GPS data to paired peer
-  bool bondStreamGamepad;              // Auto-stream gamepad data to paired peer
-  bool bondStreamFmradio;              // Auto-stream FM radio data to paired peer
-  bool bondStreamPresence;             // Auto-stream presence sensor data to paired peer
+  bool bondStreamThermal;              // Auto-stream thermal data to bonded peer
+  bool bondStreamTof;                  // Auto-stream ToF data to bonded peer
+  bool bondStreamImu;                  // Auto-stream IMU data to bonded peer
+  bool bondStreamGps;                  // Auto-stream GPS data to bonded peer
+  bool bondStreamGamepad;              // Auto-stream gamepad data to bonded peer
+  bool bondStreamFmradio;              // Auto-stream FM radio data to bonded peer
+  bool bondStreamRtc;                  // Auto-stream RTC data to bonded peer
+  bool bondStreamPresence;             // Auto-stream presence sensor data to bonded peer
+#endif
   // ESP-NOW buffer size settings (runtime tuning)
   uint16_t espnowTxQueueSize;          // TX retry queue size (1-16, default: 8)
   uint16_t espnowRxBufferSize;         // RX deferred message buffer size (64-512, default: 256)
