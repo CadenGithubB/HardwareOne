@@ -167,10 +167,24 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
     
     // Parse optional 'mac' parameter for per-device filtering
     if (httpd_query_key_value(queryBuf, "mac", paramBuf, sizeof(paramBuf)) == ESP_OK) {
+      // Inline URL-decode (httpd_query_key_value does NOT decode %XX sequences)
+      char decoded[32];
+      char* dst = decoded;
+      char* dEnd = decoded + sizeof(decoded) - 1;
+      for (const char* s = paramBuf; *s && dst < dEnd; ) {
+        if (*s == '%' && s[1] && s[2]) {
+          char hex[3] = {s[1], s[2], 0};
+          *dst++ = (char)strtol(hex, nullptr, 16);
+          s += 3;
+        } else {
+          *dst++ = *s++;
+        }
+      }
+      *dst = '\0';
       // Parse MAC address (format: AA:BB:CC:DD:EE:FF or AABBCCDDEEFF)
-      if (strlen(paramBuf) >= 12) {
+      if (strlen(decoded) >= 12) {
         hasMacFilter = true;
-        sscanf(paramBuf, "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
+        sscanf(decoded, "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
                &filterMac[0], &filterMac[1], &filterMac[2],
                &filterMac[3], &filterMac[4], &filterMac[5]);
       }

@@ -74,18 +74,21 @@ enum EspNowMode {
   ESPNOW_MODE_MESH = 1 
 };
 
+#if ENABLE_BONDED_MODE
 // ==========================
-// Bond Mode Handshake State Machine
+// Bond Mode Sync Tracking
 // ==========================
-// Linear handshake: wait for each step to complete before proceeding
-enum BondHandshakeState {
-  BOND_HS_IDLE = 0,           // Not paired or disconnected
-  BOND_HS_WAIT_HEARTBEAT,     // Waiting for first heartbeat exchange
-  BOND_HS_CAP_EXCHANGE,       // Exchanging capabilities
-  BOND_HS_MANIFEST_EXCHANGE,  // Exchanging manifests (via file transfer)
-  BOND_HS_SETTINGS_EXCHANGE,  // Exchanging settings (via file transfer)
-  BOND_HS_COMPLETE            // Handshake complete, normal operation
+// No linear state machine — sync tick idempotently fetches what's missing.
+// Master "Synced" = lastRemoteCapValid && bondManifestReceived && bondSettingsReceived
+// Worker "Synced" = lastRemoteCapValid && bondCapSent && bondSettingsSent
+
+enum BondSyncRequestType : uint8_t {
+  BOND_SYNC_NONE = 0,
+  BOND_SYNC_CAP = 1,
+  BOND_SYNC_MANIFEST = 2,
+  BOND_SYNC_SETTINGS = 3,
 };
+#endif // ENABLE_BONDED_MODE
 
 // ESP-NOW device name mapping
 struct EspNowDevice {
@@ -307,11 +310,28 @@ struct CapabilitySummary {
   uint32_t uptimeSeconds;      // Uptime in seconds
 };
 
-// Bond mode message types
-#define MSG_TYPE_PAIR_CAP_REQ "PAIR_CAP_REQ"     // Request capability summary
-#define MSG_TYPE_PAIR_CAP_RESP "PAIR_CAP_RESP"   // Capability summary response
-#define MSG_TYPE_PAIR_MANIFEST_REQ "PAIR_MAN_REQ" // Request full manifest
-#define MSG_TYPE_PAIR_MANIFEST_RESP "PAIR_MAN_RESP" // Manifest response (chunked)
+#if ENABLE_BONDED_MODE
+// Bond mode message types (v2 JSON - deprecated, now use v3 binary)
+#define MSG_TYPE_BOND_CAP_REQ "PAIR_CAP_REQ"     // Request capability summary (wire value kept for compat)
+#define MSG_TYPE_BOND_CAP_RESP "PAIR_CAP_RESP"   // Capability summary response
+#define MSG_TYPE_BOND_MANIFEST_REQ "PAIR_MAN_REQ" // Request full manifest
+#define MSG_TYPE_BOND_MANIFEST_RESP "PAIR_MAN_RESP" // Manifest response (chunked)
+
+// Periodic bond status snapshot — sent in response to BOND_STATUS_REQ (~30s interval)
+// Uses same CAP_SENSOR_* bitmask constants as CapabilitySummary
+struct __attribute__((packed)) BondPeerStatus {
+  uint32_t uptimeSec;          // Device uptime in seconds
+  uint32_t freeHeap;           // Free heap bytes
+  uint32_t minFreeHeap;        // Minimum free heap since boot
+  uint16_t sensorEnabledMask;  // CAP_SENSOR_* bits for sensors currently running (xxxEnabled)
+  uint16_t sensorConnectedMask;// CAP_SENSOR_* bits for sensors currently connected (xxxConnected)
+  uint8_t  wifiConnected;      // WiFi STA connected (0/1)
+  uint8_t  bluetoothActive;    // Bluetooth active (0/1)
+  uint8_t  httpActive;         // HTTP server running (0/1)
+  uint8_t  bondHandshakeState; // Current handshake state
+  uint8_t  reserved[4];        // Future use
+};
+#endif // ENABLE_BONDED_MODE
 
 // ==========================
 // Capability Bit Definitions
@@ -661,8 +681,8 @@ struct EspNowState {
   volatile uint16_t fileAckLast;
   char fileAckHashExpected[16];
   
-  // List output buffer
-  char listBuffer[1024];
+  // List output buffer (PSRAM-allocated at init)
+  char* listBuffer;
   
   // Message Router
   RouterMetrics routerMetrics;
@@ -700,23 +720,66 @@ struct EspNowState {
   bool lastRemoteCapValid;
   unsigned long lastRemoteCapTime;
   
-  // Bond mode heartbeat tracking
+#if ENABLE_BONDED_MODE
+  // Bond heartbeat tracking
   uint32_t bondHeartbeatsSent;
   uint32_t bondHeartbeatsReceived;
   unsigned long lastBondHeartbeatSentMs;
   unsigned long lastBondHeartbeatReceivedMs;
-  uint32_t bondPeerUptimeSec;
-  uint32_t bondPeerUptimeSecAtOffline;
-  bool bondPeerOnline;  // true if heartbeat received within timeout
-  bool bondNeedsCapabilityRequest;  // flag to request caps/manifest (set by callback, handled by task)
-  BondHandshakeState bondOnlineEventState;  // handshake state when "peer online" event fired (for debug)
-  bool bondNeedsStreamingSetup;     // flag to apply saved streaming settings (set by callback, handled by task)
-  bool bondNeedsCapabilityResponse; // flag to send capability response (deferred from callback)
-  bool bondNeedsManifestResponse;   // flag to send manifest response (deferred from callback)
-  bool bondNeedsSettingsResponse;   // flag to send settings response (deferred from callback)
-  bool bondNeedsMetadataResponse;   // flag to send metadata response (deferred from callback)
-  bool bondReceivedCapability;      // flag to log received capability (deferred from callback)
+  bool bondPeerOnline;              // true if heartbeat received within timeout
+  uint32_t bondPeerBootCounter;     // Peer's boot counter (detect reboots)
+  uint32_t bondPeerSettingsHash;    // Peer's settings hash (detect changes)
+  uint32_t bondLocalSettingsHash;   // Our settings hash (sent in heartbeat)
+  uint32_t bondPeerUptime;          // Peer's uptime in seconds (from heartbeat)
+  uint32_t bondLastOfflineMs;       // millis() when peer last went offline
+  
+  // Master-driven sync tick state
+  BondSyncRequestType bondSyncInFlight; // What request is currently pending
+  uint8_t bondSyncRetryCount;           // Retry counter for current request
+  uint32_t bondSyncLastAttemptMs;       // When last sync request was sent
+  
+  // Deferred flags (set in ISR-like callback, consumed in task context)
+  bool bondNeedsCapabilityRequest;  // Peer came online — master starts sync
+  bool bondNeedsStreamingSetup;     // Apply saved streaming prefs after sync
+  bool bondDeferredStreamCtrlPending; // STREAM_CTRL received, needs processing
+  uint8_t bondDeferredStreamCtrlSensor;
+  uint8_t bondDeferredStreamCtrlEnable;
+  bool bondNeedsCapabilityResponse; // Peer requested our capabilities
+  bool bondNeedsManifestResponse;   // Peer requested our manifest
+  bool bondNeedsSettingsResponse;   // Peer requested our settings
+  bool bondReceivedCapability;      // We received peer's CAP_RESP
   uint8_t bondPendingResponseMac[6]; // MAC of peer requesting cap/manifest/settings
+  
+  // Sync completion tracking (replaces linear handshake state machine)
+  bool bondCapSent;                 // We sent our capabilities this session
+  bool bondManifestReceived;        // We received/cached peer's manifest (master)
+  bool bondSettingsReceived;        // We received peer's settings (master)
+  bool bondSettingsSent;            // We sent our settings to peer (worker)
+  
+  // Session token (RAM only — computed after CAP exchange, cleared on offline)
+  uint8_t bondSessionToken[16];
+  bool bondSessionTokenValid;
+  
+  // RSSI tracking (updated from rx_ctrl on every received bond packet)
+  int8_t bondRssiLast;
+  int8_t bondRssiAvg;
+  uint32_t bondLastRssiUpdateMs;
+  
+  // Deferred diagnostics: bond messages rejected because sender not in device list
+  uint32_t bondUnpairedRejectCount;
+  uint8_t  bondUnpairedRejectType;
+  uint8_t  bondUnpairedRejectMac[6];
+  
+  // Periodic bond status poll cache (updated every ~30s from BOND_STATUS_RESP)
+  BondPeerStatus bondPeerStatus;
+  bool bondPeerStatusValid;
+  unsigned long bondPeerStatusTimeMs;
+  bool bondNeedsStatusResponse;
+  bool bondNeedsProactiveStatus;  // Push status to peer when local sensor state changes
+  unsigned long bondLastStatusReqMs;
+#endif // ENABLE_BONDED_MODE
+  
+  bool bondNeedsMetadataResponse;   // flag to send metadata response (deferred from callback)
   uint8_t metadataPendingResponseMac[6]; // Dedicated MAC for metadata response (separate from bond exchanges)
   
   // Deferred metadata processing (set in callback, handled in task)
@@ -724,51 +787,25 @@ struct EspNowState {
   uint8_t deferredMetadataSrcMac[6];
   uint8_t deferredMetadataPayload[216];  // V3PayloadMetadata size (212) + 4 bytes padding
   
-  // Linear handshake state machine (prevents overlapping file transfers)
-  BondHandshakeState bondHandshakeState;  // Current handshake step
-  uint32_t bondHandshakeStartMs;          // When current step started (for timeout)
-  uint8_t bondHandshakeRetryCount;        // Retry counter for current step (max 3)
-  bool bondCapSent;                       // We sent our capabilities
-  bool bondCapReceived;                   // We received peer's capabilities  
-  bool bondManifestSent;                  // We sent our manifest
-  bool bondManifestReceived;              // We received peer's manifest
-  bool bondSettingsSent;                  // We sent our settings
-  bool bondSettingsReceived;              // We received peer's settings
-
-  bool bondHandshakeCompletedThisBoot;
-  uint32_t bondHandshakeCompletedMs;
-  uint32_t bondLastOfflineMs;
-  uint8_t bondHandshakeCompletedPeerMac[6];
-  
-  // Bond mode session token (RAM only - never persisted)
-  // Token = HMAC-SHA256(passphrase, peerMAC || ourMAC) - proves knowledge of shared passphrase
-  // Used for authenticating remote commands without sending credentials per-command
-  uint8_t bondSessionToken[16];      // First 16 bytes of HMAC (sufficient for auth)
-  bool bondSessionTokenValid;        // True if token has been computed for current peer
-  
-  // Bond mode health scoring (minimal overhead: 16 bytes)
-  uint16_t bondHealthScore;          // 0-100 health score based on heartbeat reliability
-  uint16_t bondMissedHeartbeats;     // Consecutive missed heartbeats
-  uint16_t bondSuccessfulHeartbeats; // Consecutive successful heartbeats (for recovery)
-  int8_t bondRssiLast;               // Last RSSI value (-128 to 0)
-  int8_t bondRssiAvg;                // Running average RSSI (EMA)
-  uint32_t bondLastRssiUpdateMs;     // When RSSI was last updated
-  uint16_t bondPacketLoss;           // Packet loss estimate (0-1000 = 0.0%-100.0%)
-  uint16_t bondLatencyMs;            // Round-trip latency estimate in ms
-  
   // Deferred message handling (ISR-safe pattern: callback sets flag, task processes)
-  // TEXT message
-  bool deferredTextPending;
-  bool deferredTextEncrypted;
-  uint8_t deferredTextSrcMac[6];
-  char deferredTextDeviceName[32];
-  char deferredTextContent[256];
+  // TEXT message ring buffer (4 slots — prevents silent overwrite when messages arrive back-to-back)
+  static constexpr int TEXT_QUEUE_SIZE = 4;  // Must be power of 2
+  struct TextQueueEntry {
+    uint8_t srcMac[6];
+    char deviceName[32];
+    char content[256];
+    bool encrypted;
+    bool used;
+  };
+  TextQueueEntry textQueue[TEXT_QUEUE_SIZE];
+  volatile int textQueueHead;  // ISR writes here (producer)
+  volatile int textQueueTail;  // Task reads here (consumer)
   
   // CMD_RESP message
   bool deferredCmdRespPending;
   uint8_t deferredCmdRespSrcMac[6];
   char deferredCmdRespDeviceName[32];
-  char deferredCmdRespResult[2048];
+  char* deferredCmdRespResult;  // PSRAM-allocated at init (2048 bytes)
   bool deferredCmdRespSuccess;
   
   // STREAM message ring buffer (replaces single-buffer to prevent overwrite loss)
@@ -809,6 +846,7 @@ struct EspNowState {
     streamReceivedCount(0),
     lastStreamSendTime(0),
     fileAckLast(0),
+    listBuffer(nullptr),
     nextMessageId(1),
     queueSize(0),
     globalMessageSeqNum(0),
@@ -823,41 +861,49 @@ struct EspNowState {
     deviceName(""),
     lastRemoteCapValid(false),
     lastRemoteCapTime(0),
+#if ENABLE_BONDED_MODE
     bondHeartbeatsSent(0),
     bondHeartbeatsReceived(0),
     lastBondHeartbeatSentMs(0),
     lastBondHeartbeatReceivedMs(0),
     bondPeerOnline(false),
+    bondPeerBootCounter(0),
+    bondPeerSettingsHash(0),
+    bondLocalSettingsHash(0),
+    bondPeerUptime(0),
+    bondLastOfflineMs(0),
+    bondSyncInFlight(BOND_SYNC_NONE),
+    bondSyncRetryCount(0),
+    bondSyncLastAttemptMs(0),
     bondNeedsCapabilityRequest(false),
-    bondOnlineEventState(BOND_HS_IDLE),
     bondNeedsStreamingSetup(false),
+    bondDeferredStreamCtrlPending(false),
+    bondDeferredStreamCtrlSensor(0),
+    bondDeferredStreamCtrlEnable(0),
     bondNeedsCapabilityResponse(false),
     bondNeedsManifestResponse(false),
     bondNeedsSettingsResponse(false),
-    bondNeedsMetadataResponse(false),
     bondReceivedCapability(false),
-    deferredMetadataPending(false),
-    bondHandshakeState(BOND_HS_IDLE),
-    bondHandshakeStartMs(0),
-    bondHandshakeRetryCount(0),
     bondCapSent(false),
-    bondCapReceived(false),
-    bondManifestSent(false),
     bondManifestReceived(false),
-    bondSettingsSent(false),
     bondSettingsReceived(false),
+    bondSettingsSent(false),
     bondSessionTokenValid(false),
-    bondHealthScore(100),
-    bondMissedHeartbeats(0),
-    bondSuccessfulHeartbeats(0),
     bondRssiLast(-100),
     bondRssiAvg(-100),
     bondLastRssiUpdateMs(0),
-    bondPacketLoss(0),
-    bondLatencyMs(0),
-    deferredTextPending(false),
-    deferredTextEncrypted(false),
+    bondPeerStatusValid(false),
+    bondPeerStatusTimeMs(0),
+    bondNeedsStatusResponse(false),
+    bondNeedsProactiveStatus(false),
+    bondLastStatusReqMs(0),
+#endif
+    bondNeedsMetadataResponse(false),
+    deferredMetadataPending(false),
+    textQueueHead(0),
+    textQueueTail(0),
     deferredCmdRespPending(false),
+    deferredCmdRespResult(nullptr),
     deferredCmdRespSuccess(false),
     streamQueueHead(0),
     streamQueueTail(0),
@@ -865,18 +911,19 @@ struct EspNowState {
     deferredCmdMsgId(0)
   {
     memset(derivedKey, 0, 16);
+#if ENABLE_BONDED_MODE
     memset(bondPendingResponseMac, 0, 6);
-    memset(metadataPendingResponseMac, 0, 6);
     memset(bondSessionToken, 0, 16);
+    memset(&bondPeerStatus, 0, sizeof(bondPeerStatus));
+#endif
+    memset(metadataPendingResponseMac, 0, 6);
     // Initialize deferred message buffers
-    memset(deferredTextSrcMac, 0, 6);
-    memset(deferredTextDeviceName, 0, sizeof(deferredTextDeviceName));
-    memset(deferredTextContent, 0, sizeof(deferredTextContent));
+    memset(textQueue, 0, sizeof(textQueue));
     memset(deferredMetadataSrcMac, 0, 6);
     memset(deferredMetadataPayload, 0, sizeof(deferredMetadataPayload));
     memset(deferredCmdRespSrcMac, 0, 6);
     memset(deferredCmdRespDeviceName, 0, sizeof(deferredCmdRespDeviceName));
-    memset(deferredCmdRespResult, 0, sizeof(deferredCmdRespResult));
+    // deferredCmdRespResult is a pointer — zeroed after ps_alloc in initEspNow
     memset(streamQueue, 0, sizeof(streamQueue));
     memset(deferredCmdSrcMac, 0, 6);
     memset(deferredCmdDeviceName, 0, sizeof(deferredCmdDeviceName));
@@ -884,7 +931,7 @@ struct EspNowState {
     memset(devices, 0, sizeof(devices));
     memset(unpairedDevices, 0, sizeof(unpairedDevices));
     memset(fileAckHashExpected, 0, 16);
-    memset(listBuffer, 0, 1024);
+    // listBuffer is a pointer — zeroed after ps_alloc in initEspNow
     memset(&lastRemoteCap, 0, sizeof(lastRemoteCap));
   }
 };
@@ -1017,6 +1064,14 @@ inline bool isSelfMac(const uint8_t* mac) {
 }
 void macFromHexString(const String& s, uint8_t out[6]);
 String macToHexString(const uint8_t mac[6]);
+// Zero-allocation MAC formatter for debug log call sites.
+// Uses a GCC statement expression + stack char[18] — no heap, no String.
+// Usage: DEBUGF(..., "%s", MAC_STR(mac))  instead of  macToHexString(mac).c_str()
+#define MAC_STR(mac) \
+  ({ static char _macbuf[18]; \
+     snprintf(_macbuf, sizeof(_macbuf), "%02X:%02X:%02X:%02X:%02X:%02X", \
+       (mac)[0],(mac)[1],(mac)[2],(mac)[3],(mac)[4],(mac)[5]); \
+     (const char*)_macbuf; })
 
 // Topology helpers (moved from .ino)
 void requestTopologyDiscovery();
@@ -1058,11 +1113,20 @@ int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t s
 // File transfer to specific MAC (used by ImageManager)
 bool sendFileToMac(const uint8_t* mac, const String& localPath);
 
+#if ENABLE_BONDED_MODE
 // V3 binary sensor data streaming for bond mode (worker → master)
 bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t dataLen);
 
 // Check if bond mode is active and peer is online
 bool isBondModeOnline();
+// Check if bond mode is active, peer is online, AND fully synced (cap + manifest + settings)
+bool isBondSynced();
+#else
+// Stubs when bond mode is compiled out
+inline bool sendBondedSensorData(uint8_t, const uint8_t*, uint16_t) { return false; }
+inline bool isBondModeOnline() { return false; }
+inline bool isBondSynced() { return false; }
+#endif // ENABLE_BONDED_MODE
 
 // V3 frame sending (for remote command execution from System_Utils)
 bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,

@@ -1,6 +1,6 @@
 #include "OLED_RemoteSettings.h"
 
-#if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
+#if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 #include <ArduinoJson.h>
 #include <LittleFS.h>
@@ -57,9 +57,9 @@ bool loadRemoteSettingsModules() {
   // Free any existing remote modules
   freeRemoteSettingsModules();
   
-  // Get paired peer MAC
+  // Get bonded peer MAC
   if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() < 12) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] Not paired");
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] Not bonded");
     return false;
   }
   
@@ -231,7 +231,7 @@ const SettingsModule** getRemoteSettingsModules(size_t& count) {
 }
 
 /**
- * Apply remote setting change by sending command to paired peer
+ * Apply remote setting change by sending command to bonded peer
  */
 bool applyRemoteSettingChange(const char* moduleName, const char* settingKey, const String& value) {
   if (!moduleName || !settingKey) return false;
@@ -264,7 +264,7 @@ bool hasRemoteSettings() {
   DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] bondModeEnabled=%d peerMacLen=%d",
                 gSettings.bondModeEnabled ? 1 : 0, gSettings.bondPeerMac.length());
   if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() < 12) {
-    DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] EXIT: paired mode disabled or MAC too short");
+    DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] EXIT: bond mode disabled or MAC too short");
     return false;
   }
   
@@ -281,7 +281,7 @@ bool hasRemoteSettings() {
   snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
            peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
   
-  String filePath = String("/cache/peers/") + macStr + "/settings.json";
+  String filePath = String("/system/espnow/peers/") + macStr + "/settings.json";
   DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] Checking path: %s", filePath.c_str());
   
   extern bool filesystemReady;
@@ -291,4 +291,4 @@ bool hasRemoteSettings() {
   return exists;
 }
 
-#endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
+#endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE

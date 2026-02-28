@@ -258,10 +258,10 @@ static bool isPowerModuleConnected() {
 }
 
 static const SettingEntry powerSettingEntries[] = {
-  { "powerMode",             SETTING_INT,  &gSettings.powerMode,             0, 0, nullptr, 0, 3, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver" },
-  { "powerAutoMode",         SETTING_BOOL, &gSettings.powerAutoMode,         0, 0, nullptr, 0, 1, "Auto Mode", nullptr },
-  { "powerBatteryThreshold", SETTING_INT,  &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr },
-  { "powerDisplayDimLevel",  SETTING_INT,  &gSettings.powerDisplayDimLevel,  30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr }
+  { "mode",             SETTING_INT,  &gSettings.powerMode,             0, 0, nullptr, 0, 3, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver" },
+  { "autoMode",         SETTING_BOOL, &gSettings.powerAutoMode,         false, 0, nullptr, 0, 1, "Auto Mode", nullptr },
+  { "batteryThreshold", SETTING_INT,  &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr },
+  { "displayDimLevel",  SETTING_INT,  &gSettings.powerDisplayDimLevel,  30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr }
 };
 
 extern const SettingsModule powerSettingsModule = {

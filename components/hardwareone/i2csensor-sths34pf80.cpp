@@ -112,7 +112,7 @@ static bool isPresenceConnected() {
 
 extern const SettingsModule presenceSettingsModule = {
   "presence",
-  nullptr,
+  "presence",
   presenceSettingEntries,
   sizeof(presenceSettingEntries) / sizeof(presenceSettingEntries[0]),
   isPresenceConnected,

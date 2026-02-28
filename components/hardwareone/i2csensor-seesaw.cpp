@@ -587,9 +587,9 @@ void gamepadTask(void* parameter) {
                 size_t heapBefore = ESP.getFreeHeap();
                 size_t largestBefore = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
                 {
-                  // Send gamepad data via V3 binary protocol
-                  extern bool v3_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
-                  v3_broadcast_sensor_data(REMOTE_SENSOR_GAMEPAD, gamepadJson, jsonLen);
+                  // Send gamepad data via bond or mesh (sendSensorDataUpdate handles routing)
+                  extern void sendSensorDataUpdate(RemoteSensorType sensorType, const String& jsonData);
+                  sendSensorDataUpdate(REMOTE_SENSOR_GAMEPAD, String(gamepadJson));
                 }
                 if (isDebugFlagSet(DEBUG_MEMORY)) {
                   size_t heapAfter = ESP.getFreeHeap();

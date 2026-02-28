@@ -642,40 +642,24 @@ void applySettings() {
 // ============================================================================
 
 void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
-  // Top-level settings
-  doc["ntpServer"] = gSettings.ntpServer;
-  doc["tzOffsetMinutes"] = gSettings.tzOffsetMinutes;
-  doc["wifiEnabled"] = gSettings.wifiEnabled;
-  doc["wifiAutoReconnect"] = gSettings.wifiAutoReconnect;
-  doc["webCliHistorySize"] = gSettings.webCliHistorySize;
-  doc["oledCliHistorySize"] = gSettings.oledCliHistorySize;
-  
-  // ESP-NOW settings (nested structure) - now handled by modular registry
-  // Note: passphrase encryption is now automatic via isSecret flag
-  
-  // WiFi SSID fields for web UI
-  // wifiPrimarySSID = currently connected network (preferred);
-  // wifiSSID = primary saved SSID from settings (fallback/display)
-  {
+  // NOTE: All top-level settings are now owned by their respective modules.
+  // NOTE: webCliHistorySize/oledCliHistorySize -> cli module
+  // NOTE: wifiEnabled and all wifi settings -> wifi module
+
+  // wifiPrimarySSID: runtime-only convenience field for web UI (not saved, not a setting)
 #if ENABLE_WIFI
+  {
     String cur = WiFi.SSID();
     if (cur.length() > 0) {
       doc["wifiPrimarySSID"] = cur;
     }
-#endif
-    doc["wifiSSID"] = gSettings.wifiSSID;
   }
-  
-#if ENABLE_AUTOMATION
-  doc["automationsEnabled"] = gSettings.automationsEnabled;
 #endif
 
-  // Power management settings
-  JsonObject powerObj = doc["power"].to<JsonObject>();
-  powerObj["mode"] = gSettings.powerMode;
-  powerObj["autoMode"] = gSettings.powerAutoMode;
-  powerObj["batteryThreshold"] = gSettings.powerBatteryThreshold;
-  powerObj["displayDimLevel"] = gSettings.powerDisplayDimLevel;
+  // NOTE: ntpServer, tzOffsetMinutes, wifiSSID, wifiPassword, wifiAutoReconnect
+  //       are owned by the wifi module (written under "wifi" section).
+  // NOTE: automationsEnabled is owned by the automation module.
+  // NOTE: power{} is owned by the power module.
 
   // Debug flags are now handled by modular registry - no manual fallbacks needed
   // Output settings are now handled by modular registry - no manual fallbacks needed
@@ -784,6 +768,9 @@ bool writeSettingsJson() {
   // Now build/overwrite with current settings (orphaned sections remain untouched)
   buildSettingsJsonDoc(doc);
 
+  // Remove runtime-only fields that must never be persisted to disk
+  doc.remove("wifiPrimarySSID");
+
   // Check for overflow
   if (doc.overflowed()) {
     ERROR_STORAGEF("JSON document overflowed during build (need more than 5120 bytes)");
@@ -840,25 +827,11 @@ bool writeSettingsJson() {
   DEBUG_STORAGEF("[Settings] Write complete");
   gSensorPollingPaused = wasPaused;
   
-  // Push settings update to paired peer if in paired mode
-#if ENABLE_ESPNOW
-  extern Settings gSettings;
-  if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() >= 12) {
-    // Convert MAC string to bytes
-    uint8_t peerMac[6];
-    String macHex = gSettings.bondPeerMac;
-    macHex.replace(":", "");
-    for (int i = 0; i < 6; i++) {
-      char byteStr[3] = {macHex[i*2], macHex[i*2+1], '\0'};
-      peerMac[i] = (uint8_t)strtol(byteStr, nullptr, 16);
-    }
-    
-    // Send settings push notification (async, non-blocking)
-    extern void sendPairedSettings(const uint8_t* peerMac, uint32_t msgId, bool isPush);
-    sendPairedSettings(peerMac, 0, true);  // isPush=true for push notification
-  }
+  // Recompute local settings hash so bond heartbeats reflect the change
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+  { extern void computeBondLocalSettingsHash(); computeBondLocalSettingsHash(); }
 #endif
-  
+
   return true;
 }
 
@@ -929,43 +902,7 @@ bool readSettingsJson() {
     gSettings.i2cSensorsEnabled = false;
   }
 
-  // Top-level settings with defaults (| operator provides fallback)
-  gSettings.wifiEnabled = doc["wifiEnabled"] | true;
-  gSettings.wifiAutoReconnect = doc["wifiAutoReconnect"] | true;
-  gSettings.webCliHistorySize = doc["webCliHistorySize"] | 10;
-  gSettings.oledCliHistorySize = doc["oledCliHistorySize"] | 50;
-  gSettings.ntpServer = doc["ntpServer"] | "pool.ntp.org";
-  gSettings.tzOffsetMinutes = doc["tzOffsetMinutes"] | 0;
-
-  // Debug and output settings are now handled by modular registry - no manual fallbacks needed
-
-  // ESP-NOW settings - now handled by modular registry
-  // Note: passphrase decryption is now automatic via isSecret flag
-  
-#if ENABLE_AUTOMATION
-  // Automation settings
-  gSettings.automationsEnabled = doc["automationsEnabled"] | false;
-#endif
-
-  // Power management settings
-  JsonObject power = doc["power"];
-  if (power) {
-    gSettings.powerMode = power["mode"] | 0;
-    gSettings.powerAutoMode = power["autoMode"] | false;
-    gSettings.powerBatteryThreshold = power["batteryThreshold"] | 20;
-    gSettings.powerDisplayDimLevel = power["displayDimLevel"] | 30;
-  }
-
-  // Output settings
-  JsonObject output = doc["output"];
-  if (output) {
-    gSettings.outSerial = output["serial"] | true;
-    gSettings.outWeb = output["web"] | true;
-    gSettings.outDisplay = output["display"] | false;
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-    gSettings.outG2 = output["g2"] | false;
-#endif
-  }
+  // All settings are now read by their registered modules above.
 
   // Thermal settings are loaded by the modular registry below (no backward compatibility)
 

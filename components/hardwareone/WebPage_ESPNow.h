@@ -41,13 +41,13 @@ inline void streamEspNowInner(httpd_req_t* req) {
 .encryption-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 8px; }
 .encryption-enabled { background: var(--success); }
 .encryption-disabled { background: var(--muted); }
-.message-log { background: var(--crumb-bg); border-radius: 8px; padding: 15px; max-height: 300px; overflow-y: auto; border: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
-.message-bubble { max-width: 75%; width: fit-content; padding: 10px 14px; border-radius: 16px; position: relative; word-wrap: break-word; animation: slideIn 0.2s ease-out; }
+.message-log { background: var(--crumb-bg); border-radius: 8px; padding: 15px; max-height: 300px; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.message-bubble { max-width: 75%; width: fit-content; padding: 10px 14px; border-radius: 16px; position: relative; word-wrap: break-word; overflow-wrap: break-word; min-width: 0; animation: slideIn 0.2s ease-out; }
 @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 .message-received { align-self: flex-start; background: rgba(128,128,128,0.25); color: var(--panel-fg); border-bottom-left-radius: 4px; border: 1px solid rgba(128,128,128,0.15); }
 .message-sent { align-self: flex-end; background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
 .message-error { align-self: flex-end; background: var(--danger); color: var(--panel-fg); border-bottom-right-radius: 4px; }
-.message-text { margin: 0; font-size: 0.95em; line-height: 1.4; }
+.message-text { margin: 0; font-size: 0.95em; line-height: 1.4; overflow-wrap: break-word; word-break: break-word; }
 .message-status { font-size: 0.75em; margin-top: 4px; opacity: 0.8; display: flex; align-items: center; gap: 4px; }
 .message-received .message-status { color: var(--muted); }
 .message-sent .message-status { color: rgba(255,255,255,0.7); }
@@ -1083,85 +1083,12 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       // Show command being executed in message log
       const sendingBubble = appendLogLine('log-' + mac, 'SENT', 'Remote: ' + c, 'sending');
       
-      // Set up temporary SSE listener for streamed output
-      const targetMac = String(mac || '').toUpperCase();
-      const targetMacKey = targetMac.replace(/:/g, '').toUpperCase();
-      var targetDeviceName = '';
-      try {
-        if (window.espnowDevices && window.espnowDevices.length) {
-          for (var i = 0; i < window.espnowDevices.length; i++) {
-            var d = window.espnowDevices[i];
-            if (d && d.mac && String(d.mac).toUpperCase() === targetMac) {
-              targetDeviceName = d.name || '';
-              break;
-            }
-          }
-        }
-      } catch(_) {}
-      let hasOutput = false;
-      const streamListener = function(event) {
-        try {
-          const data = JSON.parse(event.data);
-          const payload = (data && (data.msg || data.message || data.broadcast)) ? String(data.msg || data.message || data.broadcast) : '';
-          if (!payload) return;
-          
-          // Check for [STREAM:device] prefix (real-time output)
-          const streamPrefix = '[STREAM:';
-          if (payload.startsWith(streamPrefix)) {
-            const endBracket = payload.indexOf(']');
-            if (endBracket <= streamPrefix.length) return;
-            const streamDevice = payload.substring(streamPrefix.length, endBracket).trim();
-            const streamContent = payload.substring(endBracket + 1).trim();
-            var match = false;
-            if (streamDevice.replace(/:/g, '').toUpperCase() === targetMacKey) match = true;
-            else if (targetDeviceName && streamDevice === targetDeviceName) match = true;
-            else if (window.__espnowDeviceNameToMac && window.__espnowDeviceNameToMac[streamDevice]) {
-              if (String(window.__espnowDeviceNameToMac[streamDevice]).toUpperCase() === targetMac) match = true;
-            }
-            if (match && streamContent) {
-              appendLogLine('log-' + mac, 'RECEIVED', streamContent, null);
-              hasOutput = true;
-            }
-            return;
-          }
-          
-          // Check for [ESP-NOW] Command result/FAILED (final CMD_RESP)
-          var cmdResultMatch = payload.match(/\[ESP-NOW\] Command (?:result|FAILED) from ([^:]+): (.*)/);
-          if (cmdResultMatch) {
-            var respDevice = cmdResultMatch[1].trim();
-            var respContent = cmdResultMatch[2].trim();
-            var rMatch = false;
-            if (respDevice.replace(/:/g, '').toUpperCase() === targetMacKey) rMatch = true;
-            else if (targetDeviceName && respDevice === targetDeviceName) rMatch = true;
-            if (rMatch && respContent) {
-              var rType = payload.indexOf('FAILED') >= 0 ? 'ERROR' : 'RECEIVED';
-              appendLogLine('log-' + mac, rType, respContent, null);
-              hasOutput = true;
-            }
-          }
-        } catch(e) { /* ignore parse errors */ }
-      };
-      
-      // Add SSE listener - always ensure connected
-      try {
-        if (!window.__es || window.__es.readyState === 2) {
-          window.__es = new EventSource('/api/events', { withCredentials: true });
-        }
-        window.__es.addEventListener('notice', streamListener);
-      } catch(_) {}
-      
+      // Remote command output is picked up by the message polling loop
+      // (/api/espnow/messages) which runs every 500ms — no SSE needed.
       const cmd = 'espnow remote ' + mac + ' ' + u + ' ' + p + ' ' + c;
       fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(cmd) })
         .then(r=>r.text())
         .then(t=>{
-          // Remove SSE listener after delay to catch remote command results.
-          // Remote commands need time for: ESP-NOW delivery + execution + response.
-          setTimeout(function() {
-            if (window.__es) {
-              window.__es.removeEventListener('notice', streamListener);
-            }
-          }, 15000);
-          
           // Update sending bubble to show completion
           if (sendingBubble) {
             const statusDiv = sendingBubble.querySelector('.message-status');
@@ -1170,8 +1097,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
             }
           }
           
-          // Show final result if no streamed output was received
-          if (!hasOutput && t && !t.includes('Remote command sent')) {
+          // Show immediate result if it's not just the "sent" confirmation
+          if (t && !t.includes('Remote command sent')) {
             appendLogLine('log-' + mac, 'RECEIVED', 'Result: ' + t, null);
           }
           
@@ -1180,11 +1107,6 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           if (cmdInput) cmdInput.value = '';
         })
         .catch(e=> {
-          // Remove SSE listener on error
-          if (window.__es) {
-            window.__es.removeEventListener('notice', streamListener);
-          }
-          
           // Update sending bubble to show error
           if (sendingBubble) {
             sendingBubble.className = 'message-bubble message-error';
@@ -1974,10 +1896,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         if (el) el.innerHTML = '<div style="color:var(--danger);text-align:center;">Error: ' + error + '</div>';
       });
       
-      // Also fetch and update topology view
-      if (document.getElementById('mesh-view-topology').style.display !== 'none') {
-        window.refreshTopologyView();
-      }
+      // Topology view is refreshed only on explicit user action (tab switch or Discover button),
+      // not on the 3-second mesh status poll — that would spam the CLI with toporesults requests.
     };
     
     // Pair an unpaired device
@@ -2064,8 +1984,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         for (var i = 0; i < lines.length; i++) {
           var line = lines[i].trim();
           
-          // Match device header: "Device: name (MAC)"
-          var deviceMatch = line.match(/Device:\s*(.+?)\s*\(([a-f0-9:]+)\)/i);
+          // Match device header: "name (MAC):" format from toporesults output
+          var deviceMatch = line.match(/^(.+?)\s*\(([A-Fa-f0-9:]{17})\)\s*:$/);
           if (deviceMatch) {
             currentDevice = {
               name: deviceMatch[1],
@@ -2099,11 +2019,15 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
               mac: peerMatch[2]
             };
             
-            // Next line should have heartbeat info
+            // Next line may have RSSI or heartbeat info
             if (i + 1 < lines.length) {
               var nextLine = lines[i + 1].trim();
+              var rssiMatch = nextLine.match(/RSSI:\s*(-?\d+)\s*dBm/i);
               var hbMatch = nextLine.match(/Heartbeats:\s*(\d+),\s*Last seen:\s*(\d+)s ago/i);
-              if (hbMatch) {
+              if (rssiMatch) {
+                peerInfo.rssi = parseInt(rssiMatch[1]);
+                i++; // Skip next line since we processed it
+              } else if (hbMatch) {
                 peerInfo.heartbeats = parseInt(hbMatch[1]);
                 peerInfo.lastSeen = parseInt(hbMatch[2]);
                 i++; // Skip next line since we processed it
@@ -2150,15 +2074,22 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
               html += '<div style="border-left:3px solid var(--success);padding-left:12px;margin-left:8px;">';
               for (var j = 0; j < dev.peers.length; j++) {
                 var peer = dev.peers[j];
-                var signalColor = peer.lastSeen < 10 ? 'var(--success)' : (peer.lastSeen < 20 ? 'var(--warning)' : 'var(--danger)');
+                var signalColor = 'var(--success)';
+                var detailText = '';
+                if (typeof peer.rssi === 'number') {
+                  signalColor = peer.rssi > -60 ? 'var(--success)' : (peer.rssi > -75 ? 'var(--warning)' : 'var(--danger)');
+                  detailText = 'RSSI: <span style="color:' + signalColor + ';">' + peer.rssi + ' dBm</span>';
+                } else if (typeof peer.lastSeen === 'number') {
+                  signalColor = peer.lastSeen < 10 ? 'var(--success)' : (peer.lastSeen < 20 ? 'var(--warning)' : 'var(--danger)');
+                  detailText = '<span style="color:' + signalColor + ';">Last seen: ' + peer.lastSeen + 's ago</span> • Heartbeats: ' + peer.heartbeats;
+                }
                 var statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + signalColor + ';margin-right:6px;"></span>';
                 
                 html += '<div style="padding:6px 0;border-bottom:1px solid var(--border);">';
                 html += '<div style="font-weight:500;color:var(--panel-fg);">' + statusDot + peer.name + '</div>';
                 html += '<div style="font-size:0.8em;color:var(--panel-fg);margin-top:2px;">';
-                html += peer.mac + ' • ';
-                html += '<span style="color:' + signalColor + ';">Last seen: ' + peer.lastSeen + 's ago</span> • ';
-                html += 'Heartbeats: ' + peer.heartbeats;
+                html += peer.mac;
+                if (detailText) html += ' • ' + detailText;
                 html += '</div></div>';
               }
               html += '</div>';

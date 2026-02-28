@@ -776,7 +776,7 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
            resultSummary.c_str());
   
   // Append to audit log with 500KB cap (rotates automatically)
-  appendLineWithCap("/system/logs/command-audit.log", String(entry), 500 * 1024);
+  appendLineWithCap("/system/sys_logs/command-audit.log", String(entry), 500 * 1024);
 }
 
 // Automation logging
@@ -805,9 +805,9 @@ bool appendAutoLogEntry(const char* type, const String& message) {
     if (lastSlash > 0) {
       String dir = gAutoLogFile.substring(0, lastSlash);
       if (!LittleFS.exists(dir)) {
-        // Create directory recursively (simple approach for /logs)
-        if (dir == "/logs" && !LittleFS.exists("/logs")) {
-          LittleFS.mkdir("/logs");
+        // Create directory recursively (simple approach for /logging_captures)
+        if (dir == "/logging_captures" && !LittleFS.exists("/logging_captures")) {
+          LittleFS.mkdir("/logging_captures");
         }
       }
     }
@@ -2574,7 +2574,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   }
 
   // ===== REMOTE COMMAND ROUTING =====
-  // Commands prefixed with "remote:" or "@" are sent to paired device
+  // Commands prefixed with "remote:" or "@" are sent to bonded device
   // This works across ALL interfaces (OLED, web, serial, voice)
   bool isRemoteCommand = false;
   String actualCommand = command;
@@ -2590,8 +2590,8 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   }
   
   if (isRemoteCommand) {
-    #if ENABLE_ESPNOW
-    extern bool isBondModeOnline();
+    #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+    extern bool isBondSynced();
     extern bool isBondSessionTokenValid();
     extern String buildBondedCommandPayload(const String& command);
     extern bool v3_send_frame(const uint8_t* dstMac, uint8_t type, uint8_t flags, 
@@ -2600,14 +2600,10 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
     extern Settings gSettings;
     
-    if (!isBondModeOnline()) {
-      strncpy(out, "Error: Bonded device not online", outSize - 1);
-      out[outSize - 1] = '\0';
-      return false;
-    }
-    
+    // Gate on valid session token — this is the actual auth credential needed
+    // to send remote commands. Implies bond is synced on both roles.
     if (!isBondSessionTokenValid()) {
-      strncpy(out, "Error: No session token - set matching passphrase on both devices", outSize - 1);
+      strncpy(out, "Error: No session token - bond not ready or passphrase mismatch", outSize - 1);
       out[outSize - 1] = '\0';
       return false;
     }
@@ -2633,7 +2629,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     
     if (sent) {
       snprintf(out, outSize, "Remote command sent: %s", actualCommand.c_str());
-      broadcastOutput("[REMOTE] Sent to paired device: " + actualCommand);
+      broadcastOutput("[REMOTE] Sent to bonded device: " + actualCommand);
       return true;
     } else {
       strncpy(out, "Error: Failed to send remote command", outSize - 1);
@@ -2641,10 +2637,10 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
       return false;
     }
     #else
-    strncpy(out, "Error: ESP-NOW not enabled", outSize - 1);
+    strncpy(out, "Error: Bond mode not available", outSize - 1);
     out[outSize - 1] = '\0';
     return false;
-    #endif
+    #endif // ENABLE_ESPNOW && ENABLE_BONDED_MODE
   }
   
   // Continue with local command execution

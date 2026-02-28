@@ -2234,7 +2234,7 @@ void drawOLEDFooter() {
       break;
     
     case OLED_REMOTE:
-      hints = "B:Back";
+      hints = "A:Select  B:Back";
       break;
       
     case OLED_UNIFIED_MENU:
@@ -4195,7 +4195,7 @@ const OLEDMenuItem oledMenuCategory2[] = {
 #if ENABLE_BLUETOOTH
   { "Bluetooth",  "bt_idle",           OLED_BLUETOOTH },
 #endif
-#if ENABLE_PAIRED_MODE
+#if ENABLE_BONDED_MODE
   { "Remote",     "notify_espnow",     OLED_REMOTE },
 #endif
 #if ENABLE_HTTP_SERVER
@@ -4264,7 +4264,7 @@ const OLEDMenuItem oledMenuItems[] = {
 #if ENABLE_HTTP_SERVER
   { "Web",        "web",               OLED_WEB_STATS },
 #endif
-#if ENABLE_PAIRED_MODE
+#if ENABLE_BONDED_MODE
   { "Remote",     "notify_espnow",     OLED_REMOTE },
 #endif
 #if ENABLE_MICROPHONE_SENSOR
@@ -4421,7 +4421,8 @@ static void addSubmenuHeader(OLEDMenuItemEx* items, int& count, int maxItems, in
   count++;
 }
 
-// Helper: Load cached manifest for paired peer
+#if ENABLE_BONDED_MODE
+// Helper: Load cached manifest for bonded peer
 // Returns empty string if not found
 static String loadCachedManifest() {
   extern EspNowState* gEspNow;
@@ -4682,6 +4683,7 @@ static int loadRemoteMenuItems(OLEDMenuItemEx* items, int maxItems, int startIdx
   Serial.printf("[RMENU] Created %d module submenu headers from manifest\n", count);
   return count;
 }
+#endif // ENABLE_BONDED_MODE
 
 // Build dynamic menu based on current DataSource
 void buildDynamicMenu() {
@@ -4716,6 +4718,7 @@ void buildDynamicMenu() {
     }
   }
   
+#if ENABLE_BONDED_MODE
   // Add remote items if REMOTE or BOTH
   if (gDataSource == DataSource::REMOTE || gDataSource == DataSource::BOTH) {
     Serial.printf("[MENU] Building REMOTE menu (source=%d)\n", (int)gDataSource);
@@ -4742,6 +4745,7 @@ void buildDynamicMenu() {
       gDynamicMenuItemCount++;
     }
   }
+#endif // ENABLE_BONDED_MODE
   
   gDynamicMenuBuilt = true;
   gLastBuildSource = gDataSource;
@@ -4799,14 +4803,14 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
       return MenuAvailability::FEATURE_DISABLED;
     
     case OLED_REMOTE:
-#if ENABLE_ESPNOW
-      // Only show Remote menu when paired mode is enabled and connected
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+      // Only show Remote menu when bond mode is enabled and connected
       if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() > 0) {
         return MenuAvailability::AVAILABLE;
       }
 #endif
-      // Hide Remote menu when not paired (return NOT_BUILT to completely hide)
-      if (outReason) *outReason = "Not paired";
+      // Hide Remote menu when not bonded (return NOT_BUILT to completely hide)
+      if (outReason) *outReason = "Not bonded";
       return MenuAvailability::NOT_BUILT;
 
     
@@ -5347,7 +5351,7 @@ static const unsigned long MENU_REPEAT_DELAY_MS = 100;   // Delay between repeat
 NavEvents gNavEvents = {false, false, false, false, 0, 0};
 
 // =============================================================================
-// Data Source Selection (for paired mode)
+// Data Source Selection (for bond mode)
 // =============================================================================
 DataSource gDataSource = DataSource::LOCAL;
 bool gDataSourceIndicatorVisible = false;
@@ -5357,7 +5361,7 @@ void invalidateDynamicMenu();
 
 void oledCycleDataSource() {
   if (!oledRemoteSourceAvailable()) {
-    // Not paired or peer offline - stay on LOCAL
+    // Not bonded or peer offline - stay on LOCAL
     gDataSource = DataSource::LOCAL;
     gDataSourceIndicatorVisible = false;
     invalidateDynamicMenu();
@@ -5392,10 +5396,14 @@ const char* oledGetDataSourceLabel() {
 }
 
 bool oledRemoteSourceAvailable() {
+#if ENABLE_BONDED_MODE
   extern EspNowState* gEspNow;
   return gSettings.bondModeEnabled && 
          gEspNow && gEspNow->initialized && 
          gEspNow->bondPeerOnline;
+#else
+  return false;
+#endif
 }
 
 // Debug throttle for gamepad menu input
@@ -5902,7 +5910,7 @@ bool processGamepadMenuInput() {
         inputProcessed = true;
       }
     } else if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_START)) {
-      // START button: toggle data source when paired, else toggle menu style
+      // START button: toggle data source when bonded, else toggle menu style
       if (oledRemoteSourceAvailable()) {
         oledCycleDataSource();
         inputProcessed = true;
@@ -6020,6 +6028,21 @@ bool processGamepadMenuInput() {
     }
 #endif
   // OLED_NETWORK_INFO now handled by registered inputFunc (see OLED_Mode_Network.cpp)
+  } else if (currentOLEDMode == OLED_REMOTE) {
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+    uint32_t pressedNow = ~buttons;
+    uint32_t pressedLast = ~lastButtonState;
+    uint32_t newlyPressed = pressedNow & ~pressedLast;
+    
+    extern bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed);
+    if (bondModeInputHandler(deltaX, deltaY, newlyPressed)) {
+      inputProcessed = true;
+    }
+    if (!inputProcessed && INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+      oledMenuBack();
+      inputProcessed = true;
+    }
+#endif
   } else {
     // Any other mode - check for registered custom input handler first
     uint32_t pressedNow = ~buttons;

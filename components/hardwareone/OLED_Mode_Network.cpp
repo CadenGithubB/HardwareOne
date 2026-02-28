@@ -921,11 +921,16 @@ void displayRemoteSensors() {
   // Works in both mesh mode (as master) and bond mode (as master)
   bool meshOn = meshEnabled();
   bool isMeshMaster = (gSettings.meshRole == MESH_ROLE_MASTER);
+#if ENABLE_BONDED_MODE
   bool isPairedMaster = (gSettings.bondModeEnabled && gSettings.bondRole == 1);
+#else
+  bool isPairedMaster = false;
+#endif
   bool canReceiveSensors = (meshOn && isMeshMaster) || isPairedMaster;
   
   if (!canReceiveSensors) {
     oledDisplay->setCursor(0, 14);
+#if ENABLE_BONDED_MODE
     if (gSettings.bondModeEnabled) {
       // Bond mode but not master
       oledDisplay->println("Bonded as worker.");
@@ -935,7 +940,9 @@ void displayRemoteSensors() {
       oledDisplay->println("");
       oledDisplay->println("Use 'bond stream' to");
       oledDisplay->println("send sensor data.");
-    } else if (meshOn && !isMeshMaster) {
+    } else
+#endif // ENABLE_BONDED_MODE
+    if (meshOn && !isMeshMaster) {
       // Mesh mode but not master
       oledDisplay->println("Not a master device!");
       oledDisplay->println("");
@@ -947,8 +954,10 @@ void displayRemoteSensors() {
       oledDisplay->println("");
       oledDisplay->println("Enable mesh mode:");
       oledDisplay->println(" espnow mode mesh");
+#if ENABLE_BONDED_MODE
       oledDisplay->println("Or bond with device:");
       oledDisplay->println(" bond connect <dev>");
+#endif
     }
     return;
   }
@@ -1166,11 +1175,11 @@ static bool remoteSensorsInputHandler(int deltaX, int deltaY, uint32_t newlyPres
   return false;
 }
 
-// Remote Sensors OLED mode entry (renamed to "Pair" for paired device control)
+// Remote Sensors OLED mode entry (bond mode: shows bonded device sensor data)
 static const OLEDModeEntry remoteSensorsOLEDModes[] = {
   {
     OLED_REMOTE_SENSORS,       // mode enum
-    "Pair",                    // menu name (shows paired device capabilities)
+    "Bond",                    // menu name (shows bonded device capabilities)
     "notify_sensor",           // icon name
     displayRemoteSensors,      // displayFunc
     remoteSensorsAvailable,    // availFunc
