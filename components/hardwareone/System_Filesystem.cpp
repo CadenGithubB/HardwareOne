@@ -91,6 +91,8 @@ bool initFilesystem() {
   LittleFS.mkdir("/system/users/user_settings");  // For per-user setting files
 #if ENABLE_ESPNOW
   LittleFS.mkdir("/espnow");  // For ESP-NOW related files (received subfolder created on-demand)
+  LittleFS.mkdir("/system/espnow");  // For ESP-NOW config (mesh peers, devices, bond peer settings)
+  LittleFS.mkdir("/system/espnow/peers");  // For per-peer cached settings
 #endif
 #if ENABLE_MAPS
   LittleFS.mkdir("/maps");  // For GPS map files (.hwmap)
@@ -513,7 +515,7 @@ static CommandModuleRegistrar _filesystem_cmd_registrar(filesystemCommands, file
 // Tier model:
 //   SENSITIVE     - /system/users/* — credentials, never expose via web/CLI
 //   IMMUTABLE     - /system/settings.json, /system/automations.json,
-//                   /system/devices.json, /system/espnow_devices.json
+//                   /system/devices.json, /system/espnow/devices.json
 //                   Can edit settings+automations, cannot delete/rename any
 //   PROTECTED_DIR - /system, /logging_captures, /espnow, /maps, /sd — dirs themselves
 //                   Cannot rename or delete the directory
@@ -552,7 +554,7 @@ static bool isImmutableFile(const String& path) {
   return (path == "/system/settings.json" ||
           path == "/system/automations.json" ||
           path == "/system/devices.json" ||
-          path == "/system/espnow_devices.json");
+          path == "/system/espnow/devices.json");
 }
 
 // Editable immutable files: these specific config files can be edited via web UI
