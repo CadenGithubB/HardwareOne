@@ -42,6 +42,15 @@
 #include "System_ESPSR.h"
 #include "System_Filesystem.h"
 #include "System_VFS.h"
+#if ENABLE_ESPNOW
+#include "System_ESPNow.h"
+#endif
+#if ENABLE_WIFI && ENABLE_MQTT
+#include "System_MQTT.h"
+#endif
+#if ENABLE_BLUETOOTH
+#include "Optional_Bluetooth.h"
+#endif
 
 #if ENABLE_WEB_BLUETOOTH
 #include "WebPage_Bluetooth.h"
@@ -52,8 +61,8 @@
 #if ENABLE_WEB_ESPNOW
 #include "WebPage_ESPNow.h"
 #endif
-#if ENABLE_WEB_PAIR
-#include "WebPage_Pair.h"
+#if ENABLE_WEB_BOND
+#include "WebPage_Bond.h"
 #endif
 #if ENABLE_WEB_MQTT
 #include "WebPage_MQTT.h"
@@ -1048,10 +1057,14 @@ void buildSystemInfoJson(JsonDocument& doc) {
     net["ssid"] = WiFi.SSID();
     net["ip"] = WiFi.localIP().toString();
     net["rssi"] = WiFi.RSSI();
+    net["channel"] = WiFi.channel();
+    net["mac"] = WiFi.macAddress();
   } else {
     net["ssid"] = "";
     net["ip"] = "";
     net["rssi"] = 0;
+    net["channel"] = 0;
+    net["mac"] = WiFi.macAddress();
   }
   
   // Memory info (nested object with KB values)
@@ -1063,17 +1076,62 @@ void buildSystemInfoJson(JsonDocument& doc) {
   
   // Storage info (nested object with KB values)
   JsonObject storage = doc["storage"].to<JsonObject>();
-  size_t totalBytes = 0;
-  size_t usedBytes = 0;
   {
-    FsLockGuard fsGuard("buildSystemInfoJson.storage");
-    totalBytes = LittleFS.totalBytes();
-    usedBytes = LittleFS.usedBytes();
+    uint64_t totalBytes = 0, usedBytes = 0, freeBytes = 0;
+    VFS::getStats(VFS::INTERNAL, totalBytes, usedBytes, freeBytes);
+    storage["total_kb"] = (int)(totalBytes / 1024);
+    storage["used_kb"] = (int)(usedBytes / 1024);
+    storage["free_kb"] = (int)(freeBytes / 1024);
   }
-  size_t freeBytes = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
-  storage["total_kb"] = (int)(totalBytes / 1024);
-  storage["used_kb"] = (int)(usedBytes / 1024);
-  storage["free_kb"] = (int)(freeBytes / 1024);
+  if (VFS::isSDAvailable()) {
+    uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
+    if (VFS::getStats(VFS::SDCARD, sdTotal, sdUsed, sdFree)) {
+      JsonObject sd = storage["sd"].to<JsonObject>();
+      sd["total_mb"] = (int)(sdTotal / (1024 * 1024));
+      sd["used_mb"] = (int)(sdUsed / (1024 * 1024));
+      sd["free_mb"] = (int)(sdFree / (1024 * 1024));
+    }
+  }
+
+  // Connectivity status
+  JsonObject conn = doc["connectivity"].to<JsonObject>();
+
+#if ENABLE_ESPNOW
+  {
+    JsonObject espnow = conn["espnow"].to<JsonObject>();
+    espnow["enabled"] = gSettings.espnowenabled;
+    espnow["running"] = (gEspNow && gEspNow->initialized);
+    espnow["mesh"] = gSettings.espnowmesh;
+    espnow["deviceName"] = gSettings.espnowDeviceName;
+    espnow["encrypted"] = (gEspNow && gEspNow->encryptionEnabled);
+    espnow["passphraseSet"] = (gSettings.espnowPassphrase.length() > 0);
+#if ENABLE_BONDED_MODE
+    JsonObject bond = conn["bond"].to<JsonObject>();
+    bond["enabled"] = gSettings.bondModeEnabled;
+    bond["role"] = (int)gSettings.bondRole;
+    bond["online"] = isBondModeOnline();
+    bond["synced"] = isBondSynced();
+    bond["peer"] = gSettings.bondPeerMac;
+#endif
+  }
+#endif
+
+#if ENABLE_WIFI && ENABLE_MQTT
+  {
+    JsonObject mqtt = conn["mqtt"].to<JsonObject>();
+    mqtt["enabled"] = gSettings.mqttAutoStart;
+    mqtt["connected"] = isMqttConnected();
+    mqtt["host"] = gSettings.mqttHost;
+  }
+#endif
+
+#if ENABLE_BLUETOOTH
+  {
+    JsonObject bt = conn["bluetooth"].to<JsonObject>();
+    bt["running"] = isBLERunning();
+    bt["state"] = getBLEStateString();
+  }
+#endif
 }
 
 // ============================================================================
@@ -2598,7 +2656,7 @@ esp_err_t handleSystemStatus(httpd_req_t* req) {
   buildSystemInfoJson(doc);
   
   // Serialize to static buffer
-  static char sysJsonBuf[256];
+  static char sysJsonBuf[1024];
   serializeJson(doc, sysJsonBuf, sizeof(sysJsonBuf));
 
   httpd_resp_send(req, sysJsonBuf, HTTPD_RESP_USE_STRLEN);
@@ -4542,8 +4600,8 @@ void startHttpServer() {
  #if ENABLE_WEB_ESPNOW
   registerEspNowHandlers(server);
  #endif
- #if ENABLE_WEB_PAIR
-  registerPairHandlers(server);
+ #if ENABLE_WEB_BOND
+  registerBondHandlers(server);
  #endif
  #if ENABLE_WEB_MQTT
   registerMqttHandlers(server);

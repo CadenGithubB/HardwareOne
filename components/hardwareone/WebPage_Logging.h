@@ -605,7 +605,7 @@ function generateDefaultFilename() {
   .then(r => r.text())
   .then(text => {
     console.log('[LOGGING] Section 3b: Time response:', text);
-    let filename = '/logs/sensors/sensors-';
+    let filename = '/logging_captures/sensors/sensors-';
     
     // Check if we have NTP time (ISO format in response)
     const isoMatch = text.match(/Time:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
@@ -642,7 +642,7 @@ function generateDefaultFilename() {
       String(now.getMinutes()).padStart(2, '0') + '-' +
       String(now.getSeconds()).padStart(2, '0');
     const format = document.getElementById('config-format').value;
-    const filename = '/logs/sensors/sensors-' + timestamp + (format === 'csv' ? '.csv' : format === 'track' ? '.txt' : '.log');
+    const filename = '/logging_captures/sensors/sensors-' + timestamp + (format === 'csv' ? '.csv' : format === 'track' ? '.txt' : '.log');
     document.getElementById('config-path').value = filename;
   });
 }
@@ -804,7 +804,7 @@ function startLogging() {
   console.log('[LOGGING] Section 6b: Start params - Path:', path, 'Interval:', interval);
   
   if (!path || !path.startsWith('/')) {
-    alert('Error: File path must start with / (e.g., /logs/sensors.csv)');
+    alert('Error: File path must start with / (e.g., /logging_captures/sensors.csv)');
     return;
   }
   
@@ -1013,7 +1013,7 @@ function generateSystemFilename() {
   .then(r => r.text())
   .then(text => {
     console.log('[LOGGING] System time response:', text);
-    let filename = '/logs/system-';
+    let filename = '/logging_captures/system-';
     
     // Match new format: "Time: 2024-01-22T06:18:00 (NTP synced)"
     const isoMatch = text.match(/Time:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
@@ -1043,7 +1043,7 @@ function generateSystemFilename() {
       String(now.getHours()).padStart(2, '0') + '-' +
       String(now.getMinutes()).padStart(2, '0') + '-' +
       String(now.getSeconds()).padStart(2, '0');
-    const filename = '/logs/system-' + timestamp + '.log';
+    const filename = '/logging_captures/system-' + timestamp + '.log';
     document.getElementById('sys-config-path').value = filename;
   });
 }
@@ -1550,7 +1550,7 @@ function updateViewerStats() {
   }
 }
 
-var currentLogSource = '/logs';  // Track current log source
+var currentLogSource = '/logging_captures';  // Track current log source
 
 function populateLogViewerFileList() {
   // Initialize file explorer for log selection
@@ -1579,12 +1579,12 @@ function populateLogViewerFileList() {
 }
 
 function switchLogSource() {
-  // Toggle between /logs and /system/logs
-  if (currentLogSource === '/logs') {
-    currentLogSource = '/system/logs';
+  // Toggle between /logging_captures and /system/sys_logs
+  if (currentLogSource === '/logging_captures') {
+    currentLogSource = '/system/sys_logs';
     document.getElementById('btn-switch-logs').textContent = 'View User Logs';
   } else {
-    currentLogSource = '/logs';
+    currentLogSource = '/logging_captures';
     document.getElementById('btn-switch-logs').textContent = 'View System Logs';
   }
   

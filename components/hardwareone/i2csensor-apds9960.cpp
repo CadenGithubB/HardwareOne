@@ -73,7 +73,7 @@ static bool isAPDSConnected() {
 
 extern const SettingsModule apdsSettingsModule = {
   "apds",
-  nullptr,
+  "apds",
   apdsSettingEntries,
   sizeof(apdsSettingEntries) / sizeof(apdsSettingEntries[0]),
   isAPDSConnected,

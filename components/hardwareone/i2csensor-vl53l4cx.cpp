@@ -741,9 +741,11 @@ void tofTask(void* parameter) {
         if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
           shouldStream = true;
         }
+#if ENABLE_BONDED_MODE
         if (gSettings.bondModeEnabled && gSettings.bondRole == 0) {
           shouldStream = true;  // Bond mode worker
         }
+#endif
         
         if (ok && shouldStream) {
           // Build ToF JSON from cache

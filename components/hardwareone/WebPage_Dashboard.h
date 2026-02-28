@@ -200,15 +200,107 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
 
   // System Stats Section (within same panel)
   httpd_resp_send_chunk(req, "<h3 style='margin-top:2rem'>System Stats</h3>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "<div class='system-grid' style='display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin:1rem 0;grid-auto-rows:minmax(60px,auto)'>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<div class='system-grid' style='display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin:1rem 0'>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req,
+    "<div class='sys-card sys-card-tall'>"
+    "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9)'>Uptime</div>"
+    "<div class='sys-card-row'><strong id='sys-uptime'>--</strong></div>"
+    "</div>",
+    HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req,
+    "<div class='sys-card sys-card-tall'>"
+    "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9)'>Memory</div>"
+    "<div class='sys-card-row'><span>Heap:</span><strong id='sys-heap'>--</strong></div>"
+    "<div class='sys-card-row'><span>PSRAM:</span><strong id='sys-psram'>--</strong></div>"
+    "</div>",
+    HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req,
+    "<div class='sys-card sys-card-tall'>"
+    "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9)'>Storage</div>"
+    "<div class='sys-card-row'><span>Flash:</span><strong id='sys-storage-used'>--</strong></div>"
+    "<div class='sys-card-row' id='sys-sd-row' style='display:none'><span>SD Card:</span><strong id='sys-storage-sd'>--</strong></div>"
+    "</div>",
+    HTTPD_RESP_USE_STRLEN);
   if (isAdminUser(username)) {
-    httpd_resp_send_chunk(req, "  <div class='sys-card' id='sys-signedin-card'>Signed in users: <strong id='sys-signedin'>--</strong></div>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req,
+      "<div class='sys-card sys-card-tall' id='sys-signedin-card'>"
+      "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9)'>Users</div>"
+      "<div class='sys-card-row'><span>Signed in:</span><strong id='sys-signedin'>--</strong></div>"
+      "</div>",
+      HTTPD_RESP_USE_STRLEN);
   }
-  httpd_resp_send_chunk(req, "  <div class='sys-card'>Uptime: <strong id='sys-uptime'>--</strong></div>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "  <div class='sys-card sys-card-tall'><div style='font-weight:bold;margin-bottom:0.25rem;color:rgba(255,255,255,0.9)'>WiFi Network</div><div class='sys-card-row'><span>SSID:</span><strong id='sys-ssid'>--</strong></div><div class='sys-card-row'><span>IP:</span><strong id='sys-ip'>--</strong></div></div>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "  <div class='sys-card sys-card-tall'><div style='font-weight:bold;margin-bottom:0.25rem;color:rgba(255,255,255,0.9)'>Memory</div><div class='sys-card-row'><span>Heap:</span><strong id='sys-heap'>--</strong></div><div class='sys-card-row'><span>PSRAM:</span><strong id='sys-psram'>--</strong></div></div>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "  <div class='sys-card'>Storage Used: <strong id='sys-storage-used'>--</strong></div>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN); // end system-grid
+
+#if ENABLE_WIFI || ENABLE_ESPNOW || (ENABLE_WIFI && ENABLE_MQTT) || ENABLE_BLUETOOTH
+  httpd_resp_send_chunk(req, "<h3 style='margin-top:2rem'>Connectivity</h3>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<div id='conn-grid' style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin:1rem 0'>", HTTPD_RESP_USE_STRLEN);
+
+#if ENABLE_WIFI
+  httpd_resp_send_chunk(req,
+    "<div class='sys-card sys-card-tall' id='conn-wifi-card'>"
+    "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9);display:flex;align-items:center;gap:0.5rem'>"
+    "<span class='status-indicator status-disabled' id='conn-wifi-dot'></span>WiFi</div>"
+    "<div class='sys-card-row'><span>SSID:</span><strong id='sys-ssid'>--</strong></div>"
+    "<div class='sys-card-row'><span>IP:</span><strong id='sys-ip'>--</strong></div>"
+    "<div class='sys-card-row'><span>Channel:</span><strong id='conn-wifi-channel'>--</strong></div>"
+    "<div class='sys-card-row'><span>MAC:</span><strong id='conn-wifi-mac' style='font-size:0.8em'>--</strong></div>"
+    "</div>",
+    HTTPD_RESP_USE_STRLEN);
+#endif
+
+#if ENABLE_ESPNOW
+  httpd_resp_send_chunk(req,
+    "<div class='sys-card sys-card-tall' id='conn-espnow-card'>"
+    "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9);display:flex;align-items:center;gap:0.5rem'>"
+    "<span class='status-indicator status-disabled' id='conn-espnow-dot'></span>ESP-NOW</div>"
+    "<div class='sys-card-row'><span>Status:</span><strong id='conn-espnow-status'>--</strong></div>"
+    "<div class='sys-card-row'><span>Device:</span><strong id='conn-espnow-name'>--</strong></div>"
+    "<div class='sys-card-row'><span>Mesh:</span><strong id='conn-espnow-mesh'>--</strong></div>"
+    "<div class='sys-card-row'><span>Passphrase:</span><strong id='conn-espnow-encrypted'>--</strong></div>"
+    "</div>",
+    HTTPD_RESP_USE_STRLEN);
+#endif
+
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+  httpd_resp_send_chunk(req,
+    "<div class='sys-card sys-card-tall' id='conn-bond-card'>"
+    "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9);display:flex;align-items:center;gap:0.5rem'>"
+    "<span class='status-indicator status-disabled' id='conn-bond-dot'></span>Bond</div>"
+    "<div class='sys-card-row'><span>Enabled:</span><strong id='conn-bond-enabled'>--</strong></div>"
+    "<div class='sys-card-row'><span>Role:</span><strong id='conn-bond-role'>--</strong></div>"
+    "<div class='sys-card-row'><span>Peer:</span><strong id='conn-bond-peer'>--</strong></div>"
+    "<div class='sys-card-row'><span>Online:</span><strong id='conn-bond-online'>--</strong></div>"
+    "<div class='sys-card-row'><span>Synced:</span><strong id='conn-bond-synced'>--</strong></div>"
+    "</div>",
+    HTTPD_RESP_USE_STRLEN);
+#endif
+
+#if ENABLE_WIFI && ENABLE_MQTT
+  httpd_resp_send_chunk(req,
+    "<div class='sys-card sys-card-tall' id='conn-mqtt-card'>"
+    "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9);display:flex;align-items:center;gap:0.5rem'>"
+    "<span class='status-indicator status-disabled' id='conn-mqtt-dot'></span>MQTT</div>"
+    "<div class='sys-card-row'><span>Enabled:</span><strong id='conn-mqtt-enabled'>--</strong></div>"
+    "<div class='sys-card-row'><span>Connected:</span><strong id='conn-mqtt-connected'>--</strong></div>"
+    "<div class='sys-card-row'><span>Broker:</span><strong id='conn-mqtt-host'>--</strong></div>"
+    "</div>",
+    HTTPD_RESP_USE_STRLEN);
+#endif
+
+#if ENABLE_BLUETOOTH
+  httpd_resp_send_chunk(req,
+    "<div class='sys-card sys-card-tall' id='conn-bt-card'>"
+    "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9);display:flex;align-items:center;gap:0.5rem'>"
+    "<span class='status-indicator status-disabled' id='conn-bt-dot'></span>Bluetooth</div>"
+    "<div class='sys-card-row'><span>Running:</span><strong id='conn-bt-running'>--</strong></div>"
+    "<div class='sys-card-row'><span>State:</span><strong id='conn-bt-state'>--</strong></div>"
+    "</div>",
+    HTTPD_RESP_USE_STRLEN);
+#endif
+
+  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN); // end conn-grid
+#endif // any connectivity feature
+
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN); // End combined status panel
 
   // CSS for dashboard-specific indicators
@@ -226,7 +318,50 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 2: Starting core object definition');(function(){console.log('[Dashboard] Section 2a: Inside IIFE wrapper');const Dash={log:function(){try{console.log.apply(console,arguments)}catch(_){ }},setText:function(id,v){var el=document.getElementById(id);if(el)el.textContent=v}};console.log('[Dashboard] Section 2b: Basic Dash object created');window.Dash=Dash;})();</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 3: Adding indicator functions');if(window.Dash){window.Dash.setIndicator=function(id,on){var el=document.getElementById(id);if(el){el.className=on?'status-indicator status-enabled':'status-indicator status-disabled'}};console.log('[Dashboard] Section 3a: setIndicator added')}else{console.error('[Dashboard] Section 3: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 4: Adding sensor status functions');if(window.Dash){window.Dash.updateSensorStatus=function(d){if(!d)return;try{var imuOn=!!(d.imuEnabled||d.imu);var thermOn=!!(d.thermalEnabled||d.thermal);var tofOn=!!(d.tofEnabled||d.tof);var apdsOn=!!(d.apdsColorEnabled||d.apdsProximityEnabled||d.apdsGestureEnabled);var gameOn=!!(d.gamepadEnabled||d.gamepad);var pwmOn=!!(d.pwmDriverConnected);var gpsOn=!!(d.gpsEnabled);var fmOn=!!(d.fmRadioEnabled);window.Dash.setIndicator('dash-imu-status',imuOn);window.Dash.setIndicator('dash-thermal-status',thermOn);window.Dash.setIndicator('dash-tof-status',tofOn);window.Dash.setIndicator('dash-apds-status',apdsOn);window.Dash.setIndicator('dash-gamepad-status',gameOn);window.Dash.setIndicator('dash-pwm-status',pwmOn);window.Dash.setIndicator('dash-gps-status',gpsOn);window.Dash.setIndicator('dash-fmradio-status',fmOn);window.Dash.setIndicator('dash-mic-status',!!(d.micEnabled));var micRec=document.getElementById('dash-mic-recording');if(micRec){micRec.className=(d.micRecording)?'status-indicator status-recording':'status-indicator status-disabled'}}catch(e){console.warn('[Dashboard] Sensor status update error',e)}};window.Dash.updateDeviceVisibility=function(registry){if(!registry||!registry.devices)return;try{var devices=registry.devices;var hasIMU=devices.some(function(d){return d.name==='BNO055'});var hasThermal=devices.some(function(d){return d.name==='MLX90640'});var hasToF=devices.some(function(d){return d.name==='VL53L4CX'});var hasAPDS=devices.some(function(d){return d.name==='APDS9960'});var hasGamepad=devices.some(function(d){return d.name==='Seesaw'});var hasDRV=devices.some(function(d){return d.name==='DRV2605'});var hasPCA9685=devices.some(function(d){return d.name==='PCA9685'});var hasGPS=devices.some(function(d){return d.name==='PA1010D'});var hasFMRadio=devices.some(function(d){return d.name==='RDA5807'});window.Dash.showHideCard('dash-imu-card',hasIMU);window.Dash.showHideCard('dash-thermal-card',hasThermal);window.Dash.showHideCard('dash-tof-card',hasToF);window.Dash.showHideCard('dash-apds-card',hasAPDS);window.Dash.showHideCard('dash-gamepad-card',hasGamepad);window.Dash.showHideCard('dash-drv-card',hasDRV);window.Dash.showHideCard('dash-pwm-card',hasPCA9685);window.Dash.showHideCard('dash-gps-card',hasGPS);window.Dash.showHideCard('dash-fmradio-card',hasFMRadio)}catch(e){console.warn('[Dashboard] Device visibility update error',e)}};console.log('[Dashboard] Section 4a: updateSensorStatus and updateDeviceVisibility added')}else{console.error('[Dashboard] Section 4: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 5: Adding system status functions');if(window.Dash){window.Dash.updateSystem=function(d){try{if(!d)return;if(d.uptime_hms)window.Dash.setText('sys-uptime',d.uptime_hms);if(d.net){if(d.net.ssid!=null)window.Dash.setText('sys-ssid',d.net.ssid);if(d.net.ip!=null)window.Dash.setText('sys-ip',d.net.ip)}if(d.mem){var heapTxt=null;if(d.mem.heap_free_kb!=null){if(d.mem.heap_total_kb!=null){heapTxt=d.mem.heap_free_kb+'/'+d.mem.heap_total_kb+' KB'}else{heapTxt=d.mem.heap_free_kb+' KB'}}if(heapTxt!=null)window.Dash.setText('sys-heap',heapTxt);var psTxt=null;var hasPs=(d.mem.psram_free_kb!=null)||(d.mem.psram_total_kb!=null);if(hasPs){var pf=(d.mem.psram_free_kb!=null)?d.mem.psram_free_kb:null;var pt=(d.mem.psram_total_kb!=null)?d.mem.psram_total_kb:null;if(pf!=null&&pt!=null)psTxt=pf+'/'+pt+' KB';else if(pf!=null)psTxt=pf+' KB'}if(psTxt!=null)window.Dash.setText('sys-psram',psTxt)}if(d.storage){if(d.storage.used_kb!=null){var usedTxt=d.storage.used_kb+' KB';if(d.storage.total_kb!=null)usedTxt+=' / '+d.storage.total_kb+' KB';window.Dash.setText('sys-storage-used',usedTxt)}if(d.storage.free_kb!=null)window.Dash.setText('sys-storage-free',d.storage.free_kb+' KB')}}catch(e){console.warn('[Dashboard] System update error',e)}};console.log('[Dashboard] Section 5a: updateSystem added')}else{console.error('[Dashboard] Section 5: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 5: Adding system status functions');if(window.Dash){window.Dash.updateSystem=function(d){try{if(!d)return;if(d.uptime_hms)window.Dash.setText('sys-uptime',d.uptime_hms);if(d.net){if(d.net.ssid!=null)window.Dash.setText('sys-ssid',d.net.ssid);if(d.net.ip!=null)window.Dash.setText('sys-ip',d.net.ip)}if(d.mem){var heapTxt=null;if(d.mem.heap_free_kb!=null){if(d.mem.heap_total_kb!=null){heapTxt=d.mem.heap_free_kb+'/'+d.mem.heap_total_kb+' KB'}else{heapTxt=d.mem.heap_free_kb+' KB'}}if(heapTxt!=null)window.Dash.setText('sys-heap',heapTxt);var psTxt=null;var hasPs=(d.mem.psram_free_kb!=null)||(d.mem.psram_total_kb!=null);if(hasPs){var pf=(d.mem.psram_free_kb!=null)?d.mem.psram_free_kb:null;var pt=(d.mem.psram_total_kb!=null)?d.mem.psram_total_kb:null;if(pf!=null&&pt!=null)psTxt=pf+'/'+pt+' KB';else if(pf!=null)psTxt=pf+' KB'}if(psTxt!=null)window.Dash.setText('sys-psram',psTxt)}if(d.storage){if(d.storage.used_kb!=null){var usedTxt=d.storage.used_kb+' KB';if(d.storage.total_kb!=null)usedTxt+=' / '+d.storage.total_kb+' KB';window.Dash.setText('sys-storage-used',usedTxt)}if(d.storage.sd){var sd=d.storage.sd;var sdTxt=sd.used_mb+' / '+sd.total_mb+' MB';window.Dash.setText('sys-storage-sd',sdTxt);var sdRow=document.getElementById('sys-sd-row');if(sdRow)sdRow.style.display='';}else{var sdRow=document.getElementById('sys-sd-row');if(sdRow)sdRow.style.display='none';}}}catch(e){console.warn('[Dashboard] System update error',e)}};console.log('[Dashboard] Section 5a: updateSystem added')}else{console.error('[Dashboard] Section 5: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<script>"
+    "if(window.Dash){"
+      "var _origUpdateSystem=window.Dash.updateSystem||function(){};"
+      "window.Dash.updateSystem=function(d){"
+        "_origUpdateSystem(d);"
+        "try{"
+          "if(!d||!d.connectivity)return;"
+          "var c=d.connectivity;"
+          "if(d.net){var wifiUp=!!(d.net.ip&&d.net.ip!='0.0.0.0');window.Dash.setIndicator('conn-wifi-dot',wifiUp);if(d.net.channel)window.Dash.setText('conn-wifi-channel',d.net.channel);if(d.net.mac)window.Dash.setText('conn-wifi-mac',d.net.mac);}"
+          "if(c.espnow){"
+            "var en=c.espnow;"
+            "window.Dash.setIndicator('conn-espnow-dot',!!en.running);"
+            "window.Dash.setText('conn-espnow-status',en.running?'Running':(en.enabled?'Stopped':'Disabled'));"
+            "window.Dash.setText('conn-espnow-name',en.deviceName||'--');"
+            "window.Dash.setText('conn-espnow-mesh',en.mesh?'Enabled':'Disabled');"
+          "window.Dash.setText('conn-espnow-encrypted',en.passphraseSet?'Set':'Not Set');"
+          "}"
+          "if(c.bond){"
+            "var b=c.bond;"
+            "window.Dash.setIndicator('conn-bond-dot',!!(b.enabled&&b.synced));"
+            "window.Dash.setText('conn-bond-enabled',b.enabled?'Yes':'No');"
+            "window.Dash.setText('conn-bond-role',['Worker','Master','Backup'][b.role]||('Role '+b.role));"
+            "window.Dash.setText('conn-bond-peer',b.peer||'None');"
+            "window.Dash.setText('conn-bond-online',b.online?'Yes':'No');"
+            "window.Dash.setText('conn-bond-synced',b.synced?'Yes':'No');"
+          "}"
+          "if(c.mqtt){"
+            "var m=c.mqtt;"
+            "window.Dash.setIndicator('conn-mqtt-dot',!!m.connected);"
+            "window.Dash.setText('conn-mqtt-enabled',m.enabled?'Yes':'No');"
+            "window.Dash.setText('conn-mqtt-connected',m.connected?'Connected':'Disconnected');"
+            "window.Dash.setText('conn-mqtt-host',m.host||'--');"
+          "}"
+          "if(c.bluetooth){"
+            "var bt=c.bluetooth;"
+            "window.Dash.setIndicator('conn-bt-dot',!!bt.running);"
+            "window.Dash.setText('conn-bt-running',bt.running?'Yes':'No');"
+            "window.Dash.setText('conn-bt-state',bt.state||'--');"
+          "}"
+        "}catch(e){console.warn('[Dashboard] Connectivity update error',e);}"
+      "};"
+    "}"
+    "</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 6: Setting up global variables');window.__sensorStatusSeq=0;window.__probeCooldownMs=10000;window.__lastProbeAt=0;console.log('[Dashboard] Section 6a: Global variables set');</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 7a: Adding applySensorStatus function');window.applySensorStatus=function(s){console.log('[Dashboard] applySensorStatus called with:',s);if(!s)return;window.__sensorStatusSeq=s.seq||0;window.__lastSensorStatus=s;};console.log('[Dashboard] Section 7a: applySensorStatus function added');</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 7b: Adding sensor card creation');window.createSensorCards=function(sensorStatus,deviceRegistry){console.log('[Dashboard] createSensorCards called with status:',sensorStatus,'registry:',deviceRegistry);var loading=document.getElementById('sensor-loading');var grid=document.getElementById('sensor-grid');if(loading)loading.style.display='none';if(grid){grid.style.display='grid';grid.innerHTML=''}var availableSensors=window.getAvailableSensors(deviceRegistry);console.log('[Dashboard] Available sensors from getAvailableSensors:',availableSensors);var cardCount=0;for(var i=0;i<availableSensors.length;i++){var sensor=availableSensors[i];var enabled=window.getSensorEnabled(sensor.key,sensorStatus);var card=document.createElement('div');card.className='sensor-status-card';card.id='dash-'+sensor.key+'-card';card.style.cssText='background:rgba(255,255,255,0.1);border-radius:8px;padding:1rem;border:1px solid rgba(255,255,255,0.2)';var statusText=enabled?'Running':'Available';var statusColor=enabled?'#28a745':'#87ceeb';var dotsHtml='';if(sensor&&sensor.key==='mic'){var enabledClass=enabled?'status-enabled':'status-disabled';var recordingClass=(sensorStatus&&sensorStatus.micRecording)?'status-recording':'status-disabled';dotsHtml='<span class=\"status-indicator '+enabledClass+'\" id=\"dash-mic-status\"></span><span class=\"status-indicator '+recordingClass+'\" id=\"dash-mic-recording\" style=\"margin-left:4px\"></span>';if(sensorStatus&&sensorStatus.micRecording){statusText='Recording';statusColor='#e74c3c'}}else if(sensor&&sensor.key==='camera'){var enabledClass=enabled?'status-enabled':'status-disabled';var streamClass=(sensorStatus&&sensorStatus.cameraStreaming)?'status-recording':'status-disabled';var mlClass=(sensorStatus&&sensorStatus.eiEnabled)?'status-enabled':'status-disabled';dotsHtml='<span class=\"status-indicator '+enabledClass+'\" id=\"dash-camera-status\" title=\"Enabled\"></span><span class=\"status-indicator '+streamClass+'\" id=\"dash-camera-stream\" title=\"Streaming\" style=\"margin-left:4px\"></span><span class=\"status-indicator '+mlClass+'\" id=\"dash-camera-ml\" title=\"ML Inference\" style=\"margin-left:4px\"></span>'}else if(sensor&&sensor.key==='gamepad'){var enabledClass=enabled?'status-enabled':'status-disabled';dotsHtml='<span class=\"status-indicator '+enabledClass+'\" id=\"dash-gamepad-status\" style=\"margin-right:0.5rem\"></span>'}else{var statusClass=enabled?'status-enabled':'status-disabled';dotsHtml='<span class=\"status-indicator '+statusClass+'\" id=\"dash-'+sensor.key+'-status\"></span>'}card.innerHTML='<div style=\"display:flex;align-items:center;gap:0.5rem;margin-bottom:0.25rem\">'+dotsHtml+'<strong style=\"line-height:1.2\">'+sensor.name+'</strong></div>'+'<div style=\"font-size:0.85rem;opacity:0.8;margin-bottom:0.5rem\">'+sensor.desc+'</div>'+'<div style=\"font-size:0.9rem;color:'+statusColor+'\">'+statusText+'</div>';if(grid)grid.appendChild(card);cardCount++}if(cardCount===0&&grid){grid.innerHTML='<div style=\"grid-column:1/-1;text-align:center;padding:2rem;color:#87ceeb;font-style:italic\">No sensors are currently available.</div>'}console.log('[Dashboard] Created '+cardCount+' sensor cards')};console.log('[Dashboard] Section 7b: createSensorCards added');</script>", HTTPD_RESP_USE_STRLEN);

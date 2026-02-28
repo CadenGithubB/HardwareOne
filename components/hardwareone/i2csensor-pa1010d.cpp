@@ -363,17 +363,27 @@ void gpsTask(void* parameter) {
             if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
               shouldStream = true;
             }
+#if ENABLE_BONDED_MODE
             if (gSettings.bondModeEnabled && gSettings.bondRole == 0) {
               shouldStream = true;  // Bond mode worker
             }
+#endif
             
-            if (gPA1010D->fix && shouldStream) {
+            if (shouldStream) {
               char gpsJson[256];
-              int jsonLen = snprintf(gpsJson, sizeof(gpsJson),
-                                     "{\"val\":1,\"fix\":%d,\"quality\":%d,\"sats\":%d,\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.2f,\"speed\":%.2f}",
-                                     gPA1010D->fix ? 1 : 0, (int)gPA1010D->fixquality, (int)gPA1010D->satellites,
-                                     gPA1010D->latitudeDegrees, gPA1010D->longitudeDegrees,
-                                     gPA1010D->altitude, gPA1010D->speed);
+              int jsonLen;
+              if (gPA1010D->fix) {
+                jsonLen = snprintf(gpsJson, sizeof(gpsJson),
+                                   "{\"val\":1,\"fix\":%d,\"quality\":%d,\"sats\":%d,\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.2f,\"speed\":%.2f}",
+                                   1, (int)gPA1010D->fixquality, (int)gPA1010D->satellites,
+                                   gPA1010D->latitudeDegrees, gPA1010D->longitudeDegrees,
+                                   gPA1010D->altitude, gPA1010D->speed);
+              } else {
+                // No fix yet - stream status so master knows GPS is active but acquiring
+                jsonLen = snprintf(gpsJson, sizeof(gpsJson),
+                                   "{\"val\":1,\"fix\":0,\"quality\":0,\"sats\":%d,\"lat\":0,\"lon\":0,\"alt\":0,\"speed\":0}",
+                                   (int)gPA1010D->satellites);
+              }
               if (jsonLen > 0 && jsonLen < 256) {
                 sendSensorDataUpdate(REMOTE_SENSOR_GPS, String(gpsJson));
               }

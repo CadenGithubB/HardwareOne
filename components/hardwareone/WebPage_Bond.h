@@ -1,5 +1,5 @@
-#ifndef WEBPAGE_PAIR_H
-#define WEBPAGE_PAIR_H
+#ifndef WEBPAGE_BOND_H
+#define WEBPAGE_BOND_H
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
@@ -8,10 +8,10 @@
 #endif
 #include "WebServer_Utils.h"
 
-// Register Paired device handlers
-void registerPairHandlers(httpd_handle_t server);
+// Register Bond device handlers
+void registerBondHandlers(httpd_handle_t server);
 
 // Stream inner content for embedding in other pages
-void streamPairInner(httpd_req_t* req);
+void streamBondInner(httpd_req_t* req);
 
-#endif // WEBPAGE_PAIR_H
+#endif // WEBPAGE_BOND_H

@@ -1588,6 +1588,11 @@ void handleDeviceStopped(I2CDeviceType sensor) {
 #endif
 
   notifySensorStopped(name);
+
+  // Bump sensor status so SSE + bonded peer get notified immediately
+  char cause[48];
+  snprintf(cause, sizeof(cause), "close_%s@handleDeviceStopped", name);
+  sensorStatusBumpWith(cause);
 }
 
 // Helper: set cause then bump (to preserve existing call-sites)

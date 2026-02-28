@@ -955,6 +955,7 @@ void setupWiFi() {
 // ============================================================================
 
 static const SettingEntry wifiSettingsEntries[] = {
+  { "wifiEnabled",        SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "WiFi Enabled", nullptr },
   { "wifiSSID",           SETTING_STRING, &gSettings.wifiSSID,          0, 0, "", 0, 0, "WiFi SSID", nullptr },
   { "wifiPassword",       SETTING_STRING, &gSettings.wifiPassword,      0, 0, "", 0, 0, "WiFi Password", nullptr },
   { "wifiAutoReconnect",  SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr },

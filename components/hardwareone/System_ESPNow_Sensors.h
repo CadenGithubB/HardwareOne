@@ -92,8 +92,13 @@ void stopSensorDataStreaming(RemoteSensorType sensorType);
 
 bool isSensorDataStreamingEnabled(RemoteSensorType sensorType);
 
-// Send sensor data update (worker → master)
+// Update local sensor cache (called by sensor polling loops)
+// This is a fast, non-blocking write - no ESP-NOW transmission here
 void sendSensorDataUpdate(RemoteSensorType sensorType, const String& jsonData);
+
+// Force immediate broadcast of a sensor (event-driven API)
+// Use this for critical events that need instant transmission (e.g., button press, alarm)
+void forceSensorBroadcast(RemoteSensorType sensorType);
 
 // Get remote sensor data for web API
 String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensorType);
@@ -148,7 +153,7 @@ struct RemoteGPSData {
   char deviceName[32];  // Name of device providing GPS
 };
 
-// Get remote GPS data from paired device or mesh workers
+// Get remote GPS data from bonded device or mesh workers
 // Returns true if valid GPS data is available from a remote source
 bool getRemoteGPSData(RemoteGPSData* outData);
 

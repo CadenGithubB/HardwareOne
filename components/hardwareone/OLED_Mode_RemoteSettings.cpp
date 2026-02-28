@@ -1,6 +1,6 @@
 #include "OLED_Display.h"
 
-#if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
+#if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 #include "OLED_Utils.h"
 #include "OLED_SettingsEditor.h"
@@ -149,4 +149,4 @@ static void registerRemoteSettingsMode() {
   registerOLEDMode(&remoteSettingsModeEntry);
 }
 
-#endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
+#endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE

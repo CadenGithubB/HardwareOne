@@ -142,7 +142,7 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
             WebPage_Games.cpp
             WebPage_ESPNow.cpp
             WebPage_ESPNow_Metadata.cpp
-            WebPage_Pair.cpp
+            WebPage_Bond.cpp
             WebPage_Bluetooth.cpp
             WebPage_Speech.cpp
             WebPage_MQTT.cpp

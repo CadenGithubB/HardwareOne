@@ -2924,9 +2924,9 @@ extern void resolvePendingUserCreationTimes();
 bool gTimeSyncedMarkerWritten = false;
 
 // Log File Path Definitions
-const char* LOG_OK_FILE = "/system/logs/successful_login.log";              // ~680KB cap
-const char* LOG_FAIL_FILE = "/system/logs/failed_login.log";                // ~680KB cap
-const char* LOG_I2C_FILE = "/system/logs/i2c_errors.log";                   // 64KB cap
+const char* LOG_OK_FILE = "/system/sys_logs/successful_login.log";              // ~680KB cap
+const char* LOG_FAIL_FILE = "/system/sys_logs/failed_login.log";                // ~680KB cap
+const char* LOG_I2C_FILE = "/system/sys_logs/i2c_errors.log";                   // 64KB cap
 
 void logToFile(const char* path, const String& line, size_t capBytes) {
   appendLineWithCap(path, line, capBytes);

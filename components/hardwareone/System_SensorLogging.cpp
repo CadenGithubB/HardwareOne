@@ -664,7 +664,7 @@ const char* cmd_sensorlog(const String& args) {
 
     if (sp2 < 0) {
       return "Usage: sensorlog start <filepath> [interval_ms]\n"
-             "Example: sensorlog start /logs/sensors/sensors.txt 1000";
+             "Example: sensorlog start /logging_captures/sensors/sensors.txt 1000";
     }
 
     String args = action.substring(sp2 + 1);
@@ -683,7 +683,7 @@ const char* cmd_sensorlog(const String& args) {
     }
 
     if (filepath.length() == 0 || filepath.charAt(0) != '/') {
-      return "Error: Filepath must start with / (e.g., /logs/sensors/sensors.txt)";
+      return "Error: Filepath must start with / (e.g., /logging_captures/sensors/sensors.txt)";
     }
 
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -991,7 +991,7 @@ static CommandModuleRegistrar _sensorlog_cmd_registrar(sensorLoggingCommands, se
 
 static const SettingEntry sensorLogSettingEntries[] = {
   { "sensorLogAutoStart",    SETTING_BOOL,   &gSettings.sensorLogAutoStart,    0, 0, nullptr, 0, 1,       "Auto-start logging after boot", nullptr },
-  { "sensorLogPath",         SETTING_STRING, &gSettings.sensorLogPath,         0, 0, "/logs/sensors/sensors.txt", 0, 0, "Log file path", nullptr },
+  { "sensorLogPath",         SETTING_STRING, &gSettings.sensorLogPath,         0, 0, "/logging_captures/sensors/sensors.txt", 0, 0, "Log file path", nullptr },
   { "sensorLogIntervalMs",   SETTING_INT,    &gSettings.sensorLogIntervalMs,   5000, 0, nullptr, 100, 3600000, "Poll interval (ms)", nullptr },
   { "sensorLogMask",         SETTING_INT,    &gSettings.sensorLogMask,         0, 0, nullptr, 0, 255,     "Sensor bitmask", nullptr },
   { "sensorLogFormat",       SETTING_INT,    &gSettings.sensorLogFormat,       0, 0, nullptr, 0, 2,       "Format (0=text,1=csv,2=track)", nullptr }

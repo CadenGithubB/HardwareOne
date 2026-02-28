@@ -129,7 +129,7 @@ esp_err_t handleEspNowMetadata(httpd_req_t* req) {
     char macStr[18];
     snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
              targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
-    String settingsPath = String("/cache/peers/") + macStr + "/settings.json";
+    String settingsPath = String("/system/espnow/peers/") + macStr + "/settings.json";
     
     if (LittleFS.exists(settingsPath.c_str())) {
       File f = LittleFS.open(settingsPath.c_str(), "r");

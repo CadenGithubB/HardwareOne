@@ -365,6 +365,13 @@ void sensorStatusBump() {
   } else {
     DEBUG_SENSORSF("[STATUS_BUMP] Broadcast already scheduled (due in %ld ms)", (long)(gNextSensorStatusBroadcastDue - nowMs));
   }
+#if ENABLE_BONDED_MODE
+  // Proactively push status to bonded peer so master sees changes immediately
+  extern EspNowState* gEspNow;
+  if (gEspNow && gEspNow->initialized && isBondSynced()) {
+    gEspNow->bondNeedsProactiveStatus = true;
+  }
+#endif
 }
 
 extern Adafruit_NeoPixel pixels;
@@ -443,11 +450,11 @@ extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, s
   // Deadlock safeguard: if current task already holds fsMutex, skip FS logging
   if (isFsLockedByCurrentTask()) return;
   s_inMemLog = true;
-  // Ensure /logs exists (best-effort)
+  // Ensure /logging_captures exists (best-effort)
   {
     FsLockGuard guard("alloclog.ensure_logs");
-    if (!LittleFS.exists("/logs")) {
-      LittleFS.mkdir("/logs");
+    if (!LittleFS.exists("/logging_captures")) {
+      LittleFS.mkdir("/logging_captures");
     }
   }
   // Timestamp prefix with ms precision, via boot-epoch offset and esp_timer
