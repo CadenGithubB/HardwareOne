@@ -1269,13 +1269,13 @@ static esp_err_t handleBondPairedDevices(httpd_req_t* req) {
   
   httpd_resp_set_type(req, "application/json");
   
-  // Read espnow_devices.json
-  if (!LittleFS.exists("/system/espnow_devices.json")) {
+  // Read espnow devices list
+  if (!LittleFS.exists("/system/espnow/devices.json")) {
     httpd_resp_send(req, "{\"devices\":[]}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
   
-  File f = LittleFS.open("/system/espnow_devices.json", "r");
+  File f = LittleFS.open("/system/espnow/devices.json", "r");
   if (!f) {
     httpd_resp_send(req, "{\"devices\":[]}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
