@@ -419,7 +419,7 @@ void firstTimeSetupIfNeeded() {
   // Setup complete!
   setSetupProgressStage(SETUP_FINISHED);
   setFirstTimeSetupState(SETUP_NOT_NEEDED);  // Back to normal state
-  // Don't set gFirstTimeSetupPerformed = true - let WiFi connect normally
+  gFirstTimeSetupPerformed = true;  // Suppress stale-cookie "device restarted" message on fresh setup
   
   broadcastOutput("");
   broadcastOutput("FIRST-TIME SETUP COMPLETE!");
