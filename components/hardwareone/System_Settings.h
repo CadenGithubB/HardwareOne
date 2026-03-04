@@ -57,42 +57,42 @@ struct Settings {
       imuPitchOffset(0.0f),
       imuRollOffset(0.0f),
       imuYawOffset(0.0f),
-      debugHttp(true),
-      debugSse(true),
-      debugCli(true),
-      debugAuth(true),
-      debugSensors(true),
-      debugEspNow(true),
-      debugSensorsGeneral(true),
-      debugWifi(true),
-      debugStorage(true),
-      debugPerformance(true),
-      debugDateTime(true),
-      debugCommandFlow(true),
-      debugUsers(true),
-      debugSystem(true),
-      debugAutomations(true),
-      debugLogger(true),
-      debugEspNowStream(true),
-      debugMqtt(true),
-      debugEspNowCore(true),
-      debugEspNowRouter(true),
-      debugEspNowMesh(true),
-      debugEspNowTopo(true),
-      debugEspNowEncryption(true),
+      debugHttp(false),
+      debugSse(false),
+      debugCli(false),
+      debugAuth(false),
+      debugSensors(false),
+      debugEspNow(false),
+      debugSensorsGeneral(false),
+      debugWifi(false),
+      debugStorage(false),
+      debugPerformance(false),
+      debugDateTime(false),
+      debugCommandFlow(false),
+      debugUsers(false),
+      debugSystem(false),
+      debugAutomations(false),
+      debugLogger(false),
+      debugEspNowStream(false),
+      debugMqtt(false),
+      debugEspNowCore(false),
+      debugEspNowRouter(false),
+      debugEspNowMesh(false),
+      debugEspNowTopo(false),
+      debugEspNowEncryption(false),
       debugEspNowMetadata(false),
-      debugAutoScheduler(true),
-      debugAutoExec(true),
-      debugAutoCondition(true),
-      debugAutoTiming(true),
-      debugMemory(true),
-      debugCommandSystem(true),
-      debugSettingsSystem(true),
-      debugFmRadio(true),
-      debugG2(true),  // G2 smart glasses BLE connection
-      debugCamera(true),
-      debugMicrophone(true),
-      debugI2C(true),  // I2C bus transactions, mutex, clock changes
+      debugAutoScheduler(false),
+      debugAutoExec(false),
+      debugAutoCondition(false),
+      debugAutoTiming(false),
+      debugMemory(false),
+      debugCommandSystem(false),
+      debugSettingsSystem(false),
+      debugFmRadio(false),
+      debugG2(false),  // G2 smart glasses BLE connection
+      debugCamera(false),
+      debugMicrophone(false),
+      debugI2C(false),  // I2C bus transactions, mutex, clock changes
       debugGps(false),        // Individual sensor flags disabled by default
       debugRtc(false),
       debugImu(false),
@@ -160,8 +160,8 @@ struct Settings {
       ledStartupColor(""),
       ledStartupColor2(""),
       ledStartupDuration(1000),
-      oledEnabled(true),
-      oledAutoInit(true),
+      oledEnabled(false),
+      oledAutoInit(false),
       localDisplayRequireAuth(true),
       oledBootMode(""),
       oledDefaultMode(""),
@@ -170,7 +170,7 @@ struct Settings {
       oledBrightness(255),
       oledThermalScale(2.5f),
       oledThermalColorMode(""),
-      gamepadAutoStart(true),
+      gamepadAutoStart(false),
       thermalAutoStart(false),
       tofAutoStart(false),
       imuAutoStart(false),
@@ -220,6 +220,7 @@ struct Settings {
       edgeImpulseContinuous(false),
       edgeImpulseIntervalMs(1000),
       httpAutoStart(true),
+      serialRequireAuth(true),
       bluetoothAutoStart(true),
       bluetoothRequireAuth(true),
       bleDeviceName("HardwareOne"),
@@ -250,16 +251,16 @@ struct Settings {
       mqttBaseTopic(""),
       mqttDiscoveryPrefix("homeassistant"),
       mqttPublishIntervalMs(10000),
-      mqttPublishWiFi(true),
-      mqttPublishSystem(true),
-      mqttPublishThermal(true),
-      mqttPublishToF(true),
-      mqttPublishIMU(true),
-      mqttPublishPresence(true),
-      mqttPublishGPS(true),
-      mqttPublishAPDS(true),
-      mqttPublishRTC(true),
-      mqttPublishGamepad(true) {
+      mqttPublishWiFi(false),
+      mqttPublishSystem(false),
+      mqttPublishThermal(false),
+      mqttPublishToF(false),
+      mqttPublishIMU(false),
+      mqttPublishPresence(false),
+      mqttPublishGPS(false),
+      mqttPublishAPDS(false),
+      mqttPublishRTC(false),
+      mqttPublishGamepad(false) {
     // String members are now initialized in initializer list
   }
 
@@ -558,6 +559,7 @@ struct Settings {
   int edgeImpulseIntervalMs;    // Interval between inferences in continuous mode
   // HTTP server settings
   bool httpAutoStart;           // Auto-start HTTP server at boot if WiFi connected
+  bool serialRequireAuth;       // Require login before accepting serial CLI commands (default: true)
   // Bluetooth settings
   bool bluetoothAutoStart;      // Auto-start Bluetooth at boot (enables BLE server)
   bool bluetoothRequireAuth;    // Require login before accepting BLE commands (always required, per-connection)
@@ -593,16 +595,16 @@ struct Settings {
   String mqttDiscoveryPrefix;   // HA discovery prefix (default: "homeassistant")
   int mqttPublishIntervalMs;    // Sensor data publish interval in ms (default: 10000)
   // MQTT publish data configuration
-  bool mqttPublishWiFi;         // Include WiFi info in published data (default: true)
-  bool mqttPublishSystem;       // Include system info (uptime, heap, etc.) (default: true)
-  bool mqttPublishThermal;      // Include thermal sensor data (default: true)
-  bool mqttPublishToF;          // Include ToF sensor data (default: true)
-  bool mqttPublishIMU;          // Include IMU sensor data (default: true)
-  bool mqttPublishPresence;     // Include presence/motion sensor data (default: true)
-  bool mqttPublishGPS;          // Include GPS location data (default: true)
-  bool mqttPublishAPDS;         // Include gesture/proximity data (default: true)
-  bool mqttPublishRTC;          // Include RTC time data (default: true)
-  bool mqttPublishGamepad;      // Include gamepad input data (default: true)
+  bool mqttPublishWiFi;         // Include WiFi info in published data (default: false)
+  bool mqttPublishSystem;       // Include system info (uptime, heap, etc.) (default: false)
+  bool mqttPublishThermal;      // Include thermal sensor data (default: false)
+  bool mqttPublishToF;          // Include ToF sensor data (default: false)
+  bool mqttPublishIMU;          // Include IMU sensor data (default: false)
+  bool mqttPublishPresence;     // Include presence/motion sensor data (default: false)
+  bool mqttPublishGPS;          // Include GPS location data (default: false)
+  bool mqttPublishAPDS;         // Include gesture/proximity data (default: false)
+  bool mqttPublishRTC;          // Include RTC time data (default: false)
+  bool mqttPublishGamepad;      // Include gamepad input data (default: false)
 };
 
 // Global settings instance (defined in .ino)
@@ -674,47 +676,47 @@ extern const size_t settingsCommandsCount;
 // ============================================================================
 
 // WiFi Settings
-const char* cmd_wifitxpower(const String& cmd);
-const char* cmd_wifiautoreconnect(const String& cmd);
-const char* cmd_tzoffsetminutes(const String& cmd);
-const char* cmd_ntpserver(const String& cmd);
+const char* cmd_wifitxpower(const String& argsInput);
+const char* cmd_wifiautoreconnect(const String& argsInput);
+const char* cmd_tzoffsetminutes(const String& argsInput);
+const char* cmd_ntpserver(const String& argsInput);
 
 // Thermal Settings
-const char* cmd_thermalpalettedefault(const String& cmd);
-const char* cmd_thermalewmafactor(const String& cmd);
-const char* cmd_thermaltransitionms(const String& cmd);
-const char* cmd_thermalupscalefactor(const String& cmd);
-const char* cmd_thermalrollingminmaxenabled(const String& cmd);
-const char* cmd_thermalrollingminmaxalpha(const String& cmd);
-const char* cmd_thermalrollingminmaxguardc(const String& cmd);
-const char* cmd_thermaltemporalalpha(const String& cmd);
-const char* cmd_thermalrotation(const String& cmd);
+const char* cmd_thermalpalettedefault(const String& argsInput);
+const char* cmd_thermalewmafactor(const String& argsInput);
+const char* cmd_thermaltransitionms(const String& argsInput);
+const char* cmd_thermalupscalefactor(const String& argsInput);
+const char* cmd_thermalrollingminmaxenabled(const String& argsInput);
+const char* cmd_thermalrollingminmaxalpha(const String& argsInput);
+const char* cmd_thermalrollingminmaxguardc(const String& argsInput);
+const char* cmd_thermaltemporalalpha(const String& argsInput);
+const char* cmd_thermalrotation(const String& argsInput);
 
 // ESP-NOW Settings
-const char* cmd_espnowenabled(const String& cmd);
+const char* cmd_espnowenabled(const String& argsInput);
 
 // OLED Settings
-const char* cmd_oled_enabled(const String& cmd);
-const char* cmd_oled_autoinit(const String& cmd);
-const char* cmd_oled_bootmode(const String& cmd);
-const char* cmd_oled_defaultmode(const String& cmd);
-const char* cmd_oled_bootduration(const String& cmd);
-const char* cmd_oled_updateinterval(const String& cmd);
-const char* cmd_oled_brightness(const String& cmd);
-const char* cmd_oled_thermalscale(const String& cmd);
-const char* cmd_oled_thermalcolormode(const String& cmd);
+const char* cmd_oled_enabled(const String& argsInput);
+const char* cmd_oled_autoinit(const String& argsInput);
+const char* cmd_oled_bootmode(const String& argsInput);
+const char* cmd_oled_defaultmode(const String& argsInput);
+const char* cmd_oled_bootduration(const String& argsInput);
+const char* cmd_oled_updateinterval(const String& argsInput);
+const char* cmd_oled_brightness(const String& argsInput);
+const char* cmd_oled_thermalscale(const String& argsInput);
+const char* cmd_oled_thermalcolormode(const String& argsInput);
 
 // LED Settings
-const char* cmd_hardwareled_brightness(const String& cmd);
-const char* cmd_hardwareled_startupenabled(const String& cmd);
-const char* cmd_hardwareled_startupeffect(const String& cmd);
-const char* cmd_hardwareled_startupcolor(const String& cmd);
-const char* cmd_hardwareled_startupcolor2(const String& cmd);
-const char* cmd_hardwareled_startupduration(const String& cmd);
+const char* cmd_hardwareled_brightness(const String& argsInput);
+const char* cmd_hardwareled_startupenabled(const String& argsInput);
+const char* cmd_hardwareled_startupeffect(const String& argsInput);
+const char* cmd_hardwareled_startupcolor(const String& argsInput);
+const char* cmd_hardwareled_startupcolor2(const String& argsInput);
+const char* cmd_hardwareled_startupduration(const String& argsInput);
 
 // CLI Settings
-const char* cmd_webclihistorysize(const String& cmd);
-const char* cmd_oledclihistorysize(const String& cmd);
+const char* cmd_webclihistorysize(const String& argsInput);
+const char* cmd_oledclihistorysize(const String& argsInput);
 
 // ============================================================================
 // Modular Settings Registry System
@@ -785,7 +787,7 @@ void printSettingsModuleSummary();
 
 // Generic setting command handler - parses value and updates setting
 // Returns result message
-const char* handleSettingCommand(const SettingEntry* entry, const String& cmd);
+const char* handleSettingCommand(const SettingEntry* entry, const String& argsInput);
 
 // Persist current settings to JSON file
 bool writeSettingsJson();

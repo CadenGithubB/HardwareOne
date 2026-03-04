@@ -19,9 +19,6 @@
 // Filesystem mutex - protects LittleFS access (not thread-safe)
 extern SemaphoreHandle_t fsMutex;
 
-// I2C bus mutex - set by initI2CManager() to the manager's recursive mutex
-extern SemaphoreHandle_t i2cMutex;
-
 // JSON response buffer mutex - protects shared gJsonResponseBuffer
 extern SemaphoreHandle_t gJsonResponseMutex;
 
@@ -69,6 +66,8 @@ struct FsLockGuard {
 
 /**
  * I2cLockGuard - RAII guard for I2C bus mutex
+ * 
+ * Acquires I2CDeviceManager::getBusMutex() directly — no legacy i2cMutex global.
  * 
  * Usage:
  *   {

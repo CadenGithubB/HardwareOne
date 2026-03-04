@@ -127,15 +127,15 @@ void checkAutoPowerMode() {
 // CLI Commands
 // ============================================================================
 
-const char* cmd_power(const String& argsIn) {
+const char* cmd_power(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  DEBUG_SYSTEMF("[POWER_CMD] cmd_power called with: '%s'", argsIn.c_str());
+  DEBUG_SYSTEMF("[POWER_CMD] cmd_power called with: '%s'", argsInput.c_str());
   
   extern Settings gSettings;
   
   // Parse command args: "" or "mode [name]" or "auto [on|off]"
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   DEBUG_SYSTEMF("[POWER_CMD] args after trim: '%s'", args.c_str());
   

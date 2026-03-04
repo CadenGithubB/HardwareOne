@@ -29,7 +29,7 @@ volatile bool imuInitResult = false;
 
 // Settings and debug
 extern Settings gSettings;
-// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing provided by System_I2C.h
+// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing provided by System_I2C.h
 
 // ============================================================================
 // IMU Sensor Cache (owned by this module)
@@ -55,13 +55,6 @@ volatile UBaseType_t gIMUWatermarkNow = (UBaseType_t)0;
 
 // IMU initialization handoff flags - defined above (lines 17-19)
 
-// Macro for validation
-#define RETURN_VALID_IF_VALIDATE_CSTR() \
-  do { \
-    extern bool gCLIValidateOnly; \
-    if (gCLIValidateOnly) return "VALID"; \
-  } while(0)
-
 // Debug macros (use centralized versions from debug_system.h)
 // BROADCAST_PRINTF now defined in debug_system.h with performance optimizations
 #define MIN_RESTART_DELAY_MS 2000
@@ -81,7 +74,7 @@ extern bool createIMUTask();
 // IMU Sensor Command Handlers
 // ============================================================================
 
-const char* cmd_imu(const String& cmd) {
+const char* cmd_imu(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!imuConnected || !imuEnabled) {
@@ -196,7 +189,7 @@ bool startIMUSensorInternal() {
 }
 
 // Public command - uses centralized queue
-const char* cmd_imustart(const String& cmd) {
+const char* cmd_imustart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Check if already enabled or queued
@@ -220,14 +213,14 @@ const char* cmd_imustart(const String& cmd) {
   }
 }
 
-const char* cmd_imustop(const String& cmd) {
+const char* cmd_imustop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   handleDeviceStopped(I2C_DEVICE_IMU);
   return "[IMU] Close requested; cleanup will complete asynchronously";
 }
 
-const char* cmd_imuactions(const String& cmd) {
+const char* cmd_imuactions(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!imuEnabled || !imuConnected) {
@@ -809,9 +802,9 @@ void updateIMUActions() {
 // IMU UI Settings Commands
 // ============================================================================
 
-const char* cmd_imupollingms(const String& cmd) {
+const char* cmd_imupollingms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: imupollingms <50..2000>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -821,9 +814,9 @@ const char* cmd_imupollingms(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_imuewmafactor(const String& cmd) {
+const char* cmd_imuewmafactor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: imuewmafactor <0.0..1.0>";
   while (*p == ' ') p++;  // Skip whitespace
   float f = strtof(p, nullptr);
@@ -833,9 +826,9 @@ const char* cmd_imuewmafactor(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_imutransitionms(const String& cmd) {
+const char* cmd_imutransitionms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: imutransitionms <0..1000>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -845,9 +838,9 @@ const char* cmd_imutransitionms(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_imuwebmaxfps(const String& cmd) {
+const char* cmd_imuwebmaxfps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: imuwebmaxfps <1..30>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -861,9 +854,9 @@ const char* cmd_imuwebmaxfps(const String& cmd) {
 // IMU Device Settings Commands
 // ============================================================================
 
-const char* cmd_imudevicepollms(const String& args) {
+const char* cmd_imudevicepollms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: imuDevicePollMs <50..1000>";
   int v = valStr.toInt();
@@ -874,9 +867,9 @@ const char* cmd_imudevicepollms(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_imuorientationmode(const String& args) {
+const char* cmd_imuorientationmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "Current imuOrientationMode: %d (0=normal, 1=flip_pitch, 2=flip_roll, 3=flip_yaw, 4=flip_pitch_roll, 5=roll_180_fix, 6=rotate_90ccw, 7=alt_extreme_pitch, 8=upside_down)", gSettings.imuOrientationMode);
@@ -889,9 +882,9 @@ const char* cmd_imuorientationmode(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_imuorientationcorrection(const String& args) {
+const char* cmd_imuorientationcorrection(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) {
     return gSettings.imuOrientationCorrectionEnabled ? "Current imuOrientationCorrectionEnabled: 1" : "Current imuOrientationCorrectionEnabled: 0";
@@ -901,9 +894,9 @@ const char* cmd_imuorientationcorrection(const String& args) {
   return gSettings.imuOrientationCorrectionEnabled ? "imuOrientationCorrectionEnabled set to 1" : "imuOrientationCorrectionEnabled set to 0";
 }
 
-const char* cmd_imupitchoffset(const String& args) {
+const char* cmd_imupitchoffset(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "Current imuPitchOffset: %.2f", gSettings.imuPitchOffset);
@@ -915,9 +908,9 @@ const char* cmd_imupitchoffset(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_imurolloffset(const String& args) {
+const char* cmd_imurolloffset(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "Current imuRollOffset: %.2f", gSettings.imuRollOffset);
@@ -929,9 +922,9 @@ const char* cmd_imurolloffset(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_imuyawoffset(const String& args) {
+const char* cmd_imuyawoffset(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "Current imuYawOffset: %.2f", gSettings.imuYawOffset);
@@ -944,9 +937,9 @@ const char* cmd_imuyawoffset(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_imuautostart(const String& args) {
+const char* cmd_imuautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args; arg.trim();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
     return gSettings.imuAutoStart ? "[IMU] Auto-start: enabled" : "[IMU] Auto-start: disabled";
   }
@@ -1012,7 +1005,7 @@ static CommandModuleRegistrar _imu_cmd_registrar(imuCommands, imuCommandsCount, 
 //
 // Cleanup Strategy:
 //   1. Check imuEnabled flag at loop start
-//   2. Acquire i2cMutex to prevent race conditions during cleanup
+//   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Delete sensor object and invalidate cache
 //   4. Release mutex and delete task
 // ============================================================================

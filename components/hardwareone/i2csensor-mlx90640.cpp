@@ -19,7 +19,7 @@
 
 // External dependencies still needed
 extern TwoWire Wire1;
-// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing provided by System_I2C.h
+// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing provided by System_I2C.h
 
 // ============================================================================
 // Thermal Settings Module (modular settings registry)
@@ -229,7 +229,7 @@ bool startThermalSensorInternal() {
 }
 
 // Public command - uses centralized queue
-const char* cmd_thermalstart(const String& cmd) {
+const char* cmd_thermalstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   DEBUG_CLIF("[THERMAL_START] Command called - checking state");
@@ -263,7 +263,7 @@ const char* cmd_thermalstart(const String& cmd) {
   }
 }
 
-const char* cmd_thermalread(const String& cmd) {
+const char* cmd_thermalread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!thermalEnabled || !thermalConnected) {
@@ -289,16 +289,16 @@ const char* cmd_thermalread(const String& cmd) {
   return "[Thermal] Reading complete";
 }
 
-const char* cmd_thermalstop(const String& cmd) {
+const char* cmd_thermalstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   handleDeviceStopped(I2C_DEVICE_THERMAL);
   return "[Thermal] Stop requested; cleanup will complete asynchronously";
 }
 
-const char* cmd_thermalpalettedefault(const String& cmd) {
+const char* cmd_thermalpalettedefault(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermalpalettedefault <grayscale|iron|rainbow|hot|coolwarm>";
   while (*p == ' ') p++;  // Skip whitespace
   // Case-insensitive compare for palette names
@@ -319,9 +319,9 @@ const char* cmd_thermalpalettedefault(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermalewmafactor(const String& cmd) {
+const char* cmd_thermalewmafactor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermalewmafactor <0.0..1.0>";
   while (*p == ' ') p++;  // Skip whitespace
   float f = strtof(p, nullptr);
@@ -331,9 +331,9 @@ const char* cmd_thermalewmafactor(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermaltransitionms(const String& cmd) {
+const char* cmd_thermaltransitionms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermaltransitionms <0..5000>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -343,9 +343,9 @@ const char* cmd_thermaltransitionms(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermalupscalefactor(const String& cmd) {
+const char* cmd_thermalupscalefactor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermalupscalefactor <1..4>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -355,9 +355,9 @@ const char* cmd_thermalupscalefactor(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermalrollingminmaxenabled(const String& cmd) {
+const char* cmd_thermalrollingminmaxenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermalrollingminmaxenabled <0|1>";
   while (*p == ' ') p++;  // Skip whitespace
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
@@ -366,9 +366,9 @@ const char* cmd_thermalrollingminmaxenabled(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermalrollingminmaxalpha(const String& cmd) {
+const char* cmd_thermalrollingminmaxalpha(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermalrollingminmaxalpha <0.0..1.0>";
   while (*p == ' ') p++;  // Skip whitespace
   float f = strtof(p, nullptr);
@@ -378,9 +378,9 @@ const char* cmd_thermalrollingminmaxalpha(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermalrollingminmaxguardc(const String& cmd) {
+const char* cmd_thermalrollingminmaxguardc(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermalrollingminmaxguardc <0.0..10.0>";
   while (*p == ' ') p++;  // Skip whitespace
   float f = strtof(p, nullptr);
@@ -390,9 +390,9 @@ const char* cmd_thermalrollingminmaxguardc(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermaltemporalalpha(const String& cmd) {
+const char* cmd_thermaltemporalalpha(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermaltemporalalpha <0.0..1.0>";
   while (*p == ' ') p++;  // Skip whitespace
   float f = strtof(p, nullptr);
@@ -402,9 +402,9 @@ const char* cmd_thermaltemporalalpha(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermalrotation(const String& cmd) {
+const char* cmd_thermalrotation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermalrotation <0|1|2|3> (0=0°, 1=90°, 2=180°, 3=270°)";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -1107,9 +1107,9 @@ void interpolateThermalFrame(const float* src, float* dst, int targetWidth, int 
 // Thermal tuning commands (migrated from .ino)
 // ============================================================================
 
-const char* cmd_thermalpollingms(const String& cmd) {
+const char* cmd_thermalpollingms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermalpollingms <50..5000>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -1119,9 +1119,9 @@ const char* cmd_thermalpollingms(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermalinterpolationenabled(const String& cmd) {
+const char* cmd_thermalinterpolationenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermalinterpolationenabled <0|1>";
   while (*p == ' ') p++;  // Skip whitespace
   // Accept 0, 1, true, false (case insensitive)
@@ -1131,9 +1131,9 @@ const char* cmd_thermalinterpolationenabled(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermalinterpolationsteps(const String& cmd) {
+const char* cmd_thermalinterpolationsteps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermalinterpolationsteps <1..8>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -1143,9 +1143,9 @@ const char* cmd_thermalinterpolationsteps(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermalinterpolationbuffersize(const String& cmd) {
+const char* cmd_thermalinterpolationbuffersize(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: thermalinterpolationbuffersize <1..10>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -1155,7 +1155,7 @@ const char* cmd_thermalinterpolationbuffersize(const String& cmd) {
   return "[Thermal] Setting updated";
 }
 
-const char* cmd_thermaldiag(const String& cmd) {
+const char* cmd_thermaldiag(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   char* buf = getDebugBuffer();
@@ -1251,12 +1251,12 @@ const char* cmd_thermaldiag(const String& cmd) {
 // ============================================================================
 
 // External device-level command handlers (defined in i2c_system.cpp)
-extern const char* cmd_thermaltargetfps(const String& cmd);
-extern const char* cmd_thermaldevicepollms(const String& cmd);
+extern const char* cmd_thermaltargetfps(const String& argsInput);
+extern const char* cmd_thermaldevicepollms(const String& argsInput);
 
-const char* cmd_thermalautostart(const String& args) {
+const char* cmd_thermalautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args; arg.trim();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
     return gSettings.thermalAutoStart ? "[Thermal] Auto-start: enabled" : "[Thermal] Auto-start: disabled";
   }
@@ -1326,7 +1326,7 @@ static CommandModuleRegistrar _thermal_registrar(thermalCommands, thermalCommand
 //
 // Cleanup Strategy:
 //   1. Check thermalEnabled flag at loop start
-//   2. Acquire i2cMutex to prevent race conditions during cleanup
+//   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Delete sensor object and invalidate cache
 //   4. Release mutex and delete task
 // ============================================================================
@@ -1453,9 +1453,9 @@ void thermalTask(void* parameter) {
 // Additional Thermal Device Commands
 // ============================================================================
 
-const char* cmd_thermaltargetfps(const String& args) {
+const char* cmd_thermaltargetfps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: thermalTargetFps <1..8>";
   int v = valStr.toInt();
@@ -1466,9 +1466,9 @@ const char* cmd_thermaltargetfps(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_thermaldevicepollms(const String& args) {
+const char* cmd_thermaldevicepollms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: thermalDevicePollMs <100..2000>";
   int v = valStr.toInt();

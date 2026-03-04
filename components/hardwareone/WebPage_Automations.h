@@ -1021,9 +1021,27 @@ function importAutomationFromJson(autoJson, statusEl){
   parts.push('commands="'+cmdsParam.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
   parts.push('enabled='+(autoJson.enabled!==false?1:0));
   const cmd=parts.join(' ');
-  return postCLI(cmd).then(r=>{
+  function showImportError(msg){
+    const errEl=document.getElementById('a_error');
+    if(errEl){ errEl.textContent=msg; errEl.style.display='block'; }
+    if(statusEl) statusEl.innerHTML='<span style="color:#dc3545">'+msg+'</span>';
+  }
+  console.log('[importAutomationFromJson] Validating import for "'+name+'":', cmd);
+  return postCLIValidate(cmd).then(v=>{
+    const vv=(v||'').trim();
+    console.log('[importAutomationFromJson] Validation result for "'+name+'":', vv);
+    if(vv!=='VALID'){
+      console.error('[importAutomationFromJson] VALIDATION FAILED for "'+name+'":', vv);
+      showImportError('Import "'+name+'" failed: '+vv);
+      throw new Error(vv);
+    }
+    console.log('[importAutomationFromJson] Validation passed, executing import for "'+name+'"');
+    return postCLI(cmd);
+  }).then(r=>{
+    console.log('[importAutomationFromJson] Import result for "'+name+'":', r);
     if(r.toLowerCase().indexOf('error:')>=0){
-      if(statusEl) statusEl.innerHTML='<span style="color:#dc3545">'+r+'</span>';
+      console.error('[importAutomationFromJson] IMPORT FAILED for "'+name+'":', r);
+      showImportError('Import "'+name+'" failed: '+r);
       throw new Error(r);
     }
     return r;

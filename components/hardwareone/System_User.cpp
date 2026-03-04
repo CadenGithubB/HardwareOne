@@ -109,7 +109,7 @@ bool tgRequireAuth(AuthContext& ctx) {
     return true;
   } else if (ctx.transport == SOURCE_SERIAL) {
     // Serial console auth state
-    if (!gSerialAuthed) {
+    if (gSettings.serialRequireAuth && !gSerialAuthed) {
       broadcastOutput("ERROR: auth required");
       return false;
     }
@@ -125,7 +125,7 @@ bool tgRequireAuth(AuthContext& ctx) {
       broadcastOutput("ERROR: auth required (display)");
       return false;
     }
-    ctx.user = gLocalDisplayAuthed ? gLocalDisplayUser : "display_system";
+    ctx.user = gLocalDisplayUser;
     if (ctx.ip.length() == 0) ctx.ip = "local";
     return true;
   } else {
@@ -175,7 +175,7 @@ bool tgRequireAdmin(AuthContext& ctx) {
 bool tgRequireAuth(AuthContext& ctx) {
   // Serial auth only when HTTP server disabled
   if (ctx.transport == SOURCE_SERIAL) {
-    if (!gSerialAuthed) {
+    if (gSettings.serialRequireAuth && !gSerialAuthed) {
       broadcastOutput("ERROR: auth required");
       return false;
     }
@@ -190,7 +190,7 @@ bool tgRequireAuth(AuthContext& ctx) {
       broadcastOutput("ERROR: auth required (display)");
       return false;
     }
-    ctx.user = gLocalDisplayAuthed ? gLocalDisplayUser : "display_system";
+    ctx.user = gLocalDisplayUser;
     if (ctx.ip.length() == 0) ctx.ip = "local";
     return true;
   }
@@ -1259,10 +1259,10 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
 // User Command Handlers
 // ============================================================================
 
-const char* cmd_user_approve(const String& argsIn) {
+const char* cmd_user_approve(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = argsIn;
+  String username = argsInput;
   username.trim();
   DEBUG_USERSF("[users] CLI approve username=%s", username.c_str());
   String err;
@@ -1276,10 +1276,10 @@ const char* cmd_user_approve(const String& argsIn) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_deny(const String& argsIn) {
+const char* cmd_user_deny(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = argsIn;
+  String username = argsInput;
   username.trim();
   DEBUG_USERSF("[users] CLI deny username=%s", username.c_str());
   String err;
@@ -1293,10 +1293,10 @@ const char* cmd_user_deny(const String& argsIn) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_promote(const String& argsIn) {
+const char* cmd_user_promote(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = argsIn;
+  String username = argsInput;
   username.trim();
   if (username.length() == 0) return "Usage: user promote <username>";
   DEBUG_USERSF("[users] CLI promote username=%s", username.c_str());
@@ -1311,10 +1311,10 @@ const char* cmd_user_promote(const String& argsIn) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_demote(const String& argsIn) {
+const char* cmd_user_demote(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = argsIn;
+  String username = argsInput;
   username.trim();
   if (username.length() == 0) return "Usage: user demote <username>";
   DEBUG_USERSF("[users] CLI demote username=%s", username.c_str());
@@ -1329,10 +1329,10 @@ const char* cmd_user_demote(const String& argsIn) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_delete(const String& argsIn) {
+const char* cmd_user_delete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = argsIn;
+  String username = argsInput;
   username.trim();
   if (username.length() == 0) return "Usage: user delete <username>";
   DEBUG_USERSF("[users] CLI delete username=%s", username.c_str());
@@ -1347,12 +1347,12 @@ const char* cmd_user_delete(const String& argsIn) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_resetpassword(const String& argsIn) {
+const char* cmd_user_resetpassword(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
   
   // Parse: "username newPassword"
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   int spaceIdx = args.indexOf(' ');
@@ -1383,14 +1383,14 @@ const char* cmd_user_resetpassword(const String& argsIn) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_list(const String& args) {
+const char* cmd_user_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
   // Check if JSON output is requested (just check for "json" in args)
-  bool jsonOutput = (args.indexOf("json") >= 0);
+  bool jsonOutput = (argsInput.indexOf("json") >= 0);
   
-  DEBUG_USERSF("[USER_LIST_DEBUG] Called with args='%s', jsonOutput=%d", args.c_str(), jsonOutput);
+  DEBUG_USERSF("[USER_LIST_DEBUG] Called with args='%s', jsonOutput=%d", argsInput.c_str(), jsonOutput);
 
   if (!LittleFS.exists(USERS_JSON_FILE)) {
     DEBUG_USERSF("[USER_LIST_DEBUG] File not found: %s", USERS_JSON_FILE);
@@ -1459,12 +1459,12 @@ const char* cmd_user_list(const String& args) {
   }
 }
 
-const char* cmd_pending_list(const String& args) {
+const char* cmd_pending_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
   // Check if JSON output is requested
-  bool jsonOutput = (args.indexOf("json") >= 0);
+  bool jsonOutput = (argsInput.indexOf("json") >= 0);
 
   if (!LittleFS.exists(PENDING_USERS_FILE)) {
     if (jsonOutput) return "[]";
@@ -1541,11 +1541,11 @@ const char* cmd_pending_list(const String& args) {
 }
 
 #if ENABLE_HTTP_SERVER
-const char* cmd_session_list(const String& args) {
+const char* cmd_session_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Check if JSON output is requested
-  bool jsonOutput = (args.indexOf("json") >= 0);
+  bool jsonOutput = (argsInput.indexOf("json") >= 0);
 
   if (jsonOutput) {
     // Use static PSRAM buffer - 2KB sufficient for session list
@@ -1584,10 +1584,10 @@ const char* cmd_session_list(const String& args) {
 
 // cmd_login and cmd_logout moved to System_Utils.cpp (critical system functions)
 
-const char* cmd_session_revoke(const String& argsIn) {
+const char* cmd_session_revoke(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   String argsLower = args;
   argsLower.toLowerCase();
@@ -1676,11 +1676,11 @@ const char* cmd_session_revoke(const String& originalCmd) {
 }
 #endif // ENABLE_HTTP_SERVER
 
-const char* cmd_user_request(const String& args) {
+const char* cmd_user_request(const String& argsInput) {
   //RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
   // Syntax: args = "<username> <password> [confirmPassword]"
-  String rest = args;
+  String rest = argsInput;
   rest.trim();
   if (rest.length() == 0) return "Usage: user request <username> <password> [confirmPassword]";
   int spU = rest.indexOf(' ');
@@ -2330,10 +2330,28 @@ void writeBootAnchor() {
 // User System Command Registry (System-Specific)
 // ============================================================================
 
+static const char* cmd_serialrequireauth(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = argsInput; arg.trim();
+  if (arg.length() == 0) {
+    return gSettings.serialRequireAuth ? "[Serial] Require auth: enabled" : "[Serial] Require auth: disabled";
+  }
+  arg.toLowerCase();
+  if (arg == "on" || arg == "true" || arg == "1") {
+    setSetting(gSettings.serialRequireAuth, true);
+    return "[Serial] Require auth enabled";
+  } else if (arg == "off" || arg == "false" || arg == "0") {
+    setSetting(gSettings.serialRequireAuth, false);
+    return "[Serial] Require auth disabled - serial commands bypass login";
+  }
+  return "Usage: serialrequireauth [on|off]";
+}
+
 const CommandEntry userSystemCommands[] = {
   // Authentication commands
   { "login", "Login: <user> <pass> [transport]", false, cmd_login, "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth" },
   { "logout", "Logout [transport]", false, cmd_logout },
+  { "serialrequireauth", "Enable/disable serial auth requirement [on|off].", true, cmd_serialrequireauth, "Usage: serialrequireauth [on|off]" },
   
   // User management commands
   { "user approve", "Approve pending request: <username>", true, cmd_user_approve },
@@ -2492,7 +2510,7 @@ static bool userSyncResolveDeviceNameOrMac(const String& deviceStr, uint8_t outM
  * Sends user credentials to a paired ESP-NOW device.
  * Requires admin privileges and user sync to be enabled.
  */
-const char* cmd_user_sync(const String& argsIn) {
+const char* cmd_user_sync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -2509,7 +2527,7 @@ const char* cmd_user_sync(const String& argsIn) {
   }
   
   // Parse command args: <username> <device> <password>
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   int firstSpace = args.indexOf(' ');

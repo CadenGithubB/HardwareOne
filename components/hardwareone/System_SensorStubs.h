@@ -136,7 +136,7 @@
 
 #if !ENABLE_APDS_SENSOR
   // APDS command stub
-  inline const char* cmd_apdscolorstart(const String& cmd) { return "APDS disabled"; }
+  inline const char* cmd_apdscolorstart(const String& argsInput) { return "APDS disabled"; }
   // APDS stub structure (matches real PeripheralCache exactly)
   struct PeripheralCache {
     SemaphoreHandle_t mutex = nullptr;
@@ -302,8 +302,8 @@
   inline bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool enabled) { return false; }
   inline void sortWiFiByPriority() {}
   inline bool saveWiFiNetworks() { return false; }
-  inline const char* cmd_wifitxpower(const String& cmd) { return "WiFi disabled"; }
-  inline const char* cmd_wifiautoreconnect(const String& cmd) { return "WiFi disabled"; }
+  inline const char* cmd_wifitxpower(const String& argsInput) { return "WiFi disabled"; }
+  inline const char* cmd_wifiautoreconnect(const String& argsInput) { return "WiFi disabled"; }
   // WiFi class stub
   class WiFiClass {
   public:
@@ -424,7 +424,7 @@
   extern const size_t espNowCommandsCount;
   // ESP-NOW stub functions
   inline const char* checkEspNowFirstTimeSetup() { return "ESP-NOW disabled"; }
-  inline const char* cmd_espnow_init(const String& cmd) { return "ESP-NOW disabled"; }
+  inline const char* cmd_espnow_init(const String& argsInput) { return "ESP-NOW disabled"; }
   inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
   inline void processMessageQueue() {}
   inline void cleanupExpiredChunkedMessage() {}

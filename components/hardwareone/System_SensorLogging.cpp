@@ -52,13 +52,6 @@ extern void getTimestampPrefixMsCached(char* out, size_t outSize);
 
 // Modular sensor caches (conditionally available based on enabled sensors)
 
-// Validation macro
-#define RETURN_VALID_IF_VALIDATE_CSTR() \
-  do { \
-    extern bool gCLIValidateOnly; \
-    if (gCLIValidateOnly) return "VALID"; \
-  } while(0)
-
 // ============================================================================
 // Sensor Logging State Variables
 // ============================================================================
@@ -570,10 +563,10 @@ void sensorLogTick() {
 // Command Handler
 // ============================================================================
 
-const char* cmd_sensorlog(const String& args) {
+const char* cmd_sensorlog(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String action = args;
+  String action = argsInput;
   action.trim();
   if (action.length() == 0) {
     return "Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors|autostart> [args...]\n"

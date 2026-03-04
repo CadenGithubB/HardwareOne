@@ -156,7 +156,7 @@ bool initFilesystem() {
 // Directory Listing Helper
 // ============================================================================
 
-bool buildFilesListing(const String& inPath, String& out, bool asJson) {
+bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hideAdminPaths) {
   String dirPath = VFS::normalize(inPath);
 
   DEBUG_STORAGEF("[buildFilesListing] START path='%s' heap=%u", dirPath.c_str(), (unsigned)ESP.getFreeHeap());
@@ -232,6 +232,15 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson) {
     if (fileName.length() == 0 || fileName.indexOf('/') != -1) {
       file = root.openNextFile();
       continue;
+    }
+
+    // Hide admin-only folders from non-admin users
+    if (hideAdminPaths) {
+      String entryFullPath = (dirPath == "/") ? String("/") + fileName : dirPath + "/" + fileName;
+      if (isAdminOnlyPath(entryFullPath)) {
+        file = root.openNextFile();
+        continue;
+      }
     }
 
     bool isDirEntry = file.isDirectory();
@@ -317,14 +326,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson) {
 // Filesystem CLI Command Handlers
 // ============================================================================
 
-// Validation macro
-#define RETURN_VALID_IF_VALIDATE_CSTR() \
-  do { \
-    extern bool gCLIValidateOnly; \
-    if (gCLIValidateOnly) return "VALID"; \
-  } while(0)
-
-const char* cmd_files(const String& args) {
+const char* cmd_files(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) {
     return "Error: LittleFS not ready";
@@ -332,7 +334,7 @@ const char* cmd_files(const String& args) {
 
   // Parse optional path argument
   String path = "/";
-  String argsTrimmed = args;
+  String argsTrimmed = argsInput;
   argsTrimmed.trim();
   if (argsTrimmed.length() > 0) path = argsTrimmed;
 
@@ -347,12 +349,12 @@ const char* cmd_files(const String& args) {
   return "[FS] Listing complete";
 }
 
-const char* cmd_mkdir(const String& args) {
+const char* cmd_mkdir(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String path = args;
+  String path = argsInput;
   path.trim();
   if (path.length() == 0) return "Usage: mkdir <path>";
   if (!path.startsWith("/")) path = String("/") + path;
@@ -368,12 +370,12 @@ const char* cmd_mkdir(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_rmdir(const String& args) {
+const char* cmd_rmdir(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String path = args;
+  String path = argsInput;
   path.trim();
   if (path.length() == 0) return "Usage: rmdir <path>";
   if (!path.startsWith("/")) path = String("/") + path;
@@ -389,12 +391,12 @@ const char* cmd_rmdir(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_filecreate(const String& args) {
+const char* cmd_filecreate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String path = args;
+  String path = argsInput;
   path.trim();
   if (path.length() == 0) return "Usage: filecreate <path>";
   if (!path.startsWith("/")) path = String("/") + path;
@@ -413,11 +415,11 @@ const char* cmd_filecreate(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_fileview(const String& args) {
+const char* cmd_fileview(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
-  String path = args;
+  String path = argsInput;
   path.trim();
   if (path.length() == 0) return "Usage: fileview <path>";
   if (!path.startsWith("/")) path = String("/") + path;
@@ -467,12 +469,12 @@ const char* cmd_fileview(const String& args) {
   return "[FS] File displayed";
 }
 
-const char* cmd_filedelete(const String& args) {
+const char* cmd_filedelete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String path = args;
+  String path = argsInput;
   path.trim();
   if (path.length() == 0) return "Usage: filedelete <path>";
   if (!path.startsWith("/")) path = String("/") + path;
@@ -493,13 +495,13 @@ const char* cmd_filedelete(const String& args) {
 // ============================================================================
 
 const CommandEntry filesystemCommands[] = {
-  { "files", "List files [path]", false, cmd_files,
+  { "files", "List files [path]", true, cmd_files,
     "files [path]        - List files in LittleFS (default '/')\n"
     "Example: files /logging_captures" },
   { "mkdir", "Create directory: <path>", true, cmd_mkdir, "Usage: mkdir <path>" },
   { "rmdir", "Remove directory: <path>", true, cmd_rmdir, "Usage: rmdir <path>" },
   { "filecreate", "Create file: <path> [content]", true, cmd_filecreate, "Usage: filecreate <path>" },
-  { "fileview", "View file: <path> [offset]", false, cmd_fileview, "Usage: fileview <path>" },
+  { "fileview", "View file: <path> [offset]", true, cmd_fileview, "Usage: fileview <path>" },
   { "filedelete", "Delete file: <path>", true, cmd_filedelete, "Usage: filedelete <path>" },
 };
 
@@ -671,6 +673,12 @@ bool canCreate(const String& path) {
   
   // Maps and user directories: allow
   return true;
+}
+
+bool isAdminOnlyPath(const String& path) {
+  if (path == "/system"            || path.startsWith("/system/"))            return true;
+  if (path == "/logging_captures"  || path.startsWith("/logging_captures/"))  return true;
+  return false;
 }
 
 uint8_t getPermissions(const String& path) {

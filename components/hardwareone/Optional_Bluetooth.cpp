@@ -931,7 +931,7 @@ void bleApplySettings() {
 // COMMAND HANDLERS
 // =============================================================================
 
-static const char* cmd_blestart(const String& cmd) {
+static const char* cmd_blestart(const String& argsInput) {
   // Pause sensor polling during BLE init to avoid interrupt contention
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
@@ -952,12 +952,12 @@ static const char* cmd_blestart(const String& cmd) {
   return "Bluetooth started and advertising";
 }
 
-static const char* cmd_blestop(const String& cmd) {
+static const char* cmd_blestop(const String& argsInput) {
   deinitBluetooth();
   return "Bluetooth stopped";
 }
 
-static const char* cmd_blestatus(const String& cmd) {
+static const char* cmd_blestatus(const String& argsInput) {
   if (!gBLEState || !gBLEState->initialized) {
     return "Bluetooth not initialized. Run 'openble' first.";
   }
@@ -999,7 +999,7 @@ static const char* cmd_blestatus(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_bledisconnect(const String& cmd) {
+static const char* cmd_bledisconnect(const String& argsInput) {
   if (!isBLEConnected()) {
     return "No client connected";
   }
@@ -1007,20 +1007,20 @@ static const char* cmd_bledisconnect(const String& cmd) {
   return "Disconnecting client...";
 }
 
-static const char* cmd_bleadv(const String& cmd) {
+static const char* cmd_bleadv(const String& argsInput) {
   if (startBLEAdvertising()) {
     return "Advertising started";
   }
   return "Failed to start advertising";
 }
 
-static const char* cmd_blesend(const String& cmd) {
+static const char* cmd_blesend(const String& argsInput) {
   if (!isBLEConnected()) {
     return "No client connected";
   }
   
   // Extract message after command
-  String message = cmd;
+  String message = argsInput;
   message.trim();
   
   // Remove "blesend" prefix
@@ -1042,12 +1042,12 @@ static const char* cmd_blesend(const String& cmd) {
   return "Failed to send message";
 }
 
-static const char* cmd_blestream(const String& cmd) {
+static const char* cmd_blestream(const String& argsInput) {
   if (!gBLEState || !gBLEState->initialized) {
     return "Bluetooth not initialized";
   }
   
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   int spaceIdx = args.indexOf(' ');
   if (spaceIdx > 0) {
@@ -1127,13 +1127,13 @@ static const char* cmd_blestream(const String& cmd) {
   return "Usage: blestream <on|off|sensors|system|events|interval>";
 }
 
-static const char* cmd_bleevent(const String& cmd) {
+static const char* cmd_bleevent(const String& argsInput) {
   if (!isBLEConnected()) {
     return "No client connected";
   }
   
   // Extract message after command
-  String message = cmd;
+  String message = argsInput;
   message.trim();
   int spaceIdx = message.indexOf(' ');
   if (spaceIdx > 0) {
@@ -1153,8 +1153,8 @@ static const char* cmd_bleevent(const String& cmd) {
   return "Failed to send event";
 }
 
-static const char* cmd_blename(const String& cmd) {
-  String args = cmd;
+static const char* cmd_blename(const String& argsInput) {
+  String args = argsInput;
   args.trim();
   int spaceIdx = args.indexOf(' ');
   
@@ -1181,8 +1181,8 @@ static const char* cmd_blename(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_bletxpower(const String& cmd) {
-  String args = cmd;
+static const char* cmd_bletxpower(const String& argsInput) {
+  String args = argsInput;
   args.trim();
   int spaceIdx = args.indexOf(' ');
   
@@ -1218,7 +1218,7 @@ static const char* cmd_bletxpower(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_bleinfo(const String& cmd) {
+static const char* cmd_bleinfo(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
   
@@ -1244,9 +1244,9 @@ static const char* cmd_bleinfo(const String& cmd) {
   return "OK";
 }
 
-static const char* cmd_bleautostart(const String& args) {
+static const char* cmd_bleautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args; arg.trim();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
     return gSettings.bluetoothAutoStart ? "[BLE] Auto-start: enabled" : "[BLE] Auto-start: disabled";
   }
@@ -1259,6 +1259,23 @@ static const char* cmd_bleautostart(const String& args) {
     return "[BLE] Auto-start disabled";
   }
   return "Usage: bleautostart [on|off]";
+}
+
+static const char* cmd_blerequireauth(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = argsInput; arg.trim();
+  if (arg.length() == 0) {
+    return gSettings.bluetoothRequireAuth ? "[BLE] Require auth: enabled" : "[BLE] Require auth: disabled";
+  }
+  arg.toLowerCase();
+  if (arg == "on" || arg == "true" || arg == "1") {
+    setSetting(gSettings.bluetoothRequireAuth, true);
+    return "[BLE] Require auth enabled";
+  } else if (arg == "off" || arg == "false" || arg == "0") {
+    setSetting(gSettings.bluetoothRequireAuth, false);
+    return "[BLE] Require auth disabled";
+  }
+  return "Usage: blerequireauth [on|off]";
 }
 
 // =============================================================================
@@ -1281,7 +1298,8 @@ const CommandEntry bluetoothCommands[] = {
   { "bleevent",     "Send event to BLE client: <event>.",        false, cmd_bleevent },
   
   // Auto-start
-  { "bleautostart", "Enable/disable BLE auto-start after boot [on|off].", false, cmd_bleautostart, "Usage: bleautostart [on|off]" },
+  { "bleautostart",    "Enable/disable BLE auto-start after boot [on|off].",   false, cmd_bleautostart,    "Usage: bleautostart [on|off]" },
+  { "blerequireauth", "Enable/disable BLE authentication requirement [on|off].", false, cmd_blerequireauth, "Usage: blerequireauth [on|off]" },
 };
 
 const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoothCommands[0]);

@@ -2052,7 +2052,7 @@ esp_err_t handleEdgeImpulseDetect(httpd_req_t* req) {
 
 static char gEICmdBuffer[512];
 
-const char* cmd_ei(const String& cmd) {
+const char* cmd_ei(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   snprintf(gEICmdBuffer, sizeof(gEICmdBuffer),
@@ -2069,10 +2069,10 @@ const char* cmd_ei(const String& cmd) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_enable(const String& cmd) {
+const char* cmd_ei_enable(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String trimmed = cmd;
+  String trimmed = argsInput;
   trimmed.trim();
   
   if (trimmed.length() == 0) {
@@ -2095,7 +2095,7 @@ const char* cmd_ei_enable(const String& cmd) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_detect(const String& cmd) {
+const char* cmd_ei_detect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   EIResults results = runEdgeImpulseInference();
@@ -2118,10 +2118,10 @@ const char* cmd_ei_detect(const String& cmd) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_file(const String& args) {
+const char* cmd_ei_file(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String path = args;
+  String path = argsInput;
   path.trim();
   
   if (path.length() == 0) {
@@ -2159,10 +2159,10 @@ const char* cmd_ei_file(const String& args) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_continuous(const String& cmd) {
+const char* cmd_ei_continuous(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String trimmed = cmd;
+  String trimmed = argsInput;
   trimmed.trim();
   
   if (trimmed.length() == 0) {
@@ -2181,10 +2181,10 @@ const char* cmd_ei_continuous(const String& cmd) {
   }
 }
 
-const char* cmd_ei_confidence(const String& cmd) {
+const char* cmd_ei_confidence(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String trimmed = cmd;
+  String trimmed = argsInput;
   trimmed.trim();
   
   if (trimmed.length() == 0) {
@@ -2202,7 +2202,7 @@ const char* cmd_ei_confidence(const String& cmd) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_status(const String& cmd) {
+const char* cmd_ei_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   snprintf(gEICmdBuffer, sizeof(gEICmdBuffer),
@@ -2228,7 +2228,7 @@ const char* cmd_ei_status(const String& cmd) {
 }
 
 // Model management commands
-const char* cmd_ei_model(const String& cmd) {
+const char* cmd_ei_model(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   snprintf(gEICmdBuffer, sizeof(gEICmdBuffer),
@@ -2242,7 +2242,7 @@ const char* cmd_ei_model(const String& cmd) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_model_list(const String& cmd) {
+const char* cmd_ei_model_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   String output;
@@ -2251,10 +2251,10 @@ const char* cmd_ei_model_list(const String& cmd) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_model_load(const String& cmd) {
+const char* cmd_ei_model_load(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String trimmed = cmd;
+  String trimmed = argsInput;
   trimmed.trim();
   
   if (trimmed.length() == 0) {
@@ -2288,7 +2288,7 @@ const char* cmd_ei_model_load(const String& cmd) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_model_info(const String& cmd) {
+const char* cmd_ei_model_info(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gEIModelLoaded || !gInterpreter) {
@@ -2331,7 +2331,7 @@ const char* cmd_ei_model_info(const String& cmd) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_model_unload(const String& cmd) {
+const char* cmd_ei_model_unload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gEIModelLoaded) {
@@ -2345,7 +2345,7 @@ const char* cmd_ei_model_unload(const String& cmd) {
 }
 
 // State tracking commands
-const char* cmd_ei_track(const String& cmd) {
+const char* cmd_ei_track(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   snprintf(gEICmdBuffer, sizeof(gEICmdBuffer),
@@ -2357,7 +2357,7 @@ const char* cmd_ei_track(const String& cmd) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_track_status(const String& cmd) {
+const char* cmd_ei_track_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gStateTrackingEnabled) {
@@ -2390,10 +2390,10 @@ const char* cmd_ei_track_status(const String& cmd) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_track_enable(const String& cmd) {
+const char* cmd_ei_track_enable(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String trimmed = cmd;
+  String trimmed = argsInput;
   trimmed.trim();
   
   if (trimmed.length() == 0) {
@@ -2410,7 +2410,7 @@ const char* cmd_ei_track_enable(const String& cmd) {
   return gEICmdBuffer;
 }
 
-const char* cmd_ei_track_clear(const String& cmd) {
+const char* cmd_ei_track_clear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   int count = gTrackedObjectCount;

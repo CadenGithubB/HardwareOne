@@ -24,7 +24,7 @@ TaskHandle_t gpsTaskHandle = nullptr;
 Adafruit_GPS* gPA1010D = nullptr;
 
 // External dependencies provided by System_I2C.h:
-// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing
+// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing
 
 // GPS sensor state (definition - matching pattern of thermal/tof/imu/gamepad sensors)
 bool gpsEnabled = false;
@@ -87,7 +87,10 @@ void startGPSInternal() {
         DEBUG_SENSORSF("[GPS_INIT] Retry %d/3 after 200ms delay...", retry);
         delay(200);
       }
-      if (gPA1010D->begin(0x10)) {
+      bool began = i2cDeviceTransaction(I2C_ADDR_GPS, 100000, 500, [&]() -> bool {
+        return gPA1010D->begin(0x10);
+      });
+      if (began) {
         initSuccess = true;
         break;
       }
@@ -102,11 +105,13 @@ void startGPSInternal() {
     }
     INFO_SENSORSF("GPS module initialized successfully at I2C address 0x10");
     
-    // Configure GPS module
+    // Configure GPS module (wrapped for mutex/clock management)
     DEBUG_SENSORSF("[GPS_INIT] Configuring GPS: RMC+GGA sentences, 1Hz update rate");
-    gPA1010D->sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);  // RMC + GGA sentences
-    gPA1010D->sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);     // 1 Hz update rate
-    gPA1010D->sendCommand(PGCMD_ANTENNA);                // Enable antenna status info
+    i2cDeviceTransactionVoid(I2C_ADDR_GPS, 100000, 500, [&]() {
+      gPA1010D->sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);  // RMC + GGA sentences
+      gPA1010D->sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);     // 1 Hz update rate
+      gPA1010D->sendCommand(PGCMD_ANTENNA);                // Enable antenna status info
+    });
     DEBUG_SENSORSF("[GPS_INIT] GPS configuration commands sent");
     
     gpsConnected = true;
@@ -162,7 +167,7 @@ void startGPSInternal() {
 // GPS Sensor Command Handlers
 // ============================================================================
 
-const char* cmd_gpsstart(const String& cmd) {
+const char* cmd_gpsstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (gpsEnabled) {
@@ -187,7 +192,7 @@ const char* cmd_gpsstart(const String& cmd) {
   return "[GPS] Error: Failed to enqueue open (queue full)";
 }
 
-const char* cmd_gpsstop(const String& cmd) {
+const char* cmd_gpsstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   DEBUG_SENSORSF("[GPS_STOP] GPS stop command called (current enabled=%d)", gpsEnabled ? 1 : 0);
@@ -196,7 +201,7 @@ const char* cmd_gpsstop(const String& cmd) {
   return "[GPS] Close requested; cleanup will complete asynchronously";
 }
 
-const char* cmd_gps(const String& cmd) {
+const char* cmd_gps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   DEBUG_SENSORSF("[GPS_CMD] Reading GPS data (enabled=%d, task=%p)...", 
@@ -267,7 +272,7 @@ const char* cmd_gps(const String& cmd) {
 //
 // Cleanup Strategy:
 //   1. Check gpsEnabled flag at loop start
-//   2. Acquire i2cMutex to prevent race conditions during cleanup
+//   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Delete GPS module object
 //   4. Release mutex and delete task
 // ============================================================================
@@ -491,9 +496,9 @@ extern const SettingsModule gpsSettingsModule = {
 // GPS Command Registry
 // ============================================================================
 
-const char* cmd_gpsautostart(const String& args) {
+const char* cmd_gpsautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args; arg.trim();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
     return gSettings.gpsAutoStart ? "[GPS] Auto-start: enabled" : "[GPS] Auto-start: disabled";
   }

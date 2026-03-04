@@ -793,7 +793,7 @@ const char* buildMicrophoneStatusJson() {
 // CLI Commands
 // ============================================================================
 
-const char* cmd_mic(const String& cmd) {
+const char* cmd_mic(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
     "Microphone Status:\n"
@@ -813,7 +813,7 @@ const char* cmd_mic(const String& cmd) {
   return gMicCmdBuffer;
 }
 
-const char* cmd_micstart(const String& cmd) {
+const char* cmd_micstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (initMicrophone()) {
     return "Microphone started successfully";
@@ -821,13 +821,13 @@ const char* cmd_micstart(const String& cmd) {
   return "Failed to start microphone";
 }
 
-const char* cmd_micstop(const String& cmd) {
+const char* cmd_micstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   stopMicrophone();
   return "Microphone stopped";
 }
 
-const char* cmd_miclevel(const String& cmd) {
+const char* cmd_miclevel(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!micEnabled) {
     return "Microphone not enabled";
@@ -837,14 +837,14 @@ const char* cmd_miclevel(const String& cmd) {
   return gMicCmdBuffer;
 }
 
-const char* cmd_micrecord(const String& cmd) {
+const char* cmd_micrecord(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!micEnabled) {
     return "Microphone not enabled. Use 'openmic' first.";
   }
 
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -872,7 +872,7 @@ const char* cmd_micrecord(const String& cmd) {
   return "Usage: micrecord <start|stop|1|0>";
 }
 
-const char* cmd_miclist(const String& cmd) {
+const char* cmd_miclist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   int count = getRecordingCount();
@@ -885,10 +885,10 @@ const char* cmd_miclist(const String& cmd) {
   return gMicCmdBuffer;
 }
 
-const char* cmd_micdelete(const String& cmd) {
+const char* cmd_micdelete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -924,10 +924,10 @@ const char* cmd_micdelete(const String& cmd) {
   return "File not found";
 }
 
-const char* cmd_micsamplerate(const String& cmd) {
+const char* cmd_micsamplerate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -957,10 +957,10 @@ const char* cmd_micsamplerate(const String& cmd) {
   return gMicCmdBuffer;
 }
 
-const char* cmd_micgain(const String& cmd) {
+const char* cmd_micgain(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -980,10 +980,10 @@ const char* cmd_micgain(const String& cmd) {
   return gMicCmdBuffer;
 }
 
-const char* cmd_micbitdepth(const String& cmd) {
+const char* cmd_micbitdepth(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -1086,7 +1086,7 @@ static void micVisualizerTaskFunc(void* param) {
   vTaskDelete(nullptr);
 }
 
-const char* cmd_micviz(const String& cmd) {
+const char* cmd_micviz(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!micEnabled) {
@@ -1103,7 +1103,7 @@ const char* cmd_micviz(const String& cmd) {
   return "Visualizer started (press any key to stop)";
 }
 
-const char* cmd_micautostart(const String& args) {
+const char* cmd_micautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = args; arg.trim();
   if (arg.length() == 0) {

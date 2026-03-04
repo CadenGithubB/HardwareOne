@@ -33,14 +33,14 @@ extern uint8_t fmRadioRSSI;          // Received Signal Strength Indicator
 extern uint8_t fmRadioSNR;           // Signal-to-Noise Ratio
 
 // Command handlers
-const char* cmd_fmradio(const String& cmd);
-const char* cmd_fmradio_start(const String& cmd);
-const char* cmd_fmradio_stop(const String& cmd);
-const char* cmd_fmradio_tune(const String& cmd);
-const char* cmd_fmradio_seek(const String& cmd);
-const char* cmd_fmradio_volume(const String& cmd);
-const char* cmd_fmradio_mute(const String& cmd);
-const char* cmd_fmradio_status(const String& cmd);
+const char* cmd_fmradio(const String& argsInput);
+const char* cmd_fmradio_start(const String& argsInput);
+const char* cmd_fmradio_stop(const String& argsInput);
+const char* cmd_fmradio_tune(const String& argsInput);
+const char* cmd_fmradio_seek(const String& argsInput);
+const char* cmd_fmradio_volume(const String& argsInput);
+const char* cmd_fmradio_mute(const String& argsInput);
+const char* cmd_fmradio_status(const String& argsInput);
 
 // FM Radio functions
 bool initFMRadio();

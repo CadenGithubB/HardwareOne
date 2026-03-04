@@ -17,7 +17,7 @@ extern OLEDMode currentOLEDMode;
 extern Settings gSettings;
 extern const char* AUTOMATIONS_JSON_FILE;
 extern bool oledMenuBack();
-extern void executeOLEDCommand(const String& cmd);
+extern void executeOLEDCommand(const String& argsInput);
 extern void broadcastOutput(const String& msg);
 
 // ============================================================================

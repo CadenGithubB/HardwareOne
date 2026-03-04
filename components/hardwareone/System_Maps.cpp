@@ -1076,7 +1076,7 @@ MapFeatureStyle OLEDMapRenderer::getFeatureStyle(MapFeatureType type) {
 // Command Handlers
 // =============================================================================
 
-const char* cmd_map(const String& cmd) {
+const char* cmd_map(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -1105,10 +1105,10 @@ const char* cmd_map(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_mapload(const String& cmd) {
+const char* cmd_mapload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: mapload <path>";
   while (*p == ' ') p++;
   
@@ -1123,7 +1123,7 @@ const char* cmd_mapload(const String& cmd) {
   return "Failed to load map";
 }
 
-const char* cmd_whereami(const String& cmd) {
+const char* cmd_whereami(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -1154,10 +1154,10 @@ const char* cmd_whereami(const String& cmd) {
   return buf;
 }
 
-const char* cmd_search(const String& cmd) {
+const char* cmd_search(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: search <name>";
   while (*p == ' ') p++;
   
@@ -1203,7 +1203,7 @@ const char* cmd_search(const String& cmd) {
   return buf;
 }
 
-const char* cmd_maplist(const String& cmd) {
+const char* cmd_maplist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -2045,14 +2045,14 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
   }
 }
 
-const char* cmd_gpstrack(const String& cmd) {
+const char* cmd_gpstrack(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
   
   // Parse subcommand
-  const char* p = cmd.c_str();
+  const char* p = argsInput.c_str();
   while (*p && *p != ' ') p++;
   while (*p == ' ') p++;
   
@@ -2108,14 +2108,14 @@ const char* cmd_gpstrack(const String& cmd) {
   return "Usage: gpstrack [status|load <filepath>|clear]";
 }
 
-const char* cmd_waypoint(const String& cmd) {
+const char* cmd_waypoint(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
   
   // Parse subcommand
-  const char* p = cmd.c_str();
+  const char* p = argsInput.c_str();
   while (*p && *p != ' ') p++;
   while (*p == ' ') p++;
   
@@ -2183,7 +2183,7 @@ const char* cmd_waypoint(const String& cmd) {
 }
 
 // Link a file to a waypoint by GPS coordinates (creates waypoint if needed, or finds nearest)
-const char* cmd_waypointfile(const String& cmd) {
+const char* cmd_waypointfile(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -2191,7 +2191,7 @@ const char* cmd_waypointfile(const String& cmd) {
   
   // Parse: waypointfile <filepath> <lat> <lon> [waypointName]
   // Or:    waypointfile <filepath> <waypointName>
-  const char* p = cmd.c_str();
+  const char* p = argsInput.c_str();
   while (*p && *p != ' ') p++;
   while (*p == ' ') p++;
   
@@ -2287,14 +2287,14 @@ const char* cmd_waypointfile(const String& cmd) {
 }
 
 // List or remove files from a waypoint
-const char* cmd_waypointfiles(const String& cmd) {
+const char* cmd_waypointfiles(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
   
   // Parse: waypointfiles <waypointName> [del <index>]
-  const char* p = cmd.c_str();
+  const char* p = argsInput.c_str();
   while (*p && *p != ' ') p++;
   while (*p == ' ') p++;
   

@@ -569,6 +569,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           + '<button class="btn" id="btn-file-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'file\')" style="width:100%;text-align:left;padding:8px 12px">File</button>'
           + '<button class="btn" id="btn-metadata-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'metadata\')" style="width:100%;text-align:left;padding:8px 12px">Metadata</button>'
           + '<button class="btn" id="btn-automations-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'automations\')" style="width:100%;text-align:left;padding:8px 12px">Automations</button>'
+          + '<button class="btn" id="btn-sensors-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'sensors\')" style="width:100%;text-align:left;padding:8px 12px">Sensors</button>'
           + '</div>'
           + '<div>'
           + '<div class="message-log" id="log-' + mac + '" style="margin-bottom:12px;max-height:300px;overflow-y:auto"><div class="message-empty">No messages yet. Start a conversation!</div></div>'
@@ -634,6 +635,23 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           + '</div>'
           + '<div id="automations-input-' + mac + '" style="display:none">'
           + automationsInnerHtml(mac)
+          + '</div>'
+          + '<div id="sensors-input-' + mac + '" style="display:none;padding:12px;background:var(--crumb-bg);border-radius:8px;min-height:200px">'
+          + '<p style="color:var(--panel-fg);font-size:0.9em;margin:0 0 10px 0">Toggle sensor streaming on the remote device. Credentials are required.</p>'
+          + '<div class="input-group" style="margin-bottom:12px">'
+          + '<input type="text" id="su-' + mac + '" placeholder="Username" style="flex:1">'
+          + '<input type="password" id="sp-' + mac + '" placeholder="Password" style="flex:1">'
+          + '</div>'
+          + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">'
+          + ['thermal','tof','imu','gps','gamepad','fmradio','rtc','presence'].map(function(s){
+              return '<button class="btn" id="sbtn-' + s + '-' + mac + '" onclick="doSensorStreamToggle(\'' + mac + '\',\'' + s + '\')" style="padding:8px;font-size:0.85em">' + s + '</button>';
+            }).join('')
+          + '</div>'
+          + '<div style="margin-bottom:10px">'
+          + '<button class="btn" onclick="doSensorBroadcast(\'' + mac + '\', true)" style="margin-right:8px;font-size:0.85em">Broadcast On</button>'
+          + '<button class="btn" onclick="doSensorBroadcast(\'' + mac + '\', false)" style="font-size:0.85em">Broadcast Off</button>'
+          + '</div>'
+          + '<div id="sensor-status-' + mac + '" style="font-size:0.85em;color:var(--muted)"></div>'
           + '</div>'
           + '</div>'
         );
@@ -908,11 +926,13 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       const fileInput = document.getElementById('file-input-' + mac);
       const metadataDiv = document.getElementById('metadata-' + mac);
       const automationsInput = document.getElementById('automations-input-' + mac);
+      const sensorsInput = document.getElementById('sensors-input-' + mac);
       const btnText = document.getElementById('btn-text-' + mac);
       const btnRemote = document.getElementById('btn-remote-' + mac);
       const btnFile = document.getElementById('btn-file-' + mac);
       const btnMetadata = document.getElementById('btn-metadata-' + mac);
       const btnAutomations = document.getElementById('btn-automations-' + mac);
+      const btnSensors = document.getElementById('btn-sensors-' + mac);
       
       if (!textInput || !remoteInput || !fileInput) return;
       
@@ -942,6 +962,11 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         btnAutomations.style.color = '';
         btnAutomations.style.border = '';
       }
+      if (btnSensors) {
+        btnSensors.style.background = '';
+        btnSensors.style.color = '';
+        btnSensors.style.border = '';
+      }
       
       // Hide all inputs and metadata
       textInput.style.display = 'none';
@@ -949,6 +974,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       fileInput.style.display = 'none';
       if (metadataDiv) metadataDiv.style.display = 'none';
       if (automationsInput) automationsInput.style.display = 'none';
+      if (sensorsInput) sensorsInput.style.display = 'none';
       
       // Get message log to show/hide based on mode
       var messageLog = document.getElementById('log-' + mac);
@@ -1009,6 +1035,21 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         var apEl = document.getElementById('ap-' + mac);
         if (ruEl && auEl && !auEl.value && ruEl.value) auEl.value = ruEl.value;
         if (rpEl && apEl && !apEl.value && rpEl.value) apEl.value = rpEl.value;
+      } else if (type === 'sensors') {
+        if (sensorsInput) sensorsInput.style.display = 'block';
+        if (messageLog) messageLog.style.display = 'none';
+        if (btnSensors) {
+          btnSensors.style.background = '#007bff';
+          btnSensors.style.color = 'white';
+          btnSensors.style.border = '2px solid #007bff';
+        }
+        // Pre-fill credentials from remote tab if available
+        var ruEl2 = document.getElementById('ru-' + mac);
+        var rpEl2 = document.getElementById('rp-' + mac);
+        var suEl = document.getElementById('su-' + mac);
+        var spEl = document.getElementById('sp-' + mac);
+        if (ruEl2 && suEl && !suEl.value && ruEl2.value) suEl.value = ruEl2.value;
+        if (rpEl2 && spEl && !spEl.value && rpEl2.value) spEl.value = rpEl2.value;
       }
     };
     window.loadRemoteAutomations = function(mac) {
@@ -1117,6 +1158,49 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
               statusDiv.innerHTML = '<span class="status-icon">ERR</span>' + e.message;
             }
           }
+        });
+    };
+    window.doSensorStreamToggle = function(mac, sensor) {
+      var u = (document.getElementById('su-' + mac) || {}).value || '';
+      var p = (document.getElementById('sp-' + mac) || {}).value || '';
+      if (!u || !p) { alert('Enter username and password in the Sensors tab'); return; }
+      var btn = document.getElementById('sbtn-' + sensor + '-' + mac);
+      var statusDiv = document.getElementById('sensor-status-' + mac);
+      var isOn = btn && btn.dataset.streaming === 'on';
+      var newState = isOn ? 'off' : 'on';
+      var cmd = 'espnow sensorstream ' + sensor + ' ' + newState;
+      var fullCmd = 'espnow remote ' + mac + ' ' + u + ' ' + p + ' ' + cmd;
+      if (statusDiv) statusDiv.textContent = 'Sending: ' + sensor + ' ' + newState + '...';
+      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(fullCmd) })
+        .then(function(r){ return r.text(); })
+        .then(function(t) {
+          if (btn) {
+            btn.dataset.streaming = newState;
+            btn.style.background = newState === 'on' ? '#28a745' : '';
+            btn.style.color = newState === 'on' ? 'white' : '';
+            btn.style.border = newState === 'on' ? '2px solid #28a745' : '';
+          }
+          if (statusDiv) statusDiv.textContent = sensor + ': ' + newState + (t ? ' — ' + t.trim().substring(0,80) : '');
+        })
+        .catch(function(e) {
+          if (statusDiv) statusDiv.textContent = 'Error: ' + e.message;
+        });
+    };
+    window.doSensorBroadcast = function(mac, enable) {
+      var u = (document.getElementById('su-' + mac) || {}).value || '';
+      var p = (document.getElementById('sp-' + mac) || {}).value || '';
+      if (!u || !p) { alert('Enter username and password in the Sensors tab'); return; }
+      var statusDiv = document.getElementById('sensor-status-' + mac);
+      var cmd = 'espnow sensorbroadcast ' + (enable ? 'on' : 'off');
+      var fullCmd = 'espnow remote ' + mac + ' ' + u + ' ' + p + ' ' + cmd;
+      if (statusDiv) statusDiv.textContent = 'Sending: sensorbroadcast ' + (enable ? 'on' : 'off') + '...';
+      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(fullCmd) })
+        .then(function(r){ return r.text(); })
+        .then(function(t) {
+          if (statusDiv) statusDiv.textContent = 'sensorbroadcast ' + (enable ? 'on' : 'off') + (t ? ' — ' + t.trim().substring(0,80) : '');
+        })
+        .catch(function(e) {
+          if (statusDiv) statusDiv.textContent = 'Error: ' + e.message;
         });
     };
     window.toggleFileMode = function(mac, mode) {
@@ -1776,10 +1860,11 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         clearInterval(window.meshStatusPollInterval);
       }
       window.meshStatusPollInterval = setInterval(function() {
+        if (document.hidden) return;
         if (window.espnowIsMesh && typeof window.refreshMeshStatus === 'function') {
           window.refreshMeshStatus();
         }
-      }, 3000);  // Refresh every 3 seconds
+      }, 10000);  // Refresh every 10 seconds
     };
     window.stopMeshStatusPolling = function() {
       console.log('[ESP-NOW] Stopping mesh status polling...');
@@ -1789,7 +1874,6 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       }
     };
     window.refreshMeshStatus = function() {
-      console.log('[ESP-NOW] Refreshing mesh status...');
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -1797,7 +1881,6 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       })
       .then(response => response.text())
       .then(output => {
-        console.log('[ESP-NOW] Mesh status response:', output);
         try {
           var data = JSON.parse(output);
           if (data.error) {

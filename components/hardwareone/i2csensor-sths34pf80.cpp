@@ -17,7 +17,7 @@
 #include "System_Utils.h"
 
 // External dependencies provided by System_I2C.h:
-// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing
+// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing
 
 // ============================================================================
 // STHS34PF80 Register Definitions
@@ -165,7 +165,7 @@ static int16_t readInt16(uint8_t regL) {
 // Presence Sensor Command Handlers
 // ============================================================================
 
-const char* cmd_presencestart(const String& cmd) {
+const char* cmd_presencestart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (presenceEnabled) {
@@ -190,7 +190,7 @@ const char* cmd_presencestart(const String& cmd) {
   return "[PRESENCE] Error: Failed to enqueue open (queue full)";
 }
 
-const char* cmd_presencestop(const String& cmd) {
+const char* cmd_presencestop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!presenceEnabled) {
@@ -202,7 +202,7 @@ const char* cmd_presencestop(const String& cmd) {
   return "[PRESENCE] Sensor close requested; cleanup will complete asynchronously";
 }
 
-const char* cmd_presenceread(const String& cmd) {
+const char* cmd_presenceread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!presenceConnected || !presenceEnabled) {
@@ -228,7 +228,7 @@ const char* cmd_presenceread(const String& cmd) {
   return "[PRESENCE] Error: Could not read cache";
 }
 
-const char* cmd_presencestatus(const String& cmd) {
+const char* cmd_presencestatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "[PRESENCE] Error: Debug buffer unavailable";
@@ -413,9 +413,9 @@ bool readPresenceData() {
 // Presence Command Registry
 // ============================================================================
 
-const char* cmd_presenceautostart(const String& args) {
+const char* cmd_presenceautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args; arg.trim();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
     return gSettings.presenceAutoStart ? "[Presence] Auto-start: enabled" : "[Presence] Auto-start: disabled";
   }

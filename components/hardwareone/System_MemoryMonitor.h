@@ -36,7 +36,7 @@ const MemoryRequirement* getAllMemoryRequirements(size_t& outCount);
 void sampleMemoryState(bool forceFullScan = false);
 
 // CLI command handler for manual memory sampling
-const char* cmd_memsample(const String& cmd);
+const char* cmd_memsample(const String& argsInput);
 
 // Periodic memory sampling (called from main loop when debug flag enabled)
 void periodicMemorySample();

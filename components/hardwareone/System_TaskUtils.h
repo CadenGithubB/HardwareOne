@@ -9,9 +9,9 @@
 // Centralized Task Stack Sizes (words; 1 word = 4 bytes on ESP32)
 // ============================================================================
 
-constexpr uint32_t CMD_EXEC_STACK_WORDS = 5120;      // ~20KB (NTP/DNS/file I/O)
-constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 3072;  // ~12KB
-constexpr uint32_t ESPNOW_HB_STACK_WORDS = 6144;     // ~24KB (mesh processing + debug logging + multi-peer scaling)
+constexpr uint32_t CMD_EXEC_STACK_WORDS = 4608;      // ~18KB (NTP/DNS/file I/O) - reduced 10%
+constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 2765;  // ~11KB - reduced 10%
+constexpr uint32_t ESPNOW_HB_STACK_WORDS = 5530;     // ~22KB (mesh processing + debug logging + multi-peer scaling) - reduced 10%
 constexpr uint32_t THERMAL_STACK_WORDS = 4096;       // ~16KB
 constexpr uint32_t IMU_STACK_WORDS = 4096;           // ~16KB (BNO055 init retries need extra stack)
 constexpr uint32_t TOF_STACK_WORDS = 3072;           // ~12KB

@@ -486,6 +486,10 @@ struct QueuedMessage {
   #define MESSAGES_PER_DEVICE 5
 #endif
 
+// Dynamic peer history allocation parameters
+#define PEER_HISTORY_INITIAL_CAPACITY 5    // Start with 5 peer slots (~125 KB)
+#define PEER_HISTORY_GROWTH_INCREMENT 3    // Grow by 3 slots at a time (~75 KB per growth)
+
 // Message types for logging
 enum LogMessageType {
   MSG_TEXT = 0,           // Regular text message
@@ -696,8 +700,10 @@ struct EspNowState {
   uint8_t queueSize;  // Current number of messages in queue
   
   // Per-device message history buffers (for web UI and OLED)
-  // Dynamically allocated [gMeshPeerSlots] at init
+  // Dynamically allocated - starts small and grows as peers are discovered
   PeerMessageHistory* peerMessageHistories;
+  int peerHistoryCapacity;      // Current allocated capacity
+  int peerHistoryCount;         // Number of active peer histories
   uint32_t globalMessageSeqNum; // Global sequence number for all messages
   
   // Statistics (non-router specific)
@@ -959,27 +965,27 @@ void removeEspNowDevice(const uint8_t* mac);
 // Note: addEspNowDevice is now static (internal) in espnow_system.cpp
 
 // Command functions
-const char* cmd_espnow_status(const String& cmd);
-const char* cmd_espnow_stats(const String& cmd);
-const char* cmd_espnow_routerstats(const String& cmd);
-const char* cmd_espnow_resetstats(const String& cmd);
-const char* cmd_espnow_init(const String& cmd);
-const char* cmd_espnow_pair(const String& cmd);
-const char* cmd_espnow_unpair(const String& cmd);
-const char* cmd_espnow_list(const String& cmd);
-const char* cmd_espnow_meshstatus(const String& cmd);
-const char* cmd_espnow_send(const String& cmd);
-const char* cmd_espnow_broadcast(const String& cmd);
-const char* cmd_espnow_sendfile(const String& cmd);
-const char* cmd_espnow_remote(const String& cmd);
+const char* cmd_espnow_status(const String& argsInput);
+const char* cmd_espnow_stats(const String& argsInput);
+const char* cmd_espnow_routerstats(const String& argsInput);
+const char* cmd_espnow_resetstats(const String& argsInput);
+const char* cmd_espnow_init(const String& argsInput);
+const char* cmd_espnow_pair(const String& argsInput);
+const char* cmd_espnow_unpair(const String& argsInput);
+const char* cmd_espnow_list(const String& argsInput);
+const char* cmd_espnow_meshstatus(const String& argsInput);
+const char* cmd_espnow_send(const String& argsInput);
+const char* cmd_espnow_broadcast(const String& argsInput);
+const char* cmd_espnow_sendfile(const String& argsInput);
+const char* cmd_espnow_remote(const String& argsInput);
 const char* cmd_espnow_startstream(const String& originalCmd);
 const char* cmd_espnow_stopstream(const String& originalCmd);
 
 // Test commands (defined in .ino)
-const char* cmd_test_streams(const String& cmd);
-const char* cmd_test_concurrent(const String& cmd);
-const char* cmd_test_cleanup(const String& cmd);
-const char* cmd_test_filelock(const String& cmd);
+const char* cmd_test_streams(const String& argsInput);
+const char* cmd_test_concurrent(const String& argsInput);
+const char* cmd_test_cleanup(const String& argsInput);
+const char* cmd_test_filelock(const String& argsInput);
 
 // Configuration
 const char* cmd_espnow_mode(const String& originalCmd);
@@ -995,17 +1001,17 @@ const char* cmd_espnow_meshmaster(const String& originalCmd);
 const char* cmd_espnow_meshbackup(const String& originalCmd);
 const char* cmd_espnow_backupenable(const String& originalCmd);
 const char* cmd_espnow_meshtopo(const String& originalCmd);
-const char* cmd_espnow_toporesults(const String& cmd);
+const char* cmd_espnow_toporesults(const String& argsInput);
 
 // Encryption
 const char* cmd_espnow_setpassphrase(const String& originalCmd);
-const char* cmd_espnow_encstatus(const String& cmd);
+const char* cmd_espnow_encstatus(const String& argsInput);
 const char* cmd_espnow_pairsecure(const String& originalCmd);
 void deriveKeyFromPassphrase(const String& passphrase, uint8_t* key);
 
 // Time sync
 const char* cmd_espnow_timesync(const String& originalCmd);
-const char* cmd_espnow_timestatus(const String& cmd);
+const char* cmd_espnow_timestatus(const String& argsInput);
 
 // Helper functions
 String formatMacAddress(const uint8_t* mac);
@@ -1028,8 +1034,8 @@ void cleanupTimedOutChunks();
 void cleanupExpiredBufferedPeers();
 
 // ESP-NOW command functions (cmd_espnow_stopstream implemented in espnow_system.cpp)
-const char* cmd_espnow_send(const String& cmd);
-const char* cmd_espnowenabled(const String& cmd);
+const char* cmd_espnow_send(const String& argsInput);
+const char* cmd_espnowenabled(const String& argsInput);
 
 // Global state (defined in espnow_system.cpp)
 extern EspNowState* gEspNow;

@@ -38,13 +38,6 @@ TaskHandle_t rtcTaskHandle = nullptr;
 volatile UBaseType_t gRTCWatermarkMin = (UBaseType_t)0xFFFFFFFF;
 volatile UBaseType_t gRTCWatermarkNow = (UBaseType_t)0;
 
-// Macro for CLI validation
-#define RETURN_VALID_IF_VALIDATE_CSTR() \
-  do { \
-    extern bool gCLIValidateOnly; \
-    if (gCLIValidateOnly) return "VALID"; \
-  } while(0)
-
 // ============================================================================
 // BCD Conversion Helpers
 // ============================================================================
@@ -147,9 +140,8 @@ bool rtcEarlyBootSync() {
   // This works even if the RTC sensor task isn't running yet
   // Just needs I2C to be initialized
   
-  // Quick probe to check if RTC is present
-  Wire1.beginTransmission(I2C_ADDR_DS3231);
-  if (Wire1.endTransmission() != 0) {
+  // Quick probe to check if RTC is present (mutex-protected)
+  if (!i2cPingAddress(I2C_ADDR_DS3231, 100000, 200)) {
     DEBUG_SENSORSF("[RTC] Early boot sync: RTC not detected at 0x%02X", I2C_ADDR_DS3231);
     return false;
   }
@@ -514,13 +506,13 @@ void startRTCSensorInternal() {
 // CLI Command Handlers
 // ============================================================================
 
-const char* cmd_rtc(const String& cmd) {
+const char* cmd_rtc(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   static String response;
   response = "";
   
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0 || arg == "status") {
@@ -555,7 +547,7 @@ const char* cmd_rtc(const String& cmd) {
   return response.c_str();
 }
 
-const char* cmd_rtcset(const String& cmd) {
+const char* cmd_rtcset(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   static String response;
@@ -565,7 +557,7 @@ const char* cmd_rtcset(const String& cmd) {
     return "[RTC] Not connected. Use 'openrtc' first.";
   }
   
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   
   // Parse: YYYY-MM-DD HH:MM:SS or unix timestamp
@@ -625,14 +617,14 @@ const char* cmd_rtcset(const String& cmd) {
   return response.c_str();
 }
 
-const char* cmd_rtcsync(const String& cmd) {
+const char* cmd_rtcsync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!rtcConnected) {
     return "[RTC] Not connected. Use 'openrtc' first.";
   }
   
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   
   if (arg == "tosystem" || arg == "to" || arg.length() == 0) {
@@ -658,9 +650,9 @@ const char* cmd_rtcsync(const String& cmd) {
   return "[RTC] Usage: rtcsync [to|from]  (to=RTC->system, from=system->RTC)";
 }
 
-const char* cmd_rtcstart(const String& cmd) {
+const char* cmd_rtcstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   
   if (rtcEnabled && rtcConnected) {
     return "[RTC] Already running";
@@ -677,9 +669,9 @@ const char* cmd_rtcstart(const String& cmd) {
   return "[RTC] Opened successfully";
 }
 
-const char* cmd_rtcstop(const String& cmd) {
+const char* cmd_rtcstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   
   if (!rtcEnabled) {
     return "[RTC] Not running";
@@ -760,9 +752,9 @@ extern const SettingsModule rtcSettingsModule = {
 
 #include "System_Utils.h"
 
-const char* cmd_rtcautostart(const String& args) {
+const char* cmd_rtcautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args; arg.trim();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
     return gSettings.rtcAutoStart ? "[RTC] Auto-start: enabled" : "[RTC] Auto-start: disabled";
   }

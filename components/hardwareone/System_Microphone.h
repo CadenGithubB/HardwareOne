@@ -55,16 +55,16 @@ String getRecordingsList();
 bool deleteRecording(const char* filename);
 
 // Command handlers
-const char* cmd_mic(const String& cmd);
-const char* cmd_micstart(const String& cmd);
-const char* cmd_micstop(const String& cmd);
-const char* cmd_miclevel(const String& cmd);
-const char* cmd_micrecord(const String& cmd);
-const char* cmd_miclist(const String& cmd);
-const char* cmd_micdelete(const String& cmd);
-const char* cmd_micsamplerate(const String& cmd);
-const char* cmd_micgain(const String& cmd);
-const char* cmd_micbitdepth(const String& cmd);
+const char* cmd_mic(const String& argsInput);
+const char* cmd_micstart(const String& argsInput);
+const char* cmd_micstop(const String& argsInput);
+const char* cmd_miclevel(const String& argsInput);
+const char* cmd_micrecord(const String& argsInput);
+const char* cmd_miclist(const String& argsInput);
+const char* cmd_micdelete(const String& argsInput);
+const char* cmd_micsamplerate(const String& argsInput);
+const char* cmd_micgain(const String& argsInput);
+const char* cmd_micbitdepth(const String& argsInput);
 
 // Command registry
 struct CommandEntry;

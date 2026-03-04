@@ -511,17 +511,17 @@ StorageStats ImageManager::getStorageStats(ImageStorageLocation location) {
 // CLI Commands
 // ============================================================================
 
-const char* cmd_capture(const String& cmd) {
+const char* cmd_capture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   ImageStorageLocation location = (ImageStorageLocation)gSettings.cameraStorageLocation;
   
   // Check for location argument
-  if (cmd.indexOf(" sd") > 0) {
+  if (argsInput.indexOf(" sd") > 0) {
     location = IMAGE_STORAGE_SD;
-  } else if (cmd.indexOf(" littlefs") > 0 || cmd.indexOf(" lfs") > 0) {
+  } else if (argsInput.indexOf(" littlefs") > 0 || argsInput.indexOf(" lfs") > 0) {
     location = IMAGE_STORAGE_LITTLEFS;
-  } else if (cmd.indexOf(" both") > 0) {
+  } else if (argsInput.indexOf(" both") > 0) {
     location = IMAGE_STORAGE_BOTH;
   }
   
@@ -535,11 +535,11 @@ const char* cmd_capture(const String& cmd) {
   return "Capture failed";
 }
 
-const char* cmd_images(const String& cmd) {
+const char* cmd_images(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS;
-  if (cmd.indexOf(" sd") > 0) {
+  if (argsInput.indexOf(" sd") > 0) {
     location = IMAGE_STORAGE_SD;
   }
   
@@ -580,10 +580,10 @@ const char* cmd_images(const String& cmd) {
   return buf;
 }
 
-const char* cmd_imageview(const String& args) {
+const char* cmd_imageview(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String path = args;
+  String path = argsInput;
   path.trim();
   
   if (path.length() == 0) {
@@ -611,10 +611,10 @@ const char* cmd_imageview(const String& args) {
   return buf;
 }
 
-const char* cmd_imagedelete(const String& args) {
+const char* cmd_imagedelete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String path = args;
+  String path = argsInput;
   path.trim();
   
   if (path.length() == 0) {
@@ -627,13 +627,13 @@ const char* cmd_imagedelete(const String& args) {
   return "Failed to delete image";
 }
 
-const char* cmd_imagesend(const String& args) {
+const char* cmd_imagesend(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Parse: <device> <path>
   // Or: <device> (sends most recent image)
   
-  String rest = args;
+  String rest = argsInput;
   rest.trim();
   
   int firstSpace = rest.indexOf(' ');

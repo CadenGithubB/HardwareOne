@@ -365,11 +365,11 @@ void sampleMemoryState(bool forceFullScan) {
   }
 }
 
-const char* cmd_memsample(const String& cmd) {
+const char* cmd_memsample(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Check for allocation tracking subcommands
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   
   if (args.startsWith("track ")) {

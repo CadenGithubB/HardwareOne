@@ -259,8 +259,8 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
   busMetrics.totalTransactions++;
   
   // Acquire bus mutex with device's adaptive timeout
-  BaseType_t acquired = xSemaphoreTakeRecursive(busMutex, 
-                                                 pdMS_TO_TICKS(device->adaptiveTimeoutMs));
+  BaseType_t acquired = xSemaphoreTake(busMutex, 
+                                       pdMS_TO_TICKS(device->adaptiveTimeoutMs));
   uint32_t waitUs = micros() - startUs;
   
   if (acquired != pdTRUE) {
@@ -280,7 +280,7 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
   // Push clock to stack
   if (!clockStackPush(device->clockHz)) {
     DEBUG_I2CF("[TX] CLOCK_STACK_OVERFLOW 0x%02X (%s)", device->address, device->name);
-    xSemaphoreGiveRecursive(busMutex);
+    xSemaphoreGive(busMutex);
     return ReturnType();
   }
   
@@ -313,7 +313,7 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
     setWire1Clock(restoreClock);
     
     // Release mutex
-    xSemaphoreGiveRecursive(busMutex);
+    xSemaphoreGive(busMutex);
     
     // Update metrics
     updateMetrics(waitUs, txDurationUs, device->clockHz);
@@ -342,7 +342,7 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
     setWire1Clock(restoreClock);
     
     // Release mutex
-    xSemaphoreGiveRecursive(busMutex);
+    xSemaphoreGive(busMutex);
     
     // Update metrics
     updateMetrics(waitUs, txDurationUs, device->clockHz);

@@ -21,16 +21,16 @@ extern WifiNetwork* gWifiNetworks;
 extern int gWifiNetworkCount;
 
 // WiFi Command Handlers
-const char* cmd_wifiinfo(const String& cmd);
-const char* cmd_wifilist(const String& cmd);
+const char* cmd_wifiinfo(const String& argsInput);
+const char* cmd_wifilist(const String& argsInput);
 const char* cmd_wifiadd(const String& originalCmd);
 const char* cmd_wifirm(const String& originalCmd);
 const char* cmd_wifipromote(const String& originalCmd);
 const char* cmd_wificonnect(const String& originalCmd);
-const char* cmd_wifidisconnect(const String& cmd);
+const char* cmd_wifidisconnect(const String& argsInput);
 const char* cmd_wifiscan(const String& command);
 const char* cmd_wifitxpower(const String& originalCmd);
-const char* cmd_wifigettxpower(const String& cmd);
+const char* cmd_wifigettxpower(const String& argsInput);
 const char* cmd_wifiautoreconnect(const String& originalCmd);
 
 // WiFi Helper Functions

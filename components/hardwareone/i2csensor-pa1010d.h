@@ -54,9 +54,9 @@ extern GPSCache gGPSCache;
 void startGPSInternal();
 
 // Command handlers
-const char* cmd_gps(const String& cmd);
-const char* cmd_gpsstart(const String& cmd);
-const char* cmd_gpsstop(const String& cmd);
+const char* cmd_gps(const String& argsInput);
+const char* cmd_gpsstart(const String& argsInput);
+const char* cmd_gpsstop(const String& argsInput);
 
 // Command registry (for system_utils.cpp module list)
 struct CommandEntry;

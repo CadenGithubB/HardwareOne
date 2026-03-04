@@ -8,6 +8,7 @@
 #include "System_Settings.h"
 #include "System_Command.h"
 #include "System_MemUtil.h"
+#include "System_Utils.h"
 #include <esp_heap_caps.h>
 
 // External settings
@@ -228,7 +229,7 @@ static const FeatureEntry featureRegistry[] = {
 
   // === DISPLAY FEATURES ===
   { "oled", "OLED Display", FEATURE_CAT_DISPLAY, 4,
-    FEATURE_FLAG_REQUIRES_REBOOT | FEATURE_FLAG_ESSENTIAL,
+    FEATURE_FLAG_REQUIRES_REBOOT,
     &gSettings.oledEnabled, isOledCompiled,
     "128x64 OLED display interface" },
     
@@ -239,9 +240,9 @@ static const FeatureEntry featureRegistry[] = {
 
   // === SENSOR FEATURES ===
   { "gamepad", "Gamepad", FEATURE_CAT_SENSOR, 2,
-    FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_ESSENTIAL,
+    FEATURE_FLAG_RUNTIME_TOGGLE,
     &gSettings.gamepadAutoStart, isGamepadCompiled,
-    "Seesaw gamepad for navigation (required for OLED)" },
+    "Seesaw gamepad for navigation" },
     
   { "thermal", "Thermal Camera", FEATURE_CAT_SENSOR, 32,
     FEATURE_FLAG_RUNTIME_TOGGLE,
@@ -419,11 +420,10 @@ static const char* getCategoryName(FeatureCategory cat) {
   }
 }
 
-const char* cmd_features(const String& argsIn) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_features(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   // No args - show all features with heap estimates
@@ -458,18 +458,15 @@ const char* cmd_features(const String& argsIn) {
       } else {
         status = "off";
       }
-      
-      const char* essential = (f->flags & FEATURE_FLAG_ESSENTIAL) ? "*" : " ";
-      
+
       pos += snprintf(buf + pos, buf_SIZE - pos,
-        " %s%-12s ~%2dKB  %s\n",
-        essential, f->id, f->heapCostKB, status);
+        " %-12s ~%2dKB  %s\n",
+        f->id, f->heapCostKB, status);
     }
     
     pos += snprintf(buf + pos, buf_SIZE - pos,
       "\n═══════════════════════════════════════════\n"
       "Enabled: ~%luKB | Free: %luKB | Max: ~%luKB\n"
-      "* = essential (should stay enabled)\n"
       "Usage: features <id> <on|off>",
       (unsigned long)enabledCost, (unsigned long)freeHeapKB,
       (unsigned long)getTotalPossibleHeapCost());
@@ -503,7 +500,7 @@ const char* cmd_features(const String& argsIn) {
       f->heapCostKB,
       compiled ? "yes" : "no",
       enabled ? "yes" : "no",
-      canToggleFeature(f) ? "yes" : "no (compile-time or essential)",
+      canToggleFeature(f) ? "yes" : "no",
       f->description);
     
     return buf;
@@ -523,9 +520,6 @@ const char* cmd_features(const String& argsIn) {
   if (!canToggleFeature(f)) {
     if (!isFeatureCompiled(f)) {
       return "Feature not compiled in this build.";
-    }
-    if (f->flags & FEATURE_FLAG_ESSENTIAL) {
-      return "Essential feature - should not be disabled.";
     }
     return "Feature cannot be toggled (compile-time only).";
   }

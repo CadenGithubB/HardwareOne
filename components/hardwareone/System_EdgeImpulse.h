@@ -135,12 +135,12 @@ extern const CommandEntry edgeImpulseCommands[];
 extern const size_t edgeImpulseCommandsCount;
 
 // Command handlers
-const char* cmd_ei(const String& cmd);
-const char* cmd_ei_enable(const String& cmd);
-const char* cmd_ei_detect(const String& cmd);
-const char* cmd_ei_continuous(const String& cmd);
-const char* cmd_ei_confidence(const String& cmd);
-const char* cmd_ei_status(const String& cmd);
+const char* cmd_ei(const String& argsInput);
+const char* cmd_ei_enable(const String& argsInput);
+const char* cmd_ei_detect(const String& argsInput);
+const char* cmd_ei_continuous(const String& argsInput);
+const char* cmd_ei_confidence(const String& argsInput);
+const char* cmd_ei_status(const String& argsInput);
 
 // Web handler registration
 #if ENABLE_HTTP_SERVER

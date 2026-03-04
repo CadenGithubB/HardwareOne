@@ -6,13 +6,13 @@
 
 #include "System_Mutex.h"
 #include "System_Debug.h"
+#include "System_I2C_Manager.h"
 
 // ============================================================================
 // Global Mutex Definitions
 // ============================================================================
 
 SemaphoreHandle_t fsMutex = nullptr;
-SemaphoreHandle_t i2cMutex = nullptr;  // Set by initI2CManager() bridge — do not allocate here
 SemaphoreHandle_t gJsonResponseMutex = nullptr;
 SemaphoreHandle_t gMeshRetryMutex = nullptr;
 SemaphoreHandle_t gFileTransferMutex = nullptr;
@@ -34,7 +34,7 @@ void initMutexes() {
   gChunkedMsgMutex = xSemaphoreCreateMutex();
   i2sMicMutex = xSemaphoreCreateMutex();
   
-  // i2cMutex is NOT allocated here — initI2CManager() bridges it to the manager's busMutex
+  // i2cMutex removed — I2cLockGuard and i2cLock/Unlock go through I2CDeviceManager::getBusMutex() directly
 
   // Log creation status
   bool allCreated = (fsMutex != nullptr) && (gJsonResponseMutex != nullptr) && 
@@ -70,8 +70,8 @@ bool isFsLockedByCurrentTask() {
 }
 
 bool isI2cLockedByCurrentTask() {
-  // Regular mutex has ownership tracking
-  return isHeldByCurrentTask(i2cMutex);
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  return mgr ? isHeldByCurrentTask(mgr->getBusMutex()) : false;
 }
 
 // ============================================================================
@@ -114,19 +114,20 @@ void fsUnlock() {
 // ============================================================================
 // I2cLockGuard Implementation
 // ============================================================================
-// i2cMutex is the manager's recursive mutex (set by initI2CManager bridge)
 
 I2cLockGuard::I2cLockGuard(const char* owner) : held(false) {
-  if (i2cMutex) {
-    if (xSemaphoreTake(i2cMutex, portMAX_DELAY) == pdTRUE) {
-      held = true;
-    }
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  SemaphoreHandle_t m = mgr ? mgr->getBusMutex() : nullptr;
+  if (m && xSemaphoreTake(m, portMAX_DELAY) == pdTRUE) {
+    held = true;
   }
 }
 
 I2cLockGuard::~I2cLockGuard() {
-  if (held && i2cMutex) {
-    xSemaphoreGive(i2cMutex);
+  if (held) {
+    I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+    SemaphoreHandle_t m = mgr ? mgr->getBusMutex() : nullptr;
+    if (m) xSemaphoreGive(m);
   }
 }
 
@@ -148,15 +149,15 @@ I2sMicLockGuard::~I2sMicLockGuard() {
 }
 
 void i2cLock(const char* owner) {
-  if (i2cMutex) {
-    xSemaphoreTake(i2cMutex, portMAX_DELAY);
-  }
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  SemaphoreHandle_t m = mgr ? mgr->getBusMutex() : nullptr;
+  if (m) xSemaphoreTake(m, portMAX_DELAY);
 }
 
 void i2cUnlock() {
-  if (i2cMutex) {
-    xSemaphoreGive(i2cMutex);
-  }
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  SemaphoreHandle_t m = mgr ? mgr->getBusMutex() : nullptr;
+  if (m) xSemaphoreGive(m);
 }
 
 // ============================================================================

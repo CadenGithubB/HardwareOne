@@ -12,14 +12,8 @@
 #include "System_Utils.h"
 #include "System_Debug.h"  // For BROADCAST_PRINTF macro
 #include "System_Command.h"  // For CommandModuleRegistrar
+#include "System_I2C.h"
 #include <Wire.h>
-
-// Validation macro
-#define RETURN_VALID_IF_VALIDATE_CSTR() \
-  do { \
-    extern bool gCLIValidateOnly; \
-    if (gCLIValidateOnly) return "VALID"; \
-  } while(0)
 
 // Note: BROADCAST_PRINTF is a macro defined in debug_system.h (included via system_utils.h)
 
@@ -42,13 +36,16 @@ bool initPCA9685() {
     if (!pwmDriver) return false;
   }
   
-  if (!pwmDriver->begin()) {
+  bool success = i2cDeviceTransaction(PCA9685_I2C_ADDRESS, 100000, 500, [&]() -> bool {
+    if (!pwmDriver->begin()) return false;
+    pwmDriver->setPWMFreq(50);  // 50Hz for standard servos
+    return true;
+  });
+  if (!success) {
     delete pwmDriver;
     pwmDriver = nullptr;
     return false;
   }
-  
-  pwmDriver->setPWMFreq(50);  // 50Hz for standard servos
   pwmDriverConnected = true;
   
   // Initialize servo profiles
@@ -67,7 +64,7 @@ bool initPCA9685() {
 // PCA9685/Servo Command Handlers
 // ============================================================================
 
-const char* cmd_servo(const String& args) {
+const char* cmd_servo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
   
@@ -106,11 +103,13 @@ const char* cmd_servo(const String& args) {
              channel, angle, pulseWidth);
   }
   
-  pwmDriver->writeMicroseconds(channel, pulseWidth);
+  i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
+    pwmDriver->writeMicroseconds(channel, pulseWidth);
+  });
   return getDebugBuffer();
 }
 
-const char* cmd_servoprofile(const String& args) {
+const char* cmd_servoprofile(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
   
@@ -165,7 +164,7 @@ const char* cmd_servoprofile(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_servolist(const String& command) {
+const char* cmd_servolist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   broadcastOutput("Configured Servos:");
@@ -192,12 +191,12 @@ const char* cmd_servolist(const String& command) {
   return "[Servo] Profile list displayed";
 }
 
-const char* cmd_servocalibrate(const String& args) {
+const char* cmd_servocalibrate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
   
   // Parse: <channel>
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: servocalibrate <channel>";
   
@@ -225,13 +224,15 @@ const char* cmd_servocalibrate(const String& args) {
   broadcastOutput("");
   
   // Set to safe center
-  pwmDriver->writeMicroseconds(channel, 1500);
+  i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
+    pwmDriver->writeMicroseconds(channel, 1500);
+  });
   
   snprintf(getDebugBuffer(), 1024, "Channel %d set to center (1500µs). Begin testing.", channel);
   return getDebugBuffer();
 }
 
-const char* cmd_pwm(const String& args) {
+const char* cmd_pwm(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
   
@@ -261,7 +262,9 @@ const char* cmd_pwm(const String& args) {
   if (sp2 >= 0) {
     int freq = rest.substring(sp2 + 1).toInt();
     if (freq >= 24 && freq <= 1526) {
-      pwmDriver->setPWMFreq(freq);
+      i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
+        pwmDriver->setPWMFreq(freq);
+      });
       snprintf(getDebugBuffer(), 1024, "PWM channel %d set to %d (freq: %dHz)", channel, value, freq);
     } else {
       snprintf(getDebugBuffer(), 1024, "[Servo] Error: Frequency must be 24-1526Hz");
@@ -270,7 +273,9 @@ const char* cmd_pwm(const String& args) {
     snprintf(getDebugBuffer(), 1024, "PWM channel %d set to %d", channel, value);
   }
   
-  pwmDriver->setPWM(channel, 0, value);
+  i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
+    pwmDriver->setPWM(channel, 0, value);
+  });
   return getDebugBuffer();
 }
 
