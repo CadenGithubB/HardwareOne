@@ -619,10 +619,10 @@ void oledEspNowMainMenuSelect() {
       break;
     case 4:  // Start/Stop
       if (gEspNow && gEspNow->initialized) {
-        extern const char* cmd_espnow_deinit(const String& cmd);
+        extern const char* cmd_espnow_deinit(const String& argsInput);
         cmd_espnow_deinit("");
       } else {
-        extern const char* cmd_espnow_init(const String& cmd);
+        extern const char* cmd_espnow_init(const String& argsInput);
         cmd_espnow_init("");
       }
       break;
@@ -1653,7 +1653,7 @@ void oledEspNowSendTextMessage() {
   if (!gEspNow || gOLEDEspNowState.textMessageBuffer.length() == 0) return;
   
   // Send text message to selected device
-  extern void executeOLEDCommand(const String& cmd);
+  extern void executeOLEDCommand(const String& argsInput);
   
   // Format MAC address
   char macStr[18];
@@ -1686,7 +1686,7 @@ void oledEspNowSendRemoteCommand() {
     return;  // Don't send if any field is empty
   }
   
-  extern void executeOLEDCommand(const String& cmd);
+  extern void executeOLEDCommand(const String& argsInput);
   
   // Format MAC address
   char macStr[18];
@@ -2036,7 +2036,7 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
   
   // A button: Execute selected action
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    extern void executeOLEDCommand(const String& cmd);
+    extern void executeOLEDCommand(const String& argsInput);
     char macStr[18];
     snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
              gOLEDEspNowState.selectedDeviceMac[0],
@@ -2108,7 +2108,7 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
     return;
   }
   
-  extern void executeOLEDCommand(const String& cmd);
+  extern void executeOLEDCommand(const String& argsInput);
   char macStr[18];
   snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
            gOLEDEspNowState.selectedDeviceMac[0],

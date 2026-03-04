@@ -24,7 +24,7 @@ extern bool filesystemReady;
  * @param asJson true for JSON format, false for text
  * @return true on success, false on error
  */
-bool buildFilesListing(const String& inPath, String& out, bool asJson);
+bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hideAdminPaths = false);
 
 // Filesystem command registry (for system_utils.cpp)
 struct CommandEntry;  // Forward declaration
@@ -97,6 +97,14 @@ bool canCreate(const String& path);
  * @return Bitmask of FilePermission flags
  */
 uint8_t getPermissions(const String& path);
+
+/**
+ * Check if a path is restricted to admin users only.
+ * Covers /system, /logging_captures and everything under them.
+ * @param path Absolute path to check
+ * @return true if admin role is required to access this path
+ */
+bool isAdminOnlyPath(const String& path);
 
 // ============================================================================
 // File I/O Helpers

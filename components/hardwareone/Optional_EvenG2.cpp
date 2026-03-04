@@ -1198,8 +1198,8 @@ void getG2Status(char* buffer, size_t bufferSize) {
 // COMMAND HANDLERS
 // =============================================================================
 
-static const char* cmd_g2connect(const String& cmd) {
-  String arg = cmd;
+static const char* cmd_g2connect(const String& argsInput) {
+  String arg = argsInput;
   arg.replace("openg2", "");
   arg.replace("g2 connect", "");
   arg.replace("g2connect", "");
@@ -1218,19 +1218,19 @@ static const char* cmd_g2connect(const String& cmd) {
   return "G2 connection failed";
 }
 
-static const char* cmd_g2disconnect(const String& cmd) {
+static const char* cmd_g2disconnect(const String& argsInput) {
   g2Disconnect();
   return "G2 glasses disconnected";
 }
 
-static const char* cmd_g2status(const String& cmd) {
+static const char* cmd_g2status(const String& argsInput) {
   static char statusBuf[128];
   getG2Status(statusBuf, sizeof(statusBuf));
   return statusBuf;
 }
 
-static const char* cmd_g2show(const String& cmd) {
-  String text = cmd;
+static const char* cmd_g2show(const String& argsInput) {
+  String text = argsInput;
   // Remove command prefix
   if (text.startsWith("g2 show ")) {
     text = text.substring(8);
@@ -1249,34 +1249,34 @@ static const char* cmd_g2show(const String& cmd) {
   return "Failed to send text (not connected?)";
 }
 
-static const char* cmd_g2scan(const String& cmd) {
+static const char* cmd_g2scan(const String& argsInput) {
   if (g2StartScan(10000)) {
     return "Scanning for G2 glasses (10s)...";
   }
   return "Failed to start scan";
 }
 
-static const char* cmd_g2init(const String& cmd) {
+static const char* cmd_g2init(const String& argsInput) {
   if (initG2Client()) {
     return "G2 client initialized (BLE server mode disabled)";
   }
   return "Failed to initialize G2 client";
 }
 
-static const char* cmd_g2deinit(const String& cmd) {
+static const char* cmd_g2deinit(const String& argsInput) {
   deinitG2Client();
   return "G2 client deinitialized";
 }
 
-static const char* cmd_g2clear(const String& cmd) {
+static const char* cmd_g2clear(const String& argsInput) {
   if (g2ClearDisplay()) {
     return "Display cleared";
   }
   return "Failed to clear display";
 }
 
-static const char* cmd_g2verbose(const String& cmd) {
-  String arg = cmd;
+static const char* cmd_g2verbose(const String& argsInput) {
+  String arg = argsInput;
   arg.replace("g2 verbose", "");
   arg.replace("g2verbose", "");
   arg.trim();
@@ -1348,8 +1348,8 @@ static void g2DefaultGestureHandler(G2EventType event) {
 // Enable/disable default gesture-to-menu mapping
 bool gG2MenuNavEnabled = true;
 
-static const char* cmd_g2nav(const String& cmd) {
-  String arg = cmd;
+static const char* cmd_g2nav(const String& argsInput) {
+  String arg = argsInput;
   arg.replace("g2 nav", "");
   arg.replace("g2nav", "");
   arg.trim();

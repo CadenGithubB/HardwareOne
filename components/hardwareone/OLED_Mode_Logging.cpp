@@ -93,7 +93,7 @@ static void drawLoggingMenuItem(int y, const char* text, bool selected, bool ena
 }
 
 // Execute logging command with proper authentication context
-static void executeLoggingCommand(const String& cmd) {
+static void executeLoggingCommand(const String& argsInput) {
   if (!ensureDebugBuffer()) return;
   
   // Create authentication context for OLED
@@ -107,7 +107,7 @@ static void executeLoggingCommand(const String& cmd) {
   ctx.sid = "";
   
   char out[512];
-  bool success = executeCommand(ctx, cmd.c_str(), out, sizeof(out));
+  bool success = executeCommand(ctx, argsInput.c_str(), out, sizeof(out));
   
   if (!success && strlen(out) > 0) {
     DEBUG_SYSTEMF("[LOGGING_CMD] Command failed: %s", out);

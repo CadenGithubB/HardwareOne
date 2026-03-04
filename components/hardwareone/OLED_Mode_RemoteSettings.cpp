@@ -22,7 +22,7 @@ static void displayRemoteSettingsMode() {
         oledDisplay->setCursor(0, 20);
         oledDisplay->println("No remote settings");
         oledDisplay->println("available");
-        oledDisplay->display();
+        displayUpdate();
       }
       delay(1000);
       oledMenuBack();

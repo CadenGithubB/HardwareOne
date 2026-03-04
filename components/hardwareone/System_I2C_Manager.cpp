@@ -40,7 +40,7 @@ void I2CDeviceManager::initialize() {
   }
   
   // Create mutexes
-  instance->busMutex = xSemaphoreCreateRecursiveMutex();
+  instance->busMutex = xSemaphoreCreateMutex();
   instance->managerMutex = xSemaphoreCreateMutex();
   instance->queueMutex = xSemaphoreCreateMutex();
   

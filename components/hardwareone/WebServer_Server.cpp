@@ -24,6 +24,7 @@
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
+#include "System_Filesystem.h"
 #include "System_User.h"
 #include "System_UserSettings.h"
 #include "System_FirstTimeSetup.h"
@@ -1295,6 +1296,14 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   path.replace("%20", " ");
   DEBUG_STORAGEF("[handleFileRead] Decoded path: %s", path.c_str());
 
+  if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
+    gSensorPollingPaused = wasPaused;
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "Forbidden: admin required", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
   FsLockGuard fsGuard("handleFileRead");
 
   File f = VFS::open(path, "r");
@@ -1425,6 +1434,12 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
     ERROR_WEBF("No name parameter in file write");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"success\":false,\"error\":\"Name required\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  if (isAdminOnlyPath(name) && !isAdminUser(ctx.user)) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin required\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
 
@@ -1663,6 +1678,10 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     // Use centralized permission check
     if (!canCreate(path)) {
       WARN_SYSTEMF("[handleFileUpload] BLOCKED: Protected path: %s", path.c_str());
+      return false;
+    }
+    if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
+      WARN_SYSTEMF("[handleFileUpload] BLOCKED: Admin-only path: %s", path.c_str());
       return false;
     }
     // Auto-create parent directory if it doesn't exist
@@ -1991,7 +2010,8 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
   // Lock shared JSON response buffer
-  if (xSemaphoreTake(gJsonResponseMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+  JsonBufferGuard jsonGuard("handleSettingsGet");
+  if (!jsonGuard.held) {
     httpd_resp_send_500(req);
     return ESP_FAIL;
   }
@@ -2026,7 +2046,6 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
   
   if (len == 0 || len >= JSON_RESPONSE_SIZE) {
     // Serialization failed or buffer too small
-    xSemaphoreGive(gJsonResponseMutex);
     DEBUG_STORAGEF("[Settings API] JSON serialization failed or buffer overflow");
     httpd_resp_send_500(req);
     return ESP_FAIL;
@@ -2037,11 +2056,8 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
   DEBUG_MEMORYF("[JSON_RESP_BUF] Settings JSON: %zu/%u bytes (%d%%)",
                 len, (unsigned)JSON_RESPONSE_SIZE, usagePct);
 
-  // Send response and release buffer
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, gJsonResponseBuffer, len);
-
-  xSemaphoreGive(gJsonResponseMutex);
   return ESP_OK;
 }
 
@@ -2058,7 +2074,8 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
   }
 
   // Lock shared JSON response buffer (longer timeout since this may race with settings fetch)
-  if (xSemaphoreTake(gJsonResponseMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+  JsonBufferGuard jsonGuard("handleSettingsSchema");
+  if (!jsonGuard.held) {
     WARN_WEBF("[handleSettingsSchema] Mutex timeout - another request holding buffer");
     httpd_resp_send_500(req);
     return ESP_FAIL;
@@ -2152,7 +2169,6 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
   
   if (len == 0 || len >= JSON_RESPONSE_SIZE) {
     WARN_WEBF("[Schema] Serialization failed or buffer overflow: %zu >= %u", len, (unsigned)JSON_RESPONSE_SIZE);
-    xSemaphoreGive(gJsonResponseMutex);
     httpd_resp_send_500(req);
     return ESP_FAIL;
   }
@@ -2162,7 +2178,6 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
   httpd_resp_send(req, gJsonResponseBuffer, len);
 
-  xSemaphoreGive(gJsonResponseMutex);
   DEBUG_HTTPF("[Schema] Schema response sent successfully");
   return ESP_OK;
 }
@@ -2173,7 +2188,8 @@ esp_err_t handleUserSettingsGet(httpd_req_t* req) {
 
   DEBUG_HTTPF("[UserSettings] GET enter user=%s ip=%s", ctx.user.c_str(), ctx.ip.c_str());
 
-  if (xSemaphoreTake(gJsonResponseMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+  JsonBufferGuard jsonGuard("handleUserSettingsGet");
+  if (!jsonGuard.held) {
     httpd_resp_send_500(req);
     return ESP_FAIL;
   }
@@ -2187,7 +2203,6 @@ esp_err_t handleUserSettingsGet(httpd_req_t* req) {
     size_t len = serializeJson(response, gJsonResponseBuffer, JSON_RESPONSE_SIZE);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, gJsonResponseBuffer, len);
-    xSemaphoreGive(gJsonResponseMutex);
     return ESP_OK;
   }
 
@@ -2200,7 +2215,6 @@ esp_err_t handleUserSettingsGet(httpd_req_t* req) {
     size_t len = serializeJson(response, gJsonResponseBuffer, JSON_RESPONSE_SIZE);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, gJsonResponseBuffer, len);
-    xSemaphoreGive(gJsonResponseMutex);
     return ESP_OK;
   }
 
@@ -2224,7 +2238,6 @@ esp_err_t handleUserSettingsGet(httpd_req_t* req) {
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
   httpd_resp_send(req, gJsonResponseBuffer, len);
 
-  xSemaphoreGive(gJsonResponseMutex);
   return ESP_OK;
 }
 
@@ -3252,7 +3265,7 @@ esp_err_t handleRegisterSubmit(httpd_req_t* req) {
 
 // File handler dependencies
 extern bool filesystemReady;
-extern bool buildFilesListing(const String& inPath, String& out, bool asJson);
+extern bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hideAdminPaths);
 extern bool ensureFileViewBuffers();
 extern char* gFileReadBuf;
 extern char* gFileOutBuf;
@@ -3287,8 +3300,16 @@ esp_err_t handleFilesList(httpd_req_t* req) {
       broadcastOutput(String("[files] Listing directory: ") + dirPath);
     }
   }
+  if (isAdminOnlyPath(dirPath) && !isAdminUser(ctx.user)) {
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin required\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  bool userIsAdmin = isAdminUser(ctx.user);
   String body;
-  bool ok = buildFilesListing(dirPath, body, /*asJson=*/true);
+  bool ok = buildFilesListing(dirPath, body, /*asJson=*/true, /*hideAdminPaths=*/!userIsAdmin);
   String json;
   if (ok) {
     json = String("{\"success\":true,\"files\":[") + body + "]}";
@@ -3371,6 +3392,12 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
     name = name.substring(1);
   }
   String path = "/" + name;
+
+  if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin required\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
 
   if (type == "folder") {
     // Use CLI command for consistent validation and error handling
@@ -3461,6 +3488,14 @@ esp_err_t handleFileView(httpd_req_t* req) {
     }
   }
   path = decoded;
+
+  if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
+    gSensorPollingPaused = wasPaused;
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "Forbidden: admin required", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
 
   broadcastOutput(String("[files] Viewing file: ") + path);
 
@@ -3942,14 +3977,22 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
     httpd_resp_send(req, "{\"success\":false,\"error\":\"No filename specified\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  // URL decode minimal subset
   nameStr.replace("%2F", "/");
   nameStr.replace("%20", " ");
+  nameStr.replace("+", " ");
+
   // Normalize: strip leading '/' if present to prevent double slashes
   if (nameStr.startsWith("/")) {
     nameStr = nameStr.substring(1);
   }
   String path = "/" + nameStr;
+
+  if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin required\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
 
   // Use centralized permission check
   if (nameStr.length() == 0 || nameStr == "." || nameStr == ".." || !canDelete(path)) {
@@ -4048,6 +4091,13 @@ esp_err_t handleFileRename(httpd_req_t* req) {
   // Ensure oldPath starts with /
   if (!oldPath.startsWith("/")) oldPath = "/" + oldPath;
 
+  if (isAdminOnlyPath(oldPath) && !isAdminUser(ctx.user)) {
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin required\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
   // Build new path: same parent directory + new name
   int lastSlash = oldPath.lastIndexOf('/');
   String parentDir = (lastSlash > 0) ? oldPath.substring(0, lastSlash) : "";
@@ -4119,14 +4169,16 @@ esp_err_t handleAdminPending(httpd_req_t* req) {
   }
 
   // Serialize to response buffer
-  if (xSemaphoreTake(gJsonResponseMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    size_t len = serializeJson(response, gJsonResponseBuffer, JSON_RESPONSE_SIZE);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, gJsonResponseBuffer, len);
-    xSemaphoreGive(gJsonResponseMutex);
-  } else {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":true,\"pending\":[]}", HTTPD_RESP_USE_STRLEN);
+  {
+    JsonBufferGuard jsonGuard("handlePendingApprovals");
+    if (jsonGuard.held) {
+      size_t len = serializeJson(response, gJsonResponseBuffer, JSON_RESPONSE_SIZE);
+      httpd_resp_set_type(req, "application/json");
+      httpd_resp_send(req, gJsonResponseBuffer, len);
+    } else {
+      httpd_resp_set_type(req, "application/json");
+      httpd_resp_send(req, "{\"success\":true,\"pending\":[]}", HTTPD_RESP_USE_STRLEN);
+    }
   }
   return ESP_OK;
 }
@@ -4489,7 +4541,7 @@ void startHttpServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 100;
   config.lru_purge_enable = true;
-  config.stack_size = 12288;  // 12KB – headroom for AuthContext Strings + chunked handlers
+  config.stack_size = 11059;  // ~11KB – reduced 10% from 12KB for memory optimization
   config.recv_wait_timeout = 30;  // 30 second timeout for large uploads
   config.send_wait_timeout = 30;  // 30 second timeout for large responses
   // Note: max header length is set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig

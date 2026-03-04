@@ -102,22 +102,22 @@ extern volatile bool imuInitDone;
 extern volatile bool imuInitResult;
 
 // IMU sensor command handlers
-const char* cmd_imu(const String& cmd);
-const char* cmd_imustart(const String& cmd);
-const char* cmd_imustop(const String& cmd);
-const char* cmd_imuactions(const String& cmd);
+const char* cmd_imu(const String& argsInput);
+const char* cmd_imustart(const String& argsInput);
+const char* cmd_imustop(const String& argsInput);
+const char* cmd_imuactions(const String& argsInput);
 // IMU UI Settings Commands
-const char* cmd_imupollingms(const String& cmd);
-const char* cmd_imuewmafactor(const String& cmd);
-const char* cmd_imutransitionms(const String& cmd);
-const char* cmd_imuwebmaxfps(const String& cmd);
+const char* cmd_imupollingms(const String& argsInput);
+const char* cmd_imuewmafactor(const String& argsInput);
+const char* cmd_imutransitionms(const String& argsInput);
+const char* cmd_imuwebmaxfps(const String& argsInput);
 // IMU Device Settings Commands
-const char* cmd_imudevicepollms(const String& cmd);
-const char* cmd_imuorientationmode(const String& cmd);
-const char* cmd_imuorientationcorrection(const String& cmd);
-const char* cmd_imupitchoffset(const String& cmd);
-const char* cmd_imurolloffset(const String& cmd);
-const char* cmd_imuyawoffset(const String& cmd);
+const char* cmd_imudevicepollms(const String& argsInput);
+const char* cmd_imuorientationmode(const String& argsInput);
+const char* cmd_imuorientationcorrection(const String& argsInput);
+const char* cmd_imupitchoffset(const String& argsInput);
+const char* cmd_imurolloffset(const String& argsInput);
+const char* cmd_imuyawoffset(const String& argsInput);
 
 // IMU sensor state and control
 extern bool imuEnabled;

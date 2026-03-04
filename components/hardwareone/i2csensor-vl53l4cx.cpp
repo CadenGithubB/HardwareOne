@@ -30,19 +30,12 @@ extern Settings gSettings;
 // I2C functions - clock now managed by transaction wrapper
 
 // External dependencies provided by System_I2C.h:
-// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing
+// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing
 
 // ============================================================================
 // ToF Sensor Cache (owned by this module)
 // ============================================================================
 TofCache gTofCache;
-
-// Macro for validation
-#define RETURN_VALID_IF_VALIDATE_CSTR() \
-  do { \
-    extern bool gCLIValidateOnly; \
-    if (gCLIValidateOnly) return "VALID"; \
-  } while(0)
 
 // Debug macros (use centralized versions from debug_system.h)
 #define MIN_RESTART_DELAY_MS 2000
@@ -142,7 +135,7 @@ float readToFDistance() {
 // ToF Sensor Command Handlers
 // ============================================================================
 
-const char* cmd_tof(const String& cmd) {
+const char* cmd_tof(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   float distance = readToFDistance();
@@ -226,7 +219,7 @@ bool startToFSensorInternal() {
 }
 
 // Public command - uses centralized queue
-const char* cmd_tofstart(const String& cmd) {
+const char* cmd_tofstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Check if already enabled or queued
@@ -250,16 +243,16 @@ const char* cmd_tofstart(const String& cmd) {
   }
 }
 
-const char* cmd_tofstop(const String& cmd) {
+const char* cmd_tofstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   handleDeviceStopped(I2C_DEVICE_TOF);
   return "[ToF] Close requested; cleanup will complete asynchronously";
 }
 
-const char* cmd_toftransitionms(const String& cmd) {
+const char* cmd_toftransitionms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: toftransitionms <0..5000>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -269,9 +262,9 @@ const char* cmd_toftransitionms(const String& cmd) {
   return "[ToF] Setting updated";
 }
 
-const char* cmd_tofmaxdistancemm(const String& cmd) {
+const char* cmd_tofmaxdistancemm(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: tofmaxdistancemm <100..10000>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -555,9 +548,9 @@ int buildToFDataJSON(char* buf, size_t bufSize) {
 // ToF tuning commands (migrated from .ino)
 // ============================================================================
 
-const char* cmd_tofpollingms(const String& cmd) {
+const char* cmd_tofpollingms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: tofpollingms <50..5000>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -567,9 +560,9 @@ const char* cmd_tofpollingms(const String& cmd) {
   return "[ToF] Setting updated";
 }
 
-const char* cmd_tofstabilitythreshold(const String& cmd) {
+const char* cmd_tofstabilitythreshold(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: tofstabilitythreshold <0..50>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -583,9 +576,9 @@ const char* cmd_tofstabilitythreshold(const String& cmd) {
 // ToF Command Registry
 // ============================================================================
 
-const char* cmd_tofdevicepollms(const String& args) {
+const char* cmd_tofdevicepollms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: tofDevicePollMs <100..2000>";
   int v = valStr.toInt();
@@ -597,11 +590,11 @@ const char* cmd_tofdevicepollms(const String& args) {
 }
 
 // External device-level command handler (defined in i2c_system.cpp)
-// extern const char* cmd_tofdevicepollms(const String& cmd);
+// extern const char* cmd_tofdevicepollms(const String& argsInput);
 
-const char* cmd_tofautostart(const String& args) {
+const char* cmd_tofautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args; arg.trim();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
     return gSettings.tofAutoStart ? "[ToF] Auto-start: enabled" : "[ToF] Auto-start: disabled";
   }
@@ -657,7 +650,7 @@ static CommandModuleRegistrar _tof_cmd_registrar(tofCommands, tofCommandsCount, 
 //
 // Cleanup Strategy:
 //   1. Check tofEnabled flag at loop start
-//   2. Acquire i2cMutex to prevent race conditions during cleanup
+//   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Stop measurement, delete sensor object, and invalidate cache
 //   4. Release mutex and delete task
 // ============================================================================

@@ -50,14 +50,14 @@ extern volatile UBaseType_t gTofWatermarkMin;
 extern volatile UBaseType_t gTofWatermarkNow;
 
 // ToF sensor command handlers
-const char* cmd_tof(const String& cmd);
-const char* cmd_tofstart(const String& cmd);
-const char* cmd_tofstop(const String& cmd);
-const char* cmd_toftransitionms(const String& cmd);
-const char* cmd_tofmaxdistancemm(const String& cmd);
-const char* cmd_tofpollingms(const String& cmd);
-const char* cmd_tofstabilitythreshold(const String& cmd);
-const char* cmd_tofdevicepollms(const String& cmd);
+const char* cmd_tof(const String& argsInput);
+const char* cmd_tofstart(const String& argsInput);
+const char* cmd_tofstop(const String& argsInput);
+const char* cmd_toftransitionms(const String& argsInput);
+const char* cmd_tofmaxdistancemm(const String& argsInput);
+const char* cmd_tofpollingms(const String& argsInput);
+const char* cmd_tofstabilitythreshold(const String& argsInput);
+const char* cmd_tofdevicepollms(const String& argsInput);
 
 // ToF sensor state and control
 extern bool tofEnabled;

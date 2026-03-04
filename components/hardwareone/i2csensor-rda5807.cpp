@@ -438,19 +438,19 @@ void updateFMRadio() {
 // Command Handlers
 // ============================================================================
 
-const char* cmd_fmradio(const String& args) {
+const char* cmd_fmradio(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  DEBUG_FMRADIOF("[FM_RADIO] Command received: '%s'", args.c_str());
+  DEBUG_FMRADIOF("[FM_RADIO] Command received: '%s'", argsInput.c_str());
   
   // Parse subcommand
-  String sub = args;
+  String sub = argsInput;
   sub.trim();
   
   if (sub.length() == 0) {
     // No subcommand - show status
     DEBUG_FMRADIOF("[FM_RADIO] No subcommand, showing status");
-    return cmd_fmradio_status(args);
+    return cmd_fmradio_status(argsInput);
   }
   
   // Extract subcommand and sub-args
@@ -482,7 +482,7 @@ const char* cmd_fmradio(const String& args) {
   return "Usage: fmradio [start|stop|tune <freq>|seek [up|down]|volume <0-15>|mute|status]";
 }
 
-const char* cmd_fmradio_start(const String& cmd) {
+const char* cmd_fmradio_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (fmRadioEnabled) {
@@ -495,7 +495,7 @@ const char* cmd_fmradio_start(const String& cmd) {
   return "FM Radio start queued";
 }
 
-const char* cmd_fmradio_stop(const String& cmd) {
+const char* cmd_fmradio_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!fmRadioEnabled) {
@@ -509,11 +509,11 @@ const char* cmd_fmradio_stop(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_fmradio_tune(const String& args) {
+const char* cmd_fmradio_tune(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Parse frequency: "103.9" or "10390"
-  String freqStr = args;
+  String freqStr = argsInput;
   freqStr.trim();
   
   if (freqStr.length() == 0) {
@@ -555,7 +555,7 @@ const char* cmd_fmradio_tune(const String& args) {
   return "OK";
 }
 
-const char* cmd_fmradio_seek(const String& args) {
+const char* cmd_fmradio_seek(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!fmRadioConnected || !radioInitialized) {
@@ -564,7 +564,7 @@ const char* cmd_fmradio_seek(const String& args) {
   
   bool seekUp = true;  // Default seek up
   
-  String dir = args;
+  String dir = argsInput;
   dir.trim();
   dir.toLowerCase();
   if (dir == "down") {
@@ -598,11 +598,11 @@ const char* cmd_fmradio_seek(const String& args) {
   return "OK";
 }
 
-const char* cmd_fmradio_volume(const String& args) {
+const char* cmd_fmradio_volume(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Parse volume: "8"
-  String volStr = args;
+  String volStr = argsInput;
   volStr.trim();
   
   if (volStr.length() == 0) {
@@ -634,7 +634,7 @@ const char* cmd_fmradio_volume(const String& args) {
   return "OK";
 }
 
-const char* cmd_fmradio_mute(const String& args) {
+const char* cmd_fmradio_mute(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!fmRadioConnected || !radioInitialized) {
@@ -642,7 +642,7 @@ const char* cmd_fmradio_mute(const String& args) {
   }
   
   // Check if this is "mute" or "unmute" command
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   arg.toLowerCase();
   bool shouldMute = (arg != "off" && arg != "unmute");  // Default to mute unless explicitly unmute
@@ -656,7 +656,7 @@ const char* cmd_fmradio_mute(const String& args) {
   return "OK";
 }
 
-const char* cmd_fmradio_status(const String& cmd) {
+const char* cmd_fmradio_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
@@ -716,9 +716,9 @@ int buildFMRadioDataJSON(char* buf, size_t bufSize) {
 // Command Registration
 // ============================================================================
 
-const char* cmd_fmradioautostart(const String& args) {
+const char* cmd_fmradioautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args; arg.trim();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
     return gSettings.fmRadioAutoStart ? "[FM Radio] Auto-start: enabled" : "[FM Radio] Auto-start: disabled";
   }

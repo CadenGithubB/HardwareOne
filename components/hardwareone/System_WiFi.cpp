@@ -38,13 +38,6 @@ extern volatile uint32_t gOutputFlags;
 
 // WebMirror buffer not used in wifi_system - removed to avoid incomplete type issues
 
-// Validation macro
-#define RETURN_VALID_IF_VALIDATE_CSTR() \
-  do { \
-    extern bool gCLIValidateOnly; \
-    if (gCLIValidateOnly) return "VALID"; \
-  } while(0)
-
 // ============================================================================
 // Forward Declarations for WiFi Helper Functions
 // ============================================================================
@@ -71,7 +64,7 @@ static bool wifiInitialized = false;
 // WiFi Command Handlers
 // ============================================================================
 
-const char* cmd_wifiinfo(const String& cmd) {
+const char* cmd_wifiinfo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (WiFi.isConnected()) {
@@ -95,7 +88,7 @@ const char* cmd_wifiinfo(const String& cmd) {
   return "[WiFi] Status displayed";
 }
 
-const char* cmd_wifilist(const String& cmd) {
+const char* cmd_wifilist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Networks already loaded from settings.json by readSettingsJson()
@@ -302,7 +295,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
   return "ERROR";
 }
 
-const char* cmd_wifidisconnect(const String& cmd) {
+const char* cmd_wifidisconnect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Stop HTTP server to free heap
@@ -325,7 +318,7 @@ const char* cmd_wifidisconnect(const String& cmd) {
  #endif
 }
 
-const char* cmd_wifiscan(const String& command) {
+const char* cmd_wifiscan(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Ensure WiFi is initialized (lazy init) before scanning
@@ -333,7 +326,7 @@ const char* cmd_wifiscan(const String& command) {
     return "ERROR: Failed to initialize WiFi";
   }
   
-  String args = command;
+  String args = argsInput;
   args.trim();
   bool json = (args == "json");
   int n = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
@@ -367,11 +360,11 @@ const char* cmd_wifiscan(const String& command) {
   return getDebugBuffer();
 }
 
-const char* cmd_wifitxpower(const String& args) {
+const char* cmd_wifitxpower(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: wifitxpower <dBm>";
   float dBm = valStr.toFloat();
@@ -387,7 +380,7 @@ const char* cmd_wifitxpower(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_wifigettxpower(const String& cmd) {
+const char* cmd_wifigettxpower(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
@@ -401,10 +394,10 @@ const char* cmd_wifigettxpower(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_wifiautoreconnect(const String& args) {
+const char* cmd_wifiautoreconnect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   int v = valStr.toInt();
   setSetting(gSettings.wifiAutoReconnect, (bool)(v != 0));
@@ -776,7 +769,7 @@ bool connectWiFiSSID(const String& ssid, unsigned long timeoutMs) {
 // HTTP Server and NTP Commands
 // ============================================================================
 
-const char* cmd_ntpsync(const String& cmd) {
+const char* cmd_ntpsync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Allow any authenticated user to sync NTP
   bool ok = syncNTPAndResolve();
@@ -784,7 +777,7 @@ const char* cmd_ntpsync(const String& cmd) {
 }
 
 #if ENABLE_HTTP_SERVER
-const char* cmd_httpstart(const String& cmd) {
+const char* cmd_httpstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!WiFi.isConnected()) {
@@ -805,7 +798,7 @@ const char* cmd_httpstart(const String& cmd) {
   return "ERROR: Failed to start HTTP server";
 }
 
-const char* cmd_httpstop(const String& cmd) {
+const char* cmd_httpstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (server == NULL) {
@@ -821,7 +814,7 @@ const char* cmd_httpstop(const String& cmd) {
   return "[HTTP] Server stopped successfully";
 }
 
-const char* cmd_httpstatus(const String& cmd) {
+const char* cmd_httpstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (server != NULL) {
@@ -833,9 +826,9 @@ const char* cmd_httpstatus(const String& cmd) {
 
 #else
 
-const char* cmd_httpstart(const String& cmd) { (void)cmd; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
-const char* cmd_httpstop(const String& cmd) { (void)cmd; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
-const char* cmd_httpstatus(const String& cmd) { (void)cmd; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server: DISABLED"; }
+const char* cmd_httpstart(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
+const char* cmd_httpstop(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
+const char* cmd_httpstatus(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server: DISABLED"; }
 
 #endif
 

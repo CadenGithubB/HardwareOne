@@ -59,6 +59,6 @@ bool isFeatureCompiled(const FeatureEntry* feature);
 bool canToggleFeature(const FeatureEntry* feature);
 
 // CLI command
-const char* cmd_features(const String& cmd);
+const char* cmd_features(const String& argsInput);
 
 #endif // SYSTEM_FEATURE_REGISTRY_H

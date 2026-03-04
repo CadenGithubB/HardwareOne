@@ -781,7 +781,7 @@ extern httpd_handle_t server;
 #endif
 
 // Forward declaration for command execution
-extern void runUnifiedSystemCommand(const String& cmd);
+extern void runUnifiedSystemCommand(const String& argsInput);
 
 // ============================================================================
 // Quick Settings - Dynamic item registry based on compile flags

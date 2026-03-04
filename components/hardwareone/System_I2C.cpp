@@ -128,12 +128,6 @@ void initI2CManager() {
   // Print device registry capacity
   INFO_I2CF("[I2C_REGISTRY] Device manager initialized with capacity for %d devices", I2CDeviceManager::MAX_DEVICES);
   
-  // Bridge legacy i2cMutex to manager's busMutex for backward compatibility
-  extern SemaphoreHandle_t i2cMutex;
-  if (mgr && mgr->getBusMutex()) {
-    i2cMutex = mgr->getBusMutex();
-    INFO_I2CF("Bridged legacy i2cMutex to manager busMutex");
-  }
   
   // Pre-register only compiled-in devices from database with their timing parameters
   int compiledCount = 0;
@@ -171,7 +165,6 @@ TaskHandle_t queueProcessorTask = nullptr;
 
 // External dependencies from .ino
 extern Settings gSettings;
-extern bool gCLIValidateOnly;
 extern TaskHandle_t imuTaskHandle;
 extern unsigned long imuLastStopTime;
 // Clock management is now unified through I2CDeviceManager
@@ -300,28 +293,28 @@ static const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* disp
   }
 }
 
-const char* cmd_thermalstart_queued(const String& cmd) {
+const char* cmd_thermalstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return cmd_sensorstart_queued(I2C_DEVICE_THERMAL, "Thermal", thermalEnabled, "openthermal@enqueue");
 }
 
-const char* cmd_tofstart_queued(const String& cmd) {
+const char* cmd_tofstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return cmd_sensorstart_queued(I2C_DEVICE_TOF, "ToF", tofEnabled, "opentof@enqueue");
 }
 
-const char* cmd_imustart_queued(const String& cmd) {
+const char* cmd_imustart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return cmd_sensorstart_queued(I2C_DEVICE_IMU, "IMU", imuEnabled, "openimu@enqueue");
 }
 
-const char* cmd_apdsstart_queued(const String& cmd) {
+const char* cmd_apdsstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return cmd_sensorstart_queued(I2C_DEVICE_APDS, "APDS", apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled, "openapds@enqueue");
 }
 
 extern bool gamepadEnabled;
-const char* cmd_gamepadstart_queued(const String& cmd) {
+const char* cmd_gamepadstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return cmd_sensorstart_queued(I2C_DEVICE_GAMEPAD, "Gamepad", gamepadEnabled, "opengamepad@enqueue");
 }
@@ -375,7 +368,7 @@ void i2cResetGracePeriod(uint8_t address) {
   if (dev) dev->resetGracePeriod();
 }
 
-const char* cmd_i2chealth(const String& cmd) {
+const char* cmd_i2chealth(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
@@ -420,7 +413,7 @@ const char* cmd_i2chealth(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_i2cmetrics(const String& cmd) {
+const char* cmd_i2cmetrics(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
@@ -534,9 +527,9 @@ String identifySensor(uint8_t address) {
 
 // ========== I2C Infrastructure Commands ==========
 
-const char* cmd_i2csdapin(const String& args) {
+const char* cmd_i2csdapin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: i2cSdaPin <0..39> (reboot required)";
   int v = valStr.toInt();
@@ -547,9 +540,9 @@ const char* cmd_i2csdapin(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_i2csclpin(const String& args) {
+const char* cmd_i2csclpin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: i2cSclPin <0..39> (reboot required)";
   int v = valStr.toInt();
@@ -560,9 +553,9 @@ const char* cmd_i2csclpin(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_i2cclockthermalhz(const String& args) {
+const char* cmd_i2cclockthermalhz(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: i2cClockThermalHz <100000..1000000>";
   int v = valStr.toInt();
@@ -573,9 +566,9 @@ const char* cmd_i2cclockthermalhz(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_i2cclocktofhz(const String& args) {
+const char* cmd_i2cclocktofhz(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: i2cClockToFHz <50000..400000>";
   int v = valStr.toInt();
@@ -865,11 +858,11 @@ static void scanBusForDevices(uint8_t busNumber) {
   TwoWire* wire = (busNumber == 0) ? &Wire : &Wire1;
 
   // Prevent concurrent I2C usage (e.g. gamepad/OLED tasks) while reinitializing/scanning
-  extern SemaphoreHandle_t i2cMutex;
   extern volatile bool gSensorPollingPaused;
+  SemaphoreHandle_t busMutex = I2CDeviceManager::getInstance() ? I2CDeviceManager::getInstance()->getBusMutex() : nullptr;
   bool prevPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
-  bool locked = (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
+  bool locked = (busMutex && xSemaphoreTake(busMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
   if (!locked) {
     gSensorPollingPaused = prevPaused;
     return;
@@ -893,7 +886,7 @@ static void scanBusForDevices(uint8_t busNumber) {
     }
   }
 
-  if (i2cMutex) xSemaphoreGive(i2cMutex);
+  if (locked) xSemaphoreGive(busMutex);
   gSensorPollingPaused = prevPaused;
 }
 
@@ -902,11 +895,11 @@ static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, 
   TwoWire* wire = (busNumber == 0) ? &Wire : &Wire1;
 
   // Prevent concurrent I2C usage (e.g. gamepad/OLED tasks) while reinitializing/scanning
-  extern SemaphoreHandle_t i2cMutex;
   extern volatile bool gSensorPollingPaused;
+  SemaphoreHandle_t busMutex = I2CDeviceManager::getInstance() ? I2CDeviceManager::getInstance()->getBusMutex() : nullptr;
   bool prevPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
-  bool locked = (i2cMutex && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
+  bool locked = (busMutex && xSemaphoreTake(busMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
   if (!locked) {
     gSensorPollingPaused = prevPaused;
     return;
@@ -934,7 +927,7 @@ static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, 
     }
   }
 
-  if (i2cMutex) xSemaphoreGive(i2cMutex);
+  if (locked) xSemaphoreGive(busMutex);
   gSensorPollingPaused = prevPaused;
 }
 
@@ -1136,10 +1129,10 @@ const char* cmd_devicefile(const String& originalCmd) {
   return "[I2C] Registry JSON displayed";
 }
 
-const char* cmd_sensors(const String& argsIn) {
+const char* cmd_sensors(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   broadcastOutput("I2C Sensor Database:");
@@ -1206,10 +1199,10 @@ const char* cmd_sensors(const String& argsIn) {
   return "[I2C] Sensor list displayed";
 }
 
-const char* cmd_sensorinfo(const String& argsIn) {
+const char* cmd_sensorinfo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   if (args.length() == 0) {
@@ -1334,11 +1327,10 @@ static uint32_t getEnabledSensorHeapEstimate() {
   return total;
 }
 
-static const char* cmd_sensorautostart(const String& argsIn) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+static const char* cmd_sensorautostart(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   // No args - show current settings with heap estimates
@@ -1451,10 +1443,10 @@ static const char* cmd_sensorautostart(const String& argsIn) {
 // ============================================================================
 
 // Forward declarations for queued sensor start commands (from main .ino)
-extern const char* cmd_thermalstart_queued(const String& cmd);
-extern const char* cmd_tofstart_queued(const String& cmd);
-extern const char* cmd_imustart_queued(const String& cmd);
-extern const char* cmd_apdsstart_queued(const String& cmd);
+extern const char* cmd_thermalstart_queued(const String& argsInput);
+extern const char* cmd_tofstart_queued(const String& argsInput);
+extern const char* cmd_imustart_queued(const String& argsInput);
+extern const char* cmd_apdsstart_queued(const String& argsInput);
 
 // ============================================================================
 // I2C Command Registry

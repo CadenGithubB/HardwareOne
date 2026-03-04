@@ -201,7 +201,7 @@ char getBatteryIcon() {
   return 'E';  // Empty/Critical
 }
 
-const char* cmd_battery_status(const String& args) {
+const char* cmd_battery_status(const String& argsInput) {
   updateBattery();
   
   broadcastOutput("");
@@ -250,7 +250,7 @@ const char* cmd_battery_status(const String& args) {
   return "Battery status displayed above";
 }
 
-const char* cmd_battery_calibrate(const String& args) {
+const char* cmd_battery_calibrate(const String& argsInput) {
   // Re-read ADC characteristics
   if (adc_chars) {
     free(adc_chars);

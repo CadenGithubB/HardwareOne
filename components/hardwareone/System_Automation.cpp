@@ -58,7 +58,7 @@
 extern Settings gSettings;
 extern bool gCLIValidateOnly;
 // gDebugBuffer, gDebugFlags, ensureDebugBuffer now from debug_system.h
-extern void runUnifiedSystemCommand(const String& cmd);
+extern void runUnifiedSystemCommand(const String& argsInput);
 
 // Async command submission types (matches HardwareOne.cpp / System_Utils.cpp)
 typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
@@ -80,6 +80,9 @@ struct Command {
 };
 extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
 
+// The createdBy user for the currently executing automation (set before each exec loop)
+static String gCurrentAutomationUser;
+
 // Queue an automation sub-command through the FreeRTOS command queue (async, non-blocking).
 // This avoids deadlock when already on cmd_exec task and avoids blocking the main loop.
 static void queueAutomationSubCommand(const char* cmd) {
@@ -87,7 +90,8 @@ static void queueAutomationSubCommand(const char* cmd) {
   uc.line = cmd;
   uc.ctx.origin = ORIGIN_SYSTEM;
   uc.ctx.auth.transport = SOURCE_INTERNAL;
-  uc.ctx.auth.user = "system";
+  uc.ctx.auth.user = gCurrentAutomationUser;
+  DEBUGF(DEBUG_AUTOMATIONS, "[autos queue] Queueing cmd='%s' with user='%s'", cmd, gCurrentAutomationUser.c_str());
   uc.ctx.auth.ip = "";
   uc.ctx.auth.path = "/automation";
   uc.ctx.auth.sid = "";
@@ -700,11 +704,17 @@ void runAutomationsOnBoot() {
       DEBUGF(DEBUG_AUTOMATIONS, "[automations] Running boot automation: %s", autoName.c_str());
     }
 
+    {
+      char _createdByBuf[64];
+      extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
+      gCurrentAutomationUser = _createdByBuf;
+    }
+
     if (gAutoLogActive) {
       gAutoLogAutomationName = autoName;
       char startMsg[256];
-      snprintf(startMsg, sizeof(startMsg), "Boot automation started: ID=%ld Name=%s User=system",
-               id, autoName.c_str());
+      snprintf(startMsg, sizeof(startMsg), "Boot automation started: ID=%ld Name=%s User=%s",
+               id, autoName.c_str(), gCurrentAutomationUser.c_str());
       appendAutoLogEntry("AUTO_START", startMsg);
     }
 
@@ -718,6 +728,7 @@ void runAutomationsOnBoot() {
         broadcastOutput(outMsg);
       }
     }
+    gCurrentAutomationUser = "";
 
     // Free allocated command strings
     for (int ci = 0; ci < cmdsCount; ++ci) {
@@ -781,14 +792,14 @@ void resumeAutomationSystem() {
 }
 
 // Execute automation command (queues through FreeRTOS command queue, non-blocking)
-void runAutomationCommandUnified(const String& cmd) {
+void runAutomationCommandUnified(const String& argsInput) {
   gInAutomationContext = true;
-  queueAutomationSubCommand(cmd.c_str());
+  queueAutomationSubCommand(argsInput.c_str());
   gInAutomationContext = false;
 }
 
 // Automation command handlers
-const char* cmd_automation_list(const String& cmd) {
+const char* cmd_automation_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String json;
   if (!readText(AUTOMATIONS_JSON_FILE, json)) {
@@ -799,11 +810,11 @@ const char* cmd_automation_list(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_automation_add(const String& argsIn) {
+const char* cmd_automation_add(const String& argsInput) {
   // Do not early-return on validate; we want to perform full argument checks
   bool validateOnly = gCLIValidateOnly;
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   auto getVal = [&](const String& key) {
@@ -1027,6 +1038,22 @@ const char* cmd_automation_add(const String& argsIn) {
         int oS = json.lastIndexOf('{', idPos);
         int oE = (oS >= 0) ? findJsonObjectEnd(json, oS) : -1;
         if (oS >= 0 && oE >= 0) {
+          // Authorization check for edit: extract createdBy from existing automation
+          String existingObj = json.substring(oS, oE + 1);
+          char existingCreatedByBuf[64];
+          extractJsonString(existingObj.c_str(), "\"createdBy\"", existingCreatedByBuf, sizeof(existingCreatedByBuf));
+          String existingCreatedBy = existingCreatedByBuf;
+          
+          DEBUGF(DEBUG_AUTOMATIONS, "[autos add/edit] Editing existing id=%lu createdBy='%s' requestedBy='%s' isAdmin=%d",
+                 overrideId, existingCreatedBy.c_str(), gExecUser.c_str(), gExecIsAdmin);
+          
+          if (!gExecIsAdmin && existingCreatedBy != gExecUser) {
+            DEBUGF(DEBUG_AUTOMATIONS, "[autos add/edit] AUTHORIZATION DENIED: non-admin '%s' cannot edit automation created by '%s'",
+                   gExecUser.c_str(), existingCreatedBy.c_str());
+            broadcastOutput("Error: You do not have permission to edit this automation. Only the creator or an admin can edit it.");
+            return "ERROR";
+          }
+          DEBUGF(DEBUG_AUTOMATIONS, "[autos add/edit] AUTHORIZATION OK for edit");
           String arrTmp = json.substring(aS + 1, aE); arrTmp.trim();
           if (arrTmp.indexOf('{') == arrTmp.lastIndexOf('{')) {
             json = json.substring(0, aS + 1) + json.substring(aE);
@@ -1143,8 +1170,12 @@ const char* cmd_automation_add(const String& argsIn) {
   
   // Build final automation object
   String obj = "{\n";
+  extern String gExecUser;
+  String createdBy = gExecUser;
+  DEBUGF(DEBUG_AUTOMATIONS, "[autos add] Storing automation id=%ld name='%s' createdBy='%s'", id, name.c_str(), createdBy.c_str());
   obj += "  \"id\": " + String(id) + ",\n";
   obj += "  \"name\": \"" + jsonEscape(name) + "\",\n";
+  obj += "  \"createdBy\": \"" + jsonEscape(createdBy) + "\",\n";
   obj += "  \"enabled\": " + String(enabled ? "true" : "false") + ",\n";
   if (condition.length() > 0) obj += "  \"condition\": \"" + jsonEscape(condition) + "\",\n";
   obj += sched + ",\n";
@@ -1170,10 +1201,10 @@ const char* cmd_automation_add(const String& argsIn) {
   return "OK";
 }
 
-const char* cmd_automation_enable_disable(const String& argsIn, bool enable) {
+const char* cmd_automation_enable_disable(const String& argsInput, bool enable) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   auto getVal = [&](const String& key) {
@@ -1206,6 +1237,33 @@ const char* cmd_automation_enable_disable(const String& argsIn, bool enable) {
     return "ERROR";
   }
   
+  // Authorization check: extract createdBy and verify user can modify this automation
+  char createdByBuf[64];
+  int objStart = json.lastIndexOf('{', idPos);
+  if (objStart < 0) {
+    broadcastOutput("Error: malformed JSON");
+    return "ERROR";
+  }
+  int objEnd = findJsonObjectEnd(json, objStart);
+  if (objEnd < 0) {
+    broadcastOutput("Error: malformed JSON");
+    return "ERROR";
+  }
+  String automationObj = json.substring(objStart, objEnd + 1);
+  extractJsonString(automationObj.c_str(), "\"createdBy\"", createdByBuf, sizeof(createdByBuf));
+  String createdBy = createdByBuf;
+  
+  DEBUGF(DEBUG_AUTOMATIONS, "[autos %s] id=%s createdBy='%s' requestedBy='%s' isAdmin=%d",
+         enable ? "enable" : "disable", idStr.c_str(), createdBy.c_str(), gExecUser.c_str(), gExecIsAdmin);
+  
+  if (!gExecIsAdmin && createdBy != gExecUser) {
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos %s] AUTHORIZATION DENIED: non-admin '%s' cannot modify automation created by '%s'",
+           enable ? "enable" : "disable", gExecUser.c_str(), createdBy.c_str());
+    broadcastOutput("Error: You do not have permission to modify this automation. Only the creator or an admin can modify it.");
+    return "ERROR";
+  }
+  DEBUGF(DEBUG_AUTOMATIONS, "[autos %s] AUTHORIZATION OK", enable ? "enable" : "disable");
+  
   int enabledPos = json.indexOf("\"enabled\":", idPos);
   if (enabledPos < 0) {
     broadcastOutput("Error: malformed automation");
@@ -1235,11 +1293,10 @@ const char* cmd_automation_enable_disable(const String& argsIn, bool enable) {
   return "OK";
 }
 
-const char* cmd_automation_delete(const String& argsIn) {
+const char* cmd_automation_delete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gExecIsAdmin) { broadcastOutput("Error: admin required"); return "ERROR"; }
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   auto getVal = [&](const String& key) {
@@ -1271,6 +1328,33 @@ const char* cmd_automation_delete(const String& argsIn) {
     return "ERROR";
   }
   
+  // Authorization check: extract createdBy and verify user can delete this automation
+  char createdByBuf[64];
+  int objStart = json.lastIndexOf('{', idPos);
+  if (objStart < 0) {
+    broadcastOutput("Error: malformed JSON");
+    return "ERROR";
+  }
+  int objEnd = findJsonObjectEnd(json, objStart);
+  if (objEnd < 0) {
+    broadcastOutput("Error: malformed JSON");
+    return "ERROR";
+  }
+  String automationObj = json.substring(objStart, objEnd + 1);
+  extractJsonString(automationObj.c_str(), "\"createdBy\"", createdByBuf, sizeof(createdByBuf));
+  String createdBy = createdByBuf;
+  
+  DEBUGF(DEBUG_AUTOMATIONS, "[autos delete] id=%s createdBy='%s' requestedBy='%s' isAdmin=%d",
+         idStr.c_str(), createdBy.c_str(), gExecUser.c_str(), gExecIsAdmin);
+  
+  if (!gExecIsAdmin && createdBy != gExecUser) {
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos delete] AUTHORIZATION DENIED: non-admin '%s' cannot delete automation created by '%s'",
+           gExecUser.c_str(), createdBy.c_str());
+    broadcastOutput("Error: You do not have permission to delete this automation. Only the creator or an admin can delete it.");
+    return "ERROR";
+  }
+  DEBUGF(DEBUG_AUTOMATIONS, "[autos delete] AUTHORIZATION OK");
+  
   // Find array bounds
   int arrayStart = json.indexOf('[');
   if (arrayStart < 0) {
@@ -1280,18 +1364,6 @@ const char* cmd_automation_delete(const String& argsIn) {
   int arrayEnd = json.lastIndexOf(']');
   if (arrayEnd < 0) {
     broadcastOutput("Error: malformed JSON - no array end");
-    return "ERROR";
-  }
-  
-  // Find object bounds (depth-tracked to handle nested schedule sub-object)
-  int objStart = json.lastIndexOf('{', idPos);
-  if (objStart < 0) {
-    broadcastOutput("Error: malformed JSON");
-    return "ERROR";
-  }
-  int objEnd = findJsonObjectEnd(json, objStart);
-  if (objEnd < 0) {
-    broadcastOutput("Error: malformed JSON");
     return "ERROR";
   }
   
@@ -1339,10 +1411,10 @@ const char* cmd_automation_delete(const String& argsIn) {
   return "OK";
 }
 
-const char* cmd_automation_run(const String& argsIn) {
+const char* cmd_automation_run(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   auto getVal = [&](const String& key) {
@@ -1530,6 +1602,23 @@ const char* cmd_automation_run(const String& argsIn) {
     }
   }
   
+  {
+    char _createdByBuf[64];
+    extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
+    gCurrentAutomationUser = _createdByBuf;
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos run] Extracted createdBy='%s' for automation id=%s", gCurrentAutomationUser.c_str(), idStr.c_str());
+  }
+
+  // Authorization: non-admins may only trigger automations they created themselves
+  if (!gExecIsAdmin && gCurrentAutomationUser != gExecUser) {
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION DENIED: user='%s' isAdmin=%d tried to run automation created by '%s'",
+           gExecUser.c_str(), gExecIsAdmin, gCurrentAutomationUser.c_str());
+    broadcastOutput("Error: Admin required to trigger automation created by " + gCurrentAutomationUser);
+    return "Error: Admin required";
+  }
+  DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION OK: user='%s' isAdmin=%d running automation created by '%s'",
+         gExecUser.c_str(), gExecIsAdmin, gCurrentAutomationUser.c_str());
+
   // Execute all commands (with conditional logic support)
   for (int ci = 0; ci < cmdsCount; ++ci) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s cmd[%d]='%s'", idStr.c_str(), ci, cmdsList[ci].c_str());
@@ -1548,6 +1637,7 @@ const char* cmd_automation_run(const String& argsIn) {
       broadcastOutput(String("[Automation ") + idStr + "] " + result);
     }
   }
+  gCurrentAutomationUser = "";
   
   // Advance nextAt after manual execution
   time_t now = time(nullptr);
@@ -1577,10 +1667,10 @@ const char* cmd_automation_run(const String& argsIn) {
 }
 
 // Main automation command dispatcher
-const char* cmd_automation(const String& argsIn) {
+const char* cmd_automation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   String argsLower = args;
   argsLower.toLowerCase();
@@ -1874,11 +1964,17 @@ bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userD
         }
       }
 
+      {
+        char _createdByBuf[64];
+        extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
+        gCurrentAutomationUser = _createdByBuf;
+      }
+
       // Log scheduled automation start if logging is active
       if (gAutoLogActive) {
         gAutoLogAutomationName = autoName;
         if (ensureDebugBuffer()) {
-          snprintf(getDebugBuffer(), 1024, "Scheduled automation started: ID=%lu Name=%s User=system", id, autoName.c_str());
+          snprintf(getDebugBuffer(), 1024, "Scheduled automation started: ID=%lu Name=%s User=%s", id, autoName.c_str(), gCurrentAutomationUser.c_str());
           appendAutoLogEntry("AUTO_START", String(getDebugBuffer()));
         }
       }
@@ -1895,6 +1991,7 @@ bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userD
           BROADCAST_PRINTF("[Scheduled Automation %lu] %s", id, result);
         }
       }
+      gCurrentAutomationUser = "";
       ctx->executed++;
 
       // Log scheduled automation end if logging is active
@@ -2850,13 +2947,12 @@ extern bool appendAutoLogEntry(const char* type, const String& message);
 // Automation Logging Command
 // ============================================================================
 
-const char* cmd_autolog(const String& argsIn) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_autolog(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   if (args.startsWith("start ")) {
@@ -2909,8 +3005,8 @@ const char* cmd_autolog(const String& argsIn) {
 }
 
 // Validate conditions command
-const char* cmd_validate_conditions(const String& cmd) {
-  String conditions = cmd;
+const char* cmd_validate_conditions(const String& argsInput) {
+  String conditions = argsInput;
   conditions.trim();
   const char* validationResult = validateConditionalHierarchy(conditions.c_str());
   // If we're in validation mode and validation passes, return "VALID"
@@ -3148,10 +3244,16 @@ void schedulerTickMinute() {
           }
         }
 
+        {
+          char _createdByBuf[64];
+          extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
+          gCurrentAutomationUser = _createdByBuf;
+        }
+
         // Log scheduled automation start if logging is active
         if (gAutoLogActive) {
           gAutoLogAutomationName = autoName;
-          String startMsg = "Scheduled automation started: ID=" + String(id) + " Name=" + autoName + " User=system";
+          String startMsg = "Scheduled automation started: ID=" + String(id) + " Name=" + autoName + " User=" + gCurrentAutomationUser;
           appendAutoLogEntry("AUTO_START", startMsg);
         }
 
@@ -3167,6 +3269,7 @@ void schedulerTickMinute() {
             broadcastOutput("[Scheduled Automation " + String(id) + "] " + String(result));
           }
         }
+        gCurrentAutomationUser = "";
         executed++;
 
         // Log scheduled automation end if logging is active
@@ -3232,10 +3335,10 @@ void stopAutomationScheduler() {
 // Print / Broadcast Command
 // ============================================================================
 
-static const char* cmd_print(const String& args) {
+static const char* cmd_print(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (args.length() == 0) return "Usage: print <message>";
-  broadcastOutput(args.c_str());
+  if (argsInput.length() == 0) return "Usage: print <message>";
+  broadcastOutput(argsInput.c_str());
   return "Message printed";
 }
 

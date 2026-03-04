@@ -784,12 +784,12 @@ const char* buildCameraStatusJson() {
 }
 
 // Command handlers
-const char* cmd_camera(const String& cmd) {
+const char* cmd_camera(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return buildCameraStatusJson();
 }
 
-const char* cmd_camerastart(const String& cmd) {
+const char* cmd_camerastart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (initCamera()) {
     return "Camera started successfully";
@@ -797,13 +797,13 @@ const char* cmd_camerastart(const String& cmd) {
   return "Camera initialization failed";
 }
 
-const char* cmd_camerastop(const String& cmd) {
+const char* cmd_camerastop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   stopCamera();
   return "Camera stopped";
 }
 
-const char* cmd_cameracapture(const String& cmd) {
+const char* cmd_cameracapture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) {
     return "Camera not enabled - run opencamera first";
@@ -820,7 +820,7 @@ const char* cmd_cameracapture(const String& cmd) {
   return "Frame capture failed";
 }
 
-const char* cmd_camerares(const String& args) {
+const char* cmd_camerares(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Parse resolution argument
@@ -872,10 +872,10 @@ const char* cmd_camerares(const String& args) {
 }
 
 // Numeric framesize command for settings UI (accepts framesize enum value directly)
-const char* cmd_cameraframesize(const String& args) {
+const char* cmd_cameraframesize(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -906,10 +906,10 @@ const char* cmd_cameraframesize(const String& args) {
   return result;
 }
 
-const char* cmd_cameraquality(const String& args) {
+const char* cmd_cameraquality(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -940,7 +940,7 @@ const char* cmd_cameraquality(const String& args) {
   return result;
 }
 
-const char* cmd_cameratiny(const String& cmd) {
+const char* cmd_cameratiny(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) {
     return "Camera not enabled - run opencamera first";
@@ -977,11 +977,11 @@ static bool applyCameraSetting(const char* name, int value, int minVal, int maxV
   return false;
 }
 
-const char* cmd_camerabrightness(const String& args) {
+const char* cmd_camerabrightness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1001,11 +1001,11 @@ const char* cmd_camerabrightness(const String& args) {
   return "Failed (use -2 to 2)";
 }
 
-const char* cmd_cameracontrast(const String& args) {
+const char* cmd_cameracontrast(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1025,11 +1025,11 @@ const char* cmd_cameracontrast(const String& args) {
   return "Failed (use -2 to 2)";
 }
 
-const char* cmd_camerasaturation(const String& args) {
+const char* cmd_camerasaturation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1049,11 +1049,11 @@ const char* cmd_camerasaturation(const String& args) {
   return "Failed (use -2 to 2)";
 }
 
-const char* cmd_camerawb(const String& args) {
+const char* cmd_camerawb(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1075,11 +1075,11 @@ const char* cmd_camerawb(const String& args) {
   return "Failed to set WB mode";
 }
 
-const char* cmd_camerasharpness(const String& args) {
+const char* cmd_camerasharpness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1101,11 +1101,11 @@ const char* cmd_camerasharpness(const String& args) {
   return "Failed (OV3660 only, use -2 to 2)";
 }
 
-const char* cmd_cameradenoise(const String& args) {
+const char* cmd_cameradenoise(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1127,11 +1127,11 @@ const char* cmd_cameradenoise(const String& args) {
   return "Failed to set denoise";
 }
 
-const char* cmd_cameraeffect(const String& args) {
+const char* cmd_cameraeffect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1153,11 +1153,11 @@ const char* cmd_cameraeffect(const String& args) {
   return "Failed to set effect";
 }
 
-const char* cmd_cameraexposure(const String& args) {
+const char* cmd_cameraexposure(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1179,7 +1179,7 @@ const char* cmd_cameraexposure(const String& args) {
   return "Failed to set AE level";
 }
 
-const char* cmd_cameraaec(const String& args) {
+const char* cmd_cameraaec(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
 
@@ -1203,10 +1203,10 @@ const char* cmd_cameraaec(const String& args) {
   return "Failed";
 }
 
-const char* cmd_camerastreaminterval(const String& args) {
+const char* cmd_camerastreaminterval(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1224,11 +1224,11 @@ const char* cmd_camerastreaminterval(const String& args) {
   return buf;
 }
 
-const char* cmd_cameraaecvalue(const String& args) {
+const char* cmd_cameraaecvalue(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
 
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1250,7 +1250,7 @@ const char* cmd_cameraaecvalue(const String& args) {
   return "Failed";
 }
 
-const char* cmd_cameraagc(const String& args) {
+const char* cmd_cameraagc(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
 
@@ -1274,11 +1274,11 @@ const char* cmd_cameraagc(const String& args) {
   return "Failed";
 }
 
-const char* cmd_cameraagcgain(const String& args) {
+const char* cmd_cameraagcgain(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
 
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1300,7 +1300,7 @@ const char* cmd_cameraagcgain(const String& args) {
   return "Failed";
 }
 
-const char* cmd_camerahmirror(const String& args) {
+const char* cmd_camerahmirror(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
@@ -1322,7 +1322,7 @@ const char* cmd_camerahmirror(const String& args) {
   return "Failed";
 }
 
-const char* cmd_cameravflip(const String& args) {
+const char* cmd_cameravflip(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
@@ -1344,7 +1344,7 @@ const char* cmd_cameravflip(const String& args) {
   return "Failed";
 }
 
-const char* cmd_camerarotate(const String& args) {
+const char* cmd_camerarotate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not started";
   
@@ -1374,7 +1374,7 @@ const char* cmd_camerarotate(const String& args) {
 // Camera Settings Commands
 // ============================================================================
 
-const char* cmd_cameraautostart(const String& args) {
+const char* cmd_cameraautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = args; arg.trim();
   if (arg.length() == 0) {
@@ -1391,9 +1391,9 @@ const char* cmd_cameraautostart(const String& args) {
   return "Usage: cameraautostart [on|off]";
 }
 
-const char* cmd_camerastoragelocation(const String& args) {
+const char* cmd_camerastoragelocation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1409,7 +1409,7 @@ const char* cmd_camerastoragelocation(const String& args) {
   return buf;
 }
 
-const char* cmd_cameracapturefolder(const String& args) {
+const char* cmd_cameracapturefolder(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String val = args;
   val.trim();
@@ -1425,9 +1425,9 @@ const char* cmd_cameracapturefolder(const String& args) {
   return buf;
 }
 
-const char* cmd_cameramaxstoredimages(const String& args) {
+const char* cmd_cameramaxstoredimages(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1443,7 +1443,7 @@ const char* cmd_cameramaxstoredimages(const String& args) {
   return buf;
 }
 
-const char* cmd_cameraautocapture(const String& args) {
+const char* cmd_cameraautocapture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = args;
   arg.trim();
@@ -1460,9 +1460,9 @@ const char* cmd_cameraautocapture(const String& args) {
   return enable ? "cameraAutoCapture set to true" : "cameraAutoCapture set to false";
 }
 
-const char* cmd_cameraautocaptureinterval(const String& args) {
+const char* cmd_cameraautocaptureinterval(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
@@ -1478,7 +1478,7 @@ const char* cmd_cameraautocaptureinterval(const String& args) {
   return buf;
 }
 
-const char* cmd_camerasendaftercapture(const String& args) {
+const char* cmd_camerasendaftercapture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = args;
   arg.trim();
@@ -1491,7 +1491,7 @@ const char* cmd_camerasendaftercapture(const String& args) {
   return enable ? "cameraSendAfterCapture set to true" : "cameraSendAfterCapture set to false";
 }
 
-const char* cmd_cameratargetdevice(const String& args) {
+const char* cmd_cameratargetdevice(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String val = args;
   val.trim();
@@ -1511,7 +1511,7 @@ const char* cmd_cameratargetdevice(const String& args) {
 #include "System_ImageManager.h"
 extern ImageManager gImageManager;
 
-const char* cmd_camerasave(const String& cmd) {
+const char* cmd_camerasave(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) {
     return "Camera not enabled - run opencamera first";

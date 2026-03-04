@@ -34,11 +34,11 @@ uint32_t getESPSRCommandCount();       // Returns total commands executed
 extern const CommandEntry espsrCommands[];
 extern const size_t espsrCommandsCount;
 
-const char* cmd_sr(const String& cmd);
-const char* cmd_sr_enable(const String& cmd);
-const char* cmd_sr_start(const String& cmd);
-const char* cmd_sr_stop(const String& cmd);
-const char* cmd_sr_status(const String& cmd);
+const char* cmd_sr(const String& argsInput);
+const char* cmd_sr_enable(const String& argsInput);
+const char* cmd_sr_start(const String& argsInput);
+const char* cmd_sr_stop(const String& argsInput);
+const char* cmd_sr_status(const String& argsInput);
 
 void registerESPSRHandlers(httpd_handle_t server);
 

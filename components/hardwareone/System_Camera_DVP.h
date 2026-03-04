@@ -46,22 +46,22 @@ uint8_t* captureTinyFrame(size_t* outLen);
 const char* buildCameraStatusJson();
 
 // Command handlers
-const char* cmd_camera(const String& cmd);
-const char* cmd_camerastart(const String& cmd);
-const char* cmd_camerastop(const String& cmd);
-const char* cmd_cameracapture(const String& cmd);
-const char* cmd_camerares(const String& cmd);
-const char* cmd_cameraquality(const String& cmd);
-const char* cmd_cameratiny(const String& cmd);
-const char* cmd_camerabrightness(const String& cmd);
-const char* cmd_cameracontrast(const String& cmd);
-const char* cmd_camerasaturation(const String& cmd);
-const char* cmd_camerawb(const String& cmd);
-const char* cmd_camerasharpness(const String& cmd);
-const char* cmd_cameradenoise(const String& cmd);
-const char* cmd_cameraeffect(const String& cmd);
-const char* cmd_camerahmirror(const String& cmd);
-const char* cmd_cameravflip(const String& cmd);
+const char* cmd_camera(const String& argsInput);
+const char* cmd_camerastart(const String& argsInput);
+const char* cmd_camerastop(const String& argsInput);
+const char* cmd_cameracapture(const String& argsInput);
+const char* cmd_camerares(const String& argsInput);
+const char* cmd_cameraquality(const String& argsInput);
+const char* cmd_cameratiny(const String& argsInput);
+const char* cmd_camerabrightness(const String& argsInput);
+const char* cmd_cameracontrast(const String& argsInput);
+const char* cmd_camerasaturation(const String& argsInput);
+const char* cmd_camerawb(const String& argsInput);
+const char* cmd_camerasharpness(const String& argsInput);
+const char* cmd_cameradenoise(const String& argsInput);
+const char* cmd_cameraeffect(const String& argsInput);
+const char* cmd_camerahmirror(const String& argsInput);
+const char* cmd_cameravflip(const String& argsInput);
 
 // Command registry
 struct CommandEntry;

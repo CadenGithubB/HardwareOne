@@ -329,7 +329,7 @@ static bool isSetPatternAvailable(String* outReason) {
 // CLI command: setpattern — triggers the OLED flow
 // ============================================================================
 
-static const char* cmd_setpattern(const String& cmd) {
+static const char* cmd_setpattern(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {

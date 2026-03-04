@@ -167,19 +167,19 @@ static void renderToggleList(int pageNum, const char* title,
   OLED_TRANSACTION(oledDisplay->display());
 }
 
-static void renderFeaturesPage() {
+void renderFeaturesPage() {
   renderToggleList(1, "Features",
                    getWizardFeaturesPage(), getWizardFeaturesPageCount(),
                    "Toggle", "Next", nullptr);
 }
 
-static void renderSensorsPage() {
+void renderSensorsPage() {
   renderToggleList(2, "Sensors",
                    getWizardSensorsPage(), getWizardSensorsPageCount(),
                    "Toggle", "Next", "Back");
 }
 
-static void renderNetworkPage() {
+void renderNetworkPage() {
   oledDisplay->clearDisplay();
   drawWizardHeader(3, 5, "Network");
   
@@ -222,7 +222,7 @@ static void renderNetworkPage() {
   OLED_TRANSACTION(oledDisplay->display());
 }
 
-static void renderSystemPage() {
+void renderSystemPage() {
   oledDisplay->clearDisplay();
   drawWizardHeader(4, 5, "System");
   
@@ -265,7 +265,7 @@ static void renderSystemPage() {
   OLED_TRANSACTION(oledDisplay->display());
 }
 
-static bool renderWiFiPage(SetupWizardResult& result) {
+bool renderWiFiPage(SetupWizardResult& result) {
   // Loop to allow going back from password entry to network selection
   // Returns true if WiFi setup completed (or skipped), false if user pressed B to go back
   while (true) {
@@ -312,15 +312,14 @@ static bool renderWiFiPage(SetupWizardResult& result) {
 // Joystick Input Helper
 // ============================================================================
 
-// Read joystick and return navigation events
-struct JoystickNav {
-  bool up;
-  bool down;
-  bool left;
-  bool right;
-};
+void resetWizardJoystickState() {
+  sJoyUpHeld = false;
+  sJoyDownHeld = false;
+  sJoyLeftHeld = false;
+  sJoyRightHeld = false;
+}
 
-static JoystickNav readJoystickNav() {
+JoystickNav readWizardJoystickNav() {
   JoystickNav nav = {false, false, false, false};
   
   if (xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
@@ -358,7 +357,7 @@ static JoystickNav readJoystickNav() {
 // Input Handling
 // ============================================================================
 
-static bool handleFeaturesInput(uint32_t buttons, JoystickNav& nav) {
+bool handleFeaturesInput(uint32_t buttons, JoystickNav& nav) {
   if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
     // Toggle current item
     wizardToggleCurrentItem();
@@ -387,7 +386,7 @@ static bool handleFeaturesInput(uint32_t buttons, JoystickNav& nav) {
   return false;
 }
 
-static bool handleSensorsInput(uint32_t buttons, JoystickNav& nav) {
+bool handleSensorsInput(uint32_t buttons, JoystickNav& nav) {
   if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
     wizardToggleCurrentItem();
     return true;
@@ -421,7 +420,7 @@ static bool handleSensorsInput(uint32_t buttons, JoystickNav& nav) {
   return false;
 }
 
-static bool handleNetworkInput(uint32_t buttons, JoystickNav& nav) {
+bool handleNetworkInput(uint32_t buttons, JoystickNav& nav) {
   if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
     wizardToggleCurrentItem();
     return true;
@@ -453,7 +452,7 @@ static bool handleNetworkInput(uint32_t buttons, JoystickNav& nav) {
   return false;
 }
 
-static bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result) {
+bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result) {
   if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
     // Cycle through options
     wizardCycleOption();
@@ -508,84 +507,6 @@ static bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardRes
   }
   
   return false;
-}
-
-// ============================================================================
-// Main Wizard Function
-// ============================================================================
-
-// Helper: Print current page to Serial for dual-interface support
-static void printSerialPageStatus() {
-  SetupWizardPage page = getWizardCurrentPage();
-  int sel = getWizardCurrentSelection();
-  
-  Serial.println();
-  Serial.println("========================================");
-  
-  switch (page) {
-    case WIZARD_PAGE_FEATURES: {
-      Serial.println("  SETUP 1/5: Features");
-      WizardFeatureItem* items = getWizardFeaturesPage();
-      size_t count = getWizardFeaturesPageCount();
-      for (size_t i = 0; i < count; i++) {
-        bool enabled = items[i].setting ? *items[i].setting : false;
-        Serial.printf(" %s%zu. [%s] %s%s ~%dKB\n",
-          (int)i == sel ? ">" : " ", i + 1,
-          enabled ? "X" : " ",
-          items[i].label,
-          items[i].essential ? "*" : "",
-          items[i].heapKB);
-      }
-      break;
-    }
-    case WIZARD_PAGE_SENSORS: {
-      Serial.println("  SETUP 2/5: Sensors & Display");
-      WizardFeatureItem* items = getWizardSensorsPage();
-      size_t count = getWizardSensorsPageCount();
-      for (size_t i = 0; i < count; i++) {
-        bool enabled = items[i].setting ? *items[i].setting : false;
-        Serial.printf(" %s%zu. [%s] %s%s ~%dKB\n",
-          (int)i == sel ? ">" : " ", i + 1,
-          enabled ? "X" : " ",
-          items[i].label,
-          items[i].essential ? "*" : "",
-          items[i].heapKB);
-      }
-      break;
-    }
-    case WIZARD_PAGE_NETWORK: {
-      Serial.println("  SETUP 3/5: Network Settings");
-      WizardNetworkItem* items = getWizardNetworkPage();
-      size_t count = getWizardNetworkPageCount();
-      for (size_t i = 0; i < count; i++) {
-        if (items[i].isBool) {
-          bool enabled = *items[i].boolSetting;
-          Serial.printf(" %s%zu. [%s] %s\n",
-            (int)i == sel ? ">" : " ", i + 1,
-            enabled ? "X" : " ",
-            items[i].label);
-        }
-      }
-      break;
-    }
-    case WIZARD_PAGE_SYSTEM: {
-      Serial.println("  SETUP 4/5: System Settings");
-      const TimezoneEntry* tz = getTimezones();
-      int tzSel = getWizardTimezoneSelection();
-      int logSel = getWizardLogLevelSelection();
-      const char** logNames = getLogLevelNames();
-      Serial.printf(" %s1. Timezone: %s\n", sel == 0 ? ">" : " ", tz[tzSel].abbrev);
-      Serial.printf(" %s2. Log Level: %s\n", sel == 1 ? ">" : " ", logNames[logSel]);
-      break;
-    }
-    default:
-      break;
-  }
-  
-  Serial.println("----------------------------------------");
-  Serial.println("Serial: # to toggle, 'n' next, 'b' back");
-  Serial.println("OLED: Joystick + A=Toggle, Right=Next");
-  Serial.print("> ");
 }
 
 // ============================================================================
@@ -658,7 +579,7 @@ bool getOLEDSetupModeSelection(bool& advancedMode) {
     
     // Read joystick (if OLED/gamepad available)
     if (oledDisplay && oledConnected) {
-      JoystickNav nav = readJoystickNav();
+      JoystickNav nav = readWizardJoystickNav();
       
       if (nav.up || nav.down) {
         selection = (selection == 0) ? 1 : 0;
@@ -770,7 +691,7 @@ bool getOLEDThemeSelection(bool& darkMode) {
     
     // Read joystick (if OLED/gamepad available)
     if (oledDisplay && oledConnected) {
-      JoystickNav nav = readJoystickNav();
+      JoystickNav nav = readWizardJoystickNav();
       
       if (nav.up || nav.down) {
         selection = (selection == 0) ? 1 : 0;
@@ -825,242 +746,8 @@ bool getOLEDThemeSelection(bool& darkMode) {
 }
 
 SetupWizardResult runOLEDSetupWizard() {
-  SetupWizardResult result;
-  result.completed = false;
-  result.wifiEnabled = false;
-  result.wifiConfigured = false;
-  result.wifiSSID = "";
-  result.wifiPassword = "";
-  result.deviceName = "HardwareOne";
-  result.timezoneOffset = -300;  // EST default
-  result.timezoneAbbrev = "EST";
-  
-  // Initialize wizard state
-  initSetupWizard();
-  
-  // Find current timezone in list
-  const TimezoneEntry* timezones = getTimezones();
-  size_t tzCount = getTimezoneCount();
-  for (size_t i = 0; i < tzCount; i++) {
-    if (timezones[i].offsetMinutes == gSettings.tzOffsetMinutes) {
-      setWizardTimezoneSelection(i);
-      break;
-    }
-  }
-  
-  // Reset joystick state
-  sJoyUpHeld = false;
-  sJoyDownHeld = false;
-  sJoyLeftHeld = false;
-  sJoyRightHeld = false;
-  
-  // Track last page to know when to reprint serial status
-  SetupWizardPage lastPrintedPage = WIZARD_PAGE_COUNT;
-  int lastPrintedSel = -1;
-  
-  bool running = true;
-  uint32_t lastButtons = 0;
-  bool lastButtonsInitialized = false;
-  
-  while (running) {
-    SetupWizardPage currentPage = getWizardCurrentPage();
-    int currentSel = getWizardCurrentSelection();
-    
-    // Render current page to OLED (if available)
-    if (oledDisplay && oledConnected) {
-      switch (currentPage) {
-        case WIZARD_PAGE_FEATURES:
-          renderFeaturesPage();
-          break;
-        case WIZARD_PAGE_SENSORS:
-          renderSensorsPage();
-          break;
-        case WIZARD_PAGE_NETWORK:
-          renderNetworkPage();
-          break;
-        case WIZARD_PAGE_SYSTEM:
-          renderSystemPage();
-          break;
-        case WIZARD_PAGE_WIFI:
-          if (renderWiFiPage(result)) {
-            result.completed = true;
-            running = false;
-          }
-          break;
-        default:
-          running = false;
-          break;
-      }
-    } else {
-      // No OLED - WiFi page is handled differently
-      if (currentPage == WIZARD_PAGE_WIFI) {
-        // Serial-only WiFi setup
-        Serial.println();
-        Serial.println("=== WiFi Setup ===");
-        Serial.println("Enter WiFi SSID (or press Enter to skip):");
-        Serial.print("> ");
-        while (!Serial.available()) { delay(10); }
-        String ssid = Serial.readStringUntil('\n');
-        ssid.trim();
-        if (ssid.length() > 0) {
-          Serial.println("Enter WiFi password:");
-          Serial.print("> ");
-          while (!Serial.available()) { delay(10); }
-          String pass = Serial.readStringUntil('\n');
-          pass.trim();
-          result.wifiSSID = ssid;
-          result.wifiPassword = pass;
-          result.wifiConfigured = true;
-        }
-        result.completed = true;
-        running = false;
-        break;
-      }
-    }
-    
-    if (!running) break;
-    
-    // Print to Serial if page or selection changed
-    if (currentPage != lastPrintedPage || currentSel != lastPrintedSel) {
-      printSerialPageStatus();
-      lastPrintedPage = currentPage;
-      lastPrintedSel = currentSel;
-    }
-    
-    // Read input with debounce
-    delay(50);
-    
-    // Check for serial input first (non-blocking)
-    bool serialHandled = false;
-    if (Serial.available()) {
-      String input = Serial.readStringUntil('\n');
-      input.trim();
-      input.toLowerCase();
-      
-      if (input == "n" || input == "next") {
-        // Navigate right (next page)
-        JoystickNav fakeNav = {false, false, false, true};
-        switch (currentPage) {
-          case WIZARD_PAGE_FEATURES:
-            handleFeaturesInput(0, fakeNav);
-            break;
-          case WIZARD_PAGE_SENSORS:
-            handleSensorsInput(0, fakeNav);
-            break;
-          case WIZARD_PAGE_NETWORK:
-            handleNetworkInput(0, fakeNav);
-            break;
-          case WIZARD_PAGE_SYSTEM:
-            if (!handleSystemInput(0, fakeNav, result)) {
-              running = false;
-            }
-            break;
-          default:
-            break;
-        }
-        serialHandled = true;
-      } else if (input == "b" || input == "back") {
-        // Navigate left (back)
-        JoystickNav fakeNav = {false, false, true, false};
-        switch (currentPage) {
-          case WIZARD_PAGE_FEATURES:
-            handleFeaturesInput(0, fakeNav);
-            break;
-          case WIZARD_PAGE_SENSORS:
-            handleSensorsInput(0, fakeNav);
-            break;
-          case WIZARD_PAGE_NETWORK:
-            handleNetworkInput(0, fakeNav);
-            break;
-          case WIZARD_PAGE_SYSTEM:
-            handleSystemInput(0, fakeNav, result);
-            break;
-          default:
-            break;
-        }
-        serialHandled = true;
-      } else if (input.length() > 0) {
-        int num = input.toInt();
-        if (num > 0) {
-          // Select item and toggle
-          setWizardCurrentSelection(num - 1);
-          if (currentPage == WIZARD_PAGE_SYSTEM) {
-            wizardCycleOption();
-          } else {
-            wizardToggleCurrentItem();
-          }
-          serialHandled = true;
-        }
-      }
-      
-      if (serialHandled) {
-        lastPrintedSel = -1;  // Force reprint
-        continue;
-      }
-    }
-    
-    // Read gamepad buttons (seesaw is active-low: 0=pressed, 1=unpressed)
-    uint32_t buttons = lastButtons;
-    bool haveButtons = false;
-    if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      if (gControlCache.gamepadDataValid) {
-        buttons = gControlCache.gamepadButtons;
-        haveButtons = true;
-      }
-      xSemaphoreGive(gControlCache.mutex);
-    }
-
-    // Initialize baseline button state on first valid read to avoid false toggles
-    // caused by starting lastButtons at 0 (which would look like a press for most bits).
-    if (haveButtons && !lastButtonsInitialized) {
-      lastButtons = buttons;
-      lastButtonsInitialized = true;
-      continue;
-    }
-
-    // Only act on new button presses (edge detect on active-high pressed bits)
-    // For active-low hardware, a press is a 1->0 transition in the raw bit.
-    uint32_t pressedNow = ~buttons;
-    uint32_t pressedLast = ~lastButtons;
-    uint32_t newButtons = pressedNow & ~pressedLast;
-    lastButtons = buttons;
-    
-    // Read joystick navigation
-    JoystickNav nav = readJoystickNav();
-    
-    // Skip if no input
-    bool hasInput = (newButtons != 0) || nav.up || nav.down || nav.left || nav.right;
-    if (!hasInput) continue;
-    
-    // Handle input for current page
-    bool handled = false;
-    switch (currentPage) {
-      case WIZARD_PAGE_FEATURES:
-        handled = handleFeaturesInput(newButtons, nav);
-        break;
-      case WIZARD_PAGE_SENSORS:
-        handled = handleSensorsInput(newButtons, nav);
-        break;
-      case WIZARD_PAGE_NETWORK:
-        handled = handleNetworkInput(newButtons, nav);
-        break;
-      case WIZARD_PAGE_SYSTEM:
-        if (!handleSystemInput(newButtons, nav, result)) {
-          running = false;  // Wizard completed
-        }
-        break;
-      default:
-        break;
-    }
-    
-    // Small delay for button debounce
-    if (handled) {
-      lastPrintedSel = -1;  // Force reprint after change
-      delay(150);
-    }
-  }
-  
-  return result;
+  return runSetupWizard();
 }
+
 
 #endif // ENABLE_OLED_DISPLAY

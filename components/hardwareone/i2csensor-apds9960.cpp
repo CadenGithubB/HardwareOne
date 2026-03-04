@@ -17,7 +17,7 @@
 // Debug macros (use centralized versions from debug_system.h)
 
 // External dependencies provided by System_I2C.h:
-// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing
+// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing
 
 // APDS sensor object (owned by this module)
 Adafruit_APDS9960* gAPDS9960 = nullptr;
@@ -87,25 +87,25 @@ extern const SettingsModule apdsSettingsModule = {
 // APDS Sensor Command Handlers
 // ============================================================================
 
-const char* cmd_apdscolor(const String& cmd) {
+const char* cmd_apdscolor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   readAPDSColor();
   return "APDS color data read (check serial output)";
 }
 
-const char* cmd_apdsproximity(const String& cmd) {
+const char* cmd_apdsproximity(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   readAPDSProximity();
   return "APDS proximity data read (check serial output)";
 }
 
-const char* cmd_apdsgesture(const String& cmd) {
+const char* cmd_apdsgesture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   readAPDSGesture();
   return "APDS gesture data read (check serial output)";
 }
 
-const char* cmd_apdsread(const String& cmd) {
+const char* cmd_apdsread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   bool anyEnabled = apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled;
@@ -141,7 +141,7 @@ const char* cmd_apdsread(const String& cmd) {
 }
 
 // Unified APDS start command using queue system (consistent with other sensors)
-const char* cmd_apdsstart(const String& cmd) {
+const char* cmd_apdsstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   bool anyEnabled = apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled;
@@ -168,13 +168,13 @@ const char* cmd_apdsstart(const String& cmd) {
 }
 
 // Deprecated: Use 'openapds' then 'apdsmode color'
-const char* cmd_apdscolorstart(const String& cmd) {
+const char* cmd_apdscolorstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return "[APDS] Deprecated: Use 'openapds' to open sensor, then 'apdsmode color' to enable color sensing";
 }
 
 // Stop APDS sensor (all modes)
-const char* cmd_apdsstop(const String& cmd) {
+const char* cmd_apdsstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   bool anyEnabled = apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled;
@@ -188,44 +188,44 @@ const char* cmd_apdsstop(const String& cmd) {
 }
 
 // Deprecated: Use 'apdsstop' or 'apdsmode color off'
-const char* cmd_apdscolorstop(const String& cmd) {
+const char* cmd_apdscolorstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return "[APDS] Deprecated: Use 'closeapds' to close sensor, or 'apdsmode color off' to disable color mode";
 }
 
 // Deprecated: Use 'openapds' then 'apdsmode proximity'
-const char* cmd_apdsproximitystart(const String& cmd) {
+const char* cmd_apdsproximitystart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return "[APDS] Deprecated: Use 'openapds' to open sensor, then 'apdsmode proximity' to enable proximity sensing";
 }
 
 // Deprecated: Use 'apdsstop' or 'apdsmode proximity off'
-const char* cmd_apdsproximitystop(const String& cmd) {
+const char* cmd_apdsproximitystop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return "[APDS] Deprecated: Use 'closeapds' to close sensor, or 'apdsmode proximity off' to disable proximity mode";
 }
 
 // Deprecated: Use 'openapds' then 'apdsmode gesture'
-const char* cmd_apdsgesturestart(const String& cmd) {
+const char* cmd_apdsgesturestart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return "[APDS] Deprecated: Use 'openapds' to open sensor, then 'apdsmode gesture' to enable gesture sensing";
 }
 
 // Deprecated: Use 'apdsstop' or 'apdsmode gesture off'
-const char* cmd_apdsgesturestop(const String& cmd) {
+const char* cmd_apdsgesturestop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return "[APDS] Deprecated: Use 'closeapds' to close sensor, or 'apdsmode gesture off' to disable gesture mode";
 }
 
 // Runtime mode control (once sensor is running)
-const char* cmd_apdsmode(const String& cmd) {
+const char* cmd_apdsmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!apdsConnected || gAPDS9960 == nullptr) {
     return "[APDS] Error: Sensor not initialized - use 'openapds' first";
   }
   
-  String lc = cmd;
+  String lc = argsInput;
   lc.toLowerCase();
   lc.trim();
   
@@ -417,9 +417,9 @@ void readAPDSGesture() {
 // APDS Command Registry
 // ============================================================================
 
-const char* cmd_apdsautostart(const String& args) {
+const char* cmd_apdsautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args; arg.trim();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
     return gSettings.apdsAutoStart ? "[APDS] Auto-start: enabled" : "[APDS] Auto-start: disabled";
   }
@@ -477,7 +477,7 @@ static CommandModuleRegistrar _apds_cmd_registrar(apdsCommands, apdsCommandsCoun
 //
 // Cleanup Strategy:
 //   1. Check if all modes (color/proximity/gesture) are disabled
-//   2. Acquire i2cMutex to prevent race conditions during cleanup
+//   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Delete sensor object and invalidate cache
 //   4. Release mutex and delete task
 // ============================================================================
@@ -593,5 +593,34 @@ void apdsTask(void* parameter) {
 #if ENABLE_OLED_DISPLAY
 #include "i2csensor-apds9960-oled.h"
 #endif // ENABLE_OLED_DISPLAY
+
+// ============================================================================
+// APDS Accessor Functions (for MQTT and other modules)
+// ============================================================================
+
+uint8_t getAPDSProximity() {
+  if (!apdsConnected || !gPeripheralCache.apdsDataValid) return 0;
+  return gPeripheralCache.apdsProximity;
+}
+
+uint16_t getAPDSColorR() {
+  if (!apdsConnected || !gPeripheralCache.apdsDataValid) return 0;
+  return gPeripheralCache.apdsRed;
+}
+
+uint16_t getAPDSColorG() {
+  if (!apdsConnected || !gPeripheralCache.apdsDataValid) return 0;
+  return gPeripheralCache.apdsGreen;
+}
+
+uint16_t getAPDSColorB() {
+  if (!apdsConnected || !gPeripheralCache.apdsDataValid) return 0;
+  return gPeripheralCache.apdsBlue;
+}
+
+uint16_t getAPDSColorC() {
+  if (!apdsConnected || !gPeripheralCache.apdsDataValid) return 0;
+  return gPeripheralCache.apdsClear;
+}
 
 #endif // ENABLE_APDS_SENSOR

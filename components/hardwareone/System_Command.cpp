@@ -143,8 +143,8 @@ String resolveRegistryCommandKey(const String& command) {
 // Command Execution
 // ============================================================================
 
-String executeCommandThroughRegistry(const String& cmd) {
-  String command = cmd;
+String executeCommandThroughRegistry(const String& argsInput) {
+  String command = argsInput;
   command.trim();
 
   if (command.length() == 0) {

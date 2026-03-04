@@ -49,9 +49,9 @@ bool displayInit() {
     return false;
   }
   
-  // Clear the display buffer
+  // Clear the display buffer and push to OLED via transaction-wrapped update
   gDisplay->clearDisplay();
-  gDisplay->display();
+  displayUpdate();
   return true;
   
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789

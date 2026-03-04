@@ -57,7 +57,7 @@ struct CommandEntry {
   const char* name;                           // canonical command name
   const char* help;                           // short help text
   bool requiresAdmin;                         // whether admin is required
-  const char* (*handler)(const String& cmd);  // function pointer to command handler
+  const char* (*handler)(const String& argsInput);  // function pointer to command handler
   const char* usage;                          // optional longer usage string (may be nullptr)
   const char* voiceCategory;                  // 1st level: category phrase (may be nullptr)
   const char* voiceSubCategory;               // 2nd level: sub-category phrase (may be nullptr for 2-level)
@@ -127,7 +127,7 @@ bool commandRequiresAdmin(const String& cmdLine);
 
 // Execute a command through the registry (returns result string)
 // Note: This is a lower-level function; executeCommand() in .ino handles auth context
-const char* dispatchCommand(const String& cmd);
+const char* dispatchCommand(const String& argsInput);
 
 // HTTP server control (lowercase 'h' matches implementation in .ino)
 void startHttpServer();
@@ -164,7 +164,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 
 // Audit / Redaction utilities
 // Centralized redaction for audit logs and debug output
-String redactCmdForAudit(const String& cmd);
+String redactCmdForAudit(const String& argsInput);
 String redactOutputForLog(const String& output);
 
 // CLI validation macro - returns "VALID" early when gCLIValidateOnly is set
@@ -247,8 +247,8 @@ size_t calculateSensorSystemMemory();
 
 // System diagnostic commands - migrated from main .ino
 void printMemoryReport();
-const char* cmd_memreport(const String& cmd);
-const char* cmd_taskstats(const String& cmd);
+const char* cmd_memreport(const String& argsInput);
+const char* cmd_taskstats(const String& argsInput);
 
 // Note: Command execution functions (executeCommand, submitAndExecuteSync, etc.) 
 // are implemented in system_utils.cpp but declared in main .ino where the 

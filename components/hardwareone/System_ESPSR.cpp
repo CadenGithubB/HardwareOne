@@ -2728,25 +2728,25 @@ void buildESPSRStatusJson(String& output) {
   serializeJson(doc, output);
 }
 
-static const char* setEnabledFromArgs(const String& cmd) {
-  (void)cmd;
+static const char* setEnabledFromArgs(const String& argsInput) {
+  (void)argsInput;
   return "Error: ENABLE_ESP_SR is a compile-time flag";
 }
 
-const char* cmd_sr(const String& cmd) {
+const char* cmd_sr(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   return "Usage: sr <enable|start|stop|status|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>";
 }
 
-const char* cmd_sr_enable(const String& cmd) {
+const char* cmd_sr_enable(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return setEnabledFromArgs(cmd);
+  return setEnabledFromArgs(argsInput);
 }
 
-const char* cmd_sr_start(const String& cmd) {
+const char* cmd_sr_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   bool ok = startESPSR();
   if (!ok) return "Error: failed to start";
 
@@ -2777,9 +2777,9 @@ const char* cmd_sr_start(const String& cmd) {
   return out.c_str();
 }
 
-const char* cmd_sr_stop(const String& cmd) {
+const char* cmd_sr_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   stopESPSR();
 
   ensureVoiceArmMutex();
@@ -2793,9 +2793,9 @@ const char* cmd_sr_stop(const String& cmd) {
   return "OK";
 }
 
-static const char* cmd_voice_arm_cli(const String& cmd) {
+static const char* cmd_voice_arm_cli(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   ensureVoiceArmMutex();
   bool armed = false;
   if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
@@ -2812,9 +2812,9 @@ static const char* cmd_voice_arm_cli(const String& cmd) {
   return out.c_str();
 }
 
-static const char* cmd_voice_disarm_cli(const String& cmd) {
+static const char* cmd_voice_disarm_cli(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   ensureVoiceArmMutex();
   if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
     voiceDisarmInternal();
@@ -2826,9 +2826,9 @@ static const char* cmd_voice_disarm_cli(const String& cmd) {
   return "OK";
 }
 
-static const char* cmd_voice_status_cli(const String& cmd) {
+static const char* cmd_voice_status_cli(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   ensureVoiceArmMutex();
   static String out;
   out = "";
@@ -2848,9 +2848,9 @@ static const char* cmd_voice_status_cli(const String& cmd) {
   return out.c_str();
 }
 
-const char* cmd_sr_status(const String& cmd) {
+const char* cmd_sr_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   static String out;
   out = "";
   buildESPSRStatusJson(out);
@@ -2859,29 +2859,29 @@ const char* cmd_sr_status(const String& cmd) {
 
 // Voice control commands - these are handled specially in onVoiceCommandDetected
 // but registered here for consistency with the command registry system
-static const char* cmd_voice_cancel(const String& cmd) {
+static const char* cmd_voice_cancel(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   // This is handled in onVoiceCommandDetected, not via CLI
   return "Voice cancel - resets voice state to idle";
 }
 
-static const char* cmd_voice_help(const String& cmd) {
+static const char* cmd_voice_help(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   // This is handled in onVoiceCommandDetected, not via CLI
   return "Voice help - shows available options for current state";
 }
 
-static const char* cmd_sr_cmds(const String& cmd) {
+static const char* cmd_sr_cmds(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   return "Usage: sr cmds <list|add|del|clear|save|reload>";
 }
 
-static const char* cmd_sr_cmds_list(const String& cmd) {
+static const char* cmd_sr_cmds_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   static String out;
   out = "";
 
@@ -2917,9 +2917,9 @@ static const char* cmd_sr_cmds_list(const String& cmd) {
   return out.c_str();
 }
 
-static const char* cmd_sr_cmds_add(const String& cmd) {
+static const char* cmd_sr_cmds_add(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   if (args.length() == 0) return "Usage: sr cmds add <id> <phrase>";
   int sp = args.indexOf(' ');
@@ -2955,9 +2955,9 @@ static const char* cmd_sr_cmds_add(const String& cmd) {
   return "OK";
 }
 
-static const char* cmd_sr_cmds_del(const String& cmd) {
+static const char* cmd_sr_cmds_del(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) return "Usage: sr cmds del <phrase|id>";
 
@@ -3000,9 +3000,9 @@ static const char* cmd_sr_cmds_del(const String& cmd) {
   return "OK";
 }
 
-static const char* cmd_sr_cmds_clear(const String& cmd) {
+static const char* cmd_sr_cmds_clear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   if (arg != "confirm") return "Usage: sr cmds clear confirm";
 
@@ -3025,9 +3025,9 @@ static const char* cmd_sr_cmds_clear(const String& cmd) {
   return "OK";
 }
 
-static const char* cmd_sr_cmds_reload(const String& cmd) {
+static const char* cmd_sr_cmds_reload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   if (!mnCommandsReady()) {
     return "Error: MultiNet not initialized. Run: sr start";
   }
@@ -3051,9 +3051,9 @@ static const char* cmd_sr_cmds_reload(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_cmds_save(const String& cmd) {
+static const char* cmd_sr_cmds_save(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   if (!mnCommandsReady()) {
     return "Error: MultiNet not initialized. Run: sr start";
   }
@@ -3069,9 +3069,9 @@ static const char* cmd_sr_cmds_save(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_cmds_sync(const String& cmd) {
+static const char* cmd_sr_cmds_sync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   if (!mnCommandsReady()) {
     return "Error: MultiNet not initialized. Run: sr start";
   }
@@ -3103,15 +3103,15 @@ static const char* cmd_sr_cmds_sync(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_debug(const String& cmd) {
+static const char* cmd_sr_debug(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   return "Usage: sr debug <level|telem|stats|reset>";
 }
 
-static const char* cmd_sr_debug_level(const String& cmd) {
+static const char* cmd_sr_debug_level(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     static char buf[64];
@@ -3127,9 +3127,9 @@ static const char* cmd_sr_debug_level(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_debug_telem(const String& cmd) {
+static const char* cmd_sr_debug_telem(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     static char buf[96];
@@ -3145,23 +3145,23 @@ static const char* cmd_sr_debug_telem(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_debug_stats(const String& cmd) {
+static const char* cmd_sr_debug_stats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   srDebugPrintTelemetry();
   return "OK (stats printed to log)";
 }
 
-static const char* cmd_sr_debug_reset(const String& cmd) {
+static const char* cmd_sr_debug_reset(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   srDebugResetCounters();
   return "OK";
 }
 
-static const char* cmd_sr_confidence(const String& cmd) {
+static const char* cmd_sr_confidence(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -3211,9 +3211,9 @@ static const char* cmd_sr_confidence(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_accept(const String& cmd) {
+static const char* cmd_sr_accept(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   args.toLowerCase();
 
@@ -3280,9 +3280,9 @@ static const char* cmd_sr_accept(const String& cmd) {
   return "Usage: sr accept [on|off|floor <0.0-1.0>|gap <0.0-1.0>|speech <0|1>]";
 }
 
-static const char* cmd_sr_dyngain(const String& cmd) {
+static const char* cmd_sr_dyngain(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   args.toLowerCase();
 
@@ -3377,9 +3377,9 @@ static const char* cmd_sr_dyngain(const String& cmd) {
   return "Usage: sr dyngain [on|off|min <0.1-10>|max <0.1-10>|target <1000-30000>|alpha <0.0-1.0>|reset]";
 }
 
-static const char* cmd_sr_raw(const String& cmd) {
+static const char* cmd_sr_raw(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -3401,9 +3401,9 @@ static const char* cmd_sr_raw(const String& cmd) {
   return "Usage: sr raw [on|off]";
 }
 
-static const char* cmd_sr_autotune(const String& cmd) {
+static const char* cmd_sr_autotune(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0 || args == "status") {
@@ -3460,9 +3460,9 @@ static const char* cmd_sr_autotune(const String& cmd) {
   return "Usage: sr autotune [start|stop|status]";
 }
 
-static const char* cmd_sr_timeout(const String& cmd) {
+static const char* cmd_sr_timeout(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -3483,9 +3483,9 @@ static const char* cmd_sr_timeout(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_tuning(const String& cmd) {
+static const char* cmd_sr_tuning(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   static char buf[520];
   int mg = gSettings.microphoneGain;
   float swgain = 24.0f * ((float)mg / 50.0f);
@@ -3509,9 +3509,9 @@ static const char* cmd_sr_tuning(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_tuning_swgain(const String& cmd) {
+static const char* cmd_sr_tuning_swgain(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -3541,9 +3541,9 @@ static const char* cmd_sr_tuning_swgain(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_tuning_gain(const String& cmd) {
+static const char* cmd_sr_tuning_gain(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -3563,9 +3563,9 @@ static const char* cmd_sr_tuning_gain(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_tuning_agc(const String& cmd) {
+static const char* cmd_sr_tuning_agc(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -3586,9 +3586,9 @@ static const char* cmd_sr_tuning_agc(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_tuning_vad(const String& cmd) {
+static const char* cmd_sr_tuning_vad(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -3608,9 +3608,9 @@ static const char* cmd_sr_tuning_vad(const String& cmd) {
   return buf;
 }
 
-static const char* cmd_sr_tuning_filters(const String& cmd) {
+static const char* cmd_sr_tuning_filters(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -3633,15 +3633,15 @@ static const char* cmd_sr_tuning_filters(const String& cmd) {
   return "Usage: sr tuning filters <on|off>";
 }
 
-static const char* cmd_sr_snip(const String& cmd) {
+static const char* cmd_sr_snip(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   return "Usage: sr snip <on|off|start|stop|status|config>";
 }
 
-static const char* cmd_sr_snip_on(const String& cmd) {
+static const char* cmd_sr_snip_on(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   if (!gESPSRRunning) {
     return "Error: SR not running. Run: sr start";
   }
@@ -3652,16 +3652,16 @@ static const char* cmd_sr_snip_on(const String& cmd) {
   return "Snippet capture enabled (will trigger on wake word)";
 }
 
-static const char* cmd_sr_snip_off(const String& cmd) {
+static const char* cmd_sr_snip_off(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   gSrSnipEnabled = false;
   return "Snippet capture disabled";
 }
 
-static const char* cmd_sr_snip_start(const String& cmd) {
+static const char* cmd_sr_snip_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   if (!gESPSRRunning) {
     return "Error: SR not running. Run: sr start";
   }
@@ -3672,9 +3672,9 @@ static const char* cmd_sr_snip_start(const String& cmd) {
   return "Manual snippet capture started";
 }
 
-static const char* cmd_sr_snip_stop(const String& cmd) {
+static const char* cmd_sr_snip_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   if (!gSrSnipSessionActive) {
     return "No active snippet session";
   }
@@ -3682,9 +3682,9 @@ static const char* cmd_sr_snip_stop(const String& cmd) {
   return "Manual snippet capture stopped";
 }
 
-static const char* cmd_sr_snip_status(const String& cmd) {
+static const char* cmd_sr_snip_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   static String out;
   out = "";
   out += "Snippet capture: ";
@@ -3714,9 +3714,9 @@ static const char* cmd_sr_snip_status(const String& cmd) {
   return out.c_str();
 }
 
-static const char* cmd_sr_snip_config(const String& cmd) {
+static const char* cmd_sr_snip_config(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = cmd;
+  String args = argsInput;
   args.trim();
   if (args.length() == 0) {
     static String out;

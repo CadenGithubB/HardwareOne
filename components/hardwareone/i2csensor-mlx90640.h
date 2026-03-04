@@ -57,21 +57,21 @@ extern Adafruit_MLX90640* gMLX90640;
 extern const unsigned long MLX90640_READ_INTERVAL;
 
 // Thermal sensor command handlers
-const char* cmd_thermalstart(const String& cmd);
-const char* cmd_thermalstop(const String& cmd);
-const char* cmd_thermalpalettedefault(const String& cmd);
-const char* cmd_thermalewmafactor(const String& cmd);
-const char* cmd_thermaltransitionms(const String& cmd);
-const char* cmd_thermalupscalefactor(const String& cmd);
-const char* cmd_thermalrollingminmaxenabled(const String& cmd);
-const char* cmd_thermalrollingminmaxalpha(const String& cmd);
-const char* cmd_thermalrollingminmaxguardc(const String& cmd);
-const char* cmd_thermaltemporalalpha(const String& cmd);
-const char* cmd_thermalrotation(const String& cmd);
-const char* cmd_thermalpollingms(const String& cmd);
-const char* cmd_thermalinterpolationenabled(const String& cmd);
-const char* cmd_thermalinterpolationsteps(const String& cmd);
-const char* cmd_thermalinterpolationbuffersize(const String& cmd);
+const char* cmd_thermalstart(const String& argsInput);
+const char* cmd_thermalstop(const String& argsInput);
+const char* cmd_thermalpalettedefault(const String& argsInput);
+const char* cmd_thermalewmafactor(const String& argsInput);
+const char* cmd_thermaltransitionms(const String& argsInput);
+const char* cmd_thermalupscalefactor(const String& argsInput);
+const char* cmd_thermalrollingminmaxenabled(const String& argsInput);
+const char* cmd_thermalrollingminmaxalpha(const String& argsInput);
+const char* cmd_thermalrollingminmaxguardc(const String& argsInput);
+const char* cmd_thermaltemporalalpha(const String& argsInput);
+const char* cmd_thermalrotation(const String& argsInput);
+const char* cmd_thermalpollingms(const String& argsInput);
+const char* cmd_thermalinterpolationenabled(const String& argsInput);
+const char* cmd_thermalinterpolationsteps(const String& argsInput);
+const char* cmd_thermalinterpolationbuffersize(const String& argsInput);
 
 // Thermal sensor state and control
 extern bool thermalEnabled;

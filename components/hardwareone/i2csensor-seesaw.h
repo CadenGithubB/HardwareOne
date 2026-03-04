@@ -54,10 +54,10 @@ extern unsigned long gLastGamepadInitMs;
 extern const unsigned long kGamepadInitMinIntervalMs;
 
 // Gamepad command handlers
-const char* cmd_gamepad(const String& cmd);
-const char* cmd_gamepadstart_queued(const String& cmd);
-const char* cmd_gamepadstop(const String& cmd);
-const char* cmd_gamepadpoll(const String& cmd);
+const char* cmd_gamepad(const String& argsInput);
+const char* cmd_gamepadstart_queued(const String& argsInput);
+const char* cmd_gamepadstop(const String& argsInput);
+const char* cmd_gamepadpoll(const String& argsInput);
 
 // Gamepad state and control
 extern bool gamepadEnabled;
@@ -75,6 +75,11 @@ void pollGamepad();
 bool initGamepad();
 bool initGamepadConnection();
 void readGamepad();
+
+// Accessor functions (for MQTT and other modules)
+int getGamepadX();
+int getGamepadY();
+uint32_t getGamepadButtons();
 
 // Command registry (for system_utils.cpp module list)
 struct CommandEntry;

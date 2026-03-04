@@ -152,7 +152,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Web CLI History Size</div><div style='color:var(--panel-fg);font-size:0.9rem'>Number of commands to keep in web CLI history buffer.</div></div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Web CLI History Size</div><div style='color:var(--panel-fg);font-size:0.9rem'>Number of commands to keep in history buffer.</div></div>
     <button class='btn' id='btn-cli-toggle' onclick="togglePane('cli-pane','btn-cli-toggle')">Expand</button>
   </div>
   <div id='cli-pane' style='display:none;margin-top:0.75rem'>
@@ -253,8 +253,8 @@ window.sendSequential = function(cmds, onDone, onFail) {
       <div>
         <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Bond Role</label>
         <select id='bond-role' style='width:100%'>
-          <option value='0'>Worker (Compute/Network)</option>
-          <option value='1'>Master (Display/Gamepad)</option>
+          <option value='0'>Worker</option>
+          <option value='1'>Master</option>
         </select>
       </div>
       <div>
@@ -1082,6 +1082,62 @@ window.sendSequential = function(cmds, onDone, onFail) {
         <button class='btn' onclick='refreshUsers()' title='Reload list of users'>Refresh Users</button>
       </div>
     </div>
+    <div style='background:var(--crumb-bg);border:1px solid var(--border);border-radius:8px;padding:1rem'>
+      <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem'>
+        <div style='font-weight:bold;color:var(--panel-fg)'>Security</div>
+        <button class='btn' id='btn-security-toggle' onclick="togglePane('security-pane','btn-security-toggle')">Expand</button>
+      </div>
+      <div style='color:var(--panel-fg);margin-bottom:0.75rem;font-size:0.9rem'>Authentication and access control settings.</div>
+      <div id='security-pane' style='display:none;margin-top:0.75rem'>
+        <div style='display:grid;gap:0.75rem'>
+          <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap'>
+            <span style='color:var(--panel-fg);min-width:160px'>Local Display Auth: <span style='font-weight:bold' id='display-auth-value'>-</span></span>
+            <button class='btn' id='display-auth-btn' onclick='toggleDisplayAuth()' title='Require login before accessing OLED display menus'>Toggle</button>
+          </div>
+          <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap'>
+            <span style='color:var(--panel-fg);min-width:160px'>Bluetooth Auth: <span style='font-weight:bold' id='ble-auth-value'>-</span></span>
+            <button class='btn' id='ble-auth-btn' onclick='toggleBleAuth()' title='Require login before accepting BLE commands'>Toggle</button>
+          </div>
+          <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap'>
+            <span style='color:var(--panel-fg);min-width:160px'>Serial Auth: <span style='font-weight:bold' id='serial-auth-value'>-</span></span>
+            <button class='btn' id='serial-auth-btn' onclick='toggleSerialAuth()' title='Require login before accepting serial CLI commands'>Toggle</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style='background:var(--crumb-bg);border:1px solid var(--border);border-radius:8px;padding:1rem'>
+      <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem'>
+        <div style='font-weight:bold;color:var(--panel-fg)'>ESP-NOW User Sync</div>
+        <button class='btn' id='btn-usersync-toggle' onclick="togglePane('usersync-pane','btn-usersync-toggle')">Expand</button>
+      </div>
+      <div style='color:var(--panel-fg);margin-bottom:0.75rem;font-size:0.9rem'>Sync user credentials to other paired devices over ESP-NOW.</div>
+      <div id='usersync-pane' style='display:none;margin-top:0.75rem'>
+        <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin-bottom:1rem'>
+          <span style='color:var(--panel-fg)'>User Sync: <span style='font-weight:bold' id='usersync-enabled-value'>-</span></span>
+          <button class='btn' id='usersync-enabled-btn' onclick='toggleUserSync()' title='Enable or disable user credential sync over ESP-NOW'>Toggle</button>
+        </div>
+        <div id='usersync-form' style='display:none'>
+          <div style='display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:0.75rem'>
+            <div>
+              <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>User</label>
+              <select id='usersync-user' style='width:100%'><option value=''>Loading...</option></select>
+            </div>
+            <div>
+              <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Target Device</label>
+              <div style='display:flex;gap:0.5rem'>
+                <select id='usersync-device' style='flex:1'><option value=''>No peers found</option></select>
+                <button class='btn' onclick='refreshSyncPeers()' title='Refresh peer device list'>&#8635;</button>
+              </div>
+            </div>
+          </div>
+          <div style='margin-bottom:0.75rem'>
+            <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Password</label>
+            <input type='password' id='usersync-password' placeholder='Password to set on target device' style='width:100%;box-sizing:border-box'>
+          </div>
+          <button class='btn' onclick='syncUserToDevice()' title='Sync selected user to selected device'>Sync User</button>
+        </div>
+      </div>
+    </div>
   </div>
   </div>
 </div>
@@ -1642,6 +1698,50 @@ console.log('[SETTINGS] Part 1: Core init starting...');
           try {
             if (typeof window.refreshUsers === 'function') {
               refreshUsers();
+            }
+          } catch(e) {}
+          try {
+            var oledSect = s.oled_ssd1306 || {};
+            var dispAuth = (oledSect.oledRequireAuth !== undefined ? oledSect.oledRequireAuth : true);
+            var dispAuthEl = $('display-auth-value');
+            if (dispAuthEl) {
+              dispAuthEl.textContent = dispAuth ? 'Required' : 'Disabled';
+              dispAuthEl.style.color = dispAuth ? '#28a745' : '#dc3545';
+            }
+            var dispAuthBtn = $('display-auth-btn');
+            if (dispAuthBtn) dispAuthBtn.textContent = dispAuth ? 'Disable' : 'Enable';
+            var btSect = s.bluetooth || {};
+            var bleAuth = (btSect.bluetoothRequireAuth !== undefined ? btSect.bluetoothRequireAuth : true);
+            var bleAuthEl = $('ble-auth-value');
+            if (bleAuthEl) {
+              bleAuthEl.textContent = bleAuth ? 'Required' : 'Disabled';
+              bleAuthEl.style.color = bleAuth ? '#28a745' : '#dc3545';
+            }
+            var bleAuthBtn = $('ble-auth-btn');
+            if (bleAuthBtn) bleAuthBtn.textContent = bleAuth ? 'Disable' : 'Enable';
+            var outSect = s.output || {};
+            var serialAuth = (outSect.serialRequireAuth !== undefined ? outSect.serialRequireAuth : true);
+            var serialAuthEl = $('serial-auth-value');
+            if (serialAuthEl) {
+              serialAuthEl.textContent = serialAuth ? 'Required' : 'Disabled';
+              serialAuthEl.style.color = serialAuth ? '#28a745' : '#dc3545';
+            }
+            var serialAuthBtn = $('serial-auth-btn');
+            if (serialAuthBtn) serialAuthBtn.textContent = serialAuth ? 'Disable' : 'Enable';
+            var espnowSect = s.espnow || {};
+            var userSyncEnabled = !!espnowSect.userSyncEnabled;
+            var usvEl = $('usersync-enabled-value');
+            if (usvEl) {
+              usvEl.textContent = userSyncEnabled ? 'Enabled' : 'Disabled';
+              usvEl.style.color = userSyncEnabled ? '#28a745' : '#dc3545';
+            }
+            var usvBtn = $('usersync-enabled-btn');
+            if (usvBtn) usvBtn.textContent = userSyncEnabled ? 'Disable' : 'Enable';
+            var usvForm = $('usersync-form');
+            if (usvForm) usvForm.style.display = userSyncEnabled ? 'block' : 'none';
+            if (userSyncEnabled && typeof window.refreshSyncUsers === 'function') {
+              refreshSyncUsers();
+              refreshSyncPeers();
             }
           } catch(e) {}
         }
@@ -3221,6 +3321,160 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       .catch(function(e) {
         alert('Error: ' + e.message);
       });
+    };
+    
+    window.toggleSerialAuth = function() {
+      var current = $('serial-auth-value') && $('serial-auth-value').textContent === 'Required';
+      var val = current ? 0 : 1;
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent('serialrequireauth ' + val)
+      }).then(function(r) { return r.text(); })
+      .then(function() {
+        var el = $('serial-auth-value');
+        if (el) { el.textContent = val ? 'Required' : 'Disabled'; el.style.color = val ? '#28a745' : '#dc3545'; }
+        var btn = $('serial-auth-btn');
+        if (btn) btn.textContent = val ? 'Disable' : 'Enable';
+      });
+    };
+    
+    window.toggleBleAuth = function() {
+      var current = $('ble-auth-value') && $('ble-auth-value').textContent === 'Required';
+      var val = current ? 0 : 1;
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent('blerequireauth ' + val)
+      }).then(function(r) { return r.text(); })
+      .then(function() {
+        var el = $('ble-auth-value');
+        if (el) { el.textContent = val ? 'Required' : 'Disabled'; el.style.color = val ? '#28a745' : '#dc3545'; }
+        var btn = $('ble-auth-btn');
+        if (btn) btn.textContent = val ? 'Disable' : 'Enable';
+      });
+    };
+    
+    window.toggleDisplayAuth = function() {
+      var current = $('display-auth-value') && $('display-auth-value').textContent === 'Required';
+      var val = current ? 0 : 1;
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent('oledrequireauth ' + val)
+      }).then(function(r) { return r.text(); })
+      .then(function() {
+        var el = $('display-auth-value');
+        if (el) { el.textContent = val ? 'Required' : 'Disabled'; el.style.color = val ? '#28a745' : '#dc3545'; }
+        var btn = $('display-auth-btn');
+        if (btn) btn.textContent = val ? 'Disable' : 'Enable';
+      });
+    };
+    
+    window.toggleUserSync = function() {
+      var current = $('usersync-enabled-value') && $('usersync-enabled-value').textContent === 'Enabled';
+      var cmd = current ? 'espnow usersync off' : 'espnow usersync on';
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent(cmd)
+      }).then(function(r) { return r.text(); })
+      .then(function() {
+        var nowEnabled = !current;
+        var el = $('usersync-enabled-value');
+        if (el) { el.textContent = nowEnabled ? 'Enabled' : 'Disabled'; el.style.color = nowEnabled ? '#28a745' : '#dc3545'; }
+        var btn = $('usersync-enabled-btn');
+        if (btn) btn.textContent = nowEnabled ? 'Disable' : 'Enable';
+        var form = $('usersync-form');
+        if (form) form.style.display = nowEnabled ? 'block' : 'none';
+        if (nowEnabled) { refreshSyncUsers(); refreshSyncPeers(); }
+      });
+    };
+    
+    window.refreshSyncUsers = function() {
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent('user list json')
+      }).then(function(r) { return r.text(); })
+      .then(function(t) {
+        var users = [];
+        try { users = JSON.parse(t); } catch(e) {}
+        var sel = $('usersync-user');
+        if (!sel) return;
+        sel.innerHTML = '';
+        if (!Array.isArray(users) || !users.length) {
+          sel.innerHTML = '<option value="">No users found</option>';
+          return;
+        }
+        users.forEach(function(u) {
+          var opt = document.createElement('option');
+          opt.value = u.username || '';
+          opt.textContent = (u.username || '') + (u.isAdmin ? ' (Admin)' : ' (User)');
+          sel.appendChild(opt);
+        });
+      });
+    };
+    
+    window.refreshSyncPeers = function() {
+      var sel = $('usersync-device');
+      if (!sel) return;
+      sel.innerHTML = '<option value="">Loading...</option>';
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent('espnow devices')
+      }).then(function(r) { return r.text(); })
+      .then(function(t) {
+        var peers = [];
+        var lines = t.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i];
+          if (line.length > 2 && line[0] === ' ' && line[1] === ' ' && line[2] !== '.' && line[2] !== '(') {
+            var name = line.trim().split(/[\s[\(]/)[0];
+            if (name && name.length > 0) peers.push(name);
+          }
+        }
+        sel.innerHTML = '';
+        if (!peers.length) {
+          sel.innerHTML = '<option value="">No peers found</option>';
+          return;
+        }
+        peers.forEach(function(name) {
+          var opt = document.createElement('option');
+          opt.value = name;
+          opt.textContent = name;
+          sel.appendChild(opt);
+        });
+      });
+    };
+    
+    window.syncUserToDevice = function() {
+      var username = $('usersync-user') ? $('usersync-user').value : '';
+      var device = $('usersync-device') ? $('usersync-device').value : '';
+      var password = $('usersync-password') ? $('usersync-password').value : '';
+      if (!username || !device || !password) {
+        alert('Please select a user, select a device, and enter a password');
+        return;
+      }
+      var cmd = 'user sync ' + username + ' ' + device + ' ' + password;
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent(cmd)
+      }).then(function(r) { return r.text(); })
+      .then(function(t) {
+        alert(t || 'Sync complete');
+        if ($('usersync-password')) $('usersync-password').value = '';
+      })
+      .catch(function(e) { alert('Error: ' + e.message); });
     };
     
     window.resetUserPassword = async function(username) {
