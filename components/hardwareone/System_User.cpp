@@ -47,7 +47,7 @@ extern void fsUnlock();
 extern void resolvePendingUserCreationTimes();
 
 // Boot tracking globals
-extern uint32_t gBootSeq;
+extern uint32_t gNTPAnchorId;
 extern uint32_t gBootCounter;
 
 // Serial authentication globals
@@ -685,12 +685,12 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     user["createdAt"] = (const char*)nullptr;  // null
     user["createdBy"] = "provisional";
     user["createdMs"] = millis();
-    user["bootSeq"] = gBootSeq;
+    user["ntpAnchorId"] = gNTPAnchorId;
     user["bootCount"] = gBootCounter;
     
     doc["bootAnchors"].to<JsonArray>();
     
-    DEBUG_SYSTEMF("ApproveInit: Creating users.json with bootCounter=%lu, admin.bootCount=%lu, gBootSeq=%lu", (unsigned long)gBootCounter, (unsigned long)gBootCounter, (unsigned long)gBootSeq);
+    DEBUG_SYSTEMF("ApproveInit: Creating users.json with bootCounter=%lu, admin.bootCount=%lu, gNTPAnchorId=%lu", (unsigned long)gBootCounter, (unsigned long)gBootCounter, (unsigned long)gNTPAnchorId);
     
     // Serialize to file
     File file = LittleFS.open(USERS_JSON_FILE, "w");
@@ -750,10 +750,10 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     newUser["createdAt"] = (const char*)nullptr;  // null
     newUser["createdBy"] = "provisional";
     newUser["createdMs"] = millis();
-    newUser["bootSeq"] = gBootSeq;
+    newUser["ntpAnchorId"] = gNTPAnchorId;
     newUser["bootCount"] = gBootCounter;
     
-    DEBUG_SYSTEMF("ApproveAppend: New user id=%d with bootCount=%lu, gBootSeq=%lu", nextId, (unsigned long)gBootCounter, (unsigned long)gBootSeq);
+    DEBUG_SYSTEMF("ApproveAppend: New user id=%d with bootCount=%lu, gNTPAnchorId=%lu", nextId, (unsigned long)gBootCounter, (unsigned long)gNTPAnchorId);
     
     // Update nextId
     doc["nextId"] = nextId + 1;
@@ -1768,7 +1768,7 @@ const char* cmd_user_request(const String& argsInput) {
 const char* USERS_JSON_FILE = "/system/users/users.json";
 
 // External dependencies for timestamp resolution
-extern uint32_t gBootSeq;
+extern uint32_t gNTPAnchorId;
 extern uint32_t gBootCounter;
 extern bool gTimeSyncedMarkerWritten;
 extern void timeSyncUpdateBootEpoch();
@@ -1777,28 +1777,28 @@ extern bool appendLineWithCap(const char* path, const String& line, size_t cap);
 
 // Boot anchor structure - represents an NTP sync point
 struct BootAnchor {
-  uint32_t bootSeq;
+  uint32_t ntpAnchorId;
   time_t epochAtSync;
   unsigned long millisAtSync;
 
   BootAnchor()
-    : bootSeq(0), epochAtSync(0), millisAtSync(0) {}
+    : ntpAnchorId(0), epochAtSync(0), millisAtSync(0) {}
   BootAnchor(uint32_t seq, time_t epoch, unsigned long ms)
-    : bootSeq(seq), epochAtSync(epoch), millisAtSync(ms) {}
+    : ntpAnchorId(seq), epochAtSync(epoch), millisAtSync(ms) {}
 };
 
 // User timestamp info - extracted from JSON for resolution
 struct UserTimestampInfo {
   int jsonStartPos;
   int jsonEndPos;
-  uint32_t bootSeq;
+  uint32_t ntpAnchorId;
   unsigned long createdMs;
   int bootCount;
   bool needsResolution;
 
   UserTimestampInfo()
     : jsonStartPos(-1), jsonEndPos(-1),
-      bootSeq(0), createdMs(0),
+      ntpAnchorId(0), createdMs(0),
       bootCount(-1), needsResolution(false) {}
 };
 
@@ -1841,7 +1841,7 @@ bool loadUsersFromFile(String& outUser, String& outPass) {
 // Forward declarations for helper functions
 static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int maxCount);
 static bool parseUserTimestampInfo(const String& userObj, int userStart, UserTimestampInfo& info);
-static BootAnchor* findMatchingAnchor(BootAnchor* anchors, int count, uint32_t bootSeq);
+static BootAnchor* findMatchingAnchor(BootAnchor* anchors, int count, uint32_t ntpAnchorId);
 static bool replaceJsonField(String& json, const char* fieldName, const String& newValue, int searchStart);
 static bool resolveUserTimestamp(String& usersJson, const UserTimestampInfo& info, const BootAnchor& anchor);
 static bool approximateUserTimestamp(String& usersJson, const UserTimestampInfo& info, uint32_t ordinalNumber);
@@ -1930,12 +1930,12 @@ static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int ma
   for (JsonObject anchor : bootAnchorsArray) {
     if (count >= maxCount) break;
     
-    int bootSeq = anchor["bootSeq"] | 0;
+    int ntpAnchorId = anchor["ntpAnchorId"] | 0;
     int epochAtSync = anchor["epochAtSync"] | 0;
     int millisAtSync = anchor["millisAtSync"] | 0;
     
-    if (bootSeq > 0 && epochAtSync > 0) {
-      anchors[count++] = BootAnchor(bootSeq, epochAtSync, millisAtSync);
+    if (ntpAnchorId > 0 && epochAtSync > 0) {
+      anchors[count++] = BootAnchor(ntpAnchorId, epochAtSync, millisAtSync);
     }
   }
 
@@ -1952,12 +1952,12 @@ static bool parseUserTimestampInfo(const String& userObj, int userStart,
 
   if (!info.needsResolution) return false;
 
-  int bootSeq, msSinceBoot, bootCounter;
-  if (!extractJsonInt(userObj, "bootSeq", bootSeq) || !extractJsonInt(userObj, "createdMs", msSinceBoot)) {
+  int ntpAnchorId, msSinceBoot, bootCounter;
+  if (!extractJsonInt(userObj, "ntpAnchorId", ntpAnchorId) || !extractJsonInt(userObj, "createdMs", msSinceBoot)) {
     return false;
   }
 
-  info.bootSeq = bootSeq;
+  info.ntpAnchorId = ntpAnchorId;
   info.createdMs = msSinceBoot;
 
   if (extractJsonInt(userObj, "bootCount", bootCounter)) {
@@ -1968,9 +1968,9 @@ static bool parseUserTimestampInfo(const String& userObj, int userStart,
 }
 
 // Find matching anchor for boot sequence
-static BootAnchor* findMatchingAnchor(BootAnchor* anchors, int count, uint32_t bootSeq) {
+static BootAnchor* findMatchingAnchor(BootAnchor* anchors, int count, uint32_t ntpAnchorId) {
   for (int i = 0; i < count; i++) {
-    if (anchors[i].bootSeq == bootSeq) {
+    if (anchors[i].ntpAnchorId == ntpAnchorId) {
       return &anchors[i];
     }
   }
@@ -2121,25 +2121,25 @@ void cleanupOldBootAnchors(void* docPtr) {
   JsonArray bootAnchorsArray = (*workingDoc)["bootAnchors"];
   if (!bootAnchorsArray || bootAnchorsArray.size() == 0) return;
 
-  uint32_t maxBootSeq = 0;
+  uint32_t maxNTPAnchorId = 0;
   JsonObject maxAnchor;
   
   for (JsonObject anchor : bootAnchorsArray) {
-    uint32_t bootSeq = anchor["bootSeq"] | 0;
-    if (bootSeq > maxBootSeq) {
-      maxBootSeq = bootSeq;
+    uint32_t ntpAnchorId = anchor["ntpAnchorId"] | 0;
+    if (ntpAnchorId > maxNTPAnchorId) {
+      maxNTPAnchorId = ntpAnchorId;
       maxAnchor = anchor;
     }
   }
 
-  if (maxBootSeq > 0 && !maxAnchor.isNull()) {
-    uint32_t bootSeqVal = maxAnchor["bootSeq"] | 0;
+  if (maxNTPAnchorId > 0 && !maxAnchor.isNull()) {
+    uint32_t ntpAnchorIdVal = maxAnchor["ntpAnchorId"] | 0;
     uint32_t epochVal = maxAnchor["epochAtSync"] | 0;
     uint32_t millisVal = maxAnchor["millisAtSync"] | 0;
     
     bootAnchorsArray.clear();
     JsonObject newAnchor = bootAnchorsArray.add<JsonObject>();
-    newAnchor["bootSeq"] = (uint32_t)bootSeqVal;
+    newAnchor["ntpAnchorId"] = (uint32_t)ntpAnchorIdVal;
     newAnchor["epochAtSync"] = (uint32_t)epochVal;
     newAnchor["millisAtSync"] = (uint32_t)millisVal;
 
@@ -2187,8 +2187,8 @@ void resolvePendingUserCreationTimes() {
   DEBUG_USERSF("[resolve] Found %d boot anchors", anchorCount);
   
   for (int i = 0; i < anchorCount; i++) {
-    DEBUG_USERSF("[resolve] Anchor %d: bootSeq=%lu epochAtSync=%u millisAtSync=%lu",
-                 i, (unsigned long)anchors[i].bootSeq, (unsigned)anchors[i].epochAtSync, (unsigned long)anchors[i].millisAtSync);
+    DEBUG_USERSF("[resolve] Anchor %d: ntpAnchorId=%lu epochAtSync=%u millisAtSync=%lu",
+                 i, (unsigned long)anchors[i].ntpAnchorId, (unsigned)anchors[i].epochAtSync, (unsigned long)anchors[i].millisAtSync);
   }
 
   // Find the "users" array in the JSON - start searching after "users":
@@ -2232,13 +2232,13 @@ void resolvePendingUserCreationTimes() {
       continue;
     }
 
-    DEBUG_USERSF("[resolve] User needs resolution: bootSeq=%lu createdMs=%lu bootCount=%d",
-                 (unsigned long)info.bootSeq, (unsigned long)info.createdMs, info.bootCount);
+    DEBUG_USERSF("[resolve] User needs resolution: ntpAnchorId=%lu createdMs=%lu bootCount=%d",
+                 (unsigned long)info.ntpAnchorId, (unsigned long)info.createdMs, info.bootCount);
 
-    BootAnchor* anchor = findMatchingAnchor(anchors, anchorCount, info.bootSeq);
+    BootAnchor* anchor = findMatchingAnchor(anchors, anchorCount, info.ntpAnchorId);
 
     if (anchor) {
-      DEBUG_USERSF("[resolve] Found matching anchor for bootSeq=%lu", (unsigned long)info.bootSeq);
+      DEBUG_USERSF("[resolve] Found matching anchor for ntpAnchorId=%lu", (unsigned long)info.ntpAnchorId);
       if (resolveUserTimestamp(usersJson, info, *anchor)) {
         INFO_SESSIONF("Successfully resolved timestamp");
         modified = true;
@@ -2246,16 +2246,16 @@ void resolvePendingUserCreationTimes() {
         WARN_SESSIONF("Failed to resolve timestamp");
       }
     } else {
-      DEBUG_USERSF("[resolve] No matching anchor for bootSeq=%lu", (unsigned long)info.bootSeq);
+      DEBUG_USERSF("[resolve] No matching anchor for ntpAnchorId=%lu", (unsigned long)info.ntpAnchorId);
       bool shouldApprox = false;
-      uint32_t ordinalN = info.bootSeq;
+      uint32_t ordinalN = info.ntpAnchorId;
 
       if (info.bootCount > 0 && gBootCounter > 0) {
         if ((uint32_t)info.bootCount < gBootCounter) {
           shouldApprox = true;
           ordinalN = (uint32_t)info.bootCount;
         }
-      } else if (info.bootSeq < gBootSeq) {
+      } else if (info.ntpAnchorId < gNTPAnchorId) {
         shouldApprox = true;
       }
 
@@ -2289,7 +2289,7 @@ void resolvePendingUserCreationTimes() {
 // Write boot anchor for user creation timestamp resolution
 void writeBootAnchor() {
   time_t now = time(nullptr);
-  if (now <= 0 || gBootSeq == 0) return;
+  if (now <= 0 || gNTPAnchorId == 0) return;
   if (!filesystemReady || !LittleFS.exists(USERS_JSON_FILE)) return;
 
   unsigned long currentMillis = millis();
@@ -2309,7 +2309,7 @@ void writeBootAnchor() {
   }
 
   JsonObject newAnchor = bootAnchorsArray.add<JsonObject>();
-  newAnchor["bootSeq"] = (uint32_t)gBootSeq;
+  newAnchor["ntpAnchorId"] = (uint32_t)gNTPAnchorId;
   newAnchor["epochAtSync"] = (uint32_t)now;
   newAnchor["millisAtSync"] = (uint32_t)currentMillis;
 
@@ -2382,11 +2382,11 @@ static CommandModuleRegistrar _user_cmd_registrar(userSystemCommands, userSystem
 // Boot Sequence Management
 // ============================================================================
 
-// Increment boot sequence counter (memory-only, resets on power cycle)
+// Increment NTP anchor ID counter (memory-only, resets on power cycle)
 void loadAndIncrementBootSeq() {
-  // Boot sequence is now memory-only and stored in bootAnchors in users.json
-  // We derive it from the highest bootSeq in existing anchors
-  gBootSeq = 0;
+  // NTP anchor ID is memory-only and stored in bootAnchors in users.json
+  // We derive it from the highest ntpAnchorId in existing anchors
+  gNTPAnchorId = 0;
   gBootCounter = 0;
   // Temporarily enable DEBUG_SYSTEM for boot sequence initialization (runs before settings loaded)
   uint32_t _dbgSaved = getDebugFlags();
@@ -2408,16 +2408,16 @@ void loadAndIncrementBootSeq() {
       } else {
         DEBUG_SYSTEMF("BootSeqInit: Loaded and parsed users.json");
         
-        // Find highest bootSeq in bootAnchors array
+        // Find highest ntpAnchorId in bootAnchors array
         JsonArray bootAnchorsArray = doc["bootAnchors"];
         if (bootAnchorsArray) {
           for (JsonObject anchor : bootAnchorsArray) {
-            uint32_t seq = anchor["bootSeq"] | 0;
-            if (seq > gBootSeq) {
-              gBootSeq = seq;
+            uint32_t seq = anchor["ntpAnchorId"] | 0;
+            if (seq > gNTPAnchorId) {
+              gNTPAnchorId = seq;
             }
           }
-          DEBUG_SYSTEMF("BootSeqInit: Highest bootSeq in anchors=%lu", (unsigned long)gBootSeq);
+          DEBUG_SYSTEMF("BootSeqInit: Highest ntpAnchorId in anchors=%lu", (unsigned long)gNTPAnchorId);
         }
 
         // Parse bootCounter if present
@@ -2451,12 +2451,12 @@ void loadAndIncrementBootSeq() {
     }
   }
 
-  gBootSeq++;
+  gNTPAnchorId++;
   // Restore debug flags
   setDebugFlags(_dbgSaved);
   // Use DEBUG macro - now safe since debug system is initialized
-  DEBUG_SYSTEMF("[BOOT] Boot sequence: %lu (derived from bootAnchors)", (unsigned long)gBootSeq);
-  DEBUG_SYSTEMF("[BOOT] Boot counter: %lu (stored in users.json)", (unsigned long)gBootCounter);
+  DEBUG_SYSTEMF("[BOOT] NTP anchor ID: %lu (derived from bootAnchors)", (unsigned long)gNTPAnchorId);
+  DEBUG_SYSTEMF("[BOOT] NTP anchor ID: %lu | Boot counter: %lu (stored in users.json)", (unsigned long)gNTPAnchorId, (unsigned long)gBootCounter);
 }
 
 // ============================================================================

@@ -313,9 +313,9 @@ void rebuildExpectedAuthHeader();
 // ---------------------------------------------------------------------------
 // Serial auth globals
 // ---------------------------------------------------------------------------
-// Boot sequence tracking for user creation timestamp resolution
+// NTP anchor ID tracking for user creation timestamp resolution
 // Exported to user_system.cpp
-uint32_t gBootSeq = 0;
+uint32_t gNTPAnchorId = 0;
 uint32_t gBootCounter = 0;
 
 bool gSerialAuthed = false;
