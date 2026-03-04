@@ -38,7 +38,7 @@ volatile SetupProgressStage gSetupProgressStage = SETUP_PROMPT_USERNAME;
 #define AUTOMATIONS_JSON_FILE "/system/automations.json"
 
 // Global variables
-extern uint32_t gBootSeq;
+extern uint32_t gNTPAnchorId;
 extern uint32_t gBootCounter;
 extern int gWifiNetworkCount;
 
@@ -350,13 +350,13 @@ void firstTimeSetupIfNeeded() {
   admin["createdAt"] = (const char*)nullptr;  // null
   admin["createdBy"] = "provisional";
   admin["createdMs"] = millis();
-  admin["bootSeq"] = gBootSeq;
+  admin["ntpAnchorId"] = gNTPAnchorId;
   admin["bootCount"] = 1;
   
   doc["bootAnchors"].to<JsonArray>();
 
-  DEBUG_SYSTEMF("FTS: Writing initial users.json: bootCounter=%u (forced 1), admin.bootCount=%u, gBootSeq=%lu",
-                1, 1, (unsigned long)gBootSeq);
+  DEBUG_SYSTEMF("FTS: Writing initial users.json: bootCounter=%u (forced 1), admin.bootCount=%u, gNTPAnchorId=%lu",
+                1, 1, (unsigned long)gNTPAnchorId);
   
   // Write to file
   File file = LittleFS.open(USERS_JSON_FILE, "w");

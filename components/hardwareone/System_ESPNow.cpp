@@ -5763,7 +5763,7 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
     String hashedPassword = hashUserPassword(String(targetPass));
     
     // Create user directly (similar to approvePendingUserInternal but simpler)
-    extern uint32_t gBootSeq;
+    extern uint32_t gNTPAnchorId;
     extern uint32_t gBootCounter;
     extern bool filesystemReady;
     
@@ -5832,7 +5832,7 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
     newUser["createdAt"] = (const char*)nullptr;  // null
     newUser["createdBy"] = String("espnow:") + ctx.deviceName;
     newUser["createdMs"] = millis();
-    newUser["bootSeq"] = gBootSeq;
+    newUser["ntpAnchorId"] = gNTPAnchorId;
     newUser["bootCount"] = gBootCounter;
 
     // Update nextId
