@@ -35,20 +35,20 @@ class Adafruit_APDS9960;
 extern Adafruit_APDS9960* gAPDS9960;
 
 // Command handlers
-const char* cmd_apdscolor(const String& cmd);
-const char* cmd_apdsproximity(const String& cmd);
-const char* cmd_apdsgesture(const String& cmd);
-const char* cmd_apdsstart(const String& cmd);
-const char* cmd_apdsstop(const String& cmd);
-const char* cmd_apdsmode(const String& cmd);
+const char* cmd_apdscolor(const String& argsInput);
+const char* cmd_apdsproximity(const String& argsInput);
+const char* cmd_apdsgesture(const String& argsInput);
+const char* cmd_apdsstart(const String& argsInput);
+const char* cmd_apdsstop(const String& argsInput);
+const char* cmd_apdsmode(const String& argsInput);
 
 // Deprecated command handlers (backward compatibility)
-const char* cmd_apdscolorstart(const String& cmd);
-const char* cmd_apdscolorstop(const String& cmd);
-const char* cmd_apdsproximitystart(const String& cmd);
-const char* cmd_apdsproximitystop(const String& cmd);
-const char* cmd_apdsgesturestart(const String& cmd);
-const char* cmd_apdsgesturestop(const String& cmd);
+const char* cmd_apdscolorstart(const String& argsInput);
+const char* cmd_apdscolorstop(const String& argsInput);
+const char* cmd_apdsproximitystart(const String& argsInput);
+const char* cmd_apdsproximitystop(const String& argsInput);
+const char* cmd_apdsgesturestart(const String& argsInput);
+const char* cmd_apdsgesturestop(const String& argsInput);
 
 // APDS sensor functions
 bool startAPDSSensorInternal();  // Called by queue processor
@@ -56,6 +56,14 @@ bool initAPDS9960();
 void readAPDSColor();
 void readAPDSProximity();
 void readAPDSGesture();
+
+// Accessor functions (for MQTT and other modules)
+uint8_t getAPDSProximity();
+uint16_t getAPDSColorR();
+uint16_t getAPDSColorG();
+uint16_t getAPDSColorB();
+uint16_t getAPDSColorC();
+extern bool apdsEnabled;
 
 // Command registry (for system_utils.cpp module list)
 struct CommandEntry;

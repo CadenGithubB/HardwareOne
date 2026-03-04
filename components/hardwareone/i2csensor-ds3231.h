@@ -85,12 +85,21 @@ String rtcDateTimeToString(const RTCDateTime* dt);
 // JSON building for ESP-NOW streaming
 int buildRTCDataJSON(char* buf, size_t bufSize);
 
+// Accessor functions (for MQTT and other modules)
+int getRTCYear();
+int getRTCMonth();
+int getRTCDay();
+int getRTCHour();
+int getRTCMinute();
+int getRTCSecond();
+float getRTCTemperature();
+
 // Command handlers
-const char* cmd_rtc(const String& cmd);
-const char* cmd_rtcset(const String& cmd);
-const char* cmd_rtcsync(const String& cmd);
-const char* cmd_rtcstart(const String& cmd);
-const char* cmd_rtcstop(const String& cmd);
+const char* cmd_rtc(const String& argsInput);
+const char* cmd_rtcset(const String& argsInput);
+const char* cmd_rtcsync(const String& argsInput);
+const char* cmd_rtcstart(const String& argsInput);
+const char* cmd_rtcstop(const String& argsInput);
 
 #endif // ENABLE_RTC_SENSOR
 

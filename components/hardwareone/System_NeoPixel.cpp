@@ -301,10 +301,10 @@ void runLEDEffect(int effectType, RGB startColor, RGB endColor, unsigned long du
 // NeoPixel Command Handlers
 // ============================================================================
 
-const char* cmd_ledcolor(const String& command) {
+const char* cmd_ledcolor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String colorName = command;
+  String colorName = argsInput;
   colorName.trim();
   colorName.toLowerCase();
   
@@ -325,16 +325,16 @@ const char* cmd_ledcolor(const String& command) {
   return getDebugBuffer();
 }
 
-const char* cmd_ledclear(const String& cmd) {
+const char* cmd_ledclear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   setLEDColor({0, 0, 0});
   return "LED cleared (turned off)";
 }
 
-const char* cmd_ledeffect(const String& command) {
+const char* cmd_ledeffect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = command;
+  String args = argsInput;
   args.trim();
 
   if (args == "off" || args == "none" || args.length() == 0) {

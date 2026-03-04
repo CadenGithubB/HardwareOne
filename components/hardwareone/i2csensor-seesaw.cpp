@@ -30,7 +30,7 @@ Adafruit_seesaw gGamepadSeesaw(&Wire1);
 // Debug system provides DEBUG_SENSORSF macro and gDebugFlags via debug_system.h
 
 // External dependencies for task
-// sensorStatusBumpWith, gSensorPollingPaused, i2cMutex, drainDebugRing provided by System_I2C.h
+// sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing provided by System_I2C.h
 
 // ============================================================================
 // Gamepad/Control Cache (owned by this module)
@@ -66,7 +66,7 @@ volatile UBaseType_t gGamepadWatermarkNow = (UBaseType_t)0;
 // Gamepad Sensor Command Handlers
 // ============================================================================
 
-const char* cmd_gamepad(const String& cmd) {
+const char* cmd_gamepad(const String& argsInput) {
   if (!gamepadConnected) {
     // Attempt on-demand init with retry/backoff
     if (!initGamepadConnection()) {
@@ -78,9 +78,9 @@ const char* cmd_gamepad(const String& cmd) {
 }
 
 // Centralized start handler (defined in System_I2C.cpp)
-extern const char* cmd_gamepadstart_queued(const String& cmd);
+extern const char* cmd_gamepadstart_queued(const String& argsInput);
 
-const char* cmd_gamepadstop(const String& cmd) {
+const char* cmd_gamepadstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   INFO_SENSORSF("[GAMEPAD] cmd_gamepadstop: Stop requested");
@@ -88,10 +88,10 @@ const char* cmd_gamepadstop(const String& cmd) {
   return "[Gamepad] Stop requested; cleanup will complete asynchronously";
 }
 
-const char* cmd_gamepadautostart(const String& args) {
+const char* cmd_gamepadautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -340,7 +340,7 @@ void readGamepad() {
 // Gamepad settings entries - minimal but essential for safety
 static const SettingEntry gamepadSettingEntries[] = {
   { "gamepadDevicePollMs", SETTING_INT,  &gSettings.gamepadDevicePollMs, 58, 0, nullptr, 10, 1000, "Poll Interval (ms)", nullptr },
-  { "gamepadAutoStart",    SETTING_BOOL, &gSettings.gamepadAutoStart,    1, 0, nullptr, 0, 1, "Auto-start after boot", nullptr }
+  { "gamepadAutoStart",    SETTING_BOOL, &gSettings.gamepadAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr }
 };
 
 static bool isGamepadConnected() {
@@ -388,7 +388,7 @@ static CommandModuleRegistrar _gamepad_cmd_registrar(gamepadCommands, gamepadCom
 //
 // Cleanup Strategy:
 //   1. Check gamepadEnabled flag at loop start
-//   2. Acquire i2cMutex to prevent race conditions during cleanup
+//   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Invalidate cache (no sensor object to delete)
 //   4. Release mutex and delete task
 // ============================================================================

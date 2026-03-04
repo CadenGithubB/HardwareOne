@@ -56,17 +56,17 @@ bool updateAutomationNextAt(long automationId, time_t newNextAt);
 
 // Automation command handlers
 const char* cmd_automation(const String& originalCmd);
-const char* cmd_automation_list(const String& cmd);
+const char* cmd_automation_list(const String& argsInput);
 const char* cmd_automation_add(const String& originalCmd);
 const char* cmd_automation_enable_disable(const String& originalCmd, bool enable);
 const char* cmd_automation_delete(const String& originalCmd);
 const char* cmd_automation_run(const String& originalCmd);
-const char* cmd_validate_conditions(const String& cmd);
+const char* cmd_validate_conditions(const String& argsInput);
 // NOTE: cmd_downloadautomation, cmd_autolog, and cmd_conditional are declared
 // and implemented in the main .ino file to avoid duplication
 
 // Automation execution
-void runAutomationCommandUnified(const String& cmd);
+void runAutomationCommandUnified(const String& argsInput);
 
 // Automation scheduler tick (called from main loop)
 void schedulerTickMinute();

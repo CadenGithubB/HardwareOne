@@ -94,25 +94,25 @@ bool loadUsersFromFile(String& outUser, String& outPass);
 // User Command Handlers (implemented in user_system.cpp)
 // ============================================================================
 
-const char* cmd_login(const String& cmd);
-const char* cmd_logout(const String& cmd);
+const char* cmd_login(const String& argsInput);
+const char* cmd_logout(const String& argsInput);
 
 // Export command registry for system_utils.cpp
 extern const CommandEntry userSystemCommands[];
 extern const size_t userSystemCommandsCount;
-const char* cmd_user_approve(const String& cmd);
-const char* cmd_user_deny(const String& cmd);
-const char* cmd_user_promote(const String& cmd);
-const char* cmd_user_demote(const String& cmd);
-const char* cmd_user_delete(const String& cmd);
-const char* cmd_user_changepassword(const String& cmd);
-const char* cmd_user_resetpassword(const String& cmd);
-const char* cmd_user_list(const String& cmd);
-const char* cmd_user_request(const String& cmd);
-const char* cmd_user_sync(const String& cmd);
-const char* cmd_pending_list(const String& cmd);
-const char* cmd_session_list(const String& cmd);
-const char* cmd_session_revoke(const String& cmd);
+const char* cmd_user_approve(const String& argsInput);
+const char* cmd_user_deny(const String& argsInput);
+const char* cmd_user_promote(const String& argsInput);
+const char* cmd_user_demote(const String& argsInput);
+const char* cmd_user_delete(const String& argsInput);
+const char* cmd_user_changepassword(const String& argsInput);
+const char* cmd_user_resetpassword(const String& argsInput);
+const char* cmd_user_list(const String& argsInput);
+const char* cmd_user_request(const String& argsInput);
+const char* cmd_user_sync(const String& argsInput);
+const char* cmd_pending_list(const String& argsInput);
+const char* cmd_session_list(const String& argsInput);
+const char* cmd_session_revoke(const String& argsInput);
 
 // ============================================================================
 // Boot Sequence Management

@@ -743,7 +743,8 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
   }
   
   // Thread-safe JSON response
-  if (!gJsonResponseMutex || xSemaphoreTake(gJsonResponseMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+  JsonBufferGuard jsonGuard("handleWaypointsAPI");
+  if (!jsonGuard.held) {
     httpd_resp_set_status(req, "503 Service Unavailable");
     httpd_resp_send(req, "{\"success\":false,\"error\":\"Mutex timeout\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -788,7 +789,6 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
     
     String response;
     serializeJson(doc, response);
-    xSemaphoreGive(gJsonResponseMutex);
     
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response.c_str(), response.length());
@@ -798,7 +798,6 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
     char buf[512];
     int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (ret <= 0) {
-      xSemaphoreGive(gJsonResponseMutex);
       httpd_resp_set_status(req, "400 Bad Request");
       httpd_resp_send(req, "{\"success\":false,\"error\":\"No data\"}", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
@@ -905,7 +904,6 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
     
     String response;
     serializeJson(doc, response);
-    xSemaphoreGive(gJsonResponseMutex);
     
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response.c_str(), response.length());

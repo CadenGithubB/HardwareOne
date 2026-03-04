@@ -375,7 +375,7 @@ bool formatSD() {
 // SD Card CLI Commands
 // ============================================================================
 
-static const char* cmd_sdmount(const String& cmd) {
+static const char* cmd_sdmount(const String& argsInput) {
   static char buf[128];
   
 #if !defined(SD_CS_PIN)
@@ -402,7 +402,7 @@ static const char* cmd_sdmount(const String& cmd) {
 #endif
 }
 
-static const char* cmd_sdunmount(const String& cmd) {
+static const char* cmd_sdunmount(const String& argsInput) {
   static char buf[128];
   
 #if !defined(SD_CS_PIN)
@@ -423,7 +423,7 @@ static const char* cmd_sdunmount(const String& cmd) {
 #endif
 }
 
-static const char* cmd_sdformat(const String& cmd) {
+static const char* cmd_sdformat(const String& argsInput) {
   static char buf[256];
   
 #if !defined(SD_CS_PIN)
@@ -431,7 +431,7 @@ static const char* cmd_sdformat(const String& cmd) {
   return buf;
 #else
   // Check for confirmation flag
-  if (cmd.indexOf("confirm") < 0) {
+  if (argsInput.indexOf("confirm") < 0) {
     snprintf(buf, sizeof(buf), 
       "WARNING: This will ERASE ALL DATA on the SD card!\n"
       "Run 'sdformat confirm' to proceed.");
@@ -450,7 +450,7 @@ static const char* cmd_sdformat(const String& cmd) {
 #endif
 }
 
-static const char* cmd_sdinfo(const String& cmd) {
+static const char* cmd_sdinfo(const String& argsInput) {
   static char buf[512];
   
 #if !defined(SD_CS_PIN)
@@ -549,7 +549,7 @@ static uint8_t testSDPins(int cs, int sck, int miso, int mosi, char* buf, int* p
 }
 
 // Raw SPI diagnostic for SD card
-static const char* cmd_sddiag(const String& cmd) {
+static const char* cmd_sddiag(const String& argsInput) {
   PSRAM_STATIC_BUF(buf, 4096);
   int pos = 0;
   

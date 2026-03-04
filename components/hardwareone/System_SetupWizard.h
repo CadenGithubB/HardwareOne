@@ -118,10 +118,16 @@ bool wizardShouldShowWiFi();
 void wizardFinalize(SetupWizardResult& result);
 
 // ============================================================================
-// Serial Console Wizard
+// Unified Wizard (single implementation - serial always, OLED optional)
 // ============================================================================
 
-// Run wizard via serial console (blocking)
+// The one wizard to rule them all. Serial is always active; when
+// ENABLE_OLED_DISPLAY=1 and the display is connected at runtime, OLED
+// rendering and joystick input are layered on top automatically.
+SetupWizardResult runSetupWizard();
+
+// Serial-only fallback for builds without OLED compiled in.
+// When ENABLE_OLED_DISPLAY=1, this just calls runSetupWizard().
 SetupWizardResult runSerialSetupWizard();
 
 // ============================================================================

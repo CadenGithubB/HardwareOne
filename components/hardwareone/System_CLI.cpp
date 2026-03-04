@@ -508,10 +508,10 @@ static void renderModuleHelp(const CommandModule* module, bool showAll) {
   }
 }
 
-static const char* cmd_help(const String& cmd) {
+static const char* cmd_help(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = cmd;
+  String args = argsInput;
   args.trim();
 
   if (args.length() == 0) {
@@ -635,7 +635,7 @@ static const char* cmd_help(const String& cmd) {
   }
 }
 
-static const char* cmd_back(const String& cmd) {
+static const char* cmd_back(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (gCLIState != CLI_NORMAL) {
@@ -646,7 +646,7 @@ static const char* cmd_back(const String& cmd) {
   return "Not in help mode.";
 }
 
-static const char* cmd_exit(const String& cmd) {
+static const char* cmd_exit(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (gCLIState != CLI_NORMAL) {
@@ -658,7 +658,7 @@ static const char* cmd_exit(const String& cmd) {
   return "Already in normal CLI mode.";
 }
 
-static const char* cmd_clear(const String& cmd) {
+static const char* cmd_clear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!gWebMirror.buf) { gWebMirror.init(gWebMirrorCap); }

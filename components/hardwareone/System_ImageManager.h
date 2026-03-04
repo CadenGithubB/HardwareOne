@@ -87,10 +87,10 @@ private:
 extern ImageManager gImageManager;
 
 // CLI commands
-const char* cmd_capture(const String& cmd);
-const char* cmd_images(const String& cmd);
-const char* cmd_imageview(const String& cmd);
-const char* cmd_imagedelete(const String& cmd);
-const char* cmd_imagesend(const String& cmd);
+const char* cmd_capture(const String& argsInput);
+const char* cmd_images(const String& argsInput);
+const char* cmd_imageview(const String& argsInput);
+const char* cmd_imagedelete(const String& argsInput);
+const char* cmd_imagesend(const String& argsInput);
 
 #endif // SYSTEM_IMAGEMANAGER_H

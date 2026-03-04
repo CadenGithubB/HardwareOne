@@ -19,7 +19,7 @@
 #define DEBUG_HTTP            0x0002ULL
 #define DEBUG_SSE             0x0004ULL
 #define DEBUG_CLI             0x0008ULL
-// Bits 4-5: REMOVED - Legacy DEBUG_SENSORS_FRAME and DEBUG_SENSORS_DATA (replaced by per-sensor flags)
+// Bits 4-5: Available (legacy DEBUG_SENSORS_FRAME/DEBUG_SENSORS_DATA were removed; replaced by per-sensor flags at bits 32-47)
 #define DEBUG_SENSORS         0x0040ULL
 #define DEBUG_FMRADIO         0x0080ULL  // FM Radio operations and I2C debugging
 #define DEBUG_I2C             0x0100ULL  // I2C bus operations, transactions, clock changes, mutex
@@ -144,7 +144,7 @@ extern int gDebugQueueSize;
 // Debug message structure
 struct DebugMessage {
   unsigned long timestamp;
-  uint32_t flags;  // Changed from uint8_t to store full flag value
+  uint64_t flags;  // Full 64-bit debug flag (matches debugQueuePrintf/isDebugFlagSet)
   char text[DEBUG_MSG_SIZE];
 };
 
@@ -227,7 +227,7 @@ void broadcastOutput(const char* s);
 struct CommandContext;
 void broadcastOutput(const String& s, const CommandContext& ctx);
 
-void debugQueuePrintf(uint32_t flag, const char* fmt, ...);
+void debugQueuePrintf(uint64_t flag, const char* fmt, ...);
 
 // Print summary (and tail) of output suppressed during help; resets counters
 void helpSuppressedPrintAndReset();
@@ -459,93 +459,93 @@ extern const size_t debugCommandsCount;
 // Debug Command Handlers (implemented in debug_system.cpp)
 // ============================================================================
 
-const char* cmd_outdisplay(const String& cmd);
-const char* cmd_debugauthcookies(const String& cmd);
-const char* cmd_debughttp(const String& cmd);
-const char* cmd_debugsse(const String& cmd);
-const char* cmd_debugcli(const String& cmd);
-const char* cmd_debugsensorsgeneral(const String& cmd);
-const char* cmd_debugcamera(const String& cmd);
-const char* cmd_debugmicrophone(const String& cmd);
-const char* cmd_debugwifi(const String& cmd);
-const char* cmd_debugstorage(const String& cmd);
-const char* cmd_debuglogger(const String& cmd);
-const char* cmd_debugautomations(const String& cmd);
-const char* cmd_debugperformance(const String& cmd);
-const char* cmd_debugauth(const String& cmd);
-const char* cmd_debugsensors(const String& cmd);
-const char* cmd_debugespnow(const String& cmd);
-const char* cmd_debugdatetime(const String& cmd);
-const char* cmd_debuggps(const String& cmd);
-const char* cmd_debugrtc(const String& cmd);
-const char* cmd_debugimu(const String& cmd);
-const char* cmd_debugthermal(const String& cmd);
-const char* cmd_debugtof(const String& cmd);
-const char* cmd_debuggamepad(const String& cmd);
-const char* cmd_debugapds(const String& cmd);
-const char* cmd_debugpresence(const String& cmd);
-const char* cmd_debugverbose(const String& cmd);
-const char* cmd_debugbuffer(const String& cmd);
-const char* cmd_debugcommandflow(const String& cmd);
-const char* cmd_debugusers(const String& cmd);
-const char* cmd_debugsystem(const String& cmd);
-const char* cmd_debugespnowstream(const String& cmd);
-const char* cmd_debugespnowcore(const String& cmd);
-const char* cmd_debugespnowrouter(const String& cmd);
-const char* cmd_debugespnowmesh(const String& cmd);
-const char* cmd_debugespnowtopo(const String& cmd);
-const char* cmd_debugespnowencryption(const String& cmd);
-const char* cmd_debugespnowmetadata(const String& cmd);
-const char* cmd_debugautoscheduler(const String& cmd);
-const char* cmd_debugautoexec(const String& cmd);
-const char* cmd_debugautocondition(const String& cmd);
-const char* cmd_debugautotiming(const String& cmd);
-const char* cmd_debugmemory(const String& cmd);
-const char* cmd_debugauthsessions(const String& cmd);
-const char* cmd_debugauthcookies(const String& cmd);
-const char* cmd_debugauthlogin(const String& cmd);
-const char* cmd_debugauthbootid(const String& cmd);
-const char* cmd_debughttphandlers(const String& cmd);
-const char* cmd_debughttprequests(const String& cmd);
-const char* cmd_debughttpresponses(const String& cmd);
-const char* cmd_debughttpstreaming(const String& cmd);
-const char* cmd_debugwificonnection(const String& cmd);
-const char* cmd_debugwificonfig(const String& cmd);
-const char* cmd_debugwifiscanning(const String& cmd);
-const char* cmd_debugwifidriver(const String& cmd);
-const char* cmd_debugstoragefiles(const String& cmd);
-const char* cmd_debugstoragejson(const String& cmd);
-const char* cmd_debugstoragesettings(const String& cmd);
-const char* cmd_debugstoragemigration(const String& cmd);
-const char* cmd_debugsystemboot(const String& cmd);
-const char* cmd_debugsystemconfig(const String& cmd);
-const char* cmd_debugsystemtasks(const String& cmd);
-const char* cmd_debugsystemhardware(const String& cmd);
-const char* cmd_debugusersmgmt(const String& cmd);
-const char* cmd_debugusersregister(const String& cmd);
-const char* cmd_debugusersquery(const String& cmd);
-const char* cmd_debugcliexecution(const String& cmd);
-const char* cmd_debugcliqueue(const String& cmd);
-const char* cmd_debugclivalidation(const String& cmd);
-const char* cmd_debugperfstack(const String& cmd);
-const char* cmd_debugperfheap(const String& cmd);
-const char* cmd_debugperftiming(const String& cmd);
-const char* cmd_debugsseconnection(const String& cmd);
-const char* cmd_debugsseevents(const String& cmd);
-const char* cmd_debugssebroadcast(const String& cmd);
-const char* cmd_debugcmdflowrouting(const String& cmd);
-const char* cmd_debugcmdflowqueue(const String& cmd);
-const char* cmd_debugcmdflowcontext(const String& cmd);
-const char* cmd_commandmodulesummary(const String& cmd);
-const char* cmd_settingsmodulesummary(const String& cmd);
+const char* cmd_outdisplay(const String& argsInput);
+const char* cmd_debugauthcookies(const String& argsInput);
+const char* cmd_debughttp(const String& argsInput);
+const char* cmd_debugsse(const String& argsInput);
+const char* cmd_debugcli(const String& argsInput);
+const char* cmd_debugsensorsgeneral(const String& argsInput);
+const char* cmd_debugcamera(const String& argsInput);
+const char* cmd_debugmicrophone(const String& argsInput);
+const char* cmd_debugwifi(const String& argsInput);
+const char* cmd_debugstorage(const String& argsInput);
+const char* cmd_debuglogger(const String& argsInput);
+const char* cmd_debugautomations(const String& argsInput);
+const char* cmd_debugperformance(const String& argsInput);
+const char* cmd_debugauth(const String& argsInput);
+const char* cmd_debugsensors(const String& argsInput);
+const char* cmd_debugespnow(const String& argsInput);
+const char* cmd_debugdatetime(const String& argsInput);
+const char* cmd_debuggps(const String& argsInput);
+const char* cmd_debugrtc(const String& argsInput);
+const char* cmd_debugimu(const String& argsInput);
+const char* cmd_debugthermal(const String& argsInput);
+const char* cmd_debugtof(const String& argsInput);
+const char* cmd_debuggamepad(const String& argsInput);
+const char* cmd_debugapds(const String& argsInput);
+const char* cmd_debugpresence(const String& argsInput);
+const char* cmd_debugverbose(const String& argsInput);
+const char* cmd_debugbuffer(const String& argsInput);
+const char* cmd_debugcommandflow(const String& argsInput);
+const char* cmd_debugusers(const String& argsInput);
+const char* cmd_debugsystem(const String& argsInput);
+const char* cmd_debugespnowstream(const String& argsInput);
+const char* cmd_debugespnowcore(const String& argsInput);
+const char* cmd_debugespnowrouter(const String& argsInput);
+const char* cmd_debugespnowmesh(const String& argsInput);
+const char* cmd_debugespnowtopo(const String& argsInput);
+const char* cmd_debugespnowencryption(const String& argsInput);
+const char* cmd_debugespnowmetadata(const String& argsInput);
+const char* cmd_debugautoscheduler(const String& argsInput);
+const char* cmd_debugautoexec(const String& argsInput);
+const char* cmd_debugautocondition(const String& argsInput);
+const char* cmd_debugautotiming(const String& argsInput);
+const char* cmd_debugmemory(const String& argsInput);
+const char* cmd_debugauthsessions(const String& argsInput);
+const char* cmd_debugauthcookies(const String& argsInput);
+const char* cmd_debugauthlogin(const String& argsInput);
+const char* cmd_debugauthbootid(const String& argsInput);
+const char* cmd_debughttphandlers(const String& argsInput);
+const char* cmd_debughttprequests(const String& argsInput);
+const char* cmd_debughttpresponses(const String& argsInput);
+const char* cmd_debughttpstreaming(const String& argsInput);
+const char* cmd_debugwificonnection(const String& argsInput);
+const char* cmd_debugwificonfig(const String& argsInput);
+const char* cmd_debugwifiscanning(const String& argsInput);
+const char* cmd_debugwifidriver(const String& argsInput);
+const char* cmd_debugstoragefiles(const String& argsInput);
+const char* cmd_debugstoragejson(const String& argsInput);
+const char* cmd_debugstoragesettings(const String& argsInput);
+const char* cmd_debugstoragemigration(const String& argsInput);
+const char* cmd_debugsystemboot(const String& argsInput);
+const char* cmd_debugsystemconfig(const String& argsInput);
+const char* cmd_debugsystemtasks(const String& argsInput);
+const char* cmd_debugsystemhardware(const String& argsInput);
+const char* cmd_debugusersmgmt(const String& argsInput);
+const char* cmd_debugusersregister(const String& argsInput);
+const char* cmd_debugusersquery(const String& argsInput);
+const char* cmd_debugcliexecution(const String& argsInput);
+const char* cmd_debugcliqueue(const String& argsInput);
+const char* cmd_debugclivalidation(const String& argsInput);
+const char* cmd_debugperfstack(const String& argsInput);
+const char* cmd_debugperfheap(const String& argsInput);
+const char* cmd_debugperftiming(const String& argsInput);
+const char* cmd_debugsseconnection(const String& argsInput);
+const char* cmd_debugsseevents(const String& argsInput);
+const char* cmd_debugssebroadcast(const String& argsInput);
+const char* cmd_debugcmdflowrouting(const String& argsInput);
+const char* cmd_debugcmdflowqueue(const String& argsInput);
+const char* cmd_debugcmdflowcontext(const String& argsInput);
+const char* cmd_commandmodulesummary(const String& argsInput);
+const char* cmd_settingsmodulesummary(const String& argsInput);
 
 // System logging commands
-const char* cmd_log(const String& cmd);
+const char* cmd_log(const String& argsInput);
 
 // System log auto-start (called from boot)
 void systemLogAutoStart();
 
 // Helper: Get category name from debug flag
-const char* getDebugCategoryName(uint32_t flag);
+const char* getDebugCategoryName(uint64_t flag);
 
 #endif // DEBUG_SYSTEM_H

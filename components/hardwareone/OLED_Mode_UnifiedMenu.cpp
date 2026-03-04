@@ -21,7 +21,7 @@ extern bool filesystemReady;
 
 extern String getEspNowDeviceName(const uint8_t* mac);
 extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
-extern String processCommand(const String& cmd);
+extern String processCommand(const String& argsInput);
 
 // Command execution uses central executeCommand() which handles remote routing
 extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);

@@ -19,15 +19,16 @@
 #include "System_Command.h"
 #include "System_MemUtil.h"
 #include "System_Auth.h"
+#include "System_Utils.h"
 #include <ArduinoJson.h>
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sensors.h"
 // Forward declarations for mesh bridge command routing
-extern const char* cmd_espnow_roomcmd(const String& args);
-extern const char* cmd_espnow_tagcmd(const String& args);
-extern const char* cmd_espnow_remote(const String& args);
+extern const char* cmd_espnow_roomcmd(const String& argsInput);
+extern const char* cmd_espnow_tagcmd(const String& argsInput);
+extern const char* cmd_espnow_remote(const String& argsInput);
 #endif
 
 #if ENABLE_GPS_SENSOR
@@ -36,6 +37,30 @@ extern const char* cmd_espnow_remote(const String& args);
 
 #if ENABLE_PRESENCE_SENSOR
 #include "i2csensor-sths34pf80.h"
+#endif
+
+#if ENABLE_THERMAL_SENSOR
+#include "i2csensor-mlx90640.h"
+#endif
+
+#if ENABLE_TOF_SENSOR
+#include "i2csensor-vl53l4cx.h"
+#endif
+
+#if ENABLE_IMU_SENSOR
+#include "i2csensor-bno055.h"
+#endif
+
+#if ENABLE_APDS_SENSOR
+#include "i2csensor-apds9960.h"
+#endif
+
+#if ENABLE_RTC_SENSOR
+#include "i2csensor-ds3231.h"
+#endif
+
+#if ENABLE_GAMEPAD_SENSOR
+#include "i2csensor-seesaw.h"
 #endif
 
 // Forward declarations
@@ -954,8 +979,6 @@ void publishMQTTSensorData() {
   
   // Add sensor data from caches (only if sensors are enabled and configured to publish)
 #if ENABLE_THERMAL_SENSOR
-  extern bool thermalEnabled;
-  extern int buildThermalDataJSON(char* buf, size_t bufSize);
   if (gSettings.mqttPublishThermal && thermalEnabled) {
     char thermalJson[2048];
     int len = buildThermalDataJSON(thermalJson, sizeof(thermalJson));
@@ -966,8 +989,6 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_TOF_SENSOR
-  extern bool tofEnabled;
-  extern int buildToFDataJSON(char* buf, size_t bufSize);
   if (gSettings.mqttPublishToF && tofEnabled) {
     char tofJson[1024];
     int len = buildToFDataJSON(tofJson, sizeof(tofJson));
@@ -978,8 +999,6 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_IMU_SENSOR
-  extern bool imuEnabled;
-  extern int buildIMUDataJSON(char* buf, size_t bufSize);
   if (gSettings.mqttPublishIMU && imuEnabled) {
     char imuJson[1024];
     int len = buildIMUDataJSON(imuJson, sizeof(imuJson));
@@ -1001,33 +1020,19 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_GPS_SENSOR
-  // gpsEnabled, gpsConnected, gPA1010D declared in i2csensor-pa1010d.h
   if (gSettings.mqttPublishGPS && gpsEnabled && gpsConnected && gPA1010D) {
-    extern float getGPSLatitude();
-    extern float getGPSLongitude();
-    extern float getGPSAltitude();
-    extern float getGPSSpeed();
-    extern int getGPSSatellites();
-    extern bool hasGPSFix();
-    if (hasGPSFix()) {
+    if (gGPSCache.hasFix) {
       pos += snprintf(jsonBuf + pos, 16384 - pos,
         ",\"gps\":{\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.1f,\"speed\":%.1f,\"satellites\":%d}",
-        getGPSLatitude(), getGPSLongitude(), getGPSAltitude(), getGPSSpeed(), getGPSSatellites());
+        gGPSCache.latitude, gGPSCache.longitude, gGPSCache.altitude, gGPSCache.speed, gGPSCache.satellites);
     } else {
-      pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"gps\":{\"fix\":false,\"satellites\":%d}", getGPSSatellites());
+      pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"gps\":{\"fix\":false,\"satellites\":%d}", gGPSCache.satellites);
     }
   }
 #endif
 
 #if ENABLE_APDS_SENSOR
-  extern bool apdsEnabled;
-  extern bool apdsConnected;
   if (gSettings.mqttPublishAPDS && apdsEnabled && apdsConnected) {
-    extern uint8_t getAPDSProximity();
-    extern uint16_t getAPDSColorR();
-    extern uint16_t getAPDSColorG();
-    extern uint16_t getAPDSColorB();
-    extern uint16_t getAPDSColorC();
     pos += snprintf(jsonBuf + pos, 16384 - pos,
       ",\"apds\":{\"proximity\":%u,\"color\":{\"r\":%u,\"g\":%u,\"b\":%u,\"c\":%u}}",
       getAPDSProximity(), getAPDSColorR(), getAPDSColorG(), getAPDSColorB(), getAPDSColorC());
@@ -1035,16 +1040,7 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_RTC_SENSOR
-  extern bool rtcEnabled;
-  extern bool rtcConnected;
   if (gSettings.mqttPublishRTC && rtcEnabled && rtcConnected) {
-    extern int getRTCYear();
-    extern int getRTCMonth();
-    extern int getRTCDay();
-    extern int getRTCHour();
-    extern int getRTCMinute();
-    extern int getRTCSecond();
-    extern float getRTCTemperature();
     char timeBuf[32];
     snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
              getRTCYear(), getRTCMonth(), getRTCDay(),
@@ -1056,12 +1052,7 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
-  extern bool gamepadEnabled;
-  extern bool gamepadConnected;
   if (gSettings.mqttPublishGamepad && gamepadEnabled && gamepadConnected) {
-    extern int getGamepadX();
-    extern int getGamepadY();
-    extern uint32_t getGamepadButtons();
     pos += snprintf(jsonBuf + pos, 16384 - pos,
       ",\"gamepad\":{\"x\":%d,\"y\":%d,\"buttons\":%lu}",
       getGamepadX(), getGamepadY(), (unsigned long)getGamepadButtons());
@@ -1106,9 +1097,8 @@ void mqttTick() {
 // MQTT CLI Commands
 // ============================================================================
 
-const char* cmd_openmqtt(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_openmqtt(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (mqttEnabled) {
     return "[MQTT] Already running";
@@ -1123,9 +1113,8 @@ const char* cmd_openmqtt(const String& args) {
   }
 }
 
-const char* cmd_closemqtt(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_closemqtt(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!mqttEnabled) {
     return "[MQTT] Not running";
@@ -1135,9 +1124,8 @@ const char* cmd_closemqtt(const String& args) {
   return "[MQTT] Client stopped";
 }
 
-const char* cmd_mqttstatus(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqttstatus(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("=== MQTT STATUS ===");
@@ -1164,11 +1152,10 @@ const char* cmd_mqttstatus(const String& args) {
 // MQTT Settings CLI Commands
 // ============================================================================
 
-const char* cmd_mqttautostart(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqttautostart(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     return gSettings.mqttAutoStart ? "MQTT auto-start: ON" : "MQTT auto-start: OFF";
@@ -1177,11 +1164,10 @@ const char* cmd_mqttautostart(const String& args) {
   return gSettings.mqttAutoStart ? "MQTT auto-start enabled" : "MQTT auto-start disabled";
 }
 
-const char* cmd_mqtthost(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqtthost(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     if (!ensureDebugBuffer()) return "Error";
@@ -1195,11 +1181,10 @@ const char* cmd_mqtthost(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_mqttport(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqttport(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     if (!ensureDebugBuffer()) return "Error";
@@ -1216,11 +1201,10 @@ const char* cmd_mqttport(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_mqtttlsmode(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqtttlsmode(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   
   // Show current mode if no argument
@@ -1275,11 +1259,10 @@ const char* cmd_mqtttlsmode(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_mqttcacertpath(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqttcacertpath(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     if (!ensureDebugBuffer()) return "Error";
@@ -1307,11 +1290,10 @@ const char* cmd_mqttcacertpath(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_mqttuser(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqttuser(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     if (!ensureDebugBuffer()) return "Error";
@@ -1329,11 +1311,10 @@ const char* cmd_mqttuser(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_mqttpassword(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqttpassword(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     return gSettings.mqttPassword.length() > 0 ? "MQTT password: ********" : "MQTT password: (not set)";
@@ -1346,11 +1327,10 @@ const char* cmd_mqttpassword(const String& args) {
   return "MQTT password updated";
 }
 
-const char* cmd_mqttbasetopic(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqttbasetopic(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     if (!ensureDebugBuffer()) return "Error";
@@ -1368,11 +1348,10 @@ const char* cmd_mqttbasetopic(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_mqttdiscoveryprefix(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqttdiscoveryprefix(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     if (!ensureDebugBuffer()) return "Error";
@@ -1386,11 +1365,10 @@ const char* cmd_mqttdiscoveryprefix(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_mqttpublishinterval(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqttpublishinterval(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     if (!ensureDebugBuffer()) return "Error";
@@ -1407,11 +1385,10 @@ const char* cmd_mqttpublishinterval(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_mqttsubscribe(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqttsubscribe(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     return gSettings.mqttSubscribeExternal ? 
@@ -1427,11 +1404,10 @@ const char* cmd_mqttsubscribe(const String& args) {
   return "Error: Use 0/1, true/false, or on/off";
 }
 
-const char* cmd_mqtttopics(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqtttopics(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     if (!ensureDebugBuffer()) return "Error";
@@ -1449,9 +1425,8 @@ const char* cmd_mqtttopics(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_mqttexternalsensors(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_mqttexternalsensors(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error";
   char* buf = getDebugBuffer();
@@ -1480,11 +1455,10 @@ const char* cmd_mqttexternalsensors(const String& args) {
   return buf;
 }
 
-const char* cmd_debugmqtt(const String& args) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* cmd_debugmqtt(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
     return gSettings.debugMqtt ? "MQTT debug: enabled" : "MQTT debug: disabled";
@@ -1501,10 +1475,9 @@ const char* cmd_debugmqtt(const String& args) {
 
 // Helper macro for boolean publish settings
 #define MQTT_PUBLISH_CMD(name, setting, label) \
-const char* cmd_mqttpublish##name(const String& args) { \
-  extern bool gCLIValidateOnly; \
-  if (gCLIValidateOnly) return "VALID"; \
-  String arg = args; arg.trim(); \
+const char* cmd_mqttpublish##name(const String& argsInput) { \
+  RETURN_VALID_IF_VALIDATE_CSTR(); \
+  String arg = argsInput; arg.trim(); \
   if (arg.length() == 0) { \
     return gSettings.setting ? "MQTT publish " label ": ON" : "MQTT publish " label ": OFF"; \
   } \

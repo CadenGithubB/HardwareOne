@@ -587,10 +587,10 @@ bool macEqual6(const uint8_t a[6], const uint8_t b[6]) {
 }
 
 // V2 reliability toggles (ack/dedup)
-const char* cmd_espnow_rel(const String& argsIn) {
+const char* cmd_espnow_rel(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   if (args.length() == 0) {
     return "Reliability status: ACK=on, dedup=on (both MANDATORY - v2 protocol)";
@@ -6754,8 +6754,8 @@ static void loadEspNowDevices() {
 
 // Dequeue a mesh retry entry by msgId (called when ACK is received)
 static void meshRetryDequeue(uint32_t msgId) {
-  if (!gMeshRetryMutex) return;
-  if (xSemaphoreTake(gMeshRetryMutex, pdMS_TO_TICKS(10)) != pdTRUE) return;
+  MeshRetryGuard guard("meshRetryDequeue");
+  if (!guard.held) return;
   for (int i = 0; i < MESH_RETRY_QUEUE_SIZE; i++) {
     if (gMeshRetryQueue[i].active && gMeshRetryQueue[i].msgId == msgId) {
       gMeshRetryQueue[i].active = false;
@@ -6763,7 +6763,6 @@ static void meshRetryDequeue(uint32_t msgId) {
       break;
     }
   }
-  xSemaphoreGive(gMeshRetryMutex);
 }
 
 // ============================================================================
@@ -7587,16 +7586,28 @@ static bool initEspNow() {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate deferredCmdRespResult");
     }
 
-    // Allocate per-device message history (biggest single allocation)
-    size_t histSize = sizeof(PeerMessageHistory) * gMeshPeerSlots;
+    // Allocate per-device message history with dynamic growth
+    // Start with small initial capacity (5 slots) and grow as peers are discovered
+    int initialCapacity = PEER_HISTORY_INITIAL_CAPACITY;
+    if (initialCapacity > gMeshPeerSlots) {
+      initialCapacity = gMeshPeerSlots;  // Cap at configured max
+    }
+    
+    size_t histSize = sizeof(PeerMessageHistory) * initialCapacity;
     gEspNow->peerMessageHistories = (PeerMessageHistory*)ps_alloc(histSize, AllocPref::PreferPSRAM, "espnow.msgHist");
     if (gEspNow->peerMessageHistories) {
       // Placement-init each entry (has constructor)
-      for (int i = 0; i < gMeshPeerSlots; i++) {
+      for (int i = 0; i < initialCapacity; i++) {
         new (&gEspNow->peerMessageHistories[i]) PeerMessageHistory();
       }
+      gEspNow->peerHistoryCapacity = initialCapacity;
+      gEspNow->peerHistoryCount = 0;
+      BROADCAST_PRINTF("[ESP-NOW] Message history allocated: %d slots (~%u KB, grows to %d max)",
+                       initialCapacity, (unsigned)(histSize / 1024), gMeshPeerSlots);
     } else {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate message history (%u bytes)", (unsigned)histSize);
+      gEspNow->peerHistoryCapacity = 0;
+      gEspNow->peerHistoryCount = 0;
       // Non-fatal — messaging will be limited but ESP-NOW still works
     }
 
@@ -7829,7 +7840,7 @@ static bool initEspNow() {
 }
 
 // ESP-NOW init command
-const char* cmd_espnow_init(const String& cmd) {
+const char* cmd_espnow_init(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (gEspNow && gEspNow->initialized) {
     return "ESP-NOW already initialized";
@@ -7888,9 +7899,11 @@ static bool deinitEspNow() {
   }
 
   // 5. Clear retry queue entries
-  if (gMeshRetryMutex && xSemaphoreTake(gMeshRetryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    memset(gMeshRetryQueue, 0, sizeof(gMeshRetryQueue));
-    xSemaphoreGive(gMeshRetryMutex);
+  {
+    MeshRetryGuard guard("stopESPNow");
+    if (guard.held) {
+      memset(gMeshRetryQueue, 0, sizeof(gMeshRetryQueue));
+    }
   }
 
   // 6. Unregister callbacks and deinit ESP-NOW
@@ -7917,7 +7930,7 @@ static bool deinitEspNow() {
 }
 
 // ESP-NOW deinit command
-const char* cmd_espnow_deinit(const String& cmd) {
+const char* cmd_espnow_deinit(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || !gEspNow->initialized) {
     return "ESP-NOW is not initialized";
@@ -7931,7 +7944,7 @@ const char* cmd_espnow_deinit(const String& cmd) {
 }
 
 // ESP-NOW status command
-const char* cmd_espnow_status(const String& cmd) {
+const char* cmd_espnow_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -7984,7 +7997,7 @@ const char* cmd_espnow_status(const String& cmd) {
 }
 
 // ESP-NOW statistics command
-const char* cmd_espnow_stats(const String& cmd) {
+const char* cmd_espnow_stats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   
@@ -8018,7 +8031,7 @@ const char* cmd_espnow_stats(const String& cmd) {
 }
 
 // ESP-NOW broadcast tracking statistics command
-const char* cmd_espnow_broadcaststats(const String& cmd) {
+const char* cmd_espnow_broadcaststats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   
@@ -8056,7 +8069,7 @@ const char* cmd_espnow_broadcaststats(const String& cmd) {
 }
 
 // ESP-NOW router statistics command
-const char* cmd_espnow_routerstats(const String& cmd) {
+const char* cmd_espnow_routerstats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   
@@ -8132,7 +8145,7 @@ const char* cmd_espnow_routerstats(const String& cmd) {
 }
 
 // ESP-NOW reset statistics command
-const char* cmd_espnow_resetstats(const String& cmd) {
+const char* cmd_espnow_resetstats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   
@@ -8153,14 +8166,14 @@ const char* cmd_espnow_resetstats(const String& cmd) {
 }
 
 // ESP-NOW pair device command
-const char* cmd_espnow_pair(const String& argsIn) {
+const char* cmd_espnow_pair(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   int firstSpace = args.indexOf(' ');
@@ -8238,9 +8251,9 @@ const char* cmd_espnow_pair(const String& argsIn) {
 }
 
 // Mesh TTL command
-const char* cmd_espnow_meshttl(const String& argsIn) {
+const char* cmd_espnow_meshttl(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -8275,7 +8288,7 @@ const char* cmd_espnow_meshttl(const String& argsIn) {
 }
 
 // Mesh metrics command
-const char* cmd_espnow_meshmetrics(const String& originalCmd) {
+const char* cmd_espnow_meshmetrics(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gEspNow) return "Error: ESP-NOW not initialized";
@@ -8330,9 +8343,9 @@ const char* cmd_espnow_meshmetrics(const String& originalCmd) {
 }
 
 // ESP-NOW mode command
-const char* cmd_espnow_mode(const String& argsIn) {
+const char* cmd_espnow_mode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   if (args.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "ESP-NOW mode: %s", getEspNowModeString());
@@ -8360,9 +8373,9 @@ const char* cmd_espnow_mode(const String& argsIn) {
 }
 
 // ESP-NOW setname command
-const char* cmd_espnow_setname(const String& argsIn) {
+const char* cmd_espnow_setname(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -8445,29 +8458,29 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
   return getDebugBuffer();
 }
 
-const char* cmd_espnow_room(const String& argsIn) {
+const char* cmd_espnow_room(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return metaGetSet(argsIn, gSettings.espnowRoom, "Room", 31);
+  return metaGetSet(argsInput, gSettings.espnowRoom, "Room", 31);
 }
 
-const char* cmd_espnow_zone(const String& argsIn) {
+const char* cmd_espnow_zone(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return metaGetSet(argsIn, gSettings.espnowZone, "Zone", 31);
+  return metaGetSet(argsInput, gSettings.espnowZone, "Zone", 31);
 }
 
-const char* cmd_espnow_tags(const String& argsIn) {
+const char* cmd_espnow_tags(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return metaGetSet(argsIn, gSettings.espnowTags, "Tags", 63);
+  return metaGetSet(argsInput, gSettings.espnowTags, "Tags", 63);
 }
 
-const char* cmd_espnow_friendlyname(const String& argsIn) {
+const char* cmd_espnow_friendlyname(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return metaGetSet(argsIn, gSettings.espnowFriendlyName, "Friendly name", 47);
+  return metaGetSet(argsInput, gSettings.espnowFriendlyName, "Friendly name", 47);
 }
 
-const char* cmd_espnow_stationary(const String& argsIn) {
+const char* cmd_espnow_stationary(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   if (args.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "Stationary: %s", gSettings.espnowStationary ? "true" : "false");
@@ -8479,7 +8492,7 @@ const char* cmd_espnow_stationary(const String& argsIn) {
   return getDebugBuffer();
 }
 
-const char* cmd_espnow_deviceinfo(const String& argsIn) {
+const char* cmd_espnow_deviceinfo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   char* buf = getDebugBuffer();
   int pos = 0;
@@ -8514,7 +8527,7 @@ const char* cmd_espnow_deviceinfo(const String& argsIn) {
 // Master Aggregation CLI Commands (Phase 3)
 // ==========================
 
-const char* cmd_espnow_devices(const String& argsIn) {
+const char* cmd_espnow_devices(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   char* buf = getDebugBuffer();
   int pos = 0;
@@ -8554,7 +8567,7 @@ const char* cmd_espnow_devices(const String& argsIn) {
   return buf;
 }
 
-const char* cmd_espnow_rooms(const String& argsIn) {
+const char* cmd_espnow_rooms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   char* buf = getDebugBuffer();
   int pos = 0;
@@ -8602,9 +8615,9 @@ const char* cmd_espnow_rooms(const String& argsIn) {
   return buf;
 }
 
-const char* cmd_espnow_find(const String& argsIn) {
+const char* cmd_espnow_find(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String query = argsIn;
+  String query = argsInput;
   query.trim();
   if (query.length() == 0) return "Usage: espnow find <query> — search by name, room, or tag";
 
@@ -8639,14 +8652,14 @@ const char* cmd_espnow_find(const String& argsIn) {
   }
 
   if (matches == 0) {
-    snprintf(buf, 1024, "No devices matching '%s'", argsIn.c_str());
+    snprintf(buf, 1024, "No devices matching '%s'", argsInput.c_str());
   }
   return buf;
 }
 
-const char* cmd_espnow_roomcmd(const String& argsIn) {
+const char* cmd_espnow_roomcmd(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   // Parse: <room> <user> <pass> <command>
@@ -8696,9 +8709,9 @@ const char* cmd_espnow_roomcmd(const String& argsIn) {
   return buf;
 }
 
-const char* cmd_espnow_tagcmd(const String& argsIn) {
+const char* cmd_espnow_tagcmd(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   // Parse: <tag> <user> <pass> <command>
@@ -8761,9 +8774,9 @@ const char* cmd_espnow_tagcmd(const String& argsIn) {
 }
 
 // ESP-NOW heartbeat mode command
-const char* cmd_espnow_hbmode(const String& argsIn) {
+const char* cmd_espnow_hbmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -8788,9 +8801,9 @@ const char* cmd_espnow_hbmode(const String& argsIn) {
 }
 
 // Mesh role command
-const char* cmd_espnow_meshrole(const String& argsIn) {
+const char* cmd_espnow_meshrole(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -8827,11 +8840,11 @@ const char* cmd_espnow_meshrole(const String& argsIn) {
 
 
 // Worker status configuration
-const char* cmd_espnow_worker(const String& argsIn) {
+const char* cmd_espnow_worker(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   // Show current configuration
@@ -8913,9 +8926,9 @@ const char* cmd_espnow_worker(const String& argsIn) {
 // V2 fragmentation is now mandatory - command removed
 
 // Mesh master command
-const char* cmd_espnow_meshmaster(const String& argsIn) {
+const char* cmd_espnow_meshmaster(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -8944,9 +8957,9 @@ const char* cmd_espnow_meshmaster(const String& argsIn) {
 }
 
 // Mesh backup command
-const char* cmd_espnow_meshbackup(const String& argsIn) {
+const char* cmd_espnow_meshbackup(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -8975,9 +8988,9 @@ const char* cmd_espnow_meshbackup(const String& argsIn) {
 }
 
 // Backup master enable/disable command
-const char* cmd_espnow_backupenable(const String& argsIn) {
+const char* cmd_espnow_backupenable(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   args.toLowerCase();
 
@@ -8998,7 +9011,7 @@ const char* cmd_espnow_backupenable(const String& argsIn) {
 }
 
 // Mesh topology discovery command
-const char* cmd_espnow_meshtopo(const String& originalCmd) {
+const char* cmd_espnow_meshtopo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!meshEnabled()) {
@@ -9035,7 +9048,7 @@ const char* cmd_espnow_meshtopo(const String& originalCmd) {
 }
 
 // Time sync command
-const char* cmd_espnow_timesync(const String& originalCmd) {
+const char* cmd_espnow_timesync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!meshEnabled()) {
@@ -9062,7 +9075,7 @@ const char* cmd_espnow_timesync(const String& originalCmd) {
 }
 
 // Time status command
-const char* cmd_espnow_timestatus(const String& originalCmd) {
+const char* cmd_espnow_timestatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "ERROR";
@@ -9081,7 +9094,7 @@ const char* cmd_espnow_timestatus(const String& originalCmd) {
 }
 
 // Mesh save command
-const char* cmd_espnow_meshsave(const String& originalCmd) {
+const char* cmd_espnow_meshsave(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!meshEnabled()) {
@@ -9093,7 +9106,7 @@ const char* cmd_espnow_meshsave(const String& originalCmd) {
 }
 
 // Topology results command
-const char* cmd_espnow_toporesults(const String& originalCmd) {
+const char* cmd_espnow_toporesults(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   uint32_t now = millis();
@@ -9150,7 +9163,7 @@ const char* cmd_espnow_toporesults(const String& originalCmd) {
 // ============================================================================
 
 // Test stream management
-const char* cmd_test_streams(const String& cmd) {
+const char* cmd_test_streams(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   broadcastOutput("\n=== Testing Stream Management ===");
@@ -9196,7 +9209,7 @@ const char* cmd_test_streams(const String& cmd) {
 }
 
 // Test concurrent streams
-const char* cmd_test_concurrent(const String& cmd) {
+const char* cmd_test_concurrent(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   broadcastOutput("\n=== Testing Concurrent Streams (Simulated) ===");
@@ -9248,7 +9261,7 @@ const char* cmd_test_concurrent(const String& cmd) {
 }
 
 // Test cleanup
-const char* cmd_test_cleanup(const String& cmd) {
+const char* cmd_test_cleanup(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   broadcastOutput("\n=== Testing Stream Cleanup ===");
@@ -9286,7 +9299,7 @@ const char* cmd_test_cleanup(const String& cmd) {
 // acquireFileTransferLock and releaseFileTransferLock removed - unused
 
 // Test file lock
-const char* cmd_test_filelock(const String& cmd) {
+const char* cmd_test_filelock(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   broadcastOutput("\n=== Testing File Transfer Lock ===");
@@ -9330,7 +9343,7 @@ const char* cmd_test_filelock(const String& cmd) {
 // ============================================================================
 
 // List paired devices
-const char* cmd_espnow_list(const String& cmd) {
+const char* cmd_espnow_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "{\"error\":\"ESP-NOW not initialized\"}";
   if (!gEspNow->initialized) {
@@ -9366,7 +9379,7 @@ const char* cmd_espnow_list(const String& cmd) {
 }
 
 // Mesh status command
-const char* cmd_espnow_meshstatus(const String& cmd) {
+const char* cmd_espnow_meshstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "{\"error\":\"ESP-NOW not initialized\"}";
   if (!gEspNow->initialized) {
@@ -9431,21 +9444,23 @@ const char* cmd_espnow_meshstatus(const String& cmd) {
   JsonArray retryQueue = doc.createNestedArray("retryQueue");
   int activeRetries = 0;
   
-  if (gMeshRetryMutex && xSemaphoreTake(gMeshRetryMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    for (int i = 0; i < MESH_RETRY_QUEUE_SIZE; i++) {
-      if (!gMeshRetryQueue[i].active) continue;
-      
-      JsonObject retry = retryQueue.createNestedObject();
-      uint32_t elapsed = now - gMeshRetryQueue[i].sentMs;
-      
-      retry["msgId"] = gMeshRetryQueue[i].msgId;
-      retry["dst"] = formatMacAddress(gMeshRetryQueue[i].dstMac);
-      retry["retryCount"] = gMeshRetryQueue[i].retryCount;
-      retry["secondsWaiting"] = elapsed / 1000;
-      
-      activeRetries++;
+  {
+    MeshRetryGuard retryGuard("espnowDebugJson");
+    if (retryGuard.held) {
+      for (int i = 0; i < MESH_RETRY_QUEUE_SIZE; i++) {
+        if (!gMeshRetryQueue[i].active) continue;
+        
+        JsonObject retry = retryQueue.createNestedObject();
+        uint32_t elapsed = now - gMeshRetryQueue[i].sentMs;
+        
+        retry["msgId"] = gMeshRetryQueue[i].msgId;
+        retry["dst"] = formatMacAddress(gMeshRetryQueue[i].dstMac);
+        retry["retryCount"] = gMeshRetryQueue[i].retryCount;
+        retry["secondsWaiting"] = elapsed / 1000;
+        
+        activeRetries++;
+      }
     }
-    xSemaphoreGive(gMeshRetryMutex);
   }
   
   doc["activeRetries"] = activeRetries;
@@ -9460,14 +9475,14 @@ const char* cmd_espnow_meshstatus(const String& cmd) {
 }
 
 // Unpair device command
-const char* cmd_espnow_unpair(const String& argsIn) {
+const char* cmd_espnow_unpair(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  String target = argsIn;
+  String target = argsInput;
   target.trim();
   
   if (target.length() == 0) {
@@ -9524,14 +9539,14 @@ const char* cmd_espnow_unpair(const String& argsIn) {
 // ============================================================================
 
 // Broadcast command
-const char* cmd_espnow_broadcast(const String& argsIn) {
+const char* cmd_espnow_broadcast(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  String message = argsIn;
+  String message = argsInput;
   message.trim();
 
   if (message.length() == 0) {
@@ -9800,14 +9815,14 @@ bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable) {
 #endif // ENABLE_BONDED_MODE
 
 // Sendfile command
-const char* cmd_espnow_sendfile(const String& argsIn) {
+const char* cmd_espnow_sendfile(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   int firstSpace = args.indexOf(' ');
@@ -9889,14 +9904,14 @@ const char* cmd_espnow_sendfile(const String& argsIn) {
 // ============================================================================
 
 // Set passphrase command
-const char* cmd_espnow_setpassphrase(const String& argsIn) {
+const char* cmd_espnow_setpassphrase(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  String passphrase = argsIn;
+  String passphrase = argsInput;
   passphrase.trim();
 
   if (passphrase.length() == 0) {
@@ -9932,7 +9947,7 @@ const char* cmd_espnow_setpassphrase(const String& argsIn) {
 }
 
 // Encryption status command
-const char* cmd_espnow_encstatus(const String& cmd) {
+const char* cmd_espnow_encstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
@@ -9984,7 +9999,7 @@ const char* cmd_espnow_encstatus(const String& cmd) {
 }
 
 // Secure pairing command
-const char* cmd_espnow_pairsecure(const String& argsIn) {
+const char* cmd_espnow_pairsecure(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
@@ -9995,7 +10010,7 @@ const char* cmd_espnow_pairsecure(const String& argsIn) {
     return "Encryption not enabled. Run 'espnow setpassphrase \"your_phrase\"' first.";
   }
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   if (args.length() == 0) {
@@ -10089,11 +10104,11 @@ const char* cmd_espnow_pairsecure(const String& argsIn) {
 
 extern void requestMetadata(const uint8_t* peerMac, bool force);
 
-const char* cmd_espnow_requestmeta(const String& argsIn) {
+const char* cmd_espnow_requestmeta(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized";
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   if (args.length() == 0) return "Usage: espnow requestmeta <name_or_mac>";
   
@@ -10126,7 +10141,7 @@ const char* cmd_espnow_requestmeta(const String& argsIn) {
 // ============================================================================
 
 // Remote file browse
-const char* cmd_espnow_browse(const String& argsIn) {
+const char* cmd_espnow_browse(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
@@ -10137,7 +10152,7 @@ const char* cmd_espnow_browse(const String& argsIn) {
     return "ESP-NOW encryption required. Set a passphrase with 'espnow setpassphrase \"your_phrase\"' and pair securely.";
   }
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   // Parse: <target> <user> <pass> [path]
@@ -10219,7 +10234,7 @@ const char* cmd_espnow_browse(const String& argsIn) {
 }
 
 // Remote file fetch (pull a file from remote device)
-const char* cmd_espnow_fetch(const String& argsIn) {
+const char* cmd_espnow_fetch(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
@@ -10230,7 +10245,7 @@ const char* cmd_espnow_fetch(const String& argsIn) {
     return "ESP-NOW encryption required. Set a passphrase with 'espnow setpassphrase \"your_phrase\"' and pair securely.";
   }
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   // Parse: <target> <user> <pass> <path>
@@ -10302,7 +10317,7 @@ const char* cmd_espnow_fetch(const String& argsIn) {
 }
 
 // Remote command execution
-const char* cmd_espnow_remote(const String& argsIn) {
+const char* cmd_espnow_remote(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) {
@@ -10315,7 +10330,7 @@ const char* cmd_espnow_remote(const String& argsIn) {
            "' and pair securely.";
   }
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   // Parse: <target> <username> <password> <command>
@@ -10400,7 +10415,7 @@ const char* cmd_espnow_remote(const String& argsIn) {
 }
 
 // Start stream command
-const char* cmd_espnow_startstream(const String& originalCmd) {
+const char* cmd_espnow_startstream(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
 
@@ -10443,7 +10458,7 @@ const char* cmd_espnow_startstream(const String& originalCmd) {
 }
 
 // Stop stream command
-const char* cmd_espnow_stopstream(const String& originalCmd) {
+const char* cmd_espnow_stopstream(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
 
@@ -10490,7 +10505,7 @@ const char* cmd_espnow_stopstream(const String& originalCmd) {
 }
 
 // ESP-NOW send message command (uses Message Router)
-const char* cmd_espnow_send(const String& argsIn) {
+const char* cmd_espnow_send(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gEspNow) return "Error: ESP-NOW not initialized";
@@ -10499,7 +10514,7 @@ const char* cmd_espnow_send(const String& argsIn) {
   }
 
   // Parse: <name_or_mac> <message>
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] args.length()=%d", args.length());
@@ -10567,12 +10582,12 @@ const char* cmd_espnow_send(const String& argsIn) {
 }
 
 // Send a synthetic large text payload to trigger fragmentation paths
-const char* cmd_espnow_bigsend(const String& argsIn) {
+const char* cmd_espnow_bigsend(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) return "ESP-NOW not initialized. Run 'openespnow' first.";
 
-  String args = argsIn; // format: "<mac|name> <bytes>"
+  String args = argsInput; // format: "<mac|name> <bytes>"
   args.trim();
   int firstSpace = args.indexOf(' ');
   if (firstSpace < 0) return "Usage: espnow bigsend <name_or_mac> <bytes>";
@@ -10642,7 +10657,7 @@ static void resetBondSync() {
 /**
  * Request capability summary from bonded peer
  */
-const char* cmd_bond_requestcap(const String& argsIn) {
+const char* cmd_bond_requestcap(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) {
@@ -10673,7 +10688,7 @@ const char* cmd_bond_requestcap(const String& argsIn) {
 /**
  * Show local capability summary
  */
-const char* cmd_bond_showcap(const String& argsIn) {
+const char* cmd_bond_showcap(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   CapabilitySummary cap;
@@ -10705,7 +10720,7 @@ const char* cmd_bond_showcap(const String& argsIn) {
 /**
  * Request full manifest from bonded peer (v3 binary protocol)
  */
-const char* cmd_bond_requestmanifest(const String& argsIn) {
+const char* cmd_bond_requestmanifest(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) {
@@ -10731,7 +10746,7 @@ const char* cmd_bond_requestmanifest(const String& argsIn) {
  * Without args: list all cached manifests
  * With fwHash arg: show specific manifest
  */
-const char* cmd_bond_showremotemanifest(const String& argsIn) {
+const char* cmd_bond_showremotemanifest(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   extern bool filesystemReady;
@@ -10739,7 +10754,7 @@ const char* cmd_bond_showremotemanifest(const String& argsIn) {
     return "Filesystem not ready.";
   }
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   const char* manifestDir = "/system/manifests";
@@ -10817,7 +10832,7 @@ const char* cmd_bond_showremotemanifest(const String& argsIn) {
 /**
  * Show local device manifest (for debugging)
  */
-const char* cmd_bond_showmanifest(const String& argsIn) {
+const char* cmd_bond_showmanifest(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   String manifest = generateDeviceManifest();
@@ -10844,13 +10859,13 @@ const char* cmd_bond_showmanifest(const String& argsIn) {
 /**
  * Connect to a bonded peer device: bond connect <mac_or_name>
  */
-const char* cmd_bond_connect(const String& argsIn) {
+const char* cmd_bond_connect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || !gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -10912,7 +10927,7 @@ const char* cmd_bond_connect(const String& argsIn) {
 /**
  * Disconnect from bonded peer: bond disconnect
  */
-const char* cmd_bond_disconnect(const String& argsIn) {
+const char* cmd_bond_disconnect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled) {
@@ -10934,7 +10949,7 @@ const char* cmd_bond_disconnect(const String& argsIn) {
  * Show bond mode status: bond status
  * NOTE: Output is split into multiple lines to avoid DEBUG_MSG_SIZE (256 byte) truncation
  */
-const char* cmd_bond_status(const String& argsIn) {
+const char* cmd_bond_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled) {
@@ -10990,10 +11005,10 @@ const char* cmd_bond_status(const String& argsIn) {
 /**
  * Set bond mode role: bond role <master|worker>
  */
-const char* cmd_bond_role(const String& argsIn) {
+const char* cmd_bond_role(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   args.toLowerCase();
   
@@ -11062,14 +11077,14 @@ const char* cmd_bond_role(const String& argsIn) {
  * Stream sensor data to bonded peer: bond stream <sensor> <on|off>
  * Works on both master and worker - bidirectional streaming supported
  */
-const char* cmd_bond_stream(const String& argsIn) {
+const char* cmd_bond_stream(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled) {
     return "Not in bond mode. Use 'bond connect <device>' first.";
   }
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   // Remove command prefix if present
@@ -11164,14 +11179,14 @@ const char* cmd_bond_stream(const String& argsIn) {
  * Test v3 sensor streaming: bond testsensor [type]
  * Sends a dummy sensor data packet to verify v3 communication
  */
-const char* cmd_bond_testsensor(const String& argsIn) {
+const char* cmd_bond_testsensor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled) {
     return "Not in bond mode. Use 'bond connect <device>' first.";
   }
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   // Remove command prefix if present
@@ -11224,11 +11239,11 @@ const char* cmd_bond_testsensor(const String& argsIn) {
  * Without args: show current settings
  * With args: adjust specific buffer size
  */
-const char* cmd_espnow_buffers(const String& argsIn) {
+const char* cmd_espnow_buffers(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   // No args: show current buffer settings
@@ -11302,23 +11317,23 @@ const char* cmd_espnow_buffers(const String& argsIn) {
 // ESP-NOW Command Registry
 // ============================================================================
 
-extern const char* cmd_espnow_sensorstream(const String& cmd);
-extern const char* cmd_espnow_sensorstatus(const String& cmd);
-extern const char* cmd_espnow_sensorbroadcast(const String& cmd);
-extern const char* cmd_espnow_usersync(const String& cmd);
+extern const char* cmd_espnow_sensorstream(const String& argsInput);
+extern const char* cmd_espnow_sensorstatus(const String& argsInput);
+extern const char* cmd_espnow_sensorbroadcast(const String& argsInput);
+extern const char* cmd_espnow_usersync(const String& argsInput);
 // Device metadata commands
-extern const char* cmd_espnow_room(const String& cmd);
-extern const char* cmd_espnow_zone(const String& cmd);
-extern const char* cmd_espnow_tags(const String& cmd);
-extern const char* cmd_espnow_friendlyname(const String& cmd);
-extern const char* cmd_espnow_stationary(const String& cmd);
-extern const char* cmd_espnow_deviceinfo(const String& cmd);
+extern const char* cmd_espnow_room(const String& argsInput);
+extern const char* cmd_espnow_zone(const String& argsInput);
+extern const char* cmd_espnow_tags(const String& argsInput);
+extern const char* cmd_espnow_friendlyname(const String& argsInput);
+extern const char* cmd_espnow_stationary(const String& argsInput);
+extern const char* cmd_espnow_deviceinfo(const String& argsInput);
 // Master aggregation commands
-extern const char* cmd_espnow_devices(const String& cmd);
-extern const char* cmd_espnow_rooms(const String& cmd);
-extern const char* cmd_espnow_find(const String& cmd);
-extern const char* cmd_espnow_roomcmd(const String& cmd);
-extern const char* cmd_espnow_tagcmd(const String& cmd);
+extern const char* cmd_espnow_devices(const String& argsInput);
+extern const char* cmd_espnow_rooms(const String& argsInput);
+extern const char* cmd_espnow_find(const String& argsInput);
+extern const char* cmd_espnow_roomcmd(const String& argsInput);
+extern const char* cmd_espnow_tagcmd(const String& argsInput);
 
 extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Status & Statistics ----
@@ -11484,12 +11499,12 @@ extern const SettingsModule espnowSettingsModule = {
 /**
  * Toggle user sync feature: espnow usersync [on|off]
  */
-const char* cmd_espnow_usersync(const String& argsIn) {
+const char* cmd_espnow_usersync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   args.toLowerCase();
   
@@ -11509,7 +11524,7 @@ const char* cmd_espnow_usersync(const String& argsIn) {
     INFO_ESPNOWF("[USER_SYNC] User sync DISABLED");
     return "User sync DISABLED - credential propagation blocked";
   } else {
-    return "Usage: espnow usersync [on|off]";
+    return "Usage: espnowusersync [on|off]";
   }
 }
 
@@ -11517,20 +11532,72 @@ const char* cmd_espnow_usersync(const String& argsIn) {
 // Per-Device Message Buffer Management (merged from espnow_message_buffer.cpp)
 // ============================================================================
 
+// Helper: Grow peer history array when capacity is reached
+static bool growPeerHistoryArray() {
+  if (!gEspNow || !gEspNow->peerMessageHistories) return false;
+  
+  int oldCapacity = gEspNow->peerHistoryCapacity;
+  int newCapacity = oldCapacity + PEER_HISTORY_GROWTH_INCREMENT;
+  
+  // Cap at gMeshPeerSlots (max configured peer limit)
+  if (newCapacity > gMeshPeerSlots) {
+    newCapacity = gMeshPeerSlots;
+  }
+  
+  // Already at max capacity
+  if (newCapacity <= oldCapacity) {
+    return false;
+  }
+  
+  DEBUG_ESPNOWF("[ESP-NOW] Growing peer history: %d -> %d slots", oldCapacity, newCapacity);
+  
+  // Allocate new larger array
+  size_t newSize = sizeof(PeerMessageHistory) * newCapacity;
+  PeerMessageHistory* newArray = (PeerMessageHistory*)ps_alloc(newSize, AllocPref::PreferPSRAM, "espnow.msgHist.grow");
+  
+  if (!newArray) {
+    ERROR_ESPNOWF("[ESP-NOW] Failed to grow peer history array (%u bytes)", (unsigned)newSize);
+    return false;
+  }
+  
+  // Initialize new array with placement new
+  for (int i = 0; i < newCapacity; i++) {
+    new (&newArray[i]) PeerMessageHistory();
+  }
+  
+  // Copy existing entries
+  for (int i = 0; i < oldCapacity; i++) {
+    if (gEspNow->peerMessageHistories[i].active) {
+      // Copy the entire structure (includes MAC, messages, counters)
+      memcpy(&newArray[i], &gEspNow->peerMessageHistories[i], sizeof(PeerMessageHistory));
+    }
+  }
+  
+  // Free old array and switch to new one
+  free(gEspNow->peerMessageHistories);
+  gEspNow->peerMessageHistories = newArray;
+  gEspNow->peerHistoryCapacity = newCapacity;
+  
+  BROADCAST_PRINTF("[ESP-NOW] Peer history expanded to %d slots (~%u KB)",
+                   newCapacity, (unsigned)(newSize / 1024));
+  
+  return true;
+}
+
 // Helper: Find or create peer message history for a given MAC address
 PeerMessageHistory* findOrCreatePeerHistory(uint8_t* peerMac) {
   if (!gEspNow || !gEspNow->peerMessageHistories) return nullptr;
   
   // First, try to find existing history for this peer
-  for (int i = 0; i < gMeshPeerSlots; i++) {
+  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
     PeerMessageHistory& history = gEspNow->peerMessageHistories[i];
     if (history.active && memcmp(history.peerMac, peerMac, 6) == 0) {
       return &history;
     }
   }
   
-  // Not found, create new entry
-  for (int i = 0; i < gMeshPeerSlots; i++) {
+  // Not found, try to create new entry in existing capacity
+  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
     PeerMessageHistory& history = gEspNow->peerMessageHistories[i];
     if (!history.active) {
       memcpy(history.peerMac, peerMac, 6);
@@ -11538,11 +11605,32 @@ PeerMessageHistory* findOrCreatePeerHistory(uint8_t* peerMac) {
       history.tail = 0;
       history.count = 0;
       history.active = true;
+      gEspNow->peerHistoryCount++;
+      DEBUG_ESPNOWF("[ESP-NOW] Created peer history slot %d/%d for %02X:%02X:%02X:%02X:%02X:%02X",
+                    gEspNow->peerHistoryCount, gEspNow->peerHistoryCapacity,
+                    peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
       return &history;
     }
   }
   
-  // No free slots
+  // No free slots - try to grow the array
+  if (growPeerHistoryArray()) {
+    // Retry allocation in the newly grown array
+    for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
+      PeerMessageHistory& history = gEspNow->peerMessageHistories[i];
+      if (!history.active) {
+        memcpy(history.peerMac, peerMac, 6);
+        history.head = 0;
+        history.tail = 0;
+        history.count = 0;
+        history.active = true;
+        gEspNow->peerHistoryCount++;
+        return &history;
+      }
+    }
+  }
+  
+  // Still no free slots (growth failed or at max capacity)
   return nullptr;
 }
 
@@ -11666,8 +11754,8 @@ int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t s
   
   int copied = 0;
   
-  // Collect messages from all peer histories
-  for (int p = 0; p < gMeshPeerSlots && copied < maxMessages; p++) {
+  // Collect messages from all peer histories (use dynamic capacity)
+  for (int p = 0; p < gEspNow->peerHistoryCapacity && copied < maxMessages; p++) {
     PeerMessageHistory& history = gEspNow->peerMessageHistories[p];
     if (!history.active || history.count == 0) continue;
     

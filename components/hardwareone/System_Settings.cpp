@@ -56,11 +56,11 @@ extern void fsUnlock();
 // Settings Command Implementations (moved from .ino)
 // ============================================================================
 
-const char* cmd_webclihistorysize(const String& args) {
+const char* cmd_webclihistorysize(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: webclihistorysize <1..100>";
   int v = valStr.toInt();
@@ -71,11 +71,11 @@ const char* cmd_webclihistorysize(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_oledclihistorysize(const String& args) {
+const char* cmd_oledclihistorysize(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  String valStr = args;
+  String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) return "Usage: oledclihistorysize <10..100>";
   int v = valStr.toInt();
@@ -86,9 +86,9 @@ const char* cmd_oledclihistorysize(const String& args) {
   return getDebugBuffer();
 }
 
-const char* cmd_outserial(const String& args) {
+const char* cmd_outserial(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String a = args;
+  String a = argsInput;
   a.trim();
   String t1, t2;
   int sp2 = a.indexOf(' ');
@@ -128,9 +128,9 @@ const char* cmd_outserial(const String& args) {
   }
 }
 
-const char* cmd_outweb(const String& args) {
+const char* cmd_outweb(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String a = args;
+  String a = argsInput;
   a.trim();
   String t1, t2;
   int sp2 = a.indexOf(' ');
@@ -174,8 +174,8 @@ const char* cmd_outweb(const String& args) {
 // Settings Command Registry
 // ============================================================================
 
-const char* cmd_beginwrite(const String& args);
-const char* cmd_savesettings(const String& args);
+const char* cmd_beginwrite(const String& argsInput);
+const char* cmd_savesettings(const String& argsInput);
 
 const CommandEntry settingsCommands[] = {
 #if ENABLE_WIFI
@@ -957,10 +957,10 @@ bool readSettingsJson() {
 
 extern void setupNTP();
 
-const char* cmd_tzoffsetminutes(const String& cmd) {
+const char* cmd_tzoffsetminutes(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: tzoffsetminutes <-720..720>";
   while (*p == ' ') p++;  // Skip whitespace
   int offset = atoi(p);
@@ -974,10 +974,10 @@ const char* cmd_tzoffsetminutes(const String& cmd) {
 }
 
 #if ENABLE_WIFI
-const char* cmd_ntpserver(const String& cmd) {
+const char* cmd_ntpserver(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: ntpserver <host>";
   while (*p == ' ') p++;  // Skip whitespace
   if (*p == '\0') return "Error: NTP server cannot be empty";
@@ -1027,15 +1027,15 @@ const char* cmd_ntpserver(const String& cmd) {
   return getDebugBuffer();
 }
 #else
-const char* cmd_ntpserver(const String& cmd) {
+const char* cmd_ntpserver(const String& argsInput) {
   return "NTP server command requires WiFi to be enabled";
 }
 #endif // ENABLE_WIFI
 
-const char* cmd_espnowenabled(const String& cmd) {
+const char* cmd_espnowenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: espnowenabled <0|1>";
   while (*p == ' ') p++;  // Skip whitespace
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
@@ -1142,6 +1142,7 @@ static const SettingEntry outputSettingEntries[] = {
   { "serial", SETTING_BOOL, &gSettings.outSerial, 1, 0, nullptr, 0, 1, "Serial Output", nullptr },
   { "web", SETTING_BOOL, &gSettings.outWeb, 1, 0, nullptr, 0, 1, "Web Output", nullptr },
   { "display", SETTING_BOOL, &gSettings.outDisplay, 0, 0, nullptr, 0, 1, "Display Output", nullptr },
+  { "serialRequireAuth", SETTING_BOOL, &gSettings.serialRequireAuth, 1, 0, nullptr, 0, 1, "Serial Require Auth", nullptr },
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "g2", SETTING_BOOL, &gSettings.outG2, 0, 0, nullptr, 0, 1, "G2 Glasses Output", nullptr },
 #endif
@@ -1505,12 +1506,11 @@ size_t writeRegisteredSettings(JsonDocument& doc) {
   return count;
 }
 
-const char* handleSettingCommand(const SettingEntry* entry, const String& cmd) {
-  extern bool gCLIValidateOnly;
-  if (gCLIValidateOnly) return "VALID";
+const char* handleSettingCommand(const SettingEntry* entry, const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Find the value after the command name
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) {
     // No argument - show current value
     static char buf[128];
@@ -1594,13 +1594,13 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& cmd) {
 // Batch write commands
 // ============================================================================
 
-const char* cmd_beginwrite(const String& args) {
+const char* cmd_beginwrite(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   gDeferWrites = true;
   return "Write deferred — changes batched until savesettings";
 }
 
-const char* cmd_savesettings(const String& args) {
+const char* cmd_savesettings(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   gDeferWrites = false;
   writeSettingsJson();

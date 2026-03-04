@@ -16,7 +16,7 @@ extern const CommandEntry commands[];
 extern const size_t commandsCount;
 
 static String originPrefix(const char* source, const String& user, const String& ip);
-void runUnifiedSystemCommand(const String& cmd);
+void runUnifiedSystemCommand(const String& argsInput);
 
 extern uint32_t gLastHeartbeatSentMs;
 extern const uint32_t MESH_HEARTBEAT_INTERVAL_MS;
@@ -744,10 +744,6 @@ static const char* originFrom(const AuthContext& ctx) {
 extern bool isAdminUser(const String& who);
 
 bool hasAdminPrivilege(const AuthContext& ctx) {
-  // SOURCE_INTERNAL transport grants automatic admin privileges for system-level operations
-  // (e.g., scheduled automations, system boot commands)
-  // User-originated commands (Web, Serial, ESP-NOW) must check actual user admin status
-  if (ctx.transport == SOURCE_INTERNAL) return true;
   return isAdminUser(ctx.user);
 }
 
@@ -986,13 +982,13 @@ extern void ensureDeviceRegistryFile();
 extern void discoverI2CDevices();
 
 #if ENABLE_AUTOMATION
-const char* cmd_downloadautomation(const String& cmd) {
+const char* cmd_downloadautomation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   broadcastOutput("Download automation from GitHub not yet implemented");
   return "ERROR";
 }
-const char* cmd_conditional(const String& cmd) {
-  return executeConditionalCommand(cmd.c_str());
+const char* cmd_conditional(const String& argsInput) {
+  return executeConditionalCommand(argsInput.c_str());
 }
 #endif
 
@@ -1197,8 +1193,8 @@ void hardwareone_setup() {
   // Legacy cache removed - each sensor now manages its own cache mutex
 
 
-  // Initialize all global mutexes (fsMutex, i2cMutex, gJsonResponseMutex, gMeshRetryMutex)
-  // Centralized in mutex_system.cpp
+  // Initialize all global mutexes (fsMutex, gJsonResponseMutex, gMeshRetryMutex, etc.)
+  // i2c bus mutex is owned by I2CDeviceManager — centralized in mutex_system.cpp
   initMutexes();
 
   // Initialize sensor startup queue mutex (in i2c_system.cpp) - only if runtime enabled
@@ -1908,8 +1904,8 @@ void hardwareone_loop() {
       String cmd = gSerialCLI;
       cmd.trim();
 
-      // Serial auth gate: require login before executing any commands
-      if (!gSerialAuthed) {
+      // Serial auth gate: require login before executing any commands (if enabled)
+      if (gSettings.serialRequireAuth && !gSerialAuthed) {
         if (cmd.startsWith("login ")) {
           // Parse: login <user> <pass>
           String rest = cmd.substring(6);

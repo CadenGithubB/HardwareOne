@@ -13,6 +13,14 @@
 #include <WiFi.h>
 #endif
 
+#if ENABLE_OLED_DISPLAY
+#include "OLED_SetupWizard.h"
+#include "HAL_Display.h"
+#include "HAL_Input.h"
+extern bool oledConnected;
+extern ControlCache gControlCache;
+#endif
+
 extern Settings gSettings;
 extern String waitForSerialInputBlocking();
 
@@ -549,6 +557,379 @@ static void printSerialSystemPage() {
   Serial.print("> ");
 }
 
+// ============================================================================
+// Shared serial page printer (used by runSetupWizard for both OLED and no-OLED)
+// ============================================================================
+
+static void printSerialPageStatus() {
+  SetupWizardPage page = getWizardCurrentPage();
+  int sel = getWizardCurrentSelection();
+
+  Serial.println();
+  Serial.println("========================================");
+
+  switch (page) {
+    case WIZARD_PAGE_FEATURES: {
+      Serial.println("  SETUP 1/5: Features");
+      WizardFeatureItem* items = getWizardFeaturesPage();
+      size_t count = getWizardFeaturesPageCount();
+      for (size_t i = 0; i < count; i++) {
+        bool enabled = items[i].setting ? *items[i].setting : false;
+        Serial.printf(" %s%zu. [%s] %s%s ~%dKB\n",
+          (int)i == sel ? ">" : " ", i + 1,
+          enabled ? "X" : " ",
+          items[i].label,
+          items[i].essential ? "*" : "",
+          items[i].heapKB);
+      }
+      break;
+    }
+    case WIZARD_PAGE_SENSORS: {
+      Serial.println("  SETUP 2/5: Sensors & Display");
+      WizardFeatureItem* items = getWizardSensorsPage();
+      size_t count = getWizardSensorsPageCount();
+      for (size_t i = 0; i < count; i++) {
+        bool enabled = items[i].setting ? *items[i].setting : false;
+        Serial.printf(" %s%zu. [%s] %s%s ~%dKB\n",
+          (int)i == sel ? ">" : " ", i + 1,
+          enabled ? "X" : " ",
+          items[i].label,
+          items[i].essential ? "*" : "",
+          items[i].heapKB);
+      }
+      break;
+    }
+    case WIZARD_PAGE_NETWORK: {
+      Serial.println("  SETUP 3/5: Network Settings");
+      WizardNetworkItem* items = getWizardNetworkPage();
+      size_t count = getWizardNetworkPageCount();
+      for (size_t i = 0; i < count; i++) {
+        if (items[i].isBool) {
+          bool enabled = *items[i].boolSetting;
+          Serial.printf(" %s%zu. [%s] %s\n",
+            (int)i == sel ? ">" : " ", i + 1,
+            enabled ? "X" : " ",
+            items[i].label);
+        }
+      }
+      break;
+    }
+    case WIZARD_PAGE_SYSTEM: {
+      Serial.println("  SETUP 4/5: System Settings");
+      const TimezoneEntry* tz = getTimezones();
+      int tzSel = getWizardTimezoneSelection();
+      int logSel = getWizardLogLevelSelection();
+      const char** logNames = getLogLevelNames();
+      Serial.printf(" %s1. Timezone: %s\n", sel == 0 ? ">" : " ", tz[tzSel].abbrev);
+      Serial.printf(" %s2. Log Level: %s\n", sel == 1 ? ">" : " ", logNames[logSel]);
+      break;
+    }
+    default:
+      break;
+  }
+
+  Serial.println("----------------------------------------");
+  Serial.println("Serial: # to toggle, 'n' next, 'b' back");
+#if ENABLE_OLED_DISPLAY
+  Serial.println("OLED:   Joystick + A=Toggle, Right=Next");
+#endif
+  Serial.print("> ");
+}
+
+// Serial WiFi page helper - full scan + numbered list
+static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
+  Serial.println();
+  Serial.println("=== WiFi Setup (SETUP 5/5) ===");
+  bool wifiPageDone = false;
+  while (!wifiPageDone) {
+#if ENABLE_WIFI
+    int n = WiFi.scanNetworks(false, true);
+    if (n > 0) {
+      Serial.printf("Found %d networks:\n", n);
+      for (int i = 0; i < n && i < 10; i++) {
+        Serial.printf("  %d. %-24s  %lddBm  %s\n",
+          i + 1, WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i),
+          (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Secured");
+      }
+      if (n > 10) Serial.printf("  ... and %d more\n", n - 10);
+    } else {
+      Serial.println("No WiFi networks found.");
+    }
+    Serial.println("----------------------------------------");
+    Serial.println("Enter number, SSID directly, 'rescan', or 'skip':");
+    Serial.println("('b' or 'back' to return to previous page)");
+    Serial.print("> ");
+    while (!Serial.available()) { delay(10); }
+    String ssidInput = Serial.readStringUntil('\n');
+    ssidInput.trim();
+    if (ssidInput.equalsIgnoreCase("b") || ssidInput.equalsIgnoreCase("back")) {
+      WiFi.scanDelete();
+      wizardPrevPage();
+      wifiPageDone = true;
+      continue;
+    }
+    if (ssidInput.equalsIgnoreCase("rescan")) {
+      WiFi.scanDelete();
+      continue;
+    }
+    if (ssidInput.equalsIgnoreCase("skip") || ssidInput.length() == 0) {
+      WiFi.scanDelete();
+      result.completed = true;
+      running = false;
+      wifiPageDone = true;
+      continue;
+    }
+    String ssid = ssidInput;
+    int idx = ssidInput.toInt();
+    if (idx > 0 && idx <= n) {
+      ssid = WiFi.SSID(idx - 1);
+    }
+    WiFi.scanDelete();
+    if (ssid.length() > 0) {
+      Serial.println("Enter WiFi password (or 'b' to go back):");
+      Serial.print("> ");
+      while (!Serial.available()) { delay(10); }
+      String pass = Serial.readStringUntil('\n');
+      pass.trim();
+      if (pass.equalsIgnoreCase("b") || pass.equalsIgnoreCase("back")) {
+        continue;
+      }
+      result.wifiSSID = ssid;
+      result.wifiPassword = pass;
+      result.wifiConfigured = true;
+    }
+    result.completed = true;
+    running = false;
+    wifiPageDone = true;
+#else
+    Serial.println("WiFi not compiled in this build.");
+    result.completed = true;
+    running = false;
+    wifiPageDone = true;
+#endif
+  }
+}
+
+// ============================================================================
+// THE unified wizard - single implementation for all builds
+// Serial is always active. When ENABLE_OLED_DISPLAY=1 and display is connected,
+// OLED rendering + joystick input are layered on top automatically.
+// ============================================================================
+
+SetupWizardResult runSetupWizard() {
+  SetupWizardResult result;
+  result.completed = false;
+  result.wifiEnabled = false;
+  result.wifiConfigured = false;
+  result.wifiSSID = "";
+  result.wifiPassword = "";
+  result.deviceName = "HardwareOne";
+  result.timezoneOffset = -300;
+  result.timezoneAbbrev = "EST";
+
+  initSetupWizard();
+
+  // Sync timezone selection from current settings
+  const TimezoneEntry* tzList = getTimezones();
+  size_t tzCount = getTimezoneCount();
+  for (size_t i = 0; i < tzCount; i++) {
+    if (tzList[i].offsetMinutes == gSettings.tzOffsetMinutes) {
+      setWizardTimezoneSelection(i);
+      break;
+    }
+  }
+
+#if ENABLE_OLED_DISPLAY
+  resetWizardJoystickState();
+  uint32_t lastButtons = 0;
+  bool lastButtonsInitialized = false;
+#endif
+
+  Serial.println();
+  Serial.println("========================================");
+  Serial.println("       FEATURE CONFIGURATION WIZARD    ");
+  Serial.println("========================================");
+  Serial.println("Configure which features to enable.");
+  Serial.println();
+
+  SetupWizardPage lastPrintedPage = WIZARD_PAGE_COUNT;
+  int lastPrintedSel = -1;
+  bool running = true;
+
+  while (running) {
+    SetupWizardPage currentPage = getWizardCurrentPage();
+    int currentSel = getWizardCurrentSelection();
+
+    // ------------------------------------------------------------------
+    // 1. WiFi page - handled before OLED rendering (has its own loop)
+    // ------------------------------------------------------------------
+    if (currentPage == WIZARD_PAGE_WIFI) {
+#if ENABLE_OLED_DISPLAY
+      if (oledDisplay && oledConnected) {
+        if (renderWiFiPage(result)) {
+          result.completed = true;
+          running = false;
+        }
+        // renderWiFiPage() called wizardPrevPage() internally on back press
+        lastPrintedPage = WIZARD_PAGE_COUNT;  // Force reprint on return
+        continue;
+      }
+#endif
+      handleSerialWiFiPage(result, running);
+      continue;
+    }
+
+    // ------------------------------------------------------------------
+    // 2. OLED rendering for pages 1-4 (when display connected)
+    // ------------------------------------------------------------------
+#if ENABLE_OLED_DISPLAY
+    if (oledDisplay && oledConnected) {
+      switch (currentPage) {
+        case WIZARD_PAGE_FEATURES: renderFeaturesPage(); break;
+        case WIZARD_PAGE_SENSORS:  renderSensorsPage();  break;
+        case WIZARD_PAGE_NETWORK:  renderNetworkPage();  break;
+        case WIZARD_PAGE_SYSTEM:   renderSystemPage();   break;
+        default: running = false;  break;
+      }
+    }
+#endif
+
+    if (!running) break;
+
+    // ------------------------------------------------------------------
+    // 3. Serial: print page state when it changes
+    // ------------------------------------------------------------------
+    if (currentPage != lastPrintedPage || currentSel != lastPrintedSel) {
+      printSerialPageStatus();
+      lastPrintedPage = currentPage;
+      lastPrintedSel = currentSel;
+    }
+
+    delay(50);
+
+    // ------------------------------------------------------------------
+    // 4. Serial input (n/b/number) - works in all builds
+    // ------------------------------------------------------------------
+    bool serialHandled = false;
+    if (Serial.available()) {
+      String input = Serial.readStringUntil('\n');
+      input.trim();
+      input.toLowerCase();
+
+      if (input == "n" || input == "next") {
+#if ENABLE_OLED_DISPLAY
+        JoystickNav fakeRight = {false, false, false, true};
+        switch (currentPage) {
+          case WIZARD_PAGE_FEATURES: handleFeaturesInput(0, fakeRight); break;
+          case WIZARD_PAGE_SENSORS:  handleSensorsInput(0, fakeRight);  break;
+          case WIZARD_PAGE_NETWORK:  handleNetworkInput(0, fakeRight);  break;
+          case WIZARD_PAGE_SYSTEM:
+            if (!handleSystemInput(0, fakeRight, result)) running = false;
+            break;
+          default: break;
+        }
+#else
+        if (!wizardNextPage(result)) running = false;
+#endif
+        serialHandled = true;
+      } else if (input == "b" || input == "back") {
+#if ENABLE_OLED_DISPLAY
+        JoystickNav fakeLeft = {false, false, true, false};
+        switch (currentPage) {
+          case WIZARD_PAGE_FEATURES: handleFeaturesInput(0, fakeLeft); break;
+          case WIZARD_PAGE_SENSORS:  handleSensorsInput(0, fakeLeft);  break;
+          case WIZARD_PAGE_NETWORK:  handleNetworkInput(0, fakeLeft);  break;
+          case WIZARD_PAGE_SYSTEM:   handleSystemInput(0, fakeLeft, result); break;
+          default: break;
+        }
+#else
+        wizardPrevPage();
+#endif
+        serialHandled = true;
+      } else if (input.length() > 0) {
+        int num = input.toInt();
+        if (num > 0) {
+          setWizardCurrentSelection(num - 1);
+          if (currentPage == WIZARD_PAGE_SYSTEM) {
+            wizardCycleOption();
+          } else {
+            wizardToggleCurrentItem();
+          }
+          serialHandled = true;
+        }
+      }
+
+      if (serialHandled) {
+        lastPrintedSel = -1;  // Force reprint after change
+        continue;
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // 5. Joystick/button input (OLED builds only, when display connected)
+    // ------------------------------------------------------------------
+#if ENABLE_OLED_DISPLAY
+    if (oledDisplay && oledConnected) {
+      uint32_t buttons = lastButtons;
+      bool haveButtons = false;
+      if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (gControlCache.gamepadDataValid) {
+          buttons = gControlCache.gamepadButtons;
+          haveButtons = true;
+        }
+        xSemaphoreGive(gControlCache.mutex);
+      }
+
+      if (haveButtons && !lastButtonsInitialized) {
+        lastButtons = buttons;
+        lastButtonsInitialized = true;
+        continue;
+      }
+
+      uint32_t pressedNow  = ~buttons;
+      uint32_t pressedLast = ~lastButtons;
+      uint32_t newButtons  = pressedNow & ~pressedLast;
+      lastButtons = buttons;
+
+      JoystickNav nav = readWizardJoystickNav();
+      bool hasInput = (newButtons != 0) || nav.up || nav.down || nav.left || nav.right;
+      if (!hasInput) continue;
+
+      bool handled = false;
+      switch (currentPage) {
+        case WIZARD_PAGE_FEATURES: handled = handleFeaturesInput(newButtons, nav); break;
+        case WIZARD_PAGE_SENSORS:  handled = handleSensorsInput(newButtons, nav);  break;
+        case WIZARD_PAGE_NETWORK:  handled = handleNetworkInput(newButtons, nav);  break;
+        case WIZARD_PAGE_SYSTEM:
+          if (!handleSystemInput(newButtons, nav, result)) running = false;
+          handled = true;
+          break;
+        default: break;
+      }
+
+      if (handled) {
+        lastPrintedSel = -1;
+        delay(150);
+      }
+    }
+#endif
+  }
+
+  return result;
+}
+
+// ============================================================================
+// runSerialSetupWizard - delegates to runSetupWizard() when OLED compiled;
+// remains a real implementation only for ENABLE_OLED_DISPLAY=0 builds.
+// ============================================================================
+
+#if ENABLE_OLED_DISPLAY
+SetupWizardResult runSerialSetupWizard() {
+  return runSetupWizard();
+}
+#else
+// NOTE: This is only the active path when ENABLE_OLED_DISPLAY=0.
+// All wizard changes should be made to runSetupWizard() above.
 SetupWizardResult runSerialSetupWizard() {
   SetupWizardResult result;
   result.completed = false;
@@ -565,7 +946,6 @@ SetupWizardResult runSerialSetupWizard() {
   Serial.println("       FEATURE CONFIGURATION WIZARD    ");
   Serial.println("========================================");
   Serial.println("Configure which features to enable.");
-  Serial.println("Features marked with * are essential.");
   Serial.println();
   
   bool running = true;
@@ -617,12 +997,13 @@ SetupWizardResult runSerialSetupWizard() {
           Serial.print("> ");
           String ssidInput = waitForSerialInputBlocking();
           ssidInput.trim();
-          WiFi.scanDelete();
           if (ssidInput.equalsIgnoreCase("b") || ssidInput.equalsIgnoreCase("back")) {
+            WiFi.scanDelete();
             wizardPrevPage();
             continue;
           }
           if (ssidInput.equalsIgnoreCase("skip") || ssidInput.length() == 0) {
+            WiFi.scanDelete();
             result.completed = true;
             running = false;
             continue;
@@ -632,6 +1013,7 @@ SetupWizardResult runSerialSetupWizard() {
           if (idx > 0 && idx <= n) {
             ssid = WiFi.SSID(idx - 1);
           }
+          WiFi.scanDelete();
           if (ssid.length() > 0) {
             Serial.println("Enter WiFi password (or 'b' to go back):");
             Serial.print("> ");
@@ -700,3 +1082,4 @@ SetupWizardResult runSerialSetupWizard() {
   
   return result;
 }
+#endif // !ENABLE_OLED_DISPLAY

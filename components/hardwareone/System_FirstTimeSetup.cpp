@@ -48,7 +48,7 @@ extern String hashUserPassword(const String& plaintext);
 #if ENABLE_AUTOMATION
 extern bool writeAutomationsJsonAtomic(const String& json);
 #endif
-extern void runUnifiedSystemCommand(const String& cmd);
+extern void runUnifiedSystemCommand(const String& argsInput);
 extern void resolvePendingUserCreationTimes();
 
 // DEBUG_SYSTEMF now defined in debug_system.h with performance optimizations
@@ -223,18 +223,7 @@ void firstTimeSetupIfNeeded() {
     // Run unified setup wizard (works on both Serial AND OLED simultaneously)
     SetupWizardResult wizardResult;
     
-#if ENABLE_OLED_DISPLAY
-    // Use OLED wizard only if display is actually connected (runtime check)
-    // This ensures uniform serial-only experience when no display present
-    if (oledEnabled && oledConnected) {
-      wizardResult = runOLEDSetupWizard();
-    } else {
-      wizardResult = runSerialSetupWizard();
-    }
-#else
-    // No OLED compiled - use serial-only wizard
-    wizardResult = runSerialSetupWizard();
-#endif
+    wizardResult = runSetupWizard();
     
     if (wizardResult.completed) {
       broadcastOutput("Feature configuration complete.");
@@ -468,6 +457,29 @@ void firstTimeSetupIfNeeded() {
     // Will not return - device reboots
   }
   
+  // OLED and gamepad are always started during first time setup if hardware is
+  // detected (OLED for boot animation, gamepad for menu navigation). If the
+  // user did not select them, reboot so the next boot starts clean — stopping
+  // them in-place would fragment the heap; a reboot is cheaper.
+  bool needsRebootForHardware = false;
+#if ENABLE_OLED_DISPLAY
+  if (oledConnected && !gSettings.oledEnabled) {
+    needsRebootForHardware = true;
+  }
+#endif
+#if ENABLE_GAMEPAD_SENSOR
+  if (gamepadEnabled && !gSettings.gamepadAutoStart) {
+    needsRebootForHardware = true;
+  }
+#endif
+  if (needsRebootForHardware) {
+    broadcastOutput("");
+    broadcastOutput("Rebooting to apply hardware settings...");
+    delay(1000);
+    ESP.restart();
+    // Will not return - device reboots
+  }
+
   broadcastOutput("Starting WiFi connection...");
   broadcastOutput("");
 }

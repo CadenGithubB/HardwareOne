@@ -165,8 +165,6 @@ static void displayChangePasswordMode() {
       oledDisplay->print(msg);
     }
   }
-  
-  oledDisplay->display();
 }
 
 // ============================================================================

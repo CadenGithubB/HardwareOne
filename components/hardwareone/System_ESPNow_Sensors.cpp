@@ -946,22 +946,13 @@ int buildThermalDataJSONInteger(char* buf, size_t bufSize) {
 // CLI Commands for Sensor Streaming (merged from espnow_sensor_commands.cpp)
 // ============================================================================
 
-const char* cmd_espnow_sensorstream(const String& cmd) {
+const char* cmd_espnow_sensorstream(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Command received: '%s'", cmd.c_str());
+  DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Command received: '%s'", argsInput.c_str());
   
-  // Parse: espnow sensorstream <sensor> <on|off>
-  String line = cmd;
-  line.trim();
-  
-  const char* prefix = "espnow sensorstream";
-  if (!line.startsWith(prefix)) {
-    DEBUG_SENSORSF("[SENSOR_STREAM_CMD] ERROR: Unexpected prefix (line='%s')", line.c_str());
-    return "Usage: espnow sensorstream <sensor> <on|off>";
-  }
-  
-  String args = line.substring(strlen(prefix));
+  // Parse: <sensor> <on|off>  (dispatcher strips "espnow sensorstream" prefix)
+  String args = argsInput;
   args.trim();
   
   int firstSpace = args.indexOf(' ');
@@ -1030,7 +1021,7 @@ const char* cmd_espnow_sensorstream(const String& cmd) {
   }
 }
 
-const char* cmd_espnow_sensorstatus(const String& cmd) {
+const char* cmd_espnow_sensorstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Show current streaming status
@@ -1059,19 +1050,11 @@ const char* cmd_espnow_sensorstatus(const String& cmd) {
 }
 
 // Enable/disable all sensor ESP-NOW communication (status + data broadcasts)
-const char* cmd_espnow_sensorbroadcast(const String& cmd) {
+const char* cmd_espnow_sensorbroadcast(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  // Parse: espnow sensorbroadcast <on|off>
-  String line = cmd;
-  line.trim();
-  
-  const char* prefix = "espnow sensorbroadcast";
-  if (!line.startsWith(prefix)) {
-    return "Usage: espnow sensorbroadcast <on|off>";
-  }
-  
-  String args = line.substring(strlen(prefix));
+  // Parse: <on|off>  (dispatcher strips "espnow sensorbroadcast" prefix)
+  String args = argsInput;
   args.trim();
   args.toLowerCase();
   

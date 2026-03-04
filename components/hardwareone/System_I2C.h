@@ -4,7 +4,7 @@
  *
  * This header provides: enqueueDeviceStart(), isInQueue(), getQueuePosition(),
  * handleDeviceStopped(), sensorStatusBumpWith(), drainDebugRing(),
- * gSensorPollingPaused, i2cMutex, i2cPingAddress(), and all I2C helpers.
+ * gSensorPollingPaused, i2cPingAddress(), and all I2C helpers.
  * Include this header instead of using 'extern' declarations for these functions.
  */
 
@@ -252,7 +252,6 @@ inline bool i2cBusRecovery() {
 // ============================================================================
 extern bool gI2CBusEnabled;
 extern volatile bool gSensorPollingPaused;
-extern SemaphoreHandle_t i2cMutex;
 
 // ============================================================================
 // I2C Sensor Database
@@ -325,41 +324,41 @@ void processAutoStartSensors();
 // ============================================================================
 // Sensor Command Handlers
 // ============================================================================
-const char* cmd_thermalstart(const String& cmd);
-const char* cmd_thermalstop(const String& cmd);
-const char* cmd_tofstart(const String& cmd);
-const char* cmd_tofstop(const String& cmd);
-const char* cmd_tof(const String& cmd);
-const char* cmd_imustart(const String& cmd);
-const char* cmd_imustop(const String& cmd);
-const char* cmd_imu(const String& cmd);
-const char* cmd_gamepadstart_queued(const String& cmd);
-const char* cmd_gamepadstop(const String& cmd);
-const char* cmd_gamepad(const String& cmd);
-const char* cmd_apdscolor(const String& cmd);
-const char* cmd_apdsproximity(const String& cmd);
-const char* cmd_apdsgesture(const String& cmd);
-const char* cmd_apdscolorstart(const String& cmd);
-const char* cmd_apdscolorstop(const String& cmd);
-const char* cmd_apdsproximitystart(const String& cmd);
-const char* cmd_apdsproximitystop(const String& cmd);
-const char* cmd_apdsgesturestart(const String& cmd);
-const char* cmd_apdsgesturestop(const String& cmd);
-const char* cmd_gpsstart(const String& cmd);
-const char* cmd_gpsstop(const String& cmd);
-const char* cmd_gps(const String& cmd);
-const char* cmd_imuactions(const String& cmd);
-const char* cmd_sensorlog(const String& cmd);
-const char* cmd_i2cclockthermalhz(const String& cmd);
-const char* cmd_i2cclocktofhz(const String& cmd);
-const char* cmd_i2cscan(const String& cmd);
-const char* cmd_i2cstats(const String& cmd);
-const char* cmd_i2cmetrics(const String& cmd);
-const char* cmd_i2chealth(const String& cmd);
-const char* cmd_sensors(const String& cmd);
-const char* cmd_sensorinfo(const String& cmd);
-const char* cmd_devices(const String& cmd);
-const char* cmd_devicefile(const String& cmd);
+const char* cmd_thermalstart(const String& argsInput);
+const char* cmd_thermalstop(const String& argsInput);
+const char* cmd_tofstart(const String& argsInput);
+const char* cmd_tofstop(const String& argsInput);
+const char* cmd_tof(const String& argsInput);
+const char* cmd_imustart(const String& argsInput);
+const char* cmd_imustop(const String& argsInput);
+const char* cmd_imu(const String& argsInput);
+const char* cmd_gamepadstart_queued(const String& argsInput);
+const char* cmd_gamepadstop(const String& argsInput);
+const char* cmd_gamepad(const String& argsInput);
+const char* cmd_apdscolor(const String& argsInput);
+const char* cmd_apdsproximity(const String& argsInput);
+const char* cmd_apdsgesture(const String& argsInput);
+const char* cmd_apdscolorstart(const String& argsInput);
+const char* cmd_apdscolorstop(const String& argsInput);
+const char* cmd_apdsproximitystart(const String& argsInput);
+const char* cmd_apdsproximitystop(const String& argsInput);
+const char* cmd_apdsgesturestart(const String& argsInput);
+const char* cmd_apdsgesturestop(const String& argsInput);
+const char* cmd_gpsstart(const String& argsInput);
+const char* cmd_gpsstop(const String& argsInput);
+const char* cmd_gps(const String& argsInput);
+const char* cmd_imuactions(const String& argsInput);
+const char* cmd_sensorlog(const String& argsInput);
+const char* cmd_i2cclockthermalhz(const String& argsInput);
+const char* cmd_i2cclocktofhz(const String& argsInput);
+const char* cmd_i2cscan(const String& argsInput);
+const char* cmd_i2cstats(const String& argsInput);
+const char* cmd_i2cmetrics(const String& argsInput);
+const char* cmd_i2chealth(const String& argsInput);
+const char* cmd_sensors(const String& argsInput);
+const char* cmd_sensorinfo(const String& argsInput);
+const char* cmd_devices(const String& argsInput);
+const char* cmd_devicefile(const String& argsInput);
 
 // ============================================================================
 // I2C Command Registry

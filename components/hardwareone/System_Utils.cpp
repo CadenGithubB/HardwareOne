@@ -879,8 +879,8 @@ namespace {
   };
 }
 
-String redactCmdForAudit(const String& cmd) {
-  String c = cmd;
+String redactCmdForAudit(const String& argsInput) {
+  String c = argsInput;
   String cl = c; cl.toLowerCase();
 
   for (size_t i = 0; i < (sizeof(kRules) / sizeof(kRules[0])); ++i) {
@@ -1044,10 +1044,10 @@ const char* cmd_voltage(const String& originalCmd) {
   return "[System] Voltage info displayed";
 }
 
-const char* cmd_cpufreq(const String& argsIn) {
+const char* cmd_cpufreq(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   uint32_t currentFreq = getCpuFrequencyMhz();
@@ -1080,12 +1080,12 @@ const char* cmd_cpufreq(const String& argsIn) {
 #include <esp_sleep.h>
 #include "OLED_Display.h"
 
-const char* cmd_lightsleep(const String& args) {
+const char* cmd_lightsleep(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Parse optional duration (default 20 seconds)
   int seconds = 20;
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   if (arg.length() > 0) {
     int val = arg.toInt();
@@ -1121,7 +1121,7 @@ const char* cmd_lightsleep(const String& args) {
 // Core System Commands (moved from .ino)
 // =========================================================================
 
-const char* cmd_status(const String& cmd) {
+const char* cmd_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   broadcastOutput("System Status:");
 #if ENABLE_WIFI
@@ -1142,7 +1142,7 @@ const char* cmd_status(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_uptime(const String& cmd) {
+const char* cmd_uptime(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   unsigned long uptimeMs = millis();
   unsigned long seconds = uptimeMs / 1000;
@@ -1152,7 +1152,7 @@ const char* cmd_uptime(const String& cmd) {
   return "[System] Uptime displayed";
 }
 
-const char* cmd_time(const String& cmd) {
+const char* cmd_time(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Show uptime in milliseconds
@@ -1188,10 +1188,10 @@ const char* cmd_time(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_timeset(const String& cmd) {
+const char* cmd_timeset(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = cmd;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -1261,7 +1261,7 @@ const char* cmd_timeset(const String& cmd) {
 
 extern bool filesystemReady;  // From filesystem.cpp
 
-const char* cmd_fsusage(const String& cmd) {
+const char* cmd_fsusage(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) {
     broadcastOutput("Error: LittleFS not ready");
@@ -1288,10 +1288,10 @@ extern String decryptWifiPassword(const String& encrypted);
 extern String hashUserPassword(const String& plaintext);
 extern bool verifyUserPassword(const String& plaintext, const String& hash);
 
-const char* cmd_testencryption(const String& argsIn) {
+const char* cmd_testencryption(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   if (args.length() == 0) {
@@ -1310,10 +1310,10 @@ const char* cmd_testencryption(const String& argsIn) {
   return "[System] Encryption test complete";
 }
 
-const char* cmd_testpassword(const String& argsIn) {
+const char* cmd_testpassword(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
 
   if (args.length() == 0) {
@@ -1342,18 +1342,18 @@ const char* cmd_reboot(const String& originalCmd) {
   return "[System] Rebooting";  // Won't actually return due to restart
 }
 
-const char* cmd_broadcast(const String& args) {
+const char* cmd_broadcast(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String msg = args;
+  String msg = argsInput;
   msg.trim();
   if (msg.length() == 0) return "Usage: broadcast <message>";
   broadcastOutput(msg);
   return "[System] Message broadcast";
 }
 
-const char* cmd_wait(const String& args) {
+const char* cmd_wait(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String val = args;
+  String val = argsInput;
   val.trim();
   if (val.length() == 0) return "Usage: wait <ms>";
   int ms = val.toInt();
@@ -1546,7 +1546,7 @@ time_t nowEpoch() {
 // cmd_testencryption, cmd_testpassword now implemented above
 // cmd_temperature, cmd_voltage, cmd_cpufreq now implemented above
 // cmd_reboot, cmd_broadcast, cmd_wait now implemented above
-extern const char* cmd_pending_list(const String& cmd);
+extern const char* cmd_pending_list(const String& argsInput);
 // cmd_lightsleep now implemented above
 
 // Main/Core command registry (commands that remain in main .ino file)
@@ -1587,8 +1587,8 @@ static CommandModuleRegistrar _core_cmd_registrar(commands, commandsCount, "core
 
 // Battery commands (from System_Battery.cpp)
 #if ENABLE_BATTERY_MONITOR
-extern const char* cmd_battery_status(const String& args);
-extern const char* cmd_battery_calibrate(const String& args);
+extern const char* cmd_battery_status(const String& argsInput);
+extern const char* cmd_battery_calibrate(const String& argsInput);
 
 const CommandEntry batteryCommands[] = {
   {"battery status", "Show battery voltage, charge level, and status", false, cmd_battery_status, nullptr, "battery", "status"},
@@ -1701,12 +1701,12 @@ bool commandRequiresAdmin(const String& cmdLine) {
 
 // Dispatch command to handler (simple version without auth context)
 // The full executeCommand() in .ino handles auth, logging, help mode, etc.
-const char* dispatchCommand(const String& cmd) {
-  const CommandEntry* entry = findCommand(cmd);
+const char* dispatchCommand(const String& argsInput) {
+  const CommandEntry* entry = findCommand(argsInput);
   if (!entry) {
     return "Unknown command";
   }
-  return entry->handler(cmd);
+  return entry->handler(argsInput);
 }
 
 // ============================================================================
@@ -2394,9 +2394,9 @@ void printMemoryReport() {
 }
 
 // Command handlers
-const char* cmd_memreport(const String& cmd) {
+const char* cmd_memreport(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)cmd;
+  (void)argsInput;
   printMemoryReport();
   return "Memory report printed to serial";
 }
@@ -2495,7 +2495,7 @@ extern QueueHandle_t gCmdExecQ;
 // External functions
 extern bool handleHelpNavigation(const String& cmd, char* out, size_t outSize);
 extern String exitToNormalBanner();
-extern String redactCmdForAudit(const String& cmd);
+extern String redactCmdForAudit(const String& argsInput);
 extern bool hasAdminPrivilege(const AuthContext& ctx);
 extern bool isAdminUser(const String& user);
 extern void logAuthAttempt(bool success, const char* path, const String& user, const String& ip, const String& extra);
@@ -2969,7 +2969,7 @@ String execCommandUnified(const CommandContext& baseCtx, const String& line) {
 }
 
 // Helper: run a command as SYSTEM origin with logging (used during first-time setup and automations)
-void runUnifiedSystemCommand(const String& cmd) {
+void runUnifiedSystemCommand(const String& argsInput) {
   AuthContext actx;
   actx.transport = SOURCE_INTERNAL;
   actx.user = "system";
@@ -2977,7 +2977,7 @@ void runUnifiedSystemCommand(const String& cmd) {
   actx.path = "/system";
   actx.opaque = nullptr;
   Command uc;
-  uc.line = cmd;
+  uc.line = argsInput;
   uc.ctx.origin = ORIGIN_SYSTEM;
   uc.ctx.auth = actx;
   uc.ctx.id = (uint32_t)millis();

@@ -639,12 +639,12 @@ extern float gMapRotation;  // Rotation angle in degrees (0-360)
 void initMapRenderer();
 
 // Command handlers
-const char* cmd_map(const String& cmd);
-const char* cmd_mapload(const String& cmd);
-const char* cmd_maplist(const String& cmd);
-const char* cmd_waypoint(const String& cmd);
-const char* cmd_whereami(const String& cmd);
-const char* cmd_search(const String& cmd);
+const char* cmd_map(const String& argsInput);
+const char* cmd_mapload(const String& argsInput);
+const char* cmd_maplist(const String& argsInput);
+const char* cmd_waypoint(const String& argsInput);
+const char* cmd_whereami(const String& argsInput);
+const char* cmd_search(const String& argsInput);
 
 // Command registry
 struct CommandEntry;

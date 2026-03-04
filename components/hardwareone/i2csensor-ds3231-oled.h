@@ -109,7 +109,7 @@ static bool rtcOLEDModeAvailable(String* outReason) {
 
 static void rtcToggleConfirmed(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& cmd);
+  extern void executeOLEDCommand(const String& argsInput);
 
   if (rtcEnabled && rtcConnected) {
     Serial.println("[RTC] Confirmed: Stopping RTC...");

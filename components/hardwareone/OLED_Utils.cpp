@@ -8,6 +8,7 @@
 #include "System_Settings.h"
 #include "System_ESPNow.h"
 #include "System_Utils.h"  // For executeCommand, AuthContext
+#include "System_FirstTimeSetup.h"
 
 // Forward declaration for memory stats display
 void displayMemoryStats();
@@ -2374,7 +2375,7 @@ void drawOLEDFooter() {
 extern bool gLocalDisplayAuthed;
 extern String gLocalDisplayUser;
 
-void executeOLEDCommand(const String& cmd) {
+void executeOLEDCommand(const String& argsInput) {
   extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
   
   AuthContext ctx;
@@ -2385,7 +2386,7 @@ void executeOLEDCommand(const String& cmd) {
   ctx.sid = "";
   
   char out[512];
-  bool success = executeCommand(ctx, cmd.c_str(), out, sizeof(out));
+  bool success = executeCommand(ctx, argsInput.c_str(), out, sizeof(out));
   
   if (!success && strlen(out) > 0) {
     Serial.printf("[OLED_CMD] Command failed: %s\n", out);
@@ -2823,13 +2824,14 @@ void stopOLEDDisplay() {
   }
 
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
-  // Use i2cTransaction wrapper for safe mutex + clock management
+  // Use i2cTransaction wrapper for safe mutex + clock management.
+  // delete/null must happen after the transaction completes, not inside it.
   i2cOledTransactionVoid(400000, 500, [&]() {
     gDisplay->clearDisplay();
     displayUpdate();
-    delete gDisplay;
-    gDisplay = nullptr;
   });
+  delete gDisplay;
+  gDisplay = nullptr;
 #else
   // For SPI displays, no transaction needed
   displayClear();
@@ -3249,17 +3251,10 @@ void updateOLEDDisplay() {
 // OLED Settings Commands (migrated from .ino)
 // ============================================================================
 
-// Validation macro used by CLI handlers
-#define RETURN_VALID_IF_VALIDATE_CSTR() \
-  do { \
-    extern bool gCLIValidateOnly; \
-    if (gCLIValidateOnly) return "VALID"; \
-  } while(0)
-
-const char* cmd_oled_enabled(const String& cmd) {
+const char* cmd_oled_enabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: oledenabled <0|1>";
   while (*p == ' ') p++;  // Skip whitespace
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
@@ -3306,10 +3301,10 @@ const char* cmd_oled_enabled(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_oled_autoinit(const String& cmd) {
+const char* cmd_oled_autoinit(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: oledautoinit <0|1>";
   while (*p == ' ') p++;  // Skip whitespace
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
@@ -3318,10 +3313,10 @@ const char* cmd_oled_autoinit(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_oled_requireauth(const String& cmd) {
+const char* cmd_oled_requireauth(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: oledrequireauth <0|1>";
   while (*p == ' ') p++;  // Skip whitespace
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
@@ -3330,10 +3325,10 @@ const char* cmd_oled_requireauth(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_oled_bootmode(const String& cmd) {
+const char* cmd_oled_bootmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: oledbootmode <logo|status|sensors|thermal|network|mesh|off>";
   while (*p == ' ') p++;  // Skip whitespace
   // Case-insensitive compare for mode names
@@ -3358,10 +3353,10 @@ const char* cmd_oled_bootmode(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_oled_defaultmode(const String& cmd) {
+const char* cmd_oled_defaultmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>";
   while (*p == ' ') p++;  // Skip whitespace
   // Case-insensitive compare for mode names
@@ -3386,10 +3381,10 @@ const char* cmd_oled_defaultmode(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_oled_bootduration(const String& cmd) {
+const char* cmd_oled_bootduration(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: oledbootduration <0..60000>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -3399,10 +3394,10 @@ const char* cmd_oled_bootduration(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_oled_updateinterval(const String& cmd) {
+const char* cmd_oled_updateinterval(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: oledupdateinterval <10..1000>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -3412,10 +3407,10 @@ const char* cmd_oled_updateinterval(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_oled_brightness(const String& cmd) {
+const char* cmd_oled_brightness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: oledbrightness <0..255>";
   while (*p == ' ') p++;  // Skip whitespace
   int v = atoi(p);
@@ -3425,10 +3420,10 @@ const char* cmd_oled_brightness(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_oled_thermalscale(const String& cmd) {
+const char* cmd_oled_thermalscale(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: oledthermalscale <0.1..10.0>";
   while (*p == ' ') p++;  // Skip whitespace
   float f = strtof(p, nullptr);
@@ -3438,10 +3433,10 @@ const char* cmd_oled_thermalscale(const String& cmd) {
   return getDebugBuffer();
 }
 
-const char* cmd_oled_thermalcolormode(const String& cmd) {
+const char* cmd_oled_thermalcolormode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(cmd.c_str(), ' ');
+  const char* p = strchr(argsInput.c_str(), ' ');
   if (!p) return "Usage: oledthermalcolormode <3level|grayscale>";
   while (*p == ' ') p++;  // Skip whitespace
   if (strncasecmp(p, "3level", 6) == 0) {
@@ -3459,7 +3454,7 @@ const char* cmd_oled_thermalcolormode(const String& cmd) {
 // OLED Display Command Handlers  
 // ============================================================================
 
-const char* cmd_oledstart(const String& cmd) {
+const char* cmd_oledstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (oledConnected) {
@@ -3475,7 +3470,7 @@ const char* cmd_oledstart(const String& cmd) {
   }
 }
 
-const char* cmd_oledstop(const String& cmd) {
+const char* cmd_oledstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
@@ -3488,7 +3483,7 @@ const char* cmd_oledstop(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_oledmode(const String& args) {
+const char* cmd_oledmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
@@ -3496,7 +3491,7 @@ const char* cmd_oledmode(const String& args) {
     return "ERROR";
   }
 
-  String mode = args;
+  String mode = argsInput;
   mode.trim();
   
   if (mode.length() == 0) {
@@ -3594,7 +3589,7 @@ const char* cmd_oledmode(const String& args) {
   return "OK";
 }
 
-const char* cmd_oledtext(const String& args) {
+const char* cmd_oledtext(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
@@ -3602,7 +3597,7 @@ const char* cmd_oledtext(const String& args) {
     return "ERROR";
   }
 
-  String text = args;
+  String text = argsInput;
   text.trim();
   
   if (text.length() == 0) {
@@ -3626,7 +3621,7 @@ const char* cmd_oledtext(const String& args) {
   return "OK";
 }
 
-const char* cmd_oledclear(const String& cmd) {
+const char* cmd_oledclear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
@@ -3643,7 +3638,7 @@ const char* cmd_oledclear(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_oledstatus(const String& cmd) {
+const char* cmd_oledstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
@@ -3695,7 +3690,7 @@ const char* cmd_oledstatus(const String& cmd) {
   return "OK";
 }
 
-const char* cmd_oledanim(const String& args) {
+const char* cmd_oledanim(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
@@ -3703,7 +3698,7 @@ const char* cmd_oledanim(const String& args) {
     return "ERROR";
   }
 
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -3846,10 +3841,10 @@ static OLEDMode getOLEDModeByName(const String& name) {
   return (OLEDMode)-1;  // Invalid
 }
 
-const char* cmd_oledlayout(const String& argsIn) {
+const char* cmd_oledlayout(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsIn;
+  String args = argsInput;
   args.trim();
   
   if (args.length() == 0) {
@@ -3992,6 +3987,15 @@ bool earlyOLEDInit() {
     oledEnabled = false;
     return false;
   }
+
+  bool inFirstTimeSetup = (gFirstTimeSetupState != SETUP_NOT_NEEDED);
+  if (!inFirstTimeSetup) {
+    if (!gSettings.oledEnabled || !gSettings.oledAutoInit) {
+      oledConnected = false;
+      oledEnabled = false;
+      return false;
+    }
+  }
   
   extern TwoWire Wire1;
   
@@ -4018,7 +4022,10 @@ bool earlyOLEDInit() {
       gDisplay = new Adafruit_SSD1306(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire1, OLED_RESET);
     }
     
-    if (gDisplay && gDisplay->begin(SSD1306_SWITCHCAPVCC, detectedAddr)) {
+    bool beginOk = gDisplay && i2cDeviceTransaction(detectedAddr, 100000, 500, [&]() -> bool {
+      return gDisplay->begin(SSD1306_SWITCHCAPVCC, detectedAddr);
+    });
+    if (beginOk) {
       oledConnected = true;
       oledEnabled = true;
 
@@ -6117,6 +6124,13 @@ void tryAutoStartGamepadForMenu() {
   if (gamepadEnabled && gamepadConnected) {
     Serial.println("[GAMEPAD_AUTO] Already running, skipping");
     return;  // Already running
+  }
+
+  bool inFirstTimeSetup = (gFirstTimeSetupState != SETUP_NOT_NEEDED);
+  if (!inFirstTimeSetup) {
+    if (!gSettings.gamepadAutoStart || !gSettings.i2cBusEnabled) {
+      return;
+    }
   }
   
   // Check if gamepad hardware is present via I2C ping

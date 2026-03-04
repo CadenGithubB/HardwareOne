@@ -14,7 +14,7 @@
 void registerCommand(const CommandEntry* command);
 void registerCommands(const CommandEntry* commands, size_t count);
 const CommandEntry* findCommand(const String& name);
-String executeCommandThroughRegistry(const String& cmd);
+String executeCommandThroughRegistry(const String& argsInput);
 String resolveRegistryCommandKey(const String& command);
 
 // Global access to command registry

@@ -35,10 +35,10 @@ extern unsigned long presenceLastStopTime;
 extern TaskHandle_t presenceTaskHandle;
 
 // Command handlers
-const char* cmd_presencestart(const String& cmd);
-const char* cmd_presencestop(const String& cmd);
-const char* cmd_presenceread(const String& cmd);
-const char* cmd_presencestatus(const String& cmd);
+const char* cmd_presencestart(const String& argsInput);
+const char* cmd_presencestop(const String& argsInput);
+const char* cmd_presenceread(const String& argsInput);
+const char* cmd_presencestatus(const String& argsInput);
 
 // Presence sensor functions
 bool startPresenceSensorInternal();  // Called by queue processor
