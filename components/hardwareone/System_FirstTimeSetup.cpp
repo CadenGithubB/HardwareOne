@@ -114,6 +114,23 @@ const char* getSetupProgressMessage(SetupProgressStage stage) {
   return "Unknown stage...";
 }
 
+static void clearOledIfActive() {
+#if ENABLE_OLED_DISPLAY
+  if (gDisplay && oledConnected && oledEnabled) {
+    displayClear();
+    displayUpdate();
+  }
+#endif
+}
+
+static void rebootWithMessage(const char* message) {
+  broadcastOutput("");
+  broadcastOutput(message);
+  clearOledIfActive();
+  delay(1000);
+  ESP.restart();
+}
+
 // ============================================================================
 // First-Time Setup Implementation
 // ============================================================================
@@ -440,20 +457,9 @@ void firstTimeSetupIfNeeded() {
   
   // If user disabled I2C, reboot so it takes effect from boot
   if (i2cDisabledByUser) {
-    broadcastOutput("");
-    broadcastOutput("Rebooting to apply I2C disabled setting...");
-
     // Clear the OLED before reboot so the previous setup text doesn't remain
     // visible on the next boot when OLED init is skipped.
-#if ENABLE_OLED_DISPLAY
-    if (gDisplay && oledConnected && oledEnabled) {
-      displayClear();
-      displayUpdate();
-    }
-#endif
-
-    delay(1000);     // Give time for output to flush
-    ESP.restart();
+    rebootWithMessage("Rebooting to apply I2C disabled setting...");
     // Will not return - device reboots
   }
   
@@ -472,11 +478,9 @@ void firstTimeSetupIfNeeded() {
     needsRebootForHardware = true;
   }
 #endif
+
   if (needsRebootForHardware) {
-    broadcastOutput("");
-    broadcastOutput("Rebooting to apply hardware settings...");
-    delay(1000);
-    ESP.restart();
+    rebootWithMessage("Rebooting to apply hardware settings...");
     // Will not return - device reboots
   }
 
