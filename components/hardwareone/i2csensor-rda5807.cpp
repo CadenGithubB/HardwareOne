@@ -488,7 +488,15 @@ const char* cmd_fmradio_start(const String& argsInput) {
   if (fmRadioEnabled) {
     return "FM Radio already running";
   }
-  
+
+  if (isInQueue(I2C_DEVICE_FMRADIO)) {
+    return "FM Radio already queued";
+  }
+
+  if (!i2cPingAddress(I2C_ADDR_FM_RADIO, 100000, 50)) {
+    return "[FM Radio] Not detected on I2C bus";
+  }
+
   // Queue the FM radio start request
   enqueueDeviceStart(I2C_DEVICE_FMRADIO);
   

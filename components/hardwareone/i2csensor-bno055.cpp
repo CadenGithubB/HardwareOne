@@ -202,6 +202,10 @@ const char* cmd_imustart(const String& argsInput) {
     return "[IMU] Already queued";
   }
 
+  if (!i2cPingAddress(I2C_ADDR_IMU, 100000, 50)) {
+    return "[IMU] Not detected on I2C bus";
+  }
+
   // Enqueue the request to centralized queue
   if (enqueueDeviceStart(I2C_DEVICE_IMU)) {
     sensorStatusBumpWith("openimu@enqueue");

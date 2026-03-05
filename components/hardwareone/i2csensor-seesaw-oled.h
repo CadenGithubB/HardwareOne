@@ -149,6 +149,12 @@ static void gamepadToggleConfirmed(void* userData) {
     Serial.println("[GAMEPAD] Confirmed: Stopping gamepad...");
     gamepadEnabled = false;
   } else if (!isInQueue(I2C_DEVICE_GAMEPAD)) {
+    // Verify hardware is physically present before attempting start
+    if (!i2cPingAddress(I2C_ADDR_GAMEPAD, 100000, 50)) {
+      Serial.println("[GAMEPAD] Confirmed: Start rejected - device not detected on I2C bus");
+      broadcastOutput("[Gamepad] Not detected on I2C bus");
+      return;
+    }
     Serial.println("[GAMEPAD] Confirmed: Starting gamepad...");
     enqueueDeviceStart(I2C_DEVICE_GAMEPAD);
   }

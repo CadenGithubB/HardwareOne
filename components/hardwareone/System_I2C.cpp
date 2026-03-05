@@ -268,6 +268,23 @@ extern bool thermalEnabled;
 extern bool tofEnabled;
 extern bool imuEnabled;
 
+// Map I2CDeviceType → I2C address for pre-start hardware presence checks.
+// Returns 0 if the device type has no single fixed address (or should skip the check).
+static uint8_t i2cAddressForDeviceType(I2CDeviceType sensor) {
+  switch (sensor) {
+    case I2C_DEVICE_THERMAL:  return I2C_ADDR_THERMAL;
+    case I2C_DEVICE_TOF:      return I2C_ADDR_TOF;
+    case I2C_DEVICE_IMU:      return I2C_ADDR_IMU;
+    case I2C_DEVICE_GAMEPAD:  return I2C_ADDR_GAMEPAD;
+    case I2C_DEVICE_GPS:      return I2C_ADDR_GPS;
+    case I2C_DEVICE_FMRADIO:  return I2C_ADDR_FM_RADIO;
+    case I2C_DEVICE_APDS:     return I2C_ADDR_APDS;
+    case I2C_DEVICE_RTC:      return I2C_ADDR_DS3231;
+    case I2C_DEVICE_PRESENCE: return I2C_ADDR_PRESENCE;
+    default:                  return 0;
+  }
+}
+
 static const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const bool& enabledFlag, const char* eventTag) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
@@ -278,6 +295,13 @@ static const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* disp
   if (isInQueue(sensor)) {
     int pos = getQueuePosition(sensor);
     snprintf(getDebugBuffer(), 1024, "%s sensor already queued (position %d)", displayName, pos);
+    return getDebugBuffer();
+  }
+
+  // Verify hardware is physically present before attempting start
+  uint8_t addr = i2cAddressForDeviceType(sensor);
+  if (addr != 0 && !i2cPingAddress(addr, 100000, 50)) {
+    snprintf(getDebugBuffer(), 1024, "[%s] Not detected on I2C bus", displayName);
     return getDebugBuffer();
   }
 
