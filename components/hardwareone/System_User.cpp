@@ -12,7 +12,7 @@
 #endif
 #include "System_SensorStubs.h" // Network stubs when disabled
 #include "System_Utils.h"  // For CommandEntry
-#include "System_Command.h"  // For CommandModuleRegistrar
+#include "System_Command.h"
 #include "System_Mutex.h"  // For FsLockGuard
 #include "System_Debug.h"  // For DEBUG_AUTHF, DEBUG_USERF
 #include "System_Logging.h" // For log file paths and constants
@@ -2376,7 +2376,7 @@ const size_t userSystemCommandsCount = sizeof(userSystemCommands) / sizeof(userS
 // Command Registration (System-Specific)
 // ============================================================================
 // Direct static registration to avoid macro issues
-static CommandModuleRegistrar _user_cmd_registrar(userSystemCommands, userSystemCommandsCount, "users");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // Boot Sequence Management

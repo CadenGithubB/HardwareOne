@@ -758,8 +758,7 @@ const CommandEntry fmRadioCommands[] = {
 
 const size_t fmRadioCommandsCount = sizeof(fmRadioCommands) / sizeof(fmRadioCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _fmradio_cmd_registrar(fmRadioCommands, fmRadioCommandsCount, "fmradio");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // FM Radio Modular Settings Registration (for safety and reliability)

@@ -2358,9 +2358,6 @@ const CommandEntry mapCommands[] = {
 };
 const size_t mapCommandsCount = sizeof(mapCommands) / sizeof(mapCommands[0]);
 
-// Command module registration
-static CommandModuleRegistrar _map_cmd_registrar(mapCommands, mapCommandsCount, "Map");
-
 // =============================================================================
 // LocationContextManager Implementation
 // =============================================================================

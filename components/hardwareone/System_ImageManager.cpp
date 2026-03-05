@@ -677,7 +677,7 @@ const char* cmd_imagesend(const String& argsInput) {
 }
 
 // Command registration
-static const CommandEntry imageCommands[] = {
+extern const CommandEntry imageCommands[] = {
   {"capture", "Capture and save image: capture [littlefs|sd|both]", false, cmd_capture},
   {"images", "List saved images: images [littlefs|sd]", false, cmd_images},
   {"imageview", "View image info: imageview <path>", false, cmd_imageview},
@@ -685,7 +685,4 @@ static const CommandEntry imageCommands[] = {
   {"imagesend", "Send image via ESP-NOW: imagesend <device> [path]", false, cmd_imagesend},
 };
 
-static const size_t imageCommandsCount = sizeof(imageCommands) / sizeof(imageCommands[0]);
-
-// Auto-register with command system
-static CommandModuleRegistrar _image_cmd_registrar(imageCommands, imageCommandsCount, "image");
+extern const size_t imageCommandsCount = sizeof(imageCommands) / sizeof(imageCommands[0]);

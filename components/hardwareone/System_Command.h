@@ -27,20 +27,11 @@ void initializeCommandSystem();
 // Debug summary of auto-registered modules (call after debug flags applied)
 void printCommandModuleSummary();
 
-// Automatic command discovery system
+// Module tracking for debug summary
 struct ModuleInfo {
   const char* name;
   const CommandEntry* commands;
   size_t count;
 };
-
-class CommandModuleRegistrar {
-public:
-  CommandModuleRegistrar(const CommandEntry* commands, size_t count, const char* moduleName);
-};
-
-// Macro for automatic registration in module files
-#define REGISTER_COMMAND_MODULE(commands, count, name) \
-  static CommandModuleRegistrar _cmd_registrar(commands, count, name)
 
 #endif // COMMAND_SYSTEM_H

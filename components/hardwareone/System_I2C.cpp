@@ -1505,7 +1505,7 @@ const size_t i2cCommandsCount = sizeof(i2cCommands) / sizeof(i2cCommands[0]);
 // ============================================================================
 // Command Registration
 // ============================================================================
-static CommandModuleRegistrar _i2c_registrar(i2cCommands, i2cCommandsCount, "i2c");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // Sensor Status System (moved from HardwareOne.ino)

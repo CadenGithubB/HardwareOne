@@ -1304,8 +1304,7 @@ const CommandEntry bluetoothCommands[] = {
 
 const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoothCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _ble_cmd_registrar(bluetoothCommands, bluetoothCommandsCount, "bluetooth");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // =============================================================================
 // SETTINGS

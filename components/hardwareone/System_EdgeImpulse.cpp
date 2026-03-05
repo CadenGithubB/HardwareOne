@@ -2446,7 +2446,7 @@ const CommandEntry edgeImpulseCommands[] = {
 const size_t edgeImpulseCommandsCount = sizeof(edgeImpulseCommands) / sizeof(edgeImpulseCommands[0]);
 
 // Auto-register commands at startup
-REGISTER_COMMAND_MODULE(edgeImpulseCommands, edgeImpulseCommandsCount, "EdgeImpulse");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // =============================================================================
 // Register Edge Impulse Web Handlers

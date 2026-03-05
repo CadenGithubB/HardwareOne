@@ -245,9 +245,6 @@ const CommandEntry powerCommands[] = {
 
 const size_t powerCommandsCount = sizeof(powerCommands) / sizeof(powerCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _power_cmd_registrar(powerCommands, powerCommandsCount, "power");
-
 // ============================================================================
 // Modular Settings Registration
 // ============================================================================

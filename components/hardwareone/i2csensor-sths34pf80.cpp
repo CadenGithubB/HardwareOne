@@ -447,8 +447,7 @@ const CommandEntry presenceCommands[] = {
 
 const size_t presenceCommandsCount = sizeof(presenceCommands) / sizeof(presenceCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _presence_cmd_registrar(presenceCommands, presenceCommandsCount, "presence");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // JSON building for ESP-NOW streaming

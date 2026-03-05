@@ -529,8 +529,7 @@ const CommandEntry gpsCommands[] = {
 
 const size_t gpsCommandsCount = sizeof(gpsCommands) / sizeof(gpsCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _gps_cmd_registrar(gpsCommands, gpsCommandsCount, "gps");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // GPS OLED Mode (Display Function + Registration)

@@ -6210,8 +6210,7 @@ const CommandEntry oledCommands[] = {
 
 const size_t oledCommandsCount = sizeof(oledCommands) / sizeof(oledCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _oled_cmd_registrar(oledCommands, oledCommandsCount, "oled");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // OLED Settings Module moved to OLED_Settings.cpp
 

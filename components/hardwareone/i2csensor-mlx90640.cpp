@@ -1314,7 +1314,7 @@ const size_t thermalCommandsCount = sizeof(thermalCommands) / sizeof(thermalComm
 // ============================================================================
 // Command Registration
 // ============================================================================
-static CommandModuleRegistrar _thermal_registrar(thermalCommands, thermalCommandsCount, "thermal");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // Thermal Task Implementation (moved from i2c_system.cpp for full modularization)

@@ -781,8 +781,7 @@ const CommandEntry rtcCommands[] = {
 };
 const size_t rtcCommandsCount = sizeof(rtcCommands) / sizeof(rtcCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _rtc_cmd_registrar(rtcCommands, rtcCommandsCount, "rtc");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // RTC OLED Mode (Display Function + Registration)
