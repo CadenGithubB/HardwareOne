@@ -2,6 +2,7 @@
 
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_NeoPixel.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
 
@@ -14,6 +15,10 @@ const char* cmd_hardwareled_brightness(const String& argsInput) {
   int v = arg.toInt();
   if (v < 0 || v > 100) return "Error: LED brightness must be 0..100";
   setSetting(gSettings.ledBrightness, v);
+  // Apply immediately to hardware (0-100% -> 0-255)
+  extern Adafruit_NeoPixel pixels;
+  pixels.setBrightness((uint8_t)(v * 255 / 100));
+  pixels.show();
   snprintf(getDebugBuffer(), 1024, "LED brightness set to %d%%", v);
   return getDebugBuffer();
 }
@@ -32,17 +37,13 @@ const char* cmd_hardwareled_startupenabled(const String& argsInput) {
 const char* cmd_hardwareled_startupeffect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  String arg = argsInput; arg.trim();
-  if (arg.length() == 0) return "Usage: hardwareledstartupeffect <rainbow|pulse|solid>";
-  // Store effect name (case-insensitive match, store lowercase)
-  if (arg.equalsIgnoreCase("rainbow")) {
-    setSetting(gSettings.ledStartupEffect, "rainbow");
-  } else if (arg.equalsIgnoreCase("pulse")) {
-    setSetting(gSettings.ledStartupEffect, "pulse");
-  } else if (arg.equalsIgnoreCase("solid")) {
-    setSetting(gSettings.ledStartupEffect, "solid");
-  } else {
+  String arg = argsInput; arg.trim(); arg.toLowerCase();
+  if (arg.length() == 0) return "Usage: hardwareledstartupeffect <none|rainbow|pulse|fade|blink|strobe>";
+  if (arg == "none"   || arg == "rainbow" || arg == "pulse" ||
+      arg == "fade"   || arg == "blink"   || arg == "strobe") {
     setSetting(gSettings.ledStartupEffect, arg.c_str());
+  } else {
+    return "Error: Unknown effect. Valid: none, rainbow, pulse, fade, blink, strobe";
   }
   snprintf(getDebugBuffer(), 1024, "LED startup effect set to %s", gSettings.ledStartupEffect.c_str());
   return getDebugBuffer();
@@ -87,7 +88,7 @@ const char* cmd_hardwareled_startupduration(const String& argsInput) {
 extern const CommandEntry hardwareCommands[] = {
   { "hardwareledbrightness",    "Set LED brightness 0-100.",                      false, cmd_hardwareled_brightness,    "Usage: hardwareledbrightness <0..100>" },
   { "hardwareledstartupenabled","Enable/disable LED startup effect [0|1].",        false, cmd_hardwareled_startupenabled,"Usage: hardwareledstartupenabled <0|1>" },
-  { "hardwareledstartupeffect", "Set LED startup effect [rainbow|pulse|solid].",   false, cmd_hardwareled_startupeffect, "Usage: hardwareledstartupeffect <rainbow|pulse|solid>" },
+  { "hardwareledstartupeffect", "Set LED startup effect [none|rainbow|pulse|fade|blink|strobe].",   false, cmd_hardwareled_startupeffect, "Usage: hardwareledstartupeffect <none|rainbow|pulse|fade|blink|strobe>" },
   { "hardwareledstartupcolor",  "Set LED startup primary color.",                  false, cmd_hardwareled_startupcolor,  "Usage: hardwareledstartupcolor <red|green|blue|cyan|magenta|yellow|white|orange|purple>" },
   { "hardwareledstartupcolor2", "Set LED startup secondary color.",                false, cmd_hardwareled_startupcolor2, "Usage: hardwareledstartupcolor2 <red|green|blue|cyan|magenta|yellow|white|orange|purple>" },
   { "hardwareledstartupduration","Set LED startup effect duration in ms.",         false, cmd_hardwareled_startupduration,"Usage: hardwareledstartupduration <100..10000>" },

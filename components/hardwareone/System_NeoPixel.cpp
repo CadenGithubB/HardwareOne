@@ -134,16 +134,26 @@ const int numColors = sizeof(colorTable) / sizeof(colorTable[0]);
 
 void initNeoPixelLED() {
 #if NEOPIXEL_AVAILABLE
-  // Enable power to STEMMA QT connector on Feather V2
-  // This pin powers the 3.3V regulator for I2C devices and NeoPixel
-  #ifdef NEOPIXEL_I2C_POWER
-    pinMode(NEOPIXEL_I2C_POWER, OUTPUT);
-    digitalWrite(NEOPIXEL_I2C_POWER, HIGH);
+  // Enable NeoPixel power pin (required on QT Py ESP32 GPIO 8, Feather V2 GPIO 2)
+  // Guard against boards that define NEOPIXEL_POWER_PIN as -1 (no power pin)
+  #if defined(NEOPIXEL_POWER_PIN) && NEOPIXEL_POWER_PIN >= 0
+    pinMode(NEOPIXEL_POWER_PIN, OUTPUT);
+    digitalWrite(NEOPIXEL_POWER_PIN, HIGH);
     delay(10);  // Allow power to stabilize
   #endif
   
+  // Legacy: some boards use NEOPIXEL_I2C_POWER instead
+  #if defined(NEOPIXEL_I2C_POWER) && !defined(NEOPIXEL_POWER_PIN)
+    pinMode(NEOPIXEL_I2C_POWER, OUTPUT);
+    digitalWrite(NEOPIXEL_I2C_POWER, HIGH);
+    delay(10);
+  #endif
+  
   pixels.begin();
-  pixels.setBrightness(50);  // Set moderate brightness
+  // Apply saved brightness (0-100% -> 0-255); fall back to 50% if settings not yet loaded
+  int bPct = (gSettings.ledBrightness > 0) ? gSettings.ledBrightness : 50;
+  if (bPct > 100) bPct = 100;
+  pixels.setBrightness((uint8_t)(bPct * 255 / 100));
   pixels.show();  // Initialize all pixels to 'off'
 #endif
   // No-op on boards without NeoPixel hardware
@@ -248,7 +258,7 @@ void runLEDEffect(int effectType, RGB startColor, RGB endColor, unsigned long du
   unsigned long startTime = millis();
   
   switch (effectType) {
-    case 1:  // Fade
+    case EFFECT_FADE:  // 1
       while (millis() - startTime < duration) {
         float progress = (float)(millis() - startTime) / duration;
         RGB currentColor = {
@@ -261,16 +271,7 @@ void runLEDEffect(int effectType, RGB startColor, RGB endColor, unsigned long du
       }
       break;
       
-    case 2:  // Blink
-      while (millis() - startTime < duration) {
-        setLEDColor(startColor);
-        delay(250);
-        setLEDColor({0, 0, 0});
-        delay(250);
-      }
-      break;
-      
-    case 3:  // Pulse
+    case EFFECT_PULSE:  // 2
       while (millis() - startTime < duration) {
         float progress = (float)(millis() - startTime) / 1000.0;
         int brightness = (int)(127.5 + 127.5 * sin(progress * 3.14159 * 2));
@@ -284,7 +285,27 @@ void runLEDEffect(int effectType, RGB startColor, RGB endColor, unsigned long du
       }
       break;
       
-    case 4:  // Strobe
+    case EFFECT_RAINBOW:  // 3
+      {
+        int step = 0;
+        while (millis() - startTime < duration) {
+          setLEDColor(rainbowColor(step, 256));
+          step = (step + 1) % 256;
+          delay(20);
+        }
+      }
+      break;
+      
+    case EFFECT_BLINK:  // 4
+      while (millis() - startTime < duration) {
+        setLEDColor(startColor);
+        delay(250);
+        setLEDColor({0, 0, 0});
+        delay(250);
+      }
+      break;
+      
+    case EFFECT_STROBE:  // 5
       while (millis() - startTime < duration) {
         setLEDColor(startColor);
         delay(50);
