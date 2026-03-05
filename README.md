@@ -8,54 +8,63 @@ Built on **ESP-IDF** (not Arduino IDE). Runs on the **Seeed XIAO ESP32-S3**, **A
 
 ## Configurations
 
-There are three ways to use Hardware One, depending on how much hardware you want to attach:
+Hardware One can be used in several different ways depending on the hardware you attach and the role you want the device to play:
 
-### 1) Barebones
+### 1) Barebones / Headless Node
 - Just the microcontroller board — no display, no sensors, no gamepad.
-- Full web UI, ESP-NOW, WiFi, CLI, and all network features still available.
-- Good starting point for headless or custom builds.
+- Full web UI, ESP-NOW, WiFi, CLI, MQTT, automation, and remote management features still available.
+- Good for relay nodes and remote endpoints.
 
-### 2) Hardware One (Standard)
+### 2) Hardware One (Standard Handheld)
 - The intended full build: board + SSD1306 OLED + Seesaw gamepad + a selection of I2C sensors.
-- Wired (USB power) or wireless (LiPo battery) variants.
-- Everything works out of the box.
+- Can be used from USB power or as a battery-powered handheld.
+- Best fit when you want both the local OLED/gamepad UI and the web UI.
 
-### 3) DIY
-- Fork the repo, enable or disable any feature in `System_BuildConfig.h`, and build whatever you need.
-- All subsystems are individually toggleable — add new hardware by wiring it up and enabling the relevant flag.
+### 3) Sensor Appliance
+- Build a dedicated single-purpose device around one or two sensors, such as thermal, GPS, RTC, ToF, or presence.
+- Useful for fixed installs where you want one job done well without carrying the whole handheld stack.
+- Can still expose data over web, CLI, automations, MQTT, and ESP-NOW.
+
+### 4) Bonded Microcontrollers
+- Use one device as the local controller with OLED + gamepad while another device acts as the remote endpoint.
+- Good for ESP-NOW paired setups where one unit is the UI/controller and the other exposes hardware, sensors, or room-specific functions.
+- Lets you split the interface hardware from the device doing the sensing or automation work.
+- Effectively doubles the available memory by distributing features across two devices — each runs only what it needs, freeing IRAM for deeper functionality on both sides.
+- Command registries are shared between bonded peers, so either device can execute commands on the other transparently — no separate API or protocol to learn.
+
 
 ---
 
 ## Software Features
 
-<ins>Key</ins>: ✅ Available, but able to be disabled &nbsp; ❌ Not available
+<ins>Key</ins>: ✅ Default for this deployment &nbsp; ❌ Not Available &nbsp; ⚙️ Configurable
 
-> DIY can enable or disable any feature individually via `System_BuildConfig.h`.
+> All features can be enabled or disabled via `System_BuildConfig.h` to match your hardware and use case.
 
-| Feature | Barebones | Standard |
-| ------- | :-------: | :------: |
-| WiFi (connect, auto-reconnect, AP scan) | ✅ | ✅ |
-| Web UI (browser-based control & monitoring) | ✅ | ✅ |
-| Web authentication (user accounts, sessions) | ✅ | ✅ |
-| Serial / web CLI with full command system | ✅ | ✅ |
-| ESP-NOW V3 mesh (peer discovery, pairing, bonding) | ✅ | ✅ |
-| ESP-NOW metadata sync & file transfer | ✅ | ✅ |
-| MQTT (Home Assistant integration) | ✅ | ✅ |
-| Automations (scheduled & conditional commands) | ✅ | ✅ |
-| OLED display with full menu system | ❌ | ✅ |
-| Seesaw gamepad input | ❌ | ✅ |
-| BNO055 IMU (9-DoF orientation) | ❌ | ✅ |
-| VL53L4CX Time-of-Flight distance sensor | ❌ | ✅ |
-| MLX90640 / AMG8833 thermal camera | ❌ | ✅ |
-| APDS9960 gesture / proximity / RGB sensor | ❌ | ✅ |
-| PA1010D GPS + offline maps | ❌ | ✅ |
-| DS3231 RTC (hardware clock) | ❌ | ✅ |
-| STHS34PF80 IR presence / motion | ❌ | ✅ |
-| DVP camera (OV2640 / OV5640) | ❌ | ✅ |
-| BLE server + Even Realities G2 glasses client | ❌ | ✅ |
-| Edge Impulse ML inference | ❌ | ✅ |
-| Battery monitoring (LiPo voltage via ADC) | ❌ | ✅ |
-| PCA9685 servo controller | ❌ | ✅ |
+| Feature | Barebones | Standard Handheld | Sensor Appliance | Bonded |
+| ------- | :-------: | :---------------: | :--------------: | :----: |
+| WiFi (connect, auto-reconnect, AP scan) | ✅ | ✅ | ✅ | ✅ |
+| Web UI (browser-based control & monitoring) | ✅ | ✅ | ✅ | ✅ |
+| Web authentication (user accounts, sessions) | ✅ | ✅ | ✅ | ✅ |
+| Serial / web CLI with full command system | ✅ | ✅ | ✅ | ✅ |
+| ESP-NOW V3 mesh (peer discovery, pairing, bonding) | ✅ | ✅ | ✅ | ✅ |
+| ESP-NOW metadata sync & file transfer | ✅ | ✅ | ✅ | ✅ |
+| MQTT (Home Assistant integration) | ✅ | ✅ | ✅ | ✅ |
+| Automations (scheduled & conditional commands) | ✅ | ✅ | ✅ | ✅ |
+| OLED display with full menu system | ❌ | ✅ | ⚙️ | ⚙️ |
+| Seesaw gamepad input | ❌ | ✅ | ❌ | ⚙️ |
+| BNO055 IMU (9-DoF orientation) | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| VL53L4CX Time-of-Flight distance sensor | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| MLX90640 / AMG8833 thermal camera | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| APDS9960 gesture / proximity / RGB sensor | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| PA1010D GPS + offline maps | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| DS3231 RTC (hardware clock) | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| STHS34PF80 IR presence / motion | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| DVP camera (OV2640 / OV5640) | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| BLE server + Even Realities G2 glasses client | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| Edge Impulse ML inference | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| Battery monitoring (LiPo voltage via ADC) | ⚙️ | ⚙️ | ⚙️ | ⚙️ |
+| PCA9685 servo controller | ❌ | ⚙️ | ⚙️ | ⚙️ |
 
 > If a module is enabled in the build config but not physically connected, its commands will gracefully fail — nothing breaks.
 
