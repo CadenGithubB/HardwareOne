@@ -1,6 +1,19 @@
 # ESP32-S3-specific build configuration — REQUIRED for correct compilation
 # Loaded automatically by ESP-IDF when target is esp32s3 (idf.py set-target esp32s3)
 # Do not delete. Controls PSRAM mode (Octal), flash mode, and Bluetooth stack.
+# This file should be used for ESP32-S3-class boards only.
+#
+# To select a board correctly:
+#   1. Run `idf.py set-target esp32s3`
+#   2. Set the matching Arduino board in `CONFIG_ARDUINO_VARIANT`
+#
+# In this project, `CONFIG_ARDUINO_VARIANT` is what lets HardwareOne map the
+# build to the proper board block in `System_BuildConfig.h`, which then selects
+# the correct pins, PSRAM mode expectations, USB behavior, and board-specific
+# feature flags.
+#
+# If you are switching from ESP32 back to ESP32-S3, run `idf.py fullclean`
+# before building so the proper esp32s3 defaults are re-applied cleanly.
 # See docs/BOARD_SWITCHING.md for full reference.
 
 # Arduino variant

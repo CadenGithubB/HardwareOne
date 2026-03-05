@@ -1,6 +1,19 @@
 # ESP32-specific build configuration — REQUIRED for correct compilation
 # Loaded automatically by ESP-IDF when target is esp32 (idf.py set-target esp32)
 # Do not delete. Controls PSRAM mode, flash mode, and Bluetooth stack.
+# This file should be used for ESP32-class boards only.
+#
+# To select a board correctly:
+#   1. Run `idf.py set-target esp32`
+#   2. Set the matching Arduino board in `CONFIG_ARDUINO_VARIANT`
+#
+# In this project, `CONFIG_ARDUINO_VARIANT` is what lets HardwareOne map the
+# build to the proper board block in `System_BuildConfig.h`, which then selects
+# the correct pins, NeoPixel behavior, PSRAM wiring assumptions, and other
+# board-specific defaults.
+#
+# If you are switching from ESP32-S3 back to ESP32, run `idf.py fullclean`
+# before building so the proper esp32 defaults are re-applied cleanly.
 # See docs/BOARD_SWITCHING.md for full reference.
 
 # Arduino variant
