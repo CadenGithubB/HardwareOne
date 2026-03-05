@@ -4,21 +4,44 @@ This guide will help you get up and running with Hardware One.
 
 ## Hardware Setup
 
-### Barebones
-Just your board and a USB-C cable. Connect it to your computer and continue to Software Setup.
+Choose the setup that matches your deployment type. All types use the same Software Setup steps that follow.
 
-### Hardware One (Standard — wired or wireless)
+### Barebones / Headless Node
+1. Just your board and a USB-C cable. Connect it to your computer and continue to Software Setup.
+
+### Sensor Appliance
 
 > **NOTE:** This assumes you have already soldered headers to any modules that require them.
 
-1. Connect your I2C sensors and peripherals via Stemma QT cables. If you have more than one, use a Stemma QT hub to chain them.
+1. Connect your I2C sensors and peripherals via Stemma QT cables and GPIO headers.
+2. **Optional battery:** Connect a LiPo battery to the board's JST connector or BFF module if you want the device to run untethered. If you skip this, the board will be powered over USB.
+3. **Optional battery:** Make sure the power switch is in the **Off** position before continuing.
+
+> **Before powering on or plugging in:** double-check that all power and ground connections are correct. Reversing polarity can damage components or the battery.
+
+4. Connect the board to your computer via USB-C.
+5. Continue to Software Setup.
+
+### Standard Handheld
+
+1. Connect your I2C sensors and peripherals via Stemma QT cables and GPIO headers. 
 2. Connect the SSD1306 OLED display via I2C.
 3. Connect the Seesaw Gamepad via Stemma QT.
-4. If using a **wireless** build, connect your LiPo battery to the board's JST connector. Make sure the power switch is in the **Off** position before continuing.
-5. Connect the board to your computer via USB-C.
-6. Continue to Software Setup.
+4. **Optional battery:** Connect a LiPo battery to the board's JST connector or BFF module if you want the device to run untethered. If you skip this, the board will be powered over USB.
+5. **Optional battery:** Make sure the power switch is in the **Off** position before continuing.
 
-> **Before powering on:** double-check that all power and ground connections are correct. Reversing polarity can damage components or the battery.
+> **Before powering on or plugging in:** double-check that all power and ground connections are correct. Reversing polarity can damage components or the battery.
+
+6. Connect the board to your computer via USB-C.
+7. Continue to Software Setup.
+
+
+
+
+### Bonded Microcontrollers
+With `ENABLE_BONDED_MODE=1`, two devices can bond into a paired set. One acts as the local controller (typically with OLED + gamepad), the other as the remote endpoint. The controller gains a **Remote** tab in its web UI showing the paired device's features, even if those features aren't compiled into the controller. Command registries are shared between the two, so either device can execute commands on the other transparently.
+
+Set up the hardware for your specific needs.
 
 ---
 
@@ -39,6 +62,8 @@ cd HardwareOne
 ### 2. Configure your build (optional)
 
 Open `components/hardwareone/System_BuildConfig.h` and enable or disable any features you want — sensors, web modules, ESP-NOW, MQTT, etc. The defaults are set for the standard full build. If you're happy with defaults, skip this step.
+
+If you are using Bonded mode, ensure that you reconfigure, fullclean, and then compile the build again.
 
 ### 3. Set your target board and flash
 
@@ -65,7 +90,7 @@ That's it. The build can take a few minutes the first time.
 
 ## Switching Between Board Families
 
-If you are switching between an **ESP32** board (QT PY, Feather) and an **ESP32-S3** board (XIAO, QT PY S3), a full clean is required — the two chip families have different architectures and the build cache is not compatible.
+If you are switching between an **ESP32** board (QT PY, Feather) and an **ESP32-S3** board (XIAO, QT PY S3), a full clean is required — the two chip families have different architectures and the build cache is not compatible. This being said, once compiled the boards can be used together without issue. The only difference is setup.
 
 ```bash
 idf.py fullclean
@@ -85,39 +110,38 @@ If you need to deviate from the defaults, run `idf.py menuconfig` after `set-tar
 
 ## First-Time Use
 
-Once the device is flashed and powered on, you'll see the boot sequence in the serial monitor. From here, setup can happen two ways — use whichever is more convenient.
+On first boot, the device detects that no users file exists and launches the setup wizard automatically. The wizard runs on **serial and OLED simultaneously** — use whichever is more convenient. Open the serial monitor at **115200 baud** to follow along or drive setup from your computer.
 
-### Option A: OLED Setup Wizard (if display is connected)
+### Step 1 — Choose setup mode
 
-On first boot, the device will launch a setup wizard on the OLED display. Navigate with the gamepad:
+You'll be prompted to choose:
 
-1. **WiFi** — enter your SSID and password.
-2. **Device name / room / zone** — set the identity used for ESP-NOW mesh.
-3. **Confirm** — settings are saved to flash. The wizard won't run again unless you reset settings.
+- **Basic** — creates your admin account and uses default settings for everything else. Quickest way to get running.
+- **Advanced** — runs the full configuration wizard after account creation, letting you configure features, sensors, WiFi, device name, and web UI theme.
 
-### Option B: Serial Console
+### Step 2 — Create your admin account
 
-Open the serial monitor (115200 baud) and type commands directly:
+Enter a username and password when prompted. These are your credentials for the web UI. Both fields are required and cannot be blank.
 
-```
-setssid YourWiFiName
-setpass YourWiFiPassword
-wifi
-```
+### Step 3 — Advanced wizard (Advanced mode only)
 
-To start the web server:
-```
-webstart
-```
+The wizard walks through seven pages:
 
-The device will print its IP address. Navigate to it in a browser to access the full web UI.
+1. **Features** — enable or disable network features (WiFi, HTTP server, Bluetooth, ESP-NOW)
+2. **Sensors** — enable or disable I2C sensors and display
+3. **Network** — auto-start options and device name
+4. **System** — timezone and log level
+5. **WiFi** — scan for networks and enter credentials. You can select by number, type an SSID directly, rescan, or skip.
+6. **Device name** — sets the name used for Bluetooth and ESP-NOW identity (default: `HardwareOne`)
+7. **Web UI theme** — choose Light or Dark
 
-To have the web server start automatically on every boot:
-```
-webauto on
-```
+### Step 4 — Access the web UI
 
-Type `help` at any time to see all available commands. Use `scan` to detect connected I2C sensors.
+Once setup completes, the device connects to WiFi and prints its IP address in the serial monitor. Navigate to that address in a browser to access the web UI.
+
+> If you chose Basic mode or skipped WiFi during the wizard, the web server will not auto-start. Run `webstart` in the serial console to start it manually, or `webauto on` to enable auto-start on every boot.
+
+Type `help` at any time in the serial console to see all available commands.
 
 ### Web UI
 

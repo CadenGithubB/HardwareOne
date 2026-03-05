@@ -36,7 +36,7 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `ENABLE_MICROPHONE_SENSOR` | `0` | PDM microphone via I2S |
 | `ENABLE_BATTERY_MONITOR` | `0` | LiPo voltage monitoring via ADC |
 | `ENABLE_EDGE_IMPULSE` | `0` | Edge Impulse ML inference |
-| `ENABLE_BONDED_MODE` | `0` | Two-device bonded pair (master/worker) |
+| `ENABLE_BONDED_MODE` | `0` | Bonded Microcontrollers — two devices share command registries and the controller shows a Remote tab with the paired device's features |
 
 When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABLE_*` flags:
 
