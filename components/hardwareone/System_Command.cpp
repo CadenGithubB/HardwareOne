@@ -40,24 +40,10 @@ size_t gCommandsCount = 0;
 // Command Registration Functions
 // ============================================================================
 
-// CommandModuleRegistrar constructor implementation
-CommandModuleRegistrar::CommandModuleRegistrar(const CommandEntry* commands, size_t count, const char* moduleName) {
-  // NOTE: Cannot use Serial here - this runs during static initialization,
-  // before app_main() and before Arduino's Serial is initialized.
-  
-  registerCommands(commands, count);
-  // Store module info for later debug summary
-  if (registeredModuleCount < MAX_MODULES) {
-    registeredModules[registeredModuleCount].name = moduleName;
-    registeredModules[registeredModuleCount].count = count;
-    registeredModuleCount++;
-  }
-}
-
 void registerCommand(const CommandEntry* command) {
   if (!command || commandRegistrySize >= MAX_COMMANDS) {
-    // IMPORTANT: do not log here. This function can be called during static
-    // initialization (via CommandModuleRegistrar) before Serial/logging is ready.
+    // IMPORTANT: do not log here. This function may be called before
+    // Serial/logging is ready.
     return;
   }
 

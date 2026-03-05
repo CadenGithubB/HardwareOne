@@ -2040,6 +2040,8 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
   features["userApprovals"] = true;
   features["adminControls"] = true;
   features["sensorConfig"] = true;
+  features["bluetooth"] = (bool)(ENABLE_BLUETOOTH);
+  features["espnow"] = (bool)(ENABLE_ESPNOW);
 
   // Serialize to buffer
   size_t len = serializeJson(response, gJsonResponseBuffer, JSON_RESPONSE_SIZE);

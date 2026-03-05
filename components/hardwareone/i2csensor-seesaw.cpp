@@ -371,8 +371,7 @@ const CommandEntry gamepadCommands[] = {
 
 const size_t gamepadCommandsCount = sizeof(gamepadCommands) / sizeof(gamepadCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _gamepad_cmd_registrar(gamepadCommands, gamepadCommandsCount, "gamepad");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // Gamepad Task Implementation (moved from i2c_system.cpp for full modularization)

@@ -11432,8 +11432,7 @@ extern const CommandEntry espNowCommands[] = {
 
 extern const size_t espNowCommandsCount = sizeof(espNowCommands) / sizeof(espNowCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _espnow_cmd_registrar(espNowCommands, espNowCommandsCount, "espnow");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // ESP-NOW Settings Module (for modular settings registry)

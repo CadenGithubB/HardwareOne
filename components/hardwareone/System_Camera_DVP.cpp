@@ -1616,7 +1616,6 @@ extern const SettingsModule cameraSettingsModule = {
 };
 const size_t cameraCommandsCount = sizeof(cameraCommands) / sizeof(cameraCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _camera_cmd_registrar(cameraCommands, cameraCommandsCount, "camera");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 #endif // ENABLE_CAMERA_SENSOR

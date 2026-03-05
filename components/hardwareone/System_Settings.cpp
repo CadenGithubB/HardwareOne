@@ -10,7 +10,7 @@
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC macro
 #include "System_SensorStubs.h" // Network stubs when disabled
 #include "System_Utils.h"    // RETURN_VALID_IF_VALIDATE_CSTR macro
-#include "System_Command.h"  // For CommandModuleRegistrar
+#include "System_Command.h"
 #include "System_Notifications.h"
 #include <LittleFS.h>
 #include <esp_system.h>
@@ -210,8 +210,7 @@ const CommandEntry settingsCommands[] = {
 
 const size_t settingsCommandsCount = sizeof(settingsCommands) / sizeof(settingsCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _settings_cmd_registrar(settingsCommands, settingsCommandsCount, "settings");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // WiFi Password Encryption Helpers

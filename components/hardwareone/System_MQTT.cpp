@@ -1529,7 +1529,6 @@ const CommandEntry mqttCommands[] = {
 
 const size_t mqttCommandsCount = sizeof(mqttCommands) / sizeof(mqttCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _mqtt_cmd_registrar(mqttCommands, mqttCommandsCount, "mqtt");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 #endif // ENABLE_WIFI && ENABLE_MQTT

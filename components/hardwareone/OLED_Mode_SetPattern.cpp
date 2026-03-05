@@ -359,12 +359,11 @@ static const OLEDModeEntry setPatternModeEntry = {
 
 static OLEDModeRegistrar _oled_mode_registrar_setpattern(&setPatternModeEntry, 1, "GamepadPassword");
 
-static const CommandEntry setPatternCommands[] = {
+extern const CommandEntry setPatternCommands[] = {
   { "set gamepad password", "Set gamepad joystick password (OLED).", true, cmd_setpattern }
 };
 
-static CommandModuleRegistrar _setpattern_cmd_registrar(
-  setPatternCommands, sizeof(setPatternCommands) / sizeof(setPatternCommands[0]), "setpattern");
+extern const size_t setPatternCommandsCount = sizeof(setPatternCommands) / sizeof(setPatternCommands[0]);
 
 // Force linker to include this file
 void oledSetPatternModeInit() {}

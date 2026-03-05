@@ -11,7 +11,7 @@
 #include "i2csensor-pca9685.h"
 #include "System_Utils.h"
 #include "System_Debug.h"  // For BROADCAST_PRINTF macro
-#include "System_Command.h"  // For CommandModuleRegistrar
+#include "System_Command.h"
 #include "System_I2C.h"
 #include <Wire.h>
 
@@ -293,7 +293,6 @@ const CommandEntry servoCommands[] = {
 
 const size_t servoCommandsCount = sizeof(servoCommands) / sizeof(servoCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _servo_cmd_registrar(servoCommands, servoCommandsCount, "servo");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 #endif // ENABLE_SERVO

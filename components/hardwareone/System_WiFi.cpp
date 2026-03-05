@@ -13,7 +13,7 @@
 #include "System_Settings.h"      // For writeSettingsJson()
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro
-#include "System_Command.h"  // For CommandModuleRegistrar
+#include "System_Command.h"
 #include "System_Notifications.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -866,7 +866,7 @@ const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);
 // ============================================================================
 // Command Registration
 // ============================================================================
-static CommandModuleRegistrar _wifi_registrar(wifiCommands, wifiCommandsCount, "wifi");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // WiFi Lazy Initialization (similar to sensor task pattern)

@@ -1159,7 +1159,6 @@ extern const SettingsModule micSettingsModule = {
   "ESP32-S3 PDM microphone"
 };
 
-// Auto-register with command system
-static CommandModuleRegistrar _mic_cmd_registrar(micCommands, micCommandsCount, "microphone");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 #endif // ENABLE_MICROPHONE_SENSOR

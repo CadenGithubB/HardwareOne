@@ -507,8 +507,7 @@ const CommandEntry filesystemCommands[] = {
 
 const size_t filesystemCommandsCount = sizeof(filesystemCommands) / sizeof(filesystemCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _filesystem_cmd_registrar(filesystemCommands, filesystemCommandsCount, "filesystem");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // File Permissions and Protection

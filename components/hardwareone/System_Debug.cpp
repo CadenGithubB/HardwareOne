@@ -2868,8 +2868,7 @@ const CommandEntry debugCommands[] = {
 
 const size_t debugCommandsCount = sizeof(debugCommands) / sizeof(debugCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _debug_cmd_registrar(debugCommands, debugCommandsCount, "debug");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // DebugManager Class Implementation (merged from System_Debug_Manager.cpp)

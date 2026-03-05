@@ -638,7 +638,7 @@ const size_t tofCommandsCount = sizeof(tofCommands) / sizeof(tofCommands[0]);
 // Command Registration (Sensor-Specific)
 // ============================================================================
 // Direct static registration to avoid macro issues
-static CommandModuleRegistrar _tof_cmd_registrar(tofCommands, tofCommandsCount, "tof");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // ToF Task Implementation (moved from i2c_system.cpp for full modularization)
