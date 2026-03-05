@@ -1,4 +1,23 @@
 # Custom partition table with spiffs for LittleFS storage
+# HardwareOne shared sdkconfig defaults
+#
+# This file is loaded for every build target and only contains settings that are
+# intended to be common across supported boards.
+#
+# Board/chip-specific settings such as Arduino variant, PSRAM mode, flash mode,
+# and Bluetooth capabilities must live in the target-specific files:
+#   - sdkconfig.defaults.esp32
+#   - sdkconfig.defaults.esp32s3
+#
+# To build correctly:
+#   1. Run `idf.py set-target <chip>` to choose the chip family.
+#   2. Make sure the target-specific defaults file sets the matching
+#      `CONFIG_ARDUINO_VARIANT` for the board you want.
+#   3. BuildConfig then auto-selects the proper board definitions from that
+#      variant so pins, PSRAM assumptions, and hardware feature flags line up.
+#
+# If you switch chip families (for example ESP32 <-> ESP32-S3), run
+# `idf.py fullclean` first. See docs/BOARD_SWITCHING.md for full instructions.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
