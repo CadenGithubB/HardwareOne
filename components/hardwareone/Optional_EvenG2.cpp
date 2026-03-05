@@ -1388,7 +1388,4 @@ const CommandEntry g2Commands[] = {
 
 const size_t g2CommandsCount = sizeof(g2Commands) / sizeof(g2Commands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _g2_cmd_registrar(g2Commands, g2CommandsCount, "even_g2");
-
 #endif // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

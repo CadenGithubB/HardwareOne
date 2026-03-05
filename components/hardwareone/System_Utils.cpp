@@ -25,7 +25,7 @@
 #include "System_TaskUtils.h"
 #include "System_I2C.h"
 #include "System_User.h"
-#include "System_Command.h"  // For CommandModuleRegistrar
+#include "System_Command.h"
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
 #include "System_Notifications.h"
@@ -189,6 +189,24 @@ extern const CommandEntry userSystemCommands[];
 extern const size_t userSystemCommandsCount;
 extern const CommandEntry sensorLoggingCommands[];
 extern const size_t sensorLoggingCommandsCount;
+extern const CommandEntry hardwareCommands[];
+extern const size_t hardwareCommandsCount;
+extern const CommandEntry featureCommands[];
+extern const size_t featureCommandsCount;
+extern const CommandEntry imageCommands[];
+extern const size_t imageCommandsCount;
+extern const CommandEntry mapCommands[];
+extern const size_t mapCommandsCount;
+extern const CommandEntry powerCommands[];
+extern const size_t powerCommandsCount;
+#if ENABLE_OLED_DISPLAY
+extern const CommandEntry setPatternCommands[];
+extern const size_t setPatternCommandsCount;
+#endif
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+extern const CommandEntry g2Commands[];
+extern const size_t g2CommandsCount;
+#endif
 
 // Include module headers to access their command registries
 #include "System_Filesystem.h"
@@ -1582,8 +1600,7 @@ const CommandEntry commands[] = {
 
 const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _core_cmd_registrar(commands, commandsCount, "core");
+// Registration handled by gCommandModules[] below
 
 // Battery commands (from System_Battery.cpp)
 #if ENABLE_BATTERY_MONITOR
@@ -1596,7 +1613,7 @@ const CommandEntry batteryCommands[] = {
 };
 
 const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batteryCommands[0]);
-static CommandModuleRegistrar _battery_cmd_registrar(batteryCommands, batteryCommandsCount, "battery");
+// Registration handled by gCommandModules[] below
 #endif
 
 // MQTT commands (from System_MQTT.cpp)
@@ -1629,6 +1646,7 @@ static const CommandModule gCommandModules[] = {
 #endif
   { "oled",       "OLED display control and graphics", oledCommands,         oledCommandsCount, 0, nullptr },
   { "neopixel",   "RGB LED strip and effects", neopixelCommands,     neopixelCommandsCount, 0, nullptr },
+  { "hardware",   "Hardware LED settings", hardwareCommands,     hardwareCommandsCount, 0, nullptr },
 #if ENABLE_SERVO
   { "servo",      "PCA9685 servo motor control", servoCommands,        servoCommandsCount, 0, nullptr },
 #endif
@@ -1683,6 +1701,16 @@ static const CommandModule gCommandModules[] = {
   { "settings",   "Device configuration and preferences", settingsCommands,     settingsCommandsCount, 0, nullptr },
   { "sensorlog", "Sensor data logging to files", sensorLoggingCommands, sensorLoggingCommandsCount, 0, nullptr },
   { "users",      "User authentication and management", userSystemCommands,         userSystemCommandsCount, CMD_MODULE_ADMIN, nullptr },
+  { "features",   "System feature management", featureCommands,      featureCommandsCount, 0, nullptr },
+  { "image",      "Image capture and management", imageCommands,        imageCommandsCount, 0, nullptr },
+  { "map",        "Map navigation and waypoints", mapCommands,          mapCommandsCount, 0, nullptr },
+  { "power",      "Power management", powerCommands,        powerCommandsCount, 0, nullptr },
+#if ENABLE_OLED_DISPLAY
+  { "setpattern", "OLED gamepad password entry", setPatternCommands,   setPatternCommandsCount, 0, nullptr },
+#endif
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  { "even_g2",    "Even G2 smart glasses control", g2Commands,           g2CommandsCount, 0, nullptr },
+#endif
  };
 static const size_t gCommandModulesCount = sizeof(gCommandModules) / sizeof(gCommandModules[0]);
 

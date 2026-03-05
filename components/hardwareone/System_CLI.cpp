@@ -680,5 +680,4 @@ const CommandEntry cliCommands[] = {
 
 const size_t cliCommandsCount = sizeof(cliCommands) / sizeof(cliCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _cli_cmd_registrar(cliCommands, cliCommandsCount, "cli");
+// Registration handled by gCommandModules[] in System_Utils.cpp

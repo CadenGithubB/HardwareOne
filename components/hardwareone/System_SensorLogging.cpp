@@ -975,8 +975,7 @@ const CommandEntry sensorLoggingCommands[] = {
 
 const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof(sensorLoggingCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _sensorlog_cmd_registrar(sensorLoggingCommands, sensorLoggingCommandsCount, "sensorlog");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // Settings Module Registration

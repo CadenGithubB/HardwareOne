@@ -464,8 +464,7 @@ const CommandEntry apdsCommands[] = {
 
 const size_t apdsCommandsCount = sizeof(apdsCommands) / sizeof(apdsCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _apds_cmd_registrar(apdsCommands, apdsCommandsCount, "apds");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // APDS Task Implementation (moved from i2c_system.cpp for full modularization)

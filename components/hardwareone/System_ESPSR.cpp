@@ -3822,7 +3822,7 @@ const CommandEntry espsrCommands[] = {
 };
 
 const size_t espsrCommandsCount = sizeof(espsrCommands) / sizeof(espsrCommands[0]);
-REGISTER_COMMAND_MODULE(espsrCommands, espsrCommandsCount, "ESPSR");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // ESP-SR Settings Module

@@ -4,7 +4,7 @@
 
 #include "System_NeoPixel.h"
 #include "System_Utils.h"
-#include "System_Command.h"  // For CommandModuleRegistrar
+#include "System_Command.h"
 #include "System_Settings.h"        // For SettingsModule (merged from System_LED.cpp)
 #include "System_Debug.h"    // For debug macros (merged from System_LED.cpp)
 #include "System_BuildConfig.h"  // For NEOPIXEL_PIN_DEFAULT
@@ -431,8 +431,7 @@ const CommandEntry neopixelCommands[] = {
 
 const size_t neopixelCommandsCount = sizeof(neopixelCommands) / sizeof(neopixelCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _neopixel_cmd_registrar(neopixelCommands, neopixelCommandsCount, "neopixel");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // LED Settings Module (merged from System_LED.cpp)

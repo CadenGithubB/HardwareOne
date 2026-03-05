@@ -3370,8 +3370,7 @@ const CommandEntry automationCommands[] = {
 
 const size_t automationCommandsCount = sizeof(automationCommands) / sizeof(automationCommands[0]);
 
-// Auto-register with command system
-static CommandModuleRegistrar _automation_cmd_registrar(automationCommands, automationCommandsCount, "automation");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // Automation Settings Module

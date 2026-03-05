@@ -562,14 +562,11 @@ const char* cmd_features(const String& argsInput) {
 // Command Registry
 // ============================================================================
 
-static const CommandEntry featureCommands[] = {
+extern const CommandEntry featureCommands[] = {
   { "features", "Show/toggle system features with heap estimates.", false, cmd_features,
     "features              - List all features\n"
     "features <id>         - Show feature details\n"
     "features <id> <on|off> - Enable/disable feature" }
 };
 
-static const size_t featureCommandsCount = sizeof(featureCommands) / sizeof(featureCommands[0]);
-
-// Auto-register commands
-static CommandModuleRegistrar _feature_cmd_registrar(featureCommands, featureCommandsCount, "features");
+extern const size_t featureCommandsCount = sizeof(featureCommands) / sizeof(featureCommands[0]);

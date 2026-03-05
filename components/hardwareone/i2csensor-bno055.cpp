@@ -993,7 +993,7 @@ const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);
 // Command Registration (Sensor-Specific)
 // ============================================================================
 // Direct static registration to avoid macro issues
-static CommandModuleRegistrar _imu_cmd_registrar(imuCommands, imuCommandsCount, "imu");
+// Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
 // IMU Task Implementation (moved from i2c_system.cpp for full modularization)
