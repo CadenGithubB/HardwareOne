@@ -2526,13 +2526,13 @@ const char* cmd_user_sync(const String& argsInput) {
     return "Error: User sync disabled - enable with 'espnow usersync on'";
   }
   
-  // Parse command args: <username> <device> <password>
+  // Parse command args
   String args = argsInput;
   args.trim();
   
   int firstSpace = args.indexOf(' ');
   if (firstSpace < 0) {
-    return "Usage: user sync <username> <device> <password>";
+    return "Usage: user sync <username> <device> <admin_password> <user_password>";
   }
   
   String username = args.substring(0, firstSpace);
@@ -2541,21 +2541,37 @@ const char* cmd_user_sync(const String& argsInput) {
   
   int secondSpace = rest.indexOf(' ');
   if (secondSpace < 0) {
-    return "Usage: user sync <username> <device> <password>";
+    return "Usage: user sync <username> <device> <admin_password> <user_password>";
   }
   
   String deviceStr = rest.substring(0, secondSpace);
-  String password = rest.substring(secondSpace + 1);
-  password.trim();
+  rest = rest.substring(secondSpace + 1);
+  rest.trim();
   
-  if (username.length() == 0 || deviceStr.length() == 0 || password.length() == 0) {
-    return "Usage: user sync <username> <device> <password>";
+  int thirdSpace = rest.indexOf(' ');
+  if (thirdSpace < 0) {
+    return "Usage: user sync <username> <device> <admin_password> <user_password>";
+  }
+  
+  String adminPass = rest.substring(0, thirdSpace);
+  String userPass = rest.substring(thirdSpace + 1);
+  adminPass.trim();
+  userPass.trim();
+  
+  if (username.length() == 0 || deviceStr.length() == 0 || adminPass.length() == 0 || userPass.length() == 0) {
+    return "Usage: user sync <username> <device> <admin_password> <user_password>";
   }
   
   // Verify user exists locally
   uint32_t userId = 0;
   if (!getUserIdByUsername(username, userId)) {
     snprintf(getDebugBuffer(), 1024, "Error: User '%s' not found", username.c_str());
+    return getDebugBuffer();
+  }
+
+  // Verify provided password matches the selected user locally
+  if (!isValidUser(username, userPass)) {
+    snprintf(getDebugBuffer(), 1024, "Error: Password incorrect for user '%s'", username.c_str());
     return getDebugBuffer();
   }
   
@@ -2606,9 +2622,9 @@ const char* cmd_user_sync(const String& argsInput) {
   // Build JSON payload (no V2 envelope, just the sync data)
   JsonObject payload = doc.to<JsonObject>();
   payload["admin_user"] = adminUser;
-  payload["admin_pass"] = password;  // Admin provides their own password for auth
+  payload["admin_pass"] = adminPass;
   payload["target_user"] = username;
-  payload["target_pass"] = password;  // Same password for the user being synced
+  payload["target_pass"] = userPass;
   payload["role"] = role;
   payload["src_device"] = myDeviceName;
   payload["dst_device"] = deviceName;

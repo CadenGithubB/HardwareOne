@@ -403,8 +403,11 @@ void gamepadTask(void* parameter) {
   unsigned long lastGamepadRead = 0;
   unsigned long lastStackLog = 0;
   unsigned long lastStateLog = 0;
-  // Note: Failure tracking now handled by centralized I2CDevice health system
-  // Use i2cShouldAutoDisable() instead of local counters
+  // Note: I2C transaction failure tracking handled by centralized I2CDevice health system.
+  // Invalid-data tracking (I2C succeeds but returns garbage) needs a local counter
+  // because the health system only tracks transport-level failures.
+  uint8_t consecutiveInvalidReads = 0;
+  static const uint8_t INVALID_READ_AUTO_DISABLE_THRESHOLD = 20;  // ~1.2s at 58ms poll
 
   // EWMA smoothing state
   int filtX = -1, filtY = -1;
@@ -482,6 +485,7 @@ void gamepadTask(void* parameter) {
         }
 
         if (readSuccess && dataValid) {
+          consecutiveInvalidReads = 0;  // Reset invalid-data counter on good read
           // Note: I2CDevice::recordSuccess() called automatically by transaction
           // which resets consecutiveErrors - no local counter needed
           
@@ -621,7 +625,16 @@ void gamepadTask(void* parameter) {
           }
         } else {
           // I2C succeeded but data validation failed (garbage data during bus contention)
-          // Don't log every instance - this is common during thermal sensor reads
+          consecutiveInvalidReads++;
+          if (consecutiveInvalidReads == 10) {
+            WARN_SENSORSF("[GAMEPAD_TASK] 10 consecutive invalid reads - device may be disconnected");
+          }
+          if (consecutiveInvalidReads >= INVALID_READ_AUTO_DISABLE_THRESHOLD) {
+            ERROR_SENSORSF("[GAMEPAD_TASK] %u consecutive invalid reads - auto-disabling gamepad", consecutiveInvalidReads);
+            gamepadEnabled = false;
+            gamepadConnected = false;
+            sensorStatusBumpWith("gamepad@invalid_data_disabled");
+          }
         }
         lastGamepadRead = nowMs;
       }

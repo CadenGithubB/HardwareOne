@@ -248,6 +248,10 @@ const char* cmd_thermalstart(const String& argsInput) {
     return "[Thermal] Already queued";
   }
 
+  if (!i2cPingAddress(I2C_ADDR_THERMAL, 100000, 50)) {
+    return "[Thermal] Not detected on I2C bus";
+  }
+
   DEBUG_CLIF("[THERMAL_START] Calling enqueueDeviceStart(I2C_DEVICE_THERMAL=%d)", I2C_DEVICE_THERMAL);
   // Enqueue the request to centralized queue
   if (enqueueDeviceStart(I2C_DEVICE_THERMAL)) {

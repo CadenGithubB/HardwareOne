@@ -155,7 +155,11 @@ const char* cmd_apdsstart(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "[APDS] Already in queue at position %d", pos);
     return getDebugBuffer();
   }
-  
+
+  if (!i2cPingAddress(I2C_ADDR_APDS, 100000, 50)) {
+    return "[APDS] Not detected on I2C bus";
+  }
+
   if (enqueueDeviceStart(I2C_DEVICE_APDS)) {
     sensorStatusBumpWith("openapds@enqueue");
     if (!ensureDebugBuffer()) return "[APDS] Sensor queued for open";
