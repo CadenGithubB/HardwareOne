@@ -232,6 +232,10 @@ const char* cmd_tofstart(const String& argsInput) {
     return "[ToF] Already queued";
   }
 
+  if (!i2cPingAddress(I2C_ADDR_TOF, 100000, 50)) {
+    return "[ToF] Not detected on I2C bus";
+  }
+
   // Enqueue the request to centralized queue
   if (enqueueDeviceStart(I2C_DEVICE_TOF)) {
     sensorStatusBumpWith("opentof@enqueue");

@@ -1130,9 +1130,15 @@ window.sendSequential = function(cmds, onDone, onFail) {
               </div>
             </div>
           </div>
-          <div style='margin-bottom:0.75rem'>
-            <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Password</label>
-            <input type='password' id='usersync-password' placeholder='Password to set on target device' style='width:100%;box-sizing:border-box'>
+          <div style='display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:0.75rem'>
+            <div>
+              <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Admin Password</label>
+              <input type='password' id='usersync-admin-password' placeholder='Password for your admin account' style='width:100%;box-sizing:border-box'>
+            </div>
+            <div>
+              <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>User Password</label>
+              <input type='password' id='usersync-user-password' placeholder='Password for selected user' style='width:100%;box-sizing:border-box'>
+            </div>
           </div>
           <button class='btn' onclick='syncUserToDevice()' title='Sync selected user to selected device'>Sync User</button>
         </div>
@@ -3458,12 +3464,13 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     window.syncUserToDevice = function() {
       var username = $('usersync-user') ? $('usersync-user').value : '';
       var device = $('usersync-device') ? $('usersync-device').value : '';
-      var password = $('usersync-password') ? $('usersync-password').value : '';
-      if (!username || !device || !password) {
-        alert('Please select a user, select a device, and enter a password');
+      var adminPass = $('usersync-admin-password') ? $('usersync-admin-password').value : '';
+      var userPass = $('usersync-user-password') ? $('usersync-user-password').value : '';
+      if (!username || !device || !adminPass || !userPass) {
+        alert('Please select a user, select a device, and enter both passwords');
         return;
       }
-      var cmd = 'user sync ' + username + ' ' + device + ' ' + password;
+      var cmd = 'user sync ' + username + ' ' + device + ' ' + adminPass + ' ' + userPass;
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -3472,7 +3479,8 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       }).then(function(r) { return r.text(); })
       .then(function(t) {
         alert(t || 'Sync complete');
-        if ($('usersync-password')) $('usersync-password').value = '';
+        if ($('usersync-admin-password')) $('usersync-admin-password').value = '';
+        if ($('usersync-user-password')) $('usersync-user-password').value = '';
       })
       .catch(function(e) { alert('Error: ' + e.message); });
     };

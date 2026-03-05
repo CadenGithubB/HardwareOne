@@ -178,7 +178,11 @@ const char* cmd_presencestart(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "[PRESENCE] Already in queue at position %d", pos);
     return getDebugBuffer();
   }
-  
+
+  if (!i2cPingAddress(I2C_ADDR_PRESENCE, 100000, 50)) {
+    return "[Presence] Not detected on I2C bus";
+  }
+
   if (enqueueDeviceStart(I2C_DEVICE_PRESENCE)) {
     sensorStatusBumpWith("openpresence@enqueue");
     if (!ensureDebugBuffer()) return "[PRESENCE] Sensor queued for open";

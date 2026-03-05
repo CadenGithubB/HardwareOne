@@ -180,7 +180,11 @@ const char* cmd_gpsstart(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "[GPS] Already queued (position %d)", pos);
     return getDebugBuffer();
   }
-  
+
+  if (!i2cPingAddress(I2C_ADDR_GPS, 100000, 50)) {
+    return "[GPS] Not detected on I2C bus";
+  }
+
   if (enqueueDeviceStart(I2C_DEVICE_GPS)) {
     sensorStatusBumpWith("opengps@enqueue");
     if (!ensureDebugBuffer()) return "[GPS] Sensor queued for open";

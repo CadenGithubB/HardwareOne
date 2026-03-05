@@ -314,10 +314,23 @@ inline String getFileBrowserScript() {
       listDiv.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);">Loading...</div>';
       
       fetch('/api/files/list?path=' + encodeURIComponent(path))
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+          return r.json().then(function(data) {
+            data.__httpStatus = r.status;
+            return data;
+          });
+        })
         .then(function(data) {
           if (!data.success || !data.files) {
-            listDiv.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger);">Error loading directory</div>';
+            var msg = 'Error loading directory';
+            var color = 'var(--danger)';
+            if ((data.__httpStatus === 403) || (data.error && ('' + data.error).toLowerCase().indexOf('admin') >= 0)) {
+              msg = 'Admin access required to view this directory';
+              color = 'var(--muted)';
+            } else if (data.error) {
+              msg = '' + data.error;
+            }
+            listDiv.innerHTML = '<div style="padding:20px;text-align:center;color:' + color + ';">' + msg + '</div>';
             return;
           }
           
