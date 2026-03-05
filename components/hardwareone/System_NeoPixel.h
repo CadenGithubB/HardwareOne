@@ -29,7 +29,8 @@ enum EffectType {
   EFFECT_FADE = 1,
   EFFECT_PULSE = 2,
   EFFECT_RAINBOW = 3,
-  EFFECT_BREATHE = 4
+  EFFECT_BLINK = 4,
+  EFFECT_STROBE = 5
 };
 
 // 64-color palette (defined in neopixel_led.cpp)

@@ -1672,27 +1672,17 @@ void hardwareone_setup() {
 
     if (effect == "rainbow") {
       runLEDEffect(EFFECT_RAINBOW, color1, color1, duration);
-    } else if (effect == "pulse" || effect == "breathe") {
+    } else if (effect == "pulse") {
       runLEDEffect(EFFECT_PULSE, color1, color1, duration);
     } else if (effect == "fade") {
       runLEDEffect(EFFECT_FADE, color1, color2, duration);
     } else if (effect == "blink") {
-      unsigned long startTime = millis();
-      while (millis() - startTime < duration) {
-        setLEDColor(color1);
-        delay(250);
-        setLEDColor({ 0, 0, 0 });
-        delay(250);
-      }
-      setLEDColor({ 0, 0, 0 });
+      runLEDEffect(EFFECT_BLINK, color1, color1, duration);
     } else if (effect == "strobe") {
-      unsigned long startTime = millis();
-      while (millis() - startTime < duration) {
-        setLEDColor(color1);
-        delay(50);
-        setLEDColor({ 0, 0, 0 });
-        delay(50);
-      }
+      runLEDEffect(EFFECT_STROBE, color1, color1, duration);
+    } else if (effect == "solid") {
+      setLEDColor(color1);
+      delay(duration);
       setLEDColor({ 0, 0, 0 });
     }
     broadcastOutput("Startup effect completed: " + effect);
