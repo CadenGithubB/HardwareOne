@@ -7,13 +7,14 @@ This guide will help you get up and running with Hardware One.
 Choose the setup that matches your deployment type. All types use the same Software Setup steps that follow.
 
 ### Barebones / Headless Node
-1. Just your board and a USB-C cable. Connect it to your computer and continue to Software Setup.
+1. Just your board and a USB-C cable.
+2. Connect it to your computer and continue to Software Setup.
 
 ### Sensor Appliance
 
 > **NOTE:** This assumes you have already soldered headers to any modules that require them.
 
-1. Connect your I2C sensors and peripherals via Stemma QT cables and GPIO headers.
+1. Connect your I2C sensors and peripherals via Stemma QT cables or GPIO headers.
 2. **Optional battery:** Connect a LiPo battery to the board's JST connector or BFF module if you want the device to run untethered. If you skip this, the board will be powered over USB.
 3. **Optional battery:** Make sure the power switch is in the **Off** position before continuing.
 
@@ -41,7 +42,9 @@ Choose the setup that matches your deployment type. All types use the same Softw
 ### Bonded Microcontrollers
 With `ENABLE_BONDED_MODE=1`, two devices can bond into a paired set. One acts as the local controller (typically with OLED + gamepad), the other as the remote endpoint. The controller gains a **Remote** tab in its web UI showing the paired device's features, even if those features aren't compiled into the controller. Command registries are shared between the two, so either device can execute commands on the other transparently.
 
-Set up the hardware for your specific needs.
+1. Set up the hardware for your specific needs, using the steps above. Do it twice, one for each of the bonded devices.
+2. Complete two Software Setups, one for each Hardware Setup.
+3. Im too lazy to write these steps now, but you pair them with espnow and then run the bond connect command and wait for the sync/handshake to finish and then its ready to go.
 
 ---
 
@@ -135,23 +138,13 @@ The wizard walks through seven pages:
 6. **Device name** — sets the name used for Bluetooth and ESP-NOW identity (default: `HardwareOne`)
 7. **Web UI theme** — choose Light or Dark
 
-### Step 4 — Access the web UI
+### Step 4 — Access the UI
 
-Once setup completes, the device connects to WiFi and prints its IP address in the serial monitor. Navigate to that address in a browser to access the web UI.
+> If you chose Basic mode or skipped WiFi during the wizard, the web server will not auto-start. This means that the Serial interface and the OLED interface (if connected) are the only ones available. Run `webstart` in the serial console to start it manually, or `webauto on` to enable auto-start on every boot.
 
-> If you chose Basic mode or skipped WiFi during the wizard, the web server will not auto-start. Run `webstart` in the serial console to start it manually, or `webauto on` to enable auto-start on every boot.
+> If you chose Advanced mode and enabled Wifi during the wizard, the device will connect to WiFi and prints its IP address in the serial monitor. Navigate to that address in a browser to access the web UI. Use the username and password entered in the first time setup to login.
 
 Type `help` at any time in the serial console to see all available commands.
-
-### Web UI
-
-Once connected, the web interface gives you:
-- Real-time sensor data
-- ESP-NOW mesh management (pair, bond, sync metadata, file transfer)
-- Remote command execution
-- MQTT configuration
-- Automations editor
-- Settings
 
 ---
 
