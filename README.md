@@ -36,39 +36,39 @@ Hardware One can be used in several different ways depending on the hardware you
 
 ## Software Features
 
-<ins>Key</ins>: ✅ Default for this deployment &nbsp; ❌ Not Available &nbsp; ⚙️ Configurable
+<ins>Key</ins>: ✅ Intended for this deployment &nbsp; ❌ Not Available &nbsp; ⚙️ Configurable
 
 > All features can be enabled or disabled via `System_BuildConfig.h` to match your hardware and use case.
 
 | Feature | Barebones | Sensor Appliance | Standard Handheld | Bonded |
 | ------- | :-------: | :--------------: | :---------------: | :----: |
-| Serial / web CLI with full command system | ✅ | ✅ | ✅ | ✅ |
-| LittleFS file system | ✅ | ✅ | ✅ | ✅ |
-| WiFi (connect, auto-reconnect, AP scan) | ✅ | ✅ | ✅ | ✅ |
-| Web UI (browser-based control & monitoring) | ✅ | ✅ | ✅ | ✅ |
-| Authentication (user accounts, web interfacesessions) | ✅ | ✅ | ✅ | ✅ |
-| ESP-NOW V3 (peer discovery, pairing, bonding) | ✅ | ✅ | ✅ | ✅ |
-| ESP-NOW metadata sync & file transfer | ✅ | ✅ | ✅ | ✅ |
-| MQTT (Home Assistant integration) | ✅ | ✅ | ✅ | ✅ |
-| Automations (scheduled & conditional commands) | ✅ | ✅ | ✅ | ✅ |
-| Seesaw gamepad input | ❌ | ❌ | ✅ | ⚙️ |
-| OLED display for onboard visuals | ❌ | ⚙️ | ✅ | ⚙️ |
-| BNO055 IMU (9-DoF orientation) | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| VL53L4CX Time-of-Flight distance sensor | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| MLX90640 / AMG8833 thermal camera | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| APDS9960 gesture / proximity / RGB sensor | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| PA1010D GPS + offline maps | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| DS3231 RTC (hardware clock) | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| STHS34PF80 IR presence / motion | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| DVP camera (OV2640 / OV5640) | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| PDM microphone (I2S audio capture) | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| TEA5767 FM Radio receiver | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| ESP-SR voice commands (wake word + command recognition) | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| BLE server + Even Realities G2 glasses client | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| Edge Impulse ML inference | ❌ | ⚙️ | ⚙️ | ⚙️ |
-| Sensor data logging (CSV export to LittleFS) | ⚙️ | ⚙️ | ⚙️ | ⚙️ |
-| Battery monitoring (LiPo voltage via ADC) | ⚙️ | ⚙️ | ⚙️ | ⚙️ |
-| PCA9685 servo controller | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| Serial CLI with full command system | ✅ | ✅ | ✅ | ✅ + ✅ |
+| LittleFS file system | ✅ | ✅ | ✅ | ✅ + ✅ |
+| Data logging (CSV export to LittleFS) | ⚙️ | ⚙️ | ⚙️ | ✅ + ✅ |
+| WiFi (connect, auto-reconnect, AP scan) | ✅ | ✅ | ✅ | ✅ + ⚙️ |
+| Web UI (browser-based control & monitoring) | ✅ | ✅ | ✅ | ✅ + ⚙️ |
+| Authentication (user accounts, permissions, settings) | ✅ | ✅ | ✅ | ✅ + ✅ |
+| ESP-NOW V3 (peer discovery, pairing, bonding) | ✅ | ✅ | ✅ | ✅ + ✅ |
+| ESP-NOW metadata sync & file transfer | ✅ | ✅ | ✅ | ✅ + ✅ |
+| MQTT (Home Assistant integration) | ✅ | ✅ | ✅ | ✅ + ⚙️ |
+| Automations (scheduled & conditional commands) | ✅ | ✅ | ✅ | ⚙️ + ✅ |
+| Seesaw gamepad input | ❌ | ❌ | ✅ | ✅ + ⚙️ |
+| OLED display for onboard visuals | ❌ | ⚙️ | ✅ | ✅ + ⚙️ |
+| BNO055 IMU (9-DoF orientation) | ❌ | ⚙️ | ⚙️ | ✅ + ⚙️ |
+| VL53L4CX Time-of-Flight distance sensor | ❌ | ⚙️ | ⚙️ | ✅ + ⚙️ |
+| MLX90640 / AMG8833 thermal camera | ❌ | ⚙️ | ⚙️ | ✅ + ⚙️ |
+| APDS9960 gesture / proximity / RGB sensor | ❌ | ⚙️ | ⚙️ | ✅ + ⚙️ |
+| PA1010D GPS + offline maps | ❌ | ⚙️ | ⚙️ | ✅ + ⚙️ |
+| DS3231 RTC (hardware clock) | ❌ | ⚙️ | ⚙️ | ✅ + ⚙️ |
+| STHS34PF80 IR presence / motion | ❌ | ⚙️ | ⚙️ | ✅ + ⚙️ |
+| DVP camera (OV2640 / OV5640) | ❌ | ⚙️ | ⚙️ | ⚙️ + ✅ |
+| PDM microphone (I2S audio capture) | ❌ | ⚙️ | ⚙️ | ⚙️ + ✅ |
+| TEA5767 FM Radio receiver | ❌ | ⚙️ | ⚙️ | ⚙️ + ⚙️ |
+| ESP-SR voice commands (wake word + command recognition) | ❌ | ⚙️ | ⚙️ | ⚙️ + ✅ |
+| BLE server + Even Realities G2 glasses client | ❌ | ⚙️ | ⚙️ | ⚙️ + ✅ |
+| Edge Impulse ML inference | ❌ | ⚙️ | ⚙️ | ⚙️ + ⚙️ |
+| Battery monitoring (LiPo voltage via ADC) | ⚙️ | ⚙️ | ⚙️ | ⚙️ + ⚙️ |
+| PCA9685 servo controller | ❌ | ⚙️ | ⚙️ | ⚙️ + ⚙️ |
 
 > If a module is enabled in the build config but not physically connected, its commands will gracefully fail — nothing breaks.
 
