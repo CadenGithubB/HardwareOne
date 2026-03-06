@@ -51,8 +51,8 @@ Hardware One can be used in several different ways depending on the hardware you
 | ESP-NOW metadata sync & file transfer | ✅ | ✅ | ✅ | ✅ |
 | MQTT (Home Assistant integration) | ✅ | ✅ | ✅ | ✅ |
 | Automations (scheduled & conditional commands) | ✅ | ✅ | ✅ | ✅ |
-| OLED display for onboard visuals | ❌ | ⚙️ | ✅ | ⚙️ |
 | Seesaw gamepad input | ❌ | ❌ | ✅ | ⚙️ |
+| OLED display for onboard visuals | ❌ | ⚙️ | ✅ | ⚙️ |
 | BNO055 IMU (9-DoF orientation) | ❌ | ⚙️ | ⚙️ | ⚙️ |
 | VL53L4CX Time-of-Flight distance sensor | ❌ | ⚙️ | ⚙️ | ⚙️ |
 | MLX90640 / AMG8833 thermal camera | ❌ | ⚙️ | ⚙️ | ⚙️ |
