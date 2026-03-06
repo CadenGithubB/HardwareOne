@@ -26,11 +26,10 @@ Hardware One can be used in several different ways depending on the hardware you
 - Can still expose data over web, CLI, automations, MQTT, and ESP-NOW.
 
 ### 4) Bonded Microcontrollers
-- Use one device as the local controller with OLED + gamepad while another device acts as the remote endpoint.
-- Good for ESP-NOW paired setups where one unit is the UI/controller and the other exposes hardware, sensors, or room-specific functions.
-- Lets you split the interface hardware from the device doing the sensing or automation work.
-- Effectively doubles the available memory by distributing features across two devices — each runs only what it needs, freeing IRAM for deeper functionality on both sides.
-- Command registries are shared between bonded peers, so either device can execute commands on the other transparently — no separate API or protocol to learn.
+- Control features unique to one device you flash while another device is flashed with other features - effectively removing the limit of software features that can be included due to iram constrictions
+- A common example would be where one unit is the Display/Input Device and the other exposes hardware, sensors, or other features.
+- The devices create an auth token during the bond sync / handshake process. This is used to execute commands with implicit trust between the devices to reduce the need to enter in username + password for every remote command.
+- Command registries are shared between bonded peers, so when a command is queued for execution there is a check to see if the command trying to be executed is able to be found on the local command registry, or if its found on the bonded device's command registry. From there it will either execute the command locally, or reroute the command to the bonded device which will enqueue the command (so it is the same code path as a standard command), and then send the output back via ESP-NOW streaming.
 
 
 ---
@@ -41,18 +40,19 @@ Hardware One can be used in several different ways depending on the hardware you
 
 > All features can be enabled or disabled via `System_BuildConfig.h` to match your hardware and use case.
 
-| Feature | Barebones | Standard Handheld | Sensor Appliance | Bonded |
-| ------- | :-------: | :---------------: | :--------------: | :----: |
+| Feature | Barebones | Sensor Appliance | Standard Handheld | Bonded |
+| ------- | :-------: | :--------------: | :---------------: | :----: |
+| Serial / web CLI with full command system | ✅ | ✅ | ✅ | ✅ |
+| LittleFS file system | ✅ | ✅ | ✅ | ✅ |
 | WiFi (connect, auto-reconnect, AP scan) | ✅ | ✅ | ✅ | ✅ |
 | Web UI (browser-based control & monitoring) | ✅ | ✅ | ✅ | ✅ |
-| Web authentication (user accounts, sessions) | ✅ | ✅ | ✅ | ✅ |
-| Serial / web CLI with full command system | ✅ | ✅ | ✅ | ✅ |
-| ESP-NOW V3 mesh (peer discovery, pairing, bonding) | ✅ | ✅ | ✅ | ✅ |
+| Authentication (user accounts, web interfacesessions) | ✅ | ✅ | ✅ | ✅ |
+| ESP-NOW V3 (peer discovery, pairing, bonding) | ✅ | ✅ | ✅ | ✅ |
 | ESP-NOW metadata sync & file transfer | ✅ | ✅ | ✅ | ✅ |
 | MQTT (Home Assistant integration) | ✅ | ✅ | ✅ | ✅ |
 | Automations (scheduled & conditional commands) | ✅ | ✅ | ✅ | ✅ |
-| OLED display with full menu system | ❌ | ✅ | ⚙️ | ⚙️ |
-| Seesaw gamepad input | ❌ | ✅ | ❌ | ⚙️ |
+| OLED display for onboard visuals | ❌ | ⚙️ | ✅ | ⚙️ |
+| Seesaw gamepad input | ❌ | ❌ | ✅ | ⚙️ |
 | BNO055 IMU (9-DoF orientation) | ❌ | ⚙️ | ⚙️ | ⚙️ |
 | VL53L4CX Time-of-Flight distance sensor | ❌ | ⚙️ | ⚙️ | ⚙️ |
 | MLX90640 / AMG8833 thermal camera | ❌ | ⚙️ | ⚙️ | ⚙️ |
@@ -61,8 +61,12 @@ Hardware One can be used in several different ways depending on the hardware you
 | DS3231 RTC (hardware clock) | ❌ | ⚙️ | ⚙️ | ⚙️ |
 | STHS34PF80 IR presence / motion | ❌ | ⚙️ | ⚙️ | ⚙️ |
 | DVP camera (OV2640 / OV5640) | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| PDM microphone (I2S audio capture) | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| TEA5767 FM Radio receiver | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| ESP-SR voice commands (wake word + command recognition) | ❌ | ⚙️ | ⚙️ | ⚙️ |
 | BLE server + Even Realities G2 glasses client | ❌ | ⚙️ | ⚙️ | ⚙️ |
 | Edge Impulse ML inference | ❌ | ⚙️ | ⚙️ | ⚙️ |
+| Sensor data logging (CSV export to LittleFS) | ⚙️ | ⚙️ | ⚙️ | ⚙️ |
 | Battery monitoring (LiPo voltage via ADC) | ⚙️ | ⚙️ | ⚙️ | ⚙️ |
 | PCA9685 servo controller | ❌ | ⚙️ | ⚙️ | ⚙️ |
 
@@ -98,6 +102,7 @@ These connect via Stemma QT (or standard I2C) and work the same on any supported
 | PA1010D GPS module | [ID: 4415](https://www.adafruit.com/product/4415) |
 | DS3231 RTC | [ID: 5188](https://www.adafruit.com/product/5188) |
 | STHS34PF80 IR presence sensor | [ID: 6426](https://www.adafruit.com/product/6426) |
+| TEA5767 FM Radio module | [ID: 1712](https://www.adafruit.com/product/1712) |
 | PCA9685 servo driver | [ID: 815](https://www.adafruit.com/product/815) |
 | Stemma QT hub (for chaining) | [ID: 5625](https://www.adafruit.com/product/5625) |
 
