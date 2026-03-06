@@ -139,9 +139,7 @@ The wizard walks through seven pages:
 7. **Web UI theme** — choose Light or Dark
 
 ### Step 4 — Access the UI
-
 > If you chose Basic mode or skipped WiFi during the wizard, the web server will not auto-start. This means that the Serial interface and the OLED interface (if connected) are the only ones available. Run `webstart` in the serial console to start it manually, or `webauto on` to enable auto-start on every boot.
-
 > If you chose Advanced mode and enabled Wifi during the wizard, the device will connect to WiFi and prints its IP address in the serial monitor. Navigate to that address in a browser to access the web UI. Use the username and password entered in the first time setup to login.
 
 Type `help` at any time in the serial console to see all available commands.
