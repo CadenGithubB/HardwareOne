@@ -15,15 +15,15 @@ Hardware One can be used in several different ways depending on the hardware you
 - Full web UI, ESP-NOW, WiFi, CLI, MQTT, automation, and remote management features still available.
 - Good for relay nodes and remote endpoints.
 
-### 2) Hardware One (Standard Handheld)
-- The intended full build: board + SSD1306 OLED + Seesaw gamepad + a selection of I2C sensors.
-- Can be used from USB power or as a battery-powered handheld.
-- Best fit when you want both the local OLED/gamepad UI and the web UI.
-
-### 3) Sensor Appliance
+### 2) Sensor Appliance
 - Build a dedicated single-purpose device around one or two sensors, such as thermal, GPS, RTC, ToF, or presence.
 - Useful for fixed installs where you want one job done well without carrying the whole handheld stack.
 - Can still expose data over web, CLI, automations, MQTT, and ESP-NOW.
+
+### 3) Hardware One (Standard Handheld)
+- The intended full build: board + SSD1306 OLED + Seesaw gamepad + a selection of I2C sensors.
+- Can be used from USB power or as a battery-powered handheld.
+- Best fit when you want both the local OLED/gamepad UI and the web UI.
 
 ### 4) Bonded Microcontrollers
 - Control features unique to one device you flash while another device is flashed with other features - effectively removing the limit of software features that can be included due to iram constrictions
