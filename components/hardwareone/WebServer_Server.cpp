@@ -44,6 +44,7 @@
 #include "System_ESPSR.h"
 #include "System_Filesystem.h"
 #include "System_VFS.h"
+#include "WebServer_MigrationTool.h"
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
 #endif
@@ -434,6 +435,10 @@ void clearSession(httpd_req_t* req, const char* logoutReason) {
   broadcastOutput("[auth] clearSession (revoked current if present)");
 }
 
+// Forward declarations for Basic Auth fallback
+bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& headerPresent);
+extern bool isValidUser(const String& username, const String& password);
+
 // Authentication check
 bool isAuthed(httpd_req_t* req, String& outUser) {
   // httpd_req_t::uri is a fixed-size char array and never NULL; only guard req itself.
@@ -444,6 +449,17 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
   getClientIP(req, ipBuf, sizeof(ipBuf));
 
   if (sid.length() == 0) {
+    // No session cookie — try Basic Auth fallback (for API clients like Migration Tool)
+    String baUser, baPass;
+    bool hdrPresent = false;
+    if (decodeBasicAuth(req, baUser, baPass, hdrPresent) && hdrPresent) {
+      if (isValidUser(baUser, baPass)) {
+        outUser = baUser;
+        DEBUG_AUTHF("[auth] Basic Auth OK for user=%s uri=%.*s", baUser.c_str(), 120, uri);
+        return true;
+      }
+      DEBUG_AUTHF("[auth] Basic Auth FAILED for user=%s uri=%.*s", baUser.c_str(), 120, uri);
+    }
     BROADCAST_PRINTF("[auth] no session cookie for uri=%.*s", 120, uri);
     return false;
   }
@@ -929,6 +945,7 @@ bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& h
   int ret = mbedtls_base64_decode(out_buf, sizeof(out_buf), &out_len,
                                   (const unsigned char*)b64.c_str(), b64.length());
   if (ret != 0 || out_len == 0) return false;
+  out_buf[out_len] = '\0';
   
   String decoded = String((const char*)out_buf);
   int colon = decoded.indexOf(':');
@@ -2853,10 +2870,22 @@ esp_err_t handleRoot(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// Simple unauthenticated health check
+// Simple unauthenticated health check (CORS-enabled for migration tool)
 esp_err_t handlePing(httpd_req_t* req) {
+  // CORS headers for migration tool access
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, OPTIONS");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, Authorization");
+
   httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
+
+  char json[256];
+  snprintf(json, sizeof(json),
+    "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"acceptingRestore\":%s}",
+    WiFi.getHostname(),
+    WiFi.macAddress().c_str(),
+    gAcceptingRestore ? "true" : "false");
+  httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -4692,6 +4721,13 @@ void startHttpServer() {
   httpd_register_uri_handler(server, &adminApprove);
   httpd_register_uri_handler(server, &adminDeny);
   httpd_register_uri_handler(server, &cliBatch);
+
+  // Migration tool endpoints (CORS-enabled)
+  // /api/backup (authenticated) + OPTIONS preflight for /api/ping and /api/backup
+  // Note: /api/restore is NOT registered here — it's only registered dynamically
+  // during first-time setup when the user selects "Import from Backup"
+  registerMigrationBackupHandler(server);
+  registerPingOptionsHandler(server);
   
   // Enable web output when server starts
   gOutputFlags |= OUTPUT_WEB;

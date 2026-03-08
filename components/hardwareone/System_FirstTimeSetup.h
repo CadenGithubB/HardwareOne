@@ -40,6 +40,14 @@ extern volatile SetupProgressStage gSetupProgressStage;
 // Used to skip WiFi connection during initial boot (connection happens on next boot)
 extern bool gFirstTimeSetupPerformed;
 
+// Migration tool restore flags
+// gAcceptingRestore: set true when user selects "Import from Backup" during setup,
+//   cleared after restore completes. Gate 2 of the triple-gated /api/restore endpoint.
+// gRestoreComplete: set true by /api/restore handler after files are written,
+//   polled by the setup flow to know when to proceed.
+extern volatile bool gAcceptingRestore;
+extern volatile bool gRestoreComplete;
+
 // ============================================================================
 // State Management Functions
 // ============================================================================
