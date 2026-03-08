@@ -18,11 +18,21 @@
 #include "System_MemUtil.h"
 #include "System_I2C.h"
 #include "System_SensorStubs.h"
+#if ENABLE_GAMEPAD_SENSOR
+#include "HAL_Input.h"
+#endif
 #include "System_Settings.h"
 #include "System_UserSettings.h"
 #include "OLED_SetupWizard.h"
 #include "System_SetupWizard.h"
 #include "System_FeatureRegistry.h"
+#include "System_WiFi.h"
+#if ENABLE_WIFI
+#include <WiFi.h>
+#endif
+#if ENABLE_HTTP_SERVER
+#include "WebServer_MigrationTool.h"
+#endif
 
 // ============================================================================
 // Global Variables
@@ -31,6 +41,8 @@
 bool gFirstTimeSetupPerformed = false;
 volatile FirstTimeSetupState gFirstTimeSetupState = SETUP_NOT_NEEDED;
 volatile SetupProgressStage gSetupProgressStage = SETUP_PROMPT_USERNAME;
+volatile bool gAcceptingRestore = false;
+volatile bool gRestoreComplete = false;
 
 // File paths
 #define SETTINGS_JSON_FILE "/system/settings.json"
@@ -137,7 +149,13 @@ static void rebootWithMessage(const char* message) {
 
 // Forward declaration for OLED setup mode selection
 #if ENABLE_OLED_DISPLAY
-extern bool getOLEDSetupModeSelection(bool& advancedMode);
+extern bool getOLEDSetupModeSelection(int& setupMode);
+#endif
+
+// Migration restore handler registration (from WebServer_MigrationTool.cpp)
+#if ENABLE_HTTP_SERVER
+#include "WebServer_MigrationTool.h"
+extern httpd_handle_t server;
 #endif
 
 void firstTimeSetupIfNeeded() {
@@ -145,6 +163,11 @@ void firstTimeSetupIfNeeded() {
   if (gFirstTimeSetupState == SETUP_NOT_NEEDED) {
     return;  // Already configured
   }
+
+  // Outer restart loop — re-entered if user presses B / types 'back' during restore wait
+  while (true) {
+
+  bool goBack = false;
 
   // Update state for OLED animation
   setFirstTimeSetupState(SETUP_IN_PROGRESS);
@@ -154,31 +177,226 @@ void firstTimeSetupIfNeeded() {
   broadcastOutput("----------------");
   
   // ============================================================================
-  // Setup Mode Selection: Basic vs Advanced
+  // Setup Mode Selection: Basic vs Advanced vs Import from Backup
   // ============================================================================
-  bool advancedSetup = false;
+  int setupMode = 0;  // 0 = Basic, 1 = Advanced, 2 = Import from Backup
   
 #if ENABLE_OLED_DISPLAY
   // Use OLED selection if available
   if (oledEnabled && oledConnected) {
-    getOLEDSetupModeSelection(advancedSetup);
+    getOLEDSetupModeSelection(setupMode);
   } else {
 #endif
     // Serial-only mode selection
     broadcastOutput("");
     broadcastOutput("Select setup mode:");
-    broadcastOutput("  1. Basic Setup   - Quick start (username + password only)");
-    broadcastOutput("  2. Advanced Setup - Full configuration wizard");
+    broadcastOutput("  1. Basic Setup        - Quick start (username + password only)");
+    broadcastOutput("  2. Advanced Setup     - Full configuration wizard");
+    broadcastOutput("  3. Import from Backup - Restore settings from .hwbackup file");
     broadcastOutput("");
-    broadcastOutput("Enter 1 or 2 (default: 1): ");
+    broadcastOutput("Enter 1, 2, or 3 (default: 1): ");
     
     String modeInput = waitForSerialInputBlocking();
     modeInput.trim();
-    advancedSetup = (modeInput == "2" || modeInput.equalsIgnoreCase("advanced"));
+    if (modeInput == "2" || modeInput.equalsIgnoreCase("advanced")) {
+      setupMode = 1;
+    } else if (modeInput == "3" || modeInput.equalsIgnoreCase("restore") || modeInput.equalsIgnoreCase("import")) {
+      setupMode = 2;
+    } else {
+      setupMode = 0;
+    }
 #if ENABLE_OLED_DISPLAY
   }
 #endif
 
+  // ============================================================================
+  // Handle "Import from Backup" mode
+  // ============================================================================
+  if (setupMode == 2) {
+    broadcastOutput("Import from Backup selected.");
+    broadcastOutput("");
+
+#if ENABLE_HTTP_SERVER && ENABLE_WIFI
+    // Step 1: Collect WiFi credentials — reuse the same scan+select UI as the setup wizard
+    broadcastOutput("WiFi is required for the Migration Tool to connect.");
+    broadcastOutput("");
+
+    String restoreSSID = "";
+    String restorePass = "";
+    bool wifiSelected = false;
+
+    while (!wifiSelected) {
+      // Network selection (scan + pick from list, with serial fallback)
+      if (!getOLEDWiFiSelection(restoreSSID)) {
+        // User pressed B / cancelled — go back to setup mode selection
+        goBack = true;
+        break;
+      }
+
+      // Password entry (B goes back to network list)
+      bool passwordCancelled = false;
+#if ENABLE_OLED_DISPLAY
+      if (oledEnabled && oledConnected) {
+        restorePass = getOLEDTextInput("WiFi Password:", true, "", 64, &passwordCancelled);
+      } else {
+#endif
+        broadcastOutput("Enter WiFi Password (blank for open, 'back' to re-select): ");
+        restorePass = waitForSerialInputBlocking();
+        restorePass.trim();
+        if (restorePass.equalsIgnoreCase("back") || restorePass.equalsIgnoreCase("b")) {
+          passwordCancelled = true;
+        }
+#if ENABLE_OLED_DISPLAY
+      }
+#endif
+
+      if (passwordCancelled) {
+        restoreSSID = "";
+        restorePass = "";
+        continue;  // Loop back to network selection
+      }
+
+      wifiSelected = true;
+    }
+
+    if (goBack) {
+      continue;  // Restart outer setup loop
+    }
+
+    // Step 2: Save WiFi credentials and connect using the proven connection infrastructure
+    broadcastOutput("Connecting to WiFi: " + restoreSSID);
+#if ENABLE_OLED_DISPLAY
+    showOLEDMessage(("Connecting WiFi:\n" + restoreSSID).c_str(), false);
+#endif
+
+    // Save credentials to the WiFi network list and persist to flash
+    extern bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden);
+    extern void sortWiFiByPriority();
+    extern bool saveWiFiNetworks();
+    upsertWiFiNetwork(restoreSSID, restorePass, 1, false);
+    sortWiFiByPriority();
+    saveWiFiNetworks();
+    gSettings.wifiAutoReconnect = true;
+
+    // Use the project's standard WiFi connection (ESP-IDF API internally)
+    setupWiFi();
+
+    if (WiFi.status() != WL_CONNECTED) {
+      broadcastOutput("ERROR: Failed to connect to WiFi. Cannot use Import from Backup.");
+      broadcastOutput("Falling back to Basic Setup.");
+#if ENABLE_OLED_DISPLAY
+      showOLEDMessage("WiFi connect\nfailed!\n\nFalling back to\nBasic Setup", true);
+#endif
+      setupMode = 0;
+    } else {
+      String ipStr = WiFi.localIP().toString();
+      broadcastOutput("WiFi connected! IP: " + ipStr);
+
+      // Step 3: Start the minimal restore-only HTTP server
+      // This exposes ONLY /api/ping and /api/restore — no other pages are accessible.
+      gAcceptingRestore = true;
+      gRestoreComplete = false;
+      startRestoreOnlyHttpServer();
+
+      broadcastOutput("");
+      broadcastOutput("========================================");
+      broadcastOutput("  RESTORE MODE ACTIVE");
+      broadcastOutput("========================================");
+      broadcastOutput("");
+      broadcastOutput("Device IP: " + ipStr);
+      broadcastOutput("");
+      broadcastOutput("IMPORTANT: Do NOT connect to this device directly.");
+      broadcastOutput("Instead, use the HardwareOne Migration Tool broswer application");
+      broadcastOutput("to send your .hwbackup file to this IP address.");
+      broadcastOutput("");
+      broadcastOutput("Download Migration Tool:");
+      broadcastOutput("  https://github.com/CadenGithubB/HardwareOne-Migration-Tool");
+      broadcastOutput("");
+      broadcastOutput("Press 'back' (serial) or B (gamepad) to return to setup menu.");
+      broadcastOutput("========================================");
+      broadcastOutput("");
+
+#if ENABLE_OLED_DISPLAY
+      {
+        String msg = "RESTORE MODE\n\nUse Migration Tool\nbrowser application to\nsend .hwbackup\n\nIP: " + ipStr + "\n\nB = back";
+        showOLEDMessage(msg.c_str(), false);
+      }
+#endif
+
+      // Step 5: Poll until restore completes or user presses B / types 'back'
+#if ENABLE_GAMEPAD_SENSOR
+      uint32_t lastBtnState = 0xFFFFFFFF;
+      bool btnStateInit = false;
+#endif
+      while (!gRestoreComplete && !goBack) {
+        delay(500);
+        Serial.print(".");
+
+        // Serial 'back' escape
+        if (Serial.available()) {
+          String line = Serial.readStringUntil('\n');
+          line.trim();
+          if (line.equalsIgnoreCase("back") || line.equalsIgnoreCase("cancel")) {
+            goBack = true;
+          }
+        }
+
+#if ENABLE_GAMEPAD_SENSOR
+        // Gamepad B button escape (active-low, detect new press)
+        if (!goBack && gControlCache.mutex &&
+            xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+          uint32_t btns = gControlCache.gamepadButtons;
+          bool valid = gControlCache.gamepadDataValid;
+          xSemaphoreGive(gControlCache.mutex);
+          if (valid) {
+            if (!btnStateInit) {
+              lastBtnState = btns;
+              btnStateInit = true;
+            } else {
+              uint32_t newPressed = ~btns & lastBtnState;  // active-low: was 1 (up), now 0 (down)
+              if (newPressed & INPUT_MASK(INPUT_BUTTON_B)) {
+                goBack = true;
+              }
+              lastBtnState = btns;
+            }
+          }
+        }
+#endif
+      }
+      Serial.println();
+
+      // Gate 3: Stop the restore-only server entirely
+      gAcceptingRestore = false;
+      stopRestoreOnlyHttpServer();
+
+      if (goBack) {
+        broadcastOutput("");
+        broadcastOutput("Returning to setup mode selection...");
+#if ENABLE_OLED_DISPLAY
+        showOLEDMessage("Returning to\nsetup menu...", false);
+#endif
+        continue;  // Restart outer while(true) loop
+      }
+
+      broadcastOutput("");
+      broadcastOutput("Restore complete! Files written to device.");
+      broadcastOutput("Rebooting to apply restored settings...");
+
+      gFirstTimeSetupPerformed = true;
+      setFirstTimeSetupState(SETUP_COMPLETE);
+      rebootWithMessage("Rebooting with restored settings...");
+      return;  // rebootWithMessage calls ESP.restart()
+    }
+#else
+    broadcastOutput("ERROR: HTTP server or WiFi not enabled. Cannot use Import from Backup.");
+    broadcastOutput("Falling back to Basic Setup.");
+    setupMode = 0;
+#endif
+  }
+
+  if (goBack) continue;  // Jump back to mode selection
+
+  bool advancedSetup = (setupMode == 1);
   broadcastOutput(advancedSetup ? "Advanced setup selected." : "Basic setup selected.");
   broadcastOutput("");
   
@@ -486,4 +704,7 @@ void firstTimeSetupIfNeeded() {
 
   broadcastOutput("Starting WiFi connection...");
   broadcastOutput("");
+
+  break;  // Setup completed normally — exit the restart loop
+  } // end while(true) restart loop
 }
