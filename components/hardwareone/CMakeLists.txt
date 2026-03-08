@@ -146,6 +146,7 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
             WebPage_Bluetooth.cpp
             WebPage_Speech.cpp
             WebPage_MQTT.cpp
+            WebServer_MigrationTool.cpp
     )
     list(APPEND hardwareone_requires esp_http_server)
 endif()

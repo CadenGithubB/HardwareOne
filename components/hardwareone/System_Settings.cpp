@@ -16,6 +16,7 @@
 #include <esp_system.h>
 #include "mbedtls/aes.h"
 #include "mbedtls/sha256.h"
+#include "esp_flash.h"
 #if ENABLE_WIFI
   #include <WiFi.h>
   #include <WiFiUdp.h>
@@ -226,25 +227,65 @@ String getDeviceEncryptionKey() {
 
   DEBUG_SYSTEMF("[Encryption] Generating device encryption key");
 
-  // Create device-unique key from Chip ID only (deterministic)
+  // Combine two hardware identifiers for better security:
+  // 1. eFuse MAC - unique per ESP32 chip (publicly visible via WiFi/BT)
+  // 2. Flash chip unique ID - unique per flash chip (NOT publicly visible,
+  //    requires physical SPI access to read)
   uint64_t chipId = ESP.getEfuseMac();
-
-  // Build key using safer char buffer approach to avoid String concatenation issues
-  char keyBuf[32];
-  snprintf(keyBuf, sizeof(keyBuf), "%08lx%08lx",
-           (unsigned long)((uint32_t)(chipId >> 32)),
-           (unsigned long)((uint32_t)chipId));
-
-  sKey = String(keyBuf);
-
-  // Pad key to ensure sufficient length for XOR
-  while (sKey.length() < 32) {
-    sKey += sKey;  // Double the key until we have enough length
+  
+  uint64_t flashUid = 0;
+  esp_err_t err = esp_flash_read_unique_chip_id(NULL, &flashUid);
+  if (err != ESP_OK) {
+    DEBUG_SYSTEMF("[Encryption] Warning: could not read flash UID (0x%x), using MAC only", err);
   }
+  
+  // Build combined input string
+  char combined[80];
+  snprintf(combined, sizeof(combined), "%016llx:%016llx:HARDWAREONE_V1",
+           (unsigned long long)chipId,
+           (unsigned long long)flashUid);
+
+  // Hash the combination with SHA-256 for a strong, deterministic key
+  uint8_t hash[32];
+  mbedtls_sha256((const uint8_t*)combined, strlen(combined), hash, 0);
+  
+  // Convert to hex string (64 chars)
+  char hexBuf[65];
+  for (int i = 0; i < 32; i++) {
+    snprintf(hexBuf + (i * 2), 3, "%02x", hash[i]);
+  }
+  hexBuf[64] = '\0';
+  
+  sKey = String(hexBuf);
 
   DEBUG_SYSTEMF("[Encryption] Key generated, length=%d", sKey.length());
   sInit = true;
   return sKey;
+}
+
+String getDeviceFingerprint() {
+  static String sFingerprint;
+  if (sFingerprint.length() > 0) return sFingerprint;
+
+  // Hash a known constant with the device encryption key to produce
+  // a one-way fingerprint that is safe to include in backup files.
+  // Cannot be reversed to recover the encryption key.
+  String key = getDeviceEncryptionKey();
+  String input = key + ":HWBACKUP_DEVICE_FINGERPRINT";
+  secureClearString(key);
+
+  uint8_t hash[32];
+  mbedtls_sha256((const uint8_t*)input.c_str(), input.length(), hash, 0);
+  secureClearString(input);
+
+  char hexBuf[65];
+  for (int i = 0; i < 32; i++) {
+    snprintf(hexBuf + (i * 2), 3, "%02x", hash[i]);
+  }
+  hexBuf[64] = '\0';
+
+  sFingerprint = String(hexBuf);
+  return sFingerprint;
 }
 
 String encryptWifiPassword(const String& password) {

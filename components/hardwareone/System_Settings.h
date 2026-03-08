@@ -667,6 +667,10 @@ String encryptWifiPassword(const String& password);
 String decryptWifiPassword(const String& encryptedPassword);
 String getDeviceEncryptionKey();
 
+// Device fingerprint for backup compatibility checking
+// One-way hash derived from device encryption key — safe to include in backups
+String getDeviceFingerprint();
+
 // Settings command registry
 extern const CommandEntry settingsCommands[];
 extern const size_t settingsCommandsCount;

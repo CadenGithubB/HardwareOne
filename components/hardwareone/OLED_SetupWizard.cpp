@@ -510,11 +510,12 @@ bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& re
 }
 
 // ============================================================================
-// Setup Mode Selection (Basic vs Advanced)
+// Setup Mode Selection (Basic vs Advanced vs Import from Backup)
 // ============================================================================
 
-bool getOLEDSetupModeSelection(bool& advancedMode) {
-  int selection = 0;  // 0 = Basic, 1 = Advanced
+bool getOLEDSetupModeSelection(int& setupMode) {
+  int selection = 0;  // 0 = Basic, 1 = Advanced, 2 = Import from Backup
+  const int NUM_OPTIONS = 3;
   uint32_t lastButtons = 0;
   bool lastButtonsInitialized = false;
   int lastPrintedSelection = -1;
@@ -532,8 +533,9 @@ bool getOLEDSetupModeSelection(bool& advancedMode) {
       Serial.println("========================================");
       Serial.printf(" %s1. Basic Setup\n", selection == 0 ? ">" : " ");
       Serial.printf(" %s2. Advanced Setup\n", selection == 1 ? ">" : " ");
+      Serial.printf(" %s3. Import from Backup\n", selection == 2 ? ">" : " ");
       Serial.println("----------------------------------------");
-      Serial.println("Serial: Enter 1 or 2");
+      Serial.println("Serial: Enter 1, 2, or 3");
       Serial.println("OLED: Joystick to move, A to select");
       Serial.print("> ");
       lastPrintedSelection = selection;
@@ -555,16 +557,19 @@ bool getOLEDSetupModeSelection(bool& advancedMode) {
       oledDisplay->println("Select setup mode:");
       
       // Option 1: Basic
-      oledDisplay->setCursor(0, 25);
+      oledDisplay->setCursor(0, 24);
       oledDisplay->print(selection == 0 ? ">" : " ");
       oledDisplay->println(" Basic Setup");
-      oledDisplay->setCursor(12, 33);
-    
       
       // Option 2: Advanced
-      oledDisplay->setCursor(0, 43);
+      oledDisplay->setCursor(0, 34);
       oledDisplay->print(selection == 1 ? ">" : " ");
       oledDisplay->println(" Advanced Setup");
+
+      // Option 3: Import from Backup
+      oledDisplay->setCursor(0, 44);
+      oledDisplay->print(selection == 2 ? ">" : " ");
+      oledDisplay->println(" Import from Backup");
       
       // Footer at standard position (matching drawOLEDFooter)
       const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
@@ -581,8 +586,13 @@ bool getOLEDSetupModeSelection(bool& advancedMode) {
     if (oledDisplay && oledConnected) {
       JoystickNav nav = readWizardJoystickNav();
       
-      if (nav.up || nav.down) {
-        selection = (selection == 0) ? 1 : 0;
+      if (nav.up) {
+        selection = (selection > 0) ? selection - 1 : NUM_OPTIONS - 1;
+        delay(150);
+        continue;
+      }
+      if (nav.down) {
+        selection = (selection < NUM_OPTIONS - 1) ? selection + 1 : 0;
         delay(150);
         continue;
       }
@@ -611,7 +621,7 @@ bool getOLEDSetupModeSelection(bool& advancedMode) {
       
       // A button = select
       if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) {
-        advancedMode = (selection == 1);
+        setupMode = selection;
         return true;
       }
     }
@@ -621,10 +631,13 @@ bool getOLEDSetupModeSelection(bool& advancedMode) {
       String input = Serial.readStringUntil('\n');
       input.trim();
       if (input == "1" || input.equalsIgnoreCase("basic")) {
-        advancedMode = false;
+        setupMode = 0;
         return true;
       } else if (input == "2" || input.equalsIgnoreCase("advanced")) {
-        advancedMode = true;
+        setupMode = 1;
+        return true;
+      } else if (input == "3" || input.equalsIgnoreCase("restore") || input.equalsIgnoreCase("import")) {
+        setupMode = 2;
         return true;
       }
     }

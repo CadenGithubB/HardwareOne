@@ -411,9 +411,13 @@ bool getOLEDWiFiSelection(String& outSSID) {
     else networks[i] += " +";
   }
   
-  // Add "Rescan" option at the end (skip is always available via B)
+  // Add special options at the end (skip is always available via B)
   if (displayCount < maxNetworks) {
     networks[displayCount] = "< Rescan WiFi >";
+    displayCount++;
+  }
+  if (displayCount < maxNetworks) {
+    networks[displayCount] = "< Manual Entry >";
     displayCount++;
   }
   
@@ -542,6 +546,17 @@ bool getOLEDWiFiSelection(String& outSSID) {
   if (networks[selection].startsWith("< Rescan")) {
     WiFi.scanDelete();
     return getOLEDWiFiSelection(outSSID);
+  }
+  
+  // Check if user selected "Manual Entry" (for hidden networks)
+  if (networks[selection].startsWith("< Manual")) {
+    WiFi.scanDelete();
+    bool cancelled = false;
+    outSSID = getOLEDTextInput("WiFi SSID:", false, "", 32, &cancelled);
+    if (cancelled || outSSID.length() == 0) {
+      return getOLEDWiFiSelection(outSSID);  // Back to network list
+    }
+    return true;
   }
   
   // Extract SSID (remove signal strength indicator)
