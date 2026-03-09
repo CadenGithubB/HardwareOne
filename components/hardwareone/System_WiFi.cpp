@@ -26,6 +26,11 @@
 #include <LittleFS.h>
 #include <time.h>
 #include "mbedtls/x509_crt.h"
+#include "mbedtls/pk.h"
+#include "mbedtls/rsa.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/ecp.h"
 #endif
 
 // External dependencies from main .ino
@@ -911,8 +916,201 @@ const char* cmd_certinfo(const String& argsInput) {
   mbedtls_x509_crt_free(&crt);
   return gDebugBuffer;
 }
+
+const char* cmd_certgen(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  // Parse key type: default ECDSA P-256, optional "rsa" for RSA-2048
+  String arg = argsInput;
+  arg.trim();
+  bool useRsa = (arg.equalsIgnoreCase("rsa"));
+
+  if (useRsa) {
+    broadcastOutput("Generating RSA-2048 key pair... this may take 30-60 seconds");
+  } else {
+    broadcastOutput("Generating ECDSA P-256 key pair...");
+  }
+
+  // PSRAM-allocate all mbedTLS contexts to avoid stack overflow in cmd_exec_task (18KB stack)
+  // mbedtls_entropy_context alone is ~1KB, plus ctr_drbg + x509write_cert + internal call depth
+  // Use PSRAM instead of DRAM to preserve precious internal RAM
+  int ret = 0;
+  mbedtls_pk_context* key = (mbedtls_pk_context*)heap_caps_malloc(sizeof(mbedtls_pk_context), MALLOC_CAP_SPIRAM);
+  mbedtls_x509write_cert* crt = (mbedtls_x509write_cert*)heap_caps_malloc(sizeof(mbedtls_x509write_cert), MALLOC_CAP_SPIRAM);
+  mbedtls_entropy_context* entropy = (mbedtls_entropy_context*)heap_caps_malloc(sizeof(mbedtls_entropy_context), MALLOC_CAP_SPIRAM);
+  mbedtls_ctr_drbg_context* ctr_drbg = (mbedtls_ctr_drbg_context*)heap_caps_malloc(sizeof(mbedtls_ctr_drbg_context), MALLOC_CAP_SPIRAM);
+  unsigned char* certPem = NULL;
+  unsigned char* keyPem = NULL;
+
+  if (!key || !crt || !entropy || !ctr_drbg) {
+    heap_caps_free(key); heap_caps_free(crt); heap_caps_free(entropy); heap_caps_free(ctr_drbg);
+    snprintf(gDebugBuffer, 1024, "Error: Failed to allocate mbedTLS contexts in PSRAM");
+    return gDebugBuffer;
+  }
+
+  mbedtls_pk_init(key);
+  mbedtls_x509write_crt_init(crt);
+  mbedtls_entropy_init(entropy);
+  mbedtls_ctr_drbg_init(ctr_drbg);
+
+  // Seed RNG
+  ret = mbedtls_ctr_drbg_seed(ctr_drbg, mbedtls_entropy_func, entropy,
+                                (const unsigned char*)"hwone_certgen", 13);
+  if (ret != 0) {
+    snprintf(gDebugBuffer, 1024, "Error: RNG seed failed (mbedTLS -0x%04X)", (unsigned)-ret);
+    goto cleanup;
+  }
+
+  if (useRsa) {
+    // Generate RSA 2048-bit key pair
+    ret = mbedtls_pk_setup(key, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
+    if (ret != 0) {
+      snprintf(gDebugBuffer, 1024, "Error: RSA PK setup failed (mbedTLS -0x%04X)", (unsigned)-ret);
+      goto cleanup;
+    }
+    ret = mbedtls_rsa_gen_key(mbedtls_pk_rsa(*key), mbedtls_ctr_drbg_random, ctr_drbg, 2048, 65537);
+    if (ret != 0) {
+      snprintf(gDebugBuffer, 1024, "Error: RSA keygen failed (mbedTLS -0x%04X)", (unsigned)-ret);
+      goto cleanup;
+    }
+  } else {
+    // Generate ECDSA P-256 key pair (much faster than RSA)
+    ret = mbedtls_pk_setup(key, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));
+    if (ret != 0) {
+      snprintf(gDebugBuffer, 1024, "Error: EC PK setup failed (mbedTLS -0x%04X)", (unsigned)-ret);
+      goto cleanup;
+    }
+    ret = mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1, mbedtls_pk_ec(*key),
+                               mbedtls_ctr_drbg_random, ctr_drbg);
+    if (ret != 0) {
+      snprintf(gDebugBuffer, 1024, "Error: EC keygen failed (mbedTLS -0x%04X)", (unsigned)-ret);
+      goto cleanup;
+    }
+  }
+
+  broadcastOutput("Key generated. Building self-signed certificate...");
+
+  // Configure certificate
+  mbedtls_x509write_crt_set_version(crt, MBEDTLS_X509_CRT_VERSION_3);
+  mbedtls_x509write_crt_set_md_alg(crt, MBEDTLS_MD_SHA256);
+  mbedtls_x509write_crt_set_subject_key(crt, key);
+  mbedtls_x509write_crt_set_issuer_key(crt, key);
+
+  ret = mbedtls_x509write_crt_set_subject_name(crt, "CN=HardwareOne,O=HardwareOne");
+  if (ret != 0) {
+    snprintf(gDebugBuffer, 1024, "Error: set subject failed (mbedTLS -0x%04X)", (unsigned)-ret);
+    goto cleanup;
+  }
+  ret = mbedtls_x509write_crt_set_issuer_name(crt, "CN=HardwareOne,O=HardwareOne");
+  if (ret != 0) {
+    snprintf(gDebugBuffer, 1024, "Error: set issuer failed (mbedTLS -0x%04X)", (unsigned)-ret);
+    goto cleanup;
+  }
+
+  // Random serial number
+  {
+    unsigned char serial[8];
+    mbedtls_ctr_drbg_random(ctr_drbg, serial, sizeof(serial));
+    serial[0] &= 0x7F;  // Ensure positive per X.509
+    ret = mbedtls_x509write_crt_set_serial_raw(crt, serial, sizeof(serial));
+    if (ret != 0) {
+      snprintf(gDebugBuffer, 1024, "Error: set serial failed (mbedTLS -0x%04X)", (unsigned)-ret);
+      goto cleanup;
+    }
+  }
+
+  // Validity: now to 10 years from now
+  {
+    time_t now = time(NULL);
+    if (now < 100000) now = 1709251200;  // Fallback: 2024-03-01 if NTP not synced
+    struct tm tmStart, tmEnd;
+    time_t expiry = now + (3650LL * 86400);
+    gmtime_r(&now, &tmStart);
+    gmtime_r(&expiry, &tmEnd);
+    char notBefore[16], notAfter[16];
+    strftime(notBefore, sizeof(notBefore), "%Y%m%d%H%M%S", &tmStart);
+    strftime(notAfter, sizeof(notAfter), "%Y%m%d%H%M%S", &tmEnd);
+    ret = mbedtls_x509write_crt_set_validity(crt, notBefore, notAfter);
+    if (ret != 0) {
+      snprintf(gDebugBuffer, 1024, "Error: set validity failed (mbedTLS -0x%04X)", (unsigned)-ret);
+      goto cleanup;
+    }
+  }
+
+  // Extensions
+  mbedtls_x509write_crt_set_basic_constraints(crt, 0, -1);
+  mbedtls_x509write_crt_set_subject_key_identifier(crt);
+  mbedtls_x509write_crt_set_authority_key_identifier(crt);
+
+  // Write certificate and key to PEM format (PSRAM-allocated)
+  certPem = (unsigned char*)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+  keyPem = (unsigned char*)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+  if (!certPem || !keyPem) {
+    snprintf(gDebugBuffer, 1024, "Error: Failed to allocate PEM buffers in PSRAM");
+    goto cleanup;
+  }
+
+  ret = mbedtls_x509write_crt_pem(crt, certPem, 4096, mbedtls_ctr_drbg_random, ctr_drbg);
+  if (ret != 0) {
+    snprintf(gDebugBuffer, 1024, "Error: write cert PEM failed (mbedTLS -0x%04X)", (unsigned)-ret);
+    goto cleanup;
+  }
+
+  ret = mbedtls_pk_write_key_pem(key, keyPem, 4096);
+  if (ret != 0) {
+    snprintf(gDebugBuffer, 1024, "Error: write key PEM failed (mbedTLS -0x%04X)", (unsigned)-ret);
+    goto cleanup;
+  }
+
+  // Save to filesystem
+  {
+    if (!LittleFS.exists("/system")) LittleFS.mkdir("/system");
+    if (!LittleFS.exists("/system/certs")) LittleFS.mkdir("/system/certs");
+
+    File cf = LittleFS.open("/system/certs/https_server.crt", "w");
+    if (!cf) {
+      snprintf(gDebugBuffer, 1024, "Error: Cannot create certificate file");
+      goto cleanup;
+    }
+    cf.print((const char*)certPem);
+    cf.close();
+
+    File kf = LittleFS.open("/system/certs/https_server.key", "w");
+    if (!kf) {
+      snprintf(gDebugBuffer, 1024, "Error: Cannot create key file");
+      goto cleanup;
+    }
+    kf.print((const char*)keyPem);
+    kf.close();
+  }
+
+  snprintf(gDebugBuffer, 1024,
+    "Self-signed %s certificate generated and saved:\n"
+    "  Cert: /system/certs/https_server.crt\n"
+    "  Key:  /system/certs/https_server.key\n"
+    "Run 'certinfo' to view details.\n"
+    "Enable HTTPS: httpsEnabled 1\n"
+    "Then reboot to activate.",
+    useRsa ? "RSA-2048" : "ECDSA P-256");
+
+cleanup:
+  heap_caps_free(certPem);
+  heap_caps_free(keyPem);
+  mbedtls_x509write_crt_free(crt);
+  mbedtls_pk_free(key);
+  mbedtls_ctr_drbg_free(ctr_drbg);
+  mbedtls_entropy_free(entropy);
+  heap_caps_free(crt);
+  heap_caps_free(key);
+  heap_caps_free(ctr_drbg);
+  heap_caps_free(entropy);
+  return gDebugBuffer;
+}
+
 #else
 const char* cmd_certinfo(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTPS disabled at build time"; }
+const char* cmd_certgen(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTPS disabled at build time"; }
 #endif
 
 #if !ENABLE_HTTP_SERVER
@@ -949,6 +1147,7 @@ const CommandEntry wifiCommands[] = {
   { "httpstatus", "Show HTTP server status.", false, cmd_httpstatus },
 #endif
   { "certinfo", "Show HTTPS certificate details.", false, cmd_certinfo },
+  { "certgen", "Generate self-signed HTTPS certificate: [rsa] (default: ECDSA P-256)", true, cmd_certgen, "Usage: certgen [rsa]  Default: ECDSA P-256 (~1s). Use 'certgen rsa' for RSA-2048 (~30-60s)." },
 };
 
 const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);
