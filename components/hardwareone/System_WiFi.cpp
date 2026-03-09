@@ -22,6 +22,11 @@
 #endif
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#if ENABLE_HTTPS
+#include <LittleFS.h>
+#include <time.h>
+#include "mbedtls/x509_crt.h"
+#endif
 
 // External dependencies from main .ino
 // WifiNetwork struct and gWifiNetworks are now in wifi_system.h
@@ -29,6 +34,7 @@ extern bool wifiConnected;
 extern bool syncNTPAndResolve();  // Synchronous NTP sync
 #if ENABLE_HTTP_SERVER
 extern httpd_handle_t server;
+extern bool gServerIsHttps;  // Defined in WebServer_Server.cpp
 #endif
 extern volatile uint32_t gOutputFlags;
 
@@ -785,6 +791,9 @@ const char* cmd_httpstart(const String& argsInput) {
   }
 
   if (server != NULL) {
+    if (gServerIsHttps) {
+      return "ERROR: HTTPS server is already running. Stop it first with 'closehttp'.";
+    }
     return "HTTP server is already running";
   }
 
@@ -793,7 +802,7 @@ const char* cmd_httpstart(const String& argsInput) {
   
   // Check if server started successfully
   if (server != NULL) {
-    return "HTTP server started";
+    return gServerIsHttps ? "HTTPS server started" : "HTTP server started";
   }
   return "ERROR: Failed to start HTTP server";
 }
@@ -805,31 +814,111 @@ const char* cmd_httpstop(const String& argsInput) {
     return "HTTP server is not running";
   }
 
+  bool wasHttps = gServerIsHttps;
   httpd_stop(server);
   server = NULL;
+  gServerIsHttps = false;  // Reset flag on stop
   
   // Disable web output when server stops
   gOutputFlags &= ~OUTPUT_WEB;
   
-  return "[HTTP] Server stopped successfully";
+  return wasHttps ? "[HTTPS] Server stopped successfully" : "[HTTP] Server stopped successfully";
 }
 
 const char* cmd_httpstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (server != NULL) {
-    return "HTTP server: RUNNING";
+    return gServerIsHttps ? "HTTPS server: RUNNING (port 443)" : "HTTP server: RUNNING (port 80)";
   } else {
     return "HTTP server: STOPPED";
   }
 }
 
-#else
+#endif
 
+#if ENABLE_HTTPS
+const char* cmd_certinfo(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  static const char* CERT_PATH = "/system/certs/https_server.crt";
+  if (!LittleFS.exists(CERT_PATH)) {
+    return "No certificate found at /system/certs/https_server.crt";
+  }
+
+  File f = LittleFS.open(CERT_PATH, "r");
+  if (!f) return "Error: Cannot open certificate file";
+  String certPem = f.readString();
+  f.close();
+
+  mbedtls_x509_crt crt;
+  mbedtls_x509_crt_init(&crt);
+
+  int ret = mbedtls_x509_crt_parse(&crt, (const unsigned char*)certPem.c_str(), certPem.length() + 1);
+  if (ret != 0) {
+    mbedtls_x509_crt_free(&crt);
+    snprintf(gDebugBuffer, 1024, "Error: Failed to parse certificate (mbedTLS error -0x%04X)", (unsigned)-ret);
+    return gDebugBuffer;
+  }
+
+  char subBuf[128], issBuf[128];
+  mbedtls_x509_dn_gets(subBuf, sizeof(subBuf), &crt.subject);
+  mbedtls_x509_dn_gets(issBuf, sizeof(issBuf), &crt.issuer);
+
+  const char* keyType = mbedtls_pk_get_name(&crt.pk);
+  size_t keyBits = mbedtls_pk_get_bitlen(&crt.pk);
+  bool selfSigned = (strcmp(subBuf, issBuf) == 0);
+
+  // Calculate days until expiry
+  const char* expiryStatus;
+  char expiryBuf[64];
+  time_t now = time(NULL);
+  if (now < 100000) {
+    expiryStatus = "unknown (time not set)";
+  } else {
+    struct tm expTm = {};
+    expTm.tm_year = crt.valid_to.year - 1900;
+    expTm.tm_mon = crt.valid_to.mon - 1;
+    expTm.tm_mday = crt.valid_to.day;
+    expTm.tm_hour = crt.valid_to.hour;
+    expTm.tm_min = crt.valid_to.min;
+    expTm.tm_sec = crt.valid_to.sec;
+    time_t expTime = mktime(&expTm);
+    if (expTime <= now) {
+      expiryStatus = "EXPIRED";
+    } else {
+      int daysLeft = (int)((expTime - now) / 86400);
+      snprintf(expiryBuf, sizeof(expiryBuf), "%d days remaining", daysLeft);
+      expiryStatus = expiryBuf;
+    }
+  }
+
+  snprintf(gDebugBuffer, 1024,
+    "HTTPS Certificate:\n"
+    "  Subject: %s\n"
+    "  Issuer:  %s%s\n"
+    "  Key:     %s (%zu bits)\n"
+    "  Valid:   %04d-%02d-%02d to %04d-%02d-%02d\n"
+    "  Expiry:  %s",
+    subBuf,
+    issBuf, selfSigned ? " (self-signed)" : "",
+    keyType, keyBits,
+    crt.valid_from.year, crt.valid_from.mon, crt.valid_from.day,
+    crt.valid_to.year, crt.valid_to.mon, crt.valid_to.day,
+    expiryStatus);
+
+  mbedtls_x509_crt_free(&crt);
+  return gDebugBuffer;
+}
+#else
+const char* cmd_certinfo(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTPS disabled at build time"; }
+#endif
+
+#if !ENABLE_HTTP_SERVER
 const char* cmd_httpstart(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
 const char* cmd_httpstop(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
 const char* cmd_httpstatus(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server: DISABLED"; }
-
 #endif
 
 // ============================================================================
@@ -857,8 +946,9 @@ const CommandEntry wifiCommands[] = {
   { "openhttp", "Start HTTP server.", false, cmd_httpstart },
   { "closehttp", "Stop HTTP server.", false, cmd_httpstop },
   { "httpread", "Read HTTP server status.", false, cmd_httpstatus },
-  { "httpstatus", "Show HTTP server status.", false, cmd_httpstatus }
+  { "httpstatus", "Show HTTP server status.", false, cmd_httpstatus },
 #endif
+  { "certinfo", "Show HTTPS certificate details.", false, cmd_certinfo },
 };
 
 const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);
@@ -971,7 +1061,10 @@ extern const SettingsModule wifiSettingsModule = {
 #if ENABLE_HTTP_SERVER
 
 static const SettingEntry httpSettingsEntries[] = {
-  { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr }
+  { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr },
+#if ENABLE_HTTPS
+  { "httpsEnabled", SETTING_BOOL, &gSettings.httpsEnabled, false, 0, nullptr, 0, 1, "Enable HTTPS (requires certs + reboot)", nullptr },
+#endif
 };
 
 extern const SettingsModule httpSettingsModule = {

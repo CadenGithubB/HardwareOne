@@ -54,6 +54,17 @@ CONFIG_BT_GATTC_MAX_CACHE_CHAR=40
 # HTTP Server - increase header buffer for browser cookies
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 
+# mbedTLS - allocate TLS buffers from PSRAM instead of internal DRAM
+# Each TLS session needs ~40-50KB; internal DRAM is too scarce for multiple sessions
+# CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC is not set
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# HTTPS performance: enable session ticket resumption (skip full handshake on reconnect)
+CONFIG_ESP_TLS_SERVER_SESSION_TICKETS=y
+
+# Don't keep peer certificate after handshake (no mutual TLS, saves RAM per session)
+# CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE is not set
+
 # IRAM savings - disable IRAM placement for non-critical drivers
 # CONFIG_ADC_ONESHOT_CTRL_FUNC_IN_IRAM is not set
 # CONFIG_ADC_CONTINUOUS_ISR_IRAM_SAFE is not set

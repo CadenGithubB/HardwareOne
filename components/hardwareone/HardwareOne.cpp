@@ -1623,7 +1623,7 @@ void hardwareone_setup() {
 
   if (gSettings.httpAutoStart && WiFi.isConnected()) {
     runUnifiedSystemCommand("openhttp");
-    broadcastOutput("HTTP server started. Try: http://" + WiFi.localIP().toString());
+    broadcastOutput(String(gServerIsHttps ? "HTTPS server started. Try: https://" : "HTTP server started. Try: http://") + WiFi.localIP().toString());
   } else if (!gSettings.httpAutoStart) {
     broadcastOutput("HTTP server available. Use 'openhttp' or quick settings (SELECT button) to start.");
   } else {

@@ -18,6 +18,9 @@
 // Buffer is defined in web_server.cpp; other modules use this extern.
 extern char* gJsonResponseBuffer;
 
+// Track whether the running server is HTTPS (true) or HTTP (false)
+extern bool gServerIsHttps;
+
 // ============================================================================
 // Web Server - HTTP server session and authentication functions
 // ============================================================================

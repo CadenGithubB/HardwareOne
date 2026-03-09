@@ -14,6 +14,7 @@
 #include "System_Notifications.h"
 #include <LittleFS.h>
 #include <esp_system.h>
+#include <esp_log.h>
 #include "mbedtls/aes.h"
 #include "mbedtls/sha256.h"
 #include "esp_flash.h"
@@ -177,6 +178,12 @@ const char* cmd_outweb(const String& argsInput) {
 
 const char* cmd_beginwrite(const String& argsInput);
 const char* cmd_savesettings(const String& argsInput);
+#if ENABLE_HTTP_SERVER
+const char* cmd_httpAutoStart(const String& argsInput);
+#endif
+#if ENABLE_HTTPS
+const char* cmd_httpsEnabled(const String& argsInput);
+#endif
 
 const CommandEntry settingsCommands[] = {
 #if ENABLE_WIFI
@@ -196,6 +203,12 @@ const CommandEntry settingsCommands[] = {
 #if ENABLE_ESPNOW
   // ---- Device Settings ----
   { "espnowenabled", "Enable/disable ESP-NOW: <0|1> (reboot required)", true, cmd_espnowenabled, "Usage: espnowenabled <0|1>" },
+#endif
+#if ENABLE_HTTP_SERVER
+  { "httpAutoStart", "Auto-start HTTP server at boot: <0|1>", true, cmd_httpAutoStart, "Usage: httpAutoStart <0|1>" },
+#endif
+#if ENABLE_HTTPS
+  { "httpsEnabled", "Enable/disable HTTPS: <0|1> (reboot required)", true, cmd_httpsEnabled, "Usage: httpsEnabled <0|1>" },
 #endif
   
   // Note: I2C settings are now handled by the modular registry in i2c_system.cpp
@@ -659,6 +672,28 @@ void applySettings() {
     if (lvl > LOG_LEVEL_DEBUG) lvl = LOG_LEVEL_DEBUG;
     DEBUG_MANAGER.setLogLevel((uint8_t)lvl);
     gSettings.logLevel = lvl;
+
+    // Map app log level to ESP-IDF log level for noisy framework components
+    // App: 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG
+    // ESP: ESP_LOG_ERROR, ESP_LOG_WARN, ESP_LOG_INFO, ESP_LOG_DEBUG
+    esp_log_level_t espLevel;
+    switch (lvl) {
+      case LOG_LEVEL_ERROR: espLevel = ESP_LOG_ERROR; break;
+      case LOG_LEVEL_WARN:  espLevel = ESP_LOG_WARN;  break;
+      case LOG_LEVEL_INFO:  espLevel = ESP_LOG_INFO;  break;
+      default:              espLevel = ESP_LOG_DEBUG; break;
+    }
+
+    // Suppress noisy ESP-IDF components based on log level
+    // TLS connection-reset/write errors (benign browser disconnects)
+    esp_log_level_set("esp-tls-mbedtls", espLevel);
+    // HTTPS handshake progress messages
+    esp_log_level_set("esp_https_server", espLevel);
+    // WiFi driver state changes and init parameters
+    esp_log_level_set("wifi", espLevel);
+    esp_log_level_set("wifi_init", espLevel);
+    // PHY calibration warnings
+    esp_log_level_set("phy_init", espLevel);
   }
 
   DEBUG_SYSTEMF("[applySettings] Applied debug flags");
@@ -1000,10 +1035,10 @@ extern void setupNTP();
 const char* cmd_tzoffsetminutes(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: tzoffsetminutes <-720..720>";
-  while (*p == ' ') p++;  // Skip whitespace
-  int offset = atoi(p);
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) return "Usage: tzoffsetminutes <-720..720>";
+  int offset = atoi(valStr.c_str());
   if (offset < -720 || offset > 720) return "Error: timezone offset must be between -720 and 720 minutes";
   setSetting(gSettings.tzOffsetMinutes, offset);
 #if ENABLE_WIFI
@@ -1017,10 +1052,10 @@ const char* cmd_tzoffsetminutes(const String& argsInput) {
 const char* cmd_ntpserver(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: ntpserver <host>";
-  while (*p == ' ') p++;  // Skip whitespace
-  if (*p == '\0') return "Error: NTP server cannot be empty";
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) return "Usage: ntpserver <host>";
+  const char* p = valStr.c_str();
 
   // Resolve host first
   IPAddress ntpIP;
@@ -1075,14 +1110,45 @@ const char* cmd_ntpserver(const String& argsInput) {
 const char* cmd_espnowenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: espnowenabled <0|1>";
-  while (*p == ' ') p++;  // Skip whitespace
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) return "Usage: espnowenabled <0|1>";
+  const char* p = valStr.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.espnowenabled, enabled);
   snprintf(getDebugBuffer(), 1024, "espnowenabled set to %s (takes effect after reboot)", enabled ? "1" : "0");
   return getDebugBuffer();
 }
+
+#if ENABLE_HTTP_SERVER
+const char* cmd_httpAutoStart(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) return "Usage: httpAutoStart <0|1>";
+  const char* p = valStr.c_str();
+  bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
+  setSetting(gSettings.httpAutoStart, enabled);
+  snprintf(getDebugBuffer(), 1024, "httpAutoStart set to %s", enabled ? "1" : "0");
+  return getDebugBuffer();
+}
+#endif
+
+#if ENABLE_HTTPS
+const char* cmd_httpsEnabled(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) return "Usage: httpsEnabled <0|1>";
+  const char* p = valStr.c_str();
+  bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
+  setSetting(gSettings.httpsEnabled, enabled);
+  snprintf(getDebugBuffer(), 1024, "httpsEnabled set to %s (takes effect after reboot)", enabled ? "1" : "0");
+  return getDebugBuffer();
+}
+#endif
 
 // ============================================================================
 // Modular Settings Registry Implementation
@@ -1549,9 +1615,9 @@ size_t writeRegisteredSettings(JsonDocument& doc) {
 const char* handleSettingCommand(const SettingEntry* entry, const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  // Find the value after the command name
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) {
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) {
     // No argument - show current value
     static char buf[128];
     switch (entry->type) {
@@ -1571,7 +1637,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
     return buf;
   }
   
-  while (*p == ' ') p++;  // Skip whitespace
+  const char* p = valStr.c_str();
   
   // Parse and validate based on type
   switch (entry->type) {

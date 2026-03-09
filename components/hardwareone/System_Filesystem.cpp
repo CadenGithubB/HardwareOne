@@ -29,8 +29,7 @@ extern bool gAutosDirty;
 // External constants
 extern const char AUTOMATIONS_JSON_FILE[];
 
-// Forward declarations
-static bool isSensitiveFile(const String& path);
+// Forward declarations (none needed — permissions are table-driven)
 
 // ============================================================================
 // Filesystem State (owned by this module)
@@ -89,6 +88,7 @@ bool initFilesystem() {
   LittleFS.mkdir("/system/sys_logs");  // For protected system logs (login, errors, command history)
   LittleFS.mkdir("/system/users");  // For users.json and user settings
   LittleFS.mkdir("/system/users/user_settings");  // For per-user setting files
+  LittleFS.mkdir("/system/certs");  // For TLS certificates (HTTPS, MQTT)
 #if ENABLE_ESPNOW
   LittleFS.mkdir("/espnow");  // For ESP-NOW related files (received subfolder created on-demand)
   LittleFS.mkdir("/system/espnow");  // For ESP-NOW config (mesh peers, devices, bond peer settings)
@@ -358,7 +358,7 @@ const char* cmd_mkdir(const String& argsInput) {
   path.trim();
   if (path.length() == 0) return "Usage: mkdir <path>";
   if (!path.startsWith("/")) path = String("/") + path;
-  if (path == "/logging_captures" || path.startsWith("/logging_captures/") || path == "/system" || path.startsWith("/system/")) {
+  if (!canCreate(path)) {
     snprintf(getDebugBuffer(), 1024, "Error: Creation not allowed: %s", path.c_str());
     return getDebugBuffer();
   }
@@ -379,8 +379,8 @@ const char* cmd_rmdir(const String& argsInput) {
   path.trim();
   if (path.length() == 0) return "Usage: rmdir <path>";
   if (!path.startsWith("/")) path = String("/") + path;
-  if (path == "/logging_captures" || path.startsWith("/logging_captures/") || path == "/system" || path.startsWith("/system/") || path == "/Users" || path.startsWith("/Users/")) {
-    snprintf(getDebugBuffer(), 1024, "Error: Removal not allowed: %s (protected system directory)", path.c_str());
+  if (!canDelete(path)) {
+    snprintf(getDebugBuffer(), 1024, "Error: Removal not allowed: %s (protected)", path.c_str());
     return getDebugBuffer();
   }
   if (VFS::rmdir(path)) {
@@ -401,7 +401,7 @@ const char* cmd_filecreate(const String& argsInput) {
   if (path.length() == 0) return "Usage: filecreate <path>";
   if (!path.startsWith("/")) path = String("/") + path;
   if (path.endsWith("/")) return "Error: Path must be a file (not a directory)";
-  if (path == "/logging_captures" || path.startsWith("/logging_captures/") || path == "/system" || path.startsWith("/system/")) {
+  if (!canCreate(path)) {
     snprintf(getDebugBuffer(), 1024, "Error: Creation not allowed: %s", path.c_str());
     return getDebugBuffer();
   }
@@ -425,7 +425,7 @@ const char* cmd_fileview(const String& argsInput) {
   if (!path.startsWith("/")) path = String("/") + path;
 
   // Security: Block reading sensitive files (credentials, passwords, keys)
-  if (isSensitiveFile(path)) {
+  if (!canRead(path)) {
     if (ensureDebugBuffer()) {
       snprintf(getDebugBuffer(), 1024, "Error: Access denied - %s contains sensitive data", path.c_str());
       broadcastOutput(getDebugBuffer());
@@ -510,185 +510,153 @@ const size_t filesystemCommandsCount = sizeof(filesystemCommands) / sizeof(files
 // Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
-// File Permissions and Protection
+// File Permissions — Table-Driven System
 // ============================================================================
 //
-// Tier model:
-//   SENSITIVE     - /system/users/* — credentials, never expose via web/CLI
-//   IMMUTABLE     - /system/settings.json, /system/automations.json,
-//                   /system/devices.json, /system/espnow/devices.json
-//                   Can edit settings+automations, cannot delete/rename any
-//   PROTECTED_DIR - /system, /logging_captures, /espnow, /maps, /sd — dirs themselves
-//                   Cannot rename or delete the directory
-//   SYSTEM_DATA   - /logging_captures/*, /espnow/* — system writes; user can read+delete
-//   UPLOADABLE    - /system/certs/* — can upload+delete, no edit/rename
-//   USER_DATA     - /maps/*, anything else — full CRUD
+// All path permission rules are defined in a single table (sPathRules).
+// Rules are matched in order; first match wins.  More specific paths go first.
+//
+// Permission flags (from System_Filesystem.h):
+//   PERM_READ   0x01  — can view/download file contents
+//   PERM_WRITE  0x02  — can edit file contents
+//   PERM_DELETE 0x04  — can delete file/folder
+//   PERM_RENAME 0x08  — can rename file/folder
+//   PERM_CREATE 0x10  — can create new files/folders (CLI mkdir/filecreate)
+//   PERM_IMPORT 0x20  — can upload/import files via web
+//
+// To add a new path rule, insert it in the table below.
 // ============================================================================
 
-// List of root directories the system creates at boot
-static bool isProtectedDirectory(const String& path) {
-  return (path == "/system" || path == "/logging_captures" || path == "/espnow" ||
-          path == "/maps" || path == "/sd" || path == "/Users");
+struct PathRule {
+  const char* path;      // Path prefix (or exact path if exactMatch is true)
+  uint8_t     perms;     // Bitmask of allowed FilePermission flags
+  bool        exactMatch;// true = match path exactly, false = prefix match
+  bool        adminOnly; // true = requires admin role to access
+};
+
+static const PathRule sPathRules[] = {
+  // ---- Sensitive credentials: no access ----
+  {"/system/users/user_settings",       0,                                          false, true},
+  {"/system/users/pending_users.json",  0,                                          true,  true},
+
+  // ---- Immutable config files: read-only ----
+  {"/system/settings.json",             PERM_READ,                                  true,  true},
+  {"/system/automations.json",          PERM_READ,                                  true,  true},
+  {"/system/devices.json",              PERM_READ,                                  true,  true},
+  {"/system/espnow/devices.json",       PERM_READ,                                  true,  true},
+
+  // ---- TLS certificates: read + delete + import (no edit/rename/create) ----
+  {"/system/certs/",                    PERM_READ | PERM_DELETE | PERM_IMPORT,      false, true},
+
+  // ---- System logs: read-only ----
+  {"/system/sys_logs/",                 PERM_READ,                                  false, true},
+
+  // ---- Protected root directories (browse only — no delete/rename) ----
+  {"/system",                           PERM_READ,                                  true,  true},
+  {"/logging_captures",                 PERM_READ,                                  true,  true},
+  {"/espnow",                           PERM_READ,                                  true,  false},
+  {"/maps",                             PERM_READ,                                  true,  false},
+  {"/sd",                               PERM_READ,                                  true,  false},
+  {"/Users",                            PERM_READ,                                  true,  false},
+
+  // ---- General system paths: read-only ----
+  {"/system/",                          PERM_READ,                                  false, true},
+
+  // ---- Logging captures: read + delete ----
+  {"/logging_captures/",                PERM_READ | PERM_DELETE,                    false, true},
+
+  // ---- ESP-NOW data: read + edit + delete ----
+  {"/espnow/",                          PERM_READ | PERM_WRITE | PERM_DELETE,       false, false},
+
+  // ---- Default: full access (user data, maps, etc.) ----
+  {nullptr,                             PERM_ALL,                                   false, false},
+};
+
+// Look up the first matching rule for a path
+static const PathRule& lookupRule(const String& path) {
+  for (size_t i = 0; i < sizeof(sPathRules) / sizeof(sPathRules[0]); i++) {
+    const PathRule& rule = sPathRules[i];
+    if (rule.path == nullptr) return rule;  // Default catch-all (must be last)
+    if (rule.exactMatch) {
+      if (path == rule.path) return rule;
+    } else {
+      if (path.startsWith(rule.path)) return rule;
+    }
+  }
+  return sPathRules[sizeof(sPathRules) / sizeof(sPathRules[0]) - 1];
 }
 
-// Sensitive paths: credentials, password hashes, encryption keys
-static bool isSensitiveFile(const String& path) {
-  // user_settings/ contains password hashes — always block
-  if (path.startsWith("/system/users/user_settings")) return true;
-  // pending_users.json contains unhashed registration passwords — block
-  if (path == "/system/users/pending_users.json") return true;
-  
-  // Any file with credential-like names
+// Filename-based sensitivity check (blocks reading contents of credential files)
+static bool hasSensitiveExtension(const String& path) {
   String lower = path;
   lower.toLowerCase();
-  if (lower.indexOf("password") >= 0) return true;
-  if (lower.indexOf("secret") >= 0) return true;
+  if (lower.indexOf("password") >= 0)   return true;
+  if (lower.indexOf("secret") >= 0)     return true;
   if (lower.indexOf("credential") >= 0) return true;
-  if (lower.indexOf(".key") >= 0) return true;
-  if (lower.indexOf(".pem") >= 0) return true;
-  
+  if (lower.indexOf(".key") >= 0)       return true;
+  if (lower.indexOf(".pem") >= 0)       return true;
   return false;
 }
 
-// Immutable system config files: cannot delete or rename, but some are editable
-static bool isImmutableFile(const String& path) {
-  return (path == "/system/settings.json" ||
-          path == "/system/automations.json" ||
-          path == "/system/devices.json" ||
-          path == "/system/espnow/devices.json");
+// Image files: can be viewed but not text-edited
+static bool isImageFile(const String& path) {
+  String lower = path;
+  lower.toLowerCase();
+  return (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") ||
+          lower.endsWith(".gif") || lower.endsWith(".bmp") || lower.endsWith(".webp") ||
+          lower.endsWith(".ico") || lower.endsWith(".avif") || lower.endsWith(".heif"));
 }
 
-// Editable immutable files: these specific config files can be edited via web UI
-static bool isEditableConfig(const String& path) {
-  (void)path;
-  return false;
-}
+// --- Public permission API (all derived from the table) ---
 
 bool canRead(const String& path) {
-  // Sensitive files: block reading via web/CLI
-  if (isSensitiveFile(path)) return false;
-  return true;
+  if (hasSensitiveExtension(path)) return false;
+  return (lookupRule(path).perms & PERM_READ) != 0;
 }
 
 bool canEdit(const String& path) {
-  // Sensitive: never
-  if (isSensitiveFile(path)) return false;
-  
-  // Editable config files (settings, automations): allow editing
-  if (isEditableConfig(path)) return true;
-  
-  // Other immutable system files: no editing
-  if (isImmutableFile(path)) return false;
-  
-  // System certs: no editing (upload-only)
-  if (path.startsWith("/system/certs/")) return false;
-  
-  // Other /system/ files: no editing
-  if (path.startsWith("/system/")) return false;
-  
-  // Logs: read-only (system-managed)
-  if (path.startsWith("/logging_captures/")) return false;
-  
-  // ESP-NOW received files: allow editing
-  // Maps: allow editing
-  
-  // Image files: view-only
-  if (path.endsWith(".jpg") || path.endsWith(".jpeg") || path.endsWith(".png") || 
-      path.endsWith(".gif") || path.endsWith(".bmp") || path.endsWith(".webp") ||
-      path.endsWith(".ico") || path.endsWith(".avif") || path.endsWith(".heif")) {
-    return false;
-  }
-  
-  return true;
+  if (hasSensitiveExtension(path)) return false;
+  if (isImageFile(path)) return false;
+  return (lookupRule(path).perms & PERM_WRITE) != 0;
 }
 
 bool canDelete(const String& path) {
-  // Protected directories themselves: never delete
-  if (isProtectedDirectory(path)) return false;
-  
-  // Sensitive: never
-  if (isSensitiveFile(path)) return false;
-  
-  // Immutable config files: never delete
-  if (isImmutableFile(path)) return false;
-  
-  // System certs: allow deletion (uploadable tier)
-  if (path.startsWith("/system/certs/")) return true;
-  
-  // System logs: protected from deletion (audit, login, errors)
-  if (path.startsWith("/system/sys_logs/")) return false;
-  
-  // Other /system/ files: no deletion
-  if (path.startsWith("/system/")) return false;
-  
-  // Logs: allow deleting individual log files
-  if (path.startsWith("/logging_captures/")) return true;
-  
-  // ESP-NOW received: allow deleting
-  if (path.startsWith("/espnow/")) return true;
-  
-  // Maps and user data: allow
-  return true;
+  return (lookupRule(path).perms & PERM_DELETE) != 0;
 }
 
 bool canRename(const String& path) {
-  // Protected directories: never rename
-  if (isProtectedDirectory(path)) return false;
-  
-  // Sensitive: never
-  if (isSensitiveFile(path)) return false;
-  
-  // Immutable: never rename
-  if (isImmutableFile(path)) return false;
-  
-  // All /system/ files: no renaming
-  if (path.startsWith("/system/")) return false;
-  
-  // Logs: no renaming (system-named)
-  if (path.startsWith("/logging_captures/")) return false;
-  
-  // ESP-NOW received: no renaming (system-created paths)
-  if (path.startsWith("/espnow/")) return false;
-  
-  // Maps and user data: allow renaming
-  return true;
+  return (lookupRule(path).perms & PERM_RENAME) != 0;
 }
 
 bool canCreate(const String& path) {
-  // Cannot create in sensitive directories
-  if (isSensitiveFile(path)) return false;
-  
-  // System certs: allow (for TLS uploads)
-  if (path.startsWith("/system/certs/")) return true;
-  
-  // Other system paths: no user creation
-  if (path == "/system" || path.startsWith("/system/")) return false;
-  
-  // Logs: system-managed only
-  if (path == "/logging_captures" || path.startsWith("/logging_captures/")) return false;
-  
-  // ESP-NOW: system-managed only
-  if (path == "/espnow" || path.startsWith("/espnow/")) return false;
-  
-  // Maps and user directories: allow
-  return true;
+  return (lookupRule(path).perms & PERM_CREATE) != 0;
+}
+
+bool canImport(const String& path) {
+  return (lookupRule(path).perms & PERM_IMPORT) != 0;
 }
 
 bool isAdminOnlyPath(const String& path) {
-  if (path == "/system"            || path.startsWith("/system/"))            return true;
-  if (path == "/logging_captures"  || path.startsWith("/logging_captures/"))  return true;
-  return false;
+  return lookupRule(path).adminOnly;
 }
 
 uint8_t getPermissions(const String& path) {
   uint8_t perms = 0;
-  
   if (canRead(path))   perms |= PERM_READ;
   if (canEdit(path))   perms |= PERM_WRITE;
   if (canDelete(path)) perms |= PERM_DELETE;
   if (canRename(path)) perms |= PERM_RENAME;
-  
+  if (canCreate(path)) perms |= PERM_CREATE;
+  if (canImport(path)) perms |= PERM_IMPORT;
   return perms;
+}
+
+uint8_t getDirPerms(const String& dirPath) {
+  // What permissions would a child of this directory have?
+  String testPath = dirPath;
+  if (!testPath.endsWith("/")) testPath += "/";
+  testPath += "_";
+  return lookupRule(testPath).perms;
 }
 
 // ============================================================================
