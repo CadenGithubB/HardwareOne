@@ -354,7 +354,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     var section = settings[mod.section] || settings[mod.name] || {};
     var entries = mod.entries || [];
     var isDisconnected = mod.connected === false;
-    var statusBadge = isDisconnected ? '<span style="background:#f59e0b;color:#fff;padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>' : '';
+    var statusBadge = isDisconnected ? '<span style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>' : '<span style="background:rgba(102,126,234,0.15);color:#667eea;border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Connected</span>';
     
     var html = '<div style="background:var(--panel-bg);border-radius:8px;padding:1rem 1.5rem;margin:0.5rem 0;box-shadow:0 1px 3px rgba(0,0,0,0.1);border:1px solid var(--border)">';
     html += '<div style="display:flex;align-items:center;justify-content:space-between">';
@@ -369,7 +369,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     html += '<div id="' + mod.name + '-net-pane" style="display:none;margin-top:0.75rem">';
     
     if (isDisconnected) {
-      html += '<div style="background:#fef3c7;border-left:3px solid #f59e0b;padding:0.75rem;margin-bottom:1rem;color:#92400e;font-size:0.85rem">';
+      html += '<div style="background:rgba(255,152,0,0.08);border-left:3px solid rgba(255,152,0,0.4);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);opacity:0.8;font-size:0.85rem">';
       html += 'Service not available. Check WiFi connection and configuration.';
       html += '</div>';
     }
@@ -549,7 +549,9 @@ window.sendSequential = function(cmds, onDone, onFail) {
     if (isOrphan) {
       statusBadge = '<span style="background:#6b7280;color:#fff;padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Inactive</span>';
     } else if (isDisconnected) {
-      statusBadge = '<span style="background:#f59e0b;color:#fff;padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>';
+      statusBadge = '<span style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>';
+    } else {
+      statusBadge = '<span style="background:rgba(102,126,234,0.15);color:#667eea;border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Connected</span>';
     }
     
     var html = '<div style="background:var(--panel-bg);border-radius:8px;padding:1rem 1.5rem;margin:0.5rem 0;box-shadow:0 1px 3px rgba(0,0,0,0.1);border:1px solid var(--border)">';
@@ -569,7 +571,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
       html += 'Module not included in current build. Settings are preserved but read-only.';
       html += '</div>';
     } else if (isDisconnected) {
-      html += '<div style="background:#fef3c7;border-left:3px solid #f59e0b;padding:0.75rem;margin-bottom:1rem;color:#92400e;font-size:0.85rem">';
+      html += '<div style="background:rgba(255,152,0,0.08);border-left:3px solid rgba(255,152,0,0.4);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);opacity:0.8;font-size:0.85rem">';
       html += 'Module not connected, settings can still be changed.';
       html += '</div>';
     }
@@ -1105,12 +1107,165 @@ window.sendSequential = function(cmds, onDone, onFail) {
         </div>
       </div>
     </div>
+)SETPART8", HTTPD_RESP_USE_STRLEN);
+
+#if ENABLE_HTTPS
+  httpd_resp_send_chunk(req, R"SETHTTPS(
+    <div style='background:var(--crumb-bg);border:1px solid var(--border);border-radius:8px;padding:1rem'>
+      <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem'>
+        <div style='font-weight:bold;color:var(--panel-fg)'>HTTPS / TLS</div>
+        <button class='btn' id='btn-https-toggle' onclick="togglePane('https-pane','btn-https-toggle')">Expand</button>
+      </div>
+      <div style='color:var(--panel-fg);margin-bottom:0.75rem;font-size:0.9rem'>Encrypt all web traffic with TLS. Requires certificate files.</div>
+      <div id='https-pane' style='display:none;margin-top:0.75rem'>
+        <div style='display:grid;gap:0.75rem'>
+          <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap'>
+            <span style='color:var(--panel-fg);min-width:160px'>Server Certificate: <span style='font-weight:bold' id='https-cert-status'>Checking...</span></span>
+          </div>
+          <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap'>
+            <span style='color:var(--panel-fg);min-width:160px'>Private Key: <span style='font-weight:bold' id='https-key-status'>Checking...</span></span>
+          </div>
+          <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap'>
+            <span style='color:var(--panel-fg);min-width:160px'>HTTPS Mode: <span style='font-weight:bold' id='https-enabled-value'>-</span></span>
+            <button class='btn' id='https-toggle-btn' onclick='toggleHttps()' title='Enable or disable HTTPS (requires reboot)'>Toggle</button>
+          </div>
+          <div id='https-reboot-row' style='display:none;margin-top:0.5rem;padding:0.75rem;background:rgba(255,255,255,0.05);border:1px solid var(--border);border-radius:6px'>
+            <span style='color:var(--panel-fg);font-weight:bold'>Reboot required for changes to take effect.</span>
+            <button class='btn' style='margin-left:1rem' onclick='rebootDevice()'>Reboot Now</button>
+          </div>
+          <div style='display:grid;gap:0.5rem;margin-top:0.25rem'>
+            <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap'>
+              <span style='color:var(--panel-fg);min-width:160px;font-size:0.9rem'>Server Certificate:</span>
+              <label class='btn' style='cursor:pointer;margin:0'>
+                Upload .crt
+                <input type='file' id='https-cert-input' accept='.crt,.pem' style='display:none' onchange='uploadHttpsCert(this)'>
+              </label>
+              <span id='https-cert-upload-status' style='font-size:0.85rem;color:var(--panel-fg);opacity:0.7'></span>
+            </div>
+            <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap'>
+              <span style='color:var(--panel-fg);min-width:160px;font-size:0.9rem'>Private Key:</span>
+              <label class='btn' style='cursor:pointer;margin:0'>
+                Upload .key
+                <input type='file' id='https-key-input' accept='.key,.pem' style='display:none' onchange='uploadHttpsKey(this)'>
+              </label>
+              <span id='https-key-upload-status' style='font-size:0.85rem;color:var(--panel-fg);opacity:0.7'></span>
+            </div>
+            <div style='color:var(--panel-fg);font-size:0.85rem;opacity:0.7;margin-top:0.25rem'>
+              When HTTPS is active, the device serves on port 443 instead of port 80.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+<script>
+(function(){
+  function checkCertFile(path, elemId) {
+    fetch('/api/files/list?path=' + encodeURIComponent('/system/certs'), {credentials:'same-origin'})
+      .then(function(r){return r.json()})
+      .then(function(j){
+        var el = document.getElementById(elemId);
+        if (!el) return;
+        var found = false;
+        var fname = path.split('/').pop();
+        if (j && j.files) {
+          for (var i=0;i<j.files.length;i++) {
+            if (j.files[i].name===fname || j.files[i].path===path) { found=true; break; }
+          }
+        }
+        el.textContent = found ? 'Present' : 'Missing';
+        el.style.color = '#667eea';
+      })
+      .catch(function(){
+        var el = document.getElementById(elemId);
+        if (el) { el.textContent='Unknown'; el.style.color='#a0aec0'; }
+      });
+  }
+  checkCertFile('/system/certs/https_server.crt', 'https-cert-status');
+  checkCertFile('/system/certs/https_server.key', 'https-key-status');
+
+  window._httpsCurrentValue = false;
+  function refreshHttpsStatus() {
+    fetch('/api/settings',{credentials:'same-origin'})
+      .then(function(r){return r.json()})
+      .then(function(j){
+        var val = j && j.settings && j.settings.http && j.settings.http.httpsEnabled;
+        window._httpsCurrentValue = !!val;
+        var el = document.getElementById('https-enabled-value');
+        if(el){ el.textContent = val ? 'Enabled' : 'Disabled'; el.style.color = '#667eea'; }
+      });
+  }
+  refreshHttpsStatus();
+
+  window.toggleHttps = function(){
+    var newVal = !window._httpsCurrentValue;
+    var cmd = 'httpsEnabled ' + (newVal ? '1' : '0');
+    sendSequential([cmd], function(){
+      window._httpsCurrentValue = newVal;
+      var el = document.getElementById('https-enabled-value');
+      if(el){ el.textContent = newVal ? 'Enabled' : 'Disabled'; el.style.color = '#667eea'; }
+      document.getElementById('https-reboot-row').style.display = 'block';
+    }, function(err){ alert('Failed to toggle HTTPS: ' + err.message); });
+  };
+  function uploadHttpsFile(file, destPath, statusId, inputEl) {
+    var statusEl = document.getElementById(statusId);
+    if (statusEl) { statusEl.textContent = 'Uploading...'; statusEl.style.color = '#a0aec0'; }
+    var reader = new FileReader();
+    reader.onload = function(evt) {
+      var content = evt.target.result;
+      fetch('/api/files/upload', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'path=' + encodeURIComponent(destPath) + '&binary=0&content=' + encodeURIComponent(content)
+      })
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if (j.success) {
+          if (statusEl) { statusEl.textContent = 'Uploaded'; statusEl.style.color = '#667eea'; }
+          var fname = destPath.split('/').pop();
+          var certId = destPath.indexOf('.crt') >= 0 ? 'https-cert-status' : 'https-key-status';
+          var certEl = document.getElementById(certId);
+          if (certEl) { certEl.textContent = 'Present'; certEl.style.color = '#667eea'; }
+        } else {
+          if (statusEl) { statusEl.textContent = 'Failed: ' + (j.error || 'unknown'); statusEl.style.color = '#667eea'; }
+        }
+        if (inputEl) inputEl.value = '';
+      })
+      .catch(function(e){
+        if (statusEl) { statusEl.textContent = 'Error: ' + e.message; statusEl.style.color = '#667eea'; }
+        if (inputEl) inputEl.value = '';
+      });
+    };
+    reader.readAsText(file);
+  }
+  window.uploadHttpsCert = function(input) {
+    if (!input.files || !input.files[0]) return;
+    uploadHttpsFile(input.files[0], '/system/certs/https_server.crt', 'https-cert-upload-status', input);
+  };
+  window.uploadHttpsKey = function(input) {
+    if (!input.files || !input.files[0]) return;
+    uploadHttpsFile(input.files[0], '/system/certs/https_server.key', 'https-key-upload-status', input);
+  };
+
+  window.rebootDevice = function(){
+    if(!confirm('Reboot the device now?')) return;
+    fetch('/api/cli',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd=reboot'})
+      .then(function(){
+        document.body.innerHTML = '<div style="text-align:center;padding:4rem;color:var(--panel-fg)"><h2>Rebooting...</h2><p>The device is restarting. Please wait and then reconnect.</p></div>';
+      });
+  };
+})();
+</script>
+)SETHTTPS", HTTPD_RESP_USE_STRLEN);
+#endif // ENABLE_HTTPS
+
+  httpd_resp_send_chunk(req, R"SETPART8B(
   </div>
   </div>
 </div>
 <div style='text-align:center;margin-top:2rem'>
   <button class='btn' onclick='refreshSettings()' title='Reload all settings from device memory'>Refresh Settings</button>
-)SETPART8", HTTPD_RESP_USE_STRLEN);
+)SETPART8B", HTTPD_RESP_USE_STRLEN);
 
   // Part 1: JavaScript - Core init, state management, and rendering (EXPANDED FOR READABILITY)
   httpd_resp_send_chunk(req, R"SETPART1(<script>
@@ -1673,7 +1828,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
             var dispAuthEl = $('display-auth-value');
             if (dispAuthEl) {
               dispAuthEl.textContent = dispAuth ? 'Required' : 'Disabled';
-              dispAuthEl.style.color = dispAuth ? '#28a745' : '#dc3545';
+              dispAuthEl.style.color = '#667eea';
             }
             var dispAuthBtn = $('display-auth-btn');
             if (dispAuthBtn) dispAuthBtn.textContent = dispAuth ? 'Disable' : 'Enable';
@@ -1682,7 +1837,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
             var bleAuthEl = $('ble-auth-value');
             if (bleAuthEl) {
               bleAuthEl.textContent = bleAuth ? 'Required' : 'Disabled';
-              bleAuthEl.style.color = bleAuth ? '#28a745' : '#dc3545';
+              bleAuthEl.style.color = '#667eea';
             }
             var bleAuthBtn = $('ble-auth-btn');
             if (bleAuthBtn) bleAuthBtn.textContent = bleAuth ? 'Disable' : 'Enable';
@@ -1691,7 +1846,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
             var serialAuthEl = $('serial-auth-value');
             if (serialAuthEl) {
               serialAuthEl.textContent = serialAuth ? 'Required' : 'Disabled';
-              serialAuthEl.style.color = serialAuth ? '#28a745' : '#dc3545';
+              serialAuthEl.style.color = '#667eea';
             }
             var serialAuthBtn = $('serial-auth-btn');
             if (serialAuthBtn) serialAuthBtn.textContent = serialAuth ? 'Disable' : 'Enable';
@@ -1715,7 +1870,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
           if (!el) return;
           var on = (String(val) == '1' || val === 1 || val === true || String(val).toLowerCase() == 'true');
           el.textContent = on ? 'On' : 'Off';
-          el.style.color = on ? '#28a745' : '#dc3545';
+          el.style.color = '#667eea';
         };
         var setHidden = function(id, hide) {
           var el = $(id);
@@ -3079,7 +3234,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           var uid = 'u' + Math.random().toString(36).substr(2, 9);
           html += '<div style="margin-bottom:0.25rem">';
           html += '<div onclick="toggleUserDropdown(\'' + uid + '\')" style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;cursor:pointer">';
-          html += '<div><strong>' + username + '</strong> ' + (isAdmin ? '<span style="color:#007bff;font-size:0.85rem">(Admin)</span>' : '<span style="color:#28a745;font-size:0.85rem">(User)</span>') + ' <span style="color:var(--panel-fg);font-size:0.85rem">' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '') + '</span></div>';
+          html += '<div><strong>' + username + '</strong> ' + (isAdmin ? '<span style="color:#667eea;font-size:0.85rem">(Admin)</span>' : '<span style="color:#667eea;font-size:0.85rem">(User)</span>') + ' <span style="color:var(--panel-fg);font-size:0.85rem">' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '') + '</span></div>';
           html += '<div style="font-size:0.8rem;color:var(--panel-fg)">▼</div></div>';
           html += '<div id="dropdown-' + uid + '" style="display:none;margin-top:0.25rem;padding:0.5rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px">';
           if (sessionCount > 0) {
@@ -3349,7 +3504,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       }).then(function(r) { return r.text(); })
       .then(function() {
         var el = $('display-auth-value');
-        if (el) { el.textContent = val ? 'Required' : 'Disabled'; el.style.color = val ? '#28a745' : '#dc3545'; }
+        if (el) { el.textContent = val ? 'Required' : 'Disabled'; el.style.color = '#667eea'; }
         var btn = $('display-auth-btn');
         if (btn) btn.textContent = val ? 'Disable' : 'Enable';
       });
@@ -3367,7 +3522,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       .then(function() {
         var nowEnabled = !current;
         var el = $('usersync-enabled-value');
-        if (el) { el.textContent = nowEnabled ? 'Enabled' : 'Disabled'; el.style.color = nowEnabled ? '#28a745' : '#dc3545'; }
+        if (el) { el.textContent = nowEnabled ? 'Enabled' : 'Disabled'; el.style.color = '#667eea'; }
         var btn = $('usersync-enabled-btn');
         if (btn) btn.textContent = nowEnabled ? 'Disable' : 'Enable';
         var form = $('usersync-form');

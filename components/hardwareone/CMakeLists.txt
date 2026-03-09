@@ -4,6 +4,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${hw_cfg_file}")
 set(HW_CFG_NETWORK_FEATURE_LEVEL 0)
 set(HW_CFG_WEB_FEATURE_LEVEL 0)
 set(HW_CFG_ENABLE_MQTT 0)
+set(HW_CFG_ENABLE_HTTPS 0)
 
 if(EXISTS "${hw_cfg_file}")
     file(READ "${hw_cfg_file}" HW_CFG_CONTENT)
@@ -20,6 +21,11 @@ if(EXISTS "${hw_cfg_file}")
     string(REGEX MATCH "#define[ \t]+ENABLE_MQTT[ \t]+([0-9]+)" _mqtt_match "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_MQTT "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_HTTPS[ \t]+([0-9]+)" _https_match "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_HTTPS "${CMAKE_MATCH_1}")
     endif()
 endif()
 
@@ -149,6 +155,10 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
             WebServer_MigrationTool.cpp
     )
     list(APPEND hardwareone_requires esp_http_server)
+    if(HW_CFG_ENABLE_HTTPS GREATER 0)
+        list(APPEND hardwareone_requires esp_https_server)
+        message(STATUS "HTTPS support ENABLED")
+    endif()
 endif()
 
 idf_component_register(
