@@ -52,8 +52,10 @@ enum FilePermission {
   PERM_WRITE  = 0x02,
   PERM_DELETE = 0x04,
   PERM_RENAME = 0x08,
+  PERM_CREATE = 0x10,   // Create new files/folders (CLI mkdir/filecreate)
+  PERM_IMPORT = 0x20,   // Upload/import files via web
   PERM_EDIT   = (PERM_READ | PERM_WRITE),
-  PERM_ALL    = (PERM_READ | PERM_WRITE | PERM_DELETE | PERM_RENAME)
+  PERM_ALL    = (PERM_READ | PERM_WRITE | PERM_DELETE | PERM_RENAME | PERM_CREATE | PERM_IMPORT)
 };
 
 /**
@@ -85,11 +87,25 @@ bool canEdit(const String& path);
 bool canRename(const String& path);
 
 /**
- * Check if a file/folder can be created in the given path
+ * Check if a file/folder can be created in the given path (CLI mkdir/filecreate)
  * @param path Absolute path to check
  * @return true if creation is allowed
  */
 bool canCreate(const String& path);
+
+/**
+ * Check if a file can be imported/uploaded to the given path
+ * @param path Absolute path to check
+ * @return true if import is allowed
+ */
+bool canImport(const String& path);
+
+/**
+ * Get aggregate permissions for contents of a directory (for toolbar buttons)
+ * @param dirPath Absolute directory path
+ * @return Bitmask of FilePermission flags that apply to children
+ */
+uint8_t getDirPerms(const String& dirPath);
 
 /**
  * Get permission flags for a given path

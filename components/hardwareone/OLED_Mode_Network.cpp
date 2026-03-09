@@ -28,6 +28,9 @@
 extern bool oledConnected;
 extern OLEDMode currentOLEDMode;
 extern Settings gSettings;
+#if ENABLE_HTTP_SERVER
+extern bool gServerIsHttps;  // Defined in WebServer_Server.cpp
+#endif
 
 #if ENABLE_ESPNOW
 // gMeshPeers, gMeshPeerSlots declared in System_ESPNow.h (pointer, not array)
@@ -152,7 +155,11 @@ void displayNetworkInfo() {
   options[2] = "WiFi Management";
   options[3] = wifiConnected ? "Disconnect" : "---";     // Hide Disconnect when not connected
 #if ENABLE_HTTP_SERVER
-  options[4] = httpRunning ? "Close HTTP" : "Open HTTP";
+  if (httpRunning) {
+    options[4] = gServerIsHttps ? "Close HTTPS" : "Close HTTP";
+  } else {
+    options[4] = "Open HTTP";
+  }
 #else
   options[4] = "---";
 #endif
@@ -168,7 +175,9 @@ void displayNetworkInfo() {
       oledDisplay->print("  ");
     }
     oledDisplay->print(options[i]);
-    if (i == 4 && httpRunning) oledDisplay->print(" *");
+    if (i == 4 && httpRunning) {
+      oledDisplay->print(gServerIsHttps ? " [S]" : " *");
+    }
     oledDisplay->println();
   }
 #else
@@ -631,7 +640,11 @@ void displayNetworkInfoRendered() {
   options[2] = "WiFi Management";
   options[3] = networkRenderData.wifiConnected ? "Disconnect" : "---";
 #if ENABLE_HTTP_SERVER
-  options[4] = httpRunning ? "Close HTTP" : "Open HTTP";
+  if (httpRunning) {
+    options[4] = gServerIsHttps ? "Close HTTPS" : "Close HTTP";
+  } else {
+    options[4] = "Open HTTP";
+  }
 #else
   options[4] = "---";
 #endif
@@ -646,7 +659,9 @@ void displayNetworkInfoRendered() {
       oledDisplay->print("  ");
     }
     oledDisplay->print(options[i]);
-    if (i == 4 && httpRunning) oledDisplay->print(" *");
+    if (i == 4 && httpRunning) {
+      oledDisplay->print(gServerIsHttps ? " [S]" : " *");
+    }
     oledDisplay->println();
   }
 #else
@@ -735,7 +750,7 @@ void displayWebStatsRendered() {
   // Server status
   oledDisplay->print("Status: ");
   if (webStatsRenderData.httpServerRunning) {
-    oledDisplay->println("Running");
+    oledDisplay->println(gServerIsHttps ? "HTTPS" : "HTTP");
   } else {
     oledDisplay->println("Stopped");
   }

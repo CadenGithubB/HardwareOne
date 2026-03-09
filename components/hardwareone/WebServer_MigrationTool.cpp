@@ -21,6 +21,9 @@
 
 #include "System_Debug.h"
 #include "System_FirstTimeSetup.h"
+#if ENABLE_HTTPS
+#include "esp_https_server.h"
+#endif
 #include "System_Filesystem.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
@@ -108,8 +111,9 @@ static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, const c
     if (entry.isDirectory()) {
       addDirectoryToBackup(files, warnings, path.c_str(), depth + 1);
     } else {
-      // Include .hwmap and .json files
-      if (path.endsWith(".hwmap") || path.endsWith(".json")) {
+      // Include .hwmap, .json, and certificate files
+      if (path.endsWith(".hwmap") || path.endsWith(".json") ||
+          path.endsWith(".pem") || path.endsWith(".crt") || path.endsWith(".key")) {
         String content = entry.readString();
         if (content.length() > 0) {
           // Try to parse JSON files as objects
@@ -182,7 +186,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
 
   // Parse categories from body: { "categories": ["settings", "users", ...] }
   bool wantSettings = false, wantUsers = false, wantAutomations = false;
-  bool wantEspnow = false, wantMaps = false;
+  bool wantEspnow = false, wantMaps = false, wantCerts = false;
 
   if (received > 0) {
     JsonDocument reqDoc;
@@ -196,13 +200,14 @@ static esp_err_t handleBackup(httpd_req_t* req) {
         else if (strcmp(c, "automations") == 0) wantAutomations = true;
         else if (strcmp(c, "espnow") == 0) wantEspnow = true;
         else if (strcmp(c, "maps") == 0) wantMaps = true;
+        else if (strcmp(c, "certs") == 0) wantCerts = true;
       }
     }
   }
 
   // If no categories specified, include all
-  if (!wantSettings && !wantUsers && !wantAutomations && !wantEspnow && !wantMaps) {
-    wantSettings = wantUsers = wantAutomations = wantEspnow = wantMaps = true;
+  if (!wantSettings && !wantUsers && !wantAutomations && !wantEspnow && !wantMaps && !wantCerts) {
+    wantSettings = wantUsers = wantAutomations = wantEspnow = wantMaps = wantCerts = true;
   }
 
   // Build backup JSON document
@@ -245,6 +250,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
     addFileToBackup(files, warnings, ESPNOW_MESH_PEERS);
   }
   if (wantMaps) addDirectoryToBackup(files, warnings, MAPS_DIR);
+  if (wantCerts) addDirectoryToBackup(files, warnings, "/system/certs");
 
   // Serialize and send
   httpd_resp_set_type(req, "application/json");
@@ -548,18 +554,74 @@ static esp_err_t handlePingRestore(httpd_req_t* req) {
   return ESP_OK;
 }
 
-void startRestoreOnlyHttpServer() {
-  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 8;
-  config.lru_purge_enable  = false;
-  config.stack_size        = 8192;
-  config.recv_wait_timeout = 60;
-  config.send_wait_timeout = 60;
+#if ENABLE_HTTPS
+static String sRestoreCertData;
+static String sRestoreKeyData;
+static bool sRestoreUsedHttps = false;
+#endif
 
-  if (httpd_start(&server, &config) != ESP_OK) {
-    broadcastOutput("ERROR: Failed to start restore HTTP server");
-    return;
+void startRestoreOnlyHttpServer() {
+#if ENABLE_HTTPS
+  // Try HTTPS if enabled and certs are present
+  if (gSettings.httpsEnabled && filesystemReady) {
+    static const char* CERT_PATH = "/system/certs/https_server.crt";
+    static const char* KEY_PATH  = "/system/certs/https_server.key";
+    bool certsOk = false;
+    if (LittleFS.exists(CERT_PATH) && LittleFS.exists(KEY_PATH)) {
+      File cf = LittleFS.open(CERT_PATH, "r");
+      File kf = LittleFS.open(KEY_PATH, "r");
+      if (cf && kf) {
+        sRestoreCertData = cf.readString();
+        sRestoreKeyData  = kf.readString();
+        cf.close(); kf.close();
+        if (sRestoreCertData.length() > 0 && sRestoreKeyData.length() > 0) certsOk = true;
+      }
+      if (cf) cf.close();
+      if (kf) kf.close();
+    }
+    if (certsOk) {
+      httpd_ssl_config_t ssl = HTTPD_SSL_CONFIG_DEFAULT();
+      ssl.httpd.max_uri_handlers = 8;
+      ssl.httpd.lru_purge_enable = false;
+      ssl.httpd.stack_size = 8192;
+      ssl.httpd.recv_wait_timeout = 60;
+      ssl.httpd.send_wait_timeout = 60;
+      ssl.httpd.max_open_sockets = 2;
+      ssl.servercert = (const uint8_t*)sRestoreCertData.c_str();
+      ssl.servercert_len = sRestoreCertData.length() + 1;
+      ssl.prvtkey_pem = (const uint8_t*)sRestoreKeyData.c_str();
+      ssl.prvtkey_len = sRestoreKeyData.length() + 1;
+      ssl.port_secure = 443;
+      if (httpd_ssl_start(&server, &ssl) == ESP_OK) {
+        sRestoreUsedHttps = true;
+        broadcastOutput("HTTPS server started (restore-only mode)");
+        goto restore_register;
+      }
+      broadcastOutput("WARNING: HTTPS failed, falling back to HTTP");
+      sRestoreCertData = ""; sRestoreKeyData = "";
+    }
   }
+#endif
+
+  // Plain HTTP fallback
+  {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.max_uri_handlers = 8;
+    config.lru_purge_enable  = false;
+    config.stack_size        = 8192;
+    config.recv_wait_timeout = 60;
+    config.send_wait_timeout = 60;
+
+    if (httpd_start(&server, &config) != ESP_OK) {
+      broadcastOutput("ERROR: Failed to start restore HTTP server");
+      return;
+    }
+    broadcastOutput("HTTP server started (restore-only mode)");
+  }
+
+#if ENABLE_HTTPS
+restore_register:
+#endif
 
   static httpd_uri_t splashGet = {
     .uri = "/",
@@ -597,13 +659,20 @@ void startRestoreOnlyHttpServer() {
   httpd_register_uri_handler(server, &pingOptions);
   httpd_register_uri_handler(server, &restorePost);
   httpd_register_uri_handler(server, &restoreOptions);
-
-  broadcastOutput("HTTP server started (restore-only mode)");
 }
 
 void stopRestoreOnlyHttpServer() {
   if (server) {
-    httpd_stop(server);
+#if ENABLE_HTTPS
+    if (sRestoreUsedHttps) {
+      httpd_ssl_stop(server);
+      sRestoreUsedHttps = false;
+      sRestoreCertData = ""; sRestoreKeyData = "";
+    } else
+#endif
+    {
+      httpd_stop(server);
+    }
     server = NULL;
   }
 }

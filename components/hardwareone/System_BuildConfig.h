@@ -98,6 +98,12 @@
 //   0 = Disabled, 1 = Enabled (requires ENABLE_WIFI=1)
 #define ENABLE_MQTT             1
 
+// HTTPS: TLS-encrypted HTTP server using self-signed or uploaded certificates
+//   0 = Disabled, 1 = Enabled (requires ENABLE_HTTP_SERVER)
+//   When enabled, the device can serve over HTTPS if certs are present in /system/certs/
+//   Runtime toggle: gSettings.httpsEnabled (admin can enable/disable via web UI)
+#define ENABLE_HTTPS            1
+
 // Edge Impulse: ML inference
 //   0 = Disabled, 1 = Enabled
 #define ENABLE_EDGE_IMPULSE     0
@@ -359,6 +365,11 @@
   #define ENABLE_WEB_MQTT       0
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
+#endif
+
+#if !ENABLE_HTTP_SERVER && ENABLE_HTTPS
+  #undef ENABLE_HTTPS
+  #define ENABLE_HTTPS 0
 #endif
 
 #if !ENABLE_BLUETOOTH

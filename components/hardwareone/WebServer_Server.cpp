@@ -16,6 +16,7 @@
 #include <memory>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <time.h>
 
 #include "System_Debug.h"
 #include "System_I2C.h"
@@ -55,6 +56,12 @@
 #include "Optional_Bluetooth.h"
 #endif
 
+#if ENABLE_HTTPS
+#include "esp_https_server.h"
+#include "mbedtls/x509_crt.h"
+#include <time.h>
+#endif
+
 #if ENABLE_WEB_BLUETOOTH
 #include "WebPage_Bluetooth.h"
 #endif
@@ -88,6 +95,9 @@ extern httpd_handle_t server;
 extern void streamCommonCSS(httpd_req_t* req);
 extern void streamDebugRecord(size_t bytes, size_t chunkSize);
 extern void streamDebugFlush();
+
+// Track whether the running server is HTTPS (true) or HTTP (false)
+bool gServerIsHttps = false;
 
 // Navigation generators moved to WebServer_Utils.cpp
 #include "WebServer_Utils.h"
@@ -1064,6 +1074,19 @@ String getLogoutReasonForAuthPage(httpd_req_t* req) {
 
 // Helper: Build system info JSON using ArduinoJson (eliminates String concatenation)
 void buildSystemInfoJson(JsonDocument& doc) {
+  // System time
+  {
+    time_t now = time(nullptr);
+    struct tm tminfo;
+    if (now > 0 && localtime_r(&now, &tminfo) && tminfo.tm_year >= 120) {
+      char timeBuf[32];
+      strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tminfo);
+      doc["system_time"] = timeBuf;
+    } else {
+      doc["system_time"] = "";
+    }
+  }
+
   // Uptime
   unsigned long uptimeMs = millis();
   unsigned long seconds = uptimeMs / 1000UL;
@@ -1152,6 +1175,22 @@ void buildSystemInfoJson(JsonDocument& doc) {
     JsonObject bt = conn["bluetooth"].to<JsonObject>();
     bt["running"] = isBLERunning();
     bt["state"] = getBLEStateString();
+  }
+#endif
+
+#if ENABLE_HTTP_SERVER
+  {
+    JsonObject ws = conn["webserver"].to<JsonObject>();
+    bool running = (server != nullptr);
+    ws["running"] = running;
+    ws["https"] = (running && gServerIsHttps);
+    ws["port"] = (running && gServerIsHttps) ? 443 : 80;
+    int active = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+      if (gSessions[i].sid.length() > 0) active++;
+    }
+    ws["sessions"] = active;
+    ws["maxSessions"] = MAX_SESSIONS;
   }
 #endif
 }
@@ -1692,9 +1731,9 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       WARN_SYSTEMF("[handleFileUpload] BLOCKED: Path traversal not allowed: %s", path.c_str());
       return false;
     }
-    // Use centralized permission check
-    if (!canCreate(path)) {
-      WARN_SYSTEMF("[handleFileUpload] BLOCKED: Protected path: %s", path.c_str());
+    // Use centralized permission check (import = upload via web)
+    if (!canImport(path)) {
+      WARN_SYSTEMF("[handleFileUpload] BLOCKED: Import not allowed: %s", path.c_str());
       return false;
     }
     if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
@@ -2879,12 +2918,21 @@ esp_err_t handlePing(httpd_req_t* req) {
 
   httpd_resp_set_type(req, "application/json");
 
-  char json[256];
+  char json[320];
+#if ENABLE_HTTPS
+  snprintf(json, sizeof(json),
+    "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"acceptingRestore\":%s,\"https\":%s}",
+    WiFi.getHostname(),
+    WiFi.macAddress().c_str(),
+    gAcceptingRestore ? "true" : "false",
+    gSettings.httpsEnabled ? "true" : "false");
+#else
   snprintf(json, sizeof(json),
     "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"acceptingRestore\":%s}",
     WiFi.getHostname(),
     WiFi.macAddress().c_str(),
     gAcceptingRestore ? "true" : "false");
+#endif
   httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
@@ -3343,7 +3391,8 @@ esp_err_t handleFilesList(httpd_req_t* req) {
   bool ok = buildFilesListing(dirPath, body, /*asJson=*/true, /*hideAdminPaths=*/!userIsAdmin);
   String json;
   if (ok) {
-    json = String("{\"success\":true,\"files\":[") + body + "]}";
+    uint8_t dp = getDirPerms(dirPath);
+    json = String("{\"success\":true,\"dirPerms\":") + String((int)dp) + ",\"files\":[" + body + "]}";
   } else {
     json = "{\"success\":false,\"error\":\"Directory not found or not accessible\"}";
   }
@@ -4568,18 +4617,116 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   return ESP_OK;
 }
 
+// Cert data must persist for lifetime of HTTPS server
+#if ENABLE_HTTPS
+static String sHttpsCertData;
+static String sHttpsKeyData;
+#endif
+
 void startHttpServer() {
-  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 100;
-  config.lru_purge_enable = true;
-  config.stack_size = 11059;  // ~11KB – reduced 10% from 12KB for memory optimization
-  config.recv_wait_timeout = 30;  // 30 second timeout for large uploads
-  config.send_wait_timeout = 30;  // 30 second timeout for large responses
-  // Note: max header length is set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig
-  if (httpd_start(&server, &config) != ESP_OK) {
-    broadcastOutput("ERROR: Failed to start HTTP server");
-    return;
+#if ENABLE_HTTPS
+  // Try HTTPS if enabled at runtime and certs are present
+  if (gSettings.httpsEnabled && filesystemReady) {
+    static const char* CERT_PATH = "/system/certs/https_server.crt";
+    static const char* KEY_PATH  = "/system/certs/https_server.key";
+
+    bool certsOk = false;
+    if (LittleFS.exists(CERT_PATH) && LittleFS.exists(KEY_PATH)) {
+      File certFile = LittleFS.open(CERT_PATH, "r");
+      File keyFile  = LittleFS.open(KEY_PATH, "r");
+      if (certFile && keyFile) {
+        sHttpsCertData = certFile.readString();
+        sHttpsKeyData  = keyFile.readString();
+        certFile.close();
+        keyFile.close();
+        if (sHttpsCertData.length() > 0 && sHttpsKeyData.length() > 0) {
+          certsOk = true;
+        }
+      }
+      if (certFile) certFile.close();
+      if (keyFile) keyFile.close();
+    }
+
+    if (certsOk) {
+      httpd_ssl_config_t sslConfig = HTTPD_SSL_CONFIG_DEFAULT();
+      sslConfig.httpd.max_uri_handlers = 100;
+      sslConfig.httpd.lru_purge_enable = true;
+      sslConfig.httpd.stack_size = 11059;
+      sslConfig.httpd.recv_wait_timeout = 10;
+      sslConfig.httpd.send_wait_timeout = 10;
+      sslConfig.httpd.max_open_sockets = 3;  // Conservative: DRAM still limited despite PSRAM TLS buffers
+      sslConfig.servercert = (const uint8_t*)sHttpsCertData.c_str();
+      sslConfig.servercert_len = sHttpsCertData.length() + 1;  // Include null terminator (PEM)
+      sslConfig.prvtkey_pem = (const uint8_t*)sHttpsKeyData.c_str();
+      sslConfig.prvtkey_len = sHttpsKeyData.length() + 1;
+      sslConfig.port_secure = 443;
+
+      if (httpd_ssl_start(&server, &sslConfig) == ESP_OK) {
+        gServerIsHttps = true;
+        broadcastOutput("HTTPS server started on port 443");
+
+        // Check certificate expiry on boot
+        {
+          mbedtls_x509_crt crt;
+          mbedtls_x509_crt_init(&crt);
+          if (mbedtls_x509_crt_parse(&crt, (const unsigned char*)sHttpsCertData.c_str(), sHttpsCertData.length() + 1) == 0) {
+            time_t now = time(NULL);
+            if (now > 100000) {  // Only check if time is set (post-NTP)
+              struct tm expTm = {};
+              expTm.tm_year = crt.valid_to.year - 1900;
+              expTm.tm_mon = crt.valid_to.mon - 1;
+              expTm.tm_mday = crt.valid_to.day;
+              expTm.tm_hour = crt.valid_to.hour;
+              expTm.tm_min = crt.valid_to.min;
+              expTm.tm_sec = crt.valid_to.sec;
+              time_t expTime = mktime(&expTm);
+              if (expTime <= now) {
+                broadcastOutput("WARNING: HTTPS certificate has EXPIRED!");
+              } else {
+                int daysLeft = (int)((expTime - now) / 86400);
+                if (daysLeft <= 30) {
+                  char warnBuf[80];
+                  snprintf(warnBuf, sizeof(warnBuf), "WARNING: HTTPS certificate expires in %d days!", daysLeft);
+                  broadcastOutput(warnBuf);
+                }
+              }
+            }
+          }
+          mbedtls_x509_crt_free(&crt);
+        }
+
+        goto register_handlers;
+      } else {
+        broadcastOutput("WARNING: HTTPS failed to start, falling back to HTTP");
+        sHttpsCertData = "";
+        sHttpsKeyData = "";
+      }
+    } else {
+      broadcastOutput("WARNING: HTTPS enabled but certs not found, falling back to HTTP");
+    }
   }
+#endif
+
+  // Plain HTTP fallback (or HTTPS not enabled)
+  {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.max_uri_handlers = 100;
+    config.lru_purge_enable = true;
+    config.stack_size = 11059;  // ~11KB – reduced 10% from 12KB for memory optimization
+    config.recv_wait_timeout = 30;  // 30 second timeout for large uploads
+    config.send_wait_timeout = 30;  // 30 second timeout for large responses
+    // Note: max header length is set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig
+    if (httpd_start(&server, &config) != ESP_OK) {
+      broadcastOutput("ERROR: Failed to start HTTP server");
+      return;
+    }
+    gServerIsHttps = false;
+    broadcastOutput("HTTP server started on port 80");
+  }
+
+#if ENABLE_HTTPS
+register_handlers:
+#endif
 
   // Define URIs
   static httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = handleRoot, .user_ctx = NULL };
@@ -4732,7 +4879,7 @@ void startHttpServer() {
   // Enable web output when server starts
   gOutputFlags |= OUTPUT_WEB;
   
-  broadcastOutput("HTTP server started");
+  broadcastOutput(gServerIsHttps ? "HTTPS server started" : "HTTP server started");
 }
 
 // Web Mirror Buffer moved to WebCore_Utils.cpp

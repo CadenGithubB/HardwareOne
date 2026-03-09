@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <stdarg.h>
+#include <esp_log.h>
 
 #include "System_BuildConfig.h"
 #include "OLED_ConsoleBuffer.h"
@@ -284,6 +285,22 @@ const char* cmd_loglevel(const String& argsInput) {
 
   setSetting(gSettings.logLevel, newLevel);
   DEBUG_MANAGER.setLogLevel((uint8_t)newLevel);
+
+  // Also update ESP-IDF framework component log levels
+  {
+    esp_log_level_t espLevel;
+    switch (newLevel) {
+      case LOG_LEVEL_ERROR: espLevel = ESP_LOG_ERROR; break;
+      case LOG_LEVEL_WARN:  espLevel = ESP_LOG_WARN;  break;
+      case LOG_LEVEL_INFO:  espLevel = ESP_LOG_INFO;  break;
+      default:              espLevel = ESP_LOG_DEBUG; break;
+    }
+    esp_log_level_set("esp-tls-mbedtls", espLevel);
+    esp_log_level_set("esp_https_server", espLevel);
+    esp_log_level_set("wifi", espLevel);
+    esp_log_level_set("wifi_init", espLevel);
+    esp_log_level_set("phy_init", espLevel);
+  }
 
   const char* levelName = "unknown";
   switch (gSettings.logLevel) {

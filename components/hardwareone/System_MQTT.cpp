@@ -198,16 +198,16 @@ static const SettingEntry mqttSettingEntries[] = {
   { "mqttBaseTopic",          SETTING_STRING, &gSettings.mqttBaseTopic,          0, 0, "", 0, 0, "Base Topic", nullptr, false },
   { "mqttDiscoveryPrefix",    SETTING_STRING, &gSettings.mqttDiscoveryPrefix,    0, 0, "homeassistant", 0, 0, "Discovery Prefix", nullptr, false },
   { "mqttPublishIntervalMs",  SETTING_INT,    &gSettings.mqttPublishIntervalMs,  10000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false },
-  { "mqttPublishWiFi",        SETTING_BOOL,   &gSettings.mqttPublishWiFi,        true, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false },
-  { "mqttPublishSystem",      SETTING_BOOL,   &gSettings.mqttPublishSystem,      true, 0, nullptr, 0, 1, "Publish system info", nullptr, false },
-  { "mqttPublishThermal",     SETTING_BOOL,   &gSettings.mqttPublishThermal,     true, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false },
-  { "mqttPublishToF",         SETTING_BOOL,   &gSettings.mqttPublishToF,         true, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false },
-  { "mqttPublishIMU",         SETTING_BOOL,   &gSettings.mqttPublishIMU,         true, 0, nullptr, 0, 1, "Publish IMU data", nullptr, false },
-  { "mqttPublishPresence",    SETTING_BOOL,   &gSettings.mqttPublishPresence,    true, 0, nullptr, 0, 1, "Publish presence data", nullptr, false },
-  { "mqttPublishGPS",         SETTING_BOOL,   &gSettings.mqttPublishGPS,         true, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false },
-  { "mqttPublishAPDS",        SETTING_BOOL,   &gSettings.mqttPublishAPDS,        true, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false },
-  { "mqttPublishRTC",         SETTING_BOOL,   &gSettings.mqttPublishRTC,         true, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false },
-  { "mqttPublishGamepad",     SETTING_BOOL,   &gSettings.mqttPublishGamepad,     true, 0, nullptr, 0, 1, "Publish gamepad data", nullptr, false }
+  { "mqttPublishWiFi",        SETTING_BOOL,   &gSettings.mqttPublishWiFi,        false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false },
+  { "mqttPublishSystem",      SETTING_BOOL,   &gSettings.mqttPublishSystem,      false, 0, nullptr, 0, 1, "Publish system info", nullptr, false },
+  { "mqttPublishThermal",     SETTING_BOOL,   &gSettings.mqttPublishThermal,     false, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false },
+  { "mqttPublishToF",         SETTING_BOOL,   &gSettings.mqttPublishToF,         false, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false },
+  { "mqttPublishIMU",         SETTING_BOOL,   &gSettings.mqttPublishIMU,         false, 0, nullptr, 0, 1, "Publish IMU data", nullptr, false },
+  { "mqttPublishPresence",    SETTING_BOOL,   &gSettings.mqttPublishPresence,    false, 0, nullptr, 0, 1, "Publish presence data", nullptr, false },
+  { "mqttPublishGPS",         SETTING_BOOL,   &gSettings.mqttPublishGPS,         false, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false },
+  { "mqttPublishAPDS",        SETTING_BOOL,   &gSettings.mqttPublishAPDS,        false, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false },
+  { "mqttPublishRTC",         SETTING_BOOL,   &gSettings.mqttPublishRTC,         false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false },
+  { "mqttPublishGamepad",     SETTING_BOOL,   &gSettings.mqttPublishGamepad,     false, 0, nullptr, 0, 1, "Publish gamepad data", nullptr, false }
 };
 
 static bool isMqttAvailable() {

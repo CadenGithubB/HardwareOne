@@ -331,6 +331,7 @@ inline String getFileBrowserScript() {
               msg = '' + data.error;
             }
             listDiv.innerHTML = '<div style="padding:20px;text-align:center;color:' + color + ';">' + msg + '</div>';
+            if (config.onNavigate) config.onNavigate(currentPath, 0);
             return;
           }
           
@@ -350,6 +351,7 @@ inline String getFileBrowserScript() {
           
           if (files.length === 0) {
             listDiv.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);">No files found</div>';
+            if (config.onNavigate) config.onNavigate(currentPath, data.dirPerms || 0);
             return;
           }
           
@@ -419,14 +421,13 @@ inline String getFileBrowserScript() {
             // Size info
             html += '<span style="color:var(--muted);font-size:0.85em;margin-left:12px;min-width:80px;text-align:right;">' + sizeInfo + '</span>';
             
-            // Action buttons (only in full mode, respecting per-file permissions)
-            // Permission flags: PERM_READ=1, PERM_WRITE=2, PERM_DELETE=4, PERM_RENAME=8
+            // Action buttons (only in full mode, respecting per-file permissions from API)
             if (mode === 'full') {
               var perms = file.perms || 0;
-              var hasRead = (perms & 1) !== 0;
-              var hasWrite = (perms & 2) !== 0;
-              var hasDelete = (perms & 4) !== 0;
-              var hasRename = (perms & 8) !== 0;
+              var hasRead   = (perms & 0x01) !== 0;
+              var hasWrite  = (perms & 0x02) !== 0;
+              var hasDelete = (perms & 0x04) !== 0;
+              var hasRename = (perms & 0x08) !== 0;
               html += '<span style="display:inline-flex;gap:2px;margin-left:8px;align-items:center;">';
               // Download button (files only, when read permission)
               if (!isFolder && hasRead) {
@@ -464,6 +465,11 @@ inline String getFileBrowserScript() {
           html += '</div>';
           
           listDiv.innerHTML = html;
+          
+          // Notify parent with directory permissions from API
+          if (config.onNavigate && typeof config.onNavigate === 'function') {
+            config.onNavigate(currentPath, data.dirPerms || 0);
+          }
         })
         .catch(function(e) {
           console.error('[FileExplorer] Failed to load directory:', e);
@@ -481,11 +487,7 @@ inline String getFileBrowserScript() {
       currentPath = path;
       renderBreadcrumb();
       loadDirectory(path);
-      
-      // Notify parent if onNavigate callback provided
-      if (config.onNavigate && typeof config.onNavigate === 'function') {
-        config.onNavigate(path);
-      }
+      // onNavigate is called from within loadDirectory after dirPerms are available
     };
     
     // Global select function
@@ -668,18 +670,17 @@ inline String getFileBrowserScript() {
     var explorerDiv = document.getElementById(explorerId);
     var statusDiv = document.getElementById(statusId);
     
-    function setWriteButtonsVisible(visible) {
-      var d = visible ? '' : 'none';
+    // Permission flags (must match FilePermission enum in System_Filesystem.h)
+    var PERM_CREATE = 0x10;
+    var PERM_IMPORT = 0x20;
+    
+    function updateToolbar(dirPerms) {
       var fb = document.getElementById(managerId + '_folder_btn');
       var fi = document.getElementById(managerId + '_file_btn');
       var ub = document.getElementById(managerId + '_upload_btn');
-      if (fb) fb.style.display = d;
-      if (fi) fi.style.display = d;
-      if (ub) ub.style.display = d;
-    }
-    
-    function isProtectedPath(path) {
-      return path === '/system' || path.indexOf('/system/') === 0;
+      if (fb) fb.style.display = (dirPerms & PERM_CREATE) ? '' : 'none';
+      if (fi) fi.style.display = (dirPerms & PERM_CREATE) ? '' : 'none';
+      if (ub) ub.style.display = (dirPerms & PERM_IMPORT) ? '' : 'none';
     }
     
     function setStatus(msg, isError) {
@@ -698,14 +699,14 @@ inline String getFileBrowserScript() {
           window[managerId + 'ViewFile'](filePath);
         },
         onEdit: config.onEdit || null,
-        onNavigate: function(path) {
+        onNavigate: function(path, dirPerms) {
           currentPath = path;
           setStatus('Path: ' + currentPath);
-          setWriteButtonsVisible(!isProtectedPath(path));
+          updateToolbar(dirPerms);
         }
       });
       setStatus('Path: ' + currentPath);
-      setWriteButtonsVisible(!isProtectedPath(currentPath));
+      // Toolbar buttons will be updated by onNavigate callback after directory loads
     }
     
     // Action: Create folder

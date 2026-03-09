@@ -220,6 +220,7 @@ struct Settings {
       edgeImpulseContinuous(false),
       edgeImpulseIntervalMs(1000),
       httpAutoStart(true),
+      httpsEnabled(false),
       serialRequireAuth(true),
       bluetoothAutoStart(true),
       bluetoothRequireAuth(true),
@@ -559,6 +560,7 @@ struct Settings {
   int edgeImpulseIntervalMs;    // Interval between inferences in continuous mode
   // HTTP server settings
   bool httpAutoStart;           // Auto-start HTTP server at boot if WiFi connected
+  bool httpsEnabled;            // Use HTTPS instead of HTTP when certs are present (requires reboot)
   bool serialRequireAuth;       // Require login before accepting serial CLI commands (default: true)
   // Bluetooth settings
   bool bluetoothAutoStart;      // Auto-start Bluetooth at boot (enables BLE server)

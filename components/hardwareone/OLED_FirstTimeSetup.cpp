@@ -397,20 +397,38 @@ bool getOLEDWiFiSelection(String& outSSID) {
     return false;  // Skip
   }
   
-  // Build network list (limit to 20 networks)
+  // Build network list (limit to 20 networks), skip hidden (empty SSID)
   const int maxNetworks = 20;
   String networks[maxNetworks];
-  int displayCount = min(networkCount, maxNetworks);
-  
-  for (int i = 0; i < displayCount; i++) {
-    networks[i] = WiFi.SSID(i);
+  int displayCount = 0;
+  int hiddenCount = 0;
+
+  for (int i = 0; i < networkCount && displayCount < maxNetworks - 3; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid.length() == 0) {
+      hiddenCount++;
+      continue;
+    }
+    networks[displayCount] = ssid;
     // Add signal strength indicator
     int rssi = WiFi.RSSI(i);
-    if (rssi > -50) networks[i] += " +++";
-    else if (rssi > -70) networks[i] += " ++";
-    else networks[i] += " +";
+    if (rssi > -50) networks[displayCount] += " +++";
+    else if (rssi > -70) networks[displayCount] += " ++";
+    else networks[displayCount] += " +";
+    displayCount++;
   }
-  
+
+  // Insert hidden network count label (non-actionable info row)
+  int hiddenLabelIdx = -1;
+  if (hiddenCount > 0 && displayCount < maxNetworks) {
+    char hiddenLabel[32];
+    snprintf(hiddenLabel, sizeof(hiddenLabel), "  %d Hidden Network%s",
+             hiddenCount, hiddenCount == 1 ? "" : "s");
+    networks[displayCount] = String(hiddenLabel);
+    hiddenLabelIdx = displayCount;
+    displayCount++;
+  }
+
   // Add special options at the end (skip is always available via B)
   if (displayCount < maxNetworks) {
     networks[displayCount] = "< Rescan WiFi >";
@@ -529,9 +547,13 @@ bool getOLEDWiFiSelection(String& outSSID) {
       delay(150);
     }
     
-    // A button to confirm
+    // A button to confirm (skip hidden label row - it is non-selectable)
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-      confirmed = true;
+      if (selection == hiddenLabelIdx) {
+        if (selection < displayCount - 1) selection++;
+      } else {
+        confirmed = true;
+      }
     }
     
     // B button to cancel/skip
