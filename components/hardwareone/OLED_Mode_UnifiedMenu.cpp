@@ -175,7 +175,9 @@ static int buildRemoteMenuItems(UnifiedMenuItem* items, int maxItems, const uint
     snprintf(fwHashHex + (i * 2), 3, "%02x", gEspNow->lastRemoteCap.fwHash[i]);
   }
   
-  String manifestPath = String("/system/manifests/") + fwHashHex + ".json";
+  char manifestPathBuf[64];
+  snprintf(manifestPathBuf, sizeof(manifestPathBuf), "/system/manifests/%s.json", fwHashHex);
+  String manifestPath = manifestPathBuf;
   if (!LittleFS.exists(manifestPath.c_str())) {
     // No cached manifest - add placeholder items based on capability summary
     CapabilitySummary& cap = gEspNow->lastRemoteCap;
@@ -285,7 +287,9 @@ static void buildSubmenuForModule(const char* moduleName, bool isRemote) {
       snprintf(fwHashHex + (i * 2), 3, "%02x", gEspNow->lastRemoteCap.fwHash[i]);
     }
     
-    String manifestPath = String("/system/manifests/") + fwHashHex + ".json";
+    char manifestPathBuf[64];
+  snprintf(manifestPathBuf, sizeof(manifestPathBuf), "/system/manifests/%s.json", fwHashHex);
+  String manifestPath = manifestPathBuf;
     File f = LittleFS.open(manifestPath.c_str(), "r");
     if (f) {
       DynamicJsonDocument doc(4096);
@@ -362,7 +366,9 @@ static void executeMenuItem(UnifiedMenuItem& item) {
   
   String cmdToExecute = item.command;
   if (item.isRemote) {
-    cmdToExecute = "remote:" + String(item.command);
+    char cmdBuf[128];
+    snprintf(cmdBuf, sizeof(cmdBuf), "remote:%s", item.command);
+    cmdToExecute = cmdBuf;
   }
   
   strncpy(gPendingCommandStatus, "Running...", sizeof(gPendingCommandStatus));
@@ -610,7 +616,9 @@ static const OLEDModeEntry unifiedMenuModeEntry = {
   "notify_espnow",
   displayUnifiedMenu,
   unifiedMenuAvailable,
-  handleUnifiedMenuInput
+  handleUnifiedMenuInput,
+  false, -1,
+  "A:Run X:Refresh B:Back"
 };
 
 static const OLEDModeEntry unifiedMenuModes[] = { unifiedMenuModeEntry };

@@ -42,13 +42,6 @@ const char* cmd_apdsstart(const String& argsInput);
 const char* cmd_apdsstop(const String& argsInput);
 const char* cmd_apdsmode(const String& argsInput);
 
-// Deprecated command handlers (backward compatibility)
-const char* cmd_apdscolorstart(const String& argsInput);
-const char* cmd_apdscolorstop(const String& argsInput);
-const char* cmd_apdsproximitystart(const String& argsInput);
-const char* cmd_apdsproximitystop(const String& argsInput);
-const char* cmd_apdsgesturestart(const String& argsInput);
-const char* cmd_apdsgesturestop(const String& argsInput);
 
 // APDS sensor functions
 bool startAPDSSensorInternal();  // Called by queue processor

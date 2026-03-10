@@ -93,7 +93,8 @@ static const OLEDModeEntry tofOLEDModes[] = {
     tofOLEDModeAvailable,    // availFunc
     tofInputHandler,         // inputFunc - X toggles sensor
     true,                    // showInMenu
-    30                       // menuOrder
+    30,                      // menuOrder
+    nullptr                  // hints
   }
 };
 

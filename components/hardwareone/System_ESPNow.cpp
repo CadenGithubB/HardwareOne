@@ -507,30 +507,6 @@ static MeshRetryEntry gMeshRetryQueue[MESH_RETRY_QUEUE_SIZE];
 [[maybe_unused]] static bool isEspNowInitializedFlag() {
   return gEspNow && gEspNow->initialized;
 }
-// NOTE: FILE_ACK_INTERVAL removed - v3 protocol doesn't use v2 ACK mechanism
-
-// ESP-NOW chunked message support (for command responses only - file transfers use v3 binary protocol)
-#define MAX_CHUNKS 20              // For remote command responses (buffered in RAM)
-#define CHUNK_SIZE 200             // Generic message chunk size (fits ESP-NOW payload)
-// NOTE: MAX_FILE_CHUNKS and FILE_CHUNK_DATA_BYTES removed - v3 uses binary frames
-// Fixed-size receive buffer sized for MAX_CHUNKS * CHUNK_SIZE (only for RESULT messages)
-#define MAX_RESULT_BYTES (MAX_CHUNKS * CHUNK_SIZE)  // 4000 bytes for command responses
-
-struct ChunkedMessage {
-  char hash[16];        // Fixed size (was String)
-  char status[16];      // Fixed size (was String)
-  char deviceName[32];  // Fixed size (was String)
-  int totalChunks;
-  int totalLength;  // expected total bytes for the result
-  int receivedChunks;
-  char buffer[MAX_RESULT_BYTES];  // static buffer for reassembly
-  unsigned long startTime;
-  bool active;
-};
-
-// Allocated only when ESP-NOW is initialized (saves ~2KB when not in use)
-static ChunkedMessage* gActiveMessage = nullptr;
-
 // ESP-NOW file transfer support
 struct FileTransfer {
   char filename[64];        // Destination filename
@@ -1050,43 +1026,7 @@ void sendTextMessage(const uint8_t* targetMac, const String& text) {
   v3_send_text(targetMac, text.c_str(), text.length());
 }
 
-// Cleanup expired chunked messages (5 second timeout)
-void cleanupExpiredChunkedMessage() {
-  if (!gActiveMessage) return;  // Not allocated
-  
-  ChunkedMsgGuard guard("cleanupExpiredChunkedMessage");
-
-  if (gActiveMessage->active && (millis() - gActiveMessage->startTime > 5000)) {
-    // Only show timeout if we actually started receiving a real message (totalChunks > 0)
-    if (gActiveMessage->totalChunks > 0) {
-      BROADCAST_PRINTF("[ESP-NOW] Chunked message timeout from %s - showing partial result:", gActiveMessage->deviceName);
-
-      // Show partial result from static buffer
-      int partialLen = gActiveMessage->receivedChunks * CHUNK_SIZE;
-      if (gActiveMessage->totalLength > 0) {
-        partialLen = min(partialLen, gActiveMessage->totalLength);
-      }
-      partialLen = min(partialLen, MAX_RESULT_BYTES);
-      // Create String directly from buffer to avoid character-by-character concatenation
-      String partialResult;
-      if (partialLen > 0) {
-        char* tempBuf = (char*)malloc(partialLen + 1);
-        if (tempBuf) {
-          memcpy(tempBuf, gActiveMessage->buffer, partialLen);
-          tempBuf[partialLen] = '\0';
-          partialResult = String(tempBuf);
-          free(tempBuf);
-          broadcastOutput(partialResult);
-        }
-      }
-      BROADCAST_PRINTF("[ESP-NOW] Error: Incomplete message (%d/%d chunks received)", gActiveMessage->receivedChunks, gActiveMessage->totalChunks);
-    }
-
-    // Reset state (even if we didn't show timeout - cleanup stale data)
-    gActiveMessage->active = false;
-    memset(gActiveMessage->buffer, 0, MAX_RESULT_BYTES);
-  }
-}
+// NOTE: V2 cleanupExpiredChunkedMessage() removed — V3 binary protocol handles all chunking
 
 // Forward declaration for session-based streaming helper (defined in V3 protocol section)
 static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t len);
@@ -1134,155 +1074,7 @@ void sendEspNowStreamMessage(const String& message) {
   }
 }
 
-// Generic handler for chunked message assembly (TYPE_START/CHUNK/END)
-// Returns true if message was handled, false if not recognized
-static bool handleGenericChunkedMessage(const String& message, const String& msgType,
-                                        const String& deviceName, bool hasStatusField) {
-  if (!gActiveMessage) return false;
-  
-  ChunkedMsgGuard guard("handleGenericChunkedMessage");
-
-  String startPrefix = msgType + "_START:";
-  String chunkPrefix = msgType + "_CHUNK:";
-  String endPrefix = msgType + "_END:";
-  int startPrefixLen = startPrefix.length();
-  int chunkPrefixLen = chunkPrefix.length();
-  int endPrefixLen = endPrefix.length();
-
-  if (message.startsWith(startPrefix)) {
-    // Parse: TYPE_START:[status:]chunks:length:hash
-    cleanupExpiredChunkedMessage();
-
-    // Find colons in the data portion (after prefix)
-    // For STREAM: "STREAM_START:5:965:1867" → extract "5:965:1867"
-    // For RESULT: "RESULT_START:SUCCESS:5:965:1867" → extract "SUCCESS:5:965:1867"
-    int dataStart = startPrefixLen;
-    int colon1 = message.indexOf(':', dataStart);
-    int colon2 = message.indexOf(':', colon1 + 1);
-    int colon3 = message.indexOf(':', colon2 + 1);
-
-    // Parse based on whether status field exists
-    int chunksColonPos, lengthColonPos, hashColonPos;
-    if (hasStatusField) {
-      // Extract status field
-      int statusLen = min(colon1 - dataStart, (int)sizeof(gActiveMessage->status) - 1);
-      memcpy(gActiveMessage->status, message.c_str() + dataStart, statusLen);
-      gActiveMessage->status[statusLen] = '\0';
-      // Chunks start after status
-      chunksColonPos = colon1;
-      lengthColonPos = colon2;
-      hashColonPos = colon3;
-    } else {
-      gActiveMessage->status[0] = '\0';
-      // Chunks start immediately
-      chunksColonPos = dataStart - 1;  // So chunksColonPos+1 = dataStart
-      lengthColonPos = colon1;
-      hashColonPos = colon2;
-    }
-
-    if (lengthColonPos > 0 && hashColonPos > 0) {
-      gActiveMessage->totalChunks = message.substring(chunksColonPos + 1, lengthColonPos).toInt();
-      gActiveMessage->totalLength = message.substring(lengthColonPos + 1, hashColonPos).toInt();
-
-      int hashLen = min((int)message.length() - (hashColonPos + 1), (int)sizeof(gActiveMessage->hash) - 1);
-      memcpy(gActiveMessage->hash, message.c_str() + hashColonPos + 1, hashLen);
-      gActiveMessage->hash[hashLen] = '\0';
-
-      int nameLen = min((int)deviceName.length(), (int)sizeof(gActiveMessage->deviceName) - 1);
-      memcpy(gActiveMessage->deviceName, deviceName.c_str(), nameLen);
-      gActiveMessage->deviceName[nameLen] = '\0';
-
-      gActiveMessage->receivedChunks = 0;
-      gActiveMessage->startTime = millis();
-      gActiveMessage->active = true;
-      memset(gActiveMessage->buffer, 0, MAX_RESULT_BYTES);
-
-      DEBUGF(DEBUG_ESPNOW_STREAM, "[%s] Receiving chunked from %s (%d chunks, %d bytes) hash=%s",
-             msgType.c_str(), deviceName.c_str(), gActiveMessage->totalChunks, gActiveMessage->totalLength, gActiveMessage->hash);
-      DEBUGF(DEBUG_ESPNOW_STREAM, "[%s] DEBUG: Parsed START message='%s'", msgType.c_str(), message.c_str());
-      DEBUGF(DEBUG_ESPNOW_STREAM, "[%s] DEBUG: dataStart=%d colon1=%d colon2=%d colon3=%d",
-             msgType.c_str(), dataStart, colon1, colon2, colon3);
-      DEBUGF(DEBUG_ESPNOW_STREAM, "[%s] DEBUG: chunksColonPos=%d lengthColonPos=%d hashColonPos=%d",
-             msgType.c_str(), chunksColonPos, lengthColonPos, hashColonPos);
-    }
-    return true;
-
-  } else if (message.startsWith(chunkPrefix) && gActiveMessage->active) {
-    // Parse: TYPE_CHUNK:N:data
-    // Format is "TYPE_CHUNK:1:actual_chunk_data" - only 2 colons, data starts after second
-    int dataColonPos = message.indexOf(':', chunkPrefixLen);
-
-    if (dataColonPos > 0) {
-      int chunkNum = message.substring(chunkPrefixLen, dataColonPos).toInt();
-      String chunkData = message.substring(dataColonPos + 1);
-
-      if (chunkNum >= 1 && chunkNum <= MAX_CHUNKS) {
-        int offset = (chunkNum - 1) * CHUNK_SIZE;
-        int space = MAX_RESULT_BYTES - offset;
-        if (gActiveMessage->totalLength > 0) {
-          space = min(space, gActiveMessage->totalLength - offset);
-        }
-        int toCopy = min(space, (int)chunkData.length());
-        if (toCopy > 0 && offset >= 0 && offset < MAX_RESULT_BYTES) {
-          memcpy(&gActiveMessage->buffer[offset], chunkData.c_str(), toCopy);
-          if (gActiveMessage->receivedChunks < chunkNum) {
-            gActiveMessage->receivedChunks = chunkNum;
-          }
-          DEBUGF(DEBUG_ESPNOW_STREAM, "[%s] Chunk %d/%d received (%d bytes, offset=%d)",
-                 msgType.c_str(), chunkNum, gActiveMessage->totalChunks, toCopy, offset);
-        }
-      }
-    }
-    return true;
-
-  } else if (message.startsWith(endPrefix) && gActiveMessage->active) {
-    // Parse: TYPE_END:hash
-    String endHash = message.substring(endPrefixLen);
-
-    DEBUGF(DEBUG_ESPNOW_STREAM, "[%s] END received, hash: %s (expected: %s)",
-           msgType.c_str(), endHash.c_str(), gActiveMessage->hash);
-
-    if (endHash == String(gActiveMessage->hash)) {
-      int finalLen = gActiveMessage->totalLength > 0 ? min(gActiveMessage->totalLength, MAX_RESULT_BYTES)
-                                                     : min(gActiveMessage->receivedChunks * CHUNK_SIZE, MAX_RESULT_BYTES);
-      // Create String directly from buffer to avoid character-by-character concatenation
-      String fullMessage;
-      if (finalLen > 0) {
-        char* tempBuf = (char*)malloc(finalLen + 1);
-        if (tempBuf) {
-          memcpy(tempBuf, gActiveMessage->buffer, finalLen);
-          tempBuf[finalLen] = '\0';
-          fullMessage = String(tempBuf);
-          free(tempBuf);
-        }
-      }
-
-      DEBUGF(DEBUG_ESPNOW_STREAM, "[%s] Complete: %d bytes from %s",
-             msgType.c_str(), finalLen, gActiveMessage->deviceName);
-
-      // Type-specific output
-      if (msgType == "STREAM") {
-        gEspNow->streamReceivedCount++;
-        broadcastOutput("[STREAM:" + String(gActiveMessage->deviceName) + "] " + fullMessage);
-      } else if (msgType == "RESULT") {
-        broadcastOutput("[ESP-NOW] Remote result from " + String(gActiveMessage->deviceName) + " (" + String(gActiveMessage->status) + "):\n" + fullMessage);
-      }
-
-      if (gActiveMessage->receivedChunks < gActiveMessage->totalChunks) {
-        BROADCAST_PRINTF("[%s] Warning: Missing %d chunks", msgType.c_str(), gActiveMessage->totalChunks - gActiveMessage->receivedChunks);
-      }
-
-      gActiveMessage->active = false;
-      memset(gActiveMessage->buffer, 0, MAX_RESULT_BYTES);
-    } else {
-      BROADCAST_PRINTF("[%s] Error: Hash mismatch", msgType.c_str());
-      gActiveMessage->active = false;
-    }
-    return true;
-  }
-
-  return false;
-}
+// NOTE: V2 handleGenericChunkedMessage() removed — V3 binary protocol handles all chunking
 
 // Minimal RX callback: enqueue raw frame into tiny ring and return immediately
 static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8_t* incomingData, int len) {
@@ -3476,13 +3268,15 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
         // For non-manifest files, write to filesystem (single write operation)
         String senderMacHex = macToHexString(gActiveFileTransfer->senderMac);
         senderMacHex.replace(":", "");
-        String deviceDir = String("/espnow/received/") + senderMacHex;
+        char deviceDir[64];
+        snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderMacHex.c_str());
         
         FsLockGuard guard("v3file.write");
         LittleFS.mkdir("/espnow");
         LittleFS.mkdir("/espnow/received");
-        LittleFS.mkdir(deviceDir.c_str());
-        String filepath = deviceDir + "/" + gActiveFileTransfer->filename;
+        LittleFS.mkdir(deviceDir);
+        char filepath[128];
+        snprintf(filepath, sizeof(filepath), "%s/%s", deviceDir, gActiveFileTransfer->filename);
         File f = LittleFS.open(filepath, "w");
         if (f) {
           f.write(gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
@@ -4416,15 +4210,24 @@ static String generateDeviceManifest() {
   JsonArray apps = doc["uiApps"].to<JsonArray>();
   
 #if ENABLE_OLED_DISPLAY
-  // Add OLED menu items as UI apps
-  extern const OLEDMenuItem oledMenuItems[];
-  extern const int oledMenuItemCount;
+  // Add OLED menu items as UI apps (from category arrays)
+  extern const OLEDMenuItem oledMenuCategory1[], oledMenuCategory2[], oledMenuCategory3[], oledMenuCategory4[], oledMenuCategory5[];
+  extern const int oledMenuCategory1Count, oledMenuCategory2Count, oledMenuCategory3Count, oledMenuCategory4Count, oledMenuCategory5Count;
   
-  for (int i = 0; i < oledMenuItemCount; i++) {
-    JsonObject app = apps.add<JsonObject>();
-    app["name"] = oledMenuItems[i].name;
-    app["icon"] = oledMenuItems[i].iconName;
-    app["mode"] = (int)oledMenuItems[i].targetMode;
+  const struct { const OLEDMenuItem* items; int count; } cats[] = {
+    { oledMenuCategory1, oledMenuCategory1Count },
+    { oledMenuCategory2, oledMenuCategory2Count },
+    { oledMenuCategory3, oledMenuCategory3Count },
+    { oledMenuCategory4, oledMenuCategory4Count },
+    { oledMenuCategory5, oledMenuCategory5Count },
+  };
+  for (int c = 0; c < (int)(sizeof(cats)/sizeof(cats[0])); c++) {
+    for (int i = 0; i < cats[c].count; i++) {
+      JsonObject app = apps.add<JsonObject>();
+      app["name"] = cats[c].items[i].name;
+      app["icon"] = cats[c].items[i].iconName;
+      app["mode"] = (int)cats[c].items[i].targetMode;
+    }
   }
 #endif
   
@@ -4467,7 +4270,8 @@ static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& mani
   }
   hashHex[32] = '\0';
   
-  String path = String("/system/manifests/") + hashHex + ".json";
+  char path[64];
+  snprintf(path, sizeof(path), "/system/manifests/%s.json", hashHex);
   
   // Ensure directory exists
   if (!LittleFS.exists("/system/manifests")) {
@@ -4476,7 +4280,7 @@ static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& mani
   
   // Write manifest
   FsLockGuard fsGuard("pair.manifest.cache");
-  File f = LittleFS.open(path.c_str(), "w");
+  File f = LittleFS.open(path, "w");
   if (!f) {
     broadcastOutput("[BOND] ERROR: Failed to open manifest cache file");
     return false;
@@ -4490,7 +4294,7 @@ static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& mani
     return false;
   }
   
-  BROADCAST_PRINTF("[BOND] Cached manifest to %s (%u bytes)", path.c_str(), (unsigned)written);
+  BROADCAST_PRINTF("[BOND] Cached manifest to %s (%u bytes)", path, (unsigned)written);
   return true;
 }
 
@@ -4561,18 +4365,20 @@ static bool cacheSettingsToLittleFS(const uint8_t* peerMac, const String& settin
   snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
            peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
   
-  String dirPath = String("/system/espnow/peers/") + macStr;
-  String filePath = dirPath + "/settings.json";
-  DEBUG_ESPNOWF("[SETTINGS_CACHE] Target path: %s", filePath.c_str());
+  char dirPath[48];
+  snprintf(dirPath, sizeof(dirPath), "/system/espnow/peers/%s", macStr);
+  char filePath[64];
+  snprintf(filePath, sizeof(filePath), "%s/settings.json", dirPath);
+  DEBUG_ESPNOWF("[SETTINGS_CACHE] Target path: %s", filePath);
   
   // Ensure per-peer directory exists (parent dirs created at filesystem init)
   FsLockGuard fsGuard("pair.settings.cache");
-  if (!LittleFS.exists(dirPath.c_str())) { LittleFS.mkdir(dirPath.c_str()); }
+  if (!LittleFS.exists(dirPath)) { LittleFS.mkdir(dirPath); }
   
   // Write settings
-  File f = LittleFS.open(filePath.c_str(), "w");
+  File f = LittleFS.open(filePath, "w");
   if (!f) {
-    ERROR_ESPNOWF("[SETTINGS_CACHE] Failed to open %s for writing", filePath.c_str());
+    ERROR_ESPNOWF("[SETTINGS_CACHE] Failed to open %s for writing", filePath);
     return false;
   }
   
@@ -4606,16 +4412,17 @@ String loadSettingsFromCache(const uint8_t* peerMac) {
   snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
            peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
   
-  String filePath = String("/system/espnow/peers/") + macStr + "/settings.json";
-  DEBUG_ESPNOWF("[SETTINGS_LOAD] Checking path: %s", filePath.c_str());
+  char filePath[64];
+  snprintf(filePath, sizeof(filePath), "/system/espnow/peers/%s/settings.json", macStr);
+  DEBUG_ESPNOWF("[SETTINGS_LOAD] Checking path: %s", filePath);
   
-  if (!LittleFS.exists(filePath.c_str())) {
+  if (!LittleFS.exists(filePath)) {
     DEBUG_ESPNOWF("[SETTINGS_LOAD] File does not exist");
     return "";  // Not cached
   }
   
   FsLockGuard fsGuard("pair.settings.load");
-  File f = LittleFS.open(filePath.c_str(), "r");
+  File f = LittleFS.open(filePath, "r");
   if (!f) {
     ERROR_ESPNOWF("[SETTINGS_LOAD] Failed to open file");
     return "";
@@ -4860,14 +4667,15 @@ static String loadManifestFromCache(const uint8_t fwHash[16]) {
   }
   hashHex[32] = '\0';
   
-  String path = String("/system/manifests/") + hashHex + ".json";
+  char path[64];
+  snprintf(path, sizeof(path), "/system/manifests/%s.json", hashHex);
   
-  if (!LittleFS.exists(path.c_str())) {
+  if (!LittleFS.exists(path)) {
     return "";  // Not cached
   }
   
   FsLockGuard fsGuard("pair.manifest.load");
-  File f = LittleFS.open(path.c_str(), "r");
+  File f = LittleFS.open(path, "r");
   if (!f) {
     return "";
   }
@@ -5482,8 +5290,9 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
       
       if (ok) {
         JsonArray files = payload["files"].as<JsonArray>();
-        String summary = String("File listing for ") + resultPath;
-        if (files.size() == 0) summary += " (empty directory)";
+        char summaryBuf[128];
+        snprintf(summaryBuf, sizeof(summaryBuf), "File listing for %s%s", resultPath, files.size() == 0 ? " (empty directory)" : "");
+        String summary = summaryBuf;
         storeMessageInPeerHistory((uint8_t*)ctx.recvInfo->src_addr,
                                   deviceName.c_str(),
                                   summary.c_str(),
@@ -5501,22 +5310,23 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
             String type = file["type"] | "file";
             String size = file["size"] | "";
             
+            char lineBuf[160];
             if (type == "folder") {
-              String line = String("[DIR] ") + name + "/";
+              snprintf(lineBuf, sizeof(lineBuf), "[DIR] %s/", name.c_str());
               storeMessageInPeerHistory((uint8_t*)ctx.recvInfo->src_addr,
                                         deviceName.c_str(),
-                                        line.c_str(),
+                                        lineBuf,
                                         ctx.isEncrypted,
                                         MSG_TEXT);
-              broadcastOutput("  [DIR]  " + name + "/");
+              BROADCAST_PRINTF("  [DIR]  %s/", name.c_str());
             } else {
-              String line = String("[FILE] ") + name + " (" + size + ")";
+              snprintf(lineBuf, sizeof(lineBuf), "[FILE] %s (%s)", name.c_str(), size.c_str());
               storeMessageInPeerHistory((uint8_t*)ctx.recvInfo->src_addr,
                                         deviceName.c_str(),
-                                        line.c_str(),
+                                        lineBuf,
                                         ctx.isEncrypted,
                                         MSG_TEXT);
-              broadcastOutput("  [FILE] " + name + " (" + size + ")");
+              BROADCAST_PRINTF("  [FILE] %s (%s)", name.c_str(), size.c_str());
             }
           }
         }
@@ -5528,10 +5338,11 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
         
       } else {
         const char* error = payload["error"] | "Unknown error";
-        String failMsg = String("File browse FAILED: ") + error;
+        char failBuf[192];
+        snprintf(failBuf, sizeof(failBuf), "File browse FAILED: %s", error);
         storeMessageInPeerHistory((uint8_t*)ctx.recvInfo->src_addr,
                                   deviceName.c_str(),
-                                  failMsg.c_str(),
+                                  failBuf,
                                   ctx.isEncrypted,
                                   MSG_TEXT);
         BROADCAST_PRINTF("[ESP-NOW] File browse FAILED from %s: %s", deviceName.c_str(), error);
@@ -5589,7 +5400,11 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
       if (ok) {
         // Parse the files JSON string into a proper JSON array
         JsonDocument filesDoc;
-        String wrappedJson = String("[") + filesJson + "]";
+        String wrappedJson;
+        wrappedJson.reserve(filesJson.length() + 2);
+        wrappedJson = "[";
+        wrappedJson += filesJson;
+        wrappedJson += "]";
         DeserializationError err = deserializeJson(filesDoc, wrappedJson);
         if (err == DeserializationError::Ok) {
           pld["files"] = filesDoc.as<JsonArray>();
@@ -5830,7 +5645,9 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
     // Password now stored in per-user settings file, not here
     newUser["role"] = role;
     newUser["createdAt"] = (const char*)nullptr;  // null
-    newUser["createdBy"] = String("espnow:") + ctx.deviceName;
+    char createdByBuf[48];
+    snprintf(createdByBuf, sizeof(createdByBuf), "espnow:%s", ctx.deviceName.c_str());
+    newUser["createdBy"] = createdByBuf;
     newUser["createdMs"] = millis();
     newUser["ntpAnchorId"] = gNTPAnchorId;
     newUser["bootCount"] = gBootCounter;
@@ -5975,7 +5792,9 @@ static bool handleCommandMessage(const ReceivedMessage& ctx) {
   AuthContext authCtx;
   authCtx.transport = SOURCE_ESPNOW;  // Command source: ESP-NOW mesh
   authCtx.user = username;
-  authCtx.ip = String("espnow:") + ctx.deviceName;
+  char ipBuf[48];
+  snprintf(ipBuf, sizeof(ipBuf), "espnow:%s", ctx.deviceName.c_str());
+  authCtx.ip = ipBuf;
   authCtx.path = "/espnow-remote";
   authCtx.opaque = (void*)ctx.recvInfo->src_addr;
   
@@ -5986,149 +5805,33 @@ static bool handleCommandMessage(const ReceivedMessage& ctx) {
   gEspNow->streamingSuspended = wasStreaming;
   
   // Log result
-  String resultStr = result;
-  String resultPreview = resultStr.length() > 100 ? resultStr.substring(0, 100) + "..." : resultStr;
+  char resultPreviewBuf[104];
+  size_t resultLen = strlen(result);
+  if (resultLen > 100) {
+    memcpy(resultPreviewBuf, result, 100);
+    resultPreviewBuf[100] = '.';
+    resultPreviewBuf[101] = '.';
+    resultPreviewBuf[102] = '.';
+    resultPreviewBuf[103] = '\0';
+  } else {
+    strncpy(resultPreviewBuf, result, sizeof(resultPreviewBuf));
+  }
+  const char* resultPreview = resultPreviewBuf;
   if (success) {
     broadcastOutput("[ESP-NOW] Remote command executed successfully");
   } else {
-    broadcastOutput("[ESP-NOW] Remote command FAILED: " + resultPreview);
+    BROADCAST_PRINTF("[ESP-NOW] Remote command FAILED: %s", resultPreview);
   }
   
   // Send result back to sender
-  sendChunkedResponse(ctx.recvInfo->src_addr, success, resultStr, ctx.deviceName, ctx.cmdMsgId);
+  sendChunkedResponse(ctx.recvInfo->src_addr, success, String(result), ctx.deviceName, ctx.cmdMsgId);
   
   return true;  // Handled
 }
 
 
 
-// ==========================
-// Message Router (Send Path)
-// ==========================
-
-/**
- * @brief Core message router - sends message with automatic routing, chunking, and metrics
- * @param msg Message to send (will be modified with msgId and timestamp)
- * @return true if message sent successfully
- * @note This is the main entry point for all message sending
- */
-/*
-bool routerSend(Message& msg) {
-  if (!gEspNow) return false;
-  if (!gEspNow->initialized) return false;
-  
-  // Generate message ID and timestamp
-  msg.msgId = generateMessageId();
-  msg.timestamp = millis();
-  
-  // Start timing
-  unsigned long startUs = micros();
-  
-  // Check if chunking needed
-  bool needsChunking = shouldChunk(msg.payload.length());
-  if (needsChunking) {
-    gEspNow->routerMetrics.chunkedMessages++;
-  }
-  
-  // Determine routing method
-  bool useMesh = shouldUseMesh(msg.dstMac);
-  if (useMesh) {
-    gEspNow->routerMetrics.meshRoutes++;
-  } else {
-    gEspNow->routerMetrics.directRoutes++;
-  }
-  
-  // Look up device info (needed for both direct and chunked sends)
-  bool isEncrypted = false;
-  String deviceName = "";
-  for (int i = 0; i < gEspNow->deviceCount; i++) {
-    if (memcmp(gEspNow->devices[i].mac, msg.dstMac, 6) == 0) {
-      isEncrypted = gEspNow->devices[i].encrypted;
-      deviceName = gEspNow->devices[i].name;
-      break;
-    }
-  }
-  
-  // Parse payload once for both TTL injection and msgId extraction
-  String finalPayload = msg.payload;
-  uint32_t actualMsgId = msg.msgId;
-  
-  if (msg.payload.startsWith("{")) {
-    PSRAM_JSON_DOC(doc);
-    DeserializationError err = deserializeJson(doc, msg.payload);
-    if (!err) {
-      // Extract msgId from JSON if present (do this first, before any modifications)
-      uint32_t jsonMsgId = doc["id"] | doc["msgId"] | 0;
-      if (jsonMsgId != 0) {
-        actualMsgId = jsonMsgId;
-        if (actualMsgId != msg.msgId) {
-          DEBUGF(DEBUG_ESPNOW_ROUTER, "[Router] Using msgId=%lu from JSON payload", (unsigned long)actualMsgId);
-        }
-      }
-      
-      // If using mesh routing, inject TTL
-      if (useMesh && (doc["ttl"].isNull() || doc["ttl"] == 0)) {
-        // Update meshTTL if adaptive mode is enabled
-        
-        doc["ttl"] = gSettings.meshTTL;
-        finalPayload = "";
-        serializeJson(doc, finalPayload);
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[Router] Added TTL=%d for mesh routing (%s)", 
-               gSettings.meshTTL, gSettings.meshAdaptiveTTL ? "adaptive" : "fixed");
-      }
-    } else {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[Router] WARNING: Failed to parse payload as JSON");
-    }
-  }
-  
-  // Send the message using unified transport layer
-  // Size check determines fragmentation, mesh flag determines routing
-  bool success = false;
-  
-  if (needsChunking) {
-    success = sendV2Fragmented(msg.dstMac, finalPayload, actualMsgId, isEncrypted, deviceName, useMesh);
-  } else {
-    success = sendV2Unfragmented(msg.dstMac, finalPayload, actualMsgId, isEncrypted, deviceName, useMesh);
-  }
-  
-  // Update metrics
-  unsigned long elapsedUs = micros() - startUs;
-  
-  if (success) {
-    gEspNow->routerMetrics.messagesSent++;
-    
-    // Update timing metrics (rolling average)
-    if (gEspNow->routerMetrics.avgSendTimeUs == 0) {
-      gEspNow->routerMetrics.avgSendTimeUs = elapsedUs;
-    } else {
-      gEspNow->routerMetrics.avgSendTimeUs = 
-        (gEspNow->routerMetrics.avgSendTimeUs * 9 + elapsedUs) / 10;
-    }
-    
-    if (elapsedUs > gEspNow->routerMetrics.maxSendTimeUs) {
-      gEspNow->routerMetrics.maxSendTimeUs = elapsedUs;
-    }
-  } else {
-    gEspNow->routerMetrics.messagesFailed++;
-    
-    // If message has retry enabled, enqueue it
-    if (msg.maxRetries > 0) {
-      if (enqueueMessage(msg)) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[Router] Message ID %lu queued for retry",
-               (unsigned long)msg.msgId);
-        return true;  // Return true since message is queued (will retry later)
-      } else {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[Router] Failed to queue message ID %lu",
-               (unsigned long)msg.msgId);
-      }
-    }
-  }
-  
-  return success;
-}
-*/ // End routerSend - V2 TRANSPORT DEPRECATED
-
-// Unused helper functions removed (flagged by compiler warnings)
+// routerSend() V2 transport removed — all sends now use V3 binary protocol
 
 
 
@@ -6209,14 +5912,15 @@ static void finalizeTopologyStream(TopologyStream* stream) {
   if (!stream) return;
   char macBuf[18];
   formatMacAddressBuf(stream->senderMac, macBuf, sizeof(macBuf));
-  String entry = String(stream->senderName) + " (" + macBuf + "):\n";
+  char entryHeader[64];
+  snprintf(entryHeader, sizeof(entryHeader), "%s (%s):\n", stream->senderName, macBuf);
+  gTopoResultsBuffer += entryHeader;
   if (stream->accumulatedData.length() > 0) {
-    entry += stream->accumulatedData;
+    gTopoResultsBuffer += stream->accumulatedData;
   } else {
-    entry += "  (no peers)\n";
+    gTopoResultsBuffer += "  (no peers)\n";
   }
-  entry += "\n";
-  gTopoResultsBuffer += entry;
+  gTopoResultsBuffer += "\n";
   gTopoResponsesReceived++;
   stream->active = false;
   DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] Finalized stream for %s (%d peers)", stream->senderName, stream->receivedPeers);
@@ -6865,16 +6569,7 @@ void meshSendEnvelopeToPeers(const String& envelope) {
   }
 }
 
-// Build a V2-style JSON heartbeat string
-String buildHeartbeat(uint32_t msgId, const char* src) {
-  JsonDocument doc;
-  v2_init_envelope(doc, MSG_TYPE_HB, msgId, src, "", 1);
-  String out;
-  serializeJson(doc, out);
-  return out;
-}
-
-// Build a V2-style JSON boot notification string
+// Build a JSON boot notification string
 String buildBootNotification(uint32_t msgId, const char* src,
                              uint32_t bootCounter, uint32_t timestamp) {
   JsonDocument doc;
@@ -7701,18 +7396,6 @@ static bool initEspNow() {
     }
   }
 
-  // Allocate chunked message buffer (only when ESP-NOW is active)
-  if (!gActiveMessage) {
-    gActiveMessage = (ChunkedMessage*)ps_alloc(sizeof(ChunkedMessage), AllocPref::PreferPSRAM, "espnow.chunk");
-    if (gActiveMessage) {
-      memset(gActiveMessage, 0, sizeof(ChunkedMessage));
-      gActiveMessage->active = false;  // Explicitly ensure not active
-      BROADCAST_PRINTF("[ESP-NOW] Allocated chunked message buffer (%u bytes)", (unsigned)sizeof(ChunkedMessage));
-    } else {
-      DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] WARNING: Failed to allocate chunked message buffer - remote commands may fail");
-    }
-  }
-  
   // Initialize broadcast tracker (static allocation)
   memset(gBroadcastTrackers, 0, sizeof(gBroadcastTrackers));
   gBroadcastsTracked = 0;
@@ -7891,14 +7574,7 @@ static bool deinitEspNow() {
     broadcastOutput("[ESP-NOW] Active file transfer cleaned up");
   }
 
-  // 4. Cleanup chunked message buffer
-  if (gActiveMessage) {
-    free(gActiveMessage);
-    gActiveMessage = nullptr;
-    broadcastOutput("[ESP-NOW] Chunked message buffer freed");
-  }
-
-  // 5. Clear retry queue entries
+  // 4. Clear retry queue entries
   {
     MeshRetryGuard guard("stopESPNow");
     if (guard.held) {
@@ -8547,11 +8223,13 @@ const char* cmd_espnow_devices(const String& argsInput) {
       ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
     if (!displayName[0]) displayName = MAC_STR(gMeshPeerMeta[i].mac);
 
+    char zoneBuf[34] = "";
+    if (gMeshPeerMeta[i].zone[0]) snprintf(zoneBuf, sizeof(zoneBuf), "/%s", gMeshPeerMeta[i].zone);
     pos += snprintf(buf + pos, 1024 - pos, "  %s%s [%s%s] %s",
                     displayName,
                     gMeshPeerMeta[i].room[0] ? "" : "",
                     gMeshPeerMeta[i].room[0] ? gMeshPeerMeta[i].room : "unassigned",
-                    gMeshPeerMeta[i].zone[0] ? (String("/") + gMeshPeerMeta[i].zone).c_str() : "",
+                    zoneBuf,
                     alive ? "(online" : "(offline");
     if (alive && health) {
       pos += snprintf(buf + pos, 1024 - pos, ", %lus ago", (unsigned long)ageSec);
@@ -8807,16 +8485,17 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
   args.trim();
   
   if (args.length() == 0) {
-    String output = String("Mesh role: ") + getMeshRoleString(gSettings.meshRole);
+    int pos = 0;
+    char* buf = getDebugBuffer();
+    pos += snprintf(buf + pos, 1024 - pos, "Mesh role: %s", getMeshRoleString(gSettings.meshRole));
     if (gSettings.meshMasterMAC.length() > 0) {
-      output += String("\nMaster MAC: ") + gSettings.meshMasterMAC;
+      pos += snprintf(buf + pos, 1024 - pos, "\nMaster MAC: %s", gSettings.meshMasterMAC.c_str());
     }
-    output += String("\nBackup enabled: ") + (gSettings.meshBackupEnabled ? "yes" : "no");
+    pos += snprintf(buf + pos, 1024 - pos, "\nBackup enabled: %s", gSettings.meshBackupEnabled ? "yes" : "no");
     if (gSettings.meshBackupEnabled && gSettings.meshBackupMAC.length() > 0) {
-      output += String("\nBackup MAC: ") + gSettings.meshBackupMAC;
+      pos += snprintf(buf + pos, 1024 - pos, "\nBackup MAC: %s", gSettings.meshBackupMAC.c_str());
     }
-    snprintf(getDebugBuffer(), 1024, "%s", output.c_str());
-    return getDebugBuffer();
+    return buf;
   }
   
   args.toLowerCase();
@@ -9974,8 +9653,9 @@ const char* cmd_espnow_encstatus(const String& argsInput) {
     remaining -= n;
 
     if (gEspNow->passphrase.length() > 0) {
-      String hint = gEspNow->passphrase.substring(0, 3) + "..." + gEspNow->passphrase.substring(gEspNow->passphrase.length() - 3);
-      n = snprintf(p, remaining, "  Passphrase Hint: %s\n", hint.c_str());
+      n = snprintf(p, remaining, "  Passphrase Hint: %.3s...%s\n",
+                   gEspNow->passphrase.c_str(),
+                   gEspNow->passphrase.c_str() + (gEspNow->passphrase.length() > 3 ? gEspNow->passphrase.length() - 3 : 0));
       p += n;
       remaining -= n;
     }
@@ -10384,19 +10064,12 @@ const char* cmd_espnow_remote(const String& argsInput) {
   if (payloadLen >= (int)sizeof(cmdPayload)) payloadLen = sizeof(cmdPayload) - 1;
 
   uint32_t msgId = generateMessageId();
-  /* V2 ACK WAIT DEPRECATED
-  msgAckWaitRegister(msgId);
-  */
   
   bool success = false;
   for (int attempt = 0; attempt < 2; attempt++) {
     success = v3_send_frame(targetMac, ESPNOW_V3_TYPE_CMD, ESPNOW_V3_FLAG_ACK_REQ, msgId,
                             (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1);
-    if (!success) continue;
-    /* V2 ACK WAIT DEPRECATED
-    if (msgAckWaitBlock(msgId, 350)) break;
-    */
-    if (success) break; // V3 has internal ACK handling
+    if (success) break;
   }
   
   static char remoteBuffer[256];
@@ -10557,19 +10230,12 @@ const char* cmd_espnow_send(const String& argsInput) {
   if (msgLen > ESPNOW_V3_MAX_PAYLOAD - 1) msgLen = ESPNOW_V3_MAX_PAYLOAD - 1;
   
   uint32_t msgId = generateMessageId();
-  /* V2 ACK WAIT DEPRECATED
-  msgAckWaitRegister(msgId);
-  */
   
   bool success = false;
   for (int attempt = 0; attempt < 2; attempt++) {
     success = v3_send_frame(mac, ESPNOW_V3_TYPE_TEXT, ESPNOW_V3_FLAG_ACK_REQ, msgId,
                             (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1);
-    if (!success) continue;
-    /* V2 ACK WAIT DEPRECATED
-    if (msgAckWaitBlock(msgId, 350)) break;
-    */
-    if (success) break; // V3 has internal ACK handling
+    if (success) break;
   }
   
   if (success) {
@@ -10670,17 +10336,10 @@ const char* cmd_bond_requestcap(const String& argsInput) {
   }
 
   uint32_t reqId = generateMessageId();
-  /* V2 ACK WAIT DEPRECATED
-  msgAckWaitRegister(reqId);
-  */
   bool sent = false;
   for (int attempt = 0; attempt < 2; attempt++) {
     sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_BOND_CAP_REQ, ESPNOW_V3_FLAG_ACK_REQ, reqId, nullptr, 0, 1);
-    if (!sent) continue;
-    /* V2 ACK WAIT DEPRECATED
-    if (msgAckWaitBlock(reqId, 350)) break;
-    */
-    if (sent) break; // V3 has internal ACK handling
+    if (sent) break;
   }
   return sent ? "Capability request sent. Check output for response." : "Failed to send capability request.";
 }
@@ -10796,13 +10455,14 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
   }
   
   // Show specific manifest by fwHash
-  String path = String(manifestDir) + "/" + args + ".json";
-  if (!LittleFS.exists(path.c_str())) {
+  char path[96];
+  snprintf(path, sizeof(path), "%s/%s.json", manifestDir, args.c_str());
+  if (!LittleFS.exists(path)) {
     return "Manifest not found. Use 'bond showremotemanifest' to list available.";
   }
   
   FsLockGuard guard("bond.manifest.read");
-  File f = LittleFS.open(path.c_str(), "r");
+  File f = LittleFS.open(path, "r");
   if (!f) {
     return "Failed to open manifest file.";
   }
@@ -10810,7 +10470,7 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
   String manifest = f.readString();
   f.close();
   
-  broadcastOutput("=== Remote Manifest: " + args + " ===");
+  BROADCAST_PRINTF("=== Remote Manifest: %s ===", args.c_str());
   BROADCAST_PRINTF("Size: %u bytes", (unsigned)manifest.length());
   
   // Broadcast manifest in 200-byte chunks

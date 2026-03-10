@@ -1,5 +1,7 @@
 // Flag for allowing queued debug messages during help-mode
 #define DEBUG_MSG_FLAG_ALLOW_IN_HELP 0x01
+// Flag to suppress serial output for this message (used by context-aware broadcastOutput)
+#define DEBUG_MSG_FLAG_NO_SERIAL     0x02
 #ifndef DEBUG_SYSTEM_H
 #define DEBUG_SYSTEM_H
 
@@ -130,9 +132,6 @@ struct DebugSubFlags {
   bool cmdflowContext;  // Context management, origin tracking
 };
 
-// Alias for legacy code that referenced DEBUG_DATETIME
-#define DEBUG_DATETIME        DEBUG_SYSTEM
-
 // Debug output queue configuration
 #define DEBUG_QUEUE_SIZE_MIN 64    // Minimum queue size (internal RAM only)
 #define DEBUG_QUEUE_SIZE_MAX 128   // Maximum queue size (with PSRAM)
@@ -222,6 +221,7 @@ inline void incrementDebugDropped() { DEBUG_MANAGER.incrementDebugDropped(); }
 // Broadcast output functions
 void broadcastOutput(const String& s);
 void broadcastOutput(const char* s);
+void broadcastOutputEx(const String& s, uint64_t extraFlags);
 
 // Forward declaration for CommandContext (defined in main .ino)
 struct CommandContext;
@@ -314,8 +314,6 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define DEBUG_COMMAND_SYSTEMF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_COMMAND_SYSTEM, fmt, ##__VA_ARGS__)
 #define DEBUG_SETTINGS_SYSTEMF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SETTINGS_SYSTEM, fmt, ##__VA_ARGS__)
 
-// DateTime debug flag doesn't exist yet - map to SYSTEM for now
-#define DEBUG_DATETIMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SYSTEM, fmt, ##__VA_ARGS__)
 
 // Individual I2C sensor debug macros
 #define DEBUG_GPSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_GPS, fmt, ##__VA_ARGS__)

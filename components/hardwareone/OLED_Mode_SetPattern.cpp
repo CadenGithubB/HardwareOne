@@ -354,7 +354,8 @@ static const OLEDModeEntry setPatternModeEntry = {
   isSetPatternAvailable,
   handleSetPatternInput,
   true,
-  2
+  2,
+  nullptr  // hints
 };
 
 static OLEDModeRegistrar _oled_mode_registrar_setpattern(&setPatternModeEntry, 1, "GamepadPassword");

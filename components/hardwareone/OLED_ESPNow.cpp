@@ -337,7 +337,7 @@ void oledEspNowDisplayStatus(Adafruit_SSD1306* display) {
   // Device name (truncate if too long)
   display->print("Name: ");
   String name = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : "(none)";
-  if (name.length() > 15) name = name.substring(0, 14) + "~";
+  if (name.length() > 15) { name = name.substring(0, 14); name += '~'; }
   display->println(name);
   
   // Note: Footer is drawn by global render loop
@@ -693,7 +693,7 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
   
   // Append online/offline indicator
   int maxNameLen = health ? 18 : 21;  // Reserve space for status if health data exists
-  if ((int)header.length() > maxNameLen) header = header.substring(0, maxNameLen - 1) + "~";
+  if ((int)header.length() > maxNameLen) { header = header.substring(0, maxNameLen - 1); header += '~'; }
   display->print(header);
   if (health) {
     display->print(alive ? " [+]" : " [-]");
@@ -763,7 +763,7 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
     
     // Draw message text (truncated)
     String msg = item->line1;
-    if (msg.length() > 20) msg = msg.substring(0, 19) + "~";
+    if (msg.length() > 20) { msg = msg.substring(0, 19); msg += '~'; }
     display->println(msg);
     
     yPos += lineHeight;
@@ -1666,8 +1666,9 @@ void oledEspNowSendTextMessage() {
            gOLEDEspNowState.selectedDeviceMac[5]);
   
   // Build command: espnow send <mac> <message>
-  String cmd = "espnow send " + String(macStr) + " " + gOLEDEspNowState.textMessageBuffer;
-  executeOLEDCommand(cmd);
+  char cmdBuf[256];
+  snprintf(cmdBuf, sizeof(cmdBuf), "espnow send %s %s", macStr, gOLEDEspNowState.textMessageBuffer.c_str());
+  executeOLEDCommand(cmdBuf);
   
   // Clear buffer
   gOLEDEspNowState.textMessageBuffer = "";
@@ -1699,12 +1700,12 @@ void oledEspNowSendRemoteCommand() {
            gOLEDEspNowState.selectedDeviceMac[5]);
   
   // Build command: espnow remote <mac> <username> <password> <command>
-  String cmd = "espnow remote " + String(macStr) + " " + 
-               gOLEDEspNowState.remoteUsername + " " +
-               gOLEDEspNowState.remotePassword + " " +
-               gOLEDEspNowState.remoteCommand;
-  
-  executeOLEDCommand(cmd);
+  char cmdBuf[384];
+  snprintf(cmdBuf, sizeof(cmdBuf), "espnow remote %s %s %s %s", macStr,
+           gOLEDEspNowState.remoteUsername.c_str(),
+           gOLEDEspNowState.remotePassword.c_str(),
+           gOLEDEspNowState.remoteCommand.c_str());
+  executeOLEDCommand(cmdBuf);
   
   // Clear form
   gOLEDEspNowState.remoteUsername = "";
@@ -1822,7 +1823,7 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
     int labelLen = strlen(espnowSettingsLabels[i]) + 2;  // label + ": "
     int maxValueLen = (128 - 4 - labelLen * 6) / 6;
     if (value.length() > maxValueLen && maxValueLen > 3) {
-      value = value.substring(0, maxValueLen - 1) + "~";
+      value = value.substring(0, maxValueLen - 1); value += '~';
     }
     display->print(value);
   }
@@ -1998,7 +1999,7 @@ void oledEspNowDisplayDeviceConfig(Adafruit_SSD1306* display) {
   display->setCursor(0, 0);
   display->print("Config: ");
   String name = gOLEDEspNowState.selectedDeviceName;
-  if (name.length() > 14) name = name.substring(0, 13) + "~";
+  if (name.length() > 14) { name = name.substring(0, 13); name += '~'; }
   display->println(name);
   
   display->drawFastHLine(0, 9, 128, DISPLAY_COLOR_WHITE);
@@ -2049,8 +2050,9 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
     switch (gOLEDEspNowState.deviceConfigMenuIndex) {
       case 0: // Restart Device
         {
-          String cmd = "espnow cmd " + String(macStr) + " restart";
-          executeOLEDCommand(cmd);
+          char cmdBuf[64];
+          snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s restart", macStr);
+          executeOLEDCommand(cmdBuf);
           broadcastOutput("[ESP-NOW] Sent restart command");
           gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
         }
@@ -2121,16 +2123,18 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
   switch (gOLEDEspNowState.deviceConfigEditField) {
     case 1: // Set Role
       {
-        String cmd = "espnow cmd " + String(macStr) + " meshrole " + value;
-        executeOLEDCommand(cmd);
+        char cmdBuf[96];
+        snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s meshrole %s", macStr, value.c_str());
+        executeOLEDCommand(cmdBuf);
         broadcastOutput("[ESP-NOW] Sent role change command");
       }
       break;
       
     case 2: // Set Name
       {
-        String cmd = "espnow cmd " + String(macStr) + " espnowname " + value;
-        executeOLEDCommand(cmd);
+        char cmdBuf[96];
+        snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s espnowname %s", macStr, value.c_str());
+        executeOLEDCommand(cmdBuf);
         gOLEDEspNowState.selectedDeviceName = value;
         broadcastOutput("[ESP-NOW] Sent name change command");
       }
@@ -2138,24 +2142,27 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
       
     case 3: // Set Room
       {
-        String cmd = "espnow cmd " + String(macStr) + " room " + value;
-        executeOLEDCommand(cmd);
+        char cmdBuf[96];
+        snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s room %s", macStr, value.c_str());
+        executeOLEDCommand(cmdBuf);
         broadcastOutput("[ESP-NOW] Sent room change command");
       }
       break;
       
     case 4: // Set Zone
       {
-        String cmd = "espnow cmd " + String(macStr) + " zone " + value;
-        executeOLEDCommand(cmd);
+        char cmdBuf[96];
+        snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s zone %s", macStr, value.c_str());
+        executeOLEDCommand(cmdBuf);
         broadcastOutput("[ESP-NOW] Sent zone change command");
       }
       break;
       
     case 5: // Set Pretty Name
       {
-        String cmd = "espnow cmd " + String(macStr) + " prettyname " + value;
-        executeOLEDCommand(cmd);
+        char cmdBuf[96];
+        snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s prettyname %s", macStr, value.c_str());
+        executeOLEDCommand(cmdBuf);
         broadcastOutput("[ESP-NOW] Sent pretty name change command");
       }
       break;

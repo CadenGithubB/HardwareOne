@@ -152,7 +152,8 @@ static const OLEDModeEntry gpsOLEDModes[] = {
     gpsOLEDModeAvailable,    // availFunc
     gpsInputHandler,         // inputFunc - X toggles sensor
     true,                    // showInMenu
-    50                       // menuOrder
+    50,                      // menuOrder
+    nullptr                  // hints
   }
 };
 

@@ -86,7 +86,8 @@ static const OLEDModeEntry apdsOLEDModes[] = {
     apdsOLEDModeAvailable,   // availFunc
     apdsInputHandler,        // inputFunc - X toggles sensor
     true,                    // showInMenu
-    35                       // menuOrder
+    35,                      // menuOrder
+    nullptr                  // hints
   }
 };
 

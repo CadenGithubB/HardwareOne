@@ -140,9 +140,6 @@ struct FileTransferGuard {
 // ESP-NOW topology streams mutex - protects gTopoStreams, gTopoDeviceCache, gPeerBuffer
 extern SemaphoreHandle_t gTopoStreamsMutex;
 
-// ESP-NOW chunked message mutex - protects gActiveMessage
-extern SemaphoreHandle_t gChunkedMsgMutex;
-
 /**
  * TopoStreamsGuard - RAII guard for topology streams state mutex
  */
@@ -153,18 +150,6 @@ struct TopoStreamsGuard {
   
   TopoStreamsGuard(const TopoStreamsGuard&) = delete;
   TopoStreamsGuard& operator=(const TopoStreamsGuard&) = delete;
-};
-
-/**
- * ChunkedMsgGuard - RAII guard for chunked message state mutex
- */
-struct ChunkedMsgGuard {
-  bool held;
-  explicit ChunkedMsgGuard(const char* owner = nullptr);
-  ~ChunkedMsgGuard();
-  
-  ChunkedMsgGuard(const ChunkedMsgGuard&) = delete;
-  ChunkedMsgGuard& operator=(const ChunkedMsgGuard&) = delete;
 };
 
 // ============================================================================

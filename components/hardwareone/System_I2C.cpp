@@ -577,31 +577,9 @@ const char* cmd_i2csclpin(const String& argsInput) {
   return getDebugBuffer();
 }
 
-const char* cmd_i2cclockthermalhz(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = argsInput;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2cClockThermalHz <100000..1000000>";
-  int v = valStr.toInt();
-  if (v < 100000) v = 100000;
-  if (v > 1000000) v = 1000000;
-  setSetting(gSettings.i2cClockThermalHz, v);
-  snprintf(getDebugBuffer(), 1024, "i2cClockThermalHz set to %d", v);
-  return getDebugBuffer();
-}
-
-const char* cmd_i2cclocktofhz(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String valStr = argsInput;
-  valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2cClockToFHz <50000..400000>";
-  int v = valStr.toInt();
-  if (v < 50000) v = 50000;
-  if (v > 400000) v = 400000;
-  setSetting(gSettings.i2cClockToFHz, v);
-  snprintf(getDebugBuffer(), 1024, "i2cClockToFHz set to %d", v);
-  return getDebugBuffer();
-}
+// Sensor-specific I2C clock commands moved to their respective sensor modules:
+// - thermalI2cClockHz -> i2csensor-mlx90640.cpp (thermal module)
+// - tofI2cClockHz -> i2csensor-vl53l4cx.cpp (ToF module)
 
 const char* cmd_i2cscan(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1463,6 +1441,59 @@ static const char* cmd_sensorautostart(const String& argsInput) {
 }
 
 // ============================================================================
+// I2C Bus Recovery / Pause / Resume Commands
+// ============================================================================
+
+const char* cmd_i2creset(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return "Error: I2C manager not initialized";
+  
+  broadcastOutput("[I2C] Starting bus reset...");
+  broadcastOutput("[I2C] Step 1/3: Pausing sensor polling...");
+  mgr->pausePolling();
+  vTaskDelay(pdMS_TO_TICKS(200));
+  
+  broadcastOutput("[I2C] Step 2/3: Performing bus recovery (clock toggle + reinit)...");
+  mgr->performBusRecovery();
+  
+  broadcastOutput("[I2C] Step 3/3: Resuming sensor polling...");
+  mgr->resumePolling();
+  
+  broadcastOutput("[I2C] Bus reset complete. Run 'i2chealth' to check device status.");
+  return "[I2C] Bus reset complete";
+}
+
+const char* cmd_i2cpause(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return "Error: I2C manager not initialized";
+  
+  if (mgr->isPollingPaused()) {
+    return "[I2C] Polling already paused";
+  }
+  
+  mgr->pausePolling();
+  return "[I2C] Sensor polling paused. Use 'i2cresume' to resume.";
+}
+
+const char* cmd_i2cresume(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return "Error: I2C manager not initialized";
+  
+  if (!mgr->isPollingPaused()) {
+    return "[I2C] Polling already running";
+  }
+  
+  mgr->resumePolling();
+  return "[I2C] Sensor polling resumed";
+}
+
+// ============================================================================
 // Sensor Command Registry
 // ============================================================================
 
@@ -1480,8 +1511,12 @@ const CommandEntry i2cCommands[] = {
   // Bus Configuration
   { "i2csdapin", "Set I2C SDA pin: <0..39>", true, cmd_i2csdapin, "Usage: i2cSdaPin <0..39>" },
   { "i2csclpin", "Set I2C SCL pin: <0..39>", true, cmd_i2csclpin, "Usage: i2cSclPin <0..39>" },
-  { "i2cclockthermalhz", "I2C clock thermal: <100000..1000000>", true, cmd_i2cclockthermalhz, "Usage: i2cClockThermalHz <100000..1000000>" },
-  { "i2cclocktofhz", "I2C clock ToF: <50000..400000>", true, cmd_i2cclocktofhz, "Usage: i2cClockToFHz <50000..400000>" },
+  // Note: Sensor-specific I2C clock commands (thermalI2cClockHz, tofI2cClockHz) are in their respective sensor modules
+  
+  // Bus Management
+  { "i2creset", "Reset I2C bus: pause polling, recover bus, resume.", false, cmd_i2creset },
+  { "i2cpause", "Pause all I2C sensor polling.", false, cmd_i2cpause },
+  { "i2cresume", "Resume I2C sensor polling.", false, cmd_i2cresume },
   
   // Diagnostics
   { "i2cmetrics", "Show I2C bus performance metrics.", false, cmd_i2cmetrics },
@@ -2073,13 +2108,10 @@ void sensorQueueProcessorTask(void* param) {
 // This allows runtime toggling without recompiling (reboot required)
 static const SettingEntry i2cSettingEntries[] = {
   { "i2cBusEnabled", SETTING_BOOL, &gSettings.i2cBusEnabled, 1, 0, nullptr, 0, 1, "I2C Bus Enabled (reboot required)", nullptr },
-  { "i2cSensorsEnabled", SETTING_BOOL, &gSettings.i2cSensorsEnabled, 1, 0, nullptr, 0, 1, "I2C Sensors Enabled", nullptr },
   { "i2cSdaPin", SETTING_INT, &gSettings.i2cSdaPin, I2C_SDA_PIN_DEFAULT,
     0, nullptr, 0, 48, "I2C SDA Pin (reboot required)", nullptr },
   { "i2cSclPin", SETTING_INT, &gSettings.i2cSclPin, I2C_SCL_PIN_DEFAULT,
-    0, nullptr, 0, 48, "I2C SCL Pin (reboot required)", nullptr },
-  { "i2cClockThermalHz", SETTING_INT, &gSettings.i2cClockThermalHz, 800000, 0, nullptr, 100000, 1000000, "Thermal I2C Clock (Hz)", nullptr },
-  { "i2cClockToFHz", SETTING_INT, &gSettings.i2cClockToFHz, 200000, 0, nullptr, 50000, 400000, "ToF I2C Clock (Hz)", nullptr }
+    0, nullptr, 0, 48, "I2C SCL Pin (reboot required)", nullptr }
 };
 
 extern const SettingsModule i2cSettingsModule = {
@@ -2103,12 +2135,10 @@ extern const SettingsModule i2cSettingsModule = {
 
 void processAutoStartSensors() {
   // Debug: Print I2C flags to diagnose auto-start issues
-  DEBUG_I2CF("[AutoStart] I2C check: i2cBus=%d i2cSensors=%d",
-                gSettings.i2cBusEnabled ? 1 : 0,
-                gSettings.i2cSensorsEnabled ? 1 : 0);
+  DEBUG_I2CF("[AutoStart] I2C check: i2cBus=%d", gSettings.i2cBusEnabled ? 1 : 0);
   
-  if (!gSettings.i2cBusEnabled || !gSettings.i2cSensorsEnabled) {
-    INFO_I2CF("[AutoStart] I2C disabled, skipping sensor auto-start");
+  if (!gSettings.i2cBusEnabled) {
+    INFO_I2CF("[AutoStart] I2C bus disabled, skipping sensor auto-start");
     return;
   }
 

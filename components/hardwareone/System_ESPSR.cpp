@@ -2843,7 +2843,13 @@ static const char* cmd_voice_status_cli(const String& argsInput) {
     }
     xSemaphoreGive(gVoiceArmMutex);
   } else {
-    out = gVoiceArmed ? (String("voice: armed user='") + gVoiceArmedUser + "' by=" + transportToStableString(gVoiceArmedByTransport)) : "voice: disarmed";
+    if (gVoiceArmed) {
+      char buf[96];
+      snprintf(buf, sizeof(buf), "voice: armed user='%s' by=%s", gVoiceArmedUser.c_str(), transportToStableString(gVoiceArmedByTransport));
+      out = buf;
+    } else {
+      out = "voice: disarmed";
+    }
   }
   return out.c_str();
 }

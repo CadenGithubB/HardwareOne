@@ -300,7 +300,8 @@ static const OLEDModeEntry cliViewerEntry = {
   isCLIViewerAvailable,
   handleCLIViewerInput,
   true,
-  92
+  92,
+  nullptr  // dynamic hints (shows line count)
 };
 
 static const OLEDModeEntry cliViewerModes[] = { cliViewerEntry };

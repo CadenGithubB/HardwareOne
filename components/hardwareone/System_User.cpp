@@ -787,7 +787,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     }
   }
 
-  broadcastOutput(String("[admin] Approved user: ") + username);
+  BROADCAST_PRINTF("[admin] Approved user: %s", username.c_str());
 
   // If NTP already synced, resolve the creation timestamp immediately
   if (time(nullptr) > 0) {
@@ -946,7 +946,7 @@ static bool promoteUserToAdminInternal(const String& username, String& errorOut)
               // Replace the entire role value with "admin"
               String before = json.substring(0, roleValueStart);
               String after = json.substring(roleValueEnd);
-              json = before + String("admin") + after;
+              json = before + "admin" + after;
               updated = true;
               break;
             }
@@ -972,7 +972,7 @@ static bool promoteUserToAdminInternal(const String& username, String& errorOut)
     errorOut = "Failed to write users.json";
     return false;
   }
-  broadcastOutput(String("[admin] Promoted user to admin: ") + username);
+  BROADCAST_PRINTF("[admin] Promoted user to admin: %s", username.c_str());
 
   // Serial admin status now checked in real-time via isAdminUser()
   if (gSerialAuthed && gSerialUser == username) {
@@ -1063,7 +1063,7 @@ static bool demoteUserFromAdminInternal(const String& username, String& errorOut
               // Replace the entire role value with "user"
               String before = json.substring(0, roleValueStart);
               String after = json.substring(roleValueEnd);
-              json = before + String("user") + after;
+              json = before + "user" + after;
               updated = true;
               break;
             }
@@ -1085,7 +1085,7 @@ static bool demoteUserFromAdminInternal(const String& username, String& errorOut
     errorOut = "Failed to write users.json";
     return false;
   }
-  broadcastOutput(String("[admin] Demoted user from admin: ") + username);
+  BROADCAST_PRINTF("[admin] Demoted user from admin: %s", username.c_str());
 
   // Serial admin status now checked in real-time via isAdminUser()
   if (gSerialAuthed && gSerialUser == username) {
@@ -1804,7 +1804,9 @@ struct UserTimestampInfo {
 
 // Helper: Check if username exists in users.json content
 bool usernameExistsInUsersJson(const String& json, const String& username) {
-  String needle = String("\"username\": \"") + username + "\"";
+  char needleBuf[80];
+  snprintf(needleBuf, sizeof(needleBuf), "\"username\": \"%s\"", username.c_str());
+  String needle = needleBuf;
   return json.indexOf(needle) >= 0;
 }
 
@@ -1852,11 +1854,12 @@ static bool formatEpochAsISO8601(time_t epoch, char* buf, size_t bufSize);
 // Extract integer field from JSON substring
 static bool extractJsonInt(const String& json, const char* fieldName,
                            int& outValue, int searchStart = 0) {
-  String needle = String("\"") + fieldName + "\":";
-  int idx = json.indexOf(needle, searchStart);
+  char needleBuf[64];
+  snprintf(needleBuf, sizeof(needleBuf), "\"%s\":", fieldName);
+  int idx = json.indexOf(needleBuf, searchStart);
   if (idx < 0) return false;
 
-  int valueStart = idx + needle.length();
+  int valueStart = idx + strlen(needleBuf);
   while (valueStart < json.length() && (json[valueStart] == ' ' || json[valueStart] == '\t')) {
     valueStart++;
   }
@@ -2313,8 +2316,9 @@ void writeBootAnchor() {
   newAnchor["epochAtSync"] = (uint32_t)now;
   newAnchor["millisAtSync"] = (uint32_t)currentMillis;
 
-  String tempFile = String(USERS_JSON_FILE) + ".tmp";
-  File file = LittleFS.open(tempFile.c_str(), "w");
+  char tempFile[48];
+  snprintf(tempFile, sizeof(tempFile), "%s.tmp", USERS_JSON_FILE);
+  File file = LittleFS.open(tempFile, "w");
   if (!file) return;
   
   size_t written = serializeJson(doc, file);
@@ -2322,7 +2326,7 @@ void writeBootAnchor() {
   
   if (written > 0) {
     LittleFS.remove(USERS_JSON_FILE);
-    LittleFS.rename(tempFile.c_str(), USERS_JSON_FILE);
+    LittleFS.rename(tempFile, USERS_JSON_FILE);
   }
 }
 

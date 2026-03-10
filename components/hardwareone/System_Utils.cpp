@@ -322,10 +322,11 @@ String base64Decode(const String& input) {
 // ============================================================================
 
 bool parseJsonBool(const String& src, const char* key, bool& out) {
-  String k = String("\"") + key + "\":";
-  int p = src.indexOf(k);
+  char kBuf[64];
+  snprintf(kBuf, sizeof(kBuf), "\"%s\":", key);
+  int p = src.indexOf(kBuf);
   if (p < 0) return false;
-  p += k.length();
+  p += strlen(kBuf);
   while (p < (int)src.length() && src[p] == ' ') p++;
   if (p >= (int)src.length()) return false;
   if (src.startsWith("true", p)) {
@@ -348,10 +349,11 @@ bool parseJsonBool(const String& src, const char* key, bool& out) {
 }
 
 bool parseJsonInt(const String& src, const char* key, int& out) {
-  String k = String("\"") + key + "\":";
-  int p = src.indexOf(k);
+  char kBuf[64];
+  snprintf(kBuf, sizeof(kBuf), "\"%s\":", key);
+  int p = src.indexOf(kBuf);
   if (p < 0) return false;
-  p += k.length();
+  p += strlen(kBuf);
   while (p < (int)src.length() && src[p] == ' ') p++;
   if (p >= (int)src.length()) return false;
   int end = p;
@@ -369,10 +371,11 @@ bool parseJsonInt(const String& src, const char* key, int& out) {
 }
 
 bool parseJsonFloat(const String& src, const char* key, float& out) {
-  String k = String("\"") + key + "\":";
-  int p = src.indexOf(k);
+  char kBuf[64];
+  snprintf(kBuf, sizeof(kBuf), "\"%s\":", key);
+  int p = src.indexOf(kBuf);
   if (p < 0) return false;
-  p += k.length();
+  p += strlen(kBuf);
   while (p < (int)src.length() && src[p] == ' ') p++;
   if (p >= (int)src.length()) return false;
   bool seenDigit = false, seenDot = false;
@@ -408,10 +411,11 @@ bool parseJsonU16(const String& src, const char* key, uint16_t& out) {
 }
 
 bool parseJsonString(const String& src, const char* key, String& out) {
-  String k = String("\"") + key + "\":\"";
-  int p = src.indexOf(k);
+  char kBuf[64];
+  snprintf(kBuf, sizeof(kBuf), "\"%s\":\"", key);
+  int p = src.indexOf(kBuf);
   if (p < 0) return false;
-  p += k.length();
+  p += strlen(kBuf);
   int end = src.indexOf('\"', p);
   if (end < 0) return false;
   out = src.substring(p, end);
@@ -419,10 +423,12 @@ bool parseJsonString(const String& src, const char* key, String& out) {
 }
 
 bool extractObjectByKey(const String& src, const char* key, String& outObj) {
-  String k = String("\"") + key + "\"";
-  int keyPos = src.indexOf(k);
+  char kBuf[64];
+  snprintf(kBuf, sizeof(kBuf), "\"%s\"", key);
+  int kLen = strlen(kBuf);
+  int keyPos = src.indexOf(kBuf);
   if (keyPos < 0) return false;
-  int colon = src.indexOf(':', keyPos + k.length());
+  int colon = src.indexOf(':', keyPos + kLen);
   if (colon < 0) return false;
   int openBrace = src.indexOf('{', colon);
   if (openBrace < 0) return false;
@@ -440,10 +446,12 @@ bool extractObjectByKey(const String& src, const char* key, String& outObj) {
 }
 
 bool extractArrayByKey(const String& src, const char* key, String& outArray) {
-  String k = String("\"") + key + "\"";
-  int keyPos = src.indexOf(k);
+  char kBuf[64];
+  snprintf(kBuf, sizeof(kBuf), "\"%s\"", key);
+  int kLen = strlen(kBuf);
+  int keyPos = src.indexOf(kBuf);
   if (keyPos < 0) return false;
-  int colon = src.indexOf(':', keyPos + k.length());
+  int colon = src.indexOf(':', keyPos + kLen);
   if (colon < 0) return false;
   int lb = src.indexOf('[', colon);
   if (lb < 0) return false;
@@ -771,14 +779,26 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
   }
   
   // Redact sensitive data from command
-  String redactedCmd = redactCmdForAudit(String(cmd));
+  String redactedCmd = redactCmdForAudit(cmd);
   
-  // Result summary (first 40 chars, single line)
-  String resultSummary = result ? String(result) : "OK";
-  resultSummary.replace("\n", " ");
-  resultSummary.replace("\r", " ");
-  if (resultSummary.length() > 40) {
-    resultSummary = resultSummary.substring(0, 37) + "...";
+  // Result summary (first 40 chars, single line, no heap alloc)
+  char resultBuf[44];
+  if (result && result[0] != '\0') {
+    size_t len = strlen(result);
+    if (len > 40) {
+      memcpy(resultBuf, result, 37);
+      resultBuf[37] = '.'; resultBuf[38] = '.'; resultBuf[39] = '.';
+      resultBuf[40] = '\0';
+    } else {
+      strncpy(resultBuf, result, sizeof(resultBuf) - 1);
+      resultBuf[sizeof(resultBuf) - 1] = '\0';
+    }
+    // Replace newlines with spaces
+    for (char* p = resultBuf; *p; p++) {
+      if (*p == '\n' || *p == '\r') *p = ' ';
+    }
+  } else {
+    strcpy(resultBuf, "OK");
   }
   
   // Status indicator
@@ -791,10 +811,10 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
            source,
            redactedCmd.c_str(),
            status,
-           resultSummary.c_str());
+           resultBuf);
   
   // Append to audit log with 500KB cap (rotates automatically)
-  appendLineWithCap("/system/sys_logs/command-audit.log", String(entry), 500 * 1024);
+  appendLineWithCap("/system/sys_logs/command-audit.log", entry, 500 * 1024);
 }
 
 // Automation logging
@@ -1392,19 +1412,19 @@ extern void logTimeSyncedMarkerIfReady();
 
 void setupNTP() {
   long gmtOffset = (long)gSettings.tzOffsetMinutes * 60;  // seconds
-  DEBUG_DATETIMEF("[NTP Setup] Starting NTP configuration");
-  DEBUG_DATETIMEF("[NTP Setup] Primary server: %s", gSettings.ntpServer.c_str());
-  DEBUG_DATETIMEF("[NTP Setup] GMT offset: %ld seconds (%d minutes)", gmtOffset, gSettings.tzOffsetMinutes);
-  DEBUG_DATETIMEF("[NTP Setup] WiFi status: %s", WiFi.isConnected() ? "CONNECTED" : "DISCONNECTED");
+  DEBUG_SYSTEMF("[NTP Setup] Starting NTP configuration");
+  DEBUG_SYSTEMF("[NTP Setup] Primary server: %s", gSettings.ntpServer.c_str());
+  DEBUG_SYSTEMF("[NTP Setup] GMT offset: %ld seconds (%d minutes)", gmtOffset, gSettings.tzOffsetMinutes);
+  DEBUG_SYSTEMF("[NTP Setup] WiFi status: %s", WiFi.isConnected() ? "CONNECTED" : "DISCONNECTED");
   if (WiFi.isConnected()) {
-    DEBUG_DATETIMEF("[NTP Setup] WiFi IP: %s", WiFi.localIP().toString().c_str());
-    DEBUG_DATETIMEF("[NTP Setup] WiFi gateway: %s", WiFi.gatewayIP().toString().c_str());
-    DEBUG_DATETIMEF("[NTP Setup] WiFi DNS: %s", WiFi.dnsIP().toString().c_str());
-    DEBUG_DATETIMEF("[NTP Setup] WiFi subnet: %s", WiFi.subnetMask().toString().c_str());
+    DEBUG_SYSTEMF("[NTP Setup] WiFi IP: %s", WiFi.localIP().toString().c_str());
+    DEBUG_SYSTEMF("[NTP Setup] WiFi gateway: %s", WiFi.gatewayIP().toString().c_str());
+    DEBUG_SYSTEMF("[NTP Setup] WiFi DNS: %s", WiFi.dnsIP().toString().c_str());
+    DEBUG_SYSTEMF("[NTP Setup] WiFi subnet: %s", WiFi.subnetMask().toString().c_str());
   }
 
   // Use standard configTime() with hostname-based NTP servers
-  DEBUG_DATETIMEF("[NTP Setup] Configuring NTP with hostname-based servers");
+  DEBUG_SYSTEMF("[NTP Setup] Configuring NTP with hostname-based servers");
 
   // Try multiple reliable NTP servers for redundancy
   configTime(gmtOffset, 0,
@@ -1412,48 +1432,48 @@ void setupNTP() {
              "time.google.com",            // Google
              "time.cloudflare.com");       // Cloudflare
 
-  DEBUG_DATETIMEF("[NTP Setup] configTime() completed with servers:");
-  DEBUG_DATETIMEF("[NTP Setup]   Primary: %s", gSettings.ntpServer.c_str());
-  DEBUG_DATETIMEF("[NTP Setup]   Backup1: time.google.com");
-  DEBUG_DATETIMEF("[NTP Setup]   Backup2: time.cloudflare.com");
+  DEBUG_SYSTEMF("[NTP Setup] configTime() completed with servers:");
+  DEBUG_SYSTEMF("[NTP Setup]   Primary: %s", gSettings.ntpServer.c_str());
+  DEBUG_SYSTEMF("[NTP Setup]   Backup1: time.google.com");
+  DEBUG_SYSTEMF("[NTP Setup]   Backup2: time.cloudflare.com");
 }
 
 bool syncNTPAndResolve() {
-  DEBUG_DATETIMEF("[syncNTPAndResolve] Starting NTP sync process");
+  DEBUG_SYSTEMF("[syncNTPAndResolve] Starting NTP sync process");
 
   if (!WiFi.isConnected()) {
-    DEBUG_DATETIMEF("[syncNTPAndResolve] FAILED - WiFi not connected");
+    DEBUG_SYSTEMF("[syncNTPAndResolve] FAILED - WiFi not connected");
     broadcastOutput("NTP sync requires WiFi connection");
     return false;
   }
 
-  DEBUG_DATETIMEF("[syncNTPAndResolve] WiFi connected, proceeding with NTP sync");
+  DEBUG_SYSTEMF("[syncNTPAndResolve] WiFi connected, proceeding with NTP sync");
 
   // Wait for DNS to be ready after WiFi connection
-  DEBUG_DATETIMEF("[syncNTPAndResolve] Waiting 500ms for DNS initialization...");
+  DEBUG_SYSTEMF("[syncNTPAndResolve] Waiting 500ms for DNS initialization...");
   delay(500);
 
   // Test DNS resolution before attempting NTP
   IPAddress testIP;
   bool dnsWorking = WiFi.hostByName("time.google.com", testIP);
   bool validIP = dnsWorking && testIP != IPAddress(0, 0, 0, 0);
-  DEBUG_DATETIMEF("[syncNTPAndResolve] DNS test: hostByName('time.google.com') = %s, IP=%s",
+  DEBUG_SYSTEMF("[syncNTPAndResolve] DNS test: hostByName('time.google.com') = %s, IP=%s",
                   validIP ? "SUCCESS" : "FAILED",
                   testIP.toString().c_str());
 
   if (!validIP) {
-    DEBUG_DATETIMEF("[syncNTPAndResolve] WARNING: DNS resolution failed (returned %s), NTP may not work",
+    DEBUG_SYSTEMF("[syncNTPAndResolve] WARNING: DNS resolution failed (returned %s), NTP may not work",
                     testIP.toString().c_str());
     broadcastOutput("⚠ DNS resolution failed - NTP may not work");
     broadcastOutput("  Waiting 2 more seconds for DNS to initialize...");
     delay(2000);
     dnsWorking = WiFi.hostByName("pool.ntp.org", testIP);
     validIP = dnsWorking && testIP != IPAddress(0, 0, 0, 0);
-    DEBUG_DATETIMEF("[syncNTPAndResolve] DNS retry: hostByName('pool.ntp.org') = %s, IP=%s",
+    DEBUG_SYSTEMF("[syncNTPAndResolve] DNS retry: hostByName('pool.ntp.org') = %s, IP=%s",
                     validIP ? "SUCCESS" : "FAILED",
                     testIP.toString().c_str());
     if (!validIP) {
-      DEBUG_DATETIMEF("[syncNTPAndResolve] ERROR: DNS still not working after retry");
+      DEBUG_SYSTEMF("[syncNTPAndResolve] ERROR: DNS still not working after retry");
       broadcastOutput("[ERROR] DNS not working - NTP will fail");
       return false;
     }
@@ -1469,7 +1489,7 @@ bool syncNTPAndResolve() {
   const int maxWaitSeconds = 15;
   const int iterationsPerSecond = 5;  // 200ms per iteration
   const int maxIterations = maxWaitSeconds * iterationsPerSecond;
-  DEBUG_DATETIMEF("[syncNTPAndResolve] Starting %d-second wait loop for NTP response", maxWaitSeconds);
+  DEBUG_SYSTEMF("[syncNTPAndResolve] Starting %d-second wait loop for NTP response", maxWaitSeconds);
 
   for (int i = 0; i < maxIterations && !ntpSynced; i++) {
     delay(200);
@@ -1479,18 +1499,18 @@ bool syncNTPAndResolve() {
       char progressMsg[64];
       snprintf(progressMsg, sizeof(progressMsg), "  Looking for updates... %d/%d seconds", i / iterationsPerSecond, maxWaitSeconds);
       broadcastOutput(progressMsg);
-      DEBUG_DATETIMEF("[syncNTPAndResolve] Waiting... %d/%d seconds elapsed", i / iterationsPerSecond, maxWaitSeconds);
+      DEBUG_SYSTEMF("[syncNTPAndResolve] Waiting... %d/%d seconds elapsed", i / iterationsPerSecond, maxWaitSeconds);
     }
 
     time_t now = time(nullptr);
-    DEBUG_DATETIMEF("[syncNTPAndResolve] time(nullptr) returned: %lu", (unsigned long)now);
+    DEBUG_SYSTEMF("[syncNTPAndResolve] time(nullptr) returned: %lu", (unsigned long)now);
 
     struct tm timeinfo;
     bool gotLocalTime = getLocalTime(&timeinfo, 10);  // 10ms timeout
-    DEBUG_DATETIMEF("[syncNTPAndResolve] getLocalTime(10ms) returned: %s", gotLocalTime ? "true" : "false");
+    DEBUG_SYSTEMF("[syncNTPAndResolve] getLocalTime(10ms) returned: %s", gotLocalTime ? "true" : "false");
 
     if (gotLocalTime) {
-      DEBUG_DATETIMEF("[syncNTPAndResolve] SUCCESS! Time synced: %04d-%02d-%02d %02d:%02d:%02d",
+      DEBUG_SYSTEMF("[syncNTPAndResolve] SUCCESS! Time synced: %04d-%02d-%02d %02d:%02d:%02d",
                       timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
                       timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
       logTimeSyncedMarkerIfReady();
@@ -1500,7 +1520,7 @@ bool syncNTPAndResolve() {
   }
 
   if (ntpSynced) {
-    DEBUG_DATETIMEF("[syncNTPAndResolve] NTP sync completed successfully");
+    DEBUG_SYSTEMF("[syncNTPAndResolve] NTP sync completed successfully");
     broadcastOutput("[OK] NTP time synchronized successfully");
     
     // Sync RTC from NTP time to keep RTC accurate
@@ -1525,8 +1545,8 @@ bool syncNTPAndResolve() {
     DEBUG_SYSTEMF("notifyAutomationScheduler completed");
     return true;
   } else {
-    DEBUG_DATETIMEF("[syncNTPAndResolve] TIMEOUT - NTP sync failed after %d seconds", maxWaitSeconds);
-    DEBUG_DATETIMEF("[syncNTPAndResolve] Check: WiFi=%s, DNS=%s, Gateway=%s",
+    DEBUG_SYSTEMF("[syncNTPAndResolve] TIMEOUT - NTP sync failed after %d seconds", maxWaitSeconds);
+    DEBUG_SYSTEMF("[syncNTPAndResolve] Check: WiFi=%s, DNS=%s, Gateway=%s",
                     WiFi.isConnected() ? "OK" : "FAIL",
                     WiFi.dnsIP().toString().c_str(),
                     WiFi.gatewayIP().toString().c_str());
@@ -2561,7 +2581,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
       cmdName = cmdStr.substring(0, spacePos);
     }
     snprintf(out, outSize, "Error: Admin access required for command '%s'. Contact an administrator.", cmdName.c_str());
-    logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, String("cmd=") + redactCmdForAudit(line));
+    { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(line).c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
     return false;
   }
   return true;
@@ -2575,25 +2595,28 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   out[0] = '\0';
   gExecIsAdmin = isAdminUser(ctx.user);
   gExecAuthContext = ctx;  // Store full context (includes opaque for ESP-NOW streaming)
-  DEBUG_CMD_FLOWF("[execCmd] user=%s ip=%s path=%s cmd=%s", ctx.user.c_str(), ctx.ip.c_str(), ctx.path.c_str(), redactCmdForAudit(String(cmd)).c_str());
+
+  // Create command String once — reuse everywhere (avoids 5+ String(cmd) temporaries)
+  String command = cmd;
+  command.trim();
+
+  DEBUG_CMD_FLOWF("[execCmd] user=%s ip=%s path=%s cmd=%.80s", ctx.user.c_str(), ctx.ip.c_str(), ctx.path.c_str(), cmd);
 
   // Centralized authorization (admin-required and future policies)
-  if (!authorizeCommand(ctx, String(cmd), out, outSize)) {
+  if (!authorizeCommand(ctx, command, out, outSize)) {
     return false;
   }
 
   // Log command execution if automation logging is active
   if (gAutoLogActive && gInAutomationContext) {
-    String cmdMsg = cmd;
     if (gAutoLogAutomationName.length() > 0) {
-      cmdMsg = "[" + gAutoLogAutomationName + "] " + String(cmd);
+      char logBuf[300];
+      snprintf(logBuf, sizeof(logBuf), "[%s] %s", gAutoLogAutomationName.c_str(), cmd);
+      appendAutoLogEntry("COMMAND", logBuf);
+    } else {
+      appendAutoLogEntry("COMMAND", cmd);
     }
-    appendAutoLogEntry("COMMAND", cmdMsg);
   }
-
-  // ===== INLINED REGISTRY LOGIC (eliminates 2 function calls) =====
-  String command = cmd;
-  command.trim();
 
   if (command.length() == 0) {
     strncpy(out, "Empty command", outSize - 1);
@@ -2682,7 +2705,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   size_t foundLen = 0;
 
   // In help mode, handle navigation commands using cli_system module
-  if (handleHelpNavigation(String(cmd), out, outSize)) {
+  if (handleHelpNavigation(command, out, outSize)) {
     return true;
   }
 
@@ -2743,20 +2766,21 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 
         // Log output if automation logging is active
         if (gAutoLogActive && gInAutomationContext) {
-          String logOutput = out;
-          if (logOutput.length() > 200) {
-            logOutput = logOutput.substring(0, 197) + "...";
-          }
-          logOutput.replace("\n", " ");
-          logOutput.replace("\r", " ");
-          appendAutoLogEntry("OUTPUT", logOutput);
+          char logBuf[201];
+          snprintf(logBuf, sizeof(logBuf), "%.197s%s", out, strlen(out) > 197 ? "..." : "");
+          for (char* c = logBuf; *c; c++) { if (*c == '\n' || *c == '\r') *c = ' '; }
+          appendAutoLogEntry("OUTPUT", logBuf);
         }
 
         // Command audit logging (always-on)
         bool success = (strncmp(out, "Error", 5) != 0) && (strncmp(out, "ERROR", 5) != 0);
         logCommandExecution(ctx, cmd, success, out);
 
-        logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, String("cmd=") + redactCmdForAudit(String(cmd)));
+        {
+          char auditBuf[180];
+          snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(command).c_str());
+          logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf);
+        }
         DEBUG_CMD_FLOWF("[execCmd] out_len=%zu", strlen(out));
         return true;
       }
@@ -2788,27 +2812,26 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 
   // Log command output if automation logging is active
   if (gAutoLogActive && gInAutomationContext) {
-    // Truncate very long outputs for readability
-    String logOutput = out;
-    if (logOutput.length() > 200) {
-      logOutput = logOutput.substring(0, 197) + "...";
-    }
-    // Replace newlines with spaces for single-line log format
-    logOutput.replace("\n", " ");
-    logOutput.replace("\r", " ");
-    appendAutoLogEntry("OUTPUT", logOutput);
+    char logBuf[201];
+    snprintf(logBuf, sizeof(logBuf), "%.197s%s", out, strlen(out) > 197 ? "..." : "");
+    for (char* c = logBuf; *c; c++) { if (*c == '\n' || *c == '\r') *c = ' '; }
+    appendAutoLogEntry("OUTPUT", logBuf);
   }
 
   // We don't have structured success/failure from registry handlers; assume success for audit purposes
-  logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, String("cmd=") + redactCmdForAudit(String(cmd)));
+  {
+    char auditBuf[180];
+    snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(command).c_str());
+    logAuthAttempt(true, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf);
+  }
   DEBUG_CMD_FLOWF("[execCmd] out_len=%zu", strlen(out));
   return true;
 }
 
 // Queued command execution with deadlock avoidance
 bool submitAndExecuteSync(const Command& cmd, String& out) {
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] enter: cmd.line.length()=%d", cmd.line.length());
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] cmd.line_first_80='%s'", cmd.line.substring(0, 80).c_str());
+  DEBUG_CMD_FLOWF("[submitSync] cmd='%.80s' origin=%d user='%s'",
+                  cmd.line.c_str(), (int)cmd.ctx.origin, cmd.ctx.auth.user.c_str());
 
   // If executor queue isn't ready (very early boot) fallback to direct call
   if (gCmdExecQ == nullptr) {
@@ -2825,16 +2848,10 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
     return ok;
   }
 
-  // Package request
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] ENTRY: cmd.line='%s' len=%d", cmd.line.c_str(), cmd.line.length());
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] cmd.ctx.origin=%d validateOnly=%d", (int)cmd.ctx.origin, cmd.ctx.validateOnly ? 1 : 0);
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] cmd.ctx.auth.user='%s' path='%s'", cmd.ctx.auth.user.c_str(), cmd.ctx.auth.path.c_str());
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] Entered: r=%p cmd.line='%s' cmd.ctx.origin=%d", nullptr, cmd.line.c_str(), (int)cmd.ctx.origin);
-  
   // Allocate ExecReq from PSRAM since it's large (8KB+)
   ExecReq* r = (ExecReq*)ps_alloc(sizeof(ExecReq), AllocPref::PreferPSRAM, "cmd.exec.req");
   if (!r) {
-    DEBUG_CMD_FLOWF("[submitAndExecuteSync] FAILED to allocate ExecReq (heap=%lu psram=%lu)",
+    DEBUG_CMD_FLOWF("[submitSync] FAILED alloc ExecReq heap=%lu psram=%lu",
                     (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
     Serial.printf("[ERROR] Out of memory - cannot create ExecReq: heap=%lu psram=%lu\n", (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
     broadcastOutput("[ERROR] Out of memory - cannot create request");
@@ -2842,73 +2859,41 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
   }
   // Initialize the structure (placement new for C++ objects)
   new (r) ExecReq();
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] ExecReq allocated successfully: r=%p size=%d heap=%lu",
-                  r, (int)sizeof(ExecReq), (unsigned long)ESP.getFreeHeap());
   
   // Validate cmd.line before proceeding
   if (cmd.line.length() == 0) {
-    DEBUG_CMD_FLOWF("[submitAndExecuteSync] ERROR: Empty command line");
     r->~ExecReq();
     free(r);
     broadcastOutput("[ERROR] Empty command");
     return false;
   }
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] Free heap after alloc: %lu bytes", (unsigned long)ESP.getFreeHeap());
   
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] Copying cmd.line to r->line (src='%s' len=%d dst_size=%d)", 
-                  cmd.line.c_str(), cmd.line.length(), (int)sizeof(r->line));
   strncpy(r->line, cmd.line.c_str(), sizeof(r->line) - 1);
   r->line[sizeof(r->line) - 1] = '\0';
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] After strncpy: r=%p r->line='%s' len=%d", r, r->line, (int)strlen(r->line));
-  
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] Copying cmd.ctx to r->ctx (origin=%d)", (int)cmd.ctx.origin);
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] Before ctx copy: r=%p heap=%lu", r, (unsigned long)ESP.getFreeHeap());
   r->ctx = cmd.ctx;
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] After ctx copy: r=%p heap=%lu", r, (unsigned long)ESP.getFreeHeap());
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] r->ctx.origin=%d r->ctx.auth.user='%s'", (int)r->ctx.origin, r->ctx.auth.user.c_str());
   
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] Creating semaphore for r=%p", r);
   r->done = xSemaphoreCreateBinary();
   if (!r->done) {
-    DEBUG_CMD_FLOWF("[submitAndExecuteSync] FAILED to create semaphore (heap=%lu)", (unsigned long)ESP.getFreeHeap());
+    DEBUG_CMD_FLOWF("[submitSync] FAILED semaphore heap=%lu", (unsigned long)ESP.getFreeHeap());
     r->~ExecReq();
     free(r);
     broadcastOutput("[ERROR] Out of memory - cannot create semaphore");
     return false;
   }
-  DEBUG_CMD_FLOWF("[submitAndExecuteSync] Semaphore created: r=%p r->done=%p heap=%lu",
-                  r, r->done, (unsigned long)ESP.getFreeHeap());
   r->ok = false;
 
-  DEBUG_CMD_FLOWF("[submit] Preparing to send: r=%p &r=%p", r, &r);
-  DEBUG_CMD_FLOWF("[submit] Queue: gCmdExecQ=%p", gCmdExecQ);
-  DEBUG_CMD_FLOWF("[submit] Request details: origin=%d user='%.32s' path='%.64s' cmd='%.128s'",
-                  (int)r->ctx.origin,
-                  r->ctx.auth.user.c_str(),
-                  r->ctx.auth.path.c_str(),
-                  r->line);
-
   // Enqueue and wait
-  DEBUG_CMD_FLOWF("[submit] Calling xQueueSend(queue=%p, item_addr=%p, timeout=MAX)", gCmdExecQ, &r);
-  DEBUG_CMD_FLOWF("[submit] Safety check: gCmdExecQ=%p r=%p &r=%p", gCmdExecQ, r, &r);
   if (!gCmdExecQ) {
-    DEBUG_CMD_FLOWF("[submit] ERROR: gCmdExecQ is NULL!");
     vSemaphoreDelete(r->done);
     r->~ExecReq();
     free(r);
     broadcastOutput("[ERROR] Command queue is NULL");
     return false;
   }
-  if (!r) {
-    DEBUG_CMD_FLOWF("[submit] ERROR: r is NULL!");
-    broadcastOutput("[ERROR] Request pointer is NULL");
-    return false;
-  }
   BaseType_t queueResult = xQueueSend(gCmdExecQ, &r, pdMS_TO_TICKS(2000));
-  DEBUG_CMD_FLOWF("[submit] xQueueSend returned: result=%d (1=success)", queueResult);
   
   if (queueResult != pdTRUE) {
-    DEBUG_CMD_FLOWF("[submit] FAILED to send to queue! result=%d", queueResult);
+    DEBUG_CMD_FLOWF("[submitSync] queue full for '%.40s'", r->line);
     vSemaphoreDelete(r->done);
     r->~ExecReq();
     free(r);
@@ -2916,16 +2901,15 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
     return false;
   }
   
-  DEBUG_CMD_FLOWF("[submit] Waiting for semaphore: r->done=%p", r->done);
+  DEBUG_CMD_FLOWF("[submitSync] queued '%.40s' waiting...", r->line);
   if (xSemaphoreTake(r->done, pdMS_TO_TICKS(10000)) != pdTRUE) {
-    DEBUG_CMD_FLOWF("[submit] Command execution timed out (10s)");
+    DEBUG_CMD_FLOWF("[submitSync] TIMEOUT for '%.40s'", r->line);
     vSemaphoreDelete(r->done);
     r->~ExecReq();
     free(r);
     out = "[ERROR] Command timed out";
     return false;
   }
-  DEBUG_CMD_FLOWF("[submit] Semaphore taken - command completed");
 
   out = r->out;  // Copy from char array to String
   bool ok = r->ok;
@@ -2935,7 +2919,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
   r->~ExecReq();
   free(r);
 
-  DEBUG_CMD_FLOWF("[submit] done ok=%d len=%d", ok ? 1 : 0, out.length());
+  DEBUG_CMD_FLOWF("[submitSync] done ok=%d len=%d", ok ? 1 : 0, out.length());
   return ok;
 }
 
@@ -3049,7 +3033,9 @@ bool initIconSystem() {
 }
 
 String getIconPath(const char* name) {
-  return String("/icons/") + name + ".png";
+  char pathBuf[64];
+  snprintf(pathBuf, sizeof(pathBuf), "/icons/%s.png", name);
+  return String(pathBuf);
 }
 
 bool iconExists(const char* name) {

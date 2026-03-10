@@ -124,35 +124,38 @@ extern const SettingsModule presenceSettingsModule = {
 // ============================================================================
 
 static bool writeRegister(uint8_t reg, uint8_t value) {
-  extern TwoWire Wire1;
-  Wire1.beginTransmission(STHS34PF80_ADDR);
-  Wire1.write(reg);
-  Wire1.write(value);
-  return (Wire1.endTransmission() == 0);
+  return i2cDeviceTransaction(STHS34PF80_ADDR, 100000, 200, [&]() -> bool {
+    Wire1.beginTransmission(STHS34PF80_ADDR);
+    Wire1.write(reg);
+    Wire1.write(value);
+    return (Wire1.endTransmission() == 0);
+  });
 }
 
 static bool readRegister(uint8_t reg, uint8_t* value) {
-  extern TwoWire Wire1;
-  Wire1.beginTransmission(STHS34PF80_ADDR);
-  Wire1.write(reg);
-  if (Wire1.endTransmission(false) != 0) return false;
-  
-  if (Wire1.requestFrom(STHS34PF80_ADDR, (uint8_t)1) != 1) return false;
-  *value = Wire1.read();
-  return true;
+  return i2cDeviceTransaction(STHS34PF80_ADDR, 100000, 200, [&]() -> bool {
+    Wire1.beginTransmission(STHS34PF80_ADDR);
+    Wire1.write(reg);
+    if (Wire1.endTransmission(false) != 0) return false;
+    
+    if (Wire1.requestFrom(STHS34PF80_ADDR, (uint8_t)1) != 1) return false;
+    *value = Wire1.read();
+    return true;
+  });
 }
 
 static bool readRegisters(uint8_t reg, uint8_t* buffer, uint8_t len) {
-  extern TwoWire Wire1;
-  Wire1.beginTransmission(STHS34PF80_ADDR);
-  Wire1.write(reg);
-  if (Wire1.endTransmission(false) != 0) return false;
-  
-  if (Wire1.requestFrom(STHS34PF80_ADDR, len) != len) return false;
-  for (uint8_t i = 0; i < len; i++) {
-    buffer[i] = Wire1.read();
-  }
-  return true;
+  return i2cDeviceTransaction(STHS34PF80_ADDR, 100000, 200, [&]() -> bool {
+    Wire1.beginTransmission(STHS34PF80_ADDR);
+    Wire1.write(reg);
+    if (Wire1.endTransmission(false) != 0) return false;
+    
+    if (Wire1.requestFrom(STHS34PF80_ADDR, len) != len) return false;
+    for (uint8_t i = 0; i < len; i++) {
+      buffer[i] = Wire1.read();
+    }
+    return true;
+  });
 }
 
 static int16_t readInt16(uint8_t regL) {

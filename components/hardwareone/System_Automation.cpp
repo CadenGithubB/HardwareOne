@@ -912,9 +912,10 @@ const char* cmd_automation_add(const String& argsInput) {
     String wrapped = "IF " + condition + " THEN _";
     const char* conditionError = validateConditionSyntax(wrapped.c_str());
     if (conditionError && conditionError[0] != '\0') {
-      String error = String("Error: Invalid condition expression - ") + conditionError;
-      broadcastOutput(error);
-      return error.c_str();
+      static char errorBuf[192];
+      snprintf(errorBuf, sizeof(errorBuf), "Error: Invalid condition expression - %s", conditionError);
+      broadcastOutput(errorBuf);
+      return errorBuf;
     }
   }
   
@@ -963,8 +964,7 @@ const char* cmd_automation_add(const String& argsInput) {
           gCLIValidateOnly = prevValidate;
           
           if (validationResult != "VALID") {
-            String error = String("Error: Invalid command '") + part + "' - " + validationResult;
-            broadcastOutput(error);
+            BROADCAST_PRINTF("Error: Invalid command '%s' - %s", part.c_str(), validationResult.c_str());
             return "ERROR";
           }
         }
@@ -1030,7 +1030,9 @@ const char* cmd_automation_add(const String& argsInput) {
   if (idOverrideStr.length() > 0) {
     unsigned long overrideId = strtoul(idOverrideStr.c_str(), nullptr, 10);
     if (automationIdExistsInJson(json, overrideId)) {
-      String needle = String("\"id\": ") + String(overrideId);
+      char needleBuf[32];
+      snprintf(needleBuf, sizeof(needleBuf), "\"id\": %lu", overrideId);
+      String needle = needleBuf;
       int idPos = json.indexOf(needle);
       int aS = json.indexOf('[');
       int aE = json.lastIndexOf(']');
@@ -1196,8 +1198,7 @@ const char* cmd_automation_add(const String& argsInput) {
   gAutosDirty = true;
   DEBUGF(DEBUG_AUTOMATIONS, "[autos add] scheduler refresh queued (type=%s)", typeNorm.c_str());
   
-  String result = String(idOverrideStr.length() > 0 ? "Updated" : "Added") + " automation id=" + String(id) + " name=" + name;
-  broadcastOutput(result);
+  BROADCAST_PRINTF("%s automation id=%ld name=%s", idOverrideStr.length() > 0 ? "Updated" : "Added", id, name.c_str());
   return "OK";
 }
 
@@ -1219,8 +1220,7 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
   
   String idStr = getVal("id");
   if (idStr.length() == 0) {
-    String usage = String("Usage: automation ") + (enable ? "enable" : "disable") + " id=<id>";
-    broadcastOutput(usage);
+    BROADCAST_PRINTF("Usage: automation %s id=<id>", enable ? "enable" : "disable");
     return "ERROR";
   }
   
@@ -1230,8 +1230,9 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
     return "ERROR";
   }
   
-  String needle = String("\"id\": ") + idStr;
-  int idPos = json.indexOf(needle);
+  char needleBuf[32];
+  snprintf(needleBuf, sizeof(needleBuf), "\"id\": %s", idStr.c_str());
+  int idPos = json.indexOf(needleBuf);
   if (idPos < 0) {
     broadcastOutput("Error: automation id not found");
     return "ERROR";
@@ -1288,8 +1289,7 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
   
   gAutosDirty = true;
   
-  String result = String(enable ? "Enabled" : "Disabled") + " automation id=" + idStr;
-  broadcastOutput(result);
+  BROADCAST_PRINTF("%s automation id=%s", enable ? "Enabled" : "Disabled", idStr.c_str());
   return "OK";
 }
 
@@ -1317,27 +1317,28 @@ const char* cmd_automation_delete(const String& argsInput) {
   
   String json;
   if (!readText(AUTOMATIONS_JSON_FILE, json)) {
-    broadcastOutput("Error: failed to read automations.json");
+    BROADCAST_PRINTF("Error: failed to read automations.json");
     return "ERROR";
   }
-  
-  String needle = String("\"id\": ") + idStr;
-  int idPos = json.indexOf(needle);
+
+  char needleBuf[32];
+  snprintf(needleBuf, sizeof(needleBuf), "\"id\": %s", idStr.c_str());
+  int idPos = json.indexOf(needleBuf);
   if (idPos < 0) {
-    broadcastOutput("Error: automation id not found");
+    BROADCAST_PRINTF("Error: automation id not found");
     return "ERROR";
   }
-  
+
   // Authorization check: extract createdBy and verify user can delete this automation
   char createdByBuf[64];
   int objStart = json.lastIndexOf('{', idPos);
   if (objStart < 0) {
-    broadcastOutput("Error: malformed JSON");
+    BROADCAST_PRINTF("Error: malformed JSON");
     return "ERROR";
   }
   int objEnd = findJsonObjectEnd(json, objStart);
   if (objEnd < 0) {
-    broadcastOutput("Error: malformed JSON");
+    BROADCAST_PRINTF("Error: malformed JSON");
     return "ERROR";
   }
   String automationObj = json.substring(objStart, objEnd + 1);
@@ -1406,8 +1407,7 @@ const char* cmd_automation_delete(const String& argsInput) {
   
   gAutosDirty = true;
   
-  String result = String("Deleted automation id=") + idStr;
-  broadcastOutput(result);
+  BROADCAST_PRINTF("Deleted automation id=%s", idStr.c_str());
   return "OK";
 }
 
@@ -1439,8 +1439,9 @@ const char* cmd_automation_run(const String& argsInput) {
     return "ERROR";
   }
   
-  String needle = String("\"id\": ") + idStr;
-  int idPos = json.indexOf(needle);
+  char needleBuf[32];
+  snprintf(needleBuf, sizeof(needleBuf), "\"id\": %s", idStr.c_str());
+  int idPos = json.indexOf(needleBuf);
   if (idPos < 0) {
     broadcastOutput("Error: automation id not found");
     return "ERROR";
@@ -1489,8 +1490,9 @@ const char* cmd_automation_run(const String& argsInput) {
   // Log automation start if logging is active
   if (gAutoLogActive) {
     gAutoLogAutomationName = autoName;
-    String startMsg = String("Automation started: ID=") + idStr + " Name=" + autoName + " User=" + gExecUser;
-    appendAutoLogEntry("AUTO_START", startMsg);
+    char startBuf[256];
+    snprintf(startBuf, sizeof(startBuf), "Automation started: ID=%s Name=%s User=%s", idStr.c_str(), autoName.c_str(), gExecUser.c_str());
+    appendAutoLogEntry("AUTO_START", startBuf);
   }
   
   // Extract commands array (preferred) or single command (fallback)
@@ -1520,13 +1522,14 @@ const char* cmd_automation_run(const String& argsInput) {
     }
   }
   
-  String cmdsList[64];
+  static constexpr int MAX_AUTO_CMDS = 16;  // 16 commands per automation (saves ~576B stack vs 64)
+  String cmdsList[MAX_AUTO_CMDS];
   int cmdsCount = 0;
   
   if (haveArray) {
     String body = obj.substring(arrStart + 1, arrEnd);
     int i = 0;
-    while (i < (int)body.length() && cmdsCount < 64) {
+    while (i < (int)body.length() && cmdsCount < MAX_AUTO_CMDS) {
       while (i < (int)body.length() && (body[i] == ' ' || body[i] == ',' || body[i] == '\n' || body[i] == '\r' || body[i] == '\t')) i++;
       if (i >= (int)body.length()) break;
       if (body[i] == '"') {
@@ -1535,7 +1538,7 @@ const char* cmd_automation_run(const String& argsInput) {
         if (q2 < 0) break;
         String one = body.substring(q1 + 1, q2);
         one.trim();
-        if (one.length() && cmdsCount < 64) { cmdsList[cmdsCount++] = one; }
+        if (one.length() && cmdsCount < MAX_AUTO_CMDS) { cmdsList[cmdsCount++] = one; }
         i = q2 + 1;
       } else {
         int next = body.indexOf(',', i);
@@ -1558,7 +1561,7 @@ const char* cmd_automation_run(const String& argsInput) {
     }
     String cmd = obj.substring(cq1 + 1, cq2);
     cmd.trim();
-    if (cmd.length() && cmdsCount < 64) { cmdsList[cmdsCount++] = cmd; }
+    if (cmd.length() && cmdsCount < MAX_AUTO_CMDS) { cmdsList[cmdsCount++] = cmd; }
   }
   
   if (cmdsCount == 0) {
@@ -1593,11 +1596,16 @@ const char* cmd_automation_run(const String& argsInput) {
            idStr.c_str(), condition.c_str(), conditionMet ? "TRUE" : "FALSE");
     if (!conditionMet) {
       if (gAutoLogActive) {
-        String skipMsg = String("Automation skipped: ID=") + idStr + " Name=" + autoName + " Condition not met: " + condition;
-        appendAutoLogEntry("AUTO_SKIP", skipMsg);
+        char skipBuf[256];
+        snprintf(skipBuf, sizeof(skipBuf), "Automation skipped: ID=%s Name=%s Condition not met: %s", idStr.c_str(), autoName.c_str(), condition.c_str());
+        appendAutoLogEntry("AUTO_SKIP", skipBuf);
         gAutoLogAutomationName = "";
       }
-      broadcastOutput("Automation skipped - condition not met: " + condition);
+      {
+        char skipBroadcast[160];
+        snprintf(skipBroadcast, sizeof(skipBroadcast), "Automation skipped - condition not met: %.120s", condition.c_str());
+        broadcastOutput(skipBroadcast);
+      }
       return "OK";
     }
   }
@@ -1613,7 +1621,11 @@ const char* cmd_automation_run(const String& argsInput) {
   if (!gExecIsAdmin && gCurrentAutomationUser != gExecUser) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION DENIED: user='%s' isAdmin=%d tried to run automation created by '%s'",
            gExecUser.c_str(), gExecIsAdmin, gCurrentAutomationUser.c_str());
-    broadcastOutput("Error: Admin required to trigger automation created by " + gCurrentAutomationUser);
+    {
+      char authErr[120];
+      snprintf(authErr, sizeof(authErr), "Error: Admin required to trigger automation created by %s", gCurrentAutomationUser.c_str());
+      broadcastOutput(authErr);
+    }
     return "Error: Admin required";
   }
   DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION OK: user='%s' isAdmin=%d running automation created by '%s'",
@@ -1634,7 +1646,11 @@ const char* cmd_automation_run(const String& argsInput) {
     
     // Output the result (skip internal status messages - actual output comes from queue)
     if (!isAutoInternalResult(result)) {
-      broadcastOutput(String("[Automation ") + idStr + "] " + result);
+      {
+        char autoBuf[256];
+        snprintf(autoBuf, sizeof(autoBuf), "[Automation %s] %s", idStr.c_str(), result);
+        broadcastOutput(autoBuf);
+      }
     }
   }
   gCurrentAutomationUser = "";
@@ -1657,12 +1673,14 @@ const char* cmd_automation_run(const String& argsInput) {
   
   // Log automation end if logging is active
   if (gAutoLogActive) {
-    String endMsg = String("Automation completed: ID=") + idStr + " Name=" + autoName + " Commands=" + String(cmdsCount);
-    appendAutoLogEntry("AUTO_END", endMsg);
+    char endBuf[256];
+    snprintf(endBuf, sizeof(endBuf), "Automation completed: ID=%s Name=%s Commands=%d", idStr.c_str(), autoName.c_str(), cmdsCount);
+    appendAutoLogEntry("AUTO_END", endBuf);
   }
   
-  String result = String("Ran automation id=") + idStr + " (" + String(cmdsCount) + " command" + (cmdsCount == 1 ? "" : "s") + ")";
-  broadcastOutput(result);
+  char resultBuf[128];
+  snprintf(resultBuf, sizeof(resultBuf), "Ran automation id=%s (%d command%s)", idStr.c_str(), cmdsCount, cmdsCount == 1 ? "" : "s");
+  broadcastOutput(resultBuf);
   return "OK";
 }
 
@@ -1788,8 +1806,7 @@ const char* cmd_automation(const String& argsInput) {
       DEBUGF(DEBUG_AUTOMATIONS, "[autos recompute] scheduler refresh queued");
     }
     
-    String result = String("Recomputed nextAt: ") + String(recomputed) + " succeeded, " + String(failed) + " failed";
-    broadcastOutput(result);
+    BROADCAST_PRINTF("Recomputed nextAt: %d succeeded, %d failed", recomputed, failed);
     return "OK";
   } else if (subCmd == "run") {
     return cmd_automation_run(subArgs);
@@ -1956,8 +1973,9 @@ bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userD
                id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
         if (!conditionMet) {
           if (gAutoLogActive) {
-            String skipMsg = "Scheduled automation skipped: ID=" + String(id) + " Name=" + autoName + " Condition not met: " + condition;
-            appendAutoLogEntry("AUTO_SKIP", skipMsg);
+            char skipBuf[256];
+            snprintf(skipBuf, sizeof(skipBuf), "Scheduled automation skipped: ID=%ld Name=%s Condition not met: %s", id, autoName.c_str(), condition.c_str());
+            appendAutoLogEntry("AUTO_SKIP", skipBuf);
           }
           DEBUGF(DEBUG_AUTO_CONDITION, "[autos] id=%ld skipped - condition not met: %s", id, condition.c_str());
           return true;
@@ -2786,7 +2804,7 @@ const char* executeConditionalCommand(const char* command) {
       }
 
       // Extract condition part (between IF and THEN) to stack buffer
-      char conditionBuf[256];
+      char conditionBuf[128];
       size_t condLen = thenPos - 3;
       if (condLen >= sizeof(conditionBuf)) condLen = sizeof(conditionBuf) - 1;
       strncpy(conditionBuf, cmdStr + 3, condLen);
@@ -2798,7 +2816,7 @@ const char* executeConditionalCommand(const char* command) {
       while (condEnd > conditionBuf && (*condEnd == ' ' || *condEnd == '\t')) *condEnd-- = '\0';
 
       // Extract THEN command to stack buffer
-      char thenBuf[256];
+      char thenBuf[128];
       size_t thenStart = thenPos + 5;
       size_t thenEnd = (elsePos > thenPos) ? elsePos : cmdLen;
       size_t thenLen = thenEnd - thenStart;
@@ -2812,7 +2830,7 @@ const char* executeConditionalCommand(const char* command) {
       while (thenCmdEnd > thenBuf && (*thenCmdEnd == ' ' || *thenCmdEnd == '\t')) *thenCmdEnd-- = '\0';
 
       // Extract ELSE command if present
-      char elseBuf[256];
+      char elseBuf[128];
       elseBuf[0] = '\0';
       if (elsePos > thenPos) {
         size_t elseStart = elsePos + 5;
@@ -2829,7 +2847,7 @@ const char* executeConditionalCommand(const char* command) {
       }
 
       // Evaluate condition (build full condition string once)
-      char fullCondBuf[512];
+      char fullCondBuf[192];
       snprintf(fullCondBuf, sizeof(fullCondBuf), "IF %s THEN dummy", condStart);
       bool conditionMet = evaluateCondition(fullCondBuf);
 
@@ -3131,7 +3149,8 @@ void schedulerTickMinute() {
     // Check if it's time to run
     if (now >= nextAt) {
       // Extract commands
-      String cmdsList[64];
+      static constexpr int MAX_AUTO_CMDS = 16;  // 16 commands per automation (saves ~576B stack vs 64)
+      String cmdsList[MAX_AUTO_CMDS];
       int cmdsCount = 0;
       int cmdsPos = obj.indexOf("\"commands\"");
       bool haveArray = false;
@@ -3162,7 +3181,7 @@ void schedulerTickMinute() {
       if (haveArray) {
         String body = obj.substring(arrStart + 1, arrEnd);
         int i = 0;
-        while (i < (int)body.length() && cmdsCount < 64) {
+        while (i < (int)body.length() && cmdsCount < MAX_AUTO_CMDS) {
           while (i < (int)body.length() && (body[i] == ' ' || body[i] == ',' || body[i] == '\n' || body[i] == '\r' || body[i] == '\t')) i++;
           if (i >= (int)body.length()) break;
           if (body[i] == '"') {
@@ -3171,7 +3190,7 @@ void schedulerTickMinute() {
             if (q2 < 0) break;
             String one = body.substring(q1 + 1, q2);
             one.trim();
-            if (one.length() && cmdsCount < 64) { cmdsList[cmdsCount++] = one; }
+            if (one.length() && cmdsCount < MAX_AUTO_CMDS) { cmdsList[cmdsCount++] = one; }
             i = q2 + 1;
           } else {
             int next = body.indexOf(',', i);
@@ -3189,7 +3208,7 @@ void schedulerTickMinute() {
           if (cq1 > 0 && cq2 > cq1) {
             String cmd = obj.substring(cq1 + 1, cq2);
             cmd.trim();
-            if (cmd.length() && cmdsCount < 64) { cmdsList[cmdsCount++] = cmd; }
+            if (cmd.length() && cmdsCount < MAX_AUTO_CMDS) { cmdsList[cmdsCount++] = cmd; }
           }
         }
       }
@@ -3235,8 +3254,9 @@ void schedulerTickMinute() {
                  id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
           if (!conditionMet) {
             if (gAutoLogActive) {
-              String skipMsg = "Scheduled automation skipped: ID=" + String(id) + " Name=" + autoName + " Condition not met: " + condition;
-              appendAutoLogEntry("AUTO_SKIP", skipMsg);
+              char skipBuf[256];
+              snprintf(skipBuf, sizeof(skipBuf), "Scheduled automation skipped: ID=%ld Name=%s Condition not met: %s", id, autoName.c_str(), condition.c_str());
+              appendAutoLogEntry("AUTO_SKIP", skipBuf);
             }
             DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skipped - condition not met: %s", id, condition.c_str());
             pos = objEnd + 1;
@@ -3253,8 +3273,9 @@ void schedulerTickMinute() {
         // Log scheduled automation start if logging is active
         if (gAutoLogActive) {
           gAutoLogAutomationName = autoName;
-          String startMsg = "Scheduled automation started: ID=" + String(id) + " Name=" + autoName + " User=" + gCurrentAutomationUser;
-          appendAutoLogEntry("AUTO_START", startMsg);
+          char startBuf[256];
+          snprintf(startBuf, sizeof(startBuf), "Scheduled automation started: ID=%ld Name=%s User=%s", id, autoName.c_str(), gCurrentAutomationUser.c_str());
+          appendAutoLogEntry("AUTO_START", startBuf);
         }
 
         // Execute commands (with conditional logic support)
@@ -3266,7 +3287,11 @@ void schedulerTickMinute() {
 
           // Output the result (skip internal status messages - actual output comes from queue)
           if (!isAutoInternalResult(result)) {
-            broadcastOutput("[Scheduled Automation " + String(id) + "] " + String(result));
+            {
+              char schedBuf[256];
+              snprintf(schedBuf, sizeof(schedBuf), "[Scheduled Automation %ld] %s", id, result);
+              broadcastOutput(schedBuf);
+            }
           }
         }
         gCurrentAutomationUser = "";
@@ -3274,8 +3299,9 @@ void schedulerTickMinute() {
 
         // Log scheduled automation end if logging is active
         if (gAutoLogActive) {
-          String endMsg = "Scheduled automation completed: ID=" + String(id) + " Name=" + autoName + " Commands=" + String(cmdsCount);
-          appendAutoLogEntry("AUTO_END", endMsg);
+          char endBuf[256];
+          snprintf(endBuf, sizeof(endBuf), "Scheduled automation completed: ID=%ld Name=%s Commands=%d", id, autoName.c_str(), cmdsCount);
+          appendAutoLogEntry("AUTO_END", endBuf);
         }
 
         // Compute and update next run time

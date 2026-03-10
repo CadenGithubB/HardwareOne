@@ -106,7 +106,7 @@ static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, const c
   while ((entry = dir.openNextFile())) {
     String path = String(entry.name());
     // Ensure absolute path
-    if (!path.startsWith("/")) path = String(dirPath) + "/" + path;
+    if (!path.startsWith("/")) { char pBuf[128]; snprintf(pBuf, sizeof(pBuf), "%s/%s", dirPath, path.c_str()); path = pBuf; }
 
     if (entry.isDirectory()) {
       addDirectoryToBackup(files, warnings, path.c_str(), depth + 1);

@@ -483,7 +483,7 @@ bool getOLEDWiFiSelection(String& outSSID) {
         // Truncate long SSIDs
         String displayName = networks[idx];
         if (displayName.length() > 20) {
-          displayName = displayName.substring(0, 17) + "...";
+          displayName = displayName.substring(0, 17); displayName += "...";
         }
         oledDisplay->print(displayName);
       }

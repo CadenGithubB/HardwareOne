@@ -9,7 +9,7 @@
 // Centralized Task Stack Sizes (words; 1 word = 4 bytes on ESP32)
 // ============================================================================
 
-constexpr uint32_t CMD_EXEC_STACK_WORDS = 4608;      // ~18KB (NTP/DNS/file I/O) - reduced 10%
+constexpr uint32_t CMD_EXEC_STACK_WORDS = 6144;      // ~24KB (automation run + debug vsnprintf frames need deep stack)
 constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 2765;  // ~11KB - reduced 10%
 constexpr uint32_t ESPNOW_HB_STACK_WORDS = 5530;     // ~22KB (mesh processing + debug logging + multi-peer scaling) - reduced 10%
 constexpr uint32_t THERMAL_STACK_WORDS = 4096;       // ~16KB

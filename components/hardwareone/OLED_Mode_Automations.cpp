@@ -459,7 +459,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
 // ============================================================================
 
 static const OLEDModeEntry sAutomationsModes[] = {
-  { OLED_AUTOMATIONS, "Automations", "notify_automation", displayAutomations, nullptr, automationsInputHandler, false, -1 },
+  { OLED_AUTOMATIONS, "Automations", "notify_automation", displayAutomations, nullptr, automationsInputHandler, false, -1, "B:Back" },
 };
 
 REGISTER_OLED_MODE_MODULE(sAutomationsModes, sizeof(sAutomationsModes) / sizeof(sAutomationsModes[0]), "Automations");

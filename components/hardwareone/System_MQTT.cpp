@@ -234,7 +234,9 @@ static String getDeviceId() {
   char macStr[13];
   snprintf(macStr, sizeof(macStr), "%02x%02x%02x%02x%02x%02x",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return String("hardwareone_") + macStr;
+  char idBuf[26];
+  snprintf(idBuf, sizeof(idBuf), "hardwareone_%s", macStr);
+  return String(idBuf);
 }
 
 // Publish a single HA discovery config message
@@ -390,21 +392,26 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
     
     // Route based on target prefix: "room:<name>", "tag:<name>", "device:<name_or_mac>"
     if (targetStr.startsWith("room:")) {
-      String roomArg = targetStr.substring(5) + " " + username + " " + password + " " + cmdStr;
-      const char* result = cmd_espnow_roomcmd(roomArg);
-      esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
-        (String("{\"ok\":true,\"routed\":\"room\",\"result\":\"") + result + "\"}").c_str(), 0, 0, false);
+      char argBuf[256];
+      snprintf(argBuf, sizeof(argBuf), "%s %s %s %s", targetStr.substring(5).c_str(), username, password, command);
+      const char* result = cmd_espnow_roomcmd(String(argBuf));
+      char respBuf[256];
+      snprintf(respBuf, sizeof(respBuf), "{\"ok\":true,\"routed\":\"room\",\"result\":\"%s\"}", result);
+      esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), respBuf, 0, 0, false);
     } else if (targetStr.startsWith("tag:")) {
-      String tagArg = targetStr.substring(4) + " " + username + " " + password + " " + cmdStr;
-      const char* result = cmd_espnow_tagcmd(tagArg);
-      esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
-        (String("{\"ok\":true,\"routed\":\"tag\",\"result\":\"") + result + "\"}").c_str(), 0, 0, false);
+      char argBuf[256];
+      snprintf(argBuf, sizeof(argBuf), "%s %s %s %s", targetStr.substring(4).c_str(), username, password, command);
+      const char* result = cmd_espnow_tagcmd(String(argBuf));
+      char respBuf[256];
+      snprintf(respBuf, sizeof(respBuf), "{\"ok\":true,\"routed\":\"tag\",\"result\":\"%s\"}", result);
+      esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), respBuf, 0, 0, false);
     } else if (targetStr.startsWith("device:")) {
-      String deviceTarget = targetStr.substring(7);
-      String remoteArgs = deviceTarget + " " + username + " " + password + " " + cmdStr;
-      const char* result = cmd_espnow_remote(remoteArgs);
-      esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
-        (String("{\"ok\":true,\"routed\":\"device\",\"result\":\"") + result + "\"}").c_str(), 0, 0, false);
+      char argBuf[256];
+      snprintf(argBuf, sizeof(argBuf), "%s %s %s %s", targetStr.substring(7).c_str(), username, password, command);
+      const char* result = cmd_espnow_remote(String(argBuf));
+      char respBuf[256];
+      snprintf(respBuf, sizeof(respBuf), "{\"ok\":true,\"routed\":\"device\",\"result\":\"%s\"}", result);
+      esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), respBuf, 0, 0, false);
     } else {
       esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
         "{\"ok\":false,\"error\":\"Unknown target prefix. Use room:, tag:, or device:\"}", 0, 0, false);
@@ -567,7 +574,9 @@ static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
   char macCompact[13];
   snprintf(macCompact, sizeof(macCompact), "%02x%02x%02x%02x%02x%02x",
            peer.mac[0], peer.mac[1], peer.mac[2], peer.mac[3], peer.mac[4], peer.mac[5]);
-  String peerId = String("hardwareone_") + macCompact;
+  char peerIdBuf[26];
+  snprintf(peerIdBuf, sizeof(peerIdBuf), "hardwareone_%s", macCompact);
+  String peerId = peerIdBuf;
   String masterDeviceId = getDeviceId();
 
   // Peer state topic: <baseTopic>/devices/<peerId>/state
@@ -841,17 +850,17 @@ bool startMQTT() {
     char macStr[13];
     snprintf(macStr, sizeof(macStr), "%02x%02x%02x%02x%02x%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    { String topic = String("hardwareone/") + macStr; setSetting(gSettings.mqttBaseTopic, topic); }
+    { char topicBuf[32]; snprintf(topicBuf, sizeof(topicBuf), "hardwareone/%s", macStr); setSetting(gSettings.mqttBaseTopic, String(topicBuf)); }
     INFO_SYSTEMF("[MQTT] Auto-generated base topic: %s", gSettings.mqttBaseTopic.c_str());
   }
   
   // Configure MQTT client - strings must persist until esp_mqtt_client_init() completes
   String brokerUri;
   bool useTLS = (gSettings.mqttTLSMode > 0);
-  if (useTLS) {
-    brokerUri = String("mqtts://") + gSettings.mqttHost + ":" + String(gSettings.mqttPort);
-  } else {
-    brokerUri = String("mqtt://") + gSettings.mqttHost + ":" + String(gSettings.mqttPort);
+  {
+    char uriBuf[128];
+    snprintf(uriBuf, sizeof(uriBuf), "%s://%s:%d", useTLS ? "mqtts" : "mqtt", gSettings.mqttHost.c_str(), gSettings.mqttPort);
+    brokerUri = uriBuf;
   }
   String availTopic = gSettings.mqttBaseTopic + "/availability";
   

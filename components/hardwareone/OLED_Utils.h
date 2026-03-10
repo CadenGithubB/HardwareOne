@@ -150,6 +150,7 @@ struct OLEDScrollItem {
   bool isHighlighted;
   void* userData;
   uint8_t icon;
+  const char* iconName;   // Icon name for drawIcon() in split-pane mode
   uint32_t validationKey;
 };
 
@@ -163,6 +164,12 @@ struct OLEDScrollState {
   const char* title;
   const char* footer;
   uint32_t refreshCounter;
+  
+  // Split-pane layout (set listWidth > 0 to enable)
+  int listWidth;          // Width of text list area in pixels (0 = full width)
+  int separatorX;         // X position of vertical separator line
+  int iconSize;           // Icon size in right pane (default 32)
+  bool singleLineItems;   // true = 10px single-line items, false = 16px two-line
 };
 
 void oledScrollInit(OLEDScrollState* state, const char* title = nullptr, int visibleLines = 4);
@@ -184,6 +191,9 @@ int oledScrollCalculateVisibleLines(int displayHeight, int textSize, bool hasTit
 // Handles up/down (and optionally left/right) scroll with wrap-around.
 // Returns true if any navigation event was consumed.
 bool oledScrollHandleNav(OLEDScrollState* state, bool leftRightNav = false);
+
+// Configure split-pane layout (list on left, icon on right)
+void oledScrollSetSplitPane(OLEDScrollState* state, int listWidth, int separatorX, int iconSize = 32);
 
 // ============= Virtual Keyboard =============
 

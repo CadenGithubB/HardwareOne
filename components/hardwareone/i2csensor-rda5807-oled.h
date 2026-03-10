@@ -99,7 +99,8 @@ static const OLEDModeEntry fmRadioOLEDModes[] = {
     fmRadioOLEDModeAvailable,// availFunc
     fmRadioInputHandler,     // inputFunc - X toggles radio
     true,                    // showInMenu
-    60                       // menuOrder
+    60,                      // menuOrder
+    nullptr                  // hints
   }
 };
 

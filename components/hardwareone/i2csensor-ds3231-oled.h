@@ -179,7 +179,8 @@ static const OLEDModeEntry rtcOLEDModes[] = {
     rtcOLEDModeAvailable,    // availFunc
     rtcInputHandler,         // inputFunc - X toggles sensor
     true,                    // showInMenu
-    55                       // menuOrder
+    55,                      // menuOrder
+    nullptr                  // hints
   }
 };
 
