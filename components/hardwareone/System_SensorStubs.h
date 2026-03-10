@@ -135,8 +135,6 @@
 #endif
 
 #if !ENABLE_APDS_SENSOR
-  // APDS command stub
-  inline const char* cmd_apdscolorstart(const String& argsInput) { return "APDS disabled"; }
   // APDS stub structure (matches real PeripheralCache exactly)
   struct PeripheralCache {
     SemaphoreHandle_t mutex = nullptr;
@@ -427,7 +425,6 @@
   inline const char* cmd_espnow_init(const String& argsInput) { return "ESP-NOW disabled"; }
   inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
   inline void processMessageQueue() {}
-  inline void cleanupExpiredChunkedMessage() {}
   inline void cleanupExpiredBufferedPeers() {}
   inline void cleanupTimedOutChunks() {}
   inline bool isSelfMac(const uint8_t* mac) { return false; }

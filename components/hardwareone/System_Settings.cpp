@@ -763,20 +763,12 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
           const SettingEntry* e = &mod->entries[i];
           if (e->isSecret && e->type == SETTING_STRING) {
             // Remove secret field from web API response
-            const char* key = e->jsonKey;
             JsonObject target = section;
-            const char* p = key;
-            const char* dot = strchr(p, '.');
-            while (dot) {
-              String seg = String(p).substring(0, dot - p);
-              target = target[seg.c_str()].as<JsonObject>();
-              if (target.isNull()) break;
-              p = dot + 1;
-              dot = strchr(p, '.');
+            if (e->group) {
+              target = target[e->group].as<JsonObject>();
+              if (target.isNull()) continue;
             }
-            if (!target.isNull()) {
-              target.remove(p);
-            }
+            target.remove(e->jsonKey);
           }
         }
       }
@@ -972,11 +964,6 @@ bool readSettingsJson() {
     DEBUG_STORAGEF("[Settings] Applied %zu settings from registered modules", registeredCount);
   }
 
-  // If I2C bus is disabled, the I2C sensor subsystem must also be disabled
-  if (!gSettings.i2cBusEnabled) {
-    gSettings.i2cSensorsEnabled = false;
-  }
-
   // All settings are now read by their registered modules above.
 
   // Thermal settings are loaded by the modular registry below (no backward compatibility)
@@ -1159,76 +1146,116 @@ const char* cmd_httpsEnabled(const String& argsInput) {
 // ============================================================================
 
 static const SettingEntry debugSettingEntries[] = {
-  { "authCookies", SETTING_BOOL, &gSettings.debugAuthCookies, 0, 0, nullptr, 0, 1, "Auth Cookies", nullptr },
-  { "http", SETTING_BOOL, &gSettings.debugHttp, 0, 0, nullptr, 0, 1, "HTTP", nullptr },
-  { "sse", SETTING_BOOL, &gSettings.debugSse, 0, 0, nullptr, 0, 1, "SSE", nullptr },
-  { "cli", SETTING_BOOL, &gSettings.debugCli, 0, 0, nullptr, 0, 1, "CLI", nullptr },
-  { "auth", SETTING_BOOL, &gSettings.debugAuth, 0, 0, nullptr, 0, 1, "Auth", nullptr },
-  { "sensors", SETTING_BOOL, &gSettings.debugSensors, 0, 0, nullptr, 0, 1, "Sensors", nullptr },
-  { "espNow", SETTING_BOOL, &gSettings.debugEspNow, 0, 0, nullptr, 0, 1, "ESP-NOW", nullptr },
-  { "wifi", SETTING_BOOL, &gSettings.debugWifi, 0, 0, nullptr, 0, 1, "WiFi", nullptr },
-  { "storage", SETTING_BOOL, &gSettings.debugStorage, 0, 0, nullptr, 0, 1, "Storage", nullptr },
-  { "performance", SETTING_BOOL, &gSettings.debugPerformance, 0, 0, nullptr, 0, 1, "Performance", nullptr },
-  { "dateTime", SETTING_BOOL, &gSettings.debugDateTime, 0, 0, nullptr, 0, 1, "Date/Time", nullptr },
-  { "cmdFlow", SETTING_BOOL, &gSettings.debugCommandFlow, 0, 0, nullptr, 0, 1, "Command Flow", nullptr },
-  { "users", SETTING_BOOL, &gSettings.debugUsers, 0, 0, nullptr, 0, 1, "Users", nullptr },
-  { "system", SETTING_BOOL, &gSettings.debugSystem, 0, 0, nullptr, 0, 1, "System", nullptr },
-  { "automations", SETTING_BOOL, &gSettings.debugAutomations, 0, 0, nullptr, 0, 1, "Automations", nullptr },
-  { "logger", SETTING_BOOL, &gSettings.debugLogger, 0, 0, nullptr, 0, 1, "Logger", nullptr },
-  { "espNowStream", SETTING_BOOL, &gSettings.debugEspNowStream, 0, 0, nullptr, 0, 1, "ESP-NOW Stream", nullptr },
-  { "espNowCore", SETTING_BOOL, &gSettings.debugEspNowCore, 0, 0, nullptr, 0, 1, "ESP-NOW Core", nullptr },
-  { "espNowRouter", SETTING_BOOL, &gSettings.debugEspNowRouter, 0, 0, nullptr, 0, 1, "ESP-NOW Router", nullptr },
-  { "espNowMesh", SETTING_BOOL, &gSettings.debugEspNowMesh, 0, 0, nullptr, 0, 1, "ESP-NOW Mesh", nullptr },
-  { "espNowTopo", SETTING_BOOL, &gSettings.debugEspNowTopo, 0, 0, nullptr, 0, 1, "ESP-NOW Topology", nullptr },
-  { "espNowEncryption", SETTING_BOOL, &gSettings.debugEspNowEncryption, 0, 0, nullptr, 0, 1, "ESP-NOW Encryption", nullptr },
-  { "espNowMetadata", SETTING_BOOL, &gSettings.debugEspNowMetadata, 0, 0, nullptr, 0, 1, "ESP-NOW Metadata", nullptr },
-  { "autoScheduler", SETTING_BOOL, &gSettings.debugAutoScheduler, 0, 0, nullptr, 0, 1, "Automations Scheduler", nullptr },
-  { "autoExec", SETTING_BOOL, &gSettings.debugAutoExec, 0, 0, nullptr, 0, 1, "Automations Execution", nullptr },
-  { "autoCondition", SETTING_BOOL, &gSettings.debugAutoCondition, 0, 0, nullptr, 0, 1, "Automations Conditions", nullptr },
-  { "autoTiming", SETTING_BOOL, &gSettings.debugAutoTiming, 0, 0, nullptr, 0, 1, "Automations Timing", nullptr },
-  { "memory", SETTING_BOOL, &gSettings.debugMemory, 1, 0, nullptr, 0, 1, "Memory", nullptr },
-  { "commandSystem", SETTING_BOOL, &gSettings.debugCommandSystem, 0, 0, nullptr, 0, 1, "Command System", nullptr },
-  { "settingsSystem", SETTING_BOOL, &gSettings.debugSettingsSystem, 0, 0, nullptr, 0, 1, "Settings System", nullptr },
-  { "fmRadio", SETTING_BOOL, &gSettings.debugFmRadio, 0, 0, nullptr, 0, 1, "FM Radio", nullptr },
-  { "g2", SETTING_BOOL, &gSettings.debugG2, 1, 0, nullptr, 0, 1, "G2 Glasses", nullptr },
-  { "i2c", SETTING_BOOL, &gSettings.debugI2C, 1, 0, nullptr, 0, 1, "I2C Bus", nullptr },
-  { "authSessions", SETTING_BOOL, &gSettings.debugAuthSessions, 0, 0, nullptr, 0, 1, "Auth Sessions", nullptr },
-  { "authCookies", SETTING_BOOL, &gSettings.debugAuthCookies, 0, 0, nullptr, 0, 1, "Auth Cookies", nullptr },
-  { "authLogin", SETTING_BOOL, &gSettings.debugAuthLogin, 0, 0, nullptr, 0, 1, "Auth Login", nullptr },
-  { "authBootId", SETTING_BOOL, &gSettings.debugAuthBootId, 0, 0, nullptr, 0, 1, "Auth BootID", nullptr },
-  { "httpHandlers", SETTING_BOOL, &gSettings.debugHttpHandlers, 0, 0, nullptr, 0, 1, "HTTP Handlers", nullptr },
-  { "httpRequests", SETTING_BOOL, &gSettings.debugHttpRequests, 0, 0, nullptr, 0, 1, "HTTP Requests", nullptr },
-  { "httpResponses", SETTING_BOOL, &gSettings.debugHttpResponses, 0, 0, nullptr, 0, 1, "HTTP Responses", nullptr },
-  { "httpStreaming", SETTING_BOOL, &gSettings.debugHttpStreaming, 0, 0, nullptr, 0, 1, "HTTP Streaming", nullptr },
-  { "wifiConnection", SETTING_BOOL, &gSettings.debugWifiConnection, 0, 0, nullptr, 0, 1, "WiFi Connection", nullptr },
-  { "wifiConfig", SETTING_BOOL, &gSettings.debugWifiConfig, 0, 0, nullptr, 0, 1, "WiFi Config", nullptr },
-  { "wifiScanning", SETTING_BOOL, &gSettings.debugWifiScanning, 0, 0, nullptr, 0, 1, "WiFi Scanning", nullptr },
-  { "wifiDriver", SETTING_BOOL, &gSettings.debugWifiDriver, 0, 0, nullptr, 0, 1, "WiFi Driver", nullptr },
-  { "storageFiles", SETTING_BOOL, &gSettings.debugStorageFiles, 0, 0, nullptr, 0, 1, "Storage Files", nullptr },
-  { "storageJson", SETTING_BOOL, &gSettings.debugStorageJson, 0, 0, nullptr, 0, 1, "Storage JSON", nullptr },
-  { "storageSettings", SETTING_BOOL, &gSettings.debugStorageSettings, 0, 0, nullptr, 0, 1, "Storage Settings", nullptr },
-  { "storageMigration", SETTING_BOOL, &gSettings.debugStorageMigration, 0, 0, nullptr, 0, 1, "Storage Migration", nullptr },
-  { "systemBoot", SETTING_BOOL, &gSettings.debugSystemBoot, 0, 0, nullptr, 0, 1, "System Boot", nullptr },
-  { "systemConfig", SETTING_BOOL, &gSettings.debugSystemConfig, 0, 0, nullptr, 0, 1, "System Config", nullptr },
-  { "systemTasks", SETTING_BOOL, &gSettings.debugSystemTasks, 0, 0, nullptr, 0, 1, "System Tasks", nullptr },
-  { "systemHardware", SETTING_BOOL, &gSettings.debugSystemHardware, 0, 0, nullptr, 0, 1, "System Hardware", nullptr },
-  { "usersMgmt", SETTING_BOOL, &gSettings.debugUsersMgmt, 0, 0, nullptr, 0, 1, "Users Management", nullptr },
-  { "usersRegister", SETTING_BOOL, &gSettings.debugUsersRegister, 0, 0, nullptr, 0, 1, "Users Registration", nullptr },
-  { "usersQuery", SETTING_BOOL, &gSettings.debugUsersQuery, 0, 0, nullptr, 0, 1, "Users Query", nullptr },
-  { "cliExecution", SETTING_BOOL, &gSettings.debugCliExecution, 0, 0, nullptr, 0, 1, "CLI Execution", nullptr },
-  { "cliQueue", SETTING_BOOL, &gSettings.debugCliQueue, 0, 0, nullptr, 0, 1, "CLI Queue", nullptr },
-  { "cliValidation", SETTING_BOOL, &gSettings.debugCliValidation, 0, 0, nullptr, 0, 1, "CLI Validation", nullptr },
-  { "perfStack", SETTING_BOOL, &gSettings.debugPerfStack, 0, 0, nullptr, 0, 1, "Performance Stack", nullptr },
-  { "perfHeap", SETTING_BOOL, &gSettings.debugPerfHeap, 0, 0, nullptr, 0, 1, "Performance Heap", nullptr },
-  { "perfTiming", SETTING_BOOL, &gSettings.debugPerfTiming, 0, 0, nullptr, 0, 1, "Performance Timing", nullptr },
-  { "sseConnection", SETTING_BOOL, &gSettings.debugSseConnection, 0, 0, nullptr, 0, 1, "SSE Connection", nullptr },
-  { "sseEvents", SETTING_BOOL, &gSettings.debugSseEvents, 0, 0, nullptr, 0, 1, "SSE Events", nullptr },
-  { "sseBroadcast", SETTING_BOOL, &gSettings.debugSseBroadcast, 0, 0, nullptr, 0, 1, "SSE Broadcast", nullptr },
-  { "cmdflowRouting", SETTING_BOOL, &gSettings.debugCmdflowRouting, 0, 0, nullptr, 0, 1, "Command Flow Routing", nullptr },
-  { "cmdflowQueue", SETTING_BOOL, &gSettings.debugCmdflowQueue, 0, 0, nullptr, 0, 1, "Command Flow Queue", nullptr },
-  { "cmdflowContext", SETTING_BOOL, &gSettings.debugCmdflowContext, 0, 0, nullptr, 0, 1, "Command Flow Context", nullptr },
-  { "logLevel", SETTING_INT, &gSettings.logLevel, 3, 0, nullptr, 0, 3, "Log Level", nullptr },
-  { "memorySampleIntervalSec", SETTING_INT, &gSettings.memorySampleIntervalSec, 30, 0, nullptr, 0, 300, "Memory Sample Interval (sec)", nullptr }
+  // --- authentication group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugAuth,          0, 0, nullptr, 0, 1, "All Authentication",  nullptr, false, "authentication", "debugauth" },
+  { "sessions",   SETTING_BOOL, &gSettings.debugAuthSessions,  0, 0, nullptr, 0, 1, "Sessions",            nullptr, false, "authentication", "debugauthsessions" },
+  { "cookies",    SETTING_BOOL, &gSettings.debugAuthCookies,   0, 0, nullptr, 0, 1, "Cookies",             nullptr, false, "authentication", "debugauthcookies" },
+  { "login",      SETTING_BOOL, &gSettings.debugAuthLogin,     0, 0, nullptr, 0, 1, "Login",               nullptr, false, "authentication", "debugauthlogin" },
+  { "bootId",     SETTING_BOOL, &gSettings.debugAuthBootId,    0, 0, nullptr, 0, 1, "Boot ID",             nullptr, false, "authentication", "debugauthbootid" },
+  // --- http group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugHttp,          0, 0, nullptr, 0, 1, "All HTTP",            nullptr, false, "http", "debughttp" },
+  { "handlers",   SETTING_BOOL, &gSettings.debugHttpHandlers,  0, 0, nullptr, 0, 1, "Handlers",            nullptr, false, "http", "debughttphandlers" },
+  { "requests",   SETTING_BOOL, &gSettings.debugHttpRequests,  0, 0, nullptr, 0, 1, "Requests",            nullptr, false, "http", "debughttprequests" },
+  { "responses",  SETTING_BOOL, &gSettings.debugHttpResponses, 0, 0, nullptr, 0, 1, "Responses",           nullptr, false, "http", "debughttpresponses" },
+  { "streaming",  SETTING_BOOL, &gSettings.debugHttpStreaming,  0, 0, nullptr, 0, 1, "Streaming",           nullptr, false, "http", "debughttpstreaming" },
+  // --- sse group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugSse,           0, 0, nullptr, 0, 1, "All SSE",             nullptr, false, "sse", "debugsse" },
+  { "connection", SETTING_BOOL, &gSettings.debugSseConnection, 0, 0, nullptr, 0, 1, "Connection",          nullptr, false, "sse", "debugsseconnection" },
+  { "events",     SETTING_BOOL, &gSettings.debugSseEvents,     0, 0, nullptr, 0, 1, "Events",              nullptr, false, "sse", "debugsseevents" },
+  { "broadcast",  SETTING_BOOL, &gSettings.debugSseBroadcast,  0, 0, nullptr, 0, 1, "Broadcast",           nullptr, false, "sse", "debugssebroadcast" },
+  // --- wifi group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugWifi,           0, 0, nullptr, 0, 1, "All WiFi",            nullptr, false, "wifi", "debugwifi" },
+  { "connection", SETTING_BOOL, &gSettings.debugWifiConnection, 0, 0, nullptr, 0, 1, "Connection",          nullptr, false, "wifi", "debugwificonnection" },
+  { "config",     SETTING_BOOL, &gSettings.debugWifiConfig,     0, 0, nullptr, 0, 1, "Config",              nullptr, false, "wifi", "debugwificonfig" },
+  { "scanning",   SETTING_BOOL, &gSettings.debugWifiScanning,   0, 0, nullptr, 0, 1, "Scanning",            nullptr, false, "wifi", "debugwifiscanning" },
+  { "driver",     SETTING_BOOL, &gSettings.debugWifiDriver,     0, 0, nullptr, 0, 1, "Driver",              nullptr, false, "wifi", "debugwifidriver" },
+  // --- storage group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugStorage,          0, 0, nullptr, 0, 1, "All Storage",       nullptr, false, "storage", "debugstorage" },
+  { "files",      SETTING_BOOL, &gSettings.debugStorageFiles,     0, 0, nullptr, 0, 1, "Files",             nullptr, false, "storage", "debugstoragefiles" },
+  { "json",       SETTING_BOOL, &gSettings.debugStorageJson,      0, 0, nullptr, 0, 1, "JSON",              nullptr, false, "storage", "debugstoragejson" },
+  { "settings",   SETTING_BOOL, &gSettings.debugStorageSettings,  0, 0, nullptr, 0, 1, "Settings",          nullptr, false, "storage", "debugstoragesettings" },
+  { "migration",  SETTING_BOOL, &gSettings.debugStorageMigration, 0, 0, nullptr, 0, 1, "Migration",         nullptr, false, "storage", "debugstoragemigration" },
+  // --- esp-now group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugEspNow,           0, 0, nullptr, 0, 1, "All ESP-NOW",       nullptr, false, "esp-now", "debugespnow" },
+  { "stream",     SETTING_BOOL, &gSettings.debugEspNowStream,     0, 0, nullptr, 0, 1, "Stream",            nullptr, false, "esp-now", "debugespnowstream" },
+  { "core",       SETTING_BOOL, &gSettings.debugEspNowCore,       0, 0, nullptr, 0, 1, "Core",              nullptr, false, "esp-now", "debugespnowcore" },
+  { "router",     SETTING_BOOL, &gSettings.debugEspNowRouter,     0, 0, nullptr, 0, 1, "Router",            nullptr, false, "esp-now", "debugespnowrouter" },
+  { "mesh",       SETTING_BOOL, &gSettings.debugEspNowMesh,       0, 0, nullptr, 0, 1, "Mesh",              nullptr, false, "esp-now", "debugespnowmesh" },
+  { "topology",   SETTING_BOOL, &gSettings.debugEspNowTopo,       0, 0, nullptr, 0, 1, "Topology",          nullptr, false, "esp-now", "debugespnowtopo" },
+  { "encryption", SETTING_BOOL, &gSettings.debugEspNowEncryption, 0, 0, nullptr, 0, 1, "Encryption",        nullptr, false, "esp-now", "debugespnowencryption" },
+  { "metadata",   SETTING_BOOL, &gSettings.debugEspNowMetadata,   0, 0, nullptr, 0, 1, "Metadata",          nullptr, false, "esp-now", "debugespnowmetadata" },
+  // --- system group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugSystem,         0, 0, nullptr, 0, 1, "All System",          nullptr, false, "system", "debugsystem" },
+  { "boot",       SETTING_BOOL, &gSettings.debugSystemBoot,     0, 0, nullptr, 0, 1, "Boot",                nullptr, false, "system", "debugsystemboot" },
+  { "config",     SETTING_BOOL, &gSettings.debugSystemConfig,   0, 0, nullptr, 0, 1, "Config",              nullptr, false, "system", "debugsystemconfig" },
+  { "tasks",      SETTING_BOOL, &gSettings.debugSystemTasks,    0, 0, nullptr, 0, 1, "Tasks",               nullptr, false, "system", "debugsystemtasks" },
+  { "hardware",   SETTING_BOOL, &gSettings.debugSystemHardware, 0, 0, nullptr, 0, 1, "Hardware",            nullptr, false, "system", "debugsystemhardware" },
+  // --- users group ---
+  { "enabled",      SETTING_BOOL, &gSettings.debugUsers,         0, 0, nullptr, 0, 1, "All Users",           nullptr, false, "users", "debugusers" },
+  { "management",   SETTING_BOOL, &gSettings.debugUsersMgmt,     0, 0, nullptr, 0, 1, "Management",          nullptr, false, "users", "debugusersmgmt" },
+  { "registration", SETTING_BOOL, &gSettings.debugUsersRegister, 0, 0, nullptr, 0, 1, "Registration",        nullptr, false, "users", "debugusersregister" },
+  { "query",        SETTING_BOOL, &gSettings.debugUsersQuery,    0, 0, nullptr, 0, 1, "Query",               nullptr, false, "users", "debugusersquery" },
+  // --- cli group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugCli,            0, 0, nullptr, 0, 1, "All CLI",             nullptr, false, "cli", "debugcli" },
+  { "execution",  SETTING_BOOL, &gSettings.debugCliExecution,   0, 0, nullptr, 0, 1, "Execution",           nullptr, false, "cli", "debugcliexecution" },
+  { "queue",      SETTING_BOOL, &gSettings.debugCliQueue,       0, 0, nullptr, 0, 1, "Queue",               nullptr, false, "cli", "debugcliqueue" },
+  { "validation", SETTING_BOOL, &gSettings.debugCliValidation,  0, 0, nullptr, 0, 1, "Validation",          nullptr, false, "cli", "debugclivalidation" },
+  // --- commands group (merged command-flow + command system) ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugCommandFlow,     0, 0, nullptr, 0, 1, "All Commands",        nullptr, false, "commands", "debugcommandflow" },
+  { "system",     SETTING_BOOL, &gSettings.debugCommandSystem,   0, 0, nullptr, 0, 1, "System",              nullptr, false, "commands", "debugcommandsystem" },
+  { "routing",    SETTING_BOOL, &gSettings.debugCmdflowRouting,  0, 0, nullptr, 0, 1, "Routing",             nullptr, false, "commands", "debugcmdflowrouting" },
+  { "queue",      SETTING_BOOL, &gSettings.debugCmdflowQueue,   0, 0, nullptr, 0, 1, "Queue",               nullptr, false, "commands", "debugcmdflowqueue" },
+  { "context",    SETTING_BOOL, &gSettings.debugCmdflowContext,  0, 0, nullptr, 0, 1, "Context",             nullptr, false, "commands", "debugcmdflowcontext" },
+  // --- performance group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugPerformance,    0, 0, nullptr, 0, 1, "All Performance",     nullptr, false, "performance", "debugperformance" },
+  { "stack",      SETTING_BOOL, &gSettings.debugPerfStack,      0, 0, nullptr, 0, 1, "Stack",               nullptr, false, "performance", "debugperfstack" },
+  { "heap",       SETTING_BOOL, &gSettings.debugPerfHeap,       0, 0, nullptr, 0, 1, "Heap",                nullptr, false, "performance", "debugperfheap" },
+  { "timing",     SETTING_BOOL, &gSettings.debugPerfTiming,     0, 0, nullptr, 0, 1, "Timing",              nullptr, false, "performance", "debugperftiming" },
+  // --- automations group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugAutomations,    0, 0, nullptr, 0, 1, "All Automations",     nullptr, false, "automations", "debugautomations" },
+  { "scheduler",  SETTING_BOOL, &gSettings.debugAutoScheduler,  0, 0, nullptr, 0, 1, "Scheduler",           nullptr, false, "automations", "debugautoscheduler" },
+  { "execution",  SETTING_BOOL, &gSettings.debugAutoExec,       0, 0, nullptr, 0, 1, "Execution",           nullptr, false, "automations", "debugautoexec" },
+  { "condition",  SETTING_BOOL, &gSettings.debugAutoCondition,  0, 0, nullptr, 0, 1, "Condition",           nullptr, false, "automations", "debugautocondition" },
+  { "timing",     SETTING_BOOL, &gSettings.debugAutoTiming,     0, 0, nullptr, 0, 1, "Timing",              nullptr, false, "automations", "debugautotiming" },
+  // --- sensors group (general + simple sensor flags) ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugSensors,         0, 0, nullptr, 0, 1, "All Sensors",         nullptr, false, "sensors", "debugsensors" },
+  { "general",    SETTING_BOOL, &gSettings.debugSensorsGeneral,  0, 0, nullptr, 0, 1, "General",             nullptr, false, "sensors", "debugsensorsgeneral" },
+  { "camera",     SETTING_BOOL, &gSettings.debugCamera,          0, 0, nullptr, 0, 1, "Camera",              nullptr, false, "sensors", "debugcamera" },
+  { "microphone", SETTING_BOOL, &gSettings.debugMicrophone,      0, 0, nullptr, 0, 1, "Microphone",          nullptr, false, "sensors", "debugmicrophone" },
+  { "gps",        SETTING_BOOL, &gSettings.debugGps,             0, 0, nullptr, 0, 1, "GPS",                 nullptr, false, "sensors", "debuggps" },
+  { "rtc",        SETTING_BOOL, &gSettings.debugRtc,             0, 0, nullptr, 0, 1, "RTC",                 nullptr, false, "sensors", "debugrtc" },
+  { "presence",   SETTING_BOOL, &gSettings.debugPresence,        0, 0, nullptr, 0, 1, "Presence",            nullptr, false, "sensors", "debugpresence" },
+  { "fmRadio",    SETTING_BOOL, &gSettings.debugFmRadio,         0, 0, nullptr, 0, 1, "FM Radio",            nullptr, false, "sensors", "debugfmradio" },
+  // --- thermal group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugThermal,         0, 0, nullptr, 0, 1, "All Thermal",         nullptr, false, "thermal", "debugthermal" },
+  { "frame",      SETTING_BOOL, &gSettings.debugThermalFrame,    0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "thermal", "debugthermalframe" },
+  { "data",       SETTING_BOOL, &gSettings.debugThermalData,     0, 0, nullptr, 0, 1, "Data",                nullptr, false, "thermal", "debugthermaldata" },
+  // --- imu group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugImu,             0, 0, nullptr, 0, 1, "All IMU",             nullptr, false, "imu", "debugimu" },
+  { "frame",      SETTING_BOOL, &gSettings.debugImuFrame,        0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "imu", "debugimuframe" },
+  { "data",       SETTING_BOOL, &gSettings.debugImuData,         0, 0, nullptr, 0, 1, "Data",                nullptr, false, "imu", "debugimudata" },
+  // --- gamepad group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugGamepad,         0, 0, nullptr, 0, 1, "All Gamepad",         nullptr, false, "gamepad", "debuggamepad" },
+  { "frame",      SETTING_BOOL, &gSettings.debugGamepadFrame,    0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "gamepad", "debuggamepadframe" },
+  { "data",       SETTING_BOOL, &gSettings.debugGamepadData,     0, 0, nullptr, 0, 1, "Data",                nullptr, false, "gamepad", "debuggamepaddata" },
+  // --- tof group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugTof,             0, 0, nullptr, 0, 1, "All ToF",             nullptr, false, "tof", "debugtof" },
+  { "frame",      SETTING_BOOL, &gSettings.debugTofFrame,        0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "tof", "debugtofframe" },
+  // --- apds group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugApds,            0, 0, nullptr, 0, 1, "All APDS",            nullptr, false, "apds", "debugapds" },
+  { "frame",      SETTING_BOOL, &gSettings.debugApdsFrame,       0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "apds", "debugapdsframe" },
+  // --- standalone (no group) ---
+  { "dateTime",         SETTING_BOOL, &gSettings.debugDateTime,       0, 0, nullptr, 0, 1, "Date/Time",            nullptr, false, nullptr, "debugdatetime" },
+  { "logger",           SETTING_BOOL, &gSettings.debugLogger,         0, 0, nullptr, 0, 1, "Logger",               nullptr, false, nullptr, "debuglogger" },
+  { "memory",           SETTING_BOOL, &gSettings.debugMemory,         0, 0, nullptr, 0, 1, "Memory",               nullptr, false, nullptr, "debugmemory" },
+  { "settingsSystem",   SETTING_BOOL, &gSettings.debugSettingsSystem, 0, 0, nullptr, 0, 1, "Settings",             nullptr, false, nullptr, "debugsettingssystem" },
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  { "g2",               SETTING_BOOL, &gSettings.debugG2,             0, 0, nullptr, 0, 1, "G2 Glasses",           nullptr, false, nullptr, "debugg2" },
+#endif
+  { "i2c",              SETTING_BOOL, &gSettings.debugI2C,            0, 0, nullptr, 0, 1, "I2C Bus",              nullptr, false, nullptr, "debugi2c" },
+  { "mqtt",             SETTING_BOOL, &gSettings.debugMqtt,           0, 0, nullptr, 0, 1, "MQTT",                 nullptr, false, nullptr, "debugmqtt" },
+  { "logLevel",         SETTING_INT,  &gSettings.logLevel,            3, 0, nullptr, 0, 3, "Log Level",            nullptr, false, nullptr, "loglevel" },
+  { "memorySampleIntervalSec", SETTING_INT, &gSettings.memorySampleIntervalSec, 30, 0, nullptr, 0, 300, "Memory Sample Interval (sec)", nullptr, false, nullptr, "memorysampleintervalsec" },
 };
 
 static const SettingsModule debugSettingsModule = {
@@ -1482,19 +1509,13 @@ size_t readRegisteredSettings(JsonDocument& doc) {
     
     for (size_t i = 0; i < mod->count; i++) {
       const SettingEntry* e = &mod->entries[i];
-      const char* key = e->jsonKey;
+      // Navigate to group sub-object if specified
       JsonVariant current = section;
-      const char* p = key;
-      const char* dot = strchr(p, '.');
-      while (dot) {
-        String seg = String(p).substring(0, dot - p);
-        current = current[seg.c_str()];
-        if (current.isNull()) break;
-        p = dot + 1;
-        dot = strchr(p, '.');
+      if (e->group) {
+        current = current[e->group];
+        if (current.isNull()) continue;
       }
-      if (current.isNull()) continue;
-      JsonVariant val = current[p];
+      JsonVariant val = current[e->jsonKey];
       if (val.isNull()) continue;
       switch (e->type) {
         case SETTING_INT:
@@ -1562,22 +1583,16 @@ size_t writeRegisteredSettings(JsonDocument& doc) {
         continue;
       }
       
-      const char* key = e->jsonKey;
+      // Navigate to group sub-object if specified
       JsonObject target = section;
-      const char* p = key;
-      const char* dot = strchr(p, '.');
-      while (dot) {
-        String seg = String(p).substring(0, dot - p);
-        // Get existing JsonObject or create new one (don't overwrite)
-        JsonObject existing = target[seg.c_str()].as<JsonObject>();
-        if (existing.isNull()) {
-          existing = target[seg.c_str()].to<JsonObject>();
+      if (e->group) {
+        JsonObject groupObj = target[e->group].as<JsonObject>();
+        if (groupObj.isNull()) {
+          groupObj = target[e->group].to<JsonObject>();
         }
-        target = existing;
-        p = dot + 1;
-        dot = strchr(p, '.');
+        target = groupObj;
       }
-      const char* leaf = p;
+      const char* leaf = e->jsonKey;
       
       switch (e->type) {
         case SETTING_INT:

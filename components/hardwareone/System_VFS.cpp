@@ -102,7 +102,7 @@ String normalize(const String& path) {
   String p = path;
   p.trim();
   if (p.length() == 0) return String("/");
-  if (!p.startsWith("/")) p = String("/") + p;
+  if (!p.startsWith("/")) { p = "/" + p; }
 
   // Collapse repeated slashes (best-effort)
   while (p.indexOf("//") >= 0) {

@@ -808,10 +808,9 @@ void updateIMUActions() {
 
 const char* cmd_imupollingms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: imupollingms <50..2000>";
-  while (*p == ' ') p++;  // Skip whitespace
-  int v = atoi(p);
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: imupollingms <50..2000>";
+  int v = _arg.toInt();
   if (v < 50 || v > 2000) return "Error: imuPollingMs must be 50..2000";
   setSetting(gSettings.imuPollingMs, v);
   BROADCAST_PRINTF("imuPollingMs set to %d", v);
@@ -820,10 +819,9 @@ const char* cmd_imupollingms(const String& argsInput) {
 
 const char* cmd_imuewmafactor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: imuewmafactor <0.0..1.0>";
-  while (*p == ' ') p++;  // Skip whitespace
-  float f = strtof(p, nullptr);
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: imuewmafactor <0.0..1.0>";
+  float f = strtof(_arg.c_str(), nullptr);
   if (f < 0.0f || f > 1.0f) return "Error: imuEWMAFactor must be 0..1";
   setSetting(gSettings.imuEWMAFactor, f);
   BROADCAST_PRINTF("imuEWMAFactor set to %.3f", f);
@@ -832,10 +830,9 @@ const char* cmd_imuewmafactor(const String& argsInput) {
 
 const char* cmd_imutransitionms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: imutransitionms <0..1000>";
-  while (*p == ' ') p++;  // Skip whitespace
-  int v = atoi(p);
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: imutransitionms <0..1000>";
+  int v = _arg.toInt();
   if (v < 0 || v > 1000) return "Error: imuTransitionMs must be 0..1000";
   setSetting(gSettings.imuTransitionMs, v);
   BROADCAST_PRINTF("imuTransitionMs set to %d", v);
@@ -844,10 +841,9 @@ const char* cmd_imutransitionms(const String& argsInput) {
 
 const char* cmd_imuwebmaxfps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: imuwebmaxfps <1..30>";
-  while (*p == ' ') p++;  // Skip whitespace
-  int v = atoi(p);
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: imuwebmaxfps <1..30>";
+  int v = _arg.toInt();
   if (v < 1 || v > 30) return "Error: imuWebMaxFps must be 1..30";
   setSetting(gSettings.imuWebMaxFps, v);
   BROADCAST_PRINTF("imuWebMaxRefreshRate set to %d", v);
@@ -1078,8 +1074,11 @@ void imuTask(void* parameter) {
       if (nowMs - lastIMURead >= imuPollMs) {
         // IMU reads ~5ms at 100kHz; fail fast and retry next poll rather than blocking 1000ms
         auto result = i2cTaskWithTimeout(I2C_ADDR_IMU, 100000, 100, [&]() -> bool {
+          // Probe device presence so health system can track failures
+          Wire1.beginTransmission(I2C_ADDR_IMU);
+          if (Wire1.endTransmission() != 0) return false;
           readIMUSensor();
-          return true;  // Assume success for void operation
+          return true;
         });
         lastIMURead = nowMs;
         

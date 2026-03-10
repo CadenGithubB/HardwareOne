@@ -337,6 +337,9 @@ void gpsTask(void* parameter) {
       if ((nowMs - lastGPSRead) >= gpsPollMs) {
         // GPS reads ~10ms at 100kHz; fail fast and retry next poll rather than blocking 1000ms
         auto result = i2cTaskWithTimeout(I2C_ADDR_GPS, 100000, 100, [&]() -> bool {
+          // Probe device presence so health system can track failures
+          Wire1.beginTransmission(I2C_ADDR_GPS);
+          if (Wire1.endTransmission() != 0) return false;
           if ((nowMs - lastGPSRead) >= gpsPollMs) {
             gPA1010D->read();
             if (gPA1010D->newNMEAreceived()) {

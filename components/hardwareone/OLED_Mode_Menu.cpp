@@ -502,7 +502,7 @@ static bool sensorMenuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
 }
 
 static const OLEDModeEntry sSensorMenuModes[] = {
-  { OLED_SENSOR_MENU, "Sensors", "sensor", displaySensorMenu, nullptr, sensorMenuInputHandler, false, -1 },
+  { OLED_SENSOR_MENU, "Sensors", "sensor", displaySensorMenu, nullptr, sensorMenuInputHandler, false, -1, "A:Select B:Back" },
 };
 
 REGISTER_OLED_MODE_MODULE(sSensorMenuModes, sizeof(sSensorMenuModes) / sizeof(sSensorMenuModes[0]), "SensorMenu");

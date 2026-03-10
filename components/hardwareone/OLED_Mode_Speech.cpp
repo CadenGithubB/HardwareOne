@@ -95,7 +95,7 @@ void displaySpeechStatus() {
     // Truncate if too long
     String cmdStr = lastCmd;
     if (cmdStr.length() > 10) {
-      cmdStr = cmdStr.substring(0, 10) + "..";
+      cmdStr = cmdStr.substring(0, 10); cmdStr += "..";
     }
     oledDisplay->print(cmdStr);
     oledDisplay->print(" ");
@@ -259,7 +259,8 @@ static const OLEDModeEntry speechModeEntries[] = {
     nullptr,              // availFunc (always available when compiled)
     speechInputHandler,   // inputFunc
     true,                 // showInMenu
-    50                    // menuOrder
+    50,                   // menuOrder
+    "X:Select B:Back"     // hints
   }
 };
 

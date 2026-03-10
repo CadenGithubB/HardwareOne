@@ -934,7 +934,8 @@ static bool g2SendContentPage(size_t pageNum, const char* text) {
   if (!isG2Connected()) return false;
   
   // Prepend newline as per protocol
-  String textWithNl = String("\n") + text;
+  String textWithNl = "\n";
+  textWithNl += text;
   
   uint8_t inner[256];
   size_t iPos = 0;

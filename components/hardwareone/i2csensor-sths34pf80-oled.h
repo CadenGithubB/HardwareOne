@@ -106,7 +106,8 @@ static const OLEDModeEntry presenceOLEDModes[] = {
     presenceOLEDModeAvailable,   // availFunc
     presenceInputHandler,        // inputFunc - X toggles sensor
     true,                        // showInMenu
-    36                           // menuOrder (after APDS at 35)
+    36,                          // menuOrder (after APDS at 35)
+    nullptr                      // hints
   }
 };
 

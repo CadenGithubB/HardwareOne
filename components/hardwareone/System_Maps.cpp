@@ -589,7 +589,9 @@ int MapCore::getAvailableMaps(char maps[][96], int maxMaps) {
       if (dirName.startsWith("/maps/")) dirName = dirName.substring(6);
       if (dirName.startsWith("/")) dirName = dirName.substring(1);
       if (dirName.length() > 0 && dirName.indexOf('/') == -1) {
-        String subPath = String("/maps/") + dirName;
+        char subPathBuf[64];
+        snprintf(subPathBuf, sizeof(subPathBuf), "/maps/%s", dirName.c_str());
+        String subPath = subPathBuf;
         File sub = LittleFS.open(subPath);
         if (sub && sub.isDirectory()) {
           String preferred = dirName + ".hwmap";
@@ -1108,9 +1110,9 @@ const char* cmd_map(const String& argsInput) {
 const char* cmd_mapload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: mapload <path>";
-  while (*p == ' ') p++;
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: mapload <path>";
+  const char* p = _arg.c_str();
   
   if (MapCore::loadMapFile(p)) {
     const LoadedMap& currentMap = MapCore::getCurrentMap();
@@ -1157,11 +1159,9 @@ const char* cmd_whereami(const String& argsInput) {
 const char* cmd_search(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: search <name>";
-  while (*p == ' ') p++;
-  
-  if (strlen(p) == 0) return "Usage: search <name>";
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: search <name>";
+  const char* p = _arg.c_str();
   
   if (!MapCore::hasValidMap()) {
     return "No map loaded";
@@ -1270,9 +1270,13 @@ bool WaypointManager::loadWaypoints() {
   }
   
   // Try to find waypoints file with pattern: waypoints_<mapbase>.json or waypoints_<mapbase>.hwmap.json
-  String wpPathStr1 = mapDir + String("/waypoints_") + mapBase + String(".hwmap.json");
-  String wpPathStr2 = mapDir + String("/waypoints_") + mapBase + String(".json");
-  String wpPathStr3 = mapDir + String("/waypoints.json");  // Fallback to old format
+  char wp1[128], wp2[128], wp3[128];
+  snprintf(wp1, sizeof(wp1), "%s/waypoints_%s.hwmap.json", mapDir.c_str(), mapBase.c_str());
+  snprintf(wp2, sizeof(wp2), "%s/waypoints_%s.json", mapDir.c_str(), mapBase.c_str());
+  snprintf(wp3, sizeof(wp3), "%s/waypoints.json", mapDir.c_str());
+  String wpPathStr1 = wp1;
+  String wpPathStr2 = wp2;
+  String wpPathStr3 = wp3;  // Fallback to old format
   
   String wpPathStr;
   if (LittleFS.exists(wpPathStr1.c_str())) {
@@ -1385,9 +1389,8 @@ bool WaypointManager::saveWaypoints() {
     mapBase = mapBase.substring(0, mapBase.length() - 6);
   }
   
-  String wpPathStr = mapDir + String("/waypoints_") + mapBase + String(".json");
   char wpPath[128];
-  strlcpy(wpPath, wpPathStr.c_str(), sizeof(wpPath));
+  snprintf(wpPath, sizeof(wpPath), "%s/waypoints_%s.json", mapDir.c_str(), mapBase.c_str());
   
   File f = LittleFS.open(wpPath, "w");
   if (!f) {

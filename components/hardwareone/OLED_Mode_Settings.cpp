@@ -52,7 +52,8 @@ static const OLEDModeEntry settingsModeEntry = {
   isSettingsAvailable,
   handleSettingsInput,
   true,   // Show in menu
-  100     // Menu order
+  100,    // Menu order
+  nullptr // hints
 };
 
 // Settings modes array

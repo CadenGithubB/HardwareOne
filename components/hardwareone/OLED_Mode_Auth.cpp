@@ -123,7 +123,7 @@ static void displayLoginMode() {
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     String displayMsg = errorMessage;
     if (displayMsg.length() > 16) {
-      displayMsg = displayMsg.substring(0, 15) + "~";
+      displayMsg = displayMsg.substring(0, 15); displayMsg += '~';
     }
     int textWidth = displayMsg.length() * 6;
     int textX = 64 - (textWidth / 2);
@@ -390,7 +390,8 @@ static const OLEDModeEntry loginModeEntry = {
   isLoginModeAvailable,
   handleLoginModeInput,
   true,
-  1
+  1,
+  nullptr  // dynamic hints (depends on auth state)
 };
 
 // Logout mode entry
@@ -402,7 +403,8 @@ static const OLEDModeEntry logoutModeEntry = {
   isLogoutModeAvailable,
   handleLogoutModeInput,
   true,
-  1
+  1,
+  "A:Confirm B:Cancel"
 };
 
 // Combined auth modes array
@@ -416,9 +418,5 @@ void oledAuthModeInit() {
   // Static registrar already handles registration during global init
   // This function exists solely to force the linker to include this translation unit
 }
-
-// Legacy compatibility - redirect old init functions
-void oledLoginModeInit() { oledAuthModeInit(); }
-void oledLogoutModeInit() { oledAuthModeInit(); }
 
 #endif // ENABLE_OLED_DISPLAY

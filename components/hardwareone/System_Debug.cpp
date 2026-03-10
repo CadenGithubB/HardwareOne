@@ -156,7 +156,7 @@ void debugOutputTask(void* parameter) {
         }
       }
       // Single point of output - no concurrency issues
-      if (gOutputFlags & OUTPUT_SERIAL) {
+      if ((gOutputFlags & OUTPUT_SERIAL) && !(msg->flags & DEBUG_MSG_FLAG_NO_SERIAL)) {
         Serial.printf("[%lu] %s\n", msg->timestamp, msg->text);
       }
       // Append to web mirror buffer using circular buffer logic (only if web output enabled)
@@ -553,6 +553,50 @@ void broadcastOutput(const String& s) {
   
 
   // ESP-NOW V3 session streaming (extern to avoid circular deps)
+#if ENABLE_ESPNOW
+  extern uint32_t gCurrentStreamCmdId;
+  extern void sendEspNowStreamMessage(const String& message);
+  if (gCurrentStreamCmdId != 0) {
+    sendEspNowStreamMessage(s);
+  }
+#endif
+}
+
+// Broadcast output with extra flags (e.g. DEBUG_MSG_FLAG_NO_SERIAL to suppress serial)
+void broadcastOutputEx(const String& s, uint64_t extraFlags) {
+  if (gCLIValidateOnly) return;
+
+  if (gCLIState != CLI_NORMAL && !gInHelpRender) {
+    if (!(s.startsWith("[SECURITY]") || s.startsWith("[AUTH]"))) {
+      gHelpSuppressedCount++;
+      pushHelpSuppressed(s.c_str());
+      return;
+    }
+  }
+
+  extern bool thermalEnabled, imuEnabled, tofEnabled;
+  TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
+  extern TaskHandle_t thermalTaskHandle, imuTaskHandle, tofTaskHandle;
+  if (currentTask == thermalTaskHandle && !thermalEnabled) return;
+  if (currentTask == imuTaskHandle && !imuEnabled) return;
+  if (currentTask == tofTaskHandle && !tofEnabled) return;
+
+  if (gDebugOutputQueue) {
+    DebugMessage* msg = nullptr;
+    if (gDebugFreeQueue && xQueueReceive(gDebugFreeQueue, &msg, 0) == pdTRUE && msg) {
+      msg->timestamp = millis();
+      msg->flags = (gInHelpRender ? DEBUG_MSG_FLAG_ALLOW_IN_HELP : 0) | extraFlags;
+      strncpy(msg->text, s.c_str(), DEBUG_MSG_SIZE - 1);
+      msg->text[DEBUG_MSG_SIZE - 1] = '\0';
+      if (xQueueSend(gDebugOutputQueue, &msg, 0) != pdTRUE) {
+        xQueueSend(gDebugFreeQueue, &msg, 0);
+        gDebugDropped++;
+      }
+    } else {
+      gDebugDropped++;
+    }
+  }
+
 #if ENABLE_ESPNOW
   extern uint32_t gCurrentStreamCmdId;
   extern void sendEspNowStreamMessage(const String& message);
@@ -1620,6 +1664,74 @@ const char* cmd_debugapdsframe(const String& argsInput) {
   }
 }
 
+const char* cmd_debugfmradio(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_FMRADIO);
+    else clearDebugFlag(DEBUG_FMRADIO);
+    return v ? "debugFmRadio enabled (runtime only)" : "debugFmRadio disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugFmRadio, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_FMRADIO);
+    else clearDebugFlag(DEBUG_FMRADIO);
+    return gSettings.debugFmRadio ? "debugFmRadio enabled (persistent)" : "debugFmRadio disabled (persistent)";
+  }
+}
+
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+const char* cmd_debugg2(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_G2);
+    else clearDebugFlag(DEBUG_G2);
+    return v ? "debugG2 enabled (runtime only)" : "debugG2 disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugG2, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_G2);
+    else clearDebugFlag(DEBUG_G2);
+    return gSettings.debugG2 ? "debugG2 enabled (persistent)" : "debugG2 disabled (persistent)";
+  }
+}
+#endif
+
+const char* cmd_memorysampleintervalsec(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) {
+    snprintf(gDebugBuffer, 1024, "Memory sample interval: %d sec (0=disabled)", gSettings.memorySampleIntervalSec);
+    return gDebugBuffer;
+  }
+  int v = valStr.toInt();
+  if (v < 0 || v > 300) return "Interval must be 0-300 seconds (0=disabled)";
+  setSetting(gSettings.memorySampleIntervalSec, v);
+  snprintf(gDebugBuffer, 1024, "Memory sample interval set to %d sec%s", v, v == 0 ? " (disabled)" : "");
+  return gDebugBuffer;
+}
+
 const char* cmd_debugbuffer(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -2119,7 +2231,9 @@ static String generateSystemLogFilename() {
     filename += String(timestamp);
   } else {
     // Fallback to uptime
-    filename += "uptime-" + String(millis());
+    char uptimeBuf[32];
+    snprintf(uptimeBuf, sizeof(uptimeBuf), "uptime-%lu", millis());
+    filename += uptimeBuf;
   }
   
   filename += ".log";
@@ -2788,7 +2902,6 @@ const char* cmd_debugcmdflowcontext(const String& argsInput) {
 // ============================================================================
 
 const CommandEntry debugCommands[] = {
-  { "debugauthcookies", "Debug authentication cookies.", true, cmd_debugauthcookies },
   { "debughttp", "Debug HTTP requests.", true, cmd_debughttp },
   { "debugsse", "Debug Server-Sent Events.", true, cmd_debugsse },
   { "debugcli", "Debug CLI processing.", true, cmd_debugcli },
@@ -2878,7 +2991,12 @@ const CommandEntry debugCommands[] = {
   { "commandmodulesummary", "Show command module summary.", true, cmd_commandmodulesummary },
   { "settingsmodulesummary", "Show settings module summary.", true, cmd_settingsmodulesummary },
   { "outdisplay", "Enable/disable display output.", true, cmd_outdisplay, "Usage: outdisplay <0|1> [persist|temp]" },
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "outg2", "Enable/disable G2 glasses output.", false, cmd_outg2, "Usage: outg2 <0|1> - streams CLI output to G2 glasses" },
+  { "debugg2", "Debug G2 smart glasses BLE operations.", true, cmd_debugg2, "Usage: debugg2 <0|1>" },
+#endif
+  { "debugfmradio", "Debug FM Radio operations.", true, cmd_debugfmradio, "Usage: debugfmradio <0|1>" },
+  { "memorysampleintervalsec", "Set memory sampling interval in seconds (0=disabled).", true, cmd_memorysampleintervalsec, "Usage: memorysampleintervalsec <0-300>" },
   { "loglevel", "Set log level (error|warn|info|debug).", true, cmd_loglevel },
   { "log", "System-wide logging to file.", false, cmd_log, "Usage: log <start|stop|status>\n  start [filepath] [flags=0xXXXX] [tags=0|1]: Begin system logging\n    filepath: Log file path (auto-generated if omitted)\n    flags: Debug flags to enable (e.g., flags=0x0203)" },
 };
@@ -2989,7 +3107,9 @@ void logTimeSyncedMarkerIfReady() {
   }
   
   getTimestampPrefixMsCached(bootTsPrefix, 48);
-  String prefix = bootTsPrefix[0] ? String(bootTsPrefix) : String("[BOOT ms=") + String(millis()) + "] | ";
+  char fallbackPrefix[48];
+  if (!bootTsPrefix[0]) { snprintf(fallbackPrefix, sizeof(fallbackPrefix), "[BOOT ms=%lu] | ", millis()); }
+  String prefix = bootTsPrefix[0] ? String(bootTsPrefix) : String(fallbackPrefix);
   String line = prefix + "Device Powered On | Time Synced via NTP";
   
   appendLineWithCap(LOG_OK_FILE, line, LOG_CAP_BYTES);
@@ -3009,7 +3129,9 @@ static String buildTimestampPrefix() {
   if (tsPrefix[0]) {
     return String(tsPrefix);
   }
-  return String("[ms=") + String(millis()) + "] ";
+  char msBuf[24];
+  snprintf(msBuf, sizeof(msBuf), "[ms=%lu] ", millis());
+  return String(msBuf);
 }
 
 void logI2CError(uint8_t address, const char* deviceName, int consecutiveErrors, int totalErrors, bool nowDegraded) {

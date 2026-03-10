@@ -634,7 +634,8 @@ static inline void broadcastWithOrigin(const char* source, const String& user, c
         DEBUG_SSEF("Found target user session [%d] - sending targeted message", i);
 
         // Create the message with proper prefix
-        String targetedMsg = originPrefix(source ? source : "system", user, targetUser) + msg;
+        String targetedMsg = originPrefix(source ? source : "system", user, targetUser);
+        targetedMsg += msg;
 
         // Send message directly to this specific session's notice queue
         DEBUG_SSEF("Sending to session: sockfd=%d sid='%s'", gSessions[i].sockfd, gSessions[i].sid.c_str());
@@ -648,7 +649,11 @@ static inline void broadcastWithOrigin(const char* source, const String& user, c
 
     if (!userFound) {
       DEBUG_SSEF("Target user '%s' not found in active sessions", targetUser.c_str());
-      broadcastOutput("[ERROR] User '" + targetUser + "' not found or not logged in");
+      {
+        char errBuf[80];
+        snprintf(errBuf, sizeof(errBuf), "[ERROR] User '%s' not found or not logged in", targetUser.c_str());
+        broadcastOutput(errBuf);
+      }
     }
   } else {
     // Regular broadcast to all users
@@ -661,7 +666,11 @@ static inline void broadcastWithOrigin(const char* source, const String& user, c
       }
     }
     // Prefix and broadcast via simple sinks
-    broadcastOutput(originPrefix(source ? source : "system", user, ip) + msg);
+    {
+      String prefixed = originPrefix(source ? source : "system", user, ip);
+      prefixed += msg;
+      broadcastOutput(prefixed);
+    }
   }
 }
 #endif // ENABLE_HTTP_SERVER
@@ -797,72 +806,45 @@ struct ExecReq {
 static void commandExecTask(void* pv) {
   DEBUG_CMD_FLOWF("[cmd_exec] task started");
   static unsigned long lastStackCheck = 0;
+  constexpr uint32_t stackBytes = CMD_EXEC_STACK_WORDS * 4;
   for (;;) {
     // Periodic stack watermark check (every 30 seconds)
     unsigned long now = millis();
     if (now - lastStackCheck > 30000) {
-      // Get current stack pointer position
-      void* sp;
-      asm volatile("mov %0, sp"
-                   : "=r"(sp));
       UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(NULL);
-      uint32_t stackPeak = (4096 * 4) - (stackHighWater * 4);  // Peak usage in bytes
-      int peakPct = (stackPeak * 100) / (4096 * 4);
+      uint32_t stackPeak = stackBytes - (stackHighWater * 4);
+      int peakPct = (stackPeak * 100) / stackBytes;
 
-      // Estimate current usage (approximate, stack grows down)
-      void* stackBase = (void*)((uint32_t)sp + (stackHighWater * 4));
-      uint32_t stackCurrent = (uint32_t)stackBase - (uint32_t)sp;
-      int currentPct = (stackCurrent * 100) / (4096 * 4);
-
-      DEBUG_MEMORYF("[STACK] cmd_exec: current=%lu bytes (%d%%), peak=%lu bytes (%d%%), free_min=%lu bytes",
-                    (unsigned long)stackCurrent, currentPct,
+      DEBUG_MEMORYF("[STACK] cmd_exec: peak=%lu bytes (%d%%), free_min=%lu bytes, total=%lu",
                     (unsigned long)stackPeak, peakPct,
-                    (unsigned long)(stackHighWater * 4));
-      DEBUG_MEMORYF("[HEAP] cmd_exec: free=%lu min=%lu",
-                    (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap());
+                    (unsigned long)(stackHighWater * 4), (unsigned long)stackBytes);
       lastStackCheck = now;
     }
 
     ExecReq* r = nullptr;
-    DEBUG_CMD_FLOWF("[cmd_exec] waiting for command... (queue=%p heap=%lu)", gCmdExecQ, (unsigned long)ESP.getFreeHeap());
-    
     BaseType_t receiveResult = xQueueReceive(gCmdExecQ, &r, portMAX_DELAY);
-    DEBUG_CMD_FLOWF("[cmd_exec] xQueueReceive returned: result=%d r=%p", receiveResult, r);
     
     if (receiveResult == pdTRUE) {
-      if (!r) {
-        DEBUG_CMD_FLOWF("[cmd_exec] ERROR: Received NULL pointer from queue!");
-        continue;
-      }
-      DEBUG_CMD_FLOWF("[cmd_exec] Received request at %p (PSRAM-allocated)", r);
-      DEBUG_CMD_FLOWF("[cmd_exec] r->line='%.200s' len=%zu", r->line, strlen(r->line));
-      DEBUG_CMD_FLOWF("[cmd_exec] r->ctx.origin=%d r->ctx.validateOnly=%d", (int)r->ctx.origin, r->ctx.validateOnly ? 1 : 0);
-      DEBUG_CMD_FLOWF("[cmd_exec] r->ctx.auth.user='%s' path='%s'", r->ctx.auth.user.c_str(), r->ctx.auth.path.c_str());
-      DEBUG_CMD_FLOWF("[cmd_exec] r->done=%p heap=%lu psram=%lu", r->done,
-                  (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+      if (!r) continue;
+      DEBUG_CMD_FLOWF("[cmd_exec] exec '%.80s' user='%s' heap=%lu",
+                  r->line, r->ctx.auth.user.c_str(), (unsigned long)ESP.getFreeHeap());
       
-      DEBUG_CMD_FLOWF("[cmd_exec] Setting command context");
       setCurrentCommandContext(r->ctx);
-      DEBUG_CMD_FLOWF("[cmd_exec] Executing command: '%.200s'", r->line);
       bool prevValidate = gCLIValidateOnly;
       gCLIValidateOnly = r->ctx.validateOnly;
       r->ok = executeCommand((AuthContext&)r->ctx.auth, r->line, r->out, sizeof(r->out));
       gCLIValidateOnly = prevValidate;
-      DEBUG_CMD_FLOWF("[cmd_exec] Command executed: ok=%d out_len=%zu heap=%lu",
+      DEBUG_CMD_FLOWF("[cmd_exec] done ok=%d out_len=%zu heap=%lu",
                   r->ok ? 1 : 0, strlen(r->out), (unsigned long)ESP.getFreeHeap());
       
       // Handle completion: async callback OR semaphore
       if (r->asyncCallback) {
-        DEBUG_CMD_FLOWF("[cmd_exec] Calling async callback: cb=%p userData=%p", r->asyncCallback, r->asyncUserData);
         r->asyncCallback(r->ok, r->out, r->asyncUserData);
         // Async mode: we own the ExecReq, free it
         r->~ExecReq();
         free(r);
-        DEBUG_CMD_FLOWF("[cmd_exec] Async request freed");
       } else if (r->done) {
-        DEBUG_CMD_FLOWF("[cmd_exec] Giving semaphore: r->done=%p", r->done);
         xSemaphoreGive(r->done);
-        DEBUG_CMD_FLOWF("[cmd_exec] Semaphore given, command complete");
       } else {
         DEBUG_CMD_FLOWF("[cmd_exec] WARNING: No callback and no semaphore!");
         r->~ExecReq();
@@ -872,7 +854,6 @@ static void commandExecTask(void* pv) {
       // Without this, back-to-back commands can trigger Interrupt WDT
       vTaskDelay(pdMS_TO_TICKS(1));
     } else {
-      DEBUG_CMD_FLOWF("[cmd_exec] xQueueReceive failed: result=%d", receiveResult);
       vTaskDelay(pdMS_TO_TICKS(100));
     }
   }
@@ -889,15 +870,21 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
     default: source = "system"; break;
   }
 
-  String prefixed = originPrefix(source, ctx.auth.user, ctx.auth.ip) + s;
+  String prefixed = originPrefix(source, ctx.auth.user, ctx.auth.ip);
+  prefixed += s;
   DEBUG_CMD_FLOWF("[BROADCAST_CTX_DEBUG] origin=%s user=%s mask=0x%02lX flags=0x%02lX msg='%.50s'",
                   source, ctx.auth.user.c_str(),
                   (unsigned long)ctx.outputMask,
                   (unsigned long)gOutputFlags,
-                  s.substring(0, 50).c_str());
+                  s.c_str());
 
   // Centralized sinks: route via debug_system (respects help gating and flags)
-  broadcastOutput(prefixed);
+  // If outputMask doesn't include serial, set NO_SERIAL flag so the queue consumer skips it
+  if (ctx.outputMask & CMD_OUT_SERIAL) {
+    broadcastOutput(prefixed);
+  } else {
+    broadcastOutputEx(prefixed, DEBUG_MSG_FLAG_NO_SERIAL);
+  }
   // Preserve prior behavior: ensure web history is appended even if OUTPUT_WEB is disabled
   if (!(gOutputFlags & OUTPUT_WEB)) {
     printToWeb(prefixed);
@@ -947,7 +934,8 @@ static String exitHelpAndExecute(const String& originalCmd) {
   ctx.path = "/help/exit";
   char out[2048];
   (void)executeCommand(ctx, originalCmd.c_str(), out, sizeof(out));
-  return banner + String(out);
+  banner += out;
+  return banner;
 }
 
 extern int connectedDeviceCount;
@@ -1197,10 +1185,10 @@ void hardwareone_setup() {
   // i2c bus mutex is owned by I2CDeviceManager — centralized in mutex_system.cpp
   initMutexes();
 
-  // Initialize sensor startup queue mutex (in i2c_system.cpp) - only if runtime enabled
-  if (gSettings.i2cSensorsEnabled) {
+  // Initialize sensor startup queue mutex (in i2c_system.cpp) - only if I2C bus enabled
+  if (gSettings.i2cBusEnabled) {
     initSensorQueue();
-    Serial.println("[I2C_SENSORS] Runtime enabled - sensor queue initialized");
+    Serial.println("[I2C_SENSORS] I2C bus enabled - sensor queue initialized");
   } else {
     Serial.println("[I2C_SENSORS] Runtime disabled - skipping sensor queue initialization");
   }
@@ -1257,7 +1245,7 @@ void hardwareone_setup() {
       Serial.println("FATAL: Failed to create command exec queue");
       while (1) delay(1000);
     }
-    const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;  // words (≈20 KB) - includes NTP sync with DNS/file I/O
+    const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;  // words (≈24 KB) - automation run + debug vsnprintf frames need deep stack
     if (xTaskCreateLogged(commandExecTask, "cmd_exec_task", cmdExecStackWords, nullptr, 1, &gCmdExecTaskHandle, "cmd.exec") != pdPASS) {
       Serial.println("FATAL: Failed to create command exec task");
       while (1) delay(1000);
@@ -1359,20 +1347,20 @@ void hardwareone_setup() {
 
   // Mutexes already created earlier in setup() - safe to create tasks now
 
-  // Create sensor queue processor task only if I2C sensors are runtime enabled
+  // Create sensor queue processor task only if I2C bus is enabled
  #if ENABLE_I2C_SYSTEM
-  if (gSettings.i2cSensorsEnabled && !queueProcessorTask) {
+  if (gSettings.i2cBusEnabled && !queueProcessorTask) {
     const uint32_t queueStackWords = SENSOR_QUEUE_STACK_WORDS;  // ~12KB (measured min free during IMU start: ~1408 bytes)
     if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, 1, &queueProcessorTask, "sensor.queue") != pdPASS) {
       Serial.println("FATAL: Failed to create sensor queue processor task");
-      while (1) delay(1000);
+      while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
-    INFO_I2CF("[I2C_SENSORS] Queue processor task created (runtime enabled)");
+
  #if DEBUG_MEM_SUMMARY
     heapLogSummary("boot.after_task.sensor_queue");
  #endif
-  } else if (!gSettings.i2cSensorsEnabled) {
-    INFO_I2CF("[I2C_SENSORS] Queue processor task skipped (runtime disabled - saves ~12KB RAM)");
+  } else if (!gSettings.i2cBusEnabled) {
+    INFO_I2CF("[I2C_SENSORS] Queue processor task skipped (I2C bus disabled - saves ~12KB RAM)");
   }
  #endif
 
@@ -1623,7 +1611,7 @@ void hardwareone_setup() {
 
   if (gSettings.httpAutoStart && WiFi.isConnected()) {
     runUnifiedSystemCommand("openhttp");
-    broadcastOutput(String(gServerIsHttps ? "HTTPS server started. Try: https://" : "HTTP server started. Try: http://") + WiFi.localIP().toString());
+    BROADCAST_PRINTF("%s%s", gServerIsHttps ? "HTTPS server started. Try: https://" : "HTTP server started. Try: http://", WiFi.localIP().toString().c_str());
   } else if (!gSettings.httpAutoStart) {
     broadcastOutput("HTTP server available. Use 'openhttp' or quick settings (SELECT button) to start.");
   } else {
@@ -1654,7 +1642,7 @@ void hardwareone_setup() {
 
   // Run LED startup effect if enabled (only on boards with NeoPixel hardware)
 #if defined(NEOPIXEL_PIN_DEFAULT) && NEOPIXEL_PIN_DEFAULT >= 0
-  if (gSettings.ledStartupEnabled && gSettings.ledStartupEffect != "none") {
+  if (gSettings.ledStartupEnabled && gSettings.ledStartupEffect.length() > 0 && gSettings.ledStartupEffect != "none") {
     RGB color1, color2;
     if (!getRGBFromName(gSettings.ledStartupColor, color1)) {
       color1 = { 0, 255, 255 };  // Default cyan
@@ -1846,9 +1834,8 @@ void hardwareone_loop() {
   processOLEDBootSequence();
 #endif
 
-  // ESP-NOW chunked message timeout cleanup
+  // ESP-NOW periodic cleanup
 #if ENABLE_ESPNOW
-  cleanupExpiredChunkedMessage();
   // Cleanup expired buffered PEER messages (topology discovery)
   cleanupExpiredBufferedPeers();
   // Topology collection window check now runs in ESP-NOW FreeRTOS task (espnowHeartbeatTask)
@@ -1921,7 +1908,7 @@ void hardwareone_loop() {
               gSerialUser = u;
               // Check admin status in real-time
               bool isCurrentlyAdmin = isAdminUser(u);
-              broadcastOutput(String("[serial] Login successful. User: ") + u + (isCurrentlyAdmin ? " (admin)" : ""));
+              BROADCAST_PRINTF("[serial] Login successful. User: %s%s", u.c_str(), isCurrentlyAdmin ? " (admin)" : "");
             } else {
               broadcastOutput("[serial] Authentication failed.");
             }
@@ -1939,7 +1926,7 @@ void hardwareone_loop() {
           broadcastOutput("Logged out.");
         } else if (cmd == "whoami") {
           bool isCurrentlyAdmin = gSerialUser.length() ? isAdminUser(gSerialUser) : false;
-          broadcastOutput(String("You are ") + (gSerialUser.length() ? gSerialUser : String("(unknown)")) + (isCurrentlyAdmin ? " (admin)" : ""));
+          BROADCAST_PRINTF("You are %s%s", gSerialUser.length() ? gSerialUser.c_str() : "(unknown)", isCurrentlyAdmin ? " (admin)" : "");
         } else {
           // Record the entered command into the unified feed with source tag (only after auth)
           appendCommandToFeed("serial", cmd);

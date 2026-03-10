@@ -649,16 +649,9 @@ void firstTimeSetupIfNeeded() {
   broadcastOutput("FIRST-TIME SETUP COMPLETE!");
   
   // Always save settings after wizard completes
-  // Ensure i2cSensorsEnabled is set when i2cBusEnabled is enabled
-  // The wizard only toggles i2cBusEnabled, but processAutoStartSensors checks both
-  if (gSettings.i2cBusEnabled) {
-    gSettings.i2cSensorsEnabled = true;
-  }
   
   // Debug: Print sensor auto-start values before saving
-  Serial.printf("[FTS] Before save: i2cBus=%d i2cSensors=%d\n",
-                gSettings.i2cBusEnabled ? 1 : 0,
-                gSettings.i2cSensorsEnabled ? 1 : 0);
+  Serial.printf("[FTS] Before save: i2cBus=%d\n", gSettings.i2cBusEnabled ? 1 : 0);
   Serial.printf("[FTS] Sensors: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d\n",
                 gSettings.thermalAutoStart ? 1 : 0,
                 gSettings.tofAutoStart ? 1 : 0,

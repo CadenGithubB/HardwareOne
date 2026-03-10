@@ -171,12 +171,6 @@ const char* cmd_apdsstart(const String& argsInput) {
   return "[APDS] Error: Failed to enqueue open (queue full)";
 }
 
-// Deprecated: Use 'openapds' then 'apdsmode color'
-const char* cmd_apdscolorstart(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'openapds' to open sensor, then 'apdsmode color' to enable color sensing";
-}
-
 // Stop APDS sensor (all modes)
 const char* cmd_apdsstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -189,36 +183,6 @@ const char* cmd_apdsstop(const String& argsInput) {
   handleDeviceStopped(I2C_DEVICE_APDS);
   sensorStatusBumpWith("closeapds@CLI");
   return "[APDS] Sensor close requested; cleanup will complete asynchronously";
-}
-
-// Deprecated: Use 'apdsstop' or 'apdsmode color off'
-const char* cmd_apdscolorstop(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'closeapds' to close sensor, or 'apdsmode color off' to disable color mode";
-}
-
-// Deprecated: Use 'openapds' then 'apdsmode proximity'
-const char* cmd_apdsproximitystart(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'openapds' to open sensor, then 'apdsmode proximity' to enable proximity sensing";
-}
-
-// Deprecated: Use 'apdsstop' or 'apdsmode proximity off'
-const char* cmd_apdsproximitystop(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'closeapds' to close sensor, or 'apdsmode proximity off' to disable proximity mode";
-}
-
-// Deprecated: Use 'openapds' then 'apdsmode gesture'
-const char* cmd_apdsgesturestart(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'openapds' to open sensor, then 'apdsmode gesture' to enable gesture sensing";
-}
-
-// Deprecated: Use 'apdsstop' or 'apdsmode gesture off'
-const char* cmd_apdsgesturestop(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return "[APDS] Deprecated: Use 'closeapds' to close sensor, or 'apdsmode gesture off' to disable gesture mode";
 }
 
 // Runtime mode control (once sensor is running)
@@ -377,9 +341,7 @@ void readAPDSColor() {
   // String colorName = getClosestColorName(red, green, blue, closestRGB);
   // setLEDColor(closestRGB);
 
-  String colorData = "Red: " + String(red) + ", Green: " + String(green) + ", Blue: " + String(blue) + ", Clear: " + String(clear);
-  // colorData += " -> Detected: " + colorName + " (" + String(closestRGB.r) + "," + String(closestRGB.g) + "," + String(closestRGB.b) + ")";
-  broadcastOutput(colorData);
+  BROADCAST_PRINTF("Red: %d, Green: %d, Blue: %d, Clear: %d", red, green, blue, clear);
 }
 
 void readAPDSProximity() {
@@ -394,8 +356,7 @@ void readAPDSProximity() {
   }
 
   uint8_t proximity = gAPDS9960->readProximity();
-  String proximityData = "Proximity: " + String(proximity);
-  broadcastOutput(proximityData);
+  BROADCAST_PRINTF("Proximity: %d", proximity);
 }
 
 void readAPDSGesture() {
@@ -449,14 +410,6 @@ const CommandEntry apdsCommands[] = {
   { "apdscolor", "Read APDS9960 color values.", false, cmd_apdscolor },
   { "apdsproximity", "Read APDS9960 proximity value.", false, cmd_apdsproximity },
   { "apdsgesture", "Read APDS9960 gesture.", false, cmd_apdsgesture },
-  
-  // Deprecated commands (backward compatibility with deprecation warnings)
-  { "apdscolorstart", "[DEPRECATED] Use 'openapds' + 'apdsmode color'.", false, cmd_apdscolorstart },
-  { "apdscolorstop", "[DEPRECATED] Use 'closeapds' or 'apdsmode color off'.", false, cmd_apdscolorstop },
-  { "apdsproximitystart", "[DEPRECATED] Use 'openapds' + 'apdsmode proximity'.", false, cmd_apdsproximitystart },
-  { "apdsproximitystop", "[DEPRECATED] Use 'closeapds' or 'apdsmode proximity off'.", false, cmd_apdsproximitystop },
-  { "apdsgesturestart", "[DEPRECATED] Use 'openapds' + 'apdsmode gesture'.", false, cmd_apdsgesturestart },
-  { "apdsgesturestop", "[DEPRECATED] Use 'closeapds' or 'apdsmode gesture off'.", false, cmd_apdsgesturestop },
   
   // Auto-start
   { "apdsautostart", "Enable/disable APDS auto-start after boot [on|off]", false, cmd_apdsautostart, "Usage: apdsautostart [on|off]" },

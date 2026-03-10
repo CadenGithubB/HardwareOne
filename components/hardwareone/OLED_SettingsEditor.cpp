@@ -166,7 +166,9 @@ bool validateSettingValue(const SettingEntry* entry, int value, String& errorMsg
   // Check range
   if (entry->minVal != 0 || entry->maxVal != 0) {
     if (value < entry->minVal || value > entry->maxVal) {
-      errorMsg = "Value must be " + String(entry->minVal) + ".." + String(entry->maxVal);
+      char rangeBuf[48];
+      snprintf(rangeBuf, sizeof(rangeBuf), "Value must be %d..%d", entry->minVal, entry->maxVal);
+      errorMsg = rangeBuf;
       return false;
     }
   }
@@ -328,7 +330,7 @@ void displaySettingsEditor() {
         
         // Truncate label if too long (max ~15 chars to leave room for value)
         if (label.length() > 15) {
-          label = label.substring(0, 14) + "~";
+          label = label.substring(0, 14); label += '~';
         }
         
         // Use print instead of println to prevent wrapping
@@ -757,7 +759,8 @@ static const OLEDModeEntry settingsModeEntry = {
   isSettingsAvailable,
   handleSettingsInput,
   true,   // Show in menu
-  100     // Menu order (near end)
+  100,    // Menu order (near end)
+  nullptr // hints
 };
 
 // Settings modes array

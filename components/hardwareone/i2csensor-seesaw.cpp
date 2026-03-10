@@ -329,8 +329,7 @@ void readGamepad() {
     y = gGamepadSeesaw.analogRead(15);
   });
 
-  String gamepadData = "Buttons: 0x" + String(buttons, HEX) + ", X: " + String(x) + ", Y: " + String(y);
-  broadcastOutput(gamepadData);
+  BROADCAST_PRINTF("Buttons: 0x%lX, X: %d, Y: %d", (unsigned long)buttons, x, y);
 }
 
 // ============================================================================

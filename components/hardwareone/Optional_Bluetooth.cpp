@@ -432,8 +432,9 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
     String u = rest.substring(0, sp);
     String p = rest.substring(sp + 1);
     if (bleLogin(connId, u, p)) {
-      String out = String("[ble] Login successful. User: ") + u + (isAdminUser(u) ? " (admin)" : "");
-      sendBLEResponseToConn(connId, out.c_str(), out.length());
+      char out[80];
+      snprintf(out, sizeof(out), "[ble] Login successful. User: %s%s", u.c_str(), isAdminUser(u) ? " (admin)" : "");
+      sendBLEResponseToConn(connId, out, strlen(out));
     } else {
       const char* msg = "[ble] Authentication failed.";
       sendBLEResponseToConn(connId, msg, strlen(msg));
@@ -449,8 +450,9 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
   if (lc == "whoami") {
     String u;
     if (bleIsAuthed(connId, u)) {
-      String out = String("You are ") + u + (isAdminUser(u) ? " (admin)" : "");
-      sendBLEResponseToConn(connId, out.c_str(), out.length());
+      char out[80];
+      snprintf(out, sizeof(out), "You are %s%s", u.c_str(), isAdminUser(u) ? " (admin)" : "");
+      sendBLEResponseToConn(connId, out, strlen(out));
     } else {
       const char* msg = "You are (unknown)";
       sendBLEResponseToConn(connId, msg, strlen(msg));
@@ -871,8 +873,9 @@ void bleSessionTick() {
     if (gBLEState->connections[i].lastActivityMs == 0) continue;
 
     if (now - gBLEState->connections[i].lastActivityMs > kBleSessionIdleTimeoutMs) {
-      String msg = String("[ble] Session expired for user '") + gBLEState->connections[i].user + "'";
-      sendBLEResponseToConn(gBLEState->connections[i].connId, msg.c_str(), msg.length());
+      char msg[80];
+      snprintf(msg, sizeof(msg), "[ble] Session expired for user '%s'", gBLEState->connections[i].user.c_str());
+      sendBLEResponseToConn(gBLEState->connections[i].connId, msg, strlen(msg));
       gBLEState->connections[i].authed = false;
       gBLEState->connections[i].user = "";
     }
@@ -1651,7 +1654,7 @@ static void displayBluetoothStatusDetail() {
   // Show device name
   oledDisplay->print("Name: ");
   String displayName = gSettings.bleDeviceName.length() > 0 ? gSettings.bleDeviceName : "HardwareOne";
-  if (displayName.length() > 12) displayName = displayName.substring(0, 11) + "~";
+  if (displayName.length() > 12) { displayName = displayName.substring(0, 11); displayName += '~'; }
   oledDisplay->println(displayName);
   
   // Show state with advertising indicator
@@ -1901,7 +1904,8 @@ static const OLEDModeEntry bluetoothOLEDModes[] = {
     bluetoothOLEDModeAvailable, // availFunc
     bluetoothInputHandler,   // inputFunc - X toggles BLE state
     true,                    // showInMenu
-    45                       // menuOrder (near ESP-NOW)
+    45,                      // menuOrder (near ESP-NOW)
+    nullptr                  // dynamic hints
   }
 };
 

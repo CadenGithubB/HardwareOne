@@ -132,7 +132,7 @@ void sendSSEBurstToSession(int sessionIndex, const String& eventData) {
   if (sessionIndex < 0 || sessionIndex >= MAX_SESSIONS) return;
   if (gSessions[sessionIndex].sid.length() == 0) return;
 
-  DEBUG_SSEF("Would send SSE burst to session %d: %s...", sessionIndex, eventData.substring(0, 50).c_str());
+  DEBUG_SSEF("Would send SSE burst to session %d: %.50s...", sessionIndex, eventData.c_str());
   gSessions[sessionIndex].needsStatusUpdate = true;
 }
 
@@ -344,8 +344,11 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
       // Create or reuse session (Safari-safe cookie path inside setSession)
       String sid = setSession(req, ctx.user);
       ctx.sid = sid;
-      if (sid.length() > 8) sidShort = sid.substring(0, 8) + "...";
-      else sidShort = sid;
+      if (sid.length() > 8) {
+        char sidBuf[12];
+        snprintf(sidBuf, sizeof(sidBuf), "%.8s...", sid.c_str());
+        sidShort = sidBuf;
+      } else sidShort = sid;
       // Heuristic: if session exists for same user+IP, setSession reuses; we mark reused
       // We can't cheaply detect here without additional API; leave 'reused' default false.
       if (ctx.ip.length() == 0) getClientIP(req, ctx.ip);
@@ -1458,7 +1461,9 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileWrite] Converted to String, length: %d", s.length());
 
   auto getParam = [&](const char* key) -> String {
-    String k = String(key) + "=";
+    char kBuf[64];
+    snprintf(kBuf, sizeof(kBuf), "%s=", key);
+    String k = kBuf;
     int p = s.indexOf(k);
     if (p < 0) return String("");
     p += k.length();
@@ -2193,6 +2198,16 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
         entry["secret"] = true;
       }
       
+      // Group for nested sub-sections + UI grouping
+      if (e->group) {
+        entry["group"] = e->group;
+      }
+      
+      // CLI command key override (when jsonKey differs from CLI command name)
+      if (e->cmdKey) {
+        entry["cmdKey"] = e->cmdKey;
+      }
+      
       // Min/max for numeric types
       if (e->type == SETTING_INT || e->type == SETTING_FLOAT) {
         if (e->minVal != 0 || e->maxVal != 0) {
@@ -2783,7 +2798,7 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   String validateStr = extractFormField(body, "validate");
   bool doValidate = (validateStr == "1" || validateStr == "true");
   DEBUG_CMD_FLOWF("[web.cli] authed user=%s cmd_len=%d validate=%d", ctx.user.c_str(), cmd.length(), doValidate ? 1 : 0);
-  DEBUG_CMD_FLOWF("[web.cli] cmd_first_80='%s'", cmd.substring(0, 80).c_str());
+  DEBUG_CMD_FLOWF("[web.cli] cmd_first_80='%.80s'", cmd.c_str());
 
   // Record the command in the unified feed (skip if validation-only), then execute centrally
   if (!doValidate) {
@@ -3289,7 +3304,9 @@ esp_err_t handleRegisterSubmit(httpd_req_t* req) {
 
   // Execute the built-in command via unified pipeline so it is logged/audited
   AuthContext ctx = makeWebAuthCtx(req);
-  String cmdline = String("user request ") + username + " " + password + " " + confirmPassword;
+  char cmdBuf[256];
+  snprintf(cmdBuf, sizeof(cmdBuf), "user request %s %s %s", username.c_str(), password.c_str(), confirmPassword.c_str());
+  String cmdline = cmdBuf;
   String out;
   bool ok = executeUnifiedWebCommand(req, ctx, cmdline, out);
   // Some commands always return true; also check textual success marker
@@ -3376,7 +3393,7 @@ esp_err_t handleFilesList(httpd_req_t* req) {
       // URL decode the path
       dirPath.replace("%2F", "/");
       dirPath.replace("%20", " ");
-      broadcastOutput(String("[files] Listing directory: ") + dirPath);
+      DEBUG_HTTPF("[files] Listing directory: %s", dirPath.c_str());
     }
   }
   if (isAdminOnlyPath(dirPath) && !isAdminUser(ctx.user)) {
@@ -3392,7 +3409,11 @@ esp_err_t handleFilesList(httpd_req_t* req) {
   String json;
   if (ok) {
     uint8_t dp = getDirPerms(dirPath);
-    json = String("{\"success\":true,\"dirPerms\":") + String((int)dp) + ",\"files\":[" + body + "]}";
+    char hdrBuf[64];
+    snprintf(hdrBuf, sizeof(hdrBuf), "{\"success\":true,\"dirPerms\":%d,\"files\":[", (int)dp);
+    json = hdrBuf;
+    json += body;
+    json += "]}";
   } else {
     json = "{\"success\":false,\"error\":\"Directory not found or not accessible\"}";
   }
@@ -3507,15 +3528,18 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
       path = "/" + name + "." + type;
     }
     // Route through unified executor using CLI-equivalent command
-    String cmd = String("filecreate ") + path;
+    char cmdBuf[128];
+    snprintf(cmdBuf, sizeof(cmdBuf), "filecreate %s", path.c_str());
+    String cmd = cmdBuf;
     String out;
     bool ok = executeUnifiedWebCommand(req, ctx, cmd, out);
     httpd_resp_set_type(req, "application/json");
     if (ok) {
       httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
     } else {
-      String resp = String("{\"success\":false,\"error\":\"") + out + String("\"}");
-      httpd_resp_send(req, resp.c_str(), HTTPD_RESP_USE_STRLEN);
+      char respBuf[256];
+      snprintf(respBuf, sizeof(respBuf), "{\"success\":false,\"error\":\"%s\"}", out.c_str());
+      httpd_resp_send(req, respBuf, HTTPD_RESP_USE_STRLEN);
     }
   }
 
@@ -3577,7 +3601,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  broadcastOutput(String("[files] Viewing file: ") + path);
+  BROADCAST_PRINTF("[files] Viewing file: %s", path.c_str());
 
   DEBUG_STORAGEF("[handleFileView] File='%s' decoded='%s' heap=%u", name, path.c_str(), (unsigned)ESP.getFreeHeap());
 
@@ -3609,17 +3633,18 @@ esp_err_t handleFileView(httpd_req_t* req) {
       ".btn.active{background:var(--btn-active)}"
       "</style></head><body><h2>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, displayName.c_str(), displayName.length());
-    String base = String("/api/files/view?name=") + filename;
-    String prettyHref = base + "&mode=pretty";
-    String rawHref = base + "&mode=raw";
+    char prettyHref[192];
+    char rawHref[192];
+    snprintf(prettyHref, sizeof(prettyHref), "/api/files/view?name=%s&mode=pretty", filename.c_str());
+    snprintf(rawHref, sizeof(rawHref), "/api/files/view?name=%s&mode=raw", filename.c_str());
     httpd_resp_send_chunk(req, "</h2><div class='bar'>", HTTPD_RESP_USE_STRLEN);
     if (raw) {
       httpd_resp_send_chunk(req, "<a class='btn' href=\"", HTTPD_RESP_USE_STRLEN);
-      httpd_resp_send_chunk(req, prettyHref.c_str(), prettyHref.length());
+      httpd_resp_send_chunk(req, prettyHref, strlen(prettyHref));
       httpd_resp_send_chunk(req, "\">Pretty</a><span class='btn active'>Raw</span>", HTTPD_RESP_USE_STRLEN);
     } else {
       httpd_resp_send_chunk(req, "<span class='btn active'>Pretty</span><a class='btn' href=\"", HTTPD_RESP_USE_STRLEN);
-      httpd_resp_send_chunk(req, rawHref.c_str(), rawHref.length());
+      httpd_resp_send_chunk(req, rawHref, strlen(rawHref));
       httpd_resp_send_chunk(req, "\">Raw</a>", HTTPD_RESP_USE_STRLEN);
     }
     httpd_resp_send_chunk(req, "</div><pre>", HTTPD_RESP_USE_STRLEN);
@@ -3983,7 +4008,7 @@ esp_err_t handleIconTestPage(httpd_req_t* req) {
   html += ".stats{color:#666;font-size:0.9em;}";
   html += "</style></head><body>";
   html += "<h1>Embedded Icons</h1>";
-  html += "<div class='stats'>" + String(EMBEDDED_ICONS_COUNT) + " icons &middot; 32&times;32 native</div>";
+  { char statsBuf[80]; snprintf(statsBuf, sizeof(statsBuf), "<div class='stats'>%d icons &middot; 32&times;32 native</div>", (int)EMBEDDED_ICONS_COUNT); html += statsBuf; }
   html += "<div class='controls'>";
   html += "<input type='text' id='filter' placeholder='Filter icons...' oninput='filterIcons()'>";
   html += "<button onclick='setSize(32)' id='b32'>32px</button>";
@@ -3999,11 +4024,15 @@ esp_err_t handleIconTestPage(httpd_req_t* req) {
     uint8_t width = pgm_read_byte(&EMBEDDED_ICONS[i].width);
     uint8_t height = pgm_read_byte(&EMBEDDED_ICONS[i].height);
     
-    html += "<div class='icon-item'>";
-    html += "<img src='/api/icon?name=" + String(iconName) + "' width='64' height='64'>";
-    html += "<div class='icon-name'>" + String(iconName) + "</div>";
-    html += "<div class='icon-info'>" + String(width) + "x" + String(height) + " (" + String(pngSize) + "B)</div>";
-    html += "</div>";
+    char iconBuf[256];
+    snprintf(iconBuf, sizeof(iconBuf),
+      "<div class='icon-item'>"
+      "<img src='/api/icon?name=%s' width='64' height='64'>"
+      "<div class='icon-name'>%s</div>"
+      "<div class='icon-info'>%dx%d (%uB)</div>"
+      "</div>",
+      iconName, iconName, width, height, (unsigned)pngSize);
+    html += iconBuf;
   }
   
   html += "</div>";
@@ -4301,7 +4330,9 @@ esp_err_t handleAdminApproveUser(httpd_req_t* req) {
   if (ok) {
     httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
   } else {
-    httpd_resp_send(req, (String("{\"success\":false,\"error\":\"") + err + "\"}").c_str(), HTTPD_RESP_USE_STRLEN);
+    char errBuf[256];
+    snprintf(errBuf, sizeof(errBuf), "{\"success\":false,\"error\":\"%s\"}", err.c_str());
+    httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
   }
   return ESP_OK;
 }
@@ -4347,7 +4378,9 @@ esp_err_t handleAdminDenyUser(httpd_req_t* req) {
   String err;
   if (!denyPendingUserInternal(username, err)) {
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, (String("{\"success\":false,\"error\":\"") + err + "\"}").c_str(), HTTPD_RESP_USE_STRLEN);
+    char errBuf[256];
+    snprintf(errBuf, sizeof(errBuf), "{\"success\":false,\"error\":\"%s\"}", err.c_str());
+    httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
 
@@ -4446,11 +4479,14 @@ esp_err_t handleAutomationsExport(httpd_req_t* req) {
   struct tm* timeinfo = localtime(&now);
   char timestamp[32];
   strftime(timestamp, sizeof(timestamp), "%Y-%m-%d_%H-%M-%S", timeinfo);
-  String filename = String("automations-backup-") + timestamp + ".json";
+  char filename[64];
+  snprintf(filename, sizeof(filename), "automations-backup-%s.json", timestamp);
 
   // Set download headers
   httpd_resp_set_type(req, "application/json");
-  httpd_resp_set_hdr(req, "Content-Disposition", ("attachment; filename=\"" + filename + "\"").c_str());
+  char dispBuf[96];
+  snprintf(dispBuf, sizeof(dispBuf), "attachment; filename=\"%s\"", filename);
+  httpd_resp_set_hdr(req, "Content-Disposition", dispBuf);
 
   httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
