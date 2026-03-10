@@ -499,17 +499,20 @@ void sensorLogTick() {
 
           if (gSensorLogMaxRotations > 0) {
             if (gSensorLogMaxRotations > 1) {
-              String oldestFile = gSensorLogPath + "." + String(gSensorLogMaxRotations);
+              char oldestFile[96];
+              snprintf(oldestFile, sizeof(oldestFile), "%s.%d", gSensorLogPath.c_str(), gSensorLogMaxRotations);
               if (LittleFS.exists(oldestFile)) {
-                LittleFS.remove(oldestFile.c_str());
+                LittleFS.remove(oldestFile);
               }
             }
 
             for (int i = gSensorLogMaxRotations - 1; i >= 1; i--) {
-              String fromFile = (i == 1) ? gSensorLogPath : (gSensorLogPath + "." + String(i));
-              String toFile = gSensorLogPath + "." + String(i + 1);
+              char fromFile[96], toFile[96];
+              if (i == 1) snprintf(fromFile, sizeof(fromFile), "%s", gSensorLogPath.c_str());
+              else snprintf(fromFile, sizeof(fromFile), "%s.%d", gSensorLogPath.c_str(), i);
+              snprintf(toFile, sizeof(toFile), "%s.%d", gSensorLogPath.c_str(), i + 1);
               if (LittleFS.exists(fromFile)) {
-                LittleFS.rename(fromFile.c_str(), toFile.c_str());
+                LittleFS.rename(fromFile, toFile);
               }
             }
 
@@ -1059,7 +1062,9 @@ void sensorLogAutoStart() {
   }
   
   // Build timestamped path: /logs/sensors/sensors-2026-02-17T14-30-00.txt or /logs/sensors/sensors-boot12345.txt
-  path = dir + baseName + "-" + String(timestamp) + ext;
+  char pathBuf[128];
+  snprintf(pathBuf, sizeof(pathBuf), "%s%s-%s%s", dir.c_str(), baseName.c_str(), timestamp, ext.c_str());
+  path = pathBuf;
 
   // Ensure /logs/sensors directory exists before starting
   if (!LittleFS.exists("/logs/sensors")) {
@@ -1073,10 +1078,10 @@ void sensorLogAutoStart() {
   // Build and execute the CLI command so all validation/space checks run
   char cmd[128];
   snprintf(cmd, sizeof(cmd), "sensorlog start %s %d", path.c_str(), (int)gSensorLogIntervalMs);
-  broadcastOutput(String("[sensorlog] Auto-start: ") + cmd);
+  BROADCAST_PRINTF("[sensorlog] Auto-start: %s", cmd);
   const char* result = cmd_sensorlog(String(cmd).substring(10));  // Pass everything after "sensorlog " (10 chars)
   if (result && strncmp(result, "SUCCESS", 7) != 0) {
     // Command failed - broadcast the error
-    broadcastOutput(String("[sensorlog] Auto-start failed: ") + result);
+    BROADCAST_PRINTF("[sensorlog] Auto-start failed: %s", result);
   }
 }

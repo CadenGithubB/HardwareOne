@@ -60,23 +60,27 @@ bool organizeMapFromAnyPath(const String& srcPath, String& outErr) {
     if (!LittleFS.mkdir("/maps")) { outErr = "maps_mkdir_failed"; return false; }
   }
 
-  String dstDir = String("/maps/") + base;
-  String dstMap = dstDir + "/" + base + ".hwmap";
+  char dstDir[64], dstMap[96];
+  snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
+  snprintf(dstMap, sizeof(dstMap), "%s/%s.hwmap", dstDir, base.c_str());
   if (srcPath == dstMap) { outErr = "already_organized"; return false; }
   if (!LittleFS.exists(dstDir)) {
     if (!LittleFS.mkdir(dstDir)) { outErr = "mkdir_failed"; return false; }
   }
   if (LittleFS.exists(dstMap)) { outErr = "dst_exists"; return false; }
-  if (!LittleFS.rename(srcPath.c_str(), dstMap.c_str())) { outErr = "rename_failed"; return false; }
+  if (!LittleFS.rename(srcPath.c_str(), dstMap)) { outErr = "rename_failed"; return false; }
 
   // Move legacy waypoints
-  String legacyWp1 = String("/maps/waypoints_") + base + ".hwmap.json";
-  String legacyWp2 = String("/maps/waypoints_") + base + ".json";
-  String legacyWp = LittleFS.exists(legacyWp1) ? legacyWp1 : (LittleFS.exists(legacyWp2) ? legacyWp2 : "");
-  if (legacyWp.length() > 0) {
-    String wpFileName = legacyWp.substring(legacyWp.lastIndexOf('/') + 1);
-    String dstWp = dstDir + "/" + wpFileName;
-    if (!LittleFS.exists(dstWp)) LittleFS.rename(legacyWp.c_str(), dstWp.c_str());
+  char legacyWp1[96], legacyWp2[96];
+  snprintf(legacyWp1, sizeof(legacyWp1), "/maps/waypoints_%s.hwmap.json", base.c_str());
+  snprintf(legacyWp2, sizeof(legacyWp2), "/maps/waypoints_%s.json", base.c_str());
+  const char* legacyWp = LittleFS.exists(legacyWp1) ? legacyWp1 : (LittleFS.exists(legacyWp2) ? legacyWp2 : nullptr);
+  if (legacyWp) {
+    const char* wpName = strrchr(legacyWp, '/');
+    wpName = wpName ? wpName + 1 : legacyWp;
+    char dstWp[128];
+    snprintf(dstWp, sizeof(dstWp), "%s/%s", dstDir, wpName);
+    if (!LittleFS.exists(dstWp)) LittleFS.rename(legacyWp, dstWp);
   }
   return true;
 }
@@ -86,24 +90,29 @@ static bool organizeOneMapAtRoot(const String& mapFileName, String& outErr) {
   if (mapFileName.indexOf('/') >= 0) { outErr = "invalid_name"; return false; }
   String base = mapBaseNameNoExt(mapFileName);
   if (base.length() == 0) { outErr = "empty_base"; return false; }
-  String srcMap = String("/maps/") + mapFileName;
+  char srcMap[96];
+  snprintf(srcMap, sizeof(srcMap), "/maps/%s", mapFileName.c_str());
   if (!LittleFS.exists(srcMap)) { outErr = "src_missing"; return false; }
   if (!isMapFileByMagic(srcMap)) { outErr = "not_map_file"; return false; }
 
-  String dstDir = String("/maps/") + base;
-  String dstMap = dstDir + "/" + base + ".hwmap";
+  char dstDir[64], dstMap[96];
+  snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
+  snprintf(dstMap, sizeof(dstMap), "%s/%s.hwmap", dstDir, base.c_str());
   if (!LittleFS.exists(dstDir)) {
     if (!LittleFS.mkdir(dstDir)) { outErr = "mkdir_failed"; return false; }
   }
   if (LittleFS.exists(dstMap)) { outErr = "dst_exists"; return false; }
-  if (!LittleFS.rename(srcMap.c_str(), dstMap.c_str())) { outErr = "rename_failed"; return false; }
+  if (!LittleFS.rename(srcMap, dstMap)) { outErr = "rename_failed"; return false; }
 
-  String legacyWp = String("/maps/waypoints_") + mapFileName + ".json";
+  char legacyWp[96];
+  snprintf(legacyWp, sizeof(legacyWp), "/maps/waypoints_%s.json", mapFileName.c_str());
   if (LittleFS.exists(legacyWp)) {
-    String wpFileName = legacyWp.substring(legacyWp.lastIndexOf('/') + 1);
-    String dstWp = dstDir + "/" + wpFileName;
+    const char* wpName = strrchr(legacyWp, '/');
+    wpName = wpName ? wpName + 1 : legacyWp;
+    char dstWp[128];
+    snprintf(dstWp, sizeof(dstWp), "%s/%s", dstDir, wpName);
     if (LittleFS.exists(dstWp)) { outErr = "waypoints_dst_exists"; return false; }
-    if (!LittleFS.rename(legacyWp.c_str(), dstWp.c_str())) { outErr = "waypoints_rename_failed"; return false; }
+    if (!LittleFS.rename(legacyWp, dstWp)) { outErr = "waypoints_rename_failed"; return false; }
   }
   return true;
 }
@@ -116,13 +125,15 @@ bool tryOrganizeLegacyWaypointsAtRoot(const String& wpFileName, String& outErr) 
   String base = mapFileName.endsWith(".hwmap") ? mapFileName.substring(0, mapFileName.length() - 6) : mapFileName;
   if (base.length() == 0) { outErr = "empty_base"; return false; }
   
-  String srcWp = String("/maps/") + wpFileName;
+  char srcWp[96];
+  snprintf(srcWp, sizeof(srcWp), "/maps/%s", wpFileName.c_str());
   if (!LittleFS.exists(srcWp)) { outErr = "src_missing"; return false; }
-  String dstDir = String("/maps/") + base;
-  String dstWp = dstDir + "/" + wpFileName;
+  char dstDir[64], dstWp[128];
+  snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
+  snprintf(dstWp, sizeof(dstWp), "%s/%s", dstDir, wpFileName.c_str());
   if (!LittleFS.exists(dstDir)) { outErr = "dst_dir_missing"; return false; }
   if (LittleFS.exists(dstWp)) { outErr = "dst_exists"; return false; }
-  if (!LittleFS.rename(srcWp.c_str(), dstWp.c_str())) { outErr = "rename_failed"; return false; }
+  if (!LittleFS.rename(srcWp, dstWp)) { outErr = "rename_failed"; return false; }
   return true;
 }
 
@@ -174,7 +185,7 @@ static esp_err_t handleMapsOrganize(httpd_req_t* req) {
           if (details.length() < 1800) {
             String esc = fn; esc.replace("\\", "\\\\"); esc.replace("\"", "\\\"");
             String escErr = err; escErr.replace("\\", "\\\\"); escErr.replace("\"", "\\\"");
-            details += String(details.length() ? "," : "") + "{\"file\":\"" + esc + "\",\"error\":\"" + escErr + "\"}";
+            { char detBuf[256]; snprintf(detBuf, sizeof(detBuf), "%s{\"file\":\"%s\",\"error\":\"%s\"}", details.length() ? "," : "", esc.c_str(), escErr.c_str()); details += detBuf; }
           }
         }
       } else if (fn.startsWith("waypoints_") && fn.endsWith(".json")) {
@@ -186,7 +197,7 @@ static esp_err_t handleMapsOrganize(httpd_req_t* req) {
           if (details.length() < 1800) {
             String esc = fn; esc.replace("\\", "\\\\"); esc.replace("\"", "\\\"");
             String escErr = err; escErr.replace("\\", "\\\\"); escErr.replace("\"", "\\\"");
-            details += String(details.length() ? "," : "") + "{\"file\":\"" + esc + "\",\"error\":\"" + escErr + "\"}";
+            { char detBuf[256]; snprintf(detBuf, sizeof(detBuf), "%s{\"file\":\"%s\",\"error\":\"%s\"}", details.length() ? "," : "", esc.c_str(), escErr.c_str()); details += detBuf; }
           }
         }
       }

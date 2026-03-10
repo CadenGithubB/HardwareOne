@@ -17,7 +17,6 @@ SemaphoreHandle_t gJsonResponseMutex = nullptr;
 SemaphoreHandle_t gMeshRetryMutex = nullptr;
 SemaphoreHandle_t gFileTransferMutex = nullptr;
 SemaphoreHandle_t gTopoStreamsMutex = nullptr;
-SemaphoreHandle_t gChunkedMsgMutex = nullptr;
 SemaphoreHandle_t i2sMicMutex = nullptr;
 
 // ============================================================================
@@ -31,7 +30,6 @@ void initMutexes() {
   gMeshRetryMutex = xSemaphoreCreateMutex();
   gFileTransferMutex = xSemaphoreCreateMutex();
   gTopoStreamsMutex = xSemaphoreCreateMutex();
-  gChunkedMsgMutex = xSemaphoreCreateMutex();
   i2sMicMutex = xSemaphoreCreateMutex();
   
   // i2cMutex removed — I2cLockGuard and i2cLock/Unlock go through I2CDeviceManager::getBusMutex() directly
@@ -39,8 +37,7 @@ void initMutexes() {
   // Log creation status
   bool allCreated = (fsMutex != nullptr) && (gJsonResponseMutex != nullptr) && 
                     (gMeshRetryMutex != nullptr) && (gFileTransferMutex != nullptr) &&
-                    (gTopoStreamsMutex != nullptr) && (gChunkedMsgMutex != nullptr) &&
-                    (i2sMicMutex != nullptr);
+                    (gTopoStreamsMutex != nullptr) && (i2sMicMutex != nullptr);
   
   if (!allCreated) {
     if (gOutputFlags & OUTPUT_SERIAL) {
@@ -244,23 +241,3 @@ TopoStreamsGuard::~TopoStreamsGuard() {
   }
 }
 
-// ============================================================================
-// ChunkedMsgGuard Implementation
-// ============================================================================
-
-ChunkedMsgGuard::ChunkedMsgGuard(const char* owner) : held(false) {
-  if (gChunkedMsgMutex) {
-    if (isHeldByCurrentTask(gChunkedMsgMutex)) {
-      return;
-    }
-    if (xSemaphoreTake(gChunkedMsgMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      held = true;
-    }
-  }
-}
-
-ChunkedMsgGuard::~ChunkedMsgGuard() {
-  if (held && gChunkedMsgMutex) {
-    xSemaphoreGive(gChunkedMsgMutex);
-  }
-}

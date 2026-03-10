@@ -153,7 +153,6 @@ struct Settings {
       automationsEnabled(true),
 #endif
       i2cBusEnabled(true),
-      i2cSensorsEnabled(true),
       ledBrightness(100),
       ledStartupEnabled(true),
       ledStartupEffect(""),
@@ -481,7 +480,6 @@ struct Settings {
 #endif
   // I2C Hardware system
   bool i2cBusEnabled;       // Enable/disable I2C bus hardware (Wire/Wire1 init and transactions)
-  bool i2cSensorsEnabled;   // Enable/disable I2C sensor subsystem (runtime toggle like automation/espnow)
   int i2cSdaPin = I2C_SDA_PIN_DEFAULT;  // I2C SDA pin (board-specific, see System_BuildConfig.h)
   int i2cSclPin = I2C_SCL_PIN_DEFAULT;  // I2C SCL pin (board-specific, see System_BuildConfig.h)
   // Hardware settings (LED)
@@ -749,6 +747,8 @@ struct SettingEntry {
   const char* label;          // Human-readable label for UI display (nullptr = use jsonKey)
   const char* options;        // Comma-separated options for select fields (nullptr = none)
   bool isSecret = false;      // If true: encrypt on disk, exclude from web API, blank input = unchanged
+  const char* group = nullptr;  // Sub-section group for JSON nesting + UI grouping (nullptr = ungrouped)
+  const char* cmdKey = nullptr; // CLI command name override (nullptr = use jsonKey as command)
 };
 
 // Connection check callback - returns true if module is available/connected

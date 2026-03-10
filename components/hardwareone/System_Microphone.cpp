@@ -422,7 +422,9 @@ String getRecordingsList() {
     while (f) {
       if (!f.isDirectory() && String(f.name()).endsWith(".wav")) {
         if (list.length() > 0) list += ",";
-        list += String(f.name()) + ":" + String(f.size());
+        char entryBuf[80];
+        snprintf(entryBuf, sizeof(entryBuf), "%s:%d", f.name(), (int)f.size());
+        list += entryBuf;
       }
       f = dir.openNextFile();
     }
@@ -431,7 +433,9 @@ String getRecordingsList() {
 }
 
 bool deleteRecording(const char* filename) {
-  String path = String(RECORDINGS_FOLDER) + "/" + filename;
+  char pathBuf[64];
+  snprintf(pathBuf, sizeof(pathBuf), "%s/%s", RECORDINGS_FOLDER, filename);
+  String path = pathBuf;
   FsLockGuard fsGuard("mic.record.delete");
   if (LittleFS.exists(path)) {
     return LittleFS.remove(path);
@@ -907,7 +911,9 @@ const char* cmd_micdelete(const String& argsInput) {
         String name = f.name();
         f.close();
         if (name.endsWith(".wav")) {
-          String path = String(RECORDINGS_FOLDER) + "/" + name;
+          char pathBuf[64];
+          snprintf(pathBuf, sizeof(pathBuf), "%s/%s", RECORDINGS_FOLDER, name.c_str());
+          String path = pathBuf;
           if (LittleFS.remove(path)) deleted++;
         }
         f = dir.openNextFile();

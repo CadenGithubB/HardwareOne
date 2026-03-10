@@ -237,7 +237,9 @@ bool applyRemoteSettingChange(const char* moduleName, const char* settingKey, co
   if (!moduleName || !settingKey) return false;
   
   // Build remote command: "set <key> <value>"
-  String cmd = "set " + String(settingKey) + " " + value;
+  char cmdBuf[128];
+  snprintf(cmdBuf, sizeof(cmdBuf), "set %s %s", settingKey, value.c_str());
+  String cmd = cmdBuf;
   
   // Execute via unified remote command routing
   extern AuthContext gExecAuthContext;
@@ -281,7 +283,9 @@ bool hasRemoteSettings() {
   snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
            peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
   
-  String filePath = String("/system/espnow/peers/") + macStr + "/settings.json";
+  char filePathBuf[64];
+  snprintf(filePathBuf, sizeof(filePathBuf), "/system/espnow/peers/%s/settings.json", macStr);
+  String filePath = filePathBuf;
   DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] Checking path: %s", filePath.c_str());
   
   extern bool filesystemReady;

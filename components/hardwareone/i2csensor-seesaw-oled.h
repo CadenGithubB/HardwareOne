@@ -183,7 +183,8 @@ static const OLEDModeEntry gamepadOLEDModes[] = {
     gamepadOLEDModeAvailable, // availFunc
     gamepadInputHandler,     // inputFunc - X toggles gamepad
     true,                    // showInMenu
-    25                       // menuOrder
+    25,                      // menuOrder
+    "B:Back"                 // hints
   }
 };
 

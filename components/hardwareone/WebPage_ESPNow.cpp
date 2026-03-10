@@ -379,7 +379,9 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
   
   // If fwHash provided, return that specific manifest
   if (strlen(fwHashParam) > 0) {
-    String path = String(manifestDir) + "/" + fwHashParam + ".json";
+    char pathBuf[80];
+    snprintf(pathBuf, sizeof(pathBuf), "%s/%s.json", manifestDir, fwHashParam);
+    String path = pathBuf;
     File f = LittleFS.open(path.c_str(), "r");
     if (!f) {
       httpd_resp_send(req, "{\"error\":\"Manifest not found\"}", HTTPD_RESP_USE_STRLEN);

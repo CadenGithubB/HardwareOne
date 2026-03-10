@@ -33,14 +33,29 @@ bool displayInit() {
   // I2C OLED (SSD1306) Initialization
   // ============================================================================
   extern TwoWire Wire1;  // System uses Wire1 for all I2C sensors
+  
+  // Probe both common SSD1306 addresses (0x3D first, then 0x3C)
+  uint8_t oledAddresses[] = {DISPLAY_I2C_ADDR_ALT, DISPLAY_I2C_ADDR};
+  uint8_t detectedAddr = 0;
+  for (uint8_t addr : oledAddresses) {
+    uint8_t probeResult = i2cProbeAddress(addr, 100000, 200);
+    if (probeResult == 0) {
+      detectedAddr = addr;
+      break;
+    }
+  }
+  if (detectedAddr == 0) {
+    return false;  // No OLED found at either address
+  }
+  
   gDisplay = new Adafruit_SSD1306(DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire1, DISPLAY_RESET_PIN);
   if (!gDisplay) {
     return false;
   }
   
-  // Use I2C transaction wrapper for thread-safe initialization
-  bool success = i2cDeviceTransaction(DISPLAY_I2C_ADDR, 100000, 100, [&]() -> bool {
-    return gDisplay->begin(SSD1306_SWITCHCAPVCC, DISPLAY_I2C_ADDR);
+  // Use I2C transaction wrapper for thread-safe initialization with detected address
+  bool success = i2cDeviceTransaction(detectedAddr, 100000, 100, [&]() -> bool {
+    return gDisplay->begin(SSD1306_SWITCHCAPVCC, detectedAddr);
   });
   
   if (!success) {
@@ -129,6 +144,11 @@ void displayUpdate() {
   if (!gDisplay) return;
   
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  // Skip I2C push while sensor polling is paused (bus recovery, i2cpause, etc.).
+  // CPU-side framebuffer is still updated so the first push after resume is current.
+  extern volatile bool gSensorPollingPaused;
+  if (gSensorPollingPaused) return;
+  
   // Use device-aware transaction for proper clock management.
   // Run at 400kHz to reduce bus hold time (~20ms vs ~80ms at 100kHz).
   // SSD1306 supports up to 400kHz I2C.

@@ -105,7 +105,7 @@ void displayNetworkInfo() {
     if (WiFi.isConnected()) {
       oledDisplay->print("SSID: ");
       String ssid = WiFi.SSID();
-      if (ssid.length() > 12) ssid = ssid.substring(0, 11) + "~";
+      if (ssid.length() > 12) { ssid = ssid.substring(0, 11); ssid += '~'; }
       oledDisplay->println(ssid);
       oledDisplay->print("IP: ");
       oledDisplay->println(WiFi.localIP());
@@ -1200,7 +1200,8 @@ static const OLEDModeEntry remoteSensorsOLEDModes[] = {
     remoteSensorsAvailable,    // availFunc
     remoteSensorsInputHandler, // inputFunc
     true,                      // showInMenu
-    30                         // menuOrder
+    30,                        // menuOrder
+    nullptr                    // dynamic hints
   }
 };
 
@@ -1214,7 +1215,7 @@ REGISTER_OLED_MODE_MODULE(remoteSensorsOLEDModes, sizeof(remoteSensorsOLEDModes)
 // ============================================================================
 
 static const OLEDModeEntry sNetworkModes[] = {
-  { OLED_NETWORK_INFO, "Network", "wifi", displayNetworkInfo, nullptr, networkRegisteredInputHandler, false, -1 },
+  { OLED_NETWORK_INFO, "Network", "wifi", displayNetworkInfo, nullptr, networkRegisteredInputHandler, false, -1, nullptr },
 };
 
 REGISTER_OLED_MODE_MODULE(sNetworkModes, sizeof(sNetworkModes) / sizeof(sNetworkModes[0]), "Network");

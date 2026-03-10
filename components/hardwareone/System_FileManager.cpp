@@ -147,9 +147,10 @@ bool FileManager::getItem(int index, FileEntry& entry) {
     // Extract display name
     String fileName = String(file.name());
     if (strcmp(state.currentPath, "/") != 0) {
-      String prefix = String(state.currentPath) + "/";
+      char prefix[96];
+      snprintf(prefix, sizeof(prefix), "%s/", state.currentPath);
       if (fileName.startsWith(prefix)) {
-        fileName = fileName.substring(prefix.length());
+        fileName = fileName.substring(strlen(prefix));
       }
     } else if (fileName.startsWith("/")) {
       fileName = fileName.substring(1);
@@ -380,9 +381,10 @@ bool FileManager::loadDirectory() {
     
     // Extract display name and filter
     if (strcmp(state.currentPath, "/") != 0) {
-      String prefix = String(state.currentPath) + "/";
+      char prefix[96];
+      snprintf(prefix, sizeof(prefix), "%s/", state.currentPath);
       if (fileName.startsWith(prefix)) {
-        fileName = fileName.substring(prefix.length());
+        fileName = fileName.substring(strlen(prefix));
       }
     } else if (fileName.startsWith("/")) {
       fileName = fileName.substring(1);
@@ -449,11 +451,11 @@ bool FileManager::isProtectedPath(const char* path) {
 // Helper functions
 String formatFileSize(uint32_t bytes) {
   if (bytes >= 1048576) {
-    return String(bytes / 1048576.0, 2) + " MB";
+    char buf[16]; snprintf(buf, sizeof(buf), "%.2f MB", bytes / 1048576.0); return buf;
   } else if (bytes >= 1024) {
-    return String(bytes / 1024.0, 2) + " KB";
+    char buf[16]; snprintf(buf, sizeof(buf), "%.2f KB", bytes / 1024.0); return buf;
   } else {
-    return String(bytes) + " B";
+    char buf[16]; snprintf(buf, sizeof(buf), "%lu B", (unsigned long)bytes); return buf;
   }
 }
 

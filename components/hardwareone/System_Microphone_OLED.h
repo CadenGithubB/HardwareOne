@@ -121,7 +121,8 @@ static const OLEDModeEntry microphoneOLEDModes[] = {
     microphoneOLEDModeAvailable, // availFunc
     microphoneInputHandler,      // inputFunc
     true,                        // showInMenu
-    65                           // menuOrder (after FM Radio at 60)
+    65,                          // menuOrder (after FM Radio at 60)
+    nullptr                      // hints
   }
 };
 

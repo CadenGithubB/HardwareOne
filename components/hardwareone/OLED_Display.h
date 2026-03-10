@@ -166,6 +166,7 @@ struct OLEDModeEntry {
   OLEDInputFunc inputFunc;          // Function to handle gamepad input (nullptr = default B=back, X=action)
   bool showInMenu;            // Whether to show in main menu
   int menuOrder;              // Order in menu (lower = earlier, -1 = end)
+  const char* hints;          // Footer hints string (nullptr = use central switch fallback)
 };
 
 // Maximum number of OLED modes that can be registered
@@ -235,9 +236,6 @@ bool oledRemoteSourceAvailable();
 
 // Menu navigation state
 extern int oledMenuSelectedIndex;
-extern const OLEDMenuItem oledMenuItems[];
-extern const int oledMenuItemCount;
-
 // Category menu system
 extern int oledMenuCategorySelected;
 extern int oledMenuCategoryItemIndex;

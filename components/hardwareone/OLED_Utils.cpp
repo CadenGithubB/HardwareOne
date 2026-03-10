@@ -606,7 +606,7 @@ static bool notificationsRegisteredInputHandler(int deltaX, int deltaY, uint32_t
 }
 
 static const OLEDModeEntry sNotificationsModes[] = {
-  { OLED_NOTIFICATIONS, "Notifications", "notify_sensor", displayNotifications, nullptr, notificationsRegisteredInputHandler, false, -1 },
+  { OLED_NOTIFICATIONS, "Notifications", "notify_sensor", displayNotifications, nullptr, notificationsRegisteredInputHandler, false, -1, "A:Detail X:Clear B:Back" },
 };
 
 REGISTER_OLED_MODE_MODULE(sNotificationsModes, sizeof(sNotificationsModes) / sizeof(sNotificationsModes[0]), "Notifications");
@@ -783,6 +783,12 @@ void oledScrollInit(OLEDScrollState* state, const char* title, int visibleLines)
   state->footer = nullptr;
   state->refreshCounter = 0;
   
+  // Split-pane defaults (0 = full-width mode)
+  state->listWidth = 0;
+  state->separatorX = 0;
+  state->iconSize = 32;
+  state->singleLineItems = false;
+  
   // Clear all items
   for (int i = 0; i < OLED_SCROLL_MAX_ITEMS; i++) {
     state->items[i].line1 = nullptr;
@@ -791,6 +797,7 @@ void oledScrollInit(OLEDScrollState* state, const char* title, int visibleLines)
     state->items[i].isHighlighted = false;
     state->items[i].userData = nullptr;
     state->items[i].icon = 0;
+    state->items[i].iconName = nullptr;
     state->items[i].validationKey = 0;
   }
 }
@@ -806,6 +813,7 @@ bool oledScrollAddItem(OLEDScrollState* state, const char* line1, const char* li
   state->items[idx].isHighlighted = false;
   state->items[idx].userData = userData;
   state->items[idx].icon = 0;
+  state->items[idx].iconName = nullptr;
   state->items[idx].validationKey = state->refreshCounter;  // Mark with current refresh cycle
   
   state->itemCount++;
@@ -913,109 +921,165 @@ int oledScrollCalculateVisibleLines(int displayHeight, int textSize, bool hasTit
   return max(1, availableHeight / itemHeight);
 }
 
+void oledScrollSetSplitPane(OLEDScrollState* state, int listWidth, int separatorX, int iconSize) {
+  if (!state) return;
+  state->listWidth = listWidth;
+  state->separatorX = separatorX;
+  state->iconSize = iconSize;
+  state->singleLineItems = true;  // Split-pane defaults to single-line items
+}
+
 void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state, 
                       bool showScrollbar, bool showSelection,
                       const OLEDFooterHints* footerHints) {
   if (!display || !state) return;
   
-  int yPos = 0;
+  bool splitPane = (state->listWidth > 0);
   int lineHeight = 8;  // For text size 1
+  int itemHeight = splitPane ? 10 : (lineHeight * 2);  // Single-line or two-line
   
-  // Draw title if present
-  if (state->title && state->title[0] != '\0') {
+  // Starting Y position
+  int yPos = splitPane ? (OLED_CONTENT_START_Y + 1) : 0;
+  
+  // Draw title if present (full-width mode only; split-pane uses global header)
+  if (!splitPane && state->title && state->title[0] != '\0') {
     display->setTextSize(1);
     display->setCursor(0, yPos);
     display->print(state->title);
-    yPos += lineHeight + 2;  // Title + spacing
+    yPos += lineHeight + 2;
+  }
+  
+  // Draw vertical separator for split-pane
+  if (splitPane && state->separatorX > 0) {
+    display->drawFastVLine(state->separatorX, OLED_CONTENT_START_Y, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_WHITE);
   }
   
   // Calculate visible range
   int visibleStart = state->scrollOffset;
   int visibleEnd = min(state->itemCount, state->scrollOffset + state->visibleLines);
   
+  display->setTextSize(1);
+  
   // Draw visible items
   for (int i = visibleStart; i < visibleEnd; i++) {
     OLEDScrollItem* item = &state->items[i];
     bool isSelected = (i == state->selectedIndex);
     
-    // Draw selection indicator
-    if (showSelection && isSelected) {
-      display->fillRect(0, yPos, 3, lineHeight * 2, DISPLAY_COLOR_WHITE);
-      display->setCursor(5, yPos);
+    if (splitPane) {
+      // Split-pane mode: inverse highlight, single line
+      if (showSelection && isSelected) {
+        display->fillRect(0, yPos, state->listWidth - 1, itemHeight - 1, DISPLAY_COLOR_WHITE);
+        display->setTextColor(DISPLAY_COLOR_BLACK);
+      } else {
+        display->setTextColor(DISPLAY_COLOR_WHITE);
+      }
+      
+      display->setCursor(2, yPos + 1);
+      if (item->line1) display->print(item->line1);
+      
+      yPos += itemHeight;
     } else {
-      display->setCursor(0, yPos);
-    }
-    
-    // Draw line1 (primary text)
-    display->setTextSize(1);
-    if (showSelection && isSelected) {
-      display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
-    } else {
+      // Full-width mode: selection bar, two lines
+      if (showSelection && isSelected) {
+        display->fillRect(0, yPos, 3, lineHeight * 2, DISPLAY_COLOR_WHITE);
+        display->setCursor(5, yPos);
+      } else {
+        display->setCursor(0, yPos);
+      }
+      
+      if (showSelection && isSelected) {
+        display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
+      } else {
+        display->setTextColor(DISPLAY_COLOR_WHITE);
+      }
+      
+      // Draw line1
+      if (item->line1 && item->line1[0] != '\0') {
+        int len = strlen(item->line1);
+        if (len > 20) {
+          char truncated[22];
+          strncpy(truncated, item->line1, 19);
+          truncated[19] = '~';
+          truncated[20] = '\0';
+          display->println(truncated);
+        } else {
+          display->println(item->line1);
+        }
+      } else {
+        display->println("---");
+      }
+      
+      // Draw line2
+      yPos += lineHeight;
+      if (showSelection && isSelected) {
+        display->setCursor(5, yPos);
+      } else {
+        display->setCursor(0, yPos);
+      }
+      
       display->setTextColor(DISPLAY_COLOR_WHITE);
-    }
-    
-    // Draw line1 with null safety and truncation
-    if (item->line1 && item->line1[0] != '\0') {
-      int len = strlen(item->line1);
-      if (len > 20) {
-        // Truncate long strings
-        char truncated[22];
-        strncpy(truncated, item->line1, 19);
-        truncated[19] = '~';
-        truncated[20] = '\0';
-        display->println(truncated);
+      if (item->line2 && item->line2[0] != '\0') {
+        int len = strlen(item->line2);
+        if (len > 20) {
+          char truncated[22];
+          strncpy(truncated, item->line2, 19);
+          truncated[19] = '~';
+          truncated[20] = '\0';
+          display->println(truncated);
+        } else {
+          display->println(item->line2);
+        }
       } else {
-        display->println(item->line1);
+        display->println("");
       }
-    } else {
-      display->println("---");  // Fallback for null/empty
+      
+      yPos += lineHeight;
     }
-    
-    // Draw line2 (secondary text)
-    yPos += lineHeight;
-    if (showSelection && isSelected) {
-      display->setCursor(5, yPos);
-    } else {
-      display->setCursor(0, yPos);
-    }
-    
-    display->setTextColor(DISPLAY_COLOR_WHITE);  // Always white for line2
-    if (item->line2 && item->line2[0] != '\0') {
-      int len = strlen(item->line2);
-      if (len > 20) {
-        // Truncate long strings
-        char truncated[22];
-        strncpy(truncated, item->line2, 19);
-        truncated[19] = '~';
-        truncated[20] = '\0';
-        display->println(truncated);
-      } else {
-        display->println(item->line2);
-      }
-    } else {
-      display->println("");  // Empty line for null/empty
-    }
-    
-    yPos += lineHeight;
   }
   
-  // Draw scrollbar if needed (constrained to content area)
-  if (showScrollbar && state->itemCount > state->visibleLines) {
-    int scrollbarX = SCREEN_WIDTH - 1;
-    bool hasTitle = (state->title && state->title[0] != '\0');
-    int scrollbarHeight = OLED_CONTENT_HEIGHT - (hasTitle ? 10 : 0);
-    int scrollbarY = hasTitle ? 10 : 0;
-    
-    // Draw scrollbar track
-    display->drawFastVLine(scrollbarX, scrollbarY, scrollbarHeight, DISPLAY_COLOR_WHITE);
-    
-    // Calculate thumb position and size
-    int thumbHeight = max(4, (scrollbarHeight * state->visibleLines) / state->itemCount);
-    int thumbY = scrollbarY + (scrollbarHeight - thumbHeight) * state->scrollOffset / 
-                 max(1, state->itemCount - state->visibleLines);
-    
-    // Draw scrollbar thumb
-    display->fillRect(scrollbarX - 1, thumbY, 3, thumbHeight, DISPLAY_COLOR_WHITE);
+  // Reset text color
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+  
+  // Draw selected item's icon in right pane (split-pane mode only)
+  if (splitPane && state->itemCount > 0) {
+    OLEDScrollItem* selected = &state->items[state->selectedIndex];
+    if (selected->iconName && selected->iconName[0] != '\0') {
+      extern bool drawIcon(Adafruit_SSD1306* display, const char* name, int x, int y, uint16_t color);
+      int iconAreaX = state->separatorX + 4;
+      int iconX = iconAreaX + (128 - iconAreaX - state->iconSize) / 2;
+      int iconY = OLED_CONTENT_START_Y + (OLED_CONTENT_HEIGHT - state->iconSize) / 2;
+      drawIcon(display, selected->iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
+    }
+  }
+  
+  // Draw scroll indicators
+  if (state->itemCount > state->visibleLines) {
+    if (splitPane) {
+      // Arrow indicators near separator
+      int arrowX = state->listWidth;
+      if (state->scrollOffset > 0) {
+        display->setCursor(arrowX, OLED_CONTENT_START_Y);
+        display->print("\x18");
+      }
+      if (visibleEnd < state->itemCount) {
+        display->setCursor(arrowX, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 9);
+        display->print("\x19");
+      }
+    } else if (showScrollbar) {
+      // Scrollbar for full-width mode
+      int scrollbarX = SCREEN_WIDTH - 1;
+      bool hasTitle = (state->title && state->title[0] != '\0');
+      int scrollbarHeight = OLED_CONTENT_HEIGHT - (hasTitle ? 10 : 0);
+      int scrollbarY = hasTitle ? 10 : 0;
+      
+      display->drawFastVLine(scrollbarX, scrollbarY, scrollbarHeight, DISPLAY_COLOR_WHITE);
+      
+      int thumbHeight = max(4, (scrollbarHeight * state->visibleLines) / state->itemCount);
+      int thumbY = scrollbarY + (scrollbarHeight - thumbHeight) * state->scrollOffset / 
+                   max(1, state->itemCount - state->visibleLines);
+      
+      display->fillRect(scrollbarX - 1, thumbY, 3, thumbHeight, DISPLAY_COLOR_WHITE);
+    }
   }
   
   // Render footer if hints provided
@@ -2102,15 +2166,18 @@ void drawOLEDFooter() {
     return;
   }
   
-  // Determine button hints based on current mode and state
+  // Check registered mode hints first (avoids central switch for self-describing modes)
   const char* hints = nullptr;
+  {
+    const OLEDModeEntry* regMode = findOLEDMode(currentOLEDMode);
+    if (regMode && regMode->hints) {
+      hints = regMode->hints;
+    }
+  }
   
-  switch (currentOLEDMode) {
+  // Fall back to central switch for modes without registered hints
+  if (!hints) switch (currentOLEDMode) {
     case OLED_MENU:
-      hints = "A:Select B:Back";
-      break;
-      
-    case OLED_SENSOR_MENU:
       hints = "A:Select B:Back";
       break;
       
@@ -2165,19 +2232,6 @@ void drawOLEDFooter() {
       } else {
         hints = "B:Back";
       }
-      break;
-      
-    case OLED_GAMEPAD_VISUAL:
-      hints = "B:Back";
-      break;
-      
-    case OLED_POWER:
-      hints = "A:Select B:Back";
-      break;
-      
-    case OLED_POWER_CPU:
-    case OLED_POWER_SLEEP:
-      hints = "A:Execute B:Back";
       break;
       
     case OLED_BLUETOOTH:
@@ -2238,22 +2292,10 @@ void drawOLEDFooter() {
       hints = "A:Select  B:Back";
       break;
       
-    case OLED_UNIFIED_MENU:
-      hints = "A:Run X:Refresh B:Back";
-      break;
-      
     case OLED_CUSTOM_TEXT:
     case OLED_LOGO:
     case OLED_ANIMATION:
       hints = "B:Back";
-      break;
-      
-    case OLED_AUTOMATIONS:
-      hints = "B:Back";
-      break;
-      
-    case OLED_SPEECH:
-      hints = "X:Select B:Back";
       break;
       
     case OLED_CLI_VIEWER:
@@ -2269,14 +2311,6 @@ void drawOLEDFooter() {
       }
       break;
       
-    case OLED_LOGGING:
-      hints = "A:Select B:Back";
-      break;
-    
-    case OLED_NOTIFICATIONS:
-      hints = "A:Detail X:Clear B:Back";
-      break;
-    
     case OLED_LOGIN:
       {
         // Check if user is already authenticated
@@ -2290,14 +2324,6 @@ void drawOLEDFooter() {
           hints = "A:Select B:Back";
         }
       }
-      break;
-      
-    case OLED_LOGOUT:
-      hints = "A:Confirm B:Cancel";
-      break;
-      
-    case OLED_QUICK_SETTINGS:
-      hints = "A:Toggle B:Back";
       break;
       
     case OLED_GPS_MAP:
@@ -2407,28 +2433,6 @@ static void drawProgressBar(int percent);
 // Forward declarations for menu system (defined later in file)
 void displayMenuListStyle();
 
-// ============================================================================
-// Per-Mode Layout System
-// ============================================================================
-// Layout styles: 0 = default/grid, 1 = list/alternate, 2+ = mode-specific variants
-// Each OLEDMode can have its own layout style setting
-
-// Menu layout system removed - list style is now the only option
-// Legacy compatibility stubs kept for compilation
-int oledModeLayouts[32] = {0};
-
-int getOLEDModeLayout(OLEDMode mode) {
-  return 0;  // Always return 0 (list style)
-}
-
-void setOLEDModeLayout(OLEDMode mode, int layout) {
-  // No-op: layout switching removed
-}
-
-// Get layout for current mode (convenience)
-int getCurrentModeLayout() {
-  return getOLEDModeLayout(currentOLEDMode);
-}
 
 // ============================================================================
 // OLED Change Detection - Skip rendering when nothing has changed
@@ -2479,8 +2483,6 @@ void oledSetAlwaysDirty(bool always) {
   if (always) oledForceNextRender = true;
 }
 
-// Legacy compatibility - always use list style (0)
-#define oledMenuLayoutStyle 0
 #if ENABLE_WIFI || ENABLE_ESPNOW
   #include <esp_wifi.h>
 #endif
@@ -2656,13 +2658,13 @@ static const OLEDModeEntry builtInQuickSettingsMode = {
   quickSettingsAvailability,
   quickSettingsInputHandler,
   false,  // Don't show in main menu (accessed via SELECT button)
-  -1
+  -1,
+  "A:Toggle B:Back"
 };
 
 // Force linker to include OLED mode files that use static registration
 // Without these calls, the linker may drop object files with no external references
-extern void oledLoginModeInit();
-extern void oledLogoutModeInit();
+extern void oledAuthModeInit();
 extern void oledLoggingModeInit();
 extern void oledSetPatternModeInit();
 
@@ -2670,8 +2672,7 @@ extern void oledSetPatternModeInit();
 void printRegisteredOLEDModes() {
   // Force linker to include mode files (static registrars run during global init,
   // but we need external references to prevent linker from dropping these files)
-  oledLoginModeInit();
-  oledLogoutModeInit();
+  oledAuthModeInit();
   oledLoggingModeInit();
   oledSetPatternModeInit();
   
@@ -2793,7 +2794,7 @@ bool initOLEDDisplay() {
     
     // Show initial splash screen
     gDisplay->clearDisplay();
-    gDisplay->setRotation(0);
+    gDisplay->setRotation(2);
     gDisplay->setTextSize(1);
     gDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     gDisplay->setCursor(0, 0);
@@ -3177,30 +3178,8 @@ void updateOLEDDisplay() {
 #endif
         break;
 
-      case OLED_UNIFIED_MENU:
-#if ENABLE_ESPNOW
-        // Unified menu handled by registered mode
-        {
-          const OLEDModeEntry* registeredMode = findOLEDMode(OLED_UNIFIED_MENU);
-          if (registeredMode && registeredMode->displayFunc) {
-            registeredMode->displayFunc();
-          }
-        }
-#endif
-        break;
-
       case OLED_NOTIFICATIONS:
         displayNotifications();
-        break;
-
-      case OLED_QUICK_SETTINGS:
-        // Quick settings handled by registered mode
-        {
-          const OLEDModeEntry* registeredMode = findOLEDMode(OLED_QUICK_SETTINGS);
-          if (registeredMode && registeredMode->displayFunc) {
-            registeredMode->displayFunc();
-          }
-        }
         break;
 
       case OLED_OFF:
@@ -3254,9 +3233,9 @@ void updateOLEDDisplay() {
 const char* cmd_oled_enabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: oledenabled <0|1>";
-  while (*p == ' ') p++;  // Skip whitespace
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: oledenabled <0|1>";
+  const char* p = _arg.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.oledEnabled, enabled);
 
@@ -3284,7 +3263,7 @@ const char* cmd_oled_enabled(const String& argsInput) {
     else if (defaultMode == "logo") setOLEDMode(OLED_LOGO);
     else setOLEDMode(OLED_SYSTEM_STATUS);
 
-    debugOLEDModeChange("cmd.oledenabled.forceDefault", prevMode, currentOLEDMode, String("defaultMode=") + defaultMode);
+    { char dbgBuf[48]; snprintf(dbgBuf, sizeof(dbgBuf), "defaultMode=%s", defaultMode.c_str()); debugOLEDModeChange("cmd.oledenabled.forceDefault", prevMode, currentOLEDMode, dbgBuf); }
 
     updateOLEDDisplay();
     snprintf(getDebugBuffer(), 1024, "OLED display enabled (mode: %s)", gSettings.oledDefaultMode.c_str());
@@ -3304,9 +3283,9 @@ const char* cmd_oled_enabled(const String& argsInput) {
 const char* cmd_oled_autoinit(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: oledautoinit <0|1>";
-  while (*p == ' ') p++;  // Skip whitespace
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: oledautoinit <0|1>";
+  const char* p = _arg.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.oledAutoInit, enabled);
   snprintf(getDebugBuffer(), 1024, "OLED auto-init %s", enabled ? "enabled" : "disabled");
@@ -3316,9 +3295,9 @@ const char* cmd_oled_autoinit(const String& argsInput) {
 const char* cmd_oled_requireauth(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: oledrequireauth <0|1>";
-  while (*p == ' ') p++;  // Skip whitespace
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: oledrequireauth <0|1>";
+  const char* p = _arg.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.localDisplayRequireAuth, enabled);
   snprintf(getDebugBuffer(), 1024, "Local display require auth %s", enabled ? "enabled" : "disabled");
@@ -3328,9 +3307,9 @@ const char* cmd_oled_requireauth(const String& argsInput) {
 const char* cmd_oled_bootmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: oledbootmode <logo|status|sensors|thermal|network|mesh|off>";
-  while (*p == ' ') p++;  // Skip whitespace
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: oledbootmode <logo|status|sensors|thermal|network|mesh|off>";
+  const char* p = _arg.c_str();
   // Case-insensitive compare for mode names
   if (strncasecmp(p, "logo", 4) == 0) {
     setSetting(gSettings.oledBootMode, "logo");
@@ -3356,9 +3335,9 @@ const char* cmd_oled_bootmode(const String& argsInput) {
 const char* cmd_oled_defaultmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>";
-  while (*p == ' ') p++;  // Skip whitespace
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>";
+  const char* p = _arg.c_str();
   // Case-insensitive compare for mode names
   if (strncasecmp(p, "logo", 4) == 0) {
     setSetting(gSettings.oledDefaultMode, "logo");
@@ -3384,9 +3363,9 @@ const char* cmd_oled_defaultmode(const String& argsInput) {
 const char* cmd_oled_bootduration(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: oledbootduration <0..60000>";
-  while (*p == ' ') p++;  // Skip whitespace
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: oledbootduration <0..60000>";
+  const char* p = _arg.c_str();
   int v = atoi(p);
   if (v < 0 || v > 60000) return "Error: OLED boot duration must be 0..60000 ms";
   setSetting(gSettings.oledBootDuration, v);
@@ -3397,9 +3376,9 @@ const char* cmd_oled_bootduration(const String& argsInput) {
 const char* cmd_oled_updateinterval(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: oledupdateinterval <10..1000>";
-  while (*p == ' ') p++;  // Skip whitespace
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: oledupdateinterval <10..1000>";
+  const char* p = _arg.c_str();
   int v = atoi(p);
   if (v < 10 || v > 1000) return "Error: OLED update interval must be 10..1000 ms";
   setSetting(gSettings.oledUpdateInterval, v);
@@ -3410,9 +3389,9 @@ const char* cmd_oled_updateinterval(const String& argsInput) {
 const char* cmd_oled_brightness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: oledbrightness <0..255>";
-  while (*p == ' ') p++;  // Skip whitespace
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: oledbrightness <0..255>";
+  const char* p = _arg.c_str();
   int v = atoi(p);
   if (v < 0 || v > 255) return "Error: OLED brightness must be 0..255";
   setSetting(gSettings.oledBrightness, (int)v);
@@ -3423,9 +3402,9 @@ const char* cmd_oled_brightness(const String& argsInput) {
 const char* cmd_oled_thermalscale(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: oledthermalscale <0.1..10.0>";
-  while (*p == ' ') p++;  // Skip whitespace
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: oledthermalscale <0.1..10.0>";
+  const char* p = _arg.c_str();
   float f = strtof(p, nullptr);
   if (f < 0.1 || f > 10.0) return "Error: OLED thermal scale must be 0.1..10.0";
   setSetting(gSettings.oledThermalScale, f);
@@ -3436,9 +3415,9 @@ const char* cmd_oled_thermalscale(const String& argsInput) {
 const char* cmd_oled_thermalcolormode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: oledthermalcolormode <3level|grayscale>";
-  while (*p == ' ') p++;  // Skip whitespace
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: oledthermalcolormode <3level|grayscale>";
+  const char* p = _arg.c_str();
   if (strncasecmp(p, "3level", 6) == 0) {
     setSetting(gSettings.oledThermalColorMode, "3level");
   } else if (strncasecmp(p, "grayscale", 9) == 0) {
@@ -3841,100 +3820,7 @@ static OLEDMode getOLEDModeByName(const String& name) {
   return (OLEDMode)-1;  // Invalid
 }
 
-const char* cmd_oledlayout(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsInput;
-  args.trim();
-  
-  if (args.length() == 0) {
-    // No argument - show all mode layouts
-    broadcastOutput("=== OLED Mode Layouts ===");
-    broadcastOutput(String("Current mode: ") + getOLEDModeName(currentOLEDMode) + " (layout " + getCurrentModeLayout() + ")");
-    broadcastOutput("");
-    broadcastOutput("Usage: oledlayout [mode] <layout>");
-    broadcastOutput("  oledlayout <0-9>        - Set current mode layout");
-    broadcastOutput("  oledlayout menu 1       - Set menu to list layout");
-    broadcastOutput("  oledlayout toggle       - Toggle current mode layout");
-    broadcastOutput("  oledlayout show         - Show all mode layouts");
-    return "OK";
-  }
-  
-  // Check for special commands
-  if (args == "toggle" || args == "t") {
-    int current = getCurrentModeLayout();
-    setOLEDModeLayout(currentOLEDMode, (current == 0) ? 1 : 0);
-    broadcastOutput(String(getOLEDModeName(currentOLEDMode)) + " layout toggled to: " + getCurrentModeLayout());
-    updateOLEDDisplay();
-    return "OK";
-  }
-  
-  if (args == "show") {
-    broadcastOutput("=== Mode Layouts ===");
-    for (int i = 0; i <= OLED_GAMEPAD_VISUAL; i++) {
-      OLEDMode m = (OLEDMode)i;
-      int layout = getOLEDModeLayout(m);
-      if (layout != 0) {  // Only show non-default layouts
-        broadcastOutput(String("  ") + getOLEDModeName(m) + ": " + layout);
-      }
-    }
-    broadcastOutput(String("Current: ") + getOLEDModeName(currentOLEDMode) + " = " + getCurrentModeLayout());
-    return "OK";
-  }
-  
-  // Check if first arg is a number (layout for current mode)
-  if (args.length() == 1 && isDigit(args[0])) {
-    int layout = args.toInt();
-    setOLEDModeLayout(currentOLEDMode, layout);
-    broadcastOutput(String(getOLEDModeName(currentOLEDMode)) + " layout set to: " + layout);
-    updateOLEDDisplay();
-    return "OK";
-  }
-  
-  // Check for "mode layout" format
-  int secondSpace = args.indexOf(' ');
-  if (secondSpace > 0) {
-    String modeName = args.substring(0, secondSpace);
-    String layoutStr = args.substring(secondSpace + 1);
-    modeName.trim();
-    modeName.toLowerCase();
-    layoutStr.trim();
-    
-    OLEDMode mode = getOLEDModeByName(modeName);
-    if ((int)mode < 0) {
-      broadcastOutput(String("Unknown mode: ") + modeName);
-      return "ERROR";
-    }
-    
-    int layout = layoutStr.toInt();
-    setOLEDModeLayout(mode, layout);
-    broadcastOutput(String(getOLEDModeName(mode)) + " layout set to: " + layout);
-    
-    // Force redraw if we changed current mode's layout
-    if (mode == currentOLEDMode) {
-      updateOLEDDisplay();
-    }
-    return "OK";
-  }
-  
-  // Legacy: grid/list for menu
-  args.toLowerCase();
-  if (args == "grid") {
-    setOLEDModeLayout(OLED_MENU, 0);
-    broadcastOutput("Menu layout set to: grid (0)");
-  } else if (args == "list") {
-    setOLEDModeLayout(OLED_MENU, 1);
-    broadcastOutput("Menu layout set to: list (1)");
-  } else {
-    broadcastOutput("Unknown argument. Use: oledlayout [mode] <layout>");
-    return "ERROR";
-  }
-  
-  if (currentOLEDMode == OLED_MENU) {
-    updateOLEDDisplay();
-  }
-  return "OK";
-}
 
 // ============================================================================
 // Boot State Variables (moved from .ino)
@@ -4126,7 +4012,7 @@ void processOLEDBootSequence() {
             else if (defaultMode == "logo") setOLEDMode(OLED_LOGO);
             else setOLEDMode(OLED_SYSTEM_STATUS);
 
-            debugOLEDModeChange("boot.complete.defaultMode", prevMode, currentOLEDMode, String("defaultMode=") + defaultMode);
+            { char dbgBuf[48]; snprintf(dbgBuf, sizeof(dbgBuf), "defaultMode=%s", defaultMode.c_str()); debugOLEDModeChange("boot.complete.defaultMode", prevMode, currentOLEDMode, dbgBuf); }
             DEBUG_SENSORSF("OLED boot sequence: Logo -> %s (complete, B returns to menu)", defaultMode.c_str());
           }
           
@@ -4243,53 +4129,6 @@ const OLEDMenuItem oledMenuCategory5[] = {
 };
 const int oledMenuCategory5Count = sizeof(oledMenuCategory5) / sizeof(oledMenuCategory5[0]);
 
-// Legacy flat menu (kept for backward compatibility with dynamic menu system)
-const OLEDMenuItem oledMenuItems[] = {
-  { "System",     "notify_system",     OLED_SYSTEM_STATUS },
-#if ENABLE_I2C_SYSTEM || ENABLE_CAMERA_SENSOR || ENABLE_MICROPHONE_SENSOR
-  { "Sensors",    "notify_sensor",     OLED_SENSOR_MENU },
-#endif
-  { "Memory",     "memory",            OLED_MEMORY_STATS },
-  { "Notifs",     "notify_bell",       OLED_NOTIFICATIONS },
-  { "Settings",   "settings",          OLED_SETTINGS },
-#if ENABLE_WIFI
-  { "Network",    "notify_server",     OLED_NETWORK_INFO },
-#endif
-#if ENABLE_ESPNOW
-  { "ESP-NOW",    "notify_espnow",     OLED_ESPNOW },
-#endif
-#if ENABLE_BLUETOOTH
-  { "Bluetooth",  "bt_idle",           OLED_BLUETOOTH },
-#endif
-#if ENABLE_AUTOMATION
-  { "Automations","notify_automation", OLED_AUTOMATIONS },
-#endif
-  { "Files",      "notify_files",      OLED_FILE_BROWSER },
-#if ENABLE_GPS_SENSOR || ENABLE_MAPS
-  { "Map",        "compass",           OLED_GPS_MAP },
-#endif
-#if ENABLE_HTTP_SERVER
-  { "Web",        "web",               OLED_WEB_STATS },
-#endif
-#if ENABLE_BONDED_MODE
-  { "Remote",     "notify_espnow",     OLED_REMOTE },
-#endif
-#if ENABLE_MICROPHONE_SENSOR
-  { "Microphone", "notify_sensor",     OLED_MICROPHONE },
-#endif
-#if ENABLE_ESP_SR
-  { "Speech",     "notify_sensor",     OLED_SPEECH },
-#endif
-  { "Login",      "user",              OLED_LOGIN },
-#if ENABLE_GAMEPAD_SENSOR
-  { "Gamepad PW", "gamepad",           OLED_SET_PATTERN },
-#endif
-  { "CLI Output", "terminal",          OLED_CLI_VIEWER },
-  { "Logging",    "file_text",         OLED_LOGGING },
-  { "Power",      "power",             OLED_POWER },
-};
-const int oledMenuItemCount = sizeof(oledMenuItems) / sizeof(oledMenuItems[0]);
-
 // Sensor submenu items (extern const for external linkage)
 extern const OLEDMenuItem oledSensorMenuItems[] = {
   { "Data",       "notify_sensor",     OLED_SENSOR_DATA },
@@ -4399,7 +4238,7 @@ void completeRemoteCommandInput() {
     char out[256];
     executeCommand(ctx, remoteCmd.c_str(), out, sizeof(out));
     
-    broadcastOutput(String("[OLED] Remote: ") + fullCommand);
+    BROADCAST_PRINTF("[OLED] Remote: %s", fullCommand);
     if (strlen(out) > 0) {
       broadcastOutput(out);
     }
@@ -4446,7 +4285,9 @@ static String loadCachedManifest() {
   }
   hashHex[32] = '\0';
   
-  String path = String("/system/manifests/") + hashHex + ".json";
+  char pathBuf[64];
+  snprintf(pathBuf, sizeof(pathBuf), "/system/manifests/%s.json", hashHex);
+  String path = pathBuf;
   
   FsLockGuard guard("manifest.load");
   if (!LittleFS.exists(path.c_str())) {
@@ -4703,25 +4544,34 @@ void buildDynamicMenu() {
   
   gDynamicMenuItemCount = 0;
   
-  // Add local items if LOCAL or BOTH
+  // Add local items if LOCAL or BOTH (built from category arrays)
   if (gDataSource == DataSource::LOCAL || gDataSource == DataSource::BOTH) {
-    for (int i = 0; i < oledMenuItemCount && gDynamicMenuItemCount < MAX_DYNAMIC_MENU_ITEMS; i++) {
-      OLEDMenuItemEx& item = gDynamicMenuItems[gDynamicMenuItemCount];
-      
-      strncpy(item.name, oledMenuItems[i].name, sizeof(item.name) - 1);
-      item.name[sizeof(item.name) - 1] = '\0';
-      
-      strncpy(item.iconName, oledMenuItems[i].iconName, sizeof(item.iconName) - 1);
-      item.iconName[sizeof(item.iconName) - 1] = '\0';
-      
-      item.command[0] = '\0';  // No command for local mode items
-      item.targetMode = oledMenuItems[i].targetMode;
-      item.isRemote = false;
-      item.isSubmenu = false;
-      item.needsInput = false;
-      item.submenuId[0] = '\0';
-      
-      gDynamicMenuItemCount++;
+    const struct { const OLEDMenuItem* items; int count; } cats[] = {
+      { oledMenuCategory1, oledMenuCategory1Count },
+      { oledMenuCategory2, oledMenuCategory2Count },
+      { oledMenuCategory3, oledMenuCategory3Count },
+      { oledMenuCategory4, oledMenuCategory4Count },
+      { oledMenuCategory5, oledMenuCategory5Count },
+    };
+    for (int c = 0; c < (int)(sizeof(cats)/sizeof(cats[0])); c++) {
+      for (int i = 0; i < cats[c].count && gDynamicMenuItemCount < MAX_DYNAMIC_MENU_ITEMS; i++) {
+        OLEDMenuItemEx& item = gDynamicMenuItems[gDynamicMenuItemCount];
+        
+        strncpy(item.name, cats[c].items[i].name, sizeof(item.name) - 1);
+        item.name[sizeof(item.name) - 1] = '\0';
+        
+        strncpy(item.iconName, cats[c].items[i].iconName, sizeof(item.iconName) - 1);
+        item.iconName[sizeof(item.iconName) - 1] = '\0';
+        
+        item.command[0] = '\0';  // No command for local mode items
+        item.targetMode = cats[c].items[i].targetMode;
+        item.isRemote = false;
+        item.isSubmenu = false;
+        item.needsInput = false;
+        item.submenuId[0] = '\0';
+        
+        gDynamicMenuItemCount++;
+      }
     }
   }
   
@@ -4771,9 +4621,6 @@ int getFilteredMenuItemCount() {
   buildDynamicMenu();
   return gDynamicMenuItemCount;
 }
-
-// Menu layout style now uses per-mode system: oledModeLayouts[OLED_MENU]
-// 0 = grid with large icons (default), 1 = list with icon on right
 
 // MenuAvailability enum moved to OLED_Display.h
 
@@ -5222,7 +5069,7 @@ void oledMenuSelect() {
           char out[256];
           executeCommand(ctx, remoteCmd.c_str(), out, sizeof(out));
           
-          broadcastOutput(String("[OLED] Remote: ") + item.command);
+          BROADCAST_PRINTF("[OLED] Remote: %s", item.command);
           if (strlen(out) > 0) {
             broadcastOutput(out);
           }
@@ -5268,7 +5115,7 @@ void oledMenuSelect() {
           default: reason = "Unavailable"; break;
         }
       }
-      broadcastOutput(String("[OLED] ") + item.name + ": " + reason);
+      BROADCAST_PRINTF("[OLED] %s: %s", item.name, reason.c_str());
 
       enterUnavailablePage(item.name, reason);
       return;
@@ -5390,7 +5237,7 @@ void oledCycleDataSource() {
   gDataSourceIndicatorVisible = true;
   invalidateDynamicMenu();  // Rebuild menu with new source
   oledMarkDirty();
-  broadcastOutput(String("[OLED] Data source: ") + oledGetDataSourceLabel());
+  BROADCAST_PRINTF("[OLED] Data source: %s", oledGetDataSourceLabel());
 }
 
 const char* oledGetDataSourceLabel() {
@@ -5966,7 +5813,7 @@ bool processGamepadMenuInput() {
         if (oledKeyboardIsCompleted()) {
           const char* deviceName = oledKeyboardGetText();
           if (deviceName && strlen(deviceName) > 0) {
-            broadcastOutput(String("[OLED] Setting ESP-NOW name: ") + deviceName);
+            BROADCAST_PRINTF("[OLED] Setting ESP-NOW name: %s", deviceName);
             // First set the name
             const char* setnameResult = cmd_espnow_setname(String(deviceName));
             if (setnameResult && strstr(setnameResult, "Device name set")) {
@@ -6204,8 +6051,16 @@ const CommandEntry oledCommands[] = {
   { "oledanim", "Select animation: <name> or fps <1-60>", false, cmd_oledanim },
   { "oledclear", "Clear OLED display.", false, cmd_oledclear },
   { "oledstatus", "Show OLED status.", false, cmd_oledstatus },
-  { "oledlayout", "Set mode layout: [mode] <layout>", false, cmd_oledlayout },
   { "oledrequireauth", "OLED auth requirement: <0|1>", false, cmd_oled_requireauth },
+  { "oledenabled", "Enable/disable OLED: <0|1>", false, cmd_oled_enabled },
+  { "oledautoinit", "OLED auto-init on boot: <0|1>", false, cmd_oled_autoinit },
+  { "oledbootmode", "OLED boot mode: <logo|status|thermal|off>", false, cmd_oled_bootmode },
+  { "oleddefaultmode", "OLED default mode: <status|thermal|off>", false, cmd_oled_defaultmode },
+  { "oledbootduration", "Boot animation duration (ms): <500-10000>", false, cmd_oled_bootduration },
+  { "oledupdateinterval", "Display update interval (ms): <10-1000>", false, cmd_oled_updateinterval },
+  { "oledbrightness", "Display brightness: <0-255>", false, cmd_oled_brightness },
+  { "oledthermalscale", "Thermal image scale: <1.0-10.0>", false, cmd_oled_thermalscale },
+  { "oledthermalcolormode", "Thermal color mode: <3level|grayscale|binary>", false, cmd_oled_thermalcolormode },
 };
 
 const size_t oledCommandsCount = sizeof(oledCommands) / sizeof(oledCommands[0]);

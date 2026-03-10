@@ -256,10 +256,9 @@ const char* cmd_tofstop(const String& argsInput) {
 
 const char* cmd_toftransitionms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: toftransitionms <0..5000>";
-  while (*p == ' ') p++;  // Skip whitespace
-  int v = atoi(p);
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: toftransitionms <0..5000>";
+  int v = _arg.toInt();
   if (v < 0 || v > 5000) return "[ToF] Error: Transition time must be 0-5000ms";
   setSetting(gSettings.tofTransitionMs, v);
   BROADCAST_PRINTF("tofTransitionMs set to %d", v);
@@ -268,10 +267,9 @@ const char* cmd_toftransitionms(const String& argsInput) {
 
 const char* cmd_tofmaxdistancemm(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: tofmaxdistancemm <100..10000>";
-  while (*p == ' ') p++;  // Skip whitespace
-  int v = atoi(p);
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: tofmaxdistancemm <100..10000>";
+  int v = _arg.toInt();
   if (v < 100 || v > 10000) return "[ToF] Error: Max distance must be 100-10000mm";
   setSetting(gSettings.tofUiMaxDistanceMm, v);
   BROADCAST_PRINTF("tofUiMaxDistanceMm set to %d", v);
@@ -554,10 +552,9 @@ int buildToFDataJSON(char* buf, size_t bufSize) {
 
 const char* cmd_tofpollingms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: tofpollingms <50..5000>";
-  while (*p == ' ') p++;  // Skip whitespace
-  int v = atoi(p);
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: tofpollingms <50..5000>";
+  int v = _arg.toInt();
   if (v < 50 || v > 5000) return "[ToF] Error: Polling interval must be 50-5000ms";
   setSetting(gSettings.tofPollingMs, v);
   BROADCAST_PRINTF("tofPollingMs set to %d", v);
@@ -566,10 +563,9 @@ const char* cmd_tofpollingms(const String& argsInput) {
 
 const char* cmd_tofstabilitythreshold(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const char* p = strchr(argsInput.c_str(), ' ');
-  if (!p) return "Usage: tofstabilitythreshold <0..50>";
-  while (*p == ' ') p++;  // Skip whitespace
-  int v = atoi(p);
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: tofstabilitythreshold <0..50>";
+  int v = _arg.toInt();
   if (v < 0 || v > 50) return "[ToF] Error: Stability threshold must be 0-50";
   setSetting(gSettings.tofStabilityThreshold, v);
   BROADCAST_PRINTF("tofStabilityThreshold set to %d", v);

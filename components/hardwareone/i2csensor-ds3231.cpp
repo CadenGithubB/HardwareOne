@@ -338,6 +338,12 @@ static void rtcTask(void* pvParameters) {
   while (rtcEnabled) {
     unsigned long now = millis();
     
+    // Respect global polling pause (I2C bus recovery, scans, file I/O, etc.)
+    if (gSensorPollingPaused) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+    
     // Poll fast when OLED is displaying RTC, slow otherwise
     unsigned long interval = (currentOLEDMode == OLED_RTC_DATA) ? CACHE_UPDATE_FAST : CACHE_UPDATE_SLOW;
     if (now - lastCacheUpdate >= interval) {
@@ -526,8 +532,9 @@ const char* cmd_rtc(const String& argsInput) {
     if (rtcReadDateTime(&dt)) {
       float temp = rtcReadTemperature();
       response = "[RTC] " + rtcDateTimeToString(&dt);
-      response += " | Temp: " + String(temp, 1) + "°C";
-      response += " | Unix: " + String(rtcToUnixTime(&dt));
+      char tempBuf[48];
+      snprintf(tempBuf, sizeof(tempBuf), " | Temp: %.1f°C | Unix: %lu", temp, (unsigned long)rtcToUnixTime(&dt));
+      response += tempBuf;
     } else {
       response = "[RTC] Failed to read time";
     }
@@ -539,7 +546,9 @@ const char* cmd_rtc(const String& argsInput) {
       return "[RTC] Not connected";
     }
     float temp = rtcReadTemperature();
-    response = "[RTC] Temperature: " + String(temp, 2) + "°C";
+    char tempBuf[32];
+    snprintf(tempBuf, sizeof(tempBuf), "[RTC] Temperature: %.2f°C", temp);
+    response = tempBuf;
     return response.c_str();
   }
   

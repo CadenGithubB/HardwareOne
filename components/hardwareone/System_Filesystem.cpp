@@ -176,7 +176,9 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
     if (asJson) {
       out = "";  // caller will wrap error
     } else {
-      out = String("Error: Cannot open directory '") + dirPath + "'";
+      char errBuf[96];
+      snprintf(errBuf, sizeof(errBuf), "Error: Cannot open directory '%s'", dirPath.c_str());
+      out = errBuf;
     }
     return false;
   }
@@ -184,7 +186,9 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
   bool first = true;
   int fileCount = 0;
   if (!asJson) {
-    out = String("Files (") + dirPath + "):\n";
+    char hdrBuf[96];
+    snprintf(hdrBuf, sizeof(hdrBuf), "Files (%s):\n", dirPath.c_str());
+    out = hdrBuf;
   } else {
     out = "";  // array body only
   }
@@ -236,7 +240,8 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
 
     // Hide admin-only folders from non-admin users
     if (hideAdminPaths) {
-      String entryFullPath = (dirPath == "/") ? String("/") + fileName : dirPath + "/" + fileName;
+      char entryFullPath[128];
+      snprintf(entryFullPath, sizeof(entryFullPath), "%s%s%s", dirPath.c_str(), dirPath == "/" ? "" : "/", fileName.c_str());
       if (isAdminOnlyPath(entryFullPath)) {
         file = root.openNextFile();
         continue;
@@ -262,14 +267,16 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
           }
           subDir.close();
         }
-        String folderFullPath = (dirPath == "/") ? String("/") + fileName : dirPath + "/" + fileName;
+        char folderFullPath[128];
+        snprintf(folderFullPath, sizeof(folderFullPath), "%s%s%s", dirPath.c_str(), dirPath == "/" ? "" : "/", fileName.c_str());
         uint8_t folderPerms = getPermissions(folderFullPath);
         char entryBuf[128];
         snprintf(entryBuf, sizeof(entryBuf), "{\"name\":\"%s\",\"type\":\"folder\",\"size\":\"%d items\",\"count\":%d,\"perms\":%d}",
                  fileName.c_str(), itemCount, itemCount, folderPerms);
         out += entryBuf;
       } else {
-        String fileFullPath = (dirPath == "/") ? String("/") + fileName : dirPath + "/" + fileName;
+        char fileFullPath[128];
+        snprintf(fileFullPath, sizeof(fileFullPath), "%s%s%s", dirPath.c_str(), dirPath == "/" ? "" : "/", fileName.c_str());
         uint8_t filePerms = getPermissions(fileFullPath);
         char entryBuf[128];
         snprintf(entryBuf, sizeof(entryBuf), "{\"name\":\"%s\",\"type\":\"file\",\"size\":\"%lu bytes\",\"perms\":%d}",
@@ -357,7 +364,7 @@ const char* cmd_mkdir(const String& argsInput) {
   String path = argsInput;
   path.trim();
   if (path.length() == 0) return "Usage: mkdir <path>";
-  if (!path.startsWith("/")) path = String("/") + path;
+  if (!path.startsWith("/")) { path = "/" + path; }
   if (!canCreate(path)) {
     snprintf(getDebugBuffer(), 1024, "Error: Creation not allowed: %s", path.c_str());
     return getDebugBuffer();
@@ -378,7 +385,7 @@ const char* cmd_rmdir(const String& argsInput) {
   String path = argsInput;
   path.trim();
   if (path.length() == 0) return "Usage: rmdir <path>";
-  if (!path.startsWith("/")) path = String("/") + path;
+  if (!path.startsWith("/")) { path = "/" + path; }
   if (!canDelete(path)) {
     snprintf(getDebugBuffer(), 1024, "Error: Removal not allowed: %s (protected)", path.c_str());
     return getDebugBuffer();
@@ -399,7 +406,7 @@ const char* cmd_filecreate(const String& argsInput) {
   String path = argsInput;
   path.trim();
   if (path.length() == 0) return "Usage: filecreate <path>";
-  if (!path.startsWith("/")) path = String("/") + path;
+  if (!path.startsWith("/")) { path = "/" + path; }
   if (path.endsWith("/")) return "Error: Path must be a file (not a directory)";
   if (!canCreate(path)) {
     snprintf(getDebugBuffer(), 1024, "Error: Creation not allowed: %s", path.c_str());
@@ -422,7 +429,7 @@ const char* cmd_fileview(const String& argsInput) {
   String path = argsInput;
   path.trim();
   if (path.length() == 0) return "Usage: fileview <path>";
-  if (!path.startsWith("/")) path = String("/") + path;
+  if (!path.startsWith("/")) { path = "/" + path; }
 
   // Security: Block reading sensitive files (credentials, passwords, keys)
   if (!canRead(path)) {
@@ -477,7 +484,7 @@ const char* cmd_filedelete(const String& argsInput) {
   String path = argsInput;
   path.trim();
   if (path.length() == 0) return "Usage: filedelete <path>";
-  if (!path.startsWith("/")) path = String("/") + path;
+  if (!path.startsWith("/")) { path = "/" + path; }
   
   if (!canDelete(path)) {
     snprintf(getDebugBuffer(), 1024, "Error: Deletion not allowed: %s (protected)", path.c_str());

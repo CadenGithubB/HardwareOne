@@ -139,7 +139,8 @@ static const OLEDModeEntry remoteSettingsModeEntry = {
   nullptr,  // availFunc - always available when paired
   handleRemoteSettingsInput,
   true,     // showInMenu
-  50        // menuOrder
+  50,       // menuOrder
+  nullptr   // hints
 };
 
 // Register remote settings mode

@@ -728,9 +728,12 @@ static void listModelsRecursive(const String& absDir, const String& relPrefix, S
     } else {
       if (entryName.endsWith(".tflite")) {
         String rel = relPrefix.length() ? (relPrefix + "/" + entryName) : entryName;
-        String fullPath = String(MODEL_DIR) + "/" + rel;
-        output += "  " + rel + " (" + String(file.size()) + " bytes)";
-        if (gLoadedModelPath == fullPath) {
+        char fullPathBuf[96];
+        snprintf(fullPathBuf, sizeof(fullPathBuf), "%s/%s", MODEL_DIR, rel.c_str());
+        char lineBuf[128];
+        snprintf(lineBuf, sizeof(lineBuf), "  %s (%d bytes)", rel.c_str(), (int)file.size());
+        output += lineBuf;
+        if (gLoadedModelPath == fullPathBuf) {
           output += " [LOADED]";
         }
         output += "\n";
@@ -743,11 +746,15 @@ static void listModelsRecursive(const String& absDir, const String& relPrefix, S
 
 // List available models in /littlefs/EI Models/
 void listAvailableModels(String& output) {
-  output = "Available models in " + String(MODEL_DIR) + ":\n";
+  char hdrBuf[64];
+  snprintf(hdrBuf, sizeof(hdrBuf), "Available models in %s:\n", MODEL_DIR);
+  output = hdrBuf;
   
   File root = LittleFS.open(MODEL_DIR);
   if (!root || !root.isDirectory()) {
-    output += "  (directory not found - create " + String(MODEL_DIR) + ")\n";
+    char errBuf[64];
+    snprintf(errBuf, sizeof(errBuf), "  (directory not found - create %s)\n", MODEL_DIR);
+    output += errBuf;
     return;
   }
 
@@ -1953,9 +1960,13 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
     String tflite = tfliteFiles[i];
     String modelName = tflite.substring(0, tflite.length() - 7); // Remove .tflite
     
-    String srcModel = String(MODEL_DIR) + "/" + tflite;
-    String dstDir = String(MODEL_DIR) + "/" + modelName;
-    String dstModel = dstDir + "/" + tflite;
+    char srcModelBuf[96], dstDirBuf[96], dstModelBuf[128];
+    snprintf(srcModelBuf, sizeof(srcModelBuf), "%s/%s", MODEL_DIR, tflite.c_str());
+    snprintf(dstDirBuf, sizeof(dstDirBuf), "%s/%s", MODEL_DIR, modelName.c_str());
+    snprintf(dstModelBuf, sizeof(dstModelBuf), "%s/%s", dstDirBuf, tflite.c_str());
+    String srcModel = srcModelBuf;
+    String dstDir = dstDirBuf;
+    String dstModel = dstModelBuf;
     
     // Create folder
     if (!LittleFS.exists(dstDir)) {
@@ -1976,9 +1987,12 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
     }
     
     // Look for matching labels file
-    String labelsName = modelName + ".labels.txt";
-    String srcLabels = String(MODEL_DIR) + "/" + labelsName;
-    String dstLabels = dstDir + "/" + labelsName;
+    char labelsNameBuf[64], srcLabelsBuf[128], dstLabelsBuf[128];
+    snprintf(labelsNameBuf, sizeof(labelsNameBuf), "%s.labels.txt", modelName.c_str());
+    snprintf(srcLabelsBuf, sizeof(srcLabelsBuf), "%s/%s", MODEL_DIR, labelsNameBuf);
+    snprintf(dstLabelsBuf, sizeof(dstLabelsBuf), "%s/%s", dstDirBuf, labelsNameBuf);
+    String srcLabels = srcLabelsBuf;
+    String dstLabels = dstLabelsBuf;
     
     if (LittleFS.exists(srcLabels) && !LittleFS.exists(dstLabels)) {
       if (LittleFS.rename(srcLabels.c_str(), dstLabels.c_str())) {
@@ -1988,8 +2002,9 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
   }
 
   httpd_resp_set_type(req, "application/json");
-  String json = "{\"success\":true,\"moved\":" + String(moved) + ",\"failed\":" + String(failed) + "}";
-  httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+  char jsonBuf[64];
+  snprintf(jsonBuf, sizeof(jsonBuf), "{\"success\":true,\"moved\":%d,\"failed\":%d}", moved, failed);
+  httpd_resp_send(req, jsonBuf, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -2264,7 +2279,9 @@ const char* cmd_ei_model_load(const String& argsInput) {
   // Build full path if just filename given
   String path = trimmed;
   if (!path.startsWith("/")) {
-    path = String(MODEL_DIR) + "/" + trimmed;
+    char pathBuf[96];
+    snprintf(pathBuf, sizeof(pathBuf), "%s/%s", MODEL_DIR, trimmed.c_str());
+    path = pathBuf;
   }
   
   if (!LittleFS.exists(path)) {
@@ -2368,21 +2385,24 @@ const char* cmd_ei_track_status(const String& argsInput) {
     return "No objects currently tracked. Run continuous inference to track objects.";
   }
   
-  String output = "Tracked Objects (" + String(gTrackedObjectCount) + "):\n";
+  char hdrBuf[32];
+  snprintf(hdrBuf, sizeof(hdrBuf), "Tracked Objects (%d):\n", gTrackedObjectCount);
+  String output = hdrBuf;
   uint32_t now = millis();
   
   for (int i = 0; i < gTrackedObjectCount; i++) {
     const TrackedObject& obj = gTrackedObjects[i];
-    output += "  [" + String(i) + "] " + obj.label;
-    output += " at (" + String(obj.x) + "," + String(obj.y) + ")";
-    output += " conf=" + String(obj.confidence, 2);
+    char lineBuf[128];
+    int pos = snprintf(lineBuf, sizeof(lineBuf), "  [%d] %s at (%d,%d) conf=%.2f",
+                       i, obj.label, obj.x, obj.y, obj.confidence);
     if (obj.prevLabel[0]) {
-      output += " prev=" + String(obj.prevLabel);
+      pos += snprintf(lineBuf + pos, sizeof(lineBuf) - pos, " prev=%s", obj.prevLabel);
     }
-    output += " age=" + String((now - obj.lastSeenMs) / 1000.0f, 1) + "s";
+    pos += snprintf(lineBuf + pos, sizeof(lineBuf) - pos, " age=%.1fs", (now - obj.lastSeenMs) / 1000.0f);
     if (obj.stateChanged) {
-      output += " [CHANGED]";
+      pos += snprintf(lineBuf + pos, sizeof(lineBuf) - pos, " [CHANGED]");
     }
+    output += lineBuf;
     output += "\n";
   }
   

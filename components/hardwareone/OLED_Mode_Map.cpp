@@ -1772,7 +1772,8 @@ static const OLEDModeEntry gpsMapOLEDModes[] = {
     gpsMapAvailable,
     gpsMapInputHandler,
     true,
-    50
+    50,
+    nullptr  // dynamic hints (menu vs map view)
   }
 };
 

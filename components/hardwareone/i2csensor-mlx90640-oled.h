@@ -140,7 +140,8 @@ static const OLEDModeEntry thermalOLEDModes[] = {
     thermalOLEDModeAvailable,// availFunc
     thermalInputHandler,     // inputFunc - X toggles sensor
     true,                    // showInMenu
-    20                       // menuOrder
+    20,                      // menuOrder
+    nullptr                  // hints
   }
 };
 

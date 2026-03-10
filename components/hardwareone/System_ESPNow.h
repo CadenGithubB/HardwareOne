@@ -1029,7 +1029,6 @@ void onEspNowDataSent(const uint8_t* mac, esp_now_send_status_t status);
 
 // Message queue processing (called from loop)
 void processMessageQueue();
-void cleanupExpiredChunkedMessage();
 void cleanupTimedOutChunks();
 void cleanupExpiredBufferedPeers();
 
@@ -1090,8 +1089,7 @@ void meshSendEnvelopeToPeers(const String& envelope);
 // Topology state (for auto-discovery check in loop)
 extern uint32_t gLastTopoRequest;
 
-// Mesh message builders (for heartbeat in loop)
-String buildHeartbeat(uint32_t msgId, const char* src);
+// Mesh message builders
 String buildBootNotification(uint32_t msgId, const char* src, uint32_t bootCounter, uint32_t timestamp);
 
 // V2 envelope builder (for user sync and other features)
@@ -1107,7 +1105,6 @@ TaskHandle_t getEspNowTaskHandle();  // Get task handle for stack monitoring
 
 // Message handling (for command execution)
 void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& result, const String& senderName);
-void cleanupExpiredChunkedMessage();  // Cleanup timed-out chunked messages
 
 // Per-device message buffer management (espnow_message_buffer.cpp)
 PeerMessageHistory* findOrCreatePeerHistory(uint8_t* peerMac);

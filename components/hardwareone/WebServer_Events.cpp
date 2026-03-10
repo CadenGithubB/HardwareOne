@@ -18,18 +18,18 @@ void sseDebug(const String& msg) {
 
 bool sseWrite(httpd_req_t* req, const char* chunk) {
   if (!req) {
-    sseDebug("sseWrite called with null req");
+    DEBUG_SSEF("sseWrite called with null req");
     return false;
   }
   if (chunk == NULL) {
     // terminate chunked response
     httpd_resp_send_chunk(req, NULL, 0);
-    sseDebug("sseWrite: terminated chunked response");
+    DEBUG_SSEF("sseWrite: terminated chunked response");
     return true;
   }
   size_t n = strlen(chunk);
   esp_err_t r = httpd_resp_send_chunk(req, chunk, n);
-  sseDebug(String("sseWrite: sent chunk bytes=") + String((unsigned)n) + (r == ESP_OK ? " OK" : " FAIL"));
+  DEBUG_SSEF("sseWrite: sent chunk bytes=%u %s", (unsigned)n, r == ESP_OK ? "OK" : "FAIL");
   return r == ESP_OK;
 }
 
@@ -39,8 +39,7 @@ int sseBindSession(httpd_req_t* req, String& outSid) {
   String ip;
   getClientIP(req, ip);
 
-  sseDebug(String("sseBindSession: sid=") + (outSid.length() ? outSid : "<none>") + ", idx=" + String(idx));
-  DEBUG_SSEF("sseBindSession: IP=%s SID=%s idx=%d", ip.c_str(), (outSid.length() ? (outSid.substring(0, 8) + "...").c_str() : "<none>"), idx);
+  DEBUG_SSEF("sseBindSession: IP=%s SID=%.8s%s idx=%d", ip.c_str(), outSid.length() ? outSid.c_str() : "<none>", outSid.length() > 8 ? "..." : "", idx);
 
   // Validate session still exists and hasn't been cleared
   if (idx >= 0) {
@@ -60,7 +59,7 @@ int sseBindSession(httpd_req_t* req, String& outSid) {
 }
 
 bool sseHeartbeat(httpd_req_t* req) {
-  sseDebug("heartbeat");
+  DEBUG_SSEF("heartbeat");
   return sseWrite(req, ":hb\n\n");
 }
 
@@ -68,9 +67,11 @@ bool sseSendNotice(httpd_req_t* req, const String& note) {
   // Wrap message as JSON string payload
   String safe = note;  // minimal escaping
   safe.replace("\n", "\\n");
-  String out = String("event: notice\n") + "data: {\"msg\":\"" + safe + "\"}" + "\n\n";
-  bool ok = sseWrite(req, out.c_str());
-  sseDebug(String("sendNotice: len=") + String((unsigned)note.length()) + (ok ? " OK" : " FAIL"));
+  // Build SSE frame in stack buffer instead of String concat
+  char sseBuf[512];
+  snprintf(sseBuf, sizeof(sseBuf), "event: notice\ndata: {\"msg\":\"%s\"}\n\n", safe.c_str());
+  bool ok = sseWrite(req, sseBuf);
+  DEBUG_SSEF("sendNotice: len=%u %s", (unsigned)note.length(), ok ? "OK" : "FAIL");
   return ok;
 }
 
@@ -122,29 +123,40 @@ bool sseDequeueEvent(SessionEntry& s, String& outEventName, String& outData) {
 }
 
 static bool sseSendFetch(httpd_req_t* req, const String& jsonPayload) {
-  String out = String("event: fetch\n") + "data: " + jsonPayload + "\n\n";
-  bool ok = sseWrite(req, out.c_str());
-  sseDebug(String("sendFetch: ") + (ok ? "OK" : "FAIL") + ", json=" + jsonPayload);
+  // Build SSE frame with snprintf instead of String concat
+  size_t needed = 14 + jsonPayload.length() + 3; // "event: fetch\n" + "data: " + payload + "\n\n"
+  char stackBuf[512];
+  char* buf = stackBuf;
+  bool heapAlloc = false;
+  if (needed >= sizeof(stackBuf)) {
+    buf = (char*)malloc(needed + 1);
+    if (!buf) return false;
+    heapAlloc = true;
+  }
+  snprintf(buf, heapAlloc ? (needed + 1) : sizeof(stackBuf), "event: fetch\ndata: %s\n\n", jsonPayload.c_str());
+  bool ok = sseWrite(req, buf);
+  if (heapAlloc) free(buf);
+  DEBUG_SSEF("sendFetch: %s json_len=%u", ok ? "OK" : "FAIL", (unsigned)jsonPayload.length());
   return ok;
 }
 
 // SSE endpoint: push per-session notices without polling
 esp_err_t handleEvents(httpd_req_t* req) {
   if (!req) {
-    sseDebug("handleEvents: null req");
+    DEBUG_SSEF("handleEvents: null req");
     return ESP_OK;
   }
   String u;
   String ip;
   getClientIP(req, ip);
   // httpd_req_t::uri is a fixed-size char array; it is never NULL
-  sseDebug(String("handleEvents: incoming from ") + (ip.length() ? ip : "<no-ip>") + ", uri=" + req->uri);
+  DEBUG_SSEF("handleEvents: incoming from %s, uri=%s", ip.length() ? ip.c_str() : "<no-ip>", req->uri);
 
   {
     AuthContext ctx = makeWebAuthCtx(req);
     if (!tgRequireAuth(ctx)) {
       DEBUG_AUTHF("/api/events (SSE) DENIED - no valid session for IP: %s", ip.c_str());
-      sseDebug("handleEvents: auth failed; sending 401");
+      DEBUG_SSEF("handleEvents: auth failed; sending 401");
       return ESP_OK;
     }
   }
@@ -165,35 +177,36 @@ esp_err_t handleEvents(httpd_req_t* req) {
   httpd_resp_set_hdr(req, "Access-Control-Allow-Credentials", "true");
   // Disable proxy buffering if any
   httpd_resp_set_hdr(req, "X-Accel-Buffering", "no");
-  sseDebug("handleEvents: SSE headers set");
+  DEBUG_SSEF("handleEvents: SSE headers set");
 
   // Bind session BEFORE sending any body chunks
   String sid;
   int sessIdx = sseBindSession(req, sid);
   if (sessIdx < 0) {
-    sseDebug("handleEvents: no session bound; closing");
+    DEBUG_SSEF("handleEvents: no session bound; closing");
     sseWrite(req, NULL);
     return ESP_OK;
   }
-  sseDebug(String("handleEvents: bound session idx=") + String(sessIdx) + ", sid=" + (sid.length() ? sid : "<none>"));
-  DEBUG_SSEF("handleEvents: bound session details | idx=%d sid=%s needsStatusUpdate=%d lastSensorSeqSent=%lu",
-             sessIdx, (sid.length() ? (sid.substring(0, 8) + "...").c_str() : "<none>"),
+  DEBUG_SSEF("handleEvents: bound session idx=%d, sid=%.8s%s", sessIdx, sid.length() ? sid.c_str() : "<none>", sid.length() > 8 ? "..." : "");
+  DEBUG_SSEF("handleEvents: bound session details | idx=%d needsStatusUpdate=%d lastSensorSeqSent=%lu",
+             sessIdx,
              gSessions[sessIdx].needsStatusUpdate ? 1 : 0,
              (unsigned long)gSessions[sessIdx].lastSensorSeqSent);
 
   // Advise browser to backoff reconnects and send initial comment to open stream
   unsigned long nowRetry = millis();
   unsigned long retryMs = (gSessions[sessIdx].needsNotificationTick || (nowRetry < gSessions[sessIdx].noticeBurstUntil)) ? 1000UL : 5000UL;
-  String retryLine = String("retry: ") + String((unsigned long)retryMs) + String("\n\n");
-  if (!sseWrite(req, retryLine.c_str())) {
-    sseDebug("handleEvents: failed to send retry hint");
+  char retryLine[32];
+  snprintf(retryLine, sizeof(retryLine), "retry: %lu\n\n", (unsigned long)retryMs);
+  if (!sseWrite(req, retryLine)) {
+    DEBUG_SSEF("handleEvents: failed to send retry hint");
     return ESP_OK;
   }
   if (!sseWrite(req, ":ok\n\n")) {
-    sseDebug("handleEvents: failed to send initial :ok");
+    DEBUG_SSEF("handleEvents: failed to send initial :ok");
     return ESP_OK;
   }
-  sseDebug("handleEvents: initial :ok sent");
+  DEBUG_SSEF("handleEvents: initial :ok sent");
 
   DEBUG_SSEF("SSE connection established");
 

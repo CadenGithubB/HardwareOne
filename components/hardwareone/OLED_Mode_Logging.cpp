@@ -359,7 +359,8 @@ static const OLEDModeEntry loggingModeEntry = {
   isLoggingModeAvailable,
   handleLoggingModeInput,
   true,
-  93
+  93,
+  "A:Select B:Back"
 };
 
 static const OLEDModeEntry loggingModes[] = { loggingModeEntry };

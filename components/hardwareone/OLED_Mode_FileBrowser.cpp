@@ -235,7 +235,7 @@ void displayFileBrowserRendered() {
       oledDisplay->setCursor(2, y + 1);
       String name = String(entry.name);
       if (name.length() > 13) {
-        name = name.substring(0, 10) + "...";
+        name = name.substring(0, 10); name += "...";
       }
       oledDisplay->print(name);
     }
@@ -390,7 +390,7 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
 extern void displayFileBrowserRendered();
 
 static const OLEDModeEntry sFileBrowserModes[] = {
-  { OLED_FILE_BROWSER, "Files", "file_text", displayFileBrowserRendered, nullptr, fileBrowserInputHandler, false, -1 },
+  { OLED_FILE_BROWSER, "Files", "file_text", displayFileBrowserRendered, nullptr, fileBrowserInputHandler, false, -1, nullptr },
 };
 
 REGISTER_OLED_MODE_MODULE(sFileBrowserModes, sizeof(sFileBrowserModes) / sizeof(sFileBrowserModes[0]), "FileBrowser");

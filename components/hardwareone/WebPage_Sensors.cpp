@@ -720,7 +720,9 @@ esp_err_t handleCameraStream(httpd_req_t* req) {
   static unsigned long s_streamLastBeat = 0;
   static uint32_t s_streamGen = 0;
   String sid = getCookieSID(req);
-  String key = sid.length() ? String("sid:") + sid : String("ip:") + ctx.ip;
+  char keyBuf[64];
+  snprintf(keyBuf, sizeof(keyBuf), "%s:%s", sid.length() ? "sid" : "ip", sid.length() ? sid.c_str() : ctx.ip.c_str());
+  String key = keyBuf;
   unsigned long nowMs = millis();
   const unsigned long staleMs = 5000UL;
   bool stale = (s_streamOwner.length() > 0) && ((long)(nowMs - s_streamLastBeat) > (long)staleMs);
@@ -849,7 +851,9 @@ esp_err_t handleMicRecordingsList(httpd_req_t* req) {
   String list = getRecordingsList();
   
   // Build JSON response
-  String json = "{\"count\":" + String(count) + ",\"files\":[";
+  char jsonHdr[32];
+  snprintf(jsonHdr, sizeof(jsonHdr), "{\"count\":%d,\"files\":[", count);
+  String json = jsonHdr;
   
   if (count > 0 && list.length() > 0) {
     // Parse "name:size,name:size" format
@@ -906,7 +910,9 @@ esp_err_t handleMicRecordingFile(httpd_req_t* req) {
   }
   
   // Construct full path
-  String path = "/recordings/" + String(filename);
+  char pathBuf[64];
+  snprintf(pathBuf, sizeof(pathBuf), "/recordings/%s", filename);
+  String path = pathBuf;
   
   if (!LittleFS.exists(path)) {
     httpd_resp_set_status(req, "404 Not Found");

@@ -203,9 +203,9 @@ static bool powerSleepInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
 // ============================================================================
 
 static const OLEDModeEntry sPowerModes[] = {
-  { OLED_POWER,       "Power",    "power", displayPower,      nullptr, powerMainInputHandler,  false, -1 },
-  { OLED_POWER_CPU,   "CPU Power","power", displayPowerCPU,   nullptr, powerCpuInputHandler,   false, -1 },
-  { OLED_POWER_SLEEP, "Sleep",    "power", displayPowerSleep, nullptr, powerSleepInputHandler, false, -1 },
+  { OLED_POWER,       "Power",    "power", displayPower,      nullptr, powerMainInputHandler,  false, -1, "A:Select B:Back" },
+  { OLED_POWER_CPU,   "CPU Power","power", displayPowerCPU,   nullptr, powerCpuInputHandler,   false, -1, "A:Execute B:Back" },
+  { OLED_POWER_SLEEP, "Sleep",    "power", displayPowerSleep, nullptr, powerSleepInputHandler, false, -1, "A:Execute B:Back" },
 };
 
 REGISTER_OLED_MODE_MODULE(sPowerModes, sizeof(sPowerModes) / sizeof(sPowerModes[0]), "Power");
