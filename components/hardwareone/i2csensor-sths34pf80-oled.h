@@ -72,14 +72,11 @@ static bool presenceOLEDModeAvailable(String* outReason) {
 
 static void presenceToggleConfirmed(void* userData) {
   (void)userData;
-
+  extern void executeOLEDCommand(const String& argsInput);
   if (presenceEnabled) {
-    Serial.println("[PRESENCE] Confirmed: Stopping presence sensor...");
-    presenceEnabled = false;
+    executeOLEDCommand("closepresence");
   } else {
-    extern bool startPresenceSensorInternal();
-    Serial.println("[PRESENCE] Confirmed: Starting presence sensor...");
-    startPresenceSensorInternal();
+    executeOLEDCommand("openpresence");
   }
 }
 

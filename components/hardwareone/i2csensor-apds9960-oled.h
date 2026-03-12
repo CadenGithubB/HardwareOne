@@ -51,15 +51,11 @@ static bool apdsOLEDModeAvailable(String* outReason) {
 
 static void apdsToggleConfirmed(void* userData) {
   (void)userData;
-  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
-
+  extern void executeOLEDCommand(const String& argsInput);
   if (apdsColorEnabled || apdsProximityEnabled) {
-    Serial.println("[APDS] Confirmed: Stopping APDS sensor...");
-    apdsColorEnabled = false;
-    apdsProximityEnabled = false;
-  } else if (!isInQueue(I2C_DEVICE_APDS)) {
-    Serial.println("[APDS] Confirmed: Starting APDS sensor...");
-    enqueueDeviceStart(I2C_DEVICE_APDS);
+    executeOLEDCommand("closeapds");
+  } else {
+    executeOLEDCommand("openapds");
   }
 }
 

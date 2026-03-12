@@ -815,6 +815,15 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
   
   // Append to audit log with 500KB cap (rotates automatically)
   appendLineWithCap("/system/sys_logs/command-audit.log", entry, 500 * 1024);
+  
+  // Broadcast command execution notice to all interfaces (serial, web, OLED, etc.)
+  // This is the "who did what from where" audit trail visible everywhere.
+  // Uses broadcastOutputEx with flags=0 to bypass context-based serial suppression —
+  // the audit line should ALWAYS appear on all interfaces regardless of command origin.
+  char auditLine[384];
+  snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s",
+           ctx.user.c_str(), source, redactedCmd.c_str(), status);
+  broadcastOutputEx(String(auditLine), 0);
 }
 
 // Automation logging
@@ -2842,7 +2851,10 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
       return false;
     }
     setCurrentCommandContext(cmd.ctx);
+    extern void* gCurrentCommandContext;
+    gCurrentCommandContext = (void*)&cmd.ctx;
     bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, 2048);
+    gCurrentCommandContext = nullptr;
     out = outBuf;
     free(outBuf);
     return ok;

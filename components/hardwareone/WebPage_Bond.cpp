@@ -1022,19 +1022,21 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
 // API: Bond Stream Control
 // =============================================================================
 
+extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
+
 static esp_err_t handleBondStream(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
-  
+
   if (!tgRequireAuth(ctx)) return ESP_OK;
-  
+
   httpd_resp_set_type(req, "application/json");
-  
+
   // Guard: only allow streaming control when fully synced
   if (!isBondSynced()) {
     httpd_resp_send(req, "{\"success\":false,\"error\":\"Bond not synced\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  
+
   // Parse POST body
   char buf[128];
   int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
@@ -1043,12 +1045,11 @@ static esp_err_t handleBondStream(httpd_req_t* req) {
     return ESP_OK;
   }
   buf[len] = '\0';
-  
+
   // Parse sensor and action
   char sensorParam[32] = {0};
   char actionParam[16] = {0};
-  
-  // Simple URL-encoded parsing
+
   char* sensorStart = strstr(buf, "sensor=");
   if (sensorStart) {
     sensorStart += 7;
@@ -1058,7 +1059,7 @@ static esp_err_t handleBondStream(httpd_req_t* req) {
     if (slen >= sizeof(sensorParam)) slen = sizeof(sensorParam) - 1;
     strncpy(sensorParam, sensorStart, slen);
   }
-  
+
   char* actionStart = strstr(buf, "action=");
   if (actionStart) {
     actionStart += 7;
@@ -1068,66 +1069,47 @@ static esp_err_t handleBondStream(httpd_req_t* req) {
     if (alen >= sizeof(actionParam)) alen = sizeof(actionParam) - 1;
     strncpy(actionParam, actionStart, alen);
   }
-  
+
   if (strlen(sensorParam) == 0) {
     httpd_resp_send(req, "{\"success\":false,\"error\":\"Missing sensor parameter\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  
-  // Map sensor name to setting and streaming function
-  bool* settingPtr = nullptr;
-  RemoteSensorType sensorType = REMOTE_SENSOR_THERMAL;
-  
-  if (strcmp(sensorParam, "thermal") == 0) {
-    settingPtr = &gSettings.bondStreamThermal;
-    sensorType = REMOTE_SENSOR_THERMAL;
-  } else if (strcmp(sensorParam, "tof") == 0) {
-    settingPtr = &gSettings.bondStreamTof;
-    sensorType = REMOTE_SENSOR_TOF;
-  } else if (strcmp(sensorParam, "imu") == 0) {
-    settingPtr = &gSettings.bondStreamImu;
-    sensorType = REMOTE_SENSOR_IMU;
-  } else if (strcmp(sensorParam, "gps") == 0) {
-    settingPtr = &gSettings.bondStreamGps;
-    sensorType = REMOTE_SENSOR_GPS;
-  } else if (strcmp(sensorParam, "gamepad") == 0) {
-    settingPtr = &gSettings.bondStreamGamepad;
-    sensorType = REMOTE_SENSOR_GAMEPAD;
-  } else if (strcmp(sensorParam, "fmradio") == 0) {
-    settingPtr = &gSettings.bondStreamFmradio;
-    sensorType = REMOTE_SENSOR_FMRADIO;
-  } else if (strcmp(sensorParam, "presence") == 0) {
-    settingPtr = &gSettings.bondStreamPresence;
-    sensorType = REMOTE_SENSOR_PRESENCE;
-  } else {
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Unknown sensor\"}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  
-  // Toggle or set explicitly
-  bool newState;
-  if (strcmp(actionParam, "toggle") == 0) {
-    newState = !(*settingPtr);
-  } else if (strcmp(actionParam, "on") == 0) {
-    newState = true;
+
+  // Resolve toggle → on/off using current setting state
+  const char* onOff = nullptr;
+  if (strcmp(actionParam, "on") == 0) {
+    onOff = "on";
   } else if (strcmp(actionParam, "off") == 0) {
-    newState = false;
+    onOff = "off";
   } else {
-    newState = !(*settingPtr); // Default to toggle
+    // toggle: look up current state from gSettings
+    bool current = false;
+    if      (strcmp(sensorParam, "thermal")  == 0) current = gSettings.bondStreamThermal;
+    else if (strcmp(sensorParam, "tof")      == 0) current = gSettings.bondStreamTof;
+    else if (strcmp(sensorParam, "imu")      == 0) current = gSettings.bondStreamImu;
+    else if (strcmp(sensorParam, "gps")      == 0) current = gSettings.bondStreamGps;
+    else if (strcmp(sensorParam, "gamepad")  == 0) current = gSettings.bondStreamGamepad;
+    else if (strcmp(sensorParam, "fmradio")  == 0) current = gSettings.bondStreamFmradio;
+    else if (strcmp(sensorParam, "presence") == 0) current = gSettings.bondStreamPresence;
+    else {
+      httpd_resp_send(req, "{\"success\":false,\"error\":\"Unknown sensor\"}", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
+    onOff = current ? "off" : "on";
   }
-  
-  // Update setting and start/stop streaming
-  *settingPtr = newState;
-  writeSettingsJson();
-  
-  if (newState) {
-    startSensorDataStreaming(sensorType);
-  } else {
-    stopSensorDataStreaming(sensorType);
-  }
-  
-  webBondSendChunkf(req, "{\"success\":true,\"sensor\":\"%s\",\"enabled\":%s}", 
+
+  // Route through unified command: "bond stream <sensor> <on|off>"
+  String cmdOut;
+  String cmd = String("bond stream ") + sensorParam + " " + onOff;
+  bool ok = executeUnifiedWebCommand(req, ctx, cmd, cmdOut);
+
+  if (ok) {
+    bool newState = (strcmp(onOff, "on") == 0);
+    webBondSendChunkf(req, "{\"success\":true,\"sensor\":\"%s\",\"enabled\":%s}",
                       sensorParam, newState ? "true" : "false");
+  } else {
+    webBondSendChunk(req, "{\"success\":false,\"error\":\"Stream command failed\"}");
+  }
   httpd_resp_send_chunk(req, NULL, 0);
   return ESP_OK;
 }
@@ -1184,25 +1166,26 @@ static esp_err_t handleBondExec(httpd_req_t* req) {
   }
   
   // Use unified remote command routing - prefix with "remote:"
-  // executeCommand() handles session token auth automatically
+  // executeUnifiedWebCommand() sets context for proper serial suppression
   String remoteCmd = "remote:";
   remoteCmd += cmdParam;
   
-  char resultBuf[1024];
-  bool success = executeCommand(ctx, remoteCmd.c_str(), resultBuf, sizeof(resultBuf));
+  String resultStr;
+  bool success = executeUnifiedWebCommand(req, ctx, remoteCmd, resultStr);
   
   webBondSendChunkf(req, "{\"success\":%s,\"result\":", success ? "true" : "false");
   
   // Escape result for JSON
   webBondSendChunk(req, "\"");
-  for (const char* p = resultBuf; *p; p++) {
-    if (*p == '"') webBondSendChunk(req, "\\\"");
-    else if (*p == '\\') webBondSendChunk(req, "\\\\");
-    else if (*p == '\n') webBondSendChunk(req, "\\n");
-    else if (*p == '\r') webBondSendChunk(req, "\\r");
-    else if (*p == '\t') webBondSendChunk(req, "\\t");
+  for (size_t i = 0; i < resultStr.length(); i++) {
+    char ch = resultStr[i];
+    if (ch == '"') webBondSendChunk(req, "\\\"");
+    else if (ch == '\\') webBondSendChunk(req, "\\\\");
+    else if (ch == '\n') webBondSendChunk(req, "\\n");
+    else if (ch == '\r') webBondSendChunk(req, "\\r");
+    else if (ch == '\t') webBondSendChunk(req, "\\t");
     else {
-      char c[2] = {*p, 0};
+      char c[2] = {ch, 0};
       webBondSendChunk(req, c);
     }
   }
@@ -1235,14 +1218,14 @@ static esp_err_t handleBondRole(httpd_req_t* req) {
   // before the local device starts the handshake. Reversing this order caused a
   // race condition where the local worker sent CAP_REQ before the peer became master,
   // and resetBondHandshake() on the peer then cleared the deferred flags.
-  char resultBuf[256];
   String remoteCmd = "remote:bond role ";
   remoteCmd += peerNewRole;
-  bool remoteOk = executeCommand(ctx, remoteCmd.c_str(), resultBuf, sizeof(resultBuf));
+  String remoteResult;
+  bool remoteOk = executeUnifiedWebCommand(req, ctx, remoteCmd, remoteResult);
   
   if (!remoteOk) {
     // Abort — don't change local role if peer didn't change, or we get split-brain
-    webBondSendChunkf(req, "{\"success\":false,\"error\":\"Remote role change failed: %s\"}", resultBuf);
+    webBondSendChunkf(req, "{\"success\":false,\"error\":\"Remote role change failed: %s\"}", remoteResult.c_str());
     httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
   }
@@ -1250,7 +1233,8 @@ static esp_err_t handleBondRole(httpd_req_t* req) {
   // Change local role (handles handshake reset + cap invalidation)
   String localCmd = "bond role ";
   localCmd += localNewRole;
-  executeCommand(ctx, localCmd.c_str(), resultBuf, sizeof(resultBuf));
+  String localResult;
+  executeUnifiedWebCommand(req, ctx, localCmd, localResult);
   
   uint8_t newRole = gSettings.bondRole;
   const char* roleName = (newRole == 1) ? "master" : "worker";

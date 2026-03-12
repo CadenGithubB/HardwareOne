@@ -59,14 +59,11 @@ static bool tofOLEDModeAvailable(String* outReason) {
 
 static void tofToggleConfirmed(void* userData) {
   (void)userData;
-  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
-
+  extern void executeOLEDCommand(const String& argsInput);
   if (tofEnabled && tofConnected) {
-    Serial.println("[TOF] Confirmed: Stopping ToF sensor...");
-    tofEnabled = false;
-  } else if (!isInQueue(I2C_DEVICE_TOF)) {
-    Serial.println("[TOF] Confirmed: Starting ToF sensor...");
-    enqueueDeviceStart(I2C_DEVICE_TOF);
+    executeOLEDCommand("closetof");
+  } else {
+    executeOLEDCommand("opentof");
   }
 }
 

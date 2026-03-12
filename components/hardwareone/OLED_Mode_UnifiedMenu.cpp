@@ -23,8 +23,7 @@ extern String getEspNowDeviceName(const uint8_t* mac);
 extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
 extern String processCommand(const String& argsInput);
 
-// Command execution uses central executeCommand() which handles remote routing
-extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
+// Command execution routes through the unified OLED command helper
 
 // ==========================
 // Unified Menu Item Structure
@@ -372,16 +371,9 @@ static void executeMenuItem(UnifiedMenuItem& item) {
   }
   
   strncpy(gPendingCommandStatus, "Running...", sizeof(gPendingCommandStatus));
-  
-  AuthContext ctx;
-  ctx.transport = SOURCE_LOCAL_DISPLAY;
-  ctx.user = "oled";
-  ctx.ip = "local";
-  ctx.path = "/oled/unified";
-  ctx.sid = "";
-  
+
   char out[512];
-  bool success = executeCommand(ctx, cmdToExecute.c_str(), out, sizeof(out));
+  bool success = executeOLEDCommandWithResult(cmdToExecute, out, sizeof(out));
   
   if (item.isRemote) {
     if (success) {

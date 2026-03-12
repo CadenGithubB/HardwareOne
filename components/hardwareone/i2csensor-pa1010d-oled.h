@@ -118,14 +118,11 @@ static bool gpsOLEDModeAvailable(String* outReason) {
 
 static void gpsToggleConfirmed(void* userData) {
   (void)userData;
-  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
-
+  extern void executeOLEDCommand(const String& argsInput);
   if (gpsEnabled && gpsConnected) {
-    Serial.println("[GPS] Confirmed: Stopping GPS...");
-    gpsEnabled = false;
-  } else if (!isInQueue(I2C_DEVICE_GPS)) {
-    Serial.println("[GPS] Confirmed: Starting GPS...");
-    enqueueDeviceStart(I2C_DEVICE_GPS);
+    executeOLEDCommand("closegps");
+  } else {
+    executeOLEDCommand("opengps");
   }
 }
 

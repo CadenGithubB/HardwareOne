@@ -10613,9 +10613,10 @@ const char* cmd_bond_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled) {
-    broadcastOutput("Bond mode: DISABLED");
-    BROADCAST_PRINTF("Role: %s", gSettings.bondRole == 1 ? "master" : "worker");
-    return "OK";
+    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+    char* buf = getDebugBuffer();
+    snprintf(buf, 512, "Bond mode: DISABLED\nRole: %s", gSettings.bondRole == 1 ? "master" : "worker");
+    return buf;
   }
   
   String deviceName = "";

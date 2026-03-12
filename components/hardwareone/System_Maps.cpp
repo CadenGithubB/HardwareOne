@@ -1,5 +1,6 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <cstring>
 
 #include "System_Maps.h"
 #include "System_BuildConfig.h"
@@ -2177,12 +2178,47 @@ const char* cmd_waypoint(const String& argsInput) {
     return buf;
   }
   
+  if (strncmp(p, "clearall", 8) == 0) {
+    WaypointManager::clearAll();
+    return "All waypoints cleared";
+  }
+
   if (strncmp(p, "clear", 5) == 0) {
     WaypointManager::selectTarget(-1);
     return "Navigation target cleared";
   }
-  
-  return "Usage: waypoint [list|add|del|goto|clear]";
+
+  if (strncmp(p, "rename ", 7) == 0) {
+    const char* rest = p + 7;
+    char* endptr;
+    int idx = (int)strtol(rest, &endptr, 10);
+    while (*endptr == ' ') endptr++;
+    if (endptr == rest || *endptr == '\0') return "Usage: waypoint rename <index> <name>";
+    char nameStr[WAYPOINT_NAME_LEN];
+    snprintf(nameStr, sizeof(nameStr), "%s", endptr);
+    if (WaypointManager::setName(idx, nameStr)) {
+      snprintf(buf, 1024, "Renamed waypoint %d: %s", idx, nameStr);
+    } else {
+      return "Invalid waypoint index";
+    }
+    return buf;
+  }
+
+  if (strncmp(p, "notes ", 6) == 0) {
+    const char* rest = p + 6;
+    char* endptr;
+    int idx = (int)strtol(rest, &endptr, 10);
+    while (*endptr == ' ') endptr++;
+    if (endptr == rest || *endptr == '\0') return "Usage: waypoint notes <index> <notes>";
+    if (WaypointManager::setNotes(idx, endptr)) {
+      snprintf(buf, 1024, "Set notes for waypoint %d", idx);
+    } else {
+      return "Invalid waypoint index";
+    }
+    return buf;
+  }
+
+  return "Usage: waypoint [list|add|del|goto|clear|clearall|rename|notes]";
 }
 
 // Link a file to a waypoint by GPS coordinates (creates waypoint if needed, or finds nearest)
@@ -2347,6 +2383,118 @@ const char* cmd_waypointfiles(const String& argsInput) {
   return buf;
 }
 
+static bool isMapFileByMagic(const String& fullPath) {
+  FsLockGuard guard("maps.magic");
+  File f = LittleFS.open(fullPath, "r");
+  if (!f) return false;
+  char magic[4] = {0};
+  size_t rd = f.read((uint8_t*)magic, 4);
+  f.close();
+  return (rd == 4 && memcmp(magic, "HWMP", 4) == 0);
+}
+
+static String mapBaseNameNoExt(const String& filename) {
+  String base = filename;
+  if (base.startsWith("/")) {
+    int lastSlash = base.lastIndexOf('/');
+    if (lastSlash >= 0) base = base.substring(lastSlash + 1);
+  }
+  if (base.endsWith(".hwmap")) base = base.substring(0, base.length() - 6);
+  return base;
+}
+
+static bool organizeMapFromAnyPath(const String& srcPath, String& outErr) {
+  int lastSlash = srcPath.lastIndexOf('/');
+  String fileName = (lastSlash >= 0) ? srcPath.substring(lastSlash + 1) : srcPath;
+  String base = mapBaseNameNoExt(fileName);
+  if (base.length() == 0) { outErr = "empty_base"; return false; }
+  if (!LittleFS.exists(srcPath)) { outErr = "src_missing"; return false; }
+  if (!isMapFileByMagic(srcPath)) { outErr = "not_map_file"; return false; }
+  if (!LittleFS.exists("/maps")) {
+    if (!LittleFS.mkdir("/maps")) { outErr = "maps_mkdir_failed"; return false; }
+  }
+  char dstDir[64], dstMap[96];
+  snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
+  snprintf(dstMap, sizeof(dstMap), "%s/%s.hwmap", dstDir, base.c_str());
+  if (srcPath == dstMap) { outErr = "already_organized"; return false; }
+  if (!LittleFS.exists(dstDir)) {
+    if (!LittleFS.mkdir(dstDir)) { outErr = "mkdir_failed"; return false; }
+  }
+  if (LittleFS.exists(dstMap)) { outErr = "dst_exists"; return false; }
+  if (!LittleFS.rename(srcPath.c_str(), dstMap)) { outErr = "rename_failed"; return false; }
+  char legacyWp1[96], legacyWp2[96];
+  snprintf(legacyWp1, sizeof(legacyWp1), "/maps/waypoints_%s.hwmap.json", base.c_str());
+  snprintf(legacyWp2, sizeof(legacyWp2), "/maps/waypoints_%s.json", base.c_str());
+  const char* legacyWp = LittleFS.exists(legacyWp1) ? legacyWp1 : (LittleFS.exists(legacyWp2) ? legacyWp2 : nullptr);
+  if (legacyWp) {
+    const char* wpName = strrchr(legacyWp, '/');
+    wpName = wpName ? wpName + 1 : legacyWp;
+    char dstWp[128];
+    snprintf(dstWp, sizeof(dstWp), "%s/%s", dstDir, wpName);
+    if (!LittleFS.exists(dstWp)) LittleFS.rename(legacyWp, dstWp);
+  }
+  return true;
+}
+
+static bool tryOrganizeLegacyWaypointsAtRoot(const String& wpFileName, String& outErr) {
+  if (!wpFileName.startsWith("waypoints_") || !wpFileName.endsWith(".json")) { outErr = "not_waypoints"; return false; }
+  if (wpFileName.indexOf('/') >= 0) { outErr = "invalid_name"; return false; }
+  String mapFileName = wpFileName.substring(10, wpFileName.length() - 5);
+  String base = mapFileName.endsWith(".hwmap") ? mapFileName.substring(0, mapFileName.length() - 6) : mapFileName;
+  if (base.length() == 0) { outErr = "empty_base"; return false; }
+  char srcWp[96];
+  snprintf(srcWp, sizeof(srcWp), "/maps/%s", wpFileName.c_str());
+  if (!LittleFS.exists(srcWp)) { outErr = "src_missing"; return false; }
+  char dstDir[64], dstWp[128];
+  snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
+  snprintf(dstWp, sizeof(dstWp), "%s/%s", dstDir, wpFileName.c_str());
+  if (!LittleFS.exists(dstDir)) { outErr = "dst_dir_missing"; return false; }
+  if (LittleFS.exists(dstWp)) { outErr = "dst_exists"; return false; }
+  if (!LittleFS.rename(srcWp, dstWp)) { outErr = "rename_failed"; return false; }
+  return true;
+}
+
+const char* cmd_maporganize(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  char* buf = getDebugBuffer();
+
+  FsLockGuard guard("cmd_maporganize");
+  File dir = LittleFS.open("/maps");
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return "Error: /maps directory not found";
+  }
+
+  int moved = 0, skipped = 0, failed = 0;
+  File entry = dir.openNextFile();
+  while (entry) {
+    String full = String(entry.name());
+    bool isDir = entry.isDirectory();
+    entry.close();
+    if (!isDir) {
+      String fn = full;
+      if (fn.startsWith("/maps/")) fn = fn.substring(6);
+      if (fn.startsWith("/")) fn = fn.substring(1);
+      if (fn.indexOf('/') == -1) {
+        bool isMapByExt = fn.endsWith(".hwmap");
+        bool isMapByMagic = (!isMapByExt && !fn.endsWith(".json")) ? isMapFileByMagic(full) : false;
+        if (isMapByExt || isMapByMagic) {
+          String err;
+          if (organizeMapFromAnyPath(full, err)) moved++; else failed++;
+        } else if (fn.startsWith("waypoints_") && fn.endsWith(".json")) {
+          String err;
+          if (tryOrganizeLegacyWaypointsAtRoot(fn, err)) moved++; else failed++;
+        } else { skipped++; }
+      } else { skipped++; }
+    } else { skipped++; }
+    entry = dir.openNextFile();
+  }
+  dir.close();
+  snprintf(buf, 1024, "Map organize: moved=%d skipped=%d failed=%d", moved, skipped, failed);
+  return buf;
+}
+
 // Command registry
 const CommandEntry mapCommands[] = {
   {"map", "Show current map info", false, cmd_map, nullptr},
@@ -2357,7 +2505,8 @@ const CommandEntry mapCommands[] = {
   {"waypoint", "Manage waypoints: <list|add|del|goto|clear>", false, cmd_waypoint, nullptr},
   {"gpstrack", "Manage GPS tracks: <status|load|clear>", false, cmd_gpstrack, nullptr},
   {"waypointfile", "Link file to waypoint: <file> <wpName>", false, cmd_waypointfile, nullptr},
-  {"waypointfiles", "Waypoint files: <name> [del <idx>]", false, cmd_waypointfiles, nullptr}
+  {"waypointfiles", "Waypoint files: <name> [del <idx>]", false, cmd_waypointfiles, nullptr},
+  {"maporganize", "Organize map files in /maps into subdirectories", false, cmd_maporganize, nullptr}
 };
 const size_t mapCommandsCount = sizeof(mapCommands) / sizeof(mapCommands[0]);
 

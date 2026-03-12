@@ -106,14 +106,11 @@ static bool thermalOLEDModeAvailable(String* outReason) {
 
 static void thermalToggleConfirmed(void* userData) {
   (void)userData;
-  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
-
+  extern void executeOLEDCommand(const String& argsInput);
   if (thermalEnabled && thermalConnected) {
-    Serial.println("[THERMAL] Confirmed: Stopping thermal sensor...");
-    thermalEnabled = false;
-  } else if (!isInQueue(I2C_DEVICE_THERMAL)) {
-    Serial.println("[THERMAL] Confirmed: Starting thermal sensor...");
-    enqueueDeviceStart(I2C_DEVICE_THERMAL);
+    executeOLEDCommand("closethermal");
+  } else {
+    executeOLEDCommand("openthermal");
   }
 }
 
