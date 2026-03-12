@@ -645,6 +645,7 @@ const char* cmd_maplist(const String& argsInput);
 const char* cmd_waypoint(const String& argsInput);
 const char* cmd_whereami(const String& argsInput);
 const char* cmd_search(const String& argsInput);
+const char* cmd_maporganize(const String& argsInput);
 
 // Command registry
 struct CommandEntry;

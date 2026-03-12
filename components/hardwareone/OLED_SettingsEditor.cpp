@@ -143,20 +143,15 @@ int getSettingCurrentValue(const SettingEntry* entry) {
   }
 }
 
-// Set value to setting entry
+// Set value to setting entry — routes through command system for audit logging
 void setSettingValue(const SettingEntry* entry, int value) {
-  if (!entry || !entry->valuePtr) return;
+  if (!entry || !entry->jsonKey) return;
 
-  switch (entry->type) {
-    case SETTING_INT:
-      setSetting(*((int*)entry->valuePtr), value);
-      break;
-    case SETTING_BOOL:
-      setSetting(*((bool*)entry->valuePtr), (bool)(value != 0));
-      break;
-    default:
-      break;
-  }
+  extern void executeOLEDCommand(const String& argsInput);
+  // Use cmdKey if set, otherwise jsonKey is the CLI command name
+  const char* cmdName = entry->cmdKey ? entry->cmdKey : entry->jsonKey;
+  String cmd = String(cmdName) + " " + String(value);
+  executeOLEDCommand(cmd);
 }
 
 // Validate value against min/max
@@ -640,7 +635,7 @@ void settingsEditorSelect() {
         break;
       }
       
-      // Apply and persist — setSetting() handles the flash write automatically
+      // Apply via command system — generates [CMD] audit line and persists
       setSettingValue(gSettingsEditor.currentEntry, gSettingsEditor.editValue);
 
       DEBUG_SYSTEMF("[SettingsEditor] Saved %s = %d",
@@ -783,9 +778,6 @@ REGISTER_OLED_MODE_MODULE(settingsOLEDModes, sizeof(settingsOLEDModes) / sizeof(
 extern httpd_handle_t server;
 #endif
 
-// Forward declaration for command execution
-extern void runUnifiedSystemCommand(const String& argsInput);
-
 // ============================================================================
 // Quick Settings - Dynamic item registry based on compile flags
 // ============================================================================
@@ -828,13 +820,13 @@ static bool getQuickWiFiState() {
   return (WiFi.getMode() != WIFI_MODE_NULL);
 }
 static void toggleQuickWiFi() {
+  extern void executeOLEDCommand(const String& argsInput);
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     setQuickStatus("WiFi OFF");
-    WiFi.disconnect();
-    WiFi.mode(WIFI_OFF);
+    executeOLEDCommand("closewifi");
   } else {
     setQuickStatus("WiFi ON");
-    WiFi.mode(WIFI_STA);
+    executeOLEDCommand("openwifi --best");
   }
 }
 #endif
@@ -848,12 +840,13 @@ static bool getQuickBluetoothState() {
 static void bluetoothToggleConfirmedQuick(void* userData) {
   (void)userData;
   extern bool isBLERunning();
+  extern void executeOLEDCommand(const String& argsInput);
   if (isBLERunning()) {
     setQuickStatus("Bluetooth OFF");
-    runUnifiedSystemCommand("closeble");
+    executeOLEDCommand("closeble");
   } else {
     setQuickStatus("Bluetooth ON");
-    runUnifiedSystemCommand("openble");
+    executeOLEDCommand("openble");
   }
 }
 static void toggleQuickBluetooth() {
@@ -873,16 +866,17 @@ static bool getQuickHTTPState() {
 }
 static void httpToggleConfirmedQuick(void* userData) {
   (void)userData;
+  extern void executeOLEDCommand(const String& argsInput);
   if (server != nullptr) {
     setQuickStatus("HTTP OFF");
-    runUnifiedSystemCommand("closehttp");
+    executeOLEDCommand("closehttp");
   } else {
     if (!WiFi.isConnected()) {
       setQuickStatus("Need WiFi first!");
       return;
     }
     setQuickStatus("HTTP ON");
-    runUnifiedSystemCommand("openhttp");
+    executeOLEDCommand("openhttp");
   }
 }
 static void toggleQuickHTTP() {

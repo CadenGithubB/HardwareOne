@@ -122,20 +122,10 @@ static void rtcToggleConfirmed(void* userData) {
 
 static void rtcNTPSyncConfirmed(void* userData) {
   (void)userData;
-  extern bool syncNTPAndResolve();
-  extern bool rtcSyncFromSystem();
-  
-  Serial.println("[RTC] Syncing time from NTP...");
-  if (syncNTPAndResolve()) {
-    Serial.println("[RTC] NTP sync successful, writing UTC to RTC...");
-    if (rtcSyncFromSystem()) {
-      oledNotificationBannerShow("Time synced!", PairingRibbonIcon::SUCCESS, 2000);
-    } else {
-      oledNotificationBannerShow("RTC write failed", PairingRibbonIcon::ERROR_ICON, 2000);
-    }
-  } else {
-    oledNotificationBannerShow("NTP sync failed", PairingRibbonIcon::ERROR_ICON, 2000);
-  }
+  extern void executeOLEDCommand(const String& argsInput);
+  executeOLEDCommand("ntpsync");
+  // ntpsync handles RTC sync internally when RTC is connected
+  oledNotificationBannerShow("NTP sync requested", PairingRibbonIcon::SUCCESS, 2000);
 }
 
 // Input handler for RTC OLED mode - X toggles sensor, Y syncs time via NTP

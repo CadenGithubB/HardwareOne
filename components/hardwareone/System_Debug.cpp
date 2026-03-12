@@ -508,6 +508,10 @@ void printToWeb(const String& s) {
   gWebMirror.buf[gWebMirror.len] = '\0';
 }
 
+// Global current command context (set during command execution, checked here)
+extern void* gCurrentCommandContext;  // Forward declare - actual type is CommandContext*
+extern uint32_t getCurrentCommandOutputMask();  // Helper to get outputMask from context
+
 // Broadcast output - String overload (now uses queue)
 void broadcastOutput(const String& s) {
   // Suppress output in validation mode
@@ -535,11 +539,20 @@ void broadcastOutput(const String& s) {
   if (currentTask == imuTaskHandle && !imuEnabled) return;
   if (currentTask == tofTaskHandle && !tofEnabled) return;
   
+  // Check if we're inside a command execution with a context that excludes serial
+  uint64_t extraFlags = 0;
+  if (gCurrentCommandContext) {
+    uint32_t mask = getCurrentCommandOutputMask();
+    if (!(mask & 0x01)) {  // CMD_OUT_SERIAL = 1 << 0
+      extraFlags |= DEBUG_MSG_FLAG_NO_SERIAL;
+    }
+  }
+  
   if (gDebugOutputQueue) {
     DebugMessage* msg = nullptr;
     if (gDebugFreeQueue && xQueueReceive(gDebugFreeQueue, &msg, 0) == pdTRUE && msg) {
       msg->timestamp = millis();
-      msg->flags = gInHelpRender ? DEBUG_MSG_FLAG_ALLOW_IN_HELP : 0;
+      msg->flags = (gInHelpRender ? DEBUG_MSG_FLAG_ALLOW_IN_HELP : 0) | extraFlags;
       strncpy(msg->text, s.c_str(), DEBUG_MSG_SIZE - 1);
       msg->text[DEBUG_MSG_SIZE - 1] = '\0';
       if (xQueueSend(gDebugOutputQueue, &msg, 0) != pdTRUE) {
@@ -635,11 +648,20 @@ void broadcastOutput(const char* s) {
   if (currentTask == imuTaskHandle && !imuEnabled) return;
   if (currentTask == tofTaskHandle && !tofEnabled) return;
 
+  // Check if we're inside a command execution with a context that excludes serial
+  uint64_t extraFlags = 0;
+  if (gCurrentCommandContext) {
+    uint32_t mask = getCurrentCommandOutputMask();
+    if (!(mask & 0x01)) {  // CMD_OUT_SERIAL = 1 << 0
+      extraFlags |= DEBUG_MSG_FLAG_NO_SERIAL;
+    }
+  }
+
   if (gDebugOutputQueue) {
     DebugMessage* msg = nullptr;
     if (gDebugFreeQueue && xQueueReceive(gDebugFreeQueue, &msg, 0) == pdTRUE && msg) {
       msg->timestamp = millis();
-      msg->flags = gInHelpRender ? DEBUG_MSG_FLAG_ALLOW_IN_HELP : 0;
+      msg->flags = (gInHelpRender ? DEBUG_MSG_FLAG_ALLOW_IN_HELP : 0) | extraFlags;
       strncpy(msg->text, s, DEBUG_MSG_SIZE - 1);
       msg->text[DEBUG_MSG_SIZE - 1] = '\0';
       if (xQueueSend(gDebugOutputQueue, &msg, 0) != pdTRUE) {

@@ -24,120 +24,11 @@ extern SemaphoreHandle_t gJsonResponseMutex;
 extern bool filesystemReady;
 
 // =============================================================================
-// Maps Organize Helpers
+// Maps Organize - now handled by cmd_maporganize in System_Maps.cpp
 // =============================================================================
 
-bool isMapFileByMagic(const String& fullPath) {
-  FsLockGuard guard("maps.magic");
-  File f = LittleFS.open(fullPath, "r");
-  if (!f) return false;
-  char magic[4] = {0};
-  size_t read = f.read((uint8_t*)magic, 4);
-  f.close();
-  return (read == 4 && memcmp(magic, "HWMP", 4) == 0);
-}
-
-static String mapBaseNameNoExt(const String& filename) {
-  String base = filename;
-  if (base.startsWith("/")) {
-    int lastSlash = base.lastIndexOf('/');
-    if (lastSlash >= 0) base = base.substring(lastSlash + 1);
-  }
-  if (base.endsWith(".hwmap")) base = base.substring(0, base.length() - 6);
-  return base;
-}
-
-bool organizeMapFromAnyPath(const String& srcPath, String& outErr) {
-  FsLockGuard guard("maps.organize.any");
-  int lastSlash = srcPath.lastIndexOf('/');
-  String fileName = (lastSlash >= 0) ? srcPath.substring(lastSlash + 1) : srcPath;
-  
-  String base = mapBaseNameNoExt(fileName);
-  if (base.length() == 0) { outErr = "empty_base"; return false; }
-  if (!LittleFS.exists(srcPath)) { outErr = "src_missing"; return false; }
-  if (!isMapFileByMagic(srcPath)) { outErr = "not_map_file"; return false; }
-  if (!LittleFS.exists("/maps")) {
-    if (!LittleFS.mkdir("/maps")) { outErr = "maps_mkdir_failed"; return false; }
-  }
-
-  char dstDir[64], dstMap[96];
-  snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
-  snprintf(dstMap, sizeof(dstMap), "%s/%s.hwmap", dstDir, base.c_str());
-  if (srcPath == dstMap) { outErr = "already_organized"; return false; }
-  if (!LittleFS.exists(dstDir)) {
-    if (!LittleFS.mkdir(dstDir)) { outErr = "mkdir_failed"; return false; }
-  }
-  if (LittleFS.exists(dstMap)) { outErr = "dst_exists"; return false; }
-  if (!LittleFS.rename(srcPath.c_str(), dstMap)) { outErr = "rename_failed"; return false; }
-
-  // Move legacy waypoints
-  char legacyWp1[96], legacyWp2[96];
-  snprintf(legacyWp1, sizeof(legacyWp1), "/maps/waypoints_%s.hwmap.json", base.c_str());
-  snprintf(legacyWp2, sizeof(legacyWp2), "/maps/waypoints_%s.json", base.c_str());
-  const char* legacyWp = LittleFS.exists(legacyWp1) ? legacyWp1 : (LittleFS.exists(legacyWp2) ? legacyWp2 : nullptr);
-  if (legacyWp) {
-    const char* wpName = strrchr(legacyWp, '/');
-    wpName = wpName ? wpName + 1 : legacyWp;
-    char dstWp[128];
-    snprintf(dstWp, sizeof(dstWp), "%s/%s", dstDir, wpName);
-    if (!LittleFS.exists(dstWp)) LittleFS.rename(legacyWp, dstWp);
-  }
-  return true;
-}
-
-static bool organizeOneMapAtRoot(const String& mapFileName, String& outErr) {
-  FsLockGuard guard("maps.organize.root");
-  if (mapFileName.indexOf('/') >= 0) { outErr = "invalid_name"; return false; }
-  String base = mapBaseNameNoExt(mapFileName);
-  if (base.length() == 0) { outErr = "empty_base"; return false; }
-  char srcMap[96];
-  snprintf(srcMap, sizeof(srcMap), "/maps/%s", mapFileName.c_str());
-  if (!LittleFS.exists(srcMap)) { outErr = "src_missing"; return false; }
-  if (!isMapFileByMagic(srcMap)) { outErr = "not_map_file"; return false; }
-
-  char dstDir[64], dstMap[96];
-  snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
-  snprintf(dstMap, sizeof(dstMap), "%s/%s.hwmap", dstDir, base.c_str());
-  if (!LittleFS.exists(dstDir)) {
-    if (!LittleFS.mkdir(dstDir)) { outErr = "mkdir_failed"; return false; }
-  }
-  if (LittleFS.exists(dstMap)) { outErr = "dst_exists"; return false; }
-  if (!LittleFS.rename(srcMap, dstMap)) { outErr = "rename_failed"; return false; }
-
-  char legacyWp[96];
-  snprintf(legacyWp, sizeof(legacyWp), "/maps/waypoints_%s.json", mapFileName.c_str());
-  if (LittleFS.exists(legacyWp)) {
-    const char* wpName = strrchr(legacyWp, '/');
-    wpName = wpName ? wpName + 1 : legacyWp;
-    char dstWp[128];
-    snprintf(dstWp, sizeof(dstWp), "%s/%s", dstDir, wpName);
-    if (LittleFS.exists(dstWp)) { outErr = "waypoints_dst_exists"; return false; }
-    if (!LittleFS.rename(legacyWp, dstWp)) { outErr = "waypoints_rename_failed"; return false; }
-  }
-  return true;
-}
-
-bool tryOrganizeLegacyWaypointsAtRoot(const String& wpFileName, String& outErr) {
-  FsLockGuard guard("maps.organize.legacy_wp");
-  if (!wpFileName.startsWith("waypoints_") || !wpFileName.endsWith(".json")) { outErr = "not_waypoints"; return false; }
-  if (wpFileName.indexOf('/') >= 0) { outErr = "invalid_name"; return false; }
-  String mapFileName = wpFileName.substring(10, wpFileName.length() - 5);
-  String base = mapFileName.endsWith(".hwmap") ? mapFileName.substring(0, mapFileName.length() - 6) : mapFileName;
-  if (base.length() == 0) { outErr = "empty_base"; return false; }
-  
-  char srcWp[96];
-  snprintf(srcWp, sizeof(srcWp), "/maps/%s", wpFileName.c_str());
-  if (!LittleFS.exists(srcWp)) { outErr = "src_missing"; return false; }
-  char dstDir[64], dstWp[128];
-  snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
-  snprintf(dstWp, sizeof(dstWp), "%s/%s", dstDir, wpFileName.c_str());
-  if (!LittleFS.exists(dstDir)) { outErr = "dst_dir_missing"; return false; }
-  if (LittleFS.exists(dstWp)) { outErr = "dst_exists"; return false; }
-  if (!LittleFS.rename(srcWp, dstWp)) { outErr = "rename_failed"; return false; }
-  return true;
-}
-
 static esp_err_t handleMapsOrganize(httpd_req_t* req) {
+  extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
   AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
@@ -147,75 +38,19 @@ static esp_err_t handleMapsOrganize(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  FsLockGuard fsGuard("maps.organize.handler");
-
-  File dir = LittleFS.open("/maps");
-  if (!dir || !dir.isDirectory()) {
-    if (dir) dir.close();
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"maps_dir_missing\"}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-
-  int moved = 0, skipped = 0, failed = 0;
-  String details = "";
-
-  File entry = dir.openNextFile();
-  while (entry) {
-    String full = String(entry.name());
-    bool isDir = entry.isDirectory();
-    entry.close();
-
-    if (!isDir) {
-      String fn = full;
-      if (fn.startsWith("/maps/")) fn = fn.substring(6);
-      if (fn.startsWith("/")) fn = fn.substring(1);
-      if (fn.indexOf('/') != -1) { entry = dir.openNextFile(); continue; }
-
-      bool handled = false;
-      bool isMapByExt = fn.endsWith(".hwmap");
-      bool isMapByMagic = (!isMapByExt && !fn.endsWith(".json")) ? isMapFileByMagic(full) : false;
-      
-      if (isMapByExt || isMapByMagic) {
-        handled = true;
-        String err;
-        if (organizeOneMapAtRoot(fn, err)) { moved++; }
-        else {
-          failed++;
-          if (details.length() < 1800) {
-            String esc = fn; esc.replace("\\", "\\\\"); esc.replace("\"", "\\\"");
-            String escErr = err; escErr.replace("\\", "\\\\"); escErr.replace("\"", "\\\"");
-            { char detBuf[256]; snprintf(detBuf, sizeof(detBuf), "%s{\"file\":\"%s\",\"error\":\"%s\"}", details.length() ? "," : "", esc.c_str(), escErr.c_str()); details += detBuf; }
-          }
-        }
-      } else if (fn.startsWith("waypoints_") && fn.endsWith(".json")) {
-        handled = true;
-        String err;
-        if (tryOrganizeLegacyWaypointsAtRoot(fn, err)) { moved++; }
-        else {
-          failed++;
-          if (details.length() < 1800) {
-            String esc = fn; esc.replace("\\", "\\\\"); esc.replace("\"", "\\\"");
-            String escErr = err; escErr.replace("\\", "\\\\"); escErr.replace("\"", "\\\"");
-            { char detBuf[256]; snprintf(detBuf, sizeof(detBuf), "%s{\"file\":\"%s\",\"error\":\"%s\"}", details.length() ? "," : "", esc.c_str(), escErr.c_str()); details += detBuf; }
-          }
-        }
-      }
-      if (!handled) skipped++;
-    } else {
-      skipped++;
-    }
-    entry = dir.openNextFile();
-  }
-  dir.close();
+  String cmdOut;
+  bool ok = executeUnifiedWebCommand(req, ctx, "maporganize", cmdOut);
 
   httpd_resp_set_type(req, "application/json");
-  char jsonHdr[80];
-  snprintf(jsonHdr, sizeof(jsonHdr), "{\"success\":true,\"moved\":%d,\"skipped\":%d,\"failed\":%d,\"failures\":[", moved, skipped, failed);
-  String json = jsonHdr;
-  json += details;
-  json += "]}";
-  httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+  if (ok) {
+    String escaped = cmdOut;
+    escaped.replace("\\", "\\\\");
+    escaped.replace("\"", "\\\"");
+    String json = "{\"success\":true,\"result\":\"" + escaped + "\"}";
+    httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+  } else {
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"maporganize_failed\"}", HTTPD_RESP_USE_STRLEN);
+  }
   return ESP_OK;
 }
 
@@ -224,13 +59,9 @@ static esp_err_t handleMapsOrganize(httpd_req_t* req) {
 // =============================================================================
 
 esp_err_t handleMapSelectAPI(httpd_req_t* req) {
-  String user;
-  if (!isAuthed(req, user)) {
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Authentication required\"}");
-    return ESP_OK;
-  }
+  extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
 
   httpd_resp_set_type(req, "application/json");
 
@@ -278,7 +109,9 @@ esp_err_t handleMapSelectAPI(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  if (!MapCore::loadMapFile(filepath)) {
+  String cmdOut;
+  bool ok = executeUnifiedWebCommand(req, ctx, String("mapload ") + String(filepath), cmdOut);
+  if (!ok) {
     httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Failed to load map\"}");
     return ESP_OK;
   }
@@ -746,12 +579,9 @@ void registerMapsHandlers(httpd_handle_t server) {
 // =============================================================================
 
 esp_err_t handleWaypointsAPI(httpd_req_t* req) {
-  String user;
-  if (!isAuthed(req, user)) {
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Authentication required\"}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
+  extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
   
   // Thread-safe JSON response
   JsonBufferGuard jsonGuard("handleWaypointsAPI");
@@ -856,58 +686,56 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
         doc["success"] = false;
         doc["error"] = "Invalid parameters";
       } else {
-        int idx = WaypointManager::addWaypoint(lat, lon, name.c_str(), notes.c_str());
-        if (idx >= 0) {
+        String addCmd = "waypoint add " + latStr + " " + lonStr + " " + name;
+        String addOut;
+        bool ok = executeUnifiedWebCommand(req, ctx, addCmd, addOut);
+        if (ok) {
+          // Parse returned index from "Added waypoint N: ..." output
+          int addedIdx = -1;
+          if (addOut.startsWith("Added waypoint ")) {
+            addedIdx = addOut.substring(15).toInt();
+          }
           doc["success"] = true;
-          doc["index"] = idx;
+          if (addedIdx >= 0) doc["index"] = addedIdx;
+          // If notes provided, set them via a second command
+          if (notes.length() > 0 && addedIdx >= 0) {
+            String notesCmd = "waypoint notes " + String(addedIdx) + " " + notes;
+            String notesOut;
+            executeUnifiedWebCommand(req, ctx, notesCmd, notesOut);
+          }
         } else {
           doc["success"] = false;
-          doc["error"] = "No free slots";
+          doc["error"] = addOut.length() ? addOut : String("No free slots");
         }
       }
     } else if (action == "rename") {
-      int idx = indexStr.toInt();
-      if (name.length() == 0) {
-        doc["success"] = false;
-        doc["error"] = "Missing name";
-      } else if (WaypointManager::setName(idx, name.c_str())) {
-        doc["success"] = true;
-      } else {
-        doc["success"] = false;
-        doc["error"] = "Invalid index";
-      }
+      String cmdOut;
+      bool ok = executeUnifiedWebCommand(req, ctx, "waypoint rename " + indexStr + " " + name, cmdOut);
+      doc["success"] = ok;
+      if (!ok) doc["error"] = cmdOut.length() ? cmdOut : String("Invalid index");
     } else if (action == "set_notes") {
-      int idx = indexStr.toInt();
-      if (WaypointManager::setNotes(idx, notes.c_str())) {
-        doc["success"] = true;
-      } else {
-        doc["success"] = false;
-        doc["error"] = "Invalid index";
-      }
+      String cmdOut;
+      bool ok = executeUnifiedWebCommand(req, ctx, "waypoint notes " + indexStr + " " + notes, cmdOut);
+      doc["success"] = ok;
+      if (!ok) doc["error"] = cmdOut.length() ? cmdOut : String("Invalid index");
     } else if (action == "clear_all") {
-      WaypointManager::clearAll();
-      doc["success"] = true;
+      String cmdOut;
+      bool ok = executeUnifiedWebCommand(req, ctx, "waypoint clearall", cmdOut);
+      doc["success"] = ok;
     } else if (action == "delete") {
-      int idx = indexStr.toInt();
-      if (WaypointManager::deleteWaypoint(idx)) {
-        doc["success"] = true;
-      } else {
-        doc["success"] = false;
-        doc["error"] = "Invalid index";
-      }
+      String cmdOut;
+      bool ok = executeUnifiedWebCommand(req, ctx, "waypoint del " + indexStr, cmdOut);
+      doc["success"] = ok;
+      if (!ok) doc["error"] = cmdOut.length() ? cmdOut : String("Invalid index");
     } else if (action == "goto") {
-      int idx = indexStr.toInt();
-      const Waypoint* wp = WaypointManager::getWaypoint(idx);
-      if (wp) {
-        WaypointManager::selectTarget(idx);
-        doc["success"] = true;
-      } else {
-        doc["success"] = false;
-        doc["error"] = "Invalid index";
-      }
+      String cmdOut;
+      bool ok = executeUnifiedWebCommand(req, ctx, "waypoint goto " + indexStr, cmdOut);
+      doc["success"] = ok;
+      if (!ok) doc["error"] = cmdOut.length() ? cmdOut : String("Invalid index");
     } else if (action == "clear") {
-      WaypointManager::selectTarget(-1);
-      doc["success"] = true;
+      String cmdOut;
+      bool ok = executeUnifiedWebCommand(req, ctx, "waypoint clear", cmdOut);
+      doc["success"] = ok;
     } else {
       doc["success"] = false;
       doc["error"] = "Unknown action";

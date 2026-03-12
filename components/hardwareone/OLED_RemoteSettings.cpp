@@ -9,6 +9,7 @@
 #include "System_Mutex.h"
 #include "System_Utils.h"
 #include "System_MemUtil.h"
+#include "OLED_Utils.h"
 
 // Storage for dynamically created remote settings modules
 static SettingsModule* gRemoteModules = nullptr;
@@ -241,12 +242,11 @@ bool applyRemoteSettingChange(const char* moduleName, const char* settingKey, co
   snprintf(cmdBuf, sizeof(cmdBuf), "set %s %s", settingKey, value.c_str());
   String cmd = cmdBuf;
   
-  // Execute via unified remote command routing
-  extern AuthContext gExecAuthContext;
+  // Execute via unified OLED command helper (SOURCE_LOCAL_DISPLAY context)
   char result[256];
   String remoteCmd = "remote:" + cmd;
-  
-  bool success = executeCommand(gExecAuthContext, remoteCmd.c_str(), result, sizeof(result));
+
+  bool success = executeOLEDCommandWithResult(remoteCmd, result, sizeof(result));
   
   if (success) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] Applied %s.%s = %s", 

@@ -276,6 +276,8 @@ bool oledConfirmIsActive();
 // ============= Shared Command Execution =============
 // Execute a CLI command with OLED display authentication context
 void executeOLEDCommand(const String& argsInput);
+// Execute a CLI command and return success status + output (for callers that need the result)
+bool executeOLEDCommandWithResult(const String& argsInput, char* out, size_t outSize);
 
 #endif // ENABLE_OLED_DISPLAY
 

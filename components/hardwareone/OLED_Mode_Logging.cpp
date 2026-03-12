@@ -92,27 +92,7 @@ static void drawLoggingMenuItem(int y, const char* text, bool selected, bool ena
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 }
 
-// Execute logging command with proper authentication context
-static void executeLoggingCommand(const String& argsInput) {
-  if (!ensureDebugBuffer()) return;
-  
-  // Create authentication context for OLED
-  extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
-  
-  AuthContext ctx;
-  ctx.transport = SOURCE_LOCAL_DISPLAY;
-  ctx.user = gLocalDisplayAuthed ? gLocalDisplayUser : "";
-  ctx.ip = "oled";
-  ctx.path = "/oled/logging";
-  ctx.sid = "";
-  
-  char out[512];
-  bool success = executeCommand(ctx, argsInput.c_str(), out, sizeof(out));
-  
-  if (!success && strlen(out) > 0) {
-    DEBUG_SYSTEMF("[LOGGING_CMD] Command failed: %s", out);
-  }
-}
+// (logging commands use executeOLEDCommand from OLED_Utils.h)
 
 // Logging display function
 static void displayLoggingMode() {
@@ -278,21 +258,21 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
       }
     } else if (loggingCurrentState == LOG_MENU_SENSOR) {
       if (loggingMenuSelection == 0 && !gSensorLoggingEnabled) {
-        executeLoggingCommand("sensorlog start");
+        executeOLEDCommand("sensorlog start");
       } else if (loggingMenuSelection == 1 && gSensorLoggingEnabled) {
-        executeLoggingCommand("sensorlog stop");
+        executeOLEDCommand("sensorlog stop");
       } else if (loggingMenuSelection == 2) {
         // Toggle auto-start
-        executeLoggingCommand("sensorlog autostart");
+        executeOLEDCommand("sensorlog autostart");
       } else if (loggingMenuSelection == 3) {
         loggingCurrentState = LOG_MENU_SENSOR_CONFIG;
         loggingSensorConfigSelection = 0;
       }
     } else if (loggingCurrentState == LOG_MENU_SYSTEM) {
       if (loggingMenuSelection == 0 && !gSystemLogEnabled) {
-        executeLoggingCommand("log start");
+        executeOLEDCommand("log start");
       } else if (loggingMenuSelection == 1 && gSystemLogEnabled) {
-        executeLoggingCommand("log stop");
+        executeOLEDCommand("log stop");
       }
     } else if (loggingCurrentState == LOG_MENU_SENSOR_CONFIG) {
       if (loggingSensorConfigSelection < 6) {
@@ -304,17 +284,31 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         else if (loggingSensorConfigSelection == 4) mask = LOG_APDS;
         else if (loggingSensorConfigSelection == 5) mask = LOG_GPS;
         
-        gSensorLogMask ^= mask;
+        uint8_t newMask = gSensorLogMask ^ mask;
+        String sensorList = "";
+        if (newMask & LOG_THERMAL)  sensorList += "thermal,";
+        if (newMask & LOG_TOF)      sensorList += "tof,";
+        if (newMask & LOG_IMU)      sensorList += "imu,";
+        if (newMask & LOG_GAMEPAD)  sensorList += "gamepad,";
+        if (newMask & LOG_APDS)     sensorList += "apds,";
+        if (newMask & LOG_GPS)      sensorList += "gps,";
+        if (sensorList.endsWith(",")) sensorList.remove(sensorList.length() - 1);
+        if (sensorList.isEmpty()) sensorList = "none";
+        executeOLEDCommand("sensorlog sensors " + sensorList);
       } else if (loggingSensorConfigSelection == 6) {
-        if (gSensorLogIntervalMs == 1000) gSensorLogIntervalMs = 5000;
-        else if (gSensorLogIntervalMs == 5000) gSensorLogIntervalMs = 10000;
-        else if (gSensorLogIntervalMs == 10000) gSensorLogIntervalMs = 30000;
-        else if (gSensorLogIntervalMs == 30000) gSensorLogIntervalMs = 60000;
-        else gSensorLogIntervalMs = 1000;
+        uint32_t newInterval;
+        if (gSensorLogIntervalMs == 1000) newInterval = 5000;
+        else if (gSensorLogIntervalMs == 5000) newInterval = 10000;
+        else if (gSensorLogIntervalMs == 10000) newInterval = 30000;
+        else if (gSensorLogIntervalMs == 30000) newInterval = 60000;
+        else newInterval = 1000;
+        executeOLEDCommand("sensorlog interval " + String(newInterval));
       } else if (loggingSensorConfigSelection == 7) {
-        if (gSensorLogFormat == SENSOR_LOG_TEXT) gSensorLogFormat = SENSOR_LOG_CSV;
-        else if (gSensorLogFormat == SENSOR_LOG_CSV) gSensorLogFormat = SENSOR_LOG_TRACK;
-        else gSensorLogFormat = SENSOR_LOG_TEXT;
+        const char* newFmt;
+        if (gSensorLogFormat == SENSOR_LOG_TEXT) newFmt = "csv";
+        else if (gSensorLogFormat == SENSOR_LOG_CSV) newFmt = "track";
+        else newFmt = "text";
+        executeOLEDCommand(String("sensorlog format ") + newFmt);
       } else if (loggingSensorConfigSelection == 8) {
         loggingCurrentState = LOG_MENU_SENSOR;
         loggingMenuSelection = 2;

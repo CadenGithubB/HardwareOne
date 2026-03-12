@@ -991,9 +991,10 @@ esp_err_t handleMicRecordingDelete(httpd_req_t* req) {
     return ESP_OK;
   }
   
-  extern bool deleteRecording(const char* filename);
-  bool success = deleteRecording(filename);
-  
+  extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
+  String cmdOut;
+  bool success = executeUnifiedWebCommand(req, ctx, "micdelete " + String(filename), cmdOut);
+
   httpd_resp_set_type(req, "application/json");
   if (success) {
     httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);

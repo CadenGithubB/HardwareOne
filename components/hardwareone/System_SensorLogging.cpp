@@ -637,7 +637,6 @@ const char* cmd_sensorlog(const String& argsInput) {
         sensors.c_str(),
         gSettings.sensorLogAutoStart ? "ON" : "OFF");
     }
-    broadcastOutput(buf);
     return buf;
   }
 
@@ -937,6 +936,25 @@ const char* cmd_sensorlog(const String& argsInput) {
              (gSensorLogMask & LOG_APDS) ? "apds " : "",
              (gSensorLogMask & LOG_GPS) ? "gps " : "",
              (gSensorLogMask & LOG_PRESENCE) ? "presence " : "");
+    return getDebugBuffer();
+  }
+
+  // Handle 'interval' subcommand
+  if (subCmd == "interval") {
+    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+    if (sp2 < 0) {
+      snprintf(getDebugBuffer(), 1024, "Current interval: %lums\nUsage: sensorlog interval <ms> (100-3600000)",
+               (unsigned long)gSensorLogIntervalMs);
+      return getDebugBuffer();
+    }
+    String msStr = action.substring(sp2 + 1);
+    msStr.trim();
+    uint32_t ms = (uint32_t)msStr.toInt();
+    if (ms < 100) ms = 100;
+    if (ms > 3600000) ms = 3600000;
+    gSensorLogIntervalMs = ms;
+    setSetting(gSettings.sensorLogIntervalMs, (int)ms);
+    snprintf(getDebugBuffer(), 1024, "Sensor log interval set to %lums", (unsigned long)ms);
     return getDebugBuffer();
   }
 
