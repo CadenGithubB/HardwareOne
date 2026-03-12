@@ -69,14 +69,11 @@ static bool imuOLEDModeAvailable(String* outReason) {
 
 static void imuToggleConfirmed(void* userData) {
   (void)userData;
-  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
-
+  extern void executeOLEDCommand(const String& argsInput);
   if (imuEnabled && imuConnected) {
-    Serial.println("[IMU] Confirmed: Stopping IMU sensor...");
-    imuEnabled = false;
-  } else if (!isInQueue(I2C_DEVICE_IMU)) {
-    Serial.println("[IMU] Confirmed: Starting IMU sensor...");
-    enqueueDeviceStart(I2C_DEVICE_IMU);
+    executeOLEDCommand("closeimu");
+  } else {
+    executeOLEDCommand("openimu");
   }
 }
 

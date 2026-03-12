@@ -65,14 +65,11 @@ static bool fmRadioOLEDModeAvailable(String* outReason) {
 
 static void fmRadioToggleConfirmed(void* userData) {
   (void)userData;
-  // enqueueDeviceStart, isInQueue provided by System_I2C.h (included in parent .cpp)
-
+  extern void executeOLEDCommand(const String& argsInput);
   if (fmRadioEnabled && fmRadioConnected) {
-    Serial.println("[FM_RADIO] Confirmed: Stopping FM radio...");
-    fmRadioEnabled = false;
-  } else if (!isInQueue(I2C_DEVICE_FMRADIO)) {
-    Serial.println("[FM_RADIO] Confirmed: Starting FM radio...");
-    enqueueDeviceStart(I2C_DEVICE_FMRADIO);
+    executeOLEDCommand("closefmradio");
+  } else {
+    executeOLEDCommand("openfmradio");
   }
 }
 

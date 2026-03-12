@@ -477,6 +477,9 @@ bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& re
     
     result.timezoneOffset = timezones[tzSel].offsetMinutes;
     result.timezoneAbbrev = timezones[tzSel].abbrev;
+    // Apply directly — executeOLEDCommand requires an authenticated user, which doesn't
+    // exist yet during first-time setup. wizardFinalize() also applies these, but setting
+    // them here ensures they're visible immediately if the wizard renders tz/log info.
     gSettings.tzOffsetMinutes = result.timezoneOffset;
     gSettings.logLevel = logSel;
     

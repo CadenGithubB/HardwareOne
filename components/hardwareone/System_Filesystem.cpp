@@ -476,6 +476,40 @@ const char* cmd_fileview(const String& argsInput) {
   return "[FS] File displayed";
 }
 
+const char* cmd_filerename(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  if (!filesystemReady) return "Error: LittleFS not ready";
+  String args = argsInput;
+  args.trim();
+  int spaceIdx = args.indexOf(' ');
+  if (spaceIdx < 0) return "Usage: filerename <oldpath> <newname>";
+
+  String oldPath = args.substring(0, spaceIdx);
+  String newName = args.substring(spaceIdx + 1);
+  newName.trim();
+
+  if (!oldPath.startsWith("/")) oldPath = "/" + oldPath;
+  if (newName.length() == 0) return "Usage: filerename <oldpath> <newname>";
+
+  int lastSlash = oldPath.lastIndexOf('/');
+  String parentDir = (lastSlash > 0) ? oldPath.substring(0, lastSlash) : "";
+  String newPath = parentDir + "/" + newName;
+
+  if (!canRename(oldPath)) {
+    snprintf(getDebugBuffer(), 1024, "Error: Rename not allowed: %s (protected)", oldPath.c_str());
+    return getDebugBuffer();
+  }
+  if (!VFS::exists(oldPath)) return "Error: File does not exist";
+  if (!VFS::rename(oldPath, newPath)) {
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to rename: %s -> %s", oldPath.c_str(), newPath.c_str());
+    return getDebugBuffer();
+  }
+  snprintf(getDebugBuffer(), 1024, "Renamed: %s -> %s", oldPath.c_str(), newPath.c_str());
+  return getDebugBuffer();
+}
+
 const char* cmd_filedelete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -510,6 +544,7 @@ const CommandEntry filesystemCommands[] = {
   { "filecreate", "Create file: <path> [content]", true, cmd_filecreate, "Usage: filecreate <path>" },
   { "fileview", "View file: <path> [offset]", true, cmd_fileview, "Usage: fileview <path>" },
   { "filedelete", "Delete file: <path>", true, cmd_filedelete, "Usage: filedelete <path>" },
+  { "filerename", "Rename file: <oldpath> <newname>", true, cmd_filerename, "Usage: filerename <oldpath> <newname>" },
 };
 
 const size_t filesystemCommandsCount = sizeof(filesystemCommands) / sizeof(filesystemCommands[0]);

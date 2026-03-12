@@ -618,12 +618,13 @@ void oledEspNowMainMenuSelect() {
       gOLEDEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
       break;
     case 4:  // Start/Stop
-      if (gEspNow && gEspNow->initialized) {
-        extern const char* cmd_espnow_deinit(const String& argsInput);
-        cmd_espnow_deinit("");
-      } else {
-        extern const char* cmd_espnow_init(const String& argsInput);
-        cmd_espnow_init("");
+      {
+        extern void executeOLEDCommand(const String& argsInput);
+        if (gEspNow && gEspNow->initialized) {
+          executeOLEDCommand("closeespnow");
+        } else {
+          executeOLEDCommand("openespnow");
+        }
       }
       break;
     case 5:  // Pairing
@@ -1856,21 +1857,23 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     gOLEDEspNowState.settingsEditField = gOLEDEspNowState.settingsMenuIndex;
     
-    // Stationary: toggle boolean directly
+    // Stationary: toggle boolean via command
     if (gOLEDEspNowState.settingsEditField == 5) {
-      setSetting(gSettings.espnowStationary, !gSettings.espnowStationary);
+      extern void executeOLEDCommand(const String& argsInput);
+      executeOLEDCommand(gSettings.espnowStationary ? "espnow stationary 0" : "espnow stationary 1");
       gOLEDEspNowState.settingsEditField = -1;
       return true;
     }
     
-    // Role: cycle through options
+    // Role: cycle through options via command
     if (gOLEDEspNowState.settingsEditField == 7) {
+      extern void executeOLEDCommand(const String& argsInput);
       if (gSettings.meshRole == MESH_ROLE_WORKER) {
-        setSetting(gSettings.meshRole, (uint8_t)MESH_ROLE_MASTER);
+        executeOLEDCommand("espnow meshrole master");
       } else if (gSettings.meshRole == MESH_ROLE_MASTER) {
-        setSetting(gSettings.meshRole, (uint8_t)MESH_ROLE_BACKUP_MASTER);
+        executeOLEDCommand("espnow meshrole backup");
       } else {
-        setSetting(gSettings.meshRole, (uint8_t)MESH_ROLE_WORKER);
+        executeOLEDCommand("espnow meshrole worker");
       }
       gOLEDEspNowState.settingsEditField = -1;
       return true;
@@ -1931,37 +1934,38 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
 }
 
 void oledEspNowApplySettingsEdit(const String& value) {
+  extern void executeOLEDCommand(const String& argsInput);
+  String cmd;
   switch (gOLEDEspNowState.settingsEditField) {
     case 0: // Device Name
-      setSetting(gSettings.espnowDeviceName, value);
+      cmd = "espnow setname " + value;
       break;
     case 1: // Room
-      setSetting(gSettings.espnowRoom, value);
+      cmd = "espnow room " + value;
       break;
     case 2: // Zone
-      setSetting(gSettings.espnowZone, value);
+      cmd = "espnow zone " + value;
       break;
     case 3: // Friendly Name
-      setSetting(gSettings.espnowFriendlyName, value);
+      cmd = "espnow friendlyname " + value;
       break;
     case 4: // Tags
-      setSetting(gSettings.espnowTags, value);
+      cmd = "espnow tags " + value;
       break;
     case 6: // Passphrase
       if (value.length() > 0) {
-        setSetting(gSettings.espnowPassphrase, value);
-        // Re-derive encryption key if ESP-NOW is initialized
-        if (gEspNow && gEspNow->initialized) {
-          deriveKeyFromPassphrase(value, gEspNow->derivedKey);
-        }
+        cmd = "espnow setpassphrase \"" + value + "\"";
       }
       break;
     case 8: // Master MAC
-      setSetting(gSettings.meshMasterMAC, value);
+      cmd = "espnow meshmaster " + value;
       break;
     case 9: // Backup MAC
-      setSetting(gSettings.meshBackupMAC, value);
+      cmd = "espnow meshbackup " + value;
       break;
+  }
+  if (cmd.length() > 0) {
+    executeOLEDCommand(cmd);
   }
   gOLEDEspNowState.settingsEditField = -1;
 }

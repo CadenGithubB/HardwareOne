@@ -1060,8 +1060,9 @@ static void executeSubmenuAction(int submenuType, int action) {
           break;
         case 1:  // Toggle GPS
           {
-            if (gpsEnabled) gpsEnabled = false;
-            else if (!isInQueue(I2C_DEVICE_GPS)) enqueueDeviceStart(I2C_DEVICE_GPS);
+            extern void executeOLEDCommand(const String& argsInput);
+            if (gpsEnabled) executeOLEDCommand("closegps");
+            else executeOLEDCommand("opengps");
           }
           break;
         case 2: goBackToMainMenu(); break;  // Back

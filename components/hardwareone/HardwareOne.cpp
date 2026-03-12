@@ -775,6 +775,16 @@ struct CommandContext {
   void* replyHandle;     // placeholder for future sync replies
   httpd_req_t* httpReq;  // used by web origin if needed
 };
+
+// Global current command context (set during command execution)
+// Exposed as void* so System_Debug.cpp can check outputMask without knowing CommandContext type
+void* gCurrentCommandContext = nullptr;
+
+uint32_t getCurrentCommandOutputMask() {
+  if (!gCurrentCommandContext) return 0xFFFFFFFF;
+  return ((CommandContext*)gCurrentCommandContext)->outputMask;
+}
+
 struct Command {
   String line;
   CommandContext ctx;
@@ -783,6 +793,9 @@ struct Command {
 void setCurrentCommandContext(const CommandContext& ctx) {
   gExecUser = ctx.auth.user;
   gExecAuthContext = ctx.auth;
+}
+void clearCurrentCommandContext() {
+  gCurrentCommandContext = nullptr;
 }
 
 // -------- Command Executor Task (definition) --------
@@ -830,10 +843,12 @@ static void commandExecTask(void* pv) {
                   r->line, r->ctx.auth.user.c_str(), (unsigned long)ESP.getFreeHeap());
       
       setCurrentCommandContext(r->ctx);
+      gCurrentCommandContext = &r->ctx;
       bool prevValidate = gCLIValidateOnly;
       gCLIValidateOnly = r->ctx.validateOnly;
       r->ok = executeCommand((AuthContext&)r->ctx.auth, r->line, r->out, sizeof(r->out));
       gCLIValidateOnly = prevValidate;
+      gCurrentCommandContext = nullptr;
       DEBUG_CMD_FLOWF("[cmd_exec] done ok=%d out_len=%zu heap=%lu",
                   r->ok ? 1 : 0, strlen(r->out), (unsigned long)ESP.getFreeHeap());
       

@@ -2587,35 +2587,30 @@ esp_err_t handleOutputTemp(httpd_req_t* req) {
   int vWeb = getVal("web");
   int vDisplay = getVal("display");
 
-  // Apply to runtime flags only
-  if (vSerial == 0) {
-    gOutputFlags &= ~OUTPUT_SERIAL;
-  } else if (vSerial == 1) {
-    gOutputFlags |= OUTPUT_SERIAL;
+  // Route each change through the unified command system for auditability.
+  // Use "outserial/outweb/outdisplay <0|1> temp" — the "temp" flag makes changes
+  // runtime-only (not persisted), matching the original direct gOutputFlags mutation.
+  String cmdOut;
+  if (vSerial == 0 || vSerial == 1) {
+    executeUnifiedWebCommand(req, ctx, "outserial " + String(vSerial) + " temp", cmdOut);
   }
-
-  if (vWeb == 0) {
-    gOutputFlags &= ~OUTPUT_WEB;
-  } else if (vWeb == 1) {
-    gOutputFlags |= OUTPUT_WEB;
+  if (vWeb == 0 || vWeb == 1) {
+    executeUnifiedWebCommand(req, ctx, "outweb " + String(vWeb) + " temp", cmdOut);
   }
-
-  if (vDisplay == 0) {
-    gOutputFlags &= ~OUTPUT_DISPLAY;
-  } else if (vDisplay == 1) {
-    gOutputFlags |= OUTPUT_DISPLAY;
+  if (vDisplay == 0 || vDisplay == 1) {
+    executeUnifiedWebCommand(req, ctx, "outdisplay " + String(vDisplay) + " temp", cmdOut);
   }
 
   // Respond with updated runtime snapshot
   int rtSerial = (gOutputFlags & OUTPUT_SERIAL) ? 1 : 0;
   int rtWeb = (gOutputFlags & OUTPUT_WEB) ? 1 : 0;
   int rtDisplay = (gOutputFlags & OUTPUT_DISPLAY) ? 1 : 0;
-  
+
   char json[128];
   snprintf(json, sizeof(json),
            "{\"success\":true,\"runtime\":{\"serial\":%d,\"web\":%d,\"display\":%d}}",
            rtSerial, rtWeb, rtDisplay);
-  
+
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
@@ -3503,16 +3498,9 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
   if (type == "folder") {
     // Use CLI command for consistent validation and error handling
     String cmd = "mkdir " + path;
-    char* result = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "http.mkdir.result");
-    if (!result) {
-      httpd_resp_set_type(req, "application/json");
-      httpd_resp_send(req, "{\"success\":false,\"error\":\"Memory allocation failed\"}", HTTPD_RESP_USE_STRLEN);
-      return ESP_OK;
-    }
-    bool success = executeCommand(ctx, cmd.c_str(), result, 512);
+    String resultStr;
+    bool success = executeUnifiedWebCommand(req, ctx, cmd, resultStr);
     httpd_resp_set_type(req, "application/json");
-    String resultStr = result;
-    free(result);
     if (success && resultStr.startsWith("Created folder:")) {
       httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
     } else {
@@ -4110,7 +4098,7 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Check if it's a directory
+  // Determine if path is a directory to pick the right CLI command
   bool isDir = false;
   {
     FsLockGuard guard("delete.probe");
@@ -4124,15 +4112,10 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
     file.close();
   }
 
-  bool success = false;
-  {
-    FsLockGuard guard("web_files.delete");
-    if (isDir) {
-      success = VFS::rmdir(path);
-    } else {
-      success = VFS::remove(path);
-    }
-  }
+  // Route through unified command system for audit trail
+  String cmdOut;
+  String deleteCmd = (isDir ? "rmdir " : "filedelete ") + path;
+  bool success = executeUnifiedWebCommand(req, ctx, deleteCmd, cmdOut);
 
   if (success) {
     httpd_resp_set_type(req, "application/json");
@@ -4219,13 +4202,10 @@ esp_err_t handleFileRename(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  bool success = false;
-  {
-    FsLockGuard guard("web_files.rename");
-    if (VFS::exists(oldPath)) {
-      success = VFS::rename(oldPath, newPath);
-    }
-  }
+  // Route through unified command system for audit trail
+  String renameOut;
+  String renameCmd = "filerename " + oldPath + " " + newName;
+  bool success = executeUnifiedWebCommand(req, ctx, renameCmd, renameOut);
 
   httpd_resp_set_type(req, "application/json");
   if (success) {
