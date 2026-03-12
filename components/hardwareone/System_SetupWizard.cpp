@@ -915,6 +915,8 @@ SetupWizardResult runSetupWizard() {
 #endif
   }
 
+  wizardFinalize(result);
+
   return result;
 }
 

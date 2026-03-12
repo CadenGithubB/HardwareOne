@@ -844,7 +844,6 @@ window.sendSequential = function(cmds, onDone, onFail) {
       <div id='oled-pane' style='display:none'>
         <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:1rem'>
           <label><input type='checkbox' id='oledEnabled' style='margin-right:0.5rem'>Enable OLED Display</label>
-          <label><input type='checkbox' id='oledAutoInit' style='margin-right:0.5rem'>Auto-Initialize on Boot</label>
         </div>
         <div style='padding:1rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;margin-bottom:1rem'>
           <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem'>Display Modes & Timing</div>
@@ -1120,6 +1119,34 @@ window.sendSequential = function(cmds, onDone, onFail) {
     </div>
 <script>
 (function(){
+  function checkCertFile(path, statusId) {
+    fetch('/api/files/list?path=' + encodeURIComponent('/system/certs'), {credentials:'same-origin'})
+      .then(function(r){return r.json()})
+      .then(function(j){
+        var el = document.getElementById(statusId);
+        if (!el) return;
+        var found = false;
+        var fname = path.split('/').pop();
+        if (j && j.files) {
+          for (var i = 0; i < j.files.length; i++) {
+            if (j.files[i].name === fname || j.files[i].path === path) {
+              found = true;
+              break;
+            }
+          }
+        }
+        el.textContent = found ? 'Present' : 'Missing';
+        el.style.color = '#667eea';
+      })
+      .catch(function(){
+        var el = document.getElementById(statusId);
+        if (el) {
+          el.textContent = 'Unknown';
+          el.style.color = '#a0aec0';
+        }
+      });
+  }
+
   fetch('/api/files/list?path=' + encodeURIComponent('/system/certs'), {credentials:'same-origin'})
     .then(function(r){return r.json()})
     .then(function(j){
@@ -1228,6 +1255,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
           if(status){ status.textContent = 'Generated!'; status.style.color = '#68d391'; }
           checkCertFile('/system/certs/https_server.crt', 'https-cert-status');
           checkCertFile('/system/certs/https_server.key', 'https-key-status');
+          document.getElementById('https-reboot-row').style.display = 'block';
         }
       })
       .catch(function(e){
@@ -1402,8 +1430,6 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         }
         var oledEn = $('oledEnabled');
         if (oledEn) oledEn.checked = (oled.oledEnabled === 1 || oled.oledEnabled === true);
-        var oledAuto = $('oledAutoInit');
-        if (oledAuto) oledAuto.checked = (oled.oledAutoInit === 1 || oled.oledAutoInit === true);
         var gamepadAuto = $('gamepadAutoStart');
         if (gamepadAuto && s.gamepad && s.gamepad.gamepadAutoStart !== undefined) {
           gamepadAuto.checked = (s.gamepad.gamepadAutoStart === 1 || s.gamepad.gamepadAutoStart === true);
@@ -2231,8 +2257,6 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
         var cmds = [];
         var oledEnabled = getBool('oledEnabled');
         if (oledEnabled !== null) cmds.push('oledenabled ' + oledEnabled);
-        var oledAutoInit = getBool('oledAutoInit');
-        if (oledAutoInit !== null) cmds.push('oledautoinit ' + oledAutoInit);
         var oledBootMode = getStr('oledBootMode');
         if (oledBootMode) cmds.push('oledbootmode ' + oledBootMode);
         var oledDefaultMode = getStr('oledDefaultMode');
