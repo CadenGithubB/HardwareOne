@@ -2419,6 +2419,24 @@ void executeOLEDCommand(const String& argsInput) {
   }
 }
 
+bool executeOLEDCommandWithResult(const String& argsInput, char* out, size_t outSize) {
+  extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
+
+  AuthContext ctx;
+  ctx.transport = SOURCE_LOCAL_DISPLAY;
+  ctx.user = gLocalDisplayAuthed ? gLocalDisplayUser : "";
+  ctx.ip = "oled";
+  ctx.path = "/oled/command";
+  ctx.sid = "";
+
+  bool success = executeCommand(ctx, argsInput.c_str(), out, outSize);
+
+  if (!success && strlen(out) > 0) {
+    Serial.printf("[OLED_CMD] Command failed: %s\n", out);
+  }
+  return success;
+}
+
 
 // =============================================================================
 // MERGED FROM OLED_Display.cpp
@@ -3280,18 +3298,6 @@ const char* cmd_oled_enabled(const String& argsInput) {
   return getDebugBuffer();
 }
 
-const char* cmd_oled_autoinit(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: oledautoinit <0|1>";
-  const char* p = _arg.c_str();
-  bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
-  setSetting(gSettings.oledAutoInit, enabled);
-  snprintf(getDebugBuffer(), 1024, "OLED auto-init %s", enabled ? "enabled" : "disabled");
-  return getDebugBuffer();
-}
-
 const char* cmd_oled_requireauth(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -3875,8 +3881,11 @@ bool earlyOLEDInit() {
   }
 
   bool inFirstTimeSetup = (gFirstTimeSetupState != SETUP_NOT_NEEDED);
+  Serial.printf("[OLED_INIT] fts=%d oledEnabled=%d\n",
+                inFirstTimeSetup ? 1 : 0,
+                gSettings.oledEnabled ? 1 : 0);
   if (!inFirstTimeSetup) {
-    if (!gSettings.oledEnabled || !gSettings.oledAutoInit) {
+    if (!gSettings.oledEnabled) {
       oledConnected = false;
       oledEnabled = false;
       return false;
@@ -4224,20 +4233,13 @@ void completeRemoteCommandInput() {
   
   const char* fullCommand = oledKeyboardGetText();
   if (fullCommand && strlen(fullCommand) > 0) {
-    // Execute remote command using unified routing
+    // Execute remote command via unified OLED command helper
     String remoteCmd = "remote:";
     remoteCmd += fullCommand;
-    
-    AuthContext ctx;
-    ctx.transport = SOURCE_LOCAL_DISPLAY;
-    ctx.user = "oled";
-    ctx.ip = "local";
-    ctx.path = "/oled/remote_input";
-    ctx.sid = "";
-    
+
     char out[256];
-    executeCommand(ctx, remoteCmd.c_str(), out, sizeof(out));
-    
+    executeOLEDCommandWithResult(remoteCmd, out, sizeof(out));
+
     BROADCAST_PRINTF("[OLED] Remote: %s", fullCommand);
     if (strlen(out) > 0) {
       broadcastOutput(out);
@@ -5055,20 +5057,13 @@ void oledMenuSelect() {
           // Show keyboard for parameter input
           startRemoteCommandInput(item.command);
         } else {
-          // Execute immediately for simple commands
+          // Execute immediately via unified OLED command helper
           String remoteCmd = "remote:";
           remoteCmd += item.command;
-          
-          AuthContext ctx;
-          ctx.transport = SOURCE_LOCAL_DISPLAY;
-          ctx.user = "oled";
-          ctx.ip = "local";
-          ctx.path = "/oled/submenu";
-          ctx.sid = "";
-          
+
           char out[256];
-          executeCommand(ctx, remoteCmd.c_str(), out, sizeof(out));
-          
+          executeOLEDCommandWithResult(remoteCmd, out, sizeof(out));
+
           BROADCAST_PRINTF("[OLED] Remote: %s", item.command);
           if (strlen(out) > 0) {
             broadcastOutput(out);
@@ -5380,27 +5375,27 @@ void handleOLEDActionButton() {
       // Try to start whatever sensor was unavailable based on the title
       if (unavailableOLEDTitle == "Thermal") {
 #if ENABLE_THERMAL_SENSOR
-        if (!isInQueue(I2C_DEVICE_THERMAL)) enqueueDeviceStart(I2C_DEVICE_THERMAL);
+        executeOLEDCommand("openthermal");
         setOLEDMode(OLED_THERMAL_VISUAL);  // Switch to thermal view
 #endif
       } else if (unavailableOLEDTitle == "ToF") {
 #if ENABLE_TOF_SENSOR
-        if (!isInQueue(I2C_DEVICE_TOF)) enqueueDeviceStart(I2C_DEVICE_TOF);
+        executeOLEDCommand("opentof");
         setOLEDMode(OLED_TOF_DATA);  // Switch to ToF view
 #endif
       } else if (unavailableOLEDTitle == "IMU") {
 #if ENABLE_IMU_SENSOR
-        if (!isInQueue(I2C_DEVICE_IMU)) enqueueDeviceStart(I2C_DEVICE_IMU);
+        executeOLEDCommand("openimu");
         setOLEDMode(OLED_IMU_ACTIONS);  // Switch to IMU view
 #endif
       } else if (unavailableOLEDTitle == "APDS") {
 #if ENABLE_APDS_SENSOR
-        if (!isInQueue(I2C_DEVICE_APDS)) enqueueDeviceStart(I2C_DEVICE_APDS);
+        executeOLEDCommand("openapds");
         setOLEDMode(OLED_APDS_DATA);  // Switch to APDS view
 #endif
       } else if (unavailableOLEDTitle == "GPS") {
 #if ENABLE_GPS_SENSOR
-        if (!isInQueue(I2C_DEVICE_GPS)) enqueueDeviceStart(I2C_DEVICE_GPS);
+        executeOLEDCommand("opengps");
         setOLEDMode(OLED_GPS_DATA);  // Switch to GPS view
 #endif
       } else if (unavailableOLEDTitle == "RTC") {
@@ -5418,14 +5413,13 @@ void handleOLEDActionButton() {
         // Start Presence with confirmation
         static auto presenceOpenConfirmedUnavail = [](void* userData) {
           (void)userData;
-          extern bool startPresenceSensorInternal();
-          startPresenceSensorInternal();
+          executeOLEDCommand("openpresence");
           setOLEDMode(OLED_PRESENCE_DATA);
         };
         oledConfirmRequest("Open Presence?", nullptr, presenceOpenConfirmedUnavail, nullptr);
 #endif
       } else if (unavailableOLEDTitle == "FM Radio") {
-        if (!isInQueue(I2C_DEVICE_FMRADIO)) enqueueDeviceStart(I2C_DEVICE_FMRADIO);
+        executeOLEDCommand("openfmradio");
         setOLEDMode(OLED_FM_RADIO);  // Switch to FM Radio view
       } else if (unavailableOLEDTitle == "ESP-NOW") {
 #if ENABLE_ESPNOW
@@ -5433,8 +5427,8 @@ void handleOLEDActionButton() {
         if (gSettings.espnowDeviceName.length() == 0) {
           oledEspNowShowNameKeyboard();
         } else {
-          const char* initResult = cmd_espnow_init("");
-          if (initResult && strstr(initResult, "initialized")) {
+          executeOLEDCommand("openespnow");
+          if (gEspNow && gEspNow->initialized) {
             oledEspNowInit();
           } else {
             oledEspNowShowInitPrompt();
@@ -5814,16 +5808,18 @@ bool processGamepadMenuInput() {
           const char* deviceName = oledKeyboardGetText();
           if (deviceName && strlen(deviceName) > 0) {
             BROADCAST_PRINTF("[OLED] Setting ESP-NOW name: %s", deviceName);
-            // First set the name
-            const char* setnameResult = cmd_espnow_setname(String(deviceName));
-            if (setnameResult && strstr(setnameResult, "Device name set")) {
-              // Then initialize ESP-NOW
+            // First set the name via command system
+            String setnameCmd = "espnow setname ";
+            setnameCmd += deviceName;
+            executeOLEDCommand(setnameCmd);
+            if (gSettings.espnowDeviceName.length() > 0) {
+              // Then initialize ESP-NOW via command system
               broadcastOutput("[OLED] Initializing ESP-NOW...");
-              const char* initResult = cmd_espnow_init("");
-              if (initResult && strstr(initResult, "initialized")) {
+              executeOLEDCommand("openespnow");
+              if (gEspNow && gEspNow->initialized) {
                 broadcastOutput("[OLED] ESP-NOW initialized successfully");
                 // Enable ESP-NOW in settings so it persists
-                setSetting(gSettings.espnowenabled, true);
+                executeOLEDCommand("espnowenabled 1");
                 // Initialize the OLED ESP-NOW interface now that ESP-NOW is ready
                 oledEspNowInit();
                 oledKeyboardReset();
@@ -5855,8 +5851,8 @@ bool processGamepadMenuInput() {
             oledEspNowShowNameKeyboard();
           } else {
             Serial.println("[ESPNOW_INIT] Y button pressed - initializing ESP-NOW (name already set)");
-            const char* initResult = cmd_espnow_init("");
-            if (initResult && strstr(initResult, "initialized")) {
+            executeOLEDCommand("openespnow");
+            if (gEspNow && gEspNow->initialized) {
               oledEspNowInit();
             }
           }
@@ -6053,7 +6049,6 @@ const CommandEntry oledCommands[] = {
   { "oledstatus", "Show OLED status.", false, cmd_oledstatus },
   { "oledrequireauth", "OLED auth requirement: <0|1>", false, cmd_oled_requireauth },
   { "oledenabled", "Enable/disable OLED: <0|1>", false, cmd_oled_enabled },
-  { "oledautoinit", "OLED auto-init on boot: <0|1>", false, cmd_oled_autoinit },
   { "oledbootmode", "OLED boot mode: <logo|status|thermal|off>", false, cmd_oled_bootmode },
   { "oleddefaultmode", "OLED default mode: <status|thermal|off>", false, cmd_oled_defaultmode },
   { "oledbootduration", "Boot animation duration (ms): <500-10000>", false, cmd_oled_bootduration },

@@ -160,7 +160,6 @@ struct Settings {
       ledStartupColor2(""),
       ledStartupDuration(1000),
       oledEnabled(false),
-      oledAutoInit(false),
       localDisplayRequireAuth(true),
       oledBootMode(""),
       oledDefaultMode(""),
@@ -491,7 +490,6 @@ struct Settings {
   int ledStartupDuration;   // Duration in ms
   // OLED Display settings
   bool oledEnabled;             // Enable/disable OLED at boot
-  bool oledAutoInit;            // Auto-initialize if detected
   bool localDisplayRequireAuth; // Require login before accessing display modes
   String oledBootMode;          // Initial mode during boot: logo, status, sensors, thermal, off
   String oledDefaultMode;       // Mode to switch to after boot completes
@@ -701,7 +699,6 @@ const char* cmd_espnowenabled(const String& argsInput);
 
 // OLED Settings
 const char* cmd_oled_enabled(const String& argsInput);
-const char* cmd_oled_autoinit(const String& argsInput);
 const char* cmd_oled_bootmode(const String& argsInput);
 const char* cmd_oled_defaultmode(const String& argsInput);
 const char* cmd_oled_bootduration(const String& argsInput);
