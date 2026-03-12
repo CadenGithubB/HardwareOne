@@ -16,9 +16,9 @@ Hardware One can be used in several different ways depending on the hardware you
 - Good for relay nodes and remote endpoints.
 
 ### 2) Sensor Appliance
-- Build a dedicated single-purpose device around one or two sensors, such as thermal, GPS, RTC, ToF, or presence.
-- Useful for fixed installs where you want one job done well without carrying the whole handheld stack.
-- Can still expose data over web, CLI, automations, MQTT, and ESP-NOW.
+- Build a dedicated single-purpose device around one or more sensors, such as IMU, gamepad, thermal sensor, GPS, RTC, ToF, or presence.
+- Useful for fixed installs where you want one job done well without having all features compiled in.
+- Can still expose data over web, CLI, automations, MQTT, and ESP-NOW like the barebones / headless node.
 
 ### 3) Hardware One (Standard Handheld)
 - The intended full build: board + SSD1306 OLED + Seesaw gamepad + a selection of I2C sensors.
@@ -26,8 +26,8 @@ Hardware One can be used in several different ways depending on the hardware you
 - Best fit when you want both the local OLED/gamepad UI and the web UI.
 
 ### 4) Bonded Microcontrollers
-- Control features unique to one device you flash while another device is flashed with other features - effectively removing the limit of software features that can be included due to iram constrictions
-- A common example would be where one unit is the Display/Input Device and the other exposes hardware, sensors, or other features.
+- Control features unique to one device you flash while another device is flashed with other features - effectively removing the limit of software features that is faced due to iram constrictions on the ESP32.
+- This was intended to be used in a way where one unit is the device which deals with the Display/Input Devices and bluetooth connectivity, while the other device exposes other hardware / sensors, or other software features.
 - The devices create an auth token during the bond sync / handshake process. This is used to execute commands with implicit trust between the devices to reduce the need to enter in username + password for every remote command.
 - Command registries are shared between bonded peers, so when a command is queued for execution there is a check to see if the command trying to be executed is able to be found on the local command registry, or if its found on the bonded device's command registry. From there it will either execute the command locally, or reroute the command to the bonded device which will enqueue the command (so it is the same code path as a standard command), and then send the output back via ESP-NOW streaming.
 
