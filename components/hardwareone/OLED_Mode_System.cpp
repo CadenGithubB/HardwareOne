@@ -240,7 +240,7 @@ void displayUnavailable() {
 
     const unsigned long UNAVAILABLE_TIMEOUT_MS = 5000;
     if (millis() - unavailableOLEDStartTime >= UNAVAILABLE_TIMEOUT_MS) {
-      setOLEDMode(popOLEDMode());
+      requestOLEDMode(popOLEDMode(), "unavail.timeout.autoreturn", false);
     }
   }
 }

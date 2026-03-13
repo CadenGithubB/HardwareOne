@@ -960,7 +960,7 @@ bool quickSettingsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (quickItemCount == 0) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
       extern OLEDMode popOLEDModeStack();
-      setOLEDMode(popOLEDModeStack());
+      requestOLEDMode(popOLEDModeStack(), "quicksettings.back.empty", false);
       return true;
     }
     return false;
@@ -985,7 +985,7 @@ bool quickSettingsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     extern OLEDMode popOLEDModeStack();
-    setOLEDMode(popOLEDModeStack());
+    requestOLEDMode(popOLEDModeStack(), "quicksettings.back", false);
     handled = true;
   }
   
