@@ -338,7 +338,7 @@ static const char* cmd_setpattern(const String& argsInput) {
 
   sStep = PATTERN_STEP_AUTH_CHECK;
   secureClearString(sFirstPattern);
-  setOLEDMode(OLED_SET_PATTERN);
+  requestOLEDMode(OLED_SET_PATTERN, "cmd.setpattern", true);
   return "Opening gamepad password setup on OLED...";
 }
 

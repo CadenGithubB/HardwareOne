@@ -1546,7 +1546,7 @@ void executeBluetoothAction() {
     case 1: // Settings
       if (openSettingsEditorForModule("bluetooth")) {
         extern OLEDMode currentOLEDMode;
-        setOLEDMode(OLED_SETTINGS);
+        requestOLEDMode(OLED_SETTINGS, "bluetooth.settings.g2", true);
       }
       break;
       
@@ -1590,7 +1590,7 @@ void executeBluetoothAction() {
     case 1: // Settings
       if (openSettingsEditorForModule("bluetooth")) {
         extern OLEDMode currentOLEDMode;
-        setOLEDMode(OLED_SETTINGS);
+        requestOLEDMode(OLED_SETTINGS, "bluetooth.settings", true);
       }
       break;
       
