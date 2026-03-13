@@ -1044,9 +1044,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
           extern OLEDMode currentOLEDMode;
           extern void resetOLEDFileBrowser();
-          extern void pushOLEDMode(OLEDMode mode);
-          pushOLEDMode(currentOLEDMode);  // Push so B returns here
-          setOLEDMode(OLED_FILE_BROWSER);
+          requestOLEDMode(OLED_FILE_BROWSER, "espnow.filebrowse");  // pushes current so B returns here
           resetOLEDFileBrowser();
           return true;
         }

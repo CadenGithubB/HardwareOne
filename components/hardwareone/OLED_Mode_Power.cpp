@@ -127,11 +127,9 @@ void displayPowerSleep() {
 static void executePowerAction() {
   int sel = sPowerMainScroll.selectedIndex;
   if (sel == 0) {
-    pushOLEDMode(currentOLEDMode);
-    setOLEDMode(OLED_POWER_CPU);
+    requestOLEDMode(OLED_POWER_CPU, "power.submenu.cpu");
   } else if (sel == 1) {
-    pushOLEDMode(currentOLEDMode);
-    setOLEDMode(OLED_POWER_SLEEP);
+    requestOLEDMode(OLED_POWER_SLEEP, "power.submenu.sleep");
   }
 }
 

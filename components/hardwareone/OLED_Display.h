@@ -293,7 +293,19 @@ extern bool oledEnabled;
 
 // OLED State Variables (defined in oled_display.cpp)
 extern OLEDMode currentOLEDMode;
-void setOLEDMode(OLEDMode newMode);
+void setOLEDMode(OLEDMode newMode);  // internal – prefer requestOLEDMode for external transitions
+
+// Single authoritative mode transition entry point.
+// Handles auth gating, back-nav stack push, and standardised debug logging.
+// Use this for all user/external mode changes; keep setOLEDMode for pop/internal transitions.
+// pushStack=false skips the back-nav push (for boot, system, or replace-in-place transitions).
+void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack = true);
+
+// Slug <-> enum helpers (canonical CLI slugs; used by CLI, boot defaults, and Web selects).
+// modeFromSlug returns (OLEDMode)-1 for unknown slugs.
+OLEDMode     modeFromSlug(const String& slug);
+const char*  slugFromMode(OLEDMode mode);
+
 extern String customOLEDText;
 extern unsigned long oledLastUpdate;
 extern unsigned long animationFrame;

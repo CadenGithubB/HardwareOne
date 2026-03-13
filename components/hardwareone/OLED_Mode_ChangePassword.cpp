@@ -265,9 +265,9 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         secureClearString(confirmPassBuffer);
         currentField = FIELD_CURRENT_PASSWORD;
         
-        // Return to menu after delay
+        // Return to menu after delay (no stack push — don't keep change-password in history)
         delay(2000);
-        setOLEDMode(OLED_MENU);
+        requestOLEDMode(OLED_MENU, "changepw.done", false);
         resetOLEDMenu();
       } else {
         // Error

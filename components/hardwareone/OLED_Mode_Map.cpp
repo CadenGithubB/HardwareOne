@@ -982,9 +982,7 @@ static void executeSubmenuAction(int submenuType, int action) {
           {
             extern class FileManager* gOLEDFileManager;
             extern bool oledFileBrowserNeedsInit;
-            extern void pushOLEDMode(OLEDMode mode);
-            pushOLEDMode(currentOLEDMode);  // Push so B returns here
-            setOLEDMode(OLED_FILE_BROWSER);
+            requestOLEDMode(OLED_FILE_BROWSER, "map.browse.maps");  // pushes currentOLEDMode so B returns here
             if (gOLEDFileManager) gOLEDFileManager->navigate("/maps");
             else oledFileBrowserNeedsInit = true;
             gMapMenuOpen = false;
