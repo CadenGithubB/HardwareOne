@@ -194,8 +194,8 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
           secureClearString(passwordBuffer);
           currentField = FIELD_USERNAME;
           
-          // Go to menu after successful login
-          setOLEDMode(OLED_MENU);
+          // Go to menu after successful login (no stack push — login screen should not be in history)
+          requestOLEDMode(OLED_MENU, "auth.login.success", false);
           resetOLEDMenu();
           tryAutoStartGamepadForMenu();
           

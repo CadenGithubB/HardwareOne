@@ -485,8 +485,7 @@ static bool sensorMenuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
         pushOLEDMode(OLED_SENSOR_MENU);
         enterUnavailablePage(oledSensorMenuItems[actualIdx].name, reason);
       } else {
-        pushOLEDMode(OLED_SENSOR_MENU);
-        setOLEDMode(target);
+        requestOLEDMode(target, "sensormenu.select");  // auto-pushes OLED_SENSOR_MENU
       }
     }
     return true;
