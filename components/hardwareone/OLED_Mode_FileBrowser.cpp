@@ -120,7 +120,7 @@ void prepareFileBrowserData() {
               if (MapCore::loadMapFile(fullPath.c_str())) {
                 extern bool gMapCenterSet;
                 extern bool gMapManuallyPanned;
-                setOLEDMode(OLED_GPS_MAP);
+                requestOLEDMode(OLED_GPS_MAP, "filebrowser.loadmap", false);
                 gMapCenterSet = false;  // Reset to new map's center
                 gMapManuallyPanned = false;  // Allow GPS to track on new map
               }

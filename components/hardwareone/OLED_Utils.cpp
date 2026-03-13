@@ -2559,6 +2559,41 @@ void setOLEDMode(OLEDMode newMode) {
   currentOLEDMode = newMode;
 }
 
+// Single authoritative mode transition entry point.
+// Auth gating, back-nav stack push, and standardised "[OLED_MODE]" logging.
+// pushStack=false for boot/system/replace-in-place transitions that must not pollute history.
+void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack) {
+  extern bool gLocalDisplayAuthed;
+  extern bool oledBootModeActive;
+
+  // Auth gate: redirect to LOGIN if display auth is required and not yet satisfied.
+  // Boot sequence bypasses this (oledBootModeActive guards the check).
+  if (gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive) {
+    if (newMode != OLED_LOGIN) {
+      Serial.printf("[OLED_MODE] AUTH_GATE %s -> LOGIN (wanted:%s) | %s\n",
+                    getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
+                    reason ? reason : "");
+      currentOLEDMode = OLED_LOGIN;
+      return;
+    }
+  }
+
+  // Standardised transition log — always emitted so serial trace shows all mode changes.
+  Serial.printf("[OLED_MODE] %s -> %s | %s\n",
+                getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
+                reason ? reason : "");
+  DEBUG_SENSORSF("[OLED_MODE] %s -> %s | %s",
+                 getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
+                 reason ? reason : "");
+
+  // Push current mode to back-nav stack before switching (if requested and mode actually changes).
+  if (pushStack && newMode != currentOLEDMode) {
+    pushOLEDMode(currentOLEDMode);
+  }
+
+  currentOLEDMode = newMode;
+}
+
 // Mode navigation stack for back button (minimal fixed-size stack)
 #define OLED_MODE_STACK_SIZE 8
 static OLEDMode modeStack[OLED_MODE_STACK_SIZE];
@@ -3272,14 +3307,9 @@ const char* cmd_oled_enabled(const String& argsInput) {
     String defaultMode = gSettings.oledDefaultMode;
     defaultMode.toLowerCase();
     OLEDMode prevMode = currentOLEDMode;
-    if (defaultMode == "status") setOLEDMode(OLED_SYSTEM_STATUS);
-    else if (defaultMode == "sensordata") setOLEDMode(OLED_SENSOR_DATA);
-    else if (defaultMode == "sensorlist") setOLEDMode(OLED_SENSOR_LIST);
-    else if (defaultMode == "thermal") setOLEDMode(OLED_THERMAL_VISUAL);
-    else if (defaultMode == "network") setOLEDMode(OLED_NETWORK_INFO);
-    else if (defaultMode == "mesh") setOLEDMode(OLED_MESH_STATUS);
-    else if (defaultMode == "logo") setOLEDMode(OLED_LOGO);
-    else setOLEDMode(OLED_SYSTEM_STATUS);
+    OLEDMode defMode = modeFromSlug(defaultMode);
+    if ((int)defMode == -1) defMode = OLED_SYSTEM_STATUS;
+    requestOLEDMode(defMode, "cmd.oledenabled.forceDefault", false);
 
     { char dbgBuf[48]; snprintf(dbgBuf, sizeof(dbgBuf), "defaultMode=%s", defaultMode.c_str()); debugOLEDModeChange("cmd.oledenabled.forceDefault", prevMode, currentOLEDMode, dbgBuf); }
 
@@ -3492,84 +3522,54 @@ const char* cmd_oledmode(const String& argsInput) {
     Serial.println("[OLED_MODE] User overrode boot sequence - will not auto-transition");
   }
 
-  if (mode == "menu") {
-    setOLEDMode(OLED_MENU);
-    resetOLEDMenu();
-    tryAutoStartGamepadForMenu();  // Auto-start gamepad if connected
-    broadcastOutput("OLED mode: Menu");
-  } else if (mode == "status") {
-    setOLEDMode(OLED_SYSTEM_STATUS);
-    broadcastOutput("OLED mode: System Status");
-  } else if (mode == "sensordata") {
-    setOLEDMode(OLED_SENSOR_DATA);
-    broadcastOutput("OLED mode: Sensor Data");
-  } else if (mode == "sensorlist") {
-    setOLEDMode(OLED_SENSOR_LIST);
-    broadcastOutput("OLED mode: Sensor List (scrolling)");
-  } else if (mode == "thermal") {
-    setOLEDMode(OLED_THERMAL_VISUAL);
-    broadcastOutput("OLED mode: Thermal Visual");
-  } else if (mode == "network") {
-    setOLEDMode(OLED_NETWORK_INFO);
-    broadcastOutput("OLED mode: Network Info");
-  } else if (mode == "mesh") {
-    setOLEDMode(OLED_MESH_STATUS);
-    broadcastOutput("OLED mode: Mesh Status");
-  } else if (mode == "text") {
-    setOLEDMode(OLED_CUSTOM_TEXT);
-    broadcastOutput("OLED mode: Custom Text");
-  } else if (mode == "logo") {
-    setOLEDMode(OLED_LOGO);
-    broadcastOutput("OLED mode: Logo");
-  } else if (mode == "anim" || mode == "animation") {
-    setOLEDMode(OLED_ANIMATION);
-    animationFrame = 0;  // Use the module-level variable
-    broadcastOutput("OLED mode: Animation");
-  } else if (mode == "imuactions" || mode == "actions") {
-    setOLEDMode(OLED_IMU_ACTIONS);
-    broadcastOutput("OLED mode: IMU Action Detection");
-  } else if (mode == "gps") {
-    setOLEDMode(OLED_GPS_DATA);
-    broadcastOutput("OLED mode: GPS Data");
-  } else if (mode == "fmradio") {
-    setOLEDMode(OLED_FM_RADIO);
-    broadcastOutput("OLED mode: FM Radio");
-  } else if (mode == "files" || mode == "filebrowser" || mode == "fb") {
-    setOLEDMode(OLED_FILE_BROWSER);
-    resetOLEDFileBrowser();
-    broadcastOutput("OLED mode: File Browser");
-  } else if (mode == "automations" || mode == "auto") {
-    setOLEDMode(OLED_AUTOMATIONS);
-    broadcastOutput("OLED mode: Automations");
-  } else if (mode == "memory" || mode == "mem") {
-    setOLEDMode(OLED_MEMORY_STATS);
-    broadcastOutput("OLED mode: Memory Stats");
-  } else if (mode == "espnow" || mode == "mesh") {
-    setOLEDMode(OLED_ESPNOW);
-#if ENABLE_ESPNOW
-    // Initialize ESP-NOW OLED state based on ESP-NOW initialization status
-    if (!gEspNow || !gEspNow->initialized) {
-      oledEspNowShowInitPrompt();
-    } else {
-      oledEspNowInit();  // Set up device list view
-    }
-#endif
-    broadcastOutput("OLED mode: ESP-NOW");
-  } else if (mode == "gamepad" || mode == "gpad") {
-    setOLEDMode(OLED_GAMEPAD_VISUAL);
-    broadcastOutput("OLED mode: Gamepad Visual");
-  } else if (mode == "off") {
-    setOLEDMode(OLED_OFF);
-    i2cOledTransactionVoid(400000, 500, [&]() {
-      oledDisplay->clearDisplay();
-      oledDisplay->display();
-    });
-    broadcastOutput("OLED display disabled");
-  } else {
-    broadcastOutput("Invalid mode. Options: menu, status, sensordata, sensorlist, gamepad, thermal, network, gps, text, logo, anim, imuactions, fmradio, files, automations, espnow, memory, off");
+  // Slug -> enum lookup (validates the slug in one place).
+  OLEDMode target = modeFromSlug(mode);
+  if ((int)target == -1) {
+    broadcastOutput("Invalid mode. Options: menu, status, sensordata, sensorlist, gamepad, "
+                    "thermal, network, gps, text, logo, anim, imuactions, fmradio, files, "
+                    "automations, espnow, memory, off");
     return "ERROR";
   }
 
+  // Single authoritative transition — auth gating + debug log handled inside.
+  // CLI transitions do not push to the back-nav stack (explicit user destination).
+  requestOLEDMode(target, "cli.oledmode", false);
+
+  // Per-mode initialisation side-effects (state resets, hardware inits).
+  switch (target) {
+    case OLED_MENU:
+      resetOLEDMenu();
+      tryAutoStartGamepadForMenu();
+      break;
+    case OLED_ANIMATION:
+      animationFrame = 0;
+      break;
+    case OLED_FILE_BROWSER:
+      resetOLEDFileBrowser();
+      break;
+    case OLED_ESPNOW:
+#if ENABLE_ESPNOW
+      if (!gEspNow || !gEspNow->initialized) {
+        oledEspNowShowInitPrompt();
+      } else {
+        oledEspNowInit();
+      }
+#endif
+      break;
+    case OLED_OFF:
+      i2cOledTransactionVoid(400000, 500, [&]() {
+        oledDisplay->clearDisplay();
+        oledDisplay->display();
+      });
+      break;
+    default:
+      break;
+  }
+
+  if (ensureDebugBuffer()) {
+    snprintf(getDebugBuffer(), 1024, "OLED mode: %s", getOLEDModeName(target));
+    broadcastOutput(getDebugBuffer());
+  }
   updateOLEDDisplay();
   return "OK";
 }
@@ -3793,37 +3793,96 @@ static const char* getOLEDModeName(OLEDMode mode) {
   }
 }
 
-static OLEDMode getOLEDModeByName(const String& name) {
-  if (name == "off") return OLED_OFF;
-  if (name == "menu") return OLED_MENU;
-  if (name == "status") return OLED_SYSTEM_STATUS;
-  if (name == "sensordata") return OLED_SENSOR_DATA;
-  if (name == "sensorlist") return OLED_SENSOR_LIST;
-  if (name == "thermal") return OLED_THERMAL_VISUAL;
-  if (name == "network") return OLED_NETWORK_INFO;
-  if (name == "mesh") return OLED_MESH_STATUS;
-  if (name == "text") return OLED_CUSTOM_TEXT;
-  if (name == "logo") return OLED_LOGO;
-  if (name == "animation") return OLED_ANIMATION;
-  if (name == "imu") return OLED_IMU_ACTIONS;
-  if (name == "gps") return OLED_GPS_DATA;
-  if (name == "fmradio") return OLED_FM_RADIO;
-  if (name == "files") return OLED_FILE_BROWSER;
-  if (name == "automations") return OLED_AUTOMATIONS;
-  if (name == "espnow") return OLED_ESPNOW;
-  if (name == "tof") return OLED_TOF_DATA;
-  if (name == "apds") return OLED_APDS_DATA;
-  if (name == "power") return OLED_POWER;
-  if (name == "gamepad" || name == "gpad") return OLED_GAMEPAD_VISUAL;
-  if (name == "bluetooth") return OLED_BLUETOOTH;
-  if (name == "remote") return OLED_REMOTE_SENSORS;
-  if (name == "memory" || name == "mem") return OLED_MEMORY_STATS;
-  if (name == "web") return OLED_WEB_STATS;
-  if (name == "rtc") return OLED_RTC_DATA;
-  if (name == "presence") return OLED_PRESENCE_DATA;
-  if (name == "actions" || name == "unified") return OLED_UNIFIED_MENU;
-  if (name == "notifs" || name == "notifications") return OLED_NOTIFICATIONS;
-  return (OLEDMode)-1;  // Invalid
+// modeFromSlug: canonical CLI slug -> OLEDMode (all recognised aliases included).
+// Returns (OLEDMode)-1 for unknown/invalid slugs.
+OLEDMode modeFromSlug(const String& slug) {
+  if (slug == "off") return OLED_OFF;
+  if (slug == "menu") return OLED_MENU;
+  if (slug == "status") return OLED_SYSTEM_STATUS;
+  if (slug == "sensordata") return OLED_SENSOR_DATA;
+  if (slug == "sensorlist") return OLED_SENSOR_LIST;
+  if (slug == "thermal") return OLED_THERMAL_VISUAL;
+  if (slug == "network") return OLED_NETWORK_INFO;
+  if (slug == "mesh") return OLED_MESH_STATUS;
+  if (slug == "text") return OLED_CUSTOM_TEXT;
+  if (slug == "logo") return OLED_LOGO;
+  if (slug == "anim" || slug == "animation") return OLED_ANIMATION;
+  if (slug == "imuactions" || slug == "imu" || slug == "actions") return OLED_IMU_ACTIONS;
+  if (slug == "gps") return OLED_GPS_DATA;
+  if (slug == "fmradio") return OLED_FM_RADIO;
+  if (slug == "files" || slug == "filebrowser" || slug == "fb") return OLED_FILE_BROWSER;
+  if (slug == "automations" || slug == "auto") return OLED_AUTOMATIONS;
+  if (slug == "espnow") return OLED_ESPNOW;
+  if (slug == "tof") return OLED_TOF_DATA;
+  if (slug == "apds") return OLED_APDS_DATA;
+  if (slug == "power") return OLED_POWER;
+  if (slug == "gamepad" || slug == "gpad") return OLED_GAMEPAD_VISUAL;
+  if (slug == "bluetooth") return OLED_BLUETOOTH;
+  if (slug == "remote") return OLED_REMOTE_SENSORS;
+  if (slug == "memory" || slug == "mem") return OLED_MEMORY_STATS;
+  if (slug == "web") return OLED_WEB_STATS;
+  if (slug == "rtc") return OLED_RTC_DATA;
+  if (slug == "presence") return OLED_PRESENCE_DATA;
+  if (slug == "unified") return OLED_UNIFIED_MENU;
+  if (slug == "notifs" || slug == "notifications") return OLED_NOTIFICATIONS;
+  if (slug == "map" || slug == "gpsmap") return OLED_GPS_MAP;
+  if (slug == "login") return OLED_LOGIN;
+  if (slug == "settings") return OLED_SETTINGS;
+  return (OLEDMode)-1;
+}
+
+// slugFromMode: OLEDMode -> primary CLI slug (round-trips with modeFromSlug).
+const char* slugFromMode(OLEDMode mode) {
+  switch (mode) {
+    case OLED_OFF:             return "off";
+    case OLED_MENU:            return "menu";
+    case OLED_SYSTEM_STATUS:   return "status";
+    case OLED_SENSOR_DATA:     return "sensordata";
+    case OLED_SENSOR_LIST:     return "sensorlist";
+    case OLED_THERMAL_VISUAL:  return "thermal";
+    case OLED_NETWORK_INFO:    return "network";
+    case OLED_MESH_STATUS:     return "mesh";
+    case OLED_CUSTOM_TEXT:     return "text";
+    case OLED_LOGO:            return "logo";
+    case OLED_ANIMATION:       return "anim";
+    case OLED_BOOT_SENSORS:    return "boot";
+    case OLED_IMU_ACTIONS:     return "imuactions";
+    case OLED_GPS_DATA:        return "gps";
+    case OLED_FM_RADIO:        return "fmradio";
+    case OLED_FILE_BROWSER:    return "files";
+    case OLED_AUTOMATIONS:     return "automations";
+    case OLED_ESPNOW:          return "espnow";
+    case OLED_TOF_DATA:        return "tof";
+    case OLED_APDS_DATA:       return "apds";
+    case OLED_POWER:           return "power";
+    case OLED_POWER_CPU:       return "powercpu";
+    case OLED_POWER_SLEEP:     return "powersleep";
+    case OLED_GAMEPAD_VISUAL:  return "gamepad";
+    case OLED_BLUETOOTH:       return "bluetooth";
+    case OLED_REMOTE_SENSORS:  return "remote";
+    case OLED_MEMORY_STATS:    return "memory";
+    case OLED_WEB_STATS:       return "web";
+    case OLED_RTC_DATA:        return "rtc";
+    case OLED_PRESENCE_DATA:   return "presence";
+    case OLED_UNIFIED_MENU:    return "actions";
+    case OLED_NOTIFICATIONS:   return "notifs";
+    case OLED_GPS_MAP:         return "map";
+    case OLED_LOGIN:           return "login";
+    case OLED_LOGOUT:          return "logout";
+    case OLED_QUICK_SETTINGS:  return "quicksettings";
+    case OLED_SETTINGS:        return "settings";
+    case OLED_REMOTE_SETTINGS: return "remotesettings";
+    case OLED_SET_PATTERN:     return "setpattern";
+    case OLED_CHANGE_PASSWORD: return "changepass";
+    case OLED_REMOTE:          return "remoteui";
+    case OLED_SPEECH:          return "speech";
+    case OLED_MICROPHONE:      return "mic";
+    case OLED_CLI_VIEWER:      return "cli";
+    case OLED_LOGGING:         return "logging";
+    case OLED_SENSOR_MENU:     return "sensormenu";
+    case OLED_UNAVAILABLE:     return "unavail";
+    default:                   return "unknown";
+  }
 }
 
 
@@ -3932,7 +3991,7 @@ bool earlyOLEDInit() {
       bootPhaseStartTime = millis();
       oledBootModeActive = true;
 
-      setOLEDMode(OLED_ANIMATION);
+      requestOLEDMode(OLED_ANIMATION, "boot.init", false);
       currentAnimation = ANIM_BOOT_PROGRESS;
       animationFrame = 0;
       animationLastUpdate = millis();
@@ -3979,7 +4038,7 @@ void processOLEDBootSequence() {
         OLEDMode prevMode = currentOLEDMode;
         currentBootPhase = BOOT_PHASE_LOGO;
         bootPhaseStartTime = now;
-        setOLEDMode(OLED_LOGO);
+        requestOLEDMode(OLED_LOGO, "boot.animation->logo", false);
         debugOLEDModeChange("boot.phase.animation->logo", prevMode, currentOLEDMode, "");
         DEBUG_SENSORSF("OLED boot sequence: Animation -> Logo");
       }
@@ -4000,8 +4059,8 @@ void processOLEDBootSequence() {
           
           // After boot completes, go to login screen if auth is required
           if (gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed) {
-            setOLEDMode(OLED_LOGIN);
-            previousOLEDMode = OLED_MENU;  // After login, B button goes to menu
+            requestOLEDMode(OLED_LOGIN, "boot.login", false);
+            // B-button from login falls back to OLED_MENU via empty-stack default in popOLEDMode().
             debugOLEDModeChange("boot.complete.login", prevMode, currentOLEDMode, "Auth required");
             DEBUG_SENSORSF("OLED boot sequence: Logo -> Login (auth required)");
           } else {
@@ -4009,17 +4068,11 @@ void processOLEDBootSequence() {
             String defaultMode = gSettings.oledDefaultMode;
             defaultMode.toLowerCase();
             
-            // Set previousOLEDMode to MENU so B button returns to menu
-            previousOLEDMode = OLED_MENU;
-            
-            if (defaultMode == "status") setOLEDMode(OLED_SYSTEM_STATUS);
-            else if (defaultMode == "sensordata") setOLEDMode(OLED_SENSOR_DATA);
-            else if (defaultMode == "sensorlist") setOLEDMode(OLED_SENSOR_LIST);
-            else if (defaultMode == "thermal") setOLEDMode(OLED_THERMAL_VISUAL);
-            else if (defaultMode == "network") setOLEDMode(OLED_NETWORK_INFO);
-            else if (defaultMode == "mesh") setOLEDMode(OLED_MESH_STATUS);
-            else if (defaultMode == "logo") setOLEDMode(OLED_LOGO);
-            else setOLEDMode(OLED_SYSTEM_STATUS);
+            // modeFromSlug resolves the saved slug; fallback to status if unrecognised.
+            // B-button from any mode falls back to OLED_MENU via empty-stack default.
+            OLEDMode defMode = modeFromSlug(defaultMode);
+            if ((int)defMode == -1) defMode = OLED_SYSTEM_STATUS;
+            requestOLEDMode(defMode, "boot.default", false);
 
             { char dbgBuf[48]; snprintf(dbgBuf, sizeof(dbgBuf), "defaultMode=%s", defaultMode.c_str()); debugOLEDModeChange("boot.complete.defaultMode", prevMode, currentOLEDMode, dbgBuf); }
             DEBUG_SENSORSF("OLED boot sequence: Logo -> %s (complete, B returns to menu)", defaultMode.c_str());
@@ -5116,10 +5169,8 @@ void oledMenuSelect() {
       return;
     }
 
-    pushOLEDMode(currentOLEDMode);
-    Serial.printf("[MENU_SELECT] Setting currentOLEDMode from %d to %d\n", (int)currentOLEDMode, (int)target);
-    setOLEDMode(target);
-    Serial.printf("[MENU_SELECT] currentOLEDMode now = %d\n", (int)currentOLEDMode);
+    requestOLEDMode(target, "menu.select");
+    Serial.printf("[MENU_SELECT] currentOLEDMode now = %d (%s)\n", (int)currentOLEDMode, getOLEDModeName(currentOLEDMode));
 
 #if ENABLE_ESPNOW
     if (currentOLEDMode == OLED_ESPNOW) {
@@ -5368,35 +5419,36 @@ void handleOLEDActionButton() {
     case OLED_UNAVAILABLE:
       // If feature is "Not built" (compile-time disabled), redirect to menu - no action possible
       if (unavailableOLEDReason.indexOf("Not built") >= 0) {
-        setOLEDMode(OLED_SENSOR_MENU);
+        requestOLEDMode(OLED_SENSOR_MENU, "unavail.notbuilt", false);
         break;
       }
-      
-      // Try to start whatever sensor was unavailable based on the title
+
+      // Try to start whatever sensor was unavailable based on the title.
+      // pushStack=false: we are replacing OLED_UNAVAILABLE, not stacking over it.
       if (unavailableOLEDTitle == "Thermal") {
 #if ENABLE_THERMAL_SENSOR
         executeOLEDCommand("openthermal");
-        setOLEDMode(OLED_THERMAL_VISUAL);  // Switch to thermal view
+        requestOLEDMode(OLED_THERMAL_VISUAL, "unavail.start.thermal", false);
 #endif
       } else if (unavailableOLEDTitle == "ToF") {
 #if ENABLE_TOF_SENSOR
         executeOLEDCommand("opentof");
-        setOLEDMode(OLED_TOF_DATA);  // Switch to ToF view
+        requestOLEDMode(OLED_TOF_DATA, "unavail.start.tof", false);
 #endif
       } else if (unavailableOLEDTitle == "IMU") {
 #if ENABLE_IMU_SENSOR
         executeOLEDCommand("openimu");
-        setOLEDMode(OLED_IMU_ACTIONS);  // Switch to IMU view
+        requestOLEDMode(OLED_IMU_ACTIONS, "unavail.start.imu", false);
 #endif
       } else if (unavailableOLEDTitle == "APDS") {
 #if ENABLE_APDS_SENSOR
         executeOLEDCommand("openapds");
-        setOLEDMode(OLED_APDS_DATA);  // Switch to APDS view
+        requestOLEDMode(OLED_APDS_DATA, "unavail.start.apds", false);
 #endif
       } else if (unavailableOLEDTitle == "GPS") {
 #if ENABLE_GPS_SENSOR
         executeOLEDCommand("opengps");
-        setOLEDMode(OLED_GPS_DATA);  // Switch to GPS view
+        requestOLEDMode(OLED_GPS_DATA, "unavail.start.gps", false);
 #endif
       } else if (unavailableOLEDTitle == "RTC") {
 #if ENABLE_RTC_SENSOR
@@ -5404,7 +5456,7 @@ void handleOLEDActionButton() {
         static auto rtcOpenConfirmedUnavail = [](void* userData) {
           (void)userData;
           executeOLEDCommand("openrtc");
-          setOLEDMode(OLED_RTC_DATA);
+          requestOLEDMode(OLED_RTC_DATA, "unavail.confirm.rtc", false);
         };
         oledConfirmRequest("Open RTC?", nullptr, rtcOpenConfirmedUnavail, nullptr);
 #endif
@@ -5414,16 +5466,16 @@ void handleOLEDActionButton() {
         static auto presenceOpenConfirmedUnavail = [](void* userData) {
           (void)userData;
           executeOLEDCommand("openpresence");
-          setOLEDMode(OLED_PRESENCE_DATA);
+          requestOLEDMode(OLED_PRESENCE_DATA, "unavail.confirm.presence", false);
         };
         oledConfirmRequest("Open Presence?", nullptr, presenceOpenConfirmedUnavail, nullptr);
 #endif
       } else if (unavailableOLEDTitle == "FM Radio") {
         executeOLEDCommand("openfmradio");
-        setOLEDMode(OLED_FM_RADIO);  // Switch to FM Radio view
+        requestOLEDMode(OLED_FM_RADIO, "unavail.start.fmradio", false);
       } else if (unavailableOLEDTitle == "ESP-NOW") {
 #if ENABLE_ESPNOW
-        setOLEDMode(OLED_ESPNOW);
+        requestOLEDMode(OLED_ESPNOW, "unavail.start.espnow", false);
         if (gSettings.espnowDeviceName.length() == 0) {
           oledEspNowShowNameKeyboard();
         } else {
@@ -5444,7 +5496,7 @@ void handleOLEDActionButton() {
 #if ENABLE_BLUETOOTH
         // Initialize Bluetooth
         executeOLEDCommand("openble");
-        setOLEDMode(OLED_BLUETOOTH);
+        requestOLEDMode(OLED_BLUETOOTH, "unavail.start.bluetooth", false);
 #endif
       } else if (unavailableOLEDTitle == "Web") {
 #if ENABLE_HTTP_SERVER
@@ -5453,7 +5505,7 @@ void handleOLEDActionButton() {
           (void)userData;
           executeOLEDCommand("openhttp");
           broadcastOutput("[OLED] HTTP server started");
-          setOLEDMode(OLED_WEB_STATS);
+          requestOLEDMode(OLED_WEB_STATS, "unavail.confirm.web", false);
         };
         oledConfirmRequest("Start HTTP?", nullptr, httpStartConfirmedUnavail, nullptr);
 #endif
@@ -5753,8 +5805,7 @@ bool processGamepadMenuInput() {
     } else if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_SELECT)) {
       // SELECT button opens quick settings - only if authenticated
       if (!gSettings.localDisplayRequireAuth || isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {
-        pushOLEDMode(currentOLEDMode);
-        setOLEDMode(OLED_QUICK_SETTINGS);
+        requestOLEDMode(OLED_QUICK_SETTINGS, "gamepad.menu.quicksettings");
         inputProcessed = true;
       }
     } else if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_START)) {
@@ -5903,8 +5954,7 @@ bool processGamepadMenuInput() {
     // NOTE: Skip if keyboard is active since SELECT toggles keyboard mode
     if (!oledKeyboardIsActive() && INPUT_CHECK(newlyPressed, INPUT_BUTTON_SELECT)) {
       if (!gSettings.localDisplayRequireAuth || isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {
-        pushOLEDMode(currentOLEDMode);
-        setOLEDMode(OLED_QUICK_SETTINGS);
+        requestOLEDMode(OLED_QUICK_SETTINGS, "gamepad.any.quicksettings");
         inputProcessed = true;
       }
     }
@@ -6137,7 +6187,7 @@ void oledNotifyLocalDisplayAuthChanged() {
 
   // If we just became authenticated while on the login screen, return to the menu.
   if (gLocalDisplayAuthed && currentOLEDMode == OLED_LOGIN) {
-    setOLEDMode(OLED_MENU);
+    requestOLEDMode(OLED_MENU, "auth.notify.loggedin", false);
     resetOLEDMenu();
     tryAutoStartGamepadForMenu();
 #if ENABLE_GAMEPAD_SENSOR
