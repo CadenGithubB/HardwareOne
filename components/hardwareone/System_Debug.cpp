@@ -18,7 +18,6 @@
 #include "WebServer_Utils.h"
 
 // External dependencies from .ino
-extern Settings gSettings;
 
 // ============================================================================
 // Debug System Implementation
@@ -77,7 +76,6 @@ extern bool gCLIValidateOnly;
 extern volatile bool gInHelpRender;
 
 // Settings and persistence (defined in settings.h and main .ino)
-extern Settings gSettings;
 
 // Web mirror buffer access - defined in WebServer_Utils.h
 

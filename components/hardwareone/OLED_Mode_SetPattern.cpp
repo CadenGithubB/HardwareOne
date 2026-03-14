@@ -19,7 +19,6 @@
 #include "System_Utils.h"
 #include "i2csensor-seesaw.h"
 
-extern OLEDMode currentOLEDMode;
 
 // ============================================================================
 // State Machine

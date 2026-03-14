@@ -14,6 +14,7 @@
 #include "System_Notifications.h"
 #include <LittleFS.h>
 #include <esp_system.h>
+#include <esp_app_desc.h>
 #include <esp_log.h>
 #include "mbedtls/aes.h"
 #include "mbedtls/sha256.h"
@@ -31,7 +32,6 @@
 // Note: WifiNetwork struct and gWifiNetworks are defined in wifi_system.h
 
 // External dependencies from main .ino
-extern Settings gSettings;
 
 extern bool filesystemReady;
 extern volatile uint32_t gOutputFlags;
@@ -717,6 +717,9 @@ void applySettings() {
 // ============================================================================
 
 void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
+  // Stamp firmware version so we know which build last wrote this file
+  doc["firmwareVersion"] = esp_app_get_description()->version;
+
   // NOTE: All top-level settings are now owned by their respective modules.
   // NOTE: webCliHistorySize/oledCliHistorySize -> cli module
   // NOTE: wifiEnabled and all wifi settings -> wifi module
@@ -955,6 +958,15 @@ bool readSettingsJson() {
   }
 
   DEBUG_STORAGEF("[Settings] JSON parsed successfully, applying settings");
+
+  // Check if settings were written by a different firmware version
+  const char* savedVersion = doc["firmwareVersion"] | "";
+  const char* runningVersion = esp_app_get_description()->version;
+  if (savedVersion[0] == '\0') {
+    INFO_STORAGEF("[Settings] No firmwareVersion in settings file (pre-versioning build)");
+  } else if (strcmp(savedVersion, runningVersion) != 0) {
+    INFO_STORAGEF("[Settings] Settings written by v%s, running v%s", savedVersion, runningVersion);
+  }
 
   registerAllSettingsModules();
 

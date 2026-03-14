@@ -16,8 +16,6 @@
 
 // External references
 extern bool oledConnected;
-extern OLEDMode currentOLEDMode;
-extern Settings gSettings;
 
 // Power menu scroll states (replaces manual selection variables)
 static OLEDScrollState sPowerMainScroll;

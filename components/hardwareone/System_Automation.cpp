@@ -39,6 +39,7 @@
 
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_Filesystem.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_User.h"
@@ -55,7 +56,6 @@
 #endif
 
 // External dependencies from .ino
-extern Settings gSettings;
 extern bool gCLIValidateOnly;
 // gDebugBuffer, gDebugFlags, ensureDebugBuffer now from debug_system.h
 extern void runUnifiedSystemCommand(const String& argsInput);
@@ -123,7 +123,6 @@ static bool isAutoInternalResult(const char* r) {
 bool gAutoLogActive = false;
 String gAutoLogFile = "";
 String gAutoLogAutomationName = "";
-extern String gExecUser;
 extern bool gExecIsAdmin;
 
 // Forward declarations for functions implemented in this file
@@ -507,7 +506,6 @@ void runAutomationsOnBoot() {
   if (s_ran) return;
   s_ran = true;
 
-  extern bool filesystemReady;
   if (!filesystemReady) return;
 
   DEBUGF(DEBUG_AUTOMATIONS, "[automations] Checking for boot automations");
@@ -943,7 +941,6 @@ const char* cmd_automation_add(const String& argsInput) {
           }
         } else {
           // Validate this individual command by calling executeCommand in validation mode
-          extern String gExecUser;
           
           // Create minimal auth context for validation
           AuthContext ctx;
@@ -1172,7 +1169,6 @@ const char* cmd_automation_add(const String& argsInput) {
   
   // Build final automation object
   String obj = "{\n";
-  extern String gExecUser;
   String createdBy = gExecUser;
   DEBUGF(DEBUG_AUTOMATIONS, "[autos add] Storing automation id=%ld name='%s' createdBy='%s'", id, name.c_str(), createdBy.c_str());
   obj += "  \"id\": " + String(id) + ",\n";

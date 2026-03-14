@@ -16,7 +16,6 @@
 
 extern DisplayDriver* oledDisplay;
 extern bool oledConnected;
-extern OLEDMode currentOLEDMode;
 
 // ============================================================================
 // Password Change State

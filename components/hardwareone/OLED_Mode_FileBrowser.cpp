@@ -17,7 +17,6 @@
 
 // External references
 extern bool oledConnected;
-extern OLEDMode currentOLEDMode;
 extern FileManager* gOLEDFileManager;
 extern bool oledFileBrowserNeedsInit;
 extern bool oledMenuBack();

@@ -18,6 +18,7 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <WiFi.h>
+#include <esp_app_desc.h>
 
 #include "System_Debug.h"
 #include "System_FirstTimeSetup.h"
@@ -227,8 +228,10 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   device["hostname"] = WiFi.getHostname();
   device["mac"] = WiFi.macAddress();
   device["fingerprint"] = getDeviceFingerprint();
+  device["board"] = BOARD_NAME;
+  device["firmwareVersion"] = esp_app_get_description()->version;
 
-  // Build system info for version/board
+  // Build system info for ip
   JsonDocument sysDoc;
   buildSystemInfoJson(sysDoc);
   if (sysDoc.containsKey("net")) {

@@ -31,7 +31,6 @@
 
 // External references
 extern bool oledConnected;
-extern Settings gSettings;
 extern ControlCache gControlCache;
 
 // OLED text input

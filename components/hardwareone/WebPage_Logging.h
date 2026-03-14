@@ -564,14 +564,8 @@ console.log('[LOGGING] Section 2: Window onload setup');
 window.onload = function() {
   try {
     console.log('[LOGGING] Section 2a: Window loaded, starting initialization...');
-    // Sensor logging initialization
-    generateDefaultFilename();
-    refreshStatus();
-    // System logging initialization
-    generateSystemFilename();
-    refreshSystemStatus();
     populateLogViewerFileList();
-    
+
     // Show admin log toggle if user is admin (check via settings API which includes user.isAdmin)
     fetch('/api/settings')
       .then(function(r) { return r.json(); })
@@ -583,7 +577,41 @@ window.onload = function() {
       .catch(function(e) {
         console.error('[LOGGING] Failed to check user role:', e);
       });
-    
+
+    // Batch-load all CLI data in a single HTTPS request (3 unique commands replace 5 separate fetches)
+    fetch('/api/cli/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ commands: ['time', 'sensorlog status', 'log status'] })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data || !Array.isArray(data.results) || data.results.length < 3) {
+        console.warn('[LOGGING] Batch response invalid, falling back to individual requests');
+        generateDefaultFilename();
+        refreshStatus();
+        generateSystemFilename();
+        refreshSystemStatus();
+        return;
+      }
+      var timeText = data.results[0] || '';
+      var sensorlogText = data.results[1] || '';
+      var logText = data.results[2] || '';
+      // Distribute the shared time result to both filename generators
+      generateDefaultFilename(timeText);
+      generateSystemFilename(timeText);
+      // Distribute each status result (also feeds the auto-start indicator — no duplicate fetch)
+      refreshStatus(sensorlogText);
+      refreshSystemStatus(logText);
+    })
+    .catch(function(e) {
+      console.warn('[LOGGING] Batch fetch failed, falling back to individual requests:', e);
+      generateDefaultFilename();
+      refreshStatus();
+      generateSystemFilename();
+      refreshSystemStatus();
+    });
+
     console.log('[LOGGING] Section 2b: Initialization complete');
   } catch(e) {
     console.error('[LOGGING] Section 2: Window onload error:', e);
@@ -594,28 +622,17 @@ console.log('[LOGGING] Section 2c: Window onload registered');
 
 <script>
 console.log('[LOGGING] Section 3: Filename generation function');
-function generateDefaultFilename() {
+function generateDefaultFilename(preloadedTimeText) {
   console.log('[LOGGING] Section 3a: generateDefaultFilename called');
-  // Try to get system time from device
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('time')
-  })
-  .then(r => r.text())
-  .then(text => {
+  function applyTime(text) {
     console.log('[LOGGING] Section 3b: Time response:', text);
     let filename = '/logging_captures/sensors/sensors-';
-    
-    // Check if we have NTP time (ISO format in response)
     const isoMatch = text.match(/Time:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
     if (isoMatch) {
-      // NTP time available - use ISO format
       console.log('[LOGGING] Section 3c: Using NTP time:', isoMatch[1]);
       const timestamp = isoMatch[1].replace(/:/g, '-');
       filename += timestamp;
     } else {
-      // Fallback to browser time
       const now = new Date();
       const timestamp = now.getFullYear() + '-' +
         String(now.getMonth() + 1).padStart(2, '0') + '-' +
@@ -626,12 +643,22 @@ function generateDefaultFilename() {
       console.log('[LOGGING] Section 3d: Using browser time:', timestamp);
       filename += timestamp;
     }
-    
     const format = document.getElementById('config-format').value;
     filename += (format === 'csv' ? '.csv' : format === 'track' ? '.txt' : '.log');
     console.log('[LOGGING] Section 3e: Generated filename:', filename);
     document.getElementById('config-path').value = filename;
+  }
+  if (preloadedTimeText !== undefined) {
+    applyTime(preloadedTimeText);
+    return;
+  }
+  fetch('/api/cli', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'cmd=' + encodeURIComponent('time')
   })
+  .then(r => r.text())
+  .then(applyTime)
   .catch(e => {
     console.warn('[LOGGING] Section 3f: Failed to get time, using browser time:', e);
     const now = new Date();
@@ -651,21 +678,10 @@ console.log('[LOGGING] Section 3g: generateDefaultFilename defined');
 
 <script>
 console.log('[LOGGING] Section 4: Status refresh function');
-function refreshStatus() {
+function refreshStatus(preloadedStatusText) {
   console.log('[LOGGING] Section 4a: refreshStatus called');
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('sensorlog status')
-  })
-  .then(r => {
-    console.log('[LOGGING] Section 4b: Status fetch response:', r.status);
-    return r.text();
-  })
-  .then(text => {
+  function applyStatus(text) {
     console.log('[LOGGING] Section 4c: Status response text:', text);
-    
-    // Check if command is not available
     if (text.includes('Unknown command') || text.includes('not found')) {
       console.log('[LOGGING] Section 4d: sensorlog command not available');
       const statusDot = document.getElementById('status-dot');
@@ -677,22 +693,18 @@ function refreshStatus() {
       document.getElementById('btn-stop').style.display = 'none';
       return;
     }
-    
     const isActive = text.includes('logging ACTIVE');
     console.log('[LOGGING] Section 4d: Logging active:', isActive);
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
     const btnStart = document.getElementById('btn-start');
     const btnStop = document.getElementById('btn-stop');
-    
     if (isActive) {
       statusDot.style.background = '#28a745';
       statusText.textContent = 'ACTIVE';
       statusText.style.color = '#28a745';
       btnStart.style.display = 'none';
       btnStop.style.display = 'inline-block';
-      
-      // Parse details
       const fileMatch = text.match(/File:\s*(.+)/);
       const intervalMatch = text.match(/Interval:\s*(\d+)ms/);
       const formatMatch = text.match(/Format:\s*(\w+)/);
@@ -700,9 +712,7 @@ function refreshStatus() {
       const rotationsMatch = text.match(/Rotations:\s*(\d+)/);
       const sensorsMatch = text.match(/Sensors:\s*(.+)/);
       const lastwriteMatch = text.match(/Last write:\s*(.+)/);
-      
       console.log('[LOGGING] Section 4e: Parsed active status - File:', fileMatch?.[1], 'Interval:', intervalMatch?.[1], 'Format:', formatMatch?.[1], 'Sensors:', sensorsMatch?.[1]);
-      
       document.getElementById('detail-file').textContent = fileMatch ? fileMatch[1] : '—';
       document.getElementById('detail-interval').textContent = intervalMatch ? intervalMatch[1] + 'ms' : '—';
       document.getElementById('detail-format').textContent = formatMatch ? formatMatch[1] : '—';
@@ -710,8 +720,6 @@ function refreshStatus() {
       document.getElementById('detail-rotations').textContent = rotationsMatch ? rotationsMatch[1] : '—';
       document.getElementById('detail-sensors').textContent = sensorsMatch ? sensorsMatch[1].trim() : '—';
       document.getElementById('detail-lastwrite').textContent = lastwriteMatch ? lastwriteMatch[1] : '—';
-      
-      // Update config fields with active values
       if (fileMatch) document.getElementById('config-path').value = fileMatch[1].trim();
       if (intervalMatch) document.getElementById('config-interval').value = intervalMatch[1];
       if (formatMatch) document.getElementById('config-format').value = formatMatch[1].toLowerCase();
@@ -723,20 +731,14 @@ function refreshStatus() {
       statusText.style.color = 'var(--panel-fg)';
       btnStart.style.display = 'inline-block';
       btnStop.style.display = 'none';
-      
-      // Parse current settings even when inactive
       const formatMatch = text.match(/Format:\s*(\w+)/);
       const maxsizeMatch = text.match(/Max size:\s*(\d+)\s*bytes/);
       const rotationsMatch = text.match(/Rotations:\s*(\d+)/);
       const sensorsMatch = text.match(/Sensors:\s*(.+)/);
-      
       console.log('[LOGGING] Section 4f: Parsed inactive settings - Format:', formatMatch?.[1], 'MaxSize:', maxsizeMatch?.[1], 'Sensors:', sensorsMatch?.[1]);
-      
       if (formatMatch) document.getElementById('config-format').value = formatMatch[1].toLowerCase();
       if (maxsizeMatch) document.getElementById('config-maxsize').value = maxsizeMatch[1];
       if (rotationsMatch) document.getElementById('config-rotations').value = rotationsMatch[1];
-      
-      // Parse and set sensor checkboxes dynamically
       if (sensorsMatch) {
         const sensorStr = sensorsMatch[1].toLowerCase();
         document.querySelectorAll('#sensors-pane input[type=checkbox]').forEach(function(cb) {
@@ -744,26 +746,34 @@ function refreshStatus() {
         });
       }
     }
-  })
-  .catch(e => {
-    console.error('[LOGGING] Section 4g: Status refresh error:', e);
-    document.getElementById('status-text').textContent = 'Error: ' + e.message;
-    document.getElementById('status-text').style.color = '#dc3545';
-  });
-  
-  // Also update auto-start status
-  updateAutoStartStatus();
-}
-console.log('[LOGGING] Section 4h: refreshStatus defined');
-
-function updateAutoStartStatus() {
+  }
+  if (preloadedStatusText !== undefined) {
+    applyStatus(preloadedStatusText);
+    updateAutoStartStatus(preloadedStatusText);
+    return;
+  }
   fetch('/api/cli', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'cmd=' + encodeURIComponent('sensorlog status')
   })
-  .then(r => r.text())
-  .then(text => {
+  .then(r => {
+    console.log('[LOGGING] Section 4b: Status fetch response:', r.status);
+    return r.text();
+  })
+  .then(applyStatus)
+  .catch(e => {
+    console.error('[LOGGING] Section 4g: Status refresh error:', e);
+    document.getElementById('status-text').textContent = 'Error: ' + e.message;
+    document.getElementById('status-text').style.color = '#dc3545';
+  });
+  // Also update auto-start status
+  updateAutoStartStatus();
+}
+console.log('[LOGGING] Section 4h: refreshStatus defined');
+
+function updateAutoStartStatus(preloadedText) {
+  function applyAutoStart(text) {
     const autostartMatch = text.match(/Auto-start:\s*(ON|OFF)/i);
     const statusSpan = document.getElementById('autostart-status');
     if (autostartMatch) {
@@ -773,7 +783,18 @@ function updateAutoStartStatus() {
     } else {
       statusSpan.textContent = '?';
     }
+  }
+  if (preloadedText !== undefined) {
+    applyAutoStart(preloadedText);
+    return;
+  }
+  fetch('/api/cli', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'cmd=' + encodeURIComponent('sensorlog status')
   })
+  .then(r => r.text())
+  .then(applyAutoStart)
   .catch(e => console.error('[LOGGING] Auto-start status error:', e));
 }
 
@@ -790,9 +811,6 @@ function toggleAutoStart() {
   })
   .catch(e => alert('Error toggling auto-start: ' + e.message));
 }
-</script>
-
-<script>
 </script>
 
 <script>
@@ -943,9 +961,6 @@ console.log('[LOGGING] Section 8i: applyConfig defined');
 </script>
 
 <script>
-</script>
-
-<script>
 console.log('[LOGGING] Section 10: Sensor selection helpers');
 function selectAllSensors() {
   console.log('[LOGGING] Section 10a: selectAllSensors called');
@@ -1003,25 +1018,16 @@ console.log('[LOGGING] Section 12: Page initialization');
 <script>
 console.log('[LOGGING] Section 13: System logging functions');
 
-function generateSystemFilename() {
+function generateSystemFilename(preloadedTimeText) {
   console.log('[LOGGING] generateSystemFilename called');
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('time')
-  })
-  .then(r => r.text())
-  .then(text => {
+  function applyTime(text) {
     console.log('[LOGGING] System time response:', text);
     let filename = '/logging_captures/system-';
-    
-    // Match new format: "Time: 2024-01-22T06:18:00 (NTP synced)"
     const isoMatch = text.match(/Time:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
     if (isoMatch) {
       const timestamp = isoMatch[1].replace(/:/g, '-');
       filename += timestamp;
     } else {
-      // Fallback to browser time
       const now = new Date();
       const timestamp = now.getFullYear() + '-' +
         String(now.getMonth() + 1).padStart(2, '0') + '-' +
@@ -1033,7 +1039,18 @@ function generateSystemFilename() {
     }
     filename += '.log';
     document.getElementById('sys-config-path').value = filename;
+  }
+  if (preloadedTimeText !== undefined) {
+    applyTime(preloadedTimeText);
+    return;
+  }
+  fetch('/api/cli', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'cmd=' + encodeURIComponent('time')
   })
+  .then(r => r.text())
+  .then(applyTime)
   .catch(e => {
     console.warn('[LOGGING] Failed to get time, using browser time:', e);
     const now = new Date();
@@ -1048,18 +1065,10 @@ function generateSystemFilename() {
   });
 }
 
-function refreshSystemStatus() {
+function refreshSystemStatus(preloadedStatusText) {
   console.log('[LOGGING] refreshSystemStatus called');
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('log status')
-  })
-  .then(r => r.text())
-  .then(text => {
+  function applySystemStatus(text) {
     console.log('[LOGGING] System status response:', text);
-    
-    // Check if command is not available
     if (text.includes('Unknown command') || text.includes('not found')) {
       console.log('[LOGGING] log command not available');
       const statusDot = document.getElementById('sys-status-dot');
@@ -1071,28 +1080,23 @@ function refreshSystemStatus() {
       document.getElementById('sys-btn-stop').style.display = 'none';
       return;
     }
-    
     const isActive = text.includes('logging ACTIVE');
     const statusDot = document.getElementById('sys-status-dot');
     const statusText = document.getElementById('sys-status-text');
     const btnStart = document.getElementById('sys-btn-start');
     const btnStop = document.getElementById('sys-btn-stop');
-    
     if (isActive) {
       statusDot.style.background = '#28a745';
       statusText.textContent = 'ACTIVE';
       statusText.style.color = '#28a745';
       btnStart.style.display = 'none';
       btnStop.style.display = 'inline-block';
-      
       const fileMatch = text.match(/File:\s*(.+)/);
       const lastwriteMatch = text.match(/Last write:\s*(\d+)s ago/);
       const flagsMatch = text.match(/Output flags:\s*0x([0-9A-Fa-f]+)/);
-      
       document.getElementById('sys-detail-file').textContent = fileMatch ? fileMatch[1].trim() : '—';
       document.getElementById('sys-detail-lastwrite').textContent = lastwriteMatch ? lastwriteMatch[1] + 's ago' : '—';
       document.getElementById('sys-detail-flags').textContent = flagsMatch ? '0x' + flagsMatch[1] : '—';
-      
       if (fileMatch) document.getElementById('sys-config-path').value = fileMatch[1].trim();
     } else {
       statusDot.style.background = '#6c757d';
@@ -1100,18 +1104,28 @@ function refreshSystemStatus() {
       statusText.style.color = 'var(--panel-fg)';
       btnStart.style.display = 'inline-block';
       btnStop.style.display = 'none';
-      
       document.getElementById('sys-detail-file').textContent = '—';
       document.getElementById('sys-detail-lastwrite').textContent = '—';
       document.getElementById('sys-detail-flags').textContent = '—';
     }
+  }
+  if (preloadedStatusText !== undefined) {
+    applySystemStatus(preloadedStatusText);
+    updateSystemAutoStartStatus(preloadedStatusText);
+    return;
+  }
+  fetch('/api/cli', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'cmd=' + encodeURIComponent('log status')
   })
+  .then(r => r.text())
+  .then(applySystemStatus)
   .catch(e => {
     console.error('[LOGGING] System status refresh error:', e);
     document.getElementById('sys-status-text').textContent = 'Error: ' + e.message;
     document.getElementById('sys-status-text').style.color = '#dc3545';
   });
-  
   // Also update auto-start status
   updateSystemAutoStartStatus();
 }
@@ -1226,14 +1240,8 @@ function selectNoFlags() {
   document.querySelectorAll('#sys-flags-pane input[type="checkbox"]').forEach(cb => cb.checked = false);
 }
 
-function updateSystemAutoStartStatus() {
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('log status')
-  })
-  .then(r => r.text())
-  .then(text => {
+function updateSystemAutoStartStatus(preloadedText) {
+  function applySysAutoStart(text) {
     const autostartMatch = text.match(/Auto-start:\s*(ON|OFF)/i);
     const statusSpan = document.getElementById('sys-autostart-status');
     if (autostartMatch) {
@@ -1243,7 +1251,18 @@ function updateSystemAutoStartStatus() {
     } else {
       statusSpan.textContent = '?';
     }
+  }
+  if (preloadedText !== undefined) {
+    applySysAutoStart(preloadedText);
+    return;
+  }
+  fetch('/api/cli', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'cmd=' + encodeURIComponent('log status')
   })
+  .then(r => r.text())
+  .then(applySysAutoStart)
   .catch(e => console.error('[LOGGING] System auto-start status error:', e));
 }
 

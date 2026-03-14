@@ -8,13 +8,12 @@
 #include "System_Icons.h"
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
+#include <esp_app_desc.h>
 
 #if ENABLE_OLED_DISPLAY
 
 extern DisplayDriver* oledDisplay;
 extern bool oledConnected;
-extern OLEDMode currentOLEDMode;
-extern Settings gSettings;
 
 // Dynamic menu system
 extern OLEDMenuItemEx gDynamicMenuItems[];
@@ -525,7 +524,8 @@ void displayLogo() {
   oledDisplay->println("  One");
   oledDisplay->setTextSize(1);
   oledDisplay->setCursor(0, 44);
-  oledDisplay->println("v0.9");
+  oledDisplay->print("v");
+  oledDisplay->println(esp_app_get_description()->version);
 
   // Animated 3D device model on the right
   static unsigned long animStartTime = 0;

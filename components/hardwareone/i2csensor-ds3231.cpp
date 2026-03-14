@@ -23,7 +23,6 @@
 #include "System_Utils.h"
 
 extern TwoWire Wire1;
-extern Settings gSettings;
 
 // RTC Cache
 RTCCache gRTCCache = {nullptr, {0}, 0.0f, false, 0};

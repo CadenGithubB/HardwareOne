@@ -84,7 +84,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
     <!-- Status Card -->
     <div class='sr-card'>
       <div class='sr-title'>
-        <span>🎤 Speech Recognition</span>
+        <span>Speech Recognition</span>
         <span class='status-indicator status-stopped' id='sr-status-indicator'></span>
       </div>
       <div class='sr-description'>
@@ -211,7 +211,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   
   <!-- Models Card -->
   <div class='sr-card' style='margin-top:20px'>
-    <div class='sr-title'>🧠 Models</div>
+    <div class='sr-title'>Models</div>
     <div class='sr-description'>
       Loaded speech recognition models. Wake word model detects activation phrase, MultiNet recognizes commands.
     </div>
@@ -374,7 +374,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
         var state = data.state || 'idle';
         if(state !== 'idle' && running){
           stateEl.style.display = 'block';
-          var path = '🎤 ';
+          var path = '';
           if(data.category) path += data.category;
           if(data.subcategory) path += ' → ' + data.subcategory;
           path += ' → [awaiting ' + state + ']';

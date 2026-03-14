@@ -15,7 +15,6 @@
 
 extern DisplayDriver* oledDisplay;
 extern bool oledConnected;
-extern Settings gSettings;
 extern EspNowState* gEspNow;
 extern bool filesystemReady;
 

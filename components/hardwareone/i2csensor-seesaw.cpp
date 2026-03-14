@@ -156,8 +156,6 @@ const char* startGamepadInternal() {
 
   // Create dedicated gamepad task
   if (!createGamepadTask()) {
-    // Roll back enable flag if task creation fails
-    gamepadEnabled = false;
     return "Failed to create Gamepad task";
   }
   gamepadLogHeap("start.after_task");
@@ -616,8 +614,7 @@ void gamepadTask(void* parameter) {
           
           if (i2cShouldAutoDisable(I2C_ADDR_GAMEPAD, 5)) {
             ERROR_SENSORSF("[GAMEPAD_TASK] Too many consecutive failures - auto-disabling");
-            gamepadEnabled = false;
-            gamepadConnected = false;
+            handleDeviceStopped(I2C_DEVICE_GAMEPAD);
             DEBUG_GAMEPAD_FRAMEF("Gamepad auto-disabled: %u consecutive I2C failures", errors);
             sensorStatusBumpWith("gamepad@auto_disabled");
           }
@@ -629,8 +626,7 @@ void gamepadTask(void* parameter) {
           }
           if (consecutiveInvalidReads >= INVALID_READ_AUTO_DISABLE_THRESHOLD) {
             ERROR_SENSORSF("[GAMEPAD_TASK] %u consecutive invalid reads - auto-disabling gamepad", consecutiveInvalidReads);
-            gamepadEnabled = false;
-            gamepadConnected = false;
+            handleDeviceStopped(I2C_DEVICE_GAMEPAD);
             sensorStatusBumpWith("gamepad@invalid_data_disabled");
           }
         }

@@ -1,5 +1,6 @@
 #include "OLED_Utils.h"
 #include "OLED_Display.h"
+#include <esp_app_desc.h>
 #include "OLED_UI.h"
 #include "Optional_Bluetooth.h"
 #include "System_Battery.h"
@@ -240,7 +241,6 @@ const OLEDNotification* oledNotificationGet(int index) {
 
 // Get mode name from current OLED mode
 const char* oledGetCurrentModeName() {
-  extern OLEDMode currentOLEDMode;
   return getOLEDModeName(currentOLEDMode);
 }
 
@@ -2060,7 +2060,6 @@ uint32_t OLEDConsoleBuffer::getTimestamp(int index) const {
 #endif
 
 // External state variables needed for context-aware footer hints
-extern OLEDMode currentOLEDMode;
 extern bool networkShowingStatus;
 extern bool networkShowingWiFiSubmenu;
 extern String unavailableOLEDTitle;
@@ -2397,9 +2396,11 @@ void drawOLEDFooter() {
 #include "System_User.h"
 #include "System_Command.h"
 
-// External references for authentication
-extern bool gLocalDisplayAuthed;
-extern String gLocalDisplayUser;
+// Returns true if the local display should be blocked pending authentication.
+// Use this instead of repeating the three-part condition everywhere.
+bool shouldBlockForDisplayAuth() {
+  return gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive;
+}
 
 void executeOLEDCommand(const String& argsInput) {
   extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
@@ -2513,8 +2514,6 @@ void oledSetAlwaysDirty(bool always) {
 // OLED display object and state (owned by this module)
 // Note: oledDisplay is now an alias for gDisplay (defined in Display_HAL.h)
 // The actual display object is managed by Display_HAL.cpp
-extern bool gLocalDisplayAuthed;
-extern String gLocalDisplayUser;
 bool oledConnected = false;
 bool oledEnabled = false;
 
@@ -2563,18 +2562,15 @@ void setOLEDMode(OLEDMode newMode) {
 // Auth gating, back-nav stack push, and standardised "[OLED_MODE]" logging.
 // pushStack=false for boot/system/replace-in-place transitions that must not pollute history.
 void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack) {
-  extern bool gLocalDisplayAuthed;
-  extern bool oledBootModeActive;
-
   // Auth gate: redirect to LOGIN if display auth is required and not yet satisfied.
   // Boot sequence bypasses this (oledBootModeActive guards the check).
-  if (gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive) {
+  if (shouldBlockForDisplayAuth()) {
     if (newMode != OLED_LOGIN) {
       Serial.printf("[OLED_MODE] AUTH_GATE %s -> LOGIN (wanted:%s) | %s\n",
                     getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
                     reason ? reason : "");
-      currentOLEDMode = OLED_LOGIN;
-      return;
+      newMode = OLED_LOGIN;
+      pushStack = false;  // auth redirects don't pollute back-nav
     }
   }
 
@@ -2770,7 +2766,7 @@ void enterUnavailablePage(const String& title, const String& reason) {
   if (unavailableOLEDReason.indexOf("Press X") >= 0) {
     unavailableOLEDStartTime = 0;
   }
-  setOLEDMode(OLED_UNAVAILABLE);
+  requestOLEDMode(OLED_UNAVAILABLE, "unavail.enter", false);
 }
 
 extern OLEDAnimationType currentAnimation;
@@ -2795,7 +2791,6 @@ extern bool rtcConnected;
 // Includes are conditional based on sensor availability
 
 // Settings and EspNowState now come from espnow_system.h -> settings.h
-extern Settings gSettings;
 
 // GPS module
 extern Adafruit_GPS* gPA1010D;
@@ -2851,7 +2846,8 @@ bool initOLEDDisplay() {
     gDisplay->setTextSize(1);
     gDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     gDisplay->setCursor(0, 0);
-    gDisplay->println("HardwareOne v0.9");
+    gDisplay->print("HardwareOne v");
+    gDisplay->println(esp_app_get_description()->version);
     gDisplay->print("Display: ");
     gDisplay->println(DISPLAY_NAME);
     displayUpdate();
@@ -2992,14 +2988,10 @@ void updateOLEDDisplay() {
   }
 
   // AUTHENTICATION ENFORCEMENT: Force login screen if auth is required and user is not authenticated
-  extern bool gLocalDisplayAuthed;
-  extern bool oledBootModeActive;
-  
-  if (gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive) {
+  if (shouldBlockForDisplayAuth()) {
     // User must be on login screen - force mode change if they somehow got to another mode
     if (currentOLEDMode != OLED_LOGIN) {
-      Serial.printf("[OLED_AUTH_GUARD] Forcing mode from %d to LOGIN - auth required\n", (int)currentOLEDMode);
-      setOLEDMode(OLED_LOGIN);
+      requestOLEDMode(OLED_LOGIN, "auth.guard.update", false);
     }
   }
 
@@ -3596,7 +3588,7 @@ const char* cmd_oledtext(const String& argsInput) {
 
   extern String customOLEDText;
   customOLEDText = text;
-  setOLEDMode(OLED_CUSTOM_TEXT);
+  requestOLEDMode(OLED_CUSTOM_TEXT, "cli.customtext", false);
 
   if (ensureDebugBuffer()) {
     snprintf(getDebugBuffer(), 1024, "Custom text set: %s", text.c_str());
@@ -3720,7 +3712,7 @@ const char* cmd_oledanim(const String& argsInput) {
   for (int i = 0; i < gAnimationCount; i++) {
     if (arg == gAnimationRegistry[i].name) {
       currentAnimation = gAnimationRegistry[i].type;
-      setOLEDMode(OLED_ANIMATION);
+      requestOLEDMode(OLED_ANIMATION, "cli.animation", false);
       animationFrame = 0;
       if (ensureDebugBuffer()) {
         snprintf(getDebugBuffer(), 1024, "Animation set to: %s", gAnimationRegistry[i].description);
@@ -3906,7 +3898,6 @@ String bootProgressLabel = "";
 // Menu navigation state (declared early for boot sequence access)
 int oledMenuSelectedIndex = 0;
 int oledSensorMenuSelectedIndex = 0;
-static OLEDMode previousOLEDMode = OLED_SYSTEM_STATUS;
 
 // Category menu state (non-static for access from OLED_Mode_Menu.cpp)
 int oledMenuCategorySelected = -1;  // -1 = showing categories, 0-5 = in category submenu
@@ -5051,8 +5042,7 @@ bool oledMenuBack() {
   // If not in menu mode, pop mode stack to go back to previous mode.
   // Category state is preserved so we return to the category submenu, not root.
   if (currentOLEDMode != OLED_MENU) {
-    OLEDMode prev = popOLEDMode();
-    setOLEDMode(prev);
+    requestOLEDMode(popOLEDMode(), "menu.back", false);
     return true;
   }
   
@@ -5218,10 +5208,6 @@ OLEDMode getPreviousOLEDMode() {
   return OLED_MENU;
 }
 
-// Pop mode from stack (exported for use by other files like quick settings)
-OLEDMode popOLEDModeStack() {
-  return popOLEDMode();
-}
 
 void resetOLEDMenu() {
   oledMenuSelectedIndex = 0;
@@ -6169,17 +6155,14 @@ void oledApplySettings() {
 
 void oledNotifyLocalDisplayAuthChanged() {
 #if ENABLE_OLED_DISPLAY
-  extern bool gLocalDisplayAuthed;
-  extern bool oledBootModeActive;
-
   if (!oledEnabled || !oledConnected) {
     return;
   }
 
   // If auth is required and the display is not authenticated, force the login screen.
-  if (gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive) {
+  if (shouldBlockForDisplayAuth()) {
     if (currentOLEDMode != OLED_LOGIN) {
-      setOLEDMode(OLED_LOGIN);
+      requestOLEDMode(OLED_LOGIN, "auth.guard.notify", false);
       updateOLEDDisplay();
     }
     return;

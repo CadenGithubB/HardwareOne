@@ -27,7 +27,6 @@
 #endif
 
 // External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)
-extern OLEDMode currentOLEDMode;
 
 // External map state from GPS_MapRenderer.cpp
 extern bool gMapRendererEnabled;

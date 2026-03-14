@@ -25,7 +25,6 @@ VL53L4CX* gVL53L4CX = nullptr;
 extern TwoWire Wire1;
 
 // Settings and debug
-extern Settings gSettings;
 
 // I2C functions - clock now managed by transaction wrapper
 
@@ -735,7 +734,7 @@ void tofTask(void* parameter) {
           shouldStream = true;
         }
 #if ENABLE_BONDED_MODE
-        if (gSettings.bondModeEnabled && gSettings.bondRole == 0) {
+        if (gSettings.bondModeEnabled && isBondWorker()) {
           shouldStream = true;  // Bond mode worker
         }
 #endif
