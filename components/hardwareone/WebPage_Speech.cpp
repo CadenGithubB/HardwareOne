@@ -9,10 +9,8 @@
 #include "WebServer_Utils.h"
 #include "System_User.h"
 
-static void streamSpeechContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Speech", false, u, "speech");
+static void streamSpeechContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "Speech", false, username, "speech");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   streamSpeechInner(req);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);

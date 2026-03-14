@@ -9,10 +9,8 @@
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
 
-static void streamGamesContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Games", false, u, "games");
+static void streamGamesContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "Games", false, username, "games");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   streamGamesInner(req);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);

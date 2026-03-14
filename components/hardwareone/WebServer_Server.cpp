@@ -144,15 +144,6 @@ void sendSSEBurstToSession(int sessionIndex, const String& eventData) {
 String gSessUser;
 SessionEntry* gSessions = nullptr;
 
-// Auth cache for high-frequency endpoints
-struct AuthCache {
-  String sessionId;
-  String user;
-  unsigned long validUntil;
-  String ip;
-};
-AuthCache gAuthCache = { "", "", 0, "" };
-
 // Logout reason tracking
 LogoutReason* gLogoutReasons = nullptr;
 
@@ -227,9 +218,6 @@ void pruneExpiredSessions() {
 // Session creation
 String setSession(httpd_req_t* req, const String& u) {
   pruneExpiredSessions();
-
-  // Clear auth cache to prevent stale authentication
-  gAuthCache = { "", "", 0, "" };
 
   // Get current client IP to avoid storing logout reason for same IP
   String currentIP;
@@ -363,8 +351,6 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
     if (ctx.ip.length() == 0) ctx.ip = "local";
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
     // Establish local display session state
-    extern bool gLocalDisplayAuthed;
-    extern String gLocalDisplayUser;
     gLocalDisplayAuthed = true;
     if (ctx.user.length()) gLocalDisplayUser = ctx.user;
     if (!gLocalDisplayUser.length()) gLocalDisplayUser = "display";
@@ -561,33 +547,6 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
   return true;
 }
 
-// Cached auth check for high-frequency endpoints (sensors)
-bool isAuthedCached(httpd_req_t* req, String& outUser) {
-  String ip;
-  getClientIP(req, ip);
-  String sid = getCookieSID(req);
-  unsigned long now = millis();
-
-  // Check cache first (valid for 30 seconds)
-  if (gAuthCache.sessionId == sid && gAuthCache.ip == ip && now < gAuthCache.validUntil && gAuthCache.sessionId.length() > 0) {
-    outUser = gAuthCache.user;
-    return true;
-  }
-
-  // Full auth check on cache miss
-  bool result = isAuthed(req, outUser);
-  if (result) {
-    gAuthCache.sessionId = sid;
-    gAuthCache.user = outUser;
-    gAuthCache.validUntil = now + 30000;  // Cache for 30 seconds
-    gAuthCache.ip = ip;
-  } else {
-    // Clear cache on auth failure
-    gAuthCache = { "", "", 0, "" };
-  }
-  return result;
-}
-
 // isAdminUser moved to user_system.cpp
 
 // Build JSON for all sessions (admin view)
@@ -708,8 +667,8 @@ void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg) {
 
 // External dependencies from .ino
 // tgRequireAuth is now in user_system.h (included above)
-extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*));
-extern void streamSensorsContent(httpd_req_t* req);
+extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
+extern void streamSensorsContent(httpd_req_t* req, const String& username);
 extern bool filesystemReady;
 extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
 #if ENABLE_AUTOMATION
@@ -721,8 +680,8 @@ extern bool gAutosDirty;
 extern bool readText(const char* path, String& out);
 extern const char* buildSensorStatusJson();
 // gSensorStatusSeq declared below
-extern void streamDashboardContent(httpd_req_t* req);
-extern void streamSettingsContent(httpd_req_t* req);
+extern void streamDashboardContent(httpd_req_t* req, const String& username);
+extern void streamSettingsContent(httpd_req_t* req, const String& username);
 // Note: gJsonResponseMutex is now in mutex_system.h
 extern char* gJsonResponseBuffer;
 extern void buildSettingsJsonDoc(JsonDocument& doc, bool excludeWifiPasswords);
@@ -778,16 +737,16 @@ struct Command {
 extern bool submitAndExecuteSync(const Command& uc, String& out);
 extern bool gMeshActivitySuspended;
 // gBroadcastSkipSessionIdx declared in web_server.h
-extern void streamCLIContent(httpd_req_t* req);
-extern void streamAutomationsContent(httpd_req_t* req);
-extern void streamFilesContent(httpd_req_t* req);
-extern void streamLoggingContent(httpd_req_t* req);
+extern void streamCLIContent(httpd_req_t* req, const String& username);
+extern void streamAutomationsContent(httpd_req_t* req, const String& username);
+extern void streamFilesContent(httpd_req_t* req, const String& username);
+extern void streamLoggingContent(httpd_req_t* req, const String& username);
 // Streaming debug helpers from .ino
 extern void streamDebugReset(const char* tag);
 extern void streamDebugFlush();
 
 // Universal page streaming function (moved from .ino)
-void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*)) {
+void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&)) {
   httpd_resp_set_type(req, "text/html");
 
   // Suspend mesh activity during page generation to reduce CPU contention
@@ -801,7 +760,7 @@ void streamPageWithContent(httpd_req_t* req, const String& activePage, const Str
 
   // Stream page-specific content only - no navigation wrapper
   if (contentStreamer) {
-    contentStreamer(req);
+    contentStreamer(req, username);
   }
 
   // End chunked response
@@ -1243,65 +1202,53 @@ void logAuthAttempt(bool success, const char* path, const String& userTried, con
 }
 
 // Streaming content for Dashboard page (moved from .ino)
-void streamDashboardContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
+void streamDashboardContent(httpd_req_t* req, const String& username) {
   // Begin streamed HTML shell (nav + content wrapper)
-  streamBeginHtml(req, "HardwareOne - Minimal", /*isPublic=*/false, u, "dashboard");
+  streamBeginHtml(req, "HardwareOne - Minimal", /*isPublic=*/false, username, "dashboard");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   // Delegate inner streaming to web_dashboard.h
-  streamDashboardInner(req, u);
+  streamDashboardInner(req, username);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
   streamEndHtml(req);
 }
 
 // Streaming content for Settings page (moved from .ino)
-void streamSettingsContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Settings", false, u, "settings");
+void streamSettingsContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "Settings", false, username, "settings");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   streamSettingsInner(req);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
   streamEndHtml(req);
 }
 
-void streamFilesContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Files", false, u, "files");
+void streamFilesContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "Files", false, username, "files");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   streamFilesInner(req);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
   streamEndHtml(req);
 }
 
-void streamLoggingContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Logging", false, u, "logging");
+void streamLoggingContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "Logging", false, username, "logging");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   streamLoggingInner(req);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
   streamEndHtml(req);
 }
 
-void streamAutomationsContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Automations", false, u, "automations");
+void streamAutomationsContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "Automations", false, username, "automations");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   streamAutomationsInner(req);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
   streamEndHtml(req);
 }
 
-void streamCLIContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "CLI", false, u, "cli");
+void streamCLIContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "CLI", false, username, "cli");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamCLIInner(req, u);
+  streamCLIInner(req, username);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
   streamEndHtml(req);
 }
@@ -3046,9 +2993,6 @@ esp_err_t handleLogin(httpd_req_t* req) {
   getClientIP(req, ip);
   logAuthAttempt(true, req->uri, u, ip, "Login successful");
 
-  // Clear auth cache immediately
-  gAuthCache = { "", "", 0, "" };
-
   // Clear any existing logout reason for this IP to prevent false "signed out" messages
   String clientIP;
   getClientIP(req, clientIP);
@@ -4594,11 +4538,17 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   gBroadcastSkipSessionIdx = originIdx;
   gMeshActivitySuspended = true;
 
+  // Collect per-command outputs for the results array
+  std::vector<String> results;
+
   int count = 0;
   for (JsonVariant v : doc["commands"].as<JsonArray>()) {
     String cmd = v.as<String>();
     cmd.trim();
-    if (cmd.length() == 0) continue;
+    if (cmd.length() == 0) {
+      results.push_back("");
+      continue;
+    }
 
     appendCommandToFeed("web", cmd, ctx.user, ctx.ip);
 
@@ -4617,6 +4567,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     submitAndExecuteSync(uc, out);
     String redacted = redactOutputForLog(out);
     broadcastOutput(redacted, uc.ctx);
+    results.push_back(out);
 
     count++;
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -4625,11 +4576,19 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   gMeshActivitySuspended = false;
   gBroadcastSkipSessionIdx = prevSkip;
 
+  // Build response: {"ok":true,"count":N,"results":["out0","out1",...]}
+  // Use ArduinoJson to safely serialize the output strings (handles escaping)
+  JsonDocument respDoc;
+  respDoc["ok"] = true;
+  respDoc["count"] = count;
+  JsonArray arr = respDoc["results"].to<JsonArray>();
+  for (const String& r : results) {
+    arr.add(r);
+  }
   httpd_resp_set_type(req, "application/json");
-  String resp = "{\"ok\":true,\"count\":";
-  resp += count;
-  resp += "}";
-  httpd_resp_sendstr(req, resp.c_str());
+  String respStr;
+  serializeJson(respDoc, respStr);
+  httpd_resp_sendstr(req, respStr.c_str());
   return ESP_OK;
 }
 
