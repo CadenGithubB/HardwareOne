@@ -128,12 +128,8 @@ esp_err_t handleMapSelectAPI(httpd_req_t* req) {
 // =============================================================================
 
 esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
-  String user;
-  if (!isAuthed(req, user)) {
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_sendstr(req, "{\"error\":\"Authentication required\"}");
-    return ESP_OK;
-  }
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
   
   httpd_resp_set_type(req, "application/json");
   
@@ -185,13 +181,8 @@ esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
 // =============================================================================
 
 esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
-  String user;
-  if (!isAuthed(req, user)) {
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"error\":\"Not authenticated\"}");
-    return ESP_OK;
-  }
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
 
   char query[256];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
@@ -333,12 +324,8 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
 // =============================================================================
 
 esp_err_t handleWaypointsPage(httpd_req_t* req) {
-  String user;
-  if (!isAuthed(req, user)) {
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_send(req, "Authentication required", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
   
   streamPageHeader(req, "Waypoints");
   
@@ -530,14 +517,12 @@ esp_err_t handleWaypointsPage(httpd_req_t* req) {
 // =============================================================================
 
 // Forward declarations for streaming
-extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*));
+extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
 extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
 extern void streamEndHtml(httpd_req_t* req);
 
-static void streamMapsContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Maps", false, u, "maps");
+static void streamMapsContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "Maps", false, username, "maps");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   streamMapsInner(req);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);

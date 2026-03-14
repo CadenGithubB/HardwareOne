@@ -15,7 +15,7 @@
 #include "System_Filesystem.h"
 
 // Forward declarations
-extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*));
+extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
 extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
 extern void streamEndHtml(httpd_req_t* req);
 
@@ -729,10 +729,8 @@ void streamBondInner(httpd_req_t* req) {
 )JS", HTTPD_RESP_USE_STRLEN);
 }
 
-static void streamBondContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Bonded Device", false, u, "bond");
+static void streamBondContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "Bonded Device", false, username, "bond");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   streamBondInner(req);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
@@ -1211,8 +1209,8 @@ static esp_err_t handleBondRole(httpd_req_t* req) {
   }
   
   // Determine new roles
-  const char* localNewRole = (gSettings.bondRole == 1) ? "worker" : "master";
-  const char* peerNewRole = (gSettings.bondRole == 1) ? "master" : "worker";
+  const char* localNewRole = (isBondMaster()) ? "worker" : "master";
+  const char* peerNewRole = (isBondMaster()) ? "master" : "worker";
   
   // IMPORTANT: Send remote role change FIRST so the peer processes its new role
   // before the local device starts the handshake. Reversing this order caused a

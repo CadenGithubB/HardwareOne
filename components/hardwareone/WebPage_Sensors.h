@@ -32,7 +32,7 @@ extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, 
 #endif
 
 // Forward declaration
-inline void streamSensorsInner(httpd_req_t* req);
+inline void streamSensorsInner(httpd_req_t* req, const String& username);
 
 // Individual sensor web modules (conditionally included)
 #if ENABLE_THERMAL_SENSOR
@@ -76,16 +76,12 @@ extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, 
 extern void streamEndHtml(httpd_req_t* req);
 
 // Top-level Sensors page content streamer (wrapper that conditionally shows sensors or disabled message)
-inline void streamSensorsContent(httpd_req_t* req) {
-  streamSensorsInner(req);
+inline void streamSensorsContent(httpd_req_t* req, const String& username) {
+  streamSensorsInner(req, username);
 }
 
 // Streamed inner content for the Sensors page (CSS + HTML skeleton + small JS)
-inline void streamSensorsInner(httpd_req_t* req) {
-  // Get username for theme lookup
-  String username;
-  isAuthed(req, username);
-  
+inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   // Stream HTML head with hw helpers (defines window.hw object)
   streamBeginHtml(req, "Sensors", false, username, "sensors");
   
@@ -403,7 +399,7 @@ inline void streamSensorsInner(httpd_req_t* req) {
     "    var queuePos = status[sensor + 'QueuePos'];\n"
     "    if (isQueued && queuePos > 0) {\n"
     "      var qd = status.queueDepth || 0;\n"
-    "      queueEl.textContent = '⏱️ Queued for start (position ' + queuePos + ' of ' + qd + ')';\n"
+    "      queueEl.textContent = 'Queued for start (position ' + queuePos + ' of ' + qd + ')';\n"
     "      queueEl.style.display = 'block';\n"
     "    } else {\n"
     "      queueEl.style.display = 'none';\n"
