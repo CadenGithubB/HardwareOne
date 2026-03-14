@@ -12,7 +12,6 @@
 #include <esp_heap_caps.h>
 
 // External settings
-extern Settings gSettings;
 
 // Compile-time feature checks
 static bool isWiFiCompiled() {

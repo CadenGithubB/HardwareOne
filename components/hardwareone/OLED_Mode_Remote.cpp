@@ -13,7 +13,6 @@
 
 extern DisplayDriver* oledDisplay;
 extern bool oledConnected;
-extern Settings gSettings;
 extern EspNowState* gEspNow;
 extern NavEvents gNavEvents;
 
@@ -108,7 +107,7 @@ static void displayBondStatus() {
   oledDisplay->println(online ? " [ON]" : " [OFF]");
   
   // Line 2: Role + sync status
-  const char* role = (gSettings.bondRole == 1) ? "Master" : "Worker";
+  const char* role = (isBondMaster()) ? "Master" : "Worker";
   bool synced = isBondSynced();
   snprintf(buf, sizeof(buf), "%s %s", role, synced ? "Synced" : "Syncing...");
   oledDisplay->println(buf);
@@ -158,7 +157,7 @@ static void displayBondStatus() {
 static void displayBondSensors() {
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   
-  bool isMaster = (gSettings.bondRole == 1);
+  bool isMaster = (isBondMaster());
   if (!isMaster) {
     oledDisplay->println("Sensor control is");
     oledDisplay->println("managed by master.");
@@ -280,7 +279,7 @@ void displayRemoteMode() {
   oledDisplay->println(online ? " [ON]" : " [OFF]");
   
   // Menu options
-  bool isMaster = (gSettings.bondRole == 1);
+  bool isMaster = (isBondMaster());
   for (int i = 0; i < BOND_MENU_ITEMS; i++) {
     // Skip Sensors for workers (they can't control)
     if (i == 1 && !isMaster) continue;
@@ -309,7 +308,7 @@ static void bondMenuUp() {
     return;
   }
   
-  bool isMaster = (gSettings.bondRole == 1);
+  bool isMaster = (isBondMaster());
   int startIdx = bondMenuSelection;
   do {
     bondMenuSelection--;
@@ -328,7 +327,7 @@ static void bondMenuDown() {
     return;
   }
   
-  bool isMaster = (gSettings.bondRole == 1);
+  bool isMaster = (isBondMaster());
   int startIdx = bondMenuSelection;
   do {
     bondMenuSelection++;
@@ -348,7 +347,7 @@ static void bondSensorRight() {
 static void swapRolesConfirmed(void* userData) {
   (void)userData;
   // If we're master, peer becomes master and we become worker (and vice versa)
-  bool wasMaster = (gSettings.bondRole == 1);
+  bool wasMaster = (isBondMaster());
   char cmd[48];
   // Remote first (so peer is ready before local handshake restarts)
   snprintf(cmd, sizeof(cmd), "remote:bond role %s", wasMaster ? "master" : "worker");

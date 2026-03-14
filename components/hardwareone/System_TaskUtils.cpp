@@ -163,8 +163,7 @@ bool createGamepadTask() {
       "gamepad");
 
     if (result != pdPASS) {
-      gamepadEnabled = false;
-      gamepadConnected = false;
+      handleDeviceStopped(I2C_DEVICE_GAMEPAD);
       return false;
     }
   }

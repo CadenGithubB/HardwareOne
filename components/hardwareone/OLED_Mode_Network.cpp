@@ -26,8 +26,6 @@
 
 // External references
 extern bool oledConnected;
-extern OLEDMode currentOLEDMode;
-extern Settings gSettings;
 #if ENABLE_HTTP_SERVER
 extern bool gServerIsHttps;  // Defined in WebServer_Server.cpp
 #endif
@@ -937,7 +935,7 @@ void displayRemoteSensors() {
   bool meshOn = meshEnabled();
   bool isMeshMaster = (gSettings.meshRole == MESH_ROLE_MASTER);
 #if ENABLE_BONDED_MODE
-  bool isPairedMaster = (gSettings.bondModeEnabled && gSettings.bondRole == 1);
+  bool isPairedMaster = (gSettings.bondModeEnabled && isBondMaster());
 #else
   bool isPairedMaster = false;
 #endif

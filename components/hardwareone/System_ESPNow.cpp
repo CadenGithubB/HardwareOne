@@ -579,7 +579,6 @@ const char* cmd_espnow_rel(const String& argsInput) {
 // This is called only when topology changes (new peer discovered, peer removed, mode change)
 // Health metrics (timestamps, counters) rebuild naturally from heartbeats after reboot
 void saveMeshPeers() {
-  extern bool filesystemReady;
   if (!filesystemReady) return;
 
   // Pause sensor polling during file I/O
@@ -640,7 +639,6 @@ void saveMeshPeers() {
 // Save named ESP-NOW devices (paired devices with names/keys) to filesystem
 static void saveEspNowDevices() {
   if (!gEspNow) return;
-  extern bool filesystemReady;
   if (!filesystemReady) return;
 
   FsLockGuard fsGuard("espnow.devices.save");
@@ -684,7 +682,6 @@ bool parseMacAddress(const String& macStr, uint8_t mac[6]);
 
 // Health metrics (timestamps, counters) will be initialized to zero and rebuild from heartbeats
 static void loadMeshPeers() {
-  extern bool filesystemReady;
   if (!filesystemReady) return;
 
   // Pause sensor polling during file I/O
@@ -2618,7 +2615,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
             if (gBackupPromoted) {
               // Original master is back — demote to backup role (runtime only, not saved)
               gBackupPromoted = false;
-              gSettings.meshRole = MESH_ROLE_BACKUP_MASTER;
+              setMeshRole(MESH_ROLE_BACKUP_MASTER, "backup.master_returned");
               BROADCAST_PRINTF("[BACKUP] Master returned — demoted back to backup role");
             }
           }
@@ -2696,7 +2693,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
         // during normal handshake when the master just hasn't asked for settings yet.
         bool capExchangedLongEnough = (gEspNow->lastRemoteCapTime > 0 &&
                                        (millis() - gEspNow->lastRemoteCapTime) > 30000);
-        if (gSettings.bondRole == 0 && !gEspNow->bondSessionTokenValid &&
+        if (isBondWorker() && !gEspNow->bondSessionTokenValid &&
             gEspNow->lastRemoteCapValid && gEspNow->bondCapSent &&
             !gEspNow->bondSettingsSent && capExchangedLongEnough) {
           gEspNow->bondSettingsSent = true;
@@ -2711,7 +2708,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
         
         if (wasOffline) {
           // Deferred: master starts sync tick
-          if (gSettings.bondRole == 1) {
+          if (isBondMaster()) {
             gEspNow->bondNeedsCapabilityRequest = true;
             // bondNeedsStreamingSetup is set after sync completes in processBondSettings()
           }
@@ -4151,7 +4148,7 @@ static String generateDeviceManifest() {
   uint8_t mac[6];
   esp_wifi_get_mac(WIFI_IF_STA, mac);
   device["mac"] = formatMacAddress(mac);
-  device["role"] = gSettings.bondRole == 1 ? "master" : "worker";
+  device["role"] = isBondMaster() ? "master" : "worker";
   device["uptime"] = millis() / 1000;
   
   // Capability summary (embedded)
@@ -4260,7 +4257,6 @@ static String generateDeviceManifest() {
  * Cache manifest to LittleFS keyed by firmware hash
  */
 static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& manifest) {
-  extern bool filesystemReady;
   if (!filesystemReady) return false;
   
   // Build filename from hash
@@ -4341,7 +4337,7 @@ static String generateDeviceSettings() {
   
   // Add device identification metadata
   doc["_deviceName"] = gSettings.espnowDeviceName;
-  doc["_bondRole"] = gSettings.bondRole == 1 ? "master" : "worker";
+  doc["_bondRole"] = isBondMaster() ? "master" : "worker";
   
   String settings;
   serializeJson(doc, settings);
@@ -4352,7 +4348,6 @@ static String generateDeviceSettings() {
  * Cache settings to LittleFS for a specific peer MAC
  */
 static bool cacheSettingsToLittleFS(const uint8_t* peerMac, const String& settings) {
-  extern bool filesystemReady;
   DEBUG_ESPNOWF("[SETTINGS_CACHE] cacheSettingsToLittleFS: fsReady=%d len=%d",
                 filesystemReady ? 1 : 0, settings.length());
   if (!filesystemReady || !peerMac) {
@@ -4399,7 +4394,6 @@ static bool cacheSettingsToLittleFS(const uint8_t* peerMac, const String& settin
  * Non-static so OLED_RemoteSettings can use it
  */
 String loadSettingsFromCache(const uint8_t* peerMac) {
-  extern bool filesystemReady;
   DEBUG_ESPNOWF("[SETTINGS_LOAD] loadSettingsFromCache called: fsReady=%d peerMac=%p",
                 filesystemReady ? 1 : 0, peerMac);
   if (!filesystemReady || !peerMac) {
@@ -4452,7 +4446,7 @@ static const uint32_t METADATA_DEBOUNCE_MS = 3000;  // 3 second cooldown between
  */
 static void requestBondSettings(const uint8_t* peerMac) {
   if (!peerMac || !gEspNow || !gSettings.bondModeEnabled) return;
-  if (gSettings.bondRole != 1) return;
+  if (!isBondMaster()) return;
 
   uint32_t now = millis();
   gEspNow->bondSyncInFlight = BOND_SYNC_SETTINGS;
@@ -4564,7 +4558,6 @@ static void sendBondSettings(const uint8_t* peerMac) {
   // /espnow/received/<mac>/automations.json and broadcasts a formatted summary.
   {
     extern const char* AUTOMATIONS_JSON_FILE;
-    extern bool filesystemReady;
     if (filesystemReady && LittleFS.exists(AUTOMATIONS_JSON_FILE)) {
       vTaskDelay(pdMS_TO_TICKS(200));  // Brief gap between transfers
       bool autoSent = sendFileToMac(peerMac, String(AUTOMATIONS_JSON_FILE));
@@ -4638,7 +4631,7 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
         }
       }
       // Master: push saved streaming prefs to worker now that sync is done
-      if (gSettings.bondRole == 1) {
+      if (isBondMaster()) {
         gEspNow->bondNeedsStreamingSetup = true;
       }
       BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=%d", (int)gSettings.bondRole);
@@ -4657,7 +4650,6 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
  * Load cached manifest from LittleFS by firmware hash
  */
 static String loadManifestFromCache(const uint8_t fwHash[16]) {
-  extern bool filesystemReady;
   if (!filesystemReady) return "";
   
   // Build filename from hash
@@ -5378,7 +5370,6 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
 
     // Handle list request
     if (strcmp(kind, "list") == 0) {
-      extern bool filesystemReady;
       extern bool buildFilesListing(const String& inPath, String& out, bool asJson);
       
       String filesJson;
@@ -5427,7 +5418,6 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
     
     // Handle fetch request (request to send a file back)
     if (strcmp(kind, "fetch") == 0) {
-      extern bool filesystemReady;
       
       if (!filesystemReady) {
         broadcastOutput("[ESP-NOW] File fetch: Filesystem not ready");
@@ -5464,7 +5454,6 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
   // Handle USER_SYNC (user credential propagation) messages
   if (strcmp(type, MSG_TYPE_USER_SYNC) == 0) {
     // Check if user sync is enabled
-    extern Settings gSettings;
     if (!gSettings.espnowUserSyncEnabled) {
       WARN_ESPNOWF("[USER_SYNC] User sync disabled - rejecting sync request from %s", ctx.deviceName.c_str());
       broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnow usersync on'");
@@ -5580,7 +5569,6 @@ static bool handleJsonMessage(const ReceivedMessage& ctx) {
     // Create user directly (similar to approvePendingUserInternal but simpler)
     extern uint32_t gNTPAnchorId;
     extern uint32_t gBootCounter;
-    extern bool filesystemReady;
     
     if (!filesystemReady) {
       ERROR_ESPNOWF("[USER_SYNC] Filesystem not ready");
@@ -6534,6 +6522,13 @@ String getEspNowDeviceName(const uint8_t* mac) {
   return "";
 }
 
+// Set mesh role at runtime with logging. Does not persist — reboot restores saved role.
+void setMeshRole(MeshRole role, const char* reason) {
+  if (gSettings.meshRole == (uint8_t)role) return;
+  BROADCAST_PRINTF("[MESH_ROLE] %d -> %d | %s", (int)gSettings.meshRole, (int)role, reason ? reason : "");
+  gSettings.meshRole = (uint8_t)role;
+}
+
 // Remove a device from the paired device registry by MAC
 void removeEspNowDevice(const uint8_t* mac) {
   if (!gEspNow) return;
@@ -6691,7 +6686,7 @@ void processMeshHeartbeats() {
       gLastMasterHeartbeat > 0 &&
       (now - gLastMasterHeartbeat) >= gSettings.meshFailoverTimeout) {
     gBackupPromoted = true;
-    gSettings.meshRole = MESH_ROLE_MASTER;  // Runtime only — not persisted, reboot restores backup role
+    setMeshRole(MESH_ROLE_MASTER, "backup.promoted");  // Runtime only — not persisted, reboot restores backup role
     BROADCAST_PRINTF("[BACKUP] Master silent for %lums — promoted to master",
                      (unsigned long)gSettings.meshFailoverTimeout);
   }
@@ -6838,7 +6833,7 @@ void processMeshHeartbeats() {
   // =========================================================================
   
   // --- Master sync tick: decide what to request next ---
-  if (gSettings.bondRole == 1 && gEspNow->bondPeerOnline && gSettings.bondModeEnabled) {
+  if (isBondMaster() && gEspNow->bondPeerOnline && gSettings.bondModeEnabled) {
     uint8_t peerMac[6];
     bool macOk = (gSettings.bondPeerMac.length() > 0 && parseMacAddress(gSettings.bondPeerMac, peerMac));
     
@@ -6966,7 +6961,6 @@ void processMeshHeartbeats() {
     String tempPath = "/system/_manifest_out.json";
     {
       FsLockGuard guard("bond.manifest.send");
-      extern bool filesystemReady;
       if (filesystemReady) {
         if (!LittleFS.exists("/system")) LittleFS.mkdir("/system");
         File f = LittleFS.open(tempPath.c_str(), "w");
@@ -7002,7 +6996,7 @@ void processMeshHeartbeats() {
     gEspNow->bondSettingsSent = true;
     
     // Worker sync-complete: capSent + settingsSent + capValid → isBondSynced() now true
-    if (gSettings.bondRole == 0 && isBondSynced() && !gEspNow->bondSessionTokenValid) {
+    if (isBondWorker() && isBondSynced() && !gEspNow->bondSessionTokenValid) {
       uint8_t pMac[6];
       if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
         computeBondSessionToken(pMac);
@@ -7018,7 +7012,7 @@ void processMeshHeartbeats() {
                      (int)gSettings.bondRole);
     
     // Only master pushes streaming prefs to worker (after full sync)
-    if (gSettings.bondRole == 1 && isBondSynced()) {
+    if (isBondMaster() && isBondSynced()) {
       extern bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable);
       struct { const char* name; bool enabled; RemoteSensorType type; } streams[] = {
         { "thermal",  gSettings.bondStreamThermal,  REMOTE_SENSOR_THERMAL },
@@ -9411,7 +9405,7 @@ bool isBondModeOnline() {
 // Worker: exchanged caps + sent settings TO master (worker never receives manifest/settings).
 bool isBondSynced() {
   if (!isBondModeOnline() || !gEspNow->lastRemoteCapValid) return false;
-  if (gSettings.bondRole == 1) {
+  if (isBondMaster()) {
     // Master: pulled everything from worker
     return gEspNow->bondManifestReceived && gEspNow->bondSettingsReceived;
   } else {
@@ -9430,7 +9424,7 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
   if (!isBondModeOnline()) return false;
   
   // Only workers should send sensor data to master
-  if (gSettings.bondRole == 1) return false;
+  if (isBondMaster()) return false;
   
   // Get peer MAC
   uint8_t peerMac[6];
@@ -9473,7 +9467,7 @@ bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable) {
   if (!isBondSynced()) return false;
   
   // Only master sends stream control to worker
-  if (gSettings.bondRole != 1) return false;
+  if (!isBondMaster()) return false;
   
   uint8_t peerMac[6];
   if (!parseMacAddress(gSettings.bondPeerMac, peerMac)) return false;
@@ -10408,7 +10402,6 @@ const char* cmd_bond_requestmanifest(const String& argsInput) {
 const char* cmd_bond_showremotemanifest(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  extern bool filesystemReady;
   if (!filesystemReady) {
     return "Filesystem not ready.";
   }
@@ -10563,7 +10556,7 @@ const char* cmd_bond_connect(const String& argsInput) {
   // Enable bond mode last — peerMac and role are already set
   setSetting(gSettings.bondModeEnabled, true);
   INFO_ESPNOWF("[PAIR] Role assigned by MAC comparison: %s (our=%02X:%02X:%02X:%02X:%02X:%02X, peer=%02X:%02X:%02X:%02X:%02X:%02X)",
-                gSettings.bondRole == 1 ? "MASTER" : "WORKER",
+                isBondMaster() ? "MASTER" : "WORKER",
                 ourMac[0], ourMac[1], ourMac[2], ourMac[3], ourMac[4], ourMac[5],
                 peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
   gEspNow->bondPeerOnline = false;  // Will be set true when heartbeat received
@@ -10580,7 +10573,7 @@ const char* cmd_bond_connect(const String& argsInput) {
   snprintf(getDebugBuffer(), 1024, 
            "Bond mode enabled. Waiting for peer: %s (%s)\nRole: %s\nCapabilities + manifest will be requested when peer comes online.",
            deviceName.c_str(), formatMacAddress(peerMac).c_str(),
-           gSettings.bondRole == 1 ? "master" : "worker");
+           isBondMaster() ? "master" : "worker");
   return getDebugBuffer();
 }
 
@@ -10615,7 +10608,7 @@ const char* cmd_bond_status(const String& argsInput) {
   if (!gSettings.bondModeEnabled) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     char* buf = getDebugBuffer();
-    snprintf(buf, 512, "Bond mode: DISABLED\nRole: %s", gSettings.bondRole == 1 ? "master" : "worker");
+    snprintf(buf, 512, "Bond mode: DISABLED\nRole: %s", isBondMaster() ? "master" : "worker");
     return buf;
   }
   
@@ -10647,7 +10640,7 @@ const char* cmd_bond_status(const String& argsInput) {
   
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("Bond mode: ENABLED");
-  BROADCAST_PRINTF("Role: %s", gSettings.bondRole == 1 ? "master (display/gamepad)" : "worker (compute/network)");
+  BROADCAST_PRINTF("Role: %s", isBondMaster() ? "master (display/gamepad)" : "worker (compute/network)");
   BROADCAST_PRINTF("Peer: %s (%s)", deviceName.c_str(), gSettings.bondPeerMac.c_str());
   BROADCAST_PRINTF("Peer status: %s", peerStatus);
   bool setSent = gEspNow ? gEspNow->bondSettingsSent : false;
@@ -10676,7 +10669,7 @@ const char* cmd_bond_role(const String& argsInput) {
   if (args.length() == 0) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     snprintf(getDebugBuffer(), 1024, "Current role: %s",
-             gSettings.bondRole == 1 ? "master" : "worker");
+             isBondMaster() ? "master" : "worker");
     return getDebugBuffer();
   }
   
@@ -10758,7 +10751,7 @@ const char* cmd_bond_stream(const String& argsInput) {
     // Show current streaming status with detailed diagnostics
     broadcastOutput("[BOND] Sensor streaming diagnostics (bidirectional):");
     BROADCAST_PRINTF("  Bond mode enabled: %s", gSettings.bondModeEnabled ? "YES" : "NO");
-    BROADCAST_PRINTF("  Our role: %s", gSettings.bondRole == 1 ? "MASTER" : "WORKER");
+    BROADCAST_PRINTF("  Our role: %s", isBondMaster() ? "MASTER" : "WORKER");
     BROADCAST_PRINTF("  Peer MAC: %s", gSettings.bondPeerMac.length() > 0 ? gSettings.bondPeerMac.c_str() : "(none)");
     BROADCAST_PRINTF("  ESP-NOW init: %s", (gEspNow && gEspNow->initialized) ? "YES" : "NO");
     BROADCAST_PRINTF("  Peer online: %s", gEspNow ? (gEspNow->bondPeerOnline ? "YES" : "NO") : "N/A");
@@ -10864,7 +10857,7 @@ const char* cmd_bond_testsensor(const String& argsInput) {
   
   broadcastOutput("[BOND_TEST] Testing v3 sensor data transmission...");
   BROADCAST_PRINTF("  Sensor type: %s (%d)", sensorTypeToString(testType), (int)testType);
-  BROADCAST_PRINTF("  Role: %s", gSettings.bondRole == 1 ? "MASTER" : "WORKER");
+  BROADCAST_PRINTF("  Role: %s", isBondMaster() ? "MASTER" : "WORKER");
   BROADCAST_PRINTF("  Peer MAC: %s", gSettings.bondPeerMac.c_str());
   BROADCAST_PRINTF("  isBondModeOnline(): %s", isBondModeOnline() ? "YES" : "NO");
   

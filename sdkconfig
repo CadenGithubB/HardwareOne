@@ -2309,6 +2309,7 @@ CONFIG_JD_USE_ROM=y
 #
 # libsodium
 #
+CONFIG_LIBSODIUM_USE_MBEDTLS_SHA=y
 # end of libsodium
 
 #

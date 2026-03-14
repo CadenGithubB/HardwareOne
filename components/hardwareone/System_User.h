@@ -39,6 +39,13 @@ struct AuthContext {
 // User command registry - using userSystemCommands only
 
 // ============================================================================
+// Authentication State Globals (defined in HardwareOne.cpp)
+// ============================================================================
+
+extern bool gLocalDisplayAuthed;
+extern String gLocalDisplayUser;
+
+// ============================================================================
 // User Management Helper Functions (implemented in user_system.cpp)
 // ============================================================================
 

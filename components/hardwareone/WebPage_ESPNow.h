@@ -398,6 +398,99 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         document.getElementById('espnow-status-data').textContent = 'Error: ' + error;
       });
     };
+
+    // Batch version: loads all 8 ESP-NOW CLI commands in a single HTTPS request on page load.
+    // Falls back to individual refreshStatus() if the batch endpoint is unavailable.
+    window.refreshStatusBatch = function() {
+      var CMDS = [
+        'espnowstatus',     // 0
+        'espnow mode',      // 1
+        'bond status',      // 2
+        'espnow list',      // 3
+        'espnow encstatus', // 4
+        'espnow deviceinfo',// 5
+        'espnow meshrole',  // 6
+        'espnow meshstatus' // 7
+      ];
+      fetch('/api/cli/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ commands: CMDS })
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (!data || !Array.isArray(data.results) || data.results.length < 2) {
+          console.warn('[ESP-NOW] Batch response invalid, falling back to individual requests');
+          refreshStatus();
+          return;
+        }
+        var results = data.results;
+        var output  = results[0] || '';
+        var modeOut = results[1] || '';
+
+        // --- apply espnowstatus (same logic as refreshStatus) ---
+        console.log('[ESP-NOW] Batch status:', output);
+        const indicator = document.getElementById('espnow-status-indicator');
+        const isInitialized = output.match(/Initialized:\s*Yes/i) !== null;
+        document.getElementById('espnow-status-data').textContent = output;
+        if (isInitialized) {
+          indicator.className = 'status-indicator status-enabled';
+          document.getElementById('btn-espnow-init').style.display = 'none';
+          document.getElementById('btn-espnow-disable').style.display = '';
+          document.getElementById('smarthome-card').style.display = 'block';
+          document.getElementById('encryption-card').style.display = 'block';
+          document.getElementById('device-management-card').style.display = 'block';
+          document.getElementById('btn-espnow-toggle-mode').style.display = '';
+        } else {
+          indicator.className = 'status-indicator status-disabled';
+          document.getElementById('btn-espnow-init').style.display = '';
+          document.getElementById('btn-espnow-disable').style.display = 'none';
+          document.getElementById('smarthome-card').style.display = 'none';
+          document.getElementById('encryption-card').style.display = 'none';
+          document.getElementById('device-management-card').style.display = 'none';
+          document.getElementById('btn-espnow-toggle-mode').style.display = 'none';
+          var meshCard = document.getElementById('mesh-status-card');
+          if (meshCard) meshCard.style.display = 'none';
+        }
+
+        // --- apply espnow mode ---
+        try {
+          var m = (modeOut || '').toLowerCase();
+          var isMesh = m.indexOf('mesh') >= 0;
+          var btn = document.getElementById('btn-espnow-toggle-mode');
+          if (btn) btn.textContent = 'Mode: ' + (isMesh ? 'Mesh' : 'Direct');
+          var warn = document.getElementById('mesh-warning');
+          if (warn) warn.style.display = isMesh ? 'block' : 'none';
+          var meshCard2 = document.getElementById('mesh-status-card');
+          if (meshCard2) meshCard2.style.display = (isMesh && isInitialized) ? 'block' : 'none';
+          var meshRoleCard = document.getElementById('mesh-role-card');
+          if (meshRoleCard) meshRoleCard.style.display = (isMesh && isInitialized) ? 'block' : 'none';
+          window.espnowIsMesh = !!isMesh;
+          if (isMesh && isInitialized) {
+            if (typeof window.startMeshStatusPolling === 'function') window.startMeshStatusPolling();
+          } else {
+            if (typeof window.stopMeshStatusPolling === 'function') window.stopMeshStatusPolling();
+          }
+        } catch(e) { console.error('[ESP-NOW] Batch mode parse error:', e); }
+
+        // --- distribute remaining results to sub-functions ---
+        if (isInitialized) {
+          try { if (typeof listDevices === 'function') listDevices(results[2], results[3]); } catch(e) { console.warn('[ESP-NOW] Batch listDevices error:', e); }
+          try { if (typeof window.checkEncryptionStatus === 'function') window.checkEncryptionStatus(results[4]); } catch(e) { console.warn('[ESP-NOW] Batch encstatus error:', e); }
+          try { if (typeof window.loadSmartHomeMetadata === 'function') window.loadSmartHomeMetadata(results[5]); } catch(e) { console.warn('[ESP-NOW] Batch deviceinfo error:', e); }
+          var isMeshInit = window.espnowIsMesh;
+          if (isMeshInit) {
+            try { if (typeof window.refreshMeshRole === 'function') window.refreshMeshRole(results[6]); } catch(e) { console.warn('[ESP-NOW] Batch meshrole error:', e); }
+            try { if (typeof window.refreshMeshStatus === 'function') window.refreshMeshStatus(results[7]); } catch(e) { console.warn('[ESP-NOW] Batch meshstatus error:', e); }
+          }
+        }
+      })
+      .catch(error => {
+        console.warn('[ESP-NOW] Batch fetch failed, falling back to individual requests:', error);
+        refreshStatus();
+      });
+    };
+
     console.log('[ESP-NOW] Chunk 2: Status functions ready');
   } catch(e) { console.error('[ESP-NOW] Chunk 2 error:', e); }
 })();
@@ -406,31 +499,13 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
 (function() {
   try {
     console.log('[ESP-NOW] Chunk 3B: listDevices start');
-    window.listDevices = function() {
-      // First get bond status to identify bonded device
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('bond status')
-      })
-      .then(r => r.text())
-      .then(bondStatus => {
-        // Extract bonded peer MAC if present
+    window.listDevices = function(preloadedBondStatus, preloadedList) {
+      function applyBondStatus(bondStatus) {
         window.__bondedPeerMac = null;
         const bondMatch = bondStatus.match(/Peer MAC:\s*([A-Fa-f0-9:]{17})/);
-        if (bondMatch) {
-          window.__bondedPeerMac = bondMatch[1].toUpperCase();
-        }
-        
-        // Now fetch device list
-        return fetch('/api/cli', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow list')
-        });
-      })
-      .then(response => response.text())
-      .then(output => {
+        if (bondMatch) { window.__bondedPeerMac = bondMatch[1].toUpperCase(); }
+      }
+      function applyList(output) {
         const deviceList = document.getElementById('device-list');
         try { console.log('[ESP-NOW][DEV] listDevices: output length', output ? output.length : -1); } catch(e){}
         window.espnowDevices = [];
@@ -476,7 +551,30 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
             + '</div>';
           deviceList.innerHTML = broadcastBtn + html;
         }
+      }
+      if (preloadedBondStatus !== undefined) {
+        applyBondStatus(preloadedBondStatus);
+        applyList(preloadedList !== undefined ? preloadedList : '');
+        return;
+      }
+      // First get bond status to identify bonded device
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'cmd=' + encodeURIComponent('bond status')
       })
+      .then(r => r.text())
+      .then(bondStatus => {
+        applyBondStatus(bondStatus);
+        // Now fetch device list
+        return fetch('/api/cli', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'cmd=' + encodeURIComponent('espnow list')
+        });
+      })
+      .then(response => response.text())
+      .then(applyList)
       .catch(error => {
         document.getElementById('device-list').innerHTML = '<div style="color: #dc3545;">Error loading devices: ' + error + '</div>';
       });
@@ -875,11 +973,11 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       if (statDiv) {
         statDiv.style.background = '#fff3cd';
         statDiv.style.color = '#856404';
-        statDiv.textContent = '📤 Sending file: ' + filename + '...';
+        statDiv.textContent = 'Sending file: ' + filename + '...';
       }
       
       // Also show in message log
-      appendLogLine('log-' + mac, 'SENT', '📤 Sending file: ' + filename, 'sending');
+      appendLogLine('log-' + mac, 'SENT', 'Sending file: ' + filename, 'sending');
       
       fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent('espnow sendfile ' + mac + ' ' + path) })
         .then(r=>r.text())
@@ -1873,14 +1971,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         window.meshStatusPollInterval = null;
       }
     };
-    window.refreshMeshStatus = function() {
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow meshstatus')
-      })
-      .then(response => response.text())
-      .then(output => {
+    window.refreshMeshStatus = function(preloadedText) {
+      function applyMeshStatus(output) {
         try {
           var data = JSON.parse(output);
           if (data.error) {
@@ -1972,13 +2064,24 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           console.error('[ESP-NOW] Error parsing mesh status:', e);
           document.getElementById('mesh-peers-list').innerHTML = '<div style="color:var(--danger);text-align:center;">Error parsing mesh status</div>';
         }
+      }
+      if (preloadedText !== undefined) {
+        applyMeshStatus(preloadedText);
+        return;
+      }
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'cmd=' + encodeURIComponent('espnow meshstatus')
       })
+      .then(response => response.text())
+      .then(applyMeshStatus)
       .catch(error => {
         console.error('[ESP-NOW] Mesh status fetch error:', error);
         var el = document.getElementById('mesh-peers-list');
         if (el) el.innerHTML = '<div style="color:var(--danger);text-align:center;">Error: ' + error + '</div>';
       });
-      
+
       // Topology view is refreshed only on explicit user action (tab switch or Discover button),
       // not on the 3-second mesh status poll — that would spam the CLI with toporesults requests.
     };
@@ -2304,48 +2407,31 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
 (function() {
   try {
     console.log('[ESP-NOW] Chunk 4c: Mesh role functions start');
-    window.refreshMeshRole = function() {
+    window.refreshMeshRole = function(preloadedText) {
       console.log('[ESP-NOW] Refreshing mesh role...');
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow meshrole')
-      })
-      .then(response => response.text())
-      .then(output => {
+      function applyMeshRole(output) {
         console.log('[ESP-NOW] Mesh role response:', output);
         var statusDiv = document.getElementById('mesh-role-status');
         if (!statusDiv) return;
-        
-        // Parse role, master MAC, backup enabled flag, and backup MAC from output
         var roleMatch = output.match(/Mesh role:\s*(\w+)/i);
         var masterMatch = output.match(/Master MAC:\s*([A-Fa-f0-9:]{17})/i);
         var backupEnabledMatch = output.match(/Backup enabled:\s*(yes|no)/i);
         var backupMatch = output.match(/Backup MAC:\s*([A-Fa-f0-9:]{17})/i);
-        
         var role = roleMatch ? roleMatch[1] : 'unknown';
         var masterMAC = masterMatch ? masterMatch[1] : 'Not set';
         var backupEnabled = backupEnabledMatch ? backupEnabledMatch[1].toLowerCase() === 'yes' : false;
         var backupMAC = backupMatch ? backupMatch[1] : 'Not set';
-        
         var html = '<strong>Current Role:</strong> ' + role.charAt(0).toUpperCase() + role.slice(1);
         html += '<br><strong>Master MAC:</strong> ' + masterMAC;
         if (backupEnabled) {
           html += '<br><strong>Backup MAC:</strong> ' + backupMAC;
         }
-        
         statusDiv.innerHTML = html;
-        
-        // Sync the backup-enabled checkbox
         var backupCheckbox = document.getElementById('backup-master-enabled');
         if (backupCheckbox) backupCheckbox.checked = backupEnabled;
-        
-        // Show/hide MAC input fields based on role
         var masterGroup = document.getElementById('master-mac')?.parentElement;
         var backupMacGroup = document.getElementById('backup-mac-group');
-        
         if (role.toLowerCase() === 'master') {
-          // Master: hide master MAC field, show backup MAC group only if backup is enabled
           if (masterGroup) masterGroup.style.display = 'none';
           if (backupMacGroup) backupMacGroup.style.display = backupEnabled ? 'flex' : 'none';
           if (backupEnabled && backupMAC !== 'Not set') {
@@ -2353,7 +2439,6 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
             if (backupInput) backupInput.value = backupMAC;
           }
         } else if (role.toLowerCase() === 'backup') {
-          // Backup: show master MAC field, hide backup MAC group (this IS the backup)
           if (masterGroup) masterGroup.style.display = 'flex';
           if (backupMacGroup) backupMacGroup.style.display = 'none';
           if (masterMAC !== 'Not set') {
@@ -2361,7 +2446,6 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
             if (masterInput) masterInput.value = masterMAC;
           }
         } else {
-          // Worker: show master MAC field, show backup MAC group only if backup is enabled
           if (masterGroup) masterGroup.style.display = 'flex';
           if (backupMacGroup) backupMacGroup.style.display = backupEnabled ? 'flex' : 'none';
           if (masterMAC !== 'Not set') {
@@ -2373,7 +2457,18 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
             if (backupInput) backupInput.value = backupMAC;
           }
         }
+      }
+      if (preloadedText !== undefined) {
+        applyMeshRole(preloadedText);
+        return;
+      }
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'cmd=' + encodeURIComponent('espnow meshrole')
       })
+      .then(response => response.text())
+      .then(applyMeshRole)
       .catch(error => {
         console.error('[ESP-NOW] Mesh role fetch error:', error);
         var statusDiv = document.getElementById('mesh-role-status');
@@ -2996,31 +3091,21 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
 (function() {
   try {
     console.log('[ESP-NOW] Chunk 5c: Smart home metadata functions');
-    window.loadSmartHomeMetadata = function() {
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow deviceinfo')
-      })
-      .then(response => response.text())
-      .then(text => {
+    window.loadSmartHomeMetadata = function(preloadedText) {
+      function applyMetadata(text) {
         const statusDiv = document.getElementById('smarthome-status');
         if (!statusDiv) return;
         statusDiv.textContent = text;
-        
-        // Parse and populate input fields
         const friendlyMatch = text.match(/Friendly Name:\s*(.+)/);
         const roomMatch = text.match(/Room:\s*(.+)/);
         const zoneMatch = text.match(/Zone:\s*(.+)/);
         const tagsMatch = text.match(/Tags:\s*(.+)/);
         const stationaryMatch = text.match(/Stationary:\s*(Yes|No)/i);
-        
         const friendlyInput = document.getElementById('friendly-name');
         const roomInput = document.getElementById('room-name');
         const zoneInput = document.getElementById('zone-name');
         const tagsInput = document.getElementById('tags-input');
         const stationaryCheckbox = document.getElementById('stationary-checkbox');
-        
         if (friendlyInput && friendlyMatch) {
           const val = friendlyMatch[1].trim();
           friendlyInput.value = (val === '(not set)') ? '' : val;
@@ -3040,7 +3125,18 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         if (stationaryCheckbox && stationaryMatch) {
           stationaryCheckbox.checked = (stationaryMatch[1].toLowerCase() === 'yes');
         }
+      }
+      if (preloadedText !== undefined) {
+        applyMetadata(preloadedText);
+        return;
+      }
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'cmd=' + encodeURIComponent('espnow deviceinfo')
       })
+      .then(response => response.text())
+      .then(applyMetadata)
       .catch(error => {
         console.error('[ESP-NOW] Error loading smart home metadata:', error);
       });
@@ -3053,27 +3149,10 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
 (function() {
   try {
     console.log('[ESP-NOW] Chunk 5d: Encryption status check');
-    window.checkEncryptionStatus = function() {
-      // Only check if ESP-NOW is initialized
-      const indicator = document.getElementById('espnow-status-indicator');
-      const isInitialized = indicator && indicator.className.indexOf('status-enabled') >= 0;
-      
-      if (!isInitialized) {
-        console.log('[ESP-NOW] Skipping encryption status check - ESP-NOW not initialized');
-        return;
-      }
-      
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow encstatus')
-      })
-      .then(response => response.text())
-      .then(text => {
+    window.checkEncryptionStatus = function(preloadedEncText) {
+      function applyEncStatus(text) {
         const statusDiv = document.getElementById('encryption-status');
         if (!statusDiv) return;
-        
-        // Parse the response to check if passphrase is set
         if (text.includes('Passphrase Set: Yes')) {
           statusDiv.textContent = 'Encryption passphrase is set';
         } else if (text.includes('Passphrase Set: No') || text.includes('Encryption Enabled: No')) {
@@ -3081,7 +3160,25 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         } else {
           statusDiv.textContent = 'Encryption status unknown';
         }
+      }
+      if (preloadedEncText !== undefined) {
+        applyEncStatus(preloadedEncText);
+        return;
+      }
+      // Only check if ESP-NOW is initialized
+      const indicator = document.getElementById('espnow-status-indicator');
+      const isInitialized = indicator && indicator.className.indexOf('status-enabled') >= 0;
+      if (!isInitialized) {
+        console.log('[ESP-NOW] Skipping encryption status check - ESP-NOW not initialized');
+        return;
+      }
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'cmd=' + encodeURIComponent('espnow encstatus')
       })
+      .then(response => response.text())
+      .then(applyEncStatus)
       .catch(error => {
         console.error('[ESP-NOW] Error checking encryption status:', error);
       });
@@ -3097,7 +3194,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
     document.addEventListener('DOMContentLoaded', function() {
       console.log('[ESP-NOW] DOMContentLoaded');
       setupButtonHandlers();
-      refreshStatus(); /* This will show/hide cards, load device list, and check encryption status if initialized */
+      refreshStatusBatch(); /* Single batch request: loads all ESP-NOW status in one HTTPS call */
       /* SSE-based: no legacy RX watcher */
     });
     console.log('[ESP-NOW] Chunk 6: Main init ready');

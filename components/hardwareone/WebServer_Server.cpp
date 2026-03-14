@@ -5,6 +5,7 @@
  */
 
 #include "System_BuildConfig.h"
+#include <esp_app_desc.h>
 
 #if ENABLE_HTTP_SERVER
 
@@ -2875,19 +2876,24 @@ esp_err_t handlePing(httpd_req_t* req) {
 
   httpd_resp_set_type(req, "application/json");
 
-  char json[320];
+  String fp = getDeviceFingerprint();
+  char json[448];
 #if ENABLE_HTTPS
   snprintf(json, sizeof(json),
-    "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"acceptingRestore\":%s,\"https\":%s}",
+    "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"fingerprint\":\"%s\",\"firmwareVersion\":\"%s\",\"acceptingRestore\":%s,\"https\":%s}",
     WiFi.getHostname(),
     WiFi.macAddress().c_str(),
+    fp.c_str(),
+    esp_app_get_description()->version,
     gAcceptingRestore ? "true" : "false",
     gSettings.httpsEnabled ? "true" : "false");
 #else
   snprintf(json, sizeof(json),
-    "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"acceptingRestore\":%s}",
+    "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"fingerprint\":\"%s\",\"firmwareVersion\":\"%s\",\"acceptingRestore\":%s}",
     WiFi.getHostname(),
     WiFi.macAddress().c_str(),
+    fp.c_str(),
+    esp_app_get_description()->version,
     gAcceptingRestore ? "true" : "false");
 #endif
   httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);

@@ -298,7 +298,6 @@ void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled) {
   }
   
   // Only workers should broadcast to master
-  extern Settings gSettings;
   bool meshEn = meshEnabled();
   DEBUG_SENSORSF("[SENSOR_STATUS_TX] Pre-checks: meshEnabled=%d, meshRole=%d", meshEn, gSettings.meshRole);
   
@@ -343,8 +342,7 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
   
 #if ENABLE_BONDED_MODE
   // Bond master: send STREAM_CTRL to worker — master doesn't have the sensors locally
-  extern Settings gSettings;
-  if (gSettings.bondModeEnabled && gSettings.bondRole == 1) {
+  if (gSettings.bondModeEnabled && isBondMaster()) {
     extern bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable);
     DEBUG_SENSORSF("[SENSOR_STREAM] Bond master: sending STREAM_CTRL %s ON to worker", sensorTypeToString(sensorType));
     bool sent = sendBondStreamCtrl(sensorType, true);
@@ -401,8 +399,7 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
   
 #if ENABLE_BONDED_MODE
   // Bond master: send STREAM_CTRL OFF to worker
-  extern Settings gSettings;
-  if (gSettings.bondModeEnabled && gSettings.bondRole == 1) {
+  if (gSettings.bondModeEnabled && isBondMaster()) {
     extern bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable);
     DEBUG_SENSORSF("[SENSOR_STREAM] Bond master: sending STREAM_CTRL %s OFF to worker", sensorTypeToString(sensorType));
     sendBondStreamCtrl(sensorType, false);
@@ -459,7 +456,6 @@ bool isSensorBroadcastEnabled() {
 void espnowSensorStatusPeriodicTick() {
   if (!gSensorBroadcastEnabled) return;
 
-  extern Settings gSettings;
   if (!meshEnabled()) return;
   if (gSettings.meshRole == MESH_ROLE_MASTER) return;
 
@@ -573,14 +569,13 @@ void forceSensorBroadcast(RemoteSensorType sensorType) {
 static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen) {
   DEBUG_SENSORSF("[SENSOR_TX] type=%s len=%u", sensorTypeToString(sensorType), jsonLen);
   
-  extern Settings gSettings;
   
   // Send via V3 binary protocol (both bond and mesh modes)
   extern bool v3_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
   
 #if ENABLE_BONDED_MODE
   // Check for bond mode first
-  if (gSettings.bondModeEnabled && gSettings.bondRole == 0) {
+  if (gSettings.bondModeEnabled && isBondWorker()) {
     // Bond mode worker - send via v3 binary protocol to master
     if (isBondModeOnline()) {
       DEBUG_SENSORSF("[SENSOR_DATA_TX] Using v3 binary protocol for bond mode");
@@ -639,7 +634,6 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
 static void sensorBroadcasterTask(void* param) {
   (void)param;
   
-  extern Settings gSettings;
   unsigned long loopCount = 0;
   
   DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BCAST_TASK] Started on core %d", xPortGetCoreID());
@@ -873,7 +867,6 @@ void cleanupExpiredRemoteSensorData() {
 int buildThermalDataJSONInteger(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
-  extern ThermalCache gThermalCache;
   extern bool lockThermalCache(TickType_t timeout);
   extern void unlockThermalCache();
   
@@ -882,7 +875,6 @@ int buildThermalDataJSONInteger(char* buf, size_t bufSize) {
   if (lockThermalCache(pdMS_TO_TICKS(100))) {
     // Use raw frame only (no interpolation for remote streaming)
     // Swap dimensions if rotation is 90° or 270°
-    extern Settings gSettings;
     int width = (gSettings.thermalRotation == 1 || gSettings.thermalRotation == 3) ? 24 : 32;
     int height = (gSettings.thermalRotation == 1 || gSettings.thermalRotation == 3) ? 32 : 24;
     int frameSize = 768;

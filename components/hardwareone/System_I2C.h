@@ -136,12 +136,12 @@ inline uint8_t i2cProbeAddress(uint8_t address, uint32_t clockHz, uint32_t timeo
   
   SemaphoreHandle_t mutex = mgr->getBusMutex();
   uint8_t err = 4;
-  if (mutex && xSemaphoreTakeRecursive(mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {
+  if (mutex && xSemaphoreTake(mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {
     Wire1.setClock(clockHz);
     Wire1.beginTransmission(address);
     err = Wire1.endTransmission();
     Wire1.setClock(100000);
-    xSemaphoreGiveRecursive(mutex);
+    xSemaphoreGive(mutex);
   }
   return err;
 }

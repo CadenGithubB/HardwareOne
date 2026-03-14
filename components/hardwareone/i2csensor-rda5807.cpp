@@ -292,7 +292,7 @@ void fmRadioTask(void* parameter) {
       shouldStream = true;
     }
 #if ENABLE_BONDED_MODE
-    if (gSettings.bondModeEnabled && gSettings.bondRole == 0) {
+    if (gSettings.bondModeEnabled && isBondWorker()) {
       shouldStream = true;  // Bond mode worker
     }
 #endif

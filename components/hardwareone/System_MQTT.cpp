@@ -64,7 +64,6 @@ extern const char* cmd_espnow_remote(const String& argsInput);
 #endif
 
 // Forward declarations
-extern Settings gSettings;
 
 // MQTT state
 static esp_mqtt_client_handle_t mqttClient = nullptr;

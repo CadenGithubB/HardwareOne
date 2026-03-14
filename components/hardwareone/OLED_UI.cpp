@@ -314,8 +314,7 @@ bool oledDialogActive() {
 
 bool oledDialogHandleInput(uint32_t newlyPressed) {
   if (!gOledDialog.active) return false;
-  
-  extern NavEvents gNavEvents;
+
   bool handled = false;
   
   // Left/right to switch buttons
@@ -535,8 +534,7 @@ bool oledListActive() {
 
 bool oledListHandleInput(uint32_t newlyPressed) {
   if (!gOledList.active) return false;
-  
-  extern NavEvents gNavEvents;
+
   bool handled = false;
   
   if (gNavEvents.up) {
@@ -820,7 +818,6 @@ static void drawPairingIcon(int x, int y, PairingRibbonIcon icon, bool visible) 
 void oledNotificationBannerShow(const char* message, PairingRibbonIcon icon,
                                 uint32_t visibleMs, bool blink) {
   // Suppress notifications during boot animation - they overlay the progress screen
-  extern bool oledBootModeActive;
   if (oledBootModeActive) return;
   oledPairingRibbonShow(message, icon, visibleMs, blink);
 }
@@ -828,7 +825,6 @@ void oledNotificationBannerShow(const char* message, PairingRibbonIcon icon,
 void oledNotificationBannerUpdate(const char* message, PairingRibbonIcon icon,
                                   uint32_t extraMs) {
   // Suppress notifications during boot animation
-  extern bool oledBootModeActive;
   if (oledBootModeActive) return;
   // If banner is not currently showing, fall back to full show
   if (gOledPairingRibbon.state == PairingRibbonState::HIDDEN ||
