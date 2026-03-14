@@ -9,10 +9,8 @@
 #include "WebServer_Utils.h"
 #include "System_User.h"
 
-static void streamBluetoothContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "Bluetooth", false, u, "bluetooth");
+static void streamBluetoothContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "Bluetooth", false, username, "bluetooth");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   streamBluetoothInner(req);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);

@@ -104,7 +104,6 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo);
 
 // Authentication
 bool isAuthed(httpd_req_t* req, String& outUser);
-bool isAuthedCached(httpd_req_t* req, String& outUser);
 bool isAdminUser(const String& who);
 
 // Cookie and header helpers
@@ -173,7 +172,7 @@ esp_err_t handleFilesPage(httpd_req_t* req);
 esp_err_t handleLoggingPage(httpd_req_t* req);
 
 // Shared page streaming helper (implemented in main .ino)
-void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*));
+void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
 
 // Simple handlers (Batch 1)
 esp_err_t handleRoot(httpd_req_t* req);

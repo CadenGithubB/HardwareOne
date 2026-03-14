@@ -11,14 +11,12 @@
 #include "WebServer_Utils.h"
 
 // Forward declarations
-extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*));
+extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
 extern void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic, const String& username, const String& activePage);
 extern void streamEndHtml(httpd_req_t* req);
 
-static void streamEspNowContent(httpd_req_t* req) {
-  String u;
-  isAuthed(req, u);
-  streamBeginHtml(req, "ESP-NOW", false, u, "espnow");
+static void streamEspNowContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "ESP-NOW", false, username, "espnow");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   streamEspNowInner(req);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);

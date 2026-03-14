@@ -152,22 +152,13 @@ esp_err_t handleEvents(httpd_req_t* req) {
   // httpd_req_t::uri is a fixed-size char array; it is never NULL
   DEBUG_SSEF("handleEvents: incoming from %s, uri=%s", ip.length() ? ip.c_str() : "<no-ip>", req->uri);
 
-  {
-    AuthContext ctx = makeWebAuthCtx(req);
-    if (!tgRequireAuth(ctx)) {
-      DEBUG_AUTHF("/api/events (SSE) DENIED - no valid session for IP: %s", ip.c_str());
-      DEBUG_SSEF("handleEvents: auth failed; sending 401");
-      return ESP_OK;
-    }
-  }
-  // Require a real authenticated user (not just a valid cookie state)
-  if (!isAuthed(req, u) || u.length() == 0) {
-    DEBUG_AUTHF("SSE denied: unauthenticated (IP: %s)", ip.c_str());
-    httpd_resp_set_status(req, "401 Unauthorized");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Authentication required\"}", HTTPD_RESP_USE_STRLEN);
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) {
+    DEBUG_AUTHF("/api/events (SSE) DENIED - no valid session for IP: %s", ip.c_str());
+    DEBUG_SSEF("handleEvents: auth failed; sending 401");
     return ESP_OK;
   }
+  u = ctx.user;
   DEBUG_AUTHF("/api/events (SSE) ALLOWED for user: %s from IP: %s", u.c_str(), ip.c_str());
 
   // Prepare SSE headers
