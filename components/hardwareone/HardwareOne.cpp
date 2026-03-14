@@ -1,4 +1,5 @@
 #include "Arduino.h"
+#include <esp_app_desc.h>
 // Forward declarations to satisfy Arduino's auto-generated prototypes
 struct AuthContext;
 struct CommandContext;
@@ -1300,7 +1301,7 @@ void hardwareone_setup() {
 
   // Show modular sensor configuration (always visible during boot)
   Serial.println();
-  Serial.println("========== MODULAR SENSOR BUILD CONFIGURATION ==========");
+  Serial.printf("========== HARDWAREONE v%s BUILD CONFIGURATION ==========\n", esp_app_get_description()->version);
 #if ENABLE_THERMAL_SENSOR
   Serial.println("  [Y] THERMAL  | MLX90640 thermal camera");
 #else
@@ -1759,114 +1760,71 @@ void hardwareone_setup() {
   Serial.println("[DEBUG] About to print boot memory report");
   Serial.flush();
   printMemoryReport();
+  // Deferred logging auto-start: sensors are queued but may still be initializing.
+  // sensorLogTick() handles missing sensor data gracefully, so safe to enable now.
+  sensorLogAutoStart();
+  systemLogAutoStart();
+
   Serial.println("[DEBUG] Setup() completed!");
   Serial.flush();
 }
 
 
 void hardwareone_loop() {
-  // Drain debug ring buffer (safe from main loop context)
-  drainDebugRing();
 
-  // Periodic memory sampling (gated by DEBUG_MEMORY flag, runs every 2 seconds)
+  // ========================================================================
+  // 1. DIAGNOSTICS — debug-gated, zero cost when flags are off
+  // ========================================================================
+
   periodicMemorySample();
 
-  // Deferred sensor logging auto-start: wait 10s after boot for sensors to initialize
-  {
-    static bool sensorLogAutoStartDone = false;
-    if (!sensorLogAutoStartDone && millis() > 10000) {
-      sensorLogAutoStartDone = true;
-      sensorLogAutoStart();
-    }
-  }
-  
-  // Deferred system logging auto-start: wait 10s after boot
-  {
-    static bool systemLogAutoStartDone = false;
-    if (!systemLogAutoStartDone && millis() > 10000) {
-      systemLogAutoStartDone = true;
-      systemLogAutoStart();
-    }
-  }
-
-  // Sensor data logging tick (runs from main loop, no dedicated task)
-  sensorLogTick();
-
-  // Periodic battery monitoring (every 10 seconds)
-#if ENABLE_BATTERY_MONITOR
-  static unsigned long lastBatteryUpdate = 0;
-  if (millis() - lastBatteryUpdate >= 10000) {
-    lastBatteryUpdate = millis();
-    updateBattery();
-  }
-#endif
-
-  // Heap pressure monitoring - CONSOLIDATED into periodicMemorySample()
-  // No longer needed here - heap warnings now triggered during memory sampling
-
-  // Task pressure monitoring - comprehensive report every 1 minute
-  // Only runs when DEBUG_MEMORY is enabled (gated to reduce overhead)
   if (isDebugFlagSet(DEBUG_MEMORY)) {
     static unsigned long lastTaskReport = 0;
     unsigned long now = millis();
-    if (now - lastTaskReport >= 60000) {  // 1 minute
+    if (now - lastTaskReport >= 60000) {
       lastTaskReport = now;
       reportAllTaskStacks();
     }
   }
 
-#if ENABLE_AUTOMATION
-  // Automation scheduler - runs when dirty flag set OR every 60 seconds
-  if (gSettings.automationsEnabled) {
-    static unsigned long lastAutoCheck = 0;
-    unsigned long nowAuto = millis();
-    if (gAutosDirty || (nowAuto - lastAutoCheck >= 60000)) {
-      gAutosDirty = false;
-      schedulerTickMinute();
-      lastAutoCheck = nowAuto;
-    }
-  }
-#endif
-
-  // Performance monitoring (gated by debug flag)
   if (isDebugFlagSet(DEBUG_PERFORMANCE)) {
     performanceCounter();
   }
 
-  // I2C bus health monitoring - REMOVED: Now event-driven
-  // Devices automatically trigger checkBusRecoveryNeeded() when they become degraded
-  // No periodic polling needed in main loop
+  // ========================================================================
+  // 2. PERIODIC I/O — timer-gated sampling and publishing
+  // ========================================================================
 
-  // Process ESP-NOW message retry queue
-#if ENABLE_ESPNOW
-  if (gEspNow && gEspNow->initialized) {
-    processMessageQueue();
+  sensorLogTick();
+
+#if ENABLE_BATTERY_MONITOR
+  {
+    static unsigned long lastBatteryUpdate = 0;
+    if (millis() - lastBatteryUpdate >= 10000) {
+      lastBatteryUpdate = millis();
+      updateBattery();
+    }
   }
 #endif
 
-  // OLED boot sequence - handled by processOLEDBootSequence() in oled_display.cpp
-#if ENABLE_OLED_DISPLAY
-  processOLEDBootSequence();
+#if ENABLE_MQTT
+  mqttTick();
 #endif
 
-  // ESP-NOW periodic cleanup
-#if ENABLE_ESPNOW
-  // Cleanup expired buffered PEER messages (topology discovery)
-  cleanupExpiredBufferedPeers();
-  // Topology collection window check now runs in ESP-NOW FreeRTOS task (espnowHeartbeatTask)
-  // Cleanup timed-out chunk buffers (router reassembly)
-  if (gEspNow && gEspNow->initialized) {
-    cleanupTimedOutChunks();
-  }
+#if ENABLE_BLUETOOTH
+  bleUpdateStreams();
 #endif
-  // Debounced SSE sensor-status broadcast
+
+  // ========================================================================
+  // 3. EVENT-DRIVEN — only runs when dirty/triggered
+  // ========================================================================
+
   if (gSensorStatusDirty) {
     unsigned long nowMs = millis();
     DEBUG_SENSORSF("[SSE_BROADCAST_CHECK] dirty=true, due=%lu, now=%lu, ready=%d",
                    gNextSensorStatusBroadcastDue, nowMs,
                    (gNextSensorStatusBroadcastDue != 0 && (long)(nowMs - gNextSensorStatusBroadcastDue) >= 0) ? 1 : 0);
     if (gNextSensorStatusBroadcastDue != 0 && (long)(nowMs - gNextSensorStatusBroadcastDue) >= 0) {
-      // Dump quick snapshot for diagnostics
       DEBUG_SENSORSF("[SSE_BROADCAST] SENDING | seq=%lu thermal=%d tof=%d imu=%d gamepad=%d apdsColor=%d apdsProx=%d apdsGest=%d",
                      (unsigned long)gSensorStatusSeq,
                      thermalEnabled ? 1 : 0, tofEnabled ? 1 : 0, imuEnabled ? 1 : 0, gamepadEnabled ? 1 : 0,
@@ -1878,17 +1836,54 @@ void hardwareone_loop() {
     }
   }
 
-  // BLE data streaming updates (auto-push sensor/system data at configured intervals)
-#if ENABLE_BLUETOOTH
-  bleUpdateStreams();
+#if ENABLE_AUTOMATION
+  if (gSettings.automationsEnabled) {
+    static unsigned long lastAutoCheck = 0;
+    unsigned long nowAuto = millis();
+    if (gAutosDirty || (nowAuto - lastAutoCheck >= 60000)) {
+      gAutosDirty = false;
+      schedulerTickMinute();
+      lastAutoCheck = nowAuto;
+    }
+  }
 #endif
 
-  // MQTT periodic publishing and reconnect handling
-#if ENABLE_MQTT
-  mqttTick();
+  // ========================================================================
+  // 4. NETWORK MAINTENANCE — ESP-NOW retry and cleanup
+  // ========================================================================
+
+#if ENABLE_ESPNOW
+  if (gEspNow && gEspNow->initialized) {
+    processMessageQueue();
+  }
+
+  {
+    static unsigned long lastEspNowCleanup = 0;
+    unsigned long nowEspNow = millis();
+    if (nowEspNow - lastEspNowCleanup >= 2000) {
+      lastEspNowCleanup = nowEspNow;
+      cleanupExpiredBufferedPeers();
+      if (gEspNow && gEspNow->initialized) {
+        cleanupTimedOutChunks();
+      }
+    }
+  }
 #endif
 
-  // Non-blocking Serial CLI
+  // ========================================================================
+  // 5. DISPLAY — OLED boot sequence and periodic refresh
+  // ========================================================================
+
+#if ENABLE_OLED_DISPLAY
+  processOLEDBootSequence();
+#endif
+
+  oledUpdate();
+
+  // ========================================================================
+  // 6. USER INPUT — Serial CLI (always last before yield)
+  // ========================================================================
+
   while (Serial.available()) {
     char c = Serial.read();
     if (c == '\r') continue;
@@ -1909,7 +1904,6 @@ void hardwareone_loop() {
             String u = rest.substring(0, sp);
             String p = rest.substring(sp + 1);
             if (isValidUser(u, p)) {
-              // Unified auth success flow for Serial transport
               AuthContext ctx;
               ctx.transport = SOURCE_SERIAL;
               ctx.user = u;
@@ -1921,7 +1915,6 @@ void hardwareone_loop() {
 #endif
               gSerialAuthed = true;
               gSerialUser = u;
-              // Check admin status in real-time
               bool isCurrentlyAdmin = isAdminUser(u);
               BROADCAST_PRINTF("[serial] Login successful. User: %s%s", u.c_str(), isCurrentlyAdmin ? " (admin)" : "");
             } else {
@@ -1929,24 +1922,19 @@ void hardwareone_loop() {
             }
           }
         } else if (cmd.length() > 0) {
-          // Block everything else (including 'clear') until login
           broadcastOutput("Serial - Authentication required. Use: login <username> <password>");
         }
       } else {
-        // Authenticated: handle local session commands first
         if (cmd == "logout") {
           gSerialAuthed = false;
           gSerialUser = String();
-          // gSerialIsAdmin no longer needed - using real-time checks
           broadcastOutput("Logged out.");
         } else if (cmd == "whoami") {
           bool isCurrentlyAdmin = gSerialUser.length() ? isAdminUser(gSerialUser) : false;
           BROADCAST_PRINTF("You are %s%s", gSerialUser.length() ? gSerialUser.c_str() : "(unknown)", isCurrentlyAdmin ? " (admin)" : "");
         } else {
-          // Record the entered command into the unified feed with source tag (only after auth)
           appendCommandToFeed("serial", cmd);
 
-          // Build unified command context for Serial origin
           AuthContext actx;
           actx.transport = SOURCE_SERIAL;
           actx.user = gSerialUser;
@@ -1973,19 +1961,12 @@ void hardwareone_loop() {
       break;  // Process at most one command per loop() iteration to avoid starving WDT
     } else {
       gSerialCLI += c;
-      // Optional: echo
-      // Serial.print(c);
     }
   }
 
-  // All sensor polling now handled by unified sensor polling task - no loop processing needed
+  // ========================================================================
+  // YIELD — give scheduler 1ms to run lower-priority tasks
+  // ========================================================================
 
-  // Update OLED display
-  oledUpdate();
-
-  // Mesh heartbeat processing now runs in separate FreeRTOS task (espnowHeartbeatTask)
-  // Started by initEspNow() -> startEspNowTask()
-
-  // esp_http_server handles requests internally
   delay(1);
 } 

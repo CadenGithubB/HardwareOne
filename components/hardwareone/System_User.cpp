@@ -54,10 +54,6 @@ extern uint32_t gBootCounter;
 extern bool gSerialAuthed;
 extern String gSerialUser;
 
-// Local display authentication globals
-extern bool gLocalDisplayAuthed;
-extern String gLocalDisplayUser;
-
 // Bluetooth authentication globals
 extern bool gBluetoothAuthed;
 extern String gBluetoothUser;
@@ -119,9 +115,7 @@ bool tgRequireAuth(AuthContext& ctx) {
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
     // Local display auth state - check if auth is required via settings
     // Allow commands during boot phase (before auth is enforced)
-    extern bool oledBootModeActive;
-    
-    if (gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive) {
+    if (shouldBlockForDisplayAuth()) {
       broadcastOutput("ERROR: auth required (display)");
       return false;
     }
@@ -156,7 +150,6 @@ bool tgRequireAdmin(AuthContext& ctx) {
     return true;
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
     // Allow admin commands during boot phase
-    extern bool oledBootModeActive;
     if (oledBootModeActive) {
       return true;  // Boot phase - allow all commands
     }
@@ -183,10 +176,7 @@ bool tgRequireAuth(AuthContext& ctx) {
     if (ctx.ip.length() == 0) ctx.ip = "local";
     return true;
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
-    // Allow commands during boot phase
-    extern bool oledBootModeActive;
-    
-    if (gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive) {
+    if (shouldBlockForDisplayAuth()) {
       broadcastOutput("ERROR: auth required (display)");
       return false;
     }
@@ -200,7 +190,6 @@ bool tgRequireAdmin(AuthContext& ctx) {
   if (!tgRequireAuth(ctx)) return false;
   
   // Allow admin commands during boot phase
-  extern bool oledBootModeActive;
   if (ctx.transport == SOURCE_LOCAL_DISPLAY && oledBootModeActive) {
     return true;  // Boot phase - allow all commands
   }

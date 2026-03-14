@@ -66,6 +66,18 @@ enum MeshRole {
   MESH_ROLE_BACKUP_MASTER = 2
 };
 
+// Bond roles (stored as uint8_t in gSettings.bondRole)
+enum BondRole {
+  BOND_ROLE_WORKER = 0,   // compute/network device
+  BOND_ROLE_MASTER = 1    // display/gamepad device
+};
+inline bool isBondMaster() { return gSettings.bondRole == BOND_ROLE_MASTER; }
+inline bool isBondWorker() { return gSettings.bondRole == BOND_ROLE_WORKER; }
+inline const char* bondRoleStr() { return isBondMaster() ? "master" : "worker"; }
+
+// Set mesh role at runtime with logging. Does not persist — reboot restores saved role.
+void setMeshRole(MeshRole role, const char* reason);
+
 // ==========================
 // ESP-NOW Mode (Direct vs Mesh)
 // ==========================

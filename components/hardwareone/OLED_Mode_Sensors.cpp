@@ -20,8 +20,6 @@
 
 // External references
 extern bool oledConnected;
-extern OLEDMode currentOLEDMode;
-extern Settings gSettings;
 
 // Sensor state (managed by I2C system)
 extern bool imuConnected;

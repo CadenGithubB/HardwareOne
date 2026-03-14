@@ -5,6 +5,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Utils.h"
+#include "System_WiFi.h"
 #include "WebServer_Utils.h"
 
 // External dependencies from main .ino
@@ -442,7 +443,6 @@ static void broadcastHelpUsageIndented(const char* usage) {
         formatted[0] = '\0';
 
 #if ENABLE_WIFI
-        extern int gWifiNetworkCount;
         snprintf(formatted, sizeof(formatted), line, gWifiNetworkCount);
 #else
         strncpy(formatted, line, sizeof(formatted) - 1);

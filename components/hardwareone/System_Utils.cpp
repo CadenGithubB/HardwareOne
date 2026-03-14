@@ -10,6 +10,7 @@
  */
 
 #include <Arduino.h>
+#include <esp_app_desc.h>
 #include "System_BuildConfig.h"
 #if ENABLE_WIFI
   #include <WiFi.h>
@@ -30,7 +31,6 @@
 #include "System_MemoryMonitor.h"
 #include "System_Notifications.h"
 #include "i2csensor-ds3231.h"  // RTC for time functions
-#include "System_Utils.h"
 #include "System_ESPSR.h"
 
 extern "C" {
@@ -255,7 +255,6 @@ extern const size_t g2CommandsCount;
 
 // External dependencies from .ino
 extern bool filesystemReady;
-extern Settings gSettings;
 extern bool gAutoLogActive;
 extern String gAutoLogFile;
 // ============================================================================
@@ -1170,6 +1169,7 @@ const char* cmd_lightsleep(const String& argsInput) {
 
 const char* cmd_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  BROADCAST_PRINTF("HardwareOne v%s (%s)", esp_app_get_description()->version, BOARD_NAME);
   broadcastOutput("System Status:");
 #if ENABLE_WIFI
   BROADCAST_PRINTF("  WiFi: %s", WiFi.isConnected() ? "Connected" : "Disconnected");
@@ -1414,7 +1414,6 @@ const char* cmd_wait(const String& argsInput) {
 
 #if ENABLE_WIFI
 
-extern Settings gSettings;
 extern void resolvePendingUserCreationTimes();
 extern void notifyAutomationScheduler();
 extern void logTimeSyncedMarkerIfReady();
@@ -2396,6 +2395,30 @@ void printMemoryReport() {
   enabled_count++;
 #else
   broadcastOutput("  [N] GPS      | Disabled (~5-8KB flash, ~4KB RAM saved)");
+  disabled_count++;
+#endif
+
+#if ENABLE_RTC_SENSOR
+  broadcastOutput("  [Y] RTC      | DS3231 precision real-time clock");
+  enabled_count++;
+#else
+  broadcastOutput("  [N] RTC      | Disabled (~3-5KB flash, ~1KB RAM saved)");
+  disabled_count++;
+#endif
+
+#if ENABLE_FM_RADIO
+  broadcastOutput("  [Y] FM RADIO | RDA5807 FM radio receiver");
+  enabled_count++;
+#else
+  broadcastOutput("  [N] FM RADIO | Disabled (~3-5KB flash, ~1KB RAM saved)");
+  disabled_count++;
+#endif
+
+#if ENABLE_PRESENCE_SENSOR
+  broadcastOutput("  [Y] PRESENCE | STHS34PF80 IR presence/motion sensor");
+  enabled_count++;
+#else
+  broadcastOutput("  [N] PRESENCE | Disabled (~3-5KB flash, ~1KB RAM saved)");
   disabled_count++;
 #endif
 

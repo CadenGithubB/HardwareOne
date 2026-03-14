@@ -21,7 +21,6 @@ extern bool oledConnected;
 extern ControlCache gControlCache;
 #endif
 
-extern Settings gSettings;
 extern String waitForSerialInputBlocking();
 
 // ============================================================================

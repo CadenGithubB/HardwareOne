@@ -151,7 +151,7 @@ void I2CDeviceManager::performBusRecovery() {
   bool prevPaused = pollingPaused;
   pausePolling();  // This syncs gSensorPollingPaused
   
-  bool locked = (busMutex && xSemaphoreTakeRecursive(busMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
+  bool locked = (busMutex && xSemaphoreTake(busMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
   if (!locked) {
     pollingPaused = prevPaused;
     ERROR_I2CF("Bus recovery failed - couldn't acquire mutex");
@@ -200,7 +200,7 @@ void I2CDeviceManager::performBusRecovery() {
     devices[i].health.degraded = false;
   }
   
-  if (busMutex) xSemaphoreGiveRecursive(busMutex);
+  if (busMutex) xSemaphoreGive(busMutex);
   
   // Restore previous pause state
   if (!prevPaused) {

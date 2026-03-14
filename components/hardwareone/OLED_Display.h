@@ -27,6 +27,9 @@ void applyOLEDBrightness();
 // Notify OLED UI that local display auth state changed (login/logout)
 void oledNotifyLocalDisplayAuthChanged();
 
+// Returns true if the display should be blocked pending authentication.
+bool shouldBlockForDisplayAuth();
+
 // Display power control (abstracted from hardware-specific commands)
 void oledDisplayOff();
 void oledDisplayOn();

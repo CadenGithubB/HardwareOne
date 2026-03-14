@@ -14,8 +14,6 @@
 
 // External references
 extern bool oledConnected;
-extern OLEDMode currentOLEDMode;
-extern Settings gSettings;
 
 // Speech menu state
 static int speechMenuSelection = 0;

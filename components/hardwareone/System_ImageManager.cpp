@@ -24,7 +24,6 @@ ImageManager gImageManager;
   #define SD_CS_PIN 21
 #endif
 
-extern Settings gSettings;
 extern bool filesystemReady;
 
 // ============================================================================

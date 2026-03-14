@@ -1042,7 +1042,6 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       if (gOLEDEspNowState.interactionMode == ESPNOW_MODE_FILE) {
         // A button: Open file browser
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-          extern OLEDMode currentOLEDMode;
           extern void resetOLEDFileBrowser();
           requestOLEDMode(OLED_FILE_BROWSER, "espnow.filebrowse");  // pushes current so B returns here
           resetOLEDFileBrowser();
@@ -1215,24 +1214,9 @@ void oledEspNowSelectMode() {
 
 void oledEspNowUnpairDevice() {
   if (!gEspNow) return;
-  
-  // Find device in paired list
-  for (int i = 0; i < gEspNow->deviceCount; i++) {
-    if (memcmp(gEspNow->devices[i].mac, gOLEDEspNowState.selectedDeviceMac, 6) == 0) {
-      // Remove from ESP-NOW peer list
-      esp_now_del_peer(gEspNow->devices[i].mac);
-      
-      // Shift remaining devices
-      for (int j = i; j < gEspNow->deviceCount - 1; j++) {
-        gEspNow->devices[j] = gEspNow->devices[j + 1];
-      }
-      gEspNow->deviceCount--;
-      
-      // Go back to device list
-      oledEspNowBackToList();
-      break;
-    }
-  }
+  esp_now_del_peer(gOLEDEspNowState.selectedDeviceMac);
+  removeEspNowDevice(gOLEDEspNowState.selectedDeviceMac);
+  oledEspNowBackToList();
 }
 
 // Helper struct for sorting devices

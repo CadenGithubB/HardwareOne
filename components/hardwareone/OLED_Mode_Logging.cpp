@@ -18,10 +18,6 @@
 #include "System_Settings.h"
 #include "System_Debug.h"
 
-// External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)
-extern bool gLocalDisplayAuthed;
-extern String gLocalDisplayUser;
-
 // Logging mode state enum (must match OLED_Display.h if defined there)
 enum LoggingMenuState {
   LOG_MENU_MAIN,

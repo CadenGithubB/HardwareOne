@@ -16,6 +16,10 @@
 #include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
+#if ENABLE_ESPNOW
+#include "System_ESPNow.h"
+#include "System_ESPNow_Sensors.h"
+#endif
 
 // External dependencies still needed
 extern TwoWire Wire1;
@@ -97,7 +101,6 @@ static float* g_tempFrame = nullptr;
 static int16_t* g_localFrame = nullptr;
 
 // Settings
-extern Settings gSettings;
 
 
 // Note: lockThermalCache() and unlockThermalCache() are declared in i2c_system.h
@@ -1420,7 +1423,7 @@ void thermalTask(void* parameter) {
           shouldStream = true;
         }
 #if ENABLE_BONDED_MODE
-        if (gSettings.bondModeEnabled && gSettings.bondRole == 0) {
+        if (gSettings.bondModeEnabled && isBondWorker()) {
           shouldStream = true;  // Bond mode worker
         }
 #endif

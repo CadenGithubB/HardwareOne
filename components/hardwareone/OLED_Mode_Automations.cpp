@@ -13,8 +13,6 @@
 
 // External references
 extern bool oledConnected;
-extern OLEDMode currentOLEDMode;
-extern Settings gSettings;
 extern const char* AUTOMATIONS_JSON_FILE;
 extern bool oledMenuBack();
 extern void executeOLEDCommand(const String& argsInput);

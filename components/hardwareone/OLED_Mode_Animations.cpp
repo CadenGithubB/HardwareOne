@@ -3,6 +3,7 @@
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
+#include <esp_app_desc.h>
 
 #if ENABLE_OLED_DISPLAY
 
@@ -423,7 +424,8 @@ static void renderBootProgressAnimation() {
 
   oledDisplay->setTextSize(1);
   oledDisplay->setCursor(0, 0);
-  oledDisplay->println("HardwareOne v0.9");
+  oledDisplay->print("HardwareOne v");
+  oledDisplay->println(esp_app_get_description()->version);
   oledDisplay->println();
 
   switch (state) {

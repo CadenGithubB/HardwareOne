@@ -12,7 +12,6 @@
 #include "System_Command.h"
 
 // Forward declarations
-extern Settings gSettings;
 
 // Power mode configuration
 struct PowerModeConfig {
@@ -82,7 +81,6 @@ void applyPowerMode(uint8_t mode) {
   }
   
   // Apply display brightness
-  extern Settings gSettings;
   uint8_t targetBrightness = (config.displayBrightnessPercent * 255) / 100;
   
   // Only apply if different from current setting
@@ -103,7 +101,6 @@ void applyPowerMode(uint8_t mode) {
 }
 
 void checkAutoPowerMode() {
-  extern Settings gSettings;
   
   if (!gSettings.powerAutoMode) {
     return;  // Auto mode disabled
@@ -132,7 +129,6 @@ const char* cmd_power(const String& argsInput) {
   
   DEBUG_SYSTEMF("[POWER_CMD] cmd_power called with: '%s'", argsInput.c_str());
   
-  extern Settings gSettings;
   
   // Parse command args: "" or "mode [name]" or "auto [on|off]"
   String args = argsInput;
