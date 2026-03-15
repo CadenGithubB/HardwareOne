@@ -384,8 +384,6 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 // Forward declarations for broadcast functions
 extern bool ensureDebugBuffer();
 extern char* gDebugBuffer;
-extern void broadcastOutput(const char* msg);
-extern void broadcastOutput(const String& msg);
 
 // MEMORY OPTIMIZATION: Printf-style broadcastOutput using stack-local buffer
 // Thread-safe: each caller uses its own stack for formatting (no shared gDebugBuffer)

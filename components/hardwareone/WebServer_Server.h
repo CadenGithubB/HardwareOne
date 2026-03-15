@@ -74,6 +74,75 @@ struct LogoutReason {
   unsigned long timestamp;
 };
 extern LogoutReason* gLogoutReasons;
+
+// ============================================================================
+// Brute-Force / Login Rate Limiting
+// ============================================================================
+
+// Track up to this many IPs simultaneously; oldest evicted when full
+#define MAX_LOGIN_ATTEMPT_ENTRIES  8
+
+// Failures within this window count toward lockout; resets on expiry
+#define LOGIN_ATTEMPT_WINDOW_MS    (10UL * 60UL * 1000UL)  // 10 minutes
+
+// Lockout tiers (checked in recordFailedLogin after incrementing failCount)
+#define LOGIN_LOCKOUT_TIER1_COUNT  5   // 5  failures → 30-second lockout
+#define LOGIN_LOCKOUT_TIER1_MS     (30UL * 1000UL)
+#define LOGIN_LOCKOUT_TIER2_COUNT  10  // 10 failures → 5-minute lockout
+#define LOGIN_LOCKOUT_TIER2_MS     (5UL * 60UL * 1000UL)
+#define LOGIN_LOCKOUT_TIER3_COUNT  20  // 20 failures → 30-minute lockout
+#define LOGIN_LOCKOUT_TIER3_MS     (30UL * 60UL * 1000UL)
+
+// Per-IP failed login tracking entry.
+// Uses fixed char[] (no String) to avoid heap fragmentation on embedded.
+struct LoginAttemptEntry {
+  char ip[40];                  // IPv4/IPv6 as C-string; ip[0]=='\0' means unused
+  uint8_t failCount;            // cumulative failures within current window
+  unsigned long windowStart;    // millis() of first failure in this window
+  unsigned long lockedUntil;    // millis() timestamp when lockout expires; 0 = not locked
+};
+
+// Returns true if the given IP is currently locked out.
+// If remainingMs is non-null it receives the milliseconds until unlock.
+bool isLoginLocked(const char* ip, unsigned long* remainingMs = nullptr);
+
+// Record a failed login attempt for the given IP and apply lockout if threshold crossed.
+void recordFailedLogin(const char* ip);
+
+// Clear the failure record for the given IP (call on successful login).
+void clearLoginAttempts(const char* ip);
+
+// ============================================================================
+// IP Ban List (permanent, admin-managed, persisted to flash)
+// ============================================================================
+
+#define MAX_IP_BANS   16
+#define IP_BANS_FILE  "/system/users/ip_bans.json"
+
+// A single ban entry. Fixed char arrays — no String, no heap fragmentation.
+struct IpBanEntry {
+  char ip[40];             // IPv4/IPv6 as C-string; ip[0]=='\0' means unused
+  char reason[80];         // optional admin note
+  unsigned long bannedAt;  // millis() when ban was created (for display only)
+};
+
+// Load ban list from flash into memory (called once at server start).
+void loadIpBans();
+
+// Returns true if the given IP is in the permanent ban list.
+bool isIpBanned(const char* ip);
+
+// Add an IP to the ban list, kick any active sessions from that IP, and persist.
+// Returns false if the list is full or the save fails.
+bool banIp(const char* ip, const char* reason = nullptr);
+
+// Remove an IP from the ban list and persist.
+// Returns false if the IP was not found in the list.
+bool unbanIp(const char* ip);
+
+// Broadcast the current ban list to all connected clients (used by cmd_banlist).
+void broadcastBanList();
+
 extern volatile unsigned long gSensorStatusSeq;
 extern const char* gLastStatusCause;
 extern volatile int gBroadcastSkipSessionIdx;

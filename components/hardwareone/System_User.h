@@ -54,7 +54,6 @@ String hashUserPassword(const String& password);
 
 // Transport-generic authentication functions
 bool tgRequireAuth(AuthContext& ctx);
-bool tgRequireAdmin(AuthContext& ctx);
 bool isAdminUser(const String& who);
 
 // Centralized transport authentication management
@@ -67,6 +66,9 @@ bool isTransportAdmin(CommandSource transport);
 // Credentials validation helpers (moved from main .ino)
 bool isValidUser(const String& username, const String& password);
 bool verifyUserPassword(const String& inputPassword, const String& storedHash);
+
+// User account ban (persisted in users.json "banned" field)
+bool isUserBanned(const String& username);
 
 // Update a user's password (stores hashed)
 bool setUserPassword(const String& username, const String& newPasswordRaw);

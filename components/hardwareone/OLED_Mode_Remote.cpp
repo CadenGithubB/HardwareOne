@@ -449,4 +449,14 @@ bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   return false;
 }
 
+// ============================================================================
+// Remote Mode Registration
+// ============================================================================
+
+static const OLEDModeEntry sRemoteModes[] = {
+  { OLED_REMOTE, "Remote UI", "notify_espnow", displayRemoteMode, nullptr, bondModeInputHandler, false, -1, "A:Select  B:Back" },
+};
+
+REGISTER_OLED_MODE_MODULE(sRemoteModes, sizeof(sRemoteModes) / sizeof(sRemoteModes[0]), "Remote");
+
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE

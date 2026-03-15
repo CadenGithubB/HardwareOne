@@ -1030,7 +1030,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
   <div style='display:grid;grid-template-columns:1fr;gap:1rem'>
     <div style='background:var(--crumb-bg);border:1px solid var(--border);border-radius:8px;padding:1rem'>
       <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem'>
-        <div style='font-weight:bold;color:var(--panel-fg)'>User Management</div>
+        <div style='font-weight:bold;color:var(--panel-fg)'>User Management <span id='pending-badge' style='display:none;font-size:0.75rem;font-weight:600;background:#b8860b;color:#fff;padding:1px 7px;border-radius:10px;vertical-align:middle;margin-left:6px'></span></div>
         <button class='btn' id='btn-users-toggle' onclick="togglePane('users-pane','btn-users-toggle')">Expand</button>
       </div>
       <div style='color:var(--panel-fg);margin-bottom:0.75rem;font-size:0.9rem'>Manage existing users and their roles.</div>
@@ -1088,6 +1088,10 @@ window.sendSequential = function(cmds, onDone, onFail) {
             <span style='color:var(--panel-fg);font-weight:bold'>Reboot required for changes to take effect.</span>
             <button class='btn' style='margin-left:1rem' onclick='rebootDevice()'>Reboot Now</button>
           </div>
+          <div id='https-nocert-row' style='display:none;margin-top:0.5rem;padding:0.75rem;background:rgba(255,255,255,0.05);border:1px solid var(--border);border-radius:6px'>
+            <span style='color:var(--panel-fg);font-weight:bold'>Certificates required</span>
+            <span style='color:var(--panel-fg);font-size:0.9rem;display:block;margin-top:0.25rem'>HTTPS cannot be enabled until a certificate and private key are present. Use <strong>Generate Certs</strong> below to create a self-signed certificate, or upload your own.</span>
+          </div>
           <div style='display:grid;gap:0.5rem;margin-top:0.25rem'>
             <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap'>
               <span style='color:var(--panel-fg);min-width:160px;font-size:0.9rem'>Server Certificate:</span>
@@ -1119,6 +1123,12 @@ window.sendSequential = function(cmds, onDone, onFail) {
     </div>
 <script>
 (function(){
+  function updateCertPresenceFlag() {
+    var certEl = document.getElementById('https-cert-status');
+    var keyEl = document.getElementById('https-key-status');
+    window._httpsCertsPresent = !!(certEl && certEl.textContent === 'Present' &&
+                                   keyEl  && keyEl.textContent  === 'Present');
+  }
   function checkCertFile(path, statusId) {
     fetch('/api/files/list?path=' + encodeURIComponent('/system/certs'), {credentials:'same-origin'})
       .then(function(r){return r.json()})
@@ -1147,6 +1157,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
       });
   }
 
+  window._httpsCertsPresent = false;
   fetch('/api/files/list?path=' + encodeURIComponent('/system/certs'), {credentials:'same-origin'})
     .then(function(r){return r.json()})
     .then(function(j){
@@ -1154,6 +1165,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
         {path:'/system/certs/https_server.crt', id:'https-cert-status'},
         {path:'/system/certs/https_server.key', id:'https-key-status'}
       ];
+      var allPresent = true;
       checks.forEach(function(c){
         var el = document.getElementById(c.id);
         if (!el) return;
@@ -1164,9 +1176,12 @@ window.sendSequential = function(cmds, onDone, onFail) {
             if (j.files[i].name===fname || j.files[i].path===c.path) { found=true; break; }
           }
         }
+        if (!found) allPresent = false;
         el.textContent = found ? 'Present' : 'Missing';
         el.style.color = '#667eea';
       });
+      window._httpsCertsPresent = allPresent;
+      if (allPresent) document.getElementById('https-nocert-row').style.display = 'none';
     })
     .catch(function(){
       ['https-cert-status','https-key-status'].forEach(function(id){
@@ -1190,6 +1205,13 @@ window.sendSequential = function(cmds, onDone, onFail) {
 
   window.toggleHttps = function(){
     var newVal = !window._httpsCurrentValue;
+    // Block enabling if certs aren't present
+    if (newVal && !window._httpsCertsPresent) {
+      document.getElementById('https-reboot-row').style.display = 'none';
+      document.getElementById('https-nocert-row').style.display = 'block';
+      return;
+    }
+    document.getElementById('https-nocert-row').style.display = 'none';
     var cmd = 'httpsEnabled ' + (newVal ? '1' : '0');
     sendSequential([cmd], function(){
       window._httpsCurrentValue = newVal;
@@ -1218,6 +1240,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
           var certId = destPath.indexOf('.crt') >= 0 ? 'https-cert-status' : 'https-key-status';
           var certEl = document.getElementById(certId);
           if (certEl) { certEl.textContent = 'Present'; certEl.style.color = '#667eea'; }
+          updateCertPresenceFlag();
         } else {
           if (statusEl) { statusEl.textContent = 'Failed: ' + (j.error || 'unknown'); statusEl.style.color = '#667eea'; }
         }
@@ -1255,7 +1278,8 @@ window.sendSequential = function(cmds, onDone, onFail) {
           if(status){ status.textContent = 'Generated!'; status.style.color = '#68d391'; }
           checkCertFile('/system/certs/https_server.crt', 'https-cert-status');
           checkCertFile('/system/certs/https_server.key', 'https-key-status');
-          document.getElementById('https-reboot-row').style.display = 'block';
+          window._httpsCertsPresent = true;
+          document.getElementById('https-nocert-row').style.display = 'none';
         }
       })
       .catch(function(e){
@@ -2463,7 +2487,53 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         alert('Error: ' + e.message);
       });
     };
-    
+
+    window.banUserByName = function(username) {
+      if (!username || !confirm('Ban user "' + username + '"? They will lose all access immediately.')) return;
+      var cmd = 'banuser ' + username;
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent(cmd)
+      })
+      .then(function(r) {
+        return r.text();
+      })
+      .then(function(t) {
+        alert(t || 'User banned');
+        try {
+          refreshUsers();
+        } catch(_) {}
+      })
+      .catch(function(e) {
+        alert('Error: ' + e.message);
+      });
+    };
+
+    window.unbanUserByName = function(username) {
+      if (!username || !confirm('Remove ban for user "' + username + '"?')) return;
+      var cmd = 'unbanuser ' + username;
+      fetch('/api/cli', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        credentials: 'same-origin',
+        body: 'cmd=' + encodeURIComponent(cmd)
+      })
+      .then(function(r) {
+        return r.text();
+      })
+      .then(function(t) {
+        alert(t || 'User unbanned');
+        try {
+          refreshUsers();
+        } catch(_) {}
+      })
+      .catch(function(e) {
+        alert('Error: ' + e.message);
+      });
+    };
+
     function formatMillisTimestamp(millis) {
       if (!millis || millis === 0) return 'Unknown';
       var d = new Date(millis);
@@ -2527,62 +2597,89 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           if (!sessionsByUser[u]) sessionsByUser[u] = [];
           sessionsByUser[u].push(s);
         });
-        var html = '<div style="display:grid;gap:0.5rem">';
-        if (pending.length > 0) {
-          html += '<div style="background:#fff3cd;border:1px solid #ffeaa7;border-radius:4px;padding:0.75rem;margin-bottom:0.5rem">';
-          html += '<div style="font-weight:bold;color:#856404;margin-bottom:0.5rem">Pending Approvals</div>';
-          pending.forEach(function(pendingUser) {
-            var username = pendingUser.username || '';
-            var uid = 'u' + Math.random().toString(36).substr(2, 9);
-            html += '<div style="margin-bottom:0.25rem">';
-            html += '<div onclick="toggleUserDropdown(\'' + uid + '-pending\')" style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;cursor:pointer">';
-            html += '<div><strong>' + username + '</strong> <span style="color:#856404;font-size:0.85rem">(Pending)</span></div>';
-            html += '<div style="font-size:0.8rem;color:var(--panel-fg)">▼</div></div>';
-            html += '<div id="dropdown-' + uid + '-pending" style="display:none;margin-top:0.25rem;padding:0.5rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px">';
-            html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap">';
-            html += '<button class="btn" data-user="' + username + '" onclick="approveUserByName(this.dataset.user); toggleUserDropdown(\'' + uid + '-pending\')" style="width:100%;margin-bottom:0.25rem;font-size:0.8rem;padding:0.25rem 0.5rem" title="Approve user">Approve</button>';
-            html += '<button class="btn" data-user="' + username + '" onclick="denyUserByName(this.dataset.user); toggleUserDropdown(\'' + uid + '-pending\')" style="width:100%;font-size:0.8rem;padding:0.25rem 0.5rem" title="Deny user">Deny</button>';
-            html += '</div></div></div>';
-          });
-          html += '</div>';
+        // Update pending badge on the User Management header
+        var badge = $('pending-badge');
+        if (badge) {
+          if (pending.length > 0) {
+            badge.textContent = pending.length + ' pending';
+            badge.style.display = '';
+          } else {
+            badge.style.display = 'none';
+          }
         }
-        users.forEach(function(user) {
+
+        // Merge pending users into the main list as synthetic user objects
+        var pendingUsernames = {};
+        pending.forEach(function(p) { pendingUsernames[p.username || ''] = true; });
+        var allUsers = users.slice();
+        pending.forEach(function(p) {
+          if (!pendingUsernames[p.username]) return;
+          allUsers.push({ username: p.username, isPending: true });
+        });
+
+        var html = '<div style="display:grid;gap:0.5rem">';
+        allUsers.forEach(function(user) {
           var username = user.username || '';
+          var isPending = user.isPending || false;
           var isAdmin = user.isAdmin || false;
+          var isBanned = user.banned || false;
           var userSessions = sessionsByUser[username] || [];
           var sessionCount = userSessions.length;
           var uid = 'u' + Math.random().toString(36).substr(2, 9);
           html += '<div style="margin-bottom:0.25rem">';
-          html += '<div onclick="toggleUserDropdown(\'' + uid + '\')" style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;cursor:pointer">';
-          html += '<div><strong>' + username + '</strong> ' + (isAdmin ? '<span style="color:#667eea;font-size:0.85rem">(Admin)</span>' : '<span style="color:#667eea;font-size:0.85rem">(User)</span>') + ' <span style="color:var(--panel-fg);font-size:0.85rem">' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '') + '</span></div>';
+          // Row header — pending users get an amber left-border accent
+          var rowBorder = isPending ? 'border-left:3px solid #b8860b;' : '';
+          html += '<div onclick="toggleUserDropdown(\'' + uid + '\')" style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;cursor:pointer;' + rowBorder + '">';
+          if (isPending) {
+            html += '<div><strong>' + username + '</strong> <span style="color:#b8860b;font-size:0.85rem">(Pending Approval)</span></div>';
+          } else {
+            html += '<div><strong>' + username + '</strong> ' + (isAdmin ? '<span style="color:#667eea;font-size:0.85rem">(Admin)</span>' : '<span style="color:#667eea;font-size:0.85rem">(User)</span>') + ' <span style="color:var(--panel-fg);font-size:0.85rem">' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '') + '</span></div>';
+          }
           html += '<div style="font-size:0.8rem;color:var(--panel-fg)">▼</div></div>';
           html += '<div id="dropdown-' + uid + '" style="display:none;margin-top:0.25rem;padding:0.5rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px">';
-          if (sessionCount > 0) {
+          if (!isPending && sessionCount > 0) {
             html += '<div style="margin-bottom:0.5rem;font-size:0.9rem;color:var(--panel-fg)"><strong>Active Sessions:</strong></div>';
             userSessions.forEach(function(session) {
-              var ip = cleanIPAddress(session.ip || '');
-              var created = session.createdAt ? formatMillisTimestamp(session.createdAt) : '';
-              var lastSeen = session.lastSeen ? formatMillisTimestamp(session.lastSeen) : '';
-              var current = session.current || false;
+              var transport = session.transport || '';
               html += '<div style="background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;padding:0.5rem;margin-bottom:0.25rem;font-size:0.85rem">';
-              html += '<div><strong>IP:</strong> ' + ip + ' ' + (current ? '<span style="color:#28a745;font-weight:bold">(Current)</span>' : '') + '</div>';
-              if (created) html += '<div><strong>Created:</strong> ' + created + '</div>';
-              if (lastSeen) html += '<div><strong>Last Seen:</strong> ' + lastSeen + '</div>';
+              if (transport) {
+                var label = transport === 'oled' ? 'OLED Display' : transport === 'serial' ? 'Serial' : transport === 'bluetooth' ? 'Bluetooth' : transport;
+                html += '<div><strong>Transport:</strong> ' + label + '</div>';
+              } else {
+                var ip = cleanIPAddress(session.ip || '');
+                var created = session.createdAt ? formatMillisTimestamp(session.createdAt) : '';
+                var lastSeen = session.lastSeen ? formatMillisTimestamp(session.lastSeen) : '';
+                var current = session.current || false;
+                html += '<div><strong>IP:</strong> ' + ip + ' ' + (current ? '<span style="color:#28a745;font-weight:bold">(Current)</span>' : '') + '</div>';
+                if (created) html += '<div><strong>Created:</strong> ' + created + '</div>';
+                if (lastSeen) html += '<div><strong>Last Seen:</strong> ' + lastSeen + '</div>';
+              }
               html += '</div>';
             });
           }
           html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap">';
-          if (!isAdmin) {
-            html += '<button class="btn" data-user="' + username + '" onclick="promoteUserByName(this.dataset.user)" title="Promote to admin">Promote</button>';
+          if (isPending) {
+            // Pending users only get Approve and Deny
+            html += '<button class="btn" data-user="' + username + '" onclick="approveUserByName(this.dataset.user)" title="Approve this registration request">Approve</button>';
+            html += '<button class="btn" data-user="' + username + '" onclick="denyUserByName(this.dataset.user)" title="Deny and remove this registration request">Deny</button>';
           } else {
-            html += '<button class="btn" data-user="' + username + '" onclick="demoteUserByName(this.dataset.user)" title="Demote from admin">Demote</button>';
+            if (!isAdmin) {
+              html += '<button class="btn" data-user="' + username + '" onclick="promoteUserByName(this.dataset.user)" title="Promote to admin">Promote</button>';
+            } else {
+              html += '<button class="btn" data-user="' + username + '" onclick="demoteUserByName(this.dataset.user)" title="Demote from admin">Demote</button>';
+            }
+            html += '<button class="btn" data-user="' + username + '" onclick="resetUserPassword(this.dataset.user)" title="Reset password for this user">Reset Password</button>';
+            html += '<button class="btn" data-user="' + username + '" onclick="deleteUserByName(this.dataset.user)" title="Delete this user">Delete</button>';
+            if (sessionCount > 0) {
+              html += '<button class="btn" data-user="' + username + '" onclick="revokeUserSessions(this.dataset.user)" title="Revoke all sessions for this user">Revoke Sessions</button>';
+            }
+            if (isBanned) {
+              html += '<button class="btn" data-user="' + username + '" onclick="unbanUserByName(this.dataset.user)" title="Remove ban and restore access">Unban</button>';
+            } else {
+              html += '<button class="btn" data-user="' + username + '" onclick="banUserByName(this.dataset.user)" title="Ban this user from all access">Ban</button>';
+            }
           }
-          html += '<button class="btn" data-user="' + username + '" onclick="resetUserPassword(this.dataset.user)" title="Reset password for this user">Reset Password</button>';
-          html += '<button class="btn" data-user="' + username + '" onclick="deleteUserByName(this.dataset.user)" title="Delete this user">Delete</button>';
-          if (sessionCount > 0) {
-            html += '<button class="btn" data-user="' + username + '" onclick="revokeUserSessions(this.dataset.user)" title="Revoke all sessions for this user">Revoke Sessions</button>';
-          }
-          var hasEspNow = (__S && __S.features && __S.features.espnow === true);
+          var hasEspNow = !isPending && (__S && __S.features && __S.features.espnow === true);
           if (hasEspNow) {
             html += '<button class="btn" data-user="' + username + '" onclick="toggleUserDropdown(\'' + uid + '-sync\')" title="Sync this user to another device over ESP-NOW">Sync via ESP-NOW</button>';
           }

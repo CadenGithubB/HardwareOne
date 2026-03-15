@@ -1761,6 +1761,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 // Map OLED mode entry
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry gpsMapOLEDModes[] = {
   {
     OLED_GPS_MAP,
@@ -1775,7 +1776,6 @@ static const OLEDModeEntry gpsMapOLEDModes[] = {
   }
 };
 
-// Auto-register on startup
-static OLEDModeRegistrar _gps_map_registrar(gpsMapOLEDModes, 1, "Map");
+REGISTER_OLED_MODE_MODULE(gpsMapOLEDModes, 1, "Map");
 
 #endif // ENABLE_OLED_DISPLAY

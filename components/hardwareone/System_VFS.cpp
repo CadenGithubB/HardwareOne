@@ -624,6 +624,7 @@ static const char* cmd_sddiag(const String& argsInput) {
 }
 
 // Command registry for SD card commands
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry sdCommands[] = {
   { "sdmount", "Mount SD card", false, cmd_sdmount,
     "sdmount - Attempt to mount SD card at /sd" },

@@ -660,9 +660,9 @@ inline void setSetting(String& field, const char* value) {
   }
 }
 
-// WiFi password encryption/decryption helpers
-String encryptWifiPassword(const String& password);
-String decryptWifiPassword(const String& encryptedPassword);
+// AES-128-CBC string encryption/decryption (device-bound key)
+String encryptString(const String& plaintext);
+String decryptString(const String& encrypted);
 String getDeviceEncryptionKey();
 
 // Device fingerprint for backup compatibility checking

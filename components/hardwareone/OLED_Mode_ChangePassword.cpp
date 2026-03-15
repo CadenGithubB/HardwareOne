@@ -10,7 +10,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
-#include "System_Auth.h"
+#include "System_User.h"
 #include "System_Utils.h"
 #include "System_User.h"
 
@@ -338,13 +338,18 @@ static bool isChangePasswordModeAvailable(String* outReason) {
 // Mode Registration
 // ============================================================================
 
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry changePasswordModeEntries[] = {
   {
     OLED_CHANGE_PASSWORD,
+    "Change Password",
+    "password",
     displayChangePasswordMode,
+    isChangePasswordModeAvailable,
     handleChangePasswordModeInput,
-    nullptr,  // No action function
-    isChangePasswordModeAvailable
+    false,  // shown via sub-menu, not top-level
+    -1,
+    nullptr
   }
 };
 

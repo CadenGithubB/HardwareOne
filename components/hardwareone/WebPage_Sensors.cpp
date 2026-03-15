@@ -137,15 +137,15 @@ esp_err_t handleSensorData(httpd_req_t* req) {
                         (unsigned long)gThermalCache.thermalSeq);
 
           // Use ArduinoJson to avoid 768+ String concatenations
-          DynamicJsonDocument doc(8192);
+          JsonDocument doc;
           doc["v"] = gThermalCache.thermalDataValid ? 1 : 0;
           doc["seq"] = gThermalCache.thermalSeq;
           doc["mn"] = serialized(String(gThermalCache.thermalMinTemp, 1));
           doc["mx"] = serialized(String(gThermalCache.thermalMaxTemp, 1));
           doc["w"] = width;
           doc["h"] = height;
-          
-          JsonArray data = doc.createNestedArray("data");
+
+          JsonArray data = doc["data"].to<JsonArray>();
           if (useInterpolated && frame) {
             for (int i = 0; i < frameSize; i++) {
               data.add((int)frame[i]);

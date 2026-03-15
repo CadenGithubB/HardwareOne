@@ -335,6 +335,7 @@ void readGamepad() {
 // ============================================================================
 
 // Gamepad settings entries - minimal but essential for safety
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry gamepadSettingEntries[] = {
   { "gamepadDevicePollMs", SETTING_INT,  &gSettings.gamepadDevicePollMs, 58, 0, nullptr, 10, 1000, "Poll Interval (ms)", nullptr },
   { "gamepadAutoStart",    SETTING_BOOL, &gSettings.gamepadAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr }
@@ -344,6 +345,7 @@ static bool isGamepadConnected() {
   return gamepadConnected;
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule gamepadSettingsModule = {
   "gamepad",
   "gamepad",
@@ -359,6 +361,7 @@ extern const SettingsModule gamepadSettingsModule = {
 // Gamepad Command Registry
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry gamepadCommands[] = {
   { "opengamepad", "Start Seesaw gamepad sensor.", false, cmd_gamepadstart_queued, nullptr, "sensor", "gamepad", "open" },
   { "closegamepad", "Stop Seesaw gamepad sensor.", false, cmd_gamepadstop, nullptr, "sensor", "gamepad", "close" },

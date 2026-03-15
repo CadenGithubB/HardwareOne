@@ -2921,6 +2921,7 @@ const char* cmd_debugcmdflowcontext(const String& argsInput) {
 // Debug Command Registry
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry debugCommands[] = {
   { "debughttp", "Debug HTTP requests.", true, cmd_debughttp },
   { "debugsse", "Debug Server-Sent Events.", true, cmd_debugsse },
@@ -2953,7 +2954,7 @@ const CommandEntry debugCommands[] = {
   { "debugperformance", "Debug performance metrics.", true, cmd_debugperformance },
   { "debugdatetime", "Debug date/time operations.", true, cmd_debugdatetime },
   { "debugverbose", "Global debug verbosity override (forces all debug + loglevel=DEBUG).", true, cmd_debugverbose, "Usage: debugverbose <0|1>" },
-  { "debugbuffer", "Show debug ring buffer status.", false, cmd_debugbuffer },
+  { "debugbuffer", "Show debug ring buffer status.", true, cmd_debugbuffer },
   { "debugcommandflow", "Debug command flow.", true, cmd_debugcommandflow, "Usage: debugcommandflow <0|1>" },
   { "debugusers", "Debug user management.", true, cmd_debugusers, "Usage: debugusers <0|1>" },
   { "debugsystem", "Debug system/boot operations.", true, cmd_debugsystem, "Usage: debugsystem <0|1>" },

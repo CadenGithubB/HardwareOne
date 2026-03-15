@@ -22,7 +22,7 @@ inline void streamLoginInner(httpd_req_t* req, const String& username, const Str
   
   // Error message section (combined error + logout reason)
   if (errorMsg.length() > 0 || logoutReason.length() > 0) {
-    httpd_resp_send_chunk(req, "  <div id='err' class='form-error text-danger'>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "  <div id='err' class='form-error' style='color:rgba(255,255,255,0.9);font-weight:500'>", HTTPD_RESP_USE_STRLEN);
     
     if (errorMsg.length() > 0) {
       httpd_resp_send_chunk(req, errorMsg.c_str(), HTTPD_RESP_USE_STRLEN);

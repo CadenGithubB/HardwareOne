@@ -199,6 +199,7 @@ static bool isEdgeImpulseCompiled() {
 // - Driver/library buffers
 // - Runtime data structures
 
+// Columns: id, displayName, category, heapEstimateKB, flags, settingPtr, isCompiledFn, description
 static const FeatureEntry featureRegistry[] = {
   // === NETWORK FEATURES ===
   { "wifi", "WiFi", FEATURE_CAT_NETWORK, 24,
@@ -561,6 +562,7 @@ const char* cmd_features(const String& argsInput) {
 // Command Registry
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 extern const CommandEntry featureCommands[] = {
   { "features", "Show/toggle system features with heap estimates.", false, cmd_features,
     "features              - List all features\n"

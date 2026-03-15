@@ -185,6 +185,7 @@ const char* cmd_httpAutoStart(const String& argsInput);
 const char* cmd_httpsEnabled(const String& argsInput);
 #endif
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry settingsCommands[] = {
 #if ENABLE_WIFI
   // ---- WiFi Network Settings ----
@@ -301,7 +302,7 @@ String getDeviceFingerprint() {
   return sFingerprint;
 }
 
-String encryptWifiPassword(const String& password) {
+String encryptString(const String& password) {
   if (password.length() == 0) return "";
 
   // Derive 16-byte AES key from device encryption key
@@ -382,25 +383,25 @@ String encryptWifiPassword(const String& password) {
   free(result);
   free(ciphertext);
 
-  DEBUG_STORAGEF("[AES] WiFi password encrypted (len=%d)", output.length());
+  DEBUG_STORAGEF("[AES] String encrypted (len=%d)", output.length());
   return output;
 }
 
-String decryptWifiPassword(const String& encryptedPassword) {
+String decryptString(const String& encryptedPassword) {
   if (encryptedPassword.length() == 0) {
     return "";
   }
 
   if (!encryptedPassword.startsWith("AES:")) {
-    ERROR_STORAGEF("[AES] Invalid WiFi password format detected");
+    ERROR_STORAGEF("[AES] Invalid encrypted string format (missing AES: prefix)");
     return "";
   }
 
-  DEBUG_STORAGEF("[AES] Decrypting WiFi password (len=%d)", encryptedPassword.length());
+  DEBUG_STORAGEF("[AES] Decrypting string (len=%d)", encryptedPassword.length());
 
   // Parse: AES:<32-hex-iv>:<hex-ciphertext>
   if (encryptedPassword.length() < 41) {  // "AES:" + 32 hex chars + ":" minimum
-    ERROR_STORAGEF("[AES] Encrypted password too short");
+    ERROR_STORAGEF("[AES] Encrypted string too short");
     return "";
   }
 
@@ -492,7 +493,7 @@ String decryptWifiPassword(const String& encryptedPassword) {
   String output = String(result);
   free(result);
 
-  DEBUG_STORAGEF("[AES] WiFi password decrypted successfully (len=%d)", output.length());
+  DEBUG_STORAGEF("[AES] String decrypted successfully (len=%d)", output.length());
   return output;
 }
 
@@ -788,7 +789,7 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
       // Security: Encrypt passwords in file, exclude from web API
       if (!excludePasswords) {
         // Encrypt password for filesystem storage (protects against file access)
-        String encryptedPassword = encryptWifiPassword(gWifiNetworks[i].password);
+        String encryptedPassword = encryptString(gWifiNetworks[i].password);
         net["password"] = encryptedPassword;
       }
       // For web API (excludePasswords=true), password field is omitted entirely
@@ -937,8 +938,8 @@ bool readSettingsJson() {
   }
 
   // Use JsonDocument for parsing settings JSON
-  // Size calculated: ~2.5KB base settings + ~2KB for WiFi networks with encrypted passwords
-  // Encrypted passwords are ~2x longer than plaintext (hex encoding + "ENC:" prefix)
+  // Size calculated: ~2.5KB base settings + ~2KB for WiFi networks with encrypted strings
+  // Encrypted strings are ~2x longer than plaintext (hex encoding + "AES:" prefix)
   PSRAM_JSON_DOC(doc);
   DeserializationError error = deserializeJson(doc, file);
   file.close();
@@ -1005,7 +1006,7 @@ bool readSettingsJson() {
       
       if (ssid && password) {
         gWifiNetworks[gWifiNetworkCount].ssid = ssid;
-        gWifiNetworks[gWifiNetworkCount].password = decryptWifiPassword(password);
+        gWifiNetworks[gWifiNetworkCount].password = decryptString(password);
         gWifiNetworks[gWifiNetworkCount].priority = priority;
         gWifiNetworks[gWifiNetworkCount].hidden = hidden;
         gWifiNetworks[gWifiNetworkCount].lastConnected = lastConnected;
@@ -1157,6 +1158,7 @@ const char* cmd_httpsEnabled(const String& argsInput) {
 // Debug Settings Module (for modular settings registry)
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry debugSettingEntries[] = {
   // --- authentication group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugAuth,          0, 0, nullptr, 0, 1, "All Authentication",  nullptr, false, "authentication", "debugauth" },
@@ -1270,6 +1272,7 @@ static const SettingEntry debugSettingEntries[] = {
   { "memorySampleIntervalSec", SETTING_INT, &gSettings.memorySampleIntervalSec, 30, 0, nullptr, 0, 300, "Memory Sample Interval (sec)", nullptr, false, nullptr, "memorysampleintervalsec" },
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 static const SettingsModule debugSettingsModule = {
   "debug",
   "debug",
@@ -1283,6 +1286,7 @@ static const SettingsModule debugSettingsModule = {
 // Output Settings Module (for modular settings registry)
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry outputSettingEntries[] = {
   { "serial", SETTING_BOOL, &gSettings.outSerial, 1, 0, nullptr, 0, 1, "Serial Output", nullptr },
   { "web", SETTING_BOOL, &gSettings.outWeb, 1, 0, nullptr, 0, 1, "Web Output", nullptr },
@@ -1293,6 +1297,7 @@ static const SettingEntry outputSettingEntries[] = {
 #endif
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 static const SettingsModule outputSettingsModule = {
   "output",
   "output",
@@ -1546,7 +1551,7 @@ size_t readRegisteredSettings(JsonDocument& doc) {
           if (e->isSecret) {
             // Decrypt secret strings when reading from disk
             const char* encrypted = val | (e->stringDefault ? e->stringDefault : "");
-            *((String*)e->valuePtr) = decryptWifiPassword(encrypted);
+            *((String*)e->valuePtr) = decryptString(encrypted);
           } else {
             *((String*)e->valuePtr) = val | (e->stringDefault ? e->stringDefault : "");
           }
@@ -1624,7 +1629,7 @@ size_t writeRegisteredSettings(JsonDocument& doc) {
             // Encrypt secret strings before writing to disk
             String plaintext = *((String*)e->valuePtr);
             if (plaintext.length() > 0) {
-              target[leaf] = encryptWifiPassword(plaintext);
+              target[leaf] = encryptString(plaintext);
             } else {
               target[leaf] = "";
             }
@@ -1658,7 +1663,11 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
         snprintf(buf, sizeof(buf), "%s = %s", entry->jsonKey, *((bool*)entry->valuePtr) ? "true" : "false");
         break;
       case SETTING_STRING:
-        snprintf(buf, sizeof(buf), "%s = %s", entry->jsonKey, ((String*)entry->valuePtr)->c_str());
+        if (entry->isSecret && ((String*)entry->valuePtr)->length() > 0) {
+          snprintf(buf, sizeof(buf), "%s = ********", entry->jsonKey);
+        } else {
+          snprintf(buf, sizeof(buf), "%s = %s", entry->jsonKey, ((String*)entry->valuePtr)->c_str());
+        }
         break;
     }
     return buf;
@@ -1709,8 +1718,13 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
     case SETTING_STRING: {
       *((String*)entry->valuePtr) = p;
       if (!gDeferWrites) writeSettingsJson();
-      BROADCAST_PRINTF("%s set to %s", entry->jsonKey, p);
-      notifySettingChanged(entry->label ? entry->label : entry->jsonKey, p);
+      if (entry->isSecret) {
+        BROADCAST_PRINTF("%s updated", entry->jsonKey);
+        notifySettingChanged(entry->label ? entry->label : entry->jsonKey, "********");
+      } else {
+        BROADCAST_PRINTF("%s set to %s", entry->jsonKey, p);
+        notifySettingChanged(entry->label ? entry->label : entry->jsonKey, p);
+      }
       return "[Settings] Configuration updated";
     }
   }

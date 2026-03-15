@@ -248,6 +248,7 @@ bool speechInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 // OLED Mode Registration
 // ============================================================================
 
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry speechModeEntries[] = {
   {
     OLED_SPEECH,          // mode

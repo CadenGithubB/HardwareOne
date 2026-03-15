@@ -18,7 +18,7 @@
 #include "System_Debug.h"
 #include "System_Command.h"
 #include "System_MemUtil.h"
-#include "System_Auth.h"
+#include "System_User.h"
 #include "System_Utils.h"
 #include <ArduinoJson.h>
 
@@ -184,6 +184,7 @@ bool getExternalSensor(int index, String& topic, String& name, String& value, un
 // MQTT Settings Module
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry mqttSettingEntries[] = {
   { "mqttAutoStart",          SETTING_BOOL,   &gSettings.mqttAutoStart,          false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false },
   { "mqttHost",               SETTING_STRING, &gSettings.mqttHost,               0, 0, "", 0, 0, "Broker Host", nullptr, false },
@@ -213,6 +214,7 @@ static bool isMqttAvailable() {
   return WiFi.isConnected();
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule mqttSettingsModule = {
   "mqtt",
   "mqtt",
@@ -1505,6 +1507,7 @@ MQTT_PUBLISH_CMD(rtc, mqttPublishRTC, "RTC")
 MQTT_PUBLISH_CMD(gamepad, mqttPublishGamepad, "Gamepad")
 
 // Command table - names must match setting keys for web UI compatibility
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry mqttCommands[] = {
   { "debugmqtt", "MQTT debug logging [0|1]", true, cmd_debugmqtt, "Usage: debugmqtt [0|1]" },
   { "openmqtt", "Start MQTT client", false, cmd_openmqtt },

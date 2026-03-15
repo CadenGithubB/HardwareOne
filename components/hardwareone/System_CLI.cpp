@@ -671,6 +671,7 @@ static const char* cmd_clear(const String& argsInput) {
 // CLI Command Registry
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry cliCommands[] = {
   { "help", "Display help menu (help [topic])", false, cmd_help },
   { "back", "Return to main help menu", false, cmd_back },

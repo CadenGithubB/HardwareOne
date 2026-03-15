@@ -918,10 +918,15 @@ namespace {
   }
 
   // Rule table (extend here to add new redactions)
+  // Columns: prefix (lowercase cmd prefix), type (MASK_TOKEN_AT_POS|MASK_AFTER_TOKEN_POS|CALL_HANDLER), param (1-based token index), handler (custom fn or nullptr)
   static const RedactRule kRules[] = {
-    { "wifiadd ", MASK_TOKEN_AT_POS, 3, nullptr },        // mask password token
-    { "user request ", MASK_AFTER_TOKEN_POS, 3, nullptr }, // mask everything after username
-    { "espnow remote ", CALL_HANDLER, 0, &redactEspNowRemote },
+    { "wifiadd ",          MASK_TOKEN_AT_POS,    3, nullptr },  // wifiadd <ssid> <password>
+    { "mqttpassword ",     MASK_TOKEN_AT_POS,    2, nullptr },  // mqttpassword <password>
+    { "login ",            MASK_TOKEN_AT_POS,    3, nullptr },  // login <user> <password>
+    { "testencryption ",   MASK_TOKEN_AT_POS,    2, nullptr },  // testencryption <secret>
+    { "testpassword ",     MASK_TOKEN_AT_POS,    2, nullptr },  // testpassword <secret>
+    { "user request ",     MASK_AFTER_TOKEN_POS, 3, nullptr },  // user request <name> <pass> ...
+    { "espnow remote ",    CALL_HANDLER,         0, &redactEspNowRemote },
   };
 }
 
@@ -1330,8 +1335,8 @@ const char* cmd_fsusage(const String& argsInput) {
 }
 
 // Forward declarations for encryption/hashing functions (in settings.cpp and user_system.cpp)
-extern String encryptWifiPassword(const String& plaintext);
-extern String decryptWifiPassword(const String& encrypted);
+extern String encryptString(const String& plaintext);
+extern String decryptString(const String& encrypted);
 extern String hashUserPassword(const String& plaintext);
 extern bool verifyUserPassword(const String& plaintext, const String& hash);
 
@@ -1345,10 +1350,10 @@ const char* cmd_testencryption(const String& argsInput) {
     return "Usage: testencryption <password_to_test>";
   }
 
-  String encrypted = encryptWifiPassword(args);
-  String decrypted = decryptWifiPassword(encrypted);
+  String encrypted = encryptString(args);
+  String decrypted = decryptString(encrypted);
 
-  broadcastOutput("WiFi Password Encryption Test:");
+  broadcastOutput("AES String Encryption Test:");
   BROADCAST_PRINTF("Original:  '%s'", args.c_str());
   BROADCAST_PRINTF("Encrypted: '%s'", encrypted.c_str());
   BROADCAST_PRINTF("Decrypted: '%s'", decrypted.c_str());
@@ -1597,12 +1602,13 @@ extern const char* cmd_pending_list(const String& argsInput);
 
 // Main/Core command registry (commands that remain in main .ino file)
 // Most commands have been modularized - this contains only core system commands
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry commands[] = {
   // ---- Core / General ----
   { "status", "Show system status (WiFi, FS, memory).", false, cmd_status, nullptr, "system", "status" },
   { "uptime", "Show device uptime.", false, cmd_uptime },
   { "time", "Show device time (uptime + NTP if synced).", false, cmd_time },
-  { "timeset", "Set time manually: timeset YYYY-MM-DD HH:MM:SS or <unix_timestamp>.", false, cmd_timeset },
+  { "timeset", "Set time manually: timeset YYYY-MM-DD HH:MM:SS or <unix_timestamp>.", true, cmd_timeset },
   { "memsample", "Memory snapshot with component requirements. Use 'memsample track [on|off|reset|status]' for allocation tracking.", false, cmd_memsample },
   { "memreport", "Comprehensive memory report (Task Manager style).", false, cmd_memreport },
   { "fsusage", "Show filesystem usage.", false, cmd_fsusage },
@@ -1614,7 +1620,7 @@ const CommandEntry commands[] = {
   // ---- System Diagnostics ----
   { "temperature", "Read ESP32 internal temperature.", false, cmd_temperature },
   { "voltage", "Read supply voltage.", false, cmd_voltage },
-  { "cpufreq", "Get/set CPU frequency.", false, cmd_cpufreq },
+  { "cpufreq", "Get/set CPU frequency.", true, cmd_cpufreq },
   { "taskstats", "Detailed task statistics.", false, cmd_taskstats },
 
   // ---- Misc ----
@@ -1623,7 +1629,7 @@ const CommandEntry commands[] = {
   { "pending list", "List pending user requests.", true, cmd_pending_list },
   { "wait", "Delay execution for N milliseconds: wait <ms>.", false, cmd_wait },
   { "sleep", "Alias for wait: sleep <ms>.", false, cmd_wait },
-  { "lightsleep", "Enter ESP32 light sleep: lightsleep [seconds] (default 20s).", false, cmd_lightsleep },
+  { "lightsleep", "Enter ESP32 light sleep: lightsleep [seconds] (default 20s).", true, cmd_lightsleep },
 };
 
 const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);
@@ -1635,9 +1641,10 @@ const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);
 extern const char* cmd_battery_status(const String& argsInput);
 extern const char* cmd_battery_calibrate(const String& argsInput);
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry batteryCommands[] = {
   {"battery status", "Show battery voltage, charge level, and status", false, cmd_battery_status, nullptr, "battery", "status"},
-  {"battery calibrate", "Recalibrate battery ADC readings", false, cmd_battery_calibrate}
+  {"battery calibrate", "Recalibrate battery ADC readings", true, cmd_battery_calibrate}
 };
 
 const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batteryCommands[0]);
@@ -1653,6 +1660,7 @@ extern const size_t mqttCommandsCount;
 // Module registry - collects all command tables from modules
 // Now includes metadata: description, flags, isConnected callback
 // Order matters for help display; longest-match search handles conflicts
+// Columns: name, description, commands, count, flags, isConnected
 static const CommandModule gCommandModules[] = {
   { "cli",        "Help and CLI navigation", cliCommands,          cliCommandsCount, CMD_MODULE_CORE, nullptr },
   { "core",       "Core system commands", commands,             commandsCount, CMD_MODULE_CORE, nullptr },

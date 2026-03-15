@@ -1,8 +1,7 @@
 // ============================================================================
 // OLED Auth Mode - Login and Logout
 // ============================================================================
-// Merged from OLED_Mode_Login.cpp and OLED_Mode_Logout.cpp for consistency
-// with System_Auth naming convention
+// Merged from OLED_Mode_Login.cpp and OLED_Mode_Logout.cpp
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
@@ -11,7 +10,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
-#include "System_Auth.h"
+#include "System_User.h"
 #include "System_Utils.h"
 #include "System_Notifications.h"
 #include "System_Settings.h"
@@ -407,10 +406,10 @@ static const OLEDModeEntry logoutModeEntry = {
 };
 
 // Combined auth modes array
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry authModes[] = { loginModeEntry, logoutModeEntry };
 
-// Register both modes with a single registrar
-static OLEDModeRegistrar _oled_mode_registrar_auth(authModes, sizeof(authModes) / sizeof(authModes[0]), "Auth");
+REGISTER_OLED_MODE_MODULE(authModes, sizeof(authModes) / sizeof(authModes[0]), "Auth");
 
 // Force linker to include this file - called from OLED_Utils.cpp
 void oledAuthModeInit() {
