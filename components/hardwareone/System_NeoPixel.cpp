@@ -444,6 +444,7 @@ const char* cmd_ledeffect(const String& argsInput) {
 // NeoPixel Command Registry
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry neopixelCommands[] = {
   { "ledcolor", "Set LED color: <color>", false, cmd_ledcolor, "Usage: ledcolor <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>", "led", "change color" },
   { "ledclear", "Turn off LED.", false, cmd_ledclear, nullptr, "led", "turn off" },
@@ -458,6 +459,7 @@ const size_t neopixelCommandsCount = sizeof(neopixelCommands) / sizeof(neopixelC
 // LED Settings Module (merged from System_LED.cpp)
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry ledSettingEntries[] = {
   { "ledBrightness",      SETTING_INT,    &gSettings.ledBrightness,      100, 0, nullptr, 0, 255, "Brightness", nullptr },
   { "ledStartupEnabled",  SETTING_BOOL,   &gSettings.ledStartupEnabled,  true, 0, nullptr, 0, 1, "Startup Enabled", nullptr },
@@ -467,6 +469,7 @@ static const SettingEntry ledSettingEntries[] = {
   { "ledStartupDuration", SETTING_INT,    &gSettings.ledStartupDuration, 1000, 0, nullptr, 100, 10000, "Startup Duration (ms)", nullptr }
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule ledSettingsModule = {
   "led", "led", ledSettingEntries,
   sizeof(ledSettingEntries) / sizeof(ledSettingEntries[0])

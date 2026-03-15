@@ -1166,17 +1166,39 @@ const char* cmd_discover(const String& originalCmd) {
 const char* cmd_devicefile(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  if (!LittleFS.exists("/system/devices.json")) {
-    return "Device registry file not found. Run 'discover' to create it.";
+  // Serialize from in-memory connectedDevices[] instead of reading disk
+  broadcastOutput("Device Registry (from memory):");
+
+  if (connectedDeviceCount == 0) {
+    broadcastOutput("  No devices discovered. Run 'discover' first.");
+    return "[I2C] Registry empty";
   }
 
-  String content;
-  if (!readText("/system/devices.json", content)) {
-    return "Error: Could not read /system/devices.json";
+  String json = "{";
+  json += "\"lastDiscovery\":" + String((unsigned long)millis()) + ",";
+  json += "\"discoveryCount\":" + String(discoveryCount) + ",";
+  json += "\"devices\":[";
+  for (int i = 0; i < connectedDeviceCount; i++) {
+    ConnectedDevice& dev = connectedDevices[i];
+    char hexAddr[5];
+    snprintf(hexAddr, sizeof(hexAddr), "0x%02X", dev.address);
+    if (i > 0) json += ",";
+    json += "{";
+    json += "\"address\":" + String(dev.address) + ",";
+    json += "\"addressHex\":\"" + String(hexAddr) + "\",";
+    json += "\"name\":\"" + String(dev.name) + "\",";
+    json += "\"description\":\"" + String(dev.description) + "\",";
+    json += "\"manufacturer\":\"" + String(dev.manufacturer) + "\",";
+    json += "\"bus\":" + String(dev.bus) + ",";
+    json += "\"isConnected\":";
+    json += dev.isConnected ? "true" : "false";
+    json += ",\"lastSeen\":" + String((unsigned long)dev.lastSeen);
+    json += ",\"firstDiscovered\":" + String((unsigned long)dev.firstDiscovered);
+    json += "}";
   }
+  json += "]}";
 
-  broadcastOutput("Device Registry JSON (/system/devices.json):");
-  broadcastOutput(content.c_str());
+  broadcastOutput(json.c_str());
   return "[I2C] Registry JSON displayed";
 }
 
@@ -1354,6 +1376,7 @@ struct SensorHeapCost {
   uint16_t heapCostKB;  // Estimated heap usage in KB
 };
 
+// Columns: name, shortName, autoStartFlag, heapCostKB
 static const SensorHeapCost sensorHeapCosts[] = {
   { "Thermal Camera", "thermal", &gSettings.thermalAutoStart, 32 },  // MLX90640: large frame buffer
   { "ToF Distance",   "tof",     &gSettings.tofAutoStart,      8 },  // VL53L4CX: moderate
@@ -1597,6 +1620,7 @@ extern const char* cmd_apdsstart_queued(const String& argsInput);
 // I2C Command Registry
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry i2cCommands[] = {
   // Bus Configuration
   { "i2csdapin", "Set I2C SDA pin: <0..39>", true, cmd_i2csdapin, "Usage: i2cSdaPin <0..39>" },
@@ -1604,9 +1628,9 @@ const CommandEntry i2cCommands[] = {
   // Note: Sensor-specific I2C clock commands (thermalI2cClockHz, tofI2cClockHz) are in their respective sensor modules
   
   // Bus Management
-  { "i2creset", "Reset I2C bus: pause polling, recover bus, resume.", false, cmd_i2creset },
-  { "i2cpause", "Pause all I2C sensor polling.", false, cmd_i2cpause },
-  { "i2cresume", "Resume I2C sensor polling.", false, cmd_i2cresume },
+  { "i2creset", "Reset I2C bus: pause polling, recover bus, resume.", true, cmd_i2creset },
+  { "i2cpause", "Pause all I2C sensor polling.", true, cmd_i2cpause },
+  { "i2cresume", "Resume I2C sensor polling.", true, cmd_i2cresume },
   { "i2crecover", "Clear degraded state for device: <address>", false, cmd_i2crecover },
   
   // Diagnostics
@@ -2207,6 +2231,7 @@ void sensorQueueProcessorTask(void* param) {
 
 // I2C settings are always available but only apply when enabled
 // This allows runtime toggling without recompiling (reboot required)
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry i2cSettingEntries[] = {
   { "i2cBusEnabled", SETTING_BOOL, &gSettings.i2cBusEnabled, 1, 0, nullptr, 0, 1, "I2C Bus Enabled (reboot required)", nullptr },
   { "i2cSdaPin", SETTING_INT, &gSettings.i2cSdaPin, I2C_SDA_PIN_DEFAULT,
@@ -2215,6 +2240,7 @@ static const SettingEntry i2cSettingEntries[] = {
     0, nullptr, 0, 48, "I2C SCL Pin (reboot required)", nullptr }
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule i2cSettingsModule = {
   "i2c", "i2c", i2cSettingEntries,
   sizeof(i2cSettingEntries) / sizeof(i2cSettingEntries[0])

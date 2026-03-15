@@ -72,7 +72,6 @@ set(hardwareone_srcs
         OLED_ESPNow.cpp
         OLED_SettingsEditor.cpp
         OLED_FirstTimeSetup.cpp
-        OLED_Mode_Settings.cpp
         OLED_Mode_Auth.cpp
         OLED_Mode_CLI.cpp
         OLED_Mode_Logging.cpp
@@ -104,8 +103,6 @@ set(hardwareone_srcs
         System_Utils.cpp
         System_TaskUtils.cpp
         System_User.cpp
-        System_Auth.cpp
-        System_Users.cpp
         System_WiFi.cpp
         System_Camera_DVP.cpp
         System_ImageManager.cpp

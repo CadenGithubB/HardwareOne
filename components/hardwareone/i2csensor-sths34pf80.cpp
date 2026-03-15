@@ -101,6 +101,7 @@ static bool createPresenceTask() {
 // STHS34PF80 Modular Settings Registration
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry presenceSettingEntries[] = {
   { "presenceAutoStart",    SETTING_BOOL, &gSettings.presenceAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   { "presenceDevicePollMs", SETTING_INT,  &gSettings.presenceDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr }
@@ -110,6 +111,7 @@ static bool isPresenceConnected() {
   return presenceConnected;
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule presenceSettingsModule = {
   "presence",
   "presence",
@@ -437,6 +439,7 @@ const char* cmd_presenceautostart(const String& argsInput) {
   return "Usage: presenceautostart [on|off]";
 }
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry presenceCommands[] = {
   // 3-level voice: "sensor" -> "presence" -> "open/close"
   { "openpresence", "Start STHS34PF80 IR presence/motion sensor.", false, cmd_presencestart, nullptr, "sensor", "presence", "open" },

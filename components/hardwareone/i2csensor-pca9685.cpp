@@ -283,6 +283,7 @@ const char* cmd_pwm(const String& argsInput) {
 // PCA9685/Servo Command Registry
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry servoCommands[] = {
   { "servo", "Control servo motor: servo <channel> <angle>.", false, cmd_servo, "Usage: servo <channel> <angle>" },
   { "pwm", "Set PWM output: pwm <channel> <value> [freq].", false, cmd_pwm, "Usage: pwm <channel> <value> [freq]" },

@@ -62,6 +62,7 @@ static bool createAPDSTask() {
 // ============================================================================
 
 // APDS settings entries
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry apdsSettingEntries[] = {
   { "apdsAutoStart",    SETTING_BOOL, &gSettings.apdsAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   { "apdsDevicePollMs", SETTING_INT,  &gSettings.apdsDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr }
@@ -71,6 +72,7 @@ static bool isAPDSConnected() {
   return apdsConnected;
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule apdsSettingsModule = {
   "apds",
   "apds",
@@ -399,6 +401,7 @@ const char* cmd_apdsautostart(const String& argsInput) {
   return "Usage: apdsautostart [on|off]";
 }
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry apdsCommands[] = {
   // Primary commands (3-level voice: "sensor" -> "gesture" -> "open/close")
   { "openapds", "Start APDS9960 sensor.", false, cmd_apdsstart, nullptr, "sensor", "gesture", "open" },

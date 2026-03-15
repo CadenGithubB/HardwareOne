@@ -676,6 +676,7 @@ const char* cmd_imagesend(const String& argsInput) {
 }
 
 // Command registration
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 extern const CommandEntry imageCommands[] = {
   {"capture", "Capture and save image: capture [littlefs|sd|both]", false, cmd_capture},
   {"images", "List saved images: images [littlefs|sd]", false, cmd_images},

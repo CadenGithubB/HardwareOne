@@ -388,6 +388,7 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
 
 extern void displayFileBrowserRendered();
 
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry sFileBrowserModes[] = {
   { OLED_FILE_BROWSER, "Files", "file_text", displayFileBrowserRendered, nullptr, fileBrowserInputHandler, false, -1, nullptr },
 };

@@ -1278,19 +1278,30 @@ static esp_err_t handleBondPairedDevices(httpd_req_t* req) {
   JsonArray devices = doc["devices"].as<JsonArray>();
   bool first = true;
   for (JsonObject dev : devices) {
-    const char* mac = dev["mac"] | "";
+    const char* rawMac = dev["mac"] | "";
     const char* name = dev["name"] | "Unknown";
     const char* room = dev["room"] | "";
     const char* zone = dev["zone"] | "";
-    
+
     // Skip devices without MAC (all devices in this file are already paired)
-    if (strlen(mac) == 0) continue;
-    
+    if (strlen(rawMac) == 0) continue;
+
+    // Decrypt MAC if stored encrypted (AES: prefix)
+    String macStr = String(rawMac);
+    if (macStr.startsWith("AES:")) {
+      String decrypted = decryptString(macStr);
+      if (decrypted.length() > 0) {
+        macStr = decrypted;
+      } else {
+        continue;  // Can't decrypt, skip this device
+      }
+    }
+
     if (!first) webBondSendChunk(req, ",");
     first = false;
-    
+
     webBondSendChunk(req, "{");
-    webBondSendChunkf(req, "\"mac\":\"%s\",", mac);
+    webBondSendChunkf(req, "\"mac\":\"%s\",", macStr.c_str());
     webBondSendChunkf(req, "\"name\":\"%s\",", name);
     webBondSendChunkf(req, "\"room\":\"%s\",", room);
     webBondSendChunkf(req, "\"zone\":\"%s\"", zone);

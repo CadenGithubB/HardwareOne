@@ -19,7 +19,7 @@
 #include "OLED_SettingsEditor.h"
 #include "OLED_Utils.h"
 #include "System_BuildConfig.h"
-#include "System_Auth.h"
+#include "System_User.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
@@ -1285,6 +1285,7 @@ static const char* cmd_blerequireauth(const String& argsInput) {
 // COMMAND REGISTRY
 // =============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry bluetoothCommands[] = {
   // Start/Stop (3-level voice: "connection" -> "bluetooth" -> "open/close")
   { "openble",      "Start Bluetooth LE and begin advertising.", false, cmd_blestart, nullptr, "connection", "bluetooth", "open" },
@@ -1302,7 +1303,7 @@ const CommandEntry bluetoothCommands[] = {
   
   // Auto-start
   { "bleautostart",    "Enable/disable BLE auto-start after boot [on|off].",   false, cmd_bleautostart,    "Usage: bleautostart [on|off]" },
-  { "blerequireauth", "Enable/disable BLE authentication requirement [on|off].", false, cmd_blerequireauth, "Usage: blerequireauth [on|off]" },
+  { "blerequireauth", "Enable/disable BLE authentication requirement [on|off].", true, cmd_blerequireauth, "Usage: blerequireauth [on|off]" },
 };
 
 const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoothCommands[0]);
@@ -1314,6 +1315,7 @@ const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoo
 // =============================================================================
 
 // Settings entries for Bluetooth
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 const SettingEntry bluetoothSettingsEntries[] = {
   { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bluetoothAutoStart,    true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr },
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr },
@@ -1328,6 +1330,7 @@ const SettingEntry bluetoothSettingsEntries[] = {
 const size_t bluetoothSettingsCount = sizeof(bluetoothSettingsEntries) / sizeof(bluetoothSettingsEntries[0]);
 
 // Register Bluetooth settings module
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule bluetoothSettingsModule = {
   "bluetooth",
   "bluetooth",
@@ -1893,6 +1896,7 @@ static bool bluetoothInputHandler(int deltaX, int deltaY, uint32_t newlyPressed)
 }
 
 // Bluetooth OLED mode entry
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry bluetoothOLEDModes[] = {
   {
     OLED_BLUETOOTH,          // mode enum

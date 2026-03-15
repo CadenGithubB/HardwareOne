@@ -220,10 +220,10 @@ static int buildRemoteMenuItems(UnifiedMenuItem* items, int maxItems, const uint
   File f = LittleFS.open(manifestPath.c_str(), "r");
   if (!f) return count;
   
-  DynamicJsonDocument doc(4096);
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, f);
   f.close();
-  
+
   if (err) return count;
   
   // Extract CLI modules from manifest - create one submenu entry per module
@@ -290,7 +290,7 @@ static void buildSubmenuForModule(const char* moduleName, bool isRemote) {
   String manifestPath = manifestPathBuf;
     File f = LittleFS.open(manifestPath.c_str(), "r");
     if (f) {
-      DynamicJsonDocument doc(4096);
+      JsonDocument doc;
       DeserializationError err = deserializeJson(doc, f);
       f.close();
       
@@ -612,6 +612,7 @@ static const OLEDModeEntry unifiedMenuModeEntry = {
   "A:Run X:Refresh B:Back"
 };
 
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry unifiedMenuModes[] = { unifiedMenuModeEntry };
 
 REGISTER_OLED_MODE_MODULE(unifiedMenuModes, 1, "UnifiedMenu");

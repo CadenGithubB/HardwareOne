@@ -174,114 +174,6 @@ void updateRemoteSensorStatus(const uint8_t* mac, const char* name, RemoteSensor
   }
 }
 
-// ==========================
-// Message Handlers
-// ==========================
-
-void handleSensorStatusMessage(const uint8_t* senderMac, const String& deviceName, const String& message) {
-  DEBUG_SENSORSF("[SENSOR_STATUS_RX] Received status message from %s (MAC: %02X:%02X:%02X:%02X:%02X:%02X)",
-         deviceName.c_str(), senderMac[0], senderMac[1], senderMac[2], senderMac[3], senderMac[4], senderMac[5]);
-  DEBUG_SENSORSF("[SENSOR_STATUS_RX] Message length: %d bytes", message.length());
-  DEBUG_SENSORSF("[SENSOR_STATUS_RX] Raw message: %.200s", message.c_str());
-  
-  PSRAM_JSON_DOC(doc);
-  DeserializationError error = deserializeJson(doc, message);
-  if (error) {
-    DEBUG_SENSORSF("[SENSOR_STATUS_RX] ERROR: Failed to parse status JSON: %s", error.c_str());
-    DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Failed to parse status JSON: %s", error.c_str());
-    return;
-  }
-  DEBUG_SENSORSF("%s", "[SENSOR_STATUS_RX] JSON parsed successfully");
-  
-  const char* sensorTypeStr = doc["sensor"] | "";
-  bool enabled = doc["enabled"] | false;
-  DEBUG_SENSORSF("[SENSOR_STATUS_RX] Extracted: sensor='%s', enabled=%d", sensorTypeStr, enabled);
-  
-  RemoteSensorType sensorType = stringToSensorType(sensorTypeStr);
-  DEBUG_SENSORSF("[SENSOR_STATUS_RX] Sensor type: %d (%s)", sensorType, sensorTypeToString(sensorType));
-  
-  DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Status from %s: %s = %s",
-         deviceName.c_str(), sensorTypeStr, enabled ? "enabled" : "disabled");
-  
-  // Update cache entry
-  DEBUG_SENSORSF("[SENSOR_STATUS_RX] Looking up/creating cache entry for %s", deviceName.c_str());
-  RemoteSensorData* entry = findOrCreateCacheEntry(senderMac, deviceName.c_str(), sensorType);
-  if (entry) {
-    DEBUG_SENSORSF("[SENSOR_STATUS_RX] Cache entry found/created at %p", entry);
-    if (!enabled) {
-      // Sensor disabled - invalidate cache entry
-      DEBUG_SENSORSF("[SENSOR_STATUS_RX] Sensor disabled, invalidating cache entry");
-      entry->valid = false;
-      entry->jsonData[0] = '\0';
-      entry->jsonLength = 0;
-      DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Invalidated cache for %s %s",
-             deviceName.c_str(), sensorTypeStr);
-    } else {
-      DEBUG_SENSORSF("[SENSOR_STATUS_RX] Sensor enabled, cache entry ready for data");
-    }
-  } else {
-    DEBUG_SENSORSF("%s", "[SENSOR_STATUS_RX] ERROR: Failed to find/create cache entry");
-  }
-  
-  // Broadcast to web clients via SSE
-  BROADCAST_PRINTF("[ESP-NOW] Remote sensor %s on %s is now %s", sensorTypeStr, deviceName.c_str(), enabled ? "enabled" : "disabled");
-}
-
-void handleSensorDataMessage(const uint8_t* senderMac, const String& deviceName, const String& message) {
-  DEBUG_SENSORSF("[SENSOR_DATA_RX] Received data message from %s (MAC: %02X:%02X:%02X:%02X:%02X:%02X)",
-         deviceName.c_str(), senderMac[0], senderMac[1], senderMac[2], senderMac[3], senderMac[4], senderMac[5]);
-  DEBUG_SENSORSF("[SENSOR_DATA_RX] Message length: %d bytes", message.length());
-  DEBUG_SENSORSF("[SENSOR_DATA_RX] Raw message (first 200 chars): %.200s", message.c_str());
-  
-  PSRAM_JSON_DOC(doc);
-  DeserializationError error = deserializeJson(doc, message);
-  if (error) {
-    DEBUG_SENSORSF("[SENSOR_DATA_RX] ERROR: Failed to parse sensor data JSON: %s", error.c_str());
-    DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Failed to parse sensor data JSON: %s", error.c_str());
-    return;
-  }
-  DEBUG_SENSORSF("%s", "[SENSOR_DATA_RX] JSON parsed successfully");
-  
-  const char* sensorTypeStr = doc["sensor"] | "";
-  JsonObject data = doc["data"];
-  DEBUG_SENSORSF("[SENSOR_DATA_RX] Extracted: sensor='%s', has_data=%d", sensorTypeStr, data ? 1 : 0);
-  
-  if (!data) {
-    DEBUG_SENSORSF("%s", "[SENSOR_DATA_RX] ERROR: No data field in sensor message");
-    DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] No data field in sensor message");
-    return;
-  }
-  
-  RemoteSensorType sensorType = stringToSensorType(sensorTypeStr);
-  DEBUG_SENSORSF("[SENSOR_DATA_RX] Sensor type: %d (%s)", sensorType, sensorTypeToString(sensorType));
-  
-  // Update cache entry
-  DEBUG_SENSORSF("[SENSOR_DATA_RX] Looking up/creating cache entry for %s", deviceName.c_str());
-  RemoteSensorData* entry = findOrCreateCacheEntry(senderMac, deviceName.c_str(), sensorType);
-  if (entry) {
-    DEBUG_SENSORSF("[SENSOR_DATA_RX] Cache entry found/created at %p", entry);
-    
-    // Serialize directly into fixed buffer (no heap allocation)
-    size_t written = serializeJson(data, entry->jsonData, REMOTE_SENSOR_BUFFER_SIZE);
-    if (written >= REMOTE_SENSOR_BUFFER_SIZE) {
-      // Truncated - data too large for buffer
-      DEBUG_SENSORSF("[SENSOR_DATA_RX] WARNING: Data truncated (%zu >= %d)", written, REMOTE_SENSOR_BUFFER_SIZE);
-      entry->jsonData[REMOTE_SENSOR_BUFFER_SIZE - 1] = '\0';
-      entry->jsonLength = REMOTE_SENSOR_BUFFER_SIZE - 1;
-    } else {
-      entry->jsonLength = (uint16_t)written;
-    }
-    entry->lastUpdate = millis();
-    entry->valid = true;
-    
-    DEBUG_SENSORSF("[SENSOR_DATA_RX] Cache updated: valid=%d, lastUpdate=%lu, len=%u", 
-                   entry->valid, entry->lastUpdate, entry->jsonLength);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Updated cache for %s %s (%u bytes)",
-           deviceName.c_str(), sensorTypeStr, entry->jsonLength);
-  } else {
-    DEBUG_SENSORSF("%s", "[SENSOR_DATA_RX] ERROR: Failed to find/create cache entry");
-  }
-}
 
 // ==========================
 // Worker → Master Broadcasting
@@ -1117,7 +1009,7 @@ bool getRemoteGPSData(RemoteGPSData* outData) {
   }
   
   // Parse the JSON data: {"val":1,"fix":1,"quality":1,"sats":8,"lat":37.123,"lon":-122.456,"alt":100.5,"speed":0.5}
-  StaticJsonDocument<256> doc;
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, bestEntry->jsonData, bestEntry->jsonLength);
   if (err) {
     return false;

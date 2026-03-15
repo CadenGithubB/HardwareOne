@@ -3370,6 +3370,7 @@ static const char* cmd_print(const String& argsInput) {
 
 // CommandEntry struct is defined in system_utils.h (included via automation_system.h)
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry automationCommands[] = {
   // Primary dispatcher: "automation <subcommand> [args]"
   // Subcommands: system enable|disable|status, list, add, enable, disable, delete, run, sanitize, recompute
@@ -3398,10 +3399,12 @@ const size_t automationCommandsCount = sizeof(automationCommands) / sizeof(autom
 // Automation Settings Module
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry automationSettingEntries[] = {
   { "automationsEnabled", SETTING_BOOL, &gSettings.automationsEnabled, false, 0, nullptr, 0, 1, "Automations Enabled", nullptr }
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule automationSettingsModule = {
   "automation", "automation", automationSettingEntries,
   sizeof(automationSettingEntries) / sizeof(automationSettingEntries[0])

@@ -1374,6 +1374,7 @@ static const char* cmd_g2nav(const String& argsInput) {
 // COMMAND REGISTRY
 // =============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry g2Commands[] = {
   { "openg2",        "Connect to G2 glasses: openg2 [left|right|auto]",    false, cmd_g2connect },
   { "closeg2",       "Disconnect from G2 glasses",                          false, cmd_g2disconnect },

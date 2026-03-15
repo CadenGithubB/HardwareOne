@@ -173,7 +173,8 @@ struct OLEDModeEntry {
 };
 
 // Maximum number of OLED modes that can be registered
-#define MAX_OLED_MODES 32
+// 47 enum values + sensor modules registering multiple entries each
+#define MAX_OLED_MODES 64
 
 // OLED Mode Registration Functions
 void registerOLEDMode(const OLEDModeEntry* mode);

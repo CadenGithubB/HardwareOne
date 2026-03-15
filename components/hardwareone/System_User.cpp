@@ -128,41 +128,6 @@ bool tgRequireAuth(AuthContext& ctx) {
   }
 }
 
-// Admin check across transports; for HTTP, send 403 on failure.
-bool tgRequireAdmin(AuthContext& ctx) {
-  if (!tgRequireAuth(ctx)) return false;
-  if (ctx.transport == SOURCE_WEB) {
-    if (!isAdminUser(ctx.user)) {
-      httpd_req_t* req = reinterpret_cast<httpd_req_t*>(ctx.opaque);
-      if (req) {
-        httpd_resp_set_status(req, "403 Forbidden");
-        httpd_resp_set_type(req, "text/plain");
-        httpd_resp_send(req, "Forbidden: admin required", HTTPD_RESP_USE_STRLEN);
-      }
-      return false;
-    }
-    return true;
-  } else if (ctx.transport == SOURCE_SERIAL) {
-    if (!isAdminUser(ctx.user)) {
-      broadcastOutput("ERROR: admin required");
-      return false;
-    }
-    return true;
-  } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
-    // Allow admin commands during boot phase
-    if (oledBootModeActive) {
-      return true;  // Boot phase - allow all commands
-    }
-    if (!isAdminUser(ctx.user)) {
-      broadcastOutput("ERROR: admin required (display)");
-      return false;
-    }
-    return true;
-  } else {
-    // Internal/ESP-NOW - check admin privilege
-    return isAdminUser(ctx.user);
-  }
-}
 #else
 // Stub implementations when HTTP server is disabled
 bool tgRequireAuth(AuthContext& ctx) {
@@ -185,27 +150,6 @@ bool tgRequireAuth(AuthContext& ctx) {
     return true;
   }
   return true; // Internal commands pass through
-}
-bool tgRequireAdmin(AuthContext& ctx) {
-  if (!tgRequireAuth(ctx)) return false;
-  
-  // Allow admin commands during boot phase
-  if (ctx.transport == SOURCE_LOCAL_DISPLAY && oledBootModeActive) {
-    return true;  // Boot phase - allow all commands
-  }
-  
-  if (ctx.transport == SOURCE_SERIAL) {
-    if (!isAdminUser(ctx.user)) {
-      broadcastOutput("ERROR: admin required");
-      return false;
-    }
-  } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
-    if (!isAdminUser(ctx.user)) {
-      broadcastOutput("ERROR: admin required (display)");
-      return false;
-    }
-  }
-  return isAdminUser(ctx.user);
 }
 #endif // ENABLE_HTTP_SERVER
 
@@ -480,12 +424,114 @@ bool hasUserGamepadPassword(const String& username) {
   return (gamepadPass && strlen(gamepadPass) > 0);
 }
 
+// ============================================================================
+// User Account Ban
+// ============================================================================
+
+// Returns true if the given username has "banned": true in users.json.
+bool isUserBanned(const String& username) {
+  if (!filesystemReady || username.length() == 0) return false;
+  FsLockGuard guard("users.is_banned");
+  if (!LittleFS.exists(USERS_JSON_FILE)) return false;
+  File f = LittleFS.open(USERS_JSON_FILE, "r");
+  if (!f) return false;
+  PSRAM_JSON_DOC(doc);
+  DeserializationError err = deserializeJson(doc, f);
+  f.close();
+  if (err) return false;
+  for (JsonObject u : doc["users"].as<JsonArray>()) {
+    const char* uname = u["username"] | "";
+    if (username == uname) return u["banned"] | false;
+  }
+  return false;
+}
+
+// Sets (or clears) the "banned" flag on a user entry in users.json.
+// Also stores optional reason. Kicks active sessions when banning.
+// Returns error string on failure, nullptr on success.
+static const char* setUserBanInternal(const String& username, bool ban, const String& reason) {
+  if (username.length() == 0) return "Username required";
+  if (!filesystemReady)       return "Filesystem not ready";
+
+  uint32_t userId = 0;
+  getUserIdByUsername(username, userId);
+  if (userId == 0) return "User not found";
+  if (userId == 1) return "Cannot ban the primary admin account";
+
+  {
+    FsLockGuard guard("users.set_ban");
+    if (!LittleFS.exists(USERS_JSON_FILE)) return "users.json not found";
+    File f = LittleFS.open(USERS_JSON_FILE, "r");
+    if (!f) return "Failed to read users.json";
+    PSRAM_JSON_DOC(doc);
+    if (deserializeJson(doc, f)) { f.close(); return "Malformed users.json"; }
+    f.close();
+
+    bool found = false;
+    for (JsonObject u : doc["users"].as<JsonArray>()) {
+      const char* uname = u["username"] | "";
+      if (username == uname) {
+        if (ban) {
+          u["banned"] = true;
+          if (reason.length()) u["banReason"] = reason;
+          else                 u.remove("banReason");
+        } else {
+          u.remove("banned");
+          u.remove("banReason");
+        }
+        found = true;
+        break;
+      }
+    }
+    if (!found) return "User not found";
+
+    File wf = LittleFS.open(USERS_JSON_FILE, "w");
+    if (!wf) return "Failed to write users.json";
+    serializeJson(doc, wf);
+    wf.close();
+  }
+
+  if (ban) {
+    // Revoke serial transport session if active for this user
+    if (gSerialAuthed && gSerialUser.equalsIgnoreCase(username)) {
+      gSerialAuthed = false;
+      gSerialUser   = String();
+    }
+    // Revoke OLED/local display session if active for this user
+    if (gLocalDisplayAuthed && gLocalDisplayUser.equalsIgnoreCase(username)) {
+      gLocalDisplayAuthed = false;
+      gLocalDisplayUser   = String();
+    }
+    // Revoke Bluetooth session if active for this user
+    if (gBluetoothAuthed && gBluetoothUser.equalsIgnoreCase(username)) {
+      gBluetoothAuthed = false;
+      gBluetoothUser   = String();
+    }
+#if ENABLE_HTTP_SERVER
+    // Revoke all web sessions for this user
+    if (gSessions) {
+      for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (gSessions[i].sid.length() > 0 && gSessions[i].user.equalsIgnoreCase(username)) {
+          enqueueTargetedRevokeForSessionIdx(i, "Your account has been suspended by an administrator.");
+        }
+      }
+    }
+#endif
+  }
+
+  DEBUG_USERSF("[users] %s user ban for '%s'", ban ? "set" : "cleared", username.c_str());
+  return nullptr;
+}
+
 // Validate a username/password against per-user settings file
 // Checks both 'password' (text) and 'gamepad_password' (pattern) fields
 bool isValidUser(const String& u, const String& p) {
   if (!filesystemReady) return false;
   if (u.length() == 0 || p.length() == 0) return false;
-  
+
+  // Reject banned accounts before touching credentials
+  if (isUserBanned(u)) return false;
+
   // Get user ID from username (verifies user exists in users.json)
   uint32_t userId = 0;
   if (!getUserIdByUsername(u, userId) || userId == 0) return false;
@@ -1547,6 +1593,22 @@ const char* cmd_session_list(const String& argsInput) {
     PSRAM_JSON_DOC(doc);
     JsonArray sessions = doc.to<JsonArray>();
     buildAllSessionsJson("", sessions);
+    // Append active transport (non-web) sessions as synthetic entries
+    if (gSerialAuthed && gSerialUser.length()) {
+      JsonObject t = sessions.add<JsonObject>();
+      t["user"]      = gSerialUser;
+      t["transport"] = "serial";
+    }
+    if (gLocalDisplayAuthed && gLocalDisplayUser.length()) {
+      JsonObject t = sessions.add<JsonObject>();
+      t["user"]      = gLocalDisplayUser;
+      t["transport"] = "oled";
+    }
+    if (gBluetoothAuthed && gBluetoothUser.length()) {
+      JsonObject t = sessions.add<JsonObject>();
+      t["user"]      = gBluetoothUser;
+      t["transport"] = "bluetooth";
+    }
     size_t len = serializeJson(sessions, jsonBuf, kBufSize);
     if (len >= kBufSize) {
       ERROR_MEMORYF("session list JSON truncated: %zu >= %zu", len, kBufSize);
@@ -1622,6 +1684,7 @@ const char* cmd_session_revoke(const String& argsInput) {
     String reason = (sp < 0) ? String() : rest.substring(sp + 1);
     reason.trim();
     if (!reason.length()) reason = defaultReason;
+    // Revoke web sessions
     for (int i = 0; i < MAX_SESSIONS; ++i) {
       if (!gSessions[i].sid.length()) continue;
       if (!gSessions[i].user.equalsIgnoreCase(username)) continue;
@@ -1629,6 +1692,22 @@ const char* cmd_session_revoke(const String& argsInput) {
         storeLogoutReason(gSessions[i].ip, reason);
       }
       enqueueTargetedRevokeForSessionIdx(i, reason);
+      revoked++;
+    }
+    // Revoke transport sessions (OLED, Serial, Bluetooth)
+    if (gSerialAuthed && gSerialUser.equalsIgnoreCase(username)) {
+      gSerialAuthed = false;
+      gSerialUser   = String();
+      revoked++;
+    }
+    if (gLocalDisplayAuthed && gLocalDisplayUser.equalsIgnoreCase(username)) {
+      gLocalDisplayAuthed = false;
+      gLocalDisplayUser   = String();
+      revoked++;
+    }
+    if (gBluetoothAuthed && gBluetoothUser.equalsIgnoreCase(username)) {
+      gBluetoothAuthed = false;
+      gBluetoothUser   = String();
       revoked++;
     }
     if (revoked > 0) {
@@ -1652,6 +1731,88 @@ const char* cmd_session_revoke(const String& argsInput) {
          "  session revoke sid <sid> [reason]\n"
          "  session revoke user <username> [reason]";
 }
+const char* cmd_ban(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String args = argsInput;
+  args.trim();
+  if (args.length() == 0) return "Usage: ban <ip> [reason]";
+
+  int sp = args.indexOf(' ');
+  String ip     = (sp >= 0) ? args.substring(0, sp) : args;
+  String reason = (sp >= 0) ? args.substring(sp + 1) : String();
+  ip.trim();
+  reason.trim();
+
+  if (ip.length() == 0) return "Usage: ban <ip> [reason]";
+  // Basic format check — must contain a dot (IPv4) or colon (IPv6)
+  if (ip.indexOf('.') < 0 && ip.indexOf(':') < 0) {
+    return "Error: invalid IP address format (expected e.g. 192.168.1.100)";
+  }
+
+  if (banIp(ip.c_str(), reason.length() ? reason.c_str() : nullptr)) {
+    static char buf[140];
+    if (reason.length()) snprintf(buf, sizeof(buf), "Banned %s — %s", ip.c_str(), reason.c_str());
+    else                 snprintf(buf, sizeof(buf), "Banned %s", ip.c_str());
+    return buf;
+  }
+  return "Error: could not ban IP (list may be full or save failed)";
+}
+
+const char* cmd_unban(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String ip = argsInput;
+  ip.trim();
+  if (ip.length() == 0) return "Usage: unban <ip>";
+
+  if (unbanIp(ip.c_str())) {
+    static char buf[80];
+    snprintf(buf, sizeof(buf), "Unbanned %s", ip.c_str());
+    return buf;
+  }
+  return "Error: IP not found in ban list";
+}
+
+const char* cmd_banlist(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  broadcastBanList();
+  return "";
+}
+
+const char* cmd_banuser(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String args = argsInput;
+  args.trim();
+  if (args.length() == 0) return "Usage: banuser <username> [reason]";
+
+  int sp = args.indexOf(' ');
+  String username = (sp >= 0) ? args.substring(0, sp) : args;
+  String reason   = (sp >= 0) ? args.substring(sp + 1) : String();
+  username.trim();
+  reason.trim();
+
+  const char* err = setUserBanInternal(username, true, reason);
+  if (err) return err;
+
+  static char buf[160];
+  if (reason.length()) snprintf(buf, sizeof(buf), "Banned user '%s' — %s", username.c_str(), reason.c_str());
+  else                 snprintf(buf, sizeof(buf), "Banned user '%s'", username.c_str());
+  return buf;
+}
+
+const char* cmd_unbanuser(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String username = argsInput;
+  username.trim();
+  if (username.length() == 0) return "Usage: unbanuser <username>";
+
+  const char* err = setUserBanInternal(username, false, "");
+  if (err) return err;
+
+  static char buf[80];
+  snprintf(buf, sizeof(buf), "Unbanned user '%s'", username.c_str());
+  return buf;
+}
+
 #else
 // Stub implementations when HTTP server is disabled
 // Note: cmd_login and cmd_logout are in System_Utils.cpp (always available)
@@ -1662,6 +1823,26 @@ const char* cmd_session_list(const String& originalCmd) {
 const char* cmd_session_revoke(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return "Session management requires HTTP server to be enabled";
+}
+const char* cmd_ban(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return "Ban management requires HTTP server to be enabled";
+}
+const char* cmd_unban(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return "Ban management requires HTTP server to be enabled";
+}
+const char* cmd_banlist(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return "Ban management requires HTTP server to be enabled";
+}
+const char* cmd_banuser(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return "Ban management requires HTTP server to be enabled";
+}
+const char* cmd_unbanuser(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return "Ban management requires HTTP server to be enabled";
 }
 #endif // ENABLE_HTTP_SERVER
 
@@ -2340,6 +2521,7 @@ static const char* cmd_serialrequireauth(const String& argsInput) {
   return "Usage: serialrequireauth [on|off]";
 }
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry userSystemCommands[] = {
   // Authentication commands
   { "login", "Login: <user> <pass> [transport]", false, cmd_login, "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth" },
@@ -2360,7 +2542,14 @@ const CommandEntry userSystemCommands[] = {
   // Session management commands
   { "pending list", "List pending user requests.", true, cmd_pending_list },
   { "session list", "List active sessions.", true, cmd_session_list },
-  { "session revoke", "Revoke session: <sid|user> [reason]", true, cmd_session_revoke, "Usage:\n  session revoke sid <sid> [reason]\n  session revoke user <username> [reason]" }
+  { "session revoke", "Revoke session: <sid|user> [reason]", true, cmd_session_revoke, "Usage:\n  session revoke sid <sid> [reason]\n  session revoke user <username> [reason]" },
+
+  // IP ban management
+  { "ban",      "Permanently ban an IP: <ip> [reason]",      true, cmd_ban,      "Usage: ban <ip> [reason]\nBlocks all access from the IP until manually unbanned." },
+  { "unban",    "Remove an IP ban: <ip>",                    true, cmd_unban,    "Usage: unban <ip>" },
+  { "banlist",  "List all banned IPs.",                      true, cmd_banlist },
+  { "banuser",  "Permanently ban a user account: <username> [reason]", true, cmd_banuser,  "Usage: banuser <username> [reason]\nPrevents the account from logging in until manually unbanned." },
+  { "unbanuser","Remove a user account ban: <username>",     true, cmd_unbanuser,"Usage: unbanuser <username>" }
 };
 
 const size_t userSystemCommandsCount = sizeof(userSystemCommands) / sizeof(userSystemCommands[0]);

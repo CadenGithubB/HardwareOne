@@ -456,6 +456,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
 // Mode Registration
 // ============================================================================
 
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry sAutomationsModes[] = {
   { OLED_AUTOMATIONS, "Automations", "notify_automation", displayAutomations, nullptr, automationsInputHandler, false, -1, "B:Back" },
 };

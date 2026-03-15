@@ -59,55 +59,6 @@ extern bool gCLIValidateOnly;
 // Debug flags (defined in .ino)
 // Removed local DEBUG_HTTP define; use debug_system.h as single source of truth
 
-// Deduplication is MANDATORY - no runtime toggle (required for mesh flood forwarding)
-struct MsgDedupEntry { uint8_t src[6]; uint32_t id; uint32_t ts; bool active; };
-#define MSG_DEDUP_SIZE 32
-static MsgDedupEntry gMsgDedup[MSG_DEDUP_SIZE];
-static int gMsgDedupIdx = 0;
-
-// Ack wait table (small, lock-free)
-struct MsgAckWait { uint32_t id; volatile bool got; uint32_t ts; bool active; };
-#define MSG_ACK_WAIT_MAX 8
-static MsgAckWait gMsgAckWait[MSG_ACK_WAIT_MAX];
-static int msgAckWaitRegister(uint32_t id) {
-  // reuse slot with same id if present
-  for (int i = 0; i < MSG_ACK_WAIT_MAX; i++) {
-    if (gMsgAckWait[i].active && gMsgAckWait[i].id == id) {
-      gMsgAckWait[i].got = false; gMsgAckWait[i].ts = millis();
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[ACK_WAIT] Reusing slot %d for msgId=%lu", i, (unsigned long)id);
-      return i;
-    }
-  }
-  for (int i = 0; i < MSG_ACK_WAIT_MAX; i++) {
-    if (!gMsgAckWait[i].active) {
-      gMsgAckWait[i].active = true;
-      gMsgAckWait[i].id = id;
-      gMsgAckWait[i].got = false;
-      gMsgAckWait[i].ts = millis();
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[ACK_WAIT] Registered slot %d for msgId=%lu", i, (unsigned long)id);
-      return i;
-    }
-  }
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[ACK_WAIT] ERROR: All slots full, cannot register msgId=%lu", (unsigned long)id);
-  return -1;
-}
-static bool msgAckWaitBlock(uint32_t id, uint32_t timeoutMs) {
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[ACK_WAIT] Blocking for msgId=%lu timeout=%lums", (unsigned long)id, (unsigned long)timeoutMs);
-  unsigned long start = millis();
-  while ((millis() - start) < timeoutMs) {
-    for (int i = 0; i < MSG_ACK_WAIT_MAX; i++) {
-      if (gMsgAckWait[i].active && gMsgAckWait[i].id == id && gMsgAckWait[i].got) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[ACK_WAIT] ACK received for msgId=%lu after %lums", (unsigned long)id, millis() - start);
-        return true;
-      }
-    }
-    // Use vTaskDelay to properly yield to RTOS scheduler and feed watchdog
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[ACK_WAIT] TIMEOUT waiting for msgId=%lu after %lums", (unsigned long)id, (unsigned long)timeoutMs);
-  return false;
-}
-
 // General system functions from .ino (non-ESP-NOW specific)
 extern AuthContext gExecAuthContext;
 // Note: handleFileTransferMessage and sendTopologyResponse are static in this file, not extern
@@ -578,8 +529,8 @@ const char* cmd_espnow_rel(const String& argsInput) {
 // Save mesh peer MAC addresses to filesystem (topology only, not health metrics)
 // This is called only when topology changes (new peer discovered, peer removed, mode change)
 // Health metrics (timestamps, counters) rebuild naturally from heartbeats after reboot
-void saveMeshPeers() {
-  if (!filesystemReady) return;
+bool saveMeshPeers() {
+  if (!filesystemReady) return false;
 
   // Pause sensor polling during file I/O
   extern volatile bool gSensorPollingPaused;
@@ -590,8 +541,9 @@ void saveMeshPeers() {
   File file = LittleFS.open(MESH_PEERS_FILE, "w");
   if (!file) {
     gSensorPollingPaused = wasPaused;
-    return;
+    return false;
   }
+  int skipped = 0;
 
   file.println("{");
  
@@ -612,8 +564,14 @@ void saveMeshPeers() {
         }
       }
     }
+    String encMac = encryptString(macToHexString(gMeshPeers[i].mac));
+    if (encMac.length() == 0) {
+      ERROR_ESPNOWF("[MESH] Failed to encrypt peer MAC, skipping entry");
+      skipped++;
+      continue;
+    }
     file.print("    {\"mac\": \"");
-    file.print(macToHexString(gMeshPeers[i].mac));
+    file.print(encMac);
     file.print("\"");
     if (peerName.length() > 0) {
       file.print(", \"name\": \"");
@@ -621,7 +579,7 @@ void saveMeshPeers() {
       file.print("\"");
     }
     file.print("}");
-    
+
     count++;
   }
 
@@ -632,38 +590,55 @@ void saveMeshPeers() {
   
   gSensorPollingPaused = wasPaused;
   
-  DEBUGF(DEBUG_ESPNOW_MESH, "[MESH] Saved role=%s, %d peer MAC addresses to filesystem", 
+  DEBUGF(DEBUG_ESPNOW_MESH, "[MESH] Saved role=%s, %d peer MAC addresses to filesystem",
                 getMeshRoleString(gSettings.meshRole), count);
+  return skipped == 0;
 }
 
 // Save named ESP-NOW devices (paired devices with names/keys) to filesystem
-static void saveEspNowDevices() {
-  if (!gEspNow) return;
-  if (!filesystemReady) return;
+static bool saveEspNowDevices() {
+  if (!gEspNow) return false;
+  if (!filesystemReady) return false;
 
   FsLockGuard fsGuard("espnow.devices.save");
   File f = LittleFS.open(ESPNOW_DEVICES_FILE, "w");
-  if (!f) return;
+  if (!f) return false;
+  int skipped = 0;
 
   f.println("{");
   f.println("  \"devices\": [");
   int count = 0;
   for (int i = 0; i < gEspNow->deviceCount; i++) {
     if (isSelfMac(gEspNow->devices[i].mac)) continue;
+    // Encrypt MAC address at rest (device-bound AES)
+    String encMac = encryptString(formatMacAddress(gEspNow->devices[i].mac));
+    if (encMac.length() == 0) {
+      ERROR_ESPNOWF("[ESPNOW] Failed to encrypt device MAC for '%s', skipping entry", gEspNow->devices[i].name.c_str());
+      skipped++;
+      continue;
+    }
     if (count > 0) f.println(",");
     f.print("    {\"mac\":\"");
-    f.print(formatMacAddress(gEspNow->devices[i].mac));
+    f.print(encMac);
     f.print("\",\"name\":\"");
     f.print(gEspNow->devices[i].name);
     f.print("\",\"encrypted\":");
     f.print(gEspNow->devices[i].encrypted ? "true" : "false");
     if (gEspNow->devices[i].encrypted) {
-      f.print(",\"key\":\"");
+      // Build hex key string, then encrypt it
+      char keyHex[33];
       for (int k = 0; k < 16; k++) {
-        char hex[3];
-        snprintf(hex, sizeof(hex), "%02x", gEspNow->devices[i].key[k]);
-        f.print(hex);
+        snprintf(keyHex + (k * 2), 3, "%02x", gEspNow->devices[i].key[k]);
       }
+      keyHex[32] = '\0';
+      String encKey = encryptString(String(keyHex));
+      if (encKey.length() == 0) {
+        ERROR_ESPNOWF("[ESPNOW] Failed to encrypt device key for '%s', skipping entry", gEspNow->devices[i].name.c_str());
+        skipped++;
+        continue;
+      }
+      f.print(",\"key\":\"");
+      f.print(encKey);
       f.print("\"");
     }
     f.print("}");
@@ -674,6 +649,7 @@ static void saveEspNowDevices() {
   f.println("}");
   f.close();
   DEBUGF(DEBUG_ESPNOW_MESH, "[ESPNOW] Saved %d device(s) to %s", count, ESPNOW_DEVICES_FILE);
+  return skipped == 0;
 }
 
 // Load mesh peer MAC addresses from filesystem (topology only)
@@ -716,12 +692,25 @@ static void loadMeshPeers() {
   int count = 0;
   int pos = 0;
   while ((pos = content.indexOf("\"mac\":", pos)) >= 0) {
-    // Extract MAC address
+    // Extract MAC address (may be AES-encrypted)
     int macStart = content.indexOf("\"", pos + 6) + 1;
     int macEnd = content.indexOf("\"", macStart);
     if (macStart <= 0 || macEnd <= macStart) break;
 
     String macStr = content.substring(macStart, macEnd);
+
+    // Decrypt if stored encrypted (AES: prefix)
+    if (macStr.startsWith("AES:")) {
+      String decrypted = decryptString(macStr);
+      if (decrypted.length() > 0) {
+        macStr = decrypted;
+      } else {
+        WARN_ESPNOWF("[MESH] Failed to decrypt peer MAC, skipping");
+        pos = macEnd;
+        continue;
+      }
+    }
+
     uint8_t mac[6];
     if (!parseMacAddress(macStr, mac)) {
       pos = macEnd;
@@ -1871,8 +1860,6 @@ static TopologyStream* findOrCreateTopoStream(const uint8_t* senderMac, uint32_t
 static void            addTopoDeviceName(const uint8_t* mac, const char* name);
 static String          getTopoDeviceName(const uint8_t* mac);
 static void            finalizeTopologyStream(TopologyStream* stream);
-static bool            handleJsonMessage(const ReceivedMessage& ctx);
-static bool            parseJsonMessage(const String& message, JsonDocument& doc);
 static void            updateUnpairedDevice(const uint8_t* mac, const String& name, int rssi);
 #if ENABLE_BONDED_MODE
 static bool            cacheManifestToLittleFS(const uint8_t fwHash[16], const String& manifest);
@@ -1881,8 +1868,6 @@ static bool            cacheManifestToLittleFS(const uint8_t fwHash[16], const S
 static void            processBondSettings(const uint8_t* srcMac, const String& deviceName, const String& settingsStr);
 static void            requestBondSettings(const uint8_t* peerMac);
 #endif
-static void            meshRetryDequeue(uint32_t msgId);
-
 #if ENABLE_BONDED_MODE
 // Process a received manifest from a bonded peer (bond mode handshake step)
 static void processBondModeManifestResp(const uint8_t* srcMac, const String& deviceName, const String& manifestStr) {
@@ -2505,6 +2490,167 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     return true;
   }
   
+  // === USER SYNC (propagate user credentials to peer) ===
+  if (h->type == ESPNOW_V3_TYPE_USER_SYNC) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_USER_SYNC] Received from %s msgId=%lu encrypted=%s",
+           deviceName, (unsigned long)h->msgId, (h->flags & ESPNOW_V3_FLAG_ENCRYPTED) ? "YES" : "NO");
+
+    // Security: must be encrypted
+    if (!(h->flags & ESPNOW_V3_FLAG_ENCRYPTED)) {
+      ERROR_ESPNOWF("[USER_SYNC] SECURITY: Rejected from %s — encryption required", deviceName);
+      broadcastOutput("[ESP-NOW] SECURITY: User sync rejected - encryption required");
+      v3_send_ack(recv_info->src_addr, h->msgId);
+      return true;
+    }
+
+    // User sync must be enabled
+    if (!gSettings.espnowUserSyncEnabled) {
+      WARN_ESPNOWF("[USER_SYNC] Disabled — rejecting from %s", deviceName);
+      broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnow usersync on'");
+      v3_send_ack(recv_info->src_addr, h->msgId);
+      return true;
+    }
+
+    // Payload is JSON: { "admin_user", "admin_pass", "target_user", "target_pass", "role" }
+    if (payloadLen == 0) {
+      WARN_ESPNOWF("[USER_SYNC] Empty payload from %s", deviceName);
+      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Empty payload", strlen("Empty payload"));
+      return true;
+    }
+
+    PSRAM_JSON_DOC(doc);
+    String jsonStr((const char*)payload, payloadLen);
+    if (deserializeJson(doc, jsonStr) != DeserializationError::Ok) {
+      WARN_ESPNOWF("[USER_SYNC] Malformed JSON from %s", deviceName);
+      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Malformed JSON", strlen("Malformed JSON"));
+      return true;
+    }
+
+    const char* adminUser  = doc["admin_user"]  | "";
+    const char* adminPass  = doc["admin_pass"]  | "";
+    const char* targetUser = doc["target_user"] | "";
+    const char* targetPass = doc["target_pass"] | "";
+    const char* role       = doc["role"]        | "user";
+
+    if (!strlen(adminUser) || !strlen(adminPass) || !strlen(targetUser) || !strlen(targetPass)) {
+      WARN_ESPNOWF("[USER_SYNC] Missing required fields from %s", deviceName);
+      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Missing required fields", strlen("Missing required fields"));
+      return true;
+    }
+
+    if (!isValidUser(String(adminUser), String(adminPass))) {
+      ERROR_ESPNOWF("[USER_SYNC] Admin auth FAILED for '%s' from %s", adminUser, deviceName);
+      broadcastOutput("[ESP-NOW] User sync: Admin authentication FAILED");
+      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Admin authentication failed", strlen("Admin authentication failed"));
+      return true;
+    }
+
+    if (!isAdminUser(String(adminUser))) {
+      ERROR_ESPNOWF("[USER_SYNC] '%s' is not admin — sync rejected from %s", adminUser, deviceName);
+      broadcastOutput("[ESP-NOW] User sync: Admin privileges required");
+      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Admin privileges required", strlen("Admin privileges required"));
+      return true;
+    }
+
+    // Check if user already exists
+    uint32_t existingId = 0;
+    if (getUserIdByUsername(String(targetUser), existingId)) {
+      WARN_ESPNOWF("[USER_SYNC] User '%s' already exists (id=%u) — skipping", targetUser, (unsigned)existingId);
+      BROADCAST_PRINTF("[ESP-NOW] User sync: '%s' already exists", targetUser);
+      v3_send_command_response(recv_info->src_addr, h->msgId, true, "User already exists (skipped)", strlen("User already exists (skipped)"));
+      return true;
+    }
+
+    if (!filesystemReady) {
+      ERROR_ESPNOWF("[USER_SYNC] Filesystem not ready");
+      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Filesystem not ready", strlen("Filesystem not ready"));
+      return true;
+    }
+
+    // Create the user
+    {
+      FsLockGuard guard("user_sync.create");
+
+      if (!LittleFS.exists(USERS_JSON_FILE)) {
+        ERROR_ESPNOWF("[USER_SYNC] users.json not found");
+        v3_send_command_response(recv_info->src_addr, h->msgId, false, "users.json not found", strlen("users.json not found"));
+        return true;
+      }
+
+      File f = LittleFS.open(USERS_JSON_FILE, "r");
+      if (!f) {
+        ERROR_ESPNOWF("[USER_SYNC] Could not open users.json");
+        v3_send_command_response(recv_info->src_addr, h->msgId, false, "Could not open users.json", strlen("Could not open users.json"));
+        return true;
+      }
+
+      JsonDocument userDoc;
+      DeserializationError err = deserializeJson(userDoc, f);
+      f.close();
+
+      if (err || !userDoc["users"]) {
+        ERROR_ESPNOWF("[USER_SYNC] Malformed users.json");
+        v3_send_command_response(recv_info->src_addr, h->msgId, false, "Malformed users.json", strlen("Malformed users.json"));
+        return true;
+      }
+
+      int nextId = userDoc["nextId"] | 2;
+      JsonArray users = userDoc["users"];
+
+      JsonObject newUser = users.add<JsonObject>();
+      newUser["id"]        = nextId;
+      newUser["username"]  = targetUser;
+      newUser["role"]      = role;
+      newUser["createdAt"] = (const char*)nullptr;
+      char createdByBuf[48];
+      snprintf(createdByBuf, sizeof(createdByBuf), "espnow:%s", deviceName);
+      newUser["createdBy"] = createdByBuf;
+      newUser["createdMs"] = millis();
+      extern uint32_t gNTPAnchorId;
+      extern uint32_t gBootCounter;
+      newUser["ntpAnchorId"] = gNTPAnchorId;
+      newUser["bootCount"]   = gBootCounter;
+      userDoc["nextId"] = nextId + 1;
+
+      f = LittleFS.open(USERS_JSON_FILE, "w");
+      if (!f || serializeJson(userDoc, f) == 0) {
+        if (f) f.close();
+        ERROR_ESPNOWF("[USER_SYNC] Failed to write users.json");
+        v3_send_command_response(recv_info->src_addr, h->msgId, false, "Failed to write users.json", strlen("Failed to write users.json"));
+        return true;
+      }
+      f.close();
+
+      // Store hashed password in user settings
+      String hashedPassword = hashUserPassword(String(targetPass));
+      JsonDocument defaults;
+      defaults["theme"]    = "light";
+      defaults["password"] = hashedPassword;
+      saveUserSettings((uint32_t)nextId, defaults);
+
+      INFO_ESPNOWF("[USER_SYNC] Created user '%s' (id=%d role=%s) from %s",
+                   targetUser, nextId, role, deviceName);
+      BROADCAST_PRINTF("[ESP-NOW] User sync: Created '%s' (role=%s) from %s",
+                       targetUser, role, deviceName);
+
+      char respBuf[128];
+      snprintf(respBuf, sizeof(respBuf), "User '%s' created (id=%d)", targetUser, nextId);
+      v3_send_command_response(recv_info->src_addr, h->msgId, true, respBuf, strlen(respBuf));
+    }
+
+    // Reassembly cleanup
+    if (h->fragCount > 1) {
+      for (int i = 0; i < V3_REASM_MAX; i++) {
+        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId &&
+            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
+          v3_reasm_reset(gV3Reasm[i]);
+          break;
+        }
+      }
+    }
+    return true;
+  }
+
   // === SENSOR STATUS (mesh broadcast) ===
   if (h->type == ESPNOW_V3_TYPE_SENSOR_STATUS) {
     DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] Received from %s msgId=%lu payloadLen=%u",
@@ -3693,40 +3839,6 @@ void onEspNowDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
  */
 
 /**
- * @brief Main message dispatcher - routes messages to appropriate handlers
- * @param ctx Received message context
- * @return true if message was handled
- */
-static bool dispatchMessage(const ReceivedMessage& ctx) {
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[DISPATCH] ========================================");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[DISPATCH] === MESSAGE DISPATCH ENTRY ===");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[DISPATCH] ========================================");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[DISPATCH] Message length: %d bytes", ctx.message.length());
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[DISPATCH] First char: '%c' (0x%02X)", 
-         ctx.message.length() > 0 ? ctx.message.charAt(0) : '?',
-         ctx.message.length() > 0 ? (unsigned char)ctx.message.charAt(0) : 0);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[DISPATCH] Content (first 80 chars): %.80s", ctx.message.c_str());
-  
-  // Priority 1: JSON messages (heartbeats, ACKs, mesh envelopes, topology)
-  if (ctx.message.startsWith("{")) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[DISPATCH] Routing to JSON handler");
-    return handleJsonMessage(ctx);
-  }
-  
-  // Priority 2: Legacy CHUNK removed - v2 fragmentation handles all chunking
-  
-  // All messages should now be v2 JSON - if we get here, it's an unknown/legacy format
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[DISPATCH] WARNING: Non-JSON message received (legacy format?)");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[DISPATCH] Content: %.80s", ctx.message.c_str());
-  
-  // For debugging: show the message but don't process it
-  String deviceName = ctx.deviceName.length() > 0 ? ctx.deviceName : ctx.macStr;
-  broadcastOutput("[ESP-NOW] Unknown format from " + deviceName + ": " + ctx.message);
-  
-  return false;
-}
-
-/**
  * @brief Check if mesh routing should be used
  * @param mac Destination MAC address
  * @return true if mesh routing should be used
@@ -3746,181 +3858,6 @@ static bool shouldUseMesh(const uint8_t* mac) {
   
   // Peer not directly paired, use mesh routing
   return true;
-}
-
-// ==========================
-// Message Queue Management
-// ==========================
-
-/**
- * @brief Check if message retry queue is full
- * @return true if queue is full
- */
-static bool isMessageQueueFull() {
-  if (!gEspNow) return true;
-  return gEspNow->queueSize >= 8;
-}
-
-/**
- * @brief Get current queue size
- * @return Number of messages in queue
- */
-static uint8_t getQueueSize() {
-  if (!gEspNow) return 0;
-  return gEspNow->queueSize;
-}
-
-/**
- * @brief Enqueue message for retry
- * @param msg Message to enqueue
- * @return true if enqueued successfully
- */
-static bool enqueueMessage(const Message& msg) {
-  if (!gEspNow) return false;
-  if (isMessageQueueFull()) {
-    gEspNow->routerMetrics.queueOverflows++;
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[Queue] Queue full, cannot enqueue message ID %lu",
-           (unsigned long)msg.msgId);
-    return false;
-  }
-  
-  // Find empty slot
-  for (int i = 0; i < 8; i++) {
-    if (!gEspNow->retryQueue[i].active) {
-      gEspNow->retryQueue[i].msg = msg;
-      gEspNow->retryQueue[i].retryCount = 0;
-      gEspNow->retryQueue[i].nextRetryTime = millis() + 100;  // First retry in 100ms
-      gEspNow->retryQueue[i].active = true;
-      gEspNow->queueSize++;
-      gEspNow->routerMetrics.messagesQueued++;
-      
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[Queue] Enqueued message ID %lu (queue size: %d)", 
-             (unsigned long)msg.msgId, gEspNow->queueSize);
-      return true;
-    }
-  }
-  
-  return false;  // Should never reach here if isQueueFull() works correctly
-}
-
-/**
- * @brief Dequeue message from retry queue
- * @param index Queue slot index to dequeue
- */
-static void dequeueMessage(int index) {
-  if (!gEspNow) return;
-  if (index < 0 || index >= 8) return;
-  if (!gEspNow->retryQueue[index].active) return;
-  
-  gEspNow->retryQueue[index].active = false;
-  gEspNow->retryQueue[index].msg.payload = "";  // Free String memory
-  gEspNow->queueSize--;
-  gEspNow->routerMetrics.messagesDequeued++;
-  
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[Queue] Dequeued message from slot %d (queue size: %d)", 
-         index, gEspNow->queueSize);
-}
-
-/**
- * @brief Process retry queue - attempt to send queued messages
- * @note Should be called periodically from main loop
- */
-void processMessageQueue() {
-  if (!gEspNow) return;
-  if (gEspNow->queueSize == 0) return;
-  
-  unsigned long now = millis();
-  
-  for (int i = 0; i < 8; i++) {
-    QueuedMessage* qm = &gEspNow->retryQueue[i];
-    if (!qm->active) continue;
-    
-    // Check if it's time to retry
-    if (now < qm->nextRetryTime) continue;
-    
-    // Check if max retries exceeded
-    if (qm->retryCount >= qm->msg.maxRetries) {
-      // Before dropping, try mesh fallback if in mesh mode and direct send was attempted
-      if (gEspNow->mode == ESPNOW_MODE_MESH && esp_now_is_peer_exist(qm->msg.dstMac)) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER,
-               "[Queue] Direct retries exhausted for ID %lu, attempting mesh fallback",
-               (unsigned long)qm->msg.msgId);
-        
-        // Inject TTL for mesh routing
-        String meshPayload = qm->msg.payload;
-        PSRAM_JSON_DOC(doc);
-        if (!deserializeJson(doc, qm->msg.payload)) {
-          if (doc["ttl"].isNull() || doc["ttl"] == 0) {
-            doc["ttl"] = gSettings.meshTTL;
-            meshPayload = "";
-            serializeJson(doc, meshPayload);
-          }
-        }
-        
-        // Try mesh routing
-        meshSendEnvelopeToPeers(meshPayload);
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[Queue] Mesh fallback attempted for ID %lu",
-               (unsigned long)qm->msg.msgId);
-        gEspNow->routerMetrics.meshFallbacks++;
-      } else {
-        DEBUGF(DEBUG_ESPNOW_ROUTER,
-               "[Queue] Message ID %lu exceeded max retries (%d), dropping",
-               (unsigned long)qm->msg.msgId, qm->msg.maxRetries);
-        gEspNow->routerMetrics.messagesDropped++;
-      }
-      dequeueMessage(i);
-      continue;
-    }
-    
-    // Attempt retry
-    qm->retryCount++;
-    gEspNow->routerMetrics.retriesAttempted++;
-    
-    DEBUGF(DEBUG_ESPNOW_ROUTER,
-           "[Queue] Retrying message ID %lu (attempt %d/%d)",
-           (unsigned long)qm->msg.msgId, qm->retryCount, qm->msg.maxRetries);
-    
-    // Try to send (use internal send, not routerSend to avoid recursion)
-    bool success = false;
-    bool useMesh = shouldUseMesh(qm->msg.dstMac);
-    
-    if (useMesh) {
-      // Unified v2: qm->msg.payload is already a full logical v2 JSON envelope
-      // (built via v2_init_envelope / buildMeshEnvelope / buildTimeSyncMessage).
-      // We simply re-broadcast this envelope via meshSendEnvelopeToPeers, without
-      // introducing any additional wrapper or base64 encoding.
-      meshSendEnvelopeToPeers(qm->msg.payload);
-      success = true;
-    } else {
-      // Look up device info
-      bool isEncrypted = false;
-      String deviceName = "";
-      for (int j = 0; j < gEspNow->deviceCount; j++) {
-        if (memcmp(gEspNow->devices[j].mac, qm->msg.dstMac, 6) == 0) {
-          isEncrypted = gEspNow->devices[j].encrypted;
-          deviceName = gEspNow->devices[j].name;
-          break;
-        }
-      }
-
-      // V2 retry disabled - V3 handles retries at fragment level
-      success = false;
-    }
-    
-    if (success) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[Queue] Retry successful for message ID %lu",
-             (unsigned long)qm->msg.msgId);
-      gEspNow->routerMetrics.retriesSucceeded++;
-      dequeueMessage(i);
-    } else {
-      // Calculate exponential backoff: 100ms, 200ms, 400ms, 800ms
-      unsigned long backoff = 100 << qm->retryCount;  // 100 * 2^retryCount
-      if (backoff > 800) backoff = 800;  // Cap at 800ms
-      qm->nextRetryTime = now + backoff;
-      
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[Queue] Retry failed, next attempt in %lu ms", backoff);
-    }
-  }
 }
 
 #if ENABLE_BONDED_MODE
@@ -4924,918 +4861,6 @@ static void updatePeerMetaFromWorkerStatus(const uint8_t* srcMac, JsonVariant pa
   memcpy(meta->mac, srcMac, 6);
 }
 
-/**
- * @brief Handle JSON messages (heartbeats, ACKs, mesh envelopes, topology)
- * @param ctx Received message context
- * @return true if handled
- */
-static bool handleJsonMessage(const ReceivedMessage& ctx) {
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[HANDLER] === handleJsonMessage ENTRY ===");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[HANDLER] Message length: %d bytes", ctx.message.length());
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[HANDLER] Content (first 80 chars): %.80s", ctx.message.c_str());
-  
-  // CRITICAL: Validate ctx.recvInfo is not NULL before dereferencing
-  if (!ctx.recvInfo) {
-    DEBUGF(DEBUG_ESPNOW_STREAM, "[HANDLER] CRITICAL ERROR: handleJsonMessage called with NULL recvInfo");
-    return false;
-  }
-  
-  PSRAM_JSON_DOC(doc);
-  if (!parseJsonMessage(ctx.message, doc)) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[Dispatch] Failed to parse JSON");
-    return false;
-  }
-  
-  
-  const char* type = doc["type"];
-  if (!type) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[Dispatch] JSON missing 'type' field");
-    return false;
-  }
-  
-  // Handle boot notification messages
-  if (strcmp(type, MSG_TYPE_BOOT) == 0) {
-    JsonObject payload = doc["pld"].as<JsonObject>();
-    uint32_t bootCounter = payload["bootCounter"] | 0;
-    uint32_t timestamp = payload["timestamp"] | 0;
-    
-    // Update peer boot counter
-    MeshPeerHealth* peer = getMeshPeerHealth(ctx.recvInfo->src_addr, true);
-    if (peer) {
-      uint32_t prevCounter = peer->lastBootCounter;
-      peer->lastBootCounter = bootCounter;
-      
-      if (prevCounter > 0 && bootCounter > prevCounter + 1) {
-        // Device rebooted multiple times while we were offline or out of range
-        DEBUGF_BROADCAST(DEBUG_ESPNOW_STREAM, "[BOOT] %s rebooted %lu times (missed %lu events)",
-                         ctx.deviceName.c_str(), bootCounter, bootCounter - prevCounter - 1);
-      } else if (prevCounter > 0 && bootCounter < prevCounter) {
-        // Boot counter reset - device was replaced or NVS cleared
-        DEBUGF_BROADCAST(DEBUG_ESPNOW_STREAM, "[BOOT] %s boot counter reset (%lu -> %lu)",
-                         ctx.deviceName.c_str(), prevCounter, bootCounter);
-      } else {
-        // Normal reboot
-        DEBUGF_BROADCAST(DEBUG_ESPNOW_STREAM, "[BOOT] %s rebooted (counter=%lu)",
-                         ctx.deviceName.c_str(), bootCounter);
-      }
-    }
-    return true;
-  }
-  
-  // Handle heartbeat messages
-  if (strcmp(type, MSG_TYPE_HB) == 0) {
-    if (meshEnabled()) {
-      if (ctx.isPaired) {
-        // Update or create peer health entry for paired device
-        MeshPeerHealth* peer = getMeshPeerHealth(ctx.recvInfo->src_addr, true);
-        if (peer) {
-          peer->lastHeartbeatMs = millis();
-          peer->heartbeatCount++;
-          
-          uint32_t msgId = doc["msgId"];
-          DEBUGF(DEBUG_ESPNOW_STREAM, "[MESH] JSON heartbeat from %s (count=%lu, msgId=%lu)",
-                 ctx.macStr.c_str(), (unsigned long)peer->heartbeatCount, (unsigned long)msgId);
-        }
-      } else {
-        // Track unpaired device sending heartbeats (for discovery/pairing)
-        String srcName = doc["src"] | "";
-        if (srcName.length() == 0) {
-          srcName = ctx.deviceName;
-        }
-        int rssi = ctx.recvInfo->rx_ctrl ? ctx.recvInfo->rx_ctrl->rssi : -100;
-        updateUnpairedDevice(ctx.recvInfo->src_addr, srcName, rssi);
-        DEBUGF(DEBUG_ESPNOW_STREAM, "[MESH] Unpaired device heartbeat: %s (%s) RSSI=%d",
-               ctx.macStr.c_str(), srcName.c_str(), rssi);
-      }
-    }
-    return true;
-  }
-  
-  // Handle ACK messages
-  if (strcmp(type, MSG_TYPE_ACK) == 0) {
-    if (meshEnabled()) {
-      uint32_t ackFor = doc["ackFor"];
-      
-      // Update peer health entry
-      MeshPeerHealth* peer = getMeshPeerHealth(ctx.recvInfo->src_addr, true);
-      if (peer) {
-        peer->lastAckMs = millis();
-        peer->ackCount++;
-      }
-      
-      // Remove from retry queue
-      meshRetryDequeue(ackFor);
-      
-      DEBUGF_BROADCAST(DEBUG_ESPNOW_STREAM, "[MESH] ACK received for msgid=%lu", (unsigned long)ackFor);
-    }
-    return true;
-  }
-  
-  // Handle mesh system control messages (master/worker control plane)
-  if (strcmp(type, MSG_TYPE_MESH_SYS) == 0) {
-    JsonObject payload = doc["pld"].as<JsonObject>();
-    const char* kind = payload["kind"] | "";
-
-    // Master heartbeat for backup nodes
-    if (strcmp(kind, "masterHb") == 0) {
-      if (meshEnabled() && gSettings.meshRole == MESH_ROLE_BACKUP_MASTER) {
-        gEspNow->heartbeatsReceived++;
-        gLastMasterHeartbeat = millis();
-        gBackupPromoted = false;  // Reset promotion flag if master is alive
-        DEBUGF(DEBUG_ESPNOW_STREAM, "[BACKUP] JSON master heartbeat received from %s", ctx.macStr.c_str());
-      }
-      return true;
-    }
-
-    // Worker status reports for master node
-    if (strcmp(kind, "workerStatus") == 0) {
-      if (meshEnabled() && gSettings.meshRole == MESH_ROLE_MASTER) {
-        // Decode workerStatus telemetry fields (see buildMeshSysWorkerStatus for schema)
-        const char* workerMAC = payload["mac"] | ctx.macStr.c_str();
-        const char* workerName = payload["name"] | "";
-        uint32_t freeHeap = (uint32_t)(payload["free"] | 0);
-        uint32_t totalHeap = (uint32_t)(payload["total"] | 0);
-        int rssi = (int)(payload["rssi"] | 0);
-        bool thermal = (bool)(payload["thermal"] | false);
-        bool imu = (bool)(payload["imu"] | false);
-
-        int heapPercent = (totalHeap > 0) ? ((freeHeap * 100) / totalHeap) : 0;
-
-        DEBUGF(DEBUG_ESPNOW_STREAM, "[MASTER] Worker status from %s (%s)",
-               workerName[0] ? workerName : workerMAC,
-               workerMAC);
-
-        BROADCAST_PRINTF("[MESH] Worker %s: heap=%lu/%lu (%d%% free) rssi=%ddBm thermal=%s imu=%s",
-                         workerName[0] ? workerName : workerMAC,
-                         (unsigned long)freeHeap,
-                         (unsigned long)totalHeap,
-                         heapPercent,
-                         rssi,
-                         thermal ? "ON" : "OFF",
-                         imu ? "ON" : "OFF");
-
-        // Update peer metadata for room/zone/tags aggregation
-        if (ctx.recvInfo && ctx.recvInfo->src_addr) {
-          updatePeerMetaFromWorkerStatus(ctx.recvInfo->src_addr, payload);
-        }
-      }
-      return true;
-    }
-
-    return false;
-  }
-
-  // Handle MESH_SYS routed messages - delegate to existing complex handler
-  if (strcmp(type, MSG_TYPE_MESH_SYS) == 0) {
-    // This is complex (topology, time sync, commands, forwarding)
-    // Keep existing logic in onEspNowDataReceived for now
-    return false;  // Fall through to legacy handler
-  }
-
-  // Handle FILE transfer messages - v2 JSON format is DEPRECATED, use v3 binary frames
-  // Block v2 FILE processing to prevent crashes from malformed JSON fragments
-  if (strcmp(type, MSG_TYPE_FILE_STR) == 0) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE] v2 JSON file message ignored (deprecated) - use v3 binary protocol");
-    return true;  // Consume but don't process
-  }
-
-  // Handle CMD (remote command) messages
-  if (strcmp(type, MSG_TYPE_CMD) == 0) {
-    // Security: Only allow remote commands over encrypted connections
-    if (!ctx.isEncrypted) {
-      broadcastOutput("[ESP-NOW] SECURITY: Remote command rejected - encryption required");
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[CMD] Remote command rejected from %s - not encrypted", ctx.macStr.c_str());
-      return true;
-    }
-
-    JsonObject payload = doc["pld"].as<JsonObject>();
-    const char* username = payload["user"] | "";
-    const char* password = payload["pass"] | "";
-    const char* command = payload["cmd"] | "";
-
-    if (strlen(username) == 0 || strlen(password) == 0 || strlen(command) == 0) {
-      broadcastOutput("[ESP-NOW] Remote command: Invalid format - missing user/pass/cmd");
-      return true;
-    }
-
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[CMD] Remote command from %s: user='%s' cmd='%s'",
-           ctx.deviceName.c_str(), username, command);
-
-    // Authenticate user
-    if (!isValidUser(String(username), String(password))) {
-      BROADCAST_PRINTF("[ESP-NOW] Remote command: Authentication FAILED for user '%s'", username);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[CMD] Auth failed for user '%s'", username);
-      return true;
-    }
-
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[CMD] Authentication successful for user '%s'", username);
-
-    // Set execution context for remote command
-    gExecAuthContext.user = username;
-    gExecAuthContext.ip = "espnow:" + ctx.macStr;
-    gExecAuthContext.opaque = (void*)ctx.recvInfo->src_addr;
-
-    // Execute command
-    BROADCAST_PRINTF("[ESP-NOW] Executing remote command from %s: %s", ctx.deviceName.c_str(), command);
-    static char* cmdResult = nullptr;
-    if (!cmdResult) cmdResult = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "espnow.cmdResult");
-    if (!cmdResult) {
-      broadcastOutput("[ESP-NOW] ERROR: Failed to allocate command result buffer");
-      return false;
-    }
-    bool success = executeCommand(gExecAuthContext, command, cmdResult, 2048);
-    const char* result = success ? cmdResult : "Command execution failed";
-
-    // Send response
-    bool cmdSuccess = (strstr(result, "[SUCCESS]") != nullptr || strstr(result, "FAILED") == nullptr);
-    sendChunkedResponse(ctx.recvInfo->src_addr, cmdSuccess, String(result), ctx.deviceName, ctx.cmdMsgId);
-
-
-    // Clear execution context
-    gExecAuthContext.user = "";
-    gExecAuthContext.ip = "";
-    gExecAuthContext.opaque = nullptr;
-
-    return true;
-  }
-
-  // Handle RESPONSE (remote command result) messages
-  if (strcmp(type, MSG_TYPE_RESPONSE) == 0) {
-    JsonObject payload = doc["pld"].as<JsonObject>();
-    const char* kind = payload["kind"] | "";
-    
-    if (strcmp(kind, "remoteCmdResult") == 0) {
-      bool ok = payload["ok"] | false;
-      const char* msg = payload["msg"] | "";
-      
-      String deviceName = ctx.deviceName.length() > 0 ? ctx.deviceName : ctx.macStr;
-      BROADCAST_PRINTF("[ESP-NOW] Response from %s:", deviceName.c_str());
-      broadcastOutput(String(msg));
-      storeMessageInPeerHistory((uint8_t*)ctx.recvInfo->src_addr,
-                                deviceName.c_str(),
-                                msg,
-                                ctx.isEncrypted,
-                                MSG_TEXT);
-      
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[RESPONSE] Remote command result from %s: ok=%s", 
-             deviceName.c_str(), ok ? "true" : "false");
-      
-      // Send ACK back to sender
-      uint32_t msgId = doc["id"] | doc["msgId"] | 0;
-      if (msgId != 0) {
-        v3_send_ack(ctx.recvInfo->src_addr, msgId);
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[RESPONSE] Sent ACK for msgId=%lu to sender", (unsigned long)msgId);
-      }
-      
-      return true;
-    }
-    
-    if (strcmp(kind, "userSyncResult") == 0) {
-      bool ok = payload["ok"] | false;
-      const char* msg = payload["msg"] | "";
-      const char* username = payload["username"] | "";
-      uint32_t userId = payload["userId"] | 0;
-      const char* role = payload["role"] | "";
-      
-      String deviceName = ctx.deviceName.length() > 0 ? ctx.deviceName : ctx.macStr;
-      
-      if (ok) {
-        if (userId > 0) {
-          INFO_USERF("[USER_SYNC] ✓ %s: %s (user='%s', id=%lu, role=%s)", 
-                    deviceName.c_str(), msg, username, (unsigned long)userId, role);
-          BROADCAST_PRINTF("[ESP-NOW] User sync SUCCESS from %s: %s (user='%s', id=%lu, role=%s)", deviceName.c_str(), msg, username, (unsigned long)userId, role);
-        } else {
-          INFO_USERF("[USER_SYNC] ✓ %s: %s (user='%s')", deviceName.c_str(), msg, username);
-          BROADCAST_PRINTF("[ESP-NOW] User sync from %s: %s (user='%s')", deviceName.c_str(), msg, username);
-        }
-      } else {
-        ERROR_USERF("[USER_SYNC] ✗ %s: %s (user='%s')", deviceName.c_str(), msg, username);
-        BROADCAST_PRINTF("[ESP-NOW] User sync FAILED from %s: %s (user='%s')", deviceName.c_str(), msg, username);
-      }
-      
-      
-      return true;
-    }
-    
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RESPONSE] Unknown kind: %s", kind);
-    return false;
-  }
-  
-#if ENABLE_BONDED_MODE
-  // === BOND messages now use v3 binary protocol - block v2 JSON versions ===
-  if (strcmp(type, MSG_TYPE_BOND_CAP_REQ) == 0 ||
-      strcmp(type, MSG_TYPE_BOND_CAP_RESP) == 0 ||
-      strcmp(type, MSG_TYPE_BOND_MANIFEST_REQ) == 0 ||
-      strcmp(type, MSG_TYPE_BOND_MANIFEST_RESP) == 0) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND] Ignoring v2 JSON %s from %s - use v3 binary protocol", type, ctx.macStr.c_str());
-    return true;  // Consume but don't process
-  }
-#endif // ENABLE_BONDED_MODE
-
-  // Handle TEXT (plain text) messages
-  if (strcmp(type, MSG_TYPE_TEXT) == 0) {
-    JsonObject payload = doc["pld"].as<JsonObject>();
-    const char* msg = payload["msg"] | "";
-    
-    String deviceName = ctx.deviceName.length() > 0 ? ctx.deviceName : ctx.macStr;
-    String encStatus = ctx.isEncrypted ? " [ENCRYPTED]" : " [UNENCRYPTED]";
-    BROADCAST_PRINTF("[ESP-NOW] %s: %s%s", deviceName.c_str(), msg, encStatus.c_str());
-    
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[TEXT] Plain text from %s: %.80s", deviceName.c_str(), msg);
-    
-    // Store in per-device message buffer for web UI and OLED
-    storeMessageInPeerHistory(
-      (uint8_t*)ctx.recvInfo->src_addr,
-      deviceName.c_str(),
-      msg,
-      ctx.isEncrypted,
-      MSG_TEXT
-    );
-    
-    
-    return true;
-  }
-
-  // Handle FILE_BROWSE (remote file browsing) messages
-  if (strcmp(type, MSG_TYPE_FILE_BROWSE) == 0) {
-    // Security: Only allow file browsing over encrypted connections
-    if (!ctx.isEncrypted) {
-      broadcastOutput("[ESP-NOW] SECURITY: File browse rejected - encryption required");
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Rejected from %s - not encrypted", ctx.macStr.c_str());
-      return true;
-    }
-
-    JsonObject payload = doc["pld"].as<JsonObject>();
-    const char* kind = payload["kind"] | "";
-    const char* path = payload["path"] | "/";
-
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Message from %s: kind='%s' path='%s'",
-           ctx.deviceName.c_str(), kind, path);
-
-    // Handle list_result response (we sent a browse request, remote sent back the listing)
-    // Responses don't require auth - they're replies to our requests
-    if (strcmp(kind, "list_result") == 0) {
-      bool ok = payload["ok"] | false;
-      const char* resultPath = payload["path"] | "/";
-      
-      String deviceName = ctx.deviceName.length() > 0 ? ctx.deviceName : ctx.macStr;
-      
-      if (ok) {
-        JsonArray files = payload["files"].as<JsonArray>();
-        char summaryBuf[128];
-        snprintf(summaryBuf, sizeof(summaryBuf), "File listing for %s%s", resultPath, files.size() == 0 ? " (empty directory)" : "");
-        String summary = summaryBuf;
-        storeMessageInPeerHistory((uint8_t*)ctx.recvInfo->src_addr,
-                                  deviceName.c_str(),
-                                  summary.c_str(),
-                                  ctx.isEncrypted,
-                                  MSG_TEXT);
-        
-        BROADCAST_PRINTF("[ESP-NOW] File listing from %s for path: %s", deviceName.c_str(), resultPath);
-        broadcastOutput("--------------------------------------------");
-        
-        if (files.size() == 0) {
-          broadcastOutput("  (empty directory)");
-        } else {
-          for (JsonVariant file : files) {
-            String name = file["name"] | "";
-            String type = file["type"] | "file";
-            String size = file["size"] | "";
-            
-            char lineBuf[160];
-            if (type == "folder") {
-              snprintf(lineBuf, sizeof(lineBuf), "[DIR] %s/", name.c_str());
-              storeMessageInPeerHistory((uint8_t*)ctx.recvInfo->src_addr,
-                                        deviceName.c_str(),
-                                        lineBuf,
-                                        ctx.isEncrypted,
-                                        MSG_TEXT);
-              BROADCAST_PRINTF("  [DIR]  %s/", name.c_str());
-            } else {
-              snprintf(lineBuf, sizeof(lineBuf), "[FILE] %s (%s)", name.c_str(), size.c_str());
-              storeMessageInPeerHistory((uint8_t*)ctx.recvInfo->src_addr,
-                                        deviceName.c_str(),
-                                        lineBuf,
-                                        ctx.isEncrypted,
-                                        MSG_TEXT);
-              BROADCAST_PRINTF("  [FILE] %s (%s)", name.c_str(), size.c_str());
-            }
-          }
-        }
-        broadcastOutput("--------------------------------------------");
-        
-        // Store the result for OLED file browser if applicable
-        extern void storeRemoteFileBrowseResult(const uint8_t* mac, const char* path, JsonArray& files);
-        storeRemoteFileBrowseResult(ctx.recvInfo->src_addr, resultPath, files);
-        
-      } else {
-        const char* error = payload["error"] | "Unknown error";
-        char failBuf[192];
-        snprintf(failBuf, sizeof(failBuf), "File browse FAILED: %s", error);
-        storeMessageInPeerHistory((uint8_t*)ctx.recvInfo->src_addr,
-                                  deviceName.c_str(),
-                                  failBuf,
-                                  ctx.isEncrypted,
-                                  MSG_TEXT);
-        BROADCAST_PRINTF("[ESP-NOW] File browse FAILED from %s: %s", deviceName.c_str(), error);
-      }
-      
-      
-      return true;
-    }
-
-    // For list and fetch requests, require authentication
-    const char* username = payload["user"] | "";
-    const char* password = payload["pass"] | "";
-    
-    if (strlen(username) == 0 || strlen(password) == 0) {
-      broadcastOutput("[ESP-NOW] File browse: Missing credentials");
-      return true;
-    }
-
-    if (!isValidUser(String(username), String(password))) {
-      BROADCAST_PRINTF("[ESP-NOW] File browse: Authentication FAILED for user '%s'", username);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Auth failed for user '%s'", username);
-      return true;
-    }
-
-    if (!isAdminUser(String(username))) {
-      broadcastOutput("[ESP-NOW] File browse: Admin privileges required");
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] User '%s' is not admin", username);
-      return true;
-    }
-
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Authenticated request: user='%s' kind='%s' path='%s'",
-           username, kind, path);
-
-    // Handle list request
-    if (strcmp(kind, "list") == 0) {
-      extern bool buildFilesListing(const String& inPath, String& out, bool asJson);
-      
-      String filesJson;
-      bool ok = false;
-      
-      if (filesystemReady) {
-        ok = buildFilesListing(String(path), filesJson, true);
-      }
-      
-      // Build response
-      JsonDocument respDoc;
-      v2_init_envelope(respDoc, MSG_TYPE_FILE_BROWSE, generateMessageId(), 
-                      gSettings.espnowDeviceName.c_str(), ctx.deviceName.c_str(), -1);
-      JsonObject pld = respDoc["pld"].to<JsonObject>();
-      pld["kind"] = "list_result";
-      pld["path"] = path;
-      pld["ok"] = ok;
-      
-      if (ok) {
-        // Parse the files JSON string into a proper JSON array
-        JsonDocument filesDoc;
-        String wrappedJson;
-        wrappedJson.reserve(filesJson.length() + 2);
-        wrappedJson = "[";
-        wrappedJson += filesJson;
-        wrappedJson += "]";
-        DeserializationError err = deserializeJson(filesDoc, wrappedJson);
-        if (err == DeserializationError::Ok) {
-          pld["files"] = filesDoc.as<JsonArray>();
-        } else {
-          // Fallback: send as string
-          pld["filesRaw"] = filesJson;
-        }
-      } else {
-        pld["error"] = filesystemReady ? "Directory not found" : "Filesystem not ready";
-      }
-      
-      String respStr;
-      serializeJson(respDoc, respStr);
-      v3_send_file_response(ctx.recvInfo->src_addr, generateMessageId(), ok, respStr.c_str());
-      
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Sent V3 list response for path '%s' ok=%d", path, ok);
-      BROADCAST_PRINTF("[ESP-NOW] File browse: Sent directory listing for %s", path);
-      return true;
-    }
-    
-    // Handle fetch request (request to send a file back)
-    if (strcmp(kind, "fetch") == 0) {
-      
-      if (!filesystemReady) {
-        broadcastOutput("[ESP-NOW] File fetch: Filesystem not ready");
-        return true;
-      }
-      
-      // Use existing file send mechanism
-      String filePath = String(path);
-      {
-        FsLockGuard guard("espnow.file_fetch.exists");
-        if (!LittleFS.exists(filePath)) {
-        broadcastOutput("[ESP-NOW] File fetch: File not found: " + filePath);
-        return true;
-        }
-      }
-      
-      // Queue file for sending back to requester
-      // Reuse existing sendFile function with target MAC
-      extern bool sendFileToMac(const uint8_t* mac, const String& localPath);
-      bool sent = sendFileToMac(ctx.recvInfo->src_addr, filePath);
-      
-      if (sent) {
-        broadcastOutput("[ESP-NOW] File fetch: Sending " + filePath + " to " + ctx.deviceName);
-      } else {
-        broadcastOutput("[ESP-NOW] File fetch: Failed to send " + filePath);
-      }
-      return true;
-    }
-
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[FILE_BROWSE] Unknown kind: %s", kind);
-    return false;
-  }
-
-  // Handle USER_SYNC (user credential propagation) messages
-  if (strcmp(type, MSG_TYPE_USER_SYNC) == 0) {
-    // Check if user sync is enabled
-    if (!gSettings.espnowUserSyncEnabled) {
-      WARN_ESPNOWF("[USER_SYNC] User sync disabled - rejecting sync request from %s", ctx.deviceName.c_str());
-      broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnow usersync on'");
-      return true;
-    }
-
-    // Security: Only allow user sync over encrypted connections
-    if (!ctx.isEncrypted) {
-      ERROR_ESPNOWF("[USER_SYNC] SECURITY: User sync rejected from %s - encryption required", ctx.macStr.c_str());
-      broadcastOutput("[ESP-NOW] SECURITY: User sync rejected - encryption required");
-      return true;
-    }
-
-    JsonObject payload = doc["pld"].as<JsonObject>();
-    const char* adminUser = payload["admin_user"] | "";
-    const char* adminPass = payload["admin_pass"] | "";
-    const char* targetUser = payload["target_user"] | "";
-    const char* targetPass = payload["target_pass"] | "";
-    const char* role = payload["role"] | "user";
-
-    if (strlen(adminUser) == 0 || strlen(adminPass) == 0 || strlen(targetUser) == 0 || strlen(targetPass) == 0) {
-      WARN_ESPNOWF("[USER_SYNC] Invalid format - missing required fields");
-      broadcastOutput("[ESP-NOW] User sync: Invalid format - missing fields");
-      
-      // Send error response
-      uint32_t msgId = doc["id"] | doc["msgId"] | 0;
-      if (msgId != 0) {
-        JsonDocument respDoc;
-        v2_init_envelope(respDoc, MSG_TYPE_RESPONSE, generateMessageId(), 
-                        gSettings.espnowDeviceName.c_str(), ctx.deviceName.c_str(), -1);
-        JsonObject pld = respDoc["pld"].to<JsonObject>();
-        pld["kind"] = "userSyncResult";
-        pld["ok"] = false;
-        pld["msg"] = "Invalid format - missing required fields";
-        pld["username"] = targetUser;
-        v3_send_file_response(ctx.recvInfo->src_addr, msgId, false, "Invalid format - missing required fields");
-      }
-      return true;
-    }
-
-    INFO_ESPNOWF("[USER_SYNC] Request from %s: admin='%s' target='%s' role='%s'",
-           ctx.deviceName.c_str(), adminUser, targetUser, role);
-
-    // Authenticate admin user on THIS device
-    if (!isValidUser(String(adminUser), String(adminPass))) {
-      ERROR_ESPNOWF("[USER_SYNC] Authentication FAILED for admin '%s'", adminUser);
-      broadcastOutput("[ESP-NOW] User sync: Admin authentication FAILED");
-      
-      // Send error response
-      uint32_t msgId = doc["id"] | doc["msgId"] | 0;
-      if (msgId != 0) {
-        JsonDocument respDoc;
-        v2_init_envelope(respDoc, MSG_TYPE_RESPONSE, generateMessageId(), 
-                        gSettings.espnowDeviceName.c_str(), ctx.deviceName.c_str(), -1);
-        JsonObject pld = respDoc["pld"].to<JsonObject>();
-        pld["kind"] = "userSyncResult";
-        pld["ok"] = false;
-        pld["msg"] = "Admin authentication failed";
-        pld["username"] = targetUser;
-        v3_send_file_response(ctx.recvInfo->src_addr, msgId, false, "Admin authentication failed");
-      }
-      return true;
-    }
-
-    // Verify admin privileges on THIS device
-    if (!isAdminUser(String(adminUser))) {
-      ERROR_ESPNOWF("[USER_SYNC] User '%s' is not an admin - sync rejected", adminUser);
-      broadcastOutput("[ESP-NOW] User sync: Admin privileges required");
-      
-      // Send error response
-      uint32_t msgId = doc["id"] | doc["msgId"] | 0;
-      if (msgId != 0) {
-        JsonDocument respDoc;
-        v2_init_envelope(respDoc, MSG_TYPE_RESPONSE, generateMessageId(), 
-                        gSettings.espnowDeviceName.c_str(), ctx.deviceName.c_str(), -1);
-        JsonObject pld = respDoc["pld"].to<JsonObject>();
-        pld["kind"] = "userSyncResult";
-        pld["ok"] = false;
-        pld["msg"] = "Admin privileges required";
-        pld["username"] = targetUser;
-        v3_send_file_response(ctx.recvInfo->src_addr, msgId, false, "Admin privileges required");
-      }
-      return true;
-    }
-
-    INFO_ESPNOWF("[USER_SYNC] Admin authentication successful for '%s'", adminUser);
-
-    // Check if target user already exists
-    uint32_t existingUserId = 0;
-    if (getUserIdByUsername(String(targetUser), existingUserId)) {
-      WARN_ESPNOWF("[USER_SYNC] User '%s' already exists (id=%u) - skipping", targetUser, (unsigned)existingUserId);
-      BROADCAST_PRINTF("[ESP-NOW] User sync: User '%s' already exists", targetUser);
-      
-      // Send response (not an error, just info)
-      uint32_t msgId = doc["id"] | doc["msgId"] | 0;
-      if (msgId != 0) {
-        JsonDocument respDoc;
-        v2_init_envelope(respDoc, MSG_TYPE_RESPONSE, generateMessageId(), 
-                        gSettings.espnowDeviceName.c_str(), ctx.deviceName.c_str(), -1);
-        JsonObject pld = respDoc["pld"].to<JsonObject>();
-        pld["kind"] = "userSyncResult";
-        pld["ok"] = true;
-        pld["msg"] = "User already exists (skipped)";
-        pld["username"] = targetUser;
-        v3_send_file_response(ctx.recvInfo->src_addr, msgId, true, "User already exists (skipped)");
-      }
-      return true;
-    }
-
-    // Hash the plaintext password with THIS device's key
-    String hashedPassword = hashUserPassword(String(targetPass));
-    
-    // Create user directly (similar to approvePendingUserInternal but simpler)
-    extern uint32_t gNTPAnchorId;
-    extern uint32_t gBootCounter;
-    
-    if (!filesystemReady) {
-      ERROR_ESPNOWF("[USER_SYNC] Filesystem not ready");
-      broadcastOutput("[ESP-NOW] User sync: Filesystem not ready");
-      
-      // Send error response
-      uint32_t msgId = doc["id"] | doc["msgId"] | 0;
-      if (msgId != 0) {
-        JsonDocument respDoc;
-        v2_init_envelope(respDoc, MSG_TYPE_RESPONSE, generateMessageId(), 
-                        gSettings.espnowDeviceName.c_str(), ctx.deviceName.c_str(), -1);
-        JsonObject pld = respDoc["pld"].to<JsonObject>();
-        pld["kind"] = "userSyncResult";
-        pld["ok"] = false;
-        pld["msg"] = "Filesystem not ready";
-        pld["username"] = targetUser;
-        v3_send_file_response(ctx.recvInfo->src_addr, msgId, false, "Filesystem not ready");
-      }
-      return true;
-    }
-
-    FsLockGuard guard("user_sync.create");
-    
-    // Load users.json
-    if (!LittleFS.exists(USERS_JSON_FILE)) {
-      ERROR_ESPNOWF("[USER_SYNC] users.json does not exist");
-      broadcastOutput("[ESP-NOW] User sync: users.json not found");
-      return true;
-    }
-
-    File file = LittleFS.open(USERS_JSON_FILE, "r");
-    if (!file) {
-      ERROR_ESPNOWF("[USER_SYNC] Could not open users.json");
-      broadcastOutput("[ESP-NOW] User sync: Could not open users.json");
-      return true;
-    }
-
-    JsonDocument userDoc;
-    DeserializationError error = deserializeJson(userDoc, file);
-    file.close();
-
-    if (error) {
-      ERROR_ESPNOWF("[USER_SYNC] Malformed users.json");
-      broadcastOutput("[ESP-NOW] User sync: Malformed users.json");
-      return true;
-    }
-
-    // Get nextId
-    int nextId = userDoc["nextId"] | 2;
-    
-    // Add new user
-    JsonArray users = userDoc["users"];
-    if (!users) {
-      ERROR_ESPNOWF("[USER_SYNC] Missing users array");
-      broadcastOutput("[ESP-NOW] User sync: Missing users array");
-      return true;
-    }
-
-    JsonObject newUser = users.add<JsonObject>();
-    newUser["id"] = nextId;
-    newUser["username"] = targetUser;
-    // Password now stored in per-user settings file, not here
-    newUser["role"] = role;
-    newUser["createdAt"] = (const char*)nullptr;  // null
-    char createdByBuf[48];
-    snprintf(createdByBuf, sizeof(createdByBuf), "espnow:%s", ctx.deviceName.c_str());
-    newUser["createdBy"] = createdByBuf;
-    newUser["createdMs"] = millis();
-    newUser["ntpAnchorId"] = gNTPAnchorId;
-    newUser["bootCount"] = gBootCounter;
-
-    // Update nextId
-    userDoc["nextId"] = nextId + 1;
-
-    // Write back to file
-    file = LittleFS.open(USERS_JSON_FILE, "w");
-    if (!file) {
-      ERROR_ESPNOWF("[USER_SYNC] Could not write users.json");
-      broadcastOutput("[ESP-NOW] User sync: Could not write users.json");
-      return true;
-    }
-    
-    size_t written = serializeJson(userDoc, file);
-    file.close();
-
-    if (written == 0) {
-      ERROR_ESPNOWF("[USER_SYNC] Failed to write users.json");
-      broadcastOutput("[ESP-NOW] User sync: Failed to write users.json");
-      return true;
-    }
-
-    // Create user settings with password
-    uint32_t createdUserId = (uint32_t)nextId;
-    if (createdUserId > 0) {
-      JsonDocument defaults;
-      defaults["theme"] = "light";
-      defaults["password"] = hashedPassword;  // Store password in user settings
-      if (!saveUserSettings(createdUserId, defaults)) {
-        WARN_ESPNOWF("[USER_SYNC] Failed to create settings for userId=%u", (unsigned)createdUserId);
-      }
-    }
-
-    INFO_ESPNOWF("[USER_SYNC] ✓ Created user '%s' (id=%d, role=%s) from %s", 
-           targetUser, nextId, role, ctx.deviceName.c_str());
-    BROADCAST_PRINTF("[ESP-NOW] User sync: Created user '%s' (role=%s) from %s", targetUser, role, ctx.deviceName.c_str());
-
-    // Send success response back to sender
-    uint32_t msgId = doc["id"] | doc["msgId"] | 0;
-    if (msgId != 0) {
-      JsonDocument respDoc;
-      v2_init_envelope(respDoc, MSG_TYPE_RESPONSE, generateMessageId(), 
-                      gSettings.espnowDeviceName.c_str(), ctx.deviceName.c_str(), -1);
-      JsonObject pld = respDoc["pld"].to<JsonObject>();
-      pld["kind"] = "userSyncResult";
-      pld["ok"] = true;
-      pld["msg"] = "User created successfully";
-      pld["username"] = targetUser;
-      pld["userId"] = nextId;
-      pld["role"] = role;
-      char respBuf[256];
-      snprintf(respBuf, sizeof(respBuf), "User created successfully (reqId=%lu)", (unsigned long)msgId);
-      v3_send_file_response(ctx.recvInfo->src_addr, msgId, true, respBuf);
-      
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[USER_SYNC] Sent success response for msgId=%lu to sender", (unsigned long)msgId);
-    }
-
-    return true;
-  }
-
-  // Handle SENSOR_STATUS messages (worker → master)
-  if (strcmp(type, MSG_TYPE_SENSOR_STATUS) == 0) {
-    String deviceName = ctx.deviceName.length() > 0 ? ctx.deviceName : ctx.macStr;
-    handleSensorStatusMessage(ctx.recvInfo->src_addr, deviceName, ctx.message);
-    return true;
-  }
-
-  // Handle SENSOR_DATA messages (worker → master)
-  if (strcmp(type, MSG_TYPE_SENSOR_DATA) == 0) {
-    String deviceName = ctx.deviceName.length() > 0 ? ctx.deviceName : ctx.macStr;
-    handleSensorDataMessage(ctx.recvInfo->src_addr, deviceName, ctx.message);
-    return true;
-  }
-  
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[Dispatch] Unknown JSON type: %s", type);
-  return false;
-}
-
-// NOTE: v2 handleFileTransferMessage wrapper has been REMOVED - v3 binary protocol handles file transfers
-
-/**
- * @brief Handle remote command messages (CMD:username:password:command)
- * @param ctx Received message context
- * @return true if handled
- * @note Only accepts commands over encrypted connections for security
- */
-static bool handleCommandMessage(const ReceivedMessage& ctx) {
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[HANDLER] === handleCommandMessage ENTRY ===");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[HANDLER] Command: %.80s", ctx.message.c_str());
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[HANDLER] From: %s, Encrypted: %s",
-         ctx.deviceName.c_str(), ctx.isEncrypted ? "YES" : "NO");
-  
-  // CRITICAL: Validate ctx.recvInfo is not NULL before dereferencing
-  if (!ctx.recvInfo) {
-    DEBUGF(DEBUG_ESPNOW_STREAM, "[HANDLER] CRITICAL ERROR: handleCommandMessage called with NULL recvInfo");
-    return false;
-  }
-  
-  // Security: Only allow remote commands over encrypted connections
-  if (!ctx.isEncrypted) {
-    broadcastOutput("[ESP-NOW] SECURITY: Remote command rejected - encryption required");
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[Router] Remote command rejected from %s - not encrypted", 
-           ctx.macStr.c_str());
-    return true;  // Handled (rejected)
-  }
-  
-  // Parse format: CMD:username:password:command
-  String payload = ctx.message.substring(4);  // Remove "CMD:" prefix
-  
-  // Find colons: username:password:command
-  int firstColon = payload.indexOf(':');
-  int secondColon = payload.indexOf(':', firstColon + 1);
-  
-  if (firstColon < 0 || secondColon < 0) {
-    broadcastOutput("[ESP-NOW] Remote command: Invalid format - need CMD:user:pass:command");
-    return true;  // Handled (invalid)
-  }
-  
-  String username = payload.substring(0, firstColon);
-  String password = payload.substring(firstColon + 1, secondColon);
-  String command = payload.substring(secondColon + 1);
-  
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[Router] Remote command from %s: user='%s' cmd='%s'",
-         ctx.deviceName.c_str(), username.c_str(), command.c_str());
-  
-  // Authenticate user
-  if (!isValidUser(username, password)) {
-    broadcastOutput("[ESP-NOW] Remote command: Authentication FAILED for user '" + username + "'");
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[Router] Auth failed for user '%s'", username.c_str());
-    return true;  // Handled (auth failed)
-  }
-  
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[Router] Authentication successful for user '%s'", username.c_str());
-  
-  // Suspend streaming during remote command execution
-  bool wasStreaming = gEspNow->streamingSuspended;
-  gEspNow->streamingSuspended = true;
-  
-  // Execute command with authenticated context
-  AuthContext authCtx;
-  authCtx.transport = SOURCE_ESPNOW;  // Command source: ESP-NOW mesh
-  authCtx.user = username;
-  char ipBuf[48];
-  snprintf(ipBuf, sizeof(ipBuf), "espnow:%s", ctx.deviceName.c_str());
-  authCtx.ip = ipBuf;
-  authCtx.path = "/espnow-remote";
-  authCtx.opaque = (void*)ctx.recvInfo->src_addr;
-  
-  char result[1024];
-  bool success = executeCommand(authCtx, command.c_str(), result, sizeof(result));
-  
-  // Restore streaming state
-  gEspNow->streamingSuspended = wasStreaming;
-  
-  // Log result
-  char resultPreviewBuf[104];
-  size_t resultLen = strlen(result);
-  if (resultLen > 100) {
-    memcpy(resultPreviewBuf, result, 100);
-    resultPreviewBuf[100] = '.';
-    resultPreviewBuf[101] = '.';
-    resultPreviewBuf[102] = '.';
-    resultPreviewBuf[103] = '\0';
-  } else {
-    strncpy(resultPreviewBuf, result, sizeof(resultPreviewBuf));
-  }
-  const char* resultPreview = resultPreviewBuf;
-  if (success) {
-    broadcastOutput("[ESP-NOW] Remote command executed successfully");
-  } else {
-    BROADCAST_PRINTF("[ESP-NOW] Remote command FAILED: %s", resultPreview);
-  }
-  
-  // Send result back to sender
-  sendChunkedResponse(ctx.recvInfo->src_addr, success, String(result), ctx.deviceName, ctx.cmdMsgId);
-  
-  return true;  // Handled
-}
-
-
-
-// routerSend() V2 transport removed — all sends now use V3 binary protocol
-
-
-
-// ============================================================================
-// HELPER FUNCTIONS (moved from .ino)
-// ============================================================================
-
-// Helper: Parse incoming JSON message
-static bool parseJsonMessage(const String& message, JsonDocument& doc) {
-  DeserializationError error = deserializeJson(doc, message);
-  if (error) {
-    WARN_ESPNOWF("Failed to parse JSON message: %s", error.c_str());
-    return false;
-  }
-  return true;
-}
 
 // Helper: Generate unique message ID
 uint32_t generateMessageId() {
@@ -5888,8 +4913,6 @@ static void updateUnpairedDevice(const uint8_t* mac, const String& name, int rss
   }
 }
 
-// findOrAllocateChunkBuffer removed - unused (legacy CHUNK code was removed)
-
 // ============================================================================
 // TOPOLOGY STREAM MANAGEMENT (moved from .ino)
 // ============================================================================
@@ -5925,8 +4948,6 @@ static TopologyStream* findTopoStream(const uint8_t* senderMac, uint32_t reqId) 
   }
   return nullptr;
 }
-
-// findTopoStreamByReqId removed - unused
 
 // Helper: Create new topology stream slot
 static TopologyStream* createTopoStream(const uint8_t* senderMac, uint32_t reqId) {
@@ -6034,8 +5055,6 @@ static bool bufferPeerMessage(const String& message, uint32_t reqId, const uint8
   return false;
 }
 
-// processBufferedPeersForStream removed - unused
-
 // Helper: Forward a topology PEER message using the stream's stored path
 // Returns true if forwarded successfully, false otherwise
 static bool forwardTopologyPeer(const String& message, TopologyStream* stream) {
@@ -6112,28 +5131,6 @@ static bool forwardTopologyPeer(const String& message, TopologyStream* stream) {
   DEBUG_ESPNOWF("[PEER_FWD] Forward result: %s", result == ESP_OK ? "OK" : "FAILED");
   
   return (result == ESP_OK);
-}
-
-// processBufferedPeersForStream removed - unused
-
-// Helper: Cleanup expired buffered PEERs (call periodically)
-void cleanupExpiredBufferedPeers() {
-  unsigned long now = millis();
-  int cleanedCount = 0;
-  
-  for (int i = 0; i < MAX_BUFFERED_PEERS; i++) {
-    if (gPeerBuffer[i].active && (now - gPeerBuffer[i].receivedMs > 10000)) {
-      DEBUG_ESPNOWF("[PEER_BUFFER] Timeout: Discarding buffered PEER from slot %d (reqId=%lu, age=%lums)",
-                    i, (unsigned long)gPeerBuffer[i].reqId, now - gPeerBuffer[i].receivedMs);
-      gPeerBuffer[i].active = false;
-      gPeerBuffer[i].message = "";
-      cleanedCount++;
-    }
-  }
-  
-  if (cleanedCount > 0) {
-    DEBUG_ESPNOWF("[PEER_BUFFER] Cleaned up %d expired buffer(s)", cleanedCount);
-  }
 }
 
 // ============================================================================
@@ -6408,19 +5405,31 @@ static void loadEspNowDevices() {
   int count = 0;
   for (JsonObject entry : arr) {
     if (gEspNow->deviceCount >= 16) break;
-    const char* macStr = entry["mac"] | "";
+    const char* rawMac = entry["mac"] | "";
     const char* name   = entry["name"] | "";
-    if (!macStr[0]) continue;
+    if (!rawMac[0]) continue;
+
+    // Decrypt MAC if stored encrypted
+    String macStr = String(rawMac);
+    if (macStr.startsWith("AES:")) {
+      String decrypted = decryptString(macStr);
+      if (decrypted.length() > 0) {
+        macStr = decrypted;
+      } else {
+        WARN_ESPNOWF("[ESPNOW] Failed to decrypt device MAC for '%s', skipping", name);
+        continue;
+      }
+    }
 
     uint8_t mac[6];
-    if (!parseMacAddress(String(macStr), mac)) continue;
+    if (!parseMacAddress(macStr, mac)) continue;
 
     // Check if this MAC is already loaded (prevents duplicates from corrupted JSON)
     bool alreadyLoaded = false;
     for (int i = 0; i < gEspNow->deviceCount; i++) {
       if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
         alreadyLoaded = true;
-        WARN_ESPNOWF("[ESPNOW] Skipping duplicate device in saved file: %s (%s)", name, macStr);
+        WARN_ESPNOWF("[ESPNOW] Skipping duplicate device in saved file: %s (%s)", name, macStr.c_str());
         break;
       }
     }
@@ -6431,11 +5440,24 @@ static void loadEspNowDevices() {
     dev.name      = String(name);
     dev.encrypted = entry["encrypted"] | false;
     memset(dev.key, 0, 16);
-    const char* keyHex = entry["key"] | "";
-    if (dev.encrypted && strlen(keyHex) == 32) {
-      for (int i = 0; i < 16; i++) {
-        char byte[3] = { keyHex[i*2], keyHex[i*2+1], '\0' };
-        dev.key[i] = (uint8_t)strtol(byte, nullptr, 16);
+
+    // Decrypt encryption key if present
+    String keyStr = String(entry["key"] | "");
+    if (dev.encrypted && keyStr.length() > 0) {
+      if (keyStr.startsWith("AES:")) {
+        String decryptedKey = decryptString(keyStr);
+        if (decryptedKey.length() == 32) {
+          keyStr = decryptedKey;
+        } else {
+          WARN_ESPNOWF("[ESPNOW] Failed to decrypt encryption key for '%s'", name);
+          keyStr = "";
+        }
+      }
+      if (keyStr.length() == 32) {
+        for (int i = 0; i < 16; i++) {
+          char byte[3] = { keyStr[i*2], keyStr[i*2+1], '\0' };
+          dev.key[i] = (uint8_t)strtol(byte, nullptr, 16);
+        }
       }
     }
     gEspNow->deviceCount++;
@@ -6444,18 +5466,6 @@ static void loadEspNowDevices() {
   DEBUGF(DEBUG_ESPNOW_MESH, "[ESPNOW] Loaded %d device(s) from %s", count, ESPNOW_DEVICES_FILE);
 }
 
-// Dequeue a mesh retry entry by msgId (called when ACK is received)
-static void meshRetryDequeue(uint32_t msgId) {
-  MeshRetryGuard guard("meshRetryDequeue");
-  if (!guard.held) return;
-  for (int i = 0; i < MESH_RETRY_QUEUE_SIZE; i++) {
-    if (gMeshRetryQueue[i].active && gMeshRetryQueue[i].msgId == msgId) {
-      gMeshRetryQueue[i].active = false;
-      DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_RETRY] Dequeued msgId=%lu on ACK", (unsigned long)msgId);
-      break;
-    }
-  }
-}
 
 // ============================================================================
 // RESTORED PUBLIC HELPER FUNCTIONS (removed during V2 cleanup, rebuilt)
@@ -6750,10 +5760,7 @@ void processMeshHeartbeats() {
     }
   }
 
-  // 4. Process queued messages and retry queue
-  processMessageQueue();
-
-  // 5. Check topology collection window
+  // 4. Check topology collection window
   checkTopologyCollectionWindow();
   
   // 6. Check broadcast tracker timeouts
@@ -7766,7 +6773,6 @@ const char* cmd_espnow_routerstats(const String& argsInput) {
   }
   
   broadcastOutput("\nQueue/Retry:");
-  BROADCAST_PRINTF("  Current Queue Size: %d", (int)(gEspNow->queueSize));
   BROADCAST_PRINTF("  Messages Queued: %lu", (unsigned long)gEspNow->routerMetrics.messagesQueued);
   BROADCAST_PRINTF("  Messages Dequeued: %lu", (unsigned long)gEspNow->routerMetrics.messagesDequeued);
   BROADCAST_PRINTF("  Retries Attempted: %lu", (unsigned long)gEspNow->routerMetrics.retriesAttempted);
@@ -7913,10 +6919,17 @@ const char* cmd_espnow_pair(const String& argsInput) {
     v3_send_frame(mac, ESPNOW_V3_TYPE_HEARTBEAT, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(),
                   (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
   }
-  saveMeshPeers();
-  saveEspNowDevices();
+  bool peersOk   = saveMeshPeers();
+  bool devicesOk = saveEspNowDevices();
 
-  snprintf(getDebugBuffer(), 1024, "Unencrypted device paired successfully: %s (%s)", name.c_str(), macStr.c_str());
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  if (!peersOk || !devicesOk) {
+    snprintf(getDebugBuffer(), 1024,
+      "Paired %s (%s) but failed to encrypt and save peer data — device encryption key unavailable. "
+      "Peer will not persist across reboot.", name.c_str(), macStr.c_str());
+  } else {
+    snprintf(getDebugBuffer(), 1024, "Unencrypted device paired successfully: %s (%s)", name.c_str(), macStr.c_str());
+  }
   return getDebugBuffer();
 }
 
@@ -8969,8 +7982,6 @@ const char* cmd_test_cleanup(const String& argsInput) {
   return "OK";
 }
 
-// acquireFileTransferLock and releaseFileTransferLock removed - unused
-
 // Test file lock
 const char* cmd_test_filelock(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -9026,13 +8037,13 @@ const char* cmd_espnow_list(const String& argsInput) {
   // Build JSON from gEspNow->devices[] — the authoritative source of truth.
   // esp_now_fetch_peer() only reflects the hardware peer table which may lag
   // behind after a reboot until loadMeshPeers() re-registers all peers.
-  DynamicJsonDocument doc(2048);
-  JsonArray devices = doc.createNestedArray("devices");
+  JsonDocument doc;
+  JsonArray devices = doc["devices"].to<JsonArray>();
 
   int listedCount = 0;
   for (int i = 0; i < gEspNow->deviceCount; i++) {
     if (isSelfMac(gEspNow->devices[i].mac)) continue;  // Don't list self
-    JsonObject d = devices.createNestedObject();
+    JsonObject d = devices.add<JsonObject>();
     d["mac"]       = formatMacAddress(gEspNow->devices[i].mac);
     d["name"]      = gEspNow->devices[i].name;
     d["encrypted"] = gEspNow->devices[i].encrypted;
@@ -9065,8 +8076,8 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
 
   // Use ArduinoJson to avoid String concatenation heap fragmentation
   // Use DynamicJsonDocument to avoid stack overflow in cmd_exec task
-  DynamicJsonDocument doc(2048);
-  JsonArray peers = doc.createNestedArray("peers");
+  JsonDocument doc;
+  JsonArray peers = doc["peers"].to<JsonArray>();
   
   uint32_t now = millis();
   int activePeers = 0;
@@ -9074,7 +8085,7 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (!gMeshPeers[i].isActive || isSelfMac(gMeshPeers[i].mac)) continue;
 
-    JsonObject peer = peers.createNestedObject();
+    JsonObject peer = peers.add<JsonObject>();
     String deviceName = getEspNowDeviceName(gMeshPeers[i].mac);
     uint32_t elapsed = now - gMeshPeers[i].lastHeartbeatMs;
     if (elapsed > 0x80000000UL) elapsed = 0;
@@ -9094,13 +8105,13 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
 
   doc["totalPeers"] = activePeers;
 
-  JsonArray unpaired = doc.createNestedArray("unpaired");
+  JsonArray unpaired = doc["unpaired"].to<JsonArray>();
   int unpairedCount = 0;
   
   for (int i = 0; i < gEspNow->unpairedDeviceCount; i++) {
     if (isPairedDevice(gEspNow->unpairedDevices[i].mac)) continue;
     
-    JsonObject dev = unpaired.createNestedObject();
+    JsonObject dev = unpaired.add<JsonObject>();
     uint32_t elapsed = now - gEspNow->unpairedDevices[i].lastSeenMs;
     
     dev["mac"] = macToHexString(gEspNow->unpairedDevices[i].mac);
@@ -9114,7 +8125,7 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
   
   doc["totalUnpaired"] = unpairedCount;
 
-  JsonArray retryQueue = doc.createNestedArray("retryQueue");
+  JsonArray retryQueue = doc["retryQueue"].to<JsonArray>();
   int activeRetries = 0;
   
   {
@@ -9123,7 +8134,7 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
       for (int i = 0; i < MESH_RETRY_QUEUE_SIZE; i++) {
         if (!gMeshRetryQueue[i].active) continue;
         
-        JsonObject retry = retryQueue.createNestedObject();
+        JsonObject retry = retryQueue.add<JsonObject>();
         uint32_t elapsed = now - gMeshRetryQueue[i].sentMs;
         
         retry["msgId"] = gMeshRetryQueue[i].msgId;
@@ -9193,10 +8204,16 @@ const char* cmd_espnow_unpair(const String& argsInput) {
     saveMeshPeers();
   }
 
-  saveMeshPeers();
-  saveEspNowDevices();
+  bool peersOk   = saveMeshPeers();
+  bool devicesOk = saveEspNowDevices();
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  if (!peersOk || !devicesOk) {
+    snprintf(getDebugBuffer(), 1024,
+      "Unpaired device but failed to encrypt and save peer data — device encryption key unavailable. "
+      "Peer list may not persist correctly across reboot.");
+    return getDebugBuffer();
+  }
   if (deviceName.length() > 0) {
     snprintf(getDebugBuffer(), 1024, "Unpaired device: %s (%s)",
              deviceName.c_str(), formatMacAddress(mac).c_str());
@@ -9647,9 +8664,7 @@ const char* cmd_espnow_encstatus(const String& argsInput) {
     remaining -= n;
 
     if (gEspNow->passphrase.length() > 0) {
-      n = snprintf(p, remaining, "  Passphrase Hint: %.3s...%s\n",
-                   gEspNow->passphrase.c_str(),
-                   gEspNow->passphrase.c_str() + (gEspNow->passphrase.length() > 3 ? gEspNow->passphrase.length() - 3 : 0));
+      n = snprintf(p, remaining, "  Passphrase Length: %d\n", (int)gEspNow->passphrase.length());
       p += n;
       remaining -= n;
     }
@@ -9761,14 +8776,20 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
     v3_send_frame(mac, ESPNOW_V3_TYPE_HEARTBEAT, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(),
                   (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
   }
-  saveMeshPeers();
-  saveEspNowDevices();
+  bool peersOk   = saveMeshPeers();
+  bool devicesOk = saveEspNowDevices();
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  snprintf(getDebugBuffer(), 1024,
-           "Encrypted device paired successfully: %s (%s)\nKey fingerprint: %02X%02X%02X%02X...",
-           deviceName.c_str(), macStr.c_str(),
-           gEspNow->derivedKey[0], gEspNow->derivedKey[1], gEspNow->derivedKey[2], gEspNow->derivedKey[3]);
+  if (!peersOk || !devicesOk) {
+    snprintf(getDebugBuffer(), 1024,
+      "Paired %s (%s) but failed to encrypt and save peer data — device encryption key unavailable. "
+      "Peer will not persist across reboot.", deviceName.c_str(), macStr.c_str());
+  } else {
+    snprintf(getDebugBuffer(), 1024,
+             "Encrypted device paired successfully: %s (%s)\nKey fingerprint: %02X%02X%02X%02X...",
+             deviceName.c_str(), macStr.c_str(),
+             gEspNow->derivedKey[0], gEspNow->derivedKey[1], gEspNow->derivedKey[2], gEspNow->derivedKey[3]);
+  }
   return getDebugBuffer();
 }
 
@@ -10989,6 +10010,7 @@ extern const char* cmd_espnow_find(const String& argsInput);
 extern const char* cmd_espnow_roomcmd(const String& argsInput);
 extern const char* cmd_espnow_tagcmd(const String& argsInput);
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Status & Statistics ----
   { "espnowread", "Read ESP-NOW status and configuration.", false, cmd_espnow_status },
@@ -11008,14 +10030,14 @@ extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Mesh Configuration ----
   { "espnow meshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
   { "espnow meshmetrics", "Show mesh routing metrics (forwards, path stats, drops).", false, cmd_espnow_meshmetrics },
-  { "espnow mode", "Get/set ESP-NOW mode: 'espnow mode [direct|mesh]'.", false, cmd_espnow_mode, "Usage: espnow mode [direct|mesh]" },
+  { "espnow mode", "Get/set ESP-NOW mode: 'espnow mode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnow mode [direct|mesh]" },
   { "espnow meshttl", "Get/set mesh TTL: 'espnow meshttl [1-10|adaptive]'.", false, cmd_espnow_meshttl },
-  { "espnow setname", "Get/set device name: 'espnow setname [name]'.", false, cmd_espnow_setname },
+  { "espnow setname", "Get/set device name: 'espnow setname [name]'.", true, cmd_espnow_setname },
   { "espnow hbmode", "Get/set heartbeat mode: 'espnow hbmode [public|private]'.", false, cmd_espnow_hbmode, "Usage: espnow hbmode [public|private]" },
-  { "espnow meshrole", "Get/set mesh role: 'espnow meshrole [worker|master|backup]'.", false, cmd_espnow_meshrole, "Usage: espnow meshrole [worker|master|backup]" },
-  { "espnow meshmaster", "Get/set master MAC: 'espnow meshmaster [MAC]'.", false, cmd_espnow_meshmaster },
-  { "espnow meshbackup", "Get/set backup MAC: 'espnow meshbackup [MAC]'.", false, cmd_espnow_meshbackup },
-  { "espnow backupenable", "Enable/disable backup master feature: 'espnow backupenable [on|off]'.", false, cmd_espnow_backupenable },
+  { "espnow meshrole", "Get/set mesh role: 'espnow meshrole [worker|master|backup]'.", true, cmd_espnow_meshrole, "Usage: espnow meshrole [worker|master|backup]" },
+  { "espnow meshmaster", "Get/set master MAC: 'espnow meshmaster [MAC]'.", true, cmd_espnow_meshmaster },
+  { "espnow meshbackup", "Get/set backup MAC: 'espnow meshbackup [MAC]'.", true, cmd_espnow_meshbackup },
+  { "espnow backupenable", "Enable/disable backup master feature: 'espnow backupenable [on|off]'.", true, cmd_espnow_backupenable },
   { "espnow meshtopo", "Discover mesh topology (master only).", false, cmd_espnow_meshtopo },
   { "espnow toporesults", "Get topology discovery results.", false, cmd_espnow_toporesults },
   { "espnow timesync", "Broadcast NTP time to mesh (master only).", false, cmd_espnow_timesync },
@@ -11050,7 +10072,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnow sensorstream", "Enable/disable sensor data streaming to master (worker only): 'espnow sensorstream <sensor> <on|off>'.", false, cmd_espnow_sensorstream },
   { "espnow sensorstatus", "Show remote sensor cache (master) or worker streaming status (worker).", false, cmd_espnow_sensorstatus },
   { "espnow sensorbroadcast", "Enable/disable all sensor ESP-NOW communication: 'espnow sensorbroadcast <on|off>'.", false, cmd_espnow_sensorbroadcast },
-  { "espnow usersync", "Enable/disable user credential sync: 'espnow usersync [on|off]'.", false, cmd_espnow_usersync },
+  { "espnow usersync", "Enable/disable user credential sync: 'espnow usersync [on|off]'.", true, cmd_espnow_usersync },
   { "espnow requestmeta", "Request metadata from peer: 'espnow requestmeta <name_or_mac>'.", false, cmd_espnow_requestmeta, "Usage: espnow requestmeta <name_or_mac>" },
   
 #if ENABLE_BONDED_MODE
@@ -11092,6 +10114,7 @@ extern const size_t espNowCommandsCount = sizeof(espNowCommands) / sizeof(espNow
 // ESP-NOW Settings Module (for modular settings registry)
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry espnowSettingEntries[] = {
   { "enabled",                    SETTING_BOOL,   &gSettings.espnowenabled,              true, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr },
   { "mesh",                       SETTING_BOOL,   &gSettings.espnowmesh,                 true, 0, nullptr, 0, 1, "Mesh Mode", nullptr },
@@ -11138,6 +10161,7 @@ static const SettingEntry espnowSettingEntries[] = {
   { "fileChunkSize",              SETTING_INT,    (int*)&gSettings.espnowFileChunkSize,  224, 0, nullptr, 100, 224, "File Chunk Size", nullptr }
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule espnowSettingsModule = {
   "espnow", "espnow", espnowSettingEntries,
   sizeof(espnowSettingEntries) / sizeof(espnowSettingEntries[0])

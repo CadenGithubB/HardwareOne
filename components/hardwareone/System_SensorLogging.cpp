@@ -981,6 +981,7 @@ const char* cmd_sensorlog(const String& argsInput) {
 // Command Registry
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry sensorLoggingCommands[] = {
   { "sensorlog", "Sensor data logging: start, stop, status, format, maxsize, rotations, sensors", false, cmd_sensorlog,
     "Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors> [args...]\n"
@@ -1002,6 +1003,7 @@ const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof
 // Settings Module Registration
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry sensorLogSettingEntries[] = {
   { "sensorLogAutoStart",    SETTING_BOOL,   &gSettings.sensorLogAutoStart,    0, 0, nullptr, 0, 1,       "Auto-start logging after boot", nullptr },
   { "sensorLogPath",         SETTING_STRING, &gSettings.sensorLogPath,         0, 0, "/logging_captures/sensors/sensors.txt", 0, 0, "Log file path", nullptr },
@@ -1010,6 +1012,7 @@ static const SettingEntry sensorLogSettingEntries[] = {
   { "sensorLogFormat",       SETTING_INT,    &gSettings.sensorLogFormat,       0, 0, nullptr, 0, 2,       "Format (0=text,1=csv,2=track)", nullptr }
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule sensorLogSettingsModule = {
   "sensorlog",
   "sensorlog",

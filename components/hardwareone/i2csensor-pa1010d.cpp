@@ -479,6 +479,7 @@ int getGPSSatellites() {
 // ============================================================================
 
 // GPS settings entries
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry gpsSettingEntries[] = {
   { "gpsAutoStart",    SETTING_BOOL, &gSettings.gpsAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   { "gpsDevicePollMs", SETTING_INT,  &gSettings.gpsDevicePollMs, 1000, 0, nullptr, 100, 10000, "Poll Interval (ms)", nullptr }
@@ -488,6 +489,7 @@ static bool isGPSConnected() {
   return gpsConnected;
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule gpsSettingsModule = {
   "gps",
   "gps_pa1010d",
@@ -520,6 +522,7 @@ const char* cmd_gpsautostart(const String& argsInput) {
   return "Usage: gpsautostart [on|off]";
 }
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry gpsCommands[] = {
   // 3-level voice: "sensor" -> "GPS" -> "open/close"
   { "opengps", "Start PA1010D GPS module.", false, cmd_gpsstart, nullptr, "sensor", "GPS", "open" },

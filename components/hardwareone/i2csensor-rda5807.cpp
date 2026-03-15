@@ -741,6 +741,7 @@ const char* cmd_fmradioautostart(const String& argsInput) {
   return "Usage: fmradioautostart [on|off]";
 }
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry fmRadioCommands[] = {
   // 3-level voice: "sensor" -> "radio" -> "open/close"
   { "openfmradio", "Start FM Radio sensor.", false, cmd_fmradio_start, nullptr, "sensor", "radio", "open" },
@@ -765,6 +766,7 @@ const size_t fmRadioCommandsCount = sizeof(fmRadioCommands) / sizeof(fmRadioComm
 // ============================================================================
 
 // FM Radio settings entries
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry fmRadioSettingEntries[] = {
   { "fmRadioAutoStart",    SETTING_BOOL, &gSettings.fmRadioAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   { "fmRadioDevicePollMs", SETTING_INT,  &gSettings.fmRadioDevicePollMs, 250, 0, nullptr, 100, 5000, "Poll Interval (ms)", nullptr }
@@ -774,6 +776,7 @@ static bool isFMRadioConnected() {
   return fmRadioConnected;
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule fmRadioSettingsModule = {
   "fmradio",
   "fmradio",

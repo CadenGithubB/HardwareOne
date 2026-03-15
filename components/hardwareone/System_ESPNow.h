@@ -44,12 +44,6 @@ String base64Encode(const uint8_t* data, size_t len);
 #define MSG_TYPE_USER_SYNC "USER_SYNC"
 #define MSG_TYPE_FILE_BROWSE "FILE_BROWSE"
 
-// Message priorities
-enum MessagePriority {
-  PRIORITY_LOW = 0,
-  PRIORITY_NORMAL = 1,
-  PRIORITY_HIGH = 2
-};
 
 // Payload types
 #define PAYLOAD_CMD "cmd"
@@ -445,50 +439,6 @@ inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) 
   return result.length() > 0 ? result : String("None");
 }
 
-// ==========================
-// Message Structures
-// ==========================
-// Message type classification (for router internal use)
-enum MessageType {
-  MSG_TYPE_DATA = 0,     // Generic data message
-  MSG_TYPE_COMMAND,      // Remote command execution
-  MSG_TYPE_RESPONSE_ENUM,     // Command response (avoid conflict with MSG_TYPE_RESPONSE string)
-  MSG_TYPE_FILE,         // File transfer
-  MSG_TYPE_STREAM_ENUM,       // Stream output (avoid conflict with MSG_TYPE_STREAM string)
-  MSG_TYPE_HEARTBEAT,    // Mesh heartbeat
-  MSG_TYPE_TOPOLOGY,     // Topology discovery
-  MSG_TYPE_BROADCAST     // Broadcast message
-};
-
-// Message structure for router
-struct Message {
-  uint8_t dstMac[6];           // Destination MAC address
-  String payload;              // Message payload (will be chunked if needed)
-  MessagePriority priority;    // Message priority
-  MessageType type;            // Message type
-  bool requiresAck;            // Whether ACK is needed
-  uint32_t msgId;              // Unique message ID (auto-generated)
-  int ttl;                     // Time-to-live for retries (hops for mesh)
-  unsigned long timestamp;     // When message was created
-  uint8_t maxRetries;          // Maximum retry attempts (0 = no retry)
-  
-  // Constructor with defaults
-  Message() : priority(PRIORITY_NORMAL), type(MSG_TYPE_DATA), 
-              requiresAck(false), msgId(0), ttl(3), timestamp(0), maxRetries(0) {
-    memset(dstMac, 0, 6);
-  }
-};
-
-// Queued message structure (for retry queue)
-struct QueuedMessage {
-  Message msg;                 // The message to send
-  uint8_t retryCount;          // Number of retries attempted
-  unsigned long nextRetryTime; // When to retry next (millis)
-  bool active;                 // Whether this slot is in use
-  
-  // Constructor
-  QueuedMessage() : retryCount(0), nextRetryTime(0), active(false) {}
-};
 
 // Per-device message buffer size based on available memory
 // With PSRAM: 100 messages per device (~30KB each), Without: 5 messages (~1.5KB each)
@@ -641,21 +591,6 @@ struct RouterMetrics {
   }
 };
 
-// Received message context for dispatch handlers
-struct ReceivedMessage {
-  const esp_now_recv_info* recvInfo;  // ESP-NOW receive info (contains src MAC, RSSI, etc)
-  const uint8_t* rawData;              // Raw incoming data
-  int dataLen;                         // Length of raw data
-  String message;                      // Parsed message string
-  bool isPaired;                       // Whether sender is paired
-  bool isEncrypted;                    // Whether message was encrypted
-  String deviceName;                   // Device name (if paired)
-  String macStr;                       // Formatted MAC address string
-  uint32_t cmdMsgId;                   // Command message ID for response tracking
-  
-  ReceivedMessage() : recvInfo(nullptr), rawData(nullptr), dataLen(0), 
-                      isPaired(false), isEncrypted(false), cmdMsgId(0) {}
-};
 
 // ==========================
 // ESP-NOW State Structure (complete version matching .ino implementation)
@@ -706,10 +641,6 @@ struct EspNowState {
   
   // Chunk reassembly (max 4 concurrent chunked messages)
   ChunkBuffer chunkBuffers[4];
-  
-  // Retry queue (max 8 queued messages)
-  QueuedMessage retryQueue[8];
-  uint8_t queueSize;  // Current number of messages in queue
   
   // Per-device message history buffers (for web UI and OLED)
   // Dynamically allocated - starts small and grows as peers are discovered
@@ -866,7 +797,6 @@ struct EspNowState {
     fileAckLast(0),
     listBuffer(nullptr),
     nextMessageId(1),
-    queueSize(0),
     globalMessageSeqNum(0),
     receiveErrors(0),
     heartbeatsSent(0),
@@ -969,7 +899,7 @@ const char* checkEspNowFirstTimeSetup();
 
 // Maintenance functions
 void cleanupTimedOutChunks();
-void saveMeshPeers();
+bool saveMeshPeers();
 
 // Device management
 String getEspNowDeviceName(const uint8_t* mac);
@@ -1040,9 +970,7 @@ void onEspNowDataRecv(const esp_now_recv_info_t* recvInfo, const uint8_t* data, 
 void onEspNowDataSent(const uint8_t* mac, esp_now_send_status_t status);
 
 // Message queue processing (called from loop)
-void processMessageQueue();
 void cleanupTimedOutChunks();
-void cleanupExpiredBufferedPeers();
 
 // ESP-NOW command functions (cmd_espnow_stopstream implemented in espnow_system.cpp)
 const char* cmd_espnow_send(const String& argsInput);

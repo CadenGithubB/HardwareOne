@@ -380,7 +380,7 @@
   inline void broadcastSensorStatusToAllSessions() {}
   inline void broadcastEventToAllSessions(const char* eventName, const char* jsonData) {}
   inline void logAuthAttempt(bool success, const char* transport, const String& ip, const String& user, const String& reason) {}
-  // Note: tgRequireAuth, tgRequireAdmin are implemented in user_system.cpp with #else stubs
+  // Note: tgRequireAuth is implemented in System_User.cpp with #else stub
   inline bool authSuccessUnified(struct AuthContext& ctx, httpd_req_t* req) { return false; }
 #endif
 
@@ -424,8 +424,6 @@
   inline const char* checkEspNowFirstTimeSetup() { return "ESP-NOW disabled"; }
   inline const char* cmd_espnow_init(const String& argsInput) { return "ESP-NOW disabled"; }
   inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
-  inline void processMessageQueue() {}
-  inline void cleanupExpiredBufferedPeers() {}
   inline void cleanupTimedOutChunks() {}
   inline bool isSelfMac(const uint8_t* mac) { return false; }
   inline bool isMeshPeerAlive(MeshPeerHealth* peer) { return false; }

@@ -6,10 +6,8 @@ struct CommandContext;
 struct Command;
 struct MeshPeerHealth;
 struct TopologyStream;
-struct Message;
 struct RouterMetrics;
 struct ChunkBuffer;
-struct ReceivedMessage;
 
 #include "System_Utils.h"
 
@@ -571,34 +569,32 @@ static inline void printToSerial(const String& s) {
 }
 
 void appendCommandToFeed(const char* source, const String& cmd, const String& user = String(), const String& ip = String()) {
-  String line = "[";
-  line += source;
+  char prefix[128];
   if (user.length() || ip.length()) {
-    line += " ";
-    if (user.length()) { line += user; }
-    if (ip.length()) {
-      line += "@";
-      line += ip;
-    }
+    snprintf(prefix, sizeof(prefix), "[%s %s%s%s] $ ",
+             source,
+             user.length() ? user.c_str() : "",
+             ip.length() ? "@" : "",
+             ip.length() ? ip.c_str() : "");
+  } else {
+    snprintf(prefix, sizeof(prefix), "[%s] $ ", source);
   }
-  line += "] $ ";
-  line += cmd;
+  String line = String(prefix) + redactCmdForAudit(cmd);
   printToWeb(line);
 }
 
 static String originPrefix(const char* source, const String& user, const String& ip) {
-  String p = "[";
-  p += source;
+  char buf[128];
   if (user.length() || ip.length()) {
-    p += " ";
-    if (user.length()) { p += user; }
-    if (ip.length()) {
-      p += "@";
-      p += ip;
-    }
+    snprintf(buf, sizeof(buf), "[%s %s%s%s] ",
+             source,
+             user.length() ? user.c_str() : "",
+             ip.length() ? "@" : "",
+             ip.length() ? ip.c_str() : "");
+  } else {
+    snprintf(buf, sizeof(buf), "[%s] ", source);
   }
-  p += "] ";
-  return p;
+  return String(buf);
 }
 
 #if ENABLE_HTTP_SERVER
@@ -1853,16 +1849,11 @@ void hardwareone_loop() {
   // ========================================================================
 
 #if ENABLE_ESPNOW
-  if (gEspNow && gEspNow->initialized) {
-    processMessageQueue();
-  }
-
   {
     static unsigned long lastEspNowCleanup = 0;
     unsigned long nowEspNow = millis();
     if (nowEspNow - lastEspNowCleanup >= 2000) {
       lastEspNowCleanup = nowEspNow;
-      cleanupExpiredBufferedPeers();
       if (gEspNow && gEspNow->initialized) {
         cleanupTimedOutChunks();
       }

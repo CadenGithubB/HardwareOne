@@ -499,6 +499,7 @@ static bool sensorMenuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
   return false;
 }
 
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry sSensorMenuModes[] = {
   { OLED_SENSOR_MENU, "Sensors", "sensor", displaySensorMenu, nullptr, sensorMenuInputHandler, false, -1, "A:Select B:Back" },
 };
@@ -681,5 +682,16 @@ void displayLogo() {
     oledDisplay->drawCircle(irScreenX, irScreenY, 3, DISPLAY_COLOR_WHITE);
   }
 }
+
+// ============================================================================
+// Logo Mode Registration
+// ============================================================================
+
+static const OLEDModeEntry sLogoModes[] = {
+  { OLED_MENU, "Menu", "menu", displayMenuListStyle, nullptr, nullptr, false, -1, "A:Select B:Back" },
+  { OLED_LOGO, "Logo", "logo", displayLogo,          nullptr, nullptr, false, -1, "B:Back" },
+};
+
+REGISTER_OLED_MODE_MODULE(sLogoModes, sizeof(sLogoModes) / sizeof(sLogoModes[0]), "MenuAndLogo");
 
 #endif // ENABLE_OLED_DISPLAY

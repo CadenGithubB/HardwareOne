@@ -566,13 +566,7 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
     DEBUG_WIFIF("[connectWiFiIndex] WARNING: Password is empty (open network?)");
   }
 
-  // Check if password is encrypted and decrypt it
   String actualPassword = nw.password;
-  if (nw.password.startsWith("ENC:")) {
-    DEBUG_WIFIF("[connectWiFiIndex] Password is encrypted, decrypting...");
-    actualPassword = decryptWifiPassword(nw.password);
-    DEBUG_WIFIF("[connectWiFiIndex] Decrypted password length: %d", actualPassword.length());
-  }
 
   // CRITICAL: Use ESP-IDF WiFi API directly to bypass Arduino WiFi library bug
   // The Arduino WiFi.begin() sometimes fails to start the connection state machine
@@ -1123,6 +1117,7 @@ const char* cmd_httpstatus(const String& argsInput) { (void)argsInput; RETURN_VA
 // WiFi Command Registry
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry wifiCommands[] = {
   // Network Management
   { "wifiread", "Read current WiFi connection info.", false, cmd_wifiinfo },
@@ -1236,6 +1231,7 @@ void setupWiFi() {
 // WiFi Settings Module
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry wifiSettingsEntries[] = {
   { "wifiEnabled",        SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "WiFi Enabled", nullptr },
   { "wifiSSID",           SETTING_STRING, &gSettings.wifiSSID,          0, 0, "", 0, 0, "WiFi SSID", nullptr },
@@ -1245,6 +1241,7 @@ static const SettingEntry wifiSettingsEntries[] = {
   { "wifiTzOffsetMinutes",SETTING_INT,    &gSettings.tzOffsetMinutes,   -240, 0, nullptr, -720, 840, "Timezone Offset (min)", nullptr }
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule wifiSettingsModule = {
   "wifi",
   "wifi",
@@ -1259,6 +1256,7 @@ extern const SettingsModule wifiSettingsModule = {
 // ============================================================================
 #if ENABLE_HTTP_SERVER
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry httpSettingsEntries[] = {
   { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr },
 #if ENABLE_HTTPS
@@ -1266,6 +1264,7 @@ static const SettingEntry httpSettingsEntries[] = {
 #endif
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule httpSettingsModule = {
   "http",
   "http",

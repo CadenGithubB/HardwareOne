@@ -45,7 +45,7 @@ bool oledBootModeActive = false;
 #include "System_I2C.h"
 #include "System_SensorLogging.h"
 #include "System_SensorStubs.h"
-#include "System_Auth.h"
+#include "System_User.h"
 #include "System_Settings.h"
 #include "System_User.h"
 #include "System_Utils.h"
@@ -53,7 +53,6 @@ bool oledBootModeActive = false;
 #if ENABLE_ESPNOW
 #include "OLED_ESPNow.h"
 #include "System_ESPNow.h"
-extern void displayRemoteMode();
 #endif
 #if ENABLE_APDS_SENSOR
 #include "i2csensor-apds9960.h"
@@ -605,6 +604,7 @@ static bool notificationsRegisteredInputHandler(int deltaX, int deltaY, uint32_t
   return handleNotificationsInput(deltaX, deltaY, newlyPressed);
 }
 
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry sNotificationsModes[] = {
   { OLED_NOTIFICATIONS, "Notifications", "notify_sensor", displayNotifications, nullptr, notificationsRegisteredInputHandler, false, -1, "A:Detail X:Clear B:Back" },
 };
@@ -2175,11 +2175,8 @@ void drawOLEDFooter() {
   }
   
   // Fall back to central switch for modes without registered hints
+  // OLED_MENU hints provided via OLEDModeEntry registration (static "A:Select B:Back")
   if (!hints) switch (currentOLEDMode) {
-    case OLED_MENU:
-      hints = "A:Select B:Back";
-      break;
-      
     case OLED_ESPNOW:
       #if ENABLE_ESPNOW
       {
@@ -2244,14 +2241,9 @@ void drawOLEDFooter() {
       }
       break;
       
-    case OLED_SYSTEM_STATUS:
-    case OLED_SENSOR_DATA:
-    case OLED_SENSOR_LIST:
-    case OLED_BOOT_SENSORS:
-    case OLED_MEMORY_STATS:
-      hints = "B:Back";
-      break;
-      
+    // OLED_SYSTEM_STATUS, OLED_SENSOR_DATA, OLED_SENSOR_LIST, OLED_BOOT_SENSORS, OLED_MEMORY_STATS
+    // hints provided via OLEDModeEntry registration (static "B:Back")
+
     case OLED_WEB_STATS:
 #if ENABLE_HTTP_SERVER
       {
@@ -2287,16 +2279,9 @@ void drawOLEDFooter() {
 #endif
       break;
     
-    case OLED_REMOTE:
-      hints = "A:Select  B:Back";
-      break;
-      
-    case OLED_CUSTOM_TEXT:
-    case OLED_LOGO:
-    case OLED_ANIMATION:
-      hints = "B:Back";
-      break;
-      
+    // OLED_REMOTE hints provided via OLEDModeEntry registration (static "A:Select  B:Back")
+    // OLED_CUSTOM_TEXT, OLED_LOGO, OLED_ANIMATION hints provided via OLEDModeEntry registration (static "B:Back")
+
     case OLED_CLI_VIEWER:
       {
         // Show selected/total in footer
@@ -2449,10 +2434,6 @@ static void showSetupCompleteMessage();
 static void showNormalBootProgress();
 static void drawProgressBar(int percent);
 
-// Forward declarations for menu system (defined later in file)
-void displayMenuListStyle();
-
-
 // ============================================================================
 // OLED Change Detection - Skip rendering when nothing has changed
 // ============================================================================
@@ -2540,15 +2521,6 @@ void prepareSystemStatusData();
 void prepareMeshStatusData();
 void prepareConnectedSensorsData();
 void prepareAutomationData();
-void displayFileBrowserRendered();
-void displayNetworkInfoRendered();
-void displayMemoryStatsRendered();
-void displayWebStatsRendered();
-void displaySystemStatusRendered();
-void displayMeshStatusRendered();
-void displayConnectedSensorsRendered();
-void displaySensorMenu();
-
 // OLED state variables (defined here, used by .ino and this file)
 // Initial mode will be set based on oledRequireAuth setting during initialization
 OLEDMode currentOLEDMode = OLED_SYSTEM_STATUS;
@@ -3118,119 +3090,44 @@ void updateOLEDDisplay() {
     }
 
     switch (currentOLEDMode) {
-      case OLED_MENU:
-        displayMenuListStyle();  // List style is now the only option
-        break;
-
-      case OLED_SENSOR_MENU:
-        displaySensorMenu();
-        break;
-
-      case OLED_SYSTEM_STATUS:
-        displaySystemStatusRendered();
-        break;
-
-      case OLED_SENSOR_DATA:
-        displaySensorData();
-        break;
-
-      case OLED_SENSOR_LIST:
-      case OLED_BOOT_SENSORS:
-        displayConnectedSensorsRendered();
-        break;
-
+      // OLED_MENU handled by registered mode in OLED_Mode_Menu.cpp
+      // OLED_SENSOR_MENU handled by registered mode in OLED_Mode_Menu.cpp
+      // OLED_SYSTEM_STATUS handled by registered mode in OLED_Mode_System.cpp
+      // OLED_SENSOR_DATA handled by registered mode in OLED_Mode_Sensors.cpp
+      // OLED_SENSOR_LIST / OLED_BOOT_SENSORS handled by registered mode in OLED_Mode_Sensors.cpp
       // OLED_THERMAL_VISUAL handled by registered mode in Sensor_Thermal_MLX90640.cpp
+      // OLED_NETWORK_INFO handled by registered mode in OLED_Mode_Network.cpp
+      // OLED_MESH_STATUS handled by registered mode in OLED_Mode_Network.cpp
+      // OLED_CUSTOM_TEXT handled by registered mode in OLED_Mode_System.cpp
+      // OLED_UNAVAILABLE handled by registered mode in OLED_Mode_System.cpp
 
-      case OLED_NETWORK_INFO:
-        displayNetworkInfoRendered();
-        break;
-
-      case OLED_MESH_STATUS:
-        displayMeshStatusRendered();
-        break;
-
-      case OLED_CUSTOM_TEXT:
-        displayCustomText();
-        break;
-
-      case OLED_UNAVAILABLE:
-        displayUnavailable();
-        break;
-
-      case OLED_LOGO:
-        displayLogo();
-        break;
-
-      case OLED_ANIMATION:
-        displayAnimation();
-        break;
-
+      // OLED_LOGO handled by registered mode in OLED_Mode_Menu.cpp
+      // OLED_ANIMATION handled by registered mode in OLED_Mode_Animations.cpp
       // OLED_IMU_ACTIONS handled by registered mode in Sensor_IMU_BNO055.cpp
-
       // OLED_GPS_DATA handled by registered mode in Sensor_GPS_PA1010D.cpp
-
       // OLED_FM_RADIO handled by registered mode in fm_radio.cpp
+      // OLED_FILE_BROWSER handled by registered mode in OLED_Mode_FileBrowser.cpp
 
-      case OLED_FILE_BROWSER:
-        displayFileBrowserRendered();
-        break;
-
-#if ENABLE_AUTOMATION
-      case OLED_AUTOMATIONS:
-        displayAutomations();
-        break;
-#else
+#if !ENABLE_AUTOMATION
       case OLED_AUTOMATIONS:
         enterUnavailablePage("Automations", "Not compiled");
         break;
 #endif
+      // When ENABLE_AUTOMATION is set, OLED_AUTOMATIONS is handled by registered mode in OLED_Mode_Automations.cpp
 
-      case OLED_ESPNOW:
-        displayEspNow();
-        break;
-
+      // OLED_ESPNOW handled by registered mode in OLED_Mode_Network.cpp
       // OLED_TOF_DATA handled by registered mode in Sensor_ToF_VL53L4CX.cpp
-
-      case OLED_APDS_DATA:
-#if ENABLE_APDS_SENSOR
-        displayAPDSData();
-#endif
-        break;
-
-      case OLED_POWER:
-        displayPower();
-        break;
-        
-      case OLED_POWER_CPU:
-        displayPowerCPU();
-        break;
-        
-      case OLED_POWER_SLEEP:
-        displayPowerSleep();
-        break;
-
-      case OLED_MEMORY_STATS:
-        displayMemoryStatsRendered();
-        break;
-
-      case OLED_WEB_STATS:
-        displayWebStatsRendered();
-        break;
-      
-      case OLED_REMOTE:
-#if ENABLE_ESPNOW
-        displayRemoteMode();
-#endif
-        break;
-
-      case OLED_NOTIFICATIONS:
-        displayNotifications();
-        break;
+      // OLED_APDS_DATA handled by registered mode in i2csensor-apds9960-oled.h
+      // OLED_POWER / OLED_POWER_CPU / OLED_POWER_SLEEP handled by registered mode in OLED_Mode_Power.cpp
+      // OLED_MEMORY_STATS handled by registered mode in OLED_Mode_System.cpp
+      // OLED_WEB_STATS handled by registered mode in OLED_Mode_Network.cpp
+      // OLED_REMOTE handled by registered mode in OLED_Mode_Remote.cpp
+      // OLED_NOTIFICATIONS handled by registered mode in OLED_Utils.cpp
 
       case OLED_OFF:
         contentDrawn = false;  // OLED_OFF intentionally draws nothing
         break;
-        
+
       default:
         // Check registered modes for any mode not handled above
         {
@@ -3240,7 +3137,7 @@ void updateOLEDDisplay() {
           } else {
             contentDrawn = false;
             // DEBUG: Log when mode not found - this would cause black screen!
-            Serial.printf("[OLED_RENDER_FAIL] Mode %d not found! render#%lu registeredMode=%p\n", 
+            Serial.printf("[OLED_RENDER_FAIL] Mode %d not found! render#%lu registeredMode=%p\n",
                          (int)currentOLEDMode, renderCount, (void*)registeredMode);
           }
         }
@@ -4099,6 +3996,7 @@ void processOLEDBootSequence() {
 // ============================================================================
 
 // Category menu items (top level)
+// Columns: name, iconName, targetMode (used as category ID)
 const OLEDMenuItem oledMenuCategories[] = {
   { "System",       "notify_system",     (OLEDMode)0 },  // Category ID 0
   { "Config",       "settings",          (OLEDMode)1 },  // Category ID 1
@@ -4110,6 +4008,7 @@ const OLEDMenuItem oledMenuCategories[] = {
 const int oledMenuCategoryCount = sizeof(oledMenuCategories) / sizeof(oledMenuCategories[0]);
 
 // System & Diagnostics category items
+// Columns: name, iconName, targetMode
 const OLEDMenuItem oledMenuCategory0[] = {
   { "Status",     "notify_system",     OLED_SYSTEM_STATUS },
   { "Memory",     "memory",            OLED_MEMORY_STATS },
@@ -4120,6 +4019,7 @@ const OLEDMenuItem oledMenuCategory0[] = {
 const int oledMenuCategory0Count = sizeof(oledMenuCategory0) / sizeof(oledMenuCategory0[0]);
 
 // Configuration category items
+// Columns: name, iconName, targetMode
 const OLEDMenuItem oledMenuCategory1[] = {
   { "Settings",   "settings",          OLED_SETTINGS },
   { "Login",      "user",              OLED_LOGIN },
@@ -4131,6 +4031,7 @@ const OLEDMenuItem oledMenuCategory1[] = {
 const int oledMenuCategory1Count = sizeof(oledMenuCategory1) / sizeof(oledMenuCategory1[0]);
 
 // Connectivity category items
+// Columns: name, iconName, targetMode
 const OLEDMenuItem oledMenuCategory2[] = {
 #if ENABLE_WIFI
   { "Network",    "notify_server",     OLED_NETWORK_INFO },
@@ -4151,6 +4052,7 @@ const OLEDMenuItem oledMenuCategory2[] = {
 const int oledMenuCategory2Count = sizeof(oledMenuCategory2) / sizeof(oledMenuCategory2[0]);
 
 // Hardware & Sensors category items
+// Columns: name, iconName, targetMode
 const OLEDMenuItem oledMenuCategory3[] = {
 #if ENABLE_I2C_SYSTEM || ENABLE_CAMERA_SENSOR || ENABLE_MICROPHONE_SENSOR
   { "Sensors",    "notify_sensor",     OLED_SENSOR_MENU },
@@ -4168,6 +4070,7 @@ const OLEDMenuItem oledMenuCategory3[] = {
 const int oledMenuCategory3Count = sizeof(oledMenuCategory3) / sizeof(oledMenuCategory3[0]);
 
 // Automation & Tools category items
+// Columns: name, iconName, targetMode
 const OLEDMenuItem oledMenuCategory4[] = {
 #if ENABLE_AUTOMATION
   { "Automations","notify_automation", OLED_AUTOMATIONS },
@@ -4177,12 +4080,14 @@ const OLEDMenuItem oledMenuCategory4[] = {
 const int oledMenuCategory4Count = sizeof(oledMenuCategory4) / sizeof(oledMenuCategory4[0]);
 
 // Power & Display category items
+// Columns: name, iconName, targetMode
 const OLEDMenuItem oledMenuCategory5[] = {
   { "Power",      "power",             OLED_POWER },
 };
 const int oledMenuCategory5Count = sizeof(oledMenuCategory5) / sizeof(oledMenuCategory5[0]);
 
 // Sensor submenu items (extern const for external linkage)
+// Columns: name, iconName, targetMode
 extern const OLEDMenuItem oledSensorMenuItems[] = {
   { "Data",       "notify_sensor",     OLED_SENSOR_DATA },
   { "List",       "notify_sensor",     OLED_SENSOR_LIST },
@@ -6069,6 +5974,7 @@ bool oledFileBrowserNeedsInit = true;
 // OLED Command Registry
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry oledCommands[] = {
   { "openoled", "Start OLED display.", false, cmd_oledstart },
   { "closeoled", "Stop OLED display.", false, cmd_oledstop },
@@ -6083,7 +5989,7 @@ const CommandEntry oledCommands[] = {
   { "oledanim", "Select animation: <name> or fps <1-60>", false, cmd_oledanim },
   { "oledclear", "Clear OLED display.", false, cmd_oledclear },
   { "oledstatus", "Show OLED status.", false, cmd_oledstatus },
-  { "oledrequireauth", "OLED auth requirement: <0|1>", false, cmd_oled_requireauth },
+  { "oledrequireauth", "OLED auth requirement: <0|1>", true, cmd_oled_requireauth },
   { "oledenabled", "Enable/disable OLED: <0|1>", false, cmd_oled_enabled },
   { "oledbootmode", "OLED boot mode: <logo|status|thermal|off>", false, cmd_oled_bootmode },
   { "oleddefaultmode", "OLED default mode: <status|thermal|off>", false, cmd_oled_defaultmode },

@@ -340,6 +340,7 @@ void buildStateChangeJson(String& output) {
 // Settings Module Definition
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry edgeImpulseSettingEntries[] = {
   { "enabled", SETTING_BOOL, &gSettings.edgeImpulseEnabled, 0, 0, nullptr, 0, 1, "Enable Inference", nullptr },
   { "requireLabels", SETTING_BOOL, &gSettings.edgeImpulseRequireLabels, 1, 0, nullptr, 0, 1, "Require Labels", nullptr },
@@ -350,6 +351,7 @@ static const SettingEntry edgeImpulseSettingEntries[] = {
   { "intervalMs", SETTING_INT, &gSettings.edgeImpulseIntervalMs, 1000, 0, nullptr, 100, 10000, "Interval (ms)", nullptr }
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule edgeImpulseSettingsModule = {
   "edgeimpulse",
   "edgeimpulse",
@@ -1903,7 +1905,7 @@ void buildDetectionJson(const EIResults& results, String& output) {
 #if ENABLE_HTTP_SERVER
 
 #include "WebServer_Server.h"
-#include "System_Auth.h"
+#include "System_User.h"
 
 // Organize EI model files: move loose .tflite and .labels.txt into proper /EI Models/<name>/ folders
 static esp_err_t handleEIOrganize(httpd_req_t* req) {
@@ -2444,6 +2446,7 @@ const char* cmd_ei_track_clear(const String& argsInput) {
 // Command Registration
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry edgeImpulseCommands[] = {
   { "ei", "Edge Impulse ML inference commands.", false, cmd_ei, "Usage: ei <subcommand>" },
   { "ei enable", "Enable/disable Edge Impulse inference.", false, cmd_ei_enable, "Usage: ei enable <0|1>" },

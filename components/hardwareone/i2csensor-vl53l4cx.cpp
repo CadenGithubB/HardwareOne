@@ -608,6 +608,7 @@ const char* cmd_tofautostart(const String& argsInput) {
   return "Usage: tofautostart [on|off]";
 }
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry tofCommands[] = {
   // Start/Stop/Read (3-level voice: "sensor" -> "time of flight" -> "open/close")
   { "opentof", "Start VL53L4CX ToF sensor.", false, cmd_tofstart, nullptr, "sensor", "time of flight", "open" },
@@ -758,6 +759,7 @@ void tofTask(void* parameter) {
 // ToF Settings Module (for modular settings registry)
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry tofSettingEntries[] = {
   { "tofAutoStart",          SETTING_BOOL, &gSettings.tofAutoStart,          0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   { "tofPollingMs",          SETTING_INT,  &gSettings.tofPollingMs,          220, 0, nullptr, 50, 5000, "Polling (ms)", nullptr },
@@ -772,6 +774,7 @@ static bool isToFConnected() {
   return tofConnected;
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule tofSettingsModule = {
   "tof",
   "tof_vl53l4cx",

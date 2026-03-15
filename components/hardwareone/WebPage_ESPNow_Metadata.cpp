@@ -3,8 +3,6 @@
 #if ENABLE_WEB_ESPNOW && ENABLE_ESPNOW
 
 #include <Arduino.h>
-#include <LittleFS.h>
-#include <ArduinoJson.h>
 
 #include "System_Debug.h"
 #include "System_User.h"
@@ -17,7 +15,6 @@
 // External declarations
 extern MeshPeerMeta* gMeshPeerMeta;
 extern int gMeshPeerSlots;
-extern bool filesystemReady;
 
 /**
  * @brief Get device metadata (smart home info) for a specific MAC address
@@ -124,59 +121,7 @@ esp_err_t handleEspNowMetadata(httpd_req_t* req) {
     return ESP_OK;
   }
   
-  // Try to load from cached settings (bond mode)
-  if (filesystemReady) {
-    char macStr[18];
-    snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
-             targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
-    char settingsPathBuf[64];
-    snprintf(settingsPathBuf, sizeof(settingsPathBuf), "/system/espnow/peers/%s/settings.json", macStr);
-    String settingsPath = settingsPathBuf;
-    
-    if (LittleFS.exists(settingsPath.c_str())) {
-      File f = LittleFS.open(settingsPath.c_str(), "r");
-      if (f) {
-        String settingsJson = f.readString();
-        f.close();
-        
-        // Parse cached settings
-        DynamicJsonDocument doc(1024);
-        DeserializationError err = deserializeJson(doc, settingsJson);
-        if (!err) {
-          // Extract metadata fields
-          const char* deviceName = doc["espnowDeviceName"] | "";
-          const char* friendlyName = doc["espnowFriendlyName"] | "";
-          const char* room = doc["espnowRoom"] | "";
-          const char* zone = doc["espnowZone"] | "";
-          const char* tags = doc["espnowTags"] | "";
-          bool stationary = doc["espnowStationary"] | false;
-          
-          char json[512];
-          snprintf(json, sizeof(json),
-                   "{\"found\":true,"
-                   "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
-                   "\"deviceName\":\"%s\","
-                   "\"friendlyName\":\"%s\","
-                   "\"room\":\"%s\","
-                   "\"zone\":\"%s\","
-                   "\"tags\":\"%s\","
-                   "\"stationary\":%s,"
-                   "\"source\":\"cached\"}",
-                   targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5],
-                   deviceName,
-                   friendlyName,
-                   room,
-                   zone,
-                   tags,
-                   stationary ? "true" : "false");
-          httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
-          return ESP_OK;
-        }
-      }
-    }
-  }
-  
-  // Not found
+  // Not found in gMeshPeerMeta
   httpd_resp_send(req, "{\"found\":false}", HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }

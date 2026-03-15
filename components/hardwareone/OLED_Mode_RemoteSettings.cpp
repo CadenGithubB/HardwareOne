@@ -143,11 +143,6 @@ static const OLEDModeEntry remoteSettingsModeEntry = {
   nullptr   // hints
 };
 
-// Register remote settings mode
-static void registerRemoteSettingsMode() __attribute__((constructor));
-static void registerRemoteSettingsMode() {
-  extern void registerOLEDMode(const OLEDModeEntry* entry);
-  registerOLEDMode(&remoteSettingsModeEntry);
-}
+REGISTER_OLED_MODE_MODULE(&remoteSettingsModeEntry, 1, "RemoteSettings");
 
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE

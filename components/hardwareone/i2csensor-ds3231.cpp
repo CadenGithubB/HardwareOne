@@ -736,6 +736,7 @@ float getRTCTemperature() {
 #include "System_Settings.h"
 
 // RTC settings entries
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry rtcSettingEntries[] = {
   { "rtcAutoStart", SETTING_BOOL, &gSettings.rtcAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   { "rtcTimeHasBeenSet", SETTING_BOOL, &gSettings.rtcTimeHasBeenSet, 0, 0, nullptr, 0, 1, "RTC time has been set (NTP/manual)", nullptr }
@@ -745,6 +746,7 @@ static bool isRTCConnectedSetting() {
   return rtcConnected;
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule rtcSettingsModule = {
   "rtc",
   "rtc_ds3231",
@@ -777,12 +779,13 @@ const char* cmd_rtcautostart(const String& argsInput) {
   return "Usage: rtcautostart [on|off]";
 }
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry rtcCommands[] = {
   { "openrtc",  "Start DS3231 RTC sensor.",                    false, cmd_rtcstart, nullptr, "sensor", "clock", "open" },
   { "closertc", "Stop DS3231 RTC sensor.",                     false, cmd_rtcstop,  nullptr, "sensor", "clock", "close" },
   { "rtcread",   "Read RTC status [status|temp]",               false, cmd_rtc,      "Usage: rtcread [status|temp]" },
-  { "rtcset",   "Set RTC time: <datetime|timestamp>",          false, cmd_rtcset,   "Usage: rtcset YYYY-MM-DD HH:MM:SS  or  rtcset <unix_timestamp>" },
-  { "rtcsync",  "Sync time: [to|from]",                        false, cmd_rtcsync,  "Usage: rtcsync [to|from] (to=RTC->system, from=system->RTC)" },
+  { "rtcset",   "Set RTC time: <datetime|timestamp>",          true,  cmd_rtcset,   "Usage: rtcset YYYY-MM-DD HH:MM:SS  or  rtcset <unix_timestamp>" },
+  { "rtcsync",  "Sync time: [to|from]",                        true,  cmd_rtcsync,  "Usage: rtcsync [to|from] (to=RTC->system, from=system->RTC)" },
   
   // Auto-start
   { "rtcautostart", "Enable/disable RTC auto-start after boot [on|off]", false, cmd_rtcautostart, "Usage: rtcautostart [on|off]" },

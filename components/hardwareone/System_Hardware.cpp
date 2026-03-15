@@ -85,6 +85,7 @@ const char* cmd_hardwareled_startupduration(const String& argsInput) {
 // Command Registration
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 extern const CommandEntry hardwareCommands[] = {
   { "hardwareledbrightness",    "Set LED brightness 0-100.",                      false, cmd_hardwareled_brightness,    "Usage: hardwareledbrightness <0..100>" },
   { "hardwareledstartupenabled","Enable/disable LED startup effect [0|1].",        false, cmd_hardwareled_startupenabled,"Usage: hardwareledstartupenabled <0|1>" },

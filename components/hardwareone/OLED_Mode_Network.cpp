@@ -1212,8 +1212,12 @@ REGISTER_OLED_MODE_MODULE(remoteSensorsOLEDModes, sizeof(remoteSensorsOLEDModes)
 // Network Mode Registration
 // ============================================================================
 
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry sNetworkModes[] = {
-  { OLED_NETWORK_INFO, "Network", "wifi", displayNetworkInfo, nullptr, networkRegisteredInputHandler, false, -1, nullptr },
+  { OLED_NETWORK_INFO, "Network", "wifi", displayNetworkInfoRendered, nullptr, networkRegisteredInputHandler, false, -1, nullptr  },  // dynamic hints
+  { OLED_MESH_STATUS,  "Mesh",    "wifi", displayMeshStatusRendered, nullptr, nullptr,                  false, -1, "B:Back" },
+  { OLED_WEB_STATS,    "Web",     "web",  displayWebStatsRendered,   nullptr, nullptr,                  false, -1, nullptr  },  // dynamic hints
+  { OLED_ESPNOW,       "ESP-NOW", "notify_espnow", displayEspNow, nullptr, nullptr,                     false, -1, nullptr  },  // dynamic hints
 };
 
 REGISTER_OLED_MODE_MODULE(sNetworkModes, sizeof(sNetworkModes) / sizeof(sNetworkModes[0]), "Network");

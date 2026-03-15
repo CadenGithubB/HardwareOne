@@ -470,4 +470,17 @@ void displaySystemStatusRendered() {
   oledDisplay->println("m");
 }
 
+// ============================================================================
+// Mode Registration
+// ============================================================================
+
+static const OLEDModeEntry sSystemModes[] = {
+  { OLED_SYSTEM_STATUS, "System",    "settings", displaySystemStatusRendered, nullptr, nullptr, false, -1, "B:Back" },
+  { OLED_CUSTOM_TEXT,   "Text",      "text",     displayCustomText,           nullptr, nullptr, false, -1, "B:Back" },
+  { OLED_MEMORY_STATS,  "Memory",    "memory",   displayMemoryStatsRendered,  nullptr, nullptr, false, -1, "B:Back" },
+  { OLED_UNAVAILABLE,   "Unavail",   nullptr,    displayUnavailable,          nullptr, nullptr, false, -1, nullptr  },  // dynamic hints
+};
+
+REGISTER_OLED_MODE_MODULE(sSystemModes, sizeof(sSystemModes) / sizeof(sSystemModes[0]), "System");
+
 #endif // ENABLE_OLED_DISPLAY
