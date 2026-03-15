@@ -1127,6 +1127,7 @@ const char* cmd_micautostart(const String& argsInput) {
 }
 
 // Command registry
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry micCommands[] = {
   { "micread", "Read microphone sensor status.", false, cmd_mic, "Usage: micread" },
   { "openmic", "Start microphone sensor.", false, cmd_micstart, nullptr, "sensor", "microphone", "open" },
@@ -1135,7 +1136,7 @@ const CommandEntry micCommands[] = {
   { "micviz", "Real-time audio level visualizer.", false, cmd_micviz, "Usage: micviz (press any key to stop)" },
   { "micrecord", "Start/stop recording to WAV file.", false, cmd_micrecord, "Usage: micrecord <start|stop>" },
   { "miclist", "List saved recordings.", false, cmd_miclist, "Usage: miclist" },
-  { "micdelete", "Delete recording(s).", false, cmd_micdelete, "Usage: micdelete <filename|all>" },
+  { "micdelete", "Delete recording(s).", true, cmd_micdelete, "Usage: micdelete <filename|all>" },
   { "micsamplerate", "Get/set sample rate.", false, cmd_micsamplerate, "Usage: micsamplerate [8000-48000]" },
   { "micgain", "Get/set microphone gain.", false, cmd_micgain, "Usage: micgain [0-100]" },
   { "micbitdepth", "Get/set bit depth.", false, cmd_micbitdepth, "Usage: micbitdepth [16|32]" },
@@ -1147,6 +1148,7 @@ const CommandEntry micCommands[] = {
 const size_t micCommandsCount = sizeof(micCommands) / sizeof(micCommands[0]);
 
 // Settings module registration
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry micSettingEntries[] = {
   { "microphoneAutoStart", SETTING_BOOL, &gSettings.microphoneAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
 };
@@ -1156,6 +1158,7 @@ static bool isMicConnected() {
   return micConnected;
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule micSettingsModule = {
   "microphone",
   "microphone",

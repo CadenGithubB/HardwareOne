@@ -10,6 +10,7 @@
 // OLED Settings Module (for modular settings registry)
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry oledSettingEntries[] = {
   { "oledEnabled",          SETTING_BOOL,   &gSettings.oledEnabled,             false, 0, nullptr, 0, 1, "OLED Enabled", nullptr },
   { "oledRequireAuth",      SETTING_BOOL,   &gSettings.localDisplayRequireAuth, true, 0, nullptr, 0, 1, "Require Authentication", nullptr },
@@ -22,6 +23,7 @@ static const SettingEntry oledSettingEntries[] = {
   { "oledThermalColorMode", SETTING_STRING, &gSettings.oledThermalColorMode,    0, 0, "3level", 0, 0, "Thermal Color Mode", "3level,grayscale,binary" }
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule oledSettingsModule = {
   "oled", "oled_ssd1306", oledSettingEntries,
   sizeof(oledSettingEntries) / sizeof(oledSettingEntries[0])

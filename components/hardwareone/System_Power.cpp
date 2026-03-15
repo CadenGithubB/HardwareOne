@@ -235,6 +235,7 @@ const char* cmd_power(const String& argsInput) {
 }
 
 // Command table
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry powerCommands[] = {
   {"power", "Power management [mode] [auto] [threshold]", false, cmd_power, "Usage: power [mode <0-3>] [auto <on|off>] [threshold <percent>]"}
 };
@@ -250,6 +251,7 @@ static bool isPowerModuleConnected() {
   return true;  // Power management always available
 }
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry powerSettingEntries[] = {
   { "mode",             SETTING_INT,  &gSettings.powerMode,             0, 0, nullptr, 0, 3, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver" },
   { "autoMode",         SETTING_BOOL, &gSettings.powerAutoMode,         false, 0, nullptr, 0, 1, "Auto Mode", nullptr },
@@ -257,6 +259,7 @@ static const SettingEntry powerSettingEntries[] = {
   { "displayDimLevel",  SETTING_INT,  &gSettings.powerDisplayDimLevel,  30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr }
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule powerSettingsModule = {
   "power",
   "power",

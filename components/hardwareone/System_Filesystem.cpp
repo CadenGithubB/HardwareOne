@@ -535,6 +535,7 @@ const char* cmd_filedelete(const String& argsInput) {
 // Filesystem Command Registry
 // ============================================================================
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry filesystemCommands[] = {
   { "files", "List files [path]", true, cmd_files,
     "files [path]        - List files in LittleFS (default '/')\n"
@@ -576,6 +577,7 @@ struct PathRule {
   bool        adminOnly; // true = requires admin role to access
 };
 
+// Columns: path (prefix or exact), perms (PERM_* bitmask), exactMatch, adminOnly
 static const PathRule sPathRules[] = {
   // ---- Sensitive credentials: no access ----
   {"/system/users/user_settings",       0,                                          false, true},

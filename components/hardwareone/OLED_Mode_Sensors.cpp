@@ -382,4 +382,16 @@ bool sensorDataInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   return false;
 }
 
+// ============================================================================
+// Mode Registration
+// ============================================================================
+
+static const OLEDModeEntry sSensorModes[] = {
+  { OLED_SENSOR_DATA,  "Sensor Data", "notify_sensor", displaySensorData,              nullptr, sensorDataInputHandler, false, -1, "B:Back" },
+  { OLED_SENSOR_LIST,  "Sensor List", "notify_sensor", displayConnectedSensorsRendered, nullptr, nullptr,               false, -1, "B:Back" },
+  { OLED_BOOT_SENSORS, "Boot",        "notify_sensor", displayConnectedSensorsRendered, nullptr, nullptr,               false, -1, "B:Back" },
+};
+
+REGISTER_OLED_MODE_MODULE(sSensorModes, sizeof(sSensorModes) / sizeof(sSensorModes[0]), "Sensors");
+
 #endif // ENABLE_OLED_DISPLAY

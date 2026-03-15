@@ -62,24 +62,11 @@ struct RemoteSensorData {
 extern RemoteSensorData gRemoteSensorCache[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
 
 // ==========================
-// ESP-NOW Sensor Message Types
-// ==========================
-
-#define MSG_TYPE_SENSOR_STATUS "SENSOR_STATUS"
-#define MSG_TYPE_SENSOR_DATA "SENSOR_DATA"
-
-// ==========================
 // Remote Sensor Functions
 // ==========================
 
 // Initialize remote sensor system (master only)
 void initRemoteSensorSystem();
-
-// Handle incoming sensor status message
-void handleSensorStatusMessage(const uint8_t* senderMac, const String& deviceName, const String& message);
-
-// Handle incoming sensor data message
-void handleSensorDataMessage(const uint8_t* senderMac, const String& deviceName, const String& message);
 
 // Broadcast sensor status change (worker → master)
 void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled);

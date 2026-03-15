@@ -1538,6 +1538,7 @@ const char* cmd_camerasave(const String& argsInput) {
 }
 
 // Command registry
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry cameraCommands[] = {
   {"cameraread",       "Read camera status",              false, cmd_camera},
   {"opencamera",       "Start camera sensor.",            false, cmd_camerastart, nullptr, "sensor", "camera", "open"},
@@ -1574,6 +1575,7 @@ const CommandEntry cameraCommands[] = {
   {"cameratargetdevice",    "Target device: <name>",      true,  cmd_cameratargetdevice},
 };
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry cameraSettingEntries[] = {
   { "cameraAutoStart",          SETTING_BOOL,   &gSettings.cameraAutoStart,              0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   { "cameraFramesize",          SETTING_INT,    &gSettings.cameraFramesize,              1, 0, nullptr, 0, 5, "Resolution",
@@ -1606,6 +1608,7 @@ static bool isCameraConnected() {
   return cameraConnected;
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule cameraSettingsModule = {
   "camera",
   "camera",

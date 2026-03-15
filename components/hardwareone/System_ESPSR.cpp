@@ -11,7 +11,7 @@
 #include "System_Mutex.h"
 #include "System_Command.h"
 #include "System_CLI.h"
-#include "System_Auth.h"
+#include "System_User.h"
 #include <ctype.h>
 #include <math.h>
 #include "esp_timer.h"
@@ -1294,6 +1294,7 @@ struct AutoTuneConfig {
   const char* description;
 };
 
+// Columns: afeGain, dynGainMax, dynGainEnabled, description
 static const AutoTuneConfig kAutoTuneConfigs[] = {
   { 1.0f, 2.5f, true,  "Baseline: gain=1.0, dyngain max=2.5" },
   { 2.0f, 2.0f, true,  "Higher input: gain=2.0, dyngain max=2.0" },
@@ -3777,6 +3778,7 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
   return "Unknown config key. Use: pre_ms, max_ms, dest";
 }
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry espsrCommands[] = {
   { "sr", "ESP-SR speech recognition commands.", false, cmd_sr, "Usage: sr <enable|start|stop|status|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>" },
   { "sr enable", "Enable/disable ESP-SR (compile-time flag).", true, cmd_sr_enable, "Usage: sr enable <0|1>" },
@@ -3838,12 +3840,14 @@ static bool isESPSRConnected() {
   return gESPSRInitialized;
 }
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry espsrSettingsEntries[] = {
   { "srAutoStart",      SETTING_BOOL, &gSettings.srAutoStart,      0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr },
   { "srModelSource",    SETTING_INT,  &gSettings.srModelSource,    0, 0, nullptr, 0, 2, "Model source (0=partition, 1=SD, 2=LittleFS)", nullptr },
   { "srCommandTimeout", SETTING_INT,  &gSettings.srCommandTimeout, 6000, 0, nullptr, 1000, 30000, "Command timeout (ms)", nullptr }
 };
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule espsrSettingsModule = {
   "espsr",
   "espsr",

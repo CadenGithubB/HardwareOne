@@ -11,7 +11,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
-#include "System_Auth.h"
+#include "System_User.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Settings.h"
@@ -357,8 +357,9 @@ static const OLEDModeEntry setPatternModeEntry = {
   nullptr  // hints
 };
 
-static OLEDModeRegistrar _oled_mode_registrar_setpattern(&setPatternModeEntry, 1, "GamepadPassword");
+REGISTER_OLED_MODE_MODULE(&setPatternModeEntry, 1, "GamepadPassword");
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 extern const CommandEntry setPatternCommands[] = {
   { "set gamepad password", "Set gamepad joystick password (OLED).", true, cmd_setpattern }
 };

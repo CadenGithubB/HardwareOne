@@ -759,6 +759,7 @@ static const OLEDModeEntry settingsModeEntry = {
 };
 
 // Settings modes array
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry settingsOLEDModes[] = {
   settingsModeEntry
 };

@@ -31,6 +31,7 @@ extern TwoWire Wire1;
 
 // Note: gSettings is declared in settings.h (included above)
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry thermalSettingEntries[] = {
   { "thermalAutoStart",             SETTING_BOOL,   &gSettings.thermalAutoStart,             0,    0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   { "thermalPollingMs",             SETTING_INT,    &gSettings.thermalPollingMs,             250,  0, nullptr, 50, 5000, "Polling (ms)", nullptr },
@@ -56,6 +57,7 @@ static bool isThermalConnected() {
   return thermalConnected;
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule thermalSettingsModule = {
   "thermal",
   "thermal_mlx90640",
@@ -1265,6 +1267,7 @@ const char* cmd_thermalautostart(const String& argsInput) {
   return "Usage: thermalautostart [on|off]";
 }
 
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry thermalCommands[] = {
   // Start/Stop (3-level voice: "sensor" -> "thermal camera" -> "open/close")
   { "openthermal", "Start MLX90640 thermal sensor.", false, cmd_thermalstart, nullptr, "sensor", "thermal camera", "open" },

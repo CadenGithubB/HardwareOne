@@ -955,6 +955,7 @@ const char* cmd_imuautostart(const String& argsInput) {
 
 // IMU Command Registry (Sensor-Specific)
 // ============================================================================
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry imuCommands[] = {
   // Start/Stop (3-level voice: "sensor" -> "motion sensor" -> "open/close")
   { "openimu", "Start BNO055 IMU sensor.", false, cmd_imustart, nullptr, "sensor", "motion sensor", "open" },
@@ -1129,6 +1130,7 @@ void imuTask(void* parameter) {
 // IMU Settings Module (for modular settings registry)
 // ============================================================================
 
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry imuSettingEntries[] = {
   { "imuAutoStart",                    SETTING_BOOL,  &gSettings.imuAutoStart,                    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
   { "imuPollingMs",                    SETTING_INT,   &gSettings.imuPollingMs,                    200, 0, nullptr, 50, 2000, "Polling (ms)", nullptr },
@@ -1147,6 +1149,7 @@ static bool isIMUConnected() {
   return imuConnected;
 }
 
+// Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule imuSettingsModule = {
   "imu",
   "imu_bno055",

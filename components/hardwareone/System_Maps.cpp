@@ -1322,7 +1322,7 @@ bool WaypointManager::loadWaypoints() {
     // Load files array
     _waypoints[i].fileCount = 0;
     memset(_waypoints[i].files, 0, sizeof(_waypoints[i].files));
-    if (wp.containsKey("files")) {
+    if (wp["files"].is<JsonArray>()) {
       JsonArray files = wp["files"].as<JsonArray>();
       for (JsonVariant file : files) {
         if (_waypoints[i].fileCount >= MAX_WAYPOINT_FILES) break;
@@ -1352,11 +1352,11 @@ bool WaypointManager::saveWaypoints() {
   FsLockGuard fsGuard("WaypointManager.saveWaypoints");
   
   PSRAM_JSON_DOC(doc);
-  JsonArray arr = doc.createNestedArray("waypoints");
+  JsonArray arr = doc["waypoints"].to<JsonArray>();
   
   for (int i = 0; i < MAX_WAYPOINTS; i++) {
     if (_waypoints[i].active) {
-      JsonObject wp = arr.createNestedObject();
+      JsonObject wp = arr.add<JsonObject>();
       wp["lat"] = _waypoints[i].lat;
       wp["lon"] = _waypoints[i].lon;
       wp["name"] = _waypoints[i].name;
@@ -1364,7 +1364,7 @@ bool WaypointManager::saveWaypoints() {
       
       // Save files array if any
       if (_waypoints[i].fileCount > 0) {
-        JsonArray files = wp.createNestedArray("files");
+        JsonArray files = wp["files"].to<JsonArray>();
         for (int j = 0; j < _waypoints[i].fileCount && j < MAX_WAYPOINT_FILES; j++) {
           if (_waypoints[i].files[j][0]) {
             files.add(_waypoints[i].files[j]);
@@ -2422,17 +2422,6 @@ static bool organizeMapFromAnyPath(const String& srcPath, String& outErr) {
   }
   if (LittleFS.exists(dstMap)) { outErr = "dst_exists"; return false; }
   if (!LittleFS.rename(srcPath.c_str(), dstMap)) { outErr = "rename_failed"; return false; }
-  char legacyWp1[96], legacyWp2[96];
-  snprintf(legacyWp1, sizeof(legacyWp1), "/maps/waypoints_%s.hwmap.json", base.c_str());
-  snprintf(legacyWp2, sizeof(legacyWp2), "/maps/waypoints_%s.json", base.c_str());
-  const char* legacyWp = LittleFS.exists(legacyWp1) ? legacyWp1 : (LittleFS.exists(legacyWp2) ? legacyWp2 : nullptr);
-  if (legacyWp) {
-    const char* wpName = strrchr(legacyWp, '/');
-    wpName = wpName ? wpName + 1 : legacyWp;
-    char dstWp[128];
-    snprintf(dstWp, sizeof(dstWp), "%s/%s", dstDir, wpName);
-    if (!LittleFS.exists(dstWp)) LittleFS.rename(legacyWp, dstWp);
-  }
   return true;
 }
 
@@ -2496,6 +2485,7 @@ const char* cmd_maporganize(const String& argsInput) {
 }
 
 // Command registry
+// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry mapCommands[] = {
   {"map", "Show current map info", false, cmd_map, nullptr},
   {"mapload", "Load map file: <path>", false, cmd_mapload, nullptr},

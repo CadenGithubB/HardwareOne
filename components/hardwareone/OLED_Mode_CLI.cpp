@@ -304,9 +304,9 @@ static const OLEDModeEntry cliViewerEntry = {
   nullptr  // dynamic hints (shows line count)
 };
 
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry cliViewerModes[] = { cliViewerEntry };
 
-// Register with unique variable name
-static OLEDModeRegistrar _oled_mode_registrar_cli(cliViewerModes, sizeof(cliViewerModes) / sizeof(cliViewerModes[0]), "CLIViewer");
+REGISTER_OLED_MODE_MODULE(cliViewerModes, sizeof(cliViewerModes) / sizeof(cliViewerModes[0]), "CLIViewer");
 
 #endif // ENABLE_OLED_DISPLAY

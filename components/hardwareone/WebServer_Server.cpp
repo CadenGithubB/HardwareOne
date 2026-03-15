@@ -448,16 +448,30 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
   char ipBuf[64];
   getClientIP(req, ipBuf, sizeof(ipBuf));
 
+  // Permanent IP ban — denied unconditionally before any auth processing
+  if (isIpBanned(ipBuf)) {
+    DEBUG_AUTHF("[auth] banned IP %s denied uri=%s", ipBuf, uri);
+    return false;
+  }
+
   if (sid.length() == 0) {
     // No session cookie — try Basic Auth fallback (for API clients like Migration Tool)
     String baUser, baPass;
     bool hdrPresent = false;
     if (decodeBasicAuth(req, baUser, baPass, hdrPresent) && hdrPresent) {
+      // Check lockout before attempting credential validation
+      if (isLoginLocked(ipBuf)) {
+        DEBUG_AUTHF("[auth] Basic Auth blocked — IP %s is locked out", ipBuf);
+        BROADCAST_PRINTF("[auth] basicauth blocked locked ip=%s uri=%.*s", ipBuf, 120, uri);
+        return false;
+      }
       if (isValidUser(baUser, baPass)) {
+        clearLoginAttempts(ipBuf);
         outUser = baUser;
         DEBUG_AUTHF("[auth] Basic Auth OK for user=%s uri=%.*s", baUser.c_str(), 120, uri);
         return true;
       }
+      recordFailedLogin(ipBuf);
       DEBUG_AUTHF("[auth] Basic Auth FAILED for user=%s uri=%.*s", baUser.c_str(), 120, uri);
     }
     BROADCAST_PRINTF("[auth] no session cookie for uri=%.*s", 120, uri);
@@ -641,6 +655,268 @@ bool hasLogoutReason(const char* ip) {
   }
   return false;
 }
+
+// ============================================================================
+// Brute-Force / Login Rate Limiting
+// ============================================================================
+
+EXT_RAM_BSS_ATTR static LoginAttemptEntry sLoginAttempts[MAX_LOGIN_ATTEMPT_ENTRIES];
+
+// Find the entry for the given IP, or a free/oldest slot if createIfMissing is true.
+static LoginAttemptEntry* findLoginEntry(const char* ip, bool createIfMissing = false) {
+  if (!ip || ip[0] == '\0') return nullptr;
+  LoginAttemptEntry* freeSlot = nullptr;
+  LoginAttemptEntry* oldestSlot = nullptr;
+  unsigned long oldestTime = 0xFFFFFFFFUL;
+
+  for (int i = 0; i < MAX_LOGIN_ATTEMPT_ENTRIES; i++) {
+    LoginAttemptEntry* e = &sLoginAttempts[i];
+    if (e->ip[0] != '\0' && strcmp(e->ip, ip) == 0) return e;
+    if (createIfMissing) {
+      if (e->ip[0] == '\0' && !freeSlot) freeSlot = e;
+      if (e->windowStart < oldestTime) { oldestTime = e->windowStart; oldestSlot = e; }
+    }
+  }
+  if (!createIfMissing) return nullptr;
+  LoginAttemptEntry* slot = freeSlot ? freeSlot : oldestSlot;
+  if (slot) memset(slot, 0, sizeof(*slot));
+  return slot;
+}
+
+// Returns the lockout duration in ms for a given cumulative failure count.
+static unsigned long lockoutDurationMs(uint8_t count) {
+  if (count >= LOGIN_LOCKOUT_TIER3_COUNT) return LOGIN_LOCKOUT_TIER3_MS;
+  if (count >= LOGIN_LOCKOUT_TIER2_COUNT) return LOGIN_LOCKOUT_TIER2_MS;
+  if (count >= LOGIN_LOCKOUT_TIER1_COUNT) return LOGIN_LOCKOUT_TIER1_MS;
+  return 0;
+}
+
+bool isLoginLocked(const char* ip, unsigned long* remainingMs) {
+  if (remainingMs) *remainingMs = 0;
+  LoginAttemptEntry* e = findLoginEntry(ip);
+  if (!e || e->ip[0] == '\0') return false;
+
+  unsigned long now = millis();
+
+  // Expire the entire window if it has rolled over
+  if (e->windowStart > 0 && (now - e->windowStart) > LOGIN_ATTEMPT_WINDOW_MS) {
+    memset(e, 0, sizeof(*e));
+    return false;
+  }
+
+  if (e->lockedUntil == 0) return false;
+
+  if ((long)(now - e->lockedUntil) >= 0) {
+    // Lockout timer has elapsed — clear it but keep failCount so next failure
+    // immediately re-locks at the same (or next) tier
+    e->lockedUntil = 0;
+    return false;
+  }
+
+  if (remainingMs) *remainingMs = e->lockedUntil - now;
+  return true;
+}
+
+void recordFailedLogin(const char* ip) {
+  if (!ip || ip[0] == '\0') return;
+  unsigned long now = millis();
+
+  LoginAttemptEntry* e = findLoginEntry(ip, /*createIfMissing=*/true);
+  if (!e) return;
+
+  // If entry is new or its window has expired, start a fresh window
+  if (e->ip[0] == '\0' || (e->windowStart > 0 && (now - e->windowStart) > LOGIN_ATTEMPT_WINDOW_MS)) {
+    memset(e, 0, sizeof(*e));
+    strncpy(e->ip, ip, sizeof(e->ip) - 1);
+    e->windowStart = now;
+  }
+
+  e->failCount++;
+  unsigned long lockMs = lockoutDurationMs(e->failCount);
+  if (lockMs > 0) {
+    e->lockedUntil = now + lockMs;
+    DEBUG_AUTHF("[brute] IP=%s failures=%d locked=%lus", ip, (int)e->failCount, lockMs / 1000UL);
+    BROADCAST_PRINTF("[auth] login locked ip=%s failures=%d duration=%lus", ip, (int)e->failCount, lockMs / 1000UL);
+  } else {
+    DEBUG_AUTHF("[brute] IP=%s failures=%d (below lockout threshold)", ip, (int)e->failCount);
+  }
+}
+
+void clearLoginAttempts(const char* ip) {
+  LoginAttemptEntry* e = findLoginEntry(ip);
+  if (e) {
+    DEBUG_AUTHF("[brute] cleared attempt record for IP=%s (successful login)", ip);
+    memset(e, 0, sizeof(*e));
+  }
+}
+
+// ============================================================================
+// IP Ban List
+// ============================================================================
+
+EXT_RAM_BSS_ATTR static IpBanEntry sIpBans[MAX_IP_BANS];
+static bool sIpBansLoaded = false;
+// Forward declaration — defined below after session helpers
+void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg);
+
+void loadIpBans() {
+  memset(sIpBans, 0, sizeof(sIpBans));
+  sIpBansLoaded = true;
+  if (!filesystemReady || !LittleFS.exists(IP_BANS_FILE)) return;
+
+  FsLockGuard guard("ipbans.load");
+  File f = LittleFS.open(IP_BANS_FILE, "r");
+  if (!f) return;
+
+  PSRAM_JSON_DOC(doc);
+  DeserializationError err = deserializeJson(doc, f);
+  f.close();
+  if (err) { DEBUG_AUTHF("[ipban] load error: %s", err.c_str()); return; }
+
+  JsonArray bans = doc["bans"];
+  int count = 0;
+  for (JsonObject ban : bans) {
+    if (count >= MAX_IP_BANS) break;
+    const char* ipRaw = ban["ip"] | "";
+    if (ipRaw[0] == '\0') continue;
+
+    // Decrypt IP — all entries on disk are AES-encrypted
+    String ipStr;
+    if (strncmp(ipRaw, "AES:", 4) == 0) {
+      ipStr = decryptString(String(ipRaw));
+      if (ipStr.length() == 0) {
+        DEBUG_AUTHF("[ipban] load: decryption failed for entry %d, skipping", count);
+        continue;
+      }
+    } else {
+      // Plain-text entry (written before encryption was added) — accept but
+      // it will be re-encrypted on the next saveIpBans()
+      DEBUG_AUTHF("[ipban] load: plain-text IP found (will re-encrypt on next save)");
+      ipStr = String(ipRaw);
+    }
+
+    strncpy(sIpBans[count].ip, ipStr.c_str(), sizeof(sIpBans[count].ip) - 1);
+    const char* reason = ban["reason"] | "";
+    strncpy(sIpBans[count].reason, reason, sizeof(sIpBans[count].reason) - 1);
+    sIpBans[count].bannedAt = ban["bannedAt"] | 0UL;
+    count++;
+  }
+  DEBUG_AUTHF("[ipban] loaded %d ban(s)", count);
+  if (count > 0) { BROADCAST_PRINTF("[auth] loaded %d IP ban(s) from flash", count); }
+}
+
+static bool saveIpBans() {
+  if (!filesystemReady) return false;
+
+  PSRAM_JSON_DOC(doc);
+  JsonArray bans = doc["bans"].to<JsonArray>();
+  for (int i = 0; i < MAX_IP_BANS; i++) {
+    if (sIpBans[i].ip[0] == '\0') continue;
+    // Encrypt IP before writing to disk — never store plain-text
+    String encryptedIp = encryptString(String(sIpBans[i].ip));
+    if (encryptedIp.length() == 0) {
+      DEBUG_AUTHF("[ipban] save: encryption failed for entry %d, skipping", i);
+      continue;
+    }
+    JsonObject ban = bans.add<JsonObject>();
+    ban["ip"]       = encryptedIp;
+    ban["reason"]   = sIpBans[i].reason;
+    ban["bannedAt"] = sIpBans[i].bannedAt;
+  }
+
+  FsLockGuard guard("ipbans.save");
+  File f = LittleFS.open(IP_BANS_FILE, "w");
+  if (!f) return false;
+  size_t written = serializeJson(doc, f);
+  f.close();
+  return written > 0;
+}
+
+bool isIpBanned(const char* ip) {
+  if (!ip || ip[0] == '\0') return false;
+  if (!sIpBansLoaded) loadIpBans();
+  for (int i = 0; i < MAX_IP_BANS; i++) {
+    if (sIpBans[i].ip[0] != '\0' && strcmp(sIpBans[i].ip, ip) == 0) return true;
+  }
+  return false;
+}
+
+bool banIp(const char* ip, const char* reason) {
+  if (!ip || ip[0] == '\0') return false;
+  if (!sIpBansLoaded) loadIpBans();
+
+  // Already banned — treat as success (idempotent)
+  for (int i = 0; i < MAX_IP_BANS; i++) {
+    if (sIpBans[i].ip[0] != '\0' && strcmp(sIpBans[i].ip, ip) == 0) return true;
+  }
+
+  // Find a free slot
+  for (int i = 0; i < MAX_IP_BANS; i++) {
+    if (sIpBans[i].ip[0] == '\0') {
+      strncpy(sIpBans[i].ip, ip, sizeof(sIpBans[i].ip) - 1);
+      if (reason && reason[0]) {
+        strncpy(sIpBans[i].reason, reason, sizeof(sIpBans[i].reason) - 1);
+      }
+      sIpBans[i].bannedAt = millis();
+
+      // Kick any active sessions from this IP
+      for (int j = 0; j < MAX_SESSIONS; j++) {
+        if (gSessions[j].sid.length() > 0 && gSessions[j].ip == ip) {
+          enqueueTargetedRevokeForSessionIdx(j, "Your access has been revoked by an administrator.");
+        }
+      }
+      // Also clear any brute-force tracking for this IP (no longer needed)
+      clearLoginAttempts(ip);
+
+      DEBUG_AUTHF("[ipban] banned %s reason='%s'", ip, reason ? reason : "");
+      return saveIpBans();
+    }
+  }
+
+  // No free slot
+  DEBUG_AUTHF("[ipban] ban list full, could not ban %s", ip);
+  return false;
+}
+
+bool unbanIp(const char* ip) {
+  if (!ip || ip[0] == '\0') return false;
+  if (!sIpBansLoaded) loadIpBans();
+
+  for (int i = 0; i < MAX_IP_BANS; i++) {
+    if (sIpBans[i].ip[0] != '\0' && strcmp(sIpBans[i].ip, ip) == 0) {
+      memset(&sIpBans[i], 0, sizeof(sIpBans[i]));
+      DEBUG_AUTHF("[ipban] unbanned %s", ip);
+      return saveIpBans();
+    }
+  }
+
+  return false;  // not found
+}
+
+void broadcastBanList() {
+  if (!sIpBansLoaded) loadIpBans();
+  broadcastOutput("IP Ban List:");
+  broadcastOutput("  IP                                     Reason");
+  broadcastOutput("  -------------------------------------  ------------------------------------------------");
+  int count = 0;
+  for (int i = 0; i < MAX_IP_BANS; i++) {
+    if (sIpBans[i].ip[0] == '\0') continue;
+    char line[140];
+    snprintf(line, sizeof(line), "  %-37s  %s",
+             sIpBans[i].ip,
+             sIpBans[i].reason[0] ? sIpBans[i].reason : "(no reason)");
+    broadcastOutput(line);
+    count++;
+  }
+  if (count == 0) broadcastOutput("  (no banned IPs)");
+  else {
+    char summary[32];
+    snprintf(summary, sizeof(summary), "Total: %d ban(s)", count);
+    broadcastOutput(summary);
+  }
+}
+
+// ============================================================================
 
 // Helper: enqueue a targeted revoke notice for a specific session index.
 // Marks session for revocation and sends notice to client for popup/redirect.
@@ -2318,7 +2594,7 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req) {
   
   // Reject attempts to set password fields via this API (use setUserPassword instead)
   // This prevents storing unhashed passwords
-  if (patch.containsKey("password") || patch.containsKey("gamepad_password")) {
+  if (!patch["password"].isNull() || !patch["gamepad_password"].isNull()) {
     DEBUG_HTTPF("[UserSettings] POST rejected password field user=%s userId=%u", ctx.user.c_str(), (unsigned)userId);
     httpd_resp_set_status(req, "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
@@ -2349,39 +2625,42 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// Device Registry API (GET): return device registry as JSON
+// Device Registry API (GET): return device registry as JSON (from in-memory connectedDevices[])
 esp_err_t handleDeviceRegistryGet(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) return ESP_OK;
 
+  extern ConnectedDevice connectedDevices[];
+  extern int connectedDeviceCount;
+  extern int discoveryCount;
+
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
-  String regContent;
-  {
-    FsLockGuard guard("devices.read");
-    
-    // Ensure file exists (create if needed) - must be inside lock
-    if (!LittleFS.exists("/system/devices.json")) {
-      File f = LittleFS.open("/system/devices.json", "w");
-      if (f) {
-        f.println("{");
-        f.println("  \"devices\": []");
-        f.println("}");
-        f.close();
-      }
-    }
-    
-    File file = LittleFS.open("/system/devices.json", "r");
-    if (!file) {
-      httpd_resp_send(req, "{\"error\":\"Could not read device registry\"}", HTTPD_RESP_USE_STRLEN);
-      return ESP_OK;
-    }
-    regContent = file.readString();
-    file.close();
+  String regContent = "{";
+  regContent += "\"lastDiscovery\":" + String((unsigned long)millis()) + ",";
+  regContent += "\"discoveryCount\":" + String(discoveryCount) + ",";
+  regContent += "\"devices\":[";
+  for (int i = 0; i < connectedDeviceCount; i++) {
+    ConnectedDevice& dev = connectedDevices[i];
+    char hexAddr[5];
+    snprintf(hexAddr, sizeof(hexAddr), "0x%02X", dev.address);
+    if (i > 0) regContent += ",";
+    regContent += "{";
+    regContent += "\"address\":" + String(dev.address) + ",";
+    regContent += "\"addressHex\":\"" + String(hexAddr) + "\",";
+    regContent += "\"name\":\"" + String(dev.name) + "\",";
+    regContent += "\"description\":\"" + String(dev.description) + "\",";
+    regContent += "\"manufacturer\":\"" + String(dev.manufacturer) + "\",";
+    regContent += "\"bus\":" + String(dev.bus) + ",";
+    regContent += "\"isConnected\":";
+    regContent += dev.isConnected ? "true" : "false";
+    regContent += ",\"lastSeen\":" + String((unsigned long)dev.lastSeen);
+    regContent += ",\"firstDiscovered\":" + String((unsigned long)dev.firstDiscovered);
+    regContent += "}";
   }
-  // Now send response without holding FS lock
-  httpd_resp_set_type(req, "application/json");
+  regContent += "]}";
+
   DEBUG_HTTPF("/api/devices len=%u", (unsigned)regContent.length());
   httpd_resp_send(req, regContent.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
@@ -2916,6 +3195,19 @@ esp_err_t handleLogout(httpd_req_t* req) {
 
 // Full-page Login: GET shows form, POST validates and sets cookie session
 esp_err_t handleLogin(httpd_req_t* req) {
+  // Permanent IP ban — return 403 before rendering any page
+  {
+    char banIpBuf[64];
+    getClientIP(req, banIpBuf, sizeof(banIpBuf));
+    if (isIpBanned(banIpBuf)) {
+      DEBUG_AUTHF("[login] banned IP %s blocked", banIpBuf);
+      httpd_resp_set_status(req, "403 Forbidden");
+      httpd_resp_set_type(req, "text/plain");
+      httpd_resp_send(req, "403 Forbidden", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
+  }
+
   if (req->method == HTTP_GET) {
     // If already authed, redirect directly to dashboard
     String u;
@@ -2968,43 +3260,65 @@ esp_err_t handleLogin(httpd_req_t* req) {
   String p = urlDecode(extractFormField(body, "password"));
   BROADCAST_PRINTF("[login] POST attempt: username='%s', password_len=%u", u.c_str(), (unsigned)p.length());
 
+  // --- Brute-force lockout check ---
+  String ip;
+  getClientIP(req, ip);
+  {
+    unsigned long remainingMs = 0;
+    if (isLoginLocked(ip.c_str(), &remainingMs)) {
+      unsigned long remainingSec = (remainingMs + 999UL) / 1000UL;  // round up
+      char lockMsg[80];
+      snprintf(lockMsg, sizeof(lockMsg),
+               "Too many failed attempts. Try again in %lu second%s.",
+               remainingSec, remainingSec == 1 ? "" : "s");
+      logAuthAttempt(false, req->uri, u, ip, "Locked out");
+      httpd_resp_set_type(req, "text/html");
+      streamBeginHtml(req, "Sign In", /*isPublic=*/true, "", "login");
+      String logoutReason = getLogoutReason(ip);
+      streamLoginInner(req, u, lockMsg, logoutReason);
+      streamEndHtml(req);
+      return ESP_OK;
+    }
+  }
+
   bool validUser = isValidUser(u, p);
   broadcastOutput(validUser ? "[login] isValidUser result: true" : "[login] isValidUser result: false");
 
   if (u.length() == 0 || p.length() == 0 || !validUser) {
-    // Log failed authentication attempt
-    String ip;
-    getClientIP(req, ip);
+    // Record failure (only when credentials were actually submitted)
+    if (u.length() > 0 && p.length() > 0) {
+      recordFailedLogin(ip.c_str());
+    }
     logAuthAttempt(false, req->uri, u, ip, "Invalid credentials");
 
-    // Show login form with error
+    // Show login form with error — include remaining attempts before first lockout
+    LoginAttemptEntry* e = findLoginEntry(ip.c_str());
+    String errorMsg = "Invalid username or password";
+    if (e && e->failCount > 0) {
+      int attemptsUntilLock = LOGIN_LOCKOUT_TIER1_COUNT - (int)e->failCount;
+      if (attemptsUntilLock > 0 && attemptsUntilLock <= 2) {
+        char warnBuf[80];
+        snprintf(warnBuf, sizeof(warnBuf),
+                 "Invalid username or password. %d attempt%s remaining before lockout.",
+                 attemptsUntilLock, attemptsUntilLock == 1 ? "" : "s");
+        errorMsg = warnBuf;
+      }
+    }
+
     httpd_resp_set_type(req, "text/html");
     streamBeginHtml(req, "Sign In", /*isPublic=*/true, "", "login");
-    // Get logout reason
-    String logoutReason = "";
-    String clientIP2;
-    getClientIP(req, clientIP2);
-    if (clientIP2.length() > 0) {
-      logoutReason = getLogoutReason(clientIP2);
-    }
-    streamLoginInner(req, u, "Invalid username or password", logoutReason);
+    String logoutReason = getLogoutReason(ip);
+    streamLoginInner(req, u, errorMsg, logoutReason);
     streamEndHtml(req);
     return ESP_OK;
   }
   // Success -> create session immediately and set cookie in this response
   BROADCAST_PRINTF("[login] Login successful for user: %s", u.c_str());
 
-  // Log successful authentication attempt
-  String ip;
-  getClientIP(req, ip);
+  // Clear brute-force record and any existing logout reason for this IP
+  clearLoginAttempts(ip.c_str());
   logAuthAttempt(true, req->uri, u, ip, "Login successful");
-
-  // Clear any existing logout reason for this IP to prevent false "signed out" messages
-  String clientIP;
-  getClientIP(req, clientIP);
-  if (clientIP.length() > 0) {
-    getLogoutReason(clientIP);  // This clears the reason by reading it
-  }
+  getLogoutReason(ip);  // clears the stored reason by reading it
 
   // Create session and capture SID for client-side fallback
   String sid = setSession(req, u);
@@ -4605,6 +4919,9 @@ static String sHttpsKeyData;
 #endif
 
 void startHttpServer() {
+  // Load persistent IP ban list before accepting any connections
+  loadIpBans();
+
 #if ENABLE_HTTPS
   // Try HTTPS if enabled at runtime and certs are present
   if (gSettings.httpsEnabled && filesystemReady) {

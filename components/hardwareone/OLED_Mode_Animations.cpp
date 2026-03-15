@@ -494,4 +494,14 @@ void displayAnimation() {
   }
 }
 
+// ============================================================================
+// Animation Mode Registration
+// ============================================================================
+
+static const OLEDModeEntry sAnimationModes[] = {
+  { OLED_ANIMATION, "Animation", "animation", displayAnimation, nullptr, nullptr, false, -1, "B:Back" },
+};
+
+REGISTER_OLED_MODE_MODULE(sAnimationModes, sizeof(sAnimationModes) / sizeof(sAnimationModes[0]), "Animations");
+
 #endif // ENABLE_OLED_DISPLAY

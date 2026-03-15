@@ -92,7 +92,11 @@ static void addFileToBackup(JsonObject& files, JsonArray& warnings, const char* 
 // Helper: Recursively add all files from a directory
 // ============================================================================
 
-static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, const char* dirPath, int depth = 0) {
+static bool isCertFile(const String& path) {
+  return path.endsWith(".pem") || path.endsWith(".crt") || path.endsWith(".key");
+}
+
+static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, JsonArray& encFields, const char* dirPath, int depth = 0) {
   if (!filesystemReady || depth > 3) return;
 
   File dir = LittleFS.open(dirPath);
@@ -110,7 +114,7 @@ static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, const c
     if (!path.startsWith("/")) { char pBuf[128]; snprintf(pBuf, sizeof(pBuf), "%s/%s", dirPath, path.c_str()); path = pBuf; }
 
     if (entry.isDirectory()) {
-      addDirectoryToBackup(files, warnings, path.c_str(), depth + 1);
+      addDirectoryToBackup(files, warnings, encFields, path.c_str(), depth + 1);
     } else {
       // Include .hwmap, .json, and certificate files
       if (path.endsWith(".hwmap") || path.endsWith(".json") ||
@@ -125,6 +129,18 @@ static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, const c
               files[path] = tmpDoc.as<JsonVariant>();
             } else {
               files[path] = content;
+            }
+          } else if (isCertFile(path)) {
+            // Encrypt certificate/key file contents with device AES key
+            // so they are not stored in plain text in the backup file
+            String encrypted = encryptString(content);
+            if (encrypted.length() > 0) {
+              files[path] = encrypted;
+              encFields.add(path);
+            } else {
+              char warn[128];
+              snprintf(warn, sizeof(warn), "Failed to encrypt %s, skipped", path.c_str());
+              warnings.add(warn);
             }
           } else {
             // Binary .hwmap files stored as raw string (base64 would be better but
@@ -234,26 +250,31 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   // Build system info for ip
   JsonDocument sysDoc;
   buildSystemInfoJson(sysDoc);
-  if (sysDoc.containsKey("net")) {
+  if (!sysDoc["net"].isNull()) {
     device["ip"] = sysDoc["net"]["ip"].as<String>();
   }
 
-  // Files and warnings
+  // Files, warnings, and encrypted field tracking
   JsonObject files = doc["files"].to<JsonObject>();
   JsonArray warnings = doc["warnings"].to<JsonArray>();
+  JsonArray encFields = doc["encryptedFields"].to<JsonArray>();
+
+  // Track well-known encrypted fields in settings (WiFi passwords, MQTT password, etc.)
+  encFields.add("wifiNetworks[].password");
+  encFields.add("/system/users/user_settings/*.json:password");
 
   if (wantSettings)    addFileToBackup(files, warnings, SETTINGS_FILE);
   if (wantUsers) {
     addFileToBackup(files, warnings, USERS_FILE);
-    addDirectoryToBackup(files, warnings, USER_SETTINGS_DIR);
+    addDirectoryToBackup(files, warnings, encFields, USER_SETTINGS_DIR);
   }
   if (wantAutomations) addFileToBackup(files, warnings, AUTOMATIONS_FILE);
   if (wantEspnow) {
     addFileToBackup(files, warnings, ESPNOW_DEVICES);
     addFileToBackup(files, warnings, ESPNOW_MESH_PEERS);
   }
-  if (wantMaps) addDirectoryToBackup(files, warnings, MAPS_DIR);
-  if (wantCerts) addDirectoryToBackup(files, warnings, "/system/certs");
+  if (wantMaps) addDirectoryToBackup(files, warnings, encFields, MAPS_DIR);
+  if (wantCerts) addDirectoryToBackup(files, warnings, encFields, "/system/certs");
 
   // Serialize and send
   httpd_resp_set_type(req, "application/json");
@@ -369,9 +390,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
 
   // Check if force flag is set (allows restore to different device)
   bool forceRestore = false;
-  if (doc.containsKey("force")) {
-    forceRestore = doc["force"].as<bool>();
-  }
+  forceRestore = doc["force"] | false;
 
   // If not compatible and not forced, reject with compatibility info
   if (!compatible && !forceRestore) {
@@ -405,19 +424,26 @@ static esp_err_t handleRestore(httpd_req_t* req) {
       continue;
     }
 
-    // On different device: skip user credential files (passwords won't work)
+    String pathStr = String(path);
+
+    // On different device: skip user credential files and encrypted cert files
     if (!compatible) {
-      String pathStr = String(path);
       if (pathStr.startsWith("/system/users/")) {
         char warn[128];
         snprintf(warn, sizeof(warn), "Skipped (different device): %s", path);
         warnings.add(warn);
         continue;
       }
+      // Skip cert files — they were encrypted with the source device's key
+      if (isCertFile(pathStr)) {
+        char warn[128];
+        snprintf(warn, sizeof(warn), "Skipped encrypted cert (different device): %s", path);
+        warnings.add(warn);
+        continue;
+      }
     }
 
     // Ensure parent directories exist
-    String pathStr = String(path);
     int lastSlash = pathStr.lastIndexOf('/');
     if (lastSlash > 0) {
       String dir = pathStr.substring(0, lastSlash);
@@ -430,6 +456,21 @@ static esp_err_t handleRestore(httpd_req_t* req) {
       content = kv.value().as<String>();
     } else {
       serializeJsonPretty(kv.value(), content);
+    }
+
+    // Decrypt cert files back to plain text before writing to disk
+    // (they were AES-encrypted during backup export)
+    if (compatible && isCertFile(pathStr) && content.startsWith("AES:")) {
+      String decrypted = decryptString(content);
+      if (decrypted.length() > 0) {
+        content = decrypted;
+      } else {
+        char warn[128];
+        snprintf(warn, sizeof(warn), "Failed to decrypt %s, skipped", path);
+        warnings.add(warn);
+        filesErrored++;
+        continue;
+      }
     }
 
     if (writeText(path, content)) {

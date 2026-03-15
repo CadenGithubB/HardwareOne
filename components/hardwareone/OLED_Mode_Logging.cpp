@@ -72,7 +72,7 @@ static void drawLoggingMenuItem(int y, const char* text, bool selected, bool ena
     oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   } else {
-    oledDisplay->setTextColor(enabled ? DISPLAY_COLOR_WHITE : DISPLAY_COLOR_WHITE);
+    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   }
   
   oledDisplay->setCursor(selected ? 4 : 2, y + 1);
@@ -353,10 +353,10 @@ static const OLEDModeEntry loggingModeEntry = {
   "A:Select B:Back"
 };
 
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry loggingModes[] = { loggingModeEntry };
 
-// Register with unique variable name
-static OLEDModeRegistrar _oled_mode_registrar_logging(loggingModes, sizeof(loggingModes) / sizeof(loggingModes[0]), "Logging");
+REGISTER_OLED_MODE_MODULE(loggingModes, sizeof(loggingModes) / sizeof(loggingModes[0]), "Logging");
 
 // Force linker to include this file - called from OLED_Utils.cpp
 void oledLoggingModeInit() {
