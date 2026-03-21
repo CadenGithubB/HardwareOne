@@ -369,12 +369,13 @@ static bool sNotificationsShowingDetail = false;
 // Helper to get source name string
 static const char* getNotificationSourceName(uint8_t source) {
   switch (source) {
-    case NOTIF_SOURCE_CLI: return "CLI";
-    case NOTIF_SOURCE_OLED: return "OLED";
-    case NOTIF_SOURCE_WEB: return "WEB";
-    case NOTIF_SOURCE_VOICE: return "VOICE";
-    case NOTIF_SOURCE_REMOTE: return "REMOTE";
-    default: return "UNKNOWN";
+    case NOTIF_SOURCE_CLI:    return "CLI";
+    case NOTIF_SOURCE_OLED:   return "OLED";
+    case NOTIF_SOURCE_WEB:    return "Web";
+    case NOTIF_SOURCE_VOICE:  return "Voice";
+    case NOTIF_SOURCE_REMOTE: return "Remote";
+    case NOTIF_SOURCE_SYSTEM: return "System";
+    default: return "Unknown";
   }
 }
 
@@ -413,13 +414,20 @@ void displayNotifications() {
     
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    
+
     int y = startY;
-    
-    // Line 1: Source and timestamp
+
+    // Line 1: Source + timestamp (left) and n/N counter (right)
+    char counterBuf[8];
+    snprintf(counterBuf, sizeof(counterBuf), "%d/%d",
+             sNotificationsSelectedIndex + 1, count);
+    int counterX = 128 - (int)strlen(counterBuf) * 6;
+    oledDisplay->setCursor(counterX, y);
+    oledDisplay->print(counterBuf);
+
     oledDisplay->setCursor(0, y);
     oledDisplay->print(getNotificationSourceName(notif->source));
-    
+
     // Show elapsed time
     uint32_t elapsed = (millis() - notif->timestampMs) / 1000;
     if (elapsed < 60) {
@@ -574,12 +582,20 @@ bool handleNotificationsInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     return true;
   }
   
-  // Navigation only works in list view
+  // In detail view: left/right (or up/down) scrolls between notifications
   if (sNotificationsShowingDetail) {
+    if ((gNavEvents.left || gNavEvents.up) && sNotificationsSelectedIndex > 0) {
+      sNotificationsSelectedIndex--;
+      return true;
+    }
+    if ((gNavEvents.right || gNavEvents.down) && sNotificationsSelectedIndex < count - 1) {
+      sNotificationsSelectedIndex++;
+      return true;
+    }
     return false;
   }
-  
-  // Use centralized navigation events (proper debounce/auto-repeat)
+
+  // List view navigation
   if ((gNavEvents.up || gNavEvents.left) && sNotificationsSelectedIndex > 0) {
     sNotificationsSelectedIndex--;
     return true;
@@ -606,7 +622,7 @@ static bool notificationsRegisteredInputHandler(int deltaX, int deltaY, uint32_t
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry sNotificationsModes[] = {
-  { OLED_NOTIFICATIONS, "Notifications", "notify_sensor", displayNotifications, nullptr, notificationsRegisteredInputHandler, false, -1, "A:Detail X:Clear B:Back" },
+  { OLED_NOTIFICATIONS, "Notifications", "notify_sensor", displayNotifications, nullptr, notificationsRegisteredInputHandler, false, -1, nullptr },
 };
 
 REGISTER_OLED_MODE_MODULE(sNotificationsModes, sizeof(sNotificationsModes) / sizeof(sNotificationsModes[0]), "Notifications");
@@ -629,75 +645,79 @@ void oledContentInit(OLEDContentArea* ctx, Adafruit_SSD1306* display) {
 
 void oledContentBegin(OLEDContentArea* ctx) {
   if (!ctx || !ctx->display) return;
-  
+
   // Clear content area only (between header and footer)
   ctx->display->fillRect(0, OLED_CONTENT_START_Y, DISPLAY_WIDTH, DISPLAY_CONTENT_HEIGHT, DISPLAY_COLOR_BLACK);
-  
-  // Reset cursor to top of content area (after header)
-  ctx->cursorY = OLED_CONTENT_START_Y;
+
+  // cursorY is content-relative (0 = top of content area).
+  // scrollOffset is how many pixels of content are hidden above the top edge.
+  // Screen Y = OLED_CONTENT_START_Y + cursorY - scrollOffset.
+  ctx->cursorY      = 0;
   ctx->contentHeight = 0;
+  // scrollOffset is intentionally NOT reset here so scroll position persists between frames.
 }
 
 void oledContentEnd(OLEDContentArea* ctx) {
   if (!ctx || !ctx->display) return;
-  
-  // Update scroll state
+
+  // Update scroll state after all content has been measured
   oledContentUpdateScroll(ctx);
-  
-  // Draw scroll indicators if content is scrollable
+
+  // Draw scroll indicators using SSD1306 font arrows
   if (ctx->needsScroll) {
-    int indicatorX = DISPLAY_WIDTH - 6;
-    
-    // Up arrow if not at top
+    const int indicatorX = DISPLAY_WIDTH - 6;
+    ctx->display->setTextColor(DISPLAY_COLOR_WHITE);
+
+    // Up arrow at top of content area when not at the beginning
     if (!ctx->scrollAtTop) {
-      ctx->display->setCursor(indicatorX, 0);
-      ctx->display->setTextColor(DISPLAY_COLOR_WHITE);
-      ctx->display->print("^");
+      ctx->display->setCursor(indicatorX, OLED_CONTENT_START_Y);
+      ctx->display->print('\x18');  // ↑
     }
-    
-    // Down arrow if not at bottom
+
+    // Down arrow at bottom of content area when more content remains
     if (!ctx->scrollAtBottom) {
-      ctx->display->setCursor(indicatorX, DISPLAY_CONTENT_HEIGHT - 8);
-      ctx->display->setTextColor(DISPLAY_COLOR_WHITE);
-      ctx->display->print("v");
+      ctx->display->setCursor(indicatorX, OLED_CONTENT_START_Y + DISPLAY_CONTENT_HEIGHT - 8);
+      ctx->display->print('\x19');  // ↓
     }
   }
 }
 
 void oledContentSetCursor(OLEDContentArea* ctx, int16_t x, int16_t y) {
   if (!ctx || !ctx->display) return;
-  
-  // Adjust Y by scroll offset
-  int16_t adjustedY = y + ctx->scrollOffset;
-  
-  // Only set cursor if within visible content area
-  if (adjustedY >= 0 && adjustedY < DISPLAY_CONTENT_HEIGHT) {
-    ctx->display->setCursor(x, adjustedY);
+
+  // y is content-relative; translate to screen coordinates
+  int16_t screenY = OLED_CONTENT_START_Y + y - ctx->scrollOffset;
+  const int16_t topClip    = OLED_CONTENT_START_Y - 8;
+  const int16_t bottomClip = OLED_CONTENT_START_Y + DISPLAY_CONTENT_HEIGHT;
+
+  if (screenY >= topClip && screenY < bottomClip) {
+    ctx->display->setCursor(x, screenY);
   }
-  
-  ctx->cursorY = y;  // Track absolute Y position
+
+  ctx->cursorY = y;  // Track content-relative position
 }
 
 void oledContentPrint(OLEDContentArea* ctx, const char* text, bool newline) {
   if (!ctx || !ctx->display || !text) return;
-  
-  // Calculate Y position with scroll offset
-  int16_t adjustedY = ctx->cursorY + ctx->scrollOffset;
-  
-  // Only render if within visible area
-  if (adjustedY >= -8 && adjustedY < DISPLAY_CONTENT_HEIGHT) {
-    ctx->display->setCursor(0, adjustedY);
+
+  // Translate content-relative cursorY to screen Y
+  int16_t screenY = OLED_CONTENT_START_Y + ctx->cursorY - ctx->scrollOffset;
+  const int16_t topClip    = OLED_CONTENT_START_Y - 8;
+  const int16_t bottomClip = OLED_CONTENT_START_Y + DISPLAY_CONTENT_HEIGHT;
+
+  if (screenY >= topClip && screenY < bottomClip) {
+    ctx->display->setCursor(0, screenY);
     if (newline) {
       ctx->display->println(text);
     } else {
       ctx->display->print(text);
     }
   }
-  
-  // Update cursor position
-  ctx->cursorY += 8;  // Assume text size 1 (8 pixels per line)
-  
-  // Track total content height
+
+  // Advance content-relative cursor by one text-size-1 line height
+  ctx->cursorY += 8;
+
+  // Track total content height (content-relative)
   if (ctx->cursorY > ctx->contentHeight) {
     ctx->contentHeight = ctx->cursorY;
   }
@@ -705,65 +725,56 @@ void oledContentPrint(OLEDContentArea* ctx, const char* text, bool newline) {
 
 void oledContentPrintAt(OLEDContentArea* ctx, int16_t x, int16_t y, const char* text) {
   if (!ctx || !ctx->display || !text) return;
-  
-  // Adjust Y by scroll offset
-  int16_t adjustedY = y + ctx->scrollOffset;
-  
-  // Only render if within visible area
-  if (adjustedY >= -8 && adjustedY < DISPLAY_CONTENT_HEIGHT) {
-    ctx->display->setCursor(x, adjustedY);
+
+  // y is content-relative; translate to screen coordinates
+  int16_t screenY = OLED_CONTENT_START_Y + y - ctx->scrollOffset;
+  const int16_t topClip    = OLED_CONTENT_START_Y - 8;
+  const int16_t bottomClip = OLED_CONTENT_START_Y + DISPLAY_CONTENT_HEIGHT;
+
+  if (screenY >= topClip && screenY < bottomClip) {
+    ctx->display->setCursor(x, screenY);
     ctx->display->print(text);
   }
-  
-  // Track content height if this extends beyond current height
+
+  // Track content height (y is content-relative, add one line height)
   if (y + 8 > ctx->contentHeight) {
     ctx->contentHeight = y + 8;
   }
 }
 
+// scrollUp: user pressed UP — wants to see content above the current view.
+// Decreases scrollOffset (fewer pixels hidden at top).
 void oledContentScrollUp(OLEDContentArea* ctx, int lines) {
   if (!ctx) return;
-  
-  // Scroll up means increasing offset (showing content further down)
-  ctx->scrollOffset += (lines * 8);
-  
-  // Clamp to valid range
-  int maxOffset = ctx->contentHeight - DISPLAY_CONTENT_HEIGHT;
-  if (maxOffset < 0) maxOffset = 0;
-  
-  if (ctx->scrollOffset > maxOffset) {
-    ctx->scrollOffset = maxOffset;
-  }
-  
+
+  ctx->scrollOffset -= (lines * 8);
+  if (ctx->scrollOffset < 0) ctx->scrollOffset = 0;
+
   oledContentUpdateScroll(ctx);
 }
 
+// scrollDown: user pressed DOWN — wants to see content below the current view.
+// Increases scrollOffset (more pixels hidden at top, revealing content below).
 void oledContentScrollDown(OLEDContentArea* ctx, int lines) {
   if (!ctx) return;
-  
-  // Scroll down means decreasing offset (showing content further up)
-  ctx->scrollOffset -= (lines * 8);
-  
-  // Clamp to valid range (minimum is 0)
-  if (ctx->scrollOffset < 0) {
-    ctx->scrollOffset = 0;
-  }
-  
+
+  ctx->scrollOffset += (lines * 8);
+
+  int maxOffset = ctx->contentHeight - DISPLAY_CONTENT_HEIGHT;
+  if (maxOffset < 0) maxOffset = 0;
+  if (ctx->scrollOffset > maxOffset) ctx->scrollOffset = maxOffset;
+
   oledContentUpdateScroll(ctx);
 }
 
 void oledContentUpdateScroll(OLEDContentArea* ctx) {
   if (!ctx) return;
-  
-  // Determine if scrolling is needed
-  ctx->needsScroll = (ctx->contentHeight > DISPLAY_CONTENT_HEIGHT);
-  
-  // Update scroll position indicators
-  ctx->scrollAtTop = (ctx->scrollOffset == 0);
-  
+
+  ctx->needsScroll   = (ctx->contentHeight > DISPLAY_CONTENT_HEIGHT);
+  ctx->scrollAtTop   = (ctx->scrollOffset == 0);
+
   int maxOffset = ctx->contentHeight - DISPLAY_CONTENT_HEIGHT;
   if (maxOffset < 0) maxOffset = 0;
-  
   ctx->scrollAtBottom = (ctx->scrollOffset >= maxOffset);
 }
 
@@ -1306,12 +1317,13 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
   display->setCursor(2, keyboardStartY + 11);
   
   // Show current text with cursor
-  String displayText = String(gOLEDKeyboardState.text);
-  if (displayText.length() > 20) {
+  int textLen = strlen(gOLEDKeyboardState.text);
+  const char* displayStart = gOLEDKeyboardState.text;
+  if (textLen > 20) {
     // Scroll text if too long
-    displayText = displayText.substring(displayText.length() - 20);
+    displayStart = gOLEDKeyboardState.text + (textLen - 20);
   }
-  display->print(displayText);
+  display->print(displayStart);
   
   // Show blinking cursor
   if ((millis() / 500) % 2 == 0) {
@@ -2123,6 +2135,9 @@ void drawOLEDFooter() {
   const int footerStartY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
   const int footerY = footerStartY + 2;  // Text position (2px below separator)
   
+  // Clear footer area (prevents content from leaking through)
+  oledDisplay->fillRect(0, footerStartY, SCREEN_WIDTH, OLED_FOOTER_HEIGHT, DISPLAY_COLOR_BLACK);
+  
   // Draw separator line above footer
   // For logo mode, draw shorter line with vertical box around "Back" text
   if (currentOLEDMode == OLED_LOGO) {
@@ -2177,6 +2192,11 @@ void drawOLEDFooter() {
   // Fall back to central switch for modes without registered hints
   // OLED_MENU hints provided via OLEDModeEntry registration (static "A:Select B:Back")
   if (!hints) switch (currentOLEDMode) {
+    case OLED_NOTIFICATIONS:
+      hints = sNotificationsShowingDetail
+        ? "\x1b\x1a:Nav B:Back"       // ←→ arrows when browsing detail
+        : "A:Detail X:Clear B:Back";  // list view
+      break;
     case OLED_ESPNOW:
       #if ENABLE_ESPNOW
       {
@@ -2316,7 +2336,7 @@ void drawOLEDFooter() {
         if (gMapMenuOpen) {
           hints = "A:Select B:Close";
         } else {
-          hints = "St:Menu A+J:Rot B:Back";
+          hints = "X/Y:Zoom A+J:Rot B:Back";
         }
       }
       break;
@@ -2688,6 +2708,7 @@ static const OLEDModeEntry builtInQuickSettingsMode = {
 extern void oledAuthModeInit();
 extern void oledLoggingModeInit();
 extern void oledSetPatternModeInit();
+extern void oledChangePasswordModeInit();
 
 // Print summary of all registered OLED modes (call from setup() after static init)
 void printRegisteredOLEDModes() {
@@ -2696,6 +2717,7 @@ void printRegisteredOLEDModes() {
   oledAuthModeInit();
   oledLoggingModeInit();
   oledSetPatternModeInit();
+  oledChangePasswordModeInit();
   
   // Register built-in quick settings mode first
   static bool builtInRegistered = false;
@@ -2968,7 +2990,10 @@ void updateOLEDDisplay() {
   }
 
   // Process gamepad input for menu navigation (runs every frame, handles its own debouncing)
-  processGamepadMenuInput();
+  bool inputProcessed = processGamepadMenuInput();
+  if (inputProcessed) {
+    oledMarkDirty();
+  }
 
   unsigned long now = millis();
   
@@ -2991,7 +3016,7 @@ void updateOLEDDisplay() {
     }
   } else {
     // Timer-based throttle: check at most every updateInterval ms
-    unsigned long updateInterval = (gSettings.oledUpdateInterval > 0) ? (unsigned long)gSettings.oledUpdateInterval : 100;
+    unsigned long updateInterval = (gSettings.oledUpdateInterval > 0) ? (unsigned long)gSettings.oledUpdateInterval : 125;
     if (now - oledLastUpdate < updateInterval) {
       return;  // Not time to check yet
     }
@@ -3064,17 +3089,13 @@ void updateOLEDDisplay() {
     gDisplay->setTextSize(1);
     gDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     
-    // Draw persistent header bar (mode name, battery, notifications)
-    // Skip header for modes that need full screen (animation, logo, keyboard)
+    // Determine if header should be shown (drawn after content, like footer)
     bool showHeader = (currentOLEDMode != OLED_ANIMATION && 
                        currentOLEDMode != OLED_LOGO &&
                        currentOLEDMode != OLED_OFF &&
                        !oledKeyboardIsActive());
-    if (showHeader) {
-      oledRenderHeader(gDisplay, nullptr);
-    }
     
-    // Set cursor to content area start (after header, or Y=0 if no header)
+    // Set cursor to content area start
     gDisplay->setCursor(0, showHeader ? OLED_CONTENT_START_Y : 0);
 
     // DEBUG: Track render for black flash investigation
@@ -3155,6 +3176,11 @@ void updateOLEDDisplay() {
     }
 
     oledConfirmRender();
+
+    // Draw persistent header bar (after content, so it's always on top - same pattern as footer)
+    if (showHeader) {
+      oledRenderHeader(gDisplay, nullptr);
+    }
 
     // Draw persistent footer with button hints (always last, in same frame)
     drawOLEDFooter();
@@ -3664,7 +3690,7 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_WEB_STATS: return "Web Stats";
     case OLED_RTC_DATA: return "RTC";
     case OLED_PRESENCE_DATA: return "Presence";
-    case OLED_REMOTE: return "Remote UI";
+    case OLED_REMOTE: return "Bond";
     case OLED_UNIFIED_MENU: return "Actions";
     case OLED_NOTIFICATIONS: return "Notifs";
     case OLED_SET_PATTERN: return "Pattern";
@@ -4043,7 +4069,7 @@ const OLEDMenuItem oledMenuCategory2[] = {
   { "Bluetooth",  "bt_idle",           OLED_BLUETOOTH },
 #endif
 #if ENABLE_BONDED_MODE
-  { "Remote",     "notify_espnow",     OLED_REMOTE },
+  { "Bond",       "notify_espnow",     OLED_REMOTE },
 #endif
 #if ENABLE_HTTP_SERVER
   { "Web",        "web",               OLED_WEB_STATS },
@@ -4183,8 +4209,8 @@ void completeRemoteCommandInput() {
   const char* fullCommand = oledKeyboardGetText();
   if (fullCommand && strlen(fullCommand) > 0) {
     // Execute remote command via unified OLED command helper
-    String remoteCmd = "remote:";
-    remoteCmd += fullCommand;
+    char remoteCmd[128];
+    snprintf(remoteCmd, sizeof(remoteCmd), "remote:%s", fullCommand);
 
     char out[256];
     executeOLEDCommandWithResult(remoteCmd, out, sizeof(out));
@@ -4238,15 +4264,14 @@ static String loadCachedManifest() {
   
   char pathBuf[64];
   snprintf(pathBuf, sizeof(pathBuf), "/system/manifests/%s.json", hashHex);
-  String path = pathBuf;
   
   FsLockGuard guard("manifest.load");
-  if (!LittleFS.exists(path.c_str())) {
-    Serial.printf("[RMENU] Manifest not cached: %s\n", path.c_str());
+  if (!LittleFS.exists(pathBuf)) {
+    Serial.printf("[RMENU] Manifest not cached: %s\n", pathBuf);
     return "";
   }
   
-  File f = LittleFS.open(path.c_str(), "r");
+  File f = LittleFS.open(pathBuf, "r");
   if (!f) return "";
   
   String content = f.readString();
@@ -4609,13 +4634,10 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
     
     case OLED_REMOTE:
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
-      // Only show Remote menu when bond mode is enabled and connected
-      if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() > 0) {
-        return MenuAvailability::AVAILABLE;
-      }
+      // Show Bond mode whenever ESP-NOW is available — picker handles the not-yet-bonded state
+      return MenuAvailability::AVAILABLE;
 #endif
-      // Hide Remote menu when not bonded (return NOT_BUILT to completely hide)
-      if (outReason) *outReason = "Not bonded";
+      if (outReason) *outReason = "Not compiled";
       return MenuAvailability::NOT_BUILT;
 
     
@@ -5006,8 +5028,8 @@ void oledMenuSelect() {
           startRemoteCommandInput(item.command);
         } else {
           // Execute immediately via unified OLED command helper
-          String remoteCmd = "remote:";
-          remoteCmd += item.command;
+          char remoteCmd[128];
+          snprintf(remoteCmd, sizeof(remoteCmd), "remote:%s", item.command);
 
           char out[256];
           executeOLEDCommandWithResult(remoteCmd, out, sizeof(out));
@@ -5464,12 +5486,15 @@ bool processGamepadMenuInput() {
   bool dataValid = false;
   bool mutexTaken = false;
   
+  uint32_t latchedPresses = 0;
   if (xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     mutexTaken = true;
     if (gControlCache.gamepadDataValid) {
       joyX = gControlCache.gamepadX;
       joyY = gControlCache.gamepadY;
       buttons = gControlCache.gamepadButtons;
+      latchedPresses = gControlCache.buttonPressedAccum;
+      gControlCache.buttonPressedAccum = 0;  // Consume accumulated presses
       dataValid = true;
     }
     xSemaphoreGive(gControlCache.mutex);
@@ -5611,7 +5636,7 @@ bool processGamepadMenuInput() {
   {
     uint32_t pressedNow = ~buttons;
     uint32_t pressedLast = ~lastButtonState;
-    uint32_t newlyPressed = pressedNow & ~pressedLast;
+    uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
     if (oledConfirmIsActive()) {
       if (oledConfirmHandleInput(newlyPressed)) {
         inputProcessed = true;
@@ -5630,7 +5655,7 @@ bool processGamepadMenuInput() {
       // Route all input to keyboard
       uint32_t pressedNow = ~buttons;
       uint32_t pressedLast = ~lastButtonState;
-      uint32_t newlyPressed = pressedNow & ~pressedLast;
+      uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
       
       // Calculate deltaX/deltaY for keyboard navigation
       int deltaX = 0, deltaY = 0;
@@ -5677,7 +5702,7 @@ bool processGamepadMenuInput() {
     // Seesaw gamepad buttons are active-low (0 = pressed)
     uint32_t pressedNow = ~buttons;  // Invert for active-high logic
     uint32_t pressedLast = ~lastButtonState;
-    uint32_t newlyPressed = pressedNow & ~pressedLast;  // Rising edge
+    uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;  // Rising edge + latched
 
     if (shouldDebug && newlyPressed) {
       Serial.printf("[GAMEPAD_LOGICAL] MODE=MENU newly=0x%08lX A=%d B=%d X=%d Y=%d START=%d SEL=%d\n",
@@ -5721,7 +5746,7 @@ bool processGamepadMenuInput() {
     // ESP-NOW interface navigation
     uint32_t pressedNow = ~buttons;
     uint32_t pressedLast = ~lastButtonState;
-    uint32_t newlyPressed = pressedNow & ~pressedLast;
+    uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
     
     if (shouldDebug) {
       Serial.printf("[ESPNOW_BUTTONS] buttons=0x%08lX pressedNow=0x%08lX pressedLast=0x%08lX newlyPressed=0x%08lX\n",
@@ -5751,8 +5776,8 @@ bool processGamepadMenuInput() {
           if (deviceName && strlen(deviceName) > 0) {
             BROADCAST_PRINTF("[OLED] Setting ESP-NOW name: %s", deviceName);
             // First set the name via command system
-            String setnameCmd = "espnow setname ";
-            setnameCmd += deviceName;
+            char setnameCmd[48];
+            snprintf(setnameCmd, sizeof(setnameCmd), "espnow setname %s", deviceName);
             executeOLEDCommand(setnameCmd);
             if (gSettings.espnowDeviceName.length() > 0) {
               // Then initialize ESP-NOW via command system
@@ -5824,7 +5849,7 @@ bool processGamepadMenuInput() {
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
     uint32_t pressedNow = ~buttons;
     uint32_t pressedLast = ~lastButtonState;
-    uint32_t newlyPressed = pressedNow & ~pressedLast;
+    uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
     
     extern bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed);
     if (bondModeInputHandler(deltaX, deltaY, newlyPressed)) {
@@ -5839,7 +5864,7 @@ bool processGamepadMenuInput() {
     // Any other mode - check for registered custom input handler first
     uint32_t pressedNow = ~buttons;
     uint32_t pressedLast = ~lastButtonState;
-    uint32_t newlyPressed = pressedNow & ~pressedLast;
+    uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
     
     // Global SELECT button handler - access quick settings from anywhere (only if authenticated)
     // NOTE: Skip if keyboard is active since SELECT toggles keyboard mode

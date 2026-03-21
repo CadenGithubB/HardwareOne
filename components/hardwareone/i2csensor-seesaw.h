@@ -24,6 +24,7 @@ struct ControlCache {
   unsigned long gamepadLastUpdate = 0;
   bool gamepadDataValid = false;
   uint32_t gamepadSeq = 0;
+  uint32_t buttonPressedAccum = 0;  // Latched press edges — OR'd in by task, read+cleared by UI
 };
 
 // Global control cache (defined in gamepad_sensor.cpp)

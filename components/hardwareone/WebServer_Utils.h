@@ -539,7 +539,7 @@ inline String getFileBrowserScript() {
     window[explorerFnId + 'Download'] = function(filePath) {
       var filename = filePath.split('/').pop() || 'download';
       var a = document.createElement('a');
-      a.href = '/api/files/view?name=' + encodeURIComponent(filePath) + '&mode=raw';
+      a.href = '/api/files/read?name=' + encodeURIComponent(filePath);
       a.download = filename;
       document.body.appendChild(a);
       a.click();
@@ -758,12 +758,23 @@ inline String getFileBrowserScript() {
         var file = e.target.files[0];
         if (!file) return;
         
-        if (file.size > 3 * 1024 * 1024) {
-          setStatus('Error: File too large (max 3MB)', true);
-          input.value = '';
-          return;
-        }
+        setStatus('Checking storage...', false);
+        fetch('/api/files/stats').then(function(r){return r.json();}).then(function(d) {
+          if (!d.success) { setStatus('Error: Cannot check storage', true); input.value=''; return; }
+          var maxUpload = Math.floor(d.free * 0.9);
+          if (file.size > maxUpload) {
+            var freeMB = (d.free / 1024 / 1024).toFixed(1);
+            var fileMB = (file.size / 1024 / 1024).toFixed(1);
+            setStatus('Upload failed: File too large (' + fileMB + 'MB, max ~' + freeMB + 'MB free)', true);
+            input.value = '';
+            return;
+          }
+          doUpload(file);
+        }).catch(function(err) {
+          doUpload(file);
+        });
         
+        function doUpload(file) {
         setStatus('Uploading ' + file.name + '...', false);
         var targetPath = currentPath === '/' ? '/' + file.name : currentPath + '/' + file.name;
         // Text files that can be safely read as text; everything else is binary
@@ -805,6 +816,7 @@ inline String getFileBrowserScript() {
         } else {
           reader.readAsText(file);     // Text files only
         }
+        } // end doUpload
       };
       input.click();
     };
@@ -976,7 +988,7 @@ inline void streamCommonCSS(httpd_req_t* req) {
     "body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;"
     "background:var(--bg);"
     "min-height:100vh;color:var(--fg);line-height:1.6}"
-    ".content{padding:1rem;max-width:1200px;margin:0 auto}"
+    ".content{padding:1rem;max-width:1600px;margin:0 auto}"
     ".card{background:var(--card-bg);backdrop-filter:blur(10px);"
     "border-radius:15px;padding:2rem;margin:1rem 0;border:1px solid var(--card-border);"
     "box-shadow:0 8px 32px rgba(0,0,0,.1)}"
@@ -1069,8 +1081,8 @@ inline void streamCommonCSS(httpd_req_t* req) {
     ".settings-panel{background:var(--panel-bg);border-radius:8px;padding:1rem 1.5rem;margin:1rem 0;color:var(--panel-fg);border:1px solid var(--border)}"
     ".settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem}"
     ".alert{padding:12px;border-radius:8px;margin-bottom:15px;border:1px solid}"
-    ".alert-warning{background:var(--warning-bg);color:var(--warning-fg);border-color:var(--warning-border);border-left:4px solid var(--warning-accent)}"
-    ".alert-info{background:var(--info-bg);color:var(--info-fg);border-color:var(--info-border);border-left:4px solid var(--info-accent)}"
+    ".alert-warning{background:var(--warning-bg);color:var(--warning-fg);border-color:var(--warning-border)}"
+    ".alert-info{background:var(--info-bg);color:var(--info-fg);border-color:var(--info-border)}"
     ".status-dot{width:12px;height:12px;border-radius:50%;display:inline-block}"
     ".status-inactive{background:var(--muted)}"
     ".status-active{background:var(--success)}", HTTPD_RESP_USE_STRLEN);

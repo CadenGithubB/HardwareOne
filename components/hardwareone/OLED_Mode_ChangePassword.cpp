@@ -10,9 +10,9 @@
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"
+#include "System_Debug.h"
 #include "System_User.h"
 #include "System_Utils.h"
-#include "System_User.h"
 
 extern DisplayDriver* oledDisplay;
 extern bool oledConnected;
@@ -54,8 +54,19 @@ static void displayChangePasswordMode() {
   oledDisplay->setCursor(0, 0);
   oledDisplay->setTextSize(1);
   oledDisplay->println("Change Password");
-  oledDrawHLine(0, 9, 128);
-  
+  oledDisplay->drawFastHLine(0, 9, 128, SSD1306_WHITE);
+
+  // Guard: must be authenticated to change password
+  if (!isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+    oledDisplay->println("Not logged in.");
+    oledDisplay->println();
+    oledDisplay->println("Enable display auth");
+    oledDisplay->println("in Output settings,");
+    oledDisplay->println("then log in first.");
+    return;
+  }
+
   // Show current user
   String currentUser = getTransportUser(SOURCE_LOCAL_DISPLAY);
   int yPos = OLED_CONTENT_START_Y;
@@ -246,9 +257,8 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
       
       // Execute password change command
       passwordChangeInProgress = true;
-      String cmd = "user changepassword " + currentPassBuffer + " " + newPassBuffer + " " + confirmPassBuffer;
-      
-      const char* result = executeCLICommand(cmd.c_str());
+      String args = currentPassBuffer + " " + newPassBuffer + " " + confirmPassBuffer;
+      const char* result = cmd_user_changepassword(args);
       
       passwordChangeInProgress = false;
       
@@ -354,5 +364,8 @@ static const OLEDModeEntry changePasswordModeEntries[] = {
 };
 
 REGISTER_OLED_MODE_MODULE(changePasswordModeEntries, 1, "ChangePassword");
+
+// Force linker to include this file - called from OLED_Utils.cpp
+void oledChangePasswordModeInit() {}
 
 #endif // ENABLE_OLED_DISPLAY

@@ -15,8 +15,17 @@
 
 #include <stdint.h>
 
-// Forward declare notification source enum from OLED_Utils.h
-enum NotificationSource : uint8_t;
+// Notification source — defined here so all callers get the values without
+// pulling in OLED headers. OLED_Utils.h includes this header and reuses it.
+enum NotificationSource : uint8_t {
+  NOTIF_SOURCE_UNKNOWN = 0,
+  NOTIF_SOURCE_CLI     = 1,
+  NOTIF_SOURCE_OLED    = 2,
+  NOTIF_SOURCE_WEB     = 3,
+  NOTIF_SOURCE_VOICE   = 4,
+  NOTIF_SOURCE_REMOTE  = 5,
+  NOTIF_SOURCE_SYSTEM  = 6   // Firmware-generated: sensor starts, WiFi events, etc.
+};
 
 // ============================================================================
 // Notification Source Context
@@ -24,11 +33,32 @@ enum NotificationSource : uint8_t;
 
 // Set the source context for notifications (call before executing commands)
 // source: NotificationSource enum value
-// subsource: IP address, device name, or MAC address (optional)
+// subsource: username, device name, or IP address (optional)
 void setNotificationContext(uint8_t source, const char* subsource = nullptr);
 
 // Clear the source context (call after command completes)
 void clearNotificationContext();
+
+// RAII guard — sets the notification context on construction and clears it
+// automatically when the guard goes out of scope, covering every return path.
+//
+// Use this instead of manual set/clear pairs:
+//   NotificationContextGuard guard(NOTIF_SOURCE_WEB, "hub");
+//   // ... any early returns, throws, etc. all clear cleanly
+//
+struct NotificationContextGuard {
+  NotificationContextGuard(uint8_t source, const char* subsource = nullptr) {
+    setNotificationContext(source, subsource);
+  }
+  ~NotificationContextGuard() {
+    clearNotificationContext();
+  }
+  // Stack-only: prevent copy and move so the destructor fires exactly once
+  NotificationContextGuard(const NotificationContextGuard&) = delete;
+  NotificationContextGuard& operator=(const NotificationContextGuard&) = delete;
+  NotificationContextGuard(NotificationContextGuard&&) = delete;
+  NotificationContextGuard& operator=(NotificationContextGuard&&) = delete;
+};
 
 // ============================================================================
 // Pairing / Connection Events

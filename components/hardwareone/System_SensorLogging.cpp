@@ -40,7 +40,6 @@
 #if ENABLE_GPS_SENSOR
   #include "i2csensor-pa1010d.h"
   #include <Adafruit_GPS.h>
-  #include "System_Maps.h"
 #endif
 #if ENABLE_PRESENCE_SENSOR
   #include "i2csensor-sths34pf80.h"
@@ -311,10 +310,8 @@ void sensorLogTick() {
     }
     trackWasConnected = true;
 
-    // Feed live map tracking if active
-    if (GPSTrackManager::isLiveTracking()) {
-      GPSTrackManager::appendPoint(s.gpsLatitude, s.gpsLongitude);
-    }
+    // NOTE: Live track (GPSTrackManager::appendPoint) is fed directly by
+    // gpsTask in i2csensor-pa1010d.cpp, independent of sensor logging.
 
     snprintf(buf, sizeof(buf), "%s,%.6f,%.6f,%.1f,%.1f,%d",
              ts, s.gpsLatitude, s.gpsLongitude, s.gpsAltitude, s.gpsSpeed, (int)s.gpsSatellites);
@@ -683,12 +680,21 @@ const char* cmd_sensorlog(const String& argsInput) {
 
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-    // Ensure directory exists
+    // Ensure directory exists (mkdir is non-recursive, create parents first)
     int lastSlash = filepath.lastIndexOf('/');
     if (lastSlash > 0) {
       String dir = filepath.substring(0, lastSlash);
       if (!LittleFS.exists(dir)) {
-        if (!LittleFS.mkdir(dir)) {
+        // Create parent directories iteratively
+        for (int i = 1; i <= (int)dir.length(); i++) {
+          if (i == (int)dir.length() || dir.charAt(i) == '/') {
+            String parent = dir.substring(0, i);
+            if (parent.length() > 0 && !LittleFS.exists(parent)) {
+              LittleFS.mkdir(parent);
+            }
+          }
+        }
+        if (!LittleFS.exists(dir)) {
           snprintf(getDebugBuffer(), 1024, "Error: Failed to create directory: %s", dir.c_str());
           return getDebugBuffer();
         }
@@ -1087,7 +1093,10 @@ void sensorLogAutoStart() {
   snprintf(pathBuf, sizeof(pathBuf), "%s%s-%s%s", dir.c_str(), baseName.c_str(), timestamp, ext.c_str());
   path = pathBuf;
 
-  // Ensure /logs/sensors directory exists before starting
+  // Ensure /logs/sensors directory exists before starting (mkdir is non-recursive)
+  if (!LittleFS.exists("/logs")) {
+    LittleFS.mkdir("/logs");
+  }
   if (!LittleFS.exists("/logs/sensors")) {
     if (!LittleFS.mkdir("/logs/sensors")) {
       broadcastOutput("[sensorlog] Auto-start failed: Could not create /logs/sensors directory");

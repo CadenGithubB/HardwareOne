@@ -165,7 +165,6 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_MemUtil.h"
 
 bool createGamepadTask();
-void ensureDeviceRegistryFile();
 bool isSensorConnected(const char* moduleName);
 void setCurrentCommandContext(const CommandContext& ctx);
 bool initGamepad();
@@ -375,10 +374,6 @@ void sensorStatusBump() {
 
 extern Adafruit_NeoPixel pixels;
 extern BatteryState gBatteryState;
-
-// Legacy auth defaults (still used by loadUsersFromFile)
-static String DEFAULT_AUTH_USER = "admin";
-static String DEFAULT_AUTH_PASS = "admin";
 
 // Globals
 #if ENABLE_HTTP_SERVER
@@ -978,7 +973,6 @@ static void heapLogSummary(const char* tag) {
                    (unsigned)main_hwm);
 }
 
-extern void ensureDeviceRegistryFile();
 extern void discoverI2CDevices();
 
 #if ENABLE_AUTOMATION
@@ -1535,7 +1529,6 @@ void hardwareone_setup() {
   oledSetBootProgress(60, "Scanning devices");
 
   DEBUG_SYSTEMF("Starting device discovery");
-  ensureDeviceRegistryFile();
   
   // Give slower I2C devices (GPS, FM Radio, Gamepad) extra time to initialize after power-on
   // Some sensors need 1-2 seconds to become responsive on I2C bus
@@ -1635,7 +1628,7 @@ void hardwareone_setup() {
 
   // MQTT client - auto-start if enabled in settings and WiFi is connected
 #if ENABLE_MQTT
-  if (gSettings.mqttAutoStart) {
+  if (gSettings.mqttClientEnabled && gSettings.mqttAutoStart) {
     oledSetBootProgress(92, "Starting MQTT");
     if (WiFi.isConnected()) {
       runUnifiedSystemCommand("openmqtt");
@@ -1956,8 +1949,8 @@ void hardwareone_loop() {
   }
 
   // ========================================================================
-  // YIELD — give scheduler 1ms to run lower-priority tasks
+  // YIELD — give scheduler time to run lower-priority tasks and service ISRs
   // ========================================================================
 
-  delay(1);
+  delay(2);
 } 

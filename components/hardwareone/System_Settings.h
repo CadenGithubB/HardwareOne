@@ -164,7 +164,7 @@ struct Settings {
       oledBootMode(""),
       oledDefaultMode(""),
       oledBootDuration(2000),
-      oledUpdateInterval(200),
+      oledUpdateInterval(125),
       oledBrightness(255),
       oledThermalScale(2.5f),
       oledThermalColorMode(""),
@@ -238,6 +238,7 @@ struct Settings {
       srAfeGain(1.0f),
       srAgcMode(2),
       srVadMode(3),
+      mqttClientEnabled(true),
       mqttAutoStart(false),
       mqttHost(""),
       mqttPort(1883),
@@ -378,6 +379,11 @@ struct Settings {
   bool debugImuFrame;       // IMU frame timing, cache operations
   bool debugImuData;        // IMU data updates
   bool debugApdsFrame;      // APDS frame timing, connection
+  // Maps debug flags
+  bool debugMaps;           // Maps (parent flag)
+  bool debugMapsLoading;    // Map file loading, tile directory parsing
+  bool debugMapsRendering;  // Map render pipeline, feature drawing, viewport
+  bool debugMapsPerf;       // Map performance timing (render ms, tile I/O, cache, FPS)
   // Auth sub-flags
   bool debugAuthSessions;
   bool debugAuthCookies;
@@ -494,7 +500,7 @@ struct Settings {
   String oledBootMode;          // Initial mode during boot: logo, status, sensors, thermal, off
   String oledDefaultMode;       // Mode to switch to after boot completes
   int oledBootDuration;         // Milliseconds to show boot mode before switching to default
-  int oledUpdateInterval;       // Update interval in milliseconds (5 Hz = 200ms)
+  int oledUpdateInterval;       // Update interval in milliseconds (8 Hz = 125ms)
   int oledBrightness;           // Display brightness/contrast 0-255
   float oledThermalScale;       // Scaling factor for thermal image (2.5 = 80x60)
   String oledThermalColorMode;  // Visualization style: 3level, 2level, gradient
@@ -580,6 +586,7 @@ struct Settings {
   int srAgcMode;                // AGC mode: 0=off, 1=-9dB, 2=-6dB, 3=-3dB (default: 2)
   int srVadMode;                // VAD sensitivity: 0-4, higher=more sensitive (default: 3)
   // MQTT Home Assistant Integration settings
+  bool mqttClientEnabled;       // Master enable/disable for MQTT subsystem (default: true)
   bool mqttAutoStart;           // Auto-start MQTT client at boot if WiFi connected (default: false)
   String mqttHost;              // MQTT broker hostname or IP (default: "")
   int mqttPort;                 // MQTT broker port (default: 1883, 8883 for TLS)

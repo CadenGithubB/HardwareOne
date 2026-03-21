@@ -13,7 +13,9 @@
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sensors.h"
 #include "System_I2C.h"
+#include "System_Maps.h"
 #include "System_MemoryMonitor.h"
+#include "System_SensorLogging.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 
@@ -365,6 +367,12 @@ void gpsTask(void* parameter) {
               gGPSCache.second = gPA1010D->seconds;
               gGPSCache.dataValid = true;
               gGPSCache.lastUpdate = nowMs;
+
+              // Feed live track directly from GPS task (independent of sensor logging)
+              if (gPA1010D->fix && GPSTrackManager::isLiveTracking()) {
+                GPSTrackManager::appendPoint(gPA1010D->latitudeDegrees, gPA1010D->longitudeDegrees);
+              }
+
               xSemaphoreGive(gGPSCache.mutex);
             }
             
@@ -522,6 +530,66 @@ const char* cmd_gpsautostart(const String& argsInput) {
   return "Usage: gpsautostart [on|off]";
 }
 
+// One-shot command: persist all GPS logging settings AND start everything immediately.
+// Usage: gpslog [interval_ms]   (default 1000ms)
+const char* cmd_gpslog(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  // Parse optional interval argument
+  String arg = argsInput;
+  arg.trim();
+  uint32_t intervalMs = 1000;
+  if (arg.length() > 0) {
+    long parsed = arg.toInt();
+    if (parsed >= 100 && parsed <= 3600000) {
+      intervalMs = (uint32_t)parsed;
+    } else {
+      return "Usage: gpslog [interval_ms]  (default 1000, min 100)";
+    }
+  }
+
+  // ── 1. Persist all settings via their own command handlers ─────────────
+  // Using command-in-command (not raw setSetting) so validation and any
+  // side-effects in each handler run exactly as they would for a user call.
+  // There is no recursion: none of these handlers call back to cmd_gpslog.
+  cmd_gpsautostart("on");           // persists gSettings.gpsAutoStart
+  cmd_sensorlog("autostart on");    // persists gSettings.sensorLogAutoStart
+
+  // "format track" already forces gSensorLogMask = LOG_GPS internally,
+  // so a separate "sensors gps" call would be redundant.
+  cmd_sensorlog("format track");
+
+  // No "interval" subcommand exists in sensorlog, so set both the persisted
+  // setting and the live runtime variable directly.
+  setSetting(gSettings.sensorLogIntervalMs, (int)intervalMs);
+  gSensorLogIntervalMs = intervalMs;
+
+  // ── 2. Start GPS sensor now if not already running ───────────────────────
+  bool gpsWasRunning = gpsEnabled;
+  if (!gpsWasRunning) {
+    cmd_gpsstart("");
+  }
+
+  // ── 3. Start sensor logging now for this boot ────────────────────────────
+  // sensorLogAutoStart() creates the timestamped file + directories and
+  // calls cmd_sensorlog("start ...") internally — identical to what would
+  // happen on the next boot automatically.
+  if (!gSensorLoggingEnabled) {
+    sensorLogAutoStart();
+  }
+
+  static char result[300];
+  snprintf(result, sizeof(result),
+    "[gpslog] Active — interval=%lums, autostart=on\n"
+    "  GPS:    %s\n"
+    "  Log:    %s",
+    (unsigned long)intervalMs,
+    gpsWasRunning ? "was already running" : "started now",
+    gSensorLoggingEnabled ? gSensorLogPath.c_str() : "FAILED to start — check serial output"
+  );
+  return result;
+}
+
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry gpsCommands[] = {
   // 3-level voice: "sensor" -> "GPS" -> "open/close"
@@ -531,6 +599,15 @@ const CommandEntry gpsCommands[] = {
   
   // Auto-start
   { "gpsautostart", "Enable/disable GPS auto-start after boot [on|off]", false, cmd_gpsautostart, "Usage: gpsautostart [on|off]" },
+
+  // One-shot GPS logging setup: persists all settings AND starts immediately
+  { "gpslog", "Set up and start GPS track logging now (persists across boots). Usage: gpslog [interval_ms]", false, cmd_gpslog,
+    "Usage: gpslog [interval_ms]\n"
+    "  Sets gpsAutoStart, sensorlog format=track, sensors=gps, and autostart,\n"
+    "  then starts both the GPS sensor and sensor logging immediately.\n"
+    "  interval_ms: log interval in ms (default 1000, min 100)\n"
+    "  Example: gpslog        (1-second logging)\n"
+    "           gpslog 500   (500ms logging)" },
 };
 
 const size_t gpsCommandsCount = sizeof(gpsCommands) / sizeof(gpsCommands[0]);

@@ -97,6 +97,7 @@ static bool notifyCooldownOk(uint32_t& lastMs) {
 // ============================================================================
 
 void notifyPairConnected(const char* peerName) {
+  NotificationContextGuard guard(NOTIF_SOURCE_SYSTEM);
   #if ENABLE_OLED_DISPLAY
   oledPairingRibbonShow(peerName, PairingRibbonIcon::LINK, 3000, true);
   #endif
@@ -106,6 +107,7 @@ void notifyPairConnected(const char* peerName) {
 }
 
 void notifyPairDisconnected(const char* peerName) {
+  NotificationContextGuard guard(NOTIF_SOURCE_SYSTEM);
   #if ENABLE_OLED_DISPLAY
   oledPairingRibbonShow(peerName, PairingRibbonIcon::LINK_OFF, 4000, true);
   #endif
@@ -115,6 +117,7 @@ void notifyPairDisconnected(const char* peerName) {
 }
 
 void notifyPairHandshakeComplete(const char* peerName) {
+  NotificationContextGuard guard(NOTIF_SOURCE_SYSTEM);
   #if ENABLE_OLED_DISPLAY
   oledPairingRibbonShow(peerName, PairingRibbonIcon::LINK, 3000, true);
   #endif
@@ -186,6 +189,7 @@ void notifyRemoteCommandReceived(const char* deviceName, const char* commandText
 // ============================================================================
 
 void notifyWiFiConnected(const char* ipAddress) {
+  NotificationContextGuard guard(NOTIF_SOURCE_SYSTEM);
   char msg[32];
   snprintf(msg, sizeof(msg), "WiFi: %s", ipAddress ? ipAddress : "connected");
   #if ENABLE_OLED_DISPLAY
@@ -195,6 +199,7 @@ void notifyWiFiConnected(const char* ipAddress) {
 }
 
 void notifyWiFiDisconnected() {
+  NotificationContextGuard guard(NOTIF_SOURCE_SYSTEM);
   #if ENABLE_OLED_DISPLAY
   oledNotificationBannerShow("WiFi off", PairingRibbonIcon::INFO_ICON, 2000);
   #endif
@@ -219,6 +224,7 @@ void notifyVolumeChanged(int volume, int maxVolume) {
 // ============================================================================
 
 void notifyBleDeviceConnected(const char* deviceName) {
+  NotificationContextGuard guard(NOTIF_SOURCE_SYSTEM);
   char msg[48];
   snprintf(msg, sizeof(msg), "BLE: %s", deviceName ? deviceName : "connected");
   #if ENABLE_OLED_DISPLAY
@@ -228,6 +234,7 @@ void notifyBleDeviceConnected(const char* deviceName) {
 }
 
 void notifyBleDeviceDisconnected(const char* deviceName) {
+  NotificationContextGuard guard(NOTIF_SOURCE_SYSTEM);
   char msg[48];
   snprintf(msg, sizeof(msg), "BLE: %s off", deviceName ? deviceName : "device");
   #if ENABLE_OLED_DISPLAY
@@ -329,6 +336,9 @@ void notifySettingChanged(const char* key, const char* value) {
 // ============================================================================
 
 void notifySensorStarted(const char* sensorName, bool success) {
+  // Sensor lifecycle events are firmware-initiated — use SYSTEM source so they
+  // never inherit a stale user context from a concurrent command task.
+  NotificationContextGuard guard(NOTIF_SOURCE_SYSTEM);
   char msg[32];
   snprintf(msg, sizeof(msg), "%s: %s", sensorName ? sensorName : "Sensor",
            success ? "started" : "failed");
@@ -340,6 +350,7 @@ void notifySensorStarted(const char* sensorName, bool success) {
 }
 
 void notifySensorStopped(const char* sensorName) {
+  NotificationContextGuard guard(NOTIF_SOURCE_SYSTEM);
   char msg[32];
   snprintf(msg, sizeof(msg), "%s: stopped", sensorName ? sensorName : "Sensor");
   #if ENABLE_OLED_DISPLAY

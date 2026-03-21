@@ -24,7 +24,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
 .espnow-title { font-size: 1.3em; font-weight: bold; margin-bottom: 10px; color: var(--panel-fg); display: flex; align-items: center; gap: 10px; }
 .espnow-description { color: var(--muted); margin-bottom: 15px; font-size: 0.9em; }
 .espnow-controls { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
-.espnow-data { background: var(--crumb-bg); border-radius: 8px; padding: 15px; font-family: 'Courier New', monospace; font-size: 0.9em; border-left: 4px solid var(--link); min-height: 60px; color: var(--panel-fg); }
+.espnow-data { background: var(--crumb-bg); border-radius: 8px; padding: 15px; font-family: 'Courier New', monospace; font-size: 0.9em; min-height: 60px; color: var(--panel-fg); }
 .status-indicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
 .status-enabled { background: #28a745; animation: pulse 2s infinite; }
 .status-disabled { background: #dc3545; }
@@ -56,7 +56,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
 .message-empty { text-align: center; color: var(--muted); padding: 20px; font-style: italic; }
 .input-group { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; width: 100%; }
 .input-group input { flex: 1 1 200px; max-width: 100%; min-width: 0; box-sizing: border-box; }
-.mesh-warning { display:none; background:var(--warning-bg); border:1px solid var(--warning-border); color:var(--warning-fg); border-left:4px solid var(--warning-accent); padding:12px; border-radius:8px; margin-top:10px; }
+.mesh-warning { display:none; background:var(--warning-bg); border:1px solid var(--warning-border); color:var(--warning-fg); padding:12px; border-radius:8px; margin-top:10px; }
 #pair-mac { flex: 1 1 260px; min-width: 200px; }
 #pair-name { flex: 2 1 360px; min-width: 220px; }
 .mac-input { font-family: 'Courier New', monospace; }
@@ -1693,7 +1693,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           html += '<div><label style="font-weight:600;color:var(--panel-fg);display:block;margin-bottom:4px">Stationary</label>';
           html += '<div style="padding:8px;background:var(--panel-bg);border-radius:4px;border:1px solid var(--border)">' + (data.stationary ? 'Yes' : 'No') + '</div></div>';
           
-          html += '<div style="margin-top:8px;padding:8px;background:var(--panel-bg);border-radius:4px;border-left:3px solid var(--link);font-size:0.85em;color:var(--panel-fg)">';
+          html += '<div style="margin-top:8px;padding:8px;background:var(--panel-bg);border-radius:4px;font-size:0.85em;color:var(--panel-fg)">';
           html += '<strong>Source:</strong> ' + (data.source === 'mesh' ? 'Mesh/Pairing Mode' : 'Bonded Mode (Cached)');
           html += '</div>';
 
@@ -2009,7 +2009,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
                 }
               }
               
-              html += '<div style="padding:10px;margin:5px 0;background:var(--panel-bg);border-left:4px solid ' + statusColor + ';border-radius:4px;">';
+              html += '<div style="padding:10px;margin:5px 0;background:var(--panel-bg);border-radius:4px;">';
               html += '<div style="display:flex;align-items:center;justify-content:space-between;">';
               html += '<div style="flex:1;">';
               html += '<span style="font-size:1.2em;color:' + statusColor + ';">' + indicator + '</span> ';
@@ -2036,7 +2036,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
               var device = data.unpaired[i];
               var rssiColor = device.rssi > -60 ? 'var(--success)' : (device.rssi > -75 ? 'var(--warning)' : 'var(--danger)');
               
-              html += '<div style="padding:10px;margin:5px 0;background:var(--panel-bg);border-left:4px solid var(--border);border-radius:4px;">';
+              html += '<div style="padding:10px;margin:5px 0;background:var(--panel-bg);border-radius:4px;">';
               html += '<div style="display:flex;align-items:center;justify-content:space-between;">';
               html += '<div style="flex:1;">';
               html += '<span style="font-size:1.2em;color:var(--panel-fg);">Unknown</span> ';
@@ -2257,7 +2257,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
             }
             
             if (dev.peers.length > 0) {
-              html += '<div style="border-left:3px solid var(--success);padding-left:12px;margin-left:8px;">';
+              html += '<div style="padding-left:12px;margin-left:8px;">'; 
               for (var j = 0; j < dev.peers.length; j++) {
                 var peer = dev.peers[j];
                 var signalColor = 'var(--success)';

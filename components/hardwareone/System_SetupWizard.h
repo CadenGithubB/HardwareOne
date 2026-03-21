@@ -18,7 +18,9 @@ enum SetupWizardPage {
   WIZARD_PAGE_FEATURES = 0,   // Network features (WiFi, HTTP, BT, ESP-NOW)
   WIZARD_PAGE_SENSORS,        // Display + I2C sensors
   WIZARD_PAGE_NETWORK,        // Auto-start options, device name
-  WIZARD_PAGE_SYSTEM,         // Time zone, log level
+  WIZARD_PAGE_SYSTEM,         // Time zone, log level, NTP, LED effect
+  WIZARD_PAGE_ESPNOW,         // ESP-NOW identity (conditional: ESP-NOW enabled)
+  WIZARD_PAGE_MQTT,           // MQTT broker config (conditional: MQTT enabled+autostarted)
   WIZARD_PAGE_WIFI,           // WiFi SSID/password (conditional)
   WIZARD_PAGE_COUNT
 };
@@ -33,6 +35,20 @@ struct SetupWizardResult {
   String deviceName;
   int timezoneOffset;         // Minutes from UTC
   String timezoneAbbrev;      // e.g., "EST", "PST"
+  // ESP-NOW identity (all optional — empty = use defaults)
+  String espnowRoom;
+  String espnowZone;
+  String espnowFriendlyName;
+  bool espnowStationary;      // false = mobile (default)
+  // MQTT broker
+  String mqttHost;
+  int mqttPort;               // 0 = use default (1883)
+  String mqttUser;
+  String mqttPassword;
+  // NTP server
+  String ntpServer;
+  // LED startup effect
+  String ledStartupEffect;
 };
 
 // Feature item for display
@@ -96,6 +112,17 @@ size_t getLogLevelCount();
 void rebuildNetworkSettingsPage();
 bool hasNetworkSettings();
 
+// System page items
+size_t getWizardSystemPageCount();
+int getWizardNTPSelection();
+void setWizardNTPSelection(int sel);
+int getWizardLEDEffectSelection();
+void setWizardLEDEffectSelection(int sel);
+const char* const* getNTPPresets();
+size_t getNTPPresetCount();
+const char* const* getLEDEffects();
+size_t getLEDEffectCount();
+
 // ============================================================================
 // Wizard Actions
 // ============================================================================
@@ -111,8 +138,15 @@ bool wizardNextPage(SetupWizardResult& result);
 bool wizardPrevPage();
 bool wizardCycleOption();  // For system page options
 
-// Check if wizard should show WiFi page
+// Page visibility and navigation
+bool wizardIsPageVisible(SetupWizardPage page);
+SetupWizardPage wizardAdvanceFrom(SetupWizardPage current);
+SetupWizardPage wizardRetreatFrom(SetupWizardPage current);
+int getWizardTotalPages();
+int getWizardPageNumber(SetupWizardPage page);
 bool wizardShouldShowWiFi();
+bool wizardShouldShowESPNow();
+bool wizardShouldShowMQTT();
 
 // Finalize wizard results
 void wizardFinalize(SetupWizardResult& result);

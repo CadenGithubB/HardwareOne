@@ -279,6 +279,7 @@ String setSession(httpd_req_t* req, const String& u) {
   s.ip = ip;
   s.sockfd = httpd_req_to_sockfd(req);  // Store socket descriptor for force disconnect
   gSessions[idx] = s;
+  updateUserLastSeen(u);
   // New session should reconcile UI immediately on next SSE ping
   gSessions[idx].needsStatusUpdate = true;
   gSessions[idx].lastSensorSeqSent = 0;
@@ -963,7 +964,6 @@ extern void streamSettingsContent(httpd_req_t* req, const String& username);
 extern char* gJsonResponseBuffer;
 extern void buildSettingsJsonDoc(JsonDocument& doc, bool excludeWifiPasswords);
 extern bool isAdminUser(const String& username);
-extern void ensureDeviceRegistryFile();
 extern String getCookieSID(httpd_req_t* req);
 extern void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
 extern bool isAuthed(httpd_req_t* req, String& userOut);
@@ -1432,6 +1432,12 @@ void buildSystemInfoJson(JsonDocument& doc) {
     ws["maxSessions"] = MAX_SESSIONS;
   }
 #endif
+
+#if ENABLE_I2C_SYSTEM
+  doc["i2c_enabled"] = gI2CBusEnabled;
+#else
+  doc["i2c_enabled"] = false;
+#endif
 }
 
 // ============================================================================
@@ -1819,12 +1825,9 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Base64 encoding adds ~33% overhead, plus URL encoding. Allow up to 3.5MB on wire for ~2.5MB actual files.
-  // Maps are loaded fully into PSRAM, so limit size to leave room for other allocations.
-  const size_t kMaxUpload = 3584 * 1024;  // 3.5MB on wire = ~2.5MB actual
   size_t contentLen = req->content_len;
 
-  // Check available storage space FIRST - more helpful error message
+  // Check available storage space dynamically
   size_t totalBytes = 0;
   size_t usedBytes = 0;
   {
@@ -1833,30 +1836,24 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     usedBytes = LittleFS.usedBytes();
   }
   size_t freeBytes = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
-  // Estimate actual file size from content length (remove ~33% base64 overhead)
+  // Estimate actual file size from content length (remove ~33% base64 + URL-encoding overhead)
   size_t estimatedFileSize = (contentLen * 3) / 4;
+  // Dynamic limit: 90% of free space (leave headroom for filesystem metadata)
+  size_t maxFileSize = (freeBytes * 9) / 10;
   
-  DEBUG_STORAGEF("[handleFileUpload] Content-Length: %d bytes (est file: %d), free space: %d, heap=%u", 
-                 contentLen, estimatedFileSize, freeBytes, (unsigned)ESP.getFreeHeap());
+  DEBUG_STORAGEF("[handleFileUpload] Content-Length: %d bytes (est file: %d), free space: %d, max: %d, heap=%u", 
+                 contentLen, estimatedFileSize, freeBytes, maxFileSize, (unsigned)ESP.getFreeHeap());
   
-  // Check storage space first - give more specific error
-  if (estimatedFileSize > freeBytes) {
-    DEBUG_STORAGEF("[handleFileUpload] ERROR: Insufficient storage space");
+  // Check if estimated file size exceeds available space
+  if (estimatedFileSize > maxFileSize) {
+    DEBUG_STORAGEF("[handleFileUpload] ERROR: File too large for available space");
     gSensorPollingPaused = wasPaused;
     httpd_resp_set_type(req, "application/json");
     char errBuf[128];
     snprintf(errBuf, sizeof(errBuf), 
-             "{\"success\":false,\"error\":\"Not enough space. File ~%.1fMB, free %.1fMB\"}", 
+             "{\"success\":false,\"error\":\"File too large (~%.1fMB). Free: %.1fMB\"}", 
              estimatedFileSize / (1024.0 * 1024.0), freeBytes / (1024.0 * 1024.0));
     httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  
-  if (contentLen > kMaxUpload) {
-    DEBUG_STORAGEF("[handleFileUpload] ERROR: Request too large");
-    gSensorPollingPaused = wasPaused;
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"File too large (max ~2.5MB)\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
 
@@ -4952,7 +4949,7 @@ void startHttpServer() {
       sslConfig.httpd.stack_size = 11059;
       sslConfig.httpd.recv_wait_timeout = 10;
       sslConfig.httpd.send_wait_timeout = 10;
-      sslConfig.httpd.max_open_sockets = 3;  // Conservative: DRAM still limited despite PSRAM TLS buffers
+      sslConfig.httpd.max_open_sockets = 2;  // Limit concurrent TLS handshakes to reduce peripheral spinlock contention
       sslConfig.servercert = (const uint8_t*)sHttpsCertData.c_str();
       sslConfig.servercert_len = sHttpsCertData.length() + 1;  // Include null terminator (PEM)
       sslConfig.prvtkey_pem = (const uint8_t*)sHttpsKeyData.c_str();

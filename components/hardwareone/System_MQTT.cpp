@@ -186,6 +186,7 @@ bool getExternalSensor(int index, String& topic, String& name, String& value, un
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry mqttSettingEntries[] = {
+  { "mqttClientEnabled",       SETTING_BOOL,   &gSettings.mqttClientEnabled,      true,  0, nullptr, 0, 1, "MQTT Enabled", nullptr, false },
   { "mqttAutoStart",          SETTING_BOOL,   &gSettings.mqttAutoStart,          false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false },
   { "mqttHost",               SETTING_STRING, &gSettings.mqttHost,               0, 0, "", 0, 0, "Broker Host", nullptr, false },
   { "mqttPort",               SETTING_INT,    &gSettings.mqttPort,               1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false },
@@ -830,6 +831,11 @@ bool startMQTT() {
   if (mqttEnabled) {
     return true;
   }
+
+  if (!gSettings.mqttClientEnabled) {
+    lastError = "MQTT disabled (mqttClientEnabled=false)";
+    return false;
+  }
   
   // Initialize external sensor storage
   initExternalSensorStorage();
@@ -1161,6 +1167,23 @@ const char* cmd_mqttstatus(const String& argsInput) {
 // ============================================================================
 // MQTT Settings CLI Commands
 // ============================================================================
+
+const char* cmd_mqttclientenabled(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  String arg = argsInput;
+  arg.trim();
+  if (arg.length() == 0) {
+    return gSettings.mqttClientEnabled ? "MQTT client: enabled" : "MQTT client: disabled";
+  }
+  bool enable = (arg == "1" || arg.equalsIgnoreCase("on") || arg.equalsIgnoreCase("true") || arg.equalsIgnoreCase("enable"));
+  setSetting(gSettings.mqttClientEnabled, enable);
+  if (!enable) {
+    stopMQTT();
+    return "MQTT client disabled";
+  }
+  return "MQTT client enabled";
+}
 
 const char* cmd_mqttautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1510,6 +1533,7 @@ MQTT_PUBLISH_CMD(gamepad, mqttPublishGamepad, "Gamepad")
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry mqttCommands[] = {
   { "debugmqtt", "MQTT debug logging [0|1]", true, cmd_debugmqtt, "Usage: debugmqtt [0|1]" },
+  { "mqttclientenabled", "Enable/disable MQTT [0|1]", true, cmd_mqttclientenabled, "Usage: mqttclientenabled [0|1]" },
   { "openmqtt", "Start MQTT client", false, cmd_openmqtt },
   { "closemqtt", "Stop MQTT client", false, cmd_closemqtt },
   { "mqttstatus", "Show MQTT status", false, cmd_mqttstatus },

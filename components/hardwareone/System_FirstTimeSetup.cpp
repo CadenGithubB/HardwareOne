@@ -192,16 +192,23 @@ void firstTimeSetupIfNeeded() {
     broadcastOutput("Select setup mode:");
     broadcastOutput("  1. Basic Setup        - Quick start (username + password only)");
     broadcastOutput("  2. Advanced Setup     - Full configuration wizard");
+#if ENABLE_HTTP_SERVER && ENABLE_WIFI
     broadcastOutput("  3. Import from Backup - Restore settings from .hwbackup file");
     broadcastOutput("");
     broadcastOutput("Enter 1, 2, or 3 (default: 1): ");
-    
+#else
+    broadcastOutput("");
+    broadcastOutput("Enter 1 or 2 (default: 1): ");
+#endif
+
     String modeInput = waitForSerialInputBlocking();
     modeInput.trim();
     if (modeInput == "2" || modeInput.equalsIgnoreCase("advanced")) {
       setupMode = 1;
+#if ENABLE_HTTP_SERVER && ENABLE_WIFI
     } else if (modeInput == "3" || modeInput.equalsIgnoreCase("restore") || modeInput.equalsIgnoreCase("import")) {
       setupMode = 2;
+#endif
     } else {
       setupMode = 0;
     }
@@ -402,7 +409,9 @@ void firstTimeSetupIfNeeded() {
   
   // Username stage
   setSetupProgressStage(SETUP_PROMPT_USERNAME);
-  broadcastOutput("Enter admin username (cannot be blank): ");
+  if (!(oledEnabled && oledConnected)) {
+    broadcastOutput("Enter admin username (cannot be blank): ");
+  }
   String u = "";
   while (u.length() == 0) {
 #if ENABLE_OLED_DISPLAY
@@ -412,7 +421,9 @@ void firstTimeSetupIfNeeded() {
 #endif
     u.trim();
     if (u.length() == 0) {
-      broadcastOutput("Username cannot be blank. Please enter admin username: ");
+      if (!(oledEnabled && oledConnected)) {
+        broadcastOutput("Username cannot be blank. Please enter admin username: ");
+      }
 #if ENABLE_OLED_DISPLAY
       showOLEDMessage("Username cannot\nbe blank!", true);
 #endif
@@ -423,7 +434,9 @@ void firstTimeSetupIfNeeded() {
   setSetupProgressStage(SETUP_PROMPT_PASSWORD);
   String p = "";
   while (p.length() == 0) {
-    broadcastOutput("Enter admin password (cannot be blank): ");
+    if (!(oledEnabled && oledConnected)) {
+      broadcastOutput("Enter admin password (cannot be blank): ");
+    }
 #if ENABLE_OLED_DISPLAY
     p = getOLEDTextInput("Admin Password:", true, "", 32);
 #else
@@ -431,7 +444,9 @@ void firstTimeSetupIfNeeded() {
 #endif
     p.trim();
     if (p.length() == 0) {
-      broadcastOutput("Password cannot be blank. Please enter admin password: ");
+      if (!(oledEnabled && oledConnected)) {
+        broadcastOutput("Password cannot be blank. Please enter admin password: ");
+      }
 #if ENABLE_OLED_DISPLAY
       showOLEDMessage("Password cannot\nbe blank!", true);
 #endif
@@ -454,22 +469,22 @@ void firstTimeSetupIfNeeded() {
     setSetupProgressStage(SETUP_PROMPT_HARDWARE);
     broadcastOutput("");
     broadcastOutput("Feature Configuration...");
-    
+
     // Run unified setup wizard (works on both Serial AND OLED simultaneously)
     SetupWizardResult wizardResult;
-    
+
     wizardResult = runSetupWizard();
-    
+
     if (wizardResult.completed) {
       broadcastOutput("Feature configuration complete.");
-      
+
       // Apply WiFi settings if configured
       if (wizardResult.wifiConfigured && wizardResult.wifiSSID.length() > 0) {
         wifiSSID = wizardResult.wifiSSID;
         wifiPass = wizardResult.wifiPassword;
         wifiConfigured = true;
       }
-      
+
       // Log the selections
       broadcastOutput("Timezone: " + wizardResult.timezoneAbbrev);
       {
@@ -481,68 +496,66 @@ void firstTimeSetupIfNeeded() {
         BROADCAST_PRINTF("Heap estimate: ~%lu KB", (unsigned long)estFreeKB);
       }
     }
-    
-    // Device name customization (advanced mode only)
-    // Shows on both Serial AND OLED simultaneously
-    broadcastOutput("");
-    broadcastOutput("========================================");
-    broadcastOutput("       DEVICE NAME");
-    broadcastOutput("========================================");
-    broadcastOutput("Used for Bluetooth and ESP-NOW identity.");
-    broadcastOutput("Press Enter to keep default [HardwareOne]");
-    broadcastOutput("----------------------------------------");
-    String deviceName = "";
-#if ENABLE_OLED_DISPLAY
-    // OLED text input already shows prompt on screen, serial sees the broadcastOutput above
-    deviceName = getOLEDTextInput("Device Name:", false, "HardwareOne", 20);
-#else
-    deviceName = waitForSerialInputBlocking();
-#endif
-    deviceName.trim();
-    if (deviceName.length() == 0) {
-      deviceName = "HardwareOne";
-    }
-    // Apply device name to BLE and ESP-NOW
-    gSettings.bleDeviceName = deviceName;
-    gSettings.espnowDeviceName = deviceName;
-    broadcastOutput("Device name set to: " + deviceName);
-    
-    // Theme preference (for web UI)
-    // Shows on both Serial AND OLED simultaneously
-    broadcastOutput("");
-    broadcastOutput("========================================");
-    broadcastOutput("       WEB UI THEME");
-    broadcastOutput("========================================");
-    broadcastOutput(" 1. Light (default)");
-    broadcastOutput(" 2. Dark");
-    broadcastOutput("----------------------------------------");
-    broadcastOutput("Enter 1 or 2: ");
-    String themeInput = "";
-#if ENABLE_OLED_DISPLAY
-    // For theme, show a simple selection on OLED too
-    extern bool getOLEDThemeSelection(bool& darkMode);
-    bool darkSelected = false;
-    if (oledEnabled && oledConnected && getOLEDThemeSelection(darkSelected)) {
-      themeInput = darkSelected ? "2" : "1";
-    } else {
-      themeInput = waitForSerialInputBlocking();
-    }
-#else
-    themeInput = waitForSerialInputBlocking();
-#endif
-    themeInput.trim();
-    // Store theme choice - will be applied when creating user settings
-    useDarkTheme = (themeInput == "2" || themeInput.equalsIgnoreCase("dark"));
-    broadcastOutput(useDarkTheme ? "Theme set to: Dark" : "Theme set to: Light");
-    
   } else {
-    // Basic mode uses defaults (light theme already set above)
     // Basic setup - use sensible defaults
     broadcastOutput("");
     broadcastOutput("Using default settings (Basic mode)");
     gSettings.wifiAutoReconnect = true;
     gSettings.httpAutoStart = true;
   }
+
+  // ============================================================================
+  // Device Name + Theme (both Basic and Advanced modes)
+  // ============================================================================
+
+  // Device name customization
+  broadcastOutput("");
+  broadcastOutput("========================================");
+  broadcastOutput("       DEVICE NAME");
+  broadcastOutput("========================================");
+  broadcastOutput("Used for Bluetooth and ESP-NOW identity.");
+  broadcastOutput("Press Enter to keep default [HardwareOne]");
+  broadcastOutput("----------------------------------------");
+  String deviceName = "";
+#if ENABLE_OLED_DISPLAY
+  deviceName = getOLEDTextInput("Device Name:", false, "HardwareOne", 20);
+#else
+  deviceName = waitForSerialInputBlocking();
+#endif
+  deviceName.trim();
+  if (deviceName.length() == 0) {
+    deviceName = "HardwareOne";
+  }
+  gSettings.bleDeviceName = deviceName;
+  gSettings.espnowDeviceName = deviceName;
+  broadcastOutput("Device name set to: " + deviceName);
+
+#if ENABLE_HTTP_SERVER
+  // Theme preference (for web UI only — skipped if web server is disabled)
+  broadcastOutput("");
+  broadcastOutput("========================================");
+  broadcastOutput("       WEB UI THEME");
+  broadcastOutput("========================================");
+  broadcastOutput(" 1. Light (default)");
+  broadcastOutput(" 2. Dark");
+  broadcastOutput("----------------------------------------");
+  broadcastOutput("Enter 1 or 2: ");
+  String themeInput = "";
+#if ENABLE_OLED_DISPLAY
+  extern bool getOLEDThemeSelection(bool& darkMode);
+  bool darkSelected = false;
+  if (oledEnabled && oledConnected && getOLEDThemeSelection(darkSelected)) {
+    themeInput = darkSelected ? "2" : "1";
+  } else {
+    themeInput = waitForSerialInputBlocking();
+  }
+#else
+  themeInput = waitForSerialInputBlocking();
+#endif
+  themeInput.trim();
+  useDarkTheme = (themeInput == "2" || themeInput.equalsIgnoreCase("dark"));
+  broadcastOutput(useDarkTheme ? "Theme set to: Dark" : "Theme set to: Light");
+#endif // ENABLE_HTTP_SERVER
   
   // Save WiFi credentials if configured
   if (wifiConfigured && wifiSSID.length() > 0) {
