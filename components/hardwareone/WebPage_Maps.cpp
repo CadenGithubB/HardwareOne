@@ -12,6 +12,7 @@
 #include "System_User.h"
 #include <ArduinoJson.h>
 #include "System_MemUtil.h"
+#include "System_Command.h"
 #include <LittleFS.h>
 #include <cstring>
 
@@ -111,8 +112,8 @@ esp_err_t handleMapSelectAPI(httpd_req_t* req) {
 
   String cmdOut;
   bool ok = executeUnifiedWebCommand(req, ctx, String("mapload ") + String(filepath), cmdOut);
-  if (!ok) {
-    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Failed to load map\"}");
+  if (!ok || !MapCore::hasValidMap()) {
+    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Map failed to load on device\"}");
     return ESP_OK;
   }
 
@@ -187,10 +188,44 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
   char query[256];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
     // Check for live track request
-    char liveParam[8] = {0};
+    char liveParam[16] = {0};
     if (httpd_query_key_value(query, "live", liveParam, sizeof(liveParam)) == ESP_OK) {
       httpd_resp_set_type(req, "application/json");
-      
+
+      // Handle live tracking toggle: ?live=start or ?live=stop
+      if (strcmp(liveParam, "start") == 0) {
+        // Auto-start GPS sensor if not running
+        executeCommandThroughRegistry("opengps");
+        GPSTrackManager::clearTrack();
+        GPSTrackManager::setLiveTracking(true);
+        // Auto-start file logging in track format so data persists
+        executeCommandThroughRegistry("sensorlog format track");
+        executeCommandThroughRegistry("sensorlog sensors gps");
+        executeCommandThroughRegistry("sensorlog start /logging_captures/tracks/live.csv 1000");
+        httpd_resp_sendstr(req, "{\"live\":true,\"started\":true}");
+        return ESP_OK;
+      }
+      if (strcmp(liveParam, "stop") == 0) {
+        GPSTrackManager::setLiveTracking(false);
+        executeCommandThroughRegistry("sensorlog stop");
+        httpd_resp_sendstr(req, "{\"live\":false,\"stopped\":true}");
+        return ESP_OK;
+      }
+      if (strcmp(liveParam, "save") == 0) {
+        char savedPath[96];
+        bool ok = GPSTrackManager::saveTrack(savedPath, sizeof(savedPath));
+        char resp[160];
+        if (ok) {
+          snprintf(resp, sizeof(resp), "{\"saved\":true,\"path\":\"%s\",\"points\":%d}",
+                   savedPath, GPSTrackManager::getPointCount());
+        } else {
+          snprintf(resp, sizeof(resp), "{\"saved\":false,\"error\":\"No track data to save\"}");
+        }
+        httpd_resp_sendstr(req, resp);
+        return ESP_OK;
+      }
+
+      // ?live=1 — return current live track data
       bool isLive = GPSTrackManager::isLiveTracking();
       int pointCount = GPSTrackManager::getPointCount();
       const GPSTrackStats& stats = GPSTrackManager::getStats();
@@ -582,8 +617,14 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
     const LoadedMap& map = MapCore::getCurrentMap();
     
     if (!map.valid) {
-      doc["success"] = false;
-      doc["error"] = "No map loaded";
+      // Device map not loaded — return empty list so JS still functions
+      doc["success"] = true;
+      doc["mapName"] = "";
+      doc["count"] = 0;
+      doc["max"] = MAX_WAYPOINTS;
+      doc["target"] = -1;
+      doc["deviceMapLoaded"] = false;
+      doc["waypoints"].to<JsonArray>();
     } else {
       doc["success"] = true;
       doc["mapName"] = map.filename;
@@ -620,10 +661,16 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
     httpd_resp_send(req, response.c_str(), response.length());
     
   } else if (req->method == HTTP_POST) {
-    // Parse form data
-    char buf[512];
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    // Parse form data — buffer on PSRAM to avoid httpd stack overflow
+    char* buf = (char*)ps_malloc(512);
+    if (!buf) {
+      httpd_resp_set_status(req, "503 Service Unavailable");
+      httpd_resp_send(req, "{\"success\":false,\"error\":\"OOM\"}", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
+    int ret = httpd_req_recv(req, buf, 511);
     if (ret <= 0) {
+      free(buf);
       httpd_resp_set_status(req, "400 Bad Request");
       httpd_resp_send(req, "{\"success\":false,\"error\":\"No data\"}", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
@@ -726,6 +773,7 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
       doc["error"] = "Unknown action";
     }
     
+    free(buf);
     String response;
     serializeJson(doc, response);
     

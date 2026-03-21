@@ -35,6 +35,10 @@ void renderNetworkPage();
 void renderSystemPage();
 bool renderWiFiPage(SetupWizardResult& result);
 
+// OLED handlers for text-input pages (own event loops)
+void handleOLEDESPNowPage(SetupWizardResult& result, bool& running);
+void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
+
 // Input handlers (joystick/button - called from unified loop when OLED connected)
 bool handleFeaturesInput(uint32_t buttons, JoystickNav& nav);
 bool handleSensorsInput(uint32_t buttons, JoystickNav& nav);

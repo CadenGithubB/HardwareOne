@@ -398,7 +398,7 @@ void streamBondInner(httpd_req_t* req) {
     html += '<div class="remote-title">Remote Command Execution</div>';
     html += '<div class="remote-description">Execute CLI commands on the bonded device</div>';
     html += '<div class="cli-input">';
-    html += '<input type="text" id="remote-cmd" placeholder="Enter command (e.g., sensors, memory, status)" onkeypress="if(event.key===\'Enter\')window.execRemoteCmd()">';
+    html += '<input type="text" id="remote-cmd" placeholder="Enter command (e.g., sensors, memory, status)" autocomplete="one-time-code" data-1p-ignore data-lpignore="true" data-form-type="other" onkeypress="if(event.key===\'Enter\')window.execRemoteCmd()">';
     html += '<button class="btn" onclick="window.execRemoteCmd()">Execute</button>';
     html += '</div>';
     html += '<div class="cli-output" id="remote-output">Ready for commands...</div>';
@@ -1251,60 +1251,32 @@ static esp_err_t handleBondPairedDevices(httpd_req_t* req) {
   
   httpd_resp_set_type(req, "application/json");
   
-  // Read espnow devices list
-  if (!LittleFS.exists("/system/espnow/devices.json")) {
-    httpd_resp_send(req, "{\"devices\":[]}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  
-  File f = LittleFS.open("/system/espnow/devices.json", "r");
-  if (!f) {
-    httpd_resp_send(req, "{\"devices\":[]}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  
-  String content = f.readString();
-  f.close();
-  
-  JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, content);
-  if (err) {
+  if (!gEspNow || gEspNow->deviceCount == 0) {
     httpd_resp_send(req, "{\"devices\":[]}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
   
   webBondSendChunk(req, "{\"devices\":[");
   
-  JsonArray devices = doc["devices"].as<JsonArray>();
   bool first = true;
-  for (JsonObject dev : devices) {
-    const char* rawMac = dev["mac"] | "";
-    const char* name = dev["name"] | "Unknown";
-    const char* room = dev["room"] | "";
-    const char* zone = dev["zone"] | "";
-
-    // Skip devices without MAC (all devices in this file are already paired)
-    if (strlen(rawMac) == 0) continue;
-
-    // Decrypt MAC if stored encrypted (AES: prefix)
-    String macStr = String(rawMac);
-    if (macStr.startsWith("AES:")) {
-      String decrypted = decryptString(macStr);
-      if (decrypted.length() > 0) {
-        macStr = decrypted;
-      } else {
-        continue;  // Can't decrypt, skip this device
-      }
-    }
-
+  for (int i = 0; i < gEspNow->deviceCount; i++) {
+    EspNowDevice& dev = gEspNow->devices[i];
+    if (isSelfMac(dev.mac)) continue;
+    
+    String macStr = formatMacAddress(dev.mac);
+    
     if (!first) webBondSendChunk(req, ",");
     first = false;
 
     webBondSendChunk(req, "{");
     webBondSendChunkf(req, "\"mac\":\"%s\",", macStr.c_str());
-    webBondSendChunkf(req, "\"name\":\"%s\",", name);
-    webBondSendChunkf(req, "\"room\":\"%s\",", room);
-    webBondSendChunkf(req, "\"zone\":\"%s\"", zone);
+    webBondSendChunkf(req, "\"name\":\"%s\",", dev.name.c_str());
+    webBondSendChunkf(req, "\"friendlyName\":\"%s\",", dev.friendlyName.c_str());
+    webBondSendChunkf(req, "\"room\":\"%s\",", dev.room.c_str());
+    webBondSendChunkf(req, "\"zone\":\"%s\",", dev.zone.c_str());
+    webBondSendChunkf(req, "\"tags\":\"%s\",", dev.tags.c_str());
+    webBondSendChunkf(req, "\"stationary\":%s,", dev.stationary ? "true" : "false");
+    webBondSendChunkf(req, "\"encrypted\":%s", dev.encrypted ? "true" : "false");
     webBondSendChunk(req, "}");
   }
   

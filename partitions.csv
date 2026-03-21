@@ -1,6 +1,8 @@
+# Partition table for builds WITHOUT ESP-SR (no speech recognition)
+# No "model" partition — all available space goes to LittleFS
+# LittleFS: 3798K (~3.7MB)
 # Name,   Type, SubType, Offset,   Size,    Flags
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
 factory,  app,  factory, 0x10000,  0x439000,
-model,    data, spiffs,  0x449000, 0x2D0000,
-littlefs, data, littlefs, 0x719000, 0x0E7000,
+littlefs, data, littlefs, 0x449000, 0x3B7000,

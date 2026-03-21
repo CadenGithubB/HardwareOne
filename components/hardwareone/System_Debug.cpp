@@ -1684,6 +1684,82 @@ const char* cmd_debugapdsframe(const String& argsInput) {
   }
 }
 
+const char* cmd_debugmaps(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_MAPS); else clearDebugFlag(DEBUG_MAPS);
+    return v ? "debugMaps enabled (runtime only)" : "debugMaps disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugMaps, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_MAPS); else clearDebugFlag(DEBUG_MAPS);
+    return gSettings.debugMaps ? "debugMaps enabled (persistent)" : "debugMaps disabled (persistent)";
+  }
+}
+
+const char* cmd_debugmapsloading(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_MAPS_LOADING); else clearDebugFlag(DEBUG_MAPS_LOADING);
+    return v ? "debugMapsLoading enabled (runtime only)" : "debugMapsLoading disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugMapsLoading, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_MAPS_LOADING); else clearDebugFlag(DEBUG_MAPS_LOADING);
+    return gSettings.debugMapsLoading ? "debugMapsLoading enabled (persistent)" : "debugMapsLoading disabled (persistent)";
+  }
+}
+
+const char* cmd_debugmapsrendering(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_MAPS_RENDERING); else clearDebugFlag(DEBUG_MAPS_RENDERING);
+    return v ? "debugMapsRendering enabled (runtime only)" : "debugMapsRendering disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugMapsRendering, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_MAPS_RENDERING); else clearDebugFlag(DEBUG_MAPS_RENDERING);
+    return gSettings.debugMapsRendering ? "debugMapsRendering enabled (persistent)" : "debugMapsRendering disabled (persistent)";
+  }
+}
+
+const char* cmd_debugmapsperf(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) { mode = valStr.substring(sp2 + 1); valStr = valStr.substring(0, sp2); mode.trim(); }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_MAPS_PERF); else clearDebugFlag(DEBUG_MAPS_PERF);
+    return v ? "debugMapsPerf enabled (runtime only)" : "debugMapsPerf disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugMapsPerf, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_MAPS_PERF); else clearDebugFlag(DEBUG_MAPS_PERF);
+    return gSettings.debugMapsPerf ? "debugMapsPerf enabled (persistent)" : "debugMapsPerf disabled (persistent)";
+  }
+}
+
 const char* cmd_debugfmradio(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
@@ -2230,6 +2306,11 @@ const char* getDebugCategoryName(uint64_t flag) {
   if (flag & DEBUG_APDS_FRAME) return "APDS_FRAME";
   // Bit 48
   if (flag & DEBUG_ESPNOW_METADATA) return "ESPNOW_META";
+  // Bits 49-52: Maps
+  if (flag & DEBUG_MAPS) return "MAPS";
+  if (flag & DEBUG_MAPS_LOADING) return "MAPS_LOAD";
+  if (flag & DEBUG_MAPS_RENDERING) return "MAPS_RENDER";
+  if (flag & DEBUG_MAPS_PERF) return "MAPS_PERF";
   return "UNKNOWN";
 }
 
@@ -2948,6 +3029,10 @@ const CommandEntry debugCommands[] = {
   { "debugimuframe", "Debug IMU frame timing.", true, cmd_debugimuframe, "Usage: debugimuframe <0|1>" },
   { "debugimudata", "Debug IMU data updates.", true, cmd_debugimudata, "Usage: debugimudata <0|1>" },
   { "debugapdsframe", "Debug APDS frame timing.", true, cmd_debugapdsframe, "Usage: debugapdsframe <0|1>" },
+  { "debugmaps", "Debug maps (parent flag).", true, cmd_debugmaps, "Usage: debugmaps <0|1>" },
+  { "debugmapsloading", "Debug map file loading and tile directory.", true, cmd_debugmapsloading, "Usage: debugmapsloading <0|1>" },
+  { "debugmapsrendering", "Debug map render pipeline and feature drawing.", true, cmd_debugmapsrendering, "Usage: debugmapsrendering <0|1>" },
+  { "debugmapsperf", "Debug map performance timing (render ms, tile I/O, cache, FPS).", true, cmd_debugmapsperf, "Usage: debugmapsperf <0|1>" },
   { "debugi2c", "Debug I2C bus transactions, mutex, clock changes.", true, cmd_debugi2c },
   { "debugwifi", "Debug WiFi operations.", true, cmd_debugwifi },
   { "debugstorage", "Debug storage operations.", true, cmd_debugstorage },

@@ -1,5 +1,5 @@
-// OLED_Mode_Remote.cpp - Remote device UI for bond mode
-// Menu-driven interface with Status, Sensors, and Swap Roles
+// OLED_Mode_Remote.cpp - Bond mode UI
+// Menu-driven interface with device picker, Status, Sensors, and Swap Roles
 // Modeled after OLED_Mode_Network.cpp menu pattern
 
 #include "OLED_Display.h"
@@ -30,6 +30,13 @@ static bool bondShowingStatus = false;
 static bool bondShowingSensors = false;
 static int bondSensorSelection = 0;  // Which sensor row is selected
 static int bondSensorColumn = 0;     // 0=Enable, 1=Stream
+
+// Device picker (shown when not yet bonded)
+static int bondPickerSelection = 0;
+static OLEDScrollState* bondPickerScroll = nullptr;
+static char (*pickerLabels)[24] = nullptr;  // Heap-allocated on first use to avoid DRAM BSS overflow
+static int pickerDeviceIndices[16] = {};    // Maps scroll index -> gEspNow->devices[] index (self filtered out)
+static int pickerFilteredCount = 0;         // Number of devices after filtering self
 
 // Main menu items
 static const char* bondMenuItems[] = {
@@ -92,10 +99,15 @@ static void displayBondStatus() {
   
   // Get peer name
   uint8_t peerMac[6];
-  String peerName = gSettings.bondPeerMac;
+  char peerName[24];
+  strncpy(peerName, gSettings.bondPeerMac.c_str(), sizeof(peerName) - 1);
+  peerName[sizeof(peerName) - 1] = '\0';
   if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
     String name = getEspNowDeviceName(peerMac);
-    if (name.length() > 0) peerName = name;
+    if (name.length() > 0) {
+      strncpy(peerName, name.c_str(), sizeof(peerName) - 1);
+      peerName[sizeof(peerName) - 1] = '\0';
+    }
   }
   
   char buf[32];
@@ -103,7 +115,8 @@ static void displayBondStatus() {
   
   // Line 1: Peer name + online/offline
   bool online = gEspNow->bondPeerOnline;
-  oledDisplay->print(peerName.substring(0, 14));
+  peerName[14] = '\0';  // Truncate for display
+  oledDisplay->print(peerName);
   oledDisplay->println(online ? " [ON]" : " [OFF]");
   
   // Line 2: Role + sync status
@@ -138,9 +151,14 @@ static void displayBondStatus() {
   // Line 5-6: Remote capabilities summary
   if (gEspNow->lastRemoteCapValid) {
     CapabilitySummary& cap = gEspNow->lastRemoteCap;
-    String sensors = getCapabilityListShort(cap.sensorMask, SENSOR_NAMES);
+    char sensorBuf[24];
+    {
+      String sensors = getCapabilityListShort(cap.sensorMask, SENSOR_NAMES);
+      strncpy(sensorBuf, sensors.c_str(), 20);
+      sensorBuf[20] = '\0';
+    }
     oledDisplay->print("S:");
-    oledDisplay->println(sensors.substring(0, 20));
+    oledDisplay->println(sensorBuf);
     snprintf(buf, sizeof(buf), "%luMB/%luMB Ch%d",
              (unsigned long)cap.flashSizeMB, (unsigned long)cap.psramSizeMB, cap.wifiChannel);
     oledDisplay->println(buf);
@@ -235,6 +253,16 @@ static void displayBondSensors() {
 // Main Display Function
 // =============================================================================
 
+// Build device name string for display (name or MAC fallback)
+static void formatDeviceLabel(char* buf, int bufLen, const EspNowDevice& dev) {
+  if (dev.name.length() > 0) {
+    snprintf(buf, bufLen, "%s", dev.name.c_str());
+  } else {
+    snprintf(buf, bufLen, "%02X:%02X:%02X:%02X:%02X:%02X",
+             dev.mac[0], dev.mac[1], dev.mac[2], dev.mac[3], dev.mac[4], dev.mac[5]);
+  }
+}
+
 void displayRemoteMode() {
   if (!oledDisplay || !oledConnected) return;
   
@@ -243,11 +271,60 @@ void displayRemoteMode() {
   
   // Check if bond mode is enabled
   if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) {
-    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-    oledDisplay->println("Not bonded.");
-    oledDisplay->println();
-    oledDisplay->println("Use CLI:");
-    oledDisplay->println("  bond connect <device>");
+    // Not bonded — show device picker or hint
+    if (!gEspNow) {
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+      oledDisplay->println("No paired devices.");
+      oledDisplay->println();
+      oledDisplay->println("Pair a device first:");
+      oledDisplay->println(" espnow pair");
+      return;
+    }
+
+    // Init scroll state and label buffer on first use (heap to save ~800 bytes DRAM BSS)
+    if (!bondPickerScroll) {
+      bondPickerScroll = (OLEDScrollState*)malloc(sizeof(OLEDScrollState));
+      if (!bondPickerScroll) return;
+      oledScrollInit(bondPickerScroll, nullptr, 4);
+      oledScrollSetSplitPane(bondPickerScroll, 128, 0, 0);
+    }
+    if (!pickerLabels) {
+      pickerLabels = (char (*)[24])malloc(16 * 24);
+    }
+    if (!pickerLabels) return;
+
+    // Rebuild item list each frame (device list may change).
+    // Filter out this device's own MAC — it cannot bond with itself.
+    int savedSel = bondPickerScroll->selectedIndex;
+    int savedOff = bondPickerScroll->scrollOffset;
+    oledScrollClear(bondPickerScroll);
+    uint8_t selfMac[6];
+    esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+    int total = min(gEspNow->deviceCount, 16);
+    pickerFilteredCount = 0;
+    for (int i = 0; i < total; i++) {
+      // Skip this device's own entry — it should never bond with itself
+      if (memcmp(gEspNow->devices[i].mac, selfMac, 6) == 0) continue;
+      pickerDeviceIndices[pickerFilteredCount] = i;
+      formatDeviceLabel(pickerLabels[pickerFilteredCount], sizeof(pickerLabels[0]), gEspNow->devices[i]);
+      oledScrollAddItem(bondPickerScroll, pickerLabels[pickerFilteredCount], nullptr);
+      pickerFilteredCount++;
+    }
+
+    if (pickerFilteredCount == 0) {
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+      oledDisplay->println("No paired devices.");
+      oledDisplay->println();
+      oledDisplay->println("Pair a device first:");
+      oledDisplay->println(" espnow pair");
+      return;
+    }
+
+    bondPickerScroll->selectedIndex = min(savedSel, max(0, pickerFilteredCount - 1));
+    bondPickerScroll->scrollOffset = savedOff;
+    bondPickerSelection = bondPickerScroll->selectedIndex;
+
+    oledScrollRender(oledDisplay, bondPickerScroll, true, true);
     return;
   }
   
@@ -270,12 +347,18 @@ void displayRemoteMode() {
   // Show peer name and status on first line for context
   bool online = gEspNow->bondPeerOnline;
   uint8_t peerMac[6];
-  String peerName = gSettings.bondPeerMac;
+  char peerName[24];
+  strncpy(peerName, gSettings.bondPeerMac.c_str(), sizeof(peerName) - 1);
+  peerName[sizeof(peerName) - 1] = '\0';
   if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
     String name = getEspNowDeviceName(peerMac);
-    if (name.length() > 0) peerName = name;
+    if (name.length() > 0) {
+      strncpy(peerName, name.c_str(), sizeof(peerName) - 1);
+      peerName[sizeof(peerName) - 1] = '\0';
+    }
   }
-  oledDisplay->print(peerName.substring(0, 14));
+  peerName[14] = '\0';  // Truncate for display
+  oledDisplay->print(peerName);
   oledDisplay->println(online ? " [ON]" : " [OFF]");
   
   // Menu options
@@ -296,6 +379,35 @@ void displayRemoteMode() {
 // =============================================================================
 // Menu Navigation
 // =============================================================================
+
+// =============================================================================
+// Picker Navigation (when not bonded)
+// =============================================================================
+
+static void handlePickerInput(uint32_t newlyPressed) {
+  if (!gEspNow || pickerFilteredCount == 0) return;
+
+  if (!bondPickerScroll) return;
+  if (oledScrollHandleNav(bondPickerScroll)) {
+    bondPickerSelection = bondPickerScroll->selectedIndex;
+  }
+
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+    int scrollIdx = bondPickerScroll->selectedIndex;
+    if (scrollIdx >= 0 && scrollIdx < pickerFilteredCount) {
+      int devIdx = pickerDeviceIndices[scrollIdx];
+      char cmd[64];
+      const EspNowDevice& dev = gEspNow->devices[devIdx];
+      if (dev.name.length() > 0) {
+        snprintf(cmd, sizeof(cmd), "bond connect %s", dev.name.c_str());
+      } else {
+        snprintf(cmd, sizeof(cmd), "bond connect %02X:%02X:%02X:%02X:%02X:%02X",
+                 dev.mac[0], dev.mac[1], dev.mac[2], dev.mac[3], dev.mac[4], dev.mac[5]);
+      }
+      executeOLEDCommand(cmd);
+    }
+  }
+}
 
 static void bondMenuUp() {
   if (bondShowingStatus) return;
@@ -419,6 +531,13 @@ static void bondMenuBack() {
 // =============================================================================
 
 bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
+  // Device picker (not yet bonded)
+  if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) {
+    handlePickerInput(newlyPressed);
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) return false;  // Let parent pop mode
+    return (gEspNow && pickerFilteredCount > 0);
+  }
+  
   // Sensors submenu: left/right moves between Enable/Stream columns
   if (bondShowingSensors) {
     if (gNavEvents.left) { bondSensorLeft(); return true; }
@@ -454,9 +573,9 @@ bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 // ============================================================================
 
 static const OLEDModeEntry sRemoteModes[] = {
-  { OLED_REMOTE, "Remote UI", "notify_espnow", displayRemoteMode, nullptr, bondModeInputHandler, false, -1, "A:Select  B:Back" },
+  { OLED_REMOTE, "Bond", "notify_espnow", displayRemoteMode, nullptr, bondModeInputHandler, false, -1, "A:Select  B:Back" },
 };
 
-REGISTER_OLED_MODE_MODULE(sRemoteModes, sizeof(sRemoteModes) / sizeof(sRemoteModes[0]), "Remote");
+REGISTER_OLED_MODE_MODULE(sRemoteModes, sizeof(sRemoteModes) / sizeof(sRemoteModes[0]), "Bond");
 
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE

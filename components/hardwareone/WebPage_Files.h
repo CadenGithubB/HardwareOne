@@ -12,14 +12,12 @@ inline void streamFilesInner(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(
 <h2>File Manager</h2>
 <p>Browse and manage files on the device filesystem</p>
-<div id='storage-stats' style='background:var(--panel-bg);padding:1rem;border-radius:8px;margin:1rem 0;color:var(--panel-fg);border:1px solid var(--border)'>
-  <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem'>
-    <strong>Storage</strong>
-    <span id='storage-text' style='font-size:0.9rem'>Loading...</span>
-  </div>
-  <div style='width:100%;height:20px;background:rgba(255,255,255,.15);border-radius:10px;overflow:hidden;border:1px solid var(--border)'>
-    <div id='storage-bar' style='height:100%;background:linear-gradient(90deg,#28a745,#20c997);width:0%;transition:width 0.3s'></div>
-  </div>
+<div style='display:flex;justify-content:space-between;align-items:center;margin:1rem 0 0.5rem 0'>
+  <strong>Storage</strong>
+  <span id='storage-text' style='font-size:0.9rem'>Loading...</span>
+</div>
+<div style='width:100%;height:20px;background:rgba(255,255,255,.15);border-radius:10px;overflow:hidden;border:1px solid var(--border);margin-bottom:1rem'>
+  <div id='storage-bar' style='height:100%;background:linear-gradient(90deg,#28a745,#20c997);width:0%;transition:width 0.3s'></div>
 </div>
 <div id='file-manager-container' style='margin:1rem 0'></div>
 <div id='editor-modal' style='display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1001'>
@@ -80,9 +78,9 @@ function updateStorageStats() {
       const freeMB = (d.free / 1024 / 1024).toFixed(2);
       document.getElementById('storage-text').textContent = usedMB + ' MB / ' + totalMB + ' MB (' + freeMB + ' MB free)';
       document.getElementById('storage-bar').style.width = d.usagePercent + '%';
-      if (d.usagePercent > 90) {
+      if (d.usagePercent > 80) {
         document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#dc3545,#c82333)';
-      } else if (d.usagePercent > 75) {
+      } else if (d.usagePercent > 45) {
         document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#ffc107,#ff9800)';
       } else {
         document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#28a745,#20c997)';

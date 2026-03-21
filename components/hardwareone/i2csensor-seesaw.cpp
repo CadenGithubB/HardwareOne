@@ -337,7 +337,7 @@ void readGamepad() {
 // Gamepad settings entries - minimal but essential for safety
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry gamepadSettingEntries[] = {
-  { "gamepadDevicePollMs", SETTING_INT,  &gSettings.gamepadDevicePollMs, 58, 0, nullptr, 10, 1000, "Poll Interval (ms)", nullptr },
+  { "gamepadDevicePollMs", SETTING_INT,  &gSettings.gamepadDevicePollMs, 90, 0, nullptr, 10, 1000, "Poll Interval (ms)", nullptr },
   { "gamepadAutoStart",    SETTING_BOOL, &gSettings.gamepadAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr }
 };
 
@@ -449,7 +449,7 @@ void gamepadTask(void* parameter) {
     }
 
     if (gamepadEnabled && gamepadConnected && !gSensorPollingPaused) {
-      unsigned long gamepadPollMs = (gSettings.gamepadDevicePollMs > 0) ? (unsigned long)gSettings.gamepadDevicePollMs : 58;
+      unsigned long gamepadPollMs = (gSettings.gamepadDevicePollMs > 0) ? (unsigned long)gSettings.gamepadDevicePollMs : 90;
       if ((nowMs - lastGamepadRead) >= gamepadPollMs) {
         bool readSuccess = false;
         uint32_t buttons = 0;
@@ -556,6 +556,10 @@ void gamepadTask(void* parameter) {
             bool changed = (gControlCache.gamepadButtons != buttons ||
                             abs(gControlCache.gamepadX - filtX) > 1 ||
                             abs(gControlCache.gamepadY - filtY) > 1);
+            // Latch newly pressed edges so UI never misses a quick tap.
+            // Active-low: a bit going from 1 (unpressed) to 0 (pressed) is a new press.
+            uint32_t newlyPressed = gControlCache.gamepadButtons & ~buttons;
+            gControlCache.buttonPressedAccum |= newlyPressed;
             gControlCache.gamepadButtons = buttons;  // Only changes after debounce
             gControlCache.gamepadX = filtX;
             gControlCache.gamepadY = filtY;

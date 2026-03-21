@@ -209,17 +209,20 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
     case SOURCE_SERIAL:
       gSerialAuthed = true;
       gSerialUser = username;
+      updateUserLastSeen(username);
       return true;
-      
+
     case SOURCE_LOCAL_DISPLAY:
       gLocalDisplayAuthed = true;
       gLocalDisplayUser = username;
       oledNotifyLocalDisplayAuthChanged();
+      updateUserLastSeen(username);
       return true;
-      
+
     case SOURCE_BLUETOOTH:
       gBluetoothAuthed = true;
       gBluetoothUser = username;
+      updateUserLastSeen(username);
       return true;
       
     case SOURCE_WEB:
@@ -521,6 +524,36 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
 
   DEBUG_USERSF("[users] %s user ban for '%s'", ban ? "set" : "cleared", username.c_str());
   return nullptr;
+}
+
+// Updates the "lastSeenSec" field in users.json for the given username.
+// Only writes if the system clock appears valid (epoch > Jan 1, 2021).
+void updateUserLastSeen(const String& username) {
+  if (username.length() == 0 || !filesystemReady) return;
+  time_t now = time(nullptr);
+  if (now < 1609459200) return;  // Clock not set yet — skip write
+
+  FsLockGuard guard("users.last_seen");
+  if (!LittleFS.exists(USERS_JSON_FILE)) return;
+  File f = LittleFS.open(USERS_JSON_FILE, "r");
+  if (!f) return;
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, f)) { f.close(); return; }
+  f.close();
+
+  for (JsonObject u : doc["users"].as<JsonArray>()) {
+    const char* uname = u["username"] | "";
+    if (username == uname) {
+      u["lastSeenSec"] = (uint32_t)now;
+      break;
+    }
+  }
+
+  File wf = LittleFS.open(USERS_JSON_FILE, "w");
+  if (!wf) return;
+  serializeJson(doc, wf);
+  wf.close();
+  DEBUG_USERSF("[users] lastSeenSec updated for '%s'", username.c_str());
 }
 
 // Validate a username/password against per-user settings file
@@ -1379,6 +1412,62 @@ const char* cmd_user_delete(const String& argsInput) {
   }
   if (!ensureDebugBuffer()) return "Deleted";
   snprintf(getDebugBuffer(), 1024, "Deleted user '%s'", username.c_str());
+  return getDebugBuffer();
+}
+
+const char* cmd_user_changepassword(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!filesystemReady) return "Error: LittleFS not ready";
+
+  // Parse: "currentPassword newPassword confirmPassword"
+  String args = argsInput;
+  args.trim();
+
+  int sp1 = args.indexOf(' ');
+  if (sp1 < 0) return "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
+  int sp2 = args.indexOf(' ', sp1 + 1);
+  if (sp2 < 0) return "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
+
+  String currentPassword = args.substring(0, sp1);
+  String newPassword     = args.substring(sp1 + 1, sp2);
+  String confirmPassword = args.substring(sp2 + 1);
+  currentPassword.trim();
+  newPassword.trim();
+  confirmPassword.trim();
+
+  if (currentPassword.length() == 0 || newPassword.length() == 0 || confirmPassword.length() == 0) {
+    return "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
+  }
+
+  if (newPassword != confirmPassword) {
+    return "Error: New passwords do not match";
+  }
+
+  if (newPassword.length() < 6) {
+    return "Error: Password must be at least 6 characters";
+  }
+
+  if (newPassword == currentPassword) {
+    return "Error: New password must differ from current password";
+  }
+
+  // Determine which user is changing their password (local display transport)
+  String username = getTransportUser(SOURCE_LOCAL_DISPLAY);
+  if (username.length() == 0) return "Error: Not authenticated";
+
+  // Verify current password
+  if (!isValidUser(username, currentPassword)) {
+    return "Error: Current password incorrect";
+  }
+
+  if (!setUserPassword(username, newPassword)) {
+    if (!ensureDebugBuffer()) return "Error: Failed to change password";
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to change password for user '%s'", username.c_str());
+    return getDebugBuffer();
+  }
+
+  if (!ensureDebugBuffer()) return "Password changed successfully";
+  snprintf(getDebugBuffer(), 1024, "Password changed successfully for user '%s'", username.c_str());
   return getDebugBuffer();
 }
 
@@ -2534,6 +2623,7 @@ const CommandEntry userSystemCommands[] = {
   { "user promote", "Promote to admin: <username>", true, cmd_user_promote, "Usage: user promote <username>" },
   { "user demote", "Demote from admin: <username>", true, cmd_user_demote, "Usage: user demote <username>" },
   { "user delete", "Delete user: <username>", true, cmd_user_delete, "Usage: user delete <username>" },
+  { "user changepassword", "Change own password: <currentPass> <newPass> <confirmPass>", false, cmd_user_changepassword, "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>" },
   { "user resetpassword", "Reset user password: <username> <newPassword>", true, cmd_user_resetpassword, "Usage: user resetpassword <username> <newPassword>" },
   { "user list", "List all users.", true, cmd_user_list },
   { "user request", "Request account: <user> <pass> [confirm]", false, cmd_user_request, "Usage: user request <username> <password> [confirmPassword]" },

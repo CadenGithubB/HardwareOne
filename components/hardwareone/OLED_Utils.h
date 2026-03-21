@@ -4,6 +4,7 @@
 #include <Arduino.h>
 
 #include "System_BuildConfig.h"
+#include "System_Notifications.h"  // NotificationSource enum (defined there, not here)
 
 #if ENABLE_OLED_DISPLAY
 
@@ -41,15 +42,7 @@ const char* oledGetCurrentModeName();
 #define OLED_NOTIFICATION_MSG_LEN 48
 #define OLED_NOTIFICATION_SUBSOURCE_LEN 32
 
-// Notification source types
-enum NotificationSource : uint8_t {
-  NOTIF_SOURCE_UNKNOWN = 0,
-  NOTIF_SOURCE_CLI = 1,
-  NOTIF_SOURCE_OLED = 2,
-  NOTIF_SOURCE_WEB = 3,
-  NOTIF_SOURCE_VOICE = 4,
-  NOTIF_SOURCE_REMOTE = 5
-};
+// NotificationSource enum is defined in System_Notifications.h (included above).
 
 struct OLEDNotification {
   char message[OLED_NOTIFICATION_MSG_LEN];

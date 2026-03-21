@@ -51,6 +51,11 @@ CONFIG_BT_GATT_MAX_SR_ATTRIBUTES=100
 CONFIG_BT_GATT_MAX_SR_PROFILES=8
 CONFIG_BT_GATTC_MAX_CACHE_CHAR=40
 
+# Interrupt watchdog - 1500ms gives headroom for I2C FSM reset under HTTPS load
+# The I2C driver's i2c_hw_fsm_reset enters nested spinlocks (I2C + periph clock),
+# which can stall under heavy WiFi/TLS peripheral contention.
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=1500
+
 # HTTP Server - increase header buffer for browser cookies
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 

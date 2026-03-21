@@ -2,22 +2,22 @@
 #define SYSTEM_MAPS_H
 
 #include <Arduino.h>
+#include <FS.h>
 
 #include "System_BuildConfig.h"
 
 // =============================================================================
-// HardwareOne Map (.hwmap) File Format - VERSION 5 (TILED + QUANTIZED)
+// HardwareOne Map (.hwmap) File Format - VERSION 6 (TILED + SUBTYPES)
 // =============================================================================
 // Binary format for compact offline maps on ESP32
 //
 // Header (40 bytes):
 //   Magic: "HWMP" (4 bytes)
-//   Version: uint16 = 5 (2 bytes)
+//   Version: uint16 = 6 (2 bytes)
 //   Flags: uint16 (encodes tiling params):
-//     bits 0-3:  reserved
-//     bits 4-7:  quantBits (precision, typically 0 = full 16-bit)
-//     bits 8-11: tileGridSize (e.g., 4 = 4x4 = 16 tiles)
-//     bits 12-15: haloPct * 100 (e.g., 10 = 0.10 = 10% halo)
+//     bits 0-1:  tileGridCode (0=16, 1=32, 2=64)
+//     bits 2-6:  haloPct (0-31, representing %)
+//     bits 7-10: quantBitsEnc = quantBits - 10 (0=10-bit .. 6=16-bit)
 //   Bounds: minLat, minLon, maxLat, maxLon (4x int32, microdegrees)
 //   FeatureCount: uint32 (total features across all tiles)
 //   NameCount: uint16 (2 bytes)
@@ -29,17 +29,19 @@
 //     Length: uint8 (max 63)
 //     String: char[Length] (not null-terminated)
 //
-// Tile Directory (6 bytes per tile, tileGridSize * tileGridSize tiles):
-//   Offset: uint32 (file offset to tile's feature data)
-//   FeatureCount: uint16 (number of features in this tile)
+// Tile Directory (8 bytes per tile, tileGridSize * tileGridSize tiles):
+//   Offset: uint32 (absolute file offset to tile's payload data)
+//   PayloadSize: uint32 (size of tile's payload in bytes; 0 = empty tile)
 //
-// Tile Feature Data (per tile, at offset specified in directory):
-//   For each feature:
+// Tile Payload (per non-empty tile, at offset specified in directory):
+//   uint16 featureCount
+//   Per feature (6-byte header):
 //     Type: uint8
+//     Subtype: uint8
 //     NameIndex: uint16 (0xFFFF = unnamed)
 //     PointCount: uint16
 //     Points: PointCount * (qLat: uint16, qLon: uint16)
-//       qLat/qLon are quantized 0-65535 relative to tile halo bounds
+//       Quantized to tile+halo local coords, decode with qMax=(1<<quantBits)-1
 
 // =============================================================================
 // Feature Types (must match web tool)
@@ -103,6 +105,25 @@ enum MapFeatureType : uint8_t {
 #define SUBTYPE_BUILDING_RESIDENTIAL 3
 
 // =============================================================================
+// LOD Zoom Thresholds (shared between OLED and web renderers)
+// Below each threshold the feature type is hidden entirely.
+// Web renderer adds smooth fade-ins starting at these same cutoffs.
+// =============================================================================
+
+#define LOD_ZOOM_MAJOR_ROAD   0.15f  // Major roads (0x01) visible above this
+#define LOD_ZOOM_WATER        0.30f  // Water (0x10) visible above this
+#define LOD_ZOOM_RAILWAY      0.30f  // Railway (0x20) visible above this
+#define LOD_ZOOM_MINOR_ROAD   0.50f  // Minor roads (0x02) visible above this
+#define LOD_ZOOM_PARK         0.50f  // Parks (0x11) visible above this
+#define LOD_ZOOM_TRANSIT      0.50f  // Bus (0x21) / Station (0x40) visible above this
+#define LOD_ZOOM_PATH         1.00f  // Paths (0x03) visible above this
+#define LOD_ZOOM_BUILDING     2.00f  // Buildings (0x30) visible above this
+
+// Subtype-level LOD (applies on top of type-level cutoff)
+#define LOD_ZOOM_SERVICE_ROAD 0.70f  // Service roads (0x02 / SUBTYPE_MINOR_SERVICE)
+#define LOD_ZOOM_TRACK        0.70f  // Tracks (0x03 / SUBTYPE_PATH_TRACK)
+
+// =============================================================================
 // Line Styles for Rendering
 // =============================================================================
 
@@ -124,25 +145,40 @@ struct MapFeatureStyle {
 };
 
 // =============================================================================
-// Map Data Structures (v5/v6)
+// Map Data Structures (v6)
 // =============================================================================
 
 // Map header structure (40 bytes)
 struct HWMapHeader {
   char magic[4];           // "HWMP"
-  uint16_t version;        // 5 or 6
-  uint16_t flags;          // bit 0: has spatial index
-  int32_t minLat;          // Microdegrees (lat * 1000000)
+  uint16_t version;        // 6
+  uint16_t flags;          // Tiling params bitfield
+  int32_t minLat;          // On disk: deci-microdegrees (lat * 10^7); normalized to microdegrees (10^6) on load
   int32_t minLon;
   int32_t maxLat;
   int32_t maxLon;
   uint32_t featureCount;
   uint16_t nameCount;      // Number of entries in name table
   char regionName[8];
-  uint16_t padding;        // Align to 40 bytes
+  uint16_t featureTypeMask; // Bitmask of feature types present (HWMAP_FTYPE_*)
 } __attribute__((packed));
 
-// Macros to extract v5 tiling params from flags (matches generator encoding)
+// Feature type presence bitmask (written by export tool into header bytes 38-39)
+// Each bit indicates the map contains at least one feature of that type
+#define HWMAP_FTYPE_HIGHWAY   (1 << 0)   // MAP_FEATURE_HIGHWAY    0x00
+#define HWMAP_FTYPE_MAJOR     (1 << 1)   // MAP_FEATURE_ROAD_MAJOR 0x01
+#define HWMAP_FTYPE_MINOR     (1 << 2)   // MAP_FEATURE_ROAD_MINOR 0x02
+#define HWMAP_FTYPE_PATH      (1 << 3)   // MAP_FEATURE_PATH       0x03
+#define HWMAP_FTYPE_WATER     (1 << 4)   // MAP_FEATURE_WATER      0x10
+#define HWMAP_FTYPE_PARK      (1 << 5)   // MAP_FEATURE_PARK       0x11
+#define HWMAP_FTYPE_LAND      (1 << 6)   // MAP_FEATURE_LAND_MASK  0x12
+#define HWMAP_FTYPE_RAILWAY   (1 << 7)   // MAP_FEATURE_RAILWAY    0x20
+#define HWMAP_FTYPE_BUS       (1 << 8)   // MAP_FEATURE_BUS        0x21
+#define HWMAP_FTYPE_FERRY     (1 << 9)   // MAP_FEATURE_FERRY      0x22
+#define HWMAP_FTYPE_BUILDING  (1 << 10)  // MAP_FEATURE_BUILDING   0x30
+#define HWMAP_FTYPE_STATION   (1 << 11)  // MAP_FEATURE_STATION    0x40
+
+// Macros to extract tiling params from flags (matches generator encoding)
 // bits 0-1: tileGridCode (0=16, 1=32, 2=64), bits 2-6: haloPct (0-31), bits 7-10: quantBits-10
 #define HWMAP_GET_TILE_GRID_CODE(flags) ((flags) & 0x03)
 #define HWMAP_GET_TILE_GRID_SIZE(flags) (HWMAP_GET_TILE_GRID_CODE(flags) == 0 ? 16 : HWMAP_GET_TILE_GRID_CODE(flags) == 2 ? 64 : 32)
@@ -156,23 +192,16 @@ struct HWMapTileDirEntry {
   uint32_t payloadSize;    // Size of tile's payload in bytes (0 = empty tile)
 } __attribute__((packed));
 
-// Feature header for v5 format (5 bytes, no points - points follow as quantized pairs)
+// Feature header (6 bytes - points follow as quantized pairs)
 struct HWMapFeatureHeader {
-  uint8_t type;
-  uint16_t nameIndex;      // Index into name table, 0xFFFF = unnamed
-  uint16_t pointCount;     // Number of quantized points following
-} __attribute__((packed));
-
-// Feature header for v6 format (6 bytes - adds subtype byte)
-struct HWMapFeatureHeaderV6 {
   uint8_t type;
   uint8_t subtype;         // Subtype for granular classification
   uint16_t nameIndex;      // Index into name table, 0xFFFF = unnamed
   uint16_t pointCount;     // Number of quantized points following
 } __attribute__((packed));
 
-// Feature header size based on version
-#define HWMAP_FEATURE_HEADER_SIZE(version) ((version) >= 6 ? 6 : 5)
+// Feature header size (always 6 bytes for v6)
+#define HWMAP_FEATURE_HEADER_SIZE 6
 
 // Marker for unnamed features
 #define HWMAP_NO_NAME 0xFFFF
@@ -180,8 +209,8 @@ struct HWMapFeatureHeaderV6 {
 // Maximum names to load (memory limit)
 #define MAX_MAP_NAMES 512
 
-// Maximum tiles (16x16 = 256 max from 4-bit grid size)
-#define HWMAP_MAX_TILES 256
+// Maximum tiles (64x64 = 4096 max; tool generates 16/32/64 grids)
+#define HWMAP_MAX_TILES 4096
 
 // =============================================================================
 // Map Feature Highlighting System (generic, can highlight any feature)
@@ -240,15 +269,30 @@ void mapLayersSetVisible(uint16_t layers);
 void mapLayerToggle(uint16_t layer);
 bool mapLayerIsVisible(uint8_t featureType);  // Check if a feature type should render
 
+// Per-subtype visibility (bit N of mask = subtype N is visible; default all on)
+bool    mapSubtypeIsVisible(uint8_t featureType, uint8_t subtype);
+void    mapSubtypeToggle(uint8_t featureType, uint8_t subtype);
+uint8_t mapSubtypeGetMask(uint8_t featureType);
+void    mapSubtypeSetMask(uint8_t featureType, uint8_t mask);
+
 // Name entry (parsed from name table)
 struct MapNameEntry {
   char name[64];  // Truncated if longer than 63
 };
 
-// Streaming cache size (1MB in PSRAM for feature data)
-#define MAP_CACHE_SIZE (1024 * 1024)
+// Multi-slot tile cache configuration
+#define MAP_CACHE_POOL_SIZE  (1 * 1024 * 1024)  // 1MB pool in PSRAM
+#define MAP_CACHE_MAX_SLOTS  256                  // Max tracked slots
+#define MAP_CACHE_MIN_SLOT   4096                 // Minimum 4KB per slot
 
-// Loaded map state - v5 tiled architecture
+// Per-slot cache entry
+struct TileCacheSlot {
+  int16_t  tileIdx;        // Which tile is cached here (-1 = empty)
+  uint32_t dataSize;       // Actual tile payload bytes stored
+  uint32_t lastAccessSeq;  // Monotonic counter for LRU eviction
+};
+
+// Loaded map state - v6 tiled architecture
 struct LoadedMap {
   bool valid;
   HWMapHeader header;
@@ -260,7 +304,7 @@ struct LoadedMap {
   MapNameEntry* names;     // Array of names
   uint16_t nameCount;      // Number of names loaded
   
-  // V5 tiling parameters (extracted from header.flags)
+  // Tiling parameters (extracted from header.flags)
   uint8_t tileGridSize;    // e.g., 4 = 4x4 = 16 tiles
   float haloPct;           // Halo fraction (e.g., 0.10)
   uint8_t quantBits;       // Quantization bits (usually 0 = full 16-bit)
@@ -275,11 +319,33 @@ struct LoadedMap {
   int32_t haloW;           // Halo width in microdegrees
   int32_t haloH;           // Halo height in microdegrees
   
-  // Streaming cache (1MB buffer in PSRAM)
-  uint8_t* cache;          // 1MB cache buffer
-  size_t cacheStart;       // File offset where cache starts
-  size_t cacheLen;         // Bytes currently in cache
+  // Persistent file handle (kept open for the lifetime of the loaded map)
+  File mapFile;              // Read-only handle, closed in unloadMap()
+  
+  // Multi-slot tile cache (PSRAM pool divided into fixed-size slots)
+  uint8_t* cachePool;       // Contiguous PSRAM pool
+  size_t   cachePoolSize;   // Actual allocated pool size
+  uint32_t slotSize;        // Bytes per slot (= max tile payload, rounded up)
+  uint16_t numSlots;        // cachePoolSize / slotSize (capped at MAX_SLOTS)
+  uint32_t accessSeq;       // Monotonic access counter for LRU
+  TileCacheSlot* slots;     // Array of slot metadata [numSlots]
+  uint32_t cacheHits;       // Debug: total cache hits since load
+  uint32_t cacheMisses;     // Debug: total cache misses since load
 };
+
+// =============================================================================
+// Render Parameters (snapshot of all mutable state needed by renderMap)
+// =============================================================================
+
+struct MapRenderParams {
+  float zoom;
+  float rotation;
+  uint16_t visibleLayers;
+  uint8_t subtypeVisibility[65];  // Snapshot of per-subtype masks
+};
+
+// Build a MapRenderParams from current global state
+MapRenderParams mapRenderParamsFromGlobals();
 
 // =============================================================================
 // Abstract Map Renderer Interface
@@ -318,6 +384,10 @@ public:
   // Get feature style for a given type (can be overridden per-renderer)
   virtual MapFeatureStyle getFeatureStyle(MapFeatureType type);
   
+  // Subtype-level filtering (called after getFeatureStyle for fine-grained control)
+  // Return false to skip rendering this specific type+subtype combination
+  virtual bool shouldRenderFeature(uint8_t type, uint8_t subtype) { return true; }
+  
 protected:
   int _width = 128;
   int _height = 64;
@@ -338,25 +408,19 @@ public:
   // Check if position is within loaded map bounds
   static bool isPositionInMap(float lat, float lon);
   
-  // Auto-select map based on GPS position
-  static bool autoSelectMap(float lat, float lon);
-  
   // Get list of available maps
   static int getAvailableMaps(char maps[][96], int maxMaps);
   
-  // Render map to a renderer at given center position
-  static void renderMap(MapRenderer* renderer, float centerLat, float centerLon);
+  // Render map with explicit parameters (thread-safe — no global reads during render)
+  static void renderMap(MapRenderer* renderer, float centerLat, float centerLon,
+                        const MapRenderParams& params);
   
   // Get current map info
   static const LoadedMap& getCurrentMap() { return _currentMap; }
   static bool hasValidMap() { return _currentMap.valid; }
   
-  // Name table access (v2)
-  static int getNameCount() { return _currentMap.valid ? _currentMap.nameCount : 0; }
+  // Name table access
   static const char* getName(uint16_t index);
-  
-  // Get all names of a specific feature type (for search/browsing)
-  static int getNamesByFeatureType(MapFeatureType type, const char** names, int maxNames);
   
   // Search names by prefix (case-insensitive) - for autocomplete
   static int searchNamesByPrefix(const char* prefix, const char** results, int maxResults);
@@ -429,6 +493,41 @@ private:
 // Concrete Renderer Implementations
 // =============================================================================
 
+// =============================================================================
+// Offscreen 1-bit Renderer (for async background rendering)
+// =============================================================================
+
+#define OFFSCREEN_BUF_SIZE 1024  // 128x64 / 8 = 1024 bytes
+
+class OffscreenMapRenderer : public MapRenderer {
+public:
+  OffscreenMapRenderer(uint8_t* buffer, int width, int height, int offsetY = 0);
+  
+  void setViewport(int width, int height) override;
+  void clear() override;
+  void drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
+                const MapFeatureStyle& style) override;
+  void drawPositionMarker(int16_t x, int16_t y) override;
+  void drawOverlayText(int16_t x, int16_t y, const char* text, bool inverted) override {}
+  void drawContextBar(const char* text, int scrollOffset) override {}
+  void flush() override {}
+  
+  MapFeatureStyle getFeatureStyle(MapFeatureType type) override;
+  bool shouldRenderFeature(uint8_t type, uint8_t subtype) override;
+  
+  uint8_t* getBuffer() const { return _buffer; }
+  
+private:
+  uint8_t* _buffer;
+  int16_t _offsetY;
+  
+  void drawPixel(int16_t x, int16_t y);
+  bool clipLine(int16_t& x0, int16_t& y0, int16_t& x1, int16_t& y1);
+  void bresenhamLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1);
+  void drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int dashLen);
+  void drawDottedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int spacing);
+};
+
 #if ENABLE_OLED_DISPLAY
 class Adafruit_SSD1306;
 
@@ -448,8 +547,15 @@ public:
   // OLED-specific: wireframe-optimized styles
   MapFeatureStyle getFeatureStyle(MapFeatureType type) override;
   
+  // OLED-specific: skip polygon features, allow linear subtypes (e.g. rivers)
+  bool shouldRenderFeature(uint8_t type, uint8_t subtype) override;
+  
 private:
   Adafruit_SSD1306* _display;
+  int16_t _offsetY;  // Y offset into display (content area start)
+  
+  // Clip line to content area (Cohen-Sutherland). Returns false if fully outside.
+  bool clipToContent(int16_t& x0, int16_t& y0, int16_t& x1, int16_t& y1);
   
   // Draw dashed line for OLED
   void drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int dashLen);
@@ -515,6 +621,9 @@ public:
   // Validate track against current map bounds
   static TrackValidation validateTrack(float& coveragePercent);
   
+  // Save current track to file (returns filepath on success, empty on failure)
+  static bool saveTrack(char* outPath, size_t outPathSize);
+
   // Delete a track file
   static bool deleteTrackFile(const char* filepath);
   
@@ -632,11 +741,7 @@ private:
 // Global State & Functions
 // =============================================================================
 
-extern bool gMapRendererEnabled;
 extern float gMapRotation;  // Rotation angle in degrees (0-360)
-
-// Initialize map renderer system
-void initMapRenderer();
 
 // Command handlers
 const char* cmd_map(const String& argsInput);

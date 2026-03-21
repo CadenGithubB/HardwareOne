@@ -33,7 +33,7 @@ static void displayRTCData() {
   bool valid = false;
   
   if (gRTCCache.mutex && xSemaphoreTake(gRTCCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    dt = gRTCCache.dateTime;
+    dt = rtcLocalTime(&gRTCCache.dateTime);  // Apply timezone offset for display
     temp = gRTCCache.temperature;
     valid = gRTCCache.dataValid;
     xSemaphoreGive(gRTCCache.mutex);

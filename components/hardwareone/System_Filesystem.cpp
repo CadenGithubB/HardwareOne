@@ -586,7 +586,6 @@ static const PathRule sPathRules[] = {
   // ---- Immutable config files: read-only ----
   {"/system/settings.json",             PERM_READ,                                  true,  true},
   {"/system/automations.json",          PERM_READ,                                  true,  true},
-  {"/system/devices.json",              PERM_READ,                                  true,  true},
   {"/system/espnow/devices.json",       PERM_READ,                                  true,  true},
 
   // ---- TLS certificates: read + delete + import (no edit/rename/create) ----
