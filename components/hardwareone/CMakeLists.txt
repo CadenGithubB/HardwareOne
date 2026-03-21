@@ -89,6 +89,7 @@ set(hardwareone_srcs
         OLED_Mode_UnifiedMenu.cpp
         OLED_Mode_RemoteSettings.cpp
         OLED_Mode_SetPattern.cpp
+        OLED_Mode_ChangePassword.cpp
         OLED_RemoteSettings.cpp
         OLED_UI.cpp
         System_MemoryMonitor.cpp

@@ -22,9 +22,7 @@
 extern const CommandEntry espNowCommands[];
 extern const size_t espNowCommandsCount;
 
-// Forward declarations from main system
-void broadcastOutput(const String& s);
-void broadcastOutput(const char* s);
+// Forward declarations from main system (broadcastOutput provided by System_Debug.h)
 bool writeSettingsJson();
 extern AuthContext gExecAuthContext;
 String base64Encode(const uint8_t* data, size_t len);
@@ -100,8 +98,13 @@ enum BondSyncRequestType : uint8_t {
 struct EspNowDevice {
   uint8_t mac[6];
   String name;
-  bool encrypted;   // Whether this device uses encryption
-  uint8_t key[16];  // Per-device encryption key
+  bool encrypted;        // Whether this device uses encryption
+  uint8_t key[16];       // Per-device encryption key
+  String friendlyName;   // Cached from mesh peer metadata
+  String room;           // Cached from mesh peer metadata
+  String zone;           // Cached from mesh peer metadata
+  String tags;           // Cached from mesh peer metadata (comma-separated)
+  bool stationary;       // Cached from mesh peer metadata
 };
 
 // ==========================
@@ -317,11 +320,6 @@ struct CapabilitySummary {
 };
 
 #if ENABLE_BONDED_MODE
-// Bond mode message types (v2 JSON - deprecated, now use v3 binary)
-#define MSG_TYPE_BOND_CAP_REQ "PAIR_CAP_REQ"     // Request capability summary (wire value kept for compat)
-#define MSG_TYPE_BOND_CAP_RESP "PAIR_CAP_RESP"   // Capability summary response
-#define MSG_TYPE_BOND_MANIFEST_REQ "PAIR_MAN_REQ" // Request full manifest
-#define MSG_TYPE_BOND_MANIFEST_RESP "PAIR_MAN_RESP" // Manifest response (chunked)
 
 // Periodic bond status snapshot — sent in response to BOND_STATUS_REQ (~30s interval)
 // Uses same CAP_SENSOR_* bitmask constants as CapabilitySummary

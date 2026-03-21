@@ -22,15 +22,44 @@ extern void streamEndHtml(httpd_req_t* req);
 // Stream MQTT page inner content
 void streamMqttInner(httpd_req_t* req) {
   // Get current MQTT status
+  bool clientEnabled = gSettings.mqttClientEnabled;
   bool connected = isMqttConnected();
   const char* statusText = connected ? "Connected" : "Disconnected";
   const char* statusClass = connected ? "status-active" : "status-inactive";
-  
-  // Header section with status
+
+  // ── Service Status panel (always visible — mirrors Automations pattern) ──
+  httpd_resp_send_chunk(req, R"HTML(
+<h2>MQTT Client</h2>
+<div class='settings-panel'>
+<h3 style='margin-top:0;color:var(--panel-fg)'>Service Status</h3>
+<div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
+  <button class='btn' id='btn-mqtt-refresh-svc'>Refresh Status</button>
+  <button class='btn' id='btn-mqtt-enable-svc' style='display:none'>Enable MQTT</button>
+  <button class='btn' id='btn-mqtt-disable-svc' style='display:none'>Disable MQTT</button>
+  <span style='display:inline-flex;align-items:center;gap:0.5rem'>
+    <span class='status-indicator status-disabled' id='mqtt-svc-dot'></span>
+    <span id='mqtt-svc-text'>Checking...</span>
+  </span>
+</div>
+<div id='mqtt-svc-warning' class='alert alert-warning' style='display:none;margin-top:10px'>
+  <strong>MQTT Disabled</strong><br>
+  The MQTT client is currently disabled. No broker connections or publishing will occur.<br>
+  Click <strong>Enable MQTT</strong> above to re-enable it (no reboot required).
+</div>
+</div>
+)HTML", HTTPD_RESP_USE_STRLEN);
+
+  // ── Body: visible only when MQTT is enabled ──
+  // Server-side we always emit it; JS will show/hide based on live status check.
+  const char* bodyDisplay = clientEnabled ? "block" : "none";
+  char bodyOpen[64];
+  snprintf(bodyOpen, sizeof(bodyOpen), "<div id='mqtt-body' style='display:%s'>", bodyDisplay);
+  httpd_resp_send_chunk(req, bodyOpen, HTTPD_RESP_USE_STRLEN);
+
+  // Connection status panel
   httpd_resp_send_chunk(req,
-    "<h2>MQTT Client</h2>"
-    "<div class=\"settings-panel\">"
-    "<h3>Status</h3>"
+    "<div class=\"settings-panel\" style=\"margin-top:16px;\">"
+    "<h3>Connection</h3>"
     "<div style=\"display:flex;align-items:center;gap:12px;margin-bottom:16px;\">"
     "<span class=\"status-dot ", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, statusClass, HTTPD_RESP_USE_STRLEN);
@@ -45,7 +74,7 @@ void streamMqttInner(httpd_req_t* req) {
     "<button class=\"btn\" onclick=\"mqttRefresh()\">Refresh Status</button>"
     "</div></div>", HTTPD_RESP_USE_STRLEN);
 
-  // Purple info blurb: show when not connected
+  // Info blurb when disconnected
   if (!connected) {
     if (!gSettings.mqttHost.length()) {
       httpd_resp_send_chunk(req,
@@ -291,11 +320,78 @@ void streamMqttInner(httpd_req_t* req) {
     publishes a JSON blob containing cached sensor readings to the configured base topic.
   </p>
   <p style="color:var(--panel-fg);font-size:0.9em;margin-top:8px;">
-    <strong>CLI Commands:</strong> <code>openmqtt</code>, <code>closemqtt</code>, <code>mqttstatus</code>
+    <strong>CLI Commands:</strong> <code>openmqtt</code>, <code>closemqtt</code>, <code>mqttstatus</code>, <code>mqttclientenabled</code>
   </p>
 </div>
+)HTML", HTTPD_RESP_USE_STRLEN);
 
+  // Close mqtt-body div
+  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+
+  // Script: service status (enable/disable) + connection status + auto-refresh
+  httpd_resp_send_chunk(req, R"HTML(
 <script>
+// ── Service Status (enable / disable) ──────────────────────────────────────
+function mqttApplySvcState(enabled) {
+  var dot  = document.getElementById('mqtt-svc-dot');
+  var txt  = document.getElementById('mqtt-svc-text');
+  var enBtn  = document.getElementById('btn-mqtt-enable-svc');
+  var disBtn = document.getElementById('btn-mqtt-disable-svc');
+  var warn = document.getElementById('mqtt-svc-warning');
+  var body = document.getElementById('mqtt-body');
+  if (enabled) {
+    dot.className = 'status-indicator status-enabled';
+    txt.textContent = 'MQTT service is enabled';
+    if (enBtn)  enBtn.style.display  = 'none';
+    if (disBtn) disBtn.style.display = 'inline-block';
+    if (warn)   warn.style.display   = 'none';
+    if (body)   body.style.display   = 'block';
+  } else {
+    dot.className = 'status-indicator status-disabled';
+    txt.textContent = 'MQTT service is disabled';
+    if (enBtn)  enBtn.style.display  = 'inline-block';
+    if (disBtn) disBtn.style.display = 'none';
+    if (warn)   warn.style.display   = 'block';
+    if (body)   body.style.display   = 'none';
+  }
+}
+
+window.refreshMqttSvcStatus = function() {
+  hw.postForm('/api/cli', {cmd: 'mqttclientenabled'})
+    .then(r => r.text())
+    .then(out => {
+      mqttApplySvcState(out.indexOf('MQTT client: enabled') >= 0);
+    })
+    .catch(e => {
+      document.getElementById('mqtt-svc-text').textContent = 'Error: ' + e.message;
+    });
+};
+
+window.enableMqttService = function() {
+  if (!confirm('Enable the MQTT client?\n\nThis will allow MQTT connections and publishing.\n\nContinue?')) return;
+  hw.postForm('/api/cli', {cmd: 'mqttclientenabled 1'})
+    .then(r => r.text())
+    .then(out => {
+      mqttApplySvcState(true);
+      alert('MQTT enabled. Use Connect or enable Auto-Start to connect to your broker.');
+      setTimeout(refreshMqttSvcStatus, 300);
+    })
+    .catch(e => alert('Error: ' + e.message));
+};
+
+window.disableMqttService = function() {
+  if (!confirm('Disable the MQTT client?\n\nThis will:\n\n\u2022 Disconnect from the broker immediately\n\u2022 Prevent auto-start on next boot\n\nContinue?')) return;
+  hw.postForm('/api/cli', {cmd: 'mqttclientenabled 0'})
+    .then(r => r.text())
+    .then(out => {
+      mqttApplySvcState(false);
+      alert('MQTT disabled. The service is now off.');
+      setTimeout(refreshMqttSvcStatus, 300);
+    })
+    .catch(e => alert('Error: ' + e.message));
+};
+
+// ── Connection status ────────────────────────────────────────────────────────
 function mqttConnect() {
   hw.postForm('/api/cli', {cmd: 'openmqtt'})
     .then(r => r.text())
@@ -313,7 +409,7 @@ function mqttRefresh() {
     .then(d => {
       var dot = document.querySelector('.status-dot');
       var txt = document.getElementById('mqtt-status');
-      if (d.connected) {
+      if (d && d.connected) {
         dot.className = 'status-dot status-active';
         txt.textContent = 'Connected';
       } else {
@@ -323,7 +419,19 @@ function mqttRefresh() {
     })
     .catch(e => console.error('Refresh failed:', e));
 }
-// Auto-refresh every 5 seconds
+
+// ── Wiring ──────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', function() {
+  var refreshBtn = document.getElementById('btn-mqtt-refresh-svc');
+  var enableBtn  = document.getElementById('btn-mqtt-enable-svc');
+  var disableBtn = document.getElementById('btn-mqtt-disable-svc');
+  if (refreshBtn) refreshBtn.addEventListener('click', refreshMqttSvcStatus);
+  if (enableBtn)  enableBtn.addEventListener('click',  enableMqttService);
+  if (disableBtn) disableBtn.addEventListener('click', disableMqttService);
+  refreshMqttSvcStatus();
+});
+
+// Auto-refresh connection status every 5 s
 setInterval(mqttRefresh, 5000);
 </script>
 )HTML", HTTPD_RESP_USE_STRLEN);

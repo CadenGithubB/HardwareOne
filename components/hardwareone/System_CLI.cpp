@@ -74,8 +74,6 @@ const char* renderHelpMain(bool showAll) {
   broadcastOutput("Core Commands:");
   broadcastOutput("  help [module]  - Show help (optionally for specific module)");
   broadcastOutput("  help all       - Show all commands (including hidden)");
-  broadcastOutput("  help search    - Search help topics (future)");
-  broadcastOutput("  tail           - Show last 32 suppressed messages");
   broadcastOutput("  back           - Return to main help menu");
   broadcastOutput("  exit           - Exit help mode");
   broadcastOutput("  clear          - Clear screen");
@@ -88,161 +86,31 @@ const char* renderHelpMain(bool showAll) {
   return "OK";
 }
 
+// Forward declaration (defined below)
+static void renderHelpModuleByName(const char* moduleName, const char* title);
+
 const char* renderHelpSystem() {
-  return "\033[2J\033[H"
-         "════════════════════════════════════════════════════════════════\n"
-         "  System Commands\n"
-         "════════════════════════════════════════════════════════════════\n\n"
-         "Status & Monitoring:\n"
-         "  status              - Show system status\n"
-         "  uptime              - Show system uptime\n"
-         "  memory              - Show heap/PSRAM usage\n"
-         "  memsum              - Print one-line memory summary (low-churn)\n"
-         "  memreport           - Print comprehensive memory report (Task Manager style)\n"
-         "  memtrack <on|off|reset|status>\n"
-         "                      - Control allocation tracking\n"
-         "  psram               - Show PSRAM usage details\n\n"
-         "Filesystem:\n"
-         "  fsusage             - Show filesystem usage (total/used/free)\n"
-         "  files [path]        - List files in LittleFS (default '/')\n"
-         "                        Example: files /logs\n"
-         "  mkdir <path>        - Create a new folder\n"
-         "                        Example: mkdir /data\n"
-         "  rmdir <path>        - Remove an empty folder\n"
-         "  filecreate <path>   - Create an empty file at path\n"
-         "                        Example: filecreate /config/test.txt\n"
-         "  fileview <path>     - View text file content (truncated)\n"
-         "                        Example: fileview /logs/automation.log\n"
-         "  filedelete <path>   - Delete the specified file\n\n"
-         "Communication:\n"
-         "  broadcast <message> (admin)\n"
-         "                      - Send a message to all users\n"
-         "                        Example: broadcast System maintenance in 5 minutes\n"
-         "  broadcast --user <username> <message> (admin)\n"
-         "                      - Send a message to a specific user\n"
-         "                        Example: broadcast --user pop Task completed\n\n"
-         "Other:\n"
-         "  reboot              - Restart the system\n"
-         "  clear               - Clear CLI history\n\n"
-         "Type 'back' to return to help menu or 'exit' to return to CLI.";
+  renderHelpModuleByName("system", "System Commands");
+  return "OK";
 }
 
 const char* renderHelpSettings() {
-  broadcastOutput("\033[2J\033[H");
-  broadcastOutput("════════════════════════════════════════════════════════════════");
-  broadcastOutput("  Settings & Configuration");
-  broadcastOutput("════════════════════════════════════════════════════════════════");
-  broadcastOutput("");
-
-  // Get command modules and render settings module dynamically
-  size_t moduleCount;
-  const CommandModule* modules = getCommandModules(moduleCount);
-  
-  // Find and render the settings module
-  for (size_t i = 0; i < moduleCount; i++) {
-    if (strcmp(modules[i].name, "settings") == 0) {
-      renderModuleHelp(&modules[i], true);
-      break;
-    }
-  }
-
-  broadcastOutput("────────────────────────────────────────────────────────────────");
-  broadcastOutput("Navigation:");
-  broadcastOutput("  • Type 'help settings' to refresh this list");
-  broadcastOutput("  • Type 'help debug' for debug commands");
-  broadcastOutput("  • Type 'help users' for user management");
-  broadcastOutput("  • Type 'back' to return to help menu");
-  broadcastOutput("  • Type 'exit' to return to CLI");
-  broadcastOutput("────────────────────────────────────────────────────────────────");
-
+  renderHelpModuleByName("settings", "Settings & Configuration");
   return "OK";
 }
 
 const char* renderHelpAutomations() {
-  broadcastOutput("\033[2J\033[H");
-  broadcastOutput("════════════════════════════════════════════════════════════════");
-  broadcastOutput("  Automations - Scheduled Tasks & Conditional Commands");
-  broadcastOutput("════════════════════════════════════════════════════════════════");
-  broadcastOutput("");
-
-  // Get command modules and render automation module dynamically
-  size_t moduleCount;
-  const CommandModule* modules = getCommandModules(moduleCount);
-  
-  // Find and render the automation module
-  for (size_t i = 0; i < moduleCount; i++) {
-    if (strcmp(modules[i].name, "automation") == 0) {
-      renderModuleHelp(&modules[i], true);
-      break;
-    }
-  }
-
-  broadcastOutput("────────────────────────────────────────────────────────────────");
-  broadcastOutput("Navigation:");
-  broadcastOutput("  • Type 'help automation' to refresh this list");
-  broadcastOutput("  • Type 'help all' to see all commands");
-  broadcastOutput("  • Type 'back' to return to help menu");
-  broadcastOutput("  • Type 'exit' to return to CLI");
-  broadcastOutput("────────────────────────────────────────────────────────────────");
-
+  renderHelpModuleByName("automation", "Automations - Scheduled Tasks & Conditional Commands");
   return "OK";
 }
 
 const char* renderHelpEspnow() {
-  broadcastOutput("\033[2J\033[H");
-  broadcastOutput("════════════════════════════════════════════════════════════════");
-  broadcastOutput("  ESP-NOW - Wireless Peer-to-Peer Communication");
-  broadcastOutput("════════════════════════════════════════════════════════════════");
-  broadcastOutput("");
-
-  // Get command modules and render espnow module dynamically
-  size_t moduleCount;
-  const CommandModule* modules = getCommandModules(moduleCount);
-  
-  // Find and render the espnow module
-  for (size_t i = 0; i < moduleCount; i++) {
-    if (strcmp(modules[i].name, "espnow") == 0) {
-      renderModuleHelp(&modules[i], true);
-      break;
-    }
-  }
-
-  broadcastOutput("────────────────────────────────────────────────────────────────");
-  broadcastOutput("Navigation:");
-  broadcastOutput("  • Type 'help espnow' to refresh this list");
-  broadcastOutput("  • Type 'back' to return to help menu");
-  broadcastOutput("  • Type 'exit' to return to CLI");
-  broadcastOutput("────────────────────────────────────────────────────────────────");
-
+  renderHelpModuleByName("espnow", "ESP-NOW - Wireless Peer-to-Peer Communication");
   return "OK";
 }
 
 const char* renderHelpWifi() {
-  broadcastOutput("\033[2J\033[H");
-  broadcastOutput("════════════════════════════════════════════════════════════════");
-  broadcastOutput("  WiFi Network Management");
-  broadcastOutput("════════════════════════════════════════════════════════════════");
-  broadcastOutput("");
-
-  // Get command modules and render wifi module dynamically
-  size_t moduleCount;
-  const CommandModule* modules = getCommandModules(moduleCount);
-  
-  // Find and render the wifi module
-  for (size_t i = 0; i < moduleCount; i++) {
-    if (strcmp(modules[i].name, "wifi") == 0) {
-      renderModuleHelp(&modules[i], true);
-      break;
-    }
-  }
-
-  broadcastOutput("────────────────────────────────────────────────────────────────");
-  broadcastOutput("Navigation:");
-  broadcastOutput("  • Type 'help wifi' to refresh this list");
-  broadcastOutput("  • Type 'back' to return to help menu");
-  broadcastOutput("  • Type 'exit' to return to CLI");
-  broadcastOutput("────────────────────────────────────────────────────────────────");
-
+  renderHelpModuleByName("wifi", "WiFi Network Management");
   return "OK";
 }
 
@@ -267,7 +135,7 @@ const char* renderHelpSensors() {
   broadcastOutput("────────────────────────────────────────────────────────────────");
   broadcastOutput("Navigation:");
   broadcastOutput("  • Type 'help sensors' to refresh this list");
-  broadcastOutput("  • Type 'help all' to see all sensors (including disconnected)");
+  broadcastOutput("  • Type 'help all' to see disconnected sensors too");
   broadcastOutput("  • Type 'back' to return to help menu");
   broadcastOutput("  • Type 'exit' to return to CLI");
   broadcastOutput("────────────────────────────────────────────────────────────────");
@@ -281,113 +149,65 @@ const char* renderHelpSensors() {
 
 bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
   DEBUGF(DEBUG_CLI, "[handleHelpNavigation] cmd='%s', gCLIState=%d", cmd.c_str(), (int)gCLIState);
-  if (gCLIState == CLI_NORMAL) {
-    return false;  // Not in help mode
-  }
-  gInHelpRender = true;  // allow help output to pass through gating
+  if (gCLIState == CLI_NORMAL) return false;
+
+  gInHelpRender = true;
+
+  // Helper lambda to write OK to out and clear the render flag
+  auto respond = [&]() {
+    strncpy(out, "OK", outSize - 1);
+    out[outSize - 1] = '\0';
+    gInHelpRender = false;
+  };
 
   String lc = cmd;
   lc.toLowerCase();
+  lc.trim();
 
-  // Handle help section navigation
-  if (lc == "system") {
-    gCLIState = CLI_HELP_SYSTEM;
-    broadcastOutput(renderHelpSystem());
-    strncpy(out, "OK", outSize - 1);
-    out[outSize - 1] = '\0';
-    gInHelpRender = false;
+  // ── Utility commands ─────────────────────────────────────────────────────
+  if (lc == "back" || lc == "exit") {
+    broadcastOutput(exitToNormalBanner());
+    respond();
     return true;
-#if ENABLE_WIFI
-  } else if (lc == "wifi") {
-    gCLIState = CLI_HELP_WIFI;
-    broadcastOutput(renderHelpWifi());
-    strncpy(out, "OK", outSize - 1);
-    out[outSize - 1] = '\0';
-    gInHelpRender = false;
+  }
+  if (lc == "clear") {
+    broadcastOutput("\033[2J\033[H");
+    respond();
     return true;
-#endif
-#if ENABLE_AUTOMATION
-  } else if (lc == "automations") {
-    gCLIState = CLI_HELP_AUTOMATIONS;
-    broadcastOutput(renderHelpAutomations());
-    strncpy(out, "OK", outSize - 1);
-    out[outSize - 1] = '\0';
-    gInHelpRender = false;
-    return true;
-#endif
-#if ENABLE_ESPNOW
-  } else if (lc == "espnow") {
-    gCLIState = CLI_HELP_ESPNOW;
-    broadcastOutput(renderHelpEspnow());
-    strncpy(out, "OK", outSize - 1);
-    out[outSize - 1] = '\0';
-    gInHelpRender = false;
-    return true;
-#endif
-  } else if (lc == "sensors") {
-    gCLIState = CLI_HELP_SENSORS;
-    broadcastOutput(renderHelpSensors());
-    strncpy(out, "OK", outSize - 1);
-    out[outSize - 1] = '\0';
-    gInHelpRender = false;
-    return true;
-  } else if (lc == "settings") {
-    gCLIState = CLI_HELP_SETTINGS;
-    broadcastOutput(renderHelpSettings());
-    strncpy(out, "OK", outSize - 1);
-    out[outSize - 1] = '\0';
-    gInHelpRender = false;
+  }
+  if (lc == "tail") {
+    helpSuppressedTailDump();
+    respond();
     return true;
   }
 
-  // Handle dynamic module navigation for all registered modules
-  if (cmd.indexOf(' ') == -1) {  // Only single words (no arguments)
+  // ── Sensors: special aggregate view (all sensor modules by flag) ──────────
+  if (lc == "sensors") {
+    gCLIState = CLI_HELP_MODULE;
+    renderHelpSensors();
+    respond();
+    return true;
+  }
+
+  // ── Dynamic module lookup: any registered module name ────────────────────
+  // Only match single-word inputs (no arguments)
+  if (lc.indexOf(' ') == -1) {
     size_t moduleCount;
     const CommandModule* modules = getCommandModules(moduleCount);
-    
+
     for (size_t i = 0; i < moduleCount; i++) {
-      String moduleName = String(modules[i].name);
-      moduleName.toLowerCase();
-      
-      // Skip core modules that don't need help navigation
-      if (strcmp(modules[i].name, "core") == 0 || strcmp(modules[i].name, "cli") == 0) {
-        continue;
-      }
-      
-      // Check if command matches module name
-      if (lc == moduleName) {
-        // Show module help using the existing help system
-        renderModuleHelp(&modules[i], false);
-        strncpy(out, "OK", outSize - 1);
-        out[outSize - 1] = '\0';
-        gInHelpRender = false;
+      // Skip internal-only modules
+      if (modules[i].flags & CMD_MODULE_CORE) continue;
+
+      // Case-insensitive comparison without heap allocation
+      const char* mname = modules[i].name;
+      if (lc.equalsIgnoreCase(mname)) {
+        gCLIState = CLI_HELP_MODULE;
+        renderHelpModuleByName(mname, nullptr);
+        respond();
         return true;
       }
     }
-  }
-
-  // Handle back/exit/clear navigation
-  if (lc == "back" || lc == "exit") {
-    String exitBanner = exitToNormalBanner();
-    broadcastOutput(exitBanner);
-    strncpy(out, "OK", outSize - 1);
-    out[outSize - 1] = '\0';
-    gInHelpRender = false;
-    return true;
-  } else if (lc == "clear") {
-    broadcastOutput("\033[2J\033[H");
-    strncpy(out, "OK", outSize - 1);
-    out[outSize - 1] = '\0';
-    gInHelpRender = false;
-    return true;
-  } else if (lc == "tail") {
-    // Show suppressed output tail while staying in help
-    gInHelpRender = true;
-    helpSuppressedTailDump();
-    strncpy(out, "OK", outSize - 1);
-    out[outSize - 1] = '\0';
-    gInHelpRender = false;
-    return true;
   }
 
   gInHelpRender = false;
@@ -476,16 +296,19 @@ static void renderModuleHelp(const CommandModule* module, bool showAll) {
   
   // Show module if connected or if showing all commands
   if (showAll || isConnected || !isSensorModule) {
-    // Module header
-    String upperName = String(moduleName);
-    upperName.toUpperCase();
-    
+    // Module header — stack buffer, no heap allocation
+    char upperName[32];
+    size_t nameLen = strlen(moduleName);
+    if (nameLen >= sizeof(upperName)) nameLen = sizeof(upperName) - 1;
+    for (size_t j = 0; j < nameLen; j++) upperName[j] = toupper((unsigned char)moduleName[j]);
+    upperName[nameLen] = '\0';
+
     if (isSensorModule) {
-      BROADCAST_PRINTF("%s Commands%s:", 
-                       upperName.c_str(),
+      BROADCAST_PRINTF("%s Commands%s:",
+                       upperName,
                        isConnected ? " (Connected)" : " (Not Connected)");
     } else {
-      BROADCAST_PRINTF("%s Commands:", upperName.c_str());
+      BROADCAST_PRINTF("%s Commands:", upperName);
     }
     
     // Show connection status for sensors
@@ -508,139 +331,135 @@ static void renderModuleHelp(const CommandModule* module, bool showAll) {
   }
 }
 
+// ============================================================================
+// Shared Help Helpers
+// ============================================================================
+
+// Standard navigation footer printed at the bottom of every module help page.
+static void broadcastHelpNavFooter(const char* moduleName) {
+  broadcastOutput("────────────────────────────────────────────────────────────────");
+  broadcastOutput("Navigation:");
+  BROADCAST_PRINTF("  • Type 'help %s' to refresh this page", moduleName);
+  broadcastOutput("  • Type 'back' to return to help menu");
+  broadcastOutput("  • Type 'exit' to return to CLI");
+  broadcastOutput("────────────────────────────────────────────────────────────────");
+}
+
+// Render help for a single named module looked up from the command registry.
+// title may be nullptr — if so the title is derived from the module name.
+// All output is broadcast directly; nothing is returned.
+static void renderHelpModuleByName(const char* moduleName, const char* title) {
+  broadcastOutput("\033[2J\033[H");
+  broadcastOutput("════════════════════════════════════════════════════════════════");
+  if (title) {
+    BROADCAST_PRINTF("  %s", title);
+  } else {
+    char upper[32];
+    size_t j = 0;
+    for (; moduleName[j] && j < sizeof(upper) - 1; j++)
+      upper[j] = toupper((unsigned char)moduleName[j]);
+    upper[j] = '\0';
+    BROADCAST_PRINTF("  %s Module", upper);
+  }
+  broadcastOutput("════════════════════════════════════════════════════════════════");
+  broadcastOutput("");
+
+  size_t moduleCount;
+  const CommandModule* modules = getCommandModules(moduleCount);
+
+  bool found = false;
+  for (size_t i = 0; i < moduleCount; i++) {
+    if (strcmp(modules[i].name, moduleName) == 0) {
+      renderModuleHelp(&modules[i], true);
+      found = true;
+      break;
+    }
+  }
+
+  if (!found) {
+    BROADCAST_PRINTF("  (No commands registered for module '%s')", moduleName);
+    broadcastOutput("");
+  }
+
+  broadcastHelpNavFooter(moduleName);
+}
+
 static const char* cmd_help(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   String args = argsInput;
   args.trim();
 
+  if (!gWebMirror.buf) { gWebMirror.init(gWebMirrorCap); }
+
+  // ── Plain "help" — enter / return to main help menu ──────────────────────
   if (args.length() == 0) {
-    // Plain "help" command
-    if (gCLIState == CLI_NORMAL) {
-      // Enter help mode
-      if (!gWebMirror.buf) { gWebMirror.init(gWebMirrorCap); }
-      gWebMirror.clear();
-      gCLIState = CLI_HELP_MAIN;
-      DEBUGF(DEBUG_CLI, "[cmd_help] Set gCLIState to CLI_HELP_MAIN (%d)", (int)gCLIState);
-      gInHelpRender = true;
-      broadcastOutput(renderHelpMain(false));
-      gInHelpRender = false;
-      return "OK";
-    } else {
-      // Already in help - re-render main
-      gCLIState = CLI_HELP_MAIN;
-      DEBUGF(DEBUG_CLI, "[cmd_help] Re-set gCLIState to CLI_HELP_MAIN (%d)", (int)gCLIState);
-      gInHelpRender = true;
-      broadcastOutput(renderHelpMain(false));
-      gInHelpRender = false;
-      return "OK";
-    }
+    gWebMirror.clear();
+    gCLIState = CLI_HELP_MAIN;
+    DEBUGF(DEBUG_CLI, "[cmd_help] gCLIState -> CLI_HELP_MAIN");
+    gInHelpRender = true;
+    renderHelpMain(gShowAllCommands);
+    gInHelpRender = false;
+    return "OK";
   }
 
-  // Check if argument matches any module name for module-specific help
-  size_t moduleCount;
-  const CommandModule* modules = getCommandModules(moduleCount);
-  
-  for (size_t i = 0; i < moduleCount; i++) {
-    if (args.equals(modules[i].name)) {
-      // Module-specific help
-      gInHelpRender = true;
-      broadcastOutput("\033[2J\033[H");
-      broadcastOutput("════════════════════════════════════════════════════════════════");
-      String upperName = String(modules[i].name);
-      upperName.toUpperCase();
-      BROADCAST_PRINTF("  %s Module Commands", upperName.c_str());
-      broadcastOutput("════════════════════════════════════════════════════════════════");
-      broadcastOutput("");
-      
-      renderModuleHelp(&modules[i], true);
-      
-      broadcastOutput("────────────────────────────────────────────────────────────────");
-      broadcastOutput("Navigation:");
-      BROADCAST_PRINTF("  • Type 'help %s' to refresh this module", modules[i].name);
-      broadcastOutput("  • Type 'help sensors' to see all sensor modules");
-      broadcastOutput("  • Type 'back' to return to help menu");
-      broadcastOutput("  • Type 'exit' to return to CLI");
-      broadcastOutput("────────────────────────────────────────────────────────────────");
-      
-      gCLIState = CLI_HELP_SENSORS;  // Use sensors state for module-specific help
-      gInHelpRender = false;
-      return "OK";
-    }
-  }
+  gInHelpRender = true;
 
-  // Parse traditional help subcommands
-  if (args == "system") {
-    gCLIState = CLI_HELP_SYSTEM;
-    gInHelpRender = true;
-    broadcastOutput(renderHelpSystem());
+  // ── Meta-commands ─────────────────────────────────────────────────────────
+  if (args == "all") {
+    gShowAllCommands = true;
+    gCLIState = CLI_HELP_MAIN;
+    renderHelpMain(true);
     gInHelpRender = false;
     return "OK";
-  } else if (args == "wifi") {
-    gCLIState = CLI_HELP_WIFI;
-    gInHelpRender = true;
-    broadcastOutput(renderHelpWifi());
-    gInHelpRender = false;
-    return "OK";
-  } else if (args == "sensors") {
-    gCLIState = CLI_HELP_SENSORS;
-    gShowAllCommands = false;  // Reset to show connected sensors only
-    gInHelpRender = true;
-    broadcastOutput(renderHelpSensors());
-    gInHelpRender = false;
-    return "OK";
-  } else if (args == "settings") {
-    gCLIState = CLI_HELP_SETTINGS;
-    gInHelpRender = true;
-    broadcastOutput(renderHelpSettings());
-    gInHelpRender = false;
-    return "OK";
-  } else if (args == "automations") {
-    gCLIState = CLI_HELP_AUTOMATIONS;
-    gInHelpRender = true;
-    broadcastOutput(renderHelpAutomations());
-    gInHelpRender = false;
-    return "OK";
-  } else if (args == "espnow") {
-    gCLIState = CLI_HELP_ESPNOW;
-    gInHelpRender = true;
-    broadcastOutput(renderHelpEspnow());
-    gInHelpRender = false;
-    return "OK";
-  } else if (args == "tail") {
-    // Dump suppressed output tail
-    gInHelpRender = true;
+  }
+  if (args == "tail") {
     helpSuppressedTailDump();
     gInHelpRender = false;
     return "OK";
-  } else if (args == "all") {
-    gShowAllCommands = true;
-    gInHelpRender = true;
-    broadcastOutput(renderHelpMain(true));
+  }
+
+  // ── Sensors: aggregate view across all sensor modules ─────────────────────
+  if (args == "sensors") {
+    gCLIState = CLI_HELP_MODULE;
+    gShowAllCommands = false;
+    renderHelpSensors();
     gInHelpRender = false;
     return "OK";
-  } else {
-    // Build list of available modules for error message
-    String moduleList = "";
-    for (size_t i = 0; i < moduleCount; i++) {
-      if (moduleList.length() > 0) moduleList += ", ";
-      moduleList += modules[i].name;
-    }
-    gInHelpRender = true;
-    broadcastOutput("Unknown help topic.");
-    broadcastOutput("Available topics: system, wifi, sensors, settings, automations, espnow, all");
-    BROADCAST_PRINTF("Available modules: %s", moduleList.c_str());
-    gInHelpRender = false;
-    return "ERROR";
   }
+
+  // ── Dynamic lookup: match any registered module name ─────────────────────
+  size_t moduleCount;
+  const CommandModule* modules = getCommandModules(moduleCount);
+
+  for (size_t i = 0; i < moduleCount; i++) {
+    if (args.equalsIgnoreCase(modules[i].name)) {
+      gCLIState = CLI_HELP_MODULE;
+      renderHelpModuleByName(modules[i].name, nullptr);
+      gInHelpRender = false;
+      return "OK";
+    }
+  }
+
+  // ── Unknown topic — list available modules ────────────────────────────────
+  broadcastOutput("Unknown help topic. Available modules:");
+  for (size_t i = 0; i < moduleCount; i++) {
+    if (modules[i].flags & CMD_MODULE_CORE) continue;
+    BROADCAST_PRINTF("  %s", modules[i].name);
+  }
+  broadcastOutput("Special topics: sensors, all, tail");
+  gInHelpRender = false;
+  return "ERROR";
 }
 
 static const char* cmd_back(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
   if (gCLIState != CLI_NORMAL) {
     gCLIState = CLI_HELP_MAIN;
-    broadcastOutput(renderHelpMain(gShowAllCommands));
+    gInHelpRender = true;
+    renderHelpMain(gShowAllCommands);
+    gInHelpRender = false;
     return "OK";
   }
   return "Not in help mode.";

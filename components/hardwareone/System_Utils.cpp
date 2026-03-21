@@ -189,12 +189,14 @@ extern const CommandEntry userSystemCommands[];
 extern const size_t userSystemCommandsCount;
 extern const CommandEntry sensorLoggingCommands[];
 extern const size_t sensorLoggingCommandsCount;
-extern const CommandEntry hardwareCommands[];
-extern const size_t hardwareCommandsCount;
+extern const CommandEntry ledCommands[];
+extern const size_t ledCommandsCount;
 extern const CommandEntry featureCommands[];
 extern const size_t featureCommandsCount;
+#if ENABLE_CAMERA_SENSOR
 extern const CommandEntry imageCommands[];
 extern const size_t imageCommandsCount;
+#endif
 extern const CommandEntry mapCommands[];
 extern const size_t mapCommandsCount;
 extern const CommandEntry powerCommands[];
@@ -1663,7 +1665,7 @@ extern const size_t mqttCommandsCount;
 // Columns: name, description, commands, count, flags, isConnected
 static const CommandModule gCommandModules[] = {
   { "cli",        "Help and CLI navigation", cliCommands,          cliCommandsCount, CMD_MODULE_CORE, nullptr },
-  { "core",       "Core system commands", commands,             commandsCount, CMD_MODULE_CORE, nullptr },
+  { "system",     "Core system commands", commands,             commandsCount, 0, nullptr },
 #if ENABLE_WIFI
   { "wifi",       "Network management (connect, scan, add/remove networks)", wifiCommands,         wifiCommandsCount, CMD_MODULE_NETWORK, nullptr },
 #endif
@@ -1682,7 +1684,7 @@ static const CommandModule gCommandModules[] = {
 #endif
   { "oled",       "OLED display control and graphics", oledCommands,         oledCommandsCount, 0, nullptr },
   { "neopixel",   "RGB LED strip and effects", neopixelCommands,     neopixelCommandsCount, 0, nullptr },
-  { "hardware",   "Hardware LED settings", hardwareCommands,     hardwareCommandsCount, 0, nullptr },
+  { "led",        "LED brightness and startup effects", ledCommands,           ledCommandsCount, 0, nullptr },
 #if ENABLE_SERVO
   { "servo",      "PCA9685 servo motor control", servoCommands,        servoCommandsCount, 0, nullptr },
 #endif
@@ -1738,7 +1740,9 @@ static const CommandModule gCommandModules[] = {
   { "sensorlog", "Sensor data logging to files", sensorLoggingCommands, sensorLoggingCommandsCount, 0, nullptr },
   { "users",      "User authentication and management", userSystemCommands,         userSystemCommandsCount, CMD_MODULE_ADMIN, nullptr },
   { "features",   "System feature management", featureCommands,      featureCommandsCount, 0, nullptr },
+#if ENABLE_CAMERA_SENSOR
   { "image",      "Image capture and management", imageCommands,        imageCommandsCount, 0, nullptr },
+#endif
   { "map",        "Map navigation and waypoints", mapCommands,          mapCommandsCount, 0, nullptr },
   { "power",      "Power management", powerCommands,        powerCommandsCount, 0, nullptr },
 #if ENABLE_OLED_DISPLAY
@@ -2636,6 +2640,24 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   gExecIsAdmin = isAdminUser(ctx.user);
   gExecAuthContext = ctx;  // Store full context (includes opaque for ESP-NOW streaming)
 
+  // Scoped notification context: attributes all notifications from this command
+  // to the correct transport + user. The RAII guard automatically clears the
+  // context when executeCommand() returns, regardless of which return path is
+  // taken — including early returns from auth failures, validation, etc.
+  uint8_t notifSrc = NOTIF_SOURCE_UNKNOWN;
+  switch (ctx.transport) {
+    case SOURCE_WEB:            notifSrc = NOTIF_SOURCE_WEB;    break;
+    case SOURCE_SERIAL:         notifSrc = NOTIF_SOURCE_CLI;    break;
+    case SOURCE_LOCAL_DISPLAY:  notifSrc = NOTIF_SOURCE_OLED;   break;
+    case SOURCE_VOICE:          notifSrc = NOTIF_SOURCE_VOICE;  break;
+    case SOURCE_ESPNOW:
+    case SOURCE_BLUETOOTH:
+    case SOURCE_MQTT:           notifSrc = NOTIF_SOURCE_REMOTE; break;
+    default: break;
+  }
+  NotificationContextGuard notifGuard(notifSrc,
+    ctx.user.length() > 0 ? ctx.user.c_str() : nullptr);
+
   // Create command String once — reuse everywhere (avoids 5+ String(cmd) temporaries)
   String command = cmd;
   command.trim();
@@ -2772,25 +2794,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 
     // Handle help mode exit for non-help commands
     if (gCLIState != CLI_NORMAL) {
-      String cmdName = String(found->name);
-      bool isHelpCommand = false;
-      
-      // Check for core help navigation commands
-      if (cmdName.startsWith("help") || cmdName == "back" || cmdName == "exit" || cmdName == "clear") {
-        isHelpCommand = true;
-      } else {
-        // Dynamically check if command matches any registered module name
-        size_t moduleCount;
-        const CommandModule* modules = getCommandModules(moduleCount);
-        for (size_t i = 0; i < moduleCount; i++) {
-          if (cmdName == String(modules[i].name)) {
-            isHelpCommand = true;
-            break;
-          }
-        }
-      }
-
-      if (!isHelpCommand) {
+      if (!isHelpModeCommand(found->name)) {
         // Exit help mode first, then execute command
         String exitBanner = exitToNormalBanner();
         broadcastOutput(exitBanner);

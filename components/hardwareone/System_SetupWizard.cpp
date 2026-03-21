@@ -19,6 +19,9 @@
 #include "HAL_Input.h"
 extern bool oledConnected;
 extern ControlCache gControlCache;
+// OLED page handlers for ESP-NOW and MQTT (defined in OLED_SetupWizard.cpp)
+void handleOLEDESPNowPage(SetupWizardResult& result, bool& running);
+void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
 #endif
 
 extern String waitForSerialInputBlocking();
@@ -28,21 +31,36 @@ extern String waitForSerialInputBlocking();
 // ============================================================================
 
 static const TimezoneEntry timezones[] = {
-  { "UTC",  "UTC (GMT)",           0 },
-  { "EST",  "Eastern US",       -300 },  // UTC-5
-  { "CST",  "Central US",       -360 },  // UTC-6
-  { "MST",  "Mountain US",      -420 },  // UTC-7
-  { "PST",  "Pacific US",       -480 },  // UTC-8
-  { "AKST", "Alaska",           -540 },  // UTC-9
-  { "HST",  "Hawaii",           -600 },  // UTC-10
-  { "GMT",  "UK/London",           0 },  // UTC+0
-  { "CET",  "Central Europe",    60 },   // UTC+1
-  { "EET",  "Eastern Europe",   120 },   // UTC+2
-  { "IST",  "India",            330 },   // UTC+5:30
-  { "SGT",  "Singapore",        480 },   // UTC+8
-  { "JST",  "Japan",            540 },   // UTC+9
-  { "AEST", "Australia East",   600 },   // UTC+10
-  { "NZST", "New Zealand",      720 },   // UTC+12
+  // UTC
+  { "UTC",  "UTC / GMT (0:00)",                  0 },
+  // North America — Daylight Saving (summer)
+  { "EDT",  "US Eastern Daylight (-4:00)",     -240 },
+  { "CDT",  "US Central Daylight (-5:00)",     -300 },
+  { "MDT",  "US Mountain Daylight (-6:00)",    -360 },
+  { "PDT",  "US Pacific Daylight (-7:00)",     -420 },
+  { "AKDT", "Alaska Daylight (-8:00)",         -480 },
+  // North America — Standard Time (winter)
+  { "EST",  "US Eastern Standard (-5:00)",     -300 },
+  { "CST",  "US Central Standard (-6:00)",     -360 },
+  { "MST",  "US Mountain Standard (-7:00)",    -420 },
+  { "PST",  "US Pacific Standard (-8:00)",     -480 },
+  { "AKST", "Alaska Standard (-9:00)",         -540 },
+  { "HST",  "Hawaii (-10:00)",                 -600 },
+  // Europe
+  { "GMT",  "UK / Ireland (0:00)",                0 },
+  { "BST",  "UK Summer Time (+1:00)",            60 },
+  { "CET",  "Central Europe (+1:00)",            60 },
+  { "CEST", "Central Europe Summer (+2:00)",    120 },
+  { "EET",  "Eastern Europe (+2:00)",           120 },
+  { "EEST", "Eastern Europe Summer (+3:00)",    180 },
+  // Asia / Pacific
+  { "IST",  "India (+5:30)",                    330 },
+  { "SGT",  "Singapore (+8:00)",                480 },
+  { "JST",  "Japan (+9:00)",                    540 },
+  { "AEST", "Australia East (+10:00)",          600 },
+  { "AEDT", "Australia East Summer (+11:00)",   660 },
+  { "NZST", "New Zealand (+12:00)",             720 },
+  { "NZDT", "New Zealand Summer (+13:00)",      780 },
 };
 static const size_t timezoneCount = sizeof(timezones) / sizeof(timezones[0]);
 
@@ -59,14 +77,58 @@ static const char* logLevelNames[] = {
 static const size_t logLevelCount = 4;
 
 // ============================================================================
+// NTP Presets
+// ============================================================================
+
+static const char* ntpPresets[] = {
+  "pool.ntp.org",
+  "us.pool.ntp.org",
+  "europe.pool.ntp.org",
+  "time.google.com",
+  "time.cloudflare.com"
+};
+static const size_t ntpPresetCount = sizeof(ntpPresets) / sizeof(ntpPresets[0]);
+
+// ============================================================================
+// LED Startup Effects
+// ============================================================================
+
+static const char* ledEffects[] = {
+  "none",
+  "rainbow",
+  "pulse",
+  "fade",
+  "blink",
+  "strobe"
+};
+static const size_t ledEffectCount = sizeof(ledEffects) / sizeof(ledEffects[0]);
+
+// ============================================================================
+// Page Order (for dynamic navigation)
+// ============================================================================
+
+static const SetupWizardPage kPageOrder[] = {
+  WIZARD_PAGE_FEATURES,
+  WIZARD_PAGE_SENSORS,
+  WIZARD_PAGE_NETWORK,
+  WIZARD_PAGE_SYSTEM,
+  WIZARD_PAGE_ESPNOW,
+  WIZARD_PAGE_MQTT,
+  WIZARD_PAGE_WIFI,
+};
+static const size_t kPageOrderCount = sizeof(kPageOrder) / sizeof(kPageOrder[0]);
+
+// ============================================================================
 // Wizard State
 // ============================================================================
 
 static SetupWizardPage currentPage = WIZARD_PAGE_FEATURES;
 static int currentSelection = 0;
 static int scrollOffset = 0;
-static int timezoneSelection = 1;  // EST default
+static int timezoneSelection = 1;  // EDT default (index 1 — US Eastern Daylight, UTC-4)
 static int logLevelSelection = 3;  // DEBUG default (all logging enabled)
+static int ntpSelection = 0;       // pool.ntp.org default
+static int ledEffectSelection = 1; // rainbow default
 
 // Feature items per page
 static WizardFeatureItem featuresPage[16];
@@ -106,6 +168,61 @@ int getWizardLogLevelSelection() { return logLevelSelection; }
 void setWizardLogLevelSelection(int sel) { logLevelSelection = sel; }
 const char** getLogLevelNames() { return (const char**)logLevelNames; }
 size_t getLogLevelCount() { return logLevelCount; }
+
+int getWizardNTPSelection() { return ntpSelection; }
+void setWizardNTPSelection(int sel) { ntpSelection = sel; }
+int getWizardLEDEffectSelection() { return ledEffectSelection; }
+void setWizardLEDEffectSelection(int sel) { ledEffectSelection = sel; }
+const char* const* getNTPPresets() { return ntpPresets; }
+size_t getNTPPresetCount() { return ntpPresetCount; }
+const char* const* getLEDEffects() { return ledEffects; }
+size_t getLEDEffectCount() { return ledEffectCount; }
+
+// System page: items are timezone, log level, [NTP server], [LED effect]
+// Item indices depend on which conditional items are visible
+static bool systemPageHasNTP() {
+#if ENABLE_WIFI
+  const FeatureEntry* wifiFeature = getFeatureById("wifi");
+  return wifiFeature && isFeatureEnabled(wifiFeature);
+#else
+  return false;
+#endif
+}
+
+static bool systemPageHasLED() {
+  const FeatureEntry* ledFeature = getFeatureById("led");
+  return ledFeature && isFeatureCompiled(ledFeature);
+}
+
+size_t getWizardSystemPageCount() {
+  size_t count = 2; // timezone + log level always present
+  if (systemPageHasNTP()) count++;
+  if (systemPageHasLED()) count++;
+  return count;
+}
+
+// Map system page selection index to logical item
+// 0=log level, 1=timezone, 2=NTP (if visible), 3=LED (if visible)
+enum SystemPageItem {
+  SYS_ITEM_LOGLEVEL = 0,
+  SYS_ITEM_TIMEZONE,
+  SYS_ITEM_NTP,
+  SYS_ITEM_LED
+};
+
+static SystemPageItem getSystemItemAt(int index) {
+  if (index == 0) return SYS_ITEM_LOGLEVEL;
+  if (index == 1) return SYS_ITEM_TIMEZONE;
+  int nextIdx = 2;
+  if (systemPageHasNTP()) {
+    if (index == nextIdx) return SYS_ITEM_NTP;
+    nextIdx++;
+  }
+  if (systemPageHasLED()) {
+    if (index == nextIdx) return SYS_ITEM_LED;
+  }
+  return SYS_ITEM_TIMEZONE; // fallback
+}
 
 // ============================================================================
 // Heap Bar Helper
@@ -211,14 +328,36 @@ void initSetupWizard() {
   currentPage = WIZARD_PAGE_FEATURES;
   currentSelection = 0;
   scrollOffset = 0;
-  timezoneSelection = 1;  // EST
+  timezoneSelection = 1;  // EDT default
   logLevelSelection = 3;  // DEBUG (all logging enabled)
-  
+  ntpSelection = 0;       // pool.ntp.org
+  ledEffectSelection = 1; // rainbow
+
   // Find current timezone in list
   for (size_t i = 0; i < timezoneCount; i++) {
     if (timezones[i].offsetMinutes == gSettings.tzOffsetMinutes) {
       timezoneSelection = i;
       break;
+    }
+  }
+
+  // Find current NTP server in presets
+  if (gSettings.ntpServer.length() > 0) {
+    for (size_t i = 0; i < ntpPresetCount; i++) {
+      if (gSettings.ntpServer == ntpPresets[i]) {
+        ntpSelection = i;
+        break;
+      }
+    }
+  }
+
+  // Find current LED effect in list
+  if (gSettings.ledStartupEffect.length() > 0) {
+    for (size_t i = 0; i < ledEffectCount; i++) {
+      if (gSettings.ledStartupEffect == ledEffects[i]) {
+        ledEffectSelection = i;
+        break;
+      }
     }
   }
 }
@@ -304,6 +443,81 @@ bool hasNetworkSettings() {
 }
 
 // ============================================================================
+// Page Visibility & Dynamic Navigation
+// ============================================================================
+
+bool wizardShouldShowESPNow() {
+#if ENABLE_ESPNOW
+  const FeatureEntry* f = getFeatureById("espnow");
+  return f && isFeatureEnabled(f);
+#else
+  return false;
+#endif
+}
+
+bool wizardShouldShowMQTT() {
+#if ENABLE_MQTT
+  const FeatureEntry* f = getFeatureById("mqtt");
+  return f && isFeatureEnabled(f) && gSettings.mqttAutoStart;
+#else
+  return false;
+#endif
+}
+
+bool wizardIsPageVisible(SetupWizardPage page) {
+  switch (page) {
+    case WIZARD_PAGE_NETWORK:
+      return hasNetworkSettings();
+    case WIZARD_PAGE_ESPNOW:
+      return wizardShouldShowESPNow();
+    case WIZARD_PAGE_MQTT:
+      return wizardShouldShowMQTT();
+    case WIZARD_PAGE_WIFI:
+      return wizardShouldShowWiFi();
+    default:
+      return true;
+  }
+}
+
+SetupWizardPage wizardAdvanceFrom(SetupWizardPage current) {
+  bool found = false;
+  for (size_t i = 0; i < kPageOrderCount; i++) {
+    if (kPageOrder[i] == current) { found = true; continue; }
+    if (found && wizardIsPageVisible(kPageOrder[i])) return kPageOrder[i];
+  }
+  return WIZARD_PAGE_COUNT; // no next page — signals completion
+}
+
+SetupWizardPage wizardRetreatFrom(SetupWizardPage current) {
+  // Walk backward through kPageOrder
+  bool found = false;
+  for (int i = (int)kPageOrderCount - 1; i >= 0; i--) {
+    if (kPageOrder[i] == current) { found = true; continue; }
+    if (found && wizardIsPageVisible(kPageOrder[i])) return kPageOrder[i];
+  }
+  return current; // already at first page
+}
+
+int getWizardTotalPages() {
+  int count = 0;
+  for (size_t i = 0; i < kPageOrderCount; i++) {
+    if (wizardIsPageVisible(kPageOrder[i])) count++;
+  }
+  return count;
+}
+
+int getWizardPageNumber(SetupWizardPage page) {
+  int num = 0;
+  for (size_t i = 0; i < kPageOrderCount; i++) {
+    if (wizardIsPageVisible(kPageOrder[i])) {
+      num++;
+      if (kPageOrder[i] == page) return num;
+    }
+  }
+  return 1; // fallback
+}
+
+// ============================================================================
 // Wizard Actions
 // ============================================================================
 
@@ -338,8 +552,8 @@ bool wizardMoveUp() {
   if (currentPage == WIZARD_PAGE_FEATURES) maxItems = featuresPageCount;
   else if (currentPage == WIZARD_PAGE_SENSORS) maxItems = sensorsPageCount;
   else if (currentPage == WIZARD_PAGE_NETWORK) maxItems = networkPageCount;
-  else if (currentPage == WIZARD_PAGE_SYSTEM) maxItems = 2;
-  
+  else if (currentPage == WIZARD_PAGE_SYSTEM) maxItems = getWizardSystemPageCount();
+
   if (currentSelection > 0) {
     currentSelection--;
     if (currentSelection < scrollOffset) {
@@ -355,8 +569,8 @@ bool wizardMoveDown() {
   if (currentPage == WIZARD_PAGE_FEATURES) maxItems = featuresPageCount;
   else if (currentPage == WIZARD_PAGE_SENSORS) maxItems = sensorsPageCount;
   else if (currentPage == WIZARD_PAGE_NETWORK) maxItems = networkPageCount;
-  else if (currentPage == WIZARD_PAGE_SYSTEM) maxItems = 2;
-  
+  else if (currentPage == WIZARD_PAGE_SYSTEM) maxItems = getWizardSystemPageCount();
+
   if (currentSelection < maxItems - 1) {
     currentSelection++;
     if (currentSelection >= scrollOffset + 4) {
@@ -369,12 +583,20 @@ bool wizardMoveDown() {
 
 bool wizardCycleOption() {
   if (currentPage == WIZARD_PAGE_SYSTEM) {
-    if (currentSelection == 0) {
-      timezoneSelection = (timezoneSelection + 1) % timezoneCount;
-      return true;
-    } else if (currentSelection == 1) {
-      logLevelSelection = (logLevelSelection + 1) % logLevelCount;
-      return true;
+    SystemPageItem item = getSystemItemAt(currentSelection);
+    switch (item) {
+      case SYS_ITEM_TIMEZONE:
+        timezoneSelection = (timezoneSelection + 1) % timezoneCount;
+        return true;
+      case SYS_ITEM_LOGLEVEL:
+        logLevelSelection = (logLevelSelection + 1) % logLevelCount;
+        return true;
+      case SYS_ITEM_NTP:
+        ntpSelection = (ntpSelection + 1) % ntpPresetCount;
+        return true;
+      case SYS_ITEM_LED:
+        ledEffectSelection = (ledEffectSelection + 1) % ledEffectCount;
+        return true;
     }
   }
   return false;
@@ -390,91 +612,49 @@ bool wizardShouldShowWiFi() {
 }
 
 bool wizardNextPage(SetupWizardResult& result) {
-  switch (currentPage) {
-    case WIZARD_PAGE_FEATURES:
-      currentPage = WIZARD_PAGE_SENSORS;
-      currentSelection = 0;
-      scrollOffset = 0;
-      return true;
-      
-    case WIZARD_PAGE_SENSORS:
-      // Check if we have any network settings to show
-      if (hasNetworkSettings()) {
-        currentPage = WIZARD_PAGE_NETWORK;
-        currentSelection = 0;
-        scrollOffset = 0;
-      } else {
-        // Skip to system settings if no network settings
-        currentPage = WIZARD_PAGE_SYSTEM;
-        currentSelection = 0;
-      }
-      return true;
-      
-    case WIZARD_PAGE_NETWORK:
-      currentPage = WIZARD_PAGE_SYSTEM;
-      currentSelection = 0;
-      return true;
-      
-    case WIZARD_PAGE_SYSTEM:
-      // Save system settings
-      result.timezoneOffset = timezones[timezoneSelection].offsetMinutes;
-      result.timezoneAbbrev = timezones[timezoneSelection].abbrev;
-      gSettings.tzOffsetMinutes = result.timezoneOffset;
-      gSettings.logLevel = logLevelSelection;
-      
-      if (wizardShouldShowWiFi()) {
-        currentPage = WIZARD_PAGE_WIFI;
-        result.wifiEnabled = true;
-        return true;
-      } else {
-        result.wifiEnabled = false;
-        result.completed = true;
-        return false;  // Signal completion
-      }
-      
-    case WIZARD_PAGE_WIFI:
-      result.completed = true;
-      return false;  // Signal completion
-      
-    default:
-      return false;
+  // Save system settings when leaving system page
+  if (currentPage == WIZARD_PAGE_SYSTEM) {
+    result.timezoneOffset = timezones[timezoneSelection].offsetMinutes;
+    result.timezoneAbbrev = timezones[timezoneSelection].abbrev;
+    gSettings.tzOffsetMinutes = result.timezoneOffset;
+    gSettings.logLevel = logLevelSelection;
+    if (systemPageHasNTP()) {
+      result.ntpServer = ntpPresets[ntpSelection];
+    }
+    if (systemPageHasLED()) {
+      result.ledStartupEffect = ledEffects[ledEffectSelection];
+    }
   }
+
+  // Rebuild network page before navigating away from sensors (toggles may have changed)
+  if (currentPage == WIZARD_PAGE_SENSORS) {
+    rebuildNetworkSettingsPage();
+  }
+
+  SetupWizardPage next = wizardAdvanceFrom(currentPage);
+  if (next == WIZARD_PAGE_COUNT) {
+    // No more pages — wizard complete
+    if (currentPage == WIZARD_PAGE_WIFI) result.wifiEnabled = true;
+    result.completed = true;
+    return false;
+  }
+
+  if (next == WIZARD_PAGE_WIFI) result.wifiEnabled = true;
+
+  currentPage = next;
+  currentSelection = 0;
+  scrollOffset = 0;
+  return true;
 }
 
 bool wizardPrevPage() {
-  switch (currentPage) {
-    case WIZARD_PAGE_SENSORS:
-      currentPage = WIZARD_PAGE_FEATURES;
-      currentSelection = 0;
-      scrollOffset = 0;
-      return true;
-      
-    case WIZARD_PAGE_NETWORK:
-      currentPage = WIZARD_PAGE_SENSORS;
-      currentSelection = 0;
-      scrollOffset = 0;
-      return true;
-      
-    case WIZARD_PAGE_SYSTEM:
-      // Check if we have any network settings - if not, skip back to sensors
-      if (hasNetworkSettings()) {
-        currentPage = WIZARD_PAGE_NETWORK;
-        currentSelection = 0;
-      } else {
-        currentPage = WIZARD_PAGE_SENSORS;
-        currentSelection = 0;
-        scrollOffset = 0;
-      }
-      return true;
-      
-    case WIZARD_PAGE_WIFI:
-      currentPage = WIZARD_PAGE_SYSTEM;
-      currentSelection = 0;
-      return true;
-      
-    default:
-      return false;
-  }
+  SetupWizardPage prev = wizardRetreatFrom(currentPage);
+  if (prev == currentPage) return false; // already at first page
+
+  currentPage = prev;
+  currentSelection = 0;
+  scrollOffset = 0;
+  return true;
 }
 
 void wizardFinalize(SetupWizardResult& result) {
@@ -482,6 +662,14 @@ void wizardFinalize(SetupWizardResult& result) {
   result.timezoneAbbrev = timezones[timezoneSelection].abbrev;
   gSettings.tzOffsetMinutes = result.timezoneOffset;
   gSettings.logLevel = logLevelSelection;
+  if (systemPageHasNTP()) {
+    result.ntpServer = ntpPresets[ntpSelection];
+    gSettings.ntpServer = result.ntpServer;
+  }
+  if (systemPageHasLED()) {
+    result.ledStartupEffect = ledEffects[ledEffectSelection];
+    gSettings.ledStartupEffect = result.ledStartupEffect;
+  }
 }
 
 // ============================================================================
@@ -545,12 +733,19 @@ static void printSerialSystemPage() {
   Serial.println("=== System Settings ===");
   printSerialHeapBar();
   Serial.println("----------------------------------------");
-  
-  Serial.printf(" 1. Timezone:  %s (%s)\n", 
-    timezones[timezoneSelection].abbrev, 
+
+  int itemNum = 1;
+  Serial.printf(" %d. Log level: %s\n", itemNum++, logLevelNames[logLevelSelection]);
+  Serial.printf(" %d. Timezone:  %-5s %s\n", itemNum++,
+    timezones[timezoneSelection].abbrev,
     timezones[timezoneSelection].name);
-  Serial.printf(" 2. Log level: %s\n", logLevelNames[logLevelSelection]);
-  
+  if (systemPageHasNTP()) {
+    Serial.printf(" %d. NTP Server: %s\n", itemNum++, ntpPresets[ntpSelection]);
+  }
+  if (systemPageHasLED()) {
+    Serial.printf(" %d. LED Effect: %s\n", itemNum++, ledEffects[ledEffectSelection]);
+  }
+
   Serial.println("----------------------------------------");
   Serial.println("Enter number to cycle, 'n' for next, 'b' for back");
   Serial.print("> ");
@@ -563,13 +758,15 @@ static void printSerialSystemPage() {
 static void printSerialPageStatus() {
   SetupWizardPage page = getWizardCurrentPage();
   int sel = getWizardCurrentSelection();
+  int pageNum = getWizardPageNumber(page);
+  int totalPages = getWizardTotalPages();
 
   Serial.println();
   Serial.println("========================================");
 
   switch (page) {
     case WIZARD_PAGE_FEATURES: {
-      Serial.println("  SETUP 1/5: Features");
+      Serial.printf("  SETUP %d/%d: Features\n", pageNum, totalPages);
       WizardFeatureItem* items = getWizardFeaturesPage();
       size_t count = getWizardFeaturesPageCount();
       for (size_t i = 0; i < count; i++) {
@@ -584,7 +781,7 @@ static void printSerialPageStatus() {
       break;
     }
     case WIZARD_PAGE_SENSORS: {
-      Serial.println("  SETUP 2/5: Sensors & Display");
+      Serial.printf("  SETUP %d/%d: Sensors & Display\n", pageNum, totalPages);
       WizardFeatureItem* items = getWizardSensorsPage();
       size_t count = getWizardSensorsPageCount();
       for (size_t i = 0; i < count; i++) {
@@ -599,7 +796,7 @@ static void printSerialPageStatus() {
       break;
     }
     case WIZARD_PAGE_NETWORK: {
-      Serial.println("  SETUP 3/5: Network Settings");
+      Serial.printf("  SETUP %d/%d: Network Settings\n", pageNum, totalPages);
       WizardNetworkItem* items = getWizardNetworkPage();
       size_t count = getWizardNetworkPageCount();
       for (size_t i = 0; i < count; i++) {
@@ -614,13 +811,34 @@ static void printSerialPageStatus() {
       break;
     }
     case WIZARD_PAGE_SYSTEM: {
-      Serial.println("  SETUP 4/5: System Settings");
+      Serial.printf("  SETUP %d/%d: System Settings\n", pageNum, totalPages);
       const TimezoneEntry* tz = getTimezones();
       int tzSel = getWizardTimezoneSelection();
       int logSel = getWizardLogLevelSelection();
       const char** logNames = getLogLevelNames();
-      Serial.printf(" %s1. Timezone: %s\n", sel == 0 ? ">" : " ", tz[tzSel].abbrev);
-      Serial.printf(" %s2. Log Level: %s\n", sel == 1 ? ">" : " ", logNames[logSel]);
+      int idx = 0;
+      Serial.printf(" %s%d. Log Level: %s\n", sel == idx ? ">" : " ", idx + 1, logNames[logSel]);
+      idx++;
+      Serial.printf(" %s%d. Timezone: %-5s %s\n", sel == idx ? ">" : " ", idx + 1, tz[tzSel].abbrev, tz[tzSel].name);
+      idx++;
+      if (systemPageHasNTP()) {
+        Serial.printf(" %s%d. NTP Server: %s\n", sel == idx ? ">" : " ", idx + 1, ntpPresets[ntpSelection]);
+        idx++;
+      }
+      if (systemPageHasLED()) {
+        Serial.printf(" %s%d. LED Effect: %s\n", sel == idx ? ">" : " ", idx + 1, ledEffects[ledEffectSelection]);
+        idx++;
+      }
+      break;
+    }
+    case WIZARD_PAGE_ESPNOW: {
+      Serial.printf("  SETUP %d/%d: ESP-NOW Identity\n", pageNum, totalPages);
+      Serial.println("  (All fields optional — press Enter to skip)");
+      break;
+    }
+    case WIZARD_PAGE_MQTT: {
+      Serial.printf("  SETUP %d/%d: MQTT Broker\n", pageNum, totalPages);
+      Serial.println("  (Press Enter to use defaults)");
       break;
     }
     default:
@@ -635,10 +853,166 @@ static void printSerialPageStatus() {
   Serial.print("> ");
 }
 
+// Serial ESP-NOW identity page
+static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
+  int pageNum = getWizardPageNumber(WIZARD_PAGE_ESPNOW);
+  int totalPages = getWizardTotalPages();
+
+  Serial.println();
+  Serial.printf("=== ESP-NOW Identity (SETUP %d/%d) ===\n", pageNum, totalPages);
+  Serial.println("Assign an optional identity for this device in the ESP-NOW mesh.");
+  Serial.println("----------------------------------------");
+  Serial.println(" c = Configure (enter fields)");
+  Serial.println(" s = Skip (leave as-is)");
+  Serial.println(" b = Back");
+  Serial.print("Choice [s]: ");
+  String introChoice = waitForSerialInputBlocking();
+  introChoice.trim();
+  if (introChoice.equalsIgnoreCase("b") || introChoice.equalsIgnoreCase("back")) {
+    wizardPrevPage();
+    return;
+  }
+  if (!introChoice.equalsIgnoreCase("c") && !introChoice.equalsIgnoreCase("configure")) {
+    // Default is skip
+    if (!wizardNextPage(result)) running = false;
+    return;
+  }
+
+  Serial.println("----------------------------------------");
+  Serial.println("All fields optional. Press Enter to skip, 'b' to go back.");
+  Serial.println("----------------------------------------");
+
+  Serial.print("Room (e.g. 'Living Room'): ");
+  String room = waitForSerialInputBlocking();
+  room.trim();
+  if (room.equalsIgnoreCase("b") || room.equalsIgnoreCase("back")) {
+    wizardPrevPage();
+    return;
+  }
+  result.espnowRoom = room;
+
+  Serial.print("Zone (e.g. 'North Wall'): ");
+  String zone = waitForSerialInputBlocking();
+  zone.trim();
+  if (zone.equalsIgnoreCase("b") || zone.equalsIgnoreCase("back")) {
+    wizardPrevPage();
+    return;
+  }
+  result.espnowZone = zone;
+
+  // Friendly name mirrors the device name set at the start of setup
+  result.espnowFriendlyName = gSettings.espnowDeviceName;
+
+  Serial.print("The device will be — (m)obile or (s)tationary [m]: ");
+  String stat = waitForSerialInputBlocking();
+  stat.trim();
+  if (stat.equalsIgnoreCase("b") || stat.equalsIgnoreCase("back")) {
+    wizardPrevPage();
+    return;
+  }
+  result.espnowStationary = (stat.equalsIgnoreCase("s") || stat.equalsIgnoreCase("stationary"));
+
+  // Apply to settings
+  if (result.espnowRoom.length() > 0) gSettings.espnowRoom = result.espnowRoom;
+  if (result.espnowZone.length() > 0) gSettings.espnowZone = result.espnowZone;
+  if (result.espnowFriendlyName.length() > 0) gSettings.espnowFriendlyName = result.espnowFriendlyName;
+  gSettings.espnowStationary = result.espnowStationary;
+
+  Serial.println("ESP-NOW identity configured.");
+
+  // Advance to next page
+  if (!wizardNextPage(result)) {
+    running = false;
+  }
+}
+
+// Serial MQTT broker page
+static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
+  int pageNum = getWizardPageNumber(WIZARD_PAGE_MQTT);
+  int totalPages = getWizardTotalPages();
+
+  Serial.println();
+  Serial.printf("=== MQTT Broker (SETUP %d/%d) ===\n", pageNum, totalPages);
+  Serial.println("Configure a MQTT broker for this device to publish data.");
+  Serial.println("----------------------------------------");
+  Serial.println(" c = Configure (enter broker details)");
+  Serial.println(" s = Skip (leave as-is)");
+  Serial.println(" b = Back");
+  Serial.print("Choice [s]: ");
+  String introChoice = waitForSerialInputBlocking();
+  introChoice.trim();
+  if (introChoice.equalsIgnoreCase("b") || introChoice.equalsIgnoreCase("back")) {
+    wizardPrevPage();
+    return;
+  }
+  if (!introChoice.equalsIgnoreCase("c") && !introChoice.equalsIgnoreCase("configure")) {
+    // Default is skip
+    if (!wizardNextPage(result)) running = false;
+    return;
+  }
+
+  Serial.println("----------------------------------------");
+  Serial.println("Press Enter to use defaults, 'b' to go back.");
+  Serial.println("----------------------------------------");
+
+  Serial.printf("Host (default: %s): ", gSettings.mqttHost.length() > 0 ? gSettings.mqttHost.c_str() : "none");
+  String host = waitForSerialInputBlocking();
+  host.trim();
+  if (host.equalsIgnoreCase("b") || host.equalsIgnoreCase("back")) {
+    wizardPrevPage();
+    return;
+  }
+  result.mqttHost = host;
+
+  Serial.print("Port (default: 1883): ");
+  String portStr = waitForSerialInputBlocking();
+  portStr.trim();
+  if (portStr.equalsIgnoreCase("b") || portStr.equalsIgnoreCase("back")) {
+    wizardPrevPage();
+    return;
+  }
+  result.mqttPort = portStr.length() > 0 ? portStr.toInt() : 0;
+
+  Serial.print("Username (blank = no auth): ");
+  String user = waitForSerialInputBlocking();
+  user.trim();
+  if (user.equalsIgnoreCase("b") || user.equalsIgnoreCase("back")) {
+    wizardPrevPage();
+    return;
+  }
+  result.mqttUser = user;
+
+  if (user.length() > 0) {
+    Serial.print("Password: ");
+    String pass = waitForSerialInputBlocking();
+    pass.trim();
+    if (pass.equalsIgnoreCase("b") || pass.equalsIgnoreCase("back")) {
+      wizardPrevPage();
+      return;
+    }
+    result.mqttPassword = pass;
+  }
+
+  // Apply to settings
+  if (result.mqttHost.length() > 0) gSettings.mqttHost = result.mqttHost;
+  if (result.mqttPort > 0) gSettings.mqttPort = result.mqttPort;
+  if (result.mqttUser.length() > 0) gSettings.mqttUser = result.mqttUser;
+  if (result.mqttPassword.length() > 0) gSettings.mqttPassword = result.mqttPassword;
+
+  Serial.println("MQTT broker configured.");
+
+  // Advance to next page
+  if (!wizardNextPage(result)) {
+    running = false;
+  }
+}
+
 // Serial WiFi page helper - full scan + numbered list
 static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
+  int pageNum = getWizardPageNumber(WIZARD_PAGE_WIFI);
+  int totalPages = getWizardTotalPages();
   Serial.println();
-  Serial.println("=== WiFi Setup (SETUP 5/5) ===");
+  Serial.printf("=== WiFi Setup (SETUP %d/%d) ===\n", pageNum, totalPages);
   bool wifiPageDone = false;
   while (!wifiPageDone) {
 #if ENABLE_WIFI
@@ -723,8 +1097,10 @@ SetupWizardResult runSetupWizard() {
   result.wifiSSID = "";
   result.wifiPassword = "";
   result.deviceName = "HardwareOne";
-  result.timezoneOffset = -300;
-  result.timezoneAbbrev = "EST";
+  result.timezoneOffset = -240;
+  result.timezoneAbbrev = "EDT";
+  result.espnowStationary = false;
+  result.mqttPort = 0;
 
   initSetupWizard();
 
@@ -760,8 +1136,34 @@ SetupWizardResult runSetupWizard() {
     int currentSel = getWizardCurrentSelection();
 
     // ------------------------------------------------------------------
-    // 1. WiFi page - handled before OLED rendering (has its own loop)
+    // 1. Pages with their own input loop (ESP-NOW, MQTT, WiFi)
     // ------------------------------------------------------------------
+    if (currentPage == WIZARD_PAGE_ESPNOW) {
+#if ENABLE_OLED_DISPLAY
+      if (oledDisplay && oledConnected) {
+        handleOLEDESPNowPage(result, running);
+        lastPrintedPage = WIZARD_PAGE_COUNT;
+        continue;
+      }
+#endif
+      handleSerialESPNowPage(result, running);
+      lastPrintedPage = WIZARD_PAGE_COUNT;
+      continue;
+    }
+
+    if (currentPage == WIZARD_PAGE_MQTT) {
+#if ENABLE_OLED_DISPLAY
+      if (oledDisplay && oledConnected) {
+        handleOLEDMQTTPage(result, running);
+        lastPrintedPage = WIZARD_PAGE_COUNT;
+        continue;
+      }
+#endif
+      handleSerialMQTTPage(result, running);
+      lastPrintedPage = WIZARD_PAGE_COUNT;
+      continue;
+    }
+
     if (currentPage == WIZARD_PAGE_WIFI) {
 #if ENABLE_OLED_DISPLAY
       if (oledDisplay && oledConnected) {
@@ -937,8 +1339,8 @@ SetupWizardResult runSerialSetupWizard() {
   result.wifiEnabled = false;
   result.wifiConfigured = false;
   result.deviceName = "HardwareOne";
-  result.timezoneOffset = -300;
-  result.timezoneAbbrev = "EST";
+  result.timezoneOffset = -240;
+  result.timezoneAbbrev = "EDT";
   
   initSetupWizard();
   

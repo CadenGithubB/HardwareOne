@@ -551,54 +551,73 @@ void applySettings() {
 #endif
   gOutputFlags = flags;  // replace current routing with persisted lanes
 
-  // Apply debug settings to runtime flags using accessor functions
-  setDebugFlags(0);  // Start with no flags, then enable based on settings
-  if (gSettings.debugAuth) setDebugFlag(DEBUG_AUTH);
-  if (gSettings.debugAuthCookies) setDebugFlag(DEBUG_AUTH);
-  if (gSettings.debugHttp) setDebugFlag(DEBUG_HTTP);
-  if (gSettings.debugSse) setDebugFlag(DEBUG_SSE);
-  if (gSettings.debugCli) setDebugFlag(DEBUG_CLI);
-  if (gSettings.debugSensors) setDebugFlag(DEBUG_SENSORS);
-  if (gSettings.debugSensorsGeneral) setDebugFlag(DEBUG_SENSORS);
-  if (gSettings.debugCamera) setDebugFlag(DEBUG_CAMERA);
-  if (gSettings.debugMicrophone) setDebugFlag(DEBUG_MICROPHONE);
-  if (gSettings.debugWifi) setDebugFlag(DEBUG_WIFI);
-  if (gSettings.debugStorage) setDebugFlag(DEBUG_STORAGE);
-  if (gSettings.debugPerformance) setDebugFlag(DEBUG_PERFORMANCE);
-  if (gSettings.debugDateTime) setDebugFlag(DEBUG_SYSTEM);
-  if (gSettings.debugCommandFlow) setDebugFlag(DEBUG_CMD_FLOW);
-  if (gSettings.debugUsers) setDebugFlag(DEBUG_USERS);
-  if (gSettings.debugSystem) setDebugFlag(DEBUG_SYSTEM);
-  if (gSettings.debugAutomations) setDebugFlag(DEBUG_AUTOMATIONS);
-  if (gSettings.debugLogger) setDebugFlag(DEBUG_LOGGER);
-  if (gSettings.debugMemory) setDebugFlag(DEBUG_MEMORY);
-  if (gSettings.debugCommandSystem) setDebugFlag(DEBUG_COMMAND_SYSTEM);
-  if (gSettings.debugSettingsSystem) setDebugFlag(DEBUG_SETTINGS_SYSTEM);
-  if (gSettings.debugEspNow) setDebugFlag(DEBUG_ESPNOW_CORE);
-  if (gSettings.debugEspNowStream) setDebugFlag(DEBUG_ESPNOW_STREAM);
-  if (gSettings.debugEspNowCore) setDebugFlag(DEBUG_ESPNOW_CORE);
-  if (gSettings.debugEspNowRouter) setDebugFlag(DEBUG_ESPNOW_ROUTER);
-  if (gSettings.debugEspNowMesh) setDebugFlag(DEBUG_ESPNOW_MESH);
-  if (gSettings.debugEspNowTopo) setDebugFlag(DEBUG_ESPNOW_TOPO);
-  if (gSettings.debugEspNowEncryption) setDebugFlag(DEBUG_ESPNOW_ENCRYPTION);
-  if (gSettings.debugEspNowMetadata) setDebugFlag(DEBUG_ESPNOW_METADATA);
-  if (gSettings.debugAutoScheduler) setDebugFlag(DEBUG_AUTO_SCHEDULER);
-  if (gSettings.debugAutoExec) setDebugFlag(DEBUG_AUTO_EXEC);
-  if (gSettings.debugAutoCondition) setDebugFlag(DEBUG_AUTO_CONDITION);
-  if (gSettings.debugAutoTiming) setDebugFlag(DEBUG_AUTO_TIMING);
-  if (gSettings.debugFmRadio) setDebugFlag(DEBUG_FMRADIO);
-  if (gSettings.debugG2) setDebugFlag(DEBUG_G2);
-  if (gSettings.debugI2C) setDebugFlag(DEBUG_I2C);
+  // Apply debug settings to runtime flags using table-driven loop.
+  // Each entry maps a bool field in gSettings to the runtime debug flag it enables.
+  // Multiple settings can map to the same flag (e.g. debugAuth and debugAuthCookies both → DEBUG_AUTH).
+  struct DebugFlagMapping { size_t settingOffset; uint64_t flag; };
+  #define DBG_MAP(field, flag) { offsetof(Settings, field), flag }
+  static const DebugFlagMapping kDebugMappings[] = {
+    // Core debug flags
+    DBG_MAP(debugAuth,             DEBUG_AUTH),
+    DBG_MAP(debugAuthCookies,      DEBUG_AUTH),
+    DBG_MAP(debugHttp,             DEBUG_HTTP),
+    DBG_MAP(debugSse,              DEBUG_SSE),
+    DBG_MAP(debugCli,              DEBUG_CLI),
+    DBG_MAP(debugSensors,          DEBUG_SENSORS),
+    DBG_MAP(debugSensorsGeneral,   DEBUG_SENSORS),
+    DBG_MAP(debugCamera,           DEBUG_CAMERA),
+    DBG_MAP(debugMicrophone,       DEBUG_MICROPHONE),
+    DBG_MAP(debugWifi,             DEBUG_WIFI),
+    DBG_MAP(debugStorage,          DEBUG_STORAGE),
+    DBG_MAP(debugPerformance,      DEBUG_PERFORMANCE),
+    DBG_MAP(debugDateTime,         DEBUG_SYSTEM),
+    DBG_MAP(debugCommandFlow,      DEBUG_CMD_FLOW),
+    DBG_MAP(debugUsers,            DEBUG_USERS),
+    DBG_MAP(debugSystem,           DEBUG_SYSTEM),
+    DBG_MAP(debugAutomations,      DEBUG_AUTOMATIONS),
+    DBG_MAP(debugLogger,           DEBUG_LOGGER),
+    DBG_MAP(debugMemory,           DEBUG_MEMORY),
+    DBG_MAP(debugCommandSystem,    DEBUG_COMMAND_SYSTEM),
+    DBG_MAP(debugSettingsSystem,   DEBUG_SETTINGS_SYSTEM),
+    DBG_MAP(debugEspNow,           DEBUG_ESPNOW_CORE),
+    DBG_MAP(debugEspNowStream,     DEBUG_ESPNOW_STREAM),
+    DBG_MAP(debugEspNowCore,       DEBUG_ESPNOW_CORE),
+    DBG_MAP(debugEspNowRouter,     DEBUG_ESPNOW_ROUTER),
+    DBG_MAP(debugEspNowMesh,       DEBUG_ESPNOW_MESH),
+    DBG_MAP(debugEspNowTopo,       DEBUG_ESPNOW_TOPO),
+    DBG_MAP(debugEspNowEncryption, DEBUG_ESPNOW_ENCRYPTION),
+    DBG_MAP(debugEspNowMetadata,   DEBUG_ESPNOW_METADATA),
+    DBG_MAP(debugAutoScheduler,    DEBUG_AUTO_SCHEDULER),
+    DBG_MAP(debugAutoExec,         DEBUG_AUTO_EXEC),
+    DBG_MAP(debugAutoCondition,    DEBUG_AUTO_CONDITION),
+    DBG_MAP(debugAutoTiming,       DEBUG_AUTO_TIMING),
+    DBG_MAP(debugFmRadio,          DEBUG_FMRADIO),
+    DBG_MAP(debugG2,               DEBUG_G2),
+    DBG_MAP(debugI2C,              DEBUG_I2C),
+    // Per-sensor frame/data flags
+    DBG_MAP(debugThermalFrame,     DEBUG_THERMAL_FRAME),
+    DBG_MAP(debugThermalData,      DEBUG_THERMAL_DATA),
+    DBG_MAP(debugTofFrame,         DEBUG_TOF_FRAME),
+    DBG_MAP(debugGamepadFrame,     DEBUG_GAMEPAD_FRAME),
+    DBG_MAP(debugGamepadData,      DEBUG_GAMEPAD_DATA),
+    DBG_MAP(debugImuFrame,         DEBUG_IMU_FRAME),
+    DBG_MAP(debugImuData,          DEBUG_IMU_DATA),
+    DBG_MAP(debugApdsFrame,        DEBUG_APDS_FRAME),
+    // Maps flags
+    DBG_MAP(debugMaps,             DEBUG_MAPS),
+    DBG_MAP(debugMapsLoading,      DEBUG_MAPS_LOADING),
+    DBG_MAP(debugMapsRendering,    DEBUG_MAPS_RENDERING),
+    DBG_MAP(debugMapsPerf,         DEBUG_MAPS_PERF),
+  };
+  #undef DBG_MAP
 
-  // Apply per-sensor frame/data debug flags
-  if (gSettings.debugThermalFrame) setDebugFlag(DEBUG_THERMAL_FRAME);
-  if (gSettings.debugThermalData) setDebugFlag(DEBUG_THERMAL_DATA);
-  if (gSettings.debugTofFrame) setDebugFlag(DEBUG_TOF_FRAME);
-  if (gSettings.debugGamepadFrame) setDebugFlag(DEBUG_GAMEPAD_FRAME);
-  if (gSettings.debugGamepadData) setDebugFlag(DEBUG_GAMEPAD_DATA);
-  if (gSettings.debugImuFrame) setDebugFlag(DEBUG_IMU_FRAME);
-  if (gSettings.debugImuData) setDebugFlag(DEBUG_IMU_DATA);
-  if (gSettings.debugApdsFrame) setDebugFlag(DEBUG_APDS_FRAME);
+  setDebugFlags(0);  // Start with no flags, then enable based on settings
+  const uint8_t* base = reinterpret_cast<const uint8_t*>(&gSettings);
+  for (const auto& m : kDebugMappings) {
+    if (*reinterpret_cast<const bool*>(base + m.settingOffset)) {
+      setDebugFlag(m.flag);
+    }
+  }
 
   // Apply debug sub-flags to gDebugSubFlags and update parent flags
   // Auth sub-flags
@@ -1258,6 +1277,11 @@ static const SettingEntry debugSettingEntries[] = {
   // --- apds group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugApds,            0, 0, nullptr, 0, 1, "All APDS",            nullptr, false, "apds", "debugapds" },
   { "frame",      SETTING_BOOL, &gSettings.debugApdsFrame,       0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "apds", "debugapdsframe" },
+  // --- maps group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugMaps,            0, 0, nullptr, 0, 1, "All Maps",            nullptr, false, "maps", "debugmaps" },
+  { "loading",    SETTING_BOOL, &gSettings.debugMapsLoading,     0, 0, nullptr, 0, 1, "Loading",             nullptr, false, "maps", "debugmapsloading" },
+  { "rendering",  SETTING_BOOL, &gSettings.debugMapsRendering,   0, 0, nullptr, 0, 1, "Rendering",           nullptr, false, "maps", "debugmapsrendering" },
+  { "perf",       SETTING_BOOL, &gSettings.debugMapsPerf,       0, 0, nullptr, 0, 1, "Performance",         nullptr, false, "maps", "debugmapsperf" },
   // --- standalone (no group) ---
   { "dateTime",         SETTING_BOOL, &gSettings.debugDateTime,       0, 0, nullptr, 0, 1, "Date/Time",            nullptr, false, nullptr, "debugdatetime" },
   { "logger",           SETTING_BOOL, &gSettings.debugLogger,         0, 0, nullptr, 0, 1, "Logger",               nullptr, false, nullptr, "debuglogger" },
@@ -1292,6 +1316,7 @@ static const SettingEntry outputSettingEntries[] = {
   { "web", SETTING_BOOL, &gSettings.outWeb, 1, 0, nullptr, 0, 1, "Web Output", nullptr },
   { "display", SETTING_BOOL, &gSettings.outDisplay, 0, 0, nullptr, 0, 1, "Display Output", nullptr },
   { "serialRequireAuth", SETTING_BOOL, &gSettings.serialRequireAuth, 1, 0, nullptr, 0, 1, "Serial Require Auth", nullptr },
+  { "displayRequireAuth", SETTING_BOOL, &gSettings.localDisplayRequireAuth, 1, 0, nullptr, 0, 1, "Display Require Auth", nullptr },
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "g2", SETTING_BOOL, &gSettings.outG2, 0, 0, nullptr, 0, 1, "G2 Glasses Output", nullptr },
 #endif

@@ -31,9 +31,9 @@
 // MapCore Static Member (works without GPS)
 // =============================================================================
 
-LoadedMap MapCore::_currentMap = {false, {}, "", "", 0, nullptr, 0, 0, 0.0f, 0, nullptr, 0, 0, 0, 0, 0, nullptr, 0, 0};
+LoadedMap MapCore::_currentMap = {};
 LocationContext LocationContextManager::_context = {"", 0, MAP_FEATURE_HIGHWAY, "", 0, MAP_FEATURE_PARK, 0, 0, 0, false};
-bool gMapRendererEnabled = true;
+
 float gMapRotation = 0.0f;  // Rotation angle in degrees
 
 // Center position for map viewing without GPS
@@ -137,6 +137,19 @@ bool mapHighlightIsVisible() {
 
 static uint16_t gVisibleLayers = LAYER_ALL;  // All layers visible by default
 
+// Per-subtype visibility bitmask: bit N = subtype N is visible.
+// Indexed directly by MapFeatureType value. Max value is 0x40=64, so 65 bytes.
+// All bits 1 = all subtypes visible (default).
+static uint8_t gSubtypeVisibility[65];
+static bool gSubtypeVisibilityInited = false;
+
+static void ensureSubtypeVisibilityInited() {
+  if (!gSubtypeVisibilityInited) {
+    memset(gSubtypeVisibility, 0xFF, sizeof(gSubtypeVisibility));
+    gSubtypeVisibilityInited = true;
+  }
+}
+
 uint16_t mapLayersGetVisible() {
   return gVisibleLayers;
 }
@@ -147,6 +160,28 @@ void mapLayersSetVisible(uint16_t layers) {
 
 void mapLayerToggle(uint16_t layer) {
   gVisibleLayers ^= layer;
+}
+
+bool mapSubtypeIsVisible(uint8_t featureType, uint8_t subtype) {
+  ensureSubtypeVisibilityInited();
+  if (featureType > 64 || subtype > 7) return true;
+  return (gSubtypeVisibility[featureType] >> subtype) & 1;
+}
+
+void mapSubtypeToggle(uint8_t featureType, uint8_t subtype) {
+  ensureSubtypeVisibilityInited();
+  if (featureType <= 64 && subtype <= 7) gSubtypeVisibility[featureType] ^= (1 << subtype);
+}
+
+uint8_t mapSubtypeGetMask(uint8_t featureType) {
+  ensureSubtypeVisibilityInited();
+  if (featureType > 64) return 0xFF;
+  return gSubtypeVisibility[featureType];
+}
+
+void mapSubtypeSetMask(uint8_t featureType, uint8_t mask) {
+  ensureSubtypeVisibilityInited();
+  if (featureType <= 64) gSubtypeVisibility[featureType] = mask;
 }
 
 bool mapLayerIsVisible(uint8_t featureType) {
@@ -165,6 +200,41 @@ bool mapLayerIsVisible(uint8_t featureType) {
     case MAP_FEATURE_STATION:  return (gVisibleLayers & LAYER_TRANSIT) != 0;
     default: return true;
   }
+}
+
+// Build a MapRenderParams snapshot from current global state
+MapRenderParams mapRenderParamsFromGlobals() {
+  ensureSubtypeVisibilityInited();
+  MapRenderParams p;
+  p.zoom = gMapZoom;
+  p.rotation = gMapRotation;
+  p.visibleLayers = gVisibleLayers;
+  memcpy(p.subtypeVisibility, gSubtypeVisibility, sizeof(p.subtypeVisibility));
+  return p;
+}
+
+// Static helpers: check visibility against a MapRenderParams (no global reads)
+static bool paramLayerIsVisible(const MapRenderParams& p, uint8_t featureType) {
+  switch (featureType) {
+    case MAP_FEATURE_HIGHWAY:    return (p.visibleLayers & LAYER_HIGHWAYS) != 0;
+    case MAP_FEATURE_ROAD_MAJOR: return (p.visibleLayers & LAYER_MAJOR) != 0;
+    case MAP_FEATURE_ROAD_MINOR: return (p.visibleLayers & LAYER_MINOR) != 0;
+    case MAP_FEATURE_PATH:       return (p.visibleLayers & LAYER_PATHS) != 0;
+    case MAP_FEATURE_WATER:      return (p.visibleLayers & LAYER_WATER) != 0;
+    case MAP_FEATURE_PARK:       return (p.visibleLayers & LAYER_PARKS) != 0;
+    case MAP_FEATURE_LAND_MASK:  return (p.visibleLayers & LAYER_LAND_MASK) != 0;
+    case MAP_FEATURE_RAILWAY:    return (p.visibleLayers & LAYER_RAILWAYS) != 0;
+    case MAP_FEATURE_BUS:        return (p.visibleLayers & LAYER_TRANSIT) != 0;
+    case MAP_FEATURE_FERRY:      return (p.visibleLayers & LAYER_TRANSIT) != 0;
+    case MAP_FEATURE_BUILDING:   return (p.visibleLayers & LAYER_BUILDINGS) != 0;
+    case MAP_FEATURE_STATION:    return (p.visibleLayers & LAYER_TRANSIT) != 0;
+    default: return true;
+  }
+}
+
+static bool paramSubtypeIsVisible(const MapRenderParams& p, uint8_t featureType, uint8_t subtype) {
+  if (featureType > 64 || subtype > 7) return true;
+  return (p.subtypeVisibility[featureType] >> subtype) & 1;
 }
 
 // =============================================================================
@@ -206,11 +276,6 @@ MapFeatureStyle MapRenderer::getFeatureStyle(MapFeatureType type) {
 // =============================================================================
 // MapCore - Map File Loading (Display-Agnostic)
 // =============================================================================
-
-void initMapRenderer() {
-  WaypointManager::loadWaypoints();
-  INFO_SENSORSF("Map renderer initialized (%d waypoints)", WaypointManager::getActiveCount());
-}
 
 bool MapCore::loadMapFile(const char* path) {
   // Unload any existing map
@@ -261,45 +326,48 @@ bool MapCore::loadMapFile(const char* path) {
     return false;
   }
   
-  // Validate version (v5 or v6)
-  if (header.version != 5 && header.version != 6) {
-    ERROR_SENSORSF("Unsupported map version: %u (need v5 or v6)", header.version);
+  // Validate version (v6 only)
+  if (header.version != 6) {
+    ERROR_SENSORSF("Unsupported map version: %u (need v6)", header.version);
     f.close();
     gSensorPollingPaused = wasPaused;
     return false;
   }
   
-  // === STREAMING ARCHITECTURE ===
-  // Allocate 1MB cache buffer in PSRAM
-  uint8_t* cache = (uint8_t*)ps_malloc(MAP_CACHE_SIZE);
-  if (!cache) {
-    ERROR_SENSORSF("Failed to allocate %d byte cache in PSRAM", MAP_CACHE_SIZE);
-    f.close();
-    gSensorPollingPaused = wasPaused;
-    return false;
-  }
-  
-  // Store basic info
+  // Store basic info (cache allocated after tile directory is parsed)
   _currentMap.valid = true;
   memcpy(&_currentMap.header, &header, sizeof(header));
+  
+  // Normalize bounds: map tool writes lat/lon * 10^7 (deci-microdegrees)
+  // but all device code expects lat/lon * 10^6 (microdegrees)
+  _currentMap.header.minLat /= 10;
+  _currentMap.header.minLon /= 10;
+  _currentMap.header.maxLat /= 10;
+  _currentMap.header.maxLon /= 10;
+  
   _currentMap.fileSize = fileSize;
-  _currentMap.cache = cache;
-  _currentMap.cacheStart = 0;
-  _currentMap.cacheLen = 0;
+  _currentMap.cachePool = nullptr;
+  _currentMap.cachePoolSize = 0;
+  _currentMap.slotSize = 0;
+  _currentMap.numSlots = 0;
+  _currentMap.accessSeq = 0;
+  _currentMap.slots = nullptr;
+  _currentMap.cacheHits = 0;
+  _currentMap.cacheMisses = 0;
   _currentMap.names = nullptr;
   _currentMap.nameCount = 0;
   _currentMap.tileDir = nullptr;
   _currentMap.tileCount = 0;
   
-  // Extract v5 tiling parameters from flags
+  // Extract tiling parameters from flags
   _currentMap.tileGridSize = HWMAP_GET_TILE_GRID_SIZE(header.flags);
   _currentMap.haloPct = HWMAP_GET_HALO_PCT(header.flags);
   _currentMap.quantBits = HWMAP_GET_QUANT_BITS(header.flags);
   _currentMap.tileCount = _currentMap.tileGridSize * _currentMap.tileGridSize;
   
-  // Precompute tile geometry for dequantization
-  int32_t mapWidth = header.maxLon - header.minLon;
-  int32_t mapHeight = header.maxLat - header.minLat;
+  // Precompute tile geometry for dequantization (use normalized bounds)
+  int32_t mapWidth = _currentMap.header.maxLon - _currentMap.header.minLon;
+  int32_t mapHeight = _currentMap.header.maxLat - _currentMap.header.minLat;
   _currentMap.tileW = mapWidth / _currentMap.tileGridSize;
   _currentMap.tileH = mapHeight / _currentMap.tileGridSize;
   _currentMap.haloW = (int32_t)(_currentMap.tileW * _currentMap.haloPct);
@@ -316,44 +384,68 @@ bool MapCore::loadMapFile(const char* path) {
   _currentMap.filename[sizeof(_currentMap.filename) - 1] = '\0';
   
   INFO_SENSORSF("Loading map v%u: %s (%zu bytes, %u features, %ux%u tiles)", 
-                header.version, _currentMap.filename, fileSize, header.featureCount,
-                _currentMap.tileGridSize, _currentMap.tileGridSize);
+               header.version, _currentMap.filename, fileSize, header.featureCount,
+               _currentMap.tileGridSize, _currentMap.tileGridSize);
   
   // === PARSE NAME TABLE (small, keep in RAM) ===
   size_t nameTableEnd = sizeof(HWMapHeader);
+  bool nameTableScanOk = true;
+  if (header.nameCount > 0) {
+    f.seek(sizeof(HWMapHeader));
+    for (uint16_t i = 0; i < header.nameCount; i++) {
+      int c = f.read();
+      if (c < 0) {
+        nameTableScanOk = false;
+        break;
+      }
+      uint8_t strLen = (uint8_t)c;
+      size_t nextPos = (size_t)f.position() + (size_t)strLen;
+      if (!f.seek(nextPos)) {
+        nameTableScanOk = false;
+        break;
+      }
+    }
+    if (nameTableScanOk) {
+      nameTableEnd = (size_t)f.position();
+    } else {
+      ERROR_SENSORSF("Failed to scan name table");
+      f.close();
+      gSensorPollingPaused = wasPaused;
+      unloadMap();
+      return false;
+    }
+  }
   if (header.nameCount > 0 && header.nameCount <= MAX_MAP_NAMES) {
     MapNameEntry* names = (MapNameEntry*)ps_malloc(sizeof(MapNameEntry) * header.nameCount);
-    
     if (names) {
       f.seek(sizeof(HWMapHeader));
-      size_t nameTableMaxSize = 64 * header.nameCount;
-      if (nameTableMaxSize > MAP_CACHE_SIZE) nameTableMaxSize = MAP_CACHE_SIZE;
-      size_t nameTableRead = f.read(cache, nameTableMaxSize);
-      
-      size_t offset = 0;
       uint16_t parsed = 0;
-      
-      for (uint16_t i = 0; i < header.nameCount && offset < nameTableRead; i++) {
-        uint8_t strLen = cache[offset++];
-        if (offset + strLen > nameTableRead) break;
-        
+      for (uint16_t i = 0; i < header.nameCount; i++) {
+        int c = f.read();
+        if (c < 0) break;
+        uint8_t strLen = (uint8_t)c;
         size_t copyLen = (strLen < sizeof(names[parsed].name) - 1) ? strLen : sizeof(names[parsed].name) - 1;
-        memcpy(names[parsed].name, cache + offset, copyLen);
+        size_t got = (copyLen > 0) ? f.read((uint8_t*)names[parsed].name, copyLen) : 0;
+        if (got != copyLen) break;
         names[parsed].name[copyLen] = '\0';
-        
-        offset += strLen;
+        if (strLen > copyLen) {
+          size_t skipPos = (size_t)f.position() + (size_t)(strLen - copyLen);
+          if (!f.seek(skipPos)) break;
+        }
         parsed++;
       }
-      
       _currentMap.names = names;
       _currentMap.nameCount = parsed;
-      nameTableEnd = sizeof(HWMapHeader) + offset;
-      
       INFO_SENSORSF("Parsed %u names", parsed);
     }
   }
   
   // === PARSE TILE DIRECTORY (small, keep in RAM) ===
+  if (_currentMap.tileCount == 0) {
+    ERROR_SENSORSF("Tile count is 0 (gridSize=%u, flags=0x%04X)", _currentMap.tileGridSize, header.flags);
+  } else if (_currentMap.tileCount > HWMAP_MAX_TILES) {
+    ERROR_SENSORSF("Tile count %u exceeds max %u (gridSize=%u)", _currentMap.tileCount, HWMAP_MAX_TILES, _currentMap.tileGridSize);
+  }
   if (_currentMap.tileCount > 0 && _currentMap.tileCount <= HWMAP_MAX_TILES) {
     size_t tileDirSize = sizeof(HWMapTileDirEntry) * _currentMap.tileCount;
     HWMapTileDirEntry* tileDir = (HWMapTileDirEntry*)ps_malloc(tileDirSize);
@@ -365,6 +457,15 @@ bool MapCore::loadMapFile(const char* path) {
         _currentMap.tileDir = tileDir;
         INFO_SENSORSF("Tile directory: %u tiles, first at offset %u", 
                       _currentMap.tileCount, tileDir[0].offset);
+        // Detailed tile stats for debugging
+        int nonEmpty = 0;
+        for (uint16_t i = 0; i < _currentMap.tileCount; i++) {
+          if (tileDir[i].payloadSize > 0) nonEmpty++;
+        }
+        DEBUG_MAPS_LOADINGF("[MAPS] tileDir: %u total, %d non-empty, tileW=%ld tileH=%ld haloW=%ld haloH=%ld",
+                            _currentMap.tileCount, nonEmpty,
+                            (long)_currentMap.tileW, (long)_currentMap.tileH,
+                            (long)_currentMap.haloW, (long)_currentMap.haloH);
       } else {
         free(tileDir);
         ERROR_SENSORSF("Failed to read tile directory");
@@ -372,15 +473,112 @@ bool MapCore::loadMapFile(const char* path) {
     }
   }
   
-  // Clear cache (will be filled on demand during rendering)
-  _currentMap.cacheStart = 0;
-  _currentMap.cacheLen = 0;
+  // Keep file open as persistent handle (closed in unloadMap)
+  _currentMap.mapFile = f;
   
-  f.close();
+  // === ALLOCATE MULTI-SLOT TILE CACHE ===
+  // Scan tile directory to find max tile payload size → determines slot size
+  uint32_t maxPayload = 0;
+  uint32_t totalPayload = 0;
+  uint16_t nonEmptyTiles = 0;
+  if (_currentMap.tileDir) {
+    for (uint16_t i = 0; i < _currentMap.tileCount; i++) {
+      uint32_t ps = _currentMap.tileDir[i].payloadSize;
+      if (ps > 0) {
+        nonEmptyTiles++;
+        totalPayload += ps;
+        if (ps > maxPayload) maxPayload = ps;
+      }
+    }
+  }
+  
+  // Slot size = max payload rounded up to 4KB boundary, with minimum
+  uint32_t slotSize = (maxPayload + 4095) & ~4095u;  // Round up to 4KB
+  if (slotSize < MAP_CACHE_MIN_SLOT) slotSize = MAP_CACHE_MIN_SLOT;
+  
+  // Try to allocate pool (4MB default, fall back to smaller if needed)
+  size_t poolSize = MAP_CACHE_POOL_SIZE;
+  uint8_t* pool = nullptr;
+  while (poolSize >= slotSize && !pool) {
+    pool = (uint8_t*)ps_malloc(poolSize);
+    if (!pool) {
+      poolSize /= 2;  // Try half size
+    }
+  }
+  if (!pool) {
+    ERROR_SENSORSF("Failed to allocate tile cache pool in PSRAM");
+    gSensorPollingPaused = wasPaused;
+    unloadMap();
+    return false;
+  }
+  
+  uint16_t numSlots = (uint16_t)(poolSize / slotSize);
+  if (numSlots > MAP_CACHE_MAX_SLOTS) numSlots = MAP_CACHE_MAX_SLOTS;
+  if (numSlots == 0) numSlots = 1;
+  
+  // Allocate slot metadata array
+  TileCacheSlot* slots = (TileCacheSlot*)ps_malloc(sizeof(TileCacheSlot) * numSlots);
+  if (!slots) {
+    free(pool);
+    ERROR_SENSORSF("Failed to allocate %u tile cache slot entries", numSlots);
+    gSensorPollingPaused = wasPaused;
+    unloadMap();
+    return false;
+  }
+  // Initialize all slots as empty
+  for (uint16_t i = 0; i < numSlots; i++) {
+    slots[i].tileIdx = -1;
+    slots[i].dataSize = 0;
+    slots[i].lastAccessSeq = 0;
+  }
+  
+  _currentMap.cachePool = pool;
+  _currentMap.cachePoolSize = poolSize;
+  _currentMap.slotSize = slotSize;
+  _currentMap.numSlots = numSlots;
+  _currentMap.accessSeq = 0;
+  _currentMap.slots = slots;
+  _currentMap.cacheHits = 0;
+  _currentMap.cacheMisses = 0;
   
   size_t metadataSize = sizeof(MapNameEntry) * _currentMap.nameCount + 
-                        sizeof(HWMapTileDirEntry) * _currentMap.tileCount;
-  INFO_SENSORSF("Streaming ready: 1MB cache + %zu bytes metadata", metadataSize);
+                        sizeof(HWMapTileDirEntry) * _currentMap.tileCount +
+                        sizeof(TileCacheSlot) * numSlots;
+  uint32_t avgPayload = nonEmptyTiles ? (totalPayload / nonEmptyTiles) : 0;
+  INFO_SENSORSF("Tile cache: %uKB pool, %u slots x %uKB | tiles: %u non-empty, avg %uB, max %uB | meta: %zuB",
+                (unsigned)(poolSize / 1024), numSlots, (unsigned)(slotSize / 1024),
+                nonEmptyTiles, avgPayload, maxPayload, metadataSize);
+  
+  // === PRE-WARM CACHE: load all tiles that fit into slots at load time ===
+  // This eliminates ALL runtime cache misses for maps that fit in the pool
+  if (_currentMap.mapFile && _currentMap.tileDir && nonEmptyTiles <= numSlots) {
+    uint16_t slotIdx = 0;
+    uint16_t preloaded = 0;
+    uint32_t preloadStart = millis();
+    for (uint16_t i = 0; i < _currentMap.tileCount && slotIdx < numSlots; i++) {
+      uint32_t ps = _currentMap.tileDir[i].payloadSize;
+      if (ps == 0) continue;
+      if (ps > slotSize) {
+        DEBUG_MAPS_LOADINGF("[MAPS] prewarm: tile %u payload %u > slotSize %u, skipping", i, ps, slotSize);
+        continue;
+      }
+      uint8_t* slotData = pool + ((size_t)slotIdx * slotSize);
+      _currentMap.mapFile.seek(_currentMap.tileDir[i].offset);
+      size_t got = _currentMap.mapFile.read(slotData, ps);
+      if (got == ps) {
+        slots[slotIdx].tileIdx = (int16_t)i;
+        slots[slotIdx].dataSize = ps;
+        slots[slotIdx].lastAccessSeq = ++_currentMap.accessSeq;
+        slotIdx++;
+        preloaded++;
+      }
+    }
+    INFO_SENSORSF("Cache pre-warmed: %u tiles loaded in %lums (zero runtime misses expected)",
+                  preloaded, (unsigned long)(millis() - preloadStart));
+  } else if (nonEmptyTiles > numSlots) {
+    INFO_SENSORSF("Map too large for full pre-warm: %u tiles > %u slots (LRU will handle misses)",
+                  nonEmptyTiles, numSlots);
+  }
   
   // Invalidate location context since map changed
   LocationContextManager::invalidate();
@@ -395,11 +593,36 @@ bool MapCore::loadMapFile(const char* path) {
 }
 
 void MapCore::unloadMap() {
-  // Free streaming cache
-  if (_currentMap.cache) {
-    free(_currentMap.cache);
-    _currentMap.cache = nullptr;
+  // Log cache stats before freeing
+  if (_currentMap.valid && (_currentMap.cacheHits > 0 || _currentMap.cacheMisses > 0)) {
+    uint32_t total = _currentMap.cacheHits + _currentMap.cacheMisses;
+    INFO_SENSORSF("Tile cache stats: %u hits, %u misses (%.1f%% hit rate), %u slots",
+                  _currentMap.cacheHits, _currentMap.cacheMisses,
+                  total > 0 ? (100.0f * _currentMap.cacheHits / total) : 0.0f,
+                  _currentMap.numSlots);
   }
+  
+  // Close persistent file handle
+  if (_currentMap.mapFile) {
+    _currentMap.mapFile.close();
+  }
+  
+  // Free multi-slot cache
+  if (_currentMap.slots) {
+    free(_currentMap.slots);
+    _currentMap.slots = nullptr;
+  }
+  if (_currentMap.cachePool) {
+    free(_currentMap.cachePool);
+    _currentMap.cachePool = nullptr;
+  }
+  _currentMap.cachePoolSize = 0;
+  _currentMap.slotSize = 0;
+  _currentMap.numSlots = 0;
+  _currentMap.accessSeq = 0;
+  _currentMap.cacheHits = 0;
+  _currentMap.cacheMisses = 0;
+  
   if (_currentMap.names) {
     free(_currentMap.names);
     _currentMap.names = nullptr;
@@ -417,8 +640,6 @@ void MapCore::unloadMap() {
   _currentMap.filename[0] = '\0';
   _currentMap.filepath[0] = '\0';
   _currentMap.nameCount = 0;
-  _currentMap.cacheStart = 0;
-  _currentMap.cacheLen = 0;
   
   // Invalidate context when map unloaded
   LocationContextManager::invalidate();
@@ -431,8 +652,8 @@ const char* MapCore::getName(uint16_t index) {
   return _currentMap.names[index].name;
 }
 
-// Helper: Load tile data into cache
-// Returns pointer to tile data in cache, or nullptr on error
+// Helper: Load tile data via multi-slot cache
+// Returns pointer to tile data in cache slot, or nullptr on error
 const uint8_t* MapCore::loadTileData(uint16_t tileIdx, size_t* outSize) {
   if (!_currentMap.valid || !_currentMap.tileDir || tileIdx >= _currentMap.tileCount) {
     return nullptr;
@@ -444,88 +665,97 @@ const uint8_t* MapCore::loadTileData(uint16_t tileIdx, size_t* outSize) {
     return nullptr;
   }
   
-  uint32_t tileOffset = tile.offset;
-  
-  // Use actual payload size from tile directory
-  size_t loadSize = tile.payloadSize;
-  if (loadSize > MAP_CACHE_SIZE) loadSize = MAP_CACHE_SIZE;
-  
-  // Check if already in cache
-  if (_currentMap.cache && _currentMap.cacheLen > 0 &&
-      tileOffset >= _currentMap.cacheStart && 
-      tileOffset + loadSize <= _currentMap.cacheStart + _currentMap.cacheLen) {
-    if (outSize) *outSize = _currentMap.cacheLen - (tileOffset - _currentMap.cacheStart);
-    return _currentMap.cache + (tileOffset - _currentMap.cacheStart);
+  if (!_currentMap.cachePool || !_currentMap.slots || _currentMap.numSlots == 0) {
+    DEBUG_MAPS_RENDERINGF("[MAPS] loadTileData: cache not initialized!");
+    return nullptr;
   }
   
-  // Load from file
-  FsLockGuard fsGuard("MapCore.loadTileData");
-  File f = LittleFS.open(_currentMap.filepath, "r");
-  if (!f) return nullptr;
-  
-  f.seek(tileOffset);
-  size_t readSize = ((size_t)MAP_CACHE_SIZE < (_currentMap.fileSize - tileOffset)) ? 
-                    (size_t)MAP_CACHE_SIZE : (_currentMap.fileSize - tileOffset);
-  _currentMap.cacheLen = f.read(_currentMap.cache, readSize);
-  _currentMap.cacheStart = tileOffset;
-  f.close();
-  
-  if (outSize) *outSize = _currentMap.cacheLen;
-  return _currentMap.cache;
-}
-
-int MapCore::getNamesByFeatureType(MapFeatureType type, const char** names, int maxNames) {
-  if (!_currentMap.valid || !_currentMap.tileDir || !names || maxNames <= 0) {
-    return 0;
-  }
-  
-  int count = 0;
-  
-  // Iterate through all tiles
-  for (uint16_t tileIdx = 0; tileIdx < _currentMap.tileCount && count < maxNames; tileIdx++) {
-    size_t tileDataSize;
-    const uint8_t* tileData = loadTileData(tileIdx, &tileDataSize);
-    if (!tileData || tileDataSize == 0) continue;
-    
-    const uint8_t* ptr = tileData;
-    const uint8_t* end = tileData + tileDataSize;
-    
-    // Feature count is at the START of each tile's payload (2 bytes)
-    if (ptr + 2 > end) continue;
-    uint16_t featureCount = ptr[0] | (ptr[1] << 8);
-    ptr += 2;
-    
-    const int hdrSize = HWMAP_FEATURE_HEADER_SIZE(_currentMap.header.version);
-    for (uint16_t f = 0; f < featureCount && count < maxNames; f++) {
-      if (ptr + hdrSize > end) break;
-      
-      uint8_t ftype = ptr[0];
-      // v6: type(1) + subtype(1) + nameIndex(2) + pointCount(2)
-      // v5: type(1) + nameIndex(2) + pointCount(2)
-      uint16_t nameIndex = (hdrSize == 6) ? (ptr[2] | (ptr[3] << 8)) : (ptr[1] | (ptr[2] << 8));
-      uint16_t pointCount = (hdrSize == 6) ? (ptr[4] | (ptr[5] << 8)) : (ptr[3] | (ptr[4] << 8));
-      ptr += hdrSize + pointCount * 4;  // Skip header + quantized points
-      
-      if (ftype == type && nameIndex != HWMAP_NO_NAME && nameIndex < _currentMap.nameCount) {
-        const char* name = _currentMap.names[nameIndex].name;
-        
-        // Check for duplicates
-        bool duplicate = false;
-        for (int j = 0; j < count; j++) {
-          if (strcmp(names[j], name) == 0) {
-            duplicate = true;
-            break;
-          }
-        }
-        
-        if (!duplicate) {
-          names[count++] = name;
-        }
-      }
+  // === CACHE LOOKUP: search slots for this tile ===
+  for (uint16_t i = 0; i < _currentMap.numSlots; i++) {
+    if (_currentMap.slots[i].tileIdx == (int16_t)tileIdx) {
+      // Cache hit - update LRU counter and return
+      _currentMap.slots[i].lastAccessSeq = ++_currentMap.accessSeq;
+      _currentMap.cacheHits++;
+      if (outSize) *outSize = _currentMap.slots[i].dataSize;
+      const uint8_t* hitPtr = _currentMap.cachePool + ((size_t)i * _currentMap.slotSize);
+      return hitPtr;
     }
   }
   
-  return count;
+  // === CACHE MISS ===
+  _currentMap.cacheMisses++;
+  
+  uint32_t payloadSize = tile.payloadSize;
+  
+  // If tile is larger than slot size, log warning and read directly into slot 0
+  // (evicting whatever was there - this should be rare/never with proper slot sizing)
+  if (payloadSize > _currentMap.slotSize) {
+    DEBUG_MAPS_RENDERINGF("[MAPS] WARNING: tile %u payload %u > slotSize %u, truncating read!",
+                          tileIdx, payloadSize, _currentMap.slotSize);
+    payloadSize = _currentMap.slotSize;
+  }
+  
+  // Find a slot: prefer empty, otherwise evict LRU
+  int16_t targetSlot = -1;
+  uint32_t oldestSeq = UINT32_MAX;
+  for (uint16_t i = 0; i < _currentMap.numSlots; i++) {
+    if (_currentMap.slots[i].tileIdx == -1) {
+      targetSlot = i;
+      break;  // Empty slot found, use it
+    }
+    if (_currentMap.slots[i].lastAccessSeq < oldestSeq) {
+      oldestSeq = _currentMap.slots[i].lastAccessSeq;
+      targetSlot = i;
+    }
+  }
+  
+  if (targetSlot < 0) targetSlot = 0;  // Shouldn't happen, but safety
+  
+  DEBUG_MAPS_PERFF("[TILE_CACHE] miss tile=%u slot=%d payload=%uB %s (hits=%u misses=%u seq=%u)",
+                   tileIdx, targetSlot, tile.payloadSize,
+                   _currentMap.slots[targetSlot].tileIdx == -1 ? "empty" : "evict",
+                   _currentMap.cacheHits, _currentMap.cacheMisses, _currentMap.accessSeq);
+  
+  // Read tile data from file into the target slot
+  uint8_t* slotData = _currentMap.cachePool + ((size_t)targetSlot * _currentMap.slotSize);
+  
+  {
+    FsLockGuard fsGuard("MapCore.loadTileData");
+    bool usedPersistent = false;
+    size_t bytesRead = 0;
+    
+    // Prefer persistent handle (no open/close overhead)
+    if (_currentMap.mapFile) {
+      _currentMap.mapFile.seek(tile.offset);
+      bytesRead = _currentMap.mapFile.read(slotData, payloadSize);
+      usedPersistent = true;
+    } else {
+      // Fallback: open/close per miss
+      File f = LittleFS.open(_currentMap.filepath, "r");
+      if (!f) {
+        DEBUG_MAPS_RENDERINGF("[MAPS] loadTileData: failed to open '%s'", _currentMap.filepath);
+        return nullptr;
+      }
+      f.seek(tile.offset);
+      bytesRead = f.read(slotData, payloadSize);
+      f.close();
+    }
+    
+    if (bytesRead != payloadSize) {
+      DEBUG_MAPS_RENDERINGF("[MAPS] loadTileData: short read tile %u: got %zu, expected %u (persistent=%d)",
+                            tileIdx, bytesRead, payloadSize, usedPersistent);
+      if (bytesRead == 0) { return nullptr; }
+      payloadSize = bytesRead;
+    }
+  }
+  
+  // Update slot metadata
+  _currentMap.slots[targetSlot].tileIdx = (int16_t)tileIdx;
+  _currentMap.slots[targetSlot].dataSize = payloadSize;
+  _currentMap.slots[targetSlot].lastAccessSeq = ++_currentMap.accessSeq;
+  
+  if (outSize) *outSize = payloadSize;
+  return slotData;
 }
 
 int MapCore::searchNamesByPrefix(const char* prefix, const char** results, int maxResults) {
@@ -631,33 +861,6 @@ int MapCore::getAvailableMaps(char maps[][96], int maxMaps) {
   return count;
 }
 
-bool MapCore::autoSelectMap(float lat, float lon) {
-  // If current map contains position, keep it
-  if (isPositionInMap(lat, lon)) {
-    return true;
-  }
-  
-  // Scan /maps/ directory for a map containing this position
-  char maps[8][96];
-  int mapCount = getAvailableMaps(maps, 8);
-  
-  for (int i = 0; i < mapCount; i++) {
-    char path[128];
-    snprintf(path, sizeof(path), "/maps/%.100s", maps[i]);
-    
-    // Try loading to check bounds
-    if (loadMapFile(path)) {
-      if (isPositionInMap(lat, lon)) {
-        INFO_SENSORSF("Auto-selected map: %s", maps[i]);
-        return true;
-      }
-      unloadMap();
-    }
-  }
-  
-  return false;
-}
-
 // =============================================================================
 // MapCore - Display-Agnostic Rendering
 // =============================================================================
@@ -676,8 +879,8 @@ void MapCore::geoToScreen(int32_t lat, int32_t lon,
   int32_t dLat = lat - centerLat;
   
   // Convert to screen pixels (scaleX/Y = microdegrees per pixel)
-  float x = (float)(dLon / scaleX);
-  float y = -(float)(dLat / scaleY);  // Y is inverted (north = up)
+  float x = (float)dLon / (float)scaleX;
+  float y = -(float)dLat / (float)scaleY;  // Y is inverted (north = up)
   
   // Apply rotation around center if rotation is set
   if (gMapRotation != 0.0f) {
@@ -694,8 +897,20 @@ void MapCore::geoToScreen(int32_t lat, int32_t lon,
   screenY = cy + (int16_t)y;
 }
 
-void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon) {
-  if (!_currentMap.valid || !renderer || !_currentMap.tileDir) return;
+// Thread-safe renderMap: all mutable state comes from params, no global reads
+void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
+                        const MapRenderParams& params) {
+  if (!_currentMap.valid || !renderer || !_currentMap.tileDir) {
+    DEBUG_MAPS_RENDERINGF("[MAPS] renderMap early exit: valid=%d renderer=%p tileDir=%p",
+                          _currentMap.valid, renderer, _currentMap.tileDir);
+    return;
+  }
+  
+  const float zoom = params.zoom;
+  const float rotation = params.rotation;
+  
+  const uint32_t perfStart = millis();
+  uint32_t perfTileIOus = 0;
   
   int viewWidth = renderer->getWidth();
   int viewHeight = renderer->getHeight();
@@ -707,10 +922,23 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon)
   // Calculate scale: how many microdegrees per pixel
   int32_t baseScaleY = 188;   // Microdegrees per pixel (latitude) at 1x
   int32_t baseScaleX = 246;   // Microdegrees per pixel (longitude) at 1x
-  int32_t scaleY = (int32_t)(baseScaleY / gMapZoom);
-  int32_t scaleX = (int32_t)(baseScaleX / gMapZoom);
+  int32_t scaleY = (int32_t)(baseScaleY / zoom);
+  int32_t scaleX = (int32_t)(baseScaleX / zoom);
   if (scaleX < 10) scaleX = 10;
   if (scaleY < 10) scaleY = 10;
+  
+  // Pre-compute values for fast coordinate transform (avoids per-point division + trig)
+  const float invScaleX = 1.0f / (float)scaleX;
+  const float invScaleY = 1.0f / (float)scaleY;
+  const int16_t cx = viewWidth / 2;
+  const int16_t cy = viewHeight / 2;
+  const bool hasRotation = (rotation != 0.0f);
+  float cosR = 1.0f, sinR = 0.0f;
+  if (hasRotation) {
+    float rad = rotation * (float)PI / 180.0f;
+    cosR = cosf(rad);
+    sinR = sinf(rad);
+  }
   
   // Calculate visible tile range based on viewport
   int32_t viewHalfWidth = (viewWidth / 2) * scaleX;
@@ -727,19 +955,42 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon)
   int maxTileY = (viewMaxLat - _currentMap.header.minLat) / _currentMap.tileH;
   
   // Clamp to valid tile range
+  int rawMinTX = minTileX, rawMaxTX = maxTileX, rawMinTY = minTileY, rawMaxTY = maxTileY;
   if (minTileX < 0) minTileX = 0;
   if (maxTileX >= _currentMap.tileGridSize) maxTileX = _currentMap.tileGridSize - 1;
   if (minTileY < 0) minTileY = 0;
   if (maxTileY >= _currentMap.tileGridSize) maxTileY = _currentMap.tileGridSize - 1;
   
-  // Iterate through visible tiles
-  for (int ty = minTileY; ty <= maxTileY; ty++) {
-    for (int tx = minTileX; tx <= maxTileX; tx++) {
+  // If viewport spans more tiles than cache can hold, use stride to prevent thrashing.
+  // At low zoom on the OLED, each tile is only a few pixels — small gaps are invisible.
+  int tileStep = 1;
+  int numTilesX = maxTileX - minTileX + 1;
+  int numTilesY = maxTileY - minTileY + 1;
+  if (_currentMap.numSlots > 0) {
+    while (((numTilesX + tileStep - 1) / tileStep) * ((numTilesY + tileStep - 1) / tileStep) > (int)_currentMap.numSlots && tileStep < 6) {
+      tileStep++;
+    }
+  }
+  
+  DEBUG_MAPS_RENDERINGF("[MAPS] render: center=%.5f,%.5f zoom=%.2f scale=%ld,%ld grid=%d tiles=%d-%d/%d-%d (raw %d-%d/%d-%d) step=%d",
+                        centerLat, centerLon, zoom, (long)scaleX, (long)scaleY,
+                        _currentMap.tileGridSize,
+                        minTileX, maxTileX, minTileY, maxTileY,
+                        rawMinTX, rawMaxTX, rawMinTY, rawMaxTY, tileStep);
+
+  int totalFeatures = 0, totalDrawn = 0, tilesLoaded = 0, tilesEmpty = 0;
+
+  // Iterate through visible tiles (with stride to cap tile count within cache budget)
+  for (int ty = minTileY; ty <= maxTileY; ty += tileStep) {
+    for (int tx = minTileX; tx <= maxTileX; tx += tileStep) {
       uint16_t tileIdx = ty * _currentMap.tileGridSize + tx;
       if (tileIdx >= _currentMap.tileCount) continue;
       
+      // Bail early if map was unloaded mid-render (async safety)
+      if (!_currentMap.valid) return;
+      
       HWMapTileDirEntry& tile = _currentMap.tileDir[tileIdx];
-      if (tile.payloadSize == 0) continue;
+      if (tile.payloadSize == 0) { tilesEmpty++; continue; }
       
       // Calculate tile halo bounds for dequantization
       int32_t tileMinLon = _currentMap.header.minLon + tx * _currentMap.tileW - _currentMap.haloW;
@@ -751,8 +1002,14 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon)
       
       // Load tile data
       size_t tileDataSize;
+      uint32_t tileIOStart = micros();
       const uint8_t* tileData = loadTileData(tileIdx, &tileDataSize);
-      if (!tileData || tileDataSize == 0) continue;
+      perfTileIOus += (uint32_t)(micros() - tileIOStart);
+      if (!tileData || tileDataSize == 0) {
+        DEBUG_MAPS_RENDERINGF("[MAPS] tile(%d,%d) idx=%u: loadTileData failed (ptr=%p size=%zu offset=%u payloadSize=%u)",
+                              tx, ty, tileIdx, tileData, tileDataSize, tile.offset, tile.payloadSize);
+        continue;
+      }
       
       const uint8_t* ptr = tileData;
       const uint8_t* end = tileData + tileDataSize;
@@ -761,20 +1018,19 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon)
       if (ptr + 2 > end) continue;
       uint16_t featureCount = ptr[0] | (ptr[1] << 8);
       ptr += 2;
+      tilesLoaded++;
+      totalFeatures += featureCount;
       
       // Parse and render features in this tile
-      const int hdrSize = HWMAP_FEATURE_HEADER_SIZE(_currentMap.header.version);
-      const bool isV6 = (hdrSize == 6);
       for (uint16_t f = 0; f < featureCount; f++) {
-        if (ptr + hdrSize > end) break;
+        if (ptr + HWMAP_FEATURE_HEADER_SIZE > end) break;
         
         uint8_t ftype = ptr[0];
-        uint8_t fsubtype = isV6 ? ptr[1] : 0;
-        // v6: type(1) + subtype(1) + nameIndex(2) + pointCount(2)
-        // v5: type(1) + nameIndex(2) + pointCount(2)
-        uint16_t nameIndex = isV6 ? (ptr[2] | (ptr[3] << 8)) : (ptr[1] | (ptr[2] << 8));
-        uint16_t pointCount = isV6 ? (ptr[4] | (ptr[5] << 8)) : (ptr[3] | (ptr[4] << 8));
-        ptr += hdrSize;
+        uint8_t fsubtype = ptr[1];
+        // type(1) + subtype(1) + nameIndex(2) + pointCount(2)
+        uint16_t nameIndex = ptr[2] | (ptr[3] << 8);
+        uint16_t pointCount = ptr[4] | (ptr[5] << 8);
+        ptr += HWMAP_FEATURE_HEADER_SIZE;
         
         size_t pointsBytes = pointCount * 4;
         if (ptr + pointsBytes > end) break;
@@ -784,41 +1040,63 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon)
           continue;
         }
         
-        // Check layer visibility (coarse type-based filtering)
-        if (!mapLayerIsVisible(ftype)) {
+        // Check layer visibility (uses snapshot, not globals)
+        if (!paramLayerIsVisible(params, ftype)) {
           ptr += pointsBytes;
           continue;
         }
         
-        // V6 subtype-based LOD: hide less important subtypes at low zoom
-        if (isV6 && gMapZoom < 0.7f) {
-          // Skip service roads and tracks at low zoom
-          if (ftype == MAP_FEATURE_ROAD_MINOR && fsubtype == SUBTYPE_MINOR_SERVICE) {
-            ptr += pointsBytes;
-            continue;
-          }
-          if (ftype == MAP_FEATURE_PATH && fsubtype == SUBTYPE_PATH_TRACK) {
-            ptr += pointsBytes;
-            continue;
-          }
+        // Check per-subtype visibility (uses snapshot)
+        if (!paramSubtypeIsVisible(params, ftype, fsubtype)) {
+          ptr += pointsBytes;
+          continue;
         }
         
-        // LOD culling
-        if (gMapZoom < 0.5f) {
-          if (ftype == MAP_FEATURE_ROAD_MINOR || ftype == MAP_FEATURE_PATH || 
+        // Subtype-based LOD: hide less important subtypes at low zoom
+        if (ftype == MAP_FEATURE_ROAD_MINOR && fsubtype == SUBTYPE_MINOR_SERVICE && zoom < LOD_ZOOM_SERVICE_ROAD) {
+          ptr += pointsBytes;
+          continue;
+        }
+        if (ftype == MAP_FEATURE_PATH && fsubtype == SUBTYPE_PATH_TRACK && zoom < LOD_ZOOM_TRACK) {
+          ptr += pointsBytes;
+          continue;
+        }
+        
+        // LOD culling - progressively hide features at lower zoom levels
+        if (zoom < LOD_ZOOM_MAJOR_ROAD) {
+          // Very far out: only highways
+          if (ftype != MAP_FEATURE_HIGHWAY) {
+            ptr += pointsBytes;
+            continue;
+          }
+        } else if (zoom < LOD_ZOOM_WATER) {
+          // Far out: hide everything except highways + major roads
+          if (ftype != MAP_FEATURE_HIGHWAY && ftype != MAP_FEATURE_ROAD_MAJOR) {
+            ptr += pointsBytes;
+            continue;
+          }
+        } else if (zoom < LOD_ZOOM_MINOR_ROAD) {
+          // Hide minor roads, paths, buildings, parks, transit
+          if (ftype == MAP_FEATURE_ROAD_MINOR || ftype == MAP_FEATURE_PATH ||
               ftype == MAP_FEATURE_BUILDING || ftype == MAP_FEATURE_PARK ||
               ftype == MAP_FEATURE_BUS || ftype == MAP_FEATURE_STATION) {
             ptr += pointsBytes;
             continue;
           }
-        } else if (gMapZoom < 1.0f) {
+        } else if (zoom < LOD_ZOOM_PATH) {
           if (ftype == MAP_FEATURE_PATH) {
             ptr += pointsBytes;
             continue;
           }
         }
-        // Buildings: only show when zoomed in enough (2.0+) to avoid blob effect
-        if (ftype == MAP_FEATURE_BUILDING && gMapZoom < 2.0f) {
+        // Buildings: only show when zoomed in enough to avoid blob effect
+        if (ftype == MAP_FEATURE_BUILDING && zoom < LOD_ZOOM_BUILDING) {
+          ptr += pointsBytes;
+          continue;
+        }
+        
+        // Subtype-level filtering (renderer can skip specific type+subtype combos)
+        if (!renderer->shouldRenderFeature(ftype, fsubtype)) {
           ptr += pointsBytes;
           continue;
         }
@@ -837,17 +1115,22 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon)
           continue;
         }
         
-        // Read and dequantize first point
+        // Read and dequantize first point (inline transform using pre-computed values)
         uint16_t qLat = ptr[0] | (ptr[1] << 8);
         uint16_t qLon = ptr[2] | (ptr[3] << 8);
         ptr += 4;
         
-        int32_t lat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan / 65535);
-        int32_t lon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan / 65535);
+        int32_t lat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan >> 16);
+        int32_t lon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan >> 16);
         
         int16_t prevX, prevY;
-        geoToScreen(lat, lon, centerLatMicro, centerLonMicro, 
-                    scaleX, scaleY, viewWidth, viewHeight, prevX, prevY);
+        {
+          float fx = (float)(lon - centerLonMicro) * invScaleX;
+          float fy = -(float)(lat - centerLatMicro) * invScaleY;
+          if (hasRotation) { float rx = fx*cosR - fy*sinR; fy = fx*sinR + fy*cosR; fx = rx; }
+          prevX = cx + (int16_t)fx;
+          prevY = cy + (int16_t)fy;
+        }
         
         // Process remaining points
         for (uint16_t p = 1; p < pointCount; p++) {
@@ -855,12 +1138,17 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon)
           qLon = ptr[2] | (ptr[3] << 8);
           ptr += 4;
           
-          lat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan / 65535);
-          lon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan / 65535);
+          lat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan >> 16);
+          lon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan >> 16);
           
           int16_t curX, curY;
-          geoToScreen(lat, lon, centerLatMicro, centerLonMicro,
-                      scaleX, scaleY, viewWidth, viewHeight, curX, curY);
+          {
+            float fx = (float)(lon - centerLonMicro) * invScaleX;
+            float fy = -(float)(lat - centerLatMicro) * invScaleY;
+            if (hasRotation) { float rx = fx*cosR - fy*sinR; fy = fx*sinR + fy*cosR; fx = rx; }
+            curX = cx + (int16_t)fx;
+            curY = cy + (int16_t)fy;
+          }
           
           // Simple visibility check
           bool visible = (prevX >= -50 && prevX < viewWidth + 50 &&
@@ -870,6 +1158,7 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon)
           
           if (visible) {
             renderer->drawLine(prevX, prevY, curX, curY, style);
+            totalDrawn++;
           }
           
           prevX = curX;
@@ -879,11 +1168,253 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon)
     }
   }
   
+  DEBUG_MAPS_RENDERINGF("[MAPS] render done: %d tiles loaded, %d empty, %d features, %d lines drawn",
+                        tilesLoaded, tilesEmpty, totalFeatures, totalDrawn);
+
   // Draw waypoints on map
   WaypointManager::renderWaypoints(renderer, centerLat, centerLon, scaleX, scaleY);
   
   // Draw GPS position marker at center
   renderer->drawPositionMarker(viewWidth / 2, viewHeight / 2);
+  
+  uint32_t perfTotal = millis() - perfStart;
+  DEBUG_MAPS_PERFF("[MAP_PERF] render: %lums total | tileIO: %luus | tiles:%d feat:%d lines:%d | zoom:%.2f viewport:%dx%d",
+                   (unsigned long)perfTotal, (unsigned long)perfTileIOus,
+                   tilesLoaded, totalFeatures, totalDrawn, zoom, viewWidth, viewHeight);
+}
+
+// =============================================================================
+// OffscreenMapRenderer Implementation (1-bit framebuffer for async rendering)
+// =============================================================================
+
+OffscreenMapRenderer::OffscreenMapRenderer(uint8_t* buffer, int width, int height, int offsetY)
+  : _buffer(buffer), _offsetY(offsetY) {
+  _width = width;
+  _height = height;
+}
+
+void OffscreenMapRenderer::setViewport(int width, int height) {
+  _width = width;
+  _height = height;
+}
+
+void OffscreenMapRenderer::clear() {
+  if (_buffer) memset(_buffer, 0, OFFSCREEN_BUF_SIZE);
+}
+
+// SSD1306-compatible pixel layout: byte = 8 vertical pixels, LSB = top
+void OffscreenMapRenderer::drawPixel(int16_t x, int16_t y) {
+  int16_t ay = y + _offsetY;
+  if (x < 0 || x >= 128 || ay < 0 || ay >= 64) return;
+  _buffer[x + (ay / 8) * 128] |= (1 << (ay & 7));
+}
+
+bool OffscreenMapRenderer::clipLine(int16_t& x0, int16_t& y0, int16_t& x1, int16_t& y1) {
+  // Cohen-Sutherland clipping to [0, _offsetY] .. [_width-1, _offsetY+_height-1]
+  const int16_t xmin = 0, ymin = _offsetY, xmax = _width - 1, ymax = _offsetY + _height - 1;
+  
+  auto outcode = [&](int16_t x, int16_t y) -> int {
+    int code = 0;
+    if (x < xmin) code |= 1;
+    else if (x > xmax) code |= 2;
+    if (y < ymin) code |= 4;
+    else if (y > ymax) code |= 8;
+    return code;
+  };
+  
+  int code0 = outcode(x0, y0);
+  int code1 = outcode(x1, y1);
+  
+  for (int iter = 0; iter < 10; iter++) {
+    if (!(code0 | code1)) return true;
+    if (code0 & code1) return false;
+    
+    int codeOut = code0 ? code0 : code1;
+    int16_t x, y;
+    int32_t dx = x1 - x0, dy = y1 - y0;
+    
+    if (codeOut & 8) {
+      x = (dy != 0) ? (int16_t)(x0 + dx * (int32_t)(ymax - y0) / dy) : x0;
+      y = ymax;
+    } else if (codeOut & 4) {
+      x = (dy != 0) ? (int16_t)(x0 + dx * (int32_t)(ymin - y0) / dy) : x0;
+      y = ymin;
+    } else if (codeOut & 2) {
+      y = (dx != 0) ? (int16_t)(y0 + dy * (int32_t)(xmax - x0) / dx) : y0;
+      x = xmax;
+    } else {
+      y = (dx != 0) ? (int16_t)(y0 + dy * (int32_t)(xmin - x0) / dx) : y0;
+      x = xmin;
+    }
+    
+    if (codeOut == code0) {
+      x0 = x; y0 = y;
+      code0 = outcode(x0, y0);
+    } else {
+      x1 = x; y1 = y;
+      code1 = outcode(x1, y1);
+    }
+  }
+  return false;
+}
+
+void OffscreenMapRenderer::bresenhamLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
+  int16_t dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+  int16_t dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  int16_t err = dx + dy;
+  
+  for (;;) {
+    // Direct pixel set (already clipped)
+    int16_t ay = y0;  // y0 already includes _offsetY from clipLine
+    if (ay >= 0 && ay < 64 && x0 >= 0 && x0 < 128)
+      _buffer[x0 + (ay / 8) * 128] |= (1 << (ay & 7));
+    
+    if (x0 == x1 && y0 == y1) break;
+    int16_t e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+
+void OffscreenMapRenderer::drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int dashLen) {
+  int adx = abs(x1 - x0), ady = abs(y1 - y0);
+  int len = (adx > ady) ? (adx + ady / 2) : (ady + adx / 2);
+  if (len < 1) return;
+  
+  float invLen = 1.0f / len;
+  float dx = (x1 - x0) * invLen;
+  float dy = (y1 - y0) * invLen;
+  float x = x0, y = y0;
+  bool draw = true;
+  int segLen = 0;
+  
+  for (int t = 0; t < len; t++) {
+    if (draw) {
+      int16_t px = (int16_t)x, py = (int16_t)y;
+      if (px >= 0 && px < 128 && py >= 0 && py < 64)
+        _buffer[px + (py / 8) * 128] |= (1 << (py & 7));
+    }
+    x += dx; y += dy;
+    if (++segLen >= dashLen) { segLen = 0; draw = !draw; }
+  }
+}
+
+void OffscreenMapRenderer::drawDottedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int spacing) {
+  int adx = abs(x1 - x0), ady = abs(y1 - y0);
+  int len = (adx > ady) ? (adx + ady / 2) : (ady + adx / 2);
+  if (len < 1) return;
+  
+  float invLen = 1.0f / len;
+  float dx = (x1 - x0) * invLen;
+  float dy = (y1 - y0) * invLen;
+  
+  for (int t = 0; t <= len; t += spacing) {
+    int16_t px = x0 + (int16_t)(dx * t);
+    int16_t py = y0 + (int16_t)(dy * t);
+    if (px >= 0 && px < 128 && py >= 0 && py < 64)
+      _buffer[px + (py / 8) * 128] |= (1 << (py & 7));
+  }
+}
+
+void OffscreenMapRenderer::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
+                                     const MapFeatureStyle& style) {
+  if (!_buffer) return;
+  
+  // Apply content area offset
+  y0 += _offsetY;
+  y1 += _offsetY;
+  
+  // Clip to content area
+  if (!clipLine(x0, y0, x1, y1)) return;
+  
+  switch (style.lineStyle) {
+    case LINE_SOLID:
+      bresenhamLine(x0, y0, x1, y1);
+      break;
+    case LINE_DASHED:
+      drawDashedLine(x0, y0, x1, y1, 4);
+      break;
+    case LINE_DOTTED:
+      drawDottedLine(x0, y0, x1, y1, 3);
+      break;
+    case LINE_NONE:
+    default:
+      break;
+  }
+}
+
+void OffscreenMapRenderer::drawPositionMarker(int16_t x, int16_t y) {
+  if (!_buffer) return;
+  y += _offsetY;
+  
+  const int16_t ymin = _offsetY, ymax = _offsetY + _height - 1;
+  if (y < ymin || y > ymax) return;
+  
+  // Crosshair
+  MapFeatureStyle solid = {LINE_SOLID, 1, 15, true, 0xFFFF};
+  int16_t x0 = x - 4, x1 = x + 4;
+  int16_t yt = (y - 4 < ymin) ? ymin : y - 4;
+  int16_t yb = (y + 4 > ymax) ? ymax : y + 4;
+  
+  // Horizontal
+  int16_t cy0 = y, cy1 = y;
+  if (clipLine(x0, cy0, x1, cy1)) bresenhamLine(x0, cy0, x1, cy1);
+  // Vertical
+  int16_t cx0 = x, cx1 = x;
+  if (clipLine(cx0, yt, cx1, yb)) bresenhamLine(cx0, yt, cx1, yb);
+  
+  // Simple circle (midpoint algorithm, r=3)
+  if (y - 3 >= ymin && y + 3 <= ymax) {
+    int16_t r = 3, px = r, py = 0, err = 1 - r;
+    while (px >= py) {
+      drawPixel(x + px, y + py - _offsetY);
+      drawPixel(x - px, y + py - _offsetY);
+      drawPixel(x + px, y - py - _offsetY);
+      drawPixel(x - px, y - py - _offsetY);
+      drawPixel(x + py, y + px - _offsetY);
+      drawPixel(x - py, y + px - _offsetY);
+      drawPixel(x + py, y - px - _offsetY);
+      drawPixel(x - py, y - px - _offsetY);
+      py++;
+      if (err < 0) {
+        err += 2 * py + 1;
+      } else {
+        px--;
+        err += 2 * (py - px) + 1;
+      }
+    }
+  }
+}
+
+// Reuse OLED styles for offscreen (same 1-bit rendering characteristics)
+MapFeatureStyle OffscreenMapRenderer::getFeatureStyle(MapFeatureType type) {
+  switch (type) {
+    case MAP_FEATURE_HIGHWAY:    return {LINE_SOLID, 1, 10, true, 0xFFFF};
+    case MAP_FEATURE_ROAD_MAJOR: return {LINE_SOLID, 1, 9, true, 0xFFFF};
+    case MAP_FEATURE_ROAD_MINOR: return {LINE_SOLID, 1, 5, true, 0xFFFF};
+    case MAP_FEATURE_PATH:       return {LINE_DOTTED, 1, 3, true, 0xFFFF};
+    case MAP_FEATURE_WATER:      return {LINE_SOLID, 1, 8, true, 0xFFFF};
+    case MAP_FEATURE_PARK:       return {LINE_NONE, 1, 0, false, 0xFFFF};
+    case MAP_FEATURE_LAND_MASK:  return {LINE_NONE, 1, 0, false, 0xFFFF};
+    case MAP_FEATURE_RAILWAY:    return {LINE_DASHED, 1, 7, true, 0xFFFF};
+    case MAP_FEATURE_BUS:        return {LINE_DASHED, 1, 4, true, 0xFFFF};
+    case MAP_FEATURE_FERRY:      return {LINE_DASHED, 1, 6, true, 0xFFFF};
+    case MAP_FEATURE_BUILDING:   return {LINE_DOTTED, 1, 1, true, 0xFFFF};
+    case MAP_FEATURE_STATION:    return {LINE_SOLID, 1, 7, true, 0xFFFF};
+    default:                     return {LINE_SOLID, 1, 5, true, 0xFFFF};
+  }
+}
+
+bool OffscreenMapRenderer::shouldRenderFeature(uint8_t type, uint8_t subtype) {
+  switch (type) {
+    case MAP_FEATURE_WATER:
+      return (subtype == SUBTYPE_WATER_RIVER);
+    case MAP_FEATURE_PARK:
+    case MAP_FEATURE_LAND_MASK:
+      return false;
+    default:
+      return true;
+  }
 }
 
 // =============================================================================
@@ -893,8 +1424,9 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon)
 #if ENABLE_OLED_DISPLAY
 
 OLEDMapRenderer::OLEDMapRenderer(Adafruit_SSD1306* display) : _display(display) {
-  _width = 128;
-  _height = 54;  // Leave room for footer
+  _width = DISPLAY_WIDTH;
+  _height = DISPLAY_CONTENT_HEIGHT;  // Content area only (between header and footer)
+  _offsetY = DISPLAY_CONTENT_START_Y;  // Offset to content area start
 }
 
 void OLEDMapRenderer::setViewport(int width, int height) {
@@ -906,15 +1438,65 @@ void OLEDMapRenderer::clear() {
   // Don't clear - OLED display is managed by the mode system
 }
 
+// Cohen-Sutherland line clipping to content area [0, _offsetY, _width-1, _offsetY+_height-1]
+bool OLEDMapRenderer::clipToContent(int16_t& x0, int16_t& y0, int16_t& x1, int16_t& y1) {
+  const int16_t xmin = 0, ymin = _offsetY, xmax = _width - 1, ymax = _offsetY + _height - 1;
+  
+  auto outcode = [&](int16_t x, int16_t y) -> int {
+    int code = 0;
+    if (x < xmin) code |= 1;
+    else if (x > xmax) code |= 2;
+    if (y < ymin) code |= 4;
+    else if (y > ymax) code |= 8;
+    return code;
+  };
+  
+  int code0 = outcode(x0, y0);
+  int code1 = outcode(x1, y1);
+  
+  for (int iter = 0; iter < 10; iter++) {
+    if (!(code0 | code1)) return true;   // Both inside
+    if (code0 & code1) return false;     // Both outside same side
+    
+    int codeOut = code0 ? code0 : code1;
+    int16_t x, y;
+    int32_t dx = x1 - x0, dy = y1 - y0;
+    
+    if (codeOut & 8) {        // Below ymax
+      x = (dy != 0) ? (int16_t)(x0 + dx * (int32_t)(ymax - y0) / dy) : x0;
+      y = ymax;
+    } else if (codeOut & 4) { // Above ymin
+      x = (dy != 0) ? (int16_t)(x0 + dx * (int32_t)(ymin - y0) / dy) : x0;
+      y = ymin;
+    } else if (codeOut & 2) { // Right of xmax
+      y = (dx != 0) ? (int16_t)(y0 + dy * (int32_t)(xmax - x0) / dx) : y0;
+      x = xmax;
+    } else {                  // Left of xmin
+      y = (dx != 0) ? (int16_t)(y0 + dy * (int32_t)(xmin - x0) / dx) : y0;
+      x = xmin;
+    }
+    
+    if (codeOut == code0) {
+      x0 = x; y0 = y;
+      code0 = outcode(x0, y0);
+    } else {
+      x1 = x; y1 = y;
+      code1 = outcode(x1, y1);
+    }
+  }
+  return false;
+}
+
 void OLEDMapRenderer::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
                                 const MapFeatureStyle& style) {
   if (!_display) return;
   
-  // Clip check - at least one endpoint near screen
-  if ((x0 < -20 || x0 > _width + 20 || y0 < -20 || y0 > _height + 20) &&
-      (x1 < -20 || x1 > _width + 20 || y1 < -20 || y1 > _height + 20)) {
-    return;
-  }
+  // Apply content area offset for actual display drawing
+  y0 += _offsetY;
+  y1 += _offsetY;
+  
+  // Clip line to content area - prevents drawing into header/footer
+  if (!clipToContent(x0, y0, x1, y1)) return;
   
   switch (style.lineStyle) {
     case LINE_SOLID:
@@ -933,26 +1515,29 @@ void OLEDMapRenderer::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
 }
 
 void OLEDMapRenderer::drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int dashLen) {
-  float dx = x1 - x0;
-  float dy = y1 - y0;
-  float len = sqrtf(dx*dx + dy*dy);
+  int adx = abs(x1 - x0);
+  int ady = abs(y1 - y0);
+  int len = (adx > ady) ? (adx + ady / 2) : (ady + adx / 2);  // Fast length approx
   if (len < 1) return;
   
-  dx /= len;
-  dy /= len;
+  float invLen = 1.0f / len;
+  float dx = (x1 - x0) * invLen;
+  float dy = (y1 - y0) * invLen;
   
   float x = x0, y = y0;
   bool draw = true;
   int segLen = 0;
   
-  for (float t = 0; t < len; t += 1.0f) {
+  const int16_t ymin = _offsetY, ymax = _offsetY + _height - 1;
+  for (int t = 0; t < len; t++) {
     if (draw) {
-      _display->drawPixel((int16_t)x, (int16_t)y, SSD1306_WHITE);
+      int16_t py = (int16_t)y;
+      if (py >= ymin && py <= ymax)
+        _display->drawPixel((int16_t)x, py, SSD1306_WHITE);
     }
     x += dx;
     y += dy;
-    segLen++;
-    if (segLen >= dashLen) {
+    if (++segLen >= dashLen) {
       segLen = 0;
       draw = !draw;
     }
@@ -960,36 +1545,49 @@ void OLEDMapRenderer::drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t
 }
 
 void OLEDMapRenderer::drawDottedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int spacing) {
-  float dx = x1 - x0;
-  float dy = y1 - y0;
-  float len = sqrtf(dx*dx + dy*dy);
+  int adx = abs(x1 - x0);
+  int ady = abs(y1 - y0);
+  int len = (adx > ady) ? (adx + ady / 2) : (ady + adx / 2);  // Fast length approx
   if (len < 1) return;
   
-  dx /= len;
-  dy /= len;
+  float invLen = 1.0f / len;
+  float dx = (x1 - x0) * invLen;
+  float dy = (y1 - y0) * invLen;
   
-  for (float t = 0; t < len; t += spacing) {
+  const int16_t ymin2 = _offsetY, ymax2 = _offsetY + _height - 1;
+  for (int t = 0; t <= len; t += spacing) {
     int16_t px = x0 + (int16_t)(dx * t);
     int16_t py = y0 + (int16_t)(dy * t);
-    _display->drawPixel(px, py, SSD1306_WHITE);
+    if (py >= ymin2 && py <= ymax2)
+      _display->drawPixel(px, py, SSD1306_WHITE);
   }
 }
 
 void OLEDMapRenderer::drawPositionMarker(int16_t x, int16_t y) {
   if (!_display) return;
   
-  // Draw crosshair
-  _display->drawLine(x - 4, y, x + 4, y, SSD1306_WHITE);
-  _display->drawLine(x, y - 4, x, y + 4, SSD1306_WHITE);
+  // Apply content area offset
+  y += _offsetY;
   
-  // Draw circle around crosshair
-  _display->drawCircle(x, y, 3, SSD1306_WHITE);
+  // Clip marker to content area
+  const int16_t ymin = _offsetY, ymax = _offsetY + _height - 1;
+  if (y < ymin || y > ymax) return;
+  
+  // Draw crosshair (clamp vertical line to content area)
+  _display->drawLine(x - 4, y, x + 4, y, SSD1306_WHITE);
+  int16_t yt = (y - 4 < ymin) ? ymin : y - 4;
+  int16_t yb = (y + 4 > ymax) ? ymax : y + 4;
+  _display->drawLine(x, yt, x, yb, SSD1306_WHITE);
+  
+  // Draw circle around crosshair (only if fully within content area)
+  if (y - 3 >= ymin && y + 3 <= ymax)
+    _display->drawCircle(x, y, 3, SSD1306_WHITE);
 }
 
 void OLEDMapRenderer::drawOverlayText(int16_t x, int16_t y, const char* text, bool inverted) {
   if (!_display) return;
   
-  _display->setCursor(x, y);
+  _display->setCursor(x, y + _offsetY);
   if (inverted) {
     _display->setTextColor(SSD1306_BLACK, SSD1306_WHITE);
   } else {
@@ -1002,9 +1600,9 @@ void OLEDMapRenderer::drawOverlayText(int16_t x, int16_t y, const char* text, bo
 void OLEDMapRenderer::drawContextBar(const char* text, int scrollOffset) {
   if (!_display || !text) return;
   
-  // Context bar at top of screen (8 pixels high)
+  // Context bar at top of content area (8 pixels high)
   // Draw inverted bar background
-  _display->fillRect(0, 0, 128, 8, SSD1306_WHITE);
+  _display->fillRect(0, _offsetY, _width, 8, SSD1306_WHITE);
   
   // Set text color to black on white
   _display->setTextColor(SSD1306_BLACK, SSD1306_WHITE);
@@ -1016,21 +1614,21 @@ void OLEDMapRenderer::drawContextBar(const char* text, int scrollOffset) {
   
   // If text is wider than screen, scroll it
   int x = -scrollOffset;
-  if (textWidth > 128) {
+  if (textWidth > _width) {
     // Wrap around for continuous scrolling
     x = x % (textWidth + 20); // +20 for gap before repeat
     if (x > 0) x -= (textWidth + 20);
   } else {
     // Center if fits on screen
-    x = (128 - textWidth) / 2;
+    x = (_width - textWidth) / 2;
   }
   
-  _display->setCursor(x, 0);
+  _display->setCursor(x, _offsetY);
   _display->print(text);
   
   // If scrolling and text wrapped, draw it again for seamless loop
-  if (textWidth > 128 && x < -20) {
-    _display->setCursor(x + textWidth + 20, 0);
+  if (textWidth > _width && x < -20) {
+    _display->setCursor(x + textWidth + 20, _offsetY);
     _display->print(text);
   }
   
@@ -1053,11 +1651,11 @@ MapFeatureStyle OLEDMapRenderer::getFeatureStyle(MapFeatureType type) {
     case MAP_FEATURE_PATH:
       return {LINE_DOTTED, 1, 3, true, 0xFFFF};
     case MAP_FEATURE_WATER:
-      return {LINE_SOLID, 1, 8, true, 0xFFFF};
+      return {LINE_SOLID, 1, 8, true, 0xFFFF};   // Rivers only (lakes/coastlines filtered by shouldRenderFeature)
     case MAP_FEATURE_PARK:
-      return {LINE_DOTTED, 1, 2, true, 0xFFFF};  // Dotted for parks
+      return {LINE_NONE, 1, 0, false, 0xFFFF};   // Skip: polygon fill only (meaningless as wireframe)
     case MAP_FEATURE_LAND_MASK:
-      return {LINE_DOTTED, 1, 1, true, 0xFFFF};  // Thin dotted coastline
+      return {LINE_NONE, 1, 0, false, 0xFFFF};   // Skip: land mask is only meaningful as filled region
     case MAP_FEATURE_RAILWAY:
       return {LINE_DASHED, 1, 7, true, 0xFFFF};
     case MAP_FEATURE_BUS:
@@ -1070,6 +1668,19 @@ MapFeatureStyle OLEDMapRenderer::getFeatureStyle(MapFeatureType type) {
       return {LINE_SOLID, 1, 7, true, 0xFFFF};   // Solid for stations (drawn as point)
     default:
       return {LINE_SOLID, 1, 5, true, 0xFFFF};
+  }
+}
+
+bool OLEDMapRenderer::shouldRenderFeature(uint8_t type, uint8_t subtype) {
+  switch (type) {
+    case MAP_FEATURE_WATER:
+      // Only render rivers (linear feature) — skip lakes/coastlines (polygon outlines)
+      return (subtype == SUBTYPE_WATER_RIVER);
+    case MAP_FEATURE_PARK:
+    case MAP_FEATURE_LAND_MASK:
+      return false;  // Never render polygon fills as wireframes
+    default:
+      return true;
   }
 }
 
@@ -1287,6 +1898,9 @@ bool WaypointManager::loadWaypoints() {
   } else if (LittleFS.exists(wpPathStr3.c_str())) {
     wpPathStr = wpPathStr3;
   } else {
+    // No waypoints file for this map — clear any stale data from a previous map
+    memset(_waypoints, 0, sizeof(_waypoints));
+    _selectedTarget = -1;
     return false;
   }
   
@@ -1851,6 +2465,46 @@ bool GPSTrackManager::deleteTrackFile(const char* filepath) {
   return success;
 }
 
+bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize) {
+  if (!_points || _pointCount == 0) return false;
+
+  // Generate timestamped filename
+  const char* dir = "/logging_captures/tracks";
+  fsLock("gpstrack.save");
+  if (!LittleFS.exists(dir)) {
+    LittleFS.mkdir(dir);
+  }
+
+  time_t now = time(nullptr);
+  char timestamp[24];
+  if (now > 1609459200) {
+    struct tm* ti = localtime(&now);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H-%M-%S", ti);
+  } else {
+    snprintf(timestamp, sizeof(timestamp), "%lu", millis());
+  }
+
+  snprintf(outPath, outPathSize, "%s/track-%s.csv", dir, timestamp);
+
+  File f = LittleFS.open(outPath, "w");
+  if (!f) {
+    fsUnlock();
+    return false;
+  }
+
+  f.print("# GPS Track\n# time,lat,lon\n");
+  char line[64];
+  for (int i = 0; i < _pointCount; i++) {
+    int len = snprintf(line, sizeof(line), "%d,%.6f,%.6f\n", i, _points[i].lat, _points[i].lon);
+    f.write((const uint8_t*)line, len);
+  }
+  f.close();
+  fsUnlock();
+
+  INFO_SENSORSF("Saved GPS track: %d points to %s", _pointCount, outPath);
+  return true;
+}
+
 void GPSTrackManager::setLiveTracking(bool enabled) {
   if (enabled && !_liveTracking) {
     // Starting live tracking - allocate buffer if not already allocated
@@ -2383,7 +3037,7 @@ const char* cmd_waypointfiles(const String& argsInput) {
   return buf;
 }
 
-static bool isMapFileByMagic(const String& fullPath) {
+bool isMapFileByMagic(const String& fullPath) {
   FsLockGuard guard("maps.magic");
   File f = LittleFS.open(fullPath, "r");
   if (!f) return false;
@@ -2403,7 +3057,7 @@ static String mapBaseNameNoExt(const String& filename) {
   return base;
 }
 
-static bool organizeMapFromAnyPath(const String& srcPath, String& outErr) {
+bool organizeMapFromAnyPath(const String& srcPath, String& outErr) {
   int lastSlash = srcPath.lastIndexOf('/');
   String fileName = (lastSlash >= 0) ? srcPath.substring(lastSlash + 1) : srcPath;
   String base = mapBaseNameNoExt(fileName);
@@ -2425,7 +3079,7 @@ static bool organizeMapFromAnyPath(const String& srcPath, String& outErr) {
   return true;
 }
 
-static bool tryOrganizeLegacyWaypointsAtRoot(const String& wpFileName, String& outErr) {
+bool tryOrganizeLegacyWaypointsAtRoot(const String& wpFileName, String& outErr) {
   if (!wpFileName.startsWith("waypoints_") || !wpFileName.endsWith(".json")) { outErr = "not_waypoints"; return false; }
   if (wpFileName.indexOf('/') >= 0) { outErr = "invalid_name"; return false; }
   String mapFileName = wpFileName.substring(10, wpFileName.length() - 5);
@@ -2584,16 +3238,14 @@ void LocationContextManager::updateContext(float lat, float lon) {
       uint16_t featureCount = ptr[0] | (ptr[1] << 8);
       ptr += 2;
       
-      const int hdrSize = HWMAP_FEATURE_HEADER_SIZE(map.header.version);
       for (uint16_t f = 0; f < featureCount; f++) {
-        if (ptr + hdrSize > end) break;
+        if (ptr + HWMAP_FEATURE_HEADER_SIZE > end) break;
         
         uint8_t ftype = ptr[0];
-        // v6: type(1) + subtype(1) + nameIndex(2) + pointCount(2)
-        // v5: type(1) + nameIndex(2) + pointCount(2)
-        uint16_t nameIndex = (hdrSize == 6) ? (ptr[2] | (ptr[3] << 8)) : (ptr[1] | (ptr[2] << 8));
-        uint16_t pointCount = (hdrSize == 6) ? (ptr[4] | (ptr[5] << 8)) : (ptr[3] | (ptr[4] << 8));
-        ptr += hdrSize;
+        // type(1) + subtype(1) + nameIndex(2) + pointCount(2)
+        uint16_t nameIndex = ptr[2] | (ptr[3] << 8);
+        uint16_t pointCount = ptr[4] | (ptr[5] << 8);
+        ptr += HWMAP_FEATURE_HEADER_SIZE;
         
         size_t pointsBytes = pointCount * 4;
         if (ptr + pointsBytes > end) break;
@@ -2618,8 +3270,8 @@ void LocationContextManager::updateContext(float lat, float lon) {
         uint16_t qLon = ptr[2] | (ptr[3] << 8);
         ptr += 4;
         
-        int32_t prevLat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan / 65535);
-        int32_t prevLon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan / 65535);
+        int32_t prevLat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan >> 16);
+        int32_t prevLon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan >> 16);
         
         float minDist = 999999.0f;
         
@@ -2628,8 +3280,8 @@ void LocationContextManager::updateContext(float lat, float lon) {
           qLon = ptr[2] | (ptr[3] << 8);
           ptr += 4;
           
-          int32_t curLat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan / 65535);
-          int32_t curLon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan / 65535);
+          int32_t curLat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan >> 16);
+          int32_t curLon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan >> 16);
           
           float dist = pointToSegmentDistance(lat, lon, prevLat, prevLon, curLat, curLon);
           if (dist < minDist) minDist = dist;

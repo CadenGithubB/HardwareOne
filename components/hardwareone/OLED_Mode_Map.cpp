@@ -16,6 +16,7 @@
 #include "i2csensor-seesaw.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_Command.h"
 
 #if ENABLE_GPS_SENSOR
 #include <Adafruit_GPS.h>
@@ -29,7 +30,6 @@
 // External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)
 
 // External map state from GPS_MapRenderer.cpp
-extern bool gMapRendererEnabled;
 extern float gMapRotation;
 extern float gMapZoom;
 
@@ -44,8 +44,50 @@ extern float gMapVelocityLat;
 extern float gMapVelocityLon;
 extern float gMapRotationVelocity;
 
-// Singleton renderer for OLED
+// Singleton renderer for OLED (used only for overlays now)
 static OLEDMapRenderer* gOLEDMapRenderer = nullptr;
+
+// =============================================================================
+// Async Double-Buffer Rendering
+// =============================================================================
+
+static const size_t SSD1306_BUF_SIZE = (128 * 64) / 8;  // 1024 bytes
+
+// Double framebuffers in PSRAM
+static uint8_t* sMapBufA = nullptr;   // Buffer A (PSRAM)
+static uint8_t* sMapBufB = nullptr;   // Buffer B (PSRAM)
+static uint8_t* sMapFrontBuf = nullptr;  // Points to completed render (A or B)
+static uint8_t* sMapBackBuf  = nullptr;  // Points to in-progress render (A or B)
+static volatile bool sFrontBufReady = false;  // True once first render completes
+
+// Render task synchronization
+static SemaphoreHandle_t sRenderSemaphore = nullptr;  // Signals render task to start
+static portMUX_TYPE sSwapSpinlock = portMUX_INITIALIZER_UNLOCKED;
+
+// Snapshot of viewport state for the render task (written by display task, read by render task)
+static struct {
+  float centerLat, centerLon;
+  float zoom, rotation;
+  uint16_t visibleLayers;
+  uint8_t subtypeVisibility[65];
+  bool hasTrack;
+  // Track scale params (precomputed by display task)
+  int32_t trackScaleX, trackScaleY;
+} sRenderSnapshot;
+
+// Last-rendered snapshot (for dirty detection)
+static float sRenderedLat = 0, sRenderedLon = 0;
+static float sRenderedZoom = 0, sRenderedRotation = 0;
+static uint16_t sRenderedLayers = 0;
+
+// Force re-render flag (set when layers toggled, etc.)
+static volatile bool sForceRender = false;
+
+// Render task handle
+static TaskHandle_t sRenderTaskHandle = nullptr;
+
+// Forward declaration
+static void mapRenderTask(void* param);
 
 // Map menu state (accessed by footer system)
 bool gMapMenuOpen = false;
@@ -71,6 +113,7 @@ enum MapMenuCategory {
   MENU_CAT_WAYPOINTS,
   MENU_CAT_TRACKS,
   MENU_CAT_INFO,
+  MENU_CAT_LAYERS,
   MENU_CAT_CLOSE,
   MENU_CAT_COUNT
 };
@@ -84,13 +127,14 @@ static const char* gMapMainMenuItems[] = {
   "Waypoints >",
   "Tracks >",
   "Info >",
+  "Layers >",
   "Close Menu"
 };
 
 #if ENABLE_GPS_SENSOR
-static const int gMapMainMenuItemCount = 7;
+static const int gMapMainMenuItemCount = 8;
 #else
-static const int gMapMainMenuItemCount = 6;
+static const int gMapMainMenuItemCount = 7;
 #endif
 
 // Submenu items
@@ -123,9 +167,9 @@ static const int gWaypointsSubmenuCount = 5;
 
 static const char* gTracksSubmenu[] = {
   "Load Track", "Clear Track", "Track Status", "Delete Track",
-  "Live Track", "< Back"
+  "Live Track", "Save Track", "< Back"
 };
-static const int gTracksSubmenuCount = 6;
+static const int gTracksSubmenuCount = 7;
 
 static const char* gInfoSubmenu[] = {
   "Map Info", "Features", "Search Names", "Transit Routes",
@@ -149,16 +193,32 @@ static bool gShowTrackStatus = false;
 // Map info overlay state
 static bool gShowMapInfo = false;
 
-// Layer visibility toggles (default all on)
-static bool gLayerHighways = true;
-static bool gLayerMajorRoads = true;
-static bool gLayerMinorRoads = true;
-static bool gLayerPaths = true;
-static bool gLayerWater = true;
-static bool gLayerParks = true;
-static bool gLayerRailways = true;
-static bool gLayerTransit = true;
-static bool gLayerBuildings = true;
+// Layer type info for the Layers submenu (used to build dynamic menu items)
+struct MapLayerTypeInfo {
+  const char* name;         // Short display name
+  uint16_t    layerFlag;    // LAYER_* flag for type-level toggle
+  uint16_t    hwmapMask;    // HWMAP_FTYPE_* bits to check in header.featureTypeMask
+  uint8_t     featureType;  // MapFeatureType value
+  int         subtypeCount; // 0 = no subtype submenu
+  const char* subtypes[4];  // Subtype display names (nullptr-terminated)
+};
+
+static const MapLayerTypeInfo gMapLayerTypes[] = {
+  { "Highways",  LAYER_HIGHWAYS,  HWMAP_FTYPE_HIGHWAY,                                      MAP_FEATURE_HIGHWAY,    2, {"Motorway", "Trunk",     nullptr,   nullptr    } },
+  { "MajorRoads",LAYER_MAJOR,     HWMAP_FTYPE_MAJOR,                                        MAP_FEATURE_ROAD_MAJOR, 2, {"Primary",  "Secondary", nullptr,   nullptr    } },
+  { "MinorRoads",LAYER_MINOR,     HWMAP_FTYPE_MINOR,                                        MAP_FEATURE_ROAD_MINOR, 3, {"Tertiary", "Resident",  "Service", nullptr    } },
+  { "Paths",     LAYER_PATHS,     HWMAP_FTYPE_PATH,                                         MAP_FEATURE_PATH,       3, {"Footway",  "Cycleway",  "Track",   nullptr    } },
+  { "Water",     LAYER_WATER,     HWMAP_FTYPE_WATER,                                        MAP_FEATURE_WATER,      3, {"Lake",     "River",     "Coast",   nullptr    } },
+  { "Parks",     LAYER_PARKS,     HWMAP_FTYPE_PARK,                                         MAP_FEATURE_PARK,       3, {"Park",     "Forest",    "Grass",   nullptr    } },
+  { "Railways",  LAYER_RAILWAYS,  HWMAP_FTYPE_RAILWAY,                                      MAP_FEATURE_RAILWAY,    2, {"Rail",     "Subway",    nullptr,   nullptr    } },
+  { "Transit",   LAYER_TRANSIT,   HWMAP_FTYPE_BUS | HWMAP_FTYPE_FERRY | HWMAP_FTYPE_STATION, MAP_FEATURE_BUS,        0, {nullptr,    nullptr,     nullptr,   nullptr    } },
+  { "Buildings", LAYER_BUILDINGS,  HWMAP_FTYPE_BUILDING,                                     MAP_FEATURE_BUILDING,   4, {"Building", "Industrial","Commerc", "Resident" } },
+  { "Land Mask", LAYER_LAND_MASK, HWMAP_FTYPE_LAND,                                         MAP_FEATURE_LAND_MASK,  0, {nullptr,    nullptr,     nullptr,   nullptr    } },
+};
+static const int gMapLayerTypeCount = 10;
+
+// State for the layer subtype sub-submenu (level 2)
+static int gLayerTypeSelectIdx = 0;
 
 // Features viewer state
 static bool gShowFeatures = false;
@@ -175,7 +235,7 @@ static bool gMapSearchMode = false;
 static char gSearchResult[64] = "";
 
 // Search results navigation (for multiple matches like "Target")
-// Store coordinates directly since v5 format doesn't have flat feature indices
+// Store coordinates directly since tiled format doesn't have flat feature indices
 struct SearchResultCoord {
   float lat;
   float lon;
@@ -192,7 +252,7 @@ static int mapNameAutocomplete(const char* input, const char** results, int maxR
 }
 
 // Zoom constants
-static const float MAP_ZOOM_MIN = 0.25f;
+static const float MAP_ZOOM_MIN = 0.20f;
 static const float MAP_ZOOM_MAX = 30.0f;
 static const float MAP_ZOOM_STEP = 1.5f;
 
@@ -375,7 +435,7 @@ static void drawRoutes() {
   int routeCount = 0;
   static RouteInfo routes[32];
   
-  // Iterate through all tiles to find transit features (v5 tiled format)
+  // Iterate through all tiles to find transit features
   for (uint16_t tileIdx = 0; tileIdx < map.tileCount && routeCount < 32; tileIdx++) {
     size_t tileDataSize;
     const uint8_t* tileData = MapCore::loadTileData(tileIdx, &tileDataSize);
@@ -389,16 +449,14 @@ static void drawRoutes() {
     uint16_t featureCount = ptr[0] | (ptr[1] << 8);
     ptr += 2;
     
-    const int hdrSize = HWMAP_FEATURE_HEADER_SIZE(map.header.version);
     for (uint16_t f = 0; f < featureCount && routeCount < 32; f++) {
-      if (ptr + hdrSize > end) break;
+      if (ptr + HWMAP_FEATURE_HEADER_SIZE > end) break;
       
       uint8_t type = ptr[0];
-      // v6: type(1) + subtype(1) + nameIndex(2) + pointCount(2)
-      // v5: type(1) + nameIndex(2) + pointCount(2)
-      uint16_t nameIdx = (hdrSize == 6) ? (ptr[2] | (ptr[3] << 8)) : (ptr[1] | (ptr[2] << 8));
-      uint16_t pointCount = (hdrSize == 6) ? (ptr[4] | (ptr[5] << 8)) : (ptr[3] | (ptr[4] << 8));
-      ptr += hdrSize + pointCount * 4;  // Skip header + quantized points
+      // type(1) + subtype(1) + nameIndex(2) + pointCount(2)
+      uint16_t nameIdx = ptr[2] | (ptr[3] << 8);
+      uint16_t pointCount = ptr[4] | (ptr[5] << 8);
+      ptr += HWMAP_FEATURE_HEADER_SIZE + pointCount * 4;  // Skip header + quantized points
       
       // Check if transit type (rail=0x20, bus=0x21, ferry=0x22) with name
       if ((type == 0x20 || type == 0x21 || type == 0x22) && nameIdx != 0xFFFF) {
@@ -591,6 +649,81 @@ static void drawTrackSelect() {
   oledDisplay->print("A:OK  B:Cancel");
 }
 
+// Dynamic buffers for the Layers submenu (rebuilt each draw to show current on/off state)
+static char       gLayersMenuBuf[11][20];
+static const char* gLayersMenuPtrs[11];
+static int        gLayersMenuCount = 0;
+
+static void buildLayersMenuItems() {
+  gLayersMenuCount = 0;
+  uint16_t vis = mapLayersGetVisible();
+  const LoadedMap& map = MapCore::getCurrentMap();
+  uint16_t ftMask = map.valid ? map.header.featureTypeMask : 0xFFFF;
+  for (int i = 0; i < gMapLayerTypeCount; i++) {
+    const MapLayerTypeInfo& t = gMapLayerTypes[i];
+    bool present = (ftMask & t.hwmapMask) != 0;
+    bool on = (vis & t.layerFlag) != 0;
+    if (!present) {
+      snprintf(gLayersMenuBuf[i], 20, "~%s", t.name);
+    } else if (t.subtypeCount > 0) {
+      snprintf(gLayersMenuBuf[i], 20, "%s %s>", t.name, on ? "[+]" : "[ ]");
+    } else {
+      snprintf(gLayersMenuBuf[i], 20, "%s %s", t.name, on ? "[+]" : "[ ]");
+    }
+    gLayersMenuPtrs[gLayersMenuCount++] = gLayersMenuBuf[i];
+  }
+  strlcpy(gLayersMenuBuf[gLayersMenuCount], "< Back", 20);
+  gLayersMenuPtrs[gLayersMenuCount++] = gLayersMenuBuf[gMapLayerTypeCount];
+}
+
+// Dynamic buffers for the subtype sub-submenu
+static char       gSubtypeMenuBuf[7][20];
+static const char* gSubtypeMenuPtrs[7];
+static int        gSubtypeMenuCount = 0;
+
+static void buildSubtypeMenuItems(int typeIdx) {
+  gSubtypeMenuCount = 0;
+  if (typeIdx < 0 || typeIdx >= gMapLayerTypeCount) return;
+  const MapLayerTypeInfo& t = gMapLayerTypes[typeIdx];
+
+  bool typeOn = (mapLayersGetVisible() & t.layerFlag) != 0;
+  snprintf(gSubtypeMenuBuf[0], 20, "All %s", typeOn ? "[+]" : "[ ]");
+  gSubtypeMenuPtrs[gSubtypeMenuCount++] = gSubtypeMenuBuf[0];
+
+  uint8_t mask = mapSubtypeGetMask(t.featureType);
+  for (int s = 0; s < t.subtypeCount; s++) {
+    bool on = typeOn && ((mask >> s) & 1);
+    snprintf(gSubtypeMenuBuf[1 + s], 20, "%s %s", t.subtypes[s], on ? "[+]" : "[ ]");
+    gSubtypeMenuPtrs[gSubtypeMenuCount++] = gSubtypeMenuBuf[1 + s];
+  }
+  strlcpy(gSubtypeMenuBuf[gSubtypeMenuCount], "< Back", 20);
+  gSubtypeMenuPtrs[gSubtypeMenuCount++] = gSubtypeMenuBuf[1 + t.subtypeCount];
+}
+
+// Execute a subtype sub-submenu action (level 2)
+static void executeSubtypeMenuAction(int typeIdx, int action) {
+  if (typeIdx < 0 || typeIdx >= gMapLayerTypeCount) {
+    gMapSubmenuLevel = 1;
+    gMapMenuSelection = 0;
+    gMapMenuScrollOffset = 0;
+    return;
+  }
+  const MapLayerTypeInfo& t = gMapLayerTypes[typeIdx];
+  const int backItem = 1 + t.subtypeCount;  // "All" + subtypes
+  if (action == 0) {
+    mapLayerToggle(t.layerFlag);
+    sForceRender = true;
+  } else if (action > 0 && action < backItem) {
+    mapSubtypeToggle(t.featureType, (uint8_t)(action - 1));
+    sForceRender = true;
+  } else {
+    // Back → return to layers submenu, restore selection
+    gMapSubmenuLevel = 1;
+    gMapMenuSelection = gLayerTypeSelectIdx;
+    gMapMenuScrollOffset = (gLayerTypeSelectIdx >= 4) ? gLayerTypeSelectIdx - 3 : 0;
+  }
+}
+
 // Draw the map menu overlay
 static void drawMapMenu() {
   if (!oledDisplay) return;
@@ -641,6 +774,12 @@ static void drawMapMenu() {
     menuItems = gMapMainMenuItems;
     menuItemCount = gMapMainMenuItemCount;
     menuTitle = "== Map Menu ==";
+  } else if (gMapSubmenuLevel == 2) {
+    buildSubtypeMenuItems(gLayerTypeSelectIdx);
+    menuItems = gSubtypeMenuPtrs;
+    menuItemCount = gSubtypeMenuCount;
+    menuTitle = (gLayerTypeSelectIdx >= 0 && gLayerTypeSelectIdx < gMapLayerTypeCount)
+                  ? gMapLayerTypes[gLayerTypeSelectIdx].name : "== Types ==";
   } else {
     menuTitle = "== Submenu ==";
     switch (gMapSubmenuType) {
@@ -675,6 +814,12 @@ static void drawMapMenu() {
         menuItems = gInfoSubmenu;
         menuItemCount = gInfoSubmenuCount;
         menuTitle = "== Info ==";
+        break;
+      case MENU_CAT_LAYERS:
+        buildLayersMenuItems();
+        menuItems = gLayersMenuPtrs;
+        menuItemCount = gLayersMenuCount;
+        menuTitle = "== Layers ==";
         break;
       default:
         menuItems = gMapMainMenuItems;
@@ -716,6 +861,86 @@ static void drawMapMenu() {
   }
 }
 
+// =============================================================================
+// Async Map Render Task
+// =============================================================================
+
+static void initAsyncMapRenderer() {
+  if (sMapBufA) return;  // Already initialized
+  
+  // Allocate double buffers in PSRAM
+  sMapBufA = (uint8_t*)ps_malloc(SSD1306_BUF_SIZE);
+  sMapBufB = (uint8_t*)ps_malloc(SSD1306_BUF_SIZE);
+  if (!sMapBufA || !sMapBufB) {
+    Serial.println("[MAP_ASYNC] PSRAM alloc failed for double buffers!");
+    return;
+  }
+  memset(sMapBufA, 0, SSD1306_BUF_SIZE);
+  memset(sMapBufB, 0, SSD1306_BUF_SIZE);
+  sMapFrontBuf = sMapBufA;
+  sMapBackBuf  = sMapBufB;
+  sFrontBufReady = false;
+  
+  // Create render semaphore
+  sRenderSemaphore = xSemaphoreCreateBinary();
+  
+  // Create render task (8KB stack in PSRAM, low priority)
+  xTaskCreatePinnedToCore(mapRenderTask, "mapRender", 8192, nullptr, tskIDLE_PRIORITY + 1, &sRenderTaskHandle, 0);
+  
+  Serial.println("[MAP_ASYNC] Async renderer initialized (double-buffer + render task)");
+}
+
+static void mapRenderTask(void* param) {
+  for (;;) {
+    // Block until display task signals us
+    xSemaphoreTake(sRenderSemaphore, portMAX_DELAY);
+    
+    // Copy snapshot to local (tiny critical section)
+    float lat, lon, zoom, rotation;
+    bool hasTrack;
+    int32_t trackScaleX, trackScaleY;
+    MapRenderParams renderParams;
+    
+    taskENTER_CRITICAL(&sSwapSpinlock);
+    lat = sRenderSnapshot.centerLat;
+    lon = sRenderSnapshot.centerLon;
+    zoom = sRenderSnapshot.zoom;
+    rotation = sRenderSnapshot.rotation;
+    renderParams.zoom = zoom;
+    renderParams.rotation = rotation;
+    renderParams.visibleLayers = sRenderSnapshot.visibleLayers;
+    memcpy(renderParams.subtypeVisibility, sRenderSnapshot.subtypeVisibility, sizeof(renderParams.subtypeVisibility));
+    hasTrack = sRenderSnapshot.hasTrack;
+    trackScaleX = sRenderSnapshot.trackScaleX;
+    trackScaleY = sRenderSnapshot.trackScaleY;
+    taskEXIT_CRITICAL(&sSwapSpinlock);
+    
+    // Get current back buffer pointer (read under spinlock)
+    taskENTER_CRITICAL(&sSwapSpinlock);
+    uint8_t* backBuf = sMapBackBuf;
+    taskEXIT_CRITICAL(&sSwapSpinlock);
+    
+    // Create a local offscreen renderer targeting the back buffer
+    OffscreenMapRenderer localRenderer(backBuf, DISPLAY_WIDTH, DISPLAY_CONTENT_HEIGHT, DISPLAY_CONTENT_START_Y);
+    localRenderer.clear();
+    
+    MapCore::renderMap(&localRenderer, lat, lon, renderParams);
+    
+    // Render GPS track if loaded
+    if (hasTrack && GPSTrackManager::hasTrack()) {
+      GPSTrackManager::renderTrack(&localRenderer, lat, lon, trackScaleX, trackScaleY);
+    }
+    
+    // Swap front/back pointers (atomic via spinlock)
+    taskENTER_CRITICAL(&sSwapSpinlock);
+    uint8_t* temp = sMapFrontBuf;
+    sMapFrontBuf = backBuf;
+    sMapBackBuf  = temp;
+    sFrontBufReady = true;
+    taskEXIT_CRITICAL(&sSwapSpinlock);
+  }
+}
+
 // Display function for GPS Map mode
 static void displayGPSMap() {
   if (!oledDisplay) return;
@@ -741,6 +966,14 @@ static void displayGPSMap() {
   }
   
   oledDisplay->setTextSize(1);
+  
+  // Performance tracking
+  const uint32_t frameStart = millis();
+  static uint32_t sPerfLastReport = 0;
+  static uint32_t sPerfFrameCount = 0;
+  static uint32_t sPerfTotalMs = 0;
+  static uint32_t sPerfCacheHits = 0;
+  static uint32_t sPerfCacheMisses = 0;
   
   float lat = 0.0f, lon = 0.0f;
   bool hasGPSFix = false;
@@ -818,24 +1051,71 @@ static void displayGPSMap() {
     gMapCenterLat = (map.header.minLat + map.header.maxLat) / 2000000.0f;
     gMapCenterLon = (map.header.minLon + map.header.maxLon) / 2000000.0f;
     gMapCenterSet = true;
+    DEBUG_MAPS_RENDERINGF("[MAPS] OLED center from header: lat=%.5f lon=%.5f (minLat=%ld maxLat=%ld minLon=%ld maxLon=%ld)",
+                          gMapCenterLat, gMapCenterLon,
+                          (long)map.header.minLat, (long)map.header.maxLat,
+                          (long)map.header.minLon, (long)map.header.maxLon);
   }
   
+  // Initialize async renderer on first call
+  initAsyncMapRenderer();
+  
+  // Create OLED renderer for overlays (context bar, text, etc.)
   if (!gOLEDMapRenderer) {
     gOLEDMapRenderer = new OLEDMapRenderer(oledDisplay);
   }
   
-  MapCore::renderMap(gOLEDMapRenderer, gMapCenterLat, gMapCenterLon);
+  // Check if viewport changed since last render request
+  uint16_t currentLayers = mapLayersGetVisible();
+  bool mapDirty = sForceRender ||
+                  gMapCenterLat != sRenderedLat ||
+                  gMapCenterLon != sRenderedLon ||
+                  gMapZoom != sRenderedZoom ||
+                  gMapRotation != sRenderedRotation ||
+                  currentLayers != sRenderedLayers;
   
-  // Render GPS track if loaded
-  if (GPSTrackManager::hasTrack()) {
-    // Calculate scale factors from map bounds (same logic as MapCore::renderMap)
+  if (mapDirty && sRenderSemaphore) {
+    // Precompute outside critical section
+    MapRenderParams tmpParams = mapRenderParamsFromGlobals();
+    bool hasTrack = GPSTrackManager::hasTrack();
     int32_t mapWidth = map.header.maxLon - map.header.minLon;
     int32_t mapHeight = map.header.maxLat - map.header.minLat;
-    int32_t scaleX = (mapWidth > 0) ? (gOLEDMapRenderer->getWidth() * 1000) / mapWidth : 1;
-    int32_t scaleY = (mapHeight > 0) ? (gOLEDMapRenderer->getHeight() * 1000) / mapHeight : 1;
-    scaleX = (int32_t)(scaleX * gMapZoom);
-    scaleY = (int32_t)(scaleY * gMapZoom);
-    GPSTrackManager::renderTrack(gOLEDMapRenderer, gMapCenterLat, gMapCenterLon, scaleX, scaleY);
+    int32_t trkScaleX = (mapWidth > 0) ? (int32_t)((DISPLAY_WIDTH * 1000L) / mapWidth * gMapZoom) : 1;
+    int32_t trkScaleY = (mapHeight > 0) ? (int32_t)((DISPLAY_CONTENT_HEIGHT * 1000L) / mapHeight * gMapZoom) : 1;
+    
+    // Write snapshot for render task (minimal critical section)
+    taskENTER_CRITICAL(&sSwapSpinlock);
+    sRenderSnapshot.centerLat = gMapCenterLat;
+    sRenderSnapshot.centerLon = gMapCenterLon;
+    sRenderSnapshot.zoom = gMapZoom;
+    sRenderSnapshot.rotation = gMapRotation;
+    sRenderSnapshot.visibleLayers = currentLayers;
+    memcpy(sRenderSnapshot.subtypeVisibility, tmpParams.subtypeVisibility, sizeof(sRenderSnapshot.subtypeVisibility));
+    sRenderSnapshot.hasTrack = hasTrack;
+    sRenderSnapshot.trackScaleX = trkScaleX;
+    sRenderSnapshot.trackScaleY = trkScaleY;
+    taskEXIT_CRITICAL(&sSwapSpinlock);
+    
+    // Update dirty-tracking state
+    sRenderedLat = gMapCenterLat;
+    sRenderedLon = gMapCenterLon;
+    sRenderedZoom = gMapZoom;
+    sRenderedRotation = gMapRotation;
+    sRenderedLayers = currentLayers;
+    sForceRender = false;
+    
+    // Signal the render task
+    xSemaphoreGive(sRenderSemaphore);
+    sPerfCacheMisses++;
+  } else {
+    sPerfCacheHits++;
+  }
+  
+  // Always blit front buffer to display (instant memcpy ~1us)
+  if (sFrontBufReady) {
+    taskENTER_CRITICAL(&sSwapSpinlock);
+    memcpy(oledDisplay->getBuffer(), sMapFrontBuf, SSD1306_BUF_SIZE);
+    taskEXIT_CRITICAL(&sSwapSpinlock);
   }
   
   // Update location context if GPS has fix and enough time has passed
@@ -916,7 +1196,7 @@ static void displayGPSMap() {
   
   // Show LIVE indicator when live tracking
   if (GPSTrackManager::isLiveTracking()) {
-    gOLEDMapRenderer->drawOverlayText(0, 56, " LIVE ", true);
+    gOLEDMapRenderer->drawOverlayText(0, gOLEDMapRenderer->getHeight() - 8, " LIVE ", true);
   }
 #endif
   
@@ -929,18 +1209,37 @@ static void displayGPSMap() {
       } else {
         snprintf(overlayBuf, sizeof(overlayBuf), "%dm %d\xf8", (int)distM, (int)bearingDeg);
       }
-      gOLEDMapRenderer->drawOverlayText(0, 56, overlayBuf, true);
+      gOLEDMapRenderer->drawOverlayText(0, gOLEDMapRenderer->getHeight() - 8, overlayBuf, true);
     }
   }
   
   // Show search results navigation indicator
   if (gSearchResultsActive && gSearchResultCount > 1) {
     snprintf(overlayBuf, sizeof(overlayBuf), " %d/%d <> ", gSearchResultCurrent + 1, gSearchResultCount);
-    gOLEDMapRenderer->drawOverlayText(40, 56, overlayBuf, true);
+    gOLEDMapRenderer->drawOverlayText(40, gOLEDMapRenderer->getHeight() - 8, overlayBuf, true);
   }
   
   if (gMapMenuOpen) {
     drawMapMenu();
+  }
+  
+  // Performance reporting (every 5 seconds)
+  uint32_t frameMs = millis() - frameStart;
+  sPerfFrameCount++;
+  sPerfTotalMs += frameMs;
+  if (millis() - sPerfLastReport >= 5000) {
+    float avgMs = (sPerfFrameCount > 0) ? (float)sPerfTotalMs / sPerfFrameCount : 0;
+    float fps = (sPerfTotalMs > 0) ? (sPerfFrameCount * 1000.0f / (millis() - sPerfLastReport)) : 0;
+    DEBUG_MAPS_PERFF("[MAP_PERF] frame: %.1fms avg | %.1f FPS | %lu frames | cache hit:%lu miss:%lu (%.0f%%)",
+                     avgMs, fps, (unsigned long)sPerfFrameCount,
+                     (unsigned long)sPerfCacheHits, (unsigned long)sPerfCacheMisses,
+                     (sPerfCacheHits + sPerfCacheMisses > 0) ? 
+                       (100.0f * sPerfCacheHits / (sPerfCacheHits + sPerfCacheMisses)) : 0.0f);
+    sPerfLastReport = millis();
+    sPerfFrameCount = 0;
+    sPerfTotalMs = 0;
+    sPerfCacheHits = 0;
+    sPerfCacheMisses = 0;
   }
 }
 
@@ -1123,12 +1422,30 @@ static void executeSubmenuAction(int submenuType, int action) {
         case 4:  // Live Track - toggle
           if (GPSTrackManager::isLiveTracking()) {
             GPSTrackManager::setLiveTracking(false);
+            executeCommandThroughRegistry("sensorlog stop");
           } else {
-            GPSTrackManager::clearTrack();  // Start fresh
+            // Auto-start GPS sensor if not running
+            if (!gpsEnabled) {
+              executeCommandThroughRegistry("opengps");
+            }
+            GPSTrackManager::clearTrack();
             GPSTrackManager::setLiveTracking(true);
+            // Auto-start file logging in track format so data persists
+            executeCommandThroughRegistry("sensorlog format track");
+            executeCommandThroughRegistry("sensorlog sensors gps");
+            executeCommandThroughRegistry("sensorlog start /logging_captures/tracks/live.csv 1000");
           }
           break;
-        case 5: goBackToMainMenu(); break;  // Back
+        case 5:  // Save Track
+          {
+            char savedPath[96];
+            if (GPSTrackManager::saveTrack(savedPath, sizeof(savedPath))) {
+              // Show brief confirmation via track status overlay
+              gShowTrackStatus = true;
+            }
+          }
+          break;
+        case 6: goBackToMainMenu(); break;  // Back
       }
       break;
 
@@ -1155,13 +1472,37 @@ static void executeSubmenuAction(int submenuType, int action) {
         case 4: goBackToMainMenu(); break;  // Back
       }
       break;
+
+    case MENU_CAT_LAYERS:
+      if (action == gMapLayerTypeCount) {
+        // Back item
+        goBackToMainMenu();
+      } else if (action >= 0 && action < gMapLayerTypeCount) {
+        const MapLayerTypeInfo& t = gMapLayerTypes[action];
+        // Skip if this layer type is not present in the loaded map
+        const LoadedMap& layerMap = MapCore::getCurrentMap();
+        uint16_t ftm = layerMap.valid ? layerMap.header.featureTypeMask : 0xFFFF;
+        if ((ftm & t.hwmapMask) == 0) break;  // Not present, ignore
+        if (t.subtypeCount > 0) {
+          // Enter subtype sub-submenu
+          gLayerTypeSelectIdx = action;
+          gMapSubmenuLevel = 2;
+          gMapMenuSelection = 0;
+          gMapMenuScrollOffset = 0;
+        } else {
+          // No subtypes: toggle type directly and stay in layers list
+          mapLayerToggle(t.layerFlag);
+          sForceRender = true;
+        }
+      }
+      break;
   }
 }
 
 // Execute main menu action (opens submenus or closes)
 static void executeMainMenuAction(int action) {
 #if ENABLE_GPS_SENSOR
-  // With GPS: View, Maps, GPS, Waypoints, Tracks, Info, Close
+  // With GPS: View, Maps, GPS, Waypoints, Tracks, Info, Layers, Close
   switch (action) {
     case MENU_CAT_VIEW:
     case MENU_CAT_MAPS:
@@ -1169,6 +1510,7 @@ static void executeMainMenuAction(int action) {
     case MENU_CAT_WAYPOINTS:
     case MENU_CAT_TRACKS:
     case MENU_CAT_INFO:
+    case MENU_CAT_LAYERS:
       gMapSubmenuLevel = 1;
       gMapSubmenuType = action;
       gMapMenuSelection = 0;
@@ -1180,7 +1522,7 @@ static void executeMainMenuAction(int action) {
       break;
   }
 #else
-  // Without GPS: View, Maps, Waypoints, Tracks, Info, Close
+  // Without GPS: View, Maps, Waypoints, Tracks, Info, Layers, Close
   int mappedAction = action;
   if (action >= 2) mappedAction = action + 1;  // Skip GPS category
   
@@ -1190,6 +1532,7 @@ static void executeMainMenuAction(int action) {
     case MENU_CAT_WAYPOINTS:
     case MENU_CAT_TRACKS:
     case MENU_CAT_INFO:
+    case MENU_CAT_LAYERS:
       gMapSubmenuLevel = 1;
       gMapSubmenuType = mappedAction;
       gMapMenuSelection = 0;
@@ -1207,6 +1550,8 @@ static void executeMainMenuAction(int action) {
 static void executeMapMenuAction(int action) {
   if (gMapSubmenuLevel == 0) {
     executeMainMenuAction(action);
+  } else if (gMapSubmenuLevel == 2) {
+    executeSubtypeMenuAction(gLayerTypeSelectIdx, action);
   } else {
     executeSubmenuAction(gMapSubmenuType, action);
   }
@@ -1238,7 +1583,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       gSearchResult[sizeof(gSearchResult) - 1] = '\0';
       DEBUG_SENSORSF("[MAP_SEARCH] Selected: '%s'", gSearchResult);
       
-      // Find ALL matching features (v5 tiled format - iterate through tiles)
+      // Find ALL matching features (iterate through tiles)
       gSearchResultCount = 0;
       gSearchResultCurrent = 0;
       const LoadedMap& map = MapCore::getCurrentMap();
@@ -1265,29 +1610,27 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
           uint16_t featureCount = ptr[0] | (ptr[1] << 8);
           ptr += 2;
           
-          const int hdrSize = HWMAP_FEATURE_HEADER_SIZE(map.header.version);
           for (uint16_t f = 0; f < featureCount && gSearchResultCount < 32; f++) {
-            if (ptr + hdrSize > end) break;
+            if (ptr + HWMAP_FEATURE_HEADER_SIZE > end) break;
             
-            // v6: type(1) + subtype(1) + nameIndex(2) + pointCount(2)
-            // v5: type(1) + nameIndex(2) + pointCount(2)
-            uint16_t nameIndex = (hdrSize == 6) ? (ptr[2] | (ptr[3] << 8)) : (ptr[1] | (ptr[2] << 8));
-            uint16_t pointCount = (hdrSize == 6) ? (ptr[4] | (ptr[5] << 8)) : (ptr[3] | (ptr[4] << 8));
+            // type(1) + subtype(1) + nameIndex(2) + pointCount(2)
+            uint16_t nameIndex = ptr[2] | (ptr[3] << 8);
+            uint16_t pointCount = ptr[4] | (ptr[5] << 8);
             
             const char* featureName = MapCore::getName(nameIndex);
             if (featureName && strcmp(featureName, gSearchResult) == 0 && pointCount > 0) {
               // Dequantize first point and store coordinates (points start after header)
-              const uint8_t* pointsPtr = ptr + hdrSize;
+              const uint8_t* pointsPtr = ptr + HWMAP_FEATURE_HEADER_SIZE;
               uint16_t qLat = pointsPtr[0] | (pointsPtr[1] << 8);
               uint16_t qLon = pointsPtr[2] | (pointsPtr[3] << 8);
-              int32_t lat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan / 65535);
-              int32_t lon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan / 65535);
+              int32_t lat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan >> 16);
+              int32_t lon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan >> 16);
               gSearchResultCoords[gSearchResultCount].lat = lat / 1000000.0f;
               gSearchResultCoords[gSearchResultCount].lon = lon / 1000000.0f;
               gSearchResultCount++;
             }
             
-            ptr += hdrSize + pointCount * 4;  // Skip to next feature
+            ptr += HWMAP_FEATURE_HEADER_SIZE + pointCount * 4;  // Skip to next feature
           }
         }
         
@@ -1326,7 +1669,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     }
     
     centerOnCurrentResult: {
-      // Use stored coordinates directly (v5 format stores coords, not indices)
+      // Use stored coordinates directly (tiled format stores coords, not indices)
       gMapCenterLat = gSearchResultCoords[gSearchResultCurrent].lat;
       gMapCenterLon = gSearchResultCoords[gSearchResultCurrent].lon;
       DEBUG_SENSORSF("[MAP_SEARCH] Showing result %d/%d", 
@@ -1405,7 +1748,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       return true;
     }
     
-    // Build route list (same logic as drawRoutes) using v5 tiled architecture
+    // Build route list (same logic as drawRoutes) using tiled architecture
     const LoadedMap& map = MapCore::getCurrentMap();
     static RouteInfo routeList[32];
     static float routeFirstLat[32];  // Store first point coords for goto
@@ -1433,15 +1776,13 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
         uint16_t featureCount = ptr[0] | (ptr[1] << 8);
         ptr += 2;
         
-        const int hdrSize = HWMAP_FEATURE_HEADER_SIZE(map.header.version);
         for (uint16_t f = 0; f < featureCount && routeCount < 32; f++) {
-          if (ptr + hdrSize > end) break;
+          if (ptr + HWMAP_FEATURE_HEADER_SIZE > end) break;
           
           uint8_t type = ptr[0];
-          // v6: type(1) + subtype(1) + nameIndex(2) + pointCount(2)
-          // v5: type(1) + nameIndex(2) + pointCount(2)
-          uint16_t nameIdx = (hdrSize == 6) ? (ptr[2] | (ptr[3] << 8)) : (ptr[1] | (ptr[2] << 8));
-          uint16_t pointCount = (hdrSize == 6) ? (ptr[4] | (ptr[5] << 8)) : (ptr[3] | (ptr[4] << 8));
+          // type(1) + subtype(1) + nameIndex(2) + pointCount(2)
+          uint16_t nameIdx = ptr[2] | (ptr[3] << 8);
+          uint16_t pointCount = ptr[4] | (ptr[5] << 8);
           
           // Check for transit types (rail, bus, ferry)
           if ((type == 0x20 || type == 0x21 || type == 0x22) && nameIdx != 0xFFFF && pointCount > 0) {
@@ -1453,11 +1794,11 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
               }
               if (!dup) {
                 // Dequantize first point for goto functionality (points start after header)
-                const uint8_t* pointsPtr = ptr + hdrSize;
+                const uint8_t* pointsPtr = ptr + HWMAP_FEATURE_HEADER_SIZE;
                 uint16_t qLat = pointsPtr[0] | (pointsPtr[1] << 8);
                 uint16_t qLon = pointsPtr[2] | (pointsPtr[3] << 8);
-                int32_t lat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan / 65535);
-                int32_t lon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan / 65535);
+                int32_t lat = tileMinLat + (int32_t)((int64_t)qLat * haloLatSpan >> 16);
+                int32_t lon = tileMinLon + (int32_t)((int64_t)qLon * haloLonSpan >> 16);
                 
                 routeList[routeCount].name = name;
                 routeList[routeCount].type = type;
@@ -1468,7 +1809,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
             }
           }
           
-          ptr += hdrSize + pointCount * 4;  // Skip to next feature
+          ptr += HWMAP_FEATURE_HEADER_SIZE + pointCount * 4;  // Skip to next feature
         }
       }
     }
@@ -1506,7 +1847,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     // A button - goto selected route (center on first point)
     if (newlyPressed & 0x20) {
       if (map.valid && routeCount > 0 && gRoutesSelectedIdx < routeCount) {
-        // Use stored coordinates directly (v5 format)
+        // Use stored coordinates directly
         gMapCenterLat = routeFirstLat[gRoutesSelectedIdx];
         gMapCenterLon = routeFirstLon[gRoutesSelectedIdx];
         gMapCenterSet = true;
@@ -1622,6 +1963,10 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     int menuItemCount;
     if (gMapSubmenuLevel == 0) {
       menuItemCount = gMapMainMenuItemCount;
+    } else if (gMapSubmenuLevel == 2) {
+      int sc = (gLayerTypeSelectIdx >= 0 && gLayerTypeSelectIdx < gMapLayerTypeCount)
+                 ? gMapLayerTypes[gLayerTypeSelectIdx].subtypeCount : 0;
+      menuItemCount = 1 + sc + 1;  // "All" + subtypes + "< Back"
     } else {
       switch (gMapSubmenuType) {
         case MENU_CAT_VIEW: menuItemCount = gViewSubmenuCount; break;
@@ -1632,6 +1977,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
         case MENU_CAT_WAYPOINTS: menuItemCount = gWaypointsSubmenuCount; break;
         case MENU_CAT_TRACKS: menuItemCount = gTracksSubmenuCount; break;
         case MENU_CAT_INFO: menuItemCount = gInfoSubmenuCount; break;
+        case MENU_CAT_LAYERS: menuItemCount = gMapLayerTypeCount + 1; break;
         default: menuItemCount = gMapMainMenuItemCount; break;
       }
     }
@@ -1642,8 +1988,13 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     }
     
     if (newlyPressed & 0x02) {
-      // B button: go back to main menu or close
-      if (gMapSubmenuLevel > 0) {
+      // B button: go back one level
+      if (gMapSubmenuLevel == 2) {
+        // Subtype submenu → layers submenu, restore selection
+        gMapSubmenuLevel = 1;
+        gMapMenuSelection = gLayerTypeSelectIdx;
+        gMapMenuScrollOffset = (gLayerTypeSelectIdx >= 4) ? gLayerTypeSelectIdx - 3 : 0;
+      } else if (gMapSubmenuLevel > 0) {
         goBackToMainMenu();
       } else {
         gMapMenuOpen = false;
@@ -1732,8 +2083,8 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     float accelLon = (effectiveDeltaX * cosR - effectiveDeltaY * sinR) * accel;
     float accelLat = (effectiveDeltaX * sinR + effectiveDeltaY * cosR) * accel;
     
-    gMapVelocityLon += accelLon;
-    gMapVelocityLat -= accelLat;
+    gMapVelocityLon -= accelLon;
+    gMapVelocityLat += accelLat;
     
     gMapVelocityLon = fmaxf(-maxVelocity, fminf(maxVelocity, gMapVelocityLon));
     gMapVelocityLat = fmaxf(-maxVelocity, fminf(maxVelocity, gMapVelocityLat));
@@ -1751,6 +2102,31 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     
     if (fabsf(gMapVelocityLon) < minVelocity) gMapVelocityLon = 0;
     if (fabsf(gMapVelocityLat) < minVelocity) gMapVelocityLat = 0;
+    
+    // Clamp center to map bounds (with margin so user can pan slightly past edge)
+    const LoadedMap& clampMap = MapCore::getCurrentMap();
+    if (clampMap.valid) {
+      float mapMinLat = clampMap.header.minLat / 1000000.0f;
+      float mapMaxLat = clampMap.header.maxLat / 1000000.0f;
+      float mapMinLon = clampMap.header.minLon / 1000000.0f;
+      float mapMaxLon = clampMap.header.maxLon / 1000000.0f;
+      // Allow panning up to half the viewport span past the edge
+      float marginLat = (mapMaxLat - mapMinLat) * 0.5f / gMapZoom;
+      float marginLon = (mapMaxLon - mapMinLon) * 0.5f / gMapZoom;
+      gMapCenterLat = fmaxf(mapMinLat - marginLat, fminf(mapMaxLat + marginLat, gMapCenterLat));
+      gMapCenterLon = fmaxf(mapMinLon - marginLon, fminf(mapMaxLon + marginLon, gMapCenterLon));
+    }
+  }
+  
+  // X button: zoom in
+  if (newlyPressed & 0x04) {
+    gMapZoom = fminf(gMapZoom * MAP_ZOOM_STEP, MAP_ZOOM_MAX);
+    return true;
+  }
+  // Y button: zoom out
+  if (newlyPressed & 0x40) {
+    gMapZoom = fmaxf(gMapZoom / MAP_ZOOM_STEP, MAP_ZOOM_MIN);
+    return true;
   }
   
   if (newlyPressed & 0x02) {

@@ -444,9 +444,6 @@ static InboundRxItem gEspNowRxRing[8];
 static volatile uint32_t gEspNowRxDrops = 0;
 MeshSeenEntry gMeshSeen[MESH_DEDUP_SIZE];  // Exported for .ino access
 int gMeshSeenIndex = 0;                     // Exported for .ino access
-// Forward declaration: accessor defined later in file
-static bool isEspNowInitializedFlag();
-
 int gMeshPeerSlots = 8;  // Runtime slot count, set from gSettings.meshPeerMax at init
 MeshPeerHealth* gMeshPeers = nullptr;
 MeshPeerMeta* gMeshPeerMeta = nullptr;
@@ -454,10 +451,6 @@ uint32_t gLastHeartbeatSentMs = 0;
 
 static MeshRetryEntry gMeshRetryQueue[MESH_RETRY_QUEUE_SIZE];
 // Note: gMeshRetryMutex is now defined in mutex_system.cpp
-// Send flow control
-[[maybe_unused]] static bool isEspNowInitializedFlag() {
-  return gEspNow && gEspNow->initialized;
-}
 // ESP-NOW file transfer support
 struct FileTransfer {
   char filename[64];        // Destination filename
@@ -641,6 +634,13 @@ static bool saveEspNowDevices() {
       f.print(encKey);
       f.print("\"");
     }
+    // Cached metadata fields (persist across reboots)
+    EspNowDevice& dev = gEspNow->devices[i];
+    if (dev.friendlyName.length()) { f.print(",\"friendlyName\":\""); f.print(dev.friendlyName); f.print("\""); }
+    if (dev.room.length())         { f.print(",\"room\":\""); f.print(dev.room); f.print("\""); }
+    if (dev.zone.length())         { f.print(",\"zone\":\""); f.print(dev.zone); f.print("\""); }
+    if (dev.tags.length())         { f.print(",\"tags\":\""); f.print(dev.tags); f.print("\""); }
+    if (dev.stationary)            { f.print(",\"stationary\":true"); }
     f.print("}");
     count++;
   }
@@ -4769,6 +4769,35 @@ static void processMetadata(const uint8_t* srcMac, const V3PayloadMetadata* meta
     idx, MAC_STR(srcMac),
     meta->name, meta->friendlyName, meta->room, meta->zone, meta->tags,
     (int)meta->stationary, (int)meta->isActive);
+  
+  // Sync metadata into paired device entry (for persistence across reboots)
+  if (gEspNow) {
+    for (int i = 0; i < gEspNow->deviceCount; i++) {
+      if (memcmp(gEspNow->devices[i].mac, srcMac, 6) == 0) {
+        bool changed = false;
+        if (metadata->friendlyName[0] && gEspNow->devices[i].friendlyName != metadata->friendlyName) {
+          gEspNow->devices[i].friendlyName = metadata->friendlyName; changed = true;
+        }
+        if (metadata->room[0] && gEspNow->devices[i].room != metadata->room) {
+          gEspNow->devices[i].room = metadata->room; changed = true;
+        }
+        if (metadata->zone[0] && gEspNow->devices[i].zone != metadata->zone) {
+          gEspNow->devices[i].zone = metadata->zone; changed = true;
+        }
+        if (metadata->tags[0] && gEspNow->devices[i].tags != metadata->tags) {
+          gEspNow->devices[i].tags = metadata->tags; changed = true;
+        }
+        bool newStationary = (metadata->stationary != 0);
+        if (gEspNow->devices[i].stationary != newStationary) {
+          gEspNow->devices[i].stationary = newStationary; changed = true;
+        }
+        if (changed) {
+          saveEspNowDevices();
+        }
+        break;
+      }
+    }
+  }
 }
 
 /**
@@ -5250,14 +5279,20 @@ static void addEspNowDevice(const uint8_t* mac, const String& name, bool encrypt
   }
   
   // Add new device
-  memcpy(gEspNow->devices[gEspNow->deviceCount].mac, mac, 6);
-  gEspNow->devices[gEspNow->deviceCount].name = name;
-  gEspNow->devices[gEspNow->deviceCount].encrypted = encrypted;
+  EspNowDevice& newDev = gEspNow->devices[gEspNow->deviceCount];
+  memcpy(newDev.mac, mac, 6);
+  newDev.name = name;
+  newDev.encrypted = encrypted;
   if (encrypted && key) {
-    memcpy(gEspNow->devices[gEspNow->deviceCount].key, key, 16);
+    memcpy(newDev.key, key, 16);
   } else {
-    memset(gEspNow->devices[gEspNow->deviceCount].key, 0, 16);
+    memset(newDev.key, 0, 16);
   }
+  newDev.friendlyName = "";
+  newDev.room = "";
+  newDev.zone = "";
+  newDev.tags = "";
+  newDev.stationary = false;
   gEspNow->deviceCount++;
 }
 
@@ -5460,6 +5495,12 @@ static void loadEspNowDevices() {
         }
       }
     }
+    // Restore cached metadata fields (backwards-compatible: missing fields default to empty)
+    dev.friendlyName = String(entry["friendlyName"] | "");
+    dev.room         = String(entry["room"] | "");
+    dev.zone         = String(entry["zone"] | "");
+    dev.tags         = String(entry["tags"] | "");
+    dev.stationary   = entry["stationary"] | false;
     gEspNow->deviceCount++;
     count++;
   }

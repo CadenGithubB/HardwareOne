@@ -796,28 +796,7 @@ extern const I2CSensorEntry i2cSensors[];
 extern const size_t i2cSensorsCount;
 extern bool readText(const char* path, String& out);
 
-void ensureDeviceRegistryFile();  // Forward declaration
 static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, int addressCount);  // Smart scan
-
-static void createEmptyDeviceRegistry() {
-  FsLockGuard guard("i2c.devices.create");
-  File file = LittleFS.open("/system/devices.json", "w");
-  if (file) {
-    file.println("{");
-    file.println("  \"lastDiscovery\": 0,");
-    file.println("  \"discoveryCount\": 0,");
-    file.println("  \"devices\": []");
-    file.println("}");
-    file.close();
-  }
-}
-
-void ensureDeviceRegistryFile() {
-  FsLockGuard guard("i2c.devices.ensure");
-  if (!LittleFS.exists("/system/devices.json")) {
-    createEmptyDeviceRegistry();
-  }
-}
 
 static int findSensorIndexByAddress(uint8_t address) {
   // Pass 1: prefer exact primary address matches
@@ -962,46 +941,6 @@ static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, 
   gSensorPollingPaused = prevPaused;
 }
 
-static void saveDeviceRegistryToJSON() {
-  ensureDeviceRegistryFile();
-
-  FsLockGuard guard("i2c.devices.save");
-
-  File file = LittleFS.open("/system/devices.json", "w");
-  if (!file) return;
-
-  file.println("{");
-  file.printf("  \"lastDiscovery\": %lu,\n", (unsigned long)millis());
-  file.printf("  \"discoveryCount\": %d,\n", discoveryCount);
-  file.println("  \"devices\": [");
-
-  for (int i = 0; i < connectedDeviceCount; i++) {
-    ConnectedDevice& device = connectedDevices[i];
-
-    String hexAddr = String(device.address, HEX);
-    if (device.address < 16) hexAddr = "0" + hexAddr;
-    hexAddr.toUpperCase();
-
-    file.print("    {");
-    file.printf("\"address\": %d, ", device.address);
-    file.printf("\"addressHex\": \"0x%s\", ", hexAddr.c_str());
-    file.printf("\"name\": \"%s\", ", device.name);
-    file.printf("\"description\": \"%s\", ", device.description);
-    file.printf("\"manufacturer\": \"%s\", ", device.manufacturer);
-    file.printf("\"bus\": %d, ", device.bus);
-    file.printf("\"isConnected\": %s, ", device.isConnected ? "true" : "false");
-    file.printf("\"lastSeen\": %lu, ", (unsigned long)device.lastSeen);
-    file.printf("\"firstDiscovered\": %lu", (unsigned long)device.firstDiscovered);
-    file.print("}");
-
-    if (i < connectedDeviceCount - 1) file.print(",");
-    file.println();
-  }
-
-  file.println("  ]");
-  file.println("}");
-  file.close();
-}
 
 void discoverI2CDevices() {
   // Early exit if I2C bus is disabled
@@ -1011,7 +950,6 @@ void discoverI2CDevices() {
   }
   
   INFO_I2CF("Starting device discovery (smart scan - compiled sensors only)");
-  ensureDeviceRegistryFile();
 
   // Clear existing registry
   connectedDeviceCount = 0;
@@ -1084,10 +1022,6 @@ void discoverI2CDevices() {
   Serial.println();
   Serial.flush();
 
-  // Save results to JSON file
-  INFO_I2CF("Saving device registry to /system/devices.json");
-  saveDeviceRegistryToJSON();
-  INFO_I2CF("Device registry saved successfully");
 }
 
 static void streamDeviceRegistryOutput() {
@@ -1125,18 +1059,15 @@ static void streamDeviceRegistryOutput() {
 
 const char* cmd_devices(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  ensureDeviceRegistryFile();
   streamDeviceRegistryOutput();
   return "[I2C] Device registry displayed";
 }
 
 const char* cmd_discover(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  ensureDeviceRegistryFile();
   discoverI2CDevices();
 
   BROADCAST_PRINTF("Device discovery completed. Found %d devices.", connectedDeviceCount);
-  broadcastOutput("Registry saved to /system/devices.json\n");
 
   // Initialize FM radio if detected to prevent I2C bus lockups
   bool fmRadioDetected = false;
@@ -1631,7 +1562,7 @@ const CommandEntry i2cCommands[] = {
   { "i2creset", "Reset I2C bus: pause polling, recover bus, resume.", true, cmd_i2creset },
   { "i2cpause", "Pause all I2C sensor polling.", true, cmd_i2cpause },
   { "i2cresume", "Resume I2C sensor polling.", true, cmd_i2cresume },
-  { "i2crecover", "Clear degraded state for device: <address>", false, cmd_i2crecover },
+  { "i2crecover", "Clear degraded state for device: <address>", true, cmd_i2crecover },
   
   // Diagnostics
   { "i2cmetrics", "Show I2C bus performance metrics.", false, cmd_i2cmetrics },

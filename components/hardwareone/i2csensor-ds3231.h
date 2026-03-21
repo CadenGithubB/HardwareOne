@@ -82,6 +82,11 @@ uint32_t rtcToUnixTime(const RTCDateTime* dt);
 void unixTimeToRTC(uint32_t unixTime, RTCDateTime* dt);
 String rtcDateTimeToString(const RTCDateTime* dt);
 
+// Returns a copy of utc with gSettings.tzOffsetMinutes applied.
+// Handles date rollover (midnight crossing in either direction).
+// Use this before any human-facing display of RTC time.
+RTCDateTime rtcLocalTime(const RTCDateTime* utc);
+
 // JSON building for ESP-NOW streaming
 int buildRTCDataJSON(char* buf, size_t bufSize);
 

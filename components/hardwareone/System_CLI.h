@@ -14,13 +14,15 @@
 // CLI State enum - tracks current help/normal mode
 enum CLIState {
   CLI_NORMAL,
-  CLI_HELP_MAIN,
-  CLI_HELP_SYSTEM,
-  CLI_HELP_WIFI,
-  CLI_HELP_SENSORS,
-  CLI_HELP_SETTINGS,
-  CLI_HELP_AUTOMATIONS,
-  CLI_HELP_ESPNOW
+  CLI_HELP_MAIN,    // main help menu
+  CLI_HELP_MODULE,  // any specific module or sensor help page
+  // Legacy aliases kept for ABI compatibility; all map to CLI_HELP_MODULE internally
+  CLI_HELP_SYSTEM      = CLI_HELP_MODULE,
+  CLI_HELP_WIFI        = CLI_HELP_MODULE,
+  CLI_HELP_SENSORS     = CLI_HELP_MODULE,
+  CLI_HELP_SETTINGS    = CLI_HELP_MODULE,
+  CLI_HELP_AUTOMATIONS = CLI_HELP_MODULE,
+  CLI_HELP_ESPNOW      = CLI_HELP_MODULE,
 };
 
 // Global CLI state variables
@@ -33,47 +35,26 @@ extern volatile bool gInHelpRender;
 // ============================================================================
 
 /**
- * @brief Render main help menu
- * @param showAll If true, show all commands including disconnected sensors
- * @return Status string
+ * @brief Render main help menu (broadcasts output directly).
+ * @param showAll If true, show all commands including disconnected sensors.
+ * @return "OK"
  */
 const char* renderHelpMain(bool showAll);
 
 /**
- * @brief Render help for System commands
- * @return Help text for system commands
- */
-const char* renderHelpSystem();
-
-/**
- * @brief Render help for WiFi commands
- * @return Help text for WiFi commands
- */
-const char* renderHelpWifi();
-
-/**
- * @brief Render help for Automation commands
- * @return Help text for automation commands
- */
-const char* renderHelpAutomations();
-
-/**
- * @brief Render help for ESP-NOW commands
- * @return Help text for ESP-NOW commands
- */
-const char* renderHelpEspnow();
-
-/**
- * @brief Render help for Settings commands
- * @return Help text for settings commands
- */
-const char* renderHelpSettings();
-
-/**
- * @brief Render help for Sensor commands
- * @return Help text for sensor commands (dynamic based on connected sensors)
+ * @brief Render help for connected sensor modules (broadcasts output directly).
+ * @return "OK"
  */
 const char* renderHelpSensors();
+
+// The functions below are thin wrappers around renderHelpModuleByName().
+// They are kept for backward compatibility; prefer calling renderHelpModuleByName()
+// directly for new module help pages — no broadcastOutput() wrapping needed.
+const char* renderHelpSystem();
+const char* renderHelpWifi();
+const char* renderHelpAutomations();
+const char* renderHelpEspnow();
+const char* renderHelpSettings();
 
 // ============================================================================
 // CLI Navigation Functions

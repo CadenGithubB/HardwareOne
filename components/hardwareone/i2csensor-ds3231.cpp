@@ -271,6 +271,62 @@ String rtcDateTimeToString(const RTCDateTime* dt) {
   return String(buf);
 }
 
+// Days in a given month, accounting for leap years.
+static int rtcDaysInMonth(int month, int year) {
+  static const int dim[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (month == 2 && (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))) return 29;
+  return dim[month];
+}
+
+// Day-of-week for a given date (Sakamoto's algorithm). Returns 0=Sun..6=Sat.
+static int rtcDayOfWeek(int y, int m, int d) {
+  static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+  if (m < 3) y--;
+  return (y + y/4 - y/100 + y/400 + t[m-1] + d) % 7;
+}
+
+RTCDateTime rtcLocalTime(const RTCDateTime* utc) {
+  RTCDateTime local = *utc;
+
+  int offsetMinutes = gSettings.tzOffsetMinutes;
+  if (offsetMinutes == 0) return local;  // UTC, nothing to do
+
+  int totalMinutes = local.hour * 60 + local.minute + offsetMinutes;
+
+  if (totalMinutes < 0) {
+    // Rolled back past midnight — go to previous day
+    totalMinutes += 1440;
+    local.day--;
+    if (local.day < 1) {
+      local.month--;
+      if (local.month < 1) {
+        local.month = 12;
+        local.year--;
+      }
+      local.day = rtcDaysInMonth(local.month, local.year);
+    }
+  } else if (totalMinutes >= 1440) {
+    // Rolled forward past midnight — go to next day
+    totalMinutes -= 1440;
+    local.day++;
+    if (local.day > rtcDaysInMonth(local.month, local.year)) {
+      local.day = 1;
+      local.month++;
+      if (local.month > 12) {
+        local.month = 1;
+        local.year++;
+      }
+    }
+  }
+
+  local.hour   = totalMinutes / 60;
+  local.minute = totalMinutes % 60;
+  // dayOfWeek: Sakamoto returns 0=Sun, RTCDateTime uses 1=Sun
+  local.dayOfWeek = rtcDayOfWeek(local.year, local.month, local.day) + 1;
+
+  return local;
+}
+
 // ============================================================================
 // JSON building for ESP-NOW streaming
 // ============================================================================
@@ -527,12 +583,27 @@ const char* cmd_rtc(const String& argsInput) {
       return response.c_str();
     }
     
-    RTCDateTime dt;
-    if (rtcReadDateTime(&dt)) {
+    RTCDateTime utc;
+    if (rtcReadDateTime(&utc)) {
       float temp = rtcReadTemperature();
-      response = "[RTC] " + rtcDateTimeToString(&dt);
-      char tempBuf[48];
-      snprintf(tempBuf, sizeof(tempBuf), " | Temp: %.1f°C | Unix: %lu", temp, (unsigned long)rtcToUnixTime(&dt));
+      RTCDateTime local = rtcLocalTime(&utc);
+      int offsetMin = gSettings.tzOffsetMinutes;
+      char tzBuf[12];
+      if (offsetMin == 0) {
+        snprintf(tzBuf, sizeof(tzBuf), "UTC");
+      } else {
+        int sign = (offsetMin >= 0) ? 1 : -1;
+        int absMin = offsetMin * sign;
+        if (absMin % 60 == 0) {
+          snprintf(tzBuf, sizeof(tzBuf), "UTC%+d", offsetMin / 60);
+        } else {
+          snprintf(tzBuf, sizeof(tzBuf), "UTC%+d:%02d", (offsetMin / 60) * sign, absMin % 60);
+        }
+      }
+      response = "[RTC] " + rtcDateTimeToString(&local);
+      char tempBuf[64];
+      snprintf(tempBuf, sizeof(tempBuf), " %s | Temp: %.1f°C | Unix: %lu",
+               tzBuf, temp, (unsigned long)rtcToUnixTime(&utc));
       response += tempBuf;
     } else {
       response = "[RTC] Failed to read time";

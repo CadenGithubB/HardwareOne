@@ -106,6 +106,29 @@ const CommandEntry* findCommand(const String& cmdLine) {
   return bestMatch;
 }
 
+// Check if a command should remain in help mode rather than exiting it.
+// Returns true for commands in the CLI module (help/back/exit/clear) and
+// any command whose name matches a registered module name (help navigation).
+bool isHelpModeCommand(const char* cmdName) {
+  size_t moduleCount;
+  const CommandModule* modules = getCommandModules(moduleCount);
+
+  // Check if command belongs to the CLI module (CMD_MODULE_CORE)
+  for (size_t i = 0; i < moduleCount; i++) {
+    if (!(modules[i].flags & CMD_MODULE_CORE)) continue;
+    for (size_t j = 0; j < modules[i].count; j++) {
+      if (strcasecmp(modules[i].commands[j].name, cmdName) == 0) return true;
+    }
+  }
+
+  // Check if command name matches any module name (help navigation shortcut)
+  for (size_t i = 0; i < moduleCount; i++) {
+    if (strcasecmp(modules[i].name, cmdName) == 0) return true;
+  }
+
+  return false;
+}
+
 // Resolve the canonical registry command key from a full command line
 // Uses longest-prefix matching to find the command name
 String resolveRegistryCommandKey(const String& command) {
@@ -176,13 +199,7 @@ String executeCommandThroughRegistry(const String& argsInput) {
 
     // Handle help mode exit and command reprocessing
     if (gCLIState != CLI_NORMAL) {
-      // Check if this is a help-related command (don't exit help mode for these)
-      String cmdName = String(found->name);
-      bool isHelpCommand = cmdName.startsWith("help") || cmdName == "back" || cmdName == "exit" || cmdName == "clear" || cmdName == "system" || cmdName == "wifi" || cmdName == "automations" || cmdName == "espnow" || cmdName == "sensors" || cmdName == "settings";
-
-      // Note: "if" commands should exit help mode and execute normally
-
-      if (!isHelpCommand) {
+      if (!isHelpModeCommand(found->name)) {
         // User typed a regular command while in help mode
         // Exit help first, then execute the command
         String exitBanner = exitToNormalBanner();

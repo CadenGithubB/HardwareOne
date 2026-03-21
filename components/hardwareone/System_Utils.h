@@ -122,6 +122,10 @@ const CommandModule* getCommandModules(size_t& count);
 // Returns nullptr if not found
 const CommandEntry* findCommand(const String& cmdLine);
 
+// Check if a command should stay in help mode (CLI-module command or module-name navigation).
+// Returns true for help/back/exit/clear and any registered module name.
+bool isHelpModeCommand(const char* cmdName);
+
 // Check if a command requires admin privileges
 bool commandRequiresAdmin(const String& cmdLine);
 

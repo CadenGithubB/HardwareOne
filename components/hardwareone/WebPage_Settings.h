@@ -242,7 +242,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     
     <!-- Bond Mode Configuration -->
     <div style='font-weight:bold;margin:1.5rem 0 0.75rem 0;padding-bottom:0.5rem;border-bottom:1px solid var(--border);color:var(--panel-fg)'>Bond Mode (Two-Device Pairing)</div>
-    <div style='background:rgba(100,149,237,0.1);border-left:3px solid #6495ed;padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--panel-fg);font-size:0.85rem'>
+    <div style='background:rgba(100,149,237,0.1);padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--panel-fg);font-size:0.85rem'>
       Bond mode creates a dedicated master/worker pair for specialized applications.
     </div>
     <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
@@ -369,7 +369,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     html += '<div id="' + mod.name + '-net-pane" style="display:none;margin-top:0.75rem">';
     
     if (isDisconnected) {
-      html += '<div style="background:rgba(255,152,0,0.08);border-left:3px solid rgba(255,152,0,0.4);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);opacity:0.8;font-size:0.85rem">';
+      html += '<div style="background:rgba(255,152,0,0.08);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);opacity:0.8;font-size:0.85rem">';
       html += 'Service not available. Check WiFi connection and configuration.';
       html += '</div>';
     }
@@ -550,7 +550,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
       statusBadge = '<span style="background:#6b7280;color:#fff;padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Inactive</span>';
     } else if (isDisconnected) {
       statusBadge = '<span style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>';
-    } else {
+    } else if (mod.name !== 'sensorlog') {
       statusBadge = '<span style="background:rgba(102,126,234,0.15);color:#667eea;border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Connected</span>';
     }
     
@@ -567,11 +567,11 @@ window.sendSequential = function(cmds, onDone, onFail) {
     html += '<div id="' + mod.name + '-pane" style="display:none;margin-top:0.75rem">';
     
     if (isOrphan) {
-      html += '<div style="background:var(--crumb-bg);border-left:3px solid var(--border);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);font-size:0.85rem">';
+      html += '<div style="background:var(--crumb-bg);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);font-size:0.85rem">';
       html += 'Module not included in current build. Settings are preserved but read-only.';
       html += '</div>';
     } else if (isDisconnected) {
-      html += '<div style="background:rgba(255,152,0,0.08);border-left:3px solid rgba(255,152,0,0.4);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);opacity:0.8;font-size:0.85rem">';
+      html += '<div style="background:rgba(255,152,0,0.08);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);opacity:0.8;font-size:0.85rem">';
       html += 'Module not connected, settings can still be changed.';
       html += '</div>';
     }
@@ -609,7 +609,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
       
       if (espnowEntries.length > 0 && mod.name === 'camera') {
         html += '<div style="font-weight:bold;margin:1rem 0 0.5rem 0;color:var(--panel-fg);border-bottom:1px solid var(--border);padding-bottom:0.25rem">ESP-NOW Integration</div>';
-        html += '<div style="background:rgba(100,149,237,0.1);border-left:3px solid #6495ed;padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--panel-fg);font-size:0.85rem">';
+        html += '<div style="background:rgba(100,149,237,0.1);padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--panel-fg);font-size:0.85rem">';
         html += 'Send captured images to another device via ESP-NOW mesh network.';
         html += '</div>';
         html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
@@ -718,7 +718,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     orphanModules.forEach(function(mod) {
       if (i2cModules.indexOf(mod.name) !== -1) {
         var ents = mod.entries || [];
-        i2cHtml += '<div id="i2c-pane"><div style="background:var(--crumb-bg);border-left:3px solid var(--border);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);font-size:0.85rem">Module not included in current build. Settings are preserved but read-only.</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
+        i2cHtml += '<div id="i2c-pane"><div style="background:var(--crumb-bg);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);font-size:0.85rem">Module not included in current build. Settings are preserved but read-only.</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
         ents.forEach(function(e) { i2cHtml += renderInput(e, e.value, true); });
         i2cHtml += '</div></div>';
       } else {
@@ -807,10 +807,10 @@ window.sendSequential = function(cmds, onDone, onFail) {
   httpd_resp_send_chunk(req, R"SETPART6(
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Hardware Settings</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure onboard hardware behavior (LED, OLED, Gamepad)</div></div>
-    <button class='btn' id='btn-hardware-toggle' onclick="togglePane('hardware-pane','btn-hardware-toggle')">Expand</button>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>LED Settings</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure LED brightness and startup effects</div></div>
+    <button class='btn' id='btn-led-settings-toggle' onclick="togglePane('led-settings-pane','btn-led-settings-toggle')">Expand</button>
   </div>
-  <div id='hardware-pane' style='display:none;margin-top:0.75rem'>
+  <div id='led-settings-pane' style='display:none;margin-top:0.75rem'>
     <!-- LED Configuration Subsection -->
     <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem'>
       <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem'>
@@ -822,8 +822,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
           <label title="Global LED brightness (0-100%)">LED Brightness (%)<br><input type='number' id='ledBrightness' min='0' max='100' step='5' value='100' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:120px' title='LED brightness percentage'></label>
           <label><input type='checkbox' id='ledStartupEnabled' style='margin-right:0.5rem'>Enable Startup Effect</label>
         </div>
-        <div style='padding:1rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;margin-bottom:1rem'>
-          <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem'>Startup Effect Configuration</div>
+        <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem;margin-top:0.25rem'>Startup Effect Configuration</div>
           <div style='color:var(--panel-fg);font-size:0.9rem;margin-bottom:0.75rem'>LED effect to run when device finishes booting.</div>
           <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
             <label title="Effect type">Effect Type<br><select id='ledStartupEffect' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='none'>None</option><option value='rainbow'>Rainbow</option><option value='pulse'>Pulse</option><option value='fade'>Fade</option><option value='blink'>Blink</option><option value='strobe'>Strobe</option></select></label>
@@ -831,7 +830,6 @@ window.sendSequential = function(cmds, onDone, onFail) {
             <label title="Secondary color (for fade effect)">Secondary Color<br><select id='ledStartupColor2' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='red'>Red</option><option value='green'>Green</option><option value='blue'>Blue</option><option value='cyan'>Cyan</option><option value='magenta'>Magenta</option><option value='yellow'>Yellow</option><option value='white'>White</option><option value='orange'>Orange</option><option value='purple'>Purple</option></select></label>
             <label title="Effect duration in milliseconds">Duration (ms)<br><input type='number' id='ledStartupDuration' min='100' max='10000' step='100' value='1000' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Effect duration'></label>
           </div>
-        </div>
         <button class='btn' onclick="saveLEDSettings()">Save LED Settings</button>
       </div>
     </div>
@@ -845,25 +843,21 @@ window.sendSequential = function(cmds, onDone, onFail) {
         <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:1rem'>
           <label><input type='checkbox' id='oledEnabled' style='margin-right:0.5rem'>Enable OLED Display</label>
         </div>
-        <div style='padding:1rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;margin-bottom:1rem'>
-          <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem'>Display Modes & Timing</div>
+        <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem;margin-top:0.25rem'>Display Modes & Timing</div>
           <div style='color:var(--panel-fg);font-size:0.9rem;margin-bottom:0.75rem'>Configure what the OLED shows during boot and after.</div>
           <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
             <label title="Mode shown during boot">Boot Mode<br><select id='oledBootMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='logo'>Logo</option><option value='status'>Status</option><option value='sensors'>Sensors</option><option value='thermal'>Thermal</option><option value='network'>Network</option><option value='off'>Off</option></select></label>
             <label title="Mode after boot completes">Default Mode<br><select id='oledDefaultMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='logo'>Logo</option><option value='status'>Status</option><option value='sensors'>Sensors</option><option value='thermal'>Thermal</option><option value='network'>Network</option><option value='off'>Off</option></select></label>
             <label title="Duration to show boot mode (ms)">Boot Duration (ms)<br><input type='number' id='oledBootDuration' min='0' max='60000' step='100' value='2000' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Boot mode duration'></label>
-            <label title="Display refresh interval (ms)">Update Interval (ms)<br><input type='number' id='oledUpdateInterval' min='10' max='1000' step='10' value='200' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Refresh rate'></label>
+            <label title="Display refresh interval (ms)">Update Interval (ms)<br><input type='number' id='oledUpdateInterval' min='10' max='1000' step='10' value='125' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Refresh rate'></label>
           </div>
-        </div>
-        <div style='padding:1rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;margin-bottom:1rem'>
-          <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem'>Display Settings</div>
+        <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem;margin-top:0.75rem'>Display Settings</div>
           <div style='color:var(--panel-fg);font-size:0.9rem;margin-bottom:0.75rem'>Brightness and thermal visualization settings.</div>
           <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
             <label title="Display brightness (0-255)">Brightness<br><input type='number' id='oledBrightness' min='0' max='255' step='5' value='255' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:120px' title='Brightness level'></label>
             <label title="Thermal image scale factor">Thermal Scale<br><input type='number' id='oledThermalScale' min='0.5' max='5.0' step='0.1' value='2.5' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Scale factor'></label>
             <label title="Thermal color mode">Thermal Color<br><select id='oledThermalColorMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='3level'>3-Level</option><option value='grayscale'>Grayscale</option></select></label>
           </div>
-        </div>
         <button class='btn' onclick="saveOLEDSettings()">Save OLED Settings</button>
       </div>
     </div>
@@ -918,7 +912,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 <script>
 (function(){
-  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS'};
+  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps'};
   function sw(cmd,grp,on,isAll){return '<label class="dbg-sw"><input type="checkbox" class="dbg-cb" data-cmd="'+cmd+'"'+(grp?' data-group="'+grp+'"':'')+(isAll?' data-all="1"':'')+(on?' checked':'')+'><span class="sl"></span></label>';}
   Promise.all([
     fetch('/api/settings/schema',{credentials:'include'}).then(function(r){return r.json();}),
@@ -2249,17 +2243,17 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
       try {
         var cmds = [];
         var brightness = getInt('ledBrightness');
-        if (brightness !== null) cmds.push('hardwareledbrightness ' + brightness);
+        if (brightness !== null) cmds.push('ledbrightness ' + brightness);
         var enabled = getBool('ledStartupEnabled');
-        if (enabled !== null) cmds.push('hardwareledstartupenabled ' + enabled);
+        if (enabled !== null) cmds.push('ledstartupenabled ' + enabled);
         var effect = getStr('ledStartupEffect');
-        if (effect) cmds.push('hardwareledstartupeffect ' + effect);
+        if (effect) cmds.push('ledstartupeffect ' + effect);
         var color = getStr('ledStartupColor');
-        if (color) cmds.push('hardwareledstartupcolor ' + color);
+        if (color) cmds.push('ledstartupcolor ' + color);
         var color2 = getStr('ledStartupColor2');
-        if (color2) cmds.push('hardwareledstartupcolor2 ' + color2);
+        if (color2) cmds.push('ledstartupcolor2 ' + color2);
         var duration = getInt('ledStartupDuration');
-        if (duration !== null) cmds.push('hardwareledstartupduration ' + duration);
+        if (duration !== null) cmds.push('ledstartupduration ' + duration);
         
         if (cmds.length === 0) {
           alert('No LED settings to save.');
@@ -2621,41 +2615,58 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         allUsers.forEach(function(user) {
           var username = user.username || '';
           var isPending = user.isPending || false;
-          var isAdmin = user.isAdmin || false;
+          var isAdmin = (user.role === 'admin') || (user.isAdmin === true);
           var isBanned = user.banned || false;
           var userSessions = sessionsByUser[username] || [];
           var sessionCount = userSessions.length;
           var uid = 'u' + Math.random().toString(36).substr(2, 9);
-          html += '<div style="margin-bottom:0.25rem">';
-          // Row header — pending users get an amber left-border accent
-          var rowBorder = isPending ? 'border-left:3px solid #b8860b;' : '';
-          html += '<div onclick="toggleUserDropdown(\'' + uid + '\')" style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;cursor:pointer;' + rowBorder + '">';
+          // Compute last active from most recent session lastSeen
+          var lastActive = 0;
+          userSessions.forEach(function(s) { if (s.lastSeen && s.lastSeen > lastActive) lastActive = s.lastSeen; });
+          var createdAt = user.createdAt || '';
+          var rowBorder = isPending ? 'border-left:3px solid #b8860b;' : (isBanned ? 'border-left:3px solid #dc3545;' : '');
+          html += '<div style="margin-bottom:0.25rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;' + rowBorder + '">';
+          html += '<div onclick="toggleUserDropdown(\'' + uid + '\')" style="padding:0.5rem;cursor:pointer">';
           if (isPending) {
-            html += '<div><strong>' + username + '</strong> <span style="color:#b8860b;font-size:0.85rem">(Pending Approval)</span></div>';
+            html += '<div style="display:flex;align-items:center;justify-content:space-between"><div><strong>' + username + '</strong> <span style="color:#b8860b;font-size:0.85rem">(Pending Approval)</span></div><div style="font-size:0.8rem;color:var(--panel-fg)">&#9660;</div></div>';
+            if (user.timestamp) { html += '<div style="font-size:0.8rem;color:var(--muted,#888);margin-top:0.25rem">Requested: ' + (typeof user.timestamp === 'string' ? user.timestamp : formatMillisTimestamp(user.timestamp)) + '</div>'; }
           } else {
-            html += '<div><strong>' + username + '</strong> ' + (isAdmin ? '<span style="color:#667eea;font-size:0.85rem">(Admin)</span>' : '<span style="color:#667eea;font-size:0.85rem">(User)</span>') + ' <span style="color:var(--panel-fg);font-size:0.85rem">' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '') + '</span></div>';
+            // Line 1: username + role badge + banned badge + session count
+            var roleBadge = isAdmin ? '<span style="color:#667eea;font-size:0.8rem;font-weight:600;background:rgba(102,126,234,0.15);padding:1px 6px;border-radius:3px;margin-left:6px">Admin</span>' : '<span style="color:#a0aec0;font-size:0.8rem;font-weight:600;background:rgba(160,174,192,0.1);padding:1px 6px;border-radius:3px;margin-left:6px">User</span>';
+            var bannedBadge = isBanned ? ' <span style="color:#dc3545;font-size:0.8rem;font-weight:600;background:rgba(220,53,69,0.15);padding:1px 6px;border-radius:3px">Banned</span>' : '';
+            var sessionBadge = '<span style="color:var(--panel-fg);font-size:0.8rem;margin-left:6px">' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '') + '</span>';
+            html += '<div style="display:flex;align-items:center;justify-content:space-between"><div><strong>' + username + '</strong>' + roleBadge + bannedBadge + sessionBadge + '</div><div style="font-size:0.8rem;color:var(--panel-fg)">&#9660;</div></div>';
+            // Line 2: metadata summary — rendered inside the dropdown, not here
           }
-          html += '<div style="font-size:0.8rem;color:var(--panel-fg)">▼</div></div>';
-          html += '<div id="dropdown-' + uid + '" style="display:none;margin-top:0.25rem;padding:0.5rem;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px">';
+          html += '</div>';
+          html += '<div id="dropdown-' + uid + '" style="display:none;padding:0.5rem">';
+          if (!isPending) {
+            var meta = [];
+            if (createdAt) meta.push('<strong>Created:</strong> ' + createdAt);
+            if (lastActive) meta.push('<strong>Last Active:</strong> ' + formatMillisTimestamp(lastActive));
+            if (user.lastSeenSec) meta.push('<strong>Last Seen:</strong> ' + formatMillisTimestamp(user.lastSeenSec * 1000));
+            if (meta.length) html += '<div style="font-size:0.8rem;color:var(--muted,#888);margin-bottom:0.5rem">' + meta.join(' &middot; ') + '</div>';
+          }
           if (!isPending && sessionCount > 0) {
-            html += '<div style="margin-bottom:0.5rem;font-size:0.9rem;color:var(--panel-fg)"><strong>Active Sessions:</strong></div>';
+            html += '<div style="margin-bottom:0.4rem;font-size:0.9rem;color:var(--panel-fg)"><strong>Active Sessions:</strong></div>';
+            html += '<div style="font-size:0.85rem;margin-bottom:0.5rem">';
             userSessions.forEach(function(session) {
               var transport = session.transport || '';
-              html += '<div style="background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;padding:0.5rem;margin-bottom:0.25rem;font-size:0.85rem">';
-              if (transport) {
-                var label = transport === 'oled' ? 'OLED Display' : transport === 'serial' ? 'Serial' : transport === 'bluetooth' ? 'Bluetooth' : transport;
-                html += '<div><strong>Transport:</strong> ' + label + '</div>';
-              } else {
+              var label = transport === 'oled' ? 'OLED Display' : transport === 'serial' ? 'Serial' : transport === 'bluetooth' ? 'Bluetooth' : transport ? transport : 'Web';
+              var detail = [];
+              if (!transport) {
                 var ip = cleanIPAddress(session.ip || '');
                 var created = session.createdAt ? formatMillisTimestamp(session.createdAt) : '';
-                var lastSeen = session.lastSeen ? formatMillisTimestamp(session.lastSeen) : '';
                 var current = session.current || false;
-                html += '<div><strong>IP:</strong> ' + ip + ' ' + (current ? '<span style="color:#28a745;font-weight:bold">(Current)</span>' : '') + '</div>';
-                if (created) html += '<div><strong>Created:</strong> ' + created + '</div>';
-                if (lastSeen) html += '<div><strong>Last Seen:</strong> ' + lastSeen + '</div>';
+                if (ip) detail.push('IP: ' + ip + (current ? ' <span style="color:#28a745;font-weight:bold">(Current)</span>' : ''));
+                if (created) detail.push('Since: ' + created);
               }
+              html += '<div style="padding:0.2rem 0;border-bottom:1px solid var(--border)">';
+              html += '<strong>' + label + '</strong>';
+              if (detail.length) html += ' <span style="color:var(--muted,#888)">&middot; ' + detail.join(' &middot; ') + '</span>';
               html += '</div>';
             });
+            html += '</div>';
           }
           html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap">';
           if (isPending) {

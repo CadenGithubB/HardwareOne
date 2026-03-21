@@ -15,10 +15,7 @@
 
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
-
-// Forward declarations
-void broadcastOutput(const char* s);
-void broadcastOutput(const String& s);
+// broadcastOutput provided by System_Debug.h
 
 // ============================================================================
 // I2C Error Classification (merged from System_I2C_Device.h)

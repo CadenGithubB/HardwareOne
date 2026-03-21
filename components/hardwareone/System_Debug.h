@@ -72,6 +72,12 @@
 #define DEBUG_APDS_FRAME      0x800000000000ULL // Bit 47 - APDS frame timing, connection
 #define DEBUG_ESPNOW_METADATA 0x1000000000000ULL // Bit 48 - ESP-NOW metadata exchange (REQ/RESP/PUSH/store)
 
+// Bits 49-52: Maps debug flags
+#define DEBUG_MAPS              0x2000000000000ULL // Bit 49 - Maps (parent flag)
+#define DEBUG_MAPS_LOADING      0x4000000000000ULL // Bit 50 - Map file loading, tile directory parsing
+#define DEBUG_MAPS_RENDERING    0x8000000000000ULL // Bit 51 - Map render pipeline, feature drawing, viewport
+#define DEBUG_MAPS_PERF         0x10000000000000ULL // Bit 52 - Map performance timing (render ms, tile I/O, cache, FPS)
+
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
 // This structure tracks which specific sub-categories are enabled
@@ -301,6 +307,10 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define DEBUG_IMU_DATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_IMU_DATA, fmt, ##__VA_ARGS__)
 #define DEBUG_APDS_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_APDS_FRAME, fmt, ##__VA_ARGS__)
 #define DEBUG_ESPNOW_METADATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ESPNOW_METADATA, fmt, ##__VA_ARGS__)
+#define DEBUG_MAPSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MAPS, fmt, ##__VA_ARGS__)
+#define DEBUG_MAPS_LOADINGF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MAPS_LOADING, fmt, ##__VA_ARGS__)
+#define DEBUG_MAPS_RENDERINGF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MAPS_RENDERING, fmt, ##__VA_ARGS__)
+#define DEBUG_MAPS_PERFF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MAPS_PERF, fmt, ##__VA_ARGS__)
 #define DEBUG_WIFIF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_WIFI, fmt, ##__VA_ARGS__)
 #define DEBUG_STORAGEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_STORAGE, fmt, ##__VA_ARGS__)
 #define DEBUG_PERFORMANCEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_PERFORMANCE, fmt, ##__VA_ARGS__)
@@ -534,6 +544,10 @@ const char* cmd_debugcmdflowqueue(const String& argsInput);
 const char* cmd_debugcmdflowcontext(const String& argsInput);
 const char* cmd_commandmodulesummary(const String& argsInput);
 const char* cmd_settingsmodulesummary(const String& argsInput);
+const char* cmd_debugmaps(const String& argsInput);
+const char* cmd_debugmapsloading(const String& argsInput);
+const char* cmd_debugmapsrendering(const String& argsInput);
+const char* cmd_debugmapsperf(const String& argsInput);
 
 // System logging commands
 const char* cmd_log(const String& argsInput);

@@ -116,7 +116,7 @@
 
 // Maps: Offline maps and waypoints web page
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_MAPS             0
+#define ENABLE_MAPS             1
 
 // Bond Mode: Two-device bonded pair via ESP-NOW (master/worker)
 //   0 = Disabled, 1 = Enabled (requires ENABLE_ESPNOW=1)
