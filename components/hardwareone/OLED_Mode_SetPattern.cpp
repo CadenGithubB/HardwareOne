@@ -122,7 +122,9 @@ static void displaySetPatternMode() {
         oledDisplay->println("Set a joystick");
         oledDisplay->println("pattern as your");
         oledDisplay->println("gamepad login.");
-        
+        oledDisplay->println();
+        oledDisplay->println("A: OK");
+
         // Note: Footer is drawn by global render loop
       }
       break;

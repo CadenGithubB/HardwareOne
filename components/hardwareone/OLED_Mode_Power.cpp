@@ -207,4 +207,7 @@ static const OLEDModeEntry sPowerModes[] = {
 
 REGISTER_OLED_MODE_MODULE(sPowerModes, sizeof(sPowerModes) / sizeof(sPowerModes[0]), "Power");
 
+// Force linker to include this file - called from OLED_Utils.cpp
+void oledPowerModeInit() {}
+
 #endif // ENABLE_OLED_DISPLAY

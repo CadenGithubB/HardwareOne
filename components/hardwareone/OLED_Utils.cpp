@@ -2314,6 +2314,10 @@ void drawOLEDFooter() {
         hints = cliHints;
       }
       break;
+
+    case OLED_CLI_INPUT:
+      hints = "A:Send B:Back";
+      break;
       
     case OLED_LOGIN:
       {
@@ -2579,6 +2583,16 @@ void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack) {
     pushOLEDMode(currentOLEDMode);
   }
 
+  // Reset per-mode transient state on entry.
+  if (newMode == OLED_CLI_VIEWER && newMode != currentOLEDMode) {
+    extern void resetCLIViewerState();
+    resetCLIViewerState();
+  }
+  if (newMode == OLED_CLI_INPUT && newMode != currentOLEDMode) {
+    extern void resetCLIInputState();
+    resetCLIInputState();
+  }
+
   currentOLEDMode = newMode;
 }
 
@@ -2709,6 +2723,8 @@ extern void oledAuthModeInit();
 extern void oledLoggingModeInit();
 extern void oledSetPatternModeInit();
 extern void oledChangePasswordModeInit();
+extern void oledPowerModeInit();
+extern void oledCLIInputModeInit();
 
 // Print summary of all registered OLED modes (call from setup() after static init)
 void printRegisteredOLEDModes() {
@@ -2718,6 +2734,8 @@ void printRegisteredOLEDModes() {
   oledLoggingModeInit();
   oledSetPatternModeInit();
   oledChangePasswordModeInit();
+  oledPowerModeInit();
+  oledCLIInputModeInit();
   
   // Register built-in quick settings mode first
   static bool builtInRegistered = false;
@@ -3702,6 +3720,7 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_GPS_MAP: return "Map";
     case OLED_SETTINGS: return "Settings";
     case OLED_CLI_VIEWER: return "CLI";
+    case OLED_CLI_INPUT:  return "CLI Input";
     case OLED_LOGGING: return "Logging";
     case OLED_REMOTE_SETTINGS: return "Remote Set";
     default: return "Unknown";
@@ -3793,6 +3812,7 @@ const char* slugFromMode(OLEDMode mode) {
     case OLED_SPEECH:          return "speech";
     case OLED_MICROPHONE:      return "mic";
     case OLED_CLI_VIEWER:      return "cli";
+    case OLED_CLI_INPUT:       return "cliinput";
     case OLED_LOGGING:         return "logging";
     case OLED_SENSOR_MENU:     return "sensormenu";
     case OLED_UNAVAILABLE:     return "unavail";
@@ -4040,6 +4060,7 @@ const OLEDMenuItem oledMenuCategory0[] = {
   { "Memory",     "memory",            OLED_MEMORY_STATS },
   { "Notifs",     "notify_bell",       OLED_NOTIFICATIONS },
   { "CLI Output", "terminal",          OLED_CLI_VIEWER },
+  { "CLI Input",  "terminal",          OLED_CLI_INPUT },
   { "Logging",    "file_text",         OLED_LOGGING },
 };
 const int oledMenuCategory0Count = sizeof(oledMenuCategory0) / sizeof(oledMenuCategory0[0]);
@@ -4049,6 +4070,7 @@ const int oledMenuCategory0Count = sizeof(oledMenuCategory0) / sizeof(oledMenuCa
 const OLEDMenuItem oledMenuCategory1[] = {
   { "Settings",   "settings",          OLED_SETTINGS },
   { "Login",      "user",              OLED_LOGIN },
+  { "Logout",     "user",              OLED_LOGOUT },
   { "Change PW",  "password",          OLED_CHANGE_PASSWORD },
 #if ENABLE_GAMEPAD_SENSOR
   { "Gamepad PW", "gamepad",           OLED_SET_PATTERN },
@@ -4160,7 +4182,7 @@ extern const int oledSensorMenuItemCount = sizeof(oledSensorMenuItems) / sizeof(
 // Dynamic Menu System (combines local + remote items based on DataSource)
 // =============================================================================
 
-OLEDMenuItemEx gDynamicMenuItems[MAX_DYNAMIC_MENU_ITEMS];
+EXT_RAM_BSS_ATTR OLEDMenuItemEx gDynamicMenuItems[MAX_DYNAMIC_MENU_ITEMS];
 int gDynamicMenuItemCount = 0;
 static bool gDynamicMenuBuilt = false;
 static DataSource gLastBuildSource = DataSource::LOCAL;
@@ -4168,7 +4190,7 @@ static DataSource gLastBuildSource = DataSource::LOCAL;
 // Submenu state for grouped remote items
 static bool gInRemoteSubmenu = false;
 static char gRemoteSubmenuId[16] = "";
-static OLEDMenuItemEx gRemoteSubmenuItems[MAX_DYNAMIC_MENU_ITEMS];
+EXT_RAM_BSS_ATTR static OLEDMenuItemEx gRemoteSubmenuItems[MAX_DYNAMIC_MENU_ITEMS];
 static int gRemoteSubmenuItemCount = 0;
 static int gRemoteSubmenuSelection = 0;
 

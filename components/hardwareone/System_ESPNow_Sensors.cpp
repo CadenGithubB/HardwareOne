@@ -43,7 +43,7 @@ extern String macToHexString(const uint8_t* mac);
 // Remote Sensor Data Cache
 // ==========================
 
-RemoteSensorData gRemoteSensorCache[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
+EXT_RAM_BSS_ATTR RemoteSensorData gRemoteSensorCache[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
 
 // Master flag to enable/disable all sensor ESP-NOW communication (status + data)
 // Must be explicitly enabled before any sensor broadcasts will be sent
@@ -60,7 +60,7 @@ struct LocalSensorCache {
   bool forceSend;      // True to force immediate send (event-driven)
   unsigned long lastUpdate;  // When cache was last written
 };
-static LocalSensorCache gLocalSensorCache[REMOTE_SENSOR_MAX];
+EXT_RAM_BSS_ATTR static LocalSensorCache gLocalSensorCache[REMOTE_SENSOR_MAX];
 
 // Broadcaster task state
 static TaskHandle_t gSensorBroadcasterTask = nullptr;

@@ -129,6 +129,7 @@ static int timezoneSelection = 1;  // EDT default (index 1 — US Eastern Daylig
 static int logLevelSelection = 3;  // DEBUG default (all logging enabled)
 static int ntpSelection = 0;       // pool.ntp.org default
 static int ledEffectSelection = 1; // rainbow default
+static char wizardDeviceName[21] = "";  // Device name entry (used when ESPNOW not compiled)
 
 // Feature items per page
 static WizardFeatureItem featuresPage[16];
@@ -194,23 +195,25 @@ static bool systemPageHasLED() {
   return ledFeature && isFeatureCompiled(ledFeature);
 }
 
+static bool systemPageHasDeviceName() {
+#if ENABLE_ESPNOW
+  return false;  // Device name is set in the ESP-NOW configure panel
+#else
+  return true;   // No ESP-NOW page — collect device name here
+#endif
+}
+
 size_t getWizardSystemPageCount() {
   size_t count = 2; // timezone + log level always present
   if (systemPageHasNTP()) count++;
   if (systemPageHasLED()) count++;
+  if (systemPageHasDeviceName()) count++;
   return count;
 }
 
 // Map system page selection index to logical item
-// 0=log level, 1=timezone, 2=NTP (if visible), 3=LED (if visible)
-enum SystemPageItem {
-  SYS_ITEM_LOGLEVEL = 0,
-  SYS_ITEM_TIMEZONE,
-  SYS_ITEM_NTP,
-  SYS_ITEM_LED
-};
-
-static SystemPageItem getSystemItemAt(int index) {
+// 0=log level, 1=timezone, 2=NTP (if visible), 3=LED (if visible), 4=DeviceName (if visible)
+SystemPageItem getSystemItemAt(int index) {
   if (index == 0) return SYS_ITEM_LOGLEVEL;
   if (index == 1) return SYS_ITEM_TIMEZONE;
   int nextIdx = 2;
@@ -220,9 +223,16 @@ static SystemPageItem getSystemItemAt(int index) {
   }
   if (systemPageHasLED()) {
     if (index == nextIdx) return SYS_ITEM_LED;
+    nextIdx++;
+  }
+  if (systemPageHasDeviceName()) {
+    if (index == nextIdx) return SYS_ITEM_DEVICE_NAME;
   }
   return SYS_ITEM_TIMEZONE; // fallback
 }
+
+const char* getWizardDeviceName() { return wizardDeviceName; }
+char* getWizardDeviceNameBuf() { return wizardDeviceName; }
 
 // ============================================================================
 // Heap Bar Helper
@@ -283,6 +293,13 @@ void initSetupWizard() {
   featuresPageCount = 0;
   sensorsPageCount = 0;
   networkPageCount = 0;
+
+  // Pre-populate device name from current settings
+  String curName = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName
+                 : gSettings.bleDeviceName.length() > 0    ? gSettings.bleDeviceName
+                 : "HardwareOne";
+  strncpy(wizardDeviceName, curName.c_str(), sizeof(wizardDeviceName) - 1);
+  wizardDeviceName[sizeof(wizardDeviceName) - 1] = '\0';
   
    sWizardBaselineKB = 0;
    sWizardBaselineCalibrated = false;
@@ -597,6 +614,8 @@ bool wizardCycleOption() {
       case SYS_ITEM_LED:
         ledEffectSelection = (ledEffectSelection + 1) % ledEffectCount;
         return true;
+      case SYS_ITEM_DEVICE_NAME:
+        return false;  // Text input — handled by caller, not cycled
     }
   }
   return false;
@@ -623,6 +642,10 @@ bool wizardNextPage(SetupWizardResult& result) {
     }
     if (systemPageHasLED()) {
       result.ledStartupEffect = ledEffects[ledEffectSelection];
+    }
+    if (systemPageHasDeviceName() && wizardDeviceName[0] != '\0') {
+      gSettings.bleDeviceName = wizardDeviceName;
+      gSettings.espnowDeviceName = wizardDeviceName;
     }
   }
 
@@ -669,6 +692,10 @@ void wizardFinalize(SetupWizardResult& result) {
   if (systemPageHasLED()) {
     result.ledStartupEffect = ledEffects[ledEffectSelection];
     gSettings.ledStartupEffect = result.ledStartupEffect;
+  }
+  if (systemPageHasDeviceName() && wizardDeviceName[0] != '\0') {
+    gSettings.bleDeviceName = wizardDeviceName;
+    gSettings.espnowDeviceName = wizardDeviceName;
   }
 }
 
@@ -745,9 +772,12 @@ static void printSerialSystemPage() {
   if (systemPageHasLED()) {
     Serial.printf(" %d. LED Effect: %s\n", itemNum++, ledEffects[ledEffectSelection]);
   }
+  if (systemPageHasDeviceName()) {
+    Serial.printf(" %d. Device Name: %s\n", itemNum++, wizardDeviceName);
+  }
 
   Serial.println("----------------------------------------");
-  Serial.println("Enter number to cycle, 'n' for next, 'b' for back");
+  Serial.println("Enter number to cycle/edit, 'n' for next, 'b' for back");
   Serial.print("> ");
 }
 
@@ -829,6 +859,10 @@ static void printSerialPageStatus() {
         Serial.printf(" %s%d. LED Effect: %s\n", sel == idx ? ">" : " ", idx + 1, ledEffects[ledEffectSelection]);
         idx++;
       }
+      if (systemPageHasDeviceName()) {
+        Serial.printf(" %s%d. Device Name: %s\n", sel == idx ? ">" : " ", idx + 1, wizardDeviceName);
+        idx++;
+      }
       break;
     }
     case WIZARD_PAGE_ESPNOW: {
@@ -882,6 +916,17 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   Serial.println("All fields optional. Press Enter to skip, 'b' to go back.");
   Serial.println("----------------------------------------");
 
+  String currentName = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : "HardwareOne";
+  Serial.printf("Device Name (for Bluetooth + ESP-NOW) [%s]: ", currentName.c_str());
+  String deviceName = waitForSerialInputBlocking();
+  deviceName.trim();
+  if (deviceName.equalsIgnoreCase("b") || deviceName.equalsIgnoreCase("back")) {
+    wizardPrevPage();
+    return;
+  }
+  if (deviceName.length() == 0) deviceName = currentName;
+  result.espnowFriendlyName = deviceName;
+
   Serial.print("Room (e.g. 'Living Room'): ");
   String room = waitForSerialInputBlocking();
   room.trim();
@@ -900,9 +945,6 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   }
   result.espnowZone = zone;
 
-  // Friendly name mirrors the device name set at the start of setup
-  result.espnowFriendlyName = gSettings.espnowDeviceName;
-
   Serial.print("The device will be — (m)obile or (s)tationary [m]: ");
   String stat = waitForSerialInputBlocking();
   stat.trim();
@@ -913,9 +955,11 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   result.espnowStationary = (stat.equalsIgnoreCase("s") || stat.equalsIgnoreCase("stationary"));
 
   // Apply to settings
+  gSettings.bleDeviceName = deviceName;
+  gSettings.espnowDeviceName = deviceName;
+  if (result.espnowFriendlyName.length() > 0) gSettings.espnowFriendlyName = result.espnowFriendlyName;
   if (result.espnowRoom.length() > 0) gSettings.espnowRoom = result.espnowRoom;
   if (result.espnowZone.length() > 0) gSettings.espnowZone = result.espnowZone;
-  if (result.espnowFriendlyName.length() > 0) gSettings.espnowFriendlyName = result.espnowFriendlyName;
   gSettings.espnowStationary = result.espnowStationary;
 
   Serial.println("ESP-NOW identity configured.");
@@ -1252,7 +1296,18 @@ SetupWizardResult runSetupWizard() {
         if (num > 0) {
           setWizardCurrentSelection(num - 1);
           if (currentPage == WIZARD_PAGE_SYSTEM) {
-            wizardCycleOption();
+            if (getSystemItemAt(num - 1) == SYS_ITEM_DEVICE_NAME) {
+              // Text input for device name — can't cycle
+              Serial.printf("Device Name [%s]: ", wizardDeviceName);
+              String newName = waitForSerialInputBlocking();
+              newName.trim();
+              if (newName.length() > 0) {
+                strncpy(wizardDeviceName, newName.c_str(), sizeof(wizardDeviceName) - 1);
+                wizardDeviceName[sizeof(wizardDeviceName) - 1] = '\0';
+              }
+            } else {
+              wizardCycleOption();
+            }
           } else {
             wizardToggleCurrentItem();
           }

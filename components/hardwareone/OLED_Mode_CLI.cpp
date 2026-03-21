@@ -41,6 +41,15 @@ int getCLIViewerSelectedIndex() {
   return (idx >= 0) ? idx + 1 : 0;  // 1-indexed for user display
 }
 
+// Reset transient viewer state on mode entry (clears stuck detail view, resets scroll)
+void resetCLIViewerState() {
+  DEBUG_CLIF("[CLI_VIEWER] resetState: detail=%d scroll=%d", cliShowingDetail, cliScrollOffset);
+  cliShowingDetail = false;
+  cliDetailLockedTimestamp = 0;
+  cliScrollOffset = 0;
+  // Keep cliSelectedTimestamp so we return to where the user was
+}
+
 // CLI display function
 static void displayCLIViewer() {
   if (!oledDisplay) {
@@ -206,12 +215,21 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
     currentIdx = totalLines - 1;
     cliSelectedTimestamp = gOLEDConsole.getTimestamp(currentIdx);
   }
-  
+
+  if (gNavEvents.up || gNavEvents.down || newlyPressed) {
+    DEBUG_CLIF("[CLI_VIEWER] input: detail=%d idx=%d/%d scroll=%d up=%d dn=%d btn=0x%lx",
+      cliShowingDetail, currentIdx, totalLines, cliScrollOffset,
+      gNavEvents.up, gNavEvents.down, (unsigned long)newlyPressed);
+  }
+
   // A button = toggle detail
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     if (!cliShowingDetail) {
       // Entering detail view - lock the current message by its timestamp
       cliDetailLockedTimestamp = cliSelectedTimestamp;
+      DEBUG_CLIF("[CLI_VIEWER] A: entering detail view idx=%d ts=%lu", currentIdx, cliSelectedTimestamp);
+    } else {
+      DEBUG_CLIF("[CLI_VIEWER] A: exiting detail view");
     }
     cliShowingDetail = !cliShowingDetail;
     if (!cliShowingDetail) {
@@ -220,16 +238,17 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
     }
     handled = true;
   }
-  
+
   // B button closes detail
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     if (cliShowingDetail) {
+      DEBUG_CLIF("[CLI_VIEWER] B: closing detail view");
       cliShowingDetail = false;
       cliDetailLockedTimestamp = 0;
       handled = true;
     }
   }
-  
+
   // In detail view, allow joystick navigation between messages using gNavEvents
   if (cliShowingDetail) {
     int lockedIdx = findIndexByTimestamp(cliDetailLockedTimestamp);
@@ -237,29 +256,39 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
       lockedIdx = currentIdx;
       cliDetailLockedTimestamp = gOLEDConsole.getTimestamp(lockedIdx);
     }
-    
+
     if (gNavEvents.up && lockedIdx > 0) {
       cliDetailLockedTimestamp = gOLEDConsole.getTimestamp(lockedIdx - 1);
+      DEBUG_CLIF("[CLI_VIEWER] detail up: %d -> %d", lockedIdx, lockedIdx - 1);
       handled = true;
     } else if (gNavEvents.down && lockedIdx < totalLines - 1) {
       cliDetailLockedTimestamp = gOLEDConsole.getTimestamp(lockedIdx + 1);
+      DEBUG_CLIF("[CLI_VIEWER] detail down: %d -> %d", lockedIdx, lockedIdx + 1);
       handled = true;
+    } else if (gNavEvents.up || gNavEvents.down) {
+      DEBUG_CLIF("[CLI_VIEWER] detail nav blocked: lockedIdx=%d total=%d", lockedIdx, totalLines);
     }
     xSemaphoreGive(gOLEDConsole.mutex);
     return handled;
   }
-  
+
   // Navigation using centralized gNavEvents (already has debounce/auto-repeat)
   if (gNavEvents.up) {
     // Move to older message (scroll up in history)
     if (currentIdx > 0) {
+      DEBUG_CLIF("[CLI_VIEWER] up: idx %d -> %d (total=%d scroll=%d)", currentIdx, currentIdx - 1, totalLines, cliScrollOffset);
       cliSelectedTimestamp = gOLEDConsole.getTimestamp(currentIdx - 1);
+    } else {
+      DEBUG_CLIF("[CLI_VIEWER] up: already at top (idx=%d total=%d scroll=%d)", currentIdx, totalLines, cliScrollOffset);
     }
     handled = true;
   } else if (gNavEvents.down) {
     // Move to newer message (scroll down in history)
     if (currentIdx < totalLines - 1) {
+      DEBUG_CLIF("[CLI_VIEWER] down: idx %d -> %d (total=%d scroll=%d)", currentIdx, currentIdx + 1, totalLines, cliScrollOffset);
       cliSelectedTimestamp = gOLEDConsole.getTimestamp(currentIdx + 1);
+    } else {
+      DEBUG_CLIF("[CLI_VIEWER] down: already at bottom (idx=%d total=%d scroll=%d)", currentIdx, totalLines, cliScrollOffset);
     }
     handled = true;
   }

@@ -101,6 +101,7 @@ enum OLEDMode {
   OLED_WEB_STATS,      // Web server statistics (connections, failed logins, etc)
   OLED_SETTINGS,       // Settings editor with visual slider/dial controls
   OLED_CLI_VIEWER,     // CLI output viewer (read-only console)
+  OLED_CLI_INPUT,      // CLI command input (keyboard + last output lines)
   OLED_LOGGING,        // Logging control and viewer (sensor + system logs)
   OLED_LOGIN,          // Login screen for OLED authentication
   OLED_LOGOUT,         // Logout confirmation screen

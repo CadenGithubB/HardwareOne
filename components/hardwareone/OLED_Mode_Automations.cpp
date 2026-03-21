@@ -43,7 +43,7 @@ struct AutomationRenderData {
   unsigned long lastRefresh;
 };
 
-static AutomationRenderData autoRenderData = {};
+EXT_RAM_BSS_ATTR static AutomationRenderData autoRenderData;
 static unsigned long autoLastInput = 0;
 static const unsigned long AUTO_DEBOUNCE = 200;
 static const unsigned long AUTO_REFRESH_INTERVAL = 5000;

@@ -347,6 +347,17 @@ void renderSystemPage() {
       }
     }
 
+    // Device Name (conditional — only when ESP-NOW not compiled)
+#ifndef ENABLE_ESPNOW
+    {
+      if (idx == logicalIdx) {
+        snprintf(line, sizeof(line), "Name:%.15s", getWizardDeviceName());
+        oledDisplay->print(line);
+      }
+      logicalIdx++;
+    }
+#endif
+
     oledDisplay->setTextColor(SSD1306_WHITE);
   }
 
@@ -510,8 +521,18 @@ bool handleNetworkInput(uint32_t buttons, JoystickNav& nav) {
 
 bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result) {
   if (buttons & INPUT_MASK(INPUT_BUTTON_A)) {
-    // Cycle through options
-    wizardCycleOption();
+    if (getSystemItemAt(getWizardCurrentSelection()) == SYS_ITEM_DEVICE_NAME) {
+      bool cancelled = false;
+      String newName = getOLEDTextInput("Device Name:", false, getWizardDeviceName(), 20, &cancelled);
+      if (!cancelled && newName.length() > 0) {
+        char* buf = getWizardDeviceNameBuf();
+        strncpy(buf, newName.c_str(), 20);
+        buf[20] = '\0';
+      }
+    } else {
+      // Cycle through options
+      wizardCycleOption();
+    }
     return true;
   }
 
@@ -640,6 +661,15 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
 
   bool cancelled = false;
 
+  // Device Name (used for Bluetooth + ESP-NOW identity)
+  String currentName = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : "HardwareOne";
+  String deviceName = getOLEDTextInput("Device Name:", false, currentName.c_str(), 20, &cancelled);
+  if (cancelled) { wizardPrevPage(); return; }
+  if (deviceName.length() == 0) deviceName = currentName;
+  result.espnowFriendlyName = deviceName;
+  gSettings.bleDeviceName = deviceName;
+  gSettings.espnowDeviceName = deviceName;
+
   // Room
   String room = getOLEDTextInput("Room:", false, gSettings.espnowRoom.c_str(), 20, &cancelled);
   if (cancelled) { wizardPrevPage(); return; }
@@ -649,9 +679,6 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
   String zone = getOLEDTextInput("Zone:", false, gSettings.espnowZone.c_str(), 20, &cancelled);
   if (cancelled) { wizardPrevPage(); return; }
   result.espnowZone = zone;
-
-  // Friendly name mirrors the device name set at the start of setup
-  result.espnowFriendlyName = gSettings.espnowDeviceName;
 
   // Stationary - simple toggle selection
   {

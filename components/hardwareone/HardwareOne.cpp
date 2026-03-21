@@ -184,7 +184,7 @@ struct AllocEntry {
   bool isActive;
 };
 extern const int MAX_ALLOC_ENTRIES = 64;
-AllocEntry gAllocTracker[MAX_ALLOC_ENTRIES];
+EXT_RAM_BSS_ATTR AllocEntry gAllocTracker[MAX_ALLOC_ENTRIES];
 int gAllocTrackerCount = 0;
 bool gAllocTrackerEnabled = false;
 

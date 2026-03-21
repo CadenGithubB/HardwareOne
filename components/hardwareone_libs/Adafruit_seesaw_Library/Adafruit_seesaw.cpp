@@ -262,6 +262,22 @@ uint32_t Adafruit_seesaw::digitalReadBulk(uint32_t pins) {
 }
 
 /*!
+ * @brief Read and clear the GPIO interrupt flag register (INTFLAG).
+ *        Returns a bitmask of pins that had any edge event since the last read.
+ *        The ATSAMD09 clears flags on read (read-to-clear), so calling this
+ *        consumes the pending edges. Mask the result to only the pins you care about.
+ * @param pins bitmask of pins to filter
+ * @return bitmask of pins that had an edge event
+ */
+uint32_t Adafruit_seesaw::digitalReadBulkIntFlag(uint32_t pins) {
+  uint8_t buf[4];
+  this->read(SEESAW_GPIO_BASE, SEESAW_GPIO_INTFLAG, buf, 4);
+  uint32_t ret = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+                 ((uint32_t)buf[2] << 8) | (uint32_t)buf[3];
+  return ret & pins;
+}
+
+/*!
  **************************************************************************
  *  @brief      read the status of multiple pins on port B.
  *

@@ -505,30 +505,9 @@ void firstTimeSetupIfNeeded() {
   }
 
   // ============================================================================
-  // Device Name + Theme (both Basic and Advanced modes)
+  // Theme (both Basic and Advanced modes)
+  // Device name is set inside the ESP-NOW configure panel (wizard page).
   // ============================================================================
-
-  // Device name customization
-  broadcastOutput("");
-  broadcastOutput("========================================");
-  broadcastOutput("       DEVICE NAME");
-  broadcastOutput("========================================");
-  broadcastOutput("Used for Bluetooth and ESP-NOW identity.");
-  broadcastOutput("Press Enter to keep default [HardwareOne]");
-  broadcastOutput("----------------------------------------");
-  String deviceName = "";
-#if ENABLE_OLED_DISPLAY
-  deviceName = getOLEDTextInput("Device Name:", false, "HardwareOne", 20);
-#else
-  deviceName = waitForSerialInputBlocking();
-#endif
-  deviceName.trim();
-  if (deviceName.length() == 0) {
-    deviceName = "HardwareOne";
-  }
-  gSettings.bleDeviceName = deviceName;
-  gSettings.espnowDeviceName = deviceName;
-  broadcastOutput("Device name set to: " + deviceName);
 
 #if ENABLE_HTTP_SERVER
   // Theme preference (for web UI only — skipped if web server is disabled)

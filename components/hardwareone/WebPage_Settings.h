@@ -883,7 +883,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
     <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Debug Controls</div>
-    <div style='color:var(--panel-fg);font-size:0.85rem;opacity:0.55'>Click a category name to toggle all flags in that group</div></div>
+    <div style='color:var(--panel-fg);font-size:0.85rem'>Click a category name to toggle all flags in that group</div></div>
     <button class='btn' id='btn-debug-toggle' onclick="togglePane('debug-pane','btn-debug-toggle')">Expand</button>
   </div>
   <div id='debug-pane' style='display:none;margin-top:0.75rem'>

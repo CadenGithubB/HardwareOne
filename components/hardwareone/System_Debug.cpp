@@ -82,7 +82,7 @@ extern volatile bool gInHelpRender;
 // Suppressed tail ring buffer
 static const size_t kHelpTailLines = 32;
 static const size_t kHelpTailCols = 120;
-static char gHelpTail[kHelpTailLines][kHelpTailCols];
+EXT_RAM_BSS_ATTR static char gHelpTail[kHelpTailLines][kHelpTailCols];
 static size_t gHelpTailCount = 0;
 static size_t gHelpTailIndex = 0;
 

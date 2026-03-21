@@ -1861,7 +1861,7 @@ static void sanitizeWaypointTextCopy(char* dst, size_t dstSize, const char* src,
   }
 }
 
-Waypoint WaypointManager::_waypoints[MAX_WAYPOINTS] = {};
+EXT_RAM_BSS_ATTR Waypoint WaypointManager::_waypoints[MAX_WAYPOINTS];
 int WaypointManager::_selectedTarget = -1;
 
 bool WaypointManager::loadWaypoints() {

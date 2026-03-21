@@ -262,6 +262,7 @@ public:
   bool digitalRead(uint8_t pin);
   uint32_t digitalReadBulk(uint32_t pins);
   uint32_t digitalReadBulkB(uint32_t pins);
+  uint32_t digitalReadBulkIntFlag(uint32_t pins);
 
   void setGPIOInterrupts(uint32_t pins, bool enabled);
 

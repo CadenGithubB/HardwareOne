@@ -348,18 +348,20 @@ void oledEspNowDisplayStatus(Adafruit_SSD1306* display) {
 #define ROOMS_DEVICES_MAX 16
 
 // Cached room list (rebuilt on entry)
-static struct {
+struct RoomListEntry {
   char name[32];
   int deviceCount;
-} sRoomList[ROOMS_MAX];
+};
+EXT_RAM_BSS_ATTR static RoomListEntry sRoomList[ROOMS_MAX];
 static int sRoomCount = 0;
 
 // Cached device list for selected room
-static struct {
+struct RoomDeviceEntry {
   char name[24];
   uint8_t mac[6];
   bool alive;
-} sRoomDevices[ROOMS_DEVICES_MAX];
+};
+EXT_RAM_BSS_ATTR static RoomDeviceEntry sRoomDevices[ROOMS_DEVICES_MAX];
 static int sRoomDeviceCount = 0;
 
 // Rebuild the room list from mesh peer metadata + local device
@@ -2174,7 +2176,7 @@ struct RemoteFileBrowseState {
   int selectedIndex;              // Currently selected item
   int scrollOffset;               // Scroll offset for display
 };
-static RemoteFileBrowseState gRemoteFileBrowse = {0};
+EXT_RAM_BSS_ATTR static RemoteFileBrowseState gRemoteFileBrowse;
 
 void oledEspNowSendBrowseRequest(const char* path) {
   if (!gEspNow || !gEspNow->initialized || !gEspNow->encryptionEnabled) {

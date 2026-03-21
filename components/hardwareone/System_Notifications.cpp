@@ -364,6 +364,7 @@ void notifySensorStopped(const char* sensorName) {
 // ============================================================================
 
 void notifyEspNowStarted(bool success) {
+  NotificationContextGuard guard(NOTIF_SOURCE_SYSTEM);
   const char* msg = success ? "ESP-NOW: on" : "ESP-NOW: failed";
   #if ENABLE_OLED_DISPLAY
   oledNotificationBannerShow(msg,
@@ -373,6 +374,7 @@ void notifyEspNowStarted(bool success) {
 }
 
 void notifyEspNowStopped() {
+  NotificationContextGuard guard(NOTIF_SOURCE_SYSTEM);
   #if ENABLE_OLED_DISPLAY
   oledNotificationBannerShow("ESP-NOW: off", PairingRibbonIcon::INFO_ICON, 2000);
   #endif
