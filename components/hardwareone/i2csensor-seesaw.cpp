@@ -453,6 +453,7 @@ void gamepadTask(void* parameter) {
       if ((nowMs - lastGamepadRead) >= gamepadPollMs) {
         bool readSuccess = false;
         uint32_t buttons = 0;
+        uint32_t intflags = 0;  // Hardware edge-latch: pins that had any transition since last read
         int rawX = 0, rawY = 0;
 
         // Seesaw ATSAMD09 supports 400kHz I2C - faster transactions reduce bus hold time.
@@ -461,6 +462,10 @@ void gamepadTask(void* parameter) {
           // Exceptions are disabled (-fno-exceptions), so rely on return value only.
           // Read ONLY button pins, not all 32 GPIO pins - prevents garbage from unconfigured pins
           buttons = gGamepadSeesaw.digitalReadBulk(GAMEPAD_BUTTON_MASK);
+          // Read and clear the hardware interrupt flag register. The ATSAMD09 latches every
+          // edge event between polls (read-to-clear), so a press+release inside one 90ms window
+          // still shows up here even though BULK already shows the button as released.
+          intflags = gGamepadSeesaw.digitalReadBulkIntFlag(GAMEPAD_BUTTON_MASK);
           rawX = 1023 - gGamepadSeesaw.analogRead(14);
           rawY = 1023 - gGamepadSeesaw.analogRead(15);
           return true;
@@ -556,10 +561,24 @@ void gamepadTask(void* parameter) {
             bool changed = (gControlCache.gamepadButtons != buttons ||
                             abs(gControlCache.gamepadX - filtX) > 1 ||
                             abs(gControlCache.gamepadY - filtY) > 1);
-            // Latch newly pressed edges so UI never misses a quick tap.
-            // Active-low: a bit going from 1 (unpressed) to 0 (pressed) is a new press.
-            uint32_t newlyPressed = gControlCache.gamepadButtons & ~buttons;
-            gControlCache.buttonPressedAccum |= newlyPressed;
+            // Latch press edges into the accumulator so the UI never misses a tap.
+            // Active-low: 1 = unpressed, 0 = pressed.
+            //
+            // Two sources of press evidence:
+            //
+            // 1. Debounce-confirmed press: button state changed and debounce accepted it.
+            //    Covers normal (held) presses where the button is still down this poll.
+            uint32_t confirmedPressed = gControlCache.gamepadButtons & ~buttons;
+            //
+            // 2. INTFLAG-based press: hardware edge-latch fired this poll interval.
+            //    Covers quick taps released before the second confirmation poll — the
+            //    debounce filter would discard these entirely, but INTFLAG saw the edge.
+            //    Condition: intflag set AND (currently pressed OR was previously unpressed).
+            //    The "was previously unpressed" arm catches press+release within one interval.
+            //    The "currently pressed" arm catches first-detected holds (belt-and-suspenders).
+            uint32_t intflagPressed = intflags & (~buttons | lastButtons);
+            //
+            gControlCache.buttonPressedAccum |= confirmedPressed | intflagPressed;
             gControlCache.gamepadButtons = buttons;  // Only changes after debounce
             gControlCache.gamepadX = filtX;
             gControlCache.gamepadY = filtY;

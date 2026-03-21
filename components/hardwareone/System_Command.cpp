@@ -22,14 +22,14 @@ String exitToNormalBanner();
 
 // Static storage for all commands (avoid dynamic allocation on embedded systems)
 // Maximum 256 commands should be sufficient for the entire system
-static const CommandEntry* commandRegistry[MAX_COMMANDS];
+EXT_RAM_BSS_ATTR static const CommandEntry* commandRegistry[MAX_COMMANDS];
 static size_t commandRegistrySize = 0;
 
 // Maximum number of command modules we can track for debug summary
 #define MAX_MODULES 32
 
 // Module tracking for debug summary
-static ModuleInfo registeredModules[MAX_MODULES];
+EXT_RAM_BSS_ATTR static ModuleInfo registeredModules[MAX_MODULES];
 static size_t registeredModuleCount = 0;
 
 // Global access pointers (extern declarations in header)

@@ -113,6 +113,14 @@ void rebuildNetworkSettingsPage();
 bool hasNetworkSettings();
 
 // System page items
+enum SystemPageItem {
+  SYS_ITEM_LOGLEVEL = 0,
+  SYS_ITEM_TIMEZONE,
+  SYS_ITEM_NTP,
+  SYS_ITEM_LED,
+  SYS_ITEM_DEVICE_NAME
+};
+SystemPageItem getSystemItemAt(int index);
 size_t getWizardSystemPageCount();
 int getWizardNTPSelection();
 void setWizardNTPSelection(int sel);
@@ -122,6 +130,8 @@ const char* const* getNTPPresets();
 size_t getNTPPresetCount();
 const char* const* getLEDEffects();
 size_t getLEDEffectCount();
+const char* getWizardDeviceName();
+char* getWizardDeviceNameBuf();
 
 // ============================================================================
 // Wizard Actions

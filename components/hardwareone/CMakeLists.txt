@@ -74,6 +74,7 @@ set(hardwareone_srcs
         OLED_FirstTimeSetup.cpp
         OLED_Mode_Auth.cpp
         OLED_Mode_CLI.cpp
+        OLED_Mode_CLIInput.cpp
         OLED_Mode_Logging.cpp
         OLED_Mode_Map.cpp
         OLED_Mode_Power.cpp
