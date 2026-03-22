@@ -22,8 +22,6 @@
 // ============================================================================
 // STHS34PF80 Register Definitions
 // ============================================================================
-#define STHS34PF80_ADDR           0x5A
-
 // Device identification
 #define STHS34PF80_WHO_AM_I       0x0F
 #define STHS34PF80_WHO_AM_I_VALUE 0xD3
@@ -126,8 +124,8 @@ extern const SettingsModule presenceSettingsModule = {
 // ============================================================================
 
 static bool writeRegister(uint8_t reg, uint8_t value) {
-  return i2cDeviceTransaction(STHS34PF80_ADDR, 100000, 200, [&]() -> bool {
-    Wire1.beginTransmission(STHS34PF80_ADDR);
+  return i2cDeviceTransaction(I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
+    Wire1.beginTransmission(I2C_ADDR_PRESENCE);
     Wire1.write(reg);
     Wire1.write(value);
     return (Wire1.endTransmission() == 0);
@@ -135,24 +133,24 @@ static bool writeRegister(uint8_t reg, uint8_t value) {
 }
 
 static bool readRegister(uint8_t reg, uint8_t* value) {
-  return i2cDeviceTransaction(STHS34PF80_ADDR, 100000, 200, [&]() -> bool {
-    Wire1.beginTransmission(STHS34PF80_ADDR);
+  return i2cDeviceTransaction(I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
+    Wire1.beginTransmission(I2C_ADDR_PRESENCE);
     Wire1.write(reg);
     if (Wire1.endTransmission(false) != 0) return false;
     
-    if (Wire1.requestFrom(STHS34PF80_ADDR, (uint8_t)1) != 1) return false;
+    if (Wire1.requestFrom(I2C_ADDR_PRESENCE, (uint8_t)1) != 1) return false;
     *value = Wire1.read();
     return true;
   });
 }
 
 static bool readRegisters(uint8_t reg, uint8_t* buffer, uint8_t len) {
-  return i2cDeviceTransaction(STHS34PF80_ADDR, 100000, 200, [&]() -> bool {
-    Wire1.beginTransmission(STHS34PF80_ADDR);
+  return i2cDeviceTransaction(I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
+    Wire1.beginTransmission(I2C_ADDR_PRESENCE);
     Wire1.write(reg);
     if (Wire1.endTransmission(false) != 0) return false;
     
-    if (Wire1.requestFrom(STHS34PF80_ADDR, len) != len) return false;
+    if (Wire1.requestFrom(I2C_ADDR_PRESENCE, len) != len) return false;
     for (uint8_t i = 0; i < len; i++) {
       buffer[i] = Wire1.read();
     }

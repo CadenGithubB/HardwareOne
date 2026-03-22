@@ -22,6 +22,14 @@ constexpr uint32_t APDS_STACK_WORDS = 3072;          // ~12KB
 constexpr uint32_t GPS_STACK_WORDS = 3072;           // ~12KB
 constexpr uint32_t PRESENCE_STACK_WORDS = 3072;      // ~12KB
 constexpr uint32_t RTC_STACK_WORDS = 4096;           // ~16KB
+constexpr uint32_t SENSOR_BCAST_STACK_WORDS = 3072;  // ~12KB
+constexpr uint32_t MIC_RECORD_STACK_WORDS = 4096;    // ~16KB
+constexpr uint32_t MIC_VIZ_STACK_WORDS = 4096;       // ~16KB
+constexpr uint32_t SR_TASK_STACK_WORDS = 8192;       // ~32KB
+constexpr UBaseType_t SR_TASK_PRIORITY_LEVEL = 5;
+constexpr uint32_t SR_SNIP_WRITER_STACK_WORDS = 4096; // ~16KB
+constexpr uint32_t EI_CONTINUOUS_STACK_WORDS = 8192; // ~32KB
+constexpr uint32_t MAP_RENDER_STACK_WORDS = 8192;    // ~32KB
 
 // ============================================================================
 // FreeRTOS Task Creation with Memory Logging

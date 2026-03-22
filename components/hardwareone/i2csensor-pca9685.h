@@ -10,6 +10,7 @@
 
 #include <Arduino.h>
 #include <Adafruit_PWMServoDriver.h>
+#include "System_I2C.h"
 
 // Servo profile structure
 struct ServoProfile {
@@ -21,7 +22,7 @@ struct ServoProfile {
 };
 
 // PCA9685 constants
-#define PCA9685_I2C_ADDRESS 0x40
+#define PCA9685_I2C_ADDRESS I2C_ADDR_PCA9685
 #define MAX_SERVO_CHANNELS 16
 
 // Global PCA9685 driver instance

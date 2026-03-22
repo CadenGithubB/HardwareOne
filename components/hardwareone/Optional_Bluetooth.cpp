@@ -896,6 +896,8 @@ const char* getBLEStateString() {
   switch (gBLEState->connectionState) {
     case BLE_STATE_IDLE:        return "idle";
     case BLE_STATE_ADVERTISING: return "advertising";
+    case BLE_STATE_SCANNING:    return "scanning";
+    case BLE_STATE_CONNECTING:  return "connecting";
     case BLE_STATE_CONNECTED:   return "connected";
     case BLE_STATE_DISCONNECTING: return "disconnecting";
     default: return "unknown";

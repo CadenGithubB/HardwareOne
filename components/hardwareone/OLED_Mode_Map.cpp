@@ -17,6 +17,7 @@
 #include "System_Debug.h"
 #include "System_I2C.h"
 #include "System_Command.h"
+#include "System_TaskUtils.h"
 
 #if ENABLE_GPS_SENSOR
 #include <Adafruit_GPS.h>
@@ -885,7 +886,7 @@ static void initAsyncMapRenderer() {
   sRenderSemaphore = xSemaphoreCreateBinary();
   
   // Create render task (8KB stack in PSRAM, low priority)
-  xTaskCreatePinnedToCore(mapRenderTask, "mapRender", 8192, nullptr, tskIDLE_PRIORITY + 1, &sRenderTaskHandle, 0);
+  xTaskCreatePinnedToCore(mapRenderTask, "mapRender", MAP_RENDER_STACK_WORDS, nullptr, tskIDLE_PRIORITY + 1, &sRenderTaskHandle, 0);
   
   Serial.println("[MAP_ASYNC] Async renderer initialized (double-buffer + render task)");
 }

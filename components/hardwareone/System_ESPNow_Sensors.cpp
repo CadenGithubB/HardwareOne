@@ -9,6 +9,7 @@
 #include "System_ESPNow.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
+#include "System_TaskUtils.h"
 
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor-seesaw.h"
@@ -643,7 +644,7 @@ static bool startSensorBroadcaster() {
   BaseType_t ret = xTaskCreatePinnedToCore(
     sensorBroadcasterTask,
     "sensor_bcast",
-    3072,  // 3KB stack
+    SENSOR_BCAST_STACK_WORDS,
     nullptr,
     5,     // Priority 5 (same as ESP-NOW task)
     &gSensorBroadcasterTask,

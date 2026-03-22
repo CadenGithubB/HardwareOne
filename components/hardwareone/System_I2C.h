@@ -22,6 +22,21 @@
 #include "System_Utils.h"
 
 // ============================================================================
+// I2C Device Addresses
+// ============================================================================
+#define I2C_ADDR_GPS        0x10
+#define I2C_ADDR_FM_RADIO   0x11
+#define I2C_ADDR_IMU        0x28
+#define I2C_ADDR_TOF        0x29
+#define I2C_ADDR_THERMAL    0x33
+#define I2C_ADDR_APDS       0x39
+#define I2C_ADDR_PCA9685    0x40
+#define I2C_ADDR_GAMEPAD    0x50
+#define I2C_ADDR_PRESENCE   0x5A
+#define I2C_ADDR_OLED       0x3D
+#define I2C_ADDR_DS3231     0x68
+
+// ============================================================================
 // Legacy Wrapper Functions - Delegate to Manager
 // ============================================================================
 
@@ -71,13 +86,13 @@ auto i2cTaskWithTimeout(uint8_t address, uint32_t clockHz, uint32_t maxMs, Func&
 
 template<typename Func>
 void i2cOledTransactionVoid(uint32_t clockHz, uint32_t timeoutMs, Func&& operation) {
-  i2cDeviceTransactionVoid(0x3D, clockHz, timeoutMs, std::forward<Func>(operation));
+  i2cDeviceTransactionVoid(I2C_ADDR_OLED, clockHz, timeoutMs, std::forward<Func>(operation));
 }
 
 template<typename Func>
 auto i2cOledTransaction(uint32_t clockHz, uint32_t timeoutMs, Func&& operation) 
     -> decltype(operation()) {
-  return i2cDeviceTransaction(0x3D, clockHz, timeoutMs, std::forward<Func>(operation));
+  return i2cDeviceTransaction(I2C_ADDR_OLED, clockHz, timeoutMs, std::forward<Func>(operation));
 }
 
 template<typename Func>
@@ -232,20 +247,6 @@ inline bool i2cBusRecovery() {
 #if ENABLE_THERMAL_SENSOR
 #include <Adafruit_MLX90640.h>
 #endif
-
-// ============================================================================
-// I2C Device Addresses
-// ============================================================================
-#define I2C_ADDR_GPS        0x10
-#define I2C_ADDR_FM_RADIO   0x11
-#define I2C_ADDR_IMU        0x28
-#define I2C_ADDR_TOF        0x29
-#define I2C_ADDR_THERMAL    0x33
-#define I2C_ADDR_APDS       0x39
-#define I2C_ADDR_PRESENCE   0x5A
-#define I2C_ADDR_OLED       0x3D
-#define I2C_ADDR_GAMEPAD    0x50
-#define I2C_ADDR_DS3231     0x68
 
 // ============================================================================
 // Global Flags and Configuration

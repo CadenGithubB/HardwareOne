@@ -6,11 +6,9 @@
 #define I2CSENSOR_DS3231_H
 
 #include "System_BuildConfig.h"
+#include "System_I2C.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
-
-// I2C address (fixed, cannot be changed)
-#define I2C_ADDR_DS3231 0x68
 
 // RTC DateTime structure (always defined for stubs)
 struct RTCDateTime {
