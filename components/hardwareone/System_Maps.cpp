@@ -2709,10 +2709,8 @@ const char* cmd_gpstrack(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
   
-  // Parse subcommand
+  // argsInput is already the args after the command name (registry strips it)
   const char* p = argsInput.c_str();
-  while (*p && *p != ' ') p++;
-  while (*p == ' ') p++;
   
   if (*p == '\0' || strncmp(p, "status", 6) == 0) {
     if (!GPSTrackManager::hasTrack()) {
@@ -2772,10 +2770,8 @@ const char* cmd_waypoint(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
   
-  // Parse subcommand
+  // argsInput is already the args after the command name (registry strips it)
   const char* p = argsInput.c_str();
-  while (*p && *p != ' ') p++;
-  while (*p == ' ') p++;
   
   if (*p == '\0' || strncmp(p, "list", 4) == 0) {
     // List waypoints
@@ -2884,9 +2880,8 @@ const char* cmd_waypointfile(const String& argsInput) {
   
   // Parse: waypointfile <filepath> <lat> <lon> [waypointName]
   // Or:    waypointfile <filepath> <waypointName>
+  // argsInput is already the args after the command name (registry strips it)
   const char* p = argsInput.c_str();
-  while (*p && *p != ' ') p++;
-  while (*p == ' ') p++;
   
   if (*p == '\0') {
     return "Usage: waypointfile <file> <wpName>\n   or: waypointfile <file> <lat> <lon> [wpName]";

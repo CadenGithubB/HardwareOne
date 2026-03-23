@@ -20,7 +20,6 @@
 #endif
 
 // External references
-extern bool oledConnected;
 extern String customOLEDText;
 extern String unavailableOLEDTitle;
 extern String unavailableOLEDReason;

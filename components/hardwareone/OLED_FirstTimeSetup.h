@@ -30,9 +30,9 @@
  * @param wasCancelled Output parameter - set to true if user cancelled (optional)
  * @return User's input string (empty if cancelled)
  */
-String getOLEDTextInput(const char* prompt, bool isPassword = false, 
+String getOLEDTextInput(const char* prompt, bool isPassword = false,
                         const char* initialText = nullptr, int maxLength = 32,
-                        bool* wasCancelled = nullptr);
+                        bool* wasCancelled = nullptr, bool canSkip = true);
 
 /**
  * Show yes/no prompt on OLED

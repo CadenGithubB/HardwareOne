@@ -13,7 +13,6 @@
 #if ENABLE_OLED_DISPLAY
 
 extern DisplayDriver* oledDisplay;
-extern bool oledConnected;
 
 // Dynamic menu system
 extern OLEDMenuItemEx gDynamicMenuItems[];
@@ -32,15 +31,7 @@ extern const OLEDMenuItem oledSensorMenuItems[];
 extern const int oledSensorMenuItemCount;
 extern int oledSensorMenuSelectedIndex;
 
-// Battery icon state
-struct BatteryIconState {
-  float percentage;
-  char icon;
-  unsigned long lastUpdateMs;
-  bool valid;
-};
-extern BatteryIconState batteryIconState;
-extern const unsigned long BATTERY_ICON_UPDATE_INTERVAL;
+// BatteryIconState declared in OLED_Utils.h (included above)
 
 // External functions
 extern float getBatteryPercentage();

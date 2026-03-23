@@ -12,7 +12,6 @@
 #include "System_Settings.h"
 
 // External references
-extern bool oledConnected;
 extern const char* AUTOMATIONS_JSON_FILE;
 extern bool oledMenuBack();
 extern void executeOLEDCommand(const String& argsInput);

@@ -204,6 +204,24 @@ inline void ps_delete(T* obj) {
 }
 
 // ============================================================================
+// Allocation Tracker Entry
+// ============================================================================
+// Shared struct for tracking per-tag allocation statistics.
+// Defined once here; used by HardwareOne.cpp, System_MemoryMonitor.cpp, System_Utils.cpp
+
+struct AllocEntry {
+  char tag[24];
+  size_t totalBytes;
+  size_t psramBytes;
+  size_t dramBytes;
+  uint16_t count;
+  bool isActive;
+};
+
+extern const int MAX_ALLOC_ENTRIES;
+extern AllocEntry gAllocTracker[];
+
+// ============================================================================
 // ArduinoJson PSRAM Allocator
 // ============================================================================
 // Custom allocator for ArduinoJson v7 that uses PSRAM instead of internal heap.

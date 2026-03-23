@@ -147,12 +147,9 @@ static void bleSendAuthRequired(uint16_t connId) {
 // DEVICE TYPE IDENTIFICATION
 // =============================================================================
 
-// Convert MAC address to string for comparison
+// Convert MAC address to string for comparison — delegates to System_Utils shared helper
 static String macToString(const uint8_t* mac) {
-  char buf[18];
-  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return String(buf);
+  return formatMacAddrStr(mac);
 }
 
 // Convert device type to human-readable string
@@ -328,28 +325,8 @@ class CmdStatusCallbacks : public BLECharacteristicCallbacks {
 extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
 extern AuthContext gExecAuthContext;
 
-// Async callback type (defined in HardwareOne.cpp)
-typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
-
-// Command origin enum (matches HardwareOne.cpp)
-enum CommandOrigin { ORIGIN_SERIAL, ORIGIN_WEB, ORIGIN_AUTOMATION, ORIGIN_SYSTEM };
-
-// Command context structure (matches HardwareOne.cpp)
-struct CommandContext {
-  CommandOrigin origin;
-  AuthContext auth;
-  uint32_t id;
-  uint32_t outputMask;
-  bool validateOnly;
-  void* replyHandle;
-  httpd_req_t* httpReq;
-};
-
-// Command structure (matches HardwareOne.cpp)
-struct Command {
-  String line;
-  CommandContext ctx;
-};
+// Command types + ExecAsyncCallback from shared header
+#include "System_CommandTypes.h"
 
 // External async command submission
 extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
@@ -896,6 +873,8 @@ const char* getBLEStateString() {
   switch (gBLEState->connectionState) {
     case BLE_STATE_IDLE:        return "idle";
     case BLE_STATE_ADVERTISING: return "advertising";
+    case BLE_STATE_SCANNING:    return "scanning";
+    case BLE_STATE_CONNECTING:  return "connecting";
     case BLE_STATE_CONNECTED:   return "connected";
     case BLE_STATE_DISCONNECTING: return "disconnecting";
     default: return "unknown";

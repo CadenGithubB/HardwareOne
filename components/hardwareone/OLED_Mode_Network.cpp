@@ -25,7 +25,6 @@
 #endif
 
 // External references
-extern bool oledConnected;
 #if ENABLE_HTTP_SERVER
 extern bool gServerIsHttps;  // Defined in WebServer_Server.cpp
 #endif

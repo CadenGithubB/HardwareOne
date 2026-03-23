@@ -12,7 +12,6 @@
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 extern DisplayDriver* oledDisplay;
-extern bool oledConnected;
 extern EspNowState* gEspNow;
 extern NavEvents gNavEvents;
 

@@ -15,61 +15,23 @@
 // Protocol reference: https://github.com/i-soxi/even-g2-protocol
 // =============================================================================
 
-// G2 requires Bluetooth to be enabled first
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-
-// -----------------------------------------------------------------------------
-// G2 BLE UUIDs (from protocol docs)
-// -----------------------------------------------------------------------------
-// Base UUID: 00002760-08c2-11e1-9073-0e8ac72e{xxxx}
-#define G2_UUID_BASE          "00002760-08c2-11e1-9073-0e8ac72e"
-#define G2_SERVICE_UUID       "00002760-08c2-11e1-9073-0e8ac72e0000"
-#define G2_CHAR_WRITE_UUID    "00002760-08c2-11e1-9073-0e8ac72e5401"  // Write Without Response (commands)
-#define G2_CHAR_NOTIFY_UUID   "00002760-08c2-11e1-9073-0e8ac72e5402"  // Notify (responses/events)
-#define G2_CHAR_DISPLAY_UUID  "00002760-08c2-11e1-9073-0e8ac72e6402"  // Display/rendering
-
-// -----------------------------------------------------------------------------
-// G2 Protocol Constants
-// -----------------------------------------------------------------------------
-#define G2_PACKET_MAGIC       0xAA
-#define G2_PACKET_TYPE_CMD    0x21  // Phone -> Glasses
-#define G2_PACKET_TYPE_RSP    0x12  // Glasses -> Phone
-#define G2_MTU_TARGET         512
-#define G2_AUTH_PACKET_COUNT  7
-
-// Service IDs (high byte, low byte)
-#define G2_SVC_AUTH_CTRL_HI   0x80
-#define G2_SVC_AUTH_CTRL_LO   0x00
-#define G2_SVC_AUTH_DATA_HI   0x80
-#define G2_SVC_AUTH_DATA_LO   0x20
-#define G2_SVC_TELEPROMPTER_HI 0x06
-#define G2_SVC_TELEPROMPTER_LO 0x20
-#define G2_SVC_DISPLAY_CFG_HI 0x0E
-#define G2_SVC_DISPLAY_CFG_LO 0x20
-#define G2_SVC_SYNC_HI        0x80
-#define G2_SVC_SYNC_LO        0x00
-
-// -----------------------------------------------------------------------------
-// G2 Connection State
-// -----------------------------------------------------------------------------
+// G2 type definitions (always available for type-safe references)
 enum G2State {
-  G2_STATE_IDLE = 0,       // Not connected, not scanning
-  G2_STATE_SCANNING,       // Scanning for G2 devices
-  G2_STATE_CONNECTING,     // Connection in progress
-  G2_STATE_AUTHENTICATING, // Running auth handshake
-  G2_STATE_CONNECTED,      // Fully connected and authenticated
-  G2_STATE_DISCONNECTING,  // Disconnecting
-  G2_STATE_ERROR           // Error state
+  G2_STATE_IDLE = 0,
+  G2_STATE_SCANNING,
+  G2_STATE_CONNECTING,
+  G2_STATE_AUTHENTICATING,
+  G2_STATE_CONNECTED,
+  G2_STATE_DISCONNECTING,
+  G2_STATE_ERROR
 };
 
-// Which eye to connect to
 enum G2Eye {
   G2_EYE_LEFT = 0,
   G2_EYE_RIGHT = 1,
-  G2_EYE_AUTO = 2  // Connect to first found
+  G2_EYE_AUTO = 2
 };
 
-// G2 Event types for notifications
 enum G2EventType {
   G2_EVENT_UNKNOWN = 0,
   G2_EVENT_SWIPE_UP,
@@ -81,8 +43,39 @@ enum G2EventType {
   G2_EVENT_DOUBLE_TAP
 };
 
-// Callback type for G2 input events
 typedef void (*G2EventCallback)(G2EventType event);
+
+// G2 requires Bluetooth to be enabled first
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+
+// -----------------------------------------------------------------------------
+// G2 BLE UUIDs (from protocol docs)
+// -----------------------------------------------------------------------------
+#define G2_UUID_BASE          "00002760-08c2-11e1-9073-0e8ac72e"
+#define G2_SERVICE_UUID       "00002760-08c2-11e1-9073-0e8ac72e0000"
+#define G2_CHAR_WRITE_UUID    "00002760-08c2-11e1-9073-0e8ac72e5401"
+#define G2_CHAR_NOTIFY_UUID   "00002760-08c2-11e1-9073-0e8ac72e5402"
+#define G2_CHAR_DISPLAY_UUID  "00002760-08c2-11e1-9073-0e8ac72e6402"
+
+// -----------------------------------------------------------------------------
+// G2 Protocol Constants
+// -----------------------------------------------------------------------------
+#define G2_PACKET_MAGIC       0xAA
+#define G2_PACKET_TYPE_CMD    0x21
+#define G2_PACKET_TYPE_RSP    0x12
+#define G2_MTU_TARGET         512
+#define G2_AUTH_PACKET_COUNT  7
+
+#define G2_SVC_AUTH_CTRL_HI   0x80
+#define G2_SVC_AUTH_CTRL_LO   0x00
+#define G2_SVC_AUTH_DATA_HI   0x80
+#define G2_SVC_AUTH_DATA_LO   0x20
+#define G2_SVC_TELEPROMPTER_HI 0x06
+#define G2_SVC_TELEPROMPTER_LO 0x20
+#define G2_SVC_DISPLAY_CFG_HI 0x0E
+#define G2_SVC_DISPLAY_CFG_LO 0x20
+#define G2_SVC_SYNC_HI        0x80
+#define G2_SVC_SYNC_LO        0x00
 
 // -----------------------------------------------------------------------------
 // G2 Client State Structure
@@ -156,11 +149,8 @@ size_t g2EncodeVarint(uint32_t value, uint8_t* buffer);
 
 // -----------------------------------------------------------------------------
 // Stub declarations when G2 glasses support is disabled
+// (G2State, G2Eye, G2EventType, G2EventCallback defined above the guard)
 // -----------------------------------------------------------------------------
-enum G2State { G2_STATE_IDLE = 0 };
-enum G2Eye { G2_EYE_LEFT = 0, G2_EYE_RIGHT = 1, G2_EYE_AUTO = 2 };
-enum G2EventType { G2_EVENT_UNKNOWN = 0 };
-typedef void (*G2EventCallback)(G2EventType event);
 
 inline bool initG2Client() { return false; }
 inline void deinitG2Client() {}

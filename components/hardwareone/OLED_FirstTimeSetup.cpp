@@ -20,14 +20,7 @@
 #include "System_I2C.h"
 #include "System_Utils.h"
 
-// I2C address for OLED (must match OLED_Display.cpp)
-#ifndef OLED_I2C_ADDRESS
-#define OLED_I2C_ADDRESS 0x3D
-#endif
-
-// Helper macro to wrap OLED operations in I2C transaction
-#define OLED_TRANSACTION(code) \
-  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 400000, 500, [&]() { code; })
+// OLED_I2C_ADDRESS and OLED_TRANSACTION defined in OLED_Display.h
 
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor-seesaw.h"  // For JOYSTICK_DEADZONE
@@ -38,7 +31,6 @@
 #endif
 
 // External references
-extern bool oledConnected;
 extern bool oledEnabled;
 extern String waitForSerialInputBlocking();
 extern void updateOLEDDisplay();
@@ -81,9 +73,9 @@ static uint32_t waitForButtonPress() {
 // OLED Text Input (with Virtual Keyboard)
 // ============================================================================
 
-String getOLEDTextInput(const char* prompt, bool isPassword, 
+String getOLEDTextInput(const char* prompt, bool isPassword,
                         const char* initialText, int maxLength,
-                        bool* wasCancelled) {
+                        bool* wasCancelled, bool canSkip) {
   // Initialize output parameter
   if (wasCancelled) *wasCancelled = false;
   
@@ -99,7 +91,11 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
 
   // Also echo prompt to serial so users monitoring via terminal know to type here
   Serial.print(prompt);
-  Serial.println(" (type here or use OLED keyboard):");
+  if (canSkip) {
+    Serial.println(" (type here, 'n' to skip, or use OLED keyboard):");
+  } else {
+    Serial.println(" (type here or use OLED keyboard):");
+  }
   
   // Store original keyboard state to modify for password mode
   bool originalActive = true;
@@ -109,20 +105,22 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
     if (Serial.available()) {
       String serialInput = Serial.readStringUntil('\n');
       serialInput.trim();
-      if (serialInput.length() > 0) {
-        // Serial input received - submit it as if user pressed Enter on keyboard
-        // Copy the serial input into the keyboard state
-        strncpy(gOLEDKeyboardState.text, serialInput.c_str(), OLED_KEYBOARD_MAX_LENGTH);
-        gOLEDKeyboardState.textLength = min((int)serialInput.length(), OLED_KEYBOARD_MAX_LENGTH);
-        gOLEDKeyboardState.text[gOLEDKeyboardState.textLength] = '\0';
-        
-        // Complete the keyboard (same as pressing Enter)
+      // 'n' = skip this field (leave blank) — only if skipping is allowed
+      if (canSkip && serialInput.equalsIgnoreCase("n")) serialInput = "";
+      // 'b' = cancel (if caller supports wasCancelled)
+      if (serialInput.equalsIgnoreCase("b") || serialInput.equalsIgnoreCase("back")) {
+        gOLEDKeyboardState.textLength = 0;
+        gOLEDKeyboardState.text[0] = '\0';
         oledKeyboardComplete();
-        broadcastOutput(serialInput);  // Echo back to serial
-        
-        // Break immediately - keyboard is now inactive
+        if (wasCancelled) *wasCancelled = true;
         break;
       }
+      strncpy(gOLEDKeyboardState.text, serialInput.c_str(), OLED_KEYBOARD_MAX_LENGTH);
+      gOLEDKeyboardState.textLength = min((int)serialInput.length(), OLED_KEYBOARD_MAX_LENGTH);
+      gOLEDKeyboardState.text[gOLEDKeyboardState.textLength] = '\0';
+      oledKeyboardComplete();
+      if (serialInput.length() > 0 && !isPassword) broadcastOutput(serialInput);
+      break;
     }
     
     // Only update display and handle input if keyboard is still active

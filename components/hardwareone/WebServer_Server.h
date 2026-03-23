@@ -21,6 +21,11 @@ extern char* gJsonResponseBuffer;
 // Track whether the running server is HTTPS (true) or HTTP (false)
 extern bool gServerIsHttps;
 
+// Global HTTP server handle (defined in HardwareOne.cpp)
+#if ENABLE_HTTP_SERVER
+extern httpd_handle_t server;
+#endif
+
 // ============================================================================
 // Web Server - HTTP server session and authentication functions
 // ============================================================================
@@ -74,6 +79,8 @@ struct LogoutReason {
   unsigned long timestamp;
 };
 extern LogoutReason* gLogoutReasons;
+
+#if ENABLE_HTTP_SERVER
 
 // ============================================================================
 // Brute-Force / Login Rate Limiting
@@ -304,5 +311,7 @@ void streamNav(httpd_req_t* req, const String& username, const String& activePag
 void streamContentGeneric(httpd_req_t* req, const String& content);
 void streamChunk(httpd_req_t* req, const String& str);
 void streamChunk(httpd_req_t* req, const char* str);
+
+#endif // ENABLE_HTTP_SERVER
 
 #endif // WEBSERVER_SERVER_H

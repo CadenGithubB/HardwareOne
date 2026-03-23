@@ -52,10 +52,6 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 .bt-description { color: var(--muted); margin-bottom: 15px; font-size: 0.9em; }
 .bt-controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
 .bt-status { background: var(--crumb-bg); border-radius: 8px; padding: 15px; font-family: 'Courier New', monospace; font-size: 0.9em; border-left: 4px solid var(--link); min-height: 60px; color: var(--panel-fg); white-space: pre-wrap; }
-.status-indicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
-.status-enabled { background: #28a745; animation: pulse 2s infinite; }
-.status-disabled { background: #dc3545; }
-@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
 .bt-meta { color: var(--muted); font-size: 0.85em; margin-top: 8px; }
 .bt-warning { background:var(--warning-bg); border:1px solid var(--warning-border); border-left:4px solid var(--warning-accent); color:var(--warning-fg); border-radius:6px; padding:10px 12px; font-size:0.85em; margin-top:10px; }
 </style>

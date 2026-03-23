@@ -5,6 +5,21 @@
 
 #include "System_BuildConfig.h"
 
+// ESP-NOW type definitions (always available for type-safe references)
+enum MeshRole {
+  MESH_ROLE_WORKER = 0,
+  MESH_ROLE_MASTER = 1,
+  MESH_ROLE_BACKUP_MASTER = 2
+};
+
+enum EspNowMode {
+  ESPNOW_MODE_DIRECT = 0,
+  ESPNOW_MODE_MESH = 1
+};
+
+// Compile-time ceiling for mesh peer slots; used in both real and stub builds.
+#define MESH_PEER_MAX 16
+
 #if ENABLE_ESPNOW
 
 #include <ArduinoJson.h>
@@ -34,14 +49,11 @@ String base64Encode(const uint8_t* data, size_t len);
 #define MSG_TYPE_RESPONSE "RESPONSE"
 #define MSG_TYPE_STREAM "STREAM"
 #define MSG_TYPE_BOOT "BOOT"
-// Note: MSG_TYPE_MESH removed - mesh is a transport method (TTL-based), not a message type
-// JSON-only logical types (names chosen to avoid collision with enum MessageType)
 #define MSG_TYPE_FILE_STR "FILE"
 #define MSG_TYPE_CMD "CMD"
 #define MSG_TYPE_TEXT "TEXT"
 #define MSG_TYPE_USER_SYNC "USER_SYNC"
 #define MSG_TYPE_FILE_BROWSE "FILE_BROWSE"
-
 
 // Payload types
 #define PAYLOAD_CMD "cmd"
@@ -50,13 +62,6 @@ String base64Encode(const uint8_t* data, size_t len);
 #define PAYLOAD_QUERY "query"
 #define PAYLOAD_STATUS "status"
 #define PAYLOAD_TIME_SYNC "timeSync"
-
-// Mesh roles
-enum MeshRole {
-  MESH_ROLE_WORKER = 0,
-  MESH_ROLE_MASTER = 1,
-  MESH_ROLE_BACKUP_MASTER = 2
-};
 
 // Bond roles (stored as uint8_t in gSettings.bondRole)
 enum BondRole {
@@ -69,14 +74,6 @@ inline const char* bondRoleStr() { return isBondMaster() ? "master" : "worker"; 
 
 // Set mesh role at runtime with logging. Does not persist — reboot restores saved role.
 void setMeshRole(MeshRole role, const char* reason);
-
-// ==========================
-// ESP-NOW Mode (Direct vs Mesh)
-// ==========================
-enum EspNowMode { 
-  ESPNOW_MODE_DIRECT = 0,
-  ESPNOW_MODE_MESH = 1 
-};
 
 #if ENABLE_BONDED_MODE
 // ==========================
@@ -113,7 +110,6 @@ struct EspNowDevice {
 
 // Topology streaming support (NEW - matches .cpp implementation)
 #define MAX_CONCURRENT_TOPO_STREAMS 4
-#define MAX_TOPO_PEERS 16
 struct TopologyStream {
   uint32_t reqId;              // Request ID to match responses
   uint8_t senderMac[6];        // MAC of device sending topology
@@ -164,7 +160,7 @@ struct MeshTopoNode {
 // ==========================
 // Mesh Peer Health Tracking (from espnow_system.cpp)
 // ==========================
-#define MESH_PEER_MAX 16          // Compile-time ceiling (max possible value of meshPeerMax setting)
+// MESH_PEER_MAX is defined above the #if ENABLE_ESPNOW guard (shared with stub build)
 #define MESH_PEER_TIMEOUT_MS 30000
 
 // Runtime peer slot count (set from gSettings.meshPeerMax at boot, capped to MESH_PEER_MAX)
@@ -993,6 +989,19 @@ inline bool meshEnabled() {
   return gEspNow && gEspNow->initialized && gEspNow->mode == ESPNOW_MODE_MESH;
 }
 
+// Returns true if this device should stream sensor data to a remote receiver.
+// A device should stream when it is:
+//   • a mesh worker (not the master), OR
+//   • a bond-mode worker
+// Replaces the identical 7-line block copy-pasted into every sensor task loop.
+inline bool shouldStreamSensorToRemote() {
+  if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) return true;
+#if ENABLE_BONDED_MODE
+  if (gSettings.bondModeEnabled && isBondWorker()) return true;
+#endif
+  return false;
+}
+
 // Mesh peer state (used by OLED and status views)
 extern MeshPeerHealth* gMeshPeers;   // Dynamically allocated [gMeshPeerSlots] at init
 
@@ -1075,15 +1084,76 @@ bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msg
 
 #else // !ENABLE_ESPNOW
 
-// Stubs for functions called from other modules when ESP-NOW is disabled
-inline bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac) { 
-  (void)nameOrMac; (void)outMac; 
-  return false; 
+// ============================================================================
+// ESP-NOW Stubs (when ENABLE_ESPNOW is disabled)
+// EspNowMode and MeshRole enums are defined above the guard.
+// Simplified stub structs are provided here for type compatibility.
+//
+// DESIGN NOTE — stub field divergence is intentional:
+//   The real MeshPeerHealth/MeshTopoNode (above, under #if ENABLE_ESPNOW)
+//   carry full telemetry fields (lastHeartbeatMs, heartbeatCount, ackCount,
+//   lastBootCounter, _pad, etc.).  The stubs below are deliberately minimal —
+//   they only need to satisfy the compiler for *declarations* and for the few
+//   inline no-op stubs that accept MeshPeerHealth* parameters.
+//
+//   CONTRACT: any C++ code that accesses fields beyond { mac, isActive, rssi }
+//   MUST be inside a #if ENABLE_ESPNOW guard.  Do NOT add field accesses to
+//   shared (unguarded) code without aligning both struct definitions.
+// ============================================================================
+
+#define MAX_MESH_PEERS MESH_PEER_MAX  // alias — canonical value defined above #if ENABLE_ESPNOW
+
+struct MeshPeerHealth {
+  uint8_t mac[6];
+  String name;
+  bool isOnline;
+  bool isActive;
+  uint32_t lastSeen;
+  int8_t rssi;
+  uint8_t role;
+};
+
+struct MeshTopoNode {
+  uint8_t mac[6];
+  String name;
+  uint8_t role;
+  bool isOnline;
+};
+
+struct EspNowState {
+  bool initialized;
+  EspNowMode mode;
+  String passphrase;
+  uint8_t channel;
+  bool encryptionEnabled;
+  void* reserved;
+};
+
+extern EspNowState* gEspNow;
+extern MeshPeerHealth gMeshPeers[MAX_MESH_PEERS];
+extern MeshTopoNode* gMeshTopology;
+extern bool gMeshActivitySuspended;
+extern const struct CommandEntry espNowCommands[];
+extern const size_t espNowCommandsCount;
+
+inline const char* checkEspNowFirstTimeSetup() { return "ESP-NOW disabled"; }
+inline const char* cmd_espnow_init(const String& argsInput) { return "ESP-NOW disabled"; }
+inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
+inline void cleanupTimedOutChunks() {}
+inline bool isSelfMac(const uint8_t* mac) { return false; }
+inline bool isMeshPeerAlive(const MeshPeerHealth* peer) { return false; }
+inline bool meshEnabled() { return false; }
+inline bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac) {
+  (void)nameOrMac; (void)outMac;
+  return false;
 }
-inline bool sendFileToMac(const uint8_t* mac, const String& localPath) { 
-  (void)mac; (void)localPath; 
-  return false; 
+inline bool sendFileToMac(const uint8_t* mac, const String& localPath) {
+  (void)mac; (void)localPath;
+  return false;
 }
+inline bool sendBondedSensorData(uint8_t, const uint8_t*, uint16_t) { return false; }
+inline bool isBondModeOnline() { return false; }
+inline bool isBondSynced() { return false; }
 
 #endif // ENABLE_ESPNOW
 

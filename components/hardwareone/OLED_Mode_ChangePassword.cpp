@@ -15,7 +15,6 @@
 #include "System_Utils.h"
 
 extern DisplayDriver* oledDisplay;
-extern bool oledConnected;
 
 // ============================================================================
 // Password Change State

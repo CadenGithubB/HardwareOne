@@ -1,9 +1,8 @@
 #include "Arduino.h"
 #include <esp_app_desc.h>
+#include <esp_system.h>
 // Forward declarations to satisfy Arduino's auto-generated prototypes
-struct AuthContext;
-struct CommandContext;
-struct Command;
+#include "System_CommandTypes.h"
 struct MeshPeerHealth;
 struct TopologyStream;
 struct RouterMetrics;
@@ -21,8 +20,6 @@ extern uint32_t gLastHeartbeatSentMs;
 extern const uint32_t MESH_HEARTBEAT_INTERVAL_MS;
 
 // Web server functions (implemented in web_server.cpp) - declared here to prevent Arduino preprocessor from creating static versions
-struct httpd_req;
-typedef struct httpd_req httpd_req_t;
 void getClientIP(httpd_req_t* req, String& ipOut);
 void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 
@@ -156,7 +153,9 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #endif
+#if ENABLE_SERVO
 #include <Adafruit_PWMServoDriver.h>
+#endif
 #if ENABLE_GPS_SENSOR
 #include <Adafruit_GPS.h>
 #endif
@@ -174,15 +173,7 @@ bool initGamepad();
 size_t gAllocHeapBefore = 0;
 size_t gAllocPsBefore = 0;
 
-// Dynamic allocation tracker - aggregates allocations by tag
-struct AllocEntry {
-  char tag[24];
-  size_t totalBytes;
-  size_t psramBytes;  // How much went to PSRAM
-  size_t dramBytes;   // How much went to DRAM
-  uint16_t count;
-  bool isActive;
-};
+// AllocEntry struct defined in System_MemUtil.h
 extern const int MAX_ALLOC_ENTRIES = 64;
 EXT_RAM_BSS_ATTR AllocEntry gAllocTracker[MAX_ALLOC_ENTRIES];
 int gAllocTrackerCount = 0;
@@ -748,25 +739,8 @@ bool hasAdminPrivilege(const AuthContext& ctx) {
   return isAdminUser(ctx.user);
 }
 
-enum CommandOrigin { ORIGIN_SERIAL,
-                     ORIGIN_WEB,
-                     ORIGIN_AUTOMATION,
-                     ORIGIN_SYSTEM };
-// Note: avoid name collision with existing OUTPUT_* macros used for device output flags
-enum CmdOutputMask { CMD_OUT_SERIAL = 1 << 0,
-                     CMD_OUT_WEB = 1 << 1,
-                     CMD_OUT_LOG = 1 << 2,
-                     CMD_OUT_BROADCAST = 1 << 3 };
-struct CommandContext {
-  CommandOrigin origin;
-  AuthContext auth;
-  uint32_t id;
-  uint32_t timestampMs;
-  uint32_t outputMask;
-  bool validateOnly;
-  void* replyHandle;     // placeholder for future sync replies
-  httpd_req_t* httpReq;  // used by web origin if needed
-};
+// CommandOrigin, CommandContext, Command, ExecReq, ExecAsyncCallback, CmdOutputMask
+// are defined in System_CommandTypes.h (included at top of file)
 
 // Global current command context (set during command execution)
 // Exposed as void* so System_Debug.cpp can check outputMask without knowing CommandContext type
@@ -777,11 +751,6 @@ uint32_t getCurrentCommandOutputMask() {
   return ((CommandContext*)gCurrentCommandContext)->outputMask;
 }
 
-struct Command {
-  String line;
-  CommandContext ctx;
-};
-
 void setCurrentCommandContext(const CommandContext& ctx) {
   gExecUser = ctx.auth.user;
   gExecAuthContext = ctx.auth;
@@ -789,23 +758,6 @@ void setCurrentCommandContext(const CommandContext& ctx) {
 void clearCurrentCommandContext() {
   gCurrentCommandContext = nullptr;
 }
-
-// -------- Command Executor Task (definition) --------
-// Async callback type for fire-and-forget command execution
-// Called on cmd_exec task with result - caller must NOT block
-typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
-
-struct ExecReq {
-  char line[2048];         // Command string (full size for ESP-NOW chunking)
-  CommandContext ctx;      // Full execution context
-  char out[2048];          // Result buffer (2KB)
-  SemaphoreHandle_t done;  // Signals completion (NULL for async mode)
-  bool ok;                 // Success flag from executeCommand()
-  
-  // Async callback mode (alternative to semaphore)
-  ExecAsyncCallback asyncCallback;  // If non-NULL, called instead of semaphore
-  void* asyncUserData;              // Passed to callback
-};
 
 // Now that ExecReq is fully defined we can implement the task
 static void commandExecTask(void* pv) {
@@ -986,8 +938,36 @@ const char* cmd_conditional(const String& argsInput) {
 }
 #endif
 
+// RTC fast memory: survives soft reset / WDT / panic but NOT power-off
+RTC_NOINIT_ATTR static uint32_t rtcCrashCount;
+RTC_NOINIT_ATTR static uint32_t rtcLastResetReason;
+RTC_NOINIT_ATTR static uint32_t rtcMagic;
+#define RTC_CRASH_MAGIC 0xC0FFEE42u
+
 void hardwareone_setup() {
-  // --- Initialise Serial early ---
+
+  // ========================================================================
+  // 1. PRE-SERIAL — crash tracking from RTC memory (no Serial yet)
+  // ========================================================================
+  {
+    esp_reset_reason_t reason = esp_reset_reason();
+    if (rtcMagic != RTC_CRASH_MAGIC) {
+      // First ever cold boot — initialise RTC counters
+      rtcCrashCount = 0;
+      rtcMagic = RTC_CRASH_MAGIC;
+    } else if (reason == ESP_RST_POWERON) {
+      // Clean power cycle — reset accumulated crash count
+      rtcCrashCount = 0;
+    } else if (reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT ||
+               reason == ESP_RST_PANIC   || reason == ESP_RST_BROWNOUT) {
+      rtcCrashCount++;
+    }
+    rtcLastResetReason = (uint32_t)reason;
+  }
+
+  // ========================================================================
+  // 2. SERIAL + FILESYSTEM + SETTINGS
+  // ========================================================================
   Serial.begin(115200);
   delay(500);  // Longer delay for serial connection
 
@@ -1005,40 +985,26 @@ void hardwareone_setup() {
   heapLogSummary("boot.after_fs");
 #endif
 
-  // NEW: Detect first-time setup state IMMEDIATELY after filesystem init
-  // This ensures OLED shows correct message from the first frame
+  // Detect FTS state early so OLED shows correct message from the first frame
   detectFirstTimeSetupState();
 
-  // Allocate WiFi networks array BEFORE loading settings (needed for readSettingsJson)
 #if ENABLE_WIFI
+  // WiFi networks array must exist before readSettingsJson deserializes into it
   if (!gWifiNetworks) {
     gWifiNetworks = (WifiNetwork*)ps_alloc(MAX_WIFI_NETWORKS * sizeof(WifiNetwork), AllocPref::PreferPSRAM, "wifi.networks");
     if (!gWifiNetworks) {
       Serial.println("FATAL: Failed to allocate WiFi networks array");
       while (1) delay(1000);
     }
-    // Initialize with placement new to call constructors
     for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
       new (&gWifiNetworks[i]) WifiNetwork();
     }
-    Serial.println("[DEBUG] WiFi networks array allocated");
   }
 #endif
 
-  // Load settings EARLY (before allocations) so conditional allocations can use setting values
-  Serial.println("[DEBUG] About to call settingsDefaults()");
-  Serial.flush();
-
-  // Initialize settings with defaults FIRST to ensure String members are constructed
+  // Settings: defaults → load from file (or write defaults) → command system
   settingsDefaults();
 
-  Serial.println("[DEBUG] settingsDefaults() completed");
-  Serial.flush();
-
-  // Note: All settings modules now auto-register via static constructors
-  // No manual registration needed
-
-  // Load settings from file if it exists (will overwrite defaults)
   bool haveSettings = false;
   if (filesystemReady) {
     FsLockGuard guard("settings.exists");
@@ -1046,60 +1012,23 @@ void hardwareone_setup() {
   }
 
   if (filesystemReady && haveSettings) {
-    Serial.println("[DEBUG] Settings file exists, about to read");
-    Serial.flush();
-
-    bool settingsLoaded = readSettingsJson();
-    if (settingsLoaded) {
-      Serial.println("[DEBUG] Settings loaded successfully");
-      Serial.flush();
-      // NOTE: applySettings() moved to after initDebugSystem() so debug queue exists
-      
-      // Initialize modular command system early
-      Serial.println("[DEBUG] About to initialize command system");
-      Serial.flush();
-      initializeCommandSystem();
-      
-      // Print debug summary of auto-registered command modules
-      printCommandModuleSummary();
-      Serial.println("[DEBUG] Command system initialization completed");
-      Serial.flush();
+    if (readSettingsJson()) {
+      Serial.println("[Settings] Loaded from file");
     }
-  } else {
-    if (!filesystemReady) {
-      Serial.println("[DEBUG] Filesystem not ready - using defaults");
-    } else {
-      Serial.println("[DEBUG] No settings file, writing defaults");
-    }
-    Serial.flush();
-    // No settings file exists or filesystem not ready, write defaults if possible
-    if (filesystemReady) {
-      writeSettingsJson();
-      // NOTE: applySettings() moved to after initDebugSystem() so debug queue exists
-      
-      // Initialize modular command system early
-      Serial.println("[DEBUG] About to initialize command system (default settings)");
-      Serial.flush();
-      initializeCommandSystem();
-      
-      // Print debug summary of auto-registered command modules
-      printCommandModuleSummary();
-      Serial.println("[DEBUG] Command system initialization completed (default settings)");
-      Serial.flush();
-    }
+  } else if (filesystemReady) {
+    Serial.println("[Settings] No file found, writing defaults");
+    writeSettingsJson();
   }
 
-  // FALLBACK: Ensure command system is always initialized
-  // This handles the case where filesystem failed and no settings were applied
-  if (!gCommands || gCommandsCount == 0) {
-    Serial.println("[DEBUG] Initializing command system (fallback - no settings loaded)");
-    Serial.flush();
-    initializeCommandSystem();
-    
-    // Print debug summary of auto-registered command modules
-    printCommandModuleSummary();
-    Serial.println("[DEBUG] Command system initialization completed (fallback)");
-    Serial.flush();
+  // Command system init — single call after settings are resolved
+  // NOTE: applySettings() deferred until after initDebugSystem() so debug queue exists
+  initializeCommandSystem();
+
+  // Persist crash counter from RTC memory into settings
+  if (filesystemReady) {
+    gSettings.crashCount     = rtcCrashCount;
+    gSettings.lastResetReason = rtcLastResetReason;
+    writeSettingsJson();
   }
 
   // If time is already valid (warm boot, retained RTC), resolve user creation times early
@@ -1109,21 +1038,15 @@ void hardwareone_setup() {
 
   // Generate unique boot ID for session versioning
   uint64_t chipId = ESP.getEfuseMac();
-  String part1 = String((uint32_t)(chipId >> 32), HEX);
-  String part2 = String((uint32_t)chipId, HEX);
-  String part3 = String(millis());
-  gBootId = part1 + part2 + "_" + part3;
-  DEBUG_SYSTEMF("Generated boot ID: %s", gBootId.c_str());
+  gBootId = String((uint32_t)(chipId >> 32), HEX) + String((uint32_t)chipId, HEX) + "_" + String(millis());
 
-  // Build identifier banner
   broadcastOutput("[build] Firmware: reg-json-debug-1");
-  DEBUG_SYSTEMF("Setup continuing after banner");
 
-  // ========================================
-  // CRITICAL: Create ALL mutexes and semaphores FIRST before any tasks or I2C operations
-  // ========================================
+  // ========================================================================
+  // 3. MUTEXES + DEBUG SYSTEM + BUFFERS
+  // ========================================================================
 
-  // Initialize sensor cache mutexes conditionally (only for enabled sensors)
+  // Sensor cache mutexes (one per enabled sensor)
 #if ENABLE_THERMAL_SENSOR
   if (!gThermalCache.mutex) {
     gThermalCache.mutex = xSemaphoreCreateMutex();
@@ -1184,38 +1107,16 @@ void hardwareone_setup() {
   }
 #endif
 
-  // Legacy cache removed - each sensor now manages its own cache mutex
-
-
-  // Initialize all global mutexes (fsMutex, gJsonResponseMutex, gMeshRetryMutex, etc.)
-  // i2c bus mutex is owned by I2CDeviceManager — centralized in mutex_system.cpp
+  // Global mutexes (fsMutex, gJsonResponseMutex, gMeshRetryMutex, etc.)
   initMutexes();
 
-  // Initialize sensor startup queue mutex (in i2c_system.cpp) - only if I2C bus enabled
   if (gSettings.i2cBusEnabled) {
     initSensorQueue();
-    Serial.println("[I2C_SENSORS] I2C bus enabled - sensor queue initialized");
-  } else {
-    Serial.println("[I2C_SENSORS] Runtime disabled - skipping sensor queue initialization");
   }
 
-
-  // ========================================
-  // Allocate buffers and resources (no tasks yet)
-  // ========================================
-
-  // (Removed) gStreamBuffer allocation - was never used, saving 4.5KB
-
-  // Initialize debug system (buffer + ring buffer)
+  // Debug system must be up before applySettings() (debug queue/task needed for flag writes)
   initDebugSystem();
-
-  // CRITICAL: Apply debug flags AFTER debug system is initialized
-  // This ensures the debug queue/task exists when flags are set
-  DEBUG_SYSTEMF("Applying settings (debug flags, output routing, etc.)");
   applySettings();
-  DEBUG_SYSTEMF("Settings applied - debug flags now active");
-
-  // Memory baseline right after debug buffer is ready
   heapLogSummary("boot.after_debugbuf");
 
   // Initialize shared JSON response buffer for handlers
@@ -1242,9 +1143,7 @@ void hardwareone_setup() {
   }
 #endif
 
-  // ========================================
-  // Now safe to create command executor queue and task
-  // ========================================
+  // Command executor task (mutexes + debug system must be ready)
   if (!gCmdExecQ) {
     gCmdExecQ = xQueueCreate(6, sizeof(ExecReq*));
     if (!gCmdExecQ) {
@@ -1252,7 +1151,7 @@ void hardwareone_setup() {
       while (1) delay(1000);
     }
     const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;  // words (≈24 KB) - automation run + debug vsnprintf frames need deep stack
-    if (xTaskCreateLogged(commandExecTask, "cmd_exec_task", cmdExecStackWords, nullptr, 1, &gCmdExecTaskHandle, "cmd.exec") != pdPASS) {
+    if (xTaskCreateLogged(commandExecTask, "cmd_exec_task", cmdExecStackWords, nullptr, TASK_PRIORITY_LOW, &gCmdExecTaskHandle, "cmd.exec") != pdPASS) {
       Serial.println("FATAL: Failed to create command exec task");
       while (1) delay(1000);
     }
@@ -1262,34 +1161,25 @@ void hardwareone_setup() {
 #endif
   }
 
-  // NTP sync runs synchronously in cmd_exec task (no dedicated NTP task needed)
-
-  // Initialize battery monitoring (Feather ESP32 battery on A13/GPIO35)
+  // ========================================================================
+  // 4. HARDWARE INIT — battery, LED, I2C buses
+  // ========================================================================
   initBattery();
-  
-  // Initialize NeoPixel LED (also enables NEOPIXEL_I2C_POWER on Feather V2)
-  // CRITICAL: Must be called BEFORE initI2CBuses() to power STEMMA QT connector
-  initNeoPixelLED();
-  
-  // Initialize I2C buses early for OLED boot animation
-  // Centralized initialization in i2c_system.cpp
- #if ENABLE_I2C_SYSTEM
-  initI2CBuses();
-  
-  // Suppress ESP-IDF I2C driver NACK spam (legitimately occurs during FM radio RDS polling)
-  // The RDA5807M FM radio chip returns NACK when polled for RDS data that isn't ready yet
-  // This is intentional protocol behavior, not an error - suppress routine I2C logs
-  esp_log_level_set("i2c.master", ESP_LOG_WARN);  // Only show WARN and ERROR, suppress INFO/DEBUG
-  DEBUG_SENSORSF("[I2C] ESP-IDF I2C driver log level set to WARN (suppresses routine NACK messages)");
+  initNeoPixelLED();  // Must precede I2C — powers STEMMA QT connector on Feather V2
 
-  // Early boot RTC sync: set system time from RTC before WiFi/NTP
-  // Zero-allocation: just a quick I2C read + settimeofday()
+#if ENABLE_I2C_SYSTEM
+  initI2CBuses();
+  esp_log_level_set("i2c.master", ESP_LOG_WARN);  // Suppress routine NACK spam from FM radio RDS polling
+
+  // Early silent RTC sync (zero-alloc I2C read + settimeofday) — verbose sync happens later
   #if ENABLE_RTC_SENSOR
   rtcEarlyBootSync();
   #endif
- #endif
+#endif
 
-  // Show modular sensor configuration (always visible during boot)
+  // ========================================================================
+  // 5. BUILD CONFIG BANNER + OLED EARLY INIT
+  // ========================================================================
   Serial.println();
   Serial.printf("========== HARDWAREONE v%s BUILD CONFIGURATION ==========\n", esp_app_get_description()->version);
 #if ENABLE_THERMAL_SENSOR
@@ -1345,38 +1235,22 @@ void hardwareone_setup() {
   Serial.println("========================================================");
   Serial.println();
 
-  // Servo profiles initialization moved to i2csensor-pca9685.cpp (initialized when first servo command is used)
-
-  // Quick OLED detection and initialization for boot animation
-  // This happens BEFORE WiFi/NTP so animation shows during slow setup operations
+  // OLED early init — boot animation runs during slow WiFi/NTP phases below
   oledEarlyInit();
 
-  // Mutexes already created earlier in setup() - safe to create tasks now
-
-  // Create sensor queue processor task only if I2C bus is enabled
- #if ENABLE_I2C_SYSTEM
+#if ENABLE_I2C_SYSTEM
   if (gSettings.i2cBusEnabled && !queueProcessorTask) {
-    const uint32_t queueStackWords = SENSOR_QUEUE_STACK_WORDS;  // ~12KB (measured min free during IMU start: ~1408 bytes)
-    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, 1, &queueProcessorTask, "sensor.queue") != pdPASS) {
+    const uint32_t queueStackWords = SENSOR_QUEUE_STACK_WORDS;
+    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, TASK_PRIORITY_LOW, &queueProcessorTask, "sensor.queue") != pdPASS) {
       Serial.println("FATAL: Failed to create sensor queue processor task");
       while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
-
- #if DEBUG_MEM_SUMMARY
+#if DEBUG_MEM_SUMMARY
     heapLogSummary("boot.after_task.sensor_queue");
- #endif
-  } else if (!gSettings.i2cBusEnabled) {
-    INFO_I2CF("[I2C_SENSORS] Queue processor task skipped (I2C bus disabled - saves ~12KB RAM)");
+#endif
   }
- #endif
+#endif
 
-  // Per-sensor tasks will be created lazily on first start to conserve RAM
-
-
-  // WiFi networks array already allocated early (before settings load)
-  // See allocation near top of setup() before readSettingsJson()
-
-  // Initialize session entries array
 #if ENABLE_HTTP_SERVER
   if (!gSessions) {
     gSessions = (SessionEntry*)ps_alloc(MAX_SESSIONS * sizeof(SessionEntry), AllocPref::PreferPSRAM, "sessions");
@@ -1403,22 +1277,11 @@ void hardwareone_setup() {
     }
   }
 #endif
-
-
-
-  // Now safe to emit output (may allocate and will be logged)
+  // ========================================================================
+  // 6. FIRST-TIME SETUP + CREDENTIALS
+  // ========================================================================
   broadcastOutput("");
   broadcastOutput("Booting ESP32 Minimal Auth");
-
-  // Settings already loaded early (before allocations) for conditional resource allocation
-
-#if ENABLE_WIFI
-  // WiFi initialization deferred to first use (lazy init saves ~32KB at boot)
-  // WiFi will be initialized when user calls wificonnect or enables via quick settings
-  DEBUG_WIFIF("[Boot] WiFi initialization deferred (lazy init)");
-#endif
-
-  // First-time setup if needed (prompts on Serial, adds WiFi credentials)
   if (gFirstTimeSetupState == SETUP_NOT_NEEDED) {
     oledSetBootProgress(10, "Checking setup");
   } else {
@@ -1459,7 +1322,9 @@ void hardwareone_setup() {
   }
 #endif
 
-  // Network - WiFi auto-start enabled by default
+  // ========================================================================
+  // 7. NETWORK — WiFi + NTP
+  // ========================================================================
 #if ENABLE_WIFI
   oledSetBootProgress(30, "Connecting WiFi");
 
@@ -1522,10 +1387,9 @@ void hardwareone_setup() {
   oledSetBootProgress(50, "Continuing offline");
 #endif
 
-  Serial.println("[DEBUG] About to start device discovery");
-  Serial.flush();
-
-  // Initialize device registry (after I2C system is ready)
+  // ========================================================================
+  // 8. DEVICE DISCOVERY + SERVICE AUTO-START
+  // ========================================================================
   oledSetBootProgress(60, "Scanning devices");
 
   DEBUG_SYSTEMF("Starting device discovery");
@@ -1549,8 +1413,6 @@ void hardwareone_setup() {
 
   // Apply OLED settings if display was initialized early
   oledApplySettings();
-
-  // Gamepad auto-initialization removed: use opengamepad (queued) to start
 
   // Bluetooth - auto-start if enabled in settings
 #if ENABLE_BLUETOOTH
@@ -1683,23 +1545,12 @@ void hardwareone_setup() {
 #endif
 
 #if ENABLE_AUTOMATION
-  // Finally, run boot automations if configured
-  Serial.println("[DEBUG] About to run boot automations");
-  Serial.flush();
   runAutomationsOnBoot();
-  Serial.println("[DEBUG] Boot automations completed");
-  Serial.flush();
 #endif
 
-  // ESP-NOW auto-initialization (if enabled in settings) - moved to end of boot
-  // This ensures all systems (WiFi, filesystem, settings) are fully initialized
 #if ENABLE_ESPNOW
-  Serial.println("[DEBUG] Checking ESP-NOW settings");
-  Serial.flush();
   if (gSettings.espnowenabled) {
     broadcastOutput("[ESP-NOW] Auto-initialization enabled in settings");
-    
-    // Check first-time setup before attempting init
     const char* setupError = checkEspNowFirstTimeSetup();
     if (setupError && strlen(setupError) > 0) {
       broadcastOutput("[ESP-NOW] Auto-init skipped - first-time setup required:");
@@ -1707,55 +1558,40 @@ void hardwareone_setup() {
       broadcastOutput("[ESP-NOW] Set device name with: espnow setname <name>");
     } else {
       broadcastOutput("[ESP-NOW] Initializing...");
-      const char* result = cmd_espnow_init("");  // Empty string is fine - validation happens in function
+      const char* result = cmd_espnow_init("");
       broadcastOutput(result);
 #if DEBUG_MEM_SUMMARY
       heapLogSummary("boot.after_espnow_init");
 #endif
     }
-  } else {
-    DEBUG_SYSTEMF("ESP-NOW Auto-init: Disabled by setting (enable in web settings)");
   }
-  Serial.println("[DEBUG] ESP-NOW check completed");
-  Serial.flush();
-  
-  // Send boot notification if ESP-NOW is active (whether just initialized or already running)
-#if ENABLE_ESPNOW
+
+  // Send boot notification if ESP-NOW is active
   extern EspNowState* gEspNow;
   if (gEspNow && gEspNow->initialized) {
     extern String buildBootNotification(uint32_t msgId, const char* src, uint32_t bootCounter, uint32_t timestamp);
     extern void meshSendEnvelopeToPeers(const String& envelope);
     extern uint32_t generateMessageId();
-    
+
     time_t now = time(nullptr);
-    uint32_t timestamp = (now > 1609459200) ? now : 0;  // Valid if after 2021-01-01
-    
+    uint32_t timestamp = (now > 1609459200) ? now : 0;
+
     String bootMsg = buildBootNotification(generateMessageId(), gEspNow->deviceName.c_str(), gBootCounter, timestamp);
     meshSendEnvelopeToPeers(bootMsg);
     BROADCAST_PRINTF("[ESP-NOW] Boot notification sent (counter=%lu)", (unsigned long)gBootCounter);
   }
 #endif
-#endif
 
-  // Boot mode transition will be handled in loop() based on oledBootDuration setting
-
-  // Print command/settings module summaries, then comprehensive memory report
-  Serial.println("[DEBUG] About to print command module summary");
-  Serial.flush();
+  // ========================================================================
+  // 9. BOOT-COMPLETE DIAGNOSTICS
+  // ========================================================================
   printCommandModuleSummary();
-  Serial.println("[DEBUG] About to print settings module summary");
-  Serial.flush();
   printSettingsModuleSummary();
-  Serial.println("[DEBUG] About to print boot memory report");
-  Serial.flush();
   printMemoryReport();
-  // Deferred logging auto-start: sensors are queued but may still be initializing.
-  // sensorLogTick() handles missing sensor data gracefully, so safe to enable now.
   sensorLogAutoStart();
   systemLogAutoStart();
 
-  Serial.println("[DEBUG] Setup() completed!");
-  Serial.flush();
+  Serial.println("[Boot] Setup complete");
 }
 
 

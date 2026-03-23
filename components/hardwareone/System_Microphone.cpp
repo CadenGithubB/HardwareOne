@@ -13,6 +13,7 @@
 #include <LittleFS.h>
 #include "System_MemUtil.h"
 #include "System_Debug.h"
+#include "System_TaskUtils.h"
 #include "System_Command.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
@@ -340,13 +341,12 @@ bool startRecording() {
   sensorStatusBumpWith("micrecstart");
   
   // Start recording task
-  DEBUG_MICF("[MIC_START_REC] Creating recording task (stack=4096, priority=5, core=1)...");
   BaseType_t taskCreated = xTaskCreatePinnedToCore(
     recordingTask,
     "mic_record",
-    4096,
+    MIC_RECORD_STACK_WORDS,
     nullptr,
-    5,
+    TASK_PRIORITY_HIGH,
     &recordingTaskHandle,
     1
   );
@@ -1105,7 +1105,7 @@ const char* cmd_micviz(const String& argsInput) {
   }
   
   gMicVisualizerRunning = true;
-  xTaskCreatePinnedToCore(micVisualizerTaskFunc, "mic_viz", 4096, nullptr, 3, &gMicVisualizerTask, 0);
+  xTaskCreatePinnedToCore(micVisualizerTaskFunc, "mic_viz", MIC_VIZ_STACK_WORDS, nullptr, TASK_PRIORITY_NORMAL, &gMicVisualizerTask, 0);
   return "Visualizer started (press any key to stop)";
 }
 

@@ -70,7 +70,7 @@ bool verifyUserPassword(const String& inputPassword, const String& storedHash);
 // User account ban (persisted in users.json "banned" field)
 bool isUserBanned(const String& username);
 
-// Update the "lastSeenSec" field in users.json for the given username.
+// Update the "lastSeen" ISO-8601 timestamp in users.json for the given username.
 // Only writes if the system clock is valid. Call after any successful login.
 void updateUserLastSeen(const String& username);
 

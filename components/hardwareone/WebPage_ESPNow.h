@@ -25,10 +25,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
 .espnow-description { color: var(--muted); margin-bottom: 15px; font-size: 0.9em; }
 .espnow-controls { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
 .espnow-data { background: var(--crumb-bg); border-radius: 8px; padding: 15px; font-family: 'Courier New', monospace; font-size: 0.9em; min-height: 60px; color: var(--panel-fg); }
-.status-indicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
-.status-enabled { background: #28a745; animation: pulse 2s infinite; }
-.status-disabled { background: #dc3545; }
-@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
 .device-list { background: var(--crumb-bg); border-radius: 8px; padding: 15px; margin-bottom: 15px; }
 .device-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .device-item:last-child { border-bottom: none; }
@@ -43,7 +39,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
 .encryption-disabled { background: var(--muted); }
 .message-log { background: var(--crumb-bg); border-radius: 8px; padding: 15px; max-height: 300px; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
 .message-bubble { max-width: 75%; width: fit-content; padding: 10px 14px; border-radius: 16px; position: relative; word-wrap: break-word; overflow-wrap: break-word; min-width: 0; animation: slideIn 0.2s ease-out; }
-@keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 .message-received { align-self: flex-start; background: rgba(128,128,128,0.25); color: var(--panel-fg); border-bottom-left-radius: 4px; border: 1px solid rgba(128,128,128,0.15); }
 .message-sent { align-self: flex-end; background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
 .message-error { align-self: flex-end; background: var(--danger); color: var(--panel-fg); border-bottom-right-radius: 4px; }
@@ -144,7 +139,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <button class='btn' id='btn-pair-secure'>Pair (Encrypted)</button>
 </div>
 <div class='device-list' id='device-list'>
-<div style='color: #666; text-align: center;'>No devices paired yet</div>
+<div style='color:var(--muted); text-align: center;'>No devices paired yet</div>
 </div>
 </div>
 <div class='espnow-card' id='mesh-status-card' style='display:none;'>
@@ -325,6 +320,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           try { if (typeof window.checkEncryptionStatus === 'function') { window.checkEncryptionStatus(); } } catch(e) { console.warn('[ESP-NOW] checkEncryptionStatus call error:', e); }
           /* Load smart home metadata */
           try { if (typeof window.loadSmartHomeMetadata === 'function') { window.loadSmartHomeMetadata(); } } catch(e) { console.warn('[ESP-NOW] loadSmartHomeMetadata call error:', e); }
+          /* Start message polling now that ESP-NOW is initialized */
+          if (typeof window.espnowStartPolling === 'function') { window.espnowStartPolling(); }
         } else {
           indicator.className = 'status-indicator status-disabled';
           /* Show init button, hide disable button */
@@ -338,6 +335,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           /* Also hide mesh status card until initialized */
           var meshCard = document.getElementById('mesh-status-card');
           if (meshCard) { meshCard.style.display = 'none'; }
+          /* Stop message polling since ESP-NOW is not initialized */
+          if (typeof window.espnowStopPolling === 'function') { window.espnowStopPolling(); }
         }
       })
       .then(() => {
@@ -513,7 +512,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         try { parsed = JSON.parse(output); } catch(e) { parsed = null; }
         const devices = (parsed && Array.isArray(parsed.devices)) ? parsed.devices : [];
         if (devices.length === 0) {
-          deviceList.innerHTML = '<div style="color: #666; text-align: center;">No devices paired yet</div>';
+          deviceList.innerHTML = '<div style="color:var(--muted); text-align: center;">No devices paired yet</div>';
         } else {
           let html = '';
           for (const dev of devices) {
@@ -2891,7 +2890,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         });
       });
       _on('btn-clear-log','click', function() {
-        document.getElementById('message-log').innerHTML = '<div style="color: #666; text-align: center;">Message log cleared</div>';
+        document.getElementById('message-log').innerHTML = '<div style="color:var(--muted); text-align: center;">Message log cleared</div>';
         window.messageCount = 0;
       });
       /* File transfer button handlers */
@@ -2937,7 +2936,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       /* Remote command button handlers */
       _on('btn-send-remote','click', executeRemoteCommand);
       _on('btn-clear-remote-log','click', function() {
-        document.getElementById('remote-results-log').innerHTML = '<div style="color: #666; text-align: center;">Remote command results cleared</div>';
+        document.getElementById('remote-results-log').innerHTML = '<div style="color:var(--muted); text-align: center;">Remote command results cleared</div>';
       });
       /* Enter key support for remote command */
       _on('remote-command','keypress', function(e) {
@@ -3260,29 +3259,25 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
   }
   
   function startPolling() {
-    console.log('[ESP-NOW] startPolling called, pollInterval=' + pollInterval);
-    if (pollInterval || authFailed) {
-      console.log('[ESP-NOW] Polling already active or auth failed, skipping');
-      return;
-    }
-    console.log('[ESP-NOW] Starting polling (500ms interval)');
+    if (pollInterval || authFailed) return;
+    console.log('[ESP-NOW] Starting message polling (500ms)');
     pollEspNowMessages();
     pollInterval = setInterval(pollEspNowMessages, 500);
-    console.log('[ESP-NOW] Polling started, interval ID=' + pollInterval);
   }
-  
+
   function stopPolling() {
     if (pollInterval) {
+      console.log('[ESP-NOW] Stopping message polling');
       clearInterval(pollInterval);
       pollInterval = null;
     }
   }
-  
+
+  // Expose so refreshStatus() can gate polling on init state
+  window.espnowStartPolling = startPolling;
+  window.espnowStopPolling = stopPolling;
+
   window.addEventListener('beforeunload', stopPolling);
-  
-  document.addEventListener('DOMContentLoaded', function(){
-    startPolling();
-  });
 })();
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);

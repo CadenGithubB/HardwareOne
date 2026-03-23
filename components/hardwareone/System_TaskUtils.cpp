@@ -180,7 +180,7 @@ bool createThermalTask() {
   }
   if (thermalTaskHandle == nullptr) {
     const uint32_t thermalStack = THERMAL_STACK_WORDS;  // words; ~16KB (reduced from 24KB - frame buffers moved to PSRAM)
-    if (xTaskCreateLogged(thermalTask, "thermal_task", thermalStack, nullptr, 1, &thermalTaskHandle, "thermal") != pdPASS) {
+    if (xTaskCreateLogged(thermalTask, "thermal_task", thermalStack, nullptr, TASK_PRIORITY_LOW, &thermalTaskHandle, "thermal") != pdPASS) {
       return false;
     }
   }
@@ -197,7 +197,7 @@ bool createIMUTask() {
   }
   if (imuTaskHandle == nullptr) {
     const uint32_t imuStack = IMU_STACK_WORDS;  // words; ~16KB (BNO055 init retries need extra stack)
-    if (xTaskCreateLogged(imuTask, "imu_task", imuStack, nullptr, 1, &imuTaskHandle, "imu") != pdPASS) {
+    if (xTaskCreateLogged(imuTask, "imu_task", imuStack, nullptr, TASK_PRIORITY_LOW, &imuTaskHandle, "imu") != pdPASS) {
       return false;
     }
     DEBUG_CLIF("imustart: IMU task created successfully");
@@ -215,7 +215,7 @@ bool createToFTask() {
   }
   if (tofTaskHandle == nullptr) {
     const uint32_t tofStack = TOF_STACK_WORDS;  // words; ~12KB
-    if (xTaskCreateLogged(tofTask, "tof_task", tofStack, nullptr, 1, &tofTaskHandle, "tof") != pdPASS) {
+    if (xTaskCreateLogged(tofTask, "tof_task", tofStack, nullptr, TASK_PRIORITY_LOW, &tofTaskHandle, "tof") != pdPASS) {
       DEBUG_CLIF("tofstart: FAILED to create ToF task");
       return false;
     }
@@ -233,7 +233,7 @@ bool createFMRadioTask() {
   }
   if (fmRadioTaskHandle == nullptr) {
     const uint32_t fmRadioStack = FMRADIO_STACK_WORDS;  // words; ~18KB
-    if (xTaskCreateLogged(fmRadioTask, "fmradio_task", fmRadioStack, nullptr, 1, &fmRadioTaskHandle, "fmradio") != pdPASS) {
+    if (xTaskCreateLogged(fmRadioTask, "fmradio_task", fmRadioStack, nullptr, TASK_PRIORITY_LOW, &fmRadioTaskHandle, "fmradio") != pdPASS) {
       DEBUG_CLIF("fmradiostart: FAILED to create FM Radio task");
       return false;
     }

@@ -731,11 +731,31 @@ bool writeText(const char* path, const String& in) {
     return false;
   }
   f.print(in);
+  f.flush();
   f.close();
-  
+
   // Resume sensor polling
   gSensorPollingPaused = wasPaused;
   return true;
+}
+
+bool writeTextAtomic(const char* path, const String& content) {
+  String tmp = String(path) + ".tmp";
+
+  // Write to temp file first
+  if (!writeText(tmp.c_str(), content)) return false;
+
+  // Atomic rename (LittleFS rename overwrites destination)
+  {
+    FsLockGuard guard("atomicRename");
+    if (LittleFS.rename(tmp.c_str(), path)) {
+      return true;
+    }
+  }
+
+  // Fallback: direct write if rename fails
+  LittleFS.remove(tmp.c_str());
+  return writeText(path, content);
 }
 
 // ============================================================================
@@ -1192,6 +1212,16 @@ const char* cmd_status(const String& argsInput) {
     BROADCAST_PRINTF("  Free PSRAM: %lu bytes", (unsigned long)ESP.getFreePsram());
     BROADCAST_PRINTF("  Total PSRAM: %lu bytes", (unsigned long)psTot);
   }
+
+  // Reset reason labels matching esp_reset_reason_t
+  static const char* const kResetReasonLabels[] = {
+    "Unknown", "Power-on", "External", "Software", "Panic",
+    "Int WDT", "Task WDT", "WDT", "Deepsleep", "Brownout", "SDIO"
+  };
+  uint32_t reason = gSettings.lastResetReason;
+  const char* reasonLabel = (reason < 11) ? kResetReasonLabels[reason] : "Unknown";
+  BROADCAST_PRINTF("  Last Reset: %s", reasonLabel);
+  BROADCAST_PRINTF("  Crash Count: %lu", (unsigned long)gSettings.crashCount);
 
   return "OK";
 }
@@ -1917,16 +1947,7 @@ size_t calculateSensorSystemMemory() {
 // System Diagnostic Commands
 // ============================================================================
 
-// Allocation tracking (struct defined here to avoid incomplete-type issues)
-struct AllocEntry {
-  char tag[24];
-  size_t totalBytes;
-  size_t psramBytes;
-  size_t dramBytes;
-  uint16_t count;
-  bool isActive;
-};
-extern AllocEntry gAllocTracker[];
+// AllocEntry struct + gAllocTracker declared in System_MemUtil.h
 extern int gAllocTrackerCount;
 extern bool gAllocTrackerEnabled;
 
@@ -1935,42 +1956,8 @@ extern volatile UBaseType_t gTofWatermarkNow, gTofWatermarkMin;
 extern volatile UBaseType_t gIMUWatermarkNow, gIMUWatermarkMin;
 extern volatile UBaseType_t gThermalWatermarkNow, gThermalWatermarkMin;
 
-// Command/context types (not in a shared header yet)
-enum CommandOrigin { ORIGIN_SERIAL, ORIGIN_WEB, ORIGIN_AUTOMATION, ORIGIN_SYSTEM };
-enum CmdOutputMask { CMD_OUT_SERIAL = 1 << 0,
-                     CMD_OUT_WEB = 1 << 1,
-                     CMD_OUT_LOG = 1 << 2,
-                     CMD_OUT_BROADCAST = 1 << 3 };
-struct CommandContext {
-  CommandOrigin origin;
-  AuthContext auth;
-  uint32_t id;
-  uint32_t timestampMs;
-  uint32_t outputMask;
-  bool validateOnly;
-  void* replyHandle;
-  httpd_req_t* httpReq;
-};
-struct Command {
-  String line;
-  CommandContext ctx;
-};
-
-// Async callback type for fire-and-forget command execution
-typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
-
-// Exec request structure (same layout as in .ino)
-struct ExecReq {
-  char line[2048];  // Full size for ESP-NOW chunking
-  CommandContext ctx;
-  char out[2048];   // Result buffer (2KB)
-  SemaphoreHandle_t done;  // NULL for async mode
-  bool ok;
-  
-  // Async callback mode
-  ExecAsyncCallback asyncCallback;
-  void* asyncUserData;
-};
+// Command/context types - shared header eliminates duplication
+#include "System_CommandTypes.h"
 
 // External memory allocation function
 extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);

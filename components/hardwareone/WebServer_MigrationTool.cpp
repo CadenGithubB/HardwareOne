@@ -33,8 +33,7 @@
 #include "WebServer_Server.h"
 #include "WebServer_MigrationTool.h"
 
-// External dependencies
-extern httpd_handle_t server;
+// External dependencies (httpd_handle_t server declared in WebServer_Server.h)
 extern bool filesystemReady;
 extern bool readText(const char* path, String& out);
 extern bool writeText(const char* path, const String& content);
@@ -79,7 +78,7 @@ static void addFileToBackup(JsonObject& files, JsonArray& warnings, const char* 
     return;
   }
   // Try to parse as JSON; if valid, store as object; otherwise store as string
-  JsonDocument tmpDoc;
+  PSRAM_JSON_DOC(tmpDoc);
   DeserializationError err = deserializeJson(tmpDoc, content);
   if (!err) {
     files[path] = tmpDoc.as<JsonVariant>();
@@ -123,7 +122,7 @@ static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, JsonArr
         if (content.length() > 0) {
           // Try to parse JSON files as objects
           if (path.endsWith(".json")) {
-            JsonDocument tmpDoc;
+            PSRAM_JSON_DOC(tmpDoc);
             DeserializationError err = deserializeJson(tmpDoc, content);
             if (!err) {
               files[path] = tmpDoc.as<JsonVariant>();
@@ -182,7 +181,6 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_HTTPF("[Backup] Auth context created, transport=%d", ctx.transport);
   if (!tgRequireAuth(ctx)) {
-    DEBUG_HTTPF("[Backup] Authentication failed - returning 401");
     return ESP_OK;
   }
   DEBUG_HTTPF("[Backup] Authentication successful, user=%s", ctx.user.c_str());
@@ -206,7 +204,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   bool wantEspnow = false, wantMaps = false, wantCerts = false;
 
   if (received > 0) {
-    JsonDocument reqDoc;
+    PSRAM_JSON_DOC(reqDoc);
     if (deserializeJson(reqDoc, body) == DeserializationError::Ok) {
       JsonArray cats = reqDoc["categories"].as<JsonArray>();
       for (JsonVariant cat : cats) {
@@ -248,7 +246,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   device["firmwareVersion"] = esp_app_get_description()->version;
 
   // Build system info for ip
-  JsonDocument sysDoc;
+  PSRAM_JSON_DOC(sysDoc);
   buildSystemInfoJson(sysDoc);
   if (!sysDoc["net"].isNull()) {
     device["ip"] = sysDoc["net"]["ip"].as<String>();
@@ -411,7 +409,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
   JsonObject files = doc["files"].as<JsonObject>();
   int filesWritten = 0;
   int filesErrored = 0;
-  JsonDocument resultDoc;
+  PSRAM_JSON_DOC(resultDoc);
   JsonArray warnings = resultDoc["warnings"].to<JsonArray>();
 
   for (JsonPair kv : files) {

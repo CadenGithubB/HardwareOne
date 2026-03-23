@@ -37,7 +37,7 @@ extern TwoWire Wire1;
 TofCache gTofCache;
 
 // Debug macros (use centralized versions from debug_system.h)
-#define MIN_RESTART_DELAY_MS 2000
+// MIN_RESTART_DELAY_MS defined in System_I2C.h
 
 // ToF sensor state (definitions)
 bool tofEnabled = false;
@@ -494,7 +494,7 @@ int buildToFDataJSON(char* buf, size_t bufSize) {
 
   int pos = 0;
 
-  if (gTofCache.mutex && xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {  // 100ms timeout for HTTP response
+  if (gTofCache.mutex && xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS)) == pdTRUE) {
     if (!gTofCache.tofDataValid) {
       if (isDebugFlagSet(DEBUG_TOF_FRAME)) {
         DEBUG_TOF_FRAMEF("buildToFDataJSON: tofDataValid=%s, tofEnabled=%d, tofConnected=%d, lastUpdate=%lu",
@@ -677,10 +677,7 @@ void tofTask(void* parameter) {
         gTofCache.tofObjects[j].detected = false;
         gTofCache.tofObjects[j].valid = false;
       }
-      INFO_SENSORSF("[ToF] Task disabled - cleaning up and deleting");
-      // NOTE: Do NOT clear tofTaskHandle here - let create function use eTaskGetState()
-      // to detect stale handles. Clearing here creates a race condition window.
-      vTaskDelete(nullptr);
+      SENSOR_TASK_EXIT("ToF");
     }
     
     // Update watermark diagnostics (only when enabled)
@@ -715,7 +712,7 @@ void tofTask(void* parameter) {
         
         // Auto-disable if too many consecutive failures
         if (!ok) {
-          if (i2cShouldAutoDisable(I2C_ADDR_TOF, 5)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_TOF)) {
             ERROR_SENSORSF("Too many consecutive ToF failures - auto-disabling");
             tofEnabled = false;
             sensorStatusBumpWith("tof@auto_disabled");
@@ -729,23 +726,12 @@ void tofTask(void* parameter) {
         
         // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW
-        // Check mesh mode (worker role) OR bond mode (worker role)
-        bool shouldStream = false;
-        if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
-          shouldStream = true;
-        }
-#if ENABLE_BONDED_MODE
-        if (gSettings.bondModeEnabled && isBondWorker()) {
-          shouldStream = true;  // Bond mode worker
-        }
-#endif
-        
-        if (ok && shouldStream) {
+        if (ok && shouldStreamSensorToRemote()) {
           // Build ToF JSON from cache
           char tofJson[1024];
           int jsonLen = buildToFDataJSON(tofJson, sizeof(tofJson));
           if (jsonLen > 0) {
-            sendSensorDataUpdate(REMOTE_SENSOR_TOF, String(tofJson));
+            sendSensorDataUpdate(REMOTE_SENSOR_TOF, tofJson, jsonLen);
           }
         }
 #endif

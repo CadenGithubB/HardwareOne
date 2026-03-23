@@ -18,17 +18,9 @@
 #include "System_Settings.h"
 #include "System_Debug.h"
 
-// Logging mode state enum (must match OLED_Display.h if defined there)
-enum LoggingMenuState {
-  LOG_MENU_MAIN,
-  LOG_MENU_SENSOR,
-  LOG_MENU_SYSTEM,
-  LOG_MENU_SENSOR_CONFIG,
-  LOG_MENU_VIEWER
-};
-
-static LoggingMenuState loggingCurrentState = LOG_MENU_MAIN;
-static int loggingMenuSelection = 0;
+// LoggingMenuState enum and extern declarations in OLED_Utils.h
+LoggingMenuState loggingCurrentState = LOG_MENU_MAIN;
+int loggingMenuSelection = 0;
 static int loggingSensorConfigSelection = 0;
 static OLEDScrollState loggingConfigScroll;
 

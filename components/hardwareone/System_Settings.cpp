@@ -882,20 +882,21 @@ bool writeSettingsJson() {
 
   // Serialize JSON directly to file (no intermediate buffer)
   size_t bytesWritten = serializeJson(doc, file);
+  file.flush();
   file.close();
   fsUnlock();
 
   if (bytesWritten == 0) {
     ERROR_STORAGEF("Failed to serialize JSON");
+    LittleFS.remove(tmp);
     gSensorPollingPaused = wasPaused;
     return false;
   }
 
   DEBUG_STORAGEF("[Settings] Wrote %zu bytes to temp file", bytesWritten);
 
-  // Atomic rename
+  // Atomic rename (LittleFS rename overwrites destination)
   fsLock("settings.rename");
-  LittleFS.remove(SETTINGS_JSON_FILE);
   bool okRename = LittleFS.rename(tmp, SETTINGS_JSON_FILE);
   fsUnlock();
 
@@ -910,6 +911,7 @@ bool writeSettingsJson() {
       return false;
     }
     serializeJson(doc, directFile);
+    directFile.flush();
     directFile.close();
     fsUnlock();
   }
@@ -1292,6 +1294,7 @@ static const SettingEntry debugSettingEntries[] = {
 #endif
   { "i2c",              SETTING_BOOL, &gSettings.debugI2C,            0, 0, nullptr, 0, 1, "I2C Bus",              nullptr, false, nullptr, "debugi2c" },
   { "mqtt",             SETTING_BOOL, &gSettings.debugMqtt,           0, 0, nullptr, 0, 1, "MQTT",                 nullptr, false, nullptr, "debugmqtt" },
+  { "webConsole",       SETTING_BOOL, &gSettings.webConsoleDebug,     0, 0, nullptr, 0, 1, "Web Console",          nullptr, false, nullptr, "webconsole" },
   { "logLevel",         SETTING_INT,  &gSettings.logLevel,            3, 0, nullptr, 0, 3, "Log Level",            nullptr, false, nullptr, "loglevel" },
   { "memorySampleIntervalSec", SETTING_INT, &gSettings.memorySampleIntervalSec, 30, 0, nullptr, 0, 300, "Memory Sample Interval (sec)", nullptr, false, nullptr, "memorysampleintervalsec" },
 };
@@ -1330,6 +1333,24 @@ static const SettingsModule outputSettingsModule = {
   sizeof(outputSettingEntries) / sizeof(outputSettingEntries[0]),
   nullptr,  // Always available
   "Output routing for serial, web, and display"
+};
+
+// ============================================================================
+// Crash / Reset Tracking Settings Module
+// ============================================================================
+
+static const SettingEntry crashSettingEntries[] = {
+  { "crashCount",      SETTING_INT, &gSettings.crashCount,      0, 0, nullptr, 0, 0xFFFF, "Abnormal Reset Count", nullptr },
+  { "lastResetReason", SETTING_INT, &gSettings.lastResetReason, 0, 0, nullptr, 0, 0xFF,   "Last Reset Reason",    nullptr },
+};
+
+static const SettingsModule crashSettingsModule = {
+  "crash",
+  "crash",
+  crashSettingEntries,
+  sizeof(crashSettingEntries) / sizeof(crashSettingEntries[0]),
+  nullptr,
+  "Crash and reset tracking (populated from RTC memory on each boot)"
 };
 
 // Registry storage
@@ -1431,6 +1452,7 @@ void registerAllSettingsModules() {
   gSettingsModulesRegistered = true;
   
   // Core system modules
+  registerSettingsModule(&crashSettingsModule);
   registerSettingsModule(&debugSettingsModule);
   registerSettingsModule(&outputSettingsModule);
   registerSettingsModule(&i2cSettingsModule);
@@ -1827,23 +1849,23 @@ bool saveUserSettings(uint32_t userId, const JsonDocument& doc) {
     File f = LittleFS.open(tmp.c_str(), "w");
     if (!f) return false;
     size_t written = serializeJson(doc, f);
+    f.flush();
     f.close();
     if (written == 0) {
       LittleFS.remove(tmp.c_str());
       return false;
     }
 
-    // Safe atomic replace: rename first, only delete original on success.
-    // Do NOT delete the original before confirming rename succeeded —
-    // if both rename and fallback fail, the original would be permanently lost.
+    // Atomic rename (LittleFS rename overwrites destination)
     if (!LittleFS.rename(tmp.c_str(), path.c_str())) {
-      // Rename failed (e.g. cross-dir); fallback to direct overwrite
+      // Rename failed; fallback to direct overwrite
       File direct = LittleFS.open(path.c_str(), "w");
       if (!direct) {
         LittleFS.remove(tmp.c_str());
         return false;
       }
       written = serializeJson(doc, direct);
+      direct.flush();
       direct.close();
       LittleFS.remove(tmp.c_str());
       return written > 0;
@@ -1857,7 +1879,7 @@ bool mergeAndSaveUserSettings(uint32_t userId, const JsonDocument& patch) {
   if (!filesystemReady) return false;
   if (!patch.is<JsonObjectConst>()) return false;
 
-  JsonDocument base;
+  PSRAM_JSON_DOC(base);
   if (!loadUserSettings(userId, base)) return false;
   if (!base.is<JsonObject>()) base.to<JsonObject>();
 

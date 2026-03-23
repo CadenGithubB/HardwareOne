@@ -170,6 +170,10 @@ void wizardFinalize(SetupWizardResult& result);
 // rendering and joystick input are layered on top automatically.
 SetupWizardResult runSetupWizard();
 
+// Shared helper: runs the wizard and applies results (WiFi credentials,
+// settings save). Used by both cmd_featuresetup and firstTimeSetupIfNeeded().
+SetupWizardResult runAndApplyFeatureWizard();
+
 // Serial-only fallback for builds without OLED compiled in.
 // When ENABLE_OLED_DISPLAY=1, this just calls runSetupWizard().
 SetupWizardResult runSerialSetupWizard();

@@ -14,31 +14,33 @@
 #include "esp_bt_main.h"
 #include "esp_bt_defs.h"
 
+#include "BLE_Types.h"
+
 // =============================================================================
-// BLE SERVICE AND CHARACTERISTIC UUIDs
+// BLE SERVICE AND CHARACTERISTIC UUIDs (IDF uses integer constants for standard services)
 // =============================================================================
 
-// Command Service - single service for all communication
-#define BLE_COMMAND_SERVICE_UUID      "12345678-1234-5678-1234-56789abcdef0"
-#define BLE_CMD_REQUEST_CHAR_UUID     "12345678-1234-5678-1234-56789abcde01"
-#define BLE_CMD_RESPONSE_CHAR_UUID    "12345678-1234-5678-1234-56789abcde02"
-#define BLE_CMD_STATUS_CHAR_UUID      "12345678-1234-5678-1234-56789abcde03"
+// Command Service
+#define BLE_IDF_COMMAND_SERVICE_UUID      "12345678-1234-5678-1234-56789abcdef0"
+#define BLE_IDF_CMD_REQUEST_CHAR_UUID     "12345678-1234-5678-1234-56789abcde01"
+#define BLE_IDF_CMD_RESPONSE_CHAR_UUID    "12345678-1234-5678-1234-56789abcde02"
+#define BLE_IDF_CMD_STATUS_CHAR_UUID      "12345678-1234-5678-1234-56789abcde03"
 
 // Data Streaming Service
-#define BLE_DATA_SERVICE_UUID         "12345678-1234-5678-1234-56789abcdef1"
-#define BLE_SENSOR_DATA_CHAR_UUID     "12345678-1234-5678-1234-56789abcde11"
-#define BLE_SYSTEM_STATUS_CHAR_UUID   "12345678-1234-5678-1234-56789abcde12"
-#define BLE_EVENT_NOTIFY_CHAR_UUID    "12345678-1234-5678-1234-56789abcde13"
-#define BLE_STREAM_CONTROL_CHAR_UUID  "12345678-1234-5678-1234-56789abcde14"
+#define BLE_IDF_DATA_SERVICE_UUID         "12345678-1234-5678-1234-56789abcdef1"
+#define BLE_IDF_SENSOR_DATA_CHAR_UUID     "12345678-1234-5678-1234-56789abcde11"
+#define BLE_IDF_SYSTEM_STATUS_CHAR_UUID   "12345678-1234-5678-1234-56789abcde12"
+#define BLE_IDF_EVENT_NOTIFY_CHAR_UUID    "12345678-1234-5678-1234-56789abcde13"
+#define BLE_IDF_STREAM_CONTROL_CHAR_UUID  "12345678-1234-5678-1234-56789abcde14"
 
-// Device Info (standard BLE service)
-#define BLE_DEVICE_INFO_SERVICE_UUID  0x180A
-#define BLE_MANUFACTURER_CHAR_UUID    0x2A29
-#define BLE_MODEL_CHAR_UUID           0x2A24
-#define BLE_FIRMWARE_CHAR_UUID        0x2A26
+// Device Info (standard BLE service - integer UUIDs for IDF GATTS)
+#define BLE_IDF_DEVICE_INFO_SERVICE_UUID  0x180A
+#define BLE_IDF_MANUFACTURER_CHAR_UUID    0x2A29
+#define BLE_IDF_MODEL_CHAR_UUID           0x2A24
+#define BLE_IDF_FIRMWARE_CHAR_UUID        0x2A26
 
 // =============================================================================
-// BLE MODE AND STATE
+// BLE MODE (IDF-specific, not shared)
 // =============================================================================
 
 enum BLEMode {
@@ -47,50 +49,9 @@ enum BLEMode {
   BLE_MODE_CLIENT       // GATT Client (G2 glasses central mode)
 };
 
-enum BLEConnectionState {
-  BLE_STATE_IDLE = 0,
-  BLE_STATE_ADVERTISING,
-  BLE_STATE_SCANNING,
-  BLE_STATE_CONNECTING,
-  BLE_STATE_CONNECTED,
-  BLE_STATE_DISCONNECTING
-};
-
-enum BLEDeviceType {
-  BLE_DEVICE_UNKNOWN = 0,
-  BLE_DEVICE_GLASSES_LEFT,
-  BLE_DEVICE_GLASSES_RIGHT,
-  BLE_DEVICE_RING,
-  BLE_DEVICE_PHONE,
-  BLE_DEVICE_CUSTOM
-};
-
-enum BLEEventType {
-  BLE_EVENT_SENSOR_CONNECTED = 0,
-  BLE_EVENT_SENSOR_DISCONNECTED,
-  BLE_EVENT_LOW_BATTERY,
-  BLE_EVENT_WIFI_CONNECTED,
-  BLE_EVENT_WIFI_DISCONNECTED,
-  BLE_EVENT_BUTTON_PRESS,
-  BLE_EVENT_GESTURE_DETECTED,
-  BLE_EVENT_THRESHOLD_EXCEEDED,
-  BLE_EVENT_ERROR,
-  BLE_EVENT_CUSTOM
-};
-
-enum BLEStreamFlags {
-  BLE_STREAM_NONE = 0,
-  BLE_STREAM_SENSORS = (1 << 0),
-  BLE_STREAM_SYSTEM = (1 << 1),
-  BLE_STREAM_EVENTS = (1 << 2),
-  BLE_STREAM_ALL = 0xFF
-};
-
 // =============================================================================
 // CONNECTION TRACKING
 // =============================================================================
-
-#define BLE_MAX_CONNECTIONS 4
 
 struct BLEConnection {
   bool active;

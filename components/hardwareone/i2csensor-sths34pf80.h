@@ -2,31 +2,30 @@
 #define I2CSENSOR_STHS34PF80_H
 
 #include "System_BuildConfig.h"
-
-#if ENABLE_PRESENCE_SENSOR
-
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// Forward declarations
-class String;
-
-// STHS34PF80 presence sensor cache
+// Presence sensor cache structure (always available for type-safe references)
 struct PresenceCache {
   SemaphoreHandle_t mutex = nullptr;
-  float ambientTemp = 0.0f;        // Ambient temperature in °C
-  int16_t objectTemp = 0;          // Raw object temperature
-  float compObjectTemp = 0.0f;     // Compensated object temperature
-  int16_t presenceValue = 0;       // Presence detection value
-  int16_t motionValue = 0;         // Motion detection value
-  int16_t tempShockValue = 0;      // Temperature shock value
-  bool presenceDetected = false;   // Presence flag
-  bool motionDetected = false;     // Motion flag
-  bool tempShockDetected = false;  // Temperature shock flag
+  float ambientTemp = 0.0f;
+  int16_t objectTemp = 0;
+  float compObjectTemp = 0.0f;
+  int16_t presenceValue = 0;
+  int16_t motionValue = 0;
+  int16_t tempShockValue = 0;
+  bool presenceDetected = false;
+  bool motionDetected = false;
+  bool tempShockDetected = false;
   unsigned long lastUpdate = 0;
   bool dataValid = false;
 };
+
+#if ENABLE_PRESENCE_SENSOR
+
+// Forward declarations
+class String;
 
 extern PresenceCache gPresenceCache;
 extern bool presenceEnabled;

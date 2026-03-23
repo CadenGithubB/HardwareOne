@@ -6,6 +6,7 @@
 #include "System_Debug.h"
 #include "System_Camera_DVP.h"
 #include "System_MemUtil.h"
+#include "System_TaskUtils.h"
 #include "esp_camera.h"
 #include "img_converters.h"
 #include <ArduinoJson.h>
@@ -1836,7 +1837,7 @@ void startContinuousInference() {
   BaseType_t result = xTaskCreatePinnedToCore(
     continuousInferenceTask,
     "ei_continuous",
-    8192,  // Increased stack for debug logging
+    EI_CONTINUOUS_STACK_WORDS,
     nullptr,
     1,
     &gEIContinuousTask,

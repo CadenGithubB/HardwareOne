@@ -60,24 +60,8 @@ extern bool gCLIValidateOnly;
 // gDebugBuffer, gDebugFlags, ensureDebugBuffer now from debug_system.h
 extern void runUnifiedSystemCommand(const String& argsInput);
 
-// Async command submission types (matches HardwareOne.cpp / System_Utils.cpp)
-typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
-enum CommandOrigin { ORIGIN_SERIAL, ORIGIN_WEB, ORIGIN_AUTOMATION, ORIGIN_SYSTEM };
-enum CmdOutputMask { CMD_OUT_SERIAL = 1 << 0, CMD_OUT_WEB = 1 << 1, CMD_OUT_LOG = 1 << 2, CMD_OUT_BROADCAST = 1 << 3 };
-struct CommandContext {
-  CommandOrigin origin;
-  AuthContext auth;
-  uint32_t id;
-  uint32_t timestampMs;
-  uint8_t outputMask;
-  bool validateOnly;
-  void* replyHandle;
-  httpd_req_t* httpReq;
-};
-struct Command {
-  String line;
-  CommandContext ctx;
-};
+// Command types from shared header
+#include "System_CommandTypes.h"
 extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
 
 // The createdBy user for the currently executing automation (set before each exec loop)
@@ -446,17 +430,7 @@ bool sanitizeAutomationsJson(String& jsonRef) {
 
 // Atomic writer for automations.json
 bool writeAutomationsJsonAtomic(const String& json) {
-  const char* tmp = "/automations.tmp";
-  if (!writeText(tmp, json)) return false;
-  fsLock("autos.rename");
-  LittleFS.remove(AUTOMATIONS_JSON_FILE);
-  bool renamed = LittleFS.rename(tmp, AUTOMATIONS_JSON_FILE);
-  fsUnlock();
-  if (!renamed) {
-    // Fallback: direct write
-    return writeText(AUTOMATIONS_JSON_FILE, json);
-  }
-  return true;
+  return writeTextAtomic(AUTOMATIONS_JSON_FILE, json);
 }
 
 // Update nextAt field in automation JSON using ArduinoJson

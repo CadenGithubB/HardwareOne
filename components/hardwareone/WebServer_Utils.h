@@ -5,16 +5,13 @@
 #define WEBSERVER_UTILS_H
 
 #include "System_BuildConfig.h"
-
-#if ENABLE_HTTP_SERVER
-
 #include <Arduino.h>
-#include <esp_http_server.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
 // ============================================================================
 // Web Mirror Buffer - CLI output buffer for web interface
+// (always available for type-safe references)
 // ============================================================================
 
 struct WebMirrorBuf {
@@ -22,20 +19,56 @@ struct WebMirrorBuf {
   size_t cap;  // maximum bytes stored (excluding null)
   size_t len;  // current length
   SemaphoreHandle_t mutex;  // Protects concurrent access
-  
+
   WebMirrorBuf();
   void init(size_t capacity);
   void clear();
   void append(const String& s, bool needNewline);
   void append(const char* s, bool needNewline);
-  void appendDirect(const char* s, size_t slen, bool needNewline);  // Zero-copy append
+  void appendDirect(const char* s, size_t slen, bool needNewline);
   String snapshot();
-  size_t snapshotTo(char* dest, size_t destSize);  // Zero-copy snapshot
+  size_t snapshotTo(char* dest, size_t destSize);
   void assignFrom(const String& s);
 };
 
 extern WebMirrorBuf gWebMirror;
 extern size_t gWebMirrorCap;
+
+#if ENABLE_HTTP_SERVER
+
+#include <esp_http_server.h>
+
+// ============================================================================
+// Shared Timing Constants
+// ============================================================================
+
+// Timeout for acquiring a sensor-cache mutex.  All sensor task loops and web
+// handlers that lock a cache semaphore use this value.
+#ifndef HW_CACHE_MUTEX_TIMEOUT_MS
+#define HW_CACHE_MUTEX_TIMEOUT_MS
+static constexpr uint32_t CACHE_MUTEX_TIMEOUT_MS = 100;
+#endif
+
+// ============================================================================
+// HTTP Response Helpers  (inline — avoids an extra function call)
+// ============================================================================
+
+// Send a complete JSON response in one call.  Equivalent to the common pair:
+//   httpd_resp_set_type(req, "application/json");
+//   httpd_resp_send(req, body, len);
+// Saves two lines at every JSON endpoint.
+inline esp_err_t sendJsonResponse(httpd_req_t* req, const char* body, ssize_t len = HTTPD_RESP_USE_STRLEN) {
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, body, len);
+}
+
+// Authenticate the request and return ESP_OK (unauthenticated) if auth fails.
+// Usage:  WEB_AUTH_OR_RETURN(req, ctx);
+//         ... use ctx.user, ctx.ip etc below ...
+// The ctx variable name is a macro parameter so callers can choose it.
+#define WEB_AUTH_OR_RETURN(req, ctx) \
+  AuthContext ctx = makeWebAuthCtx(req); \
+  if (!tgRequireAuth(ctx)) return ESP_OK
 
 // ============================================================================
 // HTTP Request Utilities
@@ -617,6 +650,55 @@ inline String getFileBrowserScript() {
     return window.createFileExplorer(config);
   };
   
+  // Shared upload utility — reads file, encodes, and POSTs with XHR progress
+  // opts: { onProgress(pct, label), onDone(ok, msg) }
+  window.hwUploadFile = function(file, targetPath, opts) {
+    opts = opts || {};
+    var isText = /\.(txt|json|csv|xml|html|htm|css|js|md|log|ini|cfg|conf|yaml|yml|sh|py|c|cpp|h|hpp|crt|pem|key|pub)$/i.test(file.name);
+    var isBinary = !isText;
+    if (opts.onProgress) opts.onProgress(0, 'Reading ' + file.name + '...');
+    var reader = new FileReader();
+    reader.onload = function(evt) {
+      var content = evt.target.result;
+      if (isBinary) content = content.split(',')[1]; // strip data URL prefix
+      var body = 'path=' + encodeURIComponent(targetPath) + '&binary=' + (isBinary ? '1' : '0') + '&content=' + encodeURIComponent(content);
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/files/upload', true);
+      xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+      xhr.upload.onprogress = function(e) {
+        if (e.lengthComputable && opts.onProgress) {
+          var pct = Math.round(e.loaded / e.total * 100);
+          opts.onProgress(pct, 'Uploading ' + file.name + '... (' + pct + '%)');
+        }
+      };
+      xhr.onload = function() {
+        try {
+          var j = JSON.parse(xhr.responseText);
+          if (j.success) {
+            if (opts.onProgress) opts.onProgress(100, 'Done');
+            if (opts.onDone) opts.onDone(true, 'Uploaded: ' + file.name);
+          } else {
+            if (opts.onDone) opts.onDone(false, 'Upload failed: ' + (j.error || 'Unknown'));
+          }
+        } catch(e) {
+          if (opts.onDone) opts.onDone(false, 'Upload error: bad response');
+        }
+      };
+      xhr.onerror = function() {
+        if (opts.onDone) opts.onDone(false, 'Upload error: network failure');
+      };
+      xhr.send(body);
+    };
+    reader.onerror = function() {
+      if (opts.onDone) opts.onDone(false, 'Error reading file');
+    };
+    if (isBinary) {
+      reader.readAsDataURL(file);
+    } else {
+      reader.readAsText(file);
+    }
+  };
+
   // Full-featured file manager with action buttons
   window.createFileManager = function(config) {
     // Config: {
@@ -650,6 +732,7 @@ inline String getFileBrowserScript() {
     // Toolbar
     if (showActions) {
       html += '<div id="' + toolbarId + '" style="padding:8px;background:var(--crumb-bg);border-bottom:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;">';
+      html += '<button id="' + managerId + '_back_btn" class="btn" onclick="' + managerId + 'GoBack()" style="display:none">\u2190 Back</button>';
       html += '<button id="' + managerId + '_folder_btn" class="btn" onclick="' + managerId + 'CreateFolder()">New Folder</button>';
       html += '<button id="' + managerId + '_file_btn" class="btn" onclick="' + managerId + 'CreateFile()">New File</button>';
       html += '<button id="' + managerId + '_upload_btn" class="btn" onclick="' + managerId + 'UploadFile()">Upload</button>';
@@ -657,10 +740,21 @@ inline String getFileBrowserScript() {
       html += '<input type="file" id="' + managerId + '_upload_input" style="display:none">';
       html += '</div>';
     }
-    
+
+    // Upload progress bar (hidden by default)
+    var progressId = managerId + '_progress';
+    html += '<div id="' + progressId + '" style="display:none;padding:4px 8px;background:var(--crumb-bg);border-bottom:1px solid var(--border)">';
+    html += '<div style="display:flex;align-items:center;gap:8px;font-size:0.82em;color:var(--muted)">';
+    html += '<span id="' + progressId + '_label">Uploading...</span>';
+    html += '<div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden">';
+    html += '<div id="' + progressId + '_bar" style="width:0%;height:100%;background:var(--accent, #4dabf7);border-radius:3px;transition:width 0.15s"></div>';
+    html += '</div>';
+    html += '<span id="' + progressId + '_pct">0%</span>';
+    html += '</div></div>';
+
     // Explorer area
     html += '<div id="' + explorerId + '"></div>';
-    
+
     // Status bar
     html += '<div id="' + statusId + '" style="padding:6px 8px;background:var(--crumb-bg);border-top:1px solid var(--border);font-size:0.85em;color:var(--muted);min-height:24px;"></div>';
     html += '</div>';
@@ -675,9 +769,11 @@ inline String getFileBrowserScript() {
     var PERM_IMPORT = 0x20;
     
     function updateToolbar(dirPerms) {
+      var bb = document.getElementById(managerId + '_back_btn');
       var fb = document.getElementById(managerId + '_folder_btn');
       var fi = document.getElementById(managerId + '_file_btn');
       var ub = document.getElementById(managerId + '_upload_btn');
+      if (bb) bb.style.display = (currentPath !== '/') ? '' : 'none';
       if (fb) fb.style.display = (dirPerms & PERM_CREATE) ? '' : 'none';
       if (fi) fi.style.display = (dirPerms & PERM_CREATE) ? '' : 'none';
       if (ub) ub.style.display = (dirPerms & PERM_IMPORT) ? '' : 'none';
@@ -709,6 +805,14 @@ inline String getFileBrowserScript() {
       // Toolbar buttons will be updated by onNavigate callback after directory loads
     }
     
+    // Action: Go back to parent directory
+    window[managerId + 'GoBack'] = function() {
+      if (currentPath === '/') return;
+      var parent = currentPath.replace(/\/[^\/]+\/?$/, '') || '/';
+      currentPath = parent;
+      loadExplorer();
+    };
+
     // Action: Create folder
     window[managerId + 'CreateFolder'] = function() {
       hwPrompt('Enter folder name:').then(function(name) {
@@ -775,47 +879,27 @@ inline String getFileBrowserScript() {
         });
         
         function doUpload(file) {
-        setStatus('Uploading ' + file.name + '...', false);
-        var targetPath = currentPath === '/' ? '/' + file.name : currentPath + '/' + file.name;
-        // Text files that can be safely read as text; everything else is binary
-        var isText = /\.(txt|json|csv|xml|html|htm|css|js|md|log|ini|cfg|conf|yaml|yml|sh|py|c|cpp|h|hpp|crt|pem|key|pub)$/i.test(file.name);
-        var isBinary = !isText;
-        
-        var reader = new FileReader();
-        reader.onload = function(evt) {
-          var content = evt.target.result;
-          
-          if (isBinary) {
-            content = content.split(',')[1];  // Strip data URL prefix for base64
-          }
-          
-          fetch('/api/files/upload', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: 'path=' + encodeURIComponent(targetPath) + '&binary=' + (isBinary ? '1' : '0') + '&content=' + encodeURIComponent(content)
-          })
-          .then(r => r.json())
-          .then(j => {
-            if (j.success) {
-              setStatus('Uploaded: ' + file.name, false);
-              loadExplorer();
-              if (config.onRefresh) config.onRefresh();
-            } else {
-              setStatus('Upload failed: ' + (j.error || 'Unknown'), true);
+          setStatus('Uploading ' + file.name + '...', false);
+          var targetPath = currentPath === '/' ? '/' + file.name : currentPath + '/' + file.name;
+          hwUploadFile(file, targetPath, {
+            onProgress: function(pct, label) {
+              var wrap = document.getElementById(progressId);
+              var bar = document.getElementById(progressId + '_bar');
+              var pctEl = document.getElementById(progressId + '_pct');
+              var lblEl = document.getElementById(progressId + '_label');
+              if (wrap) wrap.style.display = '';
+              if (bar) bar.style.width = pct + '%';
+              if (pctEl) pctEl.textContent = pct + '%';
+              if (lblEl) lblEl.textContent = label || ('Uploading ' + file.name + '...');
+            },
+            onDone: function(ok, msg) {
+              var wrap = document.getElementById(progressId);
+              if (wrap) wrap.style.display = 'none';
+              setStatus(ok ? 'Uploaded: ' + file.name : msg, !ok);
+              if (ok) { loadExplorer(); if (config.onRefresh) config.onRefresh(); }
+              input.value = '';
             }
-            input.value = '';
-          })
-          .catch(e => {
-            setStatus('Upload error: ' + e.message, true);
-            input.value = '';
           });
-        };
-        
-        if (isBinary) {
-          reader.readAsDataURL(file);  // Base64 preserves binary data
-        } else {
-          reader.readAsText(file);     // Text files only
-        }
         } // end doUpload
       };
       input.click();
@@ -914,6 +998,7 @@ inline void streamCommonCSS(httpd_req_t* req) {
     "--icon-filter:none;"
     "--danger:#dc3545;"
     "--danger-hover:#c82333;"
+    "--accent:#667eea;"
     "--placeholder:rgba(255,255,255,.65);"
     "}"
     "html[data-theme=light]{"
@@ -936,6 +1021,7 @@ inline void streamCommonCSS(httpd_req_t* req) {
     "--icon-filter:none;"
     "--danger:#dc3545;"
     "--danger-hover:#c82333;"
+    "--accent:#667eea;"
     "--placeholder:rgba(255,255,255,.65);"
     "--success:#28a745;"
     "--success-hover:#218838;"
@@ -968,6 +1054,7 @@ inline void streamCommonCSS(httpd_req_t* req) {
     "--icon-filter:invert(1);"
     "--danger:#ff5a6a;"
     "--danger-hover:#ff3b4e;"
+    "--accent:#818cf8;"
     "--success:#4ade80;"
     "--success-hover:#22c55e;"
     "--warning-bg:rgba(118,75,162,.15);"
@@ -1085,7 +1172,18 @@ inline void streamCommonCSS(httpd_req_t* req) {
     ".alert-info{background:var(--info-bg);color:var(--info-fg);border-color:var(--info-border)}"
     ".status-dot{width:12px;height:12px;border-radius:50%;display:inline-block}"
     ".status-inactive{background:var(--muted)}"
-    ".status-active{background:var(--success)}", HTTPD_RESP_USE_STRLEN);
+    ".status-active{background:var(--success)}"
+    "@keyframes pulse{0%{opacity:1}50%{opacity:.5}100%{opacity:1}}"
+    "@keyframes pulse-fast{0%{opacity:1}50%{opacity:.3}100%{opacity:1}}"
+    "@keyframes blink{0%{opacity:1}50%{opacity:.3}100%{opacity:1}}"
+    "@keyframes slideIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}"
+    ".status-indicator{display:inline-block;width:12px;height:12px;min-width:12px;min-height:12px;flex:0 0 12px;border-radius:50%;margin-right:8px;box-sizing:content-box;vertical-align:middle}"
+    ".status-enabled{background:var(--success);animation:pulse 2s infinite}"
+    ".status-disabled{background:var(--danger)}"
+    ".status-recording{background:#e74c3c;animation:blink 1s infinite}"
+    ".status-running{background:var(--success);animation:pulse 2s infinite}"
+    ".status-wake{background:var(--warning-accent,#ffc107);animation:pulse-fast .5s infinite}"
+    ".text-accent{color:var(--accent)}", HTTPD_RESP_USE_STRLEN);
   
   httpd_resp_send_chunk(req,
     ".btn{display:inline-flex;align-items:center;justify-content:center;min-height:40px;"
@@ -1150,25 +1248,16 @@ inline void streamCommonDialogs(httpd_req_t* req) {
 
 #else  // !ENABLE_HTTP_SERVER
 
-#include <Arduino.h>
-
-struct WebMirrorBuf {
-  char* buf;
-  size_t cap;
-  size_t len;
-  WebMirrorBuf() : buf(nullptr), cap(0), len(0) {}
-  inline void init(size_t) {}
-  inline void clear() {}
-  inline void append(const String&, bool) {}
-  inline void append(const char*, bool) {}
-  inline void appendDirect(const char*, size_t, bool) {}
-  inline String snapshot() { return String(); }
-  inline size_t snapshotTo(char*, size_t) { return 0; }
-  inline void assignFrom(const String&) {}
-};
-
-extern WebMirrorBuf gWebMirror;
-extern size_t gWebMirrorCap;
+// No-op stub implementations (real implementations in WebServer_Utils.cpp)
+inline WebMirrorBuf::WebMirrorBuf() : buf(nullptr), cap(0), len(0), mutex(nullptr) {}
+inline void WebMirrorBuf::init(size_t) {}
+inline void WebMirrorBuf::clear() {}
+inline void WebMirrorBuf::append(const String&, bool) {}
+inline void WebMirrorBuf::append(const char*, bool) {}
+inline void WebMirrorBuf::appendDirect(const char*, size_t, bool) {}
+inline String WebMirrorBuf::snapshot() { return String(); }
+inline size_t WebMirrorBuf::snapshotTo(char*, size_t) { return 0; }
+inline void WebMirrorBuf::assignFrom(const String&) {}
 
 #endif // ENABLE_HTTP_SERVER
 

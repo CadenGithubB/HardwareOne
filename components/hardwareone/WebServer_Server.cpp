@@ -91,8 +91,7 @@
 // Filesystem ready flag (defined in System_Filesystem.cpp)
 extern bool filesystemReady;
 
-// External dependencies from .ino
-extern httpd_handle_t server;
+// External dependencies from .ino (httpd_handle_t server declared in WebServer_Server.h)
 extern void streamCommonCSS(httpd_req_t* req);
 extern void streamDebugRecord(size_t bytes, size_t chunkSize);
 extern void streamDebugFlush();
@@ -401,7 +400,7 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
       String _theme = "light";
       uint32_t _uid = 0;
       if (getUserIdByUsername(ctx.user, _uid) && _uid > 0) {
-        JsonDocument _s;
+        PSRAM_JSON_DOC(_s);
         if (loadUserSettings(_uid, _s)) { const char* _t = _s["theme"] | "light"; if (_t && strcmp(_t,"dark")==0) _theme = "dark"; }
       }
       streamLoginSuccessContent(req, ctx.sid, _theme);
@@ -481,14 +480,13 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
 
   int idx = findSessionIndexBySID(sid);
   if (idx < 0) {
-    BROADCAST_PRINTF("[auth] unknown SID for uri=%.*s", 120, uri);
-
-    // Rate limit session debug messages per IP
+    // Rate limit session debug/broadcast messages per IP
     static char lastDebugIP[64] = "";
     static unsigned long lastDebugTime = 0;
     unsigned long now = millis();
 
     if (strcmp(ipBuf, lastDebugIP) != 0 || (now - lastDebugTime) > 5000) {
+      BROADCAST_PRINTF("[auth] unknown SID for uri=%.*s", 120, uri);
       DEBUG_AUTHF("No session found for SID from IP %s (stale cookie after reboot)", ipBuf);
 
       strncpy(lastDebugIP, ipBuf, sizeof(lastDebugIP) - 1);
@@ -988,29 +986,8 @@ extern String jsonEscape(const String& in);
 extern unsigned long gWebMirrorSeq;
 extern void buildSystemInfoJson(JsonDocument& doc);
 extern void appendCommandToFeed(const char* origin, const String& cmd, const String& user, const String& ip);
-// Command forward declaration
-enum CommandOrigin { ORIGIN_SERIAL,
-                     ORIGIN_WEB,
-                     ORIGIN_AUTOMATION,
-                     ORIGIN_SYSTEM };
-enum CmdOutputMask { CMD_OUT_SERIAL = 1 << 0,
-                     CMD_OUT_WEB = 1 << 1,
-                     CMD_OUT_LOG = 1 << 2,
-                     CMD_OUT_BROADCAST = 1 << 3 };
-struct CommandContext {
-  CommandOrigin origin;
-  AuthContext auth;
-  uint32_t id;
-  uint32_t timestampMs;
-  uint32_t outputMask;
-  bool validateOnly;
-  void* replyHandle;
-  httpd_req_t* httpReq;
-};
-struct Command {
-  String line;
-  CommandContext ctx;
-};
+// Command types from shared header
+#include "System_CommandTypes.h"
 extern bool submitAndExecuteSync(const Command& uc, String& out);
 extern bool gMeshActivitySuspended;
 // gBroadcastSkipSessionIdx declared in web_server.h
@@ -1547,7 +1524,6 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleFileRead] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
-    WARN_SESSIONF("File read auth failed");
     gSensorPollingPaused = wasPaused;
     return ESP_OK;
   }  DEBUG_STORAGEF("[handleFileRead] Auth SUCCESS for user: %s", ctx.user.c_str());
@@ -1633,14 +1609,12 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleFileWrite] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
-    WARN_SESSIONF("File write auth failed");
     return ESP_OK;
   }  DEBUG_STORAGEF("[handleFileWrite] Auth SUCCESS for user: %s", ctx.user.c_str());
 
   if (!filesystemReady) {
     ERROR_STORAGEF("Filesystem not ready");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Filesystem not initialized\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Filesystem not initialized\"}");
     return ESP_OK;
   }
 
@@ -1649,16 +1623,14 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileWrite] Content-Length: %d bytes", contentLen);
   if (contentLen == 0 || contentLen > 150 * 1024) {
     ERROR_WEBF("Invalid content length: %d", contentLen);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Invalid content length\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Invalid content length\"}");
     return ESP_OK;
   }
 
   char* body = (char*)ps_alloc(contentLen + 1, AllocPref::PreferPSRAM, "http.upload.body");
   if (!body) {
     ERROR_MEMORYF("Failed to allocate %d bytes for upload", contentLen + 1);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"OOM\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"OOM\"}");
     return ESP_OK;
   }
   DEBUG_STORAGEF("[handleFileWrite] Allocated %d bytes for body", contentLen + 1);
@@ -1676,8 +1648,7 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
       }
       ERROR_WEBF("recv failed with code %d after %d attempts", ret, recvAttempts);
       free(body);
-      httpd_resp_set_type(req, "application/json");
-      httpd_resp_send(req, "{\"success\":false,\"error\":\"Error receiving data\"}", HTTPD_RESP_USE_STRLEN);
+      sendJsonResponse(req, "{\"success\":false, \"error\":\"Error receiving data\"}");
       return ESP_OK;
     }
     totalReceived += ret;
@@ -1723,22 +1694,19 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
 
   if (name.length() == 0) {
     ERROR_WEBF("No name parameter in file write");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Name required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Name required\"}");
     return ESP_OK;
   }
 
   if (isAdminOnlyPath(name) && !isAdminUser(ctx.user)) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin required\"}");
     return ESP_OK;
   }
 
   // Use centralized permission check (also block .bin firmware files)
   if (name.endsWith(".bin") || !canEdit(name)) {
     WARN_STORAGEF("Protected path write attempt: %s", name.c_str());
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Writes to this path are not allowed\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Writes to this path are not allowed\"}");
     return ESP_OK;
   }
 
@@ -1749,24 +1717,33 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   File f = VFS::open(name, "w", true);
   if (!f) {
     ERROR_STORAGEF("Failed to open file for write: %s", name.c_str());
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Open failed\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Open failed\"}");
     return ESP_OK;
   }
-  DEBUG_STORAGEF("[handleFileWrite] File opened successfully");
 
   size_t left = content.length();
   size_t pos = 0;
   int writeChunks = 0;
+  bool writeError = false;
   while (left > 0) {
     size_t chunk = left > 512 ? 512 : left;
     size_t written = f.write((const uint8_t*)content.c_str() + pos, chunk);
     writeChunks++;
-    DEBUG_STORAGEF("[handleFileWrite] Write chunk %d: %d bytes (requested %d)", writeChunks, written, chunk);
+    if (written != chunk) {
+      ERROR_STORAGEF("[handleFileWrite] Short write: got %d, expected %d", written, chunk);
+      writeError = true;
+      break;
+    }
     pos += chunk;
     left -= chunk;
   }
+  f.flush();
   f.close();
+
+  if (writeError) {
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Write failed (short write)\"}");
+    return ESP_OK;
+  }
   DEBUG_STORAGEF("[handleFileWrite] File closed, wrote %d bytes in %d chunks", content.length(), writeChunks);
 
 #if ENABLE_AUTOMATION
@@ -1791,8 +1768,7 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   }
 #endif
 
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, "{\"success\":true}");
   DEBUG_STORAGEF("[handleFileWrite] COMPLETE: Success");
   return ESP_OK;
 }
@@ -1811,7 +1787,6 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleFileUpload] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
-    WARN_SESSIONF("File upload auth failed");
     gSensorPollingPaused = wasPaused;
     return ESP_OK;
   }
@@ -1820,8 +1795,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   if (!filesystemReady) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Filesystem not ready");
     gSensorPollingPaused = wasPaused;
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Filesystem not initialized\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Filesystem not initialized\"}");
     return ESP_OK;
   }
 
@@ -1882,8 +1856,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   if (!uploadOutBuf) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Failed to allocate output buffer");
     gSensorPollingPaused = wasPaused;
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Memory allocation failed\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Memory allocation failed\"}");
     return ESP_OK;
   }
   size_t outLen = 0;
@@ -1897,9 +1870,13 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   bool fileOpen = false;
   bool fsLockedForUpload = false;
 
+  bool shortWrite = false;
   auto flushWrite = [&]() {
     if (outLen && fileOpen) {
       size_t w = file.write(uploadOutBuf, outLen);
+      if (w != outLen) {
+        shortWrite = true;
+      }
       totalWritten += w;
       outLen = 0;
       if (totalWritten > freeLimit) {
@@ -2000,8 +1977,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     free(uploadOutBuf);
     gSensorPollingPaused = wasPaused;
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Failed to allocate recv buffer");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Memory allocation failed\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Memory allocation failed\"}");
     return ESP_OK;
   }
   char* buf = uploadRecvBuf;
@@ -2028,8 +2004,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       free(uploadOutBuf);
       free(uploadRecvBuf);
       gSensorPollingPaused = wasPaused;
-      httpd_resp_set_type(req, "application/json");
-      httpd_resp_send(req, "{\"success\":false,\"error\":\"Recv error\"}", HTTPD_RESP_USE_STRLEN);
+      sendJsonResponse(req, "{\"success\":false, \"error\":\"Recv error\"}");
       return ESP_OK;
     }
     received += ret;
@@ -2081,8 +2056,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
           if (!openFileIfNeeded()) {
             free(uploadOutBuf);
             free(uploadRecvBuf);
-            httpd_resp_set_type(req, "application/json");
-            httpd_resp_send(req, "{\"success\":false,\"error\":\"Invalid path\"}", HTTPD_RESP_USE_STRLEN);
+            sendJsonResponse(req, "{\"success\":false, \"error\":\"Invalid path\"}");
             return ESP_OK;
           }
         }
@@ -2163,14 +2137,14 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     }
     if ((chunkIndex % 8) == 0) {
       flushWrite();
-      if (outOfSpace) break;
+      if (outOfSpace || shortWrite) break;
       delay(0);
     }
   }
 
   // Flush any remaining url-decode state for text content (nothing to emit for partial %)
   flushWrite();
-  if (outOfSpace) {
+  if (outOfSpace || shortWrite) {
     if (fileOpen) {
       file.close();
       fileOpen = false;
@@ -2183,16 +2157,22 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       fsUnlock();
       fsLockedForUpload = false;
     }
-    DEBUG_STORAGEF("[handleFileUpload] ERROR: Insufficient storage space during write (wrote %d / free %d)", (int)totalWritten, (int)freeLimit);
+    const char* reason = outOfSpace ? "Insufficient storage space" : "Write failed (short write)";
+    DEBUG_STORAGEF("[handleFileUpload] ERROR: %s (wrote %d / free %d)", reason, (int)totalWritten, (int)freeLimit);
     free(uploadOutBuf);
     free(uploadRecvBuf);
     gSensorPollingPaused = wasPaused;
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Insufficient storage space\"}", HTTPD_RESP_USE_STRLEN);
+    char errBuf[128];
+    snprintf(errBuf, sizeof(errBuf), "{\"success\":false,\"error\":\"%s\"}", reason);
+    httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
 
-  if (fileOpen) file.close();
+  if (fileOpen) {
+    file.flush();
+    file.close();
+  }
   if (fsLockedForUpload) {
     fsUnlock();
     fsLockedForUpload = false;
@@ -2204,7 +2184,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   DEBUG_STORAGEF("[handleFileUpload] COMPLETE: wrote %d bytes to '%s' (binary=%s), heap delta=%d, dur=%u ms",
                  (int)totalWritten, path.c_str(), isBinary ? "true" : "false", (int)ESP.getFreeHeap() - (int)heapStart, (unsigned)(millis() - tStart));
-  
+
   // Always print upload completion to serial for visibility
   Serial.printf("[UPLOAD] %s: %d bytes written in %u ms\n", path.c_str(), (int)totalWritten, (unsigned)(millis() - tStart));
 
@@ -2262,24 +2242,21 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   gSensorPollingPaused = wasPaused;
   DEBUG_STORAGEF("[handleFileUpload] Sensor polling resumed");
 
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, "{\"success\":true}");
   return ESP_OK;
 }
 
 // handleSensorsStatus moved to web_sensors.cpp
 
 esp_err_t handleDashboard(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "dashboard");
   streamPageWithContent(req, "dashboard", ctx.user, streamDashboardContent);
   return ESP_OK;
 }
 
 esp_err_t handleSettingsPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "settings");
   streamPageWithContent(req, "settings", ctx.user, streamSettingsContent);
   return ESP_OK;
@@ -2288,8 +2265,7 @@ esp_err_t handleSettingsPage(httpd_req_t* req) {
 // Settings API (GET): return current settings as JSON
 // OPTIMIZED: Uses static buffer with snprintf to eliminate String allocations
 esp_err_t handleSettingsGet(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   // Lock shared JSON response buffer
   JsonBufferGuard jsonGuard("handleSettingsGet");
@@ -2300,11 +2276,11 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
 
   // Build response using ArduinoJson
   // Size hint: ~3584 for settings + 512 for wrapper
-  JsonDocument response;
-  
+  PSRAM_JSON_DOC(response);
+
   // Build settings object using unified builder (passwords excluded for security)
   JsonObject settings = response["settings"].to<JsonObject>();
-  JsonDocument settingsDoc;
+  PSRAM_JSON_DOC(settingsDoc);
   buildSettingsJsonDoc(settingsDoc, true);  // true = exclude WiFi passwords from web API
   settings.set(settingsDoc.as<JsonObject>());
   
@@ -2340,15 +2316,13 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
   DEBUG_MEMORYF("[JSON_RESP_BUF] Settings JSON: %zu/%u bytes (%d%%)",
                 len, (unsigned)JSON_RESPONSE_SIZE, usagePct);
 
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, gJsonResponseBuffer, len);
+  sendJsonResponse(req, gJsonResponseBuffer, len);
   return ESP_OK;
 }
 
 // Settings Schema API (GET): return settings metadata for dynamic UI rendering
 esp_err_t handleSettingsSchema(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   // Check buffer is allocated
   if (!gJsonResponseBuffer) {
@@ -2477,8 +2451,7 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
 }
 
 esp_err_t handleUserSettingsGet(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   DEBUG_HTTPF("[UserSettings] GET enter user=%s ip=%s", ctx.user.c_str(), ctx.ip.c_str());
 
@@ -2491,28 +2464,26 @@ esp_err_t handleUserSettingsGet(httpd_req_t* req) {
   uint32_t userId = 0;
   if (!getUserIdByUsername(ctx.user, userId)) {
     DEBUG_HTTPF("[UserSettings] GET userId not found user=%s", ctx.user.c_str());
-    JsonDocument response;
+    PSRAM_JSON_DOC(response);
     response["success"] = false;
     response["error"] = "user_not_found";
     size_t len = serializeJson(response, gJsonResponseBuffer, JSON_RESPONSE_SIZE);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, gJsonResponseBuffer, len);
+    sendJsonResponse(req, gJsonResponseBuffer, len);
     return ESP_OK;
   }
 
-  JsonDocument settingsDoc;
+  PSRAM_JSON_DOC(settingsDoc);
   if (!loadUserSettings(userId, settingsDoc)) {
     DEBUG_HTTPF("[UserSettings] GET load failed user=%s userId=%u", ctx.user.c_str(), (unsigned)userId);
-    JsonDocument response;
+    PSRAM_JSON_DOC(response);
     response["success"] = false;
     response["error"] = "read_failed";
     size_t len = serializeJson(response, gJsonResponseBuffer, JSON_RESPONSE_SIZE);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, gJsonResponseBuffer, len);
+    sendJsonResponse(req, gJsonResponseBuffer, len);
     return ESP_OK;
   }
 
-  JsonDocument response;
+  PSRAM_JSON_DOC(response);
   response["success"] = true;
   response["userId"] = userId;
   JsonObject settings = response["settings"].to<JsonObject>();
@@ -2536,32 +2507,28 @@ esp_err_t handleUserSettingsGet(httpd_req_t* req) {
 }
 
 esp_err_t handleUserSettingsSet(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   DEBUG_HTTPF("[UserSettings] POST enter user=%s ip=%s content_len=%d", ctx.user.c_str(), ctx.ip.c_str(), (int)req->content_len);
 
   uint32_t userId = 0;
   if (!getUserIdByUsername(ctx.user, userId)) {
     DEBUG_HTTPF("[UserSettings] POST userId not found user=%s", ctx.user.c_str());
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"user_not_found\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"user_not_found\"}");
     return ESP_OK;
   }
 
   int total_len = req->content_len;
   if (total_len <= 0 || total_len > 4096) {
     DEBUG_HTTPF("[UserSettings] POST invalid content_len=%d user=%s userId=%u", total_len, ctx.user.c_str(), (unsigned)userId);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"invalid_content_length\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"invalid_content_length\"}");
     return ESP_OK;
   }
 
   std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.user.settings"), free);
   if (!buf) {
     ERROR_MEMORYF("OOM for user settings POST: user=%s userId=%u", ctx.user.c_str(), (unsigned)userId);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"oom\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"oom\"}");
     return ESP_OK;
   }
 
@@ -2571,21 +2538,19 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req) {
     if (r <= 0) {
       if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
       DEBUG_HTTPF("[UserSettings] POST recv_failed r=%d user=%s userId=%u", r, ctx.user.c_str(), (unsigned)userId);
-      httpd_resp_set_type(req, "application/json");
-      httpd_resp_send(req, "{\"success\":false,\"error\":\"recv_failed\"}", HTTPD_RESP_USE_STRLEN);
+      sendJsonResponse(req, "{\"success\":false, \"error\":\"recv_failed\"}");
       return ESP_OK;
     }
     received += r;
   }
   buf.get()[received] = '\0';
 
-  JsonDocument patch;
+  PSRAM_JSON_DOC(patch);
   DeserializationError err = deserializeJson(patch, buf.get());
   if (err) {
     DEBUG_HTTPF("[UserSettings] POST invalid_json user=%s userId=%u err=%s", ctx.user.c_str(), (unsigned)userId, err.c_str());
     httpd_resp_set_status(req, "400 Bad Request");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"invalid_json\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"invalid_json\"}");
     return ESP_OK;
   }
   
@@ -2594,8 +2559,7 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req) {
   if (!patch["password"].isNull() || !patch["gamepad_password"].isNull()) {
     DEBUG_HTTPF("[UserSettings] POST rejected password field user=%s userId=%u", ctx.user.c_str(), (unsigned)userId);
     httpd_resp_set_status(req, "400 Bad Request");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"password_not_allowed\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"password_not_allowed\"}");
     return ESP_OK;
   }
 
@@ -2610,22 +2574,19 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req) {
 
   if (!mergeAndSaveUserSettings(userId, patch)) {
     DEBUG_HTTPF("[UserSettings] POST write_failed user=%s userId=%u", ctx.user.c_str(), (unsigned)userId);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"write_failed\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"write_failed\"}");
     return ESP_OK;
   }
 
   DEBUG_HTTPF("[UserSettings] POST ok user=%s userId=%u", ctx.user.c_str(), (unsigned)userId);
 
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, "{\"success\":true}");
   return ESP_OK;
 }
 
 // Device Registry API (GET): return device registry as JSON (from in-memory connectedDevices[])
 esp_err_t handleDeviceRegistryGet(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   extern ConnectedDevice connectedDevices[];
   extern int connectedDeviceCount;
@@ -2665,8 +2626,7 @@ esp_err_t handleDeviceRegistryGet(httpd_req_t* req) {
 
 // Build Configuration API (GET): return compile-time feature flags
 esp_err_t handleBuildConfig(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "max-age=3600"); // Cache for 1 hour since build config doesn't change
@@ -2704,11 +2664,9 @@ esp_err_t handleBuildConfig(httpd_req_t* req) {
 
 esp_err_t handleSessionsList(httpd_req_t* req) {
   // Admin-only: list all active sessions
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   if (!isAdminUser(ctx.user)) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin access required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin access required\"}");
     return ESP_OK;
   }
   
@@ -2723,18 +2681,15 @@ esp_err_t handleSessionsList(httpd_req_t* req) {
   String response;
   serializeJson(doc, response);
   
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, response.c_str());
   return ESP_OK;
 }
 
 // Admin: list all sessions
 esp_err_t handleAdminSessionsList(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   if (!isAdminUser(ctx.user)) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin access required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin access required\"}");
     return ESP_OK;
   }
   // Build response using ArduinoJson (no String concatenation)
@@ -2748,15 +2703,13 @@ esp_err_t handleAdminSessionsList(httpd_req_t* req) {
   String response;
   serializeJson(doc, response);
   
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, response.c_str(), HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, response.c_str());
   return ESP_OK;
 }
 
 // GET /api/output -> returns persisted (gSettings) and runtime (gOutputFlags) for serial/web/display/g2
 esp_err_t handleOutputGet(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   int rtSerial = (gOutputFlags & OUTPUT_SERIAL) ? 1 : 0;
   int rtWeb = (gOutputFlags & OUTPUT_WEB) ? 1 : 0;
   int rtDisplay = (gOutputFlags & OUTPUT_DISPLAY) ? 1 : 0;
@@ -2775,15 +2728,13 @@ esp_err_t handleOutputGet(httpd_req_t* req) {
 #endif
            rtSerial, rtWeb, rtDisplay, rtG2);
   
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, json);
   return ESP_OK;
 }
 
 // POST /api/output/temp (x-www-form-urlencoded): serial=0/1&web=0/1&display=0/1
 esp_err_t handleOutputTemp(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   // Read form body
   char buf[256];
@@ -2835,8 +2786,7 @@ esp_err_t handleOutputTemp(httpd_req_t* req) {
            "{\"success\":true,\"runtime\":{\"serial\":%d,\"web\":%d,\"display\":%d}}",
            rtSerial, rtWeb, rtDisplay);
 
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, json);
   return ESP_OK;
 }
 
@@ -2883,7 +2833,6 @@ esp_err_t handleLogs(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_HTTPF("[LOGS_DEBUG] Request from %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
-    WARN_SESSIONF("Logs API auth failed");
     return ESP_OK;
   }
   DEBUG_HTTPF("[LOGS_DEBUG] Auth OK for user '%s'", ctx.user.c_str());
@@ -2915,8 +2864,7 @@ esp_err_t handleLogs(httpd_req_t* req) {
 
 // Enhanced sensors status endpoint with session update checking
 esp_err_t handleSensorsStatusWithUpdates(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   // Check if this session needs a status update notification
   int sessIdx = findSessionIndexBySID(getCookieSID(req));
@@ -2957,8 +2905,7 @@ esp_err_t handleSensorsStatusWithUpdates(httpd_req_t* req) {
 
 // System status endpoint for dashboard one-shot fetch
 esp_err_t handleSystemStatus(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   httpd_resp_set_type(req, "application/json");
 
@@ -3079,8 +3026,7 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
 }
 
 esp_err_t handleCLIPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "cli");
   streamPageWithContent(req, "cli", ctx.user, streamCLIContent);
@@ -3090,8 +3036,7 @@ esp_err_t handleCLIPage(httpd_req_t* req) {
 #if ENABLE_AUTOMATION
 // Automations page handler (authenticated for all users)
 esp_err_t handleAutomationsPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "automations");
   streamPageWithContent(req, "automations", ctx.user, streamAutomationsContent);
   return ESP_OK;
@@ -3099,8 +3044,7 @@ esp_err_t handleAutomationsPage(httpd_req_t* req) {
 
 // GET /api/automations: return raw automations.json
 esp_err_t handleAutomationsGet(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   httpd_resp_set_type(req, "application/json");
   String json;
@@ -3118,15 +3062,13 @@ esp_err_t handleAutomationsGet(httpd_req_t* req) {
 #endif
 
 esp_err_t handleFilesPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   streamPageWithContent(req, "files", ctx.user, streamFilesContent);
   return ESP_OK;
 }
 
 esp_err_t handleLoggingPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   streamPageWithContent(req, "logging", ctx.user, streamLoggingContent);
   return ESP_OK;
 }
@@ -3285,6 +3227,14 @@ esp_err_t handleLogin(httpd_req_t* req) {
     // Record failure (only when credentials were actually submitted)
     if (u.length() > 0 && p.length() > 0) {
       recordFailedLogin(ip.c_str());
+      // Audit log: failed login attempt (password redacted by redactCmdForAudit)
+      AuthContext auditCtx;
+      auditCtx.transport = SOURCE_WEB;
+      auditCtx.user = u;
+      auditCtx.ip = ip;
+      auditCtx.path = "/login";
+      String fakeCmd = "login " + u + " ****";
+      logCommandExecution(auditCtx, fakeCmd.c_str(), false, "Invalid credentials");
     }
     logAuthAttempt(false, req->uri, u, ip, "Invalid credentials");
 
@@ -3315,6 +3265,17 @@ esp_err_t handleLogin(httpd_req_t* req) {
   // Clear brute-force record and any existing logout reason for this IP
   clearLoginAttempts(ip.c_str());
   logAuthAttempt(true, req->uri, u, ip, "Login successful");
+
+  // Audit log: successful login (password redacted)
+  {
+    AuthContext auditCtx;
+    auditCtx.transport = SOURCE_WEB;
+    auditCtx.user = u;
+    auditCtx.ip = ip;
+    auditCtx.path = "/login";
+    String fakeCmd = "login " + u + " ****";
+    logCommandExecution(auditCtx, fakeCmd.c_str(), true, "Login successful");
+  }
   getLogoutReason(ip);  // clears the stored reason by reading it
 
   // Create session and capture SID for client-side fallback
@@ -3329,7 +3290,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
     String _theme = "light";
     uint32_t _uid = 0;
     if (getUserIdByUsername(u, _uid) && _uid > 0) {
-      JsonDocument _s;
+      PSRAM_JSON_DOC(_s);
       if (loadUserSettings(_uid, _s)) { const char* _t = _s["theme"] | "light"; if (_t && strcmp(_t,"dark")==0) _theme = "dark"; }
     }
     streamLoginSuccessContent(req, sid, _theme);
@@ -3349,8 +3310,7 @@ esp_err_t sendAuthRequiredResponse(httpd_req_t* req) {
   String uri = String(req->uri);
   if (uri.startsWith("/api/")) {
     DEBUG_AUTHF("[401] API endpoint - sending JSON response");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"error\":\"auth_required\",\"message\":\"Authentication required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"error\":\"auth_required\", \"message\":\"Authentication required\"}");
     return ESP_OK;
   }
   
@@ -3361,8 +3321,7 @@ esp_err_t sendAuthRequiredResponse(httpd_req_t* req) {
     accept.toLowerCase();
     if (accept.indexOf("application/json") >= 0) {
       DEBUG_AUTHF("[401] Accept header requests JSON - sending JSON response");
-      httpd_resp_set_type(req, "application/json");
-      httpd_resp_send(req, "{\"error\":\"auth_required\",\"reload\":true}", HTTPD_RESP_USE_STRLEN);
+      sendJsonResponse(req, "{\"error\":\"auth_required\", \"reload\":true}");
       return ESP_OK;
     }
   }
@@ -3628,14 +3587,12 @@ extern void fsLock(const char* tag);
 extern void fsUnlock();
 
 esp_err_t handleFilesList(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   // Check if filesystem is ready
   if (!filesystemReady) {
     broadcastOutput("[files] ERROR: Filesystem not ready");
     String json = "{\"success\":false,\"error\":\"Filesystem not initialized\"}";
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, json.c_str());
     return ESP_OK;
   }
 
@@ -3654,8 +3611,7 @@ esp_err_t handleFilesList(httpd_req_t* req) {
   }
   if (isAdminOnlyPath(dirPath) && !isAdminUser(ctx.user)) {
     httpd_resp_set_status(req, "403 Forbidden");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin required\"}");
     return ESP_OK;
   }
 
@@ -3674,18 +3630,15 @@ esp_err_t handleFilesList(httpd_req_t* req) {
     json = "{\"success\":false,\"error\":\"Directory not found or not accessible\"}";
   }
 
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, json.c_str());
   return ESP_OK;
 }
 
 esp_err_t handleFilesStats(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   if (!filesystemReady) {
     String json = "{\"success\":false,\"error\":\"Filesystem not initialized\"}";
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, json.c_str());
     return ESP_OK;
   }
 
@@ -3698,19 +3651,16 @@ esp_err_t handleFilesStats(httpd_req_t* req) {
   snprintf(json, sizeof(json), "{\"success\":true,\"total\":%u,\"used\":%u,\"free\":%u,\"usagePercent\":%d}",
            (unsigned)totalBytes, (unsigned)usedBytes, (unsigned)freeBytes, usagePercent);
 
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, json);
   return ESP_OK;
 }
 
 esp_err_t handleFilesCreate(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   char buf[256];
   int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
   if (ret <= 0) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"No data received\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"No data received\"}");
     return ESP_OK;
   }
   buf[ret] = '\0';
@@ -3740,8 +3690,7 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
   }
 
   if (name.length() == 0) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Name required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Name required\"}");
     return ESP_OK;
   }
   // Normalize: strip leading '/' if present to prevent double slashes
@@ -3751,8 +3700,7 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
   String path = "/" + name;
 
   if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin required\"}");
     return ESP_OK;
   }
 
@@ -4233,8 +4181,7 @@ esp_err_t handleIconGet(httpd_req_t* req) {
 }
 
 esp_err_t handleIconTestPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   
   extern const size_t EMBEDDED_ICONS_COUNT;
   extern const EmbeddedIcon EMBEDDED_ICONS[];
@@ -4300,8 +4247,7 @@ esp_err_t handleIconTestPage(httpd_req_t* req) {
 }
 
 esp_err_t handleFileDelete(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   // Accept name from POST body (x-www-form-urlencoded) or URL query as fallback
   String nameStr = "";
   {
@@ -4331,8 +4277,7 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
     }
   }
   if (nameStr.length() == 0) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"No filename specified\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"No filename specified\"}");
     return ESP_OK;
   }
   nameStr.replace("%2F", "/");
@@ -4347,15 +4292,13 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
 
   if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
     httpd_resp_set_status(req, "403 Forbidden");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin required\"}");
     return ESP_OK;
   }
 
   // Use centralized permission check
   if (nameStr.length() == 0 || nameStr == "." || nameStr == ".." || !canDelete(path)) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Deletion not allowed\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Deletion not allowed\"}");
     return ESP_OK;
   }
 
@@ -4365,8 +4308,7 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
     FsLockGuard guard("delete.probe");
     File file = VFS::open(path, "r");
     if (!file) {
-      httpd_resp_set_type(req, "application/json");
-      httpd_resp_send(req, "{\"success\":false,\"error\":\"File not found\"}", HTTPD_RESP_USE_STRLEN);
+      sendJsonResponse(req, "{\"success\":false, \"error\":\"File not found\"}");
       return ESP_OK;
     }
     isDir = file.isDirectory();
@@ -4379,11 +4321,9 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
   bool success = executeUnifiedWebCommand(req, ctx, deleteCmd, cmdOut);
 
   if (success) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":true}");
   } else {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Failed to delete\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Failed to delete\"}");
   }
 
   return ESP_OK;
@@ -4394,14 +4334,12 @@ esp_err_t handleFileDelete(httpd_req_t* req) {
 // ============================================================================
 
 esp_err_t handleFileRename(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   // Read POST body
   char buf[512];
   int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
   if (ret <= 0) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"No data received\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"No data received\"}");
     return ESP_OK;
   }
   buf[ret] = '\0';
@@ -4436,8 +4374,7 @@ esp_err_t handleFileRename(httpd_req_t* req) {
   newName.replace("+", " ");
 
   if (oldPath.length() == 0 || newName.length() == 0) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"oldPath and newName required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"oldPath and newName required\"}");
     return ESP_OK;
   }
 
@@ -4446,8 +4383,7 @@ esp_err_t handleFileRename(httpd_req_t* req) {
 
   if (isAdminOnlyPath(oldPath) && !isAdminUser(ctx.user)) {
     httpd_resp_set_status(req, "403 Forbidden");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin required\"}");
     return ESP_OK;
   }
 
@@ -4458,8 +4394,7 @@ esp_err_t handleFileRename(httpd_req_t* req) {
 
   // Use centralized permission check
   if (!canRename(oldPath)) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Rename not allowed for this file\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Rename not allowed for this file\"}");
     return ESP_OK;
   }
 
@@ -4487,23 +4422,21 @@ extern bool approvePendingUserInternal(const String& username, String& errorOut)
 extern bool denyPendingUserInternal(const String& username, String& errorOut);
 
 esp_err_t handleAdminPending(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   // Preserve JSON error contract for this endpoint
   if (!isAdminUser(ctx.user)) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin access required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin access required\"}");
     return ESP_OK;
   }
 
-  JsonDocument response;
+  PSRAM_JSON_DOC(response);
   response["success"] = true;
   JsonArray pendingArray = response["pending"].to<JsonArray>();
 
   if (LittleFS.exists("/system/users/pending_users.json")) {
     File file = LittleFS.open("/system/users/pending_users.json", "r");
     if (file) {
-      JsonDocument doc;
+      PSRAM_JSON_DOC(doc);
       DeserializationError err = deserializeJson(doc, file);
       file.close();
       if (!err) {
@@ -4523,22 +4456,18 @@ esp_err_t handleAdminPending(httpd_req_t* req) {
     JsonBufferGuard jsonGuard("handlePendingApprovals");
     if (jsonGuard.held) {
       size_t len = serializeJson(response, gJsonResponseBuffer, JSON_RESPONSE_SIZE);
-      httpd_resp_set_type(req, "application/json");
-      httpd_resp_send(req, gJsonResponseBuffer, len);
+      sendJsonResponse(req, gJsonResponseBuffer, len);
     } else {
-      httpd_resp_set_type(req, "application/json");
-      httpd_resp_send(req, "{\"success\":true,\"pending\":[]}", HTTPD_RESP_USE_STRLEN);
+      sendJsonResponse(req, "{\"success\":true, \"pending\":[]}");
     }
   }
   return ESP_OK;
 }
 
 esp_err_t handleAdminApproveUser(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   if (!isAdminUser(ctx.user)) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin access required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin access required\"}");
     return ESP_OK;
   }
 
@@ -4560,8 +4489,7 @@ esp_err_t handleAdminApproveUser(httpd_req_t* req) {
   }
   String username = urlDecode(extractFormField(body, "username"));
   if (username.length() == 0) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Username required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Username required\"}");
     return ESP_OK;
   }
 
@@ -4579,20 +4507,17 @@ esp_err_t handleAdminApproveUser(httpd_req_t* req) {
 }
 
 esp_err_t handleAdminDenyUser(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   // Preserve JSON error contract for this endpoint
   if (!isAdminUser(ctx.user)) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Admin access required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin access required\"}");
     return ESP_OK;
   }
 
   // Read full body and decode
   int total_len = req->content_len;
   if (total_len <= 0) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"No data\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"No data\"}");
     return ESP_OK;
   }
   std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.passwd"), free);
@@ -4600,8 +4525,7 @@ esp_err_t handleAdminDenyUser(httpd_req_t* req) {
   while (received < total_len) {
     int r = httpd_req_recv(req, buf.get() + received, total_len - received);
     if (r <= 0) {
-      httpd_resp_set_type(req, "application/json");
-      httpd_resp_send(req, "{\"success\":false,\"error\":\"Read error\"}", HTTPD_RESP_USE_STRLEN);
+      sendJsonResponse(req, "{\"success\":false, \"error\":\"Read error\"}");
       return ESP_OK;
     }
     received += r;
@@ -4611,8 +4535,7 @@ esp_err_t handleAdminDenyUser(httpd_req_t* req) {
   String username = urlDecode(extractFormField(body, "username"));
 
   if (username.length() == 0) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Username required\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Username required\"}");
     return ESP_OK;
   }
 
@@ -4625,8 +4548,7 @@ esp_err_t handleAdminDenyUser(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, "{\"success\":true}");
   return ESP_OK;
 }
 
@@ -4643,8 +4565,7 @@ extern bool parseJsonString(const String& json, const char* key, String& out);
 extern const char* AUTOMATIONS_JSON_FILE;
 
 esp_err_t handleAutomationsExport(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   // Parse query parameters
   char query[512] = { 0 };
@@ -4841,7 +4762,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
   }
   buf.get()[received] = '\0';
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError jerr = deserializeJson(doc, buf.get(), received);
   if (jerr || !doc["commands"].is<JsonArray>()) {
     httpd_resp_set_type(req, "application/json");
@@ -4895,7 +4816,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
 
   // Build response: {"ok":true,"count":N,"results":["out0","out1",...]}
   // Use ArduinoJson to safely serialize the output strings (handles escaping)
-  JsonDocument respDoc;
+  PSRAM_JSON_DOC(respDoc);
   respDoc["ok"] = true;
   respDoc["count"] = count;
   JsonArray arr = respDoc["results"].to<JsonArray>();
@@ -4947,9 +4868,9 @@ void startHttpServer() {
       sslConfig.httpd.max_uri_handlers = 100;
       sslConfig.httpd.lru_purge_enable = true;
       sslConfig.httpd.stack_size = 11059;
-      sslConfig.httpd.recv_wait_timeout = 10;
-      sslConfig.httpd.send_wait_timeout = 10;
-      sslConfig.httpd.max_open_sockets = 2;  // Limit concurrent TLS handshakes to reduce peripheral spinlock contention
+      sslConfig.httpd.recv_wait_timeout = 20;
+      sslConfig.httpd.send_wait_timeout = 20;
+      sslConfig.httpd.max_open_sockets = 5;  // 5 slots: page load + 2 API fetches + browser connection-pool pre-open headroom
       sslConfig.servercert = (const uint8_t*)sHttpsCertData.c_str();
       sslConfig.servercert_len = sHttpsCertData.length() + 1;  // Include null terminator (PEM)
       sslConfig.prvtkey_pem = (const uint8_t*)sHttpsKeyData.c_str();

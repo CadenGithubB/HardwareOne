@@ -2077,17 +2077,7 @@ extern bool networkShowingWiFiSubmenu;
 extern String unavailableOLEDTitle;
 extern String unavailableOLEDReason;
 
-// Forward declare FileBrowserRenderData struct to access selected item type
-struct FileBrowserRenderData {
-  char path[128];
-  void* items;
-  int itemCount;
-  int selectedIdx;
-  int pageStart;
-  int pageEnd;
-  bool valid;
-  bool selectedIsFolder;
-};
+// FileBrowserRenderData defined in System_FileManager.h (included above)
 extern FileBrowserRenderData fileBrowserRenderData;
 
 // Get specific action text for Bluetooth X button based on current state
@@ -4873,13 +4863,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
   }
 }
 
-// Battery icon state for main menu (updated every 2 minutes)
-struct BatteryIconState {
-  float percentage;
-  char icon;
-  unsigned long lastUpdateMs;
-  bool valid;
-};
+// BatteryIconState struct declared in OLED_Utils.h
 BatteryIconState batteryIconState = {0};
 extern const unsigned long BATTERY_ICON_UPDATE_INTERVAL = 120000; // 2 minutes
 
@@ -5009,16 +4993,8 @@ bool oledMenuBack() {
 
 // pushOLEDMode and popOLEDMode are declared in OLED_Display.h
 
-// Logging mode state enum and variables (used by oledMenuSelect)
-enum LoggingMenuState : uint8_t {
-  LOG_MENU_MAIN,
-  LOG_MENU_SENSOR,
-  LOG_MENU_SYSTEM,
-  LOG_MENU_SENSOR_CONFIG,
-  LOG_MENU_VIEWER
-};
-LoggingMenuState loggingCurrentState = LOG_MENU_MAIN;
-int loggingMenuSelection = 0;
+// LoggingMenuState enum, loggingCurrentState, loggingMenuSelection
+// declared in OLED_Utils.h, defined in OLED_Mode_Logging.cpp
 
 void oledMenuSelect() {
   // Handle remote command keyboard input completion

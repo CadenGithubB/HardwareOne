@@ -56,7 +56,7 @@ volatile UBaseType_t gIMUWatermarkNow = (UBaseType_t)0;
 
 // Debug macros (use centralized versions from debug_system.h)
 // BROADCAST_PRINTF now defined in debug_system.h with performance optimizations
-#define MIN_RESTART_DELAY_MS 2000
+// MIN_RESTART_DELAY_MS defined in System_I2C.h
 
 // Queue system functions now in System_I2C.h
 
@@ -319,7 +319,7 @@ bool initIMUSensor() {
   INFO_SENSORSF("Starting BNO055 IMU initialization (STEMMA QT)...");
 
   // Reset grace period for this initialization attempt (device may have been registered at boot)
-  i2cResetGracePeriod(0x28);
+  i2cResetGracePeriod(I2C_ADDR_IMU);
 
   // Use i2cTransaction wrapper with long timeout for IMU init (can take several seconds with retries)
   // Probe for possible I2C addresses (A: 0x28, B: 0x29)
@@ -340,7 +340,7 @@ bool initIMUSensor() {
     delay(1000);
 
     if (foundIndex < 0) {
-      WARN_SENSORSF("[IMU] Error: Not detected at 0x28 or 0x29 (initial probe). Will attempt init anyway with retries");
+      WARN_SENSORSF("[IMU] Error: Not detected at 0x%02X or 0x%02X (initial probe). Will attempt init anyway with retries", I2C_ADDR_IMU, BNO055_ADDRESS_B);
     } else {
       INFO_SENSORSF("Detected BNO055 at address 0x%02X", candidateAddrs[foundIndex]);
     }
@@ -561,7 +561,7 @@ int buildIMUDataJSON(char* buf, size_t bufSize) {
 
   int pos = 0;
 
-  if (gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {  // 100ms timeout for HTTP response
+  if (gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS)) == pdTRUE) {
     unsigned long nowMs = millis();
     unsigned long lastUpdateMs = gImuCache.imuLastUpdate;
     unsigned long ageMs = (lastUpdateMs > 0 && nowMs >= lastUpdateMs) ? (nowMs - lastUpdateMs) : 0;
@@ -938,11 +938,11 @@ const char* cmd_imuyawoffset(const String& argsInput) {
 
 const char* cmd_imuautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = argsInput; arg.trim();
+  String arg = argsInput;
+  normalizeCliArg(arg);
   if (arg.length() == 0) {
     return gSettings.imuAutoStart ? "[IMU] Auto-start: enabled" : "[IMU] Auto-start: disabled";
   }
-  arg.toLowerCase();
   if (arg == "on" || arg == "true" || arg == "1") {
     setSetting(gSettings.imuAutoStart, true);
     return "[IMU] Auto-start enabled";
@@ -1033,10 +1033,7 @@ void imuTask(void* parameter) {
       imuInitDone = false;
       imuInitResult = false;
       
-      INFO_SENSORSF("[IMU] Task disabled - cleaning up and deleting");
-      // NOTE: Do NOT clear imuTaskHandle here - let create function use eTaskGetState()
-      // to detect stale handles. Clearing here creates a race condition window.
-      vTaskDelete(nullptr);
+      SENSOR_TASK_EXIT("IMU");
     }
     
     // Update watermark diagnostics (only when enabled)
@@ -1089,7 +1086,7 @@ void imuTask(void* parameter) {
         
         // Auto-disable if too many consecutive failures
         if (!result) {
-          if (i2cShouldAutoDisable(I2C_ADDR_IMU, 5)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_IMU)) {
             ERROR_SENSORSF("Too many consecutive IMU failures - auto-disabling");
             imuEnabled = false;
             sensorStatusBumpWith("imu@auto_disabled");
@@ -1098,23 +1095,12 @@ void imuTask(void* parameter) {
         
         // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW
-        // Check mesh mode (worker role) OR bond mode (worker role)
-        bool shouldStream = false;
-        if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
-          shouldStream = true;
-        }
-#if ENABLE_BONDED_MODE
-        if (gSettings.bondModeEnabled && isBondWorker()) {
-          shouldStream = true;  // Bond mode worker
-        }
-#endif
-        
-        if (result && shouldStream) {
+        if (result && shouldStreamSensorToRemote()) {
           // Build IMU JSON from cache
           char imuJson[512];
           int jsonLen = buildIMUDataJSON(imuJson, sizeof(imuJson));
           if (jsonLen > 0) {
-            sendSensorDataUpdate(REMOTE_SENSOR_IMU, String(imuJson));
+            sendSensorDataUpdate(REMOTE_SENSOR_IMU, imuJson, jsonLen);
           }
         }
 #endif

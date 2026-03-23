@@ -22,7 +22,6 @@
 // ============================================================================
 // STHS34PF80 Register Definitions
 // ============================================================================
-#define STHS34PF80_ADDR           0x5A
 
 // Device identification
 #define STHS34PF80_WHO_AM_I       0x0F
@@ -89,7 +88,7 @@ static bool createPresenceTask() {
   }
   if (presenceTaskHandle == nullptr) {
     const uint32_t presenceStack = PRESENCE_STACK_WORDS;
-    if (xTaskCreateLogged(presenceTask, "presence_task", presenceStack, nullptr, 1, &presenceTaskHandle, "presence") != pdPASS) {
+    if (xTaskCreateLogged(presenceTask, "presence_task", presenceStack, nullptr, TASK_PRIORITY_LOW, &presenceTaskHandle, "presence") != pdPASS) {
       return false;
     }
     DEBUG_SENSORSF("Presence task created successfully");
@@ -126,8 +125,8 @@ extern const SettingsModule presenceSettingsModule = {
 // ============================================================================
 
 static bool writeRegister(uint8_t reg, uint8_t value) {
-  return i2cDeviceTransaction(STHS34PF80_ADDR, 100000, 200, [&]() -> bool {
-    Wire1.beginTransmission(STHS34PF80_ADDR);
+  return i2cDeviceTransaction(I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
+    Wire1.beginTransmission(I2C_ADDR_PRESENCE);
     Wire1.write(reg);
     Wire1.write(value);
     return (Wire1.endTransmission() == 0);
@@ -135,24 +134,24 @@ static bool writeRegister(uint8_t reg, uint8_t value) {
 }
 
 static bool readRegister(uint8_t reg, uint8_t* value) {
-  return i2cDeviceTransaction(STHS34PF80_ADDR, 100000, 200, [&]() -> bool {
-    Wire1.beginTransmission(STHS34PF80_ADDR);
+  return i2cDeviceTransaction(I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
+    Wire1.beginTransmission(I2C_ADDR_PRESENCE);
     Wire1.write(reg);
     if (Wire1.endTransmission(false) != 0) return false;
     
-    if (Wire1.requestFrom(STHS34PF80_ADDR, (uint8_t)1) != 1) return false;
+    if (Wire1.requestFrom(I2C_ADDR_PRESENCE, (uint8_t)1) != 1) return false;
     *value = Wire1.read();
     return true;
   });
 }
 
 static bool readRegisters(uint8_t reg, uint8_t* buffer, uint8_t len) {
-  return i2cDeviceTransaction(STHS34PF80_ADDR, 100000, 200, [&]() -> bool {
-    Wire1.beginTransmission(STHS34PF80_ADDR);
+  return i2cDeviceTransaction(I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
+    Wire1.beginTransmission(I2C_ADDR_PRESENCE);
     Wire1.write(reg);
     if (Wire1.endTransmission(false) != 0) return false;
     
-    if (Wire1.requestFrom(STHS34PF80_ADDR, len) != len) return false;
+    if (Wire1.requestFrom(I2C_ADDR_PRESENCE, len) != len) return false;
     for (uint8_t i = 0; i < len; i++) {
       buffer[i] = Wire1.read();
     }
@@ -503,10 +502,7 @@ void presenceTask(void* parameter) {
     if (!presenceEnabled) {
       presenceConnected = false;
       gPresenceCache.dataValid = false;
-      INFO_SENSORSF("[PRESENCE] Task disabled - cleaning up and deleting");
-      // NOTE: Do NOT clear presenceTaskHandle here - let create function use eTaskGetState()
-      // to detect stale handles. Clearing here creates a race condition window.
-      vTaskDelete(nullptr);
+      SENSOR_TASK_EXIT("PRESENCE");
     }
 
     // Stack watermark tracking + safety bailout
@@ -537,12 +533,12 @@ void presenceTask(void* parameter) {
             char presJson[256];
             int jsonLen = buildPresenceDataJSON(presJson, sizeof(presJson));
             if (jsonLen > 0) {
-              sendSensorDataUpdate(REMOTE_SENSOR_PRESENCE, String(presJson));
+              sendSensorDataUpdate(REMOTE_SENSOR_PRESENCE, presJson, jsonLen);
             }
           }
 #endif
         } else {
-          if (i2cShouldAutoDisable(I2C_ADDR_PRESENCE, 5)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_PRESENCE)) {
             uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_PRESENCE);
             presenceEnabled = false;
             presenceConnected = false;

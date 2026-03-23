@@ -356,9 +356,8 @@ void formatMacAddressBuf(const uint8_t* mac, char* buf, size_t bufSize);
 // Forward declaration for internal addEspNowPeerWithEncryption (different from extern version in .ino)
 static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool useEncryption, const uint8_t* encryptionKey);
 
-// Forward declarations for structures from main .ino
-// AuthContext and CommandSource now in user_system.h
-struct CommandContext;
+// Command types from shared header
+#include "System_CommandTypes.h"
 // ConnectedDevice is now defined in System_I2C.h (included above)
 
 // External globals for device tracking (defined in System_I2C.cpp)
@@ -2584,7 +2583,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
         return true;
       }
 
-      JsonDocument userDoc;
+      PSRAM_JSON_DOC(userDoc);
       DeserializationError err = deserializeJson(userDoc, f);
       f.close();
 
@@ -2623,7 +2622,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
 
       // Store hashed password in user settings
       String hashedPassword = hashUserPassword(String(targetPass));
-      JsonDocument defaults;
+      PSRAM_JSON_DOC(defaults);
       defaults["theme"]    = "light";
       defaults["password"] = hashedPassword;
       saveUserSettings((uint32_t)nextId, defaults);
@@ -3553,29 +3552,7 @@ struct V3CmdAsyncCtx {
   uint32_t cmdMsgId;  // For session-based streaming correlation
 };
 
-// Async callback type (matches HardwareOne.cpp)
-typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
-
-// Command origin enum (matches HardwareOne.cpp)
-enum CommandOrigin { ORIGIN_SERIAL, ORIGIN_WEB, ORIGIN_AUTOMATION, ORIGIN_SYSTEM };
-
-// Command context structure (matches HardwareOne.cpp)
-struct CommandContext {
-  CommandOrigin origin;
-  AuthContext auth;
-  uint32_t id;
-  uint32_t timestampMs;
-  uint32_t outputMask;
-  bool validateOnly;
-  void* replyHandle;
-  httpd_req_t* httpReq;
-};
-
-// Command structure (matches HardwareOne.cpp)
-struct Command {
-  String line;
-  CommandContext ctx;
-};
+// ExecAsyncCallback, CommandOrigin, CommandContext, Command defined in System_CommandTypes.h (included above)
 
 // External async command submission
 extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
@@ -5383,32 +5360,8 @@ const char* checkEspNowFirstTimeSetup() {
     return "";
   }
   
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  
-  snprintf(getDebugBuffer(), 1024,
-    "\n"
-    "╔════════════════════════════════════════════════════════════╗\n"
-    "║          ESP-NOW First-Time Setup Required                ║\n"
-    "╚════════════════════════════════════════════════════════════╝\n"
-    "\n"
-    "Before initializing ESP-NOW, you must set a device name.\n"
-    "This name will identify this device in topology displays.\n"
-    "\n"
-    "To set the device name, use:\n"
-    "  espnow setname <name>\n"
-    "\n"
-    "Example:\n"
-    "  espnow setname darkblue\n"
-    "\n"
-    "Requirements:\n"
-    "  - 1-20 characters\n"
-    "  - Letters, numbers, hyphens, underscores only\n"
-    "  - No spaces\n"
-    "\n"
-    "After setting the name, run 'openespnow' again.\n"
-  );
-  
-  return getDebugBuffer();
+  // No device name configured — require the user to set one before ESP-NOW can start.
+  return "No device name configured. Set one with: espnow setname <name>";
 }
 
 // Load named ESP-NOW devices (paired devices with names/keys) from filesystem
@@ -5427,7 +5380,7 @@ static void loadEspNowDevices() {
   f.close();
   if (content.isEmpty()) return;
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, content);
   if (err) {
     WARN_ESPNOWF("[ESPNOW] Failed to parse %s: %s", ESPNOW_DEVICES_FILE, err.c_str());
@@ -5618,7 +5571,7 @@ void meshSendEnvelopeToPeers(const String& envelope) {
 // Build a JSON boot notification string
 String buildBootNotification(uint32_t msgId, const char* src,
                              uint32_t bootCounter, uint32_t timestamp) {
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   v2_init_envelope(doc, MSG_TYPE_BOOT, msgId, src, "", 3);
   JsonObject pld = doc["pld"].to<JsonObject>();
   pld["boot"] = bootCounter;
@@ -6250,7 +6203,7 @@ bool startEspNowTask() {
     "espnow_task",
     ESPNOW_HB_STACK_WORDS,
     nullptr,
-    5,
+    TASK_PRIORITY_HIGH,
     &gEspNowHbTaskHandle,
     0
   );
@@ -8078,7 +8031,7 @@ const char* cmd_espnow_list(const String& argsInput) {
   // Build JSON from gEspNow->devices[] — the authoritative source of truth.
   // esp_now_fetch_peer() only reflects the hardware peer table which may lag
   // behind after a reboot until loadMeshPeers() re-registers all peers.
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   JsonArray devices = doc["devices"].to<JsonArray>();
 
   int listedCount = 0;
@@ -8116,8 +8069,8 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
   }
 
   // Use ArduinoJson to avoid String concatenation heap fragmentation
-  // Use DynamicJsonDocument to avoid stack overflow in cmd_exec task
-  JsonDocument doc;
+  // Use PSRAM allocator to avoid internal heap fragmentation in cmd_exec task
+  PSRAM_JSON_DOC(doc);
   JsonArray peers = doc["peers"].to<JsonArray>();
   
   uint32_t now = millis();
@@ -10157,8 +10110,8 @@ extern const size_t espNowCommandsCount = sizeof(espNowCommands) / sizeof(espNow
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry espnowSettingEntries[] = {
-  { "enabled",                    SETTING_BOOL,   &gSettings.espnowenabled,              true, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr },
-  { "mesh",                       SETTING_BOOL,   &gSettings.espnowmesh,                 true, 0, nullptr, 0, 1, "Mesh Mode", nullptr },
+  { "enabled",                    SETTING_BOOL,   &gSettings.espnowenabled,              false, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr },
+  { "mesh",                       SETTING_BOOL,   &gSettings.espnowmesh,                 false, 0, nullptr, 0, 1, "Mesh Mode", nullptr },
   { "userSyncEnabled",            SETTING_BOOL,   &gSettings.espnowUserSyncEnabled,      false, 0, nullptr, 0, 1, "User Sync Enabled", nullptr },
   { "deviceName",                 SETTING_STRING, &gSettings.espnowDeviceName,           0, 0, "", 0, 0, "Device Name", nullptr },
   { "room",                       SETTING_STRING, &gSettings.espnowRoom,                 0, 0, "", 0, 0, "Room", nullptr },

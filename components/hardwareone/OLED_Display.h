@@ -290,6 +290,13 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason);
 #define OLED_RESET -1
 #define OLED_I2C_ADDRESS 0x3D
 
+// Helper macro to wrap OLED operations in I2C transaction
+// Requires System_I2C.h for i2cDeviceTransactionVoid — include it before using this macro
+#ifndef OLED_TRANSACTION
+#define OLED_TRANSACTION(code) \
+  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 400000, 500, [&]() { code; })
+#endif
+
 // OLED display object (now provided by Display_HAL.h as gDisplay)
 // Legacy alias: oledDisplay is defined as gDisplay in Display_HAL.h
 // extern Adafruit_SSD1306* oledDisplay;  // Removed - use gDisplay from Display_HAL.h

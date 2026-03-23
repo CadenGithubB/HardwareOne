@@ -15,7 +15,6 @@
 #include "System_Debug.h"
 
 // External references
-extern bool oledConnected;
 
 // Power menu scroll states (replaces manual selection variables)
 static OLEDScrollState sPowerMainScroll;

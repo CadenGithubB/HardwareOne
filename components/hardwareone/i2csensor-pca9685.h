@@ -8,10 +8,10 @@
 #ifndef I2CSENSOR_PCA9685_H
 #define I2CSENSOR_PCA9685_H
 
-#include <Arduino.h>
-#include <Adafruit_PWMServoDriver.h>
+#include "System_BuildConfig.h"
+#include <stdint.h>
 
-// Servo profile structure
+// Servo profile structure (always available for type-safe references)
 struct ServoProfile {
   char name[32];
   uint16_t minPulse;
@@ -20,8 +20,14 @@ struct ServoProfile {
   bool configured;
 };
 
+#if ENABLE_SERVO
+
+#include <Arduino.h>
+#include <Adafruit_PWMServoDriver.h>
+#include "System_I2C.h"
+
 // PCA9685 constants
-#define PCA9685_I2C_ADDRESS 0x40
+#define PCA9685_I2C_ADDRESS I2C_ADDR_PCA9685
 #define MAX_SERVO_CHANNELS 16
 
 // Global PCA9685 driver instance
@@ -40,4 +46,5 @@ struct CommandEntry;
 extern const CommandEntry servoCommands[];
 extern const size_t servoCommandsCount;
 
+#endif // ENABLE_SERVO
 #endif // I2CSENSOR_PCA9685_H

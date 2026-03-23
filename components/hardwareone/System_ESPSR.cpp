@@ -4,6 +4,7 @@
 
 #include "System_Notifications.h"
 #include "System_Debug.h"
+#include "System_TaskUtils.h"
 #include "System_VFS.h"
 #include "System_BuildConfig.h"
 #include "System_MemUtil.h"
@@ -53,9 +54,7 @@
   #define MIC_DATA_PIN      41  // Default for XIAO ESP32S3 Sense
 #endif
 
-// Task configuration
-#define SR_TASK_STACK_SIZE  (8 * 1024)
-#define SR_TASK_PRIORITY    5
+// Task configuration (SR_STACK_WORDS and SR_TASK_PRIORITY_LEVEL defined in System_TaskUtils.h)
 #define SR_AUDIO_CHUNK_MS   32
 #define SR_AUDIO_CHUNK_SIZE (I2S_SR_SAMPLE_RATE * I2S_SR_CHANNELS * sizeof(int16_t) * SR_AUDIO_CHUNK_MS / 1000)
 
@@ -1252,7 +1251,7 @@ static bool srSnipInit() {
     ERROR_SRF("Failed to create snippet queue");
     return false;
   }
-  BaseType_t ret = xTaskCreatePinnedToCore(srSnipWriterTask, "sr_snip_wr", 4096, nullptr, 3, &gSrSnipWriterTask, 0);
+  BaseType_t ret = xTaskCreatePinnedToCore(srSnipWriterTask, "sr_snip_wr", SR_SNIP_STACK_WORDS, nullptr, TASK_PRIORITY_NORMAL, &gSrSnipWriterTask, 0);
   if (ret != pdPASS) {
     ERROR_SRF("Failed to create snippet writer task");
     vQueueDelete(gSrSnipQueue);
@@ -2612,14 +2611,14 @@ bool startESPSR() {
   
   // Start SR task
   WARN_SYSTEMF("[SR_START] Step 4: Creating srTask (stack=%u, priority=%d, core=1)",
-               (unsigned)SR_TASK_STACK_SIZE, SR_TASK_PRIORITY);
+               (unsigned)SR_STACK_WORDS, (int)SR_TASK_PRIORITY_LEVEL);
   gSRTaskShouldRun = true;
   BaseType_t ret = xTaskCreatePinnedToCore(
     srTask,
     "sr_task",
-    SR_TASK_STACK_SIZE,
+    SR_STACK_WORDS,
     nullptr,
-    SR_TASK_PRIORITY,
+    SR_TASK_PRIORITY_LEVEL,
     &gSRTaskHandle,
     1  // Run on core 1
   );

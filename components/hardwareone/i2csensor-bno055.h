@@ -2,26 +2,11 @@
 #define I2CSENSOR_BNO055_H
 
 #include "System_BuildConfig.h"
-
-#if ENABLE_IMU_SENSOR
-
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// Forward declarations
-class String;
-class Adafruit_BNO055;
-
-// BNO055 sensor object (defined in imu_sensor.cpp)
-extern Adafruit_BNO055* gBNO055;
-
-// IMU initialization handoff variables
-extern volatile bool imuInitRequested;
-extern volatile bool imuInitDone;
-extern volatile bool imuInitResult;
-
-// IMU sensor cache (small data, 5Hz updates)
+// IMU sensor cache structure (always available for type-safe references)
 struct ImuCache {
   SemaphoreHandle_t mutex = nullptr;
   float accelX = 0.0, accelY = 0.0, accelZ = 0.0;
@@ -33,63 +18,63 @@ struct ImuCache {
   uint32_t imuSeq = 0;
 };
 
-// Global IMU cache (defined in imu_sensor.cpp)
-extern ImuCache gImuCache;
-
-// IMU Action Detection System
+// IMU Action Detection System (always available for type-safe references)
 struct IMUActionState {
-  // Shake detection
   bool isShaking;
   unsigned long lastShakeMs;
   uint32_t shakeCount;
-  float shakeIntensity;  // 0.0 to 1.0
+  float shakeIntensity;
 
-  // Tilt detection
   bool isTilted;
-  float tiltAngle;     // Degrees from horizontal
+  float tiltAngle;
   char tiltDirection;  // 'F'=forward, 'B'=back, 'L'=left, 'R'=right, 'N'=none
 
-  // Tap/knock detection
   bool tapDetected;
   unsigned long lastTapMs;
   uint32_t tapCount;
-  float tapStrength;  // 0.0 to 1.0
+  float tapStrength;
 
-  // Rotation detection
   bool isRotating;
   float rotationRate;  // deg/s
   char rotationAxis;   // 'X', 'Y', 'Z', or 'N' for none
 
-  // Freefall detection
   bool isFreefalling;
   unsigned long freefallStartMs;
   uint32_t freefallDurationMs;
 
-  // Step counting
   bool isWalking;
   uint32_t stepCount;
   unsigned long lastStepMs;
-  float stepFrequency;  // steps per minute
+  float stepFrequency;
 
-  // Orientation detection
-  char orientation;  // 'P'=portrait, 'L'=landscape, 'U'=upside-down portrait, 'R'=reverse landscape, 'F'=face-up, 'D'=face-down
+  char orientation;  // 'P'=portrait, 'L'=landscape, 'U'=upside-down, 'R'=reverse, 'F'=face-up, 'D'=face-down
   char lastOrientation;
   unsigned long lastOrientationChangeMs;
 
-  // Internal state for detection algorithms
-  float accelHistory[10];  // Rolling buffer for acceleration magnitude
+  float accelHistory[10];
   int accelHistoryIndex;
   unsigned long lastUpdateMs;
-  float baselineAccel;  // Baseline for freefall detection (~9.8 m/s²)
+  float baselineAccel;
 
-  // Step detection state
   float lastAccelMag;
   bool stepPeakDetected;
   unsigned long stepWindowStartMs;
   uint32_t stepsInWindow;
 };
 
-// Global IMU action state (defined in imu_sensor.cpp)
+#if ENABLE_IMU_SENSOR
+
+// Forward declarations
+class String;
+class Adafruit_BNO055;
+
+extern Adafruit_BNO055* gBNO055;
+
+extern volatile bool imuInitRequested;
+extern volatile bool imuInitDone;
+extern volatile bool imuInitResult;
+
+extern ImuCache gImuCache;
 extern IMUActionState gIMUActions;
 
 // IMU watermark tracking

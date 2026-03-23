@@ -272,6 +272,31 @@ void executeOLEDCommand(const String& argsInput);
 // Execute a CLI command and return success status + output (for callers that need the result)
 bool executeOLEDCommandWithResult(const String& argsInput, char* out, size_t outSize);
 
+// ============= Battery Icon Shared State =============
+
+struct BatteryIconState {
+  float percentage;
+  char icon;
+  unsigned long lastUpdateMs;
+  bool valid;
+};
+
+extern BatteryIconState batteryIconState;
+extern const unsigned long BATTERY_ICON_UPDATE_INTERVAL;
+
+// ============= Logging Mode Shared State =============
+
+enum LoggingMenuState {
+  LOG_MENU_MAIN,
+  LOG_MENU_SENSOR,
+  LOG_MENU_SYSTEM,
+  LOG_MENU_SENSOR_CONFIG,
+  LOG_MENU_VIEWER
+};
+
+extern LoggingMenuState loggingCurrentState;
+extern int loggingMenuSelection;
+
 #endif // ENABLE_OLED_DISPLAY
 
 #endif // OLED_UTILS_H
