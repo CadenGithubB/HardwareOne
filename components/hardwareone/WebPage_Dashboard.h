@@ -22,7 +22,9 @@
   #if ENABLE_FM_RADIO
   #include "i2csensor-rda5807-web.h"
   #endif
+  #if ENABLE_SERVO
   #include "i2csensor-pca9685-web.h"
+  #endif
   #if ENABLE_CAMERA_SENSOR
   #include "System_Camera_DVP_Web.h"
   #endif
@@ -52,7 +54,6 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "    if(!s) return true;\n"
     "    var k=String(key||'')+'Compiled';\n"
     "    if(typeof s[k]==='boolean') return !!s[k];\n"
-    "    if(key==='fmradio'||key==='pwm') return true;\n"
     "    return true;\n"
     "  }\n"
     "  function tryPatch(){\n"
@@ -180,9 +181,11 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
   streamMicrophoneDashboardDef(req);
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
  #endif
+ #if ENABLE_SERVO
   httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
   streamPCA9685ServoDriverDashboardDef(req);
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
+ #endif
  #endif
 
   // Combined Status Panel (Sensor Status + System Stats)
@@ -211,14 +214,14 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req,
     "<div class='sys-card sys-card-tall' data-panel='memory'>"
     "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9)'>Memory</div>"
-    "<div class='sys-card-row'><span>Heap:</span><strong id='sys-heap'>--</strong></div>"
-    "<div class='sys-card-row'><span>PSRAM:</span><strong id='sys-psram'>--</strong></div>"
+    "<div class='sys-card-row'><span>Heap used:</span><strong id='sys-heap'>--</strong></div>"
+    "<div class='sys-card-row'><span>PSRAM used:</span><strong id='sys-psram'>--</strong></div>"
     "</div>",
     HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req,
     "<div class='sys-card sys-card-tall' data-panel='storage'>"
     "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9)'>Storage</div>"
-    "<div class='sys-card-row'><span>Onboard Flash:</span><strong id='sys-storage-used'>--</strong></div>"
+    "<div class='sys-card-row'><span>Flash used:</span><strong id='sys-storage-used'>--</strong></div>"
     "<div class='sys-card-row' id='sys-sd-row' style='display:none'><span>SD Card:</span><strong id='sys-storage-sd'>--</strong></div>"
     "</div>",
     HTTPD_RESP_USE_STRLEN);
@@ -319,22 +322,13 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
 
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN); // End combined status panel
 
-  // CSS for dashboard-specific indicators
-  httpd_resp_send_chunk(req, "<style>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, ".status-indicator{display:inline-block;width:12px;height:12px;min-width:12px;min-height:12px;flex:0 0 12px;border-radius:50%;margin-right:8px;box-sizing:content-box;vertical-align:middle}", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, ".status-enabled{background:#28a745;animation:pulse 2s infinite}", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, ".status-disabled{background:#dc3545}", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, ".status-recording{background:#e74c3c;animation:blink 1s infinite}", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "@keyframes pulse{0%{opacity:1}50%{opacity:0.5}100%{opacity:1}}", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "@keyframes blink{0%{opacity:1}50%{opacity:0.3}100%{opacity:1}}", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "</style>", HTTPD_RESP_USE_STRLEN);
 
   // JS sections (identical to legacy)
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 1: Pre-script sentinel');</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 2: Starting core object definition');(function(){console.log('[Dashboard] Section 2a: Inside IIFE wrapper');const Dash={log:function(){try{console.log.apply(console,arguments)}catch(_){ }},setText:function(id,v){var el=document.getElementById(id);if(el)el.textContent=v}};console.log('[Dashboard] Section 2b: Basic Dash object created');window.Dash=Dash;})();</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 3: Adding indicator functions');if(window.Dash){window.Dash.setIndicator=function(id,on){var el=document.getElementById(id);if(el){el.className=on?'status-indicator status-enabled':'status-indicator status-disabled'}};console.log('[Dashboard] Section 3a: setIndicator added')}else{console.error('[Dashboard] Section 3: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 4: Adding sensor status functions');if(window.Dash){window.Dash.updateSensorStatus=function(d){if(!d)return;try{var imuOn=!!(d.imuEnabled||d.imu);var thermOn=!!(d.thermalEnabled||d.thermal);var tofOn=!!(d.tofEnabled||d.tof);var apdsOn=!!(d.apdsColorEnabled||d.apdsProximityEnabled||d.apdsGestureEnabled);var gameOn=!!(d.gamepadEnabled||d.gamepad);var pwmOn=!!(d.pwmDriverConnected);var gpsOn=!!(d.gpsEnabled);var fmOn=!!(d.fmRadioEnabled);window.Dash.setIndicator('dash-imu-status',imuOn);window.Dash.setIndicator('dash-thermal-status',thermOn);window.Dash.setIndicator('dash-tof-status',tofOn);window.Dash.setIndicator('dash-apds-status',apdsOn);window.Dash.setIndicator('dash-gamepad-status',gameOn);window.Dash.setIndicator('dash-pwm-status',pwmOn);window.Dash.setIndicator('dash-gps-status',gpsOn);window.Dash.setIndicator('dash-fmradio-status',fmOn);window.Dash.setIndicator('dash-mic-status',!!(d.micEnabled));var micRec=document.getElementById('dash-mic-recording');if(micRec){micRec.className=(d.micRecording)?'status-indicator status-recording':'status-indicator status-disabled'}}catch(e){console.warn('[Dashboard] Sensor status update error',e)}};window.Dash.updateDeviceVisibility=function(registry){if(!registry||!registry.devices)return;try{var devices=registry.devices;var hasIMU=devices.some(function(d){return d.name==='BNO055'});var hasThermal=devices.some(function(d){return d.name==='MLX90640'});var hasToF=devices.some(function(d){return d.name==='VL53L4CX'});var hasAPDS=devices.some(function(d){return d.name==='APDS9960'});var hasGamepad=devices.some(function(d){return d.name==='Seesaw'});var hasDRV=devices.some(function(d){return d.name==='DRV2605'});var hasPCA9685=devices.some(function(d){return d.name==='PCA9685'});var hasGPS=devices.some(function(d){return d.name==='PA1010D'});var hasFMRadio=devices.some(function(d){return d.name==='RDA5807'});window.Dash.showHideCard('dash-imu-card',hasIMU);window.Dash.showHideCard('dash-thermal-card',hasThermal);window.Dash.showHideCard('dash-tof-card',hasToF);window.Dash.showHideCard('dash-apds-card',hasAPDS);window.Dash.showHideCard('dash-gamepad-card',hasGamepad);window.Dash.showHideCard('dash-drv-card',hasDRV);window.Dash.showHideCard('dash-pwm-card',hasPCA9685);window.Dash.showHideCard('dash-gps-card',hasGPS);window.Dash.showHideCard('dash-fmradio-card',hasFMRadio)}catch(e){console.warn('[Dashboard] Device visibility update error',e)}};console.log('[Dashboard] Section 4a: updateSensorStatus and updateDeviceVisibility added')}else{console.error('[Dashboard] Section 4: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 5: Adding system status functions');if(window.Dash){window.Dash.updateSystem=function(d){try{if(!d)return;if(d.system_time){var parts=d.system_time.split(' ');window.Dash.setText('sys-date',parts[0]||d.system_time);window.Dash.setText('sys-time',parts[1]||'')}else{window.Dash.setText('sys-date','Not synced');window.Dash.setText('sys-time','--')}if(d.uptime_hms)window.Dash.setText('sys-uptime',d.uptime_hms);if(d.net){if(d.net.ssid!=null)window.Dash.setText('sys-ssid',d.net.ssid);if(d.net.ip!=null)window.Dash.setText('sys-ip',d.net.ip)}if(d.mem){var heapTxt=null;if(d.mem.heap_free_kb!=null){if(d.mem.heap_total_kb!=null){heapTxt=d.mem.heap_free_kb+'/'+d.mem.heap_total_kb+' KB'}else{heapTxt=d.mem.heap_free_kb+' KB'}}if(heapTxt!=null)window.Dash.setText('sys-heap',heapTxt);var psTxt=null;var hasPs=(d.mem.psram_free_kb!=null)||(d.mem.psram_total_kb!=null);if(hasPs){var pf=(d.mem.psram_free_kb!=null)?d.mem.psram_free_kb:null;var pt=(d.mem.psram_total_kb!=null)?d.mem.psram_total_kb:null;if(pf!=null&&pt!=null)psTxt=pf+'/'+pt+' KB';else if(pf!=null)psTxt=pf+' KB'}if(psTxt!=null)window.Dash.setText('sys-psram',psTxt)}if(d.storage){if(d.storage.used_kb!=null){var usedTxt=d.storage.used_kb;if(d.storage.total_kb!=null)usedTxt+=' / '+d.storage.total_kb+' KB';window.Dash.setText('sys-storage-used',usedTxt)}if(d.storage.sd){var sd=d.storage.sd;var sdTxt=sd.used_mb+' / '+sd.total_mb+' MB';window.Dash.setText('sys-storage-sd',sdTxt);var sdRow=document.getElementById('sys-sd-row');if(sdRow)sdRow.style.display='';}else{var sdRow=document.getElementById('sys-sd-row');if(sdRow)sdRow.style.display='none';}}}catch(e){console.warn('[Dashboard] System update error',e)}};console.log('[Dashboard] Section 5a: updateSystem added')}else{console.error('[Dashboard] Section 5: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<script>console.log('[Dashboard] Section 5: Adding system status functions');if(window.Dash){window.Dash.updateSystem=function(d){try{if(!d)return;if(d.system_time){var parts=d.system_time.split(' ');window.Dash.setText('sys-date',parts[0]||d.system_time);window.Dash.setText('sys-time',parts[1]||'')}else{window.Dash.setText('sys-date','Not synced');window.Dash.setText('sys-time','--')}if(d.uptime_hms)window.Dash.setText('sys-uptime',d.uptime_hms);if(d.net){if(d.net.ssid!=null)window.Dash.setText('sys-ssid',d.net.ssid);if(d.net.ip!=null)window.Dash.setText('sys-ip',d.net.ip)}if(d.mem){var heapTxt=null;if(d.mem.heap_free_kb!=null&&d.mem.heap_total_kb!=null){var heapUsed=d.mem.heap_total_kb-d.mem.heap_free_kb;heapTxt=heapUsed+' / '+d.mem.heap_total_kb+' KB'}else if(d.mem.heap_free_kb!=null){heapTxt=d.mem.heap_free_kb+' KB free'}if(heapTxt!=null)window.Dash.setText('sys-heap',heapTxt);var psTxt=null;var hasPs=(d.mem.psram_free_kb!=null)||(d.mem.psram_total_kb!=null);if(hasPs){var pf=(d.mem.psram_free_kb!=null)?d.mem.psram_free_kb:null;var pt=(d.mem.psram_total_kb!=null)?d.mem.psram_total_kb:null;if(pf!=null&&pt!=null)psTxt=(pt-pf)+' / '+pt+' KB';else if(pf!=null)psTxt=pf+' KB free'}if(psTxt!=null)window.Dash.setText('sys-psram',psTxt)}if(d.storage){if(d.storage.used_kb!=null){var usedTxt=d.storage.used_kb;if(d.storage.total_kb!=null)usedTxt+=' / '+d.storage.total_kb+' KB';window.Dash.setText('sys-storage-used',usedTxt)}if(d.storage.sd){var sd=d.storage.sd;var sdTxt=sd.used_mb+' / '+sd.total_mb+' MB';window.Dash.setText('sys-storage-sd',sdTxt);var sdRow=document.getElementById('sys-sd-row');if(sdRow)sdRow.style.display='';}else{var sdRow=document.getElementById('sys-sd-row');if(sdRow)sdRow.style.display='none';}}}catch(e){console.warn('[Dashboard] System update error',e)}};console.log('[Dashboard] Section 5a: updateSystem added')}else{console.error('[Dashboard] Section 5: Dash object not found!')}</script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<script>"
     "if(window.Dash){"
       "var _origUpdateSystem=window.Dash.updateSystem||function(){};"

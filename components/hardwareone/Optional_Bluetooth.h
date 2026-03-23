@@ -12,6 +12,7 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 
+#include "BLE_Types.h"
 #include "System_Command.h"
 
 // =============================================================================
@@ -41,54 +42,8 @@
 #define BLE_FIRMWARE_CHAR_UUID        "2A26"
 
 // =============================================================================
-// BLE CONNECTION STATE
-// =============================================================================
-
-enum BLEConnectionState {
-  BLE_STATE_IDLE = 0,
-  BLE_STATE_ADVERTISING,
-  BLE_STATE_CONNECTED,
-  BLE_STATE_DISCONNECTING
-};
-
-// Device types for MAC address mapping
-enum BLEDeviceType {
-  BLE_DEVICE_UNKNOWN = 0,
-  BLE_DEVICE_GLASSES_LEFT,
-  BLE_DEVICE_GLASSES_RIGHT,
-  BLE_DEVICE_RING,
-  BLE_DEVICE_PHONE,
-  BLE_DEVICE_CUSTOM
-};
-
-// Event types for notification system
-enum BLEEventType {
-  BLE_EVENT_SENSOR_CONNECTED = 0,
-  BLE_EVENT_SENSOR_DISCONNECTED,
-  BLE_EVENT_LOW_BATTERY,
-  BLE_EVENT_WIFI_CONNECTED,
-  BLE_EVENT_WIFI_DISCONNECTED,
-  BLE_EVENT_BUTTON_PRESS,
-  BLE_EVENT_GESTURE_DETECTED,
-  BLE_EVENT_THRESHOLD_EXCEEDED,
-  BLE_EVENT_ERROR,
-  BLE_EVENT_CUSTOM
-};
-
-// Stream control flags
-enum BLEStreamFlags {
-  BLE_STREAM_NONE = 0,
-  BLE_STREAM_SENSORS = (1 << 0),
-  BLE_STREAM_SYSTEM = (1 << 1),
-  BLE_STREAM_EVENTS = (1 << 2),
-  BLE_STREAM_ALL = 0xFF
-};
-
-// =============================================================================
 // BLE SYSTEM STATE STRUCTURE
 // =============================================================================
-
-#define BLE_MAX_CONNECTIONS 4  // Support up to 4 simultaneous connections (glasses x2, ring, phone)
 
 struct BLEConnection {
   bool active;

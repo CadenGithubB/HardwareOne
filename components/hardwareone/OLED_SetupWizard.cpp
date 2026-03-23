@@ -20,21 +20,11 @@
 #include "i2csensor-seesaw.h"
 #include "System_I2C.h"
 
-// I2C address for OLED (must match OLED_Display.cpp)
-#ifndef OLED_I2C_ADDRESS
-#define OLED_I2C_ADDRESS 0x3D
-#endif
-
-// Helper macro to wrap OLED operations in I2C transaction
-#define OLED_TRANSACTION(code) \
-  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 400000, 500, [&]() { code; })
-
-// External references
-extern bool oledConnected;
+// OLED_I2C_ADDRESS, OLED_TRANSACTION, and oledConnected from OLED_Display.h
 extern ControlCache gControlCache;
 
 // OLED text input
-extern String getOLEDTextInput(const char* prompt, bool masked, const char* defaultValue, int maxLen, bool* wasCancelled = nullptr);
+extern String getOLEDTextInput(const char* prompt, bool masked, const char* defaultValue, int maxLen, bool* wasCancelled = nullptr, bool canSkip = true);
 extern bool getOLEDWiFiSelection(String& selectedSSID);
 
 // Joystick navigation state
@@ -71,25 +61,26 @@ void drawWizardHeader(int pageNum, int totalPages, const char* title) {
 
 
 void drawWizardFooter(const char* leftAction, const char* rightAction, const char* backAction) {
-  // Use correct footer position: header + content area
   const int footerStartY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
-  
-  // Draw separator line
+  const int footerY = footerStartY + 2;
+
   oledDisplay->drawFastHLine(0, footerStartY, 128, SSD1306_WHITE);
-  
-  // Draw footer text
-  oledDisplay->setCursor(0, footerStartY + 2);
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(SSD1306_WHITE);
-  
-  // Compact format to fit 21 chars: "A:Tog >:Nxt B:Bk"
-  char footer[22];
-  if (backAction) {
-    snprintf(footer, sizeof(footer), "A:%.3s >:%.3s B:%.2s", leftAction, rightAction, backAction);
-  } else {
-    snprintf(footer, sizeof(footer), "A:%.4s >:%.4s", leftAction, rightAction);
+  oledDisplay->setCursor(0, footerY);
+
+  if (leftAction && leftAction[0]) {
+    oledDisplay->print("A:");
+    oledDisplay->print(leftAction);
   }
-  oledDisplay->print(footer);
+  if (rightAction && rightAction[0]) {
+    oledDisplay->print(" >:");
+    oledDisplay->print(rightAction);
+  }
+  if (backAction && backAction[0]) {
+    oledDisplay->print(" ");
+    oledDrawBackArrowIcon(oledDisplay, footerY);
+  }
 }
 
 
@@ -385,7 +376,7 @@ bool renderWiFiPage(SetupWizardResult& result) {
     oledDisplay->clearDisplay();
     drawWizardHeader(getWizardPageNumber(WIZARD_PAGE_WIFI), getWizardTotalPages(), "WiFi");
     
-    oledDisplay->setCursor(0, 14);
+    oledDisplay->setCursor(0, 20);
     oledDisplay->println("Select network or");
     oledDisplay->println("press B to go back");
     
@@ -581,8 +572,8 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
                 title, getWizardPageNumber(page), getWizardTotalPages());
   Serial.println(description);
   Serial.println("----------------------------------------");
-  Serial.println(" c = Configure   s = Skip   b = Back");
-  Serial.print("Choice [s]: ");
+  Serial.println(" c = Configure   n = Next (skip)   b = Back");
+  Serial.print("Choice: ");
 
   while (true) {
     // Check serial input (non-blocking) — 'c'/'s'/'n'/'b' all work
@@ -654,7 +645,8 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
   int choice = showWizardOptionalPageIntro(WIZARD_PAGE_ESPNOW, "ESP-NOW",
       "Optional: ESP-NOW ID");
   if (choice == -1) return; // went back
-  if (choice == 0) {        // skip
+  if (choice == 0) {        // skip — disable ESP-NOW since it's unconfigured
+    gSettings.espnowenabled = false;
     if (!wizardNextPage(result)) running = false;
     return;
   }
@@ -680,13 +672,16 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
   if (cancelled) { wizardPrevPage(); return; }
   result.espnowZone = zone;
 
-  // Stationary - simple toggle selection
+  // Stationary - simple toggle selection (OLED + serial)
   {
     int selection = gSettings.espnowStationary ? 1 : 0;
     uint32_t lastButtons = 0;
     bool lastButtonsInitialized = false;
     sJoyUpHeld = false;
     sJoyDownHeld = false;
+
+    // Echo prompt to serial so users monitoring via terminal can respond
+    Serial.println("The device will be — (m)obile or (s)tationary [m]:");
 
     while (true) {
       oledDisplay->clearDisplay();
@@ -703,6 +698,18 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
       OLED_TRANSACTION(oledDisplay->display());
 
       delay(50);
+
+      // Check for serial input
+      if (Serial.available()) {
+        String serialInput = Serial.readStringUntil('\n');
+        serialInput.trim();
+        if (serialInput.equalsIgnoreCase("b") || serialInput.equalsIgnoreCase("back")) {
+          wizardPrevPage();
+          return;
+        }
+        result.espnowStationary = (serialInput.equalsIgnoreCase("s") || serialInput.equalsIgnoreCase("stationary"));
+        break;
+      }
 
       JoystickNav nav = readWizardJoystickNav();
       if (nav.up || nav.down) { selection = selection == 0 ? 1 : 0; delay(150); continue; }
@@ -751,7 +758,8 @@ void handleOLEDMQTTPage(SetupWizardResult& result, bool& running) {
   int choice = showWizardOptionalPageIntro(WIZARD_PAGE_MQTT, "MQTT",
       "Optional: MQTT broker");
   if (choice == -1) return; // went back
-  if (choice == 0) {        // skip
+  if (choice == 0) {        // skip — disable MQTT auto-start since it's unconfigured
+    gSettings.mqttAutoStart = false;
     if (!wizardNextPage(result)) running = false;
     return;
   }

@@ -44,10 +44,10 @@ volatile SetupProgressStage gSetupProgressStage = SETUP_PROMPT_USERNAME;
 volatile bool gAcceptingRestore = false;
 volatile bool gRestoreComplete = false;
 
-// File paths
-#define SETTINGS_JSON_FILE "/system/settings.json"
-#define USERS_JSON_FILE "/system/users/users.json"
-#define AUTOMATIONS_JSON_FILE "/system/automations.json"
+// File paths (defined in HardwareOne.cpp / System_User.cpp)
+extern const char* SETTINGS_JSON_FILE;
+extern const char* USERS_JSON_FILE;
+extern const char* AUTOMATIONS_JSON_FILE;
 
 // Global variables
 extern uint32_t gNTPAnchorId;
@@ -415,7 +415,7 @@ void firstTimeSetupIfNeeded() {
   String u = "";
   while (u.length() == 0) {
 #if ENABLE_OLED_DISPLAY
-    u = getOLEDTextInput("Admin Username:", false, "", 32);
+    u = getOLEDTextInput("Admin Username:", false, "", 32, nullptr, false);
 #else
     u = waitForSerialInputBlocking();
 #endif
@@ -438,7 +438,7 @@ void firstTimeSetupIfNeeded() {
       broadcastOutput("Enter admin password (cannot be blank): ");
     }
 #if ENABLE_OLED_DISPLAY
-    p = getOLEDTextInput("Admin Password:", true, "", 32);
+    p = getOLEDTextInput("Admin Password:", true, "", 32, nullptr, false);
 #else
     p = waitForSerialInputBlocking();
 #endif
@@ -460,8 +460,6 @@ void firstTimeSetupIfNeeded() {
   // ============================================================================
   // Feature Configuration Wizard (Advanced mode only)
   // ============================================================================
-  String wifiSSID = "";
-  String wifiPass = "";
   bool wifiConfigured = false;
   bool useDarkTheme = false;  // Theme preference (used when creating user settings)
   
@@ -470,32 +468,8 @@ void firstTimeSetupIfNeeded() {
     broadcastOutput("");
     broadcastOutput("Feature Configuration...");
 
-    // Run unified setup wizard (works on both Serial AND OLED simultaneously)
-    SetupWizardResult wizardResult;
-
-    wizardResult = runSetupWizard();
-
-    if (wizardResult.completed) {
-      broadcastOutput("Feature configuration complete.");
-
-      // Apply WiFi settings if configured
-      if (wizardResult.wifiConfigured && wizardResult.wifiSSID.length() > 0) {
-        wifiSSID = wizardResult.wifiSSID;
-        wifiPass = wizardResult.wifiPassword;
-        wifiConfigured = true;
-      }
-
-      // Log the selections
-      broadcastOutput("Timezone: " + wizardResult.timezoneAbbrev);
-      {
-        uint32_t usedKB = 0;
-        uint32_t totalKB = 1;
-        int pct = 0;
-        getHeapBarData(&usedKB, &totalKB, &pct);
-        uint32_t estFreeKB = (usedKB >= totalKB) ? 0 : (totalKB - usedKB);
-        BROADCAST_PRINTF("Heap estimate: ~%lu KB", (unsigned long)estFreeKB);
-      }
-    }
+    SetupWizardResult wizardResult = runAndApplyFeatureWizard();
+    wifiConfigured = wizardResult.wifiConfigured && wizardResult.wifiSSID.length() > 0;
   } else {
     // Basic setup - use sensible defaults
     broadcastOutput("");
@@ -536,22 +510,10 @@ void firstTimeSetupIfNeeded() {
   broadcastOutput(useDarkTheme ? "Theme set to: Dark" : "Theme set to: Light");
 #endif // ENABLE_HTTP_SERVER
   
-  // Save WiFi credentials if configured
-  if (wifiConfigured && wifiSSID.length() > 0) {
-#if ENABLE_WIFI
-    extern bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden);
-    extern void sortWiFiByPriority();
-    extern bool saveWiFiNetworks();
-    
-    upsertWiFiNetwork(wifiSSID, wifiPass, 1, false);
-    sortWiFiByPriority();
-    saveWiFiNetworks();
-    broadcastOutput("WiFi credentials saved: " + wifiSSID);
-    gSettings.wifiAutoReconnect = true;
-#else
-    broadcastOutput("WiFi disabled at compile time");
-#endif
-  } else {
+  // WiFi credentials are saved inside runAndApplyFeatureWizard() when configured.
+  // When not configured, ensure auto-reconnect is off so the device doesn't
+  // attempt to connect with no stored credentials.
+  if (!wifiConfigured) {
     gSettings.wifiAutoReconnect = false;
     broadcastOutput("WiFi setup skipped");
   }
@@ -601,7 +563,7 @@ void firstTimeSetupIfNeeded() {
       {
         String settingsPath = getUserSettingsPath(1);
         // Create user settings with password and theme
-        JsonDocument defaults;
+        PSRAM_JSON_DOC(defaults);
         defaults["theme"] = useDarkTheme ? "dark" : "light";
         defaults["password"] = hashedPassword;  // Store password in user settings
         if (!saveUserSettings(1, defaults)) {

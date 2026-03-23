@@ -9,29 +9,19 @@
 #include <freertos/semphr.h>
 
 // =============================================================================
-// MINIMAL SENSOR STUBS - ONLY WHERE ABSOLUTELY REQUIRED
+// SENSOR STUBS - Uniform stub definitions for disabled sensors/modules
 // =============================================================================
-// These stubs only exist to prevent compilation errors from extern references
-// No complex functionality - just basic variables to satisfy the linker
+// Struct definitions live in each sensor header, above their #if ENABLE_* guard,
+// so they are always available regardless of feature flags (single source of truth).
+// These stubs provide externs and inline no-op functions for disabled sensors
+// so the rest of the codebase compiles and links cleanly.
 
 #if !ENABLE_THERMAL_SENSOR
-  // Thermal stub structure (matches real ThermalCache exactly)
-  struct ThermalCache {
-    SemaphoreHandle_t mutex = nullptr;
-    int16_t* thermalFrame = nullptr;
-    float* thermalInterpolated = nullptr;
-    int thermalInterpolatedWidth = 0;
-    int thermalInterpolatedHeight = 0;
-    float thermalMinTemp = 0.0;
-    float thermalMaxTemp = 0.0;
-    float thermalAvgTemp = 0.0;
-    unsigned long thermalLastUpdate = 0;
-    bool thermalDataValid = false;
-    uint32_t thermalSeq = 0;
-  };
+  #include "i2csensor-mlx90640.h"  // Provides ThermalCache struct
   extern ThermalCache gThermalCache;
   extern bool thermalEnabled;
   extern bool thermalConnected;
+  extern unsigned long thermalLastStopTime;
   extern TaskHandle_t thermalTaskHandle;
   extern volatile UBaseType_t gThermalWatermarkNow;
   extern volatile UBaseType_t gThermalWatermarkMin;
@@ -43,27 +33,11 @@
 #endif
 
 #if !ENABLE_TOF_SENSOR
-  // ToF stub structure (matches real TofCache exactly)
-  struct TofCache {
-    SemaphoreHandle_t mutex = nullptr;
-    struct TofObject {
-      bool detected = false;
-      bool valid = false;
-      int distance_mm = 0;
-      float distance_cm = 0.0;
-      int status = 0;
-      float smoothed_distance_mm = 0.0;
-      float smoothed_distance_cm = 0.0;
-      bool hasHistory = false;
-    } tofObjects[4];
-    int tofTotalObjects = 0;
-    unsigned long tofLastUpdate = 0;
-    bool tofDataValid = false;
-    uint32_t tofSeq = 0;
-  };
+  #include "i2csensor-vl53l4cx.h"  // Provides TofCache struct
   extern TofCache gTofCache;
   extern bool tofEnabled;
   extern bool tofConnected;
+  extern uint32_t tofLastStopTime;
   extern TaskHandle_t tofTaskHandle;
   extern volatile UBaseType_t gTofWatermarkNow;
   extern volatile UBaseType_t gTofWatermarkMin;
@@ -75,20 +49,11 @@
 #endif
 
 #if !ENABLE_IMU_SENSOR
-  // IMU stub structure (matches real ImuCache exactly)
-  struct ImuCache {
-    SemaphoreHandle_t mutex = nullptr;
-    float accelX = 0.0, accelY = 0.0, accelZ = 0.0;
-    float gyroX = 0.0, gyroY = 0.0, gyroZ = 0.0;
-    float imuTemp = 0.0;
-    float oriYaw = 0.0, oriPitch = 0.0, oriRoll = 0.0;
-    unsigned long imuLastUpdate = 0;
-    bool imuDataValid = false;
-    uint32_t imuSeq = 0;
-  };
+  #include "i2csensor-bno055.h"  // Provides ImuCache and IMUActionState structs
   extern ImuCache gImuCache;
   extern bool imuEnabled;
   extern bool imuConnected;
+  extern unsigned long imuLastStopTime;
   extern TaskHandle_t imuTaskHandle;
   extern volatile UBaseType_t gIMUWatermarkNow;
   extern volatile UBaseType_t gIMUWatermarkMin;
@@ -101,20 +66,14 @@
 #endif
 
 #if !ENABLE_GAMEPAD_SENSOR
-  // Gamepad stub structure (matches real ControlCache exactly)
-  struct ControlCache {
-    SemaphoreHandle_t mutex = nullptr;
-    uint32_t gamepadButtons = 0;
-    int gamepadX = 0, gamepadY = 0;
-    unsigned long gamepadLastUpdate = 0;
-    bool gamepadDataValid = false;
-    uint32_t gamepadSeq = 0;
-    uint32_t buttonPressedAccum = 0;  // Latched press edges — OR'd in by task, read+cleared by UI
-  };
+  #include "i2csensor-seesaw.h"  // Provides ControlCache struct
   extern ControlCache gControlCache;
   extern bool gamepadEnabled;
   extern bool gamepadConnected;
+  extern unsigned long gamepadLastStopTime;
   extern TaskHandle_t gamepadTaskHandle;
+  extern volatile UBaseType_t gGamepadWatermarkMin;
+  extern volatile UBaseType_t gGamepadWatermarkNow;
   extern const struct CommandEntry gamepadCommands[];
   extern const size_t gamepadCommandsCount;
   // Gamepad stub functions
@@ -136,33 +95,32 @@
 #endif
 
 #if !ENABLE_APDS_SENSOR
-  // APDS stub structure (matches real PeripheralCache exactly)
-  struct PeripheralCache {
-    SemaphoreHandle_t mutex = nullptr;
-    uint16_t apdsRed = 0, apdsGreen = 0, apdsBlue = 0, apdsClear = 0;
-    uint8_t apdsProximity = 0;
-    uint8_t apdsGesture = 0;
-    unsigned long apdsLastUpdate = 0;
-    bool apdsDataValid = false;
-  };
+  #include "i2csensor-apds9960.h"  // Provides PeripheralCache struct
   extern PeripheralCache gPeripheralCache;
+  extern bool apdsEnabled;
   extern bool apdsConnected;
   extern bool apdsColorEnabled;
   extern bool apdsProximityEnabled;
   extern bool apdsGestureEnabled;
+  extern unsigned long apdsLastStopTime;
   extern TaskHandle_t apdsTaskHandle;
   extern const struct CommandEntry apdsCommands[];
   extern const size_t apdsCommandsCount;
+  // APDS stub functions
+  inline bool startAPDSSensorInternal() { return false; }
 #endif
 
 #if !ENABLE_GPS_SENSOR
-  // GPS stubs when disabled
+  #include "i2csensor-pa1010d.h"  // Provides GPSCache struct
+  extern GPSCache gGPSCache;
   extern bool gpsEnabled;
   extern bool gpsConnected;
+  extern unsigned long gpsLastStopTime;
   extern class Adafruit_GPS* gPA1010D;
   extern TaskHandle_t gpsTaskHandle;
   extern const struct CommandEntry gpsCommands[];
   extern const size_t gpsCommandsCount;
+  // GPS stub functions
   inline void startGPSInternal() {}
 #endif
 
@@ -170,6 +128,7 @@
   // FM Radio stubs when disabled
   extern bool fmRadioEnabled;
   extern bool fmRadioConnected;
+  extern unsigned long fmRadioLastStopTime;
   extern bool radioInitialized;
   extern uint16_t fmRadioFrequency;
   extern uint8_t fmRadioVolume;
@@ -190,21 +149,7 @@
 #endif
 
 #if !ENABLE_PRESENCE_SENSOR
-  // Presence sensor stub structure (matches real PresenceCache exactly)
-  struct PresenceCache {
-    SemaphoreHandle_t mutex = nullptr;
-    float ambientTemp = 0.0f;
-    int16_t objectTemp = 0;
-    float compObjectTemp = 0.0f;
-    int16_t presenceValue = 0;
-    int16_t motionValue = 0;
-    int16_t tempShockValue = 0;
-    bool presenceDetected = false;
-    bool motionDetected = false;
-    bool tempShockDetected = false;
-    unsigned long lastUpdate = 0;
-    bool dataValid = false;
-  };
+  #include "i2csensor-sths34pf80.h"  // Provides PresenceCache struct
   extern PresenceCache gPresenceCache;
   extern bool presenceEnabled;
   extern bool presenceConnected;
@@ -220,9 +165,29 @@
 #endif
 
 #if !ENABLE_RTC_SENSOR
-  // RTC stubs when disabled - declarations only, definitions in System_SensorStubs.cpp
+  #include "i2csensor-ds3231.h"  // Provides RTCDateTime and RTCCache structs
+  extern RTCCache gRTCCache;
+  extern bool rtcEnabled;
+  extern bool rtcConnected;
+  extern unsigned long rtcLastStopTime;
+  extern TaskHandle_t rtcTaskHandle;
+  extern volatile UBaseType_t gRTCWatermarkNow;
+  extern volatile UBaseType_t gRTCWatermarkMin;
+  extern const struct CommandEntry rtcCommands[];
+  extern const size_t rtcCommandsCount;
+  // RTC stub functions
   void startRTCSensorInternal();
   inline int buildRTCDataJSON(char* buf, size_t bufSize) { return 0; }
+#endif
+
+#if !ENABLE_SERVO
+  #include "i2csensor-pca9685.h"  // Provides ServoProfile, PCA9685_I2C_ADDRESS, MAX_SERVO_CHANNELS
+  extern const struct CommandEntry servoCommands[];
+  extern const size_t servoCommandsCount;
+  // Servo stub functions
+  inline bool initPCA9685() { return false; }
+  inline void setServoAngle(uint8_t channel, int angle) {}
+  inline void setPWMValue(uint8_t channel, uint16_t value) {}
 #endif
 
 #if !ENABLE_BLUETOOTH
@@ -280,17 +245,8 @@
 // =============================================================================
 
 #if !ENABLE_WIFI
-  // WiFi stubs when disabled
-  #define MAX_WIFI_NETWORKS 8
-  struct WifiNetwork {
-    String ssid;
-    String password;
-    int priority;
-    bool hidden;
-    uint32_t lastConnected;
-  };
-  extern WifiNetwork* gWifiNetworks;
-  extern int gWifiNetworkCount;
+  // WifiNetwork struct and constants come from System_WiFi.h (single source of truth)
+  #include "System_WiFi.h"
   extern bool gSkipNTPInWifiConnect;
   extern const struct CommandEntry wifiCommands[];
   extern const size_t wifiCommandsCount;
@@ -317,14 +273,18 @@
 
 #if !ENABLE_HTTP_SERVER
   // HTTP server stubs when disabled
+  // SessionEntry, LogoutReason, and constants come from WebServer_Server.h (single source of truth)
+  #include "WebServer_Server.h"
   #ifndef HW_HTTPD_TYPES_DEFINED
     #define HW_HTTPD_TYPES_DEFINED 1
     struct httpd_req;
     typedef struct httpd_req httpd_req_t;
     typedef void* httpd_handle_t;
   #endif
-  typedef int esp_err_t;
-  #define ESP_OK 0
+  #ifndef ESP_OK
+    typedef int esp_err_t;
+    #define ESP_OK 0
+  #endif
   #define HTTPD_RESP_USE_STRLEN -1
   extern httpd_handle_t server;
   inline void startHttpServer() {}
@@ -339,32 +299,7 @@
   inline esp_err_t httpd_resp_send(httpd_req_t* req, const char* buf, int len) { return ESP_OK; }
   inline esp_err_t httpd_resp_send_chunk(httpd_req_t* req, const char* buf, int len) { return ESP_OK; }
   inline int httpd_req_to_sockfd(httpd_req_t* req) { return -1; }
-  // Session stubs
-  #define MAX_SESSIONS 8
-  #define MAX_LOGOUT_REASONS 16
-  #define JSON_RESPONSE_SIZE 4096
-  struct SessionEntry {
-    String sid;
-    String user;
-    String ip;
-    uint32_t created;
-    uint32_t lastAccess;
-    uint32_t createdAt;
-    uint32_t lastSeen;
-    uint32_t expiresAt;
-    int sockfd;
-    uint8_t nqCount;
-    uint8_t eqCount;
-    bool needsNotificationTick;
-  };
-  struct LogoutReason {
-    String sid;
-    String reason;
-    uint32_t timestamp;
-  };
-  extern SessionEntry* gSessions;
-  extern LogoutReason* gLogoutReasons;
-  extern char* gJsonResponseBuffer;
+  // Session and SSE stub functions
   inline void sseEnqueueNotice(SessionEntry& s, const String& msg) {}
   inline bool sseDequeueNotice(SessionEntry& s, String& out) { return false; }
   inline void sseEnqueueEvent(SessionEntry& s, const char* name, const char* data) {}
@@ -381,53 +316,12 @@
   inline void broadcastSensorStatusToAllSessions() {}
   inline void broadcastEventToAllSessions(const char* eventName, const char* jsonData) {}
   inline void logAuthAttempt(bool success, const char* transport, const String& ip, const String& user, const String& reason) {}
-  // Note: tgRequireAuth is implemented in System_User.cpp with #else stub
   inline bool authSuccessUnified(struct AuthContext& ctx, httpd_req_t* req) { return false; }
 #endif
 
+// ESP-NOW stubs now live in System_ESPNow.h (#else block) for grouping
 #if !ENABLE_ESPNOW
-  // ESP-NOW stubs when disabled
-  enum EspNowMode { ESPNOW_MODE_DISABLED = 0, ESPNOW_MODE_BROADCAST, ESPNOW_MODE_MESH, ESPNOW_MODE_DIRECT };
-  #define MESH_ROLE_MASTER 0
-  #define MESH_ROLE_BACKUP_MASTER 1
-  #define MESH_ROLE_WORKER 2
-  #define MAX_MESH_PEERS 16
-  struct MeshPeerHealth {
-    uint8_t mac[6];
-    String name;
-    bool isOnline;
-    bool isActive;
-    uint32_t lastSeen;
-    int8_t rssi;
-    uint8_t role;
-  };
-  struct MeshTopoNode {
-    uint8_t mac[6];
-    String name;
-    uint8_t role;
-    bool isOnline;
-  };
-  struct EspNowState {
-    bool initialized;
-    EspNowMode mode;
-    String passphrase;
-    uint8_t channel;
-    bool encryptionEnabled;
-    void* reserved;
-  };
-  extern EspNowState* gEspNow;
-  extern MeshPeerHealth gMeshPeers[MAX_MESH_PEERS];
-  extern MeshTopoNode* gMeshTopology;
-  extern bool gMeshActivitySuspended;
-  extern const struct CommandEntry espNowCommands[];
-  extern const size_t espNowCommandsCount;
-  // ESP-NOW stub functions
-  inline const char* checkEspNowFirstTimeSetup() { return "ESP-NOW disabled"; }
-  inline const char* cmd_espnow_init(const String& argsInput) { return "ESP-NOW disabled"; }
-  inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
-  inline void cleanupTimedOutChunks() {}
-  inline bool isSelfMac(const uint8_t* mac) { return false; }
-  inline bool isMeshPeerAlive(MeshPeerHealth* peer) { return false; }
+  #include "System_ESPNow.h"
 #endif
 
 #if !ENABLE_MQTT

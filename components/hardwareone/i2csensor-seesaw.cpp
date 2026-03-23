@@ -179,9 +179,8 @@ bool initGamepad() {
   bool initSuccess = i2cDeviceTransaction(I2C_ADDR_GAMEPAD, 100000, 3000, [&]() -> bool {
     // Wire1 already initialized in setup() - no need to call begin() again
 
-    // Attempt to begin Seesaw on 0x50 using Wire1 bus
     if (!gGamepadSeesaw.begin(I2C_ADDR_GAMEPAD)) {
-      ERROR_SENSORSF("[GAMEPAD] Seesaw (Gamepad) not found at 0x50 on Wire1");
+      ERROR_SENSORSF("[GAMEPAD] Seesaw (Gamepad) not found at 0x%02X on Wire1", I2C_ADDR_GAMEPAD);
       return false;
     }
 
@@ -247,14 +246,14 @@ bool initGamepadConnection() {
   // Quick ping first to avoid costly begin() if device not present
   bool seen = false;
   for (int p = 0; p < 2; ++p) {
-    if (i2cPing(&Wire1, 0x50)) {
+    if (i2cPing(&Wire1, I2C_ADDR_GAMEPAD)) {
       seen = true;
       break;
     }
     delay(5);
   }
   if (!seen) {
-    WARN_SENSORSF("Gamepad: no ACK at 0x50");
+    WARN_SENSORSF("Gamepad: no ACK at 0x%02X", I2C_ADDR_GAMEPAD);
     broadcastOutput("Gamepad: no ACK at 0x50");
     return false;
   }
@@ -417,10 +416,7 @@ void gamepadTask(void* parameter) {
     if (!gamepadEnabled) {
       gamepadConnected = false;
       gControlCache.gamepadDataValid = false;
-      INFO_SENSORSF("[GAMEPAD_TASK] Task disabled - cleaning up and deleting");
-      // NOTE: Do NOT clear gamepadTaskHandle here - let create function use eTaskGetState()
-      // to detect stale handles. Clearing here creates a race condition window.
-      vTaskDelete(nullptr);
+      SENSOR_TASK_EXIT("GAMEPAD_TASK");
     }
 
     // Stack watermark tracking + safety bailout
@@ -614,8 +610,8 @@ void gamepadTask(void* parameter) {
                 size_t largestBefore = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
                 {
                   // Send gamepad data via bond or mesh (sendSensorDataUpdate handles routing)
-                  extern void sendSensorDataUpdate(RemoteSensorType sensorType, const String& jsonData);
-                  sendSensorDataUpdate(REMOTE_SENSOR_GAMEPAD, String(gamepadJson));
+                  extern void sendSensorDataUpdate(RemoteSensorType sensorType, const char* jsonData, size_t jsonLen);
+                  sendSensorDataUpdate(REMOTE_SENSOR_GAMEPAD, gamepadJson, jsonLen);
                 }
                 if (isDebugFlagSet(DEBUG_MEMORY)) {
                   size_t heapAfter = ESP.getFreeHeap();
@@ -638,7 +634,7 @@ void gamepadTask(void* parameter) {
           uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_GAMEPAD);
           WARN_SENSORSF("[GAMEPAD_TASK] I2C read failure (consecutive: %u)", errors);
           
-          if (i2cShouldAutoDisable(I2C_ADDR_GAMEPAD, 5)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_GAMEPAD)) {
             ERROR_SENSORSF("[GAMEPAD_TASK] Too many consecutive failures - auto-disabling");
             handleDeviceStopped(I2C_DEVICE_GAMEPAD);
             DEBUG_GAMEPAD_FRAMEF("Gamepad auto-disabled: %u consecutive I2C failures", errors);

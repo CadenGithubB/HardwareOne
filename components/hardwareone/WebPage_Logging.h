@@ -82,13 +82,8 @@ inline void streamLoggingInner(httpd_req_t* req) {
   </div>
   <div id='config-pane' style='display:none;margin-top:0.75rem'>
     
-    <!-- Logging Parameters Section (Combined) -->
-    <div class='settings-panel'>
-      <div style='display:flex;align-items:center;justify-content:space-between'>
-        <div style='font-weight:bold;color:var(--panel-fg)'>Logging Parameters</div>
-        <button class='btn' id='btn-params-toggle' onclick="toggleConfigPane('params-pane','btn-params-toggle')" style='padding:0.25rem 0.75rem;font-size:0.85rem'>Expand</button>
-      </div>
-      <div id='params-pane' style='display:none;margin-top:0.75rem'>
+    <!-- Logging Parameters -->
+    <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.75rem'>Logging Parameters</div>
         <label style='display:block;margin-bottom:1rem'>
           <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>File Path:</div>
           <input id='config-path' type='text' placeholder='Generating timestamp...' class='form-input' style='width:100%;font-family:monospace'>
@@ -117,16 +112,10 @@ inline void streamLoggingInner(httpd_req_t* req) {
           <input id='config-rotations' type='number' value='3' min='0' max='9' class='form-input' style='width:100%'>
           <small style='color:var(--panel-fg)'>0 = delete old logs, 1-9 = keep N old files</small>
         </label>
-      </div>
-    </div>
     
-    <!-- Sensors Section -->
-    <div class='settings-panel'>
-      <div style='display:flex;align-items:center;justify-content:space-between'>
-        <div style='font-weight:bold;color:var(--panel-fg)'>Sensors to Log</div>
-        <button class='btn' id='btn-sensors-toggle' onclick="toggleConfigPane('sensors-pane','btn-sensors-toggle')" style='padding:0.25rem 0.75rem;font-size:0.85rem'>Expand</button>
-      </div>
-      <div id='sensors-pane' style='display:none;margin-top:0.75rem'>
+    <!-- Sensors to Log -->
+    <div style='font-weight:bold;color:var(--panel-fg);margin:1rem 0 0.75rem'>Sensors to Log</div>
+    <div id='sensors-pane'>
 )HTML", HTTPD_RESP_USE_STRLEN);
 #if ENABLE_THERMAL_SENSOR
   httpd_resp_send_chunk(req, R"HTML(
@@ -190,7 +179,6 @@ inline void streamLoggingInner(httpd_req_t* req) {
           <button class='btn' onclick='selectNoSensors()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select None</button>
         </div>
       </div>
-    </div>
     
     <div style='margin-top:1rem;display:flex;gap:0.5rem'>
       <button class='btn' onclick='applyConfig()'>Apply Configuration</button>
@@ -262,9 +250,8 @@ inline void streamLoggingInner(httpd_req_t* req) {
   </div>
   <div id='sys-config-pane' style='display:none;margin-top:0.75rem'>
     
-    <!-- File Path Section -->
-    <div class='settings-panel'>
-      <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.75rem'>File Path & Options</div>
+    <!-- File Path & Options -->
+    <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.75rem'>File Path & Options</div>
       <label style='display:block;margin-bottom:1rem'>
         <div style='margin-bottom:0.25rem;color:var(--panel-fg)'>Log File Path:</div>
         <input id='sys-config-path' type='text' placeholder='Generating timestamp...' class='form-input' style='width:100%;font-family:monospace'>
@@ -274,11 +261,9 @@ inline void streamLoggingInner(httpd_req_t* req) {
         <input type='checkbox' id='sys-config-tags' checked style='margin:0;padding:0;width:16px;height:16px'>
         <span style='font-size:0.95em;color:var(--panel-fg)'>Include category tags in log output (e.g., [AUTH], [HTTP])</span>
       </label>
-    </div>
     
-    <!-- Debug Flags Section -->
-    <div class='settings-panel'>
-      <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.75rem'>Debug Message Categories</div>
+    <!-- Debug Message Categories -->
+    <div style='font-weight:bold;color:var(--panel-fg);margin:1rem 0 0.75rem'>Debug Message Categories</div>
       <div style='padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;max-height:300px;overflow-y:auto'>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
             <input type='checkbox' id='flag-auth' value='0x0001' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
@@ -472,7 +457,6 @@ inline void streamLoggingInner(httpd_req_t* req) {
         <button class='btn' onclick='selectAllFlags()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select All</button>
         <button class='btn' onclick='selectNoFlags()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select None</button>
       </div>
-    </div>
     
     <div style='margin-top:1rem;display:flex;gap:0.5rem'>
       <button class='btn' onclick='applySystemConfig()'>Apply Configuration</button>
@@ -499,8 +483,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
   </div>
   <div id='content-viewer' style='display:none;margin-top:0.75rem'>
 
-<div class='settings-panel' style='background:var(--panel-bg)'>
-  <div id='viewer-pane' style='margin-top:0.75rem'>
+<div id='viewer-pane' style='margin-top:0.75rem'>
     
     <!-- File Selection & Actions -->
     <div style='margin-bottom:1rem'>
@@ -547,7 +530,6 @@ inline void streamLoggingInner(httpd_req_t* req) {
     </div>
     
   </div>
-</div>
 
   </div>
 </div>
@@ -979,34 +961,14 @@ console.log('[LOGGING] Section 10e: Sensor selection helpers defined');
 <script>
 console.log('[LOGGING] Section 11: Toggle functions');
 function togglePane(paneId, btnId) {
-  console.log('[LOGGING] Section 11a: togglePane called for:', paneId);
-  const pane = document.getElementById(paneId);
-  const btn = document.getElementById(btnId);
-  if (pane.style.display === 'none') {
-    pane.style.display = 'block';
-    btn.textContent = 'Collapse';
-    console.log('[LOGGING] Section 11b: Pane', paneId, 'expanded');
-  } else {
-    pane.style.display = 'none';
-    btn.textContent = 'Expand';
-    console.log('[LOGGING] Section 11c: Pane', paneId, 'collapsed');
-  }
+  var p = document.getElementById(paneId);
+  var b = document.getElementById(btnId);
+  if (!p || !b) { console.warn('[togglePane] Element not found:', paneId, btnId); return; }
+  var isHidden = (p.style.display === 'none' || !p.style.display);
+  p.style.display = isHidden ? 'block' : 'none';
+  b.textContent = isHidden ? 'Collapse' : 'Expand';
 }
 
-function toggleConfigPane(paneId, btnId) {
-  console.log('[LOGGING] Section 11d: toggleConfigPane called for:', paneId);
-  const pane = document.getElementById(paneId);
-  const btn = document.getElementById(btnId);
-  if (pane.style.display === 'none') {
-    pane.style.display = 'block';
-    btn.textContent = 'Collapse';
-    console.log('[LOGGING] Section 11e: Config pane', paneId, 'expanded');
-  } else {
-    pane.style.display = 'none';
-    btn.textContent = 'Expand';
-    console.log('[LOGGING] Section 11f: Config pane', paneId, 'collapsed');
-  }
-}
 console.log('[LOGGING] Section 11g: Toggle functions defined');
 </script>
 

@@ -21,6 +21,7 @@ size_t gWebMirrorCap = 0;
 ThermalCache gThermalCache;
 bool thermalEnabled = false;
 bool thermalConnected = false;
+unsigned long thermalLastStopTime = 0;
 TaskHandle_t thermalTaskHandle = nullptr;
 volatile UBaseType_t gThermalWatermarkNow = 0;
 volatile UBaseType_t gThermalWatermarkMin = 0;
@@ -33,6 +34,7 @@ const size_t thermalCommandsCount = 0;
 TofCache gTofCache;
 bool tofEnabled = false;
 bool tofConnected = false;
+uint32_t tofLastStopTime = 0;
 TaskHandle_t tofTaskHandle = nullptr;
 volatile UBaseType_t gTofWatermarkNow = 0;
 volatile UBaseType_t gTofWatermarkMin = 0;
@@ -45,6 +47,7 @@ const size_t tofCommandsCount = 0;
 ImuCache gImuCache;
 bool imuEnabled = false;
 bool imuConnected = false;
+unsigned long imuLastStopTime = 0;
 TaskHandle_t imuTaskHandle = nullptr;
 volatile UBaseType_t gIMUWatermarkNow = 0;
 volatile UBaseType_t gIMUWatermarkMin = 0;
@@ -60,19 +63,23 @@ void updateIMUActions() {
 ControlCache gControlCache;
 bool gamepadEnabled = false;
 bool gamepadConnected = false;
+unsigned long gamepadLastStopTime = 0;
 TaskHandle_t gamepadTaskHandle = nullptr;
+volatile UBaseType_t gGamepadWatermarkMin = 0;
+volatile UBaseType_t gGamepadWatermarkNow = 0;
 const struct CommandEntry gamepadCommands[] = {};
 const size_t gamepadCommandsCount = 0;
-#warning "GAMEPAD STUBS ARE BEING COMPILED - THIS SHOULD NOT HAPPEN IF GAMEPAD IS ENABLED"
 #endif
 
 #if !ENABLE_APDS_SENSOR
 // APDS stub variables (global definitions)
 PeripheralCache gPeripheralCache;
+bool apdsEnabled = false;
 bool apdsConnected = false;
 bool apdsColorEnabled = false;
 bool apdsProximityEnabled = false;
 bool apdsGestureEnabled = false;
+unsigned long apdsLastStopTime = 0;
 TaskHandle_t apdsTaskHandle = nullptr;
 const struct CommandEntry apdsCommands[] = {};
 const size_t apdsCommandsCount = 0;
@@ -80,8 +87,10 @@ const size_t apdsCommandsCount = 0;
 
 #if !ENABLE_GPS_SENSOR
 // GPS stub variables (global definitions)
+GPSCache gGPSCache;
 bool gpsEnabled = false;
 bool gpsConnected = false;
+unsigned long gpsLastStopTime = 0;
 Adafruit_GPS* gPA1010D = nullptr;
 TaskHandle_t gpsTaskHandle = nullptr;
 const struct CommandEntry gpsCommands[] = {};
@@ -112,6 +121,7 @@ const size_t oledCommandsCount = 0;
 // FM Radio stub variables (global definitions)
 bool fmRadioEnabled = false;
 bool fmRadioConnected = false;
+unsigned long fmRadioLastStopTime = 0;
 bool radioInitialized = false;
 uint16_t fmRadioFrequency = 0;
 uint8_t fmRadioVolume = 0;
@@ -128,17 +138,23 @@ const size_t fmRadioCommandsCount = 0;
 
 #if !ENABLE_RTC_SENSOR
 // RTC stub variables (global definitions)
-// Types are defined in i2csensor-ds3231.h (always available outside #if guard)
-#include "i2csensor-ds3231.h"
+// Types are defined in System_SensorStubs.h when disabled
 RTCCache gRTCCache = {nullptr, {0, 0, 0, 0, 0, 0, 0}, 0.0f, false, 0};
 bool rtcEnabled = false;
 bool rtcConnected = false;
+unsigned long rtcLastStopTime = 0;
 TaskHandle_t rtcTaskHandle = nullptr;
 volatile UBaseType_t gRTCWatermarkNow = 0;
 volatile UBaseType_t gRTCWatermarkMin = 0;
 const struct CommandEntry rtcCommands[] = {};
 const size_t rtcCommandsCount = 0;
 void startRTCSensorInternal() {}
+#endif
+
+#if !ENABLE_SERVO
+// Servo stub variables (global definitions)
+const struct CommandEntry servoCommands[] = {};
+const size_t servoCommandsCount = 0;
 #endif
 
 #if !ENABLE_MICROPHONE_SENSOR

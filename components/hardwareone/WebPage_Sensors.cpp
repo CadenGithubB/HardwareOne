@@ -62,8 +62,7 @@ static const size_t IMU_RESPONSE_SIZE = 512;    // 512 bytes sufficient for IMU 
 
 // GET /sensors: sensors page
 esp_err_t handleSensorsPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "sensors");
   streamPageWithContent(req, "sensors", ctx.user, streamSensorsContent);
@@ -72,8 +71,7 @@ esp_err_t handleSensorsPage(httpd_req_t* req) {
 
 // GET /api/sensors: multiplexed sensor JSON endpoint
 esp_err_t handleSensorData(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   // Add CORS headers to prevent access control errors
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -90,8 +88,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 
       if (sensorType == "thermal") {
 #if !ENABLE_THERMAL_SENSOR
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"v\":0,\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        sendJsonResponse(req, "{\"v\":0, \"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
         // Preferred path: use shared response buffer (avoids large stack usage)
@@ -111,8 +108,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
               int usagePct = (jsonLen * 100) / JSON_RESPONSE_SIZE;
               DEBUG_MEMORYF("[JSON_RESP_BUF] Thermal JSON: %d/%u bytes (%d%%)", jsonLen, (unsigned)JSON_RESPONSE_SIZE, usagePct);
 
-              httpd_resp_set_type(req, "application/json");
-              httpd_resp_send(req, buf, jsonLen);
+              sendJsonResponse(req, buf, jsonLen);
               xSemaphoreGive(gJsonResponseMutex);
               return ESP_OK;
             }
@@ -122,7 +118,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 
         // Fallback to ArduinoJson path (avoids String concatenation heap fragmentation)
         String json;
-        if (lockThermalCache(pdMS_TO_TICKS(100))) {  // 100ms timeout for HTTP response
+        if (lockThermalCache(pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS))) {
           bool useInterpolated = (gThermalCache.thermalInterpolated != nullptr && gThermalCache.thermalInterpolatedWidth > 0 && gThermalCache.thermalInterpolatedHeight > 0);
           // For raw frame, convert int16_t to float on the fly
           float* frame = useInterpolated ? gThermalCache.thermalInterpolated : nullptr;
@@ -137,7 +133,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
                         (unsigned long)gThermalCache.thermalSeq);
 
           // Use ArduinoJson to avoid 768+ String concatenations
-          JsonDocument doc;
+          PSRAM_JSON_DOC(doc);
           doc["v"] = gThermalCache.thermalDataValid ? 1 : 0;
           doc["seq"] = gThermalCache.thermalSeq;
           doc["mn"] = serialized(String(gThermalCache.thermalMinTemp, 1));
@@ -170,8 +166,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
       } else if (sensorType == "tof") {
 #if !ENABLE_TOF_SENSOR
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"v\":0,\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        sendJsonResponse(req, "{\"v\":0, \"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
         // Always return ToF data, using stack-allocated buffer (no String allocations)
@@ -188,8 +183,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
       } else if (sensorType == "imu") {
 #if !ENABLE_IMU_SENSOR
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"v\":0,\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        sendJsonResponse(req, "{\"v\":0, \"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
         // Always return IMU data, using stack-allocated buffer (no String allocations)
@@ -206,14 +200,12 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
       } else if (sensorType == "gamepad") {
 #if !ENABLE_GAMEPAD_SENSOR
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"val\":0,\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        sendJsonResponse(req, "{\"val\":0, \"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
         // Gamepad now follows queued start paradigm; read from shared state only
         if (!gamepadEnabled || !gamepadConnected) {
-          httpd_resp_set_type(req, "application/json");
-          httpd_resp_send(req, "{\"val\":0,\"error\":\"not_connected\"}", HTTPD_RESP_USE_STRLEN);
+          sendJsonResponse(req, "{\"val\":0, \"error\":\"not_connected\"}");
           return ESP_OK;
         }
 
@@ -231,8 +223,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         }
 
         if (!dataValid) {
-          httpd_resp_set_type(req, "application/json");
-          httpd_resp_send(req, "{\"val\":0,\"error\":\"no_data\"}", HTTPD_RESP_USE_STRLEN);
+          sendJsonResponse(req, "{\"val\":0, \"error\":\"no_data\"}");
           return ESP_OK;
         }
 
@@ -249,8 +240,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
       } else if (sensorType == "fmradio") {
         // FM radio data - use stack-allocated buffer
         if (!fmRadioEnabled || !radioInitialized) {
-          httpd_resp_set_type(req, "application/json");
-          httpd_resp_send(req, "{\"v\":0,\"error\":\"not_enabled\"}", HTTPD_RESP_USE_STRLEN);
+          sendJsonResponse(req, "{\"v\":0, \"error\":\"not_enabled\"}");
           return ESP_OK;
         }
 
@@ -264,32 +254,27 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           httpd_resp_send(req, fmRadioResponseBuffer, jsonLen);
           return ESP_OK;
         } else {
-          httpd_resp_set_type(req, "application/json");
-          httpd_resp_send(req, "{\"v\":0,\"error\":\"data_unavailable\"}", HTTPD_RESP_USE_STRLEN);
+          sendJsonResponse(req, "{\"v\":0, \"error\":\"data_unavailable\"}");
           return ESP_OK;
         }
       } else if (sensorType == "camera") {
 #if ENABLE_CAMERA_SENSOR
         extern const char* buildCameraStatusJson();
         const char* json = buildCameraStatusJson();
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+        sendJsonResponse(req, json);
         return ESP_OK;
 #else
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"enabled\":false,\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        sendJsonResponse(req, "{\"enabled\":false, \"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
       } else if (sensorType == "microphone") {
 #if ENABLE_MICROPHONE_SENSOR
         extern const char* buildMicrophoneStatusJson();
         const char* json = buildMicrophoneStatusJson();
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+        sendJsonResponse(req, json);
         return ESP_OK;
 #else
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"enabled\":false,\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        sendJsonResponse(req, "{\"enabled\":false, \"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
       } else if (sensorType == "presence") {
@@ -299,8 +284,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         extern PresenceCache gPresenceCache;
         
         if (!presenceEnabled || !presenceConnected) {
-          httpd_resp_set_type(req, "application/json");
-          httpd_resp_send(req, "{\"error\":\"not_enabled\"}", HTTPD_RESP_USE_STRLEN);
+          sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
         
@@ -322,8 +306,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         }
         
         if (!dataValid) {
-          httpd_resp_set_type(req, "application/json");
-          httpd_resp_send(req, "{\"error\":\"no_data\"}", HTTPD_RESP_USE_STRLEN);
+          sendJsonResponse(req, "{\"error\":\"no_data\"}");
           return ESP_OK;
         }
         
@@ -333,12 +316,10 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           presenceDetected ? "true" : "false",
           motionDetected ? "true" : "false");
         
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, buf, len);
+        sendJsonResponse(req, buf, len);
         return ESP_OK;
 #else
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        sendJsonResponse(req, "{\"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
       } else if (sensorType == "gps") {
@@ -348,8 +329,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         extern GPSCache gGPSCache;
         
         if (!gpsEnabled || !gpsConnected) {
-          httpd_resp_set_type(req, "application/json");
-          httpd_resp_send(req, "{\"error\":\"not_enabled\"}", HTTPD_RESP_USE_STRLEN);
+          sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
         
@@ -382,8 +362,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         }
         
         if (!dataValid) {
-          httpd_resp_set_type(req, "application/json");
-          httpd_resp_send(req, "{\"error\":\"no_data\"}", HTTPD_RESP_USE_STRLEN);
+          sendJsonResponse(req, "{\"error\":\"no_data\"}");
           return ESP_OK;
         }
         
@@ -392,12 +371,10 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           hasFix ? "true" : "false", quality, sats, lat, lon, alt, speed, angle,
           hour, minute, second, year, month, day);
         
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, buf, len);
+        sendJsonResponse(req, buf, len);
         return ESP_OK;
 #else
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        sendJsonResponse(req, "{\"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
       } else if (sensorType == "rtc") {
@@ -407,8 +384,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         extern RTCCache gRTCCache;
         
         if (!rtcEnabled || !rtcConnected) {
-          httpd_resp_set_type(req, "application/json");
-          httpd_resp_send(req, "{\"error\":\"not_enabled\"}", HTTPD_RESP_USE_STRLEN);
+          sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
         
@@ -426,8 +402,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         }
         
         if (!dataValid) {
-          httpd_resp_set_type(req, "application/json");
-          httpd_resp_send(req, "{\"error\":\"no_data\"}", HTTPD_RESP_USE_STRLEN);
+          sendJsonResponse(req, "{\"error\":\"no_data\"}");
           return ESP_OK;
         }
         
@@ -505,12 +480,10 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           localYear, localMonth, localDay, dayName, 
           localHour, localMinute, dt.second, temp);
         
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, buf, len);
+        sendJsonResponse(req, buf, len);
         return ESP_OK;
 #else
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+        sendJsonResponse(req, "{\"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
       }
@@ -518,8 +491,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
   }
 
   // Default response for invalid/missing sensor parameter
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, "{\"valid\":false,\"error\":\"Invalid sensor parameter\"}", HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, "{\"valid\":false, \"error\":\"Invalid sensor parameter\"}");
   return ESP_OK;
 }
 
@@ -529,7 +501,6 @@ esp_err_t handleSensorsStatus(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleSensorsStatus] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
-    WARN_SESSIONF("Sensors status auth failed");
     return ESP_OK;
   }
   DEBUG_STORAGEF("[handleSensorsStatus] Auth SUCCESS for user: %s", ctx.user.c_str());
@@ -556,8 +527,7 @@ esp_err_t handleSensorsStatus(httpd_req_t* req) {
 
 // Remote sensors endpoint (auth-protected): returns list of remote devices with sensors
 esp_err_t handleRemoteSensors(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   DEBUG_HTTPF("/api/sensors/remote by %s @ %s", ctx.user.c_str(), ctx.ip.c_str());
 
@@ -594,8 +564,7 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
         DEBUG_HTTPF("/api/sensors/remote data device=%s sensor=%s type=%d json_len=%u json_snip=%.120s",
                     deviceMac, sensorType, (int)type, (unsigned)jsonData.length(), dbg);
         
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, jsonData.c_str(), jsonData.length());
+        sendJsonResponse(req, jsonData.c_str(), jsonData.length());
         return ESP_OK;
       } else {
         DEBUG_HTTPF("/api/sensors/remote bad_mac device=%s sensor=%s", deviceMac, sensorType);
@@ -611,11 +580,9 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
   if (resp.startsWith("{")) {
     resp = "{\"enabled\":true," + resp.substring(1);
   }
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, resp.c_str(), resp.length());
+  sendJsonResponse(req, resp.c_str(), resp.length());
 #else
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, "{\"enabled\":false,\"devices\":[]}", HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, "{\"enabled\":false, \"devices\":[]}");
 #endif
   
   return ESP_OK;
@@ -623,17 +590,14 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
 
 // Camera status endpoint (auth-protected): returns camera state
 esp_err_t handleCameraStatus(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
 #if ENABLE_CAMERA_SENSOR
   extern const char* buildCameraStatusJson();
   const char* j = buildCameraStatusJson();
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, j, HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, j);
 #else
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, "{\"enabled\":false,\"compiled\":false}", HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, "{\"enabled\":false, \"compiled\":false}");
 #endif
   return ESP_OK;
 }
@@ -697,8 +661,7 @@ esp_err_t handleCameraFrame(httpd_req_t* req) {
 
 // Camera MJPEG stream endpoint (auth-protected): returns multipart JPEG stream
 esp_err_t handleCameraStream(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
 #if ENABLE_CAMERA_SENSOR
   extern bool cameraEnabled;
@@ -840,8 +803,7 @@ esp_err_t handleCameraStream(httpd_req_t* req) {
 
 // Microphone recordings list endpoint (auth-protected)
 esp_err_t handleMicRecordingsList(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
 #if ENABLE_MICROPHONE_SENSOR
   extern int getRecordingCount();
@@ -879,19 +841,16 @@ esp_err_t handleMicRecordingsList(httpd_req_t* req) {
   
   json += "]}";
   
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, json.c_str(), json.length());
+  sendJsonResponse(req, json.c_str(), json.length());
 #else
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, "{\"count\":0,\"files\":[],\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, "{\"count\":0, \"files\":[],\"error\":\"not_compiled\"}");
 #endif
   return ESP_OK;
 }
 
 // Microphone recording file endpoint (auth-protected) - serves WAV file for playback
 esp_err_t handleMicRecordingFile(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
 #if ENABLE_MICROPHONE_SENSOR
   // Get filename from query string
@@ -973,8 +932,7 @@ esp_err_t handleMicRecordingFile(httpd_req_t* req) {
 
 // Microphone recording delete endpoint (auth-protected)
 esp_err_t handleMicRecordingDelete(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
 #if ENABLE_MICROPHONE_SENSOR
   // Get filename from query string
@@ -986,8 +944,7 @@ esp_err_t handleMicRecordingDelete(httpd_req_t* req) {
   }
   
   if (strlen(filename) == 0) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Missing filename\"}", HTTPD_RESP_USE_STRLEN);
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Missing filename\"}");
     return ESP_OK;
   }
   
@@ -1002,8 +959,7 @@ esp_err_t handleMicRecordingDelete(httpd_req_t* req) {
     httpd_resp_send(req, "{\"success\":false,\"error\":\"File not found\"}", HTTPD_RESP_USE_STRLEN);
   }
 #else
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, "{\"success\":false,\"error\":\"not_compiled\"}", HTTPD_RESP_USE_STRLEN);
+  sendJsonResponse(req, "{\"success\":false, \"error\":\"not_compiled\"}");
 #endif
   return ESP_OK;
 }

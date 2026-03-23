@@ -2,12 +2,13 @@
 #define WIFI_SYSTEM_H
 
 #include <Arduino.h>
-#include "System_Debug.h"  // Centralized OUTPUT_* flags and gOutputFlags
+#include "System_BuildConfig.h"
+#include "System_Debug.h"
 
 // WiFi Constants
 #define MAX_WIFI_NETWORKS 8
 
-// WiFi Network Structure
+// WiFi Network Structure (always available for type-safe references)
 struct WifiNetwork {
   String ssid;
   String password;
@@ -19,6 +20,8 @@ struct WifiNetwork {
 // Global WiFi network storage (defined in .ino)
 extern WifiNetwork* gWifiNetworks;
 extern int gWifiNetworkCount;
+
+#if ENABLE_WIFI
 
 // WiFi Command Handlers
 const char* cmd_wifiinfo(const String& argsInput);
@@ -34,7 +37,7 @@ const char* cmd_wifigettxpower(const String& argsInput);
 const char* cmd_wifiautoreconnect(const String& originalCmd);
 
 // WiFi Helper Functions
-bool ensureWiFiInitialized();  // Lazy initialization (saves ~32KB at boot)
+bool ensureWiFiInitialized();
 void setupWiFi();
 bool connectToBestWiFiNetwork();
 
@@ -42,5 +45,7 @@ bool connectToBestWiFiNetwork();
 struct CommandEntry;
 extern const CommandEntry wifiCommands[];
 extern const size_t wifiCommandsCount;
+
+#endif // ENABLE_WIFI
 
 #endif // WIFI_SYSTEM_H

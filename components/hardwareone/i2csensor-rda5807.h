@@ -10,6 +10,10 @@
 #ifndef I2CSENSOR_RDA5807_H
 #define I2CSENSOR_RDA5807_H
 
+#include "System_BuildConfig.h"
+
+#if ENABLE_FM_RADIO
+
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -55,4 +59,5 @@ struct CommandEntry;
 extern const CommandEntry fmRadioCommands[];
 extern const size_t fmRadioCommandsCount;
 
-#endif // FM_RADIO_H
+#endif // ENABLE_FM_RADIO
+#endif // I2CSENSOR_RDA5807_H

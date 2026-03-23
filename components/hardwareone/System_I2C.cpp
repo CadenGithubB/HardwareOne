@@ -1794,9 +1794,16 @@ const char* buildSensorStatusJson() {
   doc["presenceCompiled"] = false;
 #endif
 
-  // Not modularized yet
+#if ENABLE_FM_RADIO
   doc["fmradioCompiled"] = true;
+#else
+  doc["fmradioCompiled"] = false;
+#endif
+#if ENABLE_SERVO
   doc["servoCompiled"] = true;
+#else
+  doc["servoCompiled"] = false;
+#endif
 
 #if ENABLE_CAMERA_SENSOR
   extern bool cameraEnabled;
@@ -2217,7 +2224,7 @@ void processAutoStartSensors() {
  #if ENABLE_I2C_SYSTEM
   if (!queueProcessorTask) {
     const uint32_t queueStackWords = SENSOR_QUEUE_STACK_WORDS;
-    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, 1, &queueProcessorTask, "sensor.queue") != pdPASS) {
+    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, TASK_PRIORITY_LOW, &queueProcessorTask, "sensor.queue") != pdPASS) {
       ERROR_I2CF("[I2C_SENSORS] Failed to create sensor queue processor task (late init)");
       queueProcessorTask = nullptr;
       return;

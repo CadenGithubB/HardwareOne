@@ -378,7 +378,7 @@ bool setUserPassword(const String& username, const String& newPasswordRaw) {
   String hashed = hashUserPassword(newPasswordRaw);
   
   // Load existing user settings
-  JsonDocument settings;
+  PSRAM_JSON_DOC(settings);
   loadUserSettings(userId, settings);  // OK if doesn't exist yet
   
   // Set the password field
@@ -400,7 +400,7 @@ bool setUserGamepadPassword(const String& username, const String& newPatternRaw)
   String hashed = hashUserPassword(newPatternRaw);
   
   // Load existing user settings
-  JsonDocument settings;
+  PSRAM_JSON_DOC(settings);
   loadUserSettings(userId, settings);  // OK if doesn't exist yet
   
   // Set the gamepad password field
@@ -419,7 +419,7 @@ bool hasUserGamepadPassword(const String& username) {
   if (!getUserIdByUsername(username, userId) || userId == 0) return false;
   
   // Load user settings
-  JsonDocument settings;
+  PSRAM_JSON_DOC(settings);
   if (!loadUserSettings(userId, settings)) return false;
   
   // Check if gamepad_password field exists and is non-empty
@@ -526,12 +526,18 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
   return nullptr;
 }
 
-// Updates the "lastSeenSec" field in users.json for the given username.
+// Updates the "lastSeen" field in users.json for the given username.
+// Stores an ISO-8601 timestamp (same format as createdAt).
 // Only writes if the system clock appears valid (epoch > Jan 1, 2021).
 void updateUserLastSeen(const String& username) {
   if (username.length() == 0 || !filesystemReady) return;
   time_t now = time(nullptr);
   if (now < 1609459200) return;  // Clock not set yet — skip write
+
+  char isoTimestamp[25];
+  struct tm tminfo;
+  if (!gmtime_r(&now, &tminfo) || tminfo.tm_year < 120) return;
+  strftime(isoTimestamp, sizeof(isoTimestamp), "%Y-%m-%dT%H:%M:%SZ", &tminfo);
 
   FsLockGuard guard("users.last_seen");
   if (!LittleFS.exists(USERS_JSON_FILE)) return;
@@ -544,7 +550,8 @@ void updateUserLastSeen(const String& username) {
   for (JsonObject u : doc["users"].as<JsonArray>()) {
     const char* uname = u["username"] | "";
     if (username == uname) {
-      u["lastSeenSec"] = (uint32_t)now;
+      u.remove("lastSeenSec");  // Remove legacy field if present
+      u["lastSeen"] = isoTimestamp;
       break;
     }
   }
@@ -553,7 +560,7 @@ void updateUserLastSeen(const String& username) {
   if (!wf) return;
   serializeJson(doc, wf);
   wf.close();
-  DEBUG_USERSF("[users] lastSeenSec updated for '%s'", username.c_str());
+  DEBUG_USERSF("[users] lastSeen updated for '%s' -> %s", username.c_str(), isoTimestamp);
 }
 
 // Validate a username/password against per-user settings file
@@ -570,7 +577,7 @@ bool isValidUser(const String& u, const String& p) {
   if (!getUserIdByUsername(u, userId) || userId == 0) return false;
   
   // Load user settings containing passwords
-  JsonDocument settings;
+  PSRAM_JSON_DOC(settings);
   if (!loadUserSettings(userId, settings)) return false;
   
   // Check text password
@@ -688,7 +695,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   }
 
   // Build new array without the approved user
-  JsonDocument newDoc;
+  PSRAM_JSON_DOC(newDoc);
   JsonArray newArray = newDoc.to<JsonArray>();
   JsonArray pendingArray = doc.as<JsonArray>();
 
@@ -847,7 +854,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     String settingsPath = getUserSettingsPath(createdUserId);
     FsLockGuard guard("user_settings.default");
     // Create user settings with password and defaults
-    JsonDocument defaults;
+    PSRAM_JSON_DOC(defaults);
     defaults["theme"] = "light";
     defaults["password"] = userPassword;  // Store hashed password in user settings
     if (!saveUserSettings(createdUserId, defaults)) {
@@ -894,7 +901,7 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
   }
 
   // Build new array without the denied user
-  JsonDocument newDoc;
+  PSRAM_JSON_DOC(newDoc);
   JsonArray newArray = newDoc.to<JsonArray>();
   JsonArray pendingArray = doc.as<JsonArray>();
   bool found = false;
@@ -1036,7 +1043,7 @@ static bool promoteUserToAdminInternal(const String& username, String& errorOut)
     errorOut = "User not found";
     return false;
   }
-  if (!writeText(USERS_JSON_FILE, json)) {
+  if (!writeTextAtomic(USERS_JSON_FILE, json)) {
     errorOut = "Failed to write users.json";
     return false;
   }
@@ -1149,7 +1156,7 @@ static bool demoteUserFromAdminInternal(const String& username, String& errorOut
     errorOut = "User not found";
     return false;
   }
-  if (!writeText(USERS_JSON_FILE, json)) {
+  if (!writeTextAtomic(USERS_JSON_FILE, json)) {
     errorOut = "Failed to write users.json";
     return false;
   }
@@ -1276,7 +1283,7 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
     errorOut = "User not found";
     return false;
   }
-  if (!writeText(USERS_JSON_FILE, json)) {
+  if (!writeTextAtomic(USERS_JSON_FILE, json)) {
     errorOut = "Failed to write users.json";
     return false;
   }
@@ -1631,7 +1638,7 @@ const char* cmd_pending_list(const String& argsInput) {
       if (!jsonBuf) return "[]";
     }
     // Build sanitized output without password hashes
-    JsonDocument sanitized;
+    PSRAM_JSON_DOC(sanitized);
     JsonArray sanitizedArray = sanitized.to<JsonArray>();
     for (JsonObject user : pending) {
       JsonObject sanitizedUser = sanitizedArray.add<JsonObject>();
@@ -1990,7 +1997,7 @@ const char* cmd_user_request(const String& argsInput) {
 
   // Attempt atomic write with debug details
   DEBUG_USERSF("[users] Attempting to write /system/pending_users.json (%d bytes)", (int)json.length());
-  bool okWrite = writeText(PENDING_USERS_FILE, json);
+  bool okWrite = writeTextAtomic(PENDING_USERS_FILE, json);
   if (!okWrite) {
     ERROR_STORAGEF("writeText failed when writing pending_users.json");
     broadcastOutput("[users] ERROR: writeText failed for /system/pending_users.json");
@@ -2343,7 +2350,7 @@ static bool approximateUserTimestamp(String& usersJson, const UserTimestampInfo&
 void cleanupOldBootAnchors(void* docPtr) {
   if (!filesystemReady || !LittleFS.exists(USERS_JSON_FILE)) return;
 
-  JsonDocument localDoc;
+  PSRAM_JSON_DOC(localDoc);
   JsonDocument* workingDoc = static_cast<JsonDocument*>(docPtr);
   
   if (!workingDoc) {
@@ -2534,7 +2541,7 @@ void resolvePendingUserCreationTimes() {
 
   if (modified) {
     DEBUG_USERSF("[resolve] Writing modified users.json");
-    if (writeText(USERS_JSON_FILE, usersJson)) {
+    if (writeTextAtomic(USERS_JSON_FILE, usersJson)) {
       PSRAM_JSON_DOC(doc);
       DeserializationError error = deserializeJson(doc, usersJson);
       if (!error) {
@@ -2579,13 +2586,18 @@ void writeBootAnchor() {
   snprintf(tempFile, sizeof(tempFile), "%s.tmp", USERS_JSON_FILE);
   File file = LittleFS.open(tempFile, "w");
   if (!file) return;
-  
+
   size_t written = serializeJson(doc, file);
+  file.flush();
   file.close();
-  
+
   if (written > 0) {
-    LittleFS.remove(USERS_JSON_FILE);
-    LittleFS.rename(tempFile, USERS_JSON_FILE);
+    // Atomic rename (LittleFS rename overwrites destination)
+    if (!LittleFS.rename(tempFile, USERS_JSON_FILE)) {
+      LittleFS.remove(tempFile);
+    }
+  } else {
+    LittleFS.remove(tempFile);
   }
 }
 

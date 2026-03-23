@@ -9,12 +9,12 @@
 #include "System_ESPNow.h"
 #include "System_Utils.h"  // For AuthContext, executeCommand
 #include <ArduinoJson.h>
+#include "System_MemUtil.h"
 #include <LittleFS.h>
 
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 extern DisplayDriver* oledDisplay;
-extern bool oledConnected;
 extern EspNowState* gEspNow;
 extern bool filesystemReady;
 
@@ -220,7 +220,7 @@ static int buildRemoteMenuItems(UnifiedMenuItem* items, int maxItems, const uint
   File f = LittleFS.open(manifestPath.c_str(), "r");
   if (!f) return count;
   
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, f);
   f.close();
 
@@ -290,7 +290,7 @@ static void buildSubmenuForModule(const char* moduleName, bool isRemote) {
   String manifestPath = manifestPathBuf;
     File f = LittleFS.open(manifestPath.c_str(), "r");
     if (f) {
-      JsonDocument doc;
+      PSRAM_JSON_DOC(doc);
       DeserializationError err = deserializeJson(doc, f);
       f.close();
       

@@ -15,6 +15,7 @@
 #include "System_Settings.h"
 #include "System_Utils.h"
 #include "System_ImageManager.h"
+#include "System_Maps.h"
 #include "System_VFS.h"
 
 // External dependencies
@@ -27,7 +28,7 @@ extern void notifyAutomationScheduler();
 extern bool gAutosDirty;
 
 // External constants
-extern const char AUTOMATIONS_JSON_FILE[];
+extern const char* AUTOMATIONS_JSON_FILE;
 
 // Forward declarations (none needed — permissions are table-driven)
 
@@ -104,6 +105,50 @@ bool initFilesystem() {
     DEBUG_STORAGEF("Migrated pending_users.json to /system/users/");
   }
   
+  // Boot-time cleanup: remove orphaned .tmp files from interrupted writes
+  {
+    const char* cleanupDirs[] = { "/", "/system", "/system/users", "/system/users/user_settings", "/maps" };
+    int cleaned = 0;
+    for (const char* dir : cleanupDirs) {
+      File d = LittleFS.open(dir);
+      if (!d || !d.isDirectory()) continue;
+      File entry = d.openNextFile();
+      while (entry) {
+        String name = entry.name();
+        entry.close();
+        if (name.endsWith(".tmp")) {
+          String fullPath = String(dir);
+          if (fullPath != "/") fullPath += "/";
+          fullPath += name;
+          LittleFS.remove(fullPath.c_str());
+          Serial.printf("[FS] Cleaned orphaned temp file: %s\n", fullPath.c_str());
+          cleaned++;
+        }
+        entry = d.openNextFile();
+      }
+      d.close();
+    }
+    if (cleaned > 0) {
+      Serial.printf("[FS] Removed %d orphaned .tmp file(s)\n", cleaned);
+    }
+  }
+
+  // Boot-time JSON validation: warn about corrupt critical config files
+  {
+    const char* criticalFiles[] = { "/settings.json", "/system/automations.json", "/system/users/users.json" };
+    for (const char* path : criticalFiles) {
+      if (!LittleFS.exists(path)) continue;
+      String content;
+      if (readText(path, content) && content.length() > 0) {
+        content.trim();
+        if (content.length() > 0 && content[0] != '{' && content[0] != '[') {
+          Serial.printf("[FS] WARNING: %s appears corrupt (not valid JSON), removing\n", path);
+          LittleFS.remove(path);
+        }
+      }
+    }
+  }
+
   DEBUG_STORAGEF("Filesystem initialized successfully");
 
   // Load and increment boot sequence for user creation timestamp tracking
@@ -526,6 +571,12 @@ const char* cmd_filedelete(const String& argsInput) {
   }
   
   if (!VFS::exists(path)) return "Error: File does not exist";
+
+  // If the file to delete is the currently loaded map, unload it first to close the FD
+  if (MapCore::hasValidMap() && path == String(MapCore::getCurrentMap().filepath)) {
+    MapCore::unloadMap();
+  }
+
   if (!VFS::remove(path)) return "Error: Failed to delete file";
   snprintf(getDebugBuffer(), 1024, "Deleted file: %s", path.c_str());
   return getDebugBuffer();

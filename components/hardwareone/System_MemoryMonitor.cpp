@@ -6,6 +6,7 @@
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 #include "System_MemoryMonitor.h"
+#include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_SensorStubs.h"
 #include "System_Utils.h"
@@ -55,16 +56,7 @@ extern TaskHandle_t apdsTaskHandle;
 extern TaskHandle_t presenceTaskHandle;
 extern TaskHandle_t rtcTaskHandle;
 
-// External allocation tracker (defined in system_utils.cpp)
-struct AllocEntry {
-  char tag[24];
-  size_t totalBytes;
-  size_t psramBytes;
-  size_t dramBytes;
-  uint16_t count;
-  bool isActive;
-};
-extern AllocEntry gAllocTracker[];
+// AllocEntry struct + gAllocTracker declared in System_MemUtil.h
 extern int gAllocTrackerCount;
 extern bool gAllocTrackerEnabled;
 

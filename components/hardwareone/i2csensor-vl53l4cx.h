@@ -2,28 +2,11 @@
 #define I2CSENSOR_VL53L4CX_H
 
 #include "System_BuildConfig.h"
-
-#if ENABLE_TOF_SENSOR
-
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-#include "System_Command.h"
-
-// VL53L4CX library constants (define if not already defined by library)
-#ifndef VL53L4CX_MAX_NB_OF_OBJECTS_PER_ROI
-#define VL53L4CX_MAX_NB_OF_OBJECTS_PER_ROI 4  // Maximum number of objects per region of interest
-#endif
-
-// Forward declarations
-class String;
-class VL53L4CX;
-
-// VL53L4CX ToF sensor object (defined in tof_sensor.cpp)
-extern VL53L4CX* gVL53L4CX;
-
-// ToF sensor cache (distance sensing, 4Hz updates)
+// ToF sensor cache structure (always available for type-safe references)
 struct TofCache {
   SemaphoreHandle_t mutex = nullptr;
   struct TofObject {
@@ -42,7 +25,19 @@ struct TofCache {
   uint32_t tofSeq = 0;
 };
 
-// Global ToF cache (defined in tof_sensor.cpp)
+#if ENABLE_TOF_SENSOR
+
+#include "System_Command.h"
+
+#ifndef VL53L4CX_MAX_NB_OF_OBJECTS_PER_ROI
+#define VL53L4CX_MAX_NB_OF_OBJECTS_PER_ROI 4
+#endif
+
+// Forward declarations
+class String;
+class VL53L4CX;
+
+extern VL53L4CX* gVL53L4CX;
 extern TofCache gTofCache;
 
 // ToF watermark tracking

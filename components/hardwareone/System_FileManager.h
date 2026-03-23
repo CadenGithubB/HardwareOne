@@ -35,6 +35,18 @@ struct FileEntry {
   uint8_t permissions;      // Bitmask from FilePermission enum
 };
 
+// Pre-rendered file browser data (shared between OLED_Mode_FileBrowser and OLED_Utils)
+struct FileBrowserRenderData {
+  char path[FILE_MANAGER_MAX_PATH];
+  FileEntry items[FILE_MANAGER_PAGE_SIZE];
+  int itemCount;
+  int selectedIdx;
+  int pageStart;
+  int pageEnd;
+  bool valid;
+  bool selectedIsFolder;
+};
+
 // File manager class for hardware displays
 class FileManager {
 public:

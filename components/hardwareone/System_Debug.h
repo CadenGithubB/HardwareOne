@@ -21,7 +21,7 @@
 #define DEBUG_HTTP            0x0002ULL
 #define DEBUG_SSE             0x0004ULL
 #define DEBUG_CLI             0x0008ULL
-// Bits 4-5: Available (legacy DEBUG_SENSORS_FRAME/DEBUG_SENSORS_DATA were removed; replaced by per-sensor flags at bits 32-47)
+// Bits 4-5: Security and G2 (legacy sensor frame/data flags moved to bits 32-47)
 #define DEBUG_SENSORS         0x0040ULL
 #define DEBUG_FMRADIO         0x0080ULL  // FM Radio operations and I2C debugging
 #define DEBUG_I2C             0x0100ULL  // I2C bus operations, transactions, clock changes, mutex
@@ -31,9 +31,9 @@
 #define DEBUG_CMD_FLOW        0x1000ULL
 #define DEBUG_USERS           0x2000ULL
 #define DEBUG_SYSTEM          0x4000ULL
-#define DEBUG_STORAGE         0x8000ULL  // File operations (NOTE: Also used by DEBUG_SECURITY and DEBUG_G2 - collision acceptable as they're related)
-#define DEBUG_SECURITY        0x8000ULL  // Bit 15 - Security (shares bit with STORAGE/G2)
-#define DEBUG_G2              0x8000ULL  // Bit 15 - G2 smart glasses BLE operations (shares bit with STORAGE/SECURITY)
+#define DEBUG_SECURITY        0x0010ULL  // Bit 4 - Security operations
+#define DEBUG_G2              0x0020ULL  // Bit 5 - G2 smart glasses BLE operations
+#define DEBUG_STORAGE         0x8000ULL  // Bit 15 - File operations
 #define DEBUG_ESPNOW_CORE     0x10000ULL
 #define DEBUG_LOGGER          0x20000ULL
 #define DEBUG_MEMORY          0x40000ULL

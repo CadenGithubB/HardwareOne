@@ -13,7 +13,6 @@
 #include "System_ESPSR.h"
 
 // External references
-extern bool oledConnected;
 
 // Speech menu state
 static int speechMenuSelection = 0;

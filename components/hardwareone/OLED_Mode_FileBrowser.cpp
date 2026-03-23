@@ -16,7 +16,6 @@
 #endif
 
 // External references
-extern bool oledConnected;
 extern FileManager* gOLEDFileManager;
 extern bool oledFileBrowserNeedsInit;
 extern bool oledMenuBack();
@@ -40,16 +39,7 @@ enum class FileBrowserPendingAction {
 static FileBrowserPendingAction fileBrowserPendingAction = FileBrowserPendingAction::NONE;
 
 // Pre-rendered file browser data to avoid filesystem I/O inside I2C transaction
-struct FileBrowserRenderData {
-  char path[FILE_MANAGER_MAX_PATH];
-  FileEntry items[FILE_MANAGER_PAGE_SIZE];
-  int itemCount;
-  int selectedIdx;
-  int pageStart;
-  int pageEnd;
-  bool valid;
-  bool selectedIsFolder;  // Track if selected item is a folder for footer hints
-};
+// (struct defined in System_FileManager.h)
 FileBrowserRenderData fileBrowserRenderData = {0};  // Non-static so footer can access it
 
 // Button/navigation state

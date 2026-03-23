@@ -455,7 +455,7 @@ void streamBeginHtml(httpd_req_t* req,
   if (!isPublic && username.length()) {
     uint32_t uid = 0;
     if (getUserIdByUsername(username, uid) && uid > 0) {
-      JsonDocument settings;
+      PSRAM_JSON_DOC(settings);
       if (loadUserSettings(uid, settings)) {
         const char* t = settings["theme"] | "light";
         if (t && strcmp(t, "dark") == 0) {
@@ -506,6 +506,17 @@ void streamBeginHtml(httpd_req_t* req,
     if (nav.length()) httpd_resp_send_chunk(req, nav.c_str(), nav.length());
   }
 #endif
+
+  // Web console debug gate — suppress console.log/warn/debug unless setting is on.
+  // console.error always preserved. Originals saved so DevTools can call __restoreConsole().
+  if (!gSettings.webConsoleDebug) {
+    streamChunkC(req,
+      "<script>(function(c){"
+      "var L=c.log,W=c.warn,D=c.debug;"
+      "c.log=c.warn=c.debug=function(){};"
+      "window.__restoreConsole=function(){c.log=L;c.warn=W;c.debug=D;L('Console restored')}"
+      "})(console)</script>");
+  }
 
   // Shared lightweight client helpers (available as window.hw)
   if (!isPublic) {

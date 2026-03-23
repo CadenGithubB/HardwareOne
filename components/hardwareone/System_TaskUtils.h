@@ -22,6 +22,22 @@ constexpr uint32_t APDS_STACK_WORDS = 3072;          // ~12KB
 constexpr uint32_t GPS_STACK_WORDS = 3072;           // ~12KB
 constexpr uint32_t PRESENCE_STACK_WORDS = 3072;      // ~12KB
 constexpr uint32_t RTC_STACK_WORDS = 4096;           // ~16KB
+constexpr uint32_t SENSOR_BCAST_STACK_WORDS = 3072;  // ~12KB (ESP-NOW sensor broadcaster)
+constexpr uint32_t MIC_RECORD_STACK_WORDS = 4096;    // ~16KB (microphone recording)
+constexpr uint32_t MIC_VIZ_STACK_WORDS = 4096;       // ~16KB (microphone visualizer)
+constexpr uint32_t SR_STACK_WORDS = 8192;             // ~32KB (speech recognition inference)
+constexpr uint32_t SR_SNIP_STACK_WORDS = 4096;        // ~16KB (speech recognition snippet writer)
+constexpr uint32_t EI_CONTINUOUS_STACK_WORDS = 8192;  // ~32KB (EdgeImpulse continuous inference)
+constexpr uint32_t MAP_RENDER_STACK_WORDS = 8192;     // ~32KB (async map rendering)
+
+// Centralized task priorities
+// LOW  (1) — sensor pollers, debug output, RTC, map render
+// NORMAL (3) — auxiliary media tasks (mic visualizer, SR snip writer)
+// HIGH (5) — real-time data paths (ESP-NOW, mic recording, SR inference)
+constexpr UBaseType_t TASK_PRIORITY_LOW    = 1;
+constexpr UBaseType_t TASK_PRIORITY_NORMAL = 3;
+constexpr UBaseType_t TASK_PRIORITY_HIGH   = 5;
+constexpr UBaseType_t SR_TASK_PRIORITY_LEVEL = TASK_PRIORITY_HIGH;  // kept for backward compat
 
 // ============================================================================
 // FreeRTOS Task Creation with Memory Logging
@@ -47,6 +63,18 @@ bool createThermalTask();
 bool createIMUTask();
 bool createToFTask();
 bool createFMRadioTask();
+
+// ============================================================================
+// Sensor Task Exit Helper
+// ============================================================================
+
+// Emit the standard "task disabled" log message and self-delete the task.
+// tag must be a string literal, e.g. SENSOR_TASK_EXIT("IMU").
+// NOTE: do NOT clear the task handle before calling this — the create/start
+// function uses eTaskGetState() to detect whether the task is still running.
+#define SENSOR_TASK_EXIT(tag)                                                  \
+  INFO_SENSORSF("[" tag "] Task disabled - cleaning up and deleting");         \
+  vTaskDelete(nullptr)
 
 // ============================================================================
 // Automated Stack Watermark Monitoring

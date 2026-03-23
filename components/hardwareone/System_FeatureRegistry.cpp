@@ -9,6 +9,7 @@
 #include "System_Command.h"
 #include "System_MemUtil.h"
 #include "System_Utils.h"
+#include "System_SetupWizard.h"
 #include <esp_heap_caps.h>
 
 // External settings
@@ -224,7 +225,7 @@ static const FeatureEntry featureRegistry[] = {
     
   { "mqtt", "MQTT", FEATURE_CAT_NETWORK, 6,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.mqttAutoStart, isMqttCompiled,
+    &gSettings.mqttClientEnabled, isMqttCompiled,
     "Home Assistant integration via MQTT broker" },
 
   // === DISPLAY FEATURES ===
@@ -559,6 +560,17 @@ const char* cmd_features(const String& argsInput) {
 }
 
 // ============================================================================
+// Feature Setup Wizard Command
+// ============================================================================
+
+static const char* cmd_featuresetup(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  SetupWizardResult result = runAndApplyFeatureWizard();
+  return result.completed ? "Feature setup complete." : "Feature setup cancelled.";
+}
+
+// ============================================================================
 // Command Registry
 // ============================================================================
 
@@ -567,7 +579,9 @@ extern const CommandEntry featureCommands[] = {
   { "features", "Show/toggle system features with heap estimates.", false, cmd_features,
     "features              - List all features\n"
     "features <id>         - Show feature details\n"
-    "features <id> <on|off> - Enable/disable feature" }
+    "features <id> <on|off> - Enable/disable feature" },
+  { "featuresetup", "Run the interactive feature configuration wizard.", true, cmd_featuresetup,
+    "featuresetup  - Launch the feature toggle wizard (serial + OLED)" }
 };
 
 extern const size_t featureCommandsCount = sizeof(featureCommands) / sizeof(featureCommands[0]);

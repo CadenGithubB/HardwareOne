@@ -164,9 +164,20 @@ bool rtcEarlyBootSync() {
   timeinfo.tm_hour = dt.hour;
   timeinfo.tm_min = dt.minute;
   timeinfo.tm_sec = dt.second;
-  timeinfo.tm_isdst = -1;
+  timeinfo.tm_isdst = 0;  // UTC has no DST
   
+  // RTC stores UTC - use mktime with TZ=UTC workaround (timegm not available on ESP32)
+  char* oldTZ = getenv("TZ");
+  setenv("TZ", "UTC0", 1);
+  tzset();
   time_t t = mktime(&timeinfo);
+  if (oldTZ) {
+    setenv("TZ", oldTZ, 1);
+  } else {
+    unsetenv("TZ");
+  }
+  tzset();
+  
   struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
   settimeofday(&tv, nullptr);
   
@@ -245,8 +256,21 @@ uint32_t rtcToUnixTime(const RTCDateTime* dt) {
   timeinfo.tm_hour = dt->hour;
   timeinfo.tm_min = dt->minute;
   timeinfo.tm_sec = dt->second;
-  timeinfo.tm_isdst = -1;
-  return (uint32_t)mktime(&timeinfo);
+  timeinfo.tm_isdst = 0;  // UTC has no DST
+  
+  // RTC stores UTC - use mktime with TZ=UTC workaround (timegm not available on ESP32)
+  char* oldTZ = getenv("TZ");
+  setenv("TZ", "UTC0", 1);
+  tzset();
+  time_t t = mktime(&timeinfo);
+  if (oldTZ) {
+    setenv("TZ", oldTZ, 1);
+  } else {
+    unsetenv("TZ");
+  }
+  tzset();
+  
+  return (uint32_t)t;
 }
 
 void unixTimeToRTC(uint32_t unixTime, RTCDateTime* dt) {
@@ -422,7 +446,7 @@ static void rtcTask(void* pvParameters) {
           char rtcJson[256];
           int jsonLen = buildRTCDataJSON(rtcJson, sizeof(rtcJson));
           if (jsonLen > 0) {
-            sendSensorDataUpdate(REMOTE_SENSOR_RTC, String(rtcJson));
+            sendSensorDataUpdate(REMOTE_SENSOR_RTC, rtcJson, jsonLen);
           }
         }
 #endif
@@ -504,7 +528,7 @@ bool createRTCTask() {
     "rtc_task",
     RTC_STACK_WORDS,  // Increased for NTP sync logic
     nullptr,
-    1,     // Low priority
+    TASK_PRIORITY_LOW,
     &rtcTaskHandle,
     1      // Core 1
   );
@@ -835,11 +859,11 @@ extern const SettingsModule rtcSettingsModule = {
 
 const char* cmd_rtcautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = argsInput; arg.trim();
+  String arg = argsInput;
+  normalizeCliArg(arg);
   if (arg.length() == 0) {
     return gSettings.rtcAutoStart ? "[RTC] Auto-start: enabled" : "[RTC] Auto-start: disabled";
   }
-  arg.toLowerCase();
   if (arg == "on" || arg == "true" || arg == "1") {
     setSetting(gSettings.rtcAutoStart, true);
     return "[RTC] Auto-start enabled";

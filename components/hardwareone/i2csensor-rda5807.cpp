@@ -48,8 +48,7 @@ void updateFMRadio();
 // FM Radio I2C clock speed (100kHz for bus stability with other devices)
 static const uint32_t FM_RADIO_I2C_CLOCK = 100000;
 
-// FM Radio I2C address (RDA5807M uses 0x11)
-static const uint8_t FM_RADIO_I2C_ADDRESS = 0x11;
+// FM Radio I2C address (RDA5807M uses 0x11, defined in System_I2C.h as I2C_ADDR_FM_RADIO)
 
 // ============================================================================
 // FM Radio State (Global Variables)
@@ -131,7 +130,7 @@ bool initFMRadio() {
   bool success = false;
   INFO_SENSORSF("Starting FM Radio I2C initialization");
   
-  i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 1000, [&]() {
+  i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 1000, [&]() {
     DEBUG_FMRADIOF("I2C transaction started, calling radio.initWire(Wire1)");
     // Initialize the radio with Wire1 (STEMMA QT bus)
     if (!radio.initWire(Wire1)) {
@@ -181,7 +180,7 @@ void deinitFMRadio() {
   
   if (radioInitialized) {
     DEBUG_FMRADIOF("[FM_RADIO] Starting I2C transaction for deinitialization");
-    i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 500, [&]() {
+    i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
       DEBUG_FMRADIOF("[FM_RADIO] Muting radio before termination");
       radio.setMute(true);
       DEBUG_FMRADIOF("[FM_RADIO] Calling radio.term() to power down chip");
@@ -234,7 +233,7 @@ void fmRadioTask(void* parameter) {
 
       // Unmute now that init succeeded
       DEBUG_FMRADIOF("[FM_RADIO_TASK] Unmuting radio for audio output");
-      i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 200, [&]() {
+      i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
         radio.setMute(false);
         fmRadioMuted = false;
         DEBUG_FMRADIOF("[FM_RADIO_TASK] Radio unmuted successfully");
@@ -286,22 +285,11 @@ void fmRadioTask(void* parameter) {
     
     // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW
-    // Check mesh mode (worker role) OR bond mode (worker role)
-    bool shouldStream = false;
-    if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
-      shouldStream = true;
-    }
-#if ENABLE_BONDED_MODE
-    if (gSettings.bondModeEnabled && isBondWorker()) {
-      shouldStream = true;  // Bond mode worker
-    }
-#endif
-    
-    if (shouldStream) {
+    if (shouldStreamSensorToRemote()) {
       char fmJson[512];
       int jsonLen = buildFMRadioDataJSON(fmJson, sizeof(fmJson));
       if (jsonLen > 0) {
-        sendSensorDataUpdate(REMOTE_SENSOR_FMRADIO, String(fmJson));
+        sendSensorDataUpdate(REMOTE_SENSOR_FMRADIO, fmJson, jsonLen);
       }
     }
 #endif
@@ -550,7 +538,7 @@ const char* cmd_fmradio_tune(const String& argsInput) {
     }
   }
   
-  i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 500, [&]() {
+  i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
     radio.setFrequency(freqInt);
     fmRadioFrequency = freqInt;
     
@@ -579,7 +567,7 @@ const char* cmd_fmradio_seek(const String& argsInput) {
     seekUp = false;
   }
   
-  i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 6000, [&]() {
+  i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 6000, [&]() {
     // mathertel library seek methods
     if (seekUp) {
       radio.seekUp(false);  // false = don't wrap
@@ -630,7 +618,7 @@ const char* cmd_fmradio_volume(const String& argsInput) {
     return "OK";
   }
   
-  i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 200, [&]() {
+  i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
     radio.setVolume(vol);
     fmRadioVolume = vol;
   });
@@ -656,7 +644,7 @@ const char* cmd_fmradio_mute(const String& argsInput) {
   bool shouldMute = (arg != "off" && arg != "unmute");  // Default to mute unless explicitly unmute
   fmRadioMuted = shouldMute;
   
-  i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 200, [&]() {
+  i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
     radio.setMute(fmRadioMuted);
   });
   
@@ -678,7 +666,7 @@ const char* cmd_fmradio_status(const String& argsInput) {
   } else {
     // Update signal info
     if (radioInitialized) {
-      i2cDeviceTransactionVoid(FM_RADIO_I2C_ADDRESS, FM_RADIO_I2C_CLOCK, 200, [&]() {
+      i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
         RADIO_INFO ri;
         radio.getRadioInfo(&ri);
         fmRadioRSSI = ri.rssi;

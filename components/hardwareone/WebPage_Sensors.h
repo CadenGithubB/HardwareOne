@@ -59,7 +59,9 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username);
 #if ENABLE_IMU_SENSOR
 #include "i2csensor-bno055-web.h"
 #endif
+#if ENABLE_SERVO
 #include "i2csensor-pca9685-web.h"
+#endif
 #if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP_Web.h"
 #endif
@@ -95,12 +97,6 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   .sensor-description{color:var(--panel-fg);margin-bottom:15px;font-size:.9em}
   .sensor-controls{display:flex;gap:10px;margin-bottom:15px;flex-wrap:wrap}
   .sensor-data{background:var(--crumb-bg);border-radius:8px;padding:15px;font-family:'Courier New',monospace;font-size:.9em;min-height:60px;color:var(--panel-fg)}
-  .status-indicator{display:inline-block;width:12px;height:12px;min-width:12px;min-height:12px;flex:0 0 12px;border-radius:50%;margin-right:8px;box-sizing:content-box;vertical-align:middle}
-  .status-enabled{background:#28a745;animation:pulse 2s infinite}
-  .status-disabled{background:#dc3545}
-  .status-recording{background:#e74c3c;animation:blink 1s infinite}
-  @keyframes pulse{0%{opacity:1}50%{opacity:.5}100%{opacity:1}}
-  @keyframes blink{0%{opacity:1}50%{opacity:0.3}100%{opacity:1}}
   /* IMU */
   #gyro-data{color:var(--panel-fg)}
   .imu-grid{display:grid;grid-template-columns:160px 1fr;column-gap:8px;row-gap:6px;align-items:baseline}
@@ -167,7 +163,9 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   streamMicrophoneSensorCard(req);
 #endif
   // Edge Impulse ML is now integrated into camera card, not a separate sensor
+#if ENABLE_SERVO
   streamPCA9685ServoDriverCard(req);
+#endif
 
   httpd_resp_send_chunk(req, R"HTML(
 
@@ -191,7 +189,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "Promise.all([hw.fetchJSON('/api/devices'),hw.fetchJSON('/api/sensors/status')]).then(function(rs){var d=rs[0]||{};var st=rs[1]||{};console.log('[SENSORS] Devices response:',d);console.log('[SENSORS] Status response:',st);", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "var has={imu:false,thermal:false,tof:false,gamepad:false,gps:false,servo:false,fmradio:false,camera:false,rtc:false,presence:false};if(d&&d.devices&&d.devices.forEach){d.devices.forEach(function(dev){", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "if(dev&&dev.name==='BNO055')has.imu=true;else if(dev&&dev.name==='MLX90640')has.thermal=true;else if(dev&&dev.name==='VL53L4CX')has.tof=true;else if(dev&&dev.name==='Seesaw')has.gamepad=true;else if(dev&&dev.name==='PA1010D')has.gps=true;else if(dev&&dev.name==='PCA9685')has.servo=true;else if(dev&&dev.name==='RDA5807')has.fmradio=true;else if(dev&&dev.name==='DS3231')has.rtc=true;else if(dev&&dev.name==='STHS34PF80')has.presence=true;});}console.log('[SENSORS] Detected sensors:',has);", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "var compiled={imu:!!st.imuCompiled,thermal:!!st.thermalCompiled,tof:!!st.tofCompiled,gamepad:!!st.gamepadCompiled,gps:!!st.gpsCompiled,fmradio:true,servo:true,camera:!!st.cameraCompiled,rtc:!!st.rtcCompiled,presence:!!st.presenceCompiled};has.camera=!!st.cameraCompiled;console.log('[SENSORS] Compiled sensors:',compiled);", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "var compiled={imu:!!st.imuCompiled,thermal:!!st.thermalCompiled,tof:!!st.tofCompiled,gamepad:!!st.gamepadCompiled,gps:!!st.gpsCompiled,fmradio:!!st.fmradioCompiled,servo:!!st.servoCompiled,camera:!!st.cameraCompiled,rtc:!!st.rtcCompiled,presence:!!st.presenceCompiled};has.camera=!!st.cameraCompiled;console.log('[SENSORS] Compiled sensors:',compiled);", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "setVis('sensor-card-imu',has.imu&&compiled.imu);setVis('sensor-card-thermal',has.thermal&&compiled.thermal);setVis('sensor-card-tof',has.tof&&compiled.tof);setVis('sensor-card-gamepad',has.gamepad&&compiled.gamepad);setVis('sensor-card-gps',has.gps&&compiled.gps);setVis('sensor-card-servo',has.servo&&compiled.servo);setVis('sensor-card-fmradio',has.fmradio&&compiled.fmradio);setVis('sensor-card-camera',has.camera&&compiled.camera);setVis('sensor-card-rtc',has.rtc&&compiled.rtc);setVis('sensor-card-presence',has.presence&&compiled.presence);", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "var any=(has.imu&&compiled.imu)||(has.thermal&&compiled.thermal)||(has.tof&&compiled.tof)||(has.gamepad&&compiled.gamepad)||(has.gps&&compiled.gps)||(has.servo&&compiled.servo)||(has.fmradio&&compiled.fmradio)||(has.camera&&compiled.camera)||(has.rtc&&compiled.rtc)||(has.presence&&compiled.presence);if(!any&&grid){grid.innerHTML='<div style=\"grid-column:1/-1;text-align:center;padding:2rem;color:#87ceeb;font-style:italic\">No sensors available (none compiled + detected)</div>';}console.log('[SENSORS] Device detection complete');", HTTPD_RESP_USE_STRLEN);
   // Show banner for sensors detected on I2C bus but not compiled into firmware

@@ -28,10 +28,6 @@ static void streamAutomationsInner(httpd_req_t* req) {
 
 <div id='auto_form' class='settings-panel' style='display:none;background:var(--panel-bg)'>
 <style>
-.status-indicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
-.status-enabled { background: #28a745; animation: pulse 2s infinite; }
-.status-disabled { background: #dc3545; }
-@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
 #auto_form .row-inline{display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;}
 #auto_form .row-inline .input-tall{height:32px;line-height:32px;box-sizing:border-box;}
 #auto_form .row-inline .btn,#auto_form .row-inline .btn-small{height:32px;line-height:32px;padding:0 10px;display:inline-flex;align-items:center;margin:0;box-sizing:border-box;font-size:14px;}
@@ -327,8 +323,11 @@ document.addEventListener('DOMContentLoaded', function() {
     disableBtn.addEventListener('click', disableAutomationSystem);
   }
   
-  // Auto-refresh status on page load
-  refreshAutomationSystemStatus();
+  // Delay the initial status check slightly so the page-load TLS connection
+  // has time to close before we open a second one (ESP32 HTTPS has a small
+  // concurrent-session limit; firing immediately on DOMContentLoaded can
+  // saturate it while the chunked page response is still in flight).
+  setTimeout(refreshAutomationSystemStatus, 300);
 });
 
 console.log('[AUTOMATIONS] System status check ready');
@@ -1064,7 +1063,9 @@ function importFromFile(input){
     let done=0,errs=0;
     const next=(idx)=>{
       if(idx>=items.length){
-        status.innerHTML='<span style="color:#28a745">Imported '+done+' automation'+(done!==1?'s':'')+(errs?', '+errs+' failed':'')+' successfully</span>';
+        if(done>0&&!errs) status.innerHTML='<span style="color:#28a745">Imported '+done+' automation'+(done!==1?'s':'')+' successfully</span>';
+        else if(done>0&&errs) status.innerHTML='<span style="color:var(--warning-accent,#ffc107)">Imported '+done+', '+errs+' failed</span>';
+        else status.innerHTML='<span style="color:#dc3545">Import failed ('+errs+' error'+(errs!==1?'s':'')+')</span>';
         if(done>0) loadAutos();
         input.value='';
         if(label) label.textContent='No file chosen';

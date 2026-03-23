@@ -80,7 +80,7 @@ void startGPSInternal() {
     }
     DEBUG_SENSORSF("[GPS_INIT] GPS object allocated at %p", gPA1010D);
     
-    DEBUG_SENSORSF("[GPS_INIT] Calling gPA1010D->begin(0x10)...");
+    DEBUG_SENSORSF("[GPS_INIT] Calling gPA1010D->begin(0x%02X)...", I2C_ADDR_GPS);
     
     // Retry GPS initialization with delays (GPS needs time after power-on)
     bool initSuccess = false;
@@ -90,7 +90,7 @@ void startGPSInternal() {
         delay(200);
       }
       bool began = i2cDeviceTransaction(I2C_ADDR_GPS, 100000, 500, [&]() -> bool {
-        return gPA1010D->begin(0x10);
+        return gPA1010D->begin(I2C_ADDR_GPS);
       });
       if (began) {
         initSuccess = true;
@@ -102,10 +102,10 @@ void startGPSInternal() {
       delete gPA1010D;
       gPA1010D = nullptr;
       gpsConnected = false;
-      ERROR_SENSORSF("Failed to initialize GPS module at 0x10 after 3 attempts");
+      ERROR_SENSORSF("Failed to initialize GPS module at 0x%02X after 3 attempts", I2C_ADDR_GPS);
       return;
     }
-    INFO_SENSORSF("GPS module initialized successfully at I2C address 0x10");
+    INFO_SENSORSF("GPS module initialized successfully at I2C address 0x%02X", I2C_ADDR_GPS);
     
     // Configure GPS module (wrapped for mutex/clock management)
     DEBUG_SENSORSF("[GPS_INIT] Configuring GPS: RMC+GGA sentences, 1Hz update rate");
@@ -301,10 +301,7 @@ void gpsTask(void* parameter) {
         delete gPA1010D;
         gPA1010D = nullptr;
       }
-      INFO_SENSORSF("[GPS] Task disabled - cleaning up and deleting");
-      // NOTE: Do NOT clear gpsTaskHandle here - let create function use eTaskGetState()
-      // to detect stale handles. Clearing here creates a race condition window.
-      vTaskDelete(nullptr);
+      SENSOR_TASK_EXIT("GPS");
     }
 
     // Stack watermark tracking + safety bailout
@@ -378,18 +375,7 @@ void gpsTask(void* parameter) {
             
             // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW
-            // Check mesh mode (worker role) OR bond mode (worker role)
-            bool shouldStream = false;
-            if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
-              shouldStream = true;
-            }
-#if ENABLE_BONDED_MODE
-            if (gSettings.bondModeEnabled && isBondWorker()) {
-              shouldStream = true;  // Bond mode worker
-            }
-#endif
-            
-            if (shouldStream) {
+            if (shouldStreamSensorToRemote()) {
               char gpsJson[256];
               int jsonLen;
               if (gPA1010D->fix) {
@@ -405,7 +391,7 @@ void gpsTask(void* parameter) {
                                    (int)gPA1010D->satellites);
               }
               if (jsonLen > 0 && jsonLen < 256) {
-                sendSensorDataUpdate(REMOTE_SENSOR_GPS, String(gpsJson));
+                sendSensorDataUpdate(REMOTE_SENSOR_GPS, gpsJson, jsonLen);
               }
             }
 #endif
@@ -422,7 +408,7 @@ void gpsTask(void* parameter) {
         
         // Auto-disable if too many consecutive failures
         if (!result) {
-          if (i2cShouldAutoDisable(I2C_ADDR_GPS, 5)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_GPS)) {
             ERROR_SENSORSF("Too many consecutive GPS failures - auto-disabling");
             gpsEnabled = false;
             sensorStatusBumpWith("gps@auto_disabled");

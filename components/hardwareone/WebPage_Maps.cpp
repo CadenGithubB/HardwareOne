@@ -435,7 +435,7 @@ esp_err_t handleWaypointsPage(httpd_req_t* req) {
     "        html += '</table>';\n"
     "        list.innerHTML = html;\n"
     "      } else {\n"
-    "        list.innerHTML = '<p style=\"color: #666;\">No waypoints for this map.</p>';\n"
+    "        list.innerHTML = '<p style=\"color:var(--muted)\">No waypoints for this map.</p>';\n"
     "      }\n"
     "    })\n"
     "    .catch(function(e) {\n"
@@ -714,9 +714,9 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
     if (action == "add") {
       float lat = latStr.toFloat();
       float lon = lonStr.toFloat();
-      if (name.length() == 0 || lat == 0.0f || lon == 0.0f) {
+      if (name.length() == 0 || latStr.length() == 0 || lonStr.length() == 0) {
         doc["success"] = false;
-        doc["error"] = "Invalid parameters";
+        doc["error"] = "Invalid parameters: name, lat and lon are all required";
       } else {
         String addCmd = "waypoint add " + latStr + " " + lonStr + " " + name;
         String addOut;

@@ -153,6 +153,7 @@ struct AuthContext;
 // File I/O functions
 bool readText(const char* path, String& out);
 bool writeText(const char* path, const String& content);
+bool writeTextAtomic(const char* path, const String& content);
 
 // Settings persistence
 // NOTE: Use writeSettingsJson() from .ino instead of saveUnifiedSettings()
@@ -178,6 +179,17 @@ String redactOutputForLog(const String& output);
     extern bool gCLIValidateOnly; \
     if (gCLIValidateOnly) return "VALID"; \
   } while(0)
+
+// Parse common boolean argument patterns used across CLI command handlers.
+// Returns 1 for true (on/true/1/enable), 0 for false (off/false/0/disable), -1 if unrecognized.
+inline int parseBoolArg(const String& arg) {
+  String a = arg;
+  a.trim();
+  a.toLowerCase();
+  if (a == "on" || a == "true" || a == "1" || a == "enable") return 1;
+  if (a == "off" || a == "false" || a == "0" || a == "disable") return 0;
+  return -1;
+}
 
 // ============================================================================
 // Base64 Encoding/Decoding
@@ -297,5 +309,35 @@ const char* getIconNameForExtension(const char* ext);
 // This allows switching between different controller types at compile time
 // by changing INPUT_TYPE in System_BuildConfig.h.
 #include "HAL_Input.h"
+
+// ============================================================================
+// String / CLI Utilities  (inline — no .cpp dependency)
+// ============================================================================
+
+// Normalize a CLI argument in-place: trim whitespace then lowercase.
+// Replaces the common two-line pattern `s.trim(); s.toLowerCase();`
+// used throughout command handlers.
+inline void normalizeCliArg(String& s) {
+  s.trim();
+  s.toLowerCase();
+}
+
+// ============================================================================
+// MAC Address Formatting  (always available, independent of ESP-NOW)
+// ============================================================================
+
+// Write a 6-byte MAC address as "XX:XX:XX:XX:XX:XX" (uppercase) into buf.
+// buf must be at least 18 bytes.  Safe to call when ESP-NOW is disabled.
+inline void formatMacAddr(const uint8_t* mac, char* buf, size_t bufSize) {
+  snprintf(buf, bufSize, "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+// Same as formatMacAddr but returns a String (heap allocation; avoid in ISR).
+inline String formatMacAddrStr(const uint8_t* mac) {
+  char buf[18];
+  formatMacAddr(mac, buf, sizeof(buf));
+  return String(buf);
+}
 
 #endif // SYSTEM_UTILS_H

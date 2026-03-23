@@ -2,17 +2,11 @@
 #define I2CSENSOR_APDS9960_H
 
 #include "System_BuildConfig.h"
-
-#if ENABLE_APDS_SENSOR
-
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// Forward declarations
-class String;
-
-// APDS sensor state
+// APDS sensor cache structure (always available for type-safe references)
 struct PeripheralCache {
   SemaphoreHandle_t mutex = nullptr;
   uint16_t apdsRed = 0, apdsGreen = 0, apdsBlue = 0, apdsClear = 0;
@@ -21,6 +15,11 @@ struct PeripheralCache {
   unsigned long apdsLastUpdate = 0;
   bool apdsDataValid = false;
 };
+
+#if ENABLE_APDS_SENSOR
+
+// Forward declarations
+class String;
 
 extern PeripheralCache gPeripheralCache;
 extern bool apdsColorEnabled;

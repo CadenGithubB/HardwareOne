@@ -81,7 +81,7 @@ bool isSensorDataStreamingEnabled(RemoteSensorType sensorType);
 
 // Update local sensor cache (called by sensor polling loops)
 // This is a fast, non-blocking write - no ESP-NOW transmission here
-void sendSensorDataUpdate(RemoteSensorType sensorType, const String& jsonData);
+void sendSensorDataUpdate(RemoteSensorType sensorType, const char* jsonData, size_t jsonLen = 0);
 
 // Force immediate broadcast of a sensor (event-driven API)
 // Use this for critical events that need instant transmission (e.g., button press, alarm)

@@ -186,7 +186,7 @@ bool getExternalSensor(int index, String& topic, String& name, String& value, un
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry mqttSettingEntries[] = {
-  { "mqttClientEnabled",       SETTING_BOOL,   &gSettings.mqttClientEnabled,      true,  0, nullptr, 0, 1, "MQTT Enabled", nullptr, false },
+  { "mqttClientEnabled",       SETTING_BOOL,   &gSettings.mqttClientEnabled,      false, 0, nullptr, 0, 1, "MQTT Enabled", nullptr, false },
   { "mqttAutoStart",          SETTING_BOOL,   &gSettings.mqttAutoStart,          false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false },
   { "mqttHost",               SETTING_STRING, &gSettings.mqttHost,               0, 0, "", 0, 0, "Broker Host", nullptr, false },
   { "mqttPort",               SETTING_INT,    &gSettings.mqttPort,               1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false },
@@ -440,7 +440,7 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   bool success = executeCommand(ctx, command, cmdResult, 2048);
   
   // Build and publish response
-  JsonDocument respDoc;
+  PSRAM_JSON_DOC(respDoc);
   respDoc["ok"] = success;
   respDoc["user"] = username;
   respDoc["cmd"] = command;
@@ -720,7 +720,7 @@ static void publishMeshPeerSensorData() {
       if (millis() - gRemoteSensorCache[s].lastUpdate > REMOTE_SENSOR_TTL_MS) continue;
 
       // Parse the cached JSON data and merge into state
-      JsonDocument sensorDoc;
+      PSRAM_JSON_DOC(sensorDoc);
       if (deserializeJson(sensorDoc, gRemoteSensorCache[s].jsonData, gRemoteSensorCache[s].jsonLength) == DeserializationError::Ok) {
         // Determine key from sensor type
         const char* key = nullptr;

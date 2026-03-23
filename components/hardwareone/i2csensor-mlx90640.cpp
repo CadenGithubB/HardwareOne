@@ -112,7 +112,7 @@ extern bool initThermalSensor();
 extern bool readThermalPixels();
 extern void i2cSetDefaultWire1Clock();
 
-#define MIN_RESTART_DELAY_MS 2000
+// MIN_RESTART_DELAY_MS defined in System_I2C.h
 
 // Queue system functions now in System_I2C.h
 
@@ -979,7 +979,7 @@ int buildThermalDataJSON(char* buf, size_t bufSize) {
   unsigned long startMs = millis();
   int pos = 0;
 
-  if (lockThermalCache(pdMS_TO_TICKS(100))) {  // 100ms timeout for HTTP response
+  if (lockThermalCache(pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS))) {
     // Determine which frame to send based on interpolation availability
     bool useInterpolated = (gThermalCache.thermalInterpolated != nullptr && gThermalCache.thermalInterpolatedWidth > 0 && gThermalCache.thermalInterpolatedHeight > 0);
 
@@ -1351,10 +1351,7 @@ void thermalTask(void* parameter) {
       extern void resetThermalFrameBuffers();
       resetThermalFrameBuffers();
       
-      INFO_SENSORSF("[THERMAL] Task disabled - cleaning up and deleting");
-      // NOTE: Do NOT clear thermalTaskHandle here - let start function use eTaskGetState()
-      // to detect stale handles. Clearing here creates a race condition window.
-      vTaskDelete(nullptr);
+      SENSOR_TASK_EXIT("THERMAL");
     }
     
     // Update watermark diagnostics (only when enabled)
@@ -1404,7 +1401,7 @@ void thermalTask(void* parameter) {
         
         // Auto-disable if too many consecutive failures (like gamepad does)
         if (!ok) {
-          if (i2cShouldAutoDisable(I2C_ADDR_THERMAL, 5)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_THERMAL)) {
             ERROR_SENSORSF("Too many consecutive thermal failures - auto-disabling");
             thermalEnabled = false;
             sensorStatusBumpWith("thermal@auto_disabled");
@@ -1420,23 +1417,12 @@ void thermalTask(void* parameter) {
         
         // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW
-        // Check mesh mode (worker role) OR bond mode (worker role)
-        bool shouldStream = false;
-        if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
-          shouldStream = true;
-        }
-#if ENABLE_BONDED_MODE
-        if (gSettings.bondModeEnabled && isBondWorker()) {
-          shouldStream = true;  // Bond mode worker
-        }
-#endif
-        
-        if (ok && shouldStream) {
+        if (ok && shouldStreamSensorToRemote()) {
           // Use integer-optimized thermal data for remote streaming
           char thermalJson[4096];  // Large buffer for thermal data
           int jsonLen = buildThermalDataJSONInteger(thermalJson, sizeof(thermalJson));
           if (jsonLen > 0) {
-            sendSensorDataUpdate(REMOTE_SENSOR_THERMAL, String(thermalJson));
+            sendSensorDataUpdate(REMOTE_SENSOR_THERMAL, thermalJson, jsonLen);
           }
         }
 #endif

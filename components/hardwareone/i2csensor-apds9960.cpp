@@ -49,7 +49,7 @@ static bool createAPDSTask() {
   }
   if (apdsTaskHandle == nullptr) {
     const uint32_t apdsStack = APDS_STACK_WORDS;
-    if (xTaskCreateLogged(apdsTask, "apds_task", apdsStack, nullptr, 1, &apdsTaskHandle, "apds") != pdPASS) {
+    if (xTaskCreateLogged(apdsTask, "apds_task", apdsStack, nullptr, TASK_PRIORITY_LOW, &apdsTaskHandle, "apds") != pdPASS) {
       return false;
     }
     DEBUG_CLIF("APDS task created successfully");
@@ -461,10 +461,7 @@ void apdsTask(void* parameter) {
         gAPDS9960 = nullptr;
       }
       gPeripheralCache.apdsDataValid = false;
-      INFO_SENSORSF("[APDS] Task disabled - cleaning up and deleting");
-      // NOTE: Do NOT clear apdsTaskHandle here - let create function use eTaskGetState()
-      // to detect stale handles. Clearing here creates a race condition window.
-      vTaskDelete(nullptr);
+      SENSOR_TASK_EXIT("APDS");
     }
 
     // Stack watermark tracking + safety bailout
@@ -525,7 +522,7 @@ void apdsTask(void* parameter) {
         } else {
           // Note: I2CDevice::recordError() called automatically by transaction
           // Check centralized health tracking for auto-disable decision
-          if (i2cShouldAutoDisable(I2C_ADDR_APDS, 5)) {
+          if (i2cShouldAutoDisable(I2C_ADDR_APDS)) {
             uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_APDS);
             apdsColorEnabled = false;
             apdsProximityEnabled = false;

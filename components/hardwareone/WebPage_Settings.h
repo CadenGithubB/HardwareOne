@@ -14,6 +14,29 @@ window.togglePane = function(paneId, btnId) {
   p.style.display = isHidden ? 'block' : 'none';
   b.textContent = isHidden ? 'Collapse' : 'Expand';
 };
+// Baseline snapshot: track what was loaded so saves only send changed values
+window._settingsBaseline = {};
+window._debugBaseline = {};
+window._snapInput = function(el) {
+  if (!el || el.type === 'password') return undefined;
+  if (el.type === 'checkbox') return el.checked ? 1 : 0;
+  if (el.type === 'number') {
+    var n = el.step && el.step.indexOf('.') !== -1 ? parseFloat(el.value) : parseInt(el.value, 10);
+    return isNaN(n) ? el.value : n;
+  }
+  return el.value;
+};
+window._snapshotContainer = function(root) {
+  var scope = (root && root.querySelectorAll) ? root : document;
+  scope.querySelectorAll('input,select,textarea').forEach(function(el) {
+    if (el.id && el.type !== 'password') {
+      window._settingsBaseline[el.id] = window._snapInput(el);
+    }
+  });
+};
+window._isChanged = function(id, val) {
+  return !(id in window._settingsBaseline) || window._settingsBaseline[id] !== val;
+};
 window.sendSequential = function(cmds, onDone, onFail) {
   var all = ['beginwrite'].concat(cmds).concat(['savesettings']);
   fetch('/api/cli/batch', {
@@ -46,10 +69,10 @@ window.sendSequential = function(cmds, onDone, onFail) {
   </div>
   <div id='wifi-pane' style='display:none;margin-top:0.75rem'>
   <div style='margin-bottom:1rem'>
-    <span style='color:var(--panel-fg)'>SSID: <span style='font-weight:bold;color:#667eea' id='wifi-ssid'>-</span></span>
+    <span style='color:var(--panel-fg)'>SSID: <span style='font-weight:bold;color:var(--accent)' id='wifi-ssid'>-</span></span>
   </div>
   <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
-    <span style='color:var(--panel-fg)' title='Automatically reconnect to saved WiFi networks after power loss or disconnection'>Auto-Reconnect: <span style='font-weight:bold;color:#667eea' id='wifi-value'>-</span></span>
+    <span style='color:var(--panel-fg)' title='Automatically reconnect to saved WiFi networks after power loss or disconnection'>Auto-Reconnect: <span style='font-weight:bold;color:var(--accent)' id='wifi-value'>-</span></span>
     <button class='btn' onclick='toggleWifi()' id='wifi-btn' title='Enable/disable automatic WiFi reconnection on boot'>Toggle</button>
   </div>
   <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
@@ -81,40 +104,41 @@ window.sendSequential = function(cmds, onDone, onFail) {
   </div>
   <div id='time-pane' style='display:none;margin-top:0.75rem'>
   <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
-    <span style='color:var(--panel-fg)' title='Current timezone'>Timezone: <span style='font-weight:bold;color:#667eea' id='tz-value'>-</span></span>
+    <span style='color:var(--panel-fg)' title='Current timezone'>Timezone: <span style='font-weight:bold;color:var(--accent)' id='tz-value'>-</span></span>
     <select id='tz-select' class='form-input input-medium' title='Select timezone'>
+      <option value='' disabled selected>-- Select Timezone --</option>
       <option value='-720'>UTC-12 (Baker Island)</option>
-      <option value='-660'>UTC-11 (Hawaii-Aleutian)</option>
-      <option value='-600'>UTC-10 (Hawaii)</option>
-      <option value='-540'>UTC-9 (Alaska)</option>
-      <option value='-480'>UTC-8 (Pacific)</option>
-      <option value='-420'>UTC-7 (Mountain)</option>
-      <option value='-360'>UTC-6 (Central)</option>
-      <option value='-300'>UTC-5 (Eastern)</option>
-      <option value='-240'>UTC-4 (Atlantic)</option>
-      <option value='-180'>UTC-3 (Argentina)</option>
+      <option value='-660'>UTC-11 (Samoa)</option>
+      <option value='-600'>UTC-10 (Hawaii/HST)</option>
+      <option value='-540'>UTC-9 (Alaska/AKST)</option>
+      <option value='-480'>UTC-8 (Pacific/PST)</option>
+      <option value='-420'>UTC-7 (Mountain/MST · Pacific/PDT)</option>
+      <option value='-360'>UTC-6 (Central/CST · Mountain/MDT)</option>
+      <option value='-300'>UTC-5 (Eastern/EST · Central/CDT)</option>
+      <option value='-240'>UTC-4 (Atlantic/AST · Eastern/EDT)</option>
+      <option value='-180'>UTC-3 (Argentina · Atlantic/ADT)</option>
       <option value='-120'>UTC-2 (Mid-Atlantic)</option>
       <option value='-60'>UTC-1 (Azores)</option>
-      <option value='0'>UTC+0 (London/Dublin)</option>
-      <option value='60'>UTC+1 (Berlin/Paris)</option>
-      <option value='120'>UTC+2 (Cairo/Athens)</option>
+      <option value='0'>UTC+0 (London/GMT · Dublin)</option>
+      <option value='60'>UTC+1 (Berlin/Paris/CET · London/BST)</option>
+      <option value='120'>UTC+2 (Cairo/Athens/EET · Paris/CEST)</option>
       <option value='180'>UTC+3 (Moscow/Baghdad)</option>
       <option value='240'>UTC+4 (Dubai/Baku)</option>
       <option value='300'>UTC+5 (Karachi/Tashkent)</option>
-      <option value='330'>UTC+5:30 (Mumbai/Delhi)</option>
+      <option value='330'>UTC+5:30 (Mumbai/Delhi/IST)</option>
       <option value='360'>UTC+6 (Dhaka/Almaty)</option>
       <option value='420'>UTC+7 (Bangkok/Jakarta)</option>
       <option value='480'>UTC+8 (Beijing/Singapore)</option>
-      <option value='540'>UTC+9 (Tokyo/Seoul)</option>
-      <option value='570'>UTC+9:30 (Adelaide)</option>
-      <option value='600'>UTC+10 (Sydney/Melbourne)</option>
+      <option value='540'>UTC+9 (Tokyo/Seoul/JST)</option>
+      <option value='570'>UTC+9:30 (Adelaide/ACST)</option>
+      <option value='600'>UTC+10 (Sydney/AEST)</option>
       <option value='660'>UTC+11 (Solomon Islands)</option>
-      <option value='720'>UTC+12 (Fiji/Auckland)</option>
+      <option value='720'>UTC+12 (Fiji/Auckland/NZST)</option>
     </select>
     <button class='btn' onclick='updateTimezone()' title='Save selected timezone'>Update</button>
   </div>
   <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
-    <span style='color:var(--panel-fg)' title='NTP server for time synchronization'>NTP Server: <span style='font-weight:bold;color:#667eea' id='ntp-value'>-</span></span>
+    <span style='color:var(--panel-fg)' title='NTP server for time synchronization'>NTP Server: <span style='font-weight:bold;color:var(--accent)' id='ntp-value'>-</span></span>
     <input type='text' id='ntp-input' placeholder='pool.ntp.org' class='form-input' style='width:200px' title='Set NTP server hostname'>
     <button class='btn' onclick='updateNtpServer()' title='Save new NTP server'>Update</button>
   </div>
@@ -128,21 +152,21 @@ window.sendSequential = function(cmds, onDone, onFail) {
   <div id='output-pane' style='display:none;margin-top:0.75rem'>
   <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem'>
     <div style='display:flex;flex-direction:column;gap:0.35rem'>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor data output to serial console (saved to device memory)'>Serial (persisted): <span style='font-weight:bold;color:#667eea' id='serial-value'>-</span></span><button class='btn' onclick="toggleOutput('outSerial','serial')" id='serial-btn' title='Toggle persistent serial output setting'>Toggle</button></div>
+      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor data output to serial console (saved to device memory)'>Serial (persisted): <span style='font-weight:bold;color:var(--accent)' id='serial-value'>-</span></span><button class='btn' onclick="toggleOutput('outSerial','serial')" id='serial-btn' title='Toggle persistent serial output setting'>Toggle</button></div>
       <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session serial output status (temporary, resets on reboot)'>Serial (runtime): <span style='font-weight:bold' id='serial-runtime'>-</span></span><button class='btn' id='serial-temp-on' onclick="setOutputRuntime('serial',1)" title='Enable serial output for this session only'>Temp On</button><button class='btn' id='serial-temp-off' onclick="setOutputRuntime('serial',0)" title='Disable serial output for this session only'>Temp Off</button></div>
     </div>
     <div style='display:flex;flex-direction:column;gap:0.35rem'>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor data output to web interface (saved to device memory)'>Web (persisted): <span style='font-weight:bold;color:#667eea' id='web-value'>-</span></span><button class='btn' onclick="toggleOutput('outWeb','web')" id='web-btn' title='Toggle persistent web output setting'>Toggle</button></div>
+      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor data output to web interface (saved to device memory)'>Web (persisted): <span style='font-weight:bold;color:var(--accent)' id='web-value'>-</span></span><button class='btn' onclick="toggleOutput('outWeb','web')" id='web-btn' title='Toggle persistent web output setting'>Toggle</button></div>
       <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session web output status (temporary, resets on reboot)'>Web (runtime): <span style='font-weight:bold' id='web-runtime'>-</span></span><button class='btn' id='web-temp-on' onclick="setOutputRuntime('web',1)" title='Enable web output for this session only'>Temp On</button><button class='btn' id='web-temp-off' onclick="setOutputRuntime('web',0)" title='Disable web output for this session only'>Temp Off</button></div>
     </div>
     <div style='display:flex;flex-direction:column;gap:0.35rem'>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor data output to display (saved to device memory)'>Display (persisted): <span style='font-weight:bold;color:#667eea' id='display-value'>-</span></span><button class='btn' onclick="toggleOutput('outDisplay','display')" id='display-btn' title='Toggle persistent display output setting'>Toggle</button></div>
+      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor data output to display (saved to device memory)'>Display (persisted): <span style='font-weight:bold;color:var(--accent)' id='display-value'>-</span></span><button class='btn' onclick="toggleOutput('outDisplay','display')" id='display-btn' title='Toggle persistent display output setting'>Toggle</button></div>
       <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session display status (temporary, resets on reboot)'>Display (runtime): <span style='font-weight:bold' id='display-runtime'>-</span></span><button class='btn' id='display-temp-on' onclick="setOutputRuntime('display',1)" title='Enable display output for this session only'>Temp On</button><button class='btn' id='display-temp-off' onclick="setOutputRuntime('display',0)" title='Disable display output for this session only'>Temp Off</button></div>
     </div>
 )SETPART2", HTTPD_RESP_USE_STRLEN);
 #if ENABLE_G2_GLASSES
   httpd_resp_send_chunk(req, R"SP2G(    <div style='display:flex;flex-direction:column;gap:0.35rem'>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable output to G2 smart glasses (saved to device memory)'>G2 Glasses (persisted): <span style='font-weight:bold;color:#667eea' id='g2-value'>-</span></span><button class='btn' onclick="toggleOutput('outG2','g2')" id='g2-btn' title='Toggle persistent G2 glasses output setting'>Toggle</button></div>
+      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable output to G2 smart glasses (saved to device memory)'>G2 Glasses (persisted): <span style='font-weight:bold;color:var(--accent)' id='g2-value'>-</span></span><button class='btn' onclick="toggleOutput('outG2','g2')" id='g2-btn' title='Toggle persistent G2 glasses output setting'>Toggle</button></div>
       <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session G2 glasses status (temporary, resets on reboot)'>G2 (runtime): <span style='font-weight:bold' id='g2-runtime'>-</span></span><button class='btn' id='g2-temp-on' onclick="setOutputRuntime('g2',1)" title='Enable G2 output for this session only'>Temp On</button><button class='btn' id='g2-temp-off' onclick="setOutputRuntime('g2',0)" title='Disable G2 output for this session only'>Temp Off</button></div>
     </div>
 )SP2G", HTTPD_RESP_USE_STRLEN);
@@ -157,7 +181,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
   </div>
   <div id='cli-pane' style='display:none;margin-top:0.75rem'>
   <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
-    <span style='color:var(--panel-fg)' title='Number of CLI commands stored in web history buffer'>Current: <span style='font-weight:bold;color:#667eea' id='cli-value'>-</span></span>
+    <span style='color:var(--panel-fg)' title='Number of CLI commands stored in web history buffer'>Current: <span style='font-weight:bold;color:var(--accent)' id='cli-value'>-</span></span>
     <input type='number' id='cli-input' min='1' max='100' value='10' class='form-input' style='width:80px' title='Set web CLI history buffer size (1-100 commands)'>
     <button class='btn' onclick='updateWebCliHistory()' title='Save new web CLI history buffer size'>Update</button>
     <button class='btn' onclick='clearCliHistory()' title='Clear all stored CLI command history'>Clear History</button>
@@ -354,7 +378,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     var section = settings[mod.section] || settings[mod.name] || {};
     var entries = mod.entries || [];
     var isDisconnected = mod.connected === false;
-    var statusBadge = isDisconnected ? '<span style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>' : '<span style="background:rgba(102,126,234,0.15);color:#667eea;border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Connected</span>';
+    var statusBadge = isDisconnected ? '<span style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>' : '<span style="background:rgba(102,126,234,0.15);color:var(--accent);border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Connected</span>';
     
     var html = '<div style="background:var(--panel-bg);border-radius:8px;padding:1rem 1.5rem;margin:0.5rem 0;box-shadow:0 1px 3px rgba(0,0,0,0.1);border:1px solid var(--border)">';
     html += '<div style="display:flex;align-items:center;justify-content:space-between">';
@@ -414,6 +438,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     }
     
     container.innerHTML = html;
+    window._snapshotContainer(container);
   }).catch(function(err) {
     console.error('[Network Settings] Schema load error:', err);
     var container = document.getElementById('network-dynamic-container');
@@ -436,6 +461,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
         val = el.value;
       }
       else val = el.value;
+      if (el.type !== 'password' && !window._isChanged(el.id, val)) return;
       updates[key] = val;
     });
     
@@ -444,10 +470,10 @@ window.sendSequential = function(cmds, onDone, onFail) {
       cmds.push(k + ' ' + updates[k]);
     }
     
-    if (cmds.length === 0) { alert('No settings to save'); return; }
+    if (cmds.length === 0) { alert('No changes to save.'); return; }
 
     sendSequential(cmds,
-      function() { alert('Settings saved! Some changes may require a restart.'); },
+      function() { window._snapshotContainer(container); alert('Settings saved! Some changes may require a restart.'); },
       function(e) { alert('Save failed: ' + (e ? e.message : 'unknown')); }
     );
   };
@@ -471,11 +497,11 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 <script>
 (function(){
-  var sensorModules = ['camera','microphone','thermal','tof','imu','gps','fmradio','apds','rtc','presence','sensorlog','espsr'];
+  var sensorModules = ['camera','microphone','thermal','tof','imu','gps','fmradio','servo','apds','rtc','presence','sensorlog','espsr'];
   var i2cModules = ['i2c'];
   var mlSubsections = {camera:'edgeimpulse',microphone:'espsr'};
   var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','espsr':'espsr','thermal_mlx90640':'thermal','tof_vl53l4cx':'tof','imu_bno055':'imu','gps':'gps','fmradio':'fmradio','apds':'apds','rtc':'rtc','presence':'presence','sensorlog':'sensorlog','power':'power','debug':'debug','output':'output'};
-  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',gamepad:'Gamepad (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels'};
+  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels'};
   
   function inferType(val) {
     if (typeof val === 'boolean') return 'bool';
@@ -551,7 +577,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     } else if (isDisconnected) {
       statusBadge = '<span style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>';
     } else if (mod.name !== 'sensorlog') {
-      statusBadge = '<span style="background:rgba(102,126,234,0.15);color:#667eea;border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Connected</span>';
+      statusBadge = '<span style="background:rgba(102,126,234,0.15);color:var(--accent);border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Connected</span>';
     }
     
     var html = '<div style="background:var(--panel-bg);border-radius:8px;padding:1rem 1.5rem;margin:0.5rem 0;box-shadow:0 1px 3px rgba(0,0,0,0.1);border:1px solid var(--border)">';
@@ -738,6 +764,8 @@ window.sendSequential = function(cmds, onDone, onFail) {
     }
     
     container.innerHTML = html;
+    window._snapshotContainer(container);
+    if (i2cCont) window._snapshotContainer(i2cCont);
   }).catch(function(err) {
     console.error('[Settings] Schema load error:', err);
     var container = document.getElementById('sensors-dynamic-container');
@@ -755,11 +783,11 @@ window.sendSequential = function(cmds, onDone, onFail) {
       if (el.type === 'checkbox') val = el.checked ? 1 : 0;
       else if (el.type === 'number') val = el.step && el.step.indexOf('.') !== -1 ? parseFloat(el.value) : parseInt(el.value);
       else if (el.type === 'password') {
-        // Secret field: skip if blank (blank = unchanged)
         if (!el.value || el.value.trim() === '') return;
         val = el.value;
       }
       else val = el.value;
+      if (el.type !== 'password' && !window._isChanged(el.id, val)) return;
       updates[key] = val;
     });
     
@@ -777,10 +805,10 @@ window.sendSequential = function(cmds, onDone, onFail) {
       cmds.push(k + ' ' + updates[k]);
     }
     
-    if (cmds.length === 0) { alert('No settings to save'); return; }
+    if (cmds.length === 0) { alert('No changes to save.'); return; }
 
     sendSequential(cmds,
-      function() { alert('Settings saved! Some changes may require a reboot.'); },
+      function() { window._snapshotContainer(pane); alert('Settings saved! Some changes may require a reboot.'); },
       function(e) { alert('Save failed: ' + (e ? e.message : 'unknown')); }
     );
   };
@@ -891,20 +919,20 @@ window.sendSequential = function(cmds, onDone, onFail) {
   .dbg-sw{position:relative;display:inline-block;width:34px;height:18px;flex-shrink:0}
   .dbg-sw input{opacity:0;width:0;height:0;position:absolute}
   .dbg-sw .sl{position:absolute;cursor:pointer;inset:0;background:var(--border);border-radius:9px;transition:background .2s}
-  .dbg-sw input:checked+.sl{background:#667eea}
+  .dbg-sw input:checked+.sl{background:var(--accent)}
   .dbg-sw .sl::before{content:'';position:absolute;height:12px;width:12px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:transform .15s}
   .dbg-sw input:checked+.sl::before{transform:translateX(16px)}
   .dbg-card{background:var(--panel-bg);border:1px solid var(--border);border-radius:8px;padding:0.6rem 0.75rem;transition:border-color .25s}
-  .dbg-card.on{border-color:#667eea}
+  .dbg-card.on{border-color:var(--accent)}
   .dbg-card-hdr{display:flex;align-items:center;gap:6px;cursor:pointer;-webkit-user-select:none;user-select:none;padding-bottom:6px;border-bottom:1px solid var(--border)}
-  .dbg-card-hdr:hover span:last-child{color:#667eea}
+  .dbg-card-hdr:hover span:last-child{color:var(--accent)}
   .dbg-dot{width:7px;height:7px;border-radius:50%;background:#555;transition:background .25s;flex-shrink:0}
-  .dbg-card.on .dbg-dot{background:#667eea}
+  .dbg-card.on .dbg-dot{background:var(--accent)}
   .dbg-card-hdr span:last-child{font-weight:600;font-size:0.92rem;color:var(--panel-fg);transition:color .15s}
   .dbg-row{display:flex;align-items:center;justify-content:space-between;padding:3px 0}
   .dbg-row .lbl{font-size:0.84rem;color:var(--panel-fg);opacity:0.85}
   .dbg-pill{display:flex;align-items:center;justify-content:space-between;border:1px solid var(--border);border-radius:6px;padding:4px 10px;transition:border-color .2s}
-  .dbg-pill.on{border-color:#667eea}
+  .dbg-pill.on{border-color:var(--accent)}
   .dbg-pill .lbl{font-size:0.84rem;color:var(--panel-fg);margin-right:10px;white-space:nowrap}
   </style>
   <div id='debug-dynamic-container'><div style='text-align:center;padding:2rem;color:var(--panel-fg);opacity:0.4'>Loading...</div></div>
@@ -974,8 +1002,13 @@ window.sendSequential = function(cmds, onDone, onFail) {
     }
     h+='<div style="margin-top:0.8rem;display:flex;align-items:center;gap:0.75rem">';
     h+='<button class="btn" onclick="saveDebugSettings()">Save</button>';
-    h+='<span id="dbg-save-msg" style="font-size:0.82rem;color:#667eea;opacity:0;transition:opacity .3s"></span></div>';
+    h+='<span id="dbg-save-msg" style="font-size:0.82rem;color:var(--accent);opacity:0;transition:opacity .3s"></span></div>';
     c.innerHTML=h;
+    window._debugBaseline = {};
+    c.querySelectorAll('.dbg-cb,.dbg-input').forEach(function(el) {
+      var cmd = el.getAttribute('data-cmd');
+      if (cmd) window._debugBaseline[cmd] = el.type === 'checkbox' ? (el.checked ? 1 : 0) : el.value;
+    });
     c.addEventListener('change',function(ev){
       var t=ev.target;if(!t.classList.contains('dbg-cb'))return;
       var g=t.getAttribute('data-group');
@@ -995,17 +1028,35 @@ window.sendSequential = function(cmds, onDone, onFail) {
   };
   window.saveDebugSettings=function(){
     var cmds=[];
+    var bl=window._debugBaseline||{};
     document.querySelectorAll('.dbg-cb').forEach(function(cb){
-      var cmd=cb.getAttribute('data-cmd');if(cmd)cmds.push(cmd+' '+(cb.checked?1:0));
+      var cmd=cb.getAttribute('data-cmd');if(!cmd)return;
+      var val=cb.checked?1:0;
+      if(cmd in bl && bl[cmd]===val)return;
+      cmds.push(cmd+' '+val);
     });
     document.querySelectorAll('.dbg-input').forEach(function(el){
-      var cmd=el.getAttribute('data-cmd');if(cmd)cmds.push(cmd+' '+el.value);
+      var cmd=el.getAttribute('data-cmd');if(!cmd)return;
+      var val=el.value;
+      if(cmd in bl && bl[cmd]===val)return;
+      cmds.push(cmd+' '+val);
     });
-    if(!cmds.length)return;
+    if(!cmds.length){
+      var msg=document.getElementById('dbg-save-msg');
+      if(msg){msg.textContent='No changes';msg.style.opacity='1';setTimeout(function(){msg.style.opacity='0';},1500);}
+      return;
+    }
     var msg=document.getElementById('dbg-save-msg');
     if(msg){msg.textContent='Saving...';msg.style.opacity='1';}
     sendSequential(cmds,
-      function(){if(msg){msg.textContent='Saved';setTimeout(function(){msg.style.opacity='0';},1500);}try{refreshSettings();}catch(_){}},
+      function(){
+        document.querySelectorAll('.dbg-cb,.dbg-input').forEach(function(el){
+          var cmd=el.getAttribute('data-cmd');
+          if(cmd) window._debugBaseline[cmd]=el.type==='checkbox'?(el.checked?1:0):el.value;
+        });
+        if(msg){msg.textContent='Saved';setTimeout(function(){msg.style.opacity='0';},1500);}
+        try{refreshSettings();}catch(_){}
+      },
       function(){if(msg){msg.textContent='Error saving';msg.style.color='#f55';}}
     );
   };
@@ -1015,7 +1066,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 
   // Part 8: Admin section and page controls
   httpd_resp_send_chunk(req, R"SETPART8(
-<div id='admin-section' style='display:none;background:var(--panel-bg);border-radius:8px;padding:1.0rem 1.5rem;margin:1rem 0;color:var(--panel-fg)'>
+<div id='admin-section' style='display:none;background:var(--panel-bg);border-radius:8px;border:1px solid var(--border);padding:1.0rem 1.5rem;margin:1rem 0;color:var(--panel-fg)'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
     <div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Admin Controls</div>
     <button class='btn' id='btn-admin-toggle' onclick="togglePane('admin-pane','btn-admin-toggle')">Expand</button>
@@ -1140,7 +1191,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
           }
         }
         el.textContent = found ? 'Present' : 'Missing';
-        el.style.color = '#667eea';
+        el.style.color = 'var(--accent)';
       })
       .catch(function(){
         var el = document.getElementById(statusId);
@@ -1172,7 +1223,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
         }
         if (!found) allPresent = false;
         el.textContent = found ? 'Present' : 'Missing';
-        el.style.color = '#667eea';
+        el.style.color = 'var(--accent)';
       });
       window._httpsCertsPresent = allPresent;
       if (allPresent) document.getElementById('https-nocert-row').style.display = 'none';
@@ -1192,7 +1243,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
         var val = j && j.settings && j.settings.http && j.settings.http.httpsEnabled;
         window._httpsCurrentValue = !!val;
         var el = document.getElementById('https-enabled-value');
-        if(el){ el.textContent = val ? 'Enabled' : 'Disabled'; el.style.color = '#667eea'; }
+        if(el){ el.textContent = val ? 'Enabled' : 'Disabled'; el.style.color = 'var(--accent)'; }
       });
   }
   refreshHttpsStatus();
@@ -1210,7 +1261,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     sendSequential([cmd], function(){
       window._httpsCurrentValue = newVal;
       var el = document.getElementById('https-enabled-value');
-      if(el){ el.textContent = newVal ? 'Enabled' : 'Disabled'; el.style.color = '#667eea'; }
+      if(el){ el.textContent = newVal ? 'Enabled' : 'Disabled'; el.style.color = 'var(--accent)'; }
       document.getElementById('https-reboot-row').style.display = 'block';
     }, function(err){ alert('Failed to toggle HTTPS: ' + err.message); });
   };
@@ -1229,19 +1280,19 @@ window.sendSequential = function(cmds, onDone, onFail) {
       .then(function(r){ return r.json(); })
       .then(function(j){
         if (j.success) {
-          if (statusEl) { statusEl.textContent = 'Uploaded'; statusEl.style.color = '#667eea'; }
+          if (statusEl) { statusEl.textContent = 'Uploaded'; statusEl.style.color = 'var(--accent)'; }
           var fname = destPath.split('/').pop();
           var certId = destPath.indexOf('.crt') >= 0 ? 'https-cert-status' : 'https-key-status';
           var certEl = document.getElementById(certId);
-          if (certEl) { certEl.textContent = 'Present'; certEl.style.color = '#667eea'; }
+          if (certEl) { certEl.textContent = 'Present'; certEl.style.color = 'var(--accent)'; }
           updateCertPresenceFlag();
         } else {
-          if (statusEl) { statusEl.textContent = 'Failed: ' + (j.error || 'unknown'); statusEl.style.color = '#667eea'; }
+          if (statusEl) { statusEl.textContent = 'Failed: ' + (j.error || 'unknown'); statusEl.style.color = 'var(--accent)'; }
         }
         if (inputEl) inputEl.value = '';
       })
       .catch(function(e){
-        if (statusEl) { statusEl.textContent = 'Error: ' + e.message; statusEl.style.color = '#667eea'; }
+        if (statusEl) { statusEl.textContent = 'Error: ' + e.message; statusEl.style.color = 'var(--accent)'; }
         if (inputEl) inputEl.value = '';
       });
     };
@@ -1360,6 +1411,27 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         $('cli-value').textContent = webHistorySize;
         $('cli-input').value = webHistorySize;
         $('wifi-btn').textContent = wifiAutoReconnect ? 'Disable' : 'Enable';
+        // Timezone and NTP from wifi module
+        var wifiSect = s.wifi || {};
+        var tzMin = (wifiSect.wifiTzOffsetMinutes !== undefined) ? wifiSect.wifiTzOffsetMinutes : (s.tzOffsetMinutes !== undefined ? s.tzOffsetMinutes : null);
+        if (tzMin !== null) {
+          var tzSel = $('tz-select');
+          if (tzSel) { tzSel.value = String(tzMin); }
+          var tzVal = $('tz-value');
+          if (tzVal) {
+            var h = Math.floor(Math.abs(tzMin) / 60);
+            var m = Math.abs(tzMin) % 60;
+            var sign = tzMin < 0 ? '-' : '+';
+            tzVal.textContent = 'UTC' + sign + h + (m ? ':' + (m < 10 ? '0' : '') + m : '') + ' (' + tzMin + ' min)';
+          }
+        }
+        var ntpSrv = wifiSect.wifiNtpServer || s.ntpServer || '';
+        if (ntpSrv) {
+          var ntpEl = $('ntp-value');
+          if (ntpEl) ntpEl.textContent = ntpSrv;
+          var ntpIn = $('ntp-input');
+          if (ntpIn && !ntpIn.value) ntpIn.placeholder = ntpSrv;
+        }
         $('espnow-value').textContent = s.espnowenabled ? 'Enabled' : 'Disabled';
         $('espnow-btn').textContent = s.espnowenabled ? 'Disable' : 'Enable';
         
@@ -1499,7 +1571,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
             var dispAuthEl = $('display-auth-value');
             if (dispAuthEl) {
               dispAuthEl.textContent = dispAuth ? 'Required' : 'Disabled';
-              dispAuthEl.style.color = '#667eea';
+              dispAuthEl.style.color = 'var(--accent)';
             }
             var dispAuthBtn = $('display-auth-btn');
             if (dispAuthBtn) dispAuthBtn.textContent = dispAuth ? 'Disable' : 'Enable';
@@ -1508,7 +1580,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
             var bleAuthEl = $('ble-auth-value');
             if (bleAuthEl) {
               bleAuthEl.textContent = bleAuth ? 'Required' : 'Disabled';
-              bleAuthEl.style.color = '#667eea';
+              bleAuthEl.style.color = 'var(--accent)';
             }
             var bleAuthBtn = $('ble-auth-btn');
             if (bleAuthBtn) bleAuthBtn.textContent = bleAuth ? 'Disable' : 'Enable';
@@ -1517,7 +1589,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
             var serialAuthEl = $('serial-auth-value');
             if (serialAuthEl) {
               serialAuthEl.textContent = serialAuth ? 'Required' : 'Disabled';
-              serialAuthEl.style.color = '#667eea';
+              serialAuthEl.style.color = 'var(--accent)';
             }
             var serialAuthBtn = $('serial-auth-btn');
             if (serialAuthBtn) serialAuthBtn.textContent = serialAuth ? 'Disable' : 'Enable';
@@ -1529,6 +1601,8 @@ console.log('[SETTINGS] Part 1: Core init starting...');
       } catch(e) {
         alert('Render error: ' + e.message);
       }
+      // Snapshot all hardcoded inputs after they've been populated
+      setTimeout(function() { window._snapshotContainer(document.body); }, 0);
     };
     
     window.renderOutputRuntime = function(obj) {
@@ -1541,7 +1615,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
           if (!el) return;
           var on = (String(val) == '1' || val === 1 || val === true || String(val).toLowerCase() == 'true');
           el.textContent = on ? 'On' : 'Off';
-          el.style.color = '#667eea';
+          el.style.color = 'var(--accent)';
         };
         var setHidden = function(id, hide) {
           var el = $(id);
@@ -1843,49 +1917,58 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     window.saveEspNowSettings = function() {
       var status = $('espnow-save-status');
       status.textContent = 'Saving...';
-      status.style.color = '#667eea';
-
-      var s = {
-        deviceName:   $('espnow-devicename').value.trim(),
-        friendlyName: $('espnow-friendlyname').value.trim(),
-        room:         $('espnow-room').value.trim(),
-        zone:         $('espnow-zone').value.trim(),
-        tags:         $('espnow-tags').value.trim(),
-        stationary:   $('espnow-stationary').checked,
-        meshRole:     parseInt($('espnow-meshrole').value),
-        masterMAC:    $('espnow-mastermac').value.trim(),
-        backupMAC:    $('espnow-backupmac').value.trim(),
-        bondRole:     parseInt($('bond-role').value),
-        bondPeerMac:  $('bond-peermac').value.trim()
-      };
+      status.style.color = 'var(--accent)';
 
       var cmds = [];
-      if (s.deviceName)   cmds.push('espnow setname "' + s.deviceName + '"');
-      if (s.friendlyName) cmds.push('espnow friendlyname "' + s.friendlyName + '"');
-      if (s.room)         cmds.push('espnow room "' + s.room + '"');
-      if (s.zone)         cmds.push('espnow zone "' + s.zone + '"');
-      if (s.tags)         cmds.push('espnow tags "' + s.tags + '"');
-      cmds.push('espnow stationary ' + (s.stationary ? 'on' : 'off'));
-      var roleNames = ['worker', 'master', 'backup'];
-      if (s.meshRole >= 0 && s.meshRole <= 2) cmds.push('espnow role ' + roleNames[s.meshRole]);
-      if (s.masterMAC) cmds.push('espnow mastermac ' + s.masterMAC);
-      if (s.backupMAC) cmds.push('espnow backupmac ' + s.backupMAC);
-      
-      // Bond settings
-      var bondRoleNames = ['worker', 'master'];
-      if (s.bondRole >= 0 && s.bondRole <= 1) cmds.push('bondrole ' + s.bondRole);
-      if (s.bondPeerMac) cmds.push('bondpeermac ' + s.bondPeerMac);
-      cmds.push('bondstreamthermal ' + ($('bond-stream-thermal').checked ? '1' : '0'));
-      cmds.push('bondstreamtof ' + ($('bond-stream-tof').checked ? '1' : '0'));
-      cmds.push('bondstreamimu ' + ($('bond-stream-imu').checked ? '1' : '0'));
-      cmds.push('bondstreamgps ' + ($('bond-stream-gps').checked ? '1' : '0'));
-      cmds.push('bondstreamgamepad ' + ($('bond-stream-gamepad').checked ? '1' : '0'));
-      cmds.push('bondstreamfmradio ' + ($('bond-stream-fmradio').checked ? '1' : '0'));
-      cmds.push('bondstreamrtc ' + ($('bond-stream-rtc').checked ? '1' : '0'));
-      cmds.push('bondstreampresence ' + ($('bond-stream-presence').checked ? '1' : '0'));
+      function addStr(id, cmdFn) {
+        var el = $(id); if (!el) return;
+        var v = el.value.trim();
+        if (v && window._isChanged(id, el.value.trim())) cmdFn(v);
+      }
+      function addBool(id, cmdFn) {
+        var el = $(id); if (!el) return;
+        var v = el.checked ? 1 : 0;
+        if (window._isChanged(id, v)) cmdFn(v);
+      }
+      function addInt(id, cmdFn) {
+        var el = $(id); if (!el) return;
+        var v = parseInt(el.value, 10);
+        if (!isNaN(v) && window._isChanged(id, v)) cmdFn(v);
+      }
+
+      addStr('espnow-devicename',   function(v) { cmds.push('espnow setname "' + v + '"'); });
+      addStr('espnow-friendlyname', function(v) { cmds.push('espnow friendlyname "' + v + '"'); });
+      addStr('espnow-room',         function(v) { cmds.push('espnow room "' + v + '"'); });
+      addStr('espnow-zone',         function(v) { cmds.push('espnow zone "' + v + '"'); });
+      addStr('espnow-tags',         function(v) { cmds.push('espnow tags "' + v + '"'); });
+      addBool('espnow-stationary',  function(v) { cmds.push('espnow stationary ' + (v ? 'on' : 'off')); });
+      addInt('espnow-meshrole', function(v) {
+        var roleNames = ['worker', 'master', 'backup'];
+        if (v >= 0 && v <= 2) cmds.push('espnow role ' + roleNames[v]);
+      });
+      addStr('espnow-mastermac',    function(v) { cmds.push('espnow mastermac ' + v); });
+      addStr('espnow-backupmac',    function(v) { cmds.push('espnow backupmac ' + v); });
+      addInt('bond-role', function(v) { if (v >= 0 && v <= 1) cmds.push('bondrole ' + v); });
+      addStr('bond-peermac',        function(v) { cmds.push('bondpeermac ' + v); });
+      addBool('bond-stream-thermal',  function(v) { cmds.push('bondstreamthermal ' + v); });
+      addBool('bond-stream-tof',      function(v) { cmds.push('bondstreamtof ' + v); });
+      addBool('bond-stream-imu',      function(v) { cmds.push('bondstreamimu ' + v); });
+      addBool('bond-stream-gps',      function(v) { cmds.push('bondstreamgps ' + v); });
+      addBool('bond-stream-gamepad',  function(v) { cmds.push('bondstreamgamepad ' + v); });
+      addBool('bond-stream-fmradio',  function(v) { cmds.push('bondstreamfmradio ' + v); });
+      addBool('bond-stream-rtc',      function(v) { cmds.push('bondstreamrtc ' + v); });
+      addBool('bond-stream-presence', function(v) { cmds.push('bondstreampresence ' + v); });
+
+      if (cmds.length === 0) {
+        status.textContent = 'No changes to save.';
+        status.style.color = 'var(--accent)';
+        setTimeout(function() { status.textContent = ''; }, 2000);
+        return;
+      }
 
       sendSequential(cmds,
         function() {
+          window._snapshotContainer(document.getElementById('espnow-settings-pane') || document.body);
           status.textContent = 'Saved successfully!';
           status.style.color = '#28a745';
           setTimeout(function() { status.textContent = ''; refreshSettings(); }, 2000);
@@ -2062,15 +2145,6 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       }
     };
     
-    // Toggle pane visibility
-    window.togglePane = function(paneId, btnId) {
-      var p = document.getElementById(paneId);
-      var b = document.getElementById(btnId);
-      if (!p || !b) return;
-      var isHidden = (p.style.display === 'none' || !p.style.display);
-      p.style.display = isHidden ? 'block' : 'none';
-      b.textContent = isHidden ? 'Collapse' : 'Expand';
-    };
     
   } catch(err) {
     console.error('[SETTINGS] Part 2 ERROR:', err);
@@ -2117,27 +2191,28 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
       map.forEach(function(pair) {
         var id = pair[0], cmdKey = pair[1];
         var v = getInt(id, null);
-        if (v !== null && v !== undefined) {
+        if (v !== null && v !== undefined && window._isChanged(id, v)) {
           cmds.push(cmdKey + ' ' + v);
         }
       });
       
       var rmmEn = getBool('thermalRollingMinMaxEnabled');
-      if (rmmEn !== null) cmds.push('thermalrollingminmaxenabled ' + rmmEn);
+      if (rmmEn !== null && window._isChanged('thermalRollingMinMaxEnabled', rmmEn)) cmds.push('thermalrollingminmaxenabled ' + rmmEn);
       var rmmAlpha = getStr('thermalRollingMinMaxAlpha');
-      if (rmmAlpha !== null) cmds.push('thermalrollingminmaxalpha ' + rmmAlpha);
+      if (rmmAlpha !== null && window._isChanged('thermalRollingMinMaxAlpha', rmmAlpha)) cmds.push('thermalrollingminmaxalpha ' + rmmAlpha);
       var rmmGuard = getStr('thermalRollingMinMaxGuardC');
-      if (rmmGuard !== null) cmds.push('thermalrollingminmaxguardc ' + rmmGuard);
+      if (rmmGuard !== null && window._isChanged('thermalRollingMinMaxGuardC', rmmGuard)) cmds.push('thermalrollingminmaxguardc ' + rmmGuard);
       var tmpAlpha = getStr('thermalTemporalAlpha');
-      if (tmpAlpha !== null) cmds.push('thermaltemporalalpha ' + tmpAlpha);
+      if (tmpAlpha !== null && window._isChanged('thermalTemporalAlpha', tmpAlpha)) cmds.push('thermaltemporalalpha ' + tmpAlpha);
       
       if (cmds.length === 0) {
-        alert('No device settings to save.');
+        alert('No changes to save.');
         return;
       }
 
       sendSequential(cmds,
         function() {
+          window._snapshotContainer(document.body);
           alert('Device settings saved. Restart the thermal sensor (closethermal + openthermal) or reboot manually to apply upscale changes.');
           refreshSettings();
         },
@@ -2149,9 +2224,6 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
     window.saveSensorsUISettings = function() {
       try {
         var cmds = [];
-        var pushCmd = function(k, v) {
-          cmds.push(k + ' ' + v);
-        };
         var getInt = function(id) {
           var el = $(id);
           if (!el) return null;
@@ -2163,52 +2235,32 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
           if (!el) return null;
           return String(el.value || '');
         };
-        
-        var tp = getInt('thermalPollingMs');
-        if (tp !== null) pushCmd('thermalpollingms', tp);
-        var tpf = getInt('tofPollingMs');
-        if (tpf !== null) pushCmd('tofpollingms', tpf);
-        var tss = getInt('tofStabilityThreshold');
-        if (tss !== null) pushCmd('tofstabilitythreshold', tss);
-        var pal = getStr('thermalPaletteDefault');
-        if (pal) pushCmd('thermalpalettedefault', pal);
-        var twf = getInt('thermalWebMaxFps');
-        if (twf !== null) pushCmd('thermalwebmaxfps', twf);
-        var ewma = getStr('thermalEWMAFactor');
-        if (ewma !== null) pushCmd('thermalewmafactor', ewma);
-        var ttm = getInt('thermalTransitionMs');
-        if (ttm !== null) pushCmd('thermaltransitionms', ttm);
-        var ttm2 = getInt('tofTransitionMs');
-        if (ttm2 !== null) pushCmd('toftransitionms', ttm2);
-        var tmax = getInt('tofMaxDistanceMm');
-        if (tmax !== null) pushCmd('tofmaxdistancemm', tmax);
-        
-        // Thermal UI settings
-        pushCmd('thermalpollingms', $('thermalPollingMs'));
-        pushCmd('thermalpalettedefault', $('thermalPaletteDefault'));
-        pushCmd('thermalewmafactor', $('thermalEWMAFactor'));
-        pushCmd('thermaltransitionms', $('thermalTransitionMs'));
-        pushCmd('thermalwebmaxfps', $('thermalWebMaxFps'));
-        
-        // ToF UI settings
-        pushCmd('tofpollingms', $('tofPollingMs'));
-        pushCmd('tofstabilitythreshold', $('tofStabilityThreshold'));
-        pushCmd('toftransitionms', $('tofTransitionMs'));
-        pushCmd('tofmaxdistancemm', $('tofMaxDistanceMm'));
-        
-        // IMU UI settings
-        pushCmd('imupollingms', $('imuPollingMs'));
-        pushCmd('imuewmafactor', $('imuEWMAFactor'));
-        pushCmd('imutransitionms', $('imuTransitionMs'));
-        pushCmd('imuwebmaxfps', $('imuWebMaxFps'));
+        var pushIfChanged = function(id, cmdKey, val) {
+          if (val !== null && val !== undefined && window._isChanged(id, val)) cmds.push(cmdKey + ' ' + val);
+        };
+
+        pushIfChanged('thermalPollingMs',      'thermalpollingms',       getInt('thermalPollingMs'));
+        pushIfChanged('thermalPaletteDefault', 'thermalpalettedefault',  getStr('thermalPaletteDefault'));
+        pushIfChanged('thermalEWMAFactor',     'thermalewmafactor',      getStr('thermalEWMAFactor'));
+        pushIfChanged('thermalTransitionMs',   'thermaltransitionms',    getInt('thermalTransitionMs'));
+        pushIfChanged('thermalWebMaxFps',      'thermalwebmaxfps',       getInt('thermalWebMaxFps'));
+        pushIfChanged('tofPollingMs',          'tofpollingms',           getInt('tofPollingMs'));
+        pushIfChanged('tofStabilityThreshold', 'tofstabilitythreshold',  getInt('tofStabilityThreshold'));
+        pushIfChanged('tofTransitionMs',       'toftransitionms',        getInt('tofTransitionMs'));
+        pushIfChanged('tofMaxDistanceMm',      'tofmaxdistancemm',       getInt('tofMaxDistanceMm'));
+        pushIfChanged('imuPollingMs',          'imupollingms',           getInt('imuPollingMs'));
+        pushIfChanged('imuEWMAFactor',         'imuewmafactor',          getStr('imuEWMAFactor'));
+        pushIfChanged('imuTransitionMs',       'imutransitionms',        getInt('imuTransitionMs'));
+        pushIfChanged('imuWebMaxFps',          'imuwebmaxfps',           getInt('imuWebMaxFps'));
         
         if (cmds.length === 0) {
-          alert('No Client UI settings to save.');
+          alert('No changes to save.');
           return;
         }
 
         sendSequential(cmds,
           function() {
+            window._snapshotContainer(document.body);
             try { if (typeof window.refreshSettings === 'function') window.refreshSettings(); } catch(_) {}
             alert('Client UI settings saved.');
           },
@@ -2243,25 +2295,25 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
       try {
         var cmds = [];
         var brightness = getInt('ledBrightness');
-        if (brightness !== null) cmds.push('ledbrightness ' + brightness);
+        if (brightness !== null && window._isChanged('ledBrightness', brightness)) cmds.push('ledbrightness ' + brightness);
         var enabled = getBool('ledStartupEnabled');
-        if (enabled !== null) cmds.push('ledstartupenabled ' + enabled);
+        if (enabled !== null && window._isChanged('ledStartupEnabled', enabled)) cmds.push('ledstartupenabled ' + enabled);
         var effect = getStr('ledStartupEffect');
-        if (effect) cmds.push('ledstartupeffect ' + effect);
+        if (effect && window._isChanged('ledStartupEffect', effect)) cmds.push('ledstartupeffect ' + effect);
         var color = getStr('ledStartupColor');
-        if (color) cmds.push('ledstartupcolor ' + color);
+        if (color && window._isChanged('ledStartupColor', color)) cmds.push('ledstartupcolor ' + color);
         var color2 = getStr('ledStartupColor2');
-        if (color2) cmds.push('ledstartupcolor2 ' + color2);
+        if (color2 && window._isChanged('ledStartupColor2', color2)) cmds.push('ledstartupcolor2 ' + color2);
         var duration = getInt('ledStartupDuration');
-        if (duration !== null) cmds.push('ledstartupduration ' + duration);
+        if (duration !== null && window._isChanged('ledStartupDuration', duration)) cmds.push('ledstartupduration ' + duration);
         
         if (cmds.length === 0) {
-          alert('No LED settings to save.');
+          alert('No changes to save.');
           return;
         }
 
         sendSequential(cmds,
-          function() { alert('LED settings saved.'); },
+          function() { window._snapshotContainer(document.getElementById('led-pane')); alert('LED settings saved.'); },
           function() { alert('One or more LED commands failed.'); }
         );
       } catch(e) {
@@ -2274,29 +2326,29 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
       try {
         var cmds = [];
         var oledEnabled = getBool('oledEnabled');
-        if (oledEnabled !== null) cmds.push('oledenabled ' + oledEnabled);
+        if (oledEnabled !== null && window._isChanged('oledEnabled', oledEnabled)) cmds.push('oledenabled ' + oledEnabled);
         var oledBootMode = getStr('oledBootMode');
-        if (oledBootMode) cmds.push('oledbootmode ' + oledBootMode);
+        if (oledBootMode && window._isChanged('oledBootMode', oledBootMode)) cmds.push('oledbootmode ' + oledBootMode);
         var oledDefaultMode = getStr('oledDefaultMode');
-        if (oledDefaultMode) cmds.push('oleddefaultmode ' + oledDefaultMode);
+        if (oledDefaultMode && window._isChanged('oledDefaultMode', oledDefaultMode)) cmds.push('oleddefaultmode ' + oledDefaultMode);
         var oledBootDuration = getInt('oledBootDuration');
-        if (oledBootDuration !== null) cmds.push('oledbootduration ' + oledBootDuration);
+        if (oledBootDuration !== null && window._isChanged('oledBootDuration', oledBootDuration)) cmds.push('oledbootduration ' + oledBootDuration);
         var oledUpdateInterval = getInt('oledUpdateInterval');
-        if (oledUpdateInterval !== null) cmds.push('oledupdateinterval ' + oledUpdateInterval);
+        if (oledUpdateInterval !== null && window._isChanged('oledUpdateInterval', oledUpdateInterval)) cmds.push('oledupdateinterval ' + oledUpdateInterval);
         var oledBrightness = getInt('oledBrightness');
-        if (oledBrightness !== null) cmds.push('oledbrightness ' + oledBrightness);
+        if (oledBrightness !== null && window._isChanged('oledBrightness', oledBrightness)) cmds.push('oledbrightness ' + oledBrightness);
         var oledThermalScale = getStr('oledThermalScale');
-        if (oledThermalScale) cmds.push('oledthermalscale ' + oledThermalScale);
+        if (oledThermalScale && window._isChanged('oledThermalScale', oledThermalScale)) cmds.push('oledthermalscale ' + oledThermalScale);
         var oledThermalColorMode = getStr('oledThermalColorMode');
-        if (oledThermalColorMode) cmds.push('oledthermalcolormode ' + oledThermalColorMode);
+        if (oledThermalColorMode && window._isChanged('oledThermalColorMode', oledThermalColorMode)) cmds.push('oledthermalcolormode ' + oledThermalColorMode);
         
         if (cmds.length === 0) {
-          alert('No OLED settings to save.');
+          alert('No changes to save.');
           return;
         }
 
         sendSequential(cmds,
-          function() { alert('OLED settings saved.'); },
+          function() { window._snapshotContainer(document.getElementById('oled-pane')); alert('OLED settings saved.'); },
           function() { alert('One or more OLED commands failed.'); }
         );
       } catch(e) {
@@ -2309,15 +2361,15 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
       try {
         var cmds = [];
         var gamepadAutoStart = getBool('gamepadAutoStart');
-        if (gamepadAutoStart !== null) cmds.push('gamepadautostart ' + (gamepadAutoStart ? 'on' : 'off'));
+        if (gamepadAutoStart !== null && window._isChanged('gamepadAutoStart', gamepadAutoStart)) cmds.push('gamepadautostart ' + (gamepadAutoStart ? 'on' : 'off'));
         
         if (cmds.length === 0) {
-          alert('No Gamepad settings to save.');
+          alert('No changes to save.');
           return;
         }
 
         sendSequential(cmds,
-          function() { alert('Gamepad settings saved.'); },
+          function() { window._snapshotContainer(document.getElementById('gamepad-pane')); alert('Gamepad settings saved.'); },
           function() { alert('One or more Gamepad commands failed.'); }
         );
       } catch(e) {
@@ -2632,7 +2684,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             if (user.timestamp) { html += '<div style="font-size:0.8rem;color:var(--muted,#888);margin-top:0.25rem">Requested: ' + (typeof user.timestamp === 'string' ? user.timestamp : formatMillisTimestamp(user.timestamp)) + '</div>'; }
           } else {
             // Line 1: username + role badge + banned badge + session count
-            var roleBadge = isAdmin ? '<span style="color:#667eea;font-size:0.8rem;font-weight:600;background:rgba(102,126,234,0.15);padding:1px 6px;border-radius:3px;margin-left:6px">Admin</span>' : '<span style="color:#a0aec0;font-size:0.8rem;font-weight:600;background:rgba(160,174,192,0.1);padding:1px 6px;border-radius:3px;margin-left:6px">User</span>';
+            var roleBadge = isAdmin ? '<span style="color:var(--accent);font-size:0.8rem;font-weight:600;background:rgba(102,126,234,0.15);padding:1px 6px;border-radius:3px;margin-left:6px">Admin</span>' : '<span style="color:#a0aec0;font-size:0.8rem;font-weight:600;background:rgba(160,174,192,0.1);padding:1px 6px;border-radius:3px;margin-left:6px">User</span>';
             var bannedBadge = isBanned ? ' <span style="color:#dc3545;font-size:0.8rem;font-weight:600;background:rgba(220,53,69,0.15);padding:1px 6px;border-radius:3px">Banned</span>' : '';
             var sessionBadge = '<span style="color:var(--panel-fg);font-size:0.8rem;margin-left:6px">' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '') + '</span>';
             html += '<div style="display:flex;align-items:center;justify-content:space-between"><div><strong>' + username + '</strong>' + roleBadge + bannedBadge + sessionBadge + '</div><div style="font-size:0.8rem;color:var(--panel-fg)">&#9660;</div></div>';
@@ -2644,7 +2696,8 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             var meta = [];
             if (createdAt) meta.push('<strong>Created:</strong> ' + createdAt);
             if (lastActive) meta.push('<strong>Last Active:</strong> ' + formatMillisTimestamp(lastActive));
-            if (user.lastSeenSec) meta.push('<strong>Last Seen:</strong> ' + formatMillisTimestamp(user.lastSeenSec * 1000));
+            else if (user.lastSeen) meta.push('<strong>Last Seen:</strong> ' + new Date(user.lastSeen).toLocaleString());
+            else if (user.lastSeenSec) meta.push('<strong>Last Seen:</strong> ' + formatMillisTimestamp(user.lastSeenSec * 1000));
             if (meta.length) html += '<div style="font-size:0.8rem;color:var(--muted,#888);margin-bottom:0.5rem">' + meta.join(' &middot; ') + '</div>';
           }
           if (!isPending && sessionCount > 0) {
@@ -2932,7 +2985,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       }).then(function(r) { return r.text(); })
       .then(function() {
         var el = $('display-auth-value');
-        if (el) { el.textContent = val ? 'Required' : 'Disabled'; el.style.color = '#667eea'; }
+        if (el) { el.textContent = val ? 'Required' : 'Disabled'; el.style.color = 'var(--accent)'; }
         var btn = $('display-auth-btn');
         if (btn) btn.textContent = val ? 'Disable' : 'Enable';
       });
@@ -2950,7 +3003,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       .then(function() {
         var nowEnabled = !current;
         var el = $('usersync-enabled-value');
-        if (el) { el.textContent = nowEnabled ? 'Enabled' : 'Disabled'; el.style.color = '#667eea'; }
+        if (el) { el.textContent = nowEnabled ? 'Enabled' : 'Disabled'; el.style.color = 'var(--accent)'; }
         var btn = $('usersync-enabled-btn');
         if (btn) btn.textContent = nowEnabled ? 'Disable' : 'Enable';
         var form = $('usersync-form');

@@ -33,24 +33,21 @@ inline void streamMapsInner(httpd_req_t* req) {
 .lyr-group summary::before{content:'\25B6';font-size:0.65em;opacity:0.5;transition:transform .15s}
 .lyr-group[open] summary::before{transform:rotate(90deg)}
 .lyr-group summary:hover{background:var(--crumb-bg)}
-.lyr-items{display:flex;flex-wrap:wrap;gap:6px 14px;padding:4px 8px 8px 20px;font-size:0.78rem}
-.lyr-items label{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer}
+.lyr-items{display:flex;flex-wrap:wrap;gap:4px 20px;padding:4px 8px 8px 22px;font-size:0.78rem}
+.lyr-items label{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer;line-height:1.4}
+.lyr-items label input[type=checkbox]{flex-shrink:0;width:13px;height:13px;margin:0;cursor:pointer}
 </style>
 <div style='margin:1rem 0'>
   <div style='position:relative;background:var(--panel-bg);border-radius:8px;border:1px solid var(--border);overflow:hidden'>
     <canvas id='map-canvas' width='1200' height='800' style='width:100%;display:block;background:var(--code-bg)'></canvas>
 
-    <!-- Zoom bar — top-right, vertical -->
-    <div class='map-bar-v' style='position:absolute;top:10px;right:10px;z-index:10'>
-      <button class='btn map-ctrl' onclick='zoomIn()' title='Zoom in' style='font-size:1.4em;font-weight:300'>+</button>
-      <button class='btn map-ctrl' onclick='zoomOut()' title='Zoom out' style='font-size:1.6em;font-weight:300'>−</button>
-    </div>
-
-    <!-- Rotate/Reset bar — top-left, horizontal -->
+    <!-- Map controls — top-left -->
     <div class='map-bar-h' style='position:absolute;top:10px;left:10px;z-index:10'>
       <button class='btn map-ctrl' onclick='rotateLeft()' title='Rotate left'>↺</button>
       <button class='btn map-ctrl' onclick='rotateRight()' title='Rotate right'>↻</button>
-      <button class='btn map-ctrl' onclick='resetView()' title='Reset view'>⟲</button>
+      <button class='btn map-ctrl' onclick='resetView()' title='Reset view' style='font-size:1.6em;line-height:1;padding-bottom:2px'>⟲</button>
+      <button class='btn map-ctrl' onclick='zoomIn()' title='Zoom in' style='font-size:1.4em;font-weight:300'>+</button>
+      <button class='btn map-ctrl' onclick='zoomOut()' title='Zoom out' style='font-size:1.6em;font-weight:300'>−</button>
     </div>
 
     <!-- Action bar — bottom-left, above info bar -->
@@ -63,85 +60,86 @@ inline void streamMapsInner(httpd_req_t* req) {
     </div>
 
     <!-- Search popup — floats above the action bar -->
-    <div id='search-dialog' style='display:none;position:absolute;bottom:84px;left:10px;width:320px;max-width:calc(100% - 20px);background:var(--menu-item-bg);color:var(--menu-item-fg);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,.5);z-index:20;overflow:hidden'>
+    <div id='search-dialog' style='display:none;position:absolute;bottom:84px;left:10px;width:max-content;min-width:320px;max-width:calc(100% - 20px);background:var(--menu-item-bg);color:var(--menu-item-fg);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,.5);z-index:20;overflow:hidden'>
       <input type='text' id='search-input' placeholder='Search map features...' style='width:100%;padding:10px 12px;border:none;border-bottom:1px solid var(--border);background:transparent;color:inherit;font-size:0.95rem;box-sizing:border-box;outline:none' oninput='searchMapNames()' onkeydown='if(event.key==="Escape")hideSearchDialog()'>
       <div id='search-results' style='max-height:240px;overflow-y:auto;font-size:0.85rem'></div>
     </div>
 
     <!-- Maps overlay panel -->
-    <div id='maps-panel' style='display:none;position:absolute;bottom:84px;left:10px;width:320px;max-width:calc(100% - 20px);background:var(--menu-item-bg);color:var(--menu-item-fg);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,.5);z-index:20;overflow:hidden'>
+    <div id='maps-panel' style='display:none;position:absolute;bottom:84px;left:10px;min-width:320px;max-width:min(480px,calc(100% - 20px));background:var(--menu-item-bg);color:var(--menu-item-fg);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,.5);z-index:20;overflow:hidden'>
       <div style='padding:8px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center'>
         <span style='font-size:0.85rem;font-weight:600;flex:1'>Maps</span>
-        <button class='btn' onclick='organizeMaps()' style='padding:4px 8px;font-size:0.8rem'>Organize</button>
-        <span id='maps-organize-status' style='font-size:0.75rem;color:var(--panel-fg)'></span>
+        <button class='btn' onclick='document.getElementById("maps-upload-input").click()' style='padding:4px 8px;font-size:0.8rem'>Upload</button>
+        <input type='file' id='maps-upload-input' accept='.hwmap' style='display:none' onchange='uploadMapFile(this)'>
         <button class='btn' onclick='toggleMapsPanel()' style='padding:4px 8px;min-height:unset'>✕</button>
       </div>
+      <div id='map-upload-status' style='display:none;padding:4px 12px;font-size:0.8rem;color:var(--accent, #4dabf7);border-bottom:1px solid var(--border)'></div>
       <div id='maps-file-browser' style='max-height:300px;overflow-y:auto'></div>
-      <div id='map-info' style='display:none'><div id='map-details'></div></div>
+      <div id='map-info' style='display:none;padding:10px 12px'><div id='map-details'></div></div>
       <div id='map-features' style='display:none'><div id='features-list' style='font-size:0.85rem;max-height:200px;overflow-y:auto'></div></div>
     </div>
 
     <!-- Layers overlay panel -->
-    <div id='layers-panel' style='display:none;position:absolute;bottom:84px;left:10px;width:280px;max-width:calc(100% - 20px);background:var(--menu-item-bg);color:var(--menu-item-fg);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,.5);z-index:20;overflow:hidden'>
+    <div id='layers-panel' style='display:none;position:absolute;bottom:84px;left:10px;width:max-content;min-width:180px;max-width:calc(100% - 20px);background:var(--menu-item-bg);color:var(--menu-item-fg);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,.5);z-index:20'>
       <div style='padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center'>
         <span style='font-size:0.85rem;font-weight:600;flex:1'>Layers</span>
         <button class='btn' onclick='toggleLayersPanel()' style='padding:4px 8px;min-height:unset'>✕</button>
       </div>
-      <div style='max-height:320px;overflow-y:auto;padding:4px 0'>
+      <div style='padding:4px 0'>
         <details class='lyr-group'>
           <summary><span style='color:#ff6b6b'>Roads</span></summary>
           <div class='lyr-items'>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-road-motorway' checked onchange='renderMap()' style='margin:0'><span style='color:#ff6b6b'>Motorway</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-road-trunk' checked onchange='renderMap()' style='margin:0'><span style='color:#ff8787'>Trunk</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-road-primary' checked onchange='renderMap()' style='margin:0'><span style='color:#ffd93d'>Primary</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-road-secondary' checked onchange='renderMap()' style='margin:0'><span style='color:#ffe066'>Secondary</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-road-tertiary' checked onchange='renderMap()' style='margin:0'><span style='color:#ffffff'>Tertiary</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-road-residential' checked onchange='renderMap()' style='margin:0'><span style='color:#e9ecef'>Residential</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-road-service' checked onchange='renderMap()' style='margin:0'><span style='color:#ced4da'>Service</span></label>
+            <label><input type='checkbox' id='layer-road-motorway' checked onchange='renderMap()'><span style='color:#ff6b6b'>Motorway</span></label>
+            <label><input type='checkbox' id='layer-road-trunk' checked onchange='renderMap()'><span style='color:#ff8787'>Trunk</span></label>
+            <label><input type='checkbox' id='layer-road-primary' checked onchange='renderMap()'><span style='color:#ffd93d'>Primary</span></label>
+            <label><input type='checkbox' id='layer-road-secondary' checked onchange='renderMap()'><span style='color:#ffe066'>Secondary</span></label>
+            <label><input type='checkbox' id='layer-road-tertiary' checked onchange='renderMap()'><span style='color:#ffffff'>Tertiary</span></label>
+            <label><input type='checkbox' id='layer-road-residential' checked onchange='renderMap()'><span style='color:#e9ecef'>Residential</span></label>
+            <label><input type='checkbox' id='layer-road-service' checked onchange='renderMap()'><span style='color:#ced4da'>Service</span></label>
           </div>
         </details>
         <details class='lyr-group'>
           <summary><span style='color:#aaaaaa'>Paths</span></summary>
           <div class='lyr-items'>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-path-footway' checked onchange='renderMap()' style='margin:0'><span style='color:#aaaaaa'>Footway</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-path-cycleway' checked onchange='renderMap()' style='margin:0'><span style='color:#74c0fc'>Cycleway</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-path-track' checked onchange='renderMap()' style='margin:0'><span style='color:#8b7355'>Track</span></label>
+            <label><input type='checkbox' id='layer-path-footway' checked onchange='renderMap()'><span style='color:#aaaaaa'>Footway</span></label>
+            <label><input type='checkbox' id='layer-path-cycleway' checked onchange='renderMap()'><span style='color:#74c0fc'>Cycleway</span></label>
+            <label><input type='checkbox' id='layer-path-track' checked onchange='renderMap()'><span style='color:#8b7355'>Track</span></label>
           </div>
         </details>
         <details class='lyr-group'>
           <summary><span style='color:#4dabf7'>Water</span></summary>
           <div class='lyr-items'>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-water-lake' checked onchange='renderMap()' style='margin:0'><span style='color:#4dabf7'>Lakes</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-water-river' checked onchange='renderMap()' style='margin:0'><span style='color:#339af0'>Rivers</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-water-coast' checked onchange='renderMap()' style='margin:0'><span style='color:#1c7ed6'>Coast</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-landmask' checked onchange='renderMap()' style='margin:0'><span style='color:#c9b896'>Land Mask</span></label>
+            <label><input type='checkbox' id='layer-water-lake' checked onchange='renderMap()'><span style='color:#4dabf7'>Lakes</span></label>
+            <label><input type='checkbox' id='layer-water-river' checked onchange='renderMap()'><span style='color:#339af0'>Rivers</span></label>
+            <label><input type='checkbox' id='layer-water-coast' checked onchange='renderMap()'><span style='color:#1c7ed6'>Coast</span></label>
+            <label><input type='checkbox' id='layer-landmask' checked onchange='renderMap()'><span style='color:#c9b896'>Land Mask</span></label>
           </div>
         </details>
         <details class='lyr-group'>
           <summary><span style='color:#69db7c'>Nature</span></summary>
           <div class='lyr-items'>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-park-park' checked onchange='renderMap()' style='margin:0'><span style='color:#69db7c'>Parks</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-park-forest' checked onchange='renderMap()' style='margin:0'><span style='color:#40c057'>Forests</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-park-grass' checked onchange='renderMap()' style='margin:0'><span style='color:#a9e34b'>Grass</span></label>
+            <label><input type='checkbox' id='layer-park-park' checked onchange='renderMap()'><span style='color:#69db7c'>Parks</span></label>
+            <label><input type='checkbox' id='layer-park-forest' checked onchange='renderMap()'><span style='color:#40c057'>Forests</span></label>
+            <label><input type='checkbox' id='layer-park-grass' checked onchange='renderMap()'><span style='color:#a9e34b'>Grass</span></label>
           </div>
         </details>
         <details class='lyr-group'>
           <summary><span style='color:#da77f2'>Rail &amp; Transit</span></summary>
           <div class='lyr-items'>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-rail-rail' checked onchange='renderMap()' style='margin:0'><span style='color:#da77f2'>Rail</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-rail-subway' checked onchange='renderMap()' style='margin:0'><span style='color:#e599f7'>Subway</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-transit-bus' checked onchange='renderMap()' style='margin:0'><span style='color:#fab005'>Bus</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-transit-ferry' checked onchange='renderMap()' style='margin:0'><span style='color:#15aabf'>Ferry</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-transit-stations' checked onchange='renderMap()' style='margin:0'><span style='color:#f783ac'>Stations</span></label>
+            <label><input type='checkbox' id='layer-rail-rail' checked onchange='renderMap()'><span style='color:#da77f2'>Rail</span></label>
+            <label><input type='checkbox' id='layer-rail-subway' checked onchange='renderMap()'><span style='color:#e599f7'>Subway</span></label>
+            <label><input type='checkbox' id='layer-transit-bus' checked onchange='renderMap()'><span style='color:#fab005'>Bus</span></label>
+            <label><input type='checkbox' id='layer-transit-ferry' checked onchange='renderMap()'><span style='color:#15aabf'>Ferry</span></label>
+            <label><input type='checkbox' id='layer-transit-stations' checked onchange='renderMap()'><span style='color:#f783ac'>Stations</span></label>
           </div>
         </details>
         <details class='lyr-group'>
           <summary><span style='color:#868e96'>Buildings</span></summary>
           <div class='lyr-items'>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-building' checked onchange='renderMap()' style='margin:0'><span style='color:#868e96'>Buildings</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-industrial' checked onchange='renderMap()' style='margin:0'><span style='color:#fab005'>Industrial</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-commercial' checked onchange='renderMap()' style='margin:0'><span style='color:#ced4da'>Commercial</span></label>
-            <label style='display:flex;align-items:center;gap:4px;cursor:pointer'><input type='checkbox' id='layer-residential-area' checked onchange='renderMap()' style='margin:0'><span style='color:#dee2e6'>Res. Areas</span></label>
+            <label><input type='checkbox' id='layer-building' checked onchange='renderMap()'><span style='color:#868e96'>Buildings</span></label>
+            <label><input type='checkbox' id='layer-industrial' checked onchange='renderMap()'><span style='color:#fab005'>Industrial</span></label>
+            <label><input type='checkbox' id='layer-commercial' checked onchange='renderMap()'><span style='color:#ced4da'>Commercial</span></label>
+            <label><input type='checkbox' id='layer-residential-area' checked onchange='renderMap()'><span style='color:#dee2e6'>Res. Areas</span></label>
           </div>
         </details>
       </div>
@@ -162,12 +160,12 @@ inline void streamMapsInner(httpd_req_t* req) {
 </div>
 
 <div style='display:flex;gap:1rem;margin-top:1rem;align-items:stretch;flex-wrap:wrap'>
-<div style='flex:1;min-width:220px;background:var(--panel-bg);padding:1rem;border-radius:8px;border:1px solid var(--border);height:260px;display:flex;flex-direction:column'>
+<div style='flex:1;min-width:280px;background:var(--panel-bg);padding:1rem;border-radius:8px;border:1px solid var(--border);min-height:320px;display:flex;flex-direction:column'>
   <h3 style='margin:0 0 0.5rem 0;color:var(--panel-fg)'>GPS Tracks</h3>
+  <select id='track-file' style='width:100%;padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg);margin-bottom:0.5rem'>
+    <option value=''>Select GPS log file...</option>
+  </select>
   <div style='display:flex;gap:8px;margin-bottom:0.5rem;align-items:center'>
-    <select id='track-file' style='flex:1;min-width:0;padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg)'>
-      <option value=''>Select GPS log file...</option>
-    </select>
     <button class='btn' onclick='loadGPSTrack()' style='padding:6px 12px'>Load</button>
     <button class='btn' onclick='clearGPSTrack()' style='padding:6px 12px'>Clear</button>
     <button class='btn' id='btn-live-track' onclick='toggleLiveTrack()' style='padding:6px 12px'>Live</button>
@@ -187,16 +185,16 @@ inline void streamMapsInner(httpd_req_t* req) {
   </div>
   <div id='track-info' style='font-size:0.85rem;color:var(--panel-fg);flex:1;overflow-y:auto'></div>
 </div>
-<div style='flex:1;min-width:180px;background:var(--panel-bg);padding:1rem;border-radius:8px;border:1px solid var(--border);height:260px;display:flex;flex-direction:column'>
+<div style='flex:1;min-width:220px;background:var(--panel-bg);padding:1rem;border-radius:8px;border:1px solid var(--border);min-height:320px;display:flex;flex-direction:column'>
   <h3 style='margin:0 0 0.5rem 0;color:var(--panel-fg)'>Transit Routes</h3>
   <div id='routes-list' style='flex:1;overflow-y:auto;font-size:0.85rem'>
     <div style='color:var(--panel-fg)'>Load a map to see routes</div>
   </div>
 </div>
-<div style='flex:2;min-width:300px;background:var(--panel-bg);padding:1rem;border-radius:8px;border:1px solid var(--border);height:260px;display:flex;flex-direction:column'>
+<div style='flex:2;min-width:420px;background:var(--panel-bg);padding:1rem;border-radius:8px;border:1px solid var(--border);min-height:320px;display:flex;flex-direction:column'>
   <h3 style='margin:0 0 0.5rem 0;color:var(--panel-fg)'>Waypoints</h3>
   <div id='waypoint-status' style='margin-bottom:0.5rem;padding:6px 8px;background:var(--crumb-bg);border-radius:4px;font-size:0.82rem'></div>
-  <div style='display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:6px;margin-bottom:0.4rem;align-items:center'>
+  <div style='display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:6px;margin-bottom:0.4rem;align-items:center;min-width:0'>
     <input type='text' id='wp-name' placeholder='Name' maxlength='11' style='padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg)' />
     <input type='number' id='wp-lat' placeholder='Latitude' step='0.000001' style='padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg)' />
     <input type='number' id='wp-lon' placeholder='Longitude' step='0.000001' style='padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg)' />
@@ -297,7 +295,8 @@ function toggleWaypointMode() {
 
 // Add waypoint at canvas coordinates
 async function addMapWaypoint(canvasX, canvasY) {
-  if (!currentMap) return;
+  wpLog('addMapWaypoint() — canvasX:', canvasX, 'canvasY:', canvasY, 'currentMap:', currentMap ? currentMap.filename : 'null');
+  if (!currentMap) { wpWarn('addMapWaypoint() — no map loaded, ignoring'); return; }
   
   // Convert canvas coords to geo coords (inverse of toCanvas in renderMap)
   const canvas = document.getElementById('map-canvas');
@@ -327,6 +326,7 @@ async function addMapWaypoint(canvasX, canvasY) {
   
   const lon = mapCenterX + x / scale;
   const lat = mapCenterY - y / scale;
+  wpLog('addMapWaypoint() — computed lat:', lat, 'lon:', lon);
   
   const name = await hwPrompt('Waypoint name:', 'WP' + (waypoints.length + 1));
   if (name !== null && name.trim()) {
@@ -560,23 +560,28 @@ function initMapsFileBrowser() {
   });
 }
 
-async function organizeMaps() {
-  const statusEl = document.getElementById('maps-organize-status');
-  if (statusEl) statusEl.textContent = 'Organizing...';
-  try {
-    const resp = await fetch('/api/maps/organize', { method: 'POST' });
-    const data = await resp.json();
-    if (!data || data.success !== true) {
-      if (statusEl) statusEl.textContent = 'Organize failed';
-      alert('Organize failed: ' + (data && data.error ? data.error : 'Unknown'));
-      return;
+function uploadMapFile(input) {
+  if (!input.files || !input.files.length) return;
+  const file = input.files[0];
+  const targetPath = '/maps/' + file.name;
+  // Show inline progress in the maps panel status area
+  const statusEl = document.getElementById('map-upload-status');
+  if (statusEl) { statusEl.style.display = ''; statusEl.textContent = 'Preparing upload...'; }
+  hwUploadFile(file, targetPath, {
+    onProgress: function(pct, label) {
+      if (statusEl) statusEl.textContent = label || ('Uploading ' + pct + '%');
+    },
+    onDone: function(ok, msg) {
+      if (statusEl) { statusEl.textContent = ok ? 'Uploaded: ' + file.name : msg; setTimeout(function(){ statusEl.style.display = 'none'; }, 3000); }
+      if (ok) {
+        if (typeof hw !== 'undefined' && hw.notify) hw.notify('success', 'Map uploaded: ' + file.name);
+        if (mapsExplorer && typeof mapsExplorer.navigate === 'function') mapsExplorer.navigate('/maps');
+      } else {
+        alert(msg);
+      }
+      input.value = '';
     }
-    if (statusEl) statusEl.textContent = `Moved ${data.moved}, Failed ${data.failed}`;
-    if (mapsExplorer && typeof mapsExplorer.navigate === 'function') mapsExplorer.navigate('/maps');
-  } catch (e) {
-    if (statusEl) statusEl.textContent = 'Organize error';
-    alert('Organize error: ' + e.message);
-  }
+  });
 }
 
 // Load and parse a map file
@@ -654,7 +659,7 @@ async function loadMap(path) {
       const unknownChips = Object.entries(typeCounts)
         .filter(([t]) => !knownTypes.has(Number(t)))
         .map(([t, c]) => `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:2px 7px;font-size:0.75rem">
-            <span style="color:#666">0x${Number(t).toString(16)}</span>
+            <span style="color:var(--muted)">0x${Number(t).toString(16)}</span>
             <strong style="color:#aaa">${c.toLocaleString()}</strong>
           </span>`).join('');
 
@@ -680,7 +685,7 @@ async function loadMap(path) {
           ${unknownChips}
         </div>
 
-        <div style="font-size:0.78rem;color:#666;border-top:1px solid var(--border);padding-top:8px;display:grid;grid-template-columns:auto 1fr;gap:3px 8px">
+        <div style="font-size:0.78rem;color:var(--muted);border-top:1px solid var(--border);padding-top:8px;margin-top:4px;display:grid;grid-template-columns:auto 1fr;gap:3px 8px">
           <span>Lat</span><span style="color:var(--panel-fg)">${currentMap.minLat.toFixed(5)}° → ${currentMap.maxLat.toFixed(5)}°</span>
           <span>Lon</span><span style="color:var(--panel-fg)">${currentMap.minLon.toFixed(5)}° → ${currentMap.maxLon.toFixed(5)}°</span>
           <span>Center</span><span style="color:var(--panel-fg)">${centerLat.toFixed(5)}°, ${centerLon.toFixed(5)}°</span>
@@ -918,7 +923,25 @@ function renderMap() {
     ctx.fillStyle = '#555';
     ctx.font = '16px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('Select a map to view', canvas.width/2, canvas.height/2);
+    ctx.fillText('Click "Maps" below to open a map', canvas.width/2, canvas.height/2);
+
+    // Arrowhead pointing down toward the Maps button
+    const w = canvas.width, h = canvas.height;
+    const mapsBtn = document.getElementById('btn-maps-panel');
+    if (mapsBtn) {
+      const canvasRect = canvas.getBoundingClientRect();
+      const btnRect = mapsBtn.getBoundingClientRect();
+      const scX = w / canvasRect.width, scY = h / canvasRect.height;
+      const tipX = (btnRect.left + btnRect.width / 2 - canvasRect.left) * scX;
+      const tipY = (btnRect.top - canvasRect.top) * scY - 10 * scY;
+      const aLen = Math.max(12, w * 0.02);
+      ctx.fillStyle = '#555';
+      ctx.beginPath();
+      ctx.moveTo(tipX, tipY);
+      ctx.lineTo(tipX - aLen * 0.7, tipY - aLen);
+      ctx.lineTo(tipX + aLen * 0.7, tipY - aLen);
+      ctx.fill();
+    }
     return;
   }
   
@@ -1322,7 +1345,7 @@ function renderMap() {
     if (!feature.name || feature.points.length < 2) continue;
     if (!layerEnabled(feature.type, feature.subtype || 0)) continue;
 
-    const displayName = String(feature.name).replace(/\0/g, '').trim();
+    const displayName = cleanName(feature.name);
     if (!displayName) continue;
     const nameKey = displayName.toLowerCase();
     
@@ -1445,7 +1468,7 @@ function renderMap() {
         ctx.fillStyle = '#fff';
         ctx.font = '10px system-ui, sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(wp.name, pos.x, pos.y - 12);
+        ctx.fillText(cleanName(wp.name), pos.x, pos.y - 12);
       }
     });
   }
@@ -1919,6 +1942,12 @@ async function updateGPS() {
 let waypoints = [];
 let targetWaypointIndex = -1;
 
+// Set to true to enable verbose waypoint debug logging in the browser console
+const WP_DEBUG = false;
+function wpLog(...args) { if (WP_DEBUG) console.log('[WP]', ...args); }
+function wpWarn(...args) { if (WP_DEBUG) console.warn('[WP]', ...args); }
+function wpError(...args) { console.error('[WP]', ...args); }
+
 function escapeHtml(s) {
   s = (s === null || s === undefined) ? '' : String(s);
   return s.replace(/&/g, '&amp;')
@@ -1928,21 +1957,47 @@ function escapeHtml(s) {
           .replace(/'/g, '&#39;');
 }
 
+// Sanitise a name string sourced from map/Overpass data before display.
+// Removes null bytes, ASCII control characters, invisible Unicode formatting
+// marks (zero-width spaces, directional overrides, BOM, soft hyphen), private-
+// use area codepoints, and replaces the Unicode replacement character (U+FFFD)
+// and white-square separator (U+25A1, □) with an en dash.
+function cleanName(s) {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/\0/g, '')                                   // null bytes
+    .replace(/[\u0001-\u001F\u007F]/g, '')                // ASCII control chars
+    .replace(/[\u200B-\u200F\u202A-\u202E\uFEFF\u00AD]/g, '') // invisible / directional overrides
+    .replace(/[\uE000-\uF8FF]/g, '')                      // private-use area
+    .replace(/[\uFFFD\u25A1]/g, '\u2013')                 // replacement char / □ → –
+    .replace(/\s{2,}/g, ' ')                              // collapse runs of whitespace
+    .trim();
+}
+
 async function loadWaypoints() {
+  wpLog('loadWaypoints() — currentMap:', currentMap ? currentMap.filename : 'null');
   if (!currentMap) {
-    document.getElementById('waypoint-status').textContent = 'Error: No map loaded';
-    document.getElementById('waypoint-list').innerHTML = '<p style="color:var(--panel-fg);font-size:0.85rem;margin:0.5rem 0">Load a map above to manage waypoints</p>';
+    document.getElementById('waypoint-status').textContent = '';
+    document.getElementById('waypoint-list').innerHTML = '<p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0">Load a map to manage waypoints</p>';
     return;
   }
   
   try {
+    wpLog('GET /api/waypoints');
     const resp = await fetch('/api/waypoints');
+    wpLog('GET /api/waypoints →', resp.status, resp.statusText);
     const data = await resp.json();
+    wpLog('GET /api/waypoints response:', JSON.stringify(data));
     
     if (data.success) {
+      if (data.deviceMapLoaded === false) {
+        wpWarn('Device map not loaded — waypoints unavailable on device');
+        document.getElementById('waypoint-status').textContent = 'Device has no map loaded — waypoints unavailable';
+      }
       waypoints = data.waypoints || [];
       targetWaypointIndex = (typeof data.target === 'number') ? data.target : -1;
-      document.getElementById('waypoint-status').textContent = `Map: ${data.mapName} | Waypoints: ${data.count}/${data.max}`;
+      wpLog('Loaded', waypoints.length, 'waypoints, target:', targetWaypointIndex);
+      document.getElementById('waypoint-status').textContent = `Map: ${data.mapName || '(none)'} | Waypoints: ${data.count}/${data.max}${data.deviceMapLoaded === false ? ' ⚠ device map not loaded' : ''}`;
       
       if (waypoints.length > 0) {
         let html = '<table style="width:100%;font-size:0.85rem;border-collapse:collapse">';
@@ -1970,15 +2025,17 @@ async function loadWaypoints() {
         html += '</table>';
         document.getElementById('waypoint-list').innerHTML = html;
       } else {
-        document.getElementById('waypoint-list').innerHTML = '<p style="color:#666;font-size:0.85rem;margin:0.5rem 0">No waypoints for this map</p>';
+        document.getElementById('waypoint-list').innerHTML = '<p style="color:var(--muted);font-size:0.85rem;margin:0.5rem 0">No waypoints for this map</p>';
       }
       renderMap();
       if (typeof updateRoutesList === 'function') updateRoutesList();
     } else {
+      wpError('loadWaypoints failed:', data.error);
       document.getElementById('waypoint-status').textContent = 'Error: ' + (data.error || 'Failed to load');
     }
   } catch (e) {
-    document.getElementById('waypoint-status').textContent = 'Error loading waypoints';
+    wpError('loadWaypoints exception:', e);
+    document.getElementById('waypoint-status').textContent = 'Error loading waypoints: ' + e.message;
   }
 }
 
@@ -2016,17 +2073,24 @@ async function addWaypoint() {
   const lat = parseFloat(document.getElementById('wp-lat').value);
   const lon = parseFloat(document.getElementById('wp-lon').value);
   const notes = (document.getElementById('wp-notes').value || '').trim();
+  wpLog('addWaypoint() — name:', name, 'lat:', lat, 'lon:', lon, 'notes:', notes);
   
   if (!name || isNaN(lat) || isNaN(lon)) {
+    wpWarn('addWaypoint() validation failed — name:', name, 'lat:', lat, 'lon:', lon);
     alert('Please fill in all fields');
     return;
   }
 
-  await addWaypointViaAPI(name, lat, lon, notes);
-  document.getElementById('wp-name').value = '';
-  document.getElementById('wp-lat').value = '';
-  document.getElementById('wp-lon').value = '';
-  document.getElementById('wp-notes').value = '';
+  try {
+    await addWaypointViaAPI(name, lat, lon, notes);
+    document.getElementById('wp-name').value = '';
+    document.getElementById('wp-lat').value = '';
+    document.getElementById('wp-lon').value = '';
+    document.getElementById('wp-notes').value = '';
+  } catch (e) {
+    wpError('addWaypoint() failed:', e);
+    alert('Failed to add waypoint: ' + (e && e.message ? e.message : e));
+  }
 }
 
 async function addWaypointViaAPI(name, lat, lon, notes) {
@@ -2036,16 +2100,29 @@ async function addWaypointViaAPI(name, lat, lon, notes) {
   body.set('lat', String(lat));
   body.set('lon', String(lon));
   if (notes) body.set('notes', notes);
+  wpLog('addWaypointViaAPI() POST body:', body.toString());
   const resp = await fetch('/api/waypoints', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body
   });
-  const data = await resp.json();
-  if (!data.success) throw new Error(data.error || 'Failed to add waypoint');
+  wpLog('addWaypointViaAPI() POST →', resp.status, resp.statusText);
+  let data;
+  try {
+    data = await resp.json();
+  } catch (e) {
+    wpError('addWaypointViaAPI() failed to parse JSON response:', e);
+    throw new Error('Server returned non-JSON response (status ' + resp.status + ')');
+  }
+  wpLog('addWaypointViaAPI() response:', JSON.stringify(data));
+  if (!data.success) {
+    wpError('addWaypointViaAPI() server error:', data.error);
+    throw new Error(data.error || 'Failed to add waypoint');
+  }
   try {
     await loadWaypoints();
   } catch (e) {
+    wpError('addWaypointViaAPI() list refresh failed:', e);
     renderMap();
     throw new Error('Waypoint added but failed to refresh list: ' + e.message);
   }
@@ -2256,7 +2333,7 @@ function updateRoutesList() {
     const byKey = new Map();
     for (const f of currentMap.features) {
       if (f.type !== sec.type) continue;
-      const n = String(f.name || '').replace(/\0/g, '').trim();
+      const n = cleanName(f.name);
       if (!n) continue;
       const k = n.toLowerCase();
       const cur = byKey.get(k);
@@ -2274,7 +2351,7 @@ function updateRoutesList() {
     for (let i = 0; i < items.length && i < 60; i++) {
       const item = items[i];
       const suffix = item.count > 1 ? ` (${item.count})` : '';
-      html += `<div data-route-name="${encodeURIComponent(item.name)}" style="cursor:pointer;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--crumb-bg);font-size:0.8rem;color:var(--panel-fg)">${item.name}${suffix}</div>`;
+      html += `<div data-route-name="${encodeURIComponent(item.name)}" style="cursor:pointer;padding:5px 8px;border:1px solid var(--border);border-radius:4px;background:var(--crumb-bg);font-size:0.8rem;color:var(--panel-fg)">${escapeHtml(item.name)}${suffix}</div>`;
     }
     html += '</div></details>';
   }
@@ -2351,7 +2428,7 @@ function searchMapNames() {
   const matches = [];
   if (currentMap.names) {
     for (let i = 0; i < currentMap.names.length; i++) {
-      const name = currentMap.names[i];
+      const name = cleanName(currentMap.names[i]);
       if (name && name.toLowerCase().includes(query)) {
         matches.push({ name, index: i });
         if (matches.length >= 20) break; // Limit results
@@ -2370,7 +2447,7 @@ function searchMapNames() {
              onmouseover="this.style.background='var(--crumb-bg)'" 
              onmouseout="this.style.background=''"
              onclick="selectSearchResult('${match.name.replace(/'/g, "\\'")}')">
-             ${match.name}
+             ${escapeHtml(match.name)}
            </div>`;
   });
   html += '</div>';
@@ -2382,11 +2459,11 @@ function selectSearchResult(name) {
   // Find ALL features with this name for navigation
   searchResults = [];
   searchResultIndex = 0;
-  const nameNorm = String(name).replace(/\0/g, '').trim();
+  const nameNorm = cleanName(name);
   
   if (currentMap && currentMap.features) {
     for (const feature of currentMap.features) {
-      const fNameNorm = String(feature.name || '').replace(/\0/g, '').trim();
+      const fNameNorm = cleanName(feature.name);
       if (fNameNorm === nameNorm && feature.points && feature.points.length > 0) {
         searchResults.push(feature);
       }
@@ -2439,7 +2516,7 @@ function centerOnSearchResult(index) {
   // Set selected feature for pin display
   const typeNames = {[FT_HIGHWAY]:'Highway',[FT_ROAD_MAJOR]:'Major Road',[FT_ROAD_MINOR]:'Minor Road',[FT_PATH]:'Path',[FT_WATER]:'Water',[FT_PARK]:'Park',[FT_RAILWAY]:'Railway',[FT_BUS]:'Bus',[FT_FERRY]:'Ferry',[FT_BUILDING]:'Building'};
   selectedFeature = {
-    name: feature.name,
+    name: cleanName(feature.name),
     type: feature.type,
     typeName: typeNames[feature.type] || 'Unknown',
     lat: point.lat,
@@ -2491,7 +2568,7 @@ function showFeatureInfo() {
   
   infoDiv.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:8px">
-      <strong style="font-size:1.1rem;color:#4dabf7">${selectedFeature.name}</strong>
+      <strong style="font-size:1.1rem;color:#4dabf7">${escapeHtml(selectedFeature.name)}</strong>
       <button onclick="clearSelectedFeature()" style="background:none;border:none;color:#888;cursor:pointer;font-size:1.2rem;line-height:1">&times;</button>
     </div>
     <div style="color:#aaa;margin-bottom:6px">${selectedFeature.typeName}</div>
@@ -2555,7 +2632,7 @@ async function loadMapFeatures() {
           html += `<div style="margin:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${name}">${name}</div>`;
         });
         if (items.length > 20) {
-          html += `<div style="color:#666;font-style:italic">...and ${items.length - 20} more</div>`;
+          html += `<div style="color:var(--muted);font-style:italic">...and ${items.length - 20} more</div>`;
         }
         html += `</div></div>`;
       }

@@ -278,7 +278,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
         service_id.is_primary = true;
         service_id.id.inst_id = 0;
         service_id.id.uuid.len = ESP_UUID_LEN_16;
-        service_id.id.uuid.uuid.uuid16 = BLE_DEVICE_INFO_SERVICE_UUID;
+        service_id.id.uuid.uuid.uuid16 = BLE_IDF_DEVICE_INFO_SERVICE_UUID;
         
         esp_err_t ret = esp_ble_gatts_create_service(gatts_if, &service_id, 10);
         if (ret != ESP_OK) {
@@ -306,7 +306,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
           
           // Add Manufacturer characteristic (Read)
           char_uuid.len = ESP_UUID_LEN_16;
-          char_uuid.uuid.uuid16 = BLE_MANUFACTURER_CHAR_UUID;
+          char_uuid.uuid.uuid16 = BLE_IDF_MANUFACTURER_CHAR_UUID;
           esp_ble_gatts_add_char(gBleState.device_info_service_handle, &char_uuid,
             ESP_GATT_PERM_READ, ESP_GATT_CHAR_PROP_BIT_READ, &char_val, &control);
           break;
@@ -315,7 +315,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
           gBleState.command_service_handle = param->create.service_handle;
           
           // Add CMD_REQUEST characteristic (Write)
-          if (!bleParseUuid128(BLE_CMD_REQUEST_CHAR_UUID, &char_uuid)) {
+          if (!bleParseUuid128(BLE_IDF_CMD_REQUEST_CHAR_UUID, &char_uuid)) {
             ESP_LOGE(TAG, "Failed to parse CMD_REQUEST UUID");
             break;
           }
@@ -330,7 +330,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
           gBleState.data_service_handle = param->create.service_handle;
           
           // Add SENSOR_DATA characteristic (Notify)
-          if (!bleParseUuid128(BLE_SENSOR_DATA_CHAR_UUID, &char_uuid)) {
+          if (!bleParseUuid128(BLE_IDF_SENSOR_DATA_CHAR_UUID, &char_uuid)) {
             ESP_LOGE(TAG, "Failed to parse SENSOR_DATA UUID");
             break;
           }
@@ -360,7 +360,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
           // Add Model characteristic
           esp_bt_uuid_t char_uuid;
           char_uuid.len = ESP_UUID_LEN_16;
-          char_uuid.uuid.uuid16 = BLE_MODEL_CHAR_UUID;
+          char_uuid.uuid.uuid16 = BLE_IDF_MODEL_CHAR_UUID;
           esp_attr_value_t cval1 = {};
           esp_ble_gatts_add_char(gBleState.device_info_service_handle, &char_uuid,
             ESP_GATT_PERM_READ, ESP_GATT_CHAR_PROP_BIT_READ, &cval1, &control);
@@ -369,7 +369,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
           // Add Firmware characteristic
           esp_bt_uuid_t char_uuid;
           char_uuid.len = ESP_UUID_LEN_16;
-          char_uuid.uuid.uuid16 = BLE_FIRMWARE_CHAR_UUID;
+          char_uuid.uuid.uuid16 = BLE_IDF_FIRMWARE_CHAR_UUID;
           esp_attr_value_t cval2 = {};
           esp_ble_gatts_add_char(gBleState.device_info_service_handle, &char_uuid,
             ESP_GATT_PERM_READ, ESP_GATT_CHAR_PROP_BIT_READ, &cval2, &control);
@@ -385,7 +385,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
           gBleState.cmd_request_handle = handle;
           // Add CMD_RESPONSE characteristic (Notify)
           esp_bt_uuid_t char_uuid;
-          if (bleParseUuid128(BLE_CMD_RESPONSE_CHAR_UUID, &char_uuid)) {
+          if (bleParseUuid128(BLE_IDF_CMD_RESPONSE_CHAR_UUID, &char_uuid)) {
             esp_attr_value_t cval3 = {};
             esp_ble_gatts_add_char(gBleState.command_service_handle, &char_uuid,
               ESP_GATT_PERM_READ, ESP_GATT_CHAR_PROP_BIT_NOTIFY, &cval3, &control);
@@ -416,7 +416,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
           gBleState.system_status_handle = handle;
           // Add EVENT_NOTIFY characteristic (Notify)
           esp_bt_uuid_t char_uuid;
-          if (bleParseUuid128(BLE_EVENT_NOTIFY_CHAR_UUID, &char_uuid)) {
+          if (bleParseUuid128(BLE_IDF_EVENT_NOTIFY_CHAR_UUID, &char_uuid)) {
             esp_attr_value_t cval4 = {};
             esp_ble_gatts_add_char(gBleState.data_service_handle, &char_uuid,
               ESP_GATT_PERM_READ, ESP_GATT_CHAR_PROP_BIT_NOTIFY, &cval4, &control);
@@ -446,7 +446,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
         // After cmd_response CCCD, add cmd_status
         if (gBleState.cmd_status_handle == 0) {
           esp_bt_uuid_t char_uuid;
-          if (bleParseUuid128(BLE_CMD_STATUS_CHAR_UUID, &char_uuid)) {
+          if (bleParseUuid128(BLE_IDF_CMD_STATUS_CHAR_UUID, &char_uuid)) {
             esp_attr_value_t char_val = {};
             esp_attr_control_t ctrl = {.auto_rsp = ESP_GATT_AUTO_RSP};
             esp_ble_gatts_add_char(gBleState.command_service_handle, &char_uuid,
@@ -457,7 +457,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
         // After sensor_data CCCD, add system_status
         if (gBleState.system_status_handle == 0) {
           esp_bt_uuid_t char_uuid;
-          if (bleParseUuid128(BLE_SYSTEM_STATUS_CHAR_UUID, &char_uuid)) {
+          if (bleParseUuid128(BLE_IDF_SYSTEM_STATUS_CHAR_UUID, &char_uuid)) {
             esp_attr_value_t char_val = {};
             esp_attr_control_t ctrl = {.auto_rsp = ESP_GATT_AUTO_RSP};
             esp_ble_gatts_add_char(gBleState.data_service_handle, &char_uuid,
@@ -467,7 +467,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
         // After event_notify CCCD, add stream_control
         else if (gBleState.stream_control_handle == 0) {
           esp_bt_uuid_t char_uuid;
-          if (bleParseUuid128(BLE_STREAM_CONTROL_CHAR_UUID, &char_uuid)) {
+          if (bleParseUuid128(BLE_IDF_STREAM_CONTROL_CHAR_UUID, &char_uuid)) {
             esp_attr_value_t char_val = {};
             esp_attr_control_t ctrl = {.auto_rsp = ESP_GATT_AUTO_RSP};
             esp_ble_gatts_add_char(gBleState.data_service_handle, &char_uuid,
@@ -491,7 +491,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
         esp_gatt_srvc_id_t service_id;
         service_id.is_primary = true;
         service_id.id.inst_id = 0;
-        if (bleParseUuid128(BLE_COMMAND_SERVICE_UUID, &service_id.id.uuid)) {
+        if (bleParseUuid128(BLE_IDF_COMMAND_SERVICE_UUID, &service_id.id.uuid)) {
           esp_ble_gatts_create_service(gatts_if, &service_id, 12);
         }
       } else if (gBleState.service_creation_step == 2) {
@@ -499,7 +499,7 @@ static void bleGattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts
         esp_gatt_srvc_id_t service_id;
         service_id.is_primary = true;
         service_id.id.inst_id = 0;
-        if (bleParseUuid128(BLE_DATA_SERVICE_UUID, &service_id.id.uuid)) {
+        if (bleParseUuid128(BLE_IDF_DATA_SERVICE_UUID, &service_id.id.uuid)) {
           esp_ble_gatts_create_service(gatts_if, &service_id, 16);
         }
       } else {

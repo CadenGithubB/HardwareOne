@@ -9,6 +9,8 @@
 #include "System_ESPNow.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
+#include "System_TaskUtils.h"
+#include "System_Utils.h"
 
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor-seesaw.h"
@@ -367,10 +369,9 @@ void espnowSensorStatusPeriodicTick() {
     doc["height"] = cameraHeight;
     doc["psram"] = psramFound();
 
-    String message;
-    serializeJson(doc, message);
-    
-    sendSensorDataUpdate(REMOTE_SENSOR_CAMERA, message);
+    char camBuf[256];
+    size_t camLen = serializeJson(doc, camBuf, sizeof(camBuf));
+    sendSensorDataUpdate(REMOTE_SENSOR_CAMERA, camBuf, camLen);
   }
 #endif
 
@@ -388,35 +389,35 @@ void espnowSensorStatusPeriodicTick() {
     doc["channels"] = micChannels;
     doc["level"] = (micEnabled && !micRecording) ? getAudioLevel() : 0;
 
-    String message;
-    serializeJson(doc, message);
-    
-    sendSensorDataUpdate(REMOTE_SENSOR_MICROPHONE, message);
+    char micBuf[256];
+    size_t micLen = serializeJson(doc, micBuf, sizeof(micBuf));
+    sendSensorDataUpdate(REMOTE_SENSOR_MICROPHONE, micBuf, micLen);
   }
 #endif
 }
 
 // Update local sensor cache (called by sensor polling loops)
 // This is a fast, non-blocking write - no ESP-NOW transmission here
-void sendSensorDataUpdate(RemoteSensorType sensorType, const String& jsonData) {
+void sendSensorDataUpdate(RemoteSensorType sensorType, const char* jsonData, size_t jsonLen) {
   if (sensorType >= REMOTE_SENSOR_MAX) {
     DEBUG_SENSORSF("[CACHE_UPDATE] REJECT: Invalid sensor type %d", sensorType);
     return;
   }
+  if (!jsonData) return;
   if (!gSensorStreamingEnabled[sensorType]) {
     // Don't log - too spammy when streaming is disabled
     return;
   }
-  
+
   // Quick cache update with mutex protection
   if (gSensorCacheMutex && xSemaphoreTake(gSensorCacheMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     LocalSensorCache* cache = &gLocalSensorCache[sensorType];
     bool wasDirty = cache->dirty;
     unsigned long timeSinceLastUpdate = millis() - cache->lastUpdate;
-    
-    size_t len = jsonData.length();
+
+    size_t len = jsonLen ? jsonLen : strlen(jsonData);
     if (len >= sizeof(cache->jsonData)) len = sizeof(cache->jsonData) - 1;
-    memcpy(cache->jsonData, jsonData.c_str(), len);
+    memcpy(cache->jsonData, jsonData, len);
     cache->jsonData[len] = '\0';
     cache->jsonLength = len;
     cache->dirty = true;
@@ -643,9 +644,9 @@ static bool startSensorBroadcaster() {
   BaseType_t ret = xTaskCreatePinnedToCore(
     sensorBroadcasterTask,
     "sensor_bcast",
-    3072,  // 3KB stack
+    SENSOR_BCAST_STACK_WORDS,
     nullptr,
-    5,     // Priority 5 (same as ESP-NOW task)
+    TASK_PRIORITY_HIGH,
     &gSensorBroadcasterTask,
     1      // Core 1 (opposite of ESP-NOW callback which is core 0)
   );
@@ -846,12 +847,10 @@ const char* cmd_espnow_sensorstream(const String& argsInput) {
   }
   
   String sensorName = args.substring(0, firstSpace);
-  sensorName.trim();
-  sensorName.toLowerCase();
+  normalizeCliArg(sensorName);
   
   String action = args.substring(firstSpace + 1);
-  action.trim();
-  action.toLowerCase();
+  normalizeCliArg(action);
   
   if (action.indexOf(' ') >= 0) {
     DEBUG_SENSORSF("[SENSOR_STREAM_CMD] ERROR: Too many arguments (action='%s')", action.c_str());
@@ -939,8 +938,7 @@ const char* cmd_espnow_sensorbroadcast(const String& argsInput) {
   
   // Parse: <on|off>  (dispatcher strips "espnow sensorbroadcast" prefix)
   String args = argsInput;
-  args.trim();
-  args.toLowerCase();
+  normalizeCliArg(args);
   
   if (args.length() == 0) {
     // No argument - show current status
@@ -1009,7 +1007,7 @@ bool getRemoteGPSData(RemoteGPSData* outData) {
   }
   
   // Parse the JSON data: {"val":1,"fix":1,"quality":1,"sats":8,"lat":37.123,"lon":-122.456,"alt":100.5,"speed":0.5}
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, bestEntry->jsonData, bestEntry->jsonLength);
   if (err) {
     return false;

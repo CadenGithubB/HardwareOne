@@ -238,7 +238,7 @@ struct Settings {
       srAfeGain(1.0f),
       srAgcMode(2),
       srVadMode(3),
-      mqttClientEnabled(true),
+      mqttClientEnabled(false),
       mqttAutoStart(false),
       mqttHost(""),
       mqttPort(1883),
@@ -260,7 +260,9 @@ struct Settings {
       mqttPublishGPS(false),
       mqttPublishAPDS(false),
       mqttPublishRTC(false),
-      mqttPublishGamepad(false) {
+      mqttPublishGamepad(false),
+      crashCount(0),
+      lastResetReason(0) {
     // String members are now initialized in initializer list
   }
 
@@ -429,6 +431,7 @@ struct Settings {
   bool debugCmdflowRouting;
   bool debugCmdflowQueue;
   bool debugCmdflowContext;
+  bool webConsoleDebug;                // Enable browser console.log/warn/debug output in web UI (default: false)
   int logLevel;                        // Severity-based logging level (0=error, 1=warn, 2=info, 3=debug)
   int memorySampleIntervalSec;  // Periodic memory sampling interval in seconds (0=disabled, default: 30)
   // ESP-NOW settings
@@ -586,7 +589,7 @@ struct Settings {
   int srAgcMode;                // AGC mode: 0=off, 1=-9dB, 2=-6dB, 3=-3dB (default: 2)
   int srVadMode;                // VAD sensitivity: 0-4, higher=more sensitive (default: 3)
   // MQTT Home Assistant Integration settings
-  bool mqttClientEnabled;       // Master enable/disable for MQTT subsystem (default: true)
+  bool mqttClientEnabled;       // Master enable/disable for MQTT subsystem (default: false)
   bool mqttAutoStart;           // Auto-start MQTT client at boot if WiFi connected (default: false)
   String mqttHost;              // MQTT broker hostname or IP (default: "")
   int mqttPort;                 // MQTT broker port (default: 1883, 8883 for TLS)
@@ -610,6 +613,10 @@ struct Settings {
   bool mqttPublishAPDS;         // Include gesture/proximity data (default: false)
   bool mqttPublishRTC;          // Include RTC time data (default: false)
   bool mqttPublishGamepad;      // Include gamepad input data (default: false)
+
+  // Crash / reset tracking (persisted from RTC memory on next healthy boot)
+  uint32_t crashCount;          // Accumulated abnormal resets (WDT, panic, brownout)
+  uint32_t lastResetReason;     // esp_reset_reason_t value from last boot
 };
 
 // Global settings instance (defined in .ino)

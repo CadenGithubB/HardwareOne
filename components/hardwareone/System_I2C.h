@@ -22,6 +22,23 @@
 #include "System_Utils.h"
 
 // ============================================================================
+// Sensor restart cooldown - shared across all I2C sensor drivers
+// ============================================================================
+#ifndef MIN_RESTART_DELAY_MS
+#define MIN_RESTART_DELAY_MS 2000
+#endif
+
+// ============================================================================
+// Cache mutex timeout - used when sensor task loops and HTTP handlers lock a
+// sensor-data cache semaphore.  A short timeout (not infinite wait) avoids
+// blocking the HTTP or I2C task if the other side stalls.
+// ============================================================================
+#ifndef HW_CACHE_MUTEX_TIMEOUT_MS
+#define HW_CACHE_MUTEX_TIMEOUT_MS
+static constexpr uint32_t CACHE_MUTEX_TIMEOUT_MS = 100;
+#endif
+
+// ============================================================================
 // Legacy Wrapper Functions - Delegate to Manager
 // ============================================================================
 
@@ -69,15 +86,19 @@ auto i2cTaskWithTimeout(uint8_t address, uint32_t clockHz, uint32_t maxMs, Func&
   return i2cDeviceTransaction(address, clockHz, maxMs, std::forward<Func>(operation));
 }
 
+// Defined here (before the template helpers that need it) rather than in the
+// address table below.  All other I2C_ADDR_* macros live in the address table.
+#define I2C_ADDR_OLED 0x3D
+
 template<typename Func>
 void i2cOledTransactionVoid(uint32_t clockHz, uint32_t timeoutMs, Func&& operation) {
-  i2cDeviceTransactionVoid(0x3D, clockHz, timeoutMs, std::forward<Func>(operation));
+  i2cDeviceTransactionVoid(I2C_ADDR_OLED, clockHz, timeoutMs, std::forward<Func>(operation));
 }
 
 template<typename Func>
 auto i2cOledTransaction(uint32_t clockHz, uint32_t timeoutMs, Func&& operation) 
     -> decltype(operation()) {
-  return i2cDeviceTransaction(0x3D, clockHz, timeoutMs, std::forward<Func>(operation));
+  return i2cDeviceTransaction(I2C_ADDR_OLED, clockHz, timeoutMs, std::forward<Func>(operation));
 }
 
 template<typename Func>
@@ -242,8 +263,9 @@ inline bool i2cBusRecovery() {
 #define I2C_ADDR_TOF        0x29
 #define I2C_ADDR_THERMAL    0x33
 #define I2C_ADDR_APDS       0x39
+// I2C_ADDR_OLED 0x3D — defined above the template helpers; not redefined here
+#define I2C_ADDR_PCA9685    0x40
 #define I2C_ADDR_PRESENCE   0x5A
-#define I2C_ADDR_OLED       0x3D
 #define I2C_ADDR_GAMEPAD    0x50
 #define I2C_ADDR_DS3231     0x68
 
@@ -370,7 +392,7 @@ extern volatile UBaseType_t gThermalWatermarkMin;
 extern volatile UBaseType_t gGamepadWatermarkNow;
 extern volatile UBaseType_t gGamepadWatermarkMin;
 extern uint32_t gWire1DefaultHz;
-extern unsigned long tofLastStopTime;
+extern uint32_t tofLastStopTime;
 extern unsigned long thermalLastStopTime;
 extern volatile bool imuInitRequested;
 extern volatile bool imuInitResult;

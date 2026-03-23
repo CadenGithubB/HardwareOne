@@ -8,6 +8,7 @@
 #include "System_FeatureRegistry.h"
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
+#include "System_Debug.h"
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -897,9 +898,9 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   Serial.println("Assign an optional identity for this device in the ESP-NOW mesh.");
   Serial.println("----------------------------------------");
   Serial.println(" c = Configure (enter fields)");
-  Serial.println(" s = Skip (leave as-is)");
+  Serial.println(" n = Next (skip)");
   Serial.println(" b = Back");
-  Serial.print("Choice [s]: ");
+  Serial.print("Choice: ");
   String introChoice = waitForSerialInputBlocking();
   introChoice.trim();
   if (introChoice.equalsIgnoreCase("b") || introChoice.equalsIgnoreCase("back")) {
@@ -907,13 +908,14 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
     return;
   }
   if (!introChoice.equalsIgnoreCase("c") && !introChoice.equalsIgnoreCase("configure")) {
-    // Default is skip
+    // Skip — disable ESP-NOW since it's unconfigured
+    gSettings.espnowenabled = false;
     if (!wizardNextPage(result)) running = false;
     return;
   }
 
   Serial.println("----------------------------------------");
-  Serial.println("All fields optional. Press Enter to skip, 'b' to go back.");
+  Serial.println("All fields optional. Enter to skip field, 'n' to finish, 'b' to go back.");
   Serial.println("----------------------------------------");
 
   String currentName = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : "HardwareOne";
@@ -921,39 +923,39 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   String deviceName = waitForSerialInputBlocking();
   deviceName.trim();
   if (deviceName.equalsIgnoreCase("b") || deviceName.equalsIgnoreCase("back")) {
-    wizardPrevPage();
-    return;
+    wizardPrevPage(); return;
   }
+  if (deviceName.equalsIgnoreCase("n")) { deviceName = currentName; goto espnow_done; }
   if (deviceName.length() == 0) deviceName = currentName;
   result.espnowFriendlyName = deviceName;
 
-  Serial.print("Room (e.g. 'Living Room'): ");
+  { Serial.print("Room (e.g. 'Living Room'): ");
   String room = waitForSerialInputBlocking();
   room.trim();
   if (room.equalsIgnoreCase("b") || room.equalsIgnoreCase("back")) {
-    wizardPrevPage();
-    return;
+    wizardPrevPage(); return;
   }
-  result.espnowRoom = room;
+  if (room.equalsIgnoreCase("n")) goto espnow_done;
+  result.espnowRoom = room; }
 
-  Serial.print("Zone (e.g. 'North Wall'): ");
+  { Serial.print("Zone (e.g. 'North Wall'): ");
   String zone = waitForSerialInputBlocking();
   zone.trim();
   if (zone.equalsIgnoreCase("b") || zone.equalsIgnoreCase("back")) {
-    wizardPrevPage();
-    return;
+    wizardPrevPage(); return;
   }
-  result.espnowZone = zone;
+  if (zone.equalsIgnoreCase("n")) goto espnow_done;
+  result.espnowZone = zone; }
 
-  Serial.print("The device will be — (m)obile or (s)tationary [m]: ");
+  { Serial.print("The device will be — (m)obile or (s)tationary [m]: ");
   String stat = waitForSerialInputBlocking();
   stat.trim();
   if (stat.equalsIgnoreCase("b") || stat.equalsIgnoreCase("back")) {
-    wizardPrevPage();
-    return;
+    wizardPrevPage(); return;
   }
-  result.espnowStationary = (stat.equalsIgnoreCase("s") || stat.equalsIgnoreCase("stationary"));
+  result.espnowStationary = (stat.equalsIgnoreCase("s") || stat.equalsIgnoreCase("stationary")); }
 
+espnow_done:
   // Apply to settings
   gSettings.bleDeviceName = deviceName;
   gSettings.espnowDeviceName = deviceName;
@@ -980,9 +982,9 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
   Serial.println("Configure a MQTT broker for this device to publish data.");
   Serial.println("----------------------------------------");
   Serial.println(" c = Configure (enter broker details)");
-  Serial.println(" s = Skip (leave as-is)");
+  Serial.println(" n = Next (skip)");
   Serial.println(" b = Back");
-  Serial.print("Choice [s]: ");
+  Serial.print("Choice: ");
   String introChoice = waitForSerialInputBlocking();
   introChoice.trim();
   if (introChoice.equalsIgnoreCase("b") || introChoice.equalsIgnoreCase("back")) {
@@ -990,7 +992,8 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
     return;
   }
   if (!introChoice.equalsIgnoreCase("c") && !introChoice.equalsIgnoreCase("configure")) {
-    // Default is skip
+    // Skip — disable MQTT auto-start since it's unconfigured
+    gSettings.mqttAutoStart = false;
     if (!wizardNextPage(result)) running = false;
     return;
   }
@@ -1377,6 +1380,51 @@ SetupWizardResult runSetupWizard() {
 }
 
 // ============================================================================
+// runAndApplyFeatureWizard - shared entry point for feature configuration.
+// Runs the wizard, saves any WiFi credentials entered, and persists settings.
+// Used by both cmd_featuresetup (CLI) and firstTimeSetupIfNeeded() (FTS).
+// ============================================================================
+
+SetupWizardResult runAndApplyFeatureWizard() {
+  SetupWizardResult result = runSetupWizard();
+
+  if (!result.completed) {
+    broadcastOutput("Feature setup cancelled. No changes saved.");
+    return result;
+  }
+
+  broadcastOutput("Feature configuration complete.");
+  broadcastOutput("Timezone: " + result.timezoneAbbrev);
+  {
+    uint32_t usedKB = 0, totalKB = 1;
+    int pct = 0;
+    getHeapBarData(&usedKB, &totalKB, &pct);
+    uint32_t estFreeKB = (usedKB >= totalKB) ? 0 : (totalKB - usedKB);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Heap estimate: ~%lu KB", (unsigned long)estFreeKB);
+    broadcastOutput(buf);
+  }
+
+#if ENABLE_WIFI
+  if (result.wifiConfigured && result.wifiSSID.length() > 0) {
+    extern bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden);
+    extern void sortWiFiByPriority();
+    extern bool saveWiFiNetworks();
+    upsertWiFiNetwork(result.wifiSSID, result.wifiPassword, 1, false);
+    sortWiFiByPriority();
+    saveWiFiNetworks();
+    gSettings.wifiAutoReconnect = true;
+    broadcastOutput("WiFi credentials saved: " + result.wifiSSID);
+  }
+#endif
+
+  writeSettingsJson();
+  applySettings();
+
+  return result;
+}
+
+// ============================================================================
 // runSerialSetupWizard - delegates to runSetupWizard() when OLED compiled;
 // remains a real implementation only for ENABLE_OLED_DISPLAY=0 builds.
 // ============================================================================
@@ -1431,7 +1479,6 @@ SetupWizardResult runSerialSetupWizard() {
         // Handle WiFi setup
         Serial.println();
         Serial.println("=== WiFi Setup ===");
-        printSerialHeapBar();
         Serial.println("----------------------------------------");
         {
 #if ENABLE_WIFI

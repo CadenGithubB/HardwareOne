@@ -6,45 +6,44 @@
 #define I2CSENSOR_DS3231_H
 
 #include "System_BuildConfig.h"
+#include <stdint.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// I2C address (fixed, cannot be changed)
-#define I2C_ADDR_DS3231 0x68
-
-// RTC DateTime structure (always defined for stubs)
+// RTC type definitions (always available for type-safe references)
 struct RTCDateTime {
-  uint16_t year;    // 2000-2099
-  uint8_t month;    // 1-12
-  uint8_t day;      // 1-31
-  uint8_t hour;     // 0-23
-  uint8_t minute;   // 0-59
-  uint8_t second;   // 0-59
+  uint16_t year;     // 2000-2099
+  uint8_t month;     // 1-12
+  uint8_t day;       // 1-31
+  uint8_t hour;      // 0-23
+  uint8_t minute;    // 0-59
+  uint8_t second;    // 0-59
   uint8_t dayOfWeek; // 1-7 (1=Sunday)
 };
 
-// RTC Cache for thread-safe access (always defined for stubs)
 struct RTCCache {
   SemaphoreHandle_t mutex;
   RTCDateTime dateTime;
-  float temperature;       // DS3231 has built-in temperature sensor
+  float temperature;
   bool dataValid;
   unsigned long lastUpdate;
 };
 
-// State variables (always declared for stubs)
+#if ENABLE_RTC_SENSOR
+
+#include "System_I2C.h"
+
+// State variables
 extern RTCCache gRTCCache;
 extern bool rtcEnabled;
 extern bool rtcConnected;
 extern unsigned long rtcLastStopTime;
 extern TaskHandle_t rtcTaskHandle;
 
-// Command registry (always declared for stubs)
+// Command registry
 struct CommandEntry;
 extern const CommandEntry rtcCommands[];
 extern const size_t rtcCommandsCount;
-
-#if ENABLE_RTC_SENSOR
 
 #include <Arduino.h>
 

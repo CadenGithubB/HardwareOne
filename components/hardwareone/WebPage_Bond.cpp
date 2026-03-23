@@ -6,6 +6,7 @@
 #include <LittleFS.h>
 
 #include "System_User.h"
+#include "System_Utils.h"
 #include "WebPage_Bond.h"
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
@@ -60,7 +61,6 @@ void streamBondInner(httpd_req_t* req) {
 .status-online { background: #28a745; animation: pulse 2s infinite; }
 .status-offline { background: #dc3545; }
 .status-unknown { background: #6c757d; }
-@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
 .health-bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; margin: 8px 0; }
 .health-fill { height: 100%; transition: width 0.5s, background 0.5s; }
 .health-excellent { background: #28a745; }
@@ -765,8 +765,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   char macStr[18] = "00:00:00:00:00:00";
   if (bonded && gSettings.bondPeerMac.length() > 0 && parseMacAddress(gSettings.bondPeerMac, peerMac)) {
     peerConfigured = true;
-    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+    formatMacAddr(peerMac, macStr, sizeof(macStr));
   }
   
   // Get peer name: prefer capability cache, fall back to device registry

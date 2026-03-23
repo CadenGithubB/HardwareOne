@@ -386,7 +386,7 @@ void initDebugSystem() {
       "debug_out",
       DEBUG_OUT_STACK_WORDS,  // ~12KB stack (reduced from 16KB - peak usage 8KB)
       nullptr,
-      1,     // Low priority
+      TASK_PRIORITY_LOW,
       &gDebugOutputTaskHandle
     );
     if (result != pdPASS) {
@@ -1251,6 +1251,15 @@ const char* cmd_debugcommandsystem(const String& argsInput) {
   } else {
     return gSettings.debugCommandSystem ? "debugCommandSystem enabled (persistent)" : "debugCommandSystem disabled (persistent)";
   }
+}
+
+const char* cmd_webconsole(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  int v = valStr.toInt();
+  setSetting(gSettings.webConsoleDebug, (bool)(v != 0));
+  return gSettings.webConsoleDebug ? "webConsole enabled (persistent)" : "webConsole disabled (persistent)";
 }
 
 const char* cmd_debugsettingssystem(const String& argsInput) {
@@ -3105,6 +3114,7 @@ const CommandEntry debugCommands[] = {
   { "memorysampleintervalsec", "Set memory sampling interval in seconds (0=disabled).", true, cmd_memorysampleintervalsec, "Usage: memorysampleintervalsec <0-300>" },
   { "loglevel", "Set log level (error|warn|info|debug).", true, cmd_loglevel },
   { "log", "System-wide logging to file.", false, cmd_log, "Usage: log <start|stop|status>\n  start [filepath] [flags=0xXXXX] [tags=0|1]: Begin system logging\n    filepath: Log file path (auto-generated if omitted)\n    flags: Debug flags to enable (e.g., flags=0x0203)" },
+  { "webconsole", "Enable/disable browser-side debug console output in the web UI.", true, cmd_webconsole, "Usage: webconsole <0|1>" },
 };
 
 const size_t debugCommandsCount = sizeof(debugCommands) / sizeof(debugCommands[0]);

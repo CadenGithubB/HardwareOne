@@ -54,12 +54,6 @@ inline void streamSpeechInner(httpd_req_t* req) {
 .sr-description { color: var(--muted); margin-bottom: 15px; font-size: 0.9em; }
 .sr-controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
 .sr-status { background: var(--crumb-bg); border-radius: 8px; padding: 15px; font-family: 'Courier New', monospace; font-size: 0.9em; border-left: 4px solid var(--link); min-height: 80px; color: var(--panel-fg); white-space: pre-wrap; }
-.status-indicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
-.status-running { background: #28a745; animation: pulse 2s infinite; }
-.status-wake { background: #ffc107; animation: pulse-fast 0.5s infinite; }
-.status-stopped { background: #dc3545; }
-@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-@keyframes pulse-fast { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
 .sr-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 15px; }
 .sr-stat { background: var(--crumb-bg); border-radius: 8px; padding: 12px; text-align: center; }
 .sr-stat-value { font-size: 1.5em; font-weight: bold; color: var(--link); }
@@ -143,7 +137,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
         Recent wake word and command detections. Log updates automatically when SR is running.
       </div>
       <div class='sr-log' id='sr-log'>
-        <div class='sr-log-entry' style='color:#666'>No detections yet...</div>
+        <div class='sr-log-entry' style='color:var(--muted)'>No detections yet...</div>
       </div>
       <div class='sr-info'>
         <strong>Tip:</strong> Place models in <code>/sd/ESP-SR Models/</code> for custom wake words and commands.
@@ -313,7 +307,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
     var logEl = document.getElementById('sr-log');
     if(!logEl) return;
     if(logEntries.length === 0){
-      logEl.innerHTML = '<div class="sr-log-entry" style="color:#666">No detections yet...</div>';
+      logEl.innerHTML = '<div class="sr-log-entry" style="color:var(--muted)">No detections yet...</div>';
       return;
     }
     var html = '';

@@ -11,7 +11,6 @@
 #include "System_FirstTimeSetup.h"
 
 // External references
-extern bool oledConnected;
 extern OLEDAnimationType currentAnimation;
 extern unsigned long animationFrame;
 extern int animationFPS;

@@ -2,21 +2,11 @@
 #define I2CSENSOR_SEESAW_H
 
 #include "System_BuildConfig.h"
-
-#if ENABLE_GAMEPAD_SENSOR
-
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// Forward declarations
-class String;
-class Adafruit_seesaw;
-
-// Seesaw gamepad object (defined in gamepad_sensor.cpp)
-extern Adafruit_seesaw gGamepadSeesaw;
-
-// Control input cache (gamepad)
+// Control input cache structure (always available for type-safe references)
 struct ControlCache {
   SemaphoreHandle_t mutex = nullptr;
   uint32_t gamepadButtons = 0;
@@ -27,7 +17,13 @@ struct ControlCache {
   uint32_t buttonPressedAccum = 0;  // Latched press edges — OR'd in by task, read+cleared by UI
 };
 
-// Global control cache (defined in gamepad_sensor.cpp)
+#if ENABLE_GAMEPAD_SENSOR
+
+// Forward declarations
+class String;
+class Adafruit_seesaw;
+
+extern Adafruit_seesaw gGamepadSeesaw;
 extern ControlCache gControlCache;
 
 // Seesaw gamepad button bit masks (active-low, so invert before checking)

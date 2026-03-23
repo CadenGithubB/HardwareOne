@@ -19,7 +19,6 @@
 #endif
 
 // External references
-extern bool oledConnected;
 
 // Sensor state (managed by I2C system)
 extern bool imuConnected;
