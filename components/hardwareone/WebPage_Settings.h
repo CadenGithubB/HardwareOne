@@ -37,6 +37,17 @@ window._snapshotContainer = function(root) {
 window._isChanged = function(id, val) {
   return !(id in window._settingsBaseline) || window._settingsBaseline[id] !== val;
 };
+// Single CLI command via POST /api/cli (same transport as Debug toggles, WiFi buttons, etc.).
+// Returns a Promise of the response body text. Callers check for "Error" in output or handle .catch.
+window.postSettingsCli = function(cmd) {
+  return fetch('/api/cli', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    credentials: 'same-origin',
+    body: 'cmd=' + encodeURIComponent(cmd)
+  }).then(function(r) { return r.text(); });
+};
+
 window.sendSequential = function(cmds, onDone, onFail) {
   var all = ['beginwrite'].concat(cmds).concat(['savesettings']);
   fetch('/api/cli/batch', {
@@ -50,8 +61,34 @@ window.sendSequential = function(cmds, onDone, onFail) {
     return r.json();
   })
   .then(function(j) {
-    if (j && j.ok) { if (onDone) onDone(); }
-    else { if (onFail) onFail(new Error(j && j.error ? j.error : 'batch failed')); }
+    if (!(j && j.ok)) {
+      if (onFail) onFail(new Error(j && j.error ? j.error : 'batch failed'));
+      return;
+    }
+
+    var results = (j && Array.isArray(j.results)) ? j.results : [];
+    var firstError = null;
+    for (var i = 0; i < results.length; i++) {
+      var out = String(results[i] || '');
+      var low = out.toLowerCase();
+      if (low.indexOf('unknown command') >= 0 ||
+          low.indexOf('error:') >= 0 ||
+          low.indexOf('failed') >= 0 ||
+          low.indexOf('not found') >= 0) {
+        firstError = { index: i, output: out };
+        break;
+      }
+    }
+
+    if (firstError) {
+      var cmd = (all[firstError.index] || '').trim();
+      var msg = 'Command failed: ' + cmd;
+      if (firstError.output) msg += ' -> ' + firstError.output;
+      if (onFail) onFail(new Error(msg));
+      return;
+    }
+
+    if (onDone) onDone();
   })
   .catch(function(err) { if (onFail) onFail(err); });
 };
@@ -848,7 +885,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
       <div id='led-pane' style='display:none'>
         <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:1rem'>
           <label title="Global LED brightness (0-100%)">LED Brightness (%)<br><input type='number' id='ledBrightness' min='0' max='100' step='5' value='100' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:120px' title='LED brightness percentage'></label>
-          <label><input type='checkbox' id='ledStartupEnabled' style='margin-right:0.5rem'>Enable Startup Effect</label>
+          <label style='display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;color:var(--panel-fg);width:100%;min-width:0;box-sizing:border-box'><input type='checkbox' id='ledStartupEnabled' style='flex-shrink:0;width:1rem;height:1rem;margin-top:0.15rem'><span style='flex:1 1 0;min-width:0;line-height:1.35'>Enable Startup Effect</span></label>
         </div>
         <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem;margin-top:0.25rem'>Startup Effect Configuration</div>
           <div style='color:var(--panel-fg);font-size:0.9rem;margin-bottom:0.75rem'>LED effect to run when device finishes booting.</div>
@@ -940,7 +977,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 <script>
 (function(){
-  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps'};
+  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps'};
   function sw(cmd,grp,on,isAll){return '<label class="dbg-sw"><input type="checkbox" class="dbg-cb" data-cmd="'+cmd+'"'+(grp?' data-group="'+grp+'"':'')+(isAll?' data-all="1"':'')+(on?' checked':'')+'><span class="sl"></span></label>';}
   Promise.all([
     fetch('/api/settings/schema',{credentials:'include'}).then(function(r){return r.json();}),
@@ -1081,7 +1118,51 @@ window.sendSequential = function(cmds, onDone, onFail) {
       <div style='color:var(--panel-fg);margin-bottom:0.75rem;font-size:0.9rem'>Manage existing users and their roles.</div>
       <div id='users-pane' style='display:none;margin-top:0.75rem'>
         <div id='users-list' style='min-height:24px;color:var(--panel-fg);margin-bottom:0.75rem'>Loading...</div>
+        <div class='btn-row' style='margin-top:0'>
         <button class='btn' onclick='refreshUsers()' title='Reload list of users'>Refresh Users</button>
+        <button class='btn' onclick='openAddUserModal()' title='Create a new user account'>Add User</button>
+        </div>
+        <div id='add-user-modal' class='modal-overlay' style='display:none;align-items:center;justify-content:center;z-index:10000' onclick='if(event.target===this)closeAddUserModal()'>
+          <div class='modal-dialog' role='dialog' aria-modal='true' onclick='event.stopPropagation()'>
+            <div style='font-weight:bold;margin-bottom:0.75rem;color:var(--panel-fg)'>Add user</div>
+            <div style='display:grid;gap:0.75rem'>
+              <div><label style='display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem'>Username</label>
+              <input type='text' id='add-user-name' class='form-input' autocomplete='off'></div>
+              <div><label style='display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem'>Password</label>
+              <input type='password' id='add-user-pass' class='form-input' autocomplete='new-password'></div>
+              <div><label style='display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem'>Confirm password</label>
+              <input type='password' id='add-user-pass2' class='form-input' autocomplete='new-password'></div>
+              <label style='display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;color:var(--panel-fg);font-size:0.9rem;width:100%;min-width:0;box-sizing:border-box'>
+                <input type='checkbox' id='add-user-mustch' style='margin-top:0.15rem;flex-shrink:0;width:1rem;height:1rem'>
+                <span style='flex:1 1 0;min-width:0;line-height:1.35'>User must set a new password on next login</span>
+              </label>
+              <div class='btn-row' style='justify-content:flex-end;margin-top:0.25rem'>
+                <button type='button' class='btn' onclick='closeAddUserModal()'>Cancel</button>
+                <button type='button' class='btn' onclick='submitAddUser()'>Create</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id='reset-pw-modal' class='modal-overlay' style='display:none;align-items:center;justify-content:center;z-index:10000' onclick='if(event.target===this)closeResetPasswordModal()'>
+          <div class='modal-dialog' role='dialog' aria-modal='true' onclick='event.stopPropagation()'>
+            <div style='font-weight:bold;margin-bottom:0.5rem;color:var(--panel-fg)'>Reset password</div>
+            <div style='font-size:0.9rem;color:var(--muted);margin-bottom:0.75rem' id='reset-pw-for-user'></div>
+            <div style='display:grid;gap:0.75rem'>
+              <div><label style='display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem'>New password</label>
+              <input type='password' id='reset-pw-pass' class='form-input' autocomplete='new-password'></div>
+              <div><label style='display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem'>Confirm new password</label>
+              <input type='password' id='reset-pw-pass2' class='form-input' autocomplete='new-password'></div>
+              <label style='display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;color:var(--panel-fg);font-size:0.9rem;width:100%;min-width:0;box-sizing:border-box'>
+                <input type='checkbox' id='reset-pw-mustch' style='margin-top:0.15rem;flex-shrink:0;width:1rem;height:1rem'>
+                <span style='flex:1 1 0;min-width:0;line-height:1.35'>User must set a new password on next login</span>
+              </label>
+              <div class='btn-row' style='justify-content:flex-end;margin-top:0.25rem'>
+                <button type='button' class='btn' onclick='closeResetPasswordModal()'>Cancel</button>
+                <button type='button' class='btn' onclick='submitResetPassword()'>OK</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
     <div style='background:var(--crumb-bg);border:1px solid var(--border);border-radius:8px;padding:1rem'>
@@ -1478,42 +1559,41 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         $('web-btn').textContent = outWeb ? 'Disable' : 'Enable';
         $('display-value').textContent = outDisplay ? 'Enabled' : 'Disabled';
         $('display-btn').textContent = outDisplay ? 'Disable' : 'Enable';
-        var hw = (s.hardware || {});
-        var led = (hw.led || {});
-        if (led.brightness !== undefined) {
+        // LED: `led` is already s.led from the destructuring line above — keys match ledSettingsModule (ledBrightness, ledStartupEnabled, …)
+        if (led.ledBrightness !== undefined) {
           var b = $('ledBrightness');
-          if (b) b.value = led.brightness;
+          if (b) b.value = led.ledBrightness;
         } else if (s.ledBrightness !== undefined) {
           var b = $('ledBrightness');
           if (b) b.value = s.ledBrightness;
         }
-        var ledEnabled = (led.startupEnabled !== undefined ? led.startupEnabled : s.ledStartupEnabled);
+        var ledEnabled = (led.ledStartupEnabled !== undefined ? led.ledStartupEnabled : s.ledStartupEnabled);
         var chk = $('ledStartupEnabled');
         if (chk) chk.checked = (ledEnabled === 1 || ledEnabled === true);
-        if (led.startupEffect) {
+        if (led.ledStartupEffect !== undefined) {
           var ef = $('ledStartupEffect');
-          if (ef) ef.value = led.startupEffect;
+          if (ef) ef.value = led.ledStartupEffect;
         } else if (s.ledStartupEffect) {
           var ef = $('ledStartupEffect');
           if (ef) ef.value = s.ledStartupEffect;
         }
-        if (led.startupColor) {
+        if (led.ledStartupColor) {
           var c1 = $('ledStartupColor');
-          if (c1) c1.value = led.startupColor;
+          if (c1) c1.value = led.ledStartupColor;
         } else if (s.ledStartupColor) {
           var c1 = $('ledStartupColor');
           if (c1) c1.value = s.ledStartupColor;
         }
-        if (led.startupColor2) {
+        if (led.ledStartupColor2) {
           var c2 = $('ledStartupColor2');
-          if (c2) c2.value = led.startupColor2;
+          if (c2) c2.value = led.ledStartupColor2;
         } else if (s.ledStartupColor2) {
           var c2 = $('ledStartupColor2');
           if (c2) c2.value = s.ledStartupColor2;
         }
-        if (led.startupDuration !== undefined) {
+        if (led.ledStartupDuration !== undefined) {
           var d = $('ledStartupDuration');
-          if (d) d.value = led.startupDuration;
+          if (d) d.value = led.ledStartupDuration;
         } else if (s.ledStartupDuration !== undefined) {
           var d = $('ledStartupDuration');
           if (d) d.value = s.ledStartupDuration;
@@ -2592,6 +2672,82 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       // Remove IPv6 prefix like ::FFFF: to show clean IPv4
       return ip.replace(/^::ffff:/i, '').replace(/^::FFFF:/i, '');
     }
+
+    window.openAddUserModal = function() {
+      var m = $('add-user-modal');
+      if (!m) return;
+      var n = $('add-user-name'), p = $('add-user-pass'), p2 = $('add-user-pass2'), c = $('add-user-mustch');
+      if (n) n.value = '';
+      if (p) p.value = '';
+      if (p2) p2.value = '';
+      if (c) c.checked = false;
+      m.style.display = 'flex';
+    };
+    window.closeAddUserModal = function() {
+      var m = $('add-user-modal');
+      if (m) m.style.display = 'none';
+    };
+    window.submitAddUser = function() {
+      var n = $('add-user-name'), p = $('add-user-pass'), p2 = $('add-user-pass2'), c = $('add-user-mustch');
+      var username = n && n.value ? n.value.trim() : '';
+      var pass = p && p.value ? p.value : '';
+      var pass2 = p2 && p2.value ? p2.value : '';
+      var mustCh = !!(c && c.checked);
+      if (!username) { hwAlert('Enter a username'); return; }
+      if (pass.length < 6) { hwAlert('Password must be at least 6 characters'); return; }
+      if (pass !== pass2) { hwAlert('Passwords do not match'); return; }
+      var cmd = 'user add ' + username + ' ' + pass + ' ' + (mustCh ? '1' : '0');
+      postSettingsCli(cmd)
+        .then(function(t) {
+          if (t && t.indexOf('Error') >= 0) {
+            hwAlert(t);
+            return;
+          }
+          closeAddUserModal();
+          hwAlert(t || 'User created');
+          try { refreshUsers(); } catch (_) {}
+        })
+        .catch(function(e) { hwAlert('Error: ' + (e && e.message ? e.message : String(e))); });
+    };
+
+    window.openResetPasswordModal = function(username) {
+      var m = $('reset-pw-modal');
+      var lab = $('reset-pw-for-user');
+      var p = $('reset-pw-pass'), p2 = $('reset-pw-pass2'), c = $('reset-pw-mustch');
+      window._resetPwTargetUser = username || '';
+      if (lab) lab.textContent = username ? ('User: ' + username) : '';
+      if (p) p.value = '';
+      if (p2) p2.value = '';
+      if (c) c.checked = false;
+      if (m) m.style.display = 'flex';
+    };
+    window.closeResetPasswordModal = function() {
+      var m = $('reset-pw-modal');
+      if (m) m.style.display = 'none';
+      window._resetPwTargetUser = '';
+    };
+    window.submitResetPassword = function() {
+      var username = window._resetPwTargetUser || '';
+      var p = $('reset-pw-pass'), p2 = $('reset-pw-pass2'), c = $('reset-pw-mustch');
+      var pass = p && p.value ? p.value : '';
+      var pass2 = p2 && p2.value ? p2.value : '';
+      var mustCh = !!(c && c.checked);
+      if (!username) { hwAlert('Username required'); return; }
+      if (pass.length < 6) { hwAlert('Password must be at least 6 characters'); return; }
+      if (pass !== pass2) { hwAlert('Passwords do not match'); return; }
+      var cmd = 'user resetpassword ' + username + ' ' + pass + ' ' + (mustCh ? '1' : '0');
+      postSettingsCli(cmd)
+        .then(function(t) {
+          if (t && t.indexOf('Error') >= 0) {
+            hwAlert(t);
+            return;
+          }
+          closeResetPasswordModal();
+          hwAlert(t || 'Password reset');
+          try { refreshUsers(); } catch (_) {}
+        })
+        .catch(function(e) { hwAlert('Error: ' + (e && e.message ? e.message : String(e))); });
+    };
     
     window.refreshUsers = function() {
       var container = $('users-list');
@@ -3153,44 +3309,12 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       .catch(function(e) { alert('Error: ' + e.message); });
     };
 
-    window.resetUserPassword = async function(username) {
+    window.resetUserPassword = function(username) {
       if (!username) {
-        await hwAlert('Username required');
+        hwAlert('Username required');
         return;
       }
-      var newPassword = await hwPrompt('Enter new password for user "' + username + '" (minimum 6 characters):');
-      if (!newPassword) {
-        return;
-      }
-      if (newPassword.length < 6) {
-        await hwAlert('Password must be at least 6 characters');
-        return;
-      }
-      var confirmPassword = await hwPrompt('Confirm new password for "' + username + '":');
-      if (newPassword !== confirmPassword) {
-        await hwAlert('Passwords do not match');
-        return;
-      }
-      var cmd = 'user resetpassword ' + username + ' ' + newPassword;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) {
-        return r.text();
-      })
-      .then(function(t) {
-        if (t.indexOf('Error') >= 0) {
-          alert('Error: ' + t);
-        } else {
-          alert(t);
-        }
-      })
-      .catch(function(e) {
-        alert('Error: ' + e.message);
-      });
+      openResetPasswordModal(username);
     };
     
   } catch(err) {

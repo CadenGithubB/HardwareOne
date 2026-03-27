@@ -11,6 +11,7 @@
 #if ENABLE_WIFI
 #include <WiFi.h>
 #endif
+#include "System_Debug.h"
 
 // RTC OLED display function - shows date, time, and temperature
 // Respects OLED_CONTENT_HEIGHT to not overlap footer/navigation bar
@@ -112,10 +113,10 @@ static void rtcToggleConfirmed(void* userData) {
   extern void executeOLEDCommand(const String& argsInput);
 
   if (rtcEnabled && rtcConnected) {
-    Serial.println("[RTC] Confirmed: Stopping RTC...");
+    DEBUG_RTCF("[RTC] Confirmed: Stopping RTC...");
     executeOLEDCommand("closertc");
   } else {
-    Serial.println("[RTC] Confirmed: Starting RTC...");
+    DEBUG_RTCF("[RTC] Confirmed: Starting RTC...");
     executeOLEDCommand("openrtc");
   }
 }

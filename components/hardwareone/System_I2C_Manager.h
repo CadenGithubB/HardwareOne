@@ -192,6 +192,13 @@ public:
   I2CDevice* getDevice(uint8_t addr);
   I2CDevice* getDeviceByName(const char* name);
   int getDeviceCount() const { return deviceCount; }
+  int getActiveDeviceCount() const {
+    int count = 0;
+    for (int i = 0; i < deviceCount; i++) {
+      if (devices[i].health.lastSuccessTime > 0) count++;
+    }
+    return count;
+  }
   
   // Bus operations
   void initBuses();

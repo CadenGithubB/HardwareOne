@@ -747,7 +747,9 @@ static void publishMeshPeerSensorData() {
     JsonObject sys = doc["system"].to<JsonObject>();
     sys["online"] = health ? isMeshPeerAlive(health) : false;
     if (health) {
-      sys["last_seen"] = (millis() - health->lastHeartbeatMs) / 1000;
+      uint32_t lastContact = health->lastMeshHeartbeatMs;
+      if (health->lastRxActivityMs > lastContact) lastContact = health->lastRxActivityMs;
+      sys["last_seen"] = lastContact ? ((millis() - lastContact) / 1000) : 0;
     }
 
     // Serialize and publish

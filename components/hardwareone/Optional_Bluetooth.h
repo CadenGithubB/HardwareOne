@@ -14,6 +14,7 @@
 
 #include "BLE_Types.h"
 #include "System_Command.h"
+#include "System_Debug.h"
 
 // =============================================================================
 // BLE SERVICE AND CHARACTERISTIC UUIDs
@@ -102,9 +103,9 @@ extern BLESystemState* gBLEState;
 // DEBUG FLAGS
 // =============================================================================
 
-#define DEBUG_BLE_CORE        0x1000000   // Core BLE operations (init, connect, disconnect)
-#define DEBUG_BLE_GATT        0x2000000   // GATT read/write/notify operations
-#define DEBUG_BLE_DATA        0x4000000   // Data transfer details
+#define DEBUG_BLE_CORE        DEBUG_BLUETOOTH_CORE
+#define DEBUG_BLE_GATT        DEBUG_BLUETOOTH_GATT
+#define DEBUG_BLE_DATA        DEBUG_BLUETOOTH_DATA
 
 // =============================================================================
 // PUBLIC API
@@ -136,6 +137,10 @@ bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len);
 // BLE auth/session maintenance
 void bleClearConnectionByConnId(uint16_t connId);
 void bleSessionTick();
+bool bleHasAuthenticatedSession();
+bool bleGetAuthenticatedSessionInfo(int authedIndex, uint16_t& outConnId, String& outUser);
+int bleRevokeUserSessions(const String& username);
+int bleRevokeAllSessions();
 
 // Data streaming pipeline API
 bool blePushSensorData(const char* jsonData, size_t len);
@@ -189,6 +194,10 @@ inline bool sendBLEResponse(const char*, size_t) { return false; }
 inline bool sendBLEResponseToConn(uint16_t, const char*, size_t) { return false; }
 inline void bleClearConnectionByConnId(uint16_t) {}
 inline void bleSessionTick() {}
+inline bool bleHasAuthenticatedSession() { return false; }
+inline bool bleGetAuthenticatedSessionInfo(int, uint16_t&, String&) { return false; }
+inline int bleRevokeUserSessions(const String&) { return 0; }
+inline int bleRevokeAllSessions() { return 0; }
 inline bool isBLERunning() { return false; }
 inline void getBLEStatus(char* buffer, size_t) { if (buffer) buffer[0] = '\0'; }
 inline const char* getBLEStateString() { return "disabled"; }

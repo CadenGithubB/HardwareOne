@@ -284,10 +284,7 @@ void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedWo
   
   // Memory allocation logging removed - LOG_ALLOC_FILE is obsolete
   
-  // Also print to serial for immediate visibility
-  if (gOutputFlags & OUTPUT_SERIAL) {
-    Serial.println(line);
-  }
+  DEBUG_PERFORMANCEF("%s", line.c_str());
 }
 
 // Report all sensor task stacks with comprehensive memory pressure stats

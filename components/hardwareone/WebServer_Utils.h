@@ -1197,7 +1197,7 @@ inline void streamCommonCSS(httpd_req_t* req) {
     ".btn-small{padding:.25rem .5rem;border-radius:6px}"
     ".btn-row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}"
     ".modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000}"
-    ".modal-dialog{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--panel-bg);color:var(--panel-fg);padding:1.25rem;border-radius:8px;min-width:320px;border:1px solid var(--border)}"
+    ".modal-dialog{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--panel-bg);color:var(--panel-fg);padding:1.25rem;border-radius:8px;min-width:320px;max-width:min(420px,calc(100vw - 2rem));box-sizing:border-box;border:1px solid var(--border)}"
     ".table{width:100%;border-collapse:collapse}"
     ".table th,.table td{padding:.5rem;text-align:left;border-bottom:1px solid var(--border);color:var(--panel-fg)}"
     ".table-striped tr:nth-child(odd){background:rgba(255,255,255,.05)}", HTTPD_RESP_USE_STRLEN);

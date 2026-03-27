@@ -20,6 +20,14 @@ enum EspNowMode {
 // Compile-time ceiling for mesh peer slots; used in both real and stub builds.
 #define MESH_PEER_MAX 16
 
+// RX liveness classification (see noteMeshPeerRxActivity in System_ESPNow.cpp).
+enum class EspNowMeshRxKind : uint8_t {
+  MeshHeartbeat = 0,
+  Ack = 1,
+  RxActivity = 2,
+  BootstrapLiveness = 3,
+};
+
 #if ENABLE_ESPNOW
 
 #include <ArduinoJson.h>
@@ -166,17 +174,32 @@ struct MeshTopoNode {
 // Runtime peer slot count (set from gSettings.meshPeerMax at boot, capped to MESH_PEER_MAX)
 extern int gMeshPeerSlots;
 
+// Peer membership vs telemetry:
+//   - Paired remotes live in gEspNow->devices[] (and esp_now peer table).
+//   - MeshPeerHealth is RX telemetry keyed by MAC (mesh HB, ACK, TEXT, etc.).
+//   - lastMeshHeartbeatMs = only V3 HEARTBEAT frames; lastRxActivityMs = any tracked RX
+//     (see noteMeshPeerRxActivity). meshstatus JSON merges devices + health (buildMeshStatusPeersJson).
+
 struct MeshPeerHealth {
   uint8_t mac[6];
-  uint8_t _pad[2];           // Padding for alignment
-  uint32_t lastHeartbeatMs;  // Last time we received MESHHB from this peer
-  uint32_t lastAckMs;        // Last time we received MESHACK from this peer
-  uint32_t heartbeatCount;   // Total heartbeats received
-  uint32_t ackCount;         // Total ACKs received
-  uint32_t lastBootCounter;  // Last known boot counter from this peer
-  int8_t rssi;               // Last RSSI from heartbeat
-  bool isActive;             // true if this slot is in use
+  uint8_t _pad[2];               // Padding for alignment
+  uint32_t lastMeshHeartbeatMs;  // Last V3 HEARTBEAT from this peer (mesh sync / isMeshPeerAlive)
+  uint32_t lastRxActivityMs;     // Last ACK, HEARTBEAT, TEXT, or bootstrap liveness bump
+  uint32_t lastAckMs;            // Last ACK from this peer
+  uint32_t heartbeatCount;       // HEARTBEAT frames received (not pairing bootstrap)
+  uint32_t ackCount;             // ACKs received
+  uint32_t lastBootCounter;      // Last known boot counter from this peer
+  int8_t rssi;                   // Last RSSI from heartbeat payload
+  bool isActive;                 // true if this slot is in use
 };
+
+// hbRssi: pass RSSI from V3PayloadHeartbeat; use -128 to leave peer->rssi unchanged.
+void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi = -128);
+
+// Fills JsonArray for espnow meshstatus: union of active gMeshPeers + paired remotes not yet in slots.
+// JSON keys: mac, name, alive (mesh HB), activityAlive, lastHeartbeat (mesh HB ms), lastRxActivity,
+// lastAck, heartbeatCount, ackCount, secondsSinceHeartbeat, secondsSinceActivity.
+void buildMeshStatusPeersJson(JsonArray peers, uint32_t nowMillis, int* outTotalPeers);
 
 // ==========================
 // Mesh Peer Metadata (device organization for rooms/zones/tags)
@@ -1007,6 +1030,7 @@ extern MeshPeerHealth* gMeshPeers;   // Dynamically allocated [gMeshPeerSlots] a
 
 // Mesh helper utilities (moved from .ino)
 bool isMeshPeerAlive(const MeshPeerHealth* peer);
+bool isMeshPeerRecentlyActive(const MeshPeerHealth* peer);
 MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing = false);
 // Inline: check if MAC is this device
 inline bool isSelfMac(const uint8_t* mac) {
@@ -1091,7 +1115,7 @@ bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msg
 //
 // DESIGN NOTE — stub field divergence is intentional:
 //   The real MeshPeerHealth/MeshTopoNode (above, under #if ENABLE_ESPNOW)
-//   carry full telemetry fields (lastHeartbeatMs, heartbeatCount, ackCount,
+//   carry full telemetry fields (lastMeshHeartbeatMs, lastRxActivityMs, heartbeatCount, ackCount,
 //   lastBootCounter, _pad, etc.).  The stubs below are deliberately minimal —
 //   they only need to satisfy the compiler for *declarations* and for the few
 //   inline no-op stubs that accept MeshPeerHealth* parameters.
@@ -1142,6 +1166,8 @@ inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
 inline void cleanupTimedOutChunks() {}
 inline bool isSelfMac(const uint8_t* mac) { return false; }
 inline bool isMeshPeerAlive(const MeshPeerHealth* peer) { return false; }
+inline bool isMeshPeerRecentlyActive(const MeshPeerHealth*) { return false; }
+inline void noteMeshPeerRxActivity(const uint8_t*, EspNowMeshRxKind, int8_t = -128) {}
 inline bool meshEnabled() { return false; }
 inline bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac) {
   (void)nameOrMac; (void)outMac;

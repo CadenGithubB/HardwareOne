@@ -254,15 +254,15 @@ void initializeCommandSystem() {
   size_t moduleCount = 0;
   const CommandModule* modules = getCommandModules(moduleCount);
 
-  Serial.printf("[CMDREG] Total modules to process: %zu\n", moduleCount);
+  DEBUG_COMMAND_SYSTEMF("[CMDREG] Total modules to process: %zu", moduleCount);
 
   for (size_t i = 0; i < moduleCount; ++i) {
-    Serial.printf("[CMDREG] Module[%zu] '%s': commands=%p count=%zu\n", 
-                  i, modules[i].name, modules[i].commands, modules[i].count);
-    
+    DEBUG_COMMAND_SYSTEMF("[CMDREG] Module[%zu] '%s': commands=%p count=%zu",
+                          i, modules[i].name, modules[i].commands, modules[i].count);
+
     if (!modules[i].commands || modules[i].count == 0) {
-      Serial.printf("[CMDREG] SKIPPING module '%s' (commands=%p count=%zu)\n", 
-                    modules[i].name, modules[i].commands, modules[i].count);
+      DEBUG_COMMAND_SYSTEMF("[CMDREG] SKIPPING module '%s' (commands=%p count=%zu)",
+                          modules[i].name, modules[i].commands, modules[i].count);
       continue;
     }
     
@@ -277,7 +277,7 @@ void initializeCommandSystem() {
     }
   }
 
-  Serial.printf("[REG_INIT] Registry initialized with %d commands\n", commandRegistrySize);
+  DEBUG_COMMAND_SYSTEMF("[REG_INIT] Registry initialized with %d commands", commandRegistrySize);
   
   // Update global pointers
   gCommands = commandRegistry;

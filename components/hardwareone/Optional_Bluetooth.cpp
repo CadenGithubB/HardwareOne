@@ -27,6 +27,8 @@
 #include "System_Settings.h"
 
 #include <esp_gatts_api.h>
+#include <stdlib.h>
+#include <string.h>
 
 // Memory allocation
 
@@ -48,6 +50,15 @@ BLESystemState* gBLEState = nullptr;
 // BLE toggle tracking - ESP32 Bluedroid leaks ~10KB DRAM per init/deinit cycle
 static int sBLEToggleCount = 0;
 static size_t sBLEHeapBeforeInit = 0;
+
+// Cached normalized MAC addresses (uppercase, no heap allocations on lookup)
+static struct {
+  char leftMAC[18];
+  char rightMAC[18];
+  char ringMAC[18];
+  char phoneMAC[18];
+  bool initialized;
+} gBLEMACCache = {{0}, {0}, {0}, {0}, false};
 
 // ESP32 BLE objects
 static BLEServer* pServer = nullptr;
@@ -94,6 +105,7 @@ static void bleMarkActivity(uint16_t connId) {
   int slot = findConnectionSlotByConnId(connId);
   if (slot >= 0) {
     gBLEState->connections[slot].lastActivityMs = millis();
+    BLE_DEBUGF(DEBUG_BLE_DATA, "Activity heartbeat conn=%u slot=%d", (unsigned)connId, slot);
   }
 }
 
@@ -111,6 +123,7 @@ void bleClearConnectionByConnId(uint16_t connId) {
   gBLEState->connections[slot].authed = false;
   gBLEState->connections[slot].user = "";
   gBLEState->connections[slot].lastActivityMs = 0;
+  BLE_DEBUGF(DEBUG_BLE_CORE, "Cleared connection slot=%d for conn=%u", slot, (unsigned)connId);
 }
 
 static bool bleIsAuthed(uint16_t connId, String& outUser) {
@@ -118,6 +131,7 @@ static bool bleIsAuthed(uint16_t connId, String& outUser) {
   if (slot < 0) return false;
   if (!gBLEState->connections[slot].authed) return false;
   outUser = gBLEState->connections[slot].user;
+  BLE_DEBUGF(DEBUG_BLE_CORE, "Session authed lookup conn=%u user='%s'", (unsigned)connId, outUser.c_str());
   return outUser.length() > 0;
 }
 
@@ -126,20 +140,80 @@ static void bleLogout(uint16_t connId) {
   if (slot < 0) return;
   gBLEState->connections[slot].authed = false;
   gBLEState->connections[slot].user = "";
+  BLE_DEBUGF(DEBUG_BLE_CORE, "Session logout conn=%u slot=%d", (unsigned)connId, slot);
 }
 
-static bool bleLogin(uint16_t connId, const String& user, const String& pass) {
-  if (!isValidUser(user, pass)) return false;
+bool bleHasAuthenticatedSession() {
+  if (!gBLEState) return false;
+  for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+    if (!gBLEState->connections[i].active) continue;
+    if (!gBLEState->connections[i].authed) continue;
+    if (gBLEState->connections[i].user.length() == 0) continue;
+    return true;
+  }
+  return false;
+}
+
+bool bleGetAuthenticatedSessionInfo(int authedIndex, uint16_t& outConnId, String& outUser) {
+  if (!gBLEState || authedIndex < 0) return false;
+  int seen = 0;
+  for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+    if (!gBLEState->connections[i].active) continue;
+    if (!gBLEState->connections[i].authed) continue;
+    if (gBLEState->connections[i].user.length() == 0) continue;
+    if (seen == authedIndex) {
+      outConnId = gBLEState->connections[i].connId;
+      outUser = gBLEState->connections[i].user;
+      return true;
+    }
+    seen++;
+  }
+  return false;
+}
+
+int bleRevokeUserSessions(const String& username) {
+  if (!gBLEState || username.length() == 0) return 0;
+  int revoked = 0;
+  for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+    if (!gBLEState->connections[i].active) continue;
+    if (!gBLEState->connections[i].authed) continue;
+    if (!gBLEState->connections[i].user.equalsIgnoreCase(username)) continue;
+    gBLEState->connections[i].authed = false;
+    gBLEState->connections[i].user = "";
+    revoked++;
+  }
+  BLE_DEBUGF(DEBUG_BLE_CORE, "Revoked %d BLE sessions for user '%s'", revoked, username.c_str());
+  return revoked;
+}
+
+int bleRevokeAllSessions() {
+  if (!gBLEState) return 0;
+  int revoked = 0;
+  for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+    if (!gBLEState->connections[i].active) continue;
+    if (!gBLEState->connections[i].authed) continue;
+    gBLEState->connections[i].authed = false;
+    gBLEState->connections[i].user = "";
+    revoked++;
+  }
+  BLE_DEBUGF(DEBUG_BLE_CORE, "Revoked all BLE sessions (%d total)", revoked);
+  return revoked;
+}
+
+// Bind an already-validated user to this BLE connection (password verified elsewhere).
+static bool bleBindSession(uint16_t connId, const String& user) {
   int slot = findConnectionSlotByConnId(connId);
-  if (slot < 0) return false;
+  if (slot < 0 || !gBLEState) return false;
   gBLEState->connections[slot].authed = true;
   gBLEState->connections[slot].user = user;
   gBLEState->connections[slot].lastActivityMs = millis();
+  BLE_DEBUGF(DEBUG_BLE_CORE, "Session bound conn=%u slot=%d user='%s'", (unsigned)connId, slot, user.c_str());
   return true;
 }
 
 static void bleSendAuthRequired(uint16_t connId) {
   static const char* msg = "Authentication required. Use: login <username> <password>";
+  BLE_DEBUGF(DEBUG_BLE_CORE, "Auth required notice conn=%u", (unsigned)connId);
   sendBLEResponseToConn(connId, msg, strlen(msg));
 }
 
@@ -147,9 +221,51 @@ static void bleSendAuthRequired(uint16_t connId) {
 // DEVICE TYPE IDENTIFICATION
 // =============================================================================
 
-// Convert MAC address to string for comparison — delegates to System_Utils shared helper
-static String macToString(const uint8_t* mac) {
-  return formatMacAddrStr(mac);
+// Convert MAC address to stack buffer (zero heap allocations)
+static void macToStackBuf(const uint8_t* mac, char* buf) {
+  snprintf(buf, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+// Update MAC address cache from settings (call when settings change)
+static void bleUpdateMACCache() {
+  // Left glasses MAC
+  if (gSettings.bleGlassesLeftMAC.length() > 0) {
+    strncpy(gBLEMACCache.leftMAC, gSettings.bleGlassesLeftMAC.c_str(), sizeof(gBLEMACCache.leftMAC) - 1);
+    gBLEMACCache.leftMAC[sizeof(gBLEMACCache.leftMAC) - 1] = '\0';
+    for (char* p = gBLEMACCache.leftMAC; *p; p++) *p = toupper(*p);
+  } else {
+    gBLEMACCache.leftMAC[0] = '\0';
+  }
+  
+  // Right glasses MAC
+  if (gSettings.bleGlassesRightMAC.length() > 0) {
+    strncpy(gBLEMACCache.rightMAC, gSettings.bleGlassesRightMAC.c_str(), sizeof(gBLEMACCache.rightMAC) - 1);
+    gBLEMACCache.rightMAC[sizeof(gBLEMACCache.rightMAC) - 1] = '\0';
+    for (char* p = gBLEMACCache.rightMAC; *p; p++) *p = toupper(*p);
+  } else {
+    gBLEMACCache.rightMAC[0] = '\0';
+  }
+  
+  // Ring MAC
+  if (gSettings.bleRingMAC.length() > 0) {
+    strncpy(gBLEMACCache.ringMAC, gSettings.bleRingMAC.c_str(), sizeof(gBLEMACCache.ringMAC) - 1);
+    gBLEMACCache.ringMAC[sizeof(gBLEMACCache.ringMAC) - 1] = '\0';
+    for (char* p = gBLEMACCache.ringMAC; *p; p++) *p = toupper(*p);
+  } else {
+    gBLEMACCache.ringMAC[0] = '\0';
+  }
+  
+  // Phone MAC
+  if (gSettings.blePhoneMAC.length() > 0) {
+    strncpy(gBLEMACCache.phoneMAC, gSettings.blePhoneMAC.c_str(), sizeof(gBLEMACCache.phoneMAC) - 1);
+    gBLEMACCache.phoneMAC[sizeof(gBLEMACCache.phoneMAC) - 1] = '\0';
+    for (char* p = gBLEMACCache.phoneMAC; *p; p++) *p = toupper(*p);
+  } else {
+    gBLEMACCache.phoneMAC[0] = '\0';
+  }
+  
+  gBLEMACCache.initialized = true;
 }
 
 // Convert device type to human-readable string
@@ -164,34 +280,29 @@ const char* bleDeviceTypeToString(BLEDeviceType type) {
   }
 }
 
-// Identify device type by MAC address
+// Identify device type by MAC address (zero heap allocations)
 BLEDeviceType bleIdentifyDeviceByMAC(const uint8_t* mac) {
-  String macStr = macToString(mac);
-  macStr.toUpperCase();  // Normalize to uppercase
-  
-  // Check against known device MACs
-  if (gSettings.bleGlassesLeftMAC.length() > 0) {
-    String leftMAC = gSettings.bleGlassesLeftMAC;
-    leftMAC.toUpperCase();
-    if (macStr == leftMAC) return BLE_DEVICE_GLASSES_LEFT;
+  // Ensure cache is initialized
+  if (!gBLEMACCache.initialized) {
+    bleUpdateMACCache();
   }
   
-  if (gSettings.bleGlassesRightMAC.length() > 0) {
-    String rightMAC = gSettings.bleGlassesRightMAC;
-    rightMAC.toUpperCase();
-    if (macStr == rightMAC) return BLE_DEVICE_GLASSES_RIGHT;
-  }
+  // Convert incoming MAC to uppercase string on stack
+  char macStr[18];
+  macToStackBuf(mac, macStr);
   
-  if (gSettings.bleRingMAC.length() > 0) {
-    String ringMAC = gSettings.bleRingMAC;
-    ringMAC.toUpperCase();
-    if (macStr == ringMAC) return BLE_DEVICE_RING;
+  // Check against cached normalized MACs
+  if (gBLEMACCache.leftMAC[0] != '\0' && strcmp(macStr, gBLEMACCache.leftMAC) == 0) {
+    return BLE_DEVICE_GLASSES_LEFT;
   }
-  
-  if (gSettings.blePhoneMAC.length() > 0) {
-    String phoneMAC = gSettings.blePhoneMAC;
-    phoneMAC.toUpperCase();
-    if (macStr == phoneMAC) return BLE_DEVICE_PHONE;
+  if (gBLEMACCache.rightMAC[0] != '\0' && strcmp(macStr, gBLEMACCache.rightMAC) == 0) {
+    return BLE_DEVICE_GLASSES_RIGHT;
+  }
+  if (gBLEMACCache.ringMAC[0] != '\0' && strcmp(macStr, gBLEMACCache.ringMAC) == 0) {
+    return BLE_DEVICE_RING;
+  }
+  if (gBLEMACCache.phoneMAC[0] != '\0' && strcmp(macStr, gBLEMACCache.phoneMAC) == 0) {
+    return BLE_DEVICE_PHONE;
   }
   
   return BLE_DEVICE_UNKNOWN;
@@ -247,6 +358,14 @@ class ServerCallbacks : public BLEServerCallbacks {
     if (gBLEState->activeConnectionCount >= BLE_MAX_CONNECTIONS) {
       BLEDevice::stopAdvertising();
     }
+
+    BLE_DEBUGF(DEBUG_BLE_CORE,
+               "ISR connect conn=%u slot=%d type=%d active=%d/%d",
+               (unsigned)param->connect.conn_id,
+               slot,
+               (int)gBLEState->connections[slot].deviceType,
+               gBLEState->activeConnectionCount,
+               BLE_MAX_CONNECTIONS);
   }
   
   void onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) override {
@@ -274,6 +393,12 @@ class ServerCallbacks : public BLEServerCallbacks {
     if (gBLEState->activeConnectionCount < BLE_MAX_CONNECTIONS && gBLEState->initialized) {
       startBLEAdvertising();
     }
+
+    BLE_DEBUGF(DEBUG_BLE_CORE,
+               "ISR disconnect conn=%u remaining=%d state=%d",
+               param ? (unsigned)param->disconnect.conn_id : 0,
+               gBLEState->activeConnectionCount,
+               (int)gBLEState->connectionState);
   }
 };
 
@@ -296,6 +421,11 @@ class CmdRequestCallbacks : public BLECharacteristicCallbacks {
       gBLEState->deferredCmdReceivedConnId = param->write.conn_id;
       gBLEState->deferredCmdReceivedLen = value.length();
       gBLEState->deferredCmdReceivedPending = true;
+
+      BLE_DEBUGF(DEBUG_BLE_GATT,
+                 "Command write conn=%u len=%u",
+                 (unsigned)param->write.conn_id,
+                 (unsigned)value.length());
       
       // Route to processIncomingBLECommand which handles lightweight ops directly
       // and routes heavy commands through cmd_exec task
@@ -331,11 +461,42 @@ extern AuthContext gExecAuthContext;
 // External async command submission
 extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
 
+struct BleLoginAsyncJob {
+  uint16_t connId;
+  char user[64];
+};
+
 // Async callback for BLE command results - called on cmd_exec task
 static void bleCommandResultCallback(bool ok, const char* result, void* userData) {
   uint16_t connId = (uint16_t)(uintptr_t)userData;
   BLE_DEBUGF(DEBUG_BLE_DATA, "Async command result: ok=%d len=%zu connId=%u", ok, strlen(result), connId);
   sendBLEResponseToConn(connId, result, strlen(result));
+}
+
+// Login runs password verification (mbedtls / PBKDF2) — must NOT run on BTC_TASK (~3KB stack).
+// cmd_login + loginTransport run on cmd_exec_task; we then bind the GATT connection session here.
+static void bleLoginAsyncCallback(bool cmdExecOk, const char* result, void* userData) {
+  BleLoginAsyncJob* job = (BleLoginAsyncJob*)userData;
+  if (!job) return;
+
+  const char* res = result ? result : "";
+  bool authOk = cmdExecOk && (strstr(res, "Login successful") != nullptr);
+
+  if (authOk) {
+    BLE_DEBUGF(DEBUG_BLE_CORE, "Login success conn=%u user='%s'", (unsigned)job->connId, job->user);
+    (void)bleBindSession(job->connId, String(job->user));
+    // Auto-enable BLE broadcast output on first authenticated session
+    gOutputFlags |= OUTPUT_BLE;
+    char out[160];
+    snprintf(out, sizeof(out), "[ble] Login successful. User: %s%s", job->user,
+             isAdminUser(String(job->user)) ? " (admin)" : "");
+    sendBLEResponseToConn(job->connId, out, strlen(out));
+  } else {
+    BLE_DEBUGF(DEBUG_BLE_CORE, "Login FAILED conn=%u result='%s'", (unsigned)job->connId, res);
+    const char* msg = (res[0] != '\0') ? res : "[ble] Authentication failed.";
+    sendBLEResponseToConn(job->connId, msg, strlen(msg));
+  }
+  free(job);
 }
 
 // Forward declaration for OLED message history
@@ -352,79 +513,113 @@ void bleAddMessageToHistory(const char* msg);
 #endif
 
 static void processIncomingBLECommand(uint16_t connId, const char* data, size_t len) {
-  // Build printable command string (filter non-printable bytes, trim)
-  String cmd;
-  cmd.reserve(len);
-  for (size_t i = 0; i < len; i++) {
+  // Build printable command string (filter non-printable bytes) - stack buffer, zero heap allocations
+  char cmdBuf[512];
+  size_t outIdx = 0;
+  
+  for (size_t i = 0; i < len && outIdx < sizeof(cmdBuf) - 1; i++) {
     uint8_t b = ((const uint8_t*)data)[i];
     if (b == 0) continue;  // Skip NUL bytes
     if (b == '\r' || b == '\n' || b == '\t') {
-      cmd += ' ';
-      continue;
-    }
-    if (b >= 32 && b <= 126) {  // Printable ASCII only
-      cmd += (char)b;
+      cmdBuf[outIdx++] = ' ';
+    } else if (b >= 32 && b <= 126) {  // Printable ASCII only
+      cmdBuf[outIdx++] = (char)b;
     }
   }
-  cmd.trim();
+  cmdBuf[outIdx] = '\0';
+  
+  // Trim leading spaces
+  char* cmdStart = cmdBuf;
+  while (*cmdStart == ' ') cmdStart++;
+  
+  // Trim trailing spaces in-place
+  while (outIdx > 0 && cmdBuf[outIdx - 1] == ' ') cmdBuf[--outIdx] = '\0';
   
   // Ignore empty commands
-  if (cmd.length() == 0) {
+  if (*cmdStart == '\0') {
     BLE_DEBUGF(DEBUG_BLE_DATA, "Ignoring empty/non-printable command");
     return;
   }
 
   bleMarkActivity(connId);
   
-  // Copy to cmdBuf for logging and OLED history
-  char cmdBuf[512];
-  strncpy(cmdBuf, cmd.c_str(), sizeof(cmdBuf) - 1);
-  cmdBuf[sizeof(cmdBuf) - 1] = '\0';
-  
-  BLE_DEBUGF(DEBUG_BLE_DATA, "Processing command: %s", cmdBuf);
+  BLE_DEBUGF(DEBUG_BLE_DATA, "Processing command: %s", cmdStart);
   
   // Add to OLED message history
   #if ENABLE_OLED_DISPLAY
   {
     char tagged[BLE_MSG_MAX_LEN];
-    snprintf(tagged, sizeof(tagged), "RX:%.*s", (int)(BLE_MSG_MAX_LEN - 4), cmdBuf);
+    snprintf(tagged, sizeof(tagged), "RX:%.*s", (int)(BLE_MSG_MAX_LEN - 4), cmdStart);
     bleAddMessageToHistory(tagged);
   }
   #endif
-  
-  String lc = cmd;
-  lc.toLowerCase();
-  lc.trim();
 
-  // Session commands
-  if (lc.startsWith("login ")) {
-    String rest = cmd.substring(6);
-    rest.trim();
-    int sp = rest.indexOf(' ');
-    if (sp <= 0) {
+  // Session commands - use case-insensitive comparison without String allocation
+  if (strncasecmp(cmdStart, "login ", 6) == 0) {
+    // Parse username and password from "login <user> <pass>"
+    const char* rest = cmdStart + 6;
+    while (*rest == ' ') rest++;  // Skip leading spaces
+    
+    const char* sp = strchr(rest, ' ');
+    if (!sp) {
       const char* msg = "Usage: login <username> <password>";
       sendBLEResponseToConn(connId, msg, strlen(msg));
       return;
     }
-    String u = rest.substring(0, sp);
-    String p = rest.substring(sp + 1);
-    if (bleLogin(connId, u, p)) {
-      char out[80];
-      snprintf(out, sizeof(out), "[ble] Login successful. User: %s%s", u.c_str(), isAdminUser(u) ? " (admin)" : "");
-      sendBLEResponseToConn(connId, out, strlen(out));
-    } else {
-      const char* msg = "[ble] Authentication failed.";
+    
+    size_t ulen = sp - rest;
+    char u[64];
+    strncpy(u, rest, ulen < sizeof(u) - 1 ? ulen : sizeof(u) - 1);
+    u[ulen < sizeof(u) - 1 ? ulen : sizeof(u) - 1] = '\0';
+    
+    const char* pstart = sp + 1;
+    while (*pstart == ' ') pstart++;  // Skip spaces before password
+    char p[128];
+    strncpy(p, pstart, sizeof(p) - 1);
+    p[sizeof(p) - 1] = '\0';
+    // Defer to cmd_exec_task — isValidUser() uses too much stack for BTC_TASK (see bleLoginAsyncCallback).
+    BleLoginAsyncJob* job = (BleLoginAsyncJob*)malloc(sizeof(BleLoginAsyncJob));
+    if (!job) {
+      const char* msg = "Error: out of memory";
+      sendBLEResponseToConn(connId, msg, strlen(msg));
+      return;
+    }
+    memset(job, 0, sizeof(*job));
+    job->connId = connId;
+    strncpy(job->user, u, sizeof(job->user) - 1);
+
+    Command ucmd;
+    char loginCmd[256];
+    snprintf(loginCmd, sizeof(loginCmd), "login %s %s bluetooth", u, p);
+    ucmd.line = loginCmd;
+    ucmd.ctx.origin = ORIGIN_BLUETOOTH;
+    ucmd.ctx.auth.transport = SOURCE_BLUETOOTH;
+    ucmd.ctx.auth.path = "/ble/cli";
+    ucmd.ctx.auth.ip = kBleIpTag;
+    ucmd.ctx.auth.sid = String(connId);
+    ucmd.ctx.auth.opaque = nullptr;
+    ucmd.ctx.auth.user = "";
+    ucmd.ctx.validateOnly = false;
+    ucmd.ctx.outputMask = CMD_OUT_LOG | CMD_OUT_BLE;
+    ucmd.ctx.replyHandle = nullptr;
+    ucmd.ctx.httpReq = nullptr;
+    ucmd.ctx.id = (uint32_t)millis();
+    ucmd.ctx.timestampMs = (uint32_t)millis();
+
+    if (!submitCommandAsync(ucmd, bleLoginAsyncCallback, job)) {
+      free(job);
+      const char* msg = "Error: Failed to queue command";
       sendBLEResponseToConn(connId, msg, strlen(msg));
     }
     return;
   }
-  if (lc == "logout") {
+  if (strcasecmp(cmdStart, "logout") == 0) {
     bleLogout(connId);
     const char* msg = "[ble] Logged out.";
     sendBLEResponseToConn(connId, msg, strlen(msg));
     return;
   }
-  if (lc == "whoami") {
+  if (strcasecmp(cmdStart, "whoami") == 0) {
     String u;
     if (bleIsAuthed(connId, u)) {
       char out[80];
@@ -449,12 +644,12 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
   // Execute command via central cmd_exec task (avoids BTC_TASK stack overflow)
   // Build Command structure for async submission
   Command ucmd;
-  ucmd.line = cmdBuf;
-  ucmd.ctx.origin = ORIGIN_SYSTEM;  // BLE commands treated as system origin
+  ucmd.line = cmdStart;
+  ucmd.ctx.origin = ORIGIN_BLUETOOTH;
   ucmd.ctx.auth.transport = SOURCE_BLUETOOTH;
   ucmd.ctx.auth.path = "/ble/cli";
   ucmd.ctx.auth.ip = kBleIpTag;
-  ucmd.ctx.auth.sid = "";
+  ucmd.ctx.auth.sid = String(connId);
   ucmd.ctx.auth.opaque = nullptr;
   if (gSettings.bluetoothRequireAuth) {
     String u;
@@ -464,7 +659,7 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
     ucmd.ctx.auth.user = "";
   }
   ucmd.ctx.validateOnly = false;
-  ucmd.ctx.outputMask = 0;
+  ucmd.ctx.outputMask = CMD_OUT_LOG | CMD_OUT_BLE;
   ucmd.ctx.replyHandle = nullptr;
   ucmd.ctx.httpReq = nullptr;
   ucmd.ctx.id = (uint32_t)millis();
@@ -783,6 +978,8 @@ uint32_t getBLEConnectionDuration() {
 
 bool sendBLEResponse(const char* data, size_t len) {
   if (!isBLEConnected() || !pCmdResponseChar) {
+    BLE_DEBUGF(DEBUG_BLE_DATA, "sendBLEResponse dropped (connected=%d char=%p)",
+               isBLEConnected(), (void*)pCmdResponseChar);
     return false;
   }
   
@@ -803,12 +1000,21 @@ bool sendBLEResponse(const char* data, size_t len) {
 }
 
 bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len) {
-  (void)connId;  // Currently using broadcast; per-conn targeting would need gatts_if access
-  
-  // Use the standard broadcast response for now
-  // The BLE library's notify() sends to all subscribed clients
-  // True per-connection targeting would require access to private BLEServer::getGattsIf()
-  return sendBLEResponse(data, len);
+  if (!data || len == 0) return false;
+
+  if (!gBLEState || gBLEState->activeConnectionCount <= 1) {
+    BLE_DEBUGF(DEBUG_BLE_DATA, "sendBLEResponseToConn passthrough conn=%u", (unsigned)connId);
+    return sendBLEResponse(data, len);
+  }
+
+  if (!ensureDebugBuffer()) {
+    return sendBLEResponse(data, len);
+  }
+
+  char* tagged = getDebugBuffer();
+  snprintf(tagged, 1024, "[ble conn:%u] %.*s", (unsigned)connId, (int)len, data);
+  BLE_DEBUGF(DEBUG_BLE_DATA, "sendBLEResponseToConn fallback broadcast (conn=%u)", (unsigned)connId);
+  return sendBLEResponse(tagged, strlen(tagged));
 }
 
 void bleSessionTick() {
@@ -833,6 +1039,10 @@ void bleSessionTick() {
     if (gBLEState->deferredDisconnectActiveCount < BLE_MAX_CONNECTIONS) {
       BLE_DEBUGF(DEBUG_BLE_CORE, "Auto-restarted advertising (slots available)");
     }
+    // Auto-disable BLE broadcast output when no authenticated sessions remain
+    if (!bleHasAuthenticatedSession()) {
+      gOutputFlags &= ~OUTPUT_BLE;
+    }
   }
   
   // Handle deferred command received event (set by callback, processed here with proper stack)
@@ -855,8 +1065,18 @@ void bleSessionTick() {
       sendBLEResponseToConn(gBLEState->connections[i].connId, msg, strlen(msg));
       gBLEState->connections[i].authed = false;
       gBLEState->connections[i].user = "";
+      BLE_DEBUGF(DEBUG_BLE_CORE,
+                 "Session expired conn=%u user='%s' idle_ms=%lu",
+                 gBLEState->connections[i].connId,
+                 gBLEState->connections[i].user.c_str(),
+                 (unsigned long)(now - gBLEState->connections[i].lastActivityMs));
+      // Auto-disable BLE broadcast output when no authenticated sessions remain
+      if (!bleHasAuthenticatedSession()) {
+        gOutputFlags &= ~OUTPUT_BLE;
+      }
     }
   }
+  BLE_DEBUGF(DEBUG_BLE_CORE, "Session tick");
 }
 
 // =============================================================================
@@ -902,11 +1122,13 @@ void getBLEStatus(char* buffer, size_t bufferSize) {
              getBLEStateString(),
              gBLEState->totalConnections);
   }
+  BLE_DEBUGF(DEBUG_BLE_CORE, "BLE status requested");
 }
 
 void bleApplySettings() {
-  // Apply settings from gSettings if needed
-  BLE_DEBUGF(DEBUG_BLE_CORE, "Settings applied");
+  // Refresh MAC address cache when settings change
+  bleUpdateMACCache();
+  BLE_DEBUGF(DEBUG_BLE_CORE, "Settings applied, MAC cache refreshed");
 }
 
 // =============================================================================
@@ -931,11 +1153,13 @@ static const char* cmd_blestart(const String& argsInput) {
   if (!advOk) {
     return "Failed to start advertising";
   }
+  BLE_DEBUGF(DEBUG_BLE_CORE, "BLE started and advertising");
   return "Bluetooth started and advertising";
 }
 
 static const char* cmd_blestop(const String& argsInput) {
   deinitBluetooth();
+  BLE_DEBUGF(DEBUG_BLE_CORE, "BLE stopped");
   return "Bluetooth stopped";
 }
 
@@ -961,10 +1185,11 @@ static const char* cmd_blestatus(const String& argsInput) {
   for (int i = 0; i < BLE_MAX_CONNECTIONS && remaining > 100; i++) {
     if (gBLEState->connections[i].active) {
       uint32_t duration = (millis() - gBLEState->connections[i].connectedSince) / 1000;
-      String macStr = macToString(gBLEState->connections[i].deviceAddr);
+      char macStr[18];
+      macToStackBuf(gBLEState->connections[i].deviceAddr, macStr);
       written = snprintf(buf + offset, remaining, "[%d] %s\n    MAC: %s | %lu sec | %lu cmds\n", 
                i, gBLEState->connections[i].deviceName.c_str(),
-               macStr.c_str(), duration, gBLEState->connections[i].commandsReceived);
+               macStr, duration, gBLEState->connections[i].commandsReceived);
       if (written > 0) { offset += written; remaining -= written; }
     }
   }
@@ -977,7 +1202,8 @@ static const char* cmd_blestatus(const String& argsInput) {
   
   // Also broadcast to serial for backwards compatibility
   broadcastOutput(buf);
-  
+  BLE_DEBUGF(DEBUG_BLE_CORE, "BLE status requested. Active=%d", gBLEState->activeConnectionCount);
+
   return buf;
 }
 
@@ -985,14 +1211,17 @@ static const char* cmd_bledisconnect(const String& argsInput) {
   if (!isBLEConnected()) {
     return "No client connected";
   }
+  BLE_DEBUGF(DEBUG_BLE_CORE, "Manual disconnect requested");
   disconnectBLE();
   return "Disconnecting client...";
 }
 
 static const char* cmd_bleadv(const String& argsInput) {
   if (startBLEAdvertising()) {
+    BLE_DEBUGF(DEBUG_BLE_CORE, "bleadv manual trigger success");
     return "Advertising started";
   }
+  BLE_DEBUGF(DEBUG_BLE_CORE, "bleadv manual trigger failed");
   return "Failed to start advertising";
 }
 
@@ -1001,26 +1230,20 @@ static const char* cmd_blesend(const String& argsInput) {
     return "No client connected";
   }
   
-  // Extract message after command
-  String message = argsInput;
-  message.trim();
+  // Extract message after first space (skip command name) - zero heap allocations
+  const char* msg = argsInput.c_str();
+  while (*msg && *msg != ' ') msg++;  // Skip command name
+  while (*msg == ' ') msg++;  // Skip spaces
   
-  // Remove "blesend" prefix
-  int spaceIdx = message.indexOf(' ');
-  if (spaceIdx > 0) {
-    message = message.substring(spaceIdx + 1);
-    message.trim();
-  } else {
+  if (*msg == '\0') {
     return "Usage: blesend <message>";
   }
   
-  if (message.length() == 0) {
-    return "Usage: blesend <message>";
-  }
-  
-  if (sendBLEResponse(message.c_str(), message.length())) {
+  if (sendBLEResponse(msg, strlen(msg))) {
+    BLE_DEBUGF(DEBUG_BLE_DATA, "blesend transmitted len=%u", (unsigned)strlen(msg));
     return "Message sent via BLE";
   }
+  BLE_DEBUGF(DEBUG_BLE_DATA, "blesend failed len=%u", (unsigned)strlen(msg));
   return "Failed to send message";
 }
 
@@ -1029,13 +1252,12 @@ static const char* cmd_blestream(const String& argsInput) {
     return "Bluetooth not initialized";
   }
   
-  String args = argsInput;
-  args.trim();
-  int spaceIdx = args.indexOf(' ');
-  if (spaceIdx > 0) {
-    args = args.substring(spaceIdx + 1);
-    args.trim();
-  } else {
+  // Parse args - skip command name, zero heap allocations
+  const char* args = argsInput.c_str();
+  while (*args && *args != ' ') args++;  // Skip command name
+  while (*args == ' ') args++;  // Skip spaces
+  
+  if (*args == '\0') {
     // Show current status
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     char* buf = getDebugBuffer();
@@ -1056,49 +1278,63 @@ static const char* cmd_blestream(const String& argsInput) {
   }
   
   // Parse command: blestream <on|off|sensors|system|events|interval>
-  if (args.startsWith("on")) {
+  if (strncasecmp(args, "on", 2) == 0 && (args[2] == '\0' || args[2] == ' ')) {
     bleEnableStream(BLE_STREAM_ALL);
+    BLE_DEBUGF(DEBUG_BLE_DATA, "blestream all=ON");
     return "All streams enabled";
-  } else if (args.startsWith("off")) {
+  } else if (strncasecmp(args, "off", 3) == 0 && (args[3] == '\0' || args[3] == ' ')) {
     bleDisableStream(BLE_STREAM_ALL);
+    BLE_DEBUGF(DEBUG_BLE_DATA, "blestream all=OFF");
     return "All streams disabled";
-  } else if (args.startsWith("sensors")) {
-    if (args.indexOf("off") > 0) {
+  } else if (strncasecmp(args, "sensors", 7) == 0) {
+    if (strstr(args, "off") != nullptr) {
       bleDisableStream(BLE_STREAM_SENSORS);
+      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream sensors=OFF");
       return "Sensor stream disabled";
     } else {
       bleEnableStream(BLE_STREAM_SENSORS);
+      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream sensors=ON");
       return "Sensor stream enabled";
     }
-  } else if (args.startsWith("system")) {
-    if (args.indexOf("off") > 0) {
+  } else if (strncasecmp(args, "system", 6) == 0) {
+    if (strstr(args, "off") != nullptr) {
       bleDisableStream(BLE_STREAM_SYSTEM);
+      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream system=OFF");
       return "System stream disabled";
     } else {
       bleEnableStream(BLE_STREAM_SYSTEM);
+      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream system=ON");
       return "System stream enabled";
     }
-  } else if (args.startsWith("events")) {
-    if (args.indexOf("off") > 0) {
+  } else if (strncasecmp(args, "events", 6) == 0) {
+    if (strstr(args, "off") != nullptr) {
       bleDisableStream(BLE_STREAM_EVENTS);
+      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream events=OFF");
       return "Event stream disabled";
     } else {
       bleEnableStream(BLE_STREAM_EVENTS);
+      BLE_DEBUGF(DEBUG_BLE_DATA, "blestream events=ON");
       return "Event stream enabled";
     }
-  } else if (args.startsWith("interval")) {
+  } else if (strncasecmp(args, "interval", 8) == 0) {
     // Parse: blestream interval <sensor_ms> <system_ms>
-    int space1 = args.indexOf(' ');
-    int space2 = args.indexOf(' ', space1 + 1);
-    if (space1 > 0 && space2 > 0) {
-      uint32_t sensorMs = args.substring(space1 + 1, space2).toInt();
-      uint32_t systemMs = args.substring(space2 + 1).toInt();
+    const char* p = args + 8;
+    while (*p == ' ') p++;
+    uint32_t sensorMs = atoi(p);
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    uint32_t systemMs = atoi(p);
+    if (sensorMs > 0 && systemMs > 0) {
       if (sensorMs >= 100 && systemMs >= 100) {
         bleSetStreamInterval(sensorMs, systemMs);
         if (!ensureDebugBuffer()) return "Intervals set";
         char* buf = getDebugBuffer();
         snprintf(buf, 1024, "Intervals set: sensor=%lums system=%lums",
                  (unsigned long)sensorMs, (unsigned long)systemMs);
+        BLE_DEBUGF(DEBUG_BLE_DATA,
+                   "blestream interval sensor=%lu system=%lu",
+                   (unsigned long)sensorMs,
+                   (unsigned long)systemMs);
         return buf;
       }
       return "Intervals must be >= 100ms";
@@ -1114,45 +1350,46 @@ static const char* cmd_bleevent(const String& argsInput) {
     return "No client connected";
   }
   
-  // Extract message after command
-  String message = argsInput;
-  message.trim();
-  int spaceIdx = message.indexOf(' ');
-  if (spaceIdx > 0) {
-    message = message.substring(spaceIdx + 1);
-    message.trim();
-  } else {
+  // Extract message after first space - zero heap allocations
+  const char* msg = argsInput.c_str();
+  while (*msg && *msg != ' ') msg++;  // Skip command name
+  while (*msg == ' ') msg++;  // Skip spaces
+  
+  if (*msg == '\0') {
     return "Usage: bleevent <message>";
   }
   
-  if (message.length() == 0) {
-    return "Usage: bleevent <message>";
-  }
-  
-  if (blePushEvent(BLE_EVENT_CUSTOM, message.c_str())) {
+  if (blePushEvent(BLE_EVENT_CUSTOM, msg)) {
+    BLE_DEBUGF(DEBUG_BLE_DATA, "bleevent sent" );
     return "Event sent via BLE";
   }
+  BLE_DEBUGF(DEBUG_BLE_DATA, "bleevent failed");
   return "Failed to send event";
 }
 
 static const char* cmd_blename(const String& argsInput) {
-  String args = argsInput;
-  args.trim();
-  int spaceIdx = args.indexOf(' ');
+  // Parse args - skip command name
+  const char* args = argsInput.c_str();
+  while (*args && *args != ' ') args++;  // Skip command name
+  while (*args == ' ') args++;  // Skip spaces
   
-  if (spaceIdx > 0) {
-    String newName = args.substring(spaceIdx + 1);
-    newName.trim();
+  if (*args != '\0') {
+    // Extract new name
+    size_t len = strlen(args);
+    // Trim trailing spaces
+    while (len > 0 && args[len - 1] == ' ') len--;
     
-    if (newName.length() == 0 || newName.length() > 29) {
+    if (len == 0 || len > 29) {
       return "Name must be 1-29 characters";
     }
     
+    String newName(args, len);
     setSetting(gSettings.bleDeviceName, newName);
     
     if (!ensureDebugBuffer()) return "Name saved (restart BLE to apply)";
     char* buf = getDebugBuffer();
     snprintf(buf, 1024, "BLE name set to '%s'. Restart Bluetooth to apply (closeble && openble)", newName.c_str());
+    BLE_DEBUGF(DEBUG_BLE_CORE, "BLE device name updated to '%s'", newName.c_str());
     return buf;
   }
   
@@ -1164,14 +1401,13 @@ static const char* cmd_blename(const String& argsInput) {
 }
 
 static const char* cmd_bletxpower(const String& argsInput) {
-  String args = argsInput;
-  args.trim();
-  int spaceIdx = args.indexOf(' ');
+  // Parse args - skip command name
+  const char* args = argsInput.c_str();
+  while (*args && *args != ' ') args++;  // Skip command name
+  while (*args == ' ') args++;  // Skip spaces
   
-  if (spaceIdx > 0) {
-    String levelStr = args.substring(spaceIdx + 1);
-    levelStr.trim();
-    int level = levelStr.toInt();
+  if (*args != '\0') {
+    int level = atoi(args);
     
     if (level < 0 || level > 7) {
       return "TX power must be 0-7 (0=min/-12dBm, 7=max/+9dBm)";
@@ -1190,6 +1426,7 @@ static const char* cmd_bletxpower(const String& argsInput) {
     if (!ensureDebugBuffer()) return "TX power updated";
     char* buf = getDebugBuffer();
     snprintf(buf, 1024, "BLE TX power set to level %d", level);
+    BLE_DEBUGF(DEBUG_BLE_CORE, "TX power set to %d", level);
     return buf;
   }
   
@@ -1203,27 +1440,24 @@ static const char* cmd_bletxpower(const String& argsInput) {
 static const char* cmd_bleinfo(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
-  
-  broadcastOutput("=== BLE Configuration ===");
-  snprintf(buf, 1024, "Device Name: %s", gSettings.bleDeviceName.c_str());
-  broadcastOutput(buf);
-  snprintf(buf, 1024, "TX Power: %d (0=min, 7=max)", gSettings.bleTxPower);
-  broadcastOutput(buf);
-  snprintf(buf, 1024, "Auto-Start: %s", gSettings.bluetoothAutoStart ? "Yes" : "No");
-  broadcastOutput(buf);
-  snprintf(buf, 1024, "Require Auth: %s", gSettings.bluetoothRequireAuth ? "Yes" : "No");
-  broadcastOutput(buf);
-  
+  int pos = 0;
+  int rem = 1024;
+  int w;
+
+  w = snprintf(buf + pos, rem, "=== BLE Configuration ===\n"); if (w > 0) { pos += w; rem -= w; }
+  w = snprintf(buf + pos, rem, "Device Name:  %s\n", gSettings.bleDeviceName.c_str());                    if (w > 0) { pos += w; rem -= w; }
+  w = snprintf(buf + pos, rem, "TX Power:     %d (0=min/-12dBm, 7=max/+9dBm)\n", gSettings.bleTxPower);  if (w > 0) { pos += w; rem -= w; }
+  w = snprintf(buf + pos, rem, "Auto-Start:   %s\n", gSettings.bluetoothAutoStart  ? "Yes" : "No");       if (w > 0) { pos += w; rem -= w; }
+  w = snprintf(buf + pos, rem, "Require Auth: %s\n", gSettings.bluetoothRequireAuth ? "Yes" : "No");      if (w > 0) { pos += w; rem -= w; }
+
   if (gBLEState && gBLEState->initialized) {
-    snprintf(buf, 1024, "Status: %s", getBLEStateString());
-    broadcastOutput(buf);
-    snprintf(buf, 1024, "Connections: %d/%d", gBLEState->activeConnectionCount, BLE_MAX_CONNECTIONS);
-    broadcastOutput(buf);
+    w = snprintf(buf + pos, rem, "Status:       %s\n", getBLEStateString());                              if (w > 0) { pos += w; rem -= w; }
+    w = snprintf(buf + pos, rem, "Connections:  %d/%d", gBLEState->activeConnectionCount, BLE_MAX_CONNECTIONS); if (w > 0) { pos += w; rem -= w; }
   } else {
-    broadcastOutput("Status: Not initialized");
+    w = snprintf(buf + pos, rem, "Status:       Not initialized");                                        if (w > 0) { pos += w; rem -= w; }
   }
-  
-  return "OK";
+
+  return buf;
 }
 
 static const char* cmd_bleautostart(const String& argsInput) {
@@ -1631,11 +1865,19 @@ static void displayBluetoothStatusDetail() {
     return;
   }
   
-  // Show device name
+  // Show device name (truncate if needed, zero heap allocations)
   oledDisplay->print("Name: ");
-  String displayName = gSettings.bleDeviceName.length() > 0 ? gSettings.bleDeviceName : "HardwareOne";
-  if (displayName.length() > 12) { displayName = displayName.substring(0, 11); displayName += '~'; }
-  oledDisplay->println(displayName);
+  const char* name = gSettings.bleDeviceName.length() > 0 ? gSettings.bleDeviceName.c_str() : "HardwareOne";
+  size_t nameLen = strlen(name);
+  if (nameLen > 12) {
+    char truncated[13];
+    strncpy(truncated, name, 11);
+    truncated[11] = '~';
+    truncated[12] = '\0';
+    oledDisplay->println(truncated);
+  } else {
+    oledDisplay->println(name);
+  }
   
   // Show state with advertising indicator
   oledDisplay->print("State: ");
@@ -1655,12 +1897,40 @@ static void displayBluetoothStatusDetail() {
     oledDisplay->print(gBLEState->commandsReceived);
     oledDisplay->print(" Tx:");
     oledDisplay->println(gBLEState->responsesSent);
+    oledDisplay->println("Peers:");
+    int shown = 0;
+    for (int i = 0; i < BLE_MAX_CONNECTIONS && shown < 3; i++) {
+      if (!gBLEState->connections[i].active) continue;
+      uint32_t duration = (millis() - gBLEState->connections[i].connectedSince) / 1000;
+      oledDisplay->print("#");
+      oledDisplay->print(i);
+      oledDisplay->print(" ");
+      oledDisplay->print(gBLEState->connections[i].deviceName.c_str());
+      oledDisplay->print(" ");
+      oledDisplay->print(duration);
+      oledDisplay->println("s");
+      shown++;
+    }
   } else {
     oledDisplay->print("TX Power: ");
     oledDisplay->println(gSettings.bleTxPower);
     oledDisplay->print("Total: ");
     oledDisplay->println(gBLEState->totalConnections);
   }
+
+  // Streaming state summary
+  oledDisplay->print("Streams: ");
+  bool sensorsOn = (gBLEState->streamFlags & BLE_STREAM_SENSORS);
+  bool systemOn = (gBLEState->streamFlags & BLE_STREAM_SYSTEM);
+  bool eventsOn = (gBLEState->streamFlags & BLE_STREAM_EVENTS);
+  oledDisplay->print(sensorsOn ? "S" : "s");
+  oledDisplay->print(systemOn ? " Sys" : " sys");
+  oledDisplay->print(eventsOn ? " Ev" : " ev");
+  oledDisplay->println();
+  oledDisplay->print("Int:" );
+  oledDisplay->print(gBLEState->sensorStreamInterval);
+  oledDisplay->print("/" );
+  oledDisplay->println(gBLEState->systemStreamInterval);
   if (bleMessageCount > 0) {
     oledDisplay->println();
     oledDisplay->println("Last:");

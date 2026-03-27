@@ -11,7 +11,7 @@ void streamCommonCSS(httpd_req_t* req);
 // ============================================================================
 // Login Success Page - Full page with redirect
 // ============================================================================
-inline void streamLoginSuccessContent(httpd_req_t* req, const String& sessionId, const String& theme = "light") {
+inline void streamLoginSuccessContent(httpd_req_t* req, const String& sessionId, const String& theme = "light", const String& redirectUrl = "/dashboard") {
   httpd_resp_set_type(req, "text/html");
 
   bool isDark = (theme == "dark");
@@ -35,8 +35,10 @@ inline void streamLoginSuccessContent(httpd_req_t* req, const String& sessionId,
   httpd_resp_send_chunk(req, R"LOGINSUCCESS2(
 @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
 </style>
-<meta http-equiv='refresh' content='2;url=/dashboard'>
-</head>)LOGINSUCCESS2", HTTPD_RESP_USE_STRLEN);
+<meta http-equiv='refresh' content='2;url=)LOGINSUCCESS2", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, redirectUrl.c_str(), HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, R"LOGINSUCCESS2A('>
+</head>)LOGINSUCCESS2A", HTTPD_RESP_USE_STRLEN);
 
   // Apply correct background inline (matches streamBeginHtml behaviour)
   httpd_resp_send_chunk(req, "<body style='background:", HTTPD_RESP_USE_STRLEN);
@@ -49,40 +51,47 @@ inline void streamLoginSuccessContent(httpd_req_t* req, const String& sessionId,
 <div class='card container-narrow'>
 <h2 style='color:#fff;margin-bottom:1.5rem'>Login Successful</h2>
 <div style='background:rgba(40,167,69,0.1);border:1px solid rgba(40,167,69,0.3);border-radius:8px;padding:1.5rem;margin:1rem 0'>
-<p style='color:#fff;margin-bottom:1rem;font-size:1.1rem'>Welcome! You are being redirected to the dashboard...</p>
+<p style='color:#fff;margin-bottom:1rem;font-size:1.1rem'>Welcome! You are being redirected...</p>
 <div style='display:flex;align-items:center;justify-content:center;gap:0.5rem;color:#87ceeb'>
 <div style='width:20px;height:20px;border:2px solid #87ceeb;border-top:2px solid transparent;border-radius:50%;animation:spin 1s linear infinite'></div>
-<span>Loading dashboard</span>
+<span>Loading</span>
 </div>
 </div>
-<p style='font-size:0.9rem;color:#87ceeb;margin-top:1rem'>If you are not redirected automatically, <a href='/dashboard' style='color:#fff;text-decoration:underline'>click here</a>.</p>
+<p style='font-size:0.9rem;color:#87ceeb;margin-top:1rem'>If you are not redirected automatically, <a href=')LOGINSUCCESS2", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, redirectUrl.c_str(), HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, R"LOGINSUCCESS2B(' style='color:#fff;text-decoration:underline'>click here</a>.</p>
 </div>
 </div>
 </div>
 <script>console.log('[LOGIN_SUCCESS] Section 1: Pre-script sentinel');</script>
-<script>
+<script>)LOGINSUCCESS2B", HTTPD_RESP_USE_STRLEN);
+  
+  httpd_resp_send_chunk(req, R"LOGINSUCCESS3(
 console.log('[LOGIN_SUCCESS] Page loaded');
 try { 
   console.log('[LOGIN_SUCCESS] Setting session cookie');
-  document.cookie = 'session=)LOGINSUCCESS2", HTTPD_RESP_USE_STRLEN);
+  document.cookie = 'session=)LOGINSUCCESS3", HTTPD_RESP_USE_STRLEN);
   
   // Dynamic session ID
   httpd_resp_send_chunk(req, sessionId.c_str(), HTTPD_RESP_USE_STRLEN);
   
   // JavaScript cookie polling and closing tags
-  httpd_resp_send_chunk(req, R"LOGINSUCCESS3(; Path=/'; 
+  httpd_resp_send_chunk(req, R"LOGINSUCCESS3A(; Path=/'; 
   console.log('[LOGIN_SUCCESS] Cookie set successfully');
 } catch(e) { 
   console.error('[LOGIN_SUCCESS] Cookie set error:', e); 
 }
 console.log('[LOGIN_SUCCESS] Starting cookie polling...');
 (function(){
+  var redirectTo = ')LOGINSUCCESS3A", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, redirectUrl.c_str(), HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, R"LOGINSUCCESS4(';
   var checks = 0; var maxChecks = 10; var timer = setInterval(function(){
     checks++;
     console.log('[LOGIN_SUCCESS] Cookie check #' + checks);
     if (document.cookie && document.cookie.indexOf('session=') >= 0) {
-      console.log('[LOGIN_SUCCESS] Session cookie detected; redirecting to /dashboard');
-      clearInterval(timer); window.location.href = '/dashboard'; return;
+      console.log('[LOGIN_SUCCESS] Session cookie detected; redirecting to ' + redirectTo);
+      clearInterval(timer); window.location.href = redirectTo; return;
     }
     if (checks >= maxChecks) {
       console.warn('[LOGIN_SUCCESS] Session cookie not detected after ' + maxChecks + ' checks; navigating to /login');
@@ -93,7 +102,7 @@ console.log('[LOGIN_SUCCESS] Starting cookie polling...');
 console.log('[LOGIN_SUCCESS] Script complete');
 </script>
 </body></html>
-)LOGINSUCCESS3", HTTPD_RESP_USE_STRLEN);
+)LOGINSUCCESS4", HTTPD_RESP_USE_STRLEN);
   
   httpd_resp_send_chunk(req, nullptr, 0); // End chunked response
 }

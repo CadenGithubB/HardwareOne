@@ -74,8 +74,16 @@ bool isUserBanned(const String& username);
 // Only writes if the system clock is valid. Call after any successful login.
 void updateUserLastSeen(const String& username);
 
-// Update a user's password (stores hashed)
-bool setUserPassword(const String& username, const String& newPasswordRaw);
+// Update a user's password (stores hashed). If requireChangeOnNextLogin is true, sets mustChangePassword until they change it.
+bool setUserPassword(const String& username, const String& newPasswordRaw, bool requireChangeOnNextLogin = false);
+
+// True when per-user settings has mustChangePassword (user must set a new password after login).
+bool userMustChangePassword(const String& username);
+
+// Admin: create a new account immediately (not pending). Regular user role. Password is hashed into per-user settings.
+// If mustChangeOnLogin is true, userMustChangePassword stays set until they change password via setUserPassword.
+bool adminCreateUser(const String& username, const String& plainPassword, bool mustChangeOnLogin,
+                     const String& createdBy, String& errorOut);
 
 // Update a user's gamepad pattern password (stores hashed, separate from text password)
 bool setUserGamepadPassword(const String& username, const String& newPatternRaw);
@@ -120,6 +128,7 @@ const char* cmd_user_demote(const String& argsInput);
 const char* cmd_user_delete(const String& argsInput);
 const char* cmd_user_changepassword(const String& argsInput);
 const char* cmd_user_resetpassword(const String& argsInput);
+const char* cmd_user_add(const String& argsInput);
 const char* cmd_user_list(const String& argsInput);
 const char* cmd_user_request(const String& argsInput);
 const char* cmd_user_sync(const String& argsInput);

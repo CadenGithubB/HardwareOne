@@ -16,13 +16,20 @@
 #endif
 
 // Command origin - where a command was initiated from
-enum CommandOrigin { ORIGIN_SERIAL, ORIGIN_WEB, ORIGIN_AUTOMATION, ORIGIN_SYSTEM };
+enum CommandOrigin {
+  ORIGIN_SERIAL,
+  ORIGIN_WEB,
+  ORIGIN_AUTOMATION,
+  ORIGIN_SYSTEM,
+  ORIGIN_BLUETOOTH
+};
 
 // Output routing mask (avoid name collision with device OUTPUT_* macros)
 enum CmdOutputMask { CMD_OUT_SERIAL = 1 << 0,
                      CMD_OUT_WEB = 1 << 1,
                      CMD_OUT_LOG = 1 << 2,
-                     CMD_OUT_BROADCAST = 1 << 3 };
+                     CMD_OUT_BROADCAST = 1 << 3,
+                     CMD_OUT_BLE = 1 << 4 };
 
 // Full execution context for a command
 struct CommandContext {

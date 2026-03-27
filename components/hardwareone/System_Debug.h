@@ -78,6 +78,12 @@
 #define DEBUG_MAPS_RENDERING    0x8000000000000ULL // Bit 51 - Map render pipeline, feature drawing, viewport
 #define DEBUG_MAPS_PERF         0x10000000000000ULL // Bit 52 - Map performance timing (render ms, tile I/O, cache, FPS)
 
+// Bits 53-56: Bluetooth debug flags
+#define DEBUG_BLUETOOTH         0x20000000000000ULL // Bit 53 - Bluetooth (parent flag)
+#define DEBUG_BLUETOOTH_CORE    0x40000000000000ULL // Bit 54 - BLE core lifecycle (init/connect/disconnect)
+#define DEBUG_BLUETOOTH_GATT    0x80000000000000ULL // Bit 55 - BLE GATT operations (read/write/notify)
+#define DEBUG_BLUETOOTH_DATA    0x100000000000000ULL // Bit 56 - BLE command/data transfer
+
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
 // This structure tracks which specific sub-categories are enabled
@@ -140,7 +146,7 @@ struct DebugSubFlags {
 
 // Debug output queue configuration
 #define DEBUG_QUEUE_SIZE_MIN 64    // Minimum queue size (internal RAM only)
-#define DEBUG_QUEUE_SIZE_MAX 128   // Maximum queue size (with PSRAM)
+#define DEBUG_QUEUE_SIZE_MAX 192   // Maximum queue size (with PSRAM)
 #define DEBUG_MSG_SIZE 256         // Max size of each debug message
 
 // Runtime queue size (set during init based on PSRAM availability)
@@ -172,6 +178,9 @@ struct DebugMessage {
 #endif
 #ifndef OUTPUT_G2
 #define OUTPUT_G2     0x10  // Even Realities G2 glasses display
+#endif
+#ifndef OUTPUT_BLE
+#define OUTPUT_BLE    0x20  // Bluetooth Low Energy broadcast output
 #endif
 
 // Global output routing flags (runtime). Persisted settings are in settings.cpp.
@@ -400,7 +409,7 @@ extern char* gDebugBuffer;
 // PERFORMANCE: Conditional execution - check output flags BEFORE allocating stack/formatting
 #define BROADCAST_PRINTF(fmt, ...) \
   do { \
-    if (gOutputFlags & (OUTPUT_SERIAL | OUTPUT_WEB | OUTPUT_FILE)) { \
+    if (gOutputFlags & (OUTPUT_SERIAL | OUTPUT_WEB | OUTPUT_FILE | OUTPUT_BLE)) { \
       char _bpBuf[256]; \
       snprintf(_bpBuf, sizeof(_bpBuf), fmt, ##__VA_ARGS__); \
       broadcastOutput(_bpBuf); \
@@ -413,7 +422,7 @@ extern char* gDebugBuffer;
 // Example: BROADCAST_PRINTF_CAT("SYSTEM", "Boot complete in %lums", millis())
 #define BROADCAST_PRINTF_CAT(cat, fmt, ...) \
   do { \
-    if (gOutputFlags & (OUTPUT_SERIAL | OUTPUT_WEB | OUTPUT_FILE)) { \
+    if (gOutputFlags & (OUTPUT_SERIAL | OUTPUT_WEB | OUTPUT_FILE | OUTPUT_BLE)) { \
       char _bpBuf[256]; \
       snprintf(_bpBuf, sizeof(_bpBuf), "[" cat "] " fmt, ##__VA_ARGS__); \
       broadcastOutput(_bpBuf); \
@@ -425,7 +434,7 @@ extern char* gDebugBuffer;
 // PERFORMANCE: Conditional execution - check output flags BEFORE allocating stack/formatting
 #define BROADCAST_PRINTF_CTX(ctx, fmt, ...) \
   do { \
-    if (gOutputFlags & (OUTPUT_SERIAL | OUTPUT_WEB | OUTPUT_FILE)) { \
+    if (gOutputFlags & (OUTPUT_SERIAL | OUTPUT_WEB | OUTPUT_FILE | OUTPUT_BLE)) { \
       char _bpBuf[256]; \
       snprintf(_bpBuf, sizeof(_bpBuf), fmt, ##__VA_ARGS__); \
       broadcastOutput(_bpBuf, ctx); \

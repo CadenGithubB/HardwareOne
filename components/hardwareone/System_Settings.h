@@ -65,6 +65,10 @@ struct Settings {
       debugEspNow(false),
       debugSensorsGeneral(false),
       debugWifi(false),
+      debugWifiConnection(false),
+      debugWifiConfig(false),
+      debugWifiScanning(false),
+      debugWifiDriver(false),
       debugStorage(false),
       debugPerformance(false),
       debugDateTime(false),
@@ -88,6 +92,10 @@ struct Settings {
       debugMemory(false),
       debugCommandSystem(false),
       debugSettingsSystem(false),
+      debugBluetooth(false),
+      debugBluetoothCore(false),
+      debugBluetoothGatt(false),
+      debugBluetoothData(false),
       debugFmRadio(false),
       debugG2(false),  // G2 smart glasses BLE connection
       debugCamera(false),
@@ -335,6 +343,10 @@ struct Settings {
   bool debugEspNow;
   bool debugSensorsGeneral;
   bool debugWifi;
+  bool debugWifiConnection;
+  bool debugWifiConfig;
+  bool debugWifiScanning;
+  bool debugWifiDriver;
   bool debugStorage;
   bool debugPerformance;
   bool debugDateTime;
@@ -358,6 +370,10 @@ struct Settings {
   bool debugMemory;
   bool debugCommandSystem;
   bool debugSettingsSystem;
+  bool debugBluetooth;
+  bool debugBluetoothCore;
+  bool debugBluetoothGatt;
+  bool debugBluetoothData;
   bool debugFmRadio;
   bool debugG2;  // G2 smart glasses BLE connection
   bool debugCamera;
@@ -396,11 +412,6 @@ struct Settings {
   bool debugHttpRequests;
   bool debugHttpResponses;
   bool debugHttpStreaming;
-  // WiFi sub-flags
-  bool debugWifiConnection;
-  bool debugWifiConfig;
-  bool debugWifiScanning;
-  bool debugWifiDriver;
   // Storage sub-flags
   bool debugStorageFiles;
   bool debugStorageJson;

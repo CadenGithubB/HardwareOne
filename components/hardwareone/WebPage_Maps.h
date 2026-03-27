@@ -12,6 +12,9 @@
 #include "System_Maps.h"
 #include <cstring>
 
+// Injects JS const LOD_* from System_Maps.h LOD_ZOOM_* (see WebPage_Maps.cpp)
+void streamMapsPageLodZoomConstants(httpd_req_t* req);
+
 // Streamed inner content for maps page
 inline void streamMapsInner(httpd_req_t* req) {
   // Include shared file browser scripts
@@ -70,6 +73,7 @@ inline void streamMapsInner(httpd_req_t* req) {
       <div style='padding:8px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center'>
         <span style='font-size:0.85rem;font-weight:600;flex:1'>Maps</span>
         <button class='btn' onclick='document.getElementById("maps-upload-input").click()' style='padding:4px 8px;font-size:0.8rem'>Upload</button>
+        <button class='btn' onclick='unloadDeviceMap()' title='Free map cache on device (PSRAM)' style='padding:4px 8px;font-size:0.8rem'>Unload device</button>
         <input type='file' id='maps-upload-input' accept='.hwmap' style='display:none' onchange='uploadMapFile(this)'>
         <button class='btn' onclick='toggleMapsPanel()' style='padding:4px 8px;min-height:unset'>✕</button>
       </div>
@@ -430,23 +434,14 @@ function updateLayerAvailability() {
   });
 }
 
-// LOD zoom thresholds — must match System_Maps.h LOD_ZOOM_* defines
-// Below each threshold the feature type is hidden entirely.
-// Web renderer adds smooth fade-ins starting at these same cutoffs.
-const LOD_MAJOR_ROAD   = 0.15;
-const LOD_WATER        = 0.30;
-const LOD_RAILWAY      = 0.30;
-const LOD_MINOR_ROAD   = 0.50;
-const LOD_PARK         = 0.50;
-const LOD_TRANSIT      = 0.50;
-const LOD_PATH         = 1.00;
-const LOD_BUILDING     = 2.00;
+)JS", HTTPD_RESP_USE_STRLEN);
 
+  streamMapsPageLodZoomConstants(req);
+
+  httpd_resp_send_chunk(req, R"JS(
 // DPP-based LOD thresholds (degrees-per-pixel) — must match map tool preview
 const LOD_DPP_BUILDING_CLUSTERS = 0.00025;  // ~28m/px — show cluster blobs above this dpp
 const LOD_DPP_LINE_SCALE_REF    = 0.0003;   // ~33m/px — reference dpp where line widths = 1.0x
-const LOD_SERVICE_ROAD = 0.70;
-const LOD_TRACK        = 0.70;
 
 // Feature colors (widths doubled for high-DPI canvas) - MUST MATCH preview in map-tool
 const COLORS = {
@@ -582,6 +577,23 @@ function uploadMapFile(input) {
       input.value = '';
     }
   });
+}
+
+// Free device-side map (PSRAM tile cache + file handle). Browser still holds parsed map until you reload or clear.
+async function unloadDeviceMap() {
+  try {
+    const resp = await fetch('/api/maps/unload', { credentials: 'include' });
+    const data = await resp.json();
+    if (!data.success) {
+      alert(data.error || 'Unload failed');
+      return;
+    }
+    if (typeof hw !== 'undefined' && hw.notify) hw.notify('success', data.message || 'Device map unloaded');
+    const wpStatus = document.getElementById('waypoint-status');
+    if (wpStatus) wpStatus.textContent = data.message || 'Device map unloaded — waypoints API inactive until you load a map again';
+  } catch (e) {
+    alert(e.message || 'Unload failed');
+  }
 }
 
 // Load and parse a map file
@@ -2824,6 +2836,7 @@ setInterval(loadWaypoints, 5000);
 
 // Map select API - select a map file on device
 esp_err_t handleMapSelectAPI(httpd_req_t* req);
+esp_err_t handleMapUnloadAPI(httpd_req_t* req);
 
 // Map features API - get map metadata and feature names
 esp_err_t handleMapFeaturesAPI(httpd_req_t* req);

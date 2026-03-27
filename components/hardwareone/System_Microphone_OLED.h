@@ -9,6 +9,7 @@
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
 #include "System_Microphone.h"
+#include "System_Debug.h"
 #include <Adafruit_SSD1306.h>
 
 // Microphone OLED display function - shows VU meter and recording status
@@ -76,10 +77,10 @@ static bool microphoneOLEDModeAvailable(String* outReason) {
 static void microphoneToggleConfirmed(void* userData) {
   (void)userData;
   if (micEnabled) {
-    Serial.println("[MICROPHONE] Confirmed: Stopping microphone...");
+    DEBUG_MICF("[MICROPHONE] Confirmed: Stopping microphone...");
     stopMicrophone();
   } else {
-    Serial.println("[MICROPHONE] Confirmed: Starting microphone...");
+    DEBUG_MICF("[MICROPHONE] Confirmed: Starting microphone...");
     initMicrophone();
   }
 }
@@ -99,11 +100,11 @@ static bool microphoneInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
   // Y button: Toggle recording
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
     if (!micEnabled) {
-      Serial.println("[MICROPHONE] Y button: Starting mic first...");
+      DEBUG_MICF("[MICROPHONE] Y button: Starting mic first...");
       initMicrophone();
     }
     micRecording = !micRecording;
-    Serial.printf("[MICROPHONE] Y button: Recording %s\n", micRecording ? "started" : "stopped");
+    DEBUG_MICF("[MICROPHONE] Y button: Recording %s", micRecording ? "started" : "stopped");
     return true;
   }
   

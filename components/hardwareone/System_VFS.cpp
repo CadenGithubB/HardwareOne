@@ -46,6 +46,41 @@ static int appendf(char* buf, int bufLen, int pos, const char* fmt, ...) {
   return pos + written;
 }
 
+// Stream a large NUL-terminated buffer through broadcastOutput line-by-line (respects OUTPUT_* flags).
+static void broadcastMultilineReport(const char* text) {
+  if (!text) {
+    return;
+  }
+  const char* lineStart = text;
+  for (;;) {
+    const char* nl = strchr(lineStart, '\n');
+    if (!nl) {
+      if (lineStart[0] != '\0') {
+        broadcastOutput(String(lineStart));
+      }
+      break;
+    }
+    size_t lineLen = (size_t)(nl - lineStart);
+    if (lineLen == 0) {
+      broadcastOutput("");
+    } else {
+      char chunk[256];
+      size_t off = 0;
+      while (off < lineLen) {
+        size_t take = lineLen - off;
+        if (take > sizeof(chunk) - 1) {
+          take = sizeof(chunk) - 1;
+        }
+        memcpy(chunk, lineStart + off, take);
+        chunk[take] = '\0';
+        broadcastOutput(String(chunk));
+        off += take;
+      }
+    }
+    lineStart = nl + 1;
+  }
+}
+
 namespace VFS {
 
 static bool gSdMounted = false;
@@ -616,8 +651,8 @@ static const char* cmd_sddiag(const String& argsInput) {
     pos = appendf(buf, buf_SIZE, pos, "5. Check if card clicks into slot\n");
   }
 
-  // Also stream to Serial so output isn't lost/truncated by CLI return size limits.
-  Serial.println(buf);
+  // Full report via broadcast (serial/web/file) — avoids CLI return size limits.
+  broadcastMultilineReport(buf);
   return "sddiag complete (see serial log output)";
   
 #endif

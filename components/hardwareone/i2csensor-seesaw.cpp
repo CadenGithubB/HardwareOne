@@ -453,8 +453,9 @@ void gamepadTask(void* parameter) {
         int rawX = 0, rawY = 0;
 
         // Seesaw ATSAMD09 supports 400kHz I2C - faster transactions reduce bus hold time.
-        // 200ms timeout allows waiting out an OLED display push (~20ms at 400kHz).
-        auto result = i2cTaskWithTimeout(I2C_ADDR_GAMEPAD, 400000, 200, [&]() -> bool {
+        // 80ms timeout: must be < Wire1.setTimeOut(100ms) so Wire aborts cleanly first.
+        // 3 reads × 80ms = 240ms worst case, well under CONFIG_ESP_INT_WDT_TIMEOUT_MS (1500ms).
+        auto result = i2cTaskWithTimeout(I2C_ADDR_GAMEPAD, 400000, 80, [&]() -> bool {
           // Exceptions are disabled (-fno-exceptions), so rely on return value only.
           // Read ONLY button pins, not all 32 GPIO pins - prevents garbage from unconfigured pins
           buttons = gGamepadSeesaw.digitalReadBulk(GAMEPAD_BUTTON_MASK);

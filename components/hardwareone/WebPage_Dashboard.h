@@ -317,6 +317,19 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     HTTPD_RESP_USE_STRLEN);
 #endif
 
+#if ENABLE_I2C_SYSTEM
+  httpd_resp_send_chunk(req,
+    "<div class='sys-card sys-card-tall' id='conn-i2c-card' data-panel='i2c'>"
+    "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9);display:flex;align-items:center;gap:0.5rem'>"
+    "<span class='status-indicator status-disabled' id='conn-i2c-dot'></span>I2C Bus</div>"
+    "<div class='sys-card-row'><span>Status:</span><strong id='conn-i2c-status'>--</strong></div>"
+    "<div class='sys-card-row'><span>Devices:</span><strong id='conn-i2c-devices'>--</strong></div>"
+    "<div class='sys-card-row'><span>Active:</span><strong id='conn-i2c-active'>--</strong></div>"
+    "<div class='sys-card-row'><span>SDA / SCL:</span><strong id='conn-i2c-pins'>--</strong></div>"
+    "</div>",
+    HTTPD_RESP_USE_STRLEN);
+#endif
+
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN); // end conn-grid
 #endif // any connectivity feature
 
@@ -375,6 +388,14 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
             "window.Dash.setText('conn-ws-proto',ws.running?(ws.https?'HTTPS':'HTTP'):'--');"
             "window.Dash.setText('conn-ws-port',ws.running?String(ws.port):'--');"
             "window.Dash.setText('conn-ws-sessions',(ws.sessions!=null)?(ws.sessions+'/'+ws.maxSessions):'--');"
+          "}"
+          "if(c.i2c){"
+            "var i2=c.i2c;"
+            "window.Dash.setIndicator('conn-i2c-dot',!!(i2.compiled&&i2.enabled));"
+            "window.Dash.setText('conn-i2c-status',!i2.compiled?'Not Compiled':(i2.enabled?'Enabled':'Disabled'));"
+            "window.Dash.setText('conn-i2c-devices',(i2.devices!=null)?String(i2.devices)+' compiled':'--');"
+            "window.Dash.setText('conn-i2c-active',(i2.activeDevices!=null)?String(i2.activeDevices):'--');"
+            "window.Dash.setText('conn-i2c-pins',(i2.sdaPin!=null)?(i2.sdaPin+' / '+i2.sclPin):'--');"
           "}"
         "}catch(e){console.warn('[Dashboard] Connectivity update error',e);}"
       "};"

@@ -155,7 +155,8 @@ void initI2CManager() {
 }
 
 // Global I2C bus enabled flag (mirrors gSettings.i2cBusEnabled)
-bool gI2CBusEnabled = true;
+// Defaults to false; set correctly inside initI2CBuses() before any transactions run
+bool gI2CBusEnabled = false;
 
 // gSensorPollingPaused is defined in HardwareOne.cpp
 extern volatile bool gSensorPollingPaused;
@@ -286,6 +287,12 @@ static uint8_t i2cAddressForDeviceType(I2CDeviceType sensor) {
 
 static const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const bool& enabledFlag, const char* eventTag) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  // Reject immediately if the I2C bus is disabled at runtime (distinct from hardware not connected)
+  if (!gI2CBusEnabled) {
+    snprintf(getDebugBuffer(), 1024, "[%s] I2C bus is disabled — enable it in settings and reboot", displayName);
+    return getDebugBuffer();
+  }
 
   if (enabledFlag) {
     snprintf(getDebugBuffer(), 1024, "%s sensor already running", displayName);
@@ -560,6 +567,17 @@ String identifySensor(uint8_t address) {
 // ========== End I2C Helper Functions ==========
 
 // ========== I2C Infrastructure Commands ==========
+
+const char* cmd_i2cbusenabled(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) return "Usage: i2cBusEnabled <0|1> (reboot required)";
+  bool v = (valStr.toInt() != 0);
+  setSetting(gSettings.i2cBusEnabled, v);
+  snprintf(getDebugBuffer(), 1024, "i2cBusEnabled set to %d (reboot required)", (int)v);
+  return getDebugBuffer();
+}
 
 const char* cmd_i2csdapin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1003,24 +1021,27 @@ void discoverI2CDevices() {
     }
   }
   
-  // Always visible - discovery is critical boot-time diagnostic info
-  Serial.printf("[%lu] [Discovery] Smart scan: %d addresses on Wire1 (SDA=%d, SCL=%d)\n",
-                (unsigned long)millis(), scanCount, gSettings.i2cSdaPin, gSettings.i2cSclPin);
+  INFO_I2CF("[Discovery] Smart scan: %d addresses on Wire1 (SDA=%d, SCL=%d)",
+            scanCount, gSettings.i2cSdaPin, gSettings.i2cSclPin);
 
   // Scan Wire1 (sensor bus) - use smart scan list
   scanBusForDevicesSmart(1, scanAddresses, scanCount);  // Wire1 - smart scan
 
-  // Always visible - show what was found regardless of debug flags
-  Serial.printf("[%lu] [Discovery] Found %d device(s)", (unsigned long)millis(), connectedDeviceCount);
-  if (connectedDeviceCount > 0) {
-    Serial.print(": ");
-    for (int i = 0; i < connectedDeviceCount; i++) {
-      if (i > 0) Serial.print(", ");
-      Serial.printf("0x%02X (%s)", connectedDevices[i].address, connectedDevices[i].name);
+  {
+    char devLine[240];
+    int pos = snprintf(devLine, sizeof(devLine), "[Discovery] Found %d device(s)", connectedDeviceCount);
+    if (connectedDeviceCount > 0 && pos > 0 && pos < (int)sizeof(devLine) - 4) {
+      pos += snprintf(devLine + pos, sizeof(devLine) - (size_t)pos, ": ");
+      for (int i = 0; i < connectedDeviceCount && pos < (int)sizeof(devLine) - 32; i++) {
+        if (i > 0) {
+          pos += snprintf(devLine + pos, sizeof(devLine) - (size_t)pos, ", ");
+        }
+        pos += snprintf(devLine + pos, sizeof(devLine) - (size_t)pos, "0x%02X (%s)",
+                       connectedDevices[i].address, connectedDevices[i].name);
+      }
     }
+    INFO_I2CF("%s", devLine);
   }
-  Serial.println();
-  Serial.flush();
 
 }
 
@@ -1554,6 +1575,7 @@ extern const char* cmd_apdsstart_queued(const String& argsInput);
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry i2cCommands[] = {
   // Bus Configuration
+  { "i2cbusenabled", "Enable/disable I2C bus: <0|1> (reboot required)", true, cmd_i2cbusenabled, "Usage: i2cBusEnabled <0|1>" },
   { "i2csdapin", "Set I2C SDA pin: <0..39>", true, cmd_i2csdapin, "Usage: i2cSdaPin <0..39>" },
   { "i2csclpin", "Set I2C SCL pin: <0..39>", true, cmd_i2csclpin, "Usage: i2cSclPin <0..39>" },
   // Note: Sensor-specific I2C clock commands (thermalI2cClockHz, tofI2cClockHz) are in their respective sensor modules
@@ -1853,6 +1875,15 @@ const char* buildSensorStatusJson() {
     }
   }
   
+  // I2C bus runtime state — lets the web UI know whether the bus is active,
+  // distinct from compile-time flags and individual sensor enable flags
+  doc["i2cBusEnabled"] = gI2CBusEnabled;
+#if ENABLE_I2C_SYSTEM
+  doc["i2cSystemCompiled"] = true;
+#else
+  doc["i2cSystemCompiled"] = false;
+#endif
+
   // Queue status
   doc["queueDepth"] = getQueueDepth();
   doc["thermalQueued"] = isInQueue(I2C_DEVICE_THERMAL);
@@ -2171,11 +2202,11 @@ void sensorQueueProcessorTask(void* param) {
 // This allows runtime toggling without recompiling (reboot required)
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry i2cSettingEntries[] = {
-  { "i2cBusEnabled", SETTING_BOOL, &gSettings.i2cBusEnabled, 1, 0, nullptr, 0, 1, "I2C Bus Enabled (reboot required)", nullptr },
+  { "i2cBusEnabled", SETTING_BOOL, &gSettings.i2cBusEnabled, 1, 0, nullptr, 0, 1, "I2C Bus Enabled (reboot required)", nullptr, false, nullptr, "i2cbusenabled" },
   { "i2cSdaPin", SETTING_INT, &gSettings.i2cSdaPin, I2C_SDA_PIN_DEFAULT,
-    0, nullptr, 0, 48, "I2C SDA Pin (reboot required)", nullptr },
+    0, nullptr, 0, 48, "I2C SDA Pin (reboot required)", nullptr, false, nullptr, "i2csdapin" },
   { "i2cSclPin", SETTING_INT, &gSettings.i2cSclPin, I2C_SCL_PIN_DEFAULT,
-    0, nullptr, 0, 48, "I2C SCL Pin (reboot required)", nullptr }
+    0, nullptr, 0, 48, "I2C SCL Pin (reboot required)", nullptr, false, nullptr, "i2csclpin" }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -2233,19 +2264,16 @@ void processAutoStartSensors() {
   }
  #endif
   
-  // Always print auto-start summary to Serial so it's visible even without debug flags.
-  // On fresh devices all debug flags are off, making auto-start completely invisible.
-  Serial.printf("[%lu] [AutoStart] Flags: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d\n",
-                (unsigned long)millis(),
-                gSettings.thermalAutoStart ? 1 : 0,
-                gSettings.tofAutoStart ? 1 : 0,
-                gSettings.imuAutoStart ? 1 : 0,
-                gSettings.gpsAutoStart ? 1 : 0,
-                gSettings.fmRadioAutoStart ? 1 : 0,
-                gSettings.apdsAutoStart ? 1 : 0,
-                gSettings.gamepadAutoStart ? 1 : 0,
-                gSettings.rtcAutoStart ? 1 : 0,
-                gSettings.presenceAutoStart ? 1 : 0);
+  INFO_I2CF("[AutoStart] Flags: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d",
+            gSettings.thermalAutoStart ? 1 : 0,
+            gSettings.tofAutoStart ? 1 : 0,
+            gSettings.imuAutoStart ? 1 : 0,
+            gSettings.gpsAutoStart ? 1 : 0,
+            gSettings.fmRadioAutoStart ? 1 : 0,
+            gSettings.apdsAutoStart ? 1 : 0,
+            gSettings.gamepadAutoStart ? 1 : 0,
+            gSettings.rtcAutoStart ? 1 : 0,
+            gSettings.presenceAutoStart ? 1 : 0);
   INFO_I2CF("[AutoStart] Processing sensor auto-start settings...");
   int autoStartQueued = 0;
   
@@ -2348,7 +2376,6 @@ void processAutoStartSensors() {
   }
   #endif
   
-  Serial.printf("[%lu] [AutoStart] Queued %d sensor(s) for startup\n", (unsigned long)millis(), autoStartQueued);
-  Serial.flush();
+  INFO_I2CF("[AutoStart] Queued %d sensor(s) for startup", autoStartQueued);
   INFO_I2CF("[AutoStart] Sensor auto-start processing complete");
 }

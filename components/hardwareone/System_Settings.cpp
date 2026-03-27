@@ -579,6 +579,10 @@ void applySettings() {
     DBG_MAP(debugMemory,           DEBUG_MEMORY),
     DBG_MAP(debugCommandSystem,    DEBUG_COMMAND_SYSTEM),
     DBG_MAP(debugSettingsSystem,   DEBUG_SETTINGS_SYSTEM),
+    DBG_MAP(debugBluetooth,        DEBUG_BLUETOOTH),
+    DBG_MAP(debugBluetoothCore,    DEBUG_BLUETOOTH_CORE),
+    DBG_MAP(debugBluetoothGatt,    DEBUG_BLUETOOTH_GATT),
+    DBG_MAP(debugBluetoothData,    DEBUG_BLUETOOTH_DATA),
     DBG_MAP(debugEspNow,           DEBUG_ESPNOW_CORE),
     DBG_MAP(debugEspNowStream,     DEBUG_ESPNOW_STREAM),
     DBG_MAP(debugEspNowCore,       DEBUG_ESPNOW_CORE),
@@ -684,6 +688,13 @@ void applySettings() {
   gDebugSubFlags.cmdflowQueue = gSettings.debugCmdflowQueue;
   gDebugSubFlags.cmdflowContext = gSettings.debugCmdflowContext;
   updateParentDebugFlag(DEBUG_CMD_FLOW, gSettings.debugCommandFlow || gDebugSubFlags.cmdflowRouting || gDebugSubFlags.cmdflowQueue || gDebugSubFlags.cmdflowContext);
+
+  // Bluetooth parent flag
+  updateParentDebugFlag(DEBUG_BLUETOOTH,
+                        gSettings.debugBluetooth ||
+                        gSettings.debugBluetoothCore ||
+                        gSettings.debugBluetoothGatt ||
+                        gSettings.debugBluetoothData);
 
   // Apply severity-based log level from settings
   {
@@ -798,9 +809,9 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
     }
   }
 
-  // WiFi networks array
+  // WiFi networks array - now nested under wifi.networks
   if (gWifiNetworks && gWifiNetworkCount > 0) {
-    JsonArray networks = doc["wifiNetworks"].to<JsonArray>();
+    JsonArray networks = doc["wifi"]["networks"].to<JsonArray>();
     for (int i = 0; i < gWifiNetworkCount; i++) {
       JsonObject net = networks.add<JsonObject>();
       net["ssid"] = gWifiNetworks[i].ssid;
@@ -1010,7 +1021,7 @@ bool readSettingsJson() {
 
   // WiFi networks array
 #if ENABLE_WIFI
-  JsonArray networks = doc["wifiNetworks"];
+  JsonArray networks = doc["wifi"]["networks"];
   if (networks && gWifiNetworks) {
     gWifiNetworkCount = 0;
     for (JsonObject net : networks) {
@@ -1219,6 +1230,11 @@ static const SettingEntry debugSettingEntries[] = {
   { "topology",   SETTING_BOOL, &gSettings.debugEspNowTopo,       0, 0, nullptr, 0, 1, "Topology",          nullptr, false, "esp-now", "debugespnowtopo" },
   { "encryption", SETTING_BOOL, &gSettings.debugEspNowEncryption, 0, 0, nullptr, 0, 1, "Encryption",        nullptr, false, "esp-now", "debugespnowencryption" },
   { "metadata",   SETTING_BOOL, &gSettings.debugEspNowMetadata,   0, 0, nullptr, 0, 1, "Metadata",          nullptr, false, "esp-now", "debugespnowmetadata" },
+  // --- bluetooth group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugBluetooth,        0, 0, nullptr, 0, 1, "All Bluetooth",     nullptr, false, "bluetooth", "debugbluetooth" },
+  { "core",       SETTING_BOOL, &gSettings.debugBluetoothCore,    0, 0, nullptr, 0, 1, "Core",              nullptr, false, "bluetooth", "debugbluetoothcore" },
+  { "gatt",       SETTING_BOOL, &gSettings.debugBluetoothGatt,    0, 0, nullptr, 0, 1, "GATT",              nullptr, false, "bluetooth", "debugbluetoothgatt" },
+  { "data",       SETTING_BOOL, &gSettings.debugBluetoothData,    0, 0, nullptr, 0, 1, "Data",              nullptr, false, "bluetooth", "debugbluetoothdata" },
   // --- system group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugSystem,         0, 0, nullptr, 0, 1, "All System",          nullptr, false, "system", "debugsystem" },
   { "boot",       SETTING_BOOL, &gSettings.debugSystemBoot,     0, 0, nullptr, 0, 1, "Boot",                nullptr, false, "system", "debugsystemboot" },
@@ -1455,7 +1471,9 @@ void registerAllSettingsModules() {
   registerSettingsModule(&crashSettingsModule);
   registerSettingsModule(&debugSettingsModule);
   registerSettingsModule(&outputSettingsModule);
+#if ENABLE_I2C_SYSTEM
   registerSettingsModule(&i2cSettingsModule);
+#endif
   registerSettingsModule(&cliSettingsModule);
 #if ENABLE_AUTOMATION
   registerSettingsModule(&automationSettingsModule);

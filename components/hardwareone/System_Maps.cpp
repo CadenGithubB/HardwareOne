@@ -11,6 +11,9 @@
 #include "System_Mutex.h"
 #include "System_Utils.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #if ENABLE_OLED_DISPLAY
 #include <Adafruit_SSD1306.h>
 #include "OLED_Display.h"
@@ -348,12 +351,14 @@ bool MapCore::loadMapFile(const char* path) {
   _currentMap.fileSize = fileSize;
   _currentMap.cachePool = nullptr;
   _currentMap.cachePoolSize = 0;
-  _currentMap.slotSize = 0;
+  memset(_currentMap.tiers, 0, sizeof(_currentMap.tiers));
+  _currentMap.numTiers = 0;
   _currentMap.numSlots = 0;
   _currentMap.accessSeq = 0;
   _currentMap.slots = nullptr;
   _currentMap.cacheHits = 0;
   _currentMap.cacheMisses = 0;
+  _currentMap.tilesDropped = 0;
   _currentMap.names = nullptr;
   _currentMap.nameCount = 0;
   _currentMap.tileDir = nullptr;
@@ -476,11 +481,14 @@ bool MapCore::loadMapFile(const char* path) {
   // Keep file open as persistent handle (closed in unloadMap)
   _currentMap.mapFile = f;
   
-  // === ALLOCATE MULTI-SLOT TILE CACHE ===
-  // Scan tile directory to find max tile payload size → determines slot size
+  // === ALLOCATE MULTI-TIER SLAB CACHE ===
+  // Scan tile directory: find max payload and build size histogram for tier config
   uint32_t maxPayload = 0;
   uint32_t totalPayload = 0;
   uint16_t nonEmptyTiles = 0;
+  // Histogram: count tiles per 4KB-aligned bucket (0=0-4KB, 1=4-8KB, ...)
+  const int kHistBuckets = 8;
+  uint16_t histogram[kHistBuckets] = {0};
   if (_currentMap.tileDir) {
     for (uint16_t i = 0; i < _currentMap.tileCount; i++) {
       uint32_t ps = _currentMap.tileDir[i].payloadSize;
@@ -488,21 +496,70 @@ bool MapCore::loadMapFile(const char* path) {
         nonEmptyTiles++;
         totalPayload += ps;
         if (ps > maxPayload) maxPayload = ps;
+        int bucket = (ps - 1) / 4096;
+        if (bucket >= kHistBuckets) bucket = kHistBuckets - 1;
+        histogram[bucket]++;
       }
     }
   }
-  
-  // Slot size = max payload rounded up to 4KB boundary, with minimum
-  uint32_t slotSize = (maxPayload + 4095) & ~4095u;  // Round up to 4KB
-  if (slotSize < MAP_CACHE_MIN_SLOT) slotSize = MAP_CACHE_MIN_SLOT;
-  
-  // Try to allocate pool (4MB default, fall back to smaller if needed)
+
+  // Determine tier configuration from histogram
+  // Each populated bucket range becomes a tier; sparse buckets merge upward
+  // Tier slot sizes are 4KB-aligned: 4KB, 8KB, 12KB, 16KB, ...
+  struct TierSpec { uint32_t slotSize; uint16_t tileCount; };
+  TierSpec tierSpecs[MAP_CACHE_MAX_TIERS];
+  uint8_t numTiers = 0;
+
+  uint32_t maxSlotSize = (maxPayload + 4095) & ~4095u;
+  if (maxSlotSize < MAP_CACHE_MIN_SLOT) maxSlotSize = MAP_CACHE_MIN_SLOT;
+
+  // Merge threshold: buckets with fewer than 5% of tiles merge into next tier
+  uint16_t mergeThreshold = nonEmptyTiles / 20;
+  if (mergeThreshold < 2) mergeThreshold = 2;
+
+  uint16_t pendingCount = 0;
+  for (int b = 0; b < kHistBuckets; b++) {
+    pendingCount += histogram[b];
+    if (pendingCount == 0) continue;
+
+    uint32_t tierSlotSize = ((uint32_t)(b + 1)) * 4096;
+    if (tierSlotSize < MAP_CACHE_MIN_SLOT) tierSlotSize = MAP_CACHE_MIN_SLOT;
+
+    // Check if this is the last populated bucket or we have enough tiles for a tier
+    bool isLastPopulated = true;
+    for (int nb = b + 1; nb < kHistBuckets; nb++) {
+      if (histogram[nb] > 0) { isLastPopulated = false; break; }
+    }
+
+    bool shouldFlush = isLastPopulated || pendingCount >= mergeThreshold ||
+                       numTiers == MAP_CACHE_MAX_TIERS - 1;
+
+    if (shouldFlush && numTiers < MAP_CACHE_MAX_TIERS) {
+      // Last tier must accommodate the largest tile
+      if (isLastPopulated && tierSlotSize < maxSlotSize) {
+        tierSlotSize = maxSlotSize;
+      }
+      tierSpecs[numTiers].slotSize = tierSlotSize;
+      tierSpecs[numTiers].tileCount = pendingCount;
+      numTiers++;
+      pendingCount = 0;
+    }
+  }
+
+  // Fallback: if no tiers created (no tiles), make one default tier
+  if (numTiers == 0) {
+    tierSpecs[0].slotSize = MAP_CACHE_MIN_SLOT;
+    tierSpecs[0].tileCount = 1;
+    numTiers = 1;
+  }
+
+  // Allocate pool
   size_t poolSize = MAP_CACHE_POOL_SIZE;
   uint8_t* pool = nullptr;
-  while (poolSize >= slotSize && !pool) {
+  while (poolSize >= tierSpecs[0].slotSize && !pool) {
     pool = (uint8_t*)ps_malloc(poolSize);
     if (!pool) {
-      poolSize /= 2;  // Try half size
+      poolSize /= 2;
     }
   }
   if (!pool) {
@@ -511,73 +568,140 @@ bool MapCore::loadMapFile(const char* path) {
     unloadMap();
     return false;
   }
-  
-  uint16_t numSlots = (uint16_t)(poolSize / slotSize);
-  if (numSlots > MAP_CACHE_MAX_SLOTS) numSlots = MAP_CACHE_MAX_SLOTS;
-  if (numSlots == 0) numSlots = 1;
-  
+
+  // Distribute pool budget proportionally to each tier's weighted need
+  uint64_t totalWeighted = 0;
+  for (uint8_t t = 0; t < numTiers; t++) {
+    totalWeighted += (uint64_t)tierSpecs[t].tileCount * tierSpecs[t].slotSize;
+  }
+  if (totalWeighted == 0) totalWeighted = 1;
+
+  // Assign slot counts per tier, ensuring at least 1 slot each
+  size_t poolRemaining = poolSize;
+  uint16_t totalSlots = 0;
+  CacheTier tiers[MAP_CACHE_MAX_TIERS];
+
+  for (uint8_t t = 0; t < numTiers; t++) {
+    uint64_t tierWeight = (uint64_t)tierSpecs[t].tileCount * tierSpecs[t].slotSize;
+    size_t tierBytes = (size_t)((tierWeight * poolSize) / totalWeighted);
+    // Don't exceed remaining pool
+    if (tierBytes > poolRemaining) tierBytes = poolRemaining;
+    uint16_t slotCount = (uint16_t)(tierBytes / tierSpecs[t].slotSize);
+    if (slotCount == 0) slotCount = 1;
+    // Cap total slots
+    if (totalSlots + slotCount > MAP_CACHE_MAX_SLOTS) {
+      slotCount = MAP_CACHE_MAX_SLOTS - totalSlots;
+    }
+    tiers[t].slotSize = tierSpecs[t].slotSize;
+    tiers[t].slotCount = slotCount;
+    tiers[t].firstSlotIndex = totalSlots;
+    tiers[t].poolOffset = poolSize - poolRemaining;
+
+    size_t tierUsed = (size_t)slotCount * tierSpecs[t].slotSize;
+    poolRemaining -= tierUsed;
+    totalSlots += slotCount;
+  }
+
+  // If there's leftover pool space, give extra slots to the smallest tier
+  if (poolRemaining >= tiers[0].slotSize && totalSlots < MAP_CACHE_MAX_SLOTS) {
+    uint16_t extraSlots = (uint16_t)(poolRemaining / tiers[0].slotSize);
+    if (totalSlots + extraSlots > MAP_CACHE_MAX_SLOTS) {
+      extraSlots = MAP_CACHE_MAX_SLOTS - totalSlots;
+    }
+    if (extraSlots > 0) {
+      // Shift all tiers after tier 0 to make room
+      size_t extraBytes = (size_t)extraSlots * tiers[0].slotSize;
+      for (uint8_t t = 1; t < numTiers; t++) {
+        tiers[t].firstSlotIndex += extraSlots;
+        tiers[t].poolOffset += extraBytes;
+      }
+      tiers[0].slotCount += extraSlots;
+      totalSlots += extraSlots;
+    }
+  }
+
   // Allocate slot metadata array
-  TileCacheSlot* slots = (TileCacheSlot*)ps_malloc(sizeof(TileCacheSlot) * numSlots);
+  TileCacheSlot* slots = (TileCacheSlot*)ps_malloc(sizeof(TileCacheSlot) * totalSlots);
   if (!slots) {
     free(pool);
-    ERROR_SENSORSF("Failed to allocate %u tile cache slot entries", numSlots);
+    ERROR_SENSORSF("Failed to allocate %u tile cache slot entries", totalSlots);
     gSensorPollingPaused = wasPaused;
     unloadMap();
     return false;
   }
-  // Initialize all slots as empty
-  for (uint16_t i = 0; i < numSlots; i++) {
-    slots[i].tileIdx = -1;
-    slots[i].dataSize = 0;
-    slots[i].lastAccessSeq = 0;
+  // Initialize all slots as empty, with correct tier assignment
+  for (uint8_t t = 0; t < numTiers; t++) {
+    for (uint16_t i = tiers[t].firstSlotIndex;
+         i < tiers[t].firstSlotIndex + tiers[t].slotCount; i++) {
+      slots[i].tileIdx = -1;
+      slots[i].dataSize = 0;
+      slots[i].lastAccessSeq = 0;
+      slots[i].tierIdx = t;
+    }
   }
-  
+
   _currentMap.cachePool = pool;
   _currentMap.cachePoolSize = poolSize;
-  _currentMap.slotSize = slotSize;
-  _currentMap.numSlots = numSlots;
+  memcpy(_currentMap.tiers, tiers, sizeof(tiers));
+  _currentMap.numTiers = numTiers;
+  _currentMap.numSlots = totalSlots;
   _currentMap.accessSeq = 0;
   _currentMap.slots = slots;
   _currentMap.cacheHits = 0;
   _currentMap.cacheMisses = 0;
-  
-  size_t metadataSize = sizeof(MapNameEntry) * _currentMap.nameCount + 
-                        sizeof(HWMapTileDirEntry) * _currentMap.tileCount +
-                        sizeof(TileCacheSlot) * numSlots;
+  _currentMap.tilesDropped = 0;
+
   uint32_t avgPayload = nonEmptyTiles ? (totalPayload / nonEmptyTiles) : 0;
-  INFO_SENSORSF("Tile cache: %uKB pool, %u slots x %uKB | tiles: %u non-empty, avg %uB, max %uB | meta: %zuB",
-                (unsigned)(poolSize / 1024), numSlots, (unsigned)(slotSize / 1024),
-                nonEmptyTiles, avgPayload, maxPayload, metadataSize);
-  
+  INFO_SENSORSF("Tile cache: %uKB pool, %u tiers, %u total slots | tiles: %u non-empty, avg %uB, max %uB",
+                (unsigned)(poolSize / 1024), numTiers, totalSlots,
+                nonEmptyTiles, avgPayload, maxPayload);
+  for (uint8_t t = 0; t < numTiers; t++) {
+    INFO_SENSORSF("  Tier %u: %uKB slots x %u = %uKB (offset %u, slots %u-%u)",
+                  t, (unsigned)(tiers[t].slotSize / 1024), tiers[t].slotCount,
+                  (unsigned)(tiers[t].slotSize * tiers[t].slotCount / 1024),
+                  (unsigned)tiers[t].poolOffset,
+                  tiers[t].firstSlotIndex,
+                  tiers[t].firstSlotIndex + tiers[t].slotCount - 1);
+  }
+
   // === PRE-WARM CACHE: load all tiles that fit into slots at load time ===
-  // This eliminates ALL runtime cache misses for maps that fit in the pool
-  if (_currentMap.mapFile && _currentMap.tileDir && nonEmptyTiles <= numSlots) {
-    uint16_t slotIdx = 0;
+  if (_currentMap.mapFile && _currentMap.tileDir && nonEmptyTiles <= totalSlots) {
+    // Track next-available slot per tier for sequential pre-warm filling
+    uint16_t nextSlot[MAP_CACHE_MAX_TIERS];
+    for (uint8_t t = 0; t < numTiers; t++) {
+      nextSlot[t] = tiers[t].firstSlotIndex;
+    }
     uint16_t preloaded = 0;
     uint32_t preloadStart = millis();
-    for (uint16_t i = 0; i < _currentMap.tileCount && slotIdx < numSlots; i++) {
+    for (uint16_t i = 0; i < _currentMap.tileCount; i++) {
       uint32_t ps = _currentMap.tileDir[i].payloadSize;
       if (ps == 0) continue;
-      if (ps > slotSize) {
-        DEBUG_MAPS_LOADINGF("[MAPS] prewarm: tile %u payload %u > slotSize %u, skipping", i, ps, slotSize);
+      // Find smallest tier that fits this tile
+      int t = 0;
+      while (t < numTiers && tiers[t].slotSize < ps) t++;
+      // Overflow upward if ideal tier is full
+      while (t < numTiers && nextSlot[t] >= tiers[t].firstSlotIndex + tiers[t].slotCount) t++;
+      if (t >= numTiers) {
+        DEBUG_MAPS_LOADINGF("[MAPS] prewarm: tile %u payload %u, no tier/slot available, skipping", i, ps);
         continue;
       }
-      uint8_t* slotData = pool + ((size_t)slotIdx * slotSize);
+      uint16_t si = nextSlot[t]++;
+      uint8_t* slotData = pool + tiers[t].poolOffset +
+                           (size_t)(si - tiers[t].firstSlotIndex) * tiers[t].slotSize;
       _currentMap.mapFile.seek(_currentMap.tileDir[i].offset);
       size_t got = _currentMap.mapFile.read(slotData, ps);
       if (got == ps) {
-        slots[slotIdx].tileIdx = (int16_t)i;
-        slots[slotIdx].dataSize = ps;
-        slots[slotIdx].lastAccessSeq = ++_currentMap.accessSeq;
-        slotIdx++;
+        slots[si].tileIdx = (int16_t)i;
+        slots[si].dataSize = ps;
+        slots[si].lastAccessSeq = ++_currentMap.accessSeq;
         preloaded++;
       }
     }
     INFO_SENSORSF("Cache pre-warmed: %u tiles loaded in %lums (zero runtime misses expected)",
                   preloaded, (unsigned long)(millis() - preloadStart));
-  } else if (nonEmptyTiles > numSlots) {
+  } else if (nonEmptyTiles > totalSlots) {
     INFO_SENSORSF("Map too large for full pre-warm: %u tiles > %u slots (LRU will handle misses)",
-                  nonEmptyTiles, numSlots);
+                  nonEmptyTiles, totalSlots);
   }
   
   // Invalidate location context since map changed
@@ -593,13 +717,18 @@ bool MapCore::loadMapFile(const char* path) {
 }
 
 void MapCore::unloadMap() {
+  // Serialize with LittleFS map reads (loadTileData holds FsLockGuard around file I/O).
+  // Full MapCore vs render thread safety would require a dedicated map mutex; this matches
+  // existing loadMapFile/delete paths that call unloadMap without a separate map lock.
+  FsLockGuard fsGuard("MapCore.unloadMap");
+
   // Log cache stats before freeing
   if (_currentMap.valid && (_currentMap.cacheHits > 0 || _currentMap.cacheMisses > 0)) {
     uint32_t total = _currentMap.cacheHits + _currentMap.cacheMisses;
-    INFO_SENSORSF("Tile cache stats: %u hits, %u misses (%.1f%% hit rate), %u slots",
+    INFO_SENSORSF("Tile cache stats: %u hits, %u misses (%.1f%% hit rate), %u slots, %u dropped",
                   _currentMap.cacheHits, _currentMap.cacheMisses,
                   total > 0 ? (100.0f * _currentMap.cacheHits / total) : 0.0f,
-                  _currentMap.numSlots);
+                  _currentMap.numSlots, _currentMap.tilesDropped);
   }
   
   // Close persistent file handle
@@ -617,11 +746,13 @@ void MapCore::unloadMap() {
     _currentMap.cachePool = nullptr;
   }
   _currentMap.cachePoolSize = 0;
-  _currentMap.slotSize = 0;
+  memset(_currentMap.tiers, 0, sizeof(_currentMap.tiers));
+  _currentMap.numTiers = 0;
   _currentMap.numSlots = 0;
   _currentMap.accessSeq = 0;
   _currentMap.cacheHits = 0;
   _currentMap.cacheMisses = 0;
+  _currentMap.tilesDropped = 0;
   
   if (_currentMap.names) {
     free(_currentMap.names);
@@ -652,24 +783,31 @@ const char* MapCore::getName(uint16_t index) {
   return _currentMap.names[index].name;
 }
 
-// Helper: Load tile data via multi-slot cache
+// Helper: compute data pointer for a slot using tier-aware offsets
+static inline uint8_t* slotDataPtr(const LoadedMap& map, uint16_t slotIdx) {
+  const CacheTier& tier = map.tiers[map.slots[slotIdx].tierIdx];
+  return map.cachePool + tier.poolOffset +
+         (size_t)(slotIdx - tier.firstSlotIndex) * tier.slotSize;
+}
+
+// Helper: Load tile data via multi-tier slab cache
 // Returns pointer to tile data in cache slot, or nullptr on error
 const uint8_t* MapCore::loadTileData(uint16_t tileIdx, size_t* outSize) {
   if (!_currentMap.valid || !_currentMap.tileDir || tileIdx >= _currentMap.tileCount) {
     return nullptr;
   }
-  
+
   HWMapTileDirEntry& tile = _currentMap.tileDir[tileIdx];
   if (tile.payloadSize == 0) {
     if (outSize) *outSize = 0;
     return nullptr;
   }
-  
+
   if (!_currentMap.cachePool || !_currentMap.slots || _currentMap.numSlots == 0) {
     DEBUG_MAPS_RENDERINGF("[MAPS] loadTileData: cache not initialized!");
     return nullptr;
   }
-  
+
   // === CACHE LOOKUP: search slots for this tile ===
   for (uint16_t i = 0; i < _currentMap.numSlots; i++) {
     if (_currentMap.slots[i].tileIdx == (int16_t)tileIdx) {
@@ -677,53 +815,82 @@ const uint8_t* MapCore::loadTileData(uint16_t tileIdx, size_t* outSize) {
       _currentMap.slots[i].lastAccessSeq = ++_currentMap.accessSeq;
       _currentMap.cacheHits++;
       if (outSize) *outSize = _currentMap.slots[i].dataSize;
-      const uint8_t* hitPtr = _currentMap.cachePool + ((size_t)i * _currentMap.slotSize);
-      return hitPtr;
+      return slotDataPtr(_currentMap, i);
     }
   }
-  
+
   // === CACHE MISS ===
   _currentMap.cacheMisses++;
-  
+
   uint32_t payloadSize = tile.payloadSize;
-  
-  // If tile is larger than slot size, log warning and read directly into slot 0
-  // (evicting whatever was there - this should be rare/never with proper slot sizing)
-  if (payloadSize > _currentMap.slotSize) {
-    DEBUG_MAPS_RENDERINGF("[MAPS] WARNING: tile %u payload %u > slotSize %u, truncating read!",
-                          tileIdx, payloadSize, _currentMap.slotSize);
-    payloadSize = _currentMap.slotSize;
+
+  // Find the ideal tier: smallest tier whose slotSize >= payloadSize
+  int idealTier = -1;
+  for (uint8_t t = 0; t < _currentMap.numTiers; t++) {
+    if (_currentMap.tiers[t].slotSize >= payloadSize) {
+      idealTier = t;
+      break;
+    }
   }
-  
-  // Find a slot: prefer empty, otherwise evict LRU
+  if (idealTier < 0) {
+    // Tile too large for any tier — drop it
+    _currentMap.tilesDropped++;
+    DEBUG_MAPS_RENDERINGF("[TILE_CACHE] DROP tile=%u payload=%uB > max tier %uB",
+                          tileIdx, payloadSize, _currentMap.tiers[_currentMap.numTiers - 1].slotSize);
+    return nullptr;
+  }
+
+  // Search ideal tier for an empty slot
   int16_t targetSlot = -1;
   uint32_t oldestSeq = UINT32_MAX;
-  for (uint16_t i = 0; i < _currentMap.numSlots; i++) {
-    if (_currentMap.slots[i].tileIdx == -1) {
-      targetSlot = i;
-      break;  // Empty slot found, use it
-    }
-    if (_currentMap.slots[i].lastAccessSeq < oldestSeq) {
-      oldestSeq = _currentMap.slots[i].lastAccessSeq;
-      targetSlot = i;
+  int16_t lruSlot = -1;
+  {
+    const CacheTier& tier = _currentMap.tiers[idealTier];
+    uint16_t end = tier.firstSlotIndex + tier.slotCount;
+    for (uint16_t i = tier.firstSlotIndex; i < end; i++) {
+      if (_currentMap.slots[i].tileIdx == -1) {
+        targetSlot = i;
+        break;
+      }
+      if (_currentMap.slots[i].lastAccessSeq < oldestSeq) {
+        oldestSeq = _currentMap.slots[i].lastAccessSeq;
+        lruSlot = i;
+      }
     }
   }
-  
-  if (targetSlot < 0) targetSlot = 0;  // Shouldn't happen, but safety
-  
+
+  // Overflow upward: try larger tiers for an empty slot
+  if (targetSlot < 0) {
+    for (int t = idealTier + 1; t < _currentMap.numTiers && targetSlot < 0; t++) {
+      const CacheTier& tier = _currentMap.tiers[t];
+      uint16_t end = tier.firstSlotIndex + tier.slotCount;
+      for (uint16_t i = tier.firstSlotIndex; i < end; i++) {
+        if (_currentMap.slots[i].tileIdx == -1) {
+          targetSlot = i;
+          break;
+        }
+      }
+    }
+  }
+
+  // If no empty slot found anywhere, evict LRU from the ideal tier
+  if (targetSlot < 0) {
+    targetSlot = (lruSlot >= 0) ? lruSlot : _currentMap.tiers[idealTier].firstSlotIndex;
+  }
+
   DEBUG_MAPS_PERFF("[TILE_CACHE] miss tile=%u slot=%d payload=%uB %s (hits=%u misses=%u seq=%u)",
                    tileIdx, targetSlot, tile.payloadSize,
                    _currentMap.slots[targetSlot].tileIdx == -1 ? "empty" : "evict",
                    _currentMap.cacheHits, _currentMap.cacheMisses, _currentMap.accessSeq);
-  
+
   // Read tile data from file into the target slot
-  uint8_t* slotData = _currentMap.cachePool + ((size_t)targetSlot * _currentMap.slotSize);
-  
+  uint8_t* slotData = slotDataPtr(_currentMap, (uint16_t)targetSlot);
+
   {
     FsLockGuard fsGuard("MapCore.loadTileData");
     bool usedPersistent = false;
     size_t bytesRead = 0;
-    
+
     // Prefer persistent handle (no open/close overhead)
     if (_currentMap.mapFile) {
       _currentMap.mapFile.seek(tile.offset);
@@ -740,7 +907,7 @@ const uint8_t* MapCore::loadTileData(uint16_t tileIdx, size_t* outSize) {
       bytesRead = f.read(slotData, payloadSize);
       f.close();
     }
-    
+
     if (bytesRead != payloadSize) {
       DEBUG_MAPS_RENDERINGF("[MAPS] loadTileData: short read tile %u: got %zu, expected %u (persistent=%d)",
                             tileIdx, bytesRead, payloadSize, usedPersistent);
@@ -748,12 +915,12 @@ const uint8_t* MapCore::loadTileData(uint16_t tileIdx, size_t* outSize) {
       payloadSize = bytesRead;
     }
   }
-  
-  // Update slot metadata
+
+  // Update slot metadata (keep the tierIdx of the slot we landed in, not idealTier)
   _currentMap.slots[targetSlot].tileIdx = (int16_t)tileIdx;
   _currentMap.slots[targetSlot].dataSize = payloadSize;
   _currentMap.slots[targetSlot].lastAccessSeq = ++_currentMap.accessSeq;
-  
+
   if (outSize) *outSize = payloadSize;
   return slotData;
 }
@@ -908,7 +1075,10 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
   
   const float zoom = params.zoom;
   const float rotation = params.rotation;
-  
+
+  // Reset per-frame drop counter (overlay reads this after render)
+  _currentMap.tilesDropped = 0;
+
   const uint32_t perfStart = millis();
   uint32_t perfTileIOus = 0;
   
@@ -961,28 +1131,60 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
   if (minTileY < 0) minTileY = 0;
   if (maxTileY >= _currentMap.tileGridSize) maxTileY = _currentMap.tileGridSize - 1;
   
-  // If viewport spans more tiles than cache can hold, use stride to prevent thrashing.
-  // At low zoom on the OLED, each tile is only a few pixels — small gaps are invisible.
+  // If visible tiles > numSlots, increase tileStep to cap work (LRU can't hold all tiles at once).
+  // When each tile is still several pixels wide, stride looks like a checkerboard — overridden below.
   int tileStep = 1;
   int numTilesX = maxTileX - minTileX + 1;
   int numTilesY = maxTileY - minTileY + 1;
+  // Smaller axis of map tile in screen pixels (stride leaves gaps only when this is tiny)
+  float pxPerTileX = (scaleX > 0) ? (float)_currentMap.tileW / (float)scaleX : 0.f;
+  float pxPerTileY = (scaleY > 0) ? (float)_currentMap.tileH / (float)scaleY : 0.f;
+  float minTilePx = (pxPerTileX < pxPerTileY) ? pxPerTileX : pxPerTileY;
+
   if (_currentMap.numSlots > 0) {
     while (((numTilesX + tileStep - 1) / tileStep) * ((numTilesY + tileStep - 1) / tileStep) > (int)_currentMap.numSlots && tileStep < 6) {
       tileStep++;
     }
   }
-  
-  DEBUG_MAPS_RENDERINGF("[MAPS] render: center=%.5f,%.5f zoom=%.2f scale=%ld,%ld grid=%d tiles=%d-%d/%d-%d (raw %d-%d/%d-%d) step=%d",
+  // At 0.2x–0.3x zoom the viewport can exceed numSlots; stride=2 looks like a checkerboard because
+  // each tile is still a few pixels wide. Prefer LRU thrashing over skipping tiles in that case.
+  if (tileStep > 1 && minTilePx >= MAP_TILE_STRIDE_OK_BELOW_PX) {
+    DEBUG_MAPS_RENDERINGF("[MAPS] render: stride=%d -> 1 (minTilePx=%.2f >= %.2f, avoid checkerboard)",
+                          tileStep, minTilePx, MAP_TILE_STRIDE_OK_BELOW_PX);
+    tileStep = 1;
+  }
+
+  DEBUG_MAPS_RENDERINGF("[MAPS] render: center=%.5f,%.5f zoom=%.2f scale=%ld,%ld grid=%d tiles=%d-%d/%d-%d (raw %d-%d/%d-%d) step=%d minTilePx=%.2f slots=%u",
                         centerLat, centerLon, zoom, (long)scaleX, (long)scaleY,
                         _currentMap.tileGridSize,
                         minTileX, maxTileX, minTileY, maxTileY,
-                        rawMinTX, rawMaxTX, rawMinTY, rawMaxTY, tileStep);
+                        rawMinTX, rawMaxTX, rawMinTY, rawMaxTY, tileStep, minTilePx,
+                        (unsigned)_currentMap.numSlots);
 
   int totalFeatures = 0, totalDrawn = 0, tilesLoaded = 0, tilesEmpty = 0;
+
+  // Actual tile iterations for this frame (stride reduces visits; numTilesX*Y does not).
+  const int visTileX = (maxTileX >= minTileX) ? (maxTileX - minTileX) / tileStep + 1 : 0;
+  const int visTileY = (maxTileY >= minTileY) ? (maxTileY - minTileY) / tileStep + 1 : 0;
+  const int visibleTileVisits = visTileX * visTileY;
+
+  // When we draw every visible tile but have fewer slots, LRU + flash reads can run long (e.g. OLED
+  // mapRenderTask). Yield occasionally so WiFi/idle/watchdog peers aren't starved on that core.
+  const bool cachePressure =
+      _currentMap.numSlots > 0 && (numTilesX * numTilesY) > (int)_currentMap.numSlots;
+  const bool heavyTileFrame =
+      cachePressure || (visibleTileVisits >= MAP_RENDER_YIELD_MANY_VISITS);
+  // More frequent yields when thrashing; moderate when many tiles even if slots "fit"; rare on tiny views.
+  const unsigned tileYieldMask =
+      cachePressure ? 7u : (visibleTileVisits >= MAP_RENDER_YIELD_MANY_VISITS ? 15u : 63u);
+  uint32_t tileVisitCounter = 0;
 
   // Iterate through visible tiles (with stride to cap tile count within cache budget)
   for (int ty = minTileY; ty <= maxTileY; ty += tileStep) {
     for (int tx = minTileX; tx <= maxTileX; tx += tileStep) {
+      if (heavyTileFrame && (++tileVisitCounter & tileYieldMask) == 0u) {
+        taskYIELD();
+      }
       uint16_t tileIdx = ty * _currentMap.tileGridSize + tx;
       if (tileIdx >= _currentMap.tileCount) continue;
       
@@ -1023,6 +1225,10 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
       
       // Parse and render features in this tile
       for (uint16_t f = 0; f < featureCount; f++) {
+        if (heavyTileFrame && f != 0 &&
+            (f % (uint16_t)MAP_RENDER_FEATURE_YIELD_STRIDE) == 0) {
+          taskYIELD();
+        }
         if (ptr + HWMAP_FEATURE_HEADER_SIZE > end) break;
         
         uint8_t ftype = ptr[0];
@@ -1052,45 +1258,8 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
           continue;
         }
         
-        // Subtype-based LOD: hide less important subtypes at low zoom
-        if (ftype == MAP_FEATURE_ROAD_MINOR && fsubtype == SUBTYPE_MINOR_SERVICE && zoom < LOD_ZOOM_SERVICE_ROAD) {
-          ptr += pointsBytes;
-          continue;
-        }
-        if (ftype == MAP_FEATURE_PATH && fsubtype == SUBTYPE_PATH_TRACK && zoom < LOD_ZOOM_TRACK) {
-          ptr += pointsBytes;
-          continue;
-        }
-        
-        // LOD culling - progressively hide features at lower zoom levels
-        if (zoom < LOD_ZOOM_MAJOR_ROAD) {
-          // Very far out: only highways
-          if (ftype != MAP_FEATURE_HIGHWAY) {
-            ptr += pointsBytes;
-            continue;
-          }
-        } else if (zoom < LOD_ZOOM_WATER) {
-          // Far out: hide everything except highways + major roads
-          if (ftype != MAP_FEATURE_HIGHWAY && ftype != MAP_FEATURE_ROAD_MAJOR) {
-            ptr += pointsBytes;
-            continue;
-          }
-        } else if (zoom < LOD_ZOOM_MINOR_ROAD) {
-          // Hide minor roads, paths, buildings, parks, transit
-          if (ftype == MAP_FEATURE_ROAD_MINOR || ftype == MAP_FEATURE_PATH ||
-              ftype == MAP_FEATURE_BUILDING || ftype == MAP_FEATURE_PARK ||
-              ftype == MAP_FEATURE_BUS || ftype == MAP_FEATURE_STATION) {
-            ptr += pointsBytes;
-            continue;
-          }
-        } else if (zoom < LOD_ZOOM_PATH) {
-          if (ftype == MAP_FEATURE_PATH) {
-            ptr += pointsBytes;
-            continue;
-          }
-        }
-        // Buildings: only show when zoomed in enough to avoid blob effect
-        if (ftype == MAP_FEATURE_BUILDING && zoom < LOD_ZOOM_BUILDING) {
+        // Zoom LOD (single implementation: mapLodFeatureVisibleAtZoom in System_Maps.h)
+        if (!mapLodFeatureVisibleAtZoom(ftype, fsubtype, zoom)) {
           ptr += pointsBytes;
           continue;
         }
@@ -1735,6 +1904,16 @@ const char* cmd_mapload(const String& argsInput) {
   }
   
   return "Failed to load map";
+}
+
+const char* cmd_mapunload(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  (void)argsInput;
+  if (!MapCore::hasValidMap()) {
+    return "No map loaded on device.";
+  }
+  MapCore::unloadMap();
+  return "Map unloaded (PSRAM/cache freed on device).";
 }
 
 const char* cmd_whereami(const String& argsInput) {
@@ -3138,6 +3317,7 @@ const char* cmd_maporganize(const String& argsInput) {
 const CommandEntry mapCommands[] = {
   {"map", "Show current map info", false, cmd_map, nullptr},
   {"mapload", "Load map file: <path>", false, cmd_mapload, nullptr},
+  {"mapunload", "Unload current map (free PSRAM on device)", false, cmd_mapunload, nullptr},
   {"maplist", "List available maps", false, cmd_maplist, nullptr},
   {"whereami", "Show current location context", false, cmd_whereami, nullptr},
   {"search", "Search map features: <name>", false, cmd_search, nullptr},

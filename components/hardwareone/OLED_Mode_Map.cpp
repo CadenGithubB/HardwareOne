@@ -865,6 +865,16 @@ static void drawMapMenu() {
 // =============================================================================
 // Async Map Render Task
 // =============================================================================
+// Architecture:
+// - displayGPSMap() (UI path) writes sRenderSnapshot + xSemaphoreGive(sRenderSemaphore) when dirty.
+// - mapRenderTask (TASK_PRIORITY_LOW, core 0) blocks on the binary semaphore, renders MapCore::renderMap
+//   into sMapBackBuf, swaps sMapFrontBuf/sMapBackBuf, sets sFrontBufReady.
+// - Each UI frame memcpy's sMapFrontBuf to the SSD1306 buffer, then draws overlays (context bar, zoom).
+// Binary semaphore: if render is slower than the UI rate, extra Gives coalesce — the task still runs
+// renderMap() to completion each wake, but sRenderSnapshot may advance (latest wins). Slower frames
+// mean the user briefly sees an older raster until the next swap — acceptable vs. skipping tiles inside
+// renderMap (checkerboard). MapCore may force full tile coverage when stride would look wrong, with
+// LRU thrashing; renderMap also taskYIELDs under cache pressure so this path stays cooperative.
 
 static void initAsyncMapRenderer() {
   if (sMapBufA) return;  // Already initialized
@@ -873,7 +883,7 @@ static void initAsyncMapRenderer() {
   sMapBufA = (uint8_t*)ps_malloc(SSD1306_BUF_SIZE);
   sMapBufB = (uint8_t*)ps_malloc(SSD1306_BUF_SIZE);
   if (!sMapBufA || !sMapBufB) {
-    Serial.println("[MAP_ASYNC] PSRAM alloc failed for double buffers!");
+    DEBUG_MAPSF("[MAP_ASYNC] PSRAM alloc failed for double buffers!");
     return;
   }
   memset(sMapBufA, 0, SSD1306_BUF_SIZE);
@@ -888,7 +898,7 @@ static void initAsyncMapRenderer() {
   // Create render task (8KB stack in PSRAM, low priority)
   xTaskCreatePinnedToCore(mapRenderTask, "mapRender", MAP_RENDER_STACK_WORDS, nullptr, TASK_PRIORITY_LOW, &sRenderTaskHandle, 0);
   
-  Serial.println("[MAP_ASYNC] Async renderer initialized (double-buffer + render task)");
+  DEBUG_MAPSF("[MAP_ASYNC] Async renderer initialized (double-buffer + render task)");
 }
 
 static void mapRenderTask(void* param) {
@@ -1179,6 +1189,12 @@ static void displayGPSMap() {
     }
   }
   
+  // Show cache pressure indicator if tiles were dropped this frame
+  if (map.valid && map.tilesDropped > 0) {
+    snprintf(overlayBuf, sizeof(overlayBuf), " -%lu ", map.tilesDropped);
+    gOLEDMapRenderer->drawOverlayText(50, 0, overlayBuf, true);
+  }
+
   // Show satellite count with source indicator
   if (hasGPSFix) {
     if (usingRemoteGPS) {
