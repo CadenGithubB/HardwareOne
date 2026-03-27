@@ -173,6 +173,15 @@ inline void streamLoggingInner(httpd_req_t* req) {
           </label>
 )HTML", HTTPD_RESP_USE_STRLEN);
 #endif
+#if !ENABLE_THERMAL_SENSOR && !ENABLE_TOF_SENSOR && !ENABLE_IMU_SENSOR && !ENABLE_GAMEPAD_SENSOR && !ENABLE_APDS_SENSOR && !ENABLE_GPS_SENSOR && !ENABLE_PRESENCE_SENSOR
+  httpd_resp_send_chunk(req, R"HTML(
+        <div style='color:var(--panel-fg);opacity:0.6;font-size:0.9em;font-style:italic;margin:0.5rem 0 0.75rem'>
+          No loggable sensors are compiled into this firmware. To enable sensors, adjust
+          <code>I2C_FEATURE_LEVEL</code> (or individual <code>ENABLE_*_SENSOR</code> flags)
+          in <code>System_BuildConfig.h</code> and rebuild.
+        </div>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
   httpd_resp_send_chunk(req, R"HTML(
         <div style='margin-top:0.5rem;display:flex;gap:0.5rem'>
           <button class='btn' onclick='selectAllSensors()' style='padding:0.25rem 0.75rem;font-size:0.85rem'>Select All</button>

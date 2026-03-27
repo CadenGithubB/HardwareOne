@@ -15,6 +15,32 @@
 #include "System_Command.h"
 #include <LittleFS.h>
 #include <cstring>
+#include <cstdio>
+
+// LOD_ZOOM_* → JS const LOD_* (must stay aligned with mapLodFeatureVisibleAtZoom in System_Maps.h)
+void streamMapsPageLodZoomConstants(httpd_req_t* req) {
+  char buf[896];
+  int n = snprintf(buf, sizeof(buf),
+                   "// --- LOD_ZOOM_* cutoffs (emitted from firmware System_Maps.h; logic: "
+                   "mapLodFeatureVisibleAtZoom) ---\n"
+                   "const LOD_MAJOR_ROAD = %.17g;\n"
+                   "const LOD_WATER = %.17g;\n"
+                   "const LOD_RAILWAY = %.17g;\n"
+                   "const LOD_MINOR_ROAD = %.17g;\n"
+                   "const LOD_PARK = %.17g;\n"
+                   "const LOD_TRANSIT = %.17g;\n"
+                   "const LOD_PATH = %.17g;\n"
+                   "const LOD_BUILDING = %.17g;\n"
+                   "const LOD_SERVICE_ROAD = %.17g;\n"
+                   "const LOD_TRACK = %.17g;\n",
+                   (double)LOD_ZOOM_MAJOR_ROAD, (double)LOD_ZOOM_WATER, (double)LOD_ZOOM_RAILWAY,
+                   (double)LOD_ZOOM_MINOR_ROAD, (double)LOD_ZOOM_PARK, (double)LOD_ZOOM_TRANSIT,
+                   (double)LOD_ZOOM_PATH, (double)LOD_ZOOM_BUILDING, (double)LOD_ZOOM_SERVICE_ROAD,
+                   (double)LOD_ZOOM_TRACK);
+  if (n > 0 && (size_t)n < sizeof(buf)) {
+    httpd_resp_send_chunk(req, buf, (size_t)n);
+  }
+}
 
 // Forward declarations for streaming functions (defined in WebServer_Server.cpp)
 void streamPageHeader(httpd_req_t* req, const char* title);
@@ -121,6 +147,33 @@ esp_err_t handleMapSelectAPI(httpd_req_t* req) {
   char json[96];
   snprintf(json, sizeof(json), "{\"success\":true,\"mapName\":\"%s\"}", map.filename);
   httpd_resp_sendstr(req, json);
+  return ESP_OK;
+}
+
+// GET /api/maps/unload — free device PSRAM (MapCore tile cache + open file handle)
+esp_err_t handleMapUnloadAPI(httpd_req_t* req) {
+  extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
+  AuthContext ctx = makeWebAuthCtx(req);
+  if (!tgRequireAuth(ctx)) return ESP_OK;
+
+  httpd_resp_set_type(req, "application/json");
+  const bool hadMap = MapCore::hasValidMap();
+  String cmdOut;
+  bool ok = executeUnifiedWebCommand(req, ctx, String("mapunload"), cmdOut);
+  if (!ok) {
+    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"command_failed\"}");
+    return ESP_OK;
+  }
+  String escaped = cmdOut;
+  escaped.replace("\\", "\\\\");
+  escaped.replace("\"", "\\\"");
+  const bool freed = hadMap && !MapCore::hasValidMap();
+  String json = "{\"success\":true,\"unloaded\":";
+  json += freed ? "true" : "false";
+  json += ",\"message\":\"";
+  json += escaped;
+  json += "\"}";
+  httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -580,6 +633,7 @@ void registerMapsHandlers(httpd_handle_t server) {
   static httpd_uri_t mapsPage = { .uri = "/maps", .method = HTTP_GET, .handler = handleMapsPage, .user_ctx = NULL };
   static httpd_uri_t mapFeaturesGet = { .uri = "/api/maps/features", .method = HTTP_GET, .handler = handleMapFeaturesAPI, .user_ctx = NULL };
   static httpd_uri_t mapSelectGet = { .uri = "/api/maps/select", .method = HTTP_GET, .handler = handleMapSelectAPI, .user_ctx = NULL };
+  static httpd_uri_t mapUnloadGet = { .uri = "/api/maps/unload", .method = HTTP_GET, .handler = handleMapUnloadAPI, .user_ctx = NULL };
   static httpd_uri_t mapsOrganizePost = { .uri = "/api/maps/organize", .method = HTTP_POST, .handler = handleMapsOrganize, .user_ctx = NULL };
   static httpd_uri_t waypointsGet = { .uri = "/api/waypoints", .method = HTTP_GET, .handler = handleWaypointsAPI, .user_ctx = NULL };
   static httpd_uri_t waypointsPost = { .uri = "/api/waypoints", .method = HTTP_POST, .handler = handleWaypointsAPI, .user_ctx = NULL };
@@ -588,6 +642,7 @@ void registerMapsHandlers(httpd_handle_t server) {
   httpd_register_uri_handler(server, &mapsPage);
   httpd_register_uri_handler(server, &mapFeaturesGet);
   httpd_register_uri_handler(server, &mapSelectGet);
+  httpd_register_uri_handler(server, &mapUnloadGet);
   httpd_register_uri_handler(server, &mapsOrganizePost);
   httpd_register_uri_handler(server, &waypointsGet);
   httpd_register_uri_handler(server, &waypointsPost);

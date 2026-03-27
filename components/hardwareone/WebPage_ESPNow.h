@@ -18,199 +18,245 @@ inline void streamEspNowInner(httpd_req_t* req) {
   // CSS
   httpd_resp_send_chunk(req, R"CSS(
 <style>
-.espnow-container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-.espnow-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; margin-bottom: 30px; }
-.espnow-card { background: var(--panel-bg); border-radius: 15px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border: 1px solid var(--border); overflow: hidden; }
-.espnow-title { font-size: 1.3em; font-weight: bold; margin-bottom: 10px; color: var(--panel-fg); display: flex; align-items: center; gap: 10px; }
-.espnow-description { color: var(--muted); margin-bottom: 15px; font-size: 0.9em; }
-.espnow-controls { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
-.espnow-data { background: var(--crumb-bg); border-radius: 8px; padding: 15px; font-family: 'Courier New', monospace; font-size: 0.9em; min-height: 60px; color: var(--panel-fg); }
-.device-list { background: var(--crumb-bg); border-radius: 8px; padding: 15px; margin-bottom: 15px; }
-.device-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
-.device-item:last-child { border-bottom: none; }
-.device-mac { font-family: 'Courier New', monospace; font-weight: bold; color: var(--link); }
-.device-channel { color: var(--muted); font-size: 0.9em; }
-.device-actions { display: flex; gap: 5px; }
-.btn-small { padding: 4px 8px; font-size: 0.8em; }
-.device-encrypted { color: var(--success); font-weight: bold; }
-.device-unencrypted { color: var(--muted); }
-.encryption-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 8px; }
-.encryption-enabled { background: var(--success); }
-.encryption-disabled { background: var(--muted); }
-.message-log { background: var(--crumb-bg); border-radius: 8px; padding: 15px; max-height: 300px; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
-.message-bubble { max-width: 75%; width: fit-content; padding: 10px 14px; border-radius: 16px; position: relative; word-wrap: break-word; overflow-wrap: break-word; min-width: 0; animation: slideIn 0.2s ease-out; }
-.message-received { align-self: flex-start; background: rgba(128,128,128,0.25); color: var(--panel-fg); border-bottom-left-radius: 4px; border: 1px solid rgba(128,128,128,0.15); }
-.message-sent { align-self: flex-end; background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
-.message-error { align-self: flex-end; background: var(--danger); color: var(--panel-fg); border-bottom-right-radius: 4px; }
-.message-text { margin: 0; font-size: 0.95em; line-height: 1.4; overflow-wrap: break-word; word-break: break-word; }
-.message-status { font-size: 0.75em; margin-top: 4px; opacity: 0.8; display: flex; align-items: center; gap: 4px; }
-.message-received .message-status { color: var(--muted); }
-.message-sent .message-status { color: rgba(255,255,255,0.7); }
-.message-error .message-status { color: var(--muted); }
-.status-icon { display: inline-block; }
-.message-empty { text-align: center; color: var(--muted); padding: 20px; font-style: italic; }
-.input-group { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; width: 100%; }
-.input-group input { flex: 1 1 200px; max-width: 100%; min-width: 0; box-sizing: border-box; }
-.mesh-warning { display:none; background:var(--warning-bg); border:1px solid var(--warning-border); color:var(--warning-fg); padding:12px; border-radius:8px; margin-top:10px; }
-#pair-mac { flex: 1 1 260px; min-width: 200px; }
-#pair-name { flex: 2 1 360px; min-width: 220px; }
-.mac-input { font-family: 'Courier New', monospace; }
-.espnow-container > .espnow-card + .espnow-card { margin-top: 30px; }
-.setup-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 10000; align-items: center; justify-content: center; }
-.setup-modal.show { display: flex; }
-.setup-modal-content { background: var(--panel-bg); border-radius: 15px; padding: 30px; max-width: 500px; width: 90%; box-shadow: 0 10px 40px rgba(0,0,0,0.3); }
-.setup-modal-title { font-size: 1.5em; font-weight: bold; margin-bottom: 15px; color: var(--panel-fg); }
-.setup-modal-description { color: var(--muted); margin-bottom: 20px; line-height: 1.6; }
-.setup-modal-input { width: 100%; padding: 12px; border: 2px solid var(--border); border-radius: 8px; font-size: 1em; margin-bottom: 15px; box-sizing: border-box; background: var(--panel-bg); color: var(--panel-fg); }
-.setup-modal-input:focus { outline: none; border-color: var(--link); }
-.setup-modal-buttons { display: flex; gap: 10px; justify-content: flex-end; }
-.setup-modal-error { color: var(--danger); margin-bottom: 15px; padding: 10px; background: var(--warning-bg); border-radius: 5px; display: none; }
-.setup-modal-requirements { background: var(--crumb-bg); padding: 12px; border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; color: var(--muted); }
-.setup-modal-requirements ul { margin: 8px 0 0 20px; padding: 0; }
+.en-header{background:var(--panel-bg);border:1px solid var(--border);border-radius:10px;margin-bottom:16px;padding:10px 16px}
+.en-header-row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.en-header-left{display:flex;align-items:center;gap:10px}
+.en-header-title{font-size:1.15em;font-weight:700;color:var(--panel-fg)}
+.en-header-right{display:flex;gap:6px}
+.en-header-status{font-family:'Courier New',monospace;font-size:.85em;color:var(--muted);line-height:1.35;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);white-space:pre-line;display:none}
+.en-not-init{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 20px;text-align:center;background:var(--panel-bg);border:1px solid var(--border);border-radius:10px;margin-bottom:16px}
+.en-not-init h3{color:var(--panel-fg);margin-bottom:6px;font-size:1.1em}
+.en-not-init p{color:var(--muted);margin-bottom:20px;max-width:380px;font-size:.9em;line-height:1.5}
+.en-pane-content{margin-top:12px}
+.en-form-row{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.en-form-row input,.en-form-row select{flex:1;min-width:140px}
+.en-form-row .btn{flex-shrink:0}
+.en-pair-inputs{display:flex;gap:8px;margin-bottom:12px;padding:10px;background:var(--crumb-bg);border-radius:8px;flex-wrap:wrap}
+.en-pair-inputs input{flex:1;min-width:140px}
+.device-list{margin-bottom:16px}
+.device-item{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-bottom:1px solid var(--border);transition:background .12s}
+.device-item:hover{background:var(--crumb-bg)}
+.device-item:last-child{border-bottom:none}
+.device-mac{font-family:'Courier New',monospace;font-weight:bold;color:var(--link)}
+.device-channel{color:var(--muted);font-size:.85em}
+.device-actions{display:flex;gap:5px}
+.device-encrypted{color:var(--accent);font-weight:bold}
+.device-unencrypted{color:var(--muted)}
+.encryption-indicator{display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:8px}
+.encryption-enabled{background:var(--accent)}
+.encryption-disabled{background:var(--muted)}
+.en-interact{margin-top:12px;background:var(--crumb-bg);border-radius:8px;border:1px solid var(--border);overflow:hidden}
+.interact-tabs{display:flex;flex-direction:column;gap:6px}
+.interact-tab{width:100%;text-align:left;padding:8px 12px;background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border);border-radius:6px;transition:background .15s,border-color .15s,color .15s}
+.interact-tab:hover{background:var(--hover-bg)}
+.interact-tab-active{background:var(--accent);color:var(--panel-bg);border-color:var(--accent)}
+.message-action-btn{background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border)}
+.message-action-btn:hover{background:var(--hover-bg)}
+.file-mode-toggle{background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border);transition:background .15s,border-color .15s,color .15s}
+.file-mode-toggle.file-mode-active{background:var(--accent);color:var(--panel-bg);border-color:var(--accent)}
+.remote-explorer{border:1px solid var(--border);border-radius:8px;background:var(--panel-bg);color:var(--panel-fg);overflow:hidden}
+.remote-explorer-crumb{padding:8px;background:var(--crumb-bg);border-bottom:1px solid var(--border);font-size:0.85em;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.remote-explorer-crumb span{cursor:pointer}
+.remote-explorer-body{max-height:260px;overflow-y:auto}
+.remote-entry{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .12s}
+.remote-entry:hover{background:var(--hover-bg)}
+.remote-entry-label{font-weight:500;color:var(--panel-fg)}
+.remote-entry-meta{margin-left:auto;font-size:0.78em;color:var(--muted)}
+.remote-entry-empty{justify-content:center;color:var(--muted);font-style:italic}
+.remote-entry-icon{font-family:'Courier New',monospace;color:var(--link)}
+.sensor-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px}
+.sensor-pill{display:flex;justify-content:center;align-items:center;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg);font-weight:500;cursor:pointer;transition:background .15s,border-color .15s,color .15s}
+.sensor-pill:hover{background:var(--hover-bg)}
+.sensor-pill.sensor-active{background:var(--accent);color:var(--panel-bg);border-color:var(--accent)}
+.sensor-pill.sensor-pending{border-style:dashed;box-shadow:0 0 0 1px var(--accent) inset}
+.en-interact-header{padding:12px 14px;border-bottom:1px solid var(--border);background:var(--panel-bg)}
+.en-interact-title{font-weight:600;color:var(--panel-fg);font-size:.95em}
+.en-interact-sub{font-size:.78em;color:var(--muted);margin-top:2px}
+.en-interact-body{padding:14px;min-height:420px}
+.message-log{background:var(--panel-bg);border-radius:8px;padding:12px;max-height:300px;overflow-y:auto;border:1px solid var(--border);display:flex;flex-direction:column;gap:8px}
+.message-bubble{max-width:75%;width:fit-content;padding:10px 14px;border-radius:16px;word-wrap:break-word;overflow-wrap:break-word;min-width:0;animation:slideIn .2s ease-out;background:var(--panel-bg);border:1px solid var(--border)}
+.message-received{align-self:flex-start;background:var(--crumb-bg);color:var(--panel-fg);border-bottom-left-radius:4px}
+.message-sent{align-self:flex-end;background:var(--accent);color:var(--panel-bg);border-bottom-right-radius:4px;border-color:var(--accent)}
+.message-error{align-self:flex-end;background:var(--danger);color:#fff;border-bottom-right-radius:4px;border-color:var(--danger)}
+.message-text{margin:0;font-size:.9em;line-height:1.4;overflow-wrap:break-word;word-break:break-word}
+.message-status{font-size:.72em;margin-top:4px;opacity:.7;display:flex;align-items:center;gap:4px}
+.message-empty{text-align:center;color:var(--muted);padding:20px;font-style:italic}
+.input-group{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;width:100%}
+.input-group input{flex:1 1 200px;max-width:100%;min-width:0;box-sizing:border-box}
+.mac-input{font-family:'Courier New',monospace}
+.mesh-warning{display:none;background:var(--warning-bg);border:1px solid var(--warning-border);color:var(--warning-fg);padding:10px;border-radius:8px;margin-bottom:12px;font-size:.88em}
+.en-data{background:var(--crumb-bg);border-radius:8px;padding:12px;font-family:'Courier New',monospace;font-size:.85em;color:var(--panel-fg);border:1px solid var(--border)}
+.btn-small{padding:4px 8px;font-size:.8em}
+.setup-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:10000;align-items:center;justify-content:center}
+.setup-modal.show{display:flex}
+.setup-modal-content{background:var(--panel-bg);border-radius:12px;padding:24px;max-width:440px;width:90%;box-shadow:0 10px 40px rgba(0,0,0,.3);border:1px solid var(--border)}
+.setup-modal-title{font-size:1.2em;font-weight:bold;margin-bottom:10px;color:var(--panel-fg)}
+.setup-modal-description{color:var(--muted);margin-bottom:14px;line-height:1.5;font-size:.88em}
+.setup-modal-input{width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:1em;margin-bottom:12px;box-sizing:border-box;background:var(--crumb-bg);color:var(--panel-fg)}
+.setup-modal-input:focus{outline:none;border-color:var(--accent)}
+.setup-modal-buttons{display:flex;gap:8px;justify-content:flex-end}
+.setup-modal-error{color:var(--danger);margin-bottom:10px;padding:8px;background:var(--crumb-bg);border-radius:5px;display:none;font-size:.88em}
+.setup-modal-requirements{background:var(--crumb-bg);padding:10px;border-radius:8px;margin-bottom:12px;font-size:.85em;color:var(--muted)}
+.setup-modal-requirements ul{margin:6px 0 0 20px;padding:0}
+.mesh-pane-header{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.mesh-view-tabs{display:flex;gap:6px;margin-bottom:12px}
+.mesh-view-tabs .btn{flex:1}
+@media(max-width:768px){
+.en-pair-inputs{flex-direction:column}
+.en-pair-inputs input{width:100%}
+}
 </style>
 )CSS", HTTPD_RESP_USE_STRLEN);
   
   // HTML structure
   httpd_resp_send_chunk(req, R"HTML(
-<div class='espnow-container'>
-<div class='espnow-grid'>
-<div class='espnow-card'>
-<div class='espnow-title'>
-<span>ESP-NOW Status</span>
+<div class='en-header'>
+<div class='en-header-row'>
+<div class='en-header-left'>
 <span class='status-indicator status-disabled' id='espnow-status-indicator'></span>
+<span class='en-header-title'>ESP-NOW</span>
 </div>
-<div class='espnow-description'>ESP-NOW wireless communication protocol for direct device-to-device messaging.</div>
-<div id='resource-warning' class='alert alert-warning' style='margin-bottom:15px;'>
-<strong>Resource Usage:</strong> Initializing ESP-NOW allocates ~10-15 KB heap (task stack, buffers, peer storage). Disabling ESP-NOW will not fully free memory, this memory remains allocated until device reboot.
-</div>
-<div class='espnow-controls'>
-<button class='btn' id='btn-espnow-init' style='display:none'>Initialize ESP-NOW</button>
-<button class='btn' id='btn-espnow-disable' style='display:none'>Disable ESP-NOW</button>
-<button class='btn' id='btn-espnow-refresh'>Refresh Status</button>
+<div class='en-header-right'>
 <button class='btn' id='btn-espnow-toggle-mode' style='display:none'>Mode: Direct</button>
+<button class='btn' id='btn-espnow-init' style='display:none'>Initialize</button>
+<button class='btn' id='btn-espnow-disable' style='display:none'>Disable</button>
+<button class='btn' id='btn-espnow-refresh'>Refresh</button>
 </div>
-<div class='espnow-data' id='espnow-status-data'>Click 'Refresh Status' to check ESP-NOW status...</div>
 </div>
-<div class='espnow-card' id='smarthome-card' style='display:none;'>
-<div class='espnow-title'>Smart Home Metadata</div>
-<div class='espnow-description'>Configure device metadata for home automation, room assignment, and organization.</div>
-<div class='input-group'>
+<div class='en-header-status' id='espnow-status-data'>Loading...</div>
+</div>
+<div class='en-not-init' id='en-not-init'>
+<h3>ESP-NOW Not Initialized</h3>
+<p>Initialize ESP-NOW to enable direct device-to-device wireless communication, mesh networking, and peer management.</p>
+<div style='font-size:.78em;color:var(--muted);max-width:340px'>Click Initialize in the top right to enable ESP-NOW.</div>
+</div>
+<div id='en-panels' style='display:none'>
+<div class='settings-panel' id='device-management-card'>
+<div style='display:flex;align-items:center;justify-content:space-between'>
+<div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Devices</div><div style='color:var(--panel-fg);font-size:0.9rem'>Paired devices, mesh peers, and network topology.</div></div>
+<button class='btn' id='btn-devices-toggle' onclick="togglePane('devices-pane','btn-devices-toggle')">Expand</button>
+</div>
+<div id='devices-pane' style='display:none' class='en-pane-content'>
+<div style='display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px'>
+<button class='btn' onclick="openBroadcastPanel()">Broadcast</button>
+<button class='btn' id='btn-add-device-toggle' onclick="(function(){var p=document.getElementById('add-device-pane');var b=document.getElementById('btn-add-device-toggle');var show=p.style.display==='none'||!p.style.display;p.style.display=show?'block':'none';b.textContent=show?'Cancel':'+ Add Device';})()" >+ Add Device</button>
+</div>
+<div id='add-device-pane' style='display:none'>
+<div class='en-pair-inputs'>
+<input type='text' id='pair-mac' class='mac-input' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17'>
+<input type='text' id='pair-name' placeholder='Device Name'>
+<button class='btn' id='btn-pair-device'>Pair</button>
+<button class='btn' id='btn-pair-secure'>Pair Encrypted</button>
+</div>
+</div>
+<div class='device-list' id='device-list'>
+<div style='color:var(--muted);text-align:center;padding:20px'>No devices paired yet</div>
+</div>
+<div class='en-interact' id='device-panel-card' style='display:none'>
+<div class='en-interact-header'>
+<div class='en-interact-title' id='device-panel-title'>Device Panel</div>
+<div class='en-interact-sub' id='device-panel-subtitle'>Select a device to interact</div>
+</div>
+<div class='en-interact-body panel' id='device-panel-content'></div>
+</div>
+<div id='mesh-views-card' style='display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)'>
+<div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px'>
+<div class='mesh-view-tabs' style='margin-bottom:0'>
+<button class='btn' id='btn-view-topology'>Topology</button>
+<button class='btn' id='btn-view-graph'>Graph</button>
+</div>
+<div style='display:flex;gap:6px'>
+<button class='btn' id='btn-refresh-mesh'>Refresh</button>
+<button class='btn' id='btn-auto-topology'>Auto-Discover: OFF</button>
+</div>
+</div>
+<div id='mesh-view-topology' style='display:none'>
+<div class='mesh-peers' id='mesh-topology-view'>
+<div style='color:var(--muted);text-align:center;padding:16px'>Click Refresh to load topology</div>
+</div>
+</div>
+<div id='mesh-view-graph' style='display:none'>
+<div class='mesh-peers' id='mesh-graph-view'>
+<div style='color:var(--muted);text-align:center;padding:16px'>Network graph</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div class='settings-panel' id='en-settings-card'>
+<div style='display:flex;align-items:center;justify-content:space-between'>
+<div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Settings</div><div style='color:var(--panel-fg);font-size:0.9rem'>Device identity, encryption, and mesh role configuration.</div></div>
+<button class='btn' id='btn-settings-toggle' onclick="togglePane('settings-pane','btn-settings-toggle')">Expand</button>
+</div>
+<div id='settings-pane' style='display:none' class='en-pane-content'>
+<div id='smarthome-card' style='margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border)'>
+<div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Smart Home Metadata</div>
+<div style='color:var(--muted);font-size:.82em;margin-bottom:10px'>Device identity for home automation and mesh discovery.</div>
+<div class='en-form-row'>
 <input type='text' id='friendly-name' placeholder='Friendly Name (e.g., Living Room Light)' maxlength='47'>
 <button class='btn' id='btn-set-friendly'>Set Name</button>
 </div>
-<div class='input-group' style='margin-top:10px;'>
+<div class='en-form-row'>
 <input type='text' id='room-name' placeholder='Room (e.g., Living Room)' maxlength='31'>
 <button class='btn' id='btn-set-room'>Set Room</button>
 </div>
-<div class='input-group' style='margin-top:10px;'>
+<div class='en-form-row'>
 <input type='text' id='zone-name' placeholder='Zone (e.g., Upstairs)' maxlength='31'>
 <button class='btn' id='btn-set-zone'>Set Zone</button>
 </div>
-<div class='input-group' style='margin-top:10px;'>
-<input type='text' id='tags-input' placeholder='Tags (comma-separated, e.g., light,dimmable)' maxlength='63'>
+<div class='en-form-row'>
+<input type='text' id='tags-input' placeholder='Tags (comma-separated)' maxlength='63'>
 <button class='btn' id='btn-set-tags'>Set Tags</button>
 </div>
-<div style='margin-top:15px;display:flex;align-items:center;gap:10px;'>
-<label style='display:flex;align-items:center;gap:8px;cursor:pointer;'>
-<input type='checkbox' id='stationary-checkbox' style='width:auto;margin:0;'>
-<span>Stationary Device (fixed location)</span>
+<label style='display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px'>
+<input type='checkbox' id='stationary-checkbox' style='width:auto;margin:0'>
+<span style='color:var(--panel-fg);font-size:.9em'>Stationary Device</span>
 </label>
 </div>
+<div id='encryption-card' style='margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border)'>
+<div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Encryption</div>
+<div style='color:var(--muted);font-size:.82em;margin-bottom:10px'>All paired devices must share the same passphrase.</div>
+<div class='en-form-row'>
+<input type='password' id='encryption-passphrase' placeholder='Encryption passphrase' maxlength='64'>
+<button class='btn' id='btn-set-passphrase'>Set</button>
+<button class='btn' id='btn-clear-passphrase' style='display:none'>Clear</button>
 </div>
-<div class='espnow-card' id='encryption-card' style='display:none;'>
-<div class='espnow-title'>Encryption Settings</div>
-<div class='espnow-description'>Set passphrase for encrypted ESP-NOW communication. All devices must use the same passphrase.</div>
-<div class='input-group'>
-<input type='password' id='encryption-passphrase' placeholder='Enter encryption passphrase' maxlength='64'>
-<button class='btn' id='btn-set-passphrase'>Set Passphrase</button>
-<button class='btn' id='btn-clear-passphrase'>Clear</button>
+<div style='background:var(--crumb-bg);border-radius:8px;padding:10px;font-size:.85em;color:var(--panel-fg);border:1px solid var(--border);margin-top:8px' id='encryption-status'>No encryption passphrase set</div>
 </div>
-<div class='espnow-data' id='encryption-status'>No encryption passphrase set</div>
-</div>
-<div class='espnow-card' id='device-management-card' style='display:none;'>
-<div class='espnow-title'>Device Management</div>
-<div class='espnow-description'>Pair and manage ESP-NOW devices for communication.</div>
-<div class='input-group'>
-<input type='text' id='pair-mac' class='mac-input' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17'>
-<input type='text' id='pair-name' placeholder='Device Name'>
-</div>
-<div class='espnow-controls'>
-<button class='btn' id='btn-pair-device'>Pair (Unencrypted)</button>
-<button class='btn' id='btn-pair-secure'>Pair (Encrypted)</button>
-</div>
-<div class='device-list' id='device-list'>
-<div style='color:var(--muted); text-align: center;'>No devices paired yet</div>
-</div>
-</div>
-<div class='espnow-card' id='mesh-status-card' style='display:none;'>
-<div class='espnow-title'>Mesh Network Status & Topology</div>
-<div class='espnow-description'>Real-time mesh monitoring with direct peer connections and full network topology visualization.</div>
-<div class='espnow-controls'>
-<button class='btn' id='btn-refresh-mesh'>Refresh Status</button>
-<button class='btn' id='btn-auto-topology' style='margin-left:8px;'>Auto-Discover: OFF</button>
-</div>
-<div style='margin-top:15px;'>
-<div style='display:flex;gap:10px;margin-bottom:10px;'>
-<button class='btn' id='btn-view-direct' style='flex:1;background:var(--crumb-bg);'>Direct Peers</button>
-<button class='btn' id='btn-view-topology' style='flex:1;'>Full Topology</button>
-<button class='btn' id='btn-view-graph' style='flex:1;'>Network Graph</button>
-</div>
-<div id='mesh-view-direct' style='display:block;'>
-<div class='mesh-peers' id='mesh-peers-list'>
-<div style='color:var(--panel-fg);text-align:center;'>No mesh peers detected yet</div>
-</div>
-</div>
-<div id='mesh-view-topology' style='display:none;'>
-<div class='mesh-peers' id='mesh-topology-view'>
-<div style='color:var(--panel-fg);text-align:center;'>Click "Refresh Status" to load topology</div>
-</div>
-</div>
-<div id='mesh-view-graph' style='display:none;'>
-<div class='mesh-peers' id='mesh-graph-view'>
-<div style='color:var(--panel-fg);text-align:center;'>Network graph visualization</div>
-</div>
-</div>
-</div>
-</div>
-<div class='espnow-card' id='mesh-role-card' style='display:none;'>
-<div class='espnow-title'>Mesh Role Configuration</div>
-<div class='espnow-description'>Configure device role (Master/Worker/Backup) and topology discovery for structured mesh networking.</div>
-<div class='espnow-data' id='mesh-role-status'>Loading role configuration...</div>
-<div class='espnow-controls' style='margin-top:15px;'>
-<button class='btn' id='btn-role-worker'>Set Worker</button>
-<button class='btn' id='btn-role-master'>Set Master</button>
-<button class='btn' id='btn-role-backup'>Set Backup</button>
+<div id='mesh-role-card' style='display:none'>
+<div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Mesh Role Configuration</div>
+<div style='background:var(--crumb-bg);border-radius:8px;padding:10px;font-size:.85em;color:var(--panel-fg);border:1px solid var(--border);margin-bottom:12px' id='mesh-role-status'>Loading role configuration...</div>
+<div style='display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap'>
+<button class='btn' id='btn-role-worker'>Worker</button>
+<button class='btn' id='btn-role-master'>Master</button>
+<button class='btn' id='btn-role-backup'>Backup</button>
 <button class='btn' id='btn-mesh-topo'>Discover Topology</button>
 </div>
-<div class='input-group' style='margin-top:15px;'>
+<div class='en-form-row'>
 <input type='text' id='master-mac' class='mac-input' placeholder='Master MAC (XX:XX:XX:XX:XX:XX)' maxlength='17'>
-<button class='btn' id='btn-set-master-mac'>Set Master MAC</button>
+<button class='btn' id='btn-set-master-mac'>Set Master</button>
 </div>
-<div style='display:flex;align-items:center;gap:8px;margin-top:6px;margin-bottom:2px;'>
-<input type='checkbox' id='backup-master-enabled' style='width:16px;height:16px;cursor:pointer;'>
-<label for='backup-master-enabled' style='color:var(--panel-fg);font-size:0.92em;cursor:pointer;'>Enable Backup Master</label>
-</div>
-<div id='backup-mac-group' class='input-group' style='display:none;margin-top:4px;'>
+<label style='display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px'>
+<input type='checkbox' id='backup-master-enabled' style='width:auto;margin:0'>
+<span style='color:var(--panel-fg);font-size:.9em'>Enable Backup Master</span>
+</label>
+<div id='backup-mac-group' class='en-form-row' style='display:none;margin-top:8px'>
 <input type='text' id='backup-mac' class='mac-input' placeholder='Backup MAC (XX:XX:XX:XX:XX:XX)' maxlength='17'>
-<button class='btn' id='btn-set-backup-mac'>Set Backup MAC</button>
+<button class='btn' id='btn-set-backup-mac'>Set Backup</button>
 </div>
-<div class='espnow-data' id='mesh-topology-data' style='margin-top:15px;display:none;'>
-<div style='font-weight:bold;margin-bottom:8px;'>Topology Discovery Results:</div>
+<div style='background:var(--crumb-bg);border-radius:8px;padding:10px;font-size:.85em;color:var(--panel-fg);border:1px solid var(--border);margin-top:12px;display:none' id='mesh-topology-data'>
+<div style='font-weight:bold;margin-bottom:8px'>Topology Discovery Results:</div>
 <div id='topology-results'>No topology data yet</div>
 </div>
 </div>
-<div class='espnow-card' id='device-panel-card' style='display:none;'>
-<div class='espnow-title' id='device-panel-title'>Device Panel</div>
-<div class='espnow-description' id='device-panel-subtitle'>Select Message, Remote, or File for a device to use this panel.</div>
-<div class='panel' id='device-panel-content'></div>
+</div>
+</div>
 </div>
 </div>
 <div class='setup-modal' id='setup-modal'>
 <div class='setup-modal-content'>
 <div class='setup-modal-title'>ESP-NOW First-Time Setup</div>
-<div class='setup-modal-description'>
-Before using ESP-NOW, you need to set a unique name for this device. This name will identify your device in topology displays and mesh networks.
-</div>
+<div class='setup-modal-description'>Set a unique name for this device. This identifies your device in topology displays and mesh networks.</div>
 <div class='setup-modal-requirements'>
 <strong>Requirements:</strong>
 <ul>
@@ -222,8 +268,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
 <div class='setup-modal-error' id='setup-error'></div>
 <input type='text' id='setup-device-name' class='setup-modal-input' placeholder='Enter device name (e.g., darkblue)' maxlength='20' autocomplete='off'>
 <div class='setup-modal-buttons'>
-<button class='btn btn-secondary' id='btn-setup-cancel'>Cancel</button>
-<button class='btn btn-primary' id='btn-setup-save'>Set Name & Initialize</button>
+<button class='btn' id='btn-setup-cancel'>Cancel</button>
+<button class='btn' id='btn-setup-save'>Set Name & Initialize</button>
 </div>
 </div>
 </div>
@@ -238,6 +284,16 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
 
   // JavaScript (complete ESP-NOW logic)
   httpd_resp_send_chunk(req, R"JS(
+<script>
+window.togglePane = function(paneId, btnId) {
+  var p = document.getElementById(paneId);
+  var b = document.getElementById(btnId);
+  if (!p || !b) { console.warn('[togglePane] Element not found:', paneId, btnId); return; }
+  var isHidden = (p.style.display === 'none' || !p.style.display);
+  p.style.display = isHidden ? 'block' : 'none';
+  b.textContent = isHidden ? 'Collapse' : 'Expand';
+};
+</script>
 <script>console.log('[ESP-NOW] Section 1: Pre-script sentinel');</script>
 <script>
 (function() {
@@ -252,7 +308,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           + '<input type="text" id="au-' + mac + '" placeholder="Username" style="flex:1">'
           + '<input type="password" id="ap-' + mac + '" placeholder="Password" style="flex:1">'
           + '</div>'
-          + '<button class="btn" onclick="loadRemoteAutomations(\'' + mac + '\')">' + 'Load Automations</button>'
+          + '<button class="btn auto-load-btn" id="btn-load-autos-' + mac + '" onclick="loadRemoteAutomations(\'' + mac + '\')">Load Automations</button>'
           + '<div id="automations-list-' + mac + '" style="margin-top:12px;min-height:40px"></div>';
       } else {
         return '<div style="text-align:center;color:var(--muted);padding:20px;font-size:0.9em">'
@@ -260,6 +316,22 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           + '<span style="font-size:0.85em">Enable ENABLE_AUTOMATION in System_BuildConfig.h and recompile.</span>'
           + '</div>';
       }
+    };
+    window.__autoFetchState = window.__autoFetchState || {};
+    window.setAutoButtonState = function(mac, opts) {
+      var btn = document.getElementById('btn-load-autos-' + mac);
+      if (!btn) return;
+      if (!btn.dataset.defaultLabel) btn.dataset.defaultLabel = btn.textContent || 'Load Automations';
+      if (opts && opts.text) {
+        btn.textContent = opts.text;
+      } else {
+        btn.textContent = btn.dataset.defaultLabel;
+      }
+      btn.disabled = !!(opts && opts.disabled);
+    };
+    window.markAutomationsFetchIdle = function(mac, nextLabel) {
+      if (window.__autoFetchState) delete window.__autoFetchState[mac];
+      window.setAutoButtonState(mac, { disabled: false, text: nextLabel || 'Refresh Automations' });
     };
     console.log('[ESP-NOW] Chunk 1: Global variables ready');
   } catch(e) { console.error('[ESP-NOW] Chunk 1 error:', e); }
@@ -306,14 +378,12 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         document.getElementById('espnow-status-data').textContent = output;
         if (isInitialized) {
           indicator.className = 'status-indicator status-enabled';
-          /* Hide init button, show disable button and other controls */
           document.getElementById('btn-espnow-init').style.display = 'none';
           document.getElementById('btn-espnow-disable').style.display = '';
-          /* Show core features */
-          document.getElementById('smarthome-card').style.display = 'block';
-          document.getElementById('encryption-card').style.display = 'block';
-          document.getElementById('device-management-card').style.display = 'block';
           document.getElementById('btn-espnow-toggle-mode').style.display = '';
+          document.getElementById('en-not-init').style.display = 'none';
+          document.getElementById('en-panels').style.display = 'block';
+          document.getElementById('espnow-status-data').style.display = 'block';
           /* Load device list */
           try { if (typeof listDevices === 'function') { listDevices(); } } catch(e) { console.warn('[ESP-NOW] listDevices not defined yet'); }
           /* Check encryption status now that ESP-NOW is initialized */
@@ -324,18 +394,12 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           if (typeof window.espnowStartPolling === 'function') { window.espnowStartPolling(); }
         } else {
           indicator.className = 'status-indicator status-disabled';
-          /* Show init button, hide disable button */
           document.getElementById('btn-espnow-init').style.display = '';
           document.getElementById('btn-espnow-disable').style.display = 'none';
-          /* Hide features until initialized */
-          document.getElementById('smarthome-card').style.display = 'none';
-          document.getElementById('encryption-card').style.display = 'none';
-          document.getElementById('device-management-card').style.display = 'none';
           document.getElementById('btn-espnow-toggle-mode').style.display = 'none';
-          /* Also hide mesh status card until initialized */
-          var meshCard = document.getElementById('mesh-status-card');
-          if (meshCard) { meshCard.style.display = 'none'; }
-          /* Stop message polling since ESP-NOW is not initialized */
+          document.getElementById('en-not-init').style.display = 'flex';
+          document.getElementById('en-panels').style.display = 'none';
+          document.getElementById('espnow-status-data').style.display = 'none';
           if (typeof window.espnowStopPolling === 'function') { window.espnowStopPolling(); }
         }
       })
@@ -355,22 +419,16 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           var warn = document.getElementById('mesh-warning');
           if (warn) { warn.style.display = isMesh ? 'block' : 'none'; }
           
-          // Only show mesh card if ESP-NOW is initialized (check status indicator)
+          // Show/hide mesh panels based on mode + init state
           var indicator = document.getElementById('espnow-status-indicator');
           var isInitialized = indicator && indicator.className.indexOf('status-enabled') >= 0;
-          var meshCard = document.getElementById('mesh-status-card');
-          if (meshCard) { 
-            // Show mesh card only if mesh mode AND initialized
-            meshCard.style.display = (isMesh && isInitialized) ? 'block' : 'none'; 
-          }
-          
-          // Show mesh role card if mesh mode AND initialized
+          var meshViewsCard = document.getElementById('mesh-views-card');
           var meshRoleCard = document.getElementById('mesh-role-card');
-          if (meshRoleCard) {
-            meshRoleCard.style.display = (isMesh && isInitialized) ? 'block' : 'none';
-            if (isMesh && isInitialized && typeof window.refreshMeshRole === 'function') {
-              window.refreshMeshRole();
-            }
+          if (meshViewsCard) meshViewsCard.style.display = (isMesh && isInitialized) ? 'block' : 'none';
+          if (meshRoleCard) meshRoleCard.style.display = (isMesh && isInitialized) ? 'block' : 'none';
+          
+          if (isMesh && isInitialized && typeof window.refreshMeshRole === 'function') {
+            window.refreshMeshRole();
           }
           
           window.espnowIsMesh = !!isMesh;
@@ -436,20 +494,20 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           indicator.className = 'status-indicator status-enabled';
           document.getElementById('btn-espnow-init').style.display = 'none';
           document.getElementById('btn-espnow-disable').style.display = '';
-          document.getElementById('smarthome-card').style.display = 'block';
-          document.getElementById('encryption-card').style.display = 'block';
-          document.getElementById('device-management-card').style.display = 'block';
           document.getElementById('btn-espnow-toggle-mode').style.display = '';
+          document.getElementById('en-not-init').style.display = 'none';
+          document.getElementById('en-panels').style.display = 'block';
+          document.getElementById('espnow-status-data').style.display = 'block';
+          if (typeof window.espnowStartPolling === 'function') window.espnowStartPolling();
         } else {
           indicator.className = 'status-indicator status-disabled';
           document.getElementById('btn-espnow-init').style.display = '';
           document.getElementById('btn-espnow-disable').style.display = 'none';
-          document.getElementById('smarthome-card').style.display = 'none';
-          document.getElementById('encryption-card').style.display = 'none';
-          document.getElementById('device-management-card').style.display = 'none';
           document.getElementById('btn-espnow-toggle-mode').style.display = 'none';
-          var meshCard = document.getElementById('mesh-status-card');
-          if (meshCard) meshCard.style.display = 'none';
+          document.getElementById('en-not-init').style.display = 'flex';
+          document.getElementById('en-panels').style.display = 'none';
+          document.getElementById('espnow-status-data').style.display = 'none';
+          if (typeof window.espnowStopPolling === 'function') window.espnowStopPolling();
         }
 
         // --- apply espnow mode ---
@@ -460,9 +518,9 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           if (btn) btn.textContent = 'Mode: ' + (isMesh ? 'Mesh' : 'Direct');
           var warn = document.getElementById('mesh-warning');
           if (warn) warn.style.display = isMesh ? 'block' : 'none';
-          var meshCard2 = document.getElementById('mesh-status-card');
-          if (meshCard2) meshCard2.style.display = (isMesh && isInitialized) ? 'block' : 'none';
+          var meshViewsCard = document.getElementById('mesh-views-card');
           var meshRoleCard = document.getElementById('mesh-role-card');
+          if (meshViewsCard) meshViewsCard.style.display = (isMesh && isInitialized) ? 'block' : 'none';
           if (meshRoleCard) meshRoleCard.style.display = (isMesh && isInitialized) ? 'block' : 'none';
           window.espnowIsMesh = !!isMesh;
           if (isMesh && isInitialized) {
@@ -497,7 +555,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
 <script>
 (function() {
   try {
-    console.log('[ESP-NOW] Chunk 3B: listDevices start');
+    console.log('[ESP-NOW] Chunk 3A: listDevices function start');
     window.listDevices = function(preloadedBondStatus, preloadedList) {
       function applyBondStatus(bondStatus) {
         window.__bondedPeerMac = null;
@@ -511,45 +569,9 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         let parsed = null;
         try { parsed = JSON.parse(output); } catch(e) { parsed = null; }
         const devices = (parsed && Array.isArray(parsed.devices)) ? parsed.devices : [];
-        if (devices.length === 0) {
-          deviceList.innerHTML = '<div style="color:var(--muted); text-align: center;">No devices paired yet</div>';
-        } else {
-          let html = '';
-          for (const dev of devices) {
-            const mac = (dev.mac || '').toUpperCase();
-            const deviceName = dev.name || '';
-            const isEncrypted = !!dev.encrypted;
-            const encryptionClass = isEncrypted ? 'device-encrypted' : 'device-unencrypted';
-            const encryptionIndicator = isEncrypted ? 'encryption-enabled' : 'encryption-disabled';
-            const encryptionText = isEncrypted ? 'Encrypted' : 'Unencrypted';
-            if (!mac) continue;
-            if (deviceName) window.__espnowDeviceNameToMac[deviceName] = mac;
-            const isBonded = window.__bondedPeerMac && mac === window.__bondedPeerMac;
-            const bondIndicator = isBonded ? '<span style="color:var(--warning);margin-right:4px;font-weight:bold" title="Bonded Device">[BOND]</span>' : '';
-            window.espnowDevices.push({ mac: mac, name: deviceName, encrypted: isEncrypted, bonded: isBonded });
-            try { console.log('[ESP-NOW][DEV] appended device', mac); } catch(e){}
-            html += '<div class="device-item">';
-            html += '<div>';
-            if (deviceName) {
-              html += '<div class="device-mac">' + bondIndicator + '<strong>' + deviceName + '</strong><span class="encryption-indicator ' + encryptionIndicator + '" title="' + encryptionText + '"></span></div>';
-              html += '<div class="device-channel ' + encryptionClass + '">' + mac + ' • ' + encryptionText + (isBonded ? ' • <strong>Bonded</strong>' : '') + '</div>';
-            } else {
-              html += '<div class="device-mac">' + bondIndicator + mac + '<span class="encryption-indicator ' + encryptionIndicator + '" title="' + encryptionText + '"></span></div>';
-              html += '<div class="device-channel ' + encryptionClass + '">' + encryptionText + (isBonded ? ' • <strong>Bonded</strong>' : '') + '</div>';
-            }
-            html += '</div>';
-            html += '<div class="device-actions">';
-            html += '<button class="btn btn-small" onclick="toggleDevicePanel(\'' + mac + '\',\'message\')">Interact</button>';
-            html += '<button class="btn btn-small" onclick="unpairDevice(\'' + mac + '\')">Unpair</button>';
-            html += '</div>';
-            html += '</div>';
-          }
-          try { console.log('[ESP-NOW][DEV] html length', html.length); } catch(e){}
-          const broadcastBtn = '<div style="display:flex;justify-content:flex-end;margin-bottom:12px;">'
-            + '<button class="btn" onclick="openBroadcastPanel()">Broadcast</button>'
-            + '</div>';
-          deviceList.innerHTML = broadcastBtn + html;
-        }
+        // Store parsed device list globally for unified rendering
+        window.__pairedDevices = devices;
+        window.renderUnifiedDeviceList();
       }
       if (preloadedBondStatus !== undefined) {
         applyBondStatus(preloadedBondStatus);
@@ -578,7 +600,176 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         document.getElementById('device-list').innerHTML = '<div style="color: #dc3545;">Error loading devices: ' + error + '</div>';
       });
     };
+    console.log('[ESP-NOW] Chunk 3A: listDevices function ready');
+    /* Unified device list renderer: merges paired devices + mesh health into one table */
+    console.log('[ESP-NOW] Chunk 3B: renderUnifiedDeviceList start');
+    window.__pairedDevices = window.__pairedDevices || [];
+    window.__meshPeers = window.__meshPeers || [];
+    window.__meshUnpaired = window.__meshUnpaired || [];
+    window.renderUnifiedDeviceList = function() {
+      var deviceList = document.getElementById('device-list');
+      if (!deviceList) return;
+      var paired = window.__pairedDevices || [];
+      var meshPeers = window.__meshPeers || [];
+      var meshUnpaired = window.__meshUnpaired || [];
+      var isMesh = !!window.espnowIsMesh;
+
+      // Build MAC-keyed mesh health map
+      var healthMap = {};
+      for (var mi = 0; mi < meshPeers.length; mi++) {
+        var mp = meshPeers[mi];
+        if (mp.mac) healthMap[mp.mac.toUpperCase()] = mp;
+      }
+
+      // Build unified device entries from paired list
+      window.espnowDevices = [];
+      window.__espnowDeviceNameToMac = window.__espnowDeviceNameToMac || {};
+      var seenMacs = {};
+      var html = '';
+      for (var i = 0; i < paired.length; i++) {
+        var dev = paired[i];
+        var mac = (dev.mac || '').toUpperCase();
+        if (!mac) continue;
+        seenMacs[mac] = true;
+        var deviceName = dev.name || '';
+        var isEncrypted = !!dev.encrypted;
+        var isBonded = window.__bondedPeerMac && mac === window.__bondedPeerMac;
+        if (deviceName) window.__espnowDeviceNameToMac[deviceName] = mac;
+        window.espnowDevices.push({ mac: mac, name: deviceName, encrypted: isEncrypted, bonded: isBonded });
+
+        // Mesh health for this device
+        var health = healthMap[mac] || null;
+        var statusDot = '';
+        var statusLabel = '';
+        var statsLine = '';
+        if (isMesh && health) {
+          var hbSec = (typeof health.secondsSinceHeartbeat === 'number') ? health.secondsSinceHeartbeat : null;
+          var actSec = (typeof health.secondsSinceActivity === 'number') ? health.secondsSinceActivity : null;
+          
+          // Consider device online if either heartbeat OR recent activity (ACKs) within timeout
+          var isOnline = health.alive || health.activityAlive;
+          var isFresh = (hbSec !== null && hbSec <= 15) || (actSec !== null && actSec <= 15);
+          
+          if (isOnline) {
+            if (isFresh) {
+              statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:6px" title="Online"></span>';
+              statusLabel = '<span style="color:var(--success);font-size:.8em;margin-left:6px">Online</span>';
+            } else {
+              statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning);margin-right:6px" title="Online (Stale)"></span>';
+              statusLabel = '<span style="color:var(--warning);font-size:.8em;margin-left:6px">Online</span>';
+            }
+          } else {
+            statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:6px" title="Offline"></span>';
+            statusLabel = '<span style="color:var(--danger);font-size:.8em;margin-left:6px">Offline</span>';
+          }
+          statsLine = '<span style="color:var(--muted);font-size:.78em;margin-left:4px">HB: ' + (health.heartbeatCount || 0) + ' | ACKs: ' + (health.ackCount || 0) + '</span>';
+        }
+
+        var encText = isEncrypted ? 'Encrypted' : 'Unencrypted';
+        var encClass = isEncrypted ? 'device-encrypted' : 'device-unencrypted';
+        var encInd = isEncrypted ? 'encryption-enabled' : 'encryption-disabled';
+        var bondBadge = isBonded ? '<span style="color:var(--warning);margin-right:4px;font-weight:bold" title="Bonded Device">[BOND]</span>' : '';
+
+        html += '<div class="device-item">';
+        html += '<div style="flex:1;min-width:0">';
+        html += '<div class="device-mac">' + statusDot + bondBadge + '<strong>' + (deviceName || mac) + '</strong>';
+        html += '<span class="encryption-indicator ' + encInd + '" title="' + encText + '"></span>';
+        html += statusLabel + '</div>';
+        html += '<div class="device-channel ' + encClass + '">' + mac + ' • ' + encText;
+        if (isBonded) html += ' • <strong>Bonded</strong>';
+        if (isMesh && health) html += ' • ' + statsLine;
+        html += '</div>';
+        html += '</div>';
+        html += '<div class="device-actions">';
+        html += '<button class="btn btn-small" onclick="toggleDevicePanel(\'' + mac + '\',\'message\')">Interact</button>';
+        html += '<button class="btn btn-small" onclick="unpairDevice(\'' + mac + '\')">Unpair</button>';
+        html += '</div>';
+        html += '</div>';
+      }
+
+      // Mesh-only peers (in meshPeers but not in paired list)
+      if (isMesh) {
+        var meshOnly = [];
+        for (var mi2 = 0; mi2 < meshPeers.length; mi2++) {
+          var pm = meshPeers[mi2];
+          if (pm.mac && !seenMacs[pm.mac.toUpperCase()]) {
+            meshOnly.push(pm);
+            seenMacs[pm.mac.toUpperCase()] = true;
+          }
+        }
+        if (meshOnly.length > 0) {
+          for (var j = 0; j < meshOnly.length; j++) {
+            var mp2 = meshOnly[j];
+            var mmac = (mp2.mac || '').toUpperCase();
+            var mname = mp2.name || 'Unknown';
+            var mStatusDot = '', mStatusLabel = '';
+            var mhbSec = (typeof mp2.secondsSinceHeartbeat === 'number') ? mp2.secondsSinceHeartbeat : null;
+            if (mp2.alive) {
+              if (mhbSec !== null && mhbSec <= 15) {
+                mStatusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:6px" title="Online"></span>';
+                mStatusLabel = '<span style="color:var(--success);font-size:.8em;margin-left:6px">Online</span>';
+              } else {
+                mStatusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning);margin-right:6px" title="Stale"></span>';
+                mStatusLabel = '<span style="color:var(--warning);font-size:.8em;margin-left:6px">Stale</span>';
+              }
+            } else if (mp2.activityAlive) {
+              mStatusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning);margin-right:6px" title="Stale"></span>';
+              mStatusLabel = '<span style="color:var(--warning);font-size:.8em;margin-left:6px">Stale</span>';
+            } else {
+              mStatusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:6px" title="Offline"></span>';
+              mStatusLabel = '<span style="color:var(--danger);font-size:.8em;margin-left:6px">Offline</span>';
+            }
+            var mStats = '<span style="color:var(--muted);font-size:.78em;margin-left:4px">HB: ' + (mp2.heartbeatCount || 0) + ' | ACKs: ' + (mp2.ackCount || 0) + '</span>';
+
+            html += '<div class="device-item">';
+            html += '<div style="flex:1;min-width:0">';
+            html += '<div class="device-mac">' + mStatusDot + '<strong>' + mname + '</strong>';
+            html += '<span style="background:var(--crumb-bg);color:var(--panel-fg);font-size:.72em;padding:2px 6px;border-radius:4px;margin-left:6px">Mesh</span>';
+            html += mStatusLabel + '</div>';
+            html += '<div class="device-channel" style="color:var(--muted)">' + mmac + ' • ' + mStats + '</div>';
+            html += '</div>';
+            html += '<div class="device-actions">';
+            html += '<button class="btn btn-small" onclick="toggleDevicePanel(\'' + mmac + '\',\'message\')">Interact</button>';
+            html += '</div>';
+            html += '</div>';
+          }
+        }
+
+        // Unpaired/discovered devices
+        if (meshUnpaired.length > 0) {
+          html += '<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">';
+          html += '<div style="font-size:.85em;font-weight:600;color:var(--muted);margin-bottom:8px">Discovered Devices (' + meshUnpaired.length + ')</div>';
+          for (var ui = 0; ui < meshUnpaired.length; ui++) {
+            var ud = meshUnpaired[ui];
+            var umac = (ud.mac || '').toUpperCase();
+            var uname = ud.name || 'Unknown';
+            var rssiColor = ud.rssi > -60 ? 'var(--success)' : (ud.rssi > -75 ? 'var(--warning)' : 'var(--danger)');
+            html += '<div class="device-item">';
+            html += '<div style="flex:1;min-width:0">';
+            html += '<div class="device-mac"><strong>' + uname + '</strong>';
+            html += '<span style="background:var(--crumb-bg);color:var(--muted);font-size:.72em;padding:2px 6px;border-radius:4px;margin-left:6px">Discovered</span></div>';
+            html += '<div class="device-channel" style="color:var(--muted)">' + umac;
+            html += ' • RSSI: <span style="color:' + rssiColor + '">' + ud.rssi + ' dBm</span>';
+            html += ' • Last: ' + ud.secondsSinceLastSeen + 's ago</div>';
+            html += '</div>';
+            html += '<div class="device-actions">';
+            html += '<button class="btn btn-small" onclick="pairUnpairedDevice(\'' + umac + '\',\'' + uname.replace(/'/g, "\\'") + '\')">Pair</button>';
+            html += '</div>';
+            html += '</div>';
+          }
+          html += '</div>';
+        }
+      }
+
+      if (!html) {
+        deviceList.innerHTML = '<div style="color:var(--muted);text-align:center;padding:20px">No devices paired yet</div>';
+      } else {
+        deviceList.innerHTML = html;
+      }
+    };
+    console.log('[ESP-NOW] Chunk 3B: renderUnifiedDeviceList ready');
     /* Per-device panel rendering and actions */
+    console.log('[ESP-NOW] Chunk 3C: initializeFileBrowser start');
     window.initializeFileBrowser = function(mac) {
       if (typeof window.createFileExplorerWithInput === 'function') {
         window.createFileExplorerWithInput({
@@ -597,6 +788,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         });
       }
     };
+    console.log('[ESP-NOW] Chunk 3C: initializeFileBrowser ready');
+    console.log('[ESP-NOW] Chunk 3D: openBroadcastPanel start');
     window.openBroadcastPanel = function() {
       try {
         var card = document.getElementById('device-panel-card');
@@ -622,6 +815,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         try { card.scrollIntoView({behavior:'smooth', block:'nearest'}); } catch(_) {}
       } catch(e) { console.warn('[ESP-NOW] openBroadcastPanel error:', e); }
     };
+    console.log('[ESP-NOW] Chunk 3D: openBroadcastPanel ready');
+    console.log('[ESP-NOW] Chunk 3E: toggleDevicePanel start');
     window.toggleDevicePanel = function(mac, kind) {
       try {
         var card = document.getElementById('device-panel-card');
@@ -656,24 +851,26 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         try { card.scrollIntoView({behavior:'smooth', block:'nearest'}); } catch(_) {}
       } catch(e) { console.warn('[ESP-NOW] toggleDevicePanel error:', e); }
     };
+    console.log('[ESP-NOW] Chunk 3E: toggleDevicePanel ready');
+    console.log('[ESP-NOW] Chunk 3F: renderDevicePanel start');
     window.renderDevicePanel = function(mac, kind) {
       if (kind === 'message') {
         return (
           '<div style="display:grid;grid-template-columns:1fr 2fr;gap:12px;margin-bottom:12px">'
-          + '<div style="display:flex;flex-direction:column;gap:6px;max-height:250px;overflow-y:auto">'
-          + '<button class="btn" id="btn-text-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'text\')" style="width:100%;text-align:left;padding:8px 12px">Text</button>'
-          + '<button class="btn" id="btn-remote-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'remote\')" style="width:100%;text-align:left;padding:8px 12px">Remote</button>'
-          + '<button class="btn" id="btn-file-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'file\')" style="width:100%;text-align:left;padding:8px 12px">File</button>'
-          + '<button class="btn" id="btn-metadata-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'metadata\')" style="width:100%;text-align:left;padding:8px 12px">Metadata</button>'
-          + '<button class="btn" id="btn-automations-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'automations\')" style="width:100%;text-align:left;padding:8px 12px">Automations</button>'
-          + '<button class="btn" id="btn-sensors-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'sensors\')" style="width:100%;text-align:left;padding:8px 12px">Sensors</button>'
+          + '<div class="interact-tabs">'
+          + '<button class="btn interact-tab" id="btn-text-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'text\')">Text</button>'
+          + '<button class="btn interact-tab" id="btn-remote-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'remote\')">Remote</button>'
+          + '<button class="btn interact-tab" id="btn-file-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'file\')">File</button>'
+          + '<button class="btn interact-tab" id="btn-metadata-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'metadata\')">Metadata</button>'
+          + '<button class="btn interact-tab" id="btn-automations-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'automations\')">Automations</button>'
+          + '<button class="btn interact-tab" id="btn-sensors-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'sensors\')">Sensor Streaming</button>'
           + '</div>'
           + '<div>'
           + '<div class="message-log" id="log-' + mac + '" style="margin-bottom:12px;max-height:300px;overflow-y:auto"><div class="message-empty">No messages yet. Start a conversation!</div></div>'
           + '<div id="text-input-' + mac + '" style="display:block">'
           + '<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">'
           + '<textarea id="msg-' + mac + '" placeholder="Message to send" style="flex:1;min-width:220px;min-height:60px;resize:vertical;font-family:inherit;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)"></textarea>'
-          + '<button class="btn" onclick="doSendMessage(\'' + mac + '\')" style="align-self:flex-start">Send</button>'
+          + '<button class="btn message-action-btn" onclick="doSendMessage(\'' + mac + '\')" style="align-self:flex-start">Send</button>'
           + '</div>'
           + '</div>'
           + '<div id="remote-input-' + mac + '" style="display:none">'
@@ -683,13 +880,13 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           + '</div>'
           + '<div style="display:flex;gap:8px;align-items:flex-start">'
           + '<input type="text" id="rc-' + mac + '" placeholder="Command (e.g., sensors, memory)" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)">'
-          + '<button class="btn" onclick="doRemoteExec(\'' + mac + '\')" style="align-self:flex-start">Execute</button>'
+          + '<button class="btn message-action-btn" onclick="doRemoteExec(\'' + mac + '\')" style="align-self:flex-start">Execute</button>'
           + '</div>'
           + '</div>'
           + '<div id="file-input-' + mac + '" style="display:none">'
           + '<div style="display:flex;gap:8px;margin-bottom:12px">'
-          + '<button class="btn" id="btn-file-send-' + mac + '" onclick="toggleFileMode(\'' + mac + '\', \'send\')" style="flex:1;background:var(--link);color:white">Send File</button>'
-          + '<button class="btn" id="btn-file-receive-' + mac + '" onclick="toggleFileMode(\'' + mac + '\', \'receive\')" style="flex:1">Receive File</button>'
+          + '<button class="btn message-action-btn" id="btn-file-send-' + mac + '" onclick="toggleFileMode(\'' + mac + '\', \'send\')" style="flex:1">Send File</button>'
+          + '<button class="btn message-action-btn" id="btn-file-receive-' + mac + '" onclick="toggleFileMode(\'' + mac + '\', \'receive\')" style="flex:1">Receive File</button>'
           + '</div>'
           + '<div id="file-send-panel-' + mac + '" style="display:block">'
           + '<div style="margin-bottom:12px">'
@@ -701,26 +898,24 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           + '<input type="text" id="fp-' + mac + '" placeholder="/path/to/file.ext or select from explorer" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)">'
           + '<small style="color:var(--panel-fg);font-size:0.85em">Click a file in the explorer above or enter path manually</small>'
           + '</div>'
-          + '<button class="btn" onclick="doSendFile(\'' + mac + '\')">Send File</button>'
+          + '<button class="btn message-action-btn" onclick="doSendFile(\'' + mac + '\')">Send File</button>'
           + '<div id="fstat-' + mac + '" style="margin-top:8px;padding:8px;border-radius:4px;font-size:0.9em;color:var(--panel-fg)">Select a file from the explorer or enter a file path manually</div>'
           + '</div>'
           + '<div id="file-receive-panel-' + mac + '" style="display:none">'
           + '<div class="input-group" style="margin-bottom:12px">'
           + '<input type="text" id="remote-user-' + mac + '" placeholder="Username" style="flex:1">'
           + '<input type="password" id="remote-pass-' + mac + '" placeholder="Password" style="flex:1">'
-          + '<button class="btn" onclick="browseRemoteFiles(\'' + mac + '\', \'/\')">Browse Root</button>'
+          + '<button class="btn message-action-btn" onclick="browseRemoteFiles(\'' + mac + '\', window.remoteCurrentPath && window.remoteCurrentPath[\'' + mac + '\'] ? window.remoteCurrentPath[\'' + mac + '\'] : \'/\')">Browse</button>'
           + '</div>'
           + '<div style="margin-bottom:12px">'
           + '<label style="display:block;margin-bottom:6px;font-weight:500;color:var(--panel-fg)">Remote Files:</label>'
-          + '<div id="remote-fexplorer-' + mac + '" style="background:var(--crumb-bg);border:1px solid var(--border);border-radius:8px;padding:12px;min-height:200px;max-height:300px;overflow-y:auto">'
-          + '<div style="text-align:center;color:var(--muted);padding:20px">Click "Browse Root" to load remote files</div>'
-          + '</div>'
+          + '<div id="remote-fexplorer-' + mac + '" style="min-height:220px"></div>'
           + '</div>'
           + '<div style="margin-bottom:10px">'
           + '<label style="display:block;margin-bottom:5px;font-weight:500;color:var(--panel-fg)">Remote File Path:</label>'
           + '<input type="text" id="remote-fp-' + mac + '" placeholder="/path/to/remote/file.ext" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)">'
           + '</div>'
-          + '<button class="btn" onclick="fetchRemoteFile(\'' + mac + '\')">Fetch File</button>'
+          + '<button class="btn message-action-btn" onclick="fetchRemoteFile(\'' + mac + '\')">Fetch File</button>'
           + '<div id="remote-fstat-' + mac + '" style="margin-top:8px;padding:8px;border-radius:4px;font-size:0.9em;color:var(--panel-fg)">Enter credentials and browse remote device</div>'
           + '</div>'
           + '</div>'
@@ -734,19 +929,21 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           + automationsInnerHtml(mac)
           + '</div>'
           + '<div id="sensors-input-' + mac + '" style="display:none;padding:12px;background:var(--crumb-bg);border-radius:8px;min-height:200px">'
-          + '<p style="color:var(--panel-fg);font-size:0.9em;margin:0 0 10px 0">Toggle sensor streaming on the remote device. Credentials are required.</p>'
+          + '<p style="color:var(--panel-fg);font-size:0.9em;margin:0 0 10px 0">Select which sensors should stream, then apply the changes. Credentials are required.</p>'
           + '<div class="input-group" style="margin-bottom:12px">'
           + '<input type="text" id="su-' + mac + '" placeholder="Username" style="flex:1">'
           + '<input type="password" id="sp-' + mac + '" placeholder="Password" style="flex:1">'
           + '</div>'
-          + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">'
+          + '<div class="sensor-grid">'
           + ['thermal','tof','imu','gps','gamepad','fmradio','rtc','presence'].map(function(s){
-              return '<button class="btn" id="sbtn-' + s + '-' + mac + '" onclick="doSensorStreamToggle(\'' + mac + '\',\'' + s + '\')" style="padding:8px;font-size:0.85em">' + s + '</button>';
+              return '<div class="sensor-pill" id="sensor-pill-' + s + '-' + mac + '" onclick="toggleSensorSelection(\'' + mac + '\',\'' + s + '\')">' + s + '</div>';
             }).join('')
           + '</div>'
-          + '<div style="margin-bottom:10px">'
-          + '<button class="btn" onclick="doSensorBroadcast(\'' + mac + '\', true)" style="margin-right:8px;font-size:0.85em">Broadcast On</button>'
-          + '<button class="btn" onclick="doSensorBroadcast(\'' + mac + '\', false)" style="font-size:0.85em">Broadcast Off</button>'
+          + '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">'
+          + '<button class="btn message-action-btn" onclick="applySensorStreaming(\'' + mac + '\')">Apply Streaming</button>'
+          + '<div style="flex:1"></div>'
+          + '<button class="btn message-action-btn" onclick="doSensorBroadcast(\'' + mac + '\', true)">Broadcast On</button>'
+          + '<button class="btn message-action-btn" onclick="doSensorBroadcast(\'' + mac + '\', false)">Broadcast Off</button>'
           + '</div>'
           + '<div id="sensor-status-' + mac + '" style="font-size:0.85em;color:var(--muted)"></div>'
           + '</div>'
@@ -784,6 +981,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       }
       return '<div>Unknown panel</div>';
     };
+    console.log('[ESP-NOW] Chunk 3F: renderDevicePanel ready');
+    console.log('[ESP-NOW] Chunk 3G: appendLogLine start');
     window.appendLogLine = function(containerId, type, message, status) {
       console.log('[appendLogLine] Called with:', {containerId, type, message, status});
       const log = document.getElementById(containerId);
@@ -862,6 +1061,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       
       return bubble;
     };
+    console.log('[ESP-NOW] Chunk 3G: appendLogLine ready');
+    console.log('[ESP-NOW] Chunk 3H: doSendMessage start');
     window.doSendMessage = function(mac) {
       const val = (document.getElementById('msg-' + mac) || {}).value || '';
       if (!val) { alert('Enter a message'); return; }
@@ -873,17 +1074,9 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       // Show message as "sending" immediately
       const bubble = appendLogLine('log-' + mac, 'SENT', val, 'sending');
       
-      // Fetch current mode dynamically to ensure we use the correct command
-      console.log('[ESP-NOW] Fetching current mode before sending...');
-      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent('espnow mode') })
-        .then(r => r.text())
-        .then(modeOut => {
-          const isMesh = (modeOut || '').toLowerCase().indexOf('mesh') >= 0;
-          console.log('[ESP-NOW] Current mode:', isMesh ? 'MESH' : 'DIRECT');
-          var cmd = 'espnow send ' + mac + ' ' + val;
-          console.log('[ESP-NOW] Command:', cmd);
-          return fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(cmd) });
-        })
+      // Use already-tracked mode — no extra round-trip needed
+      var cmd = 'espnow send ' + mac + ' ' + val;
+      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(cmd) })
         .then(r=>r.text())
         .then(t=>{
           console.log('[ESP-NOW] Send result:', t);
@@ -912,6 +1105,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           }
         });
     };
+    console.log('[ESP-NOW] Chunk 3H: doSendMessage ready');
+    console.log('[ESP-NOW] Chunk 3I: doBroadcast start');
     window.doBroadcast = function(){
       const input = document.getElementById('broadcast-msg');
       const statusDiv = document.getElementById('broadcast-status');
@@ -958,6 +1153,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           }
         });
     };
+    console.log('[ESP-NOW] Chunk 3I: doBroadcast ready');
+    console.log('[ESP-NOW] Chunk 3J: doSendFile start');
     window.doSendFile = function(mac) {
       const path = (document.getElementById('fp-' + mac) || {}).value || '';
       if (!path) { 
@@ -1017,6 +1214,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           appendLogLine('log-' + mac, 'ERROR', 'File transfer error: ' + e.message, null);
         });
     };
+    console.log('[ESP-NOW] Chunk 3J: doSendFile ready');
+    console.log('[ESP-NOW] Chunk 3K: toggleMessageType start');
     window.toggleMessageType = function(mac, type) {
       const textInput = document.getElementById('text-input-' + mac);
       const remoteInput = document.getElementById('remote-input-' + mac);
@@ -1024,8 +1223,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       const metadataDiv = document.getElementById('metadata-' + mac);
       const automationsInput = document.getElementById('automations-input-' + mac);
       const sensorsInput = document.getElementById('sensors-input-' + mac);
+      const messageLog = document.getElementById('log-' + mac);
       const btnText = document.getElementById('btn-text-' + mac);
-      const btnRemote = document.getElementById('btn-remote-' + mac);
       const btnFile = document.getElementById('btn-file-' + mac);
       const btnMetadata = document.getElementById('btn-metadata-' + mac);
       const btnAutomations = document.getElementById('btn-automations-' + mac);
@@ -1034,35 +1233,13 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       if (!textInput || !remoteInput || !fileInput) return;
       
       // Reset all button styles
-      if (btnText) {
-        btnText.style.background = '';
-        btnText.style.color = '';
-        btnText.style.border = '';
-      }
+      [btnText, btnRemote, btnFile, btnMetadata, btnAutomations, btnSensors].forEach(function(btn) {
+        if (btn) btn.classList.remove('interact-tab-active');
+      });
       if (btnRemote) {
         btnRemote.style.background = '';
         btnRemote.style.color = '';
         btnRemote.style.border = '';
-      }
-      if (btnFile) {
-        btnFile.style.background = '';
-        btnFile.style.color = '';
-        btnFile.style.border = '';
-      }
-      if (btnMetadata) {
-        btnMetadata.style.background = '';
-        btnMetadata.style.color = '';
-        btnMetadata.style.border = '';
-      }
-      if (btnAutomations) {
-        btnAutomations.style.background = '';
-        btnAutomations.style.color = '';
-        btnAutomations.style.border = '';
-      }
-      if (btnSensors) {
-        btnSensors.style.background = '';
-        btnSensors.style.color = '';
-        btnSensors.style.border = '';
       }
       
       // Hide all inputs and metadata
@@ -1073,34 +1250,21 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       if (automationsInput) automationsInput.style.display = 'none';
       if (sensorsInput) sensorsInput.style.display = 'none';
       
-      // Get message log to show/hide based on mode
-      var messageLog = document.getElementById('log-' + mac);
+      // messageLog already declared as const above, reuse it
       
       // Show selected input and highlight button
       if (type === 'text') {
         textInput.style.display = 'block';
         if (messageLog) messageLog.style.display = 'block';
-        if (btnText) {
-          btnText.style.background = '#007bff';
-          btnText.style.color = 'white';
-          btnText.style.border = '2px solid #007bff';
-        }
+        if (btnText) btnText.classList.add('interact-tab-active');
       } else if (type === 'remote') {
         remoteInput.style.display = 'block';
         if (messageLog) messageLog.style.display = 'block';
-        if (btnRemote) {
-          btnRemote.style.background = '#007bff';
-          btnRemote.style.color = 'white';
-          btnRemote.style.border = '2px solid #007bff';
-        }
+        if (btnRemote) btnRemote.classList.add('interact-tab-active');
       } else if (type === 'file') {
         fileInput.style.display = 'block';
         if (messageLog) messageLog.style.display = 'none';
-        if (btnFile) {
-          btnFile.style.background = '#007bff';
-          btnFile.style.color = 'white';
-          btnFile.style.border = '2px solid #007bff';
-        }
+        if (btnFile) btnFile.classList.add('interact-tab-active');
         // Initialize file browser when file mode is selected
         if (typeof window.initializeFileBrowser === 'function') {
           setTimeout(function() { window.initializeFileBrowser(mac); }, 100);
@@ -1108,21 +1272,13 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       } else if (type === 'metadata') {
         if (metadataDiv) metadataDiv.style.display = 'block';
         if (messageLog) messageLog.style.display = 'none';
-        if (btnMetadata) {
-          btnMetadata.style.background = '#007bff';
-          btnMetadata.style.color = 'white';
-          btnMetadata.style.border = '2px solid #007bff';
-        }
+        if (btnMetadata) btnMetadata.classList.add('interact-tab-active');
         // Load cached metadata if available; don't auto-request from device
         window.loadDeviceMetadata(mac);
       } else if (type === 'automations') {
         if (automationsInput) automationsInput.style.display = 'block';
         if (messageLog) messageLog.style.display = 'none';
-        if (btnAutomations) {
-          btnAutomations.style.background = '#007bff';
-          btnAutomations.style.color = 'white';
-          btnAutomations.style.border = '2px solid #007bff';
-        }
+        if (btnAutomations) btnAutomations.classList.add('interact-tab-active');
         // Auto-load already-received automations file if it exists
         window.tryLoadExistingAutomations(mac);
         // Pre-fill credentials from remote tab if available
@@ -1135,11 +1291,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       } else if (type === 'sensors') {
         if (sensorsInput) sensorsInput.style.display = 'block';
         if (messageLog) messageLog.style.display = 'none';
-        if (btnSensors) {
-          btnSensors.style.background = '#007bff';
-          btnSensors.style.color = 'white';
-          btnSensors.style.border = '2px solid #007bff';
-        }
+        if (btnSensors) btnSensors.classList.add('interact-tab-active');
         // Pre-fill credentials from remote tab if available
         var ruEl2 = document.getElementById('ru-' + mac);
         var rpEl2 = document.getElementById('rp-' + mac);
@@ -1149,7 +1301,16 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         if (rpEl2 && spEl && !spEl.value && rpEl2.value) spEl.value = rpEl2.value;
       }
     };
+    console.log('[ESP-NOW] Chunk 3K: toggleMessageType ready');
+    console.log('[ESP-NOW] Chunk 3L: loadRemoteAutomations start');
     window.loadRemoteAutomations = function(mac) {
+      var listDiv = document.getElementById('automations-list-' + mac);
+      if (!listDiv) return;
+      if (window.__autoFetchState && window.__autoFetchState[mac]) {
+        listDiv.innerHTML = '<div style="color:var(--muted);padding:12px;text-align:center">Transfer already in progress...</div>';
+        window.setAutoButtonState(mac, { disabled: true, text: 'Transferring...' });
+        return;
+      }
       var u = (document.getElementById('au-' + mac) || {}).value || '';
       var p = (document.getElementById('ap-' + mac) || {}).value || '';
       var esc = (typeof hw !== 'undefined' && hw._esc)
@@ -1160,8 +1321,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         else alert('Enter username and password');
         return;
       }
-      var listDiv = document.getElementById('automations-list-' + mac);
-      if (!listDiv) return;
+      if (window.__autoFetchState) window.__autoFetchState[mac] = true;
+      window.setAutoButtonState(mac, { disabled: true, text: 'Requesting...' });
       listDiv.innerHTML = '<div style="color:var(--muted);padding:12px;text-align:center">Requesting automations via ESP-NOW...</div>';
       var macHex = mac.replace(/:/g, '').toUpperCase();
       var filePath = '/espnow/received/' + macHex + '/automations.json';
@@ -1175,43 +1336,50 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         var lower = (resp || '').toLowerCase();
         if (lower.indexOf('error') >= 0 || lower.indexOf('not initialized') >= 0) {
           listDiv.innerHTML = '<div style="color:var(--danger);padding:12px">' + esc(resp) + '</div>';
+          window.markAutomationsFetchIdle(mac, 'Retry Automations');
           return;
         }
         var attempts = 0;
         listDiv.innerHTML = '<div style="color:var(--muted);padding:12px;text-align:center">Transfer in progress (1/30)...</div>';
         function poll() {
           attempts++;
+          window.setAutoButtonState(mac, { disabled: true, text: 'Receiving ' + attempts + '/30' });
           fetch('/api/files/read?name=' + encodeURIComponent(filePath))
-          .then(function(r) {
-            if (r.status === 404) {
-              if (attempts < 30) {
-                listDiv.innerHTML = '<div style="color:var(--muted);padding:12px;text-align:center">Transfer in progress (' + attempts + '/30)...</div>';
-                setTimeout(poll, 1000);
-              } else {
-                listDiv.innerHTML = '<div style="color:var(--danger);padding:12px">Timed out. Is encryption enabled and both devices securely paired?</div>';
+            .then(function(r) {
+              if (r.status === 404) {
+                if (attempts < 30) {
+                  listDiv.innerHTML = '<div style="color:var(--muted);padding:12px;text-align:center">Transfer in progress (' + attempts + '/30)...</div>';
+                  setTimeout(poll, 1000);
+                } else {
+                  listDiv.innerHTML = '<div style="color:var(--danger);padding:12px">Timed out. Is encryption enabled and both devices securely paired?</div>';
+                  window.markAutomationsFetchIdle(mac, 'Retry Automations');
+                }
+                return null;
               }
-              return null;
-            }
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-            return r.text();
-          })
-          .then(function(text) {
-            if (text === null || text === undefined) return;
-            // File is now cached — use tryLoadExistingAutomations which renders
-            // with proper click handlers, Run buttons, and event listeners
-            window.tryLoadExistingAutomations(mac);
-            if (typeof hw !== 'undefined') hw.notify('success', 'Automations loaded', 2000);
-          })
-          .catch(function(e) {
-            listDiv.innerHTML = '<div style="color:var(--danger);padding:12px">Error: ' + esc(e.message) + '</div>';
-          });
+              if (!r.ok) throw new Error('HTTP ' + r.status);
+              return r.text();
+            })
+            .then(function(text) {
+              if (text === null || text === undefined) return;
+              // File is now cached — use tryLoadExistingAutomations which renders
+              // with proper click handlers, Run buttons, and event listeners
+              window.tryLoadExistingAutomations(mac);
+              if (typeof hw !== 'undefined') hw.notify('success', 'Automations loaded', 2000);
+            })
+            .catch(function(e) {
+              listDiv.innerHTML = '<div style="color:var(--danger);padding:12px">Error: ' + esc(e.message) + '</div>';
+              window.markAutomationsFetchIdle(mac, 'Retry Automations');
+            });
         }
         setTimeout(poll, 1500);
       })
       .catch(function(e) {
         listDiv.innerHTML = '<div style="color:var(--danger);padding:12px">Error: ' + esc(e.message) + '</div>';
+        window.markAutomationsFetchIdle(mac, 'Retry Automations');
       });
     };
+    console.log('[ESP-NOW] Chunk 3L: loadRemoteAutomations ready');
+    console.log('[ESP-NOW] Chunk 3M: doRemoteExec start');
     window.doRemoteExec = function(mac) {
       const u = (document.getElementById('ru-' + mac) || {}).value || '';
       const p = (document.getElementById('rp-' + mac) || {}).value || '';
@@ -1227,11 +1395,18 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(cmd) })
         .then(r=>r.text())
         .then(t=>{
+          console.log('[ESP-NOW] Remote exec result:', t);
           // Update sending bubble to show completion
           if (sendingBubble) {
             const statusDiv = sendingBubble.querySelector('.message-status');
-            if (statusDiv) {
-              statusDiv.innerHTML = '<span class="status-icon">OK</span>Sent';
+            const lowerResult = (t || '').toLowerCase();
+            // Check for ACK confirmation (v2 protocol with ACK)
+            if (lowerResult.indexOf('failed') >= 0 || lowerResult.indexOf('error') >= 0) {
+              statusDiv.innerHTML = '<span class="status-icon">✗</span>Failed';
+            } else if (lowerResult.indexOf('remote command sent') >= 0) {
+              statusDiv.innerHTML = '<span class="status-icon">✓</span>Sent';
+            } else {
+              statusDiv.innerHTML = '<span class="status-icon">✓</span>' + t;
             }
           }
           
@@ -1252,54 +1427,13 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
             if (textDiv) textDiv.textContent = 'Remote: ' + c + ' (FAILED)';
             const statusDiv = sendingBubble.querySelector('.message-status');
             if (statusDiv) {
-              statusDiv.innerHTML = '<span class="status-icon">ERR</span>' + e.message;
+              statusDiv.innerHTML = '<span class="status-icon">✗</span>Failed';
             }
           }
         });
     };
-    window.doSensorStreamToggle = function(mac, sensor) {
-      var u = (document.getElementById('su-' + mac) || {}).value || '';
-      var p = (document.getElementById('sp-' + mac) || {}).value || '';
-      if (!u || !p) { alert('Enter username and password in the Sensors tab'); return; }
-      var btn = document.getElementById('sbtn-' + sensor + '-' + mac);
-      var statusDiv = document.getElementById('sensor-status-' + mac);
-      var isOn = btn && btn.dataset.streaming === 'on';
-      var newState = isOn ? 'off' : 'on';
-      var cmd = 'espnow sensorstream ' + sensor + ' ' + newState;
-      var fullCmd = 'espnow remote ' + mac + ' ' + u + ' ' + p + ' ' + cmd;
-      if (statusDiv) statusDiv.textContent = 'Sending: ' + sensor + ' ' + newState + '...';
-      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(fullCmd) })
-        .then(function(r){ return r.text(); })
-        .then(function(t) {
-          if (btn) {
-            btn.dataset.streaming = newState;
-            btn.style.background = newState === 'on' ? '#28a745' : '';
-            btn.style.color = newState === 'on' ? 'white' : '';
-            btn.style.border = newState === 'on' ? '2px solid #28a745' : '';
-          }
-          if (statusDiv) statusDiv.textContent = sensor + ': ' + newState + (t ? ' — ' + t.trim().substring(0,80) : '');
-        })
-        .catch(function(e) {
-          if (statusDiv) statusDiv.textContent = 'Error: ' + e.message;
-        });
-    };
-    window.doSensorBroadcast = function(mac, enable) {
-      var u = (document.getElementById('su-' + mac) || {}).value || '';
-      var p = (document.getElementById('sp-' + mac) || {}).value || '';
-      if (!u || !p) { alert('Enter username and password in the Sensors tab'); return; }
-      var statusDiv = document.getElementById('sensor-status-' + mac);
-      var cmd = 'espnow sensorbroadcast ' + (enable ? 'on' : 'off');
-      var fullCmd = 'espnow remote ' + mac + ' ' + u + ' ' + p + ' ' + cmd;
-      if (statusDiv) statusDiv.textContent = 'Sending: sensorbroadcast ' + (enable ? 'on' : 'off') + '...';
-      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(fullCmd) })
-        .then(function(r){ return r.text(); })
-        .then(function(t) {
-          if (statusDiv) statusDiv.textContent = 'sensorbroadcast ' + (enable ? 'on' : 'off') + (t ? ' — ' + t.trim().substring(0,80) : '');
-        })
-        .catch(function(e) {
-          if (statusDiv) statusDiv.textContent = 'Error: ' + e.message;
-        });
-    };
+    console.log('[ESP-NOW] Chunk 3M: doRemoteExec ready');
+    console.log('[ESP-NOW] Chunk 3N: toggleFileMode start');
     window.toggleFileMode = function(mac, mode) {
       const sendPanel = document.getElementById('file-send-panel-' + mac);
       const receivePanel = document.getElementById('file-receive-panel-' + mac);
@@ -1324,104 +1458,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         btnReceive.style.color = 'white';
       }
     };
-    // Track current remote path per device
-    window.remoteCurrentPath = window.remoteCurrentPath || {};
-    
-    // Helper to render interactive remote file browser UI
-    window.renderRemoteFileExplorer = function(mac, path, entries) {
-      var container = document.getElementById('remote-fexplorer-' + mac);
-      if (!container) return;
-      
-      window.remoteCurrentPath[mac] = path;
-      
-      // Build breadcrumb navigation
-      var parts = path.split('/').filter(function(p) { return p.length > 0; });
-      var crumbHtml = '<div style="display:flex;align-items:center;gap:4px;margin-bottom:10px;flex-wrap:wrap">';
-      crumbHtml += '<span onclick="browseRemoteFiles(\'' + mac + '\', \'/\')" style="cursor:pointer;color:var(--link);font-weight:500">Root</span>';
-      var crumbPath = '';
-      for (var i = 0; i < parts.length; i++) {
-        crumbPath += '/' + parts[i];
-        var isLast = (i === parts.length - 1);
-        crumbHtml += '<span style="color:var(--muted)">/</span>';
-        if (isLast) {
-          crumbHtml += '<span style="font-weight:500;color:var(--panel-fg)">' + parts[i] + '</span>';
-        } else {
-          crumbHtml += '<span onclick="browseRemoteFiles(\'' + mac + '\', \'' + crumbPath + '\')" style="cursor:pointer;color:var(--link)">' + parts[i] + '</span>';
-        }
-      }
-      crumbHtml += '</div>';
-      
-      // Build file/folder list
-      var listHtml = '<div style="display:flex;flex-direction:column;gap:2px">';
-      
-      // Add parent directory link if not at root
-      if (path !== '/') {
-        var parentPath = path.replace(/\/[^\/]+\/?$/, '') || '/';
-        listHtml += '<div onclick="browseRemoteFiles(\'' + mac + '\', \'' + parentPath + '\')" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:4px;cursor:pointer;background:var(--panel-bg)" onmouseover="this.style.background=\'var(--hover-bg)\'" onmouseout="this.style.background=\'var(--panel-bg)\'">';
-        listHtml += '<span style="color:var(--link)">..</span>';
-        listHtml += '<span style="color:var(--muted);font-size:0.85em;margin-left:auto">(parent)</span>';
-        listHtml += '</div>';
-      }
-      
-      if (entries.length === 0) {
-        listHtml += '<div style="padding:12px;color:var(--muted);text-align:center">(empty directory)</div>';
-      }
-      
-      for (var j = 0; j < entries.length; j++) {
-        var entry = entries[j];
-        var fullPath = (path === '/' ? '/' : path + '/') + entry.name;
-        
-        if (entry.isDir) {
-          listHtml += '<div onclick="browseRemoteFiles(\'' + mac + '\', \'' + fullPath + '\')" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:4px;cursor:pointer;background:var(--panel-bg)" onmouseover="this.style.background=\'var(--hover-bg)\'" onmouseout="this.style.background=\'var(--panel-bg)\'">';
-          listHtml += '<span style="color:var(--link);font-weight:500">' + entry.name + '</span>';
-          listHtml += '<span style="color:var(--muted);font-size:0.85em;margin-left:auto">' + entry.info + '</span>';
-          listHtml += '</div>';
-        } else {
-          listHtml += '<div onclick="selectRemoteFile(\'' + mac + '\', \'' + fullPath + '\')" style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:4px;cursor:pointer;background:var(--panel-bg)" onmouseover="this.style.background=\'var(--hover-bg)\'" onmouseout="this.style.background=\'var(--panel-bg)\'">';
-          listHtml += '<span style="color:var(--panel-fg)">' + entry.name + '</span>';
-          listHtml += '<span style="color:var(--muted);font-size:0.85em;margin-left:auto">' + entry.info + '</span>';
-          listHtml += '</div>';
-        }
-      }
-      listHtml += '</div>';
-      
-      container.innerHTML = crumbHtml + listHtml;
-    };
-    
-    // Select a remote file (fills in the path input)
-    window.selectRemoteFile = function(mac, filePath) {
-      var input = document.getElementById('remote-fp-' + mac);
-      if (input) input.value = filePath;
-      var statusDiv = document.getElementById('remote-fstat-' + mac);
-      if (statusDiv) statusDiv.textContent = 'Selected: ' + filePath;
-    };
-    
-    // Parse remote file listing response into entries
-    window.parseRemoteFileListing = function(lines) {
-      var entries = [];
-      for (var i = 0; i < lines.length; i++) {
-        var line = lines[i].trim();
-        // Format: "  dirname (N items)" for directories
-        // Format: "  filename (N bytes)" for files
-        var dirMatch = line.match(/^\s*(\S+)\s+\((\d+)\s+items?\)$/);
-        var fileMatch = line.match(/^\s*(\S+)\s+\((\d+)\s+bytes?\)$/);
-        
-        if (dirMatch) {
-          entries.push({ name: dirMatch[1], isDir: true, info: dirMatch[2] + ' items' });
-        } else if (fileMatch) {
-          var bytes = parseInt(fileMatch[2], 10);
-          var sizeStr = bytes < 1024 ? bytes + ' B' : (bytes / 1024).toFixed(1) + ' KB';
-          entries.push({ name: fileMatch[1], isDir: false, info: sizeStr });
-        }
-      }
-      // Sort: directories first, then files, alphabetically
-      entries.sort(function(a, b) {
-        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
-      return entries;
-    };
-    
+    console.log('[ESP-NOW] Chunk 3N: toggleFileMode ready');
+    console.log('[ESP-NOW] Chunk 3O: browseRemoteFiles start');
     window.browseRemoteFiles = function(mac, path) {
       var u = (document.getElementById('remote-user-' + mac) || {}).value || '';
       var p = (document.getElementById('remote-pass-' + mac) || {}).value || '';
@@ -1434,7 +1472,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       }
       
       if (!container) return;
-      container.innerHTML = '<div style="text-align:center;color:var(--muted);padding:20px">Loading remote files...</div>';
+      container.innerHTML = '<div class="remote-explorer"><div class="remote-explorer-crumb">Loading...</div><div class="remote-entry remote-entry-empty" style="display:flex">Requesting directory...</div></div>';
       if (statusDiv) statusDiv.textContent = 'Requesting directory listing from ' + mac + '...';
       
       var targetMac = String(mac || '').toUpperCase();
@@ -1465,7 +1503,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       .then(function(text) {
         if (!text.includes('Remote command sent')) {
           container.innerHTML = '<pre style="margin:0;white-space:pre-wrap;font-size:0.85em">' + text + '</pre>';
-          if (statusDiv) statusDiv.textContent = 'Result received';
+          if (statusDiv) statusDiv.textContent = text;
           return;
         }
         if (statusDiv) statusDiv.textContent = 'Request sent, waiting for response...';
@@ -1477,10 +1515,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           pollCount++;
           if (pollCount > maxPolls) {
             clearInterval(pollInterval);
-            if (container.innerHTML.indexOf('Loading') >= 0) {
-              container.innerHTML = '<div style="text-align:center;color:var(--muted);padding:20px">Timed out waiting for response</div>';
-              if (statusDiv) statusDiv.textContent = 'Timed out';
-            }
+            container.innerHTML = '<div class="remote-explorer"><div class="remote-explorer-crumb">' + browsePath + '</div><div class="remote-entry remote-entry-empty" style="display:flex">Timed out waiting for response</div></div>';
+            if (statusDiv) statusDiv.textContent = 'Timed out';
             return;
           }
           
@@ -1888,6 +1924,89 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       }
       next();
     };
+    window.__sensorList = window.__sensorList || ['thermal','tof','imu','gps','gamepad','fmradio','rtc','presence'];
+    window.sensorActiveState = window.sensorActiveState || {};
+    window.sensorPendingState = window.sensorPendingState || {};
+    window.updateSensorStatus = function(mac) {
+      var statusDiv = document.getElementById('sensor-status-' + mac);
+      if (!statusDiv) return;
+      var pendingCount = Object.keys(window.sensorPendingState[mac] || {}).length;
+      statusDiv.textContent = pendingCount ? ('Pending changes: ' + pendingCount) : 'Select sensors and click Apply Streaming.';
+    };
+    window.updateSensorPill = function(mac, sensor) {
+      var pill = document.getElementById('sensor-pill-' + sensor + '-' + mac);
+      if (!pill) return;
+      pill.classList.remove('sensor-active','sensor-pending');
+      var activeState = window.sensorActiveState[mac] && window.sensorActiveState[mac][sensor] === 'on';
+      var pendingMap = window.sensorPendingState[mac] || {};
+      if (activeState) pill.classList.add('sensor-active');
+      if (pendingMap.hasOwnProperty(sensor)) pill.classList.add('sensor-pending');
+    };
+    window.ensureSensorState = function(mac) {
+      if (!window.sensorActiveState[mac]) window.sensorActiveState[mac] = {};
+      if (!window.sensorPendingState[mac]) window.sensorPendingState[mac] = {};
+      window.__sensorList.forEach(function(sensor){ window.updateSensorPill(mac, sensor); });
+      window.updateSensorStatus(mac);
+    };
+    window.toggleSensorSelection = function(mac, sensor) {
+      window.ensureSensorState(mac);
+      var pendingMap = window.sensorPendingState[mac];
+      var active = (window.sensorActiveState[mac][sensor] || 'off');
+      if (pendingMap.hasOwnProperty(sensor)) {
+        delete pendingMap[sensor];
+      } else {
+        pendingMap[sensor] = active === 'on' ? 'off' : 'on';
+      }
+      window.updateSensorPill(mac, sensor);
+      window.updateSensorStatus(mac);
+    };
+    window.applySensorStreaming = function(mac) {
+      window.ensureSensorState(mac);
+      var pendingMap = window.sensorPendingState[mac];
+      var entries = Object.entries(pendingMap);
+      var statusDiv = document.getElementById('sensor-status-' + mac);
+      var u = (document.getElementById('su-' + mac) || {}).value || '';
+      var p = (document.getElementById('sp-' + mac) || {}).value || '';
+      if (!u || !p) { alert('Enter username and password in Sensor Streaming tab'); return; }
+      if (entries.length === 0) {
+        if (statusDiv) statusDiv.textContent = 'No pending changes to apply';
+        return;
+      }
+      var idx = 0;
+      var results = [];
+      function processNext() {
+        if (idx >= entries.length) {
+          window.updateSensorStatus(mac);
+          if (statusDiv) statusDiv.textContent = results.join(' | ');
+          return;
+        }
+        var sensor = entries[idx][0];
+        var desired = entries[idx][1];
+        idx++;
+        if (statusDiv) statusDiv.textContent = 'Applying ' + sensor + ' ' + desired + '...';
+        var cmd = 'espnow remote ' + mac + ' ' + u + ' ' + p + ' espnow sensorstream ' + sensor + ' ' + desired;
+        fetch('/api/cli', {
+          method:'POST',
+          headers:{'Content-Type':'application/x-www-form-urlencoded'},
+          body:'cmd=' + encodeURIComponent(cmd)
+        })
+        .then(function(r){ return r.text(); })
+        .then(function(resp){
+          window.sensorActiveState[mac][sensor] = desired;
+          delete pendingMap[sensor];
+          window.updateSensorPill(mac, sensor);
+          results.push(sensor + ' ' + desired + ' ✓');
+          processNext();
+        })
+        .catch(function(e){
+          results.push(sensor + ' error: ' + e.message);
+          delete pendingMap[sensor];
+          window.updateSensorPill(mac, sensor);
+          processNext();
+        });
+      }
+      processNext();
+    };
     console.log('[ESP-NOW] Chunk 3: helpers ready');
   } catch(e) { console.error('[ESP-NOW] Chunk 3 error:', e); }
 })();
@@ -1951,13 +2070,14 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
   try {
     console.log('[ESP-NOW] Chunk 4b: Mesh status functions start');
     window.meshStatusPollInterval = null;
+    window.meshStatusPollInFlight = false;
     window.startMeshStatusPolling = function() {
-      console.log('[ESP-NOW] Starting mesh status polling...');
       if (window.meshStatusPollInterval) {
         clearInterval(window.meshStatusPollInterval);
       }
       window.meshStatusPollInterval = setInterval(function() {
         if (document.hidden) return;
+        if (window.meshStatusPollInFlight) return;  // skip if previous request still pending
         if (window.espnowIsMesh && typeof window.refreshMeshStatus === 'function') {
           window.refreshMeshStatus();
         }
@@ -1971,97 +2091,23 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
       }
     };
     window.refreshMeshStatus = function(preloadedText) {
+      if (!preloadedText) window.meshStatusPollInFlight = true;
       function applyMeshStatus(output) {
         try {
           var data = JSON.parse(output);
           if (data.error) {
-            document.getElementById('mesh-peers-list').innerHTML = '<div style="color:var(--danger);text-align:center;">' + data.error + '</div>';
+            console.warn('[ESP-NOW] meshstatus error:', data.error);
             return;
           }
-          var html = '';
-          
-          // Paired Devices Section
-          html += '<div style="margin-bottom:20px;">';
-          html += '<h4 style="color:var(--panel-fg);margin:0 0 10px 0;padding:8px;background:var(--crumb-bg);border-radius:4px;">Paired Devices (' + (data.peers ? data.peers.length : 0) + ')</h4>';
-          
-          if (!data.peers || data.peers.length === 0) {
-            html += '<div style="color:var(--panel-fg);text-align:center;padding:20px;">No paired mesh peers detected yet</div>';
-          } else {
-            for (var i = 0; i < data.peers.length; i++) {
-              var peer = data.peers[i];
-              
-              // Determine status indicator
-              var indicator = '';
-              var statusColor = '';
-              var statusText = '';
-              if (!peer.alive) {
-                indicator = 'Offline';
-                statusColor = 'var(--danger)';
-              } else {
-                var secondsSince = peer.secondsSinceHeartbeat;
-                if (secondsSince < 15) {
-                  indicator = 'Online';
-                  statusColor = 'var(--success)';
-                } else {
-                  indicator = 'Stale';
-                  statusColor = 'var(--warning)';
-                }
-              }
-              
-              html += '<div style="padding:10px;margin:5px 0;background:var(--panel-bg);border-radius:4px;">';
-              html += '<div style="display:flex;align-items:center;justify-content:space-between;">';
-              html += '<div style="flex:1;">';
-              html += '<span style="font-size:1.2em;color:' + statusColor + ';">' + indicator + '</span> ';
-              html += '<strong style="color:var(--panel-fg);">' + peer.name + '</strong> ';
-              html += '<span style="color:var(--panel-fg);font-size:0.9em;">(' + peer.mac + ')</span>';
-              html += '<br><span style="color:var(--panel-fg);font-size:0.85em;margin-left:20px;">';
-              html += 'Last HB: ' + peer.secondsSinceHeartbeat + 's ago | ';
-              html += 'Count: ' + peer.heartbeatCount + ' | ';
-              html += 'ACKs: ' + peer.ackCount;
-              html += '</span>';
-              html += '</div>';
-              html += '<div style="text-align:right;"><span style="color:' + statusColor + ';font-weight:bold;font-size:0.9em;">' + statusText + '</span></div>';
-              html += '</div></div>';
-            }
-          }
-          html += '</div>';
-          
-          // Unpaired Devices Section
-          if (data.unpaired && data.unpaired.length > 0) {
-            html += '<div style="margin-top:20px;">';
-            html += '<h4 style="color:var(--panel-fg);margin:0 0 10px 0;padding:8px;background:var(--panel-bg);border-radius:4px;">Unpaired Devices Detected (' + data.unpaired.length + ')</h4>';
-            
-            for (var i = 0; i < data.unpaired.length; i++) {
-              var device = data.unpaired[i];
-              var rssiColor = device.rssi > -60 ? 'var(--success)' : (device.rssi > -75 ? 'var(--warning)' : 'var(--danger)');
-              
-              html += '<div style="padding:10px;margin:5px 0;background:var(--panel-bg);border-radius:4px;">';
-              html += '<div style="display:flex;align-items:center;justify-content:space-between;">';
-              html += '<div style="flex:1;">';
-              html += '<span style="font-size:1.2em;color:var(--panel-fg);">Unknown</span> ';
-              html += '<strong style="color:var(--panel-fg);">' + (device.name || 'Unknown') + '</strong> ';
-              html += '<span style="color:var(--panel-fg);font-size:0.9em;">(' + device.mac + ')</span>';
-              html += '<br><span style="color:var(--panel-fg);font-size:0.85em;margin-left:20px;">';
-              html += 'Last seen: ' + device.secondsSinceLastSeen + 's ago | ';
-              html += 'RSSI: <span style="color:' + rssiColor + ';">' + device.rssi + ' dBm</span> | ';
-              html += 'HB Count: ' + device.heartbeatCount;
-              html += '</span>';
-              html += '</div>';
-              html += '<div style="text-align:right;">';
-              html += '<button onclick="pairUnpairedDevice(\'' + device.mac + '\', \'' + (device.name || 'Unknown') + '\')" ';
-              html += 'class="btn" style="padding:5px 12px;font-size:0.9em;">';
-              html += 'Pair</button>';
-              html += '</div>';
-              html += '</div></div>';
-            }
-            
-            html += '</div>';
-          }
-          
-          document.getElementById('mesh-peers-list').innerHTML = html;
+          // Store mesh health data globally and trigger unified re-render
+          window.__meshPeers = data.peers || [];
+          window.__meshUnpaired = data.unpaired || [];
+          // Show mesh views card when we have mesh data
+          var viewsCard = document.getElementById('mesh-views-card');
+          if (viewsCard) viewsCard.style.display = 'block';
+          window.renderUnifiedDeviceList();
         } catch(e) {
           console.error('[ESP-NOW] Error parsing mesh status:', e);
-          document.getElementById('mesh-peers-list').innerHTML = '<div style="color:var(--danger);text-align:center;">Error parsing mesh status</div>';
         }
       }
       if (preloadedText !== undefined) {
@@ -2074,11 +2120,10 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         body: 'cmd=' + encodeURIComponent('espnow meshstatus')
       })
       .then(response => response.text())
-      .then(applyMeshStatus)
+      .then(function(text) { window.meshStatusPollInFlight = false; applyMeshStatus(text); })
       .catch(error => {
+        window.meshStatusPollInFlight = false;
         console.error('[ESP-NOW] Mesh status fetch error:', error);
-        var el = document.getElementById('mesh-peers-list');
-        if (el) el.innerHTML = '<div style="color:var(--danger);text-align:center;">Error: ' + error + '</div>';
       });
 
       // Topology view is refreshed only on explicit user action (tab switch or Discover button),
@@ -2114,8 +2159,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
     
     // View switching
     window.switchMeshView = function(view) {
-      var views = ['direct', 'topology', 'graph'];
-      var buttons = ['btn-view-direct', 'btn-view-topology', 'btn-view-graph'];
+      var views = ['topology', 'graph'];
+      var buttons = ['btn-view-topology', 'btn-view-graph'];
       
       views.forEach(function(v, idx) {
         var elem = document.getElementById('mesh-view-' + v);
@@ -2761,11 +2806,6 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           window.toggleAutoTopology();
         }
       });
-      document.getElementById('btn-view-direct').addEventListener('click', function() {
-        if (typeof window.switchMeshView === 'function') {
-          window.switchMeshView('direct');
-        }
-      });
       document.getElementById('btn-view-topology').addEventListener('click', function() {
         if (typeof window.switchMeshView === 'function') {
           window.switchMeshView('topology');
@@ -2839,7 +2879,7 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow clearpassphrase')
+          body: 'cmd=' + encodeURIComponent('espnow setpassphrase clear')
         })
         .then(response => response.text())
         .then(text => {
@@ -3093,13 +3133,12 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
     window.loadSmartHomeMetadata = function(preloadedText) {
       function applyMetadata(text) {
         const statusDiv = document.getElementById('smarthome-status');
-        if (!statusDiv) return;
-        statusDiv.textContent = text;
+        if (statusDiv) statusDiv.textContent = text;
         const friendlyMatch = text.match(/Friendly Name:\s*(.+)/);
         const roomMatch = text.match(/Room:\s*(.+)/);
         const zoneMatch = text.match(/Zone:\s*(.+)/);
         const tagsMatch = text.match(/Tags:\s*(.+)/);
-        const stationaryMatch = text.match(/Stationary:\s*(Yes|No)/i);
+        const stationaryMatch = text.match(/Stationary:\s*(true|false|yes|no)/i);
         const friendlyInput = document.getElementById('friendly-name');
         const roomInput = document.getElementById('room-name');
         const zoneInput = document.getElementById('zone-name');
@@ -3122,7 +3161,8 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
           tagsInput.value = (val === '(none)') ? '' : val;
         }
         if (stationaryCheckbox && stationaryMatch) {
-          stationaryCheckbox.checked = (stationaryMatch[1].toLowerCase() === 'yes');
+          const sv = stationaryMatch[1].toLowerCase();
+          stationaryCheckbox.checked = (sv === 'yes' || sv === 'true');
         }
       }
       if (preloadedText !== undefined) {
@@ -3151,14 +3191,19 @@ Before using ESP-NOW, you need to set a unique name for this device. This name w
     window.checkEncryptionStatus = function(preloadedEncText) {
       function applyEncStatus(text) {
         const statusDiv = document.getElementById('encryption-status');
+        const setBtn = document.getElementById('btn-set-passphrase');
+        const clearBtn = document.getElementById('btn-clear-passphrase');
         if (!statusDiv) return;
-        if (text.includes('Passphrase Set: Yes')) {
+        var hasPass = text && text.indexOf('Passphrase Set: Yes') >= 0;
+        if (hasPass) {
           statusDiv.textContent = 'Encryption passphrase is set';
         } else if (text.includes('Passphrase Set: No') || text.includes('Encryption Enabled: No')) {
           statusDiv.textContent = 'No encryption passphrase set';
         } else {
           statusDiv.textContent = 'Encryption status unknown';
         }
+        if (setBtn) setBtn.style.display = hasPass ? 'none' : 'inline-flex';
+        if (clearBtn) clearBtn.style.display = hasPass ? 'inline-flex' : 'none';
       }
       if (preloadedEncText !== undefined) {
         applyEncStatus(preloadedEncText);

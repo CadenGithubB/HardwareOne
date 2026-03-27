@@ -1758,7 +1758,9 @@ static const CommandModule gCommandModules[] = {
  #if ENABLE_ESP_SR
    { "espsr", "ESP-SR speech recognition", espsrCommands,  espsrCommandsCount, CMD_MODULE_SENSOR, nullptr },
  #endif
+#if ENABLE_I2C_SYSTEM
   { "i2c",        "I2C bus diagnostics and scanning", i2cCommands,          i2cCommandsCount, 0, nullptr },
+#endif
 #if ENABLE_AUTOMATION
   { "automation", "Scheduled tasks and conditional commands", automationCommands,   automationCommandsCount, 0, nullptr },
 #endif
@@ -2887,7 +2889,6 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
   if (!r) {
     DEBUG_CMD_FLOWF("[submitSync] FAILED alloc ExecReq heap=%lu psram=%lu",
                     (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
-    Serial.printf("[ERROR] Out of memory - cannot create ExecReq: heap=%lu psram=%lu\n", (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
     broadcastOutput("[ERROR] Out of memory - cannot create request");
     return false;
   }

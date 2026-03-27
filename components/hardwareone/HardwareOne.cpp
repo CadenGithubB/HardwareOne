@@ -313,11 +313,6 @@ String gSerialUser = String();
 bool gLocalDisplayAuthed = false;
 String gLocalDisplayUser = String();
 
-// Bluetooth authentication (per-connection, separate from other transports)
-// Exported to user_system.cpp and bluetooth modules
-bool gBluetoothAuthed = false;
-String gBluetoothUser = String();
-
 esp_err_t handleSensorsStatus(httpd_req_t* req);
 
 volatile bool gSensorPollingPaused = false;
@@ -551,7 +546,7 @@ static String stripANSICSI(const String& in) {
 }
 
 static inline void printToSerial(const String& s) {
-  Serial.println(stripANSICSI(s));
+  broadcastOutput(stripANSICSI(s));
 }
 
 void appendCommandToFeed(const char* source, const String& cmd, const String& user = String(), const String& ip = String()) {
@@ -825,6 +820,7 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
     case ORIGIN_SERIAL: source = "serial"; break;
     case ORIGIN_WEB: source = "web"; break;
     case ORIGIN_AUTOMATION: source = "auto"; break;
+    case ORIGIN_BLUETOOTH: source = "bluetooth"; break;
     case ORIGIN_SYSTEM:
     default: source = "system"; break;
   }
@@ -849,12 +845,25 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
     printToWeb(prefixed);
   }
 
+  if (ctx.outputMask & CMD_OUT_BLE) {
+    uint16_t targetConnId = 0;
+    if (ctx.auth.sid.length() > 0) {
+      targetConnId = (uint16_t)ctx.auth.sid.toInt();
+    }
+    if (targetConnId > 0) {
+      sendBLEResponseToConn(targetConnId, prefixed.c_str(), prefixed.length());
+    } else {
+      sendBLEResponse(prefixed.c_str(), prefixed.length());
+    }
+  }
+
   // Note: ESP-NOW V3 session streaming now handled in base broadcastOutput() in System_Debug.cpp
 
-  DEBUG_CMD_FLOWF("[broadcast] sinks: serial=%d web=%d log=%d len=%d",
+  DEBUG_CMD_FLOWF("[broadcast] sinks: serial=%d web=%d log=%d ble=%d len=%d",
                   (ctx.outputMask & CMD_OUT_SERIAL) ? 1 : 0,
                   (ctx.outputMask & CMD_OUT_WEB) ? 1 : 0,
                   (ctx.outputMask & CMD_OUT_LOG) ? 1 : 0,
+                  (ctx.outputMask & CMD_OUT_BLE) ? 1 : 0,
                   s.length());
 }
 
@@ -1124,7 +1133,7 @@ void hardwareone_setup() {
   if (!gJsonResponseBuffer) {
     gJsonResponseBuffer = (char*)ps_alloc(JSON_RESPONSE_SIZE, AllocPref::PreferPSRAM, "json.resp.buf");
     if (!gJsonResponseBuffer) {
-      Serial.println("FATAL: Failed to allocate JSON response buffer");
+      ERROR_SYSTEMF("FATAL: Failed to allocate JSON response buffer");
       while (1) delay(1000);
     }
   }
@@ -1134,7 +1143,7 @@ void hardwareone_setup() {
   // Initialize automation system at boot (only if enabled in settings)
   if (gSettings.automationsEnabled) {
     if (!initAutomationSystem()) {
-      Serial.println("FATAL: Failed to initialize automation system");
+      ERROR_SYSTEMF("FATAL: Failed to initialize automation system");
       while (1) delay(1000);
     }
     DEBUG_SYSTEMF("Automation system initialized at boot");
@@ -1144,15 +1153,15 @@ void hardwareone_setup() {
 #endif
 
   // Command executor task (mutexes + debug system must be ready)
-  if (!gCmdExecQ) {
-    gCmdExecQ = xQueueCreate(6, sizeof(ExecReq*));
     if (!gCmdExecQ) {
-      Serial.println("FATAL: Failed to create command exec queue");
-      while (1) delay(1000);
-    }
+      gCmdExecQ = xQueueCreate(6, sizeof(ExecReq*));
+      if (!gCmdExecQ) {
+        ERROR_SYSTEMF("FATAL: Failed to create command exec queue");
+        while (1) delay(1000);
+      }
     const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;  // words (≈24 KB) - automation run + debug vsnprintf frames need deep stack
     if (xTaskCreateLogged(commandExecTask, "cmd_exec_task", cmdExecStackWords, nullptr, TASK_PRIORITY_LOW, &gCmdExecTaskHandle, "cmd.exec") != pdPASS) {
-      Serial.println("FATAL: Failed to create command exec task");
+      ERROR_SYSTEMF("FATAL: Failed to create command exec task");
       while (1) delay(1000);
     }
     DEBUG_SYSTEMF("Command executor task created");
@@ -1180,60 +1189,64 @@ void hardwareone_setup() {
   // ========================================================================
   // 5. BUILD CONFIG BANNER + OLED EARLY INIT
   // ========================================================================
-  Serial.println();
-  Serial.printf("========== HARDWAREONE v%s BUILD CONFIGURATION ==========\n", esp_app_get_description()->version);
+  {
+    char bannerLine[96];
+    broadcastOutput("");
+    snprintf(bannerLine, sizeof(bannerLine), "========== HARDWAREONE v%s BUILD CONFIGURATION ==========", esp_app_get_description()->version);
+    broadcastOutput(bannerLine);
 #if ENABLE_THERMAL_SENSOR
-  Serial.println("  [Y] THERMAL  | MLX90640 thermal camera");
+    broadcastOutput("  [Y] THERMAL  | MLX90640 thermal camera");
 #else
-  Serial.println("  [N] THERMAL  | Disabled (~20-25KB flash, ~15KB RAM saved)");
+    broadcastOutput("  [N] THERMAL  | Disabled (~20-25KB flash, ~15KB RAM saved)");
 #endif
 #if ENABLE_TOF_SENSOR
-  Serial.println("  [Y] TOF      | VL53L4CX distance sensor");
+    broadcastOutput("  [Y] TOF      | VL53L4CX distance sensor");
 #else
-  Serial.println("  [N] TOF      | Disabled (~25-30KB flash, ~10KB RAM saved)");
+    broadcastOutput("  [N] TOF      | Disabled (~25-30KB flash, ~10KB RAM saved)");
 #endif
 #if ENABLE_IMU_SENSOR
-  Serial.println("  [Y] IMU      | BNO055 9-DOF orientation sensor");
+    broadcastOutput("  [Y] IMU      | BNO055 9-DOF orientation sensor");
 #else
-  Serial.println("  [N] IMU      | Disabled (~12-18KB flash, ~8KB RAM saved)");
+    broadcastOutput("  [N] IMU      | Disabled (~12-18KB flash, ~8KB RAM saved)");
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  Serial.println("  [Y] GAMEPAD  | Seesaw gamepad controller");
+    broadcastOutput("  [Y] GAMEPAD  | Seesaw gamepad controller");
 #else
-  Serial.println("  [N] GAMEPAD  | Disabled (~8-12KB flash, ~6KB RAM saved)");
+    broadcastOutput("  [N] GAMEPAD  | Disabled (~8-12KB flash, ~6KB RAM saved)");
 #endif
 #if ENABLE_APDS_SENSOR
-  Serial.println("  [Y] APDS     | APDS9960 color/proximity/gesture");
+    broadcastOutput("  [Y] APDS     | APDS9960 color/proximity/gesture");
 #else
-  Serial.println("  [N] APDS     | Disabled (~6-10KB flash, ~4KB RAM saved)");
+    broadcastOutput("  [N] APDS     | Disabled (~6-10KB flash, ~4KB RAM saved)");
 #endif
 #if ENABLE_GPS_SENSOR
-  Serial.println("  [Y] GPS      | PA1010D mini GPS module");
+    broadcastOutput("  [Y] GPS      | PA1010D mini GPS module");
 #else
-  Serial.println("  [N] GPS      | Disabled (~5-8KB flash, ~4KB RAM saved)");
+    broadcastOutput("  [N] GPS      | Disabled (~5-8KB flash, ~4KB RAM saved)");
 #endif
 #if ENABLE_RTC_SENSOR
-  Serial.println("  [Y] RTC      | DS3231 precision real-time clock");
+    broadcastOutput("  [Y] RTC      | DS3231 precision real-time clock");
 #else
-  Serial.println("  [N] RTC      | Disabled (~3-5KB flash, ~1KB RAM saved)");
+    broadcastOutput("  [N] RTC      | Disabled (~3-5KB flash, ~1KB RAM saved)");
 #endif
 #if ENABLE_FM_RADIO
-  Serial.println("  [Y] FM RADIO | RDA5807 FM radio receiver");
+    broadcastOutput("  [Y] FM RADIO | RDA5807 FM radio receiver");
 #else
-  Serial.println("  [N] FM RADIO | Disabled (~3-5KB flash, ~1KB RAM saved)");
+    broadcastOutput("  [N] FM RADIO | Disabled (~3-5KB flash, ~1KB RAM saved)");
 #endif
 #if ENABLE_PRESENCE_SENSOR
-  Serial.println("  [Y] PRESENCE | STHS34PF80 IR presence/motion sensor");
+    broadcastOutput("  [Y] PRESENCE | STHS34PF80 IR presence/motion sensor");
 #else
-  Serial.println("  [N] PRESENCE | Disabled (~4-6KB flash, ~2KB RAM saved)");
+    broadcastOutput("  [N] PRESENCE | Disabled (~4-6KB flash, ~2KB RAM saved)");
 #endif
 #if ENABLE_OLED_DISPLAY
-  Serial.println("  [Y] OLED     | SSD1306 128x64 display enabled");
+    broadcastOutput("  [Y] OLED     | SSD1306 128x64 display enabled");
 #else
-  Serial.println("  [N] OLED     | Disabled (~8-12KB flash, ~5KB RAM saved)");
+    broadcastOutput("  [N] OLED     | Disabled (~8-12KB flash, ~5KB RAM saved)");
 #endif
-  Serial.println("========================================================");
-  Serial.println();
+    broadcastOutput("========================================================");
+    broadcastOutput("");
+  }
 
   // OLED early init — boot animation runs during slow WiFi/NTP phases below
   oledEarlyInit();
@@ -1242,7 +1255,7 @@ void hardwareone_setup() {
   if (gSettings.i2cBusEnabled && !queueProcessorTask) {
     const uint32_t queueStackWords = SENSOR_QUEUE_STACK_WORDS;
     if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, TASK_PRIORITY_LOW, &queueProcessorTask, "sensor.queue") != pdPASS) {
-      Serial.println("FATAL: Failed to create sensor queue processor task");
+      ERROR_SYSTEMF("FATAL: Failed to create sensor queue processor task");
       while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
 #if DEBUG_MEM_SUMMARY
@@ -1252,12 +1265,12 @@ void hardwareone_setup() {
 #endif
 
 #if ENABLE_HTTP_SERVER
-  if (!gSessions) {
-    gSessions = (SessionEntry*)ps_alloc(MAX_SESSIONS * sizeof(SessionEntry), AllocPref::PreferPSRAM, "sessions");
     if (!gSessions) {
-      Serial.println("FATAL: Failed to allocate sessions array");
-      while (1) delay(1000);
-    }
+      gSessions = (SessionEntry*)ps_alloc(MAX_SESSIONS * sizeof(SessionEntry), AllocPref::PreferPSRAM, "sessions");
+      if (!gSessions) {
+        ERROR_SYSTEMF("FATAL: Failed to allocate sessions array");
+        while (1) delay(1000);
+      }
     // Initialize with placement new to call constructors
     for (int i = 0; i < MAX_SESSIONS; i++) {
       new (&gSessions[i]) SessionEntry();
@@ -1265,12 +1278,12 @@ void hardwareone_setup() {
   }
 
   // Initialize logout reasons array
-  if (!gLogoutReasons) {
-    gLogoutReasons = (LogoutReason*)ps_alloc(MAX_LOGOUT_REASONS * sizeof(LogoutReason), AllocPref::PreferPSRAM, "logout.reasons");
     if (!gLogoutReasons) {
-      Serial.println("FATAL: Failed to allocate logout reasons array");
-      while (1) delay(1000);
-    }
+      gLogoutReasons = (LogoutReason*)ps_alloc(MAX_LOGOUT_REASONS * sizeof(LogoutReason), AllocPref::PreferPSRAM, "logout.reasons");
+      if (!gLogoutReasons) {
+        ERROR_SYSTEMF("FATAL: Failed to allocate logout reasons array");
+        while (1) delay(1000);
+      }
     // Initialize with placement new to call constructors
     for (int i = 0; i < MAX_LOGOUT_REASONS; i++) {
       new (&gLogoutReasons[i]) LogoutReason();
@@ -1364,17 +1377,14 @@ void hardwareone_setup() {
       // RTC already provided valid time - skip blocking NTP sync at boot
       // NTP can still be triggered manually via 'ntpsync' command
       oledSetBootProgress(50, "Time from RTC");
-      Serial.println("[DEBUG] Skipping NTP sync - RTC already provided valid time");
-      Serial.flush();
+      DEBUG_WIFIF("[DEBUG] Skipping NTP sync - RTC already provided valid time");
       // Still set up NTP for background sync (non-blocking)
       setupNTP();
     } else {
       oledSetBootProgress(45, "Syncing NTP");
-      Serial.println("[DEBUG] Starting NTP sync");
-      Serial.flush();
+      DEBUG_WIFIF("[DEBUG] Starting NTP sync");
       bool ntpOk = syncNTPAndResolve();
-      Serial.println(ntpOk ? "[DEBUG] NTP sync complete" : "[DEBUG] NTP sync failed");
-      Serial.flush();
+      DEBUG_WIFIF("%s", ntpOk ? "[DEBUG] NTP sync complete" : "[DEBUG] NTP sync failed");
       oledSetBootProgress(50, ntpOk ? "Time synced" : "Time unavailable");
     }
   } else {
@@ -1444,7 +1454,9 @@ void hardwareone_setup() {
 
   // Sensor auto-start - process settings for all I2C sensors
   oledSetBootProgress(87, "Starting sensors");
+#if ENABLE_I2C_SYSTEM
   processAutoStartSensors();
+#endif
 
 #if ENABLE_CAMERA_SENSOR
   // Camera auto-start (independent of I2C sensor queue)
@@ -1591,7 +1603,7 @@ void hardwareone_setup() {
   sensorLogAutoStart();
   systemLogAutoStart();
 
-  Serial.println("[Boot] Setup complete");
+  broadcastOutput("[Boot] Setup complete");
 }
 
 

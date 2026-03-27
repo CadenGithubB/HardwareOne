@@ -8,7 +8,8 @@
 
 #include <Arduino.h>
 #include <LittleFS.h>
-#include "WebServer_Server.h"           // httpd types, JSON_RESPONSE_SIZE, gJsonResponseBuffer
+#include "WebServer_Server.h"           // httpd types, JSON_RESPONSE_SIZE, gJsonResponseBuffer, makeWebAuthCtx
+#include "WebServer_Utils.h"            // WEB_AUTH_OR_RETURN, sendJsonResponse
 #include "System_User.h"          // AuthContext, tgRequireAuth
 #include "System_Debug.h"         // DEBUG_* macros
 #include "System_Settings.h"             // Settings, gSettings

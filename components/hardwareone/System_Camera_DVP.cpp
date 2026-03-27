@@ -18,6 +18,7 @@
 #include "System_MemUtil.h"
 #include "System_Command.h"
 #include "System_Settings.h"
+#include "System_I2C.h"
 #include <ArduinoJson.h>
 
 static SemaphoreHandle_t gCameraMutex = nullptr;
@@ -824,13 +825,13 @@ const char* cmd_camerares(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   // Parse resolution argument
-  String sizeStr = args;
+  String sizeStr = argsInput;
   sizeStr.trim();
   sizeStr.toLowerCase();
   
   if (sizeStr.length() == 0) {
-    static char result[160];
-    snprintf(result, sizeof(result), 
+    static char result[192];
+    snprintf(result, sizeof(result),
       "Current: %dx%d\nUsage: camerares <size>\nSizes: qqvga(160x120) qvga(320x240) vga(640x480) svga(800x600) xga(1024x768)\nNote: Requires camera restart",
       cameraWidth, cameraHeight);
     return result;
@@ -1186,7 +1187,7 @@ const char* cmd_cameraaec(const String& argsInput) {
   sensor_t* s = esp_camera_sensor_get();
   if (!s) return "Camera sensor not available";
 
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -1257,7 +1258,7 @@ const char* cmd_cameraagc(const String& argsInput) {
   sensor_t* s = esp_camera_sensor_get();
   if (!s) return "Camera sensor not available";
 
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -1304,7 +1305,7 @@ const char* cmd_camerahmirror(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -1326,7 +1327,7 @@ const char* cmd_cameravflip(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not enabled";
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -1348,7 +1349,7 @@ const char* cmd_camerarotate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!cameraEnabled) return "Camera not started";
   
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -1376,7 +1377,7 @@ const char* cmd_camerarotate(const String& argsInput) {
 
 const char* cmd_cameraautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args; arg.trim();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
     return gSettings.cameraAutoStart ? "[Camera] Auto-start: enabled" : "[Camera] Auto-start: disabled";
   }
@@ -1411,16 +1412,16 @@ const char* cmd_camerastoragelocation(const String& argsInput) {
 
 const char* cmd_cameracapturefolder(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String val = args;
+  String val = argsInput;
   val.trim();
   
   if (val.length() == 0) {
-    static char buf[128];
+    static char buf[256];
     snprintf(buf, sizeof(buf), "cameraCaptureFolder = %s", gSettings.cameraCaptureFolder.c_str());
     return buf;
   }
   setSetting(gSettings.cameraCaptureFolder, val);
-  static char buf[128];
+  static char buf[256];
   snprintf(buf, sizeof(buf), "cameraCaptureFolder set to %s", val.c_str());
   return buf;
 }
@@ -1445,7 +1446,7 @@ const char* cmd_cameramaxstoredimages(const String& argsInput) {
 
 const char* cmd_cameraautocapture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -1480,7 +1481,7 @@ const char* cmd_cameraautocaptureinterval(const String& argsInput) {
 
 const char* cmd_camerasendaftercapture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args;
+  String arg = argsInput;
   arg.trim();
   
   if (arg.length() == 0) {
@@ -1493,16 +1494,16 @@ const char* cmd_camerasendaftercapture(const String& argsInput) {
 
 const char* cmd_cameratargetdevice(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String val = args;
+  String val = argsInput;
   val.trim();
   
   if (val.length() == 0) {
-    static char buf[128];
+    static char buf[256];
     snprintf(buf, sizeof(buf), "cameraTargetDevice = %s", gSettings.cameraTargetDevice.c_str());
     return buf;
   }
   setSetting(gSettings.cameraTargetDevice, val);
-  static char buf[128];
+  static char buf[256];
   snprintf(buf, sizeof(buf), "cameraTargetDevice set to %s", val.c_str());
   return buf;
 }

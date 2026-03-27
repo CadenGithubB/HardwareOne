@@ -786,7 +786,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
   // Handle "cancel" or "nevermind" - abort current sequence
   if ((normPhrase.indexOf("cancel") >= 0 || normPhrase.indexOf("nevermind") >= 0) && gVoiceState != VoiceState::IDLE) {
     INFO_SRF("[HIER] CANCEL DETECTED - Aborting from state: %s", voiceStateToString(gVoiceState));
-    Serial.printf("\033[1;33m[Voice] Cancelled.\033[0m\n");
+    broadcastOutput("[Voice] Cancelled.");
     gVoiceState = VoiceState::IDLE;
     gCurrentCategory = "";
     gCurrentSubCategory = "";
@@ -799,7 +799,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     INFO_SRF("[HIER] HELP REQUESTED - State: %s", voiceStateToString(gVoiceState));
     
     if (gVoiceState == VoiceState::AWAIT_CATEGORY) {
-      Serial.printf("\033[1;35m[Voice Help] Say a category:\033[0m\n");
+      broadcastOutput("[Voice Help] Say a category:");
       for (size_t i = 0; i < gCommandsCount; i++) {
         const CommandEntry* e = gCommands[i];
         if (e && e->voiceCategory && e->voiceCategory[0] != '\0' && strcmp(e->voiceCategory, "*") != 0) {
@@ -808,11 +808,11 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
             if (gCommands[j] && gCommands[j]->voiceCategory &&
                 normalizePhrase(gCommands[j]->voiceCategory) == normalizePhrase(e->voiceCategory)) dup = true;
           }
-          if (!dup) Serial.printf("  - %s\n", e->voiceCategory);
+          if (!dup) broadcastOutput(String("  - ") + e->voiceCategory);
         }
       }
     } else if (gVoiceState == VoiceState::AWAIT_SUBCATEGORY) {
-      Serial.printf("\033[1;35m[Voice Help] %s - which one?\033[0m\n", gCurrentCategory.c_str());
+      broadcastOutput(String("[Voice Help] ") + gCurrentCategory + " - which one?");
       String normCat = normalizePhrase(gCurrentCategory.c_str());
       for (size_t i = 0; i < gCommandsCount; i++) {
         const CommandEntry* e = gCommands[i];
@@ -823,38 +823,37 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
             if (gCommands[j] && gCommands[j]->voiceSubCategory &&
                 normalizePhrase(gCommands[j]->voiceSubCategory) == normalizePhrase(e->voiceSubCategory)) dup = true;
           }
-          if (!dup) Serial.printf("  - %s\n", e->voiceSubCategory);
+          if (!dup) broadcastOutput(String("  - ") + e->voiceSubCategory);
         }
       }
     } else if (gVoiceState == VoiceState::AWAIT_TARGET) {
       String normCat = normalizePhrase(gCurrentCategory.c_str());
       if (gCurrentSubCategory.length() > 0) {
-        Serial.printf("\033[1;35m[Voice Help] %s %s - what action?\033[0m\n", 
-                      gCurrentCategory.c_str(), gCurrentSubCategory.c_str());
+        broadcastOutput(String("[Voice Help] ") + gCurrentCategory + " " + gCurrentSubCategory + " - what action?");
         String normSub = normalizePhrase(gCurrentSubCategory.c_str());
         for (size_t i = 0; i < gCommandsCount; i++) {
           const CommandEntry* e = gCommands[i];
           if (e && e->voiceCategory && e->voiceSubCategory && e->voiceTarget &&
               normalizePhrase(e->voiceCategory) == normCat &&
               normalizePhrase(e->voiceSubCategory) == normSub && e->voiceTarget[0] != '\0') {
-            Serial.printf("  - %s\n", e->voiceTarget);
+            broadcastOutput(String("  - ") + e->voiceTarget);
           }
         }
       } else {
-        Serial.printf("\033[1;35m[Voice Help] %s - what action?\033[0m\n", gCurrentCategory.c_str());
+        broadcastOutput(String("[Voice Help] ") + gCurrentCategory + " - what action?");
         for (size_t i = 0; i < gCommandsCount; i++) {
           const CommandEntry* e = gCommands[i];
           if (e && e->voiceCategory && e->voiceTarget &&
               normalizePhrase(e->voiceCategory) == normCat &&
               (!e->voiceSubCategory || e->voiceSubCategory[0] == '\0') && e->voiceTarget[0] != '\0') {
-            Serial.printf("  - %s\n", e->voiceTarget);
+            broadcastOutput(String("  - ") + e->voiceTarget);
           }
         }
       }
     } else {
-      Serial.printf("\033[1;35m[Voice Help] Say the wake word first.\033[0m\n");
+      broadcastOutput("[Voice Help] Say the wake word first.");
     }
-    Serial.printf("  - cancel, help\n");
+    broadcastOutput("  - cancel, help");
     
     if (gVoiceState != VoiceState::IDLE) {
       gCategoryTimeoutMs = millis() + gSettings.srCommandTimeout;
@@ -888,7 +887,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
       
       // User-facing feedback
       String normCat = normalizePhrase(category);
-      Serial.printf("\033[1;36m[Voice] %s... which one?\033[0m\n", normCat.c_str());
+      broadcastOutput(String("[Voice] ") + normCat + "... which one?");
       
     } else if (categoryHasDirectTargets(category)) {
       // 2-level: category -> target (no subcategory)
@@ -903,7 +902,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
       
       // User-facing feedback
       String normCat = normalizePhrase(category);
-      Serial.printf("\033[1;36m[Voice] %s... what action?\033[0m\n", normCat.c_str());
+      broadcastOutput(String("[Voice] ") + normCat + "... what action?");
       
     } else {
       // Single-stage: execute immediately
@@ -912,7 +911,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
       if (cliCmd) {
         INFO_SRF("[HIER] Single-stage command -> CLI: %s", cliCmd);
         String normCat = normalizePhrase(category);
-        Serial.printf("\033[1;32m[Voice] OK, %s.\033[0m\n", normCat.c_str());
+        broadcastOutput(String("[Voice] OK, ") + normCat + ".");
         
         static char* cmdOut = nullptr;
         if (!cmdOut) cmdOut = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "sr.cmdOut");
@@ -927,7 +926,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
         gLastCommand = category;
       } else {
         WARN_SYSTEMF("[HIER] Category '%s' has no associated command!", category);
-        Serial.printf("\033[1;31m[Voice] Sorry, I don't know how to do that.\033[0m\n");
+        broadcastOutput("[Voice] Sorry, I don't know how to do that.");
       }
       // Return to idle
       gVoiceState = VoiceState::IDLE;
@@ -958,7 +957,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     
     // User-facing feedback
     String normSubCat = normalizePhrase(subCategory);
-    Serial.printf("\033[1;36m[Voice] %s... what action?\033[0m\n", normSubCat.c_str());
+    broadcastOutput(String("[Voice] ") + normSubCat + "... what action?");
     
   } else if (gVoiceState == VoiceState::AWAIT_TARGET) {
     // We detected a target
@@ -980,11 +979,11 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
       String normTarget = normalizePhrase(target);
       if (gCurrentSubCategory.length() > 0) {
         String normSubCat = normalizePhrase(gCurrentSubCategory.c_str());
-        Serial.printf("\033[1;32m[Voice] OK, %s %s.\033[0m\n", normSubCat.c_str(), normTarget.c_str());
+        broadcastOutput(String("[Voice] OK, ") + normSubCat + " " + normTarget + ".");
         gLastCommand = gCurrentCategory + " " + gCurrentSubCategory + " " + target;
       } else {
         String normCat = normalizePhrase(gCurrentCategory.c_str());
-        Serial.printf("\033[1;32m[Voice] OK, %s %s.\033[0m\n", normCat.c_str(), normTarget.c_str());
+        broadcastOutput(String("[Voice] OK, ") + normCat + " " + normTarget + ".");
         gLastCommand = gCurrentCategory + " " + target;
       }
       
@@ -1001,7 +1000,7 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     } else {
       WARN_SYSTEMF("[HIER] No CLI command found for '%s'->'%s'->'%s'!", 
                    gCurrentCategory.c_str(), gCurrentSubCategory.c_str(), target);
-      Serial.printf("\033[1;31m[Voice] Sorry, I don't understand that.\033[0m\n");
+      broadcastOutput("[Voice] Sorry, I don't understand that.");
     }
     
     // Return to idle, reload categories
@@ -1319,9 +1318,10 @@ static void srAutoTuneCheck() {
       // All steps complete
       gSrAutoTuneActive = false;
       gSrRawOutputEnabled = false;
-      Serial.printf("\n\033[1;32m=== AUTO-TUNE COMPLETE ===\033[0m\n");
-      Serial.printf("Tested %d configurations. Review logs above to find best settings.\n", (int)kAutoTuneConfigCount);
-      Serial.printf("Apply best config with: sr tuning gain <value> and sr dyngain max <value>\n\n");
+      broadcastOutput("");
+      broadcastOutput("=== AUTO-TUNE COMPLETE ===");
+      broadcastOutput(String("Tested ") + (int)kAutoTuneConfigCount + " configurations. Review logs above to find best settings.");
+      broadcastOutput("Apply best config with: sr tuning gain <value> and sr dyngain max <value>");
       return;
     }
     
@@ -1333,10 +1333,10 @@ static void srAutoTuneCheck() {
     gSrDynGainEnabled = cfg.dynGainEnabled;
     gSrDynGainCurrent = 1.0f;
     
-    Serial.printf("\n\033[1;33m=== AUTO-TUNE Step %d/%d ===\033[0m\n", 
-                  gSrAutoTuneStep + 1, (int)kAutoTuneConfigCount);
-    Serial.printf("Config: %s\n", cfg.description);
-    Serial.printf("Say test phrases now! (NOTE: AFE gain change needs SR restart)\n\n");
+    broadcastOutput("");
+    broadcastOutput(String("=== AUTO-TUNE Step ") + (gSrAutoTuneStep + 1) + "/" + (int)kAutoTuneConfigCount + " ===");
+    broadcastOutput(String("Config: ") + cfg.description);
+    broadcastOutput("Say test phrases now! (NOTE: AFE gain change needs SR restart)");
   }
 }
 
@@ -2236,8 +2236,8 @@ static void srTask(void* param) {
           INFO_SRF("[HIER] Listening for CATEGORY... (timeout in %d ms)", gSettings.srCommandTimeout);
           
           // User-facing feedback
-          Serial.println();
-          Serial.println("\033[1;36m[Voice] Yes?\033[0m");
+          broadcastOutput("");
+          broadcastOutput("[Voice] Yes?");
           notifyVoiceListening();
           INFO_SRF("[HIER-DEBUG] Voice CLI mappings count: %u", (unsigned)gVoiceCliMappingCount);
           INFO_SRF("Wake stats: count=%u, idx=%d, model=%d, vol=%.1f dB, wake_len=%d",
@@ -2277,7 +2277,7 @@ static void srTask(void* param) {
               INFO_SRF("[HIER-DEBUG] State transition: AWAIT_CATEGORY -> IDLE");
               
               // User-facing feedback
-              Serial.println("\033[1;33m[Voice] Sorry, I didn't catch that.\033[0m");
+              broadcastOutput("[Voice] Sorry, I didn't catch that.");
               
               gVoiceState = VoiceState::IDLE;
               gCurrentCategory = "";
@@ -2289,7 +2289,7 @@ static void srTask(void* param) {
               INFO_SRF("[HIER-DEBUG] State transition: AWAIT_SUBCATEGORY -> IDLE");
               
               // User-facing feedback
-              Serial.printf("\033[1;33m[Voice] Timed out waiting for %s selection.\033[0m\n", gCurrentCategory.c_str());
+              broadcastOutput(String("[Voice] Timed out waiting for ") + gCurrentCategory + " selection.");
               
               gVoiceState = VoiceState::IDLE;
               gCurrentCategory = "";
@@ -2306,9 +2306,9 @@ static void srTask(void* param) {
               
               // User-facing feedback
               if (gCurrentSubCategory.length() > 0) {
-                Serial.printf("\033[1;33m[Voice] Timed out waiting for %s action.\033[0m\n", gCurrentSubCategory.c_str());
+                broadcastOutput(String("[Voice] Timed out waiting for ") + gCurrentSubCategory + " action.");
               } else {
-                Serial.printf("\033[1;33m[Voice] Timed out waiting for %s action.\033[0m\n", gCurrentCategory.c_str());
+                broadcastOutput(String("[Voice] Timed out waiting for ") + gCurrentCategory + " action.");
               }
               
               gVoiceState = VoiceState::IDLE;
@@ -2431,9 +2431,9 @@ static void srTask(void* param) {
                   WARN_SYSTEMF("[SR] Rejected command: id=%d prob=%.3f (need>=%.2f or gap floor=%.2f gap=%.2f) (rejects=%lu)",
                                cmdId, cmdProb, requiredConfidence, gSrGapAcceptFloor, gSrGapAcceptGap, (unsigned long)gSrLowConfidenceRejects);
                   if (isCategoryStage) {
-                    Serial.printf("\033[1;33m[Voice] I heard '%s'... can you say it again?\033[0m\n", normalizePhrase(cmdPhraseCopy).c_str());
+                    broadcastOutput(String("[Voice] I heard '") + normalizePhrase(cmdPhraseCopy) + "'... can you say it again?");
                   } else {
-                    Serial.println("\033[1;33m[Voice] Sorry, can you repeat that?\033[0m");
+                    broadcastOutput("[Voice] Sorry, can you repeat that?");
                   }
 
                   gMNModel->clean(gMNData);
@@ -3444,11 +3444,13 @@ static const char* cmd_sr_autotune(const String& argsInput) {
     gSrDynGainEnabled = kAutoTuneConfigs[0].dynGainEnabled;
     gSrDynGainCurrent = 1.0f;
     
-    Serial.printf("\n\033[1;36m=== AUTO-TUNE STARTED ===\033[0m\n");
-    Serial.printf("Will cycle through %d configurations, %d sec each.\n", (int)kAutoTuneConfigCount, (int)(kAutoTuneStepDurationMs / 1000));
-    Serial.printf("Say test phrases (system, battery, cancel, help) during each step.\n");
-    Serial.printf("\033[1;33mStep 1/%d: %s\033[0m\n", (int)kAutoTuneConfigCount, kAutoTuneConfigs[0].description);
-    Serial.printf("NOTE: AFE gain change requires SR restart. Run 'sr stop' then 'sr start'.\n\n");
+    broadcastOutput("");
+    broadcastOutput("=== AUTO-TUNE STARTED ===");
+    broadcastOutput(String("Will cycle through ") + (int)kAutoTuneConfigCount + " configurations, " +
+                      (int)(kAutoTuneStepDurationMs / 1000) + " sec each.");
+    broadcastOutput("Say test phrases (system, battery, cancel, help) during each step.");
+    broadcastOutput(String("Step 1/") + (int)kAutoTuneConfigCount + ": " + kAutoTuneConfigs[0].description);
+    broadcastOutput("NOTE: AFE gain change requires SR restart. Run 'sr stop' then 'sr start'.");
     
     return "Auto-tune started. Restart SR to apply AFE gain change.";
   }
@@ -3459,7 +3461,8 @@ static const char* cmd_sr_autotune(const String& argsInput) {
     }
     gSrAutoTuneActive = false;
     gSrRawOutputEnabled = false;
-    Serial.printf("\n\033[1;36m=== AUTO-TUNE STOPPED ===\033[0m\n");
+    broadcastOutput("");
+    broadcastOutput("=== AUTO-TUNE STOPPED ===");
     return "Auto-tune stopped. Review the results above to pick best config.";
   }
   

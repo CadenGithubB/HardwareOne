@@ -62,27 +62,18 @@ inline void streamLoginInner(httpd_req_t* req, const String& username, const Str
     </div>
   </form>
 </div>
-<script>console.log('[LOGIN] Section 1: Pre-script sentinel');</script>
 <script>
-console.log('[LOGIN] Page loaded');
-window.addEventListener('load', function(){ 
-  console.log('[LOGIN] Window onload event');
-  setTimeout(function(){ 
-    try{ 
-      var msg = sessionStorage.getItem('revokeMsg'); 
-      if(msg){ 
-        console.log('[LOGIN] Found revoke message:',msg);
-        sessionStorage.removeItem('revokeMsg'); 
-        alert(msg); 
-      } else {
-        console.log('[LOGIN] No revoke message found');
+window.addEventListener('load', function(){
+  setTimeout(function(){
+    try{
+      var msg = sessionStorage.getItem('revokeMsg');
+      if(msg){
+        sessionStorage.removeItem('revokeMsg');
+        alert(msg);
       }
-    }catch(e){
-      console.error('[LOGIN] Error checking revoke message:',e);
-    } 
-  }, 500); 
+    }catch(e){}
+  }, 500);
 });
-console.log('[LOGIN] Script complete');
 </script>
 )LOGIN3", HTTPD_RESP_USE_STRLEN);
 }

@@ -131,7 +131,7 @@ void I2CDeviceManager::initBuses() {
   // Use configurable pins from settings (defaults: SDA=22, SCL=19 for original, SDA=22, SCL=20 for Feather V2)
   Wire1.begin(gSettings.i2cSdaPin, gSettings.i2cSclPin);
   Wire1.setClock(I2C_WIRE1_DEFAULT_FREQ);
-  Wire1.setTimeOut(250);  // Abort hung transactions after 100ms; must be well under CONFIG_ESP_INT_WDT_TIMEOUT_MS (1500ms)
+  Wire1.setTimeOut(100);  // Abort hung transactions after 100ms; must be well under CONFIG_ESP_INT_WDT_TIMEOUT_MS (1500ms)
   currentClockHz = I2C_WIRE1_DEFAULT_FREQ;
   // Glitch filter: ignore pulses < 7 APB cycles (~88ns at 80MHz).
   // Prevents spurious bus errors from EMI/noise that trigger i2c_hw_disable
@@ -309,6 +309,10 @@ void I2CDeviceManager::updateHistogram(uint32_t txDurationUs) {
 // ============================================================================
 
 bool I2CDeviceManager::enqueueDeviceStart(I2CDeviceType sensor) {
+  // Refuse to enqueue if the bus is disabled — nothing will drain the queue
+  extern bool gI2CBusEnabled;
+  if (!gI2CBusEnabled) return false;
+
   if (!queueMutex) return false;
   
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
@@ -462,7 +466,7 @@ void I2CDevice::init(uint8_t addr, const char* deviceName, uint32_t clock, uint3
   health.totalErrors = 0;
   health.degraded = false;
   health.lastErrorTime = 0;
-  health.lastSuccessTime = millis();
+  health.lastSuccessTime = 0;
   health.registrationTime = millis();
   health.nackCount = 0;
   health.timeoutCount = 0;

@@ -152,6 +152,53 @@ static void rebootWithMessage(const char* message) {
 extern bool getOLEDSetupModeSelection(int& setupMode);
 #endif
 
+#if ENABLE_WIFI
+// Serial WiFi scan + pick for "Import from Backup" when ENABLE_OLED_DISPLAY is off
+// (getOLEDWiFiSelection lives in OLED_FirstTimeSetup.cpp and is not built).
+static bool serialWifiSelectionForRestore(String& outSSID) {
+  outSSID = "";
+  WiFi.mode(WIFI_STA);
+  int n = WiFi.scanNetworks(false, true);
+  if (n > 0) {
+    broadcastOutput(String("Found ") + n + " networks:");
+    for (int i = 0; i < n && i < 10; i++) {
+      char line[96];
+      snprintf(line, sizeof(line), "  %d. %-24s  %lddBm",
+               i + 1, WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i));
+      broadcastOutput(line);
+    }
+    if (n > 10) {
+      broadcastOutput(String("  ... and ") + (n - 10) + " more");
+    }
+  } else {
+    broadcastOutput("No WiFi networks found.");
+  }
+  broadcastOutput("Enter a number to select, type an SSID directly, 'rescan' to refresh, or 'b' to go back:");
+  String input = waitForSerialInputBlocking();
+  input.trim();
+  if (input.equalsIgnoreCase("b") || input.equalsIgnoreCase("back")) {
+    WiFi.scanDelete();
+    return false;
+  }
+  if (input.equalsIgnoreCase("rescan")) {
+    WiFi.scanDelete();
+    return serialWifiSelectionForRestore(outSSID);
+  }
+  if (input.length() == 0) {
+    WiFi.scanDelete();
+    return false;
+  }
+  String ssid = input;
+  int idx = input.toInt();
+  if (idx > 0 && idx <= n) {
+    ssid = WiFi.SSID(idx - 1);
+  }
+  WiFi.scanDelete();
+  outSSID = ssid;
+  return outSSID.length() > 0;
+}
+#endif // ENABLE_WIFI
+
 // Migration restore handler registration (from WebServer_MigrationTool.cpp)
 #if ENABLE_HTTP_SERVER
 #include "WebServer_MigrationTool.h"
@@ -233,12 +280,23 @@ void firstTimeSetupIfNeeded() {
     bool wifiSelected = false;
 
     while (!wifiSelected) {
-      // Network selection (scan + pick from list, with serial fallback)
+      // Network selection (scan + pick from list)
+#if ENABLE_OLED_DISPLAY
       if (!getOLEDWiFiSelection(restoreSSID)) {
         // User pressed B / cancelled — go back to setup mode selection
         goBack = true;
         break;
       }
+#elif ENABLE_WIFI
+      if (!serialWifiSelectionForRestore(restoreSSID)) {
+        goBack = true;
+        break;
+      }
+#else
+      broadcastOutput("ERROR: WiFi not enabled in this build; cannot import from backup.");
+      goBack = true;
+      break;
+#endif
 
       // Password entry (B goes back to network list)
       bool passwordCancelled = false;
@@ -605,8 +663,8 @@ void firstTimeSetupIfNeeded() {
   // Always save settings after wizard completes
   
   // Debug: Print sensor auto-start values before saving
-  Serial.printf("[FTS] Before save: i2cBus=%d\n", gSettings.i2cBusEnabled ? 1 : 0);
-  Serial.printf("[FTS] Sensors: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d\n",
+  INFO_SYSTEMF("[FTS] Before save: i2cBus=%d", gSettings.i2cBusEnabled ? 1 : 0);
+  INFO_SYSTEMF("[FTS] Sensors: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d",
                 gSettings.thermalAutoStart ? 1 : 0,
                 gSettings.tofAutoStart ? 1 : 0,
                 gSettings.imuAutoStart ? 1 : 0,

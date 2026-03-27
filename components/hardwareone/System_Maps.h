@@ -123,6 +123,47 @@ enum MapFeatureType : uint8_t {
 #define LOD_ZOOM_SERVICE_ROAD 0.70f  // Service roads (0x02 / SUBTYPE_MINOR_SERVICE)
 #define LOD_ZOOM_TRACK        0.70f  // Tracks (0x03 / SUBTYPE_PATH_TRACK)
 
+// -----------------------------------------------------------------------------
+// Single source of truth for zoom LOD (CPU / OLED render path).
+// Call AFTER layer + subtype visibility checks; those use gVisibleLayers / subtype masks.
+// Web map page injects the same LOD_ZOOM_* values as JS constants (see streamMapsPageLodZoomConstants).
+// Note: LOD_ZOOM_RAILWAY / LOD_ZOOM_PARK / LOD_ZOOM_TRANSIT are semantic aliases — the cascade below
+// uses MAJOR_ROAD, WATER, MINOR_ROAD, PATH, BUILDING steps; keep their numeric values aligned when tuning.
+// -----------------------------------------------------------------------------
+inline bool mapLodFeatureVisibleAtZoom(uint8_t ftype, uint8_t fsubtype, float zoom) {
+  if (ftype == MAP_FEATURE_ROAD_MINOR && fsubtype == SUBTYPE_MINOR_SERVICE &&
+      zoom < LOD_ZOOM_SERVICE_ROAD) {
+    return false;
+  }
+  if (ftype == MAP_FEATURE_PATH && fsubtype == SUBTYPE_PATH_TRACK && zoom < LOD_ZOOM_TRACK) {
+    return false;
+  }
+  if (zoom < LOD_ZOOM_MAJOR_ROAD) {
+    return ftype == MAP_FEATURE_HIGHWAY;
+  }
+  if (zoom < LOD_ZOOM_WATER) {
+    return ftype == MAP_FEATURE_HIGHWAY || ftype == MAP_FEATURE_ROAD_MAJOR;
+  }
+  if (zoom < LOD_ZOOM_MINOR_ROAD) {
+    if (ftype == MAP_FEATURE_ROAD_MINOR || ftype == MAP_FEATURE_PATH ||
+        ftype == MAP_FEATURE_BUILDING || ftype == MAP_FEATURE_PARK ||
+        ftype == MAP_FEATURE_BUS || ftype == MAP_FEATURE_STATION) {
+      return false;
+    }
+    return true;
+  }
+  if (zoom < LOD_ZOOM_PATH) {
+    if (ftype == MAP_FEATURE_PATH) {
+      return false;
+    }
+    return true;
+  }
+  if (ftype == MAP_FEATURE_BUILDING && zoom < LOD_ZOOM_BUILDING) {
+    return false;
+  }
+  return true;
+}
+
 // =============================================================================
 // Line Styles for Rendering
 // =============================================================================
@@ -280,16 +321,40 @@ struct MapNameEntry {
   char name[64];  // Truncated if longer than 63
 };
 
-// Multi-slot tile cache configuration
+// Multi-tier slab cache configuration
 #define MAP_CACHE_POOL_SIZE  (1 * 1024 * 1024)  // 1MB pool in PSRAM
-#define MAP_CACHE_MAX_SLOTS  256                  // Max tracked slots
+#define MAP_CACHE_MAX_SLOTS  512                  // Max tracked slots (across all tiers)
 #define MAP_CACHE_MIN_SLOT   4096                 // Minimum 4KB per slot
+#define MAP_CACHE_MAX_TIERS  4                    // Max number of size tiers
+
+// Tile stride (subsampling) avoids LRU/flash thrashing when visible tiles > numSlots, but skipping
+// tiles draws a visible checkerboard whenever each map tile still covers several screen pixels.
+// Only allow stride when tiles project smaller than this (sub-pixel / tiny tiles OK).
+// Note: OLED uses mapRenderTask (async) + double buffer; longer renders mean more stale blits until
+// catch-up — still preferable to wrong (skipped) tiles. renderMap may taskYIELD under cache pressure.
+#define MAP_TILE_STRIDE_OK_BELOW_PX  2.5f
+
+// renderMap() runs on the same core as other work (e.g. OLED mapRenderTask on CPU0). Yield cadence:
+// - cache thrash (visible tiles > LRU slots): often (every 8 tile visits)
+// - many tile visits without slot pressure: moderate (every 16) so IDLE0 / TWDT still run
+// - small frames: light (every 64) to avoid pointless overhead
+#define MAP_RENDER_YIELD_MANY_VISITS  40   // >= this many stepped tile iterations → more yields
+#define MAP_RENDER_FEATURE_YIELD_STRIDE 256  // extra yields inside huge per-tile feature lists
+
+// Per-tier cache region descriptor
+struct CacheTier {
+  uint32_t slotSize;        // Bytes per slot in this tier (4KB-aligned)
+  uint16_t slotCount;       // Number of slots in this tier
+  uint16_t firstSlotIndex;  // Index of first slot in global slots[] array
+  size_t   poolOffset;      // Byte offset from cachePool where this tier starts
+};
 
 // Per-slot cache entry
 struct TileCacheSlot {
   int16_t  tileIdx;        // Which tile is cached here (-1 = empty)
   uint32_t dataSize;       // Actual tile payload bytes stored
   uint32_t lastAccessSeq;  // Monotonic counter for LRU eviction
+  uint8_t  tierIdx;        // Which tier this slot belongs to
 };
 
 // Loaded map state - v6 tiled architecture
@@ -322,15 +387,17 @@ struct LoadedMap {
   // Persistent file handle (kept open for the lifetime of the loaded map)
   File mapFile;              // Read-only handle, closed in unloadMap()
   
-  // Multi-slot tile cache (PSRAM pool divided into fixed-size slots)
+  // Multi-tier slab cache (PSRAM pool divided into size-tiered slots)
   uint8_t* cachePool;       // Contiguous PSRAM pool
   size_t   cachePoolSize;   // Actual allocated pool size
-  uint32_t slotSize;        // Bytes per slot (= max tile payload, rounded up)
-  uint16_t numSlots;        // cachePoolSize / slotSize (capped at MAX_SLOTS)
+  CacheTier tiers[MAP_CACHE_MAX_TIERS];  // Size tiers (smallest first)
+  uint8_t  numTiers;        // Active tier count (1-4)
+  uint16_t numSlots;        // Total slots across all tiers (length of slots[])
   uint32_t accessSeq;       // Monotonic access counter for LRU
   TileCacheSlot* slots;     // Array of slot metadata [numSlots]
   uint32_t cacheHits;       // Debug: total cache hits since load
   uint32_t cacheMisses;     // Debug: total cache misses since load
+  uint32_t tilesDropped;    // Tiles that couldn't fit in any tier this frame
 };
 
 // =============================================================================
@@ -746,6 +813,7 @@ extern float gMapRotation;  // Rotation angle in degrees (0-360)
 // Command handlers
 const char* cmd_map(const String& argsInput);
 const char* cmd_mapload(const String& argsInput);
+const char* cmd_mapunload(const String& argsInput);
 const char* cmd_maplist(const String& argsInput);
 const char* cmd_waypoint(const String& argsInput);
 const char* cmd_whereami(const String& argsInput);

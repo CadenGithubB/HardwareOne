@@ -44,36 +44,26 @@ bool filesystemReady = false;
 
 bool initFilesystem() {
   ESP_LOGI("FS", "Initializing LittleFS...");
-  Serial.println("[FS] Initializing LittleFS...");
-  Serial.flush();
-  delay(50);  // Allow serial to flush
-  
+  delay(50);  // Allow USB serial to attach before early boot logs
+
   // Configure LittleFS using ESP-IDF native API (bypasses Arduino wrapper issues)
   if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
     ESP_LOGW("FS", "LittleFS mount failed; formatting and retrying");
-    Serial.println("[FS] Mount failed; formatting and retrying...");
-    Serial.flush();
 
     if (!LittleFS.format()) {
       ESP_LOGE("FS", "LittleFS format failed");
-      Serial.println("[FS] ERROR: LittleFS format failed");
-      Serial.flush();
       filesystemReady = false;
       return false;
     }
 
     if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
       ESP_LOGE("FS", "LittleFS mount failed after format");
-      Serial.println("[FS] ERROR: LittleFS mount failed after format");
-      Serial.flush();
       filesystemReady = false;
       return false;
     }
   }
-  
+
   ESP_LOGI("FS", "LittleFS mounted successfully");
-  Serial.println("[FS] LittleFS mounted successfully");
-  Serial.flush();
   filesystemReady = true;
 
   VFS::init();
@@ -121,7 +111,7 @@ bool initFilesystem() {
           if (fullPath != "/") fullPath += "/";
           fullPath += name;
           LittleFS.remove(fullPath.c_str());
-          Serial.printf("[FS] Cleaned orphaned temp file: %s\n", fullPath.c_str());
+          ESP_LOGI("FS", "Cleaned orphaned temp file: %s", fullPath.c_str());
           cleaned++;
         }
         entry = d.openNextFile();
@@ -129,7 +119,7 @@ bool initFilesystem() {
       d.close();
     }
     if (cleaned > 0) {
-      Serial.printf("[FS] Removed %d orphaned .tmp file(s)\n", cleaned);
+      ESP_LOGI("FS", "Removed %d orphaned .tmp file(s)", cleaned);
     }
   }
 
@@ -142,7 +132,7 @@ bool initFilesystem() {
       if (readText(path, content) && content.length() > 0) {
         content.trim();
         if (content.length() > 0 && content[0] != '{' && content[0] != '[') {
-          Serial.printf("[FS] WARNING: %s appears corrupt (not valid JSON), removing\n", path);
+          ESP_LOGW("FS", "%s appears corrupt (not valid JSON), removing", path);
           LittleFS.remove(path);
         }
       }

@@ -226,6 +226,7 @@ esp_err_t handleFileWrite(httpd_req_t* req);
 esp_err_t handleFileUpload(httpd_req_t* req);
 esp_err_t handleSensorsStatus(httpd_req_t* req);
 esp_err_t handleDashboard(httpd_req_t* req);
+esp_err_t handlePasswordChangePage(httpd_req_t* req);
 esp_err_t handleSettingsPage(httpd_req_t* req);
 esp_err_t handleSettingsGet(httpd_req_t* req);
 esp_err_t handleUserSettingsGet(httpd_req_t* req);

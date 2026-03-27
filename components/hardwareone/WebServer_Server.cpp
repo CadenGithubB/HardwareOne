@@ -38,7 +38,6 @@
 #include "WebPage_Dashboard.h"
 #include "WebPage_Files.h"
 #include "WebPage_Login.h"
-#include "WebPage_LoginSuccess.h"
 #include "WebPage_LoginRequired.h"
 #include "WebPage_Logging.h"
 #include "WebPage_Settings.h"
@@ -233,7 +232,7 @@ String setSession(httpd_req_t* req, const String& u) {
           // Refresh and reuse existing session
           gSessions[i].lastSeen = nowMs;
           gSessions[i].expiresAt = nowMs + SESSION_TTL_MS;
-          char cookieBuf[96];
+          static char cookieBuf[96];
           snprintf(cookieBuf, sizeof(cookieBuf), "session=%s; Path=/", gSessions[i].sid.c_str());
           esp_err_t sc = httpd_resp_set_hdr(req, "Set-Cookie", cookieBuf);
           DEBUG_AUTHF("Reusing existing session idx=%d user=%s sid=%s | refreshed", i, u.c_str(), gSessions[i].sid.c_str());
@@ -285,7 +284,7 @@ String setSession(httpd_req_t* req, const String& u) {
   DEBUG_AUTHF("New session created idx=%d user=%s sid=%s | needsStatusUpdate=1", idx, u.c_str(), s.sid.c_str());
 
   // Set new session cookie with minimal attributes for maximum compatibility
-  char cookieBuf[96];
+  static char cookieBuf[96];
   snprintf(cookieBuf, sizeof(cookieBuf), "session=%s; Path=/", s.sid.c_str());
   esp_err_t sc = httpd_resp_set_hdr(req, "Set-Cookie", cookieBuf);
   DEBUG_AUTHF("Setting session cookie: %s", cookieBuf);
@@ -306,7 +305,6 @@ String setSession(httpd_req_t* req, const String& u) {
 extern bool gSerialAuthed;
 extern String gSerialUser;
 extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
-extern void streamLoginSuccessContent(httpd_req_t* req, const String& sid, const String& theme);
 extern "C" void __attribute__((weak)) authSuccessDebug(const char* user,
                                                        const char* ip,
                                                        const char* path,
@@ -390,29 +388,13 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
   // Weak hook for external instrumentation
   authSuccessDebug(ctx.user.c_str(), ctx.ip.c_str(), ctx.path.c_str(), ctx.sid.c_str(), redirectTo ? redirectTo : "", reused);
 
-  // Emit transport-specific success UX
-  if (ctx.transport == SOURCE_WEB) {
-    httpd_req_t* req = reinterpret_cast<httpd_req_t*>(ctx.opaque);
-    if (!req) return ESP_FAIL;
-    // Use streaming success page (web_login_success.h), with meta refresh
-    // Session ID passed for cookie setting; redirect handled inside the page implementation
-    {
-      String _theme = "light";
-      uint32_t _uid = 0;
-      if (getUserIdByUsername(ctx.user, _uid) && _uid > 0) {
-        PSRAM_JSON_DOC(_s);
-        if (loadUserSettings(_uid, _s)) { const char* _t = _s["theme"] | "light"; if (_t && strcmp(_t,"dark")==0) _theme = "dark"; }
-      }
-      streamLoginSuccessContent(req, ctx.sid, _theme);
-    }
-    return ESP_OK;
-  } else if (ctx.transport == SOURCE_SERIAL) {
+  // Transport-specific post-login actions
+  // Note: Web login response (303 redirect) is handled directly by handleLogin,
+  // not here. This function only handles logging and session state for all transports.
+  if (ctx.transport == SOURCE_SERIAL) {
     DEBUG_HTTPF("OK: logged in (Serial transport)");
-    return ESP_OK;
-  } else {
-    // Internal/ESP-NOW commands - no UI response needed
-    return ESP_OK;
   }
+  return ESP_OK;
 }
 
 // Session destruction
@@ -977,7 +959,6 @@ extern bool isValidUser(const String& username, const String& password);
 extern String extractFormField(const String& body, const String& key);
 extern String urlDecode(const String& str);
 extern String gSessUser;
-extern void streamLoginSuccessContent(httpd_req_t* req, const String& sid, const String& theme);
 extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmdline, String& out);
 extern int findSessionIndexBySID(const String& sid);
 extern bool sseDequeueNotice(SessionEntry& s, String& out);
@@ -1002,6 +983,21 @@ extern void streamDebugFlush();
 // Universal page streaming function (moved from .ino)
 void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&)) {
   httpd_resp_set_type(req, "text/html");
+
+  // Enforce one-time password change (admin-created accounts, etc.) before other app pages
+  if (username.length() > 0 && userMustChangePassword(username)) {
+    if (activePage != "password-change") {
+      httpd_resp_set_status(req, "303 See Other");
+      httpd_resp_set_hdr(req, "Location", "/account/password-change");
+      httpd_resp_send(req, "", 0);
+      return;
+    }
+  } else if (activePage == "password-change" && username.length() > 0) {
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", "/dashboard");
+    httpd_resp_send(req, "", 0);
+    return;
+  }
 
   // Suspend mesh activity during page generation to reduce CPU contention
   gMeshActivitySuspended = true;
@@ -1255,6 +1251,17 @@ String getLogoutReason(const String& ip) {
   return String();
 }
 
+// Clear any stored logout reason for an IP (e.g. after successful login)
+void clearLogoutReason(const String& ip) {
+  if (ip.length() == 0) return;
+  for (int i = 0; i < MAX_LOGOUT_REASONS; ++i) {
+    if (gLogoutReasons[i].ip == ip) {
+      gLogoutReasons[i] = LogoutReason();
+      return;
+    }
+  }
+}
+
 // Function called from auth required page to get logout reason
 String getLogoutReasonForAuthPage(httpd_req_t* req) {
   String logoutReason = "";
@@ -1411,9 +1418,23 @@ void buildSystemInfoJson(JsonDocument& doc) {
 #endif
 
 #if ENABLE_I2C_SYSTEM
-  doc["i2c_enabled"] = gI2CBusEnabled;
+  {
+    JsonObject i2c = conn["i2c"].to<JsonObject>();
+    i2c["compiled"] = true;
+    i2c["enabled"]  = gI2CBusEnabled;
+    auto* mgr = I2CDeviceManager::getInstance();
+    i2c["devices"]  = mgr ? mgr->getDeviceCount() : 0;
+    i2c["activeDevices"] = mgr ? mgr->getActiveDeviceCount() : 0;
+    i2c["sdaPin"]   = gSettings.i2cSdaPin;
+    i2c["sclPin"]   = gSettings.i2cSclPin;
+  }
 #else
-  doc["i2c_enabled"] = false;
+  {
+    JsonObject i2c = conn["i2c"].to<JsonObject>();
+    i2c["compiled"] = false;
+    i2c["enabled"]  = false;
+    i2c["devices"]  = 0;
+  }
 #endif
 }
 
@@ -1511,6 +1532,34 @@ void streamCLIContent(httpd_req_t* req, const String& username) {
   streamCLIInner(req, username);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
   streamEndHtml(req);
+}
+
+static void streamPasswordChangeInner(httpd_req_t* req, const String& username, const String& errorMsg) {
+  streamBeginHtml(req, "Change Password", false, username, "settings");
+  httpd_resp_send_chunk(req, "<div class='card'><div class='container-narrow'>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<h2 style='margin-top:0'>Choose a new password</h2>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<p class='text-muted' style='margin:0 0 1rem 0'>Your administrator requires you to set a new password before continuing.</p>", HTTPD_RESP_USE_STRLEN);
+  if (errorMsg.length() > 0) {
+    httpd_resp_send_chunk(req, "<div class='form-error' style='color:#f66;margin-bottom:0.75rem'>", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, errorMsg.c_str(), HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+  }
+  httpd_resp_send_chunk(req,
+                        "<form method='POST' action='/account/password-change' style='display:grid;gap:0.75rem'>"
+                        "<div class='form-field'><label>Current password</label>"
+                        "<input class='form-input' type='password' name='currentPassword' required autocomplete='current-password'></div>"
+                        "<div class='form-field'><label>New password</label>"
+                        "<input class='form-input' type='password' name='newPassword' required minlength='6' autocomplete='new-password'></div>"
+                        "<div class='form-field'><label>Confirm new password</label>"
+                        "<input class='form-input' type='password' name='confirmPassword' required minlength='6' autocomplete='new-password'></div>"
+                        "<div class='btn-row'><button class='btn' type='submit'>Update password</button></div>"
+                        "</form></div></div>",
+                        HTTPD_RESP_USE_STRLEN);
+  streamEndHtml(req);
+}
+
+void streamPasswordChangeContent(httpd_req_t* req, const String& username) {
+  streamPasswordChangeInner(req, username, String());
 }
 
 // Read raw file contents as text/plain
@@ -2184,9 +2233,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   DEBUG_STORAGEF("[handleFileUpload] COMPLETE: wrote %d bytes to '%s' (binary=%s), heap delta=%d, dur=%u ms",
                  (int)totalWritten, path.c_str(), isBinary ? "true" : "false", (int)ESP.getFreeHeap() - (int)heapStart, (unsigned)(millis() - tStart));
-
-  // Always print upload completion to serial for visibility
-  Serial.printf("[UPLOAD] %s: %d bytes written in %u ms\n", path.c_str(), (int)totalWritten, (unsigned)(millis() - tStart));
+  INFO_WEBF("[UPLOAD] %s: %d bytes written in %u ms", path.c_str(), (int)totalWritten, (unsigned)(millis() - tStart));
 
 #if ENABLE_AUTOMATION
   // Post-save hook: keep existing behavior for automations.json (read/validate)
@@ -2259,6 +2306,81 @@ esp_err_t handleSettingsPage(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "settings");
   streamPageWithContent(req, "settings", ctx.user, streamSettingsContent);
+  return ESP_OK;
+}
+
+// GET/POST: required password change (session must exist; see streamPageWithContent redirect)
+esp_err_t handlePasswordChangePage(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+
+  if (req->method == HTTP_POST) {
+    int total_len = req->content_len;
+    if (total_len <= 0 || total_len > 4096) {
+      httpd_resp_set_type(req, "text/html");
+      gMeshActivitySuspended = true;
+      streamPasswordChangeInner(req, ctx.user, String("Invalid request"));
+      gMeshActivitySuspended = false;
+      streamDebugFlush();
+      return ESP_OK;
+    }
+    std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.pwchg"), free);
+    if (!buf) {
+      httpd_resp_set_type(req, "text/html");
+      gMeshActivitySuspended = true;
+      streamPasswordChangeInner(req, ctx.user, String("Out of memory"));
+      gMeshActivitySuspended = false;
+      streamDebugFlush();
+      return ESP_OK;
+    }
+    int received = 0;
+    while (received < total_len) {
+      int r = httpd_req_recv(req, buf.get() + received, total_len - received);
+      if (r <= 0) {
+        httpd_resp_set_type(req, "text/html");
+        gMeshActivitySuspended = true;
+        streamPasswordChangeInner(req, ctx.user, String("Read error"));
+        gMeshActivitySuspended = false;
+        streamDebugFlush();
+        return ESP_OK;
+      }
+      received += r;
+    }
+    buf.get()[received] = '\0';
+    String body(buf.get());
+    String current = urlDecode(extractFormField(body, "currentPassword"));
+    String newp = urlDecode(extractFormField(body, "newPassword"));
+    String conf = urlDecode(extractFormField(body, "confirmPassword"));
+
+    String err;
+    if (newp != conf) {
+      err = "New passwords do not match";
+    } else if (newp.length() < 6) {
+      err = "Password must be at least 6 characters";
+    } else if (newp == current) {
+      err = "New password must differ from current password";
+    } else if (!isValidUser(ctx.user, current)) {
+      err = "Current password is incorrect";
+    } else if (!setUserPassword(ctx.user, newp)) {
+      err = "Could not save new password";
+    }
+
+    if (err.length() > 0) {
+      httpd_resp_set_type(req, "text/html");
+      gMeshActivitySuspended = true;
+      streamPasswordChangeInner(req, ctx.user, err);
+      gMeshActivitySuspended = false;
+      streamDebugFlush();
+      return ESP_OK;
+    }
+
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", "/dashboard");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_send(req, "", 0);
+    return ESP_OK;
+  }
+
+  streamPageWithContent(req, "password-change", ctx.user, streamPasswordChangeContent);
   return ESP_OK;
 }
 
@@ -2486,12 +2608,14 @@ esp_err_t handleUserSettingsGet(httpd_req_t* req) {
   PSRAM_JSON_DOC(response);
   response["success"] = true;
   response["userId"] = userId;
+  response["mustChangePassword"] = (settingsDoc["mustChangePassword"] == true);
   JsonObject settings = response["settings"].to<JsonObject>();
   settings.set(settingsDoc.as<JsonObject>());
   
   // Remove sensitive fields from response (passwords should never be exposed via API)
   settings.remove("password");
   settings.remove("gamepad_password");
+  settings.remove("mustChangePassword");
 
   {
     const char* theme = settingsDoc["theme"] | "";
@@ -3151,30 +3275,23 @@ esp_err_t handleLogin(httpd_req_t* req) {
     // If already authed, redirect directly to dashboard
     String u;
     if (isAuthed(req, u)) {
+      // Redirect to dashboard; streamPageWithContent will enforce password-change if needed
       httpd_resp_set_status(req, "303 See Other");
       httpd_resp_set_hdr(req, "Location", "/dashboard");
       httpd_resp_send(req, "", 0);
       return ESP_OK;
     }
-    // Render login form (no next param) using streaming
-    DEBUG_HTTPF("[LOGIN_DEBUG] Starting login page render");
+    // Render login form
     httpd_resp_set_type(req, "text/html");
-    DEBUG_HTTPF("[LOGIN_DEBUG] Set content type");
     streamBeginHtml(req, "Sign In", /*isPublic=*/true, "", "login");
-    DEBUG_HTTPF("[LOGIN_DEBUG] Sent HTML header");
-    // Get logout reason
     String logoutReason = "";
     String clientIP;
     getClientIP(req, clientIP);
     if (clientIP.length() > 0) {
       logoutReason = getLogoutReason(clientIP);
-      DEBUG_HTTPF("[LOGIN_PAGE_DEBUG] Direct login page access for IP '%s' - logout reason: '%s'", clientIP.c_str(), logoutReason.c_str());
     }
-    DEBUG_HTTPF("[LOGIN_DEBUG] About to call streamLoginInner");
     streamLoginInner(req, "", "", logoutReason);
-    DEBUG_HTTPF("[LOGIN_DEBUG] Called streamLoginInner");
     streamEndHtml(req);
-    DEBUG_HTTPF("[LOGIN_DEBUG] Sent HTML footer, page complete");
     return ESP_OK;
   }
   // POST
@@ -3276,97 +3393,51 @@ esp_err_t handleLogin(httpd_req_t* req) {
     String fakeCmd = "login " + u + " ****";
     logCommandExecution(auditCtx, fakeCmd.c_str(), true, "Login successful");
   }
-  getLogoutReason(ip);  // clears the stored reason by reading it
+  clearLogoutReason(ip);
 
-  // Create session and capture SID for client-side fallback
-  String sid = setSession(req, u);
+  // Determine redirect destination BEFORE setting session cookie,
+  // so no work happens between setSession and httpd_resp_send
+  const char* redirectTo = userMustChangePassword(u) ? "/account/password-change" : "/dashboard";
 
-  // Send styled login success page with Safari-compatible redirect
-  httpd_resp_set_hdr(req, "Cache-Control", "no-cache, no-store, must-revalidate");
-  httpd_resp_set_hdr(req, "Pragma", "no-cache");
-  httpd_resp_set_hdr(req, "Expires", "0");
+  // Create session (sets Set-Cookie header via static buffer)
+  setSession(req, u);
 
-  {
-    String _theme = "light";
-    uint32_t _uid = 0;
-    if (getUserIdByUsername(u, _uid) && _uid > 0) {
-      PSRAM_JSON_DOC(_s);
-      if (loadUserSettings(_uid, _s)) { const char* _t = _s["theme"] | "light"; if (_t && strcmp(_t,"dark")==0) _theme = "dark"; }
-    }
-    streamLoginSuccessContent(req, sid, _theme);
-  }
-
-  BROADCAST_PRINTF("[login] Safari-compatible session and cookie set for user: %s", u.c_str());
+  // 303 redirect — browser saves cookie then follows Location
+  httpd_resp_set_status(req, "303 See Other");
+  httpd_resp_set_hdr(req, "Location", redirectTo);
+  httpd_resp_send(req, "", 0);
+  BROADCAST_PRINTF("[login] Login successful for user: %s -> %s", u.c_str(), redirectTo);
   return ESP_OK;
 }
 
-// Auth required page handler - shows 401 with login prompt
+// Auth required handler - redirects to login or returns JSON for API/AJAX
 esp_err_t sendAuthRequiredResponse(httpd_req_t* req) {
-  httpd_resp_set_status(req, "401 Unauthorized");
-  httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
-  httpd_resp_set_hdr(req, "Pragma", "no-cache");
-  
-  // Check if this is an API endpoint - send JSON for all /api/* paths
+  // API endpoints: return JSON 401
   String uri = String(req->uri);
   if (uri.startsWith("/api/")) {
-    DEBUG_AUTHF("[401] API endpoint - sending JSON response");
+    httpd_resp_set_status(req, "401 Unauthorized");
     sendJsonResponse(req, "{\"error\":\"auth_required\", \"message\":\"Authentication required\"}");
     return ESP_OK;
   }
-  
-  // Check if this is an AJAX/fetch request (Accept: application/json)
+
+  // AJAX/fetch requests: return JSON 401
   char acceptBuf[128] = {0};
   if (httpd_req_get_hdr_value_str(req, "Accept", acceptBuf, sizeof(acceptBuf)) == ESP_OK) {
     String accept = String(acceptBuf);
     accept.toLowerCase();
     if (accept.indexOf("application/json") >= 0) {
-      DEBUG_AUTHF("[401] Accept header requests JSON - sending JSON response");
+      httpd_resp_set_status(req, "401 Unauthorized");
       sendJsonResponse(req, "{\"error\":\"auth_required\", \"reload\":true}");
       return ESP_OK;
     }
   }
-  
-  DEBUG_AUTHF("[401] Sending HTML login page");
-  httpd_resp_set_type(req, "text/html");
 
-  // Get logout reason from main file function
-  String logoutReason = getLogoutReasonForAuthPage(req);
-
-  // Stream the page with public shell
-  streamBeginHtml(req, "Authentication Required", /*isPublic=*/true, "", "auth");
-
-  // Page content with card wrapper
-  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, R"AUTHREQ(
-<div class='text-center pad-xl'>
-  <h2>Authentication Required</h2>
-)AUTHREQ",
-                        HTTPD_RESP_USE_STRLEN);
-
-  // Show logout reason if present
-  if (logoutReason.length() > 0) {
-    DEBUG_HTTPF("[AUTH_DEBUG] Including logout reason: %s", logoutReason.c_str());
-    httpd_resp_send_chunk(req, R"LOGOUT(
-  <div class='alert alert-warning mb-3' style='background:#fff3cd;border:1px solid #ffeaa7;color:#856404;padding:12px;border-radius:4px;'>
-    <strong>Session Terminated:</strong> )LOGOUT",
-                          HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, logoutReason.c_str(), HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, "\n  </div>\n", HTTPD_RESP_USE_STRLEN);
-  }
-
-  // Main content and closing
-  httpd_resp_send_chunk(req, R"AUTHCONTENT(
-  <p>You need to sign in to access this page.</p>
-  <p class='text-sm' style='color:#fff'>Don't have an account? <a class='link-primary' href='/register' style='text-decoration:none'>Request Access</a></p>
-</div>
-</div>
-<script>window.addEventListener('load', function(){ setTimeout(function(){ try{ var msg = sessionStorage.getItem('revokeMsg'); if(msg){ sessionStorage.removeItem('revokeMsg'); alert(msg); } }catch(_){} }, 500); });</script>
-)AUTHCONTENT",
-                        HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);  // Close card
-
-  streamEndHtml(req);
-
+  // HTML pages: simple redirect to /login (no heavy chunked 401 page)
+  // Store logout reason so the login page can display it
+  httpd_resp_set_status(req, "303 See Other");
+  httpd_resp_set_hdr(req, "Location", "/login");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+  httpd_resp_send(req, "", 0);
   return ESP_OK;
 }
 
@@ -4952,6 +5023,8 @@ register_handlers:
   static httpd_uri_t logout = { .uri = "/logout", .method = HTTP_GET, .handler = handleLogout, .user_ctx = NULL };
   static httpd_uri_t ping = { .uri = "/api/ping", .method = HTTP_GET, .handler = handlePing, .user_ctx = NULL };
   static httpd_uri_t dash = { .uri = "/dashboard", .method = HTTP_GET, .handler = handleDashboard, .user_ctx = NULL };
+  static httpd_uri_t passwordChangeGet = { .uri = "/account/password-change", .method = HTTP_GET, .handler = handlePasswordChangePage, .user_ctx = NULL };
+  static httpd_uri_t passwordChangePost = { .uri = "/account/password-change", .method = HTTP_POST, .handler = handlePasswordChangePage, .user_ctx = NULL };
   static httpd_uri_t settingsPage = { .uri = "/settings", .method = HTTP_GET, .handler = handleSettingsPage, .user_ctx = NULL };
   static httpd_uri_t settingsGet = { .uri = "/api/settings", .method = HTTP_GET, .handler = handleSettingsGet, .user_ctx = NULL };
   static httpd_uri_t settingsSchema = { .uri = "/api/settings/schema", .method = HTTP_GET, .handler = handleSettingsSchema, .user_ctx = NULL };
@@ -5012,6 +5085,8 @@ register_handlers:
   httpd_register_uri_handler(server, &logout);
   httpd_register_uri_handler(server, &ping);
   httpd_register_uri_handler(server, &dash);
+  httpd_register_uri_handler(server, &passwordChangeGet);
+  httpd_register_uri_handler(server, &passwordChangePost);
   httpd_register_uri_handler(server, &settingsPage);
   httpd_register_uri_handler(server, &settingsGet);
   httpd_register_uri_handler(server, &settingsSchema);

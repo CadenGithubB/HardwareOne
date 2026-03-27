@@ -18,6 +18,7 @@
 #include "System_Logging.h" // For log file paths and constants
 #include "System_Filesystem.h"    // For writeText, readText
 #include "System_Settings.h"
+#include "Optional_Bluetooth.h"
 #include "OLED_Display.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -53,10 +54,6 @@ extern uint32_t gBootCounter;
 // Serial authentication globals
 extern bool gSerialAuthed;
 extern String gSerialUser;
-
-// Bluetooth authentication globals
-extern bool gBluetoothAuthed;
-extern String gBluetoothUser;
 
 // Web authentication functions (from web_server.h)
 extern bool isAuthed(httpd_req_t* req, String& outUser);
@@ -220,8 +217,6 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
       return true;
 
     case SOURCE_BLUETOOTH:
-      gBluetoothAuthed = true;
-      gBluetoothUser = username;
       updateUserLastSeen(username);
       return true;
       
@@ -249,8 +244,7 @@ void logoutTransport(CommandSource transport) {
       break;
       
     case SOURCE_BLUETOOTH:
-      gBluetoothAuthed = false;
-      gBluetoothUser = String();
+      bleRevokeAllSessions();
       break;
       
     case SOURCE_WEB:
@@ -271,7 +265,7 @@ bool isTransportAuthenticated(CommandSource transport) {
       return gLocalDisplayAuthed;
       
     case SOURCE_BLUETOOTH:
-      return gBluetoothAuthed;
+      return bleHasAuthenticatedSession();
       
     case SOURCE_WEB:
       // Web auth requires request context, can't check here
@@ -291,7 +285,14 @@ String getTransportUser(CommandSource transport) {
       return gLocalDisplayUser;
       
     case SOURCE_BLUETOOTH:
-      return gBluetoothUser;
+      {
+        uint16_t connId = 0;
+        String user;
+        if (bleGetAuthenticatedSessionInfo(0, connId, user)) {
+          return user;
+        }
+        return String();
+      }
       
     case SOURCE_WEB:
       // Web user requires request context, can't get here
@@ -367,7 +368,7 @@ bool verifyUserPassword(const String& inputPassword, const String& storedHash) {
 }
 
 // Update a user's text password in per-user settings file
-bool setUserPassword(const String& username, const String& newPasswordRaw) {
+bool setUserPassword(const String& username, const String& newPasswordRaw, bool requireChangeOnNextLogin) {
   if (!filesystemReady || username.length() == 0 || newPasswordRaw.length() == 0) return false;
   
   // Get user ID from username
@@ -383,9 +384,142 @@ bool setUserPassword(const String& username, const String& newPasswordRaw) {
   
   // Set the password field
   settings["password"] = hashed;
-  
+  settings["mustChangePassword"] = requireChangeOnNextLogin;
+
   // Save back to user settings file
   return saveUserSettings(userId, settings);
+}
+
+bool userMustChangePassword(const String& username) {
+  if (!filesystemReady || username.length() == 0) return false;
+  uint32_t userId = 0;
+  if (!getUserIdByUsername(username, userId) || userId == 0) return false;
+  PSRAM_JSON_DOC(settings);
+  if (!loadUserSettings(userId, settings)) return false;
+  return settings["mustChangePassword"] == true;
+}
+
+bool adminCreateUser(const String& username, const String& plainPassword, bool mustChangeOnLogin,
+                     const String& createdBy, String& errorOut) {
+  errorOut = "";
+  if (!filesystemReady) {
+    errorOut = "LittleFS not ready";
+    return false;
+  }
+  String u = username;
+  u.trim();
+  if (u.length() == 0 || u.length() > 64) {
+    errorOut = "Invalid username";
+    return false;
+  }
+  for (size_t i = 0; i < u.length(); ++i) {
+    if (u[i] <= ' ') {
+      errorOut = "Username may not contain whitespace";
+      return false;
+    }
+  }
+  if (plainPassword.length() < 6) {
+    errorOut = "Password must be at least 6 characters";
+    return false;
+  }
+
+  if (!LittleFS.exists(USERS_JSON_FILE)) {
+    errorOut = "users.json not found";
+    return false;
+  }
+
+  // Reject if already pending registration
+  if (LittleFS.exists(PENDING_USERS_FILE)) {
+    File pf = LittleFS.open(PENDING_USERS_FILE, "r");
+    if (pf) {
+      PSRAM_JSON_DOC(pdoc);
+      if (!deserializeJson(pdoc, pf)) {
+        JsonArray parr = pdoc.as<JsonArray>();
+        if (parr) {
+          for (JsonObject pu : parr) {
+            const char* pun = pu["username"] | "";
+            if (pun && u == pun) {
+              pf.close();
+              errorOut = "Username already pending approval";
+              return false;
+            }
+          }
+        }
+      }
+      pf.close();
+    }
+  }
+
+  int nextIdForSettings = 0;
+  {
+    FsLockGuard guard("users.admin_create");
+    File file = LittleFS.open(USERS_JSON_FILE, "r");
+    if (!file) {
+      errorOut = "Failed to read users.json";
+      return false;
+    }
+    PSRAM_JSON_DOC(doc);
+    DeserializationError jerr = deserializeJson(doc, file);
+    file.close();
+    if (jerr) {
+      errorOut = "Malformed users.json";
+      return false;
+    }
+    JsonArray users = doc["users"];
+    if (!users) {
+      errorOut = "Malformed users.json - missing users array";
+      return false;
+    }
+    for (JsonObject user : users) {
+      const char* existingUsername = user["username"];
+      if (existingUsername && u == existingUsername) {
+        errorOut = "Username already exists";
+        return false;
+      }
+    }
+
+    int nextId = doc["nextId"] | 2;
+    JsonObject newUser = users.add<JsonObject>();
+    newUser["id"] = nextId;
+    newUser["username"] = u;
+    newUser["role"] = "user";
+    newUser["createdAt"] = (const char*)nullptr;
+    newUser["createdBy"] = createdBy.length() ? createdBy.c_str() : "admin";
+    newUser["createdMs"] = millis();
+    newUser["ntpAnchorId"] = gNTPAnchorId;
+    newUser["bootCount"] = gBootCounter;
+    doc["nextId"] = nextId + 1;
+
+    file = LittleFS.open(USERS_JSON_FILE, "w");
+    if (!file) {
+      errorOut = "Failed to write users.json";
+      return false;
+    }
+    size_t written = serializeJson(doc, file);
+    file.close();
+    if (written == 0) {
+      errorOut = "Failed to write users.json";
+      return false;
+    }
+    nextIdForSettings = nextId;
+  }
+
+  const uint32_t createdUserId = (uint32_t)nextIdForSettings;
+  {
+    FsLockGuard sguard("user_settings.admin_create");
+    PSRAM_JSON_DOC(defaults);
+    defaults["theme"] = "light";
+    defaults["password"] = hashUserPassword(plainPassword);
+    defaults["mustChangePassword"] = mustChangeOnLogin;
+    if (!saveUserSettings(createdUserId, defaults)) {
+      errorOut = "User created but failed to write settings file";
+      return false;
+    }
+  }
+
+  DEBUG_USERSF("[users] admin created user '%s' id=%u mustChange=%d", u.c_str(), (unsigned)createdUserId,
+               mustChangeOnLogin ? 1 : 0);
+  return true;
 }
 
 // Update a user's gamepad pattern password in per-user settings file
@@ -505,11 +639,8 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
       gLocalDisplayAuthed = false;
       gLocalDisplayUser   = String();
     }
-    // Revoke Bluetooth session if active for this user
-    if (gBluetoothAuthed && gBluetoothUser.equalsIgnoreCase(username)) {
-      gBluetoothAuthed = false;
-      gBluetoothUser   = String();
-    }
+    // Revoke Bluetooth sessions for this user
+    (void)bleRevokeUserSessions(username);
 #if ENABLE_HTTP_SERVER
     // Revoke all web sessions for this user
     if (gSessions) {
@@ -1482,35 +1613,109 @@ const char* cmd_user_resetpassword(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
   
-  // Parse: "username newPassword"
+  // Parse: "<username> <newPassword> [0|1]" — optional 1 = require new password on next login (same tail rule as user add)
   String args = argsInput;
   args.trim();
   
   int spaceIdx = args.indexOf(' ');
-  if (spaceIdx < 0) return "Usage: user resetpassword <username> <newPassword>";
-  
-  String username = args.substring(0, spaceIdx);
-  String newPassword = args.substring(spaceIdx + 1);
-  username.trim();
-  newPassword.trim();
-  
-  if (username.length() == 0 || newPassword.length() == 0) {
-    return "Usage: user resetpassword <username> <newPassword>";
+  if (spaceIdx < 0) {
+    return "Usage: user resetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login, 0 = omit";
   }
   
-  if (newPassword.length() < 6) {
+  String username = args.substring(0, spaceIdx);
+  String rest = args.substring(spaceIdx + 1);
+  username.trim();
+  rest.trim();
+  
+  if (username.length() == 0 || rest.length() == 0) {
+    return "Usage: user resetpassword <username> <newPassword> [0|1]";
+  }
+
+  bool mustChange = false;
+  int lastSp = rest.lastIndexOf(' ');
+  if (lastSp >= 0) {
+    String tail = rest.substring(lastSp + 1);
+    tail.trim();
+    if (tail == "1" || tail == "0") {
+      mustChange = (tail == "1");
+      rest = rest.substring(0, lastSp);
+      rest.trim();
+    }
+  }
+  
+  if (rest.length() < 6) {
     return "Error: Password must be at least 6 characters";
   }
   
-  // Use the existing setUserPassword function
-  if (!setUserPassword(username, newPassword)) {
+  if (!setUserPassword(username, rest, mustChange)) {
     if (!ensureDebugBuffer()) return "Error: Failed to reset password";
     snprintf(getDebugBuffer(), 1024, "Error: Failed to reset password for user '%s'", username.c_str());
     return getDebugBuffer();
   }
   
   if (!ensureDebugBuffer()) return "Password reset successfully";
-  snprintf(getDebugBuffer(), 1024, "Password reset successfully for user '%s'", username.c_str());
+  snprintf(getDebugBuffer(), 1024, "Password reset successfully for user '%s'%s", username.c_str(),
+           mustChange ? " (must change password on next login)" : "");
+  return getDebugBuffer();
+}
+
+// Create user immediately (admin). Args: "<username> <password> [0|1]" — optional trailing 1 = must change password on next login.
+const char* cmd_user_add(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!filesystemReady) return "Error: LittleFS not ready";
+
+  String args = argsInput;
+  args.trim();
+  if (args.length() == 0) {
+    return "Usage: user add <username> <password> [0|1]\n(optional last arg: 1 = require new password on next login)";
+  }
+
+  int sp = args.indexOf(' ');
+  if (sp < 0) {
+    return "Usage: user add <username> <password> [0|1]\n(optional last arg: 1 = require new password on next login)";
+  }
+
+  String username = args.substring(0, sp);
+  String rest = args.substring(sp + 1);
+  username.trim();
+  rest.trim();
+
+  if (username.length() == 0 || rest.length() == 0) {
+    return "Usage: user add <username> <password> [0|1]\n(optional last arg: 1 = require new password on next login)";
+  }
+
+  bool mustChange = false;
+  int lastSp = rest.lastIndexOf(' ');
+  if (lastSp >= 0) {
+    String tail = rest.substring(lastSp + 1);
+    tail.trim();
+    if (tail == "1" || tail == "0") {
+      mustChange = (tail == "1");
+      rest = rest.substring(0, lastSp);
+      rest.trim();
+    }
+  }
+
+  if (rest.length() < 6) {
+    return "Error: Password must be at least 6 characters";
+  }
+
+  extern AuthContext gExecAuthContext;
+  String createdBy = gExecAuthContext.user;
+  if (createdBy.length() == 0) {
+    createdBy = "cli";
+  }
+
+  String err;
+  if (!adminCreateUser(username, rest, mustChange, createdBy, err)) {
+    if (!ensureDebugBuffer()) return "Error: Failed to create user";
+    snprintf(getDebugBuffer(), 1024, "Error: %s", err.c_str());
+    return getDebugBuffer();
+  }
+
+  if (!ensureDebugBuffer()) return "User created";
+  snprintf(getDebugBuffer(), 1024, "Created user '%s'%s", username.c_str(),
+           mustChange ? " (must change password on next login)" : "");
   return getDebugBuffer();
 }
 
@@ -1700,10 +1905,14 @@ const char* cmd_session_list(const String& argsInput) {
       t["user"]      = gLocalDisplayUser;
       t["transport"] = "oled";
     }
-    if (gBluetoothAuthed && gBluetoothUser.length()) {
+    for (int i = 0;; ++i) {
+      uint16_t connId = 0;
+      String user;
+      if (!bleGetAuthenticatedSessionInfo(i, connId, user)) break;
       JsonObject t = sessions.add<JsonObject>();
-      t["user"]      = gBluetoothUser;
+      t["user"]      = user;
       t["transport"] = "bluetooth";
+      t["sid"]       = String(connId);
     }
     size_t len = serializeJson(sessions, jsonBuf, kBufSize);
     if (len >= kBufSize) {
@@ -1801,11 +2010,7 @@ const char* cmd_session_revoke(const String& argsInput) {
       gLocalDisplayUser   = String();
       revoked++;
     }
-    if (gBluetoothAuthed && gBluetoothUser.equalsIgnoreCase(username)) {
-      gBluetoothAuthed = false;
-      gBluetoothUser   = String();
-      revoked++;
-    }
+    revoked += bleRevokeUserSessions(username);
     if (revoked > 0) {
       // Admin audit broadcast
       if (ensureDebugBuffer()) {
@@ -2636,7 +2841,9 @@ const CommandEntry userSystemCommands[] = {
   { "user demote", "Demote from admin: <username>", true, cmd_user_demote, "Usage: user demote <username>" },
   { "user delete", "Delete user: <username>", true, cmd_user_delete, "Usage: user delete <username>" },
   { "user changepassword", "Change own password: <currentPass> <newPass> <confirmPass>", false, cmd_user_changepassword, "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>" },
-  { "user resetpassword", "Reset user password: <username> <newPassword>", true, cmd_user_resetpassword, "Usage: user resetpassword <username> <newPassword>" },
+  { "user resetpassword", "Reset user password: <username> <newPassword> [0|1]", true, cmd_user_resetpassword,
+    "Usage: user resetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login" },
+  { "user add", "Create user: <username> <password> [0|1]", true, cmd_user_add, "Usage: user add <username> <password> [0|1]\nOptional: 1 = require new password on next login, 0 = omit" },
   { "user list", "List all users.", true, cmd_user_list },
   { "user request", "Request account: <user> <pass> [confirm]", false, cmd_user_request, "Usage: user request <username> <password> [confirmPassword]" },
   { "user sync", "Sync user to ESP-NOW: <username> <target>", true, cmd_user_sync },

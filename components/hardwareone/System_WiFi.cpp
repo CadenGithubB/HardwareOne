@@ -226,7 +226,11 @@ bool connectToBestWiFiNetwork() {
   bool connected = false;
 
   for (int i = 0; i < gWifiNetworkCount && !connected; ++i) {
-    connected = connectWiFiIndex(i, 20000, true);
+    if (i > 0) {
+      // Brief pause between trying different saved networks
+      delay(2000);
+    }
+    connected = connectWiFiIndex(i, 12000, true);
     
     if (gWifiUserCancelled) {
       esp_wifi_disconnect();
@@ -288,7 +292,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
     // Use shared connection logic
     connected = connectToBestWiFiNetwork();
   } else if (index1 > 0) {
-    connected = connectWiFiIndex(index1 - 1, 20000);
+    connected = connectWiFiIndex(index1 - 1, 12000);
     if (!connected && prevSSID.length() > 0) {
       connectWiFiSSID(prevSSID, 15000);
     }
@@ -308,6 +312,12 @@ const char* cmd_wificonnect(const String& originalCmd) {
 
 const char* cmd_wifidisconnect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  
+  // Check if WiFi is initialized before attempting disconnect
+  wifi_mode_t mode;
+  if (esp_wifi_get_mode(&mode) != ESP_OK) {
+    return "WiFi is not initialized";
+  }
   
   // Stop HTTP server to free heap
  #if ENABLE_HTTP_SERVER
@@ -626,139 +636,177 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
   err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
   DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_config() returned: %d", err);
 
-  // Step 6: Connect
-  DEBUG_WIFIF("[connectWiFiIndex] Calling esp_wifi_connect()...");
-  err = esp_wifi_connect();
-  DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_connect() returned: %d (%s)", err,
-              err == ESP_OK ? "ESP_OK" : "ERROR");
+  // Multi-attempt retry loop with exponential backoff
+  const int kMaxWifiAttempts = 3;
+  unsigned long retryBackoffMs = 1500;
 
-  // CRITICAL: Give the driver MORE time to scan channels and find the AP
-  // The ESP32 needs time to scan for the SSID beacon
-  delay(500);  // Increased from 100ms to 500ms
-  DEBUG_WIFIF("[connectWiFiIndex] WiFi status 500ms after connect(): %s (%d)",
-              wifiStatusToString(WiFi.status()), WiFi.status());
-
-  unsigned long start = millis();
-  int statusCheckCount = 0;
-  wl_status_t lastStatus = WiFi.status();
-  DEBUG_WIFIF("[connectWiFiIndex] Initial WiFi status after begin(): %s (%d)",
-              wifiStatusToString(lastStatus), lastStatus);
-
-  // Track if we hit the IDLE bug (status STAYS in IDLE for too long)
-  bool hitIdleBug = false;
-  unsigned long firstIdleTime = 0;  // When we first saw IDLE status
-
-  while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
-    delay(200);
-    statusCheckCount++;
-
-    wl_status_t currentStatus = WiFi.status();
-
-    // Track IDLE status timing
-    if (currentStatus == WL_IDLE_STATUS) {
-      if (firstIdleTime == 0) {
-        firstIdleTime = millis();
-        DEBUG_WIFIF("[connectWiFiIndex] First IDLE status seen at %lums", millis() - start);
-      }
-    } else {
-      // If we leave IDLE, reset the timer (this is normal during scanning)
-      firstIdleTime = 0;
+  for (int attempt = 1; attempt <= kMaxWifiAttempts; ++attempt) {
+    if (attempt > 1) {
+      BROADCAST_PRINTF("Retrying '%s' (%d/%d)...", nw.ssid.c_str(), attempt, kMaxWifiAttempts);
+      DEBUG_WIFIF("[connectWiFiIndex] Backing off %lums before retry", retryBackoffMs);
+      delay(retryBackoffMs);
+      retryBackoffMs = min(retryBackoffMs * 2, (unsigned long)8000);
     }
 
-    // CRITICAL: Detect ESP32 WiFi IDLE bug
-    // Only trigger if status STAYS in IDLE for 3+ seconds (not just transitions through it)
-    if (currentStatus == WL_IDLE_STATUS && firstIdleTime > 0 && (millis() - firstIdleTime) > 3000 && !hitIdleBug) {
-      hitIdleBug = true;
-      DEBUG_WIFIF("[connectWiFiIndex] ⚠ ESP32 IDLE BUG DETECTED - stuck in IDLE for %lums",
-                  millis() - firstIdleTime);
+    // Step 6: Connect
+    DEBUG_WIFIF("[connectWiFiIndex] Calling esp_wifi_connect()...");
+    err = esp_wifi_connect();
+    DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_connect() returned: %d (%s)", err,
+                err == ESP_OK ? "ESP_OK" : "ERROR");
 
-      // NUCLEAR OPTION: Complete WiFi deinit/reinit
-      DEBUG_WIFIF("[connectWiFiIndex] Doing COMPLETE WiFi deinit/reinit...");
+    // CRITICAL: Give the driver MORE time to scan channels and find the AP
+    // The ESP32 needs time to scan for the SSID beacon
+    delay(500);  // Increased from 100ms to 500ms
+    DEBUG_WIFIF("[connectWiFiIndex] WiFi status 500ms after connect(): %s (%d)",
+                wifiStatusToString(WiFi.status()), WiFi.status());
 
-      esp_wifi_disconnect();
-      delay(50);
-      esp_wifi_stop();
-      delay(50);
-      esp_wifi_deinit();  // Complete deinit
-      delay(500);         // Wait for full cleanup
+    unsigned long start = millis();
+    int statusCheckCount = 0;
+    wl_status_t lastStatus = WiFi.status();
+    DEBUG_WIFIF("[connectWiFiIndex] Initial WiFi status after begin(): %s (%d)",
+                wifiStatusToString(lastStatus), lastStatus);
 
-      DEBUG_WIFIF("[connectWiFiIndex] Re-initializing WiFi subsystem...");
-      wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-      err = esp_wifi_init(&cfg);
-      DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_init() returned: %d", err);
+    // Track if we hit the IDLE bug (status STAYS in IDLE for too long)
+    bool hitIdleBug = false;
+    unsigned long firstIdleTime = 0;  // When we first saw IDLE status
 
-      err = esp_wifi_set_mode(WIFI_MODE_STA);
-      DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_mode(STA) returned: %d", err);
-
-      err = esp_wifi_start();
-      DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_start() returned: %d", err);
+    while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
       delay(200);
+      statusCheckCount++;
 
-      // Reconfigure credentials
-      err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-      DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_config() returned: %d", err);
+      wl_status_t currentStatus = WiFi.status();
 
-      // Try connecting again
-      err = esp_wifi_connect();
-      DEBUG_WIFIF("[connectWiFiIndex] Retry esp_wifi_connect() returned: %d", err);
-      delay(500);
+      // Track IDLE status timing
+      if (currentStatus == WL_IDLE_STATUS) {
+        if (firstIdleTime == 0) {
+          firstIdleTime = millis();
+          DEBUG_WIFIF("[connectWiFiIndex] First IDLE status seen at %lums", millis() - start);
+        }
+      } else {
+        // If we leave IDLE, reset the timer (this is normal during scanning)
+        firstIdleTime = 0;
+      }
 
-      // Reset the timer so we get full timeout for the retry
-      start = millis();
-      statusCheckCount = 0;
+      // CRITICAL: Detect ESP32 WiFi IDLE bug
+      // Only trigger if status STAYS in IDLE for 3+ seconds (not just transitions through it)
+      if (currentStatus == WL_IDLE_STATUS && firstIdleTime > 0 && (millis() - firstIdleTime) > 3000 && !hitIdleBug) {
+        hitIdleBug = true;
+        DEBUG_WIFIF("[connectWiFiIndex] ⚠ ESP32 IDLE BUG DETECTED - stuck in IDLE for %lums",
+                    millis() - firstIdleTime);
+
+        // NUCLEAR OPTION: Complete WiFi deinit/reinit
+        DEBUG_WIFIF("[connectWiFiIndex] Doing COMPLETE WiFi deinit/reinit...");
+
+        esp_wifi_disconnect();
+        delay(50);
+        esp_wifi_stop();
+        delay(50);
+        esp_wifi_deinit();  // Complete deinit
+        delay(500);         // Wait for full cleanup
+
+        DEBUG_WIFIF("[connectWiFiIndex] Re-initializing WiFi subsystem...");
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        err = esp_wifi_init(&cfg);
+        DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_init() returned: %d", err);
+
+        err = esp_wifi_set_mode(WIFI_MODE_STA);
+        DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_mode(STA) returned: %d", err);
+
+        err = esp_wifi_start();
+        DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_start() returned: %d", err);
+        delay(200);
+
+        // Reconfigure credentials
+        err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+        DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_config() returned: %d", err);
+
+        // Try connecting again
+        err = esp_wifi_connect();
+        DEBUG_WIFIF("[connectWiFiIndex] Retry esp_wifi_connect() returned: %d", err);
+        delay(500);
+
+        // Reset the timer so we get full timeout for the retry
+        start = millis();
+        statusCheckCount = 0;
+      }
+
+      // Log every 2 seconds OR when status changes
+      if (statusCheckCount % 10 == 0 || currentStatus != lastStatus) {
+        DEBUG_WIFIF("[connectWiFiIndex] Status: %s (%d), elapsed=%lums",
+                    wifiStatusToString(currentStatus), currentStatus, millis() - start);
+        lastStatus = currentStatus;
+      }
+      // Check for user escape input during WiFi connection
+      if (Serial.available()) {
+        while (Serial.available()) Serial.read();  // consume all pending input
+        DEBUG_WIFIF("[connectWiFiIndex] Connection cancelled by user");
+        gWifiUserCancelled = true;  // Set global flag for multi-attempt cancellation
+        broadcastOutput("*** WiFi connection cancelled by user ***");
+        return false;  // connection cancelled
+      }
+      // progress dots omitted from unified output to reduce noise
     }
 
-    // Log every 2 seconds OR when status changes
-    if (statusCheckCount % 10 == 0 || currentStatus != lastStatus) {
-      DEBUG_WIFIF("[connectWiFiIndex] Status: %s (%d), elapsed=%lums",
-                  wifiStatusToString(currentStatus), currentStatus, millis() - start);
-      lastStatus = currentStatus;
+    if (WiFi.status() == WL_CONNECTED) {
+      DEBUG_WIFIF("[connectWiFiIndex] SUCCESS! Connected to '%s', IP=%s",
+                  nw.ssid.c_str(), WiFi.localIP().toString().c_str());
+      // Disable WiFi power save. WIFI_PS_MODEM (default) wakes/sleeps the modem
+      // via periph_module_enable/disable, which acquires periph_spinlock. If I2C
+      // error recovery simultaneously holds I2C_ENTER_CRITICAL on Core 0 waiting
+      // for periph_spinlock, Core 0 spins with interrupts disabled and trips the
+      // interrupt WDT. WIFI_PS_NONE eliminates this contention.
+      esp_wifi_set_ps(WIFI_PS_NONE);
+      BROADCAST_PRINTF("WiFi connected: %s", WiFi.localIP().toString().c_str());
+      notifyWiFiConnected(WiFi.localIP().toString().c_str());
+      gWifiNetworks[index0based].lastConnected = millis();
+      saveWiFiNetworks();
+      return true;
     }
-    // Check for user escape input during WiFi connection
-    if (Serial.available()) {
-      while (Serial.available()) Serial.read();  // consume all pending input
-      DEBUG_WIFIF("[connectWiFiIndex] Connection cancelled by user");
-      gWifiUserCancelled = true;  // Set global flag for multi-attempt cancellation
-      broadcastOutput("*** WiFi connection cancelled by user ***");
-      return false;  // connection cancelled
+
+    wl_status_t finalStatus = WiFi.status();
+    WARN_WIFIF("Connection FAILED after %lums, final status=%s (%d)",
+               millis() - start, wifiStatusToString(finalStatus), finalStatus);
+
+    // Stop the driver from auto-retrying with bad credentials
+    // Check if WiFi is still initialized before calling disconnect
+    wifi_mode_t mode;
+    if (esp_wifi_get_mode(&mode) == ESP_OK) {
+      WiFi.disconnect(true);
+    } else {
+      DEBUG_WIFIF("[connectWiFiIndex] WiFi already deinitialized, skipping disconnect");
     }
-    // progress dots omitted from unified output to reduce noise
+
+    // Additional diagnostics
+    DEBUG_WIFIF("[connectWiFiIndex] WiFi diagnostics: RSSI=%ld, Channel=%ld",
+                (long)WiFi.RSSI(), (long)WiFi.channel());
+
+    // Check WiFi driver state
+    DEBUG_WIFIF("[connectWiFiIndex] WiFi mode at failure: %d", WiFi.getMode());
+    DEBUG_WIFIF("[connectWiFiIndex] WiFi isConnected(): %s", WiFi.isConnected() ? "true" : "false");
+    DEBUG_WIFIF("[connectWiFiIndex] WiFi SSID(): '%s'", WiFi.SSID().c_str());
+
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    DEBUG_WIFIF("[connectWiFiIndex] SUCCESS! Connected to '%s', IP=%s",
-                nw.ssid.c_str(), WiFi.localIP().toString().c_str());
-    // Disable WiFi power save. WIFI_PS_MODEM (default) wakes/sleeps the modem
-    // via periph_module_enable/disable, which acquires periph_spinlock. If I2C
-    // error recovery simultaneously holds I2C_ENTER_CRITICAL on Core 0 waiting
-    // for periph_spinlock, Core 0 spins with interrupts disabled and trips the
-    // interrupt WDT. WIFI_PS_NONE eliminates this contention.
-    esp_wifi_set_ps(WIFI_PS_NONE);
-    BROADCAST_PRINTF("WiFi connected: %s", WiFi.localIP().toString().c_str());
-    notifyWiFiConnected(WiFi.localIP().toString().c_str());
-    gWifiNetworks[index0based].lastConnected = millis();
-    saveWiFiNetworks();
-    return true;
+  // All attempts exhausted - ensure WiFi is left in a usable state
+  // If IDLE bug recovery deinitialized WiFi, reinitialize it so other commands work
+  DEBUG_WIFIF("[connectWiFiIndex] All attempts failed, ensuring WiFi is in usable state");
+  
+  // Check if WiFi is deinitialized and reinit if needed
+  wifi_mode_t mode;
+  if (esp_wifi_get_mode(&mode) != ESP_OK) {
+    DEBUG_WIFIF("[connectWiFiIndex] WiFi was deinitialized, reinitializing...");
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
+    delay(100);
   }
-
-  wl_status_t finalStatus = WiFi.status();
-  WARN_WIFIF("Connection FAILED after %lums, final status=%s (%d)",
-             millis() - start, wifiStatusToString(finalStatus), finalStatus);
-
-  // Additional diagnostics
-  DEBUG_WIFIF("[connectWiFiIndex] WiFi diagnostics: RSSI=%ld, Channel=%ld",
-              (long)WiFi.RSSI(), (long)WiFi.channel());
-
-  // Check WiFi driver state
-  DEBUG_WIFIF("[connectWiFiIndex] WiFi mode at failure: %d", WiFi.getMode());
-  DEBUG_WIFIF("[connectWiFiIndex] WiFi isConnected(): %s", WiFi.isConnected() ? "true" : "false");
-  DEBUG_WIFIF("[connectWiFiIndex] WiFi SSID(): '%s'", WiFi.SSID().c_str());
-
-  // Display failure message with WiFi status
+  
   if (showPriority) {
-    BROADCAST_PRINTF("Failed connecting to '%s' - WiFi status: %d", nw.ssid.c_str(), WiFi.status());
+    BROADCAST_PRINTF("Failed connecting to '%s' after %d attempts - WiFi status: %d", 
+                     nw.ssid.c_str(), kMaxWifiAttempts, WiFi.status());
   } else {
-    broadcastOutput("Connection failed.");
+    broadcastOutput("Connection failed after 3 attempts.");
   }
   return false;
 }
@@ -1233,12 +1281,12 @@ void setupWiFi() {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry wifiSettingsEntries[] = {
-  { "wifiEnabled",        SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "WiFi Enabled", nullptr },
-  { "wifiSSID",           SETTING_STRING, &gSettings.wifiSSID,          0, 0, "", 0, 0, "WiFi SSID", nullptr },
-  { "wifiPassword",       SETTING_STRING, &gSettings.wifiPassword,      0, 0, "", 0, 0, "WiFi Password", nullptr },
-  { "wifiAutoReconnect",  SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr },
-  { "wifiNtpServer",      SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr },
-  { "wifiTzOffsetMinutes",SETTING_INT,    &gSettings.tzOffsetMinutes,   -240, 0, nullptr, -720, 840, "Timezone Offset (min)", nullptr }
+  { "enabled",            SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "WiFi Enabled", nullptr, false, "global", "wifienabled" },
+  { "ssid",               SETTING_STRING, &gSettings.wifiSSID,          0, 0, "", 0, 0, "WiFi SSID", nullptr, false, "global", "wifissid" },
+  { "password",           SETTING_STRING, &gSettings.wifiPassword,      0, 0, "", 0, 0, "WiFi Password", nullptr, true, "global", "wifipassword" },
+  { "autoReconnect",      SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr, false, "global", "wifiautoreconnect" },
+  { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, "global", "ntpserver" },
+  { "tzOffsetMinutes",    SETTING_INT,    &gSettings.tzOffsetMinutes,   -240, 0, nullptr, -720, 840, "Timezone Offset (min)", nullptr, false, "global", "tzoffsetminutes" }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

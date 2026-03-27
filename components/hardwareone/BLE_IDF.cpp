@@ -1,6 +1,6 @@
 #include "BLE_IDF.h"
 
-#if ENABLE_BLUETOOTH
+#if ENABLE_BLUETOOTH && ENABLE_BLE_IDF_EXPERIMENTAL
 
 #include <Arduino.h>
 #include <string.h>

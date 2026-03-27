@@ -4,7 +4,9 @@
 #include <esp_log.h>
 
 #include "System_BuildConfig.h"
+#include "System_Filesystem.h"
 #include "OLED_ConsoleBuffer.h"
+#include "Optional_Bluetooth.h"
 #include "Optional_EvenG2.h"
 #include "System_CLI.h"
 #include "System_Command.h"
@@ -61,6 +63,14 @@ static const uint32_t LOG_FLUSH_INTERVAL_MS = 5000;      // Or every 5 seconds
 
 // Suppressed output during help (summary only)
 static volatile unsigned long gHelpSuppressedCount = 0;
+
+// BLE broadcast output buffer (accumulates messages for periodic send to authenticated BLE clients)
+#if ENABLE_BLUETOOTH
+static String gBLEOutputBuffer;
+static unsigned long gBLELastFlush = 0;
+static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 500;  // Send to BLE every 500ms
+static const size_t BLE_OUTPUT_BUFFER_MAX = 512;            // Max chars to buffer (BLE MTU limited)
+#endif
 
 // G2 glasses output buffer (accumulates messages for periodic display)
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
@@ -134,6 +144,9 @@ void helpSuppressedTailDump() {
 // Initialization
 // ============================================================================
 
+// Forward declaration (definition with I2C helpers below)
+static String buildTimestampPrefix();
+
 // Debug output task - single writer for all debug messages
 static TaskHandle_t gDebugOutputTaskHandle = nullptr;
 
@@ -144,7 +157,8 @@ void debugOutputTask(void* parameter) {
       // Help-mode gating for queued debug messages (allow security/auth)
       if (gCLIState != CLI_NORMAL && !gInHelpRender) {
         if ((msg->flags & DEBUG_MSG_FLAG_ALLOW_IN_HELP) == 0 &&
-            !(strncmp(msg->text, "[SECURITY]", 10) == 0 || strncmp(msg->text, "[AUTH]", 6) == 0)) {
+            !(strncmp(msg->text, "[SECURITY]", 10) == 0 || strncmp(msg->text, "[AUTH]", 6) == 0 ||
+              strncmp(msg->text, "[ERROR]", 7) == 0)) {
           gHelpSuppressedCount++;
           pushHelpSuppressed(msg->text);
           if (gDebugFreeQueue) {
@@ -206,6 +220,13 @@ void debugOutputTask(void* parameter) {
         
         fsUnlock();
       }
+
+      // Ring buffer file for ERROR_* lines (same pattern as i2c_errors / login logs)
+      if (filesystemReady && strncmp(msg->text, "[ERROR]", 7) == 0) {
+        String line = buildTimestampPrefix();
+        line += msg->text;
+        appendLineWithCap(LOG_ERROR_FILE, line, LOG_ERROR_CAP);
+      }
       
       // Append to OLED console buffer (always, independent of OUTPUT_* flags)
       #if ENABLE_OLED_DISPLAY
@@ -214,6 +235,26 @@ void debugOutputTask(void* parameter) {
       }
       #endif
       
+      // BLE broadcast output - buffer messages and flush periodically to authenticated BLE clients
+      #if ENABLE_BLUETOOTH
+      if ((gOutputFlags & OUTPUT_BLE) && isBLEConnected() && bleHasAuthenticatedSession()) {
+        // Append to buffer (with newline)
+        size_t msgLen = strlen(msg->text);
+        if (gBLEOutputBuffer.length() + msgLen + 2 < BLE_OUTPUT_BUFFER_MAX) {
+          gBLEOutputBuffer += msg->text;
+          gBLEOutputBuffer += "\n";
+        }
+        // Flush if buffer full or interval elapsed
+        unsigned long now = millis();
+        if (gBLEOutputBuffer.length() >= BLE_OUTPUT_BUFFER_MAX - 50 ||
+            (now - gBLELastFlush >= BLE_OUTPUT_FLUSH_INTERVAL_MS && gBLEOutputBuffer.length() > 0)) {
+          sendBLEResponse(gBLEOutputBuffer.c_str(), gBLEOutputBuffer.length());
+          gBLEOutputBuffer = "";
+          gBLELastFlush = now;
+        }
+      }
+      #endif
+
       // G2 glasses output - buffer messages and flush periodically
       #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
       if ((gOutputFlags & OUTPUT_G2) && isG2Connected()) {
@@ -400,6 +441,11 @@ void initDebugSystem() {
 
   // NOTE: Do NOT reset gDebugFlags here - applySettings() may have already set them
   // The flags are managed by applySettings() in settings.cpp
+  
+  // Preallocate BLE output buffer to prevent incremental reallocation
+  #if ENABLE_BLUETOOTH
+  gBLEOutputBuffer.reserve(BLE_OUTPUT_BUFFER_MAX);
+  #endif
   
   // Initialize OLED console buffer
   #if ENABLE_OLED_DISPLAY
@@ -803,6 +849,37 @@ const char* cmd_outg2(const String& argsInput) {
   #endif
 }
 
+const char* cmd_outble(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  #if ENABLE_BLUETOOTH
+  String a = argsInput;
+  a.trim();
+  int v = -1;
+  if (a.length()) {
+    v = a.toInt();
+    if (a != "0" && v == 0) v = -1;
+  }
+  if (v < 0) {
+    bool enabled = (gOutputFlags & OUTPUT_BLE) != 0;
+    bool connected = isBLEConnected();
+    bool authed = bleHasAuthenticatedSession();
+    static char buf[160];
+    snprintf(buf, sizeof(buf), "BLE output: %s, BLE connected: %s, authenticated: %s",
+             enabled ? "ON" : "OFF", connected ? "yes" : "no", authed ? "yes" : "no");
+    return buf;
+  }
+  if (v) {
+    gOutputFlags |= OUTPUT_BLE;
+    return "BLE broadcast output enabled (messages will stream to authenticated BLE clients)";
+  } else {
+    gOutputFlags &= ~OUTPUT_BLE;
+    return "BLE broadcast output disabled";
+  }
+  #else
+  return "Bluetooth not compiled (ENABLE_BLUETOOTH=0)";
+  #endif
+}
+
 const char* cmd_debughttp(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
@@ -1185,6 +1262,105 @@ const char* cmd_debugespnow(const String& argsInput) {
     else clearDebugFlag(DEBUG_ESPNOW_CORE);
     return gSettings.debugEspNow ? "debugEspNow enabled (persistent)" : "debugEspNow disabled (persistent)";
   }
+}
+
+static void syncBluetoothParentFlag() {
+  const uint64_t runtime = getDebugFlags();
+  const bool runtimeChild = (runtime & (DEBUG_BLUETOOTH_CORE | DEBUG_BLUETOOTH_GATT | DEBUG_BLUETOOTH_DATA)) != 0;
+  const bool any = gSettings.debugBluetooth ||
+                   gSettings.debugBluetoothCore ||
+                   gSettings.debugBluetoothGatt ||
+                   gSettings.debugBluetoothData ||
+                   runtimeChild;
+  updateParentDebugFlag(DEBUG_BLUETOOTH, any);
+}
+
+const char* cmd_debugbluetooth(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (v != 0 && v != 1) return "Usage: debugbluetooth <0|1> [temp|runtime]";
+  if (!modeTemp) setSetting(gSettings.debugBluetooth, (bool)(v == 1));
+  if (v) setDebugFlag(DEBUG_BLUETOOTH);
+  else clearDebugFlag(DEBUG_BLUETOOTH);
+  syncBluetoothParentFlag();
+  if (modeTemp) return v ? "debugBluetooth enabled (runtime only)" : "debugBluetooth disabled (runtime only)";
+  return gSettings.debugBluetooth ? "debugBluetooth enabled (persistent)" : "debugBluetooth disabled (persistent)";
+}
+
+const char* cmd_debugbluetoothcore(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (v != 0 && v != 1) return "Usage: debugbluetoothcore <0|1> [temp|runtime]";
+  if (!modeTemp) setSetting(gSettings.debugBluetoothCore, (bool)(v == 1));
+  if (v) setDebugFlag(DEBUG_BLUETOOTH_CORE);
+  else clearDebugFlag(DEBUG_BLUETOOTH_CORE);
+  syncBluetoothParentFlag();
+  if (modeTemp) return v ? "debugBluetoothCore enabled (runtime only)" : "debugBluetoothCore disabled (runtime only)";
+  return gSettings.debugBluetoothCore ? "debugBluetoothCore enabled (persistent)" : "debugBluetoothCore disabled (persistent)";
+}
+
+const char* cmd_debugbluetoothgatt(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (v != 0 && v != 1) return "Usage: debugbluetoothgatt <0|1> [temp|runtime]";
+  if (!modeTemp) setSetting(gSettings.debugBluetoothGatt, (bool)(v == 1));
+  if (v) setDebugFlag(DEBUG_BLUETOOTH_GATT);
+  else clearDebugFlag(DEBUG_BLUETOOTH_GATT);
+  syncBluetoothParentFlag();
+  if (modeTemp) return v ? "debugBluetoothGatt enabled (runtime only)" : "debugBluetoothGatt disabled (runtime only)";
+  return gSettings.debugBluetoothGatt ? "debugBluetoothGatt enabled (persistent)" : "debugBluetoothGatt disabled (persistent)";
+}
+
+const char* cmd_debugbluetoothdata(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (v != 0 && v != 1) return "Usage: debugbluetoothdata <0|1> [temp|runtime]";
+  if (!modeTemp) setSetting(gSettings.debugBluetoothData, (bool)(v == 1));
+  if (v) setDebugFlag(DEBUG_BLUETOOTH_DATA);
+  else clearDebugFlag(DEBUG_BLUETOOTH_DATA);
+  syncBluetoothParentFlag();
+  if (modeTemp) return v ? "debugBluetoothData enabled (runtime only)" : "debugBluetoothData disabled (runtime only)";
+  return gSettings.debugBluetoothData ? "debugBluetoothData enabled (persistent)" : "debugBluetoothData disabled (persistent)";
 }
 
 const char* cmd_debugdatetime(const String& argsInput) {
@@ -3019,6 +3195,10 @@ const CommandEntry debugCommands[] = {
   { "debugauth", "Debug authentication (parent flag).", true, cmd_debugauth, "Usage: debugauth <0|1>" },
   { "debugsensors", "Debug sensors (parent flag).", true, cmd_debugsensors, "Usage: debugsensors <0|1>" },
   { "debugespnow", "Debug ESP-NOW (parent flag).", true, cmd_debugespnow, "Usage: debugespnow <0|1>" },
+  { "debugbluetooth", "Debug Bluetooth (parent flag).", true, cmd_debugbluetooth, "Usage: debugbluetooth <0|1> [temp|runtime]" },
+  { "debugbluetoothcore", "Debug Bluetooth core lifecycle.", true, cmd_debugbluetoothcore, "Usage: debugbluetoothcore <0|1> [temp|runtime]" },
+  { "debugbluetoothgatt", "Debug Bluetooth GATT operations.", true, cmd_debugbluetoothgatt, "Usage: debugbluetoothgatt <0|1> [temp|runtime]" },
+  { "debugbluetoothdata", "Debug Bluetooth command/data path.", true, cmd_debugbluetoothdata, "Usage: debugbluetoothdata <0|1> [temp|runtime]" },
   { "debugsensorsgeneral", "Debug general sensor operations.", true, cmd_debugsensorsgeneral },
   { "debugcamera", "Debug camera operations.", true, cmd_debugcamera },
   { "debugmicrophone", "Debug microphone operations.", true, cmd_debugmicrophone },
@@ -3110,6 +3290,7 @@ const CommandEntry debugCommands[] = {
   { "outg2", "Enable/disable G2 glasses output.", false, cmd_outg2, "Usage: outg2 <0|1> - streams CLI output to G2 glasses" },
   { "debugg2", "Debug G2 smart glasses BLE operations.", true, cmd_debugg2, "Usage: debugg2 <0|1>" },
 #endif
+  { "outble", "Enable/disable BLE broadcast output.", false, cmd_outble, "Usage: outble <0|1> - streams broadcast output to authenticated BLE clients" },
   { "debugfmradio", "Debug FM Radio operations.", true, cmd_debugfmradio, "Usage: debugfmradio <0|1>" },
   { "memorysampleintervalsec", "Set memory sampling interval in seconds (0=disabled).", true, cmd_memorysampleintervalsec, "Usage: memorysampleintervalsec <0-300>" },
   { "loglevel", "Set log level (error|warn|info|debug).", true, cmd_loglevel },
@@ -3198,6 +3379,7 @@ bool gTimeSyncedMarkerWritten = false;
 const char* LOG_OK_FILE = "/system/sys_logs/successful_login.log";              // ~680KB cap
 const char* LOG_FAIL_FILE = "/system/sys_logs/failed_login.log";                // ~680KB cap
 const char* LOG_I2C_FILE = "/system/sys_logs/i2c_errors.log";                   // 64KB cap
+const char* LOG_ERROR_FILE = "/system/sys_logs/errors.log";                      // LOG_ERROR_CAP
 
 void logToFile(const char* path, const String& line, size_t capBytes) {
   appendLineWithCap(path, line, capBytes);
@@ -3231,6 +3413,7 @@ void logTimeSyncedMarkerIfReady() {
   appendLineWithCap(LOG_OK_FILE, line, LOG_CAP_BYTES);
   appendLineWithCap(LOG_FAIL_FILE, line, LOG_CAP_BYTES);
   appendLineWithCap(LOG_I2C_FILE, line, LOG_I2C_CAP);
+  appendLineWithCap(LOG_ERROR_FILE, line, LOG_ERROR_CAP);
   
   gTimeSyncedMarkerWritten = true;
 

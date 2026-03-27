@@ -3,7 +3,11 @@
 
 #include "System_BuildConfig.h"
 
-#if ENABLE_BLUETOOTH
+#ifndef ENABLE_BLE_IDF_EXPERIMENTAL
+#define ENABLE_BLE_IDF_EXPERIMENTAL 0
+#endif
+
+#if ENABLE_BLUETOOTH && ENABLE_BLE_IDF_EXPERIMENTAL
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -117,7 +121,7 @@ bool bleIdfGetConnectionInfo(int index, BLEConnection* outInfo);
 // Session management
 void bleIdfSessionTick();
 
-#else // !ENABLE_BLUETOOTH
+#else // !ENABLE_BLUETOOTH || !ENABLE_BLE_IDF_EXPERIMENTAL
 
 #include <cstdint>
 #include <cstddef>

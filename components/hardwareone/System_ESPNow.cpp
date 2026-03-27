@@ -556,7 +556,9 @@ bool saveMeshPeers() {
         }
       }
     }
-    String encMac = encryptString(macToHexString(gMeshPeers[i].mac));
+    char rawMacBuf[18];
+    formatMacAddressBuf(gMeshPeers[i].mac, rawMacBuf, sizeof(rawMacBuf));
+    String encMac = encryptString(String(rawMacBuf));
     if (encMac.length() == 0) {
       ERROR_ESPNOWF("[MESH] Failed to encrypt peer MAC, skipping entry");
       skipped++;
@@ -603,7 +605,9 @@ static bool saveEspNowDevices() {
   for (int i = 0; i < gEspNow->deviceCount; i++) {
     if (isSelfMac(gEspNow->devices[i].mac)) continue;
     // Encrypt MAC address at rest (device-bound AES)
-    String encMac = encryptString(formatMacAddress(gEspNow->devices[i].mac));
+    char rawDevMacBuf[18];
+    formatMacAddressBuf(gEspNow->devices[i].mac, rawDevMacBuf, sizeof(rawDevMacBuf));
+    String encMac = encryptString(String(rawDevMacBuf));
     if (encMac.length() == 0) {
       ERROR_ESPNOWF("[ESPNOW] Failed to encrypt device MAC for '%s', skipping entry", gEspNow->devices[i].name.c_str());
       skipped++;
@@ -725,7 +729,8 @@ static void loadMeshPeers() {
     // Create peer entry with zero health metrics (will rebuild from heartbeats)
     MeshPeerHealth* peer = getMeshPeerHealth(mac, true);
     if (peer) {
-      peer->lastHeartbeatMs = 0;  // Will update on first heartbeat
+      peer->lastMeshHeartbeatMs = 0;
+      peer->lastRxActivityMs = 0;
       peer->lastAckMs = 0;
       peer->heartbeatCount = 0;
       peer->ackCount = 0;
@@ -1857,7 +1862,7 @@ bool v3_broadcast_text(const char* text, uint16_t textLen) {
 static TopologyStream* findTopoStream(const uint8_t* senderMac, uint32_t reqId);
 static TopologyStream* findOrCreateTopoStream(const uint8_t* senderMac, uint32_t reqId);
 static void            addTopoDeviceName(const uint8_t* mac, const char* name);
-static String          getTopoDeviceName(const uint8_t* mac);
+static bool            getTopoDeviceName(const uint8_t* mac, char* outBuf, size_t outLen);
 static void            finalizeTopologyStream(TopologyStream* stream);
 static void            updateUnpairedDevice(const uint8_t* mac, const String& name, int rssi);
 #if ENABLE_BONDED_MODE
@@ -2058,11 +2063,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
            srcMac, (unsigned long)h->msgId, h->fragIndex, h->fragCount);
     
     // Update peer health ACK tracking
-    MeshPeerHealth* peer = getMeshPeerHealth(recv_info->src_addr, true);
-    if (peer) {
-      peer->lastAckMs = millis();
-      peer->ackCount++;
-    }
+    noteMeshPeerRxActivity(recv_info->src_addr, EspNowMeshRxKind::Ack);
     
     // Check broadcast tracker
     broadcast_tracker_record_ack(h->msgId, recv_info->src_addr);
@@ -2192,6 +2193,9 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
         gEspNow->textQueueHead = nextHead;
         DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message enqueued slot=%d (encrypted=%s)",
                head, slot.encrypted ? "YES" : "NO");
+        if (isPaired && meshEnabled()) {
+          noteMeshPeerRxActivity(recv_info->src_addr, EspNowMeshRxKind::RxActivity);
+        }
       } else {
         DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT queue full, message dropped");
       }
@@ -2325,12 +2329,28 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
       for (int i = 0; i < gMeshPeerSlots; i++) {
         if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) {
           bool isLast = (peerIndex == peerCount - 1);
-          String peerName = getEspNowDeviceName(gMeshPeers[i].mac);
+          const char* peerNamePtr = nullptr;
+          char peerNameBuf[48];
+          if (gMeshPeerMeta) {
+            for (int _pni = 0; _pni < gMeshPeerSlots; _pni++) {
+              if (gMeshPeerMeta[_pni].isActive && memcmp(gMeshPeerMeta[_pni].mac, gMeshPeers[i].mac, 6) == 0 && gMeshPeerMeta[_pni].name[0]) {
+                peerNamePtr = gMeshPeerMeta[_pni].name; break;
+              }
+            }
+          }
+          if (!peerNamePtr && gEspNow) {
+            for (int _pni = 0; _pni < gEspNow->deviceCount; _pni++) {
+              if (memcmp(gEspNow->devices[_pni].mac, gMeshPeers[i].mac, 6) == 0 && gEspNow->devices[_pni].name.length()) {
+                strlcpy(peerNameBuf, gEspNow->devices[_pni].name.c_str(), sizeof(peerNameBuf));
+                peerNamePtr = peerNameBuf; break;
+              }
+            }
+          }
           MeshPeerHealth* ph = getMeshPeerHealth(gMeshPeers[i].mac, false);
           int8_t rssi = ph ? ph->rssi : 0;
           v3_send_topo_peer(recv_info->src_addr, tr->reqId, (uint8_t)peerIndex,
                             isLast, gMeshPeers[i].mac, rssi,
-                            false, peerName.length() > 0 ? peerName.c_str() : "Unknown");
+                            false, peerNamePtr ? peerNamePtr : "Unknown");
           peerIndex++;
         }
       }
@@ -2371,24 +2391,34 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
         if (stream && stream->active) {
           // Initialize stream if newly created
           if (stream->receivedPeers == 0 && stream->totalPeers == 0) {
-            String senderName = String(deviceName);
-            if (senderName.length() == 0) {
-              senderName = getEspNowDeviceName(recv_info->src_addr);
+            const char* senderNamePtr = (deviceName && deviceName[0]) ? deviceName : nullptr;
+            char senderNameFallBuf[48];
+            if (!senderNamePtr && gMeshPeerMeta) {
+              for (int _sni = 0; _sni < gMeshPeerSlots; _sni++) {
+                if (gMeshPeerMeta[_sni].isActive && memcmp(gMeshPeerMeta[_sni].mac, recv_info->src_addr, 6) == 0 && gMeshPeerMeta[_sni].name[0]) {
+                  senderNamePtr = gMeshPeerMeta[_sni].name; break;
+                }
+              }
             }
-            if (senderName.length() == 0) {
-              char macBuf[18];
-              formatMacAddressBuf(recv_info->src_addr, macBuf, sizeof(macBuf));
-              senderName = macBuf;
+            if (!senderNamePtr && gEspNow) {
+              for (int _sni = 0; _sni < gEspNow->deviceCount; _sni++) {
+                if (memcmp(gEspNow->devices[_sni].mac, recv_info->src_addr, 6) == 0 && gEspNow->devices[_sni].name.length()) {
+                  strlcpy(senderNameFallBuf, gEspNow->devices[_sni].name.c_str(), sizeof(senderNameFallBuf));
+                  senderNamePtr = senderNameFallBuf; break;
+                }
+              }
             }
-            strncpy(stream->senderName, senderName.c_str(), 31);
+            if (!senderNamePtr) {
+              formatMacAddressBuf(recv_info->src_addr, senderNameFallBuf, sizeof(senderNameFallBuf));
+              senderNamePtr = senderNameFallBuf;
+            }
+            strncpy(stream->senderName, senderNamePtr, 31);
             stream->senderName[31] = '\0';
             stream->totalPeers = ts->peerCount;
             stream->accumulatedData = "";
             
             // Cache device name for topology display
-            if (senderName.length() > 0) {
-              addTopoDeviceName(recv_info->src_addr, senderName.c_str());
-            }
+            addTopoDeviceName(recv_info->src_addr, senderNamePtr);
             
             DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] Stream initialized for %s: expecting %d peers",
                    stream->senderName, ts->peerCount);
@@ -2443,22 +2473,38 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
             DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Duplicate peer %s, skipping", peerMacStr);
           } else {
             // Get peer name
-            String peerName = String(tp->name);
-            if (peerName.length() == 0 || peerName == "Unknown") {
-              peerName = getTopoDeviceName(tp->mac);
-              if (peerName.length() == 0) peerName = getEspNowDeviceName(tp->mac);
-              if (peerName.length() == 0) peerName = "Unknown";
+            const char* peerNamePtr2 = (tp->name[0] && strcmp(tp->name, "Unknown") != 0) ? tp->name : nullptr;
+            char peerNameFallBuf[48];
+            if (!peerNamePtr2) {
+              if (getTopoDeviceName(tp->mac, peerNameFallBuf, sizeof(peerNameFallBuf)) && peerNameFallBuf[0]) {
+                peerNamePtr2 = peerNameFallBuf;
+              }
+            }
+            if (!peerNamePtr2 && gMeshPeerMeta) {
+              for (int _tni = 0; _tni < gMeshPeerSlots; _tni++) {
+                if (gMeshPeerMeta[_tni].isActive && memcmp(gMeshPeerMeta[_tni].mac, tp->mac, 6) == 0 && gMeshPeerMeta[_tni].name[0]) {
+                  peerNamePtr2 = gMeshPeerMeta[_tni].name; break;
+                }
+              }
+            }
+            if (!peerNamePtr2 && gEspNow) {
+              for (int _tni = 0; _tni < gEspNow->deviceCount; _tni++) {
+                if (memcmp(gEspNow->devices[_tni].mac, tp->mac, 6) == 0 && gEspNow->devices[_tni].name.length()) {
+                  strlcpy(peerNameFallBuf, gEspNow->devices[_tni].name.c_str(), sizeof(peerNameFallBuf));
+                  peerNamePtr2 = peerNameFallBuf; break;
+                }
+              }
             }
             
             // Cache peer name
-            if (peerName != "Unknown") {
-              addTopoDeviceName(tp->mac, peerName.c_str());
+            if (peerNamePtr2) {
+              addTopoDeviceName(tp->mac, peerNamePtr2);
             }
             
             // Accumulate peer info (same format as JSON handler)
             char peerInfoBuf[128];
             snprintf(peerInfoBuf, sizeof(peerInfoBuf), "  \xe2\x86\x92 %s (%s)\n    RSSI: %d dBm\n",
-                     peerName.c_str(), peerMacStr, (int)tp->rssi);
+                     peerNamePtr2 ? peerNamePtr2 : "Unknown", peerMacStr, (int)tp->rssi);
             stream->accumulatedData += peerInfoBuf;
             stream->receivedPeers++;
             
@@ -2466,7 +2512,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
             gTopoLastResponseTime = millis();
             
             DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Accumulated peer %d/%d: %s",
-                   stream->receivedPeers, stream->totalPeers, peerName.c_str());
+                   stream->receivedPeers, stream->totalPeers, peerNamePtr2 ? peerNamePtr2 : "Unknown");
           }
         } else {
           DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] No active stream for this sender");
@@ -2738,13 +2784,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   if (h->type == ESPNOW_V3_TYPE_HEARTBEAT) {
     if (payloadLen >= sizeof(V3PayloadHeartbeat)) {
       const V3PayloadHeartbeat* hb = (const V3PayloadHeartbeat*)payload;
-      MeshPeerHealth* peer = getMeshPeerHealth(recv_info->src_addr, true);
-      if (peer) {
-        peer->lastHeartbeatMs = millis();
-        peer->heartbeatCount++;
-        peer->rssi = hb->rssi;
-        peer->isActive = true;
-      }
+      noteMeshPeerRxActivity(recv_info->src_addr, EspNowMeshRxKind::MeshHeartbeat, hb->rssi);
       if (gEspNow) gEspNow->heartbeatsReceived++;
 
       // Backup master failover: track heartbeats from the configured master MAC
@@ -5031,15 +5071,16 @@ static void addTopoDeviceName(const uint8_t* mac, const char* name) {
 }
 
 // Helper: Get device name from topology cache
-static String getTopoDeviceName(const uint8_t* mac) {
-  if (!mac) return "";
-  
+static bool getTopoDeviceName(const uint8_t* mac, char* outBuf, size_t outLen) {
+  if (!mac || !outBuf || outLen == 0) return false;
+  outBuf[0] = '\0';
   for (int i = 0; i < MAX_TOPO_DEVICE_CACHE; i++) {
     if (gTopoDeviceCache[i].active && memcmp(gTopoDeviceCache[i].mac, mac, 6) == 0) {
-      return String(gTopoDeviceCache[i].name);
+      strlcpy(outBuf, gTopoDeviceCache[i].name, outLen);
+      return true;
     }
   }
-  return "";
+  return false;
 }
 
 // Helper: Buffer a PEER message for later processing
@@ -5500,11 +5541,48 @@ MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing) {
   return nullptr;
 }
 
-// Check if a mesh peer is considered alive (heartbeat within timeout window)
+void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi) {
+  if (!mac || !gMeshPeers) return;
+  MeshPeerHealth* peer = getMeshPeerHealth(mac, true);
+  if (!peer) return;
+  const uint32_t t = millis();
+  switch (kind) {
+    case EspNowMeshRxKind::MeshHeartbeat:
+      peer->lastMeshHeartbeatMs = t;
+      peer->lastRxActivityMs = t;
+      peer->heartbeatCount++;
+      if (hbRssi != (int8_t)-128) peer->rssi = hbRssi;
+      break;
+    case EspNowMeshRxKind::Ack:
+      peer->lastAckMs = t;
+      peer->lastRxActivityMs = t;
+      peer->ackCount++;
+      break;
+    case EspNowMeshRxKind::RxActivity:
+      peer->lastRxActivityMs = t;
+      break;
+    case EspNowMeshRxKind::BootstrapLiveness:
+      peer->lastMeshHeartbeatMs = t;
+      peer->lastRxActivityMs = t;
+      break;
+    default:
+      break;
+  }
+  peer->isActive = true;
+}
+
+// Check if a mesh peer is considered alive (mesh V3 HEARTBEAT within timeout window)
 bool isMeshPeerAlive(const MeshPeerHealth* peer) {
   if (!peer || !peer->isActive) return false;
-  if (peer->lastHeartbeatMs == 0) return false;
-  return (millis() - peer->lastHeartbeatMs) < MESH_PEER_TIMEOUT_MS;
+  if (peer->lastMeshHeartbeatMs == 0) return false;
+  return (millis() - peer->lastMeshHeartbeatMs) < MESH_PEER_TIMEOUT_MS;
+}
+
+// Recent contact via any tracked RX (TEXT, ACK, HEARTBEAT, bootstrap)
+bool isMeshPeerRecentlyActive(const MeshPeerHealth* peer) {
+  if (!peer || !peer->isActive) return false;
+  if (peer->lastRxActivityMs == 0) return false;
+  return (millis() - peer->lastRxActivityMs) < MESH_PEER_TIMEOUT_MS;
 }
 
 // Get device display name for a MAC (from runtime meta, then paired registry)
@@ -5524,6 +5602,98 @@ String getEspNowDeviceName(const uint8_t* mac) {
     }
   }
   return "";
+}
+
+static void fillMeshStatusPeerJsonObject(JsonObject peer, uint32_t now, const uint8_t* mac,
+                                        const char* nameOpt, MeshPeerHealth* ph) {
+  // Zero-allocation MAC formatting directly into stack buffer
+  char macBuf[18];
+  snprintf(macBuf, sizeof(macBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  peer["mac"] = macBuf;
+  // Zero-allocation name lookup: check meta then paired registry, no String heap alloc
+  const char* resolvedName = (nameOpt && nameOpt[0]) ? nameOpt : nullptr;
+  char nameBuf[48] = "Unknown";
+  if (!resolvedName && gMeshPeerMeta) {
+    for (int _ni = 0; _ni < gMeshPeerSlots; _ni++) {
+      if (gMeshPeerMeta[_ni].isActive && memcmp(gMeshPeerMeta[_ni].mac, mac, 6) == 0 && gMeshPeerMeta[_ni].name[0]) {
+        resolvedName = gMeshPeerMeta[_ni].name;
+        break;
+      }
+    }
+  }
+  if (!resolvedName && gEspNow) {
+    for (int _ni = 0; _ni < gEspNow->deviceCount; _ni++) {
+      if (memcmp(gEspNow->devices[_ni].mac, mac, 6) == 0 && gEspNow->devices[_ni].name.length()) {
+        strlcpy(nameBuf, gEspNow->devices[_ni].name.c_str(), sizeof(nameBuf));
+        resolvedName = nameBuf;
+        break;
+      }
+    }
+  }
+  peer["name"] = resolvedName ? resolvedName : "Unknown";
+  if (ph) {
+    uint32_t elHb = now - ph->lastMeshHeartbeatMs;
+    if (elHb > 0x80000000UL) elHb = 0;
+    uint32_t elAct = 0;
+    if (ph->lastRxActivityMs) {
+      elAct = now - ph->lastRxActivityMs;
+      if (elAct > 0x80000000UL) elAct = 0;
+    }
+    peer["alive"] = isMeshPeerAlive(ph);
+    peer["activityAlive"] = isMeshPeerRecentlyActive(ph);
+    peer["lastHeartbeat"] = ph->lastMeshHeartbeatMs;
+    peer["lastRxActivity"] = ph->lastRxActivityMs;
+    peer["lastAck"] = ph->lastAckMs;
+    peer["heartbeatCount"] = ph->heartbeatCount;
+    peer["ackCount"] = ph->ackCount;
+    peer["secondsSinceHeartbeat"] = elHb / 1000;
+    peer["secondsSinceActivity"] = ph->lastRxActivityMs ? (elAct / 1000) : 0;
+  } else {
+    peer["alive"] = false;
+    peer["activityAlive"] = false;
+    peer["lastHeartbeat"] = 0;
+    peer["lastRxActivity"] = 0;
+    peer["lastAck"] = 0;
+    peer["heartbeatCount"] = 0;
+    peer["ackCount"] = 0;
+    peer["secondsSinceHeartbeat"] = 0;
+    peer["secondsSinceActivity"] = 0;
+  }
+}
+
+void buildMeshStatusPeersJson(JsonArray peers, uint32_t nowMillis, int* outTotalPeers) {
+  int n = 0;
+  if (!gEspNow || !gMeshPeers) {
+    if (outTotalPeers) *outTotalPeers = 0;
+    return;
+  }
+  const uint32_t now = nowMillis;
+  for (int i = 0; i < gMeshPeerSlots; i++) {
+    if (!gMeshPeers[i].isActive || isSelfMac(gMeshPeers[i].mac)) continue;
+    JsonObject peer = peers.add<JsonObject>();
+    fillMeshStatusPeerJsonObject(peer, now, gMeshPeers[i].mac, nullptr, &gMeshPeers[i]);
+    n++;
+  }
+  for (int di = 0; di < gEspNow->deviceCount; di++) {
+    const uint8_t* dmac = gEspNow->devices[di].mac;
+    if (isSelfMac(dmac)) continue;
+    bool inMeshSlots = false;
+    for (int j = 0; j < gMeshPeerSlots; j++) {
+      if (gMeshPeers[j].isActive && !isSelfMac(gMeshPeers[j].mac) &&
+          memcmp(gMeshPeers[j].mac, dmac, 6) == 0) {
+        inMeshSlots = true;
+        break;
+      }
+    }
+    if (inMeshSlots) continue;
+    MeshPeerHealth* ph = getMeshPeerHealth(dmac, false);
+    JsonObject peer = peers.add<JsonObject>();
+    const char* dn = gEspNow->devices[di].name.length() ? gEspNow->devices[di].name.c_str() : nullptr;
+    fillMeshStatusPeerJsonObject(peer, now, dmac, dn, ph);
+    n++;
+  }
+  if (outTotalPeers) *outTotalPeers = n;
 }
 
 // Set mesh role at runtime with logging. Does not persist — reboot restores saved role.
@@ -5638,21 +5808,30 @@ void processMeshHeartbeats() {
 
   if (!gEspNow || !gEspNow->initialized || gMeshActivitySuspended) return;
 
-  // 2. Send periodic V3 mesh heartbeat (only if we have active peers)
+  // 2. Send periodic V3 mesh heartbeat (if we have active peers OR paired devices)
   static const uint32_t HB_INTERVAL_MS = 5000;
   uint32_t now = (uint32_t)millis();
   if (now - gLastHeartbeatSentMs >= HB_INTERVAL_MS) {
     gLastHeartbeatSentMs = now;
-    // Count active peers first — skip heartbeat entirely if nobody to send to
+    // Count active runtime peers
     uint8_t activePeerCount = 0;
     for (int i = 0; i < gMeshPeerSlots; i++) {
       if (gMeshPeers && gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac))
         activePeerCount++;
     }
-    if (activePeerCount > 0) {
+    // Also count paired devices from registry (bootstrap case: after reboot, gMeshPeers is empty)
+    uint8_t pairedDeviceCount = 0;
+    if (gEspNow && gEspNow->deviceCount > 0) {
+      for (int i = 0; i < gEspNow->deviceCount; i++) {
+        if (!isSelfMac(gEspNow->devices[i].mac))
+          pairedDeviceCount++;
+      }
+    }
+    // Send heartbeat if we have either active peers OR paired devices
+    if (activePeerCount > 0 || pairedDeviceCount > 0) {
       V3PayloadHeartbeat hb = {};
       hb.role = gSettings.meshRole;
-      hb.peerCount = activePeerCount;
+      hb.peerCount = activePeerCount > 0 ? activePeerCount : pairedDeviceCount;
       wifi_ap_record_t ap = {};
       hb.rssi      = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
       hb.uptimeSec = now / 1000;
@@ -6901,8 +7080,7 @@ const char* cmd_espnow_pair(const String& argsInput) {
   // heartbeat tick (without this, two freshly-paired devices never exchange
   // heartbeats until one reboots, so mesh topology stays empty)
   if (meshEnabled()) {
-    MeshPeerHealth* ph = getMeshPeerHealth(mac, true);
-    if (ph) ph->lastHeartbeatMs = millis();
+    noteMeshPeerRxActivity(mac, EspNowMeshRxKind::BootstrapLiveness);
     V3PayloadHeartbeat hb = {};
     hb.role = gSettings.meshRole;
     hb.uptimeSec = (uint32_t)(millis() / 1000);
@@ -7022,12 +7200,12 @@ const char* cmd_espnow_meshmetrics(const String& argsInput) {
 // ESP-NOW mode command
 const char* cmd_espnow_mode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  if (args.length() == 0) {
+  if (argsInput.length() == 0 || argsInput == " ") {
     snprintf(getDebugBuffer(), 1024, "ESP-NOW mode: %s", getEspNowModeString());
     return getDebugBuffer();
   }
+  String args = argsInput;
+  args.trim();
   args.toLowerCase();
   if (args == "direct") {
     setSetting(gSettings.espnowmesh, false);
@@ -7116,7 +7294,7 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
     return getDebugBuffer();
   }
   if (trimmed == "clear") {
-    field = "";
+    setSetting(field, String(""));  // Persist to flash
     gMetadataChanged = true;  // Mark metadata as dirty
     snprintf(getDebugBuffer(), 1024, "%s cleared", fieldName);
     return getDebugBuffer();
@@ -7129,7 +7307,7 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
     snprintf(getDebugBuffer(), 1024, "Error: %s too long (max %zu chars)", fieldName, maxLen);
     return getDebugBuffer();
   }
-  field = trimmed;
+  setSetting(field, trimmed);  // Persist to flash
   gMetadataChanged = true;  // Mark metadata as dirty
   snprintf(getDebugBuffer(), 1024, "%s set to: %s", fieldName, field.c_str());
   return getDebugBuffer();
@@ -7218,7 +7396,12 @@ const char* cmd_espnow_devices(const String& argsInput) {
     // Determine online status from MeshPeerHealth
     MeshPeerHealth* health = getMeshPeerHealth(gMeshPeerMeta[i].mac, false);
     bool alive = health ? isMeshPeerAlive(health) : false;
-    uint32_t ageSec = health ? ((millis() - health->lastHeartbeatMs) / 1000) : 0;
+    uint32_t lastContact = 0;
+    if (health) {
+      lastContact = health->lastMeshHeartbeatMs;
+      if (health->lastRxActivityMs > lastContact) lastContact = health->lastRxActivityMs;
+    }
+    uint32_t ageSec = lastContact ? ((millis() - lastContact) / 1000) : 0;
 
     const char* displayName = gMeshPeerMeta[i].friendlyName[0]
       ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
@@ -7367,15 +7550,18 @@ const char* cmd_espnow_roomcmd(const String& argsInput) {
     String room = gMeshPeerMeta[i].room;
     if (!room.equalsIgnoreCase(targetRoom)) continue;
 
-    // Call cmd_espnow_remote with: <mac> <user> <pass> <cmd>
-    String mac = macToHexString(gMeshPeerMeta[i].mac);
-    String remoteArgs = mac + " " + user + " " + pass + " " + command;
-    cmd_espnow_remote(remoteArgs);
+    // Send remote command directly — no String concat, no re-parse
+    char macStrBuf[18];
+    formatMacAddressBuf(gMeshPeerMeta[i].mac, macStrBuf, sizeof(macStrBuf));
+    char roomCmdPayload[ESPNOW_V3_MAX_PAYLOAD];
+    snprintf(roomCmdPayload, sizeof(roomCmdPayload), "%s:%s:%s", user.c_str(), pass.c_str(), command.c_str());
+    v3_send_frame(gMeshPeerMeta[i].mac, ESPNOW_V3_TYPE_CMD, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(),
+                  (const uint8_t*)roomCmdPayload, (uint16_t)strlen(roomCmdPayload), 1);
     sent++;
 
     const char* displayName = gMeshPeerMeta[i].friendlyName[0]
       ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
-    pos += snprintf(buf + pos, 1024 - pos, "  -> %s (%s)\n", displayName, mac.c_str());
+    pos += snprintf(buf + pos, 1024 - pos, "  -> %s (%s)\n", displayName, macStrBuf);
     if (pos >= 900) break;
   }
 
@@ -7432,14 +7618,18 @@ const char* cmd_espnow_tagcmd(const String& argsInput) {
     }
     if (!match) continue;
 
-    String mac = macToHexString(gMeshPeerMeta[i].mac);
-    String remoteArgs = mac + " " + user + " " + pass + " " + command;
-    cmd_espnow_remote(remoteArgs);
+    // Send remote command directly — no String concat, no re-parse
+    char tagMacStrBuf[18];
+    formatMacAddressBuf(gMeshPeerMeta[i].mac, tagMacStrBuf, sizeof(tagMacStrBuf));
+    char tagCmdPayload[ESPNOW_V3_MAX_PAYLOAD];
+    snprintf(tagCmdPayload, sizeof(tagCmdPayload), "%s:%s:%s", user.c_str(), pass.c_str(), command.c_str());
+    v3_send_frame(gMeshPeerMeta[i].mac, ESPNOW_V3_TYPE_CMD, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(),
+                  (const uint8_t*)tagCmdPayload, (uint16_t)strlen(tagCmdPayload), 1);
     sent++;
 
     const char* displayName = gMeshPeerMeta[i].friendlyName[0]
       ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
-    pos += snprintf(buf + pos, 1024 - pos, "  -> %s (%s)\n", displayName, mac.c_str());
+    pos += snprintf(buf + pos, 1024 - pos, "  -> %s (%s)\n", displayName, tagMacStrBuf);
     if (pos >= 900) break;
   }
 
@@ -8038,7 +8228,9 @@ const char* cmd_espnow_list(const String& argsInput) {
   for (int i = 0; i < gEspNow->deviceCount; i++) {
     if (isSelfMac(gEspNow->devices[i].mac)) continue;  // Don't list self
     JsonObject d = devices.add<JsonObject>();
-    d["mac"]       = formatMacAddress(gEspNow->devices[i].mac);
+    char listMacBuf[18];
+    formatMacAddressBuf(gEspNow->devices[i].mac, listMacBuf, sizeof(listMacBuf));
+    d["mac"]       = listMacBuf;
     d["name"]      = gEspNow->devices[i].name;
     d["encrypted"] = gEspNow->devices[i].encrypted;
     listedCount++;
@@ -8072,31 +8264,9 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
   // Use PSRAM allocator to avoid internal heap fragmentation in cmd_exec task
   PSRAM_JSON_DOC(doc);
   JsonArray peers = doc["peers"].to<JsonArray>();
-  
   uint32_t now = millis();
   int activePeers = 0;
-
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (!gMeshPeers[i].isActive || isSelfMac(gMeshPeers[i].mac)) continue;
-
-    JsonObject peer = peers.add<JsonObject>();
-    String deviceName = getEspNowDeviceName(gMeshPeers[i].mac);
-    uint32_t elapsed = now - gMeshPeers[i].lastHeartbeatMs;
-    if (elapsed > 0x80000000UL) elapsed = 0;
-    bool alive = isMeshPeerAlive(&gMeshPeers[i]);
-
-    peer["mac"] = macToHexString(gMeshPeers[i].mac);
-    peer["name"] = deviceName.length() > 0 ? deviceName : "Unknown";
-    peer["alive"] = alive;
-    peer["lastHeartbeat"] = gMeshPeers[i].lastHeartbeatMs;
-    peer["lastAck"] = gMeshPeers[i].lastAckMs;
-    peer["heartbeatCount"] = gMeshPeers[i].heartbeatCount;
-    peer["ackCount"] = gMeshPeers[i].ackCount;
-    peer["secondsSinceHeartbeat"] = elapsed / 1000;
-
-    activePeers++;
-  }
-
+  buildMeshStatusPeersJson(peers, now, &activePeers);
   doc["totalPeers"] = activePeers;
 
   JsonArray unpaired = doc["unpaired"].to<JsonArray>();
@@ -8107,8 +8277,12 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
     
     JsonObject dev = unpaired.add<JsonObject>();
     uint32_t elapsed = now - gEspNow->unpairedDevices[i].lastSeenMs;
-    
-    dev["mac"] = macToHexString(gEspNow->unpairedDevices[i].mac);
+    char unpairedMacBuf[18];
+    snprintf(unpairedMacBuf, sizeof(unpairedMacBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
+             gEspNow->unpairedDevices[i].mac[0], gEspNow->unpairedDevices[i].mac[1],
+             gEspNow->unpairedDevices[i].mac[2], gEspNow->unpairedDevices[i].mac[3],
+             gEspNow->unpairedDevices[i].mac[4], gEspNow->unpairedDevices[i].mac[5]);
+    dev["mac"] = unpairedMacBuf;
     dev["name"] = gEspNow->unpairedDevices[i].name.length() > 0 ? gEspNow->unpairedDevices[i].name : "Unknown";
     dev["rssi"] = gEspNow->unpairedDevices[i].rssi;
     dev["heartbeatCount"] = gEspNow->unpairedDevices[i].heartbeatCount;
@@ -8132,7 +8306,12 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
         uint32_t elapsed = now - gMeshRetryQueue[i].sentMs;
         
         retry["msgId"] = gMeshRetryQueue[i].msgId;
-        retry["dst"] = formatMacAddress(gMeshRetryQueue[i].dstMac);
+        char retryMacBuf[18];
+        snprintf(retryMacBuf, sizeof(retryMacBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 gMeshRetryQueue[i].dstMac[0], gMeshRetryQueue[i].dstMac[1],
+                 gMeshRetryQueue[i].dstMac[2], gMeshRetryQueue[i].dstMac[3],
+                 gMeshRetryQueue[i].dstMac[4], gMeshRetryQueue[i].dstMac[5]);
+        retry["dst"] = retryMacBuf;
         retry["retryCount"] = gMeshRetryQueue[i].retryCount;
         retry["secondsWaiting"] = elapsed / 1000;
         
@@ -8758,8 +8937,7 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   // heartbeat tick (without this, two freshly-paired devices never exchange
   // heartbeats until one reboots, so mesh topology stays empty)
   if (meshEnabled()) {
-    MeshPeerHealth* ph = getMeshPeerHealth(mac, true);
-    if (ph) ph->lastHeartbeatMs = millis();
+    noteMeshPeerRxActivity(mac, EspNowMeshRxKind::BootstrapLiveness);
     V3PayloadHeartbeat hb = {};
     hb.role = gSettings.meshRole;
     hb.uptimeSec = (uint32_t)(millis() / 1000);

@@ -96,7 +96,7 @@
 
 // MQTT: Home Assistant integration via MQTT broker
 //   0 = Disabled, 1 = Enabled (requires ENABLE_WIFI=1)
-#define ENABLE_MQTT             1
+#define ENABLE_MQTT             0
 
 // HTTPS: TLS-encrypted HTTP server using self-signed or uploaded certificates
 //   0 = Disabled, 1 = Enabled (requires ENABLE_HTTP_SERVER)

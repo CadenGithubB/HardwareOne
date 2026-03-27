@@ -17,6 +17,7 @@
 #include "System_Command.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
+#include "System_I2C.h"
 #include "System_Microphone_OLED.h"
 
 // XIAO ESP32S3 Sense PDM Microphone Pins
@@ -433,7 +434,7 @@ String getRecordingsList() {
 }
 
 bool deleteRecording(const char* filename) {
-  char pathBuf[64];
+  char pathBuf[128];
   snprintf(pathBuf, sizeof(pathBuf), "%s/%s", RECORDINGS_FOLDER, filename);
   String path = pathBuf;
   FsLockGuard fsGuard("mic.record.delete");
@@ -1111,7 +1112,7 @@ const char* cmd_micviz(const String& argsInput) {
 
 const char* cmd_micautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = args; arg.trim();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
     return gSettings.microphoneAutoStart ? "[Mic] Auto-start: enabled" : "[Mic] Auto-start: disabled";
   }
