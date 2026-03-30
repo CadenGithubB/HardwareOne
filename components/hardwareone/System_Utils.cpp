@@ -1689,6 +1689,12 @@ extern const CommandEntry mqttCommands[];
 extern const size_t mqttCommandsCount;
 #endif
 
+// LLM commands (from System_LLM.cpp)
+#if ENABLE_ONDEVICE_LLM
+extern const CommandEntry llmCommands[];
+extern const size_t llmCommandsCount;
+#endif
+
 // Module registry - collects all command tables from modules
 // Now includes metadata: description, flags, isConnected callback
 // Order matters for help display; longest-match search handles conflicts
@@ -1782,6 +1788,9 @@ static const CommandModule gCommandModules[] = {
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "even_g2",    "Even G2 smart glasses control", g2Commands,           g2CommandsCount, 0, nullptr },
+#endif
+#if ENABLE_ONDEVICE_LLM
+  { "llm",        "On-device LLM text generation", llmCommands,          llmCommandsCount, 0, nullptr },
 #endif
  };
 static const size_t gCommandModulesCount = sizeof(gCommandModules) / sizeof(gCommandModules[0]);
