@@ -177,6 +177,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   var busy      = false;
   var abortCtrl = null;
   var currentCtx = null; // Track the most recent Q&A context
+  var lastShownError = null; // Avoid repeating the same error message
 
   // ── helpers ──
   function setDot(cls) {
@@ -251,6 +252,18 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
           setDot('dot-off');
           stateEl.textContent = 'Error';
           setReady(false);
+          if (!afterGen && j.error && j.error !== lastShownError) {
+            lastShownError = j.error;
+            if (initMsg) { initMsg.remove(); initMsg = null; }
+            var specs = [];
+            if (j.arch && j.quant) specs.push(j.arch + ' ' + j.quant);
+            if (j.params && j.params !== '0x0x0') specs.push(j.params);
+            if (j.dim)    specs.push('dim=' + j.dim);
+            if (j.layers) specs.push(j.layers + ' layers');
+            if (j.vocab)  specs.push('vocab=' + j.vocab);
+            var specStr = specs.length > 0 ? ' (' + specs.join(' · ') + ')' : '';
+            addSys('Load failed' + specStr + ': ' + j.error);
+          }
         }
 
         // Append per-answer stats if we just finished generating
@@ -486,10 +499,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     }).then(function(r){ return r.json(); })
       .then(function(j){
         if (j.ok) { fetchStatus(false, null); }
-        else {
-          setDot('dot-off'); stateEl.textContent = 'Error';
-          addSys('Load failed: ' + (j.error||'unknown'));
-        }
+        else { fetchStatus(false, null); }
       })
       .catch(function(){ addSys('Load request failed'); });
   };
