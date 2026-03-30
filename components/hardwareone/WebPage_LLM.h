@@ -486,12 +486,11 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   window.qaLoadModel = function() {
     var path = modelSel.value;
     if (!path) return;
-    var ctx = parseInt(document.getElementById('qa-ctx').value) || 64;
     var name = path.split('/').pop() || path;
     setDot('dot-busy');
     stateEl.textContent = 'Loading...';
     setReady(false);
-    addSys('Loading ' + name + ' (ctx=' + ctx + ')...');
+    addSys('Loading ' + name + '...');
     fetch('/api/llm/load', {
       method:'POST', headers:{'Content-Type':'application/json'},
       credentials:'same-origin',
