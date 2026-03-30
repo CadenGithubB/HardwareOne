@@ -394,6 +394,9 @@ String generateNavigation(const String& activePage, const String& username, cons
 #if ENABLE_WEB_SPEECH
   link("/speech", "speech", "Speech");
 #endif
+#if ENABLE_ONDEVICE_LLM
+  link("/llm", "llm", "LLM");
+#endif
 #if ENABLE_AUTOMATION
   link("/automations", "automations", "Automations");
 #endif

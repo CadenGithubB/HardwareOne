@@ -108,6 +108,12 @@
 //   0 = Disabled, 1 = Enabled
 #define ENABLE_EDGE_IMPULSE     0
 
+// On-Device LLM: Tiny transformer inference via llama2.c port
+//   0 = Disabled, 1 = Enabled
+//   Requires ESP32-S3 with PSRAM. Model files loaded from LittleFS.
+//   The 260K "tiny stories" model needs ~1.5 MB PSRAM at runtime.
+#define ENABLE_ONDEVICE_LLM     0
+
 #define ENABLE_ESP_SR           0
 
 // Games: Browser-based games web page
@@ -414,6 +420,13 @@
 #if !ENABLE_ESPNOW
   #undef ENABLE_BONDED_MODE
   #define ENABLE_BONDED_MODE 0
+#endif
+
+// Force ENABLE_ONDEVICE_LLM off on non-S3 targets (needs PSRAM + DSP)
+#if ENABLE_ONDEVICE_LLM && !defined(CONFIG_IDF_TARGET_ESP32S3)
+  #undef ENABLE_ONDEVICE_LLM
+  #define ENABLE_ONDEVICE_LLM 0
+  #warning "On-device LLM requires ESP32-S3; disabled for this target."
 #endif
 
 // =============================================================================

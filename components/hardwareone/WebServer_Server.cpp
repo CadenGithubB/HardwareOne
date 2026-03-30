@@ -77,6 +77,9 @@
 #if ENABLE_WEB_MQTT
 #include "WebPage_MQTT.h"
 #endif
+#if ENABLE_ONDEVICE_LLM
+#include "WebPage_LLM.h"
+#endif
 #if ENABLE_WEB_GAMES
 #include "WebPage_Games.h"
 #endif
@@ -5138,6 +5141,9 @@ register_handlers:
  #endif
  #if ENABLE_WEB_GAMES
   registerGamesHandlers(server);
+ #endif
+ #if ENABLE_ONDEVICE_LLM
+  registerLLMHandlers(server);
  #endif
   
   // SSE events endpoint for server-driven notices
