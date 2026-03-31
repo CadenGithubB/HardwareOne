@@ -235,7 +235,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
   }
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN); // end system-grid
 
-#if ENABLE_WIFI || ENABLE_ESPNOW || (ENABLE_WIFI && ENABLE_MQTT) || ENABLE_BLUETOOTH
+#if ENABLE_WIFI || ENABLE_ESPNOW || (ENABLE_WIFI && ENABLE_MQTT) || ENABLE_BLUETOOTH || ENABLE_ONDEVICE_LLM
   httpd_resp_send_chunk(req, "<div style='display:flex;align-items:center;gap:0.75rem;margin-top:2rem'><h3 style='margin:0'>Connectivity Status</h3><button onclick='window.Dash.openLayoutEditor(\"conn-grid\")' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize</button></div>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<div id='conn-grid' style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin:1rem 0;visibility:hidden'>", HTTPD_RESP_USE_STRLEN);
 
@@ -330,6 +330,19 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     HTTPD_RESP_USE_STRLEN);
 #endif
 
+#if ENABLE_ONDEVICE_LLM
+  httpd_resp_send_chunk(req,
+    "<div class='sys-card sys-card-tall' id='conn-llm-card' data-panel='llm'>"
+    "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9);display:flex;align-items:center;gap:0.5rem'>"
+    "<span class='status-indicator status-disabled' id='conn-llm-dot'></span>LLM</div>"
+    "<div class='sys-card-row'><span>State:</span><strong id='conn-llm-state'>--</strong></div>"
+    "<div class='sys-card-row'><span>Model:</span><strong id='conn-llm-model'>--</strong></div>"
+    "<div class='sys-card-row'><span>PSRAM:</span><strong id='conn-llm-psram'>--</strong></div>"
+    "<div class='sys-card-row'><span>Speed:</span><strong id='conn-llm-tps'>--</strong></div>"
+    "</div>",
+    HTTPD_RESP_USE_STRLEN);
+#endif
+
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN); // end conn-grid
 #endif // any connectivity feature
 
@@ -396,6 +409,14 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
             "window.Dash.setText('conn-i2c-devices',(i2.devices!=null)?String(i2.devices)+' compiled':'--');"
             "window.Dash.setText('conn-i2c-active',(i2.activeDevices!=null)?String(i2.activeDevices):'--');"
             "window.Dash.setText('conn-i2c-pins',(i2.sdaPin!=null)?(i2.sdaPin+' / '+i2.sclPin):'--');"
+          "}"
+          "if(c.llm){"
+            "var ll=c.llm;"
+            "window.Dash.setIndicator('conn-llm-dot',ll.state==='READY'||ll.state==='GENERATING');"
+            "window.Dash.setText('conn-llm-state',ll.state||'--');"
+            "window.Dash.setText('conn-llm-model',(ll.model&&ll.model.length>0)?ll.model:'None');"
+            "window.Dash.setText('conn-llm-psram',(ll.psramKB>0)?ll.psramKB+'KB':'--');"
+            "window.Dash.setText('conn-llm-tps',(ll.tokPerSec>0)?ll.tokPerSec.toFixed(1)+' tok/s':'--');"
           "}"
         "}catch(e){console.warn('[Dashboard] Connectivity update error',e);}"
       "};"

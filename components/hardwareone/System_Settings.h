@@ -117,6 +117,16 @@ struct Settings {
       debugImuFrame(false),
       debugImuData(false),
       debugApdsFrame(false),
+      debugMaps(false),
+      debugMapsLoading(false),
+      debugMapsRendering(false),
+      debugMapsPerf(false),
+      debugLlm(false),
+      debugLlmLoad(false),
+      debugLlmTokenizer(false),
+      debugLlmForward(false),
+      debugLlmGenerate(false),
+      debugLlmMemory(false),
       logLevel(3),                    // Default: LOG_LEVEL_DEBUG (show everything)
       memorySampleIntervalSec(30),
       espnowenabled(false),
@@ -402,6 +412,13 @@ struct Settings {
   bool debugMapsLoading;    // Map file loading, tile directory parsing
   bool debugMapsRendering;  // Map render pipeline, feature drawing, viewport
   bool debugMapsPerf;       // Map performance timing (render ms, tile I/O, cache, FPS)
+  // On-device LLM debug flags (System_LLM — parent + sub-flags)
+  bool debugLlm;            // All LLM
+  bool debugLlmLoad;        // Checkpoint load, validation, weight mapping
+  bool debugLlmTokenizer;   // Tokenizer / BPE
+  bool debugLlmForward;       // Transformer forward (verbose)
+  bool debugLlmGenerate;      // Generation loop, sampling
+  bool debugLlmMemory;        // PSRAM budget, context cap
   // Auth sub-flags
   bool debugAuthSessions;
   bool debugAuthCookies;

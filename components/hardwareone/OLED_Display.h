@@ -116,7 +116,8 @@ enum OLEDMode {
   OLED_REMOTE_SETTINGS,// Remote device settings editor (paired mode only)
   OLED_SET_PATTERN,    // Set gamepad pattern password
   OLED_CHANGE_PASSWORD,// Change password for authenticated user
-  OLED_NOTIFICATIONS   // Notification history viewer
+  OLED_NOTIFICATIONS,  // Notification history viewer
+  OLED_LLM             // On-device LLM chat
 };
 
 // Menu item structure for OLED menu (legacy - kept for compatibility)

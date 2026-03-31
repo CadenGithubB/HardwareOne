@@ -2584,6 +2584,12 @@ void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack) {
     extern void resetCLIInputState();
     resetCLIInputState();
   }
+#if ENABLE_ONDEVICE_LLM
+  if (newMode == OLED_LLM && newMode != currentOLEDMode) {
+    extern void resetLLMOLEDState();
+    resetLLMOLEDState();
+  }
+#endif
 
   currentOLEDMode = newMode;
 }
@@ -2717,6 +2723,9 @@ extern void oledSetPatternModeInit();
 extern void oledChangePasswordModeInit();
 extern void oledPowerModeInit();
 extern void oledCLIInputModeInit();
+#if ENABLE_ONDEVICE_LLM
+extern void oledLLMModeInit();
+#endif
 
 // Print summary of all registered OLED modes (call from setup() after static init)
 void printRegisteredOLEDModes() {
@@ -2728,6 +2737,9 @@ void printRegisteredOLEDModes() {
   oledChangePasswordModeInit();
   oledPowerModeInit();
   oledCLIInputModeInit();
+#if ENABLE_ONDEVICE_LLM
+  oledLLMModeInit();
+#endif
   
   // Register built-in quick settings mode first
   static bool builtInRegistered = false;

@@ -14,7 +14,7 @@
 //   2 = STANDALONE - OLED + Gamepad
 //   3 = FULL       - OLED + all sensors
 //   4 = CUSTOM     - Use individual sensor flags below
-#define I2C_FEATURE_LEVEL       4
+#define I2C_FEATURE_LEVEL       0
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CUSTOM SENSOR SELECTION (only used when I2C_FEATURE_LEVEL = 4)
@@ -108,11 +108,16 @@
 //   0 = Disabled, 1 = Enabled
 #define ENABLE_EDGE_IMPULSE     0
 
-// On-Device LLM: Tiny transformer inference via llama2.c port
+// On-Device LLM: Tiny transformer inference (Llama + GPT-2 architectures)
 //   0 = Disabled, 1 = Enabled
-//   Requires ESP32-S3 with PSRAM. Model files loaded from LittleFS.
-//   The 260K "tiny stories" model needs ~1.5 MB PSRAM at runtime.
-#define ENABLE_ONDEVICE_LLM     0
+//   Requires ESP32-S3 with PSRAM. Model files (LLM1 format) from LittleFS or SD.
+//   Supports FP32 and INT8 quantization. Typical PSRAM usage: 1–4 MB at runtime.
+#define ENABLE_ONDEVICE_LLM     1
+#if ENABLE_ONDEVICE_LLM
+// Max KV / attention context in tokens (0 = use checkpoint's seq_len only).
+// Lower uses less PSRAM; must cover prompt + max generation. Typical tiny models: 256–1024.
+#define LLM_MAX_CONTEXT_LEN     1024
+#endif
 
 #define ENABLE_ESP_SR           0
 
@@ -122,7 +127,7 @@
 
 // Maps: Offline maps and waypoints web page
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_MAPS             1
+#define ENABLE_MAPS             0
 
 // Bond Mode: Two-device bonded pair via ESP-NOW (master/worker)
 //   0 = Disabled, 1 = Enabled (requires ENABLE_ESPNOW=1)
@@ -131,11 +136,11 @@
 
 // Automation: Scheduled tasks and conditional command system
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_AUTOMATION       1
+#define ENABLE_AUTOMATION       0
 
 // Display Type: Hardware display selection
 //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
-#define DISPLAY_TYPE            1
+#define DISPLAY_TYPE            0
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
 // ║                    END OF USER CONFIGURATION                              ║
@@ -422,12 +427,8 @@
   #define ENABLE_BONDED_MODE 0
 #endif
 
-// Force ENABLE_ONDEVICE_LLM off on non-S3 targets (needs PSRAM + DSP)
-#if ENABLE_ONDEVICE_LLM && !defined(CONFIG_IDF_TARGET_ESP32S3)
-  #undef ENABLE_ONDEVICE_LLM
-  #define ENABLE_ONDEVICE_LLM 0
-  #warning "On-device LLM requires ESP32-S3; disabled for this target."
-#endif
+// Note: ENABLE_ONDEVICE_LLM requires ESP32-S3 with PSRAM.
+// CMakeLists.txt handles excluding LLM source files on non-S3 targets.
 
 // =============================================================================
 // MEMORY SAVINGS REFERENCE

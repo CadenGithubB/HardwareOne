@@ -80,6 +80,9 @@ bool initFilesystem() {
   LittleFS.mkdir("/system/users");  // For users.json and user settings
   LittleFS.mkdir("/system/users/user_settings");  // For per-user setting files
   LittleFS.mkdir("/system/certs");  // For TLS certificates (HTTPS, MQTT)
+#if ENABLE_ONDEVICE_LLM
+  LittleFS.mkdir("/system/llm");  // LLM1 model files (tokenizer embedded)
+#endif
 #if ENABLE_ESPNOW
   LittleFS.mkdir("/espnow");  // For ESP-NOW related files (received subfolder created on-demand)
   LittleFS.mkdir("/system/espnow");  // For ESP-NOW config (mesh peers, devices, bond peer settings)
@@ -97,7 +100,12 @@ bool initFilesystem() {
   
   // Boot-time cleanup: remove orphaned .tmp files from interrupted writes
   {
-    const char* cleanupDirs[] = { "/", "/system", "/system/users", "/system/users/user_settings", "/maps" };
+    const char* cleanupDirs[] = {
+        "/", "/system", "/system/users", "/system/users/user_settings", "/maps"
+#if ENABLE_ONDEVICE_LLM
+        , "/system/llm"
+#endif
+    };
     int cleaned = 0;
     for (const char* dir : cleanupDirs) {
       File d = LittleFS.open(dir);
@@ -631,6 +639,11 @@ static const PathRule sPathRules[] = {
 
   // ---- TLS certificates: read + delete + import (no edit/rename/create) ----
   {"/system/certs/",                    PERM_READ | PERM_DELETE | PERM_IMPORT,      false, true},
+
+
+  // ---- On-device LLM: LLM1 model files (same policy as certs) ----
+  {"/system/llm/",                      PERM_READ | PERM_DELETE | PERM_IMPORT,      false, true},
+
 
   // ---- System logs: read-only ----
   {"/system/sys_logs/",                 PERM_READ,                                  false, true},

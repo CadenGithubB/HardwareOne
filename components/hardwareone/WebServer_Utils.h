@@ -663,7 +663,7 @@ inline String getFileBrowserScript() {
       if (isBinary) content = content.split(',')[1]; // strip data URL prefix
       var body = 'path=' + encodeURIComponent(targetPath) + '&binary=' + (isBinary ? '1' : '0') + '&content=' + encodeURIComponent(content);
       var xhr = new XMLHttpRequest();
-      xhr.open('POST', '/api/files/upload', true);
+      xhr.open('POST', '/api/files/upload?path=' + encodeURIComponent(targetPath), true);
       xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
       xhr.upload.onprogress = function(e) {
         if (e.lengthComputable && opts.onProgress) {
@@ -799,6 +799,7 @@ inline String getFileBrowserScript() {
           currentPath = path;
           setStatus('Path: ' + currentPath);
           updateToolbar(dirPerms);
+          if (config.onRefresh) config.onRefresh(currentPath);
         }
       });
       setStatus('Path: ' + currentPath);
@@ -828,7 +829,7 @@ inline String getFileBrowserScript() {
         .then(function(txt) {
           setStatus(txt, txt.indexOf('Error') >= 0);
           loadExplorer();
-          if (config.onRefresh) config.onRefresh();
+          if (config.onRefresh) config.onRefresh(currentPath);
         })
         .catch(function(e) { setStatus('Error: ' + e.message, true); });
       });
@@ -849,7 +850,7 @@ inline String getFileBrowserScript() {
         .then(function(txt) {
           setStatus(txt, txt.indexOf('Error') >= 0);
           loadExplorer();
-          if (config.onRefresh) config.onRefresh();
+          if (config.onRefresh) config.onRefresh(currentPath);
         })
         .catch(function(e) { setStatus('Error: ' + e.message, true); });
       });
@@ -863,8 +864,8 @@ inline String getFileBrowserScript() {
         if (!file) return;
         
         setStatus('Checking storage...', false);
-        fetch('/api/files/stats').then(function(r){return r.json();}).then(function(d) {
-          if (!d.success) { setStatus('Error: Cannot check storage', true); input.value=''; return; }
+        fetch('/api/files/stats?path=' + encodeURIComponent(currentPath)).then(function(r){return r.json();}).then(function(d) {
+          if (!d.success) { setStatus('Upload failed: ' + (d.error || 'Cannot check storage'), true); input.value=''; return; }
           var maxUpload = Math.floor(d.free * 0.9);
           if (file.size > maxUpload) {
             var freeMB = (d.free / 1024 / 1024).toFixed(1);
@@ -896,7 +897,7 @@ inline String getFileBrowserScript() {
               var wrap = document.getElementById(progressId);
               if (wrap) wrap.style.display = 'none';
               setStatus(ok ? 'Uploaded: ' + file.name : msg, !ok);
-              if (ok) { loadExplorer(); if (config.onRefresh) config.onRefresh(); }
+              if (ok) { loadExplorer(); if (config.onRefresh) config.onRefresh(currentPath); }
               input.value = '';
             }
           });
@@ -908,7 +909,7 @@ inline String getFileBrowserScript() {
     // Action: Refresh
     window[managerId + 'Refresh'] = function() {
       loadExplorer();
-      if (config.onRefresh) config.onRefresh();
+      if (config.onRefresh) config.onRefresh(currentPath);
     };
     
     // Action: View file

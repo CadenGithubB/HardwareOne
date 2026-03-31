@@ -49,7 +49,7 @@ let isJsonEdit = false;
 
 window.onload = function() {
   console.log('[FILES] Window onload');
-  updateStorageStats();
+  updateStorageStats('/');
   initFileManager();
 };
 console.log('[FILES] onload registered');
@@ -65,13 +65,13 @@ function initFileManager() {
     height: '500px',
     showActions: true,
     onEdit: editFile,
-    onRefresh: function() {
-      updateStorageStats();
+    onRefresh: function(path) {
+      updateStorageStats(path || '/');
     }
   });
 }
-function updateStorageStats() {
-  fetch('/api/files/stats').then(r => r.json()).then(d => {
+function updateStorageStats(path) {
+  fetch('/api/files/stats?path=' + encodeURIComponent(path || '/')).then(r => r.json()).then(d => {
     if (d.success) {
       const usedMB = (d.used / 1024 / 1024).toFixed(2);
       const totalMB = (d.total / 1024 / 1024).toFixed(2);
@@ -85,6 +85,10 @@ function updateStorageStats() {
       } else {
         document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#28a745,#20c997)';
       }
+    } else {
+      document.getElementById('storage-text').textContent = d.error || 'Storage unavailable';
+      document.getElementById('storage-bar').style.width = '0%';
+      document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#666,#444)';
     }
   }).catch(e => console.error('Storage stats error:', e));
 }

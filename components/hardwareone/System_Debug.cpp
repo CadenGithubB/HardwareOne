@@ -1945,6 +1945,65 @@ const char* cmd_debugmapsperf(const String& argsInput) {
   }
 }
 
+#if ENABLE_ONDEVICE_LLM
+static inline void syncLlmParent() {
+  updateParentDebugFlag(DEBUG_LLM,
+                        gSettings.debugLlm ||
+                        gSettings.debugLlmLoad ||
+                        gSettings.debugLlmTokenizer ||
+                        gSettings.debugLlmForward ||
+                        gSettings.debugLlmGenerate ||
+                        gSettings.debugLlmMemory);
+}
+
+static const char* cmd_debugllm_impl(const String& argsInput, bool* settingPtr, uint64_t flagBit, const char* name) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char buf[96];
+  String valStr = argsInput;
+  valStr.trim();
+  int sp2 = valStr.indexOf(' ');
+  String mode = "";
+  if (sp2 >= 0) {
+    mode = valStr.substring(sp2 + 1);
+    valStr = valStr.substring(0, sp2);
+    mode.trim();
+  }
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = valStr.toInt();
+  if (modeTemp) {
+    if (v) setDebugFlag(flagBit);
+    else clearDebugFlag(flagBit);
+    snprintf(buf, sizeof(buf), "%s %s (runtime only)", name, v ? "enabled" : "disabled");
+    return buf;
+  }
+  setSetting(*settingPtr, (bool)(v != 0));
+  if (v) setDebugFlag(flagBit);
+  else clearDebugFlag(flagBit);
+  syncLlmParent();
+  snprintf(buf, sizeof(buf), "%s %s (persistent)", name, *settingPtr ? "enabled" : "disabled");
+  return buf;
+}
+
+const char* cmd_debugllm(const String& argsInput) {
+  return cmd_debugllm_impl(argsInput, &gSettings.debugLlm, DEBUG_LLM, "debugLlm");
+}
+const char* cmd_debugllmload(const String& argsInput) {
+  return cmd_debugllm_impl(argsInput, &gSettings.debugLlmLoad, DEBUG_LLM_LOAD, "debugLlmLoad");
+}
+const char* cmd_debugllmtokenizer(const String& argsInput) {
+  return cmd_debugllm_impl(argsInput, &gSettings.debugLlmTokenizer, DEBUG_LLM_TOKENIZER, "debugLlmTokenizer");
+}
+const char* cmd_debugllmforward(const String& argsInput) {
+  return cmd_debugllm_impl(argsInput, &gSettings.debugLlmForward, DEBUG_LLM_FORWARD, "debugLlmForward");
+}
+const char* cmd_debugllmgenerate(const String& argsInput) {
+  return cmd_debugllm_impl(argsInput, &gSettings.debugLlmGenerate, DEBUG_LLM_GENERATE, "debugLlmGenerate");
+}
+const char* cmd_debugllmmemory(const String& argsInput) {
+  return cmd_debugllm_impl(argsInput, &gSettings.debugLlmMemory, DEBUG_LLM_MEMORY, "debugLlmMemory");
+}
+#endif
+
 const char* cmd_debugfmradio(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
@@ -2496,6 +2555,15 @@ const char* getDebugCategoryName(uint64_t flag) {
   if (flag & DEBUG_MAPS_LOADING) return "MAPS_LOAD";
   if (flag & DEBUG_MAPS_RENDERING) return "MAPS_RENDER";
   if (flag & DEBUG_MAPS_PERF) return "MAPS_PERF";
+#if ENABLE_ONDEVICE_LLM
+  // Bits 57-62: On-device LLM
+  if (flag & DEBUG_LLM) return "LLM";
+  if (flag & DEBUG_LLM_LOAD) return "LLM_LOAD";
+  if (flag & DEBUG_LLM_TOKENIZER) return "LLM_TOK";
+  if (flag & DEBUG_LLM_FORWARD) return "LLM_FWD";
+  if (flag & DEBUG_LLM_GENERATE) return "LLM_GEN";
+  if (flag & DEBUG_LLM_MEMORY) return "LLM_MEM";
+#endif
   return "UNKNOWN";
 }
 
@@ -3222,6 +3290,14 @@ const CommandEntry debugCommands[] = {
   { "debugmapsloading", "Debug map file loading and tile directory.", true, cmd_debugmapsloading, "Usage: debugmapsloading <0|1>" },
   { "debugmapsrendering", "Debug map render pipeline and feature drawing.", true, cmd_debugmapsrendering, "Usage: debugmapsrendering <0|1>" },
   { "debugmapsperf", "Debug map performance timing (render ms, tile I/O, cache, FPS).", true, cmd_debugmapsperf, "Usage: debugmapsperf <0|1>" },
+#if ENABLE_ONDEVICE_LLM
+  { "debugllm", "Debug on-device LLM (parent flag).", true, cmd_debugllm, "Usage: debugllm <0|1> [temp|runtime]" },
+  { "debugllmload", "Debug LLM checkpoint load and validation.", true, cmd_debugllmload, "Usage: debugllmload <0|1> [temp|runtime]" },
+  { "debugllmtokenizer", "Debug LLM tokenizer / BPE.", true, cmd_debugllmtokenizer, "Usage: debugllmtokenizer <0|1> [temp|runtime]" },
+  { "debugllmforward", "Debug LLM transformer forward (verbose).", true, cmd_debugllmforward, "Usage: debugllmforward <0|1> [temp|runtime]" },
+  { "debugllmgenerate", "Debug LLM generation loop and sampling.", true, cmd_debugllmgenerate, "Usage: debugllmgenerate <0|1> [temp|runtime]" },
+  { "debugllmmemory", "Debug LLM PSRAM budget and context cap.", true, cmd_debugllmmemory, "Usage: debugllmmemory <0|1> [temp|runtime]" },
+#endif
   { "debugi2c", "Debug I2C bus transactions, mutex, clock changes.", true, cmd_debugi2c },
   { "debugwifi", "Debug WiFi operations.", true, cmd_debugwifi },
   { "debugstorage", "Debug storage operations.", true, cmd_debugstorage },
