@@ -17,36 +17,33 @@
  */
 
 /*
- * DEBUG NOTE (commented-out diagnostics)
+ * DEBUG NOTE (prediction engine diagnostics)
  * ----------------------------------------
- * Many per-token and per-layer debug calls below have been commented out
- * to reduce log noise during normal operation. They remain in the source
- * and can be re-enabled individually for targeted debugging.
- *
- * Commented-out groups:
- *   - Per-prompt-token position tracking (every prompt token fed into forward())
- *   - Prompt prediction rank tracking (PROMPT_PRED / PROMPT_TRACK per token)
- *   - Generation boundary embedding similarity pairs (verbose, fires at start)
- *   - KV cache health check at generation start (WARN only if nearly-zero)
- *   - Prompt token logit rank check at generation start
- *   - Pre-generation embedding norm / pairwise similarity analysis
- *   - Pre-generation token confusion (CONFUSER) analysis
- *   - Content token listing
- *   - Per-generated-token sample line (pos/sampled/top/eff_temp every token)
- *   - Rep penalty per-step log (fires every generation step)
+ * Prediction-engine debug calls are ENABLED (via DEBUG_LLM_FORWARD / DEBUG_LLM_GENERATE):
+ *   - forward() logit distribution stats + top-5 candidates at each position
+ *   - Prompt prediction tracking (PROMPT_PRED per token, PROMPT_TRACK at boundary)
+ *   - sample() pre-logit range & entropy
+ *   - sample_topp nucleus stats, per-candidate detail, sampled rank
+ *   - sample_mirostat2 mu/threshold detail + chosen token surprise
+ *   - Rep penalty per-step log
  *   - Suppress penalty per-step log
  *   - Content logit boost per-step log
  *   - Dynamic temperature per-token log
- *   - sample_topp nucleus / selected-token detail (every sample)
- *   - sample() pre-logit/entropy detail (every sample)
- *   - sample_mirostat2 mu/threshold detail (every sample)
+ *   - Per-generated-token sample line (pos/sampled/top/eff_temp/mu)
+ *
+ * Still commented out (low-level transformer internals):
+ *   - Per-prompt-token position tracking
+ *   - Generation boundary embedding similarity pairs
+ *   - KV cache health check at generation start
+ *   - Prompt token logit rank check at generation start
+ *   - Pre-generation embedding norm / pairwise similarity / CONFUSER analysis
+ *   - Content token listing
  *   - forward() per-layer QKV matmul stats
- *   - forward() per-layer attention pattern stats (including per-head weights)
+ *   - forward() per-layer attention pattern stats (per-head weights)
  *   - forward() post-attention residual stats
  *   - forward() pre/post-GELU FFN stats
  *   - forward() post-FFN residual stats
- *   - forward() final norm and logit distribution stats
- *   - forward() top-5 token candidates at each position
+ *   - forward() embedding + position encoding stats
  */
 
 #include "System_BuildConfig.h"
@@ -941,13 +938,12 @@ static float* forward(int token, int pos) {
         }
       }
     }
-    //DEBUG_LLM_FORWARDF("[LLM] pos=%d logits: [%.2f,%.2f] mean=%.2f spread=%.2f nan=%d top=%d(%.2f)",
-    //                   pos, lmin, lmax, lsum / (p->vocab_size - nan_count),
-    //                   lmax - lmin, nan_count, top_id, lmax);
-    //DEBUG_LLM_FORWARDF("[LLM] pos=%d top5: %d(%.2f) %d(%.2f) %d(%.2f) %d(%.2f) %d(%.2f)",
-    //                   pos, top5[0], top5v[0], top5[1], top5v[1], top5[2], top5v[2],
-    //                   top5[3], top5v[3], top5[4], top5v[4]);
-    (void)lmin; (void)lmax; (void)lsum; (void)top_id; (void)nan_count; (void)top5; (void)top5v;
+    DEBUG_LLM_FORWARDF("[LLM] pos=%d logits: [%.2f,%.2f] mean=%.2f spread=%.2f nan=%d top=%d(%.2f)",
+                       pos, lmin, lmax, lsum / (p->vocab_size - nan_count),
+                       lmax - lmin, nan_count, top_id, lmax);
+    DEBUG_LLM_FORWARDF("[LLM] pos=%d top5: %d(%.2f) %d(%.2f) %d(%.2f) %d(%.2f) %d(%.2f)",
+                       pos, top5[0], top5v[0], top5[1], top5v[1], top5[2], top5v[2],
+                       top5[3], top5v[3], top5[4], top5v[4]);
   }
 
   return s->logits;
@@ -1024,13 +1020,13 @@ static int sample_topp(float* probabilities, int n, float topp) {
   }
 
   // Debug: log nucleus stats and top candidates
-  //DEBUG_LLM_GENERATEF("[LLM] top-p: nucleus=%d/%d tokens, cumsum=%.4f (target=%.2f)",
-  //                    nucleus_n, n, cumsum, topp);
+  DEBUG_LLM_GENERATEF("[LLM] top-p: nucleus=%d/%d tokens, cumsum=%.4f (target=%.2f)",
+                      nucleus_n, n, cumsum, topp);
   // Log top 5 candidates in the nucleus
   int dbg_n = (nucleus_n < 5) ? nucleus_n : 5;
   for (int di = 0; di < dbg_n; di++) {
-    //DEBUG_LLM_GENERATEF("[LLM]   nucleus[%d]: tok=%d prob=%.4f (%.1f%%)",
-    //                    di, indices[di], probabilities[di], probabilities[di] * 100.0f);
+    DEBUG_LLM_GENERATEF("[LLM]   nucleus[%d]: tok=%d prob=%.4f (%.1f%%)",
+                        di, indices[di], probabilities[di], probabilities[di] * 100.0f);
   }
 
   // Sample from the nucleus only (re-normalised by cumsum)
@@ -1043,9 +1039,8 @@ static int sample_topp(float* probabilities, int n, float topp) {
     if (cdf > r) { result = indices[i]; result_rank = i; break; }
   }
 
-  //DEBUG_LLM_GENERATEF("[LLM]   sampled tok=%d at rank=%d/%d (r=%.4f)",
-  //                    result, result_rank, nucleus_n, r / cumsum);
-  (void)result_rank;
+  DEBUG_LLM_GENERATEF("[LLM]   sampled tok=%d at rank=%d/%d (r=%.4f)",
+                      result, result_rank, nucleus_n, r / cumsum);
 
   free(indices);
   return result;
@@ -1088,9 +1083,8 @@ static int sample(float* logits, int vocab_size, float temperature, float topp) 
     if (logits[q] > max_prob) { max_prob = logits[q]; max_prob_id = q; }
     if (logits[q] > 1e-8f) entropy -= logits[q] * log2f(logits[q]);
   }
-  //DEBUG_LLM_GENERATEF("[LLM] sample: temp=%.2f topp=%.2f pre_logit=[%.1f,%.1f] top_prob=%.3f(tok=%d) entropy=%.1f bits",
-  //                    temperature, topp, pre_min, pre_max, max_prob, max_prob_id, entropy);
-  (void)pre_min; (void)pre_max; (void)max_prob; (void)max_prob_id; (void)entropy;
+  DEBUG_LLM_GENERATEF("[LLM] sample: temp=%.2f topp=%.2f pre_logit=[%.1f,%.1f] top_prob=%.3f(tok=%d) entropy=%.1f bits",
+                      temperature, topp, pre_min, pre_max, max_prob, max_prob_id, entropy);
 
   if (topp <= 0.0f || topp >= 1.0f) {
     // Simple random sample (no top-p filtering)
@@ -1135,9 +1129,8 @@ static int sample_mirostat2(float* logits, int n, float temperature, float tau, 
   // Debug: log Mirostat state
   int included_count = 0;
   for (int i = 0; i < n; i++) if (logits[i] >= threshold) included_count++;
-  //DEBUG_LLM_GENERATEF("[LLM] mirostat2: mu=%.3f threshold=%.6f included=%d/%d mass=%.4f tau=%.1f eta=%.2f",
-  //                    *mu, threshold, included_count, n, included_sum, tau, eta);
-  (void)included_count;
+  DEBUG_LLM_GENERATEF("[LLM] mirostat2: mu=%.3f threshold=%.6f included=%d/%d mass=%.4f tau=%.1f eta=%.2f",
+                      *mu, threshold, included_count, n, included_sum, tau, eta);
 
   // If nothing passes the surprise threshold, mu has drifted too low (threshold ≈ 1.0).
   // Reset mu to 2*tau and sample from the full distribution rather than collapsing to
@@ -1175,9 +1168,8 @@ static int sample_mirostat2(float* logits, int n, float temperature, float tau, 
     // Clamp to a sane range
     if (*mu < 0.01f) *mu = 0.01f;
     if (*mu > tau * 20.0f) *mu = tau * 20.0f;
-    //DEBUG_LLM_GENERATEF("[LLM] mirostat2: chose tok=%d p=%.4f surprise=%.2f bits mu: %.3f -> %.3f",
-    //                    chosen, p_chosen, surprise_bits, old_mu, *mu);
-    (void)surprise_bits; (void)old_mu;
+    DEBUG_LLM_GENERATEF("[LLM] mirostat2: chose tok=%d p=%.4f surprise=%.2f bits mu: %.3f -> %.3f",
+                        chosen, p_chosen, surprise_bits, old_mu, *mu);
   }
 
   return chosen;
@@ -3171,12 +3163,11 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                                    gLLM.tokenizer.vocab[actual_next] : "?";
         const char* top_name = (top_tok >= 0 && top_tok < gLLM.tokenizer.vocab_size) ?
                                 gLLM.tokenizer.vocab[top_tok] : "?";
-        //DEBUG_LLM_GENERATEF("[LLM] PROMPT_PRED pos=%d: actual_next=%d('%s') rank=%d/%d logit=%.1f | "
-        //                    "model_top=%d('%s') logit=%.1f %s",
-        //                    pos, actual_next, actual_name, rank, p->vocab_size, actual_logit,
-        //                    top_tok, top_name, top_logit,
-        //                    rank == 0 ? "CORRECT!" : (rank < 10 ? "CLOSE" : "WRONG"));
-        (void)actual_logit; (void)rank; (void)top_tok; (void)top_logit; (void)actual_name; (void)top_name;
+        DEBUG_LLM_GENERATEF("[LLM] PROMPT_PRED pos=%d: actual_next=%d('%s') rank=%d/%d logit=%.1f | "
+                            "model_top=%d('%s') logit=%.1f %s",
+                            pos, actual_next, actual_name, rank, p->vocab_size, actual_logit,
+                            top_tok, top_name, top_logit,
+                            rank == 0 ? "CORRECT!" : (rank < 10 ? "CLOSE" : "WRONG"));
       }
 
       // At the last prompt position, dump the logits the model WOULD produce
@@ -3210,18 +3201,16 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
 
         const char* next_name = (actual_next >= 0 && actual_next < gLLM.tokenizer.vocab_size) ?
                                  gLLM.tokenizer.vocab[actual_next] : "?";
-        //DEBUG_LLM_GENERATEF("[LLM] PROMPT_TRACK pos=%d: model predicts top5=[%d(%s:%.1f) %d(%s:%.1f) %d(%s:%.1f) %d(%s:%.1f) %d(%s:%.1f)]",
-        //                    pos,
-        //                    top5i[0], (top5i[0]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[0]]:"?"), top5v[0],
-        //                    top5i[1], (top5i[1]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[1]]:"?"), top5v[1],
-        //                    top5i[2], (top5i[2]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[2]]:"?"), top5v[2],
-        //                    top5i[3], (top5i[3]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[3]]:"?"), top5v[3],
-        //                    top5i[4], (top5i[4]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[4]]:"?"), top5v[4]);
-        //DEBUG_LLM_GENERATEF("[LLM] PROMPT_TRACK actual_next=%d('%s') logit=%.2f rank=%d/%d %s",
-        //                    actual_next, next_name, actual_logit, actual_rank, p->vocab_size,
-        //                    actual_rank < 5 ? "IN_TOP5" : (actual_rank < 20 ? "IN_TOP20" : "LOW_RANK"));
-        (void)actual_logit; (void)actual_rank; (void)rank; (void)next_name;
-        (void)top5i; (void)top5v;
+        DEBUG_LLM_GENERATEF("[LLM] PROMPT_TRACK pos=%d: model predicts top5=[%d(%s:%.1f) %d(%s:%.1f) %d(%s:%.1f) %d(%s:%.1f) %d(%s:%.1f)]",
+                            pos,
+                            top5i[0], (top5i[0]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[0]]:"?"), top5v[0],
+                            top5i[1], (top5i[1]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[1]]:"?"), top5v[1],
+                            top5i[2], (top5i[2]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[2]]:"?"), top5v[2],
+                            top5i[3], (top5i[3]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[3]]:"?"), top5v[3],
+                            top5i[4], (top5i[4]<gLLM.tokenizer.vocab_size?gLLM.tokenizer.vocab[top5i[4]]:"?"), top5v[4]);
+        DEBUG_LLM_GENERATEF("[LLM] PROMPT_TRACK actual_next=%d('%s') logit=%.2f rank=%d/%d %s",
+                            actual_next, next_name, actual_logit, actual_rank, p->vocab_size,
+                            actual_rank < 5 ? "IN_TOP5" : (actual_rank < 20 ? "IN_TOP20" : "LOW_RANK"));
       }
     } else {
       // ── First generation position diagnostics ────────────────────────────────
@@ -3313,9 +3302,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
             penalized++;
           }
         }
-        //DEBUG_LLM_GENERATEF("[LLM] rep_penalty: penalized %d/%d tokens (window=%d penalty=%.2f)",
-        //                    penalized, count, REP_WINDOW, REP_PENALTY);
-        (void)penalized;
+        DEBUG_LLM_GENERATEF("[LLM] rep_penalty: penalized %d/%d tokens (window=%d penalty=%.2f)",
+                            penalized, count, REP_WINDOW, REP_PENALTY);
       }
 
       // ── Suppress penalty (retry mechanism) ──────────────────────────────────
@@ -3339,10 +3327,9 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
           else                     logits[tok] *= SUPPRESS_PENALTY;
           penalized++;
         }
-        (void)penalized; (void)skipped_prompt;
         if (pos == num_prompt_tokens || pos % 16 == 0) {
-          //DEBUG_LLM_GENERATEF("[LLM] suppress: penalized %d/%d tokens, skipped %d prompt tokens (penalty=%.1f)",
-          //                    penalized, suppressTokenCount, skipped_prompt, SUPPRESS_PENALTY);
+          DEBUG_LLM_GENERATEF("[LLM] suppress: penalized %d/%d tokens, skipped %d prompt tokens (penalty=%.1f)",
+                              penalized, suppressTokenCount, skipped_prompt, SUPPRESS_PENALTY);
         }
       }
 
@@ -3364,10 +3351,9 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
             if (pos == num_prompt_tokens - 1 || pos % 8 == 0) {
               const char* cname = (ctok < gLLM.tokenizer.vocab_size) ?
                                    gLLM.tokenizer.vocab[ctok] : "?";
-              //DEBUG_LLM_GENERATEF("[LLM] CONTENT_BOOST pos=%d gen=%d/%d tok=%d('%s') %.2f -> %.2f (+%.1f)",
-              //                    pos, gen_pos, CONTENT_BOOST_WINDOW, ctok, cname,
-              //                    old_logit, logits[ctok], CONTENT_LOGIT_BOOST);
-              (void)cname; (void)old_logit;
+              DEBUG_LLM_GENERATEF("[LLM] CONTENT_BOOST pos=%d gen=%d/%d tok=%d('%s') %.2f -> %.2f (+%.1f)",
+                                  pos, gen_pos, CONTENT_BOOST_WINDOW, ctok, cname,
+                                  old_logit, logits[ctok], CONTENT_LOGIT_BOOST);
             }
           }
         }
@@ -3386,8 +3372,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         if (boost < 0.6f) boost = 0.6f;
         if (boost > 1.8f) boost = 1.8f;
         effective_temp = temperature * boost;
-        //DEBUG_LLM_GENERATEF("[LLM] pos=%d dyn_temp: max_logit=%.2f boost=%.2f eff=%.3f (base=%.2f)",
-        //                    pos, max_logit, boost, effective_temp, temperature);
+        DEBUG_LLM_GENERATEF("[LLM] pos=%d dyn_temp: max_logit=%.2f boost=%.2f eff=%.3f (base=%.2f)",
+                            pos, max_logit, boost, effective_temp, temperature);
       }
 
       int topId = 0;
@@ -3395,7 +3381,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       for (int vi = 1; vi < p->vocab_size; vi++) {
         if (logits[vi] > topLogit) { topLogit = logits[vi]; topId = vi; }
       }
-      (void)topId; (void)topLogit;
+      // topId and topLogit used by per-token sample debug line below
 
       if (useMirostat2) {
         next = sample_mirostat2(logits, p->vocab_size, effective_temp,
@@ -3413,11 +3399,10 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       const char* piece = decode(token, next);
       bool has_leading_space = (piece && piece[0] == ' ');
       int piece_len = piece ? strlen(piece) : 0;
-      //DEBUG_LLM_GENERATEF("[LLM]  pos=%d sampled=%d('%s') top=%d(%.2f) eff_temp=%.2f mu=%.2f sp=%d len=%d",
-      //                    pos, next, piece ? piece : "?", topId, topLogit,
-      //                    effective_temp, mirostat_mu,
-      //                    (int)has_leading_space, piece_len);
-      (void)has_leading_space; (void)piece_len;
+      DEBUG_LLM_GENERATEF("[LLM]  pos=%d sampled=%d('%s') top=%d(%.2f) eff_temp=%.2f mu=%.2f sp=%d len=%d",
+                          pos, next, piece ? piece : "?", topId, topLogit,
+                          effective_temp, mirostat_mu,
+                          (int)has_leading_space, piece_len);
     }
 
     pos++;

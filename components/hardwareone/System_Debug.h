@@ -7,6 +7,7 @@
 
 #include <Arduino.h>
 #include "System_Debug_Manager.h"
+#include "System_BuildConfig.h"
 
 // ============================================================================
 // Debug System - Centralized debug output and ring buffer management
@@ -83,6 +84,14 @@
 #define DEBUG_BLUETOOTH_CORE    0x40000000000000ULL // Bit 54 - BLE core lifecycle (init/connect/disconnect)
 #define DEBUG_BLUETOOTH_GATT    0x80000000000000ULL // Bit 55 - BLE GATT operations (read/write/notify)
 #define DEBUG_BLUETOOTH_DATA    0x100000000000000ULL // Bit 56 - BLE command/data transfer
+
+// Bits 57-62: On-device LLM (llama2.c / System_LLM)
+#define DEBUG_LLM               0x200000000000000ULL   // Bit 57 - parent (all LLM debug)
+#define DEBUG_LLM_LOAD          0x400000000000000ULL   // Bit 58 - checkpoint load, header validation, weight mapping
+#define DEBUG_LLM_TOKENIZER     0x800000000000000ULL   // Bit 59 - tokenizer file, BPE encode/decode
+#define DEBUG_LLM_FORWARD       0x1000000000000000ULL  // Bit 60 - transformer forward (per-step; use sparingly)
+#define DEBUG_LLM_GENERATE      0x2000000000000000ULL  // Bit 61 - generation loop, sampling, throughput
+#define DEBUG_LLM_MEMORY        0x4000000000000000ULL  // Bit 62 - PSRAM estimates, context cap, allocations
 
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
@@ -320,6 +329,12 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define DEBUG_MAPS_LOADINGF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MAPS_LOADING, fmt, ##__VA_ARGS__)
 #define DEBUG_MAPS_RENDERINGF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MAPS_RENDERING, fmt, ##__VA_ARGS__)
 #define DEBUG_MAPS_PERFF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MAPS_PERF, fmt, ##__VA_ARGS__)
+#define DEBUG_LLMF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM, fmt, ##__VA_ARGS__)
+#define DEBUG_LLM_LOADF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_LOAD, fmt, ##__VA_ARGS__)
+#define DEBUG_LLM_TOKENIZERF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_TOKENIZER, fmt, ##__VA_ARGS__)
+#define DEBUG_LLM_FORWARDF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_FORWARD, fmt, ##__VA_ARGS__)
+#define DEBUG_LLM_GENERATEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_GENERATE, fmt, ##__VA_ARGS__)
+#define DEBUG_LLM_MEMORYF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_MEMORY, fmt, ##__VA_ARGS__)
 #define DEBUG_WIFIF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_WIFI, fmt, ##__VA_ARGS__)
 #define DEBUG_STORAGEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_STORAGE, fmt, ##__VA_ARGS__)
 #define DEBUG_PERFORMANCEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_PERFORMANCE, fmt, ##__VA_ARGS__)
@@ -365,6 +380,7 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define ERROR_STORAGEF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][STORAGE] " fmt, ##__VA_ARGS__)
 #define ERROR_WIFIF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][WIFI] " fmt, ##__VA_ARGS__)
 #define ERROR_MEMORYF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][MEM] " fmt, ##__VA_ARGS__)
+#define ERROR_LLMF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][LLM] " fmt, ##__VA_ARGS__)
 
 // WARN macros - Always visible (cannot be disabled)
 #define WARN_SENSORSF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][SENSORS] " fmt, ##__VA_ARGS__); } while (0)
@@ -557,6 +573,14 @@ const char* cmd_debugmaps(const String& argsInput);
 const char* cmd_debugmapsloading(const String& argsInput);
 const char* cmd_debugmapsrendering(const String& argsInput);
 const char* cmd_debugmapsperf(const String& argsInput);
+#if ENABLE_ONDEVICE_LLM
+const char* cmd_debugllm(const String& argsInput);
+const char* cmd_debugllmload(const String& argsInput);
+const char* cmd_debugllmtokenizer(const String& argsInput);
+const char* cmd_debugllmforward(const String& argsInput);
+const char* cmd_debugllmgenerate(const String& argsInput);
+const char* cmd_debugllmmemory(const String& argsInput);
+#endif
 
 // System logging commands
 const char* cmd_log(const String& argsInput);

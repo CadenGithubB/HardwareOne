@@ -79,6 +79,7 @@
 #endif
 #if ENABLE_ONDEVICE_LLM
 #include "WebPage_LLM.h"
+#include "System_LLM.h"
 #endif
 #if ENABLE_WEB_GAMES
 #include "WebPage_Games.h"
@@ -1439,6 +1440,26 @@ void buildSystemInfoJson(JsonDocument& doc) {
     i2c["devices"]  = 0;
   }
 #endif
+
+#if ENABLE_ONDEVICE_LLM
+  {
+    LLMStatus llmSt = llmGetStatus();
+    const char* llmStateStr = "UNLOADED";
+    switch (llmSt.state) {
+      case LLMState::LOADING:    llmStateStr = "LOADING"; break;
+      case LLMState::READY:      llmStateStr = "READY"; break;
+      case LLMState::GENERATING: llmStateStr = "GENERATING"; break;
+      case LLMState::ERROR:      llmStateStr = "ERROR"; break;
+      default: break;
+    }
+    JsonObject llm = conn["llm"].to<JsonObject>();
+    llm["state"] = llmStateStr;
+    const char* slash = strrchr(llmSt.modelPath, '/');
+    llm["model"] = slash ? (slash + 1) : llmSt.modelPath;
+    llm["psramKB"] = (unsigned)((llmSt.totalPsramUsed + 512) / 1024);
+    llm["tokPerSec"] = llmSt.lastTokensPerSec;
+  }
+#endif
 }
 
 // ============================================================================
@@ -1853,31 +1874,50 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   size_t contentLen = req->content_len;
 
-  // Check available storage space dynamically
-  size_t totalBytes = 0;
-  size_t usedBytes = 0;
+  // Determine destination storage from ?path= query param (added by hwUploadFile).
+  // Falls back to LittleFS if no query param is present (backward-compatible).
+  // httpd_query_key_value does NOT percent-decode, so urlDecode() is required.
+  VFS::StorageType uploadStorage = VFS::INTERNAL;
+  {
+    char uploadQuery[256];
+    if (httpd_req_get_url_query_str(req, uploadQuery, sizeof(uploadQuery)) == ESP_OK) {
+      char pathVal[128];
+      if (httpd_query_key_value(uploadQuery, "path", pathVal, sizeof(pathVal)) == ESP_OK) {
+        uploadStorage = VFS::getStorageType(urlDecode(String(pathVal)));
+      }
+    }
+  }
+
+  // If the destination is SD but it isn't mounted, reject early with a clear message.
+  if (uploadStorage == VFS::SDCARD && !VFS::isSDAvailable()) {
+    gSensorPollingPaused = wasPaused;
+    sendJsonResponse(req, "{\"success\":false,\"error\":\"SD card not available\"}");
+    return ESP_OK;
+  }
+
+  // Check available storage space for the destination storage
+  uint64_t totalBytes64 = 0, usedBytes64 = 0, freeBytes64 = 0;
   {
     FsLockGuard fsGuard("handleFileUpload.stats");
-    totalBytes = LittleFS.totalBytes();
-    usedBytes = LittleFS.usedBytes();
+    VFS::getStats(uploadStorage, totalBytes64, usedBytes64, freeBytes64);
   }
-  size_t freeBytes = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
+  size_t freeBytes = (size_t)freeBytes64;
   // Estimate actual file size from content length (remove ~33% base64 + URL-encoding overhead)
   size_t estimatedFileSize = (contentLen * 3) / 4;
   // Dynamic limit: 90% of free space (leave headroom for filesystem metadata)
   size_t maxFileSize = (freeBytes * 9) / 10;
-  
-  DEBUG_STORAGEF("[handleFileUpload] Content-Length: %d bytes (est file: %d), free space: %d, max: %d, heap=%u", 
+
+  DEBUG_STORAGEF("[handleFileUpload] Content-Length: %d bytes (est file: %d), free space: %d, max: %d, heap=%u",
                  contentLen, estimatedFileSize, freeBytes, maxFileSize, (unsigned)ESP.getFreeHeap());
-  
+
   // Check if estimated file size exceeds available space
   if (estimatedFileSize > maxFileSize) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: File too large for available space");
     gSensorPollingPaused = wasPaused;
     httpd_resp_set_type(req, "application/json");
     char errBuf[128];
-    snprintf(errBuf, sizeof(errBuf), 
-             "{\"success\":false,\"error\":\"File too large (~%.1fMB). Free: %.1fMB\"}", 
+    snprintf(errBuf, sizeof(errBuf),
+             "{\"success\":false,\"error\":\"File too large (~%.1fMB). Free: %.1fMB\"}",
              estimatedFileSize / (1024.0 * 1024.0), freeBytes / (1024.0 * 1024.0));
     httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -3716,14 +3756,31 @@ esp_err_t handleFilesStats(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  size_t totalBytes = LittleFS.totalBytes();
-  size_t usedBytes = LittleFS.usedBytes();
-  size_t freeBytes = totalBytes - usedBytes;
-  int usagePercent = (totalBytes == 0) ? 0 : (usedBytes * 100) / totalBytes;
+  // Optional ?path= query param — use SD stats when path is under /sd/
+  // httpd_query_key_value does NOT percent-decode, so urlDecode() is required.
+  VFS::StorageType storageType = VFS::INTERNAL;
+  char query[256];
+  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char pathVal[128];
+    if (httpd_query_key_value(query, "path", pathVal, sizeof(pathVal)) == ESP_OK) {
+      storageType = VFS::getStorageType(urlDecode(String(pathVal)));
+    }
+  }
+
+  // If SD was requested but isn't mounted, return a clear error rather than
+  // reporting 0 bytes free (which would produce a misleading "file too large").
+  if (storageType == VFS::SDCARD && !VFS::isSDAvailable()) {
+    sendJsonResponse(req, "{\"success\":false,\"error\":\"SD card not available\"}");
+    return ESP_OK;
+  }
+
+  uint64_t totalBytes = 0, usedBytes = 0, freeBytes = 0;
+  VFS::getStats(storageType, totalBytes, usedBytes, freeBytes);
+  int usagePercent = (totalBytes == 0) ? 0 : (int)((usedBytes * 100) / totalBytes);
 
   char json[128];
-  snprintf(json, sizeof(json), "{\"success\":true,\"total\":%u,\"used\":%u,\"free\":%u,\"usagePercent\":%d}",
-           (unsigned)totalBytes, (unsigned)usedBytes, (unsigned)freeBytes, usagePercent);
+  snprintf(json, sizeof(json), "{\"success\":true,\"total\":%llu,\"used\":%llu,\"free\":%llu,\"usagePercent\":%d}",
+           totalBytes, usedBytes, freeBytes, usagePercent);
 
   sendJsonResponse(req, json);
   return ESP_OK;

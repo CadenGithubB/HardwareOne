@@ -612,6 +612,14 @@ void applySettings() {
     DBG_MAP(debugMapsLoading,      DEBUG_MAPS_LOADING),
     DBG_MAP(debugMapsRendering,    DEBUG_MAPS_RENDERING),
     DBG_MAP(debugMapsPerf,         DEBUG_MAPS_PERF),
+#if ENABLE_ONDEVICE_LLM
+    DBG_MAP(debugLlm,              DEBUG_LLM),
+    DBG_MAP(debugLlmLoad,          DEBUG_LLM_LOAD),
+    DBG_MAP(debugLlmTokenizer,     DEBUG_LLM_TOKENIZER),
+    DBG_MAP(debugLlmForward,       DEBUG_LLM_FORWARD),
+    DBG_MAP(debugLlmGenerate,      DEBUG_LLM_GENERATE),
+    DBG_MAP(debugLlmMemory,        DEBUG_LLM_MEMORY),
+#endif
   };
   #undef DBG_MAP
 
@@ -688,6 +696,16 @@ void applySettings() {
   gDebugSubFlags.cmdflowQueue = gSettings.debugCmdflowQueue;
   gDebugSubFlags.cmdflowContext = gSettings.debugCmdflowContext;
   updateParentDebugFlag(DEBUG_CMD_FLOW, gSettings.debugCommandFlow || gDebugSubFlags.cmdflowRouting || gDebugSubFlags.cmdflowQueue || gDebugSubFlags.cmdflowContext);
+
+#if ENABLE_ONDEVICE_LLM
+  updateParentDebugFlag(DEBUG_LLM,
+                        gSettings.debugLlm ||
+                        gSettings.debugLlmLoad ||
+                        gSettings.debugLlmTokenizer ||
+                        gSettings.debugLlmForward ||
+                        gSettings.debugLlmGenerate ||
+                        gSettings.debugLlmMemory);
+#endif
 
   // Bluetooth parent flag
   updateParentDebugFlag(DEBUG_BLUETOOTH,
@@ -1300,6 +1318,15 @@ static const SettingEntry debugSettingEntries[] = {
   { "loading",    SETTING_BOOL, &gSettings.debugMapsLoading,     0, 0, nullptr, 0, 1, "Loading",             nullptr, false, "maps", "debugmapsloading" },
   { "rendering",  SETTING_BOOL, &gSettings.debugMapsRendering,   0, 0, nullptr, 0, 1, "Rendering",           nullptr, false, "maps", "debugmapsrendering" },
   { "perf",       SETTING_BOOL, &gSettings.debugMapsPerf,       0, 0, nullptr, 0, 1, "Performance",         nullptr, false, "maps", "debugmapsperf" },
+#if ENABLE_ONDEVICE_LLM
+  // --- llm group (on-device LLM) ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugLlm,             0, 0, nullptr, 0, 1, "All LLM",             nullptr, false, "llm", "debugllm" },
+  { "load",       SETTING_BOOL, &gSettings.debugLlmLoad,         0, 0, nullptr, 0, 1, "Load / checkpoint",   nullptr, false, "llm", "debugllmload" },
+  { "tokenizer",  SETTING_BOOL, &gSettings.debugLlmTokenizer,  0, 0, nullptr, 0, 1, "Tokenizer",           nullptr, false, "llm", "debugllmtokenizer" },
+  { "forward",    SETTING_BOOL, &gSettings.debugLlmForward,      0, 0, nullptr, 0, 1, "Forward",             nullptr, false, "llm", "debugllmforward" },
+  { "generate",   SETTING_BOOL, &gSettings.debugLlmGenerate,     0, 0, nullptr, 0, 1, "Generate",            nullptr, false, "llm", "debugllmgenerate" },
+  { "memory",     SETTING_BOOL, &gSettings.debugLlmMemory,       0, 0, nullptr, 0, 1, "Memory / PSRAM",      nullptr, false, "llm", "debugllmmemory" },
+#endif
   // --- standalone (no group) ---
   { "dateTime",         SETTING_BOOL, &gSettings.debugDateTime,       0, 0, nullptr, 0, 1, "Date/Time",            nullptr, false, nullptr, "debugdatetime" },
   { "logger",           SETTING_BOOL, &gSettings.debugLogger,         0, 0, nullptr, 0, 1, "Logger",               nullptr, false, nullptr, "debuglogger" },

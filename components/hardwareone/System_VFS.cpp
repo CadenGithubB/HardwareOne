@@ -85,30 +85,78 @@ namespace VFS {
 
 static bool gSdMounted = false;
 
+// Fully tear down SPI + SD so tryMountSD() can start from a clean slate.
+static void spiTeardown() {
+#if defined(SD_CS_PIN)
+  SD.end();
+  SPI.end();
+  // Drive CS high so the card doesn't interpret noise as a command while the
+  // bus is idle.
+  pinMode(SD_CS_PIN, OUTPUT);
+  digitalWrite(SD_CS_PIN, HIGH);
+#endif
+}
+
+// Send the SD power-up sequence per the SD spec: 74+ clock edges with CS and
+// MOSI held high before CMD0.  Arduino's SD.begin() is supposed to handle
+// this, but doing it explicitly first helps with cards that just came out of
+// a format / reset.
+static void sdPowerUpClocks() {
+#if defined(SD_CS_PIN)
+  digitalWrite(SD_CS_PIN, HIGH);
+  SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+  for (int i = 0; i < 10; i++) SPI.transfer(0xFF);  // 80 clocks
+  SPI.endTransaction();
+  delay(5);
+#endif
+}
+
 static bool tryMountSD() {
 #if defined(SD_CS_PIN)
-  DEBUG_STORAGEF("[SD] Attempting mount with pins: CS=%d", SD_CS_PIN);
-  #if defined(SD_SCK_PIN) && defined(SD_MISO_PIN) && defined(SD_MOSI_PIN)
-  DEBUG_STORAGEF("[SD] SPI pins: SCK=%d, MISO=%d, MOSI=%d", SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN);
-  SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-  #else
-  DEBUG_STORAGEF("[SD] Using default SPI pins");
-  SPI.begin();
-  #endif
+  // Three full attempts, each with a complete SPI bus reset and both
+  // frequencies (fast first, slow fallback).
+  uint32_t frequencies[] = {4000000, 400000};
+  const int FULL_ATTEMPTS = 3;
 
-  // Try different SPI frequencies
-  uint32_t frequencies[] = {4000000, 1000000, 400000};
-  for (uint32_t freq : frequencies) {
-    DEBUG_STORAGEF("[SD] Trying SPI frequency: %lu Hz...", freq);
-    if (SD.begin(SD_CS_PIN, SPI, freq, "/sd")) {
-      INFO_STORAGEF("[SD] Mount SUCCESS at %lu Hz", freq);
-      gSdMounted = true;
-      return true;
+  for (int attempt = 0; attempt < FULL_ATTEMPTS; attempt++) {
+    DEBUG_STORAGEF("[SD] Mount attempt %d/%d — resetting SPI bus",
+                   attempt + 1, FULL_ATTEMPTS);
+
+    // Complete teardown before each full attempt so we always start clean.
+    spiTeardown();
+    delay(50 + attempt * 100);   // back-off: 50 ms, 150 ms, 250 ms
+
+    // Re-initialise SPI with explicit pins if defined.
+#if defined(SD_SCK_PIN) && defined(SD_MISO_PIN) && defined(SD_MOSI_PIN)
+    SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+#else
+    SPI.begin();
+#endif
+    delay(10);
+
+    // SD spec power-up sequence.
+    sdPowerUpClocks();
+
+    // Try each frequency in order.
+    for (uint32_t freq : frequencies) {
+      DEBUG_STORAGEF("[SD]   Trying %lu Hz...", freq);
+      if (SD.begin(SD_CS_PIN, SPI, freq, "/sd")) {
+        INFO_STORAGEF("[SD] Mount SUCCESS at %lu Hz (attempt %d)",
+                      freq, attempt + 1);
+        gSdMounted = true;
+        return true;
+      }
+      DEBUG_STORAGEF("[SD]   Failed at %lu Hz", freq);
+      // Tear down SD between frequency changes so SD.begin() always starts
+      // with a fresh SPI transaction state.
+      SD.end();
+      delay(50);
     }
-    DEBUG_STORAGEF("[SD] Mount failed at this frequency");
-    delay(100);
+
+    WARN_STORAGEF("[SD] Attempt %d/%d failed", attempt + 1, FULL_ATTEMPTS);
   }
-  WARN_STORAGEF("[SD] All mount attempts failed");
+
+  WARN_STORAGEF("[SD] All mount attempts exhausted");
 #endif
   gSdMounted = false;
   return false;
@@ -136,8 +184,15 @@ StorageType getStorageType(const String& path) {
 String normalize(const String& path) {
   String p = path;
   p.trim();
-  if (p.length() == 0) return String("/");
-  if (!p.startsWith("/")) { p = "/" + p; }
+  if (p.length() == 0) return "/";
+  if (!p.startsWith("/")) {
+    // Pre-reserve to avoid two separate allocations for the prepend.
+    String prepended;
+    prepended.reserve(p.length() + 1);
+    prepended = '/';
+    prepended += p;
+    p = prepended;
+  }
 
   // Collapse repeated slashes (best-effort)
   while (p.indexOf("//") >= 0) {
@@ -157,7 +212,7 @@ String normalize(const String& path) {
 
 String stripSdPrefix(const String& path) {
   String p = normalize(path);
-  if (p == "/sd") return String("/");
+  if (p == "/sd") return "/";
   if (p.startsWith("/sd/")) {
     return p.substring(3);
   }
@@ -175,7 +230,7 @@ bool exists(const String& path) {
   if (getStorageType(p) == SDCARD) {
     if (!gSdMounted) return false;
     if (p == "/sd") return true;
-    return SD.exists(stripSdPrefix(p));
+    return SD.exists(p.c_str() + 3);
   }
 
   if (!filesystemReady) return false;
@@ -188,8 +243,8 @@ File open(const String& path, const char* mode, bool create) {
 
   if (getStorageType(p) == SDCARD) {
     if (!gSdMounted) return File();
-    String sp = stripSdPrefix(p);
-    return SD.open(sp.c_str(), mode, create);
+    const char* sdPath = (p == "/sd") ? "/" : p.c_str() + 3;
+    return SD.open(sdPath, mode, create);
   }
 
   if (!filesystemReady) return File();
@@ -203,7 +258,7 @@ bool mkdir(const String& path) {
   if (getStorageType(p) == SDCARD) {
     if (!gSdMounted) return false;
     if (p == "/sd") return false;
-    return SD.mkdir(stripSdPrefix(p));
+    return SD.mkdir(p.c_str() + 3);
   }
 
   if (!filesystemReady) return false;
@@ -217,7 +272,7 @@ bool remove(const String& path) {
   if (getStorageType(p) == SDCARD) {
     if (!gSdMounted) return false;
     if (p == "/sd") return false;
-    bool ok = SD.remove(stripSdPrefix(p));
+    bool ok = SD.remove(p.c_str() + 3);
     if (ok) notifyFileDeleted(p.c_str());
     return ok;
   }
@@ -243,7 +298,7 @@ bool rename(const String& pathFrom, const String& pathTo) {
   if (tf == SDCARD) {
     if (!gSdMounted) return false;
     if (from == "/sd" || to == "/sd") return false;
-    return SD.rename(stripSdPrefix(from), stripSdPrefix(to));
+    return SD.rename(from.c_str() + 3, to.c_str() + 3);
   }
 
   if (!filesystemReady) return false;
@@ -257,7 +312,7 @@ bool rmdir(const String& path) {
   if (getStorageType(p) == SDCARD) {
     if (!gSdMounted) return false;
     if (p == "/sd") return false;
-    bool ok = SD.rmdir(stripSdPrefix(p));
+    bool ok = SD.rmdir(p.c_str() + 3);
     if (ok) notifyFileDeleted(p.c_str());
     return ok;
   }
@@ -299,13 +354,10 @@ bool unmountSD() {
 
 bool remountSD() {
 #if defined(SD_CS_PIN)
-  // Unmount first if already mounted
-  if (gSdMounted) {
-    SD.end();
-    gSdMounted = false;
-  }
-  
-  // Re-initialize SPI and try mounting
+  // Full teardown regardless of current mount state — guarantees a clean bus.
+  spiTeardown();
+  gSdMounted = false;
+  delay(100);
   return tryMountSD();
 #else
   return false;
@@ -377,6 +429,8 @@ bool formatSD() {
     if (ret != ESP_OK) {
       ERROR_STORAGEF("[SD FORMAT] Format failed: 0x%x", ret);
       spi_bus_free(SPI2_HOST);
+      spiTeardown();
+      delay(200);
       return false;
     }
   } else {
@@ -392,12 +446,18 @@ bool formatSD() {
   }
   
   INFO_STORAGEF("[SD FORMAT] Format complete, unmounting ESP-IDF...");
-  // Unmount the ESP-IDF mount
   esp_vfs_fat_sdcard_unmount("/sdformat", card);
   spi_bus_free(SPI2_HOST);
-  
+
+  // The ESP-IDF SPI master driver fully resets the peripheral when freed.
+  // The Arduino SPI library needs the hardware to settle before it can
+  // reinitialise it — without this delay SD.begin() either hangs or
+  // immediately returns false.
+  INFO_STORAGEF("[SD FORMAT] SPI bus released, settling before remount...");
+  spiTeardown();    // make sure CS is high and Arduino side is clean too
+  delay(500);       // 500 ms is enough for all tested cards
+
   DEBUG_STORAGEF("[SD FORMAT] Remounting with Arduino SD...");
-  // Remount with Arduino SD library
   return tryMountSD();
 #else
   return false;
