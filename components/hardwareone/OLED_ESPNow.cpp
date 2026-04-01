@@ -1652,7 +1652,7 @@ void oledEspNowSendTextMessage() {
   
   // Build command: espnow send <mac> <message>
   char cmdBuf[256];
-  snprintf(cmdBuf, sizeof(cmdBuf), "espnow send %s %s", macStr, gOLEDEspNowState.textMessageBuffer.c_str());
+  snprintf(cmdBuf, sizeof(cmdBuf), "espnowsend %s %s", macStr, gOLEDEspNowState.textMessageBuffer.c_str());
   executeOLEDCommand(cmdBuf);
   
   // Clear buffer
@@ -1686,7 +1686,7 @@ void oledEspNowSendRemoteCommand() {
   
   // Build command: espnow remote <mac> <username> <password> <command>
   char cmdBuf[384];
-  snprintf(cmdBuf, sizeof(cmdBuf), "espnow remote %s %s %s %s", macStr,
+  snprintf(cmdBuf, sizeof(cmdBuf), "espnowremote %s %s %s %s", macStr,
            gOLEDEspNowState.remoteUsername.c_str(),
            gOLEDEspNowState.remotePassword.c_str(),
            gOLEDEspNowState.remoteCommand.c_str());
@@ -1844,7 +1844,7 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
     // Stationary: toggle boolean via command
     if (gOLEDEspNowState.settingsEditField == 5) {
       extern void executeOLEDCommand(const String& argsInput);
-      executeOLEDCommand(gSettings.espnowStationary ? "espnow stationary 0" : "espnow stationary 1");
+      executeOLEDCommand(gSettings.espnowStationary ? "espnowstationary 0" : "espnowstationary 1");
       gOLEDEspNowState.settingsEditField = -1;
       return true;
     }
@@ -1853,11 +1853,11 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
     if (gOLEDEspNowState.settingsEditField == 7) {
       extern void executeOLEDCommand(const String& argsInput);
       if (gSettings.meshRole == MESH_ROLE_WORKER) {
-        executeOLEDCommand("espnow meshrole master");
+        executeOLEDCommand("espnowmeshrole master");
       } else if (gSettings.meshRole == MESH_ROLE_MASTER) {
-        executeOLEDCommand("espnow meshrole backup");
+        executeOLEDCommand("espnowmeshrole backup");
       } else {
-        executeOLEDCommand("espnow meshrole worker");
+        executeOLEDCommand("espnowmeshrole worker");
       }
       gOLEDEspNowState.settingsEditField = -1;
       return true;
@@ -1922,30 +1922,30 @@ void oledEspNowApplySettingsEdit(const String& value) {
   String cmd;
   switch (gOLEDEspNowState.settingsEditField) {
     case 0: // Device Name
-      cmd = "espnow setname " + value;
+      cmd = "espnowsetname " + value;
       break;
     case 1: // Room
-      cmd = "espnow room " + value;
+      cmd = "espnowroom " + value;
       break;
     case 2: // Zone
-      cmd = "espnow zone " + value;
+      cmd = "espnowzone " + value;
       break;
     case 3: // Friendly Name
-      cmd = "espnow friendlyname " + value;
+      cmd = "espnowfriendlyname " + value;
       break;
     case 4: // Tags
-      cmd = "espnow tags " + value;
+      cmd = "espnowtags " + value;
       break;
     case 6: // Passphrase
       if (value.length() > 0) {
-        cmd = "espnow setpassphrase \"" + value + "\"";
+        cmd = "espnowsetpassphrase \"" + value + "\"";
       }
       break;
     case 8: // Master MAC
-      cmd = "espnow meshmaster " + value;
+      cmd = "espnowmeshmaster " + value;
       break;
     case 9: // Backup MAC
-      cmd = "espnow meshbackup " + value;
+      cmd = "espnowmeshbackup " + value;
       break;
   }
   if (cmd.length() > 0) {

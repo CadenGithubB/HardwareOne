@@ -2450,21 +2450,21 @@ const char* cmd_ei_track_clear(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry edgeImpulseCommands[] = {
   { "ei", "Edge Impulse ML inference commands.", false, cmd_ei, "Usage: ei <subcommand>" },
-  { "ei enable", "Enable/disable Edge Impulse inference.", false, cmd_ei_enable, "Usage: ei enable <0|1>" },
-  { "ei detect", "Run single object detection inference.", false, cmd_ei_detect, "Usage: ei detect" },
-  { "ei file", "Run inference on stored JPEG image.", false, cmd_ei_file, "Usage: ei file <path>" },
-  { "ei continuous", "Start/stop continuous inference mode.", false, cmd_ei_continuous, "Usage: ei continuous <0|1>" },
-  { "ei confidence", "Set minimum detection confidence.", false, cmd_ei_confidence, "Usage: ei confidence <0.0-1.0>" },
-  { "ei status", "Show Edge Impulse status.", false, cmd_ei_status, "Usage: ei status" },
-  { "ei model", "Model management commands.", false, cmd_ei_model, "Usage: ei model <subcommand>" },
-  { "ei model list", "List available .tflite models.", false, cmd_ei_model_list, "Usage: ei model list" },
-  { "ei model load", "Load a TFLite model from LittleFS.", false, cmd_ei_model_load, "Usage: ei model load <filename>" },
-  { "ei model info", "Show loaded model information.", false, cmd_ei_model_info, "Usage: ei model info" },
-  { "ei model unload", "Unload the current model.", false, cmd_ei_model_unload, "Usage: ei model unload" },
-  { "ei track", "State tracking commands.", false, cmd_ei_track, "Usage: ei track <subcommand>" },
-  { "ei track status", "Show currently tracked objects.", false, cmd_ei_track_status, "Usage: ei track status" },
-  { "ei track enable", "Enable/disable state tracking.", false, cmd_ei_track_enable, "Usage: ei track enable <0|1>" },
-  { "ei track clear", "Clear all tracked objects.", false, cmd_ei_track_clear, "Usage: ei track clear" }
+  { "eienable", "Enable/disable Edge Impulse inference.", false, cmd_ei_enable, "Usage: eienable <0|1>" },
+  { "eidetect", "Run single object detection inference.", false, cmd_ei_detect, "Usage: eidetect" },
+  { "eifile", "Run inference on stored JPEG image.", false, cmd_ei_file, "Usage: eifile <path>" },
+  { "eicontinuous", "Start/stop continuous inference mode.", false, cmd_ei_continuous, "Usage: eicontinuous <0|1>" },
+  { "eiconfidence", "Set minimum detection confidence.", false, cmd_ei_confidence, "Usage: eiconfidence <0.0-1.0>" },
+  { "eistatus", "Show Edge Impulse status.", false, cmd_ei_status, "Usage: eistatus" },
+  { "eimodel", "Model management commands.", false, cmd_ei_model, "Usage: eimodel <subcommand>" },
+  { "eimodellist", "List available .tflite models.", false, cmd_ei_model_list, "Usage: eimodellist" },
+  { "eimodelload", "Load a TFLite model from LittleFS.", false, cmd_ei_model_load, "Usage: eimodelload <filename>" },
+  { "eimodelinfo", "Show loaded model information.", false, cmd_ei_model_info, "Usage: eimodelinfo" },
+  { "eimodelunload", "Unload the current model.", false, cmd_ei_model_unload, "Usage: eimodelunload" },
+  { "eitrack", "State tracking commands.", false, cmd_ei_track, "Usage: eitrack <subcommand>" },
+  { "eitrackstatus", "Show currently tracked objects.", false, cmd_ei_track_status, "Usage: eitrackstatus" },
+  { "eitrackenable", "Enable/disable state tracking.", false, cmd_ei_track_enable, "Usage: eitrackenable <0|1>" },
+  { "eitrackclear", "Clear all tracked objects.", false, cmd_ei_track_clear, "Usage: eitrackclear" }
 };
 
 const size_t edgeImpulseCommandsCount = sizeof(edgeImpulseCommands) / sizeof(edgeImpulseCommands[0]);

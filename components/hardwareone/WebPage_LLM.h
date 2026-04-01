@@ -355,7 +355,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       rep_window:     32
     };
     if (ctx.isDoMode) {
-      body.hard_cap = 10;
+      body.hard_cap = 4;
       body.sentence_limit = 0;
     }
     if (ctx.prevAnswers.length > 0) { body.suppress = ctx.prevAnswers; }
@@ -411,7 +411,14 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
     // Do: mode — render suggestion UI instead of retry
     if (ctx.isDoMode && ctx.aText.textContent.trim()) {
-      var cmd = ctx.aText.textContent.trim();
+      var raw = ctx.aText.textContent.trim();
+      // Extract just the command — strip any trailing explanation text.
+      // Commands are 1-2 words (e.g. "wifistatus", "ledcolor green").
+      // Stop at punctuation or common explanation words.
+      var cmd = raw.replace(/[.,;!?].*/,'')             // strip from first punctuation
+                   .replace(/\s+(to|for|and|the|is|it|that|which|will|can|shows|displays|checks|reads)\b.*/i,'')  // strip explanation
+                   .trim();
+      if (!cmd) cmd = raw.split(/\s/)[0];  // fallback: first word
       ctx.aText.textContent = '';
 
       var suggestion = document.createElement('div');
@@ -493,6 +500,17 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   function doRunCmd(cmdInput, resultDiv) {
     var cmd = cmdInput.value.trim();
     if (!cmd) return;
+    // Find the Run button (sibling of the input)
+    var runBtn = cmdInput.parentElement.querySelector('.qa-do-run');
+    // Disable input and button immediately
+    cmdInput.disabled = true;
+    cmdInput.style.opacity = '0.6';
+    if (runBtn) {
+      runBtn.disabled = true;
+      runBtn.textContent = 'Running...';
+      runBtn.style.opacity = '0.6';
+      runBtn.style.cursor = 'default';
+    }
     resultDiv.style.display = '';
     resultDiv.textContent = 'Running...';
     fetch('/api/cli', {
@@ -503,9 +521,19 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     }).then(function(r) { return r.text(); })
       .then(function(t) {
         resultDiv.textContent = t || '(no output)';
+        if (runBtn) runBtn.textContent = 'Ran \u2713';
       })
       .catch(function(e) {
         resultDiv.textContent = 'Error: ' + e.message;
+        // Re-enable on error so user can retry
+        cmdInput.disabled = false;
+        cmdInput.style.opacity = '';
+        if (runBtn) {
+          runBtn.disabled = false;
+          runBtn.textContent = 'Run \u25B6';
+          runBtn.style.opacity = '';
+          runBtn.style.cursor = 'pointer';
+        }
       });
   }
 
@@ -530,7 +558,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
     var qRow = document.createElement('div');
     qRow.className = 'qa-q-row';
-    qRow.innerHTML = '<span class="qa-label qa-label-q">Q:</span>';
+    qRow.innerHTML = '<span class="qa-label qa-label-q">' + (isDoMode ? 'Do:' : 'Q:') + '</span>';
     var qText = document.createElement('span');
     qText.className = 'qa-q-text';
     qText.textContent = intent;
@@ -539,7 +567,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
     var aRow = document.createElement('div');
     aRow.className = 'qa-a-row';
-    aRow.innerHTML = '<span class="qa-label qa-label-a">' + (isDoMode ? 'Do:' : 'A:') + '</span>';
+    aRow.innerHTML = '<span class="qa-label qa-label-a">A:</span>';
     var aText = document.createElement('span');
     aText.className = 'qa-a-text';
     aRow.appendChild(aText);

@@ -922,10 +922,9 @@ namespace {
   }
 
   static String redactEspNowRemote(const String& in) {
-    // Expect: "espnow remote <target> <username> <password> <command>..."
+    // Expect: "espnowremote <target> <username> <password> <command>..."
     String c = in;
-    int base = c.indexOf(' ');                      // after "espnow"
-    if (base > 0) base = c.indexOf(' ', base + 1);  // after "remote"
+    int base = c.indexOf(' ');                      // after "espnowremote"
     if (base > 0) {
       int t1 = c.indexOf(' ', base + 1);                 // end of <target>
       int t2 = (t1 > 0) ? c.indexOf(' ', t1 + 1) : -1;   // end of <username>
@@ -947,8 +946,8 @@ namespace {
     { "login ",            MASK_TOKEN_AT_POS,    3, nullptr },  // login <user> <password>
     { "testencryption ",   MASK_TOKEN_AT_POS,    2, nullptr },  // testencryption <secret>
     { "testpassword ",     MASK_TOKEN_AT_POS,    2, nullptr },  // testpassword <secret>
-    { "user request ",     MASK_AFTER_TOKEN_POS, 3, nullptr },  // user request <name> <pass> ...
-    { "espnow remote ",    CALL_HANDLER,         0, &redactEspNowRemote },
+    { "userrequest ",      MASK_AFTER_TOKEN_POS, 2, nullptr },  // userrequest <name> <pass> ...
+    { "espnowremote ",     CALL_HANDLER,         0, &redactEspNowRemote },
   };
 }
 
@@ -1658,7 +1657,7 @@ const CommandEntry commands[] = {
   // ---- Misc ----
   { "reboot", "Reboot the system.", true, cmd_reboot, nullptr, "system", "reboot" },
   { "broadcast", "Send message to all or specific user.", true, cmd_broadcast },
-  { "pending list", "List pending user requests.", true, cmd_pending_list },
+  { "pendinglist", "List pending user requests.", true, cmd_pending_list },
   { "wait", "Delay execution for N milliseconds: wait <ms>.", false, cmd_wait },
   { "sleep", "Alias for wait: sleep <ms>.", false, cmd_wait },
   { "lightsleep", "Enter ESP32 light sleep: lightsleep [seconds] (default 20s).", true, cmd_lightsleep },
@@ -1675,8 +1674,8 @@ extern const char* cmd_battery_calibrate(const String& argsInput);
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry batteryCommands[] = {
-  {"battery status", "Show battery voltage, charge level, and status", false, cmd_battery_status, nullptr, "battery", "status"},
-  {"battery calibrate", "Recalibrate battery ADC readings", true, cmd_battery_calibrate}
+  {"batterystatus", "Show battery voltage, charge level, and status", false, cmd_battery_status, nullptr, "battery", "status"},
+  {"batterycalibrate", "Recalibrate battery ADC readings", true, cmd_battery_calibrate}
 };
 
 const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batteryCommands[0]);

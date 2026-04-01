@@ -735,11 +735,11 @@ const CommandEntry fmRadioCommands[] = {
   { "openfmradio", "Start FM Radio sensor.", false, cmd_fmradio_start, nullptr, "sensor", "radio", "open" },
   { "closefmradio", "Stop FM Radio sensor.", false, cmd_fmradio_stop, nullptr, "sensor", "radio", "close" },
   { "fmradioread", "Read FM Radio status.", false, cmd_fmradio_status },
-  { "fmradio tune", "Tune to frequency: <freq>", false, cmd_fmradio_tune, "Usage: fmradio tune <frequency> (e.g., 103.9 or 10390)" },
-  { "fmradio seek", "Seek next station [up|down]", false, cmd_fmradio_seek },
-  { "fmradio volume", "Set volume: <0-15>", false, cmd_fmradio_volume, "Usage: fmradio volume <0-15>" },
-  { "fmradio mute", "Mute audio", false, cmd_fmradio_mute },
-  { "fmradio unmute", "Unmute audio", false, cmd_fmradio_mute },
+  { "fmradiotune", "Tune to frequency: <freq>", false, cmd_fmradio_tune, "Usage: fmradiotune <frequency> (e.g., 103.9 or 10390)" },
+  { "fmradioseek", "Seek next station [up|down]", false, cmd_fmradio_seek },
+  { "fmradiovolume", "Set volume: <0-15>", false, cmd_fmradio_volume, "Usage: fmradiovolume <0-15>" },
+  { "fmradiomute", "Mute audio", false, cmd_fmradio_mute },
+  { "fmradiounmute", "Unmute audio", false, cmd_fmradio_mute },
   
   // Auto-start
   { "fmradioautostart", "Enable/disable FM Radio auto-start after boot [on|off]", false, cmd_fmradioautostart, "Usage: fmradioautostart [on|off]" },

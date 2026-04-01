@@ -3634,7 +3634,7 @@ esp_err_t handleRegisterSubmit(httpd_req_t* req) {
   // Execute the built-in command via unified pipeline so it is logged/audited
   AuthContext ctx = makeWebAuthCtx(req);
   char cmdBuf[256];
-  snprintf(cmdBuf, sizeof(cmdBuf), "user request %s %s %s", username.c_str(), password.c_str(), confirmPassword.c_str());
+  snprintf(cmdBuf, sizeof(cmdBuf), "userrequest %s %s %s", username.c_str(), password.c_str(), confirmPassword.c_str());
   String cmdline = cmdBuf;
   String out;
   bool ok = executeUnifiedWebCommand(req, ctx, cmdline, out);

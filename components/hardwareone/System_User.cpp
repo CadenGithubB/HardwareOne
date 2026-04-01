@@ -2835,23 +2835,23 @@ const CommandEntry userSystemCommands[] = {
   { "serialrequireauth", "Enable/disable serial auth requirement [on|off].", true, cmd_serialrequireauth, "Usage: serialrequireauth [on|off]" },
   
   // User management commands
-  { "user approve", "Approve pending request: <username>", true, cmd_user_approve },
-  { "user deny", "Deny pending request: <username>", true, cmd_user_deny },
-  { "user promote", "Promote to admin: <username>", true, cmd_user_promote, "Usage: user promote <username>" },
-  { "user demote", "Demote from admin: <username>", true, cmd_user_demote, "Usage: user demote <username>" },
-  { "user delete", "Delete user: <username>", true, cmd_user_delete, "Usage: user delete <username>" },
-  { "user changepassword", "Change own password: <currentPass> <newPass> <confirmPass>", false, cmd_user_changepassword, "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>" },
-  { "user resetpassword", "Reset user password: <username> <newPassword> [0|1]", true, cmd_user_resetpassword,
-    "Usage: user resetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login" },
-  { "user add", "Create user: <username> <password> [0|1]", true, cmd_user_add, "Usage: user add <username> <password> [0|1]\nOptional: 1 = require new password on next login, 0 = omit" },
-  { "user list", "List all users.", true, cmd_user_list },
-  { "user request", "Request account: <user> <pass> [confirm]", false, cmd_user_request, "Usage: user request <username> <password> [confirmPassword]" },
-  { "user sync", "Sync user to ESP-NOW: <username> <target>", true, cmd_user_sync },
-  
+  { "userapprove", "Approve pending request: <username>", true, cmd_user_approve },
+  { "userdeny", "Deny pending request: <username>", true, cmd_user_deny },
+  { "userpromote", "Promote to admin: <username>", true, cmd_user_promote, "Usage: userpromote <username>" },
+  { "userdemote", "Demote from admin: <username>", true, cmd_user_demote, "Usage: userdemote <username>" },
+  { "userdelete", "Delete user: <username>", true, cmd_user_delete, "Usage: userdelete <username>" },
+  { "userchangepassword", "Change own password: <currentPass> <newPass> <confirmPass>", false, cmd_user_changepassword, "Usage: userchangepassword <currentPassword> <newPassword> <confirmPassword>" },
+  { "userresetpassword", "Reset user password: <username> <newPassword> [0|1]", true, cmd_user_resetpassword,
+    "Usage: userresetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login" },
+  { "useradd", "Create user: <username> <password> [0|1]", true, cmd_user_add, "Usage: useradd <username> <password> [0|1]\nOptional: 1 = require new password on next login, 0 = omit" },
+  { "userlist", "List all users.", true, cmd_user_list },
+  { "userrequest", "Request account: <user> <pass> [confirm]", false, cmd_user_request, "Usage: userrequest <username> <password> [confirmPassword]" },
+  { "usersync", "Sync user to ESP-NOW: <username> <target>", true, cmd_user_sync },
+
   // Session management commands
-  { "pending list", "List pending user requests.", true, cmd_pending_list },
-  { "session list", "List active sessions.", true, cmd_session_list },
-  { "session revoke", "Revoke session: <sid|user> [reason]", true, cmd_session_revoke, "Usage:\n  session revoke sid <sid> [reason]\n  session revoke user <username> [reason]" },
+  { "pendinglist", "List pending user requests.", true, cmd_pending_list },
+  { "sessionlist", "List active sessions.", true, cmd_session_list },
+  { "sessionrevoke", "Revoke session: <sid|user> [reason]", true, cmd_session_revoke, "Usage:\n  sessionrevoke sid <sid> [reason]\n  sessionrevoke user <username> [reason]" },
 
   // IP ban management
   { "ban",      "Permanently ban an IP: <ip> [reason]",      true, cmd_ban,      "Usage: ban <ip> [reason]\nBlocks all access from the IP until manually unbanned." },

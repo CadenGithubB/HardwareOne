@@ -1471,7 +1471,7 @@ void hardwareone_setup() {
   #if ENABLE_ESP_SR
   if (gSettings.srAutoStart) {
     broadcastOutput("Starting ESP-SR speech recognition...");
-    runUnifiedSystemCommand("sr start");
+    runUnifiedSystemCommand("srstart");
   } else if (gSettings.microphoneAutoStart) {
     broadcastOutput("Starting microphone sensor...");
     runUnifiedSystemCommand("openmic");
