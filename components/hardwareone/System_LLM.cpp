@@ -3021,8 +3021,9 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   // very common function words. During generation, these get a small logit boost
   // to nudge the model toward on-topic answers.
   static constexpr int   MAX_CONTENT_TOKENS   = 16;
-  static constexpr float CONTENT_LOGIT_BOOST  = 2.0f;  // logit bonus for content tokens
-  static constexpr int   CONTENT_BOOST_WINDOW = 10;    // only boost first N generated tokens
+  static constexpr float CONTENT_LOGIT_BOOST       = 1.5f;  // logit bonus for content tokens (gentle nudge)
+  static constexpr float CONTENT_LOGIT_BOOST_LATE  = 0.5f;  // weaker nudge after initial window
+  static constexpr int   CONTENT_BOOST_WINDOW      = 10;    // first N tokens get full boost
   int content_tokens[MAX_CONTENT_TOKENS];
   int content_token_count = 0;
   {
@@ -3291,19 +3292,27 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       // Apply to raw logits before temperature scaling.  Tokens in the recent
       // window have their logit divided (if positive) or multiplied (if negative)
       // by REP_PENALTY, making them less likely without zeroing them entirely.
+      // Content tokens (topic words from the prompt) are EXEMPT — the model
+      // should be allowed to repeat "WiFi" or "sensor" across sentences.
       if (rep_buf && REP_PENALTY > 1.0f) {
         int count = (rep_fill < REP_WINDOW) ? rep_fill : REP_WINDOW;
         int penalized = 0;
         for (int ri = 0; ri < count; ri++) {
           int tok = rep_buf[ri];
           if (tok >= 0 && tok < p->vocab_size) {
+            // Skip content tokens — don't penalize on-topic words
+            bool isContent = false;
+            for (int ci = 0; ci < content_token_count; ci++) {
+              if (content_tokens[ci] == tok) { isContent = true; break; }
+            }
+            if (isContent) continue;
             if (logits[tok] > 0.0f) logits[tok] /= REP_PENALTY;
             else                     logits[tok] *= REP_PENALTY;
             penalized++;
           }
         }
-        DEBUG_LLM_GENERATEF("[LLM] rep_penalty: penalized %d/%d tokens (window=%d penalty=%.2f)",
-                            penalized, count, REP_WINDOW, REP_PENALTY);
+        DEBUG_LLM_GENERATEF("[LLM] rep_penalty: penalized %d/%d tokens (window=%d penalty=%.2f, %d content-exempt)",
+                            penalized, count, REP_WINDOW, REP_PENALTY, content_token_count);
       }
 
       // ── Suppress penalty (retry mechanism) ──────────────────────────────────
@@ -3336,24 +3345,25 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       // ── Prompt content logit boost (first 10 generated tokens only) ────────
       // Nudge the model toward on-topic answers by boosting logits for tokens
       // that appeared as content words in the prompt. Applied only during the
-      // first 10 generated tokens — after that the model has either latched
-      // onto the right topic or it hasn't, and continued boosting injects
-      // noise that causes topic bleed and garbled output.
+      // first 10 generated tokens get full boost to latch onto the right topic.
+      // After that, a weaker "late" boost continues through the entire generation
+      // to prevent sentence 2 from drifting off-topic.
       int gen_pos = pos - num_prompt_tokens + 1;  // 0-based generated token index
-      if (content_token_count > 0 && gen_pos < CONTENT_BOOST_WINDOW) {
+      if (content_token_count > 0) {
+        float boost = (gen_pos < CONTENT_BOOST_WINDOW) ? CONTENT_LOGIT_BOOST : CONTENT_LOGIT_BOOST_LATE;
         int boosted = 0;
         for (int ci = 0; ci < content_token_count; ci++) {
           int ctok = content_tokens[ci];
           if (ctok >= 0 && ctok < p->vocab_size) {
             float old_logit = logits[ctok];
-            logits[ctok] += CONTENT_LOGIT_BOOST;
+            logits[ctok] += boost;
             boosted++;
             if (pos == num_prompt_tokens - 1 || pos % 8 == 0) {
               const char* cname = (ctok < gLLM.tokenizer.vocab_size) ?
                                    gLLM.tokenizer.vocab[ctok] : "?";
-              DEBUG_LLM_GENERATEF("[LLM] CONTENT_BOOST pos=%d gen=%d/%d tok=%d('%s') %.2f -> %.2f (+%.1f)",
-                                  pos, gen_pos, CONTENT_BOOST_WINDOW, ctok, cname,
-                                  old_logit, logits[ctok], CONTENT_LOGIT_BOOST);
+              DEBUG_LLM_GENERATEF("[LLM] CONTENT_BOOST pos=%d gen=%d tok=%d('%s') %.2f -> %.2f (+%.1f)",
+                                  pos, gen_pos, ctok, cname,
+                                  old_logit, logits[ctok], boost);
             }
           }
         }

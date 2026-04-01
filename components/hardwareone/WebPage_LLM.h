@@ -121,6 +121,30 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 .qa-adv-body select{padding:3px 6px;border:1px solid var(--border);border-radius:4px;
   background:var(--panel-bg);color:var(--panel-fg);font-size:.82em}
 .qa-adv-hint{font-size:.73em;color:var(--muted);font-style:italic;width:100%}
+
+/* ── Do: suggestion ── */
+.qa-do-suggestion {
+  display:flex;align-items:center;gap:8px;
+  padding:8px 12px;background:var(--panel-bg);
+  border:1px solid var(--accent);border-radius:6px;
+}
+.qa-do-cmd {
+  font-family:'Courier New',monospace;font-size:.95em;color:var(--panel-fg);
+  background:var(--bg);border:1px solid var(--border);border-radius:4px;
+  padding:4px 8px;flex:1;outline:none;
+}
+.qa-do-cmd:focus{border-color:var(--accent)}
+.qa-do-run {
+  background:var(--accent);color:#fff;border:none;border-radius:4px;
+  padding:6px 16px;cursor:pointer;font-size:.9em;white-space:nowrap;
+}
+.qa-do-run:hover{opacity:.85}
+.qa-do-result {
+  margin-top:6px;padding:6px 10px;background:var(--panel-bg);
+  border:1px solid var(--border);border-radius:4px;
+  font-family:'Courier New',monospace;font-size:.85em;color:var(--muted);
+  white-space:pre-wrap;
+}
 </style>
 )CSS", HTTPD_RESP_USE_STRLEN);
 
@@ -330,6 +354,10 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       rep_penalty:    repen,
       rep_window:     32
     };
+    if (ctx.isDoMode) {
+      body.hard_cap = 10;
+      body.sentence_limit = 0;
+    }
     if (ctx.prevAnswers.length > 0) { body.suppress = ctx.prevAnswers; }
 
     abortCtrl = new AbortController();
@@ -381,6 +409,39 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     inputEl.focus();
     fetchStatus(true, ctx.metaLine);
 
+    // Do: mode — render suggestion UI instead of retry
+    if (ctx.isDoMode && ctx.aText.textContent.trim()) {
+      var cmd = ctx.aText.textContent.trim();
+      ctx.aText.textContent = '';
+
+      var suggestion = document.createElement('div');
+      suggestion.className = 'qa-do-suggestion';
+
+      var cmdInput = document.createElement('input');
+      cmdInput.className = 'qa-do-cmd';
+      cmdInput.type = 'text';
+      cmdInput.value = cmd;
+
+      var runBtn = document.createElement('button');
+      runBtn.className = 'qa-do-run';
+      runBtn.textContent = 'Run \u25B6';
+
+      var resultDiv = document.createElement('div');
+      resultDiv.className = 'qa-do-result';
+      resultDiv.style.display = 'none';
+
+      runBtn.onclick = function() { doRunCmd(cmdInput, resultDiv); };
+      cmdInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); doRunCmd(cmdInput, resultDiv); }
+      });
+
+      suggestion.appendChild(cmdInput);
+      suggestion.appendChild(runBtn);
+      ctx.aText.appendChild(suggestion);
+      ctx.pair.appendChild(resultDiv);
+      return;
+    }
+
     // Show retry button if under 3 retries
     if (ctx.prevAnswers.length < 3 && ctx.aText.textContent.trim()) {
       if (!ctx.retryBtn) {
@@ -428,11 +489,35 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     }
   }
 
+  // ── run Do: command ──
+  function doRunCmd(cmdInput, resultDiv) {
+    var cmd = cmdInput.value.trim();
+    if (!cmd) return;
+    resultDiv.style.display = '';
+    resultDiv.textContent = 'Running...';
+    fetch('/api/cli', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      credentials: 'same-origin',
+      body: 'cmd=' + encodeURIComponent(cmd)
+    }).then(function(r) { return r.text(); })
+      .then(function(t) {
+        resultDiv.textContent = t || '(no output)';
+      })
+      .catch(function(e) {
+        resultDiv.textContent = 'Error: ' + e.message;
+      });
+  }
+
   // ── ask ──
   window.qaAsk = function() {
     var q = inputEl.value.trim();
     if (!q || busy) return;
     inputEl.value = '';
+
+    // Detect Do: prefix (case-insensitive)
+    var isDoMode = /^do:\s*/i.test(q);
+    var intent = isDoMode ? q.replace(/^do:\s*/i, '') : q;
 
     // Hide retry button from previous Q&A pair
     if (currentCtx && currentCtx.retryBtn) {
@@ -448,13 +533,13 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     qRow.innerHTML = '<span class="qa-label qa-label-q">Q:</span>';
     var qText = document.createElement('span');
     qText.className = 'qa-q-text';
-    qText.textContent = q;
+    qText.textContent = intent;
     qRow.appendChild(qText);
     pair.appendChild(qRow);
 
     var aRow = document.createElement('div');
     aRow.className = 'qa-a-row';
-    aRow.innerHTML = '<span class="qa-label qa-label-a">A:</span>';
+    aRow.innerHTML = '<span class="qa-label qa-label-a">' + (isDoMode ? 'Do:' : 'A:') + '</span>';
     var aText = document.createElement('span');
     aText.className = 'qa-a-text';
     aRow.appendChild(aText);
@@ -468,7 +553,8 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
     // Create new context and track it as current
     currentCtx = {
-      prompt: 'Q: ' + q + '\nA:',
+      prompt: isDoMode ? 'Q: ' + intent + '\nDo:' : 'Q: ' + q + '\nA:',
+      isDoMode: isDoMode,
       pair: pair,
       aText: aText,
       metaLine: metaLine,
