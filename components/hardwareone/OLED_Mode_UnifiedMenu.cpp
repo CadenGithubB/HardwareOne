@@ -102,7 +102,7 @@ static int buildLocalMenuItems(UnifiedMenuItem* items, int maxItems) {
 #if ENABLE_CAMERA_SENSOR
   if (count < maxItems) {
     strncpy(items[count].name, "Camera Capture", 23);
-    strncpy(items[count].command, "camera capture", 47);
+    strncpy(items[count].command, "cameracapture", 47);
     items[count].isRemote = false;
     items[count].category = 1;
     count++;
@@ -112,7 +112,7 @@ static int buildLocalMenuItems(UnifiedMenuItem* items, int maxItems) {
 #if ENABLE_GPS_SENSOR
   if (count < maxItems) {
     strncpy(items[count].name, "GPS Status", 23);
-    strncpy(items[count].command, "gps status", 47);
+    strncpy(items[count].command, "gpsread", 47);
     items[count].isRemote = false;
     items[count].category = 1;
     count++;
@@ -122,7 +122,7 @@ static int buildLocalMenuItems(UnifiedMenuItem* items, int maxItems) {
 #if ENABLE_THERMAL_SENSOR
   if (count < maxItems) {
     strncpy(items[count].name, "Thermal Read", 23);
-    strncpy(items[count].command, "thermal read", 47);
+    strncpy(items[count].command, "thermalread", 47);
     items[count].isRemote = false;
     items[count].category = 1;
     count++;
@@ -132,7 +132,7 @@ static int buildLocalMenuItems(UnifiedMenuItem* items, int maxItems) {
 #if ENABLE_IMU_SENSOR
   if (count < maxItems) {
     strncpy(items[count].name, "IMU Status", 23);
-    strncpy(items[count].command, "imu status", 47);
+    strncpy(items[count].command, "imuread", 47);
     items[count].isRemote = false;
     items[count].category = 1;
     count++;
@@ -182,23 +182,23 @@ static int buildRemoteMenuItems(UnifiedMenuItem* items, int maxItems, const uint
     
     if ((cap.featureMask & CAP_FEATURE_CAMERA) && count < maxItems) {
       strncpy(items[count].name, "[R] Camera Capture", 23);
-      strncpy(items[count].command, "camera capture", 47);
+      strncpy(items[count].command, "cameracapture", 47);
       items[count].isRemote = true;
       items[count].category = 1;
       count++;
     }
-    
+
     if ((cap.sensorMask & CAP_SENSOR_GPS) && count < maxItems) {
       strncpy(items[count].name, "[R] GPS Status", 23);
-      strncpy(items[count].command, "gps status", 47);
+      strncpy(items[count].command, "gpsread", 47);
       items[count].isRemote = true;
       items[count].category = 1;
       count++;
     }
-    
+
     if ((cap.sensorMask & CAP_SENSOR_THERMAL) && count < maxItems) {
       strncpy(items[count].name, "[R] Thermal Read", 23);
-      strncpy(items[count].command, "thermal read", 47);
+      strncpy(items[count].command, "thermalread", 47);
       items[count].isRemote = true;
       items[count].category = 1;
       count++;
