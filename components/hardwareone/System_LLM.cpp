@@ -3096,6 +3096,18 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   const bool isGPT2gen = (p->arch_type == 1);
   const int eos_id = isGPT2gen ? EOS_TOKEN_GPT2 : EOS_TOKEN_LLAMA;
 
+  // ── Do: command mode detection ────────────────────────────────────────────
+  // When the prompt ends with the Do: token (id=5), the model should output
+  // a short command (1-2 tokens) and stop.  We detect explanation tokens
+  // (period, comma, "to", "for", etc.) and stop early to prevent the model
+  // from appending "to show the current status..." after the command.
+  static constexpr int DO_TOKEN_ID = 5;
+  const bool isDoMode = (num_prompt_tokens > 0 &&
+                         prompt_tokens[num_prompt_tokens - 1] == DO_TOKEN_ID);
+  if (isDoMode) {
+    DEBUG_LLM_GENERATEF("[LLM] Do: command mode detected — will stop on explanation tokens");
+  }
+
   // ── Repetition penalty ring buffer ────────────────────────────────────────
   // Penalises tokens seen in the last repWindow positions to reduce loops.
   // repPenalty=1.0 disables it entirely; repWindow clamped to pre-allocated size.
@@ -3430,6 +3442,42 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       break;
     }
 
+    // ── Do: mode smart stop ──────────────────────────────────────────────
+    // In Do: mode, the model should output a command (1-2 tokens) and stop.
+    // After at least 1 generated token, stop if we see punctuation or
+    // explanation words — these signal the model is explaining, not commanding.
+    if (isDoMode && pos >= num_prompt_tokens && generated > 0) {
+      bool doStop = false;
+      const char* dp = (next >= 0 && next < gLLM.tokenizer.vocab_size)
+                        ? gLLM.tokenizer.vocab[next] : nullptr;
+      if (dp) {
+        // Normalize: skip leading space
+        const char* dw = dp;
+        if (*dw == ' ') dw++;
+        // Stop on punctuation
+        if (dw[0] == '.' || dw[0] == ',' || dw[0] == '?' || dw[0] == '!' || dw[0] == ';') {
+          DEBUG_LLM_GENERATEF("[LLM] Do: mode — stopping on punctuation '%s' at generated=%d", dp, generated);
+          doStop = true;
+        }
+        // Stop on explanation words (model is adding "to show...", "for the...", etc.)
+        if (!doStop) {
+          static const char* const DO_STOP_WORDS[] = {
+            "to", "for", "and", "the", "is", "it", "that", "this", "which",
+            "will", "can", "shows", "displays", "checks", "reads",
+          };
+          static constexpr int NUM_DO_STOP = sizeof(DO_STOP_WORDS) / sizeof(DO_STOP_WORDS[0]);
+          for (int dsi = 0; dsi < NUM_DO_STOP; dsi++) {
+            if (strcasecmp(dw, DO_STOP_WORDS[dsi]) == 0) {
+              DEBUG_LLM_GENERATEF("[LLM] Do: mode — stopping on explanation word '%s' at generated=%d", dp, generated);
+              doStop = true;
+              break;
+            }
+          }
+        }
+      }
+      if (doStop) break;
+    }
+
     // Decode and emit token
     if (pos >= num_prompt_tokens) {
       const char* piece = decode(token, next);
@@ -3737,12 +3785,12 @@ static const char* cmd_llm_stop(const String&) {
 }
 
 const CommandEntry llmCommands[] = {
-  { "llm status",   "Show LLM engine status",           false, cmd_llm_status },
-  { "llm load",     "Load model [model.bin]",            true,  cmd_llm_load,     "Usage: llm load [filename.bin]" },
-  { "llm unload",   "Unload model and free PSRAM",       true,  cmd_llm_unload },
-  { "llm models",   "List available model files",        false, cmd_llm_models },
-  { "llm generate", "Generate text from prompt",         false, cmd_llm_generate, "Usage: llm generate <prompt text>" },
-  { "llm stop",     "Stop in-progress generation",       false, cmd_llm_stop },
+  { "llmstatus",   "Show LLM engine status",           false, cmd_llm_status },
+  { "llmload",     "Load model [model.bin]",            true,  cmd_llm_load,     "Usage: llmload [filename.bin]" },
+  { "llmunload",   "Unload model and free PSRAM",       true,  cmd_llm_unload },
+  { "llmmodels",   "List available model files",        false, cmd_llm_models },
+  { "llmgenerate", "Generate text from prompt",         false, cmd_llm_generate, "Usage: llmgenerate <prompt text>" },
+  { "llmstop",     "Stop in-progress generation",       false, cmd_llm_stop },
 };
 const size_t llmCommandsCount = sizeof(llmCommands) / sizeof(llmCommands[0]);
 

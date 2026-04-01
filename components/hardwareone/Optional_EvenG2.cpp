@@ -1379,13 +1379,13 @@ const CommandEntry g2Commands[] = {
   { "openg2",        "Connect to G2 glasses: openg2 [left|right|auto]",    false, cmd_g2connect },
   { "closeg2",       "Disconnect from G2 glasses",                          false, cmd_g2disconnect },
   { "g2status",      "Show G2 glasses connection status",                   false, cmd_g2status },
-  { "g2 show",       "Display text on G2 glasses: g2 show <text>",          false, cmd_g2show },
-  { "g2 scan",       "Scan for G2 glasses",                                 false, cmd_g2scan },
-  { "g2 init",       "Initialize G2 client mode (disables BLE server)",     false, cmd_g2init },
-  { "g2 deinit",     "Deinitialize G2 client mode",                         false, cmd_g2deinit },
-  { "g2 clear",      "Clear G2 glasses display",                            false, cmd_g2clear },
-  { "g2 verbose",    "Toggle verbose packet logging: g2 verbose [on|off]",  false, cmd_g2verbose },
-  { "g2 nav",        "Toggle gesture->menu nav: g2 nav [on|off]",           false, cmd_g2nav },
+  { "g2show",       "Display text on G2 glasses: g2show <text>",          false, cmd_g2show },
+  { "g2scan",       "Scan for G2 glasses",                                 false, cmd_g2scan },
+  { "g2init",       "Initialize G2 client mode (disables BLE server)",     false, cmd_g2init },
+  { "g2deinit",     "Deinitialize G2 client mode",                         false, cmd_g2deinit },
+  { "g2clear",      "Clear G2 glasses display",                            false, cmd_g2clear },
+  { "g2verbose",    "Toggle verbose packet logging: g2verbose [on|off]",  false, cmd_g2verbose },
+  { "g2nav",        "Toggle gesture->menu nav: g2nav [on|off]",           false, cmd_g2nav },
 };
 
 const size_t g2CommandsCount = sizeof(g2Commands) / sizeof(g2Commands[0]);

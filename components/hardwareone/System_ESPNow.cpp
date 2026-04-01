@@ -9934,9 +9934,9 @@ const char* cmd_bond_stream(const String& argsInput) {
   String args = argsInput;
   args.trim();
   
-  // Remove command prefix if present
-  if (args.startsWith("bond stream")) {
-    args = args.substring(11);
+  // Remove command prefix if present (legacy)
+  if (args.startsWith("bond stream") || args.startsWith("bondstream")) {
+    args = args.substring(args.indexOf("stream") + 6);
     args.trim();
   }
   
@@ -10036,9 +10036,9 @@ const char* cmd_bond_testsensor(const String& argsInput) {
   String args = argsInput;
   args.trim();
   
-  // Remove command prefix if present
-  if (args.startsWith("bond testsensor")) {
-    args = args.substring(15);
+  // Remove command prefix if present (legacy)
+  if (args.startsWith("bond testsensor") || args.startsWith("bondtestsensor")) {
+    args = args.substring(args.indexOf("testsensor") + 10);
     args.trim();
   }
   
@@ -10187,95 +10187,95 @@ extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Status & Statistics ----
   { "espnowread", "Read ESP-NOW status and configuration.", false, cmd_espnow_status },
   { "espnowstatus", "Show ESP-NOW status and configuration.", false, cmd_espnow_status },
-  { "espnow stats", "Show ESP-NOW statistics (messages, errors, etc.).", false, cmd_espnow_stats },
-  { "espnow routerstats", "Show message router statistics and metrics.", false, cmd_espnow_routerstats },
-  { "espnow broadcaststats", "Show broadcast ACK tracking statistics.", false, cmd_espnow_broadcaststats },
-  { "espnow resetstats", "Reset ESP-NOW statistics counters.", true, cmd_espnow_resetstats },
+  { "espnowstats", "Show ESP-NOW statistics (messages, errors, etc.).", false, cmd_espnow_stats },
+  { "espnowrouterstats", "Show message router statistics and metrics.", false, cmd_espnow_routerstats },
+  { "espnowbroadcaststats", "Show broadcast ACK tracking statistics.", false, cmd_espnow_broadcaststats },
+  { "espnowresetstats", "Reset ESP-NOW statistics counters.", true, cmd_espnow_resetstats },
   
   // ---- ESP-NOW Initialization & Pairing ----
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },
   { "closeespnow", "Deinitialize ESP-NOW and free resources.", true, cmd_espnow_deinit },
-  { "espnow pair", "Pair ESP-NOW device: 'espnow pair <mac> <name>'.", true, cmd_espnow_pair, "Usage: espnow pair <mac> <name>" },
-  { "espnow unpair", "Unpair ESP-NOW device: 'espnow unpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnow unpair <name_or_mac>" },
-  { "espnow list", "List all paired ESP-NOW devices.", false, cmd_espnow_list },
+  { "espnowpair", "Pair ESP-NOW device: 'espnowpair <mac> <name>'.", true, cmd_espnow_pair, "Usage: espnowpair <mac> <name>" },
+  { "espnowunpair", "Unpair ESP-NOW device: 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>" },
+  { "espnowlist", "List all paired ESP-NOW devices.", false, cmd_espnow_list },
   
   // ---- ESP-NOW Mesh Configuration ----
-  { "espnow meshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
-  { "espnow meshmetrics", "Show mesh routing metrics (forwards, path stats, drops).", false, cmd_espnow_meshmetrics },
-  { "espnow mode", "Get/set ESP-NOW mode: 'espnow mode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnow mode [direct|mesh]" },
-  { "espnow meshttl", "Get/set mesh TTL: 'espnow meshttl [1-10|adaptive]'.", false, cmd_espnow_meshttl },
-  { "espnow setname", "Get/set device name: 'espnow setname [name]'.", true, cmd_espnow_setname },
-  { "espnow hbmode", "Get/set heartbeat mode: 'espnow hbmode [public|private]'.", false, cmd_espnow_hbmode, "Usage: espnow hbmode [public|private]" },
-  { "espnow meshrole", "Get/set mesh role: 'espnow meshrole [worker|master|backup]'.", true, cmd_espnow_meshrole, "Usage: espnow meshrole [worker|master|backup]" },
-  { "espnow meshmaster", "Get/set master MAC: 'espnow meshmaster [MAC]'.", true, cmd_espnow_meshmaster },
-  { "espnow meshbackup", "Get/set backup MAC: 'espnow meshbackup [MAC]'.", true, cmd_espnow_meshbackup },
-  { "espnow backupenable", "Enable/disable backup master feature: 'espnow backupenable [on|off]'.", true, cmd_espnow_backupenable },
-  { "espnow meshtopo", "Discover mesh topology (master only).", false, cmd_espnow_meshtopo },
-  { "espnow toporesults", "Get topology discovery results.", false, cmd_espnow_toporesults },
-  { "espnow timesync", "Broadcast NTP time to mesh (master only).", false, cmd_espnow_timesync },
-  { "espnow timestatus", "Show time synchronization status.", false, cmd_espnow_timestatus },
-  { "espnow meshsave", "Manually save mesh peer topology to filesystem.", false, cmd_espnow_meshsave },
+  { "espnowmeshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
+  { "espnowmeshmetrics", "Show mesh routing metrics (forwards, path stats, drops).", false, cmd_espnow_meshmetrics },
+  { "espnowmode", "Get/set ESP-NOW mode: 'espnowmode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnowmode [direct|mesh]" },
+  { "espnowmeshttl", "Get/set mesh TTL: 'espnowmeshttl [1-10|adaptive]'.", false, cmd_espnow_meshttl },
+  { "espnowsetname", "Get/set device name: 'espnowsetname [name]'.", true, cmd_espnow_setname },
+  { "espnowhbmode", "Get/set heartbeat mode: 'espnowhbmode [public|private]'.", false, cmd_espnow_hbmode, "Usage: espnowhbmode [public|private]" },
+  { "espnowmeshrole", "Get/set mesh role: 'espnowmeshrole [worker|master|backup]'.", true, cmd_espnow_meshrole, "Usage: espnowmeshrole [worker|master|backup]" },
+  { "espnowmeshmaster", "Get/set master MAC: 'espnowmeshmaster [MAC]'.", true, cmd_espnow_meshmaster },
+  { "espnowmeshbackup", "Get/set backup MAC: 'espnowmeshbackup [MAC]'.", true, cmd_espnow_meshbackup },
+  { "espnowbackupenable", "Enable/disable backup master feature: 'espnowbackupenable [on|off]'.", true, cmd_espnow_backupenable },
+  { "espnowmeshtopo", "Discover mesh topology (master only).", false, cmd_espnow_meshtopo },
+  { "espnowtoporesults", "Get topology discovery results.", false, cmd_espnow_toporesults },
+  { "espnowtimesync", "Broadcast NTP time to mesh (master only).", false, cmd_espnow_timesync },
+  { "espnowtimestatus", "Show time synchronization status.", false, cmd_espnow_timestatus },
+  { "espnowmeshsave", "Manually save mesh peer topology to filesystem.", false, cmd_espnow_meshsave },
   
   // ---- Device Metadata ----
-  { "espnow room", "Get/set device room: 'espnow room [name]'.", false, cmd_espnow_room, "Usage: espnow room [Kitchen|Bedroom|...]\n       espnow room clear" },
-  { "espnow zone", "Get/set device zone: 'espnow zone [name]'.", false, cmd_espnow_zone, "Usage: espnow zone [Counter|Door|Ceiling|...]\n       espnow zone clear" },
-  { "espnow tags", "Get/set device tags: 'espnow tags [tag1,tag2,...]'.", false, cmd_espnow_tags, "Usage: espnow tags stationary,thermal\n       espnow tags clear" },
-  { "espnow friendlyname", "Get/set friendly display name: 'espnow friendlyname [name]'.", false, cmd_espnow_friendlyname },
-  { "espnow stationary", "Get/set stationary flag: 'espnow stationary [0|1]'.", false, cmd_espnow_stationary },
-  { "espnow deviceinfo", "Show all local device metadata.", false, cmd_espnow_deviceinfo },
+  { "espnowroom", "Get/set device room: 'espnowroom [name]'.", false, cmd_espnow_room, "Usage: espnowroom [Kitchen|Bedroom|...]\n       espnowroom clear" },
+  { "espnowzone", "Get/set device zone: 'espnowzone [name]'.", false, cmd_espnow_zone, "Usage: espnowzone [Counter|Door|Ceiling|...]\n       espnowzone clear" },
+  { "espnowtags", "Get/set device tags: 'espnowtags [tag1,tag2,...]'.", false, cmd_espnow_tags, "Usage: espnowtags stationary,thermal\n       espnowtags clear" },
+  { "espnowfriendlyname", "Get/set friendly display name: 'espnowfriendlyname [name]'.", false, cmd_espnow_friendlyname },
+  { "espnowstationary", "Get/set stationary flag: 'espnowstationary [0|1]'.", false, cmd_espnow_stationary },
+  { "espnowdeviceinfo", "Show all local device metadata.", false, cmd_espnow_deviceinfo },
   
   // ---- Master Aggregation ----
-  { "espnow devices", "List all mesh devices with room/zone/tags/status (master).", false, cmd_espnow_devices },
-  { "espnow rooms", "List rooms and their devices (master).", false, cmd_espnow_rooms },
-  { "espnow find", "Find devices by name, room, or tag: 'espnow find <query>'.", false, cmd_espnow_find, "Usage: espnow find <query>" },
-  { "espnow roomcmd", "Run command on all devices in a room.", true, cmd_espnow_roomcmd, "Usage: espnow roomcmd <room> <user> <pass> <command>" },
-  { "espnow tagcmd", "Run command on all devices with a tag.", true, cmd_espnow_tagcmd, "Usage: espnow tagcmd <tag> <user> <pass> <command>" },
+  { "espnowdevices", "List all mesh devices with room/zone/tags/status (master).", false, cmd_espnow_devices },
+  { "espnowrooms", "List rooms and their devices (master).", false, cmd_espnow_rooms },
+  { "espnowfind", "Find devices by name, room, or tag: 'espnowfind <query>'.", false, cmd_espnow_find, "Usage: espnowfind <query>" },
+  { "espnowroomcmd", "Run command on all devices in a room.", true, cmd_espnow_roomcmd, "Usage: espnowroomcmd <room> <user> <pass> <command>" },
+  { "espnowtagcmd", "Run command on all devices with a tag.", true, cmd_espnow_tagcmd, "Usage: espnowtagcmd <tag> <user> <pass> <command>" },
   
   // ---- ESP-NOW Communication ----
-  { "espnow send", "Send message (auto-routes via mesh if enabled): 'espnow send <name_or_mac> <message>'.", false, cmd_espnow_send, "Usage: espnow send <name_or_mac> <message>" },
-  { "espnow broadcast", "Broadcast message: 'espnow broadcast <message>'.", false, cmd_espnow_broadcast, "Usage: espnow broadcast <message>" },
-  { "espnow sendfile", "Send file: 'espnow sendfile <name_or_mac> <filepath>'.", false, cmd_espnow_sendfile, "Usage: espnow sendfile <name_or_mac> <filepath>" },
-  { "espnow browse", "Browse remote files: 'espnow browse <name_or_mac> <user> <pass> [path]'.", false, cmd_espnow_browse, "Usage: espnow browse <target> <username> <password> [path]" },
-  { "espnow fetch", "Fetch remote file: 'espnow fetch <name_or_mac> <user> <pass> <path>'.", false, cmd_espnow_fetch, "Usage: espnow fetch <target> <username> <password> <path>" },
-  { "espnow remote", "Execute remote command: 'espnow remote <name_or_mac> <user> <pass> <cmd>'.", false, cmd_espnow_remote, "Usage: espnow remote <target> <username> <password> <command>" },
+  { "espnowsend", "Send message (auto-routes via mesh if enabled): 'espnowsend <name_or_mac> <message>'.", false, cmd_espnow_send, "Usage: espnowsend <name_or_mac> <message>" },
+  { "espnowbroadcast", "Broadcast message: 'espnowbroadcast <message>'.", false, cmd_espnow_broadcast, "Usage: espnowbroadcast <message>" },
+  { "espnowsendfile", "Send file: 'espnowsendfile <name_or_mac> <filepath>'.", false, cmd_espnow_sendfile, "Usage: espnowsendfile <name_or_mac> <filepath>" },
+  { "espnowbrowse", "Browse remote files: 'espnowbrowse <name_or_mac> <user> <pass> [path]'.", false, cmd_espnow_browse, "Usage: espnowbrowse <target> <username> <password> [path]" },
+  { "espnowfetch", "Fetch remote file: 'espnowfetch <name_or_mac> <user> <pass> <path>'.", false, cmd_espnow_fetch, "Usage: espnowfetch <target> <username> <password> <path>" },
+  { "espnowremote", "Execute remote command: 'espnowremote <name_or_mac> <user> <pass> <cmd>'.", false, cmd_espnow_remote, "Usage: espnowremote <target> <username> <password> <command>" },
   { "openstream", "Start streaming all output to ESP-NOW caller (admin, remote only).", true, cmd_espnow_startstream },
   { "closestream", "Stop streaming output to ESP-NOW device (admin).", true, cmd_espnow_stopstream },
-  { "espnow worker", "Configure worker status reporting: 'espnow worker [show|on|off|interval <ms>|fields <list>]'.", false, cmd_espnow_worker, "Usage: espnow worker [show|on|off|interval <ms>|fields <heap,rssi,thermal,imu>]" },
-  { "espnow sensorstream", "Enable/disable sensor data streaming to master (worker only): 'espnow sensorstream <sensor> <on|off>'.", false, cmd_espnow_sensorstream },
-  { "espnow sensorstatus", "Show remote sensor cache (master) or worker streaming status (worker).", false, cmd_espnow_sensorstatus },
-  { "espnow sensorbroadcast", "Enable/disable all sensor ESP-NOW communication: 'espnow sensorbroadcast <on|off>'.", false, cmd_espnow_sensorbroadcast },
-  { "espnow usersync", "Enable/disable user credential sync: 'espnow usersync [on|off]'.", true, cmd_espnow_usersync },
-  { "espnow requestmeta", "Request metadata from peer: 'espnow requestmeta <name_or_mac>'.", false, cmd_espnow_requestmeta, "Usage: espnow requestmeta <name_or_mac>" },
+  { "espnowworker", "Configure worker status reporting: 'espnowworker [show|on|off|interval <ms>|fields <list>]'.", false, cmd_espnow_worker, "Usage: espnowworker [show|on|off|interval <ms>|fields <heap,rssi,thermal,imu>]" },
+  { "espnowsensorstream", "Enable/disable sensor data streaming to master (worker only): 'espnowsensorstream <sensor> <on|off>'.", false, cmd_espnow_sensorstream },
+  { "espnowsensorstatus", "Show remote sensor cache (master) or worker streaming status (worker).", false, cmd_espnow_sensorstatus },
+  { "espnowsensorbroadcast", "Enable/disable all sensor ESP-NOW communication: 'espnowsensorbroadcast <on|off>'.", false, cmd_espnow_sensorbroadcast },
+  { "espnowusersync", "Enable/disable user credential sync: 'espnowusersync [on|off]'.", true, cmd_espnow_usersync },
+  { "espnowrequestmeta", "Request metadata from peer: 'espnowrequestmeta <name_or_mac>'.", false, cmd_espnow_requestmeta, "Usage: espnowrequestmeta <name_or_mac>" },
   
 #if ENABLE_BONDED_MODE
   // ---- Bond Mode Commands (1:1 handshake relationship) ----
-  { "bond connect", "Connect to bonded peer device: 'bond connect <mac_or_name>'.", false, cmd_bond_connect, "Usage: bond connect <mac_or_name>" },
-  { "bond disconnect", "Disconnect from bonded peer device.", false, cmd_bond_disconnect },
-  { "bond status", "Show bond mode status and configuration.", false, cmd_bond_status },
-  { "bond role", "Set bond mode role: 'bond role <master|worker>'.", false, cmd_bond_role, "Usage: bond role <master|worker>" },
-  { "bond showcap", "Show local device capability summary.", false, cmd_bond_showcap },
-  { "bond requestcap", "Request capability summary from bonded peer.", false, cmd_bond_requestcap },
-  { "bond showmanifest", "Show local device manifest (UI apps + CLI commands).", false, cmd_bond_showmanifest },
-  { "bond requestmanifest", "Request full manifest from bonded peer.", false, cmd_bond_requestmanifest },
-  { "bond showremotemanifest", "Show cached remote manifest(s): 'bond showremotemanifest [fwHash]'.", false, cmd_bond_showremotemanifest },
-  { "bond stream", "Stream sensor data to bonded master (worker only): 'bond stream <sensor> <on|off>'.", false, cmd_bond_stream, "Usage: bond stream <sensor> <on|off>\n       bond stream (show status)" },
-  { "bond testsensor", "Test v3 sensor data transmission: 'bond testsensor [sensor_type]'.", false, cmd_bond_testsensor, "Usage: bond testsensor [thermal|tof|imu|gps|gamepad|fmradio]" },
+  { "bondconnect", "Connect to bonded peer device: 'bondconnect <mac_or_name>'.", false, cmd_bond_connect, "Usage: bondconnect <mac_or_name>" },
+  { "bonddisconnect", "Disconnect from bonded peer device.", false, cmd_bond_disconnect },
+  { "bondstatus", "Show bond mode status and configuration.", false, cmd_bond_status },
+  { "bondrole", "Set bond mode role: 'bondrole <master|worker>'.", false, cmd_bond_role, "Usage: bondrole <master|worker>" },
+  { "bondshowcap", "Show local device capability summary.", false, cmd_bond_showcap },
+  { "bondrequestcap", "Request capability summary from bonded peer.", false, cmd_bond_requestcap },
+  { "bondshowmanifest", "Show local device manifest (UI apps + CLI commands).", false, cmd_bond_showmanifest },
+  { "bondrequestmanifest", "Request full manifest from bonded peer.", false, cmd_bond_requestmanifest },
+  { "bondshowremotemanifest", "Show cached remote manifest(s): 'bondshowremotemanifest [fwHash]'.", false, cmd_bond_showremotemanifest },
+  { "bondstream", "Stream sensor data to bonded master (worker only): 'bondstream <sensor> <on|off>'.", false, cmd_bond_stream, "Usage: bondstream <sensor> <on|off>\n       bondstream (show status)" },
+  { "bondtestsensor", "Test v3 sensor data transmission: 'bondtestsensor [sensor_type]'.", false, cmd_bond_testsensor, "Usage: bondtestsensor [thermal|tof|imu|gps|gamepad|fmradio]" },
 #endif
   
   // ---- ESP-NOW Encryption ----
-  { "espnow setpassphrase", "Set encryption passphrase: 'espnow setpassphrase \"phrase\"'.", true, cmd_espnow_setpassphrase, "Usage: espnow setpassphrase \"your_passphrase_here\"\n       espnow setpassphrase clear" },
-  { "espnow encstatus", "Show ESP-NOW encryption status and key fingerprint.", true, cmd_espnow_encstatus },
-  { "espnow pairsecure", "Pair device with encryption: 'espnow pairsecure <mac> <name>'.", true, cmd_espnow_pairsecure, "Usage: espnow pairsecure <mac_address> <device_name>" },
+  { "espnowsetpassphrase", "Set encryption passphrase: 'espnowsetpassphrase \"phrase\"'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase \"your_passphrase_here\"\n       espnowsetpassphrase clear" },
+  { "espnowencstatus", "Show ESP-NOW encryption status and key fingerprint.", true, cmd_espnow_encstatus },
+  { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name>'.", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name>" },
   
   // ---- ESP-NOW Testing Commands ----
-  { "test streams", "Test topology stream management functions.", false, cmd_test_streams },
-  { "test concurrent", "Test concurrent topology streams (simulated).", false, cmd_test_concurrent },
-  { "test cleanup", "Test cleanup of stale topology streams.", false, cmd_test_cleanup },
-  { "test filelock", "Test file transfer lock acquire/release.", false, cmd_test_filelock },
+  { "teststreams", "Test topology stream management functions.", false, cmd_test_streams },
+  { "testconcurrent", "Test concurrent topology streams (simulated).", false, cmd_test_concurrent },
+  { "testcleanup", "Test cleanup of stale topology streams.", false, cmd_test_cleanup },
+  { "testfilelock", "Test file transfer lock acquire/release.", false, cmd_test_filelock },
   
   // ---- ESP-NOW Settings ----
   { "espnowenabled", "Enable/disable ESP-NOW (0|1, takes effect after reboot).", true, cmd_espnowenabled },
-  { "espnow buffers", "Show/adjust ESP-NOW buffer sizes: 'espnow buffers [tx|rx|chunk|filechunk] [value]'.", false, cmd_espnow_buffers },
+  { "espnowbuffers", "Show/adjust ESP-NOW buffer sizes: 'espnowbuffers [tx|rx|chunk|filechunk] [value]'.", false, cmd_espnow_buffers },
 };
 
 extern const size_t espNowCommandsCount = sizeof(espNowCommands) / sizeof(espNowCommands[0]);

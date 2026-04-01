@@ -1097,7 +1097,7 @@ static esp_err_t handleBondStream(httpd_req_t* req) {
 
   // Route through unified command: "bond stream <sensor> <on|off>"
   String cmdOut;
-  String cmd = String("bond stream ") + sensorParam + " " + onOff;
+  String cmd = String("bondstream ") + sensorParam + " " + onOff;
   bool ok = executeUnifiedWebCommand(req, ctx, cmd, cmdOut);
 
   if (ok) {
@@ -1228,7 +1228,7 @@ static esp_err_t handleBondRole(httpd_req_t* req) {
   }
   
   // Change local role (handles handshake reset + cap invalidation)
-  String localCmd = "bond role ";
+  String localCmd = "bondrole ";
   localCmd += localNewRole;
   String localResult;
   executeUnifiedWebCommand(req, ctx, localCmd, localResult);

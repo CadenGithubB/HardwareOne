@@ -398,9 +398,9 @@ static void handlePickerInput(uint32_t newlyPressed) {
       char cmd[64];
       const EspNowDevice& dev = gEspNow->devices[devIdx];
       if (dev.name.length() > 0) {
-        snprintf(cmd, sizeof(cmd), "bond connect %s", dev.name.c_str());
+        snprintf(cmd, sizeof(cmd), "bondconnect %s", dev.name.c_str());
       } else {
-        snprintf(cmd, sizeof(cmd), "bond connect %02X:%02X:%02X:%02X:%02X:%02X",
+        snprintf(cmd, sizeof(cmd), "bondconnect %02X:%02X:%02X:%02X:%02X:%02X",
                  dev.mac[0], dev.mac[1], dev.mac[2], dev.mac[3], dev.mac[4], dev.mac[5]);
       }
       executeOLEDCommand(cmd);
@@ -461,10 +461,10 @@ static void swapRolesConfirmed(void* userData) {
   bool wasMaster = (isBondMaster());
   char cmd[48];
   // Remote first (so peer is ready before local handshake restarts)
-  snprintf(cmd, sizeof(cmd), "remote:bond role %s", wasMaster ? "master" : "worker");
+  snprintf(cmd, sizeof(cmd), "remote:bondrole %s", wasMaster ? "master" : "worker");
   executeOLEDCommand(cmd);
   // Then local
-  snprintf(cmd, sizeof(cmd), "bond role %s", wasMaster ? "worker" : "master");
+  snprintf(cmd, sizeof(cmd), "bondrole %s", wasMaster ? "worker" : "master");
   executeOLEDCommand(cmd);
 }
 
