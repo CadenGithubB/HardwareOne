@@ -3130,7 +3130,9 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   DEBUG_CMD_FLOWF("[web.cli] cmd.length()=%d after urlDecode", cmd.length());
   String validateStr = extractFormField(body, "validate");
   bool doValidate = (validateStr == "1" || validateStr == "true");
-  DEBUG_CMD_FLOWF("[web.cli] authed user=%s cmd_len=%d validate=%d", ctx.user.c_str(), cmd.length(), doValidate ? 1 : 0);
+  String captureStr = extractFormField(body, "capture");
+  bool doCapture = (captureStr == "1");
+  DEBUG_CMD_FLOWF("[web.cli] authed user=%s cmd_len=%d validate=%d capture=%d", ctx.user.c_str(), cmd.length(), doValidate ? 1 : 0, doCapture ? 1 : 0);
   DEBUG_CMD_FLOWF("[web.cli] cmd_first_80='%.80s'", cmd.c_str());
 
   // Record the command in the unified feed (skip if validation-only), then execute centrally
@@ -3160,6 +3162,7 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   uc.ctx.timestampMs = (uint32_t)millis();
   uc.ctx.outputMask = CMD_OUT_WEB | CMD_OUT_LOG;
   uc.ctx.validateOnly = doValidate;
+  uc.ctx.captureOutput = doCapture;
   uc.ctx.replyHandle = nullptr;
   uc.ctx.httpReq = req;
 
@@ -3168,11 +3171,11 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   String out;
   bool ok = submitAndExecuteSync(uc, out);
   gMeshActivitySuspended = false;
-  
+
   // Redact sensitive data from output (passwords, session IDs)
   // This applies to CLI history, logs, and all broadcast sinks
   String redactedOut = redactOutputForLog(out);
-  
+
   DEBUG_CMD_FLOWF("[web.cli] executed ok=%d out_len=%d", ok ? 1 : 0, out.length());
   DEBUG_CLIF("Command result: %s", redactedOut.c_str());
   if (!doValidate) {
@@ -3184,6 +3187,13 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   // Restore skip index after broadcast side-effects complete
   gBroadcastSkipSessionIdx = prevSkip;
   DEBUG_SSEF("Restored gBroadcastSkipSessionIdx to %d", prevSkip);
+
+  // Guard: if the command killed the HTTP server (e.g. closewifi), req is
+  // now a dangling pointer — skip the response to avoid a crash.
+  if (server == NULL) {
+    DEBUG_CMD_FLOWF("[web.cli] server destroyed by command, skipping response");
+    return ESP_OK;
+  }
 
   // For web CLI, return the redacted output directly for immediate display
   httpd_resp_set_type(req, "text/plain");
@@ -4939,11 +4949,18 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     results.push_back(out);
 
     count++;
+
+    // If the command killed the HTTP server (e.g. closewifi), bail out
+    if (server == NULL) break;
+
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 
   gMeshActivitySuspended = false;
   gBroadcastSkipSessionIdx = prevSkip;
+
+  // If server was destroyed by a command, req is dangling — skip response
+  if (server == NULL) return ESP_OK;
 
   // Build response: {"ok":true,"count":N,"results":["out0","out1",...]}
   // Use ArduinoJson to safely serialize the output strings (handles escaping)

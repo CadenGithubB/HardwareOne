@@ -39,6 +39,7 @@ struct CommandContext {
   uint32_t timestampMs;
   uint32_t outputMask;
   bool validateOnly;
+  bool captureOutput = false;  // capture broadcastOutput into HTTP response
   void* replyHandle;     // placeholder for future sync replies
   httpd_req_t* httpReq;  // used by web origin if needed
 };

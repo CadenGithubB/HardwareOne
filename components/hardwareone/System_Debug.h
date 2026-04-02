@@ -251,6 +251,12 @@ void broadcastOutputEx(const String& s, uint64_t extraFlags);
 struct CommandContext;
 void broadcastOutput(const String& s, const CommandContext& ctx);
 
+// Output capture: when active, broadcastOutput also appends to this buffer.
+// Used by cmd_exec_task to capture command output for HTTP responses.
+extern char* gCmdCaptureBuf;
+extern size_t gCmdCaptureLen;
+extern size_t gCmdCaptureCap;
+
 void debugQueuePrintf(uint64_t flag, const char* fmt, ...);
 
 // Print summary (and tail) of output suppressed during help; resets counters

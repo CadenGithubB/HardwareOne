@@ -1880,12 +1880,9 @@ static bool computeMemoryLayout(LoadContext& ctx) {
   const uint16_t gs = ctx.gs;
   const int kv_dim = ctx.kv_dim;
 
+  // Start with model's seq_len, capped by user request if given
   int seq_ctx = p->seq_len;
   if (gLLM.requestedMaxCtx > 0 && seq_ctx > gLLM.requestedMaxCtx) seq_ctx = gLLM.requestedMaxCtx;
-  gLLM.seq_ctx = seq_ctx;
-  if (seq_ctx < p->seq_len) {
-    DEBUG_LLM_MEMORYF("[LLM] Context capped: model seq_len=%d -> runtime ctx=%d", p->seq_len, seq_ctx);
-  }
 
   ctx.weightsBytes = 0;
   ctx.weightsQ8Bytes = 0;
@@ -1983,14 +1980,49 @@ static bool computeMemoryLayout(LoadContext& ctx) {
     DEBUG_LLM_MEMORYF("[LLM] Mixed Q4/Q8: nQ8=%d nQ4=%d", nQ8, nQ4);
   }
 
-  ctx.kvCacheSize = 2 * L * seq_ctx * kv_dim * sizeof(float);
+  // Fixed-size memory (weights, not context-dependent)
+  size_t fixedBytes = ctx.weightsBytes + ctx.weightsQ8Bytes + ctx.weightsQ4Bytes
+                    + ctx.weightsQ4ScBytes + ctx.mixedMetaBytes;
   ctx.hotSize = (4 * D + 2 * H) * sizeof(float);
-  ctx.coldSize = (p->n_heads * seq_ctx + V) * sizeof(float);
-  size_t totalNeeded = ctx.weightsBytes + ctx.weightsQ8Bytes + ctx.weightsQ4Bytes
-                     + ctx.weightsQ4ScBytes + ctx.mixedMetaBytes + ctx.kvCacheSize
-                     + ctx.hotSize + ctx.coldSize;
+  fixedBytes += ctx.hotSize;
 
   size_t freePSRAM = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  size_t budget = (freePSRAM > LLM_PSRAM_RESERVE_BYTES) ? freePSRAM - LLM_PSRAM_RESERVE_BYTES : 0;
+
+  // Check if even weights alone exceed budget (ctx-independent)
+  // coldSize has a fixed V component too
+  size_t fixedCold = (size_t)V * sizeof(float);
+  if (fixedBytes + fixedCold > budget) {
+    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg),
+             "Weights too large for PSRAM: need %uKB, have %uKB (short %uKB)",
+             (unsigned)((fixedBytes + fixedCold)/1024), (unsigned)(budget/1024),
+             (unsigned)((fixedBytes + fixedCold - budget)/1024));
+    return false;
+  }
+
+  // Auto-fit: reduce context until total fits in PSRAM
+  // Per-context-slot cost: KV cache + attention scores
+  size_t perCtxSlot = 2 * L * kv_dim * sizeof(float)   // KV cache per position
+                    + p->n_heads * sizeof(float);        // attention scores per position
+  size_t remaining = budget - fixedBytes - fixedCold;
+  int maxFitCtx = (int)(remaining / perCtxSlot);
+  if (maxFitCtx < 1) maxFitCtx = 1;
+  if (seq_ctx > maxFitCtx) {
+    DEBUG_LLM_MEMORYF("[LLM] Auto-fit: ctx %d -> %d (PSRAM budget %uKB, weights %uKB, per-slot %u bytes)",
+                      seq_ctx, maxFitCtx, (unsigned)(budget/1024), (unsigned)(fixedBytes/1024),
+                      (unsigned)perCtxSlot);
+    seq_ctx = maxFitCtx;
+  }
+
+  gLLM.seq_ctx = seq_ctx;
+  if (seq_ctx < p->seq_len) {
+    DEBUG_LLM_MEMORYF("[LLM] Context: model seq_len=%d -> runtime ctx=%d", p->seq_len, seq_ctx);
+  }
+
+  ctx.kvCacheSize = 2 * L * seq_ctx * kv_dim * sizeof(float);
+  ctx.coldSize = (p->n_heads * seq_ctx + V) * sizeof(float);
+  size_t totalNeeded = fixedBytes + ctx.kvCacheSize + ctx.coldSize;
+
   if (qt == 2) {
     DEBUG_LLM_MEMORYF("[LLM] Memory (MIXED): fp=%uKB q8=%uKB q4=%uKB q4sc=%uKB kv=%uKB act=%uKB total=%uKB free=%uKB",
                       (unsigned)(ctx.weightsBytes/1024), (unsigned)(ctx.weightsQ8Bytes/1024),
@@ -1998,20 +2030,21 @@ static bool computeMemoryLayout(LoadContext& ctx) {
                       (unsigned)(ctx.kvCacheSize/1024), (unsigned)((ctx.hotSize + ctx.coldSize)/1024),
                       (unsigned)(totalNeeded/1024), (unsigned)(freePSRAM/1024));
   } else if (qt == 1) {
-    DEBUG_LLM_MEMORYF("[LLM] Memory (INT8): fp_block=%uKB q8_block=%uKB kv=%uKB act=%uKB total=%uKB free=%uKB",
+    DEBUG_LLM_MEMORYF("[LLM] Memory (INT8): fp_block=%uKB q8_block=%uKB kv=%uKB act=%uKB total=%uKB free=%uKB ctx=%d",
                       (unsigned)(ctx.weightsBytes/1024), (unsigned)(ctx.weightsQ8Bytes/1024),
                       (unsigned)(ctx.kvCacheSize/1024), (unsigned)((ctx.hotSize + ctx.coldSize)/1024),
-                      (unsigned)(totalNeeded/1024), (unsigned)(freePSRAM/1024));
+                      (unsigned)(totalNeeded/1024), (unsigned)(freePSRAM/1024), seq_ctx);
   } else {
-    DEBUG_LLM_MEMORYF("[LLM] Memory (FP32): weights=%uKB kv=%uKB act=%uKB total=%uKB free=%uKB",
+    DEBUG_LLM_MEMORYF("[LLM] Memory (FP32): weights=%uKB kv=%uKB act=%uKB total=%uKB free=%uKB ctx=%d",
                       (unsigned)(ctx.weightsBytes/1024), (unsigned)(ctx.kvCacheSize/1024),
                       (unsigned)((ctx.hotSize + ctx.coldSize)/1024), (unsigned)(totalNeeded/1024),
-                      (unsigned)(freePSRAM/1024));
+                      (unsigned)(freePSRAM/1024), seq_ctx);
   }
 
+  // Final sanity check (should not fail after auto-fit, but be safe)
   if (totalNeeded + LLM_PSRAM_RESERVE_BYTES > freePSRAM) {
     snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg),
-             "Not enough PSRAM: need %uKB + %uKB reserve = %uKB, have %uKB (short %uKB) — try lower Ctx",
+             "Not enough PSRAM: need %uKB + %uKB reserve = %uKB, have %uKB (short %uKB)",
              (unsigned)(totalNeeded/1024), (unsigned)(LLM_PSRAM_RESERVE_BYTES/1024),
              (unsigned)((totalNeeded + LLM_PSRAM_RESERVE_BYTES)/1024),
              (unsigned)(freePSRAM/1024),
@@ -2674,8 +2707,8 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
   // Unload any existing model
   llmUnload();
 
-  // Store the requested context cap (0 = use compile-time default)
-  gLLM.requestedMaxCtx = (maxCtx > 0) ? maxCtx : LLM_MAX_CONTEXT_LEN;
+  // Store the requested context cap (0 = auto-fit to available PSRAM)
+  gLLM.requestedMaxCtx = maxCtx;
 
   gLLM.runState = LLMState::LOADING;
   strlcpy(gLLM.modelPath, modelPath, sizeof(gLLM.modelPath));
@@ -2690,10 +2723,11 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
 
   gLLM.runState = LLMState::READY;
   gLLM.lastContextMax = gLLM.seq_ctx;  // expose active ctx window immediately (before first generation)
-  DEBUG_LLM_LOADF("[LLM] Model ready. PSRAM used: %uKB (weights=%uKB state=%uKB)",
+  DEBUG_LLM_LOADF("[LLM] Model ready. PSRAM used: %uKB (weights=%uKB state=%uKB) ctx=%d/%d",
                   (unsigned)((gLLM.weightsSize + gLLM.weightsQ8Size + gLLM.stateSize) / 1024),
                   (unsigned)((gLLM.weightsSize + gLLM.weightsQ8Size) / 1024),
-                  (unsigned)(gLLM.stateSize / 1024));
+                  (unsigned)(gLLM.stateSize / 1024),
+                  gLLM.seq_ctx, gLLM.config.seq_len);
   return true;
 }
 
@@ -3022,8 +3056,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   // to nudge the model toward on-topic answers.
   static constexpr int   MAX_CONTENT_TOKENS   = 16;
   static constexpr float CONTENT_LOGIT_BOOST       = 1.5f;  // logit bonus for content tokens (gentle nudge)
-  static constexpr float CONTENT_LOGIT_BOOST_LATE  = 0.5f;  // weaker nudge after initial window
-  static constexpr int   CONTENT_BOOST_WINDOW      = 10;    // first N tokens get full boost
+  static constexpr float CONTENT_LOGIT_BOOST_LATE  = 1.0f;  // sustained nudge after initial window (was 0.5)
+  static constexpr int   CONTENT_BOOST_WINDOW      = 16;    // first N tokens get full boost (was 10)
   int content_tokens[MAX_CONTENT_TOKENS];
   int content_token_count = 0;
   {
@@ -3063,13 +3097,16 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       content_tokens[content_token_count++] = tok;
     }
     if (content_token_count > 0) {
-      //DEBUG_LLM_GENERATEF("[LLM] CONTENT TOKENS for logit boost (boost=%.1f):", CONTENT_LOGIT_BOOST);
+      DEBUG_LLM_GENERATEF("[LLM] CONTENT TOKENS for logit boost (early=%.1f late=%.1f window=%d):",
+                          CONTENT_LOGIT_BOOST, CONTENT_LOGIT_BOOST_LATE, CONTENT_BOOST_WINDOW);
       for (int ci = 0; ci < content_token_count; ci++) {
         const char* cname = (content_tokens[ci] < gLLM.tokenizer.vocab_size) ?
                              gLLM.tokenizer.vocab[content_tokens[ci]] : "?";
-        //DEBUG_LLM_GENERATEF("[LLM]   content[%d]=%d('%s')", ci, content_tokens[ci], cname);
+        DEBUG_LLM_GENERATEF("[LLM]   content[%d]=%d('%s')", ci, content_tokens[ci], cname);
         (void)cname;
       }
+    } else {
+      DEBUG_LLM_GENERATEF("[LLM] CONTENT TOKENS: none extracted from prompt (all filtered as stop words or too short)");
     }
   }
 
@@ -3272,15 +3309,15 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                                  gLLM.tokenizer.vocab[prompt_tokens[t]] : "?";
             (void)tname;
             if (k_l2 < 0.001f || v_l2 < 0.001f) {
-              //DEBUG_LLM_GENERATEF("[LLM] WARNING KV_CACHE L%d pos=%d '%s': K_L2=%.4f V_L2=%.4f NEARLY_ZERO!",
-              //                    cl, t, tname, k_l2, v_l2);
+              DEBUG_LLM_GENERATEF("[LLM] WARNING KV_CACHE L%d pos=%d '%s': K_L2=%.4f V_L2=%.4f NEARLY_ZERO!",
+                                  cl, t, tname, k_l2, v_l2);
             }
           }
         }
 
         // Check logits for prompt content tokens — does model "recall" them?
         // If wifi (tok 485) has low logit at generation start, model didn't attend to it
-        //DEBUG_LLM_GENERATEF("[LLM] PROMPT TOKEN LOGIT CHECK at generation start:");
+        DEBUG_LLM_GENERATEF("[LLM] PROMPT TOKEN LOGIT CHECK at generation start:");
         for (int ti = 0; ti < num_prompt_tokens; ti++) {
           int ptok = prompt_tokens[ti];
           if (ptok >= 0 && ptok < p->vocab_size) {
@@ -3292,8 +3329,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
             }
             const char* pname = (ptok < gLLM.tokenizer.vocab_size) ?
                                  gLLM.tokenizer.vocab[ptok] : "?";
-            //DEBUG_LLM_GENERATEF("[LLM]   prompt_tok[%d]=%d('%s') logit=%.2f rank=%d/%d",
-            //                    ti, ptok, pname, ptok_logit, rank, p->vocab_size);
+            DEBUG_LLM_GENERATEF("[LLM]   prompt_tok[%d]=%d('%s') logit=%.2f rank=%d/%d",
+                                ti, ptok, pname, ptok_logit, rank, p->vocab_size);
             (void)ptok_logit; (void)rank; (void)pname;
           }
         }
@@ -3381,11 +3418,23 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         }
       }
 
+      // Sentence-aware temperature taper: reduce temperature slightly after the
+      // first sentence to prevent second-sentence drift. The model is less
+      // confident later in generation, so tighter sampling keeps it on-topic.
+      // Scales temp by 0.8 once a sentence boundary has been seen.
+      float effective_temp = temperature;
+      if (sentence_count > 0 && temperature > 0.0f) {
+        effective_temp = temperature * 0.8f;
+        if (gen_pos % 8 == 0) {
+          DEBUG_LLM_GENERATEF("[LLM] TEMP_TAPER gen=%d sent=%d: base=%.3f -> eff=%.3f (x0.8)",
+                              gen_pos, sentence_count, temperature, effective_temp);
+        }
+      }
+
       // Dynamic temperature: optionally scale base temperature using top logit as a
       // confidence proxy. Disabled by default — for memorization/domain models, flat
       // temperature produces better recall. Enable via dyn_temp=true in the generate API.
-      float effective_temp = temperature;
-      if (dynTemp && temperature > 0.0f) {
+      if (dynTemp && effective_temp > 0.0f) {
         float max_logit = logits[0];
         for (int vi = 1; vi < p->vocab_size; vi++) {
           if (logits[vi] > max_logit) max_logit = logits[vi];
@@ -3405,11 +3454,21 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       }
       // topId and topLogit used by per-token sample debug line below
 
+      // Tighten nucleus after first sentence to reduce second-sentence drift
+      float effective_topp = topp;
+      if (sentence_count > 0 && topp > 0.0f) {
+        effective_topp = topp * 0.75f;  // 0.8 -> 0.6 after first sentence
+        if (gen_pos % 8 == 0) {
+          DEBUG_LLM_GENERATEF("[LLM] TOPP_TAPER gen=%d sent=%d: base=%.3f -> eff=%.3f (x0.75)",
+                              gen_pos, sentence_count, topp, effective_topp);
+        }
+      }
+
       if (useMirostat2) {
         next = sample_mirostat2(logits, p->vocab_size, effective_temp,
                                 mirostatTau, mirostatEta, &mirostat_mu);
       } else {
-        next = sample(logits, p->vocab_size, effective_temp, topp);
+        next = sample(logits, p->vocab_size, effective_temp, effective_topp);
       }
 
       // Clamp to valid vocab range — prevents OOV tokens from corrupting output
@@ -3421,10 +3480,9 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       const char* piece = decode(token, next);
       bool has_leading_space = (piece && piece[0] == ' ');
       int piece_len = piece ? strlen(piece) : 0;
-      DEBUG_LLM_GENERATEF("[LLM]  pos=%d sampled=%d('%s') top=%d(%.2f) eff_temp=%.2f mu=%.2f sp=%d len=%d",
+      DEBUG_LLM_GENERATEF("[LLM]  pos=%d sampled=%d('%s') top=%d(%.2f) eff_temp=%.2f eff_topp=%.2f sent=%d gen=%d",
                           pos, next, piece ? piece : "?", topId, topLogit,
-                          effective_temp, mirostat_mu,
-                          (int)has_leading_space, piece_len);
+                          effective_temp, effective_topp, sentence_count, gen_pos);
     }
 
     pos++;
@@ -3673,13 +3731,13 @@ static const char* cmd_llm_status(const String&) {
   snprintf(llmCmdBuf, sizeof(llmCmdBuf),
     "LLM State: %s\n"
     "Model: %s\n"
-    "Config: dim=%d layers=%d heads=%d vocab=%d seq=%d\n"
+    "Config: dim=%d layers=%d heads=%d vocab=%d seq=%d ctx=%d\n"
     "PSRAM: %uKB (weights=%uKB runtime=%uKB)\n"
     "Last: %d tokens @ %.1f tok/s\n"
     "%s%s",
     stateStr, st.modelPath,
     st.config.dim, st.config.n_layers, st.config.n_heads,
-    st.config.vocab_size, st.config.seq_len,
+    st.config.vocab_size, st.config.seq_len, st.lastContextMax,
     (unsigned)(st.totalPsramUsed / 1024),
     (unsigned)(st.modelSizeBytes / 1024),
     (unsigned)(st.runtimeSizeBytes / 1024),
