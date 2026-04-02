@@ -256,6 +256,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
             if (j.heads) details.push('heads=' + j.heads);
             if (j.kvHeads && j.kvHeads !== j.heads) details.push('kv_heads=' + j.kvHeads);
             if (j.seqLen) details.push('seq_len=' + j.seqLen);
+            if (j.ctxMax > 0 && j.ctxMax < j.seqLen) details.push('ctx=' + j.ctxMax + ' (auto-fit)');
             if (j.psramKB) details.push(j.psramKB + 'KB PSRAM');
             var msg = 'Model loaded: ' + modelName;
             if (details.length > 0) msg += ' (' + details.join(' · ') + ')';
@@ -517,7 +518,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       credentials: 'same-origin',
-      body: 'cmd=' + encodeURIComponent(cmd)
+      body: 'cmd=' + encodeURIComponent(cmd) + '&capture=1'
     }).then(function(r) { return r.text(); })
       .then(function(t) {
         resultDiv.textContent = t || '(no output)';

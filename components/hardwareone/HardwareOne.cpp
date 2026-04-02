@@ -785,7 +785,47 @@ static void commandExecTask(void* pv) {
       gCurrentCommandContext = &r->ctx;
       bool prevValidate = gCLIValidateOnly;
       gCLIValidateOnly = r->ctx.validateOnly;
+
+      // Set up output capture if requested (for HTTP responses that need
+      // the actual broadcast output, not just the return code)
+      char captureBuf[1024];
+      captureBuf[0] = '\0';
+      if (r->ctx.captureOutput) {
+        extern char* gCmdCaptureBuf;
+        extern size_t gCmdCaptureLen, gCmdCaptureCap;
+        gCmdCaptureBuf = captureBuf;
+        gCmdCaptureLen = 0;
+        gCmdCaptureCap = sizeof(captureBuf);
+      }
+
       r->ok = executeCommand((AuthContext&)r->ctx.auth, r->line, r->out, sizeof(r->out));
+
+      // Tear down capture and prepend captured output to r->out
+      if (r->ctx.captureOutput) {
+        extern char* gCmdCaptureBuf;
+        extern size_t gCmdCaptureLen;
+        gCmdCaptureBuf = nullptr;
+        if (gCmdCaptureLen > 0) {
+          // Use captured broadcast output as the response instead of just
+          // the return code (e.g. show the actual time, not "OK")
+          size_t retLen = strlen(r->out);
+          // If return value is non-trivial (not just "OK"), append it
+          bool trivialReturn = (strcmp(r->out, "OK") == 0);
+          if (trivialReturn) {
+            // Replace "OK" with the captured output
+            size_t copyLen = gCmdCaptureLen < sizeof(r->out) - 1 ? gCmdCaptureLen : sizeof(r->out) - 1;
+            memcpy(r->out, captureBuf, copyLen);
+            r->out[copyLen] = '\0';
+          } else {
+            // Prepend captured output to the return value
+            char tmpOut[2048];
+            snprintf(tmpOut, sizeof(tmpOut), "%s%s", captureBuf, r->out);
+            strncpy(r->out, tmpOut, sizeof(r->out) - 1);
+            r->out[sizeof(r->out) - 1] = '\0';
+          }
+        }
+      }
+
       gCLIValidateOnly = prevValidate;
       gCurrentCommandContext = nullptr;
       DEBUG_CMD_FLOWF("[cmd_exec] done ok=%d out_len=%zu heap=%lu",

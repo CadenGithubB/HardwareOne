@@ -556,11 +556,32 @@ void printToWeb(const String& s) {
 extern void* gCurrentCommandContext;  // Forward declare - actual type is CommandContext*
 extern uint32_t getCurrentCommandOutputMask();  // Helper to get outputMask from context
 
+// Output capture buffer (set by cmd_exec_task when captureOutput is requested)
+char* gCmdCaptureBuf = nullptr;
+size_t gCmdCaptureLen = 0;
+size_t gCmdCaptureCap = 0;
+
 // Broadcast output - String overload (now uses queue)
 void broadcastOutput(const String& s) {
   // Suppress output in validation mode
   if (gCLIValidateOnly) {
     return;
+  }
+
+  // Capture output if active (used for HTTP response with capture=1)
+  if (gCmdCaptureBuf && gCmdCaptureLen < gCmdCaptureCap) {
+    size_t avail = gCmdCaptureCap - gCmdCaptureLen - 1;  // leave room for NUL
+    size_t sLen = s.length();
+    if (sLen > avail) sLen = avail;
+    if (sLen > 0) {
+      memcpy(gCmdCaptureBuf + gCmdCaptureLen, s.c_str(), sLen);
+      gCmdCaptureLen += sLen;
+      // Add newline if room
+      if (gCmdCaptureLen < gCmdCaptureCap - 1) {
+        gCmdCaptureBuf[gCmdCaptureLen++] = '\n';
+      }
+      gCmdCaptureBuf[gCmdCaptureLen] = '\0';
+    }
   }
   
   // Help-mode gating: drop non-help-render output while help UI is active,
@@ -623,6 +644,21 @@ void broadcastOutput(const String& s) {
 void broadcastOutputEx(const String& s, uint64_t extraFlags) {
   if (gCLIValidateOnly) return;
 
+  // Capture output if active (used for HTTP response with capture=1)
+  if (gCmdCaptureBuf && gCmdCaptureLen < gCmdCaptureCap) {
+    size_t avail = gCmdCaptureCap - gCmdCaptureLen - 1;
+    size_t sLen = s.length();
+    if (sLen > avail) sLen = avail;
+    if (sLen > 0) {
+      memcpy(gCmdCaptureBuf + gCmdCaptureLen, s.c_str(), sLen);
+      gCmdCaptureLen += sLen;
+      if (gCmdCaptureLen < gCmdCaptureCap - 1) {
+        gCmdCaptureBuf[gCmdCaptureLen++] = '\n';
+      }
+      gCmdCaptureBuf[gCmdCaptureLen] = '\0';
+    }
+  }
+
   if (gCLIState != CLI_NORMAL && !gInHelpRender) {
     if (!(s.startsWith("[SECURITY]") || s.startsWith("[AUTH]"))) {
       gHelpSuppressedCount++;
@@ -666,10 +702,25 @@ void broadcastOutputEx(const String& s, uint64_t extraFlags) {
 // Broadcast output - const char* overload (now uses queue)
 void broadcastOutput(const char* s) {
   if (!s) return;
-  
+
   // Suppress output in validation mode
   if (gCLIValidateOnly) {
     return;
+  }
+
+  // Capture output if active (used for HTTP response with capture=1)
+  if (gCmdCaptureBuf && gCmdCaptureLen < gCmdCaptureCap) {
+    size_t avail = gCmdCaptureCap - gCmdCaptureLen - 1;
+    size_t sLen = strlen(s);
+    if (sLen > avail) sLen = avail;
+    if (sLen > 0) {
+      memcpy(gCmdCaptureBuf + gCmdCaptureLen, s, sLen);
+      gCmdCaptureLen += sLen;
+      if (gCmdCaptureLen < gCmdCaptureCap - 1) {
+        gCmdCaptureBuf[gCmdCaptureLen++] = '\n';
+      }
+      gCmdCaptureBuf[gCmdCaptureLen] = '\0';
+    }
   }
 
   // Help-mode gating: drop non-help-render output while help UI is active,
