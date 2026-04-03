@@ -1,9 +1,12 @@
+#include "System_BuildConfig.h"
+#include "System_Maps.h"
+
+#if ENABLE_MAPS
+
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <cstring>
 
-#include "System_Maps.h"
-#include "System_BuildConfig.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
@@ -3536,15 +3539,25 @@ float LocationContextManager::pointToSegmentDistance(float lat, float lon,
 
 float LocationContextManager::haversineDistance(float lat1, float lon1, float lat2, float lon2) {
   const float R = 6371000.0f;  // Earth radius in meters
-  
+
   float dLat = (lat2 - lat1) * PI / 180.0f;
   float dLon = (lon2 - lon1) * PI / 180.0f;
-  
+
   float a = sinf(dLat / 2) * sinf(dLat / 2) +
             cosf(lat1 * PI / 180.0f) * cosf(lat2 * PI / 180.0f) *
             sinf(dLon / 2) * sinf(dLon / 2);
-  
+
   float c = 2 * atan2f(sqrtf(a), sqrtf(1 - a));
-  
+
   return R * c;
 }
+
+#else // !ENABLE_MAPS
+
+// Stubs so the linker is happy when maps are disabled
+#include "System_Command.h"
+const CommandEntry mapCommands[] = {};
+const size_t mapCommandsCount = 0;
+float gMapRotation = 0;
+
+#endif // ENABLE_MAPS

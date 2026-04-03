@@ -839,12 +839,13 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
   
   // Broadcast command execution notice to all interfaces (serial, web, OLED, etc.)
   // This is the "who did what from where" audit trail visible everywhere.
-  // Uses broadcastOutputEx with flags=0 to bypass context-based serial suppression —
+  // Uses explicit MSG_ROUTE_ALL to bypass context-based serial suppression —
   // the audit line should ALWAYS appear on all interfaces regardless of command origin.
   char auditLine[384];
   snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s",
            ctx.user.c_str(), source, redactedCmd.c_str(), status);
-  broadcastOutputEx(String(auditLine), 0);
+  extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
+  broadcastOutputCore_Routed(auditLine, strlen(auditLine), MSG_ROUTE_ALL);
 }
 
 // Automation logging
@@ -1780,7 +1781,9 @@ static const CommandModule gCommandModules[] = {
 #if ENABLE_CAMERA_SENSOR
   { "image",      "Image capture and management", imageCommands,        imageCommandsCount, 0, nullptr },
 #endif
+#if ENABLE_MAPS
   { "map",        "Map navigation and waypoints", mapCommands,          mapCommandsCount, 0, nullptr },
+#endif
   { "power",      "Power management", powerCommands,        powerCommandsCount, 0, nullptr },
 #if ENABLE_OLED_DISPLAY
   { "setpattern", "OLED gamepad password entry", setPatternCommands,   setPatternCommandsCount, 0, nullptr },

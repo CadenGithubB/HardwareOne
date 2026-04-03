@@ -458,7 +458,7 @@ void displayUnifiedMenu() {
     oledDisplay->println("Not bonded.");
     oledDisplay->println();
     oledDisplay->println("Use CLI:");
-    oledDisplay->println("  bond connect <device>");
+    oledDisplay->println("  bondconnect <device>");
     return;
   }
   

@@ -765,7 +765,7 @@ bool g2Connect(G2Eye eye) {
   DEBUG_G2F("[G2] MTU: %d", gG2State->mtu);
   
   BROADCAST_PRINTF("[G2] SUCCESS: Connected to %s", gFoundDeviceName.c_str());
-  broadcastOutput("[G2] Ready! Try: g2 show \"Hello\"");
+  broadcastOutput("[G2] Ready! Try: g2show \"Hello\"");
   notifyBleDeviceConnected(gFoundDeviceName.c_str());
   
   return true;
@@ -1201,9 +1201,6 @@ void getG2Status(char* buffer, size_t bufferSize) {
 
 static const char* cmd_g2connect(const String& argsInput) {
   String arg = argsInput;
-  arg.replace("openg2", "");
-  arg.replace("g2 connect", "");
-  arg.replace("g2connect", "");
   arg.trim();
   
   G2Eye eye = G2_EYE_LEFT;  // Default to left
@@ -1232,16 +1229,10 @@ static const char* cmd_g2status(const String& argsInput) {
 
 static const char* cmd_g2show(const String& argsInput) {
   String text = argsInput;
-  // Remove command prefix
-  if (text.startsWith("g2 show ")) {
-    text = text.substring(8);
-  } else if (text.startsWith("g2show ")) {
-    text = text.substring(7);
-  }
   text.trim();
-  
+
   if (text.length() == 0) {
-    return "Usage: g2 show <text>";
+    return "Usage: g2show <text>";
   }
   
   if (g2ShowText(text.c_str())) {
@@ -1278,8 +1269,6 @@ static const char* cmd_g2clear(const String& argsInput) {
 
 static const char* cmd_g2verbose(const String& argsInput) {
   String arg = argsInput;
-  arg.replace("g2 verbose", "");
-  arg.replace("g2verbose", "");
   arg.trim();
   
   if (arg.equalsIgnoreCase("on") || arg == "1") {
@@ -1351,8 +1340,6 @@ bool gG2MenuNavEnabled = true;
 
 static const char* cmd_g2nav(const String& argsInput) {
   String arg = argsInput;
-  arg.replace("g2 nav", "");
-  arg.replace("g2nav", "");
   arg.trim();
   
   if (arg.equalsIgnoreCase("on") || arg == "1") {

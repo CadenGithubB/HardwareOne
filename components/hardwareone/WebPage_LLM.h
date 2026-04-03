@@ -43,6 +43,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 .qa-bar select{
   background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border);
   border-radius:5px;padding:3px 6px;font-size:.82em;max-width:160px;
+  vertical-align:middle;
 }
 .qa-bar .btn{padding:3px 10px;font-size:.8em}
 
@@ -91,11 +92,11 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   margin-top:10px;border-top:1px solid var(--border);padding-top:10px;
 }
 .qa-input-row {
-  display:flex;align-items:flex-end;gap:8px;
+  display:flex;align-items:center;gap:8px;
 }
 .qa-q-prefix {
   font-family:'Courier New',monospace;font-size:1em;font-weight:700;
-  color:var(--panel-fg);padding-bottom:11px;flex-shrink:0;user-select:none;
+  color:var(--panel-fg);flex-shrink:0;user-select:none;
 }
 .qa-input-row textarea {
   flex:1;background:var(--panel-bg);color:var(--panel-fg);
@@ -107,7 +108,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 .qa-input-row textarea:disabled{opacity:.5}
 
 /* ── Retry button ── */
-.qa-retry{margin-left:8px;font-size:.85em;padding:4px 10px}
+.qa-retry{display:block;margin-left:28px;margin-top:4px;font-size:.85em;padding:4px 10px;width:fit-content}
 .qa-a-old{opacity:.45;font-size:.88em;border-left:2px solid var(--border);padding-left:8px;margin-top:2px}
 
 /* ── Advanced ── */
@@ -172,7 +173,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       <textarea id='qa-input' rows='2'
         placeholder='Ask about Hardware One...' disabled></textarea>
       <button id='qa-ask' class='btn' disabled onclick='qaAsk()'>Ask</button>
-      <button id='qa-stop' class='btn' style='display:none;background:var(--danger);color:#fff' onclick='qaStop()'>Stop</button>
+      <button id='qa-stop' class='btn' style='display:none' onclick='qaStop()'>Stop</button>
     </div>
     <div class='qa-adv-body' id='qa-adv-body'>
       <label title='Temperature — lower is more focused, higher is more varied'>Temp:<input type='number' id='qa-temp' value='0.5' min='0' max='2' step='0.05'></label>
@@ -235,12 +236,9 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     fetch('/api/llm/status', {credentials:'same-origin'})
       .then(function(r){ return r.json(); })
       .then(function(j){
-        var tps     = j.tokPerSec > 0 ? j.tokPerSec.toFixed(1) + ' tok/s' : '';
-        var arch    = j.arch ? j.arch + ' ' + (j.quant||'') : '';
-        var meta    = [arch, j.params||'', j.psramKB ? j.psramKB+'KB' : '', tps].filter(Boolean).join(' · ');
-        metaEl.textContent = meta;
-
         if (j.state === 'READY') {
+          var modelName = (j.model||'').split('/').pop().replace(/\.bin$/i,'') || 'model';
+          metaEl.textContent = modelName;
           setDot('dot-ready');
           stateEl.textContent = 'Ready';
           setReady(true);
@@ -268,6 +266,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
         } else if (j.state === 'UNLOADED') {
           setDot('dot-off');
           stateEl.textContent = 'No model';
+          metaEl.textContent = '';
           setReady(false);
           if (!afterGen) {
             if (initMsg) initMsg.textContent = 'No model loaded. Select a model and click Load.';
@@ -276,6 +275,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
         } else if (j.state === 'ERROR') {
           setDot('dot-off');
           stateEl.textContent = 'Error';
+          metaEl.textContent = '';
           setReady(false);
           if (!afterGen && j.error && j.error !== lastShownError) {
             lastShownError = j.error;

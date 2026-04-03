@@ -2892,7 +2892,7 @@ static const char* cmd_sr_cmds_list(const String& argsInput) {
   out = "";
 
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: sr start";
+    return "Error: MultiNet not initialized. Run: srstart";
   }
 
   if (!lockMN(2000)) {
@@ -2939,7 +2939,7 @@ static const char* cmd_sr_cmds_add(const String& argsInput) {
   if (id <= 0) return "Error: id must be > 0";
 
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: sr start";
+    return "Error: MultiNet not initialized. Run: srstart";
   }
   if (!lockMN(4000)) {
     return "Error: busy";
@@ -2968,7 +2968,7 @@ static const char* cmd_sr_cmds_del(const String& argsInput) {
   if (arg.length() == 0) return "Usage: sr cmds del <phrase|id>";
 
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: sr start";
+    return "Error: MultiNet not initialized. Run: srstart";
   }
   if (!lockMN(4000)) {
     return "Error: busy";
@@ -3013,7 +3013,7 @@ static const char* cmd_sr_cmds_clear(const String& argsInput) {
   if (arg != "confirm") return "Usage: sr cmds clear confirm";
 
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: sr start";
+    return "Error: MultiNet not initialized. Run: srstart";
   }
   if (!lockMN(4000)) {
     return "Error: busy";
@@ -3035,7 +3035,7 @@ static const char* cmd_sr_cmds_reload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: sr start";
+    return "Error: MultiNet not initialized. Run: srstart";
   }
   if (!lockMN(6000)) {
     return "Error: busy";
@@ -3061,7 +3061,7 @@ static const char* cmd_sr_cmds_save(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: sr start";
+    return "Error: MultiNet not initialized. Run: srstart";
   }
   if (!lockMN(6000)) {
     return "Error: busy";
@@ -3079,7 +3079,7 @@ static const char* cmd_sr_cmds_sync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: sr start";
+    return "Error: MultiNet not initialized. Run: srstart";
   }
   
   // Reset hierarchical state machine
@@ -3430,7 +3430,7 @@ static const char* cmd_sr_autotune(const String& argsInput) {
   
   if (args == "start") {
     if (gSrAutoTuneActive) {
-      return "Auto-tune already running. Use 'sr autotune stop' to cancel.";
+      return "Auto-tune already running. Use 'srautotune stop' to cancel.";
     }
     gSrAutoTuneActive = true;
     gSrAutoTuneStep = 0;
@@ -3450,7 +3450,7 @@ static const char* cmd_sr_autotune(const String& argsInput) {
                       (int)(kAutoTuneStepDurationMs / 1000) + " sec each.");
     broadcastOutput("Say test phrases (system, battery, cancel, help) during each step.");
     broadcastOutput(String("Step 1/") + (int)kAutoTuneConfigCount + ": " + kAutoTuneConfigs[0].description);
-    broadcastOutput("NOTE: AFE gain change requires SR restart. Run 'sr stop' then 'sr start'.");
+    broadcastOutput("NOTE: AFE gain change requires SR restart. Run 'srstop' then 'srstart'.");
     
     return "Auto-tune started. Restart SR to apply AFE gain change.";
   }
@@ -3652,7 +3652,7 @@ static const char* cmd_sr_snip_on(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!gESPSRRunning) {
-    return "Error: SR not running. Run: sr start";
+    return "Error: SR not running. Run: srstart";
   }
   if (!srSnipInit()) {
     return "Error: failed to initialize snippet capture";
@@ -3672,7 +3672,7 @@ static const char* cmd_sr_snip_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!gESPSRRunning) {
-    return "Error: SR not running. Run: sr start";
+    return "Error: SR not running. Run: srstart";
   }
   if (!srSnipInit()) {
     return "Error: failed to initialize snippet capture";

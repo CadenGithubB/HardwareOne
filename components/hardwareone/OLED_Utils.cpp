@@ -8,7 +8,8 @@
 #include "System_Command.h"
 #include "System_Settings.h"
 #include "System_ESPNow.h"
-#include "System_Utils.h"  // For executeCommand, AuthContext
+#include "System_Utils.h"  // For AuthContext
+#include "System_CommandTypes.h"  // For Command, CmdOutputMask
 #include "System_FirstTimeSetup.h"
 
 // Forward declaration for memory stats display
@@ -2405,38 +2406,52 @@ bool shouldBlockForDisplayAuth() {
   return gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive;
 }
 
+// Build a Command struct for OLED-originated commands.
+// Routed through cmd_exec_task via submitAndExecuteSync for unified
+// output routing, audit logging, and stack safety.
+static Command buildOLEDCommand(const String& cmdLine) {
+  Command uc;
+  uc.line = cmdLine;
+  uc.ctx.origin = ORIGIN_SYSTEM;
+  uc.ctx.auth.transport = SOURCE_LOCAL_DISPLAY;
+  uc.ctx.auth.user = gLocalDisplayAuthed ? gLocalDisplayUser : "";
+  uc.ctx.auth.ip = "oled";
+  uc.ctx.auth.path = "/oled/command";
+  uc.ctx.auth.sid = "";
+  uc.ctx.id = (uint32_t)millis();
+  uc.ctx.timestampMs = (uint32_t)millis();
+  uc.ctx.outputMask = CMD_OUT_LOG;  // file log + OLED console (via MSG_ROUTE_OLED), no serial echo
+  uc.ctx.validateOnly = false;
+  uc.ctx.replyHandle = nullptr;
+  uc.ctx.httpReq = nullptr;
+  return uc;
+}
+
 void executeOLEDCommand(const String& argsInput) {
-  extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
-  
-  AuthContext ctx;
-  ctx.transport = SOURCE_LOCAL_DISPLAY;
-  ctx.user = gLocalDisplayAuthed ? gLocalDisplayUser : "";
-  ctx.ip = "oled";
-  ctx.path = "/oled/command";
-  ctx.sid = "";
-  
-  char out[512];
-  bool success = executeCommand(ctx, argsInput.c_str(), out, sizeof(out));
-  
-  if (!success && strlen(out) > 0) {
-    DEBUG_USERSF("[OLED_CMD] Command failed: %s\n", out);
+  extern bool submitAndExecuteSync(const Command& cmd, String& out);
+
+  Command uc = buildOLEDCommand(argsInput);
+  String out;
+  bool success = submitAndExecuteSync(uc, out);
+
+  if (!success && out.length() > 0) {
+    DEBUG_USERSF("[OLED_CMD] Command failed: %s", out.c_str());
   }
 }
 
 bool executeOLEDCommandWithResult(const String& argsInput, char* out, size_t outSize) {
-  extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
+  extern bool submitAndExecuteSync(const Command& cmd, String& outStr);
 
-  AuthContext ctx;
-  ctx.transport = SOURCE_LOCAL_DISPLAY;
-  ctx.user = gLocalDisplayAuthed ? gLocalDisplayUser : "";
-  ctx.ip = "oled";
-  ctx.path = "/oled/command";
-  ctx.sid = "";
+  Command uc = buildOLEDCommand(argsInput);
+  String outStr;
+  bool success = submitAndExecuteSync(uc, outStr);
 
-  bool success = executeCommand(ctx, argsInput.c_str(), out, outSize);
+  // Copy result to caller's buffer
+  strncpy(out, outStr.c_str(), outSize - 1);
+  out[outSize - 1] = '\0';
 
-  if (!success && strlen(out) > 0) {
-    DEBUG_USERSF("[OLED_CMD] Command failed: %s\n", out);
+  if (!success && outStr.length() > 0) {
+    DEBUG_USERSF("[OLED_CMD] Command failed: %s", out);
   }
   return success;
 }

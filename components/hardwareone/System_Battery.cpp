@@ -272,7 +272,7 @@ const char* cmd_battery_calibrate(const String& argsInput) {
     delay(100);
   }
   
-  return "Battery calibration complete. Check 'battery status' for new readings.";
+  return "Battery calibration complete. Check 'batterystatus' for new readings.";
 }
 
 // Command registration moved to system_utils.cpp to ensure linker inclusion

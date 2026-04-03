@@ -191,8 +191,7 @@ idf_component_register(
 # This enables SD_CS_PIN and other Sense-specific defines in System_BuildConfig.h
 if(CONFIG_IDF_TARGET_ESP32S3)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC XIAO_ESP32S3_SENSE_ENABLED=1)
-    target_compile_definitions(${COMPONENT_LIB} PUBLIC ENABLE_CAMERA_SENSOR=1)
-    message(STATUS "XIAO ESP32S3 Sense features ENABLED (camera, mic, SD card)")
+    message(STATUS "XIAO ESP32S3 Sense features ENABLED (mic, SD card)")
 endif()
 
 target_compile_options(${COMPONENT_LIB} PRIVATE

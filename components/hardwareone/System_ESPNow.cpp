@@ -50,7 +50,6 @@
 // External dependencies from main .ino - now in espnow_system.h
 extern bool isValidUser(const String& username, const String& password);
 extern bool isAdminUser(const String& username);
-extern void printToWeb(const String& s);
 extern void printToSerial(const String& s);
 extern volatile uint32_t gOutputFlags;
 extern bool gCLIValidateOnly;
@@ -2551,7 +2550,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     // User sync must be enabled
     if (!gSettings.espnowUserSyncEnabled) {
       WARN_ESPNOWF("[USER_SYNC] Disabled — rejecting from %s", deviceName);
-      broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnow usersync on'");
+      broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnowusersync on'");
       v3_send_ack(recv_info->src_addr, h->msgId);
       return true;
     }
@@ -3794,7 +3793,7 @@ static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   cmd.ctx.auth.opaque = (void*)asyncCtx->srcMac;
   cmd.ctx.id = msgId;
   cmd.ctx.timestampMs = millis();
-  cmd.ctx.outputMask = 0;  // Output streams via V3 STREAM frames
+  cmd.ctx.outputMask = CMD_OUT_WEB | CMD_OUT_LOG;  // local sinks; output also streams via V3 STREAM frames
   cmd.ctx.validateOnly = false;
   cmd.ctx.replyHandle = nullptr;
   cmd.ctx.httpReq = nullptr;
@@ -6239,7 +6238,7 @@ void processMeshHeartbeats() {
     if (gEspNow->bondUnpairedRejectCount > sLastReportedRejectCount) {
       uint32_t newRejects = gEspNow->bondUnpairedRejectCount - sLastReportedRejectCount;
       sLastReportedRejectCount = gEspNow->bondUnpairedRejectCount;
-      BROADCAST_PRINTF("[BOND] REJECTED %lu bond msg(s) from UNPAIRED %02X:%02X:%02X:%02X:%02X:%02X (type=%d, total=%lu) — run 'bond connect' or 'espnow pair'!",
+      BROADCAST_PRINTF("[BOND] REJECTED %lu bond msg(s) from UNPAIRED %02X:%02X:%02X:%02X:%02X:%02X (type=%d, total=%lu) — run 'bondconnect' or 'espnowpair'!",
                        (unsigned long)newRejects,
                        gEspNow->bondUnpairedRejectMac[0], gEspNow->bondUnpairedRejectMac[1],
                        gEspNow->bondUnpairedRejectMac[2], gEspNow->bondUnpairedRejectMac[3],
@@ -7055,7 +7054,7 @@ const char* cmd_espnow_pair(const String& argsInput) {
   for (int i = 0; i < gEspNow->deviceCount; i++) {
     if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-      snprintf(getDebugBuffer(), 1024, "Device already paired. Use 'espnow unpair %s' first.", macStr.c_str());
+      snprintf(getDebugBuffer(), 1024, "Device already paired. Use 'espnowunpair %s' first.", macStr.c_str());
       return getDebugBuffer();
     }
   }
@@ -7885,7 +7884,7 @@ const char* cmd_espnow_meshtopo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!meshEnabled()) {
-    return "Mesh mode not enabled. Use 'espnow mode mesh' first.";
+    return "Mesh mode not enabled. Use 'espnowmode mesh' first.";
   }
   
   int peerCount = 0;
@@ -7907,14 +7906,14 @@ const char* cmd_espnow_meshtopo(const String& argsInput) {
       broadcastOutput("Ensure paired devices are powered on and in mesh mode.");
     } else {
       broadcastOutput("No mesh peers available.");
-      broadcastOutput("Pair devices using 'espnow pair' or 'espnow pairsecure' first.");
+      broadcastOutput("Pair devices using 'espnowpair' or 'espnowpairsecure' first.");
     }
     return "ERROR";
   }
   
   BROADCAST_PRINTF("[TOPO] Initiating topology discovery for %d peer(s)...", peerCount);
   requestTopologyDiscovery();
-  return "Topology discovery initiated. Use 'espnow toporesults' to view responses.";
+  return "Topology discovery initiated. Use 'espnowtoporesults' to view responses.";
 }
 
 // Time sync command
@@ -7922,7 +7921,7 @@ const char* cmd_espnow_timesync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!meshEnabled()) {
-    return "Mesh mode not enabled. Use 'espnow mode mesh' first.";
+    return "Mesh mode not enabled. Use 'espnowmode mesh' first.";
   }
   
   uint32_t epoch = (uint32_t)time(nullptr);
@@ -7957,7 +7956,7 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
              "Time Status:\n  Synced: Yes\n  Epoch: %lu\n  Last sync: %lu seconds ago",
              (unsigned long)epoch, (unsigned long)secondsSinceSync);
   } else {
-    snprintf(getDebugBuffer(), 1024, "Time Status:\n  Synced: No\n  Use 'espnow timesync' on master to sync");
+    snprintf(getDebugBuffer(), 1024, "Time Status:\n  Synced: No\n  Use 'espnowtimesync' on master to sync");
   }
   
   return getDebugBuffer();
@@ -8125,7 +8124,7 @@ const char* cmd_test_concurrent(const String& argsInput) {
   BROADCAST_PRINTF("\n=== Simulation Complete ===");
   BROADCAST_PRINTF("Results buffer length: %d bytes", gTopoResultsBuffer.length());
   BROADCAST_PRINTF("Responses received: %d", gTopoResponsesReceived);
-  broadcastOutput("\nRun 'espnow toporesults' to view the simulated results");
+  broadcastOutput("\nRun 'espnowtoporesults' to view the simulated results");
   
   return "OK";
 }
@@ -8350,7 +8349,7 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   if (!resolveDeviceNameOrMac(target, mac)) {
     static char errBuf[256];
     snprintf(errBuf, sizeof(errBuf), 
-             "Device '%s' not found. Use 'espnow devices' to see paired devices.", 
+             "Device '%s' not found. Use 'espnowdevices' to see paired devices.", 
              target.c_str());
     return errBuf;
   }
@@ -8705,7 +8704,7 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
   if (!resolveDeviceNameOrMac(target, mac)) {
     static char errBuf[256];
     snprintf(errBuf, sizeof(errBuf), 
-             "Device '%s' not found. Use 'espnow devices' to see paired devices.", 
+             "Device '%s' not found. Use 'espnowdevices' to see paired devices.", 
              target.c_str());
     return errBuf;
   }
@@ -8802,7 +8801,7 @@ const char* cmd_espnow_setpassphrase(const String& argsInput) {
   setEspNowPassphrase(passphrase);
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   snprintf(getDebugBuffer(), 1024,
-           "ESP-NOW encryption passphrase set. Use 'espnow pairsecure' to pair with encryption.\n"
+           "ESP-NOW encryption passphrase set. Use 'espnowpairsecure' to pair with encryption.\n"
            "Key derived from: %s...%s",
            passphrase.substring(0, 3).c_str(),
            passphrase.substring(passphrase.length() - 3).c_str());
@@ -8869,7 +8868,7 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return "Encryption not enabled. Run 'espnow setpassphrase \"your_phrase\"' first.";
+    return "Encryption not enabled. Run 'espnowsetpassphrase \"your_phrase\"' first.";
   }
 
   String args = argsInput;
@@ -8912,7 +8911,7 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
     if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       snprintf(getDebugBuffer(), 1024,
-               "Device already paired. Use 'espnow unpair %s' first.", macStr.c_str());
+               "Device already paired. Use 'espnowunpair %s' first.", macStr.c_str());
       return getDebugBuffer();
     }
   }
@@ -9016,7 +9015,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return "ESP-NOW encryption required. Set a passphrase with 'espnow setpassphrase \"your_phrase\"' and pair securely.";
+    return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase \"your_phrase\"' and pair securely.";
   }
 
   String args = argsInput;
@@ -9062,7 +9061,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
   if (!resolveDeviceNameOrMac(target, targetMac)) {
     static char browseBuffer[256];
     snprintf(browseBuffer, sizeof(browseBuffer),
-             "Target device '%s' not found or not paired. Pair the device first (prefer 'espnow pairsecure').",
+             "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
              target.c_str());
     return browseBuffer;
   }
@@ -9076,7 +9075,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
   if (isMeshMode()) {
     if (!isPairedDevice(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: not paired MAC=%s", formatMacAddress(targetMac).c_str());
-      return "Rejected (mesh): device not paired. Use 'espnow pair' first.";
+      return "Rejected (mesh): device not paired. Use 'espnowpair' first.";
     }
     if (!espnowPeerExists(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: no peer entry MAC=%s", formatMacAddress(targetMac).c_str());
@@ -9109,7 +9108,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return "ESP-NOW encryption required. Set a passphrase with 'espnow setpassphrase \"your_phrase\"' and pair securely.";
+    return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase \"your_phrase\"' and pair securely.";
   }
 
   String args = argsInput;
@@ -9143,7 +9142,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   if (!resolveDeviceNameOrMac(target, targetMac)) {
     static char fetchBuffer[256];
     snprintf(fetchBuffer, sizeof(fetchBuffer),
-             "Target device '%s' not found or not paired. Pair the device first (prefer 'espnow pairsecure').",
+             "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
              target.c_str());
     return fetchBuffer;
   }
@@ -9159,7 +9158,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   if (isMeshMode()) {
     if (!isPairedDevice(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: not paired MAC=%s", formatMacAddress(targetMac).c_str());
-      return "Rejected (mesh): device not paired. Use 'espnow pair' first.";
+      return "Rejected (mesh): device not paired. Use 'espnowpair' first.";
     }
     if (!espnowPeerExists(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: no peer entry MAC=%s", formatMacAddress(targetMac).c_str());
@@ -9192,7 +9191,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return "ESP-NOW encryption required. Set a passphrase with 'espnow setpassphrase "
+    return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase "
            "your_phrase"
            "' and pair securely.";
   }
@@ -9228,7 +9227,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
   if (!resolveDeviceNameOrMac(target, targetMac)) {
     static char remoteBuffer[256];
     snprintf(remoteBuffer, sizeof(remoteBuffer),
-             "Target device '%s' not found or not paired. Pair the device first (prefer 'espnow pairsecure').",
+             "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
              target.c_str());
     return remoteBuffer;
   }
@@ -9312,7 +9311,7 @@ const char* cmd_espnow_startstream(const String& argsInput) {
            "Stream started - all output will be sent to %s\n"
            "Rate limited to 10 messages/second.\n"
            "Large messages (>200 bytes) use chunked transmission for complete delivery.\n"
-           "Use 'espnow remote %s admin pass stopstream' to stop.",
+           "Use 'espnowremote %s admin pass stopstream' to stop.",
            senderName.c_str(), senderName.c_str());
   return streamBuffer;
 }
@@ -9398,7 +9397,7 @@ const char* cmd_espnow_send(const String& argsInput) {
   if (!resolveDeviceNameOrMac(target, mac)) {
     static char errBuf[256];
     snprintf(errBuf, sizeof(errBuf), 
-             "Device '%s' not found. Use 'espnow devices' to see paired devices.", 
+             "Device '%s' not found. Use 'espnowdevices' to see paired devices.", 
              target.c_str());
     return errBuf;
   }
@@ -9514,7 +9513,7 @@ const char* cmd_bond_requestcap(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) {
-    return "Not connected in bond mode. Use 'bond connect <device>' first.";
+    return "Not connected in bond mode. Use 'bondconnect <device>' first.";
   }
   
   uint8_t peerMac[6];
@@ -9570,7 +9569,7 @@ const char* cmd_bond_requestmanifest(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) {
-    return "Not connected in bond mode. Use 'bond connect <device>' first.";
+    return "Not connected in bond mode. Use 'bondconnect <device>' first.";
   }
   
   uint8_t peerMac[6];
@@ -9607,7 +9606,7 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
   // If no argument, list all cached manifests
   if (args.length() == 0) {
     if (!LittleFS.exists(manifestDir)) {
-      return "No cached manifests. Use 'bond requestmanifest' to fetch from peer.";
+      return "No cached manifests. Use 'bondrequestmanifest' to fetch from peer.";
     }
     
     File dir = LittleFS.open(manifestDir);
@@ -9637,14 +9636,14 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
       return "No cached manifests found.";
     }
     BROADCAST_PRINTF("Total: %d manifest(s)", count);
-    return "Use 'bond showremotemanifest <fwHash>' to view details.";
+    return "Use 'bondshowremotemanifest <fwHash>' to view details.";
   }
   
   // Show specific manifest by fwHash
   char path[96];
   snprintf(path, sizeof(path), "%s/%s.json", manifestDir, args.c_str());
   if (!LittleFS.exists(path)) {
-    return "Manifest not found. Use 'bond showremotemanifest' to list available.";
+    return "Manifest not found. Use 'bondshowremotemanifest' to list available.";
   }
   
   FsLockGuard guard("bond.manifest.read");
@@ -9715,13 +9714,13 @@ const char* cmd_bond_connect(const String& argsInput) {
   args.trim();
   
   if (args.length() == 0) {
-    return "Usage: bond connect <mac_or_name>";
+    return "Usage: bondconnect <mac_or_name>";
   }
   
   // Resolve device name or MAC to MAC bytes
   uint8_t peerMac[6];
   if (!resolveDeviceNameOrMac(args, peerMac)) {
-    return "Device not found. Use 'espnow list' to see paired devices.";
+    return "Device not found. Use 'espnowlist' to see paired devices.";
   }
   
   // Check if already connected
@@ -9732,7 +9731,7 @@ const char* cmd_bond_connect(const String& argsInput) {
   
   // Enable bond mode and set peer MAC
   // Role is determined by MAC address comparison (higher MAC = master)
-  // This ensures deterministic role assignment when both devices run 'bond connect'
+  // This ensures deterministic role assignment when both devices run 'bondconnect'
   // Role-based handshake sequencing:
   // - Master (role=1) waits for worker's data, then sends its own
   // - Worker (role=0) sends data first when entering each exchange state
@@ -9872,7 +9871,7 @@ const char* cmd_bond_role(const String& argsInput) {
   } else if (args == "worker" || args == "0") {
     newRole = 0;
   } else {
-    return "Usage: bond role <master|worker>";
+    return "Usage: bondrole <master|worker>";
   }
   
   bool changed = (newRole != gSettings.bondRole);
@@ -9928,18 +9927,12 @@ const char* cmd_bond_stream(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled) {
-    return "Not in bond mode. Use 'bond connect <device>' first.";
+    return "Not in bond mode. Use 'bondconnect <device>' first.";
   }
   
   String args = argsInput;
   args.trim();
-  
-  // Remove command prefix if present (legacy)
-  if (args.startsWith("bond stream") || args.startsWith("bondstream")) {
-    args = args.substring(args.indexOf("stream") + 6);
-    args.trim();
-  }
-  
+
   if (args.length() == 0) {
     // Show current streaming status with detailed diagnostics
     broadcastOutput("[BOND] Sensor streaming diagnostics (bidirectional):");
@@ -9972,7 +9965,7 @@ const char* cmd_bond_stream(const String& argsInput) {
   // Parse: bond stream <sensor> <on|off>
   int spaceIdx = args.indexOf(' ');
   if (spaceIdx < 0) {
-    return "Usage: bond stream <sensor> <on|off>\n       bond stream (show status)";
+    return "Usage: bondstream <sensor> <on|off>\n       bondstream (show status)";
   }
   
   String sensorName = args.substring(0, spaceIdx);
@@ -9996,7 +9989,7 @@ const char* cmd_bond_stream(const String& argsInput) {
   } else if (action == "off" || action == "0" || action == "stop") {
     enable = false;
   } else {
-    return "Usage: bond stream <sensor> <on|off>";
+    return "Usage: bondstream <sensor> <on|off>";
   }
   
   if (enable) {
@@ -10030,18 +10023,12 @@ const char* cmd_bond_testsensor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gSettings.bondModeEnabled) {
-    return "Not in bond mode. Use 'bond connect <device>' first.";
+    return "Not in bond mode. Use 'bondconnect <device>' first.";
   }
   
   String args = argsInput;
   args.trim();
-  
-  // Remove command prefix if present (legacy)
-  if (args.startsWith("bond testsensor") || args.startsWith("bondtestsensor")) {
-    args = args.substring(args.indexOf("testsensor") + 10);
-    args.trim();
-  }
-  
+
   // Default to thermal sensor for testing
   RemoteSensorType testType = REMOTE_SENSOR_THERMAL;
   if (args.length() > 0) {

@@ -92,7 +92,7 @@ extern volatile bool gInHelpRender;
 // Suppressed tail ring buffer
 static const size_t kHelpTailLines = 32;
 static const size_t kHelpTailCols = 120;
-EXT_RAM_BSS_ATTR static char gHelpTail[kHelpTailLines][kHelpTailCols];
+static char gHelpTail[kHelpTailLines][kHelpTailCols];
 static size_t gHelpTailCount = 0;
 static size_t gHelpTailIndex = 0;
 
@@ -154,9 +154,9 @@ void debugOutputTask(void* parameter) {
   while (true) {
     DebugMessage* msg = nullptr;
     if (xQueueReceive(gDebugOutputQueue, &msg, portMAX_DELAY) == pdTRUE && msg) {
-      // Help-mode gating for queued debug messages (allow security/auth)
+      // Help-mode gating for queued messages (allow security/auth/error)
       if (gCLIState != CLI_NORMAL && !gInHelpRender) {
-        if ((msg->flags & DEBUG_MSG_FLAG_ALLOW_IN_HELP) == 0 &&
+        if ((msg->routing & MSG_ROUTE_ALLOW_IN_HELP) == 0 &&
             !(strncmp(msg->text, "[SECURITY]", 10) == 0 || strncmp(msg->text, "[AUTH]", 6) == 0 ||
               strncmp(msg->text, "[ERROR]", 7) == 0)) {
           gHelpSuppressedCount++;
@@ -167,25 +167,25 @@ void debugOutputTask(void* parameter) {
           continue; // Drop from sinks to avoid overwriting help UI
         }
       }
-      // Single point of output - no concurrency issues
-      if ((gOutputFlags & OUTPUT_SERIAL) && !(msg->flags & DEBUG_MSG_FLAG_NO_SERIAL)) {
+
+      // --- Per-sink output gated by msg->routing AND hardware availability ---
+
+      // Serial
+      if ((msg->routing & MSG_ROUTE_SERIAL) && (gOutputFlags & OUTPUT_SERIAL)) {
         Serial.printf("[%lu] %s\n", msg->timestamp, msg->text);
       }
-      // Append to web mirror buffer using circular buffer logic (only if web output enabled)
-      if ((gOutputFlags & OUTPUT_WEB) && gWebMirror.buf) {
-        // Format message with timestamp (stack buffer - zero heap allocation)
+      // Web mirror (circular buffer for /api/cli/logs polling)
+      if ((msg->routing & MSG_ROUTE_WEB) && gWebMirror.buf) {
         char formattedMsg[DEBUG_MSG_SIZE + 32];
         int written = snprintf(formattedMsg, sizeof(formattedMsg), "[%lu] %s", msg->timestamp, msg->text);
         if (written > 0) {
-          // Use appendDirect() with pre-calculated length - zero String churn
           gWebMirror.appendDirect(formattedMsg, (size_t)written, true);
         }
       }
-      // File output (system log) - optimized with persistent file handle
-      if ((gOutputFlags & OUTPUT_FILE) && gSystemLogEnabled && gSystemLogPath.length() > 0) {
+      // File output (system log)
+      if ((msg->routing & MSG_ROUTE_FILE) && (gOutputFlags & OUTPUT_FILE) &&
+          gSystemLogEnabled && gSystemLogPath.length() > 0) {
         fsLock("debug.log");
-        
-        // Open file if not already open (once per logging session)
         if (!gSystemLogFile) {
           gSystemLogFile = LittleFS.open(gSystemLogPath.c_str(), "a");
           if (gSystemLogFile) {
@@ -193,58 +193,50 @@ void debugOutputTask(void* parameter) {
             gSystemLogUnflushedCount = 0;
           }
         }
-        
         if (gSystemLogFile) {
-          // Write directly to file (no intermediate buffer needed)
-          if (gSystemLogCategoryTags && msg->flags != 0) {
-            const char* category = getDebugCategoryName(msg->flags);
-            gSystemLogFile.printf("[%lu] [%s] %s\n", msg->timestamp, category, msg->text);
+          if (gSystemLogCategoryTags && msg->category != 0) {
+            const char* cat = getDebugCategoryName(msg->category);
+            gSystemLogFile.printf("[%lu] [%s] %s\n", msg->timestamp, cat, msg->text);
           } else {
             gSystemLogFile.printf("[%lu] %s\n", msg->timestamp, msg->text);
           }
-          
           gSystemLogLastWrite = millis();
           gSystemLogUnflushedCount++;
-          
-          // Periodic flush (balances performance vs data safety)
-          bool shouldFlush = 
+          bool shouldFlush =
             (gSystemLogUnflushedCount >= LOG_FLUSH_MESSAGE_COUNT) ||
             ((millis() - gSystemLogLastFlush) >= LOG_FLUSH_INTERVAL_MS);
-          
           if (shouldFlush) {
             gSystemLogFile.flush();
             gSystemLogLastFlush = millis();
             gSystemLogUnflushedCount = 0;
           }
         }
-        
         fsUnlock();
       }
 
-      // Ring buffer file for ERROR_* lines (same pattern as i2c_errors / login logs)
+      // Error ring buffer (always, independent of routing — errors are always logged)
       if (filesystemReady && strncmp(msg->text, "[ERROR]", 7) == 0) {
         String line = buildTimestampPrefix();
         line += msg->text;
         appendLineWithCap(LOG_ERROR_FILE, line, LOG_ERROR_CAP);
       }
-      
-      // Append to OLED console buffer (always, independent of OUTPUT_* flags)
+
+      // OLED console
       #if ENABLE_OLED_DISPLAY
-      if (gOLEDConsole.mutex) {
+      if ((msg->routing & MSG_ROUTE_OLED) && gOLEDConsole.mutex) {
         gOLEDConsole.append(msg->text, msg->timestamp);
       }
       #endif
-      
-      // BLE broadcast output - buffer messages and flush periodically to authenticated BLE clients
+
+      // BLE broadcast output
       #if ENABLE_BLUETOOTH
-      if ((gOutputFlags & OUTPUT_BLE) && isBLEConnected() && bleHasAuthenticatedSession()) {
-        // Append to buffer (with newline)
+      if ((msg->routing & MSG_ROUTE_BLE) && (gOutputFlags & OUTPUT_BLE) &&
+          isBLEConnected() && bleHasAuthenticatedSession()) {
         size_t msgLen = strlen(msg->text);
         if (gBLEOutputBuffer.length() + msgLen + 2 < BLE_OUTPUT_BUFFER_MAX) {
           gBLEOutputBuffer += msg->text;
           gBLEOutputBuffer += "\n";
         }
-        // Flush if buffer full or interval elapsed
         unsigned long now = millis();
         if (gBLEOutputBuffer.length() >= BLE_OUTPUT_BUFFER_MAX - 50 ||
             (now - gBLELastFlush >= BLE_OUTPUT_FLUSH_INTERVAL_MS && gBLEOutputBuffer.length() > 0)) {
@@ -255,17 +247,15 @@ void debugOutputTask(void* parameter) {
       }
       #endif
 
-      // G2 glasses output - buffer messages and flush periodically
+      // G2 glasses output
       #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-      if ((gOutputFlags & OUTPUT_G2) && isG2Connected()) {
-        // Append to buffer (with newline)
+      if ((msg->routing & MSG_ROUTE_G2) && (gOutputFlags & OUTPUT_G2) && isG2Connected()) {
         if (gG2OutputBuffer.length() + strlen(msg->text) + 2 < G2_BUFFER_MAX) {
           gG2OutputBuffer += msg->text;
           gG2OutputBuffer += "\n";
         }
-        // Flush if buffer full or interval elapsed
         unsigned long now = millis();
-        if (gG2OutputBuffer.length() >= G2_BUFFER_MAX - 50 || 
+        if (gG2OutputBuffer.length() >= G2_BUFFER_MAX - 50 ||
             (now - gG2LastFlush >= G2_FLUSH_INTERVAL_MS && gG2OutputBuffer.length() > 0)) {
           g2ShowText(gG2OutputBuffer.c_str());
           gG2OutputBuffer = "";
@@ -516,7 +506,8 @@ void debugQueuePrintf(uint64_t flag, const char* fmt, ...) {
   }
 
   msg->timestamp = millis();
-  msg->flags = flag;
+  msg->category = flag;          // debug category (DEBUG_WIFI, DEBUG_AUTH, etc.)
+  msg->routing = MSG_ROUTE_ALL;  // debug messages go to all sinks
 
   va_list args;
   va_start(args, fmt);
@@ -542,16 +533,6 @@ void debugQueuePrintf(uint64_t flag, const char* fmt, ...) {
 // Broadcast Output Functions
 // ============================================================================
 
-// Helper: Print to web buffer
-void printToWeb(const String& s) {
-  if (!gWebMirror.buf) return;
-  if (gWebMirror.len + s.length() + 1 >= gWebMirror.cap) return;
-  strcpy(gWebMirror.buf + gWebMirror.len, s.c_str());
-  gWebMirror.len += s.length();
-  gWebMirror.buf[gWebMirror.len++] = '\n';
-  gWebMirror.buf[gWebMirror.len] = '\0';
-}
-
 // Global current command context (set during command execution, checked here)
 extern void* gCurrentCommandContext;  // Forward declare - actual type is CommandContext*
 extern uint32_t getCurrentCommandOutputMask();  // Helper to get outputMask from context
@@ -561,97 +542,28 @@ char* gCmdCaptureBuf = nullptr;
 size_t gCmdCaptureLen = 0;
 size_t gCmdCaptureCap = 0;
 
-// Broadcast output - String overload (now uses queue)
-void broadcastOutput(const String& s) {
-  // Suppress output in validation mode
-  if (gCLIValidateOnly) {
-    return;
-  }
-
-  // Capture output if active (used for HTTP response with capture=1)
-  if (gCmdCaptureBuf && gCmdCaptureLen < gCmdCaptureCap) {
-    size_t avail = gCmdCaptureCap - gCmdCaptureLen - 1;  // leave room for NUL
-    size_t sLen = s.length();
-    if (sLen > avail) sLen = avail;
-    if (sLen > 0) {
-      memcpy(gCmdCaptureBuf + gCmdCaptureLen, s.c_str(), sLen);
-      gCmdCaptureLen += sLen;
-      // Add newline if room
-      if (gCmdCaptureLen < gCmdCaptureCap - 1) {
-        gCmdCaptureBuf[gCmdCaptureLen++] = '\n';
-      }
-      gCmdCaptureBuf[gCmdCaptureLen] = '\0';
-    }
-  }
-  
-  // Help-mode gating: drop non-help-render output while help UI is active,
-  // but allow security/auth notices to pass through
-  if (gCLIState != CLI_NORMAL && !gInHelpRender) {
-    if (!(s.startsWith("[SECURITY]") || s.startsWith("[AUTH]"))) {
-      gHelpSuppressedCount++;
-      pushHelpSuppressed(s.c_str());
-      return;
-    }
-  }
-  
-  // CRITICAL: Check if we're in a sensor task that's shutting down
-  extern bool thermalEnabled, imuEnabled, tofEnabled;
-  TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
-  extern TaskHandle_t thermalTaskHandle, imuTaskHandle, tofTaskHandle;
-  
-  // Skip output if current task is a sensor task that's been disabled
-  if (currentTask == thermalTaskHandle && !thermalEnabled) return;
-  if (currentTask == imuTaskHandle && !imuEnabled) return;
-  if (currentTask == tofTaskHandle && !tofEnabled) return;
-  
-  // Check if we're inside a command execution with a context that excludes serial
-  uint64_t extraFlags = 0;
-  if (gCurrentCommandContext) {
-    uint32_t mask = getCurrentCommandOutputMask();
-    if (!(mask & 0x01)) {  // CMD_OUT_SERIAL = 1 << 0
-      extraFlags |= DEBUG_MSG_FLAG_NO_SERIAL;
-    }
-  }
-  
-  if (gDebugOutputQueue) {
-    DebugMessage* msg = nullptr;
-    if (gDebugFreeQueue && xQueueReceive(gDebugFreeQueue, &msg, 0) == pdTRUE && msg) {
-      msg->timestamp = millis();
-      msg->flags = (gInHelpRender ? DEBUG_MSG_FLAG_ALLOW_IN_HELP : 0) | extraFlags;
-      strncpy(msg->text, s.c_str(), DEBUG_MSG_SIZE - 1);
-      msg->text[DEBUG_MSG_SIZE - 1] = '\0';
-      if (xQueueSend(gDebugOutputQueue, &msg, 0) != pdTRUE) {
-        xQueueSend(gDebugFreeQueue, &msg, 0);
-        gDebugDropped++;
-      }
-    } else {
-      gDebugDropped++;
-    }
-  }
-  
-
-  // ESP-NOW V3 session streaming (extern to avoid circular deps)
-#if ENABLE_ESPNOW
-  extern uint32_t gCurrentStreamCmdId;
-  extern void sendEspNowStreamMessage(const String& message);
-  if (gCurrentStreamCmdId != 0) {
-    sendEspNowStreamMessage(s);
-  }
-#endif
-}
-
-// Broadcast output with extra flags (e.g. DEBUG_MSG_FLAG_NO_SERIAL to suppress serial)
-void broadcastOutputEx(const String& s, uint64_t extraFlags) {
+// ============================================================================
+// broadcastOutputCore — single implementation for all broadcast overloads
+// ============================================================================
+//
+// All broadcast output funnels through here. The public overloads
+// (String, const char*) are thin wrappers that call this.
+//
+// routeOverride: when non-zero, used as the MSG_ROUTE_* mask directly.
+//   When zero, route is computed from gCurrentCommandContext->outputMask
+//   (or MSG_ROUTE_ALL if no command context is active).
+//
+static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverride) {
+  // 1. Suppress output in validation mode
   if (gCLIValidateOnly) return;
 
-  // Capture output if active (used for HTTP response with capture=1)
+  // 2. Capture output if active (used for HTTP response with capture=1)
   if (gCmdCaptureBuf && gCmdCaptureLen < gCmdCaptureCap) {
-    size_t avail = gCmdCaptureCap - gCmdCaptureLen - 1;
-    size_t sLen = s.length();
-    if (sLen > avail) sLen = avail;
-    if (sLen > 0) {
-      memcpy(gCmdCaptureBuf + gCmdCaptureLen, s.c_str(), sLen);
-      gCmdCaptureLen += sLen;
+    size_t avail = gCmdCaptureCap - gCmdCaptureLen - 1;  // leave room for NUL
+    size_t copyLen = len < avail ? len : avail;
+    if (copyLen > 0) {
+      memcpy(gCmdCaptureBuf + gCmdCaptureLen, text, copyLen);
+      gCmdCaptureLen += copyLen;
       if (gCmdCaptureLen < gCmdCaptureCap - 1) {
         gCmdCaptureBuf[gCmdCaptureLen++] = '\n';
       }
@@ -659,14 +571,17 @@ void broadcastOutputEx(const String& s, uint64_t extraFlags) {
     }
   }
 
+  // 3. Help-mode gating: drop non-help-render output while help UI is active,
+  //    but allow security/auth notices to pass through
   if (gCLIState != CLI_NORMAL && !gInHelpRender) {
-    if (!(s.startsWith("[SECURITY]") || s.startsWith("[AUTH]"))) {
+    if (!(strncmp(text, "[SECURITY]", 10) == 0 || strncmp(text, "[AUTH]", 6) == 0)) {
       gHelpSuppressedCount++;
-      pushHelpSuppressed(s.c_str());
+      pushHelpSuppressed(text);
       return;
     }
   }
 
+  // 4. Skip output if current task is a sensor task that's been disabled
   extern bool thermalEnabled, imuEnabled, tofEnabled;
   TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
   extern TaskHandle_t thermalTaskHandle, imuTaskHandle, tofTaskHandle;
@@ -674,12 +589,28 @@ void broadcastOutputEx(const String& s, uint64_t extraFlags) {
   if (currentTask == imuTaskHandle && !imuEnabled) return;
   if (currentTask == tofTaskHandle && !tofEnabled) return;
 
+  // 5. Compute per-message route mask
+  uint8_t route;
+  if (routeOverride) {
+    route = routeOverride;
+  } else if (gCurrentCommandContext) {
+    // Map CMD_OUT_* to MSG_ROUTE_* (bits 0-2 and 4 are aligned by design)
+    uint32_t mask = getCurrentCommandOutputMask();
+    route = (uint8_t)(mask & (MSG_ROUTE_SERIAL | MSG_ROUTE_WEB | MSG_ROUTE_FILE | MSG_ROUTE_BLE))
+          | MSG_ROUTE_OLED | MSG_ROUTE_G2;  // OLED and G2 always receive command output
+  } else {
+    route = MSG_ROUTE_ALL;  // non-command output goes to all sinks
+  }
+  if (gInHelpRender) route |= MSG_ROUTE_ALLOW_IN_HELP;
+
+  // 6. Enqueue to debug output task
   if (gDebugOutputQueue) {
     DebugMessage* msg = nullptr;
     if (gDebugFreeQueue && xQueueReceive(gDebugFreeQueue, &msg, 0) == pdTRUE && msg) {
       msg->timestamp = millis();
-      msg->flags = (gInHelpRender ? DEBUG_MSG_FLAG_ALLOW_IN_HELP : 0) | extraFlags;
-      strncpy(msg->text, s.c_str(), DEBUG_MSG_SIZE - 1);
+      msg->category = 0;   // broadcast message, no debug category
+      msg->routing = route;
+      strncpy(msg->text, text, DEBUG_MSG_SIZE - 1);
       msg->text[DEBUG_MSG_SIZE - 1] = '\0';
       if (xQueueSend(gDebugOutputQueue, &msg, 0) != pdTRUE) {
         xQueueSend(gDebugFreeQueue, &msg, 0);
@@ -690,93 +621,31 @@ void broadcastOutputEx(const String& s, uint64_t extraFlags) {
     }
   }
 
+  // 7. ESP-NOW V3 session streaming (extern to avoid circular deps)
 #if ENABLE_ESPNOW
   extern uint32_t gCurrentStreamCmdId;
   extern void sendEspNowStreamMessage(const String& message);
   if (gCurrentStreamCmdId != 0) {
-    sendEspNowStreamMessage(s);
+    sendEspNowStreamMessage(String(text));
   }
 #endif
 }
 
-// Broadcast output - const char* overload (now uses queue)
+// --- Public overloads: thin wrappers around broadcastOutputCore ---
+
+void broadcastOutput(const String& s) {
+  broadcastOutputCore(s.c_str(), s.length(), 0);
+}
+
 void broadcastOutput(const char* s) {
   if (!s) return;
+  broadcastOutputCore(s, strlen(s), 0);
+}
 
-  // Suppress output in validation mode
-  if (gCLIValidateOnly) {
-    return;
-  }
-
-  // Capture output if active (used for HTTP response with capture=1)
-  if (gCmdCaptureBuf && gCmdCaptureLen < gCmdCaptureCap) {
-    size_t avail = gCmdCaptureCap - gCmdCaptureLen - 1;
-    size_t sLen = strlen(s);
-    if (sLen > avail) sLen = avail;
-    if (sLen > 0) {
-      memcpy(gCmdCaptureBuf + gCmdCaptureLen, s, sLen);
-      gCmdCaptureLen += sLen;
-      if (gCmdCaptureLen < gCmdCaptureCap - 1) {
-        gCmdCaptureBuf[gCmdCaptureLen++] = '\n';
-      }
-      gCmdCaptureBuf[gCmdCaptureLen] = '\0';
-    }
-  }
-
-  // Help-mode gating: drop non-help-render output while help UI is active,
-  // but allow security/auth notices to pass through
-  if (gCLIState != CLI_NORMAL && !gInHelpRender) {
-    if (!(strncmp(s, "[SECURITY]", 10) == 0 || strncmp(s, "[AUTH]", 6) == 0)) {
-      gHelpSuppressedCount++;
-      pushHelpSuppressed(s);
-      return;
-    }
-  }
-
-  // CRITICAL: Check if we're in a sensor task that's shutting down
-  extern bool thermalEnabled, imuEnabled, tofEnabled;
-  TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
-  extern TaskHandle_t thermalTaskHandle, imuTaskHandle, tofTaskHandle;
-  
-  // Skip output if current task is a sensor task that's been disabled
-  if (currentTask == thermalTaskHandle && !thermalEnabled) return;
-  if (currentTask == imuTaskHandle && !imuEnabled) return;
-  if (currentTask == tofTaskHandle && !tofEnabled) return;
-
-  // Check if we're inside a command execution with a context that excludes serial
-  uint64_t extraFlags = 0;
-  if (gCurrentCommandContext) {
-    uint32_t mask = getCurrentCommandOutputMask();
-    if (!(mask & 0x01)) {  // CMD_OUT_SERIAL = 1 << 0
-      extraFlags |= DEBUG_MSG_FLAG_NO_SERIAL;
-    }
-  }
-
-  if (gDebugOutputQueue) {
-    DebugMessage* msg = nullptr;
-    if (gDebugFreeQueue && xQueueReceive(gDebugFreeQueue, &msg, 0) == pdTRUE && msg) {
-      msg->timestamp = millis();
-      msg->flags = (gInHelpRender ? DEBUG_MSG_FLAG_ALLOW_IN_HELP : 0) | extraFlags;
-      strncpy(msg->text, s, DEBUG_MSG_SIZE - 1);
-      msg->text[DEBUG_MSG_SIZE - 1] = '\0';
-      if (xQueueSend(gDebugOutputQueue, &msg, 0) != pdTRUE) {
-        xQueueSend(gDebugFreeQueue, &msg, 0);
-        gDebugDropped++;
-      }
-    } else {
-      gDebugDropped++;
-    }
-  }
-  
-
-  // ESP-NOW V3 session streaming (extern to avoid circular deps)
-#if ENABLE_ESPNOW
-  extern uint32_t gCurrentStreamCmdId;
-  extern void sendEspNowStreamMessage(const String& message);
-  if (gCurrentStreamCmdId != 0) {
-    sendEspNowStreamMessage(String(s));
-  }
-#endif
+// Explicit-route entry point for context-aware overload (HardwareOne.cpp)
+// Called when gCurrentCommandContext is already NULL and the caller knows the route.
+void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route) {
+  broadcastOutputCore(text, len, route);
 }
 
 // Print summary (and tail) of output suppressed during help; resets counters

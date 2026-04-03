@@ -357,6 +357,8 @@ struct TileCacheSlot {
   uint8_t  tierIdx;        // Which tier this slot belongs to
 };
 
+#if ENABLE_MAPS
+
 // Loaded map state - v6 tiled architecture
 struct LoadedMap {
   bool valid;
@@ -820,7 +822,18 @@ const char* cmd_whereami(const String& argsInput);
 const char* cmd_search(const String& argsInput);
 const char* cmd_maporganize(const String& argsInput);
 
-// Command registry
+#else // !ENABLE_MAPS
+
+// Stubs when maps are disabled — allows callers to compile without #if guards everywhere
+class MapCore {
+public:
+  static bool hasValidMap() { return false; }
+  static void unloadMap() {}
+};
+
+#endif // ENABLE_MAPS
+
+// Command registry — always declared (stub definition in .cpp when disabled)
 struct CommandEntry;
 extern const CommandEntry mapCommands[];
 extern const size_t mapCommandsCount;

@@ -686,7 +686,7 @@ void streamBondInner(httpd_req_t* req) {
     fetch('/api/cli', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'cmd=' + encodeURIComponent('bond connect ' + mac)
+      body: 'cmd=' + encodeURIComponent('bondconnect ' + mac)
     })
     .then(r => r.text())
     .then(result => {
@@ -1215,7 +1215,7 @@ static esp_err_t handleBondRole(httpd_req_t* req) {
   // before the local device starts the handshake. Reversing this order caused a
   // race condition where the local worker sent CAP_REQ before the peer became master,
   // and resetBondHandshake() on the peer then cleared the deferred flags.
-  String remoteCmd = "remote:bond role ";
+  String remoteCmd = "remote:bondrole ";
   remoteCmd += peerNewRole;
   String remoteResult;
   bool remoteOk = executeUnifiedWebCommand(req, ctx, remoteCmd, remoteResult);

@@ -571,9 +571,11 @@ const char* cmd_filedelete(const String& argsInput) {
   if (!VFS::exists(path)) return "Error: File does not exist";
 
   // If the file to delete is the currently loaded map, unload it first to close the FD
+#if ENABLE_MAPS
   if (MapCore::hasValidMap() && path == String(MapCore::getCurrentMap().filepath)) {
     MapCore::unloadMap();
   }
+#endif
 
   if (!VFS::remove(path)) return "Error: Failed to delete file";
   snprintf(getDebugBuffer(), 1024, "Deleted file: %s", path.c_str());

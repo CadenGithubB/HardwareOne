@@ -28,7 +28,7 @@
 
 // Memory budget: minimum free PSRAM to allow LLM init (bytes)
 // Keeps a reserve so the rest of the app doesn't starve
-#define LLM_PSRAM_RESERVE_BYTES   (0)
+#define LLM_PSRAM_RESERVE_BYTES   (400 * 1024)
 
 // Auto-fit: firmware automatically reduces context to fit available PSRAM.
 // This is just the upper bound — the actual context used may be lower.

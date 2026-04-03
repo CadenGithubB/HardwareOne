@@ -2029,8 +2029,8 @@ const char* cmd_session_revoke(const String& argsInput) {
   }
 
   return "Usage:\n"
-         "  session revoke sid <sid> [reason]\n"
-         "  session revoke user <username> [reason]";
+         "  sessionrevoke sid <sid> [reason]\n"
+         "  sessionrevoke user <username> [reason]";
 }
 const char* cmd_ban(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -3014,7 +3014,7 @@ const char* cmd_user_sync(const String& argsInput) {
   
   // Check if user sync is enabled
   if (!gSettings.espnowUserSyncEnabled) {
-    return "Error: User sync disabled - enable with 'espnow usersync on'";
+    return "Error: User sync disabled - enable with 'espnowusersync on'";
   }
   
   // Parse command args
