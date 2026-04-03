@@ -66,6 +66,7 @@ Hardware One can be used in several different ways depending on the hardware you
 | TEA5767 FM Radio receiver | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | ESP-SR voice commands (wake word + command recognition) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;✅ |
 | BLE server + Even Realities G2 glasses client | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;✅ |
+| On-device LLM inference (ESP32-S3 + PSRAM only) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Edge Impulse ML inference | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Battery monitoring (LiPo voltage via ADC) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | PCA9685 servo controller | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |

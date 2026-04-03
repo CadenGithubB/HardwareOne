@@ -11,6 +11,7 @@ This is the full reference for Hardware One. It covers every subsystem, all CLI 
 - [ESP-NOW Mesh](#esp-now-mesh)
 - [Automations](#automations)
 - [MQTT](#mqtt)
+- [On-Device LLM](#on-device-llm)
 - [Debug Flags](#debug-flags)
 - [Command Reference](#command-reference)
 - [Per-Module Notes](#per-module-notes)
@@ -37,6 +38,7 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `ENABLE_BATTERY_MONITOR` | `0` | LiPo voltage monitoring via ADC |
 | `ENABLE_EDGE_IMPULSE` | `0` | Edge Impulse ML inference |
 | `ENABLE_BONDED_MODE` | `0` | Bonded Microcontrollers — two devices share command registries and the controller shows a Remote tab with the paired device's features |
+| `ENABLE_ONDEVICE_LLM` | `1` | On-device LLM inference — tiny transformer runs locally on ESP32-S3 with PSRAM. Requires a model file on LittleFS or SD card. |
 
 When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABLE_*` flags:
 
@@ -85,6 +87,7 @@ Navigate to the device's IP address in a browser. The web server must be running
 - **Bluetooth** — BLE connection status and controls (requires `ENABLE_BLUETOOTH`)
 - **MQTT** — broker configuration, topic preview, Home Assistant status (requires `ENABLE_MQTT`)
 - **Settings** — all device settings, debug flags, user management
+- **LLM** — on-device language model chat interface: load/unload model, ask questions, adjust temperature and sampling settings (requires `ENABLE_ONDEVICE_LLM`)
 - **CLI** — full command interface in the browser, with history
 
 Authentication is required. Default credentials are set on first boot via the setup wizard or the `users` CLI commands.
@@ -196,6 +199,47 @@ mqtt status                  - Show connection status
 
 ---
 
+## On-Device LLM
+
+Requires `ENABLE_ONDEVICE_LLM=1` and an ESP32-S3 board with PSRAM. Runs a tiny transformer model entirely on-device — no internet connection required.
+
+### Model files
+
+Place LLM1-format model files (produced by `esp32-llm-converter`) in one of two locations:
+
+- **LittleFS (internal flash):** `/system/llm/model.bin` — default path, loaded automatically
+- **SD card:** `/sd/llm/<filename>.bin` — useful for swapping models without reflashing
+
+The default path (`/system/llm/model.bin`) is loaded when you call `llmload` with no arguments. Use `llmmodels` to list all available files across both storage locations.
+
+### Memory
+
+Models and KV cache are allocated in PSRAM. The firmware automatically reduces the context window to fit available PSRAM (auto-fit). A 400 KB reserve is kept free for the rest of the system. Run `llmstatus` to see current PSRAM usage after loading.
+
+### Web UI
+
+The **LLM** tab provides a chat interface. Select a model from the dropdown, click **Load**, then type a prompt and click **Ask**. Adjustable settings: temperature, sentence limit, and repetition penalty.
+
+### Generation modes
+
+The model supports two generation modes triggered by how the prompt ends:
+
+- **Normal mode** — generates a natural-language response, stopping after the configured sentence limit.
+- **Do: mode** — when the prompt ends with the `Do:` token, the model outputs a CLI command instead of prose. Used internally by the automation and web UI to translate natural-language requests into executable commands.
+
+### CLI commands
+
+```
+llmstatus               - Show LLM engine state, model config, and PSRAM usage
+llmload [model.bin]     - Load model (default: /system/llm/model.bin)
+llmunload               - Unload model and free all PSRAM buffers
+llmmodels               - List available model files (LittleFS + SD)
+llmgenerate <prompt>    - Generate text from a prompt (synchronous)
+llmstop                 - Stop in-progress generation
+```
+
+---
+
 ## Debug Flags
 
 Debug output is controlled by named flags. Each flag can be enabled persistently (saved to flash) or temporarily (runtime only, cleared on reboot).
@@ -227,6 +271,12 @@ Available debug modules (type `help debug` on device for full list):
 | `debugperformance` | Timing and performance metrics |
 | `debugsystem` | System events |
 | `debugusers` | User management |
+| `debugllm` | LLM general (parent flag) |
+| `debugllmload` | Model load, header validation, weight mapping |
+| `debugllmtokenizer` | Tokenizer BPE encode/decode |
+| `debugllmforward` | Transformer forward pass (verbose — use sparingly) |
+| `debugllmgenerate` | Generation loop, sampling, throughput |
+| `debugllmmemory` | PSRAM estimates, context cap, allocations |
 
 ---
 
@@ -238,16 +288,23 @@ Type `help` on the device to enter the interactive help system. Type a module na
 <summary><strong>core — System commands</strong></summary>
 
 ```
-status              - Show system status
-uptime              - Show system uptime
-memory              - Show heap/PSRAM usage
-memsum              - One-line memory summary
-memreport           - Comprehensive memory report
-memtrack <on|off|reset|status>
-psram               - Show PSRAM usage details
-reboot              - Restart the device
-clear               - Clear CLI history
-broadcast <message> - Send message to all users (admin)
+status                          - Show system status (WiFi, FS, memory)
+uptime                          - Show device uptime
+time                            - Show current time (uptime + NTP if synced)
+timeset <YYYY-MM-DD HH:MM:SS>   - Set time manually (or unix timestamp)
+reboot                          - Restart the device
+clear                           - Clear CLI history
+broadcast <message>             - Send message to all users (admin)
+wait <ms>                       - Delay execution for N milliseconds
+sleep <ms>                      - Alias for wait
+lightsleep [seconds]            - Enter ESP32 light sleep (default 20s)
+temperature                     - Read ESP32 internal temperature
+voltage                         - Read supply voltage
+cpufreq                         - Get/set CPU frequency
+memsample                       - Memory snapshot with component breakdown
+memreport                       - Comprehensive memory report (Task Manager style)
+taskstats                       - Detailed FreeRTOS task statistics
+pendinglist                     - List pending user account requests
 ```
 </details>
 
@@ -255,20 +312,20 @@ broadcast <message> - Send message to all users (admin)
 <summary><strong>wifi — Network management</strong></summary>
 
 ```
-wifi                - Show WiFi status
-wifi connect        - Connect to saved network
-wifi disconnect     - Disconnect
-wifi scan           - Scan for nearby access points
-wifi on             - Enable WiFi
-wifi off            - Disable WiFi
-setssid <ssid>      - Save WiFi SSID
-setpass <pass>      - Save WiFi password
-webauto <on|off>    - Auto-start web server on boot
-webstart            - Start web server
-webstop             - Stop web server
-webstatus           - Show web server status and IP
-synctime            - Sync time from NTP server
-time                - Show current time
+openwifi [ssid]                 - Connect to WiFi (optional SSID override)
+closewifi                       - Disconnect from WiFi
+wifistatus                      - Show current connection info
+wifiscan                        - Scan for nearby access points
+wifilist                        - List saved networks
+wifiadd <ssid> <pass> [priority] [hidden]  - Add/save a WiFi network
+wifirm <ssid>                   - Remove a saved network
+wifipromote <ssid>              - Promote network to top priority
+ntpsync                         - Sync time from NTP server
+openhttp                        - Start HTTP/HTTPS web server
+closehttp                       - Stop web server
+httpstatus                      - Show web server status and IP
+certinfo                        - Show HTTPS certificate details
+certgen [rsa]                   - Generate self-signed certificate (default: ECDSA P-256)
 ```
 </details>
 
@@ -276,18 +333,75 @@ time                - Show current time
 <summary><strong>espnow — ESP-NOW mesh</strong></summary>
 
 ```
-espnow status       - Show ESP-NOW status and peer list
-espnow pair         - Start pairing with a peer
-espnow unpair <mac> - Remove a paired peer
-espnow send <mac> <msg>  - Send text message to peer
-espnow sendfile <mac> <path>  - Send file to peer
-espnow requestmeta <mac>  - Request metadata from peer
-espnow setname <name>     - Set this device's name
-espnow setroom <room>     - Set room identifier
-espnow setzone <zone>     - Set zone identifier
-espnow settags <tags>     - Set comma-separated tags
-espnow peers        - List all known peers
-espnow mesh         - Show mesh topology
+openespnow                      - Initialize ESP-NOW
+closeespnow                     - Deinitialize ESP-NOW and free resources
+espnowstatus                    - Show ESP-NOW status and configuration
+espnowstats                     - Show message/error counters
+espnowlist                      - List all paired peers
+espnowpair <mac> <name>         - Pair with a device
+espnowunpair <name_or_mac>      - Remove a paired peer
+espnowsend <name_or_mac> <msg>  - Send a text message (auto-routes via mesh)
+espnowbroadcast <message>       - Broadcast to all peers
+espnowsendfile <name_or_mac> <path>        - Send a file to a peer
+espnowbrowse <name_or_mac> <user> <pass> [path]  - Browse remote filesystem
+espnowfetch <name_or_mac> <user> <pass> <path>   - Fetch a file from a peer
+espnowremote <name_or_mac> <user> <pass> <cmd>   - Execute command on peer
+
+--- Mesh ---
+espnowmode [direct|mesh]        - Get/set routing mode
+espnowmeshstatus                - Show mesh peer health (heartbeats, ACKs)
+espnowmeshmetrics               - Show routing metrics (forwards, drops, path stats)
+espnowmeshttl [1-10|adaptive]   - Get/set mesh TTL
+espnowmeshtopo                  - Discover mesh topology (master only)
+espnowtimesync                  - Broadcast NTP time to mesh (master only)
+espnowtimestatus                - Show time sync status
+
+--- Device identity ---
+espnowsetname [name]            - Get/set device name
+espnowroom [name]               - Get/set room
+espnowzone [name]               - Get/set zone
+espnowtags [tag1,tag2,...]      - Get/set tags
+espnowfriendlyname [name]       - Get/set friendly display name
+espnowstationary [0|1]          - Get/set stationary flag
+espnowdeviceinfo                - Show all local device metadata
+espnowdevices                   - List all mesh devices with metadata (master)
+espnowrooms                     - List rooms and their devices (master)
+espnowfind <query>              - Find devices by name, room, or tag
+espnowroomcmd <room> <cmd>      - Run command on all devices in a room
+espnowtagcmd <tag> <cmd>        - Run command on all devices with a tag
+
+--- Sensor streaming ---
+espnowworker [show|on|off|interval <ms>|fields <list>]  - Worker status reporting
+espnowsensorstream <sensor> <on|off>   - Stream sensor data to master (worker)
+espnowsensorstatus              - Show remote sensor cache (master) or worker streaming status
+
+--- Security ---
+espnowsetpassphrase "phrase"    - Set encryption passphrase
+espnowencstatus                 - Show encryption status and key fingerprint
+espnowpairsecure <mac> <name>   - Pair with encryption
+
+--- Metadata sync ---
+espnowrequestmeta <name_or_mac> - Pull metadata from a peer
+espnowusersync [on|off]         - Enable/disable credential sync across mesh
+```
+</details>
+
+<details>
+<summary><strong>bond — Bonded mode (requires ENABLE_BONDED_MODE)</strong></summary>
+
+```
+bondconnect <mac_or_name>       - Connect to bonded peer
+bonddisconnect                  - Disconnect bonded peer
+bondstatus                      - Show bond mode status
+bondrole <master|worker>        - Set bond mode role
+bondshowcap                     - Show local capability summary
+bondrequestcap                  - Request capability summary from peer
+bondshowmanifest                - Show local manifest (UI apps + CLI commands)
+bondrequestmanifest             - Request full manifest from peer
+bondshowremotemanifest [fwHash] - Show cached remote manifest
+bondstream <sensor> <on|off>    - Stream sensor data to bonded master (worker)
+openstream                      - Start streaming all output to ESP-NOW caller (admin, remote only)
+closestream                     - Stop streaming to ESP-NOW device (admin)
 ```
 </details>
 
@@ -295,87 +409,157 @@ espnow mesh         - Show mesh topology
 <summary><strong>mqtt — MQTT broker</strong></summary>
 
 ```
-mqtt status         - Show connection status
-mqtt connect        - Connect to broker
-mqtt disconnect     - Disconnect from broker
-mqtt broker <host>  - Set broker hostname/IP
-mqtt port <port>    - Set broker port
-mqtt user <user>    - Set username
-mqtt pass <pass>    - Set password
-mqtt topic <prefix> - Set topic prefix
+openmqtt                        - Start MQTT client
+closemqtt                       - Stop MQTT client
+mqttstatus                      - Show connection status
+mqttautostart [0|1]             - Auto-connect on boot
+mqttHost [hostname]             - Set broker host/IP
+mqttPort [port]                 - Set broker port (default 1883)
+mqttUser [user|clear]           - Set username
+mqttPassword [pass|clear]       - Set password
+mqttBaseTopic [topic|auto]      - Set base topic prefix
+mqttTLSMode [0|1|2]             - TLS mode (0=off, 1=verify, 2=no-verify)
+mqttCACertPath [path|clear]     - CA certificate path
+mqttPublishIntervalMs [ms]      - Sensor publish interval
+mqttDiscoveryPrefix [prefix]    - Home Assistant discovery prefix
+mqttPublishWiFi [0|1]           - Publish WiFi state
+mqttPublishSystem [0|1]         - Publish system state
+mqttPublishThermal [0|1]        - Publish thermal data
+mqttPublishToF [0|1]            - Publish ToF distance
+mqttPublishIMU [0|1]            - Publish IMU orientation
+mqttPublishPresence [0|1]       - Publish presence/motion
+mqttPublishGPS [0|1]            - Publish GPS location
+mqttPublishAPDS [0|1]           - Publish APDS color/proximity
+mqttPublishRTC [0|1]            - Publish RTC time
+mqttPublishGamepad [0|1]        - Publish gamepad state
+mqttSubscribeTopics [topics]    - Set external subscription topics
+mqttExternalSensors             - List external sensor data received via MQTT
 ```
 </details>
 
 <details>
-<summary><strong>bluetooth — BLE</strong></summary>
+<summary><strong>bluetooth — BLE (requires ENABLE_BLUETOOTH)</strong></summary>
 
 ```
-bluetooth status    - Show BLE status
-bluetooth on        - Enable BLE
-bluetooth off       - Disable BLE
-bluetooth scan      - Scan for BLE devices
-bluetooth connect <addr>  - Connect to device
-bluetooth disconnect      - Disconnect
-```
-</details>
-
-<details>
-<summary><strong>filesystem — File operations</strong></summary>
-
-```
-fsusage             - Show filesystem usage
-files [path]        - List files (default '/')
-mkdir <path>        - Create directory
-rmdir <path>        - Remove empty directory
-filecreate <path>   - Create empty file
-fileview <path>     - View file contents
-filedelete <path>   - Delete file
+openble                         - Start BLE and begin advertising
+closeble                        - Stop BLE and deinitialize
+blestatus                       - Show connection status
+bleinfo                         - Show BLE configuration and settings
+blename [name]                  - Get/set BLE device name
+bletxpower [0-7]                - Get/set TX power
+bleadv                          - Start advertising
+bledisconnect                   - Disconnect current BLE client
+blesend <message>               - Send message to BLE client
+blestream <on|off|sensors|system>  - Control sensor/system data streaming
+bleautostart [on|off]           - Auto-start BLE on boot
+blerequireauth [on|off]         - Require authentication for BLE access
 ```
 </details>
 
 <details>
-<summary><strong>oled — Display control</strong></summary>
+<summary><strong>filesystem — LittleFS file operations</strong></summary>
 
 ```
-oled on             - Turn OLED on
-oled off            - Turn OLED off
-oled brightness <0-255>  - Set brightness
-oled menu           - Open main menu
-oled page <name>    - Go to named page
-```
-</details>
-
-<details>
-<summary><strong>neopixel — RGB LED</strong></summary>
-
-```
-ledcolor <color>    - Set onboard NeoPixel color
-ledcolor off        - Turn off NeoPixel
+fsusage                         - Show filesystem usage
+files [path]                    - List files (default '/')
+mkdir <path>                    - Create directory
+rmdir <path>                    - Remove directory
+filecreate <path> [content]     - Create file
+fileview <path> [offset]        - View file contents
+filedelete <path>               - Delete file
+filerename <oldpath> <newname>  - Rename file
 ```
 </details>
 
 <details>
-<summary><strong>i2c — I2C bus</strong></summary>
+<summary><strong>sd — SD card</strong></summary>
 
 ```
-i2c scan            - Scan I2C bus and detect devices
-i2c speed <hz>      - Set I2C bus speed
-i2c reset           - Reset I2C bus
-i2c status          - Show I2C bus status
+sdmount                         - Mount SD card
+sdunmount                       - Unmount SD card
+sdformat                        - Format SD card as FAT32
+sdinfo                          - Show SD card information
+sddiag                          - SD card hardware diagnostics
 ```
 </details>
 
 <details>
-<summary><strong>automation — Automations</strong></summary>
+<summary><strong>oled — Display control (requires OLED)</strong></summary>
 
 ```
-automation list     - List all automations
-automation add <json>     - Add automation
-automation delete <name>  - Delete automation
-automation run <name>     - Run immediately
-automation enable <name>  - Enable
-automation disable <name> - Disable
-automation export   - Export all as JSON
+openoled                        - Start OLED display
+closeoled                       - Stop OLED display
+oledstatus                      - Show OLED status
+oledmode <mode>                 - Set display mode
+oledtext <message>              - Set custom text overlay
+oledanim <name>                 - Select animation, or: oledanim fps <1-60>
+oledclear                       - Clear display
+oledbrightness <0-255>          - Set brightness
+oledupdateinterval <ms>         - Display update interval (10-1000ms)
+oledbootmode <logo|status|thermal|off>   - Mode shown at boot
+oleddefaultmode <status|thermal|off>     - Mode after boot animation
+oledbootduration <ms>           - Boot animation duration (500-10000ms)
+oledrequireauth <0|1>           - Require login to use OLED menu
+oledenabled <0|1>               - Enable/disable OLED
+oledthermalscale <1.0-10.0>     - Thermal image scale on OLED
+oledthermalcolormode <3level|grayscale|binary>  - Thermal color mode on OLED
+setgamepadpassword              - Set gamepad joystick unlock pattern
+```
+</details>
+
+<details>
+<summary><strong>led — NeoPixel & startup effects</strong></summary>
+
+```
+ledcolor <color>                - Set NeoPixel color (name or hex)
+ledcolor off                    - Turn off NeoPixel
+ledclear                        - Turn off NeoPixel
+ledeffect <effect>              - Run a NeoPixel effect
+ledbrightness <0-100>           - Set LED brightness
+ledstartupenabled [0|1]         - Enable/disable startup effect
+ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>  - Set startup effect
+ledstartupcolor <color>         - Set startup primary color
+ledstartupcolor2 <color>        - Set startup secondary color
+ledstartupduration <ms>         - Startup effect duration
+```
+</details>
+
+<details>
+<summary><strong>i2c — I2C bus management</strong></summary>
+
+```
+i2cscan                         - Scan bus and list detected device addresses
+i2creset                        - Reset I2C bus (pause polling, recover, resume)
+i2cpause                        - Pause all I2C sensor polling
+i2cresume                       - Resume I2C sensor polling
+i2crecover <address>            - Clear degraded state for a specific device
+i2cmetrics                      - Show I2C bus performance metrics
+i2cstats                        - Show bus error statistics
+i2chealth                       - Show per-device health status
+i2cbusenabled <0|1>             - Enable/disable I2C bus (reboot required)
+i2csdapin <pin>                 - Set SDA pin (0-39)
+i2csclpin <pin>                 - Set SCL pin (0-39)
+sensors [filter]                - List I2C sensors
+sensorinfo <name>               - Show sensor details
+sensorautostart [sensor] [on|off]  - Configure auto-start for a sensor
+devices                         - Show discovered I2C device registry
+discover                        - Re-scan and register I2C devices
+```
+</details>
+
+<details>
+<summary><strong>automation — Scheduled & conditional commands</strong></summary>
+
+```
+automation                      - Show automation system status
+automationlist                  - List all automations
+automationadd                   - Add an automation (JSON)
+automationrun id=<id>           - Run automation immediately by ID
+autolog start <file>            - Start automation execution log
+autolog stop                    - Stop automation log
+autolog status                  - Show log status
+validate-conditions <expr>      - Validate conditional syntax (e.g. IF temp>75 THEN ledcolor red)
+print <message>                 - Broadcast a message to all output channels
 ```
 </details>
 
@@ -383,11 +567,17 @@ automation export   - Export all as JSON
 <summary><strong>settings — Device configuration</strong></summary>
 
 ```
-settings list       - Show all settings
-settings get <key>  - Get a setting value
-settings set <key> <value>  - Set a value
-settings reset      - Reset all to defaults
-settings export     - Export settings as JSON
+wifiautoreconnect <0|1>         - WiFi auto-reconnect on disconnect
+ntpserver <hostname>            - Set NTP server
+tzoffsetminutes <-720..720>     - Set timezone offset in minutes
+httpAutoStart <0|1>             - Auto-start web server on boot
+httpsEnabled <0|1>              - Enable HTTPS (reboot required)
+webclihistorysize <1-100>       - Web CLI history buffer size
+oledclihistorysize <10-100>     - OLED CLI history buffer size
+beginwrite                      - Start a batch settings update (defers flash write)
+savesettings                    - Flush deferred settings to flash
+features                        - Show/toggle system features with heap estimates
+featuresetup                    - Run interactive feature configuration wizard
 ```
 </details>
 
@@ -395,12 +585,28 @@ settings export     - Export settings as JSON
 <summary><strong>users — User management (admin)</strong></summary>
 
 ```
-users list          - List all users
-users add <user> <pass>   - Add user
-users delete <user>       - Delete user
-users passwd <user> <pass> - Change password
-users promote <user>      - Grant admin
-users demote <user>       - Remove admin
+userlist                        - List all users
+useradd <user> <pass> [0|1]     - Create user (1 = admin)
+userdelete <user>               - Delete user
+userchangepassword <cur> <new> <confirm>  - Change own password
+userresetpassword <user> <pass> [0|1]     - Reset another user's password (admin)
+userpromote <user>              - Grant admin role
+userdemote <user>               - Remove admin role
+userrequest <user> <pass>       - Request a new account (self-registration)
+userapprove <user>              - Approve a pending account request (admin)
+userdeny <user>                 - Deny a pending account request (admin)
+pendinglist                     - List pending account requests
+usersync <user> <target>        - Sync user credentials to an ESP-NOW peer (admin)
+sessionlist                     - List active sessions
+sessionrevoke <sid|user> [reason]  - Revoke a session
+serialrequireauth [on|off]      - Require login on serial interface
+ban <ip> [reason]               - Permanently ban an IP address (admin)
+unban <ip>                      - Remove an IP ban (admin)
+banlist                         - List all banned IPs
+banuser <user> [reason]         - Ban a user account (admin)
+unbanuser <user>                - Remove a user account ban (admin)
+login <user> <pass>             - Log in
+logout                          - Log out
 ```
 </details>
 
@@ -408,10 +614,9 @@ users demote <user>       - Remove admin
 <summary><strong>debug — Debug flags</strong></summary>
 
 ```
-debug list          - Show all debug flags and current state
-debug<flagname> 1   - Enable flag (persistent)
-debug<flagname> 1 temp  - Enable flag (runtime only)
-debug<flagname> 0   - Disable flag
+debug<flagname> 1               - Enable flag (persistent, saved to flash)
+debug<flagname> 1 temp          - Enable flag (runtime only, cleared on reboot)
+debug<flagname> 0               - Disable flag
 ```
 See [Debug Flags](#debug-flags) section for the full flag list.
 </details>
@@ -420,47 +625,389 @@ See [Debug Flags](#debug-flags) section for the full flag list.
 <summary><strong>sensorlog — Sensor data logging</strong></summary>
 
 ```
-sensorlog start <sensor>   - Start logging sensor to file
-sensorlog stop <sensor>    - Stop logging
-sensorlog list             - List active log files
-sensorlog view <sensor>    - View recent log entries
-sensorlog clear <sensor>   - Clear log file
+sensorlog start <sensor>        - Start logging sensor data to CSV on LittleFS
+sensorlog stop <sensor>         - Stop logging
+sensorlog status                - Show active log files
+sensorlog format <sensor>       - Set log format
+sensorlog maxsize <sensor>      - Set max log file size
+sensorlog rotations <sensor>    - Set number of rotation files kept
+sensorlog sensors               - List loggable sensors
 ```
 </details>
 
 <details>
-<summary><strong>battery — Battery monitoring</strong></summary>
+<summary><strong>llm — On-device LLM inference (requires ENABLE_ONDEVICE_LLM)</strong></summary>
 
 ```
-battery status      - Show voltage, charge level, status
-battery calibrate   - Recalibrate ADC readings
+llmstatus                       - Show LLM state, model config, PSRAM usage, last generation stats
+llmload [model.bin]             - Load model from LittleFS or SD (default: /system/llm/model.bin)
+llmunload                       - Unload model and free all PSRAM buffers
+llmmodels                       - List available model files on LittleFS and SD
+llmgenerate <prompt>            - Generate text from prompt (runs synchronously)
+llmstop                         - Interrupt in-progress generation
 ```
 </details>
 
 <details>
-<summary><strong>Sensors — all use open/close/read pattern</strong></summary>
+<summary><strong>maps — Offline maps & waypoints (requires ENABLE_MAPS)</strong></summary>
 
-All sensor modules follow a consistent command pattern:
-- `open<sensor>` — start the sensor (e.g., `openthermal`, `opentof`, `openimu`)
-- `close<sensor>` — stop the sensor
-- `<sensor>read` — take a single reading (e.g., `tofread`, `imuread`, `gpsread`)
-- `<sensor>autostart <on|off>` — auto-start on boot
+```
+maplist                         - List available map files
+mapload <path>                  - Load a map file into memory
+mapunload                       - Unload current map and free PSRAM
+map                             - Show current map info and GPS position
+whereami                        - Show current location context (map, room, zone)
+search <name>                   - Search map for a named feature
+waypoint list                   - List all waypoints
+waypoint add <name>             - Add waypoint at current GPS location
+waypoint del <name>             - Delete waypoint
+waypoint goto <name>            - Navigate to waypoint
+waypoint clear                  - Clear all waypoints
+waypointfile <file> <wpName>    - Link a file to a waypoint
+waypointfiles <name> [del <idx>] - List or remove waypoint file attachments
+gpstrack status                 - Show GPS track log status
+gpstrack load                   - Load a saved GPS track
+gpstrack clear                  - Clear the current track
+gpslog [interval_ms]            - Start GPS track logging (persists across boots)
+maporganize                     - Organize map files in /maps into subdirectories
+```
+</details>
 
-| Module | Sensor | Key commands |
-| ------ | ------ | ------------ |
-| `thermal` | MLX90640 32×24 thermal camera | `openthermal`, `closethermal`, `thermalautostart` |
-| `tof` | VL53L4CX Time-of-Flight (up to 6m, multi-object) | `opentof`, `closetof`, `tofread` |
-| `imu` | BNO055 9-DoF orientation | `openimu`, `closeimu`, `imuread` |
-| `gamepad` | Seesaw gamepad | `opengamepad`, `closegamepad` |
-| `apds` | APDS9960 gesture/proximity/RGB | `apdscolor`, `apdsproximity`, `apdsgesture` |
-| `gps` | PA1010D GPS | `opengps`, `closegps`, `gpsread` |
-| `rtc` | DS3231 precision RTC | `openrtc`, `closertc`, `rtcread` |
-| `presence` | STHS34PF80 IR presence/motion | `openpresence`, `closepresence`, `presenceread` |
-| `fmradio` | RDA5807 FM radio | `openfmradio`, `closefmradio`, `fmradio tune <MHz>` |
-| `camera` | DVP camera (ESP32-S3 only) | `opencamera`, `closecamera`, `cameraread` |
-| `microphone` | PDM microphone (ESP32-S3 only) | `openmicrophone`, `closemicrophone`, `micread` |
-| `edgeimpulse` | Edge Impulse ML inference | `edgeimpulse run`, `edgeimpulse status` |
-| `servo` | PCA9685 servo controller | `servo <channel> <angle>` |
+<details>
+<summary><strong>power — Power management</strong></summary>
+
+```
+power                           - Show power mode status
+power mode <mode>               - Set power mode
+power auto                      - Enable automatic power management
+power threshold <value>         - Set power threshold
+```
+</details>
+
+<details>
+<summary><strong>battery — Battery monitoring (requires ENABLE_BATTERY_MONITOR)</strong></summary>
+
+```
+battery status                  - Show voltage, estimated charge level, and status
+battery calibrate               - Recalibrate ADC voltage readings
+```
+</details>
+
+<details>
+<summary><strong>images — Image capture and management</strong></summary>
+
+```
+capture [littlefs|sd|both]      - Capture and save an image
+images [littlefs|sd]            - List saved images
+imageview <path>                - Show image file info
+imagedelete <path>              - Delete an image
+imagesend <device> [path]       - Send image to a peer via ESP-NOW
+```
+</details>
+
+<details>
+<summary><strong>camera — DVP camera (ESP32-S3 only, requires ENABLE_CAMERA_SENSOR)</strong></summary>
+
+```
+opencamera                      - Start camera sensor
+closecamera                     - Stop camera sensor
+cameraread                      - Show camera status
+cameracapture                   - Capture a single frame
+camerasave                      - Save current frame to storage
+camerares <res>                 - Set resolution preset
+cameraquality <0-63>            - Set JPEG quality (lower = higher quality)
+camerabrightness <-2..2>        - Set brightness
+cameracontrast <-2..2>          - Set contrast
+camerasaturation <-2..2>        - Set saturation
+cameraexposure <-2..2>          - Set AE level
+cameraaec <on|off>              - Auto exposure
+cameraaecvalue <0-1200>         - Manual exposure value
+cameraagc <on|off>              - Auto gain
+cameraagcgain <0-30>            - Manual gain
+camerahmirror <on|off>          - Horizontal mirror
+cameravflip <on|off>            - Vertical flip
+camerarotate <on|off>           - Rotate 180°
+camerawb <0-4>                  - White balance mode
+cameraeffect <0-6>              - Special effect
+camerasharpness <-2..2>         - Sharpness
+cameradenoise <0-8>             - Denoise level
+cameraautostart <on|off>        - Auto-start on boot
+cameraautocapture <on|off>      - Auto-capture on schedule
+cameraautocaptureinterval <sec> - Auto-capture interval
+camerasendaftercapture <on|off> - Send image via ESP-NOW after capture
+cameratargetdevice <name>       - Target device for post-capture send
+camerastoragelocation <0-2>     - Storage destination (LittleFS/SD/both)
+cameracapturefolder <path>      - Folder for captured images
+cameramaxstoredimages <0-1000>  - Max images to keep
+cameratiny                      - Capture a small frame (for ESP-NOW transfer)
+```
+</details>
+
+<details>
+<summary><strong>microphone — PDM microphone (ESP32-S3 only, requires ENABLE_MICROPHONE_SENSOR)</strong></summary>
+
+```
+openmic                         - Start microphone
+closemic                        - Stop microphone
+micread                         - Show microphone status
+miclevel                        - Get current audio level
+micviz                          - Real-time audio level visualizer
+micrecord                       - Start/stop recording to WAV file
+miclist                         - List saved recordings
+micdelete                       - Delete recording(s)
+micsamplerate                   - Get/set sample rate
+micgain                         - Get/set microphone gain
+micbitdepth                     - Get/set bit depth
+micautostart [on|off]           - Auto-start on boot
+```
+</details>
+
+<details>
+<summary><strong>speech — ESP-SR voice recognition (requires ENABLE_ESPSR)</strong></summary>
+
+```
+opensr                          - Start ESP-SR pipeline
+closesr                         - Stop ESP-SR pipeline
+srstatus                        - Show pipeline status
+srconfidence                    - Get/set command confidence threshold
+srtimeout                       - Get/set command listening timeout
+srraw                           - Toggle raw output mode (all MultiNet hypotheses)
+srautotune                      - Auto-cycle gain configs to find best settings
+
+--- Voice arming ---
+voicearm                        - Arm voice command execution as current user
+voicedisarm                     - Disarm voice command execution
+voicestatus                     - Show arming status
+voicecancel                     - Cancel current voice command sequence
+voicehelp                       - Show available voice options for current state
+
+--- Command phrases ---
+srcmdslist                      - List current MultiNet command phrases
+srcmdsadd                       - Add or update a command phrase
+srcmdsdel                       - Delete a command phrase (by phrase or ID)
+srcmdsclear                     - Clear all command phrases
+srcmdsreload                    - Reload phrases from SD file
+srcmdssave                      - Save current phrases to SD file
+srcmdssync                      - Sync voice commands from CLI registry
+
+--- Audio tuning ---
+srtuningswgain <1.0-50.0>       - Set software gain
+srtuninggain <0.1-10.0>         - Set AFE linear gain
+srtuningagc <0-3>               - Set AGC mode (0=off)
+srtuningvad <0-4>               - Set VAD sensitivity
+srtuningfilters                 - Toggle high-pass + pre-emphasis filters
+srdyngain                       - Configure dynamic gain normalization
+
+--- Snippet capture ---
+srsnipon                        - Enable auto-capture on wake word
+srsnipoff                       - Disable auto-capture
+srsnipstart                     - Start manual snippet capture now
+srsnipstop                      - Stop and save manual snippet
+srsnipstatus                    - Show snippet capture status
+srsnipconfig                    - Configure snippet capture parameters
+
+--- Debug ---
+srdebuglevel <0-4>              - Set debug verbosity
+srdebugtelem <ms>               - Set periodic telemetry interval (0=off)
+srdebugstats                    - Print current SR statistics
+srdebugreset                    - Reset SR counters
+```
+</details>
+
+<details>
+<summary><strong>g2 — Even Realities G2 glasses (requires ENABLE_G2_GLASSES)</strong></summary>
+
+```
+openg2 [left|right|auto]        - Connect to G2 glasses
+closeg2                         - Disconnect from G2 glasses
+g2status                        - Show connection status
+g2scan                          - Scan for G2 glasses
+g2show <text>                   - Display text on G2 glasses
+g2clear                         - Clear G2 display
+g2init                          - Initialize G2 client mode (disables BLE server)
+g2deinit                        - Deinitialize G2 client mode
+g2nav [on|off]                  - Map G2 gestures to OLED menu navigation
+g2verbose [on|off]              - Toggle verbose packet logging
+```
+</details>
+
+<details>
+<summary><strong>edgeimpulse — Edge Impulse ML inference (requires ENABLE_EDGE_IMPULSE)</strong></summary>
+
+```
+eienable                        - Enable/disable Edge Impulse inference
+eidetect                        - Run single object detection inference
+eifile                          - Run inference on a stored JPEG image
+eicontinuous                    - Start/stop continuous inference mode
+eiconfidence                    - Set minimum detection confidence threshold
+eistatus                        - Show Edge Impulse status
+
+--- Model management ---
+eimodellist                     - List available .tflite models on LittleFS
+eimodelload                     - Load a TFLite model
+eimodelinfo                     - Show loaded model information
+eimodelunload                   - Unload the current model
+
+--- State tracking ---
+eitrackstatus                   - Show currently tracked objects
+eitrackenable                   - Enable/disable state tracking
+eitrackclear                    - Clear all tracked objects
+```
+</details>
+
+<details>
+<summary><strong>thermal — MLX90640 thermal camera</strong></summary>
+
+```
+openthermal                     - Start thermal sensor
+closethermal                    - Stop thermal sensor
+thermalread                     - Read min/max/avg temperature
+thermalautostart [on|off]       - Auto-start on boot
+thermaldiag                     - Run sensor diagnostics
+thermalpollingms <50-5000>      - UI polling interval
+thermalpalettedefault <name>    - Color palette (grayscale|iron|rainbow|hot|coolwarm)
+thermalrotation <0-3>           - Rotate thermal image (0=0°, 1=90°, 2=180°, 3=270°)
+thermalinterpolationenabled <0|1>       - Enable interpolated upscaling
+thermalinterpolationsteps <1-8>         - Interpolation steps
+thermalupscalefactor <1-4>              - Display upscale factor
+thermaltargetfps <1-8>                  - Target frame rate
+thermaldevicepollms <100-2000>          - Sensor hardware poll interval
+thermaltemporalalpha <0.0-1.0>          - Temporal smoothing factor
+thermalewmafactor <0.0-1.0>             - EWMA smoothing factor
+thermaltransitionms <0-5000>            - Color transition time
+thermalrollingminmaxenabled <0|1>       - Rolling min/max normalization
+thermalrollingminmaxalpha <0.0-1.0>     - Rolling normalization alpha
+thermalrollingminmaxguardc <0.0-10.0>   - Rolling normalization guard band
+```
+</details>
+
+<details>
+<summary><strong>tof — VL53L4CX Time-of-Flight sensor</strong></summary>
+
+```
+opentof                         - Start ToF sensor
+closetof                        - Stop ToF sensor
+tofread                         - Read distance measurement(s)
+tofautostart [on|off]           - Auto-start on boot
+tofpollingms <50-5000>          - UI polling interval
+tofdevicepollms <100-2000>      - Sensor hardware poll interval
+tofmaxdistancemm <100-10000>    - Maximum valid distance
+tofstabilitythreshold <0-50>    - Stability threshold for readings
+toftransitionms <0-5000>        - Reading transition time
+```
+</details>
+
+<details>
+<summary><strong>imu — BNO055 9-DoF IMU</strong></summary>
+
+```
+openimu                         - Start IMU sensor
+closeimu                        - Stop IMU sensor
+imuread                         - Read orientation data
+imuautostart [on|off]           - Auto-start on boot
+imuactions                      - Show action detection state (tap, shake, etc.)
+imupollingms <50-2000>          - UI polling interval
+imudevicepollms <50-1000>       - Sensor hardware poll interval
+imuorientationmode <0-8>        - Orientation mode
+imuorientationcorrection <0|1>  - Apply orientation correction
+imupitchoffset <-180..180>      - Pitch offset correction
+imurolloffset <-180..180>       - Roll offset correction
+imuyawoffset <-180..180>        - Yaw offset correction
+imuewmafactor <0.0-1.0>         - EWMA smoothing factor
+imutransitionms <0-1000>        - Transition time
+imuwebmaxfps <1-30>             - Web UI max frame rate
+```
+</details>
+
+<details>
+<summary><strong>apds — APDS9960 gesture/proximity/color sensor</strong></summary>
+
+```
+openapds                        - Start APDS9960 sensor
+closeapds                       - Stop APDS9960 sensor
+apdsread                        - Read sensor status and data
+apdsmode <color|proximity|gesture> [on|off]  - Enable/disable a mode
+apdscolor                       - Read color/RGB values
+apdsproximity                   - Read proximity value
+apdsgesture                     - Read gesture (up/down/left/right)
+apdsautostart [on|off]          - Auto-start on boot
+```
+</details>
+
+<details>
+<summary><strong>gps — PA1010D GPS module</strong></summary>
+
+```
+opengps                         - Start GPS module
+closegps                        - Stop GPS module
+gpsread                         - Read current location, speed, and heading
+gpsautostart [on|off]           - Auto-start on boot
+gpslog [interval_ms]            - Start GPS track logging (persists across boots)
+```
+</details>
+
+<details>
+<summary><strong>rtc — DS3231 precision RTC</strong></summary>
+
+```
+openrtc                         - Start RTC
+closertc                        - Stop RTC
+rtcread [status|temp]           - Read time or temperature compensation
+rtcset <datetime|timestamp>     - Set RTC time
+rtcsync [to|from]               - Sync time to/from system clock
+rtcautostart [on|off]           - Auto-start on boot
+```
+</details>
+
+<details>
+<summary><strong>presence — STHS34PF80 IR presence/motion sensor</strong></summary>
+
+```
+openpresence                    - Start presence sensor
+closepresence                   - Stop presence sensor
+presenceread                    - Read presence, motion, and temperature data
+presencestatus                  - Show sensor status
+presenceautostart [on|off]      - Auto-start on boot
+```
+</details>
+
+<details>
+<summary><strong>fmradio — RDA5807 FM radio</strong></summary>
+
+```
+openfmradio                     - Start FM radio
+closefmradio                    - Stop FM radio
+fmradioread                     - Read tuner status
+fmradiotune <MHz>               - Tune to frequency (e.g. fmradiotune 101.5)
+fmradioseek [up|down]           - Seek next station
+fmradiovolume <0-15>            - Set volume
+fmradiomute                     - Mute audio
+fmradiounmute                   - Unmute audio
+fmradioautostart [on|off]       - Auto-start on boot
+```
+</details>
+
+<details>
+<summary><strong>servo — PCA9685 servo controller</strong></summary>
+
+```
+servo <channel> <angle>         - Move servo to angle (degrees)
+pwm <channel> <value> [freq]    - Set raw PWM output
+servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>  - Configure servo profile
+servolist                       - List configured servo profiles
+servocalibrate <channel>        - Enter calibration mode for a channel
+```
+</details>
+
+<details>
+<summary><strong>gamepad — Seesaw gamepad</strong></summary>
+
+```
+opengamepad                     - Start gamepad
+closegamepad                    - Stop gamepad
+gamepadread                     - Read joystick axes and button states
+gamepadautostart [on|off]       - Auto-start on boot
+```
 </details>
 
 ---
