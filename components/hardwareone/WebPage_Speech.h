@@ -422,7 +422,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   var lastCmdCount = 0;
   
   function refreshStatus(){
-    postCli('sr status').then(function(out){
+    postCli('srstatus').then(function(out){
       var data = parseStatus(out);
       if(data){
         // Check for new detections
@@ -442,7 +442,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   
   function startSR(){
     setStatus('Starting speech recognition...');
-    postCli('sr start').then(function(out){
+    postCli('srstart').then(function(out){
       setStatus(out);
       setTimeout(refreshStatus, 500);
       startPolling();
@@ -451,7 +451,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   
   function stopSR(){
     setStatus('Stopping speech recognition...');
-    postCli('sr stop').then(function(out){
+    postCli('srstop').then(function(out){
       setStatus(out);
       setTimeout(refreshStatus, 500);
       stopPolling();
@@ -611,7 +611,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   var autotuneActive = false;
   
   function updateTuningStatus(){
-    postCli('sr tuning').then(function(out){
+    postCli('srtuning').then(function(out){
       var el = document.getElementById('sr-tuning-status');
       if(el) el.textContent = out;
     });
@@ -634,7 +634,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   }
   
   document.getElementById('btn-sr-raw-toggle').onclick = function(){
-    var cmd = rawEnabled ? 'sr raw off' : 'sr raw on';
+    var cmd = rawEnabled ? 'srraw off' : 'srraw on';
     postCli(cmd).then(function(out){
       rawEnabled = !rawEnabled;
       updateRawButton();
@@ -643,7 +643,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   };
   
   document.getElementById('btn-sr-autotune-toggle').onclick = function(){
-    var cmd = autotuneActive ? 'sr autotune stop' : 'sr autotune start';
+    var cmd = autotuneActive ? 'srautotune stop' : 'srautotune start';
     postCli(cmd).then(function(out){
       autotuneActive = !autotuneActive;
       updateAutotuneButton();
@@ -656,12 +656,12 @@ inline void streamSpeechInner(httpd_req_t* req) {
     var dynMax = document.getElementById('sr-dyngain-max').value;
     
     // Apply AFE gain via tuning command
-    postCli('sr tuning gain ' + afeGain).then(function(){
+    postCli('srtuninggain ' + afeGain).then(function(){
       // Apply dynamic gain
       if(dynMax === '0'){
-        return postCli('sr dyngain off');
+        return postCli('srdyngain off');
       } else {
-        return postCli('sr dyngain on ' + dynMax);
+        return postCli('srdyngain on ' + dynMax);
       }
     }).then(function(){
       updateTuningStatus();
@@ -673,7 +673,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   updateTuningStatus();
   
   // Start polling if already running
-  postCli('sr status').then(function(out){
+  postCli('srstatus').then(function(out){
     try {
       var data = JSON.parse(out);
       if(data.running) startPolling();

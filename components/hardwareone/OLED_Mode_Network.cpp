@@ -200,7 +200,7 @@ void displayMeshStatus() {
   if (!meshEnabled()) {
     oledDisplay->println("Mesh disabled");
     oledDisplay->println();
-    oledDisplay->println("Use 'espnow mode'");
+    oledDisplay->println("Use 'espnowmode'");
     oledDisplay->println("to enable mesh");
     return;
   }
@@ -875,7 +875,7 @@ void displayMeshStatusRendered() {
   if (!meshStatusRenderData.meshEnabled) {
     oledDisplay->println("Mesh disabled");
     oledDisplay->println();
-    oledDisplay->println("Use 'espnow mode'");
+    oledDisplay->println("Use 'espnowmode'");
     oledDisplay->println("to enable mesh");
     return;
   }
@@ -950,7 +950,7 @@ void displayRemoteSensors() {
       oledDisplay->println("Workers send data,");
       oledDisplay->println("masters receive.");
       oledDisplay->println("");
-      oledDisplay->println("Use 'bond stream' to");
+      oledDisplay->println("Use 'bondstream' to");
       oledDisplay->println("send sensor data.");
     } else
 #endif // ENABLE_BONDED_MODE
@@ -965,10 +965,10 @@ void displayRemoteSensors() {
       oledDisplay->println("No remote source.");
       oledDisplay->println("");
       oledDisplay->println("Enable mesh mode:");
-      oledDisplay->println(" espnow mode mesh");
+      oledDisplay->println(" espnowmode mesh");
 #if ENABLE_BONDED_MODE
       oledDisplay->println("Or bond with device:");
-      oledDisplay->println(" bond connect <dev>");
+      oledDisplay->println(" bondconnect <dev>");
 #endif
     }
     return;

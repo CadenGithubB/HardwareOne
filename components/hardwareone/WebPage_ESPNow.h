@@ -404,7 +404,7 @@ window.togglePane = function(paneId, btnId) {
         }
       })
       .then(() => {
-        return fetch('/api/cli', { method: 'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body: 'cmd=' + encodeURIComponent('espnow mode') });
+        return fetch('/api/cli', { method: 'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body: 'cmd=' + encodeURIComponent('espnowmode') });
       })
       .then(r => r.text())
       .then(modeOut => {
@@ -461,13 +461,13 @@ window.togglePane = function(paneId, btnId) {
     window.refreshStatusBatch = function() {
       var CMDS = [
         'espnowstatus',     // 0
-        'espnow mode',      // 1
-        'bond status',      // 2
-        'espnow list',      // 3
-        'espnow encstatus', // 4
-        'espnow deviceinfo',// 5
-        'espnow meshrole',  // 6
-        'espnow meshstatus' // 7
+        'espnowmode',      // 1
+        'bondstatus',      // 2
+        'espnowlist',      // 3
+        'espnowencstatus', // 4
+        'espnowdeviceinfo',// 5
+        'espnowmeshrole',  // 6
+        'espnowmeshstatus' // 7
       ];
       fetch('/api/cli/batch', {
         method: 'POST',
@@ -582,7 +582,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('bond status')
+        body: 'cmd=' + encodeURIComponent('bondstatus')
       })
       .then(r => r.text())
       .then(bondStatus => {
@@ -591,7 +591,7 @@ window.togglePane = function(paneId, btnId) {
         return fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow list')
+          body: 'cmd=' + encodeURIComponent('espnowlist')
         });
       })
       .then(response => response.text())
@@ -1075,7 +1075,7 @@ window.togglePane = function(paneId, btnId) {
       const bubble = appendLogLine('log-' + mac, 'SENT', val, 'sending');
       
       // Use already-tracked mode — no extra round-trip needed
-      var cmd = 'espnow send ' + mac + ' ' + val;
+      var cmd = 'espnowsend ' + mac + ' ' + val;
       fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(cmd) })
         .then(r=>r.text())
         .then(t=>{
@@ -1125,7 +1125,7 @@ window.togglePane = function(paneId, btnId) {
         statusDiv.textContent = 'Broadcasting message...';
       }
       
-      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent('espnow broadcast ' + msg) })
+      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent('espnowbroadcast ' + msg) })
         .then(r=>r.text())
         .then(t=> {
           // Clear input
@@ -1175,7 +1175,7 @@ window.togglePane = function(paneId, btnId) {
       // Also show in message log
       appendLogLine('log-' + mac, 'SENT', 'Sending file: ' + filename, 'sending');
       
-      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent('espnow sendfile ' + mac + ' ' + path) })
+      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent('espnowsendfile ' + mac + ' ' + path) })
         .then(r=>r.text())
         .then(t=>{
           const success = t.toLowerCase().indexOf('success') >= 0 || t.toLowerCase().indexOf('sent') >= 0;
@@ -1329,7 +1329,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: 'cmd=' + encodeURIComponent('espnow fetch ' + mac + ' ' + u + ' ' + p + ' /system/automations.json')
+        body: 'cmd=' + encodeURIComponent('espnowfetch ' + mac + ' ' + u + ' ' + p + ' /system/automations.json')
       })
       .then(function(r) { return r.text(); })
       .then(function(resp) {
@@ -1391,7 +1391,7 @@ window.togglePane = function(paneId, btnId) {
       
       // Remote command output is picked up by the message polling loop
       // (/api/espnow/messages) which runs every 500ms — no SSE needed.
-      const cmd = 'espnow remote ' + mac + ' ' + u + ' ' + p + ' ' + c;
+      const cmd = 'espnowremote ' + mac + ' ' + u + ' ' + p + ' ' + c;
       fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(cmd) })
         .then(r=>r.text())
         .then(t=>{
@@ -1493,7 +1493,7 @@ window.togglePane = function(paneId, btnId) {
         .finally(function() {
       
       // Send browse command (sends V3 CMD: user:pass:files /path)
-      var cmd = 'espnow remote ' + mac + ' ' + u + ' ' + p + ' files ' + browsePath;
+      var cmd = 'espnowremote ' + mac + ' ' + u + ' ' + p + ' files ' + browsePath;
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -1593,7 +1593,7 @@ window.togglePane = function(paneId, btnId) {
         statusDiv.style.color = '#856404';
         statusDiv.textContent = 'Fetching ' + filename + ' from ' + mac + '...';
       }
-      var cmd = 'espnow fetch ' + mac + ' ' + u + ' ' + p + ' ' + remotePath;
+      var cmd = 'espnowfetch ' + mac + ' ' + u + ' ' + p + ' ' + remotePath;
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -1671,7 +1671,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow unpair ' + mac)
+          body: 'cmd=' + encodeURIComponent('espnowunpair ' + mac)
         })
         .then(response => response.text())
         .then(text => {
@@ -1752,7 +1752,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', { 
         method: 'POST', 
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, 
-        body: 'cmd=' + encodeURIComponent('espnow requestmeta ' + mac) 
+        body: 'cmd=' + encodeURIComponent('espnowrequestmeta ' + mac) 
       })
         .then(function(r) { return r.text(); })
         .then(function(result) {
@@ -1911,7 +1911,7 @@ window.togglePane = function(paneId, btnId) {
           setTimeout(function() { btn.textContent = origText; btn.disabled = false; }, 2000);
           return;
         }
-        var cmd = 'espnow remote ' + mac + ' ' + u + ' ' + p + ' ' + cmds[i];
+        var cmd = 'espnowremote ' + mac + ' ' + u + ' ' + p + ' ' + cmds[i];
         btn.textContent = 'Running ' + (i + 1) + '/' + total + '...';
         fetch('/api/cli', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'cmd=' + encodeURIComponent(cmd) })
           .then(function(r) { return r.text(); })
@@ -1984,7 +1984,7 @@ window.togglePane = function(paneId, btnId) {
         var desired = entries[idx][1];
         idx++;
         if (statusDiv) statusDiv.textContent = 'Applying ' + sensor + ' ' + desired + '...';
-        var cmd = 'espnow remote ' + mac + ' ' + u + ' ' + p + ' espnow sensorstream ' + sensor + ' ' + desired;
+        var cmd = 'espnowremote ' + mac + ' ' + u + ' ' + p + ' espnowsensorstream ' + sensor + ' ' + desired;
         fetch('/api/cli', {
           method:'POST',
           headers:{'Content-Type':'application/x-www-form-urlencoded'},
@@ -2018,12 +2018,12 @@ window.togglePane = function(paneId, btnId) {
     window.sendMessage = function(mac, message) {
       // Fetch current mode dynamically to ensure we use the correct command
       console.log('[ESP-NOW] sendMessage: Fetching current mode...');
-      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent('espnow mode') })
+      fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent('espnowmode') })
         .then(r => r.text())
         .then(modeOut => {
           const isMesh = (modeOut || '').toLowerCase().indexOf('mesh') >= 0;
           console.log('[ESP-NOW] sendMessage: Current mode:', isMesh ? 'MESH' : 'DIRECT');
-          var cmd = 'espnow send ' + mac + ' ' + message;
+          var cmd = 'espnowsend ' + mac + ' ' + message;
           console.log('[ESP-NOW] sendMessage: Command:', cmd);
           return fetch('/api/cli', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'cmd=' + encodeURIComponent(cmd) });
         })
@@ -2117,7 +2117,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow meshstatus')
+        body: 'cmd=' + encodeURIComponent('espnowmeshstatus')
       })
       .then(response => response.text())
       .then(function(text) { window.meshStatusPollInFlight = false; applyMeshStatus(text); })
@@ -2140,7 +2140,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow pair ' + mac + ' ' + name)
+        body: 'cmd=' + encodeURIComponent('espnowpair ' + mac + ' ' + name)
       })
       .then(response => response.text())
       .then(output => {
@@ -2188,7 +2188,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow toporesults')
+        body: 'cmd=' + encodeURIComponent('espnowtoporesults')
       })
       .then(response => response.text())
       .then(output => {
@@ -2352,7 +2352,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow meshstatus')
+          body: 'cmd=' + encodeURIComponent('espnowmeshstatus')
         }).then(r => r.text()),
         fetch('/api/cli', {
           method: 'POST',
@@ -2433,7 +2433,7 @@ window.togglePane = function(paneId, btnId) {
           fetch('/api/cli', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'cmd=' + encodeURIComponent('espnow meshtopo')
+            body: 'cmd=' + encodeURIComponent('espnowmeshtopo')
           });
         }, 30000); // Every 30 seconds
         btn.textContent = 'Auto-Discover: ON';
@@ -2509,7 +2509,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow meshrole')
+        body: 'cmd=' + encodeURIComponent('espnowmeshrole')
       })
       .then(response => response.text())
       .then(applyMeshRole)
@@ -2525,7 +2525,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow meshrole ' + role)
+        body: 'cmd=' + encodeURIComponent('espnowmeshrole ' + role)
       })
       .then(response => response.text())
       .then(output => {
@@ -2548,7 +2548,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow meshmaster ' + mac)
+        body: 'cmd=' + encodeURIComponent('espnowmeshmaster ' + mac)
       })
       .then(response => response.text())
       .then(output => {
@@ -2571,7 +2571,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow meshbackup ' + mac)
+        body: 'cmd=' + encodeURIComponent('espnowmeshbackup ' + mac)
       })
       .then(response => response.text())
       .then(output => {
@@ -2590,7 +2590,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow backupenable ' + (enabled ? 'on' : 'off'))
+        body: 'cmd=' + encodeURIComponent('espnowbackupenable ' + (enabled ? 'on' : 'off'))
       })
       .then(response => response.text())
       .then(output => {
@@ -2622,7 +2622,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow meshtopo')
+        body: 'cmd=' + encodeURIComponent('espnowmeshtopo')
       })
       .then(response => response.text())
       .then(output => {
@@ -2643,7 +2643,7 @@ window.togglePane = function(paneId, btnId) {
           fetch('/api/cli', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'cmd=' + encodeURIComponent('espnow toporesults')
+            body: 'cmd=' + encodeURIComponent('espnowtoporesults')
           })
           .then(r => r.text())
           .then(results => {
@@ -2685,7 +2685,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow setname')
+          body: 'cmd=' + encodeURIComponent('espnowsetname')
         })
         .then(response => response.text())
         .then(text => {
@@ -2732,14 +2732,14 @@ window.togglePane = function(paneId, btnId) {
       document.getElementById('btn-espnow-refresh').addEventListener('click', refreshStatus);
       document.getElementById('btn-espnow-toggle-mode').addEventListener('click', function() {
         /* Fetch current mode, then toggle to the other */
-        fetch('/api/cli', { method:'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body: 'cmd=' + encodeURIComponent('espnow mode') })
+        fetch('/api/cli', { method:'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body: 'cmd=' + encodeURIComponent('espnowmode') })
           .then(r=>r.text())
           .then(curr => {
             var isMesh = (curr || '').toLowerCase().indexOf('mesh') >= 0;
             var next = isMesh ? 'direct' : 'mesh';
             // Update global flag immediately based on what we're switching TO
             window.espnowIsMesh = (next === 'mesh');
-            return fetch('/api/cli', { method:'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body: 'cmd=' + encodeURIComponent('espnow mode ' + next) });
+            return fetch('/api/cli', { method:'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body: 'cmd=' + encodeURIComponent('espnowmode ' + next) });
           })
           .then(r=>r.text())
           .then(t=>{ try { /* optional toast */ } catch(_) {}; refreshStatus(); })
@@ -2755,7 +2755,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow pair ' + mac + ' ' + name)
+          body: 'cmd=' + encodeURIComponent('espnowpair ' + mac + ' ' + name)
         })
         .then(response => response.text())
         .then(text => {
@@ -2780,7 +2780,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow pairsecure ' + mac + ' ' + name)
+          body: 'cmd=' + encodeURIComponent('espnowpairsecure ' + mac + ' ' + name)
         })
         .then(response => response.text())
         .then(text => {
@@ -2827,27 +2827,27 @@ window.togglePane = function(paneId, btnId) {
       /* Smart home metadata button handlers */
       _on('btn-set-friendly','click', function() {
         const val = document.getElementById('friendly-name').value;
-        fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd='+encodeURIComponent('espnow friendlyname "'+val+'"') })
+        fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd='+encodeURIComponent('espnowfriendlyname "'+val+'"') })
           .then(r=>r.text()).then(t=>{ var el=document.getElementById('smarthome-status'); if(el)el.textContent=t; if(typeof window.loadSmartHomeMetadata==='function')window.loadSmartHomeMetadata(); });
       });
       _on('btn-set-room','click', function() {
         const val = document.getElementById('room-name').value;
-        fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd='+encodeURIComponent('espnow room "'+val+'"') })
+        fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd='+encodeURIComponent('espnowroom "'+val+'"') })
           .then(r=>r.text()).then(t=>{ var el=document.getElementById('smarthome-status'); if(el)el.textContent=t; if(typeof window.loadSmartHomeMetadata==='function')window.loadSmartHomeMetadata(); });
       });
       _on('btn-set-zone','click', function() {
         const val = document.getElementById('zone-name').value;
-        fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd='+encodeURIComponent('espnow zone "'+val+'"') })
+        fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd='+encodeURIComponent('espnowzone "'+val+'"') })
           .then(r=>r.text()).then(t=>{ var el=document.getElementById('smarthome-status'); if(el)el.textContent=t; if(typeof window.loadSmartHomeMetadata==='function')window.loadSmartHomeMetadata(); });
       });
       _on('btn-set-tags','click', function() {
         const val = document.getElementById('tags-input').value;
-        fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd='+encodeURIComponent('espnow tags "'+val+'"') })
+        fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd='+encodeURIComponent('espnowtags "'+val+'"') })
           .then(r=>r.text()).then(t=>{ var el=document.getElementById('smarthome-status'); if(el)el.textContent=t; if(typeof window.loadSmartHomeMetadata==='function')window.loadSmartHomeMetadata(); });
       });
       _on('stationary-checkbox','change', function() {
         const checked = document.getElementById('stationary-checkbox').checked;
-        fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd='+encodeURIComponent('espnow stationary '+(checked?'on':'off')) })
+        fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd='+encodeURIComponent('espnowstationary '+(checked?'on':'off')) })
           .then(r=>r.text()).then(t=>{ var el=document.getElementById('smarthome-status'); if(el)el.textContent=t; if(typeof window.loadSmartHomeMetadata==='function')window.loadSmartHomeMetadata(); });
       });
       document.getElementById('btn-set-passphrase').addEventListener('click', function() {
@@ -2859,7 +2859,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow setpassphrase "' + passphrase + '"')
+          body: 'cmd=' + encodeURIComponent('espnowsetpassphrase "' + passphrase + '"')
         })
         .then(response => response.text())
         .then(text => {
@@ -2879,7 +2879,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow setpassphrase clear')
+          body: 'cmd=' + encodeURIComponent('espnowsetpassphrase clear')
         })
         .then(response => response.text())
         .then(text => {
@@ -2916,7 +2916,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow broadcast ' + message)
+          body: 'cmd=' + encodeURIComponent('espnowbroadcast ' + message)
         })
         .then(response => response.text())
         .then(text => {
@@ -2945,7 +2945,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow sendfile ' + mac + ' ' + filepath)
+          body: 'cmd=' + encodeURIComponent('espnowsendfile ' + mac + ' ' + filepath)
         })
         .then(response => response.text())
         .then(text => {
@@ -3011,7 +3011,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnow setname ' + deviceName)
+          body: 'cmd=' + encodeURIComponent('espnowsetname ' + deviceName)
         })
         .then(response => response.text())
         .then(text => {
@@ -3102,7 +3102,7 @@ window.togglePane = function(paneId, btnId) {
         return;
       }
       
-      const remoteCmd = 'espnow remote ' + device + ' ' + username + ' ' + password + ' ' + command;
+      const remoteCmd = 'espnowremote ' + device + ' ' + username + ' ' + password + ' ' + command;
       addRemoteResultToLog('SENT', 'Executing on ' + device + ': ' + command);
       
       fetch('/api/cli', {
@@ -3172,7 +3172,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow deviceinfo')
+        body: 'cmd=' + encodeURIComponent('espnowdeviceinfo')
       })
       .then(response => response.text())
       .then(applyMetadata)
@@ -3219,7 +3219,7 @@ window.togglePane = function(paneId, btnId) {
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnow encstatus')
+        body: 'cmd=' + encodeURIComponent('espnowencstatus')
       })
       .then(response => response.text())
       .then(applyEncStatus)

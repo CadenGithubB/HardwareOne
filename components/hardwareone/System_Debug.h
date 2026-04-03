@@ -1,7 +1,14 @@
-// Flag for allowing queued debug messages during help-mode
-#define DEBUG_MSG_FLAG_ALLOW_IN_HELP 0x01
-// Flag to suppress serial output for this message (used by context-aware broadcastOutput)
-#define DEBUG_MSG_FLAG_NO_SERIAL     0x02
+// Per-message routing flags (set by producer, checked by debugOutputTask consumer).
+// These control which sinks receive each individual message.
+// Bits 0-5 are sink enables; bit 6 is a modifier.
+#define MSG_ROUTE_SERIAL  0x01
+#define MSG_ROUTE_WEB     0x02
+#define MSG_ROUTE_FILE    0x04
+#define MSG_ROUTE_OLED    0x08
+#define MSG_ROUTE_BLE     0x10
+#define MSG_ROUTE_G2      0x20
+#define MSG_ROUTE_ALLOW_IN_HELP  0x40
+#define MSG_ROUTE_ALL     0x3F  // all 6 sinks (no ALLOW_IN_HELP)
 #ifndef DEBUG_SYSTEM_H
 #define DEBUG_SYSTEM_H
 
@@ -164,7 +171,8 @@ extern int gDebugQueueSize;
 // Debug message structure
 struct DebugMessage {
   unsigned long timestamp;
-  uint64_t flags;  // Full 64-bit debug flag (matches debugQueuePrintf/isDebugFlagSet)
+  uint64_t category;   // Debug category (DEBUG_WIFI, DEBUG_AUTH, etc.) — 0 for broadcast messages
+  uint8_t  routing;    // MSG_ROUTE_* sink mask — which sinks receive this message
   char text[DEBUG_MSG_SIZE];
 };
 
@@ -245,7 +253,6 @@ inline void incrementDebugDropped() { DEBUG_MANAGER.incrementDebugDropped(); }
 // Broadcast output functions
 void broadcastOutput(const String& s);
 void broadcastOutput(const char* s);
-void broadcastOutputEx(const String& s, uint64_t extraFlags);
 
 // Forward declaration for CommandContext (defined in main .ino)
 struct CommandContext;
@@ -262,9 +269,6 @@ void debugQueuePrintf(uint64_t flag, const char* fmt, ...);
 // Print summary (and tail) of output suppressed during help; resets counters
 void helpSuppressedPrintAndReset();
 void helpSuppressedTailDump();
-
-// Print to web buffer helper
-void printToWeb(const String& s);
 
 // ============================================================================
 // Severity-Based Logging Levels

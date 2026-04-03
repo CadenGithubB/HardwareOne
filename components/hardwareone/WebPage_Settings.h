@@ -1961,7 +1961,7 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     window.toggleEspNowMesh = function() {
       var cur = ($('espnow-mesh-value').textContent === 'Enabled') ? 1 : 0;
       var v = cur ? 0 : 1;
-      var cmd = 'espnow mode ' + (v ? 'mesh' : 'direct');
+      var cmd = 'espnowmode ' + (v ? 'mesh' : 'direct');
       $('espnow-mesh-btn').textContent = '...';
       $('espnow-mesh-btn').disabled = true;
       fetch('/api/cli', {
@@ -2016,18 +2016,18 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
         if (!isNaN(v) && window._isChanged(id, v)) cmdFn(v);
       }
 
-      addStr('espnow-devicename',   function(v) { cmds.push('espnow setname "' + v + '"'); });
-      addStr('espnow-friendlyname', function(v) { cmds.push('espnow friendlyname "' + v + '"'); });
-      addStr('espnow-room',         function(v) { cmds.push('espnow room "' + v + '"'); });
-      addStr('espnow-zone',         function(v) { cmds.push('espnow zone "' + v + '"'); });
-      addStr('espnow-tags',         function(v) { cmds.push('espnow tags "' + v + '"'); });
-      addBool('espnow-stationary',  function(v) { cmds.push('espnow stationary ' + (v ? 'on' : 'off')); });
+      addStr('espnow-devicename',   function(v) { cmds.push('espnowsetname "' + v + '"'); });
+      addStr('espnow-friendlyname', function(v) { cmds.push('espnowfriendlyname "' + v + '"'); });
+      addStr('espnow-room',         function(v) { cmds.push('espnowroom "' + v + '"'); });
+      addStr('espnow-zone',         function(v) { cmds.push('espnowzone "' + v + '"'); });
+      addStr('espnow-tags',         function(v) { cmds.push('espnowtags "' + v + '"'); });
+      addBool('espnow-stationary',  function(v) { cmds.push('espnowstationary ' + (v ? 'on' : 'off')); });
       addInt('espnow-meshrole', function(v) {
         var roleNames = ['worker', 'master', 'backup'];
-        if (v >= 0 && v <= 2) cmds.push('espnow role ' + roleNames[v]);
+        if (v >= 0 && v <= 2) cmds.push('espnowmeshrole ' + roleNames[v]);
       });
-      addStr('espnow-mastermac',    function(v) { cmds.push('espnow mastermac ' + v); });
-      addStr('espnow-backupmac',    function(v) { cmds.push('espnow backupmac ' + v); });
+      addStr('espnow-mastermac',    function(v) { cmds.push('espnowmeshmaster ' + v); });
+      addStr('espnow-backupmac',    function(v) { cmds.push('espnowmeshbackup ' + v); });
       addInt('bond-role', function(v) { if (v >= 0 && v <= 1) cmds.push('bondrole ' + v); });
       addStr('bond-peermac',        function(v) { cmds.push('bondpeermac ' + v); });
       addBool('bond-stream-thermal',  function(v) { cmds.push('bondstreamthermal ' + v); });
@@ -2593,7 +2593,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     
     window.revokeUserSessions = function(username) {
       if (!username || !confirm('Revoke all sessions for user: ' + username + '?')) return;
-      var cmd = 'session revoke user ' + username;
+      var cmd = 'sessionrevoke user ' + username;
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -2696,7 +2696,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!username) { hwAlert('Enter a username'); return; }
       if (pass.length < 6) { hwAlert('Password must be at least 6 characters'); return; }
       if (pass !== pass2) { hwAlert('Passwords do not match'); return; }
-      var cmd = 'user add ' + username + ' ' + pass + ' ' + (mustCh ? '1' : '0');
+      var cmd = 'useradd ' + username + ' ' + pass + ' ' + (mustCh ? '1' : '0');
       postSettingsCli(cmd)
         .then(function(t) {
           if (t && t.indexOf('Error') >= 0) {
@@ -2735,7 +2735,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!username) { hwAlert('Username required'); return; }
       if (pass.length < 6) { hwAlert('Password must be at least 6 characters'); return; }
       if (pass !== pass2) { hwAlert('Passwords do not match'); return; }
-      var cmd = 'user resetpassword ' + username + ' ' + pass + ' ' + (mustCh ? '1' : '0');
+      var cmd = 'userresetpassword ' + username + ' ' + pass + ' ' + (mustCh ? '1' : '0');
       postSettingsCli(cmd)
         .then(function(t) {
           if (t && t.indexOf('Error') >= 0) {
@@ -2758,7 +2758,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded'},
           credentials: 'same-origin',
-          body: 'cmd=' + encodeURIComponent('user list json')
+          body: 'cmd=' + encodeURIComponent('userlist json')
         }).then(function(r) {
           return r.text();
         }),
@@ -2766,7 +2766,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded'},
           credentials: 'same-origin',
-          body: 'cmd=' + encodeURIComponent('session list json')
+          body: 'cmd=' + encodeURIComponent('sessionlist json')
         }).then(function(r) {
           return r.text();
         }),
@@ -2774,7 +2774,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded'},
           credentials: 'same-origin',
-          body: 'cmd=' + encodeURIComponent('pending list json')
+          body: 'cmd=' + encodeURIComponent('pendinglist json')
         }).then(function(r) {
           return r.text();
         })
@@ -2939,7 +2939,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!confirm('Promote user "' + username + '" to admin?')) {
         return;
       }
-      var cmd = 'user promote ' + username;
+      var cmd = 'userpromote ' + username;
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -2972,7 +2972,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!confirm('Approve user "' + username + '"?')) {
         return;
       }
-      var cmd = 'user approve ' + username;
+      var cmd = 'userapprove ' + username;
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -3005,7 +3005,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!confirm('Deny user "' + username + '"? This will permanently reject their registration.')) {
         return;
       }
-      var cmd = 'user deny ' + username;
+      var cmd = 'userdeny ' + username;
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -3038,7 +3038,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!confirm('Demote admin user "' + username + '" to regular user?')) {
         return;
       }
-      var cmd = 'user demote ' + username;
+      var cmd = 'userdemote ' + username;
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -3071,7 +3071,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!confirm('Delete user "' + username + '"? This action cannot be undone.')) {
         return;
       }
-      var cmd = 'user delete ' + username;
+      var cmd = 'userdelete ' + username;
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -3149,7 +3149,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     
     window.toggleUserSync = function() {
       var current = $('usersync-enabled-value') && $('usersync-enabled-value').textContent === 'Enabled';
-      var cmd = current ? 'espnow usersync off' : 'espnow usersync on';
+      var cmd = current ? 'espnowusersync off' : 'espnowusersync on';
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -3173,7 +3173,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('user list json')
+        body: 'cmd=' + encodeURIComponent('userlist json')
       }).then(function(r) { return r.text(); })
       .then(function(t) {
         var users = [];
@@ -3202,7 +3202,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('espnow devices')
+        body: 'cmd=' + encodeURIComponent('espnowdevices')
       }).then(function(r) { return r.text(); })
       .then(function(t) {
         var peers = [];
@@ -3237,7 +3237,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         alert('Please select a user, select a device, and enter both passwords');
         return;
       }
-      var cmd = 'user sync ' + username + ' ' + device + ' ' + adminPass + ' ' + userPass;
+      var cmd = 'usersync ' + username + ' ' + device + ' ' + adminPass + ' ' + userPass;
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -3260,7 +3260,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('espnow devices')
+        body: 'cmd=' + encodeURIComponent('espnowdevices')
       }).then(function(r) { return r.text(); })
       .then(function(t) {
         var peers = [];
@@ -3294,7 +3294,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         alert('Please select a device and enter both passwords');
         return;
       }
-      var cmd = 'user sync ' + username + ' ' + device + ' ' + adminPass + ' ' + userPass;
+      var cmd = 'usersync ' + username + ' ' + device + ' ' + adminPass + ' ' + userPass;
       fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},

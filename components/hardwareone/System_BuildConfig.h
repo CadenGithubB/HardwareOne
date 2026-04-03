@@ -73,7 +73,9 @@
 
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640)
 //   0 = Disabled, 1 = Enabled
+#ifndef ENABLE_CAMERA_SENSOR
 #define ENABLE_CAMERA_SENSOR    0
+#endif
 
 // Microphone: PDM microphone via I2S
 //   0 = Disabled, 1 = Enabled

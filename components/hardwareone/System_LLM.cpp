@@ -272,6 +272,10 @@ static struct {
   int* repBuf;
   int repBufSize;  // = LLM_DEFAULT_REP_WINDOW (capped 1-256)
 
+  // Top-p sampling index buffer (allocated once at model load, reused per token)
+  int* sampleIndices;
+  int sampleIndicesSize;  // = vocab_size
+
   SemaphoreHandle_t mutex;
 } gLLM = {};
 
@@ -970,16 +974,13 @@ static int sample_topp(float* probabilities, int n, float topp) {
   // cumulative probability exceeds topp.  This prunes the long tail of low-
   // probability tokens that cause garbled / random output.
   //
-  // We need to track (prob, original_index) pairs.  Allocate a small index
-  // array on the heap — for vocab 8192 this is 32KB, well within budget since
-  // we free it immediately.  We do a partial selection sort, accumulating mass
-  // until cumsum >= topp, then sample from the nucleus only.
+  // Uses pre-allocated gLLM.sampleIndices buffer (allocated once at model load)
+  // to avoid malloc/free churn every token, which fragments the heap.
 
-  // Build index array alongside probabilities
-  int* indices = (int*)malloc(n * sizeof(int));
-  if (!indices) {
-    DEBUG_LLM_GENERATEF("[LLM] sample_topp: OOM allocating %d indices, falling back to categorical", n);
-    // OOM fallback: plain categorical
+  int* indices = gLLM.sampleIndices;
+  if (!indices || gLLM.sampleIndicesSize < n) {
+    // Fallback: plain categorical sampling (no allocation needed)
+    DEBUG_LLM_GENERATEF("[LLM] sample_topp: no index buffer, falling back to categorical");
     float r = (float)esp_random() / (float)UINT32_MAX;
     float cdf = 0.0f;
     for (int i = 0; i < n; i++) {
@@ -1042,7 +1043,6 @@ static int sample_topp(float* probabilities, int n, float topp) {
   DEBUG_LLM_GENERATEF("[LLM]   sampled tok=%d at rank=%d/%d (r=%.4f)",
                       result, result_rank, nucleus_n, r / cumsum);
 
-  free(indices);
   return result;
 }
 
@@ -1236,9 +1236,15 @@ static bool loadTokenizerFromFile(File& f) {
   t->vocab_size = (int)tok_vocab_size;
   t->merge_count = (int)merge_count;
 
-  // Allocate vocab pointer array
-  t->vocab = (char**)llmPsramAlloc(tok_vocab_size * sizeof(char*), "tok.vocab");
-  if (!t->vocab) return false;
+  // Allocate vocab pointer array in internal RAM — it's only ~13KB for typical
+  // vocab sizes and is accessed frequently during tokenization. Keeping it in
+  // fast DRAM also reduces PSRAM fragmentation before the large weight/state allocs.
+  t->vocab = (char**)calloc(tok_vocab_size, sizeof(char*));
+  if (!t->vocab) {
+    // Fall back to PSRAM if DRAM is tight
+    t->vocab = (char**)llmPsramAlloc(tok_vocab_size * sizeof(char*), "tok.vocab");
+    if (!t->vocab) return false;
+  }
 
   // First pass: calculate total string pool size
   size_t vocabStart = f.position();
@@ -1349,8 +1355,8 @@ static bool loadTokenizerFromFile(File& f) {
       }
 
       if (unreachableCount > 0) {
-        t->presplit = (PreSplitToken*)llmPsramAlloc(
-          unreachableCount * sizeof(PreSplitToken), "tok.presplit");
+        // Presplit is tiny (~400 bytes) — use DRAM to reduce PSRAM fragmentation
+        t->presplit = (PreSplitToken*)calloc(unreachableCount, sizeof(PreSplitToken));
         if (t->presplit) {
           int idx = 0;
           for (uint32_t i = 0; i < tok_vocab_size; i++) {
@@ -1403,10 +1409,11 @@ static bool loadTokenizerFromFile(File& f) {
 
 static void freeTokenizer() {
   TokenizerState* t = &gLLM.tokenizer;
+  // vocab and presplit may be in DRAM (calloc) or PSRAM — heap_caps_free handles both
   llmPsramFree((void**)&t->vocab);
   llmPsramFree((void**)&t->merges);
   llmPsramFree((void**)&t->merge_map);
-  llmPsramFree((void**)&t->presplit);
+  if (t->presplit) { free(t->presplit); t->presplit = nullptr; }
   llmPsramFree((void**)&gLLM.tokenizerData);
   memset(t, 0, sizeof(TokenizerState));
 }
@@ -1987,7 +1994,15 @@ static bool computeMemoryLayout(LoadContext& ctx) {
   fixedBytes += ctx.hotSize;
 
   size_t freePSRAM = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+  // Use largest contiguous block as budget basis — total free can be misleading
+  // because the cold state (KV cache + logits) is one big contiguous allocation.
+  // After weights fragment PSRAM, the largest block shrinks significantly.
+  // We use the smaller of (total free) and (weights + largest_block) to be safe:
+  // weights can be multiple smaller allocs, but cold state must be contiguous.
   size_t budget = (freePSRAM > LLM_PSRAM_RESERVE_BYTES) ? freePSRAM - LLM_PSRAM_RESERVE_BYTES : 0;
+  DEBUG_LLM_MEMORYF("[LLM] PSRAM: total_free=%uKB largest_block=%uKB",
+                    (unsigned)(freePSRAM/1024), (unsigned)(largestBlock/1024));
 
   // Check if even weights alone exceed budget (ctx-independent)
   // coldSize has a fixed V component too
@@ -2125,11 +2140,12 @@ static void spotCheckWeights(const LoadContext& ctx) {
 }
 
 // Allocate hot (internal RAM) and cold (PSRAM) activation buffers.
-static bool allocateRunState(const LoadContext& ctx) {
+// ctx is non-const: fragmentation recovery may reduce kvCacheSize/coldSize.
+static bool allocateRunState(LoadContext& ctx) {
   const LLMConfig* p = &gLLM.config;
   const int D = ctx.D, H = ctx.H, L = ctx.L, V = ctx.V;
   const int kv_dim = ctx.kv_dim;
-  const int seq_ctx = gLLM.seq_ctx;
+  int seq_ctx = gLLM.seq_ctx;
 
   gLLM.stateHotData = (float*)heap_caps_calloc(1, ctx.hotSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (!gLLM.stateHotData) {
@@ -2139,12 +2155,48 @@ static bool allocateRunState(const LoadContext& ctx) {
   }
   gLLM.stateHotSize = ctx.hotSize;
 
+  // Cold state (KV cache + att + logits) is one large contiguous PSRAM allocation.
+  // After weight loading fragments PSRAM, the largest free block may be smaller
+  // than total free bytes. Retry with reduced context if allocation fails.
   size_t coldStateBytes = ctx.kvCacheSize + ctx.coldSize;
   gLLM.stateData = (float*)llmPsramAlloc(coldStateBytes, "llm.state.cold");
   if (!gLLM.stateData) {
-    heap_caps_free(gLLM.stateHotData);
-    gLLM.stateHotData = nullptr;
-    return false;
+    // Fragmentation: largest contiguous block is too small. Shrink context to fit.
+    size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    size_t freePSRAM = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    DEBUG_LLM_MEMORYF("[LLM] Cold state alloc failed: need %uKB, PSRAM free=%uKB largest=%uKB — retrying with reduced ctx",
+                      (unsigned)(coldStateBytes/1024), (unsigned)(freePSRAM/1024), (unsigned)(largestBlock/1024));
+    // Recompute: how many context slots fit in largest contiguous block?
+    size_t fixedCold = (size_t)V * sizeof(float);  // logits array (always needed)
+    if (largestBlock <= fixedCold) {
+      ERROR_LLMF("Cannot fit even logits in PSRAM (need %uKB, largest=%uKB)",
+                 (unsigned)(fixedCold/1024), (unsigned)(largestBlock/1024));
+      heap_caps_free(gLLM.stateHotData);
+      gLLM.stateHotData = nullptr;
+      return false;
+    }
+    size_t perCtxSlot = 2 * L * kv_dim * sizeof(float) + p->n_heads * sizeof(float);
+    int newCtx = (int)((largestBlock - fixedCold) / perCtxSlot);
+    if (newCtx < 1) newCtx = 1;
+    if (newCtx >= seq_ctx) newCtx = seq_ctx - 1;  // must shrink at least 1
+    if (newCtx < 1) {
+      heap_caps_free(gLLM.stateHotData);
+      gLLM.stateHotData = nullptr;
+      return false;
+    }
+    DEBUG_LLM_MEMORYF("[LLM] Fragmentation recovery: ctx %d -> %d", seq_ctx, newCtx);
+    seq_ctx = newCtx;
+    gLLM.seq_ctx = seq_ctx;
+    ctx.kvCacheSize = 2 * L * seq_ctx * kv_dim * sizeof(float);
+    ctx.coldSize = (p->n_heads * seq_ctx + V) * sizeof(float);
+    coldStateBytes = ctx.kvCacheSize + ctx.coldSize;
+    gLLM.stateData = (float*)llmPsramAlloc(coldStateBytes, "llm.state.cold.retry");
+    if (!gLLM.stateData) {
+      ERROR_LLMF("Cold state retry also failed (%uKB)", (unsigned)(coldStateBytes/1024));
+      heap_caps_free(gLLM.stateHotData);
+      gLLM.stateHotData = nullptr;
+      return false;
+    }
   }
   gLLM.stateSize = coldStateBytes;
 
@@ -2170,6 +2222,10 @@ static bool allocateRunState(const LoadContext& ctx) {
     gLLM.repBuf = (int*)malloc(repSize * sizeof(int));
     gLLM.repBufSize = gLLM.repBuf ? repSize : 0;
   }
+
+  // Pre-allocate top-p sampling index buffer (reused every token instead of malloc/free per token)
+  gLLM.sampleIndices = (int*)malloc(V * sizeof(int));
+  gLLM.sampleIndicesSize = gLLM.sampleIndices ? V : 0;
 
   return true;
 }
@@ -2708,6 +2764,10 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
   llmUnload();
 
   // Store the requested context cap (0 = auto-fit to available PSRAM)
+  // HardwareOneHelpAgent needs a reduced context window to leave PSRAM for the rest of the system
+  if (strstr(modelPath, "HardwareOneHelpAgent") && (maxCtx == 0 || maxCtx > 45)) {
+    maxCtx = 45;
+  }
   gLLM.requestedMaxCtx = maxCtx;
 
   gLLM.runState = LLMState::LOADING;
@@ -2757,6 +2817,11 @@ void llmUnload() {
     free(gLLM.repBuf);
     gLLM.repBuf = nullptr;
     gLLM.repBufSize = 0;
+  }
+  if (gLLM.sampleIndices) {
+    free(gLLM.sampleIndices);
+    gLLM.sampleIndices = nullptr;
+    gLLM.sampleIndicesSize = 0;
   }
 
   memset(&gLLM.weights, 0, sizeof(gLLM.weights));

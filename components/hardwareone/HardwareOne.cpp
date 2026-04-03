@@ -175,7 +175,7 @@ size_t gAllocPsBefore = 0;
 
 // AllocEntry struct defined in System_MemUtil.h
 extern const int MAX_ALLOC_ENTRIES = 64;
-EXT_RAM_BSS_ATTR AllocEntry gAllocTracker[MAX_ALLOC_ENTRIES];
+AllocEntry gAllocTracker[MAX_ALLOC_ENTRIES];
 int gAllocTrackerCount = 0;
 bool gAllocTrackerEnabled = false;
 
@@ -561,7 +561,10 @@ void appendCommandToFeed(const char* source, const String& cmd, const String& us
     snprintf(prefix, sizeof(prefix), "[%s] $ ", source);
   }
   String line = String(prefix) + redactCmdForAudit(cmd);
-  printToWeb(line);
+  // Write directly to web mirror (command feed, not via debug queue)
+  if (gWebMirror.buf) {
+    gWebMirror.appendDirect(line.c_str(), line.length(), true);
+  }
 }
 
 static String originPrefix(const char* source, const String& user, const String& ip) {
@@ -787,29 +790,30 @@ static void commandExecTask(void* pv) {
       gCLIValidateOnly = r->ctx.validateOnly;
 
       // Set up output capture if requested (for HTTP responses that need
-      // the actual broadcast output, not just the return code)
-      char captureBuf[1024];
-      captureBuf[0] = '\0';
+      // the actual broadcast output, not just the return code).
+      // Heap-allocate the capture buffer to avoid blowing cmd_exec_task stack.
+      static constexpr size_t CAPTURE_BUF_SIZE = 1024;
+      char* captureBuf = nullptr;
       if (r->ctx.captureOutput) {
-        extern char* gCmdCaptureBuf;
-        extern size_t gCmdCaptureLen, gCmdCaptureCap;
-        gCmdCaptureBuf = captureBuf;
-        gCmdCaptureLen = 0;
-        gCmdCaptureCap = sizeof(captureBuf);
+        captureBuf = (char*)malloc(CAPTURE_BUF_SIZE);
+        if (captureBuf) {
+          captureBuf[0] = '\0';
+          extern char* gCmdCaptureBuf;
+          extern size_t gCmdCaptureLen, gCmdCaptureCap;
+          gCmdCaptureBuf = captureBuf;
+          gCmdCaptureLen = 0;
+          gCmdCaptureCap = CAPTURE_BUF_SIZE;
+        }
       }
 
       r->ok = executeCommand((AuthContext&)r->ctx.auth, r->line, r->out, sizeof(r->out));
 
-      // Tear down capture and prepend captured output to r->out
-      if (r->ctx.captureOutput) {
+      // Tear down capture and merge captured output into r->out
+      if (captureBuf) {
         extern char* gCmdCaptureBuf;
         extern size_t gCmdCaptureLen;
         gCmdCaptureBuf = nullptr;
         if (gCmdCaptureLen > 0) {
-          // Use captured broadcast output as the response instead of just
-          // the return code (e.g. show the actual time, not "OK")
-          size_t retLen = strlen(r->out);
-          // If return value is non-trivial (not just "OK"), append it
           bool trivialReturn = (strcmp(r->out, "OK") == 0);
           if (trivialReturn) {
             // Replace "OK" with the captured output
@@ -817,13 +821,21 @@ static void commandExecTask(void* pv) {
             memcpy(r->out, captureBuf, copyLen);
             r->out[copyLen] = '\0';
           } else {
-            // Prepend captured output to the return value
-            char tmpOut[2048];
-            snprintf(tmpOut, sizeof(tmpOut), "%s%s", captureBuf, r->out);
-            strncpy(r->out, tmpOut, sizeof(r->out) - 1);
-            r->out[sizeof(r->out) - 1] = '\0';
+            // Prepend captured output to the return value.
+            // Shift existing r->out right to make room, then copy capture in front.
+            size_t capLen = gCmdCaptureLen;
+            size_t retLen = strlen(r->out);
+            size_t maxOut = sizeof(r->out) - 1;
+            if (capLen + retLen > maxOut) {
+              // Truncate return portion to fit
+              retLen = (capLen < maxOut) ? maxOut - capLen : 0;
+            }
+            memmove(r->out + capLen, r->out, retLen);
+            memcpy(r->out, captureBuf, capLen);
+            r->out[capLen + retLen] = '\0';
           }
         }
+        free(captureBuf);
       }
 
       gCLIValidateOnly = prevValidate;
@@ -853,7 +865,9 @@ static void commandExecTask(void* pv) {
   }
 }
 
-// Context-aware broadcastOutput that includes origin/user/path metadata
+// Context-aware broadcastOutput that includes origin/user/path metadata.
+// Used to broadcast a command's return value after execution completes.
+// Routing is derived from ctx.outputMask (CMD_OUT_* flags).
 void broadcastOutput(const String& s, const CommandContext& ctx) {
   const char* source;
   switch (ctx.origin) {
@@ -867,24 +881,29 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
 
   String prefixed = originPrefix(source, ctx.auth.user, ctx.auth.ip);
   prefixed += s;
-  DEBUG_CMD_FLOWF("[BROADCAST_CTX_DEBUG] origin=%s user=%s mask=0x%02lX flags=0x%02lX msg='%.50s'",
+  DEBUG_CMD_FLOWF("[BROADCAST_CTX] origin=%s user=%s mask=0x%02lX msg='%.50s'",
                   source, ctx.auth.user.c_str(),
-                  (unsigned long)ctx.outputMask,
-                  (unsigned long)gOutputFlags,
-                  s.c_str());
+                  (unsigned long)ctx.outputMask, s.c_str());
 
-  // Centralized sinks: route via debug_system (respects help gating and flags)
-  // If outputMask doesn't include serial, set NO_SERIAL flag so the queue consumer skips it
-  if (ctx.outputMask & CMD_OUT_SERIAL) {
-    broadcastOutput(prefixed);
-  } else {
-    broadcastOutputEx(prefixed, DEBUG_MSG_FLAG_NO_SERIAL);
-  }
-  // Preserve prior behavior: ensure web history is appended even if OUTPUT_WEB is disabled
-  if (!(gOutputFlags & OUTPUT_WEB)) {
-    printToWeb(prefixed);
+  // Compute route from outputMask (CMD_OUT_* bits 0-2,4 align with MSG_ROUTE_*)
+  // OLED and G2 always included for command return values.
+  uint8_t route = (uint8_t)(ctx.outputMask & (MSG_ROUTE_SERIAL | MSG_ROUTE_WEB | MSG_ROUTE_FILE | MSG_ROUTE_BLE))
+                | MSG_ROUTE_OLED | MSG_ROUTE_G2;
+
+  // Pass explicit route to broadcastOutputCore (gCurrentCommandContext is
+  // already NULL at this point since command execution is complete).
+  extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
+  broadcastOutputCore_Routed(prefixed.c_str(), prefixed.length(), route);
+
+  // Ensure web mirror is populated even when OUTPUT_WEB is off in gOutputFlags
+  // (e.g. WiFi down). The circular buffer is always allocated.
+  if (!(gOutputFlags & OUTPUT_WEB) && (route & MSG_ROUTE_WEB) && gWebMirror.buf) {
+    char fmtBuf[DEBUG_MSG_SIZE + 32];
+    int n = snprintf(fmtBuf, sizeof(fmtBuf), "[%lu] %s", (unsigned long)millis(), prefixed.c_str());
+    if (n > 0) gWebMirror.appendDirect(fmtBuf, (size_t)n, true);
   }
 
+  // Targeted BLE response (direct send to originating connection, not via queue)
   if (ctx.outputMask & CMD_OUT_BLE) {
     uint16_t targetConnId = 0;
     if (ctx.auth.sid.length() > 0) {
@@ -897,14 +916,7 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
     }
   }
 
-  // Note: ESP-NOW V3 session streaming now handled in base broadcastOutput() in System_Debug.cpp
-
-  DEBUG_CMD_FLOWF("[broadcast] sinks: serial=%d web=%d log=%d ble=%d len=%d",
-                  (ctx.outputMask & CMD_OUT_SERIAL) ? 1 : 0,
-                  (ctx.outputMask & CMD_OUT_WEB) ? 1 : 0,
-                  (ctx.outputMask & CMD_OUT_LOG) ? 1 : 0,
-                  (ctx.outputMask & CMD_OUT_BLE) ? 1 : 0,
-                  s.length());
+  DEBUG_CMD_FLOWF("[broadcast] route=0x%02X len=%d", route, s.length());
 }
 
 char* gFileReadBuf = nullptr;

@@ -82,7 +82,7 @@ static void queueAutomationSubCommand(const char* cmd) {
   uc.ctx.auth.opaque = nullptr;
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
-  uc.ctx.outputMask = CMD_OUT_LOG | CMD_OUT_BROADCAST;
+  uc.ctx.outputMask = CMD_OUT_SERIAL | CMD_OUT_WEB | CMD_OUT_LOG;
   uc.ctx.validateOnly = false;
   uc.ctx.replyHandle = nullptr;
   uc.ctx.httpReq = nullptr;
