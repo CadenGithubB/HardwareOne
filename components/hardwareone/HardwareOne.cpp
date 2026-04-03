@@ -1081,15 +1081,15 @@ void hardwareone_setup() {
     writeSettingsJson();
   }
 
+  // TEMP DEBUG (2026-04-03): force debug flags on AFTER file load to diagnose
   // Command system init — single call after settings are resolved
   // NOTE: applySettings() deferred until after initDebugSystem() so debug queue exists
   initializeCommandSystem();
 
   // Persist crash counter from RTC memory into settings
   if (filesystemReady) {
-    gSettings.crashCount     = rtcCrashCount;
-    gSettings.lastResetReason = rtcLastResetReason;
-    writeSettingsJson();
+    setSetting(gSettings.crashCount, rtcCrashCount);
+    setSetting(gSettings.lastResetReason, rtcLastResetReason);
   }
 
   // If time is already valid (warm boot, retained RTC), resolve user creation times early
@@ -1429,14 +1429,14 @@ void hardwareone_setup() {
       // RTC already provided valid time - skip blocking NTP sync at boot
       // NTP can still be triggered manually via 'ntpsync' command
       oledSetBootProgress(50, "Time from RTC");
-      DEBUG_WIFIF("[DEBUG] Skipping NTP sync - RTC already provided valid time");
+      DEBUG_NTPF("[DEBUG] Skipping NTP sync - RTC already provided valid time");
       // Still set up NTP for background sync (non-blocking)
       setupNTP();
     } else {
       oledSetBootProgress(45, "Syncing NTP");
-      DEBUG_WIFIF("[DEBUG] Starting NTP sync");
+      DEBUG_NTPF("[DEBUG] Starting NTP sync");
       bool ntpOk = syncNTPAndResolve();
-      DEBUG_WIFIF("%s", ntpOk ? "[DEBUG] NTP sync complete" : "[DEBUG] NTP sync failed");
+      DEBUG_NTPF("%s", ntpOk ? "[DEBUG] NTP sync complete" : "[DEBUG] NTP sync failed");
       oledSetBootProgress(50, ntpOk ? "Time synced" : "Time unavailable");
     }
   } else {

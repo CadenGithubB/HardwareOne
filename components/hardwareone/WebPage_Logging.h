@@ -192,7 +192,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
     <div style='margin-top:1rem;display:flex;gap:0.5rem'>
       <button class='btn' onclick='applyConfig()'>Apply Configuration</button>
     </div>
-    <div id='config-status' style='margin-top:1rem;color:#dc3545'></div>
+    <div id='config-status' style='margin-top:1rem;color:var(--danger)'></div>
   </div>
 </div>
 
@@ -470,7 +470,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
     <div style='margin-top:1rem;display:flex;gap:0.5rem'>
       <button class='btn' onclick='applySystemConfig()'>Apply Configuration</button>
     </div>
-    <div id='sys-config-status' style='margin-top:1rem;color:#dc3545'></div>
+    <div id='sys-config-status' style='margin-top:1rem;color:var(--danger)'></div>
   </div>
 </div>
 
@@ -498,7 +498,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
     <div style='margin-bottom:1rem'>
       <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem'>
         <label style='color:var(--panel-fg);font-weight:500'>Select Log File:</label>
-        <button class='btn' id='btn-switch-logs' style='display:none;padding:0.25rem 0.75rem;font-size:0.85rem' onclick='switchLogSource()'>View System Logs</button>
+        <button class='btn' id='btn-switch-logs' style='display:none;padding:0.25rem 0.75rem;font-size:0.85rem' onclick='switchLogSource()'>View Admin Logs</button>
       </div>
       <div id='log-viewer-file-explorer' style='margin-top:0.5rem'></div>
     </div>
@@ -534,7 +534,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
     </div>
     
     <!-- Log Display -->
-    <div id='viewer-display' style='display:none;background:#12121c;color:#d4d4d4;border-radius:8px;padding:1rem;margin:1rem 0;max-height:600px;overflow-y:auto;font-family:monospace;font-size:0.85rem;line-height:1.5;border:1px solid rgba(255,255,255,0.12)'>
+    <div id='viewer-display' style='display:none;background:var(--terminal-bg);color:var(--terminal-fg);border-radius:8px;padding:1rem;margin:1rem 0;max-height:600px;overflow-y:auto;font-family:monospace;font-size:0.85rem;line-height:1.5;border:1px solid var(--border)'>
       <div id='viewer-content'>No log loaded</div>
     </div>
     
@@ -691,9 +691,9 @@ function refreshStatus(preloadedStatusText) {
     const btnStart = document.getElementById('btn-start');
     const btnStop = document.getElementById('btn-stop');
     if (isActive) {
-      statusDot.style.background = '#28a745';
+      statusDot.style.background = 'var(--success)';
       statusText.textContent = 'ACTIVE';
-      statusText.style.color = '#28a745';
+      statusText.style.color = 'var(--success)';
       btnStart.style.display = 'none';
       btnStop.style.display = 'inline-block';
       const fileMatch = text.match(/File:\s*(.+)/);
@@ -756,7 +756,7 @@ function refreshStatus(preloadedStatusText) {
   .catch(e => {
     console.error('[LOGGING] Section 4g: Status refresh error:', e);
     document.getElementById('status-text').textContent = 'Error: ' + e.message;
-    document.getElementById('status-text').style.color = '#dc3545';
+    document.getElementById('status-text').style.color = 'var(--danger)';
   });
   // Also update auto-start status
   updateAutoStartStatus();
@@ -770,7 +770,7 @@ function updateAutoStartStatus(preloadedText) {
     if (autostartMatch) {
       const isOn = autostartMatch[1].toUpperCase() === 'ON';
       statusSpan.textContent = isOn ? 'ON' : 'OFF';
-      statusSpan.style.color = isOn ? '#28a745' : 'var(--panel-fg)';
+      statusSpan.style.color = isOn ? 'var(--success)' : 'var(--panel-fg)';
     } else {
       statusSpan.textContent = '?';
     }
@@ -901,7 +901,7 @@ function applyConfig() {
   console.log('[LOGGING] Section 8c: Selected sensors:', sensorList);
   
   document.getElementById('config-status').textContent = 'Applying...';
-  document.getElementById('config-status').style.color = '#007bff';
+  document.getElementById('config-status').style.color = 'var(--accent)';
   
   const commands = [
     'sensorlog format ' + format,
@@ -918,7 +918,7 @@ function applyConfig() {
     if (index >= commands.length) {
       console.log('[LOGGING] Section 8e: All commands completed successfully');
       document.getElementById('config-status').textContent = 'Configuration applied!';
-      document.getElementById('config-status').style.color = '#28a745';
+      document.getElementById('config-status').style.color = 'var(--success)';
       setTimeout(() => {
         document.getElementById('config-status').textContent = '';
         refreshStatus();
@@ -942,7 +942,7 @@ function applyConfig() {
     .catch(e => {
       console.error('[LOGGING] Section 8h: Command', index + 1, 'error:', e);
       document.getElementById('config-status').textContent = 'Error: ' + e.message;
-      document.getElementById('config-status').style.color = '#dc3545';
+      document.getElementById('config-status').style.color = 'var(--danger)';
     });
   }
   
@@ -1057,9 +1057,9 @@ function refreshSystemStatus(preloadedStatusText) {
     const btnStart = document.getElementById('sys-btn-start');
     const btnStop = document.getElementById('sys-btn-stop');
     if (isActive) {
-      statusDot.style.background = '#28a745';
+      statusDot.style.background = 'var(--success)';
       statusText.textContent = 'ACTIVE';
-      statusText.style.color = '#28a745';
+      statusText.style.color = 'var(--success)';
       btnStart.style.display = 'none';
       btnStop.style.display = 'inline-block';
       const fileMatch = text.match(/File:\s*(.+)/);
@@ -1095,7 +1095,7 @@ function refreshSystemStatus(preloadedStatusText) {
   .catch(e => {
     console.error('[LOGGING] System status refresh error:', e);
     document.getElementById('sys-status-text').textContent = 'Error: ' + e.message;
-    document.getElementById('sys-status-text').style.color = '#dc3545';
+    document.getElementById('sys-status-text').style.color = 'var(--danger)';
   });
   // Also update auto-start status
   updateSystemAutoStartStatus();
@@ -1200,7 +1200,7 @@ function applySystemConfig() {
   
   // Store for use when starting logging
   document.getElementById('sys-config-status').textContent = 'Configuration saved. Click "Start System Logging" to apply with these flags.';
-  document.getElementById('sys-config-status').style.color = '#28a745';
+  document.getElementById('sys-config-status').style.color = 'var(--success)';
 }
 
 function selectAllFlags() {
@@ -1218,7 +1218,7 @@ function updateSystemAutoStartStatus(preloadedText) {
     if (autostartMatch) {
       const isOn = autostartMatch[1].toUpperCase() === 'ON';
       statusSpan.textContent = isOn ? 'ON' : 'OFF';
-      statusSpan.style.color = isOn ? '#28a745' : 'var(--panel-fg)';
+      statusSpan.style.color = isOn ? 'var(--success)' : 'var(--panel-fg)';
     } else {
       statusSpan.textContent = '?';
     }
@@ -1575,7 +1575,7 @@ function switchLogSource() {
     document.getElementById('btn-switch-logs').textContent = 'View User Logs';
   } else {
     currentLogSource = '/logging_captures';
-    document.getElementById('btn-switch-logs').textContent = 'View System Logs';
+    document.getElementById('btn-switch-logs').textContent = 'View Admin Logs';
   }
   
   // Reload file explorer with new source

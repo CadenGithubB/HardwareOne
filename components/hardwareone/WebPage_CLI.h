@@ -33,8 +33,8 @@ inline void streamCLIInner(httpd_req_t* req, const String& username) {
     font-weight: bold;
   }
   .cli-output {
-    background: rgba(0, 0, 0, 0.5);
-    border: 1px solid #333;
+    background: var(--terminal-bg);
+    border: 1px solid var(--border);
     border-radius: 5px;
     padding: 8px;
     flex: 1 1 auto;
@@ -44,7 +44,7 @@ inline void streamCLIInner(httpd_req_t* req, const String& username) {
     font-size: 14px;
     line-height: 1.4;
     white-space: pre-wrap;
-    color: #fff;
+    color: var(--terminal-fg);
     scroll-behavior: smooth;
   }
   .cli-input-container {

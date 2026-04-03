@@ -688,7 +688,7 @@ function renderAutos(json) {
           }
           btns += '<button class="btn" onclick="autoRun(' + id + ')" style="margin-right:0.3rem">Run</button>';
           btns += '<button class="btn" onclick="autoEdit(' + id + ')" style="margin-right:0.3rem">Edit</button>';
-          btns += '<button class="btn" onclick="autoDelete(' + id + ')" style="margin-right:0.3rem;color:#b00">Delete</button>';
+          btns += '<button class="btn" onclick="autoDelete(' + id + ')" style="margin-right:0.3rem;color:var(--danger)">Delete</button>';
           btns += '<button class="btn" onclick="exportSingleAutomation(' + id + ')">Export</button>';
         }
         html += '<tr style="border-bottom:1px solid var(--border)">';
@@ -984,13 +984,13 @@ function autoEdit(id){
 function importAutomationFromJson(autoJson, statusEl){
   const name=(autoJson.name||'').trim();
   if(!name){
-    if(statusEl) statusEl.innerHTML='<span style="color:#dc3545">Error: missing name</span>';
+    if(statusEl) statusEl.innerHTML='<span style="color:var(--danger)">Error: missing name</span>';
     return Promise.reject(new Error('missing name'));
   }
   const sched=autoJson.schedule||{};
   const rawType=(sched.type||autoJson.type||'').toLowerCase();
   if(!rawType){
-    if(statusEl) statusEl.innerHTML='<span style="color:#dc3545">Error: missing schedule.type</span>';
+    if(statusEl) statusEl.innerHTML='<span style="color:var(--danger)">Error: missing schedule.type</span>';
     return Promise.reject(new Error('missing type'));
   }
   const parts=['automation add'];
@@ -1013,7 +1013,7 @@ function importAutomationFromJson(autoJson, statusEl){
   if(condition) parts.push('condition="'+condition.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
   const commands=Array.isArray(autoJson.commands)?autoJson.commands:(autoJson.command?[autoJson.command]:[]);
   if(commands.length===0){
-    if(statusEl) statusEl.innerHTML='<span style="color:#dc3545">Error: missing commands</span>';
+    if(statusEl) statusEl.innerHTML='<span style="color:var(--danger)">Error: missing commands</span>';
     return Promise.reject(new Error('missing commands'));
   }
   const cmdsParam=commands.map(c=>typeof c==='object'?(c.conditional||JSON.stringify(c)):c).join(';');
@@ -1023,7 +1023,7 @@ function importAutomationFromJson(autoJson, statusEl){
   function showImportError(msg){
     const errEl=document.getElementById('a_error');
     if(errEl){ errEl.textContent=msg; errEl.style.display='block'; }
-    if(statusEl) statusEl.innerHTML='<span style="color:#dc3545">'+msg+'</span>';
+    if(statusEl) statusEl.innerHTML='<span style="color:var(--danger)">'+msg+'</span>';
   }
   console.log('[importAutomationFromJson] Validating import for "'+name+'":', cmd);
   return postCLIValidate(cmd).then(v=>{
@@ -1052,20 +1052,20 @@ function importFromFile(input){
   if(!input.files||input.files.length===0) return;
   const file=input.files[0];
   if(label) label.textContent=file.name;
-  status.innerHTML='<span style="color:#007bff">Reading...</span>';
+  status.innerHTML='<span style="color:var(--accent)">Reading...</span>';
   const reader=new FileReader();
   reader.onload=function(e){
     let parsed;
     try{ parsed=JSON.parse(e.target.result); }
-    catch(ex){ status.innerHTML='<span style="color:#dc3545">Invalid JSON: '+ex.message+'</span>'; return; }
+    catch(ex){ status.innerHTML='<span style="color:var(--danger)">Invalid JSON: '+ex.message+'</span>'; return; }
     // Support single automation object or { automations: [...] } wrapper
     const items=Array.isArray(parsed.automations)?parsed.automations:[parsed];
     let done=0,errs=0;
     const next=(idx)=>{
       if(idx>=items.length){
-        if(done>0&&!errs) status.innerHTML='<span style="color:#28a745">Imported '+done+' automation'+(done!==1?'s':'')+' successfully</span>';
+        if(done>0&&!errs) status.innerHTML='<span style="color:var(--success)">Imported '+done+' automation'+(done!==1?'s':'')+' successfully</span>';
         else if(done>0&&errs) status.innerHTML='<span style="color:var(--warning-accent,#ffc107)">Imported '+done+', '+errs+' failed</span>';
-        else status.innerHTML='<span style="color:#dc3545">Import failed ('+errs+' error'+(errs!==1?'s':'')+')</span>';
+        else status.innerHTML='<span style="color:var(--danger)">Import failed ('+errs+' error'+(errs!==1?'s':'')+')</span>';
         if(done>0) loadAutos();
         input.value='';
         if(label) label.textContent='No file chosen';
@@ -1075,7 +1075,7 @@ function importFromFile(input){
     };
     next(0);
   };
-  reader.onerror=function(){ status.innerHTML='<span style="color:#dc3545">Failed to read file</span>'; };
+  reader.onerror=function(){ status.innerHTML='<span style="color:var(--danger)">Failed to read file</span>'; };
   reader.readAsText(file);
 }
 function downloadFromGitHub(){
@@ -1084,11 +1084,11 @@ function downloadFromGitHub(){
   const status=document.getElementById('download_status');
   let url=(urlEl?urlEl.value.trim():'');
   const customName=(nameEl?nameEl.value.trim():'');
-  if(!url){ status.innerHTML='<span style="color:#dc3545">Please enter a GitHub URL</span>'; return; }
+  if(!url){ status.innerHTML='<span style="color:var(--danger)">Please enter a GitHub URL</span>'; return; }
   // Convert github.com blob URL to raw.githubusercontent.com
   url=url.replace('https://github.com/','https://raw.githubusercontent.com/').replace('/blob/','/')
          .replace('http://github.com/','https://raw.githubusercontent.com/');
-  status.innerHTML='<span style="color:#007bff">Fetching from GitHub...</span>';
+  status.innerHTML='<span style="color:var(--accent)">Fetching from GitHub...</span>';
   fetch(url)
     .then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
     .then(autoJson=>{
@@ -1096,27 +1096,27 @@ function downloadFromGitHub(){
       return importAutomationFromJson(autoJson,status);
     })
     .then(r=>{
-      status.innerHTML='<span style="color:#28a745">Imported successfully!</span>';
+      status.innerHTML='<span style="color:var(--success)">Imported successfully!</span>';
       if(urlEl) urlEl.value='';
       if(nameEl) nameEl.value='';
       loadAutos();
     })
     .catch(e=>{
       if(!status.innerHTML.includes('dc3545'))
-        status.innerHTML='<span style="color:#dc3545">Error: '+e.message+'</span>';
+        status.innerHTML='<span style="color:var(--danger)">Error: '+e.message+'</span>';
     });
 }
 function exportAllAutomations(){ 
   const status=document.getElementById('export_status'); 
   const separateFiles=document.getElementById('export_separate').checked; 
-  status.innerHTML='<span style="color:#007bff">Preparing export...</span>'; 
+  status.innerHTML='<span style="color:var(--accent)">Preparing export...</span>'; 
   if(separateFiles){ 
     fetch('/api/automations').then(r=>r.json()).then(data=>{ 
       if(data && data.automations && data.automations.length>0){ 
         let downloadCount = 0; 
         const downloadNext = (index) => { 
           if(index >= data.automations.length) { 
-            status.innerHTML='<span style="color:#28a745">' + downloadCount + ' files downloaded separately (import-ready)</span>'; 
+            status.innerHTML='<span style="color:var(--success)">' + downloadCount + ' files downloaded separately (import-ready)</span>'; 
             return; 
           } 
           const auto = data.automations[index];
@@ -1150,15 +1150,15 @@ function exportAllAutomations(){
           document.body.removeChild(link); 
           URL.revokeObjectURL(url); 
           downloadCount++; 
-          status.innerHTML='<span style="color:#007bff">Downloading ' + (index + 1) + ' of ' + data.automations.length + '...</span>'; 
+          status.innerHTML='<span style="color:var(--accent)">Downloading ' + (index + 1) + ' of ' + data.automations.length + '...</span>'; 
           setTimeout(() => downloadNext(index + 1), 500); 
         }; 
         downloadNext(0); 
       } else { 
-        status.innerHTML='<span style="color:#dc3545">No automations to export</span>'; 
+        status.innerHTML='<span style="color:var(--danger)">No automations to export</span>'; 
       } 
     }).catch(e=>{ 
-      status.innerHTML='<span style="color:#dc3545">Export failed: '+e.message+'</span>'; 
+      status.innerHTML='<span style="color:var(--danger)">Export failed: '+e.message+'</span>'; 
     }); 
   } else { 
     const link=document.createElement('a'); 
@@ -1168,7 +1168,7 @@ function exportAllAutomations(){
     document.body.appendChild(link); 
     link.click(); 
     document.body.removeChild(link); 
-    status.innerHTML='<span style="color:#28a745">Export started - check your downloads folder</span>'; 
+    status.innerHTML='<span style="color:var(--success)">Export started - check your downloads folder</span>'; 
   } 
   setTimeout(()=>{ 
     status.innerHTML=''; 
