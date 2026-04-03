@@ -100,6 +100,9 @@
 #define DEBUG_LLM_GENERATE      0x2000000000000000ULL  // Bit 61 - generation loop, sampling, throughput
 #define DEBUG_LLM_MEMORY        0x4000000000000000ULL  // Bit 62 - PSRAM estimates, context cap, allocations
 
+// Bit 63: NTP / DateTime (repurposed from debugDateTime which previously aliased DEBUG_SYSTEM)
+#define DEBUG_NTP               0x8000000000000000ULL  // Bit 63 - NTP sync, setup, anchors, timestamp resolution
+
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
 // This structure tracks which specific sub-categories are enabled
@@ -158,6 +161,12 @@ struct DebugSubFlags {
   bool cmdflowRouting;  // Command routing, handler lookup
   bool cmdflowQueue;    // Queue operations, sync/async execution
   bool cmdflowContext;  // Context management, origin tracking
+
+  // NTP / DateTime sub-flags
+  bool ntpSync;         // DNS validation, wait loop, per-iteration polling, success/timeout
+  bool ntpSetup;        // setupNTP() / configTime() calls, server & offset config
+  bool ntpAnchor;       // Boot anchor write/read/cleanup, loadAndIncrementBootSeq
+  bool ntpResolve;      // resolvePendingUserCreationTimes(), [resolve] messages
 };
 
 // Debug output queue configuration
@@ -346,6 +355,11 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define DEBUG_LLM_GENERATEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_GENERATE, fmt, ##__VA_ARGS__)
 #define DEBUG_LLM_MEMORYF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LLM_MEMORY, fmt, ##__VA_ARGS__)
 #define DEBUG_WIFIF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_WIFI, fmt, ##__VA_ARGS__)
+#define DEBUG_NTPF(fmt, ...)          DEBUGF_QUEUE_DEBUG(DEBUG_NTP, fmt, ##__VA_ARGS__)
+#define DEBUG_NTP_SYNCF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_NTP, fmt, ##__VA_ARGS__)
+#define DEBUG_NTP_SETUPF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_NTP, fmt, ##__VA_ARGS__)
+#define DEBUG_NTP_ANCHORF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_NTP, fmt, ##__VA_ARGS__)
+#define DEBUG_NTP_RESOLVEF(fmt, ...)  DEBUGF_QUEUE_DEBUG(DEBUG_NTP, fmt, ##__VA_ARGS__)
 #define DEBUG_STORAGEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_STORAGE, fmt, ##__VA_ARGS__)
 #define DEBUG_PERFORMANCEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_PERFORMANCE, fmt, ##__VA_ARGS__)
 #define DEBUG_SYSTEMF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SYSTEM, fmt, ##__VA_ARGS__)
@@ -517,6 +531,10 @@ const char* cmd_debugauth(const String& argsInput);
 const char* cmd_debugsensors(const String& argsInput);
 const char* cmd_debugespnow(const String& argsInput);
 const char* cmd_debugdatetime(const String& argsInput);
+const char* cmd_debugdatetimesync(const String& argsInput);
+const char* cmd_debugdatetimesetup(const String& argsInput);
+const char* cmd_debugdatetimeanchor(const String& argsInput);
+const char* cmd_debugdatetimeresolve(const String& argsInput);
 const char* cmd_debuggps(const String& argsInput);
 const char* cmd_debugrtc(const String& argsInput);
 const char* cmd_debugimu(const String& argsInput);

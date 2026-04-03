@@ -90,30 +90,16 @@ const char* cmd_oledclihistorysize(const String& argsInput) {
 
 const char* cmd_outserial(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String a = argsInput;
-  a.trim();
-  String t1, t2;
-  int sp2 = a.indexOf(' ');
-  if (sp2 >= 0) {
-    t1 = a.substring(0, sp2);
-    t2 = a.substring(sp2 + 1);
-    t2.trim();
-  } else {
-    t1 = a;
-  }
-  t1.trim();
+  CommandArgs ca(argsInput);
+  String t1 = ca.arg(0);
+  String t2 = ca.arg(1);
   bool modeTemp = false;
   int v = -1;
-  auto parse01 = [](const String& s) -> int {
-    String ss = s;
-    ss.trim();
-    return ss.toInt();
-  };
   if (t1.length() && (t1 == "temp" || t1 == "persist")) {
     modeTemp = (t1 == "temp");
-    if (t2.length()) v = parse01(t2);
+    if (t2.length()) v = t2.toInt();
   } else {
-    if (t1.length()) v = parse01(t1);
+    if (t1.length()) v = t1.toInt();
     if (t2.length()) { modeTemp = (t2 == "temp"); }
   }
   if (v != 0) v = 1;
@@ -132,30 +118,16 @@ const char* cmd_outserial(const String& argsInput) {
 
 const char* cmd_outweb(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String a = argsInput;
-  a.trim();
-  String t1, t2;
-  int sp2 = a.indexOf(' ');
-  if (sp2 >= 0) {
-    t1 = a.substring(0, sp2);
-    t2 = a.substring(sp2 + 1);
-    t2.trim();
-  } else {
-    t1 = a;
-  }
-  t1.trim();
+  CommandArgs ca(argsInput);
+  String t1 = ca.arg(0);
+  String t2 = ca.arg(1);
   bool modeTemp = false;
   int v = -1;
-  auto parse01 = [](const String& s) -> int {
-    String ss = s;
-    ss.trim();
-    return ss.toInt();
-  };
   if (t1.length() && (t1 == "temp" || t1 == "persist")) {
     modeTemp = (t1 == "temp");
-    if (t2.length()) v = parse01(t2);
+    if (t2.length()) v = t2.toInt();
   } else {
-    if (t1.length()) v = parse01(t1);
+    if (t1.length()) v = t1.toInt();
     if (t2.length()) { modeTemp = (t2 == "temp"); }
   }
   if (v != 0) v = 1;
@@ -178,6 +150,8 @@ const char* cmd_outweb(const String& argsInput) {
 
 const char* cmd_beginwrite(const String& argsInput);
 const char* cmd_savesettings(const String& argsInput);
+const char* cmd_serialrequireauth(const String&);
+const char* cmd_displayrequireauth(const String&);
 #if ENABLE_HTTP_SERVER
 const char* cmd_httpAutoStart(const String& argsInput);
 #endif
@@ -217,6 +191,12 @@ const CommandEntry settingsCommands[] = {
   // ---- CLI Settings ----
   { "webclihistorysize", "Set web CLI history size: <1..100>", true, cmd_webclihistorysize, "Usage: webclihistorysize <1..100>" },
   { "oledclihistorysize", "Set OLED CLI history size: <10..100>", true, cmd_oledclihistorysize, "Usage: oledclihistorysize <10..100>" },
+
+  // ---- Output Settings ----
+  { "outserial",          "Set serial output: <0|1> [persist|temp]", true, cmd_outserial },
+  { "outweb",             "Set web output: <0|1> [persist|temp]", true, cmd_outweb },
+  { "serialrequireauth",  "Require auth for serial: <0|1>", true, cmd_serialrequireauth },
+  { "displayrequireauth", "Require auth for display: <0|1>", true, cmd_displayrequireauth },
 
   // ---- Batch write ----
   { "beginwrite",   "Start a batch settings update — defers flash write until savesettings.", true, cmd_beginwrite },
@@ -570,7 +550,7 @@ void applySettings() {
     DBG_MAP(debugWifi,             DEBUG_WIFI),
     DBG_MAP(debugStorage,          DEBUG_STORAGE),
     DBG_MAP(debugPerformance,      DEBUG_PERFORMANCE),
-    DBG_MAP(debugDateTime,         DEBUG_SYSTEM),
+    DBG_MAP(debugDateTime,         DEBUG_NTP),
     DBG_MAP(debugCommandFlow,      DEBUG_CMD_FLOW),
     DBG_MAP(debugUsers,            DEBUG_USERS),
     DBG_MAP(debugSystem,           DEBUG_SYSTEM),
@@ -672,7 +652,14 @@ void applySettings() {
   gDebugSubFlags.usersRegister = gSettings.debugUsersRegister;
   gDebugSubFlags.usersQuery = gSettings.debugUsersQuery;
   updateParentDebugFlag(DEBUG_USERS, gSettings.debugUsers || gDebugSubFlags.usersMgmt || gDebugSubFlags.usersRegister || gDebugSubFlags.usersQuery);
-  
+
+  // NTP / DateTime sub-flags
+  gDebugSubFlags.ntpSync    = gSettings.debugDatetimeSync;
+  gDebugSubFlags.ntpSetup   = gSettings.debugDatetimeSetup;
+  gDebugSubFlags.ntpAnchor  = gSettings.debugDatetimeAnchor;
+  gDebugSubFlags.ntpResolve = gSettings.debugDatetimeResolve;
+  updateParentDebugFlag(DEBUG_NTP, gSettings.debugDateTime || gDebugSubFlags.ntpSync || gDebugSubFlags.ntpSetup || gDebugSubFlags.ntpAnchor || gDebugSubFlags.ntpResolve);
+
   // CLI sub-flags
   gDebugSubFlags.cliExecution = gSettings.debugCliExecution;
   gDebugSubFlags.cliQueue = gSettings.debugCliQueue;
@@ -1327,8 +1314,13 @@ static const SettingEntry debugSettingEntries[] = {
   { "generate",   SETTING_BOOL, &gSettings.debugLlmGenerate,     0, 0, nullptr, 0, 1, "Generate",            nullptr, false, "llm", "debugllmgenerate" },
   { "memory",     SETTING_BOOL, &gSettings.debugLlmMemory,       0, 0, nullptr, 0, 1, "Memory / PSRAM",      nullptr, false, "llm", "debugllmmemory" },
 #endif
+  // --- NTP / DateTime group ---
+  { "enabled",   SETTING_BOOL, &gSettings.debugDateTime,       0, 0, nullptr, 0, 1, "All NTP/DateTime",      nullptr, false, "datetime", "debugdatetime" },
+  { "sync",      SETTING_BOOL, &gSettings.debugDatetimeSync,   0, 0, nullptr, 0, 1, "Sync loop",             nullptr, false, "datetime", "debugdatetimesync" },
+  { "setup",     SETTING_BOOL, &gSettings.debugDatetimeSetup,  0, 0, nullptr, 0, 1, "Setup/configTime",      nullptr, false, "datetime", "debugdatetimesetup" },
+  { "anchor",    SETTING_BOOL, &gSettings.debugDatetimeAnchor, 0, 0, nullptr, 0, 1, "Boot anchors",          nullptr, false, "datetime", "debugdatetimeanchor" },
+  { "resolve",   SETTING_BOOL, &gSettings.debugDatetimeResolve,0, 0, nullptr, 0, 1, "Timestamp resolution",  nullptr, false, "datetime", "debugdatetimeresolve" },
   // --- standalone (no group) ---
-  { "dateTime",         SETTING_BOOL, &gSettings.debugDateTime,       0, 0, nullptr, 0, 1, "Date/Time",            nullptr, false, nullptr, "debugdatetime" },
   { "logger",           SETTING_BOOL, &gSettings.debugLogger,         0, 0, nullptr, 0, 1, "Logger",               nullptr, false, nullptr, "debuglogger" },
   { "memory",           SETTING_BOOL, &gSettings.debugMemory,         0, 0, nullptr, 0, 1, "Memory",               nullptr, false, nullptr, "debugmemory" },
   { "settingsSystem",   SETTING_BOOL, &gSettings.debugSettingsSystem, 0, 0, nullptr, 0, 1, "Settings",             nullptr, false, nullptr, "debugsettingssystem" },
@@ -1358,15 +1350,33 @@ static const SettingsModule debugSettingsModule = {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry outputSettingEntries[] = {
-  { "serial", SETTING_BOOL, &gSettings.outSerial, 1, 0, nullptr, 0, 1, "Serial Output", nullptr },
-  { "web", SETTING_BOOL, &gSettings.outWeb, 1, 0, nullptr, 0, 1, "Web Output", nullptr },
-  { "display", SETTING_BOOL, &gSettings.outDisplay, 0, 0, nullptr, 0, 1, "Display Output", nullptr },
-  { "serialRequireAuth", SETTING_BOOL, &gSettings.serialRequireAuth, 1, 0, nullptr, 0, 1, "Serial Require Auth", nullptr },
-  { "displayRequireAuth", SETTING_BOOL, &gSettings.localDisplayRequireAuth, 1, 0, nullptr, 0, 1, "Display Require Auth", nullptr },
+  { "serial", SETTING_BOOL, &gSettings.outSerial, 1, 0, nullptr, 0, 1, "Serial Output", nullptr, false, nullptr, "outserial" },
+  { "web", SETTING_BOOL, &gSettings.outWeb, 1, 0, nullptr, 0, 1, "Web Output", nullptr, false, nullptr, "outweb" },
+  { "display", SETTING_BOOL, &gSettings.outDisplay, 0, 0, nullptr, 0, 1, "Display Output", nullptr, false, nullptr, "outdisplay" },
+  { "serialRequireAuth", SETTING_BOOL, &gSettings.serialRequireAuth, 1, 0, nullptr, 0, 1, "Serial Require Auth", nullptr, false, nullptr, "serialrequireauth" },
+  { "displayRequireAuth", SETTING_BOOL, &gSettings.localDisplayRequireAuth, 1, 0, nullptr, 0, 1, "Display Require Auth", nullptr, false, nullptr, "displayrequireauth" },
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  { "g2", SETTING_BOOL, &gSettings.outG2, 0, 0, nullptr, 0, 1, "G2 Glasses Output", nullptr },
+  { "g2", SETTING_BOOL, &gSettings.outG2, 0, 0, nullptr, 0, 1, "G2 Glasses Output", nullptr, false, nullptr, "outg2" },
 #endif
 };
+
+// Helper: find an output setting entry by jsonKey
+static const SettingEntry* findOutputEntry(const char* key) {
+  for (size_t i = 0; i < sizeof(outputSettingEntries)/sizeof(outputSettingEntries[0]); i++) {
+    if (strcmp(outputSettingEntries[i].jsonKey, key) == 0) return &outputSettingEntries[i];
+  }
+  return nullptr;
+}
+
+const char* cmd_serialrequireauth(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return handleSettingCommand(findOutputEntry("serialRequireAuth"), a);
+}
+
+const char* cmd_displayrequireauth(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return handleSettingCommand(findOutputEntry("displayRequireAuth"), a);
+}
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 static const SettingsModule outputSettingsModule = {
@@ -1575,6 +1585,11 @@ void registerAllSettingsModules() {
 
   // Sensor logging
   registerSettingsModule(&sensorLogSettingsModule);
+
+#if ENABLE_ONDEVICE_LLM
+  extern const SettingsModule llmSettingsModule;
+  registerSettingsModule(&llmSettingsModule);
+#endif
 
   DEBUG_SYSTEMF("[Settings] All %zu modules registered", gSettingsModuleCount);
 }

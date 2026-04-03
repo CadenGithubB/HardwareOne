@@ -1558,24 +1558,12 @@ const char* cmd_user_changepassword(const String& argsInput) {
   if (!filesystemReady) return "Error: LittleFS not ready";
 
   // Parse: "currentPassword newPassword confirmPassword"
-  String args = argsInput;
-  args.trim();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(3)) return "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
 
-  int sp1 = args.indexOf(' ');
-  if (sp1 < 0) return "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
-  int sp2 = args.indexOf(' ', sp1 + 1);
-  if (sp2 < 0) return "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
-
-  String currentPassword = args.substring(0, sp1);
-  String newPassword     = args.substring(sp1 + 1, sp2);
-  String confirmPassword = args.substring(sp2 + 1);
-  currentPassword.trim();
-  newPassword.trim();
-  confirmPassword.trim();
-
-  if (currentPassword.length() == 0 || newPassword.length() == 0 || confirmPassword.length() == 0) {
-    return "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
-  }
+  String currentPassword = a.arg(0);
+  String newPassword     = a.arg(1);
+  String confirmPassword = a.arg(2);
 
   if (newPassword != confirmPassword) {
     return "Error: New passwords do not match";
@@ -1613,40 +1601,20 @@ const char* cmd_user_resetpassword(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
   
-  // Parse: "<username> <newPassword> [0|1]" — optional 1 = require new password on next login (same tail rule as user add)
-  String args = argsInput;
-  args.trim();
-  
-  int spaceIdx = args.indexOf(' ');
-  if (spaceIdx < 0) {
+  // Parse: "<username> <newPassword> [0|1]" — optional 1 = require new password on next login
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) {
     return "Usage: user resetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login, 0 = omit";
   }
-  
-  String username = args.substring(0, spaceIdx);
-  String rest = args.substring(spaceIdx + 1);
-  username.trim();
-  rest.trim();
-  
-  if (username.length() == 0 || rest.length() == 0) {
-    return "Usage: user resetpassword <username> <newPassword> [0|1]";
-  }
 
-  bool mustChange = false;
-  int lastSp = rest.lastIndexOf(' ');
-  if (lastSp >= 0) {
-    String tail = rest.substring(lastSp + 1);
-    tail.trim();
-    if (tail == "1" || tail == "0") {
-      mustChange = (tail == "1");
-      rest = rest.substring(0, lastSp);
-      rest.trim();
-    }
-  }
-  
+  String username = a.arg(0);
+  String rest = a.arg(1);
+  bool mustChange = a.argBool(2, false);
+
   if (rest.length() < 6) {
     return "Error: Password must be at least 6 characters";
   }
-  
+
   if (!setUserPassword(username, rest, mustChange)) {
     if (!ensureDebugBuffer()) return "Error: Failed to reset password";
     snprintf(getDebugBuffer(), 1024, "Error: Failed to reset password for user '%s'", username.c_str());
@@ -1664,37 +1632,14 @@ const char* cmd_user_add(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
-  String args = argsInput;
-  args.trim();
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) {
     return "Usage: user add <username> <password> [0|1]\n(optional last arg: 1 = require new password on next login)";
   }
 
-  int sp = args.indexOf(' ');
-  if (sp < 0) {
-    return "Usage: user add <username> <password> [0|1]\n(optional last arg: 1 = require new password on next login)";
-  }
-
-  String username = args.substring(0, sp);
-  String rest = args.substring(sp + 1);
-  username.trim();
-  rest.trim();
-
-  if (username.length() == 0 || rest.length() == 0) {
-    return "Usage: user add <username> <password> [0|1]\n(optional last arg: 1 = require new password on next login)";
-  }
-
-  bool mustChange = false;
-  int lastSp = rest.lastIndexOf(' ');
-  if (lastSp >= 0) {
-    String tail = rest.substring(lastSp + 1);
-    tail.trim();
-    if (tail == "1" || tail == "0") {
-      mustChange = (tail == "1");
-      rest = rest.substring(0, lastSp);
-      rest.trim();
-    }
-  }
+  String username = a.arg(0);
+  String rest = a.arg(1);
+  bool mustChange = a.argBool(2, false);
 
   if (rest.length() < 6) {
     return "Error: Password must be at least 6 characters";
@@ -1943,23 +1888,17 @@ const char* cmd_session_list(const String& argsInput) {
 const char* cmd_session_revoke(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsInput;
-  args.trim();
-  String argsLower = args;
-  argsLower.toLowerCase();
+  CommandArgs a(argsInput);
+  String subcmd = a.arg(0);
+  subcmd.toLowerCase();
 
   auto defaultReason = String("Your session has been signed out by an administrator.");
 
   int revoked = 0;
 
-  if (argsLower.startsWith("sid ")) {
-    // Extract SID and optional reason
-    String rest = args.substring(4);  // after "sid "
-    rest.trim();
-    int sp = rest.indexOf(' ');
-    String sid = (sp < 0) ? rest : rest.substring(0, sp);
-    String reason = (sp < 0) ? String() : rest.substring(sp + 1);
-    reason.trim();
+  if (subcmd == "sid") {
+    String sid = a.arg(1);
+    String reason = a.has(2) ? a.remaining(1) : String();
     if (!reason.length()) reason = defaultReason;
     int idx = findSessionIndexBySID(sid);
     if (idx < 0) return "Session not found for given SID.";
@@ -1980,14 +1919,9 @@ const char* cmd_session_revoke(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  if (argsLower.startsWith("user ")) {
-    // Extract username and optional reason
-    String rest = args.substring(5);  // after "user "
-    rest.trim();
-    int sp = rest.indexOf(' ');
-    String username = (sp < 0) ? rest : rest.substring(0, sp);
-    String reason = (sp < 0) ? String() : rest.substring(sp + 1);
-    reason.trim();
+  if (subcmd == "user") {
+    String username = a.arg(1);
+    String reason = a.has(2) ? a.remaining(1) : String();
     if (!reason.length()) reason = defaultReason;
     // Revoke web sessions
     for (int i = 0; i < MAX_SESSIONS; ++i) {
@@ -2034,17 +1968,11 @@ const char* cmd_session_revoke(const String& argsInput) {
 }
 const char* cmd_ban(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  if (args.length() == 0) return "Usage: ban <ip> [reason]";
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Usage: ban <ip> [reason]";
 
-  int sp = args.indexOf(' ');
-  String ip     = (sp >= 0) ? args.substring(0, sp) : args;
-  String reason = (sp >= 0) ? args.substring(sp + 1) : String();
-  ip.trim();
-  reason.trim();
-
-  if (ip.length() == 0) return "Usage: ban <ip> [reason]";
+  String ip = a.arg(0);
+  String reason = a.has(1) ? a.remaining(0) : String();
   // Basic format check — must contain a dot (IPv4) or colon (IPv6)
   if (ip.indexOf('.') < 0 && ip.indexOf(':') < 0) {
     return "Error: invalid IP address format (expected e.g. 192.168.1.100)";
@@ -2081,15 +2009,11 @@ const char* cmd_banlist(const String& argsInput) {
 
 const char* cmd_banuser(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  if (args.length() == 0) return "Usage: banuser <username> [reason]";
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Usage: banuser <username> [reason]";
 
-  int sp = args.indexOf(' ');
-  String username = (sp >= 0) ? args.substring(0, sp) : args;
-  String reason   = (sp >= 0) ? args.substring(sp + 1) : String();
-  username.trim();
-  reason.trim();
+  String username = a.arg(0);
+  String reason = a.has(1) ? a.remaining(0) : String();
 
   const char* err = setUserBanInternal(username, true, reason);
   if (err) return err;
@@ -2151,21 +2075,12 @@ const char* cmd_user_request(const String& argsInput) {
   //RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
   // Syntax: args = "<username> <password> [confirmPassword]"
-  String rest = argsInput;
-  rest.trim();
-  if (rest.length() == 0) return "Usage: user request <username> <password> [confirmPassword]";
-  int spU = rest.indexOf(' ');
-  if (spU < 0) return "Usage: user request <username> <password> [confirmPassword]";
-  String username = rest.substring(0, spU);
-  username.trim();
-  String rem = rest.substring(spU + 1);
-  rem.trim();
-  int spP = rem.indexOf(' ');
-  String password = (spP >= 0) ? rem.substring(0, spP) : rem;
-  password.trim();
-  String confirm = (spP >= 0) ? rem.substring(spP + 1) : String();
-  confirm.trim();
-  if (username.length() == 0 || password.length() == 0) return "Error: username and password required";
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) return "Usage: user request <username> <password> [confirmPassword]";
+
+  String username = a.arg(0);
+  String password = a.arg(1);
+  String confirm = a.arg(2);  // empty if not provided
   if (confirm.length() && confirm != password) return "Error: passwords do not match";
   // Add to pending_users.json in JSON format
   DEBUG_CMD_FLOWF("[users] Adding user to pending_users.json, filesystemReady=%d", filesystemReady ? 1 : 0);
@@ -2420,9 +2335,18 @@ static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int ma
 static bool parseUserTimestampInfo(const String& userObj, int userStart,
                                    UserTimestampInfo& info) {
   info.jsonStartPos = userStart;
-  // Check for null createdAt - handle both compact ("createdAt":null) and pretty ("createdAt": null) JSON
-  info.needsResolution = (userObj.indexOf("\"createdAt\":null") >= 0) || 
-                         (userObj.indexOf("\"createdAt\": null") >= 0);
+  // Needs resolution if createdAt is:
+  //   1. JSON null (NTP wasn't synced at creation time)
+  //   2. Missing entirely (ArduinoJson may drop null values on re-serialize)
+  //   3. An approximate sentinel like "1st Power Cycle" written by approximateUserTimestamp()
+  //      — happens when gBootCounter advanced past bootCount before an anchor was available;
+  //      now that NTP has synced we can replace the approximation with the real timestamp.
+  bool hasNullCreatedAt    = (userObj.indexOf("\"createdAt\":null") >= 0) ||
+                             (userObj.indexOf("\"createdAt\": null") >= 0);
+  bool hasMissingCreatedAt = (userObj.indexOf("\"createdAt\"") < 0);
+  bool isApproximate       = (userObj.indexOf("\"createdBy\":\"approx_power_cycle\"") >= 0) ||
+                             (userObj.indexOf("\"createdBy\": \"approx_power_cycle\"") >= 0);
+  info.needsResolution = hasNullCreatedAt || hasMissingCreatedAt || isApproximate;
 
   if (!info.needsResolution) return false;
 
@@ -2510,11 +2434,25 @@ static bool replaceJsonField(String& json, const char* fieldName,
 static bool resolveUserTimestamp(String& usersJson, const UserTimestampInfo& info,
                                  const BootAnchor& anchor) {
   long delta = (long)anchor.millisAtSync - (long)info.createdMs;
-  time_t createdAtUtc = anchor.epochAtSync - (delta / 1000);
 
-  if (createdAtUtc < 1577836800) return false;
+  time_t createdAtUtc;
+  bool crossBoot = false;
+
+  if (delta >= 0) {
+    // Same-boot: user was created before NTP synced in the same boot cycle.
+    // Exact calculation: walk back from the sync epoch by the elapsed ms difference.
+    createdAtUtc = anchor.epochAtSync - (delta / 1000);
+  } else {
+    // Cross-boot: user was created in a previous boot (createdMs > millisAtSync).
+    // We can't calculate the exact time without knowing when the prior boot started,
+    // so use epochAtSync as an upper bound (user was created no later than this).
+    createdAtUtc = anchor.epochAtSync;
+    crossBoot = true;
+  }
+
+  if (createdAtUtc < 1577836800) return false;  // sanity: before Jan 2020
   time_t now = time(nullptr);
-  if (now > 0 && createdAtUtc > now + 60) return false;
+  if (now > 0 && createdAtUtc > now + 60) return false;  // sanity: not in the future
 
   char isoTimestamp[24];
   if (!formatEpochAsISO8601(createdAtUtc, isoTimestamp, sizeof(isoTimestamp))) {
@@ -2528,7 +2466,10 @@ static bool resolveUserTimestamp(String& usersJson, const UserTimestampInfo& inf
     return false;
   }
 
-  replaceJsonField(usersJson, "createdBy", "\"ntp_resolved\"", info.jsonStartPos);
+  // Mark whether this was an exact resolution or a cross-boot approximation.
+  replaceJsonField(usersJson, "createdBy",
+                   crossBoot ? "\"approx_ntp\"" : "\"ntp_resolved\"",
+                   info.jsonStartPos);
   return true;
 }
 
@@ -2627,10 +2568,10 @@ void cleanupOldBootAnchors(void* docPtr) {
 
 // Resolve pending user creation timestamps
 void resolvePendingUserCreationTimes() {
-  DEBUG_USERSF("[resolve] Starting timestamp resolution");
+  DEBUG_NTP_RESOLVEF("[resolve] Starting timestamp resolution");
   
   if (!filesystemReady || !LittleFS.exists(USERS_JSON_FILE)) {
-    DEBUG_USERSF("[resolve] Skipping - FS not ready or file missing");
+    DEBUG_NTP_RESOLVEF("[resolve] Skipping - FS not ready or file missing");
     return;
   }
 
@@ -2653,27 +2594,27 @@ void resolvePendingUserCreationTimes() {
   if (bytesRead == 0) return;
 
   String usersJson = usersJsonBuf;
-  DEBUG_USERSF("[resolve] Read %d bytes from users.json", (int)bytesRead);
+  DEBUG_NTP_RESOLVEF("[resolve] Read %d bytes from users.json", (int)bytesRead);
 
   const int MAX_ANCHORS = 16;
   BootAnchor anchors[MAX_ANCHORS];
   int anchorCount = parseBootAnchors(usersJson, anchors, MAX_ANCHORS);
-  DEBUG_USERSF("[resolve] Found %d boot anchors", anchorCount);
+  DEBUG_NTP_RESOLVEF("[resolve] Found %d boot anchors", anchorCount);
   
   for (int i = 0; i < anchorCount; i++) {
-    DEBUG_USERSF("[resolve] Anchor %d: ntpAnchorId=%lu epochAtSync=%u millisAtSync=%lu",
+    DEBUG_NTP_RESOLVEF("[resolve] Anchor %d: ntpAnchorId=%lu epochAtSync=%u millisAtSync=%lu",
                  i, (unsigned long)anchors[i].ntpAnchorId, (unsigned)anchors[i].epochAtSync, (unsigned long)anchors[i].millisAtSync);
   }
 
   // Find the "users" array in the JSON - start searching after "users":
   int usersArrayStart = usersJson.indexOf("\"users\"");
   if (usersArrayStart < 0) {
-    DEBUG_USERSF("[resolve] No 'users' array found");
+    DEBUG_NTP_RESOLVEF("[resolve] No 'users' array found");
     return;
   }
   int arrayBracket = usersJson.indexOf('[', usersArrayStart);
   if (arrayBracket < 0) {
-    DEBUG_USERSF("[resolve] No '[' found after 'users'");
+    DEBUG_NTP_RESOLVEF("[resolve] No '[' found after 'users'");
     return;
   }
 
@@ -2697,22 +2638,22 @@ void resolvePendingUserCreationTimes() {
     if (depth != 0) break;
 
     String userObj = usersJson.substring(userStart, userEnd + 1);
-    DEBUG_USERSF("[resolve] Checking user object at pos %d-%d", userStart, userEnd);
+    DEBUG_NTP_RESOLVEF("[resolve] Checking user object at pos %d-%d", userStart, userEnd);
 
     UserTimestampInfo info;
     if (!parseUserTimestampInfo(userObj, userStart, info)) {
-      DEBUG_USERSF("[resolve] User doesn't need resolution (createdAt not null or missing fields)");
+      DEBUG_NTP_RESOLVEF("[resolve] User doesn't need resolution (createdAt not null or missing fields)");
       userPos = userEnd + 1;
       continue;
     }
 
-    DEBUG_USERSF("[resolve] User needs resolution: ntpAnchorId=%lu createdMs=%lu bootCount=%d",
+    DEBUG_NTP_RESOLVEF("[resolve] User needs resolution: ntpAnchorId=%lu createdMs=%lu bootCount=%d",
                  (unsigned long)info.ntpAnchorId, (unsigned long)info.createdMs, info.bootCount);
 
     BootAnchor* anchor = findMatchingAnchor(anchors, anchorCount, info.ntpAnchorId);
 
     if (anchor) {
-      DEBUG_USERSF("[resolve] Found matching anchor for ntpAnchorId=%lu", (unsigned long)info.ntpAnchorId);
+      DEBUG_NTP_RESOLVEF("[resolve] Found matching anchor for ntpAnchorId=%lu", (unsigned long)info.ntpAnchorId);
       if (resolveUserTimestamp(usersJson, info, *anchor)) {
         INFO_SESSIONF("Successfully resolved timestamp");
         modified = true;
@@ -2720,7 +2661,7 @@ void resolvePendingUserCreationTimes() {
         WARN_SESSIONF("Failed to resolve timestamp");
       }
     } else {
-      DEBUG_USERSF("[resolve] No matching anchor for ntpAnchorId=%lu", (unsigned long)info.ntpAnchorId);
+      DEBUG_NTP_RESOLVEF("[resolve] No matching anchor for ntpAnchorId=%lu", (unsigned long)info.ntpAnchorId);
       bool shouldApprox = false;
       uint32_t ordinalN = info.ntpAnchorId;
 
@@ -2734,7 +2675,7 @@ void resolvePendingUserCreationTimes() {
       }
 
       if (shouldApprox) {
-        DEBUG_USERSF("[resolve] Approximating timestamp with ordinal %lu", (unsigned long)ordinalN);
+        DEBUG_NTP_RESOLVEF("[resolve] Approximating timestamp with ordinal %lu", (unsigned long)ordinalN);
         if (approximateUserTimestamp(usersJson, info, ordinalN)) {
           modified = true;
         }
@@ -2745,7 +2686,7 @@ void resolvePendingUserCreationTimes() {
   }
 
   if (modified) {
-    DEBUG_USERSF("[resolve] Writing modified users.json");
+    DEBUG_NTP_RESOLVEF("[resolve] Writing modified users.json");
     if (writeTextAtomic(USERS_JSON_FILE, usersJson)) {
       PSRAM_JSON_DOC(doc);
       DeserializationError error = deserializeJson(doc, usersJson);
@@ -2756,7 +2697,7 @@ void resolvePendingUserCreationTimes() {
       }
     }
   } else {
-    DEBUG_USERSF("[resolve] No modifications needed");
+    DEBUG_NTP_RESOLVEF("[resolve] No modifications needed");
   }
 }
 
@@ -2897,7 +2838,7 @@ void loadAndIncrementBootSeq() {
       if (error) {
         ERROR_SYSTEMF("BootSeqInit: Failed to parse users.json");
       } else {
-        DEBUG_SYSTEMF("BootSeqInit: Loaded and parsed users.json");
+        DEBUG_NTP_ANCHORF("BootSeqInit: Loaded and parsed users.json");
         
         // Find highest ntpAnchorId in bootAnchors array
         JsonArray bootAnchorsArray = doc["bootAnchors"];
@@ -2908,18 +2849,18 @@ void loadAndIncrementBootSeq() {
               gNTPAnchorId = seq;
             }
           }
-          DEBUG_SYSTEMF("BootSeqInit: Highest ntpAnchorId in anchors=%lu", (unsigned long)gNTPAnchorId);
+          DEBUG_NTP_ANCHORF("BootSeqInit: Highest ntpAnchorId in anchors=%lu", (unsigned long)gNTPAnchorId);
         }
 
         // Parse bootCounter if present
         gBootCounter = doc["bootCounter"] | 0;
-        DEBUG_SYSTEMF("BootSeqInit: Parsed bootCounter=%lu", (unsigned long)gBootCounter);
+        DEBUG_NTP_ANCHORF("BootSeqInit: Parsed bootCounter=%lu", (unsigned long)gBootCounter);
 
         // Increment bootCounter and persist back
         uint32_t newCounter = gBootCounter + 1;
         doc["bootCounter"] = newCounter;
-        
-        DEBUG_SYSTEMF("BootSeqInit: Updating bootCounter -> %lu", (unsigned long)newCounter);
+
+        DEBUG_NTP_ANCHORF("BootSeqInit: Updating bootCounter -> %lu", (unsigned long)newCounter);
 
         // Write back to file
         file = LittleFS.open(USERS_JSON_FILE, "w");
@@ -2946,8 +2887,8 @@ void loadAndIncrementBootSeq() {
   // Restore debug flags
   setDebugFlags(_dbgSaved);
   // Use DEBUG macro - now safe since debug system is initialized
-  DEBUG_SYSTEMF("[BOOT] NTP anchor ID: %lu (derived from bootAnchors)", (unsigned long)gNTPAnchorId);
-  DEBUG_SYSTEMF("[BOOT] NTP anchor ID: %lu | Boot counter: %lu (stored in users.json)", (unsigned long)gNTPAnchorId, (unsigned long)gBootCounter);
+  DEBUG_NTP_ANCHORF("[BOOT] NTP anchor ID: %lu (derived from bootAnchors)", (unsigned long)gNTPAnchorId);
+  DEBUG_NTP_ANCHORF("[BOOT] NTP anchor ID: %lu | Boot counter: %lu (stored in users.json)", (unsigned long)gNTPAnchorId, (unsigned long)gBootCounter);
 }
 
 // ============================================================================
@@ -3018,40 +2959,15 @@ const char* cmd_user_sync(const String& argsInput) {
   }
   
   // Parse command args
-  String args = argsInput;
-  args.trim();
-  
-  int firstSpace = args.indexOf(' ');
-  if (firstSpace < 0) {
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(4)) {
     return "Usage: user sync <username> <device> <admin_password> <user_password>";
   }
-  
-  String username = args.substring(0, firstSpace);
-  String rest = args.substring(firstSpace + 1);
-  rest.trim();
-  
-  int secondSpace = rest.indexOf(' ');
-  if (secondSpace < 0) {
-    return "Usage: user sync <username> <device> <admin_password> <user_password>";
-  }
-  
-  String deviceStr = rest.substring(0, secondSpace);
-  rest = rest.substring(secondSpace + 1);
-  rest.trim();
-  
-  int thirdSpace = rest.indexOf(' ');
-  if (thirdSpace < 0) {
-    return "Usage: user sync <username> <device> <admin_password> <user_password>";
-  }
-  
-  String adminPass = rest.substring(0, thirdSpace);
-  String userPass = rest.substring(thirdSpace + 1);
-  adminPass.trim();
-  userPass.trim();
-  
-  if (username.length() == 0 || deviceStr.length() == 0 || adminPass.length() == 0 || userPass.length() == 0) {
-    return "Usage: user sync <username> <device> <admin_password> <user_password>";
-  }
+
+  String username = a.arg(0);
+  String deviceStr = a.arg(1);
+  String adminPass = a.arg(2);
+  String userPass = a.arg(3);
   
   // Verify user exists locally
   uint32_t userId = 0;

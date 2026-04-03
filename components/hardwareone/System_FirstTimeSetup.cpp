@@ -677,7 +677,16 @@ void firstTimeSetupIfNeeded() {
   
   writeSettingsJson();
   applySettings();  // Apply log level and other debug settings immediately
-  
+
+  // Connect WiFi and sync NTP before any potential reboot.
+  // WiFi was already initialized for network scanning during setup.
+  // This ensures user creation timestamps are resolved to real dates
+  // even when the setup wizard triggers a reboot (I2C/OLED/gamepad).
+  if (wifiConfigured) {
+    broadcastOutput("Connecting WiFi and syncing time before reboot...");
+    connectToBestWiFiNetwork();  // Handles WiFi connect + NTP sync + timestamp resolution
+  }
+
   // If user disabled I2C, reboot so it takes effect from boot
   if (i2cDisabledByUser) {
     // Clear the OLED before reboot so the previous setup text doesn't remain
