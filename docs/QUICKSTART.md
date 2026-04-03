@@ -68,6 +68,8 @@ Open `components/hardwareone/System_BuildConfig.h` and enable or disable any fea
 
 If you are using Bonded mode, ensure that you reconfigure, fullclean, and then compile the build again.
 
+**On-device LLM (`ENABLE_ONDEVICE_LLM`):** Enabled by default on ESP32-S3 builds. To use it, place an LLM1-format model file at `/system/llm/model.bin` on the device's LittleFS filesystem, or on an SD card at `/sd/llm/<filename>.bin`. You can copy files to LittleFS via the web UI's file manager or the `filecreate`/`fileview` CLI commands. Once a model file is in place, load it with `llmload` from the serial console or the **LLM** tab in the web UI. If you are not using the LLM feature, set `ENABLE_ONDEVICE_LLM=0` to save PSRAM.
+
 ### 3. Set your target board and flash
 
 ```bash
