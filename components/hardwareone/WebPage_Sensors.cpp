@@ -931,40 +931,6 @@ esp_err_t handleMicRecordingFile(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// Microphone recording delete endpoint (auth-protected)
-esp_err_t handleMicRecordingDelete(httpd_req_t* req) {
-  WEB_AUTH_OR_RETURN(req, ctx);
-
-#if ENABLE_MICROPHONE_SENSOR
-  // Get filename from query string
-  char query[128];
-  char filename[64] = {0};
-  
-  if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-    httpd_query_key_value(query, "name", filename, sizeof(filename));
-  }
-  
-  if (strlen(filename) == 0) {
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Missing filename\"}");
-    return ESP_OK;
-  }
-  
-  extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
-  String cmdOut;
-  bool success = executeUnifiedWebCommand(req, ctx, "micdelete " + String(filename), cmdOut);
-
-  httpd_resp_set_type(req, "application/json");
-  if (success) {
-    httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
-  } else {
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"File not found\"}", HTTPD_RESP_USE_STRLEN);
-  }
-#else
-  sendJsonResponse(req, "{\"success\":false, \"error\":\"not_compiled\"}");
-#endif
-  return ESP_OK;
-}
-
 // Register all sensor-related URI handlers
 void registerSensorHandlers(httpd_handle_t server) {
   // Sensors page
@@ -994,10 +960,8 @@ void registerSensorHandlers(httpd_handle_t server) {
   // Microphone recording endpoints
   static httpd_uri_t micRecordings = { .uri = "/api/recordings", .method = HTTP_GET, .handler = handleMicRecordingsList, .user_ctx = NULL };
   static httpd_uri_t micRecordingFile = { .uri = "/api/recordings/file", .method = HTTP_GET, .handler = handleMicRecordingFile, .user_ctx = NULL };
-  static httpd_uri_t micRecordingDelete = { .uri = "/api/recordings/delete", .method = HTTP_GET, .handler = handleMicRecordingDelete, .user_ctx = NULL };
   httpd_register_uri_handler(server, &micRecordings);
   httpd_register_uri_handler(server, &micRecordingFile);
-  httpd_register_uri_handler(server, &micRecordingDelete);
 }
 
 #endif // ENABLE_HTTP_SERVER

@@ -43,7 +43,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 .qa-bar select{
   background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border);
   border-radius:5px;padding:3px 6px;font-size:.82em;max-width:160px;
-  vertical-align:middle;
+  align-self:center;margin-top:2px;
 }
 .qa-bar .btn{padding:3px 10px;font-size:.8em}
 
@@ -330,7 +330,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       });
   }
 
-  // ── generate (shared by ask and retry) ──
+  // ── generate (shared by ask and retry) — async poll architecture ──
   function doGenerate(ctx) {
     busy = true;
     askBtn.style.display = 'none';
@@ -343,9 +343,9 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     ctx.metaLine.textContent = '';
     scrollBottom();
 
-    var temp    = parseFloat(document.getElementById('qa-temp').value)   || 0.5;
-    var sent    = parseInt(document.getElementById('qa-sentlimit').value);
-    var repen   = parseFloat(document.getElementById('qa-repen').value)  || 1.3;
+    var temp  = parseFloat(document.getElementById('qa-temp').value)  || 0.5;
+    var sent  = parseInt(document.getElementById('qa-sentlimit').value);
+    var repen = parseFloat(document.getElementById('qa-repen').value) || 1.3;
 
     var body = {
       prompt:         ctx.prompt,
@@ -355,48 +355,71 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       rep_penalty:    repen,
       rep_window:     32
     };
-    if (ctx.isDoMode) {
-      body.hard_cap = 4;
-      body.sentence_limit = 0;
-    }
+    if (ctx.isDoMode) { body.hard_cap = 4; body.sentence_limit = 0; }
     if (ctx.prevAnswers.length > 0) { body.suppress = ctx.prevAnswers; }
 
-    abortCtrl = new AbortController();
+    ctx.pollOffset  = 0;
+    ctx.pollSession = 0;
+    ctx.stopped     = false;
+    // Fake AbortController so qaStop() can set stopped = true
+    abortCtrl = { abort: function() { ctx.stopped = true; } };
+
     fetch('/api/llm/generate', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      credentials:'same-origin',
-      body: JSON.stringify(body),
-      signal: abortCtrl.signal
-    }).then(function(r){
-      var reader  = r.body.getReader();
-      var decoder = new TextDecoder();
-      function read() {
-        reader.read().then(function(res){
-          if (res.done) { finishGen(ctx); return; }
-          ctx.aText.textContent += decoder.decode(res.value, {stream:true});
-          scrollBottom();
-          read();
-        }).catch(function(e){
-          if (e.name !== 'AbortError') {
-            var err = document.createElement('div');
-            err.className = 'qa-err';
-            err.textContent = '[stream error]';
-            ctx.pair.appendChild(err);
-          }
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify(body)
+    }).then(function(r) { return r.json(); })
+      .then(function(j) {
+        if (!j.ok) {
+          var err = document.createElement('div');
+          err.className = 'qa-err';
+          err.textContent = '[' + (j.error || 'error') + ']';
+          ctx.pair.appendChild(err);
           finishGen(ctx);
-        });
-      }
-      read();
-    }).catch(function(e){
-      if (e.name !== 'AbortError') {
-        var err = document.createElement('div');
-        err.className = 'qa-err';
-        err.textContent = '[request failed: ' + e.message + ']';
-        ctx.pair.appendChild(err);
-      }
-      finishGen(ctx);
-    });
+          return;
+        }
+        ctx.pollSession = j.session;
+        schedulePoll(ctx);
+      })
+      .catch(function(e) {
+        if (!ctx.stopped) {
+          var err = document.createElement('div');
+          err.className = 'qa-err';
+          err.textContent = '[request failed: ' + e.message + ']';
+          ctx.pair.appendChild(err);
+        }
+        finishGen(ctx);
+      });
+  }
+
+  function schedulePoll(ctx) {
+    if (ctx.stopped) { finishGen(ctx); return; }
+    setTimeout(function() { pollResult(ctx); }, 150);
+  }
+
+  function pollResult(ctx) {
+    if (ctx.stopped) { finishGen(ctx); return; }
+    fetch('/api/llm/result?session=' + ctx.pollSession + '&offset=' + ctx.pollOffset, {
+      credentials: 'same-origin'
+    }).then(function(r) { return r.json(); })
+      .then(function(j) {
+        if (j.stale) { finishGen(ctx); return; }
+        if (j.text && j.text.length > 0) {
+          ctx.aText.textContent += j.text;
+          ctx.pollOffset += j.text.length;
+          scrollBottom();
+        }
+        if (j.done) {
+          finishGen(ctx);
+        } else {
+          schedulePoll(ctx);
+        }
+      })
+      .catch(function() {
+        // Network hiccup — retry the poll rather than give up
+        if (!ctx.stopped) schedulePoll(ctx);
+      });
   }
 
   function finishGen(ctx) {

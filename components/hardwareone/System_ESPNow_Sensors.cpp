@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 
 #include "OLED_Display.h"
+#include "System_Command.h"
 #include "System_Debug.h"
 #include "System_ESPNow.h"
 #include "System_MemUtil.h"
@@ -837,28 +838,17 @@ const char* cmd_espnow_sensorstream(const String& argsInput) {
   DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Command received: '%s'", argsInput.c_str());
   
   // Parse: <sensor> <on|off>  (dispatcher strips "espnow sensorstream" prefix)
-  String args = argsInput;
-  args.trim();
-  
-  int firstSpace = args.indexOf(' ');
-  if (firstSpace < 0) {
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) {
     DEBUG_SENSORSF("%s", "[SENSOR_STREAM_CMD] ERROR: Missing sensor name");
     return "Usage: espnow sensorstream <sensor> <on|off>";
   }
-  
-  String sensorName = args.substring(0, firstSpace);
+
+  String sensorName = a.arg(0);
   normalizeCliArg(sensorName);
-  
-  String action = args.substring(firstSpace + 1);
-  normalizeCliArg(action);
-  
-  if (action.indexOf(' ') >= 0) {
-    DEBUG_SENSORSF("[SENSOR_STREAM_CMD] ERROR: Too many arguments (action='%s')", action.c_str());
-    return "Usage: espnow sensorstream <sensor> <on|off>";
-  }
-  
-  DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Parsed: sensor='%s' action='%s'", sensorName.c_str(), action.c_str());
-  
+
+  DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Parsed: sensor='%s' action='%s'", sensorName.c_str(), a.arg(1).c_str());
+
   // Convert sensor name to type
   RemoteSensorType sensorType = stringToSensorType(sensorName.c_str());
   if (strcmp(sensorTypeToString(sensorType), sensorName.c_str()) != 0) {
@@ -866,17 +856,14 @@ const char* cmd_espnow_sensorstream(const String& argsInput) {
     return "Usage: espnow sensorstream <sensor> <on|off>";
   }
   DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Sensor type resolved: %d (%s)", sensorType, sensorTypeToString(sensorType));
-  
+
   // Parse action
-  bool enable = false;
-  if (action == "on" || action == "1" || action == "true") {
-    enable = true;
-  } else if (action == "off" || action == "0" || action == "false") {
-    enable = false;
-  } else {
-    DEBUG_SENSORSF("[SENSOR_STREAM_CMD] ERROR: Invalid action '%s'", action.c_str());
+  int boolResult = parseBoolArg(a.arg(1));
+  if (boolResult < 0) {
+    DEBUG_SENSORSF("[SENSOR_STREAM_CMD] ERROR: Invalid action '%s'", a.arg(1).c_str());
     return "Usage: espnow sensorstream <sensor> <on|off>";
   }
+  bool enable = (boolResult == 1);
   
   DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Action: %s streaming", enable ? "ENABLE" : "DISABLE");
   

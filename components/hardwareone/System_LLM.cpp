@@ -51,10 +51,12 @@
 #if ENABLE_ONDEVICE_LLM
 
 #include "System_LLM.h"
+#include "System_Command.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
 #include "System_Filesystem.h"
 #include "System_VFS.h"
+#include "System_Settings.h"
 
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -278,6 +280,49 @@ static struct {
 
   SemaphoreHandle_t mutex;
 } gLLM = {};
+
+// ============================================================================
+// Async Generation State (background task + PSRAM result buffer)
+// ============================================================================
+
+#define LLM_RESULT_BUF_SIZE (8 * 1024)
+
+static char*          gLLMResultBuf  = nullptr;  // PSRAM, allocated on first use
+static volatile int   gLLMResultLen  = 0;         // bytes written (written by task, read by HTTP)
+static volatile bool  gLLMResultDone = true;      // true = idle / finished
+static volatile int   gLLMSessionId  = 0;         // bumped per llmStartAsync call
+static TaskHandle_t   gLLMTask       = nullptr;   // running gen task handle (or null)
+
+struct LLMAsyncContext {
+  char         prompt[2048];
+  LLMGenParams params;
+};
+static LLMAsyncContext gLLMAsyncCtx;
+
+static void llmAsyncTask(void* /*pv*/) {
+  const LLMAsyncContext* ac = &gLLMAsyncCtx;
+
+  llmGenerate(ac->prompt, [](const char* token) -> bool {
+    if (!gLLMResultBuf) return false;
+    int tlen = (int)strlen(token);
+    int cur  = gLLMResultLen;
+    if (cur + tlen >= LLM_RESULT_BUF_SIZE - 1) return false;  // buffer full
+    memcpy(gLLMResultBuf + cur, token, tlen);
+    gLLMResultBuf[cur + tlen] = '\0';
+    gLLMResultLen = cur + tlen;  // publish after write
+    return true;
+  },
+  ac->params.maxTokens,    ac->params.temperature,  ac->params.topp,
+  ac->params.useMirostat2, ac->params.mirostatTau,  ac->params.mirostatEta,
+  ac->params.repPenalty,   ac->params.repWindow,    ac->params.sentenceLimit,
+  ac->params.hardCap,      ac->params.dynTemp,
+  ac->params.suppressCount > 0 ? ac->params.suppressTokens : nullptr,
+  ac->params.suppressCount);
+
+  gLLMResultDone = true;
+  gLLMTask       = nullptr;
+  vTaskDelete(nullptr);
+}
 
 // ============================================================================
 // 4. PSRAM Allocation Helpers
@@ -3776,6 +3821,70 @@ String llmListModels() {
 }
 
 // ============================================================================
+// 11b. Async Public API
+// ============================================================================
+
+int llmStartAsync(const char* prompt, const LLMGenParams& params) {
+  if (!llmIsReady()) return 0;
+
+  // Stop any in-progress generation and wait for the task to exit (max 500 ms)
+  if (gLLMTask != nullptr) {
+    llmStop();
+    for (int i = 0; i < 50 && gLLMTask != nullptr; i++) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (gLLMTask != nullptr) return 0;  // task didn't exit in time
+  }
+
+  // Allocate PSRAM result buffer on first call
+  if (!gLLMResultBuf) {
+    gLLMResultBuf = (char*)heap_caps_malloc(LLM_RESULT_BUF_SIZE, MALLOC_CAP_SPIRAM);
+    if (!gLLMResultBuf) return 0;
+  }
+
+  // Reset state for this generation
+  gLLMResultLen    = 0;
+  gLLMResultDone   = false;
+  gLLMResultBuf[0] = '\0';
+  int newSession   = (int)gLLMSessionId + 1;
+  gLLMSessionId    = newSession;
+
+  // Copy prompt + params into the static context the task will read from
+  strlcpy(gLLMAsyncCtx.prompt, prompt, sizeof(gLLMAsyncCtx.prompt));
+  gLLMAsyncCtx.params = params;
+
+  // Spawn background task pinned to core 1 (app_cpu)
+  BaseType_t rc = xTaskCreatePinnedToCore(
+    llmAsyncTask, "llm_gen",
+    LLM_TASK_STACK_SIZE, nullptr,
+    LLM_TASK_PRIORITY, &gLLMTask, 1
+  );
+  if (rc != pdPASS) {
+    gLLMResultDone = true;
+    gLLMTask       = nullptr;
+    return 0;
+  }
+
+  DEBUG_HTTPF("[LLM] Async gen started: session=%d prompt='%.40s%s'",
+              newSession, prompt, strlen(prompt) > 40 ? "..." : "");
+  return newSession;
+}
+
+int llmGetResultChunk(int offset, char* buf, int maxLen) {
+  if (!gLLMResultBuf || offset < 0 || maxLen <= 0) return 0;
+  int avail = (int)gLLMResultLen - offset;
+  if (avail <= 0) return 0;
+  if (avail > maxLen - 1) avail = maxLen - 1;
+  memcpy(buf, gLLMResultBuf + offset, avail);
+  buf[avail] = '\0';
+  return avail;
+}
+
+int  llmGetResultLen()     { return (int)gLLMResultLen; }
+bool llmIsGenerationDone() { return (bool)gLLMResultDone; }
+int  llmGetSessionId()     { return (int)gLLMSessionId; }
+
+// ============================================================================
 // 12. CLI Commands
 // ============================================================================
 
@@ -3813,15 +3922,8 @@ static const char* cmd_llm_status(const String&) {
 }
 
 static const char* cmd_llm_load(const String& args) {
-  // Parse model name from args: "llm load [model.bin]"
-  String a = args;
-  a.trim();
-  int sp = a.indexOf(' ');
-  if (sp > 0) a = a.substring(sp + 1);  // skip "load"
-  a.trim();
-  sp = a.indexOf(' ');
-  if (sp > 0) a = a.substring(sp + 1);  // skip second word if present
-  a.trim();
+  CommandArgs ca(args);
+  String a = ca.arg(0);  // optional model filename
 
   const char* modelPath = LLM_DEFAULT_MODEL_PATH;
 
@@ -3866,19 +3968,9 @@ static const char* cmd_llm_models(const String&) {
 static const char* cmd_llm_generate(const String& args) {
   if (!llmIsReady()) return "Error: no model loaded";
 
-  // Extract prompt from "llm generate <prompt>"
-  String a = args;
-  a.trim();
-  // Skip "llm"
-  int sp = a.indexOf(' ');
-  if (sp > 0) a = a.substring(sp + 1);
-  a.trim();
-  // Skip "generate"
-  sp = a.indexOf(' ');
-  if (sp > 0) a = a.substring(sp + 1);
-  a.trim();
-
-  if (a.length() == 0) return "Usage: llm generate <prompt>";
+  CommandArgs ca(args);
+  if (ca.count() == 0) return "Usage: llm generate <prompt>";
+  String a = ca.raw();  // full prompt text
 
   // Build output into buffer
   String output;
@@ -3907,13 +3999,74 @@ static const char* cmd_llm_stop(const String&) {
   return "Stop requested";
 }
 
+// ============================================================================
+// LLM Settings Module (generation defaults, persisted)
+// ============================================================================
+
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options, isSecret, group, cmdKey
+static const SettingEntry llmSettingEntries[] = {
+  { "temperature",   SETTING_FLOAT,  &gSettings.llmTemperature,  0,   0.5f, nullptr,    0,    0, "Temperature",          nullptr, false, nullptr, "llmtemperature"   },
+  { "topP",          SETTING_FLOAT,  &gSettings.llmTopP,         0,   0.8f, nullptr,    0,    1, "Top-P",                nullptr, false, nullptr, "llmtopp"          },
+  { "maxTokens",     SETTING_INT,    &gSettings.llmMaxTokens,    256, 0,    nullptr,    1,  512, "Max Tokens",           nullptr, false, nullptr, "llmmaxtokens"     },
+  { "sentenceLimit", SETTING_INT,    &gSettings.llmSentenceLimit,  2, 0,    nullptr,    0,   20, "Sentence Limit",       nullptr, false, nullptr, "llmsentencelimit" },
+  { "hardCap",       SETTING_INT,    &gSettings.llmHardCap,       80, 0,    nullptr,    0,  512, "Hard Cap",             nullptr, false, nullptr, "llmhardcap"       },
+  { "repPenalty",    SETTING_FLOAT,  &gSettings.llmRepPenalty,    0,  1.3f, nullptr,    1,    3, "Rep Penalty",          nullptr, false, nullptr, "llmreppenalty"    },
+  { "repWindow",     SETTING_INT,    &gSettings.llmRepWindow,     32, 0,    nullptr,    1,  128, "Rep Window",           nullptr, false, nullptr, "llmrepwindow"     },
+  { "maxContext",    SETTING_INT,    &gSettings.llmMaxContext,     0, 0,    nullptr,    0, 4096, "Max Context (0=auto)", nullptr, false, nullptr, "llmmaxcontext"    },
+  { "useMirostat2",  SETTING_BOOL,   &gSettings.llmUseMirostat2,  0, 0,    nullptr,    0,    0, "Use Mirostat 2",       nullptr, false, nullptr, "llmusemirostat2"  },
+  { "mirostatTau",   SETTING_FLOAT,  &gSettings.llmMirostatTau,   0, 5.0f, nullptr,    1,   10, "Mirostat Tau",         nullptr, false, nullptr, "llmmirostattau"   },
+  { "mirostatEta",   SETTING_FLOAT,  &gSettings.llmMirostatEta,   0, 0.1f, nullptr,    0,    0, "Mirostat Eta",         nullptr, false, nullptr, "llmmirostateta"   },
+  { "dynTemp",       SETTING_BOOL,   &gSettings.llmDynTemp,       0, 0,    nullptr,    0,    0, "Dynamic Temp",         nullptr, false, nullptr, "llmdyntemp"       },
+  { "defaultModel",  SETTING_STRING, &gSettings.llmDefaultModel,  0, 0,    "model.bin",0,    0, "Default Model",        nullptr, false, nullptr, "llmdefaultmodel"  },
+};
+
+extern const SettingsModule llmSettingsModule = {
+  "llm", "llm", llmSettingEntries,
+  sizeof(llmSettingEntries) / sizeof(llmSettingEntries[0]),
+  nullptr,
+  "On-device LLM generation defaults"
+};
+
+// Setting command handlers (one per entry, via index)
+#define LLM_SETTING_CMD(funcName, idx) \
+  static const char* funcName(const String& a) { \
+    return handleSettingCommand(&llmSettingEntries[idx], a); \
+  }
+
+LLM_SETTING_CMD(cmd_llm_temperature,   0)
+LLM_SETTING_CMD(cmd_llm_topp,          1)
+LLM_SETTING_CMD(cmd_llm_maxtokens,     2)
+LLM_SETTING_CMD(cmd_llm_sentencelimit, 3)
+LLM_SETTING_CMD(cmd_llm_hardcap,       4)
+LLM_SETTING_CMD(cmd_llm_reppenalty,    5)
+LLM_SETTING_CMD(cmd_llm_repwindow,     6)
+LLM_SETTING_CMD(cmd_llm_maxcontext,    7)
+LLM_SETTING_CMD(cmd_llm_usemirostat2,  8)
+LLM_SETTING_CMD(cmd_llm_mirostattau,   9)
+LLM_SETTING_CMD(cmd_llm_mirostateta,  10)
+LLM_SETTING_CMD(cmd_llm_dyntemp,      11)
+LLM_SETTING_CMD(cmd_llm_defaultmodel, 12)
+
 const CommandEntry llmCommands[] = {
-  { "llmstatus",   "Show LLM engine status",           false, cmd_llm_status },
-  { "llmload",     "Load model [model.bin]",            true,  cmd_llm_load,     "Usage: llmload [filename.bin]" },
-  { "llmunload",   "Unload model and free PSRAM",       true,  cmd_llm_unload },
-  { "llmmodels",   "List available model files",        false, cmd_llm_models },
-  { "llmgenerate", "Generate text from prompt",         false, cmd_llm_generate, "Usage: llmgenerate <prompt text>" },
-  { "llmstop",     "Stop in-progress generation",       false, cmd_llm_stop },
+  { "llmstatus",        "Show LLM engine status",               false, cmd_llm_status },
+  { "llmload",          "Load model [model.bin]",               true,  cmd_llm_load,         "Usage: llmload [filename.bin]" },
+  { "llmunload",        "Unload model and free PSRAM",          true,  cmd_llm_unload },
+  { "llmmodels",        "List available model files",           false, cmd_llm_models },
+  { "llmgenerate",      "Generate text from prompt",            false, cmd_llm_generate,     "Usage: llmgenerate <prompt text>" },
+  { "llmstop",          "Stop in-progress generation",          false, cmd_llm_stop },
+  { "llmtemperature",   "Set default sampling temperature",     true,  cmd_llm_temperature,  "Usage: llmtemperature <0.0-2.0>" },
+  { "llmtopp",          "Set default Top-P threshold",          true,  cmd_llm_topp,         "Usage: llmtopp <0.0-1.0>" },
+  { "llmmaxtokens",     "Set default max tokens per reply",     true,  cmd_llm_maxtokens,    "Usage: llmmaxtokens <1-512>" },
+  { "llmsentencelimit", "Set default sentence stop limit",      true,  cmd_llm_sentencelimit,"Usage: llmsentencelimit <0-20>" },
+  { "llmhardcap",       "Set default hard token cap",           true,  cmd_llm_hardcap,      "Usage: llmhardcap <0-512>" },
+  { "llmreppenalty",    "Set default repetition penalty",       true,  cmd_llm_reppenalty,   "Usage: llmreppenalty <1.0-3.0>" },
+  { "llmrepwindow",     "Set default rep-penalty look-back",    true,  cmd_llm_repwindow,    "Usage: llmrepwindow <1-128>" },
+  { "llmmaxcontext",    "Set KV cache context window (0=auto)", true,  cmd_llm_maxcontext,   "Usage: llmmaxcontext <0-4096>" },
+  { "llmusemirostat2",  "Enable/disable Mirostat 2 sampling",   true,  cmd_llm_usemirostat2, "Usage: llmusemirostat2 <0|1>" },
+  { "llmmirostattau",   "Set Mirostat target surprise (bits)",  true,  cmd_llm_mirostattau,  "Usage: llmmirostattau <1-10>" },
+  { "llmmirostateta",   "Set Mirostat learning rate",           true,  cmd_llm_mirostateta,  "Usage: llmmirostateta <0.01-0.5>" },
+  { "llmdyntemp",       "Enable/disable dynamic temperature",   true,  cmd_llm_dyntemp,      "Usage: llmdyntemp <0|1>" },
+  { "llmdefaultmodel",  "Set default model filename",           true,  cmd_llm_defaultmodel, "Usage: llmdefaultmodel <filename.bin>" },
 };
 const size_t llmCommandsCount = sizeof(llmCommands) / sizeof(llmCommands[0]);
 

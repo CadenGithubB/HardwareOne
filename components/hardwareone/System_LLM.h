@@ -157,6 +157,46 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
 // Request stop of in-progress generation (thread-safe)
 void llmStop();
 
+// ============================================================================
+// Async generation (non-blocking — sensor-style architecture)
+// ============================================================================
+
+// Parameters for one generation run.  Caller fills this, passes to llmStartAsync.
+struct LLMGenParams {
+  int   maxTokens;
+  float temperature;
+  float topp;
+  bool  useMirostat2;
+  float mirostatTau;
+  float mirostatEta;
+  float repPenalty;
+  int   repWindow;
+  int   sentenceLimit;
+  int   hardCap;
+  bool  dynTemp;
+  int   suppressTokens[128];
+  int   suppressCount;
+};
+
+// Start generation in a background FreeRTOS task (returns immediately).
+// Returns new session ID (> 0) on success, 0 if model not ready or task
+// could not be created.  Poll llmGetResultChunk / llmIsGenerationDone for output.
+int llmStartAsync(const char* prompt, const LLMGenParams& params);
+
+// Copy up to (maxLen-1) bytes starting at byte 'offset' into buf (NUL-terminated).
+// Returns bytes copied.  0 = no new data at that offset or buffer not ready.
+int llmGetResultChunk(int offset, char* buf, int maxLen);
+
+// Total bytes appended to the result buffer so far (monotonically increasing).
+int llmGetResultLen();
+
+// True once the background generation task has finished (or been stopped).
+bool llmIsGenerationDone();
+
+// Monotonically increasing counter, bumped by each llmStartAsync call.
+// Clients use this to detect stale polls from a previous generation.
+int llmGetSessionId();
+
 // Tokenize text into token IDs using the loaded model's tokenizer.
 // Returns number of tokens written to outTokens. Returns 0 if no model loaded.
 int llmTokenize(const char* text, int* outTokens, int maxTokens);

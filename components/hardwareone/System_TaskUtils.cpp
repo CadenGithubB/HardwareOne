@@ -364,7 +364,11 @@ void reportAllTaskStacks() {
   };
   
   // Build known tasks list dynamically (some handles are runtime-resolved)
+#if ENABLE_ESPNOW
   TaskHandle_t espnowHandle = getEspNowTaskHandle();
+#else
+  TaskHandle_t espnowHandle = nullptr;
+#endif
   
   const KnownTask knownTasks[] = {
     {"espnow_task", espnowHandle, ESPNOW_HB_STACK_WORDS},

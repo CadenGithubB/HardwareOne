@@ -1666,8 +1666,8 @@ window.togglePane = function(paneId, btnId) {
         appendLogLine('log-' + mac, 'ERROR', 'Fetch error: ' + e.message, null);
       });
     };
-    window.unpairDevice = function(mac) {
-      if (confirm('Unpair device ' + mac + '?')) {
+    window.unpairDevice = async function(mac) {
+      if (await hwConfirm('Unpair device ' + mac + '?')) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -2131,9 +2131,9 @@ window.togglePane = function(paneId, btnId) {
     };
     
     // Pair an unpaired device
-    window.pairUnpairedDevice = function(mac, name) {
+    window.pairUnpairedDevice = async function(mac, name) {
       console.log('[ESP-NOW] Pairing device:', mac, name);
-      if (!confirm('Pair device "' + name + '" (' + mac + ')?')) {
+      if (!await hwConfirm('Pair device "' + name + '" (' + mac + ')?')) {
         return;
       }
       
@@ -2711,8 +2711,8 @@ window.togglePane = function(paneId, btnId) {
           document.getElementById('espnow-status-data').textContent = 'Error: ' + error;
         });
       });
-      document.getElementById('btn-espnow-disable').addEventListener('click', function() {
-        if (!confirm('Disable ESP-NOW? This will stop all ESP-NOW communication. Memory will remain allocated until reboot.')) {
+      document.getElementById('btn-espnow-disable').addEventListener('click', async function() {
+        if (!await hwConfirm('Disable ESP-NOW? This will stop all ESP-NOW communication. Memory will remain allocated until reboot.')) {
           return;
         }
         fetch('/api/cli', {

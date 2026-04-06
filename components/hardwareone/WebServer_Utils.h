@@ -585,17 +585,17 @@ inline String getFileBrowserScript() {
       var newName = await hwPrompt('Rename "' + oldName + '" to:', oldName);
       if (!newName || newName === oldName) return;
       
-      fetch('/api/files/rename', {
+      fetch('/api/cli', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: 'oldPath=' + encodeURIComponent(filePath) + '&newName=' + encodeURIComponent(newName)
+        body: 'cmd=' + encodeURIComponent('filerename ' + filePath + ' ' + newName)
       })
-      .then(function(r) { return r.json(); })
-      .then(function(j) {
-        if (j.success) {
-          loadDirectory(currentPath);
+      .then(function(r) { return r.text(); })
+      .then(function(t) {
+        if (!t || t.startsWith('Error')) {
+          hwAlert('Rename failed: ' + (t || 'Unknown error'));
         } else {
-          hwAlert('Rename failed: ' + (j.error || 'Unknown error'));
+          loadDirectory(currentPath);
         }
       })
       .catch(function(e) {

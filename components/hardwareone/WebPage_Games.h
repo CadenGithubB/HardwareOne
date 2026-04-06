@@ -44,10 +44,14 @@ canvas#maze{background:#000;border:1px solid var(--border);border-radius:4px}
             <option value='ground'>Ground</option>
             <option value='ice'>Icy</option>
             <option value='cave'>Cave</option>
-            <option value='plains'>Plains (test)</option>
+            <option value='plains'>Plains</option>
+            <option value='expanse'>Expanse</option>
           </select>
           <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin-left:12px' title='Use Seesaw gamepad to control the maze'>
-            <input type='checkbox' id='chkGamepad'/> Use gamepad for movement
+            <input type='checkbox' id='chkGamepad'/> Gamepad
+          </label>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin-left:12px' title='Use WASD/arrows + mouse look to control the maze'>
+            <input type='checkbox' id='chkKeyboard'/> Keyboard + Mouse
           </label>
         </div>
         <div class='space-top-sm text-sm'>
@@ -76,6 +80,10 @@ canvas#maze{background:#000;border:1px solid var(--border);border-radius:4px}
             <input type='checkbox' id='chkDecorDebug'/> Decoration debug
           </label>
           <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Show skeleton sprite sheet overlay with active frame highlighted'>
+            <input type='checkbox' id='chkSkelDebug'/> Skeleton debug
+          </label>
+          <span class='space-left-md'></span>
           <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='During 3D render, set camera position equal to player position'>
             <input type='checkbox' id='chkCamFollow'/> Sync camera to player
           </label>
@@ -99,1591 +107,6609 @@ canvas#maze{background:#000;border:1px solid var(--border);border-radius:4px}
 
   // JavaScript (complete game logic)
   httpd_resp_send_chunk(req, R"JS(
-<script>console.log('[GAMES] Section 1: Pre-script sentinel');</script>
 <script>
-console.info('[GAMES] Chunk 1: bootstrap + state');
-var polling=null, lastUpdate=0, running=false;
-var i2cEnabled=false, imuEnabled=false, imuCompiled=false, gamepadEnabled=false, gamepadCompiled=false;
-var level=1, collisions=0, startMs=0;
-var canvas=document.getElementById('maze'), ctx=canvas.getContext('2d');
-var pos={x:20,y:20}, vel={x:0,y:0};
-var dead=1.5, maxAng=15, speed=180;
-var walls=[]; var goal={x:320,y:200,w:24,h:24};
-var basePitch=0, baseRoll=0, baseYaw=0, hasBaseline=false;
-var calibTimer=null, calibMs=1000, calibSamples=[];
-var DEBUG_IMU=false;
-var FW_DEBUG=false;
-var __gamesLogPoll=null, __gamesLogLastLen=0;
-var terrain='ground', damping=0.965, bounce=0.45;
-var medalGold=10, medalSilver=15, medalBronze=22;
-var timeSec=0, timeColor='#d4af37';
-var bgPattern=null;
-var MODE3D=false;
-var cam={x:20,y:20,ang:0,fov:1.0471975512};
-var viewCam={x:0,y:0};
-var grid=null, gridW=0, gridH=0, cell=15, wallHeights=null;
-var wallColor='#8b6b3a'; var ceilPattern=null;
-var DEBUG_3D=false, __dbg3dLast=0;
-var DEBUG_TEXTURE=false, __dbgTexLast=0;
-var DEBUG_FLOOR=false, __dbgFloorLast=0;
-var USE_TEXTURES=true;
-var wallBatch=null;
-var wallDecorations=[];
-var depthBuffer=null;
-var DEBUG_DECORATIONS=false;
-var CAM_FOLLOW=false;
-var BASE_SEED=54321;
-function seedFor(component){ return (BASE_SEED + level*101 + component)|0; }
-var USE_GAMEPAD=false;
-var MODE_GYRO_AIM=1, MODE_STICK_AIM=2;
 
-var CONTROL_MODE=2;
+// =============================================
+// CANVAS & RENDERING
+// =============================================
+var canvas = document.getElementById('maze');
+var ctx = canvas.getContext('2d');
+var USE_TEXTURES = true;
+var BASE_SEED = 54321;
+var depthBuffer = null;
+var CANVAS_BASE_W = canvas.width;   // original authored resolution (360)
+var CANVAS_BASE_H = canvas.height;  // original authored resolution (240)
 
-var BTN_X=(1<<6), BTN_Y=(1<<2), BTN_A=(1<<5), BTN_B=(1<<1);
-
-var BTN_SELECT=(1<<0);
-
-var BTN_START=(1<<16);
-
-var lastSelectDown=false, lastSelectToggleMs=0, SELECT_TOGGLE_COOLDOWN=300, selectPrimed=false;
-
-var menuOpen=false, lastStartMenuDown=false, lastStartMenuToggleMs=0, START_MENU_COOLDOWN=300;
-
-var STICK_CAM_YAW_SPEED=1.8, STICK_CAM_PITCH_SPEED=1.2, CAM_PITCH_MAX=0.6;
-
-var projectiles=[], lastStartDown=false, lastShotMs=0, lastStartCastDown=false;
-
-var SHOOT_COOLDOWN=300, PROJ_SPEED=360, PROJ_LIFE_MS=1200, PROJ_RADIUS=3;
-
-var MANA_MAX=100, mana=100, MANA_REGEN_PER_S=15;
-
-var MANA_COST_MIN=12, MANA_COST_MAX=35;
-
-var CHARGE_MAX_MS=1200, charging=false, chargeStartMs=0, chargeLevel=0;
-
-var manaBlinkUntil=0;
-
-var HEALTH_MAX=100, health=100, HEALTH_REGEN_PER_S=3;
-
-var USE_YAW=true, yawTarget=0, yawAlpha=0.08;
-var USE_PITCH=true, pitchTarget=0, pitchAlpha=0.12, pitchOffset=0;
-var calibrating=false, calStableMs=0, calNeedStableMs=1200;
-var lastRoll=0, lastPitch=0, lastYaw=0, hasYaw=false;
-var gpPoll=null, gpLast={x:0,y:0,buttons:0,valid:false}, gpBackoffUntil=0;
-var yawOffset=0, capturingYaw=false, yawAtPress=0, camHold=0, yawResumeUntil=0, prevX=false;
-var DEBUG_CAM=false, __camDbgLast=0;
-var DEBUG_PERF=true, __perfFrames=[], __perfLogInterval=2000, __perfLastLog=0;
-var DEBUG_EFFECTS=true, __effectsLastLog=0, __effectsLogInterval=3000;
-var platforms=[], floorMesh=null, PLATFORM_COLS=['#6aff6a','#6aa7ff','#ffb36a','#efe36a'];
-var enemies=[];
-var deathEffects=[];
-var stats={totalDamageDone:0,totalDamageTaken:0,totalManaConsumed:0,totalEnemiesKilled:0};
-var enemyTypes={
-  fast:{id:'fast',name:'Scout',color:'#ff9900',size:0.8,health:2,speed:55,chaseRange:450},
-  normal:{id:'normal',name:'Soldier',color:'#ff4444',size:1.0,health:4,speed:35,chaseRange:400},
-  tank:{id:'tank',name:'Brute',color:'#cc0000',size:1.4,health:8,speed:20,chaseRange:350}
-};
-var spells={
-  missile:{id:'missile',name:'Magic Missile',color:'#4db6ff',damage:1,speed:360,manaCost:12,unlocked:true},
-  fire:{id:'fire',name:'Flame Jet',color:'#ff6600',damage:1.5,speed:300,manaCost:18,unlocked:true,attackType:'cone',coneAngle:0.25,coneRange:150},
-  ice:{id:'ice',name:'Frost Jet',color:'#00ffff',damage:1.2,speed:340,manaCost:15,unlocked:true,attackType:'cone',coneAngle:1.396,coneRange:75},
-  lightning:{id:'lightning',name:'Lightning',color:'#ffff00',damage:1.8,speed:400,manaCost:20,unlocked:true}
-};
-var spellOrder=['missile','fire','ice','lightning'];
-var currentSpellIdx=0;
-var lastADown=false;
-var lastXDown=false;
-var levels=[
-{start:{x:40,y:40},goal:{x:640,y:400,w:32,h:32},medals:{gold:15,silver:22,bronze:32},walls:[{x:160,y:0,w:15,h:360},{x:320,y:120,w:15,h:360}]},
-{start:{x:40,y:40},goal:{x:640,y:400,w:32,h:32},medals:{gold:20,silver:28,bronze:40},walls:[{x:120,y:80,w:480,h:15},{x:120,y:240,w:480,h:15},{x:120,y:400,w:480,h:15}]},
-{start:{x:40,y:40},goal:{x:640,y:400,w:32,h:32},medals:{gold:25,silver:35,bronze:50},walls:[{x:200,y:0,w:15,h:480},{x:400,y:0,w:15,h:480},{x:0,y:240,w:720,h:15}]}
-];
-function makePattern(kind){ var oc=document.createElement('canvas'); oc.width=32; oc.height=32; var c=oc.getContext('2d');
-  if(kind==='ice'){
-    c.fillStyle='#0a1322'; c.fillRect(0,0,32,32);
-    c.strokeStyle='rgba(170,210,255,0.35)'; c.lineWidth=2; c.beginPath(); c.moveTo(0,16); c.lineTo(32,16); c.moveTo(16,0); c.lineTo(16,32); c.stroke();
-    c.strokeStyle='rgba(120,190,255,0.18)'; c.beginPath(); c.moveTo(0,0); c.lineTo(32,32); c.moveTo(32,0); c.lineTo(0,32); c.stroke();
-    for(var i=0;i<14;i++){ var x=Math.random()*32, y=Math.random()*32, r=Math.random()*0.9+0.3; c.fillStyle='rgba(210,235,255,'+(0.05+Math.random()*0.05)+')'; c.beginPath(); c.arc(x,y,r,0,Math.PI*2); c.fill(); }
-    var g=c.createLinearGradient(0,0,32,32); g.addColorStop(0,'rgba(255,255,255,0.02)'); g.addColorStop(1,'rgba(255,255,255,0.00)'); c.fillStyle=g; c.fillRect(0,0,32,32);
-  } else if(kind==='cave'){
-    c.fillStyle='#2a2a2e'; c.fillRect(0,0,32,32);
-    for(var i=0;i<32;i++){ var x=Math.random()*32, y=Math.random()*32, r=Math.random()*1.4+0.5; var a=0.08+Math.random()*0.12; var pick=Math.random(); if(pick<0.4){ c.fillStyle='rgba(80,80,85,'+a+')'; } else if(pick<0.75){ c.fillStyle='rgba(60,60,65,'+a+')'; } else { c.fillStyle='rgba(100,100,105,'+(a*0.8)+')'; } c.beginPath(); c.arc(x,y,r,0,Math.PI*2); c.fill(); }
-    for(var j=0;j<4;j++){ var w=8+Math.random()*12, hgt=8+Math.random()*12; var px=Math.random()*(32-w), py=Math.random()*(32-hgt); c.fillStyle='rgba(70,70,75,'+(0.03+Math.random()*0.04)+')'; c.fillRect(px,py,w,hgt); }
+// =============================================
+// FULLSCREEN
+// =============================================
+function toggleFullscreen() {
+  var fs = document.fullscreenElement || document.webkitFullscreenElement
+         || document.mozFullScreenElement || document.msFullscreenElement;
+  if (!fs) {
+    var req = canvas.requestFullscreen || canvas.webkitRequestFullscreen
+            || canvas.mozRequestFullScreen || canvas.msRequestFullscreen;
+    if (req) req.call(canvas);
   } else {
-    c.fillStyle='#3b2a18'; c.fillRect(0,0,32,32);
-    for(var i=0;i<28;i++){
-      var x=Math.random()*32, y=Math.random()*32, r=Math.random()*1.6+0.6;
-      var a=0.10+Math.random()*0.10; var pick=Math.random();
-      if(pick<0.5){ c.fillStyle='rgba(124,93,60,'+a+')'; }
-      else if(pick<0.8){ c.fillStyle='rgba(98,72,45,'+a+')'; }
-      else { c.fillStyle='rgba(160,120,80,'+(a*0.9)+')'; }
-      c.beginPath(); c.arc(x,y,r,0,Math.PI*2); c.fill();
+    var ex = document.exitFullscreen || document.webkitExitFullscreen
+           || document.mozCancelFullScreen || document.msExitFullscreen;
+    if (ex) ex.call(document);
+  }
+}
+
+function onFullscreenChange() {
+  var fs = document.fullscreenElement || document.webkitFullscreenElement
+         || document.mozFullScreenElement || document.msFullscreenElement;
+  if (fs === canvas) {
+    // Entering fullscreen — expand draw buffer to the actual screen size.
+    // A brief rAF ensures the browser has committed the new viewport size.
+    requestAnimationFrame(function() {
+      canvas.width  = window.innerWidth  || screen.width;
+      canvas.height = window.innerHeight || screen.height;
+    });
+  } else {
+    // Exiting fullscreen — restore authored resolution.
+    canvas.width  = CANVAS_BASE_W;
+    canvas.height = CANVAS_BASE_H;
+  }
+}
+document.addEventListener('fullscreenchange',       onFullscreenChange);
+document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+document.addEventListener('mozfullscreenchange',    onFullscreenChange);
+document.addEventListener('MSFullscreenChange',     onFullscreenChange);
+
+// =============================================
+// GAME STATE
+// =============================================
+var running = false;
+var gameOverState = false;
+var polling = null;
+var lastUpdate = 0;
+var level = 1;
+var collisions = 0;
+var startMs = 0;
+var timeSec = 0;
+var pos = {x:20, y:20};
+var vel = {x:0, y:0};
+var walls = [];
+var goal = {x:320, y:200, w:24, h:24};
+
+// =============================================
+// PHYSICS CONFIG
+// =============================================
+var dead = 1.5;      // deadzone in degrees
+var maxAng = 15;     // max tilt angle
+var speed = 90;      // movement speed
+var damping = 0.965;
+var bounce = 0.45;
+var cell = 15;       // grid cell size in world pixels
+
+// =============================================
+// TERRAIN
+// =============================================
+var terrain = 'ground';
+var bgPattern = null;
+var ceilPattern = null;
+var wallColor = '#8b6b3a';
+
+// =============================================
+// GRID & LEVEL GEOMETRY
+// =============================================
+var worldW = 720;          // active level world width  (set in resetLevel)
+var worldH = 480;          // active level world height (set in resetLevel)
+var viewDist = 800;        // max render distance for floor/sprite culls (scaled per level)
+var borderVariations = []; // [{x1,y1,x2,y2,width}] subtle border wall roughening capsules
+var deepCaveRegions = [];  // [{x1,y1,x2,y2,width,ceilZ,type}] deep cave capsule segments
+var deepCaveEntrances = []; // [{x,y}] world-space entrance positions for beacon rendering
+var deepCaveChambers = []; // [{cx,cy,radius,ceilZ}] circular cave chambers
+var currentBorderPoly = null; // irregular border polygon for plains/cave terrain
+var grid = null;
+var gridW = 0;
+var gridH = 0;
+var wallHeights = null;
+var wallDecorations = [];
+var oreVeins = [];        // breakable mineral deposits on cave walls; cleared each level
+var floorScatter = [];    // static decorative debris/props on open floor cells
+var platforms = [];
+var floorMesh = null;
+
+// =============================================
+// CAMERA
+// =============================================
+var cam = {x:20, y:20, ang:0, fov:1.0471975512};
+var viewCam = {x:0, y:0};
+var CAM_FOLLOW = false;
+var MODE3D = false;
+
+// =============================================
+// INPUT MODE FLAGS
+// =============================================
+var USE_GAMEPAD = false;
+var USE_KEYBOARD = false;
+var USE_MOUSE = false;
+var CONTROL_MODE = 2;
+var MODE_GYRO_AIM = 1;
+var MODE_STICK_AIM = 2;
+
+// =============================================
+// KEYBOARD & MOUSE STATE
+// =============================================
+var kbState = {up:false, down:false, left:false, right:false};
+var mouseAccum = {x:0, y:0};
+var MOUSE_SENSITIVITY = 0.008;
+var mouseDelta = {x:0, y:0};       // raw pixel deltas consumed each frame for camera
+var MOUSE_CAM_SENSITIVITY = 0.003; // radians per pixel (yaw); pitch uses 0.7x
+
+// =============================================
+// GAMEPAD STATE
+// =============================================
+var gpPoll = null;
+var gpLast = {x:0, y:0, buttons:0, valid:false};
+var gpBackoffUntil = 0;
+var BTN_X = (1<<6), BTN_Y = (1<<2), BTN_A = (1<<5), BTN_B = (1<<1);
+var BTN_SELECT = (1<<0);
+var BTN_START = (1<<16);
+var STICK_CAM_YAW_SPEED = 1.8;
+var STICK_CAM_PITCH_SPEED = 1.8;
+var CAM_PITCH_MAX = 0.75;   // ~43° — widened after matching pitchOff scale to perspective
+
+// =============================================
+// BUTTON TOGGLE STATE
+// =============================================
+var lastSelectDown = false;
+var lastSelectToggleMs = 0;
+var SELECT_TOGGLE_COOLDOWN = 300;
+var menuOpen = false;
+var lastStartMenuDown = false;
+var lastStartMenuToggleMs = 0;
+var START_MENU_COOLDOWN = 300;
+
+// =============================================
+// IMU & CALIBRATION
+// =============================================
+var basePitch = 0, baseRoll = 0, baseYaw = 0, hasBaseline = false;
+var calibTimer = null, calibMs = 1000, calibSamples = [];
+var calibrating = false, calStableMs = 0, calNeedStableMs = 1200;
+var lastRoll = 0, lastPitch = 0, lastYaw = 0, hasYaw = false;
+var USE_YAW = true, yawTarget = 0, yawAlpha = 0.08;
+var USE_PITCH = true, pitchTarget = 0, pitchAlpha = 0.12, pitchOffset = 0, autoPitchOff = 0;
+var yawOffset = 0, capturingYaw = false, yawAtPress = 0, camHold = 0, yawResumeUntil = 0, prevX = false;
+
+// =============================================
+// SKELETON SPRITES
+// =============================================
+var skeletonFrames = null;
+var SKEL_FRAMES = 8;
+var SKEL_W = 48, SKEL_H = 80;
+
+// =============================================
+// SENSOR HARDWARE STATE
+// =============================================
+var i2cEnabled = false;
+var imuEnabled = false;
+var imuCompiled = false;
+var gamepadEnabled = false;
+var gamepadCompiled = false;
+
+// =============================================
+// COMBAT
+// =============================================
+var MANA_MAX = 100, mana = 100, MANA_REGEN_PER_S = 15;
+var MANA_COST_MIN = 12, MANA_COST_MAX = 35;
+var manaBlinkUntil = 0;
+var HEALTH_MAX = 100, health = 100, HEALTH_REGEN_PER_S = 3;
+var SHOOT_COOLDOWN = 300, PROJ_SPEED = 360, PROJ_LIFE_MS = 1200, PROJ_RADIUS = 3;
+var projectiles = [];
+var lastShotMs = 0;
+var impacts = [];
+var coneEffects = [];
+var groundEffects = [];   // fire patches, ice patches, poison clouds on the floor
+var chainEffects = [];    // lightning chain arcs between enemies
+var novaEffects = [];     // expanding ring from arcane blast
+var spells = {
+  missile:  {id:'missile',  name:'Magic Missile',    color:'#4db6ff', damage:1.0, speed:360, manaCost:10,
+             attackType:'projectile', homing:0.8, tier:1, unlocked:true},
+  fire:     {id:'fire',     name:'Flame Jet',        color:'#ff6600', damage:1.5, speed:300, manaCost:16,
+             attackType:'cone', coneAngle:0.25, coneRange:150, groundFire:true, tier:1, unlocked:false},
+  ice:      {id:'ice',      name:'Frost Bolt',       color:'#00ffff', damage:1.0, speed:380, manaCost:14,
+             attackType:'projectile', instantSlow:true, groundPatch:true, tier:1, unlocked:false},
+  lightning:{id:'lightning', name:'Chain Lightning',  color:'#ffff00', damage:1.8, speed:450, manaCost:20,
+             attackType:'projectile', chainCount:2, chainRange:80, chainDmgFalloff:0.5, tier:1, unlocked:false},
+  poison:   {id:'poison',   name:'Poison Cloud',     color:'#88ff44', damage:0.4, speed:200, manaCost:18,
+             attackType:'lob', lobRange:180, cloudRadius:50, cloudDuration:4000, tier:1, unlocked:false},
+  arcane:   {id:'arcane',   name:'Arcane Blast',     color:'#cc66ff', damage:2.0, speed:0,   manaCost:25,
+             attackType:'nova', novaRadius:100, stunDuration:800, tier:1, unlocked:false}
+};
+var spellOrder = ['missile','fire','ice','lightning','poison','arcane'];
+var currentSpellIdx = 0;
+var lastADown = false;
+var lastXDown = false;
+var lastShopGpA = false, lastShopGpB = false, lastShopGpX = false, lastShopGpY = false;
+var stats = {totalDamageDone:0, totalDamageTaken:0, totalManaConsumed:0, totalEnemiesKilled:0};
+
+// =============================================
+// ENEMIES
+// =============================================
+var enemies = [];
+var deathEffects = [];
+var soulOrbs = [];
+var coinDrops = [];      // gold coins dropped by enemies — picked up for shop currency
+var coins = 0;           // current coin count
+var shopMarker = null;   // {x,y,wallSide} — where the shop wall decoration lives
+var shopOpen = false;    // shop overlay visible
+var shopNearby = false;  // player within interaction range
+var shopSelIdx = 0;      // currently-highlighted item in the shop UI
+var wardActive = false;  // "next hit absorbed" buff from Warding Stone
+var dmgBoostUntil = 0;   // timestamp for Power Rune damage boost
+var speedBoostUntil = 0; // timestamp for Wind Boots speed boost
+var castAnimUntil = 0;   // timestamp for FPS arm cast animation
+var walkBobPhase = 0;    // running phase for arm bob
+var enemyTypes = {
+  fast:   {id:'fast',  name:'Scout',   color:'#ff9900',size:0.8,health:2,speed:55,chaseRange:450, attackWindup:280,  attackCooldown:900,  attackDamage:8 },
+  normal: {id:'normal',name:'Soldier', color:'#ff4444',size:1.0,health:4,speed:35,chaseRange:400, attackWindup:480,  attackCooldown:1200, attackDamage:15},
+  tank:   {id:'tank',  name:'Brute',   color:'#cc0000',size:1.4,health:8,speed:20,chaseRange:350, attackWindup:750,  attackCooldown:1800, attackDamage:25}
+};
+
+// =============================================
+// SCORING
+// =============================================
+var medalGold = 10, medalSilver = 15, medalBronze = 22;
+var timeColor = '#d4af37';
+
+// =============================================
+// DEBUG FLAGS
+// =============================================
+var DEBUG_IMU = false;
+var DEBUG_3D = false, __dbg3dLast = 0;
+var DEBUG_TEXTURE = false, __dbgTexLast = 0;
+var DEBUG_FLOOR = false, __dbgFloorLast = 0;
+var DEBUG_DECORATIONS = false;
+var DEBUG_SKELETON = false;
+var DEBUG_CAM = false, __camDbgLast = 0;
+var DEBUG_PERF = true, __perfFrames = [], __perfLogInterval = 2000, __perfLastLog = 0;
+var DEBUG_EFFECTS = true, __effectsLastLog = 0, __effectsLogInterval = 3000;
+var FW_DEBUG = false;
+var __gamesLogPoll = null, __gamesLogLastLen = 0;
+var __decorDebugLast = 0;
+
+// =============================================
+// LEVEL DATA
+// =============================================
+var levels = [
+  // Level 1 — 720×480, compact
+  { w:720, h:480,
+    start:{x:120,y:120}, goal:{x:648,y:408,w:32,h:32},
+    medals:{gold:15,silver:22,bronze:32},
+    maxEnemies:4,
+    enemies:[{x:300,y:150,type:'fast'},{x:500,y:350,type:'normal'},{x:200,y:400,type:'tank'},{x:600,y:200,type:'fast'}],
+    walls:[{x:160,y:0,w:15,h:360},{x:320,y:120,w:15,h:360}]
+  },
+  // Level 2 — 1080×720, medium (1.5×)
+  { w:1080, h:720,
+    start:{x:40,y:40}, goal:{x:1008,y:648,w:32,h:32},
+    medals:{gold:25,silver:35,bronze:50},
+    maxEnemies:6,
+    enemies:[{x:400,y:200,type:'fast'},{x:700,y:420,type:'normal'},{x:300,y:580,type:'fast'},
+             {x:800,y:200,type:'normal'},{x:550,y:520,type:'tank'},{x:900,y:380,type:'fast'}],
+    walls:[{x:180,y:120,w:720,h:15},{x:180,y:360,w:720,h:15},{x:180,y:600,w:720,h:15}]
+  },
+  // Level 3 — 1440×960, large (2×)
+  { w:1440, h:960,
+    start:{x:40,y:40}, goal:{x:1368,y:888,w:32,h:32},
+    medals:{gold:35,silver:50,bronze:70},
+    maxEnemies:8,
+    enemies:[{x:400,y:200,type:'fast'},{x:800,y:420,type:'normal'},{x:400,y:700,type:'fast'},
+             {x:1000,y:200,type:'normal'},{x:600,y:620,type:'tank'},{x:1100,y:520,type:'fast'},
+             {x:700,y:320,type:'normal'},{x:950,y:740,type:'tank'}],
+    walls:[{x:400,y:0,w:20,h:960},{x:800,y:0,w:20,h:960},{x:0,y:480,w:1440,h:20}]
+  },
+  // Level 4 — 4320×2880, The Expanse (9× area of Level 3)
+  // Terrain is pinned to 'expanse' so the selector updates automatically.
+  // No interior walls — the procedural border polygon and floor mesh fill the space.
+  // Enemies are scattered in loose clusters across the four quadrants.
+  { w:4320, h:2880,
+    terrain:'expanse',
+    start:{x:400,y:400}, goal:{x:4160,y:2720,w:56,h:56},
+    medals:{gold:120,silver:180,bronze:260},
+    maxEnemies:18,
+    enemies:[
+      // NW cluster
+      {x:600,  y:400,  type:'fast'},   {x:900,  y:550,  type:'normal'},
+      {x:750,  y:800,  type:'tank'},
+      // NE cluster
+      {x:3200, y:350,  type:'fast'},   {x:3500, y:600,  type:'normal'},
+      {x:3800, y:500,  type:'fast'},
+      // Centre swarm
+      {x:2000, y:1300, type:'normal'}, {x:2200, y:1500, type:'fast'},
+      {x:1800, y:1600, type:'tank'},   {x:2400, y:1200, type:'normal'},
+      // SW cluster
+      {x:500,  y:2200, type:'tank'},   {x:800,  y:2500, type:'fast'},
+      {x:650,  y:2700, type:'normal'},
+      // SE cluster
+      {x:3400, y:2200, type:'fast'},   {x:3700, y:2500, type:'normal'},
+      {x:3600, y:2700, type:'tank'},
+      // Roaming outriders
+      {x:1500, y:700,  type:'fast'},   {x:2800, y:2100, type:'normal'}
+    ],
+    walls:[]
+  }
+];
+
+
+// =============================================
+// SECTION 1: UTILITIES
+// =============================================
+
+function clamp(v, min, max) {
+  return v < min ? min : (v > max ? max : v);
+}
+
+function deg2rad(d) {
+  return d * Math.PI / 180;
+}
+
+function angNorm(a) {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
+function seedFor(component) {
+  return (BASE_SEED + level * 101 + component) | 0;
+}
+
+function rectsOverlap(a, b) {
+  return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y || a.y > b.y + b.h);
+}
+
+
+// =============================================
+// SECTION 2: TERRAIN & PATTERNS
+// =============================================
+
+function makePattern(kind) {
+  var oc = document.createElement('canvas');
+  oc.width = 32; oc.height = 32;
+  var c = oc.getContext('2d');
+  if (kind === 'ice') {
+    c.fillStyle = '#0a1322'; c.fillRect(0, 0, 32, 32);
+    c.strokeStyle = 'rgba(170,210,255,0.35)'; c.lineWidth = 2;
+    c.beginPath(); c.moveTo(0, 16); c.lineTo(32, 16); c.moveTo(16, 0); c.lineTo(16, 32); c.stroke();
+    c.strokeStyle = 'rgba(120,190,255,0.18)';
+    c.beginPath(); c.moveTo(0, 0); c.lineTo(32, 32); c.moveTo(32, 0); c.lineTo(0, 32); c.stroke();
+    for (var i = 0; i < 14; i++) {
+      var x = Math.random() * 32, y = Math.random() * 32, r = Math.random() * 0.9 + 0.3;
+      c.fillStyle = 'rgba(210,235,255,' + (0.05 + Math.random() * 0.05) + ')';
+      c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
     }
-    for(var j=0;j<3;j++){
-      var w=10+Math.random()*14, hgt=10+Math.random()*14;
-      var px=Math.random()*(32-w), py=Math.random()*(32-hgt);
-      c.fillStyle='rgba(255,230,200,'+(0.02+Math.random()*0.025)+')';
-      c.fillRect(px,py,w,hgt);
+    var g = c.createLinearGradient(0, 0, 32, 32);
+    g.addColorStop(0, 'rgba(255,255,255,0.02)'); g.addColorStop(1, 'rgba(255,255,255,0.00)');
+    c.fillStyle = g; c.fillRect(0, 0, 32, 32);
+  } else if (kind === 'cave') {
+    c.fillStyle = '#2a2a2e'; c.fillRect(0, 0, 32, 32);
+    for (var i = 0; i < 32; i++) {
+      var x = Math.random() * 32, y = Math.random() * 32, r = Math.random() * 1.4 + 0.5;
+      var a = 0.08 + Math.random() * 0.12; var pick = Math.random();
+      if (pick < 0.4) c.fillStyle = 'rgba(80,80,85,' + a + ')';
+      else if (pick < 0.75) c.fillStyle = 'rgba(60,60,65,' + a + ')';
+      else c.fillStyle = 'rgba(100,100,105,' + (a * 0.8) + ')';
+      c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
+    }
+    for (var j = 0; j < 4; j++) {
+      var w = 8 + Math.random() * 12, hgt = 8 + Math.random() * 12;
+      var px = Math.random() * (32 - w), py = Math.random() * (32 - hgt);
+      c.fillStyle = 'rgba(70,70,75,' + (0.03 + Math.random() * 0.04) + ')';
+      c.fillRect(px, py, w, hgt);
+    }
+  } else if (kind === 'expanse') {
+    // Cracked sandstone — warm ochre base with hairline fractures
+    c.fillStyle = '#7a4e22'; c.fillRect(0, 0, 32, 32);
+    // Crack lines
+    c.strokeStyle = 'rgba(30,15,5,0.55)'; c.lineWidth = 0.8;
+    for (var i = 0; i < 6; i++) {
+      var ax = Math.random() * 32, ay = Math.random() * 32;
+      var bx = ax + (Math.random() - 0.5) * 18, by = ay + (Math.random() - 0.5) * 18;
+      c.beginPath(); c.moveTo(ax, ay); c.lineTo(bx, by); c.stroke();
+    }
+    // Sand grain speckle
+    for (var i = 0; i < 24; i++) {
+      var x = Math.random() * 32, y = Math.random() * 32, r = Math.random() * 1.0 + 0.3;
+      var pick = Math.random();
+      if (pick < 0.5)      c.fillStyle = 'rgba(160,100,40,0.14)';
+      else if (pick < 0.8) c.fillStyle = 'rgba(200,140,60,0.10)';
+      else                 c.fillStyle = 'rgba(80,40,10,0.18)';
+      c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
+    }
+  } else {
+    c.fillStyle = '#3b2a18'; c.fillRect(0, 0, 32, 32);
+    for (var i = 0; i < 28; i++) {
+      var x = Math.random() * 32, y = Math.random() * 32, r = Math.random() * 1.6 + 0.6;
+      var a = 0.10 + Math.random() * 0.10; var pick = Math.random();
+      if (pick < 0.5) c.fillStyle = 'rgba(124,93,60,' + a + ')';
+      else if (pick < 0.8) c.fillStyle = 'rgba(98,72,45,' + a + ')';
+      else c.fillStyle = 'rgba(160,120,80,' + (a * 0.9) + ')';
+      c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
+    }
+    for (var j = 0; j < 3; j++) {
+      var w = 10 + Math.random() * 14, hgt = 10 + Math.random() * 14;
+      var px = Math.random() * (32 - w), py = Math.random() * (32 - hgt);
+      c.fillStyle = 'rgba(255,230,200,' + (0.02 + Math.random() * 0.025) + ')';
+      c.fillRect(px, py, w, hgt);
     }
   }
-  return ctx.createPattern(oc,'repeat'); }
-function makeCeilPattern(kind){
-  var oc=document.createElement('canvas'); oc.width=32; oc.height=32;
-  var c=oc.getContext('2d');
-  if(kind==='ice'){ c.fillStyle='#0d1a2e'; }
-  else if(kind==='cave'){ c.fillStyle='#1a1a1e'; }
-  else { c.fillStyle='#3f2f1c'; }
-  c.fillRect(0,0,32,32);
-  c.fillStyle='rgba(255,255,255,0.02)'; c.fillRect(0,0,16,16);
-  return ctx.createPattern(oc,'repeat');
+  return ctx.createPattern(oc, 'repeat');
 }
-function makeWallColor(kind){ return (kind==='ice')?'#7aa7ff':(kind==='cave')?'#6a6a70':'#a77a45'; }
-function applyPreset(){
-  if(terrain==='ice'){ damping=0.992; bounce=0.20; dead=1.2; }
-  else if(terrain==='plains'){ damping=0.970; bounce=0.40; dead=1.5; }
-  else if(terrain==='cave'){ damping=0.975; bounce=0.35; dead=1.3; }
-  else { damping=0.965; bounce=0.45; dead=1.5; }
-  var k=(terrain==='ice')?'ice':(terrain==='cave')?'cave':'ground';
-  bgPattern = makePattern(k); ceilPattern = makeCeilPattern(k); wallColor = makeWallColor(k);
+
+function makeCeilPattern(kind) {
+  var oc = document.createElement('canvas');
+  oc.width = 32; oc.height = 32;
+  var c = oc.getContext('2d');
+  if (kind === 'ice')          c.fillStyle = '#0d1a2e';
+  else if (kind === 'cave')    c.fillStyle = '#1a1a1e';
+  else if (kind === 'expanse') c.fillStyle = '#5a3010'; // deep rust sky
+  else                         c.fillStyle = '#3f2f1c';
+  c.fillRect(0, 0, 32, 32);
+  c.fillStyle = 'rgba(255,255,255,0.02)'; c.fillRect(0, 0, 16, 16);
+  return ctx.createPattern(oc, 'repeat');
 }
-</script><script>console.info('[GAMES] Chunk 1B: presets');
-function generateCaveWalls(){
-  if(terrain!=='cave') return;
-  Math.seedrandom=function(seed){
-    var m=0x80000000,a=1103515245,c=12345,s=seed?seed:Math.floor(Math.random()*(m-1));
-    return function(){ s=(a*s+c)%m; return s/(m-1); };
+
+function makeWallColor(kind) {
+  if (kind === 'ice')     return '#7aa7ff';
+  if (kind === 'cave')    return '#6a6a70';
+  if (kind === 'expanse') return '#c07838'; // warm sandstone cliff face
+  return '#a77a45';
+}
+
+function applyPreset() {
+  if (terrain === 'ice') { damping = 0.992; bounce = 0.20; dead = 1.2; }
+  else if (terrain === 'plains')  { damping = 0.970; bounce = 0.40; dead = 1.5; }
+  else if (terrain === 'cave')    { damping = 0.975; bounce = 0.35; dead = 1.3; }
+  else if (terrain === 'expanse') { damping = 0.968; bounce = 0.38; dead = 1.4; }
+  else { damping = 0.965; bounce = 0.45; dead = 1.5; }
+  var k = (terrain === 'ice') ? 'ice' : (terrain === 'cave') ? 'cave' : (terrain === 'expanse') ? 'expanse' : 'ground';
+  bgPattern = makePattern(k);
+  ceilPattern = makeCeilPattern(k);
+  wallColor = makeWallColor(k);
+}
+
+
+// =============================================
+// SECTION 3: LEVEL GENERATION
+// =============================================
+
+function generateCaveWalls() {
+  if (terrain !== 'cave') return;
+  Math.seedrandom = function(seed) {
+    var m = 0x80000000, a = 1103515245, c = 12345;
+    var s = seed ? seed : Math.floor(Math.random() * (m - 1));
+    return function() { s = (a * s + c) % m; return s / (m - 1); };
   };
-  var rng=Math.seedrandom(seedFor(1));
-  var worldW=720,worldH=480,margin=40,buffer=35;
-  function overlaps(r){
-    for(var j=0;j<walls.length;j++){
-      var e=walls[j];
-      if(!(r.x+r.w+buffer<e.x||r.x>e.x+e.w+buffer||r.y+r.h+buffer<e.y||r.y>e.y+e.h+buffer)) return true;
+  var rng = Math.seedrandom(seedFor(1));
+  var margin = 40, buffer = 35;
+  function overlaps(r) {
+    for (var j = 0; j < walls.length; j++) {
+      var e = walls[j];
+      if (!(r.x + r.w + buffer < e.x || r.x > e.x + e.w + buffer || r.y + r.h + buffer < e.y || r.y > e.y + e.h + buffer)) return true;
     }
     return false;
   }
-  function blocks(r){
-    var bs=(r.x<pos.x+buffer&&r.x+r.w>pos.x-buffer&&r.y<pos.y+buffer&&r.y+r.h>pos.y-buffer);
-    var bg=(r.x<goal.x+buffer&&r.x+r.w>goal.x-buffer&&r.y<goal.y+buffer&&r.y+r.h>goal.y-buffer);
-    return bs||bg;
+  function blocks(r) {
+    var bs = (r.x < pos.x + buffer && r.x + r.w > pos.x - buffer && r.y < pos.y + buffer && r.y + r.h > pos.y - buffer);
+    var bg = (r.x < goal.x + buffer && r.x + r.w > goal.x - buffer && r.y < goal.y + buffer && r.y + r.h > goal.y - buffer);
+    return bs || bg;
   }
-  function tryAdd(rects){
-    for(var i=0;i<rects.length;i++){
-      var r=rects[i];
-      if(r.x<margin||r.y<margin||r.x+r.w>worldW-margin||r.y+r.h>worldH-margin) return false;
-      if(overlaps(r)||blocks(r)) return false;
+  function tryAdd(rects) {
+    for (var i = 0; i < rects.length; i++) {
+      var r = rects[i];
+      if (r.x < margin || r.y < margin || r.x + r.w > worldW - margin || r.y + r.h > worldH - margin) return false;
+      if (overlaps(r) || blocks(r)) return false;
     }
-    for(var k=0;k<rects.length;k++){ walls.push(rects[k]); }
+    for (var k = 0; k < rects.length; k++) walls.push(rects[k]);
     return true;
   }
-  var shapes=['rect','L','T','plus','corr_h','corr_v','zigzag','pillars','U','arc'];
-  var targetShapes=Math.floor(6+rng()*6),addedRects=0,placedShapes=0,attempts=targetShapes*30;
-  while(placedShapes<targetShapes && attempts-->0){
-    var shape=shapes[Math.floor(rng()*shapes.length)];
-    var cx=Math.floor(margin+rng()*(worldW-2*margin)), cy=Math.floor(margin+rng()*(worldH-2*margin));
-    var scale=20+rng()*60, rects=[];
-    if(shape==='rect'){
-      var w=Math.floor(scale*0.6+rng()*scale), h=Math.floor(scale*0.6+rng()*scale);
-      rects=[{x:cx,y:cy,w:w,h:h}];
-    } else if(shape==='L'){
-      var arm=Math.floor(scale*0.8), th=Math.floor(10+rng()*18);
-      rects=[{x:cx,y:cy,w:arm,h:th},{x:cx,y:cy,w:th,h:arm}];
-    } else if(shape==='T'){
-      var arm2=Math.floor(scale), th2=Math.floor(10+rng()*18);
-      rects=[{x:cx-Math.floor(arm2/2),y:cy,w:arm2,h:th2},{x:cx-Math.floor(th2/2),y:cy,w:th2,h:arm2}];
-    } else if(shape==='plus'){
-      var arm3=Math.floor(scale*0.8), th3=Math.floor(10+rng()*16);
-      rects=[{x:cx-Math.floor(arm3/2),y:cy-Math.floor(th3/2),w:arm3,h:th3},{x:cx-Math.floor(th3/2),y:cy-Math.floor(arm3/2),w:th3,h:arm3}];
-    } else if(shape==='corr_h'){
-      var len=Math.floor(scale*1.4), gap=Math.floor(18+rng()*28), th4=Math.floor(10+rng()*14);
-      rects=[{x:cx,y:cy,w:len,h:th4},{x:cx,y:cy+gap,w:len,h:th4}];
-    } else if(shape==='corr_v'){
-      var len2=Math.floor(scale*1.4), gap2=Math.floor(18+rng()*28), th5=Math.floor(10+rng()*14);
-      rects=[{x:cx,y:cy,w:th5,h:len2},{x:cx+gap2,y:cy,w:th5,h:len2}];
-    } else if(shape==='zigzag'){
-      var seg=Math.floor(14+rng()*18), th6=Math.floor(10+rng()*14);
-      rects=[{x:cx,y:cy,w:seg,h:th6},{x:cx+seg-Math.floor(th6/2),y:cy+seg,w:seg,h:th6},{x:cx+2*seg-Math.floor(th6),y:cy+2*seg,w:seg,h:th6}];
-    } else if(shape==='pillars'){
-      var n=3+Math.floor(rng()*3), s=Math.floor(12+rng()*18);
-      for(var i=0;i<n;i++){
-        var ox=Math.floor((rng()-0.5)*scale), oy=Math.floor((rng()-0.5)*scale);
-        rects.push({x:cx+ox,y:cy+oy,w:s,h:s});
+  var shapes = ['rect', 'L', 'T', 'plus', 'corr_h', 'corr_v', 'zigzag', 'pillars', 'U', 'arc'];
+  var targetShapes = Math.floor(6 + rng() * 6), addedRects = 0, placedShapes = 0, attempts = targetShapes * 30;
+  while (placedShapes < targetShapes && attempts-- > 0) {
+    var shape = shapes[Math.floor(rng() * shapes.length)];
+    var cx = Math.floor(margin + rng() * (worldW - 2 * margin));
+    var cy = Math.floor(margin + rng() * (worldH - 2 * margin));
+    var scale = 20 + rng() * 60, rects = [];
+    if (shape === 'rect') {
+      var w = Math.floor(scale * 0.6 + rng() * scale), h = Math.floor(scale * 0.6 + rng() * scale);
+      rects = [{x:cx, y:cy, w:w, h:h}];
+    } else if (shape === 'L') {
+      var arm = Math.floor(scale * 0.8), th = Math.floor(10 + rng() * 18);
+      rects = [{x:cx, y:cy, w:arm, h:th}, {x:cx, y:cy, w:th, h:arm}];
+    } else if (shape === 'T') {
+      var arm2 = Math.floor(scale), th2 = Math.floor(10 + rng() * 18);
+      rects = [{x:cx - Math.floor(arm2 / 2), y:cy, w:arm2, h:th2}, {x:cx - Math.floor(th2 / 2), y:cy, w:th2, h:arm2}];
+    } else if (shape === 'plus') {
+      var arm3 = Math.floor(scale * 0.8), th3 = Math.floor(10 + rng() * 16);
+      rects = [{x:cx - Math.floor(arm3 / 2), y:cy - Math.floor(th3 / 2), w:arm3, h:th3}, {x:cx - Math.floor(th3 / 2), y:cy - Math.floor(arm3 / 2), w:th3, h:arm3}];
+    } else if (shape === 'corr_h') {
+      var len = Math.floor(scale * 1.4), gap = Math.floor(18 + rng() * 28), th4 = Math.floor(10 + rng() * 14);
+      rects = [{x:cx, y:cy, w:len, h:th4}, {x:cx, y:cy + gap, w:len, h:th4}];
+    } else if (shape === 'corr_v') {
+      var len2 = Math.floor(scale * 1.4), gap2 = Math.floor(18 + rng() * 28), th5 = Math.floor(10 + rng() * 14);
+      rects = [{x:cx, y:cy, w:th5, h:len2}, {x:cx + gap2, y:cy, w:th5, h:len2}];
+    } else if (shape === 'zigzag') {
+      var seg = Math.floor(14 + rng() * 18), th6 = Math.floor(10 + rng() * 14);
+      rects = [
+        {x:cx, y:cy, w:seg, h:th6},
+        {x:cx + seg - Math.floor(th6 / 2), y:cy + seg, w:seg, h:th6},
+        {x:cx + 2 * seg - Math.floor(th6), y:cy + 2 * seg, w:seg, h:th6}
+      ];
+    } else if (shape === 'pillars') {
+      var n = 3 + Math.floor(rng() * 3), s = Math.floor(12 + rng() * 18);
+      for (var i = 0; i < n; i++) {
+        var ox = Math.floor((rng() - 0.5) * scale), oy = Math.floor((rng() - 0.5) * scale);
+        rects.push({x:cx + ox, y:cy + oy, w:s, h:s});
       }
-    } else if(shape==='U'){
-      var arm4=Math.floor(scale), th7=Math.floor(10+rng()*16), inn=Math.floor(scale*0.5);
-      rects=[{x:cx,y:cy,w:th7,h:arm4},{x:cx+inn,y:cy,w:th7,h:arm4},{x:cx,y:cy+arm4-th7,w:inn+th7,h:th7}];
+    } else if (shape === 'U') {
+      var arm4 = Math.floor(scale), th7 = Math.floor(10 + rng() * 16), inn = Math.floor(scale * 0.5);
+      rects = [{x:cx, y:cy, w:th7, h:arm4}, {x:cx + inn, y:cy, w:th7, h:arm4}, {x:cx, y:cy + arm4 - th7, w:inn + th7, h:th7}];
     } else {
-      var th8=Math.floor(10+rng()*16), r=Math.floor(scale*0.8), seg2=Math.floor(r/2);
-      rects=[{x:cx-r,y:cy,w:seg2,h:th8},{x:cx-Math.floor(seg2/2),y:cy+Math.floor(seg2/2),w:seg2,h:th8},{x:cx,y:cy+seg2,w:seg2,h:th8}];
+      var th8 = Math.floor(10 + rng() * 16), r = Math.floor(scale * 0.8), seg2 = Math.floor(r / 2);
+      rects = [
+        {x:cx - r, y:cy, w:seg2, h:th8},
+        {x:cx - Math.floor(seg2 / 2), y:cy + Math.floor(seg2 / 2), w:seg2, h:th8},
+        {x:cx, y:cy + seg2, w:seg2, h:th8}
+      ];
     }
-    if(tryAdd(rects)){
-      addedRects+=rects.length;
+    if (tryAdd(rects)) {
+      addedRects += rects.length;
       placedShapes++;
     }
   }
-  walls.caveCount=addedRects;
+  walls.caveCount = addedRects;
 }
-function buildGrid(){
-  var worldW=720, worldH=480;
-  gridW=Math.floor(worldW/cell);
-  gridH=Math.floor(worldH/cell);
-  grid=new Array(gridW*gridH);
-  wallHeights=new Array(gridW*gridH);
-  Math.seedrandom = function(seed){
-    var m = 0x80000000;
-    var a = 1103515245;
-    var c = 12345;
+
+function buildGrid() {
+  gridW = Math.floor(worldW / cell);
+  gridH = Math.floor(worldH / cell);
+  grid = new Array(gridW * gridH);
+  wallHeights = new Array(gridW * gridH);
+  Math.seedrandom = function(seed) {
+    var m = 0x80000000, a = 1103515245, c = 12345;
     var state = seed ? seed : Math.floor(Math.random() * (m - 1));
-    return function(){
-      state = (a * state + c) % m;
-      return state / (m - 1);
-    };
+    return function() { state = (a * state + c) % m; return state / (m - 1); };
   };
   var rng = Math.seedrandom(seedFor(2));
-  for(var i=0;i<grid.length;i++){
-    grid[i]=0;
-    wallHeights[i]=0.7 + rng()*0.6;
+  for (var i = 0; i < grid.length; i++) {
+    grid[i] = 0;
+    wallHeights[i] = 0.7 + rng() * 0.6;
   }
   var caveWallStartIdx = walls.length;
-  if(terrain==='cave'){
+  if (terrain === 'cave') {
     caveWallStartIdx = walls.length - (walls.caveCount || 0);
   }
-  for(var wi=0;wi<walls.length;wi++){
-    var w=walls[wi];
-    var isCaveWall = (terrain==='cave' && wi >= caveWallStartIdx);
-    var heightForWall = isCaveWall ? (0.3 + rng()*0.4) : (0.7 + rng()*0.6);
-    var x0=Math.max(0,Math.floor(w.x/cell));
-    var y0=Math.max(0,Math.floor(w.y/cell));
-    var x1=Math.min(gridW-1,Math.floor((w.x+w.w-1)/cell));
-    var y1=Math.min(gridH-1,Math.floor((w.y+w.h-1)/cell));
-    for(var y=y0;y<=y1;y++){
-      for(var x=x0;x<=x1;x++){
-        grid[y*gridW+x]=1;
-        wallHeights[y*gridW+x]=heightForWall;
+  for (var wi = 0; wi < walls.length; wi++) {
+    var w = walls[wi];
+    var isCaveWall = (terrain === 'cave' && wi >= caveWallStartIdx);
+    var heightForWall = isCaveWall ? (0.3 + rng() * 0.4) : (0.7 + rng() * 0.6);
+    var x0 = Math.max(0, Math.floor(w.x / cell));
+    var y0 = Math.max(0, Math.floor(w.y / cell));
+    var x1 = Math.min(gridW - 1, Math.floor((w.x + w.w - 1) / cell));
+    var y1 = Math.min(gridH - 1, Math.floor((w.y + w.h - 1) / cell));
+    for (var y = y0; y <= y1; y++) {
+      for (var x = x0; x <= x1; x++) {
+        grid[y * gridW + x] = 1;
+        wallHeights[y * gridW + x] = heightForWall;
       }
     }
   }
 }
-</script><script>console.info('[GAMES] Chunk 2A: prelude');
-function controlSensor(sensor, action){
-  return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(sensor+action)})
-    .then(function(r){return r.text();}).catch(function(_){return '';});
-}
-async function checkSensorAvailability(){
-  try{
-    var sysResp=await fetch('/api/system');
-    var sysData=await sysResp.json();
-    i2cEnabled=(sysData.i2c_enabled===true);
-    if(!i2cEnabled){
-      console.warn('[GAMES] I2C is disabled - sensors unavailable');
-      return;
-    }
-    var sensResp=await fetch('/api/sensors/status');
-    var sensData=await sensResp.json();
-    imuCompiled=(sensData.imuCompiled===true);
-    imuEnabled=(sensData.imuEnabled===true);
-    gamepadCompiled=(sensData.gamepadCompiled===true);
-    gamepadEnabled=(sensData.gamepadEnabled===true);
-    console.log('[GAMES] Sensor status: i2c='+i2cEnabled+' imuCompiled='+imuCompiled+' imuEnabled='+imuEnabled+' gamepadCompiled='+gamepadCompiled+' gamepadEnabled='+gamepadEnabled);
-  }catch(e){
-    console.error('[GAMES] Failed to check sensor availability:',e);
-    i2cEnabled=false;
-    imuEnabled=false;
-    imuCompiled=false;
-    gamepadEnabled=false;
-    gamepadCompiled=false;
-  }
-}
-</script><script>console.info('[GAMES] Chunk 2A.1: sensor control');
-function startGamepadPolling(){
-  if(gpPoll) return;
-  if(!i2cEnabled||!gamepadCompiled){
-    console.warn('[GAMES] Gamepad polling disabled: i2c='+i2cEnabled+' gamepadCompiled='+gamepadCompiled);
-    return;
-  }
-  function tick(){
-    var now=Date.now();
-    if(now<gpBackoffUntil) return;
-    fetch('/api/sensors?sensor=gamepad&ts='+now,{cache:'no-store',credentials:'include'})
-      .then(function(r){ return r.json(); })
-      .then(function(j){
-        if(!running) return;
-        if(j && j.v){
-          var x=j.x|0, y=j.y|0;
-          var nx=(x-512)/512, ny=(y-512)/512;
-          if(nx<-1) nx=-1; if(nx>1) nx=1;
-          if(ny<-1) ny=-1; if(ny>1) ny=1;
-          gpLast={x:nx,y:ny,buttons:(j.buttons||0),valid:true};
-        } else {
-          gpLast.valid=false; gpBackoffUntil=Date.now()+150;
-        }
-      }).catch(function(_){ gpLast.valid=false; gpBackoffUntil=Date.now()+200; });
-  }
-  gpPoll=setInterval(tick, 16);
-}
-function stopGamepadPolling(){
-  if(gpPoll){ try{ clearInterval(gpPoll); }catch(_){} gpPoll=null; }
-  gpLast.valid=false;
-}
-</script><script>console.info('[GAMES] Chunk 2A.2: gamepad');
-function startCalibration(){
-  if(!i2cEnabled||!imuCompiled){
-    var hud=document.getElementById('hudCal');
-    hud.textContent='IMU unavailable: '+(i2cEnabled?'not compiled':'I2C disabled');
-    hud.style.color='#ff6b6b';
-    alert('IMU sensor is not available. I2C: '+i2cEnabled+', IMU compiled: '+imuCompiled);
-    return;
-  }
-  controlSensor('imu','start').then(function(){
-    var hud=document.getElementById('hudCal'); hud.textContent='Hold still... calibrating';
-    hasBaseline=false; basePitch=0; baseRoll=0; calibSamples=[];
-    var t0=Date.now();
-    if(calibTimer) { clearInterval(calibTimer); calibTimer=null; }
-    calibTimer=setInterval(function(){
-      fetch('/api/sensors?sensor=imu&ts='+Date.now(),{cache:'no-store'})
-        .then(function(r){return r.json();}).then(function(j){
-        if(j && j.valid && j.ori){ calibSamples.push({p:j.ori.pitch||0, r:j.ori.roll||0}); }
-      }).catch(function(_){});
-      if(Date.now()-t0>=calibMs){
-        clearInterval(calibTimer); calibTimer=null;
-        if(calibSamples.length){
-          var sp=0,sr=0;
-          for(var i=0;i<calibSamples.length;i++){
-            sp+=calibSamples[i].p; sr+=calibSamples[i].r;
-          }
-          basePitch=sp/calibSamples.length; baseRoll=sr/calibSamples.length; hasBaseline=true;
-          hud.textContent='Calibrated: pitch '+basePitch.toFixed(1)+'°, roll '+baseRoll.toFixed(1)+'°';
-        } else { hud.textContent='Calibration failed'; }
-      }
-    }, 50);
-  });
-}
-function resetLevel(lv){
-  level=lv||1; collisions=0; startMs=Date.now();
-  document.getElementById('hudLevel').textContent=level;
-  document.getElementById('hudCol').textContent=collisions;
-  vel={x:0,y:0};
-  var idx=(level-1); if(idx<0) idx=0; if(idx>=levels.length) idx=levels.length-1;
-  var cfg = levels[idx];
-  pos={x:cfg.start.x,y:cfg.start.y};
-  goal={x:cfg.goal.x,y:cfg.goal.y,w:cfg.goal.w,h:cfg.goal.h};
-  walls = cfg.walls.slice();
-  if(terrain==='plains' || terrain==='cave'){
-    var t=15; var worldW=720, worldH=480;
-    walls=[{x:0,y:0,w:worldW,h:t},{x:0,y:worldH-t,w:worldW,h:t},{x:0,y:0,w:t,h:worldH},{x:worldW-t,y:0,w:t,h:worldH}];
-  }
-  if(terrain==='plains' || terrain==='cave'){ generateBlendedFloor(); }
-  else { platforms=[]; floorMesh=null; }
-  if(terrain==='cave'){ generateCaveWalls(); }
-  buildGrid();
-  cam.x=pos.x; cam.y=pos.y; cam.ang=0; cam.z=60; cam.pitch=0; pos.floorZ=60;
-  CAM_FOLLOW=true; createWallDecorations(); spawnEnemies();
-  medalGold = (cfg.medals && cfg.medals.gold)?cfg.medals.gold:10;
-  medalSilver = (cfg.medals && cfg.medals.silver)?cfg.medals.silver:15;
-  medalBronze = (cfg.medals && cfg.medals.bronze)?cfg.medals.bronze:22;
-  timeSec=0; timeColor='#d4af37'; applyPreset();
-}
-function rectsOverlap(a,b){
-  return !(a.x+a.w<b.x||a.x>b.x+b.w||a.y+a.h<b.y||a.y>b.y+b.h);
-}
-</script>
-<script>console.info('[GAMES] Chunk 2A.3: collision');
-</script>
-<script>console.info('[GAMES] Chunk 2B: rendering prelude');
-</script>
-<script>console.info('[GAMES] Chunk 2B: start');
-</script>
-<script>console.info('[GAMES] Chunk 2B.1: before rendering functions'); void 0;
-</script>
-<script>console.info('[GAMES] Chunk 2B.2a: helpers');
-function shadeWall(col,shade,dist){
-  function clamp(v){ return v<0?0:(v>255?255:v); }
-  var r=parseInt(col.substr(1,2),16), g=parseInt(col.substr(3,2),16), b=parseInt(col.substr(5,2),16);
-  var fog=Math.max(0.4,1.0-0.0009*dist);
-  r=Math.floor(clamp(r*shade*fog)); g=Math.floor(clamp(g*shade*fog)); b=Math.floor(clamp(b*shade*fog));
-  return 'rgb('+r+','+g+','+b+')';
-}
-function getFloorHeightAt(x, y){
-  if(!floorMesh) return 0;
-  var mesh=floorMesh;
-  var gridX=Math.floor(x/mesh.gridSize); var gridY=Math.floor(y/mesh.gridSize);
-  if(gridX<0||gridX>=mesh.w||gridY<0||gridY>=mesh.h) return 0;
-  return mesh.heights[gridY*mesh.w + gridX];
-}
-function getFloorColorAt(x, y){
-  if(!floorMesh) return getFloorColor(0);
-  var mesh=floorMesh;
-  var gridX=Math.floor(x/mesh.gridSize); var gridY=Math.floor(y/mesh.gridSize);
-  if(gridX<0||gridX>=mesh.w||gridY<0||gridY>=mesh.h) return getFloorColor(0);
-  return mesh.colors[gridY*mesh.w + gridX];
-}
-console.info('[GAMES] Chunk 2B.2a: helpers ready'); void 0;
 
-</script>
-<script>console.info('[GAMES] Chunk 2B.2b: raycast start'); console.info('[GAMES] Chunk 2B.2c: raycast def');
-function raycastDraw(){ 
- if(!grid){ return; }
- var w=canvas.width, h=canvas.height; var fov=cam.fov; var halfFov=fov/2;
- var s0=0, s1=Math.floor(w/2), s2=w-1; var dist0=0, dist1=0, dist2=0;
- var cameraZRaw=(cam.z||60); var cameraZ=60 + (cameraZRaw-60)*(25/40);
- var pitchOffset=Math.floor(-(cam.pitch||0)*100); var horizonY=Math.floor(h*0.5)+pitchOffset;
- ctx.save(); ctx.globalCompositeOperation='source-over';
- var ceilCol=(terrain==='ice')?'#0b0d12':(terrain==='cave')?'#1a1a1e':'#3f2f1c';
- var floorCol=(terrain==='ice')?'#1b293d':(terrain==='cave')?'#2a2a30':'#3a2f22';
- (function(){ var gy=Math.max(0,horizonY); ctx.fillStyle=ceilCol; ctx.fillRect(0,0,w, Math.max(0,horizonY)); })(); ctx.restore();
- for(var x=0;x<w;x++){
-   var cameraX=2*x/w-1;
-   var rayAng=cam.ang + Math.atan(cameraX*Math.tan(halfFov));
-   var dirX=Math.cos(rayAng), dirY=Math.sin(rayAng);
-   var skipFloorRaycast=true;
- if(!skipFloorRaycast){ var gy=Math.max(0,horizonY); var prevY=h; var d=Math.max(8, cell); var maxD=1200; var lastCol=null; while(d<=maxD){ var fx=cam.x + dirX*d; var fy=cam.y + dirY*d; var fh=(floorMesh?getFloorHeightAt(fx,fy):0); var worldZ=fh*25; var y=Math.floor(horizonY + ((cameraZ-worldZ)/d)*180); if(y<gy) y=gy; if(y>h) y=h; var col; if(floorMesh){ col=getFloorColorAt(fx,fy); } else { var fr=parseInt(floorCol.substr(1,2),16), fg=parseInt(floorCol.substr(3,2),16), fb=parseInt(floorCol.substr(5,2),16); var base=0.85 - 0.35*(d/maxD); var tint=0.04*Math.sin((fx+fy)*0.02); var k=Math.max(0.4, Math.min(1.0, base + tint)); var rr=Math.floor(fr*k), gg=Math.floor(fg*k), bb=Math.floor(fb*k); col='rgb('+rr+','+gg+','+bb+')'; } if(y<prevY){ ctx.fillStyle=col; ctx.fillRect(x, y, 1, prevY - y); prevY=y; lastCol=col; if(prevY<=gy) break; } d = Math.floor(d*1.15)+1; } if(prevY>gy){ ctx.fillStyle=(lastCol||getFloorColorAt(cam.x,cam.y)); ctx.fillRect(x, gy, 1, prevY - gy); } }
- var mapX=Math.floor(cam.x/cell), mapY=Math.floor(cam.y/cell); var rayPosX=(cam.x/cell)-mapX, rayPosY=(cam.y/cell)-mapY;
- var stepX=(dirX<0?-1:1); var stepY=(dirY<0?-1:1);
- var deltaDistX=(dirX===0)?1e9:Math.abs(1/dirX); var deltaDistY=(dirY===0)?1e9:Math.abs(1/dirY);
- var sideDistX=(dirX<0? rayPosX*deltaDistX : (1-rayPosX)*deltaDistX); var sideDistY=(dirY<0? rayPosY*deltaDistY : (1-rayPosY)*deltaDistY);
- var uncovered=[[0,h]]; var hits=0; var maxHits=15; var maxSteps=gridW+gridH+50; var firstDepthSet=false;
- while(hits<maxHits && uncovered.length>0 && maxSteps-->0){ var side=0;
-   var hit=0;
-   while(hit===0 && maxSteps-->0){
-     if(sideDistX<sideDistY){ sideDistX+=deltaDistX; mapX+=stepX; side=0; }
-     else { sideDistY+=deltaDistY; mapY+=stepY; side=1; }
-     if(mapX<0||mapY<0||mapX>=gridW||mapY>=gridH){ hit=1; break; }
-     if(grid[mapY*gridW+mapX]){ hit=1; }
-   }
-   var perpDist; var wallX;
-   if(side===0){
-     perpDist=(sideDistX-deltaDistX)*cell; wallX = cam.y + perpDist * dirY;
-   } else {
-     perpDist=(sideDistY-deltaDistY)*cell; wallX = cam.x + perpDist * dirX;
-   }
-   if(perpDist<1) perpDist=1; wallX -= Math.floor(wallX/cell)*cell;
- if(!firstDepthSet){ if(!depthBuffer || depthBuffer.length!==w) depthBuffer=new Array(w); depthBuffer[x]=perpDist; if(x===s0) dist0=perpDist; if(x===s1) dist1=perpDist; if(x===s2) dist2=perpDist; firstDepthSet=true; }
-   var wallHeight=1.0;
-   if(wallHeights && mapX>=0 && mapY>=0 && mapX<gridW && mapY<gridH){
-     wallHeight=wallHeights[mapY*gridW+mapX];
-   }
-   var lineH=Math.floor(h/perpDist*180*wallHeight); var shade=side?0.8:1.0;
-   var hx=cam.x + dirX*perpDist; var hy=cam.y + dirY*perpDist;
-   var fh=(floorMesh?getFloorHeightAt(hx,hy):0); var worldZ=fh*25;
-   var baseY=horizonY + Math.floor(((cameraZ-worldZ)/perpDist)*180);
-   var segStart=Math.max(0, baseY - lineH); var segEnd=Math.min(h, baseY);
-   if(segEnd>segStart){
- var newUncovered=[]; for(var b=0;b<uncovered.length;b++){ var b0=uncovered[b][0], b1=uncovered[b][1]; var d0=Math.max(segStart,b0), d1=Math.min(segEnd,b1); if(d1>d0){ if(USE_TEXTURES){ drawSimpleWallSlice(x, d0, d1-d0, wallX, shade, perpDist, side); } else { ctx.fillStyle=shadeWall(wallColor,shade,perpDist); ctx.fillRect(x,d0,1,d1-d0); } if(b0<d0) newUncovered.push([b0,d0]); if(d1<b1) newUncovered.push([d1,b1]); } else { newUncovered.push([b0,b1]); } } uncovered=newUncovered; }
- hits++; if(uncovered.length===0) break; if(perpDist>1000) break; }
- } drawWallDecorations(); if(DEBUG_3D){ if(Date.now()-__dbg3dLast>600){ __dbg3dLast=Date.now(); try{ var spd=Math.hypot(vel.x,vel.y).toFixed(1); console.log('[3D]', 'cam=('+cam.x.toFixed(1)+','+cam.y.toFixed(1)+') a='+cam.ang.toFixed(2), 'pos=('+pos.x.toFixed(1)+','+pos.y.toFixed(1)+') v='+spd, 'grid=('+gridW+'x'+gridH+') cell='+cell, 'd0='+dist0.toFixed(1), 'dM='+dist1.toFixed(1), 'dE='+dist2.toFixed(1), 'running='+(running?1:0)+' polling='+(polling?1:0)); }catch(_){ } } drawMiniMap(); draw3DHud(dist0,dist1,dist2); } } void 0;
-</script>
-<script>console.info('[GAMES] Chunk 2B.3: post basic raycast');
-</script>
-<script>console.info('[GAMES] Chunk 2C: hud+mini+shade');
-function drawSimpleWallSlice(x, y, height, wallX, shade, dist, side){
-  if(height <= 0) return;
-  var baseColor = (terrain==='ice') ? [140, 170, 240] : (terrain==='cave') ? [95, 95, 105] : [180, 140, 100];
-  var u = Math.floor(wallX * 4) % 16; var colorMod = 1.0;
-  if(terrain==='cave'){
-    var v = Math.floor(wallX * 2) % 8;
-    if(v < 1) colorMod = 0.75; else if(v < 2) colorMod = 0.85;
-    else if(v > 6) colorMod = 1.15; else if(v === 4) colorMod = 0.95; else colorMod = 1.0;
-  } else {
-    if(u < 2) colorMod = 0.9; else if(u > 13) colorMod = 0.9;
-    else if(u === 7 || u === 8) colorMod = 0.95;
+function generateFloorMesh() {
+  // Use a coarser grid for very large maps to keep generation fast.
+  // Influence radii scale with world size so terrain features span the map properly.
+  var gridSize = (worldW * worldH > 1500000) ? 12 : 6;
+  var radiusScale = Math.max(1.0, Math.sqrt(worldW * worldH / (720 * 480)));
+  var meshW = Math.ceil(worldW / gridSize);
+  var meshH = Math.ceil(worldH / gridSize);
+  floorMesh = {w:meshW, h:meshH, gridSize:gridSize, heights:[], colors:[],
+               ceilH: new Float32Array(meshW * meshH)};
+  for (var y = 0; y < meshH; y++) {
+    for (var x = 0; x < meshW; x++) {
+      var worldX = x * gridSize;
+      var worldY = y * gridSize;
+      var height = 0;
+      var totalWeight = 0;
+      for (var i = 0; i < platforms.length; i++) {
+        var p = platforms[i];
+        var dx = Math.max(0, Math.max(p.x - worldX, worldX - (p.x + p.w)));
+        var dy = Math.max(0, Math.max(p.y - worldY, worldY - (p.y + p.h)));
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        // Depressions get a wide influence radius so they form broad bowls.
+        // Both radii scale with world size so features fill the map.
+        // Increased depression radius (120→200) = ravines 67% wider.
+        var radius = ((p.heightPercent < 0) ? 200 : 80) * radiusScale;
+        // Smoothstep falloff instead of linear: zero slope at center AND edge.
+        // Linear (old): V-shaped cliffs with a sharp angle at the rim.
+        // Smoothstep (new): broad U-shape — gentle hill/valley sides, gradual descent.
+        var t = Math.min(1, dist / radius);
+        var influence = 1 - t * t * (3 - 2 * t);
+        if (influence > 0) {
+          height += p.heightPercent * influence;
+          totalWeight += influence;
+        }
+      }
+      if (totalWeight > 0) {
+        height /= totalWeight;
+      } else {
+        height = (Math.random() - 0.5) * 0.35;
+      }
+      // Deep cave overlay: force floor deep, stamp ceiling height
+      // (border variations get NO override — normal terrain height/color)
+      var caveData = isInDeepCave(worldX, worldY);
+      if (caveData) {
+        height = Math.min(height, -1.8) - 0.3 * Math.random(); // deep cave floor
+        floorMesh.ceilH[y * meshW + x] = caveData.ceilZ / 25;  // store as height units
+      }
+      floorMesh.heights[y * meshW + x] = height;
+      floorMesh.colors[y * meshW + x] = caveData ? '#2a1a0e' : getFloorColor(height);
+    }
   }
-  var fog = Math.max(0.3, 1.0 - dist * 0.0008);
-  var r = Math.floor(baseColor[0] * colorMod * shade * fog);
-  var g = Math.floor(baseColor[1] * colorMod * shade * fog);
-  var b = Math.floor(baseColor[2] * colorMod * shade * fog);
-  r = Math.max(0, Math.min(255, r)); g = Math.max(0, Math.min(255, g)); b = Math.max(0, Math.min(255, b));
-  var gradient = ctx.createLinearGradient(0, y, 0, y + height);
-  var topShade = 1.12, bottomShade = 0.88;
-  gradient.addColorStop(0, 'rgb(' + Math.floor(r*topShade) + ',' + Math.floor(g*topShade) + ',' + Math.floor(b*topShade) + ')');
-  gradient.addColorStop(0.5, 'rgb(' + r + ',' + g + ',' + b + ')');
-  gradient.addColorStop(1, 'rgb(' + Math.floor(r*bottomShade) + ',' + Math.floor(g*bottomShade) + ',' + Math.floor(b*bottomShade) + ')');
-  ctx.fillStyle = gradient; ctx.fillRect(x, y, 1, height);
+  console.log('[FLOOR] Generated ' + (meshW * meshH) + ' mesh points (' + meshW + 'x' + meshH + ') gridSize=' + gridSize + (deepCaveRegions.length ? ' cave=' + deepCaveRegions.length + 'segs' : ''));
 }
-function findWallSurfaces(){
+
+// =============================================
+// WATER FEATURE GENERATION
+// =============================================
+// Water is now explicitly placed as two distinct feature types, fully
+// independent from terrain depth so deep pits can exist without water:
+//
+//   mesh.water == 0  → dry terrain (including deep dark pits)
+//   mesh.water == 1  → still pool  (slow/subtle glint, naturally enclosed)
+//   mesh.water == 2  → flowing stream (animated shimmer, carved channel)
+//
+// Pools: BFS finds the single deepest connected cluster below POOL_THRESH
+//   and marks it (up to MAX_POOL_CELLS).  Capped so a pool stays compact.
+//
+// Streams: 1–2 channels are carved with a biased random walk from one
+//   quadrant of the map to the opposite one.  The walk is 70% biased
+//   toward the target so channels meander naturally without looping.
+//   Stream cells are carved slightly into the terrain so they sit in a
+//   shallow depression visually.
+function generateWaterFeatures() {
+  if (!floorMesh) return;
+  var mesh = floorMesh;
+  mesh.water    = new Uint8Array(mesh.w * mesh.h);  // 0=none 1=pool 2=stream
+  mesh.waterDirX = new Float32Array(mesh.w * mesh.h); // normalized flow direction X
+  mesh.waterDirY = new Float32Array(mesh.w * mesh.h); // normalized flow direction Y
+
+  // ---- POOLS -------------------------------------------------------
+  // Large maps get more and larger pools to fill the landscape.
+  var isLargeMesh = (mesh.w * mesh.h > 50000);
+  var POOL_THRESH    = -1.25; // only absolute-deepest terrain qualifies
+  var MAX_POOL_CELLS = isLargeMesh ? 180 : 55;
+  var MAX_POOLS      = isLargeMesh ? 3   : 1;
+  var visited = new Uint8Array(mesh.w * mesh.h);
+  var bestCluster = null, bestAvgH = 0;
+
+  for (var py = 2; py < mesh.h - 2; py++) {
+    for (var px = 2; px < mesh.w - 2; px++) {
+      var idx0 = py * mesh.w + px;
+      if (visited[idx0] || mesh.heights[idx0] >= POOL_THRESH) continue;
+      // BFS — collect connected deep cluster
+      var cluster = [], queue = [idx0], totalH = 0;
+      visited[idx0] = 1;
+      while (queue.length > 0) {
+        var qidx = queue.pop();
+        cluster.push(qidx);
+        totalH += mesh.heights[qidx];
+        var qx = qidx % mesh.w, qy = Math.floor(qidx / mesh.w);
+        var nbrs = [qidx - 1, qidx + 1, qidx - mesh.w, qidx + mesh.w];
+        for (var ni = 0; ni < 4; ni++) {
+          var nidx = nbrs[ni];
+          var nx2 = nidx % mesh.w, ny2 = Math.floor(nidx / mesh.w);
+          if (nx2 < 2 || ny2 < 2 || nx2 >= mesh.w - 2 || ny2 >= mesh.h - 2) continue;
+          if (visited[nidx] || mesh.heights[nidx] >= POOL_THRESH) continue;
+          visited[nidx] = 1;
+          queue.push(nidx);
+        }
+      }
+      if (cluster.length < 4) continue;
+      var avgH = totalH / cluster.length;
+      if (bestCluster === null || avgH < bestAvgH) { bestCluster = cluster; bestAvgH = avgH; }
+    }
+  }
+  // For large maps, collect the top-N deepest distinct clusters instead of just 1
+  var poolClusters = [];
+  if (bestCluster) poolClusters.push(bestCluster);
+  if (MAX_POOLS > 1) {
+    // Re-scan visited; any unvisited qualifying cluster that doesn't overlap existing pools
+    var visited2 = new Uint8Array(mesh.w * mesh.h);
+    for (var py2 = 2; py2 < mesh.h - 2 && poolClusters.length < MAX_POOLS; py2++) {
+      for (var px2 = 2; px2 < mesh.w - 2 && poolClusters.length < MAX_POOLS; px2++) {
+        var idx2 = py2 * mesh.w + px2;
+        if (visited2[idx2] || mesh.heights[idx2] >= POOL_THRESH + 0.10) continue;
+        // Check spatial separation from existing pools (at least 15% of map width apart)
+        var sepOK = true;
+        var minSep = mesh.w * 0.15;
+        for (var ep = 0; ep < poolClusters.length; ep++) {
+          var repCell = poolClusters[ep][0];
+          var repX = repCell % mesh.w, repY = Math.floor(repCell / mesh.w);
+          if (Math.hypot(px2 - repX, py2 - repY) < minSep) { sepOK = false; break; }
+        }
+        if (!sepOK) { visited2[idx2] = 1; continue; }
+        var cl2 = [], q2 = [idx2], th2 = 0;
+        visited2[idx2] = 1;
+        while (q2.length > 0) {
+          var qi2 = q2.pop(); cl2.push(qi2); th2 += mesh.heights[qi2];
+          var qx2 = qi2 % mesh.w, qy2 = Math.floor(qi2 / mesh.w);
+          var nb2 = [qi2-1, qi2+1, qi2-mesh.w, qi2+mesh.w];
+          for (var ni2 = 0; ni2 < 4; ni2++) {
+            var ni2idx = nb2[ni2], nx3 = ni2idx % mesh.w, ny3 = Math.floor(ni2idx / mesh.w);
+            if (nx3 < 2 || ny3 < 2 || nx3 >= mesh.w-2 || ny3 >= mesh.h-2) continue;
+            if (visited2[ni2idx] || mesh.heights[ni2idx] >= POOL_THRESH + 0.10) continue;
+            visited2[ni2idx] = 1; q2.push(ni2idx);
+          }
+        }
+        if (cl2.length >= 4) poolClusters.push(cl2);
+      }
+    }
+  }
+  for (var pc = 0; pc < poolClusters.length; pc++) {
+    var poolCells = poolClusters[pc].slice(0, MAX_POOL_CELLS);
+    for (var ci = 0; ci < poolCells.length; ci++) mesh.water[poolCells[ci]] = 1;
+  }
+
+  // ---- STREAMS -----------------------------------------------------
+  // Large maps get more streams crossing different parts of the world.
+  var nStreams = isLargeMesh
+    ? 3 + Math.floor(Math.random() * 3)   // 3–5 streams on big maps
+    : 1 + Math.floor(Math.random() * 2);  // 1–2 streams normally
+  for (var si = 0; si < nStreams; si++) {
+    // Cycle through 4 diagonal patterns so streams spread across the whole map.
+    // Pattern 0: TL→BR  1: TR→BL  2: BL→TR  3: BR→TL
+    var sx, sy, ex, ey;
+    var pat = si % 4;
+    var qw = mesh.w * 0.30, qh = mesh.h * 0.30;
+    if (pat === 0) {
+      sx = 4 + Math.floor(Math.random() * qw);              sy = 4 + Math.floor(Math.random() * qh);
+      ex = Math.floor(mesh.w * 0.65) + Math.floor(Math.random() * qw); ey = Math.floor(mesh.h * 0.65) + Math.floor(Math.random() * qh);
+    } else if (pat === 1) {
+      sx = Math.floor(mesh.w * 0.65) + Math.floor(Math.random() * qw); sy = 4 + Math.floor(Math.random() * qh);
+      ex = 4 + Math.floor(Math.random() * qw);              ey = Math.floor(mesh.h * 0.65) + Math.floor(Math.random() * qh);
+    } else if (pat === 2) {
+      sx = 4 + Math.floor(Math.random() * qw);              sy = Math.floor(mesh.h * 0.65) + Math.floor(Math.random() * qh);
+      ex = Math.floor(mesh.w * 0.65) + Math.floor(Math.random() * qw); ey = 4 + Math.floor(Math.random() * qh);
+    } else {
+      sx = Math.floor(mesh.w * 0.65) + Math.floor(Math.random() * qw); sy = Math.floor(mesh.h * 0.65) + Math.floor(Math.random() * qh);
+      ex = 4 + Math.floor(Math.random() * qw);              ey = 4 + Math.floor(Math.random() * qh);
+    }
+    sx = Math.max(2, Math.min(mesh.w - 3, sx)); sy = Math.max(2, Math.min(mesh.h - 3, sy));
+    ex = Math.max(2, Math.min(mesh.w - 3, ex)); ey = Math.max(2, Math.min(mesh.h - 3, ey));
+
+    // Pre-compute normalized direction so every cell stores which way the stream flows
+    var dLen = Math.hypot(ex - sx, ey - sy) || 1;
+    var ndx = (ex - sx) / dLen, ndy = (ey - sy) / dLen;
+
+    var scx = sx, scy = sy;
+    var maxSteps = (mesh.w + mesh.h) * 3;
+    for (var step = 0; step < maxSteps; step++) {
+      if (scx < 1 || scy < 1 || scx >= mesh.w - 1 || scy >= mesh.h - 1) break;
+      var sidx = scy * mesh.w + scx;
+      mesh.water[sidx] = 2;
+      mesh.waterDirX[sidx] = ndx; mesh.waterDirY[sidx] = ndy;
+      // Carve stream bed slightly lower so it reads as a channel
+      if (mesh.heights[sidx] > -0.55) mesh.heights[sidx] = -0.60 - Math.random() * 0.10;
+      if (Math.abs(scx - ex) < 2 && Math.abs(scy - ey) < 2) break;
+      // 70% biased toward target, 30% wander; advance one axis per step
+      var ddx = ex - scx, ddy = ey - scy;
+      var moveX = 0, moveY = 0;
+      if (Math.random() < 0.5) {
+        moveX = (Math.random() < 0.70) ? (ddx > 0 ? 1 : ddx < 0 ? -1 : 0)
+                                        : (Math.random() < 0.5 ? 1 : -1);
+      } else {
+        moveY = (Math.random() < 0.70) ? (ddy > 0 ? 1 : ddy < 0 ? -1 : 0)
+                                        : (Math.random() < 0.5 ? 1 : -1);
+      }
+      scx += moveX; scy += moveY;
+    }
+  }
+
+  // ---- COLOURS -----------------------------------------------------
+  var poolDeep  = (terrain === 'cave') ? '#0e1824' : '#0e1e30';
+  var poolShall = (terrain === 'cave') ? '#142035' : '#152a45';
+  var streamCol = (terrain === 'cave') ? '#1a2a44' : '#1a3a5a';
+  var poolCount = 0, streamCount = 0;
+  for (var wy3 = 0; wy3 < mesh.h; wy3++) {
+    for (var wx3 = 0; wx3 < mesh.w; wx3++) {
+      var wt = mesh.water[wy3 * mesh.w + wx3];
+      if (wt === 1) {
+        mesh.colors[wy3 * mesh.w + wx3] = (mesh.heights[wy3 * mesh.w + wx3] < -1.35) ? poolDeep : poolShall;
+        poolCount++;
+      } else if (wt === 2) {
+        mesh.colors[wy3 * mesh.w + wx3] = streamCol;
+        streamCount++;
+      }
+    }
+  }
+  console.log('[WATER] Pool: ' + poolCount + ' cells, Stream: ' + streamCount + ' cells');
+}
+
+function generateBlendedFloor() {
+  platforms = [];
+  var margin = Math.min(30, worldW * 0.08);
+  var availableW = worldW - 2 * margin;
+  var availableH = worldH - 2 * margin;
+  Math.seedrandom = function(seed) {
+    var m = 0x80000000, a = 1103515245, c = 12345;
+    var state = seed ? seed : Math.floor(Math.random() * (m - 1));
+    return function() { state = (a * state + c) % m; return state / (m - 1); };
+  };
+  var rng = Math.seedrandom(seedFor(0));
+  // Large worlds get more platforms with bigger size ranges; the influence radius
+  // scaling in generateFloorMesh means each platform covers proportionally more area.
+  var isLarge = (worldW * worldH > 1500000);
+  var platformCap = isLarge ? 80 : 20;
+  var platformDensity = isLarge ? 18000 : 5000; // sq-world-units per platform
+  var targetPlatforms = Math.max(8, Math.min(platformCap, Math.floor(availableW * availableH / platformDensity)));
+  console.log('[FLOOR] Starting blended floor generation: target=' + targetPlatforms + ', world=' + worldW + 'x' + worldH);
+  var generated = 0;
+  for (var i = 0; i < targetPlatforms; i++) {
+    var attempts = 0;
+    var placed = false;
+    while (!placed && attempts < 30) {
+      // Large maps: platforms can be much bigger to create sweeping regions
+      var maxW = isLarge ? Math.min(600, availableW * 0.25) : Math.min(100, availableW * 0.35);
+      var maxH = isLarge ? Math.min(400, availableH * 0.25) : Math.min(80,  availableH * 0.35);
+      var minPW = isLarge ? 80 : 30, minPH = isLarge ? 60 : 20;
+      var pw = Math.floor(minPW + rng() * maxW);
+      var ph = Math.floor(minPH + rng() * maxH);
+      var px = Math.floor(margin + rng() * (availableW - pw));
+      var py = Math.floor(margin + rng() * (availableH - ph));
+      // Bias: valleys deeper than hills (-2.5 to +1.0).
+      // Combined with wider+smoothstep radius, this gives gradual descents into deep floors.
+      var heightPercent = rng() * 3.5 - 2.5;
+      var newPlat = {x:px, y:py, w:pw, h:ph, heightPercent:heightPercent};
+      var overlaps = false;
+      for (var j = 0; j < platforms.length; j++) {
+        var existing = platforms[j];
+        var buffer = Math.max(5, Math.min(12, (pw + ph) / 10));
+        if (!(newPlat.x + newPlat.w + buffer < existing.x || newPlat.x > existing.x + existing.w + buffer ||
+              newPlat.y + newPlat.h + buffer < existing.y || newPlat.y > existing.y + existing.h + buffer)) {
+          overlaps = true; break;
+        }
+      }
+      if (!overlaps) {
+        platforms.push(newPlat);
+        placed = true;
+        generated++;
+      }
+      attempts++;
+    }
+  }
+  console.log('[FLOOR] Pre-generating blended mesh...');
+  generateFloorMesh();
+  generateWaterFeatures();
+  console.log('[FLOOR] Blended floor complete: ' + generated + ' platforms, mesh ready for runtime');
+}
+
+// =============================================
+// IRREGULAR BORDER
+// =============================================
+// Generates a convex-ish polygon that approximates the world rectangle
+// but with random notches bitten inward along each edge and at corners.
+// Applied to the grid AFTER buildGrid() so cave/floor generation runs
+// inside a simple rectangular grid, then the shape is carved out.
+
+// Capsule test against border variation segments. Returns true/false.
+function isInBorderVariation(wx, wy) {
+  for (var i = 0; i < borderVariations.length; i++) {
+    var r = borderVariations[i];
+    var rdx = r.x2 - r.x1, rdy = r.y2 - r.y1;
+    var lenSq = rdx * rdx + rdy * rdy;
+    var t = lenSq > 0 ? Math.max(0, Math.min(1, ((wx - r.x1) * rdx + (wy - r.y1) * rdy) / lenSq)) : 0;
+    var perpDist = Math.hypot(wx - (r.x1 + t * rdx), wy - (r.y1 + t * rdy));
+    if (perpDist < r.width * 0.5) return true;
+  }
+  return false;
+}
+
+// Capsule + circle test against deep cave regions. Returns {ceilZ, type} or null.
+function isInDeepCave(wx, wy) {
+  for (var i = 0; i < deepCaveRegions.length; i++) {
+    var r = deepCaveRegions[i];
+    var rdx = r.x2 - r.x1, rdy = r.y2 - r.y1;
+    var lenSq = rdx * rdx + rdy * rdy;
+    var t = lenSq > 0 ? Math.max(0, Math.min(1, ((wx - r.x1) * rdx + (wy - r.y1) * rdy) / lenSq)) : 0;
+    var perpDist = Math.hypot(wx - (r.x1 + t * rdx), wy - (r.y1 + t * rdy));
+    if (perpDist < r.width * 0.5) return {ceilZ: r.ceilZ, type: r.type};
+  }
+  for (var j = 0; j < deepCaveChambers.length; j++) {
+    var ch = deepCaveChambers[j];
+    if (Math.hypot(wx - ch.cx, wy - ch.cy) < ch.radius) return {ceilZ: ch.ceilZ, type: 'chamber'};
+  }
+  return null;
+}
+
+// Subtle border wall roughening — creates small indentations along the border
+// to make walls feel organic rather than sterile. NO ceiling, NO cave semantics.
+// Runs on ALL bordered terrains. Called AFTER applyIrregularBorder().
+function generateBorderVariation() {
+  if (!grid || !currentBorderPoly) return;
+  var m2 = 0x80000000, a2 = 1103515245, c2 = 12345;
+  var rs = (seedFor(7)) | 0;
+  var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
+
+  var numVeins = (worldW * worldH > 1500000) ? (4 + Math.floor(rng() * 3)) : (2 + Math.floor(rng() * 3));
+
+  // Collect border-edge candidates: wall cells that have at least one open neighbour
+  var edgeCells = [];
+  var dirs4 = [[-1,0],[1,0],[0,-1],[0,1]];
+  for (var gy = 1; gy < gridH - 1; gy++) {
+    for (var gx = 1; gx < gridW - 1; gx++) {
+      if (!grid[gy * gridW + gx]) continue;
+      for (var d = 0; d < 4; d++) {
+        var nx = gx + dirs4[d][0], ny = gy + dirs4[d][1];
+        if (nx >= 0 && ny >= 0 && nx < gridW && ny < gridH && !grid[ny * gridW + nx]) {
+          edgeCells.push({gx:gx, gy:gy}); break;
+        }
+      }
+    }
+  }
+  if (!edgeCells.length) return;
+
+  for (var v = 0; v < numVeins; v++) {
+    var entrance = edgeCells[Math.floor(rng() * edgeCells.length)];
+    var ex = entrance.gx * cell + cell * 0.5;
+    var ey = entrance.gy * cell + cell * 0.5;
+
+    // Direction biased toward map centre
+    var toCX = worldW * 0.5 - ex, toCY = worldH * 0.5 - ey;
+    var toCLen = Math.hypot(toCX, toCY) || 1;
+    var dirX = toCX / toCLen, dirY = toCY / toCLen;
+
+    var numSteps = 4 + Math.floor(rng() * 5);  // 4-8 short steps
+    var stepLen  = 25 + rng() * 25;             // 25-50px per step
+    var veinW    = 30 + rng() * 20;             // 30-50px wide
+
+    // Punch small opening through border wall (radius 2 cells)
+    var entrRad = 2;
+    for (var edy = -entrRad; edy <= entrRad; edy++) {
+      for (var edx = -entrRad; edx <= entrRad; edx++) {
+        if (edx*edx + edy*edy > entrRad*entrRad) continue;
+        var enx = entrance.gx + edx, eny = entrance.gy + edy;
+        if (enx >= 0 && eny >= 0 && enx < gridW && eny < gridH) grid[eny * gridW + enx] = 0;
+      }
+    }
+
+    var px = ex, py = ey;
+    var margin = 50;
+
+    for (var step = 0; step < numSteps; step++) {
+      var jAng = (rng() - 0.5) * 1.4;
+      var cosJ = Math.cos(jAng), sinJ = Math.sin(jAng);
+      var jdX = dirX * cosJ - dirY * sinJ, jdY = dirX * sinJ + dirY * cosJ;
+      var bdX = jdX * 0.55 + dirX * 0.45, bdY = jdY * 0.55 + dirY * 0.45;
+      var bLen = Math.hypot(bdX, bdY) || 1;
+      bdX /= bLen; bdY /= bLen;
+
+      var nx2 = Math.max(margin, Math.min(worldW - margin, px + bdX * stepLen));
+      var ny2 = Math.max(margin, Math.min(worldH - margin, py + bdY * stepLen));
+      var segW = veinW * (0.65 + rng() * 0.7);
+
+      // Store segment (no ceilZ — border variation, not a cave)
+      borderVariations.push({x1:px, y1:py, x2:nx2, y2:ny2, width:segW});
+
+      // Punch grid cells along the segment open
+      var segLen = Math.hypot(nx2 - px, ny2 - py);
+      var sdX = (nx2 - px) / (segLen || 1), sdY = (ny2 - py) / (segLen || 1);
+      var punchR = Math.ceil(segW * 0.5 / cell) + 1;
+      for (var t = 0; t < segLen; t += cell) {
+        var swx = px + sdX * t, swy = py + sdY * t;
+        var sgx2 = Math.floor(swx / cell), sgy2 = Math.floor(swy / cell);
+        for (var pdy = -punchR; pdy <= punchR; pdy++) {
+          for (var pdx = -punchR; pdx <= punchR; pdx++) {
+            var pnx = sgx2 + pdx, pny = sgy2 + pdy;
+            if (pnx < 0 || pny < 0 || pnx >= gridW || pny >= gridH) continue;
+            if (isInBorderVariation(pnx * cell + cell * 0.5, pny * cell + cell * 0.5)) {
+              grid[pny * gridW + pnx] = 0;
+            }
+          }
+        }
+      }
+      // No branch logic — border variation is just subtle roughening
+      px = nx2; py = ny2;
+    }
+  }
+  console.log('[BORDER_VAR] Placed ' + numVeins + ' border variations, ' + borderVariations.length + ' segments');
+}
+
+// Generate deep cave tunnel networks with branching fingers and chambers.
+// Only runs on expanse terrain. Uses iterative work-stack for corridor growth.
+function generateDeepCaves() {
+  if (!grid || !currentBorderPoly) return;
+  var m2 = 0x80000000, a2 = 1103515245, c2 = 12345;
+  var rs = (seedFor(11)) | 0;
+  var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
+
+  var numCaves = 1 + Math.floor(rng() * 2);  // 1-2 cave systems
+
+  // Collect border-edge candidates
+  var edgeCells = [];
+  var dirs4 = [[-1,0],[1,0],[0,-1],[0,1]];
+  for (var gy = 1; gy < gridH - 1; gy++) {
+    for (var gx = 1; gx < gridW - 1; gx++) {
+      if (!grid[gy * gridW + gx]) continue;
+      for (var d = 0; d < 4; d++) {
+        var nx = gx + dirs4[d][0], ny = gy + dirs4[d][1];
+        if (nx >= 0 && ny >= 0 && nx < gridW && ny < gridH && !grid[ny * gridW + nx]) {
+          edgeCells.push({gx:gx, gy:gy}); break;
+        }
+      }
+    }
+  }
+  if (!edgeCells.length) return;
+
+  for (var cv = 0; cv < numCaves; cv++) {
+    var entrance = edgeCells[Math.floor(rng() * edgeCells.length)];
+    var ex = entrance.gx * cell + cell * 0.5;
+    var ey = entrance.gy * cell + cell * 0.5;
+
+    // Outward direction AWAY from map centre — cave tunnels into the border walls
+    var toCX = worldW * 0.5 - ex, toCY = worldH * 0.5 - ey;
+    var toCLen = Math.hypot(toCX, toCY) || 1;
+    var inDirX = -toCX / toCLen, inDirY = -toCY / toCLen;  // negated = outward
+
+    // Wide entrance (radius 5 cells)
+    var entrRad = 5;
+    for (var edy = -entrRad; edy <= entrRad; edy++) {
+      for (var edx = -entrRad; edx <= entrRad; edx++) {
+        if (edx*edx + edy*edy > entrRad*entrRad) continue;
+        var enx = entrance.gx + edx, eny = entrance.gy + edy;
+        if (enx >= 0 && eny >= 0 && enx < gridW && eny < gridH) grid[eny * gridW + enx] = 0;
+      }
+    }
+    deepCaveEntrances.push({x: ex, y: ey});
+    console.log('[DEEP_CAVE] Entrance ' + (cv+1) + ' at world (' + Math.round(ex) + ',' + Math.round(ey) + ')');
+
+    // Work stack for iterative corridor growth
+    // Scale cave dimensions with world size so caves feel spacious on large maps
+    var worldScale = Math.max(1.0, Math.sqrt(worldW * worldH / (720 * 480)));
+    var mainWidth = (60 + rng() * 40) * Math.max(1, worldScale * 0.5);   // ~90-150px on expanse
+    var mainCeilZ = 100 + rng() * 40;     // 100-140
+    var mainSteps = 12 + Math.floor(rng() * 12);  // 12-24 steps (longer corridors)
+    var margin = 60;
+    console.log('[DEEP_CAVE] Cave ' + (cv+1) + ': worldScale=' + worldScale.toFixed(1) +
+                ' mainWidth=' + mainWidth.toFixed(0) + ' steps=' + mainSteps);
+
+    var stack = [{
+      cx: ex, cy: ey, dirX: inDirX, dirY: inDirY,
+      origDirX: inDirX, origDirY: inDirY,
+      width: mainWidth, ceilZ: mainCeilZ, depth: 0,
+      stepsLeft: mainSteps
+    }];
+
+    while (stack.length > 0) {
+      var item = stack.pop();
+      var icx = item.cx, icy = item.cy;
+      var idX = item.dirX, idY = item.dirY;
+
+      for (var step = 0; step < item.stepsLeft; step++) {
+        var stepLen = (40 + rng() * 30) * Math.max(1, worldScale * 0.4);  // 56-98px on expanse
+
+        // Jitter direction, blend back toward original
+        var jAng = (rng() - 0.5) * 0.8;
+        var cosJ = Math.cos(jAng), sinJ = Math.sin(jAng);
+        var jdX = idX * cosJ - idY * sinJ, jdY = idX * sinJ + idY * cosJ;
+        var bdX = jdX * 0.7 + item.origDirX * 0.3, bdY = jdY * 0.7 + item.origDirY * 0.3;
+        var bLen = Math.hypot(bdX, bdY) || 1;
+        bdX /= bLen; bdY /= bLen;
+
+        // Allow cave corridors to extend to world edges (into wall mass)
+        var caveMargin = 5;
+        var nx2 = Math.max(caveMargin, Math.min(worldW - caveMargin, icx + bdX * stepLen));
+        var ny2 = Math.max(caveMargin, Math.min(worldH - caveMargin, icy + bdY * stepLen));
+
+        // Taper width slightly per step
+        var segW = item.width * (0.75 + rng() * 0.5);
+        var segCeil = item.ceilZ * (0.85 + 0.15 * (segW / item.width));
+
+        // Store corridor segment
+        deepCaveRegions.push({x1:icx, y1:icy, x2:nx2, y2:ny2, width:segW, ceilZ:segCeil, type:'corridor'});
+
+        // Punch grid cells open along segment
+        var segLen = Math.hypot(nx2 - icx, ny2 - icy);
+        var sdX = (nx2 - icx) / (segLen || 1), sdY = (ny2 - icy) / (segLen || 1);
+        var punchR = Math.ceil(segW * 0.5 / cell) + 1;
+        for (var t = 0; t < segLen; t += cell) {
+          var swx = icx + sdX * t, swy = icy + sdY * t;
+          var sgx = Math.floor(swx / cell), sgy = Math.floor(swy / cell);
+          for (var pdy = -punchR; pdy <= punchR; pdy++) {
+            for (var pdx = -punchR; pdx <= punchR; pdx++) {
+              var pnx = sgx + pdx, pny = sgy + pdy;
+              if (pnx < 0 || pny < 0 || pnx >= gridW || pny >= gridH) continue;
+              var pwx = pnx * cell + cell * 0.5, pwy = pny * cell + cell * 0.5;
+              if (isInDeepCave(pwx, pwy)) {
+                grid[pny * gridW + pnx] = 0;
+              }
+            }
+          }
+        }
+
+        // CHAMBER: 25% chance after step 2, or at corridor end
+        if ((rng() < 0.25 && step > 2) || step === item.stepsLeft - 1) {
+          var chamberR = (40 + rng() * 40) * Math.max(1, worldScale * 0.4);  // 56-112px on expanse
+          var chamberCeil = item.ceilZ * (1.0 + rng() * 0.2);
+          deepCaveChambers.push({cx:nx2, cy:ny2, radius:chamberR, ceilZ:chamberCeil});
+
+          // Approximate chamber as overlapping capsule segments for ceiling rendering
+          for (var ai = 0; ai < 6; ai++) {
+            var aAng = ai * Math.PI / 3;
+            var adx = Math.cos(aAng) * chamberR * 0.5;
+            var ady = Math.sin(aAng) * chamberR * 0.5;
+            deepCaveRegions.push({x1:nx2-adx, y1:ny2-ady, x2:nx2+adx, y2:ny2+ady,
+                                  width:chamberR, ceilZ:chamberCeil, type:'chamber'});
+          }
+
+          // Punch chamber circle
+          var chPunchR = Math.ceil(chamberR / cell) + 1;
+          var chgx = Math.floor(nx2 / cell), chgy = Math.floor(ny2 / cell);
+          for (var cdy = -chPunchR; cdy <= chPunchR; cdy++) {
+            for (var cdx = -chPunchR; cdx <= chPunchR; cdx++) {
+              var cpx = chgx + cdx, cpy = chgy + cdy;
+              if (cpx < 0 || cpy < 0 || cpx >= gridW || cpy >= gridH) continue;
+              var cwx = cpx * cell + cell * 0.5, cwy = cpy * cell + cell * 0.5;
+              if (Math.hypot(cwx - nx2, cwy - ny2) < chamberR) {
+                grid[cpy * gridW + cpx] = 0;
+              }
+            }
+          }
+        }
+
+        // BRANCH: 35% chance, depth < 3
+        if (item.depth < 3 && rng() < 0.35 && step > 1 && step < item.stepsLeft - 1) {
+          var brAngle = (rng() < 0.5 ? 1 : -1) * (0.5 + rng() * 0.7);
+          var brCos = Math.cos(brAngle), brSin = Math.sin(brAngle);
+          var brDirX = bdX * brCos - bdY * brSin, brDirY = bdX * brSin + bdY * brCos;
+          var brLen = Math.hypot(brDirX, brDirY) || 1;
+          brDirX /= brLen; brDirY /= brLen;
+
+          stack.push({
+            cx: nx2, cy: ny2, dirX: brDirX, dirY: brDirY,
+            origDirX: brDirX, origDirY: brDirY,
+            width: segW * (0.6 + rng() * 0.2),
+            ceilZ: segCeil * 0.85,
+            depth: item.depth + 1,
+            stepsLeft: 4 + Math.floor(rng() * 6)
+          });
+        }
+
+        icx = nx2; icy = ny2;
+        idX = bdX; idY = bdY;
+      }
+    }
+  }
+  // ── Debug summary ─────────────────────────────────────────────────
+  console.log('[DEEP_CAVE] Generated ' + deepCaveRegions.length + ' segments, ' +
+              deepCaveChambers.length + ' chambers, ' + deepCaveEntrances.length + ' entrances');
+  // Log bounding box and extent of the cave system
+  if (deepCaveRegions.length > 0) {
+    var cavMinX = Infinity, cavMinY = Infinity, cavMaxX = -Infinity, cavMaxY = -Infinity;
+    var corridorSegs = 0, chamberSegs = 0;
+    for (var dci = 0; dci < deepCaveRegions.length; dci++) {
+      var dcr = deepCaveRegions[dci];
+      cavMinX = Math.min(cavMinX, dcr.x1, dcr.x2);
+      cavMinY = Math.min(cavMinY, dcr.y1, dcr.y2);
+      cavMaxX = Math.max(cavMaxX, dcr.x1, dcr.x2);
+      cavMaxY = Math.max(cavMaxY, dcr.y1, dcr.y2);
+      if (dcr.type === 'corridor') corridorSegs++;
+      else chamberSegs++;
+    }
+    console.log('[DEEP_CAVE] Bounds: (' + Math.round(cavMinX) + ',' + Math.round(cavMinY) +
+                ') to (' + Math.round(cavMaxX) + ',' + Math.round(cavMaxY) + ')');
+    console.log('[DEEP_CAVE] Extent: ' + Math.round(cavMaxX - cavMinX) + 'px × ' +
+                Math.round(cavMaxY - cavMinY) + 'px  (' + corridorSegs + ' corridor, ' + chamberSegs + ' chamber segs)');
+    // Log widths
+    var widths = deepCaveRegions.filter(function(r){return r.type==='corridor';}).map(function(r){return r.width;});
+    if (widths.length) {
+      var avgW = widths.reduce(function(a,b){return a+b;},0) / widths.length;
+      console.log('[DEEP_CAVE] Corridor widths: avg=' + avgW.toFixed(1) + 'px  min=' +
+                  Math.min.apply(null, widths).toFixed(1) + '  max=' + Math.max.apply(null, widths).toFixed(1));
+    }
+    // Count grid cells punched open for cave
+    var punchedCells = 0;
+    for (var pci = 0; pci < deepCaveRegions.length; pci++) {
+      var pcr = deepCaveRegions[pci];
+      var pcLen = Math.hypot(pcr.x2 - pcr.x1, pcr.y2 - pcr.y1);
+      punchedCells += Math.ceil(pcLen / cell) * Math.ceil(pcr.width / cell);
+    }
+    console.log('[DEEP_CAVE] ~' + punchedCells + ' grid cells carved (approx)');
+    // Log each chamber
+    for (var chdi = 0; chdi < deepCaveChambers.length; chdi++) {
+      var chd = deepCaveChambers[chdi];
+      console.log('[DEEP_CAVE] Chamber ' + (chdi+1) + ': center=(' + Math.round(chd.cx) + ',' +
+                  Math.round(chd.cy) + ') r=' + Math.round(chd.radius) + ' ceil=' + Math.round(chd.ceilZ));
+    }
+  }
+}
+
+// Place ore vein markers on wall cells that border a deep cave corridor.
+// Requires deepCaveRegions to be populated (call after generateDeepCaves).
+function generateOreVeins() {
+  oreVeins = [];
+  if (!deepCaveRegions.length || !grid) return;
+  var m2 = 0x80000000, a2 = 1103515245, c2 = 12345;
+  var rs = (seedFor(7)) | 0;
+  var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
+  var placed = 0;
+  var dirs = [[-1,0,'east'],[1,0,'west'],[0,-1,'south'],[0,1,'north']];
+  // Walk along corridor EDGES (not center) so we find adjacent wall cells
+  for (var si = 0; si < deepCaveRegions.length; si++) {
+    var seg = deepCaveRegions[si];
+    if (seg.type !== 'corridor') continue;
+    var segLen = Math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1);
+    var sdx = (seg.x2 - seg.x1) / (segLen || 1), sdy = (seg.y2 - seg.y1) / (segLen || 1);
+    // Perpendicular direction
+    var perpX = -sdy, perpY = sdx;
+    var halfW = seg.width * 0.5;
+    var steps = Math.ceil(segLen / cell);
+    for (var st = 0; st <= steps; st++) {
+      var cx = seg.x1 + sdx * st * cell, cy = seg.y1 + sdy * st * cell;
+      // Check both edges of the corridor
+      for (var edgeSide = -1; edgeSide <= 1; edgeSide += 2) {
+        var ex = cx + perpX * halfW * edgeSide;
+        var ey = cy + perpY * halfW * edgeSide;
+        // Check 4 neighbours from the edge point
+        for (var di = 0; di < dirs.length; di++) {
+          var ngx = Math.floor(ex / cell) + dirs[di][0];
+          var ngy = Math.floor(ey / cell) + dirs[di][1];
+          if (ngx < 1 || ngy < 1 || ngx >= gridW - 1 || ngy >= gridH - 1) continue;
+          if (!grid[ngy * gridW + ngx]) continue;           // must be a wall cell
+          if (isInDeepCave(ngx * cell + cell * 0.5, ngy * cell + cell * 0.5)) continue;
+          if (rng() > 0.15) continue;                       // 15% spawn chance per edge cell
+          var dup = false;
+          for (var oi = 0; oi < oreVeins.length; oi++) {
+            if (oreVeins[oi].gx === ngx && oreVeins[oi].gy === ngy) { dup = true; break; }
+          }
+          if (dup) continue;
+          var veinType = rng() < 0.5 ? 'gold' : 'teal';
+          var worldX = ngx * cell + cell * 0.5 + dirs[di][0] * cell * 0.3;
+          var worldY = ngy * cell + cell * 0.5 + dirs[di][1] * cell * 0.3;
+          oreVeins.push({gx:ngx, gy:ngy, hp:3, worldX:worldX, worldY:worldY,
+                         side:dirs[di][2], veinType:veinType});
+          placed++;
+        }
+      }
+    }
+  }
+  console.log('[ORE] Placed ' + placed + ' ore veins in cave walls');
+}
+
+// Scatter decorative floor props (bones, crates, crystals, etc.) across open grid cells.
+// Items are purely visual — no collision or interaction. Terrain-aware type selection.
+function generateFloorScatter() {
+  floorScatter = [];
+  if (!grid || gridW < 2 || gridH < 2) return;
+  var m2 = 0x80000000, a2 = 1103515245, c2 = 12345;
+  var rs = (seedFor(9)) | 0;
+  var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
+
+  // Terrain-specific type pool
+  var typePool;
+  if (terrain === 'ice')                   typePool = ['ice_shard','frozen_pool','rubble','ice_shard'];
+  else if (terrain === 'cave')             typePool = ['crystal','stalagmite','rock_pile','puddle','crystal'];
+  else if (terrain === 'expanse' || terrain === 'plains')
+                                           typePool = ['desert_rock','dry_bones','dead_shrub','rubble','desert_rock'];
+  else                                     typePool = ['bones','crate','skull','rubble','bones'];
+
+  // Collect eligible open cells
+  var candidates = [];
+  var goalCX = goal.x + (goal.w || 0) * 0.5, goalCY = goal.y + (goal.h || 0) * 0.5;
+  var shopX = shopMarker ? shopMarker.x : -9999, shopY = shopMarker ? shopMarker.y : -9999;
+  for (var gy = 1; gy < gridH - 1; gy++) {
+    for (var gx = 1; gx < gridW - 1; gx++) {
+      if (grid[gy * gridW + gx] !== 0) continue;   // must be open
+      var wx = gx * cell + cell * 0.5;
+      var wy = gy * cell + cell * 0.5;
+      // Keep away from player start, goal, and shop
+      if (Math.hypot(wx - pos.x, wy - pos.y) < 70) continue;
+      if (Math.hypot(wx - goalCX, wy - goalCY) < 55) continue;
+      if (Math.hypot(wx - shopX,  wy - shopY)  < 50) continue;
+      // For irregular-border terrains, skip cells outside the polygon
+      if (currentBorderPoly && !pointInPolygon(wx, wy, currentBorderPoly)) continue;
+      candidates.push({gx:gx, gy:gy, wx:wx, wy:wy});
+    }
+  }
+
+  // Fisher-Yates shuffle
+  for (var si = candidates.length - 1; si > 0; si--) {
+    var sj = Math.floor(rng() * (si + 1));
+    var tmp = candidates[si]; candidates[si] = candidates[sj]; candidates[sj] = tmp;
+  }
+
+  // ── Singles — sparse, spread across the world ─────────────────────────────
+  // max(6, …) ensures even tiny maps get a handful; cap 15 keeps it sparse.
+  var cavePool = ['crystal','crystal','stalagmite','rock_pile','puddle'];
+  var chamberPool = ['crystal','crystal','crystal','stalagmite','rock_pile'];
+  var singleCount = Math.max(15, Math.min(45, Math.floor(candidates.length * 0.025)));
+  for (var ci = 0; ci < singleCount && ci < candidates.length; ci++) {
+    var c2s = candidates[ci];
+    // Pick type: override for deep cave interiors
+    var inCave = isInDeepCave(c2s.wx, c2s.wy);
+    var itemType;
+    if (inCave && inCave.type === 'chamber') itemType = chamberPool[Math.floor(rng() * chamberPool.length)];
+    else if (inCave) itemType = cavePool[Math.floor(rng() * cavePool.length)];
+    else itemType = typePool[Math.floor(rng() * typePool.length)];
+    floorScatter.push({
+      x: c2s.wx + (rng() - 0.5) * cell * 0.6,
+      y: c2s.wy + (rng() - 0.5) * cell * 0.6,
+      type: itemType,
+      variant: Math.floor(rng() * 3),
+      seed: rng()
+    });
+  }
+
+  // ── Groups — rare clusters of 2–4 same-type items around one anchor ────────
+  // Drawn from candidates not already used by singles so they stay well separated.
+  var groupCount = Math.max(3, Math.min(10, Math.floor(candidates.length * 0.003)));
+  for (var gi = 0; gi < groupCount; gi++) {
+    var gcIdx = singleCount + gi;
+    if (gcIdx >= candidates.length) break;
+    var gc = candidates[gcIdx];
+    var inCaveG = isInDeepCave(gc.wx, gc.wy);
+    var groupType;
+    if (inCaveG && inCaveG.type === 'chamber') groupType = chamberPool[Math.floor(rng() * chamberPool.length)];
+    else if (inCaveG) groupType = cavePool[Math.floor(rng() * cavePool.length)];
+    else groupType = typePool[Math.floor(rng() * typePool.length)];
+    var groupSize = 2 + Math.floor(rng() * 3);   // 2, 3, or 4 items per cluster
+    for (var gj = 0; gj < groupSize; gj++) {
+      var gAng = rng() * Math.PI * 2;
+      var gRad = 5 + rng() * 20;                 // spread within ~20px of anchor
+      floorScatter.push({
+        x: gc.wx + Math.cos(gAng) * gRad + (rng() - 0.5) * cell * 0.25,
+        y: gc.wy + Math.sin(gAng) * gRad + (rng() - 0.5) * cell * 0.25,
+        type: groupType,
+        variant: Math.floor(rng() * 3),
+        seed: rng(),
+        grouped: true   // cosmetic flag — renderers treat these identically to singles
+      });
+    }
+  }
+  console.log('[SCATTER] Placed ' + floorScatter.length + ' floor items (' + singleCount + ' singles + ' + groupCount + ' groups, ' + terrain + ')');
+}
+
+function generateBorderPolygon() {
+  // Inline seedable RNG so this is deterministic per level/seed
+  var m2 = 0x80000000, a2 = 1103515245, c2 = 12345;
+  var rs = (seedFor(5)) | 0;
+  var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
+
+  var m = 22;                              // guaranteed minimum border thickness
+  // Cap maxBite so large maps don't produce 500+ pixel walls that swallow spawn points.
+  var maxBite = Math.min(Math.min(worldW, worldH) * 0.18, 180);
+  var segs = 5 + Math.floor(rng() * 4);   // 5–8 segments per edge (more organic)
+  var poly = [];
+
+  // Randomise the four corners slightly so even the corners feel organic
+  var tlx = m + rng()*maxBite*0.4,  tly = m + rng()*maxBite*0.4;
+  var trx = worldW-m-rng()*maxBite*0.4, tryY = m + rng()*maxBite*0.4;
+  var brx = worldW-m-rng()*maxBite*0.4, bry = worldH-m-rng()*maxBite*0.4;
+  var blx = m + rng()*maxBite*0.4,  bly = worldH-m-rng()*maxBite*0.4;
+
+  // Helper: walk one edge, adding 'segs-1' intermediate vertices each bitten
+  // inward by a random amount in the direction (indx, indy).
+  var maxBiteCorner = 1.1 * maxBite / segs;
+  function addEdge(x1,y1,x2,y2,indx,indy,skipFirst) {
+    if (!skipFirst) poly.push({x:x1, y:y1});
+    for (var i = 1; i < segs; i++) {
+      var t = i / segs;
+      var bite = rng() * maxBite;
+      // Secondary depth noise for rougher, more natural edges
+      bite += (rng() - 0.5) * 12;
+      bite = Math.max(0, bite);
+      // Near-corner taper to avoid sliver crevasses
+      if (i === 1 || i === segs - 1) bite = Math.min(bite, maxBiteCorner);
+      poly.push({x: x1+(x2-x1)*t + indx*bite,
+                 y: y1+(y2-y1)*t + indy*bite});
+    }
+    poly.push({x:x2, y:y2});
+  }
+
+  addEdge(tlx,tly, trx,tryY,  0, 1, false);  // top   — bites go down (+y)
+  addEdge(trx,tryY,brx,bry,  -1, 0, true);   // right — bites go left (-x)
+  addEdge(brx,bry, blx,bly,   0,-1, true);   // bottom— bites go up  (-y)
+  addEdge(blx,bly, tlx,tly,   1, 0, true);   // left  — bites go right(+x)
+
+  // Micro-bump post-pass: insert one vertex between each pair with small
+  // perpendicular jitter to break up straight-line segments
+  var refined = [];
+  for (var ri = 0; ri < poly.length; ri++) {
+    refined.push(poly[ri]);
+    var rj = (ri + 1) % poly.length;
+    var mx = (poly[ri].x + poly[rj].x) * 0.5;
+    var my = (poly[ri].y + poly[rj].y) * 0.5;
+    var edx = poly[rj].x - poly[ri].x, edy = poly[rj].y - poly[ri].y;
+    var eLen = Math.hypot(edx, edy) || 1;
+    // Perpendicular direction (normalised)
+    var px = -edy / eLen, py = edx / eLen;
+    var jitter = (rng() - 0.5) * 10;
+    refined.push({x: mx + px * jitter, y: my + py * jitter});
+  }
+
+  return refined;
+}
+
+// Standard ray-casting point-in-polygon test
+function pointInPolygon(px, py, poly) {
+  var inside = false;
+  for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    var xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+    if (((yi > py) !== (yj > py)) && (px < (xj-xi)*(py-yi)/(yj-yi)+xi))
+      inside = !inside;
+  }
+  return inside;
+}
+
+// Draw the irregular border polygon outline in the 2D minimap view.
+function drawIrregularBorder2D() {
+  if (!currentBorderPoly || currentBorderPoly.length < 3) return;
+  ctx.save();
+  ctx.strokeStyle = '#aaaaaa';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(currentBorderPoly[0].x, currentBorderPoly[0].y);
+  for (var pi = 1; pi < currentBorderPoly.length; pi++) {
+    ctx.lineTo(currentBorderPoly[pi].x, currentBorderPoly[pi].y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// BFS from (targetX,targetY) to nearest position where isInGridWall returns false.
+// Uses the same 6-unit player radius so the spawn is guaranteed collision-free.
+function findSafeSpawn(targetX, targetY) {
+  if (!grid) return {x: targetX, y: targetY};
+  var tgx = Math.floor(targetX / cell), tgy = Math.floor(targetY / cell);
+  tgx = Math.max(0, Math.min(gridW - 1, tgx));
+  tgy = Math.max(0, Math.min(gridH - 1, tgy));
+  var tx = tgx * cell + cell * 0.5, ty = tgy * cell + cell * 0.5;
+  if (!isInGridWall(tx, ty, 6)) return {x: tx, y: ty};
+  var visited = new Uint8Array(gridW * gridH);
+  var queue = [{gx: tgx, gy: tgy}];
+  visited[tgy * gridW + tgx] = 1;
+  var dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+  while (queue.length > 0) {
+    var cur = queue.shift();
+    var nx, ny, nidx, d;
+    for (d = 0; d < 4; d++) {
+      nx = cur.gx + dirs[d][0]; ny = cur.gy + dirs[d][1];
+      if (nx < 0 || ny < 0 || nx >= gridW || ny >= gridH) continue;
+      nidx = ny * gridW + nx;
+      if (visited[nidx]) continue;
+      visited[nidx] = 1;
+      var cx2 = nx * cell + cell * 0.5, cy2 = ny * cell + cell * 0.5;
+      if (!isInGridWall(cx2, cy2, 6)) return {x: cx2, y: cy2};
+      queue.push({gx: nx, gy: ny});
+    }
+  }
+  return {x: targetX, y: targetY};
+}
+
+// Mark every grid cell whose centre falls outside the border polygon as a wall.
+// Called once after buildGrid() so it overrides (or adds to) existing wall data.
+function applyIrregularBorder(poly) {
+  if (!grid || !poly || !poly.length) return;
+  var marked = 0;
+  for (var gy = 0; gy < gridH; gy++) {
+    for (var gx = 0; gx < gridW; gx++) {
+      var cx = gx * cell + cell * 0.5;
+      var cy = gy * cell + cell * 0.5;
+      if (!pointInPolygon(cx, cy, poly)) {
+        grid[gy * gridW + gx] = 1;
+        if (wallHeights) wallHeights[gy * gridW + gx] = 1.0;  // uniform → flat top silhouette
+        marked++;
+      }
+    }
+  }
+  console.log('[BORDER] Irregular border applied: ' + marked + ' cells marked outside polygon');
+}
+
+// =============================================
+// SHOP SYSTEM
+// =============================================
+var SHOP_ITEMS_BASE = [
+  {id:'heal',  name:'Health Potion', desc:'+40 HP',             cost:15, type:'consumable'},
+  {id:'mana',  name:'Mana Crystal',  desc:'+60 Mana',           cost:12, type:'consumable'},
+  {id:'speed', name:'Wind Boots',    desc:'+25% Speed (60s)',   cost:25, type:'consumable'},
+  {id:'ward',  name:'Warding Stone', desc:'Absorb next hit',    cost:35, type:'consumable'},
+  {id:'dmg',   name:'Power Rune',    desc:'+30% Damage (60s)',  cost:30, type:'consumable'},
+  // Spell tomes — unlock new spells
+  {id:'spell_fire',      name:'Flame Jet Tome',    desc:'Unlock Flame Jet',      cost:20, type:'spell', spellId:'fire'},
+  {id:'spell_ice',       name:'Frost Bolt Tome',   desc:'Unlock Frost Bolt',     cost:20, type:'spell', spellId:'ice'},
+  {id:'spell_lightning', name:'Lightning Tome',     desc:'Unlock Chain Lightning',cost:25, type:'spell', spellId:'lightning'},
+  {id:'spell_poison',    name:'Poison Tome',        desc:'Unlock Poison Cloud',   cost:25, type:'spell', spellId:'poison'},
+  {id:'spell_arcane',    name:'Arcane Tome',        desc:'Unlock Arcane Blast',   cost:30, type:'spell', spellId:'arcane'},
+  // Upgrade tomes — enhance owned spells
+  {id:'upg_missile',  name:'Split Shot',     desc:'3-way homing missiles',   cost:40, type:'upgrade', spellId:'missile'},
+  {id:'upg_fire',     name:'Inferno',        desc:'Wider cone, longer fire', cost:40, type:'upgrade', spellId:'fire'},
+  {id:'upg_ice',      name:'Frost Nova',     desc:'AoE slow on hit',         cost:40, type:'upgrade', spellId:'ice'},
+  {id:'upg_lightning',name:'Ball Lightning',  desc:'+1 chain, re-chains',    cost:40, type:'upgrade', spellId:'lightning'},
+  {id:'upg_poison',   name:'Plague',          desc:'Bigger cloud, bonus coins',cost:40, type:'upgrade', spellId:'poison'},
+  {id:'upg_arcane',   name:'Shockwave',       desc:'Bigger radius, longer stun',cost:40, type:'upgrade', spellId:'arcane'}
+];
+
+function getVisibleShopItems() {
+  var result = [];
+  for (var i = 0; i < SHOP_ITEMS_BASE.length; i++) {
+    var item = SHOP_ITEMS_BASE[i];
+    if (item.type === 'spell') {
+      // Only show if spell not yet unlocked
+      if (!spells[item.spellId].unlocked) result.push(item);
+    } else if (item.type === 'upgrade') {
+      // Only show if spell is unlocked AND not yet upgraded
+      if (spells[item.spellId].unlocked && spells[item.spellId].tier < 2) result.push(item);
+    } else {
+      result.push(item); // consumables always visible
+    }
+  }
+  return result;
+}
+var SHOP_ITEMS = SHOP_ITEMS_BASE; // legacy compat — drawShopOverlay uses dynamic list
+
+function spawnShop() {
+  shopMarker = null; shopOpen = false; shopNearby = false;
+  if (Math.random() > 0.6) return; // 60% chance of a shop per level
+
+  // Collect all grid cells that are open (==0) AND adjacent to at least one wall (==1).
+  // These are the interior-edge cells — valid shop positions regardless of border shape.
+  var candidates = [];
+  if (grid && gridW > 0 && gridH > 0) {
+    var dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+    for (var gy = 0; gy < gridH; gy++) {
+      for (var gx = 0; gx < gridW; gx++) {
+        if (grid[gy * gridW + gx] !== 0) continue; // must be open
+        var adj = false;
+        for (var d = 0; d < 4; d++) {
+          var nx = gx + dirs[d][0], ny = gy + dirs[d][1];
+          if (nx < 0 || ny < 0 || nx >= gridW || ny >= gridH || grid[ny * gridW + nx] !== 0) {
+            adj = true; break;
+          }
+        }
+        if (adj) {
+          // Ensure the cell isn't so close to the world origin that it's actually a cfg wall
+          var cx = gx * cell + cell * 0.5;
+          var cy = gy * cell + cell * 0.5;
+          if (cx > cell && cy > cell && cx < worldW - cell && cy < worldH - cell) {
+            candidates.push({x: cx, y: cy});
+          }
+        }
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    // Fallback: centre of world (unlikely to be blocked)
+    shopMarker = {x: worldW * 0.5, y: worldH * 0.5};
+    console.log('[SHOP] No edge candidates — placed at centre');
+    return;
+  }
+
+  var pick = candidates[Math.floor(Math.random() * candidates.length)];
+  shopMarker = {x: pick.x, y: pick.y};
+  console.log('[SHOP] Spawned at (' + pick.x.toFixed(0) + ',' + pick.y.toFixed(0) + ') from ' + candidates.length + ' edge candidates');
+}
+
+function applyShopItem(item) {
+  if (coins < item.cost) return false;
+  coins -= item.cost;
+  if (item.type === 'spell') {
+    // Unlock a new spell
+    spells[item.spellId].unlocked = true;
+    console.log('[SHOP] Unlocked spell: ' + spells[item.spellId].name);
+  } else if (item.type === 'upgrade') {
+    // Upgrade a spell to tier 2
+    var sp = spells[item.spellId];
+    sp.tier = 2;
+    // Apply upgrade-specific stat changes
+    if (item.spellId === 'fire') {
+      sp.coneAngle = 0.5; // wider cone (was 0.25)
+      sp.damage = sp.damage * 1.2; // +20% damage
+    } else if (item.spellId === 'arcane') {
+      sp.novaRadius = 160; // bigger radius (was 100)
+      sp.stunDuration = 1600; // doubled stun (was 800)
+    } else if (item.spellId === 'poison') {
+      sp.cloudRadius = 75; // bigger cloud (was 50)
+      sp.cloudDuration = 5000; // longer (was 4000)
+    } else if (item.spellId === 'lightning') {
+      sp.speed = 300; // slower orb
+      // chainCount stays 2 but +1 applied in chain code for tier>=2
+    }
+    // missile tier 2 (Split Shot) and ice tier 2 (Frost Nova) handled in cast/hit code
+    console.log('[SHOP] Upgraded: ' + sp.name + ' → Tier 2');
+  } else {
+    // Consumable items
+    if (item.id === 'heal')  { health = Math.min(HEALTH_MAX, health + 40); }
+    else if (item.id === 'mana')  { mana = Math.min(MANA_MAX, mana + 60); }
+    else if (item.id === 'speed') { speedBoostUntil = Date.now() + 60000; }
+    else if (item.id === 'ward')  { wardActive = true; }
+    else if (item.id === 'dmg')   { dmgBoostUntil = Date.now() + 60000; }
+  }
+  return true;
+}
+
+function resetLevel(lv) {
+  level = lv || 1;
+  collisions = 0;
+  startMs = Date.now();
+  document.getElementById('hudLevel').textContent = level;
+  document.getElementById('hudCol').textContent = collisions;
+  vel = {x:0, y:0};
+  var idx = (level - 1);
+  if (idx < 0) idx = 0;
+  if (idx >= levels.length) idx = levels.length - 1;
+  var cfg = levels[idx];
+  // If terrain is 'expanse' but the current level config is a small map,
+  // use the Expanse level config (last level) so dimensions match.
+  if (terrain === 'expanse' && !cfg.terrain && levels.length > 0) {
+    var expanseCfg = null;
+    for (var li = 0; li < levels.length; li++) {
+      if (levels[li].terrain === 'expanse') { expanseCfg = levels[li]; break; }
+    }
+    if (expanseCfg) cfg = expanseCfg;
+  }
+  // World dimensions come from the level definition — set globals first so all
+  // downstream functions (buildGrid, generateFloorMesh, etc.) pick them up.
+  worldW = cfg.w || 720;
+  worldH = cfg.h || 480;
+  // View distance scales with map size — ensures large maps feel appropriately vast
+  viewDist = Math.max(800, Math.min(worldW, worldH) * 0.7);
+
+  // ── MAP SIZING DIAGNOSTICS ────────────────────────────────────────────────
+  var _area       = worldW * worldH;
+  var _baseArea   = 720 * 480;
+  var _gridSzPrev = (_area > 1500000) ? 12 : 6;          // matches generateFloorMesh
+  var _meshW      = Math.ceil(worldW / _gridSzPrev);
+  var _meshH      = Math.ceil(worldH / _gridSzPrev);
+  var _gridWp     = Math.floor(worldW / cell);            // collision grid dims
+  var _gridHp     = Math.floor(worldH / cell);
+  var _radScale   = Math.max(1.0, Math.sqrt(_area / _baseArea));
+  var _maxBite    = Math.min(Math.min(worldW, worldH) * 0.18, 180);
+  var _viewDistCalc = Math.max(800, Math.min(worldW, worldH) * 0.7);
+  console.log('[MAP] ═══════════════════════════════════════════');
+  console.log('[MAP] Level ' + lv + '  terrain=' + (cfg.terrain || terrain));
+  console.log('[MAP] World:      ' + worldW + ' × ' + worldH + ' px  (' + (worldW/720).toFixed(1) + 'x  ' + (_area/1e6).toFixed(2) + ' Mpx)');
+  console.log('[MAP] Floor mesh: ' + _meshW + ' × ' + _meshH + ' cells  gridSize=' + _gridSzPrev + 'px  (' + (_meshW*_meshH) + ' total)');
+  console.log('[MAP] Coll grid:  ' + _gridWp + ' × ' + _gridHp + ' cells  cell=' + cell + 'px');
+  console.log('[MAP] viewDist:   ' + _viewDistCalc.toFixed(0) + ' px  (' + (_viewDistCalc/worldW*100).toFixed(0) + '% of width)');
+  console.log('[MAP] radiusScale:' + _radScale.toFixed(2) + '×  maxBite=' + _maxBite.toFixed(0) + 'px');
+  console.log('[MAP] Start:      (' + cfg.start.x + ',' + cfg.start.y + ')  Goal: (' + cfg.goal.x + ',' + cfg.goal.y + ')');
+  console.log('[MAP] ═══════════════════════════════════════════');
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Level config can pin a terrain type (e.g. the Expanse level auto-selects 'expanse')
+  if (cfg.terrain) {
+    terrain = cfg.terrain;
+    var sel = document.getElementById('terrainSelect');
+    if (sel) sel.value = terrain;
+  }
+  pos = {x:cfg.start.x, y:cfg.start.y};
+  goal = {x:cfg.goal.x, y:cfg.goal.y, w:cfg.goal.w, h:cfg.goal.h};
+  walls = cfg.walls.slice();
+  var usesBorderPoly = (terrain === 'plains' || terrain === 'cave' || terrain === 'expanse');
+  if (usesBorderPoly) {
+    currentBorderPoly = generateBorderPolygon();
+    walls = [];
+  } else {
+    currentBorderPoly = null;
+  }
+  // Pipeline: walls → border → border variation → deep caves → floor mesh
+  if (terrain === 'cave') { generateCaveWalls(); }  // adds interior obstacles to walls[]
+  buildGrid();
+  borderVariations = [];
+  deepCaveRegions = [];
+  deepCaveEntrances = [];
+  deepCaveChambers = [];
+  if (currentBorderPoly) {
+    applyIrregularBorder(currentBorderPoly);
+    if (usesBorderPoly) { generateBorderVariation(); }  // subtle wall roughening on all bordered terrains
+    if (terrain === 'expanse') { generateDeepCaves(); } // real deep cave networks (expanse only)
+  }
+  if (usesBorderPoly) { generateBlendedFloor(); }   // cave-aware: stamps ceilH into mesh
+  else { platforms = []; floorMesh = null; }
+  if (currentBorderPoly) {
+    var safe = findSafeSpawn(pos.x, pos.y);
+    pos.x = safe.x; pos.y = safe.y;
+    console.log('[MAP] Safe spawn: (' + pos.x.toFixed(1) + ',' + pos.y.toFixed(1) + ')  grid=(' + Math.floor(pos.x/cell) + ',' + Math.floor(pos.y/cell) + ')  wall=' + (isInGridWall(pos.x,pos.y,6) ? 'YES ⚠' : 'no'));
+  }
+  cam.x = pos.x; cam.y = pos.y; cam.ang = 0; cam.z = 60; cam.pitch = 0; pos.floorZ = 60;
+  CAM_FOLLOW = true;
+  oreVeins = [];
+  floorScatter = [];
+  createWallDecorations();
+  generateOreVeins();
+  generateFloorScatter();
+  spawnEnemies(cfg);
+  coinDrops = []; coins = 0; wardActive = false; dmgBoostUntil = 0; speedBoostUntil = 0;
+  groundEffects = []; chainEffects = []; novaEffects = [];
+  projectiles = []; impacts = []; coneEffects = [];
+  spawnShop();
+  medalGold = (cfg.medals && cfg.medals.gold) ? cfg.medals.gold : 10;
+  medalSilver = (cfg.medals && cfg.medals.silver) ? cfg.medals.silver : 15;
+  medalBronze = (cfg.medals && cfg.medals.bronze) ? cfg.medals.bronze : 22;
+  timeSec = 0; timeColor = '#d4af37';
+  applyPreset();
+}
+
+
+// =============================================
+// SECTION 4: FLOOR HELPERS
+// =============================================
+
+function getFloorHeightAt(x, y) {
+  if (!floorMesh) return 0;
+  var mesh = floorMesh;
+  var gridX = Math.floor(x / mesh.gridSize);
+  var gridY = Math.floor(y / mesh.gridSize);
+  if (gridX < 0 || gridX >= mesh.w || gridY < 0 || gridY >= mesh.h) return 0;
+  return mesh.heights[gridY * mesh.w + gridX];
+}
+
+function getFloorColorAt(x, y) {
+  if (!floorMesh) return getFloorColor(0);
+  var mesh = floorMesh;
+  var gridX = Math.floor(x / mesh.gridSize);
+  var gridY = Math.floor(y / mesh.gridSize);
+  if (gridX < 0 || gridX >= mesh.w || gridY < 0 || gridY >= mesh.h) return getFloorColor(0);
+  return mesh.colors[gridY * mesh.w + gridX];
+}
+
+function getFloorColor(heightPercent) {
+  if (terrain === 'cave') {
+    if (heightPercent < -0.9) return '#18181c'; // abyss
+    if (heightPercent < -0.6) return '#28282e'; // deep pit
+    if (heightPercent < -0.3) return '#3a3a42';
+    if (heightPercent < -0.1) return '#4e4e58';
+    if (heightPercent < 0.1)  return '#7a7a80';
+    if (heightPercent < 0.3)  return '#8a8a90';
+    if (heightPercent < 0.5)  return '#9a9aa0';
+    return '#aaaab0';
+  } else if (terrain === 'expanse') {
+    // Warm sandstone / cracked-earth palette: dark canyon floors, bright mesa tops
+    if (heightPercent < -0.9) return '#1a0e08'; // canyon abyss — near-black
+    if (heightPercent < -0.6) return '#2e1808'; // deep ravine
+    if (heightPercent < -0.3) return '#4a2a10'; // shadowed canyon wall
+    if (heightPercent < -0.1) return '#6b3e1a'; // eroded gully
+    if (heightPercent < 0.1)  return '#8b5a28'; // dry plains floor
+    if (heightPercent < 0.3)  return '#a87040'; // sandy upland
+    if (heightPercent < 0.5)  return '#c48a52'; // mesa shoulder
+    return '#d8a86a';                           // bright mesa top / dune crest
+  } else {
+    if (heightPercent < -0.9) return '#0e1a12'; // abyss — near-black earth
+    if (heightPercent < -0.6) return '#1e2e22'; // deep pit
+    if (heightPercent < -0.3) return '#2a4232';
+    if (heightPercent < -0.1) return '#3a5642';
+    if (heightPercent < 0.1)  return '#5a8a69';
+    if (heightPercent < 0.3)  return '#6a9a79';
+    if (heightPercent < 0.5)  return '#7aaa89';
+    return '#8aba99';
+  }
+}
+
+function avgColor(c1, c2, c3, c4) {
+  var r1 = parseInt(c1.substr(1, 2), 16), g1 = parseInt(c1.substr(3, 2), 16), b1 = parseInt(c1.substr(5, 2), 16);
+  var r2 = parseInt(c2.substr(1, 2), 16), g2 = parseInt(c2.substr(3, 2), 16), b2 = parseInt(c2.substr(5, 2), 16);
+  var r3 = parseInt(c3.substr(1, 2), 16), g3 = parseInt(c3.substr(3, 2), 16), b3 = parseInt(c3.substr(5, 2), 16);
+  var r4 = parseInt(c4.substr(1, 2), 16), g4 = parseInt(c4.substr(3, 2), 16), b4 = parseInt(c4.substr(5, 2), 16);
+  var r = Math.floor((r1 + r2 + r3 + r4) / 4);
+  var g = Math.floor((g1 + g2 + g3 + g4) / 4);
+  var b = Math.floor((b1 + b2 + b3 + b4) / 4);
+  return '#' + ('0' + r.toString(16)).slice(-2) + ('0' + g.toString(16)).slice(-2) + ('0' + b.toString(16)).slice(-2);
+}
+
+
+// =============================================
+// SECTION 5: WALL DECORATIONS
+// =============================================
+
+function findWallSurfaces() {
   var surfaces = [];
-  for(var y = 0; y < gridH; y++){
-    for(var x = 0; x < gridW; x++){
-      if(grid[y * gridW + x]){
-        var hasNorth = (y > 0 && !grid[(y-1) * gridW + x]);
-        var hasSouth = (y < gridH-1 && !grid[(y+1) * gridW + x]);
-        var hasWest = (x > 0 && !grid[y * gridW + (x-1)]);
-        var hasEast = (x < gridW-1 && !grid[y * gridW + (x+1)]);
-        if(hasNorth) surfaces.push({x: x, y: y, side: 'north', worldX: x * cell + cell/2, worldY: y * cell});
-        if(hasSouth) surfaces.push({x: x, y: y, side: 'south', worldX: x * cell + cell/2, worldY: (y+1) * cell});
-        if(hasWest) surfaces.push({x: x, y: y, side: 'west', worldX: x * cell, worldY: y * cell + cell/2});
-        if(hasEast) surfaces.push({x: x, y: y, side: 'east', worldX: (x+1) * cell, worldY: y * cell + cell/2});
+  for (var y = 0; y < gridH; y++) {
+    for (var x = 0; x < gridW; x++) {
+      if (grid[y * gridW + x]) {
+        var hasNorth = (y > 0 && !grid[(y - 1) * gridW + x]);
+        var hasSouth = (y < gridH - 1 && !grid[(y + 1) * gridW + x]);
+        var hasWest = (x > 0 && !grid[y * gridW + (x - 1)]);
+        var hasEast = (x < gridW - 1 && !grid[y * gridW + (x + 1)]);
+        if (hasNorth) surfaces.push({x:x, y:y, side:'north', worldX:x * cell + cell / 2, worldY:y * cell});
+        if (hasSouth) surfaces.push({x:x, y:y, side:'south', worldX:x * cell + cell / 2, worldY:(y + 1) * cell});
+        if (hasWest) surfaces.push({x:x, y:y, side:'west', worldX:x * cell, worldY:y * cell + cell / 2});
+        if (hasEast) surfaces.push({x:x, y:y, side:'east', worldX:(x + 1) * cell, worldY:y * cell + cell / 2});
       }
     }
   }
   return surfaces;
 }
-function createWallDecorations(){ var surfaces = findWallSurfaces(); wallDecorations = []; Math.seedrandom = function(seed){ var m = 0x80000000; var a = 1103515245; var c = 12345; var state = seed ? seed : Math.floor(Math.random() * (m - 1)); return function(){ state = (a * state + c) % m; return state / (m - 1); }; }; var rng = Math.seedrandom(seedFor(3)); var numDecorations = Math.min(8, Math.floor(surfaces.length * 0.15)); for(var i = 0; i < numDecorations; i++){ if(surfaces.length === 0) break; var idx = Math.floor(rng() * surfaces.length); var surface = surfaces[idx]; surfaces.splice(idx, 1); var types = ['torch', 'shield', 'banner', 'sconce']; var type = types[Math.floor(rng() * types.length)]; var offset = (rng() - 0.5) * cell * 0.4; var decorX = surface.worldX; var decorY = surface.worldY; if(surface.side === 'north' || surface.side === 'south'){ decorX += offset; } else { decorY += offset; } wallDecorations.push({worldX: decorX, worldY: decorY, side: surface.side, type: type, gridX: surface.x, gridY: surface.y}); } console.log('[DECOR] Created ' + wallDecorations.length + ' seeded decorations on actual walls'); }
-function isDecorationOccluded(decorX, decorY, camX, camY){
-  var dx = decorX - camX; var dy = decorY - camY;
+
+function createWallDecorations() {
+  var surfaces = findWallSurfaces();
+  wallDecorations = [];
+  Math.seedrandom = function(seed) {
+    var m = 0x80000000, a = 1103515245, c = 12345;
+    var state = seed ? seed : Math.floor(Math.random() * (m - 1));
+    return function() { state = (a * state + c) % m; return state / (m - 1); };
+  };
+  var rng = Math.seedrandom(seedFor(3));
+  // Pick decoration type pool based on terrain — prevent dungeon items on natural rock walls
+  var typePool;
+  if (terrain === 'cave') {
+    typePool = ['fungi', 'moss_drip', 'stalactite_tip'];
+  } else if (terrain === 'expanse' || terrain === 'plains') {
+    return;  // open-air natural border walls — no wall ornaments
+  } else if (terrain === 'ice') {
+    typePool = ['torch', 'sconce'];    // no fabric/painted items in frozen dungeon
+  } else {
+    typePool = ['torch', 'shield', 'banner', 'sconce'];
+  }
+
+  var numDecorations = Math.min(8, Math.floor(surfaces.length * 0.15));
+  for (var i = 0; i < numDecorations; i++) {
+    if (surfaces.length === 0) break;
+    var idx = Math.floor(rng() * surfaces.length);
+    var surface = surfaces[idx];
+    surfaces.splice(idx, 1);
+    // Skip surfaces on irregular border polygon walls (natural terrain, not dungeon)
+    if (currentBorderPoly && !pointInPolygon(surface.worldX, surface.worldY, currentBorderPoly)) continue;
+    var type = typePool[Math.floor(rng() * typePool.length)];
+    var offset = (rng() - 0.5) * cell * 0.4;
+    var decorX = surface.worldX;
+    var decorY = surface.worldY;
+    if (surface.side === 'north' || surface.side === 'south') {
+      decorX += offset;
+    } else {
+      decorY += offset;
+    }
+    wallDecorations.push({
+      worldX:decorX, worldY:decorY, side:surface.side,
+      type:type, gridX:surface.x, gridY:surface.y
+    });
+  }
+  console.log('[DECOR] Created ' + wallDecorations.length + ' seeded decorations on actual walls');
+}
+
+function isDecorationOccluded(decorX, decorY, camX, camY) {
+  var dx = decorX - camX;
+  var dy = decorY - camY;
   var dist = Math.hypot(dx, dy);
-  if(dist < 2) return false;
-  var steps = Math.floor(dist / 3); if(steps < 2) steps = 2;
-  for(var i = 1; i < steps; i++){
+  if (dist < 2) return false;
+  var steps = Math.floor(dist / 3);
+  if (steps < 2) steps = 2;
+  for (var i = 1; i < steps; i++) {
     var t = i / steps;
-    var testX = camX + dx * t; var testY = camY + dy * t;
-    var gridX = Math.floor(testX / cell); var gridY = Math.floor(testY / cell);
-    if(gridX >= 0 && gridX < gridW && gridY >= 0 && gridY < gridH){
-      if(grid[gridY * gridW + gridX]){ return true; }
+    var testX = camX + dx * t;
+    var testY = camY + dy * t;
+    var gridX = Math.floor(testX / cell);
+    var gridY = Math.floor(testY / cell);
+    if (gridX >= 0 && gridX < gridW && gridY >= 0 && gridY < gridH) {
+      if (grid[gridY * gridW + gridX]) return true;
     }
   }
   return false;
 }
-var __decorDebugLast = 0; function drawWallDecorations(){ if(!wallDecorations || wallDecorations.length === 0) return; var w = canvas.width, h = canvas.height; var halfFov = cam.fov / 2; var visibleCount = 0; var occludedCount = 0; var culledCount = 0; var now = Date.now(); var shouldLog = DEBUG_DECORATIONS && (now - __decorDebugLast > 1000); for(var i = 0; i < wallDecorations.length; i++){ var dec = wallDecorations[i]; var dx = dec.worldX - cam.x; var dy = dec.worldY - cam.y; var dist = Math.hypot(dx, dy); if(dist < 1 || dist > 400) continue; var ang = Math.atan2(dy, dx); var da = ang - cam.ang; while(da > Math.PI) da -= Math.PI * 2; while(da < -Math.PI) da += Math.PI * 2; if(Math.abs(da) > halfFov * 1.5) { culledCount++; continue; } var sx = (da / halfFov) * 0.5 + 0.5; var screenX = Math.floor(sx * w); if(screenX < -40 || screenX > w + 40) { culledCount++; continue; } var isOccluded = isDecorationOccluded(dec.worldX, dec.worldY, cam.x, cam.y); if(isOccluded){ occludedCount++; } else { visibleCount++; var renderX = Math.max(0, Math.min(w - 1, screenX)); var wallNormalX = 0, wallNormalY = 0; if(dec.side === 'north') wallNormalY = -1; else if(dec.side === 'south') wallNormalY = 1; else if(dec.side === 'west') wallNormalX = -1; else if(dec.side === 'east') wallNormalX = 1; var toCamX = cam.x - dec.worldX; var toCamY = cam.y - dec.worldY; var toCamLen = Math.hypot(toCamX, toCamY); if(toCamLen > 0){ toCamX /= toCamLen; toCamY /= toCamLen; } var viewAngle = Math.abs(toCamX * wallNormalX + toCamY * wallNormalY); var scale = Math.min(4.0, 200 / dist); var size = Math.max(8, Math.floor(32 * scale)); var pitchOffset=Math.floor(-(cam.pitch||0)*100); var decorY = Math.floor(h * 0.45) + pitchOffset; drawWallAlignedDecoration(dec.type, renderX, decorY, size, dist, dec.side, viewAngle); } } if(shouldLog){ console.log('[DECOR] Summary: ' + visibleCount + ' visible, ' + occludedCount + ' occluded, ' + culledCount + ' culled'); __decorDebugLast = now; } }
-function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle){
+
+function drawWallAlignedDecoration(type, x, y, size, dist, side, viewAngle) {
   ctx.save();
-  var brightness = Math.max(0.4, viewAngle); ctx.globalAlpha = Math.max(0.6, brightness);
-  var widthScale = 1.0; var heightScale = 1.0;
+  var brightness = Math.max(0.4, viewAngle);
+  ctx.globalAlpha = Math.max(0.6, brightness);
+  var widthScale = 1.0;
+  var heightScale = 1.0;
   var distanceFactor = Math.max(0.0, Math.min(1.0, (120 - dist) / 80));
   var angleEffect = distanceFactor * (1.0 - viewAngle);
-  if(side === 'north' || side === 'south'){ widthScale = 1.0 - angleEffect * 0.6; }
+  if (side === 'north' || side === 'south') { widthScale = 1.0 - angleEffect * 0.6; }
   else { heightScale = 1.0 - angleEffect * 0.5; }
-  var w = Math.floor(size * widthScale); var h = Math.floor(size * heightScale);
-  if(type === 'torch'){
-    var stickColor = 'rgb(' + Math.floor(139*brightness) + ',' + Math.floor(69*brightness) + ',' + Math.floor(19*brightness) + ')';
-    ctx.fillStyle = stickColor; ctx.fillRect(x - w/6, y, w/3, h);
-    ctx.fillStyle = '#FF4500'; ctx.globalAlpha *= 0.9; ctx.beginPath();
-    ctx.ellipse(x, y - h/4, w/3, h/2, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#FFD700'; ctx.beginPath();
-    ctx.ellipse(x, y - h/3, w/5, h/4, 0, 0, Math.PI * 2); ctx.fill();
-  } else if(type === 'shield'){
-    var metalColor = 'rgb(' + Math.floor(192*brightness) + ',' + Math.floor(192*brightness) + ',' + Math.floor(192*brightness) + ')';
-    ctx.fillStyle = metalColor; ctx.beginPath();
-    ctx.ellipse(x, y, w/2, h*0.6, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#8B0000'; ctx.globalAlpha *= 0.8; ctx.beginPath();
-    ctx.moveTo(x, y - h/3); ctx.lineTo(x - w/4, y); ctx.lineTo(x, y + h/3); ctx.lineTo(x + w/4, y);
+  var w = Math.floor(size * widthScale);
+  var h = Math.floor(size * heightScale);
+  if (type === 'torch') {
+    var stickColor = 'rgb(' + Math.floor(139 * brightness) + ',' + Math.floor(69 * brightness) + ',' + Math.floor(19 * brightness) + ')';
+    ctx.fillStyle = stickColor;
+    ctx.fillRect(x - w / 6, y, w / 3, h);
+    ctx.fillStyle = '#FF4500'; ctx.globalAlpha *= 0.9;
+    ctx.beginPath(); ctx.ellipse(x, y - h / 4, w / 3, h / 2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#FFD700';
+    ctx.beginPath(); ctx.ellipse(x, y - h / 3, w / 5, h / 4, 0, 0, Math.PI * 2); ctx.fill();
+  } else if (type === 'shield') {
+    var metalColor = 'rgb(' + Math.floor(192 * brightness) + ',' + Math.floor(192 * brightness) + ',' + Math.floor(192 * brightness) + ')';
+    ctx.fillStyle = metalColor;
+    ctx.beginPath(); ctx.ellipse(x, y, w / 2, h * 0.6, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#8B0000'; ctx.globalAlpha *= 0.8;
+    ctx.beginPath();
+    ctx.moveTo(x, y - h / 3); ctx.lineTo(x - w / 4, y); ctx.lineTo(x, y + h / 3); ctx.lineTo(x + w / 4, y);
     ctx.closePath(); ctx.fill();
-  } else if(type === 'banner'){
-    var poleColor = 'rgb(' + Math.floor(139*brightness) + ',' + Math.floor(69*brightness) + ',' + Math.floor(19*brightness) + ')';
-    ctx.fillStyle = poleColor; ctx.fillRect(x - w/8, y - h/2, w/4, h);
-    var fabricColor = 'rgb(' + Math.floor(128*brightness) + ',0,' + Math.floor(128*brightness) + ')';
-    ctx.fillStyle = fabricColor; ctx.fillRect(x, y - h/2, w/2, h*0.7);
+  } else if (type === 'banner') {
+    var poleColor = 'rgb(' + Math.floor(139 * brightness) + ',' + Math.floor(69 * brightness) + ',' + Math.floor(19 * brightness) + ')';
+    ctx.fillStyle = poleColor;
+    ctx.fillRect(x - w / 8, y - h / 2, w / 4, h);
+    var fabricColor = 'rgb(' + Math.floor(128 * brightness) + ',0,' + Math.floor(128 * brightness) + ')';
+    ctx.fillStyle = fabricColor;
+    ctx.fillRect(x, y - h / 2, w / 2, h * 0.7);
     ctx.fillStyle = '#FFD700'; ctx.globalAlpha *= 0.9;
-    ctx.fillRect(x + w/8, y - h/3, w/4, h/6);
-  } else if(type === 'sconce'){
-    var baseColor = 'rgb(' + Math.floor(105*brightness) + ',' + Math.floor(105*brightness) + ',' + Math.floor(105*brightness) + ')';
-    ctx.fillStyle = baseColor; ctx.beginPath(); ctx.arc(x, y, w/3, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#FF6347'; ctx.globalAlpha *= 0.8; ctx.beginPath();
-    ctx.ellipse(x, y - h/6, w/4, h/3, 0, 0, Math.PI * 2); ctx.fill();
-  }
-  ctx.restore();
-}
-function drawDecoration(type, x, y, size, dist){ ctx.save(); if(type === 'torch'){ ctx.fillStyle = '#8B4513'; ctx.fillRect(x - size/6, y, size/3, size); ctx.fillStyle = '#FF4500'; ctx.beginPath(); ctx.ellipse(x, y - size/4, size/3, size/2, 0, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = '#FFD700'; ctx.beginPath(); ctx.ellipse(x, y - size/3, size/5, size/4, 0, 0, Math.PI * 2); ctx.fill(); } else if(type === 'shield'){ ctx.fillStyle = '#C0C0C0'; ctx.beginPath(); ctx.ellipse(x, y, size/2, size*0.6, 0, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = '#8B0000'; ctx.beginPath(); ctx.moveTo(x, y - size/3); ctx.lineTo(x - size/4, y); ctx.lineTo(x, y + size/3); ctx.lineTo(x + size/4, y); ctx.closePath(); ctx.fill(); } else if(type === 'banner'){ ctx.fillStyle = '#8B4513'; ctx.fillRect(x - size/8, y - size/2, size/4, size); ctx.fillStyle = '#800080'; ctx.fillRect(x, y - size/2, size/2, size*0.7); ctx.fillStyle = '#FFD700'; ctx.fillRect(x + size/8, y - size/3, size/4, size/6); } else if(type === 'sconce'){ ctx.fillStyle = '#696969'; ctx.beginPath(); ctx.arc(x, y, size/3, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = '#FF6347'; ctx.beginPath(); ctx.ellipse(x, y - size/6, size/4, size/3, 0, 0, Math.PI * 2); ctx.fill(); } ctx.restore(); }
-var PLAINS_COL_N='#ff6666', PLAINS_COL_S='#66ff66', PLAINS_COL_W='#6699ff', PLAINS_COL_E='#ffe066';
-</script>
-<script>console.info('[GAMES] Chunk 3: gameplay + listeners');
-function drawGoalMarker3D(){
-  var w=canvas.width, h=canvas.height; var fov=cam.fov;
-  var gx=goal.x+goal.w/2, gy=goal.y+goal.h/2;
-  var dx=gx-cam.x, dy=gy-cam.y; var dist=Math.hypot(dx,dy);
-  if(dist<1) dist=1;
-  var ang=Math.atan2(dy,dx); var da=ang - cam.ang;
-  while(da>Math.PI) da-=Math.PI*2; while(da<-Math.PI) da+=Math.PI*2;
-  var halfFov=fov/2; if(Math.abs(da)>halfFov*1.1){ return; }
-  var sx = (da/halfFov)*0.5 + 0.5; var screenX = Math.floor(sx * w);
-  if(depthBuffer && screenX >= 0 && screenX < depthBuffer.length && dist > depthBuffer[screenX] + 3) return;
-  var pitchOffset=Math.floor(-(cam.pitch||0)*100);
-  var floorY = Math.floor(h*0.75)+pitchOffset;
-  var size = Math.max(6, Math.min(28, Math.floor(240/(dist))));
-  ctx.save(); ctx.globalAlpha=0.95; ctx.fillStyle='#00ff00';
-  ctx.strokeStyle='rgba(0,255,0,0.7)'; ctx.lineWidth=2;
-  ctx.fillRect(screenX - size/2, floorY - Math.floor(size/4), size, Math.floor(size/3));
-  ctx.beginPath(); ctx.moveTo(screenX, floorY - Math.floor(size/4));
-  ctx.lineTo(screenX, floorY - Math.floor(size/4) - Math.min(40, Math.floor(280/dist)));
-  ctx.stroke(); ctx.restore();
-}
-function generateBlendedFloor(){ platforms=[]; var w=720, h=480; var margin=Math.min(30, w*0.08); var availableW=w-2*margin; var availableH=h-2*margin; Math.seedrandom = function(seed){ var m = 0x80000000; var a = 1103515245; var c = 12345; var state = seed ? seed : Math.floor(Math.random() * (m - 1)); return function(){ state = (a * state + c) % m; return state / (m - 1); }; }; var rng = Math.seedrandom(54321); var targetPlatforms=Math.max(8, Math.min(20, Math.floor(availableW*availableH/5000))); console.log('[FLOOR] Starting blended floor generation: target=' + targetPlatforms + ', canvas=' + w + 'x' + h); var generated=0; for(var i=0;i<targetPlatforms;i++){ var attempts=0; var placed=false; while(!placed && attempts<30){ var maxW=Math.min(100, availableW*0.35); var maxH=Math.min(80, availableH*0.35); var pw=Math.floor(30 + rng()*maxW); var ph=Math.floor(20 + rng()*maxH); var px=Math.floor(margin + rng()*(availableW-pw)); var py=Math.floor(margin + rng()*(availableH-ph)); var heightPercent=(rng()-0.5)*2.0; var newPlat={x:px,y:py,w:pw,h:ph,heightPercent:heightPercent}; var overlaps=false; for(var j=0;j<platforms.length;j++){ var existing=platforms[j]; var buffer=Math.max(5, Math.min(12, (pw+ph)/10)); if(!(newPlat.x+newPlat.w+buffer<existing.x||newPlat.x>existing.x+existing.w+buffer||newPlat.y+newPlat.h+buffer<existing.y||newPlat.y>existing.y+existing.h+buffer)){ overlaps=true; break; } } if(!overlaps){ platforms.push(newPlat); placed=true; generated++; } attempts++; } } console.log('[FLOOR] Pre-generating blended mesh...'); generateFloorMesh(); console.log('[FLOOR] Blended floor complete: ' + generated + ' platforms, mesh ready for runtime'); }
-function generateFloorMesh(){ var w=720, h=480; var gridSize=6; var meshW=Math.ceil(w/gridSize); var meshH=Math.ceil(h/gridSize); floorMesh={w:meshW, h:meshH, gridSize:gridSize, heights:[], colors:[]}; for(var y=0;y<meshH;y++){ for(var x=0;x<meshW;x++){ var worldX=x*gridSize; var worldY=y*gridSize; var height=0; var totalWeight=0; for(var i=0;i<platforms.length;i++){ var p=platforms[i]; var dx=Math.max(0, Math.max(p.x-worldX, worldX-(p.x+p.w))); var dy=Math.max(0, Math.max(p.y-worldY, worldY-(p.y+p.h))); var dist=Math.sqrt(dx*dx + dy*dy); var influence=Math.max(0, 1.0 - dist/70); if(influence>0){ height += p.heightPercent * influence; totalWeight += influence; } } if(totalWeight>0){ height /= totalWeight; } else { height=(Math.random()-0.5)*0.15; } floorMesh.heights[y*meshW + x] = height; floorMesh.colors[y*meshW + x] = getFloorColor(height); } } console.log('[FLOOR] Generated ' + (meshW*meshH) + ' mesh points (' + meshW + 'x' + meshH + ')'); }
-function drawSkybox3D(){
-  var w=canvas.width, h=canvas.height;
-  var pitchOffset=Math.floor(-(cam.pitch||0)*100);
-  var horizonY=Math.floor(h*0.5)+pitchOffset;
-  ctx.save(); var gradient=ctx.createLinearGradient(0,0,0,horizonY);
-  if(terrain==='cave'){
-    gradient.addColorStop(0, '#2a2a30'); gradient.addColorStop(0.6, '#3a3a40'); gradient.addColorStop(1, '#4a4a50');
-  } else {
-    gradient.addColorStop(0, '#87ceeb'); gradient.addColorStop(0.6, '#b0d9f0'); gradient.addColorStop(1, '#d4e8f5');
-  }
-  ctx.fillStyle=gradient; ctx.fillRect(0,0,w,horizonY); ctx.restore();
-}
-function getFloorColor(heightPercent){
-  if(terrain==='cave'){
-    if(heightPercent<-0.3) return '#5a5a60'; if(heightPercent<-0.1) return '#6a6a70';
-    if(heightPercent<0.1) return '#7a7a80'; if(heightPercent<0.3) return '#8a8a90';
-    if(heightPercent<0.5) return '#9a9aa0'; return '#aaaab0';
-  } else {
-    if(heightPercent<-0.3) return '#3a5a45'; if(heightPercent<-0.1) return '#4a6a55';
-    if(heightPercent<0.1) return '#5a8a69'; if(heightPercent<0.3) return '#6a9a79';
-    if(heightPercent<0.5) return '#7aaa89'; return '#8aba99';
-  }
-}
-function generateBlendedFloor(){ platforms=[]; var w=720, h=480; var margin=Math.min(30, w*0.08); var availableW=w-2*margin; var availableH=h-2*margin;
- Math.seedrandom = function(seed){ var m = 0x80000000; var a = 1103515245; var c = 12345; var state = seed ? seed : Math.floor(Math.random() * (m - 1)); return function(){ state = (a * state + c) % m; return state / (m - 1); }; };
- var rng = Math.seedrandom(seedFor(0)); var targetPlatforms=Math.max(8, Math.min(20, Math.floor(availableW*availableH/5000)));
- console.log('[FLOOR] Starting blended floor generation: target=' + targetPlatforms + ', canvas=' + w + 'x' + h); var generated=0;
- for(var i=0;i<targetPlatforms;i++){ var attempts=0; var placed=false; while(!placed && attempts<30){ var maxW=Math.min(100, availableW*0.35); var maxH=Math.min(80, availableH*0.35);
- var pw=Math.floor(30 + rng()*maxW); var ph=Math.floor(20 + rng()*maxH); var px=Math.floor(margin + rng()*(availableW-pw)); var py=Math.floor(margin + rng()*(availableH-ph));
- var heightPercent=(rng()-0.5)*2.0; var newPlat={x:px,y:py,w:pw,h:ph,heightPercent:heightPercent}; var overlaps=false;
- for(var j=0;j<platforms.length;j++){ var existing=platforms[j]; var buffer=Math.max(5, Math.min(12, (pw+ph)/10));
- if(!(newPlat.x+newPlat.w+buffer<existing.x||newPlat.x>existing.x+existing.w+buffer||newPlat.y+newPlat.h+buffer<existing.y||newPlat.y>existing.y+existing.h+buffer)){ overlaps=true; break; } }
- if(!overlaps){ platforms.push(newPlat); placed=true; generated++; } attempts++; } }
- console.log('[FLOOR] Pre-generating blended mesh...'); generateFloorMesh(); console.log('[FLOOR] Blended floor complete: ' + generated + ' platforms, mesh ready for runtime'); }
-function drawPlatforms2D(){
-  if(!floorMesh) return;
-  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
-  var mesh=floorMesh; var gridSize=mesh.gridSize;
-  for(var y=0;y<mesh.h-1;y++){
-    for(var x=0;x<mesh.w-1;x++){
-      var height=mesh.heights[y*mesh.w + x];
-      var worldX=x*gridSize; var worldY=y*gridSize;
-      ctx.fillStyle=mesh.colors[y*mesh.w + x];
-      ctx.globalAlpha=0.4 + height*0.5;
-      ctx.fillRect(worldX, worldY, gridSize, gridSize);
+    ctx.fillRect(x + w / 8, y - h / 3, w / 4, h / 6);
+  } else if (type === 'sconce') {
+    var baseColor = 'rgb(' + Math.floor(105 * brightness) + ',' + Math.floor(105 * brightness) + ',' + Math.floor(105 * brightness) + ')';
+    ctx.fillStyle = baseColor;
+    ctx.beginPath(); ctx.arc(x, y, w / 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#FF6347'; ctx.globalAlpha *= 0.8;
+    ctx.beginPath(); ctx.ellipse(x, y - h / 6, w / 4, h / 3, 0, 0, Math.PI * 2); ctx.fill();
+
+  // ── Cave ornament types ─────────────────────────────────────────────────────
+
+  } else if (type === 'fungi') {
+    // Bioluminescent cave mushroom cluster — 3-4 small caps in teal/amber palette
+    var fungCols = ['#00b8a0', '#00ddc8', '#e07820', '#ffaa40'];
+    var offsets = [[-w*0.15, 0, 0.55], [w*0.12, h*0.05, 0.45], [-w*0.05, -h*0.08, 0.38], [w*0.18, -h*0.04, 0.32]];
+    for (var fi = 0; fi < offsets.length; fi++) {
+      var fo = offsets[fi];
+      var fr = fo[2] * h;
+      // Glow halo
+      ctx.globalAlpha = 0.18 * brightness;
+      ctx.fillStyle = fungCols[fi % fungCols.length];
+      ctx.beginPath(); ctx.arc(x + fo[0], y + fo[1], fr * 2.2, 0, Math.PI * 2); ctx.fill();
+      // Cap
+      ctx.globalAlpha = 0.75 * brightness;
+      ctx.fillStyle = fungCols[fi % fungCols.length];
+      ctx.beginPath(); ctx.arc(x + fo[0], y + fo[1], fr, 0, Math.PI * 2); ctx.fill();
+      // Stem
+      ctx.globalAlpha = 0.5 * brightness;
+      ctx.fillStyle = '#c8c0a8';
+      ctx.fillRect(x + fo[0] - fr * 0.2, y + fo[1], fr * 0.4, fr * 1.3);
     }
-  }
-  ctx.restore();
-}
-function avgColor(c1,c2,c3,c4){
-  var r1=parseInt(c1.substr(1,2),16), g1=parseInt(c1.substr(3,2),16), b1=parseInt(c1.substr(5,2),16);
-  var r2=parseInt(c2.substr(1,2),16), g2=parseInt(c2.substr(3,2),16), b2=parseInt(c2.substr(5,2),16);
-  var r3=parseInt(c3.substr(1,2),16), g3=parseInt(c3.substr(3,2),16), b3=parseInt(c3.substr(5,2),16);
-  var r4=parseInt(c4.substr(1,2),16), g4=parseInt(c4.substr(3,2),16), b4=parseInt(c4.substr(5,2),16);
-  var r=Math.floor((r1+r2+r3+r4)/4), g=Math.floor((g1+g2+g3+g4)/4), b=Math.floor((b1+b2+b3+b4)/4);
-  return '#'+('0'+r.toString(16)).slice(-2)+('0'+g.toString(16)).slice(-2)+('0'+b.toString(16)).slice(-2);
-}
-function drawPlatforms3D(){
-  if(!floorMesh) return;
-  var w=canvas.width, h=canvas.height; var halfFov=cam.fov/2;
-  var pitchOffset=Math.floor(-(cam.pitch||0)*100); var horizonY=Math.floor(h*0.5)+pitchOffset;
-  var mesh=floorMesh; var cameraZRaw=(cam.z||60); var cameraZ=60 + (cameraZRaw-60)*(25/40);
-  ctx.save(); var visibleQuads=[]; var totalQuads=0, distCulled=0, fovCulled=0, rendered=0, cornerCulled=0;
-  var minH=999, maxH=-999;
-  for(var y=0;y<mesh.h-1;y++){
-    for(var x=0;x<mesh.w-1;x++){
-      var h1=mesh.heights[y*mesh.w + x]; var h2=mesh.heights[y*mesh.w + (x+1)];
-      var h3=mesh.heights[(y+1)*mesh.w + x]; var h4=mesh.heights[(y+1)*mesh.w + (x+1)];
-      var worldX1=x*mesh.gridSize, worldY1=y*mesh.gridSize;
-      var worldX2=(x+1)*mesh.gridSize, worldY2=(y+1)*mesh.gridSize;
-      var centerX=(worldX1+worldX2)/2, centerY=(worldY1+worldY2)/2;
-      var dx=centerX-cam.x, dy=centerY-cam.y; var dist=Math.hypot(dx,dy); totalQuads++;
-      if(dist>800){ distCulled++; continue; }
-      var ang=Math.atan2(dy,dx); var da=ang - cam.ang;
-      while(da>Math.PI) da-=Math.PI*2; while(da<-Math.PI) da+=Math.PI*2;
-      if(Math.abs(da)>halfFov*1.8){ fovCulled++; continue; }
-      var avgHeight=(h1+h2+h3+h4)/4;
-      if(dist<100){ minH=Math.min(minH,h1,h2,h3,h4); maxH=Math.max(maxH,h1,h2,h3,h4); }
-      var c1=mesh.colors[y*mesh.w + x]; var c2=mesh.colors[y*mesh.w + (x+1)];
-      var c3=mesh.colors[(y+1)*mesh.w + x]; var c4=mesh.colors[(y+1)*mesh.w + (x+1)];
-      visibleQuads.push({x1:worldX1,y1:worldY1,x2:worldX2,y2:worldY2,h1:h1,h2:h2,h3:h3,h4:h4,avgHeight:avgHeight,dist:dist,centerX:centerX,centerY:centerY,gridX:x,gridY:y,c1:c1,c2:c2,c3:c3,c4:c4});
+
+  } else if (type === 'moss_drip') {
+    // Moisture seep — dark green drip streaks anchored to upper wall face
+    var mossGreen = 'rgb(' + Math.floor(40 * brightness) + ',' + Math.floor(90 * brightness) + ',' + Math.floor(30 * brightness) + ')';
+    var drips = [[-w * 0.1, 0], [0, -h * 0.04], [w * 0.13, h * 0.02]];
+    for (var mi = 0; mi < drips.length; mi++) {
+      var mx2 = x + drips[mi][0], my2 = y - h * 0.3 + drips[mi][1];
+      var dripH = h * (0.3 + mi * 0.07);
+      var dripW = Math.max(1, Math.floor(w * 0.04));
+      ctx.fillStyle = mossGreen; ctx.globalAlpha = 0.7 * brightness;
+      ctx.fillRect(mx2 - dripW * 0.5, my2, dripW, dripH);
+      // Drip bulb at bottom
+      ctx.beginPath(); ctx.arc(mx2, my2 + dripH, dripW * 0.8, 0, Math.PI * 2); ctx.fill();
     }
-  }
-  visibleQuads.sort(function(a,b){return b.dist-a.dist;});
-  for(var i=0;i<visibleQuads.length;i++){
-    var quad=visibleQuads[i];
-    var corners=[{x:quad.x1,y:quad.y1,h:quad.h1},{x:quad.x2,y:quad.y1,h:quad.h2},{x:quad.x2,y:quad.y2,h:quad.h4},{x:quad.x1,y:quad.y2,h:quad.h3}];
-    var screenPts=[]; var allVisible=true;
-    for(var j=0;j<4;j++){
-      var dx=corners[j].x-cam.x, dy=corners[j].y-cam.y; var dist=Math.hypot(dx,dy);
-      if(dist<1) dist=1; var ang=Math.atan2(dy,dx); var da=ang - cam.ang;
-      while(da>Math.PI) da-=Math.PI*2; while(da<-Math.PI) da+=Math.PI*2;
-      if(Math.abs(da)>halfFov*2.5){ allVisible=false; cornerCulled++; break; }
-      var sx=(da/halfFov)*0.5 + 0.5; var screenX=Math.floor(sx*w);
-      var worldZ=corners[j].h*25; var heightAboveFloor=cameraZ-worldZ;
-      var screenY=horizonY + Math.floor((heightAboveFloor/dist)*180);
-      screenPts.push({x:screenX,y:screenY});
-    }
-    if(!allVisible){ continue; }
-    rendered++; ctx.fillStyle=avgColor(quad.c1,quad.c2,quad.c3,quad.c4); ctx.globalAlpha=1.0;
-    ctx.beginPath(); ctx.moveTo(screenPts[0].x, screenPts[0].y);
-    for(var k=1;k<screenPts.length;k++){ ctx.lineTo(screenPts[k].x, screenPts[k].y); }
+    // Moss patch — irregular cluster near base of drips
+    ctx.globalAlpha = 0.55 * brightness;
+    ctx.fillStyle = 'rgb(' + Math.floor(30 * brightness) + ',' + Math.floor(70 * brightness) + ',' + Math.floor(20 * brightness) + ')';
+    ctx.beginPath(); ctx.ellipse(x, y + h * 0.1, w * 0.45, h * 0.18, 0, 0, Math.PI * 2); ctx.fill();
+
+  } else if (type === 'stalactite_tip') {
+    // Downward rocky spike near the top of a tall cave wall face
+    var stoneColor = 'rgb(' + Math.floor(70 * brightness) + ',' + Math.floor(60 * brightness) + ',' + Math.floor(50 * brightness) + ')';
+    var tipY = y - h * 0.35;   // anchor near top of wall
+    // Main spike
+    ctx.fillStyle = stoneColor; ctx.globalAlpha = 0.85 * brightness;
+    ctx.beginPath();
+    ctx.moveTo(x - w * 0.18, tipY);
+    ctx.lineTo(x + w * 0.18, tipY);
+    ctx.lineTo(x, tipY + h * 0.45);
     ctx.closePath(); ctx.fill();
+    // Secondary smaller spike offset
+    ctx.globalAlpha = 0.65 * brightness;
+    ctx.beginPath();
+    ctx.moveTo(x + w * 0.22, tipY + h * 0.04);
+    ctx.lineTo(x + w * 0.42, tipY + h * 0.04);
+    ctx.lineTo(x + w * 0.32, tipY + h * 0.32);
+    ctx.closePath(); ctx.fill();
+    // Highlight edge
+    ctx.strokeStyle = 'rgba(180,160,130,' + (0.3 * brightness) + ')';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x - w * 0.18, tipY); ctx.lineTo(x, tipY + h * 0.45);
+    ctx.stroke();
   }
   ctx.restore();
-  if(DEBUG_TEXTURE && Date.now()-__dbgTexLast>1000){
-    __dbgTexLast=Date.now();
-    console.log('[FLOOR-3D]', 'total='+totalQuads, 'distCull='+distCulled, 'fovCull='+fovCulled, 'cornerCull='+cornerCulled, 'rendered='+rendered);
+}
+
+// ── FLOOR SCATTER ─────────────────────────────────────────────────────────────
+
+// Draw a single floor scatter item at screen position (x, y) with perspective size.
+// All shapes are anchored at their base (ground level) so they sit ON the floor.
+function drawFloorItem(type, variant, seed, x, y, size) {
+  ctx.save();
+  var s = size;
+  var s2 = s * 0.5, s4 = s * 0.25, s8 = s * 0.125;
+  // Use seed for per-item sub-randomness without calling Math.random()
+  var r0 = (seed * 7.3 + 0.1) % 1.0;
+  var r1 = (seed * 13.7 + 0.3) % 1.0;
+  var r2 = (seed * 19.1 + 0.6) % 1.0;
+
+  if (type === 'bones' || type === 'dry_bones') {
+    var boneCol = (type === 'dry_bones') ? '#c8b870' : '#c8c8c8';
+    ctx.strokeStyle = boneCol; ctx.lineWidth = Math.max(1, s * 0.12); ctx.lineCap = 'round';
+    var angles = [r0 * Math.PI, (r0 + 0.4) * Math.PI, (r1 + 0.7) * Math.PI];
+    for (var bi = 0; bi < (variant === 0 ? 2 : 3); bi++) {
+      var ba = angles[bi]; var bl = s * (0.5 + r1 * 0.3);
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath(); ctx.moveTo(x + Math.cos(ba)*bl, y + Math.sin(ba)*bl*0.45);
+      ctx.lineTo(x - Math.cos(ba)*bl, y - Math.sin(ba)*bl*0.45); ctx.stroke();
+      // endpoint knuckle dots
+      ctx.fillStyle = boneCol; ctx.globalAlpha = 0.9;
+      ctx.beginPath(); ctx.arc(x + Math.cos(ba)*bl, y + Math.sin(ba)*bl*0.45, s*0.10, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x - Math.cos(ba)*bl, y - Math.sin(ba)*bl*0.45, s*0.10, 0, Math.PI*2); ctx.fill();
+    }
+
+  } else if (type === 'crate') {
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = '#8b5a2b'; ctx.fillRect(x - s2, y - s2, s, s);
+    ctx.fillStyle = '#6b3a1b'; ctx.fillRect(x - s2, y - s8, s, Math.max(1, s*0.15));
+    ctx.fillRect(x - s8, y - s2, Math.max(1, s*0.15), s);
+    if (variant === 2) { // broken corner
+      ctx.clearRect(x + s2 - s*0.3, y - s2, s*0.32, s*0.32);
+      ctx.fillStyle = '#3a1a08'; ctx.fillRect(x + s2 - s*0.3, y - s2, s*0.32, s*0.32);
+    }
+    ctx.strokeStyle = '#4a2808'; ctx.lineWidth = 1; ctx.globalAlpha = 0.7;
+    ctx.strokeRect(x - s2, y - s2, s, s);
+
+  } else if (type === 'skull') {
+    ctx.globalAlpha = 0.88;
+    ctx.fillStyle = '#d8d0b8';
+    ctx.beginPath(); ctx.ellipse(x, y - s*0.15, s*0.38, s*0.32, 0, 0, Math.PI*2); ctx.fill();
+    // jaw
+    ctx.fillStyle = '#c0b8a0';
+    ctx.beginPath(); ctx.ellipse(x, y + s*0.12, s*0.28, s*0.18, 0, 0, Math.PI); ctx.fill();
+    // eye sockets
+    ctx.fillStyle = '#1a1008'; ctx.globalAlpha = 0.85;
+    ctx.beginPath(); ctx.ellipse(x - s*0.13, y - s*0.18, s*0.09, s*0.10, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x + s*0.13, y - s*0.18, s*0.09, s*0.10, 0, 0, Math.PI*2); ctx.fill();
+    // teeth
+    if (s > 8) {
+      ctx.fillStyle = '#d8d0b8'; ctx.globalAlpha = 0.8;
+      for (var ti = 0; ti < 3; ti++) {
+        ctx.fillRect(x - s*0.12 + ti*s*0.12, y + s*0.04, Math.max(1,s*0.08), Math.max(1,s*0.12));
+      }
+    }
+
+  } else if (type === 'rubble') {
+    var rubCols = ['#787060','#686058','#888070','#504840'];
+    for (var ri = 0; ri < 5; ri++) {
+      var rox = (((ri*7+3)*seed*11)%1.0 - 0.5) * s * 0.9;
+      var roy = (((ri*5+1)*seed*17)%1.0 - 0.5) * s * 0.5;
+      var rr = s * (0.12 + ((ri*3+seed*7)%1.0) * 0.15);
+      ctx.fillStyle = rubCols[ri % rubCols.length]; ctx.globalAlpha = 0.8;
+      ctx.beginPath(); ctx.ellipse(x+rox, y+roy, rr*1.3, rr*0.7, r0*Math.PI, 0, Math.PI*2); ctx.fill();
+    }
+
+  } else if (type === 'ice_shard') {
+    ctx.globalAlpha = 0.75;
+    var shardCols = ['rgba(140,200,255,0.7)','rgba(180,230,255,0.6)','rgba(100,170,240,0.65)'];
+    for (var ii = 0; ii < (variant === 0 ? 2 : 3); ii++) {
+      var iox = (ii - 1) * s * 0.35; var ih = s * (0.7 + ii * 0.2);
+      ctx.fillStyle = shardCols[ii % shardCols.length];
+      ctx.beginPath();
+      ctx.moveTo(x + iox - s*0.1, y);
+      ctx.lineTo(x + iox + s*0.1, y);
+      ctx.lineTo(x + iox, y - ih); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = 'rgba(220,240,255,0.5)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x + iox, y); ctx.lineTo(x + iox, y - ih); ctx.stroke();
+    }
+
+  } else if (type === 'frozen_pool') {
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = 'rgba(100,160,255,0.45)';
+    ctx.beginPath(); ctx.ellipse(x, y, s*0.7, s*0.3, 0, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = 'rgba(200,230,255,0.6)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.ellipse(x - s*0.15, y - s*0.06, s*0.28, s*0.1, -0.3, 0, Math.PI); ctx.stroke();
+    // crack
+    ctx.strokeStyle = 'rgba(180,210,255,0.4)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x - s*0.2, y + s*0.05); ctx.lineTo(x+s*0.35, y-s*0.1); ctx.stroke();
+
+  } else if (type === 'crystal') {
+    var crystColors = (terrain === 'expanse' || terrain === 'plains')
+      ? ['#c8a000','#ffe066','#e8b800'] : ['#00c8a8','#00eedd','#60d8c8'];
+    for (var ki = 0; ki < (variant === 0 ? 2 : 3); ki++) {
+      var kox = (ki - 1) * s * 0.3; var kh = s * (0.6 + ki * 0.25);
+      ctx.globalAlpha = 0.85; ctx.fillStyle = crystColors[ki % crystColors.length];
+      ctx.beginPath();
+      ctx.moveTo(x+kox-s*0.09, y - s*0.05);
+      ctx.lineTo(x+kox+s*0.09, y - s*0.05);
+      ctx.lineTo(x+kox, y - kh); ctx.closePath(); ctx.fill();
+      // bright inner core
+      ctx.globalAlpha = 0.55; ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.moveTo(x+kox-s*0.03, y - kh*0.4);
+      ctx.lineTo(x+kox+s*0.03, y - kh*0.4);
+      ctx.lineTo(x+kox, y - kh*0.85); ctx.closePath(); ctx.fill();
+    }
+
+  } else if (type === 'stalagmite') {
+    ctx.globalAlpha = 0.82;
+    var stCol = '#6a5848';
+    ctx.fillStyle = stCol;
+    var sw = s * (0.12 + r0 * 0.08); var sh = s * (0.9 + r1 * 0.5);
+    ctx.beginPath();
+    ctx.moveTo(x - sw, y);
+    ctx.lineTo(x + sw, y);
+    ctx.lineTo(x + sw*0.3, y - sh);
+    ctx.lineTo(x - sw*0.3, y - sh); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(180,160,130,0.4)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x - sw*0.2, y); ctx.lineTo(x - sw*0.1, y - sh*0.8); ctx.stroke();
+
+  } else if (type === 'rock_pile') {
+    var rpCols = ['#787060','#686058','#888070'];
+    for (var rpi = 0; rpi < 3; rpi++) {
+      var rpox = (rpi-1) * s*0.3 + (r0-0.5)*s*0.15;
+      var rpoy = (r1-0.5)*s*0.2;
+      var rpr = s*(0.22 + rpi*0.04);
+      ctx.globalAlpha = 0.8; ctx.fillStyle = rpCols[rpi];
+      ctx.beginPath(); ctx.ellipse(x+rpox, y+rpoy, rpr*1.2, rpr*0.75, r2*Math.PI, 0, Math.PI*2); ctx.fill();
+    }
+
+  } else if (type === 'puddle') {
+    ctx.globalAlpha = 0.65;
+    ctx.fillStyle = 'rgba(15,22,35,0.75)';
+    ctx.beginPath(); ctx.ellipse(x, y, s*0.65, s*0.28, 0, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = 'rgba(60,80,100,0.5)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.ellipse(x - s*0.1, y - s*0.06, s*0.2, s*0.07, -0.4, 0, Math.PI); ctx.stroke();
+
+  } else if (type === 'desert_rock') {
+    ctx.globalAlpha = 0.82;
+    ctx.fillStyle = '#b8905a';
+    ctx.beginPath(); ctx.ellipse(x, y - s*0.15, s*(0.38+r0*0.15), s*(0.25+r1*0.1), r2*0.5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#d0a870'; ctx.globalAlpha = 0.6;
+    ctx.beginPath(); ctx.ellipse(x - s*0.08, y - s*0.22, s*0.15, s*0.08, -0.5, 0, Math.PI*2); ctx.fill();
+
+  } else if (type === 'dead_shrub') {
+    ctx.strokeStyle = '#6a4820'; ctx.lineWidth = Math.max(1, s*0.09); ctx.lineCap = 'round';
+    ctx.globalAlpha = 0.78;
+    // main trunk
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + (r0-0.5)*s*0.2, y - s*0.65); ctx.stroke();
+    // branches
+    var branches = [[0.4, -0.4, 0.5, 0.3],[-0.35, -0.45, -0.55, 0.25],[0.15, -0.6, 0.45, 0.2]];
+    for (var bri = 0; bri < 3; bri++) {
+      var br = branches[bri];
+      var bx1 = x + br[0]*s, by1 = y + br[1]*s;
+      ctx.lineWidth = Math.max(1, s*0.06);
+      ctx.beginPath(); ctx.moveTo(bx1, by1); ctx.lineTo(bx1 + br[2]*s, by1 + br[3]*s); ctx.stroke();
+    }
   }
-  if(DEBUG_FLOOR && Date.now()-__dbgFloorLast>500){
-    __dbgFloorLast=Date.now(); var camFloorH=getFloorHeightAt(cam.x,cam.y);
-    console.log('[FLOOR-HEIGHTS]', 'cam=('+cam.x.toFixed(1)+','+cam.y.toFixed(1)+')', 'camFloorH='+camFloorH.toFixed(3), 'cameraZ='+cameraZ.toFixed(1), 'nearbyRange=['+minH.toFixed(3)+' to '+maxH.toFixed(3)+']', 'delta='+(maxH-minH).toFixed(3), 'scale=25');
+  ctx.restore();
+}
+
+// Perspective-projects all floorScatter items and draws them with drawFloorItem().
+function drawFloorScatter3D() {
+  if (!floorScatter || !floorScatter.length || !MODE3D) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var cameraZRaw = (cam.z || 60);
+  var cameraZ = 60 + (cameraZRaw - 60) * (25 / 40);
+
+  for (var i = 0; i < floorScatter.length; i++) {
+    var item = floorScatter[i];
+    var dx = item.x - cam.x, dy = item.y - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 3 || dist > viewDist * 0.45) continue;
+
+    var ang = Math.atan2(dy, dx);
+    var da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.4) continue;
+
+    var sx = (da / halfFov) * 0.5 + 0.5;
+    var screenX = Math.floor(sx * w);
+    if (screenX < -20 || screenX > w + 20) continue;
+
+    // Depth buffer occlusion
+    if (depthBuffer && screenX >= 0 && screenX < depthBuffer.length && dist > depthBuffer[screenX] + 2) continue;
+
+    var fh = floorMesh ? getFloorHeightAt(item.x, item.y) : 0;
+    var floorWorldZ = fh * 25;
+    var screenY = horizonY + Math.floor(((cameraZ - floorWorldZ) / dist) * 180);
+
+    var size = Math.max(6, Math.min(60, Math.floor(1200 / dist)));
+
+    // Slight distance fog on alpha
+    var fogAlpha = Math.max(0.35, 1.0 - dist / (viewDist * 0.45) * 0.55);
+    ctx.save(); ctx.globalAlpha = fogAlpha;
+
+    drawFloorItem(item.type, item.variant, item.seed, screenX, screenY, size);
+    ctx.restore();
   }
 }
-function drawCalibration(){
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  ctx.fillStyle='#333'; ctx.fillRect(0,0,canvas.width,canvas.height);
-  ctx.fillStyle='#fff'; ctx.font='16px Arial'; ctx.textAlign='center';
-  ctx.fillText('Calibrating...', canvas.width/2, canvas.height/2 - 20);
-  ctx.fillText('Hold device flat and still', canvas.width/2, canvas.height/2 + 10);
-  var pct=Math.min(100, Math.floor((calStableMs/calNeedStableMs)*100));
-  ctx.fillStyle='#4db6ff';
-  ctx.fillRect(canvas.width/2 - 100, canvas.height/2 + 30, pct*2, 10);
-  ctx.strokeStyle='#fff';
-  ctx.strokeRect(canvas.width/2 - 100, canvas.height/2 + 30, 200, 10);
+
+// Renders breakable ore vein overlays on cave walls.
+// Same perspective pipeline as drawWallDecorations; depth-buffer occlusion prevents
+// drawing through walls. hp-based opacity shows cracking as the vein is damaged.
+function drawOreVeins() {
+  if (!oreVeins || !oreVeins.length || !MODE3D) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var cameraZRaw = (cam.z || 60);
+  var cameraZ = 60 + (cameraZRaw - 60) * (25 / 40);
+  var now = Date.now();
+
+  for (var i = 0; i < oreVeins.length; i++) {
+    var ore = oreVeins[i];
+    var dx = ore.worldX - cam.x, dy = ore.worldY - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 1 || dist > 280) continue;
+
+    var ang = Math.atan2(dy, dx);
+    var da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.5) continue;
+
+    var sx = (da / halfFov) * 0.5 + 0.5;
+    var screenX = Math.floor(sx * w);
+    if (screenX < -30 || screenX > w + 30) continue;
+
+    // Depth buffer occlusion — skip if a wall is closer than the ore vein
+    if (depthBuffer && screenX >= 0 && screenX < depthBuffer.length && dist > depthBuffer[screenX] + 2) continue;
+
+    var fhAtOre = floorMesh ? getFloorHeightAt(ore.worldX, ore.worldY) : 0;
+    var floorWorldZ = fhAtOre * 25;
+    var screenY = horizonY + Math.floor(((cameraZ - floorWorldZ) / dist) * 180);
+    // Place vein at mid-wall height
+    var wallMidY = screenY - Math.floor(h / dist * 180 * 0.55);
+
+    // Perspective-scaled size
+    var size = Math.max(6, Math.min(48, Math.floor(160 / dist)));
+
+    // hp fade: full at 3, 65% at 2, 35% at 1 (cracked look)
+    var hpAlpha = ore.hp >= 3 ? 1.0 : ore.hp === 2 ? 0.65 : 0.35;
+    // Shimmer flicker
+    var flicker = 0.82 + 0.18 * Math.sin(now * 0.007 + ore.gx * 5.3 + ore.gy * 3.7);
+
+    ctx.save();
+    ctx.globalAlpha = hpAlpha * flicker;
+
+    var col1, col2, glowCol;
+    if (ore.veinType === 'gold') {
+      col1 = '#c8a000'; col2 = '#ffe066'; glowCol = 'rgba(255,200,0,0.25)';
+    } else {
+      col1 = '#00a89a'; col2 = '#00ddc8'; glowCol = 'rgba(0,220,200,0.2)';
+    }
+
+    // Glow halo behind vein
+    ctx.globalAlpha = hpAlpha * flicker * 0.3;
+    ctx.fillStyle = glowCol;
+    ctx.beginPath(); ctx.arc(screenX, wallMidY, size * 1.6, 0, Math.PI * 2); ctx.fill();
+
+    // Jagged vein polygon — mimics a mineral seam cutting across the wall face
+    ctx.globalAlpha = hpAlpha * flicker;
+    ctx.fillStyle = col1;
+    var s = size;
+    ctx.beginPath();
+    ctx.moveTo(screenX - s,      wallMidY - s * 0.1);
+    ctx.lineTo(screenX - s*0.5,  wallMidY - s * 0.55);
+    ctx.lineTo(screenX + s*0.1,  wallMidY - s * 0.35);
+    ctx.lineTo(screenX + s*0.6,  wallMidY - s * 0.7);
+    ctx.lineTo(screenX + s,      wallMidY - s * 0.2);
+    ctx.lineTo(screenX + s*0.7,  wallMidY + s * 0.4);
+    ctx.lineTo(screenX + s*0.15, wallMidY + s * 0.2);
+    ctx.lineTo(screenX - s*0.4,  wallMidY + s * 0.55);
+    ctx.closePath(); ctx.fill();
+
+    // Bright accent veins inside
+    ctx.fillStyle = col2;
+    ctx.globalAlpha = hpAlpha * flicker * 0.75;
+    ctx.beginPath();
+    ctx.moveTo(screenX - s*0.5, wallMidY - s*0.4);
+    ctx.lineTo(screenX + s*0.0, wallMidY - s*0.55);
+    ctx.lineTo(screenX + s*0.3, wallMidY + s*0.1);
+    ctx.lineTo(screenX - s*0.1, wallMidY + s*0.25);
+    ctx.closePath(); ctx.fill();
+
+    // If hp < 3: draw crack lines over the vein
+    if (ore.hp < 3) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.lineWidth = Math.max(1, Math.floor(size / 10));
+      ctx.globalAlpha = hpAlpha;
+      ctx.beginPath();
+      ctx.moveTo(screenX - s*0.2, wallMidY - s*0.6);
+      ctx.lineTo(screenX + s*0.3, wallMidY + s*0.3);
+      if (ore.hp < 2) {
+        ctx.moveTo(screenX + s*0.4, wallMidY - s*0.4);
+        ctx.lineTo(screenX - s*0.3, wallMidY + s*0.5);
+      }
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
 }
-function draw2D(){ updateViewCamera(); ctx.clearRect(0,0,canvas.width,canvas.height); if(bgPattern){ ctx.save(); ctx.fillStyle=bgPattern; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore(); } ctx.save(); ctx.translate(-viewCam.x, -viewCam.y); for(var i=0;i<walls.length;i++){ var w=walls[i]; ctx.fillStyle=wallColor; ctx.fillRect(w.x, w.y, w.w, w.h); } ctx.fillStyle='#00ff00'; ctx.fillRect(goal.x, goal.y, goal.w, goal.h); ctx.fillStyle='#ff0000'; ctx.beginPath(); ctx.arc(pos.x, pos.y, 6, 0, Math.PI*2); ctx.fill(); var now=Date.now(); for(var j=0;j<enemies.length;j++){ var e=enemies[j]; var eType=e.enemyType; var r=8*eType.size; var isFlashing=(e.damageFlash && now<e.damageFlash); ctx.fillStyle=isFlashing?'#ffffff':eType.color; ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI*2); ctx.fill(); if(e.slowUntil && now<e.slowUntil){ ctx.strokeStyle='#00ffff'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(e.x, e.y, r+2, 0, Math.PI*2); ctx.stroke(); } if(e.burnUntil && now<e.burnUntil){ ctx.fillStyle='rgba(255,100,0,0.6)'; ctx.beginPath(); ctx.arc(e.x, e.y-r*0.5, r*0.4, 0, Math.PI*2); ctx.fill(); } var healthPct=e.health/e.maxHealth; ctx.fillStyle=(healthPct>0.6)?'#00ff00':(healthPct>0.3)?'#ffaa00':'#ff4444'; ctx.fillRect(e.x-10, e.y-15-r, 20*healthPct, 3); ctx.strokeStyle='#fff'; ctx.strokeRect(e.x-10, e.y-15-r, 20, 3); } for(var d=0;d<deathEffects.length;d++){ var de=deathEffects[d]; var t=Math.max(0, Math.min(1, (now-de.spawnMs)/de.lifeMs)); var r=5 + 25*t; ctx.globalAlpha=1.0 - t; ctx.fillStyle=de.color; for(var p=0;p<8;p++){ var pang=(p/8)*Math.PI*2; var px=de.x+Math.cos(pang)*r*0.8; var py=de.y+Math.sin(pang)*r*0.8; ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI*2); ctx.fill(); } ctx.globalAlpha=1.0; } ctx.restore(); ctx.fillStyle='#fff'; ctx.font='14px monospace'; ctx.fillText('Time: ' + timeSec.toFixed(1) + 's', 10, 20); ctx.fillStyle=timeColor; ctx.fillText('●', 90, 20); }
-function draw(){ if(calibrating){ drawCalibration(); return; } if(MODE3D){ var now=Date.now(); if(CONTROL_MODE===MODE_GYRO_AIM && USE_YAW && hasYaw){ var effTarget = yawTarget + yawOffset; if(capturingYaw){ /* freeze camera */ if(!isFinite(camHold)) camHold=cam.ang; cam.ang = camHold; if(DEBUG_CAM && now-__camDbgLast>300){ __camDbgLast=now; try{ console.log('[CAM]', 'capturing=1', 'camHold=', camHold.toFixed(3), 'yawTarget=', yawTarget.toFixed?yawTarget.toFixed(3):yawTarget, 'yawOffset=', yawOffset.toFixed?yawOffset.toFixed(3):yawOffset); }catch(_){ } } } else { var d=angNorm(effTarget - cam.ang); var alpha = (now < yawResumeUntil) ? Math.min(0.5, yawAlpha*2.0) : yawAlpha; cam.ang += d*alpha; camHold = cam.ang; if(DEBUG_CAM && now-__camDbgLast>300){ __camDbgLast=now; try{ console.log('[CAM]', 'capturing=0', 'effTarget=', effTarget.toFixed?effTarget.toFixed(3):effTarget, 'cam=', cam.ang.toFixed(3), 'd=', d.toFixed?d.toFixed(3):d, 'alpha=', alpha.toFixed?alpha.toFixed(3):alpha); }catch(_){ } } } } if(CONTROL_MODE===MODE_GYRO_AIM && USE_PITCH){ var pitchDiff = pitchTarget - cam.pitch; cam.pitch += pitchDiff * pitchAlpha; } if(CAM_FOLLOW){ cam.x=pos.x; cam.y=pos.y; if(pos.floorZ) cam.z=pos.floorZ; } ctx.clearRect(0,0,canvas.width,canvas.height); drawSkybox3D(); drawPlatforms3D(); raycastDraw(); drawGoalMarker3D(); } else { if(CONTROL_MODE===MODE_GYRO_AIM && USE_YAW && hasYaw){ var d2=angNorm(yawTarget - cam.ang); cam.ang += d2*yawAlpha; } draw2D(); drawPlatforms2D(); } }
-function clamp(v,min,max){ return v<min?min:(v>max?max:v); }
-function deg2rad(d){ return d*Math.PI/180; }
-function angNorm(a){ while(a>Math.PI) a-=Math.PI*2; while(a<-Math.PI) a+=Math.PI*2; return a; }
-function updateViewCamera(){
-  var targetX=pos.x-canvas.width/2; var targetY=pos.y-canvas.height/2;
-  var dx=targetX-viewCam.x; var dy=targetY-viewCam.y;
-  viewCam.x += dx*0.1; viewCam.y += dy*0.1;
+
+function drawWallDecorations() {
+  if (!wallDecorations || wallDecorations.length === 0) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var visibleCount = 0, occludedCount = 0, culledCount = 0;
+  var now = Date.now();
+  var shouldLog = DEBUG_DECORATIONS && (now - __decorDebugLast > 1000);
+
+  for (var i = 0; i < wallDecorations.length; i++) {
+    var dec = wallDecorations[i];
+    var dx = dec.worldX - cam.x;
+    var dy = dec.worldY - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 1 || dist > viewDist * 0.5) continue;
+
+    var ang = Math.atan2(dy, dx);
+    var da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.5) { culledCount++; continue; }
+
+    var sx = (da / halfFov) * 0.5 + 0.5;
+    var screenX = Math.floor(sx * w);
+    if (screenX < -40 || screenX > w + 40) { culledCount++; continue; }
+
+    var isOccluded = isDecorationOccluded(dec.worldX, dec.worldY, cam.x, cam.y);
+    if (isOccluded) {
+      occludedCount++;
+    } else {
+      visibleCount++;
+      var renderX = Math.max(0, Math.min(w - 1, screenX));
+      var wallNormalX = 0, wallNormalY = 0;
+      if (dec.side === 'north') wallNormalY = -1;
+      else if (dec.side === 'south') wallNormalY = 1;
+      else if (dec.side === 'west') wallNormalX = -1;
+      else if (dec.side === 'east') wallNormalX = 1;
+
+      var toCamX = cam.x - dec.worldX;
+      var toCamY = cam.y - dec.worldY;
+      var toCamLen = Math.hypot(toCamX, toCamY);
+      if (toCamLen > 0) { toCamX /= toCamLen; toCamY /= toCamLen; }
+      var viewAngle = Math.abs(toCamX * wallNormalX + toCamY * wallNormalY);
+
+      var scale = Math.min(4.0, 200 / dist);
+      var size = Math.max(8, Math.floor(32 * scale));
+      var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+
+      // Anchor decoration to the wall using the same perspective formula the
+      // raycaster uses, so it stays fixed on the wall as camera height changes.
+      var horizonYd = Math.floor(h * 0.5) + pitchOff;
+      var cameraZd = 60 + ((cam.z || 60) - 60) * (25 / 40);
+      var wallFloorZ = floorMesh ? getFloorHeightAt(dec.worldX, dec.worldY) * 25 : 0;
+      // Approximate perpendicular distance (cos correction for off-axis walls)
+      var approxPerp = Math.max(1, dist * Math.max(0.35, Math.abs(Math.cos(da))));
+      var wallBaseY  = horizonYd + Math.floor(((cameraZd - wallFloorZ) / approxPerp) * 180);
+      var wallLineH  = Math.max(1, Math.floor(h / approxPerp * 180));
+      // Place icon at ~38% up from wall base — roughly mid-wall / eye height
+      var decorY = wallBaseY - Math.floor(wallLineH * 0.38);
+
+      drawWallAlignedDecoration(dec.type, renderX, decorY, size, dist, dec.side, viewAngle);
+    }
+  }
+  if (shouldLog) {
+    console.log('[DECOR] Summary: ' + visibleCount + ' visible, ' + occludedCount + ' occluded, ' + culledCount + ' culled');
+    __decorDebugLast = now;
+  }
 }
-function getCurrentSpell(){ return spells[spellOrder[currentSpellIdx]]; };
-function cycleSpell(){ currentSpellIdx = (currentSpellIdx + 1) % spellOrder.length; console.log('[SPELL] Cycled to: ' + getCurrentSpell().name); };
-function spawnProjectile(speedOverride, radiusOverride, spellOverride){ 
 
-  var spell = spellOverride || getCurrentSpell(); 
 
-  var ang=cam.ang||0; 
+// =============================================
+// SECTION 6: SENSOR & HARDWARE
+// =============================================
 
-  // In 2D mode: Use instant joystick direction for snappy aiming
+function controlSensor(sensor, action) {
+  return fetch('/api/cli', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(sensor + action)})
+    .then(function(r) { return r.text(); }).catch(function(_) { return ''; });
+}
 
-  if(!MODE3D && gpLast && gpLast.valid){ 
+async function checkSensorAvailability() {
+  try {
+    var sysResp = await fetch('/api/system');
+    var sysData = await sysResp.json();
+    i2cEnabled = (sysData.i2c_enabled === true);
+    if (!i2cEnabled) {
+      console.warn('[GAMES] I2C is disabled - sensors unavailable');
+      return;
+    }
+    var sensResp = await fetch('/api/sensors/status');
+    var sensData = await sensResp.json();
+    imuCompiled = (sensData.imuCompiled === true);
+    imuEnabled = (sensData.imuEnabled === true);
+    gamepadCompiled = (sensData.gamepadCompiled === true);
+    gamepadEnabled = (sensData.gamepadEnabled === true);
+    console.log('[GAMES] Sensor status: i2c=' + i2cEnabled + ' imuCompiled=' + imuCompiled + ' imuEnabled=' + imuEnabled + ' gamepadCompiled=' + gamepadCompiled + ' gamepadEnabled=' + gamepadEnabled);
+  } catch (e) {
+    console.error('[GAMES] Failed to check sensor availability:', e);
+    i2cEnabled = false; imuEnabled = false; imuCompiled = false;
+    gamepadEnabled = false; gamepadCompiled = false;
+  }
+}
 
-    var jx=gpLast.x, jy=-gpLast.y; 
+function startCalibration() {
+  if (!i2cEnabled || !imuCompiled) {
+    var hud = document.getElementById('hudCal');
+    hud.textContent = 'IMU unavailable: ' + (i2cEnabled ? 'not compiled' : 'I2C disabled');
+    hud.style.color = '#ff6b6b';
+    alert('IMU sensor is not available. I2C: ' + i2cEnabled + ', IMU compiled: ' + imuCompiled);
+    return;
+  }
+  controlSensor('imu', 'start').then(function() {
+    var hud = document.getElementById('hudCal');
+    hud.textContent = 'Hold still... calibrating';
+    hasBaseline = false; basePitch = 0; baseRoll = 0; calibSamples = [];
+    var t0 = Date.now();
+    if (calibTimer) { clearInterval(calibTimer); calibTimer = null; }
+    calibTimer = setInterval(function() {
+      fetch('/api/sensors?sensor=imu&ts=' + Date.now(), {cache:'no-store'})
+        .then(function(r) { return r.json(); }).then(function(j) {
+          if (j && j.valid && j.ori) calibSamples.push({p:j.ori.pitch || 0, r:j.ori.roll || 0});
+        }).catch(function(_) {});
+      if (Date.now() - t0 >= calibMs) {
+        clearInterval(calibTimer); calibTimer = null;
+        if (calibSamples.length) {
+          var sp = 0, sr = 0;
+          for (var i = 0; i < calibSamples.length; i++) {
+            sp += calibSamples[i].p; sr += calibSamples[i].r;
+          }
+          basePitch = sp / calibSamples.length;
+          baseRoll = sr / calibSamples.length;
+          hasBaseline = true;
+          hud.textContent = 'Calibrated: pitch ' + basePitch.toFixed(1) + '\u00b0, roll ' + baseRoll.toFixed(1) + '\u00b0';
+        } else {
+          hud.textContent = 'Calibration failed';
+        }
+      }
+    }, 50);
+  });
+}
 
-    var jmag=Math.hypot(jx,jy); 
+function startGamepadPolling() {
+  if (gpPoll) return;
+  if (!i2cEnabled || !gamepadCompiled) {
+    console.warn('[GAMES] Gamepad polling disabled: i2c=' + i2cEnabled + ' gamepadCompiled=' + gamepadCompiled);
+    return;
+  }
+  function tick() {
+    var now = Date.now();
+    if (now < gpBackoffUntil) return;
+    fetch('/api/sensors?sensor=gamepad&ts=' + now, {cache:'no-store', credentials:'include'})
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        if (!running) return;
+        if (j && j.v) {
+          var x = j.x | 0, y = j.y | 0;
+          var nx = (x - 512) / 512, ny = (y - 512) / 512;
+          if (nx < -1) nx = -1; if (nx > 1) nx = 1;
+          if (ny < -1) ny = -1; if (ny > 1) ny = 1;
+          gpLast = {x:nx, y:ny, buttons:(j.buttons || 0), valid:true};
+        } else {
+          gpLast.valid = false; gpBackoffUntil = Date.now() + 150;
+        }
+      }).catch(function(_) { gpLast.valid = false; gpBackoffUntil = Date.now() + 200; });
+  }
+  gpPoll = setInterval(tick, 16);
+}
 
-    if(jmag>0.2){ ang=Math.atan2(jy,jx); } 
+function stopGamepadPolling() {
+  if (gpPoll) { try { clearInterval(gpPoll); } catch (_) {} gpPoll = null; }
+  gpLast.valid = false;
+}
 
-  } 
 
-  // In 3D mode: Use instant joystick for Stick Aim, or yaw target for Gyro Aim
+// =============================================
+// SECTION 7: INPUT PROCESSING
+// =============================================
 
-  else if(MODE3D){ 
+function applyTilt(pitch, roll) {
+  if (hasBaseline) { roll -= baseRoll; pitch -= basePitch; }
+  if (Math.abs(roll) < dead) roll = 0;
+  roll = clamp(roll, -maxAng, maxAng);
+  if (Math.abs(pitch) < dead) pitch = 0;
+  pitch = clamp(pitch, -maxAng, maxAng);
+  vel.x += (roll / maxAng) * speed * 0.10;
+  vel.y += (pitch / maxAng) * speed * 0.10;
+}
 
-    if(CONTROL_MODE===MODE_STICK_AIM && gpLast && gpLast.valid){ 
+function applyGamepad(nx, ny, dt) {
+  var dz = 0.05;
+  if (Math.abs(nx) < dz) nx = 0;
+  if (Math.abs(ny) < dz) ny = 0;
+  nx = clamp(nx, -1, 1);
+  ny = clamp(ny, -1, 1);
+  var dtScale = dt > 0 ? (dt / 0.060) : 1;
+  var jy = -ny; // invert Y so up is up
+  if (MODE3D) {
+    var ca = Math.cos(cam.ang), sa = Math.sin(cam.ang);
+    var fwd = -jy, str = nx; // flip forward only for 3D
+    var vx = fwd * ca + str * (-sa);
+    var vy = fwd * sa + str * (ca);
+    vel.x += vx * speed * 0.15 * dtScale;
+    vel.y += vy * speed * 0.15 * dtScale;
+  } else {
+    vel.x += (nx) * speed * 0.15 * dtScale;
+    vel.y += (jy) * speed * 0.15 * dtScale;
+  }
+}
 
-      var jx2=gpLast.x; 
+function onCalibUpdate() {
+  var thr = 0.35;
+  var ok = (Math.abs(lastRoll - baseRoll) < thr) && (Math.abs(lastPitch - basePitch) < thr);
+  if (hasYaw) {
+    ok = ok && (Math.abs(angNorm(deg2rad(lastYaw - baseYaw))) < deg2rad(2.0));
+  }
+  var now = Date.now();
+  if (ok) { calStableMs += 60; } else { calStableMs = 0; }
+  if (calStableMs >= calNeedStableMs) {
+    hasBaseline = true;
+    calibrating = false;
+    resetLevel(1);
+  }
+}
 
-      var jmag2=Math.abs(jx2); 
+function pollIMU() {
+  if (!i2cEnabled || !imuCompiled) {
+    console.warn('[GAMES] IMU polling skipped: i2c=' + i2cEnabled + ' imuCompiled=' + imuCompiled);
+    return;
+  }
+  var ts = Date.now();
+  fetch('/api/sensors?sensor=imu&ts=' + ts, {cache:'no-store'}).then(function(r) {
+    return r.json();
+  }).then(function(j) {
+    if (!running) return;
+    if (!j || !j.valid || !j.ori) return;
 
-      if(jmag2>0.15){ ang=cam.ang + jx2*0.3; } 
+    var pitch = j.ori.pitch || 0;
+    var roll = j.ori.roll || 0;
+    var yaw = (j.ori.yaw !== undefined && j.ori.yaw !== null) ? j.ori.yaw : 0;
+    lastPitch = pitch;
+    lastRoll = roll;
+    hasYaw = (j.ori.yaw !== undefined && j.ori.yaw !== null);
+    if (hasYaw) lastYaw = yaw;
 
-    } else if(CONTROL_MODE===MODE_GYRO_AIM && hasYaw){ 
+    if (DEBUG_IMU) {
+      try {
+        console.log('[IMU]', ts,
+          'pitch=', pitch.toFixed ? pitch.toFixed(2) : pitch,
+          'roll=', roll.toFixed ? roll.toFixed(2) : roll,
+          'yaw=', hasYaw ? (yaw.toFixed ? yaw.toFixed(2) : yaw) : 'n/a',
+          'baseP=', basePitch.toFixed ? basePitch.toFixed(2) : basePitch,
+          'baseR=', baseRoll.toFixed ? baseRoll.toFixed(2) : baseRoll,
+          'baseY=', baseYaw.toFixed ? baseYaw.toFixed(2) : baseYaw,
+          'hasBase=', !!hasBaseline,
+          'pos=(' + pos.x.toFixed(1) + ',' + pos.y.toFixed(1) + ')');
+      } catch (_) {}
+    }
 
-      ang = yawTarget + yawOffset; 
+    if (calibrating) {
+      if (!hasBaseline) {
+        basePitch = pitch;
+        baseRoll = roll;
+        if (hasYaw) baseYaw = yaw;
+      }
+      onCalibUpdate();
+    } else {
+      if (!USE_GAMEPAD && !USE_KEYBOARD && !USE_MOUSE) {
+        applyTilt(pitch, roll);
+      }
+      if (USE_YAW && hasYaw) {
+        var yawDiff = yaw - baseYaw;
+        while (yawDiff > 180) yawDiff -= 360;
+        while (yawDiff < -180) yawDiff += 360;
+        var relYaw = deg2rad(yawDiff);
+        var yawSmooth = 0.7;
+        yawTarget = yawTarget * yawSmooth + relYaw * (1 - yawSmooth);
+      }
+      if (USE_PITCH) {
+        var relPitch = deg2rad(pitch - basePitch);
+        var newPitchTarget = Math.max(-0.65, Math.min(0.65, relPitch));
+        var pitchSmooth = 0.6;
+        pitchTarget = pitchTarget * pitchSmooth + newPitchTarget * (1 - pitchSmooth);
+      }
+    }
+  }).catch(function(_) {});
+}
 
-    } 
+function updateHudInput() {
+  var el = document.getElementById('hudInput');
+  if (!el) return;
+  var label;
+  if (USE_KEYBOARD && USE_MOUSE) label = 'KB + Mouse';
+  else if (USE_KEYBOARD) label = 'Keyboard';
+  else if (USE_MOUSE) label = 'Mouse';
+  else if (USE_GAMEPAD) label = (CONTROL_MODE === MODE_GYRO_AIM) ? 'Gamepad (Gyro Aim)' : 'Gamepad (Stick)';
+  else label = 'IMU';
+  el.textContent = label;
+}
 
-  } 
 
-  var rawPitch=(CONTROL_MODE===MODE_STICK_AIM)?(cam.pitch||0):(pitchTarget||0); var usePitch=-(rawPitch); var sx=pos.x+Math.cos(ang)*10; var sy=pos.y+Math.sin(ang)*10; var sp=(speedOverride||spell.speed); var rr=(radiusOverride||PROJ_RADIUS); var hz=sp*Math.cos(usePitch); var vz=sp*Math.sin(usePitch); var spawnZ=MODE3D?35:0; try{ console.log('[SHOT]', 'spell=', spell.name, 'ang(rad)=', ang.toFixed?ang.toFixed(3):ang, 'vz=', vz.toFixed?vz.toFixed(1):vz); }catch(_){ } projectiles.push({x:sx,y:sy,z:spawnZ,ang:ang,speed:sp,hz:hz,vz:vz,spawnMs:Date.now(),lifeMs:PROJ_LIFE_MS,r:rr,spell:spell}); 
+// =============================================
+// SECTION 7B: LINE OF SIGHT
+// =============================================
 
-};
-var impacts=[];
+// DDA ray march on the grid — returns true if no wall cell interrupts the segment
+function hasLineOfSight(x1, y1, x2, y2) {
+  var dx = x2 - x1, dy = y2 - y1;
+  var steps = Math.ceil(Math.hypot(dx, dy) / (cell * 0.5));
+  if (steps < 1) return true;
+  for (var i = 1; i < steps; i++) {
+    var t = i / steps;
+    var gx = Math.floor((x1 + dx * t) / cell);
+    var gy = Math.floor((y1 + dy * t) / cell);
+    if (gx < 0 || gy < 0 || gx >= gridW || gy >= gridH) return false;
+    if (grid && grid[gy * gridW + gx]) return false;
+  }
+  return true;
+}
 
-var coneEffects=[];
+// =============================================
+// SECTION 8: PHYSICS & COLLISION
+// =============================================
 
-function castConeAttack(spell){ var now=Date.now(); var ang=cam.ang||0; 
-  if(!MODE3D && gpLast && gpLast.valid){ var jx=gpLast.x, jy=-gpLast.y; var jmag=Math.hypot(jx,jy); if(jmag>0.2){ ang=Math.atan2(jy,jx); } } 
-  else if(MODE3D){ 
-    if(CONTROL_MODE===MODE_STICK_AIM && gpLast && gpLast.valid){ var jx2=gpLast.x; var jmag2=Math.abs(jx2); if(jmag2>0.15){ ang=cam.ang + jx2*0.3; } } 
-    else if(CONTROL_MODE===MODE_GYRO_AIM && hasYaw){ ang = yawTarget + yawOffset; } 
-  } 
-  var halfAngle=spell.coneAngle/2; var range=spell.coneRange||100; var hitCount=0; 
-  coneEffects.push({x:pos.x,y:pos.y,z:MODE3D?35:0,ang:ang,halfAngle:halfAngle,range:range,color:spell.color,spellId:spell.id,spawnMs:now,lifeMs:200}); 
-  if(enemies&&enemies.length){
-    for(var ei=0;ei<enemies.length;ei++){
-      var e=enemies[ei];
-      var dx=e.x-pos.x, dy=e.y-pos.y; var dist=Math.hypot(dx,dy);
-      if(dist>range || dist<1) continue;
-      var angleToEnemy=Math.atan2(dy,dx); var angleDiff=angleToEnemy - ang;
-      while(angleDiff>Math.PI) angleDiff-=Math.PI*2;
-      while(angleDiff<-Math.PI) angleDiff+=Math.PI*2;
-      if(Math.abs(angleDiff)<=halfAngle){
-        var dmg=spell.damage||1; e.health-=dmg; stats.totalDamageDone+=dmg;
-        if(e.health<=0){ stats.totalEnemiesKilled++; }
-        e.damageFlash=now+120; hitCount++;
-        if(spell.id==='ice'){
-          e.iceHits=(e.iceHits||0)+1;
-          if(e.iceHits>=3){ e.slowUntil=now+2500; e.iceHits=0; }
-        } else if(spell.id==='fire'){
-          e.fireHits=(e.fireHits||0)+1;
-          if(e.fireHits>=3){ e.burnUntil=now+4000; e.burnDmgLast=now; e.fireHits=0; }
+// Returns true if any corner of the player circle (radius rad) sits inside a grid wall cell.
+function isInGridWall(cx, cy, rad) {
+  if (!grid) return false;
+  var pts = [
+    cx - rad, cy - rad,
+    cx + rad, cy - rad,
+    cx - rad, cy + rad,
+    cx + rad, cy + rad,
+    cx,       cy        // centre point too
+  ];
+  for (var i = 0; i < pts.length; i += 2) {
+    var gx = Math.floor(pts[i]     / cell);
+    var gy = Math.floor(pts[i + 1] / cell);
+    if (gx >= 0 && gx < gridW && gy >= 0 && gy < gridH && grid[gy * gridW + gx]) return true;
+  }
+  return false;
+}
+
+function repelFromWalls(dt) {
+  var cx = pos.x, cy = pos.y;
+  var rad = 6, range = 12, k = 40;
+  for (var i = 0; i < walls.length; i++) {
+    var w = walls[i];
+    var nx = Math.max(w.x, Math.min(cx, w.x + w.w));
+    var ny = Math.max(w.y, Math.min(cy, w.y + w.h));
+    var dx = cx - nx, dy = cy - ny;
+    var dist = Math.hypot(dx, dy);
+    var thresh = rad + range;
+    if (dist < thresh && dist > 0.001) {
+      var s = (thresh - dist) / thresh;
+      var inv = 1.0 / dist;
+      vel.x += (dx * inv) * k * s * dt;
+      vel.y += (dy * inv) * k * s * dt;
+    }
+  }
+}
+
+// Physical push only — attack state is handled in updateEnemies (per-frame, pre-throttle)
+function repelFromEnemies(dt) {
+  if (!enemies || !enemies.length) return;
+  var cx = pos.x, cy = pos.y, k = 300;
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    var enemyRad = 8 * (e.enemyType.size || 1);
+    var dx = cx - e.x, dy = cy - e.y;
+    var dist = Math.hypot(dx, dy);
+    var thresh = 12 + enemyRad; // larger radius: repel earlier so close-range never looks broken
+    if (dist < thresh && dist > 0.001) {
+      var overlap = thresh - dist, inv = 1.0 / dist;
+      var newX = pos.x + (dx * inv) * overlap * 0.5;
+      var newY = pos.y + (dy * inv) * overlap * 0.5;
+      // Use the same full-radius wall check as player movement so enemies
+      // can never pin the player into wall geometry or out-of-bounds
+      var blocked = (newX < 6 || newX > worldW - 6 || newY < 6 || newY > worldH - 6)
+                    || isInGridWall(newX, newY, 6);
+      if (!blocked) { pos.x = newX; pos.y = newY; vel.x += (dx * inv) * k * overlap * dt; vel.y += (dy * inv) * k * overlap * dt; }
+      else { vel.x *= 0.5; vel.y *= 0.5; }
+    }
+  }
+}
+
+function step(dt) {
+  // Mana and health regen
+  mana = Math.min(MANA_MAX, mana + MANA_REGEN_PER_S * dt);
+  health = Math.min(HEALTH_MAX, health + HEALTH_REGEN_PER_S * dt);
+
+  // Apply damping — frame-rate independent (reference: 60fps)
+  var damp = Math.pow(damping, dt * 60);
+  vel.x *= damp;
+  vel.y *= damp;
+
+  // Move per-axis so the player slides along grid walls instead of stopping dead.
+  // Each axis is tried independently: if moving X would enter a wall cell, revert
+  // only X (and bounce it) so Y motion still continues — the player glides along
+  // the wall face rather than getting stuck in a corner.
+  var oldX = pos.x;
+  pos.x += vel.x * dt;
+  if (isInGridWall(pos.x, pos.y, 6)) { pos.x = oldX; vel.x *= -bounce; }
+
+  var oldY = pos.y;
+  pos.y += vel.y * dt;
+  if (isInGridWall(pos.x, pos.y, 6)) { pos.y = oldY; vel.y *= -bounce; }
+
+  // Floor height tracking for procedural-floor terrains
+  if ((terrain === 'plains' || terrain === 'cave' || terrain === 'expanse') && floorMesh) {
+    var floorHeight = getFloorHeightAt(pos.x, pos.y);
+    if (!pos.floorZ) pos.floorZ = 0;
+    var targetZ = floorHeight * 40 + 60;
+    var zDiff = targetZ - pos.floorZ;
+    pos.floorZ += zDiff * 0.3;
+
+    // Auto-pitch: transient horizon nudge when traversing slopes.
+    // Uses a SEPARATE offset that decays on its own — never touches pitchTarget
+    // so manual aim ("hold angle" behaviour) is respected.
+    if (MODE3D) {
+      var autoPitch = zDiff * 0.003;
+      autoPitch = Math.max(-0.1, Math.min(0.1, autoPitch));
+      autoPitchOff = (autoPitchOff || 0) + autoPitch * 0.25;
+      autoPitchOff *= 0.88;  // fast self-decay — only visible while actively on a slope
+      autoPitchOff = Math.max(-0.12, Math.min(0.12, autoPitchOff));
+    }
+    if (Math.random() < 0.01) {
+      console.log('[FLOOR] Player at (' + pos.x.toFixed(1) + ',' + pos.y.toFixed(1) + ')' +
+        ' floorHeight=' + floorHeight.toFixed(3) +
+        ' targetZ=' + targetZ.toFixed(1) +
+        ' currentZ=' + pos.floorZ.toFixed(1));
+    }
+  }
+
+  // World bounds
+  if (pos.x < 6) { pos.x = 6; vel.x *= -bounce; }
+  if (pos.x > worldW - 6) { pos.x = worldW - 6; vel.x *= -bounce; }
+  if (pos.y < 6) { pos.y = 6; vel.y *= -bounce; }
+  if (pos.y > worldH - 6) { pos.y = worldH - 6; vel.y *= -bounce; }
+
+  // Wall collision
+  var player = {x:pos.x - 6, y:pos.y - 6, w:12, h:12};
+  for (var i = 0; i < walls.length; i++) {
+    var w = walls[i];
+    if (rectsOverlap(player, w)) {
+      collisions++;
+      document.getElementById('hudCol').textContent = collisions;
+      pos.x -= vel.x * dt * 2;
+      pos.y -= vel.y * dt * 2;
+      vel.x *= -0.5; vel.y *= -0.5;
+      player = {x:pos.x - 6, y:pos.y - 6, w:12, h:12};
+    }
+  }
+
+  repelFromWalls(dt);
+  repelFromEnemies(dt);
+
+  // Death check
+  if (health <= 0 && running) {
+    gameOverState = true;
+    stopGame();
+    draw();
+    return;
+  }
+
+  // Goal check
+  if (rectsOverlap(player, goal)) {
+    if (level < levels.length) {
+      if (terrain === 'ice') terrain = 'cave';
+      else if (terrain === 'cave') terrain = 'plains';
+      else if (terrain === 'plains') terrain = 'ice';
+      else terrain = 'ice';
+      var sel = document.getElementById('terrainSelect');
+      if (sel) sel.value = terrain;
+      resetLevel(level + 1);
+    } else {
+      stopGame();
+      alert('You win!');
+    }
+  }
+
+  // Timer and medal color
+  timeSec = (Date.now() - startMs) / 1000;
+  if (timeSec <= medalGold) timeColor = '#d4af37';
+  else if (timeSec <= medalSilver) timeColor = '#c0c0c0';
+  else if (timeSec <= medalBronze) timeColor = '#cd7f32';
+  else timeColor = '#ffffff';
+}
+
+
+// =============================================
+// SECTION 9: COMBAT SYSTEM
+// =============================================
+
+function getUnlockedSpells() {
+  var result = [];
+  for (var i = 0; i < spellOrder.length; i++) {
+    if (spells[spellOrder[i]].unlocked) result.push(spellOrder[i]);
+  }
+  return result;
+}
+
+function getCurrentSpell() {
+  var unlocked = getUnlockedSpells();
+  if (currentSpellIdx >= unlocked.length) currentSpellIdx = 0;
+  return spells[unlocked[currentSpellIdx] || 'missile'];
+}
+
+function cycleSpell(dir) {
+  var n = getUnlockedSpells().length;
+  if (n < 2) return;
+  currentSpellIdx = ((currentSpellIdx + (dir || 1)) % n + n) % n;
+  console.log('[SPELL] Cycled to: ' + getCurrentSpell().name);
+}
+
+function castCurrentSpell() {
+  if (!running || gameOverState || menuOpen) return;
+  var now = Date.now();
+  var spell = getCurrentSpell();
+  if (mana >= spell.manaCost && (now - lastShotMs) >= SHOOT_COOLDOWN) {
+    if (spell.attackType === 'nova') castNovaAttack(spell);
+    else if (spell.attackType === 'cone') castConeAttack(spell);
+    else if (spell.attackType === 'lob') spawnLobProjectile(spell);
+    else {
+      if (spell.tier >= 2 && spell.id === 'missile') {
+        // Split Shot: fire 3 missiles in a spread
+        for (var si = -1; si <= 1; si++) {
+          spawnProjectile(spell.speed, PROJ_RADIUS, spell, si * 0.2);
+        }
+      } else {
+        spawnProjectile(spell.speed, PROJ_RADIUS);
+      }
+    }
+    mana -= spell.manaCost; stats.totalManaConsumed += spell.manaCost; lastShotMs = now;
+    castAnimUntil = now + 280;
+  }
+}
+
+// Helper: compute aim angle from current input mode
+function getAimAngle() {
+  var ang = cam.ang || 0;
+  if (!MODE3D && gpLast && gpLast.valid) {
+    var jx = gpLast.x, jy = -gpLast.y;
+    var jmag = Math.hypot(jx, jy);
+    if (jmag > 0.2) ang = Math.atan2(jy, jx);
+  } else if (MODE3D) {
+    if (CONTROL_MODE === MODE_STICK_AIM && gpLast && gpLast.valid) {
+      var jx2 = gpLast.x, jmag2 = Math.abs(jx2);
+      if (jmag2 > 0.15) ang = cam.ang + jx2 * 0.3;
+    } else if (CONTROL_MODE === MODE_GYRO_AIM && hasYaw) {
+      ang = yawTarget + yawOffset;
+    }
+  }
+  return ang;
+}
+
+function spawnProjectile(speedOverride, radiusOverride, spellOverride, angOffset) {
+  var spell = spellOverride || getCurrentSpell();
+  var ang = getAimAngle() + (angOffset || 0);
+  var rawPitch = (CONTROL_MODE === MODE_STICK_AIM) ? (cam.pitch || 0) : (pitchTarget || 0);
+  var usePitch = -(rawPitch);
+  var sx = pos.x + Math.cos(ang) * 10;
+  var sy = pos.y + Math.sin(ang) * 10;
+  var sp = (speedOverride || spell.speed);
+  var rr = (radiusOverride || PROJ_RADIUS);
+  var hz = sp * Math.cos(usePitch);
+  var vz = sp * Math.sin(usePitch);
+  var spawnZ = MODE3D ? 35 : 0;
+  projectiles.push({x:sx, y:sy, z:spawnZ, ang:ang, speed:sp, hz:hz, vz:vz,
+                    spawnMs:Date.now(), lifeMs:PROJ_LIFE_MS, r:rr, spell:spell});
+}
+
+// Lob projectile — arcing trajectory for Poison Cloud
+function spawnLobProjectile(spell) {
+  var ang = getAimAngle();
+  var range = spell.lobRange || 180;
+  var sx = pos.x + Math.cos(ang) * 10;
+  var sy = pos.y + Math.sin(ang) * 10;
+  var sp = spell.speed || 200;
+  var spawnZ = MODE3D ? 35 : 0;
+  // Calculate arc: fly toward target at range, with upward arc
+  var lobTime = range / sp;  // time to reach target
+  var gravZ = -200;          // gravity pulling lob down
+  var initVZ = -gravZ * lobTime * 0.5;  // launch upward to land at range
+  projectiles.push({x:sx, y:sy, z:spawnZ, ang:ang, speed:sp, hz:sp, vz:initVZ,
+                    spawnMs:Date.now(), lifeMs:3000, r:PROJ_RADIUS, spell:spell,
+                    isLob:true, gravZ:gravZ, lobStartZ:spawnZ});
+}
+
+// Nova attack — instant AoE damage around the player
+function castNovaAttack(spell) {
+  var now = Date.now();
+  var radius = spell.novaRadius || 100;
+  var hitCount = 0;
+  novaEffects.push({x:pos.x, y:pos.y, radius:radius, color:spell.color, spawnMs:now, lifeMs:400});
+  if (enemies && enemies.length) {
+    for (var ei = 0; ei < enemies.length; ei++) {
+      var e = enemies[ei];
+      var dx = e.x - pos.x, dy = e.y - pos.y;
+      var dist = Math.hypot(dx, dy);
+      if (dist > radius || dist < 1) continue;
+      var dmg = (spell.damage || 1) * (now < dmgBoostUntil ? 1.30 : 1.0);
+      // Damage falls off at edge of radius
+      dmg *= (1.0 - dist / radius * 0.5);
+      e.health -= dmg; stats.totalDamageDone += dmg;
+      if (e.health <= 0) stats.totalEnemiesKilled++;
+      e.damageFlash = now + 200; e.damageFlashColor = spell.color;
+      // Knockback away from player
+      var kb = Math.hypot(dx, dy) || 1;
+      e.vx = (dx / kb) * 300; e.vy = (dy / kb) * 300;
+      // Stun
+      if (spell.stunDuration) e.stunUntil = now + spell.stunDuration;
+      hitCount++;
+    }
+  }
+  console.log('[NOVA] ' + spell.name + ' hit ' + hitCount + ' enemies');
+}
+
+function castConeAttack(spell) {
+  var now = Date.now();
+  var ang = getAimAngle();
+  var coneAngle = spell.coneAngle || 0.25;
+  // Tier 2 Inferno: wider cone, more damage
+  if (spell.id === 'fire' && spell.tier >= 2) { coneAngle = 0.5; }
+  var halfAngle = coneAngle / 2;
+  var range = spell.coneRange || 100;
+  var hitCount = 0;
+  coneEffects.push({x:pos.x, y:pos.y, z:MODE3D ? 35 : 0, ang:ang, halfAngle:halfAngle, range:range, color:spell.color, spellId:spell.id, spawnMs:now, lifeMs:200});
+  if (enemies && enemies.length) {
+    for (var ei = 0; ei < enemies.length; ei++) {
+      var e = enemies[ei];
+      var dx = e.x - pos.x, dy = e.y - pos.y;
+      var dist = Math.hypot(dx, dy);
+      if (dist > range || dist < 1) continue;
+      var angleToEnemy = Math.atan2(dy, dx);
+      var angleDiff = angleToEnemy - ang;
+      while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+      while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+      if (Math.abs(angleDiff) <= halfAngle) {
+        var dmg = (spell.damage || 1) * (now < dmgBoostUntil ? 1.30 : 1.0);
+        // Synergy: Steam Burst — fire on ice-slowed enemy
+        if (spell.id === 'fire' && e.slowUntil && now < e.slowUntil) {
+          applySteamBurst(e, now);
+        }
+        e.health -= dmg; stats.totalDamageDone += dmg;
+        if (e.health <= 0) stats.totalEnemiesKilled++;
+        e.damageFlash = now + 150; e.damageFlashColor = spell.color; hitCount++;
+        if (spell.id === 'fire') {
+          e.fireHits = (e.fireHits || 0) + 1;
+          if (e.fireHits >= 3) { e.burnUntil = now + 4000; e.burnDmgLast = now; e.fireHits = 0; }
         }
       }
     }
   }
-  if(DEBUG_EFFECTS){ try{ console.log('[CONE]','spell='+spell.id,'hits='+hitCount,'activeCones='+coneEffects.length); }catch(_){} }
-}
-function updateConeEffects(){ if(!coneEffects||!coneEffects.length) return; var now=Date.now(); var keep=[]; var removed=0; 
-  for(var i=0;i<coneEffects.length;i++){ var ce=coneEffects[i]; if(now - ce.spawnMs < ce.lifeMs){ keep.push(ce); } else { removed++; } } 
-  if(DEBUG_EFFECTS && removed>0){ try{ console.log('[CONE-FX]','active='+keep.length,'removed='+removed); }catch(_){} } coneEffects=keep; }
-function spawnEnemies(){
-  enemies=[];
-  var spawns=[{x:300,y:150,type:'fast'},{x:500,y:350,type:'normal'},{x:200,y:400,type:'tank'},{x:600,y:200,type:'fast'}];
-  for(var i=0;i<spawns.length;i++){
-    var s=spawns[i]; var eType=enemyTypes[s.type||'normal'];
-    enemies.push({x:s.x,y:s.y,z:0,enemyType:eType,health:eType.health,maxHealth:eType.health,speed:eType.speed,chaseRange:eType.chaseRange,lastUpdate:0,damageFlash:0,slowUntil:0,burnUntil:0,burnDmgLast:0,iceHits:0,fireHits:0,lightningHits:0});
-  }
-  console.log('[ENEMY] Spawned ' + enemies.length + ' enemies');
-}
-function updateEnemies(dt){
-  if(!enemies||!enemies.length) return;
-  var now=Date.now(); var alive=[]; var throttled=0, moved=0, burning=0, slowed=0;
-  for(var i=0;i<enemies.length;i++){
-    var e=enemies[i];
-    if(e.health<=0){
-      console.log('[ENEMY] Enemy ' + i + ' defeated!');
-      deathEffects.push({x:e.x,y:e.y,z:e.z||0,color:e.enemyType.color,spawnMs:now,lifeMs:400});
-      continue;
-    }
-    if(!e.lastUpdate) e.lastUpdate=now;
-    if(now - e.lastUpdate < 80){ alive.push(e); throttled++; continue; }
-    e.lastUpdate=now;
-    if(e.burnUntil && now<e.burnUntil){
-      burning++;
-      if(!e.burnDmgLast || now-e.burnDmgLast>=500){
-        e.health-=0.3; e.burnDmgLast=now;
-        console.log('[BURN] Enemy burning! HP: ' + e.health.toFixed(1));
+  // Ground fire patches — scatter 2-3 fire patches along the cone
+  if (spell.groundFire) {
+    var fireDur = (spell.tier >= 2) ? 5000 : 3000;
+    var numPatches = 2 + Math.floor(Math.random() * 2);
+    for (var fi = 0; fi < numPatches; fi++) {
+      var fd = range * (0.3 + Math.random() * 0.6);
+      var fa = ang + (Math.random() - 0.5) * coneAngle;
+      var fx = pos.x + Math.cos(fa) * fd, fy = pos.y + Math.sin(fa) * fd;
+      // Don't place in walls
+      var fgx = Math.floor(fx / cell), fgy = Math.floor(fy / cell);
+      if (fgx >= 0 && fgy >= 0 && fgx < gridW && fgy < gridH && !grid[fgy * gridW + fgx]) {
+        groundEffects.push({x:fx, y:fy, radius:20, duration:fireDur,
+                            damage:0.5, color:'#ff4400', spellId:'fire', spawnMs:now, tickMs:now});
       }
     }
-    var dx=pos.x-e.x, dy=pos.y-e.y; var dist=Math.hypot(dx,dy);
-    if(dist<e.chaseRange && dist>20){
-      var dirX=dx/dist, dirY=dy/dist; var moveSpeed=e.speed*0.08;
-      if(e.slowUntil && now<e.slowUntil){ moveSpeed*=0.4; slowed++; }
-      var nx=e.x + dirX*moveSpeed; var ny=e.y + dirY*moveSpeed;
-      var gx=Math.floor(nx/cell), gy=Math.floor(ny/cell); var blocked=false;
-      if(gx<0||gy<0||gx>=gridW||gy>=gridH){ blocked=true; }
-      else if(grid && grid[gy*gridW+gx]){ blocked=true; }
-      if(!blocked){ e.x=nx; e.y=ny; moved++; }
+  }
+}
+
+// Synergy: Steam Burst — AoE damage around an ice-slowed enemy hit by fire
+function applySteamBurst(target, now) {
+  var burstRadius = 60;
+  var burstDmg = 2.0;
+  for (var si = 0; si < enemies.length; si++) {
+    var se = enemies[si];
+    if (Math.hypot(se.x - target.x, se.y - target.y) < burstRadius) {
+      se.health -= burstDmg; stats.totalDamageDone += burstDmg;
+      if (se.health <= 0) stats.totalEnemiesKilled++;
+      se.damageFlash = now + 200; se.damageFlashColor = '#cccccc';
+    }
+  }
+  target.slowUntil = 0; target.burnUntil = 0; // clear both statuses
+  impacts.push({x:target.x, y:target.y, z:0, spawnMs:now, lifeMs:500, type:'steam'});
+  console.log('[SYNERGY] Steam Burst!');
+}
+
+function updateProjectiles(dt) {
+  if (!projectiles || !projectiles.length) return;
+  var now = Date.now();
+  var alive = [], hitWalls = 0, hitEnemies = 0, expired = 0;
+  for (var i = 0; i < projectiles.length; i++) {
+    var p = projectiles[i];
+    var spell = p.spell || spells.missile;
+
+    // ── Homing (Magic Missile) ──────────────────────────────────────
+    if (spell.homing && !p.isLob) {
+      var bestDist = 999999, bestAng = p.ang;
+      for (var hi = 0; hi < enemies.length; hi++) {
+        var he = enemies[hi]; if (he.health <= 0) continue;
+        var hdx = he.x - p.x, hdy = he.y - p.y;
+        var hd = Math.hypot(hdx, hdy); if (hd > 400 || hd < 1) continue;
+        var ha = Math.atan2(hdy, hdx);
+        var hda = ha - p.ang;
+        while (hda > Math.PI) hda -= Math.PI * 2;
+        while (hda < -Math.PI) hda += Math.PI * 2;
+        if (Math.abs(hda) < 0.78 && hd < bestDist) { bestDist = hd; bestAng = ha; }
+      }
+      if (bestDist < 999999) {
+        var turnDa = bestAng - p.ang;
+        while (turnDa > Math.PI) turnDa -= Math.PI * 2;
+        while (turnDa < -Math.PI) turnDa += Math.PI * 2;
+        var maxTurn = spell.homing * dt;
+        if (turnDa > maxTurn) turnDa = maxTurn;
+        else if (turnDa < -maxTurn) turnDa = -maxTurn;
+        p.ang += turnDa;
+      }
+    }
+
+    // ── Lob physics (Poison Cloud) ──────────────────────────────────
+    if (p.isLob) {
+      p.vz = (p.vz || 0) + (p.gravZ || -200) * dt;
+    }
+
+    var nx = p.x + Math.cos(p.ang) * (p.hz || p.speed) * dt;
+    var ny = p.y + Math.sin(p.ang) * (p.hz || p.speed) * dt;
+    var nz = (p.z || 0) + (p.vz || 0) * dt;
+
+    // ── Lob landing ─────────────────────────────────────────────────
+    if (p.isLob && nz <= 0 && (now - p.spawnMs) > 100) {
+      groundEffects.push({x:nx, y:ny, radius:spell.cloudRadius || 50,
+        duration:spell.cloudDuration || 4000, damage:spell.damage || 0.4,
+        color:spell.color, spellId:spell.id, spawnMs:now, tickMs:now});
+      impacts.push({x:nx, y:ny, z:0, spawnMs:now, lifeMs:400});
+      expired++; continue;
+    }
+
+    // Check enemies FIRST — so projectiles register hits on enemies that are
+    // touching or partially inside a wall (single-cell wall check would kill
+    // the projectile before it reaches the enemy collision test otherwise).
+    var hitEnemy = false;
+    if (enemies && enemies.length && !p.isLob) {
+      for (var ei = 0; ei < enemies.length; ei++) {
+        var e = enemies[ei];
+        var dx = nx - e.x, dy = ny - e.y, dz = nz - (e.z || 0);
+        var dist3d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        var hitRadius = MODE3D ? 45 : 20;
+        hitRadius += (p.r || 8);
+        if (dist3d < hitRadius) {
+          var dmg = (spell.damage || 1) * (now < dmgBoostUntil ? 1.30 : 1.0);
+
+          // ── Synergy: Shatter (lightning on ice-slowed) ────────────
+          var chainRange = spell.chainRange || 80;
+          if (spell.id === 'lightning' && e.slowUntil && now < e.slowUntil) {
+            dmg *= 1.5; chainRange *= 2;
+            impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:400, type:'shatter'});
+            console.log('[SYNERGY] Shatter! 1.5x dmg, 2x chain range');
+          }
+
+          e.health -= dmg; stats.totalDamageDone += dmg;
+          if (e.health <= 0) stats.totalEnemiesKilled++;
+          e.damageFlash = now + 150; e.damageFlashColor = spell.color || '#ffffff';
+          // Knockback impulse — push enemy away from projectile direction
+          var kb2d = Math.hypot(dx, dy) || 1;
+          e.vx = (-dx / kb2d) * 220; e.vy = (-dy / kb2d) * 220;
+
+          // ── Frost Bolt: instant slow + ice ground patch ───────────
+          if (spell.id === 'ice') {
+            e.slowUntil = now + 2500; // instant slow, no accumulator
+            if (spell.groundPatch) {
+              groundEffects.push({x:e.x, y:e.y, radius:35, duration:3000,
+                damage:0, color:'#00ffff', spellId:'ice', spawnMs:now, tickMs:now,
+                slowFactor:0.4});
+            }
+            // Frost Nova upgrade: AoE slow burst
+            if (spell.tier >= 2) {
+              var frostNovaR = 80;
+              for (var fni = 0; fni < enemies.length; fni++) {
+                var fne = enemies[fni];
+                if (fne === e) continue;
+                if (Math.hypot(fne.x - e.x, fne.y - e.y) < frostNovaR) {
+                  fne.slowUntil = now + 2000;
+                  fne.damageFlash = now + 100; fne.damageFlashColor = '#00ffff';
+                }
+              }
+              impacts.push({x:e.x, y:e.y, z:0, spawnMs:now, lifeMs:350, type:'frostnova'});
+            }
+          } else if (spell.id === 'fire') {
+            e.fireHits = (e.fireHits || 0) + 1;
+            if (e.fireHits >= 3) { e.burnUntil = now + 4000; e.burnDmgLast = now; e.fireHits = 0; }
+            // Synergy: Steam Burst (fire projectile on ice-slowed enemy)
+            if (e.slowUntil && now < e.slowUntil) { applySteamBurst(e, now); }
+          } else if (spell.id === 'lightning') {
+            // No accumulator — chain is the mechanic
+          }
+
+          // ── Chain Lightning ────────────────────────────────────────
+          if (spell.chainCount) {
+            var chainTargets = [];
+            var chainN = (spell.tier >= 2) ? (spell.chainCount + 1) : spell.chainCount;
+            var hitSet = {}; hitSet[ei] = true;
+            // Check Conductive Cloud synergy: lightning on enemy in poison zone
+            var inPoisonCloud = false;
+            for (var gei = 0; gei < groundEffects.length; gei++) {
+              var ge = groundEffects[gei];
+              if (ge.spellId === 'poison' && Math.hypot(e.x - ge.x, e.y - ge.y) < ge.radius) {
+                inPoisonCloud = true; break;
+              }
+            }
+            if (inPoisonCloud) {
+              // Conductive Cloud: chain to ALL enemies in the poison cloud
+              console.log('[SYNERGY] Conductive Cloud! Chains to all in poison zone');
+              for (var cci = 0; cci < enemies.length; cci++) {
+                if (hitSet[cci]) continue;
+                var cce = enemies[cci]; if (cce.health <= 0) continue;
+                for (var gcj = 0; gcj < groundEffects.length; gcj++) {
+                  var gc2 = groundEffects[gcj];
+                  if (gc2.spellId === 'poison' && Math.hypot(cce.x - gc2.x, cce.y - gc2.y) < gc2.radius) {
+                    chainTargets.push(cci); hitSet[cci] = true; break;
+                  }
+                }
+              }
+            } else {
+              // Normal chaining: find N nearest within range
+              var chainCandidates = [];
+              for (var ci = 0; ci < enemies.length; ci++) {
+                if (hitSet[ci]) continue;
+                var ce = enemies[ci]; if (ce.health <= 0) continue;
+                var cdist = Math.hypot(ce.x - e.x, ce.y - e.y);
+                if (cdist < chainRange) chainCandidates.push({idx:ci, dist:cdist});
+              }
+              chainCandidates.sort(function(a,b) { return a.dist - b.dist; });
+              for (var cj = 0; cj < Math.min(chainN, chainCandidates.length); cj++) {
+                chainTargets.push(chainCandidates[cj].idx);
+              }
+            }
+            // Apply chain damage and create visual
+            var chainDmg = dmg * (spell.chainDmgFalloff || 0.5);
+            for (var ck = 0; ck < chainTargets.length; ck++) {
+              var ce2 = enemies[chainTargets[ck]];
+              ce2.health -= chainDmg; stats.totalDamageDone += chainDmg;
+              if (ce2.health <= 0) stats.totalEnemiesKilled++;
+              ce2.damageFlash = now + 150; ce2.damageFlashColor = '#ffff00';
+              ce2.vx = (ce2.x - e.x) * 0.5; ce2.vy = (ce2.y - e.y) * 0.5;
+            }
+            if (chainTargets.length > 0) {
+              chainEffects.push({fromX:e.x, fromY:e.y, targets:chainTargets.map(function(ci2) {
+                return {x:enemies[ci2].x, y:enemies[ci2].y};
+              }), spawnMs:now, lifeMs:300});
+            }
+          }
+
+          hitEnemy = true;
+          impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:220});
+          hitEnemies++; break;
+        }
+      }
+    }
+    if (hitEnemy) continue;
+    // Wall check after enemy check — projectile only stops on a wall if it
+    // didn't already hit an enemy (handles enemies touching/inside walls)
+    var gx = Math.floor(nx / cell), gy = Math.floor(ny / cell);
+    var hitWall = (gx < 0 || gy < 0 || gx >= gridW || gy >= gridH)
+                  || !!(grid && grid[gy * gridW + gx]);
+    if (hitWall && !p.isLob) {
+      // Ore vein check — must run before normal wall stop so projectile is consumed here
+      var hitOre = false;
+      if (oreVeins && oreVeins.length) {
+        for (var oi = 0; oi < oreVeins.length; oi++) {
+          if (oreVeins[oi].gx === gx && oreVeins[oi].gy === gy) {
+            oreVeins[oi].hp--;
+            impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:400});  // longer flash
+            if (oreVeins[oi].hp <= 0) {
+              oreVeins.splice(oi, 1);
+              // Scatter 3-6 gold coins from the broken vein
+              var dropN = 3 + Math.floor(Math.random() * 4);
+              for (var di = 0; di < dropN; di++) {
+                var da = Math.random() * Math.PI * 2, ds = 15 + Math.random() * 30;
+                coinDrops.push({x:nx + Math.cos(da)*6, y:ny + Math.sin(da)*6,
+                                vx:Math.cos(da)*ds, vy:Math.sin(da)*ds,
+                                spawnMs:now, lifeMs:25000});
+              }
+            }
+            hitOre = true; hitWalls++; break;
+          }
+        }
+      }
+      if (!hitOre) { impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:220}); hitWalls++; }
+      continue;
+    }
+    p.x = nx; p.y = ny; p.z = nz;
+    if (now - p.spawnMs < p.lifeMs) { alive.push(p); } else { expired++; }
+  }
+  if (DEBUG_EFFECTS && hitWalls + hitEnemies + expired > 0) {
+    try { console.log('[PROJECTILES]', 'alive=' + alive.length, 'hitWalls=' + hitWalls, 'hitEnemies=' + hitEnemies, 'expired=' + expired); } catch (_) {}
+  }
+  projectiles = alive;
+}
+
+// ── Ground Effects (fire/ice/poison patches on floor) ─────────────────
+function updateGroundEffects(dt) {
+  if (!groundEffects || !groundEffects.length) return;
+  var now = Date.now();
+  var alive = [];
+  for (var i = 0; i < groundEffects.length; i++) {
+    var ge = groundEffects[i];
+    var age = now - ge.spawnMs;
+    if (age > ge.duration) continue; // expired
+    // Tick damage every 400ms to enemies inside
+    if (ge.damage > 0 && now - ge.tickMs >= 400) {
+      ge.tickMs = now;
+      for (var ei = 0; ei < enemies.length; ei++) {
+        var e = enemies[ei]; if (e.health <= 0) continue;
+        if (Math.hypot(e.x - ge.x, e.y - ge.y) < ge.radius) {
+          var geDmg = ge.damage * 0.5; // per-tick damage
+          e.health -= geDmg; stats.totalDamageDone += geDmg;
+          if (e.health <= 0) { stats.totalEnemiesKilled++;
+            // Plague upgrade: enemies killed in poison cloud drop bonus coins
+            if (ge.spellId === 'poison') {
+              var pSpell = spells.poison;
+              if (pSpell && pSpell.tier >= 2) {
+                var pn = 2 + Math.floor(Math.random() * 3);
+                for (var pi = 0; pi < pn; pi++) {
+                  var pa = Math.random() * Math.PI * 2, ps = 10 + Math.random() * 20;
+                  coinDrops.push({x:e.x + Math.cos(pa)*4, y:e.y + Math.sin(pa)*4,
+                    vx:Math.cos(pa)*ps, vy:Math.sin(pa)*ps, spawnMs:now, lifeMs:25000});
+                }
+              }
+            }
+          }
+          e.damageFlash = now + 100; e.damageFlashColor = ge.color;
+          // Fire patches apply burn
+          if (ge.spellId === 'fire') { e.burnUntil = now + 2000; e.burnDmgLast = e.burnDmgLast || now; }
+        }
+      }
+    }
+    // Ice patches apply slow to enemies walking through
+    if (ge.spellId === 'ice' && ge.slowFactor) {
+      for (var si = 0; si < enemies.length; si++) {
+        var se = enemies[si]; if (se.health <= 0) continue;
+        if (Math.hypot(se.x - ge.x, se.y - ge.y) < ge.radius) {
+          se.slowUntil = Math.max(se.slowUntil || 0, now + 500);
+        }
+      }
+    }
+    alive.push(ge);
+  }
+  groundEffects = alive;
+}
+
+// Single consolidated effect tick — one Date.now(), four small arrays
+function tickEffects(dt) {
+  var now = Date.now();
+
+  // Impacts — timer only
+  if (impacts && impacts.length) {
+    var ki = [];
+    for (var i = 0; i < impacts.length; i++) { if (now - impacts[i].spawnMs < impacts[i].lifeMs) ki.push(impacts[i]); }
+    impacts = ki;
+  }
+
+  // Cone effects — timer only
+  if (coneEffects && coneEffects.length) {
+    var kc = [];
+    for (var i = 0; i < coneEffects.length; i++) { if (now - coneEffects[i].spawnMs < coneEffects[i].lifeMs) kc.push(coneEffects[i]); }
+    coneEffects = kc;
+  }
+
+  // Death effects — bone physics (gravity + friction)
+  if (deathEffects && deathEffects.length) {
+    var kd = [];
+    for (var i = 0; i < deathEffects.length; i++) {
+      var de = deathEffects[i];
+      if (now - de.spawnMs < de.lifeMs) {
+        de.x += de.vx * dt; de.y += de.vy * dt;
+        de.vy += 60 * dt; de.vx *= 0.96; de.vy *= 0.96;
+        kd.push(de);
+      }
+    }
+    deathEffects = kd;
+  }
+
+  // Soul orbs — proximity collection
+  if (soulOrbs && soulOrbs.length) {
+    var ks = [];
+    for (var i = 0; i < soulOrbs.length; i++) {
+      var orb = soulOrbs[i];
+      if (Math.hypot(pos.x - orb.x, pos.y - orb.y) < 22) {
+        mana = Math.min(MANA_MAX, mana + 15);
+        console.log('[SOUL] Orb collected! Mana +15');
+      } else { ks.push(orb); }
+    }
+    soulOrbs = ks;
+  }
+
+  // Coin drops — proximity collection (18 units)
+  if (coinDrops && coinDrops.length) {
+    var kc = [];
+    for (var i = 0; i < coinDrops.length; i++) {
+      var coin = coinDrops[i];
+      if (Math.hypot(pos.x - coin.x, pos.y - coin.y) < 18) {
+        coins++;
+      } else { kc.push(coin); }
+    }
+    coinDrops = kc;
+  }
+
+  // Shop proximity check
+  shopNearby = false;
+  if (shopMarker) {
+    var sdx = pos.x - shopMarker.x, sdy = pos.y - shopMarker.y;
+    if (Math.hypot(sdx, sdy) < 45) shopNearby = true;
+    else if (shopOpen) { shopOpen = false; shopSelIdx = 0; } // auto-close if player walks away
+  }
+
+  // Active buffs — update global speed from base so all input handlers pick it up
+  var BASE_SPEED = 90;
+  speed = (now < speedBoostUntil) ? BASE_SPEED * 1.25 : BASE_SPEED;
+}
+
+
+// =============================================
+// SECTION 10: ENEMY SYSTEM
+// =============================================
+
+// Build a short looping patrol route for one enemy.
+// Every waypoint is validated with two checks at load time so enemies never
+// walk into walls:
+//   1. Grid check — the target cell must be open (not grid[gy*gridW+gx])
+//   2. LOS check  — hasLineOfSight from the spawn point ensures the path is
+//      clear; a second LOS check from the previous waypoint keeps the loop smooth.
+// If a waypoint can't be placed in 25 attempts we just use fewer points —
+// tight areas get a shorter patrol rather than a broken one.
+function generatePatrolWaypoints(sx, sy, range) {
+  var count = 2 + Math.floor(Math.random() * 3); // 2-4 waypoints
+  var wps = [{x:sx, y:sy}];
+  var prev = wps[0];
+  var patrolRange = range * 0.45;
+  for (var wi = 1; wi < count; wi++) {
+    var placed = false;
+    for (var att = 0; att < 25 && !placed; att++) {
+      var ang = Math.random() * Math.PI * 2;
+      var d = patrolRange * 0.4 + Math.random() * patrolRange * 0.6;
+      var tx = sx + Math.cos(ang) * d;
+      var ty = sy + Math.sin(ang) * d;
+      // World bounds
+      if (tx < cell * 2 || ty < cell * 2 || tx > worldW - cell * 2 || ty > worldH - cell * 2) continue;
+      // Grid cell open?
+      var gx = Math.floor(tx / cell), gy = Math.floor(ty / cell);
+      if (gx < 0 || gy < 0 || gx >= gridW || gy >= gridH) continue;
+      if (grid && grid[gy * gridW + gx]) continue;
+      // LOS from spawn and from previous waypoint
+      if (!hasLineOfSight(sx, sy, tx, ty)) continue;
+      if (!hasLineOfSight(prev.x, prev.y, tx, ty)) continue;
+      var wp = {x:tx, y:ty};
+      wps.push(wp);
+      prev = wp;
+      placed = true;
+    }
+  }
+  return wps;
+}
+
+function spawnEnemies(cfg) {
+  enemies = [];
+  var maxE = (cfg && cfg.maxEnemies) ? cfg.maxEnemies : 4;
+  var spawns = (cfg && cfg.enemies) ? cfg.enemies : [];
+  // For plains/cave the fixed spawn list still works — enemies start in open space
+  // near borders and the level's start corner; if a position lands in a procedural
+  // wall the separation physics will push them clear within the first few frames.
+  // Cap to maxEnemies in case someone defines more entries than they want active.
+  if (spawns.length > maxE) spawns = spawns.slice(0, maxE);
+  // If fewer fixed spawns than maxEnemies (e.g. plains/cave with extra budget),
+  // scatter random extras across the world, well away from the player start.
+  var typeKeys = Object.keys(enemyTypes);
+  while (spawns.length < maxE) {
+    var rx = Math.floor(100 + Math.random() * (worldW - 200));
+    var ry = Math.floor(100 + Math.random() * (worldH - 200));
+    spawns.push({x:rx, y:ry, type:typeKeys[Math.floor(Math.random() * typeKeys.length)]});
+  }
+  for (var i = 0; i < spawns.length; i++) {
+    var s = spawns[i];
+    var eType = enemyTypes[s.type || 'normal'];
+    var wps = generatePatrolWaypoints(s.x, s.y, eType.chaseRange);
+    enemies.push({x:s.x, y:s.y, z:0, enemyType:eType, health:eType.health, maxHealth:eType.health, speed:eType.speed,
+      chaseRange:eType.chaseRange, lastUpdate:0, damageFlash:0, damageFlashColor:'#ffffff',
+      slowUntil:0, burnUntil:0, burnDmgLast:0, iceHits:0, fireHits:0, lightningHits:0,
+      vx:0, vy:0, aggroAt:0, attackState:'idle', attackStateUntil:0,
+      patrolWaypoints:wps, patrolIdx:0});
+  }
+  console.log('[ENEMY] Spawned ' + enemies.length + ' / ' + maxE + ' enemies (world ' + worldW + 'x' + worldH + ')');
+}
+
+function updateEnemies(dt) {
+  if (!enemies || !enemies.length) return;
+  var now = Date.now();
+  var alive = [], throttled = 0, moved = 0, burning = 0, slowed = 0;
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    if (e.health <= 0) {
+      console.log('[ENEMY] Enemy ' + i + ' defeated!');
+      // Bone scatter — 7 tumbling segments fly outward
+      for (var b = 0; b < 7; b++) {
+        var bang = Math.random() * Math.PI * 2;
+        var bspd = 50 + Math.random() * 110;
+        deathEffects.push({x:e.x, y:e.y, vx:Math.cos(bang)*bspd, vy:Math.sin(bang)*bspd,
+          rot:Math.random()*Math.PI*2, rotVel:(Math.random()-0.5)*10,
+          len:7+Math.random()*13, spawnMs:now, lifeMs:800, color:'#cfc8b8'});
+      }
+      // Soul orb — glowing mana pickup
+      soulOrbs.push({x:e.x, y:e.y, spawnMs:now, bob:Math.random()*Math.PI*2});
+      // Coin drop — 1 for scout, 2 for soldier, 3 for brute
+      var dropCount = (e.enemyType.id === 'fast') ? 1 : (e.enemyType.id === 'normal') ? 2 : 3;
+      for (var ci = 0; ci < dropCount; ci++) {
+        var cang = Math.random() * Math.PI * 2, cspd = 15 + Math.random() * 25;
+        coinDrops.push({x:e.x + Math.cos(cang)*8, y:e.y + Math.sin(cang)*8,
+          bob:Math.random()*Math.PI*2, spawnMs:now});
+      }
+      continue;
+    }
+    // PER-FRAME: knockback velocity
+    var eRad = 8 * (e.enemyType.size || 1);
+    if (e.vx || e.vy) {
+      var kbx = e.x + e.vx * dt, kby = e.y + e.vy * dt;
+      if (!isInGridWall(kbx, kby, eRad * 0.6)) {
+        e.x = kbx; e.y = kby;
+      }
+      var kbDecay = Math.pow(0.005, dt);
+      e.vx *= kbDecay; e.vy *= kbDecay;
+      if (Math.abs(e.vx) < 1 && Math.abs(e.vy) < 1) { e.vx = 0; e.vy = 0; }
+    }
+    // PER-FRAME: attack state machine — runs before throttle so response is immediate
+    var eType = e.enemyType;
+    var aThr = 6 + 8 * (eType.size || 1);
+    var aPdx = pos.x - e.x, aPdy = pos.y - e.y;
+    var aPdist = Math.hypot(aPdx, aPdy);
+    if (aPdist < aThr && aPdist > 0.001) {
+      if (!e.attackState || e.attackState === 'idle') {
+        e.attackState = 'windup'; e.attackStateUntil = now + eType.attackWindup;
+      } else if (e.attackState === 'windup' && now >= e.attackStateUntil) {
+        if (wardActive) {
+          wardActive = false; // Warding Stone absorbs one hit
+          console.log('[WARD] Hit absorbed by Warding Stone!');
+        } else {
+          health = Math.max(0, health - eType.attackDamage);
+          stats.totalDamageTaken += eType.attackDamage;
+        }
+        e.attackState = 'cooldown'; e.attackStateUntil = now + eType.attackCooldown;
+      }
+    } else {
+      if (e.attackState === 'windup') { e.attackState = 'idle'; e.attackStateUntil = 0; }
+      else if (e.attackState === 'cooldown' && now >= e.attackStateUntil) { e.attackState = 'idle'; }
+    }
+    if (!e.lastUpdate) e.lastUpdate = now;
+    if (now - e.lastUpdate < 80) { alive.push(e); throttled++; continue; }
+    e.lastUpdate = now;
+    // Stun effect — skip all actions while stunned
+    if (e.stunUntil && now < e.stunUntil) {
+      alive.push(e); continue;
+    }
+    if (e.burnUntil && now < e.burnUntil) {
+      burning++;
+      if (!e.burnDmgLast || now - e.burnDmgLast >= 500) {
+        e.health -= 0.3; e.burnDmgLast = now;
+      }
+    }
+    var dx = pos.x - e.x, dy = pos.y - e.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < e.chaseRange && dist > 10 && hasLineOfSight(e.x, e.y, pos.x, pos.y)) {
+      if (!e.aggroAt) e.aggroAt = now; // first time entering chase range → show indicator
+      var dirX = dx / dist, dirY = dy / dist;
+      var moveSpeed = e.speed * 0.08;
+      if (e.slowUntil && now < e.slowUntil) { moveSpeed *= 0.4; slowed++; }
+      // Try direct move first, then slide along each axis independently.
+      // Use radius-based wall check so enemies can't clip their bodies into walls.
+      var eWallRad = eRad * 0.6;
+      var nx = e.x + dirX * moveSpeed, ny = e.y + dirY * moveSpeed;
+      if (!isInGridWall(nx, ny, eWallRad)) {
+        e.x = nx; e.y = ny; moved++;
+      } else {
+        // Wall-slide: try X axis only
+        var nxX = e.x + dirX * moveSpeed;
+        if (!isInGridWall(nxX, e.y, eWallRad)) { e.x = nxX; moved++; }
+        // Try Y axis only
+        var nyY = e.y + dirY * moveSpeed;
+        if (!isInGridWall(e.x, nyY, eWallRad)) { e.y = nyY; moved++; }
+      }
+    } else {
+      // Not chasing — patrol between pre-validated waypoints
+      e.aggroAt = 0;
+      if (e.patrolWaypoints && e.patrolWaypoints.length > 1) {
+        var wp = e.patrolWaypoints[e.patrolIdx || 0];
+        var wpDx = wp.x - e.x, wpDy = wp.y - e.y;
+        var wpDist = Math.hypot(wpDx, wpDy);
+        if (wpDist < 14) {
+          // Reached waypoint — advance loop
+          e.patrolIdx = ((e.patrolIdx || 0) + 1) % e.patrolWaypoints.length;
+        } else {
+          var pSpeed = e.speed * 0.38 * 0.08; // patrol at ~38% of chase speed
+          var pdirX = wpDx / wpDist, pdirY = wpDy / wpDist;
+          var pnx = e.x + pdirX * pSpeed, pny = e.y + pdirY * pSpeed;
+          if (!isInGridWall(pnx, pny, eRad * 0.6)) {
+            e.x = pnx; e.y = pny; moved++;
+          } else {
+            // Waypoint now blocked (e.g. cave walls shifted) — skip ahead
+            e.patrolIdx = ((e.patrolIdx || 0) + 1) % e.patrolWaypoints.length;
+          }
+        }
+      }
     }
     alive.push(e);
   }
-  if(DEBUG_EFFECTS && now-__effectsLastLog>__effectsLogInterval){
-    try{ console.log('[EFFECTS]','enemies='+alive.length,'throttled='+throttled,'moved='+moved,'burning='+burning,'slowed='+slowed,'deathFX='+deathEffects.length,'proj='+projectiles.length,'cone='+coneEffects.length,'impacts='+impacts.length); __effectsLastLog=now; }catch(_){}
+  if (DEBUG_EFFECTS && now - __effectsLastLog > __effectsLogInterval) {
+    try {
+      console.log('[EFFECTS]', 'enemies=' + alive.length, 'throttled=' + throttled, 'moved=' + moved,
+        'burning=' + burning, 'slowed=' + slowed, 'deathFX=' + deathEffects.length,
+        'proj=' + projectiles.length, 'cone=' + coneEffects.length, 'impacts=' + impacts.length);
+      __effectsLastLog = now;
+    } catch (_) {}
   }
-  enemies=alive;
+  enemies = alive;
 }
-function drawEnemies3D(){
-  if(!enemies||!enemies.length) return;
-  var w=canvas.width, h=canvas.height; var halfFov=cam.fov/2;
-  var pitchOffset=Math.floor(-(cam.pitch||0)*100); var horizon=h*0.75; var now=Date.now();
-  for(var i=0;i<enemies.length;i++){
-    var e=enemies[i]; var eType=e.enemyType;
-    var dx=e.x-cam.x, dy=e.y-cam.y; var dist=Math.hypot(dx,dy);
-    if(dist<1) dist=1; if(dist>800) continue;
-    var ang=Math.atan2(dy,dx); var da=ang - cam.ang;
-    while(da>Math.PI) da-=Math.PI*2; while(da<-Math.PI) da+=Math.PI*2;
-    if(Math.abs(da)>halfFov*1.2) continue;
-    var sx=(da/halfFov)*0.5 + 0.5; var screenX=Math.floor(sx*w);
-    if(depthBuffer && screenX>=0 && screenX<depthBuffer.length && dist>depthBuffer[screenX]+5) continue;
-    var perspectiveShift=Math.floor(70 * (1 - dist/(dist+40)));
-    var floorY=Math.floor(horizon + perspectiveShift)+pitchOffset;
-    var baseSize=Math.max(5, Math.min(45, Math.floor(600/(dist+15)))); var size=baseSize*eType.size;
-    var zVal=(e.z||0) + 12; var liftRaw=(zVal*1.0) / (1 + dist*0.01);
-    var liftPx = Math.max(-80, Math.min(80, Math.floor(liftRaw))); var centerY=floorY - liftPx;
-    ctx.save();
-    var shadowAlpha=Math.max(0.15, Math.min(0.5, 0.6 - dist/1000));
-    ctx.globalAlpha=shadowAlpha; ctx.fillStyle='#000000'; ctx.beginPath();
-    ctx.ellipse(screenX, floorY, size*0.45, size*0.2, 0, 0, Math.PI*2); ctx.fill();
-    ctx.globalAlpha=0.95; var isFlashing=(e.damageFlash && now<e.damageFlash);
-    ctx.fillStyle=isFlashing?'#ffffff':eType.color; ctx.strokeStyle=isFlashing?'#ffffff':'#990000';
-    ctx.lineWidth=Math.max(1, Math.min(3, Math.floor(size/15))); ctx.beginPath();
-    ctx.arc(screenX, centerY, size/2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-    if(e.slowUntil && now<e.slowUntil){
-      ctx.strokeStyle='#00ffff'; ctx.lineWidth=Math.max(2, Math.min(4, Math.floor(size/12)));
-      ctx.beginPath(); ctx.arc(screenX, centerY, size*0.55, 0, Math.PI*2); ctx.stroke();
-    }
-    if(e.burnUntil && now<e.burnUntil){
-      ctx.fillStyle='rgba(255,100,0,0.7)'; ctx.beginPath();
-      ctx.arc(screenX, centerY-size*0.4, size*0.25, 0, Math.PI*2); ctx.fill();
-      ctx.fillStyle='rgba(255,150,0,0.5)'; ctx.beginPath();
-      ctx.arc(screenX, centerY-size*0.6, size*0.15, 0, Math.PI*2); ctx.fill();
-    }
-    var hpPct=e.health/e.maxHealth;
-    if(hpPct<1.0){
-      var barW=Math.max(20, size*1.2); var barH=Math.max(2, Math.floor(size/10));
-      var barY=centerY-size*0.8; ctx.fillStyle='rgba(0,0,0,0.5)';
-      ctx.fillRect(screenX-barW/2, barY, barW, barH);
-      ctx.fillStyle=(hpPct>0.5)?'#00ff00':(hpPct>0.25)?'#ffaa00':'#ff4444';
-      ctx.fillRect(screenX-barW/2, barY, barW*hpPct, barH);
-    }
-    ctx.restore();
-  }
+
+
+// =============================================
+// SECTION 11: RENDERING - CORE
+// =============================================
+
+function updateViewCamera() {
+  var targetX = pos.x - canvas.width / 2;
+  var targetY = pos.y - canvas.height / 2;
+  var dx = targetX - viewCam.x;
+  var dy = targetY - viewCam.y;
+  viewCam.x += dx * 0.1;
+  viewCam.y += dy * 0.1;
 }
-function updateProjectiles(dt){
-  if(!projectiles||!projectiles.length) return;
-  var now=Date.now(); var alive=[]; var hitWalls=0, hitEnemies=0, expired=0;
-  for(var i=0;i<projectiles.length;i++){
-    var p=projectiles[i];
-    var nx=p.x+Math.cos(p.ang)*(p.hz||p.speed)*dt;
-    var ny=p.y+Math.sin(p.ang)*(p.hz||p.speed)*dt; var nz=(p.z||0) + (p.vz||0)*dt;
-    var gx=Math.floor(nx/cell), gy=Math.floor(ny/cell); var hitWall=false;
-    if(gx<0||gy<0||gx>=gridW||gy>=gridH){ hitWall=true; }
-    else if(grid && grid[gy*gridW+gx]){ hitWall=true; }
-    if(hitWall){ impacts.push({x:nx,y:ny,z:nz,spawnMs:now,lifeMs:220}); hitWalls++; continue; }
-    var hitEnemy=false;
-    if(enemies&&enemies.length){
-      for(var ei=0;ei<enemies.length;ei++){
-        var e=enemies[ei];
-        var dx=nx-e.x, dy=ny-e.y, dz=nz-(e.z||0);
-        var dist3d=Math.sqrt(dx*dx+dy*dy+dz*dz);
-        var hitRadius=MODE3D?45:20; hitRadius+=(p.r||8);
-        if(dist3d<hitRadius){
-          var spell=p.spell||spells.missile; var dmg=spell.damage||1;
-          e.health-=dmg; stats.totalDamageDone+=dmg;
-          if(e.health<=0){ stats.totalEnemiesKilled++; }
-          e.damageFlash=now+120;
-          if(spell.id==='ice'){
-            e.iceHits=(e.iceHits||0)+1;
-            if(e.iceHits>=3){ e.slowUntil=now+2500; e.iceHits=0; }
-          } else if(spell.id==='fire'){
-            e.fireHits=(e.fireHits||0)+1;
-            if(e.fireHits>=3){ e.burnUntil=now+4000; e.burnDmgLast=now; e.fireHits=0; }
-          } else if(spell.id==='lightning'){
-            e.lightningHits=(e.lightningHits||0)+1;
-            if(e.lightningHits>=3){ e.slowUntil=now+1500; e.lightningHits=0; }
-          }
-          hitEnemy=true; impacts.push({x:nx,y:ny,z:nz,spawnMs:now,lifeMs:220}); hitEnemies++; break;
-        }
-      }
-    }
-    if(hitEnemy) continue;
-    p.x=nx; p.y=ny; p.z=nz;
-    if(now - p.spawnMs < p.lifeMs){ alive.push(p); } else { expired++; }
-  }
-  if(DEBUG_EFFECTS && hitWalls+hitEnemies+expired>0){
-    try{ console.log('[PROJECTILES]','alive='+alive.length,'hitWalls='+hitWalls,'hitEnemies='+hitEnemies,'expired='+expired); }catch(_){}
-  }
-  projectiles=alive;
+
+function shadeWall(col, shade, dist) {
+  var r = parseInt(col.substr(1, 2), 16);
+  var g = parseInt(col.substr(3, 2), 16);
+  var b = parseInt(col.substr(5, 2), 16);
+  var fog = Math.max(0.4, 1.0 - 0.0009 * dist);
+  r = Math.floor(clamp(r * shade * fog, 0, 255));
+  g = Math.floor(clamp(g * shade * fog, 0, 255));
+  b = Math.floor(clamp(b * shade * fog, 0, 255));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
-function updateImpacts(){
-  if(!impacts||!impacts.length) return; var now=Date.now(); var keep=[]; var removed=0;
-  for(var i=0;i<impacts.length;i++){
-    var im=impacts[i];
-    if(now - im.spawnMs < im.lifeMs){ keep.push(im); } else { removed++; }
+
+function drawSimpleWallSlice(x, y, height, wallX, shade, dist, side) {
+  if (height <= 0) return;
+  var baseColor = (terrain === 'ice') ? [140, 170, 240] : (terrain === 'cave') ? [95, 95, 105] : [180, 140, 100];
+  var u = Math.floor(wallX * 4) % 16;
+  var colorMod = 1.0;
+  if (terrain === 'cave') {
+    var v = Math.floor(wallX * 2) % 8;
+    if (v < 1) colorMod = 0.75;
+    else if (v < 2) colorMod = 0.85;
+    else if (v > 6) colorMod = 1.15;
+    else if (v === 4) colorMod = 0.95;
+    else colorMod = 1.0;
+  } else {
+    if (u < 2) colorMod = 0.9;
+    else if (u > 13) colorMod = 0.9;
+    else if (u === 7 || u === 8) colorMod = 0.95;
   }
-  if(DEBUG_EFFECTS && removed>0){ try{ console.log('[IMPACTS]','active='+keep.length,'removed='+removed); }catch(_){} }
-  impacts=keep;
+  var fog = Math.max(0.3, 1.0 - dist * 0.0008);
+  var r = Math.floor(baseColor[0] * colorMod * shade * fog);
+  var g = Math.floor(baseColor[1] * colorMod * shade * fog);
+  var b = Math.floor(baseColor[2] * colorMod * shade * fog);
+  r = Math.max(0, Math.min(255, r));
+  g = Math.max(0, Math.min(255, g));
+  b = Math.max(0, Math.min(255, b));
+  var gradient = ctx.createLinearGradient(0, y, 0, y + height);
+  var topShade = 1.12, bottomShade = 0.88;
+  gradient.addColorStop(0, 'rgb(' + Math.floor(r * topShade) + ',' + Math.floor(g * topShade) + ',' + Math.floor(b * topShade) + ')');
+  gradient.addColorStop(0.5, 'rgb(' + r + ',' + g + ',' + b + ')');
+  gradient.addColorStop(1, 'rgb(' + Math.floor(r * bottomShade) + ',' + Math.floor(g * bottomShade) + ',' + Math.floor(b * bottomShade) + ')');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(x, y, 1, height);
 }
-function updateDeathEffects(){
-  if(!deathEffects||!deathEffects.length) return; var now=Date.now(); var keep=[]; var removed=0;
-  for(var i=0;i<deathEffects.length;i++){
-    var de=deathEffects[i];
-    if(now - de.spawnMs < de.lifeMs){ keep.push(de); } else { removed++; }
+
+function drawSkybox3D() {
+  var w = canvas.width, h = canvas.height;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  ctx.save();
+  // Use the same sky/ceiling colours as raycastDraw once did, but as a subtle gradient
+  // so that open expanse above walls looks atmospheric rather than flat.
+  var gradient = ctx.createLinearGradient(0, 0, 0, horizonY);
+  if (terrain === 'ice') {
+    gradient.addColorStop(0, '#05070f'); gradient.addColorStop(1, '#0b0d12');
+  } else if (terrain === 'cave') {
+    gradient.addColorStop(0, '#12121a'); gradient.addColorStop(1, '#1a1a1e');
+  } else if (terrain === 'expanse') {
+    gradient.addColorStop(0, '#2e1e08'); gradient.addColorStop(1, '#5a3010');
+  } else {
+    // ground / plains
+    gradient.addColorStop(0, '#1e1508'); gradient.addColorStop(1, '#3f2f1c');
   }
-  if(DEBUG_EFFECTS && removed>0){ try{ console.log('[DEATH-FX]','active='+keep.length,'removed='+removed); }catch(_){} }
-  deathEffects=keep;
-}
-function drawLightningBolt(x, y, ang, size){
-  var len=size*3.5; var endX=x+Math.cos(ang)*len; var endY=y+Math.sin(ang)*len;
-  var segments=6; ctx.shadowBlur=8; ctx.shadowColor='#ffff00';
-  ctx.lineWidth=Math.max(2, ctx.lineWidth); ctx.beginPath(); ctx.moveTo(x, y);
-  for(var s=1; s<=segments; s++){
-    var t=s/segments; var baseX=x + (endX-x)*t; var baseY=y + (endY-y)*t;
-    var perpAng=ang+Math.PI/2; var offset=(s%2===0?1:-1)*size*0.6;
-    var segX=baseX + Math.cos(perpAng)*offset; var segY=baseY + Math.sin(perpAng)*offset;
-    ctx.lineTo(segX, segY);
-  }
-  ctx.lineTo(endX, endY); ctx.stroke();
-  var branch1Ang=ang+0.7; var branch1Len=len*0.5;
-  var branch1X=x+Math.cos(ang)*len*0.25; var branch1Y=y+Math.sin(ang)*len*0.25;
-  ctx.beginPath(); ctx.moveTo(branch1X, branch1Y);
-  var b1endX=branch1X+Math.cos(branch1Ang)*branch1Len; var b1endY=branch1Y+Math.sin(branch1Ang)*branch1Len;
-  ctx.lineTo(b1endX, b1endY); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(b1endX, b1endY);
-  ctx.lineTo(b1endX+Math.cos(branch1Ang+0.4)*branch1Len*0.3, b1endY+Math.sin(branch1Ang+0.4)*branch1Len*0.3);
-  ctx.stroke();
-  var branch2Ang=ang-0.8; var branch2Len=len*0.55;
-  var branch2X=x+Math.cos(ang)*len*0.5; var branch2Y=y+Math.sin(ang)*len*0.5;
-  ctx.beginPath(); ctx.moveTo(branch2X, branch2Y);
-  var b2endX=branch2X+Math.cos(branch2Ang)*branch2Len; var b2endY=branch2Y+Math.sin(branch2Ang)*branch2Len;
-  ctx.lineTo(b2endX, b2endY); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(b2endX, b2endY);
-  ctx.lineTo(b2endX+Math.cos(branch2Ang-0.5)*branch2Len*0.35, b2endY+Math.sin(branch2Ang-0.5)*branch2Len*0.35);
-  ctx.stroke();
-  var branch3Ang=ang+0.5; var branch3Len=len*0.4;
-  var branch3X=x+Math.cos(ang)*len*0.75; var branch3Y=y+Math.sin(ang)*len*0.75;
-  ctx.beginPath(); ctx.moveTo(branch3X, branch3Y);
-  ctx.lineTo(branch3X+Math.cos(branch3Ang)*branch3Len, branch3Y+Math.sin(branch3Ang)*branch3Len);
-  ctx.stroke(); ctx.shadowBlur=0;
-}
-function drawProjectiles2D(){
-  if(!projectiles||!projectiles.length) return; var now=Date.now();
-  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
-  for(var i=0;i<projectiles.length;i++){
-    var p=projectiles[i]; var age=(now - p.spawnMs);
-    var t=Math.max(0, Math.min(1, age/(p.lifeMs||1000))); ctx.globalAlpha=1.0 - t;
-    var spellId=(p.spell && p.spell.id) || 'missile';
-    if(spellId==='lightning'){
-      ctx.strokeStyle=p.spell.color; ctx.lineWidth=2; ctx.lineCap='round';
-      drawLightningBolt(p.x, p.y, p.ang, p.r*1.5);
-    } else if(spellId==='fire'){
-      ctx.shadowBlur=12; ctx.shadowColor='#ff6600'; ctx.fillStyle=p.spell.color;
-      ctx.beginPath(); ctx.arc(p.x,p.y,p.r*1.3,0,Math.PI*2); ctx.fill();
-      ctx.fillStyle='#ffaa00'; ctx.beginPath(); ctx.arc(p.x,p.y,p.r*0.7,0,Math.PI*2); ctx.fill();
-      var flameAng=p.ang+Math.PI;
-      for(var f=0;f<3;f++){
-        var fang=flameAng+(f-1)*0.4; var fx=p.x+Math.cos(fang)*(p.r*1.8); var fy=p.y+Math.sin(fang)*(p.r*1.8);
-        ctx.fillStyle='rgba(255,100,0,0.6)'; ctx.beginPath(); ctx.arc(fx,fy,p.r*0.5,0,Math.PI*2); ctx.fill();
-      }
-      ctx.shadowBlur=0;
-    } else if(spellId==='ice'){
-      ctx.shadowBlur=10; ctx.shadowColor='#00ffff'; ctx.strokeStyle=p.spell.color; ctx.lineWidth=2;
-      ctx.fillStyle='rgba(0,255,255,0.3)'; ctx.beginPath(); ctx.arc(p.x,p.y,p.r*1.2,0,Math.PI*2); ctx.fill(); ctx.stroke();
-      for(var s=0;s<6;s++){
-        var sang=p.ang+(s*Math.PI/3); var sx1=p.x+Math.cos(sang)*(p.r*0.4); var sy1=p.y+Math.sin(sang)*(p.r*0.4);
-        var sx2=p.x+Math.cos(sang)*(p.r*1.5); var sy2=p.y+Math.sin(sang)*(p.r*1.5);
-        ctx.beginPath(); ctx.moveTo(sx1,sy1); ctx.lineTo(sx2,sy2); ctx.stroke();
-      }
-      ctx.shadowBlur=0;
-    } else {
-      ctx.shadowBlur=5; ctx.shadowColor=p.spell.color;
-      ctx.fillStyle=(p.spell && p.spell.color) || '#ffd54f';
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill(); ctx.shadowBlur=0;
-    }
-  }
-  ctx.restore(); ctx.globalAlpha=1.0;
-}
-function drawProjectiles3D(){
-  if(!projectiles||!projectiles.length) return;
-  var w=canvas.width, h=canvas.height; var halfFov=cam.fov/2;
-  var pitchOffset=Math.floor(-(cam.pitch||0)*100); var horizon=h*0.75;
-  for(var i=0;i<projectiles.length;i++){
-    var p=projectiles[i]; var dx=p.x-cam.x, dy=p.y-cam.y; var dist=Math.hypot(dx,dy);
-    if(dist<1) dist=1; if(dist>600) continue;
-    var ang=Math.atan2(dy,dx); var da=ang - cam.ang;
-    while(da>Math.PI) da-=Math.PI*2; while(da<-Math.PI) da+=Math.PI*2;
-    if(Math.abs(da)>halfFov*1.2) continue;
-    var sx=(da/halfFov)*0.5 + 0.5; var screenX=Math.floor(sx*w);
-    if(depthBuffer && screenX>=0 && screenX<depthBuffer.length && dist>depthBuffer[screenX]+2) continue;
-    var perspectiveShift=Math.floor(70 * (1 - dist/(dist+40)));
-    var floorY=Math.floor(horizon + perspectiveShift)+pitchOffset;
-    var size=Math.max(6, Math.min(22, Math.floor(240/dist)));
-    var zVal=(p.z||0); var liftRaw=(zVal*1.0) / (1 + dist*0.01);
-    var liftPx = Math.max(-60, Math.min(60, Math.floor(liftRaw))); var centerY=floorY - liftPx;
-    ctx.save(); ctx.globalAlpha=0.95; var spellId=(p.spell && p.spell.id) || 'missile';
-    if(spellId==='lightning'){
-      ctx.strokeStyle=p.spell.color; ctx.lineWidth=Math.max(2, Math.min(4, size/5)); ctx.lineCap='round';
-      drawLightningBolt(screenX, centerY, p.ang, size*0.8);
-    } else if(spellId==='fire'){
-      ctx.shadowBlur=10; ctx.shadowColor='#ff6600'; ctx.fillStyle=p.spell.color;
-      ctx.beginPath(); ctx.arc(screenX, centerY, size*0.65, 0, Math.PI*2); ctx.fill();
-      ctx.fillStyle='#ffaa00'; ctx.beginPath(); ctx.arc(screenX, centerY, size*0.35, 0, Math.PI*2); ctx.fill();
-      ctx.shadowBlur=0;
-    } else if(spellId==='ice'){
-      ctx.shadowBlur=8; ctx.shadowColor='#00ffff'; ctx.strokeStyle=p.spell.color; ctx.lineWidth=Math.max(1.5, size/10);
-      ctx.fillStyle='rgba(0,255,255,0.3)'; ctx.beginPath(); ctx.arc(screenX, centerY, size*0.6, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-      for(var s=0;s<6;s++){
-        var sang=p.ang+(s*Math.PI/3); var sx1=screenX+Math.cos(sang)*(size*0.2); var sy1=centerY+Math.sin(sang)*(size*0.2);
-        var sx2=screenX+Math.cos(sang)*(size*0.75); var sy2=centerY+Math.sin(sang)*(size*0.75);
-        ctx.beginPath(); ctx.moveTo(sx1,sy1); ctx.lineTo(sx2,sy2); ctx.stroke();
-      }
-      ctx.shadowBlur=0;
-    } else {
-      ctx.shadowBlur=5; ctx.shadowColor=p.spell.color; ctx.fillStyle=(p.spell && p.spell.color) || '#ffd54f';
-      ctx.beginPath(); ctx.arc(screenX, centerY, size/2, 0, Math.PI*2); ctx.fill(); ctx.shadowBlur=0;
-    }
-    ctx.restore();
-  }
-}
-function drawImpacts2D(){
-  if(!impacts||!impacts.length) return; var now=Date.now();
-  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
-  for(var i=0;i<impacts.length;i++){
-    var im=impacts[i]; var t=Math.max(0, Math.min(1, (now-im.spawnMs)/im.lifeMs));
-    ctx.globalAlpha=1.0 - t; ctx.strokeStyle='rgba(255,212,79,0.9)'; ctx.lineWidth=2;
-    ctx.beginPath(); ctx.arc(im.x, im.y, 4 + 18*t, 0, Math.PI*2); ctx.stroke();
-  }
-  ctx.restore(); ctx.globalAlpha=1.0;
-}
-function drawImpacts3D(){
-  if(!impacts||!impacts.length) return;
-  var w=canvas.width, h=canvas.height; var halfFov=cam.fov/2;
-  var pitchOffset=Math.floor(-(cam.pitch||0)*100); var horizon=h*0.75; var now=Date.now();
-  for(var i=0;i<impacts.length;i++){
-    var im=impacts[i]; var dx=im.x-cam.x, dy=im.y-cam.y; var dist=Math.hypot(dx,dy);
-    if(dist<1) dist=1; if(dist>800) continue;
-    var ang=Math.atan2(dy,dx); var da=ang - cam.ang;
-    while(da>Math.PI) da-=Math.PI*2; while(da<-Math.PI) da+=Math.PI*2;
-    if(Math.abs(da)>halfFov*1.3) continue;
-    var sx=(da/halfFov)*0.5 + 0.5; var screenX=Math.floor(sx*w);
-    if(depthBuffer && screenX>=0 && screenX<depthBuffer.length && dist>depthBuffer[screenX]+2) continue;
-    var perspectiveShift=Math.floor(70 * (1 - dist/(dist+40)));
-    var floorY=Math.floor(horizon + perspectiveShift)+pitchOffset;
-    var zVal=(im.z||0); var liftRaw=(zVal*1.0) / (1 + dist*0.01);
-    var liftPx=Math.max(-60, Math.min(60, Math.floor(liftRaw))); var centerY=floorY - liftPx;
-    var t=Math.max(0, Math.min(1, (now-im.spawnMs)/im.lifeMs));
-    var size=Math.max(6, Math.min(28, Math.floor(220/dist))); var r=(size*0.5) + 10*t;
-    ctx.save(); ctx.globalAlpha=1.0 - t; ctx.strokeStyle='rgba(255,212,79,0.95)'; ctx.lineWidth=2;
-    ctx.beginPath(); ctx.arc(screenX, centerY, r, 0, Math.PI*2); ctx.stroke(); ctx.restore();
-  }
-}
-function drawConeEffects2D(){
-  if(!coneEffects||!coneEffects.length) return; var now=Date.now();
-  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
-  for(var i=0;i<coneEffects.length;i++){
-    var ce=coneEffects[i]; var t=Math.max(0, Math.min(1, (now-ce.spawnMs)/ce.lifeMs));
-    var isFire=(ce.spellId==='fire');
-    if(isFire){
-      ctx.shadowBlur=15; ctx.shadowColor='#ff6600'; var particles=8;
-      for(var p=0;p<particles;p++){
-        var pct=p/particles; var dist=ce.range*(0.2+0.8*pct); var spread=ce.halfAngle*2*pct;
-        var pAng=ce.ang + (Math.random()-0.5)*spread;
-        var px=ce.x + Math.cos(pAng)*dist; var py=ce.y + Math.sin(pAng)*dist;
-        var size=8*(1-pct)*(1-t); ctx.globalAlpha=(0.6-0.4*pct)*(1.0-t);
-        ctx.fillStyle=(p%2===0)?'#ff6600':'#ffaa00';
-        ctx.beginPath(); ctx.arc(px, py, size, 0, Math.PI*2); ctx.fill();
-      }
-      ctx.shadowBlur=0;
-    } else {
-      ctx.globalAlpha=0.4*(1.0-t); ctx.fillStyle=ce.color; ctx.beginPath(); ctx.moveTo(ce.x, ce.y);
-      var leftAng=ce.ang-ce.halfAngle; var rightAng=ce.ang+ce.halfAngle;
-      ctx.arc(ce.x, ce.y, ce.range, leftAng, rightAng); ctx.closePath(); ctx.fill();
-      ctx.globalAlpha=0.7*(1.0-t); ctx.strokeStyle=ce.color; ctx.lineWidth=2; ctx.beginPath();
-      ctx.moveTo(ce.x, ce.y); ctx.lineTo(ce.x+Math.cos(leftAng)*ce.range, ce.y+Math.sin(leftAng)*ce.range);
-      ctx.moveTo(ce.x, ce.y); ctx.lineTo(ce.x+Math.cos(rightAng)*ce.range, ce.y+Math.sin(rightAng)*ce.range);
-      ctx.stroke();
-    }
-  }
-  ctx.restore(); ctx.globalAlpha=1.0;
-}
-function drawConeEffects3D(){
-  if(!coneEffects||!coneEffects.length) return;
-  var w=canvas.width, h=canvas.height; var halfFov=cam.fov/2;
-  var pitchOffset=Math.floor(-(cam.pitch||0)*100); var horizon=h*0.75; var now=Date.now();
-  for(var i=0;i<coneEffects.length;i++){
-    var ce=coneEffects[i]; var t=Math.max(0, Math.min(1, (now-ce.spawnMs)/ce.lifeMs));
-    var isFire=(ce.spellId==='fire');
-    if(isFire){
-      ctx.save(); ctx.shadowBlur=15; ctx.shadowColor='#ff6600'; var particles=20;
-      for(var p=0;p<particles;p++){
-        var pct=p/particles; var dist=ce.range*(0.1+0.9*pct); var spread=ce.halfAngle*2*pct;
-        var pAng=ce.ang + (Math.random()-0.5)*spread;
-        var px=ce.x + Math.cos(pAng)*dist; var py=ce.y + Math.sin(pAng)*dist;
-        var dx=px-cam.x, dy=py-cam.y; var d=Math.hypot(dx,dy);
-        if(d<1) d=1; if(d>300) continue;
-        var ang=Math.atan2(dy,dx); var da=ang - cam.ang;
-        while(da>Math.PI) da-=Math.PI*2; while(da<-Math.PI) da+=Math.PI*2;
-        if(Math.abs(da)>halfFov*1.3) continue;
-        var sx=(da/halfFov)*0.5 + 0.5; var screenX=Math.floor(sx*w);
-        var perspectiveShift=Math.floor(70 * (1 - d/(d+40)));
-        var floorY=Math.floor(horizon + perspectiveShift)+pitchOffset;
-        var size=Math.max(6, Math.min(24, Math.floor(220/d)))*(1-pct*0.5);
-        ctx.globalAlpha=(0.7-0.4*pct)*(1.0-t); var hue=p%3;
-        ctx.fillStyle=(hue===0)?'#ff6600':(hue===1?'#ffaa00':'#ff8800');
-        ctx.beginPath(); ctx.arc(screenX, floorY, size, 0, Math.PI*2); ctx.fill();
-      }
-      ctx.restore();
-    } else {
-      ctx.save(); ctx.shadowBlur=10; ctx.shadowColor='#00ffff';
-      var leftAng=ce.ang-ce.halfAngle; var rightAng=ce.ang+ce.halfAngle; var rays=8;
-      for(var r=0;r<rays;r++){
-        var rayAng=leftAng + (rightAng-leftAng)*(r/(rays-1));
-        ctx.globalAlpha=0.5*(1.0-t); ctx.strokeStyle='rgba(0,255,255,0.8)'; ctx.lineWidth=3;
-        ctx.beginPath(); var steps=6;
-        for(var s=0;s<=steps;s++){
-          var dist=ce.range*(s/steps); var px=ce.x + Math.cos(rayAng)*dist; var py=ce.y + Math.sin(rayAng)*dist;
-          var dx=px-cam.x, dy=py-cam.y; var d=Math.hypot(dx,dy); if(d<1) d=1;
-          var ang=Math.atan2(dy,dx); var da=ang - cam.ang;
-          while(da>Math.PI) da-=Math.PI*2; while(da<-Math.PI) da+=Math.PI*2;
-          var sx=(da/halfFov)*0.5 + 0.5; var screenX=Math.floor(sx*w);
-          var perspectiveShift=Math.floor(70 * (1 - d/(d+40)));
-          var floorY=Math.floor(horizon + perspectiveShift)+pitchOffset;
-          if(s===0){ ctx.moveTo(screenX, floorY); } else { ctx.lineTo(screenX, floorY); }
-        }
-        ctx.stroke();
-      }
-      ctx.globalAlpha=0.2*(1.0-t); ctx.fillStyle='rgba(0,255,255,0.3)'; ctx.beginPath();
-      var arcSteps=16;
-      for(var s=0;s<=arcSteps;s++){
-        var a=leftAng + (rightAng-leftAng)*(s/arcSteps); var dist=ce.range;
-        var px=ce.x + Math.cos(a)*dist; var py=ce.y + Math.sin(a)*dist;
-        var dx=px-cam.x, dy=py-cam.y; var d=Math.hypot(dx,dy); if(d<1) d=1;
-        var ang=Math.atan2(dy,dx); var da=ang - cam.ang;
-        while(da>Math.PI) da-=Math.PI*2; while(da<-Math.PI) da+=Math.PI*2;
-        var sx=(da/halfFov)*0.5 + 0.5; var screenX=Math.floor(sx*w);
-        var perspectiveShift=Math.floor(70 * (1 - d/(d+40)));
-        var floorY=Math.floor(horizon + perspectiveShift)+pitchOffset;
-        if(s===0){ ctx.moveTo(screenX, floorY); } else { ctx.lineTo(screenX, floorY); }
-      }
-      var ox=ce.x-cam.x, oy=ce.y-cam.y; var od=Math.hypot(ox,oy); if(od<1) od=1;
-      var oang=Math.atan2(oy,ox); var oda=oang - cam.ang;
-      while(oda>Math.PI) oda-=Math.PI*2; while(oda<-Math.PI) oda+=Math.PI*2;
-      var osx=(oda/halfFov)*0.5 + 0.5; var oScreenX=Math.floor(osx*w);
-      var oPerspectiveShift=Math.floor(70 * (1 - od/(od+40)));
-      var oFloorY=Math.floor(horizon + oPerspectiveShift)+pitchOffset;
-      ctx.lineTo(oScreenX, oFloorY); ctx.closePath(); ctx.fill(); ctx.restore();
-    }
-  }
-}
-function drawMenuOverlay(){
-  if(!menuOpen) return; var w=canvas.width, h=canvas.height;
-  ctx.save(); ctx.globalAlpha=0.85; ctx.fillStyle='rgba(0,0,0,0.75)'; ctx.fillRect(0,0,w,h);
-  var menuW=Math.min(400, w*0.6), menuH=Math.min(300, h*0.6);
-  var mx=(w-menuW)/2, my=(h-menuH)/2;
-  ctx.fillStyle='rgba(20,20,40,0.95)'; ctx.strokeStyle='rgba(100,150,255,0.8)'; ctx.lineWidth=2;
-  ctx.fillRect(mx,my,menuW,menuH); ctx.strokeRect(mx,my,menuW,menuH);
-  ctx.fillStyle='#ffffff'; ctx.font='bold 20px Arial'; ctx.textAlign='center';
-  ctx.fillText('Player Stats', mx+menuW/2, my+30);
-  ctx.font='16px Arial'; ctx.textAlign='left';
-  var lineY=my+60; var lineH=24; var leftX=mx+20;
-  ctx.fillStyle='#aaddff'; ctx.fillText('Mana:', leftX, lineY);
-  ctx.fillStyle='#ffffff'; var manaPct=((mana/MANA_MAX)*100).toFixed(0);
-  ctx.fillText(Math.floor(mana)+' / '+MANA_MAX+' ('+manaPct+'%)', leftX+120, lineY); lineY+=lineH;
-  ctx.fillStyle='#aaddff'; ctx.fillText('Health:', leftX, lineY);
-  ctx.fillStyle='#ffffff'; var hpPct=((health/HEALTH_MAX)*100).toFixed(0);
-  ctx.fillText(Math.floor(health)+' / '+HEALTH_MAX+' ('+hpPct+'%)', leftX+120, lineY); lineY+=lineH;
-  ctx.fillStyle='#aaddff'; ctx.fillText('Level:', leftX, lineY);
-  ctx.fillStyle='#ffffff'; ctx.fillText(level.toString(), leftX+120, lineY); lineY+=lineH;
-  ctx.fillStyle='#aaddff'; ctx.fillText('Enemies Defeated:', leftX, lineY);
-  ctx.fillStyle='#ffffff'; ctx.fillText(stats.totalEnemiesKilled.toString(), leftX+120, lineY); lineY+=lineH+10;
-  var barW=menuW-40, barH=20; var barX=mx+20, barY=lineY;
-  ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(barX,barY,barW,barH);
-  var manaPct2=Math.max(0,Math.min(1,mana/MANA_MAX)); ctx.fillStyle='#4db6ff';
-  ctx.fillRect(barX,barY,Math.floor(barW*manaPct2),barH);
-  ctx.strokeStyle='rgba(255,255,255,0.6)'; ctx.lineWidth=1; ctx.strokeRect(barX,barY,barW,barH);
-  ctx.fillStyle='#ffffff'; ctx.font='12px Arial'; ctx.textAlign='center';
-  ctx.fillText('Mana', barX+barW/2, barY+14);
-  ctx.font='14px Arial'; ctx.textAlign='center'; ctx.fillStyle='#ffdd88';
-  ctx.fillText('Press Start to close', mx+menuW/2, my+menuH-20);
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, w, Math.max(0, horizonY));
   ctx.restore();
 }
-function drawHudOverlay(){
 
-  var w=canvas.width, h=canvas.height;
+function drawCalibration() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#333'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#fff'; ctx.font = '16px Arial'; ctx.textAlign = 'center';
+  ctx.fillText('Calibrating...', canvas.width / 2, canvas.height / 2 - 20);
+  ctx.fillText('Hold device flat and still', canvas.width / 2, canvas.height / 2 + 10);
+  var pct = Math.min(100, Math.floor((calStableMs / calNeedStableMs) * 100));
+  ctx.fillStyle = '#4db6ff';
+  ctx.fillRect(canvas.width / 2 - 100, canvas.height / 2 + 30, pct * 2, 10);
+  ctx.strokeStyle = '#fff';
+  ctx.strokeRect(canvas.width / 2 - 100, canvas.height / 2 + 30, 200, 10);
+}
+
+
+// =============================================
+// SECTION 12: RENDERING - RAYCASTER
+// =============================================
+
+function raycastDraw() {
+  if (!grid) return;
+  var w = canvas.width, h = canvas.height;
+  var fov = cam.fov;
+  var halfFov = fov / 2;
+  var s0 = 0, s1 = Math.floor(w / 2), s2 = w - 1;
+  var dist0 = 0, dist1 = 0, dist2 = 0;
+  var cameraZRaw = (cam.z || 60);
+  var cameraZ = 60 + (cameraZRaw - 60) * (25 / 40);
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+
+  for (var x = 0; x < w; x++) {
+    var cameraX = 2 * x / w - 1;
+    var rayAng = cam.ang + Math.atan(cameraX * Math.tan(halfFov));
+    var dirX = Math.cos(rayAng), dirY = Math.sin(rayAng);
+
+    var mapX = Math.floor(cam.x / cell), mapY = Math.floor(cam.y / cell);
+    var rayPosX = (cam.x / cell) - mapX, rayPosY = (cam.y / cell) - mapY;
+    var stepX = (dirX < 0 ? -1 : 1), stepY = (dirY < 0 ? -1 : 1);
+    var deltaDistX = (dirX === 0) ? 1e9 : Math.abs(1 / dirX);
+    var deltaDistY = (dirY === 0) ? 1e9 : Math.abs(1 / dirY);
+    var sideDistX = (dirX < 0 ? rayPosX * deltaDistX : (1 - rayPosX) * deltaDistX);
+    var sideDistY = (dirY < 0 ? rayPosY * deltaDistY : (1 - rayPosY) * deltaDistY);
+
+    var uncovered = [[0, h]];
+    var hits = 0, maxHits = 15, maxSteps = gridW + gridH + 50;
+    var firstDepthSet = false;
+
+    while (hits < maxHits && uncovered.length > 0 && maxSteps-- > 0) {
+      var side = 0;
+      var hit = 0;
+      while (hit === 0 && maxSteps-- > 0) {
+        if (sideDistX < sideDistY) { sideDistX += deltaDistX; mapX += stepX; side = 0; }
+        else { sideDistY += deltaDistY; mapY += stepY; side = 1; }
+        if (mapX < 0 || mapY < 0 || mapX >= gridW || mapY >= gridH) { hit = 1; break; }
+        if (grid[mapY * gridW + mapX]) hit = 1;
+      }
+      var perpDist, wallXPos;
+      if (side === 0) {
+        perpDist = (sideDistX - deltaDistX) * cell;
+        wallXPos = cam.y + perpDist * dirY;
+      } else {
+        perpDist = (sideDistY - deltaDistY) * cell;
+        wallXPos = cam.x + perpDist * dirX;
+      }
+      if (perpDist < 1) perpDist = 1;
+      wallXPos -= Math.floor(wallXPos / cell) * cell;
+
+      if (!firstDepthSet) {
+        if (!depthBuffer || depthBuffer.length !== w) depthBuffer = new Array(w);
+        depthBuffer[x] = perpDist;
+        if (x === s0) dist0 = perpDist;
+        if (x === s1) dist1 = perpDist;
+        if (x === s2) dist2 = perpDist;
+        firstDepthSet = true;
+      }
+
+      var wallHeight = 1.0;
+      if (wallHeights && mapX >= 0 && mapY >= 0 && mapX < gridW && mapY < gridH) {
+        wallHeight = wallHeights[mapY * gridW + mapX];
+      }
+      var lineH = Math.floor(h / perpDist * 180 * wallHeight);
+      var shade = side ? 0.8 : 1.0;
+      var hx = cam.x + dirX * perpDist;
+      var hy = cam.y + dirY * perpDist;
+      var fh = (floorMesh ? getFloorHeightAt(hx, hy) : 0);
+      var worldZ = fh * 25;
+      var baseY = horizonY + Math.floor(((cameraZ - worldZ) / perpDist) * 180);
+      var segStart = Math.max(0, baseY - lineH);
+      var segEnd = Math.min(h, baseY + 2); // +2px overlap to hide wall-floor seam
+
+      if (segEnd > segStart) {
+        var newUncovered = [];
+        for (var b = 0; b < uncovered.length; b++) {
+          var b0 = uncovered[b][0], b1 = uncovered[b][1];
+          var d0 = Math.max(segStart, b0), d1 = Math.min(segEnd, b1);
+          if (d1 > d0) {
+            if (USE_TEXTURES) {
+              drawSimpleWallSlice(x, d0, d1 - d0, wallXPos, shade, perpDist, side);
+            } else {
+              ctx.fillStyle = shadeWall(wallColor, shade, perpDist);
+              ctx.fillRect(x, d0, 1, d1 - d0);
+            }
+            if (b0 < d0) newUncovered.push([b0, d0]);
+            if (d1 < b1) newUncovered.push([d1, b1]);
+          } else {
+            newUncovered.push([b0, b1]);
+          }
+        }
+        uncovered = newUncovered;
+      }
+      hits++;
+      if (uncovered.length === 0) break;
+      if (perpDist > 1000) break;
+    }
+  }
+
+  drawFloorScatter3D();
+  drawOreVeins();
+  drawWallDecorations();
+
+  if (DEBUG_3D) {
+    if (Date.now() - __dbg3dLast > 600) {
+      __dbg3dLast = Date.now();
+      try {
+        var spd = Math.hypot(vel.x, vel.y).toFixed(1);
+        console.log('[3D]',
+          'cam=(' + cam.x.toFixed(1) + ',' + cam.y.toFixed(1) + ') a=' + cam.ang.toFixed(2),
+          'pos=(' + pos.x.toFixed(1) + ',' + pos.y.toFixed(1) + ') v=' + spd,
+          'grid=(' + gridW + 'x' + gridH + ') cell=' + cell,
+          'd0=' + dist0.toFixed(1), 'dM=' + dist1.toFixed(1), 'dE=' + dist2.toFixed(1),
+          'running=' + (running ? 1 : 0) + ' polling=' + (polling ? 1 : 0));
+      } catch (_) {}
+    }
+  }
+}
+
+
+// =============================================
+// SECTION 13: RENDERING - FLOOR
+// =============================================
+
+function drawPlatforms2D() {
+  if (!floorMesh) return;
+  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
+  var mesh = floorMesh;
+  var gridSize = mesh.gridSize;
+  var now2d = Date.now();
+  for (var y = 0; y < mesh.h - 1; y++) {
+    for (var x = 0; x < mesh.w - 1; x++) {
+      var height = mesh.heights[y * mesh.w + x];
+      var worldX = x * gridSize;
+      var worldY = y * gridSize;
+      ctx.fillStyle = mesh.colors[y * mesh.w + x];
+      ctx.globalAlpha = 0.4 + height * 0.5;
+      ctx.fillRect(worldX, worldY, gridSize, gridSize);
+      // Water overlay in 2D — streams shimmer, pools are near-static
+      var wt2d = mesh.water ? mesh.water[y * mesh.w + x] : 0;
+      if (wt2d === 2) {
+        var ripple2d = Math.sin(now2d * 0.003 + x * 0.3 + y * 0.3);
+        ctx.globalAlpha = 0.30 + 0.15 * ripple2d;
+        ctx.fillStyle = '#55aaee';
+        ctx.fillRect(worldX, worldY, gridSize, gridSize);
+      } else if (wt2d === 1) {
+        ctx.globalAlpha = 0.18;
+        ctx.fillStyle = '#3388bb';
+        ctx.fillRect(worldX, worldY, gridSize, gridSize);
+      }
+    }
+  }
+  ctx.globalAlpha = 1.0;
+  ctx.restore();
+}
+
+function drawPlatforms3D() {
+  if (!floorMesh) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var mesh = floorMesh;
+  var cameraZRaw = (cam.z || 60);
+  var cameraZ = 60 + (cameraZRaw - 60) * (25 / 40);
+  ctx.save();
+  var visibleQuads = [];
+  var totalQuads = 0, distCulled = 0, fovCulled = 0, rendered = 0, cornerCulled = 0;
+  var minH = 999, maxH = -999;
+  for (var y = 0; y < mesh.h - 1; y++) {
+    for (var x = 0; x < mesh.w - 1; x++) {
+      var h1 = mesh.heights[y * mesh.w + x];
+      var h2 = mesh.heights[y * mesh.w + (x + 1)];
+      var h3 = mesh.heights[(y + 1) * mesh.w + x];
+      var h4 = mesh.heights[(y + 1) * mesh.w + (x + 1)];
+      var worldX1 = x * mesh.gridSize, worldY1 = y * mesh.gridSize;
+      var worldX2 = (x + 1) * mesh.gridSize, worldY2 = (y + 1) * mesh.gridSize;
+      var centerX = (worldX1 + worldX2) / 2, centerY = (worldY1 + worldY2) / 2;
+      var dx = centerX - cam.x, dy = centerY - cam.y;
+      var dist = Math.hypot(dx, dy);
+      totalQuads++;
+      if (dist > viewDist) { distCulled++; continue; }
+      var ang = Math.atan2(dy, dx);
+      var da = ang - cam.ang;
+      while (da > Math.PI) da -= Math.PI * 2;
+      while (da < -Math.PI) da += Math.PI * 2;
+      if (Math.abs(da) > halfFov * 1.8) { fovCulled++; continue; }
+      var avgHeight = (h1 + h2 + h3 + h4) / 4;
+      if (dist < 100) { minH = Math.min(minH, h1, h2, h3, h4); maxH = Math.max(maxH, h1, h2, h3, h4); }
+      var c1 = mesh.colors[y * mesh.w + x], c2 = mesh.colors[y * mesh.w + (x + 1)];
+      var c3 = mesh.colors[(y + 1) * mesh.w + x], c4 = mesh.colors[(y + 1) * mesh.w + (x + 1)];
+      // waterType: 0=none, 1=still pool, 2=flowing stream (max of corners)
+      var waterType = 0;
+      if (mesh.water) {
+        waterType = Math.max(
+          mesh.water[y * mesh.w + x]       || 0,
+          mesh.water[y * mesh.w + (x + 1)] || 0,
+          mesh.water[(y + 1) * mesh.w + x] || 0,
+          mesh.water[(y + 1) * mesh.w + (x + 1)] || 0
+        );
+      }
+      // For stream quads, look up the stored flow direction (from the source-cell or any neighbour)
+      var flowDirX = 0.0, flowDirY = 0.0;
+      if (waterType === 2 && mesh.waterDirX) {
+        var fdIdxs = [y*mesh.w+x, y*mesh.w+(x+1), (y+1)*mesh.w+x, (y+1)*mesh.w+(x+1)];
+        for (var fdi = 0; fdi < 4; fdi++) {
+          var fdv = fdIdxs[fdi];
+          if (mesh.waterDirX[fdv] !== 0 || mesh.waterDirY[fdv] !== 0) {
+            flowDirX = mesh.waterDirX[fdv]; flowDirY = mesh.waterDirY[fdv]; break;
+          }
+        }
+      }
+      visibleQuads.push({x1:worldX1, y1:worldY1, x2:worldX2, y2:worldY2,
+        h1:h1, h2:h2, h3:h3, h4:h4, avgHeight:avgHeight, dist:dist,
+        centerX:centerX, centerY:centerY, gridX:x, gridY:y, c1:c1, c2:c2, c3:c3, c4:c4,
+        waterType:waterType, flowDirX:flowDirX, flowDirY:flowDirY});
+    }
+  }
+  visibleQuads.sort(function(a, b) { return b.dist - a.dist; });
+  for (var i = 0; i < visibleQuads.length; i++) {
+    var quad = visibleQuads[i];
+    var corners = [
+      {x:quad.x1, y:quad.y1, h:quad.h1}, {x:quad.x2, y:quad.y1, h:quad.h2},
+      {x:quad.x2, y:quad.y2, h:quad.h4}, {x:quad.x1, y:quad.y2, h:quad.h3}
+    ];
+    var screenPts = [];
+    var allVisible = true;
+    for (var j = 0; j < 4; j++) {
+      var dx = corners[j].x - cam.x, dy = corners[j].y - cam.y;
+      var dist = Math.hypot(dx, dy);
+      if (dist < 1) dist = 1;
+      var ang = Math.atan2(dy, dx);
+      var da = ang - cam.ang;
+      while (da > Math.PI) da -= Math.PI * 2;
+      while (da < -Math.PI) da += Math.PI * 2;
+      if (Math.abs(da) > halfFov * 2.5) { allVisible = false; cornerCulled++; break; }
+      var sx = (da / halfFov) * 0.5 + 0.5;
+      var screenX = Math.floor(sx * w);
+      var worldZ = corners[j].h * 25;
+      var heightAboveFloor = cameraZ - worldZ;
+      var screenY = horizonY + Math.floor((heightAboveFloor / dist) * 180);
+      screenPts.push({x:screenX, y:screenY});
+    }
+    if (!allVisible) continue;
+    rendered++;
+    ctx.fillStyle = avgColor(quad.c1, quad.c2, quad.c3, quad.c4);
+    ctx.globalAlpha = 1.0;
+    ctx.beginPath();
+    ctx.moveTo(screenPts[0].x, screenPts[0].y);
+    for (var k = 1; k < screenPts.length; k++) ctx.lineTo(screenPts[k].x, screenPts[k].y);
+    ctx.closePath(); ctx.fill();
+    // Water overlay — streams animate fast, pools have a slow subtle glint
+    if (quad.waterType === 2) {
+      // Flowing stream — ripple travels along the stream's stored direction vector
+      var now3d = Date.now();
+      // Project world position onto flow axis and its perpendicular for 2-D wave pattern
+      var fdx = quad.flowDirX || 0.707, fdy = quad.flowDirY || 0.707;
+      var flowDot = quad.centerX * fdx + quad.centerY * fdy;   // along stream
+      var perpDot = quad.centerX * (-fdy) + quad.centerY * fdx; // across stream
+      var ripple  = Math.sin(now3d * 0.0022 - flowDot * 0.04);
+      var ripple2 = Math.sin(now3d * 0.0014 - flowDot * 0.025 + perpDot * 0.012);
+      ctx.globalAlpha = 0.20 + 0.13 * ripple + 0.07 * ripple2;
+      ctx.fillStyle = '#88ccff';
+      ctx.beginPath();
+      ctx.moveTo(screenPts[0].x, screenPts[0].y);
+      for (var k2 = 1; k2 < screenPts.length; k2++) ctx.lineTo(screenPts[k2].x, screenPts[k2].y);
+      ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 1.0;
+    } else if (quad.waterType === 1) {
+      // Still pool — very slow, very faint glint; mostly just the dark colour
+      var now3dP = Date.now();
+      var glint = Math.sin(now3dP * 0.0003 + quad.centerX * 0.015 + quad.centerY * 0.015);
+      ctx.globalAlpha = 0.07 + 0.04 * glint;
+      ctx.fillStyle = '#aaddff';
+      ctx.beginPath();
+      ctx.moveTo(screenPts[0].x, screenPts[0].y);
+      for (var k2b = 1; k2b < screenPts.length; k2b++) ctx.lineTo(screenPts[k2b].x, screenPts[k2b].y);
+      ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 1.0;
+    }
+  }
+  ctx.restore();
+  if (DEBUG_TEXTURE && Date.now() - __dbgTexLast > 1000) {
+    __dbgTexLast = Date.now();
+    console.log('[FLOOR-3D]', 'total=' + totalQuads, 'distCull=' + distCulled, 'fovCull=' + fovCulled, 'cornerCull=' + cornerCulled, 'rendered=' + rendered);
+  }
+  if (DEBUG_FLOOR && Date.now() - __dbgFloorLast > 500) {
+    __dbgFloorLast = Date.now();
+    var camFloorH = getFloorHeightAt(cam.x, cam.y);
+    console.log('[FLOOR-HEIGHTS]', 'cam=(' + cam.x.toFixed(1) + ',' + cam.y.toFixed(1) + ')',
+      'camFloorH=' + camFloorH.toFixed(3), 'cameraZ=' + cameraZ.toFixed(1),
+      'nearbyRange=[' + minH.toFixed(3) + ' to ' + maxH.toFixed(3) + ']',
+      'delta=' + (maxH - minH).toFixed(3), 'scale=25');
+  }
+}
+
+
+// =============================================
+// SECTION 13b: RENDERING - CAVE CEILING
+// =============================================
+// Projects cave ceiling quads using the same perspective formula as drawPlatforms3D,
+// but with worldZ = ceilH * 25 which places them ABOVE the camera (screenY < horizonY).
+// Must be called before raycastDraw() so walls correctly paint over distant ceiling.
+function drawCeiling3D() {
+  if (!floorMesh || !floorMesh.ceilH || !deepCaveRegions.length) return;
+  var mesh = floorMesh;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var cameraZRaw = (cam.z || 60);
+  var cameraZ = 60 + (cameraZRaw - 60) * (25 / 40);
+  ctx.save();
+
+  // Collect visible ceiling quads (back-to-front sort like the floor)
+  var ceilQuads = [];
+  for (var my = 0; my < mesh.h - 1; my++) {
+    for (var mx = 0; mx < mesh.w - 1; mx++) {
+      // All four corners must have a ceiling for this quad to render
+      var c00 = mesh.ceilH[my * mesh.w + mx];
+      var c10 = mesh.ceilH[my * mesh.w + (mx + 1)];
+      var c01 = mesh.ceilH[(my + 1) * mesh.w + mx];
+      var c11 = mesh.ceilH[(my + 1) * mesh.w + (mx + 1)];
+      var avgCeil = (c00 + c10 + c01 + c11) * 0.25;
+      if (avgCeil < 0.1) continue;
+      var worldX1 = mx * mesh.gridSize, worldY1 = my * mesh.gridSize;
+      var worldX2 = (mx + 1) * mesh.gridSize, worldY2 = (my + 1) * mesh.gridSize;
+      var centerX = (worldX1 + worldX2) * 0.5, centerY = (worldY1 + worldY2) * 0.5;
+      var ddx = centerX - cam.x, ddy = centerY - cam.y;
+      var dist = Math.hypot(ddx, ddy);
+      if (dist > viewDist) continue;
+      var ang = Math.atan2(ddy, ddx);
+      var da = ang - cam.ang;
+      while (da > Math.PI) da -= Math.PI * 2;
+      while (da < -Math.PI) da += Math.PI * 2;
+      if (Math.abs(da) > halfFov * 1.8) continue;
+      ceilQuads.push({x1:worldX1, y1:worldY1, x2:worldX2, y2:worldY2,
+                      c00:c00, c10:c10, c01:c01, c11:c11, avgCeil:avgCeil, dist:dist});
+    }
+  }
+  ceilQuads.sort(function(a, b) { return b.dist - a.dist; });
+
+  // Rocky ceiling color palette — slightly lighter toward stalactite tips
+  var ceilColors = ['#1e130a', '#261a0e', '#2e2014', '#361f0f', '#2a1a08'];
+
+  for (var qi = 0; qi < ceilQuads.length; qi++) {
+    var quad = ceilQuads[qi];
+    // Corners: (x1,y1), (x2,y1), (x2,y2), (x1,y2) — clockwise
+    var corners = [
+      {x:quad.x1, y:quad.y1, cz:quad.c00},
+      {x:quad.x2, y:quad.y1, cz:quad.c10},
+      {x:quad.x2, y:quad.y2, cz:quad.c11},
+      {x:quad.x1, y:quad.y2, cz:quad.c01}
+    ];
+    var screenPts = [];
+    var allVis = true;
+    for (var j = 0; j < 4; j++) {
+      var cdx = corners[j].x - cam.x, cdy = corners[j].y - cam.y;
+      var cdist = Math.hypot(cdx, cdy);
+      if (cdist < 1) cdist = 1;
+      var cang = Math.atan2(cdy, cdx);
+      var cda = cang - cam.ang;
+      while (cda > Math.PI) cda -= Math.PI * 2;
+      while (cda < -Math.PI) cda += Math.PI * 2;
+      if (Math.abs(cda) > halfFov * 2.5) { allVis = false; break; }
+      var sx = (cda / halfFov) * 0.5 + 0.5;
+      var ceilWorldZ = corners[j].cz * 25;
+      var screenY = horizonY + Math.floor(((cameraZ - ceilWorldZ) / cdist) * 180);
+      screenPts.push({x: Math.floor(sx * w), y: screenY});
+    }
+    if (!allVis) continue;
+
+    // Vary color slightly by average ceiling height for depth variation
+    var colorIdx = Math.floor(((quad.avgCeil * 25 - 85) / 40) * ceilColors.length);
+    colorIdx = Math.max(0, Math.min(ceilColors.length - 1, colorIdx));
+    ctx.fillStyle = ceilColors[colorIdx];
+
+    // Slightly darken by distance (fog)
+    var fogAlpha = Math.max(0.35, 1.0 - quad.dist / viewDist * 0.7);
+    ctx.globalAlpha = fogAlpha;
+
+    ctx.beginPath();
+    ctx.moveTo(screenPts[0].x, screenPts[0].y);
+    for (var k = 1; k < 4; k++) ctx.lineTo(screenPts[k].x, screenPts[k].y);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1.0;
+  ctx.restore();
+}
+
+
+// =============================================
+// SECTION 14: RENDERING - ENTITIES
+// =============================================
+
+function drawGoalMarker3D() {
+  var w = canvas.width, h = canvas.height;
+  var fov = cam.fov;
+  var gx = goal.x + goal.w / 2, gy = goal.y + goal.h / 2;
+  var dx = gx - cam.x, dy = gy - cam.y;
+  var dist = Math.hypot(dx, dy);
+  if (dist < 1) dist = 1;
+  var ang = Math.atan2(dy, dx);
+  var da = ang - cam.ang;
+  while (da > Math.PI) da -= Math.PI * 2;
+  while (da < -Math.PI) da += Math.PI * 2;
+  var halfFov = fov / 2;
+  if (Math.abs(da) > halfFov * 1.1) return;
+  var sx = (da / halfFov) * 0.5 + 0.5;
+  var screenX = Math.floor(sx * w);
+  if (depthBuffer && screenX >= 0 && screenX < depthBuffer.length && dist > depthBuffer[screenX] + 3) return;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var floorY = Math.floor(h * 0.75) + pitchOff;
+  var size = Math.max(6, Math.min(28, Math.floor(240 / (dist))));
+  ctx.save(); ctx.globalAlpha = 0.95; ctx.fillStyle = '#00ff00';
+  ctx.strokeStyle = 'rgba(0,255,0,0.7)'; ctx.lineWidth = 2;
+  ctx.fillRect(screenX - size / 2, floorY - Math.floor(size / 4), size, Math.floor(size / 3));
+  ctx.beginPath(); ctx.moveTo(screenX, floorY - Math.floor(size / 4));
+  ctx.lineTo(screenX, floorY - Math.floor(size / 4) - Math.min(40, Math.floor(280 / dist)));
+  ctx.stroke(); ctx.restore();
+}
+
+function drawSkeletonFrame(oc, typeId, frame, crumble) {
+  var w = SKEL_W, h = SKEL_H;
+  var c = oc.getContext('2d');
+  var phase = (frame / SKEL_FRAMES) * Math.PI * 2;
+  var isFast = typeId === 'fast', isTank = typeId === 'tank';
+  c.clearRect(0, 0, w, h);
+
+  var bone  = '#cfc8b8';
+  var dark  = '#8a7e6c';
+  var black = '#111111';
+  var lw    = isTank ? 2.5 : (isFast ? 1.5 : 2.0);
+  c.strokeStyle = dark; c.lineWidth = lw; c.lineCap = 'round'; c.lineJoin = 'round';
+
+  var cx     = w / 2;
+  var headR  = isTank ? 9  : (isFast ? 7  : 8);
+  var shldrW = isTank ? 17 : (isFast ? 12 : 14);
+  var hipHW  = isTank ? 12 : (isFast ? 8  : 10);
+  var ribH   = isTank ? 22 : 18;
+  var nRibs  = isTank ? 5  : 4;
+  var uLeg = 14, lLeg = 14, uArm = 11, lArm = 11;
+  var jointR = lw * 0.9;
+
+  var swing     = isFast ? 0.38 : (isTank ? 0.24 : 0.32);
+  var leftLegA  =  Math.sin(phase) * swing;
+  var rightLegA = -Math.sin(phase) * swing;
+  var kneeB     = -Math.abs(Math.sin(phase)) * 0.28 - 0.12;
+  var leftArmA  = -Math.sin(phase) * swing * 0.55 - 0.18;
+  var rightArmA =  Math.sin(phase) * swing * 0.55 + 0.18;
+  var bob       =  Math.abs(Math.sin(phase * 2)) * 1.5;
+
+  var headY   = 10 + bob;
+  var neckY   = headY + headR;
+  var shldrY  = neckY + 3;
+  var pelvisY = shldrY + ribH + 2;
+  var hipY    = pelvisY + 3;
+
+  // Draw a two-segment limb; returns the end point
+  function limb(fromX, fromY, ang, s1, bend, s2) {
+    var kx = fromX + Math.sin(ang) * s1, ky = fromY + Math.cos(ang) * s1;
+    c.beginPath(); c.moveTo(fromX, fromY); c.lineTo(kx, ky); c.stroke();
+    var a2 = ang + bend;
+    var ex = kx + Math.sin(a2) * s2, ey = ky + Math.cos(a2) * s2;
+    c.beginPath(); c.moveTo(kx, ky); c.lineTo(ex, ey); c.stroke();
+    c.fillStyle = bone;
+    c.beginPath(); c.arc(kx, ky, jointR, 0, Math.PI * 2); c.fill();
+    return {x: ex, y: ey};
+  }
+
+  // Legs (behind torso)
+  var lhX = cx - hipHW * 0.6, rhX = cx + hipHW * 0.6;
+  var lf = limb(lhX, hipY, leftLegA,  uLeg, kneeB, lLeg);
+  var rf = limb(rhX, hipY, rightLegA, uLeg, kneeB, lLeg);
+  // Foot stubs
+  c.beginPath(); c.moveTo(lf.x, lf.y); c.lineTo(lf.x - Math.sin(leftLegA)  * 4, lf.y + 1); c.stroke();
+  c.beginPath(); c.moveTo(rf.x, rf.y); c.lineTo(rf.x - Math.sin(rightLegA) * 4, rf.y + 1); c.stroke();
+
+  // Spine
+  c.beginPath(); c.moveTo(cx, neckY); c.lineTo(cx, pelvisY); c.stroke();
+
+  // Pelvis oval
+  c.beginPath(); c.ellipse(cx, pelvisY, hipHW * 0.85, 4, 0, 0, Math.PI * 2); c.stroke();
+
+  // Ribs (quadratic curves tapering toward bottom)
+  for (var r = 0; r < nRibs; r++) {
+    var ribY = shldrY + 3 + r * (ribH - 5) / nRibs;
+    var rw   = shldrW * (1.0 - r * 0.07);
+    c.beginPath(); c.moveTo(cx, ribY);
+      c.quadraticCurveTo(cx - rw * 0.55, ribY - 1, cx - rw, ribY + 4); c.stroke();
+    c.beginPath(); c.moveTo(cx, ribY);
+      c.quadraticCurveTo(cx + rw * 0.55, ribY - 1, cx + rw, ribY + 4); c.stroke();
+  }
+
+  // Shoulder bar
+  var lsX = cx - shldrW, rsX = cx + shldrW;
+  c.beginPath(); c.moveTo(lsX, shldrY); c.lineTo(rsX, shldrY); c.stroke();
+
+  // Arms
+  limb(lsX, shldrY, leftArmA,  uArm,  0.35, lArm);
+  if (!crumble) limb(rsX, shldrY, rightArmA, uArm, -0.35, lArm);
+
+  // Skull dome
+  c.fillStyle = bone; c.strokeStyle = dark;
+  c.beginPath(); c.arc(cx, headY, headR, 0, Math.PI * 2); c.fill(); c.stroke();
+  // Crumble: crack across skull
+  if (crumble) {
+    c.strokeStyle = dark; c.lineWidth = 1;
+    c.beginPath(); c.moveTo(cx - 3, headY - headR * 0.5); c.lineTo(cx + 1, headY + headR * 0.1); c.lineTo(cx + 4, headY - headR * 0.2); c.stroke();
+    c.lineWidth = lw; c.strokeStyle = dark;
+  }
+
+  // Cheekbone arc (slightly wider oval for lower half)
+  c.beginPath();
+  c.ellipse(cx, headY + headR * 0.15, headR * 1.05, headR * 0.55, 0, 0, Math.PI);
+  c.stroke();
+
+  // Eye sockets
+  var eyeR = headR * 0.32, eyeOX = headR * 0.38;
+  c.fillStyle = black;
+  c.beginPath(); c.ellipse(cx - eyeOX, headY - 1, eyeR * 0.85, eyeR, 0, 0, Math.PI * 2); c.fill();
+  c.beginPath(); c.ellipse(cx + eyeOX, headY - 1, eyeR * 0.85, eyeR, 0, 0, Math.PI * 2); c.fill();
+
+  // Nasal cavity triangle
+  c.fillStyle = black;
+  c.beginPath();
+    c.moveTo(cx, headY + headR * 0.18);
+    c.lineTo(cx - 1.5, headY + headR * 0.38);
+    c.lineTo(cx + 1.5, headY + headR * 0.38);
+  c.closePath(); c.fill();
+
+  // Teeth row — omitted in crumble state (jaw has fallen off)
+  if (!crumble) {
+    var jawTop  = headY + headR * 0.45;
+    var nTeeth  = isFast ? 3 : (isTank ? 5 : 4);
+    var tSpan   = headR * 1.1;
+    c.fillStyle = bone;
+    for (var t = 0; t < nTeeth; t++) {
+      var tx = cx - tSpan / 2 + (t + 0.5) * (tSpan / nTeeth);
+      c.fillRect(tx - 1.5, jawTop, 3, 4);
+      c.strokeStyle = dark; c.lineWidth = 0.5;
+      c.strokeRect(tx - 1.5, jawTop, 3, 4);
+      c.lineWidth = lw; c.strokeStyle = dark;
+    }
+  }
+}
+
+function buildSkeletonSprites() {
+  skeletonFrames = {};
+  var types = ['fast', 'normal', 'tank'];
+  var t0 = Date.now();
+  for (var ti = 0; ti < types.length; ti++) {
+    var id = types[ti];
+    skeletonFrames[id] = [];
+    for (var f = 0; f < SKEL_FRAMES; f++) {
+      var oc = document.createElement('canvas');
+      oc.width = SKEL_W; oc.height = SKEL_H;
+      drawSkeletonFrame(oc, id, f);
+      skeletonFrames[id].push(oc);
+    }
+    console.log('[SKEL] built "' + id + '": ' + SKEL_FRAMES + ' frames @ ' + SKEL_W + 'x' + SKEL_H);
+  }
+  // Crumble variants (< 25% HP): cracked skull, missing jaw, one arm gone
+  for (var ci = 0; ci < types.length; ci++) {
+    var cid = types[ci] + '_crumble';
+    skeletonFrames[cid] = [];
+    for (var cf = 0; cf < SKEL_FRAMES; cf++) {
+      var coc = document.createElement('canvas');
+      coc.width = SKEL_W; coc.height = SKEL_H;
+      drawSkeletonFrame(coc, types[ci], cf, true);
+      skeletonFrames[cid].push(coc);
+    }
+  }
+  console.log('[SKEL] buildSkeletonSprites complete — ' + (types.length * SKEL_FRAMES * 2) + ' canvases in ' + (Date.now() - t0) + 'ms');
+}
+
+function drawSkeletonDebug() {
+  if (!skeletonFrames) { return; }
+  var pad = 6, slotW = 26, slotH = 42, labelW = 52, titleH = 18, rowGap = 2;
+  var panW = labelW + SKEL_FRAMES * (slotW + 1) + pad * 2;
+  var panH = titleH + 3 * (slotH + rowGap) + pad;
+  var px = pad, py = pad;
+  var now2 = Date.now();
+  var typesMeta = [
+    {id:'fast',   label:'Scout',   spd:55},
+    {id:'normal', label:'Soldier', spd:35},
+    {id:'tank',   label:'Brute',   spd:20}
+  ];
 
   ctx.save();
 
-  var pad=10;
+  // Panel background
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.fillRect(px, py, panW, panH);
+  ctx.strokeStyle = '#666'; ctx.lineWidth = 1;
+  ctx.strokeRect(px, py, panW, panH);
 
-  var barW=Math.min(220, Math.floor(w*0.3)), barH=10;
+  // Title
+  ctx.fillStyle = '#cccccc'; ctx.font = 'bold 11px monospace';
+  ctx.fillText('SKELETON DEBUG', px + 4, py + 13);
 
-  var x=pad, y=h-pad-barH;
+  for (var ti = 0; ti < typesMeta.length; ti++) {
+    var tm = typesMeta[ti];
+    var msPerFrame = Math.max(50, 200 - tm.spd * 2);
+    var activeFrame = Math.floor(now2 / msPerFrame) % SKEL_FRAMES;
+    var rowY = py + titleH + ti * (slotH + rowGap);
+    var frames = skeletonFrames[tm.id];
+
+    // Row label
+    ctx.fillStyle = '#aaaaaa'; ctx.font = '10px monospace';
+    ctx.fillText(tm.label, px + 3, rowY + slotH / 2 + 4);
+
+    if (!frames) { continue; }
+    for (var f = 0; f < SKEL_FRAMES; f++) {
+      var fx = px + labelW + f * (slotW + 1);
+      var fy = rowY;
+      var isActive = (f === activeFrame);
+
+      // Slot background + border
+      if (isActive) {
+        ctx.fillStyle = 'rgba(255,255,80,0.18)'; ctx.fillRect(fx, fy, slotW, slotH);
+        ctx.strokeStyle = '#ffff44'; ctx.lineWidth = 1.5;
+      } else {
+        ctx.strokeStyle = '#444444'; ctx.lineWidth = 0.5;
+      }
+      ctx.strokeRect(fx, fy, slotW, slotH);
+
+      // Sprite scaled to fit slot
+      if (frames[f]) {
+        var scale = Math.min(slotW / SKEL_W, slotH / SKEL_H);
+        var dw = SKEL_W * scale, dh = SKEL_H * scale;
+        ctx.drawImage(frames[f], fx + (slotW - dw) / 2, fy + (slotH - dh) / 2, dw, dh);
+      }
+
+      // Frame index label (bottom of slot)
+      ctx.fillStyle = isActive ? '#ffff44' : '#666666'; ctx.font = '8px monospace';
+      ctx.fillText(f, fx + 2, fy + slotH - 2);
+    }
+  }
+  ctx.restore();
+}
+
+function drawEnemies3D() {
+  if (!enemies || !enemies.length) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var cameraZ = 60 + ((cam.z || 60) - 60) * (25 / 40);
+  var now = Date.now();
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i]; var eType = e.enemyType;
+    var dx = e.x - cam.x, dy = e.y - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 1) dist = 1; if (dist > viewDist) continue;
+    var ang = Math.atan2(dy, dx);
+    var da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.2) continue;
+    var sx = (da / halfFov) * 0.5 + 0.5;
+    var screenX = Math.floor(sx * w);
+    if (depthBuffer && screenX >= 0 && screenX < depthBuffer.length && dist > depthBuffer[screenX] + 5) continue;
+    var fhAtSprite = floorMesh ? getFloorHeightAt(e.x, e.y) : 0;
+    var floorWorldZ = fhAtSprite * 25;
+    if ((e.z || 0) < floorWorldZ - 5) continue;
+    var fhMid = floorMesh ? getFloorHeightAt((cam.x + e.x) * 0.5, (cam.y + e.y) * 0.5) : 0;
+    if (fhMid * 25 > (cameraZ + floorWorldZ) * 0.5 + 8) continue;
+    var floorY = horizonY + Math.floor(((cameraZ - floorWorldZ) / dist) * 180);
+    // True perspective sizing: world-height of a standard enemy = 60 world-Z units
+    // (camera sits at Z=60, so a full-height humanoid fills eye-level).
+    // spriteH ∝ 1/dist exactly — the same formula that drives wall and floor projection.
+    // This means doubling distance halves the sprite, giving reliable depth cues.
+    var worldEnemyH = 60 * (eType.size || 1);
+    var spriteH = Math.max(6, Math.min(h * 2, Math.floor(worldEnemyH * 180 / dist)));
+    var spriteW = Math.floor(spriteH * SKEL_W / SKEL_H); // preserve sprite-sheet aspect ratio
+    var size = spriteH * 0.43;  // effect-size proxy (shadow, rings, bars) — stays proportional
+    // Clamp floorY so the enemy's feet are at most 50% below the canvas bottom.
+    // Old clamp was h+spriteH which — with spriteH up to h*2 — let floorY reach 1350
+    // at close range, making spriteTop=450 and the enemy 0px visible (the "sudden shrink").
+    // h*1.5 guarantees the top of the sprite stays on screen at any distance.
+    floorY = Math.min(floorY, h * 1.5);
+    var zVal = (e.z || 0) + 12;
+    var liftRaw = (zVal * 1.0) / (1 + dist * 0.01);
+    var liftPx = Math.max(-80, Math.min(80, Math.floor(liftRaw)));
+    var centerY = floorY - liftPx;
+
+    ctx.save();
+    var shadowAlpha = Math.max(0.15, Math.min(0.5, 0.6 - dist / 1000));
+    ctx.globalAlpha = shadowAlpha; ctx.fillStyle = '#000000';
+    ctx.beginPath(); ctx.ellipse(screenX, floorY, size * 0.45, size * 0.2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 0.95;
+    var isFlashing = (e.damageFlash && now < e.damageFlash);
+    var hpPct = e.health / e.maxHealth;
+
+    // Pick walk frame: cycle speed proportional to enemy speed; freeze on frame 0 when idle
+    var isMoving = (dist > 10 && dist < eType.chaseRange);
+    var msPerFrame = Math.max(50, 200 - eType.speed * 2);
+    var skelFrameIdx = isMoving ? (Math.floor(now / msPerFrame) % SKEL_FRAMES) : 0;
+    var skelKey = (hpPct < 0.25) ? (eType.id + '_crumble') : eType.id;
+    var skelCanvas = skeletonFrames && skeletonFrames[skelKey] && skeletonFrames[skelKey][skelFrameIdx];
+
+    // Sprite screen rect — spriteH and spriteW computed from perspective above
+    var spriteX = screenX - spriteW / 2;
+    var spriteTop = floorY - spriteH;
+
+    if (skelCanvas) {
+      ctx.drawImage(skelCanvas, spriteX, spriteTop, spriteW, spriteH);
+      if (isFlashing) {
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = e.damageFlashColor || '#ffffff';
+        ctx.fillRect(spriteX, spriteTop, spriteW, spriteH);
+        ctx.globalAlpha = 0.95;
+      }
+    } else {
+      // Fallback to circle if sprites not ready
+      ctx.fillStyle = isFlashing ? '#ffffff' : eType.color;
+      ctx.strokeStyle = '#990000';
+      ctx.lineWidth = Math.max(1, Math.min(3, Math.floor(size / 15)));
+      ctx.beginPath(); ctx.arc(screenX, centerY, size / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
+
+    // Status effects — positioned at mid-torso of the sprite
+    var effectCY = spriteTop + spriteH * 0.45;
+    if (e.slowUntil && now < e.slowUntil) {
+      ctx.strokeStyle = '#00ffff';
+      ctx.lineWidth = Math.max(2, Math.min(4, Math.floor(size / 12)));
+      ctx.beginPath(); ctx.arc(screenX, effectCY, size * 0.65, 0, Math.PI * 2); ctx.stroke();
+    }
+    if (e.burnUntil && now < e.burnUntil) {
+      ctx.fillStyle = 'rgba(255,100,0,0.7)';
+      ctx.beginPath(); ctx.arc(screenX, spriteTop + spriteH * 0.08, size * 0.3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,200,0,0.5)';
+      ctx.beginPath(); ctx.arc(screenX, spriteTop - size * 0.1, size * 0.18, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Attack windup telegraph — ground ring grows and reddens as strike approaches
+    if (e.attackState === 'windup' && e.attackStateUntil) {
+      var windupDur = eType.attackWindup || 500;
+      var windupT = Math.max(0, Math.min(1, 1 - (e.attackStateUntil - now) / windupDur));
+      ctx.strokeStyle = windupT > 0.65 ? '#ff2200' : '#ff8800';
+      ctx.lineWidth = Math.max(2, Math.floor(size / 6));
+      ctx.globalAlpha = 0.35 + 0.55 * windupT + 0.1 * Math.sin(now * 0.025);
+      var ringR = size * (0.45 + windupT * 0.45);
+      ctx.beginPath(); ctx.ellipse(screenX, floorY, ringR, ringR * 0.28, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = 0.95;
+    }
+
+    // Health bar above the head (hpPct already computed above for sprite selection)
+    if (hpPct < 1.0) {
+      var barW = Math.max(20, size * 1.2); var barH = Math.max(2, Math.floor(size / 10));
+      var barY = spriteTop - barH - 2;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(screenX - barW / 2, barY, barW, barH);
+      ctx.fillStyle = (hpPct > 0.5) ? '#00ff00' : (hpPct > 0.25) ? '#ffaa00' : '#ff4444';
+      ctx.fillRect(screenX - barW / 2, barY, barW * hpPct, barH);
+    }
+    // Aggro indicator — red ! above head for 600ms when enemy first spots you
+    if (e.aggroAt && now - e.aggroAt < 600) {
+      var aggroT = (now - e.aggroAt) / 600;
+      ctx.globalAlpha = Math.max(0, 1 - aggroT * aggroT);
+      ctx.fillStyle = '#ff3300';
+      ctx.font = 'bold ' + Math.max(10, Math.floor(size * 0.5)) + 'px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('!', screenX, spriteTop - (hpPct < 1 ? 10 : 4));
+      ctx.textAlign = 'left';
+      ctx.globalAlpha = 0.95;
+    }
+    ctx.restore();
+  }
+}
+
+function drawLightningBolt(x, y, ang, size) {
+  var len = size * 3.5;
+  var endX = x + Math.cos(ang) * len;
+  var endY = y + Math.sin(ang) * len;
+  var segments = 6;
+  ctx.shadowBlur = 8; ctx.shadowColor = '#ffff00';
+  ctx.lineWidth = Math.max(2, ctx.lineWidth);
+  ctx.beginPath(); ctx.moveTo(x, y);
+  for (var s = 1; s <= segments; s++) {
+    var t = s / segments;
+    var baseX = x + (endX - x) * t;
+    var baseY = y + (endY - y) * t;
+    var perpAng = ang + Math.PI / 2;
+    var offset = (s % 2 === 0 ? 1 : -1) * size * 0.6;
+    var segX = baseX + Math.cos(perpAng) * offset;
+    var segY = baseY + Math.sin(perpAng) * offset;
+    ctx.lineTo(segX, segY);
+  }
+  ctx.lineTo(endX, endY); ctx.stroke();
+  var branch1Ang = ang + 0.7, branch1Len = len * 0.5;
+  var branch1X = x + Math.cos(ang) * len * 0.25, branch1Y = y + Math.sin(ang) * len * 0.25;
+  ctx.beginPath(); ctx.moveTo(branch1X, branch1Y);
+  var b1endX = branch1X + Math.cos(branch1Ang) * branch1Len, b1endY = branch1Y + Math.sin(branch1Ang) * branch1Len;
+  ctx.lineTo(b1endX, b1endY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(b1endX, b1endY);
+  ctx.lineTo(b1endX + Math.cos(branch1Ang + 0.4) * branch1Len * 0.3, b1endY + Math.sin(branch1Ang + 0.4) * branch1Len * 0.3);
+  ctx.stroke();
+  var branch2Ang = ang - 0.8, branch2Len = len * 0.55;
+  var branch2X = x + Math.cos(ang) * len * 0.5, branch2Y = y + Math.sin(ang) * len * 0.5;
+  ctx.beginPath(); ctx.moveTo(branch2X, branch2Y);
+  var b2endX = branch2X + Math.cos(branch2Ang) * branch2Len, b2endY = branch2Y + Math.sin(branch2Ang) * branch2Len;
+  ctx.lineTo(b2endX, b2endY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(b2endX, b2endY);
+  ctx.lineTo(b2endX + Math.cos(branch2Ang - 0.5) * branch2Len * 0.35, b2endY + Math.sin(branch2Ang - 0.5) * branch2Len * 0.35);
+  ctx.stroke();
+  var branch3Ang = ang + 0.5, branch3Len = len * 0.4;
+  var branch3X = x + Math.cos(ang) * len * 0.75, branch3Y = y + Math.sin(ang) * len * 0.75;
+  ctx.beginPath(); ctx.moveTo(branch3X, branch3Y);
+  ctx.lineTo(branch3X + Math.cos(branch3Ang) * branch3Len, branch3Y + Math.sin(branch3Ang) * branch3Len);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function drawProjectiles2D() {
+  if (!projectiles || !projectiles.length) return;
+  var now = Date.now();
+  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
+  for (var i = 0; i < projectiles.length; i++) {
+    var p = projectiles[i];
+    var age = (now - p.spawnMs);
+    var t = Math.max(0, Math.min(1, age / (p.lifeMs || 1000)));
+    ctx.globalAlpha = 1.0 - t;
+    var spellId = (p.spell && p.spell.id) || 'missile';
+    if (spellId === 'lightning') {
+      ctx.strokeStyle = p.spell.color; ctx.lineWidth = 2; ctx.lineCap = 'round';
+      drawLightningBolt(p.x, p.y, p.ang, p.r * 1.5);
+    } else if (spellId === 'fire') {
+      ctx.shadowBlur = 12; ctx.shadowColor = '#ff6600'; ctx.fillStyle = p.spell.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 1.3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffaa00'; ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 0.7, 0, Math.PI * 2); ctx.fill();
+      var flameAng = p.ang + Math.PI;
+      for (var f = 0; f < 3; f++) {
+        var fang = flameAng + (f - 1) * 0.4;
+        var fx = p.x + Math.cos(fang) * (p.r * 1.8);
+        var fy = p.y + Math.sin(fang) * (p.r * 1.8);
+        ctx.fillStyle = 'rgba(255,100,0,0.6)';
+        ctx.beginPath(); ctx.arc(fx, fy, p.r * 0.5, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.shadowBlur = 0;
+    } else if (spellId === 'ice') {
+      ctx.shadowBlur = 10; ctx.shadowColor = '#00ffff'; ctx.strokeStyle = p.spell.color; ctx.lineWidth = 2;
+      ctx.fillStyle = 'rgba(0,255,255,0.3)';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 1.2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      for (var s = 0; s < 6; s++) {
+        var sang = p.ang + (s * Math.PI / 3);
+        var sx1 = p.x + Math.cos(sang) * (p.r * 0.4), sy1 = p.y + Math.sin(sang) * (p.r * 0.4);
+        var sx2 = p.x + Math.cos(sang) * (p.r * 1.5), sy2 = p.y + Math.sin(sang) * (p.r * 1.5);
+        ctx.beginPath(); ctx.moveTo(sx1, sy1); ctx.lineTo(sx2, sy2); ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+    } else if (spellId === 'poison') {
+      ctx.shadowBlur = 10; ctx.shadowColor = '#88ff44'; ctx.fillStyle = 'rgba(136,255,68,0.7)';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 1.4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(50,200,20,0.5)';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 0.8, 0, Math.PI * 2); ctx.fill();
+      // Shadow on ground showing landing spot for lob
+      if (p.isLob) {
+        var landX = p.x + Math.cos(p.ang) * 20, landY = p.y + Math.sin(p.ang) * 20;
+        ctx.globalAlpha = 0.3; ctx.fillStyle = '#88ff44';
+        ctx.beginPath(); ctx.arc(landX, landY, 12, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 1.0 - t;
+      }
+      ctx.shadowBlur = 0;
+    } else if (spellId === 'arcane') {
+      ctx.shadowBlur = 12; ctx.shadowColor = '#cc66ff'; ctx.fillStyle = 'rgba(204,102,255,0.8)';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 1.2, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    } else {
+      ctx.shadowBlur = 5; ctx.shadowColor = p.spell.color;
+      ctx.fillStyle = (p.spell && p.spell.color) || '#ffd54f';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+  }
+  ctx.restore(); ctx.globalAlpha = 1.0;
+}
+
+function drawProjectiles3D() {
+  if (!projectiles || !projectiles.length) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizon = h * 0.75;
+  for (var i = 0; i < projectiles.length; i++) {
+    var p = projectiles[i];
+    var dx = p.x - cam.x, dy = p.y - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 1) dist = 1; if (dist > 600) continue;
+    var ang = Math.atan2(dy, dx);
+    var da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.2) continue;
+    var sx = (da / halfFov) * 0.5 + 0.5;
+    var screenX = Math.floor(sx * w);
+    if (depthBuffer && screenX >= 0 && screenX < depthBuffer.length && dist > depthBuffer[screenX] + 2) continue;
+    var perspectiveShift = Math.floor(70 * (1 - dist / (dist + 40)));
+    var floorY = Math.floor(horizon + perspectiveShift) + pitchOff;
+    var size = Math.max(6, Math.min(22, Math.floor(240 / dist)));
+    var zVal = (p.z || 0);
+    var liftRaw = (zVal * 1.0) / (1 + dist * 0.01);
+    var liftPx = Math.max(-60, Math.min(60, Math.floor(liftRaw)));
+    var centerY = floorY - liftPx;
+    ctx.save(); ctx.globalAlpha = 0.95;
+    var spellId = (p.spell && p.spell.id) || 'missile';
+    if (spellId === 'lightning') {
+      ctx.strokeStyle = p.spell.color;
+      ctx.lineWidth = Math.max(2, Math.min(4, size / 5));
+      ctx.lineCap = 'round';
+      drawLightningBolt(screenX, centerY, p.ang, size * 0.8);
+    } else if (spellId === 'fire') {
+      ctx.shadowBlur = 10; ctx.shadowColor = '#ff6600'; ctx.fillStyle = p.spell.color;
+      ctx.beginPath(); ctx.arc(screenX, centerY, size * 0.65, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffaa00'; ctx.beginPath(); ctx.arc(screenX, centerY, size * 0.35, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    } else if (spellId === 'ice') {
+      ctx.shadowBlur = 8; ctx.shadowColor = '#00ffff'; ctx.strokeStyle = p.spell.color;
+      ctx.lineWidth = Math.max(1.5, size / 10);
+      ctx.fillStyle = 'rgba(0,255,255,0.3)';
+      ctx.beginPath(); ctx.arc(screenX, centerY, size * 0.6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      for (var s = 0; s < 6; s++) {
+        var sang = p.ang + (s * Math.PI / 3);
+        var sx1 = screenX + Math.cos(sang) * (size * 0.2), sy1 = centerY + Math.sin(sang) * (size * 0.2);
+        var sx2 = screenX + Math.cos(sang) * (size * 0.75), sy2 = centerY + Math.sin(sang) * (size * 0.75);
+        ctx.beginPath(); ctx.moveTo(sx1, sy1); ctx.lineTo(sx2, sy2); ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+    } else if (spellId === 'poison') {
+      ctx.shadowBlur = 8; ctx.shadowColor = '#88ff44'; ctx.fillStyle = 'rgba(136,255,68,0.7)';
+      ctx.beginPath(); ctx.arc(screenX, centerY, size * 0.7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(50,200,20,0.5)';
+      ctx.beginPath(); ctx.arc(screenX, centerY, size * 0.4, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    } else if (spellId === 'arcane') {
+      ctx.shadowBlur = 10; ctx.shadowColor = '#cc66ff'; ctx.fillStyle = 'rgba(204,102,255,0.8)';
+      ctx.beginPath(); ctx.arc(screenX, centerY, size * 0.6, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    } else {
+      ctx.shadowBlur = 5; ctx.shadowColor = p.spell.color;
+      ctx.fillStyle = (p.spell && p.spell.color) || '#ffd54f';
+      ctx.beginPath(); ctx.arc(screenX, centerY, size / 2, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+    ctx.restore();
+  }
+}
+
+function drawImpacts2D() {
+  if (!impacts || !impacts.length) return;
+  var now = Date.now();
+  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
+  for (var i = 0; i < impacts.length; i++) {
+    var im = impacts[i];
+    var t = Math.max(0, Math.min(1, (now - im.spawnMs) / im.lifeMs));
+    ctx.globalAlpha = 1.0 - t; ctx.strokeStyle = 'rgba(255,212,79,0.9)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(im.x, im.y, 4 + 18 * t, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.restore(); ctx.globalAlpha = 1.0;
+}
+
+function drawImpacts3D() {
+  if (!impacts || !impacts.length) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizon = h * 0.75;
+  var now = Date.now();
+  for (var i = 0; i < impacts.length; i++) {
+    var im = impacts[i];
+    var dx = im.x - cam.x, dy = im.y - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 1) dist = 1; if (dist > viewDist) continue;
+    var ang = Math.atan2(dy, dx);
+    var da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.3) continue;
+    var sx = (da / halfFov) * 0.5 + 0.5;
+    var screenX = Math.floor(sx * w);
+    if (depthBuffer && screenX >= 0 && screenX < depthBuffer.length && dist > depthBuffer[screenX] + 2) continue;
+    var perspectiveShift = Math.floor(70 * (1 - dist / (dist + 40)));
+    var floorY = Math.floor(horizon + perspectiveShift) + pitchOff;
+    var zVal = (im.z || 0);
+    var liftRaw = (zVal * 1.0) / (1 + dist * 0.01);
+    var liftPx = Math.max(-60, Math.min(60, Math.floor(liftRaw)));
+    var centerY = floorY - liftPx;
+    var t = Math.max(0, Math.min(1, (now - im.spawnMs) / im.lifeMs));
+    var size = Math.max(6, Math.min(28, Math.floor(220 / dist)));
+    var r = (size * 0.5) + 10 * t;
+    ctx.save(); ctx.globalAlpha = 1.0 - t; ctx.strokeStyle = 'rgba(255,212,79,0.95)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(screenX, centerY, r, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+  }
+}
+
+// ── Ground Effects Rendering ──────────────────────────────────────────
+function drawGroundEffects2D() {
+  if (!groundEffects || !groundEffects.length) return;
+  var now = Date.now();
+  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
+  for (var i = 0; i < groundEffects.length; i++) {
+    var ge = groundEffects[i];
+    var age = now - ge.spawnMs;
+    var t = Math.min(1, age / ge.duration);
+    var fadeIn = Math.min(1, age / 200);
+    var fadeOut = t > 0.7 ? 1.0 - (t - 0.7) / 0.3 : 1.0;
+    ctx.globalAlpha = 0.5 * fadeIn * fadeOut;
+    if (ge.spellId === 'fire') {
+      // Flickering orange-red
+      var flicker = 0.8 + 0.2 * Math.sin(now * 0.01 + i * 3);
+      ctx.fillStyle = 'rgba(255,' + Math.floor(80 * flicker) + ',0,0.6)';
+      ctx.beginPath(); ctx.arc(ge.x, ge.y, ge.radius * flicker, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,200,0,0.3)';
+      ctx.beginPath(); ctx.arc(ge.x, ge.y, ge.radius * 0.6 * flicker, 0, Math.PI * 2); ctx.fill();
+    } else if (ge.spellId === 'ice') {
+      ctx.fillStyle = 'rgba(0,200,255,0.3)';
+      ctx.beginPath(); ctx.arc(ge.x, ge.y, ge.radius, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(150,240,255,0.5)'; ctx.lineWidth = 1.5;
+      ctx.stroke();
+    } else if (ge.spellId === 'poison') {
+      // Green bubbling cloud
+      var bubble = 0.9 + 0.1 * Math.sin(now * 0.008 + i * 5);
+      ctx.fillStyle = 'rgba(80,200,40,0.4)';
+      ctx.beginPath(); ctx.arc(ge.x, ge.y, ge.radius * bubble, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(120,255,60,0.2)';
+      ctx.beginPath(); ctx.arc(ge.x + ge.radius * 0.3, ge.y - ge.radius * 0.2, ge.radius * 0.5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.restore(); ctx.globalAlpha = 1.0;
+}
+
+function drawGroundEffects3D() {
+  if (!groundEffects || !groundEffects.length) return;
+  var now = Date.now();
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizon = h * 0.75;
+  for (var i = 0; i < groundEffects.length; i++) {
+    var ge = groundEffects[i];
+    var dx = ge.x - cam.x, dy = ge.y - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist > 500 || dist < 1) continue;
+    var ang = Math.atan2(dy, dx);
+    var da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.3) continue;
+    var sx = (da / halfFov) * 0.5 + 0.5;
+    var screenX = Math.floor(sx * w);
+    var perspShift = Math.floor(70 * (1 - dist / (dist + 40)));
+    var floorY = Math.floor(horizon + perspShift) + pitchOff;
+    var sizeW = Math.max(8, Math.floor(ge.radius * 2.5 / (dist * 0.02 + 1)));
+    var sizeH = Math.max(3, Math.floor(sizeW * 0.35)); // perspective flattening
+    var age = now - ge.spawnMs;
+    var t = Math.min(1, age / ge.duration);
+    var fadeOut = t > 0.7 ? 1.0 - (t - 0.7) / 0.3 : 1.0;
+    ctx.save(); ctx.globalAlpha = 0.5 * fadeOut;
+    if (ge.spellId === 'fire') {
+      var flicker = 0.8 + 0.2 * Math.sin(now * 0.01 + i * 3);
+      ctx.fillStyle = 'rgba(255,' + Math.floor(80 * flicker) + ',0,0.6)';
+      ctx.beginPath(); ctx.ellipse(screenX, floorY, sizeW * 0.5 * flicker, sizeH * 0.5 * flicker, 0, 0, Math.PI * 2); ctx.fill();
+    } else if (ge.spellId === 'ice') {
+      ctx.fillStyle = 'rgba(0,200,255,0.35)';
+      ctx.beginPath(); ctx.ellipse(screenX, floorY, sizeW * 0.5, sizeH * 0.5, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(150,240,255,0.4)'; ctx.lineWidth = 1;
+      ctx.stroke();
+    } else if (ge.spellId === 'poison') {
+      var bubble = 0.9 + 0.1 * Math.sin(now * 0.008 + i * 5);
+      ctx.fillStyle = 'rgba(80,200,40,0.4)';
+      ctx.beginPath(); ctx.ellipse(screenX, floorY, sizeW * 0.5 * bubble, sizeH * 0.5 * bubble, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+// ── Chain Lightning Arcs ──────────────────────────────────────────────
+function drawChainEffects2D() {
+  if (!chainEffects || !chainEffects.length) return;
+  var now = Date.now();
+  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
+  var alive = [];
+  for (var i = 0; i < chainEffects.length; i++) {
+    var ce = chainEffects[i];
+    var age = now - ce.spawnMs;
+    if (age > ce.lifeMs) continue;
+    alive.push(ce);
+    var t = age / ce.lifeMs;
+    ctx.globalAlpha = 1.0 - t;
+    ctx.strokeStyle = '#ffff00'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    for (var j = 0; j < ce.targets.length; j++) {
+      var tgt = ce.targets[j];
+      drawLightningBoltBetween(ce.fromX, ce.fromY, tgt.x, tgt.y);
+    }
+  }
+  chainEffects = alive;
+  ctx.restore(); ctx.globalAlpha = 1.0;
+}
+
+function drawChainEffects3D() {
+  if (!chainEffects || !chainEffects.length) return;
+  var now = Date.now();
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizon = h * 0.75;
+  var alive = [];
+  for (var i = 0; i < chainEffects.length; i++) {
+    var ce = chainEffects[i];
+    var age = now - ce.spawnMs;
+    if (age > ce.lifeMs) continue;
+    alive.push(ce);
+    var t = age / ce.lifeMs;
+    ctx.save(); ctx.globalAlpha = 1.0 - t;
+    ctx.strokeStyle = '#ffff00'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    // Project from and target to screen coords
+    var fromScreen = worldToScreen3D(ce.fromX, ce.fromY, 25, cam, halfFov, w, h, horizon, pitchOff);
+    if (!fromScreen) { ctx.restore(); continue; }
+    for (var j = 0; j < ce.targets.length; j++) {
+      var tgt = ce.targets[j];
+      var toScreen = worldToScreen3D(tgt.x, tgt.y, 25, cam, halfFov, w, h, horizon, pitchOff);
+      if (toScreen) drawLightningBoltBetween(fromScreen.x, fromScreen.y, toScreen.x, toScreen.y);
+    }
+    ctx.restore();
+  }
+  chainEffects = alive;
+}
+
+function worldToScreen3D(wx, wy, wz, cam2, halfFov, w, h, horizon, pitchOff) {
+  var dx = wx - cam2.x, dy = wy - cam2.y;
+  var dist = Math.hypot(dx, dy);
+  if (dist < 1 || dist > 600) return null;
+  var ang = Math.atan2(dy, dx);
+  var da = ang - cam2.ang;
+  while (da > Math.PI) da -= Math.PI * 2;
+  while (da < -Math.PI) da += Math.PI * 2;
+  if (Math.abs(da) > halfFov * 1.3) return null;
+  var sx = (da / halfFov) * 0.5 + 0.5;
+  var screenX = Math.floor(sx * w);
+  var perspShift = Math.floor(70 * (1 - dist / (dist + 40)));
+  var floorY = Math.floor(horizon + perspShift) + pitchOff;
+  var liftRaw = (wz * 1.0) / (1 + dist * 0.01);
+  return {x:screenX, y:floorY - Math.floor(liftRaw)};
+}
+
+function drawLightningBoltBetween(x1, y1, x2, y2) {
+  var dx = x2 - x1, dy = y2 - y1;
+  var dist = Math.hypot(dx, dy);
+  var segments = Math.max(3, Math.floor(dist / 12));
+  ctx.beginPath(); ctx.moveTo(x1, y1);
+  for (var s = 1; s < segments; s++) {
+    var t = s / segments;
+    var mx = x1 + dx * t + (Math.random() - 0.5) * 12;
+    var my = y1 + dy * t + (Math.random() - 0.5) * 12;
+    ctx.lineTo(mx, my);
+  }
+  ctx.lineTo(x2, y2); ctx.stroke();
+}
+
+// ── Nova Effects (expanding rings) ────────────────────────────────────
+function drawNovaEffects2D() {
+  if (!novaEffects || !novaEffects.length) return;
+  var now = Date.now();
+  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
+  var alive = [];
+  for (var i = 0; i < novaEffects.length; i++) {
+    var ne = novaEffects[i];
+    var age = now - ne.spawnMs;
+    if (age > ne.lifeMs) continue;
+    alive.push(ne);
+    var t = age / ne.lifeMs;
+    var r = ne.radius * t;
+    ctx.globalAlpha = 0.7 * (1.0 - t);
+    ctx.strokeStyle = ne.color; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(ne.x, ne.y, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = ne.color; ctx.globalAlpha = 0.15 * (1.0 - t);
+    ctx.beginPath(); ctx.arc(ne.x, ne.y, r, 0, Math.PI * 2); ctx.fill();
+  }
+  novaEffects = alive;
+  ctx.restore(); ctx.globalAlpha = 1.0;
+}
+
+function drawNovaEffects3D() {
+  if (!novaEffects || !novaEffects.length) return;
+  var now = Date.now();
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizon = h * 0.75;
+  var alive = [];
+  for (var i = 0; i < novaEffects.length; i++) {
+    var ne = novaEffects[i];
+    var age = now - ne.spawnMs;
+    if (age > ne.lifeMs) continue;
+    alive.push(ne);
+    var t = age / ne.lifeMs;
+    var dx = ne.x - cam.x, dy = ne.y - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist > 500) continue;
+    var ang = Math.atan2(dy, dx);
+    var da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    var sx = (da / halfFov) * 0.5 + 0.5;
+    var screenX = Math.floor(sx * w);
+    var perspShift = Math.floor(70 * (1 - dist / (dist + 40)));
+    var floorY = Math.floor(horizon + perspShift) + pitchOff;
+    var screenR = Math.max(6, Math.floor(ne.radius * t * 2.0 / (dist * 0.02 + 1)));
+    ctx.save(); ctx.globalAlpha = 0.6 * (1.0 - t);
+    ctx.strokeStyle = ne.color; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(screenX, floorY, screenR, screenR * 0.35, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+  novaEffects = alive;
+}
+
+function drawConeEffects2D() {
+  if (!coneEffects || !coneEffects.length) return;
+  var now = Date.now();
+  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
+  for (var i = 0; i < coneEffects.length; i++) {
+    var ce = coneEffects[i];
+    var t = Math.max(0, Math.min(1, (now - ce.spawnMs) / ce.lifeMs));
+    var isFire = (ce.spellId === 'fire');
+    if (isFire) {
+      ctx.shadowBlur = 15; ctx.shadowColor = '#ff6600';
+      var particles = 8;
+      for (var p = 0; p < particles; p++) {
+        var pct = p / particles;
+        var dist = ce.range * (0.2 + 0.8 * pct);
+        var spread = ce.halfAngle * 2 * pct;
+        var pAng = ce.ang + (Math.random() - 0.5) * spread;
+        var px = ce.x + Math.cos(pAng) * dist;
+        var py = ce.y + Math.sin(pAng) * dist;
+        var size = 8 * (1 - pct) * (1 - t);
+        ctx.globalAlpha = (0.6 - 0.4 * pct) * (1.0 - t);
+        ctx.fillStyle = (p % 2 === 0) ? '#ff6600' : '#ffaa00';
+        ctx.beginPath(); ctx.arc(px, py, size, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.shadowBlur = 0;
+    } else {
+      ctx.globalAlpha = 0.4 * (1.0 - t); ctx.fillStyle = ce.color;
+      ctx.beginPath(); ctx.moveTo(ce.x, ce.y);
+      var leftAng = ce.ang - ce.halfAngle;
+      var rightAng = ce.ang + ce.halfAngle;
+      ctx.arc(ce.x, ce.y, ce.range, leftAng, rightAng);
+      ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 0.7 * (1.0 - t); ctx.strokeStyle = ce.color; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(ce.x, ce.y); ctx.lineTo(ce.x + Math.cos(leftAng) * ce.range, ce.y + Math.sin(leftAng) * ce.range);
+      ctx.moveTo(ce.x, ce.y); ctx.lineTo(ce.x + Math.cos(rightAng) * ce.range, ce.y + Math.sin(rightAng) * ce.range);
+      ctx.stroke();
+    }
+  }
+  ctx.restore(); ctx.globalAlpha = 1.0;
+}
+
+function drawConeEffects3D() {
+  if (!coneEffects || !coneEffects.length) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizon = h * 0.75;
+  var now = Date.now();
+  for (var i = 0; i < coneEffects.length; i++) {
+    var ce = coneEffects[i];
+    var t = Math.max(0, Math.min(1, (now - ce.spawnMs) / ce.lifeMs));
+    var isFire = (ce.spellId === 'fire');
+    if (isFire) {
+      ctx.save(); ctx.shadowBlur = 15; ctx.shadowColor = '#ff6600';
+      var particles = 20;
+      for (var p = 0; p < particles; p++) {
+        var pct = p / particles;
+        var dist = ce.range * (0.1 + 0.9 * pct);
+        var spread = ce.halfAngle * 2 * pct;
+        var pAng = ce.ang + (Math.random() - 0.5) * spread;
+        var px = ce.x + Math.cos(pAng) * dist;
+        var py = ce.y + Math.sin(pAng) * dist;
+        var dx = px - cam.x, dy = py - cam.y;
+        var d = Math.hypot(dx, dy);
+        if (d < 1) d = 1; if (d > 300) continue;
+        var ang = Math.atan2(dy, dx);
+        var da = ang - cam.ang;
+        while (da > Math.PI) da -= Math.PI * 2;
+        while (da < -Math.PI) da += Math.PI * 2;
+        if (Math.abs(da) > halfFov * 1.3) continue;
+        var sx = (da / halfFov) * 0.5 + 0.5;
+        var screenX = Math.floor(sx * w);
+        var perspectiveShift = Math.floor(70 * (1 - d / (d + 40)));
+        var floorY = Math.floor(horizon + perspectiveShift) + pitchOff;
+        var size = Math.max(6, Math.min(24, Math.floor(220 / d))) * (1 - pct * 0.5);
+        ctx.globalAlpha = (0.7 - 0.4 * pct) * (1.0 - t);
+        var hue = p % 3;
+        ctx.fillStyle = (hue === 0) ? '#ff6600' : (hue === 1 ? '#ffaa00' : '#ff8800');
+        ctx.beginPath(); ctx.arc(screenX, floorY, size, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+    } else {
+      ctx.save(); ctx.shadowBlur = 10; ctx.shadowColor = '#00ffff';
+      var leftAng = ce.ang - ce.halfAngle;
+      var rightAng = ce.ang + ce.halfAngle;
+      var rays = 8;
+      for (var r = 0; r < rays; r++) {
+        var rayAng = leftAng + (rightAng - leftAng) * (r / (rays - 1));
+        ctx.globalAlpha = 0.5 * (1.0 - t);
+        ctx.strokeStyle = 'rgba(0,255,255,0.8)'; ctx.lineWidth = 3;
+        ctx.beginPath();
+        var steps = 6;
+        for (var s = 0; s <= steps; s++) {
+          var dist = ce.range * (s / steps);
+          var px = ce.x + Math.cos(rayAng) * dist;
+          var py = ce.y + Math.sin(rayAng) * dist;
+          var dx = px - cam.x, dy = py - cam.y;
+          var d = Math.hypot(dx, dy); if (d < 1) d = 1;
+          var ang = Math.atan2(dy, dx);
+          var da = ang - cam.ang;
+          while (da > Math.PI) da -= Math.PI * 2;
+          while (da < -Math.PI) da += Math.PI * 2;
+          var sx = (da / halfFov) * 0.5 + 0.5;
+          var screenX = Math.floor(sx * w);
+          var perspectiveShift = Math.floor(70 * (1 - d / (d + 40)));
+          var floorY = Math.floor(horizon + perspectiveShift) + pitchOff;
+          if (s === 0) ctx.moveTo(screenX, floorY); else ctx.lineTo(screenX, floorY);
+        }
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 0.2 * (1.0 - t); ctx.fillStyle = 'rgba(0,255,255,0.3)';
+      ctx.beginPath();
+      var arcSteps = 16;
+      for (var s = 0; s <= arcSteps; s++) {
+        var a = leftAng + (rightAng - leftAng) * (s / arcSteps);
+        var dist = ce.range;
+        var px = ce.x + Math.cos(a) * dist;
+        var py = ce.y + Math.sin(a) * dist;
+        var dx = px - cam.x, dy = py - cam.y;
+        var d = Math.hypot(dx, dy); if (d < 1) d = 1;
+        var ang = Math.atan2(dy, dx);
+        var da = ang - cam.ang;
+        while (da > Math.PI) da -= Math.PI * 2;
+        while (da < -Math.PI) da += Math.PI * 2;
+        var sx = (da / halfFov) * 0.5 + 0.5;
+        var screenX = Math.floor(sx * w);
+        var perspectiveShift = Math.floor(70 * (1 - d / (d + 40)));
+        var floorY = Math.floor(horizon + perspectiveShift) + pitchOff;
+        if (s === 0) ctx.moveTo(screenX, floorY); else ctx.lineTo(screenX, floorY);
+      }
+      var ox = ce.x - cam.x, oy = ce.y - cam.y;
+      var od = Math.hypot(ox, oy); if (od < 1) od = 1;
+      var oang = Math.atan2(oy, ox);
+      var oda = oang - cam.ang;
+      while (oda > Math.PI) oda -= Math.PI * 2;
+      while (oda < -Math.PI) oda += Math.PI * 2;
+      var osx = (oda / halfFov) * 0.5 + 0.5;
+      var oScreenX = Math.floor(osx * w);
+      var oPerspectiveShift = Math.floor(70 * (1 - od / (od + 40)));
+      var oFloorY = Math.floor(horizon + oPerspectiveShift) + pitchOff;
+      ctx.lineTo(oScreenX, oFloorY);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+
+// =============================================
+// SECTION 15: RENDERING - HUD & MENU
+// =============================================
+
+// =============================================
+// FPS WIZARD ARMS
+// =============================================
+// Drawn in screen-space after the 3D world so it always appears on top.
+// The right arm holds the casting orb; both arms bob gently with movement.
+// castAnimUntil drives a forward-thrust animation on each cast.
+// ─────────────────────────────────────────────────────────────────────────────
+// drawFPSArms — robed wizard sleeves drawn as flat trapezoids with fabric folds.
+// Right arm holds the casting orb; left arm is the guide/support hand.
+// Three implicit poses driven by castT (0=idle, 1=windup/cast):
+//   idle   castT≈0 : arms hang at sides, gentle walk bob
+//   windup castT≈1 : right arm thrusts forward, orb flares
+// ─────────────────────────────────────────────────────────────────────────────
+function drawFPSArms() {
+  if (!MODE3D || shopOpen) return;
+  var w = canvas.width, h = canvas.height;
+  var now = Date.now();
+  var spd = Math.hypot(vel.x, vel.y);
+  walkBobPhase += spd * 0.004;
+  var bob  = Math.sin(walkBobPhase) * Math.min(7, spd * 0.05);
+  var bobX = Math.cos(walkBobPhase * 0.5) * Math.min(3, spd * 0.02);
+  var casting = (now < castAnimUntil);
+  var castT   = casting ? Math.max(0, (castAnimUntil - now) / 280) : 0;
+  var spell   = getCurrentSpell();
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+
+  // ── Robe palette ────────────────────────────────────────────────────
+  var robeDeep  = '#0d0618';
+  var robeMid   = '#190d30';
+  var robeLit   = '#2c1455';  // highlight (inner face toward centre)
+  var cuffCol   = '#3d2068';
+  var trimCol   = '#7040b8';
+  var foldCol   = '#110826';
+
+  // Helper: draw one trapezoidal sleeve + cuff + fold lines
+  // (bx,by) = base-centre at bottom, bw = base width
+  // (wx,wy) = wrist-centre at top,   ww = wrist width
+  // folds: array of fractional positions [-0.5..0.5] across the sleeve
+  // highlight side: +1 = right edge lit, -1 = left edge lit
+  function drawSleeve(bx, by, bw, wx, wy, ww, folds, hlSide) {
+    // Sleeve body
+    var bL = bx - bw*0.5, bR = bx + bw*0.5;
+    var wL = wx - ww*0.5, wR = wx + ww*0.5;
+    ctx.fillStyle = robeMid;
+    ctx.beginPath();
+    ctx.moveTo(bL, by); ctx.lineTo(bR, by);
+    ctx.lineTo(wR, wy); ctx.lineTo(wL, wy);
+    ctx.closePath(); ctx.fill();
+
+    // Side-lighting gradient (one side darker, opposite side slightly lighter)
+    var gx0 = hlSide > 0 ? bL : bR, gx1 = hlSide > 0 ? bR : bL;
+    var sGrad = ctx.createLinearGradient(gx0, 0, gx1, 0);
+    sGrad.addColorStop(0,   'rgba(0,0,0,0.50)');
+    sGrad.addColorStop(0.42,'rgba(0,0,0,0.10)');
+    sGrad.addColorStop(0.72,'rgba(0,0,0,0)');
+    sGrad.addColorStop(1,   hlSide > 0 ? 'rgba(80,30,130,0.22)' : 'rgba(0,0,0,0.30)');
+    ctx.fillStyle = sGrad;
+    ctx.beginPath();
+    ctx.moveTo(bL, by); ctx.lineTo(bR, by);
+    ctx.lineTo(wR, wy); ctx.lineTo(wL, wy);
+    ctx.closePath(); ctx.fill();
+
+    // Fabric fold lines (straight, like stiff robe fabric)
+    ctx.save();
+    ctx.strokeStyle = foldCol; ctx.lineWidth = 1.2; ctx.globalAlpha = 0.72;
+    for (var fi = 0; fi < folds.length; fi++) {
+      var ft = folds[fi]; // -0.5 to +0.5
+      var fbx = bx + ft * bw, fwx = wx + ft * ww;
+      ctx.beginPath(); ctx.moveTo(fbx, by); ctx.lineTo(fwx, wy); ctx.stroke();
+    }
+    ctx.restore();
+
+    // Cuff band (wider than wrist by 2px each side, extends 13px down from wrist)
+    ctx.fillStyle = cuffCol;
+    ctx.beginPath();
+    ctx.moveTo(wL - 2, wy); ctx.lineTo(wR + 2, wy);
+    ctx.lineTo(wR + 3, wy + 13); ctx.lineTo(wL - 3, wy + 13);
+    ctx.closePath(); ctx.fill();
+    // Trim line across cuff mid
+    ctx.strokeStyle = trimCol; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(wL - 1, wy + 6); ctx.lineTo(wR + 1, wy + 6); ctx.stroke();
+  }
+
+  // ── Right arm (casting hand) — comes from bottom-right ──────────────
+  // castT shifts the wrist upward and forward (leftward) for dramatic thrust
+  var rBX  = w * 0.81 + bobX,  rBY  = h + 65  + bob;
+  var rWX  = w * 0.615 - castT * 62 + bobX;
+  var rWY  = h * 0.695 + bob - castT * 45;
+  drawSleeve(rBX, rBY, 92, rWX, rWY, 40, [-0.28, 0.02, 0.28], 1);
+
+  // Orb held at the wrist
+  var orbR = 12 + castT * 13;
+  var orbX = rWX - 1, orbY = rWY - 7 - castT * 10;
+  ctx.shadowBlur = 18 + castT * 38; ctx.shadowColor = spell.color;
+  ctx.globalAlpha = 0.90 + castT * 0.10;
+  ctx.fillStyle = spell.color;
+  ctx.beginPath(); ctx.arc(orbX, orbY, orbR, 0, Math.PI * 2); ctx.fill();
+  // Bright inner specular
+  ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.28 + castT * 0.52;
+  ctx.beginPath();
+  ctx.arc(orbX - orbR * 0.30, orbY - orbR * 0.28, orbR * 0.42, 0, Math.PI * 2); ctx.fill();
+  // Outer glow ring (faint)
+  ctx.strokeStyle = spell.color; ctx.lineWidth = 2 + castT * 3;
+  ctx.globalAlpha = 0.25 + castT * 0.30;
+  ctx.beginPath(); ctx.arc(orbX, orbY, orbR + 4 + castT * 5, 0, Math.PI * 2); ctx.stroke();
+
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1.0;
+
+  // ── Left arm (guide hand) — comes from bottom-left ──────────────────
+  // Slightly less extension during cast; barely shows hand (no orb)
+  var lBX  = w * 0.19 - bobX,  lBY  = h + 58  + bob * 0.7;
+  var lWX  = w * 0.385 + castT * 24 - bobX;
+  var lWY  = h * 0.730 + bob * 0.7 - castT * 20;
+  drawSleeve(lBX, lBY, 80, lWX, lWY, 33, [-0.15, 0.20], -1);
+
+  ctx.restore();
+}
+
+// =============================================
+// SHOP & COIN RENDERING
+// =============================================
+
+function drawCoins2D() {
+  if (!coinDrops || !coinDrops.length) return;
+  var now = Date.now();
+  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
+  for (var i = 0; i < coinDrops.length; i++) {
+    var c = coinDrops[i];
+    var bob = Math.sin(now * 0.004 + c.bob) * 3;
+    ctx.fillStyle = '#ffd700';
+    ctx.strokeStyle = '#b8860b';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(c.x, c.y + bob, 5, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#fff8'; ctx.font = 'bold 5px Arial'; ctx.textAlign = 'center';
+    ctx.fillText('$', c.x, c.y + bob + 2);
+  }
+  ctx.restore();
+}
+
+function drawCoins3D() {
+  if (!coinDrops || !coinDrops.length) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var cameraZ = 60 + ((cam.z || 60) - 60) * (25 / 40);
+  var now = Date.now();
+  for (var i = 0; i < coinDrops.length; i++) {
+    var coin = coinDrops[i];
+    var dx = coin.x - cam.x, dy = coin.y - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 1 || dist > viewDist * 0.5) continue;
+    var ang = Math.atan2(dy, dx), da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.2) continue;
+    var screenX = Math.floor(((da / halfFov) * 0.5 + 0.5) * w);
+    if (depthBuffer && screenX >= 0 && screenX < depthBuffer.length && dist > depthBuffer[screenX] + 3) continue;
+    var fh = floorMesh ? getFloorHeightAt(coin.x, coin.y) : 0;
+    var floorY = horizonY + Math.floor(((cameraZ - fh * 25) / dist) * 180);
+    floorY = Math.min(floorY, h + 10);
+    var sz = Math.max(4, Math.min(14, Math.floor(h * 0.18 / (dist * 0.12 + 1))));
+    var bob = Math.sin(now * 0.004 + coin.bob) * 3;
+    var cy = floorY - sz * 1.2 + bob;
+    ctx.save();
+    ctx.shadowBlur = 10; ctx.shadowColor = '#ffd700';
+    ctx.fillStyle = '#ffd700'; ctx.strokeStyle = '#b8860b'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(screenX, cy, sz, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#ffffffcc'; ctx.font = 'bold ' + Math.max(6, sz) + 'px Arial'; ctx.textAlign = 'center';
+    ctx.fillText('$', screenX, cy + sz * 0.35);
+    ctx.shadowBlur = 0; ctx.restore();
+  }
+}
+
+function drawShopMarker2D() {
+  if (!shopMarker) return;
+  var now = Date.now();
+  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
+  var pulse = 0.7 + 0.3 * Math.sin(now * 0.003);
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#ffcc44';
+  ctx.strokeStyle = '#aa8800';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(shopMarker.x, shopMarker.y, 10, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#000'; ctx.font = 'bold 10px Arial'; ctx.textAlign = 'center';
+  ctx.fillText('$', shopMarker.x, shopMarker.y + 4);
+  ctx.restore();
+}
+
+function drawShopMarker3D() {
+  if (!shopMarker) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var cameraZ = 60 + ((cam.z || 60) - 60) * (25 / 40);
+  var now = Date.now();
+  var dx = shopMarker.x - cam.x, dy = shopMarker.y - cam.y;
+  var dist = Math.hypot(dx, dy);
+  if (dist < 1 || dist > 600) return;
+  var ang = Math.atan2(dy, dx), da = ang - cam.ang;
+  while (da > Math.PI) da -= Math.PI * 2;
+  while (da < -Math.PI) da += Math.PI * 2;
+  if (Math.abs(da) > halfFov * 1.4) return;
+  var screenX = Math.floor(((da / halfFov) * 0.5 + 0.5) * w);
+  var fh = floorMesh ? getFloorHeightAt(shopMarker.x, shopMarker.y) : 0;
+  var groundWZ  = fh * 25;          // world-Z of the shop's floor cell
+  var poleTopWZ = groundWZ + 58;    // world-Z of the top of the sign board
+  var boardBotWZ = groundWZ + 28;   // world-Z of the bottom of the sign board
+  // Project all three heights with the same perspective formula used for walls/floor
+  var project = function(wz) { return horizonY + Math.floor(((cameraZ - wz) / dist) * 180); };
+  var signTopY  = Math.max(-40, project(poleTopWZ));
+  var signBotY  = Math.min(h + 20, project(boardBotWZ));
+  var signBoardH = Math.max(4, signBotY - signTopY);
+  var signMidY  = (signTopY + signBotY) * 0.5;
+  // Width: project a fixed world half-width using the same angular formula as screenX.
+  // Both width and height now divide by dist equally → constant aspect ratio at any distance.
+  // worldSignHW = 10 world units gives roughly square proportions given the 180px height scale.
+  var worldSignHW = 10;
+  var signHalfW = Math.max(4, Math.floor(worldSignHW * w / (2 * dist * halfFov)));
+  var pulse = 0.75 + 0.25 * Math.sin(now * 0.003);
+  ctx.save();
+  ctx.shadowBlur = 20 * pulse; ctx.shadowColor = '#ffcc44';
+  ctx.globalAlpha = 0.92 * pulse;
+  // Sign board — both dimensions derived from world-space so aspect ratio is distance-invariant
+  ctx.fillStyle = '#3a2a08'; ctx.strokeStyle = '#ffcc44'; ctx.lineWidth = 2;
+  ctx.fillRect(screenX - signHalfW, signTopY, signHalfW * 2, signBoardH);
+  ctx.strokeRect(screenX - signHalfW, signTopY, signHalfW * 2, signBoardH);
+  // $ glyph centred in the board
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold ' + Math.max(8, Math.floor(signBoardH * 0.72)) + 'px serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('$', screenX, signMidY + signBoardH * 0.22);
+  // No floating text on the sign — the HUD prompt below handles the interaction hint
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1.0; ctx.restore();
+}
+
+// Cave entrance beacon — eerie teal glow pillar visible from far in 3D.
+// Shows up on every cave entrance stored in deepCaveEntrances[].
+function drawCaveEntrance3D() {
+  if (!deepCaveEntrances || !deepCaveEntrances.length) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var cameraZ = 60 + ((cam.z || 60) - 60) * (25 / 40);
+  var now = Date.now();
+  var project = function(wz, dist) { return horizonY + Math.floor(((cameraZ - wz) / dist) * 180); };
+
+  for (var ei = 0; ei < deepCaveEntrances.length; ei++) {
+    var ce = deepCaveEntrances[ei];
+    var dx = ce.x - cam.x, dy = ce.y - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 1 || dist > 900) continue;
+    var ang = Math.atan2(dy, dx), da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.6) continue;   // wider visible arc so it doesn't pop in/out
+    var screenX = Math.floor(((da / halfFov) * 0.5 + 0.5) * w);
+
+    var fh = floorMesh ? getFloorHeightAt(ce.x, ce.y) : 0;
+    var groundWZ = fh * 25;
+
+    // Pillar: floor → tall top
+    var pillarH = 80;
+    var topY  = project(groundWZ + pillarH, dist);
+    var botY  = project(groundWZ,           dist);
+    var beamH = Math.max(4, botY - topY);
+
+    // Width proportional to distance like shop sign
+    var pillarHW = Math.max(3, Math.floor(12 * w / (2 * dist * halfFov)));
+
+    var pulse = 0.6 + 0.4 * Math.sin(now * 0.0025 + ei * 1.7);
+    var flicker = 0.85 + 0.15 * Math.sin(now * 0.011 + ei * 3.3);
+    var alpha = Math.min(1.0, 0.82 * pulse * flicker * (1.0 - dist / 1100));
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    // Outer glow halo
+    var grad = ctx.createLinearGradient(screenX - pillarHW * 3, 0, screenX + pillarHW * 3, 0);
+    grad.addColorStop(0,   'rgba(0,255,200,0)');
+    grad.addColorStop(0.35,'rgba(0,220,180,0.18)');
+    grad.addColorStop(0.5, 'rgba(0,255,210,0.38)');
+    grad.addColorStop(0.65,'rgba(0,220,180,0.18)');
+    grad.addColorStop(1,   'rgba(0,255,200,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(screenX - pillarHW * 3, topY - 8, pillarHW * 6, beamH + 16);
+
+    // Core beam — bright teal/white centre
+    var coreGrad = ctx.createLinearGradient(screenX - pillarHW, 0, screenX + pillarHW, 0);
+    coreGrad.addColorStop(0,   'rgba(0,255,200,0)');
+    coreGrad.addColorStop(0.4, 'rgba(80,255,220,0.6)');
+    coreGrad.addColorStop(0.5, 'rgba(200,255,245,0.9)');
+    coreGrad.addColorStop(0.6, 'rgba(80,255,220,0.6)');
+    coreGrad.addColorStop(1,   'rgba(0,255,200,0)');
+    ctx.fillStyle = coreGrad;
+    ctx.fillRect(screenX - pillarHW, topY, pillarHW * 2, beamH);
+
+    // Bright orb at top of beam
+    var orbR = Math.max(4, pillarHW * 1.4);
+    var orbY = topY;
+    ctx.shadowBlur = 22 * pulse; ctx.shadowColor = '#00ffcc';
+    ctx.beginPath(); ctx.arc(screenX, orbY, orbR, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(180,255,240,0.95)'; ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Floating "CAVE" label when close enough
+    if (dist < 350) {
+      var labelAlpha = Math.min(1.0, (350 - dist) / 150) * alpha;
+      ctx.globalAlpha = labelAlpha;
+      var labelSize = Math.max(9, Math.floor(22 - dist / 22));
+      ctx.font = 'bold ' + labelSize + 'px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#00ffcc';
+      ctx.shadowBlur = 8; ctx.shadowColor = '#00ffcc';
+      ctx.fillText('CAVE', screenX, orbY - orbR - 4);
+      ctx.shadowBlur = 0;
+    }
+
+    ctx.restore();
+  }
+}
+
+// Cave entrance beacon — 2D top-down: pulsing teal ring with "C" label.
+function drawCaveEntrance2D() {
+  if (!deepCaveEntrances || !deepCaveEntrances.length) return;
+  var now = Date.now();
+  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
+  for (var ei = 0; ei < deepCaveEntrances.length; ei++) {
+    var ce = deepCaveEntrances[ei];
+    var pulse = 0.55 + 0.45 * Math.sin(now * 0.003 + ei * 1.7);
+    ctx.globalAlpha = 0.7 * pulse + 0.15;
+    // Outer glow ring
+    ctx.strokeStyle = '#00ffcc'; ctx.lineWidth = 3;
+    ctx.shadowBlur = 10; ctx.shadowColor = '#00ffcc';
+    ctx.beginPath(); ctx.arc(ce.x, ce.y, 13, 0, Math.PI * 2); ctx.stroke();
+    // Inner filled dot
+    ctx.fillStyle = 'rgba(0,220,180,0.55)';
+    ctx.beginPath(); ctx.arc(ce.x, ce.y, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    // Label
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = '#00ffcc'; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('C', ce.x, ce.y + 3);
+  }
+  ctx.restore();
+}
+
+// Shop overlay — two-zone layout:
+//   Top:    large detail card for the selected item (name, desc, cost, buy prompt)
+//   Bottom: strip of 5 compact numbered tabs; A/D or ←/→ cycles selection
+// No scrolling needed — everything fits at any canvas size.
+function drawShopOverlay() {
+  if (!shopOpen) return;
+  var w = canvas.width, h = canvas.height;
+  ctx.save();
+
+  // Get dynamic item list (filters out already-bought spells/upgrades)
+  var visItems = getVisibleShopItems();
+  if (visItems.length === 0) visItems = SHOP_ITEMS_BASE.slice(0, 5); // fallback to consumables
+
+  // Paging: max 6 tabs visible at a time
+  var maxTabs = 6;
+  var shopPage = Math.floor(shopSelIdx / maxTabs);
+  var pageStart = shopPage * maxTabs;
+  var pageItems = visItems.slice(pageStart, pageStart + maxTabs);
+  var pageIdx = shopSelIdx - pageStart;
+  // Clamp selection
+  if (shopSelIdx >= visItems.length) shopSelIdx = visItems.length - 1;
+  if (shopSelIdx < 0) shopSelIdx = 0;
+
+  // ── Dim background ──────────────────────────────────────────────────
+  ctx.fillStyle = 'rgba(0,0,0,0.78)'; ctx.fillRect(0, 0, w, h);
+
+  // ── Panel bounds ────────────────────────────────────────────────────
+  var panW = Math.min(440, Math.floor(w * 0.88));
+  var panH = Math.min(340, Math.floor(h * 0.86));
+  var px = Math.floor((w - panW) / 2), py = Math.floor((h - panH) / 2);
+
+  // Panel background + border
+  ctx.fillStyle = 'rgba(14,9,2,0.97)';
+  ctx.strokeStyle = '#c8a020'; ctx.lineWidth = 2;
+  ctx.fillRect(px, py, panW, panH);
+  ctx.strokeRect(px, py, panW, panH);
+
+  // Inner inset line (decorative)
+  ctx.strokeStyle = 'rgba(200,160,32,0.25)'; ctx.lineWidth = 1;
+  ctx.strokeRect(px + 5, py + 5, panW - 10, panH - 10);
+
+  // ── Header ──────────────────────────────────────────────────────────
+  var hdY = py + 26;
+  ctx.fillStyle = '#ffd700'; ctx.font = 'bold 16px serif'; ctx.textAlign = 'center';
+  ctx.fillText('= Wandering Merchant =', px + panW / 2, hdY);
+  ctx.fillStyle = '#aa9944'; ctx.font = '11px Arial';
+  var pageHint = visItems.length > maxTabs ? ('  Page ' + (shopPage + 1) + '/' + Math.ceil(visItems.length / maxTabs)) : '';
+  ctx.fillText('Coins: ' + coins + '   \u25C4 Tab \u25BA  select   [E] buy   [Esc] close' + pageHint, px + panW / 2, hdY + 17);
+
+  // ── Tab strip (bottom) ──────────────────────────────────────────────
+  var tabStripH = 54;
+  var tabY = py + panH - tabStripH - 8;
+  var tabW = Math.floor((panW - 28) / Math.max(1, pageItems.length));
+  var tabPad = 4;
+
+  for (var ti = 0; ti < pageItems.length; ti++) {
+    var titem = pageItems[ti];
+    var canBuyT = (coins >= titem.cost);
+    var sel = (ti === pageIdx);
+    var tx = px + 14 + ti * tabW;
+
+    // Tab background — spell/upgrade tomes get different tints
+    var isSpellItem = (titem.type === 'spell' || titem.type === 'upgrade');
+    if (sel) {
+      ctx.fillStyle = canBuyT ? (isSpellItem ? 'rgba(20,40,90,0.95)' : 'rgba(90,70,10,0.95)') : 'rgba(60,20,20,0.95)';
+    } else {
+      ctx.fillStyle = canBuyT ? (isSpellItem ? 'rgba(10,20,45,0.7)' : 'rgba(40,30,5,0.7)') : 'rgba(22,14,14,0.7)';
+    }
+    ctx.fillRect(tx, tabY, tabW - tabPad, tabStripH);
+
+    // Tab border
+    ctx.strokeStyle = sel ? (canBuyT ? '#ffd700' : '#882222') : (canBuyT ? '#665500' : '#333333');
+    ctx.lineWidth = sel ? 2 : 1;
+    ctx.strokeRect(tx, tabY, tabW - tabPad, tabStripH);
+
+    // Number key
+    ctx.fillStyle = sel ? '#ffffff' : (canBuyT ? '#ccaa44' : '#555555');
+    ctx.font = 'bold 11px Arial'; ctx.textAlign = 'center';
+    ctx.fillText('' + (ti + 1), tx + (tabW - tabPad) / 2, tabY + 13);
+
+    // Short name
+    var shortName = titem.name.split(' ')[0];
+    ctx.fillStyle = sel ? '#ffd700' : (canBuyT ? '#ccaa44' : '#444444');
+    if (isSpellItem && titem.spellId && spells[titem.spellId]) {
+      ctx.fillStyle = sel ? spells[titem.spellId].color : (canBuyT ? spells[titem.spellId].color : '#444444');
+    }
+    ctx.font = (sel ? 'bold ' : '') + '10px Arial';
+    ctx.fillText(shortName, tx + (tabW - tabPad) / 2, tabY + 27);
+
+    // Cost
+    ctx.fillStyle = canBuyT ? '#ffdd55' : '#553333';
+    ctx.font = '10px Arial';
+    ctx.fillText(titem.cost + 'g', tx + (tabW - tabPad) / 2, tabY + 42);
+  }
+
+  // ── Detail card (between header and tab strip) ───────────────────────
+  var cardY = py + 52, cardH = tabY - cardY - 8;
+  var cardX = px + 14, cardW = panW - 28;
+  var selItem = visItems[shopSelIdx] || visItems[0];
+  var canBuySel = (coins >= selItem.cost);
+
+  ctx.fillStyle = canBuySel ? 'rgba(55,42,8,0.85)' : 'rgba(35,18,18,0.85)';
+  ctx.fillRect(cardX, cardY, cardW, cardH);
+  ctx.strokeStyle = canBuySel ? '#aa8800' : '#552222'; ctx.lineWidth = 1.5;
+  ctx.strokeRect(cardX, cardY, cardW, cardH);
+
+  // Item icon glyph
+  var icons = {heal:'\u2665', mana:'\u2726', speed:'\u27A4', ward:'\u26E8', dmg:'\u2605',
+               spell_fire:'\u2622', spell_ice:'\u2744', spell_lightning:'\u26A1',
+               spell_poison:'\u2623', spell_arcane:'\u2728',
+               upg_missile:'\u2B06', upg_fire:'\u2B06', upg_ice:'\u2B06',
+               upg_lightning:'\u2B06', upg_poison:'\u2B06', upg_arcane:'\u2B06'};
+  var iconGlyph = icons[selItem.id] || '\u25C6';
+  var iconSize  = Math.min(36, Math.floor(cardH * 0.45));
+  // Spell items get their spell color for the icon
+  var iconColor = canBuySel ? '#ffd700' : '#773333';
+  if (selItem.spellId && spells[selItem.spellId] && canBuySel) iconColor = spells[selItem.spellId].color;
+  ctx.fillStyle = iconColor;
+  ctx.font = 'bold ' + iconSize + 'px serif'; ctx.textAlign = 'center';
+  var iconX = cardX + Math.floor(cardW * 0.15);
+  var midY  = cardY + cardH / 2;
+  ctx.fillText(iconGlyph, iconX, midY + iconSize * 0.35);
+
+  // Type label (small, above name)
+  if (selItem.type === 'spell') {
+    ctx.fillStyle = '#6688cc'; ctx.font = '9px Arial'; ctx.textAlign = 'left';
+    ctx.fillText('SPELL TOME', cardX + Math.floor(cardW * 0.28), midY - Math.floor(cardH * 0.25));
+  } else if (selItem.type === 'upgrade') {
+    ctx.fillStyle = '#cc8844'; ctx.font = '9px Arial'; ctx.textAlign = 'left';
+    ctx.fillText('UPGRADE', cardX + Math.floor(cardW * 0.28), midY - Math.floor(cardH * 0.25));
+  }
+
+  // Name
+  var textX = cardX + Math.floor(cardW * 0.28);
+  ctx.fillStyle = canBuySel ? '#ffd700' : '#884444';
+  ctx.font = 'bold ' + Math.min(16, Math.floor(cardH * 0.22)) + 'px serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(selItem.name, textX, midY - Math.floor(cardH * 0.08));
+
+  // Description
+  ctx.fillStyle = canBuySel ? '#ddddcc' : '#665555';
+  ctx.font = Math.min(13, Math.floor(cardH * 0.17)) + 'px Arial';
+  ctx.fillText(selItem.desc, textX, midY + Math.floor(cardH * 0.12));
+
+  // Cost badge
+  var badgeX = cardX + cardW - 12, badgeY = cardY + 12;
+  ctx.fillStyle = canBuySel ? '#ffd700' : '#553333';
+  ctx.font = 'bold ' + Math.min(15, Math.floor(cardH * 0.20)) + 'px Arial';
+  ctx.textAlign = 'right';
+  ctx.fillText(selItem.cost + 'g', badgeX, badgeY + Math.floor(cardH * 0.20));
+
+  // Buy prompt
+  ctx.fillStyle = canBuySel ? 'rgba(100,255,100,0.90)' : 'rgba(180,60,60,0.80)';
+  ctx.font = 'bold ' + Math.min(12, Math.floor(cardH * 0.15)) + 'px Arial';
+  ctx.textAlign = 'center';
+  var promptY = cardY + cardH - 10;
+  ctx.fillText(canBuySel ? '[E] Buy' : 'Need ' + (selItem.cost - coins) + ' more coins', cardX + cardW / 2, promptY);
+
+  ctx.restore();
+}
+
+function drawHudOverlay() {
+  var w = canvas.width, h = canvas.height;
+  ctx.save();
+  var pad = 10;
+  var barW = Math.min(220, Math.floor(w * 0.3)), barH = 10;
+  var x = pad, y = h - pad - barH;
 
   // Health bar (above mana)
-
-  var hy=y-16;
-
-  ctx.globalAlpha=0.9;
-
-  ctx.fillStyle='rgba(0,0,0,0.35)';
-
-  ctx.fillRect(x-2, hy-2, barW+4, barH+4);
-
-  var hpct=Math.max(0, Math.min(1, health/HEALTH_MAX));
-
-  ctx.fillStyle='#ff6a6a';
-
-  ctx.fillRect(x, hy, Math.floor(barW*hpct), barH);
-
-  ctx.strokeStyle='rgba(255,255,255,0.6)';
-
-  ctx.lineWidth=1;
-
+  var hy = y - 16;
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(x - 2, hy - 2, barW + 4, barH + 4);
+  var hpct = Math.max(0, Math.min(1, health / HEALTH_MAX));
+  ctx.fillStyle = '#ff6a6a';
+  ctx.fillRect(x, hy, Math.floor(barW * hpct), barH);
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 1;
   ctx.strokeRect(x, hy, barW, barH);
 
-  // Mana bar background
-
-  ctx.globalAlpha=0.9;
-
-  ctx.fillStyle='rgba(0,0,0,0.35)';
-
-  ctx.fillRect(x-2, y-2, barW+4, barH+4);
-
-  var pct=Math.max(0, Math.min(1, mana/MANA_MAX));
-
-  var blink=(Date.now()<manaBlinkUntil);
-
-  if(blink){
-
-    var a=0.5+0.5*Math.sin(Date.now()/120);
-
-    ctx.fillStyle='rgba(255,64,64,'+a.toFixed(2)+')';
-
+  // Mana bar
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(x - 2, y - 2, barW + 4, barH + 4);
+  var pct = Math.max(0, Math.min(1, mana / MANA_MAX));
+  var blink = (Date.now() < manaBlinkUntil);
+  if (blink) {
+    var a = 0.5 + 0.5 * Math.sin(Date.now() / 120);
+    ctx.fillStyle = 'rgba(255,64,64,' + a.toFixed(2) + ')';
   } else {
-
-    ctx.fillStyle='#4db6ff';
-
+    ctx.fillStyle = '#4db6ff';
   }
-
-  ctx.fillRect(x, y, Math.floor(barW*pct), barH);
-
-  ctx.strokeStyle='rgba(255,255,255,0.6)';
-
-  ctx.lineWidth=1;
-
+  ctx.fillRect(x, y, Math.floor(barW * pct), barH);
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 1;
   ctx.strokeRect(x, y, barW, barH);
 
-  // Charge bar (shown when charging)
-
-  if(charging){
-
-    var cy=y-8-6;
-
-    var cbarW=barW;
-
-    var cPct=Math.max(0, Math.min(1, chargeLevel));
-
-    ctx.fillStyle='rgba(0,0,0,0.35)';
-
-    ctx.fillRect(x-2, cy-2, cbarW+4, 6+4);
-
-    ctx.fillStyle='#ffd54f';
-
-    ctx.fillRect(x, cy, Math.floor(cbarW*cPct), 6);
-
-    ctx.strokeStyle='rgba(255,255,255,0.5)';
-
-    ctx.strokeRect(x, cy, cbarW, 6);
-
+  // Coin counter (above spell indicator)
+  if (coins > 0 || (shopMarker && shopNearby)) {
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(w - pad - 60, pad + 40, 70, 22);
+    ctx.fillStyle = '#ffd700'; ctx.font = 'bold 13px Arial'; ctx.textAlign = 'center';
+    ctx.fillText('$ ' + coins, w - pad - 25, pad + 55);
+  }
+  if (shopNearby && !shopOpen) {
+    ctx.globalAlpha = 0.9 + 0.1 * Math.sin(Date.now() * 0.006);
+    ctx.fillStyle = '#ffd700'; ctx.font = 'bold 14px Arial'; ctx.textAlign = 'center';
+    ctx.fillText('[E]  Enter Shop', w / 2, h / 2 + 40);
   }
 
-  // Spell indicator (top-right)
+  // Spell indicator (top-right) — right-anchored so it never clips the edge
+  var spell = getCurrentSpell();
+  ctx.font = '12px Arial';
+  var spellTxtW = ctx.measureText(spell.name).width;
+  var dotR = 7, dotGap = 6, innerPad = 6;
+  var boxW = innerPad + dotR * 2 + dotGap + spellTxtW + innerPad;
+  var boxH = 28;
+  var sx = w - pad - boxW, sy = pad + 4;
+  ctx.globalAlpha = 0.88;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(sx, sy, boxW, boxH);
+  // colour dot
+  ctx.fillStyle = spell.color;
+  ctx.beginPath(); ctx.arc(sx + innerPad + dotR, sy + boxH / 2, dotR, 0, Math.PI * 2); ctx.fill();
+  // spell name — left-aligned starting after dot
+  ctx.fillStyle = '#ffffff'; ctx.textAlign = 'left';
+  ctx.fillText(spell.name, sx + innerPad + dotR * 2 + dotGap, sy + boxH / 2 + 4);
 
-  var spell=getCurrentSpell();
+  // Fullscreen hint — bottom-right, fades out after 8 s from level start
+  var hintAge = (Date.now() - startMs) / 1000;
+  if (hintAge < 8) {
+    var hintAlpha = Math.max(0, 1.0 - (hintAge - 6) / 2); // fade over last 2 s
+    ctx.globalAlpha = hintAlpha * 0.7;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(w - 110, h - 26, 106, 20);
+    ctx.fillStyle = '#aaaaaa';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('[F] Fullscreen', w - 57, h - 12);
+  }
 
-  var sx=w-pad-60, sy=pad+5;
+  ctx.restore();
+}
 
-  ctx.globalAlpha=0.9;
+function drawMenuOverlay() {
+  if (!menuOpen) return;
+  var w = canvas.width, h = canvas.height;
+  ctx.save(); ctx.globalAlpha = 0.85;
+  ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(0, 0, w, h);
+  var menuW = Math.min(400, w * 0.6), menuH = Math.min(300, h * 0.6);
+  var mx = (w - menuW) / 2, my = (h - menuH) / 2;
+  ctx.fillStyle = 'rgba(20,20,40,0.95)'; ctx.strokeStyle = 'rgba(100,150,255,0.8)'; ctx.lineWidth = 2;
+  ctx.fillRect(mx, my, menuW, menuH); ctx.strokeRect(mx, my, menuW, menuH);
+  ctx.fillStyle = '#ffffff'; ctx.font = 'bold 20px Arial'; ctx.textAlign = 'center';
+  ctx.fillText('Player Stats', mx + menuW / 2, my + 30);
+  ctx.font = '16px Arial'; ctx.textAlign = 'left';
+  var lineY = my + 60, lineH = 24, leftX = mx + 20;
+  ctx.fillStyle = '#aaddff'; ctx.fillText('Mana:', leftX, lineY);
+  ctx.fillStyle = '#ffffff';
+  var manaPct = ((mana / MANA_MAX) * 100).toFixed(0);
+  ctx.fillText(Math.floor(mana) + ' / ' + MANA_MAX + ' (' + manaPct + '%)', leftX + 120, lineY);
+  lineY += lineH;
+  ctx.fillStyle = '#aaddff'; ctx.fillText('Health:', leftX, lineY);
+  ctx.fillStyle = '#ffffff';
+  var hpPct = ((health / HEALTH_MAX) * 100).toFixed(0);
+  ctx.fillText(Math.floor(health) + ' / ' + HEALTH_MAX + ' (' + hpPct + '%)', leftX + 120, lineY);
+  lineY += lineH;
+  ctx.fillStyle = '#aaddff'; ctx.fillText('Level:', leftX, lineY);
+  ctx.fillStyle = '#ffffff'; ctx.fillText(level.toString(), leftX + 120, lineY);
+  lineY += lineH;
+  ctx.fillStyle = '#aaddff'; ctx.fillText('Enemies Defeated:', leftX, lineY);
+  ctx.fillStyle = '#ffffff'; ctx.fillText(stats.totalEnemiesKilled.toString(), leftX + 120, lineY);
+  lineY += lineH + 10;
+  var barW2 = menuW - 40, barH2 = 20;
+  var barX = mx + 20, barY = lineY;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(barX, barY, barW2, barH2);
+  var manaPct2 = Math.max(0, Math.min(1, mana / MANA_MAX));
+  ctx.fillStyle = '#4db6ff'; ctx.fillRect(barX, barY, Math.floor(barW2 * manaPct2), barH2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 1; ctx.strokeRect(barX, barY, barW2, barH2);
+  ctx.fillStyle = '#ffffff'; ctx.font = '12px Arial'; ctx.textAlign = 'center';
+  ctx.fillText('Mana', barX + barW2 / 2, barY + 14);
+  ctx.font = '14px Arial'; ctx.textAlign = 'center'; ctx.fillStyle = '#ffdd88';
+  ctx.fillText('Press Start to close', mx + menuW / 2, my + menuH - 20);
+  ctx.restore();
+}
 
-  ctx.fillStyle='rgba(0,0,0,0.5)';
 
-  ctx.fillRect(sx-5, sy-5, 70, 30);
+function drawGameOver() {
+  var w = canvas.width, h = canvas.height;
+  ctx.save();
 
-  ctx.fillStyle=spell.color;
+  // Dimmed background
+  ctx.fillStyle = 'rgba(0,0,0,0.80)';
+  ctx.fillRect(0, 0, w, h);
 
+  // Layout constants — panel is sized to fit content, never by canvas height
+  var titleH  = 46;  // baseline of title text from panel top
+  var dividerY = titleH + 12;
+  var statsTop = dividerY + 24;
+  var statRows = ['Level reached:', 'Enemies defeated:', 'Damage taken:', 'Time survived:'];
+  var statLH   = 26;
+  var statsH   = statRows.length * statLH;
+  var hintH    = 36;  // space for the "press start" line + bottom padding
+  var padTop   = 16;  // extra top padding above title
+
+  var panW = Math.min(300, w - 16);
+  var panH = padTop + statsTop + statsH + hintH;
+  var px = Math.floor((w - panW) / 2);
+  var py = Math.floor((h - panH) / 2);
+
+  // Panel background + border
+  ctx.fillStyle = 'rgba(40,0,0,0.96)';
+  ctx.strokeStyle = '#cc2222'; ctx.lineWidth = 2;
+  ctx.fillRect(px, py, panW, panH);
+  ctx.strokeRect(px, py, panW, panH);
+
+  // Title
+  ctx.textAlign = 'center'; ctx.fillStyle = '#ff3333';
+  ctx.font = 'bold ' + Math.max(20, Math.min(28, Math.floor(panW * 0.09))) + 'px Arial';
+  ctx.fillText('GAME OVER', px + panW / 2, py + padTop + titleH);
+
+  // Divider
+  ctx.strokeStyle = '#661111'; ctx.lineWidth = 1;
   ctx.beginPath();
+  ctx.moveTo(px + 16, py + padTop + dividerY);
+  ctx.lineTo(px + panW - 16, py + padTop + dividerY);
+  ctx.stroke();
 
-  ctx.arc(sx+10, sy+10, 8, 0, Math.PI*2);
+  // Stats — label on left, value right-aligned
+  ctx.font = '13px Arial'; ctx.textAlign = 'left';
+  var lx  = px + 18, rx = px + panW - 18;
+  var ly  = py + padTop + statsTop;
+  var statValues = [
+    level.toString(),
+    (stats.totalEnemiesKilled || 0).toString(),
+    Math.floor(stats.totalDamageTaken || 0).toString(),
+    timeSec.toFixed(1) + 's'
+  ];
+  for (var si = 0; si < statRows.length; si++) {
+    ctx.fillStyle = '#ffaaaa'; ctx.textAlign = 'left';
+    ctx.fillText(statRows[si], lx, ly);
+    ctx.fillStyle = '#ffffff'; ctx.textAlign = 'right';
+    ctx.fillText(statValues[si], rx, ly);
+    ly += statLH;
+  }
 
-  ctx.fill();
+  // Restart hint — always sits in reserved space below stats
+  ctx.textAlign = 'center'; ctx.font = '12px Arial'; ctx.fillStyle = '#ff7777';
+  ctx.fillText('Press Start to play again', px + panW / 2, py + panH - 12);
 
-  ctx.fillStyle='#fff';
+  ctx.restore();
+}
 
-  ctx.font='12px Arial';
+// =============================================
+// SECTION 16: MAIN DRAW DISPATCH
+// =============================================
 
-  ctx.textAlign='left';
+// Top-down tiny icons for floor scatter items — called inside draw2D's translate block.
+function drawFloorScatter2D() {
+  if (!floorScatter || !floorScatter.length) return;
+  ctx.save();
+  for (var i = 0; i < floorScatter.length; i++) {
+    var item = floorScatter[i];
+    var x = item.x, y = item.y;
+    var t = item.type;
+    ctx.globalAlpha = 0.72;
+    if (t === 'bones' || t === 'dry_bones') {
+      ctx.strokeStyle = (t === 'dry_bones') ? '#c0a850' : '#aaaaaa';
+      ctx.lineWidth = 1.5; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x-4, y-2); ctx.lineTo(x+4, y+2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x+3, y-3); ctx.lineTo(x-3, y+3); ctx.stroke();
+    } else if (t === 'crate') {
+      ctx.fillStyle = '#8b5a2b'; ctx.fillRect(x-3, y-3, 6, 6);
+      ctx.strokeStyle = '#4a2808'; ctx.lineWidth = 0.8; ctx.strokeRect(x-3, y-3, 6, 6);
+    } else if (t === 'skull') {
+      ctx.fillStyle = '#c8c0a8'; ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#1a1008'; ctx.beginPath(); ctx.arc(x-1.2, y-0.5, 0.9, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x+1.2, y-0.5, 0.9, 0, Math.PI*2); ctx.fill();
+    } else if (t === 'rubble' || t === 'rock_pile' || t === 'desert_rock') {
+      ctx.fillStyle = (t === 'desert_rock') ? '#b8905a' : '#787060';
+      ctx.beginPath(); ctx.arc(x-2, y+1, 2.2, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = (t === 'desert_rock') ? '#c8a070' : '#888070';
+      ctx.beginPath(); ctx.arc(x+2, y-1, 2.0, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y+2, 1.6, 0, Math.PI*2); ctx.fill();
+    } else if (t === 'ice_shard') {
+      ctx.fillStyle = 'rgba(140,200,255,0.75)';
+      ctx.beginPath(); ctx.moveTo(x-2,y+2); ctx.lineTo(x+2,y+2); ctx.lineTo(x,y-4); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(x+2,y+1); ctx.lineTo(x+4,y+1); ctx.lineTo(x+3,y-3); ctx.closePath(); ctx.fill();
+    } else if (t === 'frozen_pool') {
+      ctx.fillStyle = 'rgba(100,160,255,0.45)';
+      ctx.beginPath(); ctx.ellipse(x, y, 5, 2.5, 0, 0, Math.PI*2); ctx.fill();
+    } else if (t === 'crystal') {
+      ctx.fillStyle = (terrain === 'expanse' || terrain === 'plains') ? '#c8a000' : '#00c8a8';
+      ctx.beginPath(); ctx.moveTo(x,y-5); ctx.lineTo(x+2,y); ctx.lineTo(x,y+1); ctx.lineTo(x-2,y); ctx.closePath(); ctx.fill();
+    } else if (t === 'stalagmite') {
+      ctx.fillStyle = '#6a5848';
+      ctx.beginPath(); ctx.moveTo(x-2,y+2); ctx.lineTo(x+2,y+2); ctx.lineTo(x,y-4); ctx.closePath(); ctx.fill();
+    } else if (t === 'puddle') {
+      ctx.fillStyle = 'rgba(15,22,35,0.65)';
+      ctx.beginPath(); ctx.ellipse(x, y, 5, 2, 0, 0, Math.PI*2); ctx.fill();
+    } else if (t === 'dead_shrub') {
+      ctx.strokeStyle = '#6a4820'; ctx.lineWidth = 1.2; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x, y+3); ctx.lineTo(x, y-3); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, y-1); ctx.lineTo(x-3, y-3); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, y-1); ctx.lineTo(x+3, y-3); ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1.0; ctx.restore();
+}
 
-  ctx.fillText(spell.name.substr(0,8), sx+22, sy+14);
+// Tiny top-down icons for wall decorations — called inside draw2D's translate block.
+function drawWallDecorations2D() {
+  if (!wallDecorations || !wallDecorations.length) return;
+  ctx.save(); ctx.globalAlpha = 0.68;
+  for (var i = 0; i < wallDecorations.length; i++) {
+    var dec = wallDecorations[i];
+    var x = dec.worldX, y = dec.worldY;
+    var t = dec.type;
+    if (t === 'torch' || t === 'sconce') {
+      ctx.fillStyle = (t === 'torch') ? '#ff8020' : '#ff5030';
+      ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI*2); ctx.fill();
+    } else if (t === 'shield') {
+      ctx.fillStyle = '#b0b0b0';
+      ctx.beginPath(); ctx.ellipse(x, y, 3.5, 2.5, 0, 0, Math.PI*2); ctx.fill();
+    } else if (t === 'banner') {
+      ctx.fillStyle = '#800080';
+      ctx.fillRect(x-1.5, y-3, 3, 5);
+    } else if (t === 'fungi') {
+      ctx.fillStyle = '#00c8a8';
+      ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI*2); ctx.fill();
+    } else if (t === 'moss_drip') {
+      ctx.fillStyle = '#3a7a28';
+      ctx.fillRect(x-1, y-2, 2, 4);
+    } else if (t === 'stalactite_tip') {
+      ctx.fillStyle = '#6a5040';
+      ctx.beginPath(); ctx.moveTo(x, y+2); ctx.lineTo(x-2,y-2); ctx.lineTo(x+2,y-2); ctx.closePath(); ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1.0; ctx.restore();
+}
+
+function draw2D() {
+  updateViewCamera();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (bgPattern) {
+    ctx.save(); ctx.fillStyle = bgPattern; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.restore();
+  }
+  ctx.save(); ctx.translate(-viewCam.x, -viewCam.y);
+
+  // Walls
+  for (var i = 0; i < walls.length; i++) {
+    var w = walls[i];
+    ctx.fillStyle = wallColor;
+    ctx.fillRect(w.x, w.y, w.w, w.h);
+  }
+  // Draw irregular border outline for plains/cave terrain
+  drawIrregularBorder2D();
+
+  // Goal
+  ctx.fillStyle = '#00ff00';
+  ctx.fillRect(goal.x, goal.y, goal.w, goal.h);
+
+  // Player
+  ctx.fillStyle = '#ff0000';
+  ctx.beginPath(); ctx.arc(pos.x, pos.y, 6, 0, Math.PI * 2); ctx.fill();
+
+  // Enemies — skeleton sprites, head rotated to face player
+  var now = Date.now();
+  for (var j = 0; j < enemies.length; j++) {
+    var e = enemies[j]; var eType = e.enemyType;
+    var r = 8 * eType.size; // used for status rings and health bar offset
+    var hpPct2d = e.health / e.maxHealth;
+    var isFlashing2d = (e.damageFlash && now < e.damageFlash);
+    var msPerFrame2d = Math.max(50, 200 - eType.speed * 2);
+    var skelFrameIdx2d = Math.floor(now / msPerFrame2d) % SKEL_FRAMES;
+    var skelKey2d = (hpPct2d < 0.25) ? (eType.id + '_crumble') : eType.id;
+    var skelCanvas2d = skeletonFrames && skeletonFrames[skelKey2d] && skeletonFrames[skelKey2d][skelFrameIdx2d];
+    var sw2d = r * 2.8, sh2d = sw2d * (SKEL_H / SKEL_W);
+    ctx.save();
+    if (skelCanvas2d) {
+      ctx.drawImage(skelCanvas2d, e.x - sw2d / 2, e.y - sh2d / 2, sw2d, sh2d);
+      if (isFlashing2d) {
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = e.damageFlashColor || '#ffffff';
+        ctx.fillRect(e.x - sw2d / 2, e.y - sh2d / 2, sw2d, sh2d);
+        ctx.globalAlpha = 1.0;
+      }
+    } else {
+      // Fallback circle if sprites not ready
+      ctx.fillStyle = isFlashing2d ? (e.damageFlashColor || '#ffffff') : eType.color;
+      ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+    // Status rings (drawn in world space, no rotation)
+    if (e.slowUntil && now < e.slowUntil) {
+      ctx.strokeStyle = '#00ffff'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(e.x, e.y, r + 2, 0, Math.PI * 2); ctx.stroke();
+    }
+    if (e.burnUntil && now < e.burnUntil) {
+      ctx.fillStyle = 'rgba(255,100,0,0.6)';
+      ctx.beginPath(); ctx.arc(e.x, e.y, r * 0.4, 0, Math.PI * 2); ctx.fill();
+    }
+    // Health bar
+    ctx.fillStyle = (hpPct2d > 0.6) ? '#00ff00' : (hpPct2d > 0.3) ? '#ffaa00' : '#ff4444';
+    ctx.fillRect(e.x - 10, e.y - 15 - r, 20 * hpPct2d, 3);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.strokeRect(e.x - 10, e.y - 15 - r, 20, 3);
+  }
+
+  // Death effects — bone scatter (tumbling line segments with physics)
+  ctx.lineWidth = 2; ctx.lineCap = 'round';
+  for (var d = 0; d < deathEffects.length; d++) {
+    var de = deathEffects[d];
+    var t = Math.max(0, Math.min(1, (now - de.spawnMs) / de.lifeMs));
+    ctx.globalAlpha = 1.0 - t * t;
+    ctx.strokeStyle = de.color;
+    ctx.save();
+    ctx.translate(de.x, de.y);
+    ctx.rotate(de.rot + de.rotVel * t);
+    ctx.beginPath(); ctx.moveTo(-de.len / 2, 0); ctx.lineTo(de.len / 2, 0); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1.0;
+
+  // Floor scatter items and wall decorations — drawn in world space, inside translate
+  drawFloorScatter2D();
+  drawWallDecorations2D();
 
   ctx.restore();
 
+  // Timer overlay
+  ctx.fillStyle = '#fff'; ctx.font = '14px monospace';
+  ctx.fillText('Time: ' + timeSec.toFixed(1) + 's', 10, 20);
+  ctx.fillStyle = timeColor;
+  ctx.fillText('\u25cf', 90, 20);
 }
 
-function updateHudInput(){
+function draw() {
+  if (calibrating) { drawCalibration(); return; }
 
-  var el=document.getElementById('hudInput');
+  if (MODE3D) {
+    var now = Date.now();
 
-  if(!el) return;
+    // Gyro aim camera smoothing
+    if (CONTROL_MODE === MODE_GYRO_AIM && USE_YAW && hasYaw) {
+      var effTarget = yawTarget + yawOffset;
+      if (capturingYaw) {
+        if (!isFinite(camHold)) camHold = cam.ang;
+        cam.ang = camHold;
+        if (DEBUG_CAM && now - __camDbgLast > 300) {
+          __camDbgLast = now;
+          try { console.log('[CAM]', 'capturing=1', 'camHold=', camHold.toFixed(3), 'yawTarget=', yawTarget.toFixed ? yawTarget.toFixed(3) : yawTarget, 'yawOffset=', yawOffset.toFixed ? yawOffset.toFixed(3) : yawOffset); } catch (_) {}
+        }
+      } else {
+        var d = angNorm(effTarget - cam.ang);
+        var alpha = (now < yawResumeUntil) ? Math.min(0.5, yawAlpha * 2.0) : yawAlpha;
+        cam.ang += d * alpha;
+        camHold = cam.ang;
+        if (DEBUG_CAM && now - __camDbgLast > 300) {
+          __camDbgLast = now;
+          try { console.log('[CAM]', 'capturing=0', 'effTarget=', effTarget.toFixed ? effTarget.toFixed(3) : effTarget, 'cam=', cam.ang.toFixed(3), 'd=', d.toFixed ? d.toFixed(3) : d, 'alpha=', alpha.toFixed ? alpha.toFixed(3) : alpha); } catch (_) {}
+        }
+      }
+    }
 
-  var label=(CONTROL_MODE===MODE_GYRO_AIM)?'Gyro Aim (Stick Move)':'Stick Aim (XYAB Move)';
+    // Pitch smoothing (gyro mode — smooth toward pitchTarget + transient terrain nudge)
+    if (CONTROL_MODE === MODE_GYRO_AIM && USE_PITCH) {
+      var pitchGoal = pitchTarget + (autoPitchOff || 0);
+      var pitchDiff = pitchGoal - cam.pitch;
+      cam.pitch += pitchDiff * pitchAlpha;
+    } else {
+      // Stick / mouse / keyboard — apply transient terrain nudge directly
+      cam.pitch = (cam.pitch || 0) + (autoPitchOff || 0) * 0.15;
+      cam.pitch = Math.max(-CAM_PITCH_MAX, Math.min(CAM_PITCH_MAX, cam.pitch));
+    }
 
-  el.textContent = label;
+    // Camera follow
+    if (CAM_FOLLOW) {
+      cam.x = pos.x; cam.y = pos.y;
+      if (pos.floorZ) cam.z = pos.floorZ;
+    }
 
-}
-
-function step(dt){
-  // Mana regen
-
-  mana = Math.min(MANA_MAX, mana + MANA_REGEN_PER_S * dt);
-  health = Math.min(HEALTH_MAX, health + HEALTH_REGEN_PER_S * dt);
-  vel.x*=damping; vel.y*=damping;
-  pos.x+=vel.x*dt; pos.y+=vel.y*dt;
-  if((terrain==='plains' || terrain==='cave') && floorMesh){ var floorHeight=getFloorHeightAt(pos.x, pos.y); if(!pos.floorZ) pos.floorZ=0; var targetZ=floorHeight*40 + 60; var zDiff=targetZ-pos.floorZ; pos.floorZ += zDiff*0.3; if(Math.random()<0.01){ console.log('[FLOOR] Player at (' + pos.x.toFixed(1) + ',' + pos.y.toFixed(1) + ') floorHeight=' + floorHeight.toFixed(3) + ' targetZ=' + targetZ.toFixed(1) + ' currentZ=' + pos.floorZ.toFixed(1)); } }
-  if(pos.x<6){ pos.x=6; vel.x*=-bounce; } if(pos.x>720-6){ pos.x=720-6; vel.x*=-bounce; }
-  if(pos.y<6){ pos.y=6; vel.y*=-bounce; } if(pos.y>480-6){ pos.y=480-6; vel.y*=-bounce; }
-  var player={x:pos.x-6,y:pos.y-6,w:12,h:12};
-  for(var i=0;i<walls.length;i++){ var w=walls[i]; if(rectsOverlap(player,w)){ collisions++; document.getElementById('hudCol').textContent=collisions;
-      pos.x-=vel.x*dt*2; pos.y-=vel.y*dt*2; vel.x*=-0.5; vel.y*=-0.5; player={x:pos.x-6,y:pos.y-6,w:12,h:12}; } }
-  repelFromWalls(); repelFromEnemies(dt);
-  if(rectsOverlap(player, goal)){ if(level<levels.length){ if(terrain==='ice'){ terrain='cave'; } else if(terrain==='cave'){ terrain='plains'; } else if(terrain==='plains'){ terrain='ice'; } else { terrain='ice'; } var sel=document.getElementById('terrainSelect'); if(sel){ sel.value=terrain; } resetLevel(level+1); } else { stopGame(); alert('You win!'); } }
-  timeSec=(Date.now()-startMs)/1000; if(timeSec<=medalGold){ timeColor='#d4af37'; } else if(timeSec<=medalSilver){ timeColor='#c0c0c0'; } else if(timeSec<=medalBronze){ timeColor='#cd7f32'; } else { timeColor='#ffffff'; }
-}
-function repelFromWalls(){ var cx=pos.x, cy=pos.y; var rad=6, range=12, k=40; for(var i=0;i<walls.length;i++){ var w=walls[i]; var nx=Math.max(w.x, Math.min(cx, w.x+w.w)); var ny=Math.max(w.y, Math.min(cy, w.y+w.h)); var dx=cx-nx, dy=cy-ny; var dist=Math.hypot(dx,dy); var thresh=rad+range; if(dist<thresh && dist>0.001){ var s=(thresh-dist)/thresh; var inv=1.0/dist; vel.x += (dx*inv)*k*s*0.016; vel.y += (dy*inv)*k*s*0.016; } } }
-function repelFromEnemies(dt){ if(!enemies||!enemies.length) return; var cx=pos.x, cy=pos.y; var playerRad=6, enemyRad=8, k=300; var debugLog=(Math.random()<0.02); for(var i=0;i<enemies.length;i++){ var e=enemies[i]; var dx=cx-e.x, dy=cy-e.y; var dist=Math.hypot(dx,dy); var thresh=playerRad+enemyRad; if(debugLog){ console.log('[ENEMY-COL] i=' + i + ' enemy=(' + e.x.toFixed(1) + ',' + e.y.toFixed(1) + ') player=(' + cx.toFixed(1) + ',' + cy.toFixed(1) + ') dist=' + dist.toFixed(1) + ' thresh=' + thresh); } if(dist<thresh && dist>0.001){ var overlap=thresh-dist; var inv=1.0/dist; var pushX=(dx*inv)*overlap*0.5, pushY=(dy*inv)*overlap*0.5; var newX=pos.x+pushX, newY=pos.y+pushY; var blocked=false; if(newX<6||newX>714||newY<6||newY>474){ blocked=true; } if(!blocked){ var gx=Math.floor(newX/cell), gy=Math.floor(newY/cell); if(gx>=0&&gy>=0&&gx<gridW&&gy<gridH&&grid&&grid[gy*gridW+gx]){ blocked=true; } } if(!blocked){ pos.x=newX; pos.y=newY; vel.x+=(dx*inv)*k*overlap*0.016; vel.y+=(dy*inv)*k*overlap*0.016; if(debugLog){ console.log('[ENEMY-COL] REPEL! push=(' + pushX.toFixed(2) + ',' + pushY.toFixed(2) + ')'); } } else { vel.x*=0.5; vel.y*=0.5; if(debugLog){ console.log('[ENEMY-COL] BLOCKED by wall at (' + newX.toFixed(1) + ',' + newY.toFixed(1) + ') - damping velocity'); } } var dps=10; var dam=dps*dt; health=Math.max(0, health - dam); stats.totalDamageTaken += dam; } } }
-function applyGamepad(nx, ny, dt){ var dz=0.05; if(Math.abs(nx)<dz) nx=0; if(Math.abs(ny)<dz) ny=0; nx=clamp(nx,-1,1); ny=clamp(ny,-1,1); var dtScale = dt>0 ? (dt/0.060) : 1; /* invert Y so up is up */ var jy = -ny; if(MODE3D){ var ca=Math.cos(cam.ang), sa=Math.sin(cam.ang); var fwd=-jy, str=nx; /* flip forward only for 3D */ var vx = fwd*ca + str*(-sa); var vy = fwd*sa + str*( ca); vel.x += vx * speed * 0.15 * dtScale; vel.y += vy * speed * 0.15 * dtScale; } else { vel.x += (nx) * speed * 0.15 * dtScale; vel.y += (jy) * speed * 0.15 * dtScale; } }
-function onCalibUpdate(){ var thr=0.35; var ok = (Math.abs(lastRoll-baseRoll)<thr) && (Math.abs(lastPitch-basePitch)<thr); if(hasYaw){ ok = ok && (Math.abs(angNorm(deg2rad(lastYaw - baseYaw))) < deg2rad(2.0)); } var now=Date.now(); if(ok){ calStableMs += 60; } else { calStableMs = 0; } if(calStableMs>=calNeedStableMs){ hasBaseline=true; calibrating=false; resetLevel(1); } }
-function applyTilt(pitch, roll){
-  if(hasBaseline){ roll -= baseRoll; pitch -= basePitch; }
-  if(Math.abs(roll)<dead) roll=0; roll=clamp(roll,-maxAng,maxAng);
-  if(Math.abs(pitch)<dead) pitch=0; pitch=clamp(pitch,-maxAng,maxAng);
-  vel.x += (roll/maxAng)*speed*0.10;
-  vel.y += (pitch/maxAng)*speed*0.10;
-}
-function pollIMU(){
-  if(!i2cEnabled||!imuCompiled){
-    console.warn('[GAMES] IMU polling skipped: i2c='+i2cEnabled+' imuCompiled='+imuCompiled);
-    return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawSkybox3D();
+    drawCeiling3D();
+    drawPlatforms3D();
+    raycastDraw();
+    drawGoalMarker3D();
+  } else {
+    if (CONTROL_MODE === MODE_GYRO_AIM && USE_YAW && hasYaw) {
+      var d2 = angNorm(yawTarget - cam.ang);
+      cam.ang += d2 * yawAlpha;
+    }
+    draw2D();
+    drawPlatforms2D();
   }
-  var ts=Date.now();
-  fetch('/api/sensors?sensor=imu&ts='+ts,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){
-    if(!running) return;
-    if(j && j.valid && j.ori){ var pitch=j.ori.pitch||0; var roll=j.ori.roll||0; var yaw=(j.ori.yaw!==undefined && j.ori.yaw!==null)?j.ori.yaw:0; lastPitch=pitch; lastRoll=roll; hasYaw = (j.ori.yaw!==undefined && j.ori.yaw!==null); if(hasYaw){ lastYaw=yaw; } if(DEBUG_IMU){ try{ console.log('[IMU]', ts, 'pitch=', pitch.toFixed?pitch.toFixed(2):pitch, 'roll=', roll.toFixed?roll.toFixed(2):roll, 'yaw=', hasYaw?(yaw.toFixed?yaw.toFixed(2):yaw):'n/a', 'baseP=', basePitch.toFixed?basePitch.toFixed(2):basePitch, 'baseR=', baseRoll.toFixed?baseRoll.toFixed(2):baseRoll, 'baseY=', baseYaw.toFixed?baseYaw.toFixed(2):baseYaw, 'hasBase=', !!hasBaseline, 'pos=('+pos.x.toFixed(1)+','+pos.y.toFixed(1)+')'); }catch(_){ } } if(calibrating){ if(!hasBaseline){ basePitch=pitch; baseRoll=roll; if(hasYaw){ baseYaw=yaw; } } onCalibUpdate(); } else { if(!USE_GAMEPAD){ applyTilt(pitch,roll); } if(USE_YAW && hasYaw){ var yawDiff = yaw - baseYaw; while(yawDiff > 180) yawDiff -= 360; while(yawDiff < -180) yawDiff += 360; var relYaw = deg2rad(yawDiff); var yawSmooth = 0.7; yawTarget = yawTarget * yawSmooth + relYaw * (1 - yawSmooth); } if(USE_PITCH){ var relPitch = deg2rad(pitch - basePitch); var newPitchTarget = Math.max(-0.35, Math.min(0.35, relPitch)); var pitchSmooth = 0.6; pitchTarget = pitchTarget * pitchSmooth + newPitchTarget * (1 - pitchSmooth); } } }
-  }).catch(function(_){});
 }
-function loop(ts){ if(!running) return; var loopStart=performance.now(); var dt=(lastUpdate? (ts-lastUpdate):16)/1000; lastUpdate=ts;
-
-// Read buttons and handle Select toggle + Start menu toggle
-
-  var btn=gpLast.buttons|0; var selectDown=((btn & BTN_SELECT)===0); if(selectDown && !lastSelectDown){ var now=Date.now(); if(now - lastSelectToggleMs > SELECT_TOGGLE_COOLDOWN){ CONTROL_MODE = (CONTROL_MODE===MODE_GYRO_AIM) ? MODE_STICK_AIM : MODE_GYRO_AIM; lastSelectToggleMs=now; console.log('[CTRL] toggled CONTROL_MODE=', CONTROL_MODE); updateHudInput(); } } lastSelectDown=selectDown;
-
-  if(gpLast && gpLast.valid){ var startMenuDown=((btn & BTN_START)===0); if(startMenuDown && !lastStartMenuDown){ var now=Date.now(); if(now - lastStartMenuToggleMs > START_MENU_COOLDOWN){ menuOpen=!menuOpen; lastStartMenuToggleMs=now; console.log('[MENU] toggled menuOpen=', menuOpen); } } lastStartMenuDown=startMenuDown; }
 
 
-/* Handle gamepad X-button for yaw capture (only in Gyro Aim) */
+// =============================================
+// SECTION 17: GAME LOOP
+// =============================================
 
- if(MODE3D && CONTROL_MODE===MODE_GYRO_AIM && USE_GAMEPAD && gpLast && gpLast.valid){ var xPressed = ((gpLast.buttons & BTN_X)===0); if(xPressed && !prevX){ capturingYaw=true; camHold=cam.ang; yawAtPress=yawTarget; if(DEBUG_CAM){ try{ console.log('[CAM] press X', 'camHold=', camHold.toFixed(3), 'yawAtPress=', yawAtPress.toFixed?yawAtPress.toFixed(3):yawAtPress, 'yawOffset=', yawOffset.toFixed?yawOffset.toFixed(3):yawOffset); }catch(_){ } } } else if(!xPressed && prevX){ capturingYaw=false; var delta=angNorm(yawTarget - yawAtPress); yawOffset += delta; yawResumeUntil = Date.now() + 250; if(DEBUG_CAM){ try{ console.log('[CAM] release X', 'yawTarget=', yawTarget.toFixed?yawTarget.toFixed(3):yawTarget, 'yawAtPress=', yawAtPress.toFixed?yawAtPress.toFixed(3):yawAtPress, 'delta=', delta.toFixed?delta.toFixed(3):delta, 'newOffset=', yawOffset.toFixed?yawOffset.toFixed(3):yawOffset); }catch(_){ } } } prevX = xPressed; }
+function handleInput(dt) {
+  var btn = gpLast.buttons | 0;
 
-// Route inputs by control mode
-
- if(!calibrating){ if(USE_GAMEPAD && gpLast && gpLast.valid){ 
-
-   // 2D Mode: Joystick controls movement directly
-
-   if(!MODE3D){ 
-
-     var now2=Date.now(); 
-
-     var nx=gpLast.x, ny=-gpLast.y; 
-
-     var mag=Math.hypot(nx,ny); 
-
-     if(mag>0.1){ 
-
-       var dtScale = dt>0 ? (dt/0.060) : 1; 
-
-       vel.x += nx * speed * 0.12 * dtScale; 
-
-       vel.y += ny * speed * 0.12 * dtScale; 
-
-     } 
-
-     // 2D Mode: XYAB buttons for spell system
-
-     var btn2d=gpLast.buttons|0; 
-
-     var xDown=((btn2d & BTN_X)===0); 
-
-     var aDown=((btn2d & BTN_A)===0); 
-
-     // X button: Cycle spell
-
-     if(xDown && !lastXDown){ cycleSpell(); } 
-
-     lastXDown=xDown; 
-
-     // A button: Cast spell (rapid fire while held)
-
-     if(aDown){ var spell=getCurrentSpell(); if(mana>=spell.manaCost && (now2-lastShotMs)>=SHOOT_COOLDOWN){ if(spell.attackType==='cone'){ castConeAttack(spell); } else { spawnProjectile(spell.speed, PROJ_RADIUS); } mana-=spell.manaCost; stats.totalManaConsumed+=spell.manaCost; lastShotMs=now2; } else if(mana<spell.manaCost && !lastADown){ manaBlinkUntil = now2 + 1000; } } 
-
-     lastADown=aDown; 
-
-   } 
-
-   // 3D Mode: Spell system with movement
-
-   else { 
-
-     var now2=Date.now(); 
-
-     // Movement: Gyro Aim uses gamepad for movement, Stick Aim uses XYAB for movement
-
-     if(!menuOpen){ 
-
-     if(CONTROL_MODE===MODE_GYRO_AIM){ 
-
-       applyGamepad(gpLast.x, gpLast.y, dt); 
-
-       // In Gyro mode: Y=cycle spell, A=cast spell (X is for yaw capture, Start opens menu)
-
-       var btn3d=gpLast.buttons|0; 
-
-       var yDown=((btn3d & BTN_Y)===0); 
-
-       var aDown3d=((btn3d & BTN_A)===0); 
-
-       if(yDown && !lastXDown){ cycleSpell(); } 
-
-       lastXDown=yDown; 
-
-       if(aDown3d){ var spell=getCurrentSpell(); if(mana>=spell.manaCost && (now2-lastShotMs)>=SHOOT_COOLDOWN){ if(spell.attackType==='cone'){ castConeAttack(spell); } else { spawnProjectile(spell.speed, PROJ_RADIUS); } mana-=spell.manaCost; stats.totalManaConsumed+=spell.manaCost; lastShotMs=now2; } else if(mana<spell.manaCost && !lastADown){ manaBlinkUntil = now2 + 1000; } } 
-
-       lastADown=aDown3d; 
-
-     } else { 
-
-       // Stick Aim: Joystick controls camera
-
-       var nx=gpLast.x, ny=gpLast.y; var jy=-ny; cam.ang += nx * STICK_CAM_YAW_SPEED * dt; cam.pitch = (cam.pitch||0) + (jy) * STICK_CAM_PITCH_SPEED * dt; if(cam.pitch>CAM_PITCH_MAX) cam.pitch=CAM_PITCH_MAX; if(cam.pitch<-CAM_PITCH_MAX) cam.pitch=-CAM_PITCH_MAX; 
-
-       // XYAB: X=forward, B=back, Y=cycle spell, A=cast spell
-
-       var btn=gpLast.buttons|0; 
-
-       var mvF=((btn & BTN_X)===0), mvB=((btn & BTN_B)===0); 
-
-       if(mvF||mvB){ var fwd=(mvF?1:0) + (mvB?-1:0); var ca=Math.cos(cam.ang), sa=Math.sin(cam.ang); var vx = fwd*ca; var vy = fwd*sa; var dtScale = dt>0 ? (dt/0.060) : 1; vel.x += vx * speed * 0.10 * dtScale; vel.y += vy * speed * 0.10 * dtScale; } 
-
-       var yDown=((btn & BTN_Y)===0); 
-
-       var aDown=((btn & BTN_A)===0); 
-
-       if(yDown && !lastXDown){ cycleSpell(); } 
-
-       lastXDown=yDown; 
-
-       if(aDown){ var spell=getCurrentSpell(); if(mana>=spell.manaCost && (now2-lastShotMs)>=SHOOT_COOLDOWN){ if(spell.attackType==='cone'){ castConeAttack(spell); } else { spawnProjectile(spell.speed, PROJ_RADIUS); } mana-=spell.manaCost; stats.totalManaConsumed+=spell.manaCost; lastShotMs=now2; } else if(mana<spell.manaCost && !lastADown){ manaBlinkUntil = now2 + 1000; } } 
-
-       lastADown=aDown; 
-
-     } 
-
-     } 
-
-   } 
-
- } } var updateStart=performance.now(); if(!menuOpen){ updateEnemies(dt); updateProjectiles(dt); updateImpacts(); updateConeEffects(); updateDeathEffects(); step(dt); } var updateEnd=performance.now(); var drawStart=performance.now(); draw(); if(MODE3D){ drawConeEffects3D(); drawProjectiles3D(); drawImpacts3D(); drawEnemies3D(); } else { drawConeEffects2D(); drawProjectiles2D(); drawImpacts2D(); } drawHudOverlay(); drawMenuOverlay(); var drawEnd=performance.now(); var loopEnd=performance.now(); if(DEBUG_PERF){ var frameTime=loopEnd-loopStart; var updateTime=updateEnd-updateStart; var drawTime=drawEnd-drawStart; __perfFrames.push({total:frameTime,update:updateTime,draw:drawTime,dt:dt*1000,proj:projectiles.length,cone:coneEffects.length,enemy:enemies.length,impacts:impacts.length,gpValid:gpLast.valid,gpX:gpLast.x,gpY:gpLast.y}); var now=Date.now(); if(now-__perfLastLog>__perfLogInterval && __perfFrames.length>0){ var avgTotal=0,avgUpdate=0,avgDraw=0,avgDt=0,maxTotal=0,maxUpdate=0,maxDraw=0; for(var i=0;i<__perfFrames.length;i++){ var f=__perfFrames[i]; avgTotal+=f.total; avgUpdate+=f.update; avgDraw+=f.draw; avgDt+=f.dt; if(f.total>maxTotal)maxTotal=f.total; if(f.update>maxUpdate)maxUpdate=f.update; if(f.draw>maxDraw)maxDraw=f.draw; } var n=__perfFrames.length; avgTotal/=n; avgUpdate/=n; avgDraw/=n; avgDt/=n; var lastF=__perfFrames[__perfFrames.length-1]; try{ console.log('[PERF]','frames='+n,'avgTotal='+avgTotal.toFixed(1)+'ms','maxTotal='+maxTotal.toFixed(1)+'ms','avgUpdate='+avgUpdate.toFixed(1)+'ms','maxUpdate='+maxUpdate.toFixed(1)+'ms','avgDraw='+avgDraw.toFixed(1)+'ms','maxDraw='+maxDraw.toFixed(1)+'ms','avgDt='+avgDt.toFixed(1)+'ms','proj='+lastF.proj,'cone='+lastF.cone,'enemy='+lastF.enemy,'impacts='+lastF.impacts,'gpValid='+lastF.gpValid,'gpX='+lastF.gpX.toFixed(2),'gpY='+lastF.gpY.toFixed(2)); }catch(_){} __perfFrames=[]; __perfLastLog=now; } } requestAnimationFrame(loop); }
-function startGame(){
-  if(!i2cEnabled){
-    alert('Cannot start game: I2C is disabled. Enable I2C in settings.');
-    return;
+  // Select button: toggle control mode
+  var selectDown = ((btn & BTN_SELECT) === 0);
+  if (selectDown && !lastSelectDown) {
+    var now = Date.now();
+    if (now - lastSelectToggleMs > SELECT_TOGGLE_COOLDOWN) {
+      CONTROL_MODE = (CONTROL_MODE === MODE_GYRO_AIM) ? MODE_STICK_AIM : MODE_GYRO_AIM;
+      lastSelectToggleMs = now;
+      console.log('[CTRL] toggled CONTROL_MODE=', CONTROL_MODE);
+      updateHudInput();
+    }
   }
-  if(!imuCompiled){
-    alert('Cannot start game: IMU sensor not compiled into firmware.');
-    return;
+  lastSelectDown = selectDown;
+
+  // Start button: toggle menu
+  if (gpLast && gpLast.valid) {
+    var startMenuDown = ((btn & BTN_START) === 0);
+    if (startMenuDown && !lastStartMenuDown) {
+      var now = Date.now();
+      if (now - lastStartMenuToggleMs > START_MENU_COOLDOWN) {
+        menuOpen = !menuOpen;
+        lastStartMenuToggleMs = now;
+        console.log('[MENU] toggled menuOpen=', menuOpen);
+      }
+    }
+    lastStartMenuDown = startMenuDown;
   }
-  if(!imuEnabled || !gamepadEnabled){
-    alert('Cannot start game: IMU and/or gamepad are disabled. Enable them in settings.');
-    return;
+
+  // X-button yaw capture (only in Gyro Aim + 3D + Gamepad)
+  if (MODE3D && CONTROL_MODE === MODE_GYRO_AIM && USE_GAMEPAD && gpLast && gpLast.valid) {
+    var xPressed = ((gpLast.buttons & BTN_X) === 0);
+    if (xPressed && !prevX) {
+      capturingYaw = true; camHold = cam.ang; yawAtPress = yawTarget;
+      if (DEBUG_CAM) {
+        try { console.log('[CAM] press X', 'camHold=', camHold.toFixed(3), 'yawAtPress=', yawAtPress.toFixed ? yawAtPress.toFixed(3) : yawAtPress, 'yawOffset=', yawOffset.toFixed ? yawOffset.toFixed(3) : yawOffset); } catch (_) {}
+      }
+    } else if (!xPressed && prevX) {
+      capturingYaw = false;
+      var delta = angNorm(yawTarget - yawAtPress);
+      yawOffset += delta;
+      yawResumeUntil = Date.now() + 250;
+      if (DEBUG_CAM) {
+        try { console.log('[CAM] release X', 'yawTarget=', yawTarget.toFixed ? yawTarget.toFixed(3) : yawTarget, 'yawAtPress=', yawAtPress.toFixed ? yawAtPress.toFixed(3) : yawAtPress, 'delta=', delta.toFixed ? delta.toFixed(3) : delta, 'newOffset=', yawOffset.toFixed ? yawOffset.toFixed(3) : yawOffset); } catch (_) {}
+      }
+    }
+    prevX = xPressed;
   }
-  running=true; resetLevel(1); startCalibration(); lastUpdate=0; calibrating=true; hasBaseline=false; calStableMs=0; CONTROL_MODE=MODE_STICK_AIM; selectPrimed=false; lastSelectDown=false; console.log('[CTRL] start CONTROL_MODE=', CONTROL_MODE); draw(); Promise.all([controlSensor('imu','start'), controlSensor('gamepad','start')]).then(function(){ polling=setInterval(pollIMU,60); requestAnimationFrame(loop); }); var chk=document.getElementById('chkCamFollow'); if(chk && chk.checked){ CAM_FOLLOW=true; } if(USE_GAMEPAD){ startGamepadPolling(); } updateHudInput(); }
-function stopGame(){ running=false; if(polling){ try{ clearInterval(polling); }catch(_){} polling=null; } stopGamepadPolling(); controlSensor('imu','stop'); }
-function fwDebugOn(){ FW_DEBUG=true; var cmds=['debugsensorsgeneral 1','debugimudata 1']; Promise.all(cmds.map(function(c){ return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(c)}).then(function(r){return r.text();}).catch(function(_){return '';}); })).then(function(){ startLogPoller(); }); }
-function fwDebugOff(){ FW_DEBUG=false; var cmds=['debugsensorsgeneral 0','debugimudata 0']; Promise.all(cmds.map(function(c){ return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(c)}).then(function(r){return r.text();}).catch(function(_){return '';}); })).then(function(){ stopLogPoller(); }); }
-function startLogPoller(){ if(__gamesLogPoll){ return; } __gamesLogLastLen=0; __gamesLogPoll=setInterval(function(){ if(!FW_DEBUG) return; fetch('/api/cli/logs',{cache:'no-store'}).then(function(r){return r.text();}).then(function(t){ if(typeof t!=='string') return; var s=t; if(s.length>__gamesLogLastLen){ var delta=s.substring(__gamesLogLastLen); __gamesLogLastLen=s.length; var lines=delta.split(/\\n/); for(var i=0;i<lines.length;i++){ var ln=lines[i]; if(!ln) continue; if(ln.indexOf('[DEBUG_SENSORS')>=0 || /IMU|BNO|ori|gyro|accel/i.test(ln)){ try{ console.log('[FW]', ln); }catch(_){ } } } } }).catch(function(_){ }); }, 800); }
-function stopLogPoller(){ if(__gamesLogPoll){ try{ clearInterval(__gamesLogPoll); }catch(_){} __gamesLogPoll=null; } }
+
+  // Route inputs by control mode
+  if (!calibrating) {
+    // Keyboard input (also active in mouse mode — WASD drives movement)
+    if (USE_KEYBOARD || USE_MOUSE) {
+      var knx = (kbState.right ? 1 : 0) - (kbState.left ? 1 : 0);
+      var kny = (kbState.up ? 1 : 0) - (kbState.down ? 1 : 0);
+      if (knx !== 0 || kny !== 0) {
+        var kmag = Math.hypot(knx, kny);
+        applyGamepad(knx / kmag, kny / kmag, dt);
+      }
+    }
+
+    // Mouse input — controls camera rotation; WASD (above) handles movement
+    if (USE_MOUSE) {
+      var mdx = mouseDelta.x, mdy = mouseDelta.y;
+      mouseDelta.x = 0; mouseDelta.y = 0;
+      if (mdx !== 0 || mdy !== 0) {
+        cam.ang += mdx * MOUSE_CAM_SENSITIVITY;
+        cam.pitch = clamp((cam.pitch || 0) - mdy * MOUSE_CAM_SENSITIVITY * 0.7, -CAM_PITCH_MAX, CAM_PITCH_MAX);
+      }
+    }
+
+    // Gamepad input
+    if (USE_GAMEPAD && gpLast && gpLast.valid) {
+
+      // ── Shop overlay — handle buttons before movement/spell logic ───────
+      // Joystick axes are NOT consumed here, so movement always works.
+      // Walking out of range auto-closes the shop.
+      var gpShopBtns = gpLast.buttons | 0;
+      var gpShopA = ((gpShopBtns & BTN_A) === 0);
+      var gpShopB = ((gpShopBtns & BTN_B) === 0);
+      var gpShopY = ((gpShopBtns & BTN_Y) === 0);
+      var gpShopX = ((gpShopBtns & BTN_X) === 0);
+      if (!shopOpen && shopNearby && gpShopA && !lastShopGpA) {
+        shopOpen = true; shopSelIdx = 0;                                   // A: open shop
+      } else if (shopOpen) {
+        var _vis = getVisibleShopItems();
+        if (gpShopY && !lastShopGpY)
+          shopSelIdx = (shopSelIdx + 1) % _vis.length;              // Y: next item
+        if (gpShopX && !lastShopGpX)
+          shopSelIdx = (shopSelIdx - 1 + _vis.length) % _vis.length; // X: prev
+        if (gpShopA && !lastShopGpA)
+          applyShopItem(_vis[shopSelIdx]);                           // A: buy
+        if (gpShopB && !lastShopGpB)
+          { shopOpen = false; shopSelIdx = 0; }                            // B: close
+      }
+      lastShopGpA = gpShopA; lastShopGpY = gpShopY;
+      lastShopGpX = gpShopX; lastShopGpB = gpShopB;
+
+      // 2D Mode: Joystick controls movement directly (blocked while shop is open)
+      if (!MODE3D) {
+        var now2 = Date.now();
+        var nx = gpLast.x, ny = -gpLast.y;
+        var mag = Math.hypot(nx, ny);
+        if (!shopOpen && mag > 0.1) {
+          var dtScale = dt > 0 ? (dt / 0.060) : 1;
+          vel.x += nx * speed * 0.12 * dtScale;
+          vel.y += ny * speed * 0.12 * dtScale;
+        }
+
+        // 2D Mode: XYAB buttons for spell system (skipped while shop is open)
+        var btn2d = gpLast.buttons | 0;
+        var xDown = ((btn2d & BTN_X) === 0);
+        var aDown = ((btn2d & BTN_A) === 0);
+
+        if (!shopOpen) {
+        // X button: Cycle spell
+        if (xDown && !lastXDown) cycleSpell();
+        lastXDown = xDown;
+
+        // A button: Cast spell (rapid fire while held)
+        if (aDown) {
+          var spell = getCurrentSpell();
+          if (mana >= spell.manaCost && (now2 - lastShotMs) >= SHOOT_COOLDOWN) {
+            if (spell.attackType === 'cone') castConeAttack(spell);
+            else spawnProjectile(spell.speed, PROJ_RADIUS);
+            mana -= spell.manaCost; stats.totalManaConsumed += spell.manaCost; lastShotMs = now2;
+          } else if (mana < spell.manaCost && !lastADown) {
+            manaBlinkUntil = now2 + 1000;
+          }
+        }
+        lastADown = aDown;
+        } // end if (!shopOpen) for 2D spell buttons
+
+      // 3D Mode: Spell system with movement
+      } else {
+        var now2 = Date.now();
+
+        if (!menuOpen) {
+          if (CONTROL_MODE === MODE_GYRO_AIM) {
+            // Gyro mode: joystick for movement (blocked while shop is open)
+            if (!shopOpen) applyGamepad(gpLast.x, gpLast.y, dt);
+
+            // Y=cycle spell, A=cast spell — skipped while shop is open
+            if (!shopOpen) {
+            var btn3d = gpLast.buttons | 0;
+            var yDown = ((btn3d & BTN_Y) === 0);
+            var aDown3d = ((btn3d & BTN_A) === 0);
+            if (yDown && !lastXDown) cycleSpell();
+            lastXDown = yDown;
+            if (aDown3d) {
+              var spell = getCurrentSpell();
+              if (mana >= spell.manaCost && (now2 - lastShotMs) >= SHOOT_COOLDOWN) {
+                if (spell.attackType === 'cone') castConeAttack(spell);
+                else spawnProjectile(spell.speed, PROJ_RADIUS);
+                mana -= spell.manaCost; stats.totalManaConsumed += spell.manaCost; lastShotMs = now2;
+              } else if (mana < spell.manaCost && !lastADown) {
+                manaBlinkUntil = now2 + 1000;
+              }
+            }
+            lastADown = aDown3d;
+            } // end if (!shopOpen) gyro spell block
+
+          } else {
+            // Stick Aim: Joystick controls camera (blocked while shop is open)
+            if (!shopOpen) {
+            var nx = gpLast.x, ny = gpLast.y;
+            var jy = -ny;
+            cam.ang += nx * STICK_CAM_YAW_SPEED * dt;
+            cam.pitch = (cam.pitch || 0) + (jy) * STICK_CAM_PITCH_SPEED * dt;
+            if (cam.pitch > CAM_PITCH_MAX) cam.pitch = CAM_PITCH_MAX;
+            if (cam.pitch < -CAM_PITCH_MAX) cam.pitch = -CAM_PITCH_MAX;
+            } // end !shopOpen camera block
+
+            // XYAB: X=forward, B=back, Y=cycle spell, A=cast — skipped while shop open
+            if (!shopOpen) {
+            var btn = gpLast.buttons | 0;
+            var mvF = ((btn & BTN_X) === 0), mvB = ((btn & BTN_B) === 0);
+            if (mvF || mvB) {
+              var fwd = (mvF ? 1 : 0) + (mvB ? -1 : 0);
+              var ca = Math.cos(cam.ang), sa = Math.sin(cam.ang);
+              var vx = fwd * ca, vy = fwd * sa;
+              var dtScale = dt > 0 ? (dt / 0.060) : 1;
+              vel.x += vx * speed * 0.10 * dtScale;
+              vel.y += vy * speed * 0.10 * dtScale;
+            }
+            var yDown = ((btn & BTN_Y) === 0);
+            var aDown = ((btn & BTN_A) === 0);
+            if (yDown && !lastXDown) cycleSpell();
+            lastXDown = yDown;
+            if (aDown) {
+              var spell = getCurrentSpell();
+              if (mana >= spell.manaCost && (now2 - lastShotMs) >= SHOOT_COOLDOWN) {
+                if (spell.attackType === 'cone') castConeAttack(spell);
+                else spawnProjectile(spell.speed, PROJ_RADIUS);
+                mana -= spell.manaCost; stats.totalManaConsumed += spell.manaCost; lastShotMs = now2;
+              } else if (mana < spell.manaCost && !lastADown) {
+                manaBlinkUntil = now2 + 1000;
+              }
+            }
+            lastADown = aDown;
+            } // end if (!shopOpen) stick-aim spell block
+          }
+        }
+      }
+    }
+  }
+}
+
+// Pairwise enemy separation — runs every frame, wall-checked
+function separateEnemies() {
+  if (!enemies || enemies.length < 2) return;
+  for (var i = 0; i < enemies.length; i++) {
+    for (var j = i + 1; j < enemies.length; j++) {
+      var a = enemies[i], b = enemies[j];
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var dist = Math.hypot(dx, dy);
+      var minDist = (a.enemyType.size + b.enemyType.size) * 10;
+      if (dist < minDist && dist > 0.01) {
+        var push = (minDist - dist) * 0.35;
+        var inv = 1 / dist;
+        var px = dx * inv * push, py = dy * inv * push;
+        var axNew = a.x - px, ayNew = a.y - py;
+        var agx = Math.floor(axNew / cell), agy = Math.floor(ayNew / cell);
+        if (!(agx < 0 || agy < 0 || agx >= gridW || agy >= gridH || (grid && grid[agy * gridW + agx]))) {
+          a.x = axNew; a.y = ayNew;
+        }
+        var bxNew = b.x + px, byNew = b.y + py;
+        var bgx = Math.floor(bxNew / cell), bgy = Math.floor(byNew / cell);
+        if (!(bgx < 0 || bgy < 0 || bgx >= gridW || bgy >= gridH || (grid && grid[bgy * gridW + bgx]))) {
+          b.x = bxNew; b.y = byNew;
+        }
+      }
+    }
+  }
+}
+
+function gameUpdate(dt) {
+  updateEnemies(dt);   // movement + per-frame attack state (pre-throttle)
+  separateEnemies();   // pairwise push — must run after positions are updated
+  updateProjectiles(dt);
+  updateGroundEffects(dt);
+  tickEffects(dt);     // impacts + cones + bone physics + soul orb collection
+  step(dt);            // player movement → repelFromWalls → repelFromEnemies (push only)
+}
+
+function updateSoulOrbs(dt) {
+  if (!soulOrbs || !soulOrbs.length) return;
+  var keep = [];
+  for (var i = 0; i < soulOrbs.length; i++) {
+    var orb = soulOrbs[i];
+    var dx = pos.x - orb.x, dy = pos.y - orb.y;
+    if (Math.hypot(dx, dy) < 22) {
+      var gain = 15;
+      mana = Math.min(MANA_MAX, mana + gain);
+      console.log('[SOUL] Orb collected! Mana +' + gain);
+    } else {
+      keep.push(orb);
+    }
+  }
+  soulOrbs = keep;
+}
+
+function drawSoulOrbs3D() {
+  if (!soulOrbs || !soulOrbs.length) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var cameraZ = 60 + ((cam.z || 60) - 60) * (25 / 40);
+  var now = Date.now();
+  for (var i = 0; i < soulOrbs.length; i++) {
+    var orb = soulOrbs[i];
+    var dx = orb.x - cam.x, dy = orb.y - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 1 || dist > 600) continue;
+    var ang = Math.atan2(dy, dx);
+    var da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.2) continue;
+    var sx = (da / halfFov) * 0.5 + 0.5;
+    var screenX = Math.floor(sx * w);
+    if (depthBuffer && screenX >= 0 && screenX < depthBuffer.length && dist > depthBuffer[screenX] + 5) continue;
+    var fhAtOrb = floorMesh ? getFloorHeightAt(orb.x, orb.y) : 0;
+    var floorWorldZ = fhAtOrb * 25;
+    var fhMid = floorMesh ? getFloorHeightAt((cam.x + orb.x) * 0.5, (cam.y + orb.y) * 0.5) : 0;
+    if (fhMid * 25 > (cameraZ + floorWorldZ) * 0.5 + 8) continue;
+    var floorY = horizonY + Math.floor(((cameraZ - floorWorldZ) / dist) * 180);
+    var orbSize = Math.max(4, Math.min(16, Math.floor(h * 0.28 / (dist * 0.12 + 1))));
+    floorY = Math.min(floorY, h + orbSize * 2);
+    var bob = Math.sin(now * 0.003 + orb.bob) * 4;
+    var orbY = floorY - orbSize * 1.6 + bob;
+    var pulse = 0.75 + 0.25 * Math.sin(now * 0.005 + orb.bob);
+    ctx.save();
+    ctx.globalAlpha = 0.92;
+    ctx.shadowBlur = 14 * pulse; ctx.shadowColor = '#9933ff';
+    ctx.fillStyle = '#cc88ff';
+    ctx.beginPath(); ctx.arc(screenX, orbY, orbSize * pulse, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.beginPath(); ctx.arc(screenX - orbSize * 0.28, orbY - orbSize * 0.28, orbSize * 0.28, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0; ctx.globalAlpha = 0.95;
+    ctx.restore();
+  }
+}
+
+function renderFrame() {
+  draw();
+  if (MODE3D) {
+    drawGroundEffects3D();
+    drawConeEffects3D();
+    drawProjectiles3D();
+    drawChainEffects3D();
+    drawNovaEffects3D();
+    drawImpacts3D();
+    drawEnemies3D();
+    drawSoulOrbs3D();
+    drawCoins3D();
+    drawShopMarker3D();
+    drawCaveEntrance3D();
+    drawFPSArms();
+    if (DEBUG_SKELETON) drawSkeletonDebug();
+  } else {
+    drawGroundEffects2D();
+    drawConeEffects2D();
+    drawProjectiles2D();
+    drawChainEffects2D();
+    drawNovaEffects2D();
+    drawImpacts2D();
+    drawCoins2D();
+    drawShopMarker2D();
+    drawCaveEntrance2D();
+  }
+  drawHudOverlay();
+  drawShopOverlay();
+  drawMenuOverlay();
+  if (gameOverState) drawGameOver();
+}
+
+function loop(ts) {
+  if (!running) return;
+  var loopStart = performance.now();
+  var dt = (lastUpdate ? (ts - lastUpdate) : 16) / 1000;
+  lastUpdate = ts;
+
+  handleInput(dt);
+  if (!menuOpen) gameUpdate(dt);
+  renderFrame();
+
+  // Performance logging
+  if (DEBUG_PERF) {
+    var loopEnd = performance.now();
+    var frameTime = loopEnd - loopStart;
+    __perfFrames.push({total:frameTime, dt:dt * 1000, proj:projectiles.length, cone:coneEffects.length, enemy:enemies.length, impacts:impacts.length, gpValid:gpLast.valid, gpX:gpLast.x, gpY:gpLast.y});
+    var now = Date.now();
+    if (now - __perfLastLog > __perfLogInterval && __perfFrames.length > 0) {
+      var avgTotal = 0, avgDt = 0, maxTotal = 0;
+      for (var i = 0; i < __perfFrames.length; i++) {
+        var f = __perfFrames[i];
+        avgTotal += f.total; avgDt += f.dt;
+        if (f.total > maxTotal) maxTotal = f.total;
+      }
+      var n = __perfFrames.length;
+      avgTotal /= n; avgDt /= n;
+      var lastF = __perfFrames[__perfFrames.length - 1];
+      try {
+        console.log('[PERF]', 'frames=' + n,
+          'avgTotal=' + avgTotal.toFixed(1) + 'ms', 'maxTotal=' + maxTotal.toFixed(1) + 'ms',
+          'avgDt=' + avgDt.toFixed(1) + 'ms',
+          'proj=' + lastF.proj, 'cone=' + lastF.cone, 'enemy=' + lastF.enemy, 'impacts=' + lastF.impacts,
+          'gpValid=' + lastF.gpValid, 'gpX=' + lastF.gpX.toFixed(2), 'gpY=' + lastF.gpY.toFixed(2));
+      } catch (_) {}
+      __perfFrames = []; __perfLastLog = now;
+    }
+  }
+
+  requestAnimationFrame(loop);
+}
+
+
+// =============================================
+// SECTION 18: GAME LIFECYCLE
+// =============================================
+
+function startGame() {
+  var useHardware = !USE_KEYBOARD && !USE_MOUSE && i2cEnabled && imuCompiled && imuEnabled && gamepadEnabled;
+  gameOverState = false;
+  running = true;
+  resetLevel(1);
+  hasBaseline = true;
+  calibrating = false;
+  lastUpdate = 0;
+  CONTROL_MODE = MODE_STICK_AIM;
+  lastSelectDown = false;
+  console.log('[CTRL] start CONTROL_MODE=', CONTROL_MODE, 'useHardware=', useHardware);
+  draw();
+  if (USE_MOUSE) {
+    canvas.requestPointerLock();
+  }
+  if (useHardware) {
+    startCalibration();
+    hasBaseline = false; calStableMs = 0; calibrating = true;
+    Promise.all([controlSensor('imu', 'start'), controlSensor('gamepad', 'start')]).then(function() {
+      polling = setInterval(pollIMU, 60);
+      requestAnimationFrame(loop);
+    });
+  } else {
+    requestAnimationFrame(loop);
+  }
+  var chk = document.getElementById('chkCamFollow');
+  if (chk && chk.checked) CAM_FOLLOW = true;
+  if (USE_GAMEPAD) startGamepadPolling();
+  updateHudInput();
+}
+
+function stopGame() {
+  running = false;
+  if (polling) { try { clearInterval(polling); } catch (_) {} polling = null; }
+  stopGamepadPolling();
+  controlSensor('imu', 'stop');
+}
+
+function fwDebugOn() {
+  FW_DEBUG = true;
+  var cmds = ['debugsensorsgeneral 1', 'debugimudata 1'];
+  Promise.all(cmds.map(function(c) {
+    return fetch('/api/cli', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(c)})
+      .then(function(r) { return r.text(); }).catch(function(_) { return ''; });
+  })).then(function() { startLogPoller(); });
+}
+
+function fwDebugOff() {
+  FW_DEBUG = false;
+  var cmds = ['debugsensorsgeneral 0', 'debugimudata 0'];
+  Promise.all(cmds.map(function(c) {
+    return fetch('/api/cli', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(c)})
+      .then(function(r) { return r.text(); }).catch(function(_) { return ''; });
+  })).then(function() { stopLogPoller(); });
+}
+
+function startLogPoller() {
+  if (__gamesLogPoll) return;
+  __gamesLogLastLen = 0;
+  __gamesLogPoll = setInterval(function() {
+    if (!FW_DEBUG) return;
+    fetch('/api/cli/logs', {cache:'no-store'}).then(function(r) { return r.text(); }).then(function(t) {
+      if (typeof t !== 'string') return;
+      var s = t;
+      if (s.length > __gamesLogLastLen) {
+        var delta = s.substring(__gamesLogLastLen);
+        __gamesLogLastLen = s.length;
+        var lines = delta.split(/\\n/);
+        for (var i = 0; i < lines.length; i++) {
+          var ln = lines[i];
+          if (!ln) continue;
+          if (ln.indexOf('[DEBUG_SENSORS') >= 0 || /IMU|BNO|ori|gyro|accel/i.test(ln)) {
+            try { console.log('[FW]', ln); } catch (_) {}
+          }
+        }
+      }
+    }).catch(function(_) {});
+  }, 800);
+}
+
+function stopLogPoller() {
+  if (__gamesLogPoll) { try { clearInterval(__gamesLogPoll); } catch (_) {} __gamesLogPoll = null; }
+}
+
+
+// =============================================
+// SECTION 19: EVENT LISTENERS & INIT
+// =============================================
+
 document.getElementById('btnStart').addEventListener('click', startGame);
 document.getElementById('btnStop').addEventListener('click', stopGame);
-document.getElementById('chkImuDebug').addEventListener('change', function(){ DEBUG_IMU=this.checked; });
+document.getElementById('chkImuDebug').addEventListener('change', function() { DEBUG_IMU = this.checked; });
 document.getElementById('btnFwDbgOn').addEventListener('click', fwDebugOn);
 document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
-(function(){ var sel=document.getElementById('terrainSelect'); if(sel){ sel.value=terrain; sel.addEventListener('change', function(){ terrain=this.value; applyPreset(); }); } })();
-document.getElementById('btnView2D').addEventListener('click', function(){ MODE3D=false; });
-document.getElementById('btnView3D').addEventListener('click', function(){ MODE3D=true; });
-document.getElementById('btnToggleTex').addEventListener('click', function(){ USE_TEXTURES=!USE_TEXTURES; this.textContent = USE_TEXTURES ? 'Disable Textures' : 'Enable Textures'; });
-document.getElementById('chk3dDebug').addEventListener('change', function(){ DEBUG_3D=this.checked; });
-document.getElementById('chkTexDebug').addEventListener('change', function(){ DEBUG_TEXTURE=this.checked; });
-document.getElementById('chkFloorDebug').addEventListener('change', function(){ DEBUG_FLOOR=this.checked; });
-document.getElementById('chkDecorDebug').addEventListener('change', function(){ DEBUG_DECORATIONS=this.checked; });
-document.getElementById('chkCamFollow').addEventListener('change', function(){ CAM_FOLLOW=this.checked; });
-(function(){ var cg=document.getElementById('chkGamepad'); if(cg){ cg.addEventListener('change', function(){ USE_GAMEPAD=this.checked; if(running){ if(USE_GAMEPAD){ startGamepadPolling(); } else { stopGamepadPolling(); } } updateHudInput(); }); } })();
-var chkGamepad=document.getElementById('chkGamepad'); if(chkGamepad){ chkGamepad.checked=true; USE_GAMEPAD=true; }
-var chkTextures=document.getElementById('btnToggleTex'); if(chkTextures){ USE_TEXTURES=true; chkTextures.textContent='Disable Textures'; }
-var chk3dDebug=document.getElementById('chk3dDebug'); if(chk3dDebug){ chk3dDebug.checked=false; DEBUG_3D=false; }
-var chkTexDebug=document.getElementById('chkTexDebug'); if(chkTexDebug){ chkTexDebug.checked=true; DEBUG_TEXTURE=true; }
-var chkFloorDebug=document.getElementById('chkFloorDebug'); if(chkFloorDebug){ chkFloorDebug.checked=false; DEBUG_FLOOR=false; }
-var chkDecorDebug=document.getElementById('chkDecorDebug'); if(chkDecorDebug){ chkDecorDebug.checked=true; DEBUG_DECORATIONS=true; }
-var chkCamFollow=document.getElementById('chkCamFollow'); if(chkCamFollow){ chkCamFollow.checked=true; CAM_FOLLOW=true; }
+
+(function() {
+  var sel = document.getElementById('terrainSelect');
+  if (sel) {
+    sel.value = terrain;
+    sel.addEventListener('change', function() { terrain = this.value; applyPreset(); });
+  }
+})();
+
+document.getElementById('btnView2D').addEventListener('click', function() { MODE3D = false; });
+document.getElementById('btnView3D').addEventListener('click', function() { MODE3D = true; });
+document.getElementById('btnToggleTex').addEventListener('click', function() {
+  USE_TEXTURES = !USE_TEXTURES;
+  this.textContent = USE_TEXTURES ? 'Disable Textures' : 'Enable Textures';
+});
+document.getElementById('chk3dDebug').addEventListener('change', function() { DEBUG_3D = this.checked; });
+document.getElementById('chkTexDebug').addEventListener('change', function() { DEBUG_TEXTURE = this.checked; });
+document.getElementById('chkFloorDebug').addEventListener('change', function() { DEBUG_FLOOR = this.checked; });
+document.getElementById('chkDecorDebug').addEventListener('change', function() { DEBUG_DECORATIONS = this.checked; });
+document.getElementById('chkSkelDebug').addEventListener('change', function() { DEBUG_SKELETON = this.checked; });
+document.getElementById('chkCamFollow').addEventListener('change', function() { CAM_FOLLOW = this.checked; });
+
+(function() {
+  // Gamepad checkbox — mutually exclusive with keyboard/mouse
+  var cg = document.getElementById('chkGamepad');
+  if (cg) {
+    cg.addEventListener('change', function() {
+      USE_GAMEPAD = this.checked;
+      if (USE_GAMEPAD) {
+        USE_KEYBOARD = false; USE_MOUSE = false;
+        var ck = document.getElementById('chkKeyboard'); if (ck) ck.checked = false;
+        if (document.pointerLockElement === canvas) document.exitPointerLock();
+      }
+      if (running) {
+        if (USE_GAMEPAD) startGamepadPolling(); else stopGamepadPolling();
+      }
+      updateHudInput();
+    });
+  }
+
+  // Keyboard+Mouse checkbox — enables both WASD movement and mouse look; mutually exclusive with gamepad
+  var ckb = document.getElementById('chkKeyboard');
+  if (ckb) {
+    ckb.addEventListener('change', function() {
+      USE_KEYBOARD = this.checked;
+      USE_MOUSE = this.checked;
+      if (this.checked) {
+        USE_GAMEPAD = false;
+        var cg2 = document.getElementById('chkGamepad'); if (cg2) cg2.checked = false;
+        stopGamepadPolling();
+        kbState = {up:false, down:false, left:false, right:false};
+        mouseAccum = {x:0, y:0}; mouseDelta = {x:0, y:0};
+        if (running) canvas.requestPointerLock();
+      } else {
+        kbState = {up:false, down:false, left:false, right:false};
+        if (document.pointerLockElement === canvas) document.exitPointerLock();
+      }
+      updateHudInput();
+    });
+  }
+
+  // Keyboard events — only active when USE_KEYBOARD
+  // F key — fullscreen toggle, always active regardless of keyboard/mouse mode
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'f' || e.key === 'F') { toggleFullscreen(); e.preventDefault(); }
+  });
+
+  document.addEventListener('keydown', function(e) {
+    if (!USE_KEYBOARD && !USE_MOUSE) return;
+    var k = e.key;
+    // Movement blocked while shop is open; also clear any held keys so the
+    // player doesn't slide after closing.
+    if (!shopOpen) {
+      if (k === 'ArrowUp'    || k === 'w' || k === 'W') { kbState.up    = true; e.preventDefault(); return; }
+      if (k === 'ArrowDown'  || k === 's' || k === 'S') { kbState.down  = true; e.preventDefault(); return; }
+      if (k === 'ArrowLeft'  || k === 'a' || k === 'A') { kbState.left  = true; e.preventDefault(); return; }
+      if (k === 'ArrowRight' || k === 'd' || k === 'D') { kbState.right = true; e.preventDefault(); return; }
+    }
+    // Tab cycles shop items (forward) / Shift+Tab cycles backward — only when shop is open
+    if (k === 'Tab' && shopOpen) {
+      var _vk = getVisibleShopItems();
+      shopSelIdx = e.shiftKey
+        ? (shopSelIdx - 1 + _vk.length) % _vk.length
+        : (shopSelIdx + 1) % _vk.length;
+      e.preventDefault();
+    }
+    else if (k === 'e' || k === 'E') {
+      if (shopOpen)        { var _ve = getVisibleShopItems(); applyShopItem(_ve[shopSelIdx]); }
+      else if (shopNearby) { shopOpen = true; shopSelIdx = 0; kbState = {up:false,down:false,left:false,right:false}; }
+      else                 { castCurrentSpell(); }
+      e.preventDefault();
+    }
+    else if (k === 'Escape') { if (shopOpen) { shopOpen = false; shopSelIdx = 0; } e.preventDefault(); }
+    else if (k === ' ') { if (!shopOpen) castCurrentSpell(); e.preventDefault(); }
+    // Number keys: select shop item when open, or switch spell when closed (among unlocked)
+    else if (k >= '1' && k <= '9') {
+      var ni = parseInt(k) - 1;
+      if (shopOpen) {
+        var _vn = getVisibleShopItems();
+        if (ni < _vn.length) shopSelIdx = ni;
+      } else {
+        var _un = getUnlockedSpells();
+        if (ni < _un.length) currentSpellIdx = ni;
+      }
+      e.preventDefault();
+    }
+  });
+  document.addEventListener('keyup', function(e) {
+    if (!USE_KEYBOARD && !USE_MOUSE) return;
+    var k = e.key;
+    if (k === 'ArrowUp' || k === 'w' || k === 'W') kbState.up = false;
+    else if (k === 'ArrowDown' || k === 's' || k === 'S') kbState.down = false;
+    else if (k === 'ArrowLeft' || k === 'a' || k === 'A') kbState.left = false;
+    else if (k === 'ArrowRight' || k === 'd' || k === 'D') kbState.right = false;
+  });
+
+  // Mouse movement — accumulate delta when pointer locked to canvas
+  document.addEventListener('mousemove', function(e) {
+    if (!USE_MOUSE || document.pointerLockElement !== canvas) return;
+    mouseDelta.x += e.movementX;
+    mouseDelta.y += e.movementY;
+  });
+
+  // Mouse click — left button casts current spell while pointer is locked
+  document.addEventListener('mousedown', function(e) {
+    if (!USE_MOUSE || document.pointerLockElement !== canvas) return;
+    if (e.button === 0) { castCurrentSpell(); e.preventDefault(); }
+  });
+
+  // Scroll wheel — cycle spells (down = next, up = prev)
+  canvas.addEventListener('wheel', function(e) {
+    if (!USE_MOUSE || document.pointerLockElement !== canvas) return;
+    e.preventDefault();
+    cycleSpell(e.deltaY > 0 ? 1 : -1);
+  }, { passive: false });
+
+  // Pointer lock change — ESC releases lock; uncheck keyboard+mouse box and clear mode
+  document.addEventListener('pointerlockchange', function() {
+    if (document.pointerLockElement !== canvas && USE_MOUSE) {
+      USE_MOUSE = false; USE_KEYBOARD = false;
+      var ck = document.getElementById('chkKeyboard'); if (ck) ck.checked = false;
+      mouseAccum = {x:0, y:0}; mouseDelta = {x:0, y:0};
+      kbState = {up:false, down:false, left:false, right:false};
+      updateHudInput();
+    }
+  });
+})();
+
+// Default state
+var chkGamepad = document.getElementById('chkGamepad');
+if (chkGamepad) { chkGamepad.checked = true; USE_GAMEPAD = true; }
+var chkTextures = document.getElementById('btnToggleTex');
+if (chkTextures) { USE_TEXTURES = true; chkTextures.textContent = 'Disable Textures'; }
+var chk3dDebug = document.getElementById('chk3dDebug');
+if (chk3dDebug) { chk3dDebug.checked = false; DEBUG_3D = false; }
+var chkTexDebug = document.getElementById('chkTexDebug');
+if (chkTexDebug) { chkTexDebug.checked = true; DEBUG_TEXTURE = true; }
+var chkFloorDebug = document.getElementById('chkFloorDebug');
+if (chkFloorDebug) { chkFloorDebug.checked = false; DEBUG_FLOOR = false; }
+var chkDecorDebug = document.getElementById('chkDecorDebug');
+if (chkDecorDebug) { chkDecorDebug.checked = true; DEBUG_DECORATIONS = true; }
+var chkSkelDebug = document.getElementById('chkSkelDebug');
+if (chkSkelDebug) { chkSkelDebug.checked = false; DEBUG_SKELETON = false; }
+var chkCamFollow = document.getElementById('chkCamFollow');
+if (chkCamFollow) { chkCamFollow.checked = true; CAM_FOLLOW = true; }
+buildSkeletonSprites();
 checkSensorAvailability();
+
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);
 
@@ -1700,4 +6726,4 @@ inline void registerGamesHandlers(httpd_handle_t server) { (void)server; }
 
 #endif
 
-#endif  // WEB_GAMES_H
+#endif // WEBPAGE_GAMES_H

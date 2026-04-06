@@ -424,11 +424,10 @@ static const char* getCategoryName(FeatureCategory cat) {
 const char* cmd_features(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String args = argsInput;
-  args.trim();
-  
+  CommandArgs a(argsInput);
+
   // No args - show all features with heap estimates
-  if (args.length() == 0) {
+  if (a.count() == 0) {
     PSRAM_STATIC_BUF(buf, 2048);
     uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
     uint32_t enabledCost = getEnabledFeaturesHeapEstimate();
@@ -476,10 +475,9 @@ const char* cmd_features(const String& argsInput) {
   }
   
   // Parse args: <id> [on|off]
-  int secondSpace = args.indexOf(' ');
-  if (secondSpace < 0) {
+  if (!a.has(1)) {
     // Single arg - show feature details
-    const FeatureEntry* f = getFeatureById(args.c_str());
+    const FeatureEntry* f = getFeatureById(a.arg(0).c_str());
     if (!f) {
       return "Unknown feature. Run 'features' to see list.";
     }
@@ -508,8 +506,8 @@ const char* cmd_features(const String& argsInput) {
   }
   
   // Two args - toggle feature
-  String featureId = args.substring(0, secondSpace);
-  String value = args.substring(secondSpace + 1);
+  String featureId = a.arg(0);
+  String value = a.arg(1);
   featureId.toLowerCase();
   value.toLowerCase();
   

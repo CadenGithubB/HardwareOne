@@ -432,21 +432,17 @@ const char* cmd_fmradio(const String& argsInput) {
   DEBUG_FMRADIOF("[FM_RADIO] Command received: '%s'", argsInput.c_str());
   
   // Parse subcommand
-  String sub = argsInput;
-  sub.trim();
-  
-  if (sub.length() == 0) {
+  CommandArgs a(argsInput);
+
+  if (a.count() == 0) {
     // No subcommand - show status
     DEBUG_FMRADIOF("[FM_RADIO] No subcommand, showing status");
     return cmd_fmradio_status(argsInput);
   }
-  
-  // Extract subcommand and sub-args
-  int spaceIdx = sub.indexOf(' ');
-  String subCmd = (spaceIdx < 0) ? sub : sub.substring(0, spaceIdx);
-  String subArgs = (spaceIdx < 0) ? "" : sub.substring(spaceIdx + 1);
+
+  String subCmd = a.arg(0);
   subCmd.toLowerCase();
-  subArgs.trim();
+  String subArgs = a.remaining(0);
   
   DEBUG_FMRADIOF("[FM_RADIO] Parsed subcommand: '%s'", subCmd.c_str());
   

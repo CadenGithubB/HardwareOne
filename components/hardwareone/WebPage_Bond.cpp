@@ -1,4 +1,7 @@
 #include "System_BuildConfig.h"
+#if ENABLE_HTTP_SERVER
+#include <esp_http_server.h>  // Required for httpd_handle_t in stub when ENABLE_WEB_BOND=0
+#endif
 
 #if ENABLE_WEB_BOND
 

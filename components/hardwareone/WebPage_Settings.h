@@ -48,6 +48,41 @@ window.postSettingsCli = function(cmd) {
   }).then(function(r) { return r.text(); });
 };
 
+// LED live control — fire-and-forget commands (no settings save flow)
+window.ledLiveSetBrightness = function() {
+  var val = parseInt(document.getElementById('led-live-brightness').value);
+  if (isNaN(val)) return;
+  if (val < 0) val = 0;
+  if (val > 100) val = 100;
+  postSettingsCli('ledbrightness ' + val)
+    .catch(function(e) { alert('LED brightness failed: ' + e.message); });
+};
+window.ledLiveApplyColor = function() {
+  var color = document.getElementById('led-live-color').value;
+  postSettingsCli('ledcolor ' + color)
+    .catch(function(e) { alert('LED color failed: ' + e.message); });
+};
+window.ledLiveEffectChanged = function() {
+  var needsTwo = document.getElementById('led-live-effect').value === 'fade';
+  var w = document.getElementById('led-live-color2-wrap');
+  if (w) w.style.display = needsTwo ? '' : 'none';
+};
+window.ledLiveRunEffect = function() {
+  var effect   = document.getElementById('led-live-effect').value;
+  var color1   = document.getElementById('led-live-eff-color1').value;
+  var color2   = document.getElementById('led-live-eff-color2').value;
+  var duration = parseInt(document.getElementById('led-live-duration').value) || 3000;
+  var cmd = effect === 'fade'
+    ? ('ledeffect fade ' + color1 + ' ' + color2 + ' ' + duration)
+    : ('ledeffect ' + effect + ' ' + color1 + ' ' + duration);
+  postSettingsCli(cmd)
+    .catch(function(e) { alert('LED effect failed: ' + e.message); });
+};
+window.ledLiveClear = function() {
+  postSettingsCli('ledclear')
+    .catch(function(e) { alert('LED clear failed: ' + e.message); });
+};
+
 window.sendSequential = function(cmds, onDone, onFail) {
   var all = ['beginwrite'].concat(cmds).concat(['savesettings']);
   fetch('/api/cli/batch', {
@@ -120,13 +155,13 @@ window.sendSequential = function(cmds, onDone, onFail) {
   <div id='wifi-connect-panel' style='display:none;margin-top:0.75rem'>
     <div style='margin-bottom:0.5rem'>Selected SSID: <strong id='sel-ssid'>-</strong></div>
     <input type='password' id='sel-pass' placeholder='WiFi password (leave blank if open)' class='form-input input-medium'>
-    <button class='btn' onclick="(function(){ var ssid=(document.getElementById('sel-ssid')||{}).textContent||''; var pass=(document.getElementById('sel-pass')||{}).value||''; if(!ssid){ alert('No SSID selected'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 0'; fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent(cmd1)}).then(function(r){return r.text();}).then(function(t1){ if(!confirm('Credentials saved for \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.')){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent('wificonnect')}); }).then(function(r){ if(!r) return ''; return r.text(); }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
+    <button class='btn' onclick="(function(){ var ssid=(document.getElementById('sel-ssid')||{}).textContent||''; var pass=(document.getElementById('sel-pass')||{}).value||''; if(!ssid){ alert('No SSID selected'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 0'; fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent(cmd1)}).then(function(r){return r.text();}).then(function(t1){ return hwConfirm('Credentials saved for \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent('wificonnect')}); }); }).then(function(r){ if(!r) return ''; return r.text(); }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
   </div>
   <div id='wifi-manual-panel' style='display:none;margin-top:0.75rem'>
     <div style='margin-bottom:0.5rem'>Enter hidden network credentials</div>
     <input type='text' id='manual-ssid' placeholder='Hidden SSID' class='form-input input-medium' style='margin-right:6px'>
     <input type='password' id='manual-pass' placeholder='Password (leave blank if open)' class='form-input input-medium' style='margin-right:6px'>
-    <button class='btn' onclick="(function(){ var ssid=(document.getElementById('manual-ssid')||{}).value||''; var pass=(document.getElementById('manual-pass')||{}).value||''; if(!ssid){ alert('Enter SSID'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 1'; fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent(cmd1)}).then(function(r){return r.text();}).then(function(t1){ if(!confirm('Credentials saved for hidden network \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.')){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent('wificonnect')}); }).then(function(r){ if(!r) return ''; return r.text(); }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
+    <button class='btn' onclick="(function(){ var ssid=(document.getElementById('manual-ssid')||{}).value||''; var pass=(document.getElementById('manual-pass')||{}).value||''; if(!ssid){ alert('Enter SSID'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 1'; fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent(cmd1)}).then(function(r){return r.text();}).then(function(t1){ return hwConfirm('Credentials saved for hidden network \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent('wificonnect')}); }); }).then(function(r){ if(!r) return ''; return r.text(); }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
   </div>
   </div>
 </div>
@@ -181,36 +216,9 @@ window.sendSequential = function(cmds, onDone, onFail) {
   </div>
   </div>
 </div>
-<div class='settings-panel'>
-  <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Output Channels</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure persistent settings and see current runtime state. Use 'Temp On/Off' to affect only this session.</div></div>
-    <button class='btn' id='btn-output-toggle' onclick="togglePane('output-pane','btn-output-toggle')">Expand</button>
-  </div>
-  <div id='output-pane' style='display:none;margin-top:0.75rem'>
-  <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem'>
-    <div style='display:flex;flex-direction:column;gap:0.35rem'>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor data output to serial console (saved to device memory)'>Serial (persisted): <span style='font-weight:bold;color:var(--accent)' id='serial-value'>-</span></span><button class='btn' onclick="toggleOutput('outSerial','serial')" id='serial-btn' title='Toggle persistent serial output setting'>Toggle</button></div>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session serial output status (temporary, resets on reboot)'>Serial (runtime): <span style='font-weight:bold' id='serial-runtime'>-</span></span><button class='btn' id='serial-temp-on' onclick="setOutputRuntime('serial',1)" title='Enable serial output for this session only'>Temp On</button><button class='btn' id='serial-temp-off' onclick="setOutputRuntime('serial',0)" title='Disable serial output for this session only'>Temp Off</button></div>
-    </div>
-    <div style='display:flex;flex-direction:column;gap:0.35rem'>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor data output to web interface (saved to device memory)'>Web (persisted): <span style='font-weight:bold;color:var(--accent)' id='web-value'>-</span></span><button class='btn' onclick="toggleOutput('outWeb','web')" id='web-btn' title='Toggle persistent web output setting'>Toggle</button></div>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session web output status (temporary, resets on reboot)'>Web (runtime): <span style='font-weight:bold' id='web-runtime'>-</span></span><button class='btn' id='web-temp-on' onclick="setOutputRuntime('web',1)" title='Enable web output for this session only'>Temp On</button><button class='btn' id='web-temp-off' onclick="setOutputRuntime('web',0)" title='Disable web output for this session only'>Temp Off</button></div>
-    </div>
-    <div style='display:flex;flex-direction:column;gap:0.35rem'>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable sensor data output to display (saved to device memory)'>Display (persisted): <span style='font-weight:bold;color:var(--accent)' id='display-value'>-</span></span><button class='btn' onclick="toggleOutput('outDisplay','display')" id='display-btn' title='Toggle persistent display output setting'>Toggle</button></div>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session display status (temporary, resets on reboot)'>Display (runtime): <span style='font-weight:bold' id='display-runtime'>-</span></span><button class='btn' id='display-temp-on' onclick="setOutputRuntime('display',1)" title='Enable display output for this session only'>Temp On</button><button class='btn' id='display-temp-off' onclick="setOutputRuntime('display',0)" title='Disable display output for this session only'>Temp Off</button></div>
-    </div>
+<!-- Output Channels settings now in schema-driven Sensors panel -->
 )SETPART2", HTTPD_RESP_USE_STRLEN);
-#if ENABLE_G2_GLASSES
-  httpd_resp_send_chunk(req, R"SP2G(    <div style='display:flex;flex-direction:column;gap:0.35rem'>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Enable/disable output to G2 smart glasses (saved to device memory)'>G2 Glasses (persisted): <span style='font-weight:bold;color:var(--accent)' id='g2-value'>-</span></span><button class='btn' onclick="toggleOutput('outG2','g2')" id='g2-btn' title='Toggle persistent G2 glasses output setting'>Toggle</button></div>
-      <div style='display:flex;align-items:center;gap:0.5rem'><span style='color:var(--panel-fg)' title='Current session G2 glasses status (temporary, resets on reboot)'>G2 (runtime): <span style='font-weight:bold' id='g2-runtime'>-</span></span><button class='btn' id='g2-temp-on' onclick="setOutputRuntime('g2',1)" title='Enable G2 output for this session only'>Temp On</button><button class='btn' id='g2-temp-off' onclick="setOutputRuntime('g2',0)" title='Disable G2 output for this session only'>Temp Off</button></div>
-    </div>
-)SP2G", HTTPD_RESP_USE_STRLEN);
-#endif
-  httpd_resp_send_chunk(req, R"SP2B(  </div>
-</div>
-</div>
+  httpd_resp_send_chunk(req, R"SP2B(
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
     <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Web CLI History Size</div><div style='color:var(--panel-fg);font-size:0.9rem'>Number of commands to keep in history buffer.</div></div>
@@ -227,126 +235,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 )SP2B", HTTPD_RESP_USE_STRLEN);
 
-#if ENABLE_ESPNOW
-  // Part 3: ESP-NOW section
-  httpd_resp_send_chunk(req, R"SETPART3(
-<div class='settings-panel'>
-  <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>ESP-NOW</div><div style='color:var(--panel-fg);font-size:0.9rem'>Interdevice Communication & Mesh Networking</div></div>
-    <button class='btn' id='btn-espnow-toggle' onclick="togglePane('espnow-pane','btn-espnow-toggle')">Expand</button>
-  </div>
-  <div id='espnow-pane' style='display:none;margin-top:0.75rem'>
-    <!-- Basic Settings -->
-    <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
-      <span style='color:var(--panel-fg)' title='Enable ESP-NOW protocol on boot (requires reboot to take effect)'>Enable ESP-NOW on boot: <span style='font-weight:bold;color:var(--panel-fg)' id='espnow-value'>-</span></span>
-      <button class='btn' onclick='toggleEspNow()' id='espnow-btn' title='Enable/disable ESP-NOW protocol'>Toggle</button>
-    </div>
-    <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
-      <span style='color:var(--panel-fg)'>Mesh Mode: <span style='font-weight:bold;color:var(--panel-fg)' id='espnow-mesh-value'>-</span></span>
-      <button class='btn' onclick='toggleEspNowMesh()' id='espnow-mesh-btn'>Toggle</button>
-    </div>
-    
-    <!-- Device Identity -->
-    <div style='font-weight:bold;margin:1.5rem 0 0.75rem 0;padding-bottom:0.5rem;border-bottom:1px solid var(--border);color:var(--panel-fg)'>Device Identity</div>
-    <div style='margin-bottom:1rem'>
-      <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Device Name</label>
-      <input type='text' id='espnow-devicename' placeholder='e.g., darkblue' maxlength='20' style='max-width:320px;width:100%'>
-      <small style='color:var(--panel-fg);font-size:0.8rem'>Short identifier (1-20 chars, alphanumeric)</small>
-    </div>
-    
-    <!-- Smart Home Metadata -->
-    <div style='font-weight:bold;margin:1.5rem 0 0.75rem 0;padding-bottom:0.5rem;border-bottom:1px solid var(--border);color:var(--panel-fg)'>Smart Home Metadata</div>
-    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0.75rem;margin-bottom:1rem'>
-      <div>
-        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Friendly Name</label>
-        <input type='text' id='espnow-friendlyname' placeholder='e.g., Living Room Light' maxlength='47' style='width:100%'>
-        <small style='color:var(--panel-fg);font-size:0.8rem'>Human-readable name for displays</small>
-      </div>
-      <div>
-        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Room</label>
-        <input type='text' id='espnow-room' placeholder='e.g., Living Room' maxlength='31' style='width:100%'>
-      </div>
-      <div>
-        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Zone</label>
-        <input type='text' id='espnow-zone' placeholder='e.g., Upstairs' maxlength='31' style='width:100%'>
-      </div>
-      <div>
-        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Tags</label>
-        <input type='text' id='espnow-tags' placeholder='e.g., light,dimmable' maxlength='63' style='width:100%'>
-      </div>
-    </div>
-    <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem'>
-      <input type='checkbox' id='espnow-stationary' style='width:auto;margin:0'>
-      <label for='espnow-stationary' style='color:var(--panel-fg);cursor:pointer'>Stationary Device (fixed location)</label>
-    </div>
-    
-    <!-- Mesh Configuration -->
-    <div style='font-weight:bold;margin:1.5rem 0 0.75rem 0;padding-bottom:0.5rem;border-bottom:1px solid var(--border);color:var(--panel-fg)'>Mesh Configuration</div>
-    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem'>
-      <div>
-        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Mesh Role</label>
-        <select id='espnow-meshrole' style='width:100%'>
-          <option value='0'>Worker</option>
-          <option value='1'>Master</option>
-          <option value='2'>Backup Master</option>
-        </select>
-      </div>
-      <div>
-        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Master MAC</label>
-        <input type='text' id='espnow-mastermac' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17' style='width:100%;font-family:monospace'>
-      </div>
-      <div>
-        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Backup MAC</label>
-        <input type='text' id='espnow-backupmac' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17' style='width:100%;font-family:monospace'>
-      </div>
-    </div>
-    
-    <!-- Bond Mode Configuration -->
-    <div style='font-weight:bold;margin:1.5rem 0 0.75rem 0;padding-bottom:0.5rem;border-bottom:1px solid var(--border);color:var(--panel-fg)'>Bond Mode (Two-Device Pairing)</div>
-    <div style='background:rgba(100,149,237,0.1);padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--panel-fg);font-size:0.85rem'>
-      Bond mode creates a dedicated master/worker pair for specialized applications.
-    </div>
-    <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
-      <span style='color:var(--panel-fg)'>Bond Mode Enabled: <span style='font-weight:bold;color:var(--panel-fg)' id='bond-enabled-value'>-</span></span>
-      <button class='btn' onclick='toggleBondMode()' id='bond-enabled-btn'>Toggle</button>
-    </div>
-    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem'>
-      <div>
-        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Bond Role</label>
-        <select id='bond-role' style='width:100%'>
-          <option value='0'>Worker</option>
-          <option value='1'>Master</option>
-        </select>
-      </div>
-      <div>
-        <label style='display:block;margin-bottom:0.25rem;font-size:0.9rem;color:var(--panel-fg)'>Bonded Peer MAC</label>
-        <input type='text' id='bond-peermac' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17' style='width:100%;font-family:monospace'>
-      </div>
-    </div>
-    <div style='font-weight:bold;margin:1rem 0 0.5rem 0;color:var(--panel-fg)'>Auto-Stream Sensors to Bonded Peer</div>
-    <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0.5rem;margin-bottom:1rem'>
-      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-thermal' style='width:auto;margin-right:0.5rem'>Thermal Camera</label>
-      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-tof' style='width:auto;margin-right:0.5rem'>Time-of-Flight</label>
-      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-imu' style='width:auto;margin-right:0.5rem'>IMU</label>
-      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-gps' style='width:auto;margin-right:0.5rem'>GPS</label>
-      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-gamepad' style='width:auto;margin-right:0.5rem'>Gamepad</label>
-      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-fmradio' style='width:auto;margin-right:0.5rem'>FM Radio</label>
-      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-rtc' style='width:auto;margin-right:0.5rem'>RTC Clock</label>
-      <label style='color:var(--panel-fg);cursor:pointer'><input type='checkbox' id='bond-stream-presence' style='width:auto;margin-right:0.5rem'>Presence Sensor</label>
-    </div>
-    
-    <!-- Save Button -->
-    <div style='margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--border)'>
-      <button class='btn' onclick='saveEspNowSettings()'>Save ESP-NOW Settings</button>
-      <span id='espnow-save-status' style='margin-left:1rem;color:var(--panel-fg)'></span>
-    </div>
-    
-  </div>
-</div>
-)SETPART3", HTTPD_RESP_USE_STRLEN);
-#endif // ENABLE_ESPNOW
-
-#if ENABLE_MQTT || ENABLE_HTTP_SERVER || ENABLE_BLUETOOTH
+#if ENABLE_MQTT || ENABLE_HTTP_SERVER || ENABLE_BLUETOOTH || ENABLE_ESPNOW
   // Part 3.5: Network Services section - renders from /api/settings/schema
   httpd_resp_send_chunk(req, R"SETPART3_5(
 <div class='settings-panel'>
@@ -378,9 +267,15 @@ window.sendSequential = function(cmds, onDone, onFail) {
 #if ENABLE_BLUETOOTH
   httpd_resp_send_chunk(req, "'bluetooth'", HTTPD_RESP_USE_STRLEN);
 #endif
+#if ENABLE_ESPNOW && (ENABLE_MQTT || ENABLE_HTTP_SERVER || ENABLE_BLUETOOTH)
+  httpd_resp_send_chunk(req, ",", HTTPD_RESP_USE_STRLEN);
+#endif
+#if ENABLE_ESPNOW
+  httpd_resp_send_chunk(req, "'espnow'", HTTPD_RESP_USE_STRLEN);
+#endif
   httpd_resp_send_chunk(req, R"SETPART3_5B(];
-  var networkSections = {'mqtt':'mqtt','http':'http','bluetooth':'bluetooth'};
-  var networkLabels = {mqtt:'MQTT Broker',http:'HTTP Server',bluetooth:'Bluetooth'};
+  var networkSections = {'mqtt':'mqtt','http':'http','bluetooth':'bluetooth','espnow':'espnow'};
+  var networkLabels = {mqtt:'MQTT Broker',http:'HTTP Server',bluetooth:'Bluetooth',espnow:'ESP-NOW'};
   
   function inferType(val) {
     if (typeof val === 'boolean') return 'bool';
@@ -396,18 +291,19 @@ window.sendSequential = function(cmds, onDone, onFail) {
     var id = 'net-' + e.key.replace(/\./g, '-');
     var disAttr = disabled ? ' disabled' : '';
     var grayStyle = disabled ? 'opacity:0.6;cursor:not-allowed;' : '';
+    var cmdAttr = e.cmdKey ? ' data-cmd="' + e.cmdKey + '"' : '';
     if (e.type === 'bool') {
-      return '<label style="' + grayStyle + '"><input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + disAttr + ' style="margin-right:0.5rem">' + e.label + '</label>';
+      return '<label style="' + grayStyle + '"><input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + disAttr + cmdAttr + ' style="margin-right:0.5rem">' + e.label + '</label>';
     } else if (e.type === 'string' && e.secret) {
       var placeholder = val !== undefined && val !== '' ? '(set - leave blank to keep)' : '(not set)';
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
     } else if (e.type === 'int' || e.type === 'float') {
       var step = e.type === 'float' ? '0.01' : '1';
       var minAttr = e.min !== undefined ? ' min="' + e.min + '"' : '';
       var maxAttr = e.max !== undefined ? ' max="' + e.max + '"' : '';
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="number" id="' + id + '" value="' + (val !== undefined ? val : e.default) + '"' + minAttr + maxAttr + ' step="' + step + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="number" id="' + id + '" value="' + (val !== undefined ? val : e.default) + '"' + minAttr + maxAttr + ' step="' + step + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px"></label>';
     } else {
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="text" id="' + id + '" value="' + (val || '') + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="text" id="' + id + '" value="' + (val || '') + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
     }
   }
   
@@ -504,9 +400,11 @@ window.sendSequential = function(cmds, onDone, onFail) {
     
     var cmds = [];
     for (var k in updates) {
-      cmds.push(k + ' ' + updates[k]);
+      var el = container.querySelector('#net-' + k.replace(/\./g, '-'));
+      var cmd = el && el.getAttribute('data-cmd');
+      cmds.push((cmd || k) + ' ' + updates[k]);
     }
-    
+
     if (cmds.length === 0) { alert('No changes to save.'); return; }
 
     sendSequential(cmds,
@@ -534,11 +432,14 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 <script>
 (function(){
-  var sensorModules = ['camera','microphone','thermal','tof','imu','gps','fmradio','servo','apds','rtc','presence','sensorlog','espsr'];
+  var sensorModules = ['camera','microphone','thermal','tof','imu','gps','fmradio','servo','apds','rtc','presence','espsr','oled','gamepad','led'];
   var i2cModules = ['i2c'];
+  var outputModules = ['output'];
+  var llmModules = ['llm'];
+  var loggingModules = ['sensorlog','systemlog'];
   var mlSubsections = {camera:'edgeimpulse',microphone:'espsr'};
-  var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','espsr':'espsr','thermal_mlx90640':'thermal','tof_vl53l4cx':'tof','imu_bno055':'imu','gps':'gps','fmradio':'fmradio','apds':'apds','rtc':'rtc','presence':'presence','sensorlog':'sensorlog','power':'power','debug':'debug','output':'output'};
-  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels'};
+  var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','espsr':'espsr','thermal_mlx90640':'thermal','tof_vl53l4cx':'tof','imu_bno055':'imu','gps':'gps','fmradio':'fmradio','apds':'apds','rtc':'rtc','presence':'presence','sensorlog':'sensorlog','power':'power','debug':'debug','output':'output','oled_ssd1306':'oled','gamepad':'gamepad','led':'led','llm':'llm'};
+  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',systemlog:'System Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels',oled:'OLED Display (SSD1306)',led:'LED Startup & Brightness',llm:'On-Device LLM'};
   
   function inferType(val) {
     if (typeof val === 'boolean') return 'bool';
@@ -554,17 +455,18 @@ window.sendSequential = function(cmds, onDone, onFail) {
     var id = 'dyn-' + e.key.replace(/\./g, '-');
     var disAttr = disabled ? ' disabled' : '';
     var grayStyle = disabled ? 'opacity:0.6;cursor:not-allowed;' : '';
+    var cmdAttr = e.cmdKey ? ' data-cmd="' + e.cmdKey + '"' : '';
     if (e.type === 'bool') {
-      return '<label style="' + grayStyle + '"><input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + disAttr + ' style="margin-right:0.5rem">' + e.label + '</label>';
+      return '<label style="' + grayStyle + '"><input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + disAttr + cmdAttr + ' style="margin-right:0.5rem">' + e.label + '</label>';
     } else if (e.type === 'string' && e.secret) {
       // Secret field: use password input, show placeholder if set, blank = unchanged
       var placeholder = val !== undefined && val !== '' ? '(set - leave blank to keep)' : '(not set)';
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
     } else if (e.type === 'string' && e.options) {
       var opts = e.options.split(',').map(function(o) {
         return '<option value="' + o + '"' + (val === o ? ' selected' : '') + '>' + o.charAt(0).toUpperCase() + o.slice(1) + '</option>';
       }).join('');
-      return '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:160px">' + opts + '</select></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:160px">' + opts + '</select></label>';
     } else if ((e.type === 'int' || e.type === 'float') && e.options) {
       // Int/float with named options - render as dropdown
       var opts = e.options.split(',').map(function(o) {
@@ -573,14 +475,14 @@ window.sendSequential = function(cmds, onDone, onFail) {
         var optLabel = parts.length > 1 ? parts[1] : optVal;
         return '<option value="' + optVal + '"' + (parseInt(val) === parseInt(optVal) ? ' selected' : '') + '>' + optLabel + '</option>';
       }).join('');
-      return '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px">' + opts + '</select></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px">' + opts + '</select></label>';
     } else if (e.type === 'int' || e.type === 'float') {
       var step = e.type === 'float' ? '0.01' : '1';
       var minAttr = e.min !== undefined ? ' min="' + e.min + '"' : '';
       var maxAttr = e.max !== undefined ? ' max="' + e.max + '"' : '';
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="number" id="' + id + '" value="' + (val !== undefined ? val : e.default) + '"' + minAttr + maxAttr + ' step="' + step + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="number" id="' + id + '" value="' + (val !== undefined ? val : e.default) + '"' + minAttr + maxAttr + ' step="' + step + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px"></label>';
     } else {
-      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="text" id="' + id + '" value="' + (val || '') + '"' + disAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
+      return '<label style="' + grayStyle + '">' + e.label + '<br><input type="text" id="' + id + '" value="' + (val || '') + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
     }
   }
   
@@ -599,6 +501,66 @@ window.sendSequential = function(cmds, onDone, onFail) {
     return result;
   }
   
+  function renderLedLiveControls() {
+    var colors = [
+      'red','green','blue','yellow','cyan','magenta','white','black',
+      'orange','darkorange','orangered','coral','tomato','peach',
+      'darkred','crimson','firebrick','indianred','lightcoral','salmon',
+      'pink','lightpink','hotpink','deeppink','palevioletred','mediumvioletred',
+      'purple','darkviolet','blueviolet','mediumpurple','plum','orchid',
+      'darkblue','navy','mediumblue','royalblue','steelblue','lightblue',
+      'skyblue','lightskyblue','deepskyblue','dodgerblue','cornflowerblue','cadetblue',
+      'darkgreen','forestgreen','seagreen','mediumseagreen','springgreen','limegreen',
+      'lime','lightgreen','palegreen','aquamarine','mediumaquamarine',
+      'gold','lightyellow','lemonchiffon','lightgoldenrodyellow','khaki','darkkhaki',
+      'brown','saddlebrown','sienna','chocolate','peru','tan','burlywood','wheat',
+      'gray','darkgray','lightgray','silver','dimgray','gainsboro'
+    ];
+    var colorOpts = colors.map(function(c) { return '<option value="' + c + '">' + c + '</option>'; }).join('');
+    var color2Opts = colors.map(function(c) { return '<option value="' + c + '"' + (c === 'blue' ? ' selected' : '') + '>' + c + '</option>'; }).join('');
+    var sel = 'padding:0.4rem 0.5rem;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg);font-size:0.85rem';
+    var num = sel + ';width:100px';
+    var lbl = 'font-size:0.78rem;color:var(--panel-fg);opacity:0.75;display:block;margin-bottom:0.3rem';
+    var row = 'display:flex;align-items:flex-end;gap:0.75rem;flex-wrap:wrap;margin-bottom:0.75rem';
+
+    var h = '<div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)">';
+    h += '<div style="font-weight:bold;margin-bottom:0.75rem;color:var(--panel-fg)">Live Control</div>';
+
+    // Brightness row
+    h += '<div style="' + row + '">';
+    h += '<div><label style="' + lbl + '">Brightness (0–100)</label>';
+    h += '<input type="number" id="led-live-brightness" value="100" min="0" max="100" step="1" style="' + num + '"></div>';
+    h += '<button class="btn" onclick="ledLiveSetBrightness()">Set Brightness</button>';
+    h += '</div>';
+
+    // Solid color + clear row
+    h += '<div style="' + row + '">';
+    h += '<div><label style="' + lbl + '">Solid Color</label>';
+    h += '<select id="led-live-color" style="' + sel + '">' + colorOpts + '</select></div>';
+    h += '<button class="btn" onclick="ledLiveApplyColor()">Apply Color</button>';
+    h += '<button class="btn" onclick="ledLiveClear()">Clear LED</button>';
+    h += '</div>';
+
+    // Effect row
+    h += '<div style="' + row + '">';
+    h += '<div><label style="' + lbl + '">Effect</label>';
+    h += '<select id="led-live-effect" style="' + sel + '" onchange="ledLiveEffectChanged()">';
+    h += '<option value="blink">Blink</option><option value="pulse">Pulse</option>';
+    h += '<option value="strobe">Strobe</option><option value="fade">Fade</option>';
+    h += '</select></div>';
+    h += '<div><label style="' + lbl + '">Color</label>';
+    h += '<select id="led-live-eff-color1" style="' + sel + '">' + colorOpts + '</select></div>';
+    h += '<div id="led-live-color2-wrap" style="display:none"><label style="' + lbl + '">Color 2</label>';
+    h += '<select id="led-live-eff-color2" style="' + sel + '">' + color2Opts + '</select></div>';
+    h += '<div><label style="' + lbl + '">Duration (ms)</label>';
+    h += '<input type="number" id="led-live-duration" value="3000" min="100" max="60000" step="500" style="' + num + '"></div>';
+    h += '<button class="btn" onclick="ledLiveRunEffect()">Run Effect</button>';
+    h += '</div>';
+
+    h += '</div>';
+    return h;
+  }
+
   function renderModule(mod, settings, isOrphan, allModules, allSettings) {
     var section = settings[mod.section] || settings[mod.name] || {};
     var entries = mod.entries || [];
@@ -687,7 +649,10 @@ window.sendSequential = function(cmds, onDone, onFail) {
     if (!isOrphan) {
       html += '<button class="btn" onclick="saveDynamicSettings(\'' + mod.name + '\',\'' + mod.section + '\')">Save ' + (moduleLabels[mod.name] || mod.name) + ' Settings</button>';
     }
-    
+    if (mod.name === 'led' && !isOrphan) {
+      html += renderLedLiveControls();
+    }
+
     // Render ML subsection if this module has one
     var mlModName = mlSubsections[mod.name];
     if (mlModName && allModules) {
@@ -728,12 +693,13 @@ window.sendSequential = function(cmds, onDone, onFail) {
     var settingsResp = results[1];
     var settings = settingsResp.settings || {};
     var container = document.getElementById('sensors-dynamic-container');
+
     if (!container) return;
-    
+
     var schemaModuleNames = (schema.modules || []).map(function(m) { return m.name; });
     var schemaSections = (schema.modules || []).map(function(m) { return m.section; });
     
-    var allKnownModules = sensorModules.concat(i2cModules);
+    var allKnownModules = sensorModules.concat(i2cModules).concat(outputModules).concat(llmModules).concat(loggingModules);
     var relevantModules = (schema.modules || []).filter(function(m) {
       return allKnownModules.indexOf(m.name) !== -1;
     });
@@ -758,7 +724,10 @@ window.sendSequential = function(cmds, onDone, onFail) {
     
     var html = '';
     var i2cHtml = '';
-    
+    var outputHtml = '';
+    var llmHtml = '';
+    var loggingHtml = '';
+
     // Render active (compiled) modules first
     var allMods = schema.modules || [];
     relevantModules.forEach(function(mod) {
@@ -772,11 +741,28 @@ window.sendSequential = function(cmds, onDone, onFail) {
           i2cHtml += renderInput(e, v, false);
         });
         i2cHtml += '</div><button class="btn" onclick="saveDynamicSettings(\'' + mod.name + '\',\'' + mod.section + '\')">Save I2C Bus Configuration Settings</button></div>';
+      } else if (outputModules.indexOf(mod.name) !== -1) {
+        // Render output module flat (no inner card/badge/expand) — outer panel provides the expand
+        // Auth toggles (serialRequireAuth, displayRequireAuth) are shown in Admin Controls > Authentication
+        var authCmds = ['serialrequireauth', 'displayrequireauth'];
+        var sec = settings[mod.section] || settings[mod.name] || {};
+        var ents = (mod.entries || []).filter(function(e) { return authCmds.indexOf(e.cmdKey) === -1; });
+        outputHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
+        ents.forEach(function(e) {
+          var parts = e.key.split('.'), v = sec;
+          for (var pi = 0; pi < parts.length && v; pi++) v = v[parts[pi]];
+          outputHtml += renderInput(e, v, false);
+        });
+        outputHtml += '</div><button class="btn" onclick="saveDynamicSettings(\'' + mod.name + '\',\'' + mod.section + '\')">Save Output Channels Settings</button>';
+      } else if (llmModules.indexOf(mod.name) !== -1) {
+        llmHtml += renderModule(mod, settings, false, allMods, settings);
+      } else if (loggingModules.indexOf(mod.name) !== -1) {
+        loggingHtml += renderModule(mod, settings, false, allMods, settings);
       } else {
         html += renderModule(mod, settings, false, allMods, settings);
       }
     });
-    
+
     // Render orphan modules (not compiled but settings exist)
     orphanModules.forEach(function(mod) {
       if (i2cModules.indexOf(mod.name) !== -1) {
@@ -784,15 +770,48 @@ window.sendSequential = function(cmds, onDone, onFail) {
         i2cHtml += '<div id="i2c-pane"><div style="background:var(--crumb-bg);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);font-size:0.85rem">Module not included in current build. Settings are preserved but read-only.</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
         ents.forEach(function(e) { i2cHtml += renderInput(e, e.value, true); });
         i2cHtml += '</div></div>';
+      } else if (outputModules.indexOf(mod.name) !== -1) {
+        // Orphan: flat render with disabled inputs (auth entries excluded)
+        var authCmds = ['serialrequireauth', 'displayrequireauth'];
+        var ents = (mod.entries || []).filter(function(e) { return authCmds.indexOf(e.cmdKey) === -1; });
+        outputHtml += '<div style="background:var(--crumb-bg);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);font-size:0.85rem">Module not included in current build. Settings are preserved but read-only.</div>';
+        outputHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem">';
+        ents.forEach(function(e) { outputHtml += renderInput(e, e.value, true); });
+        outputHtml += '</div>';
+      } else if (llmModules.indexOf(mod.name) !== -1) {
+        llmHtml += renderModule(mod, settings, true, allMods, settings);
+      } else if (loggingModules.indexOf(mod.name) !== -1) {
+        loggingHtml += renderModule(mod, settings, true, allMods, settings);
       } else {
         html += renderModule(mod, settings, true, allMods, settings);
       }
     });
-    
+
+    // Populate logging container
+    var loggingCont = document.getElementById('logging-dynamic-container');
+    if (loggingCont) {
+      loggingCont.innerHTML = loggingHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">Logging settings not available</div>';
+      if (loggingHtml) window._snapshotContainer(loggingCont);
+    }
+
     // Populate i2c container
     var i2cCont = document.getElementById('i2c-bus-dynamic-container');
     if (i2cCont) {
       i2cCont.innerHTML = i2cHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">I2C settings not available</div>';
+    }
+
+    // Populate output container
+    var outputCont = document.getElementById('output-dynamic-container');
+    if (outputCont) {
+      outputCont.innerHTML = outputHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">Output channel settings not available</div>';
+      if (outputHtml) window._snapshotContainer(outputCont);
+    }
+
+    // Populate LLM container
+    var llmCont = document.getElementById('llm-dynamic-container');
+    if (llmCont) {
+      llmCont.innerHTML = llmHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">LLM not compiled in current build</div>';
+      if (llmHtml) window._snapshotContainer(llmCont);
     }
     
     if (html === '') {
@@ -839,9 +858,11 @@ window.sendSequential = function(cmds, onDone, onFail) {
     
     var cmds = [];
     for (var k in updates) {
-      cmds.push(k + ' ' + updates[k]);
+      var el = pane.querySelector('#dyn-' + k.replace(/\./g, '-'));
+      var cmd = el && el.getAttribute('data-cmd');
+      cmds.push((cmd || k) + ' ' + updates[k]);
     }
-    
+
     if (cmds.length === 0) { alert('No changes to save.'); return; }
 
     sendSequential(cmds,
@@ -853,6 +874,37 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </script>
 )SETPART4", HTTPD_RESP_USE_STRLEN);
 
+  // Logging section (standalone)
+  httpd_resp_send_chunk(req, R"LOGGINGPART(
+<div class='settings-panel'>
+  <div style='display:flex;align-items:center;justify-content:space-between'>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Logging</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure automated logging to files.</div></div>
+    <button class='btn' id='btn-logging-toggle' onclick="togglePane('logging-panel-pane','btn-logging-toggle')">Expand</button>
+  </div>
+  <div id='logging-panel-pane' style='display:none;margin-top:0.75rem'>
+    <div id='logging-dynamic-container'>
+      <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading logging settings...</div>
+    </div>
+  </div>
+</div>
+)LOGGINGPART", HTTPD_RESP_USE_STRLEN);
+
+  // Output Channels section (standalone)
+  httpd_resp_send_chunk(req, R"OUTPUTPART(
+<div class='settings-panel'>
+  <div style='display:flex;align-items:center;justify-content:space-between'>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Output Channels</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure serial, web, and display output routing.</div></div>
+    <button class='btn' id='btn-output-toggle' onclick="togglePane('output-panel-pane','btn-output-toggle')">Expand</button>
+  </div>
+  <div id='output-panel-pane' style='display:none;margin-top:0.75rem'>
+    <div id='output-dynamic-container'>
+      <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading output settings...</div>
+    </div>
+  </div>
+</div>
+)OUTPUTPART", HTTPD_RESP_USE_STRLEN);
+
+#if ENABLE_I2C_SYSTEM
   // I2C Bus Configuration section (standalone, not under Sensors)
   httpd_resp_send_chunk(req, R"I2CPART(
 <div class='settings-panel'>
@@ -867,80 +919,29 @@ window.sendSequential = function(cmds, onDone, onFail) {
   </div>
 </div>
 )I2CPART", HTTPD_RESP_USE_STRLEN);
+#endif // ENABLE_I2C_SYSTEM
 
-  // Part 6: Hardware Settings section
-  httpd_resp_send_chunk(req, R"SETPART6(
+#if ENABLE_ONDEVICE_LLM
+  // On-Device LLM settings section
+  httpd_resp_send_chunk(req, R"LLMPART(
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>LED Settings</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure LED brightness and startup effects</div></div>
-    <button class='btn' id='btn-led-settings-toggle' onclick="togglePane('led-settings-pane','btn-led-settings-toggle')">Expand</button>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>On-Device LLM</div>
+    <div style='color:var(--panel-fg);font-size:0.9rem'>Default generation parameters and context window for on-device inference.</div></div>
+    <button class='btn' id='btn-llm-toggle' onclick="togglePane('llm-panel-pane','btn-llm-toggle')">Expand</button>
   </div>
-  <div id='led-settings-pane' style='display:none;margin-top:0.75rem'>
-    <!-- LED Configuration Subsection -->
-    <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem'>
-      <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem'>
-        <div style='font-weight:bold;color:var(--panel-fg)'>LED Configuration</div>
-        <button class='btn' id='btn-led-toggle' onclick="togglePane('led-pane','btn-led-toggle')" style='font-size:0.85rem;padding:0.25rem 0.75rem'>Expand</button>
-      </div>
-      <div id='led-pane' style='display:none'>
-        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:1rem'>
-          <label title="Global LED brightness (0-100%)">LED Brightness (%)<br><input type='number' id='ledBrightness' min='0' max='100' step='5' value='100' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:120px' title='LED brightness percentage'></label>
-          <label style='display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;color:var(--panel-fg);width:100%;min-width:0;box-sizing:border-box'><input type='checkbox' id='ledStartupEnabled' style='flex-shrink:0;width:1rem;height:1rem;margin-top:0.15rem'><span style='flex:1 1 0;min-width:0;line-height:1.35'>Enable Startup Effect</span></label>
-        </div>
-        <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem;margin-top:0.25rem'>Startup Effect Configuration</div>
-          <div style='color:var(--panel-fg);font-size:0.9rem;margin-bottom:0.75rem'>LED effect to run when device finishes booting.</div>
-          <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
-            <label title="Effect type">Effect Type<br><select id='ledStartupEffect' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='none'>None</option><option value='rainbow'>Rainbow</option><option value='pulse'>Pulse</option><option value='fade'>Fade</option><option value='blink'>Blink</option><option value='strobe'>Strobe</option></select></label>
-            <label title="Primary color">Primary Color<br><select id='ledStartupColor' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='red'>Red</option><option value='green'>Green</option><option value='blue'>Blue</option><option value='cyan'>Cyan</option><option value='magenta'>Magenta</option><option value='yellow'>Yellow</option><option value='white'>White</option><option value='orange'>Orange</option><option value='purple'>Purple</option></select></label>
-            <label title="Secondary color (for fade effect)">Secondary Color<br><select id='ledStartupColor2' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='red'>Red</option><option value='green'>Green</option><option value='blue'>Blue</option><option value='cyan'>Cyan</option><option value='magenta'>Magenta</option><option value='yellow'>Yellow</option><option value='white'>White</option><option value='orange'>Orange</option><option value='purple'>Purple</option></select></label>
-            <label title="Effect duration in milliseconds">Duration (ms)<br><input type='number' id='ledStartupDuration' min='100' max='10000' step='100' value='1000' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Effect duration'></label>
-          </div>
-        <button class='btn' onclick="saveLEDSettings()">Save LED Settings</button>
-      </div>
-    </div>
-    <!-- OLED Display Configuration Subsection -->
-    <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem'>
-      <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem'>
-        <div style='font-weight:bold;color:var(--panel-fg)'>OLED Display Configuration</div>
-        <button class='btn' id='btn-oled-toggle' onclick="togglePane('oled-pane','btn-oled-toggle')" style='font-size:0.85rem;padding:0.25rem 0.75rem'>Expand</button>
-      </div>
-      <div id='oled-pane' style='display:none'>
-        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:1rem'>
-          <label><input type='checkbox' id='oledEnabled' style='margin-right:0.5rem'>Enable OLED Display</label>
-        </div>
-        <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem;margin-top:0.25rem'>Display Modes & Timing</div>
-          <div style='color:var(--panel-fg);font-size:0.9rem;margin-bottom:0.75rem'>Configure what the OLED shows during boot and after.</div>
-          <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
-            <label title="Mode shown during boot">Boot Mode<br><select id='oledBootMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='logo'>Logo</option><option value='status'>Status</option><option value='sensors'>Sensors</option><option value='thermal'>Thermal</option><option value='network'>Network</option><option value='off'>Off</option></select></label>
-            <label title="Mode after boot completes">Default Mode<br><select id='oledDefaultMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='logo'>Logo</option><option value='status'>Status</option><option value='sensors'>Sensors</option><option value='thermal'>Thermal</option><option value='network'>Network</option><option value='off'>Off</option></select></label>
-            <label title="Duration to show boot mode (ms)">Boot Duration (ms)<br><input type='number' id='oledBootDuration' min='0' max='60000' step='100' value='2000' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Boot mode duration'></label>
-            <label title="Display refresh interval (ms)">Update Interval (ms)<br><input type='number' id='oledUpdateInterval' min='10' max='1000' step='10' value='125' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Refresh rate'></label>
-          </div>
-        <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem;margin-top:0.75rem'>Display Settings</div>
-          <div style='color:var(--panel-fg);font-size:0.9rem;margin-bottom:0.75rem'>Brightness and thermal visualization settings.</div>
-          <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;align-items:end'>
-            <label title="Display brightness (0-255)">Brightness<br><input type='number' id='oledBrightness' min='0' max='255' step='5' value='255' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:120px' title='Brightness level'></label>
-            <label title="Thermal image scale factor">Thermal Scale<br><input type='number' id='oledThermalScale' min='0.5' max='5.0' step='0.1' value='2.5' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px' title='Scale factor'></label>
-            <label title="Thermal color mode">Thermal Color<br><select id='oledThermalColorMode' style='padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:140px'><option value='3level'>3-Level</option><option value='grayscale'>Grayscale</option></select></label>
-          </div>
-        <button class='btn' onclick="saveOLEDSettings()">Save OLED Settings</button>
-      </div>
-    </div>
-    <!-- Gamepad Configuration Subsection -->
-    <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:6px;padding:1rem'>
-      <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem'>
-        <div style='font-weight:bold;color:var(--panel-fg)'>Gamepad Configuration</div>
-        <button class='btn' id='btn-gamepad-toggle' onclick="togglePane('gamepad-pane','btn-gamepad-toggle')" style='font-size:0.85rem;padding:0.25rem 0.75rem'>Expand</button>
-      </div>
-      <div id='gamepad-pane' style='display:none'>
-        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:1rem'>
-          <label><input type='checkbox' id='gamepadAutoStart' style='margin-right:0.5rem'>Auto-Start Gamepad After Boot</label>
-        </div>
-        <button class='btn' onclick="saveGamepadSettings()">Save Gamepad Settings</button>
-      </div>
+  <div id='llm-panel-pane' style='display:none;margin-top:0.75rem'>
+    <div id='llm-dynamic-container'>
+      <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading LLM settings...</div>
     </div>
   </div>
 </div>
+)LLMPART", HTTPD_RESP_USE_STRLEN);
+#endif // ENABLE_ONDEVICE_LLM
+
+  // Part 6: (LED settings now rendered dynamically via schema in Sensors panel)
+  httpd_resp_send_chunk(req, R"SETPART6(
+<!-- LED settings removed - now in schema-driven Sensors panel -->
 )SETPART6", HTTPD_RESP_USE_STRLEN);
 
   // Part 7: Debug Controls section (dynamic from schema)
@@ -977,7 +978,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 <script>
 (function(){
-  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps'};
+  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',camera:'Camera',microphone:'Microphone',gps:'GPS',rtc:'RTC',presence:'Presence',fmradio:'FM Radio',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps',datetime:'Date / Time'};
   function sw(cmd,grp,on,isAll){return '<label class="dbg-sw"><input type="checkbox" class="dbg-cb" data-cmd="'+cmd+'"'+(grp?' data-group="'+grp+'"':'')+(isAll?' data-all="1"':'')+(on?' checked':'')+'><span class="sl"></span></label>';}
   Promise.all([
     fetch('/api/settings/schema',{credentials:'include'}).then(function(r){return r.json();}),
@@ -992,6 +993,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
       if(e.group){if(!groups[e.group]){groups[e.group]=[];gOrder.push(e.group);}groups[e.group].push(e);}
       else standalone.push(e);
     });
+    gOrder.sort(function(a,b){return (GL[a]||a).localeCompare(GL[b]||b);});
     var h='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0.6rem">';
     gOrder.forEach(function(gn){
       var ge=groups[gn],gl=GL[gn]||gn,gid='dbg-'+gn.replace(/[^a-z0-9]/g,'');
@@ -1167,25 +1169,17 @@ window.sendSequential = function(cmds, onDone, onFail) {
     </div>
     <div style='background:var(--crumb-bg);border:1px solid var(--border);border-radius:8px;padding:1rem'>
       <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem'>
-        <div style='font-weight:bold;color:var(--panel-fg)'>Security</div>
-        <button class='btn' id='btn-security-toggle' onclick="togglePane('security-pane','btn-security-toggle')">Expand</button>
+        <div style='font-weight:bold;color:var(--panel-fg)'>Authentication</div>
+        <button class='btn' id='btn-auth-toggle' onclick="togglePane('auth-pane','btn-auth-toggle')">Expand</button>
       </div>
-      <div style='color:var(--panel-fg);margin-bottom:0.75rem;font-size:0.9rem'>Authentication and access control settings.</div>
-      <div id='security-pane' style='display:none;margin-top:0.75rem'>
-        <div style='display:grid;gap:0.75rem'>
-          <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap'>
-            <span style='color:var(--panel-fg);min-width:160px'>Local Display Auth: <span style='font-weight:bold' id='display-auth-value'>-</span></span>
-            <button class='btn' id='display-auth-btn' onclick='toggleDisplayAuth()' title='Require login before accessing OLED display menus'>Toggle</button>
-          </div>
-          <div id='ble-auth-row' style='display:none;align-items:center;gap:0.75rem;flex-wrap:wrap'>
-            <span style='color:var(--panel-fg);min-width:160px'>Bluetooth Auth: <span style='font-weight:bold' id='ble-auth-value'>-</span></span>
-            <button class='btn' id='ble-auth-btn' onclick='toggleBleAuth()' title='Require login before accepting BLE commands'>Toggle</button>
-          </div>
-          <div style='display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap'>
-            <span style='color:var(--panel-fg);min-width:160px'>Serial Auth: <span style='font-weight:bold' id='serial-auth-value'>-</span></span>
-            <button class='btn' id='serial-auth-btn' onclick='toggleSerialAuth()' title='Require login before accepting serial CLI commands'>Toggle</button>
-          </div>
+      <div style='color:var(--panel-fg);font-size:0.9rem'>Require login before accepting commands on each interface.</div>
+      <div id='auth-pane' style='display:none;margin-top:0.75rem'>
+        <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem'>
+          <label><input type='checkbox' id='auth-serial' style='margin-right:0.5rem'>Serial Require Auth</label>
+          <label><input type='checkbox' id='auth-display' style='margin-right:0.5rem'>Display Require Auth</label>
+          <label id='auth-bluetooth-wrap'><input type='checkbox' id='auth-bluetooth' style='margin-right:0.5rem'>Bluetooth Require Auth</label>
         </div>
+        <button class='btn' onclick='saveAuthSettings()'>Save Authentication Settings</button>
       </div>
     </div>
 )SETPART8", HTTPD_RESP_USE_STRLEN);
@@ -1388,8 +1382,8 @@ window.sendSequential = function(cmds, onDone, onFail) {
     uploadHttpsFile(input.files[0], '/system/certs/https_server.key', 'https-key-upload-status', input);
   };
 
-  window.generateCerts = function(){
-    if(!confirm('Generate a self-signed ECDSA P-256 certificate? This will overwrite any existing cert/key files.')) return;
+  window.generateCerts = async function(){
+    if(!await hwConfirm('Generate a self-signed ECDSA P-256 certificate? This will overwrite any existing cert/key files.')) return;
     var btn = document.getElementById('https-certgen-btn');
     var status = document.getElementById('https-certgen-status');
     if(btn) btn.disabled = true;
@@ -1414,8 +1408,8 @@ window.sendSequential = function(cmds, onDone, onFail) {
       });
   };
 
-  window.rebootDevice = function(){
-    if(!confirm('Reboot the device now?')) return;
+  window.rebootDevice = async function(){
+    if(!await hwConfirm('Reboot the device now?')) return;
     fetch('/api/cli',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd=reboot'})
       .then(function(){
         document.body.innerHTML = '<div style="text-align:center;padding:4rem;color:var(--panel-fg)"><h2>Rebooting...</h2><p>The device is restarting. Please wait and then reconnect.</p></div>';
@@ -1493,8 +1487,13 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         $('cli-input').value = webHistorySize;
         $('wifi-btn').textContent = wifiAutoReconnect ? 'Disable' : 'Enable';
         // Timezone and NTP from wifi module
+        // Settings are serialized as s.wifi.global.tzOffsetMinutes / s.wifi.global.ntpServer
+        // (all WiFi entries use group="global" in their SettingEntry registration)
         var wifiSect = s.wifi || {};
-        var tzMin = (wifiSect.wifiTzOffsetMinutes !== undefined) ? wifiSect.wifiTzOffsetMinutes : (s.tzOffsetMinutes !== undefined ? s.tzOffsetMinutes : null);
+        var wifiGlobal = wifiSect.global || {};
+        var tzMin = (wifiGlobal.tzOffsetMinutes !== undefined) ? wifiGlobal.tzOffsetMinutes
+                  : (wifiSect.wifiTzOffsetMinutes !== undefined) ? wifiSect.wifiTzOffsetMinutes
+                  : (s.tzOffsetMinutes !== undefined ? s.tzOffsetMinutes : null);
         if (tzMin !== null) {
           var tzSel = $('tz-select');
           if (tzSel) { tzSel.value = String(tzMin); }
@@ -1506,132 +1505,18 @@ console.log('[SETTINGS] Part 1: Core init starting...');
             tzVal.textContent = 'UTC' + sign + h + (m ? ':' + (m < 10 ? '0' : '') + m : '') + ' (' + tzMin + ' min)';
           }
         }
-        var ntpSrv = wifiSect.wifiNtpServer || s.ntpServer || '';
+        var ntpSrv = wifiGlobal.ntpServer || wifiSect.wifiNtpServer || s.ntpServer || '';
         if (ntpSrv) {
           var ntpEl = $('ntp-value');
           if (ntpEl) ntpEl.textContent = ntpSrv;
           var ntpIn = $('ntp-input');
           if (ntpIn && !ntpIn.value) ntpIn.placeholder = ntpSrv;
         }
-        $('espnow-value').textContent = s.espnowenabled ? 'Enabled' : 'Disabled';
-        $('espnow-btn').textContent = s.espnowenabled ? 'Disable' : 'Enable';
+        // ESP-NOW toggle states now handled by schema-driven Network Services panel
         
-        // Load ESP-NOW settings
-        var espnow = s.espnow || {};
-        if ($('espnow-mesh-value')) {
-          $('espnow-mesh-value').textContent = espnow.mesh ? 'Enabled' : 'Disabled';
-          $('espnow-mesh-btn').textContent = espnow.mesh ? 'Disable' : 'Enable';
-        }
-        if ($('espnow-devicename')) $('espnow-devicename').value = espnow.deviceName || '';
-        if ($('espnow-friendlyname')) $('espnow-friendlyname').value = espnow.friendlyName || '';
-        if ($('espnow-room')) $('espnow-room').value = espnow.room || '';
-        if ($('espnow-zone')) $('espnow-zone').value = espnow.zone || '';
-        if ($('espnow-tags')) $('espnow-tags').value = espnow.tags || '';
-        if ($('espnow-stationary')) $('espnow-stationary').checked = !!espnow.stationary;
-        if ($('espnow-meshrole')) $('espnow-meshrole').value = String(espnow.meshRole || 0);
-        if ($('espnow-mastermac')) $('espnow-mastermac').value = espnow.masterMAC || '';
-        if ($('espnow-backupmac')) $('espnow-backupmac').value = espnow.backupMAC || '';
-        
-        // Load bond settings
-        if ($('bond-enabled-value')) {
-          $('bond-enabled-value').textContent = espnow.bondModeEnabled ? 'Enabled' : 'Disabled';
-          $('bond-enabled-btn').textContent = espnow.bondModeEnabled ? 'Disable' : 'Enable';
-        }
-        if ($('bond-role')) $('bond-role').value = String(espnow.bondRole || 0);
-        if ($('bond-peermac')) $('bond-peermac').value = espnow.bondPeerMac || '';
-        if ($('bond-stream-thermal')) $('bond-stream-thermal').checked = !!espnow.bondStreamThermal;
-        if ($('bond-stream-tof')) $('bond-stream-tof').checked = !!espnow.bondStreamTof;
-        if ($('bond-stream-imu')) $('bond-stream-imu').checked = !!espnow.bondStreamImu;
-        if ($('bond-stream-gps')) $('bond-stream-gps').checked = !!espnow.bondStreamGps;
-        if ($('bond-stream-gamepad')) $('bond-stream-gamepad').checked = !!espnow.bondStreamGamepad;
-        if ($('bond-stream-fmradio')) $('bond-stream-fmradio').checked = !!espnow.bondStreamFmradio;
-        if ($('bond-stream-rtc')) $('bond-stream-rtc').checked = !!espnow.bondStreamRtc;
-        if ($('bond-stream-presence')) $('bond-stream-presence').checked = !!espnow.bondStreamPresence;
-        
-        var out = (s.output || {}), th = (s.thermal_mlx90640 || {}), tof = (s.tof_vl53l4cx || {}), oled = (s.oled_ssd1306 || {}), led = (s.led || {}), imu = (s.imu_bno055 || {}), i2c = (s.i2c || {});
+        // Output and LED settings now rendered dynamically via schema in Sensors panel
+        var th = (s.thermal_mlx90640 || {}), tof = (s.tof_vl53l4cx || {}), imu = (s.imu_bno055 || {}), i2c = (s.i2c || {});
         var thUI = (th.ui || {}), thDev = (th.device || {}), tofUI = (tof.ui || {}), tofDev = (tof.device || {});
-        var outSerial = (out.outSerial !== undefined ? out.outSerial : s.outSerial);
-        var outWeb = (out.outWeb !== undefined ? out.outWeb : s.outWeb);
-        var outDisplay = (out.outDisplay !== undefined ? out.outDisplay : s.outDisplay);
-        $('serial-value').textContent = outSerial ? 'Enabled' : 'Disabled';
-        $('serial-btn').textContent = outSerial ? 'Disable' : 'Enable';
-        $('web-value').textContent = outWeb ? 'Enabled' : 'Disabled';
-        $('web-btn').textContent = outWeb ? 'Disable' : 'Enable';
-        $('display-value').textContent = outDisplay ? 'Enabled' : 'Disabled';
-        $('display-btn').textContent = outDisplay ? 'Disable' : 'Enable';
-        // LED: `led` is already s.led from the destructuring line above — keys match ledSettingsModule (ledBrightness, ledStartupEnabled, …)
-        if (led.ledBrightness !== undefined) {
-          var b = $('ledBrightness');
-          if (b) b.value = led.ledBrightness;
-        } else if (s.ledBrightness !== undefined) {
-          var b = $('ledBrightness');
-          if (b) b.value = s.ledBrightness;
-        }
-        var ledEnabled = (led.ledStartupEnabled !== undefined ? led.ledStartupEnabled : s.ledStartupEnabled);
-        var chk = $('ledStartupEnabled');
-        if (chk) chk.checked = (ledEnabled === 1 || ledEnabled === true);
-        if (led.ledStartupEffect !== undefined) {
-          var ef = $('ledStartupEffect');
-          if (ef) ef.value = led.ledStartupEffect;
-        } else if (s.ledStartupEffect) {
-          var ef = $('ledStartupEffect');
-          if (ef) ef.value = s.ledStartupEffect;
-        }
-        if (led.ledStartupColor) {
-          var c1 = $('ledStartupColor');
-          if (c1) c1.value = led.ledStartupColor;
-        } else if (s.ledStartupColor) {
-          var c1 = $('ledStartupColor');
-          if (c1) c1.value = s.ledStartupColor;
-        }
-        if (led.ledStartupColor2) {
-          var c2 = $('ledStartupColor2');
-          if (c2) c2.value = led.ledStartupColor2;
-        } else if (s.ledStartupColor2) {
-          var c2 = $('ledStartupColor2');
-          if (c2) c2.value = s.ledStartupColor2;
-        }
-        if (led.ledStartupDuration !== undefined) {
-          var d = $('ledStartupDuration');
-          if (d) d.value = led.ledStartupDuration;
-        } else if (s.ledStartupDuration !== undefined) {
-          var d = $('ledStartupDuration');
-          if (d) d.value = s.ledStartupDuration;
-        }
-        var oledEn = $('oledEnabled');
-        if (oledEn) oledEn.checked = (oled.oledEnabled === 1 || oled.oledEnabled === true);
-        var gamepadAuto = $('gamepadAutoStart');
-        if (gamepadAuto && s.gamepad && s.gamepad.gamepadAutoStart !== undefined) {
-          gamepadAuto.checked = (s.gamepad.gamepadAutoStart === 1 || s.gamepad.gamepadAutoStart === true);
-        }
-        if (oled.bootMode) {
-          var bm = $('oledBootMode');
-          if (bm) bm.value = oled.bootMode;
-        }
-        if (oled.defaultMode) {
-          var dm = $('oledDefaultMode');
-          if (dm) dm.value = oled.defaultMode;
-        }
-        if (oled.bootDuration !== undefined) {
-          var bd = $('oledBootDuration');
-          if (bd) bd.value = oled.bootDuration;
-        }
-        if (oled.updateInterval !== undefined) {
-          var ui = $('oledUpdateInterval');
-          if (ui) ui.value = oled.updateInterval;
-        }
-        if (oled.brightness !== undefined) {
-          var br = $('oledBrightness');
-          if (br) br.value = oled.brightness;
-        }
-        if (oled.thermalScale !== undefined) {
-          var ts = $('oledThermalScale');
-          if (ts) ts.value = oled.thermalScale;
-        }
-        if (oled.thermalColorMode) {
-          var tcm = $('oledThermalColorMode');
-          if (tcm) tcm.value = oled.thermalColorMode;
-        }
         var isAdm = (s && s.user && (s.user.isAdmin === true)) || (__S && __S.user && (__S.user.isAdmin === true));
         var hasFeat = (__S && __S.features && __S.features.adminSessions === true);
         var admin = isAdm && hasFeat;
@@ -1645,37 +1530,17 @@ console.log('[SETTINGS] Part 1: Core init starting...');
               refreshUsers();
             }
           } catch(e) {}
+          // Populate Authentication panel
           try {
-            var oledSect = s.oled_ssd1306 || {};
-            var dispAuth = (oledSect.oledRequireAuth !== undefined ? oledSect.oledRequireAuth : true);
-            var dispAuthEl = $('display-auth-value');
-            if (dispAuthEl) {
-              dispAuthEl.textContent = dispAuth ? 'Required' : 'Disabled';
-              dispAuthEl.style.color = 'var(--accent)';
-            }
-            var dispAuthBtn = $('display-auth-btn');
-            if (dispAuthBtn) dispAuthBtn.textContent = dispAuth ? 'Disable' : 'Enable';
-            var btSect = s.bluetooth || {};
-            var bleAuth = (btSect.bluetoothRequireAuth !== undefined ? btSect.bluetoothRequireAuth : true);
-            var bleAuthEl = $('ble-auth-value');
-            if (bleAuthEl) {
-              bleAuthEl.textContent = bleAuth ? 'Required' : 'Disabled';
-              bleAuthEl.style.color = 'var(--accent)';
-            }
-            var bleAuthBtn = $('ble-auth-btn');
-            if (bleAuthBtn) bleAuthBtn.textContent = bleAuth ? 'Disable' : 'Enable';
             var outSect = s.output || {};
-            var serialAuth = (outSect.serialRequireAuth !== undefined ? outSect.serialRequireAuth : true);
-            var serialAuthEl = $('serial-auth-value');
-            if (serialAuthEl) {
-              serialAuthEl.textContent = serialAuth ? 'Required' : 'Disabled';
-              serialAuthEl.style.color = 'var(--accent)';
-            }
-            var serialAuthBtn = $('serial-auth-btn');
-            if (serialAuthBtn) serialAuthBtn.textContent = serialAuth ? 'Disable' : 'Enable';
-            var hasBle = (__S && __S.features && __S.features.bluetooth === true);
-            var bleRow = $('ble-auth-row');
-            if (bleRow) bleRow.style.display = hasBle ? 'flex' : 'none';
+            var btSect  = s.bluetooth || {};
+            var el;
+            el = document.getElementById('auth-serial');    if (el) el.checked = outSect.serialRequireAuth  !== false;
+            el = document.getElementById('auth-display');   if (el) el.checked = outSect.displayRequireAuth !== false;
+            el = document.getElementById('auth-bluetooth'); if (el) el.checked = btSect.bluetoothRequireAuth !== false;
+            // Hide bluetooth row if module not present in settings
+            var btWrap = document.getElementById('auth-bluetooth-wrap');
+            if (btWrap) btWrap.style.display = (s.bluetooth !== undefined) ? '' : 'none';
           } catch(e) {}
         }
       } catch(e) {
@@ -1685,132 +1550,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
       setTimeout(function() { window._snapshotContainer(document.body); }, 0);
     };
     
-    window.renderOutputRuntime = function(obj) {
-      try {
-        obj = obj || {};
-        var r = obj.runtime || {};
-        var p = obj.persisted || {};
-        var set = function(id, val) {
-          var el = $(id);
-          if (!el) return;
-          var on = (String(val) == '1' || val === 1 || val === true || String(val).toLowerCase() == 'true');
-          el.textContent = on ? 'On' : 'Off';
-          el.style.color = 'var(--accent)';
-        };
-        var setHidden = function(id, hide) {
-          var el = $(id);
-          if (!el) return;
-          try {
-            if (hide) {
-              el.classList.add('vis-gone');
-            } else {
-              el.classList.remove('vis-gone');
-            }
-          } catch(_) {
-            el.style.display = hide ? 'none' : '';
-          }
-        };
-        set('serial-runtime', r.serial);
-        set('web-runtime', r.web);
-        set('display-runtime', r.display);
-        set('g2-runtime', r.g2);
-        try {
-          if (p && typeof p === 'object') {
-            if (p.serial !== undefined) {
-              var pv = $('serial-value');
-              if (pv) pv.textContent = p.serial ? 'Enabled' : 'Disabled';
-              var pb = $('serial-btn');
-              if (pb) {
-                pb.textContent = p.serial ? 'Disable' : 'Enable';
-              }
-            }
-            if (p.web !== undefined) {
-              var pv2 = $('web-value');
-              if (pv2) pv2.textContent = p.web ? 'Enabled' : 'Disabled';
-              var pb2 = $('web-btn');
-              if (pb2) {
-                pb2.textContent = p.web ? 'Disable' : 'Enable';
-              }
-            }
-            if (p.display !== undefined) {
-              var pv3 = $('display-value');
-              if (pv3) pv3.textContent = p.display ? 'Enabled' : 'Disabled';
-              var pb3 = $('display-btn');
-              if (pb3) {
-                pb3.textContent = p.display ? 'Disable' : 'Enable';
-              }
-            }
-            if (p.g2 !== undefined) {
-              var pv4 = $('g2-value');
-              if (pv4) pv4.textContent = p.g2 ? 'Enabled' : 'Disabled';
-              var pb4 = $('g2-btn');
-              if (pb4) {
-                pb4.textContent = p.g2 ? 'Disable' : 'Enable';
-              }
-            }
-          }
-          var curSerial = (r.serial !== undefined) ? (String(r.serial) == '1' || r.serial === 1 || r.serial === true || String(r.serial).toLowerCase() == 'true') : !!(p && p.serial);
-          var curWeb = (r.web !== undefined) ? (String(r.web) == '1' || r.web === 1 || r.web === true || String(r.web).toLowerCase() == 'true') : !!(p && p.web);
-          var curDisplay = (r.display !== undefined) ? (String(r.display) == '1' || r.display === 1 || r.display === true || String(r.display).toLowerCase() == 'true') : !!(p && p.display);
-          var curG2 = (r.g2 !== undefined) ? (String(r.g2) == '1' || r.g2 === 1 || r.g2 === true || String(r.g2).toLowerCase() == 'true') : !!(p && p.g2);
-          setHidden('serial-temp-on', curSerial);
-          setHidden('serial-temp-off', !curSerial);
-          setHidden('web-temp-on', curWeb);
-          setHidden('web-temp-off', !curWeb);
-          setHidden('display-temp-on', curDisplay);
-          setHidden('display-temp-off', !curDisplay);
-          setHidden('g2-temp-on', curG2);
-          setHidden('g2-temp-off', !curG2);
-        } catch(e) {}
-      } catch(e) {}
-    };
-    
-    window.refreshOutput = function() {
-      return fetch('/api/output', {credentials: 'same-origin'})
-        .then(function(r) { return r.text(); })
-        .then(function(t) {
-          var d = null;
-          try {
-            d = JSON.parse(t || '{}');
-          } catch(e) {
-            return;
-          }
-          if (d && d.success) {
-            window.renderOutputRuntime(d);
-          }
-        })
-        .catch(function(e) {});
-    };
-    
-    window.setOutputRuntime = function(channel, val) {
-      try {
-        if (!channel) return;
-        var map = {serial: 'outserial', web: 'outweb', display: 'outdisplay', g2: 'outg2'};
-        var key = map[channel];
-        if (!key) return;
-        var v = val ? 1 : 0;
-        var cmd = key + ' temp ' + v;
-        fetch('/api/cli', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          credentials: 'same-origin',
-          body: 'cmd=' + encodeURIComponent(cmd)
-        })
-        .then(function(r) { return r.text(); })
-        .then(function(_t) {
-          try {
-            if (typeof window.refreshOutput === 'function') {
-              window.refreshOutput();
-            }
-          } catch(_) {}
-        })
-        .catch(function(e) {
-          alert('Error: ' + e.message);
-        });
-      } catch(e) {
-        alert('Error: ' + e.message);
-      }
-    };
+    // renderOutputRuntime, refreshOutput, setOutputRuntime removed - Output settings now in schema-driven Sensors panel
     
     window.onload = function() {
       try {
@@ -1920,66 +1660,6 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     };
     console.log('[SETTINGS] toggleWifi defined');
     
-    // Toggle ESP-NOW auto-init
-    window.toggleEspNow = function() {
-      console.log('[SETTINGS] toggleEspNow called');
-      var cur = ($('espnow-value').textContent === 'Enabled') ? 1 : 0;
-      var v = cur ? 0 : 1;
-      console.log('[SETTINGS] toggleEspNow - current:', cur, 'new:', v);
-      var cmd = 'espnowenabled ' + v;
-      $('espnow-btn').textContent = '...';
-      $('espnow-btn').disabled = true;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) { return r.text(); })
-      .then(function(t) {
-        console.log('[SETTINGS] toggleEspNow result:', t);
-        if (t.indexOf('Error') >= 0) {
-          alert(t);
-        } else {
-          if (v === 1) {
-            alert('ESP-NOW enabled. Will initialize on next reboot.');
-          } else {
-            alert('ESP-NOW disabled. Will not initialize on next reboot.');
-          }
-        }
-        refreshSettings();
-      })
-      .catch(function(e) {
-        console.error('[SETTINGS] toggleEspNow error:', e);
-        alert('Error: ' + e.message);
-        refreshSettings();
-      });
-    };
-    console.log('[SETTINGS] toggleEspNow defined');
-    
-    // Toggle ESP-NOW mesh mode
-    window.toggleEspNowMesh = function() {
-      var cur = ($('espnow-mesh-value').textContent === 'Enabled') ? 1 : 0;
-      var v = cur ? 0 : 1;
-      var cmd = 'espnowmode ' + (v ? 'mesh' : 'direct');
-      $('espnow-mesh-btn').textContent = '...';
-      $('espnow-mesh-btn').disabled = true;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) { return r.text(); })
-      .then(function(t) {
-        refreshSettings();
-      })
-      .catch(function(e) {
-        alert('Error: ' + e.message);
-        refreshSettings();
-      });
-    };
-    
     // Toggle bond mode
     window.toggleBondMode = function() {
       fetch('/api/cli', {
@@ -1993,73 +1673,8 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       .catch(function(e) { alert('Error: ' + e.message); });
     };
     
-    // Save all ESP-NOW settings
-    window.saveEspNowSettings = function() {
-      var status = $('espnow-save-status');
-      status.textContent = 'Saving...';
-      status.style.color = 'var(--accent)';
+    // saveEspNowSettings removed - ESP-NOW settings now saved via schema-driven saveNetworkSettings
 
-      var cmds = [];
-      function addStr(id, cmdFn) {
-        var el = $(id); if (!el) return;
-        var v = el.value.trim();
-        if (v && window._isChanged(id, el.value.trim())) cmdFn(v);
-      }
-      function addBool(id, cmdFn) {
-        var el = $(id); if (!el) return;
-        var v = el.checked ? 1 : 0;
-        if (window._isChanged(id, v)) cmdFn(v);
-      }
-      function addInt(id, cmdFn) {
-        var el = $(id); if (!el) return;
-        var v = parseInt(el.value, 10);
-        if (!isNaN(v) && window._isChanged(id, v)) cmdFn(v);
-      }
-
-      addStr('espnow-devicename',   function(v) { cmds.push('espnowsetname "' + v + '"'); });
-      addStr('espnow-friendlyname', function(v) { cmds.push('espnowfriendlyname "' + v + '"'); });
-      addStr('espnow-room',         function(v) { cmds.push('espnowroom "' + v + '"'); });
-      addStr('espnow-zone',         function(v) { cmds.push('espnowzone "' + v + '"'); });
-      addStr('espnow-tags',         function(v) { cmds.push('espnowtags "' + v + '"'); });
-      addBool('espnow-stationary',  function(v) { cmds.push('espnowstationary ' + (v ? 'on' : 'off')); });
-      addInt('espnow-meshrole', function(v) {
-        var roleNames = ['worker', 'master', 'backup'];
-        if (v >= 0 && v <= 2) cmds.push('espnowmeshrole ' + roleNames[v]);
-      });
-      addStr('espnow-mastermac',    function(v) { cmds.push('espnowmeshmaster ' + v); });
-      addStr('espnow-backupmac',    function(v) { cmds.push('espnowmeshbackup ' + v); });
-      addInt('bond-role', function(v) { if (v >= 0 && v <= 1) cmds.push('bondrole ' + v); });
-      addStr('bond-peermac',        function(v) { cmds.push('bondpeermac ' + v); });
-      addBool('bond-stream-thermal',  function(v) { cmds.push('bondstreamthermal ' + v); });
-      addBool('bond-stream-tof',      function(v) { cmds.push('bondstreamtof ' + v); });
-      addBool('bond-stream-imu',      function(v) { cmds.push('bondstreamimu ' + v); });
-      addBool('bond-stream-gps',      function(v) { cmds.push('bondstreamgps ' + v); });
-      addBool('bond-stream-gamepad',  function(v) { cmds.push('bondstreamgamepad ' + v); });
-      addBool('bond-stream-fmradio',  function(v) { cmds.push('bondstreamfmradio ' + v); });
-      addBool('bond-stream-rtc',      function(v) { cmds.push('bondstreamrtc ' + v); });
-      addBool('bond-stream-presence', function(v) { cmds.push('bondstreampresence ' + v); });
-
-      if (cmds.length === 0) {
-        status.textContent = 'No changes to save.';
-        status.style.color = 'var(--accent)';
-        setTimeout(function() { status.textContent = ''; }, 2000);
-        return;
-      }
-
-      sendSequential(cmds,
-        function() {
-          window._snapshotContainer(document.getElementById('espnow-settings-pane') || document.body);
-          status.textContent = 'Saved successfully!';
-          status.style.color = '#28a745';
-          setTimeout(function() { status.textContent = ''; refreshSettings(); }, 2000);
-        },
-        function(e) {
-          status.textContent = 'Error: ' + (e ? e.message : 'unknown');
-          status.style.color = '#dc3545';
-        }
-      );
-    };
-    
     // Update Web CLI history size
     window.updateWebCliHistory = function() {
       console.log('[SETTINGS] updateWebCliHistory called');
@@ -2111,6 +1726,22 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       });
     };
     
+    // Save authentication settings
+    window.saveAuthSettings = function() {
+      var serial  = document.getElementById('auth-serial');
+      var display = document.getElementById('auth-display');
+      var ble     = document.getElementById('auth-bluetooth');
+      var cmds = [];
+      if (serial)  cmds.push('serialrequireauth '  + (serial.checked  ? '1' : '0'));
+      if (display) cmds.push('displayrequireauth ' + (display.checked ? '1' : '0'));
+      if (ble && document.getElementById('auth-bluetooth-wrap').style.display !== 'none') {
+        cmds.push('bluetoothrequireauth ' + (ble.checked ? '1' : '0'));
+      }
+      Promise.all(cmds.map(function(cmd) { return postSettingsCli(cmd); }))
+        .then(function() { refreshSettings(); })
+        .catch(function(e) { alert('Error saving auth settings: ' + e.message); });
+    };
+
     // Update timezone
     window.updateTimezone = function() {
       const select = document.getElementById('tz-select');
@@ -2163,52 +1794,11 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       });
     };
     
-    // Toggle output channel
-    window.toggleOutput = function(setting, channel) {
-      var valueId = (channel || setting.replace('out', '').toLowerCase()) + '-value';
-      var btnId = (channel || setting.replace('out', '').toLowerCase()) + '-btn';
-      var valueEl = $(valueId);
-      var btnEl = $(btnId);
-      if (!valueEl || !btnEl) return;
-      var cur = (valueEl.textContent === 'Enabled') ? 1 : 0;
-      var newVal = cur ? 0 : 1;
-      btnEl.textContent = '...';
-      btnEl.disabled = true;
-      valueEl.textContent = newVal ? 'Enabled' : 'Disabled';
-      var cmdMap = {
-        outSerial: 'outserial',
-        outWeb: 'outweb',
-        outDisplay: 'outdisplay'
-      };
-      var key = cmdMap[setting] || setting.toLowerCase();
-      var cmd = key + ' ' + newVal;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) { return r.text(); })
-      .then(function(_t) {
-        btnEl.textContent = newVal ? 'Disable' : 'Enable';
-        btnEl.disabled = false;
-        try {
-          if (typeof window.refreshOutput === 'function') {
-            window.refreshOutput();
-          }
-        } catch(_) {}
-      })
-      .catch(function(e) {
-        valueEl.textContent = cur ? 'Enabled' : 'Disabled';
-        btnEl.textContent = cur ? 'Disable' : 'Enable';
-        btnEl.disabled = false;
-        alert('Error: ' + e.message);
-      });
-    };
-    
+    // toggleOutput removed - Output settings now in schema-driven Sensors panel
+
     // Disconnect WiFi
-    window.disconnectWifi = function() {
-      if (confirm('Are you sure you want to disconnect from WiFi? You may lose connection to this device.')) {
+    window.disconnectWifi = async function() {
+      if (await hwConfirm('Are you sure you want to disconnect from WiFi? You may lose connection to this device.')) {
         fetch('/api/cli', {
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -2240,116 +1830,7 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
 (function() {
   try {
     // Save device sensor settings
-    window.saveDeviceSensorSettings = function() {
-      var cmds = [];
-      var getInt = function(id, def) {
-        var el = $(id);
-        if (!el) return def;
-        var n = parseInt(el.value, 10);
-        return isNaN(n) ? def : n;
-      };
-      var getStr = function(id) {
-        var el = $(id);
-        if (!el) return null;
-        return String(el.value || '');
-      };
-      var getBool = function(id) {
-        var el = $(id);
-        if (!el) return null;
-        return el.checked ? 1 : 0;
-      };
-      
-      var map = [
-        ['thermalTargetFps', 'thermaltargetfps'],
-        ['thermalDevicePollMs', 'thermaldevicepollms'],
-        ['thermalUpscaleFactor', 'thermalupscalefactor'],
-        ['tofDevicePollMs', 'tofdevicepollms'],
-        ['imuDevicePollMs', 'imudevicepollms'],
-        ['thermalI2cClockHz', 'thermali2cclockHz'],
-        ['tofI2cClockHz', 'tofi2cclockHz']
-      ];
-      map.forEach(function(pair) {
-        var id = pair[0], cmdKey = pair[1];
-        var v = getInt(id, null);
-        if (v !== null && v !== undefined && window._isChanged(id, v)) {
-          cmds.push(cmdKey + ' ' + v);
-        }
-      });
-      
-      var rmmEn = getBool('thermalRollingMinMaxEnabled');
-      if (rmmEn !== null && window._isChanged('thermalRollingMinMaxEnabled', rmmEn)) cmds.push('thermalrollingminmaxenabled ' + rmmEn);
-      var rmmAlpha = getStr('thermalRollingMinMaxAlpha');
-      if (rmmAlpha !== null && window._isChanged('thermalRollingMinMaxAlpha', rmmAlpha)) cmds.push('thermalrollingminmaxalpha ' + rmmAlpha);
-      var rmmGuard = getStr('thermalRollingMinMaxGuardC');
-      if (rmmGuard !== null && window._isChanged('thermalRollingMinMaxGuardC', rmmGuard)) cmds.push('thermalrollingminmaxguardc ' + rmmGuard);
-      var tmpAlpha = getStr('thermalTemporalAlpha');
-      if (tmpAlpha !== null && window._isChanged('thermalTemporalAlpha', tmpAlpha)) cmds.push('thermaltemporalalpha ' + tmpAlpha);
-      
-      if (cmds.length === 0) {
-        alert('No changes to save.');
-        return;
-      }
-
-      sendSequential(cmds,
-        function() {
-          window._snapshotContainer(document.body);
-          alert('Device settings saved. Restart the thermal sensor (closethermal + openthermal) or reboot manually to apply upscale changes.');
-          refreshSettings();
-        },
-        function() { alert('One or more device commands failed.'); }
-      );
-    };
-    
-    // Save sensors UI settings
-    window.saveSensorsUISettings = function() {
-      try {
-        var cmds = [];
-        var getInt = function(id) {
-          var el = $(id);
-          if (!el) return null;
-          var n = parseInt(el.value, 10);
-          return isNaN(n) ? null : n;
-        };
-        var getStr = function(id) {
-          var el = $(id);
-          if (!el) return null;
-          return String(el.value || '');
-        };
-        var pushIfChanged = function(id, cmdKey, val) {
-          if (val !== null && val !== undefined && window._isChanged(id, val)) cmds.push(cmdKey + ' ' + val);
-        };
-
-        pushIfChanged('thermalPollingMs',      'thermalpollingms',       getInt('thermalPollingMs'));
-        pushIfChanged('thermalPaletteDefault', 'thermalpalettedefault',  getStr('thermalPaletteDefault'));
-        pushIfChanged('thermalEWMAFactor',     'thermalewmafactor',      getStr('thermalEWMAFactor'));
-        pushIfChanged('thermalTransitionMs',   'thermaltransitionms',    getInt('thermalTransitionMs'));
-        pushIfChanged('thermalWebMaxFps',      'thermalwebmaxfps',       getInt('thermalWebMaxFps'));
-        pushIfChanged('tofPollingMs',          'tofpollingms',           getInt('tofPollingMs'));
-        pushIfChanged('tofStabilityThreshold', 'tofstabilitythreshold',  getInt('tofStabilityThreshold'));
-        pushIfChanged('tofTransitionMs',       'toftransitionms',        getInt('tofTransitionMs'));
-        pushIfChanged('tofMaxDistanceMm',      'tofmaxdistancemm',       getInt('tofMaxDistanceMm'));
-        pushIfChanged('imuPollingMs',          'imupollingms',           getInt('imuPollingMs'));
-        pushIfChanged('imuEWMAFactor',         'imuewmafactor',          getStr('imuEWMAFactor'));
-        pushIfChanged('imuTransitionMs',       'imutransitionms',        getInt('imuTransitionMs'));
-        pushIfChanged('imuWebMaxFps',          'imuwebmaxfps',           getInt('imuWebMaxFps'));
-        
-        if (cmds.length === 0) {
-          alert('No changes to save.');
-          return;
-        }
-
-        sendSequential(cmds,
-          function() {
-            window._snapshotContainer(document.body);
-            try { if (typeof window.refreshSettings === 'function') window.refreshSettings(); } catch(_) {}
-            alert('Client UI settings saved.');
-          },
-          function() { alert('One or more Client UI commands failed.'); }
-        );
-      } catch(e) {
-        alert('Error: ' + e.message);
-      }
-    };
+    // saveDeviceSensorSettings and saveSensorsUISettings removed - these referenced non-existent HTML inputs
     
     // Save hardware settings
     // Helper functions for hardware settings
@@ -2371,92 +1852,8 @@ console.log('[SETTINGS] Part 3: Save functions starting...');
     };
     
     // Save LED settings
-    window.saveLEDSettings = function() {
-      try {
-        var cmds = [];
-        var brightness = getInt('ledBrightness');
-        if (brightness !== null && window._isChanged('ledBrightness', brightness)) cmds.push('ledbrightness ' + brightness);
-        var enabled = getBool('ledStartupEnabled');
-        if (enabled !== null && window._isChanged('ledStartupEnabled', enabled)) cmds.push('ledstartupenabled ' + enabled);
-        var effect = getStr('ledStartupEffect');
-        if (effect && window._isChanged('ledStartupEffect', effect)) cmds.push('ledstartupeffect ' + effect);
-        var color = getStr('ledStartupColor');
-        if (color && window._isChanged('ledStartupColor', color)) cmds.push('ledstartupcolor ' + color);
-        var color2 = getStr('ledStartupColor2');
-        if (color2 && window._isChanged('ledStartupColor2', color2)) cmds.push('ledstartupcolor2 ' + color2);
-        var duration = getInt('ledStartupDuration');
-        if (duration !== null && window._isChanged('ledStartupDuration', duration)) cmds.push('ledstartupduration ' + duration);
-        
-        if (cmds.length === 0) {
-          alert('No changes to save.');
-          return;
-        }
+    // saveLEDSettings removed - LED settings now saved via schema-driven saveDynamicSettings
 
-        sendSequential(cmds,
-          function() { window._snapshotContainer(document.getElementById('led-pane')); alert('LED settings saved.'); },
-          function() { alert('One or more LED commands failed.'); }
-        );
-      } catch(e) {
-        alert('Error saving LED settings: ' + e.message);
-      }
-    };
-    
-    // Save OLED settings
-    window.saveOLEDSettings = function() {
-      try {
-        var cmds = [];
-        var oledEnabled = getBool('oledEnabled');
-        if (oledEnabled !== null && window._isChanged('oledEnabled', oledEnabled)) cmds.push('oledenabled ' + oledEnabled);
-        var oledBootMode = getStr('oledBootMode');
-        if (oledBootMode && window._isChanged('oledBootMode', oledBootMode)) cmds.push('oledbootmode ' + oledBootMode);
-        var oledDefaultMode = getStr('oledDefaultMode');
-        if (oledDefaultMode && window._isChanged('oledDefaultMode', oledDefaultMode)) cmds.push('oleddefaultmode ' + oledDefaultMode);
-        var oledBootDuration = getInt('oledBootDuration');
-        if (oledBootDuration !== null && window._isChanged('oledBootDuration', oledBootDuration)) cmds.push('oledbootduration ' + oledBootDuration);
-        var oledUpdateInterval = getInt('oledUpdateInterval');
-        if (oledUpdateInterval !== null && window._isChanged('oledUpdateInterval', oledUpdateInterval)) cmds.push('oledupdateinterval ' + oledUpdateInterval);
-        var oledBrightness = getInt('oledBrightness');
-        if (oledBrightness !== null && window._isChanged('oledBrightness', oledBrightness)) cmds.push('oledbrightness ' + oledBrightness);
-        var oledThermalScale = getStr('oledThermalScale');
-        if (oledThermalScale && window._isChanged('oledThermalScale', oledThermalScale)) cmds.push('oledthermalscale ' + oledThermalScale);
-        var oledThermalColorMode = getStr('oledThermalColorMode');
-        if (oledThermalColorMode && window._isChanged('oledThermalColorMode', oledThermalColorMode)) cmds.push('oledthermalcolormode ' + oledThermalColorMode);
-        
-        if (cmds.length === 0) {
-          alert('No changes to save.');
-          return;
-        }
-
-        sendSequential(cmds,
-          function() { window._snapshotContainer(document.getElementById('oled-pane')); alert('OLED settings saved.'); },
-          function() { alert('One or more OLED commands failed.'); }
-        );
-      } catch(e) {
-        alert('Error saving OLED settings: ' + e.message);
-      }
-    };
-    
-    // Save Gamepad settings
-    window.saveGamepadSettings = function() {
-      try {
-        var cmds = [];
-        var gamepadAutoStart = getBool('gamepadAutoStart');
-        if (gamepadAutoStart !== null && window._isChanged('gamepadAutoStart', gamepadAutoStart)) cmds.push('gamepadautostart ' + (gamepadAutoStart ? 'on' : 'off'));
-        
-        if (cmds.length === 0) {
-          alert('No changes to save.');
-          return;
-        }
-
-        sendSequential(cmds,
-          function() { window._snapshotContainer(document.getElementById('gamepad-pane')); alert('Gamepad settings saved.'); },
-          function() { alert('One or more Gamepad commands failed.'); }
-        );
-      } catch(e) {
-        alert('Error saving Gamepad settings: ' + e.message);
-      }
-    };
-    
   } catch(err) {
     console.error('[SETTINGS] Part 3 ERROR:', err);
     alert('Settings page error (Part 3): ' + err.message);
@@ -2523,7 +1920,6 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:0.5rem;margin-top:0.5rem">';
           visible.forEach(function(ap) {
             var ssid = (ap.ssid || '(hidden)');
-            var lock = (ap.auth && ap.auth !== '0') ? '[SEC]' : '[OPEN]';
             var rssi = ap.rssi || -999;
             var ch = ap.channel || 0;
             var saved = (__S.state.savedSSIDs || []).indexOf(ssid) !== -1;
@@ -2535,7 +1931,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             var esc = encodeURIComponent(ssid);
             var needsPass = (ap.auth && ap.auth !== '0') ? 'true' : 'false';
             var btnCls = isCur ? ' vis-hidden' : '';
-            html += '<div style="background:var(--panel-bg);color:var(--panel-fg);border:1px solid ' + border + ';border-radius:6px;padding:0.5rem;display:flex;align-items:center;justify-content:space-between">' + '<div><div style="font-weight:bold">' + ssid + ' ' + badge + '</div><div style="color:var(--panel-fg);font-size:0.85rem">RSSI ' + rssi + ' | CH ' + ch + '</div></div>' + '<button class="btn' + btnCls + '" data-ssid="' + esc + '" data-locked="' + needsPass + '" onclick="(function(b){selectSsid(decodeURIComponent(b.dataset.ssid), b.dataset.locked===\\"true\\");})(this)">Select ' + lock + '</button>' + '</div>';
+            html += '<div style="background:var(--panel-bg);color:var(--panel-fg);border:1px solid ' + border + ';border-radius:6px;padding:0.5rem;display:flex;align-items:center;justify-content:space-between">' + '<div><div style="font-weight:bold">' + ssid + ' ' + badge + '</div><div style="color:var(--panel-fg);font-size:0.85rem">RSSI ' + rssi + ' | CH ' + ch + '</div></div>' + '<button class="btn' + btnCls + '" data-ssid="' + esc + '" data-locked="' + needsPass + '" onclick="(function(b){selectSsid(decodeURIComponent(b.dataset.ssid), b.dataset.locked===\\"true\\");})(this)">Select</button>' + '</div>';
           });
           html += '</div>';
         }
@@ -2591,8 +1987,8 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       }
     };
     
-    window.revokeUserSessions = function(username) {
-      if (!username || !confirm('Revoke all sessions for user: ' + username + '?')) return;
+    window.revokeUserSessions = async function(username) {
+      if (!username || !await hwConfirm('Revoke all sessions for user: ' + username + '?')) return;
       var cmd = 'sessionrevoke user ' + username;
       fetch('/api/cli', {
         method: 'POST',
@@ -2614,8 +2010,8 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
 
-    window.banUserByName = function(username) {
-      if (!username || !confirm('Ban user "' + username + '"? They will lose all access immediately.')) return;
+    window.banUserByName = async function(username) {
+      if (!username || !await hwConfirm('Ban user "' + username + '"? They will lose all access immediately.')) return;
       var cmd = 'banuser ' + username;
       fetch('/api/cli', {
         method: 'POST',
@@ -2637,8 +2033,8 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
 
-    window.unbanUserByName = function(username) {
-      if (!username || !confirm('Remove ban for user "' + username + '"?')) return;
+    window.unbanUserByName = async function(username) {
+      if (!username || !await hwConfirm('Remove ban for user "' + username + '"?')) return;
       var cmd = 'unbanuser ' + username;
       fetch('/api/cli', {
         method: 'POST',
@@ -2850,7 +2246,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           html += '<div id="dropdown-' + uid + '" style="display:none;padding:0.5rem">';
           if (!isPending) {
             var meta = [];
-            if (createdAt) meta.push('<strong>Created:</strong> ' + createdAt);
+            if (createdAt) meta.push('<strong>Created:</strong> ' + createdAt.replace('T', ' ').replace('Z', ''));
             if (lastActive) meta.push('<strong>Last Active:</strong> ' + formatMillisTimestamp(lastActive));
             else if (user.lastSeen) meta.push('<strong>Last Seen:</strong> ' + new Date(user.lastSeen).toLocaleString());
             else if (user.lastSeenSec) meta.push('<strong>Last Seen:</strong> ' + formatMillisTimestamp(user.lastSeenSec * 1000));
@@ -2931,12 +2327,12 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
     
-    window.promoteUserByName = function(username) {
+    window.promoteUserByName = async function(username) {
       if (!username) {
         alert('Username required');
         return;
       }
-      if (!confirm('Promote user "' + username + '" to admin?')) {
+      if (!await hwConfirm('Promote user "' + username + '" to admin?')) {
         return;
       }
       var cmd = 'userpromote ' + username;
@@ -2964,12 +2360,12 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
     
-    window.approveUserByName = function(username) {
+    window.approveUserByName = async function(username) {
       if (!username) {
         alert('Username required');
         return;
       }
-      if (!confirm('Approve user "' + username + '"?')) {
+      if (!await hwConfirm('Approve user "' + username + '"?')) {
         return;
       }
       var cmd = 'userapprove ' + username;
@@ -2997,12 +2393,12 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
     
-    window.denyUserByName = function(username) {
+    window.denyUserByName = async function(username) {
       if (!username) {
         alert('Username required');
         return;
       }
-      if (!confirm('Deny user "' + username + '"? This will permanently reject their registration.')) {
+      if (!await hwConfirm('Deny user "' + username + '"? This will permanently reject their registration.')) {
         return;
       }
       var cmd = 'userdeny ' + username;
@@ -3030,12 +2426,12 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
     
-    window.demoteUserByName = function(username) {
+    window.demoteUserByName = async function(username) {
       if (!username) {
         alert('Username required');
         return;
       }
-      if (!confirm('Demote admin user "' + username + '" to regular user?')) {
+      if (!await hwConfirm('Demote admin user "' + username + '" to regular user?')) {
         return;
       }
       var cmd = 'userdemote ' + username;
@@ -3063,12 +2459,12 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
     
-    window.deleteUserByName = function(username) {
+    window.deleteUserByName = async function(username) {
       if (!username) {
         alert('Username required');
         return;
       }
-      if (!confirm('Delete user "' + username + '"? This action cannot be undone.')) {
+      if (!await hwConfirm('Delete user "' + username + '"? This action cannot be undone.')) {
         return;
       }
       var cmd = 'userdelete ' + username;
@@ -3096,57 +2492,8 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
     
-    window.toggleSerialAuth = function() {
-      var current = $('serial-auth-value') && $('serial-auth-value').textContent === 'Required';
-      var val = current ? 0 : 1;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('serialrequireauth ' + val)
-      }).then(function(r) { return r.text(); })
-      .then(function() {
-        var el = $('serial-auth-value');
-        if (el) { el.textContent = val ? 'Required' : 'Disabled'; el.style.color = val ? '#28a745' : '#dc3545'; }
-        var btn = $('serial-auth-btn');
-        if (btn) btn.textContent = val ? 'Disable' : 'Enable';
-      });
-    };
-    
-    window.toggleBleAuth = function() {
-      var current = $('ble-auth-value') && $('ble-auth-value').textContent === 'Required';
-      var val = current ? 0 : 1;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('blerequireauth ' + val)
-      }).then(function(r) { return r.text(); })
-      .then(function() {
-        var el = $('ble-auth-value');
-        if (el) { el.textContent = val ? 'Required' : 'Disabled'; el.style.color = val ? '#28a745' : '#dc3545'; }
-        var btn = $('ble-auth-btn');
-        if (btn) btn.textContent = val ? 'Disable' : 'Enable';
-      });
-    };
-    
-    window.toggleDisplayAuth = function() {
-      var current = $('display-auth-value') && $('display-auth-value').textContent === 'Required';
-      var val = current ? 0 : 1;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('oledrequireauth ' + val)
-      }).then(function(r) { return r.text(); })
-      .then(function() {
-        var el = $('display-auth-value');
-        if (el) { el.textContent = val ? 'Required' : 'Disabled'; el.style.color = 'var(--accent)'; }
-        var btn = $('display-auth-btn');
-        if (btn) btn.textContent = val ? 'Disable' : 'Enable';
-      });
-    };
-    
+    // toggleSerialAuth, toggleBleAuth, toggleDisplayAuth removed - auth settings now in respective module panels
+
     window.toggleUserSync = function() {
       var current = $('usersync-enabled-value') && $('usersync-enabled-value').textContent === 'Enabled';
       var cmd = current ? 'espnowusersync off' : 'espnowusersync on';

@@ -1413,12 +1413,12 @@ SetupWizardResult runAndApplyFeatureWizard() {
     upsertWiFiNetwork(result.wifiSSID, result.wifiPassword, 1, false);
     sortWiFiByPriority();
     saveWiFiNetworks();
-    gSettings.wifiAutoReconnect = true;
+    setSetting(gSettings.wifiAutoReconnect, true);
     broadcastOutput("WiFi credentials saved: " + result.wifiSSID);
   }
 #endif
 
-  writeSettingsJson();
+  writeSettingsJson();  // flush any other wizard changes made above
   applySettings();
 
   return result;

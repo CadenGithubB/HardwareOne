@@ -1063,8 +1063,9 @@ void MapCore::geoToScreen(int32_t lat, int32_t lon,
     y = ry;
   }
   
-  screenX = cx + (int16_t)x;
-  screenY = cy + (int16_t)y;
+  // Clamp before casting to int16_t to prevent overflow-wrap producing false on-screen coords
+  screenX = cx + (int16_t)fmaxf(-30000.0f, fminf(30000.0f, x));
+  screenY = cy + (int16_t)fmaxf(-30000.0f, fminf(30000.0f, y));
 }
 
 // Thread-safe renderMap: all mutable state comes from params, no global reads
@@ -1893,12 +1894,11 @@ const char* cmd_map(const String& argsInput) {
 
 const char* cmd_mapload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: mapload <path>";
-  const char* p = _arg.c_str();
-  
-  if (MapCore::loadMapFile(p)) {
+
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Usage: mapload <path>";
+
+  if (MapCore::loadMapFile(a.arg(0).c_str())) {
     const LoadedMap& currentMap = MapCore::getCurrentMap();
     if (!ensureDebugBuffer()) return "Map loaded";
     snprintf(getDebugBuffer(), 1024, "Loaded: %s (%lu features)", 
@@ -1952,25 +1952,24 @@ const char* cmd_whereami(const String& argsInput) {
 
 const char* cmd_search(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: search <name>";
-  const char* p = _arg.c_str();
-  
+
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Usage: search <name>";
+
   if (!MapCore::hasValidMap()) {
     return "No map loaded";
   }
-  
+
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  
+
   // Search through all feature names
   const LoadedMap& map = MapCore::getCurrentMap();
   char* buf = getDebugBuffer();
   int pos = 0;
   int found = 0;
-  
-  // Convert search term to lowercase for case-insensitive search
-  String searchTerm = String(p);
+
+  // Convert search term to lowercase for case-insensitive search (preserve spaces)
+  String searchTerm = a.raw();
   searchTerm.toLowerCase();
   
   for (uint16_t i = 0; i < map.nameCount && found < 10; i++) {
@@ -2438,7 +2437,7 @@ GPSTrackPoint* GPSTrackManager::_points = nullptr;
 int GPSTrackManager::_pointCount = 0;
 GPSTrackBounds GPSTrackManager::_bounds = {0, 0, 0, 0, false};
 GPSTrackStats GPSTrackManager::_stats = {0, 0, 0, false};
-char GPSTrackManager::_filename[64] = "";
+char GPSTrackManager::_filename[256] = "";
 bool GPSTrackManager::_liveTracking = false;
 uint32_t GPSTrackManager::_lastUpdateMs = 0;
 
@@ -2597,6 +2596,12 @@ bool GPSTrackManager::loadTrack(const char* filepath, String& errorMsg) {
     
     float lat, lon;
     if (parseGPSLine(line.c_str(), lat, lon)) {
+      // Skip exact duplicates — GPS logs often repeat the same fix at sub-1Hz intervals
+      if (_pointCount > 0 &&
+          _points[_pointCount - 1].lat == lat &&
+          _points[_pointCount - 1].lon == lon) {
+        continue;
+      }
       _points[_pointCount].lat = lat;
       _points[_pointCount].lon = lon;
       _points[_pointCount].timestamp = 0;  // Could parse from log if needed
@@ -2887,49 +2892,50 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
 
 const char* cmd_gpstrack(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
-  
-  // argsInput is already the args after the command name (registry strips it)
-  const char* p = argsInput.c_str();
-  
-  if (*p == '\0' || strncmp(p, "status", 6) == 0) {
+
+  CommandArgs a(argsInput);
+  String sub = a.arg(0);
+  sub.toLowerCase();
+
+  if (sub.length() == 0 || sub == "status") {
     if (!GPSTrackManager::hasTrack()) {
       return "No GPS track loaded";
     }
-    
+
     int count = GPSTrackManager::getPointCount();
     const GPSTrackBounds& bounds = GPSTrackManager::getBounds();
     const char* filename = GPSTrackManager::getFilename();
-    
+
     float coverage;
     TrackValidation validation = GPSTrackManager::validateTrack(coverage);
     const char* validMsg = GPSTrackManager::getValidationMessage(validation, coverage);
-    
-    snprintf(buf, 1024, 
+
+    snprintf(buf, 1024,
              "GPS Track: %s\nPoints: %d\nBounds: %.5f,%.5f to %.5f,%.5f\n%s",
-             filename, count, bounds.minLat, bounds.minLon, 
+             filename, count, bounds.minLat, bounds.minLon,
              bounds.maxLat, bounds.maxLon, validMsg);
     return buf;
   }
-  
-  if (strncmp(p, "load ", 5) == 0) {
-    const char* filepath = p + 5;
+
+  if (sub == "load") {
+    if (!a.hasMinArgs(2)) return "Usage: gpstrack load <filepath>";
     String errorMsg;
-    
-    if (GPSTrackManager::loadTrack(filepath, errorMsg)) {
+
+    if (GPSTrackManager::loadTrack(a.arg(1).c_str(), errorMsg)) {
       float coverage;
       TrackValidation validation = GPSTrackManager::validateTrack(coverage);
-      
+
       if (validation == TRACK_OUT_OF_BOUNDS) {
         GPSTrackManager::clearTrack();
         snprintf(buf, 1024, "Error: Track outside map bounds (%.0f%% visible)", coverage);
         return buf;
       }
-      
+
       const char* validMsg = GPSTrackManager::getValidationMessage(validation, coverage);
-      snprintf(buf, 1024, "Loaded %d GPS points\n%s", 
+      snprintf(buf, 1024, "Loaded %d GPS points\n%s",
                GPSTrackManager::getPointCount(), validMsg);
       return buf;
     } else {
@@ -2937,27 +2943,27 @@ const char* cmd_gpstrack(const String& argsInput) {
       return buf;
     }
   }
-  
-  if (strncmp(p, "clear", 5) == 0) {
+
+  if (sub == "clear") {
     GPSTrackManager::clearTrack();
     return "GPS track cleared";
   }
-  
+
   return "Usage: gpstrack [status|load <filepath>|clear]";
 }
 
 const char* cmd_waypoint(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
-  
-  // argsInput is already the args after the command name (registry strips it)
-  const char* p = argsInput.c_str();
-  
-  if (*p == '\0' || strncmp(p, "list", 4) == 0) {
-    // List waypoints
-    int offset = snprintf(buf, 1024, "Waypoints (%d/%d):\n", 
+
+  CommandArgs a(argsInput);
+  String sub = a.arg(0);
+  sub.toLowerCase();
+
+  if (sub.length() == 0 || sub == "list") {
+    int offset = snprintf(buf, 1024, "Waypoints (%d/%d):\n",
                           WaypointManager::getActiveCount(), MAX_WAYPOINTS);
     int target = WaypointManager::getSelectedTarget();
     for (int i = 0; i < MAX_WAYPOINTS && offset < 900; i++) {
@@ -2969,37 +2975,35 @@ const char* cmd_waypoint(const String& argsInput) {
     }
     return buf;
   }
-  
-  if (strncmp(p, "add ", 4) == 0) {
-    // waypoint add <lat> <lon> <name>
-    float lat, lon;
-    char name[WAYPOINT_NAME_LEN];
-    if (sscanf(p + 4, "%f %f %11s", &lat, &lon, name) >= 2) {
-      if (strlen(name) == 0) strcpy(name, "WP");
-      int idx = WaypointManager::addWaypoint(lat, lon, name);
-      if (idx >= 0) {
-        snprintf(buf, 1024, "Added waypoint %d: %s", idx, name);
-      } else {
-        return "No free waypoint slots";
-      }
+
+  if (sub == "add") {
+    if (!a.hasMinArgs(3)) return "Usage: waypoint add <lat> <lon> [name]";
+    float lat = a.argFloat(1);
+    float lon = a.argFloat(2);
+    String name = a.has(3) ? a.arg(3) : String("WP");
+    if (name.length() == 0) name = "WP";
+    int idx = WaypointManager::addWaypoint(lat, lon, name.c_str());
+    if (idx >= 0) {
+      snprintf(buf, 1024, "Added waypoint %d: %s", idx, name.c_str());
     } else {
-      return "Usage: waypoint add <lat> <lon> [name]";
+      return "No free waypoint slots";
     }
     return buf;
   }
-  
-  if (strncmp(p, "del ", 4) == 0) {
-    int idx = atoi(p + 4);
-    if (WaypointManager::deleteWaypoint(idx)) {
-      snprintf(buf, 1024, "Deleted waypoint %d", idx);
+
+  if (sub == "del") {
+    if (!a.hasMinArgs(2)) return "Usage: waypoint del <index>";
+    if (WaypointManager::deleteWaypoint(a.argInt(1))) {
+      snprintf(buf, 1024, "Deleted waypoint %d", a.argInt(1));
     } else {
       return "Invalid waypoint index";
     }
     return buf;
   }
-  
-  if (strncmp(p, "goto ", 5) == 0) {
-    int idx = atoi(p + 5);
+
+  if (sub == "goto") {
+    if (!a.hasMinArgs(2)) return "Usage: waypoint goto <index>";
+    int idx = a.argInt(1);
     const Waypoint* wp = WaypointManager::getWaypoint(idx);
     if (wp) {
       WaypointManager::selectTarget(idx);
@@ -3009,40 +3013,34 @@ const char* cmd_waypoint(const String& argsInput) {
     }
     return buf;
   }
-  
-  if (strncmp(p, "clearall", 8) == 0) {
+
+  if (sub == "clearall") {
     WaypointManager::clearAll();
     return "All waypoints cleared";
   }
 
-  if (strncmp(p, "clear", 5) == 0) {
+  if (sub == "clear") {
     WaypointManager::selectTarget(-1);
     return "Navigation target cleared";
   }
 
-  if (strncmp(p, "rename ", 7) == 0) {
-    const char* rest = p + 7;
-    char* endptr;
-    int idx = (int)strtol(rest, &endptr, 10);
-    while (*endptr == ' ') endptr++;
-    if (endptr == rest || *endptr == '\0') return "Usage: waypoint rename <index> <name>";
-    char nameStr[WAYPOINT_NAME_LEN];
-    snprintf(nameStr, sizeof(nameStr), "%s", endptr);
-    if (WaypointManager::setName(idx, nameStr)) {
-      snprintf(buf, 1024, "Renamed waypoint %d: %s", idx, nameStr);
+  if (sub == "rename") {
+    if (!a.hasMinArgs(3)) return "Usage: waypoint rename <index> <name>";
+    int idx = a.argInt(1);
+    String name = a.remaining(1);  // everything after the index arg
+    if (WaypointManager::setName(idx, name.c_str())) {
+      snprintf(buf, 1024, "Renamed waypoint %d: %s", idx, name.c_str());
     } else {
       return "Invalid waypoint index";
     }
     return buf;
   }
 
-  if (strncmp(p, "notes ", 6) == 0) {
-    const char* rest = p + 6;
-    char* endptr;
-    int idx = (int)strtol(rest, &endptr, 10);
-    while (*endptr == ' ') endptr++;
-    if (endptr == rest || *endptr == '\0') return "Usage: waypoint notes <index> <notes>";
-    if (WaypointManager::setNotes(idx, endptr)) {
+  if (sub == "notes") {
+    if (!a.hasMinArgs(3)) return "Usage: waypoint notes <index> <notes>";
+    int idx = a.argInt(1);
+    String notes = a.remaining(1);  // everything after the index arg
+    if (WaypointManager::setNotes(idx, notes.c_str())) {
       snprintf(buf, 1024, "Set notes for waypoint %d", idx);
     } else {
       return "Invalid waypoint index";
@@ -3056,34 +3054,36 @@ const char* cmd_waypoint(const String& argsInput) {
 // Link a file to a waypoint by GPS coordinates (creates waypoint if needed, or finds nearest)
 const char* cmd_waypointfile(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
-  
-  // Parse: waypointfile <filepath> <lat> <lon> [waypointName]
-  // Or:    waypointfile <filepath> <waypointName>
-  // argsInput is already the args after the command name (registry strips it)
-  const char* p = argsInput.c_str();
-  
-  if (*p == '\0') {
+
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) {
     return "Usage: waypointfile <file> <wpName>\n   or: waypointfile <file> <lat> <lon> [wpName]";
   }
-  
+
   char filepath[WAYPOINT_FILE_PATH_LEN];
-  float lat, lon;
-  char wpName[WAYPOINT_NAME_LEN] = "";
-  
-  // Try parsing as: filepath lat lon [wpName]
-  int argsRead = sscanf(p, "%63s %f %f %11s", filepath, &lat, &lon, wpName);
-  
-  if (argsRead >= 3) {
-    // GPS coords provided - find or create waypoint
-    // Verify file exists
+  strlcpy(filepath, a.arg(0).c_str(), sizeof(filepath));
+
+  // Determine format: is arg(1) a numeric latitude?
+  // strtof returns endptr == start if no conversion was performed.
+  const String& arg1 = a.arg(1);
+  char* endp;
+  float lat = strtof(arg1.c_str(), &endp);
+  bool hasLatLon = (endp != arg1.c_str() && *endp == '\0') && a.hasMinArgs(3);
+
+  if (hasLatLon) {
+    // Format: <filepath> <lat> <lon> [wpName]
+    float lon = a.argFloat(2);
+    char wpName[WAYPOINT_NAME_LEN] = "";
+    strlcpy(wpName, a.arg(3).c_str(), sizeof(wpName));
+
     if (!LittleFS.exists(filepath)) {
       snprintf(buf, 1024, "File not found: %s", filepath);
       return buf;
     }
-    
+
     int wpIndex = -1;
     if (wpName[0]) {
       wpIndex = WaypointManager::findWaypointByName(wpName);
@@ -3109,10 +3109,10 @@ const char* cmd_waypointfile(const String& argsInput) {
       }
       if (wpIndex < 0) return "No nearby waypoint. Provide a name to create one.";
     }
-    
+
     if (WaypointManager::addFile(wpIndex, filepath)) {
       const Waypoint* wp = WaypointManager::getWaypoint(wpIndex);
-      snprintf(buf, 1024, "Linked %s to '%s' (%d files)", 
+      snprintf(buf, 1024, "Linked %s to '%s' (%d files)",
                filepath, wp ? wp->name : "?", WaypointManager::getFileCount(wpIndex));
     } else {
       const Waypoint* wp = WaypointManager::getWaypoint(wpIndex);
@@ -3124,87 +3124,73 @@ const char* cmd_waypointfile(const String& argsInput) {
     }
     return buf;
   }
-  
-  // Try parsing as: filepath wpName
+
+  // Format: <filepath> <wpName>
   char wpNameOnly[WAYPOINT_NAME_LEN];
-  if (sscanf(p, "%63s %11s", filepath, wpNameOnly) >= 2) {
-    if (!LittleFS.exists(filepath)) {
-      snprintf(buf, 1024, "File not found: %s", filepath);
-      return buf;
-    }
-    
-    int wpIndex = WaypointManager::findWaypointByName(wpNameOnly);
-    if (wpIndex < 0) {
-      snprintf(buf, 1024, "Waypoint not found: %s", wpNameOnly);
-      return buf;
-    }
-    
-    if (WaypointManager::addFile(wpIndex, filepath)) {
-      snprintf(buf, 1024, "Linked %s to '%s' (%d files)", 
-               filepath, wpNameOnly, WaypointManager::getFileCount(wpIndex));
-    } else {
-      const Waypoint* wp = WaypointManager::getWaypoint(wpIndex);
-      if (wp && wp->fileCount >= MAX_WAYPOINT_FILES) {
-        snprintf(buf, 1024, "'%s' has max files (%d)", wpNameOnly, MAX_WAYPOINT_FILES);
-      } else {
-        return "Failed to link (already linked?)";
-      }
-    }
+  strlcpy(wpNameOnly, arg1.c_str(), sizeof(wpNameOnly));
+
+  if (!LittleFS.exists(filepath)) {
+    snprintf(buf, 1024, "File not found: %s", filepath);
     return buf;
   }
-  
-  return "Usage: waypointfile <file> <wpName>\n   or: waypointfile <file> <lat> <lon> [wpName]";
+
+  int wpIndex = WaypointManager::findWaypointByName(wpNameOnly);
+  if (wpIndex < 0) {
+    snprintf(buf, 1024, "Waypoint not found: %s", wpNameOnly);
+    return buf;
+  }
+
+  if (WaypointManager::addFile(wpIndex, filepath)) {
+    snprintf(buf, 1024, "Linked %s to '%s' (%d files)",
+             filepath, wpNameOnly, WaypointManager::getFileCount(wpIndex));
+  } else {
+    const Waypoint* wp = WaypointManager::getWaypoint(wpIndex);
+    if (wp && wp->fileCount >= MAX_WAYPOINT_FILES) {
+      snprintf(buf, 1024, "'%s' has max files (%d)", wpNameOnly, MAX_WAYPOINT_FILES);
+    } else {
+      return "Failed to link (already linked?)";
+    }
+  }
+  return buf;
 }
 
 // List or remove files from a waypoint
 const char* cmd_waypointfiles(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
-  
-  // Parse: waypointfiles <waypointName> [del <index>]
-  const char* p = argsInput.c_str();
-  while (*p && *p != ' ') p++;
-  while (*p == ' ') p++;
-  
-  if (*p == '\0') {
-    return "Usage: waypointfiles <wpName> [del <index>]";
-  }
-  
-  char wpName[WAYPOINT_NAME_LEN];
-  char action[8] = "";
-  int fileIdx = -1;
-  
-  int argsRead = sscanf(p, "%11s %7s %d", wpName, action, &fileIdx);
-  if (argsRead < 1) {
-    return "Usage: waypointfiles <wpName> [del <index>]";
-  }
-  
-  int wpIndex = WaypointManager::findWaypointByName(wpName);
+
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Usage: waypointfiles <wpName> [del <index>]";
+
+  const String& wpName = a.arg(0);
+  int wpIndex = WaypointManager::findWaypointByName(wpName.c_str());
   if (wpIndex < 0) {
-    snprintf(buf, 1024, "Waypoint not found: %s", wpName);
+    snprintf(buf, 1024, "Waypoint not found: %s", wpName.c_str());
     return buf;
   }
-  
-  // Delete action
-  if (strcmp(action, "del") == 0 && fileIdx >= 0) {
+
+  // Delete action: waypointfiles <wpName> del <index>
+  if (a.arg(1) == "del") {
+    if (!a.hasMinArgs(3)) return "Usage: waypointfiles <wpName> del <index>";
+    int fileIdx = a.argInt(2);
     if (WaypointManager::removeFile(wpIndex, fileIdx)) {
-      snprintf(buf, 1024, "Removed file %d from '%s'", fileIdx, wpName);
+      snprintf(buf, 1024, "Removed file %d from '%s'", fileIdx, wpName.c_str());
     } else {
-      snprintf(buf, 1024, "Invalid file index %d for '%s'", fileIdx, wpName);
+      snprintf(buf, 1024, "Invalid file index %d for '%s'", fileIdx, wpName.c_str());
     }
     return buf;
   }
-  
+
   // List files
   int count = WaypointManager::getFileCount(wpIndex);
   if (count == 0) {
-    snprintf(buf, 1024, "Waypoint '%s' has no files", wpName);
+    snprintf(buf, 1024, "Waypoint '%s' has no files", wpName.c_str());
     return buf;
   }
-  
-  int offset = snprintf(buf, 1024, "Files for '%s' (%d):\n", wpName, count);
+
+  int offset = snprintf(buf, 1024, "Files for '%s' (%d):\n", wpName.c_str(), count);
   for (int i = 0; i < count && offset < 900; i++) {
     const char* file = WaypointManager::getFile(wpIndex, i);
     if (file) {

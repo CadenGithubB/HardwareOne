@@ -23,10 +23,16 @@ static const SettingEntry oledSettingEntries[] = {
   { "oledThermalColorMode", SETTING_STRING, &gSettings.oledThermalColorMode,    0, 0, "3level", 0, 0, "Thermal Color Mode", "3level,grayscale,binary" }
 };
 
+static bool isOledConnected() {
+  return oledConnected;
+}
+
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule oledSettingsModule = {
   "oled", "oled_ssd1306", oledSettingEntries,
-  sizeof(oledSettingEntries) / sizeof(oledSettingEntries[0])
+  sizeof(oledSettingEntries) / sizeof(oledSettingEntries[0]),
+  isOledConnected,
+  "OLED display (SSD1306)"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

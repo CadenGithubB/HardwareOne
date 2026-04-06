@@ -582,15 +582,15 @@ function uploadMapFile(input) {
 // Free device-side map (PSRAM tile cache + file handle). Browser still holds parsed map until you reload or clear.
 async function unloadDeviceMap() {
   try {
-    const resp = await fetch('/api/maps/unload', { credentials: 'include' });
-    const data = await resp.json();
-    if (!data.success) {
-      alert(data.error || 'Unload failed');
+    const resp = await fetch('/api/cli', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'include',body:'cmd=mapunload'});
+    const msg = await resp.text();
+    if (!resp.ok || (msg && msg.startsWith('Error'))) {
+      alert(msg || 'Unload failed');
       return;
     }
-    if (typeof hw !== 'undefined' && hw.notify) hw.notify('success', data.message || 'Device map unloaded');
+    if (typeof hw !== 'undefined' && hw.notify) hw.notify('success', msg || 'Device map unloaded');
     const wpStatus = document.getElementById('waypoint-status');
-    if (wpStatus) wpStatus.textContent = data.message || 'Device map unloaded — waypoints API inactive until you load a map again';
+    if (wpStatus) wpStatus.textContent = msg || 'Device map unloaded — waypoints API inactive until you load a map again';
   } catch (e) {
     alert(e.message || 'Unload failed');
   }
@@ -614,10 +614,10 @@ async function loadMap(path) {
     
     if (currentMap) {
       try {
-        const selResp = await fetch('/api/maps/select?file=' + encodeURIComponent(path), { credentials: 'include' });
-        const selData = await selResp.json();
-        if (!selData || selData.success !== true) {
-          console.warn('[MAP] Device map select failed:', selData);
+        const selResp = await fetch('/api/cli', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'include',body:'cmd=' + encodeURIComponent('mapload ' + path)});
+        const selText = await selResp.text();
+        if (!selResp.ok || (selText && selText.startsWith('Error'))) {
+          console.warn('[MAP] Device map load failed:', selText);
           const wpStatus = document.getElementById('waypoint-status');
           if (wpStatus) wpStatus.textContent = 'Warning: Device map load failed — waypoints unavailable';
         }
@@ -1497,15 +1497,12 @@ function renderMap() {
     ctx.beginPath();
     let firstPoint = true;
     for (const point of gpsTrack) {
-      if (point.lat >= m.minLat && point.lat <= m.maxLat &&
-          point.lon >= m.minLon && point.lon <= m.maxLon) {
-        const pos = toCanvas(point.lat, point.lon);
-        if (firstPoint) {
-          ctx.moveTo(pos.x, pos.y);
-          firstPoint = false;
-        } else {
-          ctx.lineTo(pos.x, pos.y);
-        }
+      const pos = toCanvas(point.lat, point.lon);
+      if (firstPoint) {
+        ctx.moveTo(pos.x, pos.y);
+        firstPoint = false;
+      } else {
+        ctx.lineTo(pos.x, pos.y);
       }
     }
     ctx.stroke();
@@ -2224,7 +2221,7 @@ function importWaypoints() {
       alert('Invalid waypoint file format');
       return;
     }
-    if (!confirm(`Import ${data.waypoints.length} waypoint(s)? This will add to existing waypoints.`)) return;
+    if (!await hwConfirm(`Import ${data.waypoints.length} waypoint(s)? This will add to existing waypoints.`)) return;
     for (const wp of data.waypoints) {
       if (typeof wp.lat === 'number' && typeof wp.lon === 'number') {
         try {
@@ -2241,7 +2238,7 @@ function importWaypoints() {
 }
 
 async function clearAllWaypoints() {
-  if (!confirm('Delete all waypoints for this map?')) return;
+  if (!await hwConfirm('Delete all waypoints for this map?')) return;
   const body = new URLSearchParams();
   body.set('action', 'clear_all');
   const resp = await fetch('/api/waypoints', {
@@ -2255,7 +2252,7 @@ async function clearAllWaypoints() {
 }
 
 async function deleteWaypoint(idx) {
-  if (!confirm('Delete this waypoint?')) return;
+  if (!await hwConfirm('Delete this waypoint?')) return;
   
   const body = new URLSearchParams();
   body.set('action', 'delete');

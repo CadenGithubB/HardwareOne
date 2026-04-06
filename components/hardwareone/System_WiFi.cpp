@@ -138,27 +138,13 @@ const char* cmd_wifiadd(const String& originalCmd) {
   // upsertWiFiNetwork, sortWiFiByPriority, saveWiFiNetworks are now defined in this file
   
   // wifiadd <ssid> <pass> [priority] [hidden0|1]
-  String args = originalCmd;
-  args.trim();
-  int sp1 = args.indexOf(' ');
-  if (sp1 <= 0) return "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]";
-  String ssid = args.substring(0, sp1);
-  String rest = args.substring(sp1 + 1);
-  rest.trim();
-  int sp2 = rest.indexOf(' ');
-  String pass = (sp2 < 0) ? rest : rest.substring(0, sp2);
-  String more = (sp2 < 0) ? "" : rest.substring(sp2 + 1);
-  more.trim();
-  int pri = 0;
-  bool hid = (ssid.length() == 0);
-  if (more.length() > 0) {
-    int sp3 = more.indexOf(' ');
-    String priStr = (sp3 < 0) ? more : more.substring(0, sp3);
-    pri = priStr.toInt();
-    if (pri <= 0) pri = 1;
-    String hidStr = (sp3 < 0) ? "" : more.substring(sp3 + 1);
-    hid = (hidStr == "1" || hidStr == "true");
-  }
+  CommandArgs a(originalCmd);
+  if (!a.hasMinArgs(2)) return "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]";
+  String ssid = a.arg(0);
+  String pass = a.arg(1);
+  int pri = a.argInt(2, 0);
+  if (pri <= 0 && a.has(2)) pri = 1;
+  bool hid = a.argBool(3, ssid.length() == 0);
   // Networks already in memory from settings.json
   upsertWiFiNetwork(ssid, pass, pri, hid);
   sortWiFiByPriority();
@@ -194,12 +180,10 @@ const char* cmd_wifipromote(const String& originalCmd) {
   // findWiFiNetwork, sortWiFiByPriority, saveWiFiNetworks are now defined in this file
   
   // wifipromote <ssid> [newPriority]
-  String rest = originalCmd;
-  rest.trim();
-  if (rest.length() == 0) return "Usage: wifipromote <ssid> [newPriority]";
-  int sp = rest.indexOf(' ');
-  String ssid = (sp < 0) ? rest : rest.substring(0, sp);
-  int newPri = (sp < 0) ? 1 : rest.substring(sp + 1).toInt();
+  CommandArgs a(originalCmd);
+  if (!a.hasMinArgs(1)) return "Usage: wifipromote <ssid> [newPriority]";
+  String ssid = a.arg(0);
+  int newPri = a.argInt(1, 1);
   if (newPri <= 0) newPri = 1;
   // Networks already in memory from settings.json
   int idx = findWiFiNetwork(ssid);
@@ -256,22 +240,20 @@ const char* cmd_wificonnect(const String& originalCmd) {
     return "ERROR: Failed to initialize WiFi";
   }
   
-  String arg = originalCmd;
-  arg.trim();
+  CommandArgs a(originalCmd);
   String prevSSID = WiFi.isConnected() ? WiFi.SSID() : String("");
   bool connected = false;
 
   // Parse flags: --best, --index N, or legacy positional index
   bool useBest = false;
   int index1 = -1;
-  if (arg.length() == 0) {
+  String firstArg = a.arg(0);
+  if (a.count() == 0) {
     useBest = true;  // default behavior
-  } else if (arg.startsWith("--best")) {
+  } else if (firstArg == "--best") {
     useBest = true;
-  } else if (arg.startsWith("--index ")) {
-    String n = arg.substring(8);
-    n.trim();
-    index1 = n.toInt();
+  } else if (firstArg == "--index") {
+    index1 = a.argInt(1, 0);
     if (index1 <= 0 || index1 > gWifiNetworkCount) {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       snprintf(getDebugBuffer(), 1024, "Usage: wificonnect --index <1..%d>", gWifiNetworkCount);
@@ -279,7 +261,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
     }
   } else {
     // Legacy: numeric positional index
-    int sel = arg.toInt();
+    int sel = firstArg.toInt();
     if (sel > 0) index1 = sel;
     else {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -312,13 +294,13 @@ const char* cmd_wificonnect(const String& originalCmd) {
 
 const char* cmd_wifidisconnect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
   // Check if WiFi is initialized before attempting disconnect
   wifi_mode_t mode;
   if (esp_wifi_get_mode(&mode) != ESP_OK) {
     return "WiFi is not initialized";
   }
-  
+
   // Stop HTTP server to free heap
  #if ENABLE_HTTP_SERVER
   if (server != NULL) {
@@ -829,6 +811,50 @@ const char* cmd_ntpsync(const String& argsInput) {
   return ok ? "NTP sync complete" : "NTP sync failed";
 }
 
+const char* cmd_ntpstatus(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  extern uint32_t gNTPAnchorId;
+  extern uint32_t gBootCounter;
+  extern bool gTimeSyncedMarkerWritten;
+
+  // Format timezone offset as UTC±HH:MM
+  int tzMin = gSettings.tzOffsetMinutes;
+  char tzStr[12];
+  snprintf(tzStr, sizeof(tzStr), "UTC%+d:%02d", tzMin / 60, abs(tzMin % 60));
+
+  // Get current time
+  time_t now = time(nullptr);
+  struct tm timeinfo;
+  char timeStr[32] = "Not synced";
+  if (now > 0 && getLocalTime(&timeinfo, 10)) {
+    if (timeinfo.tm_year + 1900 >= 2020) {
+      strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    }
+  }
+
+  snprintf(getDebugBuffer(), 1024,
+    "NTP Status:\n"
+    "  Primary server : %s\n"
+    "  Backup servers : time.google.com, time.cloudflare.com\n"
+    "  Timezone       : %s (%+d min)\n"
+    "  Current time   : %s\n"
+    "  Synced this boot: %s\n"
+    "  Boot anchor ID : %lu\n"
+    "  Boot counter   : %lu\n"
+    "  WiFi           : %s",
+    gSettings.ntpServer.c_str(),
+    tzStr, tzMin,
+    timeStr,
+    gTimeSyncedMarkerWritten ? "yes" : "no",
+    (unsigned long)gNTPAnchorId,
+    (unsigned long)gBootCounter,
+    WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "not connected"
+  );
+  return getDebugBuffer();
+}
+
 #if ENABLE_HTTP_SERVER
 const char* cmd_httpstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1182,7 +1208,8 @@ const CommandEntry wifiCommands[] = {
   { "wifigettxpower", "Get WiFi TX power.", false, cmd_wifitxpower },
   
   // Network Services
-  { "ntpsync", "Sync time with NTP server.", false, cmd_ntpsync },
+  { "ntpsync",   "Sync time with NTP server.",               false, cmd_ntpsync },
+  { "ntpstatus", "Show NTP configuration and sync state.",   false, cmd_ntpstatus },
 #if ENABLE_HTTP_SERVER
   { "openhttp", "Start HTTP server.", false, cmd_httpstart },
   { "closehttp", "Stop HTTP server.", false, cmd_httpstop },
@@ -1294,7 +1321,9 @@ extern const SettingsModule wifiSettingsModule = {
   "wifi",
   "wifi",
   wifiSettingsEntries,
-  sizeof(wifiSettingsEntries) / sizeof(wifiSettingsEntries[0])
+  sizeof(wifiSettingsEntries) / sizeof(wifiSettingsEntries[0]),
+  nullptr,
+  "WiFi connection and network settings"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
@@ -1317,7 +1346,9 @@ extern const SettingsModule httpSettingsModule = {
   "http",
   "http",
   httpSettingsEntries,
-  sizeof(httpSettingsEntries) / sizeof(httpSettingsEntries[0])
+  sizeof(httpSettingsEntries) / sizeof(httpSettingsEntries[0]),
+  nullptr,
+  "HTTP server settings"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

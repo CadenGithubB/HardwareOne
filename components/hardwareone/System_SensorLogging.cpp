@@ -267,12 +267,12 @@ void sensorLogTick() {
     return buf;
   };
 
-  // Track format state (signal loss dedup)
-  uint32_t trackSignalLostCount = 0;
-  bool trackWasConnected = false;
+  // Track format state (signal loss dedup) — must be static to persist across ticks
+  static uint32_t trackSignalLostCount = 0;
+  static bool trackWasConnected = false;
 
   // Track format builder — GPS-only compact: time,lat,lon,alt,speed,sats
-  auto buildTrackFromSnap = [&trackSignalLostCount, &trackWasConnected](const SensorCacheSnapshot& s) -> const char* {
+  auto buildTrackFromSnap = [](const SensorCacheSnapshot& s) -> const char* {
     static char buf[128];
     
     // Format timestamp from GPS time or millis fallback
@@ -566,9 +566,8 @@ void sensorLogTick() {
 const char* cmd_sensorlog(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String action = argsInput;
-  action.trim();
-  if (action.length() == 0) {
+  CommandArgs a(argsInput);
+  if (a.count() == 0) {
     return "Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors|autostart> [args...]\n"
            "  start <filepath> [interval_ms]: Begin logging (default 5000ms)\n"
            "  stop: Stop logging\n"
@@ -580,8 +579,7 @@ const char* cmd_sensorlog(const String& argsInput) {
            "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|all|none>: Select sensors to log\n"
            "  autostart [on|off]: Auto-start logging on boot with last-used parameters";
   }
-  int sp2 = action.indexOf(' ');
-  String subCmd = (sp2 >= 0) ? action.substring(0, sp2) : action;
+  String subCmd = a.arg(0);
   subCmd.toLowerCase();
 
   // Handle 'status' subcommand
@@ -654,22 +652,16 @@ const char* cmd_sensorlog(const String& argsInput) {
       return "Sensor logging already running. Use 'sensorlog stop' first.";
     }
 
-    if (sp2 < 0) {
+    if (!a.has(1)) {
       return "Usage: sensorlog start <filepath> [interval_ms]\n"
              "Example: sensorlog start /logging_captures/sensors/sensors.txt 1000";
     }
 
-    String args = action.substring(sp2 + 1);
-    args.trim();
-    int sp3 = args.indexOf(' ');
-
-    String filepath = (sp3 >= 0) ? args.substring(0, sp3) : args;
+    String filepath = a.arg(1);
     uint32_t interval = gSensorLogIntervalMs;
 
-    if (sp3 >= 0) {
-      String intervalStr = args.substring(sp3 + 1);
-      intervalStr.trim();
-      interval = intervalStr.toInt();
+    if (a.has(2)) {
+      interval = a.argInt(2, (int)gSensorLogIntervalMs);
       if (interval < 100) interval = 100;
       if (interval > 3600000) interval = 3600000;
     }
@@ -785,7 +777,7 @@ const char* cmd_sensorlog(const String& argsInput) {
 
   // Handle 'format' subcommand
   if (subCmd == "format") {
-    if (sp2 < 0) {
+    if (!a.has(1)) {
       const char* fmtName = (gSensorLogFormat == SENSOR_LOG_CSV) ? "csv" :
                              (gSensorLogFormat == SENSOR_LOG_TRACK) ? "track" : "text";
       snprintf(getDebugBuffer(), 1024, "Current format: %s\nUsage: sensorlog format <text|csv|track>\n"
@@ -796,8 +788,7 @@ const char* cmd_sensorlog(const String& argsInput) {
       return getDebugBuffer();
     }
 
-    String formatType = action.substring(sp2 + 1);
-    formatType.trim();
+    String formatType = a.arg(1);
     formatType.toLowerCase();
 
     if (formatType == "csv") {
@@ -822,15 +813,13 @@ const char* cmd_sensorlog(const String& argsInput) {
   // Handle 'maxsize' subcommand
   if (subCmd == "maxsize") {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    if (sp2 < 0) {
+    if (!a.has(1)) {
       snprintf(getDebugBuffer(), 1024, "Current max size: %u bytes\nUsage: sensorlog maxsize <bytes>",
                (unsigned)gSensorLogMaxSize);
       return getDebugBuffer();
     }
 
-    String sizeStr = action.substring(sp2 + 1);
-    sizeStr.trim();
-    size_t newSize = sizeStr.toInt();
+    size_t newSize = a.argInt(1, 0);
 
     if (newSize < 10240) return "Error: Max size must be at least 10240 bytes (10KB)";
     if (newSize > 10485760) return "Error: Max size cannot exceed 10485760 bytes (10MB)";
@@ -844,16 +833,14 @@ const char* cmd_sensorlog(const String& argsInput) {
   // Handle 'rotations' subcommand
   if (subCmd == "rotations") {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    if (sp2 < 0) {
+    if (!a.has(1)) {
       snprintf(getDebugBuffer(), 1024, "Current rotations: %u\nUsage: sensorlog rotations <count>\n"
                                    "Set to 0 to disable rotation (delete old logs)",
                (unsigned)gSensorLogMaxRotations);
       return getDebugBuffer();
     }
 
-    String countStr = action.substring(sp2 + 1);
-    countStr.trim();
-    int count = countStr.toInt();
+    int count = a.argInt(1, 0);
 
     if (count < 0 || count > 9) return "Error: Rotation count must be 0-9";
 
@@ -870,7 +857,7 @@ const char* cmd_sensorlog(const String& argsInput) {
   // Handle 'sensors' subcommand
   if (subCmd == "sensors") {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    if (sp2 < 0) {
+    if (!a.has(1)) {
       char* p = getDebugBuffer();
       size_t remaining = 1024;
       int n = snprintf(p, remaining, "Selected sensors:\n");
@@ -894,8 +881,7 @@ const char* cmd_sensorlog(const String& argsInput) {
       return getDebugBuffer();
     }
 
-    String sensorList = action.substring(sp2 + 1);
-    sensorList.trim();
+    String sensorList = a.remaining(0);
     sensorList.toLowerCase();
 
     if (sensorList == "all") {
@@ -948,14 +934,12 @@ const char* cmd_sensorlog(const String& argsInput) {
   // Handle 'interval' subcommand
   if (subCmd == "interval") {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    if (sp2 < 0) {
+    if (!a.has(1)) {
       snprintf(getDebugBuffer(), 1024, "Current interval: %lums\nUsage: sensorlog interval <ms> (100-3600000)",
                (unsigned long)gSensorLogIntervalMs);
       return getDebugBuffer();
     }
-    String msStr = action.substring(sp2 + 1);
-    msStr.trim();
-    uint32_t ms = (uint32_t)msStr.toInt();
+    uint32_t ms = (uint32_t)a.argInt(1, (int)gSensorLogIntervalMs);
     if (ms < 100) ms = 100;
     if (ms > 3600000) ms = 3600000;
     gSensorLogIntervalMs = ms;
@@ -966,16 +950,13 @@ const char* cmd_sensorlog(const String& argsInput) {
 
   // Handle 'autostart' subcommand
   if (subCmd == "autostart") {
-    if (sp2 < 0) {
+    if (!a.has(1)) {
       // Toggle
       bool newVal = !gSettings.sensorLogAutoStart;
       setSetting(gSettings.sensorLogAutoStart, newVal);
       return newVal ? "Sensor logging auto-start ENABLED" : "Sensor logging auto-start DISABLED";
     }
-    String val = action.substring(sp2 + 1);
-    val.trim();
-    val.toLowerCase();
-    bool enable = (val == "on" || val == "1" || val == "true" || val == "yes");
+    bool enable = a.argBool(1, false);
     setSetting(gSettings.sensorLogAutoStart, enable);
     return enable ? "Sensor logging auto-start ENABLED" : "Sensor logging auto-start DISABLED";
   }
@@ -1011,7 +992,7 @@ const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry sensorLogSettingEntries[] = {
-  { "sensorLogAutoStart",    SETTING_BOOL,   &gSettings.sensorLogAutoStart,    0, 0, nullptr, 0, 1,       "Auto-start logging after boot", nullptr },
+  { "sensorLogAutoStart",    SETTING_BOOL,   &gSettings.sensorLogAutoStart,    0, 0, nullptr, 0, 1,       "Auto-start logging after boot", nullptr, false, nullptr, "sensorlog autostart" },
   { "sensorLogPath",         SETTING_STRING, &gSettings.sensorLogPath,         0, 0, "/logging_captures/sensors/sensors.txt", 0, 0, "Log file path", nullptr },
   { "sensorLogIntervalMs",   SETTING_INT,    &gSettings.sensorLogIntervalMs,   5000, 0, nullptr, 100, 3600000, "Poll interval (ms)", nullptr },
   { "sensorLogMask",         SETTING_INT,    &gSettings.sensorLogMask,         0, 0, nullptr, 0, 255,     "Sensor bitmask", nullptr },
@@ -1064,15 +1045,31 @@ void sensorLogAutoStart() {
     baseName = baseName.substring(0, baseName.lastIndexOf('.'));
   }
   
-  // Strip any existing timestamp pattern from baseName to prevent double-timestamping
-  // Patterns: "-2026-02-17T11-11-43" or "-boot12345"
-  int dashPos = baseName.lastIndexOf('-');
-  if (dashPos > 0) {
-    String suffix = baseName.substring(dashPos + 1);
-    // Check if suffix looks like a timestamp (starts with digit and contains 'T' or 'boot')
-    if (suffix.length() > 0 && (suffix.indexOf('T') > 0 || suffix.startsWith("boot"))) {
-      baseName = baseName.substring(0, dashPos);
+  // Strip any existing timestamp suffixes from baseName to prevent double-timestamping.
+  // Timestamps start with "-YYYY-" (e.g. "-2026-04-04T...") or "-boot".
+  // Scan forward for the first such pattern rather than looking at the last segment,
+  // because the last segment is often just the seconds ("02") which has no T or boot.
+  {
+    int stripAt = -1;
+    for (int i = 0; i < (int)baseName.length() - 5; i++) {
+      if (baseName.charAt(i) == '-') {
+        // Check for "-YYYY-" (4 digits followed by another dash)
+        if (isdigit(baseName.charAt(i+1)) && isdigit(baseName.charAt(i+2)) &&
+            isdigit(baseName.charAt(i+3)) && isdigit(baseName.charAt(i+4)) &&
+            baseName.charAt(i+5) == '-') {
+          stripAt = i;
+          break;
+        }
+        // Check for "-boot"
+        if (baseName.length() > (size_t)(i + 4) &&
+            baseName.charAt(i+1) == 'b' && baseName.charAt(i+2) == 'o' &&
+            baseName.charAt(i+3) == 'o' && baseName.charAt(i+4) == 't') {
+          stripAt = i;
+          break;
+        }
+      }
     }
+    if (stripAt > 0) baseName = baseName.substring(0, stripAt);
   }
   
   // Get current time for timestamp (fallback to boot counter + ms if no RTC/NTP)
@@ -1089,7 +1086,7 @@ void sensorLogAutoStart() {
   }
   
   // Build timestamped path: /logs/sensors/sensors-2026-02-17T14-30-00.txt or /logs/sensors/sensors-boot12345.txt
-  char pathBuf[128];
+  char pathBuf[256];
   snprintf(pathBuf, sizeof(pathBuf), "%s%s-%s%s", dir.c_str(), baseName.c_str(), timestamp, ext.c_str());
   path = pathBuf;
 
@@ -1106,7 +1103,7 @@ void sensorLogAutoStart() {
   }
 
   // Build and execute the CLI command so all validation/space checks run
-  char cmd[128];
+  char cmd[320];
   snprintf(cmd, sizeof(cmd), "sensorlog start %s %d", path.c_str(), (int)gSensorLogIntervalMs);
   BROADCAST_PRINTF("[sensorlog] Auto-start: %s", cmd);
   const char* result = cmd_sensorlog(String(cmd).substring(10));  // Pass everything after "sensorlog " (10 chars)

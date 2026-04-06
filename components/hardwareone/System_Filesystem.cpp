@@ -310,21 +310,41 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
           }
           subDir.close();
         }
-        char folderFullPath[128];
-        snprintf(folderFullPath, sizeof(folderFullPath), "%s%s%s", dirPath.c_str(), dirPath == "/" ? "" : "/", fileName.c_str());
-        uint8_t folderPerms = getPermissions(folderFullPath);
-        char entryBuf[128];
-        snprintf(entryBuf, sizeof(entryBuf), "{\"name\":\"%s\",\"type\":\"folder\",\"size\":\"%d items\",\"count\":%d,\"perms\":%d}",
-                 fileName.c_str(), itemCount, itemCount, folderPerms);
-        out += entryBuf;
+        // Build the full path for permission lookup using String to avoid fixed-size overflow
+        String folderFullPath = dirPath;
+        if (dirPath != "/") folderFullPath += "/";
+        folderFullPath += fileName;
+        uint8_t folderPerms = getPermissions(folderFullPath.c_str());
+        // Build JSON entry directly into out — no fixed buffer, handles any filename length
+        out += "{\"name\":\"";
+        for (size_t ci = 0; ci < fileName.length(); ci++) {
+          char c = fileName.charAt(ci);
+          if (c == '"' || c == '\\') out += '\\';
+          out += c;
+        }
+        out += "\",\"type\":\"folder\",\"size\":\"";
+        out += itemCount;
+        out += " items\",\"count\":";
+        out += itemCount;
+        out += ",\"perms\":";
+        out += (int)folderPerms;
+        out += "}";
       } else {
-        char fileFullPath[128];
-        snprintf(fileFullPath, sizeof(fileFullPath), "%s%s%s", dirPath.c_str(), dirPath == "/" ? "" : "/", fileName.c_str());
-        uint8_t filePerms = getPermissions(fileFullPath);
-        char entryBuf[128];
-        snprintf(entryBuf, sizeof(entryBuf), "{\"name\":\"%s\",\"type\":\"file\",\"size\":\"%lu bytes\",\"perms\":%d}",
-                 fileName.c_str(), (unsigned long)file.size(), filePerms);
-        out += entryBuf;
+        String fileFullPath = dirPath;
+        if (dirPath != "/") fileFullPath += "/";
+        fileFullPath += fileName;
+        uint8_t filePerms = getPermissions(fileFullPath.c_str());
+        out += "{\"name\":\"";
+        for (size_t ci = 0; ci < fileName.length(); ci++) {
+          char c = fileName.charAt(ci);
+          if (c == '"' || c == '\\') out += '\\';
+          out += c;
+        }
+        out += "\",\"type\":\"file\",\"size\":\"";
+        out += (unsigned long)file.size();
+        out += " bytes\",\"perms\":";
+        out += (int)filePerms;
+        out += "}";
       }
     } else {
       // Human-readable text
@@ -524,14 +544,11 @@ const char* cmd_filerename(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String args = argsInput;
-  args.trim();
-  int spaceIdx = args.indexOf(' ');
-  if (spaceIdx < 0) return "Usage: filerename <oldpath> <newname>";
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) return "Usage: filerename <oldpath> <newname>";
 
-  String oldPath = args.substring(0, spaceIdx);
-  String newName = args.substring(spaceIdx + 1);
-  newName.trim();
+  String oldPath = a.arg(0);
+  String newName = a.arg(1);
 
   if (!oldPath.startsWith("/")) oldPath = "/" + oldPath;
   if (newName.length() == 0) return "Usage: filerename <oldpath> <newname>";

@@ -1457,19 +1457,19 @@ extern void logTimeSyncedMarkerIfReady();
 
 void setupNTP() {
   long gmtOffset = (long)gSettings.tzOffsetMinutes * 60;  // seconds
-  DEBUG_SYSTEMF("[NTP Setup] Starting NTP configuration");
-  DEBUG_SYSTEMF("[NTP Setup] Primary server: %s", gSettings.ntpServer.c_str());
-  DEBUG_SYSTEMF("[NTP Setup] GMT offset: %ld seconds (%d minutes)", gmtOffset, gSettings.tzOffsetMinutes);
-  DEBUG_SYSTEMF("[NTP Setup] WiFi status: %s", WiFi.isConnected() ? "CONNECTED" : "DISCONNECTED");
+  DEBUG_NTP_SETUPF("[NTP Setup] Starting NTP configuration");
+  DEBUG_NTP_SETUPF("[NTP Setup] Primary server: %s", gSettings.ntpServer.c_str());
+  DEBUG_NTP_SETUPF("[NTP Setup] GMT offset: %ld seconds (%d minutes)", gmtOffset, gSettings.tzOffsetMinutes);
+  DEBUG_NTP_SETUPF("[NTP Setup] WiFi status: %s", WiFi.isConnected() ? "CONNECTED" : "DISCONNECTED");
   if (WiFi.isConnected()) {
-    DEBUG_SYSTEMF("[NTP Setup] WiFi IP: %s", WiFi.localIP().toString().c_str());
-    DEBUG_SYSTEMF("[NTP Setup] WiFi gateway: %s", WiFi.gatewayIP().toString().c_str());
-    DEBUG_SYSTEMF("[NTP Setup] WiFi DNS: %s", WiFi.dnsIP().toString().c_str());
-    DEBUG_SYSTEMF("[NTP Setup] WiFi subnet: %s", WiFi.subnetMask().toString().c_str());
+    DEBUG_NTP_SETUPF("[NTP Setup] WiFi IP: %s", WiFi.localIP().toString().c_str());
+    DEBUG_NTP_SETUPF("[NTP Setup] WiFi gateway: %s", WiFi.gatewayIP().toString().c_str());
+    DEBUG_NTP_SETUPF("[NTP Setup] WiFi DNS: %s", WiFi.dnsIP().toString().c_str());
+    DEBUG_NTP_SETUPF("[NTP Setup] WiFi subnet: %s", WiFi.subnetMask().toString().c_str());
   }
 
   // Use standard configTime() with hostname-based NTP servers
-  DEBUG_SYSTEMF("[NTP Setup] Configuring NTP with hostname-based servers");
+  DEBUG_NTP_SETUPF("[NTP Setup] Configuring NTP with hostname-based servers");
 
   // Try multiple reliable NTP servers for redundancy
   configTime(gmtOffset, 0,
@@ -1477,48 +1477,48 @@ void setupNTP() {
              "time.google.com",            // Google
              "time.cloudflare.com");       // Cloudflare
 
-  DEBUG_SYSTEMF("[NTP Setup] configTime() completed with servers:");
-  DEBUG_SYSTEMF("[NTP Setup]   Primary: %s", gSettings.ntpServer.c_str());
-  DEBUG_SYSTEMF("[NTP Setup]   Backup1: time.google.com");
-  DEBUG_SYSTEMF("[NTP Setup]   Backup2: time.cloudflare.com");
+  DEBUG_NTP_SETUPF("[NTP Setup] configTime() completed with servers:");
+  DEBUG_NTP_SETUPF("[NTP Setup]   Primary: %s", gSettings.ntpServer.c_str());
+  DEBUG_NTP_SETUPF("[NTP Setup]   Backup1: time.google.com");
+  DEBUG_NTP_SETUPF("[NTP Setup]   Backup2: time.cloudflare.com");
 }
 
 bool syncNTPAndResolve() {
-  DEBUG_SYSTEMF("[syncNTPAndResolve] Starting NTP sync process");
+  DEBUG_NTP_SYNCF("[syncNTPAndResolve] Starting NTP sync process");
 
   if (!WiFi.isConnected()) {
-    DEBUG_SYSTEMF("[syncNTPAndResolve] FAILED - WiFi not connected");
+    DEBUG_NTP_SYNCF("[syncNTPAndResolve] FAILED - WiFi not connected");
     broadcastOutput("NTP sync requires WiFi connection");
     return false;
   }
 
-  DEBUG_SYSTEMF("[syncNTPAndResolve] WiFi connected, proceeding with NTP sync");
+  DEBUG_NTP_SYNCF("[syncNTPAndResolve] WiFi connected, proceeding with NTP sync");
 
   // Wait for DNS to be ready after WiFi connection
-  DEBUG_SYSTEMF("[syncNTPAndResolve] Waiting 500ms for DNS initialization...");
+  DEBUG_NTP_SYNCF("[syncNTPAndResolve] Waiting 500ms for DNS initialization...");
   delay(500);
 
   // Test DNS resolution before attempting NTP
   IPAddress testIP;
   bool dnsWorking = WiFi.hostByName("time.google.com", testIP);
   bool validIP = dnsWorking && testIP != IPAddress(0, 0, 0, 0);
-  DEBUG_SYSTEMF("[syncNTPAndResolve] DNS test: hostByName('time.google.com') = %s, IP=%s",
+  DEBUG_NTP_SYNCF("[syncNTPAndResolve] DNS test: hostByName('time.google.com') = %s, IP=%s",
                   validIP ? "SUCCESS" : "FAILED",
                   testIP.toString().c_str());
 
   if (!validIP) {
-    DEBUG_SYSTEMF("[syncNTPAndResolve] WARNING: DNS resolution failed (returned %s), NTP may not work",
+    DEBUG_NTP_SYNCF("[syncNTPAndResolve] WARNING: DNS resolution failed (returned %s), NTP may not work",
                     testIP.toString().c_str());
     broadcastOutput("⚠ DNS resolution failed - NTP may not work");
     broadcastOutput("  Waiting 2 more seconds for DNS to initialize...");
     delay(2000);
     dnsWorking = WiFi.hostByName("pool.ntp.org", testIP);
     validIP = dnsWorking && testIP != IPAddress(0, 0, 0, 0);
-    DEBUG_SYSTEMF("[syncNTPAndResolve] DNS retry: hostByName('pool.ntp.org') = %s, IP=%s",
+    DEBUG_NTP_SYNCF("[syncNTPAndResolve] DNS retry: hostByName('pool.ntp.org') = %s, IP=%s",
                     validIP ? "SUCCESS" : "FAILED",
                     testIP.toString().c_str());
     if (!validIP) {
-      DEBUG_SYSTEMF("[syncNTPAndResolve] ERROR: DNS still not working after retry");
+      DEBUG_NTP_SYNCF("[syncNTPAndResolve] ERROR: DNS still not working after retry");
       broadcastOutput("[ERROR] DNS not working - NTP will fail");
       return false;
     }
@@ -1534,7 +1534,7 @@ bool syncNTPAndResolve() {
   const int maxWaitSeconds = 15;
   const int iterationsPerSecond = 5;  // 200ms per iteration
   const int maxIterations = maxWaitSeconds * iterationsPerSecond;
-  DEBUG_SYSTEMF("[syncNTPAndResolve] Starting %d-second wait loop for NTP response", maxWaitSeconds);
+  DEBUG_NTP_SYNCF("[syncNTPAndResolve] Starting %d-second wait loop for NTP response", maxWaitSeconds);
 
   for (int i = 0; i < maxIterations && !ntpSynced; i++) {
     delay(200);
@@ -1544,18 +1544,18 @@ bool syncNTPAndResolve() {
       char progressMsg[64];
       snprintf(progressMsg, sizeof(progressMsg), "  Looking for updates... %d/%d seconds", i / iterationsPerSecond, maxWaitSeconds);
       broadcastOutput(progressMsg);
-      DEBUG_SYSTEMF("[syncNTPAndResolve] Waiting... %d/%d seconds elapsed", i / iterationsPerSecond, maxWaitSeconds);
+      DEBUG_NTP_SYNCF("[syncNTPAndResolve] Waiting... %d/%d seconds elapsed", i / iterationsPerSecond, maxWaitSeconds);
     }
 
     time_t now = time(nullptr);
-    DEBUG_SYSTEMF("[syncNTPAndResolve] time(nullptr) returned: %lu", (unsigned long)now);
+    DEBUG_NTP_SYNCF("[syncNTPAndResolve] time(nullptr) returned: %lu", (unsigned long)now);
 
     struct tm timeinfo;
     bool gotLocalTime = getLocalTime(&timeinfo, 10);  // 10ms timeout
-    DEBUG_SYSTEMF("[syncNTPAndResolve] getLocalTime(10ms) returned: %s", gotLocalTime ? "true" : "false");
+    DEBUG_NTP_SYNCF("[syncNTPAndResolve] getLocalTime(10ms) returned: %s", gotLocalTime ? "true" : "false");
 
     if (gotLocalTime) {
-      DEBUG_SYSTEMF("[syncNTPAndResolve] SUCCESS! Time synced: %04d-%02d-%02d %02d:%02d:%02d",
+      DEBUG_NTP_SYNCF("[syncNTPAndResolve] SUCCESS! Time synced: %04d-%02d-%02d %02d:%02d:%02d",
                       timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
                       timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
       logTimeSyncedMarkerIfReady();
@@ -1565,7 +1565,7 @@ bool syncNTPAndResolve() {
   }
 
   if (ntpSynced) {
-    DEBUG_SYSTEMF("[syncNTPAndResolve] NTP sync completed successfully");
+    DEBUG_NTP_SYNCF("[syncNTPAndResolve] NTP sync completed successfully");
     broadcastOutput("[OK] NTP time synchronized successfully");
     
     // Sync RTC from NTP time to keep RTC accurate
@@ -1582,16 +1582,16 @@ bool syncNTPAndResolve() {
     }
 #endif
     
-    DEBUG_SYSTEMF("About to call resolvePendingUserCreationTimes");
+    DEBUG_NTP_SYNCF("About to call resolvePendingUserCreationTimes");
     resolvePendingUserCreationTimes();
-    DEBUG_SYSTEMF("resolvePendingUserCreationTimes completed");
-    DEBUG_SYSTEMF("About to call notifyAutomationScheduler");
+    DEBUG_NTP_SYNCF("resolvePendingUserCreationTimes completed");
+    DEBUG_NTP_SYNCF("About to call notifyAutomationScheduler");
     notifyAutomationScheduler();
-    DEBUG_SYSTEMF("notifyAutomationScheduler completed");
+    DEBUG_NTP_SYNCF("notifyAutomationScheduler completed");
     return true;
   } else {
-    DEBUG_SYSTEMF("[syncNTPAndResolve] TIMEOUT - NTP sync failed after %d seconds", maxWaitSeconds);
-    DEBUG_SYSTEMF("[syncNTPAndResolve] Check: WiFi=%s, DNS=%s, Gateway=%s",
+    DEBUG_NTP_SYNCF("[syncNTPAndResolve] TIMEOUT - NTP sync failed after %d seconds", maxWaitSeconds);
+    DEBUG_NTP_SYNCF("[syncNTPAndResolve] Check: WiFi=%s, DNS=%s, Gateway=%s",
                     WiFi.isConnected() ? "OK" : "FAIL",
                     WiFi.dnsIP().toString().c_str(),
                     WiFi.gatewayIP().toString().c_str());
@@ -3275,35 +3275,17 @@ bool drawIconScaled(Adafruit_SSD1306* display, const char* name, int x, int y, u
 const char* cmd_login(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String cmd = originalCmd;
-  cmd.trim();
-
   // Parse: <username> <password> [transport]
   // transport can be: serial, display, bluetooth
-  String rest = cmd;
-  rest.trim();
-
-  int sp1 = rest.indexOf(' ');
-  if (sp1 <= 0) {
+  CommandArgs a(originalCmd);
+  if (!a.hasMinArgs(2)) {
     return "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth";
   }
 
-  String username = rest.substring(0, sp1);
-  String remainder = rest.substring(sp1 + 1);
-  remainder.trim();
-
-  int sp2 = remainder.indexOf(' ');
-  String password;
-  String transportStr = "serial";  // default
-
-  if (sp2 > 0) {
-    password = remainder.substring(0, sp2);
-    transportStr = remainder.substring(sp2 + 1);
-    transportStr.trim();
-    transportStr.toLowerCase();
-  } else {
-    password = remainder;
-  }
+  String username = a.arg(0);
+  String password = a.arg(1);
+  String transportStr = a.has(2) ? a.arg(2) : String("serial");
+  transportStr.toLowerCase();
 
   // Map transport string to enum
   CommandSource transport = SOURCE_SERIAL;

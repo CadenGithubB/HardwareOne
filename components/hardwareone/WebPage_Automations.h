@@ -227,8 +227,8 @@ window.refreshAutomationSystemStatus = function() {
   });
 };
 
-window.disableAutomationSystem = function() {
-  if (!confirm('Disable the automation system? This will:\n\n• Stop the automation scheduler immediately\n• Keep ~16KB memory allocated until next reboot\n• Disable all scheduled automations\n\nContinue?')) {
+window.disableAutomationSystem = async function() {
+  if (!await hwConfirm('Disable the automation system? This will:\n\n• Stop the automation scheduler immediately\n• Keep ~16KB memory allocated until next reboot\n• Disable all scheduled automations\n\nContinue?')) {
     return;
   }
   
@@ -267,8 +267,8 @@ window.disableAutomationSystem = function() {
   });
 };
 
-window.enableAutomationSystem = function() {
-  if (!confirm('Enable automation system? This will:\n\n• Start the automation scheduler immediately\n• Enable all scheduled automations\n\nContinue?')) {
+window.enableAutomationSystem = async function() {
+  if (!await hwConfirm('Enable automation system? This will:\n\n• Start the automation scheduler immediately\n• Enable all scheduled automations\n\nContinue?')) {
     return;
   }
   fetch('/api/cli', {
@@ -910,9 +910,9 @@ function autoToggle(id,en){
   const cmd='automation ' + (en? 'enable':'disable') + ' id='+id; 
   postCLI(cmd).then(()=>loadAutos()); 
 }
-function autoDelete(id){ 
-  if(!confirm('Delete automation '+id+'?')) return; 
-  postCLI('automation delete id='+id).then(()=>loadAutos()); 
+async function autoDelete(id){
+  if(!await hwConfirm('Delete automation '+id+'?')) return;
+  postCLI('automation delete id='+id).then(()=>loadAutos());
 }
 function autoRun(id){ 
   postCLI('automation run id='+id).then(r=>{ 

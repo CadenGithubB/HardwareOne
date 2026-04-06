@@ -131,11 +131,10 @@ const char* cmd_power(const String& argsInput) {
   
   
   // Parse command args: "" or "mode [name]" or "auto [on|off]"
-  String args = argsInput;
-  args.trim();
-  DEBUG_SYSTEMF("[POWER_CMD] args after trim: '%s'", args.c_str());
-  
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+  DEBUG_SYSTEMF("[POWER_CMD] args after trim: '%s'", a.raw().c_str());
+
+  if (a.count() == 0) {
     // Show current power status
     broadcastOutput("Power Management Status:");
     BROADCAST_PRINTF("  Mode: %s (CPU: %lu MHz)", 
@@ -159,11 +158,8 @@ const char* cmd_power(const String& argsInput) {
   }
   
   // Parse subcommand
-  int spaceIdx = args.indexOf(' ');
-  String subCmd = spaceIdx > 0 ? args.substring(0, spaceIdx) : args;
-  String subArgs = spaceIdx > 0 ? args.substring(spaceIdx + 1) : "";
-  subCmd.trim();
-  subArgs.trim();
+  String subCmd = a.arg(0);
+  String subArgs = a.remaining(0);
   
   if (subCmd.equalsIgnoreCase("mode")) {
     if (subArgs.length() == 0) {

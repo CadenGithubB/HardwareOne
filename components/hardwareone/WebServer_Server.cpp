@@ -2338,6 +2338,15 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
 // handleSensorsStatus moved to web_sensors.cpp
 
+#if !ENABLE_WEB_SENSORS
+// Stub: sensors not compiled — return 200 so the dashboard doesn't get a red console error
+static esp_err_t handleSensorsStatusStub(httpd_req_t* req) {
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, "{\"sensorsDisabled\":true}", HTTPD_RESP_USE_STRLEN);
+  return ESP_OK;
+}
+#endif
+
 esp_err_t handleDashboard(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "dashboard");
@@ -4387,172 +4396,6 @@ esp_err_t handleIconTestPage(httpd_req_t* req) {
   return ESP_OK;
 }
 
-esp_err_t handleFileDelete(httpd_req_t* req) {
-  WEB_AUTH_OR_RETURN(req, ctx);
-  // Accept name from POST body (x-www-form-urlencoded) or URL query as fallback
-  String nameStr = "";
-  {
-    // Try to read POST body
-    char buf[256];
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (ret > 0) {
-      buf[ret] = '\0';
-      String body = String(buf);
-      int nameStart = body.indexOf("name=");
-      if (nameStart >= 0) {
-        nameStart += 5;
-        int nameEnd = body.indexOf("&", nameStart);
-        if (nameEnd < 0) nameEnd = body.length();
-        nameStr = body.substring(nameStart, nameEnd);
-      }
-    }
-  }
-  if (nameStr.length() == 0) {
-    // Fallback to query parameter
-    char query[256];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-      char name[128];
-      if (httpd_query_key_value(query, "name", name, sizeof(name)) == ESP_OK) {
-        nameStr = String(name);
-      }
-    }
-  }
-  if (nameStr.length() == 0) {
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"No filename specified\"}");
-    return ESP_OK;
-  }
-  nameStr.replace("%2F", "/");
-  nameStr.replace("%20", " ");
-  nameStr.replace("+", " ");
-
-  // Normalize: strip leading '/' if present to prevent double slashes
-  if (nameStr.startsWith("/")) {
-    nameStr = nameStr.substring(1);
-  }
-  String path = "/" + nameStr;
-
-  if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
-    httpd_resp_set_status(req, "403 Forbidden");
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin required\"}");
-    return ESP_OK;
-  }
-
-  // Use centralized permission check
-  if (nameStr.length() == 0 || nameStr == "." || nameStr == ".." || !canDelete(path)) {
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Deletion not allowed\"}");
-    return ESP_OK;
-  }
-
-  // Determine if path is a directory to pick the right CLI command
-  bool isDir = false;
-  {
-    FsLockGuard guard("delete.probe");
-    File file = VFS::open(path, "r");
-    if (!file) {
-      sendJsonResponse(req, "{\"success\":false, \"error\":\"File not found\"}");
-      return ESP_OK;
-    }
-    isDir = file.isDirectory();
-    file.close();
-  }
-
-  // Route through unified command system for audit trail
-  String cmdOut;
-  String deleteCmd = (isDir ? "rmdir " : "filedelete ") + path;
-  bool success = executeUnifiedWebCommand(req, ctx, deleteCmd, cmdOut);
-
-  if (success) {
-    sendJsonResponse(req, "{\"success\":true}");
-  } else {
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Failed to delete\"}");
-  }
-
-  return ESP_OK;
-}
-
-// ============================================================================
-// File Rename Handler
-// ============================================================================
-
-esp_err_t handleFileRename(httpd_req_t* req) {
-  WEB_AUTH_OR_RETURN(req, ctx);
-  // Read POST body
-  char buf[512];
-  int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-  if (ret <= 0) {
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"No data received\"}");
-    return ESP_OK;
-  }
-  buf[ret] = '\0';
-  String body = String(buf);
-
-  // Parse oldPath and newName from POST body
-  String oldPath = "";
-  String newName = "";
-  {
-    int idx = body.indexOf("oldPath=");
-    if (idx >= 0) {
-      idx += 8;
-      int end = body.indexOf("&", idx);
-      if (end < 0) end = body.length();
-      oldPath = body.substring(idx, end);
-    }
-    idx = body.indexOf("newName=");
-    if (idx >= 0) {
-      idx += 8;
-      int end = body.indexOf("&", idx);
-      if (end < 0) end = body.length();
-      newName = body.substring(idx, end);
-    }
-  }
-
-  // URL decode
-  oldPath.replace("%2F", "/");
-  oldPath.replace("%20", " ");
-  oldPath.replace("+", " ");
-  newName.replace("%2F", "/");
-  newName.replace("%20", " ");
-  newName.replace("+", " ");
-
-  if (oldPath.length() == 0 || newName.length() == 0) {
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"oldPath and newName required\"}");
-    return ESP_OK;
-  }
-
-  // Ensure oldPath starts with /
-  if (!oldPath.startsWith("/")) oldPath = "/" + oldPath;
-
-  if (isAdminOnlyPath(oldPath) && !isAdminUser(ctx.user)) {
-    httpd_resp_set_status(req, "403 Forbidden");
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin required\"}");
-    return ESP_OK;
-  }
-
-  // Build new path: same parent directory + new name
-  int lastSlash = oldPath.lastIndexOf('/');
-  String parentDir = (lastSlash > 0) ? oldPath.substring(0, lastSlash) : "";
-  String newPath = parentDir + "/" + newName;
-
-  // Use centralized permission check
-  if (!canRename(oldPath)) {
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Rename not allowed for this file\"}");
-    return ESP_OK;
-  }
-
-  // Route through unified command system for audit trail
-  String renameOut;
-  String renameCmd = "filerename " + oldPath + " " + newName;
-  bool success = executeUnifiedWebCommand(req, ctx, renameCmd, renameOut);
-
-  httpd_resp_set_type(req, "application/json");
-  if (success) {
-    httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
-  } else {
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Rename failed\"}", HTTPD_RESP_USE_STRLEN);
-  }
-  return ESP_OK;
-}
-
 // ============================================================================
 // Admin Handlers (Batch 4 - migrated from .ino)
 // ============================================================================
@@ -5116,11 +4959,9 @@ register_handlers:
   static httpd_uri_t filesStats = { .uri = "/api/files/stats", .method = HTTP_GET, .handler = handleFilesStats, .user_ctx = NULL };
   static httpd_uri_t filesCreate = { .uri = "/api/files/create", .method = HTTP_POST, .handler = handleFilesCreate, .user_ctx = NULL };
   static httpd_uri_t filesView = { .uri = "/api/files/view", .method = HTTP_GET, .handler = handleFileView, .user_ctx = NULL };
-  static httpd_uri_t filesDelete = { .uri = "/api/files/delete", .method = HTTP_POST, .handler = handleFileDelete, .user_ctx = NULL };
   static httpd_uri_t filesRead = { .uri = "/api/files/read", .method = HTTP_GET, .handler = handleFileRead, .user_ctx = NULL };
   static httpd_uri_t filesWrite = { .uri = "/api/files/write", .method = HTTP_POST, .handler = handleFileWrite, .user_ctx = NULL };
   static httpd_uri_t filesUpload = { .uri = "/api/files/upload", .method = HTTP_POST, .handler = handleFileUpload, .user_ctx = NULL };
-  static httpd_uri_t filesRename = { .uri = "/api/files/rename", .method = HTTP_POST, .handler = handleFileRename, .user_ctx = NULL };
   static httpd_uri_t iconGet = { .uri = "/api/icon", .method = HTTP_GET, .handler = handleIconGet, .user_ctx = NULL };
   static httpd_uri_t iconTestPage = { .uri = "/icons/test", .method = HTTP_GET, .handler = handleIconTestPage, .user_ctx = NULL };
   static httpd_uri_t loggingPage = { .uri = "/logging", .method = HTTP_GET, .handler = handleLoggingPage, .user_ctx = NULL };
@@ -5177,11 +5018,9 @@ register_handlers:
   httpd_register_uri_handler(server, &filesStats);
   httpd_register_uri_handler(server, &filesCreate);
   httpd_register_uri_handler(server, &filesView);
-  httpd_register_uri_handler(server, &filesDelete);
   httpd_register_uri_handler(server, &filesRead);
   httpd_register_uri_handler(server, &filesWrite);
   httpd_register_uri_handler(server, &filesUpload);
-  httpd_register_uri_handler(server, &filesRename);
   httpd_register_uri_handler(server, &iconGet);
   httpd_register_uri_handler(server, &iconTestPage);
   httpd_register_uri_handler(server, &loggingPage);
@@ -5197,6 +5036,10 @@ register_handlers:
   // Module registration functions (sensors, bluetooth, esp-now, games, speech)
  #if ENABLE_WEB_SENSORS
   registerSensorHandlers(server);
+ #else
+  // Sensors not compiled — register stub so dashboard gets 200 + sensorsDisabled:true instead of 404
+  static httpd_uri_t sensorsStatusStub = { .uri = "/api/sensors/status", .method = HTTP_GET, .handler = handleSensorsStatusStub, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &sensorsStatusStub);
  #endif
  #if ENABLE_WEB_BLUETOOTH
   registerBluetoothHandlers(server);
