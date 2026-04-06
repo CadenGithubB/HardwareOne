@@ -41,7 +41,7 @@
 //   2 = WIFI_HTTP  - WiFi + HTTP server
 //   3 = WIFI_ESPNOW - WiFi + HTTP + ESP-NOW mesh
 //   4 = CUSTOM     - Use individual CUSTOM_ENABLE_NET_* flags below
-#define NETWORK_FEATURE_LEVEL   4
+#define NETWORK_FEATURE_LEVEL   2
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CUSTOM NETWORK SELECTION (only used when NETWORK_FEATURE_LEVEL = 4)
@@ -61,13 +61,13 @@
 #define WEB_FEATURE_LEVEL       4
 
 #if WEB_FEATURE_LEVEL == 4
-  #define CUSTOM_ENABLE_WEB_SENSORS    0
+  #define CUSTOM_ENABLE_WEB_SENSORS    1
   #define CUSTOM_ENABLE_WEB_BLUETOOTH  0
   #define CUSTOM_ENABLE_WEB_SPEECH     0
   #define CUSTOM_ENABLE_WEB_ESPNOW     1
   #define CUSTOM_ENABLE_WEB_BOND       1
   #define CUSTOM_ENABLE_WEB_MQTT       0
-  #define CUSTOM_ENABLE_WEB_GAMES      0
+  #define CUSTOM_ENABLE_WEB_GAMES      1
   #define CUSTOM_ENABLE_WEB_MAPS       0
 #endif
 
@@ -114,7 +114,7 @@
 //   0 = Disabled, 1 = Enabled
 //   Requires ESP32-S3 with PSRAM. Model files (LLM1 format) from LittleFS or SD.
 //   Supports FP32 and INT8 quantization. Typical PSRAM usage: 1–4 MB at runtime.
-#define ENABLE_ONDEVICE_LLM     1
+#define ENABLE_ONDEVICE_LLM     0
 #if ENABLE_ONDEVICE_LLM
 // Max KV / attention context in tokens (0 = use checkpoint's seq_len only).
 // Lower uses less PSRAM; must cover prompt + max generation. Typical tiny models: 256–1024.
@@ -125,11 +125,11 @@
 
 // Games: Browser-based games web page
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_GAMES            0
+#define ENABLE_GAMES            1
 
 // Maps: Offline maps and waypoints web page
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_MAPS             0
+#define ENABLE_MAPS             1
 
 // Bond Mode: Two-device bonded pair via ESP-NOW (master/worker)
 //   0 = Disabled, 1 = Enabled (requires ENABLE_ESPNOW=1)
@@ -138,7 +138,7 @@
 
 // Automation: Scheduled tasks and conditional command system
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_AUTOMATION       0
+#define ENABLE_AUTOMATION       1
 
 // Display Type: Hardware display selection
 //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)

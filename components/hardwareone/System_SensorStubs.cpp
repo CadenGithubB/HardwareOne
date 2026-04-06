@@ -217,7 +217,7 @@ String gBootId = "";
 
 #if !ENABLE_ESPNOW
 // ESP-NOW stub variables (global definitions)
-static EspNowState _gEspNowStub = { false, ESPNOW_MODE_DISABLED, "", 0, false, nullptr };
+static EspNowState _gEspNowStub = { false, ESPNOW_MODE_DIRECT, "", 0, false, nullptr };
 EspNowState* gEspNow = &_gEspNowStub;
 MeshPeerHealth gMeshPeers[MAX_MESH_PEERS] = {};
 MeshTopoNode* gMeshTopology = nullptr;

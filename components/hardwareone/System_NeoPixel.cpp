@@ -355,21 +355,18 @@ const char* cmd_ledclear(const String& argsInput) {
 const char* cmd_ledeffect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsInput;
-  args.trim();
+  CommandArgs a(argsInput);
 
-  if (args == "off" || args == "none" || args.length() == 0) {
+  if (a.count() == 0 || a.arg(0) == "off" || a.arg(0) == "none") {
     setLEDColor({0, 0, 0});
     return "LED effect: off";
   }
 
   // Parse effect type
-  int firstSpace = args.indexOf(' ');
-  String effectType = (firstSpace >= 0) ? args.substring(0, firstSpace) : args;
+  String effectType = a.arg(0);
   effectType.toLowerCase();
 
-  String remaining = (firstSpace >= 0) ? args.substring(firstSpace + 1) : "";
-  remaining.trim();
+  String remaining = a.remaining(0);
 
   // Default values
   RGB color1 = {255, 0, 0};     // Red
@@ -472,7 +469,9 @@ static const SettingEntry ledSettingEntries[] = {
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule ledSettingsModule = {
   "led", "led", ledSettingEntries,
-  sizeof(ledSettingEntries) / sizeof(ledSettingEntries[0])
+  sizeof(ledSettingEntries) / sizeof(ledSettingEntries[0]),
+  nullptr,
+  "LED brightness and startup effects"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

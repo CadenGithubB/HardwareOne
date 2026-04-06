@@ -51,133 +51,6 @@ extern SemaphoreHandle_t gJsonResponseMutex;
 extern bool filesystemReady;
 
 // =============================================================================
-// Maps Organize - now handled by cmd_maporganize in System_Maps.cpp
-// =============================================================================
-
-static esp_err_t handleMapsOrganize(httpd_req_t* req) {
-  extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-
-  if (!filesystemReady) {
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"filesystem_not_ready\"}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-
-  String cmdOut;
-  bool ok = executeUnifiedWebCommand(req, ctx, "maporganize", cmdOut);
-
-  httpd_resp_set_type(req, "application/json");
-  if (ok) {
-    String escaped = cmdOut;
-    escaped.replace("\\", "\\\\");
-    escaped.replace("\"", "\\\"");
-    String json = "{\"success\":true,\"result\":\"" + escaped + "\"}";
-    httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
-  } else {
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"maporganize_failed\"}", HTTPD_RESP_USE_STRLEN);
-  }
-  return ESP_OK;
-}
-
-// =============================================================================
-// Map Select API
-// =============================================================================
-
-esp_err_t handleMapSelectAPI(httpd_req_t* req) {
-  extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-
-  httpd_resp_set_type(req, "application/json");
-
-  char query[256];
-  if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
-    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Missing query\"}");
-    return ESP_OK;
-  }
-
-  char filepathRaw[128] = {0};
-  if (httpd_query_key_value(query, "file", filepathRaw, sizeof(filepathRaw)) != ESP_OK) {
-    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Missing file parameter\"}");
-    return ESP_OK;
-  }
-
-  // URL decode (httpd_query_key_value does not percent-decode)
-  char filepath[128] = {0};
-  {
-    size_t wi = 0;
-    for (size_t ri = 0; filepathRaw[ri] != '\0' && wi + 1 < sizeof(filepath); ri++) {
-      char c = filepathRaw[ri];
-      if (c == '+') {
-        filepath[wi++] = ' ';
-        continue;
-      }
-      if (c == '%' && filepathRaw[ri + 1] && filepathRaw[ri + 2]) {
-        char hex[3] = { filepathRaw[ri + 1], filepathRaw[ri + 2], 0 };
-        filepath[wi++] = (char)strtol(hex, nullptr, 16);
-        ri += 2;
-        continue;
-      }
-      filepath[wi++] = c;
-    }
-    filepath[wi] = '\0';
-  }
-
-  if (filepath[0] != '/' || strncmp(filepath, "/maps/", 6) != 0) {
-    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Invalid file path\"}");
-    return ESP_OK;
-  }
-
-  const char* ext = strrchr(filepath, '.');
-  if (!ext || strcmp(ext, ".hwmap") != 0) {
-    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Invalid file type\"}");
-    return ESP_OK;
-  }
-
-  String cmdOut;
-  bool ok = executeUnifiedWebCommand(req, ctx, String("mapload ") + String(filepath), cmdOut);
-  if (!ok || !MapCore::hasValidMap()) {
-    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Map failed to load on device\"}");
-    return ESP_OK;
-  }
-
-  const LoadedMap& map = MapCore::getCurrentMap();
-  char json[96];
-  snprintf(json, sizeof(json), "{\"success\":true,\"mapName\":\"%s\"}", map.filename);
-  httpd_resp_sendstr(req, json);
-  return ESP_OK;
-}
-
-// GET /api/maps/unload — free device PSRAM (MapCore tile cache + open file handle)
-esp_err_t handleMapUnloadAPI(httpd_req_t* req) {
-  extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-
-  httpd_resp_set_type(req, "application/json");
-  const bool hadMap = MapCore::hasValidMap();
-  String cmdOut;
-  bool ok = executeUnifiedWebCommand(req, ctx, String("mapunload"), cmdOut);
-  if (!ok) {
-    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"command_failed\"}");
-    return ESP_OK;
-  }
-  String escaped = cmdOut;
-  escaped.replace("\\", "\\\\");
-  escaped.replace("\"", "\\\"");
-  const bool freed = hadMap && !MapCore::hasValidMap();
-  String json = "{\"success\":true,\"unloaded\":";
-  json += freed ? "true" : "false";
-  json += ",\"message\":\"";
-  json += escaped;
-  json += "\"}";
-  httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
-  return ESP_OK;
-}
-
-// =============================================================================
 // Map Features API
 // =============================================================================
 
@@ -306,16 +179,17 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
       return ESP_OK;
     }
     
-    char filepath[128] = {0};
+    char filepath[256] = {0};
     if (httpd_query_key_value(query, "file", filepath, sizeof(filepath)) == ESP_OK) {
-      if (filepath[0] != '/') {
+      String decodedPath = urlDecode(String(filepath));
+      if (decodedPath.charAt(0) != '/') {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"error\":\"Invalid file path\"}");
         return ESP_OK;
       }
 
       String errorMsg;
-      if (!GPSTrackManager::loadTrack(filepath, errorMsg)) {
+      if (!GPSTrackManager::loadTrack(decodedPath.c_str(), errorMsg)) {
         httpd_resp_set_type(req, "application/json");
         char errJson[256];
         snprintf(errJson, sizeof(errJson), "{\"error\":\"%s\"}", errorMsg.c_str());
@@ -362,11 +236,11 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
 
   fsLock("gps.tracks.list");
   
-  // Scan /logging_captures and /logging_captures/tracks directories
-  const char* dirs[] = {"/logging_captures", "/logging_captures/tracks"};
+  // Scan relevant directories for GPS log files
+  const char* dirs[] = {"/logging_captures", "/logging_captures/tracks", "/logging_captures/sensors"};
   bool firstFile = true;
   
-  for (int d = 0; d < 2; d++) {
+  for (int d = 0; d < 3; d++) {
     File root = LittleFS.open(dirs[d]);
     if (!root || !root.isDirectory()) continue;
     
@@ -389,7 +263,7 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
         }
 
         if (hasGPS) {
-          char fileJson[256];
+          char fileJson[384];
           snprintf(fileJson, sizeof(fileJson), "%s{\"path\":\"%s\",\"size\":%lu}",
                    firstFile ? "" : ",", file.path(), (unsigned long)file.size());
           httpd_resp_sendstr_chunk(req, fileJson);
@@ -632,18 +506,12 @@ static esp_err_t handleMapsPage(httpd_req_t* req) {
 void registerMapsHandlers(httpd_handle_t server) {
   static httpd_uri_t mapsPage = { .uri = "/maps", .method = HTTP_GET, .handler = handleMapsPage, .user_ctx = NULL };
   static httpd_uri_t mapFeaturesGet = { .uri = "/api/maps/features", .method = HTTP_GET, .handler = handleMapFeaturesAPI, .user_ctx = NULL };
-  static httpd_uri_t mapSelectGet = { .uri = "/api/maps/select", .method = HTTP_GET, .handler = handleMapSelectAPI, .user_ctx = NULL };
-  static httpd_uri_t mapUnloadGet = { .uri = "/api/maps/unload", .method = HTTP_GET, .handler = handleMapUnloadAPI, .user_ctx = NULL };
-  static httpd_uri_t mapsOrganizePost = { .uri = "/api/maps/organize", .method = HTTP_POST, .handler = handleMapsOrganize, .user_ctx = NULL };
   static httpd_uri_t waypointsGet = { .uri = "/api/waypoints", .method = HTTP_GET, .handler = handleWaypointsAPI, .user_ctx = NULL };
   static httpd_uri_t waypointsPost = { .uri = "/api/waypoints", .method = HTTP_POST, .handler = handleWaypointsAPI, .user_ctx = NULL };
   static httpd_uri_t gpsTracksGet = { .uri = "/api/gps/tracks", .method = HTTP_GET, .handler = handleGPSTracksAPI, .user_ctx = NULL };
   
   httpd_register_uri_handler(server, &mapsPage);
   httpd_register_uri_handler(server, &mapFeaturesGet);
-  httpd_register_uri_handler(server, &mapSelectGet);
-  httpd_register_uri_handler(server, &mapUnloadGet);
-  httpd_register_uri_handler(server, &mapsOrganizePost);
   httpd_register_uri_handler(server, &waypointsGet);
   httpd_register_uri_handler(server, &waypointsPost);
   httpd_register_uri_handler(server, &gpsTracksGet);

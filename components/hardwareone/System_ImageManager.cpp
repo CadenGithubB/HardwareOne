@@ -632,19 +632,15 @@ const char* cmd_imagesend(const String& argsInput) {
   // Parse: <device> <path>
   // Or: <device> (sends most recent image)
   
-  String rest = argsInput;
-  rest.trim();
-  
-  int firstSpace = rest.indexOf(' ');
-  if (rest.length() == 0) {
+  CommandArgs a(argsInput);
+  if (a.count() == 0) {
     return "Usage: imagesend <device> [path]";
   }
-  
+
   String device, path;
-  
-  if (firstSpace < 0) {
-    device = rest;
-    device.trim();
+
+  if (!a.has(1)) {
+    device = a.arg(0);
     // Get most recent image
     std::vector<ImageInfo> images = gImageManager.listImages(IMAGE_STORAGE_LITTLEFS);
     if (images.empty()) {
@@ -652,10 +648,8 @@ const char* cmd_imagesend(const String& argsInput) {
     }
     path = images.back().fullPath;
   } else {
-    device = rest.substring(0, firstSpace);
-    path = rest.substring(firstSpace + 1);
-    device.trim();
-    path.trim();
+    device = a.arg(0);
+    path = a.arg(1);
   }
   
   // Use ESP-NOW file send (stubs return false when ESPNOW disabled)

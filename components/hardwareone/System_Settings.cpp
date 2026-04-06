@@ -1008,6 +1008,32 @@ bool readSettingsJson() {
 
   registerAllSettingsModules();
 
+  // ---- Migration: debug.sensors.{camera,microphone,...} → debug.{group}.enabled ----
+  // These flags were split from a shared "sensors" group into per-sensor groups.
+  // Run before readRegisteredSettings() so the new paths are populated before reading.
+  {
+    JsonVariant sensorsSect = doc["debug"]["sensors"];
+    if (!sensorsSect.isNull() && sensorsSect.is<JsonObject>()) {
+      static const struct { const char* oldKey; const char* newGroup; } kMigrations[] = {
+        { "camera",     "camera"     },
+        { "microphone", "microphone" },
+        { "gps",        "gps"        },
+        { "rtc",        "rtc"        },
+        { "presence",   "presence"   },
+        { "fmRadio",    "fmradio"    },
+      };
+      JsonObject sensorsObj = sensorsSect.as<JsonObject>();
+      for (const auto& m : kMigrations) {
+        JsonVariant oldVal = sensorsObj[m.oldKey];
+        if (!oldVal.isNull()) {
+          doc["debug"][m.newGroup]["enabled"] = oldVal.as<bool>();
+          sensorsObj.remove(m.oldKey);
+          INFO_STORAGEF("[Settings] Migrated debug.sensors.%s → debug.%s.enabled", m.oldKey, m.newGroup);
+        }
+      }
+    }
+  }
+
   // Apply settings from registered modules first (handles defaults automatically)
   size_t registeredCount = readRegisteredSettings(doc);
   if (registeredCount > 0) {
@@ -1273,15 +1299,16 @@ static const SettingEntry debugSettingEntries[] = {
   { "execution",  SETTING_BOOL, &gSettings.debugAutoExec,       0, 0, nullptr, 0, 1, "Execution",           nullptr, false, "automations", "debugautoexec" },
   { "condition",  SETTING_BOOL, &gSettings.debugAutoCondition,  0, 0, nullptr, 0, 1, "Condition",           nullptr, false, "automations", "debugautocondition" },
   { "timing",     SETTING_BOOL, &gSettings.debugAutoTiming,     0, 0, nullptr, 0, 1, "Timing",              nullptr, false, "automations", "debugautotiming" },
-  // --- sensors group (general + simple sensor flags) ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugSensors,         0, 0, nullptr, 0, 1, "All Sensors",         nullptr, false, "sensors", "debugsensors" },
-  { "general",    SETTING_BOOL, &gSettings.debugSensorsGeneral,  0, 0, nullptr, 0, 1, "General",             nullptr, false, "sensors", "debugsensorsgeneral" },
-  { "camera",     SETTING_BOOL, &gSettings.debugCamera,          0, 0, nullptr, 0, 1, "Camera",              nullptr, false, "sensors", "debugcamera" },
-  { "microphone", SETTING_BOOL, &gSettings.debugMicrophone,      0, 0, nullptr, 0, 1, "Microphone",          nullptr, false, "sensors", "debugmicrophone" },
-  { "gps",        SETTING_BOOL, &gSettings.debugGps,             0, 0, nullptr, 0, 1, "GPS",                 nullptr, false, "sensors", "debuggps" },
-  { "rtc",        SETTING_BOOL, &gSettings.debugRtc,             0, 0, nullptr, 0, 1, "RTC",                 nullptr, false, "sensors", "debugrtc" },
-  { "presence",   SETTING_BOOL, &gSettings.debugPresence,        0, 0, nullptr, 0, 1, "Presence",            nullptr, false, "sensors", "debugpresence" },
-  { "fmRadio",    SETTING_BOOL, &gSettings.debugFmRadio,         0, 0, nullptr, 0, 1, "FM Radio",            nullptr, false, "sensors", "debugfmradio" },
+  // --- sensors group (general only; per-sensor flags have their own groups below) ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugSensors,         0, 0, nullptr, 0, 1, "All Sensors",         nullptr, false, "sensors",     "debugsensors" },
+  { "general",    SETTING_BOOL, &gSettings.debugSensorsGeneral,  0, 0, nullptr, 0, 1, "General",             nullptr, false, "sensors",     "debugsensorsgeneral" },
+  // --- per-sensor groups (each sensor gets its own card in the debug UI) ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugCamera,          0, 0, nullptr, 0, 1, "Camera",              nullptr, false, "camera",      "debugcamera" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugMicrophone,      0, 0, nullptr, 0, 1, "Microphone",          nullptr, false, "microphone",  "debugmicrophone" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugGps,             0, 0, nullptr, 0, 1, "GPS",                 nullptr, false, "gps",         "debuggps" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugRtc,             0, 0, nullptr, 0, 1, "RTC",                 nullptr, false, "rtc",         "debugrtc" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugPresence,        0, 0, nullptr, 0, 1, "Presence",            nullptr, false, "presence",    "debugpresence" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugFmRadio,         0, 0, nullptr, 0, 1, "FM Radio",            nullptr, false, "fmradio",     "debugfmradio" },
   // --- thermal group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugThermal,         0, 0, nullptr, 0, 1, "All Thermal",         nullptr, false, "thermal", "debugthermal" },
   { "frame",      SETTING_BOOL, &gSettings.debugThermalFrame,    0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "thermal", "debugthermalframe" },
@@ -1499,6 +1526,7 @@ extern const SettingsModule espsrSettingsModule;
 #endif
 
 extern const SettingsModule sensorLogSettingsModule;
+extern const SettingsModule systemLogSettingsModule;
 
 void registerAllSettingsModules() {
   if (gSettingsModulesRegistered) return;  // Only register once
@@ -1583,8 +1611,9 @@ void registerAllSettingsModules() {
   registerSettingsModule(&espsrSettingsModule);
 #endif
 
-  // Sensor logging
+  // Logging modules
   registerSettingsModule(&sensorLogSettingsModule);
+  registerSettingsModule(&systemLogSettingsModule);
 
 #if ENABLE_ONDEVICE_LLM
   extern const SettingsModule llmSettingsModule;

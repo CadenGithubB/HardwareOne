@@ -160,6 +160,19 @@ String executeCommandThroughRegistry(const String& argsInput) {
     return "Empty command";
   }
 
+  // Reject binary/non-printable input — garbled bytes from a torn-down connection
+  // can reach this path and cause an InstructionFetchError via a bad function lookup
+  for (size_t i = 0; i < (size_t)command.length(); i++) {
+    unsigned char c = (unsigned char)command[i];
+    // Allow printable ASCII (0x20-0x7E) plus common whitespace (tab, CR, LF)
+    if (c < 0x20 && c != '\t' && c != '\r' && c != '\n') {
+      return "Error: command contains non-printable characters";
+    }
+    if (c > 0x7E) {
+      return "Error: command contains non-ASCII characters";
+    }
+  }
+
   DEBUG_COMMAND_SYSTEMF("CommandSystem: Executing command '%s'", command.c_str());
 
   // Step 1: Resolve canonical command key once (case-insensitive, args preserved)
@@ -301,6 +314,135 @@ void printCommandModuleSummary() {
 }
 
 // ============================================================================
+// Command Argument Parser Implementation
+// ============================================================================
+
+const String CommandArgs::empty_;
+
+CommandArgs::CommandArgs(const String& input) : raw_(input) {
+  raw_.trim();
+  parse();
+}
+
+void CommandArgs::parse() {
+  int len = raw_.length();
+  int pos = 0;
+
+  while (pos < len && argCount_ < MAX_ARGS) {
+    // skip spaces
+    while (pos < len && raw_[pos] == ' ') pos++;
+    if (pos >= len) break;
+
+    int start = pos;
+
+    if (raw_[pos] == '"') {
+      // quoted token — store content without quotes
+      pos++;          // skip opening quote
+      start = pos;
+      while (pos < len && raw_[pos] != '"') pos++;
+      args_[argCount_]    = raw_.substring(start, pos);
+      offsets_[argCount_] = start - 1;  // offset points to the opening quote
+      argCount_++;
+      if (pos < len) pos++;  // skip closing quote
+    } else {
+      // unquoted token
+      while (pos < len && raw_[pos] != ' ') pos++;
+      args_[argCount_]    = raw_.substring(start, pos);
+      offsets_[argCount_] = start;
+      argCount_++;
+    }
+  }
+}
+
+const String& CommandArgs::arg(int index) const {
+  if (index < 0 || index >= argCount_) return empty_;
+  return args_[index];
+}
+
+int CommandArgs::argInt(int index, int defaultVal) const {
+  if (!has(index)) return defaultVal;
+  const String& a = args_[index];
+  if (a.length() == 0) return defaultVal;
+  if (a == "0") return 0;
+  int v = a.toInt();
+  return (v == 0) ? defaultVal : v;  // toInt returns 0 on failure
+}
+
+float CommandArgs::argFloat(int index, float defaultVal) const {
+  if (!has(index)) return defaultVal;
+  const String& a = args_[index];
+  if (a.length() == 0) return defaultVal;
+  // toFloat returns 0 on failure; distinguish from literal "0"
+  if (a == "0" || a == "0.0" || a == "0.00") return 0.0f;
+  float v = a.toFloat();
+  return (v == 0.0f) ? defaultVal : v;
+}
+
+bool CommandArgs::argBool(int index, bool defaultVal) const {
+  if (!has(index)) return defaultVal;
+  // Delegate to the existing project-wide helper
+  int r = parseBoolArg(args_[index]);
+  if (r < 0) return defaultVal;
+  return r == 1;
+}
+
+bool CommandArgs::argMac(int index, uint8_t mac[6]) const {
+  if (!has(index)) return false;
+  extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
+  return parseMacAddress(args_[index], mac);
+}
+
+String CommandArgs::remaining(int afterIndex) const {
+  if (afterIndex < -1) return raw_;
+  if (afterIndex == -1) return raw_;
+
+  // Find byte position right after the token at afterIndex
+  if (afterIndex >= argCount_) return String();
+
+  int pos = offsets_[afterIndex];
+  // skip past the token itself
+  if (raw_[pos] == '"') {
+    pos++;  // opening quote
+    while (pos < (int)raw_.length() && raw_[pos] != '"') pos++;
+    if (pos < (int)raw_.length()) pos++;  // closing quote
+  } else {
+    while (pos < (int)raw_.length() && raw_[pos] != ' ') pos++;
+  }
+  // skip spaces between token and remainder
+  while (pos < (int)raw_.length() && raw_[pos] == ' ') pos++;
+
+  if (pos >= (int)raw_.length()) return String();
+  return raw_.substring(pos);
+}
+
+String CommandArgs::value(const String& key) const {
+  String needle = key + "=";
+  int pos = raw_.indexOf(needle);
+  if (pos < 0) return String();
+
+  int start = pos + needle.length();
+  if (start >= (int)raw_.length()) return String();
+
+  // quoted value?
+  if (raw_[start] == '"') {
+    start++;
+    int end = raw_.indexOf('"', start);
+    if (end < 0) end = raw_.length();
+    return raw_.substring(start, end);
+  }
+
+  // unquoted — find next space
+  int end = raw_.indexOf(' ', start);
+  if (end < 0) end = raw_.length();
+  return raw_.substring(start, end);
+}
+
+bool CommandArgs::hasKey(const String& key) const {
+  String needle = key + "=";
+  return raw_.indexOf(needle) >= 0;
+}
+
+// ============================================================================
 // CLI Settings Module
 // ============================================================================
 
@@ -315,7 +457,9 @@ extern const SettingsModule cliSettingsModule = {
   "cli",
   "cli",
   cliSettingsEntries,
-  sizeof(cliSettingsEntries) / sizeof(cliSettingsEntries[0])
+  sizeof(cliSettingsEntries) / sizeof(cliSettingsEntries[0]),
+  nullptr,
+  "CLI history and display settings"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

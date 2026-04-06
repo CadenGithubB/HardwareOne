@@ -2925,17 +2925,12 @@ static const char* cmd_sr_cmds_list(const String& argsInput) {
 
 static const char* cmd_sr_cmds_add(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  if (args.length() == 0) return "Usage: sr cmds add <id> <phrase>";
-  int sp = args.indexOf(' ');
-  if (sp <= 0) return "Usage: sr cmds add <id> <phrase>";
-  String idStr = args.substring(0, sp);
-  String phrase = args.substring(sp + 1);
-  idStr.trim();
-  phrase.trim();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) return "Usage: sr cmds add <id> <phrase>";
+  String idStr = a.arg(0);
+  String phrase = a.remaining(0);
   if (!isAllDigits(idStr) || phrase.length() == 0) return "Usage: sr cmds add <id> <phrase>";
-  int id = idStr.toInt();
+  int id = a.argInt(0, 0);
   if (id <= 0) return "Error: id must be > 0";
 
   if (!mnCommandsReady()) {
@@ -3167,10 +3162,9 @@ static const char* cmd_sr_debug_reset(const String& argsInput) {
 
 static const char* cmd_sr_confidence(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+
+  if (a.count() == 0) {
     static char buf[96];
     snprintf(buf, sizeof(buf),
              "Category confidence threshold: %.2f\nTarget confidence threshold: %.2f (rejects: %lu)\nUsage: sr confidence [<0.0-1.0> | category <0.0-1.0> | target <0.0-1.0>]",
@@ -3178,25 +3172,16 @@ static const char* cmd_sr_confidence(const String& argsInput) {
     return buf;
   }
 
-  int sp = args.indexOf(' ');
-  String first = args;
-  String rest = "";
-  if (sp >= 0) {
-    first = args.substring(0, sp);
-    rest = args.substring(sp + 1);
-    first.trim();
-    rest.trim();
-  }
-
+  String first = a.arg(0);
   bool setCategoryOnly = (first == "category");
   bool setTargetOnly = (first == "target");
 
   float val = 0.0f;
   if (setCategoryOnly || setTargetOnly) {
-    if (rest.length() == 0) return "Error: missing value";
-    val = rest.toFloat();
+    if (!a.has(1)) return "Error: missing value";
+    val = a.argFloat(1, 0.0f);
   } else {
-    val = args.toFloat();
+    val = a.argFloat(0, 0.0f);
   }
 
   if (val < 0.0f || val > 1.0f) {
@@ -3219,11 +3204,9 @@ static const char* cmd_sr_confidence(const String& argsInput) {
 
 static const char* cmd_sr_accept(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  args.toLowerCase();
+  CommandArgs a(argsInput);
 
-  if (args.length() == 0) {
+  if (a.count() == 0) {
     static String out;
     out = "Target acceptance:\n";
     out += "  gap_enabled=";
@@ -3240,15 +3223,9 @@ static const char* cmd_sr_accept(const String& argsInput) {
     return out.c_str();
   }
 
-  int sp = args.indexOf(' ');
-  String key = args;
-  String val = "";
-  if (sp >= 0) {
-    key = args.substring(0, sp);
-    val = args.substring(sp + 1);
-    key.trim();
-    val.trim();
-  }
+  String key = a.arg(0);
+  key.toLowerCase();
+  String val = a.has(1) ? a.arg(1) : String();
 
   if (key == "on") {
     gSrGapAcceptEnabled = true;
@@ -3288,11 +3265,9 @@ static const char* cmd_sr_accept(const String& argsInput) {
 
 static const char* cmd_sr_dyngain(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  args.toLowerCase();
+  CommandArgs a(argsInput);
 
-  if (args.length() == 0) {
+  if (a.count() == 0) {
     static String out;
     out = "Dynamic gain (MultiNet input only):\n";
     out += "  enabled=";
@@ -3315,15 +3290,9 @@ static const char* cmd_sr_dyngain(const String& argsInput) {
     return out.c_str();
   }
 
-  int sp = args.indexOf(' ');
-  String key = args;
-  String val = "";
-  if (sp >= 0) {
-    key = args.substring(0, sp);
-    val = args.substring(sp + 1);
-    key.trim();
-    val.trim();
-  }
+  String key = a.arg(0);
+  key.toLowerCase();
+  String val = a.has(1) ? a.arg(1) : String();
 
   if (key == "on") {
     gSrDynGainEnabled = true;
@@ -3725,9 +3694,8 @@ static const char* cmd_sr_snip_status(const String& argsInput) {
 
 static const char* cmd_sr_snip_config(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+  if (a.count() == 0) {
     static String out;
     out = "Snippet config:\n";
     out += "  pre_ms=";
@@ -3739,13 +3707,10 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
     out += "\nUsage: sr snip config <pre_ms|max_ms|dest> <value>";
     return out.c_str();
   }
-  int sp = args.indexOf(' ');
-  if (sp <= 0) return "Usage: sr snip config <pre_ms|max_ms|dest> <value>";
-  String key = args.substring(0, sp);
-  String val = args.substring(sp + 1);
-  key.trim();
-  val.trim();
+  if (!a.hasMinArgs(2)) return "Usage: sr snip config <pre_ms|max_ms|dest> <value>";
+  String key = a.arg(0);
   key.toLowerCase();
+  String val = a.arg(1);
   if (key == "pre_ms") {
     int v = val.toInt();
     if (v < 100) v = 100;

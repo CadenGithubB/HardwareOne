@@ -195,13 +195,10 @@ const char* cmd_apdsmode(const String& argsInput) {
     return "[APDS] Error: Sensor not initialized - use 'openapds' first";
   }
   
-  String lc = argsInput;
-  lc.toLowerCase();
-  lc.trim();
-  
   // Parse: apdsmode <color|proximity|gesture> [on|off]
-  int sp1 = lc.indexOf(' ');
-  if (sp1 < 0) {
+  CommandArgs a(argsInput);
+
+  if (a.count() == 0) {
     if (!ensureDebugBuffer()) return "[APDS] Error: Debug buffer unavailable";
     snprintf(getDebugBuffer(), 1024, "[APDS] Modes: color=%s proximity=%s gesture=%s",
              apdsColorEnabled ? "on" : "off",
@@ -209,14 +206,10 @@ const char* cmd_apdsmode(const String& argsInput) {
              apdsGestureEnabled ? "on" : "off");
     return getDebugBuffer();
   }
-  
-  int sp2 = lc.indexOf(' ', sp1 + 1);
-  String mode = (sp2 > 0) ? lc.substring(sp1 + 1, sp2) : lc.substring(sp1 + 1);
-  String state = (sp2 > 0) ? lc.substring(sp2 + 1) : "on";
-  mode.trim();
-  state.trim();
-  
-  bool enable = (state == "on" || state == "1" || state == "true");
+
+  String mode = a.arg(0);
+  mode.toLowerCase();
+  bool enable = a.argBool(1, true);  // default to "on" if not specified
   
   if (mode == "color") {
     gAPDS9960->enableColor(enable);

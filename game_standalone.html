@@ -1,35 +1,30 @@
-#ifndef WEBPAGE_GAMES_H
-#define WEBPAGE_GAMES_H
-
-#include <Arduino.h>
-#include "System_BuildConfig.h"
-#if ENABLE_HTTP_SERVER
-#include <esp_http_server.h>
-#endif
-#include "WebServer_Utils.h"
-
-#if ENABLE_GAMES
-
-// Client-only Tilt Maze prototype
-// - Uses IMU endpoint: /api/sensors?sensor=imu
-// - Polling starts ONLY after pressing Start
-// - Uses shared page shell/navigation
-
-// Streamed inner content for games page
-inline void streamGamesInner(httpd_req_t* req) {
-  // CSS
-  httpd_resp_send_chunk(req, R"CSS(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tilt Maze - Standalone</title>
 <style>
+  :root { --panel-bg: #1a1a2e; --panel-fg: #e0e0e0; --border: #333355; }
+  body { background: #0f0f1a; color: #e0e0e0; font-family: Arial, sans-serif; margin: 0; padding: 16px; }
+  .btn { background: #2a2a4a; color: #e0e0e0; border: 1px solid #444466; border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+  .btn:hover { background: #3a3a5a; }
+  .btn-small { font-size: 11px; padding: 4px 10px; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .input-tall { background: #2a2a4a; color: #e0e0e0; border: 1px solid #444466; border-radius: 6px; padding: 4px 8px; font-size: 13px; }
+  .text-sm { font-size: 12px; }
+  .text-muted { opacity: 0.6; }
+  .space-top-sm { margin-top: 8px; }
+  .space-top-md { margin-top: 12px; }
+  .space-left-md { margin-left: 12px; }
 .games-wrap{max-width:1000px;margin:0 auto}
 .row{display:flex;gap:16px;flex-wrap:wrap}
 .col{flex:1 1 320px} .card-light{background:var(--panel-bg);color:var(--panel-fg);border-radius:12px;padding:16px;border:1px solid var(--border)}
 .hud{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-family:'Courier New',monospace;color:var(--panel-fg)}
 canvas#maze{background:#000;border:1px solid var(--border);border-radius:4px}
 </style>
-)CSS", HTTPD_RESP_USE_STRLEN);
-
-  // HTML structure
-  httpd_resp_send_chunk(req, R"HTML(
+</head>
+<body>
 <div class='games-wrap'>
   <h2>Games</h2>
   <p class='text-sm'>Client-side prototype for Tilt Maze. IMU polling starts when you click Start.</p>
@@ -58,10 +53,15 @@ canvas#maze{background:#000;border:1px solid var(--border);border-radius:4px}
           <button class='btn btn-small' id='btnView2D'>2D View</button>
           <button class='btn btn-small' id='btnView3D'>3D View (beta)</button>
           <button class='btn btn-small' id='btnToggleTex'>Toggle Textures</button>
+          <button class='btn btn-small' id='btnOverview' style='background:#2a3a2a;border-color:#446644'>🗺 Overview</button>
         </div>
         <div class='space-top-sm text-sm'>
           <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer'>
             <input type='checkbox' id='chkImuDebug'/> IMU debug to console
+          </label>
+          <span class='space-left-md'></span>
+          <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer' title='Automatically show map overview when a level loads'>
+            <input type='checkbox' id='chkAutoOverview' checked/> Auto overview on load
           </label>
           <span class='space-left-md'></span>
           <label style='display:inline-flex;align-items:center;gap:6px;cursor:pointer'>
@@ -101,12 +101,7 @@ canvas#maze{background:#000;border:1px solid var(--border);border-radius:4px}
           <canvas id='maze' width='360' height='240'></canvas>
         </div>
         <p class='text-sm space-top-sm'>Hold the device flat. Roll controls X, Pitch controls Y. Keep movements gentle.</p>
-    </div>
-  </div>
-)HTML", HTTPD_RESP_USE_STRLEN);
-
-  // JavaScript (complete game logic)
-  httpd_resp_send_chunk(req, R"JS(
+</div>
 <script>
 
 // =============================================
@@ -172,7 +167,10 @@ var timeSec = 0;
 var pos = {x:20, y:20};
 var vel = {x:0, y:0};
 var walls = [];
-var goal = {x:320, y:200, w:24, h:24};
+var goal = null;
+var goalSpawned = false;
+var goalMessage = '';
+var goalMessageUntil = 0;
 
 // =============================================
 // PHYSICS CONFIG
@@ -210,6 +208,8 @@ var wallHeights = null;
 var wallDecorations = [];
 var oreVeins = [];        // breakable mineral deposits on cave walls; cleared each level
 var floorScatter = [];    // static decorative debris/props on open floor cells
+var treasureChests = [];  // [{x,y,gold,collected}] chests at cave dead-ends
+var enemySpawners = [];   // [{x,y,hp,maxHp,cooldown,lastSpawn,type}] spawner obelisks in caves
 var platforms = [];
 var floorMesh = null;
 
@@ -251,7 +251,7 @@ var BTN_SELECT = (1<<0);
 var BTN_START = (1<<16);
 var STICK_CAM_YAW_SPEED = 1.8;
 var STICK_CAM_PITCH_SPEED = 1.8;
-var CAM_PITCH_MAX = 0.75;   // ~43° — widened after matching pitchOff scale to perspective
+var CAM_PITCH_MAX = 1.4;    // ~80° — near-vertical look range for natural FPS feel
 
 // =============================================
 // BUTTON TOGGLE STATE
@@ -595,7 +595,7 @@ function generateCaveWalls() {
   }
   function blocks(r) {
     var bs = (r.x < pos.x + buffer && r.x + r.w > pos.x - buffer && r.y < pos.y + buffer && r.y + r.h > pos.y - buffer);
-    var bg = (r.x < goal.x + buffer && r.x + r.w > goal.x - buffer && r.y < goal.y + buffer && r.y + r.h > goal.y - buffer);
+    var bg = goal ? (r.x < goal.x + buffer && r.x + r.w > goal.x - buffer && r.y < goal.y + buffer && r.y + r.h > goal.y - buffer) : false;
     return bs || bg;
   }
   function tryAdd(rects) {
@@ -662,6 +662,128 @@ function generateCaveWalls() {
     }
   }
   walls.caveCount = addedRects;
+}
+
+// Scatter varied obstacle structures across the open playable area of
+// bordered terrains (expanse, plains). Creates visual interest, cover, and
+// breaks up long sight lines in otherwise empty floors.
+// Types: stone_pillar (tall 1-2 cell), ruined_wall (broken L/line),
+//        rock_cluster (organic blob), ancient_column (round with rubble).
+function generateOpenAreaObstacles() {
+  if (!currentBorderPoly) return;
+  var m2 = 0x80000000, a2 = 1103515245, c2 = 12345;
+  var rs = (seedFor(13)) | 0;
+  var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
+
+  var area = worldW * worldH;
+  // Scale count with map area: small ~5, large ~20
+  var targetCount = Math.max(5, Math.min(22, Math.floor(area / 100000)));
+  var obstacleTypes = ['stone_pillar', 'ruined_wall', 'rock_cluster', 'ancient_column'];
+
+  var margin = 60;
+  var placed = 0, attempts = targetCount * 40;
+  var obstacles = []; // track placed centers for spacing
+
+  while (placed < targetCount && attempts-- > 0) {
+    var cx = margin + rng() * (worldW - 2 * margin);
+    var cy = margin + rng() * (worldH - 2 * margin);
+
+    // Must be inside playable area (border polygon)
+    if (!pointInPolygon(cx, cy, currentBorderPoly)) continue;
+
+    // Keep away from player start position and other obstacles
+    var tooClose = false;
+    for (var oi = 0; oi < obstacles.length; oi++) {
+      if (Math.hypot(cx - obstacles[oi].x, cy - obstacles[oi].y) < 120) { tooClose = true; break; }
+    }
+    if (tooClose) continue;
+    // Keep away from map center (leave a clearing for player)
+    if (Math.hypot(cx - worldW * 0.5, cy - worldH * 0.5) < Math.min(worldW, worldH) * 0.12) continue;
+
+    var type = obstacleTypes[Math.floor(rng() * obstacleTypes.length)];
+    var rects = [];
+
+    if (type === 'stone_pillar') {
+      // 1×1 or 2×2 tall pillar
+      var sz = (rng() < 0.5) ? cell : cell * 2;
+      rects.push({x: cx - sz * 0.5, y: cy - sz * 0.5, w: sz, h: sz, height: 0.7 + rng() * 0.5});
+    } else if (type === 'ruined_wall') {
+      // Broken wall segment — 2-4 cells in an L or line
+      var th = cell;
+      var len = cell * (2 + Math.floor(rng() * 3));
+      var h1 = 0.25 + rng() * 0.35;
+      if (rng() < 0.5) {
+        // Horizontal line
+        rects.push({x: cx, y: cy, w: len, h: th, height: h1});
+        // Maybe an L stub
+        if (rng() < 0.5) {
+          var stubLen = cell * (1 + Math.floor(rng() * 2));
+          rects.push({x: cx, y: cy, w: th, h: stubLen, height: h1 * (0.5 + rng() * 0.4)});
+        }
+      } else {
+        // Vertical line
+        rects.push({x: cx, y: cy, w: th, h: len, height: h1});
+        if (rng() < 0.5) {
+          var stubLen2 = cell * (1 + Math.floor(rng() * 2));
+          rects.push({x: cx, y: cy + len - th, w: stubLen2, h: th, height: h1 * (0.5 + rng() * 0.4)});
+        }
+      }
+    } else if (type === 'rock_cluster') {
+      // 2-4 cell organic blob
+      var numRocks = 2 + Math.floor(rng() * 3);
+      for (var ri = 0; ri < numRocks; ri++) {
+        var rox = cx + (rng() - 0.5) * cell * 2.5;
+        var roy = cy + (rng() - 0.5) * cell * 2.5;
+        var rsz = cell * (0.7 + rng() * 0.6);
+        rects.push({x: rox - rsz * 0.5, y: roy - rsz * 0.5, w: rsz, h: rsz, height: 0.15 + rng() * 0.25});
+      }
+    } else {
+      // ancient_column — single tall cell with very tall height
+      var csz = cell * (1 + rng() * 0.3);
+      rects.push({x: cx - csz * 0.5, y: cy - csz * 0.5, w: csz, h: csz, height: 0.9 + rng() * 0.4});
+    }
+
+    // Validate all rects are inside border polygon and don't overlap existing walls
+    var valid = true;
+    for (var vi = 0; vi < rects.length; vi++) {
+      var vr = rects[vi];
+      var vcx = vr.x + vr.w * 0.5, vcy = vr.y + vr.h * 0.5;
+      if (!pointInPolygon(vcx, vcy, currentBorderPoly)) { valid = false; break; }
+      // Check grid cells won't overlap existing walls
+      var gx0 = Math.max(0, Math.floor(vr.x / cell));
+      var gy0 = Math.max(0, Math.floor(vr.y / cell));
+      var gx1 = Math.min(gridW - 1, Math.floor((vr.x + vr.w) / cell));
+      var gy1 = Math.min(gridH - 1, Math.floor((vr.y + vr.h) / cell));
+      for (var vy = gy0; vy <= gy1 && valid; vy++) {
+        for (var vx = gx0; vx <= gx1 && valid; vx++) {
+          if (grid[vy * gridW + vx]) valid = false;
+        }
+      }
+    }
+    if (!valid) continue;
+
+    // Stamp into grid
+    for (var si = 0; si < rects.length; si++) {
+      var sr = rects[si];
+      var sx0 = Math.max(0, Math.floor(sr.x / cell));
+      var sy0 = Math.max(0, Math.floor(sr.y / cell));
+      var sx1 = Math.min(gridW - 1, Math.floor((sr.x + sr.w) / cell));
+      var sy1 = Math.min(gridH - 1, Math.floor((sr.y + sr.h) / cell));
+      for (var sy = sy0; sy <= sy1; sy++) {
+        for (var sx = sx0; sx <= sx1; sx++) {
+          grid[sy * gridW + sx] = 1;
+          wallHeights[sy * gridW + sx] = sr.height;
+        }
+      }
+    }
+    obstacles.push({x: cx, y: cy, type: type});
+    placed++;
+  }
+  console.log('[OBSTACLES] Placed ' + placed + '/' + targetCount + ' open-area obstacles (' +
+    obstacles.filter(function(o){return o.type==='stone_pillar'}).length + ' pillars, ' +
+    obstacles.filter(function(o){return o.type==='ruined_wall'}).length + ' ruins, ' +
+    obstacles.filter(function(o){return o.type==='rock_cluster'}).length + ' rocks, ' +
+    obstacles.filter(function(o){return o.type==='ancient_column'}).length + ' columns)');
 }
 
 function buildGrid() {
@@ -1009,19 +1131,98 @@ function isInBorderVariation(wx, wy) {
   return false;
 }
 
+// Spatial grid cache for fast isInDeepCave lookups.
+// Built once after cave generation; converts O(n) per-call to O(k) where k is
+// the small number of segments overlapping a single grid bucket.
+var _caveGrid = null;      // 2D array of lists of segment/chamber indices
+var _caveGridCell = 60;    // bucket size in world pixels
+var _caveGridW = 0;
+var _caveGridH = 0;
+
+function buildCaveSpatialGrid() {
+  var gc = _caveGridCell;
+  _caveGridW = Math.ceil(worldW / gc) + 1;
+  _caveGridH = Math.ceil(worldH / gc) + 1;
+  _caveGrid = new Array(_caveGridW * _caveGridH);
+  for (var i = 0; i < _caveGrid.length; i++) _caveGrid[i] = null;
+
+  // Insert corridor segments — expand bounding box by half-width
+  for (var si = 0; si < deepCaveRegions.length; si++) {
+    var r = deepCaveRegions[si];
+    var hw = r.width * 0.5;
+    var minX = Math.max(0, Math.floor((Math.min(r.x1, r.x2) - hw) / gc));
+    var maxX = Math.min(_caveGridW - 1, Math.floor((Math.max(r.x1, r.x2) + hw) / gc));
+    var minY = Math.max(0, Math.floor((Math.min(r.y1, r.y2) - hw) / gc));
+    var maxY = Math.min(_caveGridH - 1, Math.floor((Math.max(r.y1, r.y2) + hw) / gc));
+    for (var gy = minY; gy <= maxY; gy++) {
+      for (var gx = minX; gx <= maxX; gx++) {
+        var idx = gy * _caveGridW + gx;
+        if (!_caveGrid[idx]) _caveGrid[idx] = [];
+        _caveGrid[idx].push({src: 'seg', i: si});
+      }
+    }
+  }
+  // Insert chambers
+  for (var ci = 0; ci < deepCaveChambers.length; ci++) {
+    var ch = deepCaveChambers[ci];
+    var cMinX = Math.max(0, Math.floor((ch.cx - ch.radius) / gc));
+    var cMaxX = Math.min(_caveGridW - 1, Math.floor((ch.cx + ch.radius) / gc));
+    var cMinY = Math.max(0, Math.floor((ch.cy - ch.radius) / gc));
+    var cMaxY = Math.min(_caveGridH - 1, Math.floor((ch.cy + ch.radius) / gc));
+    for (var cgy = cMinY; cgy <= cMaxY; cgy++) {
+      for (var cgx = cMinX; cgx <= cMaxX; cgx++) {
+        var cidx = cgy * _caveGridW + cgx;
+        if (!_caveGrid[cidx]) _caveGrid[cidx] = [];
+        _caveGrid[cidx].push({src: 'cham', i: ci});
+      }
+    }
+  }
+  // Count non-empty buckets for logging
+  var filled = 0;
+  for (var fi = 0; fi < _caveGrid.length; fi++) { if (_caveGrid[fi]) filled++; }
+  console.log('[CAVE_GRID] Spatial grid: ' + _caveGridW + 'x' + _caveGridH + ' (' +
+    filled + '/' + (_caveGridW * _caveGridH) + ' filled)  ' +
+    deepCaveRegions.length + ' segs + ' + deepCaveChambers.length + ' chambers indexed');
+}
+
 // Capsule + circle test against deep cave regions. Returns {ceilZ, type} or null.
+// Uses spatial grid for O(1) average lookup instead of scanning all segments.
 function isInDeepCave(wx, wy) {
+  // Fast path: spatial grid lookup
+  if (_caveGrid) {
+    var bgx = Math.floor(wx / _caveGridCell);
+    var bgy = Math.floor(wy / _caveGridCell);
+    if (bgx < 0 || bgy < 0 || bgx >= _caveGridW || bgy >= _caveGridH) return null;
+    var bucket = _caveGrid[bgy * _caveGridW + bgx];
+    if (!bucket) return null;
+    for (var bi = 0; bi < bucket.length; bi++) {
+      var entry = bucket[bi];
+      if (entry.src === 'seg') {
+        var r = deepCaveRegions[entry.i];
+        var rdx = r.x2 - r.x1, rdy = r.y2 - r.y1;
+        var lenSq = rdx * rdx + rdy * rdy;
+        var t = lenSq > 0 ? Math.max(0, Math.min(1, ((wx - r.x1) * rdx + (wy - r.y1) * rdy) / lenSq)) : 0;
+        var perpDist = Math.hypot(wx - (r.x1 + t * rdx), wy - (r.y1 + t * rdy));
+        if (perpDist < r.width * 0.5) return {ceilZ: r.ceilZ, type: r.type};
+      } else {
+        var ch = deepCaveChambers[entry.i];
+        if (Math.hypot(wx - ch.cx, wy - ch.cy) < ch.radius) return {ceilZ: ch.ceilZ, type: 'chamber'};
+      }
+    }
+    return null;
+  }
+  // Fallback: brute-force scan (used before grid is built)
   for (var i = 0; i < deepCaveRegions.length; i++) {
-    var r = deepCaveRegions[i];
-    var rdx = r.x2 - r.x1, rdy = r.y2 - r.y1;
-    var lenSq = rdx * rdx + rdy * rdy;
-    var t = lenSq > 0 ? Math.max(0, Math.min(1, ((wx - r.x1) * rdx + (wy - r.y1) * rdy) / lenSq)) : 0;
-    var perpDist = Math.hypot(wx - (r.x1 + t * rdx), wy - (r.y1 + t * rdy));
-    if (perpDist < r.width * 0.5) return {ceilZ: r.ceilZ, type: r.type};
+    var r2 = deepCaveRegions[i];
+    var rdx2 = r2.x2 - r2.x1, rdy2 = r2.y2 - r2.y1;
+    var lenSq2 = rdx2 * rdx2 + rdy2 * rdy2;
+    var t2 = lenSq2 > 0 ? Math.max(0, Math.min(1, ((wx - r2.x1) * rdx2 + (wy - r2.y1) * rdy2) / lenSq2)) : 0;
+    var perpDist2 = Math.hypot(wx - (r2.x1 + t2 * rdx2), wy - (r2.y1 + t2 * rdy2));
+    if (perpDist2 < r2.width * 0.5) return {ceilZ: r2.ceilZ, type: r2.type};
   }
   for (var j = 0; j < deepCaveChambers.length; j++) {
-    var ch = deepCaveChambers[j];
-    if (Math.hypot(wx - ch.cx, wy - ch.cy) < ch.radius) return {ceilZ: ch.ceilZ, type: 'chamber'};
+    var ch2 = deepCaveChambers[j];
+    if (Math.hypot(wx - ch2.cx, wy - ch2.cy) < ch2.radius) return {ceilZ: ch2.ceilZ, type: 'chamber'};
   }
   return null;
 }
@@ -1127,7 +1328,16 @@ function generateDeepCaves() {
   var rs = (seedFor(11)) | 0;
   var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
 
-  var numCaves = 1 + Math.floor(rng() * 2);  // 1-2 cave systems
+  // More caves on larger maps — sprinkled around the perimeter for variety
+  var worldScale = Math.max(1.0, Math.sqrt(worldW * worldH / (720 * 480)));
+  // Scale cave count with map size: small maps 2-3, expanse 5-8
+  var numCaves = Math.min(8, 2 + Math.floor(rng() * Math.min(6, worldScale * 1.5)));
+
+  // Cave archetypes: each cave gets a random type for variety
+  // 'narrow'  — thin single corridor, long reach, no branches
+  // 'fingers' — medium width, short reach, lots of branches (spider-like)
+  // 'cavern'  — wide corridors, medium reach, chambers, some branches
+  var caveTypes = ['narrow', 'fingers', 'cavern'];
 
   // Collect border-edge candidates
   var edgeCells = [];
@@ -1145,8 +1355,29 @@ function generateDeepCaves() {
   }
   if (!edgeCells.length) return;
 
+  // Compute angle from map center for each edge cell, then divide the
+  // perimeter into numCaves equal angular sectors so entrances spread out.
+  var centerX = worldW * 0.5, centerY = worldH * 0.5;
+  for (var eci = 0; eci < edgeCells.length; eci++) {
+    var ecwx = edgeCells[eci].gx * cell + cell * 0.5;
+    var ecwy = edgeCells[eci].gy * cell + cell * 0.5;
+    edgeCells[eci].ang = Math.atan2(ecwy - centerY, ecwx - centerX);
+  }
+  var sectorSize = (Math.PI * 2) / numCaves;
+  var sectorOffset = rng() * Math.PI * 2;
+
   for (var cv = 0; cv < numCaves; cv++) {
-    var entrance = edgeCells[Math.floor(rng() * edgeCells.length)];
+    // Pick entrance from this cave's angular sector
+    var sectorCenter = sectorOffset + cv * sectorSize;
+    var sectorCands = edgeCells.filter(function(ec) {
+      var da = ec.ang - sectorCenter;
+      // Normalize to [-PI, PI]
+      while (da > Math.PI) da -= Math.PI * 2;
+      while (da < -Math.PI) da += Math.PI * 2;
+      return Math.abs(da) < sectorSize * 0.5;
+    });
+    if (!sectorCands.length) sectorCands = edgeCells;  // fallback
+    var entrance = sectorCands[Math.floor(rng() * sectorCands.length)];
     var ex = entrance.gx * cell + cell * 0.5;
     var ey = entrance.gy * cell + cell * 0.5;
 
@@ -1167,14 +1398,37 @@ function generateDeepCaves() {
     deepCaveEntrances.push({x: ex, y: ey});
     console.log('[DEEP_CAVE] Entrance ' + (cv+1) + ' at world (' + Math.round(ex) + ',' + Math.round(ey) + ')');
 
-    // Work stack for iterative corridor growth
-    // Scale cave dimensions with world size so caves feel spacious on large maps
-    var worldScale = Math.max(1.0, Math.sqrt(worldW * worldH / (720 * 480)));
-    var mainWidth = (60 + rng() * 40) * Math.max(1, worldScale * 0.5);   // ~90-150px on expanse
-    var mainCeilZ = 100 + rng() * 40;     // 100-140
-    var mainSteps = 12 + Math.floor(rng() * 12);  // 12-24 steps (longer corridors)
+    // Pick a cave type for this entrance
+    var caveType = caveTypes[Math.floor(rng() * caveTypes.length)];
+    var mainWidth, mainCeilZ, mainSteps, branchChance, branchAngleMin, branchAngleRange, chamberChance;
     var margin = 60;
-    console.log('[DEEP_CAVE] Cave ' + (cv+1) + ': worldScale=' + worldScale.toFixed(1) +
+
+    if (caveType === 'narrow') {
+      // Thin, long, no branching — a single deep tunnel
+      mainWidth = (25 + rng() * 20) * Math.max(1, worldScale * 0.35);   // narrow
+      mainCeilZ = 70 + rng() * 30;
+      mainSteps = 18 + Math.floor(rng() * 14);  // long reach
+      branchChance = 0;         // no branches
+      chamberChance = 0.05;     // rare small chamber at dead end
+      branchAngleMin = 0; branchAngleRange = 0;
+    } else if (caveType === 'fingers') {
+      // Short stubby corridors that branch aggressively — spider-like
+      mainWidth = (40 + rng() * 30) * Math.max(1, worldScale * 0.4);
+      mainCeilZ = 90 + rng() * 30;
+      mainSteps = 5 + Math.floor(rng() * 5);    // short main
+      branchChance = 0.7;       // branch aggressively
+      chamberChance = 0.15;     // some chambers
+      branchAngleMin = 0.6; branchAngleRange = 1.0;  // wide splay
+    } else {
+      // Cavern — wide corridors with chambers (the original big cave)
+      mainWidth = (60 + rng() * 40) * Math.max(1, worldScale * 0.5);
+      mainCeilZ = 100 + rng() * 40;
+      mainSteps = 14 + Math.floor(rng() * 10);
+      branchChance = 0.45;
+      chamberChance = 0.25;
+      branchAngleMin = 0.7; branchAngleRange = 0.8;
+    }
+    console.log('[DEEP_CAVE] Cave ' + (cv+1) + ' type=' + caveType + ': worldScale=' + worldScale.toFixed(1) +
                 ' mainWidth=' + mainWidth.toFixed(0) + ' steps=' + mainSteps);
 
     var stack = [{
@@ -1209,42 +1463,50 @@ function generateDeepCaves() {
         var segW = item.width * (0.75 + rng() * 0.5);
         var segCeil = item.ceilZ * (0.85 + 0.15 * (segW / item.width));
 
+        // Skip segments whose endpoint is inside the playable area (border polygon).
+        // Caves should only exist in the wall mass, not floating over open floor.
+        if (currentBorderPoly && pointInPolygon(nx2, ny2, currentBorderPoly)) {
+          break;  // stop this corridor — it's wandered back into the open
+        }
+
         // Store corridor segment
         deepCaveRegions.push({x1:icx, y1:icy, x2:nx2, y2:ny2, width:segW, ceilZ:segCeil, type:'corridor'});
 
-        // Punch grid cells open along segment
+        // Punch grid cells open along segment — O(1) capsule check, not O(regions)
         var segLen = Math.hypot(nx2 - icx, ny2 - icy);
         var sdX = (nx2 - icx) / (segLen || 1), sdY = (ny2 - icy) / (segLen || 1);
-        var punchR = Math.ceil(segW * 0.5 / cell) + 1;
-        for (var t = 0; t < segLen; t += cell) {
+        var halfW = segW * 0.5;
+        var punchR = Math.ceil(halfW / cell) + 1;
+        var segLenSq = segLen * segLen;
+        for (var t = 0; t <= segLen; t += cell * 0.5) {
           var swx = icx + sdX * t, swy = icy + sdY * t;
           var sgx = Math.floor(swx / cell), sgy = Math.floor(swy / cell);
           for (var pdy = -punchR; pdy <= punchR; pdy++) {
             for (var pdx = -punchR; pdx <= punchR; pdx++) {
               var pnx = sgx + pdx, pny = sgy + pdy;
               if (pnx < 0 || pny < 0 || pnx >= gridW || pny >= gridH) continue;
+              // Capsule check: distance from cell centre to segment line
               var pwx = pnx * cell + cell * 0.5, pwy = pny * cell + cell * 0.5;
-              if (isInDeepCave(pwx, pwy)) {
+              var tx2 = segLenSq > 0 ? Math.max(0, Math.min(1, ((pwx - icx) * sdX + (pwy - icy) * sdY) / segLen)) : 0;
+              var cx2 = icx + tx2 * sdX * segLen, cy2 = icy + tx2 * sdY * segLen;
+              if ((pwx - cx2) * (pwx - cx2) + (pwy - cy2) * (pwy - cy2) < halfW * halfW) {
                 grid[pny * gridW + pnx] = 0;
               }
             }
           }
         }
 
-        // CHAMBER: 25% chance after step 2, or at corridor end
-        if ((rng() < 0.25 && step > 2) || step === item.stepsLeft - 1) {
-          var chamberR = (40 + rng() * 40) * Math.max(1, worldScale * 0.4);  // 56-112px on expanse
+        // CHAMBER: type-dependent chance after step 2, or at corridor end
+        var isTerminal = (step === item.stepsLeft - 1);
+        if ((rng() < chamberChance && step > 2) || (chamberChance > 0 && isTerminal)) {
+          var chamberBase = (caveType === 'narrow') ? (20 + rng() * 15) : (40 + rng() * 40);
+          var chamberR = chamberBase * Math.max(1, worldScale * 0.4);
           var chamberCeil = item.ceilZ * (1.0 + rng() * 0.2);
-          deepCaveChambers.push({cx:nx2, cy:ny2, radius:chamberR, ceilZ:chamberCeil});
+          deepCaveChambers.push({cx:nx2, cy:ny2, radius:chamberR, ceilZ:chamberCeil, terminal:isTerminal});
 
-          // Approximate chamber as overlapping capsule segments for ceiling rendering
-          for (var ai = 0; ai < 6; ai++) {
-            var aAng = ai * Math.PI / 3;
-            var adx = Math.cos(aAng) * chamberR * 0.5;
-            var ady = Math.sin(aAng) * chamberR * 0.5;
-            deepCaveRegions.push({x1:nx2-adx, y1:ny2-ady, x2:nx2+adx, y2:ny2+ady,
-                                  width:chamberR, ceilZ:chamberCeil, type:'chamber'});
-          }
+          // Chambers are stored in deepCaveChambers[] — no need to also create
+          // 6 capsule segments in deepCaveRegions[]. isInDeepCave() checks both
+          // arrays, and ceiling heights get stamped into floorMesh.ceilH at gen time.
 
           // Punch chamber circle
           var chPunchR = Math.ceil(chamberR / cell) + 1;
@@ -1261,9 +1523,9 @@ function generateDeepCaves() {
           }
         }
 
-        // BRANCH: 35% chance, depth < 3
-        if (item.depth < 3 && rng() < 0.35 && step > 1 && step < item.stepsLeft - 1) {
-          var brAngle = (rng() < 0.5 ? 1 : -1) * (0.5 + rng() * 0.7);
+        // BRANCH: type-dependent chance and angle
+        if (item.depth < 3 && rng() < branchChance && step > 0 && step < item.stepsLeft - 1) {
+          var brAngle = (rng() < 0.5 ? 1 : -1) * (branchAngleMin + rng() * branchAngleRange);
           var brCos = Math.cos(brAngle), brSin = Math.sin(brAngle);
           var brDirX = bdX * brCos - bdY * brSin, brDirY = bdX * brSin + bdY * brCos;
           var brLen = Math.hypot(brDirX, brDirY) || 1;
@@ -1337,42 +1599,54 @@ function generateOreVeins() {
   var rs = (seedFor(7)) | 0;
   var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
   var placed = 0;
-  var dirs = [[-1,0,'east'],[1,0,'west'],[0,-1,'south'],[0,1,'north']];
-  // Walk along corridor EDGES (not center) so we find adjacent wall cells
-  for (var si = 0; si < deepCaveRegions.length; si++) {
-    var seg = deepCaveRegions[si];
-    if (seg.type !== 'corridor') continue;
+  var usedCells = {};  // track placed cells by "gx,gy" key for O(1) dedup
+
+  // Walk along each corridor segment. At sample points, cast outward
+  // perpendicular to the corridor direction to find the cave wall edge,
+  // then place ore on the first wall cell encountered.
+  var corridors = deepCaveRegions.filter(function(r) { return r.type === 'corridor'; });
+  for (var si = 0; si < corridors.length; si++) {
+    var seg = corridors[si];
     var segLen = Math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1);
-    var sdx = (seg.x2 - seg.x1) / (segLen || 1), sdy = (seg.y2 - seg.y1) / (segLen || 1);
-    // Perpendicular direction
-    var perpX = -sdy, perpY = sdx;
+    if (segLen < 1) continue;
+    var sdx = (seg.x2 - seg.x1) / segLen, sdy = (seg.y2 - seg.y1) / segLen;
+    // Perpendicular directions (left and right of corridor)
+    var perpLX = -sdy, perpLY = sdx;   // left normal
+    var perpRX = sdy,  perpRY = -sdx;  // right normal
     var halfW = seg.width * 0.5;
-    var steps = Math.ceil(segLen / cell);
+    var steps = Math.ceil(segLen / (cell * 2));  // sample every ~2 cells along corridor
+
     for (var st = 0; st <= steps; st++) {
-      var cx = seg.x1 + sdx * st * cell, cy = seg.y1 + sdy * st * cell;
-      // Check both edges of the corridor
-      for (var edgeSide = -1; edgeSide <= 1; edgeSide += 2) {
-        var ex = cx + perpX * halfW * edgeSide;
-        var ey = cy + perpY * halfW * edgeSide;
-        // Check 4 neighbours from the edge point
-        for (var di = 0; di < dirs.length; di++) {
-          var ngx = Math.floor(ex / cell) + dirs[di][0];
-          var ngy = Math.floor(ey / cell) + dirs[di][1];
-          if (ngx < 1 || ngy < 1 || ngx >= gridW - 1 || ngy >= gridH - 1) continue;
-          if (!grid[ngy * gridW + ngx]) continue;           // must be a wall cell
-          if (isInDeepCave(ngx * cell + cell * 0.5, ngy * cell + cell * 0.5)) continue;
-          if (rng() > 0.15) continue;                       // 15% spawn chance per edge cell
-          var dup = false;
-          for (var oi = 0; oi < oreVeins.length; oi++) {
-            if (oreVeins[oi].gx === ngx && oreVeins[oi].gy === ngy) { dup = true; break; }
-          }
-          if (dup) continue;
+      var t = st / (steps || 1);
+      var cx = seg.x1 + sdx * segLen * t;
+      var cy = seg.y1 + sdy * segLen * t;
+
+      // Cast outward from corridor edge in both perpendicular directions
+      var perps = [[perpLX, perpLY, 'east'], [perpRX, perpRY, 'west']];
+      for (var pi = 0; pi < perps.length; pi++) {
+        var px = perps[pi][0], py = perps[pi][1], side = perps[pi][2];
+        // Start at corridor edge (halfW out from center), scan outward
+        for (var dist = halfW; dist < halfW + cell * 4; dist += cell) {
+          var wx = cx + px * dist, wy = cy + py * dist;
+          var gx = Math.floor(wx / cell), gy = Math.floor(wy / cell);
+          if (gx < 1 || gy < 1 || gx >= gridW - 1 || gy >= gridH - 1) break;
+          if (!grid[gy * gridW + gx]) continue;  // still floor, keep scanning
+          // Found a wall cell at the cave edge
+          if (rng() > 0.25) break;  // 25% spawn chance
+          var key = gx + ',' + gy;
+          if (usedCells[key]) break;
+          usedCells[key] = true;
           var veinType = rng() < 0.5 ? 'gold' : 'teal';
-          var worldX = ngx * cell + cell * 0.5 + dirs[di][0] * cell * 0.3;
-          var worldY = ngy * cell + cell * 0.5 + dirs[di][1] * cell * 0.3;
-          oreVeins.push({gx:ngx, gy:ngy, hp:3, worldX:worldX, worldY:worldY,
-                         side:dirs[di][2], veinType:veinType});
+          // Determine which side the cave interior is on
+          var faceSide = (Math.abs(px) > Math.abs(py))
+            ? (px > 0 ? 'west' : 'east')
+            : (py > 0 ? 'north' : 'south');
+          oreVeins.push({gx:gx, gy:gy, hp:3,
+                         worldX: gx * cell + cell * 0.5,
+                         worldY: gy * cell + cell * 0.5,
+                         side: faceSide, veinType: veinType});
           placed++;
+          break;  // only one vein per ray
         }
       }
     }
@@ -1399,7 +1673,8 @@ function generateFloorScatter() {
 
   // Collect eligible open cells
   var candidates = [];
-  var goalCX = goal.x + (goal.w || 0) * 0.5, goalCY = goal.y + (goal.h || 0) * 0.5;
+  var goalCX = goal ? goal.x + (goal.w || 0) * 0.5 : -9999;
+  var goalCY = goal ? goal.y + (goal.h || 0) * 0.5 : -9999;
   var shopX = shopMarker ? shopMarker.x : -9999, shopY = shopMarker ? shopMarker.y : -9999;
   for (var gy = 1; gy < gridH - 1; gy++) {
     for (var gx = 1; gx < gridW - 1; gx++) {
@@ -1470,7 +1745,135 @@ function generateFloorScatter() {
       });
     }
   }
-  console.log('[SCATTER] Placed ' + floorScatter.length + ' floor items (' + singleCount + ' singles + ' + groupCount + ' groups, ' + terrain + ')');
+  // ── Edge scatter — items hugging walls, columns, and border transitions ────
+  // Collect floor cells adjacent to at least one wall cell, then sprinkle
+  // terrain-appropriate items along these edges for a natural lived-in look.
+  var edgePool;
+  if (terrain === 'cave')                            edgePool = ['rubble','rock_pile','bones','rubble'];
+  else if (terrain === 'expanse' || terrain === 'plains') edgePool = ['rubble','desert_rock','dry_bones','rubble','dead_shrub'];
+  else if (terrain === 'ice')                        edgePool = ['ice_shard','rubble','ice_shard'];
+  else                                               edgePool = ['rubble','bones','skull','rubble'];
+
+  var edgeCands = [];
+  var dirs4e = [[-1,0],[1,0],[0,-1],[0,1]];
+  for (var egy = 2; egy < gridH - 2; egy++) {
+    for (var egx = 2; egx < gridW - 2; egx++) {
+      if (grid[egy * gridW + egx] !== 0) continue;
+      var adjWall = false;
+      for (var ed = 0; ed < 4; ed++) {
+        var enx = egx + dirs4e[ed][0], eny = egy + dirs4e[ed][1];
+        if (enx >= 0 && eny >= 0 && enx < gridW && eny < gridH && grid[eny * gridW + enx]) {
+          adjWall = true; break;
+        }
+      }
+      if (!adjWall) continue;
+      var ewx = egx * cell + cell * 0.5, ewy = egy * cell + cell * 0.5;
+      if (Math.hypot(ewx - pos.x, ewy - pos.y) < 50) continue;
+      if (currentBorderPoly && !pointInPolygon(ewx, ewy, currentBorderPoly)) continue;
+      edgeCands.push({gx:egx, gy:egy, wx:ewx, wy:ewy});
+    }
+  }
+  // Shuffle edge candidates
+  for (var esi = edgeCands.length - 1; esi > 0; esi--) {
+    var esj = Math.floor(rng() * (esi + 1));
+    var etmp = edgeCands[esi]; edgeCands[esi] = edgeCands[esj]; edgeCands[esj] = etmp;
+  }
+  // Place ~4% of edge cells
+  var edgeCount = Math.max(8, Math.min(60, Math.floor(edgeCands.length * 0.04)));
+  for (var eci2 = 0; eci2 < edgeCount && eci2 < edgeCands.length; eci2++) {
+    var ec = edgeCands[eci2];
+    var inCaveE = isInDeepCave(ec.wx, ec.wy);
+    var eType2;
+    if (inCaveE) eType2 = cavePool[Math.floor(rng() * cavePool.length)];
+    else eType2 = edgePool[Math.floor(rng() * edgePool.length)];
+    // Offset toward the wall for a natural hugging effect
+    floorScatter.push({
+      x: ec.wx + (rng() - 0.5) * cell * 0.4,
+      y: ec.wy + (rng() - 0.5) * cell * 0.4,
+      type: eType2,
+      variant: Math.floor(rng() * 3),
+      seed: rng(),
+      edge: true
+    });
+  }
+
+  console.log('[SCATTER] Placed ' + floorScatter.length + ' floor items (' + singleCount + ' singles + ' + groupCount + ' groups + ' + edgeCount + ' edge, ' + terrain + ')');
+}
+
+// Place treasure chests at terminal cave chambers (dead-ends) and enemy
+// spawners in larger non-terminal chambers. Chests contain 30 gold and glow
+// so they're visible from a distance. Spawners periodically emit enemies
+// until destroyed.
+function generateCaveInteractables() {
+  treasureChests = [];
+  enemySpawners = [];
+  if (!deepCaveChambers.length) return;
+
+  var m2 = 0x80000000, a2 = 1103515245, c2 = 12345;
+  var rs = (seedFor(14)) | 0;
+  var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
+
+  // Minimum distance between chests so they don't cluster
+  var MIN_CHEST_SPACING = 200;
+  // Reject chambers too close to world edges — those are just boundary hits
+  var edgeMargin = 30;
+
+  var skippedEdge = 0, skippedSpacing = 0;
+
+  for (var ci = 0; ci < deepCaveChambers.length; ci++) {
+    var ch = deepCaveChambers[ci];
+
+    // Skip chambers that are at the world edge (boundary terminations, not real dead-ends)
+    if (ch.cx < edgeMargin || ch.cy < edgeMargin ||
+        ch.cx > worldW - edgeMargin || ch.cy > worldH - edgeMargin) {
+      skippedEdge++;
+      continue;
+    }
+
+    if (ch.terminal) {
+      // Check minimum spacing from existing chests
+      var tooClose = false;
+      for (var ti = 0; ti < treasureChests.length; ti++) {
+        if (Math.hypot(ch.cx - treasureChests[ti].x, ch.cy - treasureChests[ti].y) < MIN_CHEST_SPACING) {
+          tooClose = true; break;
+        }
+      }
+      if (tooClose) { skippedSpacing++; continue; }
+
+      // Small offset from center for visual interest
+      var chestX = ch.cx + (rng() - 0.5) * ch.radius * 0.3;
+      var chestY = ch.cy + (rng() - 0.5) * ch.radius * 0.3;
+      treasureChests.push({
+        x: chestX, y: chestY, gold: 30, collected: false,
+        seed: rng(), bobPhase: rng() * Math.PI * 2
+      });
+    } else if (ch.radius > 50 && rng() < 0.45) {
+      // Larger non-terminal chambers may get an enemy spawner
+      // Also check spacing from other spawners
+      var spTooClose = false;
+      for (var si = 0; si < enemySpawners.length; si++) {
+        if (Math.hypot(ch.cx - enemySpawners[si].x, ch.cy - enemySpawners[si].y) < 150) {
+          spTooClose = true; break;
+        }
+      }
+      if (spTooClose) continue;
+
+      enemySpawners.push({
+        x: ch.cx, y: ch.cy,
+        hp: 5, maxHp: 5,
+        cooldownMs: 12000,    // spawn an enemy every 12s
+        lastSpawn: 0,
+        spawnCount: 0,
+        maxSpawns: 3,         // max 3 enemies per spawner
+        active: true,
+        seed: rng(),
+        pulsePhase: rng() * Math.PI * 2
+      });
+    }
+  }
+  console.log('[INTERACTABLES] ' + treasureChests.length + ' treasure chests, ' +
+              enemySpawners.length + ' enemy spawners placed in caves' +
+              ' (skipped: ' + skippedEdge + ' edge, ' + skippedSpacing + ' too close)');
 }
 
 function generateBorderPolygon() {
@@ -1479,9 +1882,13 @@ function generateBorderPolygon() {
   var rs = (seedFor(5)) | 0;
   var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
 
-  var m = 22;                              // guaranteed minimum border thickness
-  // Cap maxBite so large maps don't produce 500+ pixel walls that swallow spawn points.
-  var maxBite = Math.min(Math.min(worldW, worldH) * 0.18, 180);
+  // Scale minimum border with world size so large maps have thick wall mass for caves to carve into.
+  // Tiered: large maps (min dim > 1000) get 18% border, small maps get 12%.
+  // Level 1 (720x480): m≈57  Expanse (4320x2880): m≈518
+  var scaleFactor = (Math.min(worldW, worldH) > 1000) ? 0.18 : 0.12;
+  var m = Math.max(22, Math.floor(Math.min(worldW, worldH) * scaleFactor));
+  // Max bite inward for organic edges — proportional to border thickness
+  var maxBite = Math.min(Math.min(worldW, worldH) * 0.15, m * 0.5);
   var segs = 5 + Math.floor(rng() * 4);   // 5–8 segments per edge (more organic)
   var poly = [];
 
@@ -1591,6 +1998,77 @@ function findSafeSpawn(targetX, targetY) {
     }
   }
   return {x: targetX, y: targetY};
+}
+
+// Find a random walkable spawn position inside the border polygon.
+// Tries random sampling first (fast), falls back to full grid scan.
+function findRandomOpenSpawn(poly) {
+  if (!grid || !poly || poly.length < 3) return findSafeSpawn(worldW * 0.5, worldH * 0.5);
+  // Random sampling: 200 attempts
+  var m2 = 0x80000000, a2 = 1103515245, c2 = 12345;
+  var rs = (Date.now() ^ 0xDEAD) | 0;
+  var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
+  var candidates = [];
+  for (var attempt = 0; attempt < 200; attempt++) {
+    var gx = Math.floor(rng() * gridW), gy = Math.floor(rng() * gridH);
+    if (grid[gy * gridW + gx]) continue; // wall
+    var wx = gx * cell + cell * 0.5, wy = gy * cell + cell * 0.5;
+    if (isInGridWall(wx, wy, 6)) continue;
+    if (!pointInPolygon(wx, wy, poly)) continue;
+    candidates.push({x: wx, y: wy});
+    if (candidates.length >= 10) break; // enough candidates
+  }
+  if (candidates.length > 0) {
+    // Pick a candidate near the center of the map for a fair start
+    var bestDist = Infinity, best = candidates[0];
+    var cx = worldW * 0.5, cy = worldH * 0.5;
+    for (var ci = 0; ci < candidates.length; ci++) {
+      var d = Math.hypot(candidates[ci].x - cx, candidates[ci].y - cy);
+      if (d < bestDist) { bestDist = d; best = candidates[ci]; }
+    }
+    return best;
+  }
+  // Fallback: full grid scan for any open cell inside polygon
+  for (var gy2 = 1; gy2 < gridH - 1; gy2++) {
+    for (var gx2 = 1; gx2 < gridW - 1; gx2++) {
+      if (grid[gy2 * gridW + gx2]) continue;
+      var wx2 = gx2 * cell + cell * 0.5, wy2 = gy2 * cell + cell * 0.5;
+      if (!isInGridWall(wx2, wy2, 6) && pointInPolygon(wx2, wy2, poly)) return {x: wx2, y: wy2};
+    }
+  }
+  return findSafeSpawn(worldW * 0.5, worldH * 0.5);
+}
+
+// Spawn the goal at a random open position far from the player.
+// Called when all enemies are defeated.
+function spawnGoal() {
+  var goalSize = (worldW > 2000) ? 56 : 32;
+  var candidates = [];
+  var m2 = 0x80000000, a2 = 1103515245, c2 = 12345;
+  var rs = (Date.now() ^ 0xBEEF) | 0;
+  var rng = function() { rs = (a2 * rs + c2) % m2; return rs / (m2 - 1); };
+  for (var attempt = 0; attempt < 300; attempt++) {
+    var gx = Math.floor(rng() * gridW), gy = Math.floor(rng() * gridH);
+    if (grid[gy * gridW + gx]) continue;
+    var wx = gx * cell + cell * 0.5, wy = gy * cell + cell * 0.5;
+    if (isInGridWall(wx, wy, goalSize * 0.5)) continue;
+    if (currentBorderPoly && !pointInPolygon(wx, wy, currentBorderPoly)) continue;
+    var dist = Math.hypot(wx - pos.x, wy - pos.y);
+    candidates.push({x: wx, y: wy, dist: dist});
+  }
+  if (!candidates.length) {
+    // Fallback: place near world center
+    var safe = findSafeSpawn(worldW * 0.5, worldH * 0.5);
+    candidates.push({x: safe.x, y: safe.y, dist: 0});
+  }
+  // Pick from the farthest 25% to make the player search for it
+  candidates.sort(function(a, b) { return b.dist - a.dist; });
+  var pick = candidates[Math.floor(rng() * Math.min(candidates.length, Math.max(1, Math.floor(candidates.length * 0.25))))];
+  goal = {x: pick.x - goalSize * 0.5, y: pick.y - goalSize * 0.5, w: goalSize, h: goalSize};
+  goalSpawned = true;
+  goalMessage = 'All enemies defeated! Find the exit!';
+  goalMessageUntil = Date.now() + 4000;
+  console.log('[GOAL] Spawned at (' + pick.x.toFixed(0) + ',' + pick.y.toFixed(0) + ') dist=' + pick.dist.toFixed(0) + ' from player');
 }
 
 // Mark every grid cell whose centre falls outside the border polygon as a wall.
@@ -1791,7 +2269,7 @@ function resetLevel(lv) {
     if (sel) sel.value = terrain;
   }
   pos = {x:cfg.start.x, y:cfg.start.y};
-  goal = {x:cfg.goal.x, y:cfg.goal.y, w:cfg.goal.w, h:cfg.goal.h};
+  goal = null; goalSpawned = false; goalMessage = ''; goalMessageUntil = 0;
   walls = cfg.walls.slice();
   var usesBorderPoly = (terrain === 'plains' || terrain === 'cave' || terrain === 'expanse');
   if (usesBorderPoly) {
@@ -1807,15 +2285,18 @@ function resetLevel(lv) {
   deepCaveRegions = [];
   deepCaveEntrances = [];
   deepCaveChambers = [];
+  _caveGrid = null;
   if (currentBorderPoly) {
     applyIrregularBorder(currentBorderPoly);
     if (usesBorderPoly) { generateBorderVariation(); }  // subtle wall roughening on all bordered terrains
     if (terrain === 'expanse') { generateDeepCaves(); } // real deep cave networks (expanse only)
+    generateOpenAreaObstacles();  // scatter pillars, ruins, rocks across open floor
   }
+  if (deepCaveRegions.length > 0) { buildCaveSpatialGrid(); }  // spatial index for O(1) isInDeepCave()
   if (usesBorderPoly) { generateBlendedFloor(); }   // cave-aware: stamps ceilH into mesh
   else { platforms = []; floorMesh = null; }
   if (currentBorderPoly) {
-    var safe = findSafeSpawn(pos.x, pos.y);
+    var safe = findRandomOpenSpawn(currentBorderPoly);
     pos.x = safe.x; pos.y = safe.y;
     console.log('[MAP] Safe spawn: (' + pos.x.toFixed(1) + ',' + pos.y.toFixed(1) + ')  grid=(' + Math.floor(pos.x/cell) + ',' + Math.floor(pos.y/cell) + ')  wall=' + (isInGridWall(pos.x,pos.y,6) ? 'YES ⚠' : 'no'));
   }
@@ -1823,9 +2304,12 @@ function resetLevel(lv) {
   CAM_FOLLOW = true;
   oreVeins = [];
   floorScatter = [];
+  treasureChests = [];
+  enemySpawners = [];
   createWallDecorations();
   generateOreVeins();
   generateFloorScatter();
+  generateCaveInteractables();
   spawnEnemies(cfg);
   coinDrops = []; coins = 0; wardActive = false; dmgBoostUntil = 0; speedBoostUntil = 0;
   groundEffects = []; chainEffects = []; novaEffects = [];
@@ -1836,6 +2320,30 @@ function resetLevel(lv) {
   medalBronze = (cfg.medals && cfg.medals.bronze) ? cfg.medals.bronze : 22;
   timeSec = 0; timeColor = '#d4af37';
   applyPreset();
+
+  // ── Generation summary — geometry counts for profiling ──────────────
+  var _smv = floorMesh ? (floorMesh.w * floorMesh.h) : 0;
+  var _smq = floorMesh ? ((floorMesh.w - 1) * (floorMesh.h - 1)) : 0;
+  var _swc = 0; if (grid) { for (var _si = 0; _si < grid.length; _si++) { if (grid[_si]) _swc++; } }
+  console.log('[GEN] ── Geometry Summary ──────────────────────────');
+  console.log('[GEN] Grid: ' + gridW + 'x' + gridH + ' = ' + (gridW*gridH) + ' cells (' + _swc + ' walls, ' + (gridW*gridH-_swc) + ' floor)');
+  console.log('[GEN] Mesh: ' + (floorMesh ? floorMesh.w+'x'+floorMesh.h : '—') + ' = ' + _smv + ' verts, ' + _smq + ' quads, ' + (_smq*4) + ' edges');
+  console.log('[GEN] Border: ' + (currentBorderPoly ? currentBorderPoly.length + ' verts' : 'none') + '  variations=' + (borderVariations ? borderVariations.length : 0));
+  console.log('[GEN] Caves: ' + (deepCaveRegions ? deepCaveRegions.length : 0) + ' segs (' +
+    (deepCaveRegions ? deepCaveRegions.filter(function(r){return r.type==='corridor'}).length : 0) + ' corr + ' +
+    (deepCaveRegions ? deepCaveRegions.filter(function(r){return r.type==='chamber'}).length : 0) + ' cham)  chambers=' +
+    (deepCaveChambers ? deepCaveChambers.length : 0) + '  entrances=' + (deepCaveEntrances ? deepCaveEntrances.length : 0));
+  console.log('[GEN] Objects: ore=' + (oreVeins ? oreVeins.length : 0) + '  scatter=' + (floorScatter ? floorScatter.length : 0) +
+    '  wallDecors=' + (wallDecorations ? wallDecorations.length : 0) + '  chests=' + (treasureChests ? treasureChests.length : 0) +
+    '  spawners=' + (enemySpawners ? enemySpawners.length : 0) + '  enemies=' + (enemies ? enemies.length : 0));
+  console.log('[GEN] ─────────────────────────────────────────────');
+
+  // Auto-overview: show full map on load if the checkbox is checked
+  var chkAuto = document.getElementById('chkAutoOverview');
+  if (chkAuto && chkAuto.checked) {
+    // Small delay so the game loop has initialised canvas dimensions first
+    setTimeout(function() { if (!overviewActive) toggleOverview(); }, 80);
+  }
 }
 
 
@@ -2316,6 +2824,172 @@ function drawFloorScatter3D() {
   }
 }
 
+// Render treasure chests as billboarded sprites in the 3D view.
+// Golden glowing boxes visible from medium range, with a bobbing idle animation.
+function drawTreasureChests3D() {
+  if (!treasureChests || !treasureChests.length || !MODE3D) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var cameraZRaw = (cam.z || 60);
+  var cameraZ = 60 + (cameraZRaw - 60) * (25 / 40);
+  var now = Date.now();
+
+  for (var i = 0; i < treasureChests.length; i++) {
+    var ch = treasureChests[i];
+    if (ch.collected) continue;
+    var dx = ch.x - cam.x, dy = ch.y - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 3 || dist > viewDist * 0.5) continue;
+
+    var ang = Math.atan2(dy, dx);
+    var da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.3) continue;
+
+    var sx = (da / halfFov) * 0.5 + 0.5;
+    var screenX = Math.floor(sx * w);
+    if (screenX < -30 || screenX > w + 30) continue;
+    if (depthBuffer && screenX >= 0 && screenX < depthBuffer.length && dist > depthBuffer[screenX] + 2) continue;
+
+    var fh = floorMesh ? getFloorHeightAt(ch.x, ch.y) : 0;
+    var floorWorldZ = fh * 25;
+    var bob = Math.sin(now * 0.003 + ch.bobPhase) * 2;
+    var screenY = horizonY + Math.floor(((cameraZ - floorWorldZ - bob) / dist) * 180);
+    var size = Math.max(10, Math.min(50, Math.floor(1600 / dist)));
+
+    var fogAlpha = Math.max(0.4, 1.0 - dist / (viewDist * 0.5) * 0.5);
+    ctx.save(); ctx.globalAlpha = fogAlpha;
+
+    // Glow halo
+    var glowR = size * 1.8;
+    var glowGrad = ctx.createRadialGradient(screenX, screenY - size * 0.3, size * 0.3, screenX, screenY - size * 0.3, glowR);
+    glowGrad.addColorStop(0, 'rgba(255,200,60,0.25)');
+    glowGrad.addColorStop(1, 'rgba(255,200,60,0)');
+    ctx.fillStyle = glowGrad;
+    ctx.fillRect(screenX - glowR, screenY - size * 0.3 - glowR, glowR * 2, glowR * 2);
+
+    // Chest body
+    var bw = size * 0.7, bh = size * 0.5;
+    ctx.fillStyle = '#8b5e2b';
+    ctx.fillRect(screenX - bw, screenY - bh, bw * 2, bh);
+
+    // Lid (slightly wider, darker)
+    ctx.fillStyle = '#6b3e1b';
+    ctx.fillRect(screenX - bw * 1.05, screenY - bh - bh * 0.3, bw * 2.1, bh * 0.35);
+
+    // Gold trim
+    ctx.fillStyle = '#d4af37';
+    ctx.fillRect(screenX - bw * 0.15, screenY - bh, bw * 0.3, bh);  // center band
+    ctx.fillRect(screenX - bw, screenY - bh * 0.55, bw * 2, bh * 0.08); // horizontal band
+
+    // Lock
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath();
+    ctx.arc(screenX, screenY - bh * 0.5, size * 0.08, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Shimmer sparkle
+    var shimmer = 0.5 + 0.5 * Math.sin(now * 0.005 + ch.seed * 10);
+    ctx.globalAlpha = fogAlpha * shimmer * 0.6;
+    ctx.fillStyle = '#ffe680';
+    var sparkX = screenX + Math.cos(now * 0.003 + ch.seed * 5) * bw * 0.6;
+    var sparkY = screenY - bh * 0.7 + Math.sin(now * 0.004 + ch.seed * 7) * bh * 0.3;
+    ctx.beginPath(); ctx.arc(sparkX, sparkY, size * 0.06, 0, Math.PI * 2); ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+// Render enemy spawner obelisks as dark pulsing pillars with a red glow.
+function drawEnemySpawners3D() {
+  if (!enemySpawners || !enemySpawners.length || !MODE3D) return;
+  var w = canvas.width, h = canvas.height;
+  var halfFov = cam.fov / 2;
+  var pitchOff = Math.floor(-(cam.pitch || 0) * 180);
+  var horizonY = Math.floor(h * 0.5) + pitchOff;
+  var cameraZRaw = (cam.z || 60);
+  var cameraZ = 60 + (cameraZRaw - 60) * (25 / 40);
+  var now = Date.now();
+
+  for (var i = 0; i < enemySpawners.length; i++) {
+    var sp = enemySpawners[i];
+    if (!sp.active) continue;
+    var dx = sp.x - cam.x, dy = sp.y - cam.y;
+    var dist = Math.hypot(dx, dy);
+    if (dist < 3 || dist > viewDist * 0.5) continue;
+
+    var ang = Math.atan2(dy, dx);
+    var da = ang - cam.ang;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    if (Math.abs(da) > halfFov * 1.3) continue;
+
+    var sx = (da / halfFov) * 0.5 + 0.5;
+    var screenX = Math.floor(sx * w);
+    if (screenX < -30 || screenX > w + 30) continue;
+    if (depthBuffer && screenX >= 0 && screenX < depthBuffer.length && dist > depthBuffer[screenX] + 2) continue;
+
+    var fh = floorMesh ? getFloorHeightAt(sp.x, sp.y) : 0;
+    var floorWorldZ = fh * 25;
+    var screenY = horizonY + Math.floor(((cameraZ - floorWorldZ) / dist) * 180);
+    var size = Math.max(12, Math.min(60, Math.floor(1800 / dist)));
+
+    var fogAlpha = Math.max(0.4, 1.0 - dist / (viewDist * 0.5) * 0.5);
+    var pulse = 0.7 + 0.3 * Math.sin(now * 0.004 + sp.pulsePhase);
+    var hpFrac = sp.hp / sp.maxHp;
+
+    ctx.save(); ctx.globalAlpha = fogAlpha;
+
+    // Red glow halo
+    var glowR = size * 2 * pulse;
+    var glowGrad = ctx.createRadialGradient(screenX, screenY - size * 0.5, size * 0.2, screenX, screenY - size * 0.5, glowR);
+    glowGrad.addColorStop(0, 'rgba(200,40,40,' + (0.3 * pulse).toFixed(2) + ')');
+    glowGrad.addColorStop(1, 'rgba(200,40,40,0)');
+    ctx.fillStyle = glowGrad;
+    ctx.fillRect(screenX - glowR, screenY - size * 0.5 - glowR, glowR * 2, glowR * 2);
+
+    // Obelisk body — dark tapered rectangle
+    var bw = size * 0.3, bh = size * 1.2;
+    ctx.fillStyle = '#1a1520';
+    ctx.beginPath();
+    ctx.moveTo(screenX - bw, screenY);
+    ctx.lineTo(screenX + bw, screenY);
+    ctx.lineTo(screenX + bw * 0.6, screenY - bh);
+    ctx.lineTo(screenX - bw * 0.6, screenY - bh);
+    ctx.closePath(); ctx.fill();
+
+    // Glowing rune lines
+    ctx.strokeStyle = 'rgba(200,50,50,' + (pulse * 0.8).toFixed(2) + ')';
+    ctx.lineWidth = Math.max(1, size * 0.06);
+    // Horizontal rune bands
+    for (var rb = 0; rb < 3; rb++) {
+      var ry = screenY - bh * (0.2 + rb * 0.25);
+      var rw = bw * (0.9 - rb * 0.1);
+      ctx.beginPath(); ctx.moveTo(screenX - rw, ry); ctx.lineTo(screenX + rw, ry); ctx.stroke();
+    }
+    // Central eye
+    ctx.fillStyle = 'rgba(255,60,60,' + (pulse * 0.9).toFixed(2) + ')';
+    ctx.beginPath();
+    ctx.arc(screenX, screenY - bh * 0.65, size * 0.1 * pulse, 0, Math.PI * 2);
+    ctx.fill();
+
+    // HP bar (shows when damaged)
+    if (sp.hp < sp.maxHp) {
+      var barW = size * 0.8, barH = Math.max(2, size * 0.08);
+      var barY = screenY - bh - barH - 4;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(screenX - barW * 0.5, barY, barW, barH);
+      ctx.fillStyle = hpFrac > 0.5 ? '#44cc44' : hpFrac > 0.25 ? '#ccaa22' : '#cc2222';
+      ctx.fillRect(screenX - barW * 0.5, barY, barW * hpFrac, barH);
+    }
+
+    ctx.restore();
+  }
+}
+
 // Renders breakable ore vein overlays on cave walls.
 // Same perspective pipeline as drawWallDecorations; depth-buffer occlusion prevents
 // drawing through walls. hp-based opacity shows cracking as the vein is damaged.
@@ -2578,6 +3252,10 @@ function startGamepadPolling() {
           var nx = (x - 512) / 512, ny = (y - 512) / 512;
           if (nx < -1) nx = -1; if (nx > 1) nx = 1;
           if (ny < -1) ny = -1; if (ny > 1) ny = 1;
+          // Deadzone: ignore tiny stick drift
+          var GP_DEAD = 0.12;
+          if (Math.abs(nx) < GP_DEAD) nx = 0;
+          if (Math.abs(ny) < GP_DEAD) ny = 0;
           gpLast = {x:nx, y:ny, buttons:(j.buttons || 0), valid:true};
         } else {
           gpLast.valid = false; gpBackoffUntil = Date.now() + 150;
@@ -2883,7 +3561,7 @@ function step(dt) {
   }
 
   // Goal check
-  if (rectsOverlap(player, goal)) {
+  if (goal && goalSpawned && rectsOverlap(player, goal)) {
     if (level < levels.length) {
       if (terrain === 'ice') terrain = 'cave';
       else if (terrain === 'cave') terrain = 'plains';
@@ -3278,6 +3956,38 @@ function updateProjectiles(dt) {
       }
     }
     if (hitEnemy) continue;
+
+    // Spawner damage check — projectiles can destroy obelisks
+    if (!p.isLob && enemySpawners && enemySpawners.length) {
+      var hitSpawner = false;
+      for (var spi = 0; spi < enemySpawners.length; spi++) {
+        var sp2 = enemySpawners[spi];
+        if (!sp2.active || sp2.hp <= 0) continue;
+        if (Math.hypot(nx - sp2.x, ny - sp2.y) < 25) {
+          sp2.hp -= (spell.damage || 1);
+          impacts.push({x:nx, y:ny, z:nz, spawnMs:now, lifeMs:300});
+          if (sp2.hp <= 0) {
+            sp2.active = false;
+            // Death burst
+            for (var sb = 0; sb < 5; sb++) {
+              var sba = Math.random() * Math.PI * 2, sbs = 40 + Math.random() * 80;
+              deathEffects.push({x:sp2.x, y:sp2.y, vx:Math.cos(sba)*sbs, vy:Math.sin(sba)*sbs,
+                rot:Math.random()*Math.PI*2, rotVel:(Math.random()-0.5)*8,
+                len:8+Math.random()*10, spawnMs:now, lifeMs:600, color:'#3a1520'});
+            }
+            // Drop gold
+            for (var sd = 0; sd < 5; sd++) {
+              var sda = Math.random() * Math.PI * 2;
+              coinDrops.push({x:sp2.x + Math.cos(sda)*6, y:sp2.y + Math.sin(sda)*6, spawnMs:now, lifeMs:25000});
+            }
+            console.log('[SPAWNER] Destroyed at (' + Math.round(sp2.x) + ',' + Math.round(sp2.y) + ')');
+          }
+          hitSpawner = true; break;
+        }
+      }
+      if (hitSpawner) continue;
+    }
+
     // Wall check after enemy check — projectile only stops on a wall if it
     // didn't already hit an enemy (handles enemies touching/inside walls)
     var gx = Math.floor(nx / cell), gy = Math.floor(ny / cell);
@@ -3640,6 +4350,13 @@ function updateEnemies(dt) {
     } catch (_) {}
   }
   enemies = alive;
+  // Spawn goal when all enemies are defeated
+  // Goal spawns when all enemies AND all spawners are destroyed
+  var spawnersAlive = 0;
+  if (enemySpawners) { for (var sai = 0; sai < enemySpawners.length; sai++) { if (enemySpawners[sai].active) spawnersAlive++; } }
+  if (!goalSpawned && enemies.length === 0 && spawnersAlive === 0) {
+    spawnGoal();
+  }
 }
 
 
@@ -3840,6 +4557,8 @@ function raycastDraw() {
   }
 
   drawFloorScatter3D();
+  drawTreasureChests3D();
+  drawEnemySpawners3D();
   drawOreVeins();
   drawWallDecorations();
 
@@ -3906,133 +4625,144 @@ function drawPlatforms3D() {
   var cameraZRaw = (cam.z || 60);
   var cameraZ = 60 + (cameraZRaw - 60) * (25 / 40);
   ctx.save();
-  var visibleQuads = [];
-  var totalQuads = 0, distCulled = 0, fovCulled = 0, rendered = 0, cornerCulled = 0;
-  var minH = 999, maxH = -999;
-  for (var y = 0; y < mesh.h - 1; y++) {
-    for (var x = 0; x < mesh.w - 1; x++) {
-      var h1 = mesh.heights[y * mesh.w + x];
-      var h2 = mesh.heights[y * mesh.w + (x + 1)];
-      var h3 = mesh.heights[(y + 1) * mesh.w + x];
-      var h4 = mesh.heights[(y + 1) * mesh.w + (x + 1)];
-      var worldX1 = x * mesh.gridSize, worldY1 = y * mesh.gridSize;
-      var worldX2 = (x + 1) * mesh.gridSize, worldY2 = (y + 1) * mesh.gridSize;
-      var centerX = (worldX1 + worldX2) / 2, centerY = (worldY1 + worldY2) / 2;
-      var dx = centerX - cam.x, dy = centerY - cam.y;
-      var dist = Math.hypot(dx, dy);
+
+  // --- Optimization: spatial culling via grid-space bounds ---
+  // Only iterate quads within viewDist of camera instead of all 85K+
+  var gs = mesh.gridSize;
+  var camGX = cam.x / gs, camGY = cam.y / gs;
+  var viewRad = viewDist / gs;
+  var gxMin = Math.max(0, Math.floor(camGX - viewRad));
+  var gxMax = Math.min(mesh.w - 2, Math.ceil(camGX + viewRad));
+  var gyMin = Math.max(0, Math.floor(camGY - viewRad));
+  var gyMax = Math.min(mesh.h - 2, Math.ceil(camGY + viewRad));
+
+  // Precompute camera trig for dot-product projection (no atan2/hypot per corner)
+  var cosAng = Math.cos(cam.ang), sinAng = Math.sin(cam.ang);
+  var tanHalf = Math.tan(halfFov);
+  var invTanHalf = 1.0 / tanHalf;
+  var viewDistSq = viewDist * viewDist;
+  var fovCutoff = halfFov * 1.8;
+
+  // Painter's algorithm: iterate far-to-near by sorting ring order.
+  // We iterate in spiral rings from the outside in so far quads are drawn first.
+  // Use a flat typed array for quad data to avoid GC pressure from object allocation.
+  // Format: [screenX0,screenY0, screenX1,screenY1, screenX2,screenY2, screenX3,screenY3, colorIdx, waterType, dist, centerX, centerY, flowDirX, flowDirY]
+  // But for simplicity & clarity we use a simpler approach: iterate rows from far to near.
+
+  var totalQuads = 0, rendered = 0;
+
+  // Project a single world-space corner to screen (inlined, no objects, no atan2)
+  // Returns false if behind camera or out of FOV, else sets sx[idx], sy[idx]
+  var _sx = new Float32Array(4), _sy = new Float32Array(4);
+  function projCorner(wx, wy, wz, idx) {
+    var dx = wx - cam.x, dy = wy - cam.y;
+    // Rotate into camera space: forward = (cosAng, sinAng), right = perpendicular
+    var fwd = dx * cosAng + dy * sinAng;   // depth along camera forward
+    var rgt = dx * (-sinAng) + dy * cosAng; // lateral offset (positive = right)
+    if (fwd < 1) return false;
+    var screenFrac = (rgt / fwd) * invTanHalf * 0.5 + 0.5;
+    if (screenFrac < -0.3 || screenFrac > 1.3) return false;
+    _sx[idx] = Math.floor(screenFrac * w);
+    var heightAbove = cameraZ - wz * 25;
+    _sy[idx] = horizonY + Math.floor((heightAbove / fwd) * 180);
+    return true;
+  }
+
+  // Iterate rows from farthest to nearest for painter's ordering
+  // Determine row iteration direction based on camera facing
+  var iterYStart, iterYEnd, iterYStep;
+  var iterXStart, iterXEnd, iterXStep;
+  if (sinAng >= 0) { iterYStart = gyMax; iterYEnd = gyMin - 1; iterYStep = -1; }
+  else             { iterYStart = gyMin; iterYEnd = gyMax + 1; iterYStep = 1; }
+  if (cosAng >= 0) { iterXStart = gxMax; iterXEnd = gxMin - 1; iterXStep = -1; }
+  else             { iterXStart = gxMin; iterXEnd = gxMax + 1; iterXStep = 1; }
+
+  var mw = mesh.w;
+  var now3dW = Date.now();
+
+  for (var y = iterYStart; y !== iterYEnd; y += iterYStep) {
+    for (var x = iterXStart; x !== iterXEnd; x += iterXStep) {
       totalQuads++;
-      if (dist > viewDist) { distCulled++; continue; }
-      var ang = Math.atan2(dy, dx);
-      var da = ang - cam.ang;
-      while (da > Math.PI) da -= Math.PI * 2;
-      while (da < -Math.PI) da += Math.PI * 2;
-      if (Math.abs(da) > halfFov * 1.8) { fovCulled++; continue; }
-      var avgHeight = (h1 + h2 + h3 + h4) / 4;
-      if (dist < 100) { minH = Math.min(minH, h1, h2, h3, h4); maxH = Math.max(maxH, h1, h2, h3, h4); }
-      var c1 = mesh.colors[y * mesh.w + x], c2 = mesh.colors[y * mesh.w + (x + 1)];
-      var c3 = mesh.colors[(y + 1) * mesh.w + x], c4 = mesh.colors[(y + 1) * mesh.w + (x + 1)];
-      // waterType: 0=none, 1=still pool, 2=flowing stream (max of corners)
+      // Quick distance check on center (squared, no sqrt)
+      var centerX = (x + 0.5) * gs, centerY = (y + 0.5) * gs;
+      var ddx = centerX - cam.x, ddy = centerY - cam.y;
+      var distSq = ddx * ddx + ddy * ddy;
+      if (distSq > viewDistSq) continue;
+
+      // Quick FOV check using dot product (avoids atan2)
+      var fwdDot = ddx * cosAng + ddy * sinAng;
+      if (fwdDot < 0) continue; // behind camera
+      var rgtDot = ddx * (-sinAng) + ddy * cosAng;
+      var tanDA = Math.abs(rgtDot) / (fwdDot + 0.001);
+      if (tanDA > tanHalf * 1.8) continue;
+
+      // Project 4 corners
+      var idx0 = y * mw + x, idx1 = idx0 + 1, idx2 = idx0 + mw, idx3 = idx2 + 1;
+      var h1 = mesh.heights[idx0], h2 = mesh.heights[idx1];
+      var h3 = mesh.heights[idx2], h4 = mesh.heights[idx3];
+      var wx1 = x * gs, wy1 = y * gs, wx2 = wx1 + gs, wy2 = wy1 + gs;
+
+      if (!projCorner(wx1, wy1, h1, 0)) continue;
+      if (!projCorner(wx2, wy1, h2, 1)) continue;
+      if (!projCorner(wx2, wy2, h4, 2)) continue;
+      if (!projCorner(wx1, wy2, h3, 3)) continue;
+
+      rendered++;
+
+      // Use c1 directly — no avgColor parsing (adjacent corners have similar colors)
+      ctx.fillStyle = mesh.colors[idx0];
+      ctx.beginPath();
+      ctx.moveTo(_sx[0], _sy[0]);
+      ctx.lineTo(_sx[1], _sy[1]);
+      ctx.lineTo(_sx[2], _sy[2]);
+      ctx.lineTo(_sx[3], _sy[3]);
+      ctx.closePath();
+      ctx.fill();
+
+      // Water overlay
       var waterType = 0;
       if (mesh.water) {
-        waterType = Math.max(
-          mesh.water[y * mesh.w + x]       || 0,
-          mesh.water[y * mesh.w + (x + 1)] || 0,
-          mesh.water[(y + 1) * mesh.w + x] || 0,
-          mesh.water[(y + 1) * mesh.w + (x + 1)] || 0
-        );
+        waterType = Math.max(mesh.water[idx0]||0, mesh.water[idx1]||0, mesh.water[idx2]||0, mesh.water[idx3]||0);
       }
-      // For stream quads, look up the stored flow direction (from the source-cell or any neighbour)
-      var flowDirX = 0.0, flowDirY = 0.0;
-      if (waterType === 2 && mesh.waterDirX) {
-        var fdIdxs = [y*mesh.w+x, y*mesh.w+(x+1), (y+1)*mesh.w+x, (y+1)*mesh.w+(x+1)];
-        for (var fdi = 0; fdi < 4; fdi++) {
-          var fdv = fdIdxs[fdi];
-          if (mesh.waterDirX[fdv] !== 0 || mesh.waterDirY[fdv] !== 0) {
-            flowDirX = mesh.waterDirX[fdv]; flowDirY = mesh.waterDirY[fdv]; break;
-          }
+      if (waterType === 2) {
+        var fdx = 0.707, fdy = 0.707;
+        if (mesh.waterDirX) {
+          if (mesh.waterDirX[idx0] || mesh.waterDirY[idx0]) { fdx = mesh.waterDirX[idx0]; fdy = mesh.waterDirY[idx0]; }
+          else if (mesh.waterDirX[idx1] || mesh.waterDirY[idx1]) { fdx = mesh.waterDirX[idx1]; fdy = mesh.waterDirY[idx1]; }
         }
+        var flowDot = centerX * fdx + centerY * fdy;
+        var perpDot = centerX * (-fdy) + centerY * fdx;
+        var ripple  = Math.sin(now3dW * 0.0022 - flowDot * 0.04);
+        var ripple2 = Math.sin(now3dW * 0.0014 - flowDot * 0.025 + perpDot * 0.012);
+        ctx.globalAlpha = 0.20 + 0.13 * ripple + 0.07 * ripple2;
+        ctx.fillStyle = '#88ccff';
+        ctx.beginPath();
+        ctx.moveTo(_sx[0], _sy[0]); ctx.lineTo(_sx[1], _sy[1]);
+        ctx.lineTo(_sx[2], _sy[2]); ctx.lineTo(_sx[3], _sy[3]);
+        ctx.closePath(); ctx.fill();
+        ctx.globalAlpha = 1.0;
+      } else if (waterType === 1) {
+        var glint = Math.sin(now3dW * 0.0003 + centerX * 0.015 + centerY * 0.015);
+        ctx.globalAlpha = 0.07 + 0.04 * glint;
+        ctx.fillStyle = '#aaddff';
+        ctx.beginPath();
+        ctx.moveTo(_sx[0], _sy[0]); ctx.lineTo(_sx[1], _sy[1]);
+        ctx.lineTo(_sx[2], _sy[2]); ctx.lineTo(_sx[3], _sy[3]);
+        ctx.closePath(); ctx.fill();
+        ctx.globalAlpha = 1.0;
       }
-      visibleQuads.push({x1:worldX1, y1:worldY1, x2:worldX2, y2:worldY2,
-        h1:h1, h2:h2, h3:h3, h4:h4, avgHeight:avgHeight, dist:dist,
-        centerX:centerX, centerY:centerY, gridX:x, gridY:y, c1:c1, c2:c2, c3:c3, c4:c4,
-        waterType:waterType, flowDirX:flowDirX, flowDirY:flowDirY});
-    }
-  }
-  visibleQuads.sort(function(a, b) { return b.dist - a.dist; });
-  for (var i = 0; i < visibleQuads.length; i++) {
-    var quad = visibleQuads[i];
-    var corners = [
-      {x:quad.x1, y:quad.y1, h:quad.h1}, {x:quad.x2, y:quad.y1, h:quad.h2},
-      {x:quad.x2, y:quad.y2, h:quad.h4}, {x:quad.x1, y:quad.y2, h:quad.h3}
-    ];
-    var screenPts = [];
-    var allVisible = true;
-    for (var j = 0; j < 4; j++) {
-      var dx = corners[j].x - cam.x, dy = corners[j].y - cam.y;
-      var dist = Math.hypot(dx, dy);
-      if (dist < 1) dist = 1;
-      var ang = Math.atan2(dy, dx);
-      var da = ang - cam.ang;
-      while (da > Math.PI) da -= Math.PI * 2;
-      while (da < -Math.PI) da += Math.PI * 2;
-      if (Math.abs(da) > halfFov * 2.5) { allVisible = false; cornerCulled++; break; }
-      var sx = (da / halfFov) * 0.5 + 0.5;
-      var screenX = Math.floor(sx * w);
-      var worldZ = corners[j].h * 25;
-      var heightAboveFloor = cameraZ - worldZ;
-      var screenY = horizonY + Math.floor((heightAboveFloor / dist) * 180);
-      screenPts.push({x:screenX, y:screenY});
-    }
-    if (!allVisible) continue;
-    rendered++;
-    ctx.fillStyle = avgColor(quad.c1, quad.c2, quad.c3, quad.c4);
-    ctx.globalAlpha = 1.0;
-    ctx.beginPath();
-    ctx.moveTo(screenPts[0].x, screenPts[0].y);
-    for (var k = 1; k < screenPts.length; k++) ctx.lineTo(screenPts[k].x, screenPts[k].y);
-    ctx.closePath(); ctx.fill();
-    // Water overlay — streams animate fast, pools have a slow subtle glint
-    if (quad.waterType === 2) {
-      // Flowing stream — ripple travels along the stream's stored direction vector
-      var now3d = Date.now();
-      // Project world position onto flow axis and its perpendicular for 2-D wave pattern
-      var fdx = quad.flowDirX || 0.707, fdy = quad.flowDirY || 0.707;
-      var flowDot = quad.centerX * fdx + quad.centerY * fdy;   // along stream
-      var perpDot = quad.centerX * (-fdy) + quad.centerY * fdx; // across stream
-      var ripple  = Math.sin(now3d * 0.0022 - flowDot * 0.04);
-      var ripple2 = Math.sin(now3d * 0.0014 - flowDot * 0.025 + perpDot * 0.012);
-      ctx.globalAlpha = 0.20 + 0.13 * ripple + 0.07 * ripple2;
-      ctx.fillStyle = '#88ccff';
-      ctx.beginPath();
-      ctx.moveTo(screenPts[0].x, screenPts[0].y);
-      for (var k2 = 1; k2 < screenPts.length; k2++) ctx.lineTo(screenPts[k2].x, screenPts[k2].y);
-      ctx.closePath(); ctx.fill();
-      ctx.globalAlpha = 1.0;
-    } else if (quad.waterType === 1) {
-      // Still pool — very slow, very faint glint; mostly just the dark colour
-      var now3dP = Date.now();
-      var glint = Math.sin(now3dP * 0.0003 + quad.centerX * 0.015 + quad.centerY * 0.015);
-      ctx.globalAlpha = 0.07 + 0.04 * glint;
-      ctx.fillStyle = '#aaddff';
-      ctx.beginPath();
-      ctx.moveTo(screenPts[0].x, screenPts[0].y);
-      for (var k2b = 1; k2b < screenPts.length; k2b++) ctx.lineTo(screenPts[k2b].x, screenPts[k2b].y);
-      ctx.closePath(); ctx.fill();
-      ctx.globalAlpha = 1.0;
     }
   }
   ctx.restore();
   if (DEBUG_TEXTURE && Date.now() - __dbgTexLast > 1000) {
     __dbgTexLast = Date.now();
-    console.log('[FLOOR-3D]', 'total=' + totalQuads, 'distCull=' + distCulled, 'fovCull=' + fovCulled, 'cornerCull=' + cornerCulled, 'rendered=' + rendered);
+    console.log('[FLOOR-3D]', 'total=' + totalQuads, 'rendered=' + rendered, 'culled=' + (totalQuads - rendered));
   }
   if (DEBUG_FLOOR && Date.now() - __dbgFloorLast > 500) {
     __dbgFloorLast = Date.now();
     var camFloorH = getFloorHeightAt(cam.x, cam.y);
     console.log('[FLOOR-HEIGHTS]', 'cam=(' + cam.x.toFixed(1) + ',' + cam.y.toFixed(1) + ')',
-      'camFloorH=' + camFloorH.toFixed(3), 'cameraZ=' + cameraZ.toFixed(1),
-      'nearbyRange=[' + minH.toFixed(3) + ' to ' + maxH.toFixed(3) + ']',
-      'delta=' + (maxH - minH).toFixed(3), 'scale=25');
+      'camFloorH=' + camFloorH.toFixed(3), 'cameraZ=' + cameraZ.toFixed(1), 'scale=25');
   }
 }
 
@@ -4137,6 +4867,7 @@ function drawCeiling3D() {
 // =============================================
 
 function drawGoalMarker3D() {
+  if (!goal) return;
   var w = canvas.width, h = canvas.height;
   var fov = cam.fov;
   var gx = goal.x + goal.w / 2, gy = goal.y + goal.h / 2;
@@ -5703,6 +6434,58 @@ function drawHudOverlay() {
     ctx.fillText('[F] Fullscreen', w - 57, h - 12);
   }
 
+  // Pointer lock hint — shown when pointer is not locked (click canvas to enter KB+Mouse)
+  if (document.pointerLockElement !== canvas) {
+    var msg = 'Click to capture mouse  \u2502  ESC to release';
+    var msgW = 300;
+    var msgX = Math.floor((w - msgW) / 2);
+    var msgY = Math.floor(h * 0.5) - 16;
+    ctx.globalAlpha = 0.92;
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.fillRect(msgX, msgY, msgW, 30);
+    ctx.strokeStyle = '#ffdd88';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(msgX, msgY, msgW, 30);
+    ctx.fillStyle = '#ffdd88';
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(msg, w / 2, msgY + 19);
+    ctx.textAlign = 'left';
+  }
+
+  // Enemy & spawner counter — shown until goal spawns
+  if (!goalSpawned) {
+    var enemyCount = enemies.length;
+    var spawnerCount = 0;
+    if (enemySpawners) { for (var sci = 0; sci < enemySpawners.length; sci++) { if (enemySpawners[sci].active) spawnerCount++; } }
+    var enemyText = 'Enemies: ' + enemyCount;
+    if (spawnerCount > 0) enemyText += '  Spawners: ' + spawnerCount;
+    ctx.globalAlpha = 0.85;
+    ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#ff6666';
+    ctx.fillText(enemyText, 8, h - 10);
+  }
+
+  // Goal spawn message — fades out over last second
+  if (goalMessage && Date.now() < goalMessageUntil) {
+    var msgAge = goalMessageUntil - Date.now();
+    var alpha = msgAge < 1000 ? msgAge / 1000 : 1.0;
+    ctx.globalAlpha = alpha * 0.95;
+    var gmW = 320, gmH = 36;
+    var gmX = Math.floor((w - gmW) / 2), gmY = Math.floor(h * 0.35);
+    ctx.fillStyle = 'rgba(0,30,0,0.75)';
+    ctx.fillRect(gmX, gmY, gmW, gmH);
+    ctx.strokeStyle = '#44ff66';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(gmX, gmY, gmW, gmH);
+    ctx.fillStyle = '#44ff66';
+    ctx.font = 'bold 16px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(goalMessage, w / 2, gmY + 24);
+    ctx.textAlign = 'left';
+  }
+
   ctx.restore();
 }
 
@@ -5903,6 +6686,318 @@ function drawWallDecorations2D() {
   ctx.globalAlpha = 1.0; ctx.restore();
 }
 
+// =============================================
+// DEBUG OVERVIEW — full zoomed-out map render
+// =============================================
+var overviewActive = false;
+
+function drawDebugOverview() {
+  if (!grid || !gridW) return;
+  var cw = canvas.width, ch = canvas.height;
+  var scaleX = cw / worldW, scaleY = ch / worldH;
+  var scale = Math.min(scaleX, scaleY) * 0.97;
+  var offX = (cw - worldW * scale) * 0.5;
+  var offY = (ch - worldH * scale) * 0.5;
+
+  function wx(x) { return offX + x * scale; }
+  function wy(y) { return offY + y * scale; }
+  function ws(s) { return Math.max(1, s * scale); }
+
+  ctx.clearRect(0, 0, cw, ch);
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, cw, ch);
+
+  // --- 1. Grid cells: wall vs floor ---
+  var cellS = ws(cell);
+  for (var gy = 0; gy < gridH; gy++) {
+    for (var gx = 0; gx < gridW; gx++) {
+      var isWall = grid[gy * gridW + gx];
+      if (isWall) {
+        ctx.fillStyle = '#2a2030';
+      } else {
+        ctx.fillStyle = '#4a3c28';
+      }
+      ctx.fillRect(wx(gx * cell), wy(gy * cell), Math.max(1, cellS), Math.max(1, cellS));
+    }
+  }
+
+  // --- 2. Border polygon (playable boundary) ---
+  if (currentBorderPoly && currentBorderPoly.length > 2) {
+    ctx.save();
+    ctx.strokeStyle = '#88aaff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(wx(currentBorderPoly[0].x), wy(currentBorderPoly[0].y));
+    for (var pi = 1; pi < currentBorderPoly.length; pi++) {
+      ctx.lineTo(wx(currentBorderPoly[pi].x), wy(currentBorderPoly[pi].y));
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  // --- 3. Deep cave regions (corridors + chambers) ---
+  if (deepCaveRegions && deepCaveRegions.length) {
+    for (var ci = 0; ci < deepCaveRegions.length; ci++) {
+      var cr = deepCaveRegions[ci];
+      var isChamber = cr.type === 'chamber';
+      var dx = cr.x2 - cr.x1, dy = cr.y2 - cr.y1;
+      var len = Math.hypot(dx, dy) || 1;
+      var perpX = -dy / len, perpY = dx / len;
+      var hw = ws(cr.width * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(wx(cr.x1 + perpX * cr.width * 0.5), wy(cr.y1 + perpY * cr.width * 0.5));
+      ctx.lineTo(wx(cr.x2 + perpX * cr.width * 0.5), wy(cr.y2 + perpY * cr.width * 0.5));
+      ctx.lineTo(wx(cr.x2 - perpX * cr.width * 0.5), wy(cr.y2 - perpY * cr.width * 0.5));
+      ctx.lineTo(wx(cr.x1 - perpX * cr.width * 0.5), wy(cr.y1 - perpY * cr.width * 0.5));
+      ctx.closePath();
+      ctx.fillStyle = isChamber ? 'rgba(120,60,200,0.55)' : 'rgba(60,120,200,0.45)';
+      ctx.fill();
+      ctx.strokeStyle = isChamber ? '#cc88ff' : '#44aaff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  // --- 4. Cave chambers (circle overlays) ---
+  if (deepCaveChambers && deepCaveChambers.length) {
+    for (var chi = 0; chi < deepCaveChambers.length; chi++) {
+      var ch2 = deepCaveChambers[chi];
+      ctx.beginPath();
+      ctx.arc(wx(ch2.cx), wy(ch2.cy), ws(ch2.radius), 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(160,80,255,0.3)';
+      ctx.fill();
+      ctx.strokeStyle = '#cc44ff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  // --- 5. Ore veins ---
+  if (oreVeins && oreVeins.length) {
+    for (var oi = 0; oi < oreVeins.length; oi++) {
+      var ov = oreVeins[oi];
+      ctx.beginPath();
+      ctx.arc(wx(ov.worldX || ov.x), wy(ov.worldY || ov.y), Math.max(2, ws(12)), 0, Math.PI * 2);
+      ctx.fillStyle = ov.veinType === 'teal' ? '#44ffcc' : '#ffcc44';
+      ctx.globalAlpha = 0.7;
+      ctx.fill();
+      ctx.globalAlpha = 1.0;
+    }
+  }
+
+  // --- 5b. Treasure chests ---
+  if (treasureChests && treasureChests.length) {
+    for (var tci = 0; tci < treasureChests.length; tci++) {
+      var tc = treasureChests[tci];
+      if (tc.collected) continue;
+      var tcx = wx(tc.x), tcy = wy(tc.y);
+      // Glow halo
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = '#ffd700';
+      ctx.beginPath(); ctx.arc(tcx, tcy, 8, 0, Math.PI * 2); ctx.fill();
+      // Chest icon — larger gold dot with dark outline
+      ctx.globalAlpha = 1.0;
+      ctx.fillStyle = '#ffd700';
+      ctx.beginPath(); ctx.arc(tcx, tcy, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#8b5e2b';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  // --- 5c. Enemy spawners ---
+  if (enemySpawners && enemySpawners.length) {
+    for (var esi2 = 0; esi2 < enemySpawners.length; esi2++) {
+      var es = enemySpawners[esi2];
+      if (!es.active) continue;
+      var esx = wx(es.x), esy = wy(es.y);
+      // Red glow
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = '#ff2244';
+      ctx.beginPath(); ctx.arc(esx, esy, 10, 0, Math.PI * 2); ctx.fill();
+      // Diamond shape
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = '#cc2244';
+      ctx.beginPath();
+      ctx.moveTo(esx, esy - 7);
+      ctx.lineTo(esx + 5, esy);
+      ctx.lineTo(esx, esy + 7);
+      ctx.lineTo(esx - 5, esy);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = '#ff4466';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.globalAlpha = 1.0;
+    }
+  }
+
+  // --- 6. Cave entrances ---
+  if (deepCaveEntrances && deepCaveEntrances.length) {
+    for (var ei = 0; ei < deepCaveEntrances.length; ei++) {
+      var ent = deepCaveEntrances[ei];
+      var ex2 = wx(ent.x), ey2 = wy(ent.y);
+      ctx.beginPath();
+      ctx.arc(ex2, ey2, 7, 0, Math.PI * 2);
+      ctx.fillStyle = '#00ffcc';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = '#00ffcc';
+      ctx.font = 'bold 11px monospace';
+      ctx.fillText('CAVE', ex2 + 9, ey2 + 4);
+    }
+  }
+
+  // --- 7. Goal ---
+  if (goal) {
+    ctx.fillStyle = '#00ff44';
+    ctx.fillRect(wx(goal.x), wy(goal.y), Math.max(4, ws(goal.w)), Math.max(4, ws(goal.h)));
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(wx(goal.x), wy(goal.y), Math.max(4, ws(goal.w)), Math.max(4, ws(goal.h)));
+  }
+
+  // --- 8. Enemies ---
+  if (enemies && enemies.length) {
+    ctx.fillStyle = '#ff4444';
+    for (var ei2 = 0; ei2 < enemies.length; ei2++) {
+      var en = enemies[ei2];
+      ctx.beginPath();
+      ctx.arc(wx(en.x), wy(en.y), Math.max(2, ws(8)), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // --- 9. Player ---
+  var px = wx(pos.x), py = wy(pos.y);
+  ctx.beginPath();
+  ctx.arc(px, py, 6, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.strokeStyle = '#ff0000';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // Facing direction arrow
+  var arrowLen = 14;
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  ctx.lineTo(px + Math.cos(cam.ang) * arrowLen, py + Math.sin(cam.ang) * arrowLen);
+  ctx.strokeStyle = '#ff0000';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // --- 10. Stats panel ---
+  // Geometry counts
+  var _meshVerts = floorMesh ? (floorMesh.w * floorMesh.h) : 0;
+  var _meshQuads = floorMesh ? ((floorMesh.w - 1) * (floorMesh.h - 1)) : 0;
+  var _meshEdges = floorMesh ? (_meshQuads * 4) : 0;  // 4 edges per quad (shared)
+  var _gridCells = gridW * gridH;
+  var _wallCells = 0;
+  if (grid) { for (var _wi = 0; _wi < grid.length; _wi++) { if (grid[_wi]) _wallCells++; } }
+  var _corridorSegs = deepCaveRegions ? deepCaveRegions.filter(function(r){return r.type==='corridor';}).length : 0;
+  var _chamberSegs = deepCaveRegions ? deepCaveRegions.filter(function(r){return r.type==='chamber';}).length : 0;
+  var _borderVarSegs = borderVariations ? borderVariations.length : 0;
+  var _scatterItems = floorScatter ? floorScatter.length : 0;
+  var _wallDecors = wallDecorations ? wallDecorations.length : 0;
+
+  var stats = [
+    'MAP: ' + worldW + ' x ' + worldH + '  (scale 1px=' + (1/scale).toFixed(1) + 'wu)',
+    'GRID: ' + gridW + 'x' + gridH + ' (' + _gridCells + ' cells, ' + _wallCells + ' walls)',
+    'MESH: ' + (floorMesh ? floorMesh.w + 'x' + floorMesh.h : '—') +
+      '  verts=' + _meshVerts + '  quads=' + _meshQuads + '  edges=' + _meshEdges,
+    'BORDER POLY: ' + (currentBorderPoly ? currentBorderPoly.length + ' verts' : 'none') +
+      '  variations=' + _borderVarSegs,
+    'CAVE SEGS: ' + (deepCaveRegions ? deepCaveRegions.length : 0) +
+      ' (' + _corridorSegs + ' corr + ' + _chamberSegs + ' cham)' +
+      '  chambers=' + (deepCaveChambers ? deepCaveChambers.length : 0),
+    'CAVE ENTRANCES: ' + (deepCaveEntrances ? deepCaveEntrances.length : 0) +
+      (deepCaveEntrances && deepCaveEntrances.length ? '  @ (' + Math.round(deepCaveEntrances[0].x) + ',' + Math.round(deepCaveEntrances[0].y) + ')' : ''),
+    'ORE VEINS: ' + (oreVeins ? oreVeins.length : 0) +
+      '  scatter=' + _scatterItems + '  wallDecors=' + _wallDecors,
+    'CHESTS: ' + (treasureChests ? treasureChests.filter(function(c){return !c.collected}).length : 0) +
+      '/' + (treasureChests ? treasureChests.length : 0) +
+      '  SPAWNERS: ' + (enemySpawners ? enemySpawners.filter(function(s){return s.active}).length : 0) +
+      '/' + (enemySpawners ? enemySpawners.length : 0),
+    'ENEMIES: ' + (enemies ? enemies.length : 0),
+    'PLAYER: (' + Math.round(pos.x) + ', ' + Math.round(pos.y) + ')',
+    'TERRAIN: ' + terrain + '  |  LEVEL: ' + level,
+  ];
+
+  // Legend
+  var legend = [
+    {color:'#2a2030', label:'Wall'},
+    {color:'#4a3c28', label:'Floor'},
+    {color:'#44aaff', label:'Cave corridor'},
+    {color:'#cc44ff', label:'Cave chamber'},
+    {color:'#ffcc44', label:'Ore vein'},
+    {color:'#ffd700', label:'Treasure chest'},
+    {color:'#cc2244', label:'Enemy spawner'},
+    {color:'#00ffcc', label:'Cave entrance'},
+    {color:'#00ff44', label:'Goal'},
+    {color:'#ff4444', label:'Enemy'},
+    {color:'#ffffff', label:'Player'},
+  ];
+
+  var panelX = 8, panelY = 8, lineH = 16, panelW = 360, padY = 8;
+  var totalH = padY * 2 + stats.length * lineH + 8 + legend.length * lineH;
+  ctx.fillStyle = 'rgba(0,0,0,0.78)';
+  ctx.fillRect(panelX, panelY, panelW, totalH);
+  ctx.strokeStyle = '#446644';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(panelX, panelY, panelW, totalH);
+
+  ctx.font = '12px monospace';
+  for (var si = 0; si < stats.length; si++) {
+    ctx.fillStyle = '#aaffaa';
+    ctx.fillText(stats[si], panelX + 10, panelY + padY + si * lineH + 12);
+  }
+  var legStartY = panelY + padY + stats.length * lineH + 10;
+  for (var li = 0; li < legend.length; li++) {
+    ctx.fillStyle = legend[li].color;
+    ctx.fillRect(panelX + 10, legStartY + li * lineH + 2, 12, 12);
+    ctx.strokeStyle = '#555';
+    ctx.lineWidth = 0.5;
+    ctx.strokeRect(panelX + 10, legStartY + li * lineH + 2, 12, 12);
+    ctx.fillStyle = '#cccccc';
+    ctx.fillText(legend[li].label, panelX + 28, legStartY + li * lineH + 12);
+  }
+
+  // "OVERVIEW MODE" banner at top-right
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(cw - 185, 8, 177, 24);
+  ctx.fillStyle = '#88ff88';
+  ctx.font = 'bold 13px monospace';
+  ctx.fillText('🗺 OVERVIEW MODE  [click to exit]', cw - 183, 24);
+}
+
+var _overviewPrevW = 0, _overviewPrevH = 0;
+
+function toggleOverview() {
+  overviewActive = !overviewActive;
+  if (overviewActive) {
+    // Expand canvas to fill the window for a proper full-map view
+    _overviewPrevW = canvas.width;
+    _overviewPrevH = canvas.height;
+    var maxW = Math.min(window.innerWidth - 40, 1400);
+    var maxH = Math.min(window.innerHeight - 40, 900);
+    canvas.width = maxW;
+    canvas.height = maxH;
+    canvas.style.width = maxW + 'px';
+    canvas.style.height = maxH + 'px';
+    drawDebugOverview();
+  } else {
+    // Restore original canvas size
+    canvas.width = _overviewPrevW;
+    canvas.height = _overviewPrevH;
+    canvas.style.width = '';
+    canvas.style.height = '';
+  }
+}
+
 function draw2D() {
   updateViewCamera();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -5921,8 +7016,10 @@ function draw2D() {
   drawIrregularBorder2D();
 
   // Goal
-  ctx.fillStyle = '#00ff00';
-  ctx.fillRect(goal.x, goal.y, goal.w, goal.h);
+  if (goal) {
+    ctx.fillStyle = '#00ff00';
+    ctx.fillRect(goal.x, goal.y, goal.w, goal.h);
+  }
 
   // Player
   ctx.fillStyle = '#ff0000';
@@ -5996,6 +7093,7 @@ function draw2D() {
   ctx.fillText('Time: ' + timeSec.toFixed(1) + 's', 10, 20);
   ctx.fillStyle = timeColor;
   ctx.fillText('\u25cf', 90, 20);
+
 }
 
 function draw() {
@@ -6026,15 +7124,18 @@ function draw() {
       }
     }
 
-    // Pitch smoothing (gyro mode — smooth toward pitchTarget + transient terrain nudge)
-    if (CONTROL_MODE === MODE_GYRO_AIM && USE_PITCH) {
-      var pitchGoal = pitchTarget + (autoPitchOff || 0);
-      var pitchDiff = pitchGoal - cam.pitch;
-      cam.pitch += pitchDiff * pitchAlpha;
-    } else {
-      // Stick / mouse / keyboard — apply transient terrain nudge directly
-      cam.pitch = (cam.pitch || 0) + (autoPitchOff || 0) * 0.15;
-      cam.pitch = Math.max(-CAM_PITCH_MAX, Math.min(CAM_PITCH_MAX, cam.pitch));
+    // Pitch smoothing — SKIP entirely when mouse controls pitch
+    if (!USE_MOUSE) {
+      if (CONTROL_MODE === MODE_GYRO_AIM && USE_PITCH) {
+        // Gyro mode: smooth toward pitchTarget + transient terrain nudge
+        var pitchGoal = pitchTarget + (autoPitchOff || 0);
+        var pitchDiff = pitchGoal - cam.pitch;
+        cam.pitch += pitchDiff * pitchAlpha;
+      } else {
+        // Stick / keyboard only — apply transient terrain nudge directly
+        cam.pitch = (cam.pitch || 0) + (autoPitchOff || 0) * 0.15;
+        cam.pitch = Math.max(-CAM_PITCH_MAX, Math.min(CAM_PITCH_MAX, cam.pitch));
+      }
     }
 
     // Camera follow
@@ -6044,11 +7145,11 @@ function draw() {
     }
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    drawSkybox3D();
-    drawCeiling3D();
-    drawPlatforms3D();
-    raycastDraw();
-    drawGoalMarker3D();
+    _pt('skybox3D', function(){ drawSkybox3D(); });
+    _pt('ceiling3D', function(){ drawCeiling3D(); });
+    _pt('platforms3D', function(){ drawPlatforms3D(); });
+    _pt('raycastDraw', function(){ raycastDraw(); });
+    _pt('goalMarker3D', function(){ drawGoalMarker3D(); });
   } else {
     if (CONTROL_MODE === MODE_GYRO_AIM && USE_YAW && hasYaw) {
       var d2 = angNorm(yawTarget - cam.ang);
@@ -6132,7 +7233,7 @@ function handleInput(dt) {
       mouseDelta.x = 0; mouseDelta.y = 0;
       if (mdx !== 0 || mdy !== 0) {
         cam.ang += mdx * MOUSE_CAM_SENSITIVITY;
-        cam.pitch = clamp((cam.pitch || 0) - mdy * MOUSE_CAM_SENSITIVITY * 0.7, -CAM_PITCH_MAX, CAM_PITCH_MAX);
+        cam.pitch = clamp((cam.pitch || 0) + mdy * MOUSE_CAM_SENSITIVITY, -CAM_PITCH_MAX, CAM_PITCH_MAX);
       }
     }
 
@@ -6308,6 +7409,82 @@ function gameUpdate(dt) {
   updateGroundEffects(dt);
   tickEffects(dt);     // impacts + cones + bone physics + soul orb collection
   step(dt);            // player movement → repelFromWalls → repelFromEnemies (push only)
+  updateTreasureChests();
+  updateEnemySpawners();
+}
+
+// Check if player is close enough to collect a treasure chest.
+function updateTreasureChests() {
+  if (!treasureChests || !treasureChests.length) return;
+  for (var i = 0; i < treasureChests.length; i++) {
+    var ch = treasureChests[i];
+    if (ch.collected) continue;
+    if (Math.hypot(pos.x - ch.x, pos.y - ch.y) < 22) {
+      ch.collected = true;
+      coins += ch.gold;
+      // Show pickup message
+      goalMessage = '+' + ch.gold + ' gold!';
+      goalMessageUntil = Date.now() + 2000;
+      console.log('[CHEST] Collected! +' + ch.gold + ' gold (total: ' + coins + ')');
+    }
+  }
+}
+
+// Enemy spawners periodically emit enemies when the player is within range
+// AND has line-of-sight (no spawning through walls). Global cap prevents
+// screen-flooding when multiple spawners are nearby.
+var SPAWNER_GLOBAL_MAX = 8;  // max spawner-born enemies alive at once
+
+function updateEnemySpawners() {
+  if (!enemySpawners || !enemySpawners.length) return;
+  var now = Date.now();
+  var typeKeys = Object.keys(enemyTypes);
+
+  // Count currently alive spawner-born enemies for global cap
+  var spawnerEnemiesAlive = 0;
+  for (var ei = 0; ei < enemies.length; ei++) {
+    if (enemies[ei].fromSpawner) spawnerEnemiesAlive++;
+  }
+
+  for (var i = 0; i < enemySpawners.length; i++) {
+    var sp = enemySpawners[i];
+    if (!sp.active || sp.hp <= 0) continue;
+    var pdist = Math.hypot(pos.x - sp.x, pos.y - sp.y);
+
+    // Only spawn when player is within 300px and cooldown elapsed
+    if (pdist > 300) continue;
+    if (sp.spawnCount >= sp.maxSpawns) continue;
+    if (now - sp.lastSpawn < sp.cooldownMs) continue;
+
+    // Global cap — don't flood the screen
+    if (spawnerEnemiesAlive >= SPAWNER_GLOBAL_MAX) continue;
+
+    // Line-of-sight check — spawner must "see" the player (no walls between)
+    if (!hasLineOfSight(sp.x, sp.y, pos.x, pos.y)) continue;
+
+    // Spawn an enemy near the spawner
+    var spAng = Math.random() * Math.PI * 2;
+    var spDist = 30 + Math.random() * 20;
+    var ex = sp.x + Math.cos(spAng) * spDist;
+    var ey = sp.y + Math.sin(spAng) * spDist;
+    // Don't spawn in walls
+    if (isInGridWall(ex, ey, 8)) continue;
+
+    var eTypeKey = typeKeys[Math.floor(Math.random() * typeKeys.length)];
+    var eType = enemyTypes[eTypeKey];
+    var wps = generatePatrolWaypoints(ex, ey, eType.chaseRange);
+    enemies.push({x:ex, y:ey, z:0, enemyType:eType, health:eType.health, maxHealth:eType.health, speed:eType.speed,
+      chaseRange:eType.chaseRange, lastUpdate:0, damageFlash:0, damageFlashColor:'#ffffff',
+      slowUntil:0, burnUntil:0, burnDmgLast:0, iceHits:0, fireHits:0, lightningHits:0,
+      vx:0, vy:0, aggroAt:0, attackState:'idle', attackStateUntil:0,
+      patrolWaypoints:wps, patrolIdx:0, fromSpawner:true});
+    sp.lastSpawn = now;
+    sp.spawnCount++;
+    spawnerEnemiesAlive++;
+    console.log('[SPAWNER] Spawned enemy #' + sp.spawnCount + '/' + sp.maxSpawns +
+                ' near (' + Math.round(sp.x) + ',' + Math.round(sp.y) + ')' +
+                ' [alive from spawners: ' + spawnerEnemiesAlive + '/' + SPAWNER_GLOBAL_MAX + ']');
+  }
 }
 
 function updateSoulOrbs(dt) {
@@ -6370,37 +7547,73 @@ function drawSoulOrbs3D() {
   }
 }
 
-function renderFrame() {
-  draw();
-  if (MODE3D) {
-    drawGroundEffects3D();
-    drawConeEffects3D();
-    drawProjectiles3D();
-    drawChainEffects3D();
-    drawNovaEffects3D();
-    drawImpacts3D();
-    drawEnemies3D();
-    drawSoulOrbs3D();
-    drawCoins3D();
-    drawShopMarker3D();
-    drawCaveEntrance3D();
-    drawFPSArms();
-    if (DEBUG_SKELETON) drawSkeletonDebug();
-  } else {
-    drawGroundEffects2D();
-    drawConeEffects2D();
-    drawProjectiles2D();
-    drawChainEffects2D();
-    drawNovaEffects2D();
-    drawImpacts2D();
-    drawCoins2D();
-    drawShopMarker2D();
-    drawCaveEntrance2D();
+// Detailed subsystem timing for performance profiling
+var _perfBreakdown = {};
+var _perfBreakdownLog = 0;
+function _pt(name, fn) {
+  var t0 = performance.now();
+  fn();
+  var elapsed = performance.now() - t0;
+  if (!_perfBreakdown[name]) _perfBreakdown[name] = {total:0, count:0, max:0};
+  _perfBreakdown[name].total += elapsed;
+  _perfBreakdown[name].count++;
+  if (elapsed > _perfBreakdown[name].max) _perfBreakdown[name].max = elapsed;
+}
+
+function dumpPerfBreakdown() {
+  var entries = [];
+  for (var k in _perfBreakdown) {
+    var v = _perfBreakdown[k];
+    entries.push({name:k, avg:(v.total / v.count).toFixed(2), max:v.max.toFixed(2), total:v.total.toFixed(1), count:v.count});
   }
-  drawHudOverlay();
-  drawShopOverlay();
-  drawMenuOverlay();
-  if (gameOverState) drawGameOver();
+  entries.sort(function(a,b){ return parseFloat(b.avg) - parseFloat(a.avg); });
+  console.log('[PERF-BREAKDOWN] Top subsystems (avg ms):');
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i];
+    console.log('  ' + e.name + ': avg=' + e.avg + 'ms  max=' + e.max + 'ms  total=' + e.total + 'ms  (' + e.count + ' calls)');
+  }
+  _perfBreakdown = {};
+}
+
+function renderFrame() {
+  if (overviewActive) { drawDebugOverview(); return; }
+  _pt('draw()', function(){ draw(); });
+  if (MODE3D) {
+    _pt('groundFX3D', function(){ drawGroundEffects3D(); });
+    _pt('coneFX3D', function(){ drawConeEffects3D(); });
+    _pt('proj3D', function(){ drawProjectiles3D(); });
+    _pt('chainFX3D', function(){ drawChainEffects3D(); });
+    _pt('novaFX3D', function(){ drawNovaEffects3D(); });
+    _pt('impacts3D', function(){ drawImpacts3D(); });
+    _pt('enemies3D', function(){ drawEnemies3D(); });
+    _pt('soulOrbs3D', function(){ drawSoulOrbs3D(); });
+    _pt('coins3D', function(){ drawCoins3D(); });
+    _pt('shopMarker3D', function(){ drawShopMarker3D(); });
+    _pt('caveEntrance3D', function(){ drawCaveEntrance3D(); });
+    _pt('fpsArms', function(){ drawFPSArms(); });
+    if (DEBUG_SKELETON) _pt('skelDebug', function(){ drawSkeletonDebug(); });
+  } else {
+    _pt('groundFX2D', function(){ drawGroundEffects2D(); });
+    _pt('coneFX2D', function(){ drawConeEffects2D(); });
+    _pt('proj2D', function(){ drawProjectiles2D(); });
+    _pt('chainFX2D', function(){ drawChainEffects2D(); });
+    _pt('novaFX2D', function(){ drawNovaEffects2D(); });
+    _pt('impacts2D', function(){ drawImpacts2D(); });
+    _pt('coins2D', function(){ drawCoins2D(); });
+    _pt('shopMarker2D', function(){ drawShopMarker2D(); });
+    _pt('caveEntrance2D', function(){ drawCaveEntrance2D(); });
+  }
+  _pt('hudOverlay', function(){ drawHudOverlay(); });
+  _pt('shopOverlay', function(){ drawShopOverlay(); });
+  _pt('menuOverlay', function(){ drawMenuOverlay(); });
+  if (gameOverState) _pt('gameOver', function(){ drawGameOver(); });
+
+  // Auto-dump every 5s
+  var now = Date.now();
+  if (now - _perfBreakdownLog > 5000 && Object.keys(_perfBreakdown).length > 0) {
+    _perfBreakdownLog = now;
+    dumpPerfBreakdown();
+  }
 }
 
 function loop(ts) {
@@ -6409,8 +7622,8 @@ function loop(ts) {
   var dt = (lastUpdate ? (ts - lastUpdate) : 16) / 1000;
   lastUpdate = ts;
 
-  handleInput(dt);
-  if (!menuOpen) gameUpdate(dt);
+  _pt('handleInput', function(){ handleInput(dt); });
+  if (!menuOpen) _pt('gameUpdate', function(){ gameUpdate(dt); });
   renderFrame();
 
   // Performance logging
@@ -6460,9 +7673,7 @@ function startGame() {
   lastSelectDown = false;
   console.log('[CTRL] start CONTROL_MODE=', CONTROL_MODE, 'useHardware=', useHardware);
   draw();
-  if (USE_MOUSE) {
-    canvas.requestPointerLock();
-  }
+  // Pointer lock must be requested from a direct canvas click gesture — see canvas click handler
   if (useHardware) {
     startCalibration();
     hasBaseline = false; calStableMs = 0; calibrating = true;
@@ -6551,11 +7762,28 @@ document.getElementById('btnFwDbgOff').addEventListener('click', fwDebugOff);
   }
 })();
 
-document.getElementById('btnView2D').addEventListener('click', function() { MODE3D = false; });
-document.getElementById('btnView3D').addEventListener('click', function() { MODE3D = true; });
+document.getElementById('btnView2D').addEventListener('click', function() { MODE3D = false; if (overviewActive) toggleOverview(); });
+document.getElementById('btnView3D').addEventListener('click', function() { MODE3D = true; if (overviewActive) toggleOverview(); });
 document.getElementById('btnToggleTex').addEventListener('click', function() {
   USE_TEXTURES = !USE_TEXTURES;
   this.textContent = USE_TEXTURES ? 'Disable Textures' : 'Enable Textures';
+});
+document.getElementById('btnOverview').addEventListener('click', function() { toggleOverview(); });
+canvas.addEventListener('click', function(e) {
+  if (overviewActive) { toggleOverview(); return; }
+  // Pointer lock: clicking the canvas while the game is running requests lock
+  // and auto-enables keyboard+mouse mode (browsers require a direct user gesture).
+  if (running && document.pointerLockElement !== canvas) {
+    USE_KEYBOARD = true; USE_MOUSE = true;
+    USE_GAMEPAD = false;
+    var cg = document.getElementById('chkGamepad'); if (cg) cg.checked = false;
+    var ck = document.getElementById('chkKeyboard'); if (ck) ck.checked = true;
+    stopGamepadPolling();
+    kbState = {up:false, down:false, left:false, right:false};
+    mouseAccum = {x:0, y:0}; mouseDelta = {x:0, y:0};
+    updateHudInput();
+    canvas.requestPointerLock();
+  }
 });
 document.getElementById('chk3dDebug').addEventListener('change', function() { DEBUG_3D = this.checked; });
 document.getElementById('chkTexDebug').addEventListener('change', function() { DEBUG_TEXTURE = this.checked; });
@@ -6711,19 +7939,5 @@ buildSkeletonSprites();
 checkSensorAvailability();
 
 </script>
-)JS", HTTPD_RESP_USE_STRLEN);
-
-  // Close games-wrap
-  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-}
-
-void registerGamesHandlers(httpd_handle_t server);
-
-#else
-
-inline void streamGamesInner(httpd_req_t* req) { (void)req; }
-inline void registerGamesHandlers(httpd_handle_t server) { (void)server; }
-
-#endif
-
-#endif // WEBPAGE_GAMES_H
+</body>
+</html>

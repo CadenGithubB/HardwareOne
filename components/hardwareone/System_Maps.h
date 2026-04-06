@@ -715,7 +715,7 @@ private:
   static int _pointCount;
   static GPSTrackBounds _bounds;
   static GPSTrackStats _stats;
-  static char _filename[64];
+  static char _filename[256];
   static bool _liveTracking;
   static uint32_t _lastUpdateMs;
   

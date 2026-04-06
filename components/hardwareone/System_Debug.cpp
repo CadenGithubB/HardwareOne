@@ -2301,7 +2301,8 @@ const char* cmd_log(const String& argsInput) {
     }
 
     if (!hasFilepath) {
-      filepath = generateSystemLogFilename();
+      // Use persisted path if set, otherwise auto-generate
+      filepath = (gSettings.systemLogPath.length() > 0) ? gSettings.systemLogPath : generateSystemLogFilename();
     }
     
     if (filepath.length() == 0 || filepath.charAt(0) != '/') {
@@ -2316,10 +2317,11 @@ const char* cmd_log(const String& argsInput) {
       broadcastOutput(flagsMsg);
     }
     
-    // Apply category tags setting if specified
+    // Apply category tags setting (arg overrides, otherwise use persisted setting)
     if (categoryTags >= 0) {
       gSystemLogCategoryTags = (categoryTags != 0);
-      broadcastOutput(gSystemLogCategoryTags ? "Category tags: ENABLED" : "Category tags: DISABLED");
+    } else {
+      gSystemLogCategoryTags = gSettings.systemLogCategoryTags;
     }
     
     // Ensure directory exists
@@ -2356,7 +2358,8 @@ const char* cmd_log(const String& argsInput) {
     gSystemLogEnabled = true;
     gSystemLogLastWrite = millis();
     gOutputFlags |= OUTPUT_FILE;
-    
+    setSetting(gSettings.systemLogPath, filepath);
+
     snprintf(gDebugBuffer, 1024, "System logging started\n  File: %s", filepath.c_str());
     broadcastOutput(gDebugBuffer);
     return gDebugBuffer;
@@ -3091,8 +3094,9 @@ void systemLogAutoStart() {
   if (!gSettings.systemLogAutoStart) return;
   if (gSystemLogEnabled) return;  // Already running
   
-  // Auto-generate log filename with timestamp
-  String filepath = generateSystemLogFilename();
+  // Use persisted path if set, otherwise auto-generate
+  String filepath = (gSettings.systemLogPath.length() > 0) ? gSettings.systemLogPath : generateSystemLogFilename();
+  gSystemLogCategoryTags = gSettings.systemLogCategoryTags;
   
   // Ensure any previous file handle is closed (safety check)
   if (gSystemLogFile) {
@@ -3118,6 +3122,25 @@ void systemLogAutoStart() {
   gSystemLogEnabled = true;
   gSystemLogLastWrite = millis();
   gOutputFlags |= OUTPUT_FILE;
-  
+
   broadcastOutput("[SYSTEM_LOG] Auto-start enabled, logging to: " + filepath);
 }
+
+// ============================================================================
+// System Log Settings Module
+// ============================================================================
+
+static const SettingEntry systemLogSettingEntries[] = {
+  { "systemLogAutoStart",    SETTING_BOOL,   &gSettings.systemLogAutoStart,    0, 0, nullptr, 0, 1, "Auto-start logging after boot", nullptr, false, nullptr, "log autostart" },
+  { "systemLogPath",         SETTING_STRING, &gSettings.systemLogPath,         0, 0, "",      0, 0, "Log file path (empty = auto-generate)", nullptr },
+  { "systemLogCategoryTags", SETTING_BOOL,   &gSettings.systemLogCategoryTags, 1, 0, nullptr, 0, 1, "Include category tags",         nullptr },
+};
+
+extern const SettingsModule systemLogSettingsModule = {
+  "systemlog",
+  "systemlog",
+  systemLogSettingEntries,
+  sizeof(systemLogSettingEntries) / sizeof(systemLogSettingEntries[0]),
+  nullptr,
+  "System debug logging to file"
+};

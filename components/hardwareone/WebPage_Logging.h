@@ -806,18 +806,18 @@ function toggleAutoStart() {
 
 <script>
 console.log('[LOGGING] Section 6: Start logging function');
-function startLogging() {
+async function startLogging() {
   console.log('[LOGGING] Section 6a: startLogging called');
   const path = document.getElementById('config-path').value;
   const interval = document.getElementById('config-interval').value;
   console.log('[LOGGING] Section 6b: Start params - Path:', path, 'Interval:', interval);
-  
+
   if (!path || !path.startsWith('/')) {
     alert('Error: File path must start with / (e.g., /logging_captures/sensors.csv)');
     return;
   }
-  
-  if (!confirm('Start logging to ' + path + ' every ' + interval + 'ms?')) {
+
+  if (!await hwConfirm('Start logging to ' + path + ' every ' + interval + 'ms?')) {
     console.log('[LOGGING] Section 6c: Start cancelled by user');
     return;
   }
@@ -853,9 +853,9 @@ console.log('[LOGGING] Section 6h: startLogging defined');
 
 <script>
 console.log('[LOGGING] Section 7: Stop logging function');
-function stopLogging() {
+async function stopLogging() {
   console.log('[LOGGING] Section 7a: stopLogging called');
-  if (!confirm('Stop sensor logging?')) {
+  if (!await hwConfirm('Stop sensor logging?')) {
     console.log('[LOGGING] Section 7b: Stop cancelled by user');
     return;
   }
@@ -1154,9 +1154,9 @@ function startSystemLogging() {
   });
 }
 
-function stopSystemLogging() {
+async function stopSystemLogging() {
   console.log('[LOGGING] stopSystemLogging called');
-  if (!confirm('Stop system logging?')) return;
+  if (!await hwConfirm('Stop system logging?')) return;
   
   fetch('/api/cli', {
     method: 'POST',

@@ -165,62 +165,54 @@ String name = args.getArg(1);
 
 ## Migration Checklist
 
-### Day 1: Foundation
-- [ ] Create `CommandArgs` class in `System_Command.h`
-- [ ] Implement core methods in `System_Command.cpp`
-- [ ] Add `getMac()` helper using existing `parseMacAddress()`
-- [ ] Add `getInt()`, `getBool()` with validation
-- [ ] Add `getValue()` for key=value parsing
-- [ ] Build test to verify compilation
+### Phase 1: Foundation
+- [x] Create `CommandArgs` class in `System_Command.h`
+- [x] Implement core methods in `System_Command.cpp`
+- [x] Add `argMac()` helper using existing `parseMacAddress()`
+- [x] Add `argInt()`, `argBool()` with validation
+- [x] Add `value()`/`hasKey()` for key=value parsing
 
-### Day 2: ESP-NOW Migration (Batch 1)
-- [ ] Migrate simple 2-arg commands (10 commands):
-  - `espnowpair`, `espnowunpair`, `espnowsend`, `espnowbroadcast`
-  - `espnowsetname`, `espnowroom`, `espnowzone`, `espnowtags`
-  - `espnowfriendlyname`, `espnowstationary`
+### Phase 2: ESP-NOW Migration
+- [x] Batch 1 - simple commands: pair, unpair, broadcast, send, sendfile, mode, setname, stationary, hbmode, meshrole, meshttl
+- [x] Batch 2 - multi-arg commands: roomcmd, tagcmd, remote, browse, fetch, worker, meshmaster, meshbackup
+- [x] Batch 3 - extras: pairsecure, bigsend, bond_stream, buffers
+
+### Phase 3: User & WiFi Migration
+- [x] User commands (8): changepassword, resetpassword, add, session_revoke, ban, banuser, user_request, user_sync
+- [x] WiFi commands (3): wifiadd, wifipromote, wificonnect
+
+### Phase 4: Automation Migration
+- [x] Automation commands (6): automation_add, automation_enable_disable, automation_delete, automation_run, automation (dispatcher), autolog
+
+### Phase 5: Sensor/Peripheral Migration
+- [x] i2csensor-pca9685.cpp (3): servo, servoprofile, pwm
+- [x] i2csensor-rda5807.cpp (1): fmradio
+- [x] i2csensor-apds9960.cpp (1): apdsmode
+- [x] System_ESPNow_Sensors.cpp (1): espnow_sensorstream
+- [x] System_Power.cpp (1): power
+- [x] System_NeoPixel.cpp (1): ledeffect
+- [x] System_LLM.cpp (2): llm_load, llm_generate
+- [x] System_ESPSR.cpp (5): sr_cmds_add, sr_confidence, sr_accept, sr_dyngain, sr_snip_config
+- [x] System_SensorLogging.cpp (1): sensorlog (dispatcher with 8 subcommands)
+
+### Phase 6: Debug & Settings Migration
+- [x] System_Debug.cpp (~50 debug flag handlers): debughttp, debugsse, debugcli, debugsensors*, debugcamera, debugmicrophone, debugi2c, debugwifi, debugstorage, debuglogger, debugautomations, debugperformance, debugauth, debugespnow, debugbluetooth*, debugdatetime, debugverbose, debugmaps*, debugthermal, debugtof, debuggamepad, debugapds*, debuggps, debugpresence, debugllm, debugsr, outdisplay, log (dispatcher)
+- [x] System_Settings.cpp (2): outserial, outweb
+
+### Phase 7: Remaining Commands
+- [x] System_Filesystem.cpp (1): filerename
+- [x] System_I2C.cpp (1): sensorautostart
+- [x] System_Utils.cpp (1): login
+- [x] System_FeatureRegistry.cpp (1): features
+- [x] System_ImageManager.cpp (1): imagesend
+
+### Phase 8: Maps Commands (missed in original plan)
+- [x] System_Maps.cpp (6): mapload, search, gpstrack, waypoint, waypointfile, waypointfiles
+  - Also fixed pre-existing bug in cmd_waypointfiles where pointer arithmetic skipped the first arg (wpName was never read)
+
+### Final Validation
 - [ ] Build test
 - [ ] Functional test via CLI
-
-### Day 3: ESP-NOW Migration (Batch 2)
-- [ ] Migrate multi-arg commands (15 commands):
-  - `espnowremote` (4 args), `espnowbrowse` (3-4 args)
-  - `espnowfetch`, `espnowsendfile`, `espnowroomcmd`, `espnowtagcmd`
-  - `espnowmeshrole`, `espnowmeshmaster`, `espnowmeshbackup`
-  - `espnowmode`, `espnowhbmode`, `espnowmeshttl`
-  - `espnowworker`, `espnowsensorstream`, `espnowusersync`
-- [ ] Build test
-- [ ] Functional test via CLI
-
-### Day 4: User & WiFi Migration
-- [ ] Migrate User commands (15 commands):
-  - `useradd`, `userchangepassword`, `userresetpassword`
-  - `userapprove`, `userdeny`, `userpromote`, `userdemote`
-  - `userdelete`, `userlist`, `userrequest`, `usersync`
-  - `sessionlist`, `sessionrevoke`, `pendinglist`
-- [ ] Migrate WiFi commands (10 commands):
-  - `wifiadd`, `wifirm`, `wifipromote`, `wifilist`
-  - `wifiscan`, `wificonnect`, `wifidisconnect`
-- [ ] Build test
-- [ ] Functional test via CLI
-
-### Day 5: Automation & Sensor Migration
-- [ ] Migrate Automation commands (8 commands):
-  - `automationadd`, `automationedit`, `automationdelete`
-  - `automationlist`, `automationenable`, `automationdisable`
-  - `automationrun`, `automationstatus`
-- [ ] Migrate Sensor commands (20 commands):
-  - Servo: `servo`, `servoprofile`, `servoreset`
-  - PWM: `pwm`, `pwmfreq`
-  - FM Radio: `fmtune`, `fmvolume`, `fmscan`
-  - Others as needed
-- [ ] Build test
-- [ ] Functional test via CLI
-
-### Day 6: Final Cleanup & Documentation
-- [ ] Review all migrated commands for consistency
-- [ ] Update command handler documentation
-- [ ] Create usage examples in comments
-- [ ] Final build test
 - [ ] Performance validation (ensure no regression)
 
 ## Code Reduction Estimate
@@ -341,9 +333,8 @@ bool enabled = args.getValue("enabled") == "true";
 
 ## Success Criteria
 
+- [x] CommandArgs class implemented (fixed-size array, no heap allocation)
+- [x] All ~100+ command handlers migrated to use CommandArgs
 - [ ] All migrated commands compile without errors
 - [ ] All migrated commands function identically to before
-- [ ] Code reduction of ~650 lines achieved
-- [ ] Consistent error messages across all commands
 - [ ] No performance regression
-- [ ] Documentation updated with usage examples

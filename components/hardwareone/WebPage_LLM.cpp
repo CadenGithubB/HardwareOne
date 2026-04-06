@@ -21,6 +21,7 @@
 
 #include "System_LLM.h"
 #include "System_Debug.h"
+#include "System_Settings.h"
 #include "System_User.h"
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
@@ -121,7 +122,7 @@ static esp_err_t handleLLMLoad(httpd_req_t* req) {
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"No model specified\"}");
   }
 
-  int maxCtx = doc["max_ctx"] | 0;  // 0 = use firmware default
+  int maxCtx = doc["max_ctx"] | gSettings.llmMaxContext;  // 0 = use compile-time default
   if (maxCtx < 0) maxCtx = 0;
   if (maxCtx > 2048) maxCtx = 2048;
 
@@ -179,145 +180,139 @@ static esp_err_t handleLLMStop(httpd_req_t* req) {
 
 // ============================================================================
 // POST /api/llm/generate  { "prompt": "...", "max_tokens": 256, "temperature": 0.8 }
-// Streams response as chunked text/plain
+// Starts async background generation; returns {"ok":true,"session":N} immediately.
+// Client polls GET /api/llm/result?session=N&offset=N for streamed output.
 // ============================================================================
-
-// Context passed to the generation task
-struct LLMGenCtx {
-  httpd_req_t* req;
-  char prompt[512];
-  int maxTokens;
-  float temperature;
-  bool finished;
-  bool error;
-};
 
 static esp_err_t handleLLMGenerate(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   if (!llmIsReady()) {
     DEBUG_HTTPF("[LLM-API] POST /api/llm/generate: model not ready");
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_send(req, "[error: model not ready]", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"model not ready\"}");
   }
 
   char body[2048];
   if (!readPostBody(req, body, sizeof(body))) {
-    DEBUG_HTTPF("[LLM-API] POST /api/llm/generate: bad request (body read failed, content_len=%d)", req->content_len);
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_send(req, "[error: bad request]", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+    DEBUG_HTTPF("[LLM-API] POST /api/llm/generate: body read failed (content_len=%d)", req->content_len);
+    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"bad request\"}");
   }
 
   JsonDocument doc;
   if (deserializeJson(doc, body)) {
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_send(req, "[error: invalid JSON]", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"invalid JSON\"}");
   }
 
   const char* prompt = doc["prompt"] | "";
-  int maxTokens = doc["max_tokens"] | LLM_DEFAULT_MAX_TOKENS;
-  float temperature = doc["temperature"] | LLM_DEFAULT_TEMPERATURE;
-  float topp = doc["top_p"] | LLM_DEFAULT_TOPP;
-  bool useMirostat2 = doc["mirostat2"] | false;
-  float mirostatTau = doc["mirostat_tau"] | LLM_DEFAULT_MIROSTAT_TAU;
-  float mirostatEta = doc["mirostat_eta"] | LLM_DEFAULT_MIROSTAT_ETA;
-  float repPenalty = doc["rep_penalty"] | LLM_DEFAULT_REP_PENALTY;
-  int repWindow = doc["rep_window"] | LLM_DEFAULT_REP_WINDOW;
-  int sentenceLimit = doc["sentence_limit"] | LLM_DEFAULT_SENTENCE_LIMIT;
-  int hardCap = doc["hard_cap"] | LLM_DEFAULT_HARD_CAP;
-  bool dynTemp = doc["dyn_temp"] | false;
+  if (!prompt[0]) {
+    DEBUG_HTTPF("[LLM-API] POST /api/llm/generate: empty prompt");
+    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"empty prompt\"}");
+  }
+
+  LLMGenParams params;
+  params.maxTokens    = doc["max_tokens"]     | gSettings.llmMaxTokens;
+  params.temperature  = doc["temperature"]    | gSettings.llmTemperature;
+  params.topp         = doc["top_p"]          | gSettings.llmTopP;
+  params.useMirostat2 = doc["mirostat2"]      | (bool)gSettings.llmUseMirostat2;
+  params.mirostatTau  = doc["mirostat_tau"]   | gSettings.llmMirostatTau;
+  params.mirostatEta  = doc["mirostat_eta"]   | gSettings.llmMirostatEta;
+  params.repPenalty   = doc["rep_penalty"]    | gSettings.llmRepPenalty;
+  params.repWindow    = doc["rep_window"]     | gSettings.llmRepWindow;
+  params.sentenceLimit= doc["sentence_limit"] | gSettings.llmSentenceLimit;
+  params.hardCap      = doc["hard_cap"]       | gSettings.llmHardCap;
+  params.dynTemp      = doc["dyn_temp"]       | (bool)gSettings.llmDynTemp;
+
+  // Clamp
+  if (params.maxTokens    <   1) params.maxTokens    = 1;
+  if (params.maxTokens    > 512) params.maxTokens    = 512;
+  if (params.temperature  < 0.0f)  params.temperature  = 0.0f;
+  if (params.temperature  > 2.0f)  params.temperature  = 2.0f;
+  if (params.topp         < 0.01f) params.topp         = 0.01f;
+  if (params.topp         > 1.0f)  params.topp         = 1.0f;
+  if (params.mirostatTau  < 0.5f)  params.mirostatTau  = 0.5f;
+  if (params.mirostatTau  > 20.0f) params.mirostatTau  = 20.0f;
+  if (params.mirostatEta  < 0.01f) params.mirostatEta  = 0.01f;
+  if (params.mirostatEta  > 1.0f)  params.mirostatEta  = 1.0f;
+  if (params.repPenalty   < 1.0f)  params.repPenalty   = 1.0f;
+  if (params.repPenalty   > 5.0f)  params.repPenalty   = 5.0f;
+  if (params.repWindow    <   0)   params.repWindow    = 0;
+  if (params.repWindow    > 128)   params.repWindow    = 128;
+  if (params.sentenceLimit<   0)   params.sentenceLimit= 0;
+  if (params.sentenceLimit>  20)   params.sentenceLimit= 20;
+  if (params.hardCap      <   0)   params.hardCap      = 0;
+  if (params.hardCap      > 512)   params.hardCap      = 512;
 
   // Tokenize suppress texts (previous answers to avoid on retry)
-  static constexpr int MAX_SUPPRESS_TOKENS = 128;
-  int suppressBuf[MAX_SUPPRESS_TOKENS];
-  int suppressCount = 0;
+  params.suppressCount = 0;
   JsonArray suppressArr = doc["suppress"].as<JsonArray>();
   if (suppressArr) {
-    int tmpBuf[64];  // per-string tokenize buffer
+    int tmpBuf[64];
     for (JsonVariant v : suppressArr) {
       const char* text = v.as<const char*>();
       if (!text || !text[0]) continue;
       int n = llmTokenize(text, tmpBuf, 64);
-      for (int i = 0; i < n && suppressCount < MAX_SUPPRESS_TOKENS; i++) {
+      for (int i = 0; i < n && params.suppressCount < 128; i++) {
         int tok = tmpBuf[i];
-        // Deduplicate
         bool dup = false;
-        for (int j = 0; j < suppressCount; j++) {
-          if (suppressBuf[j] == tok) { dup = true; break; }
+        for (int j = 0; j < params.suppressCount; j++) {
+          if (params.suppressTokens[j] == tok) { dup = true; break; }
         }
-        if (!dup) suppressBuf[suppressCount++] = tok;
+        if (!dup) params.suppressTokens[params.suppressCount++] = tok;
       }
     }
-    if (suppressCount > 0) {
-      DEBUG_HTTPF("[LLM-API] suppress: %d unique tokens from %d previous answers",
-                  suppressCount, suppressArr.size());
-    }
   }
 
-  if (!prompt[0]) {
-    DEBUG_HTTPF("[LLM-API] POST /api/llm/generate: empty prompt");
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_send(req, "[error: empty prompt]", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+  DEBUG_HTTPF("[LLM-API] POST /api/llm/generate (async): prompt='%.60s%s' max_tokens=%d temp=%.2f",
+    prompt, strlen(prompt) > 60 ? "..." : "", params.maxTokens, params.temperature);
+
+  int sessionId = llmStartAsync(prompt, params);
+  if (sessionId == 0) {
+    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"failed to start generation\"}");
   }
 
-  DEBUG_HTTPF("[LLM-API] POST /api/llm/generate: prompt='%.80s%s' max_tokens=%d temp=%.2f topp=%.2f",
-    prompt, strlen(prompt) > 80 ? "..." : "", maxTokens, temperature, topp);
-  DEBUG_HTTPF("[LLM-API]   mirostat2=%d tau=%.1f eta=%.2f rep_pen=%.2f rep_win=%d sent_lim=%d hard_cap=%d dynTemp=%d suppress=%d",
-    useMirostat2 ? 1 : 0, mirostatTau, mirostatEta, repPenalty, repWindow, sentenceLimit, hardCap, dynTemp ? 1 : 0, suppressCount);
+  char json[48];
+  snprintf(json, sizeof(json), "{\"ok\":true,\"session\":%d}", sessionId);
+  return sendJsonResponse(req, json);
+}
 
-  // Clamp
-  if (maxTokens < 1) maxTokens = 1;
-  if (maxTokens > 512) maxTokens = 512;
-  if (temperature < 0.0f) temperature = 0.0f;
-  if (temperature > 2.0f) temperature = 2.0f;
-  if (topp < 0.01f) topp = 0.01f;
-  if (topp > 1.0f) topp = 1.0f;
-  if (mirostatTau < 0.5f) mirostatTau = 0.5f;
-  if (mirostatTau > 20.0f) mirostatTau = 20.0f;
-  if (mirostatEta < 0.01f) mirostatEta = 0.01f;
-  if (mirostatEta > 1.0f) mirostatEta = 1.0f;
-  if (repPenalty < 1.0f) repPenalty = 1.0f;
-  if (repPenalty > 5.0f) repPenalty = 5.0f;
-  if (repWindow < 0) repWindow = 0;
-  if (repWindow > 128) repWindow = 128;
-  if (sentenceLimit < 0) sentenceLimit = 0;
-  if (sentenceLimit > 20) sentenceLimit = 20;
-  if (hardCap < 0) hardCap = 0;
-  if (hardCap > 512) hardCap = 512;
+// ============================================================================
+// GET /api/llm/result?session=N&offset=N
+// Returns buffered tokens since byte offset as JSON: {"text":"...","done":bool,"len":N}
+// ============================================================================
+static esp_err_t handleLLMPoll(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
 
-  // Start chunked response as text/plain for streaming
-  httpd_resp_set_type(req, "text/plain");
-  DEBUG_HTTPF("[LLM-API] Starting chunked generation (clamped: max_tokens=%d temp=%.2f topp=%.2f)", maxTokens, temperature, topp);
-  unsigned long genStartMs = millis();
-
-  // Generate synchronously on this httpd worker thread.
-  // The httpd task stack is ~11KB which is tight, but the heavy lifting
-  // (matmul, KV cache) is in heap/PSRAM. The llmGenerate function yields
-  // via vTaskDelay so the watchdog stays happy.
-  int result = llmGenerate(prompt, [req](const char* token) -> bool {
-    esp_err_t err = httpd_resp_send_chunk(req, token, strlen(token));
-    return (err == ESP_OK);
-  }, maxTokens, temperature, topp, useMirostat2, mirostatTau, mirostatEta,
-     repPenalty, repWindow, sentenceLimit, hardCap, dynTemp,
-     suppressCount > 0 ? suppressBuf : nullptr, suppressCount);
-
-  // End chunked response
-  httpd_resp_send_chunk(req, NULL, 0);
-
-  unsigned long genElapsedMs = millis() - genStartMs;
-  if (result < 0) {
-    DEBUG_HTTPF("[LLM-API] Generation FAILED (%d) in %lums for prompt: %.64s...", result, genElapsedMs, prompt);
-    DEBUG_LLM_GENERATEF("[LLM] Generation failed for prompt: %.32s...", prompt);
-  } else {
-    DEBUG_HTTPF("[LLM-API] Generation complete: %d tokens in %lums (%.1f tok/s)",
-      result, genElapsedMs, genElapsedMs > 0 ? (result * 1000.0f / genElapsedMs) : 0.0f);
+  // Parse query string: ?session=N&offset=N
+  size_t qlen = httpd_req_get_url_query_len(req);
+  char   query[64] = {};
+  if (qlen > 0 && qlen < sizeof(query)) {
+    httpd_req_get_url_query_str(req, query, sizeof(query));
   }
 
-  return ESP_OK;
+  int offset = 0, session = 0;
+  char param[16];
+  if (httpd_query_key_value(query, "offset",  param, sizeof(param)) == ESP_OK) offset  = atoi(param);
+  if (httpd_query_key_value(query, "session", param, sizeof(param)) == ESP_OK) session = atoi(param);
+
+  // Stale session → tell client to stop
+  if (session != llmGetSessionId()) {
+    return sendJsonResponse(req, "{\"text\":\"\",\"done\":true,\"len\":0,\"stale\":true}");
+  }
+
+  // Read up to 512 bytes of new tokens starting at offset
+  char chunk[512];
+  int n = llmGetResultChunk(offset, chunk, sizeof(chunk));
+  bool done = llmIsGenerationDone();
+
+  // Serialize with ArduinoJson so token text is properly escaped
+  JsonDocument jdoc;
+  jdoc["done"] = done;
+  jdoc["len"]  = llmGetResultLen();
+  jdoc["text"] = (n > 0) ? (const char*)chunk : "";
+
+  String resp;
+  serializeJson(jdoc, resp);
+  return sendJsonResponse(req, resp.c_str());
 }
 
 // ============================================================================
@@ -348,7 +343,8 @@ void registerLLMHandlers(httpd_handle_t server) {
   static httpd_uri_t llmLoad = { .uri = "/api/llm/load", .method = HTTP_POST, .handler = handleLLMLoad, .user_ctx = NULL };
   static httpd_uri_t llmUnload = { .uri = "/api/llm/unload", .method = HTTP_POST, .handler = handleLLMUnload, .user_ctx = NULL };
   static httpd_uri_t llmGenerate = { .uri = "/api/llm/generate", .method = HTTP_POST, .handler = handleLLMGenerate, .user_ctx = NULL };
-  static httpd_uri_t llmStop = { .uri = "/api/llm/stop", .method = HTTP_POST, .handler = handleLLMStop, .user_ctx = NULL };
+  static httpd_uri_t llmStop    = { .uri = "/api/llm/stop",     .method = HTTP_POST, .handler = handleLLMStop,     .user_ctx = NULL };
+  static httpd_uri_t llmPoll    = { .uri = "/api/llm/result",   .method = HTTP_GET,  .handler = handleLLMPoll,     .user_ctx = NULL };
 
   httpd_register_uri_handler(server, &llmPage);
   httpd_register_uri_handler(server, &llmStatus);
@@ -357,6 +353,7 @@ void registerLLMHandlers(httpd_handle_t server) {
   httpd_register_uri_handler(server, &llmUnload);
   httpd_register_uri_handler(server, &llmGenerate);
   httpd_register_uri_handler(server, &llmStop);
+  httpd_register_uri_handler(server, &llmPoll);
 }
 
 #endif // ENABLE_ONDEVICE_LLM && ENABLE_HTTP_SERVER

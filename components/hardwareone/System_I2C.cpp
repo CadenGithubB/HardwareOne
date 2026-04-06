@@ -1356,11 +1356,10 @@ static uint32_t getEnabledSensorHeapEstimate() {
 static const char* cmd_sensorautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String args = argsInput;
-  args.trim();
-  
+  CommandArgs a(argsInput);
+
   // No args - show current settings with heap estimates
-  if (args.length() == 0) {
+  if (a.count() == 0) {
     PSRAM_STATIC_BUF(buf, 1024);
     uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
     uint32_t enabledCost = getEnabledSensorHeapEstimate();
@@ -1389,13 +1388,12 @@ static const char* cmd_sensorautostart(const String& argsInput) {
     return buf;
   }
   
-  int secondSpace = args.indexOf(' ');
-  if (secondSpace < 0) {
+  if (!a.hasMinArgs(2)) {
     return "Usage: sensorautostart <sensor> <on|off>";
   }
-  
-  String sensor = args.substring(0, secondSpace);
-  String value = args.substring(secondSpace + 1);
+
+  String sensor = a.arg(0);
+  String value = a.arg(1);
   sensor.toLowerCase();
   value.toLowerCase();
   
@@ -2212,7 +2210,9 @@ static const SettingEntry i2cSettingEntries[] = {
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule i2cSettingsModule = {
   "i2c", "i2c", i2cSettingEntries,
-  sizeof(i2cSettingEntries) / sizeof(i2cSettingEntries[0])
+  sizeof(i2cSettingEntries) / sizeof(i2cSettingEntries[0]),
+  nullptr,
+  "I2C bus configuration"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

@@ -261,7 +261,11 @@ void sampleMemoryState(bool forceFullScan) {
       uint32_t stackWords;
     };
     
+#if ENABLE_ESPNOW
     TaskHandle_t espnowHandle = getEspNowTaskHandle();
+#else
+    TaskHandle_t espnowHandle = nullptr;
+#endif
     
     const TaskEntry tasks[] = {
       {"espnow_task",        espnowHandle,          ESPNOW_HB_STACK_WORDS},

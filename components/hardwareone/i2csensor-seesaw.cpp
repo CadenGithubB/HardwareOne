@@ -111,6 +111,20 @@ const char* cmd_gamepadautostart(const String& argsInput) {
   }
 }
 
+const char* cmd_gamepaddevicepollms(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs a(argsInput);
+  if (a.count() == 0) {
+    static char buf[48];
+    snprintf(buf, sizeof(buf), "[Gamepad] Poll interval: %d ms", gSettings.gamepadDevicePollMs);
+    return buf;
+  }
+  int ms = a.argInt(0, 0);
+  if (ms < 10 || ms > 1000) return "Usage: gamepaddevicepollms <10-1000>";
+  setSetting(gSettings.gamepadDevicePollMs, ms);
+  return "[Gamepad] Poll interval updated";
+}
+
 // ============================================================================
 // Gamepad Internal Start (called by queue processor)
 // ============================================================================
@@ -366,6 +380,7 @@ const CommandEntry gamepadCommands[] = {
   { "closegamepad", "Stop Seesaw gamepad sensor.", false, cmd_gamepadstop, nullptr, "sensor", "gamepad", "close" },
   { "gamepadread", "Read Seesaw gamepad state (x/y/buttons).", false, cmd_gamepad },
   { "gamepadautostart", "Enable/disable gamepad auto-start after boot [on|off]", false, cmd_gamepadautostart, "Usage: gamepadautostart [on|off]" },
+  { "gamepaddevicepollms", "Set gamepad poll interval ms [10-1000]", true, cmd_gamepaddevicepollms },
 };
 
 const size_t gamepadCommandsCount = sizeof(gamepadCommands) / sizeof(gamepadCommands[0]);

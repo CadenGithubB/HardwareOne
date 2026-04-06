@@ -76,13 +76,11 @@ const char* cmd_servo(const String& argsInput) {
   }
   
   // Parse: <channel> <angle>
-  String rest = args;
-  rest.trim();
-  int sp1 = rest.indexOf(' ');
-  if (sp1 < 0) return "Usage: servo <channel> <angle>";
-  
-  int channel = rest.substring(0, sp1).toInt();
-  int angle = rest.substring(sp1 + 1).toInt();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) return "Usage: servo <channel> <angle>";
+
+  int channel = a.argInt(0, -1);
+  int angle = a.argInt(1, -1);
   
   if (channel < 0 || channel > 15) return "[Servo] Error: Channel must be 0-15";
   if (angle < 0 || angle > 180) return "[Servo] Error: Angle must be 0-180";
@@ -114,37 +112,14 @@ const char* cmd_servoprofile(const String& argsInput) {
   if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
   
   // Parse: <channel> <minPulse> <maxPulse> <centerPulse> <name>
-  String rest = args;
-  rest.trim();
-  if (rest.length() == 0) return "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
-  
-  int sp2 = rest.indexOf(' ');
-  if (sp2 < 0) return "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
-  
-  int channel = rest.substring(0, sp2).toInt();
-  rest = rest.substring(sp2 + 1);
-  rest.trim();
-  
-  int sp3 = rest.indexOf(' ');
-  if (sp3 < 0) return "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
-  
-  int minPulse = rest.substring(0, sp3).toInt();
-  rest = rest.substring(sp3 + 1);
-  rest.trim();
-  
-  int sp4 = rest.indexOf(' ');
-  if (sp4 < 0) return "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
-  
-  int maxPulse = rest.substring(0, sp4).toInt();
-  rest = rest.substring(sp4 + 1);
-  rest.trim();
-  
-  int sp5 = rest.indexOf(' ');
-  if (sp5 < 0) return "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
-  
-  int centerPulse = rest.substring(0, sp5).toInt();
-  String name = rest.substring(sp5 + 1);
-  name.trim();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(5)) return "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
+
+  int channel = a.argInt(0, -1);
+  int minPulse = a.argInt(1, -1);
+  int maxPulse = a.argInt(2, -1);
+  int centerPulse = a.argInt(3, -1);
+  String name = a.remaining(3);
   
   if (channel < 0 || channel > 15) return "[Servo] Error: Channel must be 0-15";
   if (minPulse < 500 || minPulse > 2500) return "[Servo] Error: Min pulse must be 500-2500µs";
@@ -244,23 +219,18 @@ const char* cmd_pwm(const String& argsInput) {
   }
   
   // Parse: <channel> <value> [freq]
-  String rest = args;
-  rest.trim();
-  int sp1 = rest.indexOf(' ');
-  if (sp1 < 0) return "Usage: pwm <channel> <value> [freq]";
-  
-  int channel = rest.substring(0, sp1).toInt();
-  rest = rest.substring(sp1 + 1);
-  rest.trim();
-  int sp2 = rest.indexOf(' ');
-  int value = (sp2 >= 0) ? rest.substring(0, sp2).toInt() : rest.toInt();
-  
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) return "Usage: pwm <channel> <value> [freq]";
+
+  int channel = a.argInt(0, -1);
+  int value = a.argInt(1, -1);
+
   if (channel < 0 || channel > 15) return "[Servo] Error: Channel must be 0-15";
   if (value < 0 || value > 4095) return "[Servo] Error: Value must be 0-4095";
-  
+
   // Optional frequency parameter
-  if (sp2 >= 0) {
-    int freq = rest.substring(sp2 + 1).toInt();
+  if (a.has(2)) {
+    int freq = a.argInt(2, 0);
     if (freq >= 24 && freq <= 1526) {
       i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
         pwmDriver->setPWMFreq(freq);

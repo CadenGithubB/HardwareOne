@@ -1548,7 +1548,9 @@ extern const SettingsModule bluetoothSettingsModule = {
   "bluetooth",
   "bluetooth",
   bluetoothSettingsEntries,
-  bluetoothSettingsCount
+  bluetoothSettingsCount,
+  nullptr,
+  "Bluetooth classic and BLE settings"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

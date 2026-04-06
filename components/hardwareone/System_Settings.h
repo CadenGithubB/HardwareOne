@@ -72,6 +72,10 @@ struct Settings {
       debugStorage(false),
       debugPerformance(false),
       debugDateTime(false),
+      debugDatetimeSync(false),
+      debugDatetimeSetup(false),
+      debugDatetimeAnchor(false),
+      debugDatetimeResolve(false),
       debugCommandFlow(false),
       debugUsers(false),
       debugSystem(false),
@@ -203,6 +207,8 @@ struct Settings {
       sensorLogMask(0),
       sensorLogFormat(0),
       systemLogAutoStart(false),
+      systemLogPath(""),
+      systemLogCategoryTags(true),
       cameraAutoStart(false),  // Camera does NOT auto-start by default
       microphoneAutoStart(false),  // Microphone does NOT auto-start by default
       microphoneSampleRate(16000),
@@ -280,7 +286,23 @@ struct Settings {
       mqttPublishRTC(false),
       mqttPublishGamepad(false),
       crashCount(0),
-      lastResetReason(0) {
+      lastResetReason(0)
+#if ENABLE_ONDEVICE_LLM
+      ,llmTemperature(0.5f)
+      ,llmTopP(0.8f)
+      ,llmMaxTokens(256)
+      ,llmSentenceLimit(2)
+      ,llmHardCap(80)
+      ,llmRepPenalty(1.3f)
+      ,llmRepWindow(32)
+      ,llmMaxContext(0)
+      ,llmUseMirostat2(false)
+      ,llmMirostatTau(5.0f)
+      ,llmMirostatEta(0.1f)
+      ,llmDynTemp(false)
+      ,llmDefaultModel("model.bin")
+#endif
+    {
     // String members are now initialized in initializer list
   }
 
@@ -360,6 +382,10 @@ struct Settings {
   bool debugStorage;
   bool debugPerformance;
   bool debugDateTime;
+  bool debugDatetimeSync;
+  bool debugDatetimeSetup;
+  bool debugDatetimeAnchor;
+  bool debugDatetimeResolve;
   bool debugCommandFlow;
   bool debugUsers;
   bool debugSystem;
@@ -553,8 +579,10 @@ struct Settings {
   int sensorLogIntervalMs;      // Last-used polling interval in ms (default: 5000)
   int sensorLogMask;            // Last-used sensor bitmask (0=none)
   int sensorLogFormat;          // Last-used format (0=text, 1=csv, 2=track)
-  // System Logging auto-start setting
+  // System Logging settings
   bool systemLogAutoStart;      // Auto-start system logging after boot
+  String systemLogPath;         // Log file path (empty = auto-generate with timestamp)
+  bool systemLogCategoryTags;   // Prefix log lines with [CATEGORY] tags
   bool cameraAutoStart;         // Auto-start ESP32-S3 camera after boot
   bool microphoneAutoStart;     // Auto-start ESP32-S3 PDM microphone after boot
   // Microphone settings
@@ -645,6 +673,22 @@ struct Settings {
   // Crash / reset tracking (persisted from RTC memory on next healthy boot)
   uint32_t crashCount;          // Accumulated abnormal resets (WDT, panic, brownout)
   uint32_t lastResetReason;     // esp_reset_reason_t value from last boot
+#if ENABLE_ONDEVICE_LLM
+  // On-device LLM generation defaults (System_LLM)
+  float llmTemperature;         // Sampling temperature (default: 0.5)
+  float llmTopP;                // Nucleus sampling threshold (default: 0.8)
+  int llmMaxTokens;             // Max tokens per generation (default: 256)
+  int llmSentenceLimit;         // Stop after N sentences, 0=disabled (default: 2)
+  int llmHardCap;               // Hard token cap, 0=disabled (default: 80)
+  float llmRepPenalty;          // Repetition penalty divisor (default: 1.3)
+  int llmRepWindow;             // Look-back window for rep penalty (default: 32)
+  int llmMaxContext;            // KV cache context window, 0=use compile-time default
+  bool llmUseMirostat2;         // Enable Mirostat 2 sampling (default: false)
+  float llmMirostatTau;         // Mirostat target surprise in bits (default: 5.0)
+  float llmMirostatEta;         // Mirostat learning rate (default: 0.1)
+  bool llmDynTemp;              // Dynamic temperature scaling (default: false)
+  String llmDefaultModel;       // Default model filename for auto-load (default: "model.bin")
+#endif
 };
 
 // Global settings instance (defined in .ino)

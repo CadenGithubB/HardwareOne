@@ -699,9 +699,14 @@ void firstTimeSetupIfNeeded() {
   // detected (OLED for boot animation, gamepad for menu navigation). If the
   // user did not select them, reboot so the next boot starts clean — stopping
   // them in-place would fragment the heap; a reboot is cheaper.
+  // Also reboot if user enabled OLED but it's not connected (wasn't initialized
+  // during setup because settings weren't loaded yet).
   bool needsRebootForHardware = false;
 #if ENABLE_OLED_DISPLAY
   if (oledConnected && !gSettings.oledEnabled) {
+    needsRebootForHardware = true;
+  }
+  if (!oledConnected && gSettings.oledEnabled) {
     needsRebootForHardware = true;
   }
 #endif

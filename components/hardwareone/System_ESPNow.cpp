@@ -7021,25 +7021,15 @@ const char* cmd_espnow_pair(const String& argsInput) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  String args = argsInput;
-  args.trim();
-
-  int firstSpace = args.indexOf(' ');
-  if (firstSpace < 0) return "Usage: espnow pair <mac> <name>";
-
-  String macStr = args.substring(0, firstSpace);
-  String name = args.substring(firstSpace + 1);
-  macStr.trim();
-  name.trim();
-
-  if (macStr.length() == 0 || name.length() == 0) {
-    return "Usage: espnow pair <mac> <name>";
-  }
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) return "Usage: espnow pair <mac> <name>";
 
   uint8_t mac[6];
-  if (!parseMacAddress(macStr, mac)) {
+  if (!a.argMac(0, mac)) {
     return "Invalid MAC address format. Use AA:BB:CC:DD:EE:FF";
   }
+  String name = a.remaining(0);
+  String macStr = a.arg(0);
   // Prevent pairing with self MAC (STA or AP interface)
   {
     uint8_t selfSta[6];
@@ -7107,20 +7097,20 @@ const char* cmd_espnow_pair(const String& argsInput) {
 // Mesh TTL command
 const char* cmd_espnow_meshttl(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+
+  if (a.count() == 0) {
     if (!ensureDebugBuffer()) return "Error";
     int peerCount = (gEspNow ? (int)gEspNow->deviceCount : 0);
-    snprintf(getDebugBuffer(), 1024, "Mesh TTL: %d\nAdaptive mode: %s\nActive peers: %d", 
+    snprintf(getDebugBuffer(), 1024, "Mesh TTL: %d\nAdaptive mode: %s\nActive peers: %d",
              gSettings.meshTTL, gSettings.meshAdaptiveTTL ? "enabled" : "disabled", peerCount);
     return getDebugBuffer();
   }
-  
+
   // Check for 'adaptive' command
-  args.toLowerCase();
-  if (args == "adaptive") {
+  String ttlArg = a.arg(0);
+  ttlArg.toLowerCase();
+  if (ttlArg == "adaptive") {
     setSetting(gSettings.meshAdaptiveTTL, !gSettings.meshAdaptiveTTL);
     
     snprintf(getDebugBuffer(), 1024, "Adaptive TTL %s (TTL now %d)", 
@@ -7128,7 +7118,7 @@ const char* cmd_espnow_meshttl(const String& argsInput) {
     return getDebugBuffer();
   }
   
-  int ttl = args.toInt();
+  int ttl = a.argInt(0, 0);
   if (ttl < 1 || ttl > 10) {
     return "Error: TTL must be between 1 and 10, or 'adaptive' to toggle";
   }
@@ -7199,14 +7189,14 @@ const char* cmd_espnow_meshmetrics(const String& argsInput) {
 // ESP-NOW mode command
 const char* cmd_espnow_mode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (argsInput.length() == 0 || argsInput == " ") {
+  CommandArgs a(argsInput);
+  if (a.count() == 0) {
     snprintf(getDebugBuffer(), 1024, "ESP-NOW mode: %s", getEspNowModeString());
     return getDebugBuffer();
   }
-  String args = argsInput;
-  args.trim();
-  args.toLowerCase();
-  if (args == "direct") {
+  String mode = a.arg(0);
+  mode.toLowerCase();
+  if (mode == "direct") {
     setSetting(gSettings.espnowmesh, false);
     if (gEspNow) {
       gEspNow->mode = ESPNOW_MODE_DIRECT;  // Update runtime state immediately
@@ -7214,7 +7204,7 @@ const char* cmd_espnow_mode(const String& argsInput) {
     saveMeshPeers();
     BROADCAST_PRINTF("[ESP-NOW] mode set to %s", getEspNowModeString());
     return "ESP-NOW mode set to direct";
-  } else if (args == "mesh") {
+  } else if (mode == "mesh") {
     setSetting(gSettings.espnowmesh, true);
     if (gEspNow) {
       gEspNow->mode = ESPNOW_MODE_MESH;  // Update runtime state immediately
@@ -7229,10 +7219,9 @@ const char* cmd_espnow_mode(const String& argsInput) {
 // ESP-NOW setname command
 const char* cmd_espnow_setname(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+
+  if (a.count() == 0) {
     if (gSettings.espnowDeviceName.length() > 0) {
       snprintf(getDebugBuffer(), 1024, "Device name: %s", gSettings.espnowDeviceName.c_str());
     } else {
@@ -7240,19 +7229,20 @@ const char* cmd_espnow_setname(const String& argsInput) {
     }
     return getDebugBuffer();
   }
-  
-  if (args.length() > 20) {
+
+  String name = a.arg(0);
+  if (name.length() > 20) {
     return "Error: Device name must be 20 characters or less";
   }
-  
-  for (size_t i = 0; i < args.length(); i++) {
-    char c = args.charAt(i);
+
+  for (size_t i = 0; i < name.length(); i++) {
+    char c = name.charAt(i);
     if (!isalnum(c) && c != '-' && c != '_') {
       return "Error: Device name can only contain letters, numbers, hyphens, and underscores";
     }
   }
-  
-  setSetting(gSettings.espnowDeviceName, args);
+
+  setSetting(gSettings.espnowDeviceName, name);
   setSetting(gSettings.espnowFirstTimeSetup, true);
   
   if (gEspNow && gEspNow->initialized) {
@@ -7262,20 +7252,20 @@ const char* cmd_espnow_setname(const String& argsInput) {
     bool found = false;
     for (int i = 0; i < gEspNow->deviceCount; i++) {
       if (memcmp(gEspNow->devices[i].mac, myMac, 6) == 0) {
-        gEspNow->devices[i].name = args;
+        gEspNow->devices[i].name = name;
         found = true;
         break;
       }
     }
-    
+
     if (!found) {
-      addEspNowDevice(myMac, args, false, nullptr);
+      addEspNowDevice(myMac, name, false, nullptr);
     }
-    
+
     saveMeshPeers();
   }
-  
-  snprintf(getDebugBuffer(), 1024, "Device name set to: %s", args.c_str());
+
+  snprintf(getDebugBuffer(), 1024, "Device name set to: %s", name.c_str());
   return getDebugBuffer();
 }
 
@@ -7334,13 +7324,12 @@ const char* cmd_espnow_friendlyname(const String& argsInput) {
 
 const char* cmd_espnow_stationary(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+  if (a.count() == 0) {
     snprintf(getDebugBuffer(), 1024, "Stationary: %s", gSettings.espnowStationary ? "true" : "false");
     return getDebugBuffer();
   }
-  bool val = (args == "1" || args == "true" || args == "on");
+  bool val = a.argBool(0, false);
   setSetting(gSettings.espnowStationary, val);
   snprintf(getDebugBuffer(), 1024, "Stationary set to: %s", val ? "true" : "false");
   return getDebugBuffer();
@@ -7520,23 +7509,13 @@ const char* cmd_espnow_find(const String& argsInput) {
 
 const char* cmd_espnow_roomcmd(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(4)) return "Usage: espnow roomcmd <room> <user> <pass> <command>";
 
-  // Parse: <room> <user> <pass> <command>
-  int s1 = args.indexOf(' ');
-  if (s1 < 0) return "Usage: espnow roomcmd <room> <user> <pass> <command>";
-  int s2 = args.indexOf(' ', s1 + 1);
-  if (s2 < 0) return "Usage: espnow roomcmd <room> <user> <pass> <command>";
-  int s3 = args.indexOf(' ', s2 + 1);
-  if (s3 < 0) return "Usage: espnow roomcmd <room> <user> <pass> <command>";
-
-  String targetRoom = args.substring(0, s1);
-  String user = args.substring(s1 + 1, s2);
-  String pass = args.substring(s2 + 1, s3);
-  String command = args.substring(s3 + 1);
-  command.trim();
-  if (command.length() == 0) return "Usage: espnow roomcmd <room> <user> <pass> <command>";
+  String targetRoom = a.arg(0);
+  String user = a.arg(1);
+  String pass = a.arg(2);
+  String command = a.remaining(2);
 
   char* buf = getDebugBuffer();
   int pos = 0;
@@ -7575,23 +7554,13 @@ const char* cmd_espnow_roomcmd(const String& argsInput) {
 
 const char* cmd_espnow_tagcmd(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(4)) return "Usage: espnow tagcmd <tag> <user> <pass> <command>";
 
-  // Parse: <tag> <user> <pass> <command>
-  int s1 = args.indexOf(' ');
-  if (s1 < 0) return "Usage: espnow tagcmd <tag> <user> <pass> <command>";
-  int s2 = args.indexOf(' ', s1 + 1);
-  if (s2 < 0) return "Usage: espnow tagcmd <tag> <user> <pass> <command>";
-  int s3 = args.indexOf(' ', s2 + 1);
-  if (s3 < 0) return "Usage: espnow tagcmd <tag> <user> <pass> <command>";
-
-  String targetTag = args.substring(0, s1);
-  String user = args.substring(s1 + 1, s2);
-  String pass = args.substring(s2 + 1, s3);
-  String command = args.substring(s3 + 1);
-  command.trim();
-  if (command.length() == 0) return "Usage: espnow tagcmd <tag> <user> <pass> <command>";
+  String targetTag = a.arg(0);
+  String user = a.arg(1);
+  String pass = a.arg(2);
+  String command = a.remaining(2);
 
   targetTag.toLowerCase();
   char* buf = getDebugBuffer();
@@ -7644,23 +7613,23 @@ const char* cmd_espnow_tagcmd(const String& argsInput) {
 // ESP-NOW heartbeat mode command
 const char* cmd_espnow_hbmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+
+  if (a.count() == 0) {
     const char* mode = gSettings.meshHeartbeatBroadcast ? "public" : "private";
-    const char* desc = gSettings.meshHeartbeatBroadcast 
+    const char* desc = gSettings.meshHeartbeatBroadcast
       ? "Heartbeats broadcast to all devices (discovery enabled)"
       : "Heartbeats sent only to paired devices (discovery disabled)";
     snprintf(getDebugBuffer(), 1024, "Heartbeat mode: %s\n%s", mode, desc);
     return getDebugBuffer();
   }
-  
-  args.toLowerCase();
-  if (args == "public" || args == "broadcast") {
+
+  String hbArg = a.arg(0);
+  hbArg.toLowerCase();
+  if (hbArg == "public" || hbArg == "broadcast") {
     setSetting(gSettings.meshHeartbeatBroadcast, true);
     return "Heartbeat mode set to public (broadcast). Unpaired devices can now be discovered.";
-  } else if (args == "private" || args == "unicast") {
+  } else if (hbArg == "private" || hbArg == "unicast") {
     setSetting(gSettings.meshHeartbeatBroadcast, false);
     return "Heartbeat mode set to private (unicast). Only paired devices will receive heartbeats.";
   }
@@ -7671,10 +7640,9 @@ const char* cmd_espnow_hbmode(const String& argsInput) {
 // Mesh role command
 const char* cmd_espnow_meshrole(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+
+  if (a.count() == 0) {
     int pos = 0;
     char* buf = getDebugBuffer();
     pos += snprintf(buf + pos, 1024 - pos, "Mesh role: %s", getMeshRoleString(gSettings.meshRole));
@@ -7688,22 +7656,23 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
     return buf;
   }
   
-  args.toLowerCase();
-  if (args == "worker") {
+  String role = a.arg(0);
+  role.toLowerCase();
+  if (role == "worker") {
     setSetting(gSettings.meshRole, (uint8_t)MESH_ROLE_WORKER);
     BROADCAST_PRINTF("[MESH] Role set to worker");
     return "Role set to worker";
-  } else if (args == "master") {
+  } else if (role == "master") {
     setSetting(gSettings.meshRole, (uint8_t)MESH_ROLE_MASTER);
     setSetting(gSettings.meshMasterMAC, String(""));
     BROADCAST_PRINTF("[MESH] Role set to master");
     return "Role set to master";
-  } else if (args == "backup") {
+  } else if (role == "backup") {
     setSetting(gSettings.meshRole, (uint8_t)MESH_ROLE_BACKUP_MASTER);
     BROADCAST_PRINTF("[MESH] Role set to backup master");
     return "Role set to backup master";
   }
-  
+
   return "Usage: espnow meshrole [worker|master|backup]";
 }
 
@@ -7712,12 +7681,13 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
 const char* cmd_espnow_worker(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  
-  String args = argsInput;
-  args.trim();
-  
+
+  CommandArgs a(argsInput);
+  String subcmd = a.arg(0);
+  subcmd.toLowerCase();
+
   // Show current configuration
-  if (args.length() == 0 || args == "show") {
+  if (a.count() == 0 || subcmd == "show") {
     snprintf(getDebugBuffer(), 1024,
              "Worker Status Config:\n"
              "  enabled: %s\n"
@@ -7733,20 +7703,18 @@ const char* cmd_espnow_worker(const String& argsInput) {
   }
   
   // Enable/disable worker status
-  if (args == "on" || args == "enable") {
+  if (subcmd == "on" || subcmd == "enable") {
     gWorkerStatusConfig.enabled = true;
     return "Worker status reporting enabled";
   }
-  if (args == "off" || args == "disable") {
+  if (subcmd == "off" || subcmd == "disable") {
     gWorkerStatusConfig.enabled = false;
     return "Worker status reporting disabled";
   }
-  
+
   // Set interval
-  if (args.startsWith("interval ")) {
-    String intervalStr = args.substring(9);
-    intervalStr.trim();
-    long interval = intervalStr.toInt();
+  if (subcmd == "interval") {
+    long interval = a.argInt(1, 0);
     if (interval < 1000) return "Error: interval must be >= 1000 ms";
     if (interval > 300000) return "Error: interval must be <= 300000 ms (5 min)";
     gWorkerStatusConfig.intervalMs = (uint16_t)interval;
@@ -7755,9 +7723,8 @@ const char* cmd_espnow_worker(const String& argsInput) {
   }
   
   // Configure fields
-  if (args.startsWith("fields ")) {
-    String fields = args.substring(7);
-    fields.trim();
+  if (subcmd == "fields") {
+    String fields = a.remaining(0);
     fields.toLowerCase();
     
     // Reset all fields to off
@@ -7797,10 +7764,9 @@ const char* cmd_espnow_worker(const String& argsInput) {
 // Mesh master command
 const char* cmd_espnow_meshmaster(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+
+  if (a.count() == 0) {
     if (gSettings.meshMasterMAC.length() > 0) {
       BROADCAST_PRINTF("Master MAC: %s", gSettings.meshMasterMAC.c_str());
     } else {
@@ -7808,19 +7774,21 @@ const char* cmd_espnow_meshmaster(const String& argsInput) {
     }
     return "OK";
   }
-  
-  if (args.length() != 17) {
+
+  String mac = a.arg(0);
+  if (mac.length() != 17) {
     return "Invalid MAC address format. Use: XX:XX:XX:XX:XX:XX";
   }
-  
+
   uint8_t myMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, myMac);
   String myMacStr = macToHexString(myMac);
-  if (args.equalsIgnoreCase(myMacStr)) {
+  if (mac.equalsIgnoreCase(myMacStr)) {
     return "Error: Cannot set your own MAC as master MAC";
   }
-  
-  { String upper = args; upper.toUpperCase(); setSetting(gSettings.meshMasterMAC, upper); }
+
+  mac.toUpperCase();
+  setSetting(gSettings.meshMasterMAC, mac);
   BROADCAST_PRINTF("[MESH] Master MAC set to %s", gSettings.meshMasterMAC.c_str());
   return "OK";
 }
@@ -7828,10 +7796,9 @@ const char* cmd_espnow_meshmaster(const String& argsInput) {
 // Mesh backup command
 const char* cmd_espnow_meshbackup(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String args = argsInput;
-  args.trim();
-  
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+
+  if (a.count() == 0) {
     if (gSettings.meshBackupMAC.length() > 0) {
       BROADCAST_PRINTF("Backup MAC: %s", gSettings.meshBackupMAC.c_str());
     } else {
@@ -7839,19 +7806,21 @@ const char* cmd_espnow_meshbackup(const String& argsInput) {
     }
     return "OK";
   }
-  
-  if (args.length() != 17) {
+
+  String mac = a.arg(0);
+  if (mac.length() != 17) {
     return "Invalid MAC address format. Use: XX:XX:XX:XX:XX:XX";
   }
-  
+
   uint8_t myMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, myMac);
   String myMacStr = macToHexString(myMac);
-  if (args.equalsIgnoreCase(myMacStr)) {
+  if (mac.equalsIgnoreCase(myMacStr)) {
     return "Error: Cannot set your own MAC as backup MAC";
   }
-  
-  { String upper = args; upper.toUpperCase(); setSetting(gSettings.meshBackupMAC, upper); }
+
+  mac.toUpperCase();
+  setSetting(gSettings.meshBackupMAC, mac);
   BROADCAST_PRINTF("[MESH] Backup MAC set to %s", gSettings.meshBackupMAC.c_str());
   return "OK";
 }
@@ -8338,12 +8307,9 @@ const char* cmd_espnow_unpair(const String& argsInput) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  String target = argsInput;
-  target.trim();
-  
-  if (target.length() == 0) {
-    return "Usage: espnow unpair <name_or_mac>";
-  }
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Usage: espnow unpair <name_or_mac>";
+  String target = a.arg(0);
 
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(target, mac)) {
@@ -8408,12 +8374,9 @@ const char* cmd_espnow_broadcast(const String& argsInput) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  String message = argsInput;
-  message.trim();
-
-  if (message.length() == 0) {
-    return "Usage: espnow broadcast <message>";
-  }
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Usage: espnow broadcast <message>";
+  String message = a.raw();
 
   // Build v2 JSON TEXT message for plain text
   String payload;
@@ -8684,21 +8647,11 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  String args = argsInput;
-  args.trim();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) return "Usage: espnow sendfile <name_or_mac> <filepath>";
 
-  int firstSpace = args.indexOf(' ');
-  if (firstSpace < 0) return "Usage: espnow sendfile <name_or_mac> <filepath>";
-
-  String target = args.substring(0, firstSpace);
-  String filepath = args.substring(firstSpace + 1);
-
-  target.trim();
-  filepath.trim();
-
-  if (target.length() == 0 || filepath.length() == 0) {
-    return "Usage: espnow sendfile <name_or_mac> <filepath>";
-  }
+  String target = a.arg(0);
+  String filepath = a.remaining(0);
 
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(target, mac)) {
@@ -8871,26 +8824,13 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
     return "Encryption not enabled. Run 'espnowsetpassphrase \"your_phrase\"' first.";
   }
 
-  String args = argsInput;
-  args.trim();
-
-  if (args.length() == 0) {
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) {
     return "Usage: espnow pairsecure <mac_address> <device_name>";
   }
 
-  int spacePos = args.indexOf(' ');
-  if (spacePos < 0) {
-    return "Usage: espnow pairsecure <mac_address> <device_name>";
-  }
-
-  String macStr = args.substring(0, spacePos);
-  String deviceName = args.substring(spacePos + 1);
-  macStr.trim();
-  deviceName.trim();
-
-  if (macStr.length() == 0 || deviceName.length() == 0) {
-    return "Usage: espnow pairsecure <mac_address> <device_name>";
-  }
+  String macStr = a.arg(0);
+  String deviceName = a.remaining(0);
 
   uint8_t mac[6];
   if (!parseMacAddress(macStr, mac)) {
@@ -9018,43 +8958,13 @@ const char* cmd_espnow_browse(const String& argsInput) {
     return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase \"your_phrase\"' and pair securely.";
   }
 
-  String args = argsInput;
-  args.trim();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(3)) return "Usage: espnow browse <target> <username> <password> [path]";
 
-  // Parse: <target> <user> <pass> [path]
-  int firstSpace = args.indexOf(' ');
-  if (firstSpace < 0) return "Usage: espnow browse <target> <username> <password> [path]";
-
-  int secondSpace = args.indexOf(' ', firstSpace + 1);
-  if (secondSpace < 0) return "Usage: espnow browse <target> <username> <password> [path]";
-
-  int thirdSpace = args.indexOf(' ', secondSpace + 1);
-  if (thirdSpace < 0) return "Usage: espnow browse <target> <username> <password> [path]";
-
-  String target = args.substring(0, firstSpace);
-  String username = args.substring(firstSpace + 1, secondSpace);
-  
-  // Find fourth space (optional path)
-  int fourthSpace = args.indexOf(' ', thirdSpace + 1);
-  String password, path;
-  if (fourthSpace < 0) {
-    password = args.substring(secondSpace + 1, thirdSpace);
-    path = args.substring(thirdSpace + 1);
-    if (path.length() == 0) path = "/";  // Default to root
-  } else {
-    password = args.substring(secondSpace + 1, thirdSpace);
-    path = args.substring(thirdSpace + 1);
-  }
-
-  target.trim();
-  username.trim();
-  password.trim();
-  path.trim();
-
-  if (target.length() == 0 || username.length() == 0 || password.length() == 0) {
-    return "Usage: espnow browse <target> <username> <password> [path]";
-  }
-
+  String target = a.arg(0);
+  String username = a.arg(1);
+  String password = a.arg(2);
+  String path = a.has(3) ? a.remaining(2) : "/";
   if (path.length() == 0) path = "/";
 
   uint8_t targetMac[6];
@@ -9111,32 +9021,13 @@ const char* cmd_espnow_fetch(const String& argsInput) {
     return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase \"your_phrase\"' and pair securely.";
   }
 
-  String args = argsInput;
-  args.trim();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(4)) return "Usage: espnow fetch <target> <username> <password> <path>";
 
-  // Parse: <target> <user> <pass> <path>
-  int firstSpace = args.indexOf(' ');
-  if (firstSpace < 0) return "Usage: espnow fetch <target> <username> <password> <path>";
-
-  int secondSpace = args.indexOf(' ', firstSpace + 1);
-  if (secondSpace < 0) return "Usage: espnow fetch <target> <username> <password> <path>";
-
-  int thirdSpace = args.indexOf(' ', secondSpace + 1);
-  if (thirdSpace < 0) return "Usage: espnow fetch <target> <username> <password> <path>";
-
-  String target = args.substring(0, firstSpace);
-  String username = args.substring(firstSpace + 1, secondSpace);
-  String password = args.substring(secondSpace + 1, thirdSpace);
-  String path = args.substring(thirdSpace + 1);
-
-  target.trim();
-  username.trim();
-  password.trim();
-  path.trim();
-
-  if (target.length() == 0 || username.length() == 0 || password.length() == 0 || path.length() == 0) {
-    return "Usage: espnow fetch <target> <username> <password> <path>";
-  }
+  String target = a.arg(0);
+  String username = a.arg(1);
+  String password = a.arg(2);
+  String path = a.remaining(2);
 
   uint8_t targetMac[6];
   if (!resolveDeviceNameOrMac(target, targetMac)) {
@@ -9196,32 +9087,13 @@ const char* cmd_espnow_remote(const String& argsInput) {
            "' and pair securely.";
   }
 
-  String args = argsInput;
-  args.trim();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(4)) return "Usage: espnow remote <target> <username> <password> <command>";
 
-  // Parse: <target> <username> <password> <command>
-  int firstSpace = args.indexOf(' ');
-  if (firstSpace < 0) return "Usage: espnow remote <target> <username> <password> <command>";
-
-  int secondSpace = args.indexOf(' ', firstSpace + 1);
-  if (secondSpace < 0) return "Usage: espnow remote <target> <username> <password> <command>";
-
-  int thirdSpace = args.indexOf(' ', secondSpace + 1);
-  if (thirdSpace < 0) return "Usage: espnow remote <target> <username> <password> <command>";
-
-  String target = args.substring(0, firstSpace);
-  String username = args.substring(firstSpace + 1, secondSpace);
-  String password = args.substring(secondSpace + 1, thirdSpace);
-  String command = args.substring(thirdSpace + 1);
-
-  target.trim();
-  username.trim();
-  password.trim();
-  command.trim();
-
-  if (target.length() == 0 || username.length() == 0 || password.length() == 0 || command.length() == 0) {
-    return "Usage: espnow remote <target> <username> <password> <command>";
-  }
+  String target = a.arg(0);
+  String username = a.arg(1);
+  String password = a.arg(2);
+  String command = a.remaining(2);
 
   uint8_t targetMac[6];
   if (!resolveDeviceNameOrMac(target, targetMac)) {
@@ -9373,24 +9245,13 @@ const char* cmd_espnow_send(const String& argsInput) {
   }
 
   // Parse: <name_or_mac> <message>
-  String args = argsInput;
-  args.trim();
-  
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] args.length()=%d", args.length());
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) return "Usage: espnow send <name_or_mac> <message>";
 
-  int firstSpace = args.indexOf(' ');
-  if (firstSpace < 0) return "Usage: espnow send <name_or_mac> <message>";
+  String target = a.arg(0);
+  String message = a.remaining(0);
 
-  String target = args.substring(0, firstSpace);
-  String message = args.substring(firstSpace + 1);
-  target.trim();
-  message.trim();
-  
   DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] message.length()=%d", message.length());
-
-  if (target.length() == 0 || message.length() == 0) {
-    return "Usage: espnow send <name_or_mac> <message>";
-  }
 
   // Resolve device name or MAC address
   uint8_t mac[6];
@@ -9439,17 +9300,11 @@ const char* cmd_espnow_bigsend(const String& argsInput) {
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   if (!gEspNow->initialized) return "ESP-NOW not initialized. Run 'openespnow' first.";
 
-  String args = argsInput; // format: "<mac|name> <bytes>"
-  args.trim();
-  int firstSpace = args.indexOf(' ');
-  if (firstSpace < 0) return "Usage: espnow bigsend <name_or_mac> <bytes>";
+  CommandArgs a(argsInput); // format: "<mac|name> <bytes>"
+  if (!a.hasMinArgs(2)) return "Usage: espnow bigsend <name_or_mac> <bytes>";
 
-  String target = args.substring(0, firstSpace);
-  String sizeStr = args.substring(firstSpace + 1);
-  target.trim(); sizeStr.trim();
-  if (target.length() == 0 || sizeStr.length() == 0) return "Usage: espnow bigsend <name_or_mac> <bytes>";
-
-  long size = sizeStr.toInt();
+  String target = a.arg(0);
+  long size = a.argInt(1, 0);
   if (size <= 0) return "Error: bytes must be > 0";
   // Keep within v2 fragment defaults (~2880 decoded bytes across 32 frags)
   if (size > 2500) size = 2500;
@@ -9930,10 +9785,9 @@ const char* cmd_bond_stream(const String& argsInput) {
     return "Not in bond mode. Use 'bondconnect <device>' first.";
   }
   
-  String args = argsInput;
-  args.trim();
+  CommandArgs a(argsInput);
 
-  if (args.length() == 0) {
+  if (a.count() == 0) {
     // Show current streaming status with detailed diagnostics
     broadcastOutput("[BOND] Sensor streaming diagnostics (bidirectional):");
     BROADCAST_PRINTF("  Bond mode enabled: %s", gSettings.bondModeEnabled ? "YES" : "NO");
@@ -9963,17 +9817,14 @@ const char* cmd_bond_stream(const String& argsInput) {
   }
   
   // Parse: bond stream <sensor> <on|off>
-  int spaceIdx = args.indexOf(' ');
-  if (spaceIdx < 0) {
+  if (!a.hasMinArgs(2)) {
     return "Usage: bondstream <sensor> <on|off>\n       bondstream (show status)";
   }
-  
-  String sensorName = args.substring(0, spaceIdx);
-  sensorName.trim();
+
+  String sensorName = a.arg(0);
   sensorName.toLowerCase();
-  
-  String action = args.substring(spaceIdx + 1);
-  action.trim();
+
+  String action = a.arg(1);
   action.toLowerCase();
   
   // Validate sensor name
@@ -10077,11 +9928,10 @@ const char* cmd_espnow_buffers(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
-  String args = argsInput;
-  args.trim();
-  
+  CommandArgs a(argsInput);
+
   // No args: show current buffer settings
-  if (args.length() == 0) {
+  if (a.count() == 0) {
     char* buf = getDebugBuffer();
     int pos = 0;
     pos += snprintf(buf + pos, 1024 - pos, "=== ESP-NOW Buffer Settings ===\n");
@@ -10097,13 +9947,11 @@ const char* cmd_espnow_buffers(const String& argsInput) {
   }
   
   // Parse: espnow buffers <type> [value]
-  int spaceIdx = args.indexOf(' ');
-  String bufType = (spaceIdx >= 0) ? args.substring(0, spaceIdx) : args;
-  bufType.trim();
+  String bufType = a.arg(0);
   bufType.toLowerCase();
-  
+
   // If no value provided, show just that setting
-  if (spaceIdx < 0) {
+  if (!a.has(1)) {
     if (bufType == "tx") {
       snprintf(getDebugBuffer(), 1024, "TX Queue Size: %u (range: 1-16)", gSettings.espnowTxQueueSize);
     } else if (bufType == "rx") {
@@ -10119,9 +9967,7 @@ const char* cmd_espnow_buffers(const String& argsInput) {
   }
   
   // Parse value
-  String valStr = args.substring(spaceIdx + 1);
-  valStr.trim();
-  int value = valStr.toInt();
+  int value = a.argInt(1, 0);
   
   // Set the appropriate buffer size
   if (bufType == "tx") {
@@ -10168,6 +10014,34 @@ extern const char* cmd_espnow_rooms(const String& argsInput);
 extern const char* cmd_espnow_find(const String& argsInput);
 extern const char* cmd_espnow_roomcmd(const String& argsInput);
 extern const char* cmd_espnow_tagcmd(const String& argsInput);
+
+// Forward declarations for schema-driven setting commands (defined below via ESPNOW_SETTING_CMD macro)
+const char* cmd_espnow_firsttimesetup(const String&);
+const char* cmd_espnow_heartbeatinterval(const String&);
+const char* cmd_espnow_failovertimeout(const String&);
+const char* cmd_espnow_workerstatusinterval(const String&);
+const char* cmd_espnow_topodiscoveryinterval(const String&);
+const char* cmd_espnow_topoautorefresh(const String&);
+const char* cmd_espnow_heartbeatbroadcast(const String&);
+const char* cmd_espnow_meshadaptivettl(const String&);
+const char* cmd_espnow_meshpeermax(const String&);
+const char* cmd_espnow_sensorbroadcastinterval(const String&);
+const char* cmd_espnow_txqueuesize(const String&);
+const char* cmd_espnow_rxbuffersize(const String&);
+const char* cmd_espnow_chunksize(const String&);
+const char* cmd_espnow_filechunksize(const String&);
+#if ENABLE_BONDED_MODE
+const char* cmd_espnow_bondmodeenabled(const String&);
+const char* cmd_espnow_bondpeermac(const String&);
+const char* cmd_espnow_bondstreamthermal(const String&);
+const char* cmd_espnow_bondstreamtof(const String&);
+const char* cmd_espnow_bondstreamimu(const String&);
+const char* cmd_espnow_bondstreamgps(const String&);
+const char* cmd_espnow_bondstreamgamepad(const String&);
+const char* cmd_espnow_bondstreamfmradio(const String&);
+const char* cmd_espnow_bondstreamrtc(const String&);
+const char* cmd_espnow_bondstreampresence(const String&);
+#endif
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 extern const CommandEntry espNowCommands[] = {
@@ -10263,6 +10137,33 @@ extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Settings ----
   { "espnowenabled", "Enable/disable ESP-NOW (0|1, takes effect after reboot).", true, cmd_espnowenabled },
   { "espnowbuffers", "Show/adjust ESP-NOW buffer sizes: 'espnowbuffers [tx|rx|chunk|filechunk] [value]'.", false, cmd_espnow_buffers },
+  // ---- ESP-NOW Settings (schema-driven, for web UI save) ----
+  { "espnowfirsttimesetup",          "Set first time setup flag: <0|1>", true, cmd_espnow_firsttimesetup },
+  { "espnowheartbeatinterval",       "Set master heartbeat interval: <1000-60000 ms>", true, cmd_espnow_heartbeatinterval },
+  { "espnowfailovertimeout",         "Set failover timeout: <5000-120000 ms>", true, cmd_espnow_failovertimeout },
+  { "espnowworkerstatusinterval",    "Set worker status interval: <5000-120000 ms>", true, cmd_espnow_workerstatusinterval },
+  { "espnowtopodiscoveryinterval",   "Set topology discovery interval: <0-300000 ms>", true, cmd_espnow_topodiscoveryinterval },
+  { "espnowtopoautorefresh",         "Set auto refresh topology: <0|1>", true, cmd_espnow_topoautorefresh },
+  { "espnowheartbeatbroadcast",      "Set heartbeat broadcast: <0|1>", true, cmd_espnow_heartbeatbroadcast },
+  { "espnowmeshadaptivettl",         "Set adaptive TTL: <0|1>", true, cmd_espnow_meshadaptivettl },
+  { "espnowmeshpeermax",             "Set max peer slots: <1-16> (reboot required)", true, cmd_espnow_meshpeermax },
+  { "espnowsensorbroadcastinterval", "Set sensor broadcast interval: <100-10000 ms>", true, cmd_espnow_sensorbroadcastinterval },
+  { "espnowtxqueuesize",             "Set TX queue size: <1-16>", true, cmd_espnow_txqueuesize },
+  { "espnowrxbuffersize",            "Set RX buffer size: <64-512>", true, cmd_espnow_rxbuffersize },
+  { "espnowchunksize",               "Set chunk size: <100-220>", true, cmd_espnow_chunksize },
+  { "espnowfilechunksize",           "Set file chunk size: <100-224>", true, cmd_espnow_filechunksize },
+#if ENABLE_BONDED_MODE
+  { "espnowbondmodeenabled",         "Enable/disable bond mode: <0|1>", true, cmd_espnow_bondmodeenabled },
+  { "espnowbondpeermac",             "Set bond peer MAC address", true, cmd_espnow_bondpeermac },
+  { "bondstreamthermal",             "Set auto-stream thermal: <0|1>", true, cmd_espnow_bondstreamthermal },
+  { "bondstreamtof",                 "Set auto-stream ToF: <0|1>", true, cmd_espnow_bondstreamtof },
+  { "bondstreamimu",                 "Set auto-stream IMU: <0|1>", true, cmd_espnow_bondstreamimu },
+  { "bondstreamgps",                 "Set auto-stream GPS: <0|1>", true, cmd_espnow_bondstreamgps },
+  { "bondstreamgamepad",             "Set auto-stream gamepad: <0|1>", true, cmd_espnow_bondstreamgamepad },
+  { "bondstreamfmradio",             "Set auto-stream FM radio: <0|1>", true, cmd_espnow_bondstreamfmradio },
+  { "bondstreamrtc",                 "Set auto-stream RTC: <0|1>", true, cmd_espnow_bondstreamrtc },
+  { "bondstreampresence",            "Set auto-stream presence: <0|1>", true, cmd_espnow_bondstreampresence },
+#endif
 };
 
 extern const size_t espNowCommandsCount = sizeof(espNowCommands) / sizeof(espNowCommands[0]);
@@ -10275,55 +10176,99 @@ extern const size_t espNowCommandsCount = sizeof(espNowCommands) / sizeof(espNow
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry espnowSettingEntries[] = {
-  { "enabled",                    SETTING_BOOL,   &gSettings.espnowenabled,              false, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr },
-  { "mesh",                       SETTING_BOOL,   &gSettings.espnowmesh,                 false, 0, nullptr, 0, 1, "Mesh Mode", nullptr },
-  { "userSyncEnabled",            SETTING_BOOL,   &gSettings.espnowUserSyncEnabled,      false, 0, nullptr, 0, 1, "User Sync Enabled", nullptr },
-  { "deviceName",                 SETTING_STRING, &gSettings.espnowDeviceName,           0, 0, "", 0, 0, "Device Name", nullptr },
-  { "room",                       SETTING_STRING, &gSettings.espnowRoom,                 0, 0, "", 0, 0, "Room", nullptr },
-  { "zone",                       SETTING_STRING, &gSettings.espnowZone,                 0, 0, "", 0, 0, "Zone", nullptr },
-  { "tags",                       SETTING_STRING, &gSettings.espnowTags,                 0, 0, "", 0, 0, "Tags", nullptr },
-  { "friendlyName",               SETTING_STRING, &gSettings.espnowFriendlyName,         0, 0, "", 0, 0, "Friendly Name", nullptr },
-  { "stationary",                 SETTING_BOOL,   &gSettings.espnowStationary,           false, 0, nullptr, 0, 1, "Stationary", nullptr },
-  { "firstTimeSetup",             SETTING_BOOL,   &gSettings.espnowFirstTimeSetup,       false, 0, nullptr, 0, 1, "First Time Setup", nullptr },
-  { "passphrase",                  SETTING_STRING, &gSettings.espnowPassphrase,           0, 0, "", 0, 0, "Passphrase", nullptr, true },
-  { "meshRole",                   SETTING_INT,    &gSettings.meshRole,                   0, 0, nullptr, 0, 2, "Mesh Role", nullptr },
-  { "masterMAC",                  SETTING_STRING, &gSettings.meshMasterMAC,              0, 0, "", 0, 0, "Master MAC", nullptr },
-  { "backupMAC",                  SETTING_STRING, &gSettings.meshBackupMAC,              0, 0, "", 0, 0, "Backup MAC", nullptr },
-  { "backupEnabled",              SETTING_BOOL,   &gSettings.meshBackupEnabled,           false, 0, nullptr, 0, 1, "Backup Master Enabled", nullptr },
-  { "masterHeartbeatInterval",    SETTING_INT,    &gSettings.meshMasterHeartbeatInterval,10000, 0, nullptr, 1000, 60000, "Heartbeat Interval (ms)", nullptr },
-  { "failoverTimeout",            SETTING_INT,    &gSettings.meshFailoverTimeout,        20000, 0, nullptr, 5000, 120000, "Failover Timeout (ms)", nullptr },
-  { "workerStatusInterval",       SETTING_INT,    &gSettings.meshWorkerStatusInterval,   30000, 0, nullptr, 5000, 120000, "Worker Status Interval (ms)", nullptr },
-  { "topoDiscoveryInterval",      SETTING_INT,    &gSettings.meshTopoDiscoveryInterval,  0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr },
-  { "topoAutoRefresh",            SETTING_BOOL,   &gSettings.meshTopoAutoRefresh,        false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr },
-  { "heartbeatBroadcast",         SETTING_BOOL,   &gSettings.meshHeartbeatBroadcast,     false, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr },
-  { "meshTTL",                    SETTING_INT,    &gSettings.meshTTL,                    3, 0, nullptr, 1, 10, "TTL", nullptr },
-  { "meshAdaptiveTTL",            SETTING_BOOL,   &gSettings.meshAdaptiveTTL,            false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr },
-  { "meshPeerMax",                SETTING_INT,    &gSettings.meshPeerMax,                8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr },
-  { "sensorBroadcastIntervalMs",  SETTING_INT,    &gSettings.sensorBroadcastIntervalMs,  1000, 0, nullptr, 100, 10000, "Sensor Broadcast Interval (ms)", nullptr },
+  { "enabled",                    SETTING_BOOL,   &gSettings.espnowenabled,              false, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr, false, nullptr, "espnowenabled" },
+  { "mesh",                       SETTING_BOOL,   &gSettings.espnowmesh,                 false, 0, nullptr, 0, 1, "Mesh Mode", nullptr, false, nullptr, "espnowmode" },
+  { "userSyncEnabled",            SETTING_BOOL,   &gSettings.espnowUserSyncEnabled,      false, 0, nullptr, 0, 1, "User Sync Enabled", nullptr, false, nullptr, "espnowusersync" },
+  { "deviceName",                 SETTING_STRING, &gSettings.espnowDeviceName,           0, 0, "", 0, 0, "Device Name", nullptr, false, nullptr, "espnowsetname" },
+  { "room",                       SETTING_STRING, &gSettings.espnowRoom,                 0, 0, "", 0, 0, "Room", nullptr, false, nullptr, "espnowroom" },
+  { "zone",                       SETTING_STRING, &gSettings.espnowZone,                 0, 0, "", 0, 0, "Zone", nullptr, false, nullptr, "espnowzone" },
+  { "tags",                       SETTING_STRING, &gSettings.espnowTags,                 0, 0, "", 0, 0, "Tags", nullptr, false, nullptr, "espnowtags" },
+  { "friendlyName",               SETTING_STRING, &gSettings.espnowFriendlyName,         0, 0, "", 0, 0, "Friendly Name", nullptr, false, nullptr, "espnowfriendlyname" },
+  { "stationary",                 SETTING_BOOL,   &gSettings.espnowStationary,           false, 0, nullptr, 0, 1, "Stationary", nullptr, false, nullptr, "espnowstationary" },
+  { "firstTimeSetup",             SETTING_BOOL,   &gSettings.espnowFirstTimeSetup,       false, 0, nullptr, 0, 1, "First Time Setup", nullptr, false, nullptr, "espnowfirsttimesetup" },
+  { "passphrase",                  SETTING_STRING, &gSettings.espnowPassphrase,           0, 0, "", 0, 0, "Passphrase", nullptr, true, nullptr, "espnowsetpassphrase" },
+  { "meshRole",                   SETTING_INT,    &gSettings.meshRole,                   0, 0, nullptr, 0, 2, "Mesh Role", nullptr, false, nullptr, "espnowmeshrole" },
+  { "masterMAC",                  SETTING_STRING, &gSettings.meshMasterMAC,              0, 0, "", 0, 0, "Master MAC", nullptr, false, nullptr, "espnowmeshmaster" },
+  { "backupMAC",                  SETTING_STRING, &gSettings.meshBackupMAC,              0, 0, "", 0, 0, "Backup MAC", nullptr, false, nullptr, "espnowmeshbackup" },
+  { "backupEnabled",              SETTING_BOOL,   &gSettings.meshBackupEnabled,           false, 0, nullptr, 0, 1, "Backup Master Enabled", nullptr, false, nullptr, "espnowbackupenable" },
+  { "masterHeartbeatInterval",    SETTING_INT,    &gSettings.meshMasterHeartbeatInterval,10000, 0, nullptr, 1000, 60000, "Heartbeat Interval (ms)", nullptr, false, nullptr, "espnowheartbeatinterval" },
+  { "failoverTimeout",            SETTING_INT,    &gSettings.meshFailoverTimeout,        20000, 0, nullptr, 5000, 120000, "Failover Timeout (ms)", nullptr, false, nullptr, "espnowfailovertimeout" },
+  { "workerStatusInterval",       SETTING_INT,    &gSettings.meshWorkerStatusInterval,   30000, 0, nullptr, 5000, 120000, "Worker Status Interval (ms)", nullptr, false, nullptr, "espnowworkerstatusinterval" },
+  { "topoDiscoveryInterval",      SETTING_INT,    &gSettings.meshTopoDiscoveryInterval,  0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr, false, nullptr, "espnowtopodiscoveryinterval" },
+  { "topoAutoRefresh",            SETTING_BOOL,   &gSettings.meshTopoAutoRefresh,        false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr, false, nullptr, "espnowtopoautorefresh" },
+  { "heartbeatBroadcast",         SETTING_BOOL,   &gSettings.meshHeartbeatBroadcast,     false, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr, false, nullptr, "espnowheartbeatbroadcast" },
+  { "meshTTL",                    SETTING_INT,    &gSettings.meshTTL,                    3, 0, nullptr, 1, 10, "TTL", nullptr, false, nullptr, "espnowmeshttl" },
+  { "meshAdaptiveTTL",            SETTING_BOOL,   &gSettings.meshAdaptiveTTL,            false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr, false, nullptr, "espnowmeshadaptivettl" },
+  { "meshPeerMax",                SETTING_INT,    &gSettings.meshPeerMax,                8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr, false, nullptr, "espnowmeshpeermax" },
+  { "sensorBroadcastIntervalMs",  SETTING_INT,    &gSettings.sensorBroadcastIntervalMs,  1000, 0, nullptr, 100, 10000, "Sensor Broadcast Interval (ms)", nullptr, false, nullptr, "espnowsensorbroadcastinterval" },
 #if ENABLE_BONDED_MODE
-  { "bondModeEnabled",          SETTING_BOOL,   &gSettings.bondModeEnabled,          false, 0, nullptr, 0, 1, "Bond Mode Enabled", nullptr },
-  { "bondRole",                 SETTING_INT,    &gSettings.bondRole,                 0, 0, nullptr, 0, 1, "Bond Role", nullptr },
-  { "bondPeerMac",              SETTING_STRING, &gSettings.bondPeerMac,              0, 0, "", 0, 0, "Bond Peer MAC", nullptr },
-  { "bondStreamThermal",          SETTING_BOOL,   &gSettings.bondStreamThermal,          false, 0, nullptr, 0, 1, "Auto-stream Thermal", nullptr },
-  { "bondStreamTof",              SETTING_BOOL,   &gSettings.bondStreamTof,              false, 0, nullptr, 0, 1, "Auto-stream ToF", nullptr },
-  { "bondStreamImu",              SETTING_BOOL,   &gSettings.bondStreamImu,              false, 0, nullptr, 0, 1, "Auto-stream IMU", nullptr },
-  { "bondStreamGps",              SETTING_BOOL,   &gSettings.bondStreamGps,              false, 0, nullptr, 0, 1, "Auto-stream GPS", nullptr },
-  { "bondStreamGamepad",          SETTING_BOOL,   &gSettings.bondStreamGamepad,          false, 0, nullptr, 0, 1, "Auto-stream Gamepad", nullptr },
-  { "bondStreamFmradio",          SETTING_BOOL,   &gSettings.bondStreamFmradio,          false, 0, nullptr, 0, 1, "Auto-stream FM Radio", nullptr },
-  { "bondStreamRtc",              SETTING_BOOL,   &gSettings.bondStreamRtc,              false, 0, nullptr, 0, 1, "Auto-stream RTC", nullptr },
-  { "bondStreamPresence",         SETTING_BOOL,   &gSettings.bondStreamPresence,         false, 0, nullptr, 0, 1, "Auto-stream Presence", nullptr },
+  { "bondModeEnabled",          SETTING_BOOL,   &gSettings.bondModeEnabled,          false, 0, nullptr, 0, 1, "Bond Mode Enabled", nullptr, false, nullptr, "espnowbondmodeenabled" },
+  { "bondRole",                 SETTING_INT,    &gSettings.bondRole,                 0, 0, nullptr, 0, 1, "Bond Role", nullptr, false, nullptr, "bondrole" },
+  { "bondPeerMac",              SETTING_STRING, &gSettings.bondPeerMac,              0, 0, "", 0, 0, "Bond Peer MAC", nullptr, false, nullptr, "espnowbondpeermac" },
+  { "bondStreamThermal",          SETTING_BOOL,   &gSettings.bondStreamThermal,          false, 0, nullptr, 0, 1, "Auto-stream Thermal", nullptr, false, nullptr, "bondstreamthermal" },
+  { "bondStreamTof",              SETTING_BOOL,   &gSettings.bondStreamTof,              false, 0, nullptr, 0, 1, "Auto-stream ToF", nullptr, false, nullptr, "bondstreamtof" },
+  { "bondStreamImu",              SETTING_BOOL,   &gSettings.bondStreamImu,              false, 0, nullptr, 0, 1, "Auto-stream IMU", nullptr, false, nullptr, "bondstreamimu" },
+  { "bondStreamGps",              SETTING_BOOL,   &gSettings.bondStreamGps,              false, 0, nullptr, 0, 1, "Auto-stream GPS", nullptr, false, nullptr, "bondstreamgps" },
+  { "bondStreamGamepad",          SETTING_BOOL,   &gSettings.bondStreamGamepad,          false, 0, nullptr, 0, 1, "Auto-stream Gamepad", nullptr, false, nullptr, "bondstreamgamepad" },
+  { "bondStreamFmradio",          SETTING_BOOL,   &gSettings.bondStreamFmradio,          false, 0, nullptr, 0, 1, "Auto-stream FM Radio", nullptr, false, nullptr, "bondstreamfmradio" },
+  { "bondStreamRtc",              SETTING_BOOL,   &gSettings.bondStreamRtc,              false, 0, nullptr, 0, 1, "Auto-stream RTC", nullptr, false, nullptr, "bondstreamrtc" },
+  { "bondStreamPresence",         SETTING_BOOL,   &gSettings.bondStreamPresence,         false, 0, nullptr, 0, 1, "Auto-stream Presence", nullptr, false, nullptr, "bondstreampresence" },
 #endif
   // Buffer size settings (requires reinit to take effect)
-  { "txQueueSize",                SETTING_INT,    (int*)&gSettings.espnowTxQueueSize,    8, 0, nullptr, 1, 16, "TX Queue Size", nullptr },
-  { "rxBufferSize",               SETTING_INT,    (int*)&gSettings.espnowRxBufferSize,   256, 0, nullptr, 64, 512, "RX Buffer Size", nullptr },
-  { "chunkSize",                  SETTING_INT,    (int*)&gSettings.espnowChunkSize,      200, 0, nullptr, 100, 220, "Chunk Size", nullptr },
-  { "fileChunkSize",              SETTING_INT,    (int*)&gSettings.espnowFileChunkSize,  224, 0, nullptr, 100, 224, "File Chunk Size", nullptr }
+  { "txQueueSize",                SETTING_INT,    (int*)&gSettings.espnowTxQueueSize,    8, 0, nullptr, 1, 16, "TX Queue Size", nullptr, false, nullptr, "espnowtxqueuesize" },
+  { "rxBufferSize",               SETTING_INT,    (int*)&gSettings.espnowRxBufferSize,   256, 0, nullptr, 64, 512, "RX Buffer Size", nullptr, false, nullptr, "espnowrxbuffersize" },
+  { "chunkSize",                  SETTING_INT,    (int*)&gSettings.espnowChunkSize,      200, 0, nullptr, 100, 220, "Chunk Size", nullptr, false, nullptr, "espnowchunksize" },
+  { "fileChunkSize",              SETTING_INT,    (int*)&gSettings.espnowFileChunkSize,  224, 0, nullptr, 100, 224, "File Chunk Size", nullptr, false, nullptr, "espnowfilechunksize" }
 };
+
+// Helper: find an ESP-NOW setting entry by jsonKey
+static const SettingEntry* findEspnowEntry(const char* key) {
+  for (size_t i = 0; i < sizeof(espnowSettingEntries)/sizeof(espnowSettingEntries[0]); i++) {
+    if (strcmp(espnowSettingEntries[i].jsonKey, key) == 0) return &espnowSettingEntries[i];
+  }
+  return nullptr;
+}
+
+// Macro to generate CLI command handlers that delegate to handleSettingCommand
+#define ESPNOW_SETTING_CMD(func, jsonKey) \
+  const char* func(const String& a) { \
+    RETURN_VALID_IF_VALIDATE_CSTR(); \
+    return handleSettingCommand(findEspnowEntry(jsonKey), a); \
+  }
+
+ESPNOW_SETTING_CMD(cmd_espnow_firsttimesetup, "firstTimeSetup")
+ESPNOW_SETTING_CMD(cmd_espnow_heartbeatinterval, "masterHeartbeatInterval")
+ESPNOW_SETTING_CMD(cmd_espnow_failovertimeout, "failoverTimeout")
+ESPNOW_SETTING_CMD(cmd_espnow_workerstatusinterval, "workerStatusInterval")
+ESPNOW_SETTING_CMD(cmd_espnow_topodiscoveryinterval, "topoDiscoveryInterval")
+ESPNOW_SETTING_CMD(cmd_espnow_topoautorefresh, "topoAutoRefresh")
+ESPNOW_SETTING_CMD(cmd_espnow_heartbeatbroadcast, "heartbeatBroadcast")
+ESPNOW_SETTING_CMD(cmd_espnow_meshadaptivettl, "meshAdaptiveTTL")
+ESPNOW_SETTING_CMD(cmd_espnow_meshpeermax, "meshPeerMax")
+ESPNOW_SETTING_CMD(cmd_espnow_sensorbroadcastinterval, "sensorBroadcastIntervalMs")
+ESPNOW_SETTING_CMD(cmd_espnow_txqueuesize, "txQueueSize")
+ESPNOW_SETTING_CMD(cmd_espnow_rxbuffersize, "rxBufferSize")
+ESPNOW_SETTING_CMD(cmd_espnow_chunksize, "chunkSize")
+ESPNOW_SETTING_CMD(cmd_espnow_filechunksize, "fileChunkSize")
+#if ENABLE_BONDED_MODE
+ESPNOW_SETTING_CMD(cmd_espnow_bondmodeenabled, "bondModeEnabled")
+ESPNOW_SETTING_CMD(cmd_espnow_bondpeermac, "bondPeerMac")
+ESPNOW_SETTING_CMD(cmd_espnow_bondstreamthermal, "bondStreamThermal")
+ESPNOW_SETTING_CMD(cmd_espnow_bondstreamtof, "bondStreamTof")
+ESPNOW_SETTING_CMD(cmd_espnow_bondstreamimu, "bondStreamImu")
+ESPNOW_SETTING_CMD(cmd_espnow_bondstreamgps, "bondStreamGps")
+ESPNOW_SETTING_CMD(cmd_espnow_bondstreamgamepad, "bondStreamGamepad")
+ESPNOW_SETTING_CMD(cmd_espnow_bondstreamfmradio, "bondStreamFmradio")
+ESPNOW_SETTING_CMD(cmd_espnow_bondstreamrtc, "bondStreamRtc")
+ESPNOW_SETTING_CMD(cmd_espnow_bondstreampresence, "bondStreamPresence")
+#endif
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule espnowSettingsModule = {
   "espnow", "espnow", espnowSettingEntries,
-  sizeof(espnowSettingEntries) / sizeof(espnowSettingEntries[0])
+  sizeof(espnowSettingEntries) / sizeof(espnowSettingEntries[0]),
+  nullptr,
+  "ESP-NOW mesh networking"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

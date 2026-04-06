@@ -786,74 +786,21 @@ const char* cmd_automation_add(const String& argsInput) {
   // Do not early-return on validate; we want to perform full argument checks
   bool validateOnly = gCLIValidateOnly;
   
-  String args = argsInput;
-  args.trim();
-  
-  auto getVal = [&](const String& key) {
-    String k = key + "=";
-    int p = args.indexOf(k);
-    if (p < 0) return String("");
-    int start = p + k.length();
-    int end = -1;
-    
-    // Skip leading whitespace
-    while (start < (int)args.length() && args[start] == ' ') start++;
-    
-    // Check if value is quoted
-    if (start < (int)args.length() && args[start] == '"') {
-      // Find closing quote
-      start++;  // Skip opening quote
-      end = args.indexOf('"', start);
-      if (end < 0) end = args.length();  // No closing quote, take rest
-      return args.substring(start, end);
-    } else {
-      // Unquoted value - find next parameter
-      // Handle empty values (when next char after = is space or another key=)
-      if (start < (int)args.length() && args[start] == ' ') {
-        // Check if next non-space character starts a new parameter (contains =)
-        int nextNonSpace = start;
-        while (nextNonSpace < (int)args.length() && args[nextNonSpace] == ' ') nextNonSpace++;
-        if (nextNonSpace < (int)args.length()) {
-          int nextEquals = args.indexOf('=', nextNonSpace);
-          int nextSpace = args.indexOf(' ', nextNonSpace);
-          if (nextEquals > 0 && (nextSpace < 0 || nextEquals < nextSpace)) {
-            // Next token is a parameter, so current value is empty
-            return String("");
-          }
-        }
-      }
-      
-      // Find end of current value
-      for (int i = start; i < (int)args.length(); i++) {
-        if (args[i] == ' ' && i + 1 < (int)args.length()) {
-          int nextSpace = args.indexOf(' ', i + 1);
-          int nextEquals = args.indexOf('=', i + 1);
-          if (nextEquals > 0 && (nextSpace < 0 || nextEquals < nextSpace)) {
-            end = i;
-            break;
-          }
-        }
-      }
-      if (end < 0) end = args.length();
-      String result = args.substring(start, end);
-      result.trim();
-      return result;
-    }
-  };
-  
-  String name = getVal("name");
-  String type = getVal("type");
-  String timeS = getVal("time");
-  String recurrence = getVal("recurrence");
-  String days = getVal("days");
-  String delayMs = getVal("delayms");
-  String intervalMs = getVal("intervalms");
-  String runAtBootStr = getVal("runatboot");
-  String bootDelayMsStr = getVal("bootdelayms");
-  String cmdStr = getVal("command");
-  String cmdsList = getVal("commands");
-  String condition = getVal("condition");
-  String enabledStr = getVal("enabled");
+  CommandArgs a(argsInput);
+
+  String name = a.value("name");
+  String type = a.value("type");
+  String timeS = a.value("time");
+  String recurrence = a.value("recurrence");
+  String days = a.value("days");
+  String delayMs = a.value("delayms");
+  String intervalMs = a.value("intervalms");
+  String runAtBootStr = a.value("runatboot");
+  String bootDelayMsStr = a.value("bootdelayms");
+  String cmdStr = a.value("command");
+  String cmdsList = a.value("commands");
+  String condition = a.value("condition");
+  String enabledStr = a.value("enabled");
   
   bool enabled = (enabledStr.equalsIgnoreCase("1") || enabledStr.equalsIgnoreCase("true") || enabledStr.equalsIgnoreCase("yes"));
   
@@ -997,7 +944,7 @@ const char* cmd_automation_add(const String& argsInput) {
   }
   
   // If a specific id= was provided and that entry already exists, remove it first
-  String idOverrideStr = getVal("id");
+  String idOverrideStr = a.value("id");
   if (idOverrideStr.length() > 0) {
     unsigned long overrideId = strtoul(idOverrideStr.c_str(), nullptr, 10);
     if (automationIdExistsInJson(json, overrideId)) {
@@ -1174,21 +1121,9 @@ const char* cmd_automation_add(const String& argsInput) {
 
 const char* cmd_automation_enable_disable(const String& argsInput, bool enable) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  String args = argsInput;
-  args.trim();
-  
-  auto getVal = [&](const String& key) {
-    String k = key + "=";
-    int p = args.indexOf(k);
-    if (p < 0) return String("");
-    int s = p + k.length();
-    int e = args.indexOf(' ', s);
-    if (e < 0) e = args.length();
-    return args.substring(s, e);
-  };
-  
-  String idStr = getVal("id");
+
+  CommandArgs a(argsInput);
+  String idStr = a.value("id");
   if (idStr.length() == 0) {
     BROADCAST_PRINTF("Usage: automation %s id=<id>", enable ? "enable" : "disable");
     return "ERROR";
@@ -1265,21 +1200,9 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
 
 const char* cmd_automation_delete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  String args = argsInput;
-  args.trim();
-  
-  auto getVal = [&](const String& key) {
-    String k = key + "=";
-    int p = args.indexOf(k);
-    if (p < 0) return String("");
-    int s = p + k.length();
-    int e = args.indexOf(' ', s);
-    if (e < 0) e = args.length();
-    return args.substring(s, e);
-  };
-  
-  String idStr = getVal("id");
+
+  CommandArgs a(argsInput);
+  String idStr = a.value("id");
   if (idStr.length() == 0) {
     broadcastOutput("Usage: automation delete id=<id>");
     return "ERROR";
@@ -1383,21 +1306,9 @@ const char* cmd_automation_delete(const String& argsInput) {
 
 const char* cmd_automation_run(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  String args = argsInput;
-  args.trim();
-  
-  auto getVal = [&](const String& key) {
-    String k = key + "=";
-    int p = args.indexOf(k);
-    if (p < 0) return String("");
-    int s = p + k.length();
-    int e = args.indexOf(' ', s);
-    if (e < 0) e = args.length();
-    return args.substring(s, e);
-  };
-  
-  String idStr = getVal("id");
+
+  CommandArgs a(argsInput);
+  String idStr = a.value("id");
   if (idStr.length() == 0) {
     broadcastOutput("Usage: automation run id=<id>");
     return "ERROR";
@@ -1658,16 +1569,10 @@ const char* cmd_automation_run(const String& argsInput) {
 const char* cmd_automation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  String args = argsInput;
-  args.trim();
-  String argsLower = args;
-  argsLower.toLowerCase();
-
-  // Extract subcommand (first word)
-  int sp = argsLower.indexOf(' ');
-  String subCmd = (sp >= 0) ? argsLower.substring(0, sp) : argsLower;
-  String subArgs = (sp >= 0) ? args.substring(sp + 1) : String("");
-  subArgs.trim();
+  CommandArgs a(argsInput);
+  String subCmd = a.arg(0);
+  subCmd.toLowerCase();
+  String subArgs = a.remaining(0);
 
   // Handle "system" subcommand
   if (subCmd == "system") {
@@ -2940,12 +2845,12 @@ const char* cmd_autolog(const String& argsInput) {
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  String args = argsInput;
-  args.trim();
+  CommandArgs a(argsInput);
+  String subcmd = a.arg(0);
+  subcmd.toLowerCase();
 
-  if (args.startsWith("start ")) {
-    String filename = args.substring(6);
-    filename.trim();
+  if (subcmd == "start") {
+    String filename = a.arg(1);
     if (filename.length() == 0) return "Usage: autolog start <filename>";
 
     gAutoLogActive = true;
@@ -2962,7 +2867,7 @@ const char* cmd_autolog(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Automation logging started: %s", filename.c_str());
     return getDebugBuffer();
 
-  } else if (args == "stop") {
+  } else if (subcmd == "stop") {
     if (!gAutoLogActive) return "Automation logging is not active";
 
     appendAutoLogEntry("LOG_STOP", "Automation logging stopped");
@@ -2974,7 +2879,7 @@ const char* cmd_autolog(const String& argsInput) {
 
     return getDebugBuffer();
 
-  } else if (args == "status") {
+  } else if (subcmd == "status") {
     if (gAutoLogActive) {
       if (gAutoLogAutomationName.length() > 0) {
         snprintf(getDebugBuffer(), 1024, "Automation logging ACTIVE: %s (automation: %s)",
@@ -3381,7 +3286,9 @@ static const SettingEntry automationSettingEntries[] = {
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule automationSettingsModule = {
   "automation", "automation", automationSettingEntries,
-  sizeof(automationSettingEntries) / sizeof(automationSettingEntries[0])
+  sizeof(automationSettingEntries) / sizeof(automationSettingEntries[0]),
+  nullptr,
+  "Automation rules and scheduling"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

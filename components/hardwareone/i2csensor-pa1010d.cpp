@@ -274,7 +274,7 @@ const char* cmd_gps(const String& argsInput) {
 // Purpose: Continuously reads NMEA data from PA1010D GPS module
 // Stack: 4608 words (~18KB) | Priority: 1 | Core: Any
 // Lifecycle: Created by cmd_gpsstart, deleted when gpsEnabled=false
-// Polling: Configurable via gpsDevicePollMs (default 1000ms) | I2C Clock: 100kHz
+// Polling: Configurable via gpsDevicePollMs (default 200ms) | I2C Clock: 100kHz
 //
 // Cleanup Strategy:
 //   1. Check gpsEnabled flag at loop start
@@ -319,95 +319,32 @@ void gpsTask(void* parameter) {
     }
     
     if (gpsEnabled && gpsConnected && gPA1010D != nullptr && !gSensorPollingPaused) {
-      unsigned long gpsPollMs = (gSettings.gpsDevicePollMs > 0) ? (unsigned long)gSettings.gpsDevicePollMs : 1000;
-      
+      // gpsPollMs gates only the I2C health probe — NOT the NMEA read.
+      // Adafruit_GPS is designed for read() to be called once per loop iteration
+      // (~1ms cadence ideally). Our 10ms vTaskDelay approximates that.
+      const unsigned long gpsPollMs = (gSettings.gpsDevicePollMs > 0) ? (unsigned long)gSettings.gpsDevicePollMs : 200;
+
       if (!wasPolling) {
-        DEBUG_SENSORSF("[GPS_TASK] Started active polling - reading NMEA data every %lums", gpsPollMs);
+        DEBUG_SENSORSF("[GPS_TASK] Started active polling (probe every %lums, read every tick)", gpsPollMs);
         wasPolling = true;
         lastStatusLog = nowMs;
       }
-      
+
       if ((nowMs - lastStatusLog) >= 30000) {
         DEBUG_SENSORSF("[GPS_TASK] Active polling - fix=%d sats=%d quality=%d",
                        gPA1010D->fix ? 1 : 0, (int)gPA1010D->satellites, (int)gPA1010D->fixquality);
         lastStatusLog = nowMs;
       }
-      
+
+      // ── I2C health probe (rate-limited) ──────────────────────────────────
+      // Separate from reading so the health/auto-disable system still works.
       if ((nowMs - lastGPSRead) >= gpsPollMs) {
-        // GPS reads ~10ms at 100kHz; fail fast and retry next poll rather than blocking 1000ms
-        auto result = i2cTaskWithTimeout(I2C_ADDR_GPS, 100000, 100, [&]() -> bool {
-          // Probe device presence so health system can track failures
-          Wire1.beginTransmission(I2C_ADDR_GPS);
-          if (Wire1.endTransmission() != 0) return false;
-          if ((nowMs - lastGPSRead) >= gpsPollMs) {
-            gPA1010D->read();
-            if (gPA1010D->newNMEAreceived()) {
-              gPA1010D->parse(gPA1010D->lastNMEA());
-            }
-            lastGPSRead = nowMs;
-            
-            // Update GPS cache for thread-safe access from web/OLED
-            if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-              gGPSCache.latitude = gPA1010D->latitudeDegrees;
-              gGPSCache.longitude = gPA1010D->longitudeDegrees;
-              gGPSCache.altitude = gPA1010D->altitude;
-              gGPSCache.speed = gPA1010D->speed;
-              gGPSCache.angle = gPA1010D->angle;
-              gGPSCache.hasFix = gPA1010D->fix;
-              gGPSCache.fixQuality = gPA1010D->fixquality;
-              gGPSCache.satellites = gPA1010D->satellites;
-              gGPSCache.year = 2000 + gPA1010D->year;
-              gGPSCache.month = gPA1010D->month;
-              gGPSCache.day = gPA1010D->day;
-              gGPSCache.hour = gPA1010D->hour;
-              gGPSCache.minute = gPA1010D->minute;
-              gGPSCache.second = gPA1010D->seconds;
-              gGPSCache.dataValid = true;
-              gGPSCache.lastUpdate = nowMs;
-
-              // Feed live track directly from GPS task (independent of sensor logging)
-              if (gPA1010D->fix && GPSTrackManager::isLiveTracking()) {
-                GPSTrackManager::appendPoint(gPA1010D->latitudeDegrees, gPA1010D->longitudeDegrees);
-              }
-
-              xSemaphoreGive(gGPSCache.mutex);
-            }
-            
-            // Stream data to ESP-NOW master if enabled (worker devices only)
-#if ENABLE_ESPNOW
-            if (shouldStreamSensorToRemote()) {
-              char gpsJson[256];
-              int jsonLen;
-              if (gPA1010D->fix) {
-                jsonLen = snprintf(gpsJson, sizeof(gpsJson),
-                                   "{\"val\":1,\"fix\":%d,\"quality\":%d,\"sats\":%d,\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.2f,\"speed\":%.2f}",
-                                   1, (int)gPA1010D->fixquality, (int)gPA1010D->satellites,
-                                   gPA1010D->latitudeDegrees, gPA1010D->longitudeDegrees,
-                                   gPA1010D->altitude, gPA1010D->speed);
-              } else {
-                // No fix yet - stream status so master knows GPS is active but acquiring
-                jsonLen = snprintf(gpsJson, sizeof(gpsJson),
-                                   "{\"val\":1,\"fix\":0,\"quality\":0,\"sats\":%d,\"lat\":0,\"lon\":0,\"alt\":0,\"speed\":0}",
-                                   (int)gPA1010D->satellites);
-              }
-              if (jsonLen > 0 && jsonLen < 256) {
-                sendSensorDataUpdate(REMOTE_SENSOR_GPS, gpsJson, jsonLen);
-              }
-            }
-#endif
-          }
-          return true;  // Assume success for void operation
-        });
-        
         lastGPSRead = nowMs;
-        
-        // Mark OLED dirty if GPS page is active (enables real-time display updates)
-        if (result && currentOLEDMode == OLED_GPS_DATA) {
-          oledMarkDirty();
-        }
-        
-        // Auto-disable if too many consecutive failures
-        if (!result) {
+        auto probeResult = i2cTaskWithTimeout(I2C_ADDR_GPS, 100000, 100, [&]() -> bool {
+          Wire1.beginTransmission(I2C_ADDR_GPS);
+          return Wire1.endTransmission() == 0;
+        });
+        if (!probeResult) {
           if (i2cShouldAutoDisable(I2C_ADDR_GPS)) {
             ERROR_SENSORSF("Too many consecutive GPS failures - auto-disabling");
             gpsEnabled = false;
@@ -415,7 +352,76 @@ void gpsTask(void* parameter) {
           }
         }
       }
-      
+
+      // ── NMEA read — once per tick (Adafruit's "call once per loop" pattern) ──
+      // In I2C mode available() always returns 1 regardless of actual data, so
+      // do NOT use while(available()) — it never terminates. Instead call read()
+      // once; it returns 0 when the PA1010D has only filler bytes (no real data).
+      bool parsedNewSentence = false;
+      char c = gPA1010D->read();
+      if (c && gPA1010D->newNMEAreceived()) {
+        gPA1010D->parse(gPA1010D->lastNMEA());
+        parsedNewSentence = true;
+      }
+
+      // Only update GPS cache when a new NMEA sentence was actually parsed.
+      // Previously dataValid was set unconditionally, causing the sensor logger to
+      // write the same stale position repeatedly between real fixes.
+      if (parsedNewSentence) {
+        if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          gGPSCache.latitude = gPA1010D->latitudeDegrees;
+          gGPSCache.longitude = gPA1010D->longitudeDegrees;
+          gGPSCache.altitude = gPA1010D->altitude;
+          gGPSCache.speed = gPA1010D->speed;
+          gGPSCache.angle = gPA1010D->angle;
+          gGPSCache.hasFix = gPA1010D->fix;
+          gGPSCache.fixQuality = gPA1010D->fixquality;
+          gGPSCache.satellites = gPA1010D->satellites;
+          gGPSCache.year = 2000 + gPA1010D->year;
+          gGPSCache.month = gPA1010D->month;
+          gGPSCache.day = gPA1010D->day;
+          gGPSCache.hour = gPA1010D->hour;
+          gGPSCache.minute = gPA1010D->minute;
+          gGPSCache.second = gPA1010D->seconds;
+          gGPSCache.dataValid = true;
+          gGPSCache.lastUpdate = nowMs;
+
+          // Feed live track directly from GPS task (independent of sensor logging)
+          if (gPA1010D->fix && GPSTrackManager::isLiveTracking()) {
+            GPSTrackManager::appendPoint(gPA1010D->latitudeDegrees, gPA1010D->longitudeDegrees);
+          }
+
+          xSemaphoreGive(gGPSCache.mutex);
+        }
+
+        // Stream data to ESP-NOW master if enabled (worker devices only)
+#if ENABLE_ESPNOW
+        if (shouldStreamSensorToRemote()) {
+          char gpsJson[256];
+          int jsonLen;
+          if (gPA1010D->fix) {
+            jsonLen = snprintf(gpsJson, sizeof(gpsJson),
+                               "{\"val\":1,\"fix\":%d,\"quality\":%d,\"sats\":%d,\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.2f,\"speed\":%.2f}",
+                               1, (int)gPA1010D->fixquality, (int)gPA1010D->satellites,
+                               gPA1010D->latitudeDegrees, gPA1010D->longitudeDegrees,
+                               gPA1010D->altitude, gPA1010D->speed);
+          } else {
+            jsonLen = snprintf(gpsJson, sizeof(gpsJson),
+                               "{\"val\":1,\"fix\":0,\"quality\":0,\"sats\":%d,\"lat\":0,\"lon\":0,\"alt\":0,\"speed\":0}",
+                               (int)gPA1010D->satellites);
+          }
+          if (jsonLen > 0 && jsonLen < 256) {
+            sendSensorDataUpdate(REMOTE_SENSOR_GPS, gpsJson, jsonLen);
+          }
+        }
+#endif
+
+        // Mark OLED dirty if GPS page is active (enables real-time display updates)
+        if (currentOLEDMode == OLED_GPS_DATA) {
+          oledMarkDirty();
+        }
+      }
+
       vTaskDelay(pdMS_TO_TICKS(10));
       drainDebugRing();
     } else {
@@ -476,7 +482,7 @@ int getGPSSatellites() {
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry gpsSettingEntries[] = {
   { "gpsAutoStart",    SETTING_BOOL, &gSettings.gpsAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  { "gpsDevicePollMs", SETTING_INT,  &gSettings.gpsDevicePollMs, 1000, 0, nullptr, 100, 10000, "Poll Interval (ms)", nullptr }
+  { "gpsDevicePollMs", SETTING_INT,  &gSettings.gpsDevicePollMs, 200, 0, nullptr, 50, 10000, "Poll Interval (ms)", nullptr }
 };
 
 static bool isGPSConnected() {
