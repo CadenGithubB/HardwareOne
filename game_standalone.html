@@ -4622,7 +4622,9 @@ function drawTreasureChests3D() {
     var floorZ = fh * 25;
     var lid = ch.lidAngle || 0;
 
-    var fogAlpha = Math.max(0.5, 1.0 - fwd / viewDist * 0.4);
+    var _chestCut = viewDist * 0.7;
+    var _cFade = dist > _chestCut * 0.8 ? Math.max(0, 1.0 - (dist - _chestCut * 0.8) / (_chestCut * 0.2)) : 1.0;
+    var fogAlpha = Math.max(0.5, 1.0 - fwd / viewDist * 0.4) * _cFade;
     ctx.save(); ctx.globalAlpha = fogAlpha;
 
     // Subtle glow halo — reduced so it doesn't wash out the box
@@ -4904,7 +4906,9 @@ function drawEnemySpawners3D() {
     // Perspective-correct sizing: 40 world-Z units tall obelisk, same formula as enemies
     var size = Math.max(12, Math.min(120, Math.floor(40 * projScale / fwd)));
 
-    var fogAlpha = Math.max(0.4, 1.0 - fwd / (viewDist * 0.5) * 0.5);
+    var _spawnerCut = viewDist * 0.5;
+    var _sFade = dist > _spawnerCut * 0.8 ? Math.max(0, 1.0 - (dist - _spawnerCut * 0.8) / (_spawnerCut * 0.2)) : 1.0;
+    var fogAlpha = Math.max(0.4, 1.0 - fwd / (viewDist * 0.5) * 0.5) * _sFade;
     var pulse = 0.7 + 0.3 * Math.sin(now * 0.004 + sp.pulsePhase);
     var hpFrac = sp.hp / sp.maxHp;
 
@@ -4978,6 +4982,7 @@ function drawOreVeins() {
     var dx = ore.worldX - cam.x, dy = ore.worldY - cam.y;
     var dist = Math.hypot(dx, dy);
     if (dist < 1 || dist > 280) continue;
+    var _oFade = dist > 224 ? Math.max(0, 1.0 - (dist - 224) / 56) : 1.0; // fade over 224-280px
 
     var fwd = dx * cosAng + dy * sinAng;
     if (fwd < 1) continue;
@@ -5003,7 +5008,7 @@ function drawOreVeins() {
     var flicker = 0.82 + 0.18 * Math.sin(now * 0.007 + ore.gx * 5.3 + ore.gy * 3.7);
 
     ctx.save();
-    ctx.globalAlpha = hpAlpha * flicker;
+    ctx.globalAlpha = hpAlpha * flicker * _oFade;
 
     var col1, col2, glowCol;
     if (ore.veinType === 'gold') {
