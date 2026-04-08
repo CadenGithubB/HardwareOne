@@ -3242,9 +3242,12 @@ function saveEnemyStateToChunks() {
     var worldY = e.y + windowOriginY;
     var ecx = Math.floor(worldX / CHUNK_SIZE);
     var ecy = Math.floor(worldY / CHUNK_SIZE);
+    // Clamp to current window bounds — prevents edge-wandered enemies being silently lost
+    ecx = Math.max(windowCX, Math.min(windowCX + WINDOW_CHUNKS - 1, ecx));
+    ecy = Math.max(windowCY, Math.min(windowCY + WINDOW_CHUNKS - 1, ecy));
     var key2 = ecx + ',' + ecy;
     var ch2 = chunks[key2];
-    if (!ch2) { discarded++; continue; }
+    if (!ch2) { discarded++; continue; } // safety guard — shouldn't fire after clamp
     ch2.enemies.push({
       x: worldX, y: worldY, z: e.z || 0,
       enemyType: e.enemyType, health: e.health, maxHealth: e.maxHealth,
@@ -6470,7 +6473,9 @@ function updateEnemies(dt) {
     } else {
       // Not chasing — patrol between pre-validated waypoints
       e.aggroAt = 0;
-      if (e.patrolWaypoints && e.patrolWaypoints.length > 1) {
+      // Only move when player is close enough to observe — prevents enemies wandering
+      // into unexpected positions before the player has ever seen them.
+      if (dist < 350 && e.patrolWaypoints && e.patrolWaypoints.length > 1) {
         var wp = e.patrolWaypoints[e.patrolIdx || 0];
         var wpDx = wp.x - e.x, wpDy = wp.y - e.y;
         var wpDist = Math.hypot(wpDx, wpDy);
@@ -7763,6 +7768,8 @@ function drawEnemies3D() {
     var dx = e.x - cam.x, dy = e.y - cam.y;
     var dist = Math.hypot(dx, dy);
     if (dist < 1) dist = 1; if (dist > viewDist) { _eRenderStats.tooFar++; continue; }
+    // Fade out over the last 20% of view distance to avoid hard pop
+    var _eFade = dist > viewDist * 0.8 ? 1.0 - (dist - viewDist * 0.8) / (viewDist * 0.2) : 1.0;
     var fwd = dx * cosAng + dy * sinAng;
     if (fwd < 1) { _eRenderStats.behind++; continue; }
     var rgt = dx * (-sinAng) + dy * cosAng;
@@ -7770,7 +7777,7 @@ function drawEnemies3D() {
     if (depthBuffer && screenX >= 0 && screenX < depthBuffer.length && fwd > depthBuffer[screenX] + 5) { _eRenderStats.depthOccl++; continue; }
     var fhAtSprite = floorMesh ? getFloorHeightAt(e.x, e.y) : 0;
     var floorWorldZ = fhAtSprite * 25;
-    if ((e.z || 0) < floorWorldZ - 5) { _eRenderStats.belowFloor++; continue; }
+    if ((e.z || 0) < floorWorldZ - 40) { _eRenderStats.belowFloor++; continue; } // 40 = max terrain height swing * 25 scale
     var fhMid = floorMesh ? getFloorHeightAt((cam.x + e.x) * 0.5, (cam.y + e.y) * 0.5) : 0;
     if (fhMid * 25 > (cameraZ + floorWorldZ) * 0.5 + 8) { _eRenderStats.midOccl++; continue; }
     var floorY = horizonY + Math.floor(((cameraZ - floorWorldZ) / fwd) * projScale);
@@ -7789,10 +7796,10 @@ function drawEnemies3D() {
     var centerY = floorY - liftPx;
 
     ctx.save();
-    var shadowAlpha = Math.max(0.15, Math.min(0.5, 0.6 - dist / 1000));
+    var shadowAlpha = Math.max(0.15, Math.min(0.5, 0.6 - dist / 1000)) * _eFade;
     ctx.globalAlpha = shadowAlpha; ctx.fillStyle = '#000000';
     ctx.beginPath(); ctx.ellipse(screenX, floorY, size * 0.45, size * 0.2, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.globalAlpha = 0.95;
+    ctx.globalAlpha = 0.95 * _eFade;
     var isFlashing = (e.damageFlash && now < e.damageFlash);
     var hpPct = e.health / e.maxHealth;
 
@@ -7810,10 +7817,10 @@ function drawEnemies3D() {
     if (skelCanvas) {
       ctx.drawImage(skelCanvas, spriteX, spriteTop, spriteW, spriteH);
       if (isFlashing) {
-        ctx.globalAlpha = 0.5;
+        ctx.globalAlpha = 0.5 * _eFade;
         ctx.fillStyle = e.damageFlashColor || '#ffffff';
         ctx.fillRect(spriteX, spriteTop, spriteW, spriteH);
-        ctx.globalAlpha = 0.95;
+        ctx.globalAlpha = 0.95 * _eFade;
       }
     } else {
       // Fallback to circle if sprites not ready
@@ -7843,10 +7850,10 @@ function drawEnemies3D() {
       var windupT = Math.max(0, Math.min(1, 1 - (e.attackStateUntil - now) / windupDur));
       ctx.strokeStyle = windupT > 0.65 ? '#ff2200' : '#ff8800';
       ctx.lineWidth = Math.max(2, Math.floor(size / 6));
-      ctx.globalAlpha = 0.35 + 0.55 * windupT + 0.1 * Math.sin(now * 0.025);
+      ctx.globalAlpha = (0.35 + 0.55 * windupT + 0.1 * Math.sin(now * 0.025)) * _eFade;
       var ringR = size * (0.45 + windupT * 0.45);
       ctx.beginPath(); ctx.ellipse(screenX, floorY, ringR, ringR * 0.28, 0, 0, Math.PI * 2); ctx.stroke();
-      ctx.globalAlpha = 0.95;
+      ctx.globalAlpha = 0.95 * _eFade;
     }
 
     // Health bar above the head (hpPct already computed above for sprite selection)
@@ -7860,13 +7867,13 @@ function drawEnemies3D() {
     // Aggro indicator — red ! above head for 600ms when enemy first spots you
     if (e.aggroAt && now - e.aggroAt < 600) {
       var aggroT = (now - e.aggroAt) / 600;
-      ctx.globalAlpha = Math.max(0, 1 - aggroT * aggroT);
+      ctx.globalAlpha = Math.max(0, 1 - aggroT * aggroT) * _eFade;
       ctx.fillStyle = '#ff3300';
       ctx.font = 'bold ' + Math.max(10, Math.floor(size * 0.5)) + 'px monospace';
       ctx.textAlign = 'center';
       ctx.fillText('!', screenX, spriteTop - (hpPct < 1 ? 10 : 4));
       ctx.textAlign = 'left';
-      ctx.globalAlpha = 0.95;
+      ctx.globalAlpha = 0.95 * _eFade;
     }
     ctx.restore();
     _eRenderStats.rendered++;
