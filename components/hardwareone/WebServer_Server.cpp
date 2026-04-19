@@ -28,6 +28,7 @@
 #include "System_Settings.h"
 #include "System_Filesystem.h"
 #include "System_User.h"
+#include "System_CLI.h"
 #include "System_UserSettings.h"
 #include "System_FirstTimeSetup.h"
 #include "System_Utils.h"
@@ -3204,8 +3205,22 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // For web CLI, return the redacted output directly for immediate display
+  // API calls with capture=1 are stateless — don't leave the device in
+  // interactive help mode after rendering. Without this, "help" via the API
+  // sets gCLIState globally, breaking subsequent commands from any source.
+  if (doCapture && gCLIState != CLI_NORMAL) {
+    gCLIState = CLI_NORMAL;
+    gShowAllCommands = false;
+  }
+
+  // Set HTTP status based on command result so API consumers can distinguish
+  // success from permission/input errors without parsing the body.
   httpd_resp_set_type(req, "text/plain");
+  if (!ok && redactedOut.startsWith("Error: Admin access required")) {
+    httpd_resp_set_status(req, "403 Forbidden");
+  } else if (!ok || redactedOut.startsWith("Empty command") || redactedOut.startsWith("Unknown command")) {
+    httpd_resp_set_status(req, "400 Bad Request");
+  }
   httpd_resp_send(req, redactedOut.c_str(), HTTPD_RESP_USE_STRLEN);
   DEBUG_CMD_FLOWF("[web.cli] exit");
   return ESP_OK;
