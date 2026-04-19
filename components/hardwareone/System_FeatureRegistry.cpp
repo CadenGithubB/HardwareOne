@@ -452,11 +452,11 @@ const char* cmd_features(const String& argsInput) {
       
       const char* status;
       if (!compiled) {
-        status = "N/A";
+        status = "[N/C]";
       } else if (enabled) {
         status = "[ON]";
       } else {
-        status = "off";
+        status = "[OFF]";
       }
 
       pos += snprintf(buf + pos, buf_SIZE - pos,
@@ -465,7 +465,8 @@ const char* cmd_features(const String& argsInput) {
     }
     
     pos += snprintf(buf + pos, buf_SIZE - pos,
-      "\n═══════════════════════════════════════════\n"
+      "\n[ON] = active | [OFF] = disabled | [N/C] = not compiled\n"
+      "═══════════════════════════════════════════\n"
       "Enabled: ~%luKB | Free: %luKB | Max: ~%luKB\n"
       "Usage: features <id> <on|off>",
       (unsigned long)enabledCost, (unsigned long)freeHeapKB,

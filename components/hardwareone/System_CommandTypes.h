@@ -59,7 +59,7 @@ typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
 struct ExecReq {
   char line[2048];         // Command string (full size for ESP-NOW chunking)
   CommandContext ctx;      // Full execution context
-  char out[2048];          // Result buffer (2KB)
+  char out[4096];          // Result buffer (4KB)
   SemaphoreHandle_t done;  // Signals completion (NULL for async mode)
   bool ok;                 // Success flag from executeCommand()
 

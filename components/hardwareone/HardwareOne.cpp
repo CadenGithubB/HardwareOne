@@ -792,7 +792,7 @@ static void commandExecTask(void* pv) {
       // Set up output capture if requested (for HTTP responses that need
       // the actual broadcast output, not just the return code).
       // Heap-allocate the capture buffer to avoid blowing cmd_exec_task stack.
-      static constexpr size_t CAPTURE_BUF_SIZE = 1024;
+      static constexpr size_t CAPTURE_BUF_SIZE = 4096;
       char* captureBuf = nullptr;
       if (r->ctx.captureOutput) {
         captureBuf = (char*)malloc(CAPTURE_BUF_SIZE);
