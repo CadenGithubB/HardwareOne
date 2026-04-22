@@ -760,8 +760,13 @@ function inEntranceReserve(wx, wy) {
   for (var _ier = 0; _ier < deepCaveEntrances.length; _ier++) {
     var _iee = deepCaveEntrances[_ier];
     var _iedx = wx - _iee.x, _iedy = wy - _iee.y;
-    var _iea = _iee.angle || 0;
-    var _iec = Math.cos(_iea), _ies = Math.sin(_iea);
+    // cosA/sinA baked at entrance creation; fallback for legacy entries.
+    var _iec = _iee.cosA, _ies = _iee.sinA;
+    if (_iec === undefined) {
+      var _iea = _iee.angle || 0;
+      _iec = Math.cos(_iea); _ies = Math.sin(_iea);
+      _iee.cosA = _iec; _iee.sinA = _ies;
+    }
     var _iAlong = _iedx * _iec + _iedy * _ies;
     var _iCross = -_iedx * _ies + _iedy * _iec;
     if (Math.abs(_iAlong) < 44 && Math.abs(_iCross) < 34) return true;
@@ -781,22 +786,42 @@ var _wsx = new Float32Array(4), _wsy = new Float32Array(4), _wfwd = new Float32A
 var _wallGradCache = new Map();
 // findMatchZ candidates live on floorMesh.walkCandZ, built once at
 // map-assembly time by buildWalkCandZ(). No per-frame cache is needed.
+
+// Per-frame entrance cull mask — rasterized bitmap of cells inside any
+// active cave-entrance "mouth hole" rectangle. Replaces the per-quad
+// transform + rectangle check in drawLayersFloor3D. Allocated on demand
+// at the window-mesh size.
+var _entCullMask = null;
+var _entCullMaskN = 0;
 function buildWalkCandZ(m) {
   if (!m || !m.layerCount) return;
   var n = m.layerCount.length;
   m.walkCandZ = new Array(n);
+  // Per-cell bitmasks (1 byte each, 5 bits used).
+  //   ceilAboveMask: bit li set = a type=2 (ceiling) layer exists ABOVE layer li.
+  //   capAboveMask:  bit li set = a type=4 (surface cap) layer exists ABOVE layer li.
+  // Read at floor-render time to avoid per-quad layer-scan loops.
+  m.ceilAboveMask = new Uint8Array(n);
+  m.capAboveMask  = new Uint8Array(n);
   var cells = 0, entries = 0;
   for (var i = 0; i < n; i++) {
     var lc = m.layerCount[i];
     if (!lc) { m.walkCandZ[i] = null; continue; }
+    // First pass: walkable-Z candidates.
     var z0=0,z1=0,z2=0,z3=0,z4=0,cnt=0;
+    // Per-layer types (loaded once, reused for both passes).
+    var t0 = lc > 0 ? m.l0Type[i] : 0;
+    var t1 = lc > 1 ? m.l1Type[i] : 0;
+    var t2 = lc > 2 ? m.l2Type[i] : 0;
+    var t3 = lc > 3 ? m.l3Type[i] : 0;
+    var t4 = lc > 4 ? m.l4Type[i] : 0;
     for (var li = 0; li < lc; li++) {
       var t, z;
-      if (li === 0) { t = m.l0Type[i]; z = m.l0TopZ[i]; }
-      else if (li === 1) { t = m.l1Type[i]; z = m.l1TopZ[i]; }
-      else if (li === 2) { t = m.l2Type[i]; z = m.l2TopZ[i]; }
-      else if (li === 3) { t = m.l3Type[i]; z = m.l3TopZ[i]; }
-      else { t = m.l4Type[i]; z = m.l4TopZ[i]; }
+      if (li === 0) { t = t0; z = m.l0TopZ[i]; }
+      else if (li === 1) { t = t1; z = m.l1TopZ[i]; }
+      else if (li === 2) { t = t2; z = m.l2TopZ[i]; }
+      else if (li === 3) { t = t3; z = m.l3TopZ[i]; }
+      else { t = t4; z = m.l4TopZ[i]; }
       if (t === 1 || t === 3 || t === 4) {
         if (cnt === 0) z0 = z;
         else if (cnt === 1) z1 = z;
@@ -806,15 +831,32 @@ function buildWalkCandZ(m) {
         cnt++;
       }
     }
-    if (cnt === 0) { m.walkCandZ[i] = null; continue; }
-    var arr = new Float32Array(cnt);
-    arr[0] = z0;
-    if (cnt > 1) arr[1] = z1;
-    if (cnt > 2) arr[2] = z2;
-    if (cnt > 3) arr[3] = z3;
-    if (cnt > 4) arr[4] = z4;
-    m.walkCandZ[i] = arr;
-    cells++; entries += cnt;
+    if (cnt === 0) m.walkCandZ[i] = null;
+    else {
+      var arr = new Float32Array(cnt);
+      arr[0] = z0;
+      if (cnt > 1) arr[1] = z1;
+      if (cnt > 2) arr[2] = z2;
+      if (cnt > 3) arr[3] = z3;
+      if (cnt > 4) arr[4] = z4;
+      m.walkCandZ[i] = arr;
+      cells++; entries += cnt;
+    }
+    // Second pass: above-masks. For each li, look at layers li+1..lc-1.
+    // "Above" means higher li index; types t1..t4 correspond to layers 1..4.
+    var ceilMask = 0, capMask = 0;
+    for (var li2 = 0; li2 < lc; li2++) {
+      var sawCeil = 0, sawCap = 0;
+      for (var lj = li2 + 1; lj < lc; lj++) {
+        var tj = lj === 1 ? t1 : lj === 2 ? t2 : lj === 3 ? t3 : lj === 4 ? t4 : t0;
+        if (tj === 2) sawCeil = 1;
+        else if (tj === 4) sawCap = 1;
+      }
+      if (sawCeil) ceilMask |= (1 << li2);
+      if (sawCap)  capMask  |= (1 << li2);
+    }
+    m.ceilAboveMask[i] = ceilMask;
+    m.capAboveMask[i]  = capMask;
   }
   console.log('[WALK-CAND] ' + cells + ' cells, ' + entries + ' candidates');
   _cacheStats.matchZ.size = cells;
@@ -1130,15 +1172,15 @@ var qualityPreset = 'medium';
 var _pendingQualityPreset = 'medium'; // tracks preset selection in the staging copy
 var QUALITY_PRESETS = {
   low:    {viewDist: 500,  chunkWindow: 5, particles: 10, resolution: 0.5},
-  medium: {viewDist: 1400, chunkWindow: 7, particles: 35, resolution: 1.0},
-  high:   {viewDist: 1700, chunkWindow: 7, particles: 50, resolution: 1.0},
-  ultra:  {viewDist: 2100, chunkWindow: 9, particles: 60, resolution: 1.0}
+  medium: {viewDist: 900,  chunkWindow: 5, particles: 25, resolution: 0.75},
+  high:   {viewDist: 1300, chunkWindow: 7, particles: 40, resolution: 1.0},
+  ultra:  {viewDist: 1800, chunkWindow: 9, particles: 60, resolution: 1.0}
 };
-var settings = {viewDist: 1400, chunkWindow: 7, particles: 35, resolution: 1.0, showFPS: false, dayNight: true};
+var settings = {viewDist: 900, chunkWindow: 5, particles: 25, resolution: 0.75, showFPS: false, dayNight: true};
 // Staging copy — holds uncommitted edits while settings overlay is open.
 // Written to by all slider/toggle/preset interactions.
 // Flushed → settings on Apply; discarded on close without Apply.
-var pendingSettings = {viewDist: 1400, chunkWindow: 7, particles: 35, resolution: 1.0, showFPS: false, dayNight: true};
+var pendingSettings = {viewDist: 900, chunkWindow: 5, particles: 25, resolution: 0.75, showFPS: false, dayNight: true};
 var _settingsDirty = false; // true when pendingSettings differs from settings
 var _fpsSmooth = 60;
 var _lastFrameTimeMs = 0;
@@ -3099,7 +3141,7 @@ function generateDeepCaves() {
         if (enx >= 0 && eny >= 0 && enx < gridW && eny < gridH) grid[eny * gridW + enx] = 0;
       }
     }
-    deepCaveEntrances.push({x: ex, y: ey});
+    deepCaveEntrances.push({x: ex, y: ey, angle: 0, cosA: 1, sinA: 0});
     console.log('[DEEP_CAVE] Entrance ' + (cv+1) + ' at world (' + Math.round(ex) + ',' + Math.round(ey) + ')');
 
     // ── ANTECHAMBER: a defined vestibule room between the entrance and the
@@ -7107,8 +7149,10 @@ function assembleWindow(centerCX, centerCY) {
                 Math.abs(_ee.y - (_ce.y - windowOriginY)) < 1) { _ceDup = true; break; }
           }
           if (!_ceDup) {
+            var _ceAng = _ce.angle || 0;
             deepCaveEntrances.push({x: _ce.x - windowOriginX, y: _ce.y - windowOriginY,
-              angle: _ce.angle, depth: _ce.depth, ceilH: _ce.ceilH});
+              angle: _ce.angle, depth: _ce.depth, ceilH: _ce.ceilH,
+              cosA: Math.cos(_ceAng), sinA: Math.sin(_ceAng)});
           }
         }
       }
@@ -7745,9 +7789,9 @@ function resetLevel(lv) {
 // 32-slot cache of recent (gridX, gridY) → l0TopZ lookups. Knuth multiplicative
 // hash mixes both coords so row/column sweeps don't degenerate to a single slot.
 // Bumped each frame via _floorCacheTick so stale entries miss on a new frame.
-var _floorCacheKey = new Int32Array(512);
-var _floorCacheVal = new Float32Array(512);
-var _floorCacheTickArr = new Int32Array(512);
+var _floorCacheKey = new Int32Array(1024);
+var _floorCacheVal = new Float32Array(1024);
+var _floorCacheTickArr = new Int32Array(1024);
 var _floorCacheTick = 0;
 var _lightGridFrameCount = 0;
 function getFloorHeightAt(x, y) {
@@ -7757,7 +7801,7 @@ function getFloorHeightAt(x, y) {
   var gridY = Math.floor(y / mesh.gridSize);
   if (gridX < 0 || gridX >= mesh.w || gridY < 0 || gridY >= mesh.h) return 0;
   var key = (gridX << 16) | (gridY & 0xffff);
-  var slot = ((gridX * 2654435761) ^ gridY) & 511;
+  var slot = ((gridX * 2654435761) ^ gridY) & 1023;
   if (_floorCacheKey[slot] === key && _floorCacheTickArr[slot] === _floorCacheTick) {
     _cacheStats.floorH.hits++;
     return _floorCacheVal[slot];
@@ -7767,7 +7811,7 @@ function getFloorHeightAt(x, y) {
   _floorCacheVal[slot] = v;
   _floorCacheTickArr[slot] = _floorCacheTick;
   _cacheStats.floorH.misses++;
-  _cacheStats.floorH.size = 512;
+  _cacheStats.floorH.size = 1024;
   return v;
 }
 
@@ -12517,6 +12561,53 @@ function drawLayersFloor3D() {
     if (_caeDSq < _camNearEntDist) _camNearEntDist = _caeDSq;
     if (_caeDSq < _entRadSq) { _camNearAnyEnt = true; break; }
   }
+
+  // Rasterize entrance cull mask once per frame. Each entrance covers a
+  // small oriented rectangle (~22u half-extent along + cross); at cell size
+  // 12u that's ~4x4 cells per entrance. Quads whose cell is flagged here
+  // skip the per-quad transform + rectangle check in the inner loop.
+  var _meshN = mesh.w * mesh.h;
+  if (_entCount > 0 && !playerUnderground) {
+    if (!_entCullMask || _entCullMaskN !== _meshN) {
+      _entCullMask = new Uint8Array(_meshN);
+      _entCullMaskN = _meshN;
+    } else {
+      _entCullMask.fill(0);
+    }
+    var _entHalf = 22; // along/cross half-extent (mirrors inner-loop check)
+    var _entCellRange = Math.ceil((_entHalf * 1.5) / gs); // ~3 cells
+    for (var _ecei = 0; _ecei < _entCount; _ecei++) {
+      var _ece = deepCaveEntrances[_ecei];
+      var _eceCx = Math.floor(_ece.x / gs);
+      var _eceCy = Math.floor(_ece.y / gs);
+      var _eceC = _ece.cosA, _eceS = _ece.sinA;
+      if (_eceC === undefined) {
+        var _eceA = _ece.angle || 0;
+        _eceC = Math.cos(_eceA); _eceS = Math.sin(_eceA);
+        _ece.cosA = _eceC; _ece.sinA = _eceS;
+      }
+      var _eceX = _ece.x, _eceY = _ece.y;
+      var _eceX0 = _eceCx - _entCellRange, _eceX1 = _eceCx + _entCellRange;
+      var _eceY0 = _eceCy - _entCellRange, _eceY1 = _eceCy + _entCellRange;
+      if (_eceX0 < 0) _eceX0 = 0;
+      if (_eceY0 < 0) _eceY0 = 0;
+      if (_eceX1 >= mesh.w) _eceX1 = mesh.w - 1;
+      if (_eceY1 >= mesh.h) _eceY1 = mesh.h - 1;
+      for (var _ecy = _eceY0; _ecy <= _eceY1; _ecy++) {
+        for (var _ecx = _eceX0; _ecx <= _eceX1; _ecx++) {
+          var _ecWx = (_ecx + 0.5) * gs, _ecWy = (_ecy + 0.5) * gs;
+          var _ecDx = _ecWx - _eceX, _ecDy = _ecWy - _eceY;
+          var _ecAlong = _ecDx * _eceC + _ecDy * _eceS;
+          var _ecCross = -_ecDx * _eceS + _ecDy * _eceC;
+          if (_ecAlong < 0) _ecAlong = -_ecAlong;
+          if (_ecCross < 0) _ecCross = -_ecCross;
+          if (_ecAlong < _entHalf && _ecCross < _entHalf) {
+            _entCullMask[_ecy * mesh.w + _ecx] = 1;
+          }
+        }
+      }
+    }
+  }
   // Diagnostic: how many cave-underground quads passed the cull this frame?
   window.__caveFloorRendered = 0;
 
@@ -12587,24 +12678,16 @@ function drawLayersFloor3D() {
       for (var li = 0; li < lc0; li++) {
         var L0 = layerAt(idx0, li); if (!L0 || (L0[1] !== 1 && L0[1] !== 3 && L0[1] !== 4)) continue;
 
-        // Per-cell underground: any ceiling-type (2) layer above this floor at idx0?
-        var _cellUnderground = false;
-        for (var _uli = li + 1; _uli < lc0; _uli++) {
-          var _UL = layerAt(idx0, _uli);
-          if (_UL && _UL[1] === 2) { _cellUnderground = true; break; }
-        }
+        // Per-cell underground + cap-above: O(1) bitmask reads (precomputed at
+        // map load by buildWalkCandZ). Bit li set = ceiling/cap layer exists
+        // above layer li in this cell.
+        var _cellUnderground = (mesh.ceilAboveMask[idx0] >> li) & 1;
         // Visibility: if a cap layer (type=4) sits above this floor, painter
         // order will overwrite whatever we draw here — skip the work. If
         // there's no cap (cave mouth, uncapped pit), the cave floor is what
-        // the player is meant to see looking in. No distance hack: generation
-        // already decides which cells have caps and which don't.
+        // the player is meant to see looking in.
         if (_cellUnderground && !playerUnderground) {
-          var _hasCapAbove = false;
-          for (var _uli2 = li + 1; _uli2 < lc0; _uli2++) {
-            var _UL2 = layerAt(idx0, _uli2);
-            if (_UL2 && _UL2[1] === 4) { _hasCapAbove = true; break; }
-          }
-          if (_hasCapAbove) continue;
+          if ((mesh.capAboveMask[idx0] >> li) & 1) continue;
           window.__caveFloorRendered++;
         }
 
@@ -12657,21 +12740,11 @@ function drawLayersFloor3D() {
         // Skip only the tight opening footprint beneath the stone archway so
         // distant/elevated views don't see the cave through unrelated ground.
         // Oriented rectangle aligned to entrance.angle matches the archway opening.
+        // Cave-mouth cull: O(1) bitmask read (_entCullMask rasterized at frame start).
         var _entryMaxZ = Math.max(_z0, _z1, _z2, _z3);
-        if (li === 0 && !playerUnderground && _entCount > 0 && _entryMaxZ < -0.5) {
-          var _ehCx = (x + 0.5) * gs, _ehCy = (y + 0.5) * gs;
-          var _ehSkip = false;
-          for (var _ehi = 0; _ehi < _entCount; _ehi++) {
-            var _ehE = deepCaveEntrances[_ehi];
-            var _ehDx = _ehCx - _ehE.x, _ehDy = _ehCy - _ehE.y;
-            var _ehA = _ehE.angle || 0;
-            var _ehC = Math.cos(_ehA), _ehS = Math.sin(_ehA);
-            var _ehAlong = _ehDx * _ehC + _ehDy * _ehS;
-            var _ehCross = -_ehDx * _ehS + _ehDy * _ehC;
-            // Narrow slot: doorway width (opening ~36u + slight margin) × short along-axis depth
-            if (Math.abs(_ehAlong) < 22 && Math.abs(_ehCross) < 22) { _ehSkip = true; break; }
-          }
-          if (_ehSkip) continue;
+        if (li === 0 && !playerUnderground && _entCount > 0 && _entryMaxZ < -0.5 &&
+            _entCullMask && _entCullMask[idx0]) {
+          continue;
         }
 
         var wx1 = x * gs, wy1 = y * gs, wx2 = wx1 + gs, wy2 = wy1 + gs;
@@ -16472,9 +16545,14 @@ function drawCaveEntrance3D() {
     var fh = floorMesh ? getFloorHeightAt(ce.x, ce.y) : 0;
     var gz = fh * 25;
 
-    // Through-direction (walk axis) and perpendicular (arch-width axis)
-    var ang = ce.angle || 0;
-    var fx = Math.cos(ang), fy = Math.sin(ang);
+    // Through-direction (walk axis) and perpendicular (arch-width axis).
+    // Uses baked cosA/sinA from entrance creation; falls back if missing.
+    var fx = ce.cosA, fy = ce.sinA;
+    if (fx === undefined) {
+      var ang = ce.angle || 0;
+      fx = Math.cos(ang); fy = Math.sin(ang);
+      ce.cosA = fx; ce.sinA = fy;
+    }
     var px = -fy, py = fx;
 
     // Pillar centers: flank the opening left/right
@@ -16668,7 +16746,10 @@ function drawCaveEntrance3D() {
         // approach ramp, since it has ceiling overhead). Signed along-axis
         // distance from the entrance is the actual boundary the user crosses.
         var _lbldx = pos.x - ce.x, _lbldy = pos.y - ce.y;
-        var _lblAlong = _lbldx * Math.cos(ce.angle || 0) + _lbldy * Math.sin(ce.angle || 0);
+        // Use baked cosA/sinA from entrance creation.
+        var _lblC = ce.cosA !== undefined ? ce.cosA : Math.cos(ce.angle || 0);
+        var _lblS = ce.sinA !== undefined ? ce.sinA : Math.sin(ce.angle || 0);
+        var _lblAlong = _lbldx * _lblC + _lbldy * _lblS;
         ctx.fillText(_lblAlong < -40 ? 'CAVE' : 'EXIT', labelP.sx, labelP.sy);
         ctx.restore();
       }
