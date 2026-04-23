@@ -47,12 +47,18 @@ void runAutomationsOnBoot();
 bool startAutomationScheduler();
 void stopAutomationScheduler();
 void notifyAutomationScheduler();
+// Fast in-RAM check used by the main loop to decide whether to run the
+// expensive schedulerTickMinute. Returns true if any enabled automation's
+// nextAt is at or before `now`, or if the cache is invalid (forcing a rebuild).
+bool automationsAnyDue(time_t now);
 
 // Automation file operations
 bool sanitizeAutomationsJson(String& jsonRef);
 bool writeAutomationsJsonAtomic(const String& json);
 bool streamParseAutomations(const char* path, AutomationCallback callback, void* userData);
 bool updateAutomationNextAt(long automationId, time_t newNextAt);
+// Write a specific trigger's nextAt (by zero-based index in the triggers array).
+bool updateAutomationTriggerNextAt(long automationId, int triggerIdx, time_t newNextAt);
 
 // Automation command handlers
 const char* cmd_automation(const String& originalCmd);
@@ -61,6 +67,7 @@ const char* cmd_automation_add(const String& originalCmd);
 const char* cmd_automation_enable_disable(const String& originalCmd, bool enable);
 const char* cmd_automation_delete(const String& originalCmd);
 const char* cmd_automation_run(const String& originalCmd);
+const char* cmd_automation_trigger(const String& originalCmd);
 const char* cmd_validate_conditions(const String& argsInput);
 // NOTE: cmd_downloadautomation, cmd_autolog, and cmd_conditional are declared
 // and implemented in the main .ino file to avoid duplication
@@ -104,6 +111,7 @@ inline void runAutomationsOnBoot() {}
 inline bool startAutomationScheduler() { return false; }
 inline void stopAutomationScheduler() {}
 inline void notifyAutomationScheduler() {}
+inline bool automationsAnyDue(time_t) { return false; }
 inline bool sanitizeAutomationsJson(String&) { return false; }
 inline bool writeAutomationsJsonAtomic(const String&) { return false; }
 inline void schedulerTickMinute() {}

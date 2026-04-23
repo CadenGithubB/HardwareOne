@@ -70,9 +70,9 @@ class Adafruit_BNO055;
 
 extern Adafruit_BNO055* gBNO055;
 
-extern volatile bool imuInitRequested;
-extern volatile bool imuInitDone;
-extern volatile bool imuInitResult;
+extern volatile bool gImuInitRequested;
+extern volatile bool gImuInitDone;
+extern volatile bool gImuInitResult;
 
 extern ImuCache gImuCache;
 extern IMUActionState gIMUActions;
@@ -82,9 +82,9 @@ extern volatile UBaseType_t gIMUWatermarkMin;
 extern volatile UBaseType_t gIMUWatermarkNow;
 
 // IMU initialization handoff flags
-extern volatile bool imuInitRequested;
-extern volatile bool imuInitDone;
-extern volatile bool imuInitResult;
+extern volatile bool gImuInitRequested;
+extern volatile bool gImuInitDone;
+extern volatile bool gImuInitResult;
 
 // IMU sensor command handlers
 const char* cmd_imu(const String& argsInput);
@@ -105,24 +105,24 @@ const char* cmd_imurolloffset(const String& argsInput);
 const char* cmd_imuyawoffset(const String& argsInput);
 
 // IMU sensor state and control
-extern bool imuEnabled;
-extern bool imuConnected;
-extern unsigned long imuLastStopTime;
-extern TaskHandle_t imuTaskHandle;
+extern bool gImuEnabled;
+extern bool gImuConnected;
+extern unsigned long gImuLastStopTime;
+extern TaskHandle_t gImuTaskHandle;
 
 // Internal function called by queue processor
-bool startIMUSensorInternal();
+bool imuStartInternal();
 
 // IMU sensor functions
-bool initIMUSensor();
-void readIMUSensor();
-void applyIMUOrientationCorrection(float& pitch, float& roll, float& yaw);
+bool imuInit();
+void imuPoll();
+void imuApplyOrientationCorrection(float& pitch, float& roll, float& yaw);
 
 // IMU action detection
-void updateIMUActions();
+void imuUpdateActions();
 
 // JSON building
-int buildIMUDataJSON(char* buf, size_t bufSize);
+int imuBuildDataJSON(char* buf, size_t bufSize);
 
 // IMU command registration (sensor-specific naming)
 void registerImuBno055Commands();

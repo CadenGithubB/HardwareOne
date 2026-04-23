@@ -55,20 +55,20 @@ const char* cmd_tofstabilitythreshold(const String& argsInput);
 const char* cmd_tofdevicepollms(const String& argsInput);
 
 // ToF sensor state and control
-extern bool tofEnabled;
-extern bool tofConnected;
-extern uint32_t tofLastStopTime;
-extern TaskHandle_t tofTaskHandle;
+extern bool gTofEnabled;
+extern bool gTofConnected;
+extern uint32_t gTofLastStopTime;
+extern TaskHandle_t gTofTaskHandle;
 
 // Internal function called by queue processor
-bool startToFSensorInternal();
+bool tofStartInternal();
 
 // ToF sensor functions
-bool initToFSensor();
-bool readToFObjects();
+bool tofInit();
+bool tofPoll();
 
 // JSON building
-int buildToFDataJSON(char* buf, size_t bufSize);
+int tofBuildDataJSON(char* buf, size_t bufSize);
 
 // ToF command registry (for help system compatibility)
 extern const CommandEntry tofCommands[];

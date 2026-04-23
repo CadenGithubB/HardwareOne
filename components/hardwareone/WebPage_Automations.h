@@ -48,10 +48,10 @@ static void streamAutomationsInner(httpd_req_t* req) {
   <div class='row-inline'>
     <label style='font-size:0.9em;color:var(--panel-fg)'>Repeat:</label>
     <select id='a_recur' class='input-tall' onchange='recurChanged()'>
-      <option value='daily' selected>Daily</option>
-      <option value='weekly'>Weekly</option>
-      <option value='monthly'>Monthly</option>
-      <option value='yearly'>Yearly</option>
+      <option value='daily' selected>Every day</option>
+      <option value='weekly'>Certain days of the week</option>
+      <option value='monthly'>Once a month</option>
+      <option value='yearly'>Once a year</option>
     </select>
   </div>
   <div style='margin-top:0.5rem'>
@@ -65,6 +65,11 @@ static void streamAutomationsInner(httpd_req_t* req) {
   <div id='time_fields' style='margin-top:0.25rem'></div>
 </div>
 <div id='dow_wrap' style='display:none;flex-direction:column;gap:0.25rem;margin-top:0.5rem;color:var(--panel-fg);margin-left:0;padding-left:0'>
+  <div style='display:flex;align-items:center;flex-wrap:wrap;margin:0 0 0.25rem 0'>
+    <span style='font-size:0.9em;color:var(--panel-fg);margin:0;margin-right:1rem'>Every</span>
+    <input type='number' id='a_week_interval' min='1' max='12' value='1' class='input-tall' style='width:4em;margin-right:0.5rem'>
+    <span style='font-size:0.9em;color:var(--panel-fg);margin:0'>week(s)</span>
+  </div>
   <div style='display:flex;align-items:center;flex-wrap:wrap;margin:0'>
     <span style='font-size:0.9em;color:var(--panel-fg);margin:0;margin-right:1rem'>Days of week:</span>
     <label style='display:flex;align-items:center;gap:0;margin-right:2.5rem'><input type='checkbox' id='day_mon' value='mon' style='margin:0;padding:0;vertical-align:middle'><span style='display:inline-block;margin-left:-2px;font-kerning:none'>Mon</span></label>
@@ -76,6 +81,26 @@ static void streamAutomationsInner(httpd_req_t* req) {
     <label style='display:flex;align-items:center;gap:0;margin-right:0'><input type='checkbox' id='day_sun' value='sun' style='margin:0;padding:0;vertical-align:middle'><span style='display:inline-block;margin-left:-2px;font-kerning:none'>Sun</span></label>
   </div>
   </div>
+<div id='monthly_wrap' style='display:none;margin-top:0.5rem'>
+  <label style='font-size:0.9em;color:var(--panel-fg);margin-right:0.5rem'>Day of month:</label>
+  <input type='number' id='a_day_of_month' min='1' max='31' value='1' class='input-tall' style='width:5em'>
+  <span style='font-size:0.85em;color:var(--muted);margin-left:0.5rem'>(Feb 30 etc. clamped to last day)</span>
+</div>
+<div id='yearly_wrap' style='display:none;flex-direction:column;gap:0.25rem;margin-top:0.5rem'>
+  <div class='row-inline'>
+    <label style='font-size:0.9em;color:var(--panel-fg);margin-right:0.5rem'>Month:</label>
+    <select id='a_month_of_year' class='input-tall'>
+      <option value='1'>January</option><option value='2'>February</option><option value='3'>March</option>
+      <option value='4'>April</option><option value='5'>May</option><option value='6'>June</option>
+      <option value='7'>July</option><option value='8'>August</option><option value='9'>September</option>
+      <option value='10'>October</option><option value='11'>November</option><option value='12'>December</option>
+    </select>
+  </div>
+  <div class='row-inline'>
+    <label style='font-size:0.9em;color:var(--panel-fg);margin-right:0.5rem'>Day:</label>
+    <input type='number' id='a_day_of_month_yearly' min='1' max='31' value='1' class='input-tall' style='width:5em'>
+  </div>
+</div>
 </div>
 </div>
 <div id='grp_afterDelay' class='vis-gone'>
@@ -100,6 +125,60 @@ static void streamAutomationsInner(httpd_req_t* req) {
     <option value='day'>days</option>
   </select>
 </div>
+<div id='secondary_triggers_section' style='margin-top:0.75rem;padding-top:0.5rem;border-top:1px dashed var(--border)'>
+  <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem;flex-wrap:wrap'>
+    <span style='font-weight:600;color:var(--panel-fg)'>Additional Triggers</span>
+    <button type='button' class='btn btn-small' onclick='addSecondaryTrigger()'>+ Add Trigger</button>
+    <span style='font-size:0.82em;color:var(--muted)'>Fire this automation from multiple sources (max 4 total).</span>
+  </div>
+  <div id='secondary_triggers_container'></div>
+</div>
+<template id='secondary_trigger_template'>
+  <div class='secondary-trigger' style='display:flex;align-items:center;gap:0.4rem;padding:0.5rem;border:1px solid var(--border);border-radius:4px;margin-bottom:0.3rem;flex-wrap:wrap'>
+    <select class='st-type input-tall' onchange='stTypeChanged(this)' style='min-width:120px'>
+      <option value='time'>At Time</option>
+      <option value='interval'>Interval</option>
+      <option value='manual'>Manual (After Delay)</option>
+      <option value='boot'>On Boot</option>
+    </select>
+    <span class='st-fields st-fields-time' style='display:inline-flex;gap:0.3rem;align-items:center;flex-wrap:wrap'>
+      <input type='time' class='st-time input-tall' style='width:120px'>
+      <select class='st-recur input-tall' onchange='stRecurChanged(this)'>
+        <option value='daily' selected>Every day</option>
+        <option value='weekly'>Certain days</option>
+      </select>
+      <span class='st-days-wrap' style='display:none;gap:0.25rem;align-items:center'>
+        <label style='display:flex;align-items:center;gap:2px'><input type='checkbox' class='st-day' value='mon'>Mon</label>
+        <label style='display:flex;align-items:center;gap:2px'><input type='checkbox' class='st-day' value='tue'>Tue</label>
+        <label style='display:flex;align-items:center;gap:2px'><input type='checkbox' class='st-day' value='wed'>Wed</label>
+        <label style='display:flex;align-items:center;gap:2px'><input type='checkbox' class='st-day' value='thu'>Thu</label>
+        <label style='display:flex;align-items:center;gap:2px'><input type='checkbox' class='st-day' value='fri'>Fri</label>
+        <label style='display:flex;align-items:center;gap:2px'><input type='checkbox' class='st-day' value='sat'>Sat</label>
+        <label style='display:flex;align-items:center;gap:2px'><input type='checkbox' class='st-day' value='sun'>Sun</label>
+      </span>
+    </span>
+    <span class='st-fields st-fields-interval' style='display:none;gap:0.3rem;align-items:center'>
+      <label style='font-size:0.85em'>Every</label>
+      <input type='number' class='st-interval-value input-tall' placeholder='Value' min='1' style='width:80px'>
+      <select class='st-interval-unit input-tall'>
+        <option value='s' selected>seconds</option><option value='min'>minutes</option><option value='hr'>hours</option><option value='ms'>ms</option>
+      </select>
+    </span>
+    <span class='st-fields st-fields-manual' style='display:none;gap:0.3rem;align-items:center'>
+      <label style='font-size:0.85em'>Delay:</label>
+      <input type='number' class='st-delay-value input-tall' placeholder='Delay' min='0' style='width:80px'>
+      <select class='st-delay-unit input-tall'>
+        <option value='s' selected>seconds</option><option value='min'>minutes</option><option value='ms'>ms</option>
+      </select>
+    </span>
+    <span class='st-fields st-fields-boot' style='display:none;gap:0.3rem;align-items:center'>
+      <label style='font-size:0.85em'>Delay:</label>
+      <input type='number' class='st-boot-delay input-tall' value='0' min='0' style='width:80px'>
+      <span style='font-size:0.85em'>ms</span>
+    </span>
+    <button type='button' class='btn btn-small' onclick='removeSecondaryTrigger(this)' style='color:var(--danger);margin-left:auto'>Remove</button>
+  </div>
+</template>
 <div style='display:flex;flex-direction:column;gap:0.5rem'>
   <div style='display:flex;flex-direction:column;gap:0.5rem'>
     <div style='margin-top:0.5rem'>
@@ -375,19 +454,18 @@ function autoTypeChanged(){
     console.error('autoTypeChanged error:', e); 
   } 
 }
-function recurChanged(){ 
-  try { 
-    var r=document.getElementById('a_recur').value; 
-    var dw=document.getElementById('dow_wrap'); 
-    if(!dw) return; 
-    if(r==='weekly'){ 
-      dw.style.display='flex'; 
-    } else { 
-      dw.style.display='none'; 
-    } 
-  }catch(e){ 
-    console.error('recurChanged error:', e); 
-  } 
+function recurChanged(){
+  try {
+    var r=document.getElementById('a_recur').value;
+    var dw=document.getElementById('dow_wrap');
+    var mw=document.getElementById('monthly_wrap');
+    var yw=document.getElementById('yearly_wrap');
+    if(dw) dw.style.display=(r==='weekly')?'flex':'none';
+    if(mw) mw.style.display=(r==='monthly')?'block':'none';
+    if(yw) yw.style.display=(r==='yearly')?'flex':'none';
+  }catch(e){
+    console.error('recurChanged error:', e);
+  }
 }
 function addTimeField(){ 
   const container=document.getElementById('time_fields'); 
@@ -619,27 +697,107 @@ function formatNextRun(nextAt){
     const timeStr = date.toLocaleString(); 
     const diffSec = next - now; 
     let relativeStr = ''; 
-    if(diffSec <= 0){ 
-      relativeStr = 'overdue'; 
-    } else if(diffSec < 60){ 
-      relativeStr = 'in ' + diffSec + 's'; 
-    } else if(diffSec < 3600){ 
-      relativeStr = 'in ' + Math.floor(diffSec/60) + 'm'; 
-    } else if(diffSec < 86400){ 
-      relativeStr = 'in ' + Math.floor(diffSec/3600) + 'h'; 
-    } else { 
-      relativeStr = 'in ' + Math.floor(diffSec/86400) + 'd'; 
-    } 
+    if(diffSec <= 0){
+      relativeStr = 'overdue';
+    } else if(diffSec < 60){
+      relativeStr = 'in ' + diffSec + 's';
+    } else if(diffSec < 3600){
+      const m = Math.floor(diffSec/60);
+      const s = diffSec % 60;
+      relativeStr = 'in ' + m + 'm' + (s ? ' ' + s + 's' : '');
+    } else if(diffSec < 86400){
+      const h = Math.floor(diffSec/3600);
+      const m = Math.floor((diffSec%3600)/60);
+      relativeStr = 'in ' + h + 'h' + (m ? ' ' + m + 'm' : '');
+    } else {
+      const d = Math.floor(diffSec/86400);
+      const h = Math.floor((diffSec%86400)/3600);
+      relativeStr = 'in ' + d + 'd' + (h ? ' ' + h + 'h' : '');
+    }
     return timeStr + '<br><small style="color:var(--panel-fg)">' + relativeStr + '</small>'; 
   } catch(e){ 
     return '\u2014'; 
   } 
 }
+// Cached last-fetched automations list so the per-second tick can update the
+// Next Run column without re-fetching from the server.
+let gLastAutos = [];
+
+// v2 schema has an automation.triggers array. The UI was written against a
+// single automation.trigger object + top-level runAtBoot flag. This function
+// synthesizes the legacy fields from the array so the rest of the UI keeps
+// working without per-site changes. Phase 2 of the multi-trigger work will
+// replace this shim with a proper trigger-array UI.
+function normalizeAutomation(a) {
+  if (!a || !Array.isArray(a.triggers) || a.triggers.length === 0) return a;
+  let primary = null, bootTrig = null;
+  for (const t of a.triggers) {
+    if (!t || !t.type) continue;
+    const tt = t.type.toLowerCase();
+    if (tt === 'boot') { if (!bootTrig) bootTrig = t; }
+    else { if (!primary) primary = t; }
+  }
+  if (!primary) primary = a.triggers[0];  // all-boot edge case
+  a.trigger = primary;
+  if (bootTrig) {
+    a.runAtBoot = true;
+    if (typeof bootTrig.bootDelayMs !== 'undefined') a.bootDelayMs = bootTrig.bootDelayMs;
+  }
+  return a;
+}
+
+// Update only the Next Run cells in place. Runs every second. Doesn't touch
+// the rest of the DOM so active buttons, edit forms, scroll position, etc.
+// are preserved. If an automation's nextAt has been hit (overdue flag), we
+// also trigger a fresh fetch so the scheduler's post-fire update shows up.
+function tickNextRunCells() {
+  if (!gLastAutos.length) return;
+  const nowSec = Math.floor(Date.now()/1000);
+  let anyOverdue = false;
+  gLastAutos.forEach(a => {
+    const id = (typeof a.id !== 'undefined') ? a.id : '';
+    const cell = document.querySelector('[data-next-run-id="' + id + '"]');
+    if (!cell) return;
+    const sched = a.trigger || {};
+    let rawType = (sched.type || a.type || '').toLowerCase();
+    let runAtBoot = (a.runAtBoot === true);
+    if (rawType === 'time') rawType = 'attime';
+    else if (rawType === 'manual') rawType = 'afterdelay';
+    else if (rawType === 'boot') { runAtBoot = true; rawType = 'afterdelay'; }
+    const nextAt = parseInt(sched.nextAt || a.nextAt || 0);
+    const isArmed = (rawType === 'afterdelay' && !runAtBoot && nextAt > nowSec);
+    let html = formatNextRun(nextAt);
+    if (isArmed) {
+      html = '<span style="color:var(--accent,#ffa500);font-weight:600">\u23F1 Armed</span><br>' + html;
+    }
+    cell.innerHTML = html;
+    if (nextAt > 0 && nextAt <= nowSec) anyOverdue = true;
+  });
+  // If anything is overdue, the scheduler fires within ~1s and writes a new
+  // nextAt. Pull a fresh list so the UI reflects it.
+  if (anyOverdue && !gAutosFetchInFlight) {
+    scheduleAutosRefresh();
+  }
+}
+let gAutosFetchInFlight = false;
+let gAutosRefreshPending = null;
+function scheduleAutosRefresh(){
+  if (gAutosRefreshPending) return;
+  gAutosRefreshPending = setTimeout(function(){
+    gAutosRefreshPending = null;
+    loadAutos();
+  }, 1500);  // brief delay so the scheduler has time to reschedule
+}
+setInterval(tickNextRunCells, 1000);
+
 function renderAutos(json) {
   try {
     let data = (typeof json === 'string') ? JSON.parse(json) : json;
     let autos = [];
     if (data && data.automations && Array.isArray(data.automations)) autos = data.automations;
+    // Normalize triggers[] → trigger + runAtBoot so the rest of the UI works.
+    autos.forEach(normalizeAutomation);
+    gLastAutos = autos;
     let html = '<table style="width:100%;border-collapse:collapse">';
     html += '<tr style="background:var(--crumb-bg);color:var(--panel-fg)"><th style="padding:0.5rem;text-align:left">ID</th><th style="padding:0.5rem;text-align:left">Name</th><th style="padding:0.5rem;text-align:left">Enabled</th><th style="padding:0.5rem;text-align:left">Type</th><th style="padding:0.5rem;text-align:left">Summary</th><th style="padding:0.5rem;text-align:left">Next Run</th><th style="padding:0.5rem">Actions</th></tr>';
     if (autos.length === 0) {
@@ -648,21 +806,57 @@ function renderAutos(json) {
       autos.forEach(a => {
         let name = a.name || '(unnamed)';
         let enabled = (a.enabled === true ? 'Yes' : 'No');
-        let sched = a.schedule || {};
+        let sched = a.trigger || {};
         let rawType = (sched.type || a.type || '');
         let t = rawType.toLowerCase();
-        let runAtBoot = (sched.runAtBoot === true || a.runAtBoot === true);
+        let runAtBoot = (a.runAtBoot === true);
+        // Normalize v1 trigger type names to legacy rendering values.
+        if (t === 'time') t = 'attime';
+        else if (t === 'manual') t = 'afterdelay';
+        else if (t === 'boot') { runAtBoot = true; t = 'afterdelay'; }
         let type = runAtBoot ? 'On Boot' : rawType;
         let summary = '';
         if (t === 'attime') {
-          summary = 'At ' + (sched.time || a.time || '?') + (sched.days || a.days ? ' on ' + (sched.days || a.days) : '');
-          if (sched.recurrence) summary += ' (' + sched.recurrence + ')';
+          const rec = (sched.recurrence || a.recurrence || '').toLowerCase();
+          if (rec === 'monthly') {
+            const dom = sched.dayOfMonth || a.dayOfMonth || '?';
+            summary = 'On the ' + dom + ' of each month at ' + (sched.time || a.time || '?');
+          } else if (rec === 'yearly') {
+            const months = ['?','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            const moy = sched.month || a.month || 0;
+            const dom = sched.dayOfMonth || a.dayOfMonth || '?';
+            summary = 'Every ' + (months[moy] || '?') + ' ' + dom + ' at ' + (sched.time || a.time || '?');
+          } else {
+            summary = 'At ' + (sched.time || a.time || '?') + (sched.days || a.days ? ' on ' + (sched.days || a.days) : '');
+            const wi = sched.weekInterval || a.weekInterval || 1;
+            if (wi > 1) summary += ' (every ' + wi + ' weeks)';
+            else if (sched.recurrence) summary += ' (' + sched.recurrence + ')';
+          }
         } else if (t === 'afterdelay') {
           summary = 'After ' + (sched.delayMs || a.delayMs || '?') + ' ms';
         } else if (t === 'interval') {
           summary = 'Every ' + (sched.intervalMs || a.intervalMs || '?') + ' ms';
         } else {
           summary = '\u2014';
+        }
+        // Mention other triggers beyond the primary (the synthesized boot is
+        // handled by the runAtBoot branch below).
+        if (Array.isArray(a.triggers) && a.triggers.length > 1) {
+          const extras = [];
+          let skippedPrimary = false, skippedBoot = !runAtBoot;
+          for (const tr of a.triggers) {
+            if (!tr || !tr.type) continue;
+            const tt = tr.type.toLowerCase();
+            if (!skippedPrimary && tt !== 'boot') { skippedPrimary = true; continue; }
+            if (!skippedBoot && tt === 'boot') { skippedBoot = true; continue; }
+            if (tt === 'time') extras.push('Time ' + (tr.time || '?'));
+            else if (tt === 'interval') extras.push('Every ' + (tr.intervalMs || '?') + 'ms');
+            else if (tt === 'manual') extras.push('Manual ' + (tr.delayMs || '?') + 'ms');
+            else if (tt === 'boot') extras.push('Boot' + (tr.bootDelayMs ? ' +' + tr.bootDelayMs + 'ms' : ''));
+          }
+          if (extras.length > 0) {
+            summary += ' <em style="color:var(--muted)">+ ' + extras.join(', ') + '</em>';
+          }
         }
         if (Array.isArray(a.commands) && a.commands.length) {
           summary += ' | cmds: ' + a.commands.join('; ');
@@ -677,7 +871,12 @@ function renderAutos(json) {
           }
         }
         let nextAt = (sched.nextAt || a.nextAt);
+        const nowSec = Math.floor(Date.now()/1000);
+        const isArmed = (t === 'afterdelay' && !runAtBoot && nextAt && parseInt(nextAt) > nowSec);
         let nextRun = formatNextRun(nextAt);
+        if (isArmed) {
+          nextRun = '<span style="color:var(--accent,#ffa500);font-weight:600">\u23F1 Armed</span><br>' + nextRun;
+        }
         let id = (typeof a.id !== 'undefined') ? a.id : '';
         let btns = '';
         if (id !== '') {
@@ -686,7 +885,10 @@ function renderAutos(json) {
           } else {
             btns += '<button class="btn" onclick="autoToggle(' + id + ',1)" style="margin-right:0.3rem">Enable</button>';
           }
-          btns += '<button class="btn" onclick="autoRun(' + id + ')" style="margin-right:0.3rem">Run</button>';
+          btns += '<button class="btn" onclick="autoRun(' + id + ')" style="margin-right:0.3rem">Run Now</button>';
+          if (t === 'afterdelay') {
+            btns += '<button class="btn" onclick="autoTrigger(' + id + ')" style="margin-right:0.3rem">Trigger</button>';
+          }
           btns += '<button class="btn" onclick="autoEdit(' + id + ')" style="margin-right:0.3rem">Edit</button>';
           btns += '<button class="btn" onclick="autoDelete(' + id + ')" style="margin-right:0.3rem;color:var(--danger)">Delete</button>';
           btns += '<button class="btn" onclick="exportSingleAutomation(' + id + ')">Export</button>';
@@ -697,7 +899,7 @@ function renderAutos(json) {
         html += '<td style="padding:0.5rem">' + enabled + '</td>';
         html += '<td style="padding:0.5rem">' + type + '</td>';
         html += '<td style="padding:0.5rem">' + summary + '</td>';
-        html += '<td style="padding:0.5rem">' + nextRun + '</td>';
+        html += '<td data-next-run-id="' + id + '" style="padding:0.5rem">' + nextRun + '</td>';
         html += '<td style="padding:0.5rem">' + btns + '</td>';
         html += '</tr>';
       });
@@ -708,19 +910,22 @@ function renderAutos(json) {
     document.getElementById('autos').innerHTML = 'Error parsing automations: ' + e.message;
   }
 }
-function loadAutos(){ 
+function loadAutos(){
   console.log('[AUTOMATIONS] loadAutos called');
-  fetch('/api/automations').then(r => { 
+  gAutosFetchInFlight = true;
+  fetch('/api/automations').then(r => {
     console.log('[AUTOMATIONS] Automations fetch response:',r.status);
-    if(r.ok) return r.text(); 
-    else throw new Error('HTTP '+r.status); 
-  }).then(txt => { 
+    if(r.ok) return r.text();
+    else throw new Error('HTTP '+r.status);
+  }).then(txt => {
     console.log('[AUTOMATIONS] Automations data length:',txt.length);
-    renderAutos(txt); 
-  }).catch(e => { 
+    renderAutos(txt);
+  }).catch(e => {
     console.error('[AUTOMATIONS] Load error:',e);
-    document.getElementById('autos').innerHTML = 'Error loading automations: ' + e.message; 
-  }); 
+    document.getElementById('autos').innerHTML = 'Error loading automations: ' + e.message;
+  }).finally(() => {
+    gAutosFetchInFlight = false;
+  });
 }
 console.log('[AUTOMATIONS] Part 1: Complete');
 </script>)AUTOPART6", HTTPD_RESP_USE_STRLEN);
@@ -741,7 +946,140 @@ function postCLIValidate(cmd){
     body:'cmd='+encodeURIComponent(cmd)+'&validate=1'
   }).then(r=>r.text()); 
 }
-async function createAutomation(){ 
+// ============================================================================
+// Secondary trigger row management
+// ============================================================================
+// Builds on top of the primary trigger form. Each secondary row is a compact
+// element with its own type dropdown + type-specific fields. Rows can be added
+// up to (4 - 1) = 3 (since the primary counts as one of the 4 max triggers).
+// Manual triggers are capped at 1 across the entire automation — enforced at
+// submit time by scanning primary + all secondaries.
+
+function addSecondaryTrigger(initial){
+  const primaryType=document.getElementById('a_type').value;
+  const secondaryCount=document.querySelectorAll('#secondary_triggers_container .secondary-trigger').length;
+  // Primary + runAtBoot-synthesized boot + secondaries. runAtBoot counts as 1
+  // boot trigger if checked, so the cap is 4 - 1 - (runAtBoot?1:0) secondaries.
+  const runBootChecked=(document.getElementById('a_runatboot')||{}).checked===true;
+  const maxSecondaries=4-1-(runBootChecked?1:0);
+  if(secondaryCount>=maxSecondaries){
+    alert('Maximum of 4 triggers per automation reached.');
+    return;
+  }
+  const tpl=document.getElementById('secondary_trigger_template');
+  if(!tpl) return;
+  const node=tpl.content.cloneNode(true).firstElementChild;
+  document.getElementById('secondary_triggers_container').appendChild(node);
+  if(initial){ populateSecondaryTrigger(node,initial); }
+  stTypeChanged(node.querySelector('.st-type'));
+}
+
+function removeSecondaryTrigger(btn){
+  const row=btn.closest('.secondary-trigger');
+  if(row) row.remove();
+}
+
+function stTypeChanged(sel){
+  const row=sel.closest('.secondary-trigger');
+  if(!row) return;
+  const type=sel.value;
+  row.querySelectorAll('.st-fields').forEach(f=>{f.style.display='none';});
+  const show=row.querySelector('.st-fields-'+type);
+  if(show) show.style.display='inline-flex';
+  if(type==='time'){ stRecurChanged(row.querySelector('.st-recur')); }
+}
+
+function stRecurChanged(sel){
+  const row=sel.closest('.secondary-trigger');
+  if(!row) return;
+  const dw=row.querySelector('.st-days-wrap');
+  if(dw) dw.style.display=(sel.value==='weekly')?'inline-flex':'none';
+}
+
+// Serialize a secondary-trigger row into a plain object matching the v1
+// backend `trigger` JSON schema. Returns null if the row is incomplete.
+function getSecondaryTriggerData(row){
+  const type=row.querySelector('.st-type').value;
+  const obj={type};
+  if(type==='time'){
+    const t=row.querySelector('.st-time').value;
+    if(!t) return null;
+    obj.time=t;
+    const recur=row.querySelector('.st-recur').value;
+    obj.recurrence=recur;
+    if(recur==='weekly'){
+      const days=[];
+      row.querySelectorAll('.st-day:checked').forEach(c=>days.push(c.value));
+      if(days.length===0) return null;
+      obj.days=days.join(',');
+    }
+  } else if(type==='interval'){
+    const v=parseInt(row.querySelector('.st-interval-value').value,10);
+    if(!(v>0)) return null;
+    const u=row.querySelector('.st-interval-unit').value;
+    const mult=(u==='ms')?1:(u==='min')?60000:(u==='hr')?3600000:1000;
+    obj.intervalMs=v*mult;
+  } else if(type==='manual'){
+    const v=parseInt(row.querySelector('.st-delay-value').value,10);
+    if(!(v>=0)) return null;
+    const u=row.querySelector('.st-delay-unit').value;
+    const mult=(u==='ms')?1:(u==='min')?60000:1000;
+    obj.delayMs=v*mult;
+  } else if(type==='boot'){
+    const d=parseInt(row.querySelector('.st-boot-delay').value,10)||0;
+    if(d<0) return null;
+    obj.bootDelayMs=d;
+  }
+  return obj;
+}
+
+function populateSecondaryTrigger(row,t){
+  if(!t||!t.type) return;
+  const sel=row.querySelector('.st-type');
+  sel.value=t.type;
+  if(t.type==='time'){
+    if(t.time) row.querySelector('.st-time').value=t.time;
+    if(t.recurrence==='weekly'){ row.querySelector('.st-recur').value='weekly'; }
+    else{ row.querySelector('.st-recur').value='daily'; }
+    if(t.days){
+      const set=new Set((t.days||'').toLowerCase().split(',').map(s=>s.trim()));
+      row.querySelectorAll('.st-day').forEach(c=>{c.checked=set.has(c.value);});
+    }
+  } else if(t.type==='interval'){
+    const ms=parseInt(t.intervalMs)||0;
+    let v=ms, u='ms';
+    if(ms%3600000===0&&ms>=3600000){v=ms/3600000;u='hr';}
+    else if(ms%60000===0&&ms>=60000){v=ms/60000;u='min';}
+    else if(ms%1000===0){v=ms/1000;u='s';}
+    row.querySelector('.st-interval-value').value=v;
+    row.querySelector('.st-interval-unit').value=u;
+  } else if(t.type==='manual'){
+    const ms=parseInt(t.delayMs)||0;
+    let v=ms, u='ms';
+    if(ms%60000===0&&ms>=60000){v=ms/60000;u='min';}
+    else if(ms%1000===0){v=ms/1000;u='s';}
+    row.querySelector('.st-delay-value').value=v;
+    row.querySelector('.st-delay-unit').value=u;
+  } else if(t.type==='boot'){
+    row.querySelector('.st-boot-delay').value=(typeof t.bootDelayMs!=='undefined')?t.bootDelayMs:0;
+  }
+}
+
+// Collect secondary trigger objects for submit. Returns null on validation fail.
+function collectSecondaryTriggers(){
+  const rows=document.querySelectorAll('#secondary_triggers_container .secondary-trigger');
+  const result=[];
+  for(const row of rows){
+    const data=getSecondaryTriggerData(row);
+    if(!data){
+      return null;  // incomplete row
+    }
+    result.push(data);
+  }
+  return result;
+}
+
+async function createAutomation(){
   const name=document.getElementById('a_name').value.trim(); 
   const type=document.getElementById('a_type').value; 
   const delayRaw=document.getElementById('a_delay').value.trim(); 
@@ -753,11 +1091,28 @@ async function createAutomation(){
   const editIdEl=document.getElementById('a_edit_id');
   const editId=editIdEl?editIdEl.value.trim():'';
   document.getElementById('a_error').textContent=''; document.getElementById('a_error').style.display='none'; 
-  const recur=(document.getElementById('a_recur')?document.getElementById('a_recur').value:'daily'); 
-  if(type==='atTime'&&(recur==='monthly'||recur==='yearly')){ 
-    document.getElementById('a_error').textContent='Monthly/Yearly repeats are not supported yet.'; document.getElementById('a_error').style.display='block';
-    return; 
-  } 
+  const recur=(document.getElementById('a_recur')?document.getElementById('a_recur').value:'daily');
+  let dayOfMonth=0, monthOfYear=0;
+  if(type==='atTime'&&recur==='monthly'){
+    const dEl=document.getElementById('a_day_of_month');
+    dayOfMonth=dEl?parseInt(dEl.value,10):0;
+    if(!(dayOfMonth>=1&&dayOfMonth<=31)){
+      document.getElementById('a_error').textContent='Monthly requires a day of month (1-31).';
+      document.getElementById('a_error').style.display='block';
+      return;
+    }
+  }
+  if(type==='atTime'&&recur==='yearly'){
+    const dEl=document.getElementById('a_day_of_month_yearly');
+    const mEl=document.getElementById('a_month_of_year');
+    dayOfMonth=dEl?parseInt(dEl.value,10):0;
+    monthOfYear=mEl?parseInt(mEl.value,10):0;
+    if(!(dayOfMonth>=1&&dayOfMonth<=31)||!(monthOfYear>=1&&monthOfYear<=12)){
+      document.getElementById('a_error').textContent='Yearly requires a month and day (1-12, 1-31).';
+      document.getElementById('a_error').style.display='block';
+      return;
+    }
+  }
   const selectedDays=[]; 
   if(type==='atTime'&&recur==='weekly'){ 
     ['mon','tue','wed','thu','fri','sat','sun'].forEach(day=>{ 
@@ -768,7 +1123,15 @@ async function createAutomation(){
       return; 
     } 
   } 
-  const days=selectedDays.join(','); 
+  const days=selectedDays.join(',');
+  let weekInterval=1;
+  if(type==='atTime'&&recur==='weekly'){
+    const wiEl=document.getElementById('a_week_interval');
+    if(wiEl){
+      const v=parseInt(wiEl.value,10);
+      if(!isNaN(v)&&v>=1&&v<=12) weekInterval=v;
+    }
+  }
   const timeInputs=document.querySelectorAll('.time-input'); 
   const times=[]; 
   timeInputs.forEach(input=>{ 
@@ -830,10 +1193,14 @@ async function createAutomation(){
       parts.push('type='+type); 
     } 
     if(time) parts.push('time='+time); 
-    if(type==='atTime'){ 
-      parts.push('recurrence='+recur); 
-      if(days) parts.push('days='+days); 
-    } 
+    if(type==='atTime'){
+      parts.push('recurrence='+recur);
+      if(days) parts.push('days='+days);
+      if(recur==='weekly'&&weekInterval>1) parts.push('weekinterval='+weekInterval);
+      if(recur==='monthly'&&dayOfMonth>0) parts.push('dayofmonth='+dayOfMonth);
+      if(recur==='yearly'&&dayOfMonth>0) parts.push('dayofmonth='+dayOfMonth);
+      if(recur==='yearly'&&monthOfYear>0) parts.push('month='+monthOfYear);
+    }
     if(delayRaw){ 
       let n=parseFloat(delayRaw); 
       if(!isNaN(n)&&n>=0){ 
@@ -858,12 +1225,38 @@ async function createAutomation(){
         parts.push('intervalms='+intervalMs); 
       } 
     } 
-    parts.push('commands="'+cmdsParam.replace(/"/g,'\\"')+'"'); 
-    parts.push('enabled='+(en?1:0)); 
-    if(runAtBoot) parts.push('runatboot=1'); 
-    if(editId && idx===0) parts.push('id='+editId); 
-    return parts.join(' '); 
-  }; 
+    parts.push('commands="'+cmdsParam.replace(/"/g,'\\"')+'"');
+    parts.push('enabled='+(en?1:0));
+    if(runAtBoot) parts.push('runatboot=1');
+    // Secondary triggers: append as a JSON array via the `secondarytriggers`
+    // arg. The backend merges these with the primary trigger + runAtBoot boot
+    // into the triggers[] array, with a cap of 4 total.
+    const secondaries=collectSecondaryTriggers();
+    if(secondaries===null){
+      document.getElementById('a_error').textContent='One or more Additional Triggers is incomplete. Fill in all fields or remove the row.';
+      document.getElementById('a_error').style.display='block';
+      throw new Error('Invalid secondary');
+    }
+    const primaryIsManual=(type==='afterDelay');
+    const manualSecCount=secondaries.filter(s=>s.type==='manual').length;
+    if((primaryIsManual?1:0)+manualSecCount>1){
+      document.getElementById('a_error').textContent='Only one manual (After Delay) trigger is allowed per automation.';
+      document.getElementById('a_error').style.display='block';
+      throw new Error('Manual cap');
+    }
+    const totalTriggers=1+(runAtBoot?1:0)+secondaries.length;
+    if(totalTriggers>4){
+      document.getElementById('a_error').textContent='Maximum of 4 triggers per automation.';
+      document.getElementById('a_error').style.display='block';
+      throw new Error('Total cap');
+    }
+    if(secondaries.length>0){
+      const json=JSON.stringify(secondaries);
+      parts.push('secondarytriggers="'+json.replace(/"/g,'\\"')+'"');
+    }
+    if(editId && idx===0) parts.push('id='+editId);
+    return parts.join(' ');
+  };
   const fullCmds=(times.length?times:[null]).map((t,idx)=>buildParts(t,idx)); 
   
   Promise.all(fullCmds.map(c=>postCLIValidate(c))).then(vals=>{ 
@@ -914,28 +1307,58 @@ async function autoDelete(id){
   if(!await hwConfirm('Delete automation '+id+'?')) return;
   postCLI('automation delete id='+id).then(()=>loadAutos());
 }
-function autoRun(id){ 
-  postCLI('automation run id='+id).then(r=>{ 
-    if(r.toLowerCase().indexOf('error:')>=0){ 
-      alert(r); 
-    } else { 
-      alert('Automation executed: '+r); 
-      loadAutos(); 
-    } 
-  }); 
+function autoRun(id){
+  postCLI('automation run id='+id).then(r=>{
+    if(r.toLowerCase().indexOf('error:')>=0){
+      alert(r);
+    } else {
+      alert('Automation executed: '+r);
+      loadAutos();
+    }
+  });
+}
+function autoTrigger(id){
+  postCLI('automation trigger id='+id).then(r=>{
+    if(r.toLowerCase().indexOf('error:')>=0){
+      alert(r);
+    } else {
+      // No alert — the "Armed" badge + countdown in the Next Run column
+      // gives immediate visual feedback once loadAutos() returns.
+      loadAutos();
+    }
+  });
 }
 function autoEdit(id){
   fetch('/api/automations').then(r=>r.json()).then(data=>{
     if(!data||!data.automations) return;
-    const a=data.automations.find(x=>String(x.id)===String(id));
+    const a=normalizeAutomation(data.automations.find(x=>String(x.id)===String(id)));
     if(!a){alert('Automation not found');return;}
-    const sched=a.schedule||{};
+    const sched=a.trigger||{};
+    // Clear any previous secondary trigger rows, then re-populate from the
+    // saved triggers array (excluding the primary and the synthesized boot).
+    const secCont=document.getElementById('secondary_triggers_container');
+    if(secCont) secCont.innerHTML='';
+    if(Array.isArray(a.triggers) && a.triggers.length > 0){
+      // The primary trigger (first non-boot) and a runAtBoot-derived boot
+      // trigger are already handled by the main form. Everything else goes
+      // into the secondary rows.
+      let primarySeen=false, bootSeen=false;
+      for(const t of a.triggers){
+        if(!t||!t.type) continue;
+        const tt=t.type.toLowerCase();
+        if(!primarySeen && tt!=='boot'){ primarySeen=true; continue; }
+        if(!bootSeen && tt==='boot' && a.runAtBoot===true){ bootSeen=true; continue; }
+        addSecondaryTrigger(t);
+      }
+    }
     document.getElementById('a_name').value=a.name||'';
-    const typeRaw=((sched.type||a.type||'attime')).toLowerCase();
+    const typeRaw=((sched.type||a.type||'time')).toLowerCase();
     let typeVal='atTime';
-    if(typeRaw==='afterdelay') typeVal='afterDelay';
+    // Accept both legacy (atTime/afterDelay/onBoot) and v1 (time/manual/boot) type names.
+    if(typeRaw==='afterdelay'||typeRaw==='manual') typeVal='afterDelay';
     else if(typeRaw==='interval') typeVal='interval';
-    else if(typeRaw==='onboot') typeVal='onBoot';
+    else if(typeRaw==='onboot'||typeRaw==='boot') typeVal='onBoot';
+    else if(a.runAtBoot===true) typeVal='onBoot';
     document.getElementById('a_type').value=typeVal;
     autoTypeChanged();
     const recurEl=document.getElementById('a_recur');
@@ -951,6 +1374,18 @@ function autoEdit(id){
     if((sched.recurrence||a.recurrence||'')==='weekly'){
       ['mon','tue','wed','thu','fri','sat','sun'].forEach(d=>{const el=document.getElementById('day_'+d);if(el)el.checked=false;});
       (sched.days||a.days||[]).forEach(d=>{const el=document.getElementById('day_'+d.toLowerCase().substring(0,3));if(el)el.checked=true;});
+      const wiEl=document.getElementById('a_week_interval');
+      if(wiEl){const wi=sched.weekInterval||a.weekInterval||1;wiEl.value=(wi>=1&&wi<=12)?wi:1;}
+    }
+    if((sched.recurrence||a.recurrence||'')==='monthly'){
+      const dEl=document.getElementById('a_day_of_month');
+      if(dEl){const dom=sched.dayOfMonth||a.dayOfMonth||1;dEl.value=(dom>=1&&dom<=31)?dom:1;}
+    }
+    if((sched.recurrence||a.recurrence||'')==='yearly'){
+      const dEl=document.getElementById('a_day_of_month_yearly');
+      const mEl=document.getElementById('a_month_of_year');
+      if(dEl){const dom=sched.dayOfMonth||a.dayOfMonth||1;dEl.value=(dom>=1&&dom<=31)?dom:1;}
+      if(mEl){const moy=sched.month||a.month||1;mEl.value=(moy>=1&&moy<=12)?moy:1;}
     }
     if(typeVal==='afterDelay') document.getElementById('a_delay').value=sched.delayMs||a.delayMs||0;
     if(typeVal==='interval') document.getElementById('a_interval').value=sched.intervalMs||a.intervalMs||0;
@@ -987,7 +1422,7 @@ function importAutomationFromJson(autoJson, statusEl){
     if(statusEl) statusEl.innerHTML='<span style="color:var(--danger)">Error: missing name</span>';
     return Promise.reject(new Error('missing name'));
   }
-  const sched=autoJson.schedule||{};
+  const sched=autoJson.trigger||{};
   const rawType=(sched.type||autoJson.type||'').toLowerCase();
   if(!rawType){
     if(statusEl) statusEl.innerHTML='<span style="color:var(--danger)">Error: missing schedule.type</span>';
@@ -1002,6 +1437,12 @@ function importAutomationFromJson(autoJson, statusEl){
   if(recurrence) parts.push('recurrence='+recurrence);
   const days=sched.days||autoJson.days||'';
   if(days) parts.push('days='+days);
+  const wi=sched.weekInterval||autoJson.weekInterval;
+  if(wi&&wi>1) parts.push('weekinterval='+wi);
+  const dom=sched.dayOfMonth||autoJson.dayOfMonth;
+  if(dom&&dom>=1&&dom<=31) parts.push('dayofmonth='+dom);
+  const moy=sched.month||autoJson.month;
+  if(moy&&moy>=1&&moy<=12) parts.push('month='+moy);
   const delayMs=typeof sched.delayMs!=='undefined'?sched.delayMs:autoJson.delayMs;
   if(typeof delayMs!=='undefined'&&delayMs!==null) parts.push('delayms='+delayMs);
   const intervalMs=typeof sched.intervalMs!=='undefined'?sched.intervalMs:autoJson.intervalMs;
@@ -1009,6 +1450,11 @@ function importAutomationFromJson(autoJson, statusEl){
   if(sched.runAtBoot===true||autoJson.runAtBoot===true) parts.push('runatboot=1');
   const bootDelay=typeof sched.bootDelayMs!=='undefined'?sched.bootDelayMs:autoJson.bootDelayMs;
   if(typeof bootDelay!=='undefined'&&bootDelay!==null) parts.push('bootdelayms='+bootDelay);
+  // Propagate secondary triggers if present in the import JSON. This ensures
+  // multi-trigger automations round-trip through export → import.
+  if(Array.isArray(autoJson.secondaryTriggers) && autoJson.secondaryTriggers.length > 0){
+    parts.push('secondarytriggers="'+JSON.stringify(autoJson.secondaryTriggers).replace(/"/g,'\\"')+'"');
+  }
   const condition=autoJson.condition||'';
   if(condition) parts.push('condition="'+condition.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
   const commands=Array.isArray(autoJson.commands)?autoJson.commands:(autoJson.command?[autoJson.command]:[]);
@@ -1119,24 +1565,46 @@ function exportAllAutomations(){
             status.innerHTML='<span style="color:var(--success)">' + downloadCount + ' files downloaded separately (import-ready)</span>'; 
             return; 
           } 
-          const auto = data.automations[index];
-          const sched = auto.schedule || {};
+          const auto = normalizeAutomation(data.automations[index]);
+          const sched = auto.trigger || {};
           const exportAuto={}; 
           exportAuto.name=auto.name; 
           if(auto.condition) exportAuto.condition=auto.condition;
-          const rawType = sched.type || auto.type || '';
-          if(rawType==='attime') exportAuto.schedule={type:'atTime'}; 
-          else if(rawType==='afterdelay') exportAuto.schedule={type:'afterDelay'}; 
-          else exportAuto.schedule={type:rawType}; 
-          if(sched.time||auto.time) exportAuto.schedule.time=sched.time||auto.time; 
-          if(sched.recurrence) exportAuto.schedule.recurrence=sched.recurrence; 
-          if(sched.days||auto.days) exportAuto.schedule.days=sched.days||auto.days; 
-          if(sched.delayMs||auto.delayMs) exportAuto.schedule.delayMs=sched.delayMs||auto.delayMs; 
-          if(sched.intervalMs||auto.intervalMs) exportAuto.schedule.intervalMs=sched.intervalMs||auto.intervalMs; 
-          if(sched.runAtBoot===true||auto.runAtBoot===true) exportAuto.schedule.runAtBoot=true; 
-          const bootDelay=sched.bootDelayMs||auto.bootDelayMs;
-          if(typeof bootDelay!=='undefined'&&bootDelay!==null) exportAuto.schedule.bootDelayMs=bootDelay; 
-          if(auto.commands) exportAuto.commands=auto.commands; 
+          const rawType = (sched.type || auto.type || '').toLowerCase();
+          // Emit new v1 type names in the export; accept legacy names on input.
+          let normType = rawType;
+          if(normType==='attime') normType='time';
+          else if(normType==='afterdelay') normType='manual';
+          else if(normType==='onboot') normType='boot';
+          exportAuto.trigger={type:normType};
+          if(sched.time||auto.time) exportAuto.trigger.time=sched.time||auto.time;
+          if(sched.recurrence) exportAuto.trigger.recurrence=sched.recurrence;
+          if(sched.days||auto.days) exportAuto.trigger.days=sched.days||auto.days;
+          if((sched.weekInterval||auto.weekInterval)&&(sched.weekInterval||auto.weekInterval)>1) exportAuto.trigger.weekInterval=sched.weekInterval||auto.weekInterval;
+          if(sched.dayOfMonth||auto.dayOfMonth) exportAuto.trigger.dayOfMonth=sched.dayOfMonth||auto.dayOfMonth;
+          if(sched.month||auto.month) exportAuto.trigger.month=sched.month||auto.month;
+          if(sched.delayMs||auto.delayMs) exportAuto.trigger.delayMs=sched.delayMs||auto.delayMs;
+          if(sched.intervalMs||auto.intervalMs) exportAuto.trigger.intervalMs=sched.intervalMs||auto.intervalMs;
+          if(normType==='boot'&&(sched.bootDelayMs||auto.bootDelayMs)) exportAuto.trigger.bootDelayMs=sched.bootDelayMs||auto.bootDelayMs;
+          // runAtBoot flag lives at automation top-level in v1 schema.
+          if(auto.runAtBoot===true){ exportAuto.runAtBoot=true; if(auto.bootDelayMs) exportAuto.bootDelayMs=auto.bootDelayMs; }
+          // Additional (non-primary, non-synthesized-boot) triggers get
+          // exported so multi-trigger automations round-trip through export.
+          if(Array.isArray(auto.triggers) && auto.triggers.length > 1){
+            const extras=[];
+            let skippedPrimary=false, skippedBoot=!(auto.runAtBoot===true);
+            for(const tr of auto.triggers){
+              if(!tr||!tr.type) continue;
+              const tt=tr.type.toLowerCase();
+              if(!skippedPrimary && tt!=='boot'){ skippedPrimary=true; continue; }
+              if(!skippedBoot && tt==='boot'){ skippedBoot=true; continue; }
+              const copy=Object.assign({},tr);
+              delete copy.nextAt; delete copy.anchor;
+              extras.push(copy);
+            }
+            if(extras.length>0) exportAuto.secondaryTriggers=extras;
+          }
+          if(auto.commands) exportAuto.commands=auto.commands;
           else if(auto.command) exportAuto.commands=[auto.command]; 
           exportAuto.enabled=auto.enabled===true; 
           const blob=new Blob([JSON.stringify(exportAuto,null,2)],{type:'application/json'}); 
@@ -1177,27 +1645,54 @@ function exportAllAutomations(){
 function exportSingleAutomation(id){
   fetch('/api/automations').then(r=>r.json()).then(data=>{
     if(!data||!data.automations) throw new Error('No automations data');
-    const auto=data.automations.find(a=>String(a.id)===String(id));
+    const auto=normalizeAutomation(data.automations.find(a=>String(a.id)===String(id)));
     if(!auto) throw new Error('Automation '+id+' not found');
-    const sched=auto.schedule||{};
+    const sched=auto.trigger||{};
     const exportAuto={};
     exportAuto.name=auto.name;
     if(auto.condition) exportAuto.condition=auto.condition;
-    const rawType=(sched.type||auto.type||'');
-    const typeNorm=rawType.toLowerCase();
-    if(typeNorm==='attime') exportAuto.schedule={type:'atTime'};
-    else if(typeNorm==='afterdelay') exportAuto.schedule={type:'afterDelay'};
-    else exportAuto.schedule={type:rawType||'interval'};
-    if(sched.time||auto.time) exportAuto.schedule.time=sched.time||auto.time;
-    if(sched.recurrence) exportAuto.schedule.recurrence=sched.recurrence;
-    if(sched.days||auto.days) exportAuto.schedule.days=sched.days||auto.days;
+    const rawType=(sched.type||auto.type||'').toLowerCase();
+    let normType=rawType;
+    if(normType==='attime') normType='time';
+    else if(normType==='afterdelay') normType='manual';
+    else if(normType==='onboot') normType='boot';
+    else if(!normType) normType='interval';
+    exportAuto.trigger={type:normType};
+    if(sched.time||auto.time) exportAuto.trigger.time=sched.time||auto.time;
+    if(sched.recurrence) exportAuto.trigger.recurrence=sched.recurrence;
+    if(sched.days||auto.days) exportAuto.trigger.days=sched.days||auto.days;
+    const exWi=sched.weekInterval||auto.weekInterval;
+    if(exWi&&exWi>1) exportAuto.trigger.weekInterval=exWi;
+    if(sched.dayOfMonth||auto.dayOfMonth) exportAuto.trigger.dayOfMonth=sched.dayOfMonth||auto.dayOfMonth;
+    if(sched.month||auto.month) exportAuto.trigger.month=sched.month||auto.month;
     const delayMs=typeof sched.delayMs!=='undefined'?sched.delayMs:auto.delayMs;
-    if(typeof delayMs!=='undefined'&&delayMs!==null) exportAuto.schedule.delayMs=delayMs;
+    if(typeof delayMs!=='undefined'&&delayMs!==null) exportAuto.trigger.delayMs=delayMs;
     const intervalMs=typeof sched.intervalMs!=='undefined'?sched.intervalMs:auto.intervalMs;
-    if(typeof intervalMs!=='undefined'&&intervalMs!==null) exportAuto.schedule.intervalMs=intervalMs;
-    if(sched.runAtBoot===true||auto.runAtBoot===true) exportAuto.schedule.runAtBoot=true;
-    const bootDelay=typeof sched.bootDelayMs!=='undefined'?sched.bootDelayMs:auto.bootDelayMs;
-    if(typeof bootDelay!=='undefined'&&bootDelay!==null) exportAuto.schedule.bootDelayMs=bootDelay;
+    if(typeof intervalMs!=='undefined'&&intervalMs!==null) exportAuto.trigger.intervalMs=intervalMs;
+    // v1 runAtBoot/bootDelayMs at automation top-level, not inside trigger.
+    if(auto.runAtBoot===true){ exportAuto.runAtBoot=true; if(auto.bootDelayMs) exportAuto.bootDelayMs=auto.bootDelayMs; }
+    // Additional (non-primary, non-synthesized-boot) triggers so the export
+    // preserves the full multi-trigger configuration.
+    if(Array.isArray(auto.triggers) && auto.triggers.length > 1){
+      const extras=[];
+      let skippedPrimary=false, skippedBoot=!(auto.runAtBoot===true);
+      for(const tr of auto.triggers){
+        if(!tr||!tr.type) continue;
+        const tt=tr.type.toLowerCase();
+        if(!skippedPrimary && tt!=='boot'){ skippedPrimary=true; continue; }
+        if(!skippedBoot && tt==='boot'){ skippedBoot=true; continue; }
+        const copy=Object.assign({},tr);
+        delete copy.nextAt; delete copy.anchor;
+        extras.push(copy);
+      }
+      if(extras.length>0) exportAuto.secondaryTriggers=extras;
+    }
+    // bootDelayMs is only meaningful inside a "boot"-type trigger; for other
+    // types, it's the top-level runAtBoot companion written above.
+    if(normType==='boot'){
+      const bootDelay=typeof sched.bootDelayMs!=='undefined'?sched.bootDelayMs:auto.bootDelayMs;
+      if(typeof bootDelay!=='undefined'&&bootDelay!==null) exportAuto.trigger.bootDelayMs=bootDelay;
+    }
     // Note: nextAt is NOT exported (recomputed on import)
     if(auto.commands) exportAuto.commands=auto.commands;
     else if(auto.command) exportAuto.commands=[auto.command];

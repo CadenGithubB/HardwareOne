@@ -31,15 +31,15 @@ struct ServoProfile {
 #define MAX_SERVO_CHANNELS 16
 
 // Global PCA9685 driver instance
-extern Adafruit_PWMServoDriver* pwmDriver;
+extern Adafruit_PWMServoDriver* gPwmDriver;
 extern ServoProfile servoProfiles[MAX_SERVO_CHANNELS];
 
 // PCA9685 initialization
-bool initPCA9685();
+bool servoInit();
 
 // Servo control functions
-void setServoAngle(uint8_t channel, int angle);
-void setPWMValue(uint8_t channel, uint16_t value);
+void servoSetAngle(uint8_t channel, int angle);
+void servoSetPWM(uint8_t channel, uint16_t value);
 
 // PCA9685/Servo command registry (for system_utils.cpp)
 struct CommandEntry;

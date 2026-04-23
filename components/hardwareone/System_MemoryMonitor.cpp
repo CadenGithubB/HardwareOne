@@ -16,45 +16,45 @@
 
 // Sensor connection externs (stubs provide these when sensor disabled, actual sensor files when enabled)
 #if ENABLE_IMU_SENSOR
-extern bool imuConnected;
+extern bool gImuConnected;
 #endif
 #if ENABLE_THERMAL_SENSOR
-extern bool thermalConnected;
+extern bool gThermalConnected;
 #endif
 #if ENABLE_TOF_SENSOR
-extern bool tofConnected;
+extern bool gTofConnected;
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-extern bool gamepadConnected;
+extern bool gGamepadConnected;
 #endif
 #if ENABLE_FM_RADIO
-extern bool fmRadioConnected;
+extern bool gFmRadioConnected;
 #endif
 
 // External sensor enabled flags (for safe stale-handle detection)
-extern bool gamepadEnabled;
-extern bool thermalEnabled;
-extern bool imuEnabled;
-extern bool tofEnabled;
-extern bool fmRadioEnabled;
-extern bool gpsEnabled;
-extern bool apdsColorEnabled;
-extern bool apdsProximityEnabled;
-extern bool apdsGestureEnabled;
-extern bool presenceEnabled;
-extern bool rtcEnabled;
+extern bool gGamepadEnabled;
+extern bool gThermalEnabled;
+extern bool gImuEnabled;
+extern bool gTofEnabled;
+extern bool gFmRadioEnabled;
+extern bool gGpsEnabled;
+extern bool gApdsColorEnabled;
+extern bool gApdsProximityEnabled;
+extern bool gApdsGestureEnabled;
+extern bool gPresenceEnabled;
+extern bool gRtcEnabled;
 
 // External task handles for stack monitoring
 extern TaskHandle_t gCmdExecTaskHandle;
-extern TaskHandle_t gamepadTaskHandle;
-extern TaskHandle_t thermalTaskHandle;
-extern TaskHandle_t imuTaskHandle;
-extern TaskHandle_t tofTaskHandle;
-extern TaskHandle_t fmRadioTaskHandle;
-extern TaskHandle_t gpsTaskHandle;
-extern TaskHandle_t apdsTaskHandle;
-extern TaskHandle_t presenceTaskHandle;
-extern TaskHandle_t rtcTaskHandle;
+extern TaskHandle_t gGamepadTaskHandle;
+extern TaskHandle_t gThermalTaskHandle;
+extern TaskHandle_t gImuTaskHandle;
+extern TaskHandle_t gTofTaskHandle;
+extern TaskHandle_t gFmRadioTaskHandle;
+extern TaskHandle_t gGpsTaskHandle;
+extern TaskHandle_t gApdsTaskHandle;
+extern TaskHandle_t gPresenceTaskHandle;
+extern TaskHandle_t gRtcTaskHandle;
 
 // AllocEntry struct + gAllocTracker declared in System_MemUtil.h
 extern int gAllocTrackerCount;
@@ -271,15 +271,15 @@ void sampleMemoryState(bool forceFullScan) {
       {"espnow_task",        espnowHandle,          ESPNOW_HB_STACK_WORDS},
       {"cmd_exec_task",      gCmdExecTaskHandle,    CMD_EXEC_STACK_WORDS},
       {"sensor_queue_task",  queueProcessorTask,    SENSOR_QUEUE_STACK_WORDS},
-      {"gamepad_task",       gamepadTaskHandle,     GAMEPAD_STACK_WORDS},
-      {"thermal_task",  thermalTaskHandle,     THERMAL_STACK_WORDS},
-      {"imu_task",      imuTaskHandle,         IMU_STACK_WORDS},
-      {"tof_task",      tofTaskHandle,         TOF_STACK_WORDS},
-      {"fmradio_task",  fmRadioTaskHandle,     FMRADIO_STACK_WORDS},
-      {"gps_task",      gpsTaskHandle,         GPS_STACK_WORDS},
-      {"apds_task",     apdsTaskHandle,        APDS_STACK_WORDS},
-      {"presence_task", presenceTaskHandle,    PRESENCE_STACK_WORDS},
-      {"rtc_task",      rtcTaskHandle,         RTC_STACK_WORDS},
+      {"gamepad_task",       gGamepadTaskHandle,     GAMEPAD_STACK_WORDS},
+      {"thermal_task",  gThermalTaskHandle,     THERMAL_STACK_WORDS},
+      {"imu_task",      gImuTaskHandle,         IMU_STACK_WORDS},
+      {"tof_task",      gTofTaskHandle,         TOF_STACK_WORDS},
+      {"fmradio_task",  gFmRadioTaskHandle,     FMRADIO_STACK_WORDS},
+      {"gps_task",      gGpsTaskHandle,         GPS_STACK_WORDS},
+      {"apds_task",     gApdsTaskHandle,        APDS_STACK_WORDS},
+      {"presence_task", gPresenceTaskHandle,    PRESENCE_STACK_WORDS},
+      {"rtc_task",      gRtcTaskHandle,         RTC_STACK_WORDS},
     };
     
     // Enabled flags for each task — if false, handle may be stale (task self-deleted)
@@ -287,15 +287,15 @@ void sampleMemoryState(bool forceFullScan) {
       espnowHandle != nullptr,                                        // espnow_task
       gCmdExecTaskHandle != nullptr,                                  // cmd_exec_task
       queueProcessorTask != nullptr,                                  // sensor_queue_task
-      gamepadEnabled,                                                 // gamepad_task
-      thermalEnabled,                                                 // thermal_task
-      imuEnabled,                                                     // imu_task
-      tofEnabled,                                                     // tof_task
-      fmRadioEnabled,                                                 // fmradio_task
-      gpsEnabled,                                                     // gps_task
-      (apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled), // apds_task
-      presenceEnabled,                                                // presence_task
-      rtcEnabled,                                                     // rtc_task
+      gGamepadEnabled,                                                 // gamepad_task
+      gThermalEnabled,                                                 // thermal_task
+      gImuEnabled,                                                     // imu_task
+      gTofEnabled,                                                     // tof_task
+      gFmRadioEnabled,                                                 // fmradio_task
+      gGpsEnabled,                                                     // gps_task
+      (gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled), // apds_task
+      gPresenceEnabled,                                                // presence_task
+      gRtcEnabled,                                                     // rtc_task
     };
     
     bool anyTask = false;

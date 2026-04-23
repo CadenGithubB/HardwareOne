@@ -14,7 +14,7 @@
 #if ENABLE_MICROPHONE_SENSOR
 
 // Microphone sensor state
-extern bool micEnabled;
+extern bool gMicEnabled;
 extern bool micConnected;
 extern bool micRecording;
 

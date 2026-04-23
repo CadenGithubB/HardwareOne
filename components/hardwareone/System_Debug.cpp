@@ -487,13 +487,13 @@ void debugQueuePrintf(uint64_t flag, const char* fmt, ...) {
   if (!getDebugQueue() || !getDebugFreeQueue()) return;
 
   // CRITICAL: Check if we're in a sensor task that's shutting down
-  extern bool thermalEnabled, imuEnabled, tofEnabled, fmRadioEnabled;
-  extern TaskHandle_t thermalTaskHandle, imuTaskHandle, tofTaskHandle, fmRadioTaskHandle;
+  extern bool gThermalEnabled, gImuEnabled, gTofEnabled, gFmRadioEnabled;
+  extern TaskHandle_t gThermalTaskHandle, gImuTaskHandle, gTofTaskHandle, gFmRadioTaskHandle;
   TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
-  if (currentTask == thermalTaskHandle && !thermalEnabled) return;
-  if (currentTask == imuTaskHandle && !imuEnabled) return;
-  if (currentTask == tofTaskHandle && !tofEnabled) return;
-  if (currentTask == fmRadioTaskHandle && !fmRadioEnabled) return;
+  if (currentTask == gThermalTaskHandle && !gThermalEnabled) return;
+  if (currentTask == gImuTaskHandle && !gImuEnabled) return;
+  if (currentTask == gTofTaskHandle && !gTofEnabled) return;
+  if (currentTask == gFmRadioTaskHandle && !gFmRadioEnabled) return;
 
   DebugMessage* msg = nullptr;
   BaseType_t got = xPortInIsrContext() ?
@@ -582,12 +582,12 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
   }
 
   // 4. Skip output if current task is a sensor task that's been disabled
-  extern bool thermalEnabled, imuEnabled, tofEnabled;
+  extern bool gThermalEnabled, gImuEnabled, gTofEnabled;
   TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
-  extern TaskHandle_t thermalTaskHandle, imuTaskHandle, tofTaskHandle;
-  if (currentTask == thermalTaskHandle && !thermalEnabled) return;
-  if (currentTask == imuTaskHandle && !imuEnabled) return;
-  if (currentTask == tofTaskHandle && !tofEnabled) return;
+  extern TaskHandle_t gThermalTaskHandle, gImuTaskHandle, gTofTaskHandle;
+  if (currentTask == gThermalTaskHandle && !gThermalEnabled) return;
+  if (currentTask == gImuTaskHandle && !gImuEnabled) return;
+  if (currentTask == gTofTaskHandle && !gTofEnabled) return;
 
   // 5. Compute per-message route mask
   uint8_t route;

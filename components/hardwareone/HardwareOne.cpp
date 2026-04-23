@@ -166,7 +166,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 bool createGamepadTask();
 bool isSensorConnected(const char* moduleName);
 void setCurrentCommandContext(const CommandContext& ctx);
-bool initGamepad();
+bool gamepadInit();
 
 
 // Pre-allocation snapshots (used by mem_util.h)
@@ -338,7 +338,7 @@ void sensorStatusBump() {
   gSensorStatusSeq = s;
   DEBUG_SENSORSF("[STATUS_BUMP] seq=%lu cause='%s' | thermal=%d tof=%d imu=%d gamepad=%d",
                  (unsigned long)gSensorStatusSeq, gLastStatusCause,
-                 thermalEnabled ? 1 : 0, tofEnabled ? 1 : 0, imuEnabled ? 1 : 0, gamepadEnabled ? 1 : 0);
+                 gThermalEnabled ? 1 : 0, gTofEnabled ? 1 : 0, gImuEnabled ? 1 : 0, gGamepadEnabled ? 1 : 0);
   DEBUG_SSEF("sensorStatusBump: seq now %lu | cause=%s (debounced)", (unsigned long)gSensorStatusSeq, gLastStatusCause);
   // Mark dirty and schedule debounced broadcast
   gSensorStatusDirty = true;
@@ -1107,66 +1107,8 @@ void hardwareone_setup() {
   // 3. MUTEXES + DEBUG SYSTEM + BUFFERS
   // ========================================================================
 
-  // Sensor cache mutexes (one per enabled sensor)
-#if ENABLE_THERMAL_SENSOR
-  if (!gThermalCache.mutex) {
-    gThermalCache.mutex = xSemaphoreCreateMutex();
-    if (!gThermalCache.mutex) {
-      Serial.println("FATAL: Failed to create thermal cache mutex");
-      while (1) delay(1000);
-    }
-  }
-#endif
-
-#if ENABLE_IMU_SENSOR
-  if (!gImuCache.mutex) {
-    gImuCache.mutex = xSemaphoreCreateMutex();
-    if (!gImuCache.mutex) {
-      Serial.println("FATAL: Failed to create IMU cache mutex");
-      while (1) delay(1000);
-    }
-  }
-#endif
-
-#if ENABLE_TOF_SENSOR
-  if (!gTofCache.mutex) {
-    gTofCache.mutex = xSemaphoreCreateMutex();
-    if (!gTofCache.mutex) {
-      Serial.println("FATAL: Failed to create ToF cache mutex");
-      while (1) delay(1000);
-    }
-  }
-#endif
-
-#if ENABLE_GAMEPAD_SENSOR
-  if (!gControlCache.mutex) {
-    gControlCache.mutex = xSemaphoreCreateMutex();
-    if (!gControlCache.mutex) {
-      Serial.println("FATAL: Failed to create gamepad cache mutex");
-      while (1) delay(1000);
-    }
-  }
-#endif
-
-#if ENABLE_GPS_SENSOR
-  if (!gGPSCache.mutex) {
-    gGPSCache.mutex = xSemaphoreCreateMutex();
-    if (!gGPSCache.mutex) {
-      Serial.println("FATAL: Failed to create GPS cache mutex");
-      while (1) delay(1000);
-    }
-  }
-#endif
-
-#if ENABLE_RTC_SENSOR
-  if (!gRTCCache.mutex) {
-    gRTCCache.mutex = xSemaphoreCreateMutex();
-    if (!gRTCCache.mutex) {
-      Serial.println("FATAL: Failed to create RTC cache mutex");
-      while (1) delay(1000);
-    }
-  }
-#endif
+  // Sensor cache mutexes are now created lazily in each *StartInternal() function
+  // This saves memory for disabled sensors and allows better error handling
 
   // Global mutexes (fsMutex, gJsonResponseMutex, gMeshRetryMutex, etc.)
   initMutexes();
@@ -1354,10 +1296,10 @@ void hardwareone_setup() {
     
 #if ENABLE_OLED_DISPLAY && ENABLE_GAMEPAD_SENSOR
     // Start gamepad sensor before first-time setup so OLED keyboard can receive input
-    if (oledConnected && oledEnabled) {
+    if (oledConnected && gOledEnabled) {
       DEBUG_SYSTEMF("[Boot] Starting gamepad sensor for OLED first-time setup");
-      const char* result = startGamepadInternal();  // Properly initializes hardware and creates task
-      DEBUG_SENSORSF("[Boot] Gamepad init result: %s", result);
+      bool ok = gamepadStartInternal();  // Properly initializes hardware and creates task
+      DEBUG_SENSORSF("[Boot] Gamepad init result: %s", ok ? "SUCCESS" : "FAILED");
       delay(100);  // Give gamepad task time to start polling
     }
 #endif
@@ -1716,8 +1658,8 @@ void hardwareone_loop() {
     if (gNextSensorStatusBroadcastDue != 0 && (long)(nowMs - gNextSensorStatusBroadcastDue) >= 0) {
       DEBUG_SENSORSF("[SSE_BROADCAST] SENDING | seq=%lu thermal=%d tof=%d imu=%d gamepad=%d apdsColor=%d apdsProx=%d apdsGest=%d",
                      (unsigned long)gSensorStatusSeq,
-                     thermalEnabled ? 1 : 0, tofEnabled ? 1 : 0, imuEnabled ? 1 : 0, gamepadEnabled ? 1 : 0,
-                     apdsColorEnabled ? 1 : 0, apdsProximityEnabled ? 1 : 0, apdsGestureEnabled ? 1 : 0);
+                     gThermalEnabled ? 1 : 0, gTofEnabled ? 1 : 0, gImuEnabled ? 1 : 0, gGamepadEnabled ? 1 : 0,
+                     gApdsColorEnabled ? 1 : 0, gApdsProximityEnabled ? 1 : 0, gApdsGestureEnabled ? 1 : 0);
       broadcastSensorStatusToAllSessions();
       DEBUG_SENSORSF("[SSE_BROADCAST] SENT successfully");
       gSensorStatusDirty = false;
@@ -1729,7 +1671,15 @@ void hardwareone_loop() {
   if (gSettings.automationsEnabled) {
     static unsigned long lastAutoCheck = 0;
     unsigned long nowAuto = millis();
-    if (gAutosDirty || (nowAuto - lastAutoCheck >= 60000)) {
+    time_t nowT = time(nullptr);
+    // Fast in-RAM due check: just an array scan of cached nextAt values, no
+    // I/O. The expensive schedulerTickMinute only runs when something is
+    // actually due, the cache is stale, an edit occurred, or the 60s safety
+    // interval elapses.
+    bool needFullTick = gAutosDirty ||
+                        automationsAnyDue(nowT) ||
+                        (nowAuto - lastAutoCheck >= 60000);
+    if (needFullTick) {
       gAutosDirty = false;
       schedulerTickMinute();
       lastAutoCheck = nowAuto;

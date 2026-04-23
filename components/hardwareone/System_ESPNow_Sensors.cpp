@@ -362,7 +362,7 @@ void espnowSensorStatusPeriodicTick() {
     lastCameraMs = now;
 
     PSRAM_JSON_DOC(doc);
-    doc["enabled"] = cameraEnabled;
+    doc["enabled"] = gCameraEnabled;
     doc["connected"] = cameraConnected;
     doc["streaming"] = cameraStreaming;
     doc["model"] = cameraModel;
@@ -382,13 +382,13 @@ void espnowSensorStatusPeriodicTick() {
     lastMicMs = now;
 
     PSRAM_JSON_DOC(doc);
-    doc["enabled"] = micEnabled;
+    doc["enabled"] = gMicEnabled;
     doc["connected"] = micConnected;
     doc["recording"] = micRecording;
     doc["sampleRate"] = micSampleRate;
     doc["bitDepth"] = micBitDepth;
     doc["channels"] = micChannels;
-    doc["level"] = (micEnabled && !micRecording) ? getAudioLevel() : 0;
+    doc["level"] = (gMicEnabled && !micRecording) ? getAudioLevel() : 0;
 
     char micBuf[256];
     size_t micLen = serializeJson(doc, micBuf, sizeof(micBuf));

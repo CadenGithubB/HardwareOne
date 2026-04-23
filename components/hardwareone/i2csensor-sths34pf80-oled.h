@@ -16,7 +16,7 @@ void displayPresenceData() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   oledDisplay->setCursor(0, 0);
   
-  if (!presenceConnected || !presenceEnabled) {
+  if (!gPresenceConnected || !gPresenceEnabled) {
     oledDisplay->println("== PRESENCE ==");
     oledDisplay->println();
     oledDisplay->println("Not active");
@@ -73,7 +73,7 @@ static bool presenceOLEDModeAvailable(String* outReason) {
 static void presenceToggleConfirmed(void* userData) {
   (void)userData;
   extern void executeOLEDCommand(const String& argsInput);
-  if (presenceEnabled) {
+  if (gPresenceEnabled) {
     executeOLEDCommand("closepresence");
   } else {
     executeOLEDCommand("openpresence");
@@ -83,7 +83,7 @@ static void presenceToggleConfirmed(void* userData) {
 // Input handler for Presence OLED mode - X button toggles sensor
 static bool presenceInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (presenceEnabled) {
+    if (gPresenceEnabled) {
       oledConfirmRequest("Close Presence?", nullptr, presenceToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open Presence?", nullptr, presenceToggleConfirmed, nullptr);

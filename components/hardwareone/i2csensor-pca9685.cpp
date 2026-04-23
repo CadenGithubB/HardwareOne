@@ -18,8 +18,8 @@
 // Note: BROADCAST_PRINTF is a macro defined in debug_system.h (included via system_utils.h)
 
 // Global PCA9685 driver instance
-Adafruit_PWMServoDriver* pwmDriver = nullptr;
-bool pwmDriverConnected = false;
+Adafruit_PWMServoDriver* gPwmDriver = nullptr;
+bool gPwmDriverConnected = false;
 
 // Servo profiles (16 channels)
 ServoProfile servoProfiles[MAX_SERVO_CHANNELS];
@@ -28,25 +28,25 @@ ServoProfile servoProfiles[MAX_SERVO_CHANNELS];
 // PCA9685 Initialization
 // ============================================================================
 
-bool initPCA9685() {
-  if (pwmDriverConnected) return true;
+bool servoInit() {
+  if (gPwmDriverConnected) return true;
   
-  if (!pwmDriver) {
-    pwmDriver = new Adafruit_PWMServoDriver(PCA9685_I2C_ADDRESS, Wire1);
-    if (!pwmDriver) return false;
+  if (!gPwmDriver) {
+    gPwmDriver = new Adafruit_PWMServoDriver(PCA9685_I2C_ADDRESS, Wire1);
+    if (!gPwmDriver) return false;
   }
   
   bool success = i2cDeviceTransaction(PCA9685_I2C_ADDRESS, 100000, 500, [&]() -> bool {
-    if (!pwmDriver->begin()) return false;
-    pwmDriver->setPWMFreq(50);  // 50Hz for standard servos
+    if (!gPwmDriver->begin()) return false;
+    gPwmDriver->setPWMFreq(50);  // 50Hz for standard servos
     return true;
   });
   if (!success) {
-    delete pwmDriver;
-    pwmDriver = nullptr;
+    delete gPwmDriver;
+    gPwmDriver = nullptr;
     return false;
   }
-  pwmDriverConnected = true;
+  gPwmDriverConnected = true;
   
   // Initialize servo profiles
   for (int i = 0; i < MAX_SERVO_CHANNELS; i++) {
@@ -69,8 +69,8 @@ const char* cmd_servo(const String& argsInput) {
   if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
   
   // Initialize PWM driver if not already done
-  if (!pwmDriverConnected) {
-    if (!initPCA9685()) {
+  if (!gPwmDriverConnected) {
+    if (!servoInit()) {
       return "[Servo] Error: PCA9685 not found at 0x40 - check wiring";
     }
   }
@@ -102,7 +102,7 @@ const char* cmd_servo(const String& argsInput) {
   }
   
   i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
-    pwmDriver->writeMicroseconds(channel, pulseWidth);
+    gPwmDriver->writeMicroseconds(channel, pulseWidth);
   });
   return getDebugBuffer();
 }
@@ -178,7 +178,7 @@ const char* cmd_servocalibrate(const String& argsInput) {
   int channel = valStr.toInt();
   if (channel < 0 || channel > 15) return "[Servo] Error: Channel must be 0-15";
   
-  if (!pwmDriverConnected) {
+  if (!gPwmDriverConnected) {
     return "[Servo] Error: PCA9685 not initialized - run 'servo' command first";
   }
   
@@ -200,7 +200,7 @@ const char* cmd_servocalibrate(const String& argsInput) {
   
   // Set to safe center
   i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
-    pwmDriver->writeMicroseconds(channel, 1500);
+    gPwmDriver->writeMicroseconds(channel, 1500);
   });
   
   snprintf(getDebugBuffer(), 1024, "Channel %d set to center (1500µs). Begin testing.", channel);
@@ -212,8 +212,8 @@ const char* cmd_pwm(const String& argsInput) {
   if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
   
   // Initialize PWM driver if not already done
-  if (!pwmDriverConnected) {
-    if (!initPCA9685()) {
+  if (!gPwmDriverConnected) {
+    if (!servoInit()) {
       return "[Servo] Error: PCA9685 not found at 0x40 - check wiring";
     }
   }
@@ -233,7 +233,7 @@ const char* cmd_pwm(const String& argsInput) {
     int freq = a.argInt(2, 0);
     if (freq >= 24 && freq <= 1526) {
       i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
-        pwmDriver->setPWMFreq(freq);
+        gPwmDriver->setPWMFreq(freq);
       });
       snprintf(getDebugBuffer(), 1024, "PWM channel %d set to %d (freq: %dHz)", channel, value, freq);
     } else {
@@ -244,7 +244,7 @@ const char* cmd_pwm(const String& argsInput) {
   }
   
   i2cDeviceTransactionVoid(PCA9685_I2C_ADDRESS, 100000, 200, [&]() {
-    pwmDriver->setPWM(channel, 0, value);
+    gPwmDriver->setPWM(channel, 0, value);
   });
   return getDebugBuffer();
 }

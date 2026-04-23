@@ -54,7 +54,7 @@ static const SettingEntry thermalSettingEntries[] = {
 };
 
 static bool isThermalConnected() {
-  return thermalConnected;
+  return gThermalConnected;
 }
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -75,30 +75,30 @@ extern const SettingsModule thermalSettingsModule = {
 ThermalCache gThermalCache;
 
 // Thermal sensor state (definitions)
-bool thermalEnabled = false;
-bool thermalConnected = false;
-unsigned long thermalLastStopTime = 0;
-TaskHandle_t thermalTaskHandle = nullptr;
+bool gThermalEnabled = false;
+bool gThermalConnected = false;
+unsigned long gThermalLastStopTime = 0;
+TaskHandle_t gThermalTaskHandle = nullptr;
 
 // Thermal initialization handoff flags
-volatile bool thermalInitRequested = false;
-volatile bool thermalInitDone = false;
-volatile bool thermalInitResult = false;
-volatile uint32_t thermalArmAtMs = 0;
+volatile bool gThermalInitRequested = false;
+volatile bool gThermalInitDone = false;
+volatile bool gThermalInitResult = false;
+volatile uint32_t gThermalArmAtMs = 0;
 
 // Thermal watermark tracking
 volatile UBaseType_t gThermalWatermarkMin = (UBaseType_t)0xFFFFFFFF;
 volatile UBaseType_t gThermalWatermarkNow = (UBaseType_t)0;
 
 // Thermal sensor hardware state
-bool mlx90640_initialized = false;
-volatile bool thermalPendingFirstFrame = false;
+bool gMlx90640Initialized = false;
+volatile bool gThermalPendingFirstFrame = false;
 Adafruit_MLX90640* gMLX90640 = nullptr;
 
 // Thermal timing constants
 const unsigned long MLX90640_READ_INTERVAL = 62;  // 16 Hz
 
-// Frame buffers for readThermalPixels (file scope for cleanup)
+// Frame buffers for thermalPoll (file scope for cleanup)
 static float* g_tempFrame = nullptr;
 static int16_t* g_localFrame = nullptr;
 
@@ -108,8 +108,8 @@ static int16_t* g_localFrame = nullptr;
 // Note: lockThermalCache() and unlockThermalCache() are declared in i2c_system.h
 
 // Forward declarations (implementations in main .ino)
-extern bool initThermalSensor();
-extern bool readThermalPixels();
+extern bool thermalInit();
+extern bool thermalPoll();
 extern void i2cSetDefaultWire1Clock();
 
 // MIN_RESTART_DELAY_MS defined in System_I2C.h
@@ -121,15 +121,15 @@ extern void i2cSetDefaultWire1Clock();
 // ============================================================================
 
 // Internal function called by queue processor
-bool startThermalSensorInternal() {
+bool thermalStartInternal() {
   DEBUG_CLIF("[THERMAL_INTERNAL] Starting thermal sensor initialization");
   DEBUG_CLIF("[THERMAL_INTERNAL] Current state: enabled=%d, connected=%d, heap=%lu", 
-             thermalEnabled ? 1 : 0, thermalConnected ? 1 : 0,
+             gThermalEnabled ? 1 : 0, gThermalConnected ? 1 : 0,
              (unsigned long)ESP.getFreeHeap());
   
   // Check if too soon after stop (prevent rapid restart crashes)
-  if (thermalLastStopTime > 0) {
-    unsigned long timeSinceStop = millis() - thermalLastStopTime;
+  if (gThermalLastStopTime > 0) {
+    unsigned long timeSinceStop = millis() - gThermalLastStopTime;
     DEBUG_CLIF("[THERMAL_INTERNAL] Time since last stop: %lu ms (min required: %d ms)", 
                timeSinceStop, MIN_RESTART_DELAY_MS);
     if (timeSinceStop < MIN_RESTART_DELAY_MS) {
@@ -145,6 +145,16 @@ bool startThermalSensorInternal() {
   }
   DEBUG_CLIF("[THERMAL_INTERNAL] Memory check passed: %lu bytes available",
              (unsigned long)ESP.getFreeHeap());
+
+  // Create cache mutex if not already created
+  if (!gThermalCache.mutex) {
+    gThermalCache.mutex = xSemaphoreCreateMutex();
+    if (!gThermalCache.mutex) {
+      ERROR_SENSORSF("[THERMAL] Failed to create cache mutex");
+      return false;
+    }
+    DEBUG_SENSORSF("[THERMAL] Cache mutex created");
+  }
 
   // Clock is now managed automatically by i2cTaskWithStandardTimeout wrapper
   // No manual clock changes needed - device registration specifies thermal's clock speed
@@ -170,56 +180,56 @@ bool startThermalSensorInternal() {
   }
 
   // Initialize thermal sensor independently (no ToF coordination)
-  if (!thermalConnected || gMLX90640 == nullptr) {
+  if (!gThermalConnected || gMLX90640 == nullptr) {
     DEBUG_CLIF("[THERMAL_INTERNAL] Sensor not connected - requesting initialization");
     // Defer initialization to thermalTask (larger stack); wait for completion to keep CLI behavior
-    thermalInitDone = false;
-    thermalInitResult = false;
-    thermalInitRequested = true;
+    gThermalInitDone = false;
+    gThermalInitResult = false;
+    gThermalInitRequested = true;
   }
 
   // Enable thermal sensor BEFORE creating task (task checks this flag immediately)
-  bool prev = thermalEnabled;
-  DEBUG_CLIF("[THERMAL_INTERNAL] Setting thermalEnabled=true (was %d)", prev ? 1 : 0);
-  thermalEnabled = true;
+  bool prev = gThermalEnabled;
+  DEBUG_CLIF("[THERMAL_INTERNAL] Setting gThermalEnabled=true (was %d)", prev ? 1 : 0);
+  gThermalEnabled = true;
 
   // Create Thermal task lazily (stale handle detection now in createThermalTask)
-  if (thermalTaskHandle == nullptr) {
+  if (gThermalTaskHandle == nullptr) {
     DEBUG_CLIF("[THERMAL_INTERNAL] Creating thermal task (handle is NULL)");
     if (!createThermalTask()) {
       DEBUG_CLIF("[THERMAL_INTERNAL] FAILED to create Thermal task");
-      thermalEnabled = false;  // Restore on failure
+      gThermalEnabled = false;  // Restore on failure
       return false;
     }
     DEBUG_CLIF("[THERMAL_INTERNAL] Thermal task created successfully");
   } else {
-    DEBUG_CLIF("[THERMAL_INTERNAL] Thermal task already exists (handle=%p)", thermalTaskHandle);
+    DEBUG_CLIF("[THERMAL_INTERNAL] Thermal task already exists (handle=%p)", gThermalTaskHandle);
   }
-  if (thermalEnabled != prev) {
+  if (gThermalEnabled != prev) {
     sensorStatusBumpWith("openthermal@queue");
   }
-  if (thermalEnabled && !prev) {
-    thermalPendingFirstFrame = true;
-    thermalArmAtMs = millis() + 150;  // small arming delay to let system settle
-    DEBUG_CLIF("[THERMAL_INTERNAL] Set pendingFirstFrame=true, armAt=%lu", thermalArmAtMs);
+  if (gThermalEnabled && !prev) {
+    gThermalPendingFirstFrame = true;
+    gThermalArmAtMs = millis() + 150;  // small arming delay to let system settle
+    DEBUG_CLIF("[THERMAL_INTERNAL] Set pendingFirstFrame=true, armAt=%lu", gThermalArmAtMs);
   }
 
   // If init was requested above, wait for result so caller gets success/fail
-  if (thermalInitRequested || !thermalConnected || gMLX90640 == nullptr) {
+  if (gThermalInitRequested || !gThermalConnected || gMLX90640 == nullptr) {
     DEBUG_CLIF("[THERMAL_INTERNAL] Waiting for sensor initialization (timeout=3000ms)");
     unsigned long start = millis();
-    while (!thermalInitDone && (millis() - start) < 3000UL) {
+    while (!gThermalInitDone && (millis() - start) < 3000UL) {
       delay(10);
     }
     unsigned long elapsed = millis() - start;
     DEBUG_CLIF("[THERMAL_INTERNAL] Init wait complete: elapsed=%lu ms, done=%d, result=%d", 
-               elapsed, thermalInitDone ? 1 : 0, thermalInitResult ? 1 : 0);
+               elapsed, gThermalInitDone ? 1 : 0, gThermalInitResult ? 1 : 0);
     
-    if (!thermalInitDone || !thermalInitResult) {
+    if (!gThermalInitDone || !gThermalInitResult) {
       // Cleanup flags on failure - no ToF interference, just fail gracefully
-      thermalEnabled = false;
-      thermalPendingFirstFrame = false;
-      thermalArmAtMs = 0;
+      gThermalEnabled = false;
+      gThermalPendingFirstFrame = false;
+      gThermalArmAtMs = 0;
       DEBUG_CLIF("[THERMAL_INTERNAL] FAILED to initialize MLX90640 thermal sensor");
       return false;
     }
@@ -239,11 +249,11 @@ const char* cmd_thermalstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   DEBUG_CLIF("[THERMAL_START] Command called - checking state");
-  DEBUG_CLIF("[THERMAL_START] thermalEnabled=%d, heap=%lu",
-             thermalEnabled ? 1 : 0, (unsigned long)ESP.getFreeHeap());
+  DEBUG_CLIF("[THERMAL_START] gThermalEnabled=%d, heap=%lu",
+             gThermalEnabled ? 1 : 0, (unsigned long)ESP.getFreeHeap());
 
   // Check if already enabled or queued
-  if (thermalEnabled) {
+  if (gThermalEnabled) {
     DEBUG_CLIF("[THERMAL_START] Already running - returning");
     return "[Thermal] Sensor already running";
   }
@@ -276,7 +286,7 @@ const char* cmd_thermalstart(const String& argsInput) {
 const char* cmd_thermalread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  if (!thermalEnabled || !thermalConnected) {
+  if (!gThermalEnabled || !gThermalConnected) {
     return "[Thermal] Not running. Use 'openthermal' to start.";
   }
 
@@ -427,9 +437,9 @@ const char* cmd_thermalrotation(const String& argsInput) {
 // Thermal Sensor Initialization and Reading Functions
 // ============================================================================
 
-bool initThermalSensor() {
+bool thermalInit() {
   extern void i2cSetDefaultWire1Clock();
-  extern bool mlx90640_initialized;
+  extern bool gMlx90640Initialized;
   
   if (gMLX90640 != nullptr) {
     return true;
@@ -462,27 +472,27 @@ bool initThermalSensor() {
     else if (fps >= 2) rate = MLX90640_2_HZ;
     else rate = MLX90640_1_HZ;
     gMLX90640->setRefreshRate(rate);
-    thermalConnected = true;
-    mlx90640_initialized = true;
+    gThermalConnected = true;
+    gMlx90640Initialized = true;
     
     return true;
   });
 }
 
-bool readThermalPixels() {
-  extern bool mlx90640_initialized;
+bool thermalPoll() {
+  extern bool gMlx90640Initialized;
   extern bool lockThermalCache(TickType_t timeout);
   extern void unlockThermalCache();
   // interpolateThermalFrame is defined at the bottom of this file
   
-  DEBUG_THERMAL_FRAMEF("readThermalPixels() entry");
+  DEBUG_THERMAL_FRAMEF("thermalPoll() entry");
 
   if (gMLX90640 == nullptr) {
-    DEBUG_THERMAL_FRAMEF("readThermalPixels() exit: sensor null");
+    DEBUG_THERMAL_FRAMEF("thermalPoll() exit: sensor null");
     return false;
   }
-  if (!thermalEnabled) {
-    DEBUG_THERMAL_FRAMEF("readThermalPixels() exit: disabled");
+  if (!gThermalEnabled) {
+    DEBUG_THERMAL_FRAMEF("thermalPoll() exit: disabled");
     return false;
   }
   
@@ -496,7 +506,7 @@ bool readThermalPixels() {
 
         gThermalCache.thermalFrame = (int16_t*)ps_alloc(768 * sizeof(int16_t), AllocPref::PreferPSRAM, "cache.thermal");
         if (!gThermalCache.thermalFrame) {
-          DEBUG_THERMAL_FRAMEF("readThermalPixels() exit: failed to allocate frame buffer");
+          DEBUG_THERMAL_FRAMEF("thermalPoll() exit: failed to allocate frame buffer");
           unlockThermalCache();
           return false;
         }
@@ -507,7 +517,7 @@ bool readThermalPixels() {
                        psram_after, psram_before - psram_after,
                        heap_after, heap_before - heap_after);
 
-        DEBUG_THERMAL_FRAMEF("readThermalPixels() allocated thermal frame buffer");
+        DEBUG_THERMAL_FRAMEF("thermalPoll() allocated thermal frame buffer");
 
         int upscale = gSettings.thermalUpscaleFactor;
         if (upscale == 2) {
@@ -541,19 +551,19 @@ bool readThermalPixels() {
       }
       unlockThermalCache();
     } else {
-      DEBUG_THERMAL_FRAMEF("readThermalPixels() exit: failed to lock cache for allocation");
+      DEBUG_THERMAL_FRAMEF("thermalPoll() exit: failed to lock cache for allocation");
       return false;
     }
   }
   
-  if (thermalArmAtMs) {
-    int32_t dt = (int32_t)(millis() - thermalArmAtMs);
+  if (gThermalArmAtMs) {
+    int32_t dt = (int32_t)(millis() - gThermalArmAtMs);
     if (dt < 0) {
-      DEBUG_THERMAL_FRAMEF("readThermalPixels() exit: arming delay %dms remaining", (int)(-dt));
+      DEBUG_THERMAL_FRAMEF("thermalPoll() exit: arming delay %dms remaining", (int)(-dt));
       return false;
     } else {
-      thermalArmAtMs = 0;
-      DEBUG_THERMAL_FRAMEF("readThermalPixels() arming delay expired, proceeding");
+      gThermalArmAtMs = 0;
+      DEBUG_THERMAL_FRAMEF("thermalPoll() arming delay expired, proceeding");
     }
   }
 
@@ -564,7 +574,7 @@ bool readThermalPixels() {
   static uint32_t frameCount = 0;
   uint32_t startTime = millis();
 
-  if (!gMLX90640 || !mlx90640_initialized) {
+  if (!gMLX90640 || !gMlx90640Initialized) {
     DEBUG_THERMAL_FRAMEF("Thermal sensor not properly initialized - skipping frame capture");
     return false;
   }
@@ -590,7 +600,7 @@ bool readThermalPixels() {
   
   // Detailed pre-capture diagnostics
   DEBUG_SENSORSF("[THERMAL_FRAME] Pre-capture: sensor=%p enabled=%d connected=%d polling_paused=%d",
-                 (void*)gMLX90640, thermalEnabled ? 1 : 0, thermalConnected ? 1 : 0, 
+                 (void*)gMLX90640, gThermalEnabled ? 1 : 0, gThermalConnected ? 1 : 0, 
                  gSensorPollingPaused ? 1 : 0);
   
   int result = gMLX90640->getFrame(g_tempFrame);
@@ -824,7 +834,7 @@ bool readThermalPixels() {
       for (int i = 0; i < 768; i++) {
         floatFrame[i] = g_localFrame[i] / 100.0f;
       }
-      interpolateThermalFrame(floatFrame, gThermalCache.thermalInterpolated,
+      thermalInterpolateFrame(floatFrame, gThermalCache.thermalInterpolated,
                               gThermalCache.thermalInterpolatedWidth, gThermalCache.thermalInterpolatedHeight);
       uint32_t interpTime = millis() - interpStart;
 
@@ -912,8 +922,8 @@ bool readThermalPixels() {
 
     unlockThermalCache();
 
-    if (thermalPendingFirstFrame) {
-      thermalPendingFirstFrame = false;
+    if (gThermalPendingFirstFrame) {
+      gThermalPendingFirstFrame = false;
       sensorStatusBumpWith("thermal-ready");
     }
   } else {
@@ -973,7 +983,7 @@ void resetThermalFrameBuffers() {
 // Thermal Frame Streaming (HTTP Response)
 // ============================================================================
 
-int buildThermalDataJSON(char* buf, size_t bufSize) {
+int thermalBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
   unsigned long startMs = millis();
@@ -1049,7 +1059,7 @@ int buildThermalDataJSON(char* buf, size_t bufSize) {
     unlockThermalCache();
 
     unsigned long elapsedMs = millis() - startMs;
-    DEBUG_PERFORMANCEF("buildThermalDataJSON: %lu ms, %d bytes, %d pixels",
+    DEBUG_PERFORMANCEF("thermalBuildDataJSON: %lu ms, %d bytes, %d pixels",
                        elapsedMs, pos, frameSize);
   } else {
     // Timeout - return error response (non-zero so caller can respond)
@@ -1066,7 +1076,7 @@ int buildThermalDataJSON(char* buf, size_t bufSize) {
 
 // Bilinear interpolation for thermal upscaling
 // Upscales 32x24 source to targetWidth x targetHeight
-void interpolateThermalFrame(const float* src, float* dst, int targetWidth, int targetHeight) {
+void thermalInterpolateFrame(const float* src, float* dst, int targetWidth, int targetHeight) {
   const int srcWidth = 32;
   const int srcHeight = 24;
 
@@ -1163,10 +1173,10 @@ const char* cmd_thermaldiag(const String& argsInput) {
   
   // Current state
   n = snprintf(buf, remaining, "State: enabled=%d connected=%d sensor=%p\n",
-               thermalEnabled ? 1 : 0, thermalConnected ? 1 : 0, (void*)gMLX90640);
+               gThermalEnabled ? 1 : 0, gThermalConnected ? 1 : 0, (void*)gMLX90640);
   buf += n; remaining -= n;
   
-  n = snprintf(buf, remaining, "Task: handle=%p\n", (void*)thermalTaskHandle);
+  n = snprintf(buf, remaining, "Task: handle=%p\n", (void*)gThermalTaskHandle);
   buf += n; remaining -= n;
   
   // Check I2C device health
@@ -1188,7 +1198,7 @@ const char* cmd_thermaldiag(const String& argsInput) {
   }
   
   // Test I2C clock speeds if sensor is stopped
-  if (thermalEnabled) {
+  if (gThermalEnabled) {
     n = snprintf(buf, remaining, "\nSensor running - stop first to test I2C speeds\n");
     buf += n; remaining -= n;
   } else {
@@ -1318,11 +1328,11 @@ const size_t thermalCommandsCount = sizeof(thermalCommands) / sizeof(thermalComm
 // ============================================================================
 // Purpose: Continuously reads 32x24 thermal frame data from MLX90640 sensor
 // Stack: 4096 words (~16KB) | Priority: 1 | Core: Any
-// Lifecycle: Created by cmd_thermalstart, deleted when thermalEnabled=false
+// Lifecycle: Created by cmd_thermalstart, deleted when gThermalEnabled=false
 // Polling: Configurable via thermalDevicePollMs (default 100ms) | I2C Clock: 100-1000kHz
 //
 // Cleanup Strategy:
-//   1. Check thermalEnabled flag at loop start
+//   1. Check gThermalEnabled flag at loop start
 //   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Delete sensor object and invalidate cache
 //   4. Release mutex and delete task
@@ -1338,8 +1348,8 @@ void thermalTask(void* parameter) {
   while (true) {
     // CRITICAL: Check enabled flag FIRST before any debug calls or operations
     // This allows graceful shutdown when thermalstop is called
-    if (!thermalEnabled) {
-      thermalConnected = false;
+    if (!gThermalEnabled) {
+      gThermalConnected = false;
       if (gMLX90640 != nullptr) {
         delete gMLX90640;
         gMLX90640 = nullptr;
@@ -1347,7 +1357,7 @@ void thermalTask(void* parameter) {
       gThermalCache.thermalDataValid = false;
       gThermalCache.thermalSeq = 0;
       
-      // Free static buffers in readThermalPixels to prevent heap corruption on restart
+      // Free static buffers in thermalPoll to prevent heap corruption on restart
       extern void resetThermalFrameBuffers();
       resetThermalFrameBuffers();
       
@@ -1363,29 +1373,29 @@ void thermalTask(void* parameter) {
     unsigned long nowLog = millis();
     if (nowLog - lastStackLog >= 5000UL) {
       lastStackLog = nowLog;
-      if (checkTaskStackSafety("thermal", THERMAL_STACK_WORDS, &thermalEnabled)) break;
+      if (checkTaskStackSafety("thermal", THERMAL_STACK_WORDS, &gThermalEnabled)) break;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
-      if (thermalEnabled) {
+      if (gThermalEnabled) {
         DEBUG_PERFORMANCEF("[STACK] thermal_task watermark_now=%u min=%u words", (unsigned)gThermalWatermarkNow, (unsigned)gThermalWatermarkMin);
         DEBUG_MEMORYF("[HEAP] thermal_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     // Handle deferred initialization request
-    if (thermalEnabled && (!thermalConnected || gMLX90640 == nullptr)) {
-      if (thermalInitRequested) {
-        bool ok = initThermalSensor();
-        thermalInitResult = ok;
-        thermalInitDone = true;
-        thermalInitRequested = false;
+    if (gThermalEnabled && (!gThermalConnected || gMLX90640 == nullptr)) {
+      if (gThermalInitRequested) {
+        bool ok = thermalInit();
+        gThermalInitResult = ok;
+        gThermalInitDone = true;
+        gThermalInitRequested = false;
       }
     }
 
-    if (thermalEnabled && thermalConnected && gMLX90640 != nullptr && !gSensorPollingPaused) {
+    if (gThermalEnabled && gThermalConnected && gMLX90640 != nullptr && !gSensorPollingPaused) {
       unsigned long nowMs = millis();
       unsigned long pollMs = (gSettings.thermalDevicePollMs > 0) ? (unsigned long)gSettings.thermalDevicePollMs : 100;
       bool ready = true;
-      if (thermalArmAtMs) {
-        int32_t dt = (int32_t)(nowMs - thermalArmAtMs);
+      if (gThermalArmAtMs) {
+        int32_t dt = (int32_t)(nowMs - gThermalArmAtMs);
         if (dt < 0) ready = false;
       }
       if (ready && (nowMs - lastThermalRead) >= pollMs) {
@@ -1394,7 +1404,7 @@ void thermalTask(void* parameter) {
         
         // Thermal frame read takes 400-800ms at 100kHz (768 pixels); needs generous timeout
         ok = i2cTaskWithTimeout(I2C_ADDR_THERMAL, thermalHz, 1500, [&]() -> bool {
-          return readThermalPixels();
+          return thermalPoll();
         });
         
         lastThermalRead = millis();
@@ -1403,15 +1413,15 @@ void thermalTask(void* parameter) {
         if (!ok) {
           if (i2cShouldAutoDisable(I2C_ADDR_THERMAL)) {
             ERROR_SENSORSF("Too many consecutive thermal failures - auto-disabling");
-            thermalEnabled = false;
+            gThermalEnabled = false;
             sensorStatusBumpWith("thermal@auto_disabled");
             // Task will clean up and delete itself on next loop iteration
           }
         }
         
         // SAFE: Debug output AFTER i2cTransaction completes, with enabled check
-        if (thermalEnabled && thermalPendingFirstFrame && ok) {
-          thermalPendingFirstFrame = false;
+        if (gThermalEnabled && gThermalPendingFirstFrame && ok) {
+          gThermalPendingFirstFrame = false;
           DEBUG_SENSORSF("Thermal first frame captured");
         }
         

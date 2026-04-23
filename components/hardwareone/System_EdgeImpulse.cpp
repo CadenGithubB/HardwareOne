@@ -970,7 +970,7 @@ EIResults runEdgeImpulseInference() {
     return results;
   }
 
-  if (!cameraEnabled) {
+  if (!gCameraEnabled) {
     DEBUG_SYSTEMF("[EI_DEBUG] ABORT: Camera not started");
     results.errorMessage = "Camera not started";
     return results;

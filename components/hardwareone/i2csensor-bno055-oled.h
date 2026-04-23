@@ -8,7 +8,7 @@
 #include <Adafruit_SSD1306.h>
 
 // Forward declaration for IMU action detection
-extern void updateIMUActions();
+extern void imuUpdateActions();
 
 // IMU OLED display function - shows action detection
 static void displayIMUActions() {
@@ -16,7 +16,7 @@ static void displayIMUActions() {
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
 
-  if (!imuConnected || !imuEnabled) {
+  if (!gImuConnected || !gImuEnabled) {
     oledDisplay->setCursor(0, y);
     oledDisplay->println("IMU not active");
     oledDisplay->println();
@@ -25,7 +25,7 @@ static void displayIMUActions() {
   }
 
   // Update detections
-  updateIMUActions();
+  imuUpdateActions();
 
   // Show orientation and acceleration data from cache
   if (gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
@@ -70,7 +70,7 @@ static bool imuOLEDModeAvailable(String* outReason) {
 static void imuToggleConfirmed(void* userData) {
   (void)userData;
   extern void executeOLEDCommand(const String& argsInput);
-  if (imuEnabled && imuConnected) {
+  if (gImuEnabled && gImuConnected) {
     executeOLEDCommand("closeimu");
   } else {
     executeOLEDCommand("openimu");
@@ -80,7 +80,7 @@ static void imuToggleConfirmed(void* userData) {
 // Input handler for IMU OLED mode - X button toggles sensor
 static bool imuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (imuEnabled && imuConnected) {
+    if (gImuEnabled && gImuConnected) {
       oledConfirmRequest("Close IMU?", nullptr, imuToggleConfirmed, nullptr);
     } else {
       oledConfirmRequest("Open IMU?", nullptr, imuToggleConfirmed, nullptr);

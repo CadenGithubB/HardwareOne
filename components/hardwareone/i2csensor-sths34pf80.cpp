@@ -69,32 +69,12 @@
 PresenceCache gPresenceCache;
 
 // Presence sensor state
-bool presenceEnabled = false;
-bool presenceConnected = false;
-unsigned long presenceLastStopTime = 0;
-TaskHandle_t presenceTaskHandle = nullptr;
+bool gPresenceEnabled = false;
+bool gPresenceConnected = false;
+unsigned long gPresenceLastStopTime = 0;
+TaskHandle_t gPresenceTaskHandle = nullptr;
 
-// Helper: Create presence task if not already running
-static bool createPresenceTask() {
-  extern BaseType_t xTaskCreateLogged(TaskFunction_t, const char*, uint32_t, void*, UBaseType_t, TaskHandle_t*, const char*);
-  extern void presenceTask(void* parameter);
-  
-  // Check for stale task handle
-  if (presenceTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(presenceTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      presenceTaskHandle = nullptr;
-    }
-  }
-  if (presenceTaskHandle == nullptr) {
-    const uint32_t presenceStack = PRESENCE_STACK_WORDS;
-    if (xTaskCreateLogged(presenceTask, "presence_task", presenceStack, nullptr, TASK_PRIORITY_LOW, &presenceTaskHandle, "presence") != pdPASS) {
-      return false;
-    }
-    DEBUG_SENSORSF("Presence task created successfully");
-  }
-  return true;
-}
+// Task creation now handled by createPresenceTask() in System_TaskUtils.cpp
 
 // ============================================================================
 // STHS34PF80 Modular Settings Registration
@@ -107,7 +87,7 @@ static const SettingEntry presenceSettingEntries[] = {
 };
 
 static bool isPresenceConnected() {
-  return presenceConnected;
+  return gPresenceConnected;
 }
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -172,7 +152,7 @@ static int16_t readInt16(uint8_t regL) {
 const char* cmd_presencestart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (presenceEnabled) {
+  if (gPresenceEnabled) {
     return "[PRESENCE] Error: Already running";
   }
   
@@ -201,7 +181,7 @@ const char* cmd_presencestart(const String& argsInput) {
 const char* cmd_presencestop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!presenceEnabled) {
+  if (!gPresenceEnabled) {
     return "[PRESENCE] Error: Not running";
   }
   
@@ -213,7 +193,7 @@ const char* cmd_presencestop(const String& argsInput) {
 const char* cmd_presenceread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!presenceConnected || !presenceEnabled) {
+  if (!gPresenceConnected || !gPresenceEnabled) {
     return "[PRESENCE] Error: Sensor not running - use 'openpresence' first";
   }
   
@@ -243,7 +223,7 @@ const char* cmd_presencestatus(const String& argsInput) {
   
   snprintf(getDebugBuffer(), 1024,
     "[PRESENCE] Status: connected=%d enabled=%d taskHandle=%p dataValid=%d",
-    presenceConnected, presenceEnabled, (void*)presenceTaskHandle,
+    gPresenceConnected, gPresenceEnabled, (void*)gPresenceTaskHandle,
     gPresenceCache.dataValid);
   return getDebugBuffer();
 }
@@ -252,7 +232,7 @@ const char* cmd_presencestatus(const String& argsInput) {
 // Presence Sensor Initialization and Reading Functions
 // ============================================================================
 
-bool startPresenceSensorInternal() {
+bool presenceStartInternal() {
   // Check memory before creating task
   if (!checkMemoryAvailable("presence", nullptr)) {
     ERROR_SENSORSF("[PRESENCE] Error: Insufficient memory for presence sensor");
@@ -286,20 +266,20 @@ bool startPresenceSensorInternal() {
   INFO_SENSORSF("[PRESENCE] Cleaned up stale cache");
 
   // Initialize sensor synchronously
-  if (!presenceConnected) {
-    if (!initPresenceSensor()) {
+  if (!gPresenceConnected) {
+    if (!presenceInit()) {
       ERROR_SENSORSF("[PRESENCE] Error: Failed to initialize STHS34PF80 sensor");
       return false;
     }
   }
 
-  // Set enabled BEFORE creating task - task checks presenceEnabled on first iteration
+  // Set enabled BEFORE creating task - task checks gPresenceEnabled on first iteration
   // and will immediately delete itself if it's still false
-  presenceEnabled = true;
+  gPresenceEnabled = true;
 
   // Create task
   if (!createPresenceTask()) {
-    presenceEnabled = false;
+    gPresenceEnabled = false;
     ERROR_SENSORSF("[PRESENCE] Error: Failed to create presence task");
     return false;
   }
@@ -308,8 +288,8 @@ bool startPresenceSensorInternal() {
   return true;
 }
 
-bool initPresenceSensor() {
-  if (presenceConnected) {
+bool presenceInit() {
+  if (gPresenceConnected) {
     return true;
   }
   
@@ -343,7 +323,7 @@ bool initPresenceSensor() {
       return false;
     }
     
-    presenceConnected = true;
+    gPresenceConnected = true;
     
     // Register for I2C health tracking (use manager directly with correct clock/timeout)
     I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
@@ -352,8 +332,8 @@ bool initPresenceSensor() {
   });
 }
 
-bool readPresenceData() {
-  if (!presenceConnected) return false;
+bool presencePoll() {
+  if (!gPresenceConnected) return false;
   
   // Read status first
   uint8_t status;
@@ -458,7 +438,7 @@ const size_t presenceCommandsCount = sizeof(presenceCommands) / sizeof(presenceC
 // JSON building for ESP-NOW streaming
 // ============================================================================
 
-int buildPresenceDataJSON(char* buf, size_t bufSize) {
+int presenceBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
   int pos = 0;
@@ -499,8 +479,8 @@ void presenceTask(void* parameter) {
 
   while (true) {
     // Check if sensor disabled for graceful shutdown
-    if (!presenceEnabled) {
-      presenceConnected = false;
+    if (!gPresenceEnabled) {
+      gPresenceConnected = false;
       gPresenceCache.dataValid = false;
       SENSOR_TASK_EXIT("PRESENCE");
     }
@@ -509,29 +489,29 @@ void presenceTask(void* parameter) {
     unsigned long nowMs = millis();
     if ((nowMs - lastStackLog) >= 10000) {
       lastStackLog = nowMs;
-      if (checkTaskStackSafety("presence", PRESENCE_STACK_WORDS, &presenceEnabled)) break;
-      if (presenceEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
+      if (checkTaskStackSafety("presence", PRESENCE_STACK_WORDS, &gPresenceEnabled)) break;
+      if (gPresenceEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         DEBUG_PERFORMANCEF("[STACK] presence_task watermark=%u words", (unsigned)watermark);
       }
-      if (presenceEnabled && isDebugFlagSet(DEBUG_MEMORY)) {
+      if (gPresenceEnabled && isDebugFlagSet(DEBUG_MEMORY)) {
         DEBUG_MEMORYF("[HEAP] presence_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     
-    if (presenceEnabled && presenceConnected && !gSensorPollingPaused) {
+    if (gPresenceEnabled && gPresenceConnected && !gSensorPollingPaused) {
       unsigned long presencePollMs = (gSettings.presenceDevicePollMs > 0) ? (unsigned long)gSettings.presenceDevicePollMs : 200;
       
       if ((nowMs - lastPresenceRead) >= presencePollMs) {
         bool ok = i2cTaskWithTimeout(I2C_ADDR_PRESENCE, 100000, 100, [&]() -> bool {
-          return readPresenceData();
+          return presencePoll();
         });
         
         if (ok) {
 #if ENABLE_ESPNOW
           {
             char presJson[256];
-            int jsonLen = buildPresenceDataJSON(presJson, sizeof(presJson));
+            int jsonLen = presenceBuildDataJSON(presJson, sizeof(presJson));
             if (jsonLen > 0) {
               sendSensorDataUpdate(REMOTE_SENSOR_PRESENCE, presJson, jsonLen);
             }
@@ -540,8 +520,8 @@ void presenceTask(void* parameter) {
         } else {
           if (i2cShouldAutoDisable(I2C_ADDR_PRESENCE)) {
             uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_PRESENCE);
-            presenceEnabled = false;
-            presenceConnected = false;
+            gPresenceEnabled = false;
+            gPresenceConnected = false;
             sensorStatusBumpWith("presence@auto_disabled");
             DEBUG_SENSORSF("Presence auto-disabled after %u consecutive I2C failures", errors);
             break;

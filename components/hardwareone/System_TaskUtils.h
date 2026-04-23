@@ -63,6 +63,10 @@ bool createThermalTask();
 bool createIMUTask();
 bool createToFTask();
 bool createFMRadioTask();
+bool createAPDSTask();
+bool createPresenceTask();
+bool createGPSTask();
+bool createRTCTask();
 
 // ============================================================================
 // Sensor Task Exit Helper

@@ -11,30 +11,39 @@
 #define I2CSENSOR_RDA5807_H
 
 #include "System_BuildConfig.h"
-
-#if ENABLE_FM_RADIO
-
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 
-// FM Radio state
-extern bool fmRadioEnabled;
-extern bool fmRadioConnected;
-extern unsigned long fmRadioLastStopTime;
-extern bool radioInitialized;      // Radio hardware initialization status
-extern uint16_t fmRadioFrequency;  // Current frequency in 10kHz units (e.g., 10390 = 103.9 MHz)
-extern uint8_t fmRadioVolume;      // 0-15
-extern bool fmRadioMuted;
-extern bool fmRadioStereo;
+// FM Radio cache structure (always available for type-safe references).
+// Groups all sensor data fields under one mutex so readers (web API, OLED,
+// ESP-NOW broadcaster) get a consistent snapshot and writers (fmRadio task,
+// RDS callbacks) don't tear strings mid-update.
+struct FMRadioCache {
+  SemaphoreHandle_t mutex = nullptr;
+  bool dataValid = false;
+  uint16_t frequency = 10390;    // Current frequency in 10kHz units (10390 = 103.9 MHz)
+  uint8_t volume = 6;            // 0-15
+  bool muted = false;
+  bool stereo = true;
+  uint8_t rssi = 0;              // Received Signal Strength Indicator
+  uint8_t snr = 0;               // Signal-to-Noise Ratio
+  bool headphonesConnected = false;
+  char stationName[9] = {0};     // 8 chars + null (RDS station name)
+  char stationText[65] = {0};    // 64 chars + null (RDS radio text)
+};
 
-// RDS data (Radio Data System)
-extern char fmRadioStationName[9];   // 8 chars + null
-extern char fmRadioStationText[65];  // 64 chars + null (Radio Text)
+#if ENABLE_FM_RADIO
 
-// Signal quality
-extern uint8_t fmRadioRSSI;          // Received Signal Strength Indicator
-extern uint8_t fmRadioSNR;           // Signal-to-Noise Ratio
+// FM Radio lifecycle state (not cached — read/written only on fmRadio task)
+extern bool gFmRadioEnabled;
+extern bool gFmRadioConnected;
+extern unsigned long gFmRadioLastStopTime;
+extern bool gRadioInitialized;      // Radio hardware initialization status
+
+// FM Radio data cache (mutex-protected)
+extern FMRadioCache gFmRadioCache;
 
 // Command handlers
 const char* cmd_fmradio(const String& argsInput);
@@ -47,12 +56,12 @@ const char* cmd_fmradio_mute(const String& argsInput);
 const char* cmd_fmradio_status(const String& argsInput);
 
 // FM Radio functions
-bool initFMRadio();
-void deinitFMRadio();
-void pollFMRadio();  // Called periodically to update RDS data
+bool fmRadioInit();
+void fmRadioDeinit();
+void fmRadioPoll();  // Called periodically to update RDS data
 
 // JSON data builder (for web API)
-int buildFMRadioDataJSON(char* buf, size_t bufSize);
+int fmRadioBuildDataJSON(char* buf, size_t bufSize);
 
 // Command registry (for system_utils.cpp module list)
 struct CommandEntry;

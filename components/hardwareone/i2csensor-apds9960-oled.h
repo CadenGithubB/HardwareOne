@@ -16,7 +16,7 @@ void displayAPDSData() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   oledDisplay->setCursor(0, 0);
   
-  if (!apdsConnected || (!apdsColorEnabled && !apdsProximityEnabled)) {
+  if (!gApdsConnected || (!gApdsColorEnabled && !gApdsProximityEnabled)) {
     oledDisplay->println("== APDS SENSOR ==");
     oledDisplay->println();
     oledDisplay->println("Not active");
@@ -26,18 +26,18 @@ void displayAPDSData() {
     oledDisplay->println("== APDS DATA ==");
     oledDisplay->println();
     
-    if (gPeripheralCache.mutex && xSemaphoreTake(gPeripheralCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       oledDisplay->print("R:");
-      oledDisplay->print(gPeripheralCache.apdsRed);
+      oledDisplay->print(gAPDSCache.apdsRed);
       oledDisplay->print(" G:");
-      oledDisplay->println(gPeripheralCache.apdsGreen);
+      oledDisplay->println(gAPDSCache.apdsGreen);
       oledDisplay->print("B:");
-      oledDisplay->print(gPeripheralCache.apdsBlue);
+      oledDisplay->print(gAPDSCache.apdsBlue);
       oledDisplay->print(" C:");
-      oledDisplay->println(gPeripheralCache.apdsClear);
+      oledDisplay->println(gAPDSCache.apdsClear);
       oledDisplay->print("Prox: ");
-      oledDisplay->println(gPeripheralCache.apdsProximity);
-      xSemaphoreGive(gPeripheralCache.mutex);
+      oledDisplay->println(gAPDSCache.apdsProximity);
+      xSemaphoreGive(gAPDSCache.mutex);
     }
   }
   
@@ -52,7 +52,7 @@ static bool apdsOLEDModeAvailable(String* outReason) {
 static void apdsToggleConfirmed(void* userData) {
   (void)userData;
   extern void executeOLEDCommand(const String& argsInput);
-  if (apdsColorEnabled || apdsProximityEnabled) {
+  if (gApdsColorEnabled || gApdsProximityEnabled) {
     executeOLEDCommand("closeapds");
   } else {
     executeOLEDCommand("openapds");
@@ -62,7 +62,7 @@ static void apdsToggleConfirmed(void* userData) {
 // Input handler for APDS OLED mode - X button toggles sensor
 static bool apdsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (apdsColorEnabled || apdsProximityEnabled) {
+    if (gApdsColorEnabled || gApdsProximityEnabled) {
       oledConfirmRequest("Close APDS?", nullptr, apdsToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open APDS?", nullptr, apdsToggleConfirmed, nullptr);

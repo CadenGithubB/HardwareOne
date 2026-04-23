@@ -684,13 +684,13 @@ void getTimestampPrefixMsCached(char* out, size_t outSize) {
 }
 
 // Sensor state externs for cmd_voltage
-extern bool thermalConnected;
-extern bool thermalEnabled;
-extern bool imuConnected;
-extern bool imuEnabled;
-extern bool tofConnected;
-extern bool tofEnabled;
-extern bool apdsConnected;
+extern bool gThermalConnected;
+extern bool gThermalEnabled;
+extern bool gImuConnected;
+extern bool gImuEnabled;
+extern bool gTofConnected;
+extern bool gTofEnabled;
+extern bool gApdsConnected;
 
 // ============================================================================
 // File I/O Functions
@@ -1088,22 +1088,22 @@ const char* cmd_voltage(const String& originalCmd) {
     broadcastOutput("WiFi: Inactive");
   }
 
-  if (thermalConnected && thermalEnabled) {
+  if (gThermalConnected && gThermalEnabled) {
     estimatedCurrent += 23;  // MLX90640 typical
     broadcastOutput("Thermal Sensor: Active (+23mA)");
   }
 
-  if (imuConnected && imuEnabled) {
+  if (gImuConnected && gImuEnabled) {
     estimatedCurrent += 12;  // BNO055 typical
     broadcastOutput("IMU Sensor: Active (+12mA)");
   }
 
-  if (tofConnected && tofEnabled) {
+  if (gTofConnected && gTofEnabled) {
     estimatedCurrent += 20;  // VL53L4CX typical
     broadcastOutput("ToF Sensor: Active (+20mA)");
   }
 
-  if (apdsConnected) {
+  if (gApdsConnected) {
     estimatedCurrent += 3;  // APDS9960 typical
     broadcastOutput("APDS Sensor: Active (+3mA)");
   }
@@ -1245,7 +1245,7 @@ const char* cmd_time(const String& argsInput) {
   
   // Priority: RTC (primary) -> NTP (fallback)
 #if ENABLE_RTC_SENSOR
-  if (rtcEnabled && rtcConnected) {
+  if (gRtcEnabled && gRtcConnected) {
     // RTC is primary time source
     RTCDateTime dt;
     if (rtcReadDateTime(&dt)) {
@@ -1321,7 +1321,7 @@ const char* cmd_timeset(const String& argsInput) {
   
   // Also update RTC if available
 #if ENABLE_RTC_SENSOR
-  if (rtcEnabled && rtcConnected) {
+  if (gRtcEnabled && gRtcConnected) {
     rtcSyncFromSystem();
     broadcastOutput("System time and RTC updated");
     // Mark RTC as calibrated so future boots trust RTC first
@@ -1570,7 +1570,7 @@ bool syncNTPAndResolve() {
     
     // Sync RTC from NTP time to keep RTC accurate
 #if ENABLE_RTC_SENSOR
-    if (rtcEnabled && rtcConnected) {
+    if (gRtcEnabled && gRtcConnected) {
       if (rtcSyncFromSystem()) {
         broadcastOutput("[OK] RTC updated from NTP time");
         // Mark RTC as calibrated so future boots trust RTC first
@@ -1598,7 +1598,7 @@ bool syncNTPAndResolve() {
     
     // Try RTC as fallback time source
 #if ENABLE_RTC_SENSOR
-    if (rtcEnabled && rtcConnected) {
+    if (gRtcEnabled && gRtcConnected) {
       if (rtcSyncToSystem()) {
         broadcastOutput("[OK] System time set from RTC (NTP unavailable)");
         resolvePendingUserCreationTimes();
@@ -2247,13 +2247,13 @@ void printMemoryReport() {
   
   // Sensor Module State Variables
   broadcastOutput("  Sensor Modules (Global State):");
-  size_t thermal_state_bytes = sizeof(gThermalCache) + sizeof(thermalEnabled) + sizeof(thermalConnected) + sizeof(thermalTaskHandle);
-  size_t imu_state_bytes = sizeof(gImuCache) + sizeof(imuEnabled) + sizeof(imuConnected) + sizeof(imuTaskHandle);
-  size_t tof_state_bytes = sizeof(gTofCache) + sizeof(tofEnabled) + sizeof(tofConnected) + sizeof(tofTaskHandle);
-  size_t gamepad_state_bytes = sizeof(gControlCache) + sizeof(gamepadEnabled) + sizeof(gamepadConnected) + sizeof(gamepadTaskHandle);
-  size_t apds_state_bytes = sizeof(gPeripheralCache) + sizeof(apdsConnected) + sizeof(apdsColorEnabled) + sizeof(apdsProximityEnabled) + sizeof(apdsGestureEnabled);
-  size_t gps_state_bytes = sizeof(gpsEnabled) + sizeof(gpsConnected);
-  size_t oled_state_bytes = sizeof(oledEnabled) + sizeof(oledConnected);
+  size_t thermal_state_bytes = sizeof(gThermalCache) + sizeof(gThermalEnabled) + sizeof(gThermalConnected) + sizeof(gThermalTaskHandle);
+  size_t imu_state_bytes = sizeof(gImuCache) + sizeof(gImuEnabled) + sizeof(gImuConnected) + sizeof(gImuTaskHandle);
+  size_t tof_state_bytes = sizeof(gTofCache) + sizeof(gTofEnabled) + sizeof(gTofConnected) + sizeof(gTofTaskHandle);
+  size_t gamepad_state_bytes = sizeof(gGamepadCache) + sizeof(gGamepadEnabled) + sizeof(gGamepadConnected) + sizeof(gGamepadTaskHandle);
+  size_t apds_state_bytes = sizeof(gAPDSCache) + sizeof(gApdsConnected) + sizeof(gApdsColorEnabled) + sizeof(gApdsProximityEnabled) + sizeof(gApdsGestureEnabled);
+  size_t gps_state_bytes = sizeof(gGpsEnabled) + sizeof(gGpsConnected);
+  size_t oled_state_bytes = sizeof(gOledEnabled) + sizeof(oledConnected);
 
 #if ENABLE_THERMAL_SENSOR
   BROADCAST_PRINTF("    Thermal Module: %5lu bytes (enabled)", (unsigned long)thermal_state_bytes);

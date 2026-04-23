@@ -909,26 +909,26 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     webBondSendChunkf(req, "\"psramMB\":%lu,", (unsigned long)((psramBytes + 524288) / (1024 * 1024)));
     webBondSendChunkf(req, "\"psramKB\":%lu,", (unsigned long)(psramBytes / 1024));
     // Local sensor connected status (runtime I2C probe results)
-    extern bool thermalConnected, tofConnected, imuConnected, gamepadConnected;
-    extern bool gpsConnected, presenceConnected;
+    extern bool gThermalConnected, gTofConnected, gImuConnected, gGamepadConnected;
+    extern bool gGpsConnected, gPresenceConnected;
     uint16_t localConnected = 0;
 #if ENABLE_THERMAL_SENSOR
-    if (thermalConnected)  localConnected |= CAP_SENSOR_THERMAL;
+    if (gThermalConnected)  localConnected |= CAP_SENSOR_THERMAL;
 #endif
 #if ENABLE_TOF_SENSOR
-    if (tofConnected)      localConnected |= CAP_SENSOR_TOF;
+    if (gTofConnected)      localConnected |= CAP_SENSOR_TOF;
 #endif
 #if ENABLE_IMU_SENSOR
-    if (imuConnected)      localConnected |= CAP_SENSOR_IMU;
+    if (gImuConnected)      localConnected |= CAP_SENSOR_IMU;
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-    if (gamepadConnected)  localConnected |= CAP_SENSOR_GAMEPAD;
+    if (gGamepadConnected)  localConnected |= CAP_SENSOR_GAMEPAD;
 #endif
 #if ENABLE_GPS_SENSOR
-    if (gpsConnected)      localConnected |= CAP_SENSOR_GPS;
+    if (gGpsConnected)      localConnected |= CAP_SENSOR_GPS;
 #endif
 #if ENABLE_PRESENCE_SENSOR
-    if (presenceConnected) localConnected |= CAP_SENSOR_PRESENCE;
+    if (gPresenceConnected) localConnected |= CAP_SENSOR_PRESENCE;
 #endif
     webBondSendChunkf(req, "\"sensorConnectedMask\":%u", (unsigned)localConnected);
     webBondSendChunk(req, "},");

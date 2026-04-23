@@ -28,7 +28,7 @@ extern void broadcastOutput(const String& msg);
 struct AutoListItem {
   long id;
   char name[AUTO_NAME_MAX];
-  char type[AUTO_TYPE_MAX];    // "atTime", "afterDelay", "interval"
+  char type[AUTO_TYPE_MAX];    // "time"/"manual"/"interval"/"boot" (legacy aliases accepted)
   bool enabled;
   int commandCount;
   char timeStr[16];            // HH:MM or delay/interval string
@@ -124,16 +124,94 @@ static bool autoGatherCallback(const char* autoJson, size_t jsonLen, void* userD
   // Extract enabled
   item.enabled = extractBool(autoJson, "\"enabled\"");
 
-  // Extract time display string based on type
-  if (strcmp(item.type, "atTime") == 0) {
-    extractStr(autoJson, "\"time\"", item.timeStr, sizeof(item.timeStr));
-  } else if (strcmp(item.type, "afterDelay") == 0 || strcmp(item.type, "afterdelay") == 0) {
+  // Extract time display string based on type (accept v1 and legacy names)
+  bool isTime = (strcmp(item.type, "time") == 0 || strcmp(item.type, "atTime") == 0 || strcmp(item.type, "attime") == 0);
+  bool isManual = (strcmp(item.type, "manual") == 0 || strcmp(item.type, "afterDelay") == 0 || strcmp(item.type, "afterdelay") == 0);
+  bool isInterval = (strcmp(item.type, "interval") == 0);
+  bool isBoot = (strcmp(item.type, "boot") == 0);
+  (void)isBoot;
+  if (isTime) {
+    char hhmm[8] = "";
+    extractStr(autoJson, "\"time\"", hhmm, sizeof(hhmm));
+
+    // Check recurrence for monthly/yearly special formatting
+    char recur[12] = "";
+    extractStr(autoJson, "\"recurrence\"", recur, sizeof(recur));
+    for (char* p = recur; *p; p++) if (*p >= 'A' && *p <= 'Z') *p += 32;
+
+    if (strcmp(recur, "monthly") == 0) {
+      long dom = extractLong(autoJson, "\"dayOfMonth\"");
+      if (dom >= 1 && dom <= 31) snprintf(item.timeStr, sizeof(item.timeStr), "%ld@%s", dom, hhmm);
+      else snprintf(item.timeStr, sizeof(item.timeStr), "%s", hhmm);
+    } else if (strcmp(recur, "yearly") == 0) {
+      long dom = extractLong(autoJson, "\"dayOfMonth\"");
+      long moy = extractLong(autoJson, "\"month\"");
+      static const char* monthAbbr[13] = {"?","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+      const char* mabbr = (moy >= 1 && moy <= 12) ? monthAbbr[moy] : "?";
+      if (dom >= 1 && dom <= 31) snprintf(item.timeStr, sizeof(item.timeStr), "%s%ld %s", mabbr, dom, hhmm);
+      else snprintf(item.timeStr, sizeof(item.timeStr), "%s", hhmm);
+    } else {
+    // Compose compact summary: "HH:MM[ Nw][ Days]" within 16-byte budget.
+    char daysRaw[64] = "";
+    extractStr(autoJson, "\"days\"", daysRaw, sizeof(daysRaw));
+    long wi = extractLong(autoJson, "\"weekInterval\"");
+
+    char daysShort[12] = "";
+    if (daysRaw[0]) {
+      // Count days and build 2-char abbreviations (Mo Tu We Th Fr Sa Su).
+      static const char* map[7][2] = {
+        {"sun","Su"},{"mon","Mo"},{"tue","Tu"},{"wed","We"},
+        {"thu","Th"},{"fri","Fr"},{"sat","Sa"}
+      };
+      int dayCount = 0;
+      bool present[7] = {false,false,false,false,false,false,false};
+      // Lowercase and tokenize in place.
+      for (char* p = daysRaw; *p; p++) if (*p >= 'A' && *p <= 'Z') *p += 32;
+      const char* tok = daysRaw;
+      while (*tok) {
+        while (*tok == ',' || *tok == ' ') tok++;
+        if (!*tok) break;
+        for (int i = 0; i < 7; i++) {
+          if (strncmp(tok, map[i][0], 3) == 0 && !present[i]) {
+            present[i] = true;
+            dayCount++;
+            break;
+          }
+        }
+        while (*tok && *tok != ',') tok++;
+      }
+      if (dayCount >= 1 && dayCount <= 3) {
+        size_t off = 0;
+        for (int i = 0; i < 7; i++) {
+          if (present[i] && off + 2 < sizeof(daysShort)) {
+            daysShort[off++] = map[i][1][0];
+            daysShort[off++] = map[i][1][1];
+          }
+        }
+        daysShort[off] = '\0';
+      } else if (dayCount >= 4) {
+        // Too many for abbreviation; show count.
+        snprintf(daysShort, sizeof(daysShort), "%dd", dayCount);
+      }
+    }
+
+    if (wi > 1 && daysShort[0]) {
+      snprintf(item.timeStr, sizeof(item.timeStr), "%s %ldw %s", hhmm, wi, daysShort);
+    } else if (wi > 1) {
+      snprintf(item.timeStr, sizeof(item.timeStr), "%s %ldw", hhmm, wi);
+    } else if (daysShort[0]) {
+      snprintf(item.timeStr, sizeof(item.timeStr), "%s %s", hhmm, daysShort);
+    } else {
+      snprintf(item.timeStr, sizeof(item.timeStr), "%s", hhmm);
+    }
+    }  // end daily/weekly branch
+  } else if (isManual) {
     long ms = extractLong(autoJson, "\"delayMs\"");
     if (ms >= 60000)
       snprintf(item.timeStr, sizeof(item.timeStr), "%ldm", ms / 60000);
     else
       snprintf(item.timeStr, sizeof(item.timeStr), "%lds", ms / 1000);
-  } else if (strcmp(item.type, "interval") == 0) {
+  } else if (isInterval) {
     long ms = extractLong(autoJson, "\"intervalMs\"");
     if (ms >= 3600000)
       snprintf(item.timeStr, sizeof(item.timeStr), "q%ldh", ms / 3600000);
@@ -297,12 +375,14 @@ void displayAutomations() {
 
     // Type label
     oledDisplay->setCursor(detailX, dy);
-    if (strcmp(sel.type, "atTime") == 0)
+    if (strcmp(sel.type, "time") == 0 || strcmp(sel.type, "atTime") == 0)
       oledDisplay->print("@Time");
-    else if (strcmp(sel.type, "afterDelay") == 0)
+    else if (strcmp(sel.type, "manual") == 0 || strcmp(sel.type, "afterDelay") == 0)
       oledDisplay->print("Delay");
     else if (strcmp(sel.type, "interval") == 0)
       oledDisplay->print("Repeat");
+    else if (strcmp(sel.type, "boot") == 0)
+      oledDisplay->print("Boot");
     else
       oledDisplay->print(sel.type);
     dy += 10;
@@ -382,11 +462,21 @@ static void autoRunSelected() {
   if (autoRenderData.count == 0 || autoRenderData.selectedIdx >= autoRenderData.count) return;
   AutoListItem& sel = autoRenderData.items[autoRenderData.selectedIdx];
 
+  // Manual (afterDelay) automations are manually-armed one-shots: "trigger"
+  // arms the delay timer; "run" would execute immediately and bypass the delay.
+  bool isAfterDelay = (strcmp(sel.type, "manual") == 0 ||
+                       strcmp(sel.type, "afterDelay") == 0 ||
+                       strcmp(sel.type, "afterdelay") == 0);
+
   char cmd[48];
-  snprintf(cmd, sizeof(cmd), "automationrun id=%ld", sel.id);
+  if (isAfterDelay) {
+    snprintf(cmd, sizeof(cmd), "automation trigger id=%ld", sel.id);
+  } else {
+    snprintf(cmd, sizeof(cmd), "automationrun id=%ld", sel.id);
+  }
   executeOLEDCommand(String(cmd));
 
-  autoActionMsg = "Running...";
+  autoActionMsg = isAfterDelay ? "Armed" : "Running...";
   autoActionMsgTime = millis();
 }
 

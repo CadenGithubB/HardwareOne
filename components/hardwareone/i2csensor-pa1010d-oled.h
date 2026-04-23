@@ -21,7 +21,7 @@ static void displayGPSData() {
   oledDisplay->setTextSize(1);
   oledContentBegin(&sGPSContent);
 
-  if (!gpsConnected || !gpsEnabled) {
+  if (!gGpsConnected || !gGpsEnabled) {
     oledContentPrint(&sGPSContent, "GPS not active");
     oledContentPrint(&sGPSContent, "");
     oledContentPrint(&sGPSContent, "Press X to start");
@@ -89,7 +89,7 @@ static void displayGPSData() {
 
 // Availability check for GPS OLED mode
 static bool gpsOLEDModeAvailable(String* outReason) {
-  if (gpsConnected && gpsEnabled) return true;
+  if (gGpsConnected && gGpsEnabled) return true;
 
   // Check if hardware was detected during I2C scan (address 0x10)
   extern ConnectedDevice connectedDevices[];
@@ -107,7 +107,7 @@ static bool gpsOLEDModeAvailable(String* outReason) {
 static void gpsToggleConfirmed(void* userData) {
   (void)userData;
   extern void executeOLEDCommand(const String& argsInput);
-  if (gpsEnabled && gpsConnected) {
+  if (gGpsEnabled && gGpsConnected) {
     executeOLEDCommand("closegps");
   } else {
     executeOLEDCommand("opengps");
@@ -127,7 +127,7 @@ static bool gpsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   }
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (gpsEnabled && gpsConnected) {
+    if (gGpsEnabled && gGpsConnected) {
       oledConfirmRequest("Close GPS?", nullptr, gpsToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open GPS?", nullptr, gpsToggleConfirmed, nullptr);

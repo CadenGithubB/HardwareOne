@@ -23,9 +23,9 @@
 Adafruit_BNO055* gBNO055 = nullptr;
 
 // IMU initialization handoff variables
-volatile bool imuInitRequested = false;
-volatile bool imuInitDone = false;
-volatile bool imuInitResult = false;
+volatile bool gImuInitRequested = false;
+volatile bool gImuInitDone = false;
+volatile bool gImuInitResult = false;
 
 // Settings and debug
 // sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing provided by System_I2C.h
@@ -61,10 +61,10 @@ volatile UBaseType_t gIMUWatermarkNow = (UBaseType_t)0;
 // Queue system functions now in System_I2C.h
 
 // IMU sensor state (definitions)
-bool imuEnabled = false;
-bool imuConnected = false;
-unsigned long imuLastStopTime = 0;
-TaskHandle_t imuTaskHandle = nullptr;
+bool gImuEnabled = false;
+bool gImuConnected = false;
+unsigned long gImuLastStopTime = 0;
+TaskHandle_t gImuTaskHandle = nullptr;
 
 // Forward declarations
 extern bool createIMUTask();
@@ -76,7 +76,7 @@ extern bool createIMUTask();
 const char* cmd_imu(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  if (!imuConnected || !imuEnabled) {
+  if (!gImuConnected || !gImuEnabled) {
     broadcastOutput("IMU sensor not connected or not started. Use 'imustart' first.");
     return "ERROR";
   }
@@ -104,10 +104,10 @@ const char* cmd_imu(const String& argsInput) {
 }
 
 // Internal function called by queue processor
-bool startIMUSensorInternal() {
+bool imuStartInternal() {
   // Check if too soon after stop (prevent rapid restart crashes)
-  if (imuLastStopTime > 0) {
-    unsigned long timeSinceStop = millis() - imuLastStopTime;
+  if (gImuLastStopTime > 0) {
+    unsigned long timeSinceStop = millis() - gImuLastStopTime;
     if (timeSinceStop < MIN_RESTART_DELAY_MS) {
       DEBUG_CLIF("IMU sensor stopped recently, waiting before restart");
       return false;
@@ -118,6 +118,16 @@ bool startIMUSensorInternal() {
   if (!checkMemoryAvailable("imu", nullptr)) {
     DEBUG_CLIF("Insufficient memory for IMU sensor");
     return false;
+  }
+
+  // Create cache mutex if not already created
+  if (!gImuCache.mutex) {
+    gImuCache.mutex = xSemaphoreCreateMutex();
+    if (!gImuCache.mutex) {
+      ERROR_SENSORSF("[IMU] Failed to create cache mutex");
+      return false;
+    }
+    DEBUG_SENSORSF("[IMU] Cache mutex created");
   }
 
   // Clean up any stale cache from previous run BEFORE starting
@@ -139,40 +149,40 @@ bool startIMUSensorInternal() {
   }
 
   // CRITICAL: Enable flag BEFORE creating task to prevent race condition
-  // Task checks imuEnabled first thing and will delete itself if false
-  bool prev = imuEnabled;
-  imuEnabled = true;  // Set this BEFORE task creation
+  // Task checks gImuEnabled first thing and will delete itself if false
+  bool prev = gImuEnabled;
+  gImuEnabled = true;  // Set this BEFORE task creation
 
   // Defer initialization to imuTask; wait briefly for result
-  if (gBNO055 == nullptr || !imuConnected) {
-    imuInitDone = false;
-    imuInitResult = false;
-    imuInitRequested = true;
+  if (gBNO055 == nullptr || !gImuConnected) {
+    gImuInitDone = false;
+    gImuInitResult = false;
+    gImuInitRequested = true;
   }
 
-  // Create IMU task lazily (after setting imuEnabled=true)
+  // Create IMU task lazily (after setting gImuEnabled=true)
   if (!createIMUTask()) {
     DEBUG_CLIF("Failed to create IMU task (insufficient memory or resources)");
-    imuEnabled = false;  // Reset flag on failure
+    gImuEnabled = false;  // Reset flag on failure
     return false;
   }
-  if (imuEnabled != prev) {
+  if (gImuEnabled != prev) {
     sensorStatusBumpWith("openimu@queue");
   }
 
   // If init was requested, block up to 3s for a result so CLI returns accurate status
-  if (imuInitRequested || gBNO055 == nullptr || !imuConnected) {
+  if (gImuInitRequested || gBNO055 == nullptr || !gImuConnected) {
     unsigned long start = millis();
-    while (!imuInitDone && (millis() - start) < 3000UL) {
+    while (!gImuInitDone && (millis() - start) < 3000UL) {
       delay(10);
     }
-    if (!imuInitDone) {
-      imuEnabled = false;
+    if (!gImuInitDone) {
+      gImuEnabled = false;
       DEBUG_CLIF("Failed to initialize IMU sensor (timeout after 3s)");
       return false;
     }
-    if (!imuInitResult) {
-      imuEnabled = false;
+    if (!gImuInitResult) {
+      gImuEnabled = false;
       DEBUG_CLIF("Failed to initialize IMU sensor (initialization failed)");
       return false;
     }
@@ -192,7 +202,7 @@ const char* cmd_imustart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Check if already enabled or queued
-  if (imuEnabled) {
+  if (gImuEnabled) {
     return "[IMU] Error: Already running";
   }
   if (isInQueue(I2C_DEVICE_IMU)) {
@@ -226,13 +236,13 @@ const char* cmd_imustop(const String& argsInput) {
 const char* cmd_imuactions(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  if (!imuEnabled || !imuConnected) {
+  if (!gImuEnabled || !gImuConnected) {
     broadcastOutput("[IMU] Error: Not enabled. Use 'imustart' first.");
     return "ERROR";
   }
 
   // Update actions once to get current state
-  updateIMUActions();
+  imuUpdateActions();
 
   // Stream output line-by-line instead of building in shared buffer
   broadcastOutput("IMU Action Detection Status:");
@@ -310,7 +320,7 @@ const char* cmd_imuactions(const String& argsInput) {
 // IMU Sensor Initialization and Reading Functions
 // ============================================================================
 
-bool initIMUSensor() {
+bool imuInit() {
   if (gBNO055 != nullptr) {
     broadcastOutput("[IMU] Error: Already initialized!");
     return true;
@@ -386,7 +396,7 @@ bool initIMUSensor() {
         // Success! Configure the sensor
         gBNO055->setExtCrystalUse(true);
         delay(100);
-        imuConnected = true;
+        gImuConnected = true;
         
         INFO_SENSORSF("[IMU] BNO055 IMU sensor initialized successfully");
         return true;
@@ -408,7 +418,7 @@ bool initIMUSensor() {
 }
 
 // Apply IMU orientation correction based on physical mounting
-void applyIMUOrientationCorrection(float& pitch, float& roll, float& yaw) {
+void imuApplyOrientationCorrection(float& pitch, float& roll, float& yaw) {
   if (!gSettings.imuOrientationCorrectionEnabled) {
     return;
   }
@@ -500,11 +510,11 @@ void applyIMUOrientationCorrection(float& pitch, float& roll, float& yaw) {
   if (roll < -180.0f) roll += 360.0f;
 }
 
-void readIMUSensor() {
-  if (!imuEnabled || !imuConnected || gBNO055 == nullptr) {
-    if (!imuConnected) {
+void imuPoll() {
+  if (!gImuEnabled || !gImuConnected || gBNO055 == nullptr) {
+    if (!gImuConnected) {
       broadcastOutput("[IMU] Error: Not connected. Check wiring.");
-    } else if (!imuEnabled) {
+    } else if (!gImuEnabled) {
       broadcastOutput("[IMU] Error: Not started - use 'imustart' first");
     } else {
       broadcastOutput("[IMU] Error: Failed to initialize BNO055 sensor");
@@ -528,7 +538,7 @@ void readIMUSensor() {
   float rawPitch = oriEvent.orientation.y;
   float rawRoll = oriEvent.orientation.z;
 
-  applyIMUOrientationCorrection(rawPitch, rawRoll, rawYaw);
+  imuApplyOrientationCorrection(rawPitch, rawRoll, rawYaw);
 
   if (gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     gImuCache.accelX = accelEvent.acceleration.x;
@@ -546,17 +556,17 @@ void readIMUSensor() {
     gImuCache.imuSeq++;
     xSemaphoreGive(gImuCache.mutex);
 
-    updateIMUActions();
+    imuUpdateActions();
     DEBUG_IMU_DATAF("IMU data updated");
   } else {
-    DEBUG_IMU_FRAMEF("readIMUSensor() failed to lock cache - skipping update");
+    DEBUG_IMU_FRAMEF("imuPoll() failed to lock cache - skipping update");
   }
 }
 // JSON Building
 // ============================================================================
 
 // Build IMU JSON directly into buffer using snprintf (zero String allocations)
-int buildIMUDataJSON(char* buf, size_t bufSize) {
+int imuBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
   int pos = 0;
@@ -566,11 +576,11 @@ int buildIMUDataJSON(char* buf, size_t bufSize) {
     unsigned long lastUpdateMs = gImuCache.imuLastUpdate;
     unsigned long ageMs = (lastUpdateMs > 0 && nowMs >= lastUpdateMs) ? (nowMs - lastUpdateMs) : 0;
 
-    bool enabled = imuEnabled;
-    bool connected = imuConnected;
-    bool initReq = imuInitRequested;
-    bool initDone = imuInitDone;
-    bool initOk = imuInitResult;
+    bool enabled = gImuEnabled;
+    bool connected = gImuConnected;
+    bool initReq = gImuInitRequested;
+    bool initDone = gImuInitDone;
+    bool initOk = gImuInitResult;
 
     // Build complete JSON response in a single snprintf call
     pos = snprintf(buf, bufSize,
@@ -613,8 +623,8 @@ int buildIMUDataJSON(char* buf, size_t bufSize) {
 // ============================================================================
 
 // Update all IMU action detections
-void updateIMUActions() {
-  if (!imuEnabled || !imuConnected || !gImuCache.imuDataValid) return;
+void imuUpdateActions() {
+  if (!gImuEnabled || !gImuConnected || !gImuCache.imuDataValid) return;
 
   unsigned long now = millis();
 
@@ -1000,11 +1010,11 @@ const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);
 // ============================================================================
 // Purpose: Continuously reads 9-DOF orientation data from BNO055 IMU sensor
 // Stack: 4096 words (~16KB) | Priority: 1 | Core: Any
-// Lifecycle: Created by cmd_imustart, deleted when imuEnabled=false
+// Lifecycle: Created by cmd_imustart, deleted when gImuEnabled=false
 // Polling: Configurable via imuDevicePollMs (default 200ms) | I2C Clock: 100kHz
 //
 // Cleanup Strategy:
-//   1. Check imuEnabled flag at loop start
+//   1. Check gImuEnabled flag at loop start
 //   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Delete sensor object and invalidate cache
 //   4. Release mutex and delete task
@@ -1019,8 +1029,8 @@ void imuTask(void* parameter) {
   unsigned long lastStackLog = 0;
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
-    if (!imuEnabled) {
-      imuConnected = false;
+    if (!gImuEnabled) {
+      gImuConnected = false;
       if (gBNO055 != nullptr) {
         delete gBNO055;
         gBNO055 = nullptr;
@@ -1029,9 +1039,9 @@ void imuTask(void* parameter) {
       gImuCache.imuSeq = 0;
       
       // Reset initialization flags for clean restart
-      imuInitRequested = false;
-      imuInitDone = false;
-      imuInitResult = false;
+      gImuInitRequested = false;
+      gImuInitDone = false;
+      gImuInitResult = false;
       
       SENSOR_TASK_EXIT("IMU");
     }
@@ -1045,27 +1055,27 @@ void imuTask(void* parameter) {
     unsigned long nowLog = millis();
     if (nowLog - lastStackLog >= 5000UL) {
       lastStackLog = nowLog;
-      if (checkTaskStackSafety("imu", IMU_STACK_WORDS, &imuEnabled)) break;
+      if (checkTaskStackSafety("imu", IMU_STACK_WORDS, &gImuEnabled)) break;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
-      if (imuEnabled) {
+      if (gImuEnabled) {
         DEBUG_PERFORMANCEF("[STACK] imu_task watermark_now=%u min=%u words", (unsigned)gIMUWatermarkNow, (unsigned)gIMUWatermarkMin);
         DEBUG_MEMORYF("[HEAP] imu_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     // Handle deferred IMU initialization on task stack
-    if (imuEnabled && (!imuConnected || gBNO055 == nullptr)) {
-      if (imuInitRequested) {
-        bool ok = initIMUSensor();
-        imuInitResult = ok;
-        imuInitDone = true;
-        imuInitRequested = false;
+    if (gImuEnabled && (!gImuConnected || gBNO055 == nullptr)) {
+      if (gImuInitRequested) {
+        bool ok = imuInit();
+        gImuInitResult = ok;
+        gImuInitDone = true;
+        gImuInitRequested = false;
         if (!ok) {
-          imuEnabled = false;
+          gImuEnabled = false;
         }
       }
     }
 
-    if (imuEnabled && imuConnected && gBNO055 != nullptr && !gSensorPollingPaused) {
+    if (gImuEnabled && gImuConnected && gBNO055 != nullptr && !gSensorPollingPaused) {
       unsigned long imuPollMs = (gSettings.imuDevicePollMs > 0) ? (unsigned long)gSettings.imuDevicePollMs : 200;
       unsigned long nowMs = millis();
       if (nowMs - lastIMURead >= imuPollMs) {
@@ -1074,7 +1084,7 @@ void imuTask(void* parameter) {
           // Probe device presence so health system can track failures
           Wire1.beginTransmission(I2C_ADDR_IMU);
           if (Wire1.endTransmission() != 0) return false;
-          readIMUSensor();
+          imuPoll();
           return true;
         });
         lastIMURead = nowMs;
@@ -1088,7 +1098,7 @@ void imuTask(void* parameter) {
         if (!result) {
           if (i2cShouldAutoDisable(I2C_ADDR_IMU)) {
             ERROR_SENSORSF("Too many consecutive IMU failures - auto-disabling");
-            imuEnabled = false;
+            gImuEnabled = false;
             sensorStatusBumpWith("imu@auto_disabled");
           }
         }
@@ -1098,7 +1108,7 @@ void imuTask(void* parameter) {
         if (result && shouldStreamSensorToRemote()) {
           // Build IMU JSON from cache
           char imuJson[512];
-          int jsonLen = buildIMUDataJSON(imuJson, sizeof(imuJson));
+          int jsonLen = imuBuildDataJSON(imuJson, sizeof(imuJson));
           if (jsonLen > 0) {
             sendSensorDataUpdate(REMOTE_SENSOR_IMU, imuJson, jsonLen);
           }
@@ -1132,7 +1142,7 @@ static const SettingEntry imuSettingEntries[] = {
 };
 
 static bool isIMUConnected() {
-  return imuConnected;
+  return gImuConnected;
 }
 
 // Columns: name, jsonSection, entries, count, isConnected, description

@@ -12,7 +12,7 @@
 // ============================================================================
 
 #if ENABLE_CAMERA_SENSOR
-extern bool cameraEnabled;
+extern bool gCameraEnabled;
 extern bool cameraConnected;
 
 static bool getCameraConnected() {
@@ -20,7 +20,7 @@ static bool getCameraConnected() {
 }
 
 static bool getCameraEnabled() {
-  return cameraEnabled;
+  return gCameraEnabled;
 }
 
 static const char* getCameraTask() {
@@ -37,7 +37,7 @@ static const char* cameraValidTasks[] = { SENSOR_TASK_STREAMING, nullptr };
 // ============================================================================
 
 #if ENABLE_MICROPHONE_SENSOR
-extern bool micEnabled;
+extern bool gMicEnabled;
 extern bool micConnected;
 extern bool micRecording;
 
@@ -46,7 +46,7 @@ static bool getMicConnected() {
 }
 
 static bool getMicEnabled() {
-  return micEnabled;
+  return gMicEnabled;
 }
 
 static const char* getMicTask() {

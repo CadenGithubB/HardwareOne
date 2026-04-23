@@ -28,10 +28,10 @@ struct PresenceCache {
 class String;
 
 extern PresenceCache gPresenceCache;
-extern bool presenceEnabled;
-extern bool presenceConnected;
-extern unsigned long presenceLastStopTime;
-extern TaskHandle_t presenceTaskHandle;
+extern bool gPresenceEnabled;
+extern bool gPresenceConnected;
+extern unsigned long gPresenceLastStopTime;
+extern TaskHandle_t gPresenceTaskHandle;
 
 // Command handlers
 const char* cmd_presencestart(const String& argsInput);
@@ -40,12 +40,12 @@ const char* cmd_presenceread(const String& argsInput);
 const char* cmd_presencestatus(const String& argsInput);
 
 // Presence sensor functions
-bool startPresenceSensorInternal();  // Called by queue processor
-bool initPresenceSensor();
-bool readPresenceData();
+bool presenceStartInternal();  // Called by queue processor
+bool presenceInit();
+bool presencePoll();
 
 // JSON building for ESP-NOW streaming
-int buildPresenceDataJSON(char* buf, size_t bufSize);
+int presenceBuildDataJSON(char* buf, size_t bufSize);
 
 // Command registry (for system_utils.cpp module list)
 struct CommandEntry;

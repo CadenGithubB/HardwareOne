@@ -16,7 +16,7 @@ static void displayFmRadio() {
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
   
-  if (!fmRadioConnected || !fmRadioEnabled) {
+  if (!gFmRadioConnected || !gRadioInitialized) {
     oledDrawIcon(48, y + 2, "vol_mute", 16);
     oledDisplay->setCursor(16, y + 22);
     oledDisplay->println("FM Radio not active");
@@ -25,37 +25,46 @@ static void displayFmRadio() {
     return;
   }
   
+  // Take a snapshot under the cache mutex so we don't tear strings mid-draw.
+  FMRadioCache snap;
+  if (gFmRadioCache.mutex && xSemaphoreTake(gFmRadioCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    snap = gFmRadioCache;
+    xSemaphoreGive(gFmRadioCache.mutex);
+  } else {
+    snap = gFmRadioCache;  // best-effort
+  }
+
   // Frequency (large)
   oledDisplay->setCursor(0, y);
   oledDisplay->setTextSize(2);
-  oledDisplay->printf("%.1f MHz", fmRadioFrequency / 100.0);
+  oledDisplay->printf("%.1f MHz", snap.frequency / 100.0);
   oledDisplay->setTextSize(1);
   y += 18;
-  
+
   // Station name (if available)
   oledDisplay->setCursor(0, y);
-  if (strlen(fmRadioStationName) > 0) {
-    oledDisplay->printf("Station: %s", fmRadioStationName);
+  if (strlen(snap.stationName) > 0) {
+    oledDisplay->printf("Station: %s", snap.stationName);
   } else {
     oledDisplay->print("No RDS Station");
   }
   y += 10;
-  
+
   // RDS Radio Text
   oledDisplay->setCursor(0, y);
-  if (strlen(fmRadioStationText) > 0) {
-    oledDisplay->print(fmRadioStationText);
+  if (strlen(snap.stationText) > 0) {
+    oledDisplay->print(snap.stationText);
   }
   y += 10;
-  
+
   // Status bar with volume, RSSI, stereo
   oledDisplay->setCursor(0, y);
   oledDisplay->print("Vol:");
-  oledDisplay->print(fmRadioVolume);
-  oledDisplay->print(fmRadioMuted ? "M" : "");
+  oledDisplay->print(snap.volume);
+  oledDisplay->print(snap.muted ? "M" : "");
   oledDisplay->print(" RSSI:");
-  oledDisplay->print(fmRadioRSSI);
-  oledDisplay->print(fmRadioStereo ? " ST" : " MO");
+  oledDisplay->print(snap.rssi);
+  oledDisplay->print(snap.stereo ? " ST" : " MO");
 }
 
 // Availability check for FM Radio OLED mode
@@ -66,7 +75,7 @@ static bool fmRadioOLEDModeAvailable(String* outReason) {
 static void fmRadioToggleConfirmed(void* userData) {
   (void)userData;
   extern void executeOLEDCommand(const String& argsInput);
-  if (fmRadioEnabled && fmRadioConnected) {
+  if (gRadioInitialized && gFmRadioConnected) {
     executeOLEDCommand("closefmradio");
   } else {
     executeOLEDCommand("openfmradio");
@@ -76,7 +85,7 @@ static void fmRadioToggleConfirmed(void* userData) {
 // Input handler for FM Radio OLED mode - X button toggles radio
 static bool fmRadioInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (fmRadioEnabled && fmRadioConnected) {
+    if (gRadioInitialized && gFmRadioConnected) {
       oledConfirmRequest("Close FM?", nullptr, fmRadioToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open FM?", nullptr, fmRadioToggleConfirmed, nullptr);

@@ -21,7 +21,7 @@
 #include "System_I2C.h"
 
 // OLED_I2C_ADDRESS, OLED_TRANSACTION, and oledConnected from OLED_Display.h
-extern ControlCache gControlCache;
+extern GamepadCache gGamepadCache;
 
 // OLED text input
 extern String getOLEDTextInput(const char* prompt, bool masked, const char* defaultValue, int maxLen, bool* wasCancelled = nullptr, bool canSkip = true);
@@ -425,10 +425,10 @@ void resetWizardJoystickState() {
 JoystickNav readWizardJoystickNav() {
   JoystickNav nav = {false, false, false, false};
   
-  if (xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    if (gControlCache.gamepadDataValid) {
-      int joyX = gControlCache.gamepadX;
-      int joyY = gControlCache.gamepadY;
+  if (xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (gGamepadCache.gamepadDataValid) {
+      int joyX = gGamepadCache.gamepadX;
+      int joyY = gGamepadCache.gamepadY;
       
       int deltaX = joyX - JOYSTICK_CENTER;
       int deltaY = JOYSTICK_CENTER - joyY;  // Physical DOWN = positive (matches main menu)
@@ -450,7 +450,7 @@ JoystickNav readWizardJoystickNav() {
       sJoyLeftHeld = deflectedLeft;
       sJoyRightHeld = deflectedRight;
     }
-    xSemaphoreGive(gControlCache.mutex);
+    xSemaphoreGive(gGamepadCache.mutex);
   }
   
   return nav;
@@ -615,9 +615,9 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
 
     uint32_t buttons = lastButtons;
     bool haveButtons = false;
-    if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      if (gControlCache.gamepadDataValid) { buttons = gControlCache.gamepadButtons; haveButtons = true; }
-      xSemaphoreGive(gControlCache.mutex);
+    if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      if (gGamepadCache.gamepadDataValid) { buttons = gGamepadCache.gamepadButtons; haveButtons = true; }
+      xSemaphoreGive(gGamepadCache.mutex);
     }
     if (haveButtons && !lastButtonsInitialized) { lastButtons = buttons; lastButtonsInitialized = true; continue; }
     uint32_t pressedNow = ~buttons;
@@ -716,9 +716,9 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
 
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
-      if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (gControlCache.gamepadDataValid) { buttons = gControlCache.gamepadButtons; haveButtons = true; }
-        xSemaphoreGive(gControlCache.mutex);
+      if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (gGamepadCache.gamepadDataValid) { buttons = gGamepadCache.gamepadButtons; haveButtons = true; }
+        xSemaphoreGive(gGamepadCache.mutex);
       }
       if (haveButtons && !lastButtonsInitialized) { lastButtons = buttons; lastButtonsInitialized = true; continue; }
       uint32_t pressedNow = ~buttons;
@@ -902,12 +902,12 @@ bool getOLEDSetupModeSelection(int& setupMode) {
       // Read buttons
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
-      if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (gControlCache.gamepadDataValid) {
-          buttons = gControlCache.gamepadButtons;
+      if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (gGamepadCache.gamepadDataValid) {
+          buttons = gGamepadCache.gamepadButtons;
           haveButtons = true;
         }
-        xSemaphoreGive(gControlCache.mutex);
+        xSemaphoreGive(gGamepadCache.mutex);
       }
 
       if (haveButtons && !lastButtonsInitialized) {
@@ -1017,12 +1017,12 @@ bool getOLEDThemeSelection(bool& darkMode) {
       // Read buttons
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
-      if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (gControlCache.gamepadDataValid) {
-          buttons = gControlCache.gamepadButtons;
+      if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (gGamepadCache.gamepadDataValid) {
+          buttons = gGamepadCache.gamepadButtons;
           haveButtons = true;
         }
-        xSemaphoreGive(gControlCache.mutex);
+        xSemaphoreGive(gGamepadCache.mutex);
       }
       
       if (haveButtons && !lastButtonsInitialized) {

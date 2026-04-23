@@ -19,7 +19,7 @@
 #include "HAL_Display.h"
 #include "HAL_Input.h"
 extern bool oledConnected;
-extern ControlCache gControlCache;
+extern GamepadCache gGamepadCache;
 // OLED page handlers for ESP-NOW and MQTT (defined in OLED_SetupWizard.cpp)
 void handleOLEDESPNowPage(SetupWizardResult& result, bool& running);
 void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
@@ -1331,12 +1331,12 @@ SetupWizardResult runSetupWizard() {
     if (oledDisplay && oledConnected) {
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
-      if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (gControlCache.gamepadDataValid) {
-          buttons = gControlCache.gamepadButtons;
+      if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (gGamepadCache.gamepadDataValid) {
+          buttons = gGamepadCache.gamepadButtons;
           haveButtons = true;
         }
-        xSemaphoreGive(gControlCache.mutex);
+        xSemaphoreGive(gGamepadCache.mutex);
       }
 
       if (haveButtons && !lastButtonsInitialized) {

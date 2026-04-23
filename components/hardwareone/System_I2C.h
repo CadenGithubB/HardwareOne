@@ -392,14 +392,14 @@ extern volatile UBaseType_t gThermalWatermarkMin;
 extern volatile UBaseType_t gGamepadWatermarkNow;
 extern volatile UBaseType_t gGamepadWatermarkMin;
 extern uint32_t gWire1DefaultHz;
-extern uint32_t tofLastStopTime;
-extern unsigned long thermalLastStopTime;
-extern volatile bool imuInitRequested;
-extern volatile bool imuInitResult;
-extern volatile bool imuInitDone;
-extern volatile bool thermalInitRequested;
-extern volatile bool thermalInitResult;
-extern volatile bool thermalInitDone;
+extern uint32_t gTofLastStopTime;
+extern unsigned long gThermalLastStopTime;
+extern volatile bool gImuInitRequested;
+extern volatile bool gImuInitResult;
+extern volatile bool gImuInitDone;
+extern volatile bool gThermalInitRequested;
+extern volatile bool gThermalInitResult;
+extern volatile bool gThermalInitDone;
 
 // ============================================================================
 // Helper Functions
@@ -410,10 +410,10 @@ void unlockThermalCache();
 void i2cSetDefaultWire1Clock();
 void sensorStatusBumpWith(const char* reason);
 const char* buildSensorStatusJson();
-bool initIMUSensor();
-bool initFMRadio();
-void startFMRadioInternal();
-void stopFMRadioInternal();
+bool imuInit();
+bool fmRadioInit();
+bool fmRadioStartInternal();
+void fmRadioStopInternal();
 
 // ============================================================================
 // Thermal Sensor Externs

@@ -30,7 +30,7 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `WEB_FEATURE_LEVEL` | `4` (Custom) | `0`=disabled, `1`=core UI, `2`=standard modules, `3`=all modules, `4`=custom |
 | `DISPLAY_TYPE` | `1` (SSD1306) | `0`=none, `1`=SSD1306 OLED, `2`=ST7789 TFT, `3`=ILI9341 TFT |
 | `ENABLE_BLUETOOTH` | `0` | BLE server with GATT services |
-| `ENABLE_G2_GLASSES` | `0` | Even Realities G2 BLE client (requires `ENABLE_BLUETOOTH=1`) |
+| `ENABLE_G2_GLASSES` | `0` | Even Realities G2 BLE client (requires `ENABLE_BLUETOOTH=1`) — **planned, not yet working** |
 | `ENABLE_MQTT` | `1` | Home Assistant MQTT integration |
 | `ENABLE_AUTOMATION` | `1` | Scheduled tasks and conditional commands |
 | `ENABLE_CAMERA_SENSOR` | `0` | ESP32-S3 DVP camera (OV2640/OV5640) |
@@ -815,7 +815,12 @@ srdebugreset                    - Reset SR counters
 </details>
 
 <details>
-<summary><strong>g2 — Even Realities G2 glasses (requires ENABLE_G2_GLASSES)</strong></summary>
+<summary><strong>g2 — Even Realities G2 glasses (requires ENABLE_G2_GLASSES) — ⚠️ planned, not yet working</strong></summary>
+
+> **Status: not functional yet.** These commands compile and the scaffolding is
+> in place, but the G2 BLE client is a work-in-progress goal — connection,
+> display, and gesture handling are not reliable. Documented here as the
+> intended command surface once the feature lands.
 
 ```
 openg2 [left|right|auto]        - Connect to G2 glasses
@@ -1032,8 +1037,13 @@ NMEA output parsed for lat/lon/speed/heading. Track logging to LittleFS. Offline
 ### FM Radio (RDA5807)
 Tune, seek up/down, set volume, mute. `fmradio tune <MHz>` — e.g., `fmradio tune 101.5`.
 
-### Even Realities G2 Glasses
-BLE client that connects to G2 glasses. Sends display text via teleprompter protocol. Gesture input from glasses maps to OLED menu navigation. Mutually exclusive with phone BLE server mode at runtime.
+### Even Realities G2 Glasses *(planned — not yet working)*
+> **Status: work in progress.** This is a goal feature, not a working one yet.
+> The intention is a BLE client that connects to G2 glasses, sends display text
+> via their teleprompter protocol, and maps glasses gestures to OLED menu
+> navigation — mutually exclusive with phone BLE server mode at runtime. The
+> CLI commands exist as placeholders but the underlying protocol is still being
+> developed. Do not expect this to work on a current build.
 
 ---
 

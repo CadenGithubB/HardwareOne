@@ -20,7 +20,7 @@
 #include "System_TaskUtils.h"
 
 // Task handle (owned by this module)
-TaskHandle_t gpsTaskHandle = nullptr;
+TaskHandle_t gGpsTaskHandle = nullptr;
 
 // GPS module object (owned by this module)
 Adafruit_GPS* gPA1010D = nullptr;
@@ -29,9 +29,9 @@ Adafruit_GPS* gPA1010D = nullptr;
 // sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing
 
 // GPS sensor state (definition - matching pattern of thermal/tof/imu/gamepad sensors)
-bool gpsEnabled = false;
-bool gpsConnected = false;
-unsigned long gpsLastStopTime = 0;
+bool gGpsEnabled = false;
+bool gGpsConnected = false;
+unsigned long gGpsLastStopTime = 0;
 
 // GPS cache for thread-safe data access (mutex created in setup())
 GPSCache gGPSCache = {
@@ -56,27 +56,52 @@ GPSCache gGPSCache = {
 
 // Helper function to start GPS internal (called by queue processor)
 // Moved from HardwareOne.ino to consolidate GPS initialization logic
-void startGPSInternal() {
+bool gpsStartInternal() {
   INFO_SENSORSF("Starting GPS initialization...");
-  
-  if (gpsEnabled) {
+
+  if (gGpsEnabled) {
     DEBUG_SENSORSF("[GPS_INIT] GPS already started (enabled=1)");
-    return;
+    return true;
   }
 
   // Check memory before creating GPS task
   if (!checkMemoryAvailable("gps", nullptr)) {
     ERROR_SENSORSF("[GPS_INIT] Insufficient memory for GPS sensor");
-    return;
+    return false;
+  }
+
+  // Create cache mutex if not already created
+  if (!gGPSCache.mutex) {
+    gGPSCache.mutex = xSemaphoreCreateMutex();
+    if (!gGPSCache.mutex) {
+      ERROR_SENSORSF("[GPS] Failed to create cache mutex");
+      return false;
+    }
+    DEBUG_SENSORSF("[GPS] Cache mutex created");
+  }
+
+  // Clean up any stale cache from previous run BEFORE starting
+  if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    gGPSCache.dataValid = false;
+    gGPSCache.latitude = 0.0f;
+    gGPSCache.longitude = 0.0f;
+    gGPSCache.altitude = 0.0f;
+    gGPSCache.speed = 0.0f;
+    gGPSCache.angle = 0.0f;
+    gGPSCache.hasFix = false;
+    gGPSCache.fixQuality = 0;
+    gGPSCache.satellites = 0;
+    xSemaphoreGive(gGPSCache.mutex);
+    DEBUG_SENSORSF("[GPS] Cleaned up stale cache from previous run");
   }
   
   // Initialize GPS module if not already done
-  if (!gpsConnected || gPA1010D == nullptr) {
+  if (!gGpsConnected || gPA1010D == nullptr) {
     DEBUG_SENSORSF("[GPS_INIT] Allocating Adafruit_GPS object on Wire1...");
     gPA1010D = new Adafruit_GPS(&Wire1);
     if (!gPA1010D) {
       ERROR_SENSORSF("Failed to allocate GPS module");
-      return;
+      return false;
     }
     DEBUG_SENSORSF("[GPS_INIT] GPS object allocated at %p", gPA1010D);
     
@@ -101,9 +126,9 @@ void startGPSInternal() {
     if (!initSuccess) {
       delete gPA1010D;
       gPA1010D = nullptr;
-      gpsConnected = false;
+      gGpsConnected = false;
       ERROR_SENSORSF("Failed to initialize GPS module at 0x%02X after 3 attempts", I2C_ADDR_GPS);
-      return;
+      return false;
     }
     INFO_SENSORSF("GPS module initialized successfully at I2C address 0x%02X", I2C_ADDR_GPS);
     
@@ -116,53 +141,32 @@ void startGPSInternal() {
     });
     DEBUG_SENSORSF("[GPS_INIT] GPS configuration commands sent");
     
-    gpsConnected = true;
-    DEBUG_SENSORSF("[GPS_INIT] gpsConnected set to true");
+    gGpsConnected = true;
+    DEBUG_SENSORSF("[GPS_INIT] gGpsConnected set to true");
     
   }
   
-  gpsEnabled = true;
-  DEBUG_SENSORSF("[GPS_INIT] gpsEnabled set to true");
+  gGpsEnabled = true;
+  DEBUG_SENSORSF("[GPS_INIT] gGpsEnabled set to true");
   
-  // Start GPS polling task if not already running
-  // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gpsTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gpsTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      gpsTaskHandle = nullptr;
-    }
+  // Create GPS task using centralized helper
+  if (!createGPSTask()) {
+    ERROR_SENSORSF("Failed to create GPS task");
+    gGpsEnabled = false;
+    gGpsConnected = false;
+    delete gPA1010D;
+    gPA1010D = nullptr;
+    return false;
   }
-  if (gpsTaskHandle == nullptr) {
-    DEBUG_SENSORSF("[GPS_INIT] Creating GPS polling task...");
-    BaseType_t result = xTaskCreatePinnedToCore(
-      gpsTask,
-      "gps_task",
-      GPS_STACK_WORDS,  // Stack size in words; ~12KB (reduced from 16KB - peak usage ~5KB)
-      nullptr,
-      1,  // Priority
-      &gpsTaskHandle,
-      1  // Core 1 (same as other sensor tasks)
-    );
-    if (result != pdPASS) {
-      ERROR_SENSORSF("Failed to create GPS task (result=%d)", result);
-      gpsEnabled = false;
-      gpsConnected = false;
-      delete gPA1010D;
-      gPA1010D = nullptr;
-      return;
-    }
-    DEBUG_SENSORSF("[GPS_INIT] GPS polling task created successfully (handle=%p)", gpsTaskHandle);
-  } else {
-    DEBUG_SENSORSF("[GPS_INIT] GPS task already running (handle=%p)", gpsTaskHandle);
-  }
-  
+
   sensorStatusBumpWith("opengps@queue");
   DEBUG_SENSORSF("[GPS_INIT] GPS module initialization complete - task is now polling");
-  
+
   // Broadcast sensor status to ESP-NOW master
 #if ENABLE_ESPNOW
   broadcastSensorStatus(REMOTE_SENSOR_GPS, true);
 #endif
+  return true;
 }
 
 // ============================================================================
@@ -172,7 +176,7 @@ void startGPSInternal() {
 const char* cmd_gpsstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (gpsEnabled) {
+  if (gGpsEnabled) {
     return "[GPS] Sensor already running";
   }
   
@@ -201,7 +205,7 @@ const char* cmd_gpsstart(const String& argsInput) {
 const char* cmd_gpsstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  DEBUG_SENSORSF("[GPS_STOP] GPS stop command called (current enabled=%d)", gpsEnabled ? 1 : 0);
+  DEBUG_SENSORSF("[GPS_STOP] GPS stop command called (current enabled=%d)", gGpsEnabled ? 1 : 0);
   
   handleDeviceStopped(I2C_DEVICE_GPS);
   return "[GPS] Close requested; cleanup will complete asynchronously";
@@ -211,9 +215,9 @@ const char* cmd_gps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   DEBUG_SENSORSF("[GPS_CMD] Reading GPS data (enabled=%d, task=%p)...", 
-                 gpsEnabled ? 1 : 0, gpsTaskHandle);
+                 gGpsEnabled ? 1 : 0, gGpsTaskHandle);
   
-  if (!gpsConnected || gPA1010D == nullptr) {
+  if (!gGpsConnected || gPA1010D == nullptr) {
     return "[GPS] Error: Module not connected or initialized";
   }
   
@@ -273,11 +277,11 @@ const char* cmd_gps(const String& argsInput) {
 // ============================================================================
 // Purpose: Continuously reads NMEA data from PA1010D GPS module
 // Stack: 4608 words (~18KB) | Priority: 1 | Core: Any
-// Lifecycle: Created by cmd_gpsstart, deleted when gpsEnabled=false
+// Lifecycle: Created by cmd_gpsstart, deleted when gGpsEnabled=false
 // Polling: Configurable via gpsDevicePollMs (default 200ms) | I2C Clock: 100kHz
 //
 // Cleanup Strategy:
-//   1. Check gpsEnabled flag at loop start
+//   1. Check gGpsEnabled flag at loop start
 //   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Delete GPS module object
 //   4. Release mutex and delete task
@@ -295,8 +299,8 @@ void gpsTask(void* parameter) {
   
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
-    if (!gpsEnabled) {
-      gpsConnected = false;
+    if (!gGpsEnabled) {
+      gGpsConnected = false;
       if (gPA1010D != nullptr) {
         delete gPA1010D;
         gPA1010D = nullptr;
@@ -308,17 +312,17 @@ void gpsTask(void* parameter) {
     unsigned long nowMs = millis();
     if ((nowMs - lastStackLog) >= 30000) {
       lastStackLog = nowMs;
-      if (checkTaskStackSafety("gps", GPS_STACK_WORDS, &gpsEnabled)) break;
-      if (gpsEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
+      if (checkTaskStackSafety("gps", GPS_STACK_WORDS, &gGpsEnabled)) break;
+      if (gGpsEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         DEBUG_PERFORMANCEF("[STACK] gps_task watermark=%u words", (unsigned)watermark);
       }
-      if (gpsEnabled && isDebugFlagSet(DEBUG_MEMORY)) {
+      if (gGpsEnabled && isDebugFlagSet(DEBUG_MEMORY)) {
         DEBUG_MEMORYF("[HEAP] gps_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     
-    if (gpsEnabled && gpsConnected && gPA1010D != nullptr && !gSensorPollingPaused) {
+    if (gGpsEnabled && gGpsConnected && gPA1010D != nullptr && !gSensorPollingPaused) {
       // gpsPollMs gates only the I2C health probe — NOT the NMEA read.
       // Adafruit_GPS is designed for read() to be called once per loop iteration
       // (~1ms cadence ideally). Our 10ms vTaskDelay approximates that.
@@ -347,7 +351,7 @@ void gpsTask(void* parameter) {
         if (!probeResult) {
           if (i2cShouldAutoDisable(I2C_ADDR_GPS)) {
             ERROR_SENSORSF("Too many consecutive GPS failures - auto-disabling");
-            gpsEnabled = false;
+            gGpsEnabled = false;
             sensorStatusBumpWith("gps@auto_disabled");
           }
         }
@@ -425,7 +429,7 @@ void gpsTask(void* parameter) {
       vTaskDelay(pdMS_TO_TICKS(10));
       drainDebugRing();
     } else {
-      if (wasPolling && (!gpsEnabled || !gpsConnected || gPA1010D == nullptr)) {
+      if (wasPolling && (!gGpsEnabled || !gGpsConnected || gPA1010D == nullptr)) {
         // Only log stop when sensor is actually disabled/disconnected,
         // not for brief gSensorPollingPaused toggles from web requests
         DEBUG_SENSORSF("[GPS_TASK] Stopped active polling - entering idle mode");
@@ -486,7 +490,7 @@ static const SettingEntry gpsSettingEntries[] = {
 };
 
 static bool isGPSConnected() {
-  return gpsConnected;
+  return gGpsConnected;
 }
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -557,7 +561,7 @@ const char* cmd_gpslog(const String& argsInput) {
   gSensorLogIntervalMs = intervalMs;
 
   // ── 2. Start GPS sensor now if not already running ───────────────────────
-  bool gpsWasRunning = gpsEnabled;
+  bool gpsWasRunning = gGpsEnabled;
   if (!gpsWasRunning) {
     cmd_gpsstart("");
   }

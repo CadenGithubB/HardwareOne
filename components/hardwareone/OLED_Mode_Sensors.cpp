@@ -21,19 +21,19 @@
 // External references
 
 // Sensor state (managed by I2C system)
-extern bool imuConnected;
-extern bool imuEnabled;
-extern bool tofConnected;
-extern bool tofEnabled;
-extern bool thermalConnected;
-extern bool thermalEnabled;
-extern bool gpsConnected;
-extern bool gpsEnabled;
-extern bool gamepadConnected;
-extern bool gamepadEnabled;
-extern bool apdsConnected;
-extern bool presenceConnected;
-extern bool presenceEnabled;
+extern bool gImuConnected;
+extern bool gImuEnabled;
+extern bool gTofConnected;
+extern bool gTofEnabled;
+extern bool gThermalConnected;
+extern bool gThermalEnabled;
+extern bool gGpsConnected;
+extern bool gGpsEnabled;
+extern bool gGamepadConnected;
+extern bool gGamepadEnabled;
+extern bool gApdsConnected;
+extern bool gPresenceConnected;
+extern bool gPresenceEnabled;
 
 // Device registry
 extern ConnectedDevice connectedDevices[];
@@ -195,7 +195,7 @@ void displaySensorData() {
 #if ENABLE_THERMAL_SENSOR
   totalCount++;
   oledDisplay->print("Thermal: ");
-  if (thermalConnected && thermalEnabled) {
+  if (gThermalConnected && gThermalEnabled) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -207,7 +207,7 @@ void displaySensorData() {
 #if ENABLE_TOF_SENSOR
   totalCount++;
   oledDisplay->print("ToF:     ");
-  if (tofConnected && tofEnabled) {
+  if (gTofConnected && gTofEnabled) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -219,7 +219,7 @@ void displaySensorData() {
 #if ENABLE_IMU_SENSOR
   totalCount++;
   oledDisplay->print("IMU:     ");
-  if (imuConnected && imuEnabled) {
+  if (gImuConnected && gImuEnabled) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -231,7 +231,7 @@ void displaySensorData() {
 #if ENABLE_GPS_SENSOR
   totalCount++;
   oledDisplay->print("GPS:     ");
-  if (gpsConnected && gpsEnabled) {
+  if (gGpsConnected && gGpsEnabled) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -242,10 +242,10 @@ void displaySensorData() {
   // APDS sensor status
 #if ENABLE_APDS_SENSOR
   {
-    extern bool apdsColorEnabled;
+    extern bool gApdsColorEnabled;
     totalCount++;
     oledDisplay->print("APDS:    ");
-    if (apdsColorEnabled) {
+    if (gApdsColorEnabled) {
       oledDisplay->println("ON");
       activeCount++;
     } else {
@@ -258,7 +258,7 @@ void displaySensorData() {
 #if ENABLE_GAMEPAD_SENSOR
   totalCount++;
   oledDisplay->print("Gamepad: ");
-  if (gamepadConnected && gamepadEnabled) {
+  if (gGamepadConnected && gGamepadEnabled) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -270,7 +270,7 @@ void displaySensorData() {
 #if ENABLE_RTC_SENSOR
   totalCount++;
   oledDisplay->print("RTC:     ");
-  if (rtcConnected && rtcEnabled) {
+  if (gRtcConnected && gRtcEnabled) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -282,7 +282,7 @@ void displaySensorData() {
 #if ENABLE_PRESENCE_SENSOR
   totalCount++;
   oledDisplay->print("Presence:");
-  if (presenceConnected && presenceEnabled) {
+  if (gPresenceConnected && gPresenceEnabled) {
     oledDisplay->println(" ON");
     activeCount++;
   } else {

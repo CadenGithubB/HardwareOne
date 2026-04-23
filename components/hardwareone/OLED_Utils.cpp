@@ -2077,7 +2077,7 @@ uint32_t OLEDConsoleBuffer::getTimestamp(int index) const {
 #endif
 
 // External state variables needed for context-aware footer hints
-extern bool networkShowingStatus;
+extern bool gNetworkShowingStatus;
 extern bool networkShowingWiFiSubmenu;
 extern String unavailableOLEDTitle;
 extern String unavailableOLEDReason;
@@ -2229,7 +2229,7 @@ void drawOLEDFooter() {
     case OLED_NETWORK_INFO:
       if (networkShowingWiFiSubmenu) {
         hints = "A:Select B:Back";
-      } else if (networkShowingStatus) {
+      } else if (gNetworkShowingStatus) {
         hints = "B:Back";
       } else {
         hints = "A:Select B:Back";
@@ -2247,8 +2247,8 @@ void drawOLEDFooter() {
       
     case OLED_BLUETOOTH:
       {
-        extern bool bluetoothShowingStatus;
-        if (bluetoothShowingStatus) {
+        extern bool gBluetoothShowingStatus;
+        if (gBluetoothShowingStatus) {
           hints = "A:Back B:Back";
         } else {
           hints = "A:Select B:Back";
@@ -2273,9 +2273,9 @@ void drawOLEDFooter() {
     case OLED_RTC_DATA:
 #if ENABLE_RTC_SENSOR
       {
-        extern bool rtcEnabled;
-        extern bool rtcConnected;
-        hints = (rtcEnabled && rtcConnected) ? "X:Stop B:Back" : "X:Start B:Back";
+        extern bool gRtcEnabled;
+        extern bool gRtcConnected;
+        hints = (gRtcEnabled && gRtcConnected) ? "X:Stop B:Back" : "X:Start B:Back";
       }
 #else
       hints = "B:Back";
@@ -2285,9 +2285,9 @@ void drawOLEDFooter() {
     case OLED_PRESENCE_DATA:
 #if ENABLE_PRESENCE_SENSOR
       {
-        extern bool presenceEnabled;
-        extern bool presenceConnected;
-        hints = (presenceEnabled && presenceConnected) ? "X:Stop B:Back" : "X:Start B:Back";
+        extern bool gPresenceEnabled;
+        extern bool gPresenceConnected;
+        hints = (gPresenceEnabled && gPresenceConnected) ? "X:Stop B:Back" : "X:Start B:Back";
       }
 #else
       hints = "B:Back";
@@ -2492,10 +2492,10 @@ void oledMarkDirtyUntil(unsigned long untilMs) {
 
 bool oledIsDirty() {
   extern volatile unsigned long gSensorStatusSeq;
-  extern ControlCache gControlCache;
+  extern GamepadCache gGamepadCache;
   
   if (oledForceNextRender) return true;
-  if (gControlCache.gamepadSeq != oledLastRenderedGamepadSeq) return true;
+  if (gGamepadCache.gamepadSeq != oledLastRenderedGamepadSeq) return true;
   if (gSensorStatusSeq != oledLastRenderedSensorSeq) return true;
   if (oledPairingRibbonActive()) return true;  // Continuous render during notification animations
   if (millis() < oledDirtyUntilMs) return true;  // Timed dirty (popup auto-dismiss, etc.)
@@ -2504,10 +2504,10 @@ bool oledIsDirty() {
 
 void oledClearDirty() {
   extern volatile unsigned long gSensorStatusSeq;
-  extern ControlCache gControlCache;
+  extern GamepadCache gGamepadCache;
   
   oledForceNextRender = false;
-  oledLastRenderedGamepadSeq = gControlCache.gamepadSeq;
+  oledLastRenderedGamepadSeq = gGamepadCache.gamepadSeq;
   oledLastRenderedSensorSeq = gSensorStatusSeq;
 }
 
@@ -2529,7 +2529,7 @@ void oledSetAlwaysDirty(bool always) {
 // Note: oledDisplay is now an alias for gDisplay (defined in Display_HAL.h)
 // The actual display object is managed by Display_HAL.cpp
 bool oledConnected = false;
-bool oledEnabled = false;
+bool gOledEnabled = false;
 
 // ESP-NOW mesh functions from .ino
 // gMeshPeers, gMeshPeerSlots declared in System_ESPNow.h (pointer, not array)
@@ -2803,18 +2803,18 @@ extern const OLEDAnimation gAnimationRegistry[];
 extern const int gAnimationCount;
 
 // Sensor state (managed by I2C system)
-extern bool imuConnected;
-extern bool imuEnabled;
-extern bool tofConnected;
-extern bool tofEnabled;
-extern bool thermalConnected;
-extern bool thermalEnabled;
-extern bool gpsConnected;
-extern bool gpsEnabled;
-extern bool gamepadConnected;
-extern bool gamepadEnabled;
-extern bool apdsConnected;
-extern bool rtcConnected;
+extern bool gImuConnected;
+extern bool gImuEnabled;
+extern bool gTofConnected;
+extern bool gTofEnabled;
+extern bool gThermalConnected;
+extern bool gThermalEnabled;
+extern bool gGpsConnected;
+extern bool gGpsEnabled;
+extern bool gGamepadConnected;
+extern bool gGamepadEnabled;
+extern bool gApdsConnected;
+extern bool gRtcConnected;
 
 // Modular sensor caches (each sensor defines its own cache)
 // Includes are conditional based on sensor availability
@@ -2841,7 +2841,7 @@ extern void unlockThermalCache();
 extern bool meshEnabled();
 extern String getEspNowDeviceName(const uint8_t* mac);
 // macToHexString, macFromHexString, and macEqual6 now in espnow_system.h
-extern void updateIMUActions();
+extern void imuUpdateActions();
 
 // Debug flags from debug_system.h (gDebugFlags, DEBUG_SENSORS_FRAME, etc.)
 
@@ -2864,7 +2864,7 @@ bool initOLEDDisplay() {
   
   if (success) {
     oledConnected = true;
-    oledEnabled = true;
+    gOledEnabled = true;
     
     broadcastOutput("Display initialized successfully");
     INFO_SYSTEMF("Display initialized: %s (%dx%d)", DISPLAY_NAME, DISPLAY_WIDTH, DISPLAY_HEIGHT);
@@ -2920,7 +2920,7 @@ void stopOLEDDisplay() {
 #endif
 
   oledConnected = false;
-  oledEnabled = false;
+  gOledEnabled = false;
 
   DEBUG_SENSORSF("Display stopped");
 }
@@ -2944,7 +2944,7 @@ void stopOLEDDisplay() {
 // Variables defined in OLED_Mode_Network.cpp
 extern int networkMenuSelection;
 extern const int NETWORK_MENU_ITEMS;
-extern bool networkShowingStatus;
+extern bool gNetworkShowingStatus;
 extern bool networkShowingWiFiSubmenu;
 extern OLEDScrollState wifiSubmenuScroll;
 extern bool wifiSubmenuScrollInitialized;
@@ -3006,7 +3006,7 @@ void updateOLEDDisplay() {
   // animationLastUpdate, animationFrame, animationFPS are now defined at top of file
   extern void displayAnimation();
   
-  if (!oledEnabled || !oledConnected || oledDisplay == nullptr) {
+  if (!gOledEnabled || !oledConnected || oledDisplay == nullptr) {
     return;
   }
 
@@ -3249,7 +3249,7 @@ const char* cmd_oled_enabled(const String& argsInput) {
         return "ERROR";
       }
     } else {
-      oledEnabled = true;
+      gOledEnabled = true;
     }
 
     String defaultMode = gSettings.oledDefaultMode;
@@ -3265,7 +3265,7 @@ const char* cmd_oled_enabled(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "OLED display enabled (mode: %s)", gSettings.oledDefaultMode.c_str());
   } else {
     if (oledConnected) {
-      oledEnabled = false;
+      gOledEnabled = false;
       i2cOledTransactionVoid(400000, 500, [&]() {
         oledDisplay->clearDisplay();
         oledDisplay->display();
@@ -3585,7 +3585,7 @@ const char* cmd_oledstatus(const String& argsInput) {
     broadcastOutput(getDebugBuffer());
     snprintf(getDebugBuffer(), 1024, "Resolution: %dx%d", SCREEN_WIDTH, SCREEN_HEIGHT);
     broadcastOutput(getDebugBuffer());
-    snprintf(getDebugBuffer(), 1024, "Enabled: %s", oledEnabled ? "Yes" : "No");
+    snprintf(getDebugBuffer(), 1024, "Enabled: %s", gOledEnabled ? "Yes" : "No");
     broadcastOutput(getDebugBuffer());
 
     String modeStr;
@@ -3884,17 +3884,17 @@ bool earlyOLEDInit() {
   if (!gI2CBusEnabled) {
     DEBUG_SENSORSF("OLED init skipped - I2C bus disabled");
     oledConnected = false;
-    oledEnabled = false;
+    gOledEnabled = false;
     return false;
   }
 
   bool inFirstTimeSetup = (gFirstTimeSetupState != SETUP_NOT_NEEDED);
-  DEBUG_USERSF("[OLED_INIT] fts=%d oledEnabled=%d\n", inFirstTimeSetup ? 1 : 0,
+  DEBUG_USERSF("[OLED_INIT] fts=%d settings.oledEnabled=%d\n", inFirstTimeSetup ? 1 : 0,
                 gSettings.oledEnabled ? 1 : 0);
   if (!inFirstTimeSetup) {
     if (!gSettings.oledEnabled) {
       oledConnected = false;
-      oledEnabled = false;
+      gOledEnabled = false;
       return false;
     }
   }
@@ -3936,7 +3936,7 @@ bool earlyOLEDInit() {
     });
     if (beginOk) {
       oledConnected = true;
-      oledEnabled = true;
+      gOledEnabled = true;
 
       // Set rotation (0 = normal, 2 = 180 degrees)
       oledDisplay->setRotation(2);
@@ -3975,7 +3975,7 @@ bool earlyOLEDInit() {
 // Process boot sequence phase transitions in loop()
 // Call this from loop() when oledBootModeActive is true
 void processOLEDBootSequence() {
-  if (!oledBootModeActive || !oledConnected || !oledEnabled) {
+  if (!oledBootModeActive || !oledConnected || !gOledEnabled) {
     return;
   }
 
@@ -4688,7 +4688,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
-      if (thermalConnected) {
+      if (gThermalConnected) {
         return MenuAvailability::AVAILABLE;
       }
       // Check if hardware was detected during I2C scan (address 0x33)
@@ -4707,7 +4707,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
-      if (fmRadioConnected && radioInitialized) {
+      if (gFmRadioConnected && gRadioInitialized) {
         return MenuAvailability::AVAILABLE;
       }
       // Check if hardware was detected during I2C scan (address 0x11)
@@ -4727,7 +4727,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         return MenuAvailability::NOT_BUILT;
 #else
       // Check if GPS is running
-      if (gpsConnected && gpsEnabled) {
+      if (gGpsConnected && gGpsEnabled) {
         return MenuAvailability::AVAILABLE;
       }
       // Check if hardware was detected during I2C scan (address 0x10)
@@ -4746,7 +4746,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
-      if (imuConnected) {
+      if (gImuConnected) {
         return MenuAvailability::AVAILABLE;
       }
       // Check if hardware was detected during I2C scan (address 0x28)
@@ -4765,7 +4765,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
-      if (tofConnected) {
+      if (gTofConnected) {
         return MenuAvailability::AVAILABLE;
       }
       // Check if hardware was detected during I2C scan (address 0x29)
@@ -4784,7 +4784,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
-      if (apdsConnected) {
+      if (gApdsConnected) {
         return MenuAvailability::AVAILABLE;
       }
       // Check if hardware was detected during I2C scan (address 0x39)
@@ -4803,7 +4803,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
-      if (gamepadConnected) {
+      if (gGamepadConnected) {
         return MenuAvailability::AVAILABLE;
       }
       // Check if hardware was detected during I2C scan (address 0x50)
@@ -4822,7 +4822,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
-      if (rtcConnected) {
+      if (gRtcConnected) {
         return MenuAvailability::AVAILABLE;
       }
       // Check if hardware was detected during I2C scan (address 0x68)
@@ -4842,8 +4842,8 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         return MenuAvailability::NOT_BUILT;
 #else
       {
-        extern bool presenceConnected;
-        if (presenceConnected) {
+        extern bool gPresenceConnected;
+        if (gPresenceConnected) {
           return MenuAvailability::AVAILABLE;
         }
         // Check if hardware was detected during I2C scan (address 0x5A)
@@ -5256,21 +5256,21 @@ static bool gInputStateValid = false;
  */
 void updateInputState() {
 #if ENABLE_GAMEPAD_SENSOR
-  if (!gControlCache.mutex) {
+  if (!gGamepadCache.mutex) {
     gInputStateValid = false;
     return;
   }
   
-  if (xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    if (gControlCache.gamepadDataValid) {
-      gCurrentJoyX = gControlCache.gamepadX;
-      gCurrentJoyY = gControlCache.gamepadY;
-      gCurrentButtons = gControlCache.gamepadButtons;
+  if (xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (gGamepadCache.gamepadDataValid) {
+      gCurrentJoyX = gGamepadCache.gamepadX;
+      gCurrentJoyY = gGamepadCache.gamepadY;
+      gCurrentButtons = gGamepadCache.gamepadButtons;
       gInputStateValid = true;
     } else {
       gInputStateValid = false;
     }
-    xSemaphoreGive(gControlCache.mutex);
+    xSemaphoreGive(gGamepadCache.mutex);
   } else {
     gInputStateValid = false;
   }
@@ -5487,14 +5487,14 @@ bool processGamepadMenuInput() {
   bool shouldDebug = (now - lastGamepadDebugTime >= GAMEPAD_DEBUG_INTERVAL);
   
   // Check gamepad enabled/connected - silent exit when disabled (no spam)
-  if (!gamepadEnabled) {
+  if (!gGamepadEnabled) {
     return false;
   }
   
   // Read from gamepad cache (thread-safe)
-  if (!gControlCache.mutex) {
+  if (!gGamepadCache.mutex) {
     if (shouldDebug) {
-      DEBUG_USERSF("[GAMEPAD_MENU] Exit: gControlCache.mutex is NULL addrs &en=%p &conn=%p &cache=%p\n", (void*)&gamepadEnabled, (void*)&gamepadConnected, (void*)&gControlCache);
+      DEBUG_USERSF("[GAMEPAD_MENU] Exit: gGamepadCache.mutex is NULL addrs &en=%p &conn=%p &cache=%p\n", (void*)&gGamepadEnabled, (void*)&gGamepadConnected, (void*)&gGamepadCache);
       lastGamepadDebugTime = now;
     }
     return false;
@@ -5506,17 +5506,17 @@ bool processGamepadMenuInput() {
   bool mutexTaken = false;
   
   uint32_t latchedPresses = 0;
-  if (xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+  if (xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     mutexTaken = true;
-    if (gControlCache.gamepadDataValid) {
-      joyX = gControlCache.gamepadX;
-      joyY = gControlCache.gamepadY;
-      buttons = gControlCache.gamepadButtons;
-      latchedPresses = gControlCache.buttonPressedAccum;
-      gControlCache.buttonPressedAccum = 0;  // Consume accumulated presses
+    if (gGamepadCache.gamepadDataValid) {
+      joyX = gGamepadCache.gamepadX;
+      joyY = gGamepadCache.gamepadY;
+      buttons = gGamepadCache.gamepadButtons;
+      latchedPresses = gGamepadCache.buttonPressedAccum;
+      gGamepadCache.buttonPressedAccum = 0;  // Consume accumulated presses
       dataValid = true;
     }
-    xSemaphoreGive(gControlCache.mutex);
+    xSemaphoreGive(gGamepadCache.mutex);
   }
   
   if (!dataValid) {
@@ -5940,8 +5940,8 @@ bool processGamepadMenuInput() {
  * Try to auto-start gamepad when entering menu mode
  */
 void tryAutoStartGamepadForMenu() {
-  DEBUG_USERSF("[GAMEPAD_AUTO] tryAutoStartGamepadForMenu: enabled=%d connected=%d\n", gamepadEnabled, gamepadConnected);
-  if (gamepadEnabled && gamepadConnected) {
+  DEBUG_USERSF("[GAMEPAD_AUTO] tryAutoStartGamepadForMenu: enabled=%d connected=%d\n", gGamepadEnabled, gGamepadConnected);
+  if (gGamepadEnabled && gGamepadConnected) {
     DEBUG_USERSF("[GAMEPAD_AUTO] Already running, skipping");
     return;  // Already running
   }
@@ -6050,7 +6050,7 @@ void oledSetBootProgress(int percent, const char* label) {
 #if ENABLE_OLED_DISPLAY
   bootProgressPercent = percent;
   bootProgressLabel = label;
-  if (oledEnabled && oledConnected) {
+  if (gOledEnabled && oledConnected) {
     updateOLEDDisplay();
   }
 #endif
@@ -6058,7 +6058,7 @@ void oledSetBootProgress(int percent, const char* label) {
 
 void oledUpdate() {
 #if ENABLE_OLED_DISPLAY
-  if (oledEnabled && oledConnected) {
+  if (gOledEnabled && oledConnected) {
     updateOLEDDisplay();
   }
 #endif
@@ -6073,7 +6073,7 @@ void oledEarlyInit() {
 
 void applyOLEDBrightness() {
 #if ENABLE_OLED_DISPLAY
-  if (oledConnected && oledEnabled) {
+  if (oledConnected && gOledEnabled) {
     if (gSettings.oledBrightness >= 0 && gSettings.oledBrightness <= 255) {
       i2cDeviceTransactionVoid(I2C_ADDR_OLED, 400000, 200, [&]() {
         oledDisplay->ssd1306_command(SSD1306_SETCONTRAST);
@@ -6086,7 +6086,7 @@ void applyOLEDBrightness() {
 
 void oledApplySettings() {
 #if ENABLE_OLED_DISPLAY
-  if (oledConnected && oledEnabled) {
+  if (oledConnected && gOledEnabled) {
     applyOLEDBrightness();
     DEBUG_SYSTEMF("OLED settings applied - boot animation running");
   }
@@ -6095,7 +6095,7 @@ void oledApplySettings() {
 
 void oledNotifyLocalDisplayAuthChanged() {
 #if ENABLE_OLED_DISPLAY
-  if (!oledEnabled || !oledConnected) {
+  if (!gOledEnabled || !oledConnected) {
     return;
   }
 

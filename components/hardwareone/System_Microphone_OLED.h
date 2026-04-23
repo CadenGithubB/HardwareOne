@@ -21,7 +21,7 @@ static void displayMicrophone() {
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
   
-  if (!micEnabled) {
+  if (!gMicEnabled) {
     // Show muted volume icon when mic is off
     oledDrawIcon(48, y + 2, "vol_mute", 16);
     oledDisplay->setCursor(20, y + 22);
@@ -76,7 +76,7 @@ static bool microphoneOLEDModeAvailable(String* outReason) {
 
 static void microphoneToggleConfirmed(void* userData) {
   (void)userData;
-  if (micEnabled) {
+  if (gMicEnabled) {
     DEBUG_MICF("[MICROPHONE] Confirmed: Stopping microphone...");
     stopMicrophone();
   } else {
@@ -89,7 +89,7 @@ static void microphoneToggleConfirmed(void* userData) {
 static bool microphoneInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   // X button: Start/Stop microphone
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (micEnabled) {
+    if (gMicEnabled) {
       oledConfirmRequest("Close mic?", nullptr, microphoneToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open mic?", nullptr, microphoneToggleConfirmed, nullptr);
@@ -99,7 +99,7 @@ static bool microphoneInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
   
   // Y button: Toggle recording
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-    if (!micEnabled) {
+    if (!gMicEnabled) {
       DEBUG_MICF("[MICROPHONE] Y button: Starting mic first...");
       initMicrophone();
     }

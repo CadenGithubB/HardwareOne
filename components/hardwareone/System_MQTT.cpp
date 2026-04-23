@@ -67,7 +67,7 @@ extern const char* cmd_espnow_remote(const String& argsInput);
 
 // MQTT state
 static esp_mqtt_client_handle_t mqttClient = nullptr;
-static bool mqttConnected = false;
+static bool mqttTofConnected = false;
 static bool mqttEnabled = false;
 static unsigned long lastPublishTime = 0;
 static String lastError = "";
@@ -156,8 +156,8 @@ static void subscribeToExternalTopics() {
 }
 
 // Check if MQTT is connected
-bool isMqttConnected() {
-  return mqttConnected;
+bool isMqttTofConnected() {
+  return mqttTofConnected;
 }
 
 // Get external sensor count
@@ -253,7 +253,7 @@ static void publishDiscoveryConfig(const char* component, const char* objectId,
                                     const char* name, const char* valueTemplate,
                                     const char* unit, const char* deviceClass,
                                     const char* icon) {
-  if (!mqttClient || !mqttConnected) return;
+  if (!mqttClient || !mqttTofConnected) return;
   
   String deviceId = getDeviceId();
   String stateTopic = gSettings.mqttBaseTopic + "/state";
@@ -313,7 +313,7 @@ static void publishDiscoveryConfig(const char* component, const char* objectId,
 
 // Subscribe to command topic for receiving commands from HA
 static void subscribeToCommandTopic() {
-  if (!mqttClient || !mqttConnected) return;
+  if (!mqttClient || !mqttTofConnected) return;
   
   String commandTopic = gSettings.mqttBaseTopic + "/command";
   int msgId = esp_mqtt_client_subscribe(mqttClient, commandTopic.c_str(), 1);
@@ -464,7 +464,7 @@ static void publishMeshPeerDiscovery();
 
 // Publish all discovery configs for enabled sensors
 static void publishMQTTDiscovery() {
-  if (!mqttConnected || gSettings.mqttDiscoveryPrefix.length() == 0) return;
+  if (!mqttTofConnected || gSettings.mqttDiscoveryPrefix.length() == 0) return;
   
   INFO_SYSTEMF("[MQTT] Publishing Home Assistant discovery configs...");
   
@@ -570,7 +570,7 @@ static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
                                         const char* name, const char* valueTemplate,
                                         const char* unit, const char* deviceClass,
                                         const char* icon) {
-  if (!mqttClient || !mqttConnected) return;
+  if (!mqttClient || !mqttTofConnected) return;
 
   // Build peer device ID from MAC
   char macCompact[13];
@@ -631,7 +631,7 @@ static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
 
 // Publish HA discovery for all known mesh peers based on their sensor capabilities
 static void publishMeshPeerDiscovery() {
-  if (!mqttClient || !mqttConnected) return;
+  if (!mqttClient || !mqttTofConnected) return;
   if (gSettings.meshRole != MESH_ROLE_MASTER) return;  // Only master bridges
   if (!gMeshPeerMeta) return;  // Not yet allocated
 
@@ -692,7 +692,7 @@ static void publishMeshPeerDiscovery() {
 // Publish sensor data for all mesh peers from gRemoteSensorCache
 // Called periodically alongside local sensor publishing
 static void publishMeshPeerSensorData() {
-  if (!mqttClient || !mqttConnected) return;
+  if (!mqttClient || !mqttTofConnected) return;
   if (gSettings.meshRole != MESH_ROLE_MASTER) return;
   if (!gMeshPeerMeta) return;  // Not yet allocated
 
@@ -775,7 +775,7 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
   
   switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
-      mqttConnected = true;
+      mqttTofConnected = true;
       lastError = "";
       broadcastOutput("[MQTT] Connected to broker");
       INFO_SYSTEMF("[MQTT] Connected to %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
@@ -797,12 +797,12 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       break;
       
     case MQTT_EVENT_DISCONNECTED:
-      mqttConnected = false;
+      mqttTofConnected = false;
       WARN_SYSTEMF("[MQTT] Disconnected from broker");
       break;
       
     case MQTT_EVENT_ERROR:
-      mqttConnected = false;
+      mqttTofConnected = false;
       lastError = "Connection error";
       ERROR_SYSTEMF("[MQTT] Error event");
       break;
@@ -945,7 +945,7 @@ void stopMQTT() {
   
   if (mqttClient) {
     // Publish offline before disconnecting
-    if (mqttConnected && gSettings.mqttBaseTopic.length() > 0) {
+    if (mqttTofConnected && gSettings.mqttBaseTopic.length() > 0) {
       String availTopic = gSettings.mqttBaseTopic + "/availability";
       esp_mqtt_client_publish(mqttClient, availTopic.c_str(), "offline", 0, 1, true);
     }
@@ -956,7 +956,7 @@ void stopMQTT() {
   }
   
   mqttEnabled = false;
-  mqttConnected = false;
+  mqttTofConnected = false;
   broadcastOutput("[MQTT] Client stopped");
 }
 
@@ -965,7 +965,7 @@ void stopMQTT() {
 // ============================================================================
 
 void publishMQTTSensorData() {
-  if (!mqttConnected || !mqttClient) {
+  if (!mqttTofConnected || !mqttClient) {
     return;
   }
   
@@ -997,9 +997,9 @@ void publishMQTTSensorData() {
   
   // Add sensor data from caches (only if sensors are enabled and configured to publish)
 #if ENABLE_THERMAL_SENSOR
-  if (gSettings.mqttPublishThermal && thermalEnabled) {
+  if (gSettings.mqttPublishThermal && gThermalEnabled) {
     char thermalJson[2048];
-    int len = buildThermalDataJSON(thermalJson, sizeof(thermalJson));
+    int len = thermalBuildDataJSON(thermalJson, sizeof(thermalJson));
     if (len > 0) {
       pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"thermal\":%s", thermalJson);
     }
@@ -1007,9 +1007,9 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_TOF_SENSOR
-  if (gSettings.mqttPublishToF && tofEnabled) {
+  if (gSettings.mqttPublishToF && gTofEnabled) {
     char tofJson[1024];
-    int len = buildToFDataJSON(tofJson, sizeof(tofJson));
+    int len = tofBuildDataJSON(tofJson, sizeof(tofJson));
     if (len > 0) {
       pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"tof\":%s", tofJson);
     }
@@ -1017,9 +1017,9 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_IMU_SENSOR
-  if (gSettings.mqttPublishIMU && imuEnabled) {
+  if (gSettings.mqttPublishIMU && gImuEnabled) {
     char imuJson[1024];
-    int len = buildIMUDataJSON(imuJson, sizeof(imuJson));
+    int len = imuBuildDataJSON(imuJson, sizeof(imuJson));
     if (len > 0) {
       pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"imu\":%s", imuJson);
     }
@@ -1027,7 +1027,7 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_PRESENCE_SENSOR
-  if (gSettings.mqttPublishPresence && presenceEnabled && gPresenceCache.dataValid) {
+  if (gSettings.mqttPublishPresence && gPresenceEnabled && gPresenceCache.dataValid) {
     pos += snprintf(jsonBuf + pos, 16384 - pos, 
       ",\"presence\":{\"detected\":%s,\"motion\":%s,\"presence_raw\":%d,\"motion_raw\":%d,\"ambient_temp\":%.1f,\"object_temp\":%d}",
       gPresenceCache.presenceDetected ? "true" : "false",
@@ -1038,7 +1038,7 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_GPS_SENSOR
-  if (gSettings.mqttPublishGPS && gpsEnabled && gpsConnected && gPA1010D) {
+  if (gSettings.mqttPublishGPS && gGpsEnabled && gGpsConnected && gPA1010D) {
     if (gGPSCache.hasFix) {
       pos += snprintf(jsonBuf + pos, 16384 - pos,
         ",\"gps\":{\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.1f,\"speed\":%.1f,\"satellites\":%d}",
@@ -1050,30 +1050,30 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_APDS_SENSOR
-  if (gSettings.mqttPublishAPDS && apdsEnabled && apdsConnected) {
+  if (gSettings.mqttPublishAPDS && gApdsColorEnabled && gApdsConnected) {
     pos += snprintf(jsonBuf + pos, 16384 - pos,
       ",\"apds\":{\"proximity\":%u,\"color\":{\"r\":%u,\"g\":%u,\"b\":%u,\"c\":%u}}",
-      getAPDSProximity(), getAPDSColorR(), getAPDSColorG(), getAPDSColorB(), getAPDSColorC());
+      apdsGetProximity(), apdsGetColorR(), apdsGetColorG(), apdsGetColorB(), apdsGetColorC());
   }
 #endif
 
 #if ENABLE_RTC_SENSOR
-  if (gSettings.mqttPublishRTC && rtcEnabled && rtcConnected) {
+  if (gSettings.mqttPublishRTC && gRtcEnabled && gRtcConnected) {
     char timeBuf[32];
     snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
-             getRTCYear(), getRTCMonth(), getRTCDay(),
-             getRTCHour(), getRTCMinute(), getRTCSecond());
+             rtcGetYear(), rtcGetMonth(), rtcGetDay(),
+             rtcGetHour(), rtcGetMinute(), rtcGetSecond());
     pos += snprintf(jsonBuf + pos, 16384 - pos,
       ",\"rtc\":{\"datetime\":\"%s\",\"temperature\":%.1f}",
-      timeBuf, getRTCTemperature());
+      timeBuf, rtcGetTemperature());
   }
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
-  if (gSettings.mqttPublishGamepad && gamepadEnabled && gamepadConnected) {
+  if (gSettings.mqttPublishGamepad && gGamepadEnabled && gGamepadConnected) {
     pos += snprintf(jsonBuf + pos, 16384 - pos,
       ",\"gamepad\":{\"x\":%d,\"y\":%d,\"buttons\":%lu}",
-      getGamepadX(), getGamepadY(), (unsigned long)getGamepadButtons());
+      gamepadGetX(), gamepadGetY(), (unsigned long)gamepadGetButtons());
   }
 #endif
   
@@ -1105,7 +1105,7 @@ void mqttTick() {
   
   // Periodic publishing
   unsigned long now = millis();
-  if (mqttConnected && (now - lastPublishTime >= gSettings.mqttPublishIntervalMs)) {
+  if (mqttTofConnected && (now - lastPublishTime >= gSettings.mqttPublishIntervalMs)) {
     publishMQTTSensorData();
     lastPublishTime = now;
   }
@@ -1148,7 +1148,7 @@ const char* cmd_mqttstatus(const String& argsInput) {
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("=== MQTT STATUS ===");
   BROADCAST_PRINTF("Enabled: %s", mqttEnabled ? "Yes" : "No");
-  BROADCAST_PRINTF("Connected: %s", mqttConnected ? "Yes" : "No");
+  BROADCAST_PRINTF("Connected: %s", mqttTofConnected ? "Yes" : "No");
   BROADCAST_PRINTF("Broker: %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
   BROADCAST_PRINTF("User: %s", gSettings.mqttUser.length() > 0 ? gSettings.mqttUser.c_str() : "(none)");
   BROADCAST_PRINTF("Base Topic: %s", gSettings.mqttBaseTopic.c_str());
@@ -1158,7 +1158,7 @@ const char* cmd_mqttstatus(const String& argsInput) {
     BROADCAST_PRINTF("Last Error: %s", lastError.c_str());
   }
   
-  if (mqttConnected) {
+  if (mqttTofConnected) {
     unsigned long nextPublish = (lastPublishTime + gSettings.mqttPublishIntervalMs) - millis();
     BROADCAST_PRINTF("Next Publish: %lu ms", nextPublish);
   }

@@ -42,7 +42,7 @@ extern String getEspNowDeviceName(const uint8_t* mac);
 // Network menu state - non-static for extern access from OLED_Display.cpp
 int networkMenuSelection = 0;
 extern const int NETWORK_MENU_ITEMS = 5;  // extern needed for const to have external linkage
-bool networkShowingStatus = false;
+bool gNetworkShowingStatus = false;
 bool networkShowingWiFiSubmenu = false;
 
 // WiFi submenu uses shared scrolling framework - non-static for extern access
@@ -95,7 +95,7 @@ void displayNetworkInfo() {
   oledDisplay->setTextSize(1);
   
 #if ENABLE_WIFI
-  if (networkShowingStatus) {
+  if (gNetworkShowingStatus) {
     // Show detailed status screen
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     
@@ -283,7 +283,7 @@ static bool isNetworkMenuItemDisabled(int idx) {
 }
 
 void networkMenuUp() {
-  if (networkShowingStatus) return;
+  if (gNetworkShowingStatus) return;
   if (networkShowingWiFiSubmenu) {
     oledScrollUp(&wifiSubmenuScroll);
     return;
@@ -300,7 +300,7 @@ void networkMenuUp() {
 }
 
 void networkMenuDown() {
-  if (networkShowingStatus) return;
+  if (gNetworkShowingStatus) return;
   if (networkShowingWiFiSubmenu) {
     oledScrollDown(&wifiSubmenuScroll);
     return;
@@ -328,8 +328,8 @@ static void httpStopConfirmedNetwork(void* userData) {
 }
 
 void executeNetworkAction() {
-  if (networkShowingStatus) {
-    networkShowingStatus = false;
+  if (gNetworkShowingStatus) {
+    gNetworkShowingStatus = false;
     return;
   }
   
@@ -360,7 +360,7 @@ void executeNetworkAction() {
   
   switch (networkMenuSelection) {
     case 0: // View Status
-      networkShowingStatus = true;
+      gNetworkShowingStatus = true;
       break;
       
     case 1: // Connect (best available network)
@@ -392,8 +392,8 @@ void executeNetworkAction() {
 }
 
 void networkMenuBack() {
-  if (networkShowingStatus) {
-    networkShowingStatus = false;
+  if (gNetworkShowingStatus) {
+    gNetworkShowingStatus = false;
   } else if (networkShowingWiFiSubmenu) {
     networkShowingWiFiSubmenu = false;
     if (wifiSubmenuScrollInitialized) {
@@ -445,7 +445,7 @@ static bool networkRegisteredInputHandler(int deltaX, int deltaY, uint32_t newly
   // Navigation
   if (networkShowingWiFiSubmenu) {
     if (oledScrollHandleNav(&wifiSubmenuScroll)) return true;
-  } else if (!networkShowingStatus) {
+  } else if (!gNetworkShowingStatus) {
     // Main network menu nav
     extern NavEvents gNavEvents;
     if (gNavEvents.up || gNavEvents.left) {
@@ -466,7 +466,7 @@ static bool networkRegisteredInputHandler(int deltaX, int deltaY, uint32_t newly
 
   // B button: Back
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    if (networkShowingStatus || networkShowingWiFiSubmenu) {
+    if (gNetworkShowingStatus || networkShowingWiFiSubmenu) {
       networkMenuBack();
       return true;
     }
@@ -578,7 +578,7 @@ void displayNetworkInfoRendered() {
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   
 #if ENABLE_WIFI
-  if (networkShowingStatus) {
+  if (gNetworkShowingStatus) {
     // Show detailed status screen
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     
