@@ -159,8 +159,8 @@ struct __attribute__((packed)) V3PayloadWorkerStatus {
   uint32_t freeHeap;
   uint32_t totalHeap;
   int8_t rssi;
-  uint8_t thermalEnabled;
-  uint8_t imuEnabled;
+  uint8_t gThermalEnabled;
+  uint8_t gImuEnabled;
   uint8_t reserved;
   char name[20];
   // Metadata fields follow as variable JSON payload if needed
@@ -1636,7 +1636,7 @@ bool v3_send_worker_status(const uint8_t* dst, const V3PayloadWorkerStatus& stat
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] Sending to %s msgId=%lu", dstMac, (unsigned long)msgId);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] Payload: freeHeap=%lu totalHeap=%lu rssi=%d thermal=%d imu=%d",
-         (unsigned long)status.freeHeap, (unsigned long)status.totalHeap, status.rssi, status.thermalEnabled, status.imuEnabled);
+         (unsigned long)status.freeHeap, (unsigned long)status.totalHeap, status.rssi, status.gThermalEnabled, status.gImuEnabled);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] name='%s' metadata=%s (%u bytes)",
          status.name, jsonMetadata ? "YES" : "NO", jsonLen);
   
@@ -3893,50 +3893,50 @@ static void buildLocalBondStatus(BondPeerStatus& status) {
   status.minFreeHeap = (uint32_t)ESP.getMinFreeHeap();
   
   // Build sensor enabled mask from runtime booleans
-  extern bool thermalEnabled, tofEnabled, imuEnabled, gamepadEnabled;
-  extern bool gpsEnabled, presenceEnabled;
+  extern bool gThermalEnabled, gTofEnabled, gImuEnabled, gGamepadEnabled;
+  extern bool gGpsEnabled, gPresenceEnabled;
   uint16_t enabled = 0;
 #if ENABLE_THERMAL_SENSOR
-  if (thermalEnabled)  enabled |= CAP_SENSOR_THERMAL;
+  if (gThermalEnabled)  enabled |= CAP_SENSOR_THERMAL;
 #endif
 #if ENABLE_TOF_SENSOR
-  if (tofEnabled)      enabled |= CAP_SENSOR_TOF;
+  if (gTofEnabled)      enabled |= CAP_SENSOR_TOF;
 #endif
 #if ENABLE_IMU_SENSOR
-  if (imuEnabled)      enabled |= CAP_SENSOR_IMU;
+  if (gImuEnabled)      enabled |= CAP_SENSOR_IMU;
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  if (gamepadEnabled)  enabled |= CAP_SENSOR_GAMEPAD;
+  if (gGamepadEnabled)  enabled |= CAP_SENSOR_GAMEPAD;
 #endif
 #if ENABLE_GPS_SENSOR
-  if (gpsEnabled)      enabled |= CAP_SENSOR_GPS;
+  if (gGpsEnabled)      enabled |= CAP_SENSOR_GPS;
 #endif
 #if ENABLE_PRESENCE_SENSOR
-  if (presenceEnabled) enabled |= CAP_SENSOR_PRESENCE;
+  if (gPresenceEnabled) enabled |= CAP_SENSOR_PRESENCE;
 #endif
   status.sensorEnabledMask = enabled;
   
   // Build sensor connected mask
-  extern bool thermalConnected, tofConnected, imuConnected, gamepadConnected;
-  extern bool gpsConnected, presenceConnected;
+  extern bool gThermalConnected, gTofConnected, gImuConnected, gGamepadConnected;
+  extern bool gGpsConnected, gPresenceConnected;
   uint16_t connected = 0;
 #if ENABLE_THERMAL_SENSOR
-  if (thermalConnected)  connected |= CAP_SENSOR_THERMAL;
+  if (gThermalConnected)  connected |= CAP_SENSOR_THERMAL;
 #endif
 #if ENABLE_TOF_SENSOR
-  if (tofConnected)      connected |= CAP_SENSOR_TOF;
+  if (gTofConnected)      connected |= CAP_SENSOR_TOF;
 #endif
 #if ENABLE_IMU_SENSOR
-  if (imuConnected)      connected |= CAP_SENSOR_IMU;
+  if (gImuConnected)      connected |= CAP_SENSOR_IMU;
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  if (gamepadConnected)  connected |= CAP_SENSOR_GAMEPAD;
+  if (gGamepadConnected)  connected |= CAP_SENSOR_GAMEPAD;
 #endif
 #if ENABLE_GPS_SENSOR
-  if (gpsConnected)      connected |= CAP_SENSOR_GPS;
+  if (gGpsConnected)      connected |= CAP_SENSOR_GPS;
 #endif
 #if ENABLE_PRESENCE_SENSOR
-  if (presenceConnected) connected |= CAP_SENSOR_PRESENCE;
+  if (gPresenceConnected) connected |= CAP_SENSOR_PRESENCE;
 #endif
   status.sensorConnectedMask = connected;
   

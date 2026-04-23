@@ -28,10 +28,10 @@ extern TwoWire Wire1;
 RTCCache gRTCCache = {nullptr, {0}, 0.0f, false, 0};
 
 // Sensor state
-bool rtcEnabled = false;
-bool rtcConnected = false;
-unsigned long rtcLastStopTime = 0;
-TaskHandle_t rtcTaskHandle = nullptr;
+bool gRtcEnabled = false;
+bool gRtcConnected = false;
+unsigned long gRtcLastStopTime = 0;
+TaskHandle_t gRtcTaskHandle = nullptr;
 
 // Task stack watermark tracking
 volatile UBaseType_t gRTCWatermarkMin = (UBaseType_t)0xFFFFFFFF;
@@ -355,7 +355,7 @@ RTCDateTime rtcLocalTime(const RTCDateTime* utc) {
 // JSON building for ESP-NOW streaming
 // ============================================================================
 
-int buildRTCDataJSON(char* buf, size_t bufSize) {
+int rtcBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
   int pos = 0;
@@ -414,7 +414,7 @@ static void rtcTask(void* pvParameters) {
   const unsigned long CACHE_UPDATE_FAST = 1000;   // 1s when OLED is showing RTC
   const unsigned long CACHE_UPDATE_SLOW = 30000;  // 30s otherwise (web UI ticks locally)
   
-  while (rtcEnabled) {
+  while (gRtcEnabled) {
     unsigned long now = millis();
     
     // Respect global polling pause (I2C bus recovery, scans, file I/O, etc.)
@@ -444,7 +444,7 @@ static void rtcTask(void* pvParameters) {
 #if ENABLE_ESPNOW
         {
           char rtcJson[256];
-          int jsonLen = buildRTCDataJSON(rtcJson, sizeof(rtcJson));
+          int jsonLen = rtcBuildDataJSON(rtcJson, sizeof(rtcJson));
           if (jsonLen > 0) {
             sendSensorDataUpdate(REMOTE_SENSOR_RTC, rtcJson, jsonLen);
           }
@@ -465,7 +465,7 @@ static void rtcTask(void* pvParameters) {
       static uint32_t sRtcSafetyCounter = 0;
       if (++sRtcSafetyCounter >= 100) {
         sRtcSafetyCounter = 0;
-        if (checkTaskStackSafety("rtc", RTC_STACK_WORDS, &rtcEnabled)) break;
+        if (checkTaskStackSafety("rtc", RTC_STACK_WORDS, &gRtcEnabled)) break;
       }
     }
     
@@ -473,7 +473,7 @@ static void rtcTask(void* pvParameters) {
   }
   
   DEBUG_SENSORSF("[RTC] Task exiting");
-  rtcTaskHandle = nullptr;
+  gRtcTaskHandle = nullptr;
   vTaskDelete(nullptr);
 }
 
@@ -481,7 +481,7 @@ static void rtcTask(void* pvParameters) {
 // Sensor Lifecycle
 // ============================================================================
 
-bool initRTCSensor() {
+bool rtcInit() {
   DEBUG_SENSORSF("[RTC] Initializing DS3231...");
   
   // Check if device responds
@@ -509,82 +509,65 @@ bool initRTCSensor() {
     }
   }
   
-  rtcConnected = true;
+  gRtcConnected = true;
   DEBUG_SENSORSF("[RTC] DS3231 initialized successfully");
   return true;
 }
 
-bool createRTCTask() {
-  if (rtcTaskHandle != nullptr) {
-    DEBUG_SENSORSF("[RTC] Task already running");
-    return true;
-  }
-  
-  rtcEnabled = true;
-  
-  // Stack needs room for NTP sync check and settings write on startup
-  BaseType_t result = xTaskCreatePinnedToCore(
-    rtcTask,
-    "rtc_task",
-    RTC_STACK_WORDS,  // Increased for NTP sync logic
-    nullptr,
-    TASK_PRIORITY_LOW,
-    &rtcTaskHandle,
-    1      // Core 1
-  );
-  
-  if (result != pdPASS) {
-    DEBUG_SENSORSF("[RTC] Failed to create task");
-    rtcEnabled = false;
-    return false;
-  }
-  
-  DEBUG_SENSORSF("[RTC] Task created successfully");
-  return true;
-}
+// createRTCTask() is now defined in System_TaskUtils.cpp (centralized helper).
 
-void stopRTCSensor() {
-  // Note: rtcEnabled is set to false by handleDeviceStopped() before this is called
+void rtcStop() {
+  // Note: gRtcEnabled is set to false by handleDeviceStopped() before this is called
   
   // Wait for task to exit
   int timeout = 50;
-  while (rtcTaskHandle != nullptr && timeout-- > 0) {
+  while (gRtcTaskHandle != nullptr && timeout-- > 0) {
     vTaskDelay(pdMS_TO_TICKS(20));
   }
   
-  if (rtcTaskHandle != nullptr) {
-    vTaskDelete(rtcTaskHandle);
-    rtcTaskHandle = nullptr;
+  if (gRtcTaskHandle != nullptr) {
+    vTaskDelete(gRtcTaskHandle);
+    gRtcTaskHandle = nullptr;
   }
   
-  rtcConnected = false;
+  gRtcConnected = false;
   DEBUG_SENSORSF("[RTC] Sensor stopped");
 }
 
 // Internal start function for sensor queue processor
-void startRTCSensorInternal() {
-  if (rtcEnabled && rtcConnected) {
+bool rtcStartInternal() {
+  if (gRtcEnabled && gRtcConnected) {
     DEBUG_SENSORSF("[RTC] Already running");
-    return;
+    return true;
   }
 
   // Check memory before creating RTC task
   if (!checkMemoryAvailable("rtc", nullptr)) {
     ERROR_SENSORSF("[RTC] Insufficient memory for RTC sensor");
-    return;
+    return false;
   }
-  
-  if (!initRTCSensor()) {
+
+  // Clean up any stale cache from previous run BEFORE starting
+  if (gRTCCache.mutex && xSemaphoreTake(gRTCCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    gRTCCache.dataValid = false;
+    gRTCCache.temperature = 0.0f;
+    memset(&gRTCCache.dateTime, 0, sizeof(RTCDateTime));
+    xSemaphoreGive(gRTCCache.mutex);
+    DEBUG_SENSORSF("[RTC] Cleaned up stale cache from previous run");
+  }
+
+  if (!rtcInit()) {
     DEBUG_SENSORSF("[RTC] Failed to initialize");
-    return;
+    return false;
   }
-  
+
   if (!createRTCTask()) {
     DEBUG_SENSORSF("[RTC] Failed to create task");
-    return;
+    return false;
   }
-  
+
   DEBUG_SENSORSF("[RTC] Started successfully via queue");
+  return true;
 }
 
 // ============================================================================
@@ -602,7 +585,7 @@ const char* cmd_rtc(const String& argsInput) {
   
   if (arg.length() == 0 || arg == "status") {
     // Show RTC status and current time
-    if (!rtcConnected) {
+    if (!gRtcConnected) {
       response = "[RTC] Not connected. Use 'openrtc' to initialize.";
       return response.c_str();
     }
@@ -636,7 +619,7 @@ const char* cmd_rtc(const String& argsInput) {
   }
   
   if (arg == "temp" || arg == "temperature") {
-    if (!rtcConnected) {
+    if (!gRtcConnected) {
       return "[RTC] Not connected";
     }
     float temp = rtcReadTemperature();
@@ -656,7 +639,7 @@ const char* cmd_rtcset(const String& argsInput) {
   static String response;
   response = "";
   
-  if (!rtcConnected) {
+  if (!gRtcConnected) {
     return "[RTC] Not connected. Use 'openrtc' first.";
   }
   
@@ -723,7 +706,7 @@ const char* cmd_rtcset(const String& argsInput) {
 const char* cmd_rtcsync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!rtcConnected) {
+  if (!gRtcConnected) {
     return "[RTC] Not connected. Use 'openrtc' first.";
   }
   
@@ -757,11 +740,11 @@ const char* cmd_rtcstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   
-  if (rtcEnabled && rtcConnected) {
+  if (gRtcEnabled && gRtcConnected) {
     return "[RTC] Already running";
   }
   
-  if (!initRTCSensor()) {
+  if (!rtcInit()) {
     return "[RTC] Failed to initialize - check wiring";
   }
   
@@ -776,12 +759,12 @@ const char* cmd_rtcstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   
-  if (!rtcEnabled) {
+  if (!gRtcEnabled) {
     return "[RTC] Not running";
   }
   
   handleDeviceStopped(I2C_DEVICE_RTC);
-  stopRTCSensor();  // Sensor-specific: wait for task exit and cleanup
+  rtcStop();  // Sensor-specific: wait for task exit and cleanup
   return "[RTC] Closed";
 }
 
@@ -789,38 +772,38 @@ const char* cmd_rtcstop(const String& argsInput) {
 // RTC Accessor Functions (for MQTT and other modules)
 // ============================================================================
 
-int getRTCYear() {
-  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+int rtcGetYear() {
+  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
   return gRTCCache.dateTime.year;
 }
 
-int getRTCMonth() {
-  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+int rtcGetMonth() {
+  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
   return gRTCCache.dateTime.month;
 }
 
-int getRTCDay() {
-  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+int rtcGetDay() {
+  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
   return gRTCCache.dateTime.day;
 }
 
-int getRTCHour() {
-  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+int rtcGetHour() {
+  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
   return gRTCCache.dateTime.hour;
 }
 
-int getRTCMinute() {
-  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+int rtcGetMinute() {
+  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
   return gRTCCache.dateTime.minute;
 }
 
-int getRTCSecond() {
-  if (!rtcConnected || !gRTCCache.dataValid) return 0;
+int rtcGetSecond() {
+  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
   return gRTCCache.dateTime.second;
 }
 
-float getRTCTemperature() {
-  if (!rtcConnected || !gRTCCache.dataValid) return 0.0f;
+float rtcGetTemperature() {
+  if (!gRtcConnected || !gRTCCache.dataValid) return 0.0f;
   return gRTCCache.temperature;
 }
 
@@ -838,7 +821,7 @@ static const SettingEntry rtcSettingEntries[] = {
 };
 
 static bool isRTCConnectedSetting() {
-  return rtcConnected;
+  return gRtcConnected;
 }
 
 // Columns: name, jsonSection, entries, count, isConnected, description

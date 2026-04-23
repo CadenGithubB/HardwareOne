@@ -222,7 +222,7 @@ inline void displayBluetoothPage() {}
 inline bool handleBluetoothInput(uint16_t, uint16_t) { return false; }
 
 // Global state stub
-extern bool bluetoothShowingStatus;
+extern bool gBluetoothShowingStatus;
 
 #endif // ENABLE_BLUETOOTH
 

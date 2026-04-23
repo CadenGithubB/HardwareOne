@@ -9,7 +9,7 @@
 
 // Thermal OLED display function - shows thermal visualization
 static void displayThermalVisual() {
-  if (!thermalConnected || !thermalEnabled) {
+  if (!gThermalConnected || !gThermalEnabled) {
     oledDisplay->setTextSize(1);
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Thermal not active");
@@ -107,7 +107,7 @@ static bool thermalOLEDModeAvailable(String* outReason) {
 static void thermalToggleConfirmed(void* userData) {
   (void)userData;
   extern void executeOLEDCommand(const String& argsInput);
-  if (thermalEnabled && thermalConnected) {
+  if (gThermalEnabled && gThermalConnected) {
     executeOLEDCommand("closethermal");
   } else {
     executeOLEDCommand("openthermal");
@@ -117,7 +117,7 @@ static void thermalToggleConfirmed(void* userData) {
 // Input handler for Thermal OLED mode - X button toggles sensor
 static bool thermalInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (thermalEnabled && thermalConnected) {
+    if (gThermalEnabled && gThermalConnected) {
       oledConfirmRequest("Close Thermal?", nullptr, thermalToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open Thermal?", nullptr, thermalToggleConfirmed, nullptr);

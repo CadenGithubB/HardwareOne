@@ -994,7 +994,7 @@ static void displayGPSMap() {
 #if ENABLE_GPS_SENSOR
   // Use cached GPS data (gpsTask continuously polls and updates gPA1010D)
   // Do NOT call gPA1010D->read() here - causes I2C bus contention with OLED
-  if (gpsConnected && gPA1010D != nullptr && gpsEnabled) {
+  if (gGpsConnected && gPA1010D != nullptr && gGpsEnabled) {
     if (gPA1010D->fix) {
       lat = gPA1010D->latitudeDegrees;
       lon = gPA1010D->longitudeDegrees;
@@ -1205,7 +1205,7 @@ static void displayGPSMap() {
     gOLEDMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
   }
 #if ENABLE_GPS_SENSOR
-  else if (gpsEnabled) {
+  else if (gGpsEnabled) {
     // Local GPS enabled but no fix - show searching indicator
     snprintf(overlayBuf, sizeof(overlayBuf), " %dS ", satellites);
     gOLEDMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
@@ -1362,7 +1362,7 @@ static void executeSubmenuAction(int submenuType, int action) {
     case MENU_CAT_GPS:
       switch (action) {
         case 0:  // Center on GPS
-          if (gpsConnected && gPA1010D != nullptr && gPA1010D->fix) {
+          if (gGpsConnected && gPA1010D != nullptr && gPA1010D->fix) {
             gMapCenterLat = gPA1010D->latitudeDegrees;
             gMapCenterLon = gPA1010D->longitudeDegrees;
             if (gPA1010D->lat == 'S') gMapCenterLat = -gMapCenterLat;
@@ -1374,7 +1374,7 @@ static void executeSubmenuAction(int submenuType, int action) {
         case 1:  // Toggle GPS
           {
             extern void executeOLEDCommand(const String& argsInput);
-            if (gpsEnabled) executeOLEDCommand("closegps");
+            if (gGpsEnabled) executeOLEDCommand("closegps");
             else executeOLEDCommand("opengps");
           }
           break;
@@ -1442,7 +1442,7 @@ static void executeSubmenuAction(int submenuType, int action) {
             executeCommandThroughRegistry("sensorlog stop");
           } else {
             // Auto-start GPS sensor if not running
-            if (!gpsEnabled) {
+            if (!gGpsEnabled) {
               executeCommandThroughRegistry("opengps");
             }
             GPSTrackManager::clearTrack();
@@ -2042,9 +2042,9 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   bool aHeld = false;
 #if ENABLE_GAMEPAD_SENSOR
-  if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-    aHeld = !(gControlCache.gamepadButtons & GAMEPAD_BUTTON_A);
-    xSemaphoreGive(gControlCache.mutex);
+  if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    aHeld = !(gGamepadCache.gamepadButtons & GAMEPAD_BUTTON_A);
+    xSemaphoreGive(gGamepadCache.mutex);
   }
 #endif
   

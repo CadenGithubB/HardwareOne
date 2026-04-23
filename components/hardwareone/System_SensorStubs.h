@@ -19,70 +19,70 @@
 #if !ENABLE_THERMAL_SENSOR
   #include "i2csensor-mlx90640.h"  // Provides ThermalCache struct
   extern ThermalCache gThermalCache;
-  extern bool thermalEnabled;
-  extern bool thermalConnected;
-  extern unsigned long thermalLastStopTime;
-  extern TaskHandle_t thermalTaskHandle;
+  extern bool gThermalEnabled;
+  extern bool gThermalConnected;
+  extern unsigned long gThermalLastStopTime;
+  extern TaskHandle_t gThermalTaskHandle;
   extern volatile UBaseType_t gThermalWatermarkNow;
   extern volatile UBaseType_t gThermalWatermarkMin;
   extern const struct CommandEntry thermalCommands[];
   extern const size_t thermalCommandsCount;
   // Thermal stub functions
-  inline int buildThermalDataJSON(char* buf, size_t bufSize) { return 0; }
-  inline bool startThermalSensorInternal() { return false; }
+  inline int thermalBuildDataJSON(char* buf, size_t bufSize) { return 0; }
+  inline bool thermalStartInternal() { return false; }
 #endif
 
 #if !ENABLE_TOF_SENSOR
   #include "i2csensor-vl53l4cx.h"  // Provides TofCache struct
   extern TofCache gTofCache;
-  extern bool tofEnabled;
-  extern bool tofConnected;
-  extern uint32_t tofLastStopTime;
-  extern TaskHandle_t tofTaskHandle;
+  extern bool gTofEnabled;
+  extern bool gTofConnected;
+  extern uint32_t gTofLastStopTime;
+  extern TaskHandle_t gTofTaskHandle;
   extern volatile UBaseType_t gTofWatermarkNow;
   extern volatile UBaseType_t gTofWatermarkMin;
   extern const struct CommandEntry tofCommands[];
   extern const size_t tofCommandsCount;
   // ToF stub functions
-  inline int buildToFDataJSON(char* buf, size_t bufSize) { return 0; }
-  inline bool startToFSensorInternal() { return false; }
+  inline int tofBuildDataJSON(char* buf, size_t bufSize) { return 0; }
+  inline bool tofStartInternal() { return false; }
 #endif
 
 #if !ENABLE_IMU_SENSOR
   #include "i2csensor-bno055.h"  // Provides ImuCache and IMUActionState structs
   extern ImuCache gImuCache;
-  extern bool imuEnabled;
-  extern bool imuConnected;
-  extern unsigned long imuLastStopTime;
-  extern TaskHandle_t imuTaskHandle;
+  extern bool gImuEnabled;
+  extern bool gImuConnected;
+  extern unsigned long gImuLastStopTime;
+  extern TaskHandle_t gImuTaskHandle;
   extern volatile UBaseType_t gIMUWatermarkNow;
   extern volatile UBaseType_t gIMUWatermarkMin;
   extern const struct CommandEntry imuCommands[];
   extern const size_t imuCommandsCount;
   // IMU stub functions
-  inline int buildIMUDataJSON(char* buf, size_t bufSize) { return 0; }
-  inline bool startIMUSensorInternal() { return false; }
-  void updateIMUActions();
+  inline int imuBuildDataJSON(char* buf, size_t bufSize) { return 0; }
+  inline bool imuStartInternal() { return false; }
+  void imuUpdateActions();
 #endif
 
 #if !ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor-seesaw.h"  // Provides ControlCache struct
-  extern ControlCache gControlCache;
-  extern bool gamepadEnabled;
-  extern bool gamepadConnected;
-  extern unsigned long gamepadLastStopTime;
-  extern TaskHandle_t gamepadTaskHandle;
+  #include "i2csensor-seesaw.h"  // Provides GamepadCache struct
+  extern GamepadCache gGamepadCache;
+  extern bool gGamepadEnabled;
+  extern bool gGamepadConnected;
+  extern unsigned long gGamepadLastStopTime;
+  extern TaskHandle_t gGamepadTaskHandle;
   extern volatile UBaseType_t gGamepadWatermarkMin;
   extern volatile UBaseType_t gGamepadWatermarkNow;
   extern const struct CommandEntry gamepadCommands[];
   extern const size_t gamepadCommandsCount;
   // Gamepad stub functions
-  inline const char* startGamepadInternal() { return "Gamepad disabled"; }
+  inline bool gamepadStartInternal() { return false; }
 #endif
 
 #if !ENABLE_OLED_DISPLAY
   // Only the most basic OLED stubs - variables referenced externally
-  extern bool oledEnabled;
+  extern bool gOledEnabled;
   extern bool oledConnected;
   extern class Adafruit_SSD1306* oledDisplay;
   // Minimal stub functions for initialization calls
@@ -95,89 +95,82 @@
 #endif
 
 #if !ENABLE_APDS_SENSOR
-  #include "i2csensor-apds9960.h"  // Provides PeripheralCache struct
-  extern PeripheralCache gPeripheralCache;
-  extern bool apdsEnabled;
-  extern bool apdsConnected;
-  extern bool apdsColorEnabled;
-  extern bool apdsProximityEnabled;
-  extern bool apdsGestureEnabled;
-  extern unsigned long apdsLastStopTime;
-  extern TaskHandle_t apdsTaskHandle;
+  #include "i2csensor-apds9960.h"  // Provides APDSCache struct
+  extern APDSCache gAPDSCache;
+  extern bool gApdsConnected;
+  extern bool gApdsColorEnabled;
+  extern bool gApdsProximityEnabled;
+  extern bool gApdsGestureEnabled;
+  extern unsigned long gApdsLastStopTime;
+  extern TaskHandle_t gApdsTaskHandle;
   extern const struct CommandEntry apdsCommands[];
   extern const size_t apdsCommandsCount;
   // APDS stub functions
-  inline bool startAPDSSensorInternal() { return false; }
+  inline bool apdsStartInternal() { return false; }
 #endif
 
 #if !ENABLE_GPS_SENSOR
   #include "i2csensor-pa1010d.h"  // Provides GPSCache struct
   extern GPSCache gGPSCache;
-  extern bool gpsEnabled;
-  extern bool gpsConnected;
-  extern unsigned long gpsLastStopTime;
+  extern bool gGpsEnabled;
+  extern bool gGpsConnected;
+  extern unsigned long gGpsLastStopTime;
   extern class Adafruit_GPS* gPA1010D;
-  extern TaskHandle_t gpsTaskHandle;
+  extern TaskHandle_t gGpsTaskHandle;
   extern const struct CommandEntry gpsCommands[];
   extern const size_t gpsCommandsCount;
   // GPS stub functions
-  inline void startGPSInternal() {}
+  inline bool gpsStartInternal() { return false; }
 #endif
 
 #if !ENABLE_FM_RADIO
   // FM Radio stubs when disabled
-  extern bool fmRadioEnabled;
-  extern bool fmRadioConnected;
-  extern unsigned long fmRadioLastStopTime;
-  extern bool radioInitialized;
-  extern uint16_t fmRadioFrequency;
-  extern uint8_t fmRadioVolume;
-  extern bool fmRadioMuted;
-  extern bool fmRadioStereo;
-  extern char fmRadioStationName[9];
-  extern char fmRadioStationText[65];
-  extern uint8_t fmRadioRSSI;
-  extern uint8_t fmRadioSNR;
-  extern TaskHandle_t fmRadioTaskHandle;
+  #include "i2csensor-rda5807.h"  // Provides FMRadioCache struct
+  extern bool gFmRadioEnabled;
+  extern bool gFmRadioConnected;
+  extern unsigned long gFmRadioLastStopTime;
+  extern bool gRadioInitialized;
+  extern FMRadioCache gFmRadioCache;
+  extern TaskHandle_t gFmRadioTaskHandle;
   extern const struct CommandEntry fmRadioCommands[];
   extern const size_t fmRadioCommandsCount;
-  inline bool initFMRadio() { return false; }
-  inline void deinitFMRadio() {}
-  inline void pollFMRadio() {}
-  inline int buildFMRadioDataJSON(char* buf, size_t bufSize) { return 0; }
-  inline void startFMRadioInternal() {}
+  inline bool fmRadioInit() { return false; }
+  inline void fmRadioDeinit() {}
+  inline void fmRadioPoll() {}
+  inline int fmRadioBuildDataJSON(char* buf, size_t bufSize) { return 0; }
+  inline bool fmRadioStartInternal() { return false; }
 #endif
 
 #if !ENABLE_PRESENCE_SENSOR
   #include "i2csensor-sths34pf80.h"  // Provides PresenceCache struct
   extern PresenceCache gPresenceCache;
-  extern bool presenceEnabled;
-  extern bool presenceConnected;
-  extern unsigned long presenceLastStopTime;
-  extern TaskHandle_t presenceTaskHandle;
+  extern bool gPresenceEnabled;
+  extern bool gPresenceConnected;
+  extern unsigned long gPresenceLastStopTime;
+  extern TaskHandle_t gPresenceTaskHandle;
   extern const struct CommandEntry presenceCommands[];
   extern const size_t presenceCommandsCount;
   // Presence stub functions
-  inline bool startPresenceSensorInternal() { return false; }
-  inline bool initPresenceSensor() { return false; }
-  inline bool readPresenceData() { return false; }
-  inline int buildPresenceDataJSON(char* buf, size_t bufSize) { return 0; }
+  inline bool presenceStartInternal() { return false; }
+  inline bool presenceInit() { return false; }
+  inline bool presencePoll() { return false; }
+  inline int presenceBuildDataJSON(char* buf, size_t bufSize) { return 0; }
 #endif
 
 #if !ENABLE_RTC_SENSOR
   #include "i2csensor-ds3231.h"  // Provides RTCDateTime and RTCCache structs
   extern RTCCache gRTCCache;
-  extern bool rtcEnabled;
-  extern bool rtcConnected;
-  extern unsigned long rtcLastStopTime;
-  extern TaskHandle_t rtcTaskHandle;
+  extern bool gRtcEnabled;
+  extern bool gRtcConnected;
+  extern unsigned long gRtcLastStopTime;
+  extern TaskHandle_t gRtcTaskHandle;
   extern volatile UBaseType_t gRTCWatermarkNow;
   extern volatile UBaseType_t gRTCWatermarkMin;
   extern const struct CommandEntry rtcCommands[];
   extern const size_t rtcCommandsCount;
   // RTC stub functions
-  void startRTCSensorInternal();
-  inline int buildRTCDataJSON(char* buf, size_t bufSize) { return 0; }
+  bool rtcStartInternal();
+  inline int rtcBuildDataJSON(char* buf, size_t bufSize) { return 0; }
 #endif
 
 #if !ENABLE_SERVO
@@ -185,9 +178,9 @@
   extern const struct CommandEntry servoCommands[];
   extern const size_t servoCommandsCount;
   // Servo stub functions
-  inline bool initPCA9685() { return false; }
-  inline void setServoAngle(uint8_t channel, int angle) {}
-  inline void setPWMValue(uint8_t channel, uint16_t value) {}
+  inline bool servoInit() { return false; }
+  inline void servoSetAngle(uint8_t channel, int angle) {}
+  inline void servoSetPWM(uint8_t channel, uint16_t value) {}
 #endif
 
 #if !ENABLE_BLUETOOTH
@@ -198,7 +191,7 @@
 
 #if !ENABLE_CAMERA_SENSOR
   // Camera stubs when disabled
-  extern bool cameraEnabled;
+  extern bool gCameraEnabled;
   extern bool cameraConnected;
   extern bool cameraStreaming;
   extern const char* cameraModel;
@@ -214,7 +207,7 @@
 
 #if !ENABLE_MICROPHONE_SENSOR
   // Microphone stubs when disabled
-  extern bool micEnabled;
+  extern bool gMicEnabled;
   extern bool micConnected;
   extern bool micRecording;
   extern int micSampleRate;

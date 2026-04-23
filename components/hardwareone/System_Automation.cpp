@@ -14,8 +14,7 @@
  * - ArduinoJson used only for JSON serialization/deserialization
  * 
  * MODERNIZATION COMPLETE:
- * ✅ parseAtTimeMatchDays() - const char* input, stack buffers
- * ✅ computeNextRunTime() - const char* input, ArduinoJson parsing
+ * ✅ computeNextRunTime() - const char* input, ArduinoJson parsing (thin wrapper around Trigger model)
  * ✅ evaluateCondition() - const char* input, stack-based parsing
  * ✅ validateConditionSyntax() - const char* input/output
  * ✅ executeConditionalCommand() - const char* input, minimal String usage
@@ -112,6 +111,8 @@ extern bool gExecIsAdmin;
 // Forward declarations for functions implemented in this file
 bool updateAutomationNextAt(long automationId, time_t newNextAt);
 time_t computeNextRunTime(const char* automationJson, time_t fromTime);
+// Unified post-fire helper (Trigger model defined later in this file).
+static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt);
 const char* executeConditionalCommand(const char* command);
 const char* evaluateConditionalChain(const char* chainStr, char* outBuf, size_t outBufSize);
 bool evaluateCondition(const char* condition);
@@ -119,7 +120,6 @@ const char* validateConditionalHierarchy(const char* conditions);
 const char* validateConditionSyntax(const char* condition);
 const char* validateConditionalChain(const char* chainStr);
 const char* validateConditionalCommand(const char* command);
-bool parseAtTimeMatchDays(const char* daysCsv, int tm_wday);
 bool automationIdExistsInJson(const String& json, unsigned long id);
 // jsonEscape now provided by system_utils.h
 void findAutomationsArrayBounds(const String& json, int& arrStart, int& arrEnd);
@@ -428,13 +428,93 @@ bool sanitizeAutomationsJson(String& jsonRef) {
   return changed;
 }
 
-// Atomic writer for automations.json
+// ============================================================================
+// In-RAM cache of per-automation scheduling metadata
+// ============================================================================
+// The scheduler runs every main-loop iteration. Without a cache it would have
+// to read automations.json from LittleFS and parse it every time — ~15-30ms of
+// work per tick for no benefit when nothing is due.
+//
+// This cache holds just enough to answer "is anything due right now?" without
+// any I/O: id, nextAt, enabled. Invalidated on any file write (via
+// writeAutomationsJsonAtomic) or explicit notifyAutomationScheduler(). Rebuilt
+// at the end of each schedulerTickMinute, which already reads+parses the file.
+
+struct AutoCacheEntry {
+  long id;
+  time_t nextAt;
+  bool enabled;
+};
+
+static constexpr int AUTO_CACHE_MAX = 64;
+static AutoCacheEntry gAutoCache[AUTO_CACHE_MAX];
+static volatile int gAutoCacheCount = 0;
+static volatile bool gAutoCacheValid = false;
+
+// Re-read automations.json and refill the cache. Called at the end of the
+// full tick so post-fire nextAt updates are captured on the same pass.
+static void rebuildAutoCache() {
+  String json;
+  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+    gAutoCacheCount = 0;
+    gAutoCacheValid = true;
+    return;
+  }
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json)) {
+    gAutoCacheCount = 0;
+    gAutoCacheValid = true;
+    return;
+  }
+  JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
+  int n = 0;
+  for (JsonObjectConst a : autos) {
+    if (n >= AUTO_CACHE_MAX) break;
+    gAutoCache[n].id = a["id"].as<long>();
+    gAutoCache[n].enabled = a["enabled"] | false;
+    // Cache the min nextAt across the automation's triggers. 0 means nothing
+    // is scheduled (all manual/boot, or unset).
+    time_t minAt = 0;
+    JsonArrayConst triggers = a["triggers"].as<JsonArrayConst>();
+    if (!triggers.isNull()) {
+      for (JsonVariantConst t : triggers) {
+        unsigned long raw = t["nextAt"] | 0UL;
+        time_t na = (time_t)raw;
+        if (na > 0 && (minAt == 0 || na < minAt)) minAt = na;
+      }
+    }
+    gAutoCache[n].nextAt = minAt;
+    n++;
+  }
+  gAutoCacheCount = n;
+  gAutoCacheValid = true;
+}
+
+// Fast in-RAM check: is any enabled automation's nextAt at or before `now`?
+// Called from the main loop every iteration. Returns true if the full tick
+// must run (something is due, or the cache is stale).
+bool automationsAnyDue(time_t now) {
+  if (!gAutoCacheValid) return true;  // force a full tick to rebuild
+  for (int i = 0; i < gAutoCacheCount; i++) {
+    if (gAutoCache[i].enabled && gAutoCache[i].nextAt > 0 && now >= gAutoCache[i].nextAt) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Atomic writer for automations.json. Invalidates the cache on every write
+// so the next main-loop iteration rebuilds it.
 bool writeAutomationsJsonAtomic(const String& json) {
+  gAutoCacheValid = false;
   return writeTextAtomic(AUTOMATIONS_JSON_FILE, json);
 }
 
-// Update nextAt field in automation JSON using ArduinoJson
-bool updateAutomationNextAt(long automationId, time_t newNextAt) {
+// Update the nextAt field of a specific trigger within an automation.
+// Phase 1: `triggerIdx=-1` is an alias for "first schedulable trigger" (the
+// behavior legacy callers that used to pass only an id+nextAt expect).
+// Phase 1B will remove the alias and force an explicit trigger index.
+bool updateAutomationTriggerNextAt(long automationId, int triggerIdx, time_t newNextAt) {
   String json;
   if (!readText(AUTOMATIONS_JSON_FILE, json)) return false;
 
@@ -444,34 +524,50 @@ bool updateAutomationNextAt(long automationId, time_t newNextAt) {
     DEBUGF(DEBUG_AUTOMATIONS, "[updateNextAt] JSON parse error: %s", error.c_str());
     return false;
   }
-  
+
   JsonArray automations = doc["automations"].as<JsonArray>();
-  if (automations.isNull()) {
-    return false;
-  }
+  if (automations.isNull()) return false;
+
   bool found = false;
-  
   for (JsonObject automation : automations) {
-    if (automation["id"].as<long>() == automationId) {
-      // Support both new nested schema (schedule.nextAt) and legacy flat schema (nextAt)
-      if (!automation["schedule"].isNull()) {
-        automation["schedule"]["nextAt"] = (unsigned long)newNextAt;
-      } else {
-        automation["nextAt"] = (unsigned long)newNextAt;
+    if (automation["id"].as<long>() != automationId) continue;
+    JsonArray triggers = automation["triggers"].as<JsonArray>();
+    if (triggers.isNull()) break;
+    // Pick the trigger to update.
+    int chosen = triggerIdx;
+    if (chosen < 0) {
+      // Legacy: first schedulable (non-boot/manual) trigger; else first.
+      int idx = 0;
+      chosen = 0;
+      for (JsonVariantConst t : triggers) {
+        const char* tt = t["type"] | "";
+        if (strcmp(tt, "time") == 0 || strcmp(tt, "interval") == 0) { chosen = idx; break; }
+        idx++;
       }
-      found = true;
-      DEBUGF(DEBUG_AUTO_TIMING, "[updateNextAt] id=%ld nextAt=%lu", automationId, (unsigned long)newNextAt);
-      break;
     }
+    int idx = 0;
+    for (JsonVariant t : triggers) {
+      if (idx == chosen) {
+        t["nextAt"] = (unsigned long)newNextAt;
+        found = true;
+        break;
+      }
+      idx++;
+    }
+    break;
   }
-  
+
   if (!found) return false;
-  
-  // Serialize back to string
+
   json = "";
   serializeJsonPretty(doc, json);
-  
   return writeAutomationsJsonAtomic(json);
+}
+
+// Legacy shim: writes nextAt into the first schedulable trigger. Callers that
+// pre-dated the trigger-array refactor still work unchanged.
+bool updateAutomationNextAt(long automationId, time_t newNextAt) {
+  return updateAutomationTriggerNextAt(automationId, -1, newNextAt);
 }
 
 // Run automations on boot
@@ -524,8 +620,11 @@ void runAutomationsOnBoot() {
       continue;
     }
 
-    bool runAtBoot = (obj.indexOf("\"runAtBoot\": true") >= 0) || (obj.indexOf("\"runAtBoot\":true") >= 0);
-    if (!runAtBoot) {
+    // An automation runs at boot if it has any trigger of type "boot" in its
+    // triggers array. We detect via string scan since the triggers array
+    // contains the substring `"type":"boot"` for any boot trigger.
+    bool bootTrigger = (obj.indexOf("\"type\": \"boot\"") >= 0) || (obj.indexOf("\"type\":\"boot\"") >= 0);
+    if (!bootTrigger) {
       pos = objEnd + 1;
       continue;
     }
@@ -793,6 +892,10 @@ const char* cmd_automation_add(const String& argsInput) {
   String timeS = a.value("time");
   String recurrence = a.value("recurrence");
   String days = a.value("days");
+  String weekInterval = a.value("weekinterval");
+  String dayOfMonth = a.value("dayofmonth");
+  String monthOfYear = a.value("month");
+  String secondaryTriggersJson = a.value("secondarytriggers");
   String delayMs = a.value("delayms");
   String intervalMs = a.value("intervalms");
   String runAtBootStr = a.value("runatboot");
@@ -1060,34 +1163,125 @@ const char* cmd_automation_add(const String& argsInput) {
   
   String commandsJson = buildCommandsArray(combined);
   
-  // Build schedule sub-object (without nextAt first so computeNextRunTime can read it)
-  String sched = "  \"schedule\": {\n";
-  sched += "    \"type\": \"" + typeNorm + "\"";
-  if (typeNorm == "attime" && timeS.length() > 0) sched += ",\n    \"time\": \"" + jsonEscape(timeS) + "\"";
-  if (recurrence.length() > 0) sched += ",\n    \"recurrence\": \"" + jsonEscape(recurrence) + "\"";
-  if (typeNorm == "attime" && days.length() > 0) sched += ",\n    \"days\": \"" + jsonEscape(days) + "\"";
-  if (typeNorm == "afterdelay" && delayMs.length() > 0) sched += ",\n    \"delayMs\": " + delayMs;
-  if (typeNorm == "interval" && intervalMs.length() > 0) sched += ",\n    \"intervalMs\": " + intervalMs;
-  if (runAtBoot) sched += ",\n    \"runAtBoot\": true";
-  if (bootDelayMsStr.length() > 0) sched += ",\n    \"bootDelayMs\": " + bootDelayMsStr;
-  
-  // Compute nextAt using partial schedule object
-  String tempObj = "{" + sched + "\n  }\n}";
-  time_t now = time(nullptr);
-  time_t nextAt = 0;
-  if (now > 0) {
-    nextAt = computeNextRunTime(tempObj.c_str(), now);
+  // Normalize legacy type names to v1 trigger type names.
+  String triggerType = typeNorm;
+  if (triggerType == "attime") triggerType = "time";
+  else if (triggerType == "afterdelay") triggerType = "manual";
+  else if (triggerType == "onboot") triggerType = "boot";
+  // "interval" and "boot" pass through unchanged.
+
+  // Helper: build a single trigger object body (without nextAt) for a given
+  // type. Used to construct each element of the triggers array below.
+  auto buildPrimaryBody = [&](const String& tt) -> String {
+    String b;
+    b += "      \"type\": \"" + tt + "\"";
+    if (tt == "time") {
+      if (timeS.length() > 0) b += ",\n      \"time\": \"" + jsonEscape(timeS) + "\"";
+      if (recurrence.length() > 0) b += ",\n      \"recurrence\": \"" + jsonEscape(recurrence) + "\"";
+      if (days.length() > 0) b += ",\n      \"days\": \"" + jsonEscape(days) + "\"";
+      if (weekInterval.length() > 0 && weekInterval.toInt() > 1) b += ",\n      \"weekInterval\": " + String(weekInterval.toInt());
+      if (dayOfMonth.length() > 0) {
+        int dom = dayOfMonth.toInt();
+        if (dom >= 1 && dom <= 31) b += ",\n      \"dayOfMonth\": " + String(dom);
+      }
+      if (monthOfYear.length() > 0) {
+        int moy = monthOfYear.toInt();
+        if (moy >= 1 && moy <= 12) b += ",\n      \"month\": " + String(moy);
+      }
+    } else if (tt == "manual") {
+      if (delayMs.length() > 0) b += ",\n      \"delayMs\": " + delayMs;
+    } else if (tt == "interval") {
+      if (intervalMs.length() > 0) b += ",\n      \"intervalMs\": " + intervalMs;
+    } else if (tt == "boot") {
+      if (bootDelayMsStr.length() > 0) b += ",\n      \"bootDelayMs\": " + bootDelayMsStr;
+    }
+    return b;
+  };
+
+  // Compute initial nextAt for a given trigger body (wraps into a temporary
+  // automation object so computeNextRunTime can parse it).
+  auto computeInitialNextAt = [&](const String& body) -> time_t {
+    time_t now = time(nullptr);
+    if (now <= 0) return 0;
+    String tmp = "{\"triggers\":[{\n" + body + "\n    }]}";
+    return computeNextRunTime(tmp.c_str(), now);
+  };
+
+  // Build the triggers array. Phase 1: one primary trigger, plus an optional
+  // boot trigger if the user checked "Run at Boot" on a non-boot primary.
+  // Phase 2 will add UI support for arbitrary multi-trigger.
+  String triggersJson = "  \"triggers\": [\n";
+  {
+    String body = buildPrimaryBody(triggerType);
+    time_t nextAt = computeInitialNextAt(body);
+    if (nextAt > 0) body += ",\n      \"nextAt\": " + String((unsigned long)nextAt);
+    else              body += ",\n      \"nextAt\": null";
+    triggersJson += "    {\n" + body + "\n    }";
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos add] primary trigger type=%s nextAt=%lu",
+           triggerType.c_str(), (unsigned long)nextAt);
   }
-  
-  if (nextAt > 0) {
-    sched += ",\n    \"nextAt\": " + String((unsigned long)nextAt);
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos add] nextAt=%lu", (unsigned long)nextAt);
-  } else {
-    sched += ",\n    \"nextAt\": null";
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos add] Warning: could not compute nextAt for automation");
+  if (runAtBoot && triggerType != "boot") {
+    String body = buildPrimaryBody("boot");
+    triggersJson += ",\n    {\n" + body + ",\n      \"nextAt\": null\n    }";
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos add] added synthesized boot trigger from runAtBoot");
   }
-  sched += "\n  }";
-  
+
+  // Parse and append secondary triggers (from the UI's + Add Trigger rows).
+  // Each secondary is a JSON object in the same shape as the primary trigger
+  // would produce — we just serialize it back in and compute nextAt per entry.
+  if (secondaryTriggersJson.length() > 0) {
+    PSRAM_JSON_DOC(secDoc);
+    if (!deserializeJson(secDoc, secondaryTriggersJson)) {
+      JsonArrayConst secArr = secDoc.as<JsonArrayConst>();
+      if (!secArr.isNull()) {
+        time_t nowSec = time(nullptr);
+        int primaryCount = 1 + ((runAtBoot && triggerType != "boot") ? 1 : 0);
+        int addedSec = 0;
+        for (JsonVariantConst sv : secArr) {
+          if (primaryCount + addedSec >= 4) break;  // cap at 4 total
+          const char* stype = sv["type"] | "";
+          if (!stype[0]) continue;
+          String body;
+          body += "      \"type\": \"" + String(stype) + "\"";
+          if (strcmp(stype, "time") == 0) {
+            const char* tval = sv["time"] | "";
+            if (tval[0]) body += ",\n      \"time\": \"" + String(tval) + "\"";
+            const char* rec = sv["recurrence"] | "";
+            if (rec[0]) body += ",\n      \"recurrence\": \"" + String(rec) + "\"";
+            const char* daysV = sv["days"] | "";
+            if (daysV[0]) body += ",\n      \"days\": \"" + String(daysV) + "\"";
+          } else if (strcmp(stype, "interval") == 0) {
+            long ims = sv["intervalMs"] | 0;
+            if (ims > 0) body += ",\n      \"intervalMs\": " + String(ims);
+          } else if (strcmp(stype, "manual") == 0) {
+            long dms = sv["delayMs"] | 0;
+            body += ",\n      \"delayMs\": " + String(dms);
+          } else if (strcmp(stype, "boot") == 0) {
+            long bms = sv["bootDelayMs"] | 0;
+            body += ",\n      \"bootDelayMs\": " + String(bms);
+          } else {
+            continue;  // unknown type, skip
+          }
+          // Compute initial nextAt for this secondary trigger.
+          time_t snext = 0;
+          if (nowSec > 0) {
+            String tmp = "{\"triggers\":[{\n" + body + "\n    }]}";
+            snext = computeNextRunTime(tmp.c_str(), nowSec);
+          }
+          if (snext > 0) body += ",\n      \"nextAt\": " + String((unsigned long)snext);
+          else              body += ",\n      \"nextAt\": null";
+          triggersJson += ",\n    {\n" + body + "\n    }";
+          addedSec++;
+        }
+        if (addedSec > 0) {
+          DEBUGF(DEBUG_AUTOMATIONS, "[autos add] appended %d secondary trigger(s)", addedSec);
+        }
+      }
+    }
+  }
+
+  triggersJson += "\n  ]";
+
   // Build final automation object
   String obj = "{\n";
   String createdBy = gExecUser;
@@ -1097,7 +1291,7 @@ const char* cmd_automation_add(const String& argsInput) {
   obj += "  \"createdBy\": \"" + jsonEscape(createdBy) + "\",\n";
   obj += "  \"enabled\": " + String(enabled ? "true" : "false") + ",\n";
   if (condition.length() > 0) obj += "  \"condition\": \"" + jsonEscape(condition) + "\",\n";
-  obj += sched + ",\n";
+  obj += triggersJson + ",\n";
   obj += "  \"commands\": " + commandsJson + "\n";
   obj += "}";
   String insert = empty ? ("\n" + obj + "\n") : (",\n" + obj + "\n");
@@ -1536,20 +1730,10 @@ const char* cmd_automation_run(const String& argsInput) {
   }
   gCurrentAutomationUser = "";
   
-  // Advance nextAt after manual execution
+  // Advance nextAt after manual execution via the unified post-fire helper.
   time_t now = time(nullptr);
   if (now > 0) {
-    time_t nextAt = computeNextRunTime(obj.c_str(), now);
-    if (nextAt > 0) {
-      long id = idStr.toInt();
-      if (updateAutomationNextAt(id, nextAt)) {
-        DEBUGF(DEBUG_AUTOMATIONS, "[autos run] advanced nextAt=%lu for id=%s", (unsigned long)nextAt, idStr.c_str());
-      } else {
-        DEBUGF(DEBUG_AUTOMATIONS, "[autos run] warning: failed to update nextAt for id=%s", idStr.c_str());
-      }
-    } else {
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos run] warning: could not compute nextAt for id=%s", idStr.c_str());
-    }
+    rescheduleAfterFire(idStr.toInt(), obj.c_str(), now);
   }
   
   // Log automation end if logging is active
@@ -1562,6 +1746,99 @@ const char* cmd_automation_run(const String& argsInput) {
   char resultBuf[128];
   snprintf(resultBuf, sizeof(resultBuf), "Ran automation id=%s (%d command%s)", idStr.c_str(), cmdsCount, cmdsCount == 1 ? "" : "s");
   broadcastOutput(resultBuf);
+  return "OK";
+}
+
+// Arm an afterDelay automation's timer: nextAt = now + delayMs/1000.
+// No commands run here; the scheduler fires them when the delay elapses.
+const char* cmd_automation_trigger(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  CommandArgs a(argsInput);
+  String idStr = a.value("id");
+  if (idStr.length() == 0) {
+    broadcastOutput("Usage: automation trigger id=<id>");
+    return "ERROR";
+  }
+
+  String json;
+  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+    broadcastOutput("Error: failed to read automations.json");
+    return "ERROR";
+  }
+
+  PSRAM_JSON_DOC(doc);
+  DeserializationError err = deserializeJson(doc, json);
+  if (err) {
+    broadcastOutput("Error: automations.json parse error");
+    return "ERROR";
+  }
+
+  JsonArray automations = doc["automations"].as<JsonArray>();
+  if (automations.isNull()) {
+    broadcastOutput("Error: automations.json missing automations array");
+    return "ERROR";
+  }
+
+  long id = idStr.toInt();
+  JsonObject target;
+  for (JsonObject obj : automations) {
+    if (obj["id"].as<long>() == id) { target = obj; break; }
+  }
+  if (target.isNull()) {
+    broadcastOutput("Error: automation id not found");
+    return "ERROR";
+  }
+
+  // Find the first manual trigger in the automation's triggers array.
+  JsonArrayConst triggers = target["triggers"].as<JsonArrayConst>();
+  if (triggers.isNull()) {
+    broadcastOutput("Error: automation has no triggers array");
+    return "ERROR";
+  }
+  int manualIdx = -1;
+  int manualDelayMs = 0;
+  int idx = 0;
+  for (JsonVariantConst t : triggers) {
+    const char* tt = t["type"] | "";
+    if (strcmp(tt, "manual") == 0) {
+      manualIdx = idx;
+      manualDelayMs = t["delayMs"] | 0;
+      break;
+    }
+    idx++;
+  }
+  if (manualIdx < 0) {
+    broadcastOutput("Error: automation has no manual trigger to arm");
+    return "ERROR";
+  }
+  if (manualDelayMs <= 0) {
+    broadcastOutput("Error: manual trigger has no valid delayMs");
+    return "ERROR";
+  }
+
+  time_t now = time(nullptr);
+  if (now <= 0) {
+    broadcastOutput("Error: system time not set");
+    return "ERROR";
+  }
+  time_t nextAt = now + (manualDelayMs / 1000);
+
+  int delayMs = manualDelayMs;  // alias for the log message below
+
+  if (!updateAutomationTriggerNextAt(id, manualIdx, nextAt)) {
+    broadcastOutput("Error: failed to update nextAt");
+    return "ERROR";
+  }
+
+  // Wake the scheduler so it re-reads the file and picks up the armed nextAt.
+  // Without this, the armed automation waits up to one tick interval before
+  // the scheduler notices.
+  notifyAutomationScheduler();
+
+  char msg[160];
+  snprintf(msg, sizeof(msg), "Armed automation id=%ld (fires in %d ms)", id, delayMs);
+  broadcastOutput(msg);
   return "OK";
 }
 
@@ -1685,9 +1962,11 @@ const char* cmd_automation(const String& argsInput) {
     return "OK";
   } else if (subCmd == "run") {
     return cmd_automation_run(subArgs);
+  } else if (subCmd == "trigger") {
+    return cmd_automation_trigger(subArgs);
   }
 
-  broadcastOutput("Unknown automation command. Use: list, add, enable, disable, delete, run, sanitize, recompute");
+  broadcastOutput("Unknown automation command. Use: list, add, enable, disable, delete, run, trigger, sanitize, recompute");
   return "ERROR";
 }
 
@@ -1895,14 +2174,8 @@ bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userD
         }
       }
 
-      // Compute and update next run time
-      time_t newNextAt = computeNextRunTime(obj.c_str(), ctx->now);
-      if (newNextAt > 0) {
-        updateAutomationNextAt(id, newNextAt);
-        DEBUGF(DEBUG_AUTO_TIMING, "[autos] id=%ld updated nextAt=%lu", id, (unsigned long)newNextAt);
-      } else {
-        DEBUGF(DEBUG_AUTO_TIMING, "[autos] id=%ld warning: could not compute next nextAt", id);
-      }
+      // Update next run time via the unified post-fire helper.
+      rescheduleAfterFire(id, obj.c_str(), ctx->now);
     } else {
       DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] id=%ld skip: no commands found", id);
     }
@@ -1913,125 +2186,369 @@ bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userD
   return true;  // Continue processing next automation
 }
 
-// Helper: Parse day matching for atTime automations (const char* input)
-bool parseAtTimeMatchDays(const char* daysCsv, int tm_wday) {
-  if (!daysCsv || daysCsv[0] == '\0') return true;
-  
-  // tm_wday: 0=Sun..6=Sat
+// ============================================================================
+// Internal trigger model (v2: per-automation array of triggers)
+// ============================================================================
+// An automation has an array of Triggers (up to MAX_TRIGGERS) that each answer:
+// what causes this automation to fire? Multiple triggers are OR-combined — if
+// any one is due, the automation fires. After firing, each trigger that was
+// due is rescheduled independently; not-yet-due triggers are untouched.
+//
+// Two functions — `nextFire` and `onFired` — encapsulate the scheduling
+// algorithm for a single trigger. Callers iterate arrays via `triggersFromJson`
+// and `rescheduleAfterFire`.
+//
+// Per-trigger `nextAt` is stored inside each element of the `triggers` array
+// in the JSON. The cache holds just the min across triggers per automation,
+// which is all the fast-due check needs.
+//
+// Adding a new trigger variant (e.g. condition-based triggers) means adding
+// one case to `parseOneTrigger`, one case to `nextFire`, and optionally one
+// case to `onFired`. No other code paths need to change.
+
+static constexpr int MAX_TRIGGERS = 4;
+
+struct Trigger {
+  enum Type { NONE, TIME, MONTHLY, YEARLY, INTERVAL, MANUAL, BOOT };
+  Type type = NONE;
+
+  // TIME / MONTHLY / YEARLY share hour+minute
+  int hour = -1;            // 0..23
+  int minute = -1;          // 0..59
+
+  // TIME (daily/weekly/biweekly)
+  uint8_t daysMask = 0;     // bit i => day i (0=Sun..6=Sat); 0 means "any day"
+  uint16_t weekInterval = 1; // 1=weekly, 2=biweekly, ...
+  time_t anchor = 0;         // first-fire timestamp (set for weekInterval > 1)
+
+  // MONTHLY (dayOfMonth) / YEARLY (monthOfYear + dayOfMonth)
+  int dayOfMonth = 0;        // 1..31
+  int monthOfYear = 0;       // 1..12
+
+  // MANUAL
+  uint32_t delayMs = 0;
+
+  // INTERVAL
+  uint32_t intervalMs = 0;
+
+  // BOOT
+  uint32_t bootDelayMs = 0;
+
+  // Scheduling state (persisted per-trigger inside the JSON)
+  time_t nextAt = 0;
+};
+
+// Convert "mon,wed,fri" (case-insensitive, any whitespace) to a 7-bit mask.
+static uint8_t daysCsvToMask(const char* csv) {
+  if (!csv || !csv[0]) return 0;
   static const char* names[7] = { "sun", "mon", "tue", "wed", "thu", "fri", "sat" };
-  const char* want = names[tm_wday];
-  
-  // Use stack buffer for processing
   char buf[128];
-  size_t len = strlen(daysCsv);
-  if (len >= sizeof(buf) - 2) len = sizeof(buf) - 3;
-  
-  // Copy and lowercase, skip spaces
+  size_t len = strlen(csv);
+  if (len >= sizeof(buf) - 1) len = sizeof(buf) - 2;
   size_t j = 0;
   for (size_t i = 0; i < len; i++) {
-    char c = daysCsv[i];
-    if (c == ' ') continue;  // Skip spaces
-    if (c >= 'A' && c <= 'Z') c += 32;  // toLower
+    char c = csv[i];
+    if (c == ' ' || c == '\t') continue;
+    if (c >= 'A' && c <= 'Z') c += 32;
     buf[j++] = c;
   }
   buf[j] = '\0';
-  
-  // Simple substring search with comma delimiters
-  char needle[8];
-  snprintf(needle, sizeof(needle), ",%s,", want);
-  
-  // Add commas to buf for matching
-  char wrapped[130];
-  snprintf(wrapped, sizeof(wrapped), ",%s,", buf);
-  
-  return strstr(wrapped, needle) != nullptr;
+
+  uint8_t mask = 0;
+  const char* p = buf;
+  while (*p) {
+    while (*p == ',') p++;
+    if (!*p) break;
+    for (int d = 0; d < 7; d++) {
+      if (strncmp(p, names[d], 3) == 0) {
+        mask |= (uint8_t)(1u << d);
+        break;
+      }
+    }
+    while (*p && *p != ',') p++;
+  }
+  return mask;
 }
 
-// Compute next run time for automation using ArduinoJson (const char* input)
-time_t computeNextRunTime(const char* automationJson, time_t fromTime) {
-  PSRAM_JSON_DOC(doc);
-  DeserializationError error = deserializeJson(doc, automationJson);
-  if (error) {
-    DEBUGF(DEBUG_AUTO_TIMING, "[computeNextRunTime] JSON parse error: %s", error.c_str());
-    return 0;
-  }
-  
-  // Support both new nested schema (schedule.type) and legacy flat schema (type)
-  JsonVariantConst schedDoc = doc["schedule"];
-  const char* type = schedDoc.isNull() ? (doc["type"] | "") : (schedDoc["type"] | "");
+// Parse a single trigger object. Returns false if the object is malformed.
+// Used by `triggersFromJson` to iterate the `triggers` array.
+static bool parseOneTrigger(JsonVariantConst trig, Trigger& out) {
+  out = Trigger();
+  if (trig.isNull()) return false;
+  const char* type = trig["type"] | "";
+  if (!type || !type[0]) return false;
 
-  if (strcmp(type, "atTime") == 0 || strcmp(type, "attime") == 0) {
-    const char* timeStr = schedDoc.isNull() ? (doc["time"] | "") : (schedDoc["time"] | "");
-    const char* daysStr = schedDoc.isNull() ? (doc["days"] | "") : (schedDoc["days"] | "");
-    
-    // Validate time format (HH:MM)
-    if (strlen(timeStr) != 5 || timeStr[2] != ':') return 0;
-    
-    int hour = (timeStr[0] - '0') * 10 + (timeStr[1] - '0');
-    int minute = (timeStr[3] - '0') * 10 + (timeStr[4] - '0');
-    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return 0;
+  // Persisted nextAt carries from previous fires.
+  unsigned long rawNextAt = trig["nextAt"] | 0UL;
+  out.nextAt = (time_t)rawNextAt;
 
-    // Convert fromTime to local time
-    struct tm tmNow;
-    if (!localtime_r(&fromTime, &tmNow)) return 0;
+  if (strcmp(type, "time") == 0) {
+    const char* timeStr = trig["time"] | "";
+    if (strlen(timeStr) != 5 || timeStr[2] != ':') return false;
+    int h = (timeStr[0] - '0') * 10 + (timeStr[1] - '0');
+    int m = (timeStr[3] - '0') * 10 + (timeStr[4] - '0');
+    if (h < 0 || h > 23 || m < 0 || m > 59) return false;
+    out.hour = h;
+    out.minute = m;
 
-    // Try today first
-    struct tm tmTarget = tmNow;
-    tmTarget.tm_hour = hour;
-    tmTarget.tm_min = minute;
-    tmTarget.tm_sec = 0;
-    tmTarget.tm_isdst = -1;
+    const char* recur = trig["recurrence"] | "";
 
-    time_t candidateTime = mktime(&tmTarget);
-    bool needNextDay = (candidateTime <= fromTime);
-
-    // Check day restrictions
-    if (daysStr[0] != '\0') {
-      bool dayMatches = parseAtTimeMatchDays(daysStr, tmTarget.tm_wday);
-      if (!dayMatches) needNextDay = true;
+    if (strcmp(recur, "monthly") == 0 || strcmp(recur, "Monthly") == 0) {
+      int dom = trig["dayOfMonth"] | 0;
+      if (dom < 1 || dom > 31) return false;
+      out.type = Trigger::MONTHLY;
+      out.dayOfMonth = dom;
+      return true;
+    }
+    if (strcmp(recur, "yearly") == 0 || strcmp(recur, "Yearly") == 0) {
+      int dom = trig["dayOfMonth"] | 0;
+      int moy = trig["month"] | 0;
+      if (dom < 1 || dom > 31 || moy < 1 || moy > 12) return false;
+      out.type = Trigger::YEARLY;
+      out.dayOfMonth = dom;
+      out.monthOfYear = moy;
+      return true;
     }
 
-    if (needNextDay) {
-      // Search up to 7 days ahead
-      for (int dayOffset = 1; dayOffset <= 7; dayOffset++) {
-        tmTarget = tmNow;
-        tmTarget.tm_mday += dayOffset;
-        tmTarget.tm_hour = hour;
-        tmTarget.tm_min = minute;
-        tmTarget.tm_sec = 0;
-        tmTarget.tm_isdst = -1;
+    const char* daysStr = trig["days"] | "";
+    out.type = Trigger::TIME;
+    out.daysMask = daysCsvToMask(daysStr);
+    int wi = trig["weekInterval"] | 1;
+    out.weekInterval = (wi < 1) ? 1 : (uint16_t)wi;
+    unsigned long a = trig["anchor"] | 0UL;
+    out.anchor = (time_t)a;
+    return true;
+  }
+  if (strcmp(type, "manual") == 0) {
+    out.type = Trigger::MANUAL;
+    out.delayMs = trig["delayMs"] | 0;
+    return true;
+  }
+  if (strcmp(type, "interval") == 0) {
+    out.type = Trigger::INTERVAL;
+    out.intervalMs = trig["intervalMs"] | 0;
+    return true;
+  }
+  if (strcmp(type, "boot") == 0) {
+    out.type = Trigger::BOOT;
+    out.bootDelayMs = trig["bootDelayMs"] | 0;
+    return true;
+  }
+  return false;
+}
 
-        candidateTime = mktime(&tmTarget);
-        if (candidateTime <= fromTime) continue;
+// Parse an automation object's `triggers` array. Fills `out[]` up to
+// `maxCount` entries. Returns the number of valid triggers (0 if none).
+static int triggersFromJson(const char* automationJson, Trigger* out, int maxCount) {
+  if (maxCount <= 0) return 0;
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, automationJson)) return 0;
+  JsonArrayConst arr = doc["triggers"].as<JsonArrayConst>();
+  if (arr.isNull()) return 0;
+  int n = 0;
+  for (JsonVariantConst t : arr) {
+    if (n >= maxCount) break;
+    Trigger tmp;
+    if (parseOneTrigger(t, tmp)) {
+      out[n++] = tmp;
+    }
+  }
+  return n;
+}
 
-        struct tm tmCheck;
-        if (localtime_r(&candidateTime, &tmCheck)) {
-          if (daysStr[0] == '\0') {
-            return candidateTime;
-          } else {
-            if (parseAtTimeMatchDays(daysStr, tmCheck.tm_wday)) {
-              return candidateTime;
-            }
-          }
+// Compute the next firing time at or after `from`, or 0 if there is none.
+// afterDelay always returns 0 (manually armed); atTime returns the next
+// matching candidate respecting day-of-week and weekInterval filters;
+// interval returns `from + intervalMs/1000`.
+static time_t nextFire(const Trigger& s, time_t from) {
+  switch (s.type) {
+    case Trigger::MANUAL:
+    case Trigger::BOOT:
+      return 0;  // manually armed / dispatched by runAtBoot, not by scheduler
+    case Trigger::INTERVAL:
+      return (s.intervalMs > 0) ? (from + (time_t)(s.intervalMs / 1000)) : 0;
+    case Trigger::TIME: {
+      struct tm tmNow;
+      if (!localtime_r(&from, &tmNow)) return 0;
+      // Scan today + enough days ahead to cover any weekInterval cycle.
+      int maxDays = (s.weekInterval > 1) ? 7 * (s.weekInterval + 1) : 8;
+      for (int d = 0; d < maxDays; d++) {
+        struct tm t = tmNow;
+        t.tm_mday += d;
+        t.tm_hour = s.hour;
+        t.tm_min = s.minute;
+        t.tm_sec = 0;
+        t.tm_isdst = -1;
+        time_t cand = mktime(&t);
+        if (cand <= from) continue;
+        struct tm tcheck;
+        if (!localtime_r(&cand, &tcheck)) continue;
+        if (s.daysMask != 0 && !(s.daysMask & (uint8_t)(1u << tcheck.tm_wday))) continue;
+        // weekInterval filter: once an anchor is set, only fire on "on" weeks.
+        if (s.weekInterval > 1 && s.anchor > 0) {
+          long deltaSec = (long)(cand - s.anchor);
+          if (deltaSec < 0) deltaSec = 0;
+          long deltaWeeks = deltaSec / (7L * 86400L);
+          if ((deltaWeeks % s.weekInterval) != 0) continue;
         }
+        return cand;
       }
       return 0;
     }
+    case Trigger::MONTHLY: {
+      // Fire on dayOfMonth at hour:minute every month. If the month has fewer
+      // days than dayOfMonth (Feb 30 etc.), clamp to the last day of that month.
+      if (s.dayOfMonth < 1 || s.dayOfMonth > 31) return 0;
+      struct tm tmNow;
+      if (!localtime_r(&from, &tmNow)) return 0;
+      for (int monthOff = 0; monthOff < 2; monthOff++) {
+        struct tm t = tmNow;
+        t.tm_mon += monthOff;
+        t.tm_mday = s.dayOfMonth;
+        t.tm_hour = s.hour;
+        t.tm_min = s.minute;
+        t.tm_sec = 0;
+        t.tm_isdst = -1;
+        time_t cand = mktime(&t);
+        // mktime normalizes out-of-range dayOfMonth by carrying into the next
+        // month (e.g. Feb 30 → Mar 2). Detect that and clamp to last-of-month.
+        struct tm tcheck;
+        if (!localtime_r(&cand, &tcheck)) continue;
+        if (tcheck.tm_mday != s.dayOfMonth) {
+          // Use day 0 of the month AFTER the target = last day of target month.
+          struct tm clamp = tmNow;
+          clamp.tm_mon += monthOff + 1;
+          clamp.tm_mday = 0;
+          clamp.tm_hour = s.hour;
+          clamp.tm_min = s.minute;
+          clamp.tm_sec = 0;
+          clamp.tm_isdst = -1;
+          cand = mktime(&clamp);
+        }
+        if (cand > from) return cand;
+      }
+      return 0;
+    }
+    case Trigger::YEARLY: {
+      // Fire on month/dayOfMonth at hour:minute every year. Clamp Feb 29 to
+      // Feb 28 in non-leap years.
+      if (s.dayOfMonth < 1 || s.dayOfMonth > 31) return 0;
+      if (s.monthOfYear < 1 || s.monthOfYear > 12) return 0;
+      struct tm tmNow;
+      if (!localtime_r(&from, &tmNow)) return 0;
+      for (int yearOff = 0; yearOff < 2; yearOff++) {
+        struct tm t = tmNow;
+        t.tm_year += yearOff;
+        t.tm_mon = s.monthOfYear - 1;
+        t.tm_mday = s.dayOfMonth;
+        t.tm_hour = s.hour;
+        t.tm_min = s.minute;
+        t.tm_sec = 0;
+        t.tm_isdst = -1;
+        time_t cand = mktime(&t);
+        struct tm tcheck;
+        if (!localtime_r(&cand, &tcheck)) continue;
+        if (tcheck.tm_mday != s.dayOfMonth || tcheck.tm_mon != s.monthOfYear - 1) {
+          // Feb 29 in non-leap year etc. — clamp to last day of target month.
+          struct tm clamp = tmNow;
+          clamp.tm_year += yearOff;
+          clamp.tm_mon = s.monthOfYear;  // month AFTER target (0-indexed +1 = 1-indexed target)
+          clamp.tm_mday = 0;
+          clamp.tm_hour = s.hour;
+          clamp.tm_min = s.minute;
+          clamp.tm_sec = 0;
+          clamp.tm_isdst = -1;
+          cand = mktime(&clamp);
+        }
+        if (cand > from) return cand;
+      }
+      return 0;
+    }
+    default:
+      return 0;
+  }
+}
 
-    return candidateTime;
+// Mutates `s` after a successful firing. Returns true if `s.anchor` changed
+// (caller must persist it). Currently only sets the anchor on the first fire
+// of a weekInterval > 1 time trigger.
+static bool onFired(Trigger& s, time_t firedAt) {
+  if (s.type == Trigger::TIME && s.weekInterval > 1 && s.anchor == 0) {
+    s.anchor = firedAt;
+    return true;
+  }
+  return false;
+}
 
-  } else if (strcmp(type, "afterDelay") == 0 || strcmp(type, "afterdelay") == 0) {
-    int delayMs = schedDoc.isNull() ? (doc["delayMs"] | 0) : (schedDoc["delayMs"] | 0);
-    if (delayMs <= 0) return 0;
-    return fromTime + (delayMs / 1000);
+// Returns the minimum nextAt across all triggers (0 if none are scheduled).
+// Used by the RAM cache to answer "is anything due?" with a single comparison.
+static time_t minNextAtAcrossTriggers(const Trigger* arr, int count) {
+  time_t minAt = 0;
+  for (int i = 0; i < count; i++) {
+    if (arr[i].nextAt > 0 && (minAt == 0 || arr[i].nextAt < minAt)) {
+      minAt = arr[i].nextAt;
+    }
+  }
+  return minAt;
+}
 
-  } else if (strcmp(type, "interval") == 0) {
-    int intervalMs = schedDoc.isNull() ? (doc["intervalMs"] | 0) : (schedDoc["intervalMs"] | 0);
-    if (intervalMs <= 0) return 0;
-    return fromTime + (intervalMs / 1000);
+// Unified post-fire helper. For each trigger whose nextAt was at or before
+// `firedAt`, compute a new nextAt (and maybe update anchor) and persist the
+// whole triggers array back to the JSON file.
+static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt) {
+  Trigger triggers[MAX_TRIGGERS];
+  int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS);
+  if (n == 0) return;  // Malformed — scheduler will skip on next rebuild.
+
+  // For each trigger that was due, advance it. Leave others untouched.
+  for (int i = 0; i < n; i++) {
+    if (triggers[i].nextAt > 0 && triggers[i].nextAt <= firedAt) {
+      onFired(triggers[i], firedAt);  // mutates anchor if needed
+      triggers[i].nextAt = nextFire(triggers[i], firedAt);  // 0 = disarm
+    }
   }
 
-  return 0;
+  // Rewrite the triggers array in the file.
+  String json;
+  if (!readText(AUTOMATIONS_JSON_FILE, json)) return;
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json)) return;
+  JsonArray autos = doc["automations"].as<JsonArray>();
+  if (autos.isNull()) return;
+  for (JsonObject automation : autos) {
+    if (automation["id"].as<long>() != id) continue;
+    JsonArray arr = automation["triggers"].as<JsonArray>();
+    if (arr.isNull()) break;
+    int idx = 0;
+    for (JsonVariant t : arr) {
+      if (idx >= n) break;
+      JsonObject tobj = t.as<JsonObject>();
+      tobj["nextAt"] = (unsigned long)triggers[idx].nextAt;
+      if (triggers[idx].type == Trigger::TIME && triggers[idx].weekInterval > 1 && triggers[idx].anchor > 0) {
+        tobj["anchor"] = (unsigned long)triggers[idx].anchor;
+      }
+      idx++;
+    }
+    break;
+  }
+  json = "";
+  serializeJsonPretty(doc, json);
+  writeAutomationsJsonAtomic(json);
+}
+
+// Thin wrapper preserving the existing public API. Returns the min nextAt
+// across all triggers of the automation, or 0 if none are scheduled.
+time_t computeNextRunTime(const char* automationJson, time_t fromTime) {
+  Trigger triggers[MAX_TRIGGERS];
+  int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS);
+  if (n == 0) return 0;
+  // For triggers without persisted nextAt, compute fresh ones.
+  time_t minAt = 0;
+  for (int i = 0; i < n; i++) {
+    time_t t = (triggers[i].nextAt > 0) ? triggers[i].nextAt : nextFire(triggers[i], fromTime);
+    if (t > 0 && (minAt == 0 || t < minAt)) minAt = t;
+  }
+  return minAt;
 }
 
 // Validate condition syntax (const char* input)
@@ -2270,10 +2787,10 @@ bool evaluateCondition(const char* condition) {
  #if ENABLE_APDS_SENSOR
     uint16_t clear = 0;
     bool ok = false;
-    if (gPeripheralCache.mutex && xSemaphoreTake(gPeripheralCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      ok = gPeripheralCache.apdsDataValid;
-      clear = gPeripheralCache.apdsClear;
-      xSemaphoreGive(gPeripheralCache.mutex);
+    if (gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      ok = gAPDSCache.apdsDataValid;
+      clear = gAPDSCache.apdsClear;
+      xSemaphoreGive(gAPDSCache.mutex);
     }
     if (!ok) return false;
     currentValue = (float)clear;
@@ -2285,10 +2802,10 @@ bool evaluateCondition(const char* condition) {
  #if ENABLE_APDS_SENSOR
     uint8_t prox = 0;
     bool ok = false;
-    if (gPeripheralCache.mutex && xSemaphoreTake(gPeripheralCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      ok = gPeripheralCache.apdsDataValid;
-      prox = gPeripheralCache.apdsProximity;
-      xSemaphoreGive(gPeripheralCache.mutex);
+    if (gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      ok = gAPDSCache.apdsDataValid;
+      prox = gAPDSCache.apdsProximity;
+      xSemaphoreGive(gAPDSCache.mutex);
     }
     if (!ok) return false;
     strncpy(currentStringValue, (prox > 50) ? "DETECTED" : "NONE", sizeof(currentStringValue) - 1);
@@ -2917,9 +3434,11 @@ const char* cmd_validate_conditions(const String& argsInput) {
 // NOTE: cmd_downloadautomation, cmd_autolog, and cmd_conditional are implemented
 // in the main .ino file to avoid duplication and linker conflicts.
 
-// Notify the automation scheduler to run on next main loop iteration
+// Notify the automation scheduler to run on next main loop iteration and
+// invalidate the in-RAM cache so it gets rebuilt from the file.
 void notifyAutomationScheduler() {
   gAutosDirty = true;
+  gAutoCacheValid = false;
 }
 
 // Core scheduler logic - extracted for reuse
@@ -3179,14 +3698,8 @@ void schedulerTickMinute() {
           appendAutoLogEntry("AUTO_END", endBuf);
         }
 
-        // Compute and update next run time
-        time_t newNextAt = computeNextRunTime(obj.c_str(), now);
-        if (newNextAt > 0) {
-          updateAutomationNextAt(id, newNextAt);
-          DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld updated nextAt=%lu", id, (unsigned long)newNextAt);
-        } else {
-          DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld warning: could not compute next nextAt", id);
-        }
+        // Update next run time via the unified post-fire helper.
+        rescheduleAfterFire(id, obj.c_str(), now);
       } else {
         DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: no commands found", id);
       }
@@ -3219,6 +3732,10 @@ void schedulerTickMinute() {
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] Runtime sanitize skipped (debounced)");
     }
   }
+
+  // Rebuild the in-RAM cache from the (possibly post-fire updated) file so the
+  // fast due-check in the main loop can skip a rescan until something changes.
+  rebuildAutoCache();
 }
 
 // Start the automation scheduler (now runs from main loop, no dedicated task)
@@ -3254,12 +3771,13 @@ const CommandEntry automationCommands[] = {
   // Primary dispatcher: "automation <subcommand> [args]"
   // Subcommands: system enable|disable|status, list, add, enable, disable, delete, run, sanitize, recompute
   { "automation", "Automation system: automation <subcommand> [args].", false, cmd_automation,
-    "Usage: automation <system enable|disable|status | list | add | enable | disable | delete | run | sanitize | recompute>" },
+    "Usage: automation <system enable|disable|status | list | add | enable | disable | delete | run | trigger | sanitize | recompute>" },
 
   // Single-word aliases for common operations (follow naming convention)
   { "automationlist", "List all automations.", false, cmd_automation_list },
   { "automationadd", "Add automation (same as 'automation add').", false, cmd_automation_add },
   { "automationrun", "Run automation by ID: automationrun id=<id>.", false, cmd_automation_run },
+  { "automationtrigger", "Arm afterDelay automation timer: automationtrigger id=<id>.", false, cmd_automation_trigger },
 
   // Utility commands
   { "autolog", "Automation logging: autolog start <file> | stop | status.", false, cmd_autolog, "Usage: autolog start <filename> | autolog stop | autolog status" },

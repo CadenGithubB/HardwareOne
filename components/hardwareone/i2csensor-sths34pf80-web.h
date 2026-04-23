@@ -13,8 +13,8 @@
 
 // Get presence sensor data as JSON for web API
 inline void getPresenceDataJson(JsonObject& doc) {
-  doc["enabled"] = presenceEnabled;
-  doc["connected"] = presenceConnected;
+  doc["enabled"] = gPresenceEnabled;
+  doc["connected"] = gPresenceConnected;
   
   if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     doc["dataValid"] = gPresenceCache.dataValid;

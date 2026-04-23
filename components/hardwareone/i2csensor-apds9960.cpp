@@ -25,37 +25,18 @@ Adafruit_APDS9960* gAPDS9960 = nullptr;
 // ============================================================================
 // APDS/Peripheral Sensor Cache (owned by this module)
 // ============================================================================
-PeripheralCache gPeripheralCache;
+APDSCache gAPDSCache;
 
 // APDS sensor state (definitions - matching pattern of thermal/tof/imu/gamepad sensors)
-bool apdsColorEnabled = false;
-bool apdsProximityEnabled = false;
-bool apdsGestureEnabled = false;
-bool apdsConnected = false;
-unsigned long apdsLastStopTime = 0;
-TaskHandle_t apdsTaskHandle = nullptr;
+bool gApdsEnabled = false;
+bool gApdsColorEnabled = false;
+bool gApdsProximityEnabled = false;
+bool gApdsGestureEnabled = false;
+bool gApdsConnected = false;
+unsigned long gApdsLastStopTime = 0;
+TaskHandle_t gApdsTaskHandle = nullptr;
 
-// Helper: Create APDS task if not already running
-static bool createAPDSTask() {
-  extern BaseType_t xTaskCreateLogged(TaskFunction_t, const char*, uint32_t, void*, UBaseType_t, TaskHandle_t*, const char*);
-  extern void apdsTask(void* parameter);
-  
-  // Check for stale task handle (task deleted itself but handle not cleared)
-  if (apdsTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(apdsTaskHandle);
-    if (state == eDeleted || state == eInvalid) {
-      apdsTaskHandle = nullptr;
-    }
-  }
-  if (apdsTaskHandle == nullptr) {
-    const uint32_t apdsStack = APDS_STACK_WORDS;
-    if (xTaskCreateLogged(apdsTask, "apds_task", apdsStack, nullptr, TASK_PRIORITY_LOW, &apdsTaskHandle, "apds") != pdPASS) {
-      return false;
-    }
-    DEBUG_CLIF("APDS task created successfully");
-  }
-  return true;
-}
+// Task creation now handled by createAPDSTask() in System_TaskUtils.cpp
 
 // ============================================================================
 // APDS Modular Settings Registration (for safety and reliability)
@@ -69,7 +50,7 @@ static const SettingEntry apdsSettingEntries[] = {
 };
 
 static bool isAPDSConnected() {
-  return apdsConnected;
+  return gApdsConnected;
 }
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -91,26 +72,26 @@ extern const SettingsModule apdsSettingsModule = {
 
 const char* cmd_apdscolor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  readAPDSColor();
+  apdsColorPoll();
   return "APDS color data read (check serial output)";
 }
 
 const char* cmd_apdsproximity(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  readAPDSProximity();
+  apdsProximityPoll();
   return "APDS proximity data read (check serial output)";
 }
 
 const char* cmd_apdsgesture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  readAPDSGesture();
+  apdsGesturePoll();
   return "APDS gesture data read (check serial output)";
 }
 
 const char* cmd_apdsread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  bool anyEnabled = apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled;
+  bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
   if (!anyEnabled) {
     return "[APDS] Not running. Use 'openapds' to start.";
   }
@@ -124,17 +105,17 @@ const char* cmd_apdsread(const String& argsInput) {
   buf += n; remaining -= n;
 
   n = snprintf(buf, remaining, "  Color: %s  Proximity: %s  Gesture: %s\n",
-               apdsColorEnabled ? "ON" : "OFF",
-               apdsProximityEnabled ? "ON" : "OFF",
-               apdsGestureEnabled ? "ON" : "OFF");
+               gApdsColorEnabled ? "ON" : "OFF",
+               gApdsProximityEnabled ? "ON" : "OFF",
+               gApdsGestureEnabled ? "ON" : "OFF");
   buf += n; remaining -= n;
 
-  if (apdsColorEnabled) {
+  if (gApdsColorEnabled) {
     n = snprintf(buf, remaining, "  RGBC: R=%u G=%u B=%u C=%u\n",
                  gAPDSCache.red, gAPDSCache.green, gAPDSCache.blue, gAPDSCache.clear);
     buf += n; remaining -= n;
   }
-  if (apdsProximityEnabled) {
+  if (gApdsProximityEnabled) {
     n = snprintf(buf, remaining, "  Proximity: %u\n", gAPDSCache.proximity);
     buf += n; remaining -= n;
   }
@@ -146,7 +127,7 @@ const char* cmd_apdsread(const String& argsInput) {
 const char* cmd_apdsstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  bool anyEnabled = apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled;
+  bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
   if (anyEnabled) {
     return "[APDS] Error: Already running";
   }
@@ -177,7 +158,7 @@ const char* cmd_apdsstart(const String& argsInput) {
 const char* cmd_apdsstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  bool anyEnabled = apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled;
+  bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
   if (!anyEnabled) {
     return "[APDS] Error: Not running";
   }
@@ -191,7 +172,7 @@ const char* cmd_apdsstop(const String& argsInput) {
 const char* cmd_apdsmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!apdsConnected || gAPDS9960 == nullptr) {
+  if (!gApdsConnected || gAPDS9960 == nullptr) {
     return "[APDS] Error: Sensor not initialized - use 'openapds' first";
   }
   
@@ -201,9 +182,9 @@ const char* cmd_apdsmode(const String& argsInput) {
   if (a.count() == 0) {
     if (!ensureDebugBuffer()) return "[APDS] Error: Debug buffer unavailable";
     snprintf(getDebugBuffer(), 1024, "[APDS] Modes: color=%s proximity=%s gesture=%s",
-             apdsColorEnabled ? "on" : "off",
-             apdsProximityEnabled ? "on" : "off",
-             apdsGestureEnabled ? "on" : "off");
+             gApdsColorEnabled ? "on" : "off",
+             gApdsProximityEnabled ? "on" : "off",
+             gApdsGestureEnabled ? "on" : "off");
     return getDebugBuffer();
   }
 
@@ -213,12 +194,12 @@ const char* cmd_apdsmode(const String& argsInput) {
   
   if (mode == "color") {
     gAPDS9960->enableColor(enable);
-    apdsColorEnabled = enable;
+    gApdsColorEnabled = enable;
     sensorStatusBumpWith(enable ? "apdsmode color on" : "apdsmode color off");
     return enable ? "[APDS] Color mode enabled" : "[APDS] Color mode disabled";
   } else if (mode == "proximity" || mode == "prox") {
     gAPDS9960->enableProximity(enable);
-    apdsProximityEnabled = enable;
+    gApdsProximityEnabled = enable;
     sensorStatusBumpWith(enable ? "apdsmode proximity on" : "apdsmode proximity off");
     return enable ? "[APDS] Proximity mode enabled" : "[APDS] Proximity mode disabled";
   } else if (mode == "gesture") {
@@ -229,7 +210,7 @@ const char* cmd_apdsmode(const String& argsInput) {
       gAPDS9960->enableGesture(false);
       gAPDS9960->enableProximity(false);
     }
-    apdsGestureEnabled = enable;
+    gApdsGestureEnabled = enable;
     sensorStatusBumpWith(enable ? "apdsmode gesture on" : "apdsmode gesture off");
     return enable ? "[APDS] Gesture mode enabled" : "[APDS] Gesture mode disabled";
   }
@@ -242,29 +223,39 @@ const char* cmd_apdsmode(const String& argsInput) {
 // ============================================================================
 
 // Internal function called by queue processor
-bool startAPDSSensorInternal() {
+bool apdsStartInternal() {
   // Check memory before creating task
   if (!checkMemoryAvailable("apds", nullptr)) {
     ERROR_SENSORSF("[APDS] Error: Insufficient memory for APDS sensor");
     return false;
   }
 
+  // Create cache mutex if not already created
+  if (!gAPDSCache.mutex) {
+    gAPDSCache.mutex = xSemaphoreCreateMutex();
+    if (!gAPDSCache.mutex) {
+      ERROR_SENSORSF("[APDS] Failed to create cache mutex");
+      return false;
+    }
+    DEBUG_SENSORSF("[APDS] Cache mutex created");
+  }
+
   // Clean up any stale cache from previous run BEFORE starting
-  if (gPeripheralCache.mutex && xSemaphoreTake(gPeripheralCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gPeripheralCache.apdsDataValid = false;
-    gPeripheralCache.apdsRed = 0;
-    gPeripheralCache.apdsGreen = 0;
-    gPeripheralCache.apdsBlue = 0;
-    gPeripheralCache.apdsClear = 0;
-    gPeripheralCache.apdsProximity = 0;
-    gPeripheralCache.apdsGesture = 0;
-    xSemaphoreGive(gPeripheralCache.mutex);
+  if (gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    gAPDSCache.apdsDataValid = false;
+    gAPDSCache.apdsRed = 0;
+    gAPDSCache.apdsGreen = 0;
+    gAPDSCache.apdsBlue = 0;
+    gAPDSCache.apdsClear = 0;
+    gAPDSCache.apdsProximity = 0;
+    gAPDSCache.apdsGesture = 0;
+    xSemaphoreGive(gAPDSCache.mutex);
   }
   INFO_SENSORSF("[APDS] Cleaned up stale cache from previous run");
 
   // Initialize APDS sensor synchronously
-  if (!apdsConnected || gAPDS9960 == nullptr) {
-    if (!initAPDS9960()) {
+  if (!gApdsConnected || gAPDS9960 == nullptr) {
+    if (!apdsInit()) {
       ERROR_SENSORSF("[APDS] Error: Failed to initialize APDS9960 sensor");
       return false;
     }
@@ -272,13 +263,13 @@ bool startAPDSSensorInternal() {
 
   // Enable color mode by default (user can change with apdsmode command)
   gAPDS9960->enableColor(true);
-  apdsColorEnabled = true;
+  gApdsColorEnabled = true;
   INFO_SENSORSF("[APDS] Color mode enabled by default");
 
   // Create APDS task
   if (!createAPDSTask()) {
     ERROR_SENSORSF("[APDS] Error: Failed to create APDS task");
-    apdsColorEnabled = false;
+    gApdsColorEnabled = false;
     return false;
   }
 
@@ -287,7 +278,7 @@ bool startAPDSSensorInternal() {
   return true;
 }
 
-bool initAPDS9960() {
+bool apdsInit() {
   if (gAPDS9960 != nullptr) {
     return true;
   }
@@ -303,19 +294,19 @@ bool initAPDS9960() {
       return false;
     }
     
-    apdsConnected = true;
+    gApdsConnected = true;
     
     return true;
   });
 }
 
-void readAPDSColor() {
-  if (!apdsConnected || gAPDS9960 == nullptr) {
+void apdsColorPoll() {
+  if (!gApdsConnected || gAPDS9960 == nullptr) {
     broadcastOutput("APDS9960 sensor not connected or initialized");
     return;
   }
 
-  if (!apdsColorEnabled) {
+  if (!gApdsColorEnabled) {
     broadcastOutput("Color sensing not enabled. Use 'apdscolorstart' first.");
     return;
   }
@@ -339,13 +330,13 @@ void readAPDSColor() {
   BROADCAST_PRINTF("Red: %d, Green: %d, Blue: %d, Clear: %d", red, green, blue, clear);
 }
 
-void readAPDSProximity() {
-  if (!apdsConnected || gAPDS9960 == nullptr) {
+void apdsProximityPoll() {
+  if (!gApdsConnected || gAPDS9960 == nullptr) {
     broadcastOutput("APDS9960 sensor not connected or initialized");
     return;
   }
 
-  if (!apdsProximityEnabled) {
+  if (!gApdsProximityEnabled) {
     broadcastOutput("Proximity sensing not enabled. Use 'apdsproximitystart' first.");
     return;
   }
@@ -354,13 +345,13 @@ void readAPDSProximity() {
   BROADCAST_PRINTF("Proximity: %d", proximity);
 }
 
-void readAPDSGesture() {
-  if (!apdsConnected || gAPDS9960 == nullptr) {
+void apdsGesturePoll() {
+  if (!gApdsConnected || gAPDS9960 == nullptr) {
     broadcastOutput("APDS9960 sensor not connected or initialized");
     return;
   }
 
-  if (!apdsGestureEnabled) {
+  if (!gApdsGestureEnabled) {
     broadcastOutput("Gesture sensing not enabled. Use 'apdsgesturestart' first.");
     return;
   }
@@ -446,14 +437,14 @@ void apdsTask(void* parameter) {
 
   while (true) {
     // CRITICAL: Check if all modes disabled for graceful shutdown
-    bool anyEnabled = apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled;
+    bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
     if (!anyEnabled) {
-      apdsConnected = false;
+      gApdsConnected = false;
       if (gAPDS9960 != nullptr) {
         delete gAPDS9960;
         gAPDS9960 = nullptr;
       }
-      gPeripheralCache.apdsDataValid = false;
+      gAPDSCache.apdsDataValid = false;
       SENSOR_TASK_EXIT("APDS");
     }
 
@@ -461,9 +452,9 @@ void apdsTask(void* parameter) {
     unsigned long nowMs = millis();
     if ((nowMs - lastStackLog) >= 10000) {
       lastStackLog = nowMs;
-      if (checkTaskStackSafety("apds", APDS_STACK_WORDS, &apdsColorEnabled)) {
-        apdsProximityEnabled = false;
-        apdsGestureEnabled = false;
+      if (checkTaskStackSafety("apds", APDS_STACK_WORDS, &gApdsColorEnabled)) {
+        gApdsProximityEnabled = false;
+        gApdsGestureEnabled = false;
         break;
       }
       if (anyEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
@@ -475,7 +466,7 @@ void apdsTask(void* parameter) {
       }
     }
     
-    if (anyEnabled && apdsConnected && !gSensorPollingPaused) {
+    if (anyEnabled && gApdsConnected && !gSensorPollingPaused) {
       unsigned long apdsPollMs = (gSettings.apdsDevicePollMs > 0) ? (unsigned long)gSettings.apdsDevicePollMs : 200;
       
       if ((nowMs - lastApdsRead) >= apdsPollMs) {
@@ -485,13 +476,13 @@ void apdsTask(void* parameter) {
         
         // APDS reads ~5ms at 100kHz; fail fast and retry next poll rather than blocking 1000ms
         bool result = i2cTaskWithTimeout(I2C_ADDR_APDS, 100000, 100, [&]() -> bool {
-          if (apdsColorEnabled && gAPDS9960->colorDataReady()) {
+          if (gApdsColorEnabled && gAPDS9960->colorDataReady()) {
             gAPDS9960->getColorData(&red, &green, &blue, &clear);
           }
-          if (apdsProximityEnabled) {
+          if (gApdsProximityEnabled) {
             proximity = gAPDS9960->readProximity();
           }
-          if (apdsGestureEnabled) {
+          if (gApdsGestureEnabled) {
             gesture = gAPDS9960->readGesture();
           }
           return true;
@@ -501,26 +492,26 @@ void apdsTask(void* parameter) {
           // Note: I2CDevice::recordSuccess() called automatically by transaction
           // which resets consecutiveErrors - no local counter needed
           
-          if (gPeripheralCache.mutex && xSemaphoreTake(gPeripheralCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            gPeripheralCache.apdsRed = red;
-            gPeripheralCache.apdsGreen = green;
-            gPeripheralCache.apdsBlue = blue;
-            gPeripheralCache.apdsClear = clear;
-            gPeripheralCache.apdsProximity = proximity;
-            gPeripheralCache.apdsGesture = gesture;
-            gPeripheralCache.apdsLastUpdate = nowMs;
-            gPeripheralCache.apdsDataValid = true;
-            xSemaphoreGive(gPeripheralCache.mutex);
+          if (gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            gAPDSCache.apdsRed = red;
+            gAPDSCache.apdsGreen = green;
+            gAPDSCache.apdsBlue = blue;
+            gAPDSCache.apdsClear = clear;
+            gAPDSCache.apdsProximity = proximity;
+            gAPDSCache.apdsGesture = gesture;
+            gAPDSCache.apdsLastUpdate = nowMs;
+            gAPDSCache.apdsDataValid = true;
+            xSemaphoreGive(gAPDSCache.mutex);
           }
         } else {
           // Note: I2CDevice::recordError() called automatically by transaction
           // Check centralized health tracking for auto-disable decision
           if (i2cShouldAutoDisable(I2C_ADDR_APDS)) {
             uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_APDS);
-            apdsColorEnabled = false;
-            apdsProximityEnabled = false;
-            apdsGestureEnabled = false;
-            apdsConnected = false;
+            gApdsColorEnabled = false;
+            gApdsProximityEnabled = false;
+            gApdsGestureEnabled = false;
+            gApdsConnected = false;
             sensorStatusBumpWith("apds@auto_disabled");
             DEBUG_APDS_FRAMEF("APDS auto-disabled after %u consecutive I2C failures", errors);
             break;
@@ -547,29 +538,29 @@ void apdsTask(void* parameter) {
 // APDS Accessor Functions (for MQTT and other modules)
 // ============================================================================
 
-uint8_t getAPDSProximity() {
-  if (!apdsConnected || !gPeripheralCache.apdsDataValid) return 0;
-  return gPeripheralCache.apdsProximity;
+uint8_t apdsGetProximity() {
+  if (!gApdsConnected || !gAPDSCache.apdsDataValid) return 0;
+  return gAPDSCache.apdsProximity;
 }
 
-uint16_t getAPDSColorR() {
-  if (!apdsConnected || !gPeripheralCache.apdsDataValid) return 0;
-  return gPeripheralCache.apdsRed;
+uint16_t apdsGetColorR() {
+  if (!gApdsConnected || !gAPDSCache.apdsDataValid) return 0;
+  return gAPDSCache.apdsRed;
 }
 
-uint16_t getAPDSColorG() {
-  if (!apdsConnected || !gPeripheralCache.apdsDataValid) return 0;
-  return gPeripheralCache.apdsGreen;
+uint16_t apdsGetColorG() {
+  if (!gApdsConnected || !gAPDSCache.apdsDataValid) return 0;
+  return gAPDSCache.apdsGreen;
 }
 
-uint16_t getAPDSColorB() {
-  if (!apdsConnected || !gPeripheralCache.apdsDataValid) return 0;
-  return gPeripheralCache.apdsBlue;
+uint16_t apdsGetColorB() {
+  if (!gApdsConnected || !gAPDSCache.apdsDataValid) return 0;
+  return gAPDSCache.apdsBlue;
 }
 
-uint16_t getAPDSColorC() {
-  if (!apdsConnected || !gPeripheralCache.apdsDataValid) return 0;
-  return gPeripheralCache.apdsClear;
+uint16_t apdsGetColorC() {
+  if (!gApdsConnected || !gAPDSCache.apdsDataValid) return 0;
+  return gAPDSCache.apdsClear;
 }
 
 #endif // ENABLE_APDS_SENSOR

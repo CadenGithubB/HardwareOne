@@ -1577,7 +1577,7 @@ void bleAddMessageToHistory(const char* msg) {
 
 // Menu state
 static int bluetoothMenuSelection = 0;
-bool bluetoothShowingStatus = false;
+bool gBluetoothShowingStatus = false;
 
 // G2 Glasses submenu state
 static bool bluetoothInG2Menu = false;
@@ -1629,7 +1629,7 @@ static int getG2MenuItemCount() {
 #endif
 
 void bluetoothMenuUp() {
-  if (bluetoothShowingStatus) return;
+  if (gBluetoothShowingStatus) return;
 #if ENABLE_G2_GLASSES
   if (bluetoothInG2Menu) {
     int maxItems = getG2MenuItemCount();
@@ -1650,7 +1650,7 @@ void bluetoothMenuUp() {
 }
 
 void bluetoothMenuDown() {
-  if (bluetoothShowingStatus) return;
+  if (gBluetoothShowingStatus) return;
 #if ENABLE_G2_GLASSES
   if (bluetoothInG2Menu) {
     int maxItems = getG2MenuItemCount();
@@ -1721,7 +1721,7 @@ static void executeG2Action() {
       break;
       
     case 3: // Status
-      bluetoothShowingStatus = true;  // Reuse status display flag for G2 status
+      gBluetoothShowingStatus = true;  // Reuse status display flag for G2 status
       break;
       
     case 4: // Show Text
@@ -1741,8 +1741,8 @@ static void executeG2Action() {
 #endif
 
 void executeBluetoothAction() {
-  if (bluetoothShowingStatus) {
-    bluetoothShowingStatus = false;
+  if (gBluetoothShowingStatus) {
+    gBluetoothShowingStatus = false;
     return;
   }
   
@@ -1758,7 +1758,7 @@ void executeBluetoothAction() {
   // With G2: 0=Status, 1=Settings, 2=Start/Stop, 3=G2 Glasses, 4=Advertising, 5=Disconnect
   switch (bluetoothMenuSelection) {
     case 0: // Status
-      bluetoothShowingStatus = true;
+      gBluetoothShowingStatus = true;
       break;
       
     case 1: // Settings
@@ -1801,7 +1801,7 @@ void executeBluetoothAction() {
   // Without G2: 0=Status, 1=Settings, 2=Start/Stop, 3=Advertising, 4=Disconnect
   switch (bluetoothMenuSelection) {
     case 0: // Status
-      bluetoothShowingStatus = true;
+      gBluetoothShowingStatus = true;
       break;
       
     case 1: // Settings
@@ -1841,8 +1841,8 @@ void executeBluetoothAction() {
 void bluetoothMenuBack() {
 #if ENABLE_G2_GLASSES
   if (bluetoothInG2Menu) {
-    if (bluetoothShowingStatus) {
-      bluetoothShowingStatus = false;
+    if (gBluetoothShowingStatus) {
+      gBluetoothShowingStatus = false;
     } else {
       bluetoothInG2Menu = false;
       g2MenuSelection = 0;
@@ -1850,8 +1850,8 @@ void bluetoothMenuBack() {
     return;
   }
 #endif
-  if (bluetoothShowingStatus) {
-    bluetoothShowingStatus = false;
+  if (gBluetoothShowingStatus) {
+    gBluetoothShowingStatus = false;
   }
 }
 
@@ -2027,7 +2027,7 @@ static void displayBluetoothStatus() {
 #if ENABLE_G2_GLASSES
   // Show G2 submenu if active
   if (bluetoothInG2Menu) {
-    if (bluetoothShowingStatus) {
+    if (gBluetoothShowingStatus) {
       displayG2StatusDetail();
     } else {
       displayG2Menu();
@@ -2037,7 +2037,7 @@ static void displayBluetoothStatus() {
 #endif
   
   // Show status detail screen or menu
-  if (bluetoothShowingStatus) {
+  if (gBluetoothShowingStatus) {
     displayBluetoothStatusDetail();
     return;
   }
@@ -2135,7 +2135,7 @@ static bool bluetoothInputHandler(int deltaX, int deltaY, uint32_t newlyPressed)
       return true;
     }
 #endif
-    if (bluetoothShowingStatus) {
+    if (gBluetoothShowingStatus) {
       bluetoothMenuBack();
       return true;
     }
@@ -2188,8 +2188,8 @@ extern struct ThermalCache {
   bool thermalDataValid;
   uint32_t thermalSeq;
 } gThermalCache;
-extern bool thermalEnabled;
-extern bool thermalConnected;
+extern bool gThermalEnabled;
+extern bool gThermalConnected;
 #endif
 
 #if ENABLE_TOF_SENSOR
@@ -2210,8 +2210,8 @@ extern struct TofCache {
   bool tofDataValid;
   uint32_t tofSeq;
 } gTofCache;
-extern bool tofEnabled;
-extern bool tofConnected;
+extern bool gTofEnabled;
+extern bool gTofConnected;
 #endif
 
 #if ENABLE_IMU_SENSOR
@@ -2224,8 +2224,8 @@ extern struct ImuCache {
   bool imuDataValid;
   uint32_t imuSeq;
 } gImuCache;
-extern bool imuEnabled;
-extern bool imuConnected;
+extern bool gImuEnabled;
+extern bool gImuConnected;
 #endif
 
 // =============================================================================
@@ -2323,7 +2323,7 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
   int pos = snprintf(buf, bufSize, "{\"sensors\":{");
   
   #if ENABLE_THERMAL_SENSOR
-  if (thermalEnabled && thermalConnected && gThermalCache.mutex) {
+  if (gThermalEnabled && gThermalConnected && gThermalCache.mutex) {
     if (xSemaphoreTake(gThermalCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       if (gThermalCache.thermalDataValid) {
         pos += snprintf(buf + pos, bufSize - pos,
@@ -2338,7 +2338,7 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
   #endif
   
   #if ENABLE_TOF_SENSOR
-  if (tofEnabled && tofConnected && gTofCache.mutex) {
+  if (gTofEnabled && gTofConnected && gTofCache.mutex) {
     if (xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       if (gTofCache.tofDataValid && gTofCache.tofTotalObjects > 0) {
         pos += snprintf(buf + pos, bufSize - pos,
@@ -2351,7 +2351,7 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
   #endif
   
   #if ENABLE_IMU_SENSOR
-  if (imuEnabled && imuConnected && gImuCache.mutex) {
+  if (gImuEnabled && gImuConnected && gImuCache.mutex) {
     if (xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       if (gImuCache.imuDataValid) {
         pos += snprintf(buf + pos, bufSize - pos,

@@ -22,7 +22,7 @@
 #include "System_TaskUtils.h"
 
 // Task handle (owned by this module)
-TaskHandle_t gamepadTaskHandle = nullptr;
+TaskHandle_t gGamepadTaskHandle = nullptr;
 
 // Seesaw gamepad object (owned by this module)
 Adafruit_seesaw gGamepadSeesaw(&Wire1);
@@ -35,12 +35,12 @@ Adafruit_seesaw gGamepadSeesaw(&Wire1);
 // ============================================================================
 // Gamepad/Control Cache (owned by this module)
 // ============================================================================
-ControlCache gControlCache;
+GamepadCache gGamepadCache;
 
 // Gamepad sensor state (definitions)
-bool gamepadEnabled = false;
-bool gamepadConnected = false;
-unsigned long gamepadLastStopTime = 0;
+bool gGamepadEnabled = false;
+bool gGamepadConnected = false;
+unsigned long gGamepadLastStopTime = 0;
 
 // Gamepad timing and constants
 unsigned long gLastGamepadInitMs = 0;
@@ -67,13 +67,13 @@ volatile UBaseType_t gGamepadWatermarkNow = (UBaseType_t)0;
 // ============================================================================
 
 const char* cmd_gamepad(const String& argsInput) {
-  if (!gamepadConnected) {
+  if (!gGamepadConnected) {
     // Attempt on-demand init with retry/backoff
-    if (!initGamepadConnection()) {
+    if (!gamepadInitConnection()) {
       return "[Gamepad] Error: Not connected - check wiring";
     }
   }
-  readGamepad();
+  gamepadPoll();
   return "[Gamepad] Data read complete";
 }
 
@@ -129,40 +129,52 @@ const char* cmd_gamepaddevicepollms(const String& argsInput) {
 // Gamepad Internal Start (called by queue processor)
 // ============================================================================
 
-const char* startGamepadInternal() {
+bool gamepadStartInternal() {
   DEBUG_CLIF("[QUEUE] Processing Gamepad start from queue");
 
    gamepadLogHeap("start.begin");
 
   // Check memory before creating gamepad task
   if (!checkMemoryAvailable("gamepad", nullptr)) {
-    return "Insufficient memory for Gamepad sensor";
+    ERROR_SENSORSF("[GAMEPAD] Insufficient memory for Gamepad sensor");
+    return false;
+  }
+
+  // Create cache mutex if not already created
+  if (!gGamepadCache.mutex) {
+    gGamepadCache.mutex = xSemaphoreCreateMutex();
+    if (!gGamepadCache.mutex) {
+      ERROR_SENSORSF("[GAMEPAD] Failed to create cache mutex");
+      return false;
+    }
+    DEBUG_SENSORSF("[GAMEPAD] Cache mutex created");
   }
 
   // Clean up any stale cache from previous run BEFORE starting
-  if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gControlCache.gamepadDataValid = false;
-    gControlCache.gamepadButtons = 0;
-    gControlCache.gamepadX = 0;
-    gControlCache.gamepadY = 0;
-    xSemaphoreGive(gControlCache.mutex);
+  if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    gGamepadCache.gamepadDataValid = false;
+    gGamepadCache.gamepadButtons = 0;
+    gGamepadCache.gamepadX = 0;
+    gGamepadCache.gamepadY = 0;
+    xSemaphoreGive(gGamepadCache.mutex);
   }
 
   // Initialize Seesaw
-  if (!initGamepad()) {
+  if (!gamepadInit()) {
     gamepadLogHeap("start.init_fail");
-    return "Failed to initialize Gamepad";
+    ERROR_SENSORSF("[GAMEPAD] Failed to initialize Gamepad");
+    return false;
   }
 
    gamepadLogHeap("start.after_init");
 
   // Mark enabled BEFORE task creation to avoid startup race where the task can self-delete
-  // if it runs before gamepadEnabled is set.
-  bool prev = gamepadEnabled;
-  gamepadEnabled = true;
-  DEBUG_SENSORSF("[GAMEPAD] startGamepadInternal: Set gamepadEnabled=true (was %d), gamepadConnected=%d", prev, gamepadConnected);
-  if (gamepadEnabled != prev) sensorStatusBumpWith("opengamepad@enabled");
-  
+  // if it runs before gGamepadEnabled is set.
+  bool prev = gGamepadEnabled;
+  gGamepadEnabled = true;
+  DEBUG_SENSORSF("[GAMEPAD] gamepadStartInternal: Set gGamepadEnabled=true (was %d), gGamepadConnected=%d", prev, gGamepadConnected);
+  if (gGamepadEnabled != prev) sensorStatusBumpWith("opengamepad@enabled");
+
   // Broadcast sensor status to ESP-NOW master
 #if ENABLE_ESPNOW
   broadcastSensorStatus(REMOTE_SENSOR_GAMEPAD, true);
@@ -170,24 +182,25 @@ const char* startGamepadInternal() {
 
   // Create dedicated gamepad task
   if (!createGamepadTask()) {
-    return "Failed to create Gamepad task";
+    ERROR_SENSORSF("[GAMEPAD] Failed to create Gamepad task");
+    return false;
   }
   gamepadLogHeap("start.after_task");
-  return "SUCCESS: Gamepad initialized with dedicated task";
+  return true;
 }
 
 // ============================================================================
 // Gamepad Initialization and Reading Functions
 // ============================================================================
 
-bool initGamepad() {
+bool gamepadInit() {
   // If we've already got a connection, consider it initialized
-  if (gamepadConnected) {
-    DEBUG_SENSORSF("[GAMEPAD] initGamepad: already connected, returning true");
+  if (gGamepadConnected) {
+    DEBUG_SENSORSF("[GAMEPAD] gamepadInit: already connected, returning true");
     return true;
   }
 
-  INFO_SENSORSF("[GAMEPAD] initGamepad: starting initialization...");
+  INFO_SENSORSF("[GAMEPAD] gamepadInit: starting initialization...");
 
   // Use device-aware transaction wrapper for safe mutex + clock management + health tracking
   bool initSuccess = i2cDeviceTransaction(I2C_ADDR_GAMEPAD, 100000, 3000, [&]() -> bool {
@@ -228,14 +241,14 @@ bool initGamepad() {
 
   DEBUG_SENSORSF("[GAMEPAD] i2cDeviceTransaction returned: %d", initSuccess);
 
-  // Set gamepadConnected OUTSIDE the lambda (like IMU pattern)
+  // Set gGamepadConnected OUTSIDE the lambda (like IMU pattern)
   if (initSuccess) {
-    gamepadConnected = true;
-    DEBUG_SENSORSF("[GAMEPAD] SUCCESS: gamepadConnected=%d gamepadEnabled=%d &enabled=%p &connected=%p &cache=%p", 
-                  gamepadConnected, gamepadEnabled, (void*)&gamepadEnabled, (void*)&gamepadConnected, (void*)&gControlCache);
+    gGamepadConnected = true;
+    DEBUG_SENSORSF("[GAMEPAD] SUCCESS: gGamepadConnected=%d gGamepadEnabled=%d &enabled=%p &connected=%p &cache=%p", 
+                  gGamepadConnected, gGamepadEnabled, (void*)&gGamepadEnabled, (void*)&gGamepadConnected, (void*)&gGamepadCache);
     broadcastOutput("Gamepad (Seesaw) initialized");
   } else {
-    ERROR_SENSORSF("[GAMEPAD] FAILED: initGamepad returning false");
+    ERROR_SENSORSF("[GAMEPAD] FAILED: gamepadInit returning false");
   }
 
   return initSuccess;
@@ -247,8 +260,8 @@ static bool i2cPing(TwoWire* bus, uint8_t addr) {
   return i2cPingAddress(addr, 100000, 200);
 }
 
-bool initGamepadConnection() {
-  if (gamepadConnected) return true;
+bool gamepadInitConnection() {
+  if (gGamepadConnected) return true;
   unsigned long now = millis();
   if (now - gLastGamepadInitMs < kGamepadInitMinIntervalMs) {
     broadcastOutput("Gamepad: skipping re-init (backoff window)");
@@ -306,9 +319,9 @@ bool initGamepadConnection() {
         (void)gGamepadSeesaw.analogRead(15);
       });
 
-      gamepadEnabled = true;
-      gamepadConnected = true;
-      DEBUG_SENSORSF("[GAMEPAD_DEBUG] initGamepadConnection: &enabled=%p &connected=%p &gControlCache=%p", (void*)&gamepadEnabled, (void*)&gamepadConnected, (void*)&gControlCache);
+      gGamepadEnabled = true;
+      gGamepadConnected = true;
+      DEBUG_SENSORSF("[GAMEPAD_DEBUG] gamepadInitConnection: &enabled=%p &connected=%p &gGamepadCache=%p", (void*)&gGamepadEnabled, (void*)&gGamepadConnected, (void*)&gGamepadCache);
       
       INFO_SENSORSF("Gamepad connected on attempt %d", attempt);
       snprintf(msg, sizeof(msg), "Gamepad: re-init success (attempt %d)", attempt);
@@ -324,8 +337,8 @@ bool initGamepadConnection() {
   return false;
 }
 
-void readGamepad() {
-  if (!gamepadConnected) {
+void gamepadPoll() {
+  if (!gGamepadConnected) {
     broadcastOutput("Gamepad not connected. Check wiring.");
     return;
   }
@@ -355,7 +368,7 @@ static const SettingEntry gamepadSettingEntries[] = {
 };
 
 static bool isGamepadConnected() {
-  return gamepadConnected;
+  return gGamepadConnected;
 }
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -396,11 +409,11 @@ const size_t gamepadCommandsCount = sizeof(gamepadCommands) / sizeof(gamepadComm
 // ============================================================================
 // Purpose: Continuously reads button and joystick state from Seesaw gamepad
 // Stack: 4096 words (~16KB) | Priority: 1 | Core: Any
-// Lifecycle: Created by cmd_gamepadstart, deleted when gamepadEnabled=false
+// Lifecycle: Created by cmd_gamepadstart, deleted when gGamepadEnabled=false
 // Polling: Fixed 50ms interval | I2C Clock: 100kHz
 //
 // Cleanup Strategy:
-//   1. Check gamepadEnabled flag at loop start
+//   1. Check gGamepadEnabled flag at loop start
 //   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Invalidate cache (no sensor object to delete)
 //   4. Release mutex and delete task
@@ -411,7 +424,7 @@ void gamepadTask(void* parameter) {
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_SENSORSF("[MODULAR] gamepadTask() running from Sensor_Gamepad_Seesaw.cpp");
-  DEBUG_SENSORSF("[GAMEPAD_TASK] Initial state: enabled=%d connected=%d", gamepadEnabled, gamepadConnected);
+  DEBUG_SENSORSF("[GAMEPAD_TASK] Initial state: enabled=%d connected=%d", gGamepadEnabled, gGamepadConnected);
   gamepadLogHeap("task.entry");
   unsigned long lastGamepadRead = 0;
   unsigned long lastStackLog = 0;
@@ -428,9 +441,9 @@ void gamepadTask(void* parameter) {
 
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
-    if (!gamepadEnabled) {
-      gamepadConnected = false;
-      gControlCache.gamepadDataValid = false;
+    if (!gGamepadEnabled) {
+      gGamepadConnected = false;
+      gGamepadCache.gamepadDataValid = false;
       SENSOR_TASK_EXIT("GAMEPAD_TASK");
     }
 
@@ -438,7 +451,7 @@ void gamepadTask(void* parameter) {
     unsigned long nowMs = millis();
     if ((nowMs - lastStackLog) >= 30000) {
       lastStackLog = nowMs;
-      if (checkTaskStackSafety("gamepad", GAMEPAD_STACK_WORDS, &gamepadEnabled)) break;
+      if (checkTaskStackSafety("gamepad", GAMEPAD_STACK_WORDS, &gGamepadEnabled)) break;
       if (isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         gGamepadWatermarkNow = watermark;
@@ -456,10 +469,10 @@ void gamepadTask(void* parameter) {
     if ((nowMs - lastStateLog) >= 60000) {
       lastStateLog = nowMs;
       DEBUG_SENSORSF("[GAMEPAD_TASK] State: enabled=%d connected=%d paused=%d dataValid=%d", 
-                    gamepadEnabled, gamepadConnected, gSensorPollingPaused, gControlCache.gamepadDataValid);
+                    gGamepadEnabled, gGamepadConnected, gSensorPollingPaused, gGamepadCache.gamepadDataValid);
     }
 
-    if (gamepadEnabled && gamepadConnected && !gSensorPollingPaused) {
+    if (gGamepadEnabled && gGamepadConnected && !gSensorPollingPaused) {
       unsigned long gamepadPollMs = (gSettings.gamepadDevicePollMs > 0) ? (unsigned long)gSettings.gamepadDevicePollMs : 90;
       if ((nowMs - lastGamepadRead) >= gamepadPollMs) {
         bool readSuccess = false;
@@ -567,12 +580,12 @@ void gamepadTask(void* parameter) {
             filtY = (int)lroundf(kAlpha * rawY + (1.0f - kAlpha) * filtY);
           }
 
-          if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             // Only increment seq when data actually changes to avoid unnecessary OLED re-renders
             // Use threshold of 2 for joystick to ignore ADC noise/rounding jitter
-            bool changed = (gControlCache.gamepadButtons != buttons ||
-                            abs(gControlCache.gamepadX - filtX) > 1 ||
-                            abs(gControlCache.gamepadY - filtY) > 1);
+            bool changed = (gGamepadCache.gamepadButtons != buttons ||
+                            abs(gGamepadCache.gamepadX - filtX) > 1 ||
+                            abs(gGamepadCache.gamepadY - filtY) > 1);
             // Latch press edges into the accumulator so the UI never misses a tap.
             // Active-low: 1 = unpressed, 0 = pressed.
             //
@@ -580,7 +593,7 @@ void gamepadTask(void* parameter) {
             //
             // 1. Debounce-confirmed press: button state changed and debounce accepted it.
             //    Covers normal (held) presses where the button is still down this poll.
-            uint32_t confirmedPressed = gControlCache.gamepadButtons & ~buttons;
+            uint32_t confirmedPressed = gGamepadCache.gamepadButtons & ~buttons;
             //
             // 2. INTFLAG-based press: hardware edge-latch fired this poll interval.
             //    Covers quick taps released before the second confirmation poll — the
@@ -590,14 +603,14 @@ void gamepadTask(void* parameter) {
             //    The "currently pressed" arm catches first-detected holds (belt-and-suspenders).
             uint32_t intflagPressed = intflags & (~buttons | lastButtons);
             //
-            gControlCache.buttonPressedAccum |= confirmedPressed | intflagPressed;
-            gControlCache.gamepadButtons = buttons;  // Only changes after debounce
-            gControlCache.gamepadX = filtX;
-            gControlCache.gamepadY = filtY;
-            gControlCache.gamepadLastUpdate = nowMs;
-            gControlCache.gamepadDataValid = true;
-            if (changed) gControlCache.gamepadSeq++;
-            xSemaphoreGive(gControlCache.mutex);
+            gGamepadCache.buttonPressedAccum |= confirmedPressed | intflagPressed;
+            gGamepadCache.gamepadButtons = buttons;  // Only changes after debounce
+            gGamepadCache.gamepadX = filtX;
+            gGamepadCache.gamepadY = filtY;
+            gGamepadCache.gamepadLastUpdate = nowMs;
+            gGamepadCache.gamepadDataValid = true;
+            if (changed) gGamepadCache.gamepadSeq++;
+            xSemaphoreGive(gGamepadCache.mutex);
           }
           
           // Stream data to ESP-NOW master if enabled (worker devices only)
@@ -683,19 +696,19 @@ void gamepadTask(void* parameter) {
 // Gamepad Accessor Functions (for MQTT and other modules)
 // ============================================================================
 
-int getGamepadX() {
-  if (!gamepadConnected || !gControlCache.gamepadDataValid) return 0;
-  return gControlCache.gamepadX;
+int gamepadGetX() {
+  if (!gGamepadConnected || !gGamepadCache.gamepadDataValid) return 0;
+  return gGamepadCache.gamepadX;
 }
 
-int getGamepadY() {
-  if (!gamepadConnected || !gControlCache.gamepadDataValid) return 0;
-  return gControlCache.gamepadY;
+int gamepadGetY() {
+  if (!gGamepadConnected || !gGamepadCache.gamepadDataValid) return 0;
+  return gGamepadCache.gamepadY;
 }
 
-uint32_t getGamepadButtons() {
-  if (!gamepadConnected || !gControlCache.gamepadDataValid) return 0;
-  return gControlCache.gamepadButtons;
+uint32_t gamepadGetButtons() {
+  if (!gGamepadConnected || !gGamepadCache.gamepadDataValid) return 0;
+  return gGamepadCache.gamepadButtons;
 }
 
 // ============================================================================

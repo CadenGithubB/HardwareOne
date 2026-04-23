@@ -18,13 +18,13 @@
 #include "System_I2C.h"           // I2C system helpers
 #include "System_BuildConfig.h"        // Conditional sensor configuration
 #if ENABLE_THERMAL_SENSOR
-  #include "i2csensor-mlx90640.h"     // ThermalCache, gThermalCache, buildThermalDataJSON
+  #include "i2csensor-mlx90640.h"     // ThermalCache, gThermalCache, thermalBuildDataJSON
 #endif
 #if ENABLE_TOF_SENSOR
-  #include "i2csensor-vl53l4cx.h"         // buildToFDataJSON
+  #include "i2csensor-vl53l4cx.h"         // tofBuildDataJSON
 #endif
 #if ENABLE_IMU_SENSOR
-  #include "i2csensor-bno055.h"         // buildIMUDataJSON
+  #include "i2csensor-bno055.h"         // imuBuildDataJSON
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   #include "i2csensor-seesaw.h"     // gamepadEnabled, gamepadConnected
@@ -45,7 +45,7 @@
   #include "System_ESPNow_Sensors.h"            // Remote sensor functions
 #endif
 #include "System_SensorStubs.h" // Stubs for disabled sensors
-#include "i2csensor-rda5807.h"             // fmRadioEnabled, radioInitialized, buildFMRadioDataJSON
+#include "i2csensor-rda5807.h"             // fmRadioEnabled, radioInitialized, fmRadioBuildDataJSON
 #include "System_MemUtil.h"             // ps_alloc, AllocPref
 
 // External helpers
@@ -103,7 +103,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           }
           if (gJsonResponseBuffer) {
             char* buf = gJsonResponseBuffer;
-            int jsonLen = buildThermalDataJSON(buf, JSON_RESPONSE_SIZE);
+            int jsonLen = thermalBuildDataJSON(buf, JSON_RESPONSE_SIZE);
             if (jsonLen > 0) {
               // DEBUG: Log buffer usage
               int usagePct = (jsonLen * 100) / JSON_RESPONSE_SIZE;
@@ -174,7 +174,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 
         // Use stack-allocated buffer for ToF response
         char tofResponseBuffer[TOF_RESPONSE_SIZE];
-        int jsonLen = buildToFDataJSON(tofResponseBuffer, TOF_RESPONSE_SIZE);
+        int jsonLen = tofBuildDataJSON(tofResponseBuffer, TOF_RESPONSE_SIZE);
 
         // Send response
         httpd_resp_set_type(req, "application/json");
@@ -191,7 +191,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 
         // Use stack-allocated buffer for IMU response
         char imuResponseBuffer[IMU_RESPONSE_SIZE];
-        int jsonLen = buildIMUDataJSON(imuResponseBuffer, IMU_RESPONSE_SIZE);
+        int jsonLen = imuBuildDataJSON(imuResponseBuffer, IMU_RESPONSE_SIZE);
 
         // Send response
         httpd_resp_set_type(req, "application/json");
@@ -205,7 +205,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
 #endif
         // Gamepad now follows queued start paradigm; read from shared state only
-        if (!gamepadEnabled || !gamepadConnected) {
+        if (!gGamepadEnabled || !gGamepadConnected) {
           sendJsonResponse(req, "{\"val\":0, \"error\":\"not_connected\"}");
           return ESP_OK;
         }
@@ -215,12 +215,12 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         int x = 0, y = 0;
         bool dataValid = false;
 
-        if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-          buttons = gControlCache.gamepadButtons;
-          x = gControlCache.gamepadX;
-          y = gControlCache.gamepadY;
-          dataValid = gControlCache.gamepadDataValid;
-          xSemaphoreGive(gControlCache.mutex);
+        if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          buttons = gGamepadCache.gamepadButtons;
+          x = gGamepadCache.gamepadX;
+          y = gGamepadCache.gamepadY;
+          dataValid = gGamepadCache.gamepadDataValid;
+          xSemaphoreGive(gGamepadCache.mutex);
         }
 
         if (!dataValid) {
@@ -240,14 +240,14 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
       } else if (sensorType == "fmradio") {
         // FM radio data - use stack-allocated buffer
-        if (!fmRadioEnabled || !radioInitialized) {
+        if (!gFmRadioEnabled || !gRadioInitialized) {
           sendJsonResponse(req, "{\"v\":0, \"error\":\"not_enabled\"}");
           return ESP_OK;
         }
 
         // Use stack-allocated buffer for FM radio response
         char fmRadioResponseBuffer[512];
-        int jsonLen = buildFMRadioDataJSON(fmRadioResponseBuffer, sizeof(fmRadioResponseBuffer));
+        int jsonLen = fmRadioBuildDataJSON(fmRadioResponseBuffer, sizeof(fmRadioResponseBuffer));
         
         if (jsonLen > 0) {
           httpd_resp_set_type(req, "application/json");
@@ -280,11 +280,11 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
       } else if (sensorType == "presence") {
 #if ENABLE_PRESENCE_SENSOR
-        extern bool presenceEnabled;
-        extern bool presenceConnected;
+        extern bool gPresenceEnabled;
+        extern bool gPresenceConnected;
         extern PresenceCache gPresenceCache;
         
-        if (!presenceEnabled || !presenceConnected) {
+        if (!gPresenceEnabled || !gPresenceConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
@@ -325,11 +325,11 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
       } else if (sensorType == "gps") {
 #if ENABLE_GPS_SENSOR
-        extern bool gpsEnabled;
-        extern bool gpsConnected;
+        extern bool gGpsEnabled;
+        extern bool gGpsConnected;
         extern GPSCache gGPSCache;
         
-        if (!gpsEnabled || !gpsConnected) {
+        if (!gGpsEnabled || !gGpsConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
@@ -380,11 +380,11 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
       } else if (sensorType == "rtc") {
 #if ENABLE_RTC_SENSOR
-        extern bool rtcEnabled;
-        extern bool rtcConnected;
+        extern bool gRtcEnabled;
+        extern bool gRtcConnected;
         extern RTCCache gRTCCache;
         
-        if (!rtcEnabled || !rtcConnected) {
+        if (!gRtcEnabled || !gRtcConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
@@ -618,12 +618,12 @@ esp_err_t handleCameraFrame(httpd_req_t* req) {
   // Serial.println("[CamFrame] Auth OK");
 
 #if ENABLE_CAMERA_SENSOR
-  extern bool cameraEnabled;
+  extern bool gCameraEnabled;
   extern uint8_t* captureFrame(size_t* outLen);
   
-  // Serial.printf("[CamFrame] cameraEnabled=%d\n", cameraEnabled);
+  // Serial.printf("[CamFrame] gCameraEnabled=%d\n", gCameraEnabled);
   
-  if (!cameraEnabled) {
+  if (!gCameraEnabled) {
     // Serial.println("[CamFrame] Camera not enabled - returning 503");
     httpd_resp_set_status(req, "503 Service Unavailable");
     httpd_resp_set_type(req, "text/plain");
@@ -665,13 +665,13 @@ esp_err_t handleCameraStream(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
 #if ENABLE_CAMERA_SENSOR
-  extern bool cameraEnabled;
+  extern bool gCameraEnabled;
   extern bool cameraStreaming;
   extern uint8_t* captureFrame(size_t* outLen);
   extern Settings gSettings;
   extern String getCookieSID(httpd_req_t* req);
   
-  if (!cameraEnabled) {
+  if (!gCameraEnabled) {
     httpd_resp_set_status(req, "503 Service Unavailable");
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Camera not enabled", HTTPD_RESP_USE_STRLEN);
@@ -725,7 +725,7 @@ esp_err_t handleCameraStream(httpd_req_t* req) {
     }
 
     // If camera is stopped while a client is streaming, end stream promptly.
-    if (!cameraEnabled) {
+    if (!gCameraEnabled) {
       break;
     }
 

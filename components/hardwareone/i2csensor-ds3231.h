@@ -22,7 +22,7 @@ struct RTCDateTime {
 };
 
 struct RTCCache {
-  SemaphoreHandle_t mutex;
+  SemaphoreHandle_t mutex = nullptr;
   RTCDateTime dateTime;
   float temperature;
   bool dataValid;
@@ -35,10 +35,10 @@ struct RTCCache {
 
 // State variables
 extern RTCCache gRTCCache;
-extern bool rtcEnabled;
-extern bool rtcConnected;
-extern unsigned long rtcLastStopTime;
-extern TaskHandle_t rtcTaskHandle;
+extern bool gRtcEnabled;
+extern bool gRtcConnected;
+extern unsigned long gRtcLastStopTime;
+extern TaskHandle_t gRtcTaskHandle;
 
 // Command registry
 struct CommandEntry;
@@ -61,10 +61,10 @@ extern const size_t rtcCommandsCount;
 #define DS3231_REG_TEMP_LSB   0x12
 
 // Core functions
-bool initRTCSensor();
-bool createRTCTask();
-void stopRTCSensor();
-void startRTCSensorInternal();  // For sensor queue processor
+bool rtcInit();
+// createRTCTask() is declared in System_TaskUtils.h
+void rtcStop();
+bool rtcStartInternal();  // For sensor queue processor
 
 // Read/Write functions
 bool rtcReadDateTime(RTCDateTime* dt);
@@ -87,16 +87,16 @@ String rtcDateTimeToString(const RTCDateTime* dt);
 RTCDateTime rtcLocalTime(const RTCDateTime* utc);
 
 // JSON building for ESP-NOW streaming
-int buildRTCDataJSON(char* buf, size_t bufSize);
+int rtcBuildDataJSON(char* buf, size_t bufSize);
 
 // Accessor functions (for MQTT and other modules)
-int getRTCYear();
-int getRTCMonth();
-int getRTCDay();
-int getRTCHour();
-int getRTCMinute();
-int getRTCSecond();
-float getRTCTemperature();
+int rtcGetYear();
+int rtcGetMonth();
+int rtcGetDay();
+int rtcGetHour();
+int rtcGetMinute();
+int rtcGetSecond();
+float rtcGetTemperature();
 
 // Command handlers
 const char* cmd_rtc(const String& argsInput);

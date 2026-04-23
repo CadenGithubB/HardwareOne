@@ -165,8 +165,8 @@ extern volatile bool gSensorPollingPaused;
 TaskHandle_t queueProcessorTask = nullptr;
 
 // External dependencies from .ino
-extern TaskHandle_t imuTaskHandle;
-extern unsigned long imuLastStopTime;
+extern TaskHandle_t gImuTaskHandle;
+extern unsigned long gImuLastStopTime;
 // Clock management is now unified through I2CDeviceManager
 // Legacy i2cSetWire1Clock() removed - all sensors use i2cDeviceTransaction wrapper
 
@@ -174,21 +174,21 @@ extern unsigned long imuLastStopTime;
 extern volatile unsigned long gSensorStatusSeq;
 extern const char* gLastStatusCause;
 extern void sensorStatusBump();
-extern bool apdsColorEnabled;
-extern bool apdsProximityEnabled;
-extern bool apdsGestureEnabled;
+extern bool gApdsColorEnabled;
+extern bool gApdsProximityEnabled;
+extern bool gApdsGestureEnabled;
 #if ENABLE_SERVO
-extern bool pwmDriverConnected;
+extern bool gPwmDriverConnected;
 #endif
 
 // BROADCAST_PRINTF now defined in debug_system.h with performance optimizations
 
 // Sensor connection status (defined in sensor files)
-extern bool gamepadConnected;
-extern bool imuConnected;
-extern bool apdsConnected;
-extern bool tofConnected;
-extern bool thermalConnected;
+extern bool gGamepadConnected;
+extern bool gImuConnected;
+extern bool gApdsConnected;
+extern bool gTofConnected;
+extern bool gThermalConnected;
 
 // ============================================================================
 // I2C Clock Management (Wire1)
@@ -264,9 +264,9 @@ void initSensorQueue() {
 // Queued Sensor Start Commands (moved from .ino)
 // =========================================================================
 
-extern bool thermalEnabled;
-extern bool tofEnabled;
-extern bool imuEnabled;
+extern bool gThermalEnabled;
+extern bool gTofEnabled;
+extern bool gImuEnabled;
 
 // Map I2CDeviceType → I2C address for pre-start hardware presence checks.
 // Returns 0 if the device type has no single fixed address (or should skip the check).
@@ -325,28 +325,28 @@ static const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* disp
 
 const char* cmd_thermalstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_THERMAL, "Thermal", thermalEnabled, "openthermal@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_THERMAL, "Thermal", gThermalEnabled, "openthermal@enqueue");
 }
 
 const char* cmd_tofstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_TOF, "ToF", tofEnabled, "opentof@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_TOF, "ToF", gTofEnabled, "opentof@enqueue");
 }
 
 const char* cmd_imustart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_IMU, "IMU", imuEnabled, "openimu@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_IMU, "IMU", gImuEnabled, "openimu@enqueue");
 }
 
 const char* cmd_apdsstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_APDS, "APDS", apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled, "openapds@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_APDS, "APDS", gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled, "openapds@enqueue");
 }
 
-extern bool gamepadEnabled;
+extern bool gGamepadEnabled;
 const char* cmd_gamepadstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_GAMEPAD, "Gamepad", gamepadEnabled, "opengamepad@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_GAMEPAD, "Gamepad", gGamepadEnabled, "opengamepad@enqueue");
 }
 
 // ========== End Sensor Startup Queue System ==========
@@ -685,23 +685,23 @@ const char* cmd_i2cstats(const String& originalCmd) {
   // Sensor connection status
   broadcastOutput("Connected Sensors:");
 
-  if (gamepadConnected) {
+  if (gGamepadConnected) {
     broadcastOutput("  Gamepad (seesaw)");
   }
-  if (imuConnected) {
+  if (gImuConnected) {
     broadcastOutput("  IMU (BNO055)");
   }
-  if (apdsConnected) {
+  if (gApdsConnected) {
     broadcastOutput("  APDS9960");
   }
-  if (tofConnected) {
+  if (gTofConnected) {
     broadcastOutput("  ToF (VL53L4CX)");
   }
-  if (thermalConnected) {
+  if (gThermalConnected) {
     broadcastOutput("  Thermal (MLX90640)");
   }
 
-  if (!gamepadConnected && !imuConnected && !apdsConnected && !tofConnected && !thermalConnected) {
+  if (!gGamepadConnected && !gImuConnected && !gApdsConnected && !gTofConnected && !gThermalConnected) {
     broadcastOutput("  No sensors connected");
   }
 
@@ -711,34 +711,34 @@ const char* cmd_i2cstats(const String& originalCmd) {
 // ========== End I2C Infrastructure Commands ==========
 
 #if ENABLE_TOF_SENSOR
-extern bool tofEnabled;
-extern bool tofConnected;
+extern bool gTofEnabled;
+extern bool gTofConnected;
 extern VL53L4CX* gVL53L4CX;
-// gTofWatermarkNow, gTofWatermarkMin, tofLastStopTime now in i2c_system.h
-extern TaskHandle_t tofTaskHandle;
-extern bool readToFObjects();
+// gTofWatermarkNow, gTofWatermarkMin, gTofLastStopTime now in i2c_system.h
+extern TaskHandle_t gTofTaskHandle;
+extern bool tofPoll();
 #endif
 // i2cOledTransactionVoid/i2cOledTransaction and i2cDeviceTransaction are template functions in System_I2C.h
-extern bool thermalEnabled;
+extern bool gThermalEnabled;
 
 // SensorCache struct is now defined in i2c_system.h
 
 // IMU sensor globals
 #if ENABLE_IMU_SENSOR
-extern bool imuEnabled;
-extern bool imuConnected;
+extern bool gImuEnabled;
+extern bool gImuConnected;
 extern Adafruit_BNO055* gBNO055;
-// gIMUWatermarkNow, gIMUWatermarkMin, imuInitRequested, imuInitResult, imuInitDone, initIMUSensor now in i2c_system.h
-extern void readIMUSensor();
+// gIMUWatermarkNow, gIMUWatermarkMin, gImuInitRequested, gImuInitResult, gImuInitDone, initIMUSensor now in i2c_system.h
+extern void imuPoll();
 #endif
 
 // Thermal sensor globals
 #if ENABLE_THERMAL_SENSOR
-extern bool thermalConnected;
-extern TaskHandle_t thermalTaskHandle;
-// thermalSensor, thermalLastStopTime, gThermalWatermarkNow, gThermalWatermarkMin, thermalInitRequested, thermalInitResult, thermalInitDone now in i2c_system.h
-extern bool initThermalSensor();
-extern bool readThermalPixels();
+extern bool gThermalConnected;
+extern TaskHandle_t gThermalTaskHandle;
+// thermalSensor, gThermalLastStopTime, gThermalWatermarkNow, gThermalWatermarkMin, thermalInitRequested, thermalInitResult, thermalInitDone now in i2c_system.h
+extern bool thermalInit();
+extern bool thermalPoll();
 #endif
 // thermalArmAtMs, thermalPendingFirstFrame now in Sensor_Thermal_MLX90640.h
 // lockThermalCache, unlockThermalCache now in i2c_system.h
@@ -747,29 +747,29 @@ extern bool readThermalPixels();
 
 // Gamepad sensor globals
 #if ENABLE_GAMEPAD_SENSOR
-extern bool gamepadEnabled;
-extern bool gamepadConnected;
+extern bool gGamepadEnabled;
+extern bool gGamepadConnected;
 extern Adafruit_seesaw gGamepadSeesaw;
-extern TaskHandle_t gamepadTaskHandle;
+extern TaskHandle_t gGamepadTaskHandle;
 // gGamepadWatermarkNow, gGamepadWatermarkMin now in i2c_system.h
 #endif
 
 // APDS9960 sensor globals
 #if ENABLE_APDS_SENSOR
-extern bool apdsColorEnabled;
-extern bool apdsProximityEnabled;
-extern bool apdsGestureEnabled;
-extern bool apdsConnected;
+extern bool gApdsColorEnabled;
+extern bool gApdsProximityEnabled;
+extern bool gApdsGestureEnabled;
+extern bool gApdsConnected;
 extern Adafruit_APDS9960* gAPDS9960;
-extern TaskHandle_t apdsTaskHandle;
+extern TaskHandle_t gApdsTaskHandle;
 #endif
 
 // GPS sensor globals
 #if ENABLE_GPS_SENSOR
-extern bool gpsEnabled;
-extern bool gpsConnected;
+extern bool gGpsEnabled;
+extern bool gGpsConnected;
 extern Adafruit_GPS* gPA1010D;
-extern TaskHandle_t gpsTaskHandle;
+extern TaskHandle_t gGpsTaskHandle;
 #endif
 
 // RTC sensor globals
@@ -1102,8 +1102,8 @@ const char* cmd_discover(const String& originalCmd) {
   if (fmRadioDetected) {
     DEBUG_SYSTEMF("FM radio detected, initializing to prevent I2C bus interference");
     // Initialize radio and keep it in stable low-power state
-    extern bool initFMRadio();
-    if (initFMRadio()) {
+    extern bool fmRadioInit();
+    if (fmRadioInit()) {
       INFO_SENSORSF("FM radio initialized successfully - kept in low-power state");
     } else {
       WARN_SENSORSF("FM radio initialization failed, may cause I2C interference");
@@ -1634,58 +1634,58 @@ void handleDeviceStopped(I2CDeviceType sensor) {
   switch (sensor) {
     case I2C_DEVICE_THERMAL:
 #if ENABLE_THERMAL_SENSOR
-      thermalEnabled = false;
-      thermalLastStopTime = millis();
+      gThermalEnabled = false;
+      gThermalLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_TOF:
 #if ENABLE_TOF_SENSOR
-      tofEnabled = false;
-      tofLastStopTime = millis();
+      gTofEnabled = false;
+      gTofLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_IMU:
 #if ENABLE_IMU_SENSOR
-      imuEnabled = false;
-      imuLastStopTime = millis();
+      gImuEnabled = false;
+      gImuLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_GAMEPAD:
 #if ENABLE_GAMEPAD_SENSOR
-      gamepadEnabled = false;
-      gamepadLastStopTime = millis();
+      gGamepadEnabled = false;
+      gGamepadLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_GPS:
 #if ENABLE_GPS_SENSOR
-      gpsEnabled = false;
-      gpsLastStopTime = millis();
+      gGpsEnabled = false;
+      gGpsLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_FMRADIO:
 #if ENABLE_FM_RADIO
-      fmRadioEnabled = false;
-      fmRadioLastStopTime = millis();
+      gFmRadioEnabled = false;
+      gFmRadioLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_APDS:
 #if ENABLE_APDS_SENSOR
-      apdsColorEnabled = false;
-      apdsProximityEnabled = false;
-      apdsGestureEnabled = false;
-      apdsLastStopTime = millis();
+      gApdsColorEnabled = false;
+      gApdsProximityEnabled = false;
+      gApdsGestureEnabled = false;
+      gApdsLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_RTC:
 #if ENABLE_RTC_SENSOR
-      rtcEnabled = false;
-      rtcLastStopTime = millis();
+      gRtcEnabled = false;
+      gRtcLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_PRESENCE:
 #if ENABLE_PRESENCE_SENSOR
-      presenceEnabled = false;
-      presenceLastStopTime = millis();
+      gPresenceEnabled = false;
+      gPresenceLastStopTime = millis();
 #endif
       break;
     default: break;
@@ -1738,29 +1738,29 @@ const char* buildSensorStatusJson() {
   
   // Basic sensor enable flags
   doc["seq"] = gSensorStatusSeq;
-  doc["thermalEnabled"] = thermalEnabled;
-  doc["tofEnabled"] = tofEnabled;
-  doc["imuEnabled"] = imuEnabled;
-  doc["apdsColorEnabled"] = apdsColorEnabled;
-  doc["apdsProximityEnabled"] = apdsProximityEnabled;
-  doc["apdsGestureEnabled"] = apdsGestureEnabled;
-  doc["gamepadEnabled"] = gamepadEnabled;
+  doc["thermalEnabled"] = gThermalEnabled;
+  doc["tofEnabled"] = gTofEnabled;
+  doc["imuEnabled"] = gImuEnabled;
+  doc["apdsColorEnabled"] = gApdsColorEnabled;
+  doc["apdsProximityEnabled"] = gApdsProximityEnabled;
+  doc["apdsGestureEnabled"] = gApdsGestureEnabled;
+  doc["gamepadEnabled"] = gGamepadEnabled;
 #if ENABLE_SERVO
-  doc["pwmDriverConnected"] = pwmDriverConnected;
+  doc["pwmDriverConnected"] = gPwmDriverConnected;
 #else
   doc["pwmDriverConnected"] = false;
 #endif
-  doc["gpsEnabled"] = gpsEnabled;
-  doc["fmRadioEnabled"] = fmRadioEnabled;
+  doc["gpsEnabled"] = gGpsEnabled;
+  doc["fmRadioEnabled"] = gFmRadioEnabled;
 #if ENABLE_RTC_SENSOR
-  doc["rtcEnabled"] = rtcEnabled;
+  doc["rtcEnabled"] = gRtcEnabled;
 #else
   doc["rtcEnabled"] = false;
 #endif
   
 #if ENABLE_PRESENCE_SENSOR
-  extern bool presenceEnabled;
-  doc["presenceEnabled"] = presenceEnabled;
+  extern bool gPresenceEnabled;
+  doc["presenceEnabled"] = gPresenceEnabled;
 #else
   doc["presenceEnabled"] = false;
 #endif
@@ -1826,9 +1826,9 @@ const char* buildSensorStatusJson() {
 #endif
 
 #if ENABLE_CAMERA_SENSOR
-  extern bool cameraEnabled;
+  extern bool gCameraEnabled;
   extern bool cameraStreaming;
-  doc["cameraEnabled"] = cameraEnabled;
+  doc["cameraEnabled"] = gCameraEnabled;
   doc["cameraStreaming"] = cameraStreaming;
   doc["cameraCompiled"] = true;
 #else
@@ -1838,9 +1838,9 @@ const char* buildSensorStatusJson() {
 #endif
 
 #if ENABLE_MICROPHONE_SENSOR
-  extern bool micEnabled;
+  extern bool gMicEnabled;
   extern bool micRecording;
-  doc["micEnabled"] = micEnabled;
+  doc["micEnabled"] = gMicEnabled;
   doc["micRecording"] = micRecording;
   doc["micCompiled"] = true;
 #else
@@ -2032,35 +2032,35 @@ void sensorQueueProcessorTask(void* param) {
       bool alreadyRunning = false;
       switch (req.device) {
         case I2C_DEVICE_THERMAL:
-          alreadyRunning = thermalEnabled;
+          alreadyRunning = gThermalEnabled;
           break;
         case I2C_DEVICE_TOF:
-          alreadyRunning = tofEnabled;
+          alreadyRunning = gTofEnabled;
           break;
         case I2C_DEVICE_IMU:
-          alreadyRunning = imuEnabled;
+          alreadyRunning = gImuEnabled;
           break;
         case I2C_DEVICE_GAMEPAD:
-          alreadyRunning = gamepadEnabled;
+          alreadyRunning = gGamepadEnabled;
           break;
         case I2C_DEVICE_APDS:
-          alreadyRunning = apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled;
+          alreadyRunning = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
           break;
         case I2C_DEVICE_GPS:
-          alreadyRunning = gpsEnabled;
+          alreadyRunning = gGpsEnabled;
           break;
         case I2C_DEVICE_FMRADIO:
-          alreadyRunning = fmRadioEnabled;
+          alreadyRunning = gFmRadioEnabled;
           break;
         case I2C_DEVICE_RTC:
 #if ENABLE_RTC_SENSOR
-          alreadyRunning = rtcEnabled;
+          alreadyRunning = gRtcEnabled;
 #endif
           break;
         case I2C_DEVICE_PRESENCE:
 #if ENABLE_PRESENCE_SENSOR
-          { extern bool presenceEnabled;
-          alreadyRunning = presenceEnabled; }
+          { extern bool gPresenceEnabled;
+          alreadyRunning = gPresenceEnabled; }
 #endif
           break;
       }
@@ -2083,67 +2083,67 @@ void sensorQueueProcessorTask(void* param) {
       // Use stack-efficient approach: discard result String, combine Serial calls
       switch (req.device) {
         case I2C_DEVICE_THERMAL:
-          startThermalSensorInternal();
-          INFO_SENSORSF("Thermal: %s", thermalEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("Thermal", thermalEnabled);
+          thermalStartInternal();
+          INFO_SENSORSF("Thermal: %s", gThermalEnabled ? "SUCCESS" : "FAILED");
+          notifySensorStarted("Thermal", gThermalEnabled);
           break;
         case I2C_DEVICE_TOF:
-          startToFSensorInternal();
-          INFO_SENSORSF("ToF: %s", tofEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("ToF", tofEnabled);
+          tofStartInternal();
+          INFO_SENSORSF("ToF: %s", gTofEnabled ? "SUCCESS" : "FAILED");
+          notifySensorStarted("ToF", gTofEnabled);
           break;
         case I2C_DEVICE_IMU:
-          startIMUSensorInternal();
-          INFO_SENSORSF("IMU: %s", imuEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("IMU", imuEnabled);
+          imuStartInternal();
+          INFO_SENSORSF("IMU: %s", gImuEnabled ? "SUCCESS" : "FAILED");
+          notifySensorStarted("IMU", gImuEnabled);
           break;
         case I2C_DEVICE_GAMEPAD:
-          startGamepadInternal();
-          INFO_SENSORSF("Gamepad: %s", gamepadEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("Gamepad", gamepadEnabled);
+          gamepadStartInternal();
+          INFO_SENSORSF("Gamepad: %s", gGamepadEnabled ? "SUCCESS" : "FAILED");
+          notifySensorStarted("Gamepad", gGamepadEnabled);
           break;
         case I2C_DEVICE_APDS:
 #if ENABLE_APDS_SENSOR
-          startAPDSSensorInternal();
-          { bool apdsOk = apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled;
+          apdsStartInternal();
+          { bool apdsOk = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
           INFO_SENSORSF("APDS: %s (color=%d prox=%d gest=%d)",
                         apdsOk ? "SUCCESS" : "FAILED",
-                        apdsColorEnabled ? 1 : 0, apdsProximityEnabled ? 1 : 0, apdsGestureEnabled ? 1 : 0);
+                        gApdsColorEnabled ? 1 : 0, gApdsProximityEnabled ? 1 : 0, gApdsGestureEnabled ? 1 : 0);
           notifySensorStarted("APDS", apdsOk); }
 #else
           INFO_SENSORSF("APDS: skipped (not compiled)");
 #endif
           break;
         case I2C_DEVICE_GPS:
-          startGPSInternal();
-          INFO_SENSORSF("GPS: %s", gpsEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("GPS", gpsEnabled);
+          gpsStartInternal();
+          INFO_SENSORSF("GPS: %s", gGpsEnabled ? "SUCCESS" : "FAILED");
+          notifySensorStarted("GPS", gGpsEnabled);
           break;
         case I2C_DEVICE_FMRADIO:
 #if ENABLE_FM_RADIO
-          startFMRadioInternal();
-          INFO_SENSORSF("FM Radio: %s", fmRadioEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("FM Radio", fmRadioEnabled);
+          fmRadioStartInternal();
+          INFO_SENSORSF("FM Radio: %s", gFmRadioEnabled ? "SUCCESS" : "FAILED");
+          notifySensorStarted("FM Radio", gFmRadioEnabled);
 #else
           INFO_SENSORSF("FM Radio: skipped (not compiled)");
 #endif
           break;
         case I2C_DEVICE_RTC:
 #if ENABLE_RTC_SENSOR
-          startRTCSensorInternal();
-          INFO_SENSORSF("RTC: %s", rtcEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("RTC", rtcEnabled);
+          rtcStartInternal();
+          INFO_SENSORSF("RTC: %s", gRtcEnabled ? "SUCCESS" : "FAILED");
+          notifySensorStarted("RTC", gRtcEnabled);
 #else
           INFO_SENSORSF("RTC: skipped (not compiled)");
 #endif
           break;
         case I2C_DEVICE_PRESENCE:
 #if ENABLE_PRESENCE_SENSOR
-          extern bool startPresenceSensorInternal();
-          extern bool presenceEnabled;
-          startPresenceSensorInternal();
-          INFO_SENSORSF("Presence: %s", presenceEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("Presence", presenceEnabled);
+          extern bool presenceStartInternal();
+          extern bool gPresenceEnabled;
+          presenceStartInternal();
+          INFO_SENSORSF("Presence: %s", gPresenceEnabled ? "SUCCESS" : "FAILED");
+          notifySensorStarted("Presence", gPresenceEnabled);
 #else
           INFO_SENSORSF("Presence: skipped (not compiled)");
 #endif

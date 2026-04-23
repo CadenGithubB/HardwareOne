@@ -16,7 +16,7 @@ static void displayGamepadVisual() {
   
   oledDisplay->setTextSize(1);
   
-  if (!gamepadEnabled || !gamepadConnected) {
+  if (!gGamepadEnabled || !gGamepadConnected) {
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Gamepad not active");
     oledDisplay->println();
@@ -30,14 +30,14 @@ static void displayGamepadVisual() {
   uint32_t buttons = 0xFFFFFFFF;  // All unpressed (active low)
   bool dataValid = false;
   
-  if (gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    if (gControlCache.gamepadDataValid) {
-      joyX = gControlCache.gamepadX;
-      joyY = gControlCache.gamepadY;
-      buttons = gControlCache.gamepadButtons;
+  if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (gGamepadCache.gamepadDataValid) {
+      joyX = gGamepadCache.gamepadX;
+      joyY = gGamepadCache.gamepadY;
+      buttons = gGamepadCache.gamepadButtons;
       dataValid = true;
     }
-    xSemaphoreGive(gControlCache.mutex);
+    xSemaphoreGive(gGamepadCache.mutex);
   }
   
   if (!dataValid) {
@@ -144,7 +144,7 @@ static bool gamepadOLEDModeAvailable(String* outReason) {
 static void gamepadToggleConfirmed(void* userData) {
   (void)userData;
   extern void executeOLEDCommand(const String& argsInput);
-  if (gamepadEnabled && gamepadConnected) {
+  if (gGamepadEnabled && gGamepadConnected) {
     executeOLEDCommand("closegamepad");
   } else {
     executeOLEDCommand("opengamepad");
@@ -154,7 +154,7 @@ static void gamepadToggleConfirmed(void* userData) {
 // Input handler for Gamepad OLED mode - X button toggles gamepad
 static bool gamepadInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (gamepadEnabled && gamepadConnected) {
+    if (gGamepadEnabled && gGamepadConnected) {
       oledConfirmRequest("Close gamepad?", "This disables input", gamepadToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open gamepad?", nullptr, gamepadToggleConfirmed, nullptr);

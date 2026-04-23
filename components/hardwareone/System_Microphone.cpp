@@ -39,7 +39,7 @@ static i2s_chan_handle_t rx_handle = NULL;
 #define MAX_RECORDING_SEC     60
 
 // Microphone state
-bool micEnabled = false;
+bool gMicEnabled = false;
 bool micConnected = false;
 bool micRecording = false;
 
@@ -207,7 +207,7 @@ static void recordingTask(void* param) {
   DEBUG_MICF("[MIC_REC_TASK] Max samples: %lu (sampleRate=%d, maxSec=%d)", maxSamples, micSampleRate, MAX_RECORDING_SEC);
   
   uint32_t loopCount = 0;
-  while (micRecording && micEnabled && recordingSamples < maxSamples) {
+  while (micRecording && gMicEnabled && recordingSamples < maxSamples) {
     size_t bytesRead = 0;
     esp_err_t err;
     {
@@ -255,8 +255,8 @@ static void recordingTask(void* param) {
     taskYIELD();
   }
   
-  DEBUG_MICF("[MIC_REC_TASK] Recording loop ended: micRecording=%d micEnabled=%d samples=%lu",
-             micRecording, micEnabled, recordingSamples);
+  DEBUG_MICF("[MIC_REC_TASK] Recording loop ended: micRecording=%d gMicEnabled=%d samples=%lu",
+             micRecording, gMicEnabled, recordingSamples);
   
   free(buffer);
   DEBUG_MICF("[MIC_REC_TASK] Buffer freed");
@@ -284,10 +284,10 @@ static void recordingTask(void* param) {
 
 bool startRecording() {
   DEBUG_MICF("[MIC_START_REC] ========== startRecording() ENTRY ==========");
-  DEBUG_MICF("[MIC_START_REC] micEnabled=%d micRecording=%d", micEnabled, micRecording);
+  DEBUG_MICF("[MIC_START_REC] gMicEnabled=%d micRecording=%d", gMicEnabled, micRecording);
   DEBUG_MICF("[MIC_START_REC] Heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   
-  if (!micEnabled) {
+  if (!gMicEnabled) {
     DEBUG_MICF("[MIC_START_REC] FAILED: mic not enabled");
     INFO_SENSORSF("[Microphone] Cannot record - mic not enabled");
     return false;
@@ -449,14 +449,14 @@ bool initMicrophone() {
   WARN_SYSTEMF("[MIC_INIT] Heap: free=%u, PSRAM_free=%u", 
                (unsigned)esp_get_free_heap_size(), 
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  WARN_SYSTEMF("[MIC_INIT] Current state: micEnabled=%d, micConnected=%d", micEnabled, micConnected);
+  WARN_SYSTEMF("[MIC_INIT] Current state: gMicEnabled=%d, micConnected=%d", gMicEnabled, micConnected);
 
   gMicDcOffset = 0;
   gMicDcOffsetInitialized = false;
 
   I2sMicLockGuard i2sGuard("mic.init");
   
-  if (micEnabled) {
+  if (gMicEnabled) {
     WARN_SYSTEMF("[MIC_INIT] Already initialized - returning true");
     INFO_SENSORSF("[Microphone] Already initialized");
     return true;
@@ -580,12 +580,12 @@ bool initMicrophone() {
     INFO_SENSORSF("[Microphone] WARNING: Microphone may not be connected or responding");
   }
 
-  micEnabled = true;
+  gMicEnabled = true;
   micConnected = (successCount > 0);  // Only mark connected if we got data
   sensorStatusBumpWith("openmic");
 
   WARN_SYSTEMF("[MIC_INIT] ########## initMicrophone() SUCCESS ##########");
-  WARN_SYSTEMF("[MIC_INIT] micEnabled=%d, micConnected=%d", micEnabled, micConnected);
+  WARN_SYSTEMF("[MIC_INIT] gMicEnabled=%d, micConnected=%d", gMicEnabled, micConnected);
   WARN_SYSTEMF("[MIC_INIT] Final heap: free=%u, PSRAM_free=%u", 
                (unsigned)esp_get_free_heap_size(), 
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -596,11 +596,11 @@ bool initMicrophone() {
 
 void stopMicrophone() {
   WARN_SYSTEMF("[MIC_STOP] ########## stopMicrophone() BEGIN ##########");
-  WARN_SYSTEMF("[MIC_STOP] Current state: micEnabled=%d, rx_handle=%p", micEnabled, rx_handle);
+  WARN_SYSTEMF("[MIC_STOP] Current state: gMicEnabled=%d, rx_handle=%p", gMicEnabled, rx_handle);
 
   I2sMicLockGuard i2sGuard("mic.stop");
   
-  if (!micEnabled) {
+  if (!gMicEnabled) {
     WARN_SYSTEMF("[MIC_STOP] Already stopped - returning");
     INFO_SENSORSF("[Microphone] Already stopped");
     return;
@@ -621,7 +621,7 @@ void stopMicrophone() {
     rx_handle = NULL;
   }
 
-  micEnabled = false;
+  gMicEnabled = false;
   micRecording = false;
   sensorStatusBumpWith("closemic");
 
@@ -634,9 +634,9 @@ void stopMicrophone() {
 
 int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
   WARN_SYSTEMF("[MIC_CAPTURE] captureAudioSamples(count=%u) called", (unsigned)sampleCount);
-  WARN_SYSTEMF("[MIC_CAPTURE] micEnabled=%d, rx_handle=%p", micEnabled, rx_handle);
+  WARN_SYSTEMF("[MIC_CAPTURE] gMicEnabled=%d, rx_handle=%p", gMicEnabled, rx_handle);
   
-  if (!micEnabled) {
+  if (!gMicEnabled) {
     WARN_SYSTEMF("[MIC_CAPTURE] Mic not enabled - returning NULL");
     if (outLen) *outLen = 0;
     return nullptr;
@@ -709,10 +709,10 @@ int getAudioLevel() {
   bool shouldLog = (callCount % 50 == 1);
   
   if (shouldLog) {
-    DEBUG_MICF("[MIC_LEVEL] getAudioLevel() call #%lu, micEnabled=%d", callCount, micEnabled);
+    DEBUG_MICF("[MIC_LEVEL] getAudioLevel() call #%lu, gMicEnabled=%d", callCount, gMicEnabled);
   }
   
-  if (!micEnabled) {
+  if (!gMicEnabled) {
     if (shouldLog) DEBUG_MICF("[MIC_LEVEL] Mic not enabled - returning 0");
     return 0;
   }
@@ -785,11 +785,11 @@ const char* buildMicrophoneStatusJson() {
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
     "{\"enabled\":%s,\"connected\":%s,\"recording\":%s,"
     "\"sampleRate\":%d,\"bitDepth\":%d,\"channels\":%d,\"level\":%d}",
-    micEnabled ? "true" : "false",
+    gMicEnabled ? "true" : "false",
     micConnected ? "true" : "false",
     micRecording ? "true" : "false",
     micSampleRate, micBitDepth, micChannels,
-    micEnabled ? getAudioLevel() : 0
+    gMicEnabled ? getAudioLevel() : 0
   );
   return gMicCmdBuffer;
 }
@@ -809,11 +809,11 @@ const char* cmd_mic(const String& argsInput) {
     "  Bit Depth: %d\n"
     "  Channels: %d\n"
     "  Level: %d%%",
-    micEnabled ? "yes" : "no",
+    gMicEnabled ? "yes" : "no",
     micConnected ? "yes" : "no",
     micRecording ? "yes" : "no",
     micSampleRate, micBitDepth, micChannels,
-    micEnabled ? getAudioLevel() : 0
+    gMicEnabled ? getAudioLevel() : 0
   );
   return gMicCmdBuffer;
 }
@@ -834,7 +834,7 @@ const char* cmd_micstop(const String& argsInput) {
 
 const char* cmd_miclevel(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!micEnabled) {
+  if (!gMicEnabled) {
     return "Microphone not enabled";
   }
   int level = getAudioLevel();
@@ -845,7 +845,7 @@ const char* cmd_miclevel(const String& argsInput) {
 const char* cmd_micrecord(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!micEnabled) {
+  if (!gMicEnabled) {
     return "Microphone not enabled. Use 'openmic' first.";
   }
 
@@ -948,7 +948,7 @@ const char* cmd_micsamplerate(const String& argsInput) {
   }
 
   // Need to reinitialize if already running
-  bool wasEnabled = micEnabled;
+  bool wasEnabled = gMicEnabled;
   if (wasEnabled) {
     stopMicrophone();
   }
@@ -1004,7 +1004,7 @@ const char* cmd_micbitdepth(const String& argsInput) {
   }
 
   // Need to reinitialize if already running
-  bool wasEnabled = micEnabled;
+  bool wasEnabled = gMicEnabled;
   if (wasEnabled) {
     stopMicrophone();
   }
@@ -1037,7 +1037,7 @@ static void micVisualizerTaskFunc(void* param) {
   Serial.println("\n=== AUDIO VISUALIZER (press any key to stop) ===");
   Serial.println("Level: [--------------------] Peak | Min/Max samples");
   
-  while (gMicVisualizerRunning && micEnabled) {
+  while (gMicVisualizerRunning && gMicEnabled) {
     size_t bytesRead = 0;
     esp_err_t err = i2s_channel_read(rx_handle, samples, bufSize * sizeof(int16_t), &bytesRead, pdMS_TO_TICKS(100));
     
@@ -1096,7 +1096,7 @@ static void micVisualizerTaskFunc(void* param) {
 const char* cmd_micviz(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!micEnabled) {
+  if (!gMicEnabled) {
     return "Microphone not enabled. Use 'openmic' first.";
   }
   
@@ -1155,7 +1155,7 @@ static const SettingEntry micSettingEntries[] = {
 };
 
 static bool isMicConnected() {
-  if (!micEnabled) return true;
+  if (!gMicEnabled) return true;
   return micConnected;
 }
 

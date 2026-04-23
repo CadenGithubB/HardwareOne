@@ -128,7 +128,7 @@ const char* getSetupProgressMessage(SetupProgressStage stage) {
 
 static void clearOledIfActive() {
 #if ENABLE_OLED_DISPLAY
-  if (gDisplay && oledConnected && oledEnabled) {
+  if (gDisplay && oledConnected && gOledEnabled) {
     displayClear();
     displayUpdate();
   }
@@ -230,7 +230,7 @@ void firstTimeSetupIfNeeded() {
   
 #if ENABLE_OLED_DISPLAY
   // Use OLED selection if available
-  if (oledEnabled && oledConnected) {
+  if (gOledEnabled && oledConnected) {
     getOLEDSetupModeSelection(setupMode);
   } else {
 #endif
@@ -301,7 +301,7 @@ void firstTimeSetupIfNeeded() {
       // Password entry (B goes back to network list)
       bool passwordCancelled = false;
 #if ENABLE_OLED_DISPLAY
-      if (oledEnabled && oledConnected) {
+      if (gOledEnabled && oledConnected) {
         restorePass = getOLEDTextInput("WiFi Password:", true, "", 64, &passwordCancelled);
       } else {
 #endif
@@ -408,11 +408,11 @@ void firstTimeSetupIfNeeded() {
 
 #if ENABLE_GAMEPAD_SENSOR
         // Gamepad B button escape (active-low, detect new press)
-        if (!goBack && gControlCache.mutex &&
-            xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-          uint32_t btns = gControlCache.gamepadButtons;
-          bool valid = gControlCache.gamepadDataValid;
-          xSemaphoreGive(gControlCache.mutex);
+        if (!goBack && gGamepadCache.mutex &&
+            xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+          uint32_t btns = gGamepadCache.gamepadButtons;
+          bool valid = gGamepadCache.gamepadDataValid;
+          xSemaphoreGive(gGamepadCache.mutex);
           if (valid) {
             if (!btnStateInit) {
               lastBtnState = btns;
@@ -467,7 +467,7 @@ void firstTimeSetupIfNeeded() {
   
   // Username stage
   setSetupProgressStage(SETUP_PROMPT_USERNAME);
-  if (!(oledEnabled && oledConnected)) {
+  if (!(gOledEnabled && oledConnected)) {
     broadcastOutput("Enter admin username (cannot be blank): ");
   }
   String u = "";
@@ -479,7 +479,7 @@ void firstTimeSetupIfNeeded() {
 #endif
     u.trim();
     if (u.length() == 0) {
-      if (!(oledEnabled && oledConnected)) {
+      if (!(gOledEnabled && oledConnected)) {
         broadcastOutput("Username cannot be blank. Please enter admin username: ");
       }
 #if ENABLE_OLED_DISPLAY
@@ -492,7 +492,7 @@ void firstTimeSetupIfNeeded() {
   setSetupProgressStage(SETUP_PROMPT_PASSWORD);
   String p = "";
   while (p.length() == 0) {
-    if (!(oledEnabled && oledConnected)) {
+    if (!(gOledEnabled && oledConnected)) {
       broadcastOutput("Enter admin password (cannot be blank): ");
     }
 #if ENABLE_OLED_DISPLAY
@@ -502,7 +502,7 @@ void firstTimeSetupIfNeeded() {
 #endif
     p.trim();
     if (p.length() == 0) {
-      if (!(oledEnabled && oledConnected)) {
+      if (!(gOledEnabled && oledConnected)) {
         broadcastOutput("Password cannot be blank. Please enter admin password: ");
       }
 #if ENABLE_OLED_DISPLAY
@@ -555,7 +555,7 @@ void firstTimeSetupIfNeeded() {
 #if ENABLE_OLED_DISPLAY
   extern bool getOLEDThemeSelection(bool& darkMode);
   bool darkSelected = false;
-  if (oledEnabled && oledConnected && getOLEDThemeSelection(darkSelected)) {
+  if (gOledEnabled && oledConnected && getOLEDThemeSelection(darkSelected)) {
     themeInput = darkSelected ? "2" : "1";
   } else {
     themeInput = waitForSerialInputBlocking();
@@ -711,7 +711,7 @@ void firstTimeSetupIfNeeded() {
   }
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  if (gamepadEnabled && !gSettings.gamepadAutoStart) {
+  if (gGamepadEnabled && !gSettings.gamepadAutoStart) {
     needsRebootForHardware = true;
   }
 #endif

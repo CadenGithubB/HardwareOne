@@ -302,7 +302,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason);
 // Legacy alias: oledDisplay is defined as gDisplay in Display_HAL.h
 // extern Adafruit_SSD1306* oledDisplay;  // Removed - use gDisplay from Display_HAL.h
 extern bool oledConnected;
-extern bool oledEnabled;
+extern bool gOledEnabled;
 
 // OLED State Variables (defined in oled_display.cpp)
 extern OLEDMode currentOLEDMode;
@@ -324,7 +324,7 @@ extern unsigned long oledLastUpdate;
 extern unsigned long animationFrame;
 
 // Network menu state (for footer rendering)
-extern bool networkShowingStatus;
+extern bool gNetworkShowingStatus;
 extern bool networkShowingWiFiSubmenu;
 extern unsigned long animationLastUpdate;
 extern int animationFPS;

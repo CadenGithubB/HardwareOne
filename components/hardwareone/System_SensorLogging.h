@@ -25,21 +25,21 @@
 // Snapshot of sensor cache and flags for logging
 struct SensorCacheSnapshot {
   // flags
-  bool thermalEnabled;
-  bool thermalConnected;
+  bool gThermalEnabled;
+  bool gThermalConnected;
   bool thermalValid;
-  bool tofEnabled;
-  bool tofConnected;
+  bool gTofEnabled;
+  bool gTofConnected;
   bool tofValid;
-  bool imuEnabled;
-  bool imuConnected;
-  bool gamepadEnabled;
-  bool gamepadConnected;
+  bool gImuEnabled;
+  bool gImuConnected;
+  bool gGamepadEnabled;
+  bool gGamepadConnected;
   bool gamepadValid;
-  bool apdsColorEnabled;
-  bool apdsProximityEnabled;
-  bool apdsGestureEnabled;
-  bool apdsConnected;
+  bool gApdsColorEnabled;
+  bool gApdsProximityEnabled;
+  bool gApdsGestureEnabled;
+  bool gApdsConnected;
   bool apdsValid;
   // thermal summary
   float thermalMin;
@@ -66,8 +66,8 @@ struct SensorCacheSnapshot {
   uint8_t apdsProximity;
   uint8_t apdsGesture;
   // gps
-  bool gpsEnabled;
-  bool gpsConnected;
+  bool gGpsEnabled;
+  bool gGpsConnected;
   bool gpsFix;
   float gpsLatitude;
   float gpsLongitude;
@@ -80,8 +80,8 @@ struct SensorCacheSnapshot {
   uint8_t gpsSecond;
   bool gpsHasTime;
   // presence
-  bool presenceEnabled;
-  bool presenceConnected;
+  bool gPresenceEnabled;
+  bool gPresenceConnected;
   float presenceAmbientTemp;
   int16_t presenceValue;
   int16_t motionValue;

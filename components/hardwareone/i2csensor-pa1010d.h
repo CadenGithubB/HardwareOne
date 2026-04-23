@@ -9,7 +9,7 @@
 
 // GPS data cache structure (always available for type-safe references)
 struct GPSCache {
-  SemaphoreHandle_t mutex;
+  SemaphoreHandle_t mutex = nullptr;
   float latitude;
   float longitude;
   float altitude;
@@ -35,15 +35,15 @@ class Adafruit_GPS;
 
 extern Adafruit_GPS* gPA1010D;
 
-extern bool gpsEnabled;
-extern bool gpsConnected;
-extern unsigned long gpsLastStopTime;
-extern TaskHandle_t gpsTaskHandle;
+extern bool gGpsEnabled;
+extern bool gGpsConnected;
+extern unsigned long gGpsLastStopTime;
+extern TaskHandle_t gGpsTaskHandle;
 
 extern GPSCache gGPSCache;
 
 // GPS initialization (called by sensor queue processor)
-void startGPSInternal();
+bool gpsStartInternal();
 
 // Command handlers
 const char* cmd_gps(const String& argsInput);

@@ -32,24 +32,24 @@ class String;
 extern ThermalCache gThermalCache;
 
 // Thermal sensor state and control
-extern bool thermalEnabled;
-extern bool thermalConnected;
-extern unsigned long thermalLastStopTime;
-extern TaskHandle_t thermalTaskHandle;
+extern bool gThermalEnabled;
+extern bool gThermalConnected;
+extern unsigned long gThermalLastStopTime;
+extern TaskHandle_t gThermalTaskHandle;
 
 // Thermal initialization handoff flags
-extern volatile bool thermalInitRequested;
-extern volatile bool thermalInitDone;
-extern volatile bool thermalInitResult;
-extern volatile uint32_t thermalArmAtMs;
+extern volatile bool gThermalInitRequested;
+extern volatile bool gThermalInitDone;
+extern volatile bool gThermalInitResult;
+extern volatile uint32_t gThermalArmAtMs;
 
 // Thermal watermark tracking
 extern volatile UBaseType_t gThermalWatermarkMin;
 extern volatile UBaseType_t gThermalWatermarkNow;
 
 // Thermal sensor state
-extern bool mlx90640_initialized;
-extern volatile bool thermalPendingFirstFrame;
+extern bool gMlx90640Initialized;
+extern volatile bool gThermalPendingFirstFrame;
 extern Adafruit_MLX90640* gMLX90640;
 
 // Thermal timing constants
@@ -73,17 +73,17 @@ const char* cmd_thermalinterpolationsteps(const String& argsInput);
 const char* cmd_thermalinterpolationbuffersize(const String& argsInput);
 
 // Internal function called by queue processor
-bool startThermalSensorInternal();
+bool thermalStartInternal();
 
 // Thermal sensor functions
-bool initThermalSensor();
-bool readThermalPixels();
+bool thermalInit();
+bool thermalPoll();
 
 // JSON building
-int buildThermalDataJSON(char* buf, size_t bufSize);
+int thermalBuildDataJSON(char* buf, size_t bufSize);
 
 // Thermal interpolation (defined in thermal_sensor.cpp)
-void interpolateThermalFrame(const float* src, float* dst, int targetWidth, int targetHeight);
+void thermalInterpolateFrame(const float* src, float* dst, int targetWidth, int targetHeight);
 
 // Thermal command registry (for system_utils.cpp module list)
 struct CommandEntry;

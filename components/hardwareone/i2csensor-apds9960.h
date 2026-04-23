@@ -7,7 +7,7 @@
 #include <freertos/semphr.h>
 
 // APDS sensor cache structure (always available for type-safe references)
-struct PeripheralCache {
+struct APDSCache {
   SemaphoreHandle_t mutex = nullptr;
   uint16_t apdsRed = 0, apdsGreen = 0, apdsBlue = 0, apdsClear = 0;
   uint8_t apdsProximity = 0;
@@ -21,13 +21,13 @@ struct PeripheralCache {
 // Forward declarations
 class String;
 
-extern PeripheralCache gPeripheralCache;
-extern bool apdsColorEnabled;
-extern bool apdsProximityEnabled;
-extern bool apdsGestureEnabled;
-extern bool apdsConnected;
-extern unsigned long apdsLastStopTime;
-extern TaskHandle_t apdsTaskHandle;
+extern APDSCache gAPDSCache;
+extern bool gApdsColorEnabled;
+extern bool gApdsProximityEnabled;
+extern bool gApdsGestureEnabled;
+extern bool gApdsConnected;
+extern unsigned long gApdsLastStopTime;
+extern TaskHandle_t gApdsTaskHandle;
 
 // APDS sensor object
 class Adafruit_APDS9960;
@@ -43,19 +43,19 @@ const char* cmd_apdsmode(const String& argsInput);
 
 
 // APDS sensor functions
-bool startAPDSSensorInternal();  // Called by queue processor
-bool initAPDS9960();
-void readAPDSColor();
-void readAPDSProximity();
-void readAPDSGesture();
+bool apdsStartInternal();  // Called by queue processor
+bool apdsInit();
+void apdsColorPoll();
+void apdsProximityPoll();
+void apdsGesturePoll();
 
 // Accessor functions (for MQTT and other modules)
-uint8_t getAPDSProximity();
-uint16_t getAPDSColorR();
-uint16_t getAPDSColorG();
-uint16_t getAPDSColorB();
-uint16_t getAPDSColorC();
-extern bool apdsEnabled;
+uint8_t apdsGetProximity();
+uint16_t apdsGetColorR();
+uint16_t apdsGetColorG();
+uint16_t apdsGetColorB();
+uint16_t apdsGetColorC();
+extern bool gApdsEnabled;
 
 // Command registry (for system_utils.cpp module list)
 struct CommandEntry;

@@ -106,7 +106,7 @@ void sensorLogTick() {
     remaining -= written;
 
     // Thermal (only if enabled in mask)
-    if ((gSensorLogMask & LOG_THERMAL) && s.thermalEnabled && s.thermalConnected && s.thermalValid && remaining > 0) {
+    if ((gSensorLogMask & LOG_THERMAL) && s.gThermalEnabled && s.gThermalConnected && s.thermalValid && remaining > 0) {
       written = snprintf(pos, remaining, "thermal: min=%dC avg=%dC max=%dC | ",
                          (int)s.thermalMin, (int)s.thermalAvg, (int)s.thermalMax);
       pos += written;
@@ -114,7 +114,7 @@ void sensorLogTick() {
     }
 
     // ToF (only if enabled in mask)
-    if ((gSensorLogMask & LOG_TOF) && s.tofEnabled && s.tofConnected && s.tofValid && remaining > 0) {
+    if ((gSensorLogMask & LOG_TOF) && s.gTofEnabled && s.gTofConnected && s.tofValid && remaining > 0) {
       written = snprintf(pos, remaining, "tof: ");
       pos += written;
       remaining -= written;
@@ -133,7 +133,7 @@ void sensorLogTick() {
     }
 
     // IMU (only if enabled in mask)
-    if ((gSensorLogMask & LOG_IMU) && s.imuEnabled && s.imuConnected && remaining > 0) {
+    if ((gSensorLogMask & LOG_IMU) && s.gImuEnabled && s.gImuConnected && remaining > 0) {
       written = snprintf(pos, remaining, "imu: yaw=%.1f pitch=%.1f roll=%.1f accel=(%.2f,%.2f,%.2f) temp=%.1fC | ",
                          s.yaw, s.pitch, s.roll, s.ax, s.ay, s.az, s.imuTemp);
       pos += written;
@@ -141,7 +141,7 @@ void sensorLogTick() {
     }
 
     // Gamepad (only if enabled in mask)
-    if ((gSensorLogMask & LOG_GAMEPAD) && s.gamepadEnabled && s.gamepadConnected && s.gamepadValid && remaining > 0) {
+    if ((gSensorLogMask & LOG_GAMEPAD) && s.gGamepadEnabled && s.gGamepadConnected && s.gamepadValid && remaining > 0) {
       written = snprintf(pos, remaining, "gamepad: x=%d y=%d btns=0x%lX | ",
                          s.gamepadX, s.gamepadY, (unsigned long)s.gamepadButtons);
       pos += written;
@@ -149,7 +149,7 @@ void sensorLogTick() {
     }
 
     // APDS (only if enabled in mask)
-    if ((gSensorLogMask & LOG_APDS) && s.apdsConnected && s.apdsValid && remaining > 0) {
+    if ((gSensorLogMask & LOG_APDS) && s.gApdsConnected && s.apdsValid && remaining > 0) {
       written = snprintf(pos, remaining, "apds: r=%u g=%u b=%u c=%u prox=%u gest=%u | ",
                          s.apdsRed, s.apdsGreen, s.apdsBlue, s.apdsClear, s.apdsProximity, s.apdsGesture);
       pos += written;
@@ -157,7 +157,7 @@ void sensorLogTick() {
     }
 
     // GPS (only if enabled in mask)
-    if ((gSensorLogMask & LOG_GPS) && s.gpsEnabled && s.gpsConnected && remaining > 0) {
+    if ((gSensorLogMask & LOG_GPS) && s.gGpsEnabled && s.gGpsConnected && remaining > 0) {
       if (s.gpsFix) {
         written = snprintf(pos, remaining, "gps: lat=%.6f lon=%.6f alt=%.1fm speed=%.1fkn sats=%d q=%d | ",
                            s.gpsLatitude, s.gpsLongitude, s.gpsAltitude, s.gpsSpeed,
@@ -171,7 +171,7 @@ void sensorLogTick() {
     }
 
     // Presence (only if enabled in mask)
-    if ((gSensorLogMask & LOG_PRESENCE) && s.presenceEnabled && s.presenceConnected && remaining > 0) {
+    if ((gSensorLogMask & LOG_PRESENCE) && s.gPresenceEnabled && s.gPresenceConnected && remaining > 0) {
       written = snprintf(pos, remaining, "presence: amb=%.1fC pres=%d%s mot=%d%s | ",
                          s.presenceAmbientTemp, (int)s.presenceValue,
                          s.presenceDetected ? "[DET]" : "",
@@ -324,8 +324,8 @@ void sensorLogTick() {
     // Only lock caches for sensors selected in the mask
     if (mask & LOG_THERMAL) {
       if (lockThermalCache(pdMS_TO_TICKS(10))) {
-        snap.thermalEnabled = thermalEnabled;
-        snap.thermalConnected = thermalConnected;
+        snap.gThermalEnabled = gThermalEnabled;
+        snap.gThermalConnected = gThermalConnected;
         snap.thermalValid = gThermalCache.thermalDataValid;
         snap.thermalMin = gThermalCache.thermalMinTemp;
         snap.thermalAvg = gThermalCache.thermalAvgTemp;
@@ -336,8 +336,8 @@ void sensorLogTick() {
     
 #if ENABLE_TOF_SENSOR
     if ((mask & LOG_TOF) && gTofCache.mutex && xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      snap.tofEnabled = tofEnabled;
-      snap.tofConnected = tofConnected;
+      snap.gTofEnabled = gTofEnabled;
+      snap.gTofConnected = gTofConnected;
       snap.tofValid = gTofCache.tofDataValid;
       snap.tofTotal = gTofCache.tofTotalObjects;
       for (int i = 0; i < 4; i++) {
@@ -352,8 +352,8 @@ void sensorLogTick() {
 
 #if ENABLE_IMU_SENSOR
     if ((mask & LOG_IMU) && gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      snap.imuEnabled = imuEnabled;
-      snap.imuConnected = imuConnected;
+      snap.gImuEnabled = gImuEnabled;
+      snap.gImuConnected = gImuConnected;
       snap.yaw = gImuCache.oriYaw;
       snap.pitch = gImuCache.oriPitch;
       snap.roll = gImuCache.oriRoll;
@@ -369,38 +369,38 @@ void sensorLogTick() {
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
-    if ((mask & LOG_GAMEPAD) && gControlCache.mutex && xSemaphoreTake(gControlCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      snap.gamepadEnabled = gamepadEnabled;
-      snap.gamepadConnected = gamepadConnected;
-      snap.gamepadValid = gControlCache.gamepadDataValid;
-      snap.gamepadButtons = gControlCache.gamepadButtons;
-      snap.gamepadX = gControlCache.gamepadX;
-      snap.gamepadY = gControlCache.gamepadY;
-      xSemaphoreGive(gControlCache.mutex);
+    if ((mask & LOG_GAMEPAD) && gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      snap.gGamepadEnabled = gGamepadEnabled;
+      snap.gGamepadConnected = gGamepadConnected;
+      snap.gamepadValid = gGamepadCache.gamepadDataValid;
+      snap.gamepadButtons = gGamepadCache.gamepadButtons;
+      snap.gamepadX = gGamepadCache.gamepadX;
+      snap.gamepadY = gGamepadCache.gamepadY;
+      xSemaphoreGive(gGamepadCache.mutex);
     }
 #endif
 
 #if ENABLE_APDS_SENSOR
-    if ((mask & LOG_APDS) && gPeripheralCache.mutex && xSemaphoreTake(gPeripheralCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      snap.apdsColorEnabled = apdsColorEnabled;
-      snap.apdsProximityEnabled = apdsProximityEnabled;
-      snap.apdsGestureEnabled = apdsGestureEnabled;
-      snap.apdsConnected = apdsConnected;
-      snap.apdsValid = gPeripheralCache.apdsDataValid;
-      snap.apdsRed = gPeripheralCache.apdsRed;
-      snap.apdsGreen = gPeripheralCache.apdsGreen;
-      snap.apdsBlue = gPeripheralCache.apdsBlue;
-      snap.apdsClear = gPeripheralCache.apdsClear;
-      snap.apdsProximity = gPeripheralCache.apdsProximity;
-      snap.apdsGesture = gPeripheralCache.apdsGesture;
-      xSemaphoreGive(gPeripheralCache.mutex);
+    if ((mask & LOG_APDS) && gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      snap.gApdsColorEnabled = gApdsColorEnabled;
+      snap.gApdsProximityEnabled = gApdsProximityEnabled;
+      snap.gApdsGestureEnabled = gApdsGestureEnabled;
+      snap.gApdsConnected = gApdsConnected;
+      snap.apdsValid = gAPDSCache.apdsDataValid;
+      snap.apdsRed = gAPDSCache.apdsRed;
+      snap.apdsGreen = gAPDSCache.apdsGreen;
+      snap.apdsBlue = gAPDSCache.apdsBlue;
+      snap.apdsClear = gAPDSCache.apdsClear;
+      snap.apdsProximity = gAPDSCache.apdsProximity;
+      snap.apdsGesture = gAPDSCache.apdsGesture;
+      xSemaphoreGive(gAPDSCache.mutex);
     }
 #endif
 
 #if ENABLE_GPS_SENSOR
     if (mask & LOG_GPS) {
-      snap.gpsEnabled = gpsEnabled;
-      snap.gpsConnected = gpsConnected;
+      snap.gGpsEnabled = gGpsEnabled;
+      snap.gGpsConnected = gGpsConnected;
       if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         if (gGPSCache.dataValid && gGPSCache.hasFix) {
           snap.gpsFix = true;
@@ -425,8 +425,8 @@ void sensorLogTick() {
 
 #if ENABLE_PRESENCE_SENSOR
     if (mask & LOG_PRESENCE) {
-      snap.presenceEnabled = presenceEnabled;
-      snap.presenceConnected = presenceConnected;
+      snap.gPresenceEnabled = gPresenceEnabled;
+      snap.gPresenceConnected = gPresenceConnected;
       if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         snap.presenceAmbientTemp = gPresenceCache.ambientTemp;
         snap.presenceValue = gPresenceCache.presenceValue;
@@ -440,13 +440,13 @@ void sensorLogTick() {
 
     // Check if any selected sensor has active data
     bool hasSelectedData = false;
-    if ((gSensorLogMask & LOG_THERMAL) && snap.thermalEnabled && snap.thermalConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_TOF) && snap.tofEnabled && snap.tofConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_IMU) && snap.imuEnabled && snap.imuConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_GAMEPAD) && snap.gamepadEnabled && snap.gamepadConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_APDS) && snap.apdsConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_GPS) && snap.gpsEnabled && snap.gpsConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_PRESENCE) && snap.presenceEnabled && snap.presenceConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_THERMAL) && snap.gThermalEnabled && snap.gThermalConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_TOF) && snap.gTofEnabled && snap.gTofConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_IMU) && snap.gImuEnabled && snap.gImuConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_GAMEPAD) && snap.gGamepadEnabled && snap.gGamepadConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_APDS) && snap.gApdsConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_GPS) && snap.gGpsEnabled && snap.gGpsConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_PRESENCE) && snap.gPresenceEnabled && snap.gPresenceConnected) hasSelectedData = true;
 
     // Suppress idle lines when no selected sensor has data
     static unsigned long lastHeartbeatMs = 0;

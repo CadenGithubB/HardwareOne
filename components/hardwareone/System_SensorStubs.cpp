@@ -19,10 +19,10 @@ size_t gWebMirrorCap = 0;
 #if !ENABLE_THERMAL_SENSOR
 // Thermal stub variables (global definitions)
 ThermalCache gThermalCache;
-bool thermalEnabled = false;
-bool thermalConnected = false;
-unsigned long thermalLastStopTime = 0;
-TaskHandle_t thermalTaskHandle = nullptr;
+bool gThermalEnabled = false;
+bool gThermalConnected = false;
+unsigned long gThermalLastStopTime = 0;
+TaskHandle_t gThermalTaskHandle = nullptr;
 volatile UBaseType_t gThermalWatermarkNow = 0;
 volatile UBaseType_t gThermalWatermarkMin = 0;
 const struct CommandEntry thermalCommands[] = {};
@@ -32,10 +32,10 @@ const size_t thermalCommandsCount = 0;
 #if !ENABLE_TOF_SENSOR
 // ToF stub variables (global definitions)
 TofCache gTofCache;
-bool tofEnabled = false;
-bool tofConnected = false;
-uint32_t tofLastStopTime = 0;
-TaskHandle_t tofTaskHandle = nullptr;
+bool gTofEnabled = false;
+bool gTofConnected = false;
+uint32_t gTofLastStopTime = 0;
+TaskHandle_t gTofTaskHandle = nullptr;
 volatile UBaseType_t gTofWatermarkNow = 0;
 volatile UBaseType_t gTofWatermarkMin = 0;
 const struct CommandEntry tofCommands[] = {};
@@ -45,26 +45,26 @@ const size_t tofCommandsCount = 0;
 #if !ENABLE_IMU_SENSOR
 // IMU stub variables (global definitions)
 ImuCache gImuCache;
-bool imuEnabled = false;
-bool imuConnected = false;
-unsigned long imuLastStopTime = 0;
-TaskHandle_t imuTaskHandle = nullptr;
+bool gImuEnabled = false;
+bool gImuConnected = false;
+unsigned long gImuLastStopTime = 0;
+TaskHandle_t gImuTaskHandle = nullptr;
 volatile UBaseType_t gIMUWatermarkNow = 0;
 volatile UBaseType_t gIMUWatermarkMin = 0;
 const struct CommandEntry imuCommands[] = {};
 const size_t imuCommandsCount = 0;
 
-void updateIMUActions() {
+void imuUpdateActions() {
 }
 #endif
 
 #if !ENABLE_GAMEPAD_SENSOR
 // Gamepad stub variables (global definitions)
-ControlCache gControlCache;
-bool gamepadEnabled = false;
-bool gamepadConnected = false;
-unsigned long gamepadLastStopTime = 0;
-TaskHandle_t gamepadTaskHandle = nullptr;
+GamepadCache gGamepadCache;
+bool gGamepadEnabled = false;
+bool gGamepadConnected = false;
+unsigned long gGamepadLastStopTime = 0;
+TaskHandle_t gGamepadTaskHandle = nullptr;
 volatile UBaseType_t gGamepadWatermarkMin = 0;
 volatile UBaseType_t gGamepadWatermarkNow = 0;
 const struct CommandEntry gamepadCommands[] = {};
@@ -73,14 +73,13 @@ const size_t gamepadCommandsCount = 0;
 
 #if !ENABLE_APDS_SENSOR
 // APDS stub variables (global definitions)
-PeripheralCache gPeripheralCache;
-bool apdsEnabled = false;
-bool apdsConnected = false;
-bool apdsColorEnabled = false;
-bool apdsProximityEnabled = false;
-bool apdsGestureEnabled = false;
-unsigned long apdsLastStopTime = 0;
-TaskHandle_t apdsTaskHandle = nullptr;
+APDSCache gAPDSCache;
+bool gApdsConnected = false;
+bool gApdsColorEnabled = false;
+bool gApdsProximityEnabled = false;
+bool gApdsGestureEnabled = false;
+unsigned long gApdsLastStopTime = 0;
+TaskHandle_t gApdsTaskHandle = nullptr;
 const struct CommandEntry apdsCommands[] = {};
 const size_t apdsCommandsCount = 0;
 #endif
@@ -88,11 +87,11 @@ const size_t apdsCommandsCount = 0;
 #if !ENABLE_GPS_SENSOR
 // GPS stub variables (global definitions)
 GPSCache gGPSCache;
-bool gpsEnabled = false;
-bool gpsConnected = false;
-unsigned long gpsLastStopTime = 0;
+bool gGpsEnabled = false;
+bool gGpsConnected = false;
+unsigned long gGpsLastStopTime = 0;
 Adafruit_GPS* gPA1010D = nullptr;
-TaskHandle_t gpsTaskHandle = nullptr;
+TaskHandle_t gGpsTaskHandle = nullptr;
 const struct CommandEntry gpsCommands[] = {};
 const size_t gpsCommandsCount = 0;
 #endif
@@ -100,17 +99,17 @@ const size_t gpsCommandsCount = 0;
 #if !ENABLE_PRESENCE_SENSOR
 // Presence sensor stub variables (global definitions)
 PresenceCache gPresenceCache;
-bool presenceEnabled = false;
-bool presenceConnected = false;
-unsigned long presenceLastStopTime = 0;
-TaskHandle_t presenceTaskHandle = nullptr;
+bool gPresenceEnabled = false;
+bool gPresenceConnected = false;
+unsigned long gPresenceLastStopTime = 0;
+TaskHandle_t gPresenceTaskHandle = nullptr;
 const struct CommandEntry presenceCommands[] = {};
 const size_t presenceCommandsCount = 0;
 #endif
 
 #if !ENABLE_OLED_DISPLAY
 // OLED stub variables (global definitions)
-bool oledEnabled = false;
+bool gOledEnabled = false;
 bool oledConnected = false;
 Adafruit_SSD1306* oledDisplay = nullptr;
 const struct CommandEntry oledCommands[] = {};
@@ -119,19 +118,12 @@ const size_t oledCommandsCount = 0;
 
 #if !ENABLE_FM_RADIO
 // FM Radio stub variables (global definitions)
-bool fmRadioEnabled = false;
-bool fmRadioConnected = false;
-unsigned long fmRadioLastStopTime = 0;
-bool radioInitialized = false;
-uint16_t fmRadioFrequency = 0;
-uint8_t fmRadioVolume = 0;
-bool fmRadioMuted = false;
-bool fmRadioStereo = false;
-char fmRadioStationName[9] = "";
-char fmRadioStationText[65] = "";
-uint8_t fmRadioRSSI = 0;
-uint8_t fmRadioSNR = 0;
-TaskHandle_t fmRadioTaskHandle = nullptr;
+bool gFmRadioEnabled = false;
+bool gFmRadioConnected = false;
+unsigned long gFmRadioLastStopTime = 0;
+bool gRadioInitialized = false;
+FMRadioCache gFmRadioCache;
+TaskHandle_t gFmRadioTaskHandle = nullptr;
 const struct CommandEntry fmRadioCommands[] = {};
 const size_t fmRadioCommandsCount = 0;
 #endif
@@ -140,15 +132,15 @@ const size_t fmRadioCommandsCount = 0;
 // RTC stub variables (global definitions)
 // Types are defined in System_SensorStubs.h when disabled
 RTCCache gRTCCache = {nullptr, {0, 0, 0, 0, 0, 0, 0}, 0.0f, false, 0};
-bool rtcEnabled = false;
-bool rtcConnected = false;
-unsigned long rtcLastStopTime = 0;
-TaskHandle_t rtcTaskHandle = nullptr;
+bool gRtcEnabled = false;
+bool gRtcConnected = false;
+unsigned long gRtcLastStopTime = 0;
+TaskHandle_t gRtcTaskHandle = nullptr;
 volatile UBaseType_t gRTCWatermarkNow = 0;
 volatile UBaseType_t gRTCWatermarkMin = 0;
 const struct CommandEntry rtcCommands[] = {};
 const size_t rtcCommandsCount = 0;
-void startRTCSensorInternal() {}
+bool rtcStartInternal() { return false; }
 #endif
 
 #if !ENABLE_SERVO
@@ -159,7 +151,7 @@ const size_t servoCommandsCount = 0;
 
 #if !ENABLE_MICROPHONE_SENSOR
 // Microphone stub variables (global definitions)
-bool micEnabled = false;
+bool gMicEnabled = false;
 bool micConnected = false;
 bool micRecording = false;
 int micSampleRate = 0;
@@ -172,7 +164,7 @@ const size_t micCommandsCount = 0;
 
 #if !ENABLE_CAMERA_SENSOR
 // Camera stub variables (global definitions)
-bool cameraEnabled = false;
+bool gCameraEnabled = false;
 bool cameraConnected = false;
 bool cameraStreaming = false;
 const char* cameraModel = "None";
@@ -186,7 +178,7 @@ const size_t cameraCommandsCount = 0;
 // Bluetooth stub variables (global definitions)
 const struct CommandEntry bluetoothCommands[] = {};
 const size_t bluetoothCommandsCount = 0;
-bool bluetoothShowingStatus = false;
+bool gBluetoothShowingStatus = false;
 #endif
 
 // =============================================================================

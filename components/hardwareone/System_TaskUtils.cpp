@@ -30,16 +30,16 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 extern void getTimestampPrefixMsCached(char* buf, size_t bufSize);
 
 // External task handles (defined in .ino / HardwareOne.cpp / sensor modules)
-extern TaskHandle_t gamepadTaskHandle;
-extern TaskHandle_t thermalTaskHandle;
-extern TaskHandle_t imuTaskHandle;
-extern TaskHandle_t tofTaskHandle;
-extern TaskHandle_t fmRadioTaskHandle;
+extern TaskHandle_t gGamepadTaskHandle;
+extern TaskHandle_t gThermalTaskHandle;
+extern TaskHandle_t gImuTaskHandle;
+extern TaskHandle_t gTofTaskHandle;
+extern TaskHandle_t gFmRadioTaskHandle;
 extern TaskHandle_t gCmdExecTaskHandle;
-extern TaskHandle_t gpsTaskHandle;
-extern TaskHandle_t apdsTaskHandle;
-extern TaskHandle_t presenceTaskHandle;
-extern TaskHandle_t rtcTaskHandle;
+extern TaskHandle_t gGpsTaskHandle;
+extern TaskHandle_t gApdsTaskHandle;
+extern TaskHandle_t gPresenceTaskHandle;
+extern TaskHandle_t gRtcTaskHandle;
 
 // External task functions (defined in sensor modules)
 extern void gamepadTask(void* parameter);
@@ -47,20 +47,24 @@ extern void thermalTask(void* parameter);
 extern void imuTask(void* parameter);
 extern void tofTask(void* parameter);
 extern void fmRadioTask(void* parameter);
+extern void apdsTask(void* parameter);
+extern void presenceTask(void* parameter);
+extern void gpsTask(void* parameter);
+extern void rtcTask(void* parameter);
 
 // External sensor enabled flags (for safe stale-handle detection)
-extern bool gamepadEnabled;
-extern bool gamepadConnected;
-extern bool thermalEnabled;
-extern bool imuEnabled;
-extern bool tofEnabled;
-extern bool fmRadioEnabled;
-extern bool gpsEnabled;
-extern bool apdsColorEnabled;
-extern bool apdsProximityEnabled;
-extern bool apdsGestureEnabled;
-extern bool presenceEnabled;
-extern bool rtcEnabled;
+extern bool gGamepadEnabled;
+extern bool gGamepadConnected;
+extern bool gThermalEnabled;
+extern bool gImuEnabled;
+extern bool gTofEnabled;
+extern bool gFmRadioEnabled;
+extern bool gGpsEnabled;
+extern bool gApdsColorEnabled;
+extern bool gApdsProximityEnabled;
+extern bool gApdsGestureEnabled;
+extern bool gPresenceEnabled;
+extern bool gRtcEnabled;
 
 // ============================================================================
 // Task Creation with Memory Logging
@@ -145,13 +149,13 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
 
 bool createGamepadTask() {
   // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gamepadTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gamepadTaskHandle);
+  if (gGamepadTaskHandle != nullptr) {
+    eTaskState state = eTaskGetState(gGamepadTaskHandle);
     if (state == eDeleted || state == eInvalid) {
-      gamepadTaskHandle = nullptr;
+      gGamepadTaskHandle = nullptr;
     }
   }
-  if (gamepadTaskHandle == nullptr) {
+  if (gGamepadTaskHandle == nullptr) {
     const uint32_t stackWords = GAMEPAD_STACK_WORDS;  // words (~14KB)
     BaseType_t result = xTaskCreateLogged(
       gamepadTask,
@@ -159,7 +163,7 @@ bool createGamepadTask() {
       stackWords,
       nullptr,
       1,
-      &gamepadTaskHandle,
+      &gGamepadTaskHandle,
       "gamepad");
 
     if (result != pdPASS) {
@@ -172,15 +176,15 @@ bool createGamepadTask() {
 
 bool createThermalTask() {
   // Check for stale task handle (task deleted itself but handle not cleared)
-  if (thermalTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(thermalTaskHandle);
+  if (gThermalTaskHandle != nullptr) {
+    eTaskState state = eTaskGetState(gThermalTaskHandle);
     if (state == eDeleted || state == eInvalid) {
-      thermalTaskHandle = nullptr;
+      gThermalTaskHandle = nullptr;
     }
   }
-  if (thermalTaskHandle == nullptr) {
+  if (gThermalTaskHandle == nullptr) {
     const uint32_t thermalStack = THERMAL_STACK_WORDS;  // words; ~16KB (reduced from 24KB - frame buffers moved to PSRAM)
-    if (xTaskCreateLogged(thermalTask, "thermal_task", thermalStack, nullptr, TASK_PRIORITY_LOW, &thermalTaskHandle, "thermal") != pdPASS) {
+    if (xTaskCreateLogged(thermalTask, "thermal_task", thermalStack, nullptr, TASK_PRIORITY_LOW, &gThermalTaskHandle, "thermal") != pdPASS) {
       return false;
     }
   }
@@ -189,15 +193,15 @@ bool createThermalTask() {
 
 bool createIMUTask() {
   // Check for stale task handle (task deleted itself but handle not cleared)
-  if (imuTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(imuTaskHandle);
+  if (gImuTaskHandle != nullptr) {
+    eTaskState state = eTaskGetState(gImuTaskHandle);
     if (state == eDeleted || state == eInvalid) {
-      imuTaskHandle = nullptr;
+      gImuTaskHandle = nullptr;
     }
   }
-  if (imuTaskHandle == nullptr) {
+  if (gImuTaskHandle == nullptr) {
     const uint32_t imuStack = IMU_STACK_WORDS;  // words; ~16KB (BNO055 init retries need extra stack)
-    if (xTaskCreateLogged(imuTask, "imu_task", imuStack, nullptr, TASK_PRIORITY_LOW, &imuTaskHandle, "imu") != pdPASS) {
+    if (xTaskCreateLogged(imuTask, "imu_task", imuStack, nullptr, TASK_PRIORITY_LOW, &gImuTaskHandle, "imu") != pdPASS) {
       return false;
     }
     DEBUG_CLIF("imustart: IMU task created successfully");
@@ -207,15 +211,15 @@ bool createIMUTask() {
 
 bool createToFTask() {
   // Check for stale task handle (task deleted itself but handle not cleared)
-  if (tofTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(tofTaskHandle);
+  if (gTofTaskHandle != nullptr) {
+    eTaskState state = eTaskGetState(gTofTaskHandle);
     if (state == eDeleted || state == eInvalid) {
-      tofTaskHandle = nullptr;
+      gTofTaskHandle = nullptr;
     }
   }
-  if (tofTaskHandle == nullptr) {
+  if (gTofTaskHandle == nullptr) {
     const uint32_t tofStack = TOF_STACK_WORDS;  // words; ~12KB
-    if (xTaskCreateLogged(tofTask, "tof_task", tofStack, nullptr, TASK_PRIORITY_LOW, &tofTaskHandle, "tof") != pdPASS) {
+    if (xTaskCreateLogged(tofTask, "tof_task", tofStack, nullptr, TASK_PRIORITY_LOW, &gTofTaskHandle, "tof") != pdPASS) {
       DEBUG_CLIF("tofstart: FAILED to create ToF task");
       return false;
     }
@@ -225,19 +229,91 @@ bool createToFTask() {
 
 bool createFMRadioTask() {
   // Check for stale task handle (task deleted itself but handle not cleared)
-  if (fmRadioTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(fmRadioTaskHandle);
+  if (gFmRadioTaskHandle != nullptr) {
+    eTaskState state = eTaskGetState(gFmRadioTaskHandle);
     if (state == eDeleted || state == eInvalid) {
-      fmRadioTaskHandle = nullptr;
+      gFmRadioTaskHandle = nullptr;
     }
   }
-  if (fmRadioTaskHandle == nullptr) {
+  if (gFmRadioTaskHandle == nullptr) {
     const uint32_t fmRadioStack = FMRADIO_STACK_WORDS;  // words; ~18KB
-    if (xTaskCreateLogged(fmRadioTask, "fmradio_task", fmRadioStack, nullptr, TASK_PRIORITY_LOW, &fmRadioTaskHandle, "fmradio") != pdPASS) {
+    if (xTaskCreateLogged(fmRadioTask, "fmradio_task", fmRadioStack, nullptr, TASK_PRIORITY_LOW, &gFmRadioTaskHandle, "fmradio") != pdPASS) {
       DEBUG_CLIF("fmradiostart: FAILED to create FM Radio task");
       return false;
     }
-    DEBUG_CLIF("fmradiostart: FM Radio task created successfully (handle=%p)", fmRadioTaskHandle);
+    DEBUG_CLIF("fmradiostart: FM Radio task created successfully (handle=%p)", gFmRadioTaskHandle);
+  }
+  return true;  // Task created successfully or already exists
+}
+
+bool createAPDSTask() {
+  // Check for stale task handle (task deleted itself but handle not cleared)
+  if (gApdsTaskHandle != nullptr) {
+    eTaskState state = eTaskGetState(gApdsTaskHandle);
+    if (state == eDeleted || state == eInvalid) {
+      gApdsTaskHandle = nullptr;
+    }
+  }
+  if (gApdsTaskHandle == nullptr) {
+    const uint32_t apdsStack = APDS_STACK_WORDS;  // words; ~12KB
+    if (xTaskCreateLogged(apdsTask, "apds_task", apdsStack, nullptr, TASK_PRIORITY_LOW, &gApdsTaskHandle, "apds") != pdPASS) {
+      return false;
+    }
+    DEBUG_CLIF("APDS task created successfully");
+  }
+  return true;  // Task created successfully or already exists
+}
+
+bool createPresenceTask() {
+  // Check for stale task handle (task deleted itself but handle not cleared)
+  if (gPresenceTaskHandle != nullptr) {
+    eTaskState state = eTaskGetState(gPresenceTaskHandle);
+    if (state == eDeleted || state == eInvalid) {
+      gPresenceTaskHandle = nullptr;
+    }
+  }
+  if (gPresenceTaskHandle == nullptr) {
+    const uint32_t presenceStack = PRESENCE_STACK_WORDS;  // words; ~12KB
+    if (xTaskCreateLogged(presenceTask, "presence_task", presenceStack, nullptr, TASK_PRIORITY_LOW, &gPresenceTaskHandle, "presence") != pdPASS) {
+      return false;
+    }
+    DEBUG_CLIF("Presence task created successfully");
+  }
+  return true;  // Task created successfully or already exists
+}
+
+bool createGPSTask() {
+  // Check for stale task handle (task deleted itself but handle not cleared)
+  if (gGpsTaskHandle != nullptr) {
+    eTaskState state = eTaskGetState(gGpsTaskHandle);
+    if (state == eDeleted || state == eInvalid) {
+      gGpsTaskHandle = nullptr;
+    }
+  }
+  if (gGpsTaskHandle == nullptr) {
+    const uint32_t gpsStack = GPS_STACK_WORDS;  // words; ~12KB
+    if (xTaskCreateLogged(gpsTask, "gps_task", gpsStack, nullptr, TASK_PRIORITY_LOW, &gGpsTaskHandle, "gps") != pdPASS) {
+      return false;
+    }
+    DEBUG_CLIF("GPS task created successfully");
+  }
+  return true;  // Task created successfully or already exists
+}
+
+bool createRTCTask() {
+  // Check for stale task handle (task deleted itself but handle not cleared)
+  if (gRtcTaskHandle != nullptr) {
+    eTaskState state = eTaskGetState(gRtcTaskHandle);
+    if (state == eDeleted || state == eInvalid) {
+      gRtcTaskHandle = nullptr;
+    }
+  }
+  if (gRtcTaskHandle == nullptr) {
+    const uint32_t rtcStack = RTC_STACK_WORDS;  // words; ~16KB
+    if (xTaskCreateLogged(rtcTask, "rtc_task", rtcStack, nullptr, TASK_PRIORITY_LOW, &gRtcTaskHandle, "rtc") != pdPASS) {
+      return false;
+    }
+    DEBUG_CLIF("RTC task created successfully");
   }
   return true;  // Task created successfully or already exists
 }
@@ -374,15 +450,15 @@ void reportAllTaskStacks() {
     {"espnow_task", espnowHandle, ESPNOW_HB_STACK_WORDS},
     {"cmd_exec_task", gCmdExecTaskHandle, CMD_EXEC_STACK_WORDS},
     {"sensor_queue_task", queueProcessorTask, SENSOR_QUEUE_STACK_WORDS},
-    {"gamepad_task", gamepadTaskHandle, GAMEPAD_STACK_WORDS},
-    {"thermal_task", thermalTaskHandle, THERMAL_STACK_WORDS},
-    {"imu_task", imuTaskHandle, IMU_STACK_WORDS},
-    {"tof_task", tofTaskHandle, TOF_STACK_WORDS},
-    {"fmradio_task", fmRadioTaskHandle, FMRADIO_STACK_WORDS},
-    {"gps_task", gpsTaskHandle, GPS_STACK_WORDS},
-    {"apds_task", apdsTaskHandle, APDS_STACK_WORDS},
-    {"presence_task", presenceTaskHandle, PRESENCE_STACK_WORDS},
-    {"rtc_task", rtcTaskHandle, RTC_STACK_WORDS}
+    {"gamepad_task", gGamepadTaskHandle, GAMEPAD_STACK_WORDS},
+    {"thermal_task", gThermalTaskHandle, THERMAL_STACK_WORDS},
+    {"imu_task", gImuTaskHandle, IMU_STACK_WORDS},
+    {"tof_task", gTofTaskHandle, TOF_STACK_WORDS},
+    {"fmradio_task", gFmRadioTaskHandle, FMRADIO_STACK_WORDS},
+    {"gps_task", gGpsTaskHandle, GPS_STACK_WORDS},
+    {"apds_task", gApdsTaskHandle, APDS_STACK_WORDS},
+    {"presence_task", gPresenceTaskHandle, PRESENCE_STACK_WORDS},
+    {"rtc_task", gRtcTaskHandle, RTC_STACK_WORDS}
   };
 
   auto isTaskHandleInSnapshot = [&](TaskHandle_t h) -> bool {
@@ -398,15 +474,15 @@ void reportAllTaskStacks() {
     espnowHandle != nullptr,                                        // espnow_task
     gCmdExecTaskHandle != nullptr,                                  // cmd_exec_task
     queueProcessorTask != nullptr,                                  // sensor_queue_task
-    gamepadEnabled,                                                 // gamepad_task
-    thermalEnabled,                                                 // thermal_task
-    imuEnabled,                                                     // imu_task
-    tofEnabled,                                                     // tof_task
-    fmRadioEnabled,                                                 // fmradio_task
-    gpsEnabled,                                                     // gps_task
-    (apdsColorEnabled || apdsProximityEnabled || apdsGestureEnabled), // apds_task
-    presenceEnabled,                                                // presence_task
-    rtcEnabled,                                                     // rtc_task
+    gGamepadEnabled,                                                 // gamepad_task
+    gThermalEnabled,                                                 // thermal_task
+    gImuEnabled,                                                     // imu_task
+    gTofEnabled,                                                     // tof_task
+    gFmRadioEnabled,                                                 // fmradio_task
+    gGpsEnabled,                                                     // gps_task
+    (gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled), // apds_task
+    gPresenceEnabled,                                                // presence_task
+    gRtcEnabled,                                                     // rtc_task
   };
 
   // First print known tasks

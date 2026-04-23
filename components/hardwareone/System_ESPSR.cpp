@@ -2573,8 +2573,8 @@ bool startESPSR() {
   INFO_SRF("Starting ESP-SR pipeline...");
 
 #if ENABLE_MICROPHONE_SENSOR
-  WARN_SYSTEMF("[SR_START] Checking microphone sensor: micEnabled=%d", micEnabled ? 1 : 0);
-  if (micEnabled) {
+  WARN_SYSTEMF("[SR_START] Checking microphone sensor: gMicEnabled=%d", gMicEnabled ? 1 : 0);
+  if (gMicEnabled) {
     gRestoreMicAfterSR = true;
     INFO_SRF("Microphone sensor is running; stopping it to start SR");
     if (micRecording) {

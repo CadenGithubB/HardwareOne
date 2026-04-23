@@ -15,10 +15,10 @@
 
 // External sensor connection flags
 #if ENABLE_THERMAL_SENSOR
-extern bool thermalConnected;
+extern bool gThermalConnected;
 #endif
 #if ENABLE_TOF_SENSOR
-extern bool tofConnected;
+extern bool gTofConnected;
 #endif
 
 // Check if a setting entry should be visible (used for conditional I2C clock settings)
@@ -28,7 +28,7 @@ static bool isSettingVisible(const SettingEntry* entry) {
   // Hide Thermal I2C clock if thermal sensor not compiled or not connected
   if (strcmp(entry->jsonKey, "i2cClockThermalHz") == 0) {
 #if ENABLE_THERMAL_SENSOR
-    return thermalConnected;
+    return gThermalConnected;
 #else
     return false;
 #endif
@@ -37,7 +37,7 @@ static bool isSettingVisible(const SettingEntry* entry) {
   // Hide ToF I2C clock if ToF sensor not compiled or not connected
   if (strcmp(entry->jsonKey, "i2cClockToFHz") == 0) {
 #if ENABLE_TOF_SENSOR
-    return tofConnected;
+    return gTofConnected;
 #else
     return false;
 #endif

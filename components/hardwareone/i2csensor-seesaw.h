@@ -6,8 +6,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// Control input cache structure (always available for type-safe references)
-struct ControlCache {
+// Gamepad input cache structure (always available for type-safe references)
+struct GamepadCache {
   SemaphoreHandle_t mutex = nullptr;
   uint32_t gamepadButtons = 0;
   int gamepadX = 0, gamepadY = 0;
@@ -24,7 +24,7 @@ class String;
 class Adafruit_seesaw;
 
 extern Adafruit_seesaw gGamepadSeesaw;
-extern ControlCache gControlCache;
+extern GamepadCache gGamepadCache;
 
 // Seesaw gamepad button bit masks (active-low, so invert before checking)
 #define GAMEPAD_BUTTON_SELECT (1 << 0)   // Select button
@@ -57,26 +57,26 @@ const char* cmd_gamepadstop(const String& argsInput);
 const char* cmd_gamepadpoll(const String& argsInput);
 
 // Gamepad state and control
-extern bool gamepadEnabled;
-extern bool gamepadConnected;
-extern unsigned long gamepadLastStopTime;
-extern TaskHandle_t gamepadTaskHandle;
+extern bool gGamepadEnabled;
+extern bool gGamepadConnected;
+extern unsigned long gGamepadLastStopTime;
+extern TaskHandle_t gGamepadTaskHandle;
 
 // Gamepad internal start (called by queue processor)
-const char* startGamepadInternal();
+bool gamepadStartInternal();
 
 // Gamepad control functions
-void pollGamepad();
+void gamepadPoll();
 
 // Gamepad initialization functions
-bool initGamepad();
-bool initGamepadConnection();
-void readGamepad();
+bool gamepadInit();
+bool gamepadInitConnection();
+void gamepadPoll();
 
 // Accessor functions (for MQTT and other modules)
-int getGamepadX();
-int getGamepadY();
-uint32_t getGamepadButtons();
+int gamepadGetX();
+int gamepadGetY();
+uint32_t gamepadGetButtons();
 
 // Command registry (for system_utils.cpp module list)
 struct CommandEntry;
