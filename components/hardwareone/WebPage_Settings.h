@@ -979,7 +979,155 @@ window.sendSequential = function(cmds, onDone, onFail) {
 <script>
 (function(){
   var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',camera:'Camera',microphone:'Microphone',gps:'GPS',rtc:'RTC',presence:'Presence',fmradio:'FM Radio',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps',datetime:'Date / Time'};
-  function sw(cmd,grp,on,isAll){return '<label class="dbg-sw"><input type="checkbox" class="dbg-cb" data-cmd="'+cmd+'"'+(grp?' data-group="'+grp+'"':'')+(isAll?' data-all="1"':'')+(on?' checked':'')+'><span class="sl"></span></label>';}
+  // Hover help for each debug flag. Keyed by the CLI cmdKey so it survives
+  // label changes. Missing keys fall back to a generic group-level hint.
+  var HELP={
+    // authentication
+    debugauth:"Master toggle for all authentication-related debug logs — sessions, cookies, login, boot ID.",
+    debugauthsessions:"Logs session creation, lookup, expiry, and invalidation across the web and CLI transports.",
+    debugauthcookies:"Logs Set-Cookie responses and the parsed session cookies seen on each incoming request.",
+    debugauthlogin:"Logs each login attempt: username seen, credential match result, session issued.",
+    debugauthbootid:"Logs the per-boot auth ID that invalidates all sessions across a reboot. Useful for diagnosing unexpected logouts.",
+    // http
+    debughttp:"Master toggle for HTTP server debug logs (handlers, requests, responses, streaming).",
+    debughttphandlers:"Logs handler registration and dispatch when a URI matches a registered handler.",
+    debughttprequests:"Logs every incoming request line, method, URI, and parsed headers.",
+    debughttpresponses:"Logs each response status code, Content-Length, and the handler that produced it.",
+    debughttpstreaming:"Logs chunked-response streaming progress including chunk sizes and flush boundaries.",
+    // sse
+    debugsse:"Master toggle for Server-Sent Events debug output.",
+    debugsseconnection:"Logs SSE client connect / disconnect and subscription lifecycle.",
+    debugsseevents:"Logs each event dispatched (event type, channel, payload size).",
+    debugssebroadcast:"Logs the SSE broadcast fanout — which subscribers each event is delivered to.",
+    // wifi
+    debugwifi:"Master toggle for WiFi subsystem logs.",
+    debugwificonnection:"Logs state transitions: connecting, connected, disconnected, reconnect attempts.",
+    debugwificonfig:"Logs saved-network config loads and credential writes.",
+    debugwifiscanning:"Logs scan starts, AP list results, and signal strengths.",
+    debugwifidriver:"Low-level WiFi driver events from the ESP-IDF wifi event loop. Verbose.",
+    // storage
+    debugstorage:"Master toggle for LittleFS storage-subsystem logs.",
+    debugstoragefiles:"Logs file open / read / write / close / rename operations.",
+    debugstoragejson:"Logs JSON parse and serialize operations against saved files.",
+    debugstoragesettings:"Logs settings-file load and save cycles.",
+    debugstoragemigration:"Logs settings-schema migrations applied during load.",
+    // esp-now
+    debugespnow:"Master toggle for ESP-NOW subsystem logs.",
+    debugespnowstream:"Logs streaming-protocol frames (data, ack, resume).",
+    debugespnowcore:"Core driver events: peer add/remove, send status, TX callbacks.",
+    debugespnowrouter:"Logs the command router that decides whether an RPC runs locally or forwards to a bonded peer.",
+    debugespnowmesh:"Logs mesh/discovery heartbeats and peer table updates.",
+    debugespnowtopo:"Logs topology changes — new neighbors, lost peers, link-quality updates.",
+    debugespnowencryption:"Logs LMK/PMK key installation and encrypted peer handshakes.",
+    debugespnowmetadata:"Logs metadata-sync frames exchanged between bonded peers.",
+    // bluetooth
+    debugbluetooth:"Master toggle for BLE debug output (server mode).",
+    debugbluetoothcore:"Logs BLE stack init, advertise start/stop, GAP events.",
+    debugbluetoothgatt:"Logs GATT service/characteristic registration and read/write operations.",
+    debugbluetoothdata:"Logs raw data flowing through GATT characteristics — verbose.",
+    // system
+    debugsystem:"Master toggle for core-system debug logs.",
+    debugsystemboot:"Logs the boot sequence — component init, setup phases, timing.",
+    debugsystemconfig:"Logs runtime config reads and build-flag feature status.",
+    debugsystemtasks:"Logs FreeRTOS task creation, deletion, and stack-watermark snapshots.",
+    debugsystemhardware:"Logs hardware probes (I2C ping, peripheral detection) during boot.",
+    // users
+    debugusers:"Master toggle for user-management debug logs.",
+    debugusersmgmt:"Logs admin user-management actions: create, delete, promote, demote.",
+    debugusersregister:"Logs registration requests and approval/denial flow.",
+    debugusersquery:"Logs user-lookup queries (e.g. isValidUser, getRole).",
+    // cli
+    debugcli:"Master toggle for CLI-subsystem debug output.",
+    debugcliexecution:"Logs each CLI command as it executes — user, source, result.",
+    debugcliqueue:"Logs the CLI command queue: enqueue, dequeue, pending count.",
+    debugclivalidation:"Logs the validate-only pass used to check commands before execution.",
+    // commands
+    debugcommandflow:"Master toggle for command-dispatch pipeline logs.",
+    debugcommandsystem:"Logs the command-registry system: module registration, command lookup.",
+    debugcmdflowrouting:"Logs which destination a command is routed to (local vs. bonded peer).",
+    debugcmdflowqueue:"Logs the command-dispatch queue internals.",
+    debugcmdflowcontext:"Logs the auth context (user, source, session) attached to each executing command.",
+    // performance
+    debugperformance:"Master toggle for performance-monitoring logs.",
+    debugperfstack:"Periodic task stack-watermark dumps so you can spot tasks approaching their limit.",
+    debugperfheap:"Periodic heap-free and largest-free-block snapshots to track fragmentation.",
+    debugperftiming:"Logs timing of key operations (scheduler ticks, sensor polls, render passes).",
+    // automations
+    debugautomations:"Master toggle for automation-system debug logs.",
+    debugautoscheduler:"Logs scheduler ticks and which automations are evaluated each cycle.",
+    debugautoexec:"Logs each automation execution — commands fired, results broadcast.",
+    debugautocondition:"Logs IF/THEN condition evaluation inside automation command lists.",
+    debugautotiming:"Logs nextAt computation and post-fire reschedule details. Noisy when many automations exist.",
+    // sensors
+    debugsensors:"Master toggle for shared sensor-subsystem logs.",
+    debugsensorsgeneral:"General sensor-queue events: start/stop requests, init failures, clock-rate changes.",
+    // per-sensor (each is its own group with just 'enabled')
+    debugcamera:"All camera (OV2640/OV3660) debug output: init, frame capture, streaming.",
+    debugmicrophone:"All microphone debug output: I2S init, recording sessions, level calculation.",
+    debuggps:"All GPS debug output: NMEA parsing, fix acquisition, cached coordinate updates.",
+    debugrtc:"All RTC debug output: DS3231 reads, NTP sync, anchor writes.",
+    debugpresence:"All presence-sensor (STHS34PF80) debug output: presence/motion detections.",
+    debugfmradio:"All FM Radio (RDA5807) debug output: tune, scan, RDS station name/text, signal.",
+    // thermal
+    debugthermal:"Master toggle for thermal camera (MLX90640) debug.",
+    debugthermalframe:"Logs per-frame capture timing — very noisy at higher frame rates.",
+    debugthermaldata:"Logs the raw pixel values / min-max-avg stats of each captured frame. Extremely verbose.",
+    // imu
+    debugimu:"Master toggle for IMU (BNO055) debug.",
+    debugimuframe:"Logs each IMU poll cycle (orientation + accel + gyro).",
+    debugimudata:"Logs the raw quaternion and Euler-angle values read from the sensor. Verbose.",
+    // gamepad
+    debuggamepad:"Master toggle for Seesaw gamepad debug.",
+    debuggamepadframe:"Logs each gamepad read cycle (stick + button snapshot).",
+    debuggamepaddata:"Logs the raw button mask and stick XY values. Verbose.",
+    // tof
+    debugtof:"Master toggle for Time-of-Flight (VL53L4CX) debug.",
+    debugtofframe:"Logs each ToF measurement frame — detected objects, distances, statuses.",
+    // apds
+    debugapds:"Master toggle for APDS9960 debug (color + proximity + gesture).",
+    debugapdsframe:"Logs each APDS poll cycle — RGB color, clear, proximity, gesture events.",
+    // maps
+    debugmaps:"Master toggle for offline-maps subsystem debug.",
+    debugmapsloading:"Logs tile file opens and chunk reads from LittleFS.",
+    debugmapsrendering:"Logs map-render passes and buffer writes to the OLED.",
+    debugmapsperf:"Performance counters for map rendering: per-tile draw time, cache hit rate.",
+    // llm
+    debugllm:"Master toggle for on-device LLM debug (when ENABLE_ONDEVICE_LLM is built in).",
+    debugllmload:"Logs model checkpoint loading and weight-tensor allocation.",
+    debugllmtokenizer:"Logs tokenizer operations — encode and decode calls.",
+    debugllmforward:"Logs forward-pass execution steps. Very verbose during generation.",
+    debugllmgenerate:"Logs token generation — prompts, sampled tokens, termination conditions.",
+    debugllmmemory:"Logs PSRAM allocations and model memory footprint.",
+    // datetime
+    debugdatetime:"Master toggle for NTP / DateTime subsystem debug.",
+    debugdatetimesync:"Logs the NTP sync loop — requests, responses, drift calculations.",
+    debugdatetimesetup:"Logs configTime() calls and timezone parsing.",
+    debugdatetimeanchor:"Logs boot-anchor timestamps used to recover time across reboots.",
+    debugdatetimeresolve:"Logs timestamp-resolution calls used when no RTC/NTP is available.",
+    // standalone (no group)
+    debuglogger:"Logs the logger subsystem itself — mostly for debugging the debug infrastructure.",
+    debugmemory:"Enables periodic memory reports (DRAM, PSRAM, task stacks) in the log.",
+    debugsettingssystem:"Logs settings-module registration and validation errors.",
+    debugg2:"Even Realities G2 glasses debug (planned feature — not yet working).",
+    debugi2c:"Logs low-level I2C bus transactions: start, address, ack/nack, clock changes.",
+    debugmqtt:"Logs MQTT client connection, publish, subscribe, and message delivery.",
+    webconsole:"Adds a floating debug console overlay to the web UI itself. Distinct from the logs shown via this page.",
+    loglevel:"Minimum severity that gets printed: Error, Warn, Info, or Debug. Debug is most verbose.",
+    memorysampleintervalsec:"How often (in seconds) the memory monitor records a snapshot. Lower = more detail, more CPU."
+  };
+  // Generic fallback for group sub-flags not in the map above.
+  function helpFor(cmd, grp, isAll){
+    if(HELP[cmd]) return HELP[cmd];
+    var gl = GL[grp] || grp || '';
+    if(isAll) return 'Master toggle for all ' + gl + ' debug output.';
+    return gl ? (gl + ' debug flag.') : '';
+  }
+  function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  function sw(cmd,grp,on,isAll){
+    var tip = esc(helpFor(cmd, grp, isAll));
+    var tAttr = tip ? ' title="'+tip+'"' : '';
+    return '<label class="dbg-sw"'+tAttr+'><input type="checkbox" class="dbg-cb" data-cmd="'+cmd+'"'+(grp?' data-group="'+grp+'"':'')+(isAll?' data-all="1"':'')+(on?' checked':'')+'><span class="sl"></span></label>';
+  }
   Promise.all([
     fetch('/api/settings/schema',{credentials:'include'}).then(function(r){return r.json();}),
     fetch('/api/settings',{credentials:'include'}).then(function(r){return r.json();})
@@ -1001,12 +1149,17 @@ window.sendSequential = function(cmds, onDone, onFail) {
       ge.forEach(function(e){if(e.key==='enabled')pe=e;else ce.push(e);});
       var gd=dbg[gn]||{},anyOn=false;
       ge.forEach(function(e){if(gd[e.key])anyOn=true;});
-      h+='<div class="dbg-card'+(anyOn?' on':'')+'" id="'+gid+'">';
-      h+='<div class="dbg-card-hdr" onclick="dbgToggleAll(\''+gn+'\')"><span class="dbg-dot"></span><span>'+gl+'</span></div>';
+      // Group-level hint: prefer the 'enabled' entry's help text; fall back to generic.
+      var groupTip = '';
+      if (pe) groupTip = helpFor(pe.cmdKey || pe.key, gn, true);
+      else groupTip = 'Master toggle for all ' + gl + ' debug output.';
+      h+='<div class="dbg-card'+(anyOn?' on':'')+'" id="'+gid+'" title="'+esc(groupTip)+'">';
+      h+='<div class="dbg-card-hdr" onclick="dbgToggleAll(\''+gn+'\')" title="'+esc(groupTip)+'"><span class="dbg-dot"></span><span>'+gl+'</span></div>';
       ge.forEach(function(e){
         var v=!!(e.key==='enabled'?gd.enabled:gd[e.key]);
         var lbl=e.key==='enabled'?'All':'&ensp;'+e.label;
-        h+='<div class="dbg-row"><span class="lbl">'+lbl+'</span>'+sw(e.cmdKey||e.key,gn,v,e.key==='enabled')+'</div>';
+        var rowTip = esc(helpFor(e.cmdKey||e.key, gn, e.key==='enabled'));
+        h+='<div class="dbg-row" title="'+rowTip+'"><span class="lbl">'+lbl+'</span>'+sw(e.cmdKey||e.key,gn,v,e.key==='enabled')+'</div>';
       });
       h+='</div>';
     });
@@ -1016,7 +1169,8 @@ window.sendSequential = function(cmds, onDone, onFail) {
       h+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:0.45rem;margin-top:0.7rem">';
       boolSA.forEach(function(e){
         var v=!!dbg[e.key];
-        h+='<div class="dbg-pill'+(v?' on':'')+'"><span class="lbl">'+e.label+'</span>'+sw(e.cmdKey||e.key,'',v)+'</div>';
+        var pillTip = esc(helpFor(e.cmdKey||e.key, '', false));
+        h+='<div class="dbg-pill'+(v?' on':'')+'" title="'+pillTip+'"><span class="lbl">'+e.label+'</span>'+sw(e.cmdKey||e.key,'',v)+'</div>';
       });
       h+='</div>';
     }
@@ -1024,17 +1178,19 @@ window.sendSequential = function(cmds, onDone, onFail) {
       h+='<div style="margin-top:0.7rem;display:flex;flex-wrap:wrap;gap:0.6rem 1.5rem;align-items:center">';
       cfgSA.forEach(function(e){
         var v=dbg[e.key];if(v===undefined)v=e['default'];var cmd=e.cmdKey||e.key;
+        var cfgTip = esc(helpFor(cmd, '', false));
+        var tAttr = cfgTip ? ' title="'+cfgTip+'"' : '';
         if(e.key==='logLevel'){
-          h+='<div style="display:flex;align-items:center;gap:0.5rem"><span style="font-size:0.88rem;color:var(--panel-fg)">'+e.label+'</span>';
-          h+='<select class="dbg-input form-input" data-cmd="'+cmd+'" style="width:130px">';
+          h+='<div style="display:flex;align-items:center;gap:0.5rem"'+tAttr+'><span style="font-size:0.88rem;color:var(--panel-fg)">'+e.label+'</span>';
+          h+='<select class="dbg-input form-input" data-cmd="'+cmd+'" style="width:130px"'+tAttr+'>';
           h+='<option value="0"'+(v===0?' selected':'')+'>Error</option>';
           h+='<option value="1"'+(v===1?' selected':'')+'>Warn</option>';
           h+='<option value="2"'+(v===2?' selected':'')+'>Info</option>';
           h+='<option value="3"'+(v===3?' selected':'')+'>Debug</option></select></div>';
         } else {
-          h+='<div style="display:flex;align-items:center;gap:0.5rem"><span style="font-size:0.88rem;color:var(--panel-fg)">'+e.label+'</span>';
+          h+='<div style="display:flex;align-items:center;gap:0.5rem"'+tAttr+'><span style="font-size:0.88rem;color:var(--panel-fg)">'+e.label+'</span>';
           var mi=e.min!==undefined?' min="'+e.min+'"':'',ma=e.max!==undefined?' max="'+e.max+'"':'';
-          h+='<input type="number" class="dbg-input form-input" data-cmd="'+cmd+'" value="'+v+'"'+mi+ma+' style="width:80px"></div>';
+          h+='<input type="number" class="dbg-input form-input" data-cmd="'+cmd+'" value="'+v+'"'+mi+ma+' style="width:80px"'+tAttr+'></div>';
         }
       });
       h+='</div>';

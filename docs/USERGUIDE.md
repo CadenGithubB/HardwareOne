@@ -1,4 +1,4 @@
-# Hardware One v0.91 — User Guide
+# Hardware One v0.92 — User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 

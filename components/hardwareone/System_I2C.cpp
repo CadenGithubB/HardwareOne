@@ -1722,7 +1722,7 @@ void sensorStatusBumpWith(const char* cause) {
 const char* buildSensorStatusJson() {
   // PSRAM buffer allocated once, reused forever (zero stack impact)
   static char* buf = nullptr;
-  static const size_t kBufSize = 1024;
+  static const size_t kBufSize = 2048;
 
   if (!buf) {
     buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "sensor.status.json");
@@ -1828,14 +1828,30 @@ const char* buildSensorStatusJson() {
 #if ENABLE_CAMERA_SENSOR
   extern bool gCameraEnabled;
   extern bool cameraStreaming;
+  extern bool videoRecording;
   doc["cameraEnabled"] = gCameraEnabled;
   doc["cameraStreaming"] = cameraStreaming;
+  doc["cameraRecording"] = videoRecording;
   doc["cameraCompiled"] = true;
 #else
   doc["cameraEnabled"] = false;
   doc["cameraStreaming"] = false;
+  doc["cameraRecording"] = false;
   doc["cameraCompiled"] = false;
 #endif
+
+  // Storage availability — exposed so UI can gate features like video
+  // recording that require SD card. Two distinct states:
+  //   sdAvailable = driver says card is mounted (SD.begin succeeded)
+  //   sdWritable  = round-trip write probe has actually succeeded
+  // The UI should gate "requires SD write" features on sdWritable, while
+  // diagnostics / file listing can use sdAvailable.
+  {
+    extern bool sdCardIsMountedForStatus();
+    extern bool sdCardIsWritableForStatus();
+    doc["sdAvailable"] = sdCardIsMountedForStatus();
+    doc["sdWritable"]  = sdCardIsWritableForStatus();
+  }
 
 #if ENABLE_MICROPHONE_SENSOR
   extern bool gMicEnabled;

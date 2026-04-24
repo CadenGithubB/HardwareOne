@@ -4,6 +4,39 @@
 #include <Arduino.h>
 #include <FS.h>
 
+// ============================================================================
+// VFS — Virtual File System dispatcher
+// ============================================================================
+// VFS is a thin routing layer that dispatches filesystem operations to either
+// LittleFS (internal flash) or the SD card library based on path prefix. It
+// does NOT replace LittleFS — it uses LittleFS (and the SD library) under
+// the hood.
+//
+// Routing rule (via `getStorageType`):
+//   - Paths beginning with "/sd/..." (or exactly "/sd") → SD card
+//   - Everything else → LittleFS
+//
+// There is no automatic overflow in the routing layer itself. A call like
+//   VFS::open("/system/settings.json", "w")
+// will always write to LittleFS. The write may fail if LittleFS is full; it
+// will NOT silently end up on SD. This is intentional: state files (users,
+// settings, automations) must have a single source of truth.
+//
+// Overflow is OPT-IN, via `resolveOverflowPath` + a normal `VFS::open` on
+// the resolved path. When LittleFS free space drops below a threshold, that
+// function rewrites primary paths like "/logs/foo.csv" to their SD mirror
+// "/sd/logs/foo.csv". The rewrite is latched until reboot so a single log
+// stream doesn't split across tiers mid-session.
+//
+// Convention for callers:
+//   - State files (settings, users, automations, mesh config, etc.)
+//     → call VFS::open directly. They stay on LittleFS; writes fail cleanly
+//       when flash is full rather than splitting across tiers.
+//   - Append-only bulk data (logs, sensor captures, recordings)
+//     → call resolveOverflowPath first to get the overflow-aware path, then
+//       VFS::open / VFS::exists / VFS::rename / VFS::remove on that path.
+//       Rotation and cap enforcement happens on whichever tier is active.
+
 namespace VFS {
 
 enum StorageType {
@@ -15,7 +48,32 @@ enum StorageType {
 bool init();
 
 bool isLittleFSReady();
+
+/**
+ * "Driver-level" SD availability: true iff SD.begin() has succeeded and the
+ * mount hasn't been torn down. This does NOT prove files can actually be
+ * written — a card can mount but fail writes (bad sector where the next
+ * file happens to land, card yanked since, write-protect tab, filesystem
+ * errors). For gating UI around "can we record to SD" use isSDWritable().
+ */
 bool isSDAvailable();
+
+/**
+ * Round-trip-verified writability. Returns true only if a write+read+delete
+ * probe has succeeded on the card recently. If the cached state is false
+ * but the card is mounted, a lazy re-probe is attempted — this gives free
+ * auto-recovery for cards that were briefly glitchy. Cheap when cached,
+ * ~a few ms when re-probing. Use this for anything that's about to do a
+ * real write (video recording, log overflow, image save).
+ */
+bool isSDWritable();
+
+/**
+ * Callers that attempt an SD write and see it fail should call this with
+ * a short reason string. It invalidates the cached writable flag so the
+ * next isSDWritable() query re-probes. Cheap.
+ */
+void noteSDWriteFailure(const char* hint);
 
 // SD card management
 bool remountSD();
@@ -34,6 +92,47 @@ bool rename(const String& pathFrom, const String& pathTo);
 bool rmdir(const String& path);
 
 bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint64_t& freeBytes);
+
+// ============================================================================
+// Overflow-aware path resolution (opt-in for append-only data)
+// ============================================================================
+
+/** Map a primary LittleFS log path to itself, OR to its /sd mirror once
+ *  LittleFS free space drops below `reserveBytes`. Once the overflow latch
+ *  fires, all subsequent resolutions return the SD mirror (until reboot).
+ *
+ *  Use for append-only bulk data that's safe to split across tiers: logs,
+ *  captures, recordings. DO NOT use for state files like settings.json,
+ *  users.json, or automations.json — those must stay single-source-of-truth.
+ *
+ *  @param primaryPath LittleFS path, e.g. "/system/log.txt"
+ *  @param reserveBytes Minimum LittleFS free bytes before overflow triggers.
+ *                     The global floor (100 KB) is applied as a minimum.
+ *  @param outPath Destination buffer for the resolved path
+ *  @param outPathLen Size of `outPath`
+ *  @return true if the resolved path is on SD (overflow active), false if LittleFS
+ */
+bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
+                         char* outPath, size_t outPathLen);
+
+/** True if the overflow latch has fired this session. */
+bool isLogOverflowActive();
+
+/** Cached LittleFS free bytes (refreshed at most every 2s). */
+size_t getCachedLittleFsFree();
+
+/** Invalidate the cached free-space reading immediately. Call after unusual
+ *  events that change free space by a lot — VFS::remove and VFS::rename do
+ *  this automatically. */
+void invalidateLittleFsFreeCache();
+
+/** Tell the free-space cache that approximately `bytes` have been written
+ *  to LittleFS since its last refresh. When the cumulative hint exceeds an
+ *  internal threshold the cache is forced to refresh on the next query,
+ *  so heavy write bursts can't sneak past a stale reading. Cheap: a single
+ *  counter add. High-volume writers (appendLineWithCap, image saves) call
+ *  this after a successful write. */
+void noteLittleFsBytesWritten(size_t bytes);
 
 }  // namespace VFS
 

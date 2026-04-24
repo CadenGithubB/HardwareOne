@@ -83,7 +83,26 @@ static void broadcastMultilineReport(const char* text) {
 
 namespace VFS {
 
-static bool gSdMounted = false;
+static bool gSdMounted  = false;  // driver-level: SD.begin() succeeded
+static bool gSdWritable = false;  // probe-verified: a write round-trip worked
+
+// Why both flags exist:
+//   A card can be "mounted" (driver initialized OK) but not actually writable:
+//   flaky contacts, write-protect tab, wrong filesystem, full disk, card
+//   physically yanked since last success. Arduino SD.begin only checks card
+//   IDENT; it doesn't prove file ops will succeed. Callers that care about
+//   "can I actually write a file here" (the video recorder, log overflow,
+//   image saves) should check isSDWritable() and gate their UI on that.
+//   Everything that just cares about "driver says it's there" (file browser
+//   listing, diagnostics) can stay on isSDAvailable().
+//
+// Lifecycle:
+//   tryMountSD succeeds     → gSdMounted=true, probe runs → gSdWritable=?
+//   probe succeeds          → gSdWritable=true
+//   any caller's write      → if it fails, noteSDWriteFailure() → gSdWritable=false
+//   next isSDWritable() call → re-probe if gSdMounted but !gSdWritable
+//   unmount / mount failure → both false
+static bool probeSDWriteInternal();  // fwd decl
 
 // Fully tear down SPI + SD so tryMountSD() can start from a clean slate.
 static void spiTeardown() {
@@ -144,6 +163,12 @@ static bool tryMountSD() {
         INFO_STORAGEF("[SD] Mount SUCCESS at %lu Hz (attempt %d)",
                       freq, attempt + 1);
         gSdMounted = true;
+        // Prove writability with a round-trip probe. If the card is
+        // present but e.g. write-protected or has a bad sector where
+        // SD.open lands, we want to know now, not the first time the
+        // video recorder tries to create a file.
+        gSdWritable = probeSDWriteInternal();
+        INFO_STORAGEF("[SD] Write probe: %s", gSdWritable ? "PASS" : "FAIL");
         return true;
       }
       DEBUG_STORAGEF("[SD]   Failed at %lu Hz", freq);
@@ -159,6 +184,7 @@ static bool tryMountSD() {
   WARN_STORAGEF("[SD] All mount attempts exhausted");
 #endif
   gSdMounted = false;
+  gSdWritable = false;
   return false;
 }
 
@@ -171,8 +197,102 @@ bool isLittleFSReady() {
   return filesystemReady;
 }
 
+// Write a tiny probe file, read it back, delete it. Returns true only if all
+// three succeed. Deliberately minimal — 13 bytes — so the cost is negligible.
+// Logs which stage failed so the operator can tell a write-protected / dirty
+// filesystem ("fopen failed") apart from a real data-integrity issue
+// ("readback mismatch") apart from path quirks.
+//
+// Filename choice matters: some FAT drivers handle leading-dot filenames
+// oddly (no 8.3 basename). HWPROBE.TMP is 8.3-safe and all-caps so it round-
+// trips cleanly on any FAT implementation.
+static bool probeSDWriteInternal() {
+#if defined(SD_CS_PIN)
+  if (!gSdMounted) return false;
+  const char* kProbePath = "/HWPROBE.TMP";
+  const char* kProbeData = "hwone-sdtest\n";  // 13 bytes
+  const size_t kProbeLen = 13;
+
+  // Stage 1: create + write.
+  // NOTE: the third arg `create=true` is essential on ESP32 Arduino's SD
+  // library. The two-arg form `SD.open(path, FILE_WRITE)` defaults create
+  // to false, so if the path doesn't already exist the call returns a null
+  // File — even though the card is fully writable. This bit us hard with
+  // the original probe and the first version of the video recorder.
+  File f = SD.open(kProbePath, FILE_WRITE, true);
+  if (!f) {
+    INFO_STORAGEF("[SD probe] FAIL stage=open_write path=%s — card refuses file creation (RO / dirty / full)", kProbePath);
+    return false;
+  }
+  size_t wrote = f.write((const uint8_t*)kProbeData, kProbeLen);
+  f.flush();
+  f.close();
+  if (wrote != kProbeLen) {
+    INFO_STORAGEF("[SD probe] FAIL stage=write wrote=%u expected=%u — partial write, likely FS full or corrupt",
+                  (unsigned)wrote, (unsigned)kProbeLen);
+    SD.remove(kProbePath);
+    return false;
+  }
+
+  // Stage 2: read back
+  File r = SD.open(kProbePath, FILE_READ);
+  if (!r) {
+    INFO_STORAGEF("[SD probe] FAIL stage=open_read path=%s — write succeeded but file vanished", kProbePath);
+    return false;
+  }
+  char buf[16] = {0};
+  size_t got = r.read((uint8_t*)buf, kProbeLen);
+  r.close();
+  if (got != kProbeLen || memcmp(buf, kProbeData, kProbeLen) != 0) {
+    INFO_STORAGEF("[SD probe] FAIL stage=readback got=%u expected=%u match=%d — data integrity issue",
+                  (unsigned)got, (unsigned)kProbeLen,
+                  (got == kProbeLen && memcmp(buf, kProbeData, kProbeLen) == 0) ? 1 : 0);
+    SD.remove(kProbePath);
+    return false;
+  }
+
+  // Stage 3: cleanup
+  if (!SD.remove(kProbePath)) {
+    INFO_STORAGEF("[SD probe] warn: write+read OK but delete failed path=%s", kProbePath);
+    // Not a fatal probe failure — we successfully wrote data, reading it back
+    // proved writes work. A stuck orphan file is cosmetic.
+  }
+  return true;
+#else
+  return false;
+#endif
+}
+
 bool isSDAvailable() {
   return gSdMounted;
+}
+
+// Writable check — re-probes lazily if the state was invalidated via
+// noteSDWriteFailure(). This gives us "auto-recover" behaviour: if a card
+// was yanked and re-inserted and a later probe succeeds, we flip back to
+// writable without needing an explicit remount.
+bool isSDWritable() {
+  if (!gSdMounted) return false;
+  if (gSdWritable) return true;
+  // Not currently writable — maybe it was, maybe it is again. Try once.
+  FsLockGuard guard("VFS.sdProbeLazy");
+  if (probeSDWriteInternal()) {
+    INFO_STORAGEF("[SD] Write probe now succeeding — card is writable again");
+    gSdWritable = true;
+    return true;
+  }
+  return false;
+}
+
+// Callers that attempt an SD write and see it fail should call this to
+// invalidate the cached writable flag. Next isSDWritable() query will
+// re-probe. Cheap — single bool write.
+void noteSDWriteFailure(const char* hint) {
+  if (gSdWritable) {
+    WARN_STORAGEF("[SD] Write failure reported (%s); marking card not writable",
+                  hint ? hint : "unspecified");
+  }
+  gSdWritable = false;
 }
 
 StorageType getStorageType(const String& path) {
@@ -279,7 +399,10 @@ bool remove(const String& path) {
 
   if (!filesystemReady) return false;
   bool ok = LittleFS.remove(p);
-  if (ok) notifyFileDeleted(p.c_str());
+  if (ok) {
+    notifyFileDeleted(p.c_str());
+    invalidateLittleFsFreeCache();  // free space just grew; don't trust the stale reading
+  }
   return ok;
 }
 
@@ -302,7 +425,9 @@ bool rename(const String& pathFrom, const String& pathTo) {
   }
 
   if (!filesystemReady) return false;
-  return LittleFS.rename(from, to);
+  bool ok = LittleFS.rename(from, to);
+  if (ok) invalidateLittleFsFreeCache();  // rename-over-existing freed the overwritten file
+  return ok;
 }
 
 bool rmdir(const String& path) {
@@ -341,11 +466,130 @@ bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint6
   return true;
 }
 
+// ============================================================================
+// Overflow-aware path resolution (opt-in tier)
+// ============================================================================
+// See System_VFS.h for the design contract. Tl;dr: append-only log code asks
+// resolveOverflowPath to either return the primary LittleFS path OR switch to
+// the /sd mirror once LittleFS free space is below the reserve floor. The
+// latch is session-scoped (reboot clears it) to keep a single log stream on
+// one tier.
+
+// Global floor: LittleFS free bytes below which any caller's request tips the
+// overflow latch. This headroom is preserved for NON-log writes (settings
+// saves, automations.json edits, user sessions, image captures) so those
+// operations continue to succeed even after logs have moved to SD.
+static constexpr size_t LOG_OVERFLOW_DEFAULT_RESERVE = 100 * 1024;  // 100 KB margin
+
+static bool           gLogOverflowActive   = false;
+static bool           gLogOverflowWarned   = false;
+static unsigned long  gLogFreeCheckLastMs  = 0;
+static size_t         gLogFreeCheckCached  = SIZE_MAX;
+
+// Rough bytes-written-since-refresh counter. Incremented by
+// `noteLittleFsBytesWritten` after any successful LittleFS-targeted write,
+// checked by `refreshLittleFsFreeCached` to force a refresh when cumulative
+// writes exceed a threshold — prevents stale cached-free-space from misleading
+// the overflow decision during write-heavy bursts that land between the
+// time-based 2s refreshes.
+static size_t gLogFreeBytesWrittenSinceRefresh = 0;
+
+// Threshold that forces a cache refresh regardless of age. 32 KB chosen as
+// roughly one-tenth the default LOG_OVERFLOW_DEFAULT_RESERVE of 100 KB, so
+// the cache can at worst be wrong by ~32 KB before overflow kicks in.
+static constexpr size_t LOG_FREE_CACHE_BYTES_THRESHOLD = 32 * 1024;
+
+static size_t refreshLittleFsFreeCached() {
+  unsigned long now = millis();
+  const bool stale       = (now - gLogFreeCheckLastMs) > 2000;
+  const bool writePressure = gLogFreeBytesWrittenSinceRefresh >= LOG_FREE_CACHE_BYTES_THRESHOLD;
+  if (gLogFreeCheckCached == SIZE_MAX || stale || writePressure) {
+    FsLockGuard guard("VFS.overflowFreeCheck");
+    size_t total = LittleFS.totalBytes();
+    size_t used  = LittleFS.usedBytes();
+    gLogFreeCheckCached = (total > used) ? (total - used) : 0;
+    gLogFreeCheckLastMs = now;
+    gLogFreeBytesWrittenSinceRefresh = 0;
+  }
+  return gLogFreeCheckCached;
+}
+
+// Called by LittleFS-targeted writers to keep the free-space cache honest
+// during write bursts. Cheap: just a counter add. Accuracy is approximate —
+// we count bytes the caller claimed to write, not actual LittleFS overhead.
+// That's fine: this is a "force an early refresh" hint, not an accounting ledger.
+void noteLittleFsBytesWritten(size_t bytes) {
+  gLogFreeBytesWrittenSinceRefresh += bytes;
+}
+
+// Explicit invalidation. Callers that remove files or do an unusual large
+// operation can call this to force the next free-space query to hit the
+// filesystem. Cheap (single volatile-ish write).
+void invalidateLittleFsFreeCache() {
+  gLogFreeCheckCached = SIZE_MAX;
+  gLogFreeBytesWrittenSinceRefresh = 0;
+}
+
+size_t getCachedLittleFsFree() { return refreshLittleFsFreeCached(); }
+
+bool isLogOverflowActive() { return gLogOverflowActive; }
+
+bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
+                        char* outPath, size_t outPathLen) {
+  if (!primaryPath || !outPath || outPathLen == 0) return false;
+
+  // Latch into overflow mode if we drop below the reserve margin. The global
+  // default acts as a FLOOR — callers can request a LARGER margin (e.g. the
+  // sensor log passes its rotation-chunk size so overflow triggers before a
+  // full rotation fails) but can't shrink the floor below the global 100KB
+  // safety zone that non-log writes (settings, automations, sessions) depend
+  // on.
+  if (!gLogOverflowActive) {
+    size_t want = LOG_OVERFLOW_DEFAULT_RESERVE;
+    if (reserveBytes > want) want = reserveBytes;
+    if (refreshLittleFsFreeCached() < want) {
+      gLogOverflowActive = true;
+      if (!gLogOverflowWarned) {
+        gLogOverflowWarned = true;
+        WARN_SYSTEMF("[LOG] LittleFS low on free space (%u < %u bytes); new log writes will route to SD overflow",
+                     (unsigned)gLogFreeCheckCached, (unsigned)want);
+      }
+    }
+  }
+
+  if (!gLogOverflowActive) {
+    snprintf(outPath, outPathLen, "%s", primaryPath);
+    return false;
+  }
+
+  // Overflow active: use /sd mirror if SD is mounted. Otherwise fall back
+  // to primary path and accept the silent-loss behavior that existed before
+  // this tiering was added.
+  if (!isSDAvailable()) {
+    snprintf(outPath, outPathLen, "%s", primaryPath);
+    return false;
+  }
+
+  // Defensive: if the caller already passed a /sd path, leave it alone.
+  if (strncmp(primaryPath, "/sd/", 4) == 0 || strcmp(primaryPath, "/sd") == 0) {
+    snprintf(outPath, outPathLen, "%s", primaryPath);
+    return true;
+  }
+
+  if (primaryPath[0] == '/') {
+    snprintf(outPath, outPathLen, "/sd%s", primaryPath);
+  } else {
+    snprintf(outPath, outPathLen, "/sd/%s", primaryPath);
+  }
+  return true;
+}
+
 bool unmountSD() {
 #if defined(SD_CS_PIN)
   if (gSdMounted) {
     SD.end();
     gSdMounted = false;
+    gSdWritable = false;
     return true;
   }
 #endif
@@ -357,6 +601,7 @@ bool remountSD() {
   // Full teardown regardless of current mount state — guarantees a clean bus.
   spiTeardown();
   gSdMounted = false;
+  gSdWritable = false;
   delay(100);
   return tryMountSD();
 #else
@@ -374,6 +619,7 @@ bool formatSD() {
     DEBUG_STORAGEF("[SD FORMAT] Unmounting Arduino SD...");
     SD.end();
     gSdMounted = false;
+    gSdWritable = false;
   }
   SPI.end();  // End Arduino SPI so ESP-IDF can take over
   

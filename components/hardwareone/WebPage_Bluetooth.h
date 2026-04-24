@@ -439,8 +439,10 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       cli('blerequireauth ' + (requireAuthState ? 'on' : 'off')).then(function(o){ setText('bt-cfg-status', o); });
     });
 
-    // Initial load
+    // Initial load — both BLE runtime status and the saved config so toggles
+    // show their real state (On/Off) instead of the placeholder "--".
     refresh();
+    loadConfig();
   });
 })();
 </script>

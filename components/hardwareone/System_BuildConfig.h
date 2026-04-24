@@ -8,13 +8,37 @@
 // ║  Everything below this section is auto-derived or board-specific.         ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ⚠️  CMakeLists.txt PARSES THE FOLLOWING FLAGS BY REGEX
+// ─────────────────────────────────────────────────────────────────────────────
+// These five flags are read as plain text by components/hardwareone/CMakeLists.txt
+// to decide which .cpp files get compiled:
+//
+//     NETWORK_FEATURE_LEVEL, WEB_FEATURE_LEVEL,
+//     ENABLE_MQTT, ENABLE_HTTPS, ENABLE_ONDEVICE_LLM
+//
+// The regex expects EXACTLY this shape, on a single non-indented line:
+//     #define NAME <integer>
+//
+// Do NOT use parentheses, inline comments, expressions, or indentation on
+// these specific lines, e.g. all of the following will silently fall back
+// to 0 and strip features out of the build:
+//     #define WEB_FEATURE_LEVEL (4)            // parentheses break the match
+//     #define WEB_FEATURE_LEVEL 4  // comment  // trailing comment may break
+//       #define WEB_FEATURE_LEVEL 4            // indented — not matched
+//
+// Other flags in this file are only read by the C++ preprocessor and can use
+// any valid macro form.
+// ─────────────────────────────────────────────────────────────────────────────
+
+
 // I2C Feature Level: Controls OLED and I2C sensors
 //   0 = DISABLED   - No I2C (max memory savings)
 //   1 = OLED_ONLY  - OLED display only
 //   2 = STANDALONE - OLED + Gamepad
 //   3 = FULL       - OLED + all sensors
 //   4 = CUSTOM     - Use individual sensor flags below
-#define I2C_FEATURE_LEVEL       0
+#define I2C_FEATURE_LEVEL       4
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CUSTOM SENSOR SELECTION (only used when I2C_FEATURE_LEVEL = 4)
@@ -22,18 +46,19 @@
 // Enable/disable individual sensors for fine-grained control.
 // This allows combinations like OLED + Gamepad + GPS without heavy sensors.
 #if I2C_FEATURE_LEVEL == 4
-  #define CUSTOM_ENABLE_OLED        1   // SSD1306 OLED display
-  #define CUSTOM_ENABLE_GAMEPAD     1   // Adafruit Seesaw gamepad
-  #define CUSTOM_ENABLE_GPS         1   // PA1010D GPS module
-  #define CUSTOM_ENABLE_IMU         1   // BNO055 IMU (uses ~1KB RAM)
-  #define CUSTOM_ENABLE_TOF         1   // VL53L4CX ToF sensor
+  #define CUSTOM_ENABLE_OLED        0   // SSD1306 OLED display
+  #define CUSTOM_ENABLE_GAMEPAD     0   // Adafruit Seesaw gamepad
+  #define CUSTOM_ENABLE_GPS         0   // PA1010D GPS module
+  #define CUSTOM_ENABLE_IMU         0   // BNO055 IMU (uses ~1KB RAM)
+  #define CUSTOM_ENABLE_TOF         0   // VL53L4CX ToF sensor
   #define CUSTOM_ENABLE_THERMAL     0   // MLX90640 thermal camera (uses ~3KB RAM)
   #define CUSTOM_ENABLE_APDS        0   // APDS9960 gesture/proximity
   #define CUSTOM_ENABLE_FM_RADIO    0   // RDA5807 FM radio
-  #define CUSTOM_ENABLE_RTC         1   // DS3231 precision RTC
-  #define CUSTOM_ENABLE_PRESENCE    1   // STHS34PF80 IR presence/motion
-  #define CUSTOM_ENABLE_SERVO      0   // PCA9685 servo controller
+  #define CUSTOM_ENABLE_RTC         0   // DS3231 precision RTC
+  #define CUSTOM_ENABLE_PRESENCE    0   // STHS34PF80 IR presence/motion
+  #define CUSTOM_ENABLE_SERVO       0   // PCA9685 servo controller
 #endif
+
 
 // Network Feature Level: Controls WiFi/ESP-NOW
 //   0 = DISABLED   - No networking
@@ -41,7 +66,7 @@
 //   2 = WIFI_HTTP  - WiFi + HTTP server
 //   3 = WIFI_ESPNOW - WiFi + HTTP + ESP-NOW mesh
 //   4 = CUSTOM     - Use individual CUSTOM_ENABLE_NET_* flags below
-#define NETWORK_FEATURE_LEVEL   2
+#define NETWORK_FEATURE_LEVEL   4
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CUSTOM NETWORK SELECTION (only used when NETWORK_FEATURE_LEVEL = 4)
@@ -62,24 +87,24 @@
 
 #if WEB_FEATURE_LEVEL == 4
   #define CUSTOM_ENABLE_WEB_SENSORS    1
-  #define CUSTOM_ENABLE_WEB_BLUETOOTH  0
+  #define CUSTOM_ENABLE_WEB_BLUETOOTH  1
   #define CUSTOM_ENABLE_WEB_SPEECH     0
   #define CUSTOM_ENABLE_WEB_ESPNOW     1
   #define CUSTOM_ENABLE_WEB_BOND       1
   #define CUSTOM_ENABLE_WEB_MQTT       0
-  #define CUSTOM_ENABLE_WEB_GAMES      1
+  #define CUSTOM_ENABLE_WEB_GAMES      0
   #define CUSTOM_ENABLE_WEB_MAPS       0
 #endif
 
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640)
 //   0 = Disabled, 1 = Enabled
 #ifndef ENABLE_CAMERA_SENSOR
-#define ENABLE_CAMERA_SENSOR    0
+#define ENABLE_CAMERA_SENSOR    1
 #endif
 
 // Microphone: PDM microphone via I2S
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_MICROPHONE_SENSOR 0
+#define ENABLE_MICROPHONE_SENSOR 1
 
 // Battery Monitoring: ADC-based LiPo battery voltage monitoring
 //   0 = Disabled (shows "USB" on OLED), 1 = Enabled (Feather ESP32 GPIO35)
@@ -88,7 +113,7 @@
 
 // Bluetooth: BLE server with GATT services
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_BLUETOOTH        0
+#define ENABLE_BLUETOOTH        1
 
 // Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses
 //   0 = Disabled, 1 = Enabled (requires ENABLE_BLUETOOTH=1)
@@ -125,11 +150,11 @@
 
 // Games: Browser-based games web page
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_GAMES            1
+#define ENABLE_GAMES            0
 
 // Maps: Offline maps and waypoints web page
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_MAPS             1
+#define ENABLE_MAPS             0
 
 // Bond Mode: Two-device bonded pair via ESP-NOW (master/worker)
 //   0 = Disabled, 1 = Enabled (requires ENABLE_ESPNOW=1)
@@ -138,7 +163,7 @@
 
 // Automation: Scheduled tasks and conditional command system
 //   0 = Disabled, 1 = Enabled
-#define ENABLE_AUTOMATION       1
+#define ENABLE_AUTOMATION       0
 
 // Display Type: Hardware display selection
 //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)

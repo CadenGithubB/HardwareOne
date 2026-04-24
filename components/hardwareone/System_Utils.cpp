@@ -696,36 +696,41 @@ extern bool gApdsConnected;
 // File I/O Functions
 // ============================================================================
 
+// NOTE: These helpers route through VFS::open, which dispatches to LittleFS
+// for any path without a "/sd/" prefix. In the current codebase that means
+// EVERY caller (state files: settings.json, users.json, automations.json,
+// etc.) goes to LittleFS. Using VFS here is about API consistency, not
+// behavior change — these state files should never overflow to SD (see the
+// design contract in System_VFS.h).
+
 bool readText(const char* path, String& out) {
   out = "";
-  
+
   // Pause sensor polling during file I/O to prevent I2C contention
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
-  
+
   FsLockGuard guard("readText");
-  File f = LittleFS.open(path, "r");
+  File f = VFS::open(String(path), "r");
   if (!f) {
     gSensorPollingPaused = wasPaused;
     return false;
   }
   out = f.readString();
   f.close();
-  
-  // Resume sensor polling
+
   gSensorPollingPaused = wasPaused;
   return true;
 }
 
 bool writeText(const char* path, const String& in) {
-  // Pause sensor polling during file I/O to prevent I2C contention
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
-  
+
   FsLockGuard guard("writeText");
-  File f = LittleFS.open(path, "w");
+  File f = VFS::open(String(path), "w", true);
   if (!f) {
     gSensorPollingPaused = wasPaused;
     return false;
@@ -734,7 +739,6 @@ bool writeText(const char* path, const String& in) {
   f.flush();
   f.close();
 
-  // Resume sensor polling
   gSensorPollingPaused = wasPaused;
   return true;
 }
@@ -745,16 +749,16 @@ bool writeTextAtomic(const char* path, const String& content) {
   // Write to temp file first
   if (!writeText(tmp.c_str(), content)) return false;
 
-  // Atomic rename (LittleFS rename overwrites destination)
+  // Atomic rename — VFS dispatches to the correct filesystem based on path.
   {
     FsLockGuard guard("atomicRename");
-    if (LittleFS.rename(tmp.c_str(), path)) {
+    if (VFS::rename(tmp, String(path))) {
       return true;
     }
   }
 
   // Fallback: direct write if rename fails
-  LittleFS.remove(tmp.c_str());
+  VFS::remove(tmp);
   return writeText(path, content);
 }
 
@@ -866,25 +870,21 @@ bool appendAutoLogEntry(const char* type, const String& message) {
   line += message;
   line += "\n";
 
-  // Append to file (create if doesn't exist)
-  File f = LittleFS.open(gAutoLogFile, "a");
-  if (!f) {
-    // Try to create directory if it doesn't exist
-    int lastSlash = gAutoLogFile.lastIndexOf('/');
-    if (lastSlash > 0) {
-      String dir = gAutoLogFile.substring(0, lastSlash);
-      if (!LittleFS.exists(dir)) {
-        // Create directory recursively (simple approach for /logging_captures)
-        if (dir == "/logging_captures" && !LittleFS.exists("/logging_captures")) {
-          LittleFS.mkdir("/logging_captures");
-        }
-      }
-    }
+  // Resolve destination — routes to /sd mirror when LittleFS is full.
+  char dest[128];
+  VFS::resolveOverflowPath(gAutoLogFile.c_str(), line.length() + 512,
+                           dest, sizeof(dest));
 
-    // Try to open again after directory creation
-    f = LittleFS.open(gAutoLogFile, "a");
-    if (!f) return false;
+  // Ensure the parent directory exists on whichever FS we're writing to.
+  String destStr(dest);
+  int lastSlash = destStr.lastIndexOf('/');
+  if (lastSlash > 0) {
+    String dir = destStr.substring(0, lastSlash);
+    if (!VFS::exists(dir)) VFS::mkdir(dir);
   }
+
+  File f = VFS::open(destStr, "a", true);
+  if (!f) return false;
 
   size_t written = f.print(line);
   f.close();

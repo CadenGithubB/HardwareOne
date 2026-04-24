@@ -962,6 +962,16 @@ void registerSensorHandlers(httpd_handle_t server) {
   static httpd_uri_t micRecordingFile = { .uri = "/api/recordings/file", .method = HTTP_GET, .handler = handleMicRecordingFile, .user_ctx = NULL };
   httpd_register_uri_handler(server, &micRecordings);
   httpd_register_uri_handler(server, &micRecordingFile);
+
+#if ENABLE_CAMERA_SENSOR
+  // Video recording endpoints (MJPEG-AVI on SD)
+  extern esp_err_t handleVideoRecordingsList(httpd_req_t* req);
+  extern esp_err_t handleVideoRecordingFile(httpd_req_t* req);
+  static httpd_uri_t vidList = { .uri = "/api/videos", .method = HTTP_GET, .handler = handleVideoRecordingsList, .user_ctx = NULL };
+  static httpd_uri_t vidFile = { .uri = "/api/videos/file", .method = HTTP_GET, .handler = handleVideoRecordingFile, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &vidList);
+  httpd_register_uri_handler(server, &vidFile);
+#endif
 }
 
 #endif // ENABLE_HTTP_SERVER
