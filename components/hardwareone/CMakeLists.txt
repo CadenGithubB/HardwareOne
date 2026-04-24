@@ -113,6 +113,7 @@ set(hardwareone_srcs
         System_User.cpp
         System_WiFi.cpp
         System_Camera_DVP.cpp
+        System_Camera_Video.cpp
         System_ImageManager.cpp
         System_EdgeImpulse.cpp
         System_ESPSR.cpp

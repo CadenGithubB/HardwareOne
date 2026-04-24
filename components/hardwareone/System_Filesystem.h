@@ -144,4 +144,20 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes);
  */
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 
+/**
+ * Recover a log file from a partial rotation. `appendLineWithCap` rotates by
+ * writing a sibling `.tmp` file and renaming over the original, which leaves
+ * a small crash-unsafe window. If the reboot hits that window, this call
+ * promotes the `.tmp` back to the canonical path (or removes a stale `.tmp`
+ * if the original survived). Safe to call even when no orphan exists —
+ * it short-circuits on the first `exists()` check.
+ *
+ * Should be called once per known log-file path during boot, after the
+ * filesystem is mounted.
+ */
+void cleanupLogOrphan(const char* path);
+
+// Log-overflow tiering lives in the VFS namespace now. See System_VFS.h for
+// VFS::resolveOverflowPath, VFS::isLogOverflowActive, VFS::getCachedLittleFsFree.
+
 #endif // FILESYSTEM_H

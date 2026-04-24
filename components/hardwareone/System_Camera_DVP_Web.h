@@ -10,6 +10,7 @@
 
 #include <Arduino.h>
 #include "WebServer_Utils.h"
+#include "WebPage_AviPlayer.h"
 #include "System_BuildConfig.h"
 
 #if ENABLE_CAMERA_SENSOR
@@ -29,6 +30,15 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
         <button class='btn' id='btn-camera-stream'>Stream</button>
         <button class='btn' id='btn-camera-stream-stop' style='display:none'>Stop Stream</button>
         <button class='btn' id='btn-camera-save' style='display:none' title='Save current image to storage'>Save Image</button>
+        <button class='btn' id='btn-camera-record' style='display:none' disabled title='Record stream to SD card as MJPEG AVI'>Record</button>
+        <button class='btn' id='btn-camera-record-stop' style='display:none' title='Stop recording and finalize file'>Stop Rec</button>
+      </div>
+      <div id='camera-record-hint' style='display:none;margin-top:6px;font-size:0.85em;color:#856404;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:6px'>SD card required to record video.</div>
+      <div style='margin-top:10px'>
+        <button class='btn' id='btn-camera-recordings-toggle' style='width:100%;background:var(--panel-bg);border:1px solid #dee2e6'>Recordings (<span id='camera-recordings-count'>0</span>)</button>
+      </div>
+      <div id='camera-recordings' style='display:none;margin-top:10px;padding:10px;background:var(--panel-bg);border:1px solid #dee2e6;border-radius:4px'>
+        <div id='camera-recordings-list' style='font-size:0.9em;color:var(--panel-fg)'>No recordings.</div>
       </div>
       <div style='margin-top:10px'>
         <button class='btn' id='btn-camera-adjustments-toggle' style='width:100%;background:var(--panel-bg);border:1px solid #dee2e6' onclick='toggleCameraAdjustments()'>Image Adjustments</button>
@@ -123,17 +133,65 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
     </div>
 
 )HTML", HTTPD_RESP_USE_STRLEN);
+  streamAviPlayerModal(req);
 }
 
 // Stream button bindings for the camera sensor
 inline void streamCameraSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-camera-start','opencamera');bind('btn-camera-stop','closecamera');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req,
+    "bind('btn-camera-start','opencamera');"
+    "bind('btn-camera-stop','closecamera');"
+    // Video recording — bind directly rather than via CLI so we can refresh
+    // the recordings list right after stop.
+    "(function(){var b=document.getElementById('btn-camera-record');if(b){b.onclick=function(){fetch('/api/cli',{method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd=camerarecord%20start'});};}"
+    "var s=document.getElementById('btn-camera-record-stop');if(s){s.onclick=function(){fetch('/api/cli',{method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd=camerarecord%20stop'}).then(function(){setTimeout(loadCameraRecordings,500);});};}"
+    "var t=document.getElementById('btn-camera-recordings-toggle');var d=document.getElementById('camera-recordings');if(t&&d){t.onclick=function(){if(d.style.display==='none'){d.style.display='block';loadCameraRecordings();}else{d.style.display='none';}};}"
+    "})();",
+    HTTPD_RESP_USE_STRLEN);
 }
 
 // Stream camera-specific JavaScript
 inline void streamCameraSensorJs(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "try{console.log('[SENSORS] Loading camera sensor module JS...');}catch(_){ }", HTTPD_RESP_USE_STRLEN);
+
+  // Recordings list loader — fetches /api/videos and renders a small list
+  // with play/download/delete per row. Called when the Recordings panel is
+  // opened and after a recording stops.
+  httpd_resp_send_chunk(req,
+    "window.loadCameraRecordings = function() {\n"
+    "  var listEl = document.getElementById('camera-recordings-list');\n"
+    "  var countEl = document.getElementById('camera-recordings-count');\n"
+    "  fetch('/api/videos', {credentials:'include'}).then(function(r){return r.json();}).then(function(j){\n"
+    "    if (countEl) countEl.textContent = j.count || 0;\n"
+    "    if (!listEl) return;\n"
+    "    if (!j.sdAvailable) { listEl.textContent = 'SD card unavailable.'; return; }\n"
+    "    if (!j.files || j.files.length === 0) { listEl.textContent = 'No recordings.'; return; }\n"
+    "    var html = '';\n"
+    "    j.files.forEach(function(f){\n"
+    "      var kb = Math.round(f.size/1024);\n"
+    "      var dl = '/api/videos/file?name=' + encodeURIComponent(f.name);\n"
+    "      var safe = f.name.replace(/'/g, \"\\\\'\");\n"
+    "      html += '<div style=\"display:flex;align-items:center;gap:6px;margin-bottom:4px\">';\n"
+    "      html += '<span style=\"flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\">' + f.name + ' (' + kb + ' KB)</span>';\n"
+    "      html += '<button class=\"btn\" style=\"padding:2px 8px\" onclick=\"openAviPlayer(\\'' + safe + '\\')\">Play</button>';\n"
+    "      html += '<a href=\"' + dl + '\" class=\"btn\" style=\"padding:2px 8px\">Download</a>';\n"
+    "      html += '<button class=\"btn\" style=\"padding:2px 8px\" onclick=\"deleteCameraRecording(\\'' + safe + '\\')\">Delete</button>';\n"
+    "      html += '</div>';\n"
+    "    });\n"
+    "    listEl.innerHTML = html;\n"
+    "  }).catch(function(e){ if(listEl) listEl.textContent = 'Load failed: ' + e; });\n"
+    "};\n"
+    "window.deleteCameraRecording = function(name) {\n"
+    "  if (!confirm('Delete ' + name + '?')) return;\n"
+    "  fetch('/api/cli', {method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd=cameravideodelete%20' + encodeURIComponent(name)})\n"
+    "    .then(function(){ setTimeout(loadCameraRecordings, 200); });\n"
+    "};\n",
+    HTTPD_RESP_USE_STRLEN);
+
+  // AVI/MJPEG player (client-side) — shared helper emits the parser, state
+  // machine, and window.openAviPlayer entry point.
+  streamAviPlayerJs(req);
 
   // Camera sensor reader - register in window._sensorReaders
   httpd_resp_send_chunk(req,

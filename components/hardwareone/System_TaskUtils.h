@@ -17,7 +17,11 @@ constexpr uint32_t IMU_STACK_WORDS = 4096;           // ~16KB (BNO055 init retri
 constexpr uint32_t TOF_STACK_WORDS = 3072;           // ~12KB
 constexpr uint32_t FMRADIO_STACK_WORDS = 4608;       // ~18KB
 constexpr uint32_t GAMEPAD_STACK_WORDS = 3584;       // ~14KB
-constexpr uint32_t DEBUG_OUT_STACK_WORDS = 3072;     // ~12KB
+constexpr uint32_t DEBUG_OUT_STACK_WORDS = 4096;     // ~16KB — previously 3072 (12KB) but
+                                                     // boot HWM was already ~9KB and a
+                                                     // stack-overflow crash hit during a
+                                                     // burst of [ERROR] appends that each
+                                                     // trigger deep LittleFS/String work.
 constexpr uint32_t APDS_STACK_WORDS = 3072;          // ~12KB
 constexpr uint32_t GPS_STACK_WORDS = 3072;           // ~12KB
 constexpr uint32_t PRESENCE_STACK_WORDS = 3072;      // ~12KB

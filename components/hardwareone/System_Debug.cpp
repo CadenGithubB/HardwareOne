@@ -45,6 +45,10 @@ int gDebugQueueSize = DEBUG_QUEUE_SIZE_MIN; // Runtime queue size (set in initDe
 
 volatile bool gDebugVerbose = false;
 
+// Low-level stack/heap trace toggle — see STACK_TRACEF in System_Debug.h.
+// Runtime-only: not persisted, resets to false on reboot.
+volatile bool gDebugStackTraceEnabled = false;
+
 // Severity-based logging level (default: show everything)
 uint8_t gLogLevel = LOG_LEVEL_DEBUG;
 
@@ -214,11 +218,35 @@ void debugOutputTask(void* parameter) {
         fsUnlock();
       }
 
-      // Error ring buffer (always, independent of routing — errors are always logged)
+      // Error ring buffer (always, independent of routing — errors are always logged).
+      //
+      // Dedupe: suppress file writes for identical [ERROR] lines that arrive
+      // within a short window. A flood of repeating messages (e.g. cam_hal
+      // FB-OVF bursts, empty-command spam) would otherwise trigger a heavy
+      // log rotation on every single occurrence, which once caused a stack
+      // overflow in this task. Serial + web mirror already ran above, so
+      // skipping the file append only suppresses the on-disk duplicate.
       if (filesystemReady && strncmp(msg->text, "[ERROR]", 7) == 0) {
-        String line = buildTimestampPrefix();
-        line += msg->text;
-        appendLineWithCap(LOG_ERROR_FILE, line, LOG_ERROR_CAP);
+        static char     lastErrText[64] = {0};
+        static uint32_t lastErrTimeMs   = 0;
+        const uint32_t  now             = millis();
+        const uint32_t  DEDUPE_WINDOW_MS = 2000;
+
+        bool isDup = (now - lastErrTimeMs < DEDUPE_WINDOW_MS) &&
+                     (strncmp(lastErrText, msg->text, sizeof(lastErrText) - 1) == 0);
+
+        STACK_TRACEF("debug_out.err_entry dup=%d text=%.40s", isDup ? 1 : 0, msg->text);
+
+        if (!isDup) {
+          String line = buildTimestampPrefix();
+          line += msg->text;
+          STACK_TRACEF("debug_out.before_appendLineWithCap");
+          appendLineWithCap(LOG_ERROR_FILE, line, LOG_ERROR_CAP);
+          STACK_TRACEF("debug_out.after_appendLineWithCap");
+          strncpy(lastErrText, msg->text, sizeof(lastErrText) - 1);
+          lastErrText[sizeof(lastErrText) - 1] = '\0';
+          lastErrTimeMs = now;
+        }
       }
 
       // OLED console
@@ -2539,6 +2567,25 @@ const char* cmd_debugstoragemigration(const String& argsInput) {
   return gSettings.debugStorageMigration ? "debugStorageMigration enabled (persistent)" : "debugStorageMigration disabled (persistent)";
 }
 
+// Low-level stack/heap trace toggle (bypasses debug queue, writes directly
+// to Serial). Use only while diagnosing stack-overflow / queue-saturation
+// issues — Serial.printf is synchronous and slows heavy paths if left on.
+const char* cmd_debugstack(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs ca(argsInput);
+  int v = ca.argInt(0, -1);
+  String s = ca.arg(0);
+  if (s.equalsIgnoreCase("on") || s.equalsIgnoreCase("true") || v == 1) {
+    gDebugStackTraceEnabled = true;
+    return "debugstack ON — STACK_TRACEF messages will print directly to Serial";
+  }
+  if (s.equalsIgnoreCase("off") || s.equalsIgnoreCase("false") || v == 0) {
+    gDebugStackTraceEnabled = false;
+    return "debugstack OFF";
+  }
+  return gDebugStackTraceEnabled ? "debugstack is currently ON" : "debugstack is currently OFF";
+}
+
 // System sub-flag commands
 const char* cmd_debugsystemboot(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -2881,6 +2928,7 @@ const CommandEntry debugCommands[] = {
   { "debugstoragejson", "Debug storage JSON.", true, cmd_debugstoragejson },
   { "debugstoragesettings", "Debug storage settings.", true, cmd_debugstoragesettings },
   { "debugstoragemigration", "Debug storage migration.", true, cmd_debugstoragemigration },
+  { "debugstack", "Low-level stack/heap trace to Serial: <on|off>.", true, cmd_debugstack },
   { "debugsystemboot", "Debug system boot.", true, cmd_debugsystemboot },
   { "debugsystemconfig", "Debug system config.", true, cmd_debugsystemconfig },
   { "debugsystemtasks", "Debug system tasks.", true, cmd_debugsystemtasks },

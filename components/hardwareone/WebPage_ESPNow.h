@@ -213,7 +213,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <span style='color:var(--panel-fg);font-size:.9em'>Stationary Device</span>
 </label>
 </div>
-<div id='encryption-card' style='margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border)'>
+<div id='encryption-card' style='margin-bottom:16px'>
 <div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Encryption</div>
 <div style='color:var(--muted);font-size:.82em;margin-bottom:10px'>All paired devices must share the same passphrase.</div>
 <div class='en-form-row'>
@@ -223,7 +223,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
 </div>
 <div style='background:var(--crumb-bg);border-radius:8px;padding:10px;font-size:.85em;color:var(--panel-fg);border:1px solid var(--border);margin-top:8px' id='encryption-status'>No encryption passphrase set</div>
 </div>
-<div id='mesh-role-card' style='display:none'>
+<div id='mesh-role-card' style='display:none;padding-top:16px;border-top:1px solid var(--border)'>
 <div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Mesh Role Configuration</div>
 <div style='background:var(--crumb-bg);border-radius:8px;padding:10px;font-size:.85em;color:var(--panel-fg);border:1px solid var(--border);margin-bottom:12px' id='mesh-role-status'>Loading role configuration...</div>
 <div style='display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap'>

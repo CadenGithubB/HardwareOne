@@ -18,6 +18,8 @@
 #include "System_TaskUtils.h"
 #include "System_Notifications.h"
 #include "System_Settings.h"
+#include "System_Filesystem.h"
+#include "System_VFS.h"
 #include <LittleFS.h>
 
 // Conditional sensor includes (same approach as main .ino)
@@ -478,7 +480,15 @@ void sensorLogTick() {
     }
     if (line && line[0] != '\0') {
       fsLock("sensorlog.append");
-      File f = LittleFS.open(gSensorLogPath.c_str(), "a");
+      // Route to LittleFS primary, or /sd overflow mirror if flash is full.
+      // The active path for this write cycle is resolved per-write so a hot
+      // card plug-in can start working immediately, but the overflow latch
+      // itself is one-way per reboot (see VFS::resolveOverflowPath).
+      char activePath[128];
+      bool onSd = VFS::resolveOverflowPath(gSensorLogPath.c_str(),
+                                           (size_t)gSensorLogMaxSize,
+                                           activePath, sizeof(activePath));
+      File f = VFS::open(String(activePath), "a", true);
       if (f) {
         size_t len = strlen(line);
         f.write((const uint8_t*)line, len);
@@ -488,46 +498,50 @@ void sensorLogTick() {
         writeCount++;
         log_writes++;
         approxSizeBytes += (len + 1);
-        
-        // Handle log rotation
+
+        // Handle log rotation. Rotation runs on whichever tier we're writing
+        // to. When overflow is active we rotate inside `/sd/...` and the
+        // LittleFS copies are preserved (never touched again).
         if (approxSizeBytes > gSensorLogMaxSize && (lastTruncateMs == 0 || (long)(millis() - lastTruncateMs) >= (long)truncateCooldownMs)) {
           lastTruncateMs = millis();
           writeCount = 0;
 
           if (gSensorLogMaxRotations > 0) {
             if (gSensorLogMaxRotations > 1) {
-              char oldestFile[96];
-              snprintf(oldestFile, sizeof(oldestFile), "%s.%d", gSensorLogPath.c_str(), gSensorLogMaxRotations);
-              if (LittleFS.exists(oldestFile)) {
-                LittleFS.remove(oldestFile);
+              char oldestFile[128];
+              snprintf(oldestFile, sizeof(oldestFile), "%s.%d", activePath, gSensorLogMaxRotations);
+              if (VFS::exists(String(oldestFile))) {
+                VFS::remove(String(oldestFile));
               }
             }
 
             for (int i = gSensorLogMaxRotations - 1; i >= 1; i--) {
-              char fromFile[96], toFile[96];
-              if (i == 1) snprintf(fromFile, sizeof(fromFile), "%s", gSensorLogPath.c_str());
-              else snprintf(fromFile, sizeof(fromFile), "%s.%d", gSensorLogPath.c_str(), i);
-              snprintf(toFile, sizeof(toFile), "%s.%d", gSensorLogPath.c_str(), i + 1);
-              if (LittleFS.exists(fromFile)) {
-                LittleFS.rename(fromFile, toFile);
+              char fromFile[128], toFile[128];
+              if (i == 1) snprintf(fromFile, sizeof(fromFile), "%s", activePath);
+              else snprintf(fromFile, sizeof(fromFile), "%s.%d", activePath, i);
+              snprintf(toFile, sizeof(toFile), "%s.%d", activePath, i + 1);
+              if (VFS::exists(String(fromFile))) {
+                VFS::rename(String(fromFile), String(toFile));
               }
             }
 
-            if (LittleFS.exists(gSensorLogPath)) {
-              String rotatedFile = gSensorLogPath + ".1";
-              LittleFS.rename(gSensorLogPath.c_str(), rotatedFile.c_str());
+            if (VFS::exists(String(activePath))) {
+              String rotatedFile = String(activePath) + ".1";
+              VFS::rename(String(activePath), rotatedFile);
             }
           } else {
-            LittleFS.remove(gSensorLogPath.c_str());
+            VFS::remove(String(activePath));
           }
 
           approxSizeBytes = 0;
           log_trunc++;
           if (isDebugFlagSet(DEBUG_STORAGE)) {
-            DEBUGF_BROADCAST(DEBUG_STORAGE, "Sensor log: rotated file (max size=%u bytes)", (unsigned)gSensorLogMaxSize);
+            DEBUGF_BROADCAST(DEBUG_STORAGE, "Sensor log: rotated file on %s (max size=%u bytes)",
+                             onSd ? "SD" : "LittleFS", (unsigned)gSensorLogMaxSize);
           }
           if (isDebugFlagSet(DEBUG_LOGGER)) {
-            DEBUG_LOGGERF("logger: rotated at approxSize=%u", (unsigned)gSensorLogMaxSize);
+            DEBUG_LOGGERF("logger: rotated at approxSize=%u tier=%s",
+                          (unsigned)gSensorLogMaxSize, onSd ? "sd" : "little");
           }
         }
         
@@ -676,17 +690,18 @@ const char* cmd_sensorlog(const String& argsInput) {
     int lastSlash = filepath.lastIndexOf('/');
     if (lastSlash > 0) {
       String dir = filepath.substring(0, lastSlash);
-      if (!LittleFS.exists(dir)) {
-        // Create parent directories iteratively
+      if (!VFS::exists(dir)) {
+        // Create parent directories iteratively via VFS so the sensor log's
+        // write path and directory creation use the same dispatcher.
         for (int i = 1; i <= (int)dir.length(); i++) {
           if (i == (int)dir.length() || dir.charAt(i) == '/') {
             String parent = dir.substring(0, i);
-            if (parent.length() > 0 && !LittleFS.exists(parent)) {
-              LittleFS.mkdir(parent);
+            if (parent.length() > 0 && !VFS::exists(parent)) {
+              VFS::mkdir(parent);
             }
           }
         }
-        if (!LittleFS.exists(dir)) {
+        if (!VFS::exists(dir)) {
           snprintf(getDebugBuffer(), 1024, "Error: Failed to create directory: %s", dir.c_str());
           return getDebugBuffer();
         }
@@ -738,7 +753,9 @@ const char* cmd_sensorlog(const String& argsInput) {
       return "Error: Insufficient memory (need 8KB free)";
     }
 
-    // Check filesystem space — need at least gSensorLogMaxSize free
+    // Check filesystem space — need at least gSensorLogMaxSize free on
+    // LittleFS OR SD card (if mounted) to allow start. Writes will route
+    // transparently to whichever tier has room via the overflow system.
     {
       extern void fsLock(const char* tag);
       extern void fsUnlock();
@@ -747,9 +764,18 @@ const char* cmd_sensorlog(const String& argsInput) {
       size_t usedBytes = LittleFS.usedBytes();
       fsUnlock();
       size_t freeBytes = (totalBytes > usedBytes) ? (totalBytes - usedBytes) : 0;
-      if (freeBytes < gSensorLogMaxSize) {
-        char errMsg[80];
-        snprintf(errMsg, sizeof(errMsg), "Not enough space for log (need %uKB, have %uKB)",
+      bool littleFsOk = (freeBytes >= gSensorLogMaxSize);
+      bool sdOk = false;
+      if (!littleFsOk && VFS::isSDAvailable()) {
+        uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
+        if (VFS::getStats(VFS::SDCARD, sdTotal, sdUsed, sdFree)) {
+          sdOk = (sdFree >= (uint64_t)gSensorLogMaxSize);
+        }
+      }
+      if (!littleFsOk && !sdOk) {
+        char errMsg[120];
+        snprintf(errMsg, sizeof(errMsg),
+                 "Not enough space for log (need %uKB, flash has %uKB, no usable SD overflow)",
                  (unsigned)(gSensorLogMaxSize / 1024), (unsigned)(freeBytes / 1024));
         notifySensorStarted("Logging", false);
         snprintf(getDebugBuffer(), 1024, "Error: %s", errMsg);
@@ -1090,12 +1116,13 @@ void sensorLogAutoStart() {
   snprintf(pathBuf, sizeof(pathBuf), "%s%s-%s%s", dir.c_str(), baseName.c_str(), timestamp, ext.c_str());
   path = pathBuf;
 
-  // Ensure /logs/sensors directory exists before starting (mkdir is non-recursive)
-  if (!LittleFS.exists("/logs")) {
-    LittleFS.mkdir("/logs");
+  // Ensure /logs/sensors directory exists before starting (mkdir is non-recursive).
+  // Uses VFS::mkdir for consistency with the overflow-capable write path.
+  if (!VFS::exists("/logs")) {
+    VFS::mkdir("/logs");
   }
-  if (!LittleFS.exists("/logs/sensors")) {
-    if (!LittleFS.mkdir("/logs/sensors")) {
+  if (!VFS::exists("/logs/sensors")) {
+    if (!VFS::mkdir("/logs/sensors")) {
       broadcastOutput("[sensorlog] Auto-start failed: Could not create /logs/sensors directory");
       return;
     }

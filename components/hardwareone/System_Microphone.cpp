@@ -478,24 +478,37 @@ bool initMicrophone() {
                micSampleRate, micBitDepth, micChannels, micGain);
   WARN_SYSTEMF("[MIC_INIT] Pin config: CLK=%d, DATA=%d", MIC_PDM_CLK_PIN, MIC_PDM_DATA_PIN);
   INFO_SENSORSF("[Microphone] Initializing PDM microphone...");
+  STACK_TRACEF("initMicrophone.enter rate=%d bitDepth=%d channels=%d",
+               micSampleRate, micBitDepth, micChannels);
 
   // Configure I2S channel for PDM RX (new driver API)
   WARN_SYSTEMF("[MIC_INIT] Creating I2S channel config...");
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   chan_cfg.dma_desc_num = 4;
   chan_cfg.dma_frame_num = AUDIO_BUFFER_SIZE;
+  // Log the derived clock values the PDM driver will try to program. At
+  // sample rates ≥48kHz the default mclk_multiple=256 + bclk_div=8 combo
+  // can exceed the internal PLL limit on the S3 and cause init to fail.
+  STACK_TRACEF("initMicrophone.clk_config rate=%d mclk_mult=256 bclk_div=8 "
+               "=> target_mclk=%uHz dma_frame_num=%d dma_desc=%d",
+               micSampleRate, (unsigned)(micSampleRate * 256),
+               (int)AUDIO_BUFFER_SIZE, (int)chan_cfg.dma_desc_num);
   
   WARN_SYSTEMF("[MIC_INIT] Channel config: i2s_num=0, dma_desc_num=%d, dma_frame_num=%d",
                (int)chan_cfg.dma_desc_num, (int)chan_cfg.dma_frame_num);
   
   WARN_SYSTEMF("[MIC_INIT] Calling i2s_new_channel()...");
+  STACK_TRACEF("initMicrophone.before_i2s_new_channel");
   esp_err_t err = i2s_new_channel(&chan_cfg, NULL, &rx_handle);
-  WARN_SYSTEMF("[MIC_INIT] i2s_new_channel returned: 0x%x (%s), handle=%p", 
+  STACK_TRACEF("initMicrophone.after_i2s_new_channel err=0x%x (%s) handle=%p",
                err, esp_err_to_name(err), rx_handle);
-  
+  WARN_SYSTEMF("[MIC_INIT] i2s_new_channel returned: 0x%x (%s), handle=%p",
+               err, esp_err_to_name(err), rx_handle);
+
   if (err != ESP_OK) {
     WARN_SYSTEMF("[MIC_INIT] *** I2S CHANNEL CREATE FAILED! ***");
     INFO_SENSORSF("[Microphone] Failed to create I2S channel: 0x%x", err);
+    STACK_TRACEF("initMicrophone.exit_channel_create_fail");
     return false;
   }
 
@@ -524,12 +537,16 @@ bool initMicrophone() {
   WARN_SYSTEMF("[MIC_INIT] PDM slot_cfg: data_bit_width=16, slot_mode=MONO");
   
   WARN_SYSTEMF("[MIC_INIT] Calling i2s_channel_init_pdm_rx_mode()...");
+  STACK_TRACEF("initMicrophone.before_pdm_init rate=%d", micSampleRate);
   err = i2s_channel_init_pdm_rx_mode(rx_handle, &pdm_rx_cfg);
+  STACK_TRACEF("initMicrophone.after_pdm_init err=0x%x (%s) rate=%d",
+               err, esp_err_to_name(err), micSampleRate);
   WARN_SYSTEMF("[MIC_INIT] i2s_channel_init_pdm_rx_mode returned: 0x%x (%s)", err, esp_err_to_name(err));
-  
+
   if (err != ESP_OK) {
-    WARN_SYSTEMF("[MIC_INIT] *** PDM RX INIT FAILED! ***");
-    INFO_SENSORSF("[Microphone] Failed to init PDM RX: 0x%x", err);
+    WARN_SYSTEMF("[MIC_INIT] *** PDM RX INIT FAILED at rate=%d Hz — this is a known bad combo on S3 ***", micSampleRate);
+    INFO_SENSORSF("[Microphone] Failed to init PDM RX: 0x%x (%s)", err, esp_err_to_name(err));
+    STACK_TRACEF("initMicrophone.exit_pdm_init_fail rate=%d", micSampleRate);
     i2s_del_channel(rx_handle);
     rx_handle = NULL;
     return false;
@@ -537,12 +554,16 @@ bool initMicrophone() {
 
   // Enable the channel
   WARN_SYSTEMF("[MIC_INIT] Calling i2s_channel_enable()...");
+  STACK_TRACEF("initMicrophone.before_channel_enable");
   err = i2s_channel_enable(rx_handle);
+  STACK_TRACEF("initMicrophone.after_channel_enable err=0x%x (%s)",
+               err, esp_err_to_name(err));
   WARN_SYSTEMF("[MIC_INIT] i2s_channel_enable returned: 0x%x (%s)", err, esp_err_to_name(err));
-  
+
   if (err != ESP_OK) {
     WARN_SYSTEMF("[MIC_INIT] *** I2S CHANNEL ENABLE FAILED! ***");
     INFO_SENSORSF("[Microphone] Failed to enable I2S channel: 0x%x", err);
+    STACK_TRACEF("initMicrophone.exit_enable_fail");
     i2s_del_channel(rx_handle);
     rx_handle = NULL;
     return false;
@@ -550,6 +571,7 @@ bool initMicrophone() {
 
   // Flush initial samples (PDM needs warm-up time)
   WARN_SYSTEMF("[MIC_INIT] Starting PDM warm-up flush (10 reads of 512 bytes)...");
+  STACK_TRACEF("initMicrophone.warmup_start rate=%d", micSampleRate);
   int16_t flushBuf[256];
   size_t bytesRead = 0;
   int flushCount = 0;
@@ -580,6 +602,8 @@ bool initMicrophone() {
     INFO_SENSORSF("[Microphone] WARNING: Microphone may not be connected or responding");
   }
 
+  STACK_TRACEF("initMicrophone.warmup_done success=%d/%d", successCount, flushCount);
+
   gMicEnabled = true;
   micConnected = (successCount > 0);  // Only mark connected if we got data
   sensorStatusBumpWith("openmic");
@@ -595,30 +619,46 @@ bool initMicrophone() {
 }
 
 void stopMicrophone() {
+  STACK_TRACEF("stopMicrophone.enter gMicEnabled=%d rx_handle=%p micRecording=%d",
+               gMicEnabled, rx_handle, micRecording);
   WARN_SYSTEMF("[MIC_STOP] ########## stopMicrophone() BEGIN ##########");
   WARN_SYSTEMF("[MIC_STOP] Current state: gMicEnabled=%d, rx_handle=%p", gMicEnabled, rx_handle);
 
+  STACK_TRACEF("stopMicrophone.before_mutex");
   I2sMicLockGuard i2sGuard("mic.stop");
-  
+  STACK_TRACEF("stopMicrophone.got_mutex");
+
   if (!gMicEnabled) {
     WARN_SYSTEMF("[MIC_STOP] Already stopped - returning");
     INFO_SENSORSF("[Microphone] Already stopped");
+    STACK_TRACEF("stopMicrophone.exit_already_stopped");
     return;
   }
 
-  WARN_SYSTEMF("[MIC_STOP] Heap before stop: free=%u, PSRAM_free=%u", 
-               (unsigned)esp_get_free_heap_size(), 
+  // Clear gMicEnabled BEFORE the I2S teardown so any concurrent caller that
+  // only does a null-check-on-rx_handle (without taking the mutex) will see
+  // us going down.
+  gMicEnabled = false;
+  STACK_TRACEF("stopMicrophone.cleared_gMicEnabled");
+
+  WARN_SYSTEMF("[MIC_STOP] Heap before stop: free=%u, PSRAM_free=%u",
+               (unsigned)esp_get_free_heap_size(),
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  
+
   if (rx_handle) {
+    STACK_TRACEF("stopMicrophone.before_disable rx_handle=%p", rx_handle);
     WARN_SYSTEMF("[MIC_STOP] Calling i2s_channel_disable()...");
     esp_err_t err = i2s_channel_disable(rx_handle);
+    STACK_TRACEF("stopMicrophone.after_disable err=0x%x (%s)", err, esp_err_to_name(err));
     WARN_SYSTEMF("[MIC_STOP] i2s_channel_disable returned: 0x%x (%s)", err, esp_err_to_name(err));
-    
+
+    STACK_TRACEF("stopMicrophone.before_del_channel");
     WARN_SYSTEMF("[MIC_STOP] Calling i2s_del_channel()...");
     err = i2s_del_channel(rx_handle);
+    STACK_TRACEF("stopMicrophone.after_del_channel err=0x%x (%s)", err, esp_err_to_name(err));
     WARN_SYSTEMF("[MIC_STOP] i2s_del_channel returned: 0x%x (%s)", err, esp_err_to_name(err));
     rx_handle = NULL;
+    STACK_TRACEF("stopMicrophone.rx_handle_nulled");
   }
 
   gMicEnabled = false;
@@ -947,17 +987,26 @@ const char* cmd_micsamplerate(const String& argsInput) {
     return "Sample rate must be 8000-48000 Hz";
   }
 
+  STACK_TRACEF("cmd_micsamplerate.enter requested=%d current=%d gMicEnabled=%d",
+               rate, micSampleRate, gMicEnabled);
+
   // Need to reinitialize if already running
   bool wasEnabled = gMicEnabled;
   if (wasEnabled) {
+    STACK_TRACEF("cmd_micsamplerate.before_stop");
     stopMicrophone();
+    STACK_TRACEF("cmd_micsamplerate.after_stop");
   }
-  
+
   micSampleRate = rate;
   setSetting(gSettings.microphoneSampleRate, rate);
-  
+  STACK_TRACEF("cmd_micsamplerate.rate_saved_to_settings");
+
   if (wasEnabled) {
-    initMicrophone();
+    STACK_TRACEF("cmd_micsamplerate.before_reinit");
+    bool ok = initMicrophone();
+    STACK_TRACEF("cmd_micsamplerate.after_reinit ok=%d gMicEnabled=%d rx_handle=%p",
+                 ok ? 1 : 0, gMicEnabled, rx_handle);
   }
 
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Sample rate set to %d Hz (saved)", micSampleRate);
@@ -1003,17 +1052,26 @@ const char* cmd_micbitdepth(const String& argsInput) {
     return "Bit depth must be 16 or 32";
   }
 
+  STACK_TRACEF("cmd_micbitdepth.enter requested=%d current=%d gMicEnabled=%d",
+               depth, micBitDepth, gMicEnabled);
+
   // Need to reinitialize if already running
   bool wasEnabled = gMicEnabled;
   if (wasEnabled) {
+    STACK_TRACEF("cmd_micbitdepth.before_stop");
     stopMicrophone();
+    STACK_TRACEF("cmd_micbitdepth.after_stop");
   }
-  
+
   micBitDepth = depth;
   setSetting(gSettings.microphoneBitDepth, depth);
-  
+  STACK_TRACEF("cmd_micbitdepth.depth_saved_to_settings");
+
   if (wasEnabled) {
-    initMicrophone();
+    STACK_TRACEF("cmd_micbitdepth.before_reinit");
+    bool ok = initMicrophone();
+    STACK_TRACEF("cmd_micbitdepth.after_reinit ok=%d gMicEnabled=%d rx_handle=%p",
+                 ok ? 1 : 0, gMicEnabled, rx_handle);
   }
 
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Bit depth set to %d-bit (saved)", micBitDepth);

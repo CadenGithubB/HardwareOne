@@ -36,6 +36,7 @@
 #include "System_Utils.h"
 #include "System_I2C.h"  // For ConnectedDevice struct
 #include "System_Filesystem.h"  // For canRead() security check
+#include "System_VFS.h"         // For SD-capture routing (captureEspNowFrame)
 #if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"
 #endif
@@ -53,6 +54,11 @@ extern bool isAdminUser(const String& username);
 extern void printToSerial(const String& s);
 extern volatile uint32_t gOutputFlags;
 extern bool gCLIValidateOnly;
+
+// Forward declaration — definition is further down near onEspNowRawRecv. Used
+// by the send paths (v3_send_frame, fragmented tx) defined above that point.
+static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
+                               int rssi, const uint8_t* data, int len);
 // gDebugBuffer, gDebugFlags, ensureDebugBuffer now from debug_system.h
 
 // Debug flags (defined in .ino)
@@ -1336,6 +1342,7 @@ bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msg
   h.crc16 = payloadLen > 0 ? v3_crc16_ccitt(payload, payloadLen) : 0;
   memcpy(frame, &h, sizeof(h));
   if (payloadLen > 0) memcpy(frame + sizeof(h), payload, payloadLen);
+  captureEspNowFrame("TX", dst, 0, frame, (int)totalLen);
   return esp_now_send(dst, frame, totalLen) == ESP_OK;
 }
 
@@ -1479,6 +1486,7 @@ bool v3_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t m
       // Send fragment
       uint16_t totalLen = sizeof(h) + fragLen;
       DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] Calling esp_now_send: totalLen=%u", totalLen);
+      captureEspNowFrame("TX", dst, 0, frame, (int)totalLen);
       esp_err_t result = esp_now_send(dst, frame, totalLen);
       if (result != ESP_OK) {
         WARN_ESPNOWF("[V3_FRAG_TX] Fragment %u/%u send failed (retry %u): esp_err=%d", 
@@ -1574,6 +1582,7 @@ static bool v3_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
   h.crc16 = 0;
   
   DEBUGF(DEBUG_ESPNOW_CORE, "[V3_FRAG_ACK_TX] Calling esp_now_send: headerLen=%u", (unsigned)sizeof(h));
+  captureEspNowFrame("TX", dst, 0, (const uint8_t*)&h, (int)sizeof(h));
   esp_err_t result = esp_now_send(dst, (uint8_t*)&h, sizeof(h));
   
   if (result == ESP_OK) {
@@ -3813,20 +3822,158 @@ static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   }
 }
 
+// ============================================================================
+// ESP-NOW traffic capture to SD card
+// ============================================================================
+// When gSettings.espnowCaptureToSd is true AND an SD card is mounted, every
+// incoming and outgoing V3 frame is appended to /sd/espnow/capture-<bootTs>.log
+// in a human-readable one-line format. Payload is base64-encoded; encrypted
+// frames are saved as encrypted bytes (future decoder can unseal them if
+// given the passphrase).
+//
+// Heartbeats (types 7 and 14) dominate volume and are skipped by default via
+// gSettings.espnowCaptureSkipHeartbeats. A reasonable session capture stays
+// well under the 16 MB per-file cap even over several hours.
+//
+// Called from the recv callback (onEspNowRawRecv) and each esp_now_send path.
+
+// Tiny base64 encoder — no external dep. Writes at most outLen-1 bytes; always
+// null-terminates. Returns actual encoded length.
+static size_t espnowCaptureBase64(const uint8_t* src, size_t srcLen, char* out, size_t outLen) {
+  static const char tbl[65] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  if (!out || outLen == 0) return 0;
+  size_t o = 0;
+  for (size_t i = 0; i < srcLen; i += 3) {
+    if (o + 4 >= outLen) break;
+    uint32_t v = ((uint32_t)src[i]) << 16;
+    if (i + 1 < srcLen) v |= ((uint32_t)src[i + 1]) << 8;
+    if (i + 2 < srcLen) v |= ((uint32_t)src[i + 2]);
+    out[o++] = tbl[(v >> 18) & 0x3F];
+    out[o++] = tbl[(v >> 12) & 0x3F];
+    out[o++] = (i + 1 < srcLen) ? tbl[(v >> 6) & 0x3F] : '=';
+    out[o++] = (i + 2 < srcLen) ? tbl[v & 0x3F] : '=';
+  }
+  out[o] = '\0';
+  return o;
+}
+
+// Session-scoped capture file path. Built on first write of each boot.
+// Format: /sd/espnow/capture-<unixBootSeconds>.log
+static String gEspNowCapturePath;
+static size_t gEspNowCaptureWritten = 0;
+static int    gEspNowCapturePart    = 0;
+static constexpr size_t ESPNOW_CAPTURE_MAX_BYTES = 16 * 1024 * 1024;  // 16 MB per file
+static bool   gEspNowCaptureMkdirTried = false;
+
+static bool ensureCaptureFile(time_t now) {
+  if (!gEspNowCapturePath.length()) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "/sd/espnow/capture-%lu.log", (unsigned long)now);
+    gEspNowCapturePath = buf;
+    gEspNowCaptureWritten = 0;
+    gEspNowCapturePart = 0;
+  }
+  if (gEspNowCaptureWritten >= ESPNOW_CAPTURE_MAX_BYTES) {
+    gEspNowCapturePart++;
+    char buf[112];
+    int dot = gEspNowCapturePath.lastIndexOf('.');
+    String stem = (dot > 0) ? gEspNowCapturePath.substring(0, dot) : gEspNowCapturePath;
+    snprintf(buf, sizeof(buf), "%s-part%d.log", stem.c_str(), gEspNowCapturePart);
+    gEspNowCapturePath = buf;
+    gEspNowCaptureWritten = 0;
+  }
+  if (!gEspNowCaptureMkdirTried) {
+    gEspNowCaptureMkdirTried = true;
+    if (!VFS::exists("/sd/espnow")) VFS::mkdir("/sd/espnow");
+  }
+  return true;
+}
+
+// direction: "RX" or "TX". peerMac must be 6 bytes. data/len is the full V3
+// frame (header + payload). rssi is only valid for RX; pass 0 for TX.
+static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
+                               int rssi, const uint8_t* data, int len) {
+  if (!gSettings.espnowCaptureToSd) return;
+  if (!VFS::isSDAvailable()) return;
+  if (!data || len < (int)sizeof(EspNowV3Header)) return;
+
+  const EspNowV3Header* h = (const EspNowV3Header*)data;
+  // Validate magic quickly — avoid capturing random junk if something non-V3 sneaks in.
+  if (h->magic != (uint16_t)ESPNOW_V3_MAGIC || h->ver != 3) return;
+
+  // Heartbeat filter (types 7=HEARTBEAT, 14=BOND_HEARTBEAT).
+  if (gSettings.espnowCaptureSkipHeartbeats &&
+      (h->type == ESPNOW_V3_TYPE_HEARTBEAT || h->type == ESPNOW_V3_TYPE_BOND_HEARTBEAT)) {
+    return;
+  }
+
+  time_t now = time(nullptr);
+  if (now <= 0) now = (time_t)(millis() / 1000);  // fallback if NTP not synced yet
+  if (!ensureCaptureFile(now)) return;
+
+  // Look up peer name if we know them. devices[] is a contiguous list of
+  // paired peers of size gEspNow->deviceCount (no per-slot "active" flag).
+  String peerName;
+  if (gEspNow && peerMac) {
+    for (int i = 0; i < gEspNow->deviceCount; i++) {
+      if (memcmp(gEspNow->devices[i].mac, peerMac, 6) == 0) {
+        peerName = gEspNow->devices[i].name;
+        break;
+      }
+    }
+  }
+
+  char macStr[20];
+  if (peerMac) {
+    snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
+             peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+  } else {
+    strcpy(macStr, "??:??:??:??:??:??");
+  }
+
+  // Base64-encode the full frame (header + payload).
+  static char b64[512];
+  espnowCaptureBase64(data, (size_t)len, b64, sizeof(b64));
+
+  // One line: timestamp, direction, peer, rssi, V3 type, flags, len, payload.
+  char line[700];
+  int n = snprintf(line, sizeof(line),
+    "%lu %s PEER=%s NAME=%s RSSI=%d TYPE=%u FLAGS=0x%02x LEN=%d FRAG=%u/%u B64=%s\n",
+    (unsigned long)now, direction, macStr,
+    peerName.length() ? peerName.c_str() : "-",
+    rssi, (unsigned)h->type, (unsigned)h->flags, len,
+    (unsigned)h->fragIndex, (unsigned)h->fragCount, b64);
+  if (n <= 0) return;
+
+  File f = VFS::open(gEspNowCapturePath, "a", true);
+  if (!f) return;
+  f.write((const uint8_t*)line, (size_t)n);
+  f.close();
+  gEspNowCaptureWritten += (size_t)n;
+}
+
 static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* incomingData, int len) {
   // Increment receive counter
   if (gEspNow) gEspNow->routerMetrics.messagesReceived++;
+
+  // Capture RX traffic if enabled (before dispatch — we want to see even frames
+  // V3 doesn't handle).
+  if (recv_info && incomingData && len > 0) {
+    captureEspNowFrame("RX", recv_info->src_addr,
+                       recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : 0,
+                       incomingData, len);
+  }
 
   // === V3-ONLY MODE ===
   // Try v3 binary protocol (only handler enabled)
   if (recv_info && incomingData && len > 0 && v3_try_handle_incoming(recv_info, incomingData, len)) {
     return;
   }
-  
+
   // V3 didn't handle it - log and drop
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[RX] Message not handled by V3 - dropped (len=%d)", len);
   return;
-  
+
 }
 
 /**
@@ -10179,6 +10326,8 @@ static const SettingEntry espnowSettingEntries[] = {
   { "enabled",                    SETTING_BOOL,   &gSettings.espnowenabled,              false, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr, false, nullptr, "espnowenabled" },
   { "mesh",                       SETTING_BOOL,   &gSettings.espnowmesh,                 false, 0, nullptr, 0, 1, "Mesh Mode", nullptr, false, nullptr, "espnowmode" },
   { "userSyncEnabled",            SETTING_BOOL,   &gSettings.espnowUserSyncEnabled,      false, 0, nullptr, 0, 1, "User Sync Enabled", nullptr, false, nullptr, "espnowusersync" },
+  { "captureToSd",                SETTING_BOOL,   &gSettings.espnowCaptureToSd,          false, 0, nullptr, 0, 1, "Capture ESP-NOW traffic to SD card", nullptr, false, nullptr, "espnowcapturetosd" },
+  { "captureSkipHeartbeats",      SETTING_BOOL,   &gSettings.espnowCaptureSkipHeartbeats, true, 0, nullptr, 0, 1, "Skip heartbeat frames in capture", nullptr, false, nullptr, "espnowcaptureskipheartbeats" },
   { "deviceName",                 SETTING_STRING, &gSettings.espnowDeviceName,           0, 0, "", 0, 0, "Device Name", nullptr, false, nullptr, "espnowsetname" },
   { "room",                       SETTING_STRING, &gSettings.espnowRoom,                 0, 0, "", 0, 0, "Room", nullptr, false, nullptr, "espnowroom" },
   { "zone",                       SETTING_STRING, &gSettings.espnowZone,                 0, 0, "", 0, 0, "Zone", nullptr, false, nullptr, "espnowzone" },

@@ -914,6 +914,16 @@ inline String getFileBrowserScript() {
     
     // Action: View file
     window[managerId + 'ViewFile'] = function(filePath) {
+      // AVI recordings can't be rendered natively by browsers. If the shared
+      // AVI player is present on this page, open it in the modal instead of
+      // navigating to the raw file URL.
+      var lower = filePath.toLowerCase();
+      if (lower.endsWith('.avi') && typeof window.openAviPlayer === 'function') {
+        var slash = filePath.lastIndexOf('/');
+        var base = slash >= 0 ? filePath.substring(slash + 1) : filePath;
+        window.openAviPlayer(base);
+        return;
+      }
       window.open('/api/files/view?name=' + encodeURIComponent(filePath), '_blank');
     };
     

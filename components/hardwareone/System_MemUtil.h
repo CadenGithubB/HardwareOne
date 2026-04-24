@@ -1,8 +1,28 @@
 #pragma once
 #include <Arduino.h>
+#include <esp_log.h>
 extern "C" {
   #include "esp_heap_caps.h"
   #include "esp_memory_utils.h"
+}
+
+// ── PSRAM fallback diagnostics ────────────────────────────────────────────
+// Incremented every time a ps_alloc/ps_calloc/ps_realloc request that asked
+// for PSRAM had to fall back to the internal DRAM heap. This makes an
+// otherwise silent failure mode observable. Previously a depleted PSRAM pool
+// would silently redirect large buffers into the ~300 KB internal heap and
+// starve other subsystems with no log trail; surfacing the count and logging
+// the specific caller turns that into a grep-able event.
+//
+// Header-inline variable (C++17) avoids the need for a companion .cpp.
+inline volatile uint32_t gPsAllocFallbacks = 0;
+
+inline void __psAllocReportFallback(size_t size, const char* tag) {
+  gPsAllocFallbacks = gPsAllocFallbacks + 1;
+  ESP_LOGW("mem", "ps_alloc fallback to internal heap: %u bytes%s%s",
+           (unsigned)size,
+           tag ? " tag=" : "",
+           tag ? tag : "");
 }
 
 // Pre-allocation snapshots (defined in main sketch)
@@ -105,12 +125,11 @@ inline void* ps_alloc(size_t size, AllocPref pref = AllocPref::PreferPSRAM) {
   if (wantPS) {
     __capture_mem_before();
     void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      return p;
-    }
+    if (p) return p;
   }
   __capture_mem_before();
   void* p2 = malloc(size);
+  if (p2 && wantPS) __psAllocReportFallback(size, nullptr);
   return p2;
 }
 
@@ -120,12 +139,11 @@ inline void* ps_alloc(size_t size, AllocPref pref, const char* tag) {
   if (wantPS) {
     __capture_mem_before();
     void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      return p;
-    }
+    if (p) return p;
   }
   __capture_mem_before();
   void* p2 = malloc(size);
+  if (p2 && wantPS) __psAllocReportFallback(size, tag);
   return p2;
 }
 
@@ -134,12 +152,11 @@ inline void* ps_calloc(size_t n, size_t size, AllocPref pref = AllocPref::Prefer
   if (wantPS) {
     __capture_mem_before();
     void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      return p;
-    }
+    if (p) return p;
   }
   __capture_mem_before();
   void* p2 = calloc(n, size);
+  if (p2 && wantPS) __psAllocReportFallback(n * size, nullptr);
   return p2;
 }
 
@@ -149,12 +166,11 @@ inline void* ps_calloc(size_t n, size_t size, AllocPref pref, const char* tag) {
   if (wantPS) {
     __capture_mem_before();
     void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      return p;
-    }
+    if (p) return p;
   }
   __capture_mem_before();
   void* p2 = calloc(n, size);
+  if (p2 && wantPS) __psAllocReportFallback(n * size, tag);
   return p2;
 }
 
@@ -163,13 +179,12 @@ inline void* ps_realloc(void* ptr, size_t size, AllocPref pref = AllocPref::Pref
   if (wantPS) {
     __capture_mem_before();
     void* p = heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM);
-    if (p) {
-      return p;
-    }
+    if (p) return p;
     // Fall through to internal realloc if PSRAM attempt failed
   }
   __capture_mem_before();
   void* p2 = realloc(ptr, size);
+  if (p2 && wantPS) __psAllocReportFallback(size, nullptr);
   return p2;
 }
 

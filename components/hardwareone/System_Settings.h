@@ -136,6 +136,8 @@ struct Settings {
       espnowenabled(false),
       espnowmesh(false),
       espnowUserSyncEnabled(false),
+      espnowCaptureToSd(false),
+      espnowCaptureSkipHeartbeats(true),
       espnowDeviceName(""),
       espnowRoom(""),
       espnowZone(""),
@@ -492,6 +494,11 @@ struct Settings {
   bool espnowenabled;
   bool espnowmesh;
   bool espnowUserSyncEnabled;          // Enable user credential sync across devices (default: false, admin-only)
+  // Capture incoming + outgoing ESP-NOW frames to /sd/espnow/capture-*.log when
+  // SD is mounted. Encrypted payloads are stored as-is (base64). Heartbeats
+  // dominate volume, so an optional sub-filter can skip them.
+  bool espnowCaptureToSd;              // Master toggle: save ESP-NOW frames to SD
+  bool espnowCaptureSkipHeartbeats;    // Skip type 7 HEARTBEAT and 14 BOND_HEARTBEAT
   // ESP-NOW device identity
   String espnowDeviceName;             // Device name for ESP-NOW topology (user-configurable)
   // ESP-NOW device metadata (for mesh organization and HA discovery)

@@ -139,7 +139,7 @@ static size_t featuresPageCount = 0;
 static WizardFeatureItem sensorsPage[16];
 static size_t sensorsPageCount = 0;
 
-static WizardNetworkItem networkPage[8];
+static WizardNetworkItem networkPage[20];
 static size_t networkPageCount = 0;
 
 // ============================================================================
@@ -322,12 +322,17 @@ void initSetupWizard() {
     }
   }
   
-  // Build sensors page (display + sensors)
+  // Build sensors page — display features only.
+  // Sensors are intentionally excluded: every sensor's persisted flag is an
+  // *AutoStart flag (not a separate enable/disable). Listing them here would
+  // make the checkbox silently toggle boot-time auto-start, which is
+  // misleading. Sensor auto-start is configured on the Startup & Auto-start
+  // page instead (see rebuildNetworkSettingsPage).
   for (size_t i = 0; i < getFeatureCount(); i++) {
     const FeatureEntry* f = getFeatureByIndex(i);
     if (!f || !isFeatureCompiled(f)) continue;
-    
-    if ((f->category == FEATURE_CAT_DISPLAY || f->category == FEATURE_CAT_SENSOR) && sensorsPageCount < 16) {
+
+    if (f->category == FEATURE_CAT_DISPLAY && sensorsPageCount < 16) {
       sensorsPage[sensorsPageCount].id = f->id;
       sensorsPage[sensorsPageCount].label = f->name;
       sensorsPage[sensorsPageCount].heapKB = f->heapCostKB;
@@ -453,6 +458,22 @@ void rebuildNetworkSettingsPage() {
     }
   }
 #endif
+
+  // Sensor auto-start toggles (one per compiled sensor).
+  // The registry already wires each sensor's enabledSetting pointer to its
+  // *AutoStart flag, so we can reuse it here. Each entry's label comes from
+  // the feature's display name.
+  const size_t kNetworkPageCap = sizeof(networkPage)/sizeof(networkPage[0]);
+  for (size_t i = 0; i < getFeatureCount() && networkPageCount < kNetworkPageCap; i++) {
+    const FeatureEntry* f = getFeatureByIndex(i);
+    if (!f || !isFeatureCompiled(f)) continue;
+    if (f->category != FEATURE_CAT_SENSOR) continue;
+    if (!f->enabledSetting) continue;
+    networkPage[networkPageCount].label = f->name;       // e.g. "Camera", "IMU"
+    networkPage[networkPageCount].boolSetting = f->enabledSetting;
+    networkPage[networkPageCount].isBool = true;
+    networkPageCount++;
+  }
 }
 
 bool hasNetworkSettings() {
@@ -740,7 +761,7 @@ static void printSerialFeaturePage(const char* title, WizardFeatureItem* items, 
 
 static void printSerialNetworkPage() {
   Serial.println();
-  Serial.println("=== Network Settings ===");
+  Serial.println("=== Startup & Auto-start ===");
   printSerialHeapBar();
   Serial.println("----------------------------------------");
   
@@ -827,7 +848,7 @@ static void printSerialPageStatus() {
       break;
     }
     case WIZARD_PAGE_NETWORK: {
-      Serial.printf("  SETUP %d/%d: Network Settings\n", pageNum, totalPages);
+      Serial.printf("  SETUP %d/%d: Startup & Auto-start\n", pageNum, totalPages);
       WizardNetworkItem* items = getWizardNetworkPage();
       size_t count = getWizardNetworkPageCount();
       for (size_t i = 0; i < count; i++) {

@@ -5,6 +5,7 @@
  */
 
 #include "System_Camera_DVP.h"
+#include "System_Camera_Video.h"
 #include "System_BuildConfig.h"
 
 #if ENABLE_CAMERA_SENSOR
@@ -1538,6 +1539,50 @@ const char* cmd_camerasave(const String& argsInput) {
   return "Failed to save image";
 }
 
+// ── Video recording commands ────────────────────────────────────────────────
+// These forward to System_Camera_Video. Kept here so they register alongside
+// the rest of the camera command table.
+static char gCameraCmdBuffer[192];
+
+const char* cmd_camerarecord(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gCameraEnabled) return "Camera not enabled - run opencamera first";
+
+  String arg = argsInput;
+  arg.trim();
+
+  if (arg.length() == 0) {
+    return videoRecording ? "Recording: active" : "Recording: stopped";
+  }
+  if (arg == "1" || arg.equalsIgnoreCase("start")) {
+    return startVideoRecording() ? "Recording started"
+                                 : "Failed to start recording (SD card available?)";
+  }
+  if (arg == "0" || arg.equalsIgnoreCase("stop")) {
+    stopVideoRecording();
+    return "Recording stopped";
+  }
+  return "Usage: camerarecord <start|stop|1|0>";
+}
+
+const char* cmd_cameravideolist(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  int count = getVideoRecordingCount();
+  if (count == 0) return "No video recordings found";
+  String list = getVideoRecordingsList();
+  snprintf(gCameraCmdBuffer, sizeof(gCameraCmdBuffer),
+           "Recordings (%d):\n%s", count, list.c_str());
+  return gCameraCmdBuffer;
+}
+
+const char* cmd_cameravideodelete(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String name = argsInput;
+  name.trim();
+  if (name.length() == 0) return "Usage: cameravideodelete <filename>";
+  return deleteVideoRecording(name) ? "Deleted" : "Delete failed (file not found or SD unavailable)";
+}
+
 // Command registry
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry cameraCommands[] = {
@@ -1574,6 +1619,9 @@ const CommandEntry cameraCommands[] = {
   {"cameraautocaptureinterval", "Auto-capture: <sec>",    true, cmd_cameraautocaptureinterval},
   {"camerasendaftercapture", "Send after capture: <on|off>", true, cmd_camerasendaftercapture},
   {"cameratargetdevice",    "Target device: <name>",      true,  cmd_cameratargetdevice},
+  {"camerarecord",          "Start/stop MJPEG-AVI recording (SD only): <start|stop>", false, cmd_camerarecord, nullptr, "sensor", "camera", "record"},
+  {"cameravideolist",       "List AVI recordings on SD",  false, cmd_cameravideolist},
+  {"cameravideodelete",     "Delete recording: <filename>", true, cmd_cameravideodelete},
 };
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]

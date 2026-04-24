@@ -10,6 +10,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Filesystem.h"
+#include "System_Logging.h"
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
@@ -67,7 +68,16 @@ bool initFilesystem() {
   filesystemReady = true;
 
   VFS::init();
-  
+
+  // Recover any log files left in an inconsistent state by a prior crash or
+  // power-cut during rotation. Each call is cheap when no orphan exists
+  // (single exists() check). Kept to the known logs that go through
+  // appendLineWithCap; see System_Logging.cpp for their path definitions.
+  cleanupLogOrphan(LOG_OK_FILE);
+  cleanupLogOrphan(LOG_FAIL_FILE);
+  cleanupLogOrphan(LOG_I2C_FILE);
+  cleanupLogOrphan(LOG_ERROR_FILE);
+
 #if ENABLE_CAMERA_SENSOR
   // Initialize ImageManager now that filesystem is ready (creates photos folder)
   gImageManager.init();
@@ -603,6 +613,54 @@ const char* cmd_filedelete(const String& argsInput) {
 // Filesystem Command Registry
 // ============================================================================
 
+// Print the log-overflow tier status: whether LittleFS is primary or if we've
+// latched into SD overflow, plus free-space snapshots on each tier.
+static const char* cmd_logtier(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  (void)argsInput;
+
+  size_t flashFree = VFS::getCachedLittleFsFree();
+  size_t flashTotal = LittleFS.totalBytes();
+  size_t flashUsed = LittleFS.usedBytes();
+  bool overflow = VFS::isLogOverflowActive();
+  bool sdOk = VFS::isSDAvailable();
+  uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
+  if (sdOk) VFS::getStats(VFS::SDCARD, sdTotal, sdUsed, sdFree);
+
+  const char* tierStr;
+  if (!overflow)        tierStr = "LittleFS primary";
+  else if (sdOk)        tierStr = "SD overflow (active)";
+  else                  tierStr = "SD overflow wanted — card not mounted, writes may drop";
+
+  const char* routeStr;
+  if (!overflow)        routeStr = "their primary LittleFS paths";
+  else if (sdOk)        routeStr = "/sd mirror paths";
+  else                  routeStr = "primary paths (data will drop if flash is full)";
+
+  char* buf = getDebugBuffer();
+  if (sdOk) {
+    snprintf(buf, 1024,
+      "Log storage tier: %s\n"
+      "  LittleFS: %uKB used / %uKB total (%uKB free)\n"
+      "  SD card:  mounted — %uKB used / %uKB total (%uKB free)\n"
+      "Overflow latches on next reboot. Once latched, new log writes go to %s.",
+      tierStr,
+      (unsigned)(flashUsed / 1024), (unsigned)(flashTotal / 1024), (unsigned)(flashFree / 1024),
+      (unsigned)(sdUsed / 1024), (unsigned)(sdTotal / 1024), (unsigned)(sdFree / 1024),
+      routeStr);
+  } else {
+    snprintf(buf, 1024,
+      "Log storage tier: %s\n"
+      "  LittleFS: %uKB used / %uKB total (%uKB free)\n"
+      "  SD card:  not mounted\n"
+      "Overflow latches on next reboot. Once latched, new log writes go to %s.",
+      tierStr,
+      (unsigned)(flashUsed / 1024), (unsigned)(flashTotal / 1024), (unsigned)(flashFree / 1024),
+      routeStr);
+  }
+  return buf;
+}
+
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry filesystemCommands[] = {
   { "files", "List files [path]", true, cmd_files,
@@ -614,6 +672,8 @@ const CommandEntry filesystemCommands[] = {
   { "fileview", "View file: <path> [offset]", true, cmd_fileview, "Usage: fileview <path>" },
   { "filedelete", "Delete file: <path>", true, cmd_filedelete, "Usage: filedelete <path>" },
   { "filerename", "Rename file: <oldpath> <newname>", true, cmd_filerename, "Usage: filerename <oldpath> <newname>" },
+  { "logtier", "Show current log storage tier (LittleFS vs SD overflow).", false, cmd_logtier,
+    "logtier             - Report which tier logs are writing to and free space on each." },
 };
 
 const size_t filesystemCommandsCount = sizeof(filesystemCommands) / sizeof(filesystemCommands[0]);
@@ -804,34 +864,167 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes) {
   return true;
 }
 
+// Log-overflow tiering implementation moved to System_VFS.cpp alongside the
+// rest of the VFS dispatcher. See VFS::resolveOverflowPath,
+// VFS::isLogOverflowActive, VFS::getCachedLittleFsFree.
+
+// Streaming + hysteresis rotation.
+//
+// Previously this function slurped the whole file into a String and called
+// String::remove(0, n) in a loop to trim old lines — O(N²) memmove, which
+// under a flood of [ERROR] writes ate seconds of fs-lock time and once
+// crashed the debug_out task via a stack overflow.
+//
+// Now:
+//   • Rotate trigger: when the file reaches capBytes (a hard ceiling). File
+//     size never exceeds cap, matching the semantic the cap name implies.
+//   • Trim target:    capBytes * 85/100. Dropping to ~85% gives ~15% of
+//     the cap as write room between rotations, so rotations amortize over
+//     many appends instead of firing on every line past cap.
+//   • Method: stream the surviving tail into a sibling ".tmp" file in 1 KB
+//     chunks, then rename over the original. O(N) work, ~1 KB stack buf,
+//     no large heap String allocations.
+//
+// Crash safety: between removing the original and renaming the .tmp in,
+// there is a small window where the log file is missing. `cleanupLogOrphan`
+// (called at boot) recovers this: if dest is missing but dest.tmp exists,
+// it promotes dest.tmp to dest.
 bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
-  FsLockGuard guard("appendLineWithCap");
+  STACK_TRACEF("appendLineWithCap.enter path=%s line_len=%u cap=%u",
+               path ? path : "(null)", (unsigned)line.length(), (unsigned)capBytes);
+
+  FsLockGuard guard("appendLineWithCap");  // reentrant-safe; nested VFS calls are fine.
+
+  // Resolve destination (LittleFS primary, or /sd overflow mirror if flash full).
+  char dest[128];
+  VFS::resolveOverflowPath(path, line.length() + 512, dest, sizeof(dest));
+  STACK_TRACEF("appendLineWithCap.resolved dest=%s", dest);
+
+  // 1. Append the new line — fast path, same as before.
   {
-    File a = LittleFS.open(path, "a");
-    if (!a) return false;
+    File a = VFS::open(String(dest), "a", true);
+    if (!a) { STACK_TRACEF("appendLineWithCap.open_a_failed"); return false; }
+    STACK_TRACEF("appendLineWithCap.opened_for_append");
     a.println(line);
+    STACK_TRACEF("appendLineWithCap.println_done");
     a.close();
+    STACK_TRACEF("appendLineWithCap.close_a_done");
   }
 
-  File r = LittleFS.open(path, "r");
-  if (!r) return false;
+  // Tell the VFS free-space cache how much data we just added (approximate —
+  // LittleFS overhead isn't counted). Lets the overflow decision refresh on
+  // the next check if enough cumulative writes have happened, instead of
+  // trusting a stale 2s-old reading through a large write burst.
+  VFS::noteLittleFsBytesWritten(line.length() + 2);  // +2 for CRLF
+
+  // 2. Check size. Rotate only if we've reached the hard cap.
+  File r = VFS::open(String(dest), "r");
+  if (!r) { STACK_TRACEF("appendLineWithCap.open_r_failed"); return false; }
   size_t sz = r.size();
-  if (sz <= capBytes) {
-    r.close();
-    return true;
-  }
-  String content = r.readString();
-  r.close();
+  STACK_TRACEF("appendLineWithCap.size_checked sz=%u cap=%u", (unsigned)sz, (unsigned)capBytes);
+  if (sz <= capBytes) { r.close(); STACK_TRACEF("appendLineWithCap.no_rotate_exit"); return true; }
 
-  int start = 0;
-  while (content.length() > 0 && content.length() > (int)capBytes) {
-    int nl = content.indexOf('\n', start);
-    if (nl < 0) break;
-    content.remove(0, nl + 1);
+  STACK_TRACEF("appendLineWithCap.rotate_begin");
+  // 3. Compute trim math. Drop enough bytes that the survivors are ~85% of cap.
+  const size_t TARGET_SIZE = (capBytes * 85) / 100;
+  if (TARGET_SIZE >= sz) { r.close(); return true; }  // defensive; shouldn't happen
+  const size_t bytesToDrop = sz - TARGET_SIZE;
+
+  // 4. Seek to the first byte we intend to keep, then advance to the next
+  //    newline so we don't begin mid-line. Bounded scan: if no newline
+  //    within 4 KB, give up and accept the partial leading line (matches
+  //    old behaviour where a single line > cap was left alone).
+  if (!r.seek(bytesToDrop)) { r.close(); return false; }
+  const size_t MAX_SCAN = 4096;
+  for (size_t scanned = 0; scanned < MAX_SCAN; scanned++) {
+    int c = r.read();
+    if (c < 0) { r.close(); return true; }   // hit EOF mid-scan — nothing to keep
+    if (c == '\n') break;                    // cursor is now past the \n
   }
-  File f = LittleFS.open(path, "w");
-  if (!f) return false;
-  f.print(content);
-  f.close();
+
+  // 5. Stream the tail into a temp file. The copy buffer lives in PSRAM and
+  //    is allocated once per boot, then reused — keeping it off the debug_out
+  //    task's stack. LittleFS internals already use several KB of stack in
+  //    deep write paths, and a 1 KB automatic here was enough to overflow
+  //    the task during a first-of-session error-log write.
+  char tmpPath[140];
+  snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", dest);
+  VFS::remove(String(tmpPath));  // clear any stale .tmp from a prior crash
+
+  static uint8_t* sRotateBuf = nullptr;
+  static const size_t ROTATE_BUF_SIZE = 1024;
+  if (!sRotateBuf) {
+    sRotateBuf = (uint8_t*)ps_alloc(ROTATE_BUF_SIZE, AllocPref::PreferPSRAM, "logrot.buf");
+    if (!sRotateBuf) { r.close(); STACK_TRACEF("appendLineWithCap.rotatebuf_alloc_failed"); return false; }
+  }
+
+  File w = VFS::open(String(tmpPath), "w", true);
+  if (!w) { r.close(); STACK_TRACEF("appendLineWithCap.open_tmp_failed"); return false; }
+  STACK_TRACEF("appendLineWithCap.tmp_opened copying...");
+
+  size_t copied = 0;
+  while (true) {
+    int n = r.readBytes((char*)sRotateBuf, ROTATE_BUF_SIZE);
+    if (n <= 0) break;
+    w.write(sRotateBuf, (size_t)n);
+    copied += n;
+  }
+  r.close();
+  w.close();
+  STACK_TRACEF("appendLineWithCap.copy_done bytes=%u", (unsigned)copied);
+
+  // 6. Atomic-ish swap. LittleFS and SD both require the destination to be
+  //    absent before rename, so remove + rename. The vulnerable window is
+  //    recovered by cleanupLogOrphan on next boot.
+  if (!VFS::remove(String(dest))) {
+    VFS::remove(String(tmpPath));
+    STACK_TRACEF("appendLineWithCap.remove_orig_failed");
+    return false;
+  }
+  STACK_TRACEF("appendLineWithCap.removed_orig");
+  if (!VFS::rename(String(tmpPath), String(dest))) {
+    STACK_TRACEF("appendLineWithCap.rename_failed — orphan .tmp left for boot recovery");
+    return false;
+  }
+  STACK_TRACEF("appendLineWithCap.rotate_complete");
   return true;
+}
+
+// Recover a log file's partner .tmp left over from a crashed or power-cut
+// rotation. Three possible on-disk states after a crash:
+//
+//   a. dest present, dest.tmp absent  → normal; nothing to do.
+//   b. dest present, dest.tmp present → crash between tmp-write and rename;
+//                                       .tmp is stale, delete it.
+//   c. dest absent,  dest.tmp present → crash between remove(dest) and
+//                                       rename(tmp→dest); promote .tmp.
+//
+// Case (c) is the only data-preserving recovery. Case (b) is cleanup.
+void cleanupLogOrphan(const char* path) {
+  if (!path) return;
+
+  char dest[128];
+  // Use the same overflow-aware resolution so we look at the actual location
+  // writes land in. Pass 0 for requiredSpace — we're not writing.
+  VFS::resolveOverflowPath(path, 0, dest, sizeof(dest));
+
+  char tmpPath[140];
+  snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", dest);
+
+  if (!VFS::exists(String(tmpPath))) return;
+
+  if (VFS::exists(String(dest))) {
+    // Case (b): stale temp, destination is authoritative.
+    VFS::remove(String(tmpPath));
+  } else {
+    // Case (c): promote the temp. Logs what it did via Serial since our
+    // own logging infrastructure may depend on this path being valid.
+    if (VFS::rename(String(tmpPath), String(dest))) {
+      Serial.printf("[FS] Recovered log file from partial rotation: %s\n", dest);
+    } else {
+      // Rename failed — delete the orphan so we don't try again next boot.
+      VFS::remove(String(tmpPath));
+      Serial.printf("[FS] Could not recover %s from .tmp; discarded orphan\n", dest);
+    }
+  }
 }

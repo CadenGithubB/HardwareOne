@@ -242,7 +242,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
       ensureCaptureFolder(IMAGE_STORAGE_SD);
       String sdDisplayPath = getCaptureFolder(IMAGE_STORAGE_SD) + "/" + filename;
       String sdFsPath = sdStripPrefix(sdDisplayPath);
-      File f = SD.open(sdFsPath, FILE_WRITE);
+      File f = SD.open(sdFsPath, FILE_WRITE, true);  // create=true — two-arg form returns null for new paths
       if (f) {
         f.write(data, len);
         f.close();
@@ -264,7 +264,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     }
     ensureCaptureFolder(IMAGE_STORAGE_SD);
     String sdFsPath = sdStripPrefix(fullPath);
-    File f = SD.open(sdFsPath, FILE_WRITE);
+    File f = SD.open(sdFsPath, FILE_WRITE, true);  // create=true — two-arg form returns null for new paths
     if (f) {
       f.write(data, len);
       f.close();

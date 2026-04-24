@@ -2,6 +2,7 @@
 #define WEBPAGE_FILES_H
 
 #include "WebServer_Utils.h"
+#include "WebPage_AviPlayer.h"
 
 // Streamed inner content for files page
 inline void streamFilesInner(httpd_req_t* req) {
@@ -20,6 +21,11 @@ inline void streamFilesInner(httpd_req_t* req) {
   <div id='storage-bar' style='height:100%;background:linear-gradient(90deg,#28a745,#20c997);width:0%;transition:width 0.3s'></div>
 </div>
 <div id='file-manager-container' style='margin:1rem 0'></div>
+)HTML", HTTPD_RESP_USE_STRLEN);
+  // AVI player modal — injected so ViewFile can call openAviPlayer for .avi
+  // files instead of letting the browser try to render the raw stream.
+  streamAviPlayerModal(req);
+  httpd_resp_send_chunk(req, R"HTML(
 <div id='editor-modal' style='display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1001'>
   <div style='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--panel-bg);color:var(--panel-fg);padding:1rem;border-radius:8px;min-width:720px;max-width:90vw;max-height:90vh;display:flex;flex-direction:column;border:1px solid var(--border)'>
     <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem'>
@@ -37,6 +43,12 @@ inline void streamFilesInner(httpd_req_t* req) {
   </div>
 </div>
 )HTML", HTTPD_RESP_USE_STRLEN);
+
+  // Shared AVI player JS (defines window.openAviPlayer, wrapped in its own
+  // IIFE). Emit before other scripts so ViewFile can rely on it being ready.
+  httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
+  streamAviPlayerJs(req);
+  httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
 
   // JavaScript chunk 1
   httpd_resp_send_chunk(req, R"JS(

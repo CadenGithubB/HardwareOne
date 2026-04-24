@@ -239,6 +239,29 @@ extern QueueHandle_t gDebugFreeQueue;
 extern volatile unsigned long gDebugDropped;
 extern volatile bool gDebugVerbose;
 
+// ── Low-level stack/heap diagnostic trace (runtime-only) ────────────────────
+// Emits directly to Serial — bypasses the debug_out queue and the broadcast
+// fan-out. The point is to stay visible when the thing you're diagnosing IS
+// the debug subsystem (queue saturation, task stack overflow, LittleFS deep
+// recursion, etc).
+//
+// Toggle via CLI:   debugstack on  |  debugstack off
+// Not persisted.    Turn it off when you're done; Serial.printf is synchronous
+//                   and will slow heavy paths if left on.
+extern volatile bool gDebugStackTraceEnabled;
+
+#define STACK_TRACEF(fmt, ...) do { \
+  if (gDebugStackTraceEnabled) { \
+    UBaseType_t _hwm_words = uxTaskGetStackHighWaterMark(nullptr); \
+    Serial.printf("[STK %s hwm=%u heap=%u ms=%lu] " fmt "\n", \
+                  pcTaskGetName(nullptr), \
+                  (unsigned)(_hwm_words * 4), \
+                  (unsigned)ESP.getFreeHeap(), \
+                  (unsigned long)millis(), \
+                  ##__VA_ARGS__); \
+  } \
+} while (0)
+
 // Accessor functions - use these instead of direct global access
 inline uint64_t getDebugFlags() { return DEBUG_MANAGER.getDebugFlags(); }
 inline void setDebugFlags(uint64_t flags) { DEBUG_MANAGER.setDebugFlags(flags); }
