@@ -56,6 +56,7 @@ set(hardwareone_srcs
         Optional_Bluetooth.cpp
         BLE_IDF.cpp
         Optional_EvenG2.cpp
+        System_G2_Protocol.cpp
         System_Battery.cpp
         System_CLI.cpp
         System_Command.cpp
