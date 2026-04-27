@@ -1,5 +1,6 @@
 #include "System_G2_Protocol.h"
 
+#include <Arduino.h>     // millis()
 #include <string.h>
 
 // ── CRC-16/CCITT-FALSE ───────────────────────────────────────────────────────
@@ -18,58 +19,67 @@ uint16_t g2CrcCcittFalse(const uint8_t* data, size_t len) {
 
 // ── Envelope ─────────────────────────────────────────────────────────────────
 
-size_t g2BuildEnvelope(uint8_t sid, uint8_t flag, uint8_t seq, uint32_t magic,
+size_t g2BuildEnvelope(uint8_t seq, uint8_t sid, uint8_t flag,
                        const uint8_t* payload, size_t payloadLen,
                        uint8_t* out, size_t outCap) {
+  // Single-fragment only. pb bytes + 2 CRC bytes must fit in the u8 len field.
+  if (payloadLen + G2_ENVELOPE_CRC_LEN > 0xFF) return 0;
   const size_t total = G2_ENVELOPE_HDR_LEN + payloadLen + G2_ENVELOPE_CRC_LEN;
   if (total > outCap) return 0;
-  if (total > 0xFFFF) return 0;  // length field is u16
 
   out[0] = G2_PREAMBLE_0;
-  out[1] = G2_PREAMBLE_1;
-  out[2] = (uint8_t)(total & 0xFF);
-  out[3] = (uint8_t)((total >> 8) & 0xFF);
-  out[4] = sid;
-  out[5] = flag;
-  out[6] = seq;
-  out[7]  = (uint8_t)(magic & 0xFF);
-  out[8]  = (uint8_t)((magic >> 8) & 0xFF);
-  out[9]  = (uint8_t)((magic >> 16) & 0xFF);
-  out[10] = (uint8_t)((magic >> 24) & 0xFF);
+  out[1] = G2_PREAMBLE_TX;
+  out[2] = seq;
+  out[3] = (uint8_t)(payloadLen + G2_ENVELOPE_CRC_LEN);
+  out[4] = 1;              // totalFrags
+  out[5] = 1;              // fragIdx (1-based)
+  out[6] = sid;
+  out[7] = flag;
   if (payload && payloadLen > 0) {
     memcpy(out + G2_ENVELOPE_HDR_LEN, payload, payloadLen);
   }
-  // CRC covers everything from the preamble through the last payload byte.
-  uint16_t crc = g2CrcCcittFalse(out, G2_ENVELOPE_HDR_LEN + payloadLen);
-  out[G2_ENVELOPE_HDR_LEN + payloadLen]     = (uint8_t)((crc >> 8) & 0xFF);
-  out[G2_ENVELOPE_HDR_LEN + payloadLen + 1] = (uint8_t)(crc & 0xFF);
+  // CRC over JUST the pb payload (not the header). Emitted little-endian
+  // (low byte first).
+  uint16_t crc = g2CrcCcittFalse(payload, payloadLen);
+  out[G2_ENVELOPE_HDR_LEN + payloadLen]     = (uint8_t)(crc & 0xFF);
+  out[G2_ENVELOPE_HDR_LEN + payloadLen + 1] = (uint8_t)((crc >> 8) & 0xFF);
   return total;
 }
 
 bool g2ParseEnvelope(const uint8_t* in, size_t len, G2EnvelopeView* out) {
   if (!in || !out) return false;
   if (len < G2_ENVELOPE_HDR_LEN + G2_ENVELOPE_CRC_LEN) return false;
-  if (in[0] != G2_PREAMBLE_0 || in[1] != G2_PREAMBLE_1) return false;
+  if (in[0] != G2_PREAMBLE_0) return false;
+  if (in[1] != G2_PREAMBLE_TX && in[1] != G2_PREAMBLE_RX) return false;
 
-  const uint16_t declared = (uint16_t)in[2] | ((uint16_t)in[3] << 8);
-  if (declared != len) return false;
+  const uint8_t declared = in[3];
+  // declared = fragment data length (pb bytes on this frag + CRC if last).
+  // For single-fragment messages declared = payload + 2.
+  if ((size_t)declared + G2_ENVELOPE_HDR_LEN > len) return false;
+  const uint8_t totFrags = in[4];
+  const uint8_t fragIdx  = in[5];
+  if (totFrags == 0 || fragIdx == 0 || fragIdx > totFrags) return false;
 
-  const size_t payloadLen = len - G2_ENVELOPE_HDR_LEN - G2_ENVELOPE_CRC_LEN;
-  const uint16_t rcvCrc =
-      ((uint16_t)in[G2_ENVELOPE_HDR_LEN + payloadLen] << 8) |
-      (uint16_t)in[G2_ENVELOPE_HDR_LEN + payloadLen + 1];
-  const uint16_t calcCrc = g2CrcCcittFalse(in, G2_ENVELOPE_HDR_LEN + payloadLen);
-  if (rcvCrc != calcCrc) return false;
+  const bool isLast = (fragIdx == totFrags);
+  const size_t pbLen = isLast ? (size_t)declared - G2_ENVELOPE_CRC_LEN
+                              : (size_t)declared;
+  const uint8_t* pb = in + G2_ENVELOPE_HDR_LEN;
 
-  out->sid  = in[4];
-  out->flag = in[5];
-  out->seq  = in[6];
-  out->magic = (uint32_t)in[7]
-             | ((uint32_t)in[8]  << 8)
-             | ((uint32_t)in[9]  << 16)
-             | ((uint32_t)in[10] << 24);
-  out->payload    = payloadLen ? (in + G2_ENVELOPE_HDR_LEN) : nullptr;
-  out->payloadLen = payloadLen;
+  if (isLast) {
+    // CRC check — LE, over just the pb bytes.
+    const uint16_t rcv = (uint16_t)pb[pbLen] | ((uint16_t)pb[pbLen + 1] << 8);
+    const uint16_t calc = g2CrcCcittFalse(pb, pbLen);
+    if (rcv != calc) return false;
+  }
+
+  out->isTx       = (in[1] == G2_PREAMBLE_TX);
+  out->seq        = in[2];
+  out->totalFrags = totFrags;
+  out->fragIdx    = fragIdx;
+  out->sid        = in[6];
+  out->flag       = in[7];
+  out->payload    = pbLen ? pb : nullptr;
+  out->payloadLen = pbLen;
   return true;
 }
 
@@ -116,17 +126,12 @@ bool g2PbWriteBytes(uint8_t* buf, size_t cap, size_t* pos, uint32_t field,
   return true;
 }
 
-// Nested-message support. We always reserve 2 bytes for the length prefix
-// and later patch them as a 2-byte varint. This limits nested payloads to
-// 2^14 - 1 = 16383 bytes, which is plenty for G2 text/heartbeat/audio but
-// NOT enough for raw image fragments — those hit 4 KB max anyway so still OK.
 static constexpr size_t NESTED_LEN_RESERVE = 2;
 
 bool g2PbBeginNested(uint8_t* buf, size_t cap, size_t* pos,
                      uint32_t field, size_t* innerStart) {
   if (!g2PbWriteTag(buf, cap, pos, field, G2_PB_WIRE_LEN_DELIM)) return false;
   if (*pos + NESTED_LEN_RESERVE > cap) return false;
-  // Reserve 2 bytes; we'll patch after the inner body is known.
   *pos += NESTED_LEN_RESERVE;
   *innerStart = *pos;
   return true;
@@ -135,10 +140,9 @@ bool g2PbBeginNested(uint8_t* buf, size_t cap, size_t* pos,
 bool g2PbEndNested(uint8_t* buf, size_t cap, size_t* pos, size_t innerStart) {
   (void)cap;
   const size_t innerLen = *pos - innerStart;
-  if (innerLen > 0x3FFF) return false;  // exceeds 2-byte varint capacity
-  // Protobuf wants canonical (minimal) varints. If the inner payload fits in
-  // one byte (<128), shift it back to reclaim the reserved second byte —
-  // otherwise strict decoders reject `0x82 0x00`-style non-canonical encodings.
+  if (innerLen > 0x3FFF) return false;
+  // Canonical varint: shift content back by 1 if a single byte suffices,
+  // so strict decoders don't reject trailing 0-byte continuations.
   if (innerLen < 0x80) {
     buf[innerStart - 2] = (uint8_t)innerLen;
     if (innerLen > 0) {
@@ -163,7 +167,7 @@ bool g2PbReadVarint(const uint8_t* buf, size_t len, size_t* pos, uint64_t* v) {
       return true;
     }
     shift += 7;
-    if (shift >= 64) return false;  // malformed
+    if (shift >= 64) return false;
   }
   return false;
 }
@@ -203,18 +207,11 @@ bool g2PbSkipField(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire) {
   }
 }
 
-// ── High-level message builders ──────────────────────────────────────────────
-
-// EvenHub wrapper field numbers (see reference: ble/gen/EvenHub_pb.ts):
-//   1  Cmd               (varint, enum)
-//   2  MagicRandom       (varint)
-//   3  CreateMessage     (len-delim, CreateStartUpPageContainer)
-//   5  ImgRawMsg         (len-delim)
-//   7  RebuildContainer  (len-delim, RebuildPageContainer)
-//   9  TextUpgrade       (len-delim, TextContainerUpgrade)
-//   11 ShutDownCmd       (len-delim, ShutDownContaniner)
-//   14 HeartPacketCmd    (len-delim, HeartBeatPacket)
-//   18 AudioCtrCommand   (len-delim, AudioCtrCmd)
+// ── EvenCore wrapper + nested-message field numbers ─────────────────────────
+// "EvenCore" is our name for the sid=0xE0 rendering subsystem; the firmware's
+// pb schema calls it `evenhub_main_msg_ctx` (see ble/gen/EvenHub_pb.ts in the
+// reference). The firmware identifiers in comments below are kept verbatim
+// so they grep cleanly against the upstream source.
 #define G2_WRAP_F_CMD            1
 #define G2_WRAP_F_MAGIC          2
 #define G2_WRAP_F_CREATE         3
@@ -224,14 +221,13 @@ bool g2PbSkipField(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire) {
 #define G2_WRAP_F_SHUTDOWN       11
 #define G2_WRAP_F_HEARTBEAT      14
 #define G2_WRAP_F_AUDIO          18
+#define G2_WRAP_F_MENU_RES       21   // MenuStartUpResPonse (Cmd=18 payload)
 
-// TextContainerProperty field numbers (flat — no Rect/TextStyle submessages):
-//   1..4   XPosition, YPosition, Width, Height
-//   5..8   BorderWidth, BorderColor, BorderRadius, PaddingLength
-//   9      ContainerID
-//   10     ContainerName (string)
-//   11     IsEventCapture
-//   12     Content (string)
+// MenuStartUpResPonse inner fields (ble/gen/EvenHub_pb.ts:186,191).
+#define G2_MENURES_F_CODE        1    // uint32 errorCode
+#define G2_MENURES_F_STR         2    // string  errorString
+
+// TextContainerProperty
 #define G2_TEXT_F_X         1
 #define G2_TEXT_F_Y         2
 #define G2_TEXT_F_W         3
@@ -241,29 +237,102 @@ bool g2PbSkipField(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire) {
 #define G2_TEXT_F_EVCAP     11
 #define G2_TEXT_F_CONTENT   12
 
-// CreateStartUpPageContainer fields:
-//   1 ContainerTotalNum, 3 repeated TextObject
-// RebuildPageContainer: same shape.
+// RebuildPageContainer / CreateStartUpPageContainer (share TextObject
+// layout, differ in which bodies are repeated). Field numbers from
+// `ble/gen/EvenHub_pb.ts` in the reference.
 #define G2_PAGE_F_TOTAL     1
+#define G2_PAGE_F_LIST_OBJ  2
 #define G2_PAGE_F_TEXT_OBJ  3
+#define G2_PAGE_F_WIDGET_ID 5  // only meaningful in CreateStartUpPageContainer
 
-// HeartBeatPacket: 1 Cnt
+// ListContainerProperty (used by CREATE for launcher-style list pages).
+#define G2_LIST_F_X         1
+#define G2_LIST_F_Y         2
+#define G2_LIST_F_W         3
+#define G2_LIST_F_H         4
+#define G2_LIST_F_CID       9
+#define G2_LIST_F_CNAME    10
+#define G2_LIST_F_ITEMS    11  // nested List_ItemContainerProperty
+#define G2_LIST_F_EVCAP   12
+
+// List_ItemContainerProperty (repeated ItemName = 4).
+#define G2_ITEM_F_COUNT     1
+#define G2_ITEM_F_SEL_BORDR 3
+#define G2_ITEM_F_NAME      4
+
+// TextContainerUpgrade (body for Cmd=5 APP_UPDATE_TEXT_DATA_PACKET).
+#define G2_TXUPG_F_CID      1
+#define G2_TXUPG_F_CNAME    2
+#define G2_TXUPG_F_OFFSET   3
+#define G2_TXUPG_F_LENGTH   4
+#define G2_TXUPG_F_CONTENT  5
+
+// HeartBeatPacket
 #define G2_HB_F_CNT         1
-// ShutDownContaniner: 1 exitMode
+// ShutDownContaniner
 #define G2_SHUT_F_MODE      1
-// AudioCtrCmd: 1 AudoFuncEn
+// AudioCtrCmd
 #define G2_AUDIO_F_EN       1
 
-// Reasonable container default: full lens area with a single event-capturing
-// text box. Values below are a conservative viewport — tuning is the caller's
-// job and does not affect wire-level correctness.
+// Default text container geometry (576×288 full lens, LVGL 50×10 grid).
 static constexpr uint32_t TEXT_X = 0;
 static constexpr uint32_t TEXT_Y = 0;
 static constexpr uint32_t TEXT_W = 576;
 static constexpr uint32_t TEXT_H = 288;
 static constexpr uint32_t TEXT_CID = 1;
 
-// Build a TextContainerProperty into a nested field of the wrapper.
+// ── High-level builders ──────────────────────────────────────────────────────
+
+size_t g2BuildHeartbeat(uint8_t seq, uint32_t magic, uint32_t cnt,
+                        uint8_t* out, size_t outCap) {
+  uint8_t payload[32];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_HEARTBEAT)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_HEARTBEAT, &inner)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_HB_F_CNT, cnt)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
+
+size_t g2BuildMenuStartupFailed(uint8_t seq, uint32_t magic,
+                                uint32_t errorCode,
+                                const char* errorString,
+                                uint8_t* out, size_t outCap) {
+  uint8_t payload[96];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_MENU_FAILED)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_MENU_RES, &inner)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_MENURES_F_CODE, errorCode)) return 0;
+  if (errorString && errorString[0]) {
+    if (!g2PbWriteString(payload, sizeof(payload), &pos, G2_MENURES_F_STR, errorString)) return 0;
+  }
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
+
+size_t g2BuildShutdown(uint8_t seq, uint32_t magic, uint32_t exitMode,
+                       uint8_t* out, size_t outCap) {
+  uint8_t payload[32];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_SHUTDOWN_PAGE)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_SHUTDOWN, &inner)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_SHUT_F_MODE, exitMode)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
+
+// Default-geometry version: keeps the legacy callers (g2BuildRebuildText
+// and g2BuildCreateStartupPage's single-text-line form) working without
+// requiring them to know about G2ContainerGeom.
 static bool writeTextProperty(uint8_t* buf, size_t cap, size_t* pos,
                               const char* containerName, const char* content) {
   size_t inner;
@@ -274,77 +343,242 @@ static bool writeTextProperty(uint8_t* buf, size_t cap, size_t* pos,
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_H, TEXT_H)) return false;
   if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_CID, TEXT_CID)) return false;
   if (!g2PbWriteString(buf, cap, pos, G2_TEXT_F_CNAME, containerName)) return false;
-  if (!g2PbWriteBool  (buf, cap, pos, G2_TEXT_F_EVCAP, true)) return false;
+  // Reference uses IsEventCapture=0 for text containers ("we don't tap text areas").
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_EVCAP, 0)) return false;
   if (!g2PbWriteString(buf, cap, pos, G2_TEXT_F_CONTENT, content ? content : "")) return false;
   return g2PbEndNested(buf, cap, pos, inner);
 }
 
-// Build an EvenHub envelope around a single-TextContainer page. Used by both
-// CREATE (Cmd=0, wrapper field 3) and REBUILD (Cmd=7, wrapper field 7).
-static size_t buildTextPage(uint8_t seq, uint32_t magic, uint32_t cmd,
-                            uint32_t wrapperField,
-                            const char* containerName, const char* content,
-                            uint8_t* out, size_t outCap) {
-  uint8_t payload[256];
-  size_t pos = 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, cmd)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
-
-  size_t pageStart;
-  if (!g2PbBeginNested(payload, sizeof(payload), &pos, wrapperField, &pageStart)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_PAGE_F_TOTAL, 1)) return 0;
-  if (!writeTextProperty(payload, sizeof(payload), &pos, containerName, content)) return 0;
-  if (!g2PbEndNested(payload, sizeof(payload), &pos, pageStart)) return 0;
-
-  return g2BuildEnvelope(G2_SID_EVEN_HUB, G2_FLAG_REQUEST, seq, magic,
-                         payload, pos, out, outCap);
+// Geom-aware variant. Used by the multi-page Settings JSON view and
+// any future caller that wants the TEXT widget at a specific on-lens
+// rectangle. `eventCapture=true` sets IsEventCapture=1, which the
+// reference says is unused for text ("we don't tap text areas") — but
+// we set it anyway in the hope that the firmware *does* fire
+// TextEvent CLICK when the user taps a captured text container. If
+// it doesn't, the caller falls back to user-activity-driven exit
+// (see Optional_EvenG2.cpp's TEXT exit path).
+static bool writeTextPropertyGeom(uint8_t* buf, size_t cap, size_t* pos,
+                                   const char* containerName,
+                                   const char* content,
+                                   const G2ContainerGeom& geom,
+                                   bool eventCapture) {
+  size_t inner;
+  if (!g2PbBeginNested(buf, cap, pos, G2_PAGE_F_TEXT_OBJ, &inner)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_X, geom.x)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_Y, geom.y)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_W, geom.w)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_H, geom.h)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_CID, TEXT_CID)) return false;
+  if (!g2PbWriteString(buf, cap, pos, G2_TEXT_F_CNAME, containerName)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_EVCAP, eventCapture ? 1u : 0u)) return false;
+  if (!g2PbWriteString(buf, cap, pos, G2_TEXT_F_CONTENT, content ? content : "")) return false;
+  return g2PbEndNested(buf, cap, pos, inner);
 }
 
-size_t g2BuildCreateStartupText(uint8_t seq, uint32_t magic,
-                                const char* containerName,
-                                const char* initialContent,
-                                uint8_t* out, size_t outCap) {
-  return buildTextPage(seq, magic, G2_CMD_CREATE_STARTUP, G2_WRAP_F_CREATE,
-                       containerName, initialContent, out, outCap);
+size_t g2BuildCreateTextPagePb(uint32_t magic,
+                               const char* containerName,
+                               const char* content,
+                               uint32_t widgetId,
+                               const G2ContainerGeom& geom,
+                               bool eventCapture,
+                               uint8_t* pbOut, size_t pbCap) {
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD, G2_CMD_CREATE_STARTUP)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, 1)) return 0;
+  // TextObject (wrapper field 3). Same widget the firmware uses for its
+  // own text overlays; we just supply our own content + geom.
+  if (!writeTextPropertyGeom(pbOut, pbCap, &pos,
+                              containerName, content, geom, eventCapture)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
 }
 
 size_t g2BuildRebuildText(uint8_t seq, uint32_t magic,
                           const char* containerName,
                           const char* content,
                           uint8_t* out, size_t outCap) {
-  return buildTextPage(seq, magic, G2_CMD_REBUILD_PAGE, G2_WRAP_F_REBUILD,
-                       containerName, content, out, outCap);
-}
-
-size_t g2BuildHeartbeat(uint8_t seq, uint32_t magic, uint32_t cnt,
-                        uint8_t* out, size_t outCap) {
-  uint8_t payload[32];
+  uint8_t payload[256];
   size_t pos = 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_HEARTBEAT)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_REBUILD_PAGE)) return 0;
   if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
-
-  size_t inner;
-  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_HEARTBEAT, &inner)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_HB_F_CNT, cnt)) return 0;
-  if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
-
-  return g2BuildEnvelope(G2_SID_EVEN_HUB, G2_FLAG_REQUEST, seq, magic,
+  size_t pageStart;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_REBUILD, &pageStart)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_PAGE_F_TOTAL, 1)) return 0;
+  if (!writeTextProperty(payload, sizeof(payload), &pos, containerName, content)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, pageStart)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
                          payload, pos, out, outCap);
 }
 
-size_t g2BuildShutdown(uint8_t seq, uint32_t magic, uint32_t exitMode,
-                       uint8_t* out, size_t outCap) {
-  uint8_t payload[32];
+// ListContainerProperty container ID. Geometry now flows in from the
+// caller via G2ContainerGeom — see G2_GEOM_* presets in the header.
+static constexpr uint32_t G2_LIST_DEF_CID   = 1;
+// widgetId for the StartUpPage's inner wrapper is now a caller-supplied
+// parameter on g2BuildCreateStartupPage — see the header. Default 10000
+// (matching the reference) unless the caller is hijacking a menu-start.
+
+// Emit a ListContainerProperty (wrapper field 2 of RebuildPage/CreateStartup)
+// with N selectable items. Firmware draws a native selection highlight when
+// IsItemSelectBorderEn=1, and routes touchpad gestures to a List_ItemEvent
+// sub-message on sid=0x0D when IsEventCapture=1. This is the one widget the
+// reference explicitly supports for scrollable menus.
+static bool writeListObjectWithItems(uint8_t* buf, size_t cap, size_t* pos,
+                                     const char* containerName,
+                                     const char* const* items,
+                                     size_t itemCount,
+                                     const G2ContainerGeom& geom) {
+  if (!items || itemCount == 0) return false;
+
+  size_t listStart;
+  if (!g2PbBeginNested(buf, cap, pos, G2_PAGE_F_LIST_OBJ, &listStart)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_X, geom.x)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_Y, geom.y)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_W, geom.w)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_H, geom.h)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_CID, G2_LIST_DEF_CID)) return false;
+  if (!g2PbWriteString(buf, cap, pos, G2_LIST_F_CNAME, containerName)) return false;
+
+  size_t itemStart;
+  if (!g2PbBeginNested(buf, cap, pos, G2_LIST_F_ITEMS, &itemStart)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_ITEM_F_COUNT, (uint32_t)itemCount)) return false;
+  // IsItemSelectBorderEn=1 → firmware draws the selection box natively,
+  // no drawing code on our side.
+  if (!g2PbWriteUint32(buf, cap, pos, G2_ITEM_F_SEL_BORDR, 1)) return false;
+  for (size_t i = 0; i < itemCount; i++) {
+    if (!g2PbWriteString(buf, cap, pos, G2_ITEM_F_NAME,
+                         items[i] ? items[i] : "")) return false;
+  }
+  if (!g2PbEndNested(buf, cap, pos, itemStart)) return false;
+
+  // IsEventCapture=1 → firmware routes touchpad gestures to this container
+  // as List_ItemEvent sub-messages on sid=0x0D.
+  if (!g2PbWriteUint32(buf, cap, pos, G2_LIST_F_EVCAP, 1)) return false;
+  return g2PbEndNested(buf, cap, pos, listStart);
+}
+
+size_t g2BuildCreateStartupPage(uint8_t seq, uint32_t magic,
+                                const char* containerName,
+                                const char* text,
+                                uint8_t* out, size_t outCap,
+                                uint32_t widgetId) {
+  uint8_t payload[256];
   size_t pos = 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_SHUTDOWN_PAGE)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_CREATE_STARTUP)) return 0;
   if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_PAGE_F_TOTAL, 1)) return 0;
+  // Use TextObject (field 3), NOT ListObject (field 2). Rationale:
+  //   * A ListContainer that we later target with UPDATE_TEXT (Cmd=5) crashes
+  //     the firmware's plugin task — UPDATE_TEXT/TextContainerUpgrade is only
+  //     defined against a TextContainer. Observed 2026-04-24: CREATE-as-list
+  //     then UPDATE_TEXT froze the glasses (all subsequent acks — even
+  //     heartbeats — silently dropped).
+  //   * Reference ships CreateStartUpPageContainer with TextObject at wrapper
+  //     field 3 (`repeated TextContainerProperty`, ble/gen/EvenHub_pb.ts:457),
+  //     alongside ListObject=2 and ImageObject=4. All three are valid here.
+  //   * writeTextProperty shares the same TextContainerProperty layout used by
+  //     REBUILD_PAGE, so once this CREATE lands the container is immediately
+  //     REBUILD-compatible for content swaps.
+  if (!writeTextProperty(payload, sizeof(payload), &pos, containerName, text)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, pageStart)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
 
-  size_t inner;
-  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_SHUTDOWN, &inner)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_SHUT_F_MODE, exitMode)) return 0;
-  if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
+// REBUILD_PAGE (Cmd=7) carrying a fresh ListContainerProperty. Used by
+// stateful pages (file browser, settings editor) that need to swap the
+// list contents in place — the widget stays the same widgetId, but the
+// items inside change. Identical pb shape to g2BuildCreateListPage but
+// with Cmd=7 + wrapper field G2_WRAP_F_REBUILD instead of CREATE.
+//
+// Safe against the UPDATE_TEXT-on-ListContainer crash because we're
+// using REBUILD which is documented as full-replace; no partial-patch
+// semantics like UPDATE_TEXT had.
+size_t g2BuildRebuildList(uint8_t seq, uint32_t magic,
+                          const char* containerName,
+                          const char* const* items, size_t itemCount,
+                          uint8_t* out, size_t outCap,
+                          const G2ContainerGeom& geom) {
+  uint8_t payload[512];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_REBUILD_PAGE)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_REBUILD, &pageStart)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_PAGE_F_TOTAL, 1)) return 0;
+  if (!writeListObjectWithItems(payload, sizeof(payload), &pos,
+                                containerName, items, itemCount, geom)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, pageStart)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
 
-  return g2BuildEnvelope(G2_SID_EVEN_HUB, G2_FLAG_REQUEST, seq, magic,
+size_t g2BuildCreateListPagePb(uint32_t magic,
+                               const char* containerName,
+                               const char* const* items, size_t itemCount,
+                               uint32_t widgetId,
+                               const G2ContainerGeom& geom,
+                               uint8_t* pbOut, size_t pbCap) {
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD, G2_CMD_CREATE_STARTUP)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, 1)) return 0;
+  // ListObject (wrapper field 2) — the widget the firmware natively
+  // scrolls through on touchpad input. Never call UPDATE_TEXT against a
+  // list container: that's the bug that froze the plugin task on
+  // 2026-04-24. Use REBUILD with a fresh writeListObjectWithItems payload
+  // to change the item set.
+  if (!writeListObjectWithItems(pbOut, pbCap, &pos,
+                                containerName, items, itemCount, geom)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+size_t g2BuildCreateListPage(uint8_t seq, uint32_t magic,
+                             const char* containerName,
+                             const char* const* items, size_t itemCount,
+                             uint8_t* out, size_t outCap,
+                             uint32_t widgetId,
+                             const G2ContainerGeom& geom) {
+  // Single-fragment build: builds pb into a stack buffer big enough for
+  // the largest list that still fits one envelope (≤253 pb bytes), then
+  // wraps. For larger lists, callers must use g2BuildCreateListPagePb +
+  // a fragmenting transport (see Optional_EvenG2.cpp::sendPbFragmented).
+  uint8_t payload[512];
+  size_t pbLen = g2BuildCreateListPagePb(magic, containerName, items, itemCount,
+                                          widgetId, geom, payload, sizeof(payload));
+  if (pbLen == 0) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pbLen, out, outCap);
+}
+
+size_t g2BuildUpdateText(uint8_t seq, uint32_t magic,
+                         const char* containerName, uint32_t containerId,
+                         const char* content,
+                         uint8_t* out, size_t outCap) {
+  uint8_t payload[256];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_UPDATE_TEXT)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t bodyStart;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_TEXT_UPGRADE, &bodyStart)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_TXUPG_F_CID, containerId)) return 0;
+  if (!g2PbWriteString(payload, sizeof(payload), &pos, G2_TXUPG_F_CNAME, containerName)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_TXUPG_F_OFFSET, 0)) return 0;
+  const size_t clen = content ? strlen(content) : 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_TXUPG_F_LENGTH, (uint32_t)clen)) return 0;
+  if (!g2PbWriteString(payload, sizeof(payload), &pos, G2_TXUPG_F_CONTENT, content ? content : "")) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, bodyStart)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
                          payload, pos, out, outCap);
 }
 
@@ -354,59 +588,366 @@ size_t g2BuildAudioCtrl(uint8_t seq, uint32_t magic, bool enable,
   size_t pos = 0;
   if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_AUDIO_CTRL)) return 0;
   if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
-
   size_t inner;
   if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_AUDIO, &inner)) return 0;
   if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AUDIO_F_EN, enable ? 1u : 0u)) return 0;
   if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
-
-  return g2BuildEnvelope(G2_SID_EVEN_HUB, G2_FLAG_REQUEST, seq, magic,
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
                          payload, pos, out, outCap);
 }
 
-// The app-launch prelude is a byte-literal in the reference repo
-// (ble/messages.ts PRELUDE_F5872) — its nested payload has no recoverable
-// field names, so we reproduce the inner protobuf verbatim and only parametrise
-// the outer envelope seq. The reference uses seq=1 magic=0x9c (156) always;
-// we match that because the firmware keys ACKs on magic's low byte and 0x9c
-// is baked into its AppLaunch dispatch.
-static const uint8_t G2_APPLAUNCH_INNER[] = {
-  0x08, 0x02,                    // field 1 varint 2  (type)
-  0x10, 0x9c, 0x01,              // field 2 varint 156 (magic)
-  0x22, 0x0a,                    // field 4 len-delim len=10
-    0x1a, 0x08,                  //   inner f3 len-delim len=8
-      0x12, 0x06,                //     f2 len-delim len=6
-        0x12, 0x04,              //       f2 len-delim len=4
-          0x08, 0x00,            //         f1 varint 0
-          0x10, 0x00             //         f2 varint 0
+size_t g2BuildEvenAICtrl(uint8_t seq, uint32_t magic, uint32_t status,
+                         uint8_t* out, size_t outCap) {
+  uint8_t payload[32];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_CMD, G2_AI_CMD_CTRL)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_AI_F_CTRL, &inner)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_CTRL_F_STATUS, status)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_AI, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
+
+size_t g2BuildEvenAIAsk(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
+                        const char* text,
+                        uint8_t* out, size_t outCap) {
+  // EvenAIAskInfo shares wire shape with EvenAIReplyInfo (cmdCnt, streamEnable,
+  // textMode, text, errorCode) but lives in field 5 of the wrapper and carries
+  // no fTextEnd. The "question" panel — what the user supposedly asked.
+  size_t textLen = text ? strnlen(text, 250) : 0;
+  uint8_t payload[400];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_CMD, G2_AI_CMD_ASK)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_AI_F_ASK, &inner)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_REPLY_F_CNT, cmdCnt)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_REPLY_F_STREAM, 0)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_REPLY_F_MODE, 0)) return 0;
+  if (textLen > 0) {
+    if (!g2PbWriteBytes(payload, sizeof(payload), &pos, G2_AI_REPLY_F_TEXT,
+                        (const uint8_t*)text, textLen)) return 0;
+  }
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_AI, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
+
+size_t g2BuildEvenAIAnalyse(uint8_t seq, uint32_t magic,
+                            uint8_t* out, size_t outCap) {
+  // EvenAIAnalyseInfo carries only an errorCode; we always send 0 (Success)
+  // since this is the "I'm processing" transition and any non-zero would
+  // tell the firmware something went wrong on our (synthetic) side. The
+  // body is intentionally non-empty (errorCode=0 written explicitly) so the
+  // wrapper field doesn't collapse into "field absent" on the wire.
+  uint8_t payload[32];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_CMD, G2_AI_CMD_ANALYSE)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_AI_F_ANALYSE, &inner)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, /*errorCode field*/ 1, 0)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_AI, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
+
+size_t g2BuildEvenAIReply(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
+                          const char* text, bool isLast,
+                          uint8_t* out, size_t outCap) {
+  // Cap text at ~250 B so the whole pb fits inside one fragment (max
+  // single-fragment pb body is 253 B). Streaming long replies should
+  // chunk above this caller and call us multiple times.
+  size_t textLen = text ? strnlen(text, 250) : 0;
+  uint8_t payload[400];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_CMD, G2_AI_CMD_REPLY)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_AI_F_REPLY, &inner)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_REPLY_F_CNT, cmdCnt)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_REPLY_F_STREAM, 0)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_REPLY_F_MODE, 0)) return 0;
+  if (textLen > 0) {
+    if (!g2PbWriteBytes(payload, sizeof(payload), &pos, G2_AI_REPLY_F_TEXT,
+                        (const uint8_t*)text, textLen)) return 0;
+  }
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_REPLY_F_END, isLast ? 1u : 0u)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_AI, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
+
+size_t g2BuildEvenAIConfig(uint8_t seq, uint32_t magic,
+                           uint64_t voiceSwitch, uint64_t streamSpeed,
+                           uint8_t* out, size_t outCap) {
+  // Wrapper: cmd=10 CONFIG + magic + (optional) inner config sub-msg.
+  // The reference enum names CONFIG=10 but doesn't ship a host->glasses
+  // example; field numbers below come from g2-kit-unofficial's inline
+  // example string `08 01 10 A0 01` = {f1=1, f2=160} = voiceSwitch=on,
+  // streamSpeed=160. Pass UINT64_MAX for either parameter to omit it
+  // from the body — useful for probing one field at a time.
+  uint8_t payload[64];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_CMD, /*CONFIG*/10)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_MAGIC, magic)) return 0;
+  // Sub-message lives at field 10 (CONFIG slot in the reference).
+  // Inner schema is not in our docs — guess: f1 = voiceSwitch (bool),
+  // f2 = streamSpeed (uint). If the firmware rejects, the COMM_RSP
+  // errorCode field will tell us what to adjust.
+  if (voiceSwitch != UINT64_MAX || streamSpeed != UINT64_MAX) {
+    size_t inner;
+    if (!g2PbBeginNested(payload, sizeof(payload), &pos, /*F_CONFIG*/10, &inner)) return 0;
+    if (voiceSwitch != UINT64_MAX) {
+      if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 1, (uint32_t)voiceSwitch)) return 0;
+    }
+    if (streamSpeed != UINT64_MAX) {
+      if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 2, (uint32_t)streamSpeed)) return 0;
+    }
+    if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
+  }
+  return g2BuildEnvelope(seq, G2_SID_EVEN_AI, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
+
+size_t g2BuildImageRawBody(uint32_t magic,
+                           uint32_t containerId,
+                           const char* containerName,
+                           uint32_t mapSessionId,
+                           uint32_t mapTotalSize,
+                           uint32_t mapFragmentIndex,
+                           const uint8_t* data, size_t dataLen,
+                           uint8_t* out, size_t outCap) {
+  if (!out || outCap == 0) return 0;
+  if (!containerName)        return 0;
+  if (dataLen > 0 && !data)  return 0;
+
+  // Wrapper: f1=Cmd(3 UPDATE_IMAGE_RAW_DATA), f2=magic, f5=ImgRawMsg{...}.
+  // Inner ImageRawDataUpdate fields verified against
+  // g2-kit-unofficial/ble/gen/EvenHub_pb.ts.
+  size_t pos = 0;
+  if (!g2PbWriteUint32(out, outCap, &pos, /*F_CMD*/   1, /*UPDATE_IMAGE_RAW_DATA*/3)) return 0;
+  if (!g2PbWriteUint32(out, outCap, &pos, /*F_MAGIC*/ 2, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(out, outCap, &pos, /*F_IMG_RAW_MSG*/5, &inner)) return 0;
+  if (!g2PbWriteUint32(out, outCap, &pos, 1, containerId)) return 0;
+  if (!g2PbWriteString(out, outCap, &pos, 2, containerName)) return 0;
+  if (!g2PbWriteUint32(out, outCap, &pos, 3, mapSessionId)) return 0;
+  if (!g2PbWriteUint32(out, outCap, &pos, 4, mapTotalSize)) return 0;
+  if (!g2PbWriteUint32(out, outCap, &pos, 5, /*CompressMode raw*/0)) return 0;
+  if (!g2PbWriteUint32(out, outCap, &pos, 6, mapFragmentIndex)) return 0;
+  if (!g2PbWriteUint32(out, outCap, &pos, 7, (uint32_t)dataLen)) return 0;
+  if (dataLen > 0) {
+    if (!g2PbWriteBytes(out, outCap, &pos, 8, data, dataLen)) return 0;
+  }
+  if (!g2PbEndNested(out, outCap, &pos, inner)) return 0;
+  return pos;
+}
+
+size_t g2BuildCreateImagePb(uint32_t magic,
+                            const char* containerName, uint32_t containerId,
+                            uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                            uint32_t widgetId,
+                            uint8_t* pbOut, size_t pbCap) {
+  if (!pbOut || pbCap == 0 || !containerName) return 0;
+
+  // Wrapper: Cmd=0 CREATE_STARTUP, magic, CreateMessage{...}.
+  // Inner CreateStartUpPageContainer.ImageObject = field 4.
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD, G2_CMD_CREATE_STARTUP)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, 1)) return 0;
+
+  // ImageContainerProperty at inner field 4.
+  size_t imgStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, /*F_IMAGE_OBJ*/4, &imgStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 1, x)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 2, y)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 3, w)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 4, h)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 5, containerId)) return 0;
+  if (!g2PbWriteString(pbOut, pbCap, &pos, 6, containerName)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, imgStart)) return 0;
+
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+size_t g2BuildCreateImage(uint8_t seq, uint32_t magic,
+                          const char* containerName, uint32_t containerId,
+                          uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                          uint32_t widgetId,
+                          uint8_t* out, size_t outCap) {
+  uint8_t payload[256];
+  size_t pbLen = g2BuildCreateImagePb(magic, containerName, containerId,
+                                      x, y, w, h, widgetId,
+                                      payload, sizeof(payload));
+  if (pbLen == 0) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pbLen, out, outCap);
+}
+
+bool g2DecodeHeartbeatAckTail(const uint8_t* pb, size_t pbLen,
+                              uint64_t* seq, uint64_t* echo) {
+  if (!pb || pbLen == 0) return false;
+  size_t p = 0;
+  while (p < pbLen) {
+    uint32_t fld; uint8_t wire;
+    if (!g2PbReadTag(pb, pbLen, &p, &fld, &wire)) return false;
+    if (fld == 15 && wire == G2_PB_WIRE_LEN_DELIM) {
+      uint64_t innerLen;
+      if (!g2PbReadVarint(pb, pbLen, &p, &innerLen)) return false;
+      if (p + innerLen > pbLen) return false;
+      const uint8_t* sub = pb + p;
+      const size_t   subN = (size_t)innerLen;
+      p += subN;
+      // Walk the sub-msg, picking off field 1 (seq) and field 2 (echo).
+      bool gotSeq = false, gotEcho = false;
+      size_t sp = 0;
+      while (sp < subN) {
+        uint32_t sf; uint8_t sw;
+        if (!g2PbReadTag(sub, subN, &sp, &sf, &sw)) break;
+        if (sw == G2_PB_WIRE_VARINT) {
+          uint64_t v;
+          if (!g2PbReadVarint(sub, subN, &sp, &v)) break;
+          if (sf == 1) { if (seq)  *seq  = v; gotSeq  = true; }
+          else if (sf == 2) { if (echo) *echo = v; gotEcho = true; }
+        } else {
+          if (!g2PbSkipField(sub, subN, &sp, sw)) break;
+        }
+      }
+      return gotSeq && gotEcho;
+    }
+    // Skip non-target fields.
+    if (!g2PbSkipField(pb, pbLen, &p, wire)) return false;
+  }
+  return false;
+}
+
+// ── Per-sid wire stats ───────────────────────────────────────────────────
+// Linear-scan array; tiny enough that O(N) lookup beats hashing. Capacity
+// is generous against the ~12 known sids in the firmware enum.
+static constexpr size_t G2_SID_STAT_CAP = 16;
+static G2SidStat gSidStats[G2_SID_STAT_CAP];
+static size_t    gSidStatsCount = 0;
+
+static G2SidStat* sidStatFind(uint8_t sid) {
+  for (size_t i = 0; i < gSidStatsCount; i++) {
+    if (gSidStats[i].sid == sid) return &gSidStats[i];
+  }
+  if (gSidStatsCount >= G2_SID_STAT_CAP) return nullptr;
+  G2SidStat* s = &gSidStats[gSidStatsCount++];
+  memset(s, 0, sizeof(*s));
+  s->sid = sid;
+  return s;
+}
+
+void g2statsRecordTx(uint8_t sid, uint8_t flag, size_t pbLen) {
+  (void)flag; (void)pbLen;
+  G2SidStat* s = sidStatFind(sid);
+  if (!s) return;
+  s->txCount++;
+  s->lastTxMs = (uint32_t)millis();
+}
+
+void g2statsRecordRx(uint8_t sid, uint8_t flag, const uint8_t* pb, size_t pbLen) {
+  G2SidStat* s = sidStatFind(sid);
+  if (!s) return;
+  s->rxCount++;
+  s->lastRxMs   = (uint32_t)millis();
+  s->lastFlag   = flag;
+  s->lastPbLen  = (uint16_t)pbLen;
+  const size_t cap   = sizeof(s->lastSample);
+  const size_t take  = (pbLen < cap) ? pbLen : cap;
+  if (pb && take) memcpy(s->lastSample, pb, take);
+  s->lastSampleLen = (uint8_t)take;
+}
+
+size_t g2statsCount() { return gSidStatsCount; }
+const G2SidStat* g2statsAt(size_t idx) {
+  return (idx < gSidStatsCount) ? &gSidStats[idx] : nullptr;
+}
+void g2statsReset() {
+  memset(gSidStats, 0, sizeof(gSidStats));
+  gSidStatsCount = 0;
+}
+
+const char* g2sidName(uint8_t sid) {
+  switch (sid) {
+    case 0x01: return "AppLaunch / Dashboard";
+    case 0x03: return "ForegroundMenu";
+    case 0x04: return "ForegroundNotification";
+    case 0x05: return "Translate";
+    case 0x06: return "Teleprompt";
+    case 0x07: return "EvenAI (front-pane)";
+    case 0x08: return "Navigation";
+    case 0x09: return "Settings";
+    case 0x0A: return "Transcribe";
+    case 0x0B: return "Conversate";
+    case 0x0C: return "QuickList";
+    case 0x0D: return "StateEvent (sync)";
+    case 0x0E: return "Health / WidgetXform";
+    case 0x10: return "Onboarding";
+    case 0x21: return "ForegroundSystemAlert";
+    case 0x22: return "ForegroundSystemClose";
+    case 0x80: return "DeviceSettings (DANGEROUS)";
+    case 0x81: return "GlassesCase";
+    case 0x90: return "Ring data";
+    case 0xC0: return "OTA cmd";
+    case 0xC1: return "OTA raw";
+    case 0xC4: return "FileService cmd";
+    case 0xC5: return "FileService raw";
+    case 0xE0: return "EvenHub (back-pane)";
+    default:   return "Unknown";
+  }
+}
+
+// App-launch prelude — verbatim from ble/messages.ts PRELUDE_F5872. The inner
+// pb structure isn't fully understood; the reference treats it as an opaque
+// blob, so we do the same. CRC 0xa1 0x42 at the end is part of the constant.
+static const uint8_t PRELUDE_F5872[] = {
+  0xaa, 0x21, 0x92, 0x13, 0x01, 0x01, 0x01, 0x20,
+  0x08, 0x02, 0x10, 0x9c, 0x01, 0x22, 0x0a, 0x1a,
+  0x08, 0x12, 0x06, 0x12, 0x04, 0x08, 0x00, 0x10,
+  0x00, 0xa1, 0x42,
 };
 
-size_t g2BuildAppLaunch(uint8_t seq, uint8_t* out, size_t outCap) {
-  // Magic must be the specific prelude magic (0x9c / 156) — firmware keys its
-  // ACK lookup on that value.
-  return g2BuildEnvelope(G2_SID_APP_LAUNCH, G2_FLAG_ASYNC, seq, 0x0000009Cu,
-                         G2_APPLAUNCH_INNER, sizeof(G2_APPLAUNCH_INNER),
-                         out, outCap);
+size_t g2BuildAppLaunch(uint8_t* out, size_t outCap) {
+  if (outCap < sizeof(PRELUDE_F5872)) return 0;
+  memcpy(out, PRELUDE_F5872, sizeof(PRELUDE_F5872));
+  return sizeof(PRELUDE_F5872);
 }
 
 // ── Settings (sid=0x09) ──────────────────────────────────────────────────────
-// G2SettingPackage wrapper:
-//   1 commandId (enum: 1=DeviceReceiveInfo, 2=DeviceReceiveRequest, ...)
-//   2 magicRandom
-//   4 deviceReceiveRequestFromApp (len-delim, DeviceReceiveRequestFromAPP)
-//   6 deviceRespondToApp          (response direction)
+// G2SettingPackage wrapper fields, cross-referenced against
+// `ble/gen/g2_setting_pb.ts` in the g2-kit-unofficial reference:
+//   field 1 commandId           (enum g2_settingCommandId)
+//   field 2 magicRandom
+//   field 3 DeviceReceiveInfoFromAPP
+//   field 4 DeviceReceiveRequestFromAPP  ← battery lives here (inner field 12)
+//   field 5 DeviceSendInfoToAPP
+//   field 6 Device_Respond_To_App
+//   field 7 App_Respond_To_Device
 //
-// DeviceReceiveRequestFromAPP (used both on request and response):
-//   1 settingInfoType (enum: 0 brightness, 1 basic)
-//  12 battery (on response)
+// Observed traffic on real glasses shows the device echoes the full
+// request back in outer field 4 with every setting populated, for both
+// explicit responses (flag=0x00) and async pushes (flag=0x01). The
+// earlier code looked at outer field 6 which the firmware never emits,
+// so every battery reading silently dropped on the floor.
 #define G2_SET_F_CMD        1
 #define G2_SET_F_MAGIC      2
-#define G2_SET_F_REQ        4
-#define G2_SET_F_RESP       6
+#define G2_SET_F_REQ        4   // DeviceReceiveRequestFromAPP echo
 #define G2_SET_CMD_REQUEST  2
 #define G2_SET_REQ_BASIC    1
 #define G2_SET_REQ_F_TYPE   1
-#define G2_SET_REQ_F_BATT   12
+// G2_SET_REQ_F_VER (5) and G2_SET_REQ_F_BATT (12) are defined in the
+// header so diagnostic callers (Optional_EvenG2.cpp verbose dumper) can
+// label known fields without hard-coding the numbers.
 
 size_t g2BuildSettingBasicRequest(uint8_t seq, uint32_t magic,
                                   uint8_t* out, size_t outCap) {
@@ -414,44 +955,45 @@ size_t g2BuildSettingBasicRequest(uint8_t seq, uint32_t magic,
   size_t pos = 0;
   if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_SET_F_CMD, G2_SET_CMD_REQUEST)) return 0;
   if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_SET_F_MAGIC, magic)) return 0;
-
   size_t inner;
   if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_SET_F_REQ, &inner)) return 0;
   if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_SET_REQ_F_TYPE, G2_SET_REQ_BASIC)) return 0;
   if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
-
-  return g2BuildEnvelope(G2_SID_SETTINGS, G2_FLAG_REQUEST, seq, magic,
+  return g2BuildEnvelope(seq, G2_SID_SETTINGS, G2_FLAG_REQUEST,
                          payload, pos, out, outCap);
 }
 
-bool g2ParseSettingBattery(const uint8_t* payload, size_t payloadLen,
-                           uint8_t* batteryPct) {
-  if (!payload || !batteryPct) return false;
+// Shared inner-body scanner used by all the sid=0x09 settings parsers.
+// Walks every len-delim outer field (3..7) looking for `targetField` inside,
+// returning a pointer+length into the body where the target's value starts
+// (AFTER its tag). Caller picks the decode based on wire type.
+//
+// Returns true if the target was found and *outPos was written; false if
+// not found (caller should keep its default output).
+static bool findInnerField(const uint8_t* payload, size_t payloadLen,
+                           uint32_t targetField, uint8_t targetWire,
+                           const uint8_t** outBody, size_t* outBodyLen,
+                           size_t* outValueStart) {
   size_t pos = 0;
-  // Walk the outer G2SettingPackage looking for field 6 (deviceRespondToApp)
-  // — the battery reply lives inside that submessage as field 12.
   while (pos < payloadLen) {
-    uint32_t field;
-    uint8_t wire;
+    uint32_t field; uint8_t wire;
     if (!g2PbReadTag(payload, payloadLen, &pos, &field, &wire)) return false;
-    if (field == G2_SET_F_RESP && wire == G2_PB_WIRE_LEN_DELIM) {
+    if (wire == G2_PB_WIRE_LEN_DELIM && field >= 3 && field <= 7) {
       uint64_t sublen;
       if (!g2PbReadVarint(payload, payloadLen, &pos, &sublen)) return false;
       if (pos + sublen > payloadLen) return false;
       const uint8_t* sub = payload + pos;
       size_t subpos = 0;
       while (subpos < (size_t)sublen) {
-        uint32_t sfield;
-        uint8_t  swire;
-        if (!g2PbReadTag(sub, (size_t)sublen, &subpos, &sfield, &swire)) return false;
-        if (sfield == G2_SET_REQ_F_BATT && swire == G2_PB_WIRE_VARINT) {
-          uint64_t v;
-          if (!g2PbReadVarint(sub, (size_t)sublen, &subpos, &v)) return false;
-          if (v > 100) v = 100;
-          *batteryPct = (uint8_t)v;
+        uint32_t sfield; uint8_t swire;
+        if (!g2PbReadTag(sub, (size_t)sublen, &subpos, &sfield, &swire)) break;
+        if (sfield == targetField && swire == targetWire) {
+          if (outBody)       *outBody       = sub;
+          if (outBodyLen)    *outBodyLen    = (size_t)sublen;
+          if (outValueStart) *outValueStart = subpos;
           return true;
         }
-        if (!g2PbSkipField(sub, (size_t)sublen, &subpos, swire)) return false;
+        if (!g2PbSkipField(sub, (size_t)sublen, &subpos, swire)) break;
       }
       pos += (size_t)sublen;
       continue;
@@ -459,4 +1001,129 @@ bool g2ParseSettingBattery(const uint8_t* payload, size_t payloadLen,
     if (!g2PbSkipField(payload, payloadLen, &pos, wire)) return false;
   }
   return false;
+}
+
+// Parse the silent-mode flag from a sid=0x09 cmd=3 DeviceSendToAPP
+// settings push. Schema verified 2026-04-26:
+//   wrapper { f1=commandId=3, f2=magic, f5=deviceSendInfoToApp { f2=silent } }
+// On-wire example (silent ON): `08 03 10 18 2A 02 10 01`
+//                                                ^^ ^^
+//                                                f5 inner f2=1
+// Scoped specifically to outer f5 so we don't pick up the inner f2 of
+// outer f4 (deviceReceiveRequestFromApp.autoBrightnessLevel) which
+// shares a field number but means something completely different.
+bool g2ParseSettingSilentMode(const uint8_t* payload, size_t payloadLen,
+                              uint8_t* outFlag) {
+  if (!payload || !outFlag) return false;
+  size_t pos = 0;
+  while (pos < payloadLen) {
+    uint32_t field; uint8_t wire;
+    if (!g2PbReadTag(payload, payloadLen, &pos, &field, &wire)) return false;
+    if (field == G2_SET_F_SEND_INFO && wire == G2_PB_WIRE_LEN_DELIM) {
+      uint64_t sublen;
+      if (!g2PbReadVarint(payload, payloadLen, &pos, &sublen)) return false;
+      if (pos + sublen > payloadLen) return false;
+      const uint8_t* sub = payload + pos;
+      size_t subpos = 0;
+      while (subpos < (size_t)sublen) {
+        uint32_t sf; uint8_t sw;
+        if (!g2PbReadTag(sub, (size_t)sublen, &subpos, &sf, &sw)) break;
+        if (sf == G2_SET_SEND_F_SILENT && sw == G2_PB_WIRE_VARINT) {
+          uint64_t v;
+          if (!g2PbReadVarint(sub, (size_t)sublen, &subpos, &v)) break;
+          *outFlag = (v != 0) ? 1 : 0;
+          return true;
+        }
+        if (!g2PbSkipField(sub, (size_t)sublen, &subpos, sw)) break;
+      }
+      pos += (size_t)sublen;
+      continue;
+    }
+    if (!g2PbSkipField(payload, payloadLen, &pos, wire)) return false;
+  }
+  return false;
+}
+
+bool g2ParseSettingBattery(const uint8_t* payload, size_t payloadLen,
+                           uint8_t* batteryPct) {
+  if (!payload || !batteryPct) return false;
+  const uint8_t* sub; size_t sublen; size_t sp;
+  if (!findInnerField(payload, payloadLen, G2_SET_REQ_F_BATT,
+                      G2_PB_WIRE_VARINT, &sub, &sublen, &sp)) return false;
+  uint64_t v;
+  if (!g2PbReadVarint(sub, sublen, &sp, &v)) return false;
+  if (v > 100) v = 100;
+  *batteryPct = (uint8_t)v;
+  return true;
+}
+
+// Pull the firmware version string out of a settings push. Observed at
+// field 5 of the DeviceReceiveRequestFromAPP body as ASCII like "2.1.1.10".
+// `versionOut` receives a null-terminated string. Returns false if no
+// string at field 5 is present (not every settings push carries the
+// version; the firmware sprinkles it in as a fresh marker when something
+// changes).
+bool g2ParseSettingVersion(const uint8_t* payload, size_t payloadLen,
+                           char* versionOut, size_t versionCap) {
+  if (!payload || !versionOut || versionCap == 0) return false;
+  versionOut[0] = '\0';
+  const uint8_t* sub; size_t sublen; size_t sp;
+  if (!findInnerField(payload, payloadLen, G2_SET_REQ_F_VER,
+                      G2_PB_WIRE_LEN_DELIM, &sub, &sublen, &sp)) return false;
+  uint64_t slen;
+  if (!g2PbReadVarint(sub, sublen, &sp, &slen)) return false;
+  if (sp + slen > sublen) return false;
+  const size_t copy = (slen < versionCap - 1) ? (size_t)slen : versionCap - 1;
+  memcpy(versionOut, sub + sp, copy);
+  versionOut[copy] = '\0';
+  return true;
+}
+
+// Diagnostic dump: walk every inner field of the settings body and print a
+// one-line summary per field. Used during development to discover what
+// numeric fields mean beyond the ones we've identified (VER, BATT).
+// Handler code can call this when a verbose settings-decode flag is set.
+//
+// `logFn` is a user-supplied callback so this file doesn't need to know
+// about the debug-macro plumbing upstream; pass nullptr to no-op.
+typedef void (*G2SettingsFieldLog)(uint32_t field, uint8_t wire,
+                                   uint64_t varintVal,
+                                   const uint8_t* bytes, size_t byteLen);
+
+void g2DumpSettingFields(const uint8_t* payload, size_t payloadLen,
+                         G2SettingsFieldLog logFn) {
+  if (!payload || !logFn) return;
+  size_t pos = 0;
+  while (pos < payloadLen) {
+    uint32_t field; uint8_t wire;
+    if (!g2PbReadTag(payload, payloadLen, &pos, &field, &wire)) return;
+    if (wire == G2_PB_WIRE_LEN_DELIM && field >= 3 && field <= 7) {
+      uint64_t sublen;
+      if (!g2PbReadVarint(payload, payloadLen, &pos, &sublen)) return;
+      if (pos + sublen > payloadLen) return;
+      const uint8_t* sub = payload + pos;
+      size_t subpos = 0;
+      while (subpos < (size_t)sublen) {
+        uint32_t sf; uint8_t sw;
+        if (!g2PbReadTag(sub, (size_t)sublen, &subpos, &sf, &sw)) break;
+        if (sw == G2_PB_WIRE_VARINT) {
+          uint64_t v;
+          size_t vstart = subpos;
+          if (!g2PbReadVarint(sub, (size_t)sublen, &subpos, &v)) break;
+          logFn(sf, sw, v, sub + vstart, subpos - vstart);
+        } else if (sw == G2_PB_WIRE_LEN_DELIM) {
+          uint64_t sl;
+          if (!g2PbReadVarint(sub, (size_t)sublen, &subpos, &sl)) break;
+          if (subpos + sl > (size_t)sublen) break;
+          logFn(sf, sw, 0, sub + subpos, (size_t)sl);
+          subpos += (size_t)sl;
+        } else {
+          if (!g2PbSkipField(sub, (size_t)sublen, &subpos, sw)) break;
+        }
+      }
+      pos += (size_t)sublen;
+      continue;
+    }
+    if (!g2PbSkipField(payload, payloadLen, &pos, wire)) return;
+  }
 }
