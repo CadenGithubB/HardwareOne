@@ -26,6 +26,9 @@
 #include "System_Notifications.h"
 #include "System_MemUtil.h"
 #include "System_VFS.h"
+extern "C" {
+#include "lc3.h"  // vendored Google liblc3 — Apache-2.0 (components/hardwareone_libs/liblc3)
+}
 #include "WebServer_Server.h"  // broadcastEventToAllSessions() for SSE push
 #include "BLE_Events.h"        // CompactJson + blePushEvent
 #include "BLE_Peers.h"         // peer registry + saved-MAC reconnect
@@ -947,6 +950,139 @@ static void micRecCloseLocked(const char* reason) {
             (unsigned)gMicRecBytes, reason ? reason : "ok");
 }
 
+// ─── Phase 2A: on-device LC3 decode → WAV on SD ───────────────────────
+//
+// Each 205 B BLE notify is `[ 5 LC3 frames × 40 B ][ 5 B trailer ]`
+// (verified in Phase 1 — see G2_PROTOCOL.md "Audio" section).
+// liblc3 decodes each 40 B frame to 160 × int16_t PCM samples
+// (16 kHz, 10 ms). Five frames per packet → 5 × 160 = 800 samples =
+// 1600 bytes of PCM per BLE notification, written straight to a WAV
+// file. WAV header written on start with placeholder sizes; on stop
+// we seek back and patch the riff-size + data-size fields.
+//
+// Decoder memory is ~6 KB for 16 kHz / 10 ms — heap-allocated once on
+// first start, freed on stop. Mutex serialises the BLE notify task
+// (writer) against the CLI task (open/close).
+static SemaphoreHandle_t gMicWavMutex   = nullptr;
+static File*             gMicWavFile    = nullptr;
+static String            gMicWavPath;
+static uint32_t          gMicWavBytes   = 0;   // PCM data bytes written (NOT incl. header)
+static uint32_t          gMicWavPackets = 0;
+static uint32_t          gMicWavStartMs = 0;
+static lc3_decoder_t     gMicWavDecoder = nullptr;
+static void*             gMicWavDecMem  = nullptr;
+static uint32_t          gMicWavDecodeFails = 0;
+static uint32_t          gMicWavPlcFrames   = 0;
+static constexpr uint32_t kMicWavMaxBytes = 16u * 1024u * 1024u;  // ~8.7 min @ 32 KB/s decoded
+
+static constexpr int kMicLc3FrameUs   = 10000;  // 10 ms
+static constexpr int kMicLc3SampleHz  = 16000;  // 16 kHz mono
+static constexpr int kMicLc3FrameBytes = 40;    // bytes per LC3 frame in our 32 kbps stream
+static constexpr int kMicLc3FramesPerPkt = 5;
+static constexpr int kMicLc3SamplesPerFrame =
+    kMicLc3SampleHz * kMicLc3FrameUs / 1000000;  // 160
+static constexpr int kMicLc3TrailerBytes = 5;   // last 5 B of each 205 B BLE packet
+
+static void ensureMicWavMutex() {
+  if (!gMicWavMutex) gMicWavMutex = xSemaphoreCreateMutex();
+}
+
+// Write a placeholder 44-byte WAV header. We patch the size fields on
+// close. Format: 16 kHz mono 16-bit PCM little-endian.
+static void micWavWriteHeader(File& f, uint32_t pcmBytes) {
+  const uint32_t riffSize  = 36 + pcmBytes;
+  const uint32_t fmtSize   = 16;
+  const uint16_t pcmFormat = 1;
+  const uint16_t channels  = 1;
+  const uint32_t rate      = (uint32_t)kMicLc3SampleHz;
+  const uint16_t bits      = 16;
+  const uint16_t blockAlign = channels * bits / 8;
+  const uint32_t byteRate   = rate * blockAlign;
+  const uint8_t header[44] = {
+    'R','I','F','F',
+    (uint8_t)(riffSize), (uint8_t)(riffSize>>8),
+    (uint8_t)(riffSize>>16), (uint8_t)(riffSize>>24),
+    'W','A','V','E',
+    'f','m','t',' ',
+    (uint8_t)(fmtSize), (uint8_t)(fmtSize>>8),
+    (uint8_t)(fmtSize>>16), (uint8_t)(fmtSize>>24),
+    (uint8_t)(pcmFormat), (uint8_t)(pcmFormat>>8),
+    (uint8_t)(channels), (uint8_t)(channels>>8),
+    (uint8_t)(rate), (uint8_t)(rate>>8),
+    (uint8_t)(rate>>16), (uint8_t)(rate>>24),
+    (uint8_t)(byteRate), (uint8_t)(byteRate>>8),
+    (uint8_t)(byteRate>>16), (uint8_t)(byteRate>>24),
+    (uint8_t)(blockAlign), (uint8_t)(blockAlign>>8),
+    (uint8_t)(bits), (uint8_t)(bits>>8),
+    'd','a','t','a',
+    (uint8_t)(pcmBytes), (uint8_t)(pcmBytes>>8),
+    (uint8_t)(pcmBytes>>16), (uint8_t)(pcmBytes>>24),
+  };
+  f.write(header, sizeof(header));
+}
+
+// Patch the riff-size and data-size fields on close so the WAV is
+// playable without depending on the original placeholder values.
+// Caller must hold gMicWavMutex.
+static void micWavPatchSizesLocked() {
+  if (!gMicWavFile) return;
+  const uint32_t riffSize = 36 + gMicWavBytes;
+  uint8_t riff[4] = {
+    (uint8_t)(riffSize), (uint8_t)(riffSize>>8),
+    (uint8_t)(riffSize>>16), (uint8_t)(riffSize>>24)
+  };
+  uint8_t dat[4] = {
+    (uint8_t)(gMicWavBytes), (uint8_t)(gMicWavBytes>>8),
+    (uint8_t)(gMicWavBytes>>16), (uint8_t)(gMicWavBytes>>24)
+  };
+  if (gMicWavFile->seek(4))  gMicWavFile->write(riff, 4);
+  if (gMicWavFile->seek(40)) gMicWavFile->write(dat, 4);
+  gMicWavFile->seek(44 + gMicWavBytes);  // restore append position (defensive)
+}
+
+static void micWavCloseLocked(const char* reason) {
+  if (!gMicWavFile) return;
+  micWavPatchSizesLocked();
+  gMicWavFile->close();
+  delete gMicWavFile;
+  gMicWavFile = nullptr;
+  if (gMicWavDecMem) {
+    free(gMicWavDecMem);
+    gMicWavDecMem = nullptr;
+  }
+  gMicWavDecoder = nullptr;
+  DEBUG_G2F("[G2-MIC-WAV] closed %s — %u packets %u PCM bytes "
+            "(%u decode-fails, %u PLC) (%s)",
+            gMicWavPath.c_str(), (unsigned)gMicWavPackets,
+            (unsigned)gMicWavBytes,
+            (unsigned)gMicWavDecodeFails, (unsigned)gMicWavPlcFrames,
+            reason ? reason : "ok");
+}
+
+// Decode one BLE packet's worth of audio (200 B = 5 LC3 frames) into
+// 800 int16 samples and append to the WAV. Caller must already hold
+// the WAV mutex AND have a valid decoder + open file.
+static bool micWavWritePacketLocked(const uint8_t* pkt) {
+  int16_t pcm[kMicLc3FramesPerPkt * kMicLc3SamplesPerFrame];
+  for (int i = 0; i < kMicLc3FramesPerPkt; i++) {
+    const uint8_t* in = pkt + i * kMicLc3FrameBytes;
+    int16_t* out = pcm + i * kMicLc3SamplesPerFrame;
+    int rc = lc3_decode(gMicWavDecoder, in, kMicLc3FrameBytes,
+                        LC3_PCM_FORMAT_S16, out, /*stride*/ 1);
+    if (rc < 0) {
+      gMicWavDecodeFails++;
+      memset(out, 0, kMicLc3SamplesPerFrame * sizeof(int16_t));
+    } else if (rc == 1) {
+      gMicWavPlcFrames++;
+    }
+  }
+  size_t n = gMicWavFile->write(reinterpret_cast<const uint8_t*>(pcm),
+                                sizeof(pcm));
+  gMicWavBytes   += (uint32_t)n;
+  gMicWavPackets += 1;
+  return n == sizeof(pcm);
+}
+
 static void resetMicProbeStats(G2MicProbe& m) {
   m.frameCount = 0;
   m.bytesTotal = 0;
@@ -996,6 +1132,25 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
         }
       }
       xSemaphoreGive(gMicRecMutex);
+    }
+  }
+
+  // On-device LC3 → WAV decode (Phase 2A). Same packet shape as the
+  // raw recorder, but here we strip the 5 B trailer, decode the 5
+  // LC3 frames inline, and write 1600 B of PCM to a WAV file. Skips
+  // packets that aren't the expected 205 B size (defensive).
+  if (gMicWavFile && t.side == gMicRecArm && gMicWavMutex &&
+      len == 205 && gMicWavDecoder) {
+    if (xSemaphoreTake(gMicWavMutex, 0) == pdTRUE) {
+      if (gMicWavFile && gMicWavBytes < kMicWavMaxBytes && gMicWavDecoder) {
+        // The first 200 bytes are 5 × 40 B LC3 frames. Last 5 bytes
+        // are the metadata trailer — discard.
+        micWavWritePacketLocked(data);
+        if (gMicWavBytes >= kMicWavMaxBytes) {
+          micWavCloseLocked("cap reached");
+        }
+      }
+      xSemaphoreGive(gMicWavMutex);
     }
   }
 
@@ -5842,6 +5997,17 @@ static const char* cmd_g2show(const String& argsInput) {
 // and the probe in-flight cap kicks in immediately. No upper clamp.
 static volatile uint32_t gG2LiveRateMs = 1000;
 
+// Q13/Q14 keep-alive toggle. When the firmware idle-times out the lens
+// (~30 s with no ring/temple input), DISPLAY_OFF fires and clears
+// `containerReady` on both arms. Default behavior (false): the loop
+// breaks with reason "lens timeout" — clean shutdown, no flicker.
+// When true: the loop re-CREATEs the container on the next frame
+// (Q13 by clearing `createdOnce`, Q14 by g2ShowText auto-recreate)
+// and continues. Each re-CREATE costs one ~70 ms flicker cycle but
+// keeps long animations playing indefinitely. Tap-dismiss still wins
+// over keep-alive — if the user double-taps, we break regardless.
+static volatile bool gG2LiveLoopKeepAlive = false;
+
 // Toggle the REBUILD-list fast path in the page-swap worker. Default ON
 // as of 2026-04-27: empirical testing on firmware 2.2.0.24 showed
 // REBUILD-list is safe across item-count changes (contradicting the
@@ -5890,6 +6056,38 @@ static const char* cmd_g2liverate(const String& argsInput) {
   gG2LiveRateMs = (uint32_t)n;
   snprintf(out, sizeof(out), "G2 live-update rate set to %u ms",
            (unsigned)gG2LiveRateMs);
+  return out;
+}
+
+// Toggle Q13/Q14 lens-idle keep-alive. Default off (clean break on
+// DISPLAY_OFF — animation stops the moment the firmware idle-times
+// out the lens, ~30 s with no user input). On (`g2liveloop keep on`)
+// re-CREATEs the container each time the firmware times out, so long
+// animations play indefinitely. Cost is one ~70 ms flicker cycle per
+// idle timeout; user double-tap still wins over keep-alive.
+static const char* cmd_g2liveloop(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char out[120];
+  CommandArgs ca(argsInput);
+  String sub = ca.arg(0); sub.toLowerCase();
+  String val = ca.arg(1); val.toLowerCase();
+  if (sub == "keep") {
+    if (val == "on" || val == "1" || val == "true") {
+      gG2LiveLoopKeepAlive = true;
+    } else if (val == "off" || val == "0" || val == "false") {
+      gG2LiveLoopKeepAlive = false;
+    } else if (val.length() != 0) {
+      return "Usage: g2liveloop keep [on|off]";
+    }
+    snprintf(out, sizeof(out),
+             "G2 live-loop keep-alive: %s (re-CREATEs on lens idle-timeout)",
+             gG2LiveLoopKeepAlive ? "ON" : "OFF");
+    return out;
+  }
+  // Status (no args, or 'status').
+  snprintf(out, sizeof(out),
+           "G2 live-loop: rate=%u ms, keep-alive=%s",
+           (unsigned)gG2LiveRateMs, gG2LiveLoopKeepAlive ? "ON" : "OFF");
   return out;
 }
 
@@ -6503,6 +6701,139 @@ static const char* cmd_g2micrec(const String& argsInput) {
   return ret;
 }
 
+// Phase-2A audio integration: on-device LC3 decode → WAV on SD.
+// Strips the 5 B trailer per BLE packet, decodes 5 × 40 B LC3 frames
+// to 5 × 160 int16 samples (16 kHz / 10 ms / 32 kbps), appends the
+// 1600 B of PCM to a WAV file. Independent of g2micrec — both can
+// run simultaneously to compare raw vs decoded.
+//
+// Usage:
+//   g2micwav start [path]   default: /sd/g2_mic-<unixTs>.wav
+//   g2micwav stop           patches WAV header sizes and closes
+//   g2micwav status         (or `g2micwav` with no args)
+//
+// File capped at 16 MB (~8.7 min @ 32 KB/s decoded).
+static const char* cmd_g2micwav(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char ret[260];
+  CommandArgs ca(argsInput);
+  String sub = ca.count() > 0 ? ca.arg(0) : String("");
+  sub.toLowerCase();
+
+  ensureMicWavMutex();
+  if (!gMicWavMutex) return "G2 mic wav: mutex alloc failed";
+
+  if (sub == "start") {
+    if (!VFS::isSDAvailable()) return "G2 mic wav: SD card not available";
+    xSemaphoreTake(gMicWavMutex, portMAX_DELAY);
+    if (gMicWavFile) {
+      xSemaphoreGive(gMicWavMutex);
+      return "G2 mic wav: already recording — run g2micwav stop first";
+    }
+
+    // Allocate decoder memory + set up the decoder. liblc3 needs ~6 KB
+    // for 16 kHz / 10 ms; sized exactly via lc3_decoder_size.
+    unsigned decSize = lc3_decoder_size(kMicLc3FrameUs, kMicLc3SampleHz);
+    if (decSize == 0) {
+      xSemaphoreGive(gMicWavMutex);
+      return "G2 mic wav: lc3_decoder_size returned 0 (bad params?)";
+    }
+    void* mem = malloc(decSize);
+    if (!mem) {
+      xSemaphoreGive(gMicWavMutex);
+      snprintf(ret, sizeof(ret), "G2 mic wav: malloc %u B failed", decSize);
+      return ret;
+    }
+    lc3_decoder_t dec = lc3_setup_decoder(kMicLc3FrameUs, kMicLc3SampleHz,
+                                          /*sr_pcm_hz*/ 0, mem);
+    if (!dec) {
+      free(mem);
+      xSemaphoreGive(gMicWavMutex);
+      return "G2 mic wav: lc3_setup_decoder failed";
+    }
+
+    String path = ca.count() > 1 ? ca.arg(1) : String("");
+    if (path.length() == 0) {
+      uint32_t ts = (uint32_t)time(nullptr);
+      if (ts == 0) ts = millis() / 1000;
+      char buf[64];
+      snprintf(buf, sizeof(buf), "/sd/g2_mic-%lu.wav", (unsigned long)ts);
+      path = buf;
+    } else if (!path.startsWith("/")) {
+      path = String("/sd/") + path;
+    }
+    File* f = new File(VFS::open(path, "w", true));
+    if (!f || !*f) {
+      delete f;
+      free(mem);
+      xSemaphoreGive(gMicWavMutex);
+      snprintf(ret, sizeof(ret), "G2 mic wav: failed to open %s", path.c_str());
+      return ret;
+    }
+    micWavWriteHeader(*f, /*pcmBytes*/ 0);
+    gMicWavFile        = f;
+    gMicWavPath        = path;
+    gMicWavBytes       = 0;
+    gMicWavPackets     = 0;
+    gMicWavStartMs     = millis();
+    gMicWavDecoder     = dec;
+    gMicWavDecMem      = mem;
+    gMicWavDecodeFails = 0;
+    gMicWavPlcFrames   = 0;
+    gMicRecArm         = 'L';
+    xSemaphoreGive(gMicWavMutex);
+    snprintf(ret, sizeof(ret),
+             "G2 mic wav: writing to %s (16k mono 16-bit, decoder=%u B). "
+             "Need an active hijack page for the firmware to send audio.",
+             path.c_str(), decSize);
+    return ret;
+  }
+
+  if (sub == "stop") {
+    xSemaphoreTake(gMicWavMutex, portMAX_DELAY);
+    if (!gMicWavFile) {
+      xSemaphoreGive(gMicWavMutex);
+      return "G2 mic wav: not recording";
+    }
+    String path     = gMicWavPath;
+    uint32_t bytes  = gMicWavBytes;
+    uint32_t pkts   = gMicWavPackets;
+    uint32_t durMs  = millis() - gMicWavStartMs;
+    uint32_t fails  = gMicWavDecodeFails;
+    uint32_t plc    = gMicWavPlcFrames;
+    micWavCloseLocked("user stop");
+    xSemaphoreGive(gMicWavMutex);
+    float secs = bytes ? (float)bytes / (float)(kMicLc3SampleHz * 2) : 0.f;
+    snprintf(ret, sizeof(ret),
+             "G2 mic wav: closed %s — %u packets, %u B PCM (%.2f s audio), "
+             "%u ms wall, %u decode-fails, %u PLC",
+             path.c_str(), (unsigned)pkts, (unsigned)bytes, (double)secs,
+             (unsigned)durMs, (unsigned)fails, (unsigned)plc);
+    return ret;
+  }
+
+  // status (default)
+  xSemaphoreTake(gMicWavMutex, portMAX_DELAY);
+  if (!gMicWavFile) {
+    xSemaphoreGive(gMicWavMutex);
+    return "G2 mic wav: idle (use g2micwav start [path])";
+  }
+  String path    = gMicWavPath;
+  uint32_t bytes = gMicWavBytes;
+  uint32_t pkts  = gMicWavPackets;
+  uint32_t durMs = millis() - gMicWavStartMs;
+  uint32_t fails = gMicWavDecodeFails;
+  xSemaphoreGive(gMicWavMutex);
+  float secs = bytes ? (float)bytes / (float)(kMicLc3SampleHz * 2) : 0.f;
+  snprintf(ret, sizeof(ret),
+           "G2 mic wav: %s — %u packets, %u B PCM (%.2f s), %u ms, "
+           "%u decode-fails (%u%% of cap)",
+           path.c_str(), (unsigned)pkts, (unsigned)bytes, (double)secs,
+           (unsigned)durMs, (unsigned)fails,
+           (unsigned)((bytes * 100u) / kMicWavMaxBytes));
+  return ret;
+}
+
 // EvenAI CONFIG probe (Cmd=10). Fires a single CONFIG message with
 // caller-specified voiceSwitch / streamSpeed values. Use to characterise
 // what the firmware accepts vs. rejects on this sub-command — the
@@ -6811,6 +7142,7 @@ extern const CommandEntry g2Commands[] = {
   { "g2info",       "Dump device info (firmware, MAC, battery, etc.)",  false, cmd_g2info },
   { "g2settings",   "Settings debug: g2settings verbose [on|off]",     false, cmd_g2settings },
   { "g2liverate",   "Get/set live-update probe cadence (ms): g2liverate [N]", false, cmd_g2liverate },
+  { "g2liveloop",   "Q13/Q14 lens-idle keep-alive: g2liveloop keep [on|off] (default off → break on lens timeout)", false, cmd_g2liveloop },
   { "g2listrebuild","REBUILD-list fast path on page-swap [on|off] (default ON; no-flicker nav, selector resets to row 0)", false, cmd_g2listrebuild },
   { "g2show",       "Display text: g2show <text>",                     false, cmd_g2show },
   { "g2ai",         "Front-pane AI card (full pipeline): g2ai <text>", false, cmd_g2ai },
@@ -6825,6 +7157,7 @@ extern const CommandEntry g2Commands[] = {
   { "g2micreset",   "G2 mic probe: zero per-arm counters",                                                  false, cmd_g2micreset },
   { "g2micverbose", "G2 mic probe: per-frame log [on|off]",                                                 false, cmd_g2micverbose },
   { "g2micrec",     "G2 mic dump: g2micrec start [path] | stop | status — writes raw 205B LC3 packets to SD", false, cmd_g2micrec },
+  { "g2micwav",     "G2 mic decode: g2micwav start [path] | stop | status — decodes LC3 → 16k mono WAV on SD", false, cmd_g2micwav },
   { "g2protostats", "Show G2 protocol stats per sid: g2protostats [verbose]",      false, cmd_g2protostats },
   { "g2probe",      "Fire arbitrary pb cmd: g2probe <sid_hex> <cmd_dec> [body_hex]", false, cmd_g2probe },
   { "g2notify",     "Transient text (placeholder): g2notify [secs] <text>", false, cmd_g2notify },
@@ -8434,12 +8767,30 @@ const char* g2ProbeImageQ13LiveTile() {
   bool createdOnce = false;
   unsigned framesOk = 0;
   unsigned framesAttempted = 0;
+  unsigned recreateCount = 0;
   const uint32_t startMs = millis();
   bool dismissed = false;
+  bool lensTimedOut = false;
 
   while ((millis() - startMs) < kSafetyCapMs &&
          framesAttempted < kSafetyCapFrames) {
     if (gImgProbeHoldTapPending) { dismissed = true; break; }
+
+    // Lens-idle detection. The firmware fires DISPLAY_OFF after ~30 s
+    // of no ring/temple input and our event handler clears
+    // containerReady. Without this check the loop happily blasts
+    // image fragments into a dead container until the safety cap.
+    if (createdOnce && !arm->containerReady) {
+      if (gG2LiveLoopKeepAlive) {
+        recreateCount++;
+        DEBUG_G2F("[ImgProbe] Q13 lens idle-timeout (recreate #%u)",
+                  recreateCount);
+        createdOnce = false;  // next push goes through CREATE path
+      } else {
+        lensTimedOut = true;
+        break;
+      }
+    }
 
     // Build BMP for this frame. Bar is 12 px tall and walks down by
     // 12 px per frame, wrapping at the bottom.
@@ -8492,18 +8843,21 @@ const char* g2ProbeImageQ13LiveTile() {
   gImgProbeHoldActive = false;
   free(bmp);
 
+  const char* reason = dismissed     ? "user tap"
+                     : lensTimedOut  ? "lens timeout"
+                                     : "safety cap";
   const uint32_t totalMs = millis() - startMs;
-  DEBUG_G2F("[ImgProbe] Q13 ended (%s): %u/%u frames in %u ms (avg %u ms/frame)",
-            dismissed ? "user tap" : "safety cap",
-            framesOk, framesAttempted, (unsigned)totalMs,
+  DEBUG_G2F("[ImgProbe] Q13 ended (%s): %u/%u frames %u recreates in %u ms "
+            "(avg %u ms/frame)",
+            reason, framesOk, framesAttempted, recreateCount, (unsigned)totalMs,
             framesAttempted ? (unsigned)(totalMs / framesAttempted) : 0u);
 
   probePostProbeShutdown(*arm);
   probeFooter("Q13", framesOk, framesAttempted);
   snprintf(ret, sizeof(ret),
-           "Img Q13: %u/%u frames in %u ms, end via %s",
+           "Img Q13: %u/%u frames in %u ms, %u re-creates, end via %s",
            framesOk, framesAttempted, (unsigned)totalMs,
-           dismissed ? "user tap" : "safety cap");
+           recreateCount, reason);
   return ret;
 }
 
@@ -8552,12 +8906,34 @@ const char* g2ProbeImageQ14LiveText() {
 
   unsigned framesOk = 0;
   unsigned framesAttempted = 0;
+  unsigned recreateCount = 0;
   const uint32_t startMs = millis();
   bool dismissed = false;
+  bool lensTimedOut = false;
 
   while ((millis() - startMs) < kSafetyCapMs &&
          framesAttempted < kSafetyCapFrames) {
     if (gImgProbeHoldTapPending) { dismissed = true; break; }
+
+    // Lens-idle detection — same gate as Q13. g2ShowText's first call
+    // CREATEs the TEXT widget, subsequent calls REBUILD. When DISPLAY_OFF
+    // fires the firmware tears the widget down and our event handler
+    // clears containerReady; the next g2ShowText auto-CREATEs a fresh
+    // widget. With keep-alive off, we break here so the loop stops cleanly
+    // instead of letting g2ShowText churn through the recreate cycle.
+    G2Temple* armCheck = pickEvenAIArm("imgQ14");
+    if (framesAttempted > 0 && armCheck && !armCheck->containerReady) {
+      if (gG2LiveLoopKeepAlive) {
+        recreateCount++;
+        DEBUG_G2F("[ImgProbe] Q14 lens idle-timeout (auto-recreate #%u)",
+                  recreateCount);
+        // No state to clear — g2ShowText handles re-CREATE itself on the
+        // next call when containerReady is false.
+      } else {
+        lensTimedOut = true;
+        break;
+      }
+    }
 
     char line[96];
     const uint32_t upS = (millis() - startMs) / 1000u;
@@ -8587,10 +8963,13 @@ const char* g2ProbeImageQ14LiveText() {
   }
   gImgProbeHoldActive = false;
 
+  const char* reason = dismissed     ? "user tap"
+                     : lensTimedOut  ? "lens timeout"
+                                     : "safety cap";
   const uint32_t totalMs = millis() - startMs;
-  DEBUG_G2F("[ImgProbe] Q14 ended (%s): %u/%u rebuilds in %u ms (avg %u ms/frame)",
-            dismissed ? "user tap" : "safety cap",
-            framesOk, framesAttempted, (unsigned)totalMs,
+  DEBUG_G2F("[ImgProbe] Q14 ended (%s): %u/%u rebuilds %u recreates in %u ms "
+            "(avg %u ms/frame)",
+            reason, framesOk, framesAttempted, recreateCount, (unsigned)totalMs,
             framesAttempted ? (unsigned)(totalMs / framesAttempted) : 0u);
 
   // Q14 uses a TEXT widget — clean it up via the standard hijack path
@@ -8599,9 +8978,9 @@ const char* g2ProbeImageQ14LiveText() {
   if (arm) probePostProbeShutdown(*arm);
   probeFooter("Q14", framesOk, framesAttempted);
   snprintf(ret, sizeof(ret),
-           "Img Q14: %u/%u rebuilds in %u ms, end via %s",
+           "Img Q14: %u/%u rebuilds in %u ms, %u re-creates, end via %s",
            framesOk, framesAttempted, (unsigned)totalMs,
-           dismissed ? "user tap" : "safety cap");
+           recreateCount, reason);
   return ret;
 }
 
