@@ -84,6 +84,32 @@ StorageType getStorageType(const String& path);
 String normalize(const String& path);
 String stripSdPrefix(const String& path);
 
+// ============================================================================
+// Virtual entries — mount points surfaced as folders during enumeration
+// ============================================================================
+// `VFS::open(parentPath, "r")` then iterating entries does NOT include
+// mount points like /sd at the LittleFS root, because the underlying
+// LittleFS knows nothing about them. Without help, every consumer that
+// browses the filesystem (FileManager, the web file listing, future
+// browsers) has to special-case "and don't forget to inject /sd at root
+// when SD is mounted." That's a known smell; this API centralises it.
+//
+// Callers walk the underlying FS as usual via VFS::open, then call this
+// to get any extra synthetic entries that should appear at the same
+// level. Today: returns "sd" once when parentPath == "/" and SD is
+// mounted. Tomorrow: USB MSC, network share, anything else mounted at a
+// well-known path.
+struct VirtualEntry {
+  const char* name;     // display name only (no leading slash)
+  bool        isFolder; // always true today; reserved for future
+};
+
+/** Fill `out` with up to `cap` virtual mount-point entries that should
+ *  appear when the caller is enumerating `parentPath`. Returns the
+ *  number actually written. Cheap (no FS I/O — just checks mount flags).
+ */
+size_t listVirtualEntries(const String& parentPath, VirtualEntry* out, size_t cap);
+
 bool exists(const String& path);
 File open(const String& path, const char* mode = FILE_READ, bool create = false);
 bool mkdir(const String& path);

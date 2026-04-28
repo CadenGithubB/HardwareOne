@@ -139,16 +139,20 @@ bool FileManager::getItem(int index, FileEntry& entry) {
     if (dir) dir.close();
     return false;
   }
-  
+
+  // Same SD prefix-translation as loadDirectory — needed when the user
+  // is browsing /sd/* with >64 items per directory.
+  String effectivePath = VFS::stripSdPrefix(String(state.currentPath));
+
   int currentIdx = 0;
   File file = dir.openNextFile();
-  
+
   while (file) {
     // Extract display name
     String fileName = String(file.name());
-    if (strcmp(state.currentPath, "/") != 0) {
+    if (effectivePath != "/") {
       char prefix[96];
-      snprintf(prefix, sizeof(prefix), "%s/", state.currentPath);
+      snprintf(prefix, sizeof(prefix), "%s/", effectivePath.c_str());
       if (fileName.startsWith(prefix)) {
         fileName = fileName.substring(strlen(prefix));
       }
@@ -363,68 +367,105 @@ bool FileManager::loadDirectory() {
   gSensorPollingPaused = true;
 
   FsLockGuard guard("FileManager.loadDirectory");
-  
+
   File dir = VFS::open(state.currentPath, "r");
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     gSensorPollingPaused = wasPaused;
     return false;
   }
-  
+
+  // The SD library returns entry names rooted at the SD card root ("/")
+  // — it doesn't know about our "/sd" mount-point convention. So when
+  // currentPath is "/sd" or "/sd/foo", the prefix the underlying FS
+  // sees is the SD-relative path (with "/sd" stripped). Compute that
+  // once so we can strip it from each entry name correctly. For
+  // LittleFS paths this is a no-op (stripSdPrefix returns the input
+  // unchanged when there's no /sd prefix).
+  String effectivePath = VFS::stripSdPrefix(String(state.currentPath));
+
   // Load and cache directory entries
   cachedCount = 0;
   state.totalItems = 0;
+
+  // Mount points (e.g. /sd at LittleFS root) — the VFS layer is the
+  // authority on which synthetic entries belong at this path. Each one
+  // gets translated into a FileEntry so the rest of the FileManager
+  // pipeline treats it like any other folder. Permissions are looked up
+  // per-mount via the regular getPermissions() rule table (e.g. /sd is
+  // PERM_READ — browse but don't delete the mount point).
+  {
+    VFS::VirtualEntry virtuals[4];
+    const size_t nVirt = VFS::listVirtualEntries(
+        String(state.currentPath), virtuals,
+        sizeof(virtuals) / sizeof(virtuals[0]));
+    for (size_t v = 0; v < nVirt; v++) {
+      if (cachedCount >= FILE_MANAGER_MAX_CACHED_ITEMS) break;
+      strncpy(cachedEntries[cachedCount].name, virtuals[v].name,
+              FILE_MANAGER_MAX_NAME - 1);
+      cachedEntries[cachedCount].name[FILE_MANAGER_MAX_NAME - 1] = '\0';
+      cachedEntries[cachedCount].isFolder = virtuals[v].isFolder;
+      cachedEntries[cachedCount].size = 0;
+      String fullPath = formatPath(state.currentPath, virtuals[v].name);
+      cachedEntries[cachedCount].permissions = getPermissions(fullPath);
+      cachedCount++;
+      state.totalItems++;
+    }
+  }
+
   File file = dir.openNextFile();
-  
+
   while (file) {
     String fileName = String(file.name());
-    
-    // Extract display name and filter
-    if (strcmp(state.currentPath, "/") != 0) {
+
+    // Extract display name and filter. Strip the *effective* path
+    // prefix so SD entries (where the FS-level path is SD-rooted) are
+    // handled the same as LittleFS entries.
+    if (effectivePath != "/") {
       char prefix[96];
-      snprintf(prefix, sizeof(prefix), "%s/", state.currentPath);
+      snprintf(prefix, sizeof(prefix), "%s/", effectivePath.c_str());
       if (fileName.startsWith(prefix)) {
         fileName = fileName.substring(strlen(prefix));
       }
     } else if (fileName.startsWith("/")) {
       fileName = fileName.substring(1);
     }
-    
+
     // Skip nested paths
     if (fileName.indexOf('/') != -1) {
       file = dir.openNextFile();
       continue;
     }
-    
+
     // Skip hidden files if configured
     if (!state.showHidden && fileName.startsWith(".")) {
       file = dir.openNextFile();
       continue;
     }
-    
+
     // Cache this entry if we have space
     if (cachedCount < FILE_MANAGER_MAX_CACHED_ITEMS) {
       strncpy(cachedEntries[cachedCount].name, fileName.c_str(), FILE_MANAGER_MAX_NAME - 1);
       cachedEntries[cachedCount].name[FILE_MANAGER_MAX_NAME - 1] = '\0';
       cachedEntries[cachedCount].isFolder = file.isDirectory();
       cachedEntries[cachedCount].size = cachedEntries[cachedCount].isFolder ? 0 : file.size();
-      
+
       // Get permissions
       String fullPath = formatPath(state.currentPath, cachedEntries[cachedCount].name);
       cachedEntries[cachedCount].permissions = getPermissions(fullPath);
-      
+
       cachedCount++;
     }
-    
+
     state.totalItems++;
     file = dir.openNextFile();
   }
-  
+
   dir.close();
   cacheValid = true;
   ensureValidSelection();
   state.dirty = false;
-  
+
   gSensorPollingPaused = wasPaused;
   return true;
 }

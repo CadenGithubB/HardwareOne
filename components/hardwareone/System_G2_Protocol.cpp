@@ -792,6 +792,120 @@ size_t g2BuildCreateImage(uint8_t seq, uint32_t magic,
                          payload, pbLen, out, outCap);
 }
 
+size_t g2BuildCreateImageMultiPb(uint32_t magic,
+                                 const G2ImageTile* tiles, size_t tileCount,
+                                 uint32_t widgetId,
+                                 uint8_t* pbOut, size_t pbCap) {
+  if (!pbOut || pbCap == 0 || !tiles || tileCount == 0) return 0;
+
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD, G2_CMD_CREATE_STARTUP)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, (uint32_t)tileCount)) return 0;
+
+  for (size_t i = 0; i < tileCount; i++) {
+    const G2ImageTile& t = tiles[i];
+    if (!t.containerName) return 0;
+    size_t imgStart;
+    if (!g2PbBeginNested(pbOut, pbCap, &pos, /*F_IMAGE_OBJ*/4, &imgStart)) return 0;
+    if (!g2PbWriteUint32(pbOut, pbCap, &pos, 1, t.x)) return 0;
+    if (!g2PbWriteUint32(pbOut, pbCap, &pos, 2, t.y)) return 0;
+    if (!g2PbWriteUint32(pbOut, pbCap, &pos, 3, t.w)) return 0;
+    if (!g2PbWriteUint32(pbOut, pbCap, &pos, 4, t.h)) return 0;
+    if (!g2PbWriteUint32(pbOut, pbCap, &pos, 5, t.containerId)) return 0;
+    if (!g2PbWriteString(pbOut, pbCap, &pos, 6, t.containerName)) return 0;
+    if (!g2PbEndNested(pbOut, pbCap, &pos, imgStart)) return 0;
+  }
+
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+size_t g2BuildCreateImageMulti(uint8_t seq, uint32_t magic,
+                               const G2ImageTile* tiles, size_t tileCount,
+                               uint32_t widgetId,
+                               uint8_t* out, size_t outCap) {
+  uint8_t payload[512];
+  size_t pbLen = g2BuildCreateImageMultiPb(magic, tiles, tileCount, widgetId,
+                                            payload, sizeof(payload));
+  if (pbLen == 0) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pbLen, out, outCap);
+}
+
+// Mixed CREATE — one ListObject (f2) + one ImageObject (f4) inside a
+// single CreateStartUpPageContainer. Tests whether the firmware accepts
+// multi-type widget composition in a single CREATE frame. Used by the
+// Q16/Q17/Q18 probes that overlay an image on a list-shaped page.
+//
+// f1 (ContainerTotalNum) is set to 2 — one list + one image. The list
+// is rendered first on the wire (f2 < f4); whether that means it's
+// drawn first on the lens (z-order) is what we're testing.
+size_t g2BuildCreateMixedListImagePb(uint32_t magic,
+                                     const char* listName,
+                                     const char* const* listItems,
+                                     size_t listItemCount,
+                                     const G2ContainerGeom& listGeom,
+                                     const G2ImageTile& imageTile,
+                                     uint32_t widgetId,
+                                     uint8_t* pbOut, size_t pbCap) {
+  if (!pbOut || pbCap == 0 || !listName || !listItems || listItemCount == 0
+      || !imageTile.containerName) return 0;
+
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD, G2_CMD_CREATE_STARTUP)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, 2)) return 0;
+
+  // ListObject (wrapper field 2) — share writeListObjectWithItems with
+  // the existing list-only builders so the on-wire shape is identical.
+  if (!writeListObjectWithItems(pbOut, pbCap, &pos,
+                                listName, listItems, listItemCount,
+                                listGeom)) return 0;
+
+  // ImageObject (wrapper field 4) — same shape as g2BuildCreateImagePb.
+  size_t imgStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, /*F_IMAGE_OBJ*/4, &imgStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 1, imageTile.x)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 2, imageTile.y)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 3, imageTile.w)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 4, imageTile.h)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 5, imageTile.containerId)) return 0;
+  if (!g2PbWriteString(pbOut, pbCap, &pos, 6, imageTile.containerName)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, imgStart)) return 0;
+
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+size_t g2BuildCreateMixedListImage(uint8_t seq, uint32_t magic,
+                                   const char* listName,
+                                   const char* const* listItems,
+                                   size_t listItemCount,
+                                   const G2ContainerGeom& listGeom,
+                                   const G2ImageTile& imageTile,
+                                   uint32_t widgetId,
+                                   uint8_t* out, size_t outCap) {
+  // Larger payload buffer than other CREATE builders because we're
+  // packing two widgets plus list items into one nested frame. 1 KB
+  // is plenty for ~6 short list rows + a single image declaration.
+  uint8_t payload[1024];
+  size_t pbLen = g2BuildCreateMixedListImagePb(magic, listName,
+                                                listItems, listItemCount,
+                                                listGeom, imageTile,
+                                                widgetId,
+                                                payload, sizeof(payload));
+  if (pbLen == 0) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pbLen, out, outCap);
+}
+
 bool g2DecodeHeartbeatAckTail(const uint8_t* pb, size_t pbLen,
                               uint64_t* seq, uint64_t* echo) {
   if (!pb || pbLen == 0) return false;

@@ -191,6 +191,35 @@ inline int parseBoolArg(const String& arg) {
   return -1;
 }
 
+// Generic on/off CLI handler for a persisted bool setting. Collapses the
+// 12-line on/off/true/false/1/0/setSetting/return-string template that
+// every BOOL toggle command was repeating. `label` is a short prefix used
+// in the response strings: "[BLE] Auto-start", "[G2] Auto-reconnect", etc.
+//
+// Behavior:
+//   * Empty arg          → "<label>: enabled" or "<label>: disabled" (current state)
+//   * "on"/"true"/"1"    → setSetting(field, true);  return "<label> enabled"
+//   * "off"/"false"/"0"  → setSetting(field, false); return "<label> disabled"
+//   * Anything else      → "<label>: invalid value (use on|off)"
+//
+// Result strings use a static buffer (single-threaded CLI assumption); a
+// returned const char* is valid until the next call to this helper. If
+// you need a stable copy, snprintf into your own buffer.
+const char* settingBoolToggle(bool& field, const String& arg, const char* label);
+
+// One-line CLI handler for a persisted bool. Use like:
+//   BOOL_CMD(bleautostart, gSettings.bluetoothAutoStart, "[BLE] Auto-start")
+// expands to:
+//   static const char* cmd_bleautostart(const String& a) {
+//     RETURN_VALID_IF_VALIDATE_CSTR();
+//     return settingBoolToggle(gSettings.bluetoothAutoStart, a, "[BLE] Auto-start");
+//   }
+#define BOOL_CMD(cmdname, fieldExpr, label) \
+  static const char* cmd_##cmdname(const String& a) { \
+    RETURN_VALID_IF_VALIDATE_CSTR(); \
+    return settingBoolToggle(fieldExpr, a, label); \
+  }
+
 // ============================================================================
 // Base64 Encoding/Decoding
 // ============================================================================

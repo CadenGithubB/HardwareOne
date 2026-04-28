@@ -252,6 +252,20 @@ bool g2ShowTextPage(const char* content,
 // overlay (observed 2026-04-24). List-into-list REBUILDs work cleanly.
 bool g2ShowTextAsList(const char* text);
 
+// Live list page primitive — periodically rebuilds a list-shaped page in
+// place via Cmd=7 REBUILD-list (no flicker). `buildFn` is called on each
+// tick to repopulate the text content (same shape as the page module's
+// `buildText` callback); the worker splits on newlines, prepends a
+// "<- Back" row, and ships a REBUILD. Double-tap (SysEvent DOUBLE_CLICK
+// src=2) kicks an immediate refresh. Single tap goes through the normal
+// row-tap path → page-swap, which auto-cancels the live worker.
+//
+// One live page at a time; calling this while another is active stops
+// the previous one first. Returns true on a successful initial render.
+typedef void (*G2LivePageBuildFn)(char* out, size_t cap);
+bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs);
+void g2StopLiveListPage();
+
 // Page-mode tracker for the hijacked Blocks menu. Stateful pages register
 // their identity here so handleHijackMenuTap() can route taps to the
 // right per-page handler. See G2HijackPage enum in Optional_EvenG2.cpp
@@ -371,6 +385,13 @@ struct G2PageModule {
   // Page identity in the lens-state hijackPage tracker. Used by the
   // dispatcher to figure out whose handleTap to call.
   G2HijackPage  hijackPage;
+
+  // Optional: when > 0 and showMenu is null, the dispatcher renders the
+  // page via g2StartLiveListPage() instead of g2ShowTextAsList(). The
+  // worker calls buildText every liveIntervalMs and REBUILDs the list
+  // in place — no flicker. Double-tap on the lens kicks an immediate
+  // refresh. 0 means "static" (one-shot render, current default).
+  uint32_t      liveIntervalMs;
 };
 
 // Register a page module. Idempotent: a re-registration with the same
@@ -507,6 +528,50 @@ const char* g2ProbeImageQ10ClearThenPush();
 // the per-frame cost drops from ~3 s (with re-CREATE) to ~2.5 s.
 const char* g2ProbeImageQ11SimpleSwap();
 
+// Probe Q12 — full-display 576×288 image as a 2×2 grid of 288×144
+// tiles. Single CREATE declares all 4 ImageObject children; subsequent
+// Cmd=3 streams target each tile by its CID/name pair. Validates the
+// firmware accepts multi-tile CREATE geometry and that the four tiles
+// align cleanly on lens (centre indicator: a 48×48 white block formed
+// by each tile's inside-corner 24×24 square).
+const char* g2ProbeImageQ12FullScreen();
+
+// Probe Q13 — live image-tile pipeline. Single 288×144 container,
+// pushes a fresh BMP every `g2liverate` ms (CLI-tunable). Each frame
+// shifts a horizontal bar so the update is visibly different. Loops
+// until double-tap or safety cap. Logs req-vs-actual cadence per frame.
+const char* g2ProbeImageQ13LiveTile();
+
+// Probe Q14 — live TEXT REBUILD pipeline. CREATE once, REBUILD_PAGE
+// (Cmd=7) every `g2liverate` ms with a fresh "Live #N up=Xs" string.
+// Single envelope per update vs Q13's ~7-fragment burst — useful for
+// characterising the fastest text-update cadence the firmware accepts.
+const char* g2ProbeImageQ14LiveText();
+
+// Probe Q15 — LEFT-arm image push test. Same BMP/transport as Q6 but
+// explicitly targets the LEFT temple instead of the default RIGHT.
+// Tests the 2026-04-28 third-party claim that "image fragments are
+// faster on the left arm." Compares burst time to Q6's right-arm
+// baseline (~2.6 s on this firmware/stack).
+const char* g2ProbeImageQ15LeftArm();
+
+// Probe Q16 — mixed CREATE side-by-side. List in top half + 288x144
+// image in bottom half, no overlap. Verifies that the firmware
+// accepts a single CreateStartUpPageContainer carrying both ListObject
+// and ImageObject children (schema-allowed but never tested).
+const char* g2ProbeImageQ16MixedSideBySide();
+
+// Probe Q17 — mixed CREATE with overlap. Full-screen list + 288x144
+// image positioned to overlap the middle. Determines z-order: does the
+// image paint on top of the list, under it, or get rejected.
+const char* g2ProbeImageQ17MixedOverlap();
+
+// Probe Q18 — mixed CREATE with icon-sized image. Full-screen list +
+// 80x80 image in top-right corner. Tests whether the firmware accepts
+// non-standard (non-288x144) image container dimensions, and whether
+// matching small BMPs render at the requested geometry.
+const char* g2ProbeImageQ18MixedIcon();
+
 #else // !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
 
 // -----------------------------------------------------------------------------
@@ -534,6 +599,9 @@ inline bool g2ShowEvenAIReplyNoAsk(const char*) { return false; }
 inline bool g2ShowEvenAIReplyDirect(const char*) { return false; }
 inline bool g2HideEvenAICard() { return false; }
 inline bool g2ShowTextAsList(const char* text) { return false; }
+typedef void (*G2LivePageBuildFn)(char* out, size_t cap);
+inline bool g2StartLiveListPage(G2LivePageBuildFn, uint32_t) { return false; }
+inline void g2StopLiveListPage() {}
 inline bool g2ShowListPage(const char* const* items, size_t itemCount,
                            const G2ContainerGeom& geom = G2_GEOM_LARGE) { return false; }
 enum G2TapKind : uint8_t { G2_TAP_PAGE_NEXT = 0, G2_TAP_PAGE_PREV = 1 };
@@ -557,6 +625,13 @@ inline const char* g2ProbeImageQ9FrameBuilder()     { return "G2 disabled"; }
 inline const char* g2ProbeImageQGlizzy()            { return "G2 disabled"; }
 inline const char* g2ProbeImageQ10ClearThenPush()   { return "G2 disabled"; }
 inline const char* g2ProbeImageQ11SimpleSwap()      { return "G2 disabled"; }
+inline const char* g2ProbeImageQ12FullScreen()      { return "G2 disabled"; }
+inline const char* g2ProbeImageQ13LiveTile()        { return "G2 disabled"; }
+inline const char* g2ProbeImageQ14LiveText()        { return "G2 disabled"; }
+inline const char* g2ProbeImageQ15LeftArm()         { return "G2 disabled"; }
+inline const char* g2ProbeImageQ16MixedSideBySide() { return "G2 disabled"; }
+inline const char* g2ProbeImageQ17MixedOverlap()    { return "G2 disabled"; }
+inline const char* g2ProbeImageQ18MixedIcon()       { return "G2 disabled"; }
 
 #endif // ENABLE_BLUETOOTH
 

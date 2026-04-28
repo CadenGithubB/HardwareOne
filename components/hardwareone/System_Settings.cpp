@@ -10,6 +10,7 @@
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC macro
 #include "System_SensorStubs.h" // Network stubs when disabled
 #include "System_Utils.h"    // RETURN_VALID_IF_VALIDATE_CSTR macro
+#include "BLE_Peers.h"       // bluetooth.peers JSON (de)serialization
 #include "System_Command.h"
 #include "System_Notifications.h"
 #include <LittleFS.h>
@@ -534,7 +535,7 @@ void applySettings() {
   // Apply debug settings to runtime flags using table-driven loop.
   // Each entry maps a bool field in gSettings to the runtime debug flag it enables.
   // Multiple settings can map to the same flag (e.g. debugAuth and debugAuthCookies both → DEBUG_AUTH).
-  struct DebugFlagMapping { size_t settingOffset; uint64_t flag; };
+  struct DebugFlagMapping { size_t settingOffset; DebugFlagMask flag; };
   #define DBG_MAP(field, flag) { offsetof(Settings, field), flag }
   static const DebugFlagMapping kDebugMappings[] = {
     // Core debug flags
@@ -563,6 +564,12 @@ void applySettings() {
     DBG_MAP(debugBluetoothCore,    DEBUG_BLUETOOTH_CORE),
     DBG_MAP(debugBluetoothGatt,    DEBUG_BLUETOOTH_GATT),
     DBG_MAP(debugBluetoothData,    DEBUG_BLUETOOTH_DATA),
+    DBG_MAP(debugG2Lifecycle,      DEBUG_G2_LIFECYCLE),
+    DBG_MAP(debugG2Protocol,       DEBUG_G2_PROTOCOL),
+    DBG_MAP(debugG2Events,         DEBUG_G2_EVENTS),
+    DBG_MAP(debugG2Pages,          DEBUG_G2_PAGES),
+    DBG_MAP(debugG2Heartbeat,      DEBUG_G2_HEARTBEAT),
+    DBG_MAP(debugG2Dump,           DEBUG_G2_DUMP),
     DBG_MAP(debugEspNow,           DEBUG_ESPNOW_CORE),
     DBG_MAP(debugEspNowStream,     DEBUG_ESPNOW_STREAM),
     DBG_MAP(debugEspNowCore,       DEBUG_ESPNOW_CORE),
@@ -814,6 +821,13 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
     }
   }
 
+  // BLE peers — nested under bluetooth.peers; serialised by BLE_Peers
+  // since the structure is one level deeper than the SettingsModule
+  // registry handles. See BLE_Peers.h.
+#if ENABLE_BLUETOOTH
+  blePeersWriteJson(doc);
+#endif
+
   // WiFi networks array - now nested under wifi.networks
   if (gWifiNetworks && gWifiNetworkCount > 0) {
     JsonArray networks = doc["wifi"]["networks"].to<JsonArray>();
@@ -1033,6 +1047,13 @@ bool readSettingsJson() {
       }
     }
   }
+
+  // BLE peers — read before registered-modules call to avoid races; the
+  // peer modules will see the data populated when they bleRegisterPeer
+  // during init.
+#if ENABLE_BLUETOOTH
+  blePeersReadJson(doc);
+#endif
 
   // Apply settings from registered modules first (handles defaults automatically)
   size_t registeredCount = readRegisteredSettings(doc);
@@ -1352,7 +1373,14 @@ static const SettingEntry debugSettingEntries[] = {
   { "memory",           SETTING_BOOL, &gSettings.debugMemory,         0, 0, nullptr, 0, 1, "Memory",               nullptr, false, nullptr, "debugmemory" },
   { "settingsSystem",   SETTING_BOOL, &gSettings.debugSettingsSystem, 0, 0, nullptr, 0, 1, "Settings",             nullptr, false, nullptr, "debugsettingssystem" },
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  { "g2",               SETTING_BOOL, &gSettings.debugG2,             0, 0, nullptr, 0, 1, "G2 Glasses",           nullptr, false, nullptr, "debugg2" },
+  // --- g2 group (Even Realities G2 glasses) ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugG2,           0, 0, nullptr, 0, 1, "All G2",            nullptr, false, "g2", "debugg2" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugG2Lifecycle,  0, 0, nullptr, 0, 1, "Lifecycle",         nullptr, false, "g2", "debugg2lifecycle" },
+  { "protocol",   SETTING_BOOL, &gSettings.debugG2Protocol,   0, 0, nullptr, 0, 1, "Protocol",          nullptr, false, "g2", "debugg2protocol" },
+  { "events",     SETTING_BOOL, &gSettings.debugG2Events,     0, 0, nullptr, 0, 1, "Events",            nullptr, false, "g2", "debugg2events" },
+  { "pages",      SETTING_BOOL, &gSettings.debugG2Pages,      0, 0, nullptr, 0, 1, "Pages",             nullptr, false, "g2", "debugg2pages" },
+  { "heartbeat",  SETTING_BOOL, &gSettings.debugG2Heartbeat,  0, 0, nullptr, 0, 1, "Heartbeat",         nullptr, false, "g2", "debugg2heartbeat" },
+  { "dump",       SETTING_BOOL, &gSettings.debugG2Dump,       0, 0, nullptr, 0, 1, "Dump",              nullptr, false, "g2", "debugg2dump" },
 #endif
   { "i2c",              SETTING_BOOL, &gSettings.debugI2C,            0, 0, nullptr, 0, 1, "I2C Bus",              nullptr, false, nullptr, "debugi2c" },
   { "mqtt",             SETTING_BOOL, &gSettings.debugMqtt,           0, 0, nullptr, 0, 1, "MQTT",                 nullptr, false, nullptr, "debugmqtt" },

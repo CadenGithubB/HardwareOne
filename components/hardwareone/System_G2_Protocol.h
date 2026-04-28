@@ -519,6 +519,54 @@ size_t g2BuildCreateImagePb(uint32_t magic,
                             uint32_t widgetId,
                             uint8_t* pbOut, size_t pbCap);
 
+// Multi-tile CREATE_STARTUP_PAGE — one page containing N ImageObject
+// children at distinct positions. Wraps the same CreateStartUpPageContainer
+// shape as the single-tile builder but with f1=ContainerTotalNum=N and f4
+// repeated N times. Used for full-display 576×288 = 2×2 tile layouts where
+// the firmware expects all four tiles to be declared in a single CREATE
+// (subsequent Cmd=3 pushes target each tile by its ContainerID/Name pair).
+struct G2ImageTile {
+  uint32_t x;
+  uint32_t y;
+  uint32_t w;
+  uint32_t h;
+  uint32_t containerId;
+  const char* containerName;
+};
+
+size_t g2BuildCreateImageMultiPb(uint32_t magic,
+                                 const G2ImageTile* tiles, size_t tileCount,
+                                 uint32_t widgetId,
+                                 uint8_t* pbOut, size_t pbCap);
+
+size_t g2BuildCreateImageMulti(uint8_t seq, uint32_t magic,
+                               const G2ImageTile* tiles, size_t tileCount,
+                               uint32_t widgetId,
+                               uint8_t* out, size_t outCap);
+
+// Mixed-widget CREATE: one ListObject (f2) + one ImageObject (f4) in a
+// single CreateStartUpPageContainer. Used by the Q16/Q17/Q18 probes to
+// test whether the firmware accepts multi-type widget composition. The
+// list and image can occupy any geometry (overlapping or not); render
+// order / z-order is empirical territory — that's what the probes are
+// for. Returns envelope length, or 0 on overflow.
+size_t g2BuildCreateMixedListImagePb(uint32_t magic,
+                                     const char* listName,
+                                     const char* const* listItems,
+                                     size_t listItemCount,
+                                     const G2ContainerGeom& listGeom,
+                                     const G2ImageTile& imageTile,
+                                     uint32_t widgetId,
+                                     uint8_t* pbOut, size_t pbCap);
+size_t g2BuildCreateMixedListImage(uint8_t seq, uint32_t magic,
+                                   const char* listName,
+                                   const char* const* listItems,
+                                   size_t listItemCount,
+                                   const G2ContainerGeom& listGeom,
+                                   const G2ImageTile& imageTile,
+                                   uint32_t widgetId,
+                                   uint8_t* out, size_t outCap);
+
 // Decode the trailing field 15 sub-message of a HeartbeatAck pb body.
 // Returns true if the sub-message was found AND both inner fields
 // parsed; writes the seq counter (inner f1) to *seq and the cmd echo

@@ -761,7 +761,7 @@ against 2.2.0.242):
 | 0 | `CLICK_EVENT` | Not observed yet — neither dashboard List_ItemEvent nor TEXT-widget SysEvent fires this in 2.2.0.242 |
 | 1 | `SCROLL_TOP_EVENT` | **Dashboard widget**: scroll-up at top OR any tap-class gesture (the firmware emits this as the *side-effect* of "list scrolled to top," even when the user actually tapped). **TEXT widget**: not observed |
 | 2 | `SCROLL_BOTTOM_EVENT` | **Dashboard widget**: scroll-down advancing into a panel. Carries `CurrentSelectItemIndex` |
-| 3 | `DOUBLE_CLICK_EVENT` | **TEXT widget on sid=0xE0 SysEvent**: ring double-tap fires this with `src=2` (verified). **Dashboard List_ItemEvent**: never observed — that channel collapses double-taps to `SCROLL_TOP_EVENT` |
+| 3 | `DOUBLE_CLICK_EVENT` | **TEXT widget on sid=0xE0 SysEvent**: ring double-tap fires this with `src=2` (verified). **Hijacked List widget on firmware 2.2.0.24**: double-tap ALSO fires `SysEvent DOUBLE_CLICK(3) src=2` on sid=0xE0 — distinct from the single-tap ListEvent CLICK(0) channel (verified 2026-04-27). The earlier claim "Dashboard List_ItemEvent: never observed" applies to the firmware-owned dashboard list on 2.2.0.242 only; on 2.2.0.24 our hijacked List widget surfaces double-tap cleanly. **Practical use:** distinct channels mean we can map single-tap to row selection AND double-tap to a separate gesture (e.g. "manual refresh on a live status page"). |
 | 4 | `FOREGROUND_ENTER_EVENT` | sid=0xE0 SysEvent — firmware-owned UI overlay covering our widget (e.g. "Exit?" confirm dialog) |
 | 5 | `FOREGROUND_EXIT_EVENT` | sid=0xE0 SysEvent — overlay dismissed |
 | 6 | `ABNORMAL_EXIT_EVENT` | Not observed |
@@ -1630,6 +1630,113 @@ ShutdownResp` arrives within ~100 ms, but it sometimes carries
 `res=10 (err)` while the teardown still completes correctly. The 500 ms
 fixed delay covers both the response latency and the firmware-side
 release of the widget slot.
+
+### REBUILD-list fast path (corrects 2026-04-25 claim)
+
+**Update 2026-04-27:** the earlier blanket warning above that `Cmd=7
+REBUILD_PAGE` with a different item set "reliably crashes the firmware
+plugin task" is **wrong on firmware 2.2.0.24** — disproven empirically
+by exercising rapid item-count changes via the runtime-tunable
+`g2listrebuild` toggle:
+
+| Transition | RebuildResp | Outcome |
+|---|---|---|
+| 7 items → 2 items | res=6 (Success) | OK |
+| 2 → 7 | res=6 | OK |
+| 7 → 6 | res=6 | OK |
+| 7 → 9 | res=6 | OK |
+| 9 → 7 | res=6 | OK |
+| 7 → 12 | res=6 | OK |
+| 12 → 7 | res=6 | OK |
+
+All in rapid succession, no firmware wedge, no plugin-task death. The
+prior crash claim came from testing on firmware 2.2.0.242, which may
+behave differently — but on 2.2.0.24, **REBUILD-list is the correct
+fast path** for in-place item swaps:
+
+- ~70 ms wire time vs ~700 ms for SHUTDOWN+CREATE (10× faster)
+- Single Cmd=7 envelope instead of two-round-trip teardown+create
+- **No flicker** — the lens never blanks between content swaps
+- Caveat: the firmware does **not** preserve cursor/selection state
+  across the rebuild; the highlighted row resets to row 0 every swap.
+  No CREATE/REBUILD-side schema field exists to seed an initial select
+  index — this is a hard firmware limitation (see `ListContainerProperty`
+  schema in g2-kit-unofficial — fields 1-12 fully accounted for, none
+  for selection state).
+
+The `g2listrebuild` CLI toggle defaults ON; it's exposed as a runtime
+kill-switch in case a future firmware regresses. Runtime helper:
+`sendRebuildListAndWait()` in `Optional_EvenG2.cpp` mirrors the CREATE
+ack path with its own semaphore (`gRebuildAckSem`) keyed on
+`G2_MAGIC_REBUILD = 202`.
+
+### Live-list page primitive
+
+Built on the REBUILD-list fast path: a page can opt into automatic
+periodic refresh by setting `liveIntervalMs > 0` on its
+`G2PageModule`. The dispatcher then renders via `g2StartLiveListPage()`
+instead of `g2ShowTextAsList()` — an initial CREATE seeds the widget,
+and a worker task ticks every `liveIntervalMs` calling the page's
+`buildText` callback and shipping a Cmd=7 REBUILD with the fresh rows.
+
+**Manual refresh trigger:** `SysEvent type=DOUBLE_CLICK(3) src=2` on
+sid=0xE0 fires when the user double-taps a List widget — distinct from
+the single-tap `ListEvent CLICK(0)` channel (corrects an earlier note
+that "List widgets collapse double-tap to scroll-top"; that was true
+for the firmware-owned dashboard list on 2.2.0.242, false for the
+hijacked list on 2.2.0.24). The live-page worker watches for this event
+and kicks an immediate refresh.
+
+**Auto-cancel on navigation:** the page-swap worker calls
+`g2StopLiveListPage()` at entry, so any tap that drills out of the live
+page cleanly cancels the worker before the new content is rendered. No
+race between two REBUILD streams targeting the same widget.
+
+**First user:** the Status page (`liveIntervalMs = 5000`).
+
+### Mixed-widget composition (List + Image in one CREATE)
+
+`CreateStartUpPageContainer` is schema-defined as a multi-widget container —
+`f1=ContainerTotalNum`, then *any combination* of `f2=ListObject`,
+`f3=TextObject`, `f4=ImageObject` (each repeated). Until 2026-04-27 we'd
+only ever shipped CREATE envelopes containing a single widget type;
+empirical sweep that day (probes Q16/Q17/Q18 in
+[Optional_EvenG2.cpp](components/hardwareone/Optional_EvenG2.cpp))
+confirmed the firmware accepts mixed declarations on **firmware 2.2.0.24**:
+
+| Probe | Geometry | Result |
+|---|---|---|
+| Q16 | List 8,8,560,130 + Image 144,144,288×144 (no overlap) | CREATE acked, both widgets render |
+| Q17 | List 8,8,560,272 + Image 280,72,288×144 (overlap, right half) | CREATE acked, **image paints on top** |
+| Q18 | List 8,8,560,272 + Image 488,8,80×80 (corner icon) | CREATE acked, **non-288×144 image OK** |
+
+Findings:
+
+- **One CREATE, multiple widget types** — no need to issue separate
+  envelopes per widget. Build `f1=N`, then emit one `f2`/`f3`/`f4`
+  per widget; firmware sets them up atomically.
+- **Z-order: image > list.** When containers overlap, the image widget
+  paints on top of the list widget. Useful for icon overlays on a
+  text menu, less useful if you want the list visible underneath —
+  position the image so it doesn't cover rows you care about.
+- **Image containers can be smaller than 288×144.** The "BMP must
+  match container size" rule from Q5/Q7 still applies (the BMP's
+  width/height must equal the container's `w`/`h`), but containers
+  themselves are free-form — Q18 ran a 80×80 tile cleanly. The 4-bpp
+  row-stride alignment requirement (`(w+1)/2` rounded up to a 4-byte
+  multiple) still applies to the BMP body.
+- **Single CREATE budget:** the runtime helper
+  `g2BuildCreateMixedListImage` builds into a 1 KB envelope buffer; a
+  ~5-row list plus one image fits comfortably. Larger lists (≥10 rows
+  with long strings) may exceed the budget — split into separate
+  CREATE+CREATE if needed (untested).
+
+Event channels are still per-widget — single-tap on the embedded list
+arrives as `ListEvent CLICK(0)` on the list's container name; the image
+widget itself emits no events. (See note on probe-hold dismissal:
+`Optional_EvenG2.cpp` watches both `SysEvent DOUBLE_CLICK(3) src=2` and
+`ListEvent CLICK(0)` to dismiss image probes that surface a list,
+because users expect single-tap exit on either gesture.)
 
 ### Worker-task pattern
 

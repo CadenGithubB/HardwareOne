@@ -339,6 +339,25 @@ String stripSdPrefix(const String& path) {
   return p;
 }
 
+size_t listVirtualEntries(const String& parentPath, VirtualEntry* out, size_t cap) {
+  if (!out || cap == 0) return 0;
+  size_t n = 0;
+  const String p = normalize(parentPath);
+
+  // Today's only virtual entry: /sd, surfaced at the LittleFS root when
+  // the card is mounted. New mount points get added here — keep entries
+  // alphabetised by name so consumer ordering is stable.
+  if (p == "/" && isSDAvailable()) {
+    if (n < cap) {
+      out[n].name = "sd";
+      out[n].isFolder = true;
+      n++;
+    }
+  }
+
+  return n;
+}
+
 static FS* fsForPath(const String& path) {
   return (getStorageType(path) == SDCARD) ? (FS*)&SD : (FS*)&LittleFS;
 }

@@ -35,7 +35,7 @@
 //   - DEBUG_ESPNOW_STREAM (0x400000)
 //   - DEBUG_ESPNOW_ENCRYPTION (0x80000000)
 // Individual sensor flags (upper 32 bits) disabled by default for cleaner output
-uint64_t gDebugFlags = 0x00000000FFFFFFFFULL;
+DebugFlagMask gDebugFlags = (DebugFlagMask)0x00000000FFFFFFFFULL;
 DebugSubFlags gDebugSubFlags = {}; // All sub-flags initialized to false
 char* gDebugBuffer = nullptr;
 QueueHandle_t gDebugOutputQueue = nullptr;
@@ -510,7 +510,7 @@ void drainDebugRing() {
   // No-op: Debug output task handles all output automatically
 }
 
-void debugQueuePrintf(uint64_t flag, const char* fmt, ...) {
+void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
   if (!fmt) return;
   if (!getDebugQueue() || !getDebugFreeQueue()) return;
 
@@ -1085,8 +1085,8 @@ const char* cmd_debugespnow(const String& argsInput) {
 }
 
 static void syncBluetoothParentFlag() {
-  const uint64_t runtime = getDebugFlags();
-  const bool runtimeChild = (runtime & (DEBUG_BLUETOOTH_CORE | DEBUG_BLUETOOTH_GATT | DEBUG_BLUETOOTH_DATA)) != 0;
+  const DebugFlagMask runtime = getDebugFlags();
+  const bool runtimeChild = (runtime & (DEBUG_BLUETOOTH_CORE | DEBUG_BLUETOOTH_GATT | DEBUG_BLUETOOTH_DATA)) != (DebugFlagMask)0;
   const bool any = gSettings.debugBluetooth ||
                    gSettings.debugBluetoothCore ||
                    gSettings.debugBluetoothGatt ||
@@ -1597,7 +1597,7 @@ static inline void syncLlmParent() {
                         gSettings.debugLlmMemory);
 }
 
-static const char* cmd_debugllm_impl(const String& argsInput, bool* settingPtr, uint64_t flagBit, const char* name) {
+static const char* cmd_debugllm_impl(const String& argsInput, bool* settingPtr, DebugFlagMask flagBit, const char* name) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   static char buf[96];
   CommandArgs ca(argsInput);
@@ -1673,6 +1673,51 @@ const char* cmd_debugg2(const String& argsInput) {
     else clearDebugFlag(DEBUG_G2);
     return gSettings.debugG2 ? "debugG2 enabled (persistent)" : "debugG2 disabled (persistent)";
   }
+}
+
+// G2 sub-flag handler. Mirrors cmd_debugllm_impl but does NOT aggregate
+// to the parent DEBUG_G2 — we deliberately want granular control here so
+// "Heartbeat only" doesn't drag in everything else parented under G2.
+// The DEBUG_G2_*F macros gate on `DEBUG_G2 | DEBUG_G2_<sub>`, so the
+// parent toggle still acts as a master switch when the user wants it.
+static const char* cmd_debugg2sub_impl(const String& argsInput, bool* settingPtr,
+                                       DebugFlagMask flagBit, const char* name) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char buf[96];
+  CommandArgs ca(argsInput);
+  String mode = ca.arg(1);
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = ca.argInt(0, 0);
+  if (modeTemp) {
+    if (v) setDebugFlag(flagBit);
+    else clearDebugFlag(flagBit);
+    snprintf(buf, sizeof(buf), "%s %s (runtime only)", name, v ? "enabled" : "disabled");
+    return buf;
+  }
+  setSetting(*settingPtr, (bool)(v != 0));
+  if (v) setDebugFlag(flagBit);
+  else clearDebugFlag(flagBit);
+  snprintf(buf, sizeof(buf), "%s %s (persistent)", name, *settingPtr ? "enabled" : "disabled");
+  return buf;
+}
+
+const char* cmd_debugg2lifecycle(const String& a) {
+  return cmd_debugg2sub_impl(a, &gSettings.debugG2Lifecycle, DEBUG_G2_LIFECYCLE, "debugG2Lifecycle");
+}
+const char* cmd_debugg2protocol(const String& a) {
+  return cmd_debugg2sub_impl(a, &gSettings.debugG2Protocol, DEBUG_G2_PROTOCOL, "debugG2Protocol");
+}
+const char* cmd_debugg2events(const String& a) {
+  return cmd_debugg2sub_impl(a, &gSettings.debugG2Events, DEBUG_G2_EVENTS, "debugG2Events");
+}
+const char* cmd_debugg2pages(const String& a) {
+  return cmd_debugg2sub_impl(a, &gSettings.debugG2Pages, DEBUG_G2_PAGES, "debugG2Pages");
+}
+const char* cmd_debugg2heartbeat(const String& a) {
+  return cmd_debugg2sub_impl(a, &gSettings.debugG2Heartbeat, DEBUG_G2_HEARTBEAT, "debugG2Heartbeat");
+}
+const char* cmd_debugg2dump(const String& a) {
+  return cmd_debugg2sub_impl(a, &gSettings.debugG2Dump, DEBUG_G2_DUMP, "debugG2Dump");
 }
 #endif
 
@@ -2114,7 +2159,7 @@ const char* cmd_settingsmodulesummary(const String& argsInput) {
 // Debug Category Name Mapping
 // ============================================================================
 
-const char* getDebugCategoryName(uint64_t flag) {
+const char* getDebugCategoryName(DebugFlagMask flag) {
   // Return the first matching flag name (checked in bit order, low to high)
   if (flag & DEBUG_AUTH) return "AUTH";
   if (flag & DEBUG_HTTP) return "HTTP";
@@ -2182,6 +2227,15 @@ const char* getDebugCategoryName(uint64_t flag) {
 #endif
   // Bit 63: NTP / DateTime
   if (flag & DEBUG_NTP) return "NTP";
+  // Bits 64-69: G2 sub-flags. Return the sub name when the sub-bit is
+  // set; the parent DEBUG_G2 alone (no sub) still maps to "G2".
+  if (flag & DEBUG_G2_LIFECYCLE) return "G2_LIFE";
+  if (flag & DEBUG_G2_PROTOCOL)  return "G2_PROTO";
+  if (flag & DEBUG_G2_EVENTS)    return "G2_EVT";
+  if (flag & DEBUG_G2_PAGES)     return "G2_PAGE";
+  if (flag & DEBUG_G2_HEARTBEAT) return "G2_HB";
+  if (flag & DEBUG_G2_DUMP)      return "G2_DUMP";
+  if (flag & DEBUG_G2)           return "G2";
   return "UNKNOWN";
 }
 
@@ -2303,9 +2357,13 @@ const char* cmd_log(const String& argsInput) {
       fsUnlock();
     }
     
-    // Parse arguments: log start [filepath] [flags=0xXXXX] [tags=0|1]
+    // Parse arguments: log start [filepath] [flags=0xXXXX[:0xYYYY]] [tags=0|1]
+    // Flag arg accepts up to 128 bits as either:
+    //   - single hex (interpreted as low 64 bits, high stays 0)
+    //   - "0xHIGH:0xLOW" pair (each up to 16 hex chars / 64 bits)
     String filepath;
-    uint64_t debugFlags = 0xFFFFFFFFFFFFFFFFULL; // Sentinel: don't change if not specified
+    bool flagsSet = false;
+    DebugFlagMask debugFlags = (DebugFlagMask)0;
     int categoryTags = -1; // Sentinel: don't change if not specified
 
     // Find filepath (first non-key=value arg after "start")
@@ -2314,11 +2372,20 @@ const char* cmd_log(const String& argsInput) {
       String token = ca.arg(i);
       if (token.startsWith("flags=")) {
         String flagsStr = token.substring(6);
-        if (flagsStr.startsWith("0x") || flagsStr.startsWith("0X")) {
-          debugFlags = strtoull(flagsStr.c_str() + 2, nullptr, 16);
+        int colon = flagsStr.indexOf(':');
+        auto parseHex64 = [](const String& s) -> uint64_t {
+          const char* p = s.c_str();
+          if (s.startsWith("0x") || s.startsWith("0X")) p += 2;
+          return strtoull(p, nullptr, 16);
+        };
+        if (colon >= 0) {
+          uint64_t hi = parseHex64(flagsStr.substring(0, colon));
+          uint64_t lo = parseHex64(flagsStr.substring(colon + 1));
+          debugFlags = ((DebugFlagMask)hi << 64) | (DebugFlagMask)lo;
         } else {
-          debugFlags = strtoull(flagsStr.c_str(), nullptr, 16);
+          debugFlags = (DebugFlagMask)parseHex64(flagsStr);
         }
+        flagsSet = true;
       } else if (token.startsWith("tags=")) {
         String tagsStr = token.substring(5);
         categoryTags = tagsStr.toInt();
@@ -2338,10 +2405,14 @@ const char* cmd_log(const String& argsInput) {
     }
     
     // Apply debug flags if specified
-    if (debugFlags != 0xFFFFFFFFFFFFFFFFULL) {
+    if (flagsSet) {
       gDebugFlags = debugFlags;
+      const uint64_t hi = (uint64_t)(gDebugFlags >> 64);
+      const uint64_t lo = (uint64_t)gDebugFlags;
       char flagsMsg[128];
-      snprintf(flagsMsg, sizeof(flagsMsg), "Debug flags set to: 0x%016llX", (unsigned long long)gDebugFlags);
+      snprintf(flagsMsg, sizeof(flagsMsg),
+               "Debug flags set to: 0x%016llX:%016llX",
+               (unsigned long long)hi, (unsigned long long)lo);
       broadcastOutput(flagsMsg);
     }
     
@@ -2958,6 +3029,12 @@ const CommandEntry debugCommands[] = {
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "outg2", "Enable/disable G2 glasses output.", false, cmd_outg2, "Usage: outg2 <0|1> - streams CLI output to G2 glasses" },
   { "debugg2", "Debug G2 smart glasses BLE operations.", true, cmd_debugg2, "Usage: debugg2 <0|1>" },
+  { "debugg2lifecycle", "Debug G2 BLE lifecycle (scan/connect/MTU).", true, cmd_debugg2lifecycle, "Usage: debugg2lifecycle <0|1>" },
+  { "debugg2protocol",  "Debug G2 envelope TX/RX, CRC, fragmentation.", true, cmd_debugg2protocol,  "Usage: debugg2protocol <0|1>" },
+  { "debugg2events",    "Debug G2 DevEvents/SysEvents/gestures.",       true, cmd_debugg2events,    "Usage: debugg2events <0|1>" },
+  { "debugg2pages",     "Debug G2 page-swap worker / hijack / lens state.", true, cmd_debugg2pages, "Usage: debugg2pages <0|1>" },
+  { "debugg2heartbeat", "Debug G2 heartbeat TX + acks (loud).",         true, cmd_debugg2heartbeat, "Usage: debugg2heartbeat <0|1>" },
+  { "debugg2dump",      "Debug G2 ring-buffer dumps on errors.",        true, cmd_debugg2dump,      "Usage: debugg2dump <0|1>" },
 #endif
   { "outble", "Enable/disable BLE broadcast output.", false, cmd_outble, "Usage: outble <0|1> - streams broadcast output to authenticated BLE clients" },
   { "debugfmradio", "Debug FM Radio operations.", true, cmd_debugfmradio, "Usage: debugfmradio <0|1>" },
@@ -2988,7 +3065,7 @@ bool DebugManager::initialize() {
     return true;
 }
 
-void DebugManager::queueDebugMessage(uint64_t flag, const char* message) {
+void DebugManager::queueDebugMessage(DebugFlagMask flag, const char* message) {
     if (!message) return;
     DEBUGF_QUEUE(flag, "%s", message);
 }
@@ -3017,8 +3094,8 @@ void DebugManager::shutdown() {
     // Intentionally no-op for now: existing debug system owns queues/tasks.
 }
 
-void DebugManager::setDebugFlags(uint64_t flags) { gDebugFlags = flags; }
-uint64_t DebugManager::getDebugFlags() const { return gDebugFlags; }
+void DebugManager::setDebugFlags(DebugFlagMask flags) { gDebugFlags = flags; }
+DebugFlagMask DebugManager::getDebugFlags() const { return gDebugFlags; }
 
 void DebugManager::setLogLevel(uint8_t level) { gLogLevel = level; }
 uint8_t DebugManager::getLogLevel() const { return gLogLevel; }

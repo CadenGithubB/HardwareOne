@@ -630,21 +630,30 @@ static size_t buildImageConfirmedRows() {
 // IMAGE / Static — single-frame composition tests. Q9 exercises the
 // rect-primitive draw API that'll back the future pushTile() public
 // surface for feature code. QGlizzy is a hardcoded-path SD-load canary.
+// Q12 is the full-display 4-tile probe (first multi-tile CREATE).
 static size_t buildImageStaticRows() {
   writeBackRow();
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "Q9: frame builder (3-band)");       gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "QGlizzy: SD /PICTURES/test.bmp");   gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q12: full-screen 576x288 (4 tiles)"); gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
 
 // IMAGE / Streaming — multi-frame swap tests, no re-CREATE between
 // frames. Q11 first (simplest); Q10 only if Q11 leaves visible tearing.
+// Q13/Q14 are live-update pipelines paced by `g2liverate` (CLI).
 static size_t buildImageStreamingRows() {
   writeBackRow();
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "Q11: simple swap (A->B)");          gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q10: clear-then-push (A->blk->B)"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q13: live image tile @ rate");      gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q14: live TEXT (rebuild) @ rate");  gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q15: LEFT-arm image push test");    gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q16: mixed list+image side-by-side"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q17: mixed list+image overlap");    gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q18: mixed list+icon (80x80)");     gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
 
@@ -1168,7 +1177,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     }
 
     case TEST_LEVEL_IMAGE_STATIC: {
-      // Static: Q9 (only).
+      // Static: Q9, QGlizzy, Q12 (full-display 4-tile).
       if (idx == 0) {
         gTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
@@ -1179,6 +1188,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       switch (idx) {
         case 1: fn = g2ProbeImageQ9FrameBuilder; break;
         case 2: fn = g2ProbeImageQGlizzy;        break;
+        case 3: fn = g2ProbeImageQ12FullScreen;  break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE/Static: tap idx=%u out of range",
                     (unsigned)idx);
@@ -1203,8 +1213,14 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       }
       ImgProbeFn fn = nullptr;
       switch (idx) {
-        case 1: fn = g2ProbeImageQ11SimpleSwap;     break;
-        case 2: fn = g2ProbeImageQ10ClearThenPush;  break;
+        case 1: fn = g2ProbeImageQ11SimpleSwap;        break;
+        case 2: fn = g2ProbeImageQ10ClearThenPush;     break;
+        case 3: fn = g2ProbeImageQ13LiveTile;          break;
+        case 4: fn = g2ProbeImageQ14LiveText;          break;
+        case 5: fn = g2ProbeImageQ15LeftArm;           break;
+        case 6: fn = g2ProbeImageQ16MixedSideBySide;   break;
+        case 7: fn = g2ProbeImageQ17MixedOverlap;      break;
+        case 8: fn = g2ProbeImageQ18MixedIcon;         break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE/Streaming: tap idx=%u out of range",
                     (unsigned)idx);
