@@ -1050,22 +1050,70 @@ the firmware foreground is busy.
 
 ## Audio (sid=0xE0 Cmd=15, render notify 6402)
 
-Not yet implemented in this repo, but recorded here for future work.
+Verified end-to-end on firmware **2.2.0.24** (2026-04-28): captured a
+10 s sample via the `g2micrec` CLI, decoded with `liblc3`, audio is
+intelligible speech.
 
-- Host sends EvenCore `AudioCtrCmd { AudoFuncEn = 1 }` to start, `0` to stop
-  (yes, `Audo` — sic).
-- Await `AudioCtrRes` (Cmd=16 flag=0x01) before expecting audio frames, or
-  lose ~100 ms.
-- LC3 frames arrive on the **left temple's** render-notify characteristic
-  (`6402` on service `6450`), one per notification, **205 bytes each**:
-  - byte 0: `0xCC` normal / `0xCD` session-start-or-resync (reset decoder)
-  - byte 1: u8 sequence counter
-  - bytes 2–204: **LC3-encoded** payload (decodes to 16 kHz mono PCM,
-    20 ms per frame = 320 samples)
-- Each arm has its own mic; the left is reported to have slightly better
-  SNR for speech.
-- Mic dies with the plugin task — heartbeats are mandatory while capture
-  is active.
+**Start sequence:**
+
+1. **A StartUpPage container must be active** on the lens before
+   `AudioCtrCmd` will be honored. Without one, the firmware silently
+   drops the request — no `AudioCtrRes` ack, no frames. Drilling into
+   any G2 hijack page (e.g. `g2network`) creates the container.
+   Confirmed empirically — same `AudioCtrCmd` produces zero frames
+   when sent to a blank lens, and ~20 fps frames the moment a list
+   page is up.
+2. Host sends EvenCore `AudioCtrCmd { AudoFuncEn = 1 }` on sid=0xE0
+   Cmd=15 (yes, `Audo` — sic).
+3. Await `AudioCtrRes` (Cmd=16 magic=207) on sid=0xE0 — confirms the
+   stream is enabled.
+4. LC3 frames begin arriving on `6402` (service `6450`) of the **LEFT**
+   temple. RIGHT's `6402` stays silent on this firmware (verified by
+   subscribing both arms; only L emits).
+
+**Packet layout (verified):** every notification on `6402` is exactly
+**205 bytes**, arriving at ~20 packets/sec (50 ms of audio per packet):
+
+```
+offset 0..199 :  five LC3 frames × 40 bytes each
+offset 200..204:  5-byte trailer (counter + status + padding)
+```
+
+LC3 codec parameters: **16 kHz mono, 10 ms frame duration, 32 kbps**.
+
+*Empirical correction note:* both this doc (pre-2026-04-28) and
+[g2-kit-unofficial/ble/audio.ts](https://github.com/Commute773/g2-kit-unofficial/blob/main/ble/audio.ts)
+speculated the framing was "5 B header at start, then 5×40 B LC3". That
+guess produced unintelligible audio. The actual layout has the LC3 data
+**first**, with the metadata as a 5 B trailer. Discovered by per-column
+entropy analysis across 209 captured packets — columns 200–203 showed
+distinct low-entropy patterns while 0–199 looked like compressed audio:
+
+| Trailer byte | Entropy | Dominant value(s) | Likely meaning |
+|---|---|---|---|
+| 200 | high  | varies | (within high-entropy region) |
+| 201 | 0.41  | `0x00` (194/209) | counter / state, mostly zero |
+| 202 | 2.26  | `0xF8` (111), `0x00` (35), `0xEF` (22) | flag/status |
+| 203 | 0.73  | `0xFF` (166), `0x00` (43) | padding / mode bit |
+| 204 | high  | varies | (semantics unconfirmed) |
+
+Exact trailer semantics are unverified — for capture/decode purposes,
+just discard the last 5 bytes.
+
+**Other notes:**
+
+- Each arm has its own mic per the kit; on 2.2.0.24 only LEFT actually
+  emits over BLE.
+- Mic dies with the plugin task — heartbeats are mandatory while
+  capture is active.
+- The stream auto-stops when the StartUpPage tears down (DISPLAY_OFF,
+  hijack exit, etc.). Send `AudioCtrCmd { AudoFuncEn = 0 }` for a
+  graceful stop.
+
+**Tooling:** `g2micrec start [path]` / `g2micrec stop` dumps raw 205 B
+packets to SD as a `.lc3` file. Decode offline with
+[randomscripts/decode_g2_mic.py](randomscripts/decode_g2_mic.py) using
+the `16k_10ms_5x40_5b_tail` layout.
 
 ## Front pane: Even-AI overlay (sid=0x07)
 
@@ -1404,6 +1452,36 @@ g2probe 0A 1                  # Transcribe CTRL — does the firmware ack?
 ```
 
 `sid=0x80` is in a hardcoded blocklist (see DeviceSettings note above).
+
+### `g2imgprobe [size_bytes]`
+
+Sends a Cmd=3 multi-fragment image-data payload on sid=0xE0 with no
+preceding CREATE-image. Used to verify the wire path and reassembler
+work before we reverse `ImageContainerProperty`.
+
+Verified 2026-04-28 against firmware 2.2.0.24: a 1054 B body fragments
+into 5 BLE writes, the firmware reassembles them, and replies
+`ImageRawResp` `cmd=4 magic=210` with body
+`{containerId=1, name="img", w=1024, h=1024, errorCode=5}` —
+**`errorCode=5` is `ImgRawFailed`**, the expected outcome when no image
+container exists. Confirms:
+
+- Multi-fragment Cmd=3 reassembly works end-to-end.
+- The firmware-side response shape uses field 6 (`length-delim`) for an
+  inner status sub-message with `errorCode` at field 8.
+- No write-mutex timeouts at this size; 4 KB soft cap from
+  g2-kit-unofficial gotchas still applies for larger probes.
+
+### `g2aiconfig [voiceSwitch] [streamSpeed]`
+
+Sends a Cmd=10 EvenAI CONFIG message on sid=0x07. With both args
+omitted, ships an empty body (no fields set).
+
+Verified 2026-04-28: empty-body CONFIG is accepted — firmware replies
+on sid=0x07 with `cmd=10 magic=212` and no `errorCode` in the response
+body, meaning the message parsed cleanly. Use this command iteratively
+to learn the schema: vary field numbers/values and watch for an
+`errorCode=1` response that flags a guess as wrong.
 
 ### `g2ai <text>` / `g2aih <heading>|<body>`
 

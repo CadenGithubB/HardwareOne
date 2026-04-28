@@ -43,94 +43,24 @@ OLED browser uses the same class.
   somewhere in the OLED renderer; check `FILE_MANAGER_MAX_PATH = 128`
   is respected by all consumers.
 
-## G2 hijack TEXT view — JSON pagination
+---
 
-**Status:** code shipped (split into `JSON_PAGE_BODY_BUDGET = 180 B`
-chunks at line boundaries, first page via CREATE-text, subsequent via
-REBUILD_PAGE on tap, wrap at end, SysEvent gestures exit).
+## Verified (kept here briefly for traceability)
 
-**Test steps:**
-1. Hijack → Settings → flip `View: PRETTY` to `View: JSON` once
-   (persists for the rest of the session).
-2. Drill into a small module (e.g. `[crash] (2)`) — should render
-   "[1/1] tap to back" header (single page).
-3. Drill into a large module (e.g. `[espnow] (42)`) — should render
-   "[1/N] tap=next, 2x-tap=exit" header.
-4. Tap the lens (single tap) — should advance to page 2.
-5. Cycle through all pages; final page should wrap back to page 1.
-6. Double-tap to exit — should land back at the module list.
-7. Watch logs for any "TEXT view: ignoring user-activity inside grace"
-   spam — expected on render, but should stop after the first 600 ms.
-
-**What to flag if it breaks:**
-- TEXT view auto-dismisses on page-render → grace timer not getting
-  re-stamped after `gTextViewTapFn` returns. Check
-  `Optional_EvenG2.cpp` USER_ACTIVITY dispatch.
-- Page never advances on tap → `gTextViewTapFn` not wired up. Verify
-  the second arg passed to `g2ShowTextPage` in
-  `renderCurrentJsonPage`.
-- Page advances but content is identical → `g2ShowText` is going
-  through the wrong path (CREATE instead of REBUILD); check
-  `arm->containerReady` state.
-- Single-fragment overflow on a specific module's page → `body`
-  exceeds ~250 B pb. Lower `JSON_PAGE_BODY_BUDGET` to 150.
-
-## G2 protocol probes
-
-**Status:** wired, untested against firmware response.
-
-### `g2aiconfig [voiceSwitch] [streamSpeed]`
-
-Send a single Cmd=10 EvenAI CONFIG message. Watch logs for the next
-sid=0x07 inbound frame; the COMM_RSP errorCode tells us:
-- `errorCode=0` → firmware accepted; we guessed the schema right.
-- `errorCode=1` (or any other) → field number guess is wrong; iterate.
-
-Test calls to try (one at a time, watching the response):
-- `g2aiconfig` (no body; does empty CONFIG ack?)
-- `g2aiconfig 0` (voiceSwitch=0)
-- `g2aiconfig 1`
-- `g2aiconfig - 160` (streamSpeed only)
-- `g2aiconfig 1 160` (the example from g2-kit-unofficial)
-
-### `g2imgprobe [size_bytes]`
-
-Send a Cmd=3 multi-fragment payload to exercise the image wire path.
-Without a CREATE-image first the firmware should reject — we want to
-confirm:
-- Multi-fragment send completes without write-mutex timeouts.
-- Firmware reassembler accepts the fragments (no `RX multi-fragment
-  message — not yet handled` warnings).
-- Firmware replies with `EvenCore ImageRawResp (cmd=4 magic=210)
-  res=5 (ImgRawFailed)` or similar — that's the expected outcome
-  proving the path works.
-
-Test calls:
-- `g2imgprobe 256` — single fragment, baseline.
-- `g2imgprobe 1024` — small multi-fragment.
-- `g2imgprobe 4096` — at the firmware's reported reassembly ceiling;
-  watch for any warnings.
-
-If the firmware responds with `res=5 ImgRawFailed`, the wire path is
-verified and the next step is reverse-engineering
-`ImageContainerProperty` (see `g2BuildCreateImage` TODO in
-`System_G2_Protocol.h`).
-
-If the firmware responds with `res=4 ImgRawSuccess`… we accidentally
-hit a state where there IS a live image container. Note what was on
-screen and document.
-
-If no response at all, increase `size_bytes` and try again — firmware
-might silently drop bodies smaller than some minimum.
-
-## Heartbeat tail decoding
-
-**Status:** decoded behind `DEBUG_G2_DUMP` flag.
-
-**Test steps:**
-1. `debugg2dump on` (or set the flag in Settings → Debug).
-2. Watch the heartbeat-ack log lines. Should now include
-   `HeartbeatAck tail seq=NN echo=12` alongside the ack itself.
-3. Confirm `seq` increments monotonically and `echo` stays at 12.
-4. If `echo` ever changes, capture the surrounding log — that means
-   the tail field is more interesting than we thought.
+- **G2 hijack TEXT view — JSON pagination** — verified 2026-04-28.
+  Pages render with "[N/M] tap=next, 2x-tap=exit" header, single-tap
+  advances, double-tap exits, wrap-on-final-page works.
+- **`g2imgprobe`** — verified 2026-04-28. Cmd=3 multi-fragment send
+  completes; firmware replies with `ImageRawResp` `errorCode=5
+  (ImgRawFailed)` because no CREATE-image precedes — exactly the
+  predicted outcome. Wire path is sound. Next step (when needed):
+  reverse `ImageContainerProperty` to enable real image rendering.
+- **`g2aiconfig`** — verified 2026-04-28. Empty CONFIG (no body)
+  acked with `cmd=10 magic=212` and no errorCode set, meaning the
+  firmware accepts an empty config. Next step (when needed): iterate
+  field numbers/values to learn the schema.
+- **Heartbeat tail decoding** — verified 2026-04-28. With
+  `debugg2dump on`, every `HeartbeatAck` line carries `tail seq=NN
+  echo=12`; `seq` increments monotonically and `echo` stays 12 across
+  every capture. The tail field is therefore an uninteresting
+  cmd-id echo, not hidden state.
