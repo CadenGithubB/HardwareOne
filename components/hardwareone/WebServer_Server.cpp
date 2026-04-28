@@ -4153,7 +4153,12 @@ esp_err_t handleFileView(httpd_req_t* req) {
   
   // Check if it's an image file
   bool isImage = path.endsWith(".jpg") || path.endsWith(".jpeg") || path.endsWith(".png") || path.endsWith(".gif") || path.endsWith(".bmp") || path.endsWith(".webp") || path.endsWith(".ico") || path.endsWith(".svg");
-  
+
+  // Check if it's an audio file. Browser <audio> tag needs Content-Length
+  // for seekable playback, so we do a single-shot read-from-PSRAM send
+  // (same pattern as handleMicRecordingFile in WebPage_Sensors.cpp).
+  bool isAudio = path.endsWith(".wav") || path.endsWith(".mp3");
+
   // Check if it's a binary download file (e.g., .hwmap)
   bool isBinaryDownload = path.endsWith(".hwmap");
 
@@ -4206,6 +4211,74 @@ esp_err_t handleFileView(httpd_req_t* req) {
     free(viewBuf);
     httpd_resp_send_chunk(req, NULL, 0);
     DEBUG_STORAGEF("[handleFileView] Image sent: %d bytes in %d chunks, dur=%u ms", totalSent, chunkCount, (unsigned)(millis() - tVStart));
+    gSensorPollingPaused = wasPaused;
+    return ESP_OK;
+  }
+
+  // Audio files (.wav / .mp3). Send with Content-Length + Accept-Ranges so
+  // the browser's <audio> player can seek. Read whole file into PSRAM and
+  // emit one response — same approach as the sensors page mic recording
+  // viewer (handleMicRecordingFile in WebPage_Sensors.cpp). Files larger
+  // than ~5 MB fall back to chunked streaming (still plays, no seek).
+  if (isAudio) {
+    DEBUG_STORAGEF("[handleFileView] Audio file detected: %s (%d B)",
+                   dispFilename.c_str(), fileSize);
+    const char* mime = path.endsWith(".mp3") ? "audio/mpeg" : "audio/wav";
+    httpd_resp_set_type(req, mime);
+    String disposition = "inline; filename=\"" + dispFilename + "\"";
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
+    httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+
+    const size_t kSinglePassMax = 5u * 1024u * 1024u;  // 5 MB
+    if (fileSize <= kSinglePassMax) {
+      char* buf = (char*)heap_caps_malloc(fileSize,
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      if (!buf) buf = (char*)malloc(fileSize);
+      if (!buf) {
+        file.close();
+        free(viewBuf);
+        gSensorPollingPaused = wasPaused;
+        DEBUG_STORAGEF("[handleFileView] ERROR: audio buf alloc failed (%d B)",
+                       fileSize);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "Memory allocation failed",
+                        HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+      }
+      char clBuf[16];
+      snprintf(clBuf, sizeof(clBuf), "%u", (unsigned)fileSize);
+      httpd_resp_set_hdr(req, "Content-Length", clBuf);
+      size_t bytesRead = file.read((uint8_t*)buf, fileSize);
+      file.close();
+      free(viewBuf);
+      httpd_resp_send(req, buf, bytesRead);
+      free(buf);
+      DEBUG_STORAGEF("[handleFileView] Audio sent: %d B in single shot, "
+                     "dur=%u ms", (int)bytesRead, (unsigned)(millis() - tVStart));
+      gSensorPollingPaused = wasPaused;
+      return ESP_OK;
+    }
+
+    // Fallback for large files — chunked stream (no Content-Length, no seek).
+    DEBUG_STORAGEF("[handleFileView] Audio file >5 MB, chunked fallback");
+    size_t totalSent = 0;
+    int chunkCount = 0;
+    while (true) {
+      size_t n = file.readBytes(viewBuf, VIEW_BUF_SIZE);
+      if (n == 0) break;
+      chunkCount++;
+      totalSent += n;
+      httpd_resp_send_chunk(req, viewBuf, n);
+      if ((chunkCount % 8) == 0) delay(0);
+    }
+    file.close();
+    free(viewBuf);
+    httpd_resp_send_chunk(req, NULL, 0);
+    DEBUG_STORAGEF("[handleFileView] Audio (chunked) sent: %d B in %d chunks, "
+                   "dur=%u ms", (int)totalSent, chunkCount,
+                   (unsigned)(millis() - tVStart));
     gSensorPollingPaused = wasPaused;
     return ESP_OK;
   }
