@@ -208,6 +208,8 @@ extern const size_t setPatternCommandsCount;
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 extern const CommandEntry g2Commands[];
 extern const size_t g2CommandsCount;
+extern const CommandEntry g2RingCommands[];
+extern const size_t g2RingCommandsCount;
 #endif
 
 // Include module headers to access their command registries
@@ -776,6 +778,33 @@ bool writeTextAtomic(const char* path, const String& content) {
 
 extern bool gCLIValidateOnly;
 
+// Read-only status commands that the web UI polls on a tick. Both the
+// serial broadcast and the audit-file write are skipped for these —
+// the broadcast was filling the serial log with one line per poll
+// (g2status, ringstatus, blestatus are each fetched every 1.5-15 s by
+// the Bluetooth panel), and the audit file would grow without bound
+// for traffic that has zero security relevance (pure reads, no state
+// change). Keeping the list deliberately tight: only commands that
+// (a) cannot mutate state and (b) are called automatically by the UI
+// belong here. User-typed `g2status` from a CLI prompt also passes
+// through this path and gets suppressed too — that's fine; it's
+// visible in the prompt response anyway.
+static bool isQuietPollCommand(const char* cmd) {
+  if (!cmd || !cmd[0]) return false;
+  // Match the leading verb; ignore any trailing args (json modifiers, etc.)
+  static const char* const kQuiet[] = {
+    "g2status", "ringstatus", "blestatus",
+  };
+  for (size_t i = 0; i < sizeof(kQuiet) / sizeof(kQuiet[0]); i++) {
+    size_t n = strlen(kQuiet[i]);
+    if (strncmp(cmd, kQuiet[i], n) == 0 &&
+        (cmd[n] == '\0' || cmd[n] == ' ' || cmd[n] == '\t')) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Log command execution to audit file
  * Format: [timestamp] user@transport command -> result_status
@@ -784,7 +813,10 @@ extern bool gCLIValidateOnly;
 void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, const char* result) {
   // Skip validation-only commands (dry-run checks)
   if (gCLIValidateOnly) return;
-  
+
+  // Skip the audit log + broadcast for noisy read-only polls.
+  if (isQuietPollCommand(cmd)) return;
+
   // Build log entry
   char entry[512];
   unsigned long ts = millis() / 1000;  // Seconds since boot
@@ -950,6 +982,42 @@ namespace {
     { "userrequest ",      MASK_AFTER_TOKEN_POS, 2, nullptr },  // userrequest <name> <pass> ...
     { "espnowremote ",     CALL_HANDLER,         0, &redactEspNowRemote },
   };
+}
+
+// =============================================================================
+// settingBoolToggle — generic on/off CLI handler for persisted bools
+// =============================================================================
+// See System_Utils.h for the contract. Single static buffer because the
+// CLI is single-threaded and result strings are consumed before the next
+// command dispatches.
+
+const char* settingBoolToggle(bool& field, const String& argsInput, const char* label) {
+  static char buf[80];
+  if (!label) label = "Setting";
+
+  String arg = argsInput;
+  arg.trim();
+
+  // Empty arg → report current state.
+  if (arg.length() == 0) {
+    snprintf(buf, sizeof(buf), "%s: %s", label,
+             field ? "enabled" : "disabled");
+    return buf;
+  }
+
+  int parsed = parseBoolArg(arg);
+  if (parsed == 1) {
+    setSetting(field, true);
+    snprintf(buf, sizeof(buf), "%s enabled", label);
+    return buf;
+  }
+  if (parsed == 0) {
+    setSetting(field, false);
+    snprintf(buf, sizeof(buf), "%s disabled", label);
+    return buf;
+  }
+  snprintf(buf, sizeof(buf), "%s: invalid value (use on|off)", label);
+  return buf;
 }
 
 String redactCmdForAudit(const String& argsInput) {
@@ -1790,6 +1858,7 @@ static const CommandModule gCommandModules[] = {
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "even_g2",    "Even G2 smart glasses control", g2Commands,           g2CommandsCount, 0, nullptr },
+  { "even_r1",    "Even R1 ring control (info-only)", g2RingCommands,    g2RingCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_ONDEVICE_LLM
   { "llm",        "On-device LLM text generation", llmCommands,          llmCommandsCount, 0, nullptr },

@@ -11,7 +11,9 @@
  */
 
 #include "Optional_Bluetooth.h"
+#include "Optional_EvenG2.h"  // Header provides stubs when ENABLE_G2_GLASSES=0, so blemode CLI compiles either way
 #include "System_Utils.h"
+#include "BLE_Peers.h"        // peer registry + cmd_bleautoconnect / cmd_blepeers
 
 #if ENABLE_BLUETOOTH
 
@@ -227,44 +229,30 @@ static void macToStackBuf(const uint8_t* mac, char* buf) {
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-// Update MAC address cache from settings (call when settings change)
+// Update MAC address cache from settings (call when settings change).
+// Source-of-truth is now gBlePeerData[] (see BLE_Peers.h); the cache
+// keeps an upper-cased fast-path copy for hot identification paths
+// that don't want to allocate or call toUpperCase on every check.
+static void copyMacUpper(char* dst, size_t dstCap, const String& src) {
+  if (src.length() > 0) {
+    strncpy(dst, src.c_str(), dstCap - 1);
+    dst[dstCap - 1] = '\0';
+    for (char* p = dst; *p; p++) *p = toupper(*p);
+  } else {
+    dst[0] = '\0';
+  }
+}
 static void bleUpdateMACCache() {
-  // Left glasses MAC
-  if (gSettings.bleGlassesLeftMAC.length() > 0) {
-    strncpy(gBLEMACCache.leftMAC, gSettings.bleGlassesLeftMAC.c_str(), sizeof(gBLEMACCache.leftMAC) - 1);
-    gBLEMACCache.leftMAC[sizeof(gBLEMACCache.leftMAC) - 1] = '\0';
-    for (char* p = gBLEMACCache.leftMAC; *p; p++) *p = toupper(*p);
-  } else {
-    gBLEMACCache.leftMAC[0] = '\0';
-  }
-  
-  // Right glasses MAC
-  if (gSettings.bleGlassesRightMAC.length() > 0) {
-    strncpy(gBLEMACCache.rightMAC, gSettings.bleGlassesRightMAC.c_str(), sizeof(gBLEMACCache.rightMAC) - 1);
-    gBLEMACCache.rightMAC[sizeof(gBLEMACCache.rightMAC) - 1] = '\0';
-    for (char* p = gBLEMACCache.rightMAC; *p; p++) *p = toupper(*p);
-  } else {
-    gBLEMACCache.rightMAC[0] = '\0';
-  }
-  
-  // Ring MAC
-  if (gSettings.bleRingMAC.length() > 0) {
-    strncpy(gBLEMACCache.ringMAC, gSettings.bleRingMAC.c_str(), sizeof(gBLEMACCache.ringMAC) - 1);
-    gBLEMACCache.ringMAC[sizeof(gBLEMACCache.ringMAC) - 1] = '\0';
-    for (char* p = gBLEMACCache.ringMAC; *p; p++) *p = toupper(*p);
-  } else {
-    gBLEMACCache.ringMAC[0] = '\0';
-  }
-  
-  // Phone MAC
-  if (gSettings.blePhoneMAC.length() > 0) {
-    strncpy(gBLEMACCache.phoneMAC, gSettings.blePhoneMAC.c_str(), sizeof(gBLEMACCache.phoneMAC) - 1);
-    gBLEMACCache.phoneMAC[sizeof(gBLEMACCache.phoneMAC) - 1] = '\0';
-    for (char* p = gBLEMACCache.phoneMAC; *p; p++) *p = toupper(*p);
-  } else {
-    gBLEMACCache.phoneMAC[0] = '\0';
-  }
-  
+  copyMacUpper(gBLEMACCache.leftMAC,  sizeof(gBLEMACCache.leftMAC),
+               gBlePeerData[BLE_PEER_G2_GLASSES].mac1);
+  copyMacUpper(gBLEMACCache.rightMAC, sizeof(gBLEMACCache.rightMAC),
+               gBlePeerData[BLE_PEER_G2_GLASSES].mac2);
+  copyMacUpper(gBLEMACCache.ringMAC,  sizeof(gBLEMACCache.ringMAC),
+               gBlePeerData[BLE_PEER_R1_RING].mac1);
+  copyMacUpper(gBLEMACCache.phoneMAC, sizeof(gBLEMACCache.phoneMAC),
+               gBlePeerData[BLE_PEER_PHONE].mac1);
+
+
   gBLEMACCache.initialized = true;
 }
 
@@ -680,6 +668,17 @@ bool initBluetooth() {
     BLE_DEBUGF(DEBUG_BLE_CORE, "Already initialized");
     return true;
   }
+
+#if ENABLE_G2_GLASSES
+  // Mirror what initG2Client() does on its side: the two roles share the BLE
+  // controller and cannot coexist, so tear down the other side first.
+  if (isG2ClientInitialized()) {
+    BLE_DEBUGF(DEBUG_BLE_CORE, "Stopping G2 client mode first");
+    broadcastOutput("[BLE] Stopping G2 client mode first");
+    deinitG2Client();
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+#endif
 
   // Check memory before initializing BLE stack (~60KB DRAM for controller + host tasks)
   if (!checkMemoryAvailable("bluetooth", nullptr)) {
@@ -1460,38 +1459,73 @@ static const char* cmd_bleinfo(const String& argsInput) {
   return buf;
 }
 
-static const char* cmd_bleautostart(const String& argsInput) {
+// Migrated to BOOL_CMD — see System_Utils.h. Equivalent to the previous
+// 12-line on/off handler. Output strings preserved verbatim so external
+// matchers (web UI, tests) keep working.
+BOOL_CMD(bleautostart, gSettings.bluetoothAutoStart, "[BLE] Auto-start")
+
+// Backward-compat shims. Both forward to the generic `bleautoconnect <name>`
+// in BLE_Peers.cpp. Kept so existing muscle memory + the BT web panel's
+// checkboxes keep working without a string change.
+static const char* cmd_g2autoconnect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = argsInput; arg.trim();
-  if (arg.length() == 0) {
-    return gSettings.bluetoothAutoStart ? "[BLE] Auto-start: enabled" : "[BLE] Auto-start: disabled";
-  }
-  arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
-    setSetting(gSettings.bluetoothAutoStart, true);
-    return "[BLE] Auto-start enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
-    setSetting(gSettings.bluetoothAutoStart, false);
-    return "[BLE] Auto-start disabled";
-  }
-  return "Usage: bleautostart [on|off]";
+  String forwarded = String("g2-glasses ") + argsInput;
+  forwarded.trim();
+  return cmd_bleautoconnect(forwarded);
+}
+static const char* cmd_ringautoconnect(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String forwarded = String("r1-ring ") + argsInput;
+  forwarded.trim();
+  return cmd_bleautoconnect(forwarded);
 }
 
-static const char* cmd_blerequireauth(const String& argsInput) {
+BOOL_CMD(blerequireauth, gSettings.bluetoothRequireAuth, "[BLE] Require auth")
+
+// -----------------------------------------------------------------------------
+// Mode (server vs. G2 client)
+// -----------------------------------------------------------------------------
+
+const char* getBleModeString() {
+  return (gSettings.bleMode == BLE_MODE_G2_CLIENT) ? "client" : "server";
+}
+
+static const char* cmd_blemode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
-    return gSettings.bluetoothRequireAuth ? "[BLE] Require auth: enabled" : "[BLE] Require auth: disabled";
+    if (!ensureDebugBuffer()) return getBleModeString();
+    char* buf = getDebugBuffer();
+    snprintf(buf, 1024, "BLE mode: %s", getBleModeString());
+    return buf;
   }
   arg.toLowerCase();
-  if (arg == "on" || arg == "true" || arg == "1") {
-    setSetting(gSettings.bluetoothRequireAuth, true);
-    return "[BLE] Require auth enabled";
-  } else if (arg == "off" || arg == "false" || arg == "0") {
-    setSetting(gSettings.bluetoothRequireAuth, false);
-    return "[BLE] Require auth disabled";
+
+  if (arg == "server" || arg == "phone") {
+#if ENABLE_G2_GLASSES
+    if (isG2ClientInitialized()) {
+      broadcastOutput("[BLE] Stopping G2 client mode");
+      deinitG2Client();
+    }
+#endif
+    setSetting(gSettings.bleMode, (int)BLE_MODE_SERVER);
+    return "[BLE] Mode set to server";
   }
-  return "Usage: blerequireauth [on|off]";
+
+  if (arg == "client" || arg == "g2") {
+#if !ENABLE_G2_GLASSES
+    return "[BLE] G2 client not compiled (ENABLE_G2_GLASSES=0)";
+#else
+    if (gBLEState && gBLEState->initialized) {
+      broadcastOutput("[BLE] Stopping BLE server mode");
+      deinitBluetooth();
+    }
+    setSetting(gSettings.bleMode, (int)BLE_MODE_G2_CLIENT);
+    return "[BLE] Mode set to client (G2)";
+#endif
+  }
+
+  return "Usage: blemode [server|client]";
 }
 
 // =============================================================================
@@ -1517,6 +1551,19 @@ const CommandEntry bluetoothCommands[] = {
   // Auto-start
   { "bleautostart",    "Enable/disable BLE auto-start after boot [on|off].",   false, cmd_bleautostart,    "Usage: bleautostart [on|off]" },
   { "blerequireauth", "Enable/disable BLE authentication requirement [on|off].", true, cmd_blerequireauth, "Usage: blerequireauth [on|off]" },
+
+  // Mode (server vs. G2 client) - mutually exclusive at runtime
+  { "blemode",        "Get/set BLE mode [server|client].",                     false, cmd_blemode,         "Usage: blemode [server|client]" },
+
+  // Auto-reconnect at boot to saved-MAC peers (no scan fallback). Pairing is
+  // separate (`openg2 auto`, `ringconnect`) and always saves the MAC; these
+  // flags only control whether boot reconnects automatically. The generic
+  // form `bleautoconnect <peer-name> [on|off]` works for any registered
+  // peer; the per-peer commands are kept as muscle-memory shims.
+  { "bleautoconnect",  "Per-peer auto-reconnect at boot: bleautoconnect <name> [on|off]. `blepeers` lists names.", false, cmd_bleautoconnect, "Usage: bleautoconnect <peer-name> [on|off]" },
+  { "blepeers",        "List all registered BLE peers and their state.",                                          false, cmd_blepeers,        nullptr },
+  { "g2autoconnect",   "Alias for `bleautoconnect g2-glasses [on|off]`.",                                          false, cmd_g2autoconnect,   "Usage: g2autoconnect [on|off]" },
+  { "ringautoconnect", "Alias for `bleautoconnect r1-ring [on|off]`.",                                             false, cmd_ringautoconnect, "Usage: ringautoconnect [on|off]" },
 };
 
 const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoothCommands[0]);
@@ -1529,15 +1576,15 @@ const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoo
 
 // Settings entries for Bluetooth
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
+// Per-peer rows are emitted programmatically in registerBluetoothPeerSettings()
+// (see below) so they stay in sync with BLE_Peers.h's BlePeerKind enum. The
+// static rows here cover only the non-peer bluetooth settings.
 const SettingEntry bluetoothSettingsEntries[] = {
   { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bluetoothAutoStart,    true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr },
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr },
   { "bluetoothDeviceName",   SETTING_STRING, &gSettings.bleDeviceName,         true, 0, nullptr, 0, 0, "Device Name", nullptr },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            true, 3, nullptr, 0, 7, "TX Power (0-7)", nullptr },
-  { "bluetoothGlassesLeftMAC",  SETTING_STRING, &gSettings.bleGlassesLeftMAC,  false, 0, nullptr, 0, 0, "Glasses Left MAC", nullptr },
-  { "bluetoothGlassesRightMAC", SETTING_STRING, &gSettings.bleGlassesRightMAC, false, 0, nullptr, 0, 0, "Glasses Right MAC", nullptr },
-  { "bluetoothRingMAC",      SETTING_STRING, &gSettings.bleRingMAC,            false, 0, nullptr, 0, 0, "Ring MAC", nullptr },
-  { "bluetoothPhoneMAC",     SETTING_STRING, &gSettings.blePhoneMAC,           false, 0, nullptr, 0, 0, "Phone MAC", nullptr }
+  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", nullptr, false, nullptr, "blemode" }
 };
 
 const size_t bluetoothSettingsCount = sizeof(bluetoothSettingsEntries) / sizeof(bluetoothSettingsEntries[0]);

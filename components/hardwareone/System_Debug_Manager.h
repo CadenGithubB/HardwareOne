@@ -3,22 +3,26 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
+// DebugFlagMask is defined in System_Debug.h, which includes this header
+// AFTER the struct definition.
+struct DebugFlagMask;
+
 class DebugManager {
 private:
     // Private constructor for singleton
     DebugManager();
-    
+
     // Prevent copying
     DebugManager(const DebugManager&) = delete;
     DebugManager& operator=(const DebugManager&) = delete;
-    
+
 public:
     // Singleton access
     static DebugManager& getInstance();
-    
+
     // Public interface (compatibility wrapper around existing debug system)
-    void setDebugFlags(uint64_t flags);
-    uint64_t getDebugFlags() const;
+    void setDebugFlags(DebugFlagMask flags);
+    DebugFlagMask getDebugFlags() const;
 
     void setLogLevel(uint8_t level);
     uint8_t getLogLevel() const;
@@ -33,7 +37,7 @@ public:
     bool initialize();
     
     // Queue a debug message
-    void queueDebugMessage(uint64_t flag, const char* message);
+    void queueDebugMessage(DebugFlagMask flag, const char* message);
 
     QueueHandle_t getDebugQueue() const;
     QueueHandle_t getDebugFreeQueue() const;

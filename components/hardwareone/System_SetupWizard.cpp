@@ -184,8 +184,11 @@ size_t getLEDEffectCount() { return ledEffectCount; }
 // Item indices depend on which conditional items are visible
 static bool systemPageHasNTP() {
 #if ENABLE_WIFI
+  // Row stays visible whenever WiFi is compiled in, regardless of whether
+  // the user currently has WiFi enabled — wizard rows don't vanish based
+  // on sibling toggles.
   const FeatureEntry* wifiFeature = getFeatureById("wifi");
-  return wifiFeature && isFeatureEnabled(wifiFeature);
+  return wifiFeature && isFeatureCompiled(wifiFeature);
 #else
   return false;
 #endif
@@ -395,10 +398,11 @@ void rebuildNetworkSettingsPage() {
   networkPageCount = 0;
   
 #if ENABLE_WIFI
-  // Only show WiFi auto-connect if WiFi feature is enabled
+  // Principle: wizard rows don't vanish based on other toggles. Gate on
+  // compiled-ness only so the row stays visible even if WiFi itself is off.
   {
     const FeatureEntry* wifiFeature = getFeatureById("wifi");
-    if (wifiFeature && isFeatureEnabled(wifiFeature)) {
+    if (wifiFeature && isFeatureCompiled(wifiFeature)) {
       networkPage[networkPageCount].label = "WiFi auto-connect";
       networkPage[networkPageCount].boolSetting = &gSettings.wifiAutoReconnect;
       networkPage[networkPageCount].isBool = true;
@@ -408,10 +412,14 @@ void rebuildNetworkSettingsPage() {
 #endif
 
 #if ENABLE_HTTP_SERVER
-  // Only show HTTP auto-start if HTTP feature is enabled
+  // HTTP and Bluetooth don't have a separate "enabled" setting from their
+  // auto-start flag — the feature's enabledSetting IS the auto-start flag.
+  // Gating this row on `isFeatureEnabled` would make the row self-hide the
+  // moment the user toggled it off, so we gate on `isFeatureCompiled`
+  // instead. This row is always visible when the feature is compiled in.
   {
     const FeatureEntry* httpFeature = getFeatureById("http");
-    if (httpFeature && isFeatureEnabled(httpFeature)) {
+    if (httpFeature && isFeatureCompiled(httpFeature)) {
       networkPage[networkPageCount].label = "HTTP auto-start";
       networkPage[networkPageCount].boolSetting = &gSettings.httpAutoStart;
       networkPage[networkPageCount].isBool = true;
@@ -421,10 +429,11 @@ void rebuildNetworkSettingsPage() {
 #endif
 
 #if ENABLE_BLUETOOTH
-  // Only show BT auto-start if Bluetooth feature is enabled
+  // See HTTP block above — same conflation (`bluetoothAutoStart` is both the
+  // feature-enable and the auto-start). Gate on compiled-ness only.
   {
     const FeatureEntry* btFeature = getFeatureById("bluetooth");
-    if (btFeature && isFeatureEnabled(btFeature)) {
+    if (btFeature && isFeatureCompiled(btFeature)) {
       networkPage[networkPageCount].label = "BT auto-start";
       networkPage[networkPageCount].boolSetting = &gSettings.bluetoothAutoStart;
       networkPage[networkPageCount].isBool = true;
@@ -434,10 +443,10 @@ void rebuildNetworkSettingsPage() {
 #endif
 
 #if ENABLE_ESPNOW
-  // Only show ESP-NOW mesh if ESP-NOW feature is enabled
+  // Gate on compiled-ness only (see WiFi comment above).
   {
     const FeatureEntry* espnowFeature = getFeatureById("espnow");
-    if (espnowFeature && isFeatureEnabled(espnowFeature)) {
+    if (espnowFeature && isFeatureCompiled(espnowFeature)) {
       networkPage[networkPageCount].label = "ESP-NOW mesh";
       networkPage[networkPageCount].boolSetting = &gSettings.espnowmesh;
       networkPage[networkPageCount].isBool = true;
@@ -447,10 +456,10 @@ void rebuildNetworkSettingsPage() {
 #endif
 
 #if ENABLE_MQTT
-  // Only show MQTT auto-start if MQTT feature is enabled
+  // Gate on compiled-ness only (see WiFi comment above).
   {
     const FeatureEntry* mqttFeature = getFeatureById("mqtt");
-    if (mqttFeature && isFeatureEnabled(mqttFeature)) {
+    if (mqttFeature && isFeatureCompiled(mqttFeature)) {
       networkPage[networkPageCount].label = "MQTT auto-start";
       networkPage[networkPageCount].boolSetting = &gSettings.mqttAutoStart;
       networkPage[networkPageCount].isBool = true;

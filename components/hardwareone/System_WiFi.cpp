@@ -205,6 +205,14 @@ bool connectToBestWiFiNetwork() {
     return false;
   }
 
+  // Defensively re-arm STA mode. If the caller previously did
+  // WiFi.disconnect(true) or some other path put the driver into
+  // WIFI_OFF, WiFi.status() will report WL_STOPPED (254) for the
+  // entire 12-s timeout because the Arduino layer thinks the radio
+  // is down. Setting STA mode here is a no-op when already in STA
+  // and a recovery when not — cheap insurance against any caller.
+  WiFi.mode(WIFI_STA);
+
   sortWiFiByPriority();
   gWifiUserCancelled = false;
   bool connected = false;
@@ -749,11 +757,27 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
     WARN_WIFIF("Connection FAILED after %lums, final status=%s (%d)",
                millis() - start, wifiStatusToString(finalStatus), finalStatus);
 
-    // Stop the driver from auto-retrying with bad credentials
-    // Check if WiFi is still initialized before calling disconnect
+    // Bail out early on "driver dead" statuses: WL_STOPPED (254,
+    // driver explicitly stopped) and WL_NO_SHIELD (255, WiFi class
+    // not initialised). Retrying just spins the same 12 s timeout
+    // and ramps heap pressure — the next attempt's deinit/reinit
+    // can hit malloc-buffer-fail when BLE is also active. Caller
+    // should re-arm WiFi.mode(WIFI_STA) and try again from scratch.
+    if (finalStatus == WL_STOPPED || finalStatus == WL_NO_SHIELD) {
+      WARN_WIFIF("WiFi driver not running (status=%d) — aborting retry loop",
+                 finalStatus);
+      break;
+    }
+
+    // Stop the driver from auto-retrying with bad credentials.
+    // disconnect(false) keeps the station driver up so the next
+    // attempt's esp_wifi_connect fires against a live stack;
+    // disconnect(true) used to set WIFI_OFF here, which made the
+    // next attempt's WiFi.status() report WL_STOPPED for the full
+    // 12 s timeout (same heap-exhaustion path as above).
     wifi_mode_t mode;
     if (esp_wifi_get_mode(&mode) == ESP_OK) {
-      WiFi.disconnect(true);
+      WiFi.disconnect(false);
     } else {
       DEBUG_WIFIF("[connectWiFiIndex] WiFi already deinitialized, skipping disconnect");
     }

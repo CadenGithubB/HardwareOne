@@ -214,14 +214,13 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
 
   DEBUG_STORAGEF("[buildFilesListing] START path='%s' heap=%u", dirPath.c_str(), (unsigned)ESP.getFreeHeap());
 
-  // Determine if we're listing SD card content
-  bool sdRequested = (VFS::getStorageType(dirPath) == VFS::SDCARD);
-  String fsDirPath = sdRequested ? VFS::stripSdPrefix(dirPath) : dirPath;
+  // SD entry names come back rooted at the SD's own "/", not at our
+  // "/sd/..." mount-point convention. Compute the underlying-FS path
+  // once so we can strip the right prefix from each entry name below.
+  // For LittleFS paths stripSdPrefix is a pass-through.
+  String fsDirPath = VFS::stripSdPrefix(dirPath);
 
   FsLockGuard _dirGuard("dir.list");
-
-  // Virtual root: show /sd folder if SD is available and we're at LittleFS root
-  bool includeVirtualSd = (!sdRequested && dirPath == "/" && VFS::isSDAvailable());
 
   File root = VFS::open(dirPath, "r");
   if (!root || !root.isDirectory()) {
@@ -246,30 +245,43 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
     out = "";  // array body only
   }
 
-  // Inject virtual /sd folder at root when SD card is available
-  if (includeVirtualSd) {
-    // Count items on SD root for display
-    uint32_t sdCount = 0;
-    File sdRoot = VFS::open("/sd", "r");
-    if (sdRoot && sdRoot.isDirectory()) {
-      File child = sdRoot.openNextFile();
-      while (child) {
-        sdCount++;
-        child = sdRoot.openNextFile();
+  // Mount-point entries (e.g. /sd at LittleFS root). The VFS layer is
+  // the authority on which synthetic entries belong here; we render each
+  // one with the same JSON / text formatting the real entries use below.
+  // Item-count display is web-listing polish so it lives here, not in VFS.
+  {
+    VFS::VirtualEntry virtuals[4];
+    const size_t nVirt = VFS::listVirtualEntries(
+        dirPath, virtuals, sizeof(virtuals) / sizeof(virtuals[0]));
+    for (size_t v = 0; v < nVirt; v++) {
+      char fullPath[160];
+      snprintf(fullPath, sizeof(fullPath), "%s%s%s",
+               dirPath.c_str(), dirPath == "/" ? "" : "/", virtuals[v].name);
+      uint32_t childCount = 0;
+      if (virtuals[v].isFolder) {
+        File mount = VFS::open(fullPath, "r");
+        if (mount && mount.isDirectory()) {
+          File child = mount.openNextFile();
+          while (child) { childCount++; child = mount.openNextFile(); }
+          mount.close();
+        }
       }
-      sdRoot.close();
-    }
-    if (asJson) {
-      uint8_t sdPerms = getPermissions("/sd");
-      char sdBuf[96];
-      snprintf(sdBuf, sizeof(sdBuf), "{\"name\":\"sd\",\"type\":\"folder\",\"size\":\"%u items\",\"count\":%u,\"perms\":%u}", (unsigned)sdCount, (unsigned)sdCount, (unsigned)sdPerms);
-      out += sdBuf;
-      first = false;
-    } else {
-      out += "  sd (";
-      out += sdCount;
-      out += " items) [SD Card]\n";
-      fileCount++;
+      if (asJson) {
+        uint8_t perms = getPermissions(String(fullPath));
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "{\"name\":\"%s\",\"type\":\"folder\",\"size\":\"%u items\",\"count\":%u,\"perms\":%u}",
+                 virtuals[v].name, (unsigned)childCount, (unsigned)childCount, (unsigned)perms);
+        out += buf;
+        first = false;
+      } else {
+        out += "  ";
+        out += virtuals[v].name;
+        out += " (";
+        out += childCount;
+        out += " items) [mount]\n";
+        fileCount++;
+      }
     }
   }
 
@@ -278,8 +290,8 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
     // Extract display name (strip leading directory)
     String fileName = String(file.name());
     DEBUG_STORAGEF("[buildFilesListing] Processing file: '%s' heap=%u", fileName.c_str(), (unsigned)ESP.getFreeHeap());
-    if (dirPath != "/") {
-      String expectedPrefix = dirPath;
+    if (fsDirPath != "/") {
+      String expectedPrefix = fsDirPath;
       if (!expectedPrefix.endsWith("/")) expectedPrefix += "/";
       if (fileName.startsWith(expectedPrefix)) fileName = fileName.substring(expectedPrefix.length());
     } else {

@@ -101,7 +101,13 @@ struct Settings {
       debugBluetoothGatt(false),
       debugBluetoothData(false),
       debugFmRadio(false),
-      debugG2(false),  // G2 smart glasses BLE connection
+      debugG2(false),  // G2 smart glasses BLE connection (master)
+      debugG2Lifecycle(false),
+      debugG2Protocol(false),
+      debugG2Events(false),
+      debugG2Pages(false),
+      debugG2Heartbeat(false),
+      debugG2Dump(false),
       debugCamera(false),
       debugMicrophone(false),
       debugI2C(false),  // I2C bus transactions, mutex, clock changes
@@ -250,10 +256,8 @@ struct Settings {
       bluetoothRequireAuth(true),
       bleDeviceName("HardwareOne"),
       bleTxPower(3),
-      bleGlassesLeftMAC(""),
-      bleGlassesRightMAC(""),
-      bleRingMAC(""),
-      blePhoneMAC(""),
+      bleMode(0),
+      // BLE peer fields moved to gBlePeerData[] (see BLE_Peers.h)
       powerMode(0),
       powerAutoMode(false),
       powerBatteryThreshold(20),
@@ -413,7 +417,13 @@ struct Settings {
   bool debugBluetoothGatt;
   bool debugBluetoothData;
   bool debugFmRadio;
-  bool debugG2;  // G2 smart glasses BLE connection
+  bool debugG2;  // G2 smart glasses BLE connection (master)
+  bool debugG2Lifecycle;  // Scan, BLE connect/disconnect, MTU, service enumeration
+  bool debugG2Protocol;   // Envelope TX/RX, CRC, fragmentation, parse errors
+  bool debugG2Events;     // DevEvents, ListEvents, SysEvents, gestures, taps
+  bool debugG2Pages;      // Page-swap worker, hijack, CREATE-list/text, lens state
+  bool debugG2Heartbeat;  // Heartbeat TX + HeartbeatAck (every ~5 s; loud)
+  bool debugG2Dump;       // [G2-DUMP] diagnostic ring buffer dumps on errors
   bool debugCamera;
   bool debugMicrophone;
   bool debugI2C;  // I2C bus transactions, mutex, clock changes
@@ -635,10 +645,12 @@ struct Settings {
   bool bluetoothRequireAuth;    // Require login before accepting BLE commands (always required, per-connection)
   String bleDeviceName;         // BLE advertised device name (default: "HardwareOne")
   int bleTxPower;               // BLE TX power level 0-7 (0=min, 7=max, default: 3)
-  String bleGlassesLeftMAC;     // MAC address of left glasses lens (format: "AA:BB:CC:DD:EE:FF")
-  String bleGlassesRightMAC;    // MAC address of right glasses lens
-  String bleRingMAC;            // MAC address of smart ring
-  String blePhoneMAC;           // MAC address of phone
+  int bleMode;                  // BLE role: 0=server (phone peripheral), 1=G2 client (central). Mutually exclusive at runtime.
+  // BLE peer MACs and auto-reconnect flags now live in BLE_Peers.cpp's
+  // gBlePeerData[BLE_PEER_MAX] array, persisted under "bluetooth.peers"
+  // in settings.json. See BLE_Peers.h. Removed flat keys:
+  //   bleGlassesLeftMAC, bleGlassesRightMAC, bleRingMAC, blePhoneMAC,
+  //   g2AutoConnect, ringAutoConnect
   // Power Management settings
   uint8_t powerMode;            // 0=Performance(240MHz), 1=Balanced(160MHz), 2=PowerSaver(80MHz), 3=UltraSaver(40MHz)
   bool powerAutoMode;           // Auto-adjust power mode based on battery level

@@ -46,9 +46,17 @@ CONFIG_ARDUINO_LOOP_STACK_SIZE=8192
 CONFIG_ARDUINO_SERIAL_EVENT_TASK_STACK_SIZE=2048
 CONFIG_ARDUINO_UDP_TASK_STACK_SIZE=4096
 
-# BLE stack sizes - reduced for IRAM savings
-CONFIG_BT_BTC_TASK_STACK_SIZE=3072
+# BLE stack sizes
+# BTC was 3072 — too tight for the G2 hijack tap dispatcher, which runs on
+# the BTC task and can transitively call g2ShowText (1 KB rebuild buffer)
+# and per-page handlers. Overflowed when tapping Status from the hijacked
+# Blocks menu. 8192 matches the ESP-IDF default for BLE-rich projects.
+CONFIG_BT_BTC_TASK_STACK_SIZE=8192
 CONFIG_BT_BTU_TASK_STACK_SIZE=4352
+# Move BLE host structs to the heap (PSRAM-backed) instead of BSS. Frees
+# ~14 KB of internal SRAM and gives the BT stack more headroom for HCI
+# command queue / fixed_pkt_queue allocations under load.
+CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
 
 # BLE GATT configuration
 CONFIG_BT_GATT_MAX_SR_ATTRIBUTES=100

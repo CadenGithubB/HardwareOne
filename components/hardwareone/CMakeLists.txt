@@ -56,6 +56,15 @@ set(hardwareone_srcs
         Optional_Bluetooth.cpp
         BLE_IDF.cpp
         Optional_EvenG2.cpp
+        Optional_EvenG2_Ring.cpp
+        BLE_Events.cpp
+        BLE_Peers.cpp
+        G2_Page_Sensors.cpp
+        G2_Page_System.cpp
+        G2_Page_Network.cpp
+        G2_Page_Settings.cpp
+        G2_Page_Files.cpp
+        G2_Page_TestSuite.cpp
         System_G2_Protocol.cpp
         System_Battery.cpp
         System_CLI.cpp

@@ -5,6 +5,15 @@
 
 #include "System_BuildConfig.h"
 
+// =============================================================================
+// BLE MODE CONSTANTS (available regardless of ENABLE_BLUETOOTH)
+// =============================================================================
+// The firmware can run the BLE radio in one of two mutually exclusive roles.
+// Which one is active at runtime is stored in gSettings.bleMode and also
+// controlled by the `blemode` CLI / the Bluetooth web page mode toggle.
+#define BLE_MODE_SERVER     0   // Peripheral / GATT server for phone clients (Optional_Bluetooth)
+#define BLE_MODE_G2_CLIENT  1   // Central / GATT client for Even Realities G2 glasses (Optional_EvenG2)
+
 #if ENABLE_BLUETOOTH
 
 #include <BLE2902.h>
@@ -161,6 +170,9 @@ bool isBLERunning();
 void getBLEStatus(char* buffer, size_t bufferSize);
 const char* getBLEStateString();
 
+// Mode (server vs. G2 client) — reads gSettings.bleMode
+const char* getBleModeString();
+
 // Settings
 void bleApplySettings();
 
@@ -201,6 +213,7 @@ inline int bleRevokeAllSessions() { return 0; }
 inline bool isBLERunning() { return false; }
 inline void getBLEStatus(char* buffer, size_t) { if (buffer) buffer[0] = '\0'; }
 inline const char* getBLEStateString() { return "disabled"; }
+inline const char* getBleModeString() { return "disabled"; }
 inline void bleApplySettings() {}
 
 // Streaming API stubs

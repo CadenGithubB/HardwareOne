@@ -4,21 +4,23 @@
 // =============================================================================
 // G2 glasses — "Network" page
 // =============================================================================
-// Display + a few tap-driven actions. The OLED Network mode supports adding
-// new networks via on-screen keyboard — that's lost on G2 (no keyboard
-// input), but everything else maps:
-//   • WiFi SSID / IP / RSSI / channel  → static text
-//   • Mesh role + peer count           → static text
-//   • "Connect best saved network"     → tap action
-//   • "Disconnect WiFi"                → tap action
-//   • "Scan for networks" + show list  → tap action; results render as a
-//                                         REBUILD-list page (sub-state)
-//   • "Forget current network"         → tap action with confirmation
+// Top-level chooser that drills into three subsystem submenus mirroring
+// what the OLED Network mode exposes, minus anything that requires
+// text input (e.g. adding a new network with a password). Tap-only.
 //
-// State machine: this page can be in two sub-modes — MAIN (action menu)
-// and SCAN_RESULTS (list of nearby SSIDs). The page-mode tracker in
-// Optional_EvenG2.h tracks which top-level page we're on; the local
-// state struct here tracks which sub-mode within Network.
+// Sub-mode tree:
+//   MAIN              [WiFi >>] [ESP-NOW >>] [Bluetooth >>]
+//     WIFI            status info / Connect Best / Disconnect /
+//                     Scan / List Saved / HTTP toggle
+//       WIFI_SCAN     scan-results list (tap = log SSID; can't enter pwd)
+//       WIFI_SAVED    saved-network list (tap = forget that network)
+//     ESPNOW          status info / Mode / Start-Stop / View Devices
+//       ESPNOW_DEVS   paired-device list (info only)
+//     BLUETOOTH       status info / Start-Stop / Adv toggle / Disconnect
+//
+// The page-mode tracker in Optional_EvenG2.h tracks which top-level
+// page we're on; the local state struct here tracks the sub-mode
+// within Network.
 
 #include "System_BuildConfig.h"
 #include <Arduino.h>
@@ -31,14 +33,9 @@
 void g2BuildNetworkInfo(char* out, size_t cap);
 bool g2ShowNetworkPage();
 
-// Render the Network sub-menu as a tap-driven list. Called when the
-// user taps "Network" from the main hijack menu. Items:
-//   <- Back         (tap → go to main menu)
-//   Connect Best
-//   Disconnect
-//   Scan Networks
-//   Forget Current
-//   (info row)      ← shows current WiFi state, no-op tap
+// Render the top-level Network chooser. Called when the user taps
+// "Network" from the main hijack menu. The chooser drills into one of
+// three subsystem submenus (WiFi / ESP-NOW / Bluetooth).
 void g2ShowNetworkMenu();
 
 // Tap dispatch from handleHijackMenuTap when gHijackPage == NETWORK.

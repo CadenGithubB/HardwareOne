@@ -2821,7 +2821,7 @@ void loadAndIncrementBootSeq() {
   gNTPAnchorId = 0;
   gBootCounter = 0;
   // Temporarily enable DEBUG_SYSTEM for boot sequence initialization (runs before settings loaded)
-  uint32_t _dbgSaved = getDebugFlags();
+  DebugFlagMask _dbgSaved = getDebugFlags();
   setDebugFlag(DEBUG_SYSTEM);
   DEBUG_SYSTEMF("BootSeqInit: filesystemReady=%d, users.json exists=%d", (int)filesystemReady, (int)(filesystemReady && LittleFS.exists(USERS_JSON_FILE)));
 

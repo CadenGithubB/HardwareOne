@@ -978,7 +978,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 <script>
 (function(){
-  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',camera:'Camera',microphone:'Microphone',gps:'GPS',rtc:'RTC',presence:'Presence',fmradio:'FM Radio',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps',datetime:'Date / Time'};
+  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',g2:'G2 Glasses',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',camera:'Camera',microphone:'Microphone',gps:'GPS',rtc:'RTC',presence:'Presence',fmradio:'FM Radio',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps',datetime:'Date / Time'};
   // Hover help for each debug flag. Keyed by the CLI cmdKey so it survives
   // label changes. Missing keys fall back to a generic group-level hint.
   var HELP={
@@ -1108,7 +1108,14 @@ window.sendSequential = function(cmds, onDone, onFail) {
     debuglogger:"Logs the logger subsystem itself — mostly for debugging the debug infrastructure.",
     debugmemory:"Enables periodic memory reports (DRAM, PSRAM, task stacks) in the log.",
     debugsettingssystem:"Logs settings-module registration and validation errors.",
-    debugg2:"Even Realities G2 glasses debug (planned feature — not yet working).",
+    // g2
+    debugg2:"Master toggle for Even Realities G2 glasses debug output.",
+    debugg2lifecycle:"Logs scan, BLE connect/disconnect, MTU negotiation, and service enumeration.",
+    debugg2protocol:"Logs envelope TX/RX, CRC, fragmentation, and parse errors.",
+    debugg2events:"Logs DevEvents, ListEvents, SysEvents, gestures, and taps from the lens.",
+    debugg2pages:"Logs the page-swap worker, hijack flow, CREATE-list/text, and lens state transitions.",
+    debugg2heartbeat:"Logs heartbeat TX and HeartbeatAck (every ~5 s — loud).",
+    debugg2dump:"Logs [G2-DUMP] diagnostic ring-buffer dumps fired on protocol errors.",
     debugi2c:"Logs low-level I2C bus transactions: start, address, ack/nack, clock changes.",
     debugmqtt:"Logs MQTT client connection, publish, subscribe, and message delivery.",
     webconsole:"Adds a floating debug console overlay to the web UI itself. Distinct from the logs shown via this page.",

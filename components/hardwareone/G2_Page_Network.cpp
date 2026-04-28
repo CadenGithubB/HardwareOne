@@ -1,22 +1,17 @@
 // =============================================================================
 // G2 glasses — "Network" page implementation
 // =============================================================================
-// See header for the contract. The page has two sub-modes:
-//   * MENU         — action list (Back / Connect Best / Disconnect / Scan / Forget)
-//   * SCAN_RESULTS — list of SSIDs found in the most recent scan; tap to
-//                    initiate connect (will fail without password since
-//                    we have no keyboard input — but it's a clean no-op
-//                    that logs the SSID for visibility)
-//
-// State is intentionally minimal — we don't try to manage the WiFi
-// state machine ourselves, just call into the existing WiFi APIs the
-// CLI commands use.
+// See header for the contract. Top-level Network chooser drills into one
+// of three subsystem submenus (WiFi / ESP-NOW / Bluetooth) plus several
+// list sub-pages. Tap-only — anything in the OLED that needs text input
+// (e.g. wifiadd <ssid> <password>, espnowsetname) is omitted.
 
 #include "G2_Page_Network.h"
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "Optional_EvenG2.h"
+#include "Optional_Bluetooth.h"
 #include "System_Debug.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,15 +25,28 @@
 #include "System_ESPNow.h"
 #endif
 
+#if ENABLE_HTTP_SERVER
+#include <esp_http_server.h>
+extern httpd_handle_t server;
+extern bool gServerIsHttps;
+extern const char* cmd_httpstart(const String&);
+extern const char* cmd_httpstop(const String&);
+#endif
+
 // -----------------------------------------------------------------------------
 // Local state
 // -----------------------------------------------------------------------------
 
 enum NetworkSubMode : uint8_t {
-  NET_SUB_MENU         = 0,
-  NET_SUB_SCAN_RESULTS = 1,
+  NET_SUB_MAIN          = 0,  // top-level chooser (WiFi / ESP-NOW / Bluetooth)
+  NET_SUB_WIFI          = 1,  // WiFi action menu
+  NET_SUB_WIFI_SCAN     = 2,  // WiFi scan results
+  NET_SUB_WIFI_SAVED    = 3,  // WiFi saved-network list (tap = forget)
+  NET_SUB_ESPNOW        = 4,  // ESP-NOW action menu
+  NET_SUB_ESPNOW_DEVS   = 5,  // ESP-NOW paired-device list (info only)
+  NET_SUB_BLUETOOTH     = 6,  // Bluetooth action menu
 };
-static NetworkSubMode gNetSub = NET_SUB_MENU;
+static NetworkSubMode gNetSub = NET_SUB_MAIN;
 
 // Cache of the most recent scan results so tap-to-connect knows which
 // SSID was at index N. Populated when the user taps "Scan Networks".
@@ -115,65 +123,87 @@ bool g2ShowNetworkPage() {
 }
 
 // -----------------------------------------------------------------------------
-// Action menu (list-mode, tappable)
+// Top-level chooser (WiFi / ESP-NOW / Bluetooth)
 // -----------------------------------------------------------------------------
 
 void g2ShowNetworkMenu() {
-  gNetSub = NET_SUB_MENU;
-  // First two items are status-info rows (no-op taps); the rest are
-  // actions. Keeping it short — 6 items is comfortable in the firmware
-  // list widget without forcing the user to scroll a lot.
-  static char wifiLine[40];
-  static char espLine[40];
-#if ENABLE_WIFI
-  if (WiFi.isConnected()) {
-    String ssid = WiFi.SSID();
-    snprintf(wifiLine, sizeof(wifiLine), "WiFi: %s",
-             ssid.length() > 12 ? (ssid.substring(0, 12) + "~").c_str()
-                                : ssid.c_str());
-  } else {
-    snprintf(wifiLine, sizeof(wifiLine), "WiFi: offline");
-  }
-#else
-  snprintf(wifiLine, sizeof(wifiLine), "WiFi: n/a");
-#endif
-
-#if ENABLE_ESPNOW
-  if (gEspNow && gEspNow->initialized) {
-    snprintf(espLine, sizeof(espLine), "ESPNow %s %dp",
-             getEspNowModeString(), gEspNow->peerHistoryCount);
-  } else {
-    snprintf(espLine, sizeof(espLine), "ESPNow off");
-  }
-#else
-  snprintf(espLine, sizeof(espLine), "ESPNow: n/a");
-#endif
-
-  // Indices match the dispatch in g2NetworkHandleTap.
+  gNetSub = NET_SUB_MAIN;
   const char* items[] = {
     "<- Back",        // 0
-    wifiLine,         // 1 (info, no-op)
-    espLine,          // 2 (info, no-op)
-    "Connect Best",   // 3
-    "Disconnect",     // 4
-    "Scan Networks",  // 5
-    "Forget Current", // 6
+    "WiFi >>",        // 1
+    "ESP-NOW >>",     // 2
+    "Bluetooth >>",   // 3
   };
   if (g2ShowListPage(items, sizeof(items) / sizeof(items[0]))) {
     g2SetHijackPage(G2_HIJACK_PAGE_NETWORK);
-    DEBUG_G2F("[G2] Network menu shown (sub=MENU)");
+    DEBUG_G2F("[G2] Network top-level chooser shown");
   } else {
-    DEBUG_G2F("[G2] Network menu show FAILED");
+    DEBUG_G2F("[G2] Network chooser show FAILED");
   }
 }
 
-// Render scan results as a tappable list. Items are:
-//   0: "<- Back" (returns to MENU sub-mode, not to top-level)
+// -----------------------------------------------------------------------------
+// WiFi submenu
+// -----------------------------------------------------------------------------
+
+static void showWiFiMenu() {
+  gNetSub = NET_SUB_WIFI;
+  static char wifiLine[48];
+  static char rssiLine[32];
+  static char httpLine[24];
+
+#if ENABLE_WIFI
+  bool connected = WiFi.isConnected();
+  if (connected) {
+    String ssid = WiFi.SSID();
+    snprintf(wifiLine, sizeof(wifiLine), "WiFi: %s",
+             ssid.length() > 14 ? (ssid.substring(0, 14) + "~").c_str()
+                                : ssid.c_str());
+    snprintf(rssiLine, sizeof(rssiLine), "RSSI %lddBm  ch%ld",
+             (long)WiFi.RSSI(), (long)WiFi.channel());
+  } else {
+    snprintf(wifiLine, sizeof(wifiLine), "WiFi: offline");
+    snprintf(rssiLine, sizeof(rssiLine), "(not connected)");
+  }
+#else
+  bool connected = false;
+  snprintf(wifiLine, sizeof(wifiLine), "WiFi: not compiled");
+  snprintf(rssiLine, sizeof(rssiLine), "-");
+#endif
+
+#if ENABLE_HTTP_SERVER
+  bool httpRunning = (server != nullptr);
+  if (httpRunning) {
+    snprintf(httpLine, sizeof(httpLine), "Stop %s",
+             gServerIsHttps ? "HTTPS" : "HTTP");
+  } else {
+    snprintf(httpLine, sizeof(httpLine), "Start HTTP");
+  }
+#else
+  snprintf(httpLine, sizeof(httpLine), "HTTP: n/a");
+#endif
+
+  // Item indices match dispatch in handleWiFiTap.
+  const char* items[] = {
+    "<- Back",         // 0
+    wifiLine,          // 1 (info)
+    rssiLine,          // 2 (info)
+    "Connect Best",    // 3
+    "Disconnect",      // 4
+    "Scan Networks",   // 5
+    "List Saved",      // 6
+    httpLine,          // 7
+  };
+  g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+  DEBUG_G2F("[G2] WiFi submenu shown (connected=%d)", connected ? 1 : 0);
+}
+
+// Render scan results as a tappable list. Items:
+//   0: "<- Back" (returns to WiFi submenu)
 //   1..N: SSID lines with RSSI suffix
 static void showScanResults() {
-  gNetSub = NET_SUB_SCAN_RESULTS;
-  // Build storage for the items we'll point to.
-  static char rows[1 + 8][48];  // [0] back, [1..8] APs
+  gNetSub = NET_SUB_WIFI_SCAN;
+  static char rows[1 + 8][48];
   strcpy(rows[0], "<- Back");
   const char* ptrs[1 + 8];
   ptrs[0] = rows[0];
@@ -181,21 +211,171 @@ static void showScanResults() {
   for (size_t i = 0; i < gScanCacheCount && i < 8; i++) {
     snprintf(rows[1 + i], sizeof(rows[1 + i]),
              "%s %s %ddBm",
-             gScanCache[i].secured ? "L" : " ",   // L = locked / secured
+             gScanCache[i].secured ? "L" : " ",
              gScanCache[i].ssid.length() > 0
                  ? gScanCache[i].ssid.c_str() : "<hidden>",
              gScanCache[i].rssi);
     ptrs[n++] = rows[1 + i];
   }
   if (n == 1) {
-    // No APs found — render a single info line.
     static const char* empty[] = { "<- Back", "(no networks found)" };
     g2ShowListPage(empty, 2);
   } else {
     g2ShowListPage(ptrs, n);
   }
-  DEBUG_G2F("[G2] Network scan results (%u APs)",
+  DEBUG_G2F("[G2] WiFi scan results (%u APs)",
             (unsigned)gScanCacheCount);
+}
+
+// Saved-network list. Tap to forget that entry (no password required —
+// only the SSID is needed for cmd_wifirm).
+static void showWiFiSavedList() {
+  gNetSub = NET_SUB_WIFI_SAVED;
+#if ENABLE_WIFI
+  static char rows[1 + MAX_WIFI_NETWORKS][48];
+  strcpy(rows[0], "<- Back");
+  const char* ptrs[1 + MAX_WIFI_NETWORKS];
+  ptrs[0] = rows[0];
+  size_t n = 1;
+  const int count = gWifiNetworkCount;
+  for (int i = 0; i < count && i < MAX_WIFI_NETWORKS; i++) {
+    snprintf(rows[1 + i], sizeof(rows[1 + i]),
+             "[%d] %s%s",
+             gWifiNetworks[i].priority,
+             gWifiNetworks[i].ssid.c_str(),
+             i == 0 ? " *" : "");
+    ptrs[n++] = rows[1 + i];
+  }
+  if (n == 1) {
+    static const char* empty[] = { "<- Back", "(no saved networks)" };
+    g2ShowListPage(empty, 2);
+  } else {
+    g2ShowListPage(ptrs, n);
+  }
+  DEBUG_G2F("[G2] WiFi saved list (%d entries) — tap to forget",
+            count);
+#else
+  static const char* na[] = { "<- Back", "(WiFi not compiled)" };
+  g2ShowListPage(na, 2);
+#endif
+}
+
+// -----------------------------------------------------------------------------
+// ESP-NOW submenu
+// -----------------------------------------------------------------------------
+
+static void showEspNowMenu() {
+  gNetSub = NET_SUB_ESPNOW;
+  static char stateLine[40];
+  static char modeLine[40];
+  static char devsLine[32];
+  static char toggleLine[24];
+
+#if ENABLE_ESPNOW
+  bool running = (gEspNow && gEspNow->initialized);
+  if (running) {
+    snprintf(stateLine, sizeof(stateLine), "ESP-NOW: ON");
+    snprintf(modeLine, sizeof(modeLine), "Mode: %s", getEspNowModeString());
+    snprintf(devsLine, sizeof(devsLine), "Peers: %d",
+             gEspNow->deviceCount);
+    snprintf(toggleLine, sizeof(toggleLine), "Stop");
+  } else {
+    snprintf(stateLine, sizeof(stateLine), "ESP-NOW: OFF");
+    snprintf(modeLine, sizeof(modeLine), "(not initialised)");
+    snprintf(devsLine, sizeof(devsLine), "Peers: -");
+    snprintf(toggleLine, sizeof(toggleLine), "Start");
+  }
+#else
+  snprintf(stateLine, sizeof(stateLine), "ESP-NOW: not compiled");
+  snprintf(modeLine, sizeof(modeLine), "-");
+  snprintf(devsLine, sizeof(devsLine), "-");
+  snprintf(toggleLine, sizeof(toggleLine), "n/a");
+#endif
+
+  const char* items[] = {
+    "<- Back",         // 0
+    stateLine,         // 1 (info)
+    modeLine,          // 2 (info)
+    devsLine,          // 3 (info)
+    toggleLine,        // 4 (Start/Stop toggle)
+    "View Devices",    // 5
+  };
+  g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+  DEBUG_G2F("[G2] ESP-NOW submenu shown");
+}
+
+static void showEspNowDevices() {
+  gNetSub = NET_SUB_ESPNOW_DEVS;
+#if ENABLE_ESPNOW
+  static char rows[1 + 8][48];
+  strcpy(rows[0], "<- Back");
+  const char* ptrs[1 + 8];
+  ptrs[0] = rows[0];
+  size_t n = 1;
+  if (gEspNow && gEspNow->initialized) {
+    const int devCount = gEspNow->deviceCount;
+    for (int i = 0; i < devCount && i < 8; i++) {
+      const EspNowDevice& d = gEspNow->devices[i];
+      const char* label = d.friendlyName.length() > 0
+          ? d.friendlyName.c_str()
+          : (d.name.length() > 0 ? d.name.c_str() : "(unnamed)");
+      snprintf(rows[1 + i], sizeof(rows[1 + i]),
+               "%s%s%s",
+               label,
+               d.room.length() > 0 ? " @ " : "",
+               d.room.length() > 0 ? d.room.c_str() : "");
+      ptrs[n++] = rows[1 + i];
+    }
+  }
+  if (n == 1) {
+    static const char* empty[] = { "<- Back", "(no peers — pair via web)" };
+    g2ShowListPage(empty, 2);
+  } else {
+    g2ShowListPage(ptrs, n);
+  }
+  DEBUG_G2F("[G2] ESP-NOW device list (%u entries)", (unsigned)(n - 1));
+#else
+  static const char* na[] = { "<- Back", "(ESP-NOW not compiled)" };
+  g2ShowListPage(na, 2);
+#endif
+}
+
+// -----------------------------------------------------------------------------
+// Bluetooth submenu
+// -----------------------------------------------------------------------------
+
+static void showBluetoothMenu() {
+  gNetSub = NET_SUB_BLUETOOTH;
+  static char stateLine[40];
+  static char modeLine[40];
+  static char connLine[40];
+  static char toggleLine[24];
+
+  bool running = isBLERunning();
+  bool connected = isBLEConnected();
+  if (running) {
+    snprintf(stateLine, sizeof(stateLine), "BLE: ON (%s)", getBLEStateString());
+    snprintf(toggleLine, sizeof(toggleLine), "Stop");
+  } else {
+    snprintf(stateLine, sizeof(stateLine), "BLE: OFF");
+    snprintf(toggleLine, sizeof(toggleLine), "Start");
+  }
+  snprintf(modeLine, sizeof(modeLine), "Mode: %s", getBleModeString());
+  snprintf(connLine, sizeof(connLine), "Conn: %s",
+           connected ? "yes" : "no");
+
+  const char* items[] = {
+    "<- Back",         // 0
+    stateLine,         // 1 (info)
+    modeLine,          // 2 (info)
+    connLine,          // 3 (info)
+    toggleLine,        // 4 (Start/Stop)
+    "Toggle Adv",      // 5
+    "Disconnect",      // 6
+  };
+  g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+  DEBUG_G2F("[G2] Bluetooth submenu shown (running=%d, conn=%d)",
+            running ? 1 : 0, connected ? 1 : 0);
 }
 
 // -----------------------------------------------------------------------------
@@ -282,116 +462,235 @@ static void spawnNetworkScanWorker() {
 #endif  // ENABLE_WIFI
 
 // -----------------------------------------------------------------------------
-// Tap dispatch
+// Tap dispatch — branch on submode, then by item index within that mode.
 // -----------------------------------------------------------------------------
 
-void g2NetworkHandleTap(uint32_t idx) {
-  if (gNetSub == NET_SUB_SCAN_RESULTS) {
-    if (idx == 0) {
-      // Back to action menu.
-      g2ShowNetworkMenu();
-      return;
-    }
-    // Tapped an SSID. Without keyboard we can't enter a password, so
-    // the most we can do is log it and bail. If it's an open AP, a
-    // future enhancement could try connect-without-password.
-    size_t apIdx = idx - 1;
-    if (apIdx < gScanCacheCount) {
-      const CachedAp& ap = gScanCache[apIdx];
-      DEBUG_G2F("[G2] Network: SSID '%s' tapped — secured=%d. No keyboard "
-                "input on G2; cannot enter password. Use the web UI or "
-                "CLI 'wifi add' to save credentials.",
-                ap.ssid.c_str(), ap.secured ? 1 : 0);
-      BROADCAST_PRINTF("[G2] Tapped '%s' on glasses — use web UI to add",
-                       ap.ssid.c_str());
-    }
-    return;
-  }
+static void backToHijackMain() {
+  g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
+  extern void g2RedrawHijackMainMenu();
+  g2RedrawHijackMainMenu();
+}
 
-  // MAIN sub-mode: dispatch by item index (matches g2ShowNetworkMenu).
+static void handleMainTap(uint32_t idx) {
   switch (idx) {
-    case 0:  // <- Back to top-level menu
-      g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-      // The main hijack menu items are owned by hijackWorkerTask — we
-      // just need to REBUILD with them. Re-sourcing the array here would
-      // duplicate state, so instead we ask the hijack code to redraw.
-      extern void g2RedrawHijackMainMenu();
-      g2RedrawHijackMainMenu();
+    case 0: backToHijackMain(); break;        // <- Back
+    case 1: showWiFiMenu();      break;       // WiFi >>
+    case 2: showEspNowMenu();    break;       // ESP-NOW >>
+    case 3: showBluetoothMenu(); break;       // Bluetooth >>
+    default:
+      DEBUG_G2F("[G2] Network MAIN: unknown idx=%u", (unsigned)idx);
+      break;
+  }
+}
+
+static void handleWiFiTap(uint32_t idx) {
+  switch (idx) {
+    case 0:  // <- Back to top-level
+      g2ShowNetworkMenu();
       break;
 
-    case 1: case 2:
-      // Info rows — no-op.
-      DEBUG_G2F("[G2] Network: tapped info row %u (no action)", (unsigned)idx);
+    case 1: case 2:  // info rows — no-op
+      DEBUG_G2F("[G2] WiFi: info row %u (no action)", (unsigned)idx);
       break;
 
     case 3: {  // Connect Best
 #if ENABLE_WIFI
-      DEBUG_G2F("[G2] Network: Connect Best — calling connectToBestWiFiNetwork");
-      // Defer to the existing helper used by the CLI `wificonnect` path.
-      // Walks the saved-credentials list and starts a connect attempt to
-      // whichever AP is best on RSSI; we don't block on the result.
-      extern bool connectToBestWiFiNetwork();
+      DEBUG_G2F("[G2] WiFi: Connect Best");
       bool ok = connectToBestWiFiNetwork();
-      BROADCAST_PRINTF("[G2] Network: Connect Best → %s",
+      BROADCAST_PRINTF("[G2] WiFi: Connect Best → %s",
                        ok ? "started" : "no saved networks / failed");
-#else
-      DEBUG_G2F("[G2] Network: WiFi not compiled in");
 #endif
       break;
     }
 
     case 4: {  // Disconnect
 #if ENABLE_WIFI
-      DEBUG_G2F("[G2] Network: Disconnect");
-      // disconnect(false) drops the AP association but keeps the station
-      // driver running. disconnect(true) sets WIFI_OFF, which leaves
-      // WiFi.status() reporting WL_STOPPED (254) — a later Connect Best
-      // then spins its 12 s retry budget three times before the driver's
-      // deinit/reinit hits a malloc-buffer-fail under BLE heap pressure
-      // (observed 2026-04-26).
+      DEBUG_G2F("[G2] WiFi: Disconnect");
       WiFi.disconnect(false);
-      BROADCAST_PRINTF("[G2] Network: WiFi disconnect requested from glasses");
+      BROADCAST_PRINTF("[G2] WiFi: disconnect requested from glasses");
+      // Refresh the menu so the SSID/RSSI lines update on next render.
+      showWiFiMenu();
 #endif
       break;
     }
 
     case 5: {  // Scan Networks
 #if ENABLE_WIFI
-      DEBUG_G2F("[G2] Network: scan triggered from glasses");
-      // Spawn a worker so the BLE notify task that ran this tap can
-      // return immediately. The worker shows a "Scanning..." card on
-      // the front pane, runs the 2-3 s blocking scan, dismisses the
-      // card, and then swaps the back pane to the results list.
+      DEBUG_G2F("[G2] WiFi: scan triggered from glasses");
       spawnNetworkScanWorker();
 #endif
       break;
     }
 
-    case 6: {  // Forget Current
-#if ENABLE_WIFI
-      if (WiFi.isConnected()) {
-        String ssid = WiFi.SSID();
-        DEBUG_G2F("[G2] Network: Forget Current — removing '%s'",
-                  ssid.c_str());
-        // Defer to the CLI handler that removes a saved network. It
-        // expects the original `wifirm <ssid>` form so we re-synthesize
-        // it here. Result string is logged for visibility.
-        extern const char* cmd_wifirm(const String& originalCmd);
-        String cmd = String("wifirm ") + ssid;
-        const char* result = cmd_wifirm(cmd);
-        WiFi.disconnect(true);
-        BROADCAST_PRINTF("[G2] Network: Forgot '%s' → %s",
-                         ssid.c_str(), result ? result : "(no result)");
-      } else {
-        DEBUG_G2F("[G2] Network: Forget Current — not connected, no-op");
-      }
+    case 6: {  // List Saved
+      showWiFiSavedList();
+      break;
+    }
+
+    case 7: {  // HTTP toggle (Start / Stop)
+#if ENABLE_HTTP_SERVER
+      bool wasRunning = (server != nullptr);
+      const char* result = wasRunning
+          ? cmd_httpstop(String(""))
+          : cmd_httpstart(String(""));
+      BROADCAST_PRINTF("[G2] WiFi: HTTP %s → %s",
+                       wasRunning ? "stop" : "start",
+                       result ? result : "(no result)");
+      // Re-render so the toggle label flips immediately.
+      showWiFiMenu();
+#else
+      DEBUG_G2F("[G2] WiFi: HTTP not compiled in");
 #endif
       break;
     }
 
     default:
-      DEBUG_G2F("[G2] Network: unknown idx=%u", (unsigned)idx);
+      DEBUG_G2F("[G2] WiFi: unknown idx=%u", (unsigned)idx);
       break;
+  }
+}
+
+static void handleWiFiScanTap(uint32_t idx) {
+  if (idx == 0) { showWiFiMenu(); return; }
+  // Tapping an AP — without keyboard we can't enter a password, just log
+  // the SSID for the operator. Open APs could be auto-connected via a
+  // future enhancement.
+  size_t apIdx = idx - 1;
+  if (apIdx < gScanCacheCount) {
+    const CachedAp& ap = gScanCache[apIdx];
+    DEBUG_G2F("[G2] WiFi: SSID '%s' tapped — secured=%d. G2 has no "
+              "keyboard; use the web UI or CLI 'wifiadd' to save creds.",
+              ap.ssid.c_str(), ap.secured ? 1 : 0);
+    BROADCAST_PRINTF("[G2] WiFi: tapped '%s' — use web UI to add",
+                     ap.ssid.c_str());
+  }
+}
+
+static void handleWiFiSavedTap(uint32_t idx) {
+  if (idx == 0) { showWiFiMenu(); return; }
+#if ENABLE_WIFI
+  size_t savedIdx = idx - 1;
+  if ((int)savedIdx < gWifiNetworkCount) {
+    String ssid = gWifiNetworks[savedIdx].ssid;
+    DEBUG_G2F("[G2] WiFi: Forget '%s'", ssid.c_str());
+    extern const char* cmd_wifirm(const String& originalCmd);
+    String cmd = String("wifirm ") + ssid;
+    const char* result = cmd_wifirm(cmd);
+    BROADCAST_PRINTF("[G2] WiFi: Forgot '%s' → %s",
+                     ssid.c_str(), result ? result : "(no result)");
+    // Re-render the (now shorter) saved list.
+    showWiFiSavedList();
+  }
+#endif
+}
+
+static void handleEspNowTap(uint32_t idx) {
+  switch (idx) {
+    case 0:  // <- Back
+      g2ShowNetworkMenu();
+      break;
+
+    case 1: case 2: case 3:  // info rows
+      DEBUG_G2F("[G2] ESP-NOW: info row %u (no action)", (unsigned)idx);
+      break;
+
+    case 4: {  // Start / Stop toggle
+#if ENABLE_ESPNOW
+      bool running = (gEspNow && gEspNow->initialized);
+      extern const char* cmd_espnow_init(const String&);
+      extern const char* cmd_espnow_deinit(const String&);
+      const char* result = running
+          ? cmd_espnow_deinit(String(""))
+          : cmd_espnow_init(String(""));
+      BROADCAST_PRINTF("[G2] ESP-NOW: %s → %s",
+                       running ? "stop" : "start",
+                       result ? result : "(no result)");
+      showEspNowMenu();
+#else
+      DEBUG_G2F("[G2] ESP-NOW: not compiled in");
+#endif
+      break;
+    }
+
+    case 5: {  // View Devices
+      showEspNowDevices();
+      break;
+    }
+
+    default:
+      DEBUG_G2F("[G2] ESP-NOW: unknown idx=%u", (unsigned)idx);
+      break;
+  }
+}
+
+static void handleEspNowDevsTap(uint32_t idx) {
+  if (idx == 0) { showEspNowMenu(); return; }
+  // Info-only — pairing/unpairing requires MAC + name text input.
+  DEBUG_G2F("[G2] ESP-NOW: device row %u tapped (info-only)", (unsigned)idx);
+}
+
+static void handleBluetoothTap(uint32_t idx) {
+  switch (idx) {
+    case 0:  // <- Back
+      g2ShowNetworkMenu();
+      break;
+
+    case 1: case 2: case 3:  // info rows
+      DEBUG_G2F("[G2] Bluetooth: info row %u (no action)", (unsigned)idx);
+      break;
+
+    case 4: {  // Start / Stop toggle
+      bool running = isBLERunning();
+      bool ok = running ? (deinitBluetooth(), true) : initBluetooth();
+      BROADCAST_PRINTF("[G2] Bluetooth: %s → %s",
+                       running ? "stop" : "start",
+                       ok ? "ok" : "failed");
+      showBluetoothMenu();
+      break;
+    }
+
+    case 5: {  // Toggle Adv
+      // No "is advertising right now" bit exposed cleanly — best-effort:
+      // start if not connected, stop if currently advertising. The CLI
+      // `bleadv` just calls startBLEAdvertising unconditionally; we
+      // match that and let the user re-toggle to stop.
+      bool started = startBLEAdvertising();
+      if (!started) {
+        stopBLEAdvertising();
+        BROADCAST_PRINTF("[G2] Bluetooth: advertising stopped");
+      } else {
+        BROADCAST_PRINTF("[G2] Bluetooth: advertising started");
+      }
+      showBluetoothMenu();
+      break;
+    }
+
+    case 6: {  // Disconnect
+      if (isBLEConnected()) {
+        disconnectBLE();
+        BROADCAST_PRINTF("[G2] Bluetooth: disconnect requested from glasses");
+      } else {
+        DEBUG_G2F("[G2] Bluetooth: not connected, no-op");
+      }
+      showBluetoothMenu();
+      break;
+    }
+
+    default:
+      DEBUG_G2F("[G2] Bluetooth: unknown idx=%u", (unsigned)idx);
+      break;
+  }
+}
+
+void g2NetworkHandleTap(uint32_t idx) {
+  switch (gNetSub) {
+    case NET_SUB_MAIN:        handleMainTap(idx);        break;
+    case NET_SUB_WIFI:        handleWiFiTap(idx);        break;
+    case NET_SUB_WIFI_SCAN:   handleWiFiScanTap(idx);    break;
+    case NET_SUB_WIFI_SAVED:  handleWiFiSavedTap(idx);   break;
+    case NET_SUB_ESPNOW:      handleEspNowTap(idx);      break;
+    case NET_SUB_ESPNOW_DEVS: handleEspNowDevsTap(idx);  break;
+    case NET_SUB_BLUETOOTH:   handleBluetoothTap(idx);   break;
   }
 }
 

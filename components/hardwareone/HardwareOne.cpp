@@ -68,6 +68,9 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
   #include "System_ESPNow.h"
 #endif
 #include "Optional_Bluetooth.h"
+#include "Optional_EvenG2.h"
+#include "Optional_EvenG2_Ring.h"
+#include "BLE_Peers.h"
 #include "System_Automation.h"
 #include "System_Utils.h"
 #include "System_User.h"
@@ -1418,28 +1421,77 @@ void hardwareone_setup() {
   // Apply OLED settings if display was initialized early
   oledApplySettings();
 
-  // Bluetooth - auto-start if enabled in settings
+  // Bluetooth - auto-start if enabled in settings.
+  // Two triggers can bring up BT at boot:
+  //   1. bluetoothAutoStart=true   → start whichever mode bleMode says
+  //   2. Any registered peer wants auto-reconnect AND has a saved MAC
+  //      → start client mode (even if (1) is off and bleMode=server)
+  // Trigger 2 only ever starts the *client* role; if you want server mode
+  // at boot, flip bluetoothAutoStart explicitly. Boot reconnect itself is
+  // delegated to BLE_Peers' bleBootReconnect() which iterates the peer
+  // registry — adding a new peer doesn't require touching this block.
 #if ENABLE_BLUETOOTH
-  if (gSettings.bluetoothAutoStart) {
+  // Make sure built-in metadata-only peers (phone) are registered so
+  // bleAnyPeerWantsAutoConnect can see them. Real peer modules register
+  // themselves from initG2Client / g2RingInit further down.
+  bleRegisterBuiltinPeers();
+
+#if ENABLE_G2_GLASSES
+  const bool wantClientForAutoReconnect = bleAnyPeerWantsAutoConnect();
+#else
+  const bool wantClientForAutoReconnect = false;
+#endif
+
+  // The *effective* mode for boot. If a peer wants auto-reconnect we
+  // coerce to client mode so the BLE stack comes up the right way.
+  const int bootBleMode = wantClientForAutoReconnect
+      ? (int)BLE_MODE_G2_CLIENT
+      : gSettings.bleMode;
+
+  if (gSettings.bluetoothAutoStart || wantClientForAutoReconnect) {
     oledSetBootProgress(85, "Starting Bluetooth");
-    
+
     // Pause sensor polling during BLE init to avoid interrupt contention
     bool wasPaused = gSensorPollingPaused;
     gSensorPollingPaused = true;
     vTaskDelay(pdMS_TO_TICKS(50));  // Let pending I2C ops complete
-    
-    extern bool initBluetooth();
-    extern bool startBLEAdvertising();
-    if (initBluetooth()) {
-      if (startBLEAdvertising()) {
-        broadcastOutput("Bluetooth initialized and advertising");
+
+#if ENABLE_G2_GLASSES
+    if (bootBleMode == BLE_MODE_G2_CLIENT) {
+      // initG2Client also registers the G2 peer. If wantClientForAutoReconnect
+      // is true, bleBootReconnect will iterate the registry and kick off
+      // saved-MAC connects (with paced 2s gaps). The boot block is now
+      // peer-agnostic — adding a peer means adding a registry entry, not
+      // touching this code.
+      if (initG2Client()) {
+        broadcastOutput("G2 client initialized (run 'openg2' to connect)");
+        if (wantClientForAutoReconnect) {
+          // Give the BLE stack ~2 s to settle before kicking off scans.
+          vTaskDelay(pdMS_TO_TICKS(2000));
+          broadcastOutput("[BLE] Auto-reconnect: iterating peer registry");
+          bleBootReconnect();
+        }
       } else {
-        broadcastOutput("Bluetooth initialized but advertising failed");
+        broadcastOutput("G2 client initialization failed");
       }
-    } else {
-      broadcastOutput("Bluetooth initialization failed");
+    } else
+#endif
+    if (gSettings.bluetoothAutoStart) {
+      // Server-mode path only runs when the user *explicitly* asked for BT
+      // at boot. We never coerce to server from auto-reconnect flags.
+      extern bool initBluetooth();
+      extern bool startBLEAdvertising();
+      if (initBluetooth()) {
+        if (startBLEAdvertising()) {
+          broadcastOutput("Bluetooth initialized and advertising");
+        } else {
+          broadcastOutput("Bluetooth initialized but advertising failed");
+        }
+      } else {
+        broadcastOutput("Bluetooth initialization failed");
+      }
     }
-    
+
     gSensorPollingPaused = wasPaused;
   } else {
     broadcastOutput("Bluetooth disabled by default. Use quick settings (SELECT button) or 'openble' to enable.");

@@ -119,7 +119,7 @@
 //   0 = Disabled, 1 = Enabled (requires ENABLE_BLUETOOTH=1)
 //   When enabled, ESP32 can act as BLE central to connect to glasses
 //   This is mutually exclusive with phone BLE connections at runtime
-#define ENABLE_G2_GLASSES       0
+#define ENABLE_G2_GLASSES       1
 
 // MQTT: Home Assistant integration via MQTT broker
 //   0 = Disabled, 1 = Enabled (requires ENABLE_WIFI=1)
