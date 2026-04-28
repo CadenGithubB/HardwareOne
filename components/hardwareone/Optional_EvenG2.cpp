@@ -87,6 +87,12 @@ static constexpr const char* DIAG_SVC_6450     = "00002760-08c2-11e1-9073-0e8ac7
 static constexpr const char* DIAG_SVC_7450     = "00002760-08c2-11e1-9073-0e8ac72e7450";
 static constexpr const char* DIAG_SVC_1001     = "00002760-08c2-11e1-9073-0e8ac72e1001";
 
+// Audio notify char on the 6450 service — receives LC3 mic frames after
+// AudioCtrCmd { AudoFuncEn=1 } is sent on sid=0xE0 Cmd=15. Each notify
+// is 205 bytes: [0xCC|0xCD][seq:u8][LC3:203], 16 kHz mono, 20 ms/frame.
+// See g2micprobe CLI commands and the audio probe stats below.
+static constexpr const char* CHAR_AUDIO_NOTIFY = "00002760-08c2-11e1-9073-0e8ac72e6402";
+
 // Heartbeat cadence — glasses kill the plugin task after ~10 s of silence.
 // 5 s gives headroom without hammering the radio.
 static constexpr uint32_t HEARTBEAT_PERIOD_MS = 5000;
@@ -117,6 +123,9 @@ struct G2Temple {
   BLEClient*                   client;
   BLERemoteCharacteristic*     writeChar;
   BLERemoteCharacteristic*     notifyChar;
+  // Audio (LC3 mic) notify char on service 6450 — null if not subscribed.
+  // Populated by the audio probe path; only used when g2micprobe is on.
+  BLERemoteCharacteristic*     audioNotifyChar;
   BLEAdvertisedDevice*         advertisedDevice;
   String                       deviceName;
   String                       deviceAddress;
@@ -421,6 +430,25 @@ static volatile uint32_t gOurShutdownAtMs;
 // g2ParseSettingVersion. Empty until the firmware sends its first
 // version-bearing settings push (not every settings push carries it).
 static char gFwVersion[32] = {0};
+
+// True when the running firmware does not emit any BLE notifications on
+// the LEFT temple — heartbeat acks, gestures, state events, settings
+// pushes all arrive only on RIGHT. Confirmed independently in
+// g2-kit-unofficial/ble/docs/gotchas.md ("Left arm is silent on async
+// events ... Don't waste time looking for a config bit"). When this is
+// true, the heartbeat-miss → pluginDead heuristic is fundamentally
+// inapplicable to L: every L heartbeat will go unacked because the
+// firmware doesn't reply, not because the plugin task is hung. Treat
+// "no L notify" as steady-state, not a fault.
+//
+// Empty version → assume affected (only firmware in our hardware
+// coverage is 2.2.0.24). Once a version push lands and proves we're on
+// a different firmware, the heuristic resumes for L.
+static bool firmwareSilencesLeftNotify() {
+  if (gFwVersion[0] == '\0') return true;
+  if (strcmp(gFwVersion, "2.2.0.24") == 0) return true;
+  return false;
+}
 
 // Runtime toggle for the settings-field verbose dumper. When on, each
 // incoming sid=0x09 push is walked field-by-field and every unrecognised
@@ -797,6 +825,7 @@ public:
     temple->connected = false;
     temple->writeChar = nullptr;
     temple->notifyChar = nullptr;
+    temple->audioNotifyChar = nullptr;
     // Container is tied to the plugin task — task dies with the BLE link,
     // so force a fresh CREATE on reconnect.
     temple->containerReady = false;
@@ -847,6 +876,180 @@ static void notifyThunkL(BLERemoteCharacteristic* /*c*/, uint8_t* data,
 static void notifyThunkR(BLERemoteCharacteristic* /*c*/, uint8_t* data,
                          size_t len, bool /*isNotify*/) {
   handleNotify(gR, data, len);
+}
+
+// =============================================================================
+// Audio (LC3 mic) probe — answers the "do frames flow on 6402?" question.
+// =============================================================================
+//
+// The G2 protocol doc says the left temple's render-notify char (`6402` on
+// service `6450`) carries LC3 mic frames after AudioCtrCmd{AudoFuncEn=1}.
+// We've never empirically confirmed this on firmware 2.2.0.24. Worse, the
+// "left arm is silent on async events" rule (g2-kit-unofficial gotchas)
+// might or might not extend to `6402` — gotchas only enumerated the
+// command channel (`5402`).
+//
+// This probe subscribes to `6402` on BOTH arms (so we learn which actually
+// emits) and accumulates per-arm counters. Run `g2micon` to send the
+// AudioCtrCmd; watch the lines tagged `[G2-MIC]` for live frame logs;
+// run `g2micstats` for the cumulative summary. If counts stay 0 after
+// `g2micon` runs and the AudioCtrRes ack arrives, the firmware just isn't
+// emitting — ESP-SR + G2 mic isn't possible until firmware exposes it.
+struct G2MicProbe {
+  uint32_t frameCount;       // total notifications received
+  uint32_t bytesTotal;       // sum of all notify lengths
+  uint32_t byte0CC;          // header 0xCC (normal frame)
+  uint32_t byte0CD;          // header 0xCD (session-start / resync)
+  uint32_t byte0Other;       // anything else (unexpected)
+  uint32_t seqGaps;          // count of non-(prev+1) seq transitions
+  uint8_t  lastSeq;
+  bool     hasLastSeq;
+  uint32_t firstFrameMs;     // millis() at first frame this session
+  uint32_t lastFrameMs;
+};
+static G2MicProbe gMicL{}, gMicR{};
+static volatile bool gMicProbeActive = false;
+static volatile bool gMicProbeVerbose = false;  // log every frame at INFO when true
+
+// Mic-to-SD recorder state. When gMicRecFile is non-null, every audio
+// notify on the chosen arm is appended to that file as raw 205 B
+// packets — no LC3 decode, just bytes. The intent is to capture a
+// .lc3 file we can pull off SD and decode offline (Phase 1 of the
+// audio integration plan; once we know the bytes are valid LC3 we'll
+// add an on-device decoder).
+//
+// Mutex protects the file pointer + counters across the BLE notify
+// task (which writes) and the CLI task (which opens / closes). The
+// notify side uses a non-blocking take so a stop-in-progress drops at
+// most one packet rather than stalling the BLE pipe.
+static SemaphoreHandle_t gMicRecMutex   = nullptr;
+static File*             gMicRecFile    = nullptr;
+static String            gMicRecPath;
+static uint32_t          gMicRecBytes   = 0;
+static uint32_t          gMicRecPackets = 0;
+static uint32_t          gMicRecStartMs = 0;
+static char              gMicRecArm     = 'L';   // L emits mic on 2.2.0.24
+static constexpr uint32_t kMicRecMaxBytes = 5u * 1024u * 1024u;  // ~20 min @ 4.1 KB/s
+
+static void ensureMicRecMutex() {
+  if (!gMicRecMutex) gMicRecMutex = xSemaphoreCreateMutex();
+}
+
+// Closes the recorder file and clears state. Caller must hold the
+// mutex.
+static void micRecCloseLocked(const char* reason) {
+  if (!gMicRecFile) return;
+  gMicRecFile->close();
+  delete gMicRecFile;
+  gMicRecFile = nullptr;
+  DEBUG_G2F("[G2-MIC-REC] closed %s — %u packets, %u B (%s)",
+            gMicRecPath.c_str(), (unsigned)gMicRecPackets,
+            (unsigned)gMicRecBytes, reason ? reason : "ok");
+}
+
+static void resetMicProbeStats(G2MicProbe& m) {
+  m.frameCount = 0;
+  m.bytesTotal = 0;
+  m.byte0CC = m.byte0CD = m.byte0Other = 0;
+  m.seqGaps = 0;
+  m.hasLastSeq = false;
+  m.lastSeq = 0;
+  m.firstFrameMs = 0;
+  m.lastFrameMs = 0;
+}
+
+static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
+  G2MicProbe& m = (t.side == 'L') ? gMicL : gMicR;
+  uint32_t now = millis();
+  m.frameCount++;
+  m.bytesTotal += (uint32_t)len;
+  if (m.frameCount == 1) m.firstFrameMs = now;
+  m.lastFrameMs = now;
+
+  if (len >= 1) {
+    if      (data[0] == 0xCC) m.byte0CC++;
+    else if (data[0] == 0xCD) m.byte0CD++;
+    else                      m.byte0Other++;
+  }
+  if (len >= 2) {
+    uint8_t seq = data[1];
+    if (m.hasLastSeq) {
+      uint8_t expected = (uint8_t)(m.lastSeq + 1);
+      if (seq != expected) m.seqGaps++;
+    }
+    m.lastSeq = seq;
+    m.hasLastSeq = true;
+  }
+
+  // SD recording — append the raw 205 B packet to the open file when
+  // the recorder is active for this arm. Non-blocking mutex take so a
+  // CLI-side close can't stall the BLE notify task; if we miss a
+  // packet during a close window, that's fine.
+  if (gMicRecFile && t.side == gMicRecArm && gMicRecMutex) {
+    if (xSemaphoreTake(gMicRecMutex, 0) == pdTRUE) {
+      if (gMicRecFile && gMicRecBytes < kMicRecMaxBytes) {
+        size_t w = gMicRecFile->write(data, len);
+        gMicRecBytes   += (uint32_t)w;
+        gMicRecPackets += 1;
+        if (gMicRecBytes >= kMicRecMaxBytes) {
+          micRecCloseLocked("cap reached");
+        }
+      }
+      xSemaphoreGive(gMicRecMutex);
+    }
+  }
+
+  // Detail log on the first 5 frames (so we know shape/cadence at a glance),
+  // then a periodic stats line every 50 frames (=1s of audio at 50fps), and
+  // every frame in verbose mode.
+  bool detail = m.frameCount <= 5 || gMicProbeVerbose;
+  bool stats  = (m.frameCount % 50) == 0;
+  if (detail) {
+    DEBUG_G2F("[G2-MIC-%c] frame #%u len=%u byte0=0x%02X seq=%u "
+              "(CC=%u CD=%u other=%u gaps=%u)",
+              t.side, (unsigned)m.frameCount, (unsigned)len,
+              (unsigned)(len ? data[0] : 0), (unsigned)(len > 1 ? data[1] : 0),
+              (unsigned)m.byte0CC, (unsigned)m.byte0CD,
+              (unsigned)m.byte0Other, (unsigned)m.seqGaps);
+  } else if (stats) {
+    uint32_t elapsedMs = m.lastFrameMs - m.firstFrameMs;
+    uint32_t fps = elapsedMs ? (m.frameCount * 1000u) / elapsedMs : 0;
+    DEBUG_G2F("[G2-MIC-%c] %u frames %u B avgLen=%u ~%u fps "
+              "(CC=%u CD=%u other=%u gaps=%u)",
+              t.side, (unsigned)m.frameCount, (unsigned)m.bytesTotal,
+              (unsigned)(m.frameCount ? m.bytesTotal / m.frameCount : 0),
+              (unsigned)fps,
+              (unsigned)m.byte0CC, (unsigned)m.byte0CD,
+              (unsigned)m.byte0Other, (unsigned)m.seqGaps);
+  }
+}
+
+static void audioNotifyThunkL(BLERemoteCharacteristic* /*c*/, uint8_t* data,
+                              size_t len, bool /*isNotify*/) {
+  handleAudioNotify(gL, data, len);
+}
+static void audioNotifyThunkR(BLERemoteCharacteristic* /*c*/, uint8_t* data,
+                              size_t len, bool /*isNotify*/) {
+  handleAudioNotify(gR, data, len);
+}
+
+// Look up the audio notify char on this temple and subscribe. Returns true
+// on success. Safe to call multiple times — re-registering the callback is
+// idempotent. Called once per arm at connect time.
+static bool subscribeAudioNotify(G2Temple& t) {
+  if (!t.client) return false;
+  BLERemoteService* svc = t.client->getService(BLEUUID(DIAG_SVC_6450));
+  if (!svc) return false;
+  BLERemoteCharacteristic* ch = svc->getCharacteristic(BLEUUID(CHAR_AUDIO_NOTIFY));
+  if (!ch || !ch->canNotify()) {
+    DEBUG_G2F("[G2-%c] audio char 6402 not available (svc=%p ch=%p notify=%d)",
+              t.side, svc, ch, ch ? (ch->canNotify() ? 1 : 0) : 0);
+    return false;
+  }
+  t.audioNotifyChar = ch;
+  ch->registerForNotify((t.side == 'L') ? audioNotifyThunkL : audioNotifyThunkR);
+  DEBUG_G2F("[G2-%c] audio probe subscribed on 6402", t.side);
+  return true;
 }
 
 // =============================================================================
@@ -3549,6 +3752,13 @@ static void beatOne(G2Temple& t) {
             t.side, (unsigned long)t.heartbeatCounter, seq, (unsigned)n);
   if (n) sendEnvelope(t, buf, n);
 
+  // LEFT-arm exception on firmware that silences L's notify channel:
+  // heartbeat acks will never arrive on L, so counting misses there is
+  // meaningless and the resulting pluginDead flip is a false alarm. We
+  // still send the heartbeat (the write channel works fine and keeps
+  // the link warm); we just don't escalate on missed responses.
+  if (t.side == 'L' && firmwareSilencesLeftNotify()) return;
+
   // Saturating pre-increment. The ack handler resets to 0 on receipt. If
   // N sends go unacked, the plugin has stopped servicing sid=0xE0 — stop
   // sending further render commands from g2ShowText et al. until
@@ -3686,6 +3896,7 @@ static void templeReset(G2Temple& t) {
   }
   t.writeChar = nullptr;
   t.notifyChar = nullptr;
+  t.audioNotifyChar = nullptr;
   t.connected = false;
   t.containerReady = false;
   // deinit wipes both temples, which invariably drops hijack state too.
@@ -3810,6 +4021,14 @@ static bool connectTemple(G2Temple& t) {
   enumerateDiagService(t, DIAG_SVC_6450, "6450");
   enumerateDiagService(t, DIAG_SVC_7450, "7450");
   enumerateDiagService(t, DIAG_SVC_1001, "1001");
+
+  // Subscribe to the audio notify char (6402 on service 6450) on both
+  // arms regardless of `g2micon` state — the registration itself is
+  // free and the handler ignores frames anyway when stats aren't being
+  // examined. This lets `g2micon` flip the firmware-side stream on/off
+  // without needing to re-discover the char each time.
+  t.audioNotifyChar = nullptr;
+  subscribeAudioNotify(t);
 
   t.connected = true;
   t.heartbeatCounter = 0;
@@ -6080,6 +6299,210 @@ static const char* cmd_g2imgprobe(const String& argsInput) {
   return ret;
 }
 
+// G2 mic probe — sends AudioCtrCmd to start/stop the LC3 mic stream
+// and dumps frame stats. The audio-notify subscription is wired at
+// connect time on both arms (see subscribeAudioNotify); these CLIs
+// just toggle the firmware-side stream and read the counters.
+//
+// Usage:
+//   g2micon          → AudioCtrCmd{AudoFuncEn=1} on LEFT (default mic arm)
+//   g2micon r        → same, but target RIGHT temple (for comparison)
+//   g2micoff         → AudioCtrCmd{AudoFuncEn=0} on whichever arm is up
+//   g2micstats       → print accumulated frame counters per arm
+//   g2micreset       → zero counters without changing stream state
+//   g2micverbose [on|off] → toggle per-frame log line (default off)
+static G2Temple* pickMicArm(const char* tag, bool preferLeft) {
+  if (preferLeft && gL.connected) return &gL;
+  if (gR.connected) return &gR;
+  if (gL.connected) return &gL;
+  DEBUG_G2F("[%s] no connected temple", tag);
+  return nullptr;
+}
+
+static const char* cmd_g2micon(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char ret[200];
+  CommandArgs ca(argsInput);
+  String armArg = ca.count() > 0 ? ca.arg(0) : String("");
+  char first = armArg.length() > 0 ? armArg.charAt(0) : '\0';
+  bool preferLeft = !(first == 'r' || first == 'R');
+  G2Temple* arm = pickMicArm("g2micon", preferLeft);
+  if (!arm) return "G2 mic: no reachable temple";
+
+  uint8_t buf[64];
+  size_t n = g2BuildAudioCtrl(allocSeq(), G2_MAGIC_AUDIO_CTRL,
+                              /*enable*/ true, buf, sizeof(buf));
+  if (!n) return "G2 mic: AudioCtrl build failed";
+  if (!sendEnvelope(*arm, buf, n)) return "G2 mic: TX failed";
+  gMicProbeActive = true;
+  snprintf(ret, sizeof(ret),
+           "G2 mic: AudioCtrCmd{en=1} sent on %c — watch [G2-MIC-%c] logs "
+           "for frames on 6402; if none arrive within ~2s, firmware "
+           "isn't streaming on this char",
+           arm->side, arm->side);
+  return ret;
+}
+
+static const char* cmd_g2micoff(const String& /*argsInput*/) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char ret[160];
+  G2Temple* arm = pickMicArm("g2micoff", true);
+  if (!arm) return "G2 mic: no reachable temple";
+  uint8_t buf[64];
+  size_t n = g2BuildAudioCtrl(allocSeq(), G2_MAGIC_AUDIO_CTRL,
+                              /*enable*/ false, buf, sizeof(buf));
+  if (!n) return "G2 mic: AudioCtrl build failed";
+  if (!sendEnvelope(*arm, buf, n)) return "G2 mic: TX failed";
+  gMicProbeActive = false;
+  snprintf(ret, sizeof(ret),
+           "G2 mic: AudioCtrCmd{en=0} sent on %c — frame counters "
+           "left intact (use g2micreset to zero)", arm->side);
+  return ret;
+}
+
+static const char* cmd_g2micstats(const String& /*argsInput*/) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char ret[320];
+  auto fmtArm = [](char side, const G2MicProbe& m, char* out, size_t cap) {
+    uint32_t span = (m.frameCount > 1) ? (m.lastFrameMs - m.firstFrameMs) : 0;
+    uint32_t fps = span ? (m.frameCount * 1000u) / span : 0;
+    snprintf(out, cap,
+             "%c=%u frames %u B (CC=%u CD=%u other=%u gaps=%u ~%u fps)",
+             side, (unsigned)m.frameCount, (unsigned)m.bytesTotal,
+             (unsigned)m.byte0CC, (unsigned)m.byte0CD,
+             (unsigned)m.byte0Other, (unsigned)m.seqGaps, (unsigned)fps);
+  };
+  char l[160], r[160];
+  fmtArm('L', gMicL, l, sizeof(l));
+  fmtArm('R', gMicR, r, sizeof(r));
+  snprintf(ret, sizeof(ret), "G2 mic: %s | %s%s", l, r,
+           gMicProbeActive ? " (stream ON)" : " (stream OFF)");
+  return ret;
+}
+
+static const char* cmd_g2micreset(const String& /*argsInput*/) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  resetMicProbeStats(gMicL);
+  resetMicProbeStats(gMicR);
+  return "G2 mic: counters reset";
+}
+
+static const char* cmd_g2micverbose(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char ret[80];
+  CommandArgs ca(argsInput);
+  if (ca.count() > 0) {
+    String v = ca.arg(0);
+    char c = v.length() > 0 ? v.charAt(0) : '\0';
+    gMicProbeVerbose = (c == '1' || c == 'o' || c == 'O' ||
+                        c == 'y' || c == 'Y' || c == 't' || c == 'T');
+  } else {
+    gMicProbeVerbose = !gMicProbeVerbose;
+  }
+  snprintf(ret, sizeof(ret), "G2 mic verbose: %s",
+           gMicProbeVerbose ? "ON (every frame)" : "OFF (first 5 + 1/sec)");
+  return ret;
+}
+
+// Phase-1 audio integration: dump raw mic packets to SD as a .lc3 file
+// so we can pull it off the device and decode offline with liblc3.
+// Confirms (a) the bytes are valid LC3 and (b) whether there's a
+// 5-byte packet header to strip before LC3 decode. Independent of
+// g2micon — the user can flip recording on/off without restarting the
+// stream, useful for capturing a clean 5–10 sec sample.
+//
+// Usage:
+//   g2micrec start [path]   default path: /sd/g2_mic-<unixTs>.lc3
+//   g2micrec stop           close the file
+//   g2micrec status         print state (or `g2micrec` with no args)
+//
+// File is capped at 5 MB (~20 min at 4.1 KB/s) to avoid eating the SD
+// card if the user forgets to stop. Recorder watches LEFT only —
+// 2.2.0.24 emits zero frames on RIGHT's 6402 (verified empirically).
+static const char* cmd_g2micrec(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char ret[240];
+  CommandArgs ca(argsInput);
+  String sub = ca.count() > 0 ? ca.arg(0) : String("");
+  sub.toLowerCase();
+
+  ensureMicRecMutex();
+  if (!gMicRecMutex) return "G2 mic rec: mutex alloc failed";
+
+  if (sub == "start") {
+    if (!VFS::isSDAvailable()) return "G2 mic rec: SD card not available";
+    xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
+    if (gMicRecFile) {
+      xSemaphoreGive(gMicRecMutex);
+      return "G2 mic rec: already recording — run g2micrec stop first";
+    }
+    String path = ca.count() > 1 ? ca.arg(1) : String("");
+    if (path.length() == 0) {
+      uint32_t ts = (uint32_t)time(nullptr);
+      if (ts == 0) ts = millis() / 1000;
+      char buf[64];
+      snprintf(buf, sizeof(buf), "/sd/g2_mic-%lu.lc3", (unsigned long)ts);
+      path = buf;
+    } else if (!path.startsWith("/")) {
+      path = String("/sd/") + path;
+    }
+    File* f = new File(VFS::open(path, "w", true));
+    if (!f || !*f) {
+      delete f;
+      xSemaphoreGive(gMicRecMutex);
+      snprintf(ret, sizeof(ret), "G2 mic rec: failed to open %s", path.c_str());
+      return ret;
+    }
+    gMicRecFile    = f;
+    gMicRecPath    = path;
+    gMicRecBytes   = 0;
+    gMicRecPackets = 0;
+    gMicRecStartMs = millis();
+    gMicRecArm     = 'L';
+    xSemaphoreGive(gMicRecMutex);
+    snprintf(ret, sizeof(ret),
+             "G2 mic rec: writing to %s (cap %u B). Run g2micon if stream "
+             "isn't active; g2micrec stop to close.",
+             path.c_str(), (unsigned)kMicRecMaxBytes);
+    return ret;
+  }
+
+  if (sub == "stop") {
+    xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
+    if (!gMicRecFile) {
+      xSemaphoreGive(gMicRecMutex);
+      return "G2 mic rec: not recording";
+    }
+    String path     = gMicRecPath;
+    uint32_t bytes  = gMicRecBytes;
+    uint32_t pkts   = gMicRecPackets;
+    uint32_t durMs  = millis() - gMicRecStartMs;
+    micRecCloseLocked("user stop");
+    xSemaphoreGive(gMicRecMutex);
+    snprintf(ret, sizeof(ret),
+             "G2 mic rec: closed %s (%u packets, %u B, %u ms)",
+             path.c_str(), (unsigned)pkts, (unsigned)bytes, (unsigned)durMs);
+    return ret;
+  }
+
+  // status (default)
+  xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
+  if (!gMicRecFile) {
+    xSemaphoreGive(gMicRecMutex);
+    return "G2 mic rec: idle (use g2micrec start [path])";
+  }
+  String path    = gMicRecPath;
+  uint32_t bytes = gMicRecBytes;
+  uint32_t pkts  = gMicRecPackets;
+  uint32_t durMs = millis() - gMicRecStartMs;
+  xSemaphoreGive(gMicRecMutex);
+  snprintf(ret, sizeof(ret),
+           "G2 mic rec: %s — %u packets, %u B, %u ms (%u%% of cap)",
+           path.c_str(), (unsigned)pkts, (unsigned)bytes, (unsigned)durMs,
+           (unsigned)((bytes * 100u) / kMicRecMaxBytes));
+  return ret;
+}
+
 // EvenAI CONFIG probe (Cmd=10). Fires a single CONFIG message with
 // caller-specified voiceSwitch / streamSpeed values. Use to characterise
 // what the firmware accepts vs. rejects on this sub-command — the
@@ -6396,6 +6819,12 @@ extern const CommandEntry g2Commands[] = {
   { "g2aih",        "Front-pane card with custom heading: g2aih <heading>|<body>", false, cmd_g2aih },
   { "g2aiconfig",   "Probe EvenAI CONFIG (cmd=10): g2aiconfig [voiceSwitch] [streamSpeed], use - to omit",  false, cmd_g2aiconfig },
   { "g2imgprobe",   "Probe Cmd=3 multi-frag wire path: g2imgprobe [size_bytes]",                            false, cmd_g2imgprobe },
+  { "g2micon",      "G2 mic probe: AudioCtrCmd{en=1} on LEFT (or 'r' for RIGHT)",                           false, cmd_g2micon },
+  { "g2micoff",     "G2 mic probe: AudioCtrCmd{en=0} (stop stream)",                                        false, cmd_g2micoff },
+  { "g2micstats",   "G2 mic probe: dump per-arm frame counters",                                            false, cmd_g2micstats },
+  { "g2micreset",   "G2 mic probe: zero per-arm counters",                                                  false, cmd_g2micreset },
+  { "g2micverbose", "G2 mic probe: per-frame log [on|off]",                                                 false, cmd_g2micverbose },
+  { "g2micrec",     "G2 mic dump: g2micrec start [path] | stop | status — writes raw 205B LC3 packets to SD", false, cmd_g2micrec },
   { "g2protostats", "Show G2 protocol stats per sid: g2protostats [verbose]",      false, cmd_g2protostats },
   { "g2probe",      "Fire arbitrary pb cmd: g2probe <sid_hex> <cmd_dec> [body_hex]", false, cmd_g2probe },
   { "g2notify",     "Transient text (placeholder): g2notify [secs] <text>", false, cmd_g2notify },
@@ -8190,16 +8619,17 @@ const char* g2ProbeImageQ14LiveText() {
 // arm-picker for image-push helpers.
 //
 // Caveats observed in our setup:
-//   * The left temple's plugin task often goes silent (heartbeat acks
-//     stop) when the user isn't wearing the glasses or the user has
-//     been inactive — we surface this as `pluginDead`. Q15 refuses to
-//     run when LEFT is plugin-dead, since image pushes there will
-//     queue indefinitely without acks.
 //   * On firmware 2.2.0.24, ALL notify traffic (incl. cmd=4 ImageRawResp
-//     acks) currently arrives on the RIGHT pipe — see
-//     docs/G2_PROTOCOL.md "Notify channel topology on firmware 2.2.0.24
-//     — right-only". So even if we TX to LEFT, acks come back via
-//     RIGHT and the existing ack-tracking path still works.
+//     acks) arrives on the RIGHT pipe — see docs/G2_PROTOCOL.md "Notify
+//     channel topology on firmware 2.2.0.24 — right-only" and
+//     g2-kit-unofficial/ble/docs/gotchas.md "Arms" section. So even
+//     when we TX to LEFT, acks come back via RIGHT and the existing
+//     ack-tracking path still works.
+//   * Because L never acks heartbeats on this firmware, beatOne()
+//     skips the miss-counter for L (firmwareSilencesLeftNotify gate),
+//     keeping gL.pluginDead=false in steady state. The pluginDead
+//     check below remains as a safety net for the case where some
+//     other code path (e.g. an explicit teardown) sets it.
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ15LeftArm() {
   static char ret[260];
