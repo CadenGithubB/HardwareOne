@@ -294,6 +294,7 @@ size_t calculateSensorSystemMemory();
 void printMemoryReport();
 const char* cmd_memreport(const String& argsInput);
 const char* cmd_taskstats(const String& argsInput);
+const char* cmd_heapowners(const String& argsInput);
 
 // Note: Command execution functions (executeCommand, submitAndExecuteSync, etc.) 
 // are implemented in system_utils.cpp but declared in main .ino where the 

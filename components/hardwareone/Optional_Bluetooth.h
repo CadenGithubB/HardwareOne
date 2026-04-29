@@ -173,6 +173,12 @@ const char* getBLEStateString();
 // Mode (server vs. G2 client) — reads gSettings.bleMode
 const char* getBleModeString();
 
+// Aggregate subsystem status — true when EITHER server OR G2 client is initialized.
+// Mirrors the ESPNow mesh-or-direct pattern so the dashboard reports BLE as
+// running regardless of which mode is active.
+bool bleSubsystemActive();
+const char* bleSubsystemStateString();
+
 // Settings
 void bleApplySettings();
 
@@ -214,6 +220,8 @@ inline bool isBLERunning() { return false; }
 inline void getBLEStatus(char* buffer, size_t) { if (buffer) buffer[0] = '\0'; }
 inline const char* getBLEStateString() { return "disabled"; }
 inline const char* getBleModeString() { return "disabled"; }
+inline bool bleSubsystemActive() { return false; }
+inline const char* bleSubsystemStateString() { return "disabled"; }
 inline void bleApplySettings() {}
 
 // Streaming API stubs

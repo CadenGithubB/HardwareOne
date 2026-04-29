@@ -55,6 +55,9 @@
 #endif
 #if ENABLE_BLUETOOTH
 #include "Optional_Bluetooth.h"
+#if ENABLE_G2_GLASSES
+#include "Optional_EvenG2.h"
+#endif
 #endif
 
 #if ENABLE_HTTPS
@@ -1400,9 +1403,20 @@ void buildSystemInfoJson(JsonDocument& doc) {
 
 #if ENABLE_BLUETOOTH
   {
+    // Aggregate-status pattern (mirrors ESPNow mesh-or-direct): subsystem reports
+    // running when EITHER the BLE server OR the G2 client is initialized.
     JsonObject bt = conn["bluetooth"].to<JsonObject>();
-    bt["running"] = isBLERunning();
-    bt["state"] = getBLEStateString();
+    bt["running"] = bleSubsystemActive();
+    bt["state"]   = bleSubsystemStateString();
+    bt["mode"]    = getBleModeString();   // "server" | "client"
+    bt["server"]  = isBLERunning();
+#if ENABLE_G2_GLASSES
+    bt["client"]    = isG2ClientInitialized();
+    bt["g2Connected"] = isG2Connected();
+#else
+    bt["client"]    = false;
+    bt["g2Connected"] = false;
+#endif
   }
 #endif
 

@@ -11,6 +11,10 @@
 
 #include <Arduino.h>
 #include <esp_app_desc.h>
+#include <esp_heap_caps.h>
+#if CONFIG_HEAP_TASK_TRACKING
+#include <esp_heap_task_info.h>   // heap_task_totals_t, heap_caps_get_per_task_info
+#endif
 #include "System_BuildConfig.h"
 #if ENABLE_WIFI
   #include <WiFi.h>
@@ -1722,6 +1726,7 @@ const CommandEntry commands[] = {
   { "voltage", "Read supply voltage.", false, cmd_voltage },
   { "cpufreq", "Get/set CPU frequency.", true, cmd_cpufreq },
   { "taskstats", "Detailed task statistics.", false, cmd_taskstats },
+  { "heapowners", "Per-task heap usage (CONFIG_HEAP_TASK_TRACKING).", false, cmd_heapowners },
 
   // ---- Misc ----
   { "reboot", "Reboot the system.", true, cmd_reboot, nullptr, "system", "reboot" },
@@ -2111,6 +2116,33 @@ void printMemoryReport() {
                 (unsigned long)noinit_internal_bytes, (unsigned long)(noinit_internal_bytes / 1024));
   BROADCAST_PRINTF("  NOINIT (PSRAM): %7lu bytes (%3lu KB)",
                 (unsigned long)noinit_psram_bytes, (unsigned long)(noinit_psram_bytes / 1024));
+
+  // heap_caps view — gives the truth about WHERE allocations land
+  // (internal DRAM vs DMA-capable vs PSRAM) and how fragmented each
+  // pool is. The "largest free block" is the indicator: when it
+  // diverges from total free, the heap is fragmented and big allocs
+  // (page-swap workers, image probes) will fail even with apparent
+  // headroom.
+  broadcastOutput("");
+  broadcastOutput("-- HEAP CAPS (allocator-eye view) --");
+  size_t cap_int_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t cap_int_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t cap_dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+  size_t cap_dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+  BROADCAST_PRINTF("  INTERNAL  free=%7lu B (%3lu KB)  largest=%7lu B  frag=%2u%%",
+                   (unsigned long)cap_int_free, (unsigned long)(cap_int_free / 1024),
+                   (unsigned long)cap_int_largest,
+                   cap_int_free ? (unsigned)(100 - (cap_int_largest * 100) / cap_int_free) : 0);
+  BROADCAST_PRINTF("  DMA-able  free=%7lu B (%3lu KB)  largest=%7lu B",
+                   (unsigned long)cap_dma_free, (unsigned long)(cap_dma_free / 1024),
+                   (unsigned long)cap_dma_largest);
+  if (has_ps) {
+    size_t cap_ps_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t cap_ps_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    BROADCAST_PRINTF("  SPIRAM    free=%7lu B (%4lu KB)  largest=%7lu B",
+                     (unsigned long)cap_ps_free, (unsigned long)(cap_ps_free / 1024),
+                     (unsigned long)cap_ps_largest);
+  }
 
   broadcastOutput("");
   broadcastOutput("-- MEMORY BREAKDOWN (Hybrid Tracking) --");
@@ -2567,26 +2599,16 @@ const char* cmd_memreport(const String& argsInput) {
 const char* cmd_taskstats(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  // Stream output line-by-line via broadcastOutput. Each broadcastOutput
+  // call becomes one queue message capped at DEBUG_MSG_SIZE (256 B), so
+  // we MUST emit each row individually — concatenating into one return
+  // string would silently truncate at the third or fourth task.
 
-  char* p = getDebugBuffer();
-  size_t remaining = 1024;
-
-  int n = snprintf(p, remaining, "Task Statistics:\n");
-  p += n;
-  remaining -= n;
-
-  n = snprintf(p, remaining, "=================\n");
-  p += n;
-  remaining -= n;
-
-  // Get task count
   UBaseType_t taskCount = uxTaskGetNumberOfTasks();
-  n = snprintf(p, remaining, "Total Tasks: %u\n\n", taskCount);
-  p += n;
-  remaining -= n;
 
-  // Allocate memory for task status array
+  // Allocate task array in PSRAM, cached across invocations so repeated
+  // taskstats calls don't churn the heap. Re-allocates only when the
+  // task count grows.
   static TaskStatus_t* taskArray = nullptr;
   static UBaseType_t taskCap = 0;
   if (taskCount > taskCap) {
@@ -2595,48 +2617,158 @@ const char* cmd_taskstats(const String& originalCmd) {
       taskArray = nullptr;
       taskCap = 0;
     }
-    taskArray = (TaskStatus_t*)ps_alloc(taskCount * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "taskstats");
-    if (taskArray) {
-      taskCap = taskCount;
-    }
+    taskArray = (TaskStatus_t*)ps_alloc(taskCount * sizeof(TaskStatus_t),
+                                        AllocPref::PreferPSRAM, "taskstats");
+    if (taskArray) taskCap = taskCount;
   }
   if (!taskArray) {
     return "Error: Unable to allocate memory for task statistics";
   }
 
-  // Get detailed task information
   UBaseType_t actualCount = uxTaskGetSystemState(taskArray, taskCount, nullptr);
 
-  n = snprintf(p, remaining, "Task Name          State  Prio  Stack\n");
-  p += n;
-  remaining -= n;
+  broadcastOutput("Task Statistics:");
+  broadcastOutput("=================");
+  BROADCAST_PRINTF("Total Tasks: %u", (unsigned)taskCount);
+  broadcastOutput("");
+  broadcastOutput("Task Name          State  Prio  Stack");
+  broadcastOutput("================== ===== ===== ======");
 
-  n = snprintf(p, remaining, "================== ===== ===== ======\n");
-  p += n;
-  remaining -= n;
-
-  for (UBaseType_t i = 0; i < actualCount && remaining > 50; i++) {
+  for (UBaseType_t i = 0; i < actualCount; i++) {
     const char* state;
     switch (taskArray[i].eCurrentState) {
-      case eRunning: state = "RUN  "; break;
-      case eReady: state = "READY"; break;
-      case eBlocked: state = "BLOCK"; break;
+      case eRunning:   state = "RUN  "; break;
+      case eReady:     state = "READY"; break;
+      case eBlocked:   state = "BLOCK"; break;
       case eSuspended: state = "SUSP "; break;
-      case eDeleted: state = "DEL  "; break;
-      default: state = "UNK  "; break;
+      case eDeleted:   state = "DEL  "; break;
+      default:         state = "UNK  "; break;
     }
-
-    n = snprintf(p, remaining, "%-18.18s %s %4u %5u\n",
-                 taskArray[i].pcTaskName, state,
-                 (unsigned)taskArray[i].uxCurrentPriority,
-                 (unsigned)taskArray[i].usStackHighWaterMark);
-    p += n;
-    remaining -= n;
+    BROADCAST_PRINTF("%-18.18s %s %4u %5u",
+                     taskArray[i].pcTaskName, state,
+                     (unsigned)taskArray[i].uxCurrentPriority,
+                     (unsigned)taskArray[i].usStackHighWaterMark);
   }
 
-  return getDebugBuffer();
+  return "OK";
 }
 
+
+// ============================================================================
+// cmd_heapowners — per-task heap ownership
+// ============================================================================
+// Asks the heap allocator who owns each block, grouped by the task that
+// allocated it. Requires CONFIG_HEAP_TASK_TRACKING=y in sdkconfig (we
+// set this in the same change). Without it, the API returns 0 results
+// and we print a hint pointing the user at menuconfig.
+//
+// Output format (one line per task):
+//   <task-name>  total=<bytes>  blocks=<count>  largest=<bytes>
+//
+// "Total" is the sum across all heap caps the task has touched
+// (internal DRAM + PSRAM). For per-cap detail, use heapcaps in the
+// memreport above.
+const char* cmd_heapowners(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+#if CONFIG_HEAP_TASK_TRACKING
+  // Allocate a per-task totals array. Critical: ESP-IDF v5.3.1's
+  // heap_caps_get_per_task_info only initializes size[type]/count[type]
+  // for the type matching the heap region being scanned — leaves the
+  // other indices uninitialized (see heap_task_info.c:86-89). If we
+  // pass uninitialized memory in, those indices report whatever PSRAM
+  // garbage was there before. Use ps_calloc / memset to zero.
+  constexpr size_t kMaxTasks = 32;
+  const size_t totalsBytes = kMaxTasks * sizeof(heap_task_totals_t);
+  heap_task_totals_t* totals =
+      (heap_task_totals_t*)ps_alloc(totalsBytes,
+                                    AllocPref::PreferPSRAM, "heapowners.totals");
+  if (!totals) {
+    return "Error: Failed to allocate heap_task_totals array";
+  }
+  memset(totals, 0, totalsBytes);   // see comment above
+  size_t totals_count = 0;
+
+  heap_task_info_params_t params = {};
+  params.caps[0]    = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  params.mask[0]    = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  params.caps[1]    = MALLOC_CAP_SPIRAM;
+  params.mask[1]    = MALLOC_CAP_SPIRAM;
+  params.tasks      = nullptr;
+  params.num_tasks  = 0;
+  params.totals     = totals;
+  params.num_totals = &totals_count;
+  params.max_totals = kMaxTasks;
+  params.blocks     = nullptr;
+  params.max_blocks = 0;
+
+  heap_caps_get_per_task_info(&params);
+
+  // Sort by total bytes descending (selection sort over ≤32 entries).
+  for (size_t i = 0; i + 1 < totals_count; i++) {
+    size_t max_i = i;
+    for (size_t j = i + 1; j < totals_count; j++) {
+      if (totals[j].size[0] + totals[j].size[1] >
+          totals[max_i].size[0] + totals[max_i].size[1]) {
+        max_i = j;
+      }
+    }
+    if (max_i != i) {
+      heap_task_totals_t tmp = totals[i];
+      totals[i] = totals[max_i];
+      totals[max_i] = tmp;
+    }
+  }
+
+  // Stream per-line so DEBUG_MSG_SIZE (256 B) doesn't truncate the
+  // multi-task output — same reason cmd_taskstats above streams.
+  broadcastOutput("Heap Ownership (per-task allocations):");
+  broadcastOutput("=========================================");
+  for (size_t i = 0; i < totals_count; i++) {
+    char nameBuf[24];
+    const char* name = nameBuf;
+    if (!totals[i].task) {
+      strcpy(nameBuf, "(pre-scheduler)");
+    } else {
+      // pcTaskGetName reads from the TCB. If the task has been deleted
+      // and its TCB freed, the call returns whatever bytes happen to be
+      // at that address — usually garbage. ESP-IDF's heap_caps_get_per_
+      // task_info doesn't clear allocations from deleted tasks; their
+      // memory stays attributed to the now-dangling handle until freed
+      // (or until the heap walker re-runs and finds the task gone).
+      // We detect this by checking the first few bytes are printable
+      // ASCII. configMAX_TASK_NAME_LEN is 16; 12 sampled chars are
+      // plenty to distinguish a real name from random TCB bytes.
+      const char* tname = pcTaskGetName(totals[i].task);
+      bool looksValid = (tname != nullptr);
+      if (looksValid) {
+        for (int k = 0; k < 12; k++) {
+          uint8_t c = (uint8_t)tname[k];
+          if (c == 0) break;                // legitimate end of string
+          if (c < 0x20 || c > 0x7E) { looksValid = false; break; }
+        }
+      }
+      if (looksValid) {
+        strncpy(nameBuf, tname, sizeof(nameBuf) - 1);
+        nameBuf[sizeof(nameBuf) - 1] = '\0';
+      } else {
+        snprintf(nameBuf, sizeof(nameBuf), "(deleted @%p)", (void*)totals[i].task);
+      }
+    }
+    BROADCAST_PRINTF("%-18.18s  DRAM=%7lu  PSRAM=%7lu  total=%7lu B",
+                     name,
+                     (unsigned long)totals[i].size[0],
+                     (unsigned long)totals[i].size[1],
+                     (unsigned long)(totals[i].size[0] + totals[i].size[1]));
+  }
+
+  free(totals);
+  return "OK";
+#else
+  return "Error: CONFIG_HEAP_TASK_TRACKING is disabled — enable in menuconfig "
+         "(Component config -> Heap memory debugging) and rebuild.";
+#endif
+}
 
 
 // ============================================================================

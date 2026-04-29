@@ -12,6 +12,7 @@
 
 #include "Optional_EvenG2.h"
 #include "Optional_Bluetooth.h"
+#include "G2_Page_TextEntry.h"   // on-glasses keyboard for "Set Name"
 #include "System_Debug.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -130,7 +131,7 @@ bool g2ShowNetworkPage() {
 void g2ShowNetworkMenu() {
   gNetSub = NET_SUB_MAIN;
   const char* items[] = {
-    "<- Back",        // 0
+    "<- Main Menu",   // 0 — exits Network back to the hijack root
     "WiFi >>",        // 1
     "ESP-NOW >>",     // 2
     "Bluetooth >>",   // 3
@@ -184,7 +185,7 @@ static void showWiFiMenu() {
   // the on/off toggle; "Connect Best" / "Disconnect" were removed since
   // tapping the toggle does the same thing.
   const char* items[] = {
-    "<- Back",         // 0
+    "<- Network",      // 0 — back to Network top-level chooser
     wifiLine,          // 1 (toggle: tap = connect best / disconnect)
     "Status",          // 2 (drill into detailed info dump)
     "Scan Networks",   // 3
@@ -207,7 +208,7 @@ static void showWiFiStatusPage() {
   const char* ptrs[12];
   size_t n = 0;
 
-  strcpy(rows[n], "<- Back"); ptrs[n] = rows[n]; n++;
+  strcpy(rows[n], "<- WiFi"); ptrs[n] = rows[n]; n++;
   bool connected = WiFi.isConnected();
   snprintf(rows[n], sizeof(rows[n]), "State: %s",
            connected ? "connected" : "offline");
@@ -240,18 +241,18 @@ static void showWiFiStatusPage() {
   g2ShowListPage(ptrs, n);
   DEBUG_G2F("[G2] WiFi status page shown (rows=%u)", (unsigned)n);
 #else
-  static const char* na[] = { "<- Back", "(WiFi not compiled)" };
+  static const char* na[] = { "<- WiFi", "(WiFi not compiled)" };
   g2ShowListPage(na, 2);
 #endif
 }
 
 // Render scan results as a tappable list. Items:
-//   0: "<- Back" (returns to WiFi submenu)
+//   0: "<- WiFi" (returns to WiFi submenu)
 //   1..N: SSID lines with RSSI suffix
 static void showScanResults() {
   gNetSub = NET_SUB_WIFI_SCAN;
   static char rows[1 + 8][48];
-  strcpy(rows[0], "<- Back");
+  strcpy(rows[0], "<- WiFi");
   const char* ptrs[1 + 8];
   ptrs[0] = rows[0];
   size_t n = 1;
@@ -265,7 +266,7 @@ static void showScanResults() {
     ptrs[n++] = rows[1 + i];
   }
   if (n == 1) {
-    static const char* empty[] = { "<- Back", "(no networks found)" };
+    static const char* empty[] = { "<- WiFi", "(no networks found)" };
     g2ShowListPage(empty, 2);
   } else {
     g2ShowListPage(ptrs, n);
@@ -280,7 +281,7 @@ static void showWiFiSavedList() {
   gNetSub = NET_SUB_WIFI_SAVED;
 #if ENABLE_WIFI
   static char rows[1 + MAX_WIFI_NETWORKS][48];
-  strcpy(rows[0], "<- Back");
+  strcpy(rows[0], "<- WiFi");
   const char* ptrs[1 + MAX_WIFI_NETWORKS];
   ptrs[0] = rows[0];
   size_t n = 1;
@@ -294,7 +295,7 @@ static void showWiFiSavedList() {
     ptrs[n++] = rows[1 + i];
   }
   if (n == 1) {
-    static const char* empty[] = { "<- Back", "(no saved networks)" };
+    static const char* empty[] = { "<- WiFi", "(no saved networks)" };
     g2ShowListPage(empty, 2);
   } else {
     g2ShowListPage(ptrs, n);
@@ -302,7 +303,7 @@ static void showWiFiSavedList() {
   DEBUG_G2F("[G2] WiFi saved list (%d entries) — tap to forget",
             count);
 #else
-  static const char* na[] = { "<- Back", "(WiFi not compiled)" };
+  static const char* na[] = { "<- WiFi", "(WiFi not compiled)" };
   g2ShowListPage(na, 2);
 #endif
 }
@@ -318,6 +319,11 @@ static void showEspNowMenu() {
   static char devsLine[32];
 
 #if ENABLE_ESPNOW
+  static char nameLine[48];
+  snprintf(nameLine, sizeof(nameLine), "Name: %s",
+           gSettings.espnowDeviceName.length() > 0
+               ? gSettings.espnowDeviceName.c_str()
+               : "(unset)");
   bool running = (gEspNow && gEspNow->initialized);
   if (running) {
     snprintf(stateLine, sizeof(stateLine), "ESP-NOW: ON");
@@ -325,26 +331,28 @@ static void showEspNowMenu() {
     snprintf(devsLine, sizeof(devsLine), "Peers: %d",
              gEspNow->deviceCount);
     const char* items[] = {
-      "<- Back",         // 0
+      "<- Network",      // 0 — back to Network top-level chooser
       stateLine,         // 1 (toggle)
       modeLine,          // 2 (info)
       devsLine,          // 3 (info)
       "View Devices",    // 4
+      nameLine,          // 5 (tap → on-glasses text entry)
     };
     g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   } else {
     snprintf(stateLine, sizeof(stateLine), "ESP-NOW: OFF");
-    // Only show toggle + View Devices when off; no point listing
-    // Mode/Peers lines for a subsystem that isn't running.
+    // Only show toggle + View Devices + name editor when off; no point
+    // listing Mode/Peers lines for a subsystem that isn't running.
     const char* items[] = {
-      "<- Back",         // 0
+      "<- Network",      // 0 — back to Network top-level chooser
       stateLine,         // 1 (toggle — tap to start)
       "View Devices",    // 2
+      nameLine,          // 3 (tap → on-glasses text entry)
     };
     g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   }
 #else
-  static const char* na[] = { "<- Back", "ESP-NOW: not compiled" };
+  static const char* na[] = { "<- Network", "ESP-NOW: not compiled" };
   g2ShowListPage(na, 2);
 #endif
   DEBUG_G2F("[G2] ESP-NOW submenu shown");
@@ -354,7 +362,7 @@ static void showEspNowDevices() {
   gNetSub = NET_SUB_ESPNOW_DEVS;
 #if ENABLE_ESPNOW
   static char rows[1 + 8][48];
-  strcpy(rows[0], "<- Back");
+  strcpy(rows[0], "<- ESP-NOW");
   const char* ptrs[1 + 8];
   ptrs[0] = rows[0];
   size_t n = 1;
@@ -374,14 +382,14 @@ static void showEspNowDevices() {
     }
   }
   if (n == 1) {
-    static const char* empty[] = { "<- Back", "(no peers — pair via web)" };
+    static const char* empty[] = { "<- ESP-NOW", "(no peers — pair via web)" };
     g2ShowListPage(empty, 2);
   } else {
     g2ShowListPage(ptrs, n);
   }
   DEBUG_G2F("[G2] ESP-NOW device list (%u entries)", (unsigned)(n - 1));
 #else
-  static const char* na[] = { "<- Back", "(ESP-NOW not compiled)" };
+  static const char* na[] = { "<- Network", "(ESP-NOW not compiled)" };
   g2ShowListPage(na, 2);
 #endif
 }
@@ -396,33 +404,65 @@ static void showBluetoothMenu() {
   static char modeLine[40];
   static char connLine[40];
 
-  bool running = isBLERunning();
-  bool connected = isBLEConnected();
-  if (running) {
+  // Aggregate-status pattern (mirrors the dashboard tile + ESPNow): the
+  // BLE subsystem is "on" when EITHER the server OR the G2 client is
+  // initialized, and the rendered state reflects whichever is active.
+  // Without this, viewing the menu from the lens (which means G2 client
+  // is connected) showed "BLE: OFF" — confusing and wrong.
+  const bool active   = bleSubsystemActive();
+  const bool isClient = (gSettings.bleMode == BLE_MODE_G2_CLIENT);
+  const bool clientUp = isG2ClientInitialized();
+  const bool serverUp = isBLERunning();
+  // Per-mode "connected" semantics: server cares about phone connection,
+  // client cares about whether the temple BLE links are live.
+  const bool connected = isClient ? isG2Connected() : isBLEConnected();
+  if (active) {
     snprintf(stateLine, sizeof(stateLine), "BLE: ON (%s)",
-             getBLEStateString());
-    snprintf(modeLine, sizeof(modeLine), "Mode: %s", getBleModeString());
+             bleSubsystemStateString());
+    snprintf(modeLine, sizeof(modeLine), "Mode: %s",
+             isClient ? "client (G2)" : "server");
     snprintf(connLine, sizeof(connLine), "Conn: %s",
              connected ? "yes" : "no");
-    const char* items[] = {
-      "<- Back",         // 0
-      stateLine,         // 1 (toggle)
-      modeLine,          // 2 (info)
-      connLine,          // 3 (info)
-      "Toggle Adv",      // 4
-      "Disconnect",      // 5
-    };
-    g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+    if (isClient) {
+      // Client mode: no advertising row (server isn't running). Tapping
+      // the toggle disconnects the client; "Disconnect G2" does the
+      // same so we don't double up.
+      const char* items[] = {
+        "<- Network",      // 0
+        stateLine,         // 1 (toggle = stop client)
+        modeLine,          // 2 (info)
+        connLine,          // 3 (info)
+        "Disconnect G2",   // 4
+      };
+      g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+    } else {
+      // Server mode (legacy layout).
+      const char* items[] = {
+        "<- Network",      // 0
+        stateLine,         // 1 (toggle = stop server)
+        modeLine,          // 2 (info)
+        connLine,          // 3 (info)
+        "Toggle Adv",      // 4
+        "Disconnect",      // 5
+      };
+      g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+    }
   } else {
+    // Subsystem fully inactive — surface mode so the user knows whether
+    // the toggle starts the server or the G2 client.
     snprintf(stateLine, sizeof(stateLine), "BLE: OFF");
+    snprintf(modeLine, sizeof(modeLine), "Mode: %s",
+             isClient ? "client (G2)" : "server");
     const char* items[] = {
-      "<- Back",         // 0
-      stateLine,         // 1 (toggle — tap to start)
+      "<- Network",      // 0
+      stateLine,         // 1 (toggle — starts whichever mode is selected)
+      modeLine,          // 2 (info)
     };
     g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   }
-  DEBUG_G2F("[G2] Bluetooth submenu shown (running=%d, conn=%d)",
-            running ? 1 : 0, connected ? 1 : 0);
+  DEBUG_G2F("[G2] Bluetooth submenu shown (server=%d client=%d conn=%d mode=%s)",
+            serverUp ? 1 : 0, clientUp ? 1 : 0, connected ? 1 : 0,
+            isClient ? "client" : "server");
 }
 
 // -----------------------------------------------------------------------------
@@ -635,10 +675,33 @@ static void handleWiFiSavedTap(uint32_t idx) {
 #endif
 }
 
+#if ENABLE_ESPNOW
+// onCommit for the ESPNow name editor — stores the new name via setSetting
+// (persists to NVS) and re-renders the ESPNow submenu so the "Name:" row
+// reflects the new value. Empty input is rejected to avoid clobbering with
+// blank — Cancel covers the "I changed my mind" case.
+static void espnowNameCommit(const char* text) {
+  if (!text || text[0] == '\0') {
+    DEBUG_G2F("[G2] ESP-NOW Set Name: empty input — keeping previous");
+  } else {
+    String old = gSettings.espnowDeviceName;
+    setSetting(gSettings.espnowDeviceName, String(text));
+    BROADCAST_PRINTF("[G2] ESP-NOW name: '%s' -> '%s'",
+                     old.c_str(), text);
+  }
+  showEspNowMenu();
+}
+
+static void espnowNameCancel() {
+  DEBUG_G2F("[G2] ESP-NOW Set Name: cancelled");
+  showEspNowMenu();
+}
+#endif
+
 static void handleEspNowTap(uint32_t idx) {
   // Layout depends on running state:
-  //   ON:  0=Back 1=toggle 2=Mode 3=Peers 4=ViewDevices
-  //   OFF: 0=Back 1=toggle 2=ViewDevices
+  //   ON:  0=Back 1=toggle 2=Mode 3=Peers 4=ViewDevices 5=Name
+  //   OFF: 0=Back 1=toggle 2=ViewDevices 3=Name
 #if ENABLE_ESPNOW
   bool running = (gEspNow && gEspNow->initialized);
 #else
@@ -663,6 +726,26 @@ static void handleEspNowTap(uint32_t idx) {
     return;
   }
 
+#if ENABLE_ESPNOW
+  // Name editor — same row index regardless of running state, just shifts
+  // position. Brings up the on-glasses keyboard pre-filled with the
+  // current name. onCommit/onCancel both redraw the ESPNow submenu.
+  const uint32_t kNameIdxOn  = 5;
+  const uint32_t kNameIdxOff = 3;
+  if ((running && idx == kNameIdxOn) || (!running && idx == kNameIdxOff)) {
+    TextEntryConfig cfg = {};
+    cfg.prompt   = "ESPNow Name";
+    cfg.initial  = gSettings.espnowDeviceName.c_str();
+    cfg.maxLen   = 24;   // ESPNow name is short — host-friendly bound
+    cfg.onCommit = espnowNameCommit;
+    cfg.onCancel = espnowNameCancel;
+    if (!g2BeginTextEntry(cfg)) {
+      DEBUG_G2F("[G2] ESP-NOW: text-entry failed to start");
+    }
+    return;
+  }
+#endif
+
   if (running) {
     if (idx == 2 || idx == 3) {  // info rows
       DEBUG_G2F("[G2] ESP-NOW: info row %u (no action)", (unsigned)idx);
@@ -683,27 +766,64 @@ static void handleEspNowDevsTap(uint32_t idx) {
 }
 
 static void handleBluetoothTap(uint32_t idx) {
-  // Layout depends on running state:
-  //   ON:  0=Back 1=toggle 2=Mode 3=Conn 4=ToggleAdv 5=Disconnect
-  //   OFF: 0=Back 1=toggle
-  bool running = isBLERunning();
+  // Layout (kept in sync with showBluetoothMenu):
+  //   active + server: 0=Back 1=toggle 2=Mode 3=Conn 4=ToggleAdv 5=Disconnect
+  //   active + client: 0=Back 1=toggle 2=Mode 3=Conn 4=DisconnectG2
+  //   inactive:        0=Back 1=toggle 2=Mode
+  const bool active   = bleSubsystemActive();
+  const bool isClient = (gSettings.bleMode == BLE_MODE_G2_CLIENT);
   if (idx == 0) { g2ShowNetworkMenu(); return; }
 
-  if (idx == 1) {  // BLE state line — toggle
-    bool ok = running ? (deinitBluetooth(), true) : initBluetooth();
-    BROADCAST_PRINTF("[G2] Bluetooth: %s → %s",
-                     running ? "stop" : "start",
-                     ok ? "ok" : "failed");
+  if (idx == 1) {  // toggle — mode-aware
+    if (active) {
+      // Stop whichever subsystem is up. In client mode this also yanks
+      // the menu out from under the user (they were viewing it on the
+      // lens), but that's the explicit action they asked for.
+      if (isClient) {
+        deinitG2Client();
+        BROADCAST_PRINTF("[G2] Bluetooth: G2 client stopped (from glasses)");
+      } else {
+        deinitBluetooth();
+        BROADCAST_PRINTF("[G2] Bluetooth: server stopped");
+      }
+    } else {
+      bool ok = isClient ? initG2Client() : initBluetooth();
+      BROADCAST_PRINTF("[G2] Bluetooth: %s start → %s",
+                       isClient ? "client" : "server",
+                       ok ? "ok" : "failed");
+    }
     showBluetoothMenu();
     return;
   }
 
-  if (!running) {
-    DEBUG_G2F("[G2] Bluetooth: idx=%u while OFF (only toggle valid)",
-              (unsigned)idx);
+  if (!active) {
+    // Only Back + toggle + Mode-info are valid; Mode is read-only here.
+    if (idx == 2) {
+      DEBUG_G2F("[G2] Bluetooth: mode info row (use blemode CLI to change)");
+    } else {
+      DEBUG_G2F("[G2] Bluetooth: idx=%u while OFF (only toggle valid)",
+                (unsigned)idx);
+    }
     return;
   }
 
+  if (isClient) {
+    // Client-mode layout: 2/3 are info, 4 is Disconnect G2.
+    if (idx == 2 || idx == 3) {
+      DEBUG_G2F("[G2] Bluetooth: client info row %u (no action)", (unsigned)idx);
+      return;
+    }
+    if (idx == 4) {
+      deinitG2Client();
+      BROADCAST_PRINTF("[G2] Bluetooth: G2 disconnect requested from glasses");
+      showBluetoothMenu();
+      return;
+    }
+    DEBUG_G2F("[G2] Bluetooth (client): unknown idx=%u", (unsigned)idx);
+    return;
+  }
+
+  // Server-mode layout (legacy).
   switch (idx) {
     case 2: case 3:  // info rows
       DEBUG_G2F("[G2] Bluetooth: info row %u (no action)", (unsigned)idx);

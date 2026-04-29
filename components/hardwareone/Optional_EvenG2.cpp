@@ -17,6 +17,7 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 #include <esp_gap_ble_api.h>  // esp_ble_gap_update_conn_params (HIGH priority)
+#include <esp_attr.h>         // EXT_RAM_BSS_ATTR
 
 #include "System_G2_Protocol.h"
 #include "Optional_Bluetooth.h"
@@ -39,6 +40,7 @@ extern "C" {
 #include "G2_Page_Settings.h"  // g2ShowSettingsMenu / g2SettingsHandleTap
 #include "G2_Page_Files.h"     // g2ShowFilesMenu / g2FilesHandleTap / g2FilesTick
 #include "G2_Page_TestSuite.h" // g2ShowTestSuiteMenu / g2TestSuiteHandleTap
+#include "G2_Page_TextEntry.h" // generic on-glasses text-entry overlay
 #include "System_Settings.h"
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -1059,6 +1061,149 @@ static void micWavCloseLocked(const char* reason) {
             reason ? reason : "ok");
 }
 
+// ─── Phase 2B: G2 mic → ESP-SR AFE feed ring buffer ───────────────────
+//
+// Decoded 16 kHz int16 PCM samples accumulate in a PSRAM ring buffer.
+// The BLE notify task pushes 5 × 160 = 800 samples per 205 B packet
+// (~50 ms of audio); ESP-SR's feed loop drains in 160-sample chunks
+// (the AFE feed_chunksize for 16 kHz / 10 ms). 2-second buffer = 64 KB
+// — comfortably absorbs WiFi-coexist scheduling jitter.
+//
+// Mutex protects the ring against the writer (BLE notify task) and the
+// reader (SR loop on cmd_exec_task). gMicAfeDataReadySem wakes a
+// blocked reader when fresh samples arrive.
+static SemaphoreHandle_t  gMicAfeMutex      = nullptr;
+static SemaphoreHandle_t  gMicAfeReadySem   = nullptr;
+static int16_t*           gMicAfeRing       = nullptr;
+static size_t             gMicAfeRingCap    = 0;     // samples
+static size_t             gMicAfeRingHead   = 0;
+static size_t             gMicAfeRingCount  = 0;
+static lc3_decoder_t      gMicAfeDecoder    = nullptr;
+static void*              gMicAfeDecMem     = nullptr;
+static volatile bool      gMicAfeFeedActive = false;
+static uint32_t           gMicAfeOverruns   = 0;
+static constexpr size_t   kMicAfeRingCapSamples = 32u * 1024u;  // 2 s @ 16 kHz
+
+static void micAfeRingPushLocked(const int16_t* src, size_t n) {
+  if (!gMicAfeRing || gMicAfeRingCap == 0) return;
+  size_t freeSpace = gMicAfeRingCap - gMicAfeRingCount;
+  if (n > freeSpace) {
+    // Reader has fallen behind. Drop oldest samples to make room —
+    // worse than skipping the new packet because a stale gap in the
+    // middle is worse for AFE than "we lost 50 ms of recent audio".
+    size_t drop = n - freeSpace;
+    gMicAfeRingHead = (gMicAfeRingHead + drop) % gMicAfeRingCap;
+    gMicAfeRingCount -= drop;
+    gMicAfeOverruns++;
+  }
+  size_t tail = (gMicAfeRingHead + gMicAfeRingCount) % gMicAfeRingCap;
+  size_t first = n;
+  if (tail + first > gMicAfeRingCap) {
+    first = gMicAfeRingCap - tail;
+  }
+  memcpy(&gMicAfeRing[tail], src, first * sizeof(int16_t));
+  if (n > first) {
+    memcpy(&gMicAfeRing[0], &src[first], (n - first) * sizeof(int16_t));
+  }
+  gMicAfeRingCount += n;
+}
+
+bool g2MicSetAfeFeedActive(bool on) {
+  if (!gMicAfeMutex)    gMicAfeMutex    = xSemaphoreCreateMutex();
+  if (!gMicAfeReadySem) gMicAfeReadySem = xSemaphoreCreateBinary();
+  if (!gMicAfeMutex || !gMicAfeReadySem) return false;
+
+  xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
+  if (on && !gMicAfeFeedActive) {
+    if (!gMicAfeRing) {
+      gMicAfeRing = (int16_t*)heap_caps_malloc(
+          kMicAfeRingCapSamples * sizeof(int16_t),
+          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      if (!gMicAfeRing) {
+        xSemaphoreGive(gMicAfeMutex);
+        DEBUG_G2F("[G2-MIC-AFE] ring alloc failed (%u B)",
+                  (unsigned)(kMicAfeRingCapSamples * sizeof(int16_t)));
+        return false;
+      }
+      gMicAfeRingCap = kMicAfeRingCapSamples;
+    }
+    if (!gMicAfeDecoder) {
+      unsigned sz = lc3_decoder_size(kMicLc3FrameUs, kMicLc3SampleHz);
+      gMicAfeDecMem = malloc(sz);
+      if (gMicAfeDecMem) {
+        gMicAfeDecoder = lc3_setup_decoder(kMicLc3FrameUs, kMicLc3SampleHz,
+                                           /*sr_pcm_hz*/ 0, gMicAfeDecMem);
+      }
+      if (!gMicAfeDecoder) {
+        free(gMicAfeDecMem);
+        gMicAfeDecMem = nullptr;
+        xSemaphoreGive(gMicAfeMutex);
+        DEBUG_G2F("[G2-MIC-AFE] decoder setup failed");
+        return false;
+      }
+    }
+    gMicAfeRingHead = 0;
+    gMicAfeRingCount = 0;
+    gMicAfeOverruns = 0;
+    gMicRecArm = 'L';
+    gMicAfeFeedActive = true;
+    DEBUG_G2F("[G2-MIC-AFE] feed ON (ring %u samples / %u B)",
+              (unsigned)gMicAfeRingCap,
+              (unsigned)(gMicAfeRingCap * sizeof(int16_t)));
+  } else if (!on && gMicAfeFeedActive) {
+    gMicAfeFeedActive = false;
+    gMicAfeRingHead = 0;
+    gMicAfeRingCount = 0;
+    DEBUG_G2F("[G2-MIC-AFE] feed OFF (cumulative overruns=%u)",
+              (unsigned)gMicAfeOverruns);
+    // Keep ring + decoder allocated for fast re-arm.
+  }
+  xSemaphoreGive(gMicAfeMutex);
+  // Wake any blocked reader so it can observe the state change.
+  if (gMicAfeReadySem) xSemaphoreGive(gMicAfeReadySem);
+  return true;
+}
+
+bool g2MicAfeFeedIsActive() { return gMicAfeFeedActive; }
+
+size_t g2MicReadPcmSamples(int16_t* out, size_t capSamples, uint32_t timeoutMs) {
+  if (!out || capSamples == 0) return 0;
+  if (!gMicAfeMutex || !gMicAfeReadySem) return 0;
+  const uint32_t deadline = millis() + timeoutMs;
+  for (;;) {
+    xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
+    if (!gMicAfeFeedActive) {
+      xSemaphoreGive(gMicAfeMutex);
+      return 0;
+    }
+    if (gMicAfeRingCount > 0) {
+      size_t toRead = (gMicAfeRingCount < capSamples)
+                        ? gMicAfeRingCount : capSamples;
+      size_t first = toRead;
+      if (gMicAfeRingHead + first > gMicAfeRingCap) {
+        first = gMicAfeRingCap - gMicAfeRingHead;
+      }
+      memcpy(out, &gMicAfeRing[gMicAfeRingHead], first * sizeof(int16_t));
+      if (toRead > first) {
+        memcpy(&out[first], &gMicAfeRing[0],
+               (toRead - first) * sizeof(int16_t));
+      }
+      gMicAfeRingHead = (gMicAfeRingHead + toRead) % gMicAfeRingCap;
+      gMicAfeRingCount -= toRead;
+      xSemaphoreGive(gMicAfeMutex);
+      return toRead;
+    }
+    xSemaphoreGive(gMicAfeMutex);
+    const uint32_t now = millis();
+    if (now >= deadline) return 0;
+    // Block until a writer signals (or 20 ms tick — defensive).
+    xSemaphoreTake(gMicAfeReadySem, pdMS_TO_TICKS(20));
+  }
+}
+
+size_t   g2MicAfeRingDepth()    { return gMicAfeRingCount; }
+uint32_t g2MicAfeOverrunCount() { return gMicAfeOverruns; }
+
 // Decode one BLE packet's worth of audio (200 B = 5 LC3 frames) into
 // 800 int16 samples and append to the WAV. Caller must already hold
 // the WAV mutex AND have a valid decoder + open file.
@@ -1151,6 +1296,39 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
         }
       }
       xSemaphoreGive(gMicWavMutex);
+    }
+  }
+
+  // Phase 2B: ESP-SR AFE feed path. Decode 5 LC3 frames inline, push
+  // 800 int16 samples to the ring buffer that ESP-SR's loop drains.
+  // Independent of the WAV writer above — both can run together
+  // (e.g. record-while-listening for ground-truth comparisons).
+  if (gMicAfeFeedActive && t.side == gMicRecArm && gMicAfeMutex &&
+      len == 205 && gMicAfeDecoder) {
+    if (xSemaphoreTake(gMicAfeMutex, 0) == pdTRUE) {
+      if (gMicAfeFeedActive && gMicAfeDecoder && gMicAfeRing) {
+        int16_t pcm[kMicLc3FramesPerPkt * kMicLc3SamplesPerFrame];
+        bool decOk = true;
+        for (int i = 0; i < kMicLc3FramesPerPkt; i++) {
+          const uint8_t* in = data + i * kMicLc3FrameBytes;
+          int16_t* out = pcm + i * kMicLc3SamplesPerFrame;
+          int rc = lc3_decode(gMicAfeDecoder, in, kMicLc3FrameBytes,
+                              LC3_PCM_FORMAT_S16, out, /*stride*/ 1);
+          if (rc < 0) {
+            // Decode error — zero this frame and keep going so the AFE
+            // sees continuous time rather than a missing chunk.
+            memset(out, 0, kMicLc3SamplesPerFrame * sizeof(int16_t));
+            decOk = false;
+          }
+        }
+        (void)decOk;
+        micAfeRingPushLocked(pcm,
+                             kMicLc3FramesPerPkt * kMicLc3SamplesPerFrame);
+      }
+      xSemaphoreGive(gMicAfeMutex);
+      // Wake any reader blocked on the ready semaphore. Outside the
+      // mutex so the reader can immediately retake it.
+      if (gMicAfeReadySem) xSemaphoreGive(gMicAfeReadySem);
     }
   }
 
@@ -2687,6 +2865,12 @@ const G2PageModule* g2FindPageByHijackPage(G2HijackPage page) {
 // modules (G2_Page_System, G2_Page_Sensors, etc.) and just supply their
 // build/show functions here.
 
+// All top-level pages return to the hijack root when their back row is
+// tapped, so they share the "<- Main Menu" back label. Pages with their
+// own showMenu (Network, Files, Settings, Tests) render the back row
+// themselves and the backLabel here is unused — left set anyway for
+// consistency in case a future code path uses g2ShowTextAsList for them
+// (e.g. a CLI text-only view).
 static const G2PageModule kStatusPage = {
   "status", "Status",
   "Show G2 status snapshot on the lens",
@@ -2695,6 +2879,7 @@ static const G2PageModule kStatusPage = {
   /*handleTap=*/ nullptr,
   G2_HIJACK_PAGE_TEXT_VIEW,
   /*liveIntervalMs=*/ 5000,       // refresh every 5s; double-tap = manual
+  /*backLabel=*/    "<- Main Menu",
 };
 
 static const G2PageModule kSensorsPage = {
@@ -2704,6 +2889,8 @@ static const G2PageModule kSensorsPage = {
   /*showMenu=*/  nullptr,
   /*handleTap=*/ nullptr,
   G2_HIJACK_PAGE_TEXT_VIEW,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Main Menu",
 };
 
 static const G2PageModule kSystemPage = {
@@ -2713,6 +2900,8 @@ static const G2PageModule kSystemPage = {
   /*showMenu=*/  nullptr,
   /*handleTap=*/ nullptr,
   G2_HIJACK_PAGE_TEXT_VIEW,
+  /*liveIntervalMs=*/ 5000,       // refresh every 5s; double-tap = manual
+  /*backLabel=*/    "<- Main Menu",
 };
 
 static const G2PageModule kNetworkPage = {
@@ -2722,6 +2911,8 @@ static const G2PageModule kNetworkPage = {
   g2ShowNetworkMenu,
   g2NetworkHandleTap,
   G2_HIJACK_PAGE_NETWORK,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Main Menu",
 };
 
 static const G2PageModule kFilesPage = {
@@ -2731,6 +2922,8 @@ static const G2PageModule kFilesPage = {
   g2ShowFilesMenu,
   g2FilesHandleTap,
   G2_HIJACK_PAGE_FILES,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Main Menu",
 };
 
 static const G2PageModule kSettingsPage = {
@@ -2742,6 +2935,8 @@ static const G2PageModule kSettingsPage = {
   g2ShowSettingsMenu,
   g2SettingsHandleTap,
   G2_HIJACK_PAGE_SETTINGS,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Main Menu",
 };
 
 static const G2PageModule kTestSuitePage = {
@@ -2751,6 +2946,8 @@ static const G2PageModule kTestSuitePage = {
   g2ShowTestSuiteMenu,
   g2TestSuiteHandleTap,
   G2_HIJACK_PAGE_TESTS,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Main Menu",
 };
 
 static void registerG2Pages(void) {
@@ -2901,7 +3098,7 @@ static void invokePageFromMain(const G2PageModule& p) {
   // Live page: start the auto-refresh worker. Still renders an initial
   // list synchronously; subsequent ticks REBUILD in place via Cmd=7.
   if (p.liveIntervalMs > 0 && p.buildText) {
-    if (g2StartLiveListPage(p.buildText, p.liveIntervalMs)) {
+    if (g2StartLiveListPage(p.buildText, p.liveIntervalMs, p.backLabel)) {
       g2SetHijackPage(p.hijackPage);
       BROADCAST_PRINTF("[G2] Hijack: %s tapped — live page (every %u ms)",
                        p.hijackLabel ? p.hijackLabel : p.name,
@@ -2917,7 +3114,7 @@ static void invokePageFromMain(const G2PageModule& p) {
   char buf[512];
   if (p.buildText) p.buildText(buf, sizeof(buf));
   else             buf[0] = '\0';
-  if (g2ShowTextAsList(buf)) {
+  if (g2ShowTextAsList(buf, p.backLabel)) {
     BROADCAST_PRINTF("[G2] Hijack: %s tapped — list shown (%u B)",
                      p.hijackLabel ? p.hijackLabel : p.name,
                      (unsigned)strlen(buf));
@@ -2927,6 +3124,15 @@ static void invokePageFromMain(const G2PageModule& p) {
 }
 
 static void handleHijackMenuTap(uint32_t idx) {
+  // Text-entry overlay: when active, the live-page renders the keyboard
+  // and taps belong to it — not the underlying page. Intercept BEFORE
+  // the per-page dispatch so any caller (Network, Bluetooth, future
+  // pages) gets text entry "for free" without wiring it page-by-page.
+  if (g2TextEntryIsActive()) {
+    g2TextEntryHandleTap(idx);
+    return;
+  }
+
   // Sub-page dispatch: if a registered page claims this hijackPage,
   // route the tap to its handleTap. Pages without a custom handleTap
   // (read-only views) get the TEXT_VIEW default: idx 0 → MAIN.
@@ -4245,7 +4451,13 @@ bool initG2Client() {
   }
   vTaskDelay(pdMS_TO_TICKS(100));
 
-  gG2State = (G2ClientState*)calloc(1, sizeof(G2ClientState));
+  // gG2State lives for the program's life and is touched only by regular
+  // task contexts (BLE notify, command dispatch, etc.) — safe in PSRAM.
+  // Note: the embedded `String deviceName/deviceAddress` members hold
+  // their own heap-backed buffers via Arduino's allocator (DRAM); only
+  // the struct shell moves here.
+  gG2State = (G2ClientState*)ps_calloc(1, sizeof(G2ClientState),
+                                       AllocPref::PreferPSRAM, "g2.clientState");
   if (!gG2State) {
     broadcastOutput("[G2] State alloc failed");
     return false;
@@ -4646,10 +4858,13 @@ static bool sendCreateListAndWait(G2Temple& arm,
   // implies UX-level pagination is overdue regardless of transport.
   // The send path below fragments this body into N envelopes per the
   // wire protocol — see sendPbFragmented.
+  // PSRAM-preferred — buffer is filled from regular task context
+  // (page-swap worker), no DMA / ISR access. Falls back to internal
+  // heap if PSRAM is exhausted.
   constexpr size_t kPbCap = 8192;
-  uint8_t* pb = (uint8_t*)malloc(kPbCap);
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM, "g2.pb.create-list");
   if (!pb) {
-    DEBUG_G2F("[G2] CREATE-list: malloc(%u) failed", (unsigned)kPbCap);
+    DEBUG_G2F("[G2] CREATE-list: ps_alloc(%u) failed", (unsigned)kPbCap);
     return false;
   }
   size_t pbLen = g2BuildCreateListPagePb(G2_MAGIC_CREATE, CONTAINER_NAME,
@@ -4710,9 +4925,9 @@ static bool sendRebuildListAndWait(G2Temple& arm,
   xSemaphoreTake(gRebuildAckSem, 0);
 
   constexpr size_t kPbCap = 8192;
-  uint8_t* pb = (uint8_t*)malloc(kPbCap);
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM, "g2.pb.rebuild-list");
   if (!pb) {
-    DEBUG_G2F("[G2] REBUILD-list: malloc(%u) failed", (unsigned)kPbCap);
+    DEBUG_G2F("[G2] REBUILD-list: ps_alloc(%u) failed", (unsigned)kPbCap);
     return false;
   }
 
@@ -4780,9 +4995,9 @@ static bool sendCreateTextAndWait(G2Temple& arm,
   // before the multi-fragment send refuses. Per-module JSON typically
   // sits well under 1 KB, so this is mostly headroom.
   constexpr size_t kPbCap = 8192;
-  uint8_t* pb = (uint8_t*)malloc(kPbCap);
+  uint8_t* pb = (uint8_t*)ps_alloc(kPbCap, AllocPref::PreferPSRAM, "g2.pb.create-text");
   if (!pb) {
-    DEBUG_G2F("[G2] CREATE-text: malloc(%u) failed", (unsigned)kPbCap);
+    DEBUG_G2F("[G2] CREATE-text: ps_alloc(%u) failed", (unsigned)kPbCap);
     return false;
   }
   size_t pbLen = g2BuildCreateTextPagePb(G2_MAGIC_CREATE, CONTAINER_NAME,
@@ -4933,7 +5148,7 @@ bool g2ShowText(const char* text) {
   // wants to show text). 1 KB on stack + buildG2StatusSnapshot's 384 B
   // + Bluedroid's own usage was reliably overflowing BTC_TASK.
   constexpr size_t kBufSize = 1024;
-  uint8_t* buf = (uint8_t*)malloc(kBufSize);
+  uint8_t* buf = (uint8_t*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "g2.showtext.buf");
   if (!buf) {
     DEBUG_G2F("[G2] g2ShowText: malloc(%u) failed", (unsigned)kBufSize);
     return false;
@@ -5046,12 +5261,12 @@ struct PageSwapArgs {
 // the strings and the outer array via freePageSwapItems().
 static char** dupPageSwapItems(const char* const* src, size_t n) {
   if (n == 0) return nullptr;
-  char** out = (char**)calloc(n, sizeof(char*));
+  char** out = (char**)ps_calloc(n, sizeof(char*), AllocPref::PreferPSRAM, "g2.pageSwap.itemArr");
   if (!out) return nullptr;
   for (size_t i = 0; i < n; i++) {
     const char* s = src[i] ? src[i] : "";
     size_t len = strlen(s);
-    char* dst = (char*)malloc(len + 1);
+    char* dst = (char*)ps_alloc(len + 1, AllocPref::PreferPSRAM, "g2.pageSwap.itemDup");
     if (!dst) {
       // Roll back partial allocations.
       for (size_t j = 0; j < i; j++) free(out[j]);
@@ -5323,7 +5538,7 @@ bool g2ShowTextPage(const char* content, const G2ContainerGeom& geom,
   // Heap-copy the content so the caller's buffer can be reused while
   // the worker is still running. Same lifetime model as the list path.
   const size_t len = strlen(content);
-  char* copy = (char*)malloc(len + 1);
+  char* copy = (char*)ps_alloc(len + 1, AllocPref::PreferPSRAM, "g2.showTextPage.copy");
   if (!copy) {
     DEBUG_G2F("[G2] g2ShowTextPage: copy alloc failed (%u B)", (unsigned)len);
     return false;
@@ -5361,21 +5576,26 @@ bool g2ShowTextPage(const char* content, const G2ContainerGeom& geom,
 }
 
 // Render a newline-separated text blob as a list page. First item is always
-// "<- Back" (returns to MAIN); subsequent items are the text lines. Mutates
-// a private buffer in place to NUL-terminate each line. Returns true if the
-// REBUILD frame went out.
-bool g2ShowTextAsList(const char* text) {
+// the back affordance (returns to MAIN); subsequent items are the text
+// lines. `backLabel` overrides the default "<- Back" — pass the destination
+// name so the user knows where the tap goes. Mutates a private buffer in
+// place to NUL-terminate each line. Returns true if the REBUILD frame went
+// out.
+bool g2ShowTextAsList(const char* text, const char* backLabel) {
   if (!text) return false;
 
   // Cap: list widget renders ~6-8 lines comfortably. Beyond that the user
   // would need to scroll — which works, but very long lists waste the row
   // buffer. 32 is plenty for the current Status/Sensors/System payloads.
+  // Buffers in PSRAM (~2.2 KB) — only touched from g2ShowTextAsList +
+  // BLE notify task, no DMA / ISR.
   static constexpr size_t kMaxRows = 32;
-  static char        gRows[kMaxRows][64];
-  static const char* gPtrs[kMaxRows];
+  EXT_RAM_BSS_ATTR static char        gRows[kMaxRows][64];
+  EXT_RAM_BSS_ATTR static const char* gPtrs[kMaxRows];
 
   // Row 0: back affordance.
-  strncpy(gRows[0], "<- Back", sizeof(gRows[0]));
+  const char* lbl = (backLabel && backLabel[0]) ? backLabel : "<- Back";
+  strncpy(gRows[0], lbl, sizeof(gRows[0]));
   gRows[0][sizeof(gRows[0]) - 1] = '\0';
   gPtrs[0] = gRows[0];
   size_t n = 1;
@@ -5441,14 +5661,21 @@ static volatile bool       gLivePageStopFlag  = false;
 static G2LivePageBuildFn   gLivePageBuildFn   = nullptr;
 static volatile uint32_t   gLivePageIntervalMs = 5000;
 static SemaphoreHandle_t   gLivePageRefreshSem = nullptr;
+// Per-session back-row label (null/empty → default "<- Back"). Captured at
+// g2StartLiveListPage so the worker uses the same label across every tick
+// without the caller needing to thread it down.
+static const char*         gLivePageBackLabel = nullptr;
 
-// Render `text` into the same row-shape g2ShowTextAsList uses (Back row
-// prepended, newline-split). Caller owns the row storage.
+// Render `text` into the same row-shape g2ShowTextAsList uses (back row
+// prepended, newline-split). Caller owns the row storage. `backLabel`
+// overrides the default "<- Back".
 static size_t splitTextIntoRows(const char* text,
                                 char rows[][64], const char** ptrs,
-                                size_t maxRows) {
+                                size_t maxRows,
+                                const char* backLabel) {
   if (!text || maxRows == 0) return 0;
-  strncpy(rows[0], "<- Back", sizeof(rows[0]));
+  const char* lbl = (backLabel && backLabel[0]) ? backLabel : "<- Back";
+  strncpy(rows[0], lbl, sizeof(rows[0]));
   rows[0][sizeof(rows[0]) - 1] = '\0';
   ptrs[0] = rows[0];
   size_t n = 1;
@@ -5472,13 +5699,15 @@ static size_t splitTextIntoRows(const char* text,
 // Worker task — runs the tick loop until gLivePageStopFlag is set.
 static void livePageWorker(void* /*arg*/) {
   // Heap-owned because the rows can be 32 × 64 = 2 KB which is more
-  // stack than we want to chew, and PSRAM is plentiful.
+  // stack than we want to chew, and PSRAM is plentiful. Worker runs in
+  // regular task context (no DMA / ISR), so PSRAM-backed buffers are
+  // safe — and ps_alloc falls back to internal heap if PSRAM is full.
   constexpr size_t kMaxRows = 32;
-  char (*rows)[64]  = (char(*)[64])heap_caps_malloc(sizeof(char[kMaxRows][64]),
-                                                    MALLOC_CAP_8BIT);
-  const char** ptrs = (const char**)heap_caps_malloc(sizeof(const char*) * kMaxRows,
-                                                      MALLOC_CAP_8BIT);
-  char* textBuf     = (char*)heap_caps_malloc(2048, MALLOC_CAP_8BIT);
+  char (*rows)[64]  = (char(*)[64])ps_alloc(sizeof(char[kMaxRows][64]),
+                                            AllocPref::PreferPSRAM, "g2.livePage.rows");
+  const char** ptrs = (const char**)ps_alloc(sizeof(const char*) * kMaxRows,
+                                             AllocPref::PreferPSRAM, "g2.livePage.ptrs");
+  char* textBuf     = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "g2.livePage.text");
   if (!rows || !ptrs || !textBuf) {
     DEBUG_G2F("[G2] live-page: worker heap alloc failed");
     if (rows)    free(rows);
@@ -5512,7 +5741,8 @@ static void livePageWorker(void* /*arg*/) {
     if (!gLivePageBuildFn) continue;
     textBuf[0] = '\0';
     gLivePageBuildFn(textBuf, 2048);
-    size_t n = splitTextIntoRows(textBuf, rows, ptrs, kMaxRows);
+    size_t n = splitTextIntoRows(textBuf, rows, ptrs, kMaxRows,
+                                 gLivePageBackLabel);
     if (n == 0) continue;
 
     G2Temple* arm = nullptr;
@@ -5542,7 +5772,8 @@ static void livePageWorker(void* /*arg*/) {
 }
 
 // Public API — start a live list page.
-bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs) {
+bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
+                         const char* backLabel) {
   if (!buildFn) return false;
   if (intervalMs < 500) intervalMs = 500;  // floor to avoid hammering
 
@@ -5556,13 +5787,18 @@ bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs) {
   // Drain any stale signal from a prior session.
   xSemaphoreTake(gLivePageRefreshSem, 0);
 
+  // Capture the back label for the worker. Caller is expected to keep
+  // the pointer alive for the session — string literals from the page
+  // module satisfy this trivially; dynamic labels would need a copy.
+  gLivePageBackLabel = (backLabel && backLabel[0]) ? backLabel : nullptr;
+
   // Initial render via the standard path so the widget gets CREATEd
   // cleanly; this also seeds containerReady so subsequent REBUILDs
   // succeed. Build the text once here and ship via g2ShowTextAsList.
   char seed[2048];
   seed[0] = '\0';
   buildFn(seed, sizeof(seed));
-  if (!g2ShowTextAsList(seed)) {
+  if (!g2ShowTextAsList(seed, gLivePageBackLabel)) {
     DEBUG_G2F("[G2] live-page: initial CREATE-list failed");
     return false;
   }
@@ -5601,12 +5837,16 @@ void g2StopLiveListPage() {
 }
 
 // Internal — give the refresh sem if a live page is active. Called from
-// the SysEvent handler when DOUBLE_CLICK(3) src=2 fires.
+// the SysEvent handler when DOUBLE_CLICK(3) src=2 fires, and exposed via
+// g2KickLivePageRefresh() so other modules (text-entry) can request an
+// immediate REBUILD after mutating buildFn-visible state.
 static void livePageKickRefresh() {
   if (gLivePageActive && gLivePageRefreshSem) {
     xSemaphoreGive(gLivePageRefreshSem);
   }
 }
+
+void g2KickLivePageRefresh() { livePageKickRefresh(); }
 
 // Forward-declared above handleEnvelope so the SysEvent handler can
 // peek at the live-page state without a variable forward-declaration
@@ -5781,7 +6021,9 @@ bool g2ShowNotification(const char* text, uint32_t durationMs) {
               (unsigned)myGen);
     return true;
   }
-  NotifyClearArgs* args = (NotifyClearArgs*)malloc(sizeof(NotifyClearArgs));
+  NotifyClearArgs* args = (NotifyClearArgs*)ps_alloc(sizeof(NotifyClearArgs),
+                                                     AllocPref::PreferPSRAM,
+                                                     "g2.notify.clearArgs");
   if (!args) {
     DEBUG_G2F("[G2] Notification: alloc failed — display won't auto-clear");
     return true;  // show succeeded; clear won't
@@ -6443,7 +6685,7 @@ static const char* cmd_g2imgprobe(const String& argsInput) {
 
   // Build the test pattern on the heap; 4 KB on stack would crowd the
   // BTC task's budget. Free at the end of this function.
-  uint8_t* pattern = (uint8_t*)malloc(sizeBytes);
+  uint8_t* pattern = (uint8_t*)ps_alloc(sizeBytes, AllocPref::PreferPSRAM, "g2.imgprobe.pattern");
   if (!pattern) return "G2: imgprobe — pattern alloc failed";
   for (size_t i = 0; i < sizeBytes; i++) {
     pattern[i] = (i & 1) ? 0x0F : 0xF0;
@@ -6454,7 +6696,7 @@ static const char* cmd_g2imgprobe(const String& argsInput) {
   // chunk it. Size budget: pb wrapper overhead (~10 B) + nested
   // ImgRawMsg overhead (~6 B) + dataLen.
   const size_t bodyCap = sizeBytes + 64;
-  uint8_t* body = (uint8_t*)malloc(bodyCap);
+  uint8_t* body = (uint8_t*)ps_alloc(bodyCap, AllocPref::PreferPSRAM, "g2.imgprobe.body");
   if (!body) {
     free(pattern);
     return "G2: imgprobe — body alloc failed";
@@ -7758,7 +8000,7 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
   // constraint).
   probePrepImagePushAcks(pushMagicBase, pushMagicBase + kFrags - 1, kFrags);
 
-  uint8_t* pbBuf = (uint8_t*)malloc(kChunkBytes + 96);
+  uint8_t* pbBuf = (uint8_t*)ps_alloc(kChunkBytes + 96, AllocPref::PreferPSRAM, "g2.imgpush.pbBuf");
   if (!pbBuf) return false;
 
   unsigned okFrags = 0;
@@ -7885,7 +8127,7 @@ const char* g2ProbeImageQ6BmpMultiFragment() {
   // Step 1: build the full-tile BMP into the heap. ~21 KB so we can't
   // stack-allocate it.
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)malloc(kBmpCap);
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(*arm);
     return "Img Q6: BMP heap alloc failed";
@@ -7950,7 +8192,7 @@ const char* g2ProbeImageQ6bBmpTapDismiss() {
   if (!probeTearDownActiveContainer(*arm)) return "Img Q6b: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)malloc(kBmpCap);
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(*arm);
     return "Img Q6b: BMP heap alloc failed";
@@ -8049,7 +8291,7 @@ const char* g2ProbeImageQ9FrameBuilder() {
   if (!probeTearDownActiveContainer(*arm)) return "Img Q9: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)malloc(kBmpCap);
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(*arm);
     return "Img Q9: BMP heap alloc failed";
@@ -8119,7 +8361,7 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
   // in that range and block for completion at the end.
   probePrepImagePushAcks(pushMagicBase, pushMagicBase + kFrags - 1, kFrags);
 
-  uint8_t* pbBuf = (uint8_t*)malloc(kChunkBytes + 96);
+  uint8_t* pbBuf = (uint8_t*)ps_alloc(kChunkBytes + 96, AllocPref::PreferPSRAM, "g2.imgpush.pbBuf");
   if (!pbBuf) return false;
 
   unsigned okFrags = 0;
@@ -8206,8 +8448,8 @@ const char* g2ProbeImageQ11SimpleSwap() {
   if (!probeTearDownActiveContainer(*arm)) return "Img Q11: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmpA = (uint8_t*)malloc(kBmpCap);
-  uint8_t* bmpB = (uint8_t*)malloc(kBmpCap);
+  uint8_t* bmpA = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmpA");
+  uint8_t* bmpB = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmpB");
   if (!bmpA || !bmpB) {
     if (bmpA) free(bmpA);
     if (bmpB) free(bmpB);
@@ -8290,9 +8532,9 @@ const char* g2ProbeImageQ10ClearThenPush() {
   if (!probeTearDownActiveContainer(*arm)) return "Img Q10: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmpA = (uint8_t*)malloc(kBmpCap);
-  uint8_t* bmpBlack = (uint8_t*)malloc(kBmpCap);
-  uint8_t* bmpB = (uint8_t*)malloc(kBmpCap);
+  uint8_t* bmpA = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmpA");
+  uint8_t* bmpBlack = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmpBlack");
+  uint8_t* bmpB = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmpB");
   if (!bmpA || !bmpBlack || !bmpB) {
     if (bmpA) free(bmpA);
     if (bmpBlack) free(bmpBlack);
@@ -8370,7 +8612,7 @@ static bool readBmpFromVfs(const String& rawPath,
   if (len < 70) { f.close(); if (outErr) *outErr = "file too small for BMP"; return false; }
   if (len > kMaxBmpBytes) { f.close(); if (outErr) *outErr = "BMP too large (>64KB)"; return false; }
 
-  uint8_t* buf = (uint8_t*)malloc(len);
+  uint8_t* buf = (uint8_t*)ps_alloc(len, AllocPref::PreferPSRAM, "g2.bmp.fileLoad");
   if (!buf) { f.close(); if (outErr) *outErr = "out of memory reading BMP"; return false; }
   const size_t rd = f.read(buf, len);
   f.close();
@@ -8659,7 +8901,7 @@ const char* g2ProbeImageQ12FullScreen() {
 
   // Single repaint buffer reused across all 4 tile pushes.
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)malloc(kBmpCap);
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(*arm);
     return "Img Q12: BMP heap alloc failed";
@@ -8748,7 +8990,7 @@ const char* g2ProbeImageQ13LiveTile() {
   if (!probeTearDownActiveContainer(*arm)) return "Img Q13: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)malloc(kBmpCap);
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(*arm);
     return "Img Q13: BMP heap alloc failed";
@@ -8811,6 +9053,16 @@ const char* g2ProbeImageQ13LiveTile() {
                                      kCreateMagic, pushMagicBase,
                                      bmp, bmpLen, &okFrags, &totalFrags);
       createdOnce = ok;
+      // Stamp lens/arm container state on first successful CREATE-image so the
+      // lens-idle gate above doesn't trip on iter 2. sendImageBmpMultiFragment
+      // doesn't do this itself — by contract (sendCreateAndWait note) the
+      // caller is responsible. Without this, Q13 bails as "lens timeout"
+      // after a single frame even though the container is alive.
+      if (ok) {
+        arm->containerReady  = true;
+        arm->containerIsList = false;
+        g2LensSetContainer(true, false, BLOCKS_WIDGET_ID);
+      }
     } else {
       unsigned okFrags = 0, totalFrags = 0;
       ok = sendImageBmpFragmentsNoCreate(*arm, "Q13",
@@ -9036,7 +9288,7 @@ const char* g2ProbeImageQ15LeftArm() {
   if (!probeTearDownActiveContainer(*arm)) return "Img Q15: pre-burst SHUTDOWN failed";
 
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)malloc(kBmpCap);
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(*arm);
     return "Img Q15: BMP heap alloc failed";
@@ -9176,7 +9428,7 @@ static const char* runMixedListImageProbe(const char* tag,
   // Build and push the BMP. Negative height = top-down for intuitive
   // pattern testing.
   const size_t kBmpCap = 24 * 1024;
-  uint8_t* bmp = (uint8_t*)malloc(kBmpCap);
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.bmp");
   if (!bmp) {
     probePostProbeShutdown(*arm);
     snprintf(retBuf, retCap, "%s: BMP heap alloc failed", tag);

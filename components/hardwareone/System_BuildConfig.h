@@ -4,18 +4,34 @@
 // ╔═══════════════════════════════════════════════════════════════════════════╗
 // ║                     USER CONFIGURATION - EDIT HERE                        ║
 // ╠═══════════════════════════════════════════════════════════════════════════╣
-// ║  All user-configurable options are in this section.                       ║
-// ║  Everything below this section is auto-derived or board-specific.         ║
+// ║  Flags are grouped into five domains:                                     ║
+// ║    1. Connectivity         — WiFi / HTTP / ESP-NOW / web pages / MQTT     ║
+// ║    2. I/O Hardware         — I2C sensors / display / camera / mic / batt  ║
+// ║    3. Wireless Peripherals — BLE radio / G2 Glasses                       ║
+// ║    4. On-device Subsystems — Speech / Edge Impulse / LLM / Automation     ║
+// ║    5. User-facing Apps     — Games / Maps                                 ║
+// ║                                                                           ║
+// ║  Flag conventions:                                                        ║
+// ║    *_FEATURE_LEVEL — coarse preset (0–4); 4 means "use CUSTOM_* below"    ║
+// ║    CUSTOM_ENABLE_* — per-item toggle, only read when level == 4           ║
+// ║    ENABLE_*        — top-level boolean, always read directly              ║
+// ║                                                                           ║
+// ║  All cross-feature dependency overrides (e.g. "WEB_SPEECH off when        ║
+// ║  ESP_SR off") live in the DERIVED section near the bottom of this file.   ║
+// ║  Edit that section only when adding new derivation rules.                 ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ⚠️  CMakeLists.txt PARSES THE FOLLOWING FLAGS BY REGEX
 // ─────────────────────────────────────────────────────────────────────────────
-// These five flags are read as plain text by components/hardwareone/CMakeLists.txt
-// to decide which .cpp files get compiled:
+// These flags are read as plain text by components/hardwareone/CMakeLists.txt
+// to decide which .cpp files get compiled (a coarse first-pass filter — the
+// per-file `#if` guards remain the fine-grained control inside each .cpp):
 //
-//     NETWORK_FEATURE_LEVEL, WEB_FEATURE_LEVEL,
-//     ENABLE_MQTT, ENABLE_HTTPS, ENABLE_ONDEVICE_LLM
+//     NETWORK_FEATURE_LEVEL, WEB_FEATURE_LEVEL, I2C_FEATURE_LEVEL,
+//     DISPLAY_TYPE,
+//     ENABLE_MQTT, ENABLE_HTTPS, ENABLE_ONDEVICE_LLM,
+//     ENABLE_MAPS, ENABLE_AUTOMATION, ENABLE_EDGE_IMPULSE, ENABLE_GAMES
 //
 // The regex expects EXACTLY this shape, on a single non-indented line:
 //     #define NAME <integer>
@@ -32,63 +48,43 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 
-// I2C Feature Level: Controls OLED and I2C sensors
-//   0 = DISABLED   - No I2C (max memory savings)
-//   1 = OLED_ONLY  - OLED display only
-//   2 = STANDALONE - OLED + Gamepad
-//   3 = FULL       - OLED + all sensors
-//   4 = CUSTOM     - Use individual sensor flags below
-#define I2C_FEATURE_LEVEL       4
+// =============================================================================
+// 1. CONNECTIVITY  —  WiFi / HTTP / ESP-NOW / web pages
+// =============================================================================
+// The network stack and any service that runs on top of it. WiFi must be on
+// for HTTP / ESP-NOW; the per-page web flags only matter when HTTP_SERVER is
+// also on. Disabling a web page removes its .cpp from the binary entirely;
+// runtime toggles can't bring it back.
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CUSTOM SENSOR SELECTION (only used when I2C_FEATURE_LEVEL = 4)
-// ─────────────────────────────────────────────────────────────────────────────
-// Enable/disable individual sensors for fine-grained control.
-// This allows combinations like OLED + Gamepad + GPS without heavy sensors.
-#if I2C_FEATURE_LEVEL == 4
-  #define CUSTOM_ENABLE_OLED        0   // SSD1306 OLED display
-  #define CUSTOM_ENABLE_GAMEPAD     0   // Adafruit Seesaw gamepad
-  #define CUSTOM_ENABLE_GPS         0   // PA1010D GPS module
-  #define CUSTOM_ENABLE_IMU         0   // BNO055 IMU (uses ~1KB RAM)
-  #define CUSTOM_ENABLE_TOF         0   // VL53L4CX ToF sensor
-  #define CUSTOM_ENABLE_THERMAL     0   // MLX90640 thermal camera (uses ~3KB RAM)
-  #define CUSTOM_ENABLE_APDS        0   // APDS9960 gesture/proximity
-  #define CUSTOM_ENABLE_FM_RADIO    0   // RDA5807 FM radio
-  #define CUSTOM_ENABLE_RTC         0   // DS3231 precision RTC
-  #define CUSTOM_ENABLE_PRESENCE    0   // STHS34PF80 IR presence/motion
-  #define CUSTOM_ENABLE_SERVO       0   // PCA9685 servo controller
-#endif
-
-
-// Network Feature Level: Controls WiFi/ESP-NOW
-//   0 = DISABLED   - No networking
-//   1 = WIFI_ONLY  - WiFi without HTTP server
-//   2 = WIFI_HTTP  - WiFi + HTTP server
+// Network level: WiFi / HTTP / ESP-NOW combinations.
+//   0 = DISABLED    - No networking
+//   1 = WIFI_ONLY   - WiFi without HTTP server
+//   2 = WIFI_HTTP   - WiFi + HTTP server
 //   3 = WIFI_ESPNOW - WiFi + HTTP + ESP-NOW mesh
-//   4 = CUSTOM     - Use individual CUSTOM_ENABLE_NET_* flags below
+//   4 = CUSTOM      - Use individual CUSTOM_ENABLE_NET_* flags below
 #define NETWORK_FEATURE_LEVEL   4
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CUSTOM NETWORK SELECTION (only used when NETWORK_FEATURE_LEVEL = 4)
-// ─────────────────────────────────────────────────────────────────────────────
 #if NETWORK_FEATURE_LEVEL == 4
   #define CUSTOM_ENABLE_NET_WIFI     1   // WiFi connectivity
   #define CUSTOM_ENABLE_NET_HTTP     1   // HTTP server (web UI)
   #define CUSTOM_ENABLE_NET_ESPNOW   1   // ESP-NOW mesh networking
 #endif
 
-// Web Feature Level: Controls HTTP server + which web modules are compiled
-//   0 = DISABLED   - No HTTP server, no web UI
-//   1 = CORE       - Core UI only (no extra modules)
-//   2 = STANDARD   - Core UI + common modules
-//   3 = FULL       - Core UI + all modules
-//   4 = CUSTOM     - Use individual CUSTOM_ENABLE_WEB_* flags below
+// Web level: which feature pages compile in.
+//   0 = DISABLED  - No HTTP server, no web UI
+//   1 = CORE      - Core UI only (no extra modules)
+//   2 = STANDARD  - Core UI + common modules
+//   3 = FULL      - Core UI + all modules
+//   4 = CUSTOM    - Use individual CUSTOM_ENABLE_WEB_* flags below
 #define WEB_FEATURE_LEVEL       4
 
 #if WEB_FEATURE_LEVEL == 4
+  // Per-page compile-time gates. Each maps to one WebPage_*.cpp file. A page
+  // also auto-disables when its dependency is missing (e.g. WEB_SPEECH needs
+  // ENABLE_ESP_SR, WEB_ESPNOW needs ENABLE_ESPNOW) — see DERIVED rules below.
   #define CUSTOM_ENABLE_WEB_SENSORS    1
   #define CUSTOM_ENABLE_WEB_BLUETOOTH  1
-  #define CUSTOM_ENABLE_WEB_SPEECH     0
+  #define CUSTOM_ENABLE_WEB_SPEECH     1
   #define CUSTOM_ENABLE_WEB_ESPNOW     1
   #define CUSTOM_ENABLE_WEB_BOND       1
   #define CUSTOM_ENABLE_WEB_MQTT       0
@@ -96,78 +92,122 @@
   #define CUSTOM_ENABLE_WEB_MAPS       0
 #endif
 
-// Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640)
-//   0 = Disabled, 1 = Enabled
+// HTTPS: TLS-encrypted HTTP. Self-signed or uploaded certs in /system/certs/.
+// Runtime toggle: gSettings.httpsEnabled (admin can flip via web UI).
+// Auto-disabled if HTTP server is off.
+#define ENABLE_HTTPS            1
+
+// MQTT: Home Assistant integration via MQTT broker.
+// Auto-disabled if WiFi is off.
+#define ENABLE_MQTT             0
+
+
+// =============================================================================
+// 2. I/O HARDWARE  —  Sensors, display, camera, mic, battery
+// =============================================================================
+// On-board peripherals. The I2C system covers the sensor breakouts and the
+// OLED; camera, microphone, and battery monitor are independent.
+
+// I2C level: bus + sensor selection.
+//   0 = DISABLED   - No I2C (max memory savings)
+//   1 = OLED_ONLY  - OLED display only
+//   2 = STANDALONE - OLED + Gamepad
+//   3 = FULL       - OLED + all sensors
+//   4 = CUSTOM     - Use individual CUSTOM_ENABLE_* flags below
+#define I2C_FEATURE_LEVEL       4
+
+#if I2C_FEATURE_LEVEL == 4
+  // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
+  #define CUSTOM_ENABLE_OLED        0   // SSD1306 OLED display
+  #define CUSTOM_ENABLE_GAMEPAD     0   // Adafruit Seesaw gamepad
+  #define CUSTOM_ENABLE_GPS         0   // PA1010D GPS module
+  #define CUSTOM_ENABLE_IMU         0   // BNO055 IMU (~1KB RAM)
+  #define CUSTOM_ENABLE_TOF         0   // VL53L4CX ToF sensor
+  #define CUSTOM_ENABLE_THERMAL     0   // MLX90640 thermal camera (~3KB RAM)
+  #define CUSTOM_ENABLE_APDS        0   // APDS9960 gesture/proximity
+  #define CUSTOM_ENABLE_FM_RADIO    0   // RDA5807 FM radio
+  #define CUSTOM_ENABLE_RTC         0   // DS3231 precision RTC
+  #define CUSTOM_ENABLE_PRESENCE    0   // STHS34PF80 IR presence/motion
+  #define CUSTOM_ENABLE_SERVO       0   // PCA9685 servo controller
+#endif
+
+// Display: hardware display selection. 0 forces all OLED_*.cpp out of the
+// build via the CMakeLists DISPLAY_TYPE gate.
+//   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
+#define DISPLAY_TYPE            0
+
+// Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640).
 #ifndef ENABLE_CAMERA_SENSOR
 #define ENABLE_CAMERA_SENSOR    1
 #endif
 
-// Microphone: PDM microphone via I2S
-//   0 = Disabled, 1 = Enabled
+// Microphone: PDM microphone via I2S.
 #define ENABLE_MICROPHONE_SENSOR 1
 
-// Battery Monitoring: ADC-based LiPo battery voltage monitoring
-//   0 = Disabled (shows "USB" on OLED), 1 = Enabled (Feather ESP32 GPIO35)
-//   Disable this if your board doesn't have battery monitoring hardware
-#define ENABLE_BATTERY_MONITOR 0
+// Battery monitor: ADC-based LiPo voltage. Disable when board has no
+// battery-monitoring hardware (shows "USB" on OLED/web instead).
+#define ENABLE_BATTERY_MONITOR  0
 
-// Bluetooth: BLE server with GATT services
-//   0 = Disabled, 1 = Enabled
+
+// =============================================================================
+// 3. WIRELESS PERIPHERALS  —  BLE radio + G2 Glasses
+// =============================================================================
+// BLE radio and the devices it talks to over GATT.
+
+// Bluetooth: BLE server with GATT services. Required for G2 Glasses below.
 #define ENABLE_BLUETOOTH        1
 
-// Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses
-//   0 = Disabled, 1 = Enabled (requires ENABLE_BLUETOOTH=1)
-//   When enabled, ESP32 can act as BLE central to connect to glasses
-//   This is mutually exclusive with phone BLE connections at runtime
+// Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses.
+// ESP32 acts as BLE central; mutually exclusive with phone BLE at runtime.
+// Auto-disabled if ENABLE_BLUETOOTH=0.
 #define ENABLE_G2_GLASSES       1
 
-// MQTT: Home Assistant integration via MQTT broker
-//   0 = Disabled, 1 = Enabled (requires ENABLE_WIFI=1)
-#define ENABLE_MQTT             0
 
-// HTTPS: TLS-encrypted HTTP server using self-signed or uploaded certificates
-//   0 = Disabled, 1 = Enabled (requires ENABLE_HTTP_SERVER)
-//   When enabled, the device can serve over HTTPS if certs are present in /system/certs/
-//   Runtime toggle: gSettings.httpsEnabled (admin can enable/disable via web UI)
-#define ENABLE_HTTPS            1
+// =============================================================================
+// 4. ON-DEVICE SUBSYSTEMS  —  Inference, voice, scheduling
+// =============================================================================
+// Independent subsystems. Some compose with other domains: bonded mode rides
+// on ESP-NOW (Connectivity); the speech web page surfaces ESP-SR.
 
-// Edge Impulse: ML inference
-//   0 = Disabled, 1 = Enabled
+// Speech recognition (ESP-SR): WakeNet wake word + MultiNet command grammar.
+// Runtime: srstart / srstop. Web page: CUSTOM_ENABLE_WEB_SPEECH (Connectivity).
+#define ENABLE_ESP_SR           1
+
+// Edge Impulse: ML inference engine.
 #define ENABLE_EDGE_IMPULSE     0
 
-// On-Device LLM: Tiny transformer inference (Llama + GPT-2 architectures)
-//   0 = Disabled, 1 = Enabled
-//   Requires ESP32-S3 with PSRAM. Model files (LLM1 format) from LittleFS or SD.
-//   Supports FP32 and INT8 quantization. Typical PSRAM usage: 1–4 MB at runtime.
+// On-device LLM: tiny transformer inference (Llama + GPT-2 architectures).
+// Requires ESP32-S3 + PSRAM. Models load from LittleFS or SD. FP32 / INT8.
+// Typical PSRAM usage: 1–4 MB at runtime.
 #define ENABLE_ONDEVICE_LLM     0
 #if ENABLE_ONDEVICE_LLM
 // Max KV / attention context in tokens (0 = use checkpoint's seq_len only).
-// Lower uses less PSRAM; must cover prompt + max generation. Typical tiny models: 256–1024.
+// Lower uses less PSRAM; must cover prompt + max generation.
+// Typical tiny models: 256–1024.
 #define LLM_MAX_CONTEXT_LEN     1024
 #endif
 
-#define ENABLE_ESP_SR           0
-
-// Games: Browser-based games web page
-//   0 = Disabled, 1 = Enabled
-#define ENABLE_GAMES            0
-
-// Maps: Offline maps and waypoints web page
-//   0 = Disabled, 1 = Enabled
-#define ENABLE_MAPS             0
-
-// Bond Mode: Two-device bonded pair via ESP-NOW (master/worker)
-//   0 = Disabled, 1 = Enabled (requires ENABLE_ESPNOW=1)
-//   Master shows remote UI for worker features, manifest cached in LittleFS
-#define ENABLE_BONDED_MODE      1
-
-// Automation: Scheduled tasks and conditional command system
-//   0 = Disabled, 1 = Enabled
+// Automation: scheduled tasks + conditional commands.
 #define ENABLE_AUTOMATION       0
 
-// Display Type: Hardware display selection
-//   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
-#define DISPLAY_TYPE            0
+// Bonded mode: two-device bonded pair via ESP-NOW (master/worker).
+// Master shows remote UI for worker features, manifest cached in LittleFS.
+// Auto-disabled if ESP-NOW is off.
+#define ENABLE_BONDED_MODE      1
+
+
+// =============================================================================
+// 5. USER-FACING APPS  —  Composed features shipped as products
+// =============================================================================
+// Higher-level features built on top of the subsystems above. Each gates
+// its own web page and (where applicable) OLED mode.
+
+// Games: browser-based games web page.
+#define ENABLE_GAMES            0
+
+// Maps: offline maps and waypoints web page.
+#define ENABLE_MAPS             0
+
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
 // ║                    END OF USER CONFIGURATION                              ║
@@ -386,12 +426,25 @@
   #define ENABLE_WEB_MAPS       CUSTOM_ENABLE_WEB_MAPS
 #endif
 
+// =============================================================================
+// CROSS-FEATURE DEPENDENCY OVERRIDES
+// =============================================================================
+// Force-disable consequents when their prerequisites are missing. These rules
+// run AFTER the per-domain derivations above so a CUSTOM-level user choice
+// (e.g. CUSTOM_ENABLE_WEB_SPEECH=1) gets transparently zeroed when the
+// dependency it needs (ENABLE_ESP_SR) is itself off.
+//
+// Each block is a single "if prerequisite missing → drop dependents" rule.
+// Adding a new rule: pick the right prerequisite, undef + redefine each
+// dependent. Don't try to predict combinations — let the rules compose.
+
+// HTTP server gates the entire web surface.
 #if !ENABLE_HTTP_SERVER
   #undef ENABLE_WEB_SENSORS
   #undef ENABLE_WEB_BLUETOOTH
   #undef ENABLE_WEB_SPEECH
   #undef ENABLE_WEB_ESPNOW
-  #undef ENABLE_WEB_PAIR
+  #undef ENABLE_WEB_BOND
   #undef ENABLE_WEB_MQTT
   #undef ENABLE_WEB_GAMES
   #undef ENABLE_WEB_MAPS
@@ -405,21 +458,25 @@
   #define ENABLE_WEB_MAPS       0
 #endif
 
+// HTTPS rides on top of HTTP server.
 #if !ENABLE_HTTP_SERVER && ENABLE_HTTPS
   #undef ENABLE_HTTPS
   #define ENABLE_HTTPS 0
 #endif
 
+// Bluetooth web page needs the BLE radio.
 #if !ENABLE_BLUETOOTH
   #undef ENABLE_WEB_BLUETOOTH
   #define ENABLE_WEB_BLUETOOTH 0
 #endif
 
+// Speech web page needs the SR engine.
 #if !ENABLE_ESP_SR
   #undef ENABLE_WEB_SPEECH
   #define ENABLE_WEB_SPEECH 0
 #endif
 
+// ESP-NOW pages (mesh + bonded-mode UI) need the ESP-NOW transport.
 #if !ENABLE_ESPNOW
   #undef ENABLE_WEB_ESPNOW
   #undef ENABLE_WEB_BOND
@@ -427,28 +484,29 @@
   #define ENABLE_WEB_BOND 0
 #endif
 
+// MQTT web page needs the MQTT subsystem.
 #if !ENABLE_MQTT
   #undef ENABLE_WEB_MQTT
   #define ENABLE_WEB_MQTT 0
 #endif
 
+// Apps web pages mirror their app flag.
 #if !ENABLE_GAMES
   #undef ENABLE_WEB_GAMES
   #define ENABLE_WEB_GAMES 0
 #endif
-
 #if !ENABLE_MAPS
   #undef ENABLE_WEB_MAPS
   #define ENABLE_WEB_MAPS 0
 #endif
 
-// Force ENABLE_MQTT off if WiFi is disabled (MQTT requires WiFi)
+// MQTT subsystem itself requires WiFi (broker is over TCP).
 #if !ENABLE_WIFI
   #undef ENABLE_MQTT
   #define ENABLE_MQTT 0
 #endif
 
-// Force ENABLE_BONDED_MODE off if ESP-NOW is disabled (Bond Mode requires ESP-NOW)
+// Bonded mode rides on ESP-NOW.
 #if !ENABLE_ESPNOW
   #undef ENABLE_BONDED_MODE
   #define ENABLE_BONDED_MODE 0

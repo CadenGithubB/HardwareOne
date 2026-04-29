@@ -297,6 +297,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9);display:flex;align-items:center;gap:0.5rem'>"
     "<span class='status-indicator status-disabled' id='conn-bt-dot'></span>Bluetooth</div>"
     "<div class='sys-card-row'><span>Running:</span><strong id='conn-bt-running'>--</strong></div>"
+    "<div class='sys-card-row'><span>Mode:</span><strong id='conn-bt-mode'>--</strong></div>"
     "<div class='sys-card-row'><span>State:</span><strong id='conn-bt-state'>--</strong></div>"
     "</div>",
     HTTPD_RESP_USE_STRLEN);
@@ -392,6 +393,8 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
             "var bt=c.bluetooth;"
             "window.Dash.setIndicator('conn-bt-dot',!!bt.running);"
             "window.Dash.setText('conn-bt-running',bt.running?'Yes':'No');"
+            "var modeTxt=(bt.mode==='client')?'Client (G2)':((bt.mode==='server')?'Server':(bt.mode||'--'));"
+            "window.Dash.setText('conn-bt-mode',modeTxt);"
             "window.Dash.setText('conn-bt-state',bt.state||'--');"
           "}"
           "if(c.webserver){"
