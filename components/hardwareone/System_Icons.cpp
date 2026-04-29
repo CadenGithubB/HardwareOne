@@ -1,4 +1,14 @@
+#include "System_BuildConfig.h"
 #include "System_Icons.h"
+
+// Embedded PNG icons (~94 KB rodata). Consumed by:
+//   * HTTP `/api/icon` handler (web UI file browser, status panels)
+//   * OLED file browser, menu, and UI chrome
+//   * Filename-extension-to-icon mapping in System_Utils.cpp
+// Skip the entire payload when neither surface is in this build —
+// keeps headless / no-display variants from paying for assets they
+// can't render.
+#if ENABLE_HTTP_SERVER || ENABLE_OLED_DISPLAY
 
 // Auto-generated icon arrays
 // DO NOT EDIT - regenerate with icons/scripts/generate_icons.py
@@ -7624,3 +7634,19 @@ const EmbeddedIcon* findEmbeddedIcon(const char* name) {
   }
   return nullptr;
 }
+
+#else  // !(ENABLE_HTTP_SERVER || ENABLE_OLED_DISPLAY)
+
+// Headless-build stubs. Callers in System_Utils.cpp (iconExists, file
+// extension mapping) reference findEmbeddedIcon unconditionally; without
+// these the link fails with undefined symbol. Empty table + null lookup
+// is the right behaviour — there are no icons to find when there's no
+// surface that could render them.
+extern const EmbeddedIcon EMBEDDED_ICONS[] = {};
+extern const size_t EMBEDDED_ICONS_COUNT = 0;
+
+const EmbeddedIcon* findEmbeddedIcon(const char* /*name*/) {
+  return nullptr;
+}
+
+#endif  // ENABLE_HTTP_SERVER || ENABLE_OLED_DISPLAY

@@ -20,6 +20,7 @@
 #include "Optional_EvenG2.h"
 #include "System_FileManager.h"
 #include "System_Debug.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR
 
 // -----------------------------------------------------------------------------
 // State
@@ -32,13 +33,16 @@ static FileManager* gFilesFm = nullptr;
 #define FILES_MAX_ROWS  (FILE_MANAGER_MAX_CACHED_ITEMS + 4)
 #define FILES_ROW_LEN   48
 
-static char        gFilesRows[FILES_MAX_ROWS][FILES_ROW_LEN];
-static const char* gFilesRowPtrs[FILES_MAX_ROWS];
+// Row buffers in PSRAM — ~3.3 KB total. Filled by buildRows() from the
+// page worker, read by the BLE notify task; both run in regular task
+// context, no DMA / ISR access.
+EXT_RAM_BSS_ATTR static char        gFilesRows[FILES_MAX_ROWS][FILES_ROW_LEN];
+EXT_RAM_BSS_ATTR static const char* gFilesRowPtrs[FILES_MAX_ROWS];
 static size_t      gFilesRowCount = 0;
 
 // Indices we keep so taps know what idx → which directory entry. -1 = not a
 // real entry (back / parent / blank).
-static int  gFilesEntryForRow[FILES_MAX_ROWS];
+EXT_RAM_BSS_ATTR static int  gFilesEntryForRow[FILES_MAX_ROWS];
 
 // File-info overlay duration. The deadline lives in the centralized
 // g2LensState (see Optional_EvenG2.h G2LensState). When the deadline
@@ -91,7 +95,7 @@ static size_t buildRows() {
 
   FileManager* fm = ensureFm();
   if (!fm) {
-    strncpy(gFilesRows[0], "<- Back", FILES_ROW_LEN);
+    strncpy(gFilesRows[0], "<- Main Menu", FILES_ROW_LEN);
     gFilesRowPtrs[0] = gFilesRows[0];
     strncpy(gFilesRows[1], "(file mgr init failed)", FILES_ROW_LEN);
     gFilesRowPtrs[1] = gFilesRows[1];
@@ -104,8 +108,10 @@ static size_t buildRows() {
 
   size_t row = 0;
 
-  // Row 0: back to main menu.
-  strncpy(gFilesRows[row], "<- Back", FILES_ROW_LEN);
+  // Row 0: back. At root we exit Files entirely; in a subdir we'd go up
+  // one level — but ".. (up)" is a separate row that handles parent
+  // navigation, so the "Back" tap consistently exits Files for now.
+  strncpy(gFilesRows[row], "<- Main Menu", FILES_ROW_LEN);
   gFilesRows[row][FILES_ROW_LEN - 1] = '\0';
   gFilesRowPtrs[row] = gFilesRows[row];
   row++;
@@ -192,7 +198,7 @@ static void showFileInfo(const FileEntry& e) {
   static char sizeRow[FILES_ROW_LEN];
   static char typeRow[FILES_ROW_LEN];
   static const char* rows[5];
-  rows[0] = "<- Back";
+  rows[0] = "<- Files";   // back to the directory listing
   snprintf(nameRow, sizeof(nameRow), "name %s", e.name);
   snprintf(sizeRow, sizeof(sizeRow), "size %s", sizeStr);
   snprintf(typeRow, sizeof(typeRow), "type %s", ext);

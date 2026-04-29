@@ -44,8 +44,10 @@
 #include "Optional_EvenG2.h"
 #include "System_Settings.h"
 #include "System_Debug.h"
+#include "System_MemUtil.h"   // PSRAM_JSON_DOC
 #include "G2_Page_Common.h"
 #include <ArduinoJson.h>
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR
 
 // -----------------------------------------------------------------------------
 // Navigation + view state
@@ -89,16 +91,17 @@ static size_t        gEntryPage    = 0;                 // 0-based page index fo
 
 // Buffer sized for the largest list-mode view. JSON view doesn't use
 // this buffer at all — it goes through g2ShowTextPage directly with a
-// String built on the heap.
-static char        gRows[SET_TOTAL_MODULES_ROWS][SET_ROW_LEN];
-static const char* gRowPtrs[SET_TOTAL_MODULES_ROWS];
+// String built on the heap. PSRAM-resident — no DMA / ISR access.
+EXT_RAM_BSS_ATTR static char        gRows[SET_TOTAL_MODULES_ROWS][SET_ROW_LEN];
+EXT_RAM_BSS_ATTR static const char* gRowPtrs[SET_TOTAL_MODULES_ROWS];
 
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
 
-static void writeBackRow() {
-  strncpy(gRows[0], "<- Back", SET_ROW_LEN);
+static void writeBackRow(const char* label) {
+  const char* lbl = (label && label[0]) ? label : "<- Back";
+  strncpy(gRows[0], lbl, SET_ROW_LEN);
   gRows[0][SET_ROW_LEN - 1] = '\0';
   gRowPtrs[0] = gRows[0];
 }
@@ -176,7 +179,7 @@ static int    gPageNextRow        = -1;    // row idx of "Next >>" if shown, els
 static size_t gPageStartIdx       = 0;     // registry index of first module on this page
 
 static size_t buildModuleRows() {
-  writeBackRow();                  // row 0
+  writeBackRow("<- Main Menu");    // row 0 — out of Settings to hijack root
   writeViewToggleRow(1);           // row 1 — view switcher
 
   size_t modCount = 0;
@@ -229,7 +232,7 @@ static int moduleIdxFromTap(uint32_t idx) {
 // -----------------------------------------------------------------------------
 
 static size_t buildEntryRowsPretty(int moduleIdx) {
-  writeBackRow();
+  writeBackRow("<- Settings");    // back to module list
 
   size_t modCount = 0;
   const SettingsModule** mods = getSettingsModules(modCount);
@@ -483,8 +486,8 @@ static bool showModuleJsonViaTextWidget(int moduleIdx) {
   // Reuse the same builder the web UI calls so on-lens JSON matches
   // /settings exactly. Wasteful — allocates the full tree just to
   // pull one section's slice — but this is a manual user action, not
-  // a hot path.
-  DynamicJsonDocument fullDoc(8192);
+  // a hot path. PSRAM-allocated so the 8 KB peak doesn't bite DRAM.
+  PSRAM_JSON_DOC(fullDoc);
   buildSettingsJsonDoc(fullDoc, /*excludePasswords=*/ true);
 
   String s;

@@ -389,7 +389,7 @@ void initDebugSystem() {
 
   // Allocate debug buffer in PSRAM
   if (!gDebugBuffer) {
-    gDebugBuffer = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "debug.buf");
+    gDebugBuffer = (char*)ps_alloc(GLOBAL_DEBUG_BUFFER_SIZE, AllocPref::PreferPSRAM, "debug.buf");
     if (!gDebugBuffer) {
       if (gOutputFlags & OUTPUT_SERIAL) {
         Serial.println("FATAL: Failed to allocate debug buffer");
@@ -443,7 +443,7 @@ void initDebugSystem() {
     BaseType_t result = xTaskCreate(
       debugOutputTask,
       "debug_out",
-      DEBUG_OUT_STACK_WORDS,  // ~12KB stack (reduced from 16KB - peak usage 8KB)
+      DEBUG_OUT_STACK_WORDS,  // ~14KB stack — see System_TaskUtils.h for sizing rationale
       nullptr,
       TASK_PRIORITY_LOW,
       &gDebugOutputTaskHandle
@@ -491,7 +491,7 @@ void initDebugSystem() {
 
 bool ensureDebugBuffer() {
   if (!gDebugBuffer) {
-    gDebugBuffer = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "debug.buf");
+    gDebugBuffer = (char*)ps_alloc(GLOBAL_DEBUG_BUFFER_SIZE, AllocPref::PreferPSRAM, "debug.buf");
     if (!gDebugBuffer) {
       if (gOutputFlags & OUTPUT_SERIAL) {
         Serial.println("ERROR: Failed to allocate debug buffer");

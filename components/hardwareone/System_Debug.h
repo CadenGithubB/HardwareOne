@@ -295,6 +295,15 @@ bool ensureDebugBuffer();
 extern DebugFlagMask gDebugFlags;  // 128-bit debug flags
 extern DebugSubFlags gDebugSubFlags;
 extern char* gDebugBuffer;
+// gDebugBuffer is the shared scratch space for cmd_* return strings.
+// 1 KB is plenty: any single return string is capped at DEBUG_MSG_SIZE
+// (256 B) by the message-queue pipeline anyway, so commands that need
+// long output stream line-by-line via broadcastOutput() and return a
+// short status string (see cmd_taskstats / cmd_heapowners). The
+// existing snprintf(gDebugBuffer, 1024, ...) callsites all produce
+// status strings under 256 B in practice — the 1024 cap was already
+// a no-op upper bound.
+constexpr size_t GLOBAL_DEBUG_BUFFER_SIZE = 1024;
 extern QueueHandle_t gDebugOutputQueue;
 extern QueueHandle_t gDebugFreeQueue;
 extern volatile unsigned long gDebugDropped;

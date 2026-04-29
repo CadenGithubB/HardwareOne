@@ -282,6 +282,33 @@ static constexpr G2ContainerGeom G2_GEOM_SMALL  = { 148,  79, 280, 130 };
 static constexpr G2ContainerGeom G2_GEOM_TOP_HALF    = {   8,   8, 560, 130 };
 static constexpr G2ContainerGeom G2_GEOM_BOTTOM_HALF = {   8, 150, 560, 130 };
 
+// Half-width presets — useful when pairing two surfaces side-by-side
+// (e.g. text on the left, icon/image on the right). 8 px margin on the
+// outer edges; inner edge butts the lens midline so two LEFT/RIGHT
+// containers tile cleanly.
+static constexpr G2ContainerGeom G2_GEOM_LEFT_HALF   = {   8,   8, 280, 272 };
+static constexpr G2ContainerGeom G2_GEOM_RIGHT_HALF  = { 288,   8, 280, 272 };
+
+// Quadrant presets — quarter-lens rectangles. Together they tile the
+// full lens with consistent 8 px edge margins and 0 px interior gutter.
+// Useful for 2x2 layouts and combo (text + image) tests.
+static constexpr G2ContainerGeom G2_GEOM_QUAD_TL = {   8,   8, 280, 136 };
+static constexpr G2ContainerGeom G2_GEOM_QUAD_TR = { 288,   8, 280, 136 };
+static constexpr G2ContainerGeom G2_GEOM_QUAD_BL = {   8, 144, 280, 136 };
+static constexpr G2ContainerGeom G2_GEOM_QUAD_BR = { 288, 144, 280, 136 };
+
+// Thin horizontal strips — status-bar (top) and footer (bottom). About
+// one row tall on the firmware's default font. Pair with a TOP_HALF /
+// BOTTOM_HALF body container for a header-plus-content layout.
+static constexpr G2ContainerGeom G2_GEOM_STATUS_BAR = {   8,   8, 560,  40 };
+static constexpr G2ContainerGeom G2_GEOM_FOOTER     = {   8, 240, 560,  40 };
+
+// Stress shapes for geometry-edge testing — extreme aspect ratios that
+// production pages don't use, but that exercise the firmware's container
+// layout against unusual rectangles.
+static constexpr G2ContainerGeom G2_GEOM_TALL_NARROW = {  16,   8,  96, 272 };
+static constexpr G2ContainerGeom G2_GEOM_CENTER_DOT  = { 224, 104, 128,  80 };
+
 // ── High-level message builders ──────────────────────────────────────────────
 // Each builder writes the complete envelope (preamble..CRC) into `out` and
 // returns the total byte count. `seq` is the transport seq byte; `magic` is

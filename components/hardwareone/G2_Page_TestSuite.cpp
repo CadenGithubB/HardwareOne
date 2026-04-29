@@ -5,15 +5,21 @@
 //
 //   ROOT:
 //     <- Back
-//     BLE Actions >>
+//     BLE Tests >>
 //     Transport Tests >>
 //     AI Panel Tests >>
 //     Character Tests >>
+//     Display Tests >>
+//     Image Tests >>
 //
-//   ACTIONS (drill from ROOT):
+//   BLE (drill from ROOT):
 //     <- Back
-//     Reconnect Ring
-//     (room for future BLE-recovery actions)
+//     Reconnect Ring / Disconnect Ring (force)
+//     Hide AI Card
+//     Toggle Mic Feed
+//     G2 AutoConnect: ON|OFF (toggles boot auto-reconnect, persisted)
+//     Heap Snapshot (log) / Lens State Dump (log)
+//     (further BLE-recovery / diagnostic taps go here)
 //
 //   BRACKETS (drill from ROOT):
 //     <- Back
@@ -82,10 +88,14 @@
 
 #include "Optional_EvenG2.h"
 #include "Optional_EvenG2_Ring.h"   // g2RingDisconnect/Connect
+#include "BLE_Peers.h"              // gBlePeerData / autoConnect toggle
+#include "System_Settings.h"        // setSetting() — persists autoConnect to NVS
 #include "System_Debug.h"
+#include "System_MemUtil.h"   // ps_alloc
 #include "G2_Page_Common.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR
 #include <stdlib.h>
 #include <string.h>
 
@@ -149,17 +159,48 @@ static constexpr size_t kBracketCount =
 // -----------------------------------------------------------------------------
 // BLE / diagnostic actions
 // -----------------------------------------------------------------------------
+// Each row is a one-tap operation against the live BLE state. Skew safe:
+// we deliberately omit anything that would tear down the lens hijack the
+// user is currently inside (g2Disconnect, g2ClearDisplay) — those would
+// kill this menu mid-tap. Use the web UI or CLI for those.
 struct TestAction {
   const char* label;
   void (*handler)();
+  // Optional state-aware label. When non-null, buildActionsRows calls this
+  // and uses the result instead of `label`. Lets toggles render their
+  // current state on the lens (e.g. "G2 AutoConnect: ON").
+  const char* (*dynLabel)();
 };
 
 static void actionReconnectRing();
+static void actionDisconnectRing();
+static void actionHideAICard();
+static void actionToggleMicFeed();
+static void actionToggleG2AutoReconnect();
+static const char* labelG2AutoReconnect();
+static void actionHeapSnapshot();
+static void actionLensStateDump();
 
 static const TestAction kActions[] = {
-  // Force-disconnect then reconnect the R1 ring. Useful when the ring
-  // BLE link enters a wedged state.
-  { "Reconnect Ring", actionReconnectRing },
+  // Ring recovery. Reconnect = force-disconnect + connect; Disconnect-
+  // only is the half-step useful when the next op (e.g. Temples Scan
+  // from the web UI) would re-trigger the connect itself.
+  { "Reconnect Ring",        actionReconnectRing,         nullptr },
+  { "Disconnect Ring",       actionDisconnectRing,        nullptr },
+  // Front-pane card cleanup. AI card normally auto-dismisses after ~10 s
+  // but a stuck card (firmware-side) blocks subsequent CTRL ENTER calls
+  // with errorCode=7. Force-EXIT clears it.
+  { "Hide AI Card",          actionHideAICard,            nullptr },
+  // Toggle the G2 → ESP-SR mic feed without going through the Settings
+  // page. Logs new state + AFE ring depth + overrun count.
+  { "Toggle Mic Feed",       actionToggleMicFeed,         nullptr },
+  // Toggle the G2 auto-reconnect-at-boot flag (gBlePeerData[G2].autoConnect).
+  // Dynamic label shows ON/OFF; tap flips it and re-renders the page.
+  { "G2 AutoConnect",        actionToggleG2AutoReconnect, labelG2AutoReconnect },
+  // Pure-log entries: snapshot diagnostic state to serial. Safe — no BLE
+  // I/O — useful as canaries before/after a heavy probe.
+  { "Heap Snapshot (log)",   actionHeapSnapshot,          nullptr },
+  { "Lens State Dump (log)", actionLensStateDump,         nullptr },
 };
 static constexpr size_t kActionCount =
   sizeof(kActions) / sizeof(kActions[0]);
@@ -416,9 +457,12 @@ static void aiWorker(void* arg) {
 // Spawn the worker so the BLE notify task that ran the tap handler can
 // return immediately. Heap-allocates args; the worker frees them.
 static void spawnAIWorker(AIWorkerKind kind, const char* heading, const char* body) {
-  AIWorkerArgs* a = (AIWorkerArgs*)malloc(sizeof(AIWorkerArgs));
+  // Worker args (~340 B) — short-lived, freed by the worker. PSRAM is fine
+  // here: the worker reads them once at task entry, no DMA / ISR.
+  AIWorkerArgs* a = (AIWorkerArgs*)ps_alloc(sizeof(AIWorkerArgs),
+                                            AllocPref::PreferPSRAM, "g2.test.aiArgs");
   if (!a) {
-    DEBUG_G2F("[G2] AI test: malloc failed (kind=%u)", (unsigned)kind);
+    DEBUG_G2F("[G2] AI test: ps_alloc failed (kind=%u)", (unsigned)kind);
     return;
   }
   a->kind = kind;
@@ -478,25 +522,55 @@ static const char kDisplaySampleText[] =
 struct DisplayVariant {
   const char*           label;
   const G2ContainerGeom geom;
-  bool                  isList;  // false = TEXT widget, true = LIST widget
 };
 
-static const DisplayVariant kDisplayVariants[] = {
-  // TEXT widget at varying sizes. Same content; compare visual extents.
-  { "Full (576x288)",        G2_GEOM_FULL,        false },
-  { "Large (560x272)",       G2_GEOM_LARGE,       false },
-  { "Medium (480x240)",      G2_GEOM_MEDIUM,      false },
-  { "Small (280x130 ctr)",   G2_GEOM_SMALL,       false },
-  { "Top half (560x130)",    G2_GEOM_TOP_HALF,    false },
-  { "Bottom half (560x130)", G2_GEOM_BOTTOM_HALF, false },
-
-  // LIST widget for the same sizes that fit a list. Compares the
-  // selection-rectangle chrome against the flowing-text view above.
-  { "List: Large",           G2_GEOM_LARGE,       true  },
-  { "List: Small",           G2_GEOM_SMALL,       true  },
+// Geometry variants — same set used by both the TEXT and LIST submenus
+// so a tester can A/B the two widget types at every preset without
+// scrolling between two visually different lists. Order: full → halves
+// → quadrants → strips → stress shapes. Production presets first, then
+// stress shapes pinned to the bottom.
+static const DisplayVariant kGeomVariants[] = {
+  { "Full (576x288)",         G2_GEOM_FULL         },
+  { "Large (560x272)",        G2_GEOM_LARGE        },
+  { "Medium (480x240)",       G2_GEOM_MEDIUM       },
+  { "Small (280x130 ctr)",    G2_GEOM_SMALL        },
+  { "Top half (560x130)",     G2_GEOM_TOP_HALF     },
+  { "Bottom half (560x130)",  G2_GEOM_BOTTOM_HALF  },
+  { "Left half (280x272)",    G2_GEOM_LEFT_HALF    },
+  { "Right half (280x272)",   G2_GEOM_RIGHT_HALF   },
+  { "Quad TL (280x136)",      G2_GEOM_QUAD_TL      },
+  { "Quad TR (280x136)",      G2_GEOM_QUAD_TR      },
+  { "Quad BL (280x136)",      G2_GEOM_QUAD_BL      },
+  { "Quad BR (280x136)",      G2_GEOM_QUAD_BR      },
+  { "Status bar (576x40)",    G2_GEOM_STATUS_BAR   },
+  { "Footer (576x40)",        G2_GEOM_FOOTER       },
+  { "Tall narrow (96x272)",   G2_GEOM_TALL_NARROW  },
+  { "Center dot (128x80)",    G2_GEOM_CENTER_DOT   },
 };
-static constexpr size_t kDisplayVariantCount =
-  sizeof(kDisplayVariants) / sizeof(kDisplayVariants[0]);
+static constexpr size_t kGeomVariantCount =
+  sizeof(kGeomVariants) / sizeof(kGeomVariants[0]);
+
+// Combo (text + image) tests live in their own sub-list and route to the
+// existing "mixed" image probes (Q16/Q17/Q18). These probes exercise a
+// single CreateStartUpPageContainer carrying both ListObject and
+// ImageObject children at varying spatial positions — exactly the
+// "combo display at various positions" shape this submenu surfaces.
+//
+// Kept here (not moved out of Image Tests/Streaming) because the same
+// probe is interesting from two angles: spatial layout (this menu) and
+// streaming-lifecycle (the Image Tests menu). Two paths, one probe.
+struct ComboTest {
+  const char* label;
+  ImgProbeFn  probe;
+};
+
+static const ComboTest kComboTests[] = {
+  { "List + Image side-by-side", g2ProbeImageQ16MixedSideBySide },
+  { "List + Image overlap",      g2ProbeImageQ17MixedOverlap    },
+  { "List + Icon (80x80 TR)",    g2ProbeImageQ18MixedIcon       },
+};
+static constexpr size_t kComboTestCount =
+  sizeof(kComboTests) / sizeof(kComboTests[0]);
 
 // Track whether the lens is currently rendering a display test
 // (LIST or TEXT) versus the Display Tests picker. Used by the
@@ -517,7 +591,7 @@ static bool gInDisplayTest = false;
 
 enum TestLevel : uint8_t {
   TEST_LEVEL_ROOT                  = 0,  // category list
-  TEST_LEVEL_ACTIONS               = 1,  // BLE-action sub-menu
+  TEST_LEVEL_ACTIONS               = 1,  // BLE Tests sub-menu
   TEST_LEVEL_BRACKETS              = 2,  // size-bracket sub-menu
   TEST_LEVEL_PAYLOAD               = 3,  // synthetic payload after a bracket tap
   TEST_LEVEL_AI                    = 4,  // AI panel variant sub-menu
@@ -527,11 +601,14 @@ enum TestLevel : uint8_t {
   TEST_LEVEL_CHARS_UNICODE         = 8,  // Unicode category picker
   TEST_LEVEL_CHARS_UNICODE_LIST    = 9,  // tests within selected Unicode category
   TEST_LEVEL_CHARS_UNICODE_PAYLOAD = 10, // showing one Unicode set
-  TEST_LEVEL_DISPLAY               = 11, // Display geometry / container variants
-  TEST_LEVEL_IMAGE                 = 12, // Image-probes router (3 sub-levels below)
-  TEST_LEVEL_IMAGE_CONFIRMED       = 13, // Doc + Q4 canary + Q6 + Q6b
-  TEST_LEVEL_IMAGE_STATIC          = 14, // Q9 frame builder
-  TEST_LEVEL_IMAGE_STREAMING       = 15, // Q11 then Q10
+  TEST_LEVEL_DISPLAY               = 11, // Display Tests parent (TEXT/LIST/Combo picker)
+  TEST_LEVEL_DISPLAY_TEXT          = 12, // Display Tests / TEXT widget geom variants
+  TEST_LEVEL_DISPLAY_LIST          = 13, // Display Tests / LIST widget geom variants
+  TEST_LEVEL_DISPLAY_COMBO         = 14, // Display Tests / Combo (text + image)
+  TEST_LEVEL_IMAGE                 = 15, // Image Tests router (3 sub-levels below)
+  TEST_LEVEL_IMAGE_CONFIRMED       = 16, // Doc + Q4 canary + Q6 + Q6b
+  TEST_LEVEL_IMAGE_STATIC          = 17, // Q9 frame builder
+  TEST_LEVEL_IMAGE_STREAMING       = 18, // Q11 then Q10
 };
 static TestLevel gTestLevel = TEST_LEVEL_ROOT;
 
@@ -551,8 +628,12 @@ static TestLevel gTestLevel = TEST_LEVEL_ROOT;
 // pushes it past ~250 B pb.
 #define TEST_VISIBLE_LIST_ROWS  10
 
-static char        gRows[TEST_MAX_ROWS][TEST_ROW_LEN];
-static const char* gRowPtrs[TEST_MAX_ROWS];
+// Row buffers live in PSRAM via EXT_RAM_BSS_ATTR — they're 7.6 KB +
+// 0.4 KB total and only touched from regular task context (page
+// builders + BLE notify task), no DMA, no ISR. Frees ~8 KB of DRAM
+// for BLE/WiFi/HTTP runtime allocations.
+EXT_RAM_BSS_ATTR static char        gRows[TEST_MAX_ROWS][TEST_ROW_LEN];
+EXT_RAM_BSS_ATTR static const char* gRowPtrs[TEST_MAX_ROWS];
 
 // Pagination state for char-test lists. One page var per paginated
 // level — they're independent (you can be on page 2 of ASCII and page
@@ -570,8 +651,12 @@ static size_t gTsPageStartIdx    = 0;
 // Row helpers
 // -----------------------------------------------------------------------------
 
-static void writeBackRow() {
-  strncpy(gRows[0], "<- Back", TEST_ROW_LEN);
+// Each level passes its own label so the back row tells the user where
+// the tap actually returns to (e.g. "<- Main Menu" at the testsuite root,
+// "<- Tests" at level-1 submenus, "<- Image" inside Image/Static).
+static void writeBackRow(const char* label) {
+  const char* lbl = (label && label[0]) ? label : "<- Back";
+  strncpy(gRows[0], lbl, TEST_ROW_LEN);
   gRows[0][TEST_ROW_LEN - 1] = '\0';
   gRowPtrs[0] = gRows[0];
 }
@@ -582,9 +667,9 @@ static void writeBackRow() {
 
 // ROOT: category list
 static size_t buildRootRows() {
-  writeBackRow();
+  writeBackRow("<- Main Menu");
   size_t row = 1;
-  snprintf(gRows[row], TEST_ROW_LEN, "BLE Actions >>");
+  snprintf(gRows[row], TEST_ROW_LEN, "BLE Tests >>");
   gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Transport Tests >>");
   gRowPtrs[row] = gRows[row]; row++;
@@ -594,7 +679,7 @@ static size_t buildRootRows() {
   gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Display Tests >>");
   gRowPtrs[row] = gRows[row]; row++;
-  snprintf(gRows[row], TEST_ROW_LEN, "Image Probes >>");
+  snprintf(gRows[row], TEST_ROW_LEN, "Image Tests >>");
   gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
@@ -605,7 +690,7 @@ static size_t buildRootRows() {
 // Streaming for multi-frame swap tests. Keeps each sub-list short
 // enough to fit one screen on the lens.
 static size_t buildImageRows() {
-  writeBackRow();
+  writeBackRow("<- Tests");
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "Confirmed / Diagnostic >>"); gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Static Tests >>");           gRowPtrs[row] = gRows[row]; row++;
@@ -618,7 +703,7 @@ static size_t buildImageRows() {
 // pipeline is alive; Q6 is the proven full-tile renderer; Q6b is the
 // tap-to-dismiss variant for testing the dismiss mechanism.
 static size_t buildImageConfirmedRows() {
-  writeBackRow();
+  writeBackRow("<- Image");
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "Doc: dump verified schema");        gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q4: CREATE-image canary");          gRowPtrs[row] = gRows[row]; row++;
@@ -632,7 +717,7 @@ static size_t buildImageConfirmedRows() {
 // surface for feature code. QGlizzy is a hardcoded-path SD-load canary.
 // Q12 is the full-display 4-tile probe (first multi-tile CREATE).
 static size_t buildImageStaticRows() {
-  writeBackRow();
+  writeBackRow("<- Image");
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "Q9: frame builder (3-band)");       gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "QGlizzy: SD /PICTURES/test.bmp");   gRowPtrs[row] = gRows[row]; row++;
@@ -644,7 +729,7 @@ static size_t buildImageStaticRows() {
 // frames. Q11 first (simplest); Q10 only if Q11 leaves visible tearing.
 // Q13/Q14 are live-update pipelines paced by `g2liverate` (CLI).
 static size_t buildImageStreamingRows() {
-  writeBackRow();
+  writeBackRow("<- Image");
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "Q11: simple swap (A->B)");          gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q10: clear-then-push (A->blk->B)"); gRowPtrs[row] = gRows[row]; row++;
@@ -656,6 +741,11 @@ static size_t buildImageStreamingRows() {
   snprintf(gRows[row], TEST_ROW_LEN, "Q18: mixed list+icon (80x80)");     gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
+
+// Forward-decl: imgProbeWorker (below) rebuilds whichever sub-list the
+// probe was launched from, including DISPLAY_COMBO whose builder is
+// defined further down with the rest of the Display section.
+static size_t buildDisplayComboRows();
 
 // -----------------------------------------------------------------------------
 // Image-probe worker (defined here so it can call buildImageRows + gRowPtrs)
@@ -684,6 +774,7 @@ static void imgProbeWorker(void* arg) {
     case TEST_LEVEL_IMAGE_CONFIRMED:  n = buildImageConfirmedRows();  break;
     case TEST_LEVEL_IMAGE_STATIC:     n = buildImageStaticRows();     break;
     case TEST_LEVEL_IMAGE_STREAMING:  n = buildImageStreamingRows();  break;
+    case TEST_LEVEL_DISPLAY_COMBO:    n = buildDisplayComboRows();    break;
     default:                          n = buildImageRows();           break;
   }
   g2ShowListPage(gRowPtrs, n);
@@ -704,12 +795,41 @@ static bool spawnImgProbeWorker(ImgProbeFn fn) {
   return true;
 }
 
-// DISPLAY: list of geometry / widget-type variants.
+// DISPLAY: parent picker — TEXT / LIST / Combo.
 static size_t buildDisplayRows() {
-  writeBackRow();
+  writeBackRow("<- Tests");
   size_t row = 1;
-  for (size_t i = 0; i < kDisplayVariantCount && row < TEST_MAX_ROWS; i++) {
-    strncpy(gRows[row], kDisplayVariants[i].label, TEST_ROW_LEN);
+  snprintf(gRows[row], TEST_ROW_LEN, "TEXT widget >>");
+  gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "LIST widget >>");
+  gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Combo (Text + Image) >>");
+  gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// DISPLAY/TEXT and DISPLAY/LIST share the same kGeomVariants table;
+// the dispatcher picks which g2Show* path to invoke based on level.
+// Both builders just emit the geom labels — same content, different
+// run target.
+static size_t buildGeomVariantRows() {
+  writeBackRow("<- Display");
+  size_t row = 1;
+  for (size_t i = 0; i < kGeomVariantCount && row < TEST_MAX_ROWS; i++) {
+    strncpy(gRows[row], kGeomVariants[i].label, TEST_ROW_LEN);
+    gRows[row][TEST_ROW_LEN - 1] = '\0';
+    gRowPtrs[row] = gRows[row];
+    row++;
+  }
+  return row;
+}
+
+// DISPLAY/COMBO: text + image layout tests, routed to existing Q-probes.
+static size_t buildDisplayComboRows() {
+  writeBackRow("<- Display");
+  size_t row = 1;
+  for (size_t i = 0; i < kComboTestCount && row < TEST_MAX_ROWS; i++) {
+    strncpy(gRows[row], kComboTests[i].label, TEST_ROW_LEN);
     gRows[row][TEST_ROW_LEN - 1] = '\0';
     gRowPtrs[row] = gRows[row];
     row++;
@@ -720,51 +840,77 @@ static size_t buildDisplayRows() {
 // Exit handler for TEXT-widget display tests. Wired as the exitFn arg
 // to g2ShowTextPage so any tap (USER_ACTIVITY post-grace, SysEvent
 // CLICK / SCROLL / DOUBLE_CLICK, TextEvent CLICK) returns the user to
-// the Display Tests picker. Without this, the TEXT widget had no exit
-// route and left the firmware to timeout-tear-down at ~8 s with
+// the appropriate sub-picker. Without this, the TEXT widget had no
+// exit route and left the firmware to timeout-tear-down at ~8 s with
 // "Connection lost" on the lens.
+//
+// Routes back to whichever sub-level was active when the test
+// launched: DISPLAY_TEXT for TEXT-widget tests, DISPLAY_LIST is
+// unreachable here (LIST tests use the dispatcher path). Falls back
+// to DISPLAY parent if state is somehow stale.
 static void displayTestExitToPicker() {
   gInDisplayTest = false;
-  size_t n = buildDisplayRows();
+  size_t n;
+  switch (gTestLevel) {
+    case TEST_LEVEL_DISPLAY_TEXT:
+    case TEST_LEVEL_DISPLAY_LIST:
+      n = buildGeomVariantRows();
+      break;
+    default:
+      gTestLevel = TEST_LEVEL_DISPLAY;
+      n = buildDisplayRows();
+      break;
+  }
   g2ShowListPage(gRowPtrs, n);
-  DEBUG_G2F("[G2] Display test: exit → picker (%u rows)", (unsigned)n);
+  DEBUG_G2F("[G2] Display test: exit → picker (level=%u rows=%u)",
+            (unsigned)gTestLevel, (unsigned)n);
 }
 
-static void runDisplayVariant(size_t idx) {
-  if (idx >= kDisplayVariantCount) return;
-  const DisplayVariant& v = kDisplayVariants[idx];
+// Run a TEXT-widget test at the geom indexed by `idx` in kGeomVariants.
+static void runDisplayTextVariant(size_t idx) {
+  if (idx >= kGeomVariantCount) return;
+  const DisplayVariant& v = kGeomVariants[idx];
   gInDisplayTest = true;
-  if (v.isList) {
-    // Split kDisplaySampleText on newlines into rows so the LIST
-    // widget has one row per line. First row is "<- Back" — tapping
-    // it routes through the dispatcher's TEST_LEVEL_DISPLAY case
-    // which checks gInDisplayTest and returns to the picker.
-    static const char* rows[7];
-    rows[0] = "<- Back";
-    rows[1] = "Display geometry test";
-    rows[2] = "Line 2: lorem ipsum";
-    rows[3] = "Line 3: 0123456789";
-    rows[4] = "Line 4: ABCDEFGHIJKLM";
-    rows[5] = "Line 5: abcdefghijklm";
-    rows[6] = "Line 6: short last";
-    g2ShowListPage(rows, 7, v.geom);
-  } else {
-    // TEXT widget — wire the exit handler so tap/scroll dismisses to
-    // the picker. tapFn=nullptr keeps the legacy "any tap exits" UX.
-    g2ShowTextPage(kDisplaySampleText, v.geom, displayTestExitToPicker);
-  }
-  DEBUG_G2F("[G2] Display test: '%s' (%s, %ux%u @ %u,%u)",
-            v.label, v.isList ? "LIST" : "TEXT",
-            (unsigned)v.geom.w, (unsigned)v.geom.h,
+  // TEXT widget — wire the exit handler so tap/scroll dismisses to
+  // the picker. tapFn=nullptr keeps the legacy "any tap exits" UX.
+  g2ShowTextPage(kDisplaySampleText, v.geom, displayTestExitToPicker);
+  DEBUG_G2F("[G2] Display test: TEXT '%s' (%ux%u @ %u,%u)",
+            v.label, (unsigned)v.geom.w, (unsigned)v.geom.h,
+            (unsigned)v.geom.x, (unsigned)v.geom.y);
+}
+
+// Run a LIST-widget test at the geom indexed by `idx` in kGeomVariants.
+static void runDisplayListVariant(size_t idx) {
+  if (idx >= kGeomVariantCount) return;
+  const DisplayVariant& v = kGeomVariants[idx];
+  gInDisplayTest = true;
+  // Split kDisplaySampleText on newlines into rows so the LIST
+  // widget has one row per line. First row is "<- Back" — tapping
+  // it routes through the dispatcher's TEST_LEVEL_DISPLAY_LIST case
+  // which checks gInDisplayTest and returns to the picker.
+  static const char* rows[7];
+  rows[0] = "<- Back";
+  rows[1] = "Display geometry test";
+  rows[2] = "Line 2: lorem ipsum";
+  rows[3] = "Line 3: 0123456789";
+  rows[4] = "Line 4: ABCDEFGHIJKLM";
+  rows[5] = "Line 5: abcdefghijklm";
+  rows[6] = "Line 6: short last";
+  g2ShowListPage(rows, 7, v.geom);
+  DEBUG_G2F("[G2] Display test: LIST '%s' (%ux%u @ %u,%u)",
+            v.label, (unsigned)v.geom.w, (unsigned)v.geom.h,
             (unsigned)v.geom.x, (unsigned)v.geom.y);
 }
 
 // ACTIONS: list of one-shot diagnostic operations
 static size_t buildActionsRows() {
-  writeBackRow();
+  writeBackRow("<- Tests");
   size_t row = 1;
   for (size_t i = 0; i < kActionCount && row < TEST_MAX_ROWS; i++) {
-    strncpy(gRows[row], kActions[i].label, TEST_ROW_LEN);
+    const char* lbl = kActions[i].dynLabel ? kActions[i].dynLabel()
+                                           : kActions[i].label;
+    if (!lbl) lbl = kActions[i].label;
+    strncpy(gRows[row], lbl, TEST_ROW_LEN);
     gRows[row][TEST_ROW_LEN - 1] = '\0';
     gRowPtrs[row] = gRows[row];
     row++;
@@ -774,7 +920,7 @@ static size_t buildActionsRows() {
 
 // CHARS: ASCII / Unicode picker.
 static size_t buildCharsRows() {
-  writeBackRow();
+  writeBackRow("<- Tests");
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "ASCII >>");
   gRowPtrs[row] = gRows[row]; row++;
@@ -789,8 +935,8 @@ static size_t buildCharsRows() {
 // pb budget. Sub-menu organisation (ASCII vs Unicode/Blocks/...) is
 // orthogonal — pagination kicks in within a category as a fallback.
 static size_t buildCharTestList(const CharTest* tests, size_t count,
-                                size_t& page) {
-  writeBackRow();
+                                size_t& page, const char* backLabel) {
+  writeBackRow(backLabel);
   G2Paginator p = g2PaginatorPrepare(count, TEST_VISIBLE_LIST_ROWS, page);
   gTsPageStartIdx = p.startIdx;
 
@@ -810,12 +956,13 @@ static size_t buildCharTestList(const CharTest* tests, size_t count,
 }
 
 static size_t buildCharsAsciiRows() {
-  return buildCharTestList(kAsciiCharTests, kAsciiCharTestCount, gAsciiPage);
+  return buildCharTestList(kAsciiCharTests, kAsciiCharTestCount, gAsciiPage,
+                           "<- Chars");
 }
 
 // Unicode picker — three category rows.
 static size_t buildCharsUnicodeRows() {
-  writeBackRow();
+  writeBackRow("<- Chars");
   size_t row = 1;
   for (size_t i = 0; i < kUnicodeCategoryCount && row < TEST_MAX_ROWS; i++) {
     snprintf(gRows[row], TEST_ROW_LEN, "%s >>", kUnicodeCategories[i].label);
@@ -828,11 +975,11 @@ static size_t buildCharsUnicodeRows() {
 // Unicode list for the currently selected category.
 static size_t buildCharsUnicodeListRows() {
   if (gUnicodeCategoryIdx >= kUnicodeCategoryCount) {
-    writeBackRow();
+    writeBackRow("<- Unicode");
     return 1;
   }
   const UnicodeCategory& c = kUnicodeCategories[gUnicodeCategoryIdx];
-  return buildCharTestList(c.tests, c.count, gUnicodeListPage);
+  return buildCharTestList(c.tests, c.count, gUnicodeListPage, "<- Unicode");
 }
 
 // Render one character-set test on the lens. Two rows of content under
@@ -840,8 +987,9 @@ static size_t buildCharsUnicodeListRows() {
 // is truncated at TEST_ROW_LEN-1; UTF-8 is byte-safe for strncpy as long
 // as we don't truncate mid-codepoint, which we avoid by keeping samples
 // shorter than TEST_ROW_LEN.
-static size_t buildCharsPayloadRowsFrom(const CharTest* tests, size_t count, size_t idx) {
-  writeBackRow();
+static size_t buildCharsPayloadRowsFrom(const CharTest* tests, size_t count,
+                                        size_t idx, const char* backLabel) {
+  writeBackRow(backLabel);
   size_t row = 1;
   if (idx >= count) return row;
   snprintf(gRows[row], TEST_ROW_LEN, "[%s]", tests[idx].label);
@@ -853,21 +1001,22 @@ static size_t buildCharsPayloadRowsFrom(const CharTest* tests, size_t count, siz
 }
 
 static size_t buildCharsAsciiPayloadRows(size_t idx) {
-  return buildCharsPayloadRowsFrom(kAsciiCharTests, kAsciiCharTestCount, idx);
+  return buildCharsPayloadRowsFrom(kAsciiCharTests, kAsciiCharTestCount, idx,
+                                   "<- ASCII");
 }
 
 static size_t buildCharsUnicodePayloadRows(size_t idx) {
   if (gUnicodeCategoryIdx >= kUnicodeCategoryCount) {
-    writeBackRow();
+    writeBackRow("<- Unicode");
     return 1;
   }
   const UnicodeCategory& c = kUnicodeCategories[gUnicodeCategoryIdx];
-  return buildCharsPayloadRowsFrom(c.tests, c.count, idx);
+  return buildCharsPayloadRowsFrom(c.tests, c.count, idx, "<- Unicode");
 }
 
 // AI: list of front-pane AI panel pipeline variants
 static size_t buildAIRows() {
-  writeBackRow();
+  writeBackRow("<- Tests");
   size_t row = 1;
   for (size_t i = 0; i < kAIVariantCount && row < TEST_MAX_ROWS; i++) {
     strncpy(gRows[row], kAIVariants[i].label, TEST_ROW_LEN);
@@ -880,7 +1029,7 @@ static size_t buildAIRows() {
 
 // BRACKETS: list of size-bracket payload tests
 static size_t buildBracketsRows() {
-  writeBackRow();
+  writeBackRow("<- Tests");
   size_t row = 1;
   for (size_t i = 0; i < kBracketCount && row < TEST_MAX_ROWS; i++) {
     strncpy(gRows[row], kBrackets[i].label, TEST_ROW_LEN);
@@ -899,7 +1048,7 @@ static size_t buildBracketsRows() {
 // etc.) adds ~30 bytes the loop accounts for via a fixed initial
 // budget.
 static size_t buildPayloadRows(size_t targetBytes) {
-  writeBackRow();
+  writeBackRow("<- Transport");
 
   const size_t fixedOverhead  = 40;
   const size_t perRowOverhead = 3;
@@ -953,10 +1102,13 @@ void g2BuildTestSuiteInfo(char* out, size_t cap) {
   s += "Test Suite (root)\n";
   s += "Tap a group, then a specific test.\n";
   s += "\n";
-  s += "BLE Actions:\n";
+  s += "BLE Tests:\n";
   for (size_t i = 0; i < kActionCount; i++) {
+    const char* lbl = kActions[i].dynLabel ? kActions[i].dynLabel()
+                                           : kActions[i].label;
+    if (!lbl) lbl = kActions[i].label;
     char line[48];
-    snprintf(line, sizeof(line), " %s\n", kActions[i].label);
+    snprintf(line, sizeof(line), " %s\n", lbl);
     s += line;
     if (s.length() > cap - 32) break;
   }
@@ -995,10 +1147,17 @@ void g2BuildTestSuiteInfo(char* out, size_t cap) {
     }
     if (s.length() > cap - 32) break;
   }
-  s += "Display Tests:\n";
-  for (size_t i = 0; i < kDisplayVariantCount; i++) {
+  s += "Display Tests (TEXT widget / LIST widget — same geom variants):\n";
+  for (size_t i = 0; i < kGeomVariantCount; i++) {
     char line[48];
-    snprintf(line, sizeof(line), " %s\n", kDisplayVariants[i].label);
+    snprintf(line, sizeof(line), " %s\n", kGeomVariants[i].label);
+    s += line;
+    if (s.length() > cap - 32) break;
+  }
+  s += "Display Tests (Combo: text + image):\n";
+  for (size_t i = 0; i < kComboTestCount; i++) {
+    char line[48];
+    snprintf(line, sizeof(line), " %s\n", kComboTests[i].label);
     s += line;
     if (s.length() > cap - 32) break;
   }
@@ -1039,7 +1198,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         gTestLevel = TEST_LEVEL_ACTIONS;
         size_t n = buildActionsRows();
         g2ShowListPage(gRowPtrs, n);
-        DEBUG_G2F("[G2] Test suite: BLE Actions sub-menu (rows=%u)",
+        DEBUG_G2F("[G2] Test suite: BLE Tests sub-menu (rows=%u)",
                   (unsigned)n);
         return;
       }
@@ -1080,7 +1239,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         gTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
         g2ShowListPage(gRowPtrs, n);
-        DEBUG_G2F("[G2] Test suite: Image Probes sub-menu (rows=%u)",
+        DEBUG_G2F("[G2] Test suite: Image Tests sub-menu (rows=%u)",
                   (unsigned)n);
         return;
       }
@@ -1089,24 +1248,86 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     }
 
     case TEST_LEVEL_DISPLAY: {
+      // Parent picker: TEXT widget / LIST widget / Combo. No tests fire
+      // from here — each row drills into a sub-list whose dispatcher
+      // case actually runs the tests.
+      if (idx == 0) {
+        gTestLevel = TEST_LEVEL_ROOT;
+        size_t n = buildRootRows();
+        g2ShowListPage(gRowPtrs, n);
+        return;
+      }
+      size_t n = 0;
+      switch (idx) {
+        case 1:
+          gTestLevel = TEST_LEVEL_DISPLAY_TEXT;
+          gInDisplayTest = false;
+          n = buildGeomVariantRows();
+          break;
+        case 2:
+          gTestLevel = TEST_LEVEL_DISPLAY_LIST;
+          gInDisplayTest = false;
+          n = buildGeomVariantRows();
+          break;
+        case 3:
+          gTestLevel = TEST_LEVEL_DISPLAY_COMBO;
+          n = buildDisplayComboRows();
+          break;
+        default:
+          DEBUG_G2F("[G2] Test suite DISPLAY: tap idx=%u out of range",
+                    (unsigned)idx);
+          return;
+      }
+      g2ShowListPage(gRowPtrs, n);
+      return;
+    }
+
+    case TEST_LEVEL_DISPLAY_TEXT: {
       // Two sub-states under this level:
-      //   gInDisplayTest=false → user is on the picker (9-entry list).
-      //                          idx=0 → back to ROOT.
-      //                          idx 1..N → drill into a test.
+      //   gInDisplayTest=false → user is on the geom-variant picker.
+      //                          idx=0 → back to DISPLAY parent.
+      //                          idx 1..N → drill into a TEXT test.
+      //   gInDisplayTest=true  → not reachable here; TEXT tests exit
+      //                          via displayTestExitToPicker() which
+      //                          rebuilds the picker and clears the
+      //                          flag before any tap arrives.
+      if (idx == 0) {
+        if (gInDisplayTest) {
+          displayTestExitToPicker();
+        } else {
+          gTestLevel = TEST_LEVEL_DISPLAY;
+          size_t n = buildDisplayRows();
+          g2ShowListPage(gRowPtrs, n);
+        }
+        return;
+      }
+      if (gInDisplayTest) return;
+      const size_t pos = idx - 1;
+      if (pos >= kGeomVariantCount) {
+        DEBUG_G2F("[G2] Test suite DISPLAY/TEXT: tap idx=%u out of range",
+                  (unsigned)idx);
+        return;
+      }
+      runDisplayTextVariant(pos);
+      return;
+    }
+
+    case TEST_LEVEL_DISPLAY_LIST: {
+      // Two sub-states under this level (mirrors DISPLAY_TEXT):
+      //   gInDisplayTest=false → user is on the geom-variant picker.
+      //                          idx=0 → back to DISPLAY parent.
+      //                          idx 1..N → drill into a LIST test.
       //   gInDisplayTest=true  → a LIST display test is on screen.
       //                          idx=0 → back to picker.
       //                          other idx → no-op (the rows are
       //                                       sample content, not
       //                                       actions).
-      // TEXT display tests don't dispatch through here — they have
-      // their own exitFn (displayTestExitToPicker) that handles the
-      // gesture-to-exit routing via the gTextView* hooks.
       if (idx == 0) {
         if (gInDisplayTest) {
           displayTestExitToPicker();
         } else {
-          gTestLevel = TEST_LEVEL_ROOT;
-          size_t n = buildRootRows();
+          gTestLevel = TEST_LEVEL_DISPLAY;
+          size_t n = buildDisplayRows();
           g2ShowListPage(gRowPtrs, n);
         }
         return;
@@ -1116,12 +1337,38 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         return;
       }
       const size_t pos = idx - 1;
-      if (pos >= kDisplayVariantCount) {
-        DEBUG_G2F("[G2] Test suite DISPLAY: tap idx=%u out of range",
+      if (pos >= kGeomVariantCount) {
+        DEBUG_G2F("[G2] Test suite DISPLAY/LIST: tap idx=%u out of range",
                   (unsigned)idx);
         return;
       }
-      runDisplayVariant(pos);
+      runDisplayListVariant(pos);
+      return;
+    }
+
+    case TEST_LEVEL_DISPLAY_COMBO: {
+      // Combo (Text + Image): each row routes to a Q-probe that
+      // exercises a mixed CreateStartUpPageContainer (list + image)
+      // at a specific spatial layout. Probes are async — spawn the
+      // worker; the user keeps the menu visible until results land.
+      if (idx == 0) {
+        gTestLevel = TEST_LEVEL_DISPLAY;
+        size_t n = buildDisplayRows();
+        g2ShowListPage(gRowPtrs, n);
+        return;
+      }
+      const size_t pos = idx - 1;
+      if (pos >= kComboTestCount) {
+        DEBUG_G2F("[G2] Test suite DISPLAY/COMBO: tap idx=%u out of range",
+                  (unsigned)idx);
+        return;
+      }
+      DEBUG_G2F("[G2] Display combo: '%s' → spawning probe worker",
+                kComboTests[pos].label);
+      if (!spawnImgProbeWorker(kComboTests[pos].probe)) {
+        size_t n = buildDisplayComboRows();
+        g2ShowListPage(gRowPtrs, n);
+      }
       return;
     }
 
@@ -1445,6 +1692,12 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       }
       DEBUG_G2F("[G2] Test suite: action '%s'", kActions[pos].label);
       if (kActions[pos].handler) kActions[pos].handler();
+      // Re-render the page so state-aware entries (dynLabel) reflect the
+      // new value immediately without making the tester back out.
+      if (kActions[pos].dynLabel) {
+        size_t n = buildActionsRows();
+        g2ShowListPage(gRowPtrs, n);
+      }
       return;
     }
 
@@ -1552,6 +1805,96 @@ static void actionReconnectRing() {
   // shows the actions menu (we never tore it down), so there's
   // nothing to redraw. The action's outcome surfaces in serial
   // and via the web UI's ring-status panel.
+}
+
+// Force-disconnect the ring without re-connecting. The half-step that
+// Reconnect-Ring does first; useful when the next op (e.g. a Temples
+// Scan from the web UI) will re-trigger connect itself, or for
+// isolating disconnect-side bugs. No heap guard — disconnect doesn't
+// allocate; only connect does.
+static void actionDisconnectRing() {
+  if (!g2RingIsConnected()) {
+    DEBUG_G2F("[G2] Disconnect Ring: already disconnected — no-op");
+    return;
+  }
+  DEBUG_G2F("[G2] Disconnect Ring: dropping connection (heap=%u)",
+            (unsigned)ESP.getFreeHeap());
+  g2RingDisconnect();
+}
+
+// Force-dismiss the front-pane EvenAI card. Card normally auto-
+// dismisses after ~10 s but a stuck card (firmware-side) blocks
+// subsequent CTRL ENTER calls with errorCode=7. Sends CTRL EXIT,
+// which is a no-op if no card is active. Single envelope — runs on
+// the BLE notify task without a worker.
+static void actionHideAICard() {
+  const bool ok = g2HideEvenAICard();
+  DEBUG_G2F("[G2] Hide AI Card: %s", ok ? "sent CTRL EXIT" : "send failed");
+}
+
+// Toggle the G2 → ESP-SR mic feed. Logs the new state plus AFE ring
+// depth + cumulative overrun count so a tester can correlate "I just
+// turned this on" with "samples are arriving" without leaving the
+// glasses. Doesn't redraw the menu — log-only.
+static void actionToggleMicFeed() {
+  const bool wasOn = g2MicAfeFeedIsActive();
+  const bool turnOn = !wasOn;
+  const bool ok = g2MicSetAfeFeedActive(turnOn);
+  DEBUG_G2F("[G2] Toggle Mic Feed: %s → %s (%s); ring=%u overruns=%u",
+            wasOn  ? "ON"  : "OFF",
+            turnOn ? "ON"  : "OFF",
+            ok     ? "ok"  : "FAILED",
+            (unsigned)g2MicAfeRingDepth(),
+            (unsigned)g2MicAfeOverrunCount());
+}
+
+// Toggle the G2 auto-reconnect-at-boot flag. Backed by the same
+// gBlePeerData[BLE_PEER_G2_GLASSES].autoConnect that `bleautoconnect
+// g2-glasses [on|off]` writes — setSetting() persists it to NVS, so
+// the choice survives reboot. Lets a tester flip auto-reconnect from
+// the lens (e.g. before flashing, or to stop the boot-time scan when
+// debugging another peer) without a host CLI.
+static void actionToggleG2AutoReconnect() {
+  BlePeerData& d = gBlePeerData[BLE_PEER_G2_GLASSES];
+  const bool wasOn = d.autoConnect;
+  setSetting(d.autoConnect, !wasOn);
+  DEBUG_G2F("[G2] AutoConnect: %s -> %s",
+            wasOn ? "ON" : "OFF",
+            d.autoConnect ? "ON" : "OFF");
+}
+
+// Buffer is static so the returned pointer stays valid until the next
+// buildActionsRows() copies it into gRows. buildActionsRows is the only
+// caller, so a single shared buffer is fine.
+static const char* labelG2AutoReconnect() {
+  static char buf[TEST_ROW_LEN];
+  const bool on = gBlePeerData[BLE_PEER_G2_GLASSES].autoConnect;
+  snprintf(buf, sizeof(buf), "G2 AutoConnect: %s", on ? "ON" : "OFF");
+  return buf;
+}
+
+// Snapshot heap state to serial. Pure log — no BLE I/O. Useful as a
+// canary before/after a heavy probe to bracket leaks. Includes free
+// + min-ever-free so a single tap shows both current pressure and
+// the worst point this session has hit.
+static void actionHeapSnapshot() {
+  const uint32_t freeNow = ESP.getFreeHeap();
+  const uint32_t minEver = ESP.getMinFreeHeap();
+  DEBUG_G2F("[G2] Heap: free=%u B  min-ever=%u B  used-since-min=%u B",
+            (unsigned)freeNow, (unsigned)minEver,
+            (unsigned)(freeNow > minEver ? freeNow - minEver : 0));
+}
+
+// Dump the consolidated lens-state struct to serial. Useful when
+// debugging hijack lifecycle or container-state desync without
+// running a CLI command from the host. Pure log — no side effects.
+static void actionLensStateDump() {
+  const G2LensState s = g2LensGetState();
+  DEBUG_G2F("[G2] Lens: hijack=%d page=%u containerReady=%d isList=%d "
+            "widgetId=%u overlay=%u",
+            (int)s.hijackActive, (unsigned)s.hijackPage,
+            (int)s.containerReady, (int)s.containerIsList,
+            (unsigned)s.containerWidgetId, (unsigned)s.overlayKind);
 }
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

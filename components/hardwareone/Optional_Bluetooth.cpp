@@ -566,7 +566,12 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
     strncpy(p, pstart, sizeof(p) - 1);
     p[sizeof(p) - 1] = '\0';
     // Defer to cmd_exec_task — isValidUser() uses too much stack for BTC_TASK (see bleLoginAsyncCallback).
-    BleLoginAsyncJob* job = (BleLoginAsyncJob*)malloc(sizeof(BleLoginAsyncJob));
+    // BTC_TASK is a regular FreeRTOS task (not an ISR), so PSRAM-backed
+    // allocations are safe. ps_alloc falls back to internal heap if PSRAM
+    // is exhausted.
+    BleLoginAsyncJob* job = (BleLoginAsyncJob*)ps_alloc(sizeof(BleLoginAsyncJob),
+                                                       AllocPref::PreferPSRAM,
+                                                       "ble.loginAsyncJob");
     if (!job) {
       const char* msg = "Error: out of memory";
       sendBLEResponseToConn(connId, msg, strlen(msg));
@@ -1488,6 +1493,31 @@ BOOL_CMD(blerequireauth, gSettings.bluetoothRequireAuth, "[BLE] Require auth")
 
 const char* getBleModeString() {
   return (gSettings.bleMode == BLE_MODE_G2_CLIENT) ? "client" : "server";
+}
+
+// Aggregate-status helpers: mirror the ESPNow mesh-or-direct pattern so the
+// dashboard sees BLE as "running" whether server mode or G2 client mode is up.
+bool bleSubsystemActive() {
+  if (isBLERunning()) return true;
+#if ENABLE_G2_GLASSES
+  if (isG2ClientInitialized()) return true;
+#endif
+  return false;
+}
+
+const char* bleSubsystemStateString() {
+#if ENABLE_G2_GLASSES
+  // Prefer G2 state when in client mode and the client is up — server may not
+  // even be initialized in that mode.
+  if (gSettings.bleMode == BLE_MODE_G2_CLIENT && isG2ClientInitialized()) {
+    return getG2StateString();
+  }
+#endif
+  if (isBLERunning()) return getBLEStateString();
+#if ENABLE_G2_GLASSES
+  if (isG2ClientInitialized()) return getG2StateString();
+#endif
+  return "uninitialized";
 }
 
 static const char* cmd_blemode(const String& argsInput) {

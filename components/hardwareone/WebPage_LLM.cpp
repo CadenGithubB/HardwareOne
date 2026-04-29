@@ -23,6 +23,7 @@
 #include "System_Debug.h"
 #include "System_Settings.h"
 #include "System_User.h"
+#include "System_MemUtil.h"   // PSRAM_JSON_DOC
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
 #include "WebPage_LLM.h"
@@ -111,7 +112,7 @@ static esp_err_t handleLLMLoad(httpd_req_t* req) {
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"Bad request\"}");
   }
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, body)) {
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"Invalid JSON\"}");
   }
@@ -198,7 +199,7 @@ static esp_err_t handleLLMGenerate(httpd_req_t* req) {
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"bad request\"}");
   }
 
-  JsonDocument doc;
+  PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, body)) {
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"invalid JSON\"}");
   }
@@ -305,7 +306,7 @@ static esp_err_t handleLLMPoll(httpd_req_t* req) {
   bool done = llmIsGenerationDone();
 
   // Serialize with ArduinoJson so token text is properly escaped
-  JsonDocument jdoc;
+  PSRAM_JSON_DOC(jdoc);
   jdoc["done"] = done;
   jdoc["len"]  = llmGetResultLen();
   jdoc["text"] = (n > 0) ? (const char*)chunk : "";

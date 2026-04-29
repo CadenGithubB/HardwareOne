@@ -1,37 +1,84 @@
 set(hw_cfg_file "${CMAKE_CURRENT_LIST_DIR}/System_BuildConfig.h")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${hw_cfg_file}")
 
+# Default values used when the matching regex doesn't fire (file missing,
+# unexpected formatting, etc.). The per-file `#if` guards inside each .cpp
+# are the source of truth for runtime behaviour — these CMake gates only
+# decide which files reach the compiler. A "0" default means "skip it"
+# rather than "include it" so a parse failure is fail-safe (no spurious
+# compile errors) and easy to spot in build output.
 set(HW_CFG_NETWORK_FEATURE_LEVEL 0)
 set(HW_CFG_WEB_FEATURE_LEVEL 0)
+set(HW_CFG_I2C_FEATURE_LEVEL 0)
+set(HW_CFG_DISPLAY_TYPE 0)
 set(HW_CFG_ENABLE_MQTT 0)
 set(HW_CFG_ENABLE_HTTPS 0)
+set(HW_CFG_ENABLE_LLM 0)
+set(HW_CFG_ENABLE_MAPS 0)
+set(HW_CFG_ENABLE_AUTOMATION 0)
+set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
+set(HW_CFG_ENABLE_GAMES 0)
 
 if(EXISTS "${hw_cfg_file}")
     file(READ "${hw_cfg_file}" HW_CFG_CONTENT)
-    string(REGEX MATCH "#define[ \t]+NETWORK_FEATURE_LEVEL[ \t]+([0-9]+)" _net_match "${HW_CFG_CONTENT}")
+
+    # Helper-equivalent: extract `#define NAME <integer>` from the header
+    # and bind it to the matching HW_CFG_* variable. Inline-repeated
+    # because CMake macros over file scope add more rope than this is
+    # worth for ~10 flags.
+    string(REGEX MATCH "#define[ \t]+NETWORK_FEATURE_LEVEL[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_NETWORK_FEATURE_LEVEL "${CMAKE_MATCH_1}")
     endif()
 
-    string(REGEX MATCH "#define[ \t]+WEB_FEATURE_LEVEL[ \t]+([0-9]+)" _web_match "${HW_CFG_CONTENT}")
+    string(REGEX MATCH "#define[ \t]+WEB_FEATURE_LEVEL[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_WEB_FEATURE_LEVEL "${CMAKE_MATCH_1}")
     endif()
 
-    string(REGEX MATCH "#define[ \t]+ENABLE_MQTT[ \t]+([0-9]+)" _mqtt_match "${HW_CFG_CONTENT}")
+    string(REGEX MATCH "#define[ \t]+I2C_FEATURE_LEVEL[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_I2C_FEATURE_LEVEL "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+DISPLAY_TYPE[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_DISPLAY_TYPE "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_MQTT[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_MQTT "${CMAKE_MATCH_1}")
     endif()
 
-    string(REGEX MATCH "#define[ \t]+ENABLE_HTTPS[ \t]+([0-9]+)" _https_match "${HW_CFG_CONTENT}")
+    string(REGEX MATCH "#define[ \t]+ENABLE_HTTPS[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_HTTPS "${CMAKE_MATCH_1}")
     endif()
 
-    set(HW_CFG_ENABLE_LLM 0)
-    string(REGEX MATCH "#define[ \t]+ENABLE_ONDEVICE_LLM[ \t]+([0-9]+)" _llm_match "${HW_CFG_CONTENT}")
+    string(REGEX MATCH "#define[ \t]+ENABLE_ONDEVICE_LLM[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_LLM "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_MAPS[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_MAPS "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_AUTOMATION[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_AUTOMATION "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_EDGE_IMPULSE[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_EDGE_IMPULSE "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_GAMES[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_GAMES "${CMAKE_MATCH_1}")
     endif()
 endif()
 
@@ -40,19 +87,19 @@ if(HW_CFG_NETWORK_FEATURE_LEVEL GREATER_EQUAL 2 AND HW_CFG_WEB_FEATURE_LEVEL GRE
     set(HW_CFG_ENABLE_HTTP_SERVER 1)
 endif()
 
+# Coarse OLED gate: skip every OLED_*.cpp (except OLED_Utils.cpp, which
+# carries the !ENABLE_OLED_DISPLAY stub implementations) when the user
+# has no display hardware OR has disabled the I2C bus entirely. The
+# per-feature .cpp guards (`#if ENABLE_OLED_DISPLAY && ...`) still apply
+# inside each file when the bus + display are present but a sub-feature
+# (ESPNOW, ESP_SR, BONDED_MODE) is off.
+set(HW_CFG_BUILD_OLED_MODES 0)
+if(HW_CFG_DISPLAY_TYPE GREATER 0 AND HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
+    set(HW_CFG_BUILD_OLED_MODES 1)
+endif()
+
 set(hardwareone_srcs
         HardwareOne.cpp
-        i2csensor-apds9960.cpp
-        i2csensor-pa1010d.cpp
-        System_Maps.cpp
-        i2csensor-seesaw.cpp
-        i2csensor-bno055.cpp
-        i2csensor-mlx90640.cpp
-        i2csensor-vl53l4cx.cpp
-        i2csensor-rda5807.cpp
-        i2csensor-ds3231.cpp
-        i2csensor-sths34pf80.cpp
-        System_Automation.cpp
         Optional_Bluetooth.cpp
         BLE_IDF.cpp
         Optional_EvenG2.cpp
@@ -65,6 +112,7 @@ set(hardwareone_srcs
         G2_Page_Settings.cpp
         G2_Page_Files.cpp
         G2_Page_TestSuite.cpp
+        G2_Page_TextEntry.cpp
         System_G2_Protocol.cpp
         System_Battery.cpp
         System_CLI.cpp
@@ -83,7 +131,80 @@ set(hardwareone_srcs
         System_Mutex.cpp
         System_Power.cpp
         System_NeoPixel.cpp
+        # OLED_Utils.cpp stays unconditional: it carries the
+        # !ENABLE_OLED_DISPLAY stub implementations needed by every
+        # consumer when DISPLAY_TYPE=0. The per-mode OLED_Mode_*.cpp
+        # files (handled below) only appear when a display is actually
+        # selected.
         OLED_Utils.cpp
+        System_MemoryMonitor.cpp
+        System_Hardware.cpp
+        System_SensorLogging.cpp
+        System_SensorStubs.cpp
+        System_Settings.cpp
+        System_SetupWizard.cpp
+        System_FeatureRegistry.cpp
+        System_Utils.cpp
+        System_TaskUtils.cpp
+        System_User.cpp
+        System_WiFi.cpp
+        System_Camera_DVP.cpp
+        System_Camera_Video.cpp
+        System_ImageManager.cpp
+        System_ESPSR.cpp
+        System_VFS.cpp
+        System_Microphone.cpp
+        System_SensorRegistry.cpp
+        System_Notifications.cpp
+)
+
+# ── Per-feature source lists (added below based on HW_CFG_* flags) ──
+# Each block follows the existing MQTT/LLM pattern further down. These
+# files all have internal `#if ENABLE_*` guards, so excluding them at
+# CMake level is equivalent to compiling-and-getting-an-empty-.obj —
+# only faster and cleaner in the build graph.
+
+if(HW_CFG_ENABLE_MAPS GREATER 0)
+    list(APPEND hardwareone_srcs System_Maps.cpp)
+    message(STATUS "Maps support ENABLED")
+else()
+    message(STATUS "Maps support DISABLED (skipping System_Maps.cpp)")
+endif()
+
+if(HW_CFG_ENABLE_AUTOMATION GREATER 0)
+    list(APPEND hardwareone_srcs System_Automation.cpp)
+    message(STATUS "Automation support ENABLED")
+else()
+    message(STATUS "Automation support DISABLED (skipping System_Automation.cpp)")
+endif()
+
+if(HW_CFG_ENABLE_EDGE_IMPULSE GREATER 0)
+    list(APPEND hardwareone_srcs System_EdgeImpulse.cpp)
+    message(STATUS "Edge Impulse support ENABLED")
+else()
+    message(STATUS "Edge Impulse support DISABLED (skipping System_EdgeImpulse.cpp)")
+endif()
+
+if(HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
+    list(APPEND hardwareone_srcs
+        i2csensor-apds9960.cpp
+        i2csensor-pa1010d.cpp
+        i2csensor-seesaw.cpp
+        i2csensor-bno055.cpp
+        i2csensor-mlx90640.cpp
+        i2csensor-vl53l4cx.cpp
+        i2csensor-rda5807.cpp
+        i2csensor-ds3231.cpp
+        i2csensor-sths34pf80.cpp
+        i2csensor-pca9685.cpp
+    )
+    message(STATUS "I2C sensors INCLUDED (per-sensor flags inside each .cpp)")
+else()
+    message(STATUS "I2C sensors EXCLUDED (I2C_FEATURE_LEVEL=0)")
+endif()
+
+if(HW_CFG_BUILD_OLED_MODES GREATER 0)
+    list(APPEND hardwareone_srcs
         OLED_Settings.cpp
         OLED_ESPNow.cpp
         OLED_SettingsEditor.cpp
@@ -92,7 +213,6 @@ set(hardwareone_srcs
         OLED_Mode_CLI.cpp
         OLED_Mode_CLIInput.cpp
         OLED_Mode_Logging.cpp
-        OLED_Mode_Map.cpp
         OLED_Mode_Power.cpp
         OLED_Mode_Network.cpp
         OLED_Mode_System.cpp
@@ -100,7 +220,6 @@ set(hardwareone_srcs
         OLED_Mode_Animations.cpp
         OLED_Mode_Menu.cpp
         OLED_Mode_FileBrowser.cpp
-        OLED_Mode_Automations.cpp
         OLED_Mode_Speech.cpp
         OLED_Mode_Remote.cpp
         OLED_Mode_UnifiedMenu.cpp
@@ -109,29 +228,22 @@ set(hardwareone_srcs
         OLED_Mode_ChangePassword.cpp
         OLED_RemoteSettings.cpp
         OLED_UI.cpp
-        System_MemoryMonitor.cpp
-        i2csensor-pca9685.cpp
-        System_Hardware.cpp
-        System_SensorLogging.cpp
-        System_SensorStubs.cpp
-        System_Settings.cpp
-        System_SetupWizard.cpp
-        System_FeatureRegistry.cpp
         OLED_SetupWizard.cpp
-        System_Utils.cpp
-        System_TaskUtils.cpp
-        System_User.cpp
-        System_WiFi.cpp
-        System_Camera_DVP.cpp
-        System_Camera_Video.cpp
-        System_ImageManager.cpp
-        System_EdgeImpulse.cpp
-        System_ESPSR.cpp
-        System_VFS.cpp
-        System_Microphone.cpp
-        System_SensorRegistry.cpp
-        System_Notifications.cpp
-)
+    )
+    # Map / Automation OLED modes are gated on both the display AND
+    # their feature flag. Layering the conditions here keeps the .cpp
+    # internal guards as a redundant safety net rather than the only
+    # source of truth.
+    if(HW_CFG_ENABLE_MAPS GREATER 0)
+        list(APPEND hardwareone_srcs OLED_Mode_Map.cpp)
+    endif()
+    if(HW_CFG_ENABLE_AUTOMATION GREATER 0)
+        list(APPEND hardwareone_srcs OLED_Mode_Automations.cpp)
+    endif()
+    message(STATUS "OLED display modes INCLUDED (DISPLAY_TYPE=${HW_CFG_DISPLAY_TYPE})")
+else()
+    message(STATUS "OLED display modes EXCLUDED (DISPLAY_TYPE=0 or I2C_FEATURE_LEVEL=0)")
+endif()
 
 set(hardwareone_requires
         arduino
@@ -160,8 +272,6 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
             WebServer_Server.cpp
             WebServer_Utils.cpp
             WebPage_Sensors.cpp
-            WebPage_Maps.cpp
-            WebPage_Games.cpp
             WebPage_ESPNow.cpp
             WebPage_ESPNow_Metadata.cpp
             WebPage_Bond.cpp
@@ -170,6 +280,16 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
             WebPage_MQTT.cpp
             WebServer_MigrationTool.cpp
     )
+    # Maps / Games web pages: tied to their feature flags. Their .cpp
+    # files have `#if ENABLE_WEB_*` guards but skipping them at CMake
+    # level avoids parsing 1000s of lines of guarded-out content on
+    # every build.
+    if(HW_CFG_ENABLE_MAPS GREATER 0)
+        list(APPEND hardwareone_srcs WebPage_Maps.cpp)
+    endif()
+    if(HW_CFG_ENABLE_GAMES GREATER 0)
+        list(APPEND hardwareone_srcs WebPage_Games.cpp)
+    endif()
     list(APPEND hardwareone_requires esp_http_server)
     if(HW_CFG_ENABLE_HTTPS GREATER 0)
         list(APPEND hardwareone_requires esp_https_server)

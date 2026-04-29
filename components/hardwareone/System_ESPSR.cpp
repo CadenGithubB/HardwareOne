@@ -10,6 +10,7 @@
 #include "System_MemUtil.h"
 #include "System_Microphone.h"
 #include "System_Mutex.h"
+#include "Optional_EvenG2.h"  // g2MicSetAfeFeedActive / g2MicReadPcmSamples (Phase 2B)
 #include "System_Command.h"
 #include "System_CLI.h"
 #include "System_User.h"
@@ -67,6 +68,20 @@ static volatile bool gSRTaskShouldRun = false;
 
 // AFE and model handles
 static esp_afe_sr_iface_t* gAFE = nullptr;
+
+// Phase 2B: runtime mic source switch. The SR feed loop reads from
+// either the local PDM mic via I2S (default) or the G2 left-temple
+// mic via the BLE-driven LC3 → PCM ring buffer in Optional_EvenG2.
+// `setmicsource g2|local` flips this; switching to G2 also arms the
+// ring buffer / decoder and assumes the caller has already issued
+// `g2micon` (which itself requires an active hijack page).
+enum SrMicSource : uint8_t {
+  SR_MIC_SOURCE_LOCAL_PDM = 0,
+  SR_MIC_SOURCE_G2_LEFT   = 1,
+};
+static volatile SrMicSource gSrMicSource = SR_MIC_SOURCE_LOCAL_PDM;
+static uint64_t gSrG2BytesOk = 0;
+static uint32_t gSrG2ReadZero = 0;
 static esp_afe_sr_data_t* gAFEData = nullptr;
 static model_iface_data_t* gMNData = nullptr;
 static const esp_mn_iface_t* gMNModel = nullptr;
@@ -2049,18 +2064,33 @@ static void srTask(void* param) {
     
     size_t bytesRead = 0;
     uint32_t readStartMs = millis();
-    esp_err_t err;
-    {
+    esp_err_t err = ESP_OK;
+    if (gSrMicSource == SR_MIC_SOURCE_G2_LEFT) {
+      // Phase 2B: drain the G2 mic ring buffer instead of I2S. Block
+      // up to 100 ms for samples — at 16 kHz the BLE pipe should
+      // refill the ring well within that. Treat short reads as
+      // success: the existing intermediate ring buffer downstream
+      // smooths the cadence into 160-sample AFE chunks.
+      size_t got = g2MicReadPcmSamples(
+          (int16_t*)i2sReadBuf,
+          i2sReadBytes / sizeof(int16_t),
+          /*timeoutMs*/ 100);
+      bytesRead = got * sizeof(int16_t);
+      if (bytesRead > 0) gSrG2BytesOk += bytesRead;
+      else               gSrG2ReadZero++;
+    } else {
       I2sMicLockGuard i2sGuard("sr.i2s.read");
       err = i2s_channel_read(gI2SRxHandle, i2sReadBuf, i2sReadBytes, &bytesRead, pdMS_TO_TICKS(100));
     }
     uint32_t readDurationMs = millis() - readStartMs;
-    
+
     if (doDetailedLog) {
-      WARN_SYSTEMF("[SR_LOOP] Loop %u: i2s_read took %u ms, err=0x%x (%s), bytesRead=%u",
-                   (unsigned)loopCount, (unsigned)readDurationMs, err, esp_err_to_name(err), (unsigned)bytesRead);
+      WARN_SYSTEMF("[SR_LOOP] Loop %u: %s_read took %u ms, err=0x%x (%s), bytesRead=%u",
+                   (unsigned)loopCount,
+                   gSrMicSource == SR_MIC_SOURCE_G2_LEFT ? "g2_mic" : "i2s",
+                   (unsigned)readDurationMs, err, esp_err_to_name(err), (unsigned)bytesRead);
     }
-    
+
     if (err != ESP_OK) {
       gSrI2SReadErr++;
       if (loopCount <= 10) {
@@ -2073,9 +2103,12 @@ static void srTask(void* param) {
     if (bytesRead == 0) {
       gSrI2SReadZero++;
       if (loopCount <= 10) {
-        WARN_SYSTEMF("[SR_LOOP] I2S READ ZERO BYTES at loop %u", (unsigned)loopCount);
+        WARN_SYSTEMF("[SR_LOOP] %s READ ZERO BYTES at loop %u",
+                     gSrMicSource == SR_MIC_SOURCE_G2_LEFT ? "G2-MIC" : "I2S",
+                     (unsigned)loopCount);
       }
-      SR_DBG_L(3, "I2S read zero bytes (loop=%u)", (unsigned)loopCount);
+      SR_DBG_L(3, "read zero bytes (loop=%u, source=%u)",
+               (unsigned)loopCount, (unsigned)gSrMicSource);
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
@@ -3104,6 +3137,41 @@ static const char* cmd_sr_cmds_sync(const String& argsInput) {
   return buf;
 }
 
+// Phase 2B: switch the SR feed loop's audio source between the local
+// PDM mic (default, via I2S) and the G2 left-temple mic (via the
+// BLE-driven LC3 ring buffer). Switching to G2 also arms the ring +
+// decoder; switching back disarms it. Caller is responsible for
+// having a hijack page active and `g2micon` started — without those
+// the firmware sends no audio and the SR loop will see "read zero"
+// every iteration.
+static const char* cmd_setmicsource(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char out[200];
+  CommandArgs ca(argsInput);
+  String v = ca.arg(0); v.toLowerCase();
+  if (v.length() == 0) {
+    snprintf(out, sizeof(out),
+             "mic source: %s | g2 ring depth=%u samples, overruns=%u",
+             gSrMicSource == SR_MIC_SOURCE_G2_LEFT ? "g2" : "local",
+             (unsigned)g2MicAfeRingDepth(),
+             (unsigned)g2MicAfeOverrunCount());
+    return out;
+  }
+  if (v == "g2" || v == "g2_left" || v == "left") {
+    if (!g2MicSetAfeFeedActive(true)) {
+      return "mic source: failed to arm G2 feed (alloc/decoder error)";
+    }
+    gSrMicSource = SR_MIC_SOURCE_G2_LEFT;
+    return "mic source: g2_left — also run `g2micon` from a hijack page";
+  }
+  if (v == "local" || v == "pdm" || v == "i2s") {
+    gSrMicSource = SR_MIC_SOURCE_LOCAL_PDM;
+    g2MicSetAfeFeedActive(false);
+    return "mic source: local PDM (I2S)";
+  }
+  return "Usage: setmicsource [local|g2]";
+}
+
 static const char* cmd_sr_debug(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
@@ -3776,6 +3844,7 @@ const CommandEntry espsrCommands[] = {
   { "srraw", "Toggle raw output mode (shows all MultiNet hypotheses).", false, cmd_sr_raw, "Usage: srraw [on|off]" },
   { "srautotune", "Auto-cycle through gain configurations to find best settings.", false, cmd_sr_autotune, "Usage: srautotune [start|stop|status]" },
   { "srtimeout", "Get/set command listening timeout.", false, cmd_sr_timeout, "Usage: srtimeout [1000-30000]" },
+  { "setmicsource", "Phase 2B: switch SR feed source (local PDM / G2 left temple).", false, cmd_setmicsource, "Usage: setmicsource [local|g2]" },
   { "srtuning", "Show/set audio tuning parameters.", false, cmd_sr_tuning, "Usage: srtuning [gain|agc|vad]" },
   { "srtuningswgain", "Set software gain (1.0-50.0) by updating shared micgain.", false, cmd_sr_tuning_swgain, "Usage: srtuningswgain <1.0-50.0>" },
   { "srtuninggain", "Set AFE linear gain (0.1-10.0).", false, cmd_sr_tuning_gain, "Usage: srtuninggain <0.1-10.0>" },

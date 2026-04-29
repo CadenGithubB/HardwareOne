@@ -250,7 +250,10 @@ bool g2ShowTextPage(const char* content,
 // otherwise need a TEXT-widget REBUILD — REBUILDing a TEXT into a list
 // container makes the firmware crash the plugin with a "lost connection"
 // overlay (observed 2026-04-24). List-into-list REBUILDs work cleanly.
-bool g2ShowTextAsList(const char* text);
+// `backLabel` overrides the prepended back-row text. Pass nullptr for the
+// default "<- Back" — callers should pass the destination name so the
+// user knows where the tap goes (e.g. "<- Main Menu", "<- Network").
+bool g2ShowTextAsList(const char* text, const char* backLabel = nullptr);
 
 // Live list page primitive — periodically rebuilds a list-shaped page in
 // place via Cmd=7 REBUILD-list (no flicker). `buildFn` is called on each
@@ -263,8 +266,37 @@ bool g2ShowTextAsList(const char* text);
 // One live page at a time; calling this while another is active stops
 // the previous one first. Returns true on a successful initial render.
 typedef void (*G2LivePageBuildFn)(char* out, size_t cap);
-bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs);
+// `backLabel` overrides the auto-prepended back-row text for this session.
+// Pass nullptr for the default "<- Back". Use this to surface where the
+// back tap actually goes (e.g. "<- Main Menu", "<- Network", or repurpose
+// it as "X Cancel" for an overlay).
+bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
+                         const char* backLabel = nullptr);
 void g2StopLiveListPage();
+
+// Wake the live-page worker so it rebuilds NOW instead of waiting for the
+// next interval tick. Use after mutating state the buildFn reads (e.g.
+// text-entry append/backspace) to get an immediate REBUILD-list. No-op
+// when no live page is active. Same path the ring's double-tap takes.
+void g2KickLivePageRefresh();
+
+// ─── Phase 2B: G2 mic → ESP-SR AFE feed ──────────────────────────────
+// When ESP-SR's mic source is switched to G2_LEFT, it drains 16 kHz mono
+// int16 PCM samples from this ring buffer instead of reading I2S. The
+// BLE notify task on 6402 decodes 5×40 B LC3 → 800 samples per packet
+// and pushes here. Caller must arrange a StartUpPage container is
+// active and `g2micon` has been issued before turning this on, or the
+// firmware won't send audio.
+bool g2MicSetAfeFeedActive(bool on);
+bool g2MicAfeFeedIsActive();
+// Drains up to `capSamples` samples into `out`. Returns number of
+// samples actually read (0 on timeout). Blocks up to `timeoutMs` if
+// the ring is empty.
+size_t g2MicReadPcmSamples(int16_t* out, size_t capSamples, uint32_t timeoutMs);
+// Telemetry: number of samples currently buffered + cumulative
+// overrun count (samples dropped because writer outpaced reader).
+size_t g2MicAfeRingDepth();
+uint32_t g2MicAfeOverrunCount();
 
 // Page-mode tracker for the hijacked Blocks menu. Stateful pages register
 // their identity here so handleHijackMenuTap() can route taps to the
@@ -392,6 +424,14 @@ struct G2PageModule {
   // in place — no flicker. Double-tap on the lens kicks an immediate
   // refresh. 0 means "static" (one-shot render, current default).
   uint32_t      liveIntervalMs;
+
+  // Optional back-row label shown as item 0 of the rendered text view.
+  // Conventional value: "<- Main Menu" for top-level pages so the user
+  // knows the back tap returns to the hijack root rather than just
+  // "back". nullptr falls back to "<- Back". Only consulted when the
+  // dispatcher renders via g2ShowTextAsList / g2StartLiveListPage —
+  // pages with their own showMenu render the back row themselves.
+  const char*   backLabel;
 };
 
 // Register a page module. Idempotent: a re-registration with the same
@@ -598,10 +638,17 @@ inline bool g2ShowEvenAIReplyDirect(const char*, const char*) { return false; }
 inline bool g2ShowEvenAIReplyNoAsk(const char*) { return false; }
 inline bool g2ShowEvenAIReplyDirect(const char*) { return false; }
 inline bool g2HideEvenAICard() { return false; }
-inline bool g2ShowTextAsList(const char* text) { return false; }
+inline bool g2ShowTextAsList(const char*, const char* = nullptr) { return false; }
 typedef void (*G2LivePageBuildFn)(char* out, size_t cap);
-inline bool g2StartLiveListPage(G2LivePageBuildFn, uint32_t) { return false; }
+inline bool g2StartLiveListPage(G2LivePageBuildFn, uint32_t,
+                                const char* = nullptr) { return false; }
 inline void g2StopLiveListPage() {}
+inline void g2KickLivePageRefresh() {}
+inline bool g2MicSetAfeFeedActive(bool) { return false; }
+inline bool g2MicAfeFeedIsActive() { return false; }
+inline size_t g2MicReadPcmSamples(int16_t*, size_t, uint32_t) { return 0; }
+inline size_t g2MicAfeRingDepth() { return 0; }
+inline uint32_t g2MicAfeOverrunCount() { return 0; }
 inline bool g2ShowListPage(const char* const* items, size_t itemCount,
                            const G2ContainerGeom& geom = G2_GEOM_LARGE) { return false; }
 enum G2TapKind : uint8_t { G2_TAP_PAGE_NEXT = 0, G2_TAP_PAGE_PREV = 1 };
