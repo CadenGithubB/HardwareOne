@@ -10,7 +10,7 @@
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
-#include "Optional_EvenG2.h"
+#include "G2_Glasses.h"
 #include "System_Debug.h"
 
 #include <stdarg.h>

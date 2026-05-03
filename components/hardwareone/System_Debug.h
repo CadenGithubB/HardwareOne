@@ -164,6 +164,18 @@ struct DebugFlagMask {
 #define DEBUG_G2_HEARTBEAT      DEBUG_BIT(68)  // Heartbeat TX + HeartbeatAck (every ~5s; loud)
 #define DEBUG_G2_DUMP           DEBUG_BIT(69)  // [G2-DUMP] diagnostic ring buffer dumps on errors
 
+// Bits 70-75: ESP-SR speech recognition sub-flags (parent: DEBUG_SR at bit 70)
+// Mirrors the legacy gSrDebugLevel (0/1/2/3) but with finer-grained control:
+// DEBUG_SR alone matches legacy "level 1" (lifecycle + wake + commands).
+// Add WAKE/COMMAND/AFE/LIFECYCLE/TUNING for selective verbosity that previously
+// required raising the global level (which dragged in unrelated noise).
+#define DEBUG_SR                DEBUG_BIT(70)  // Parent: any SR debug
+#define DEBUG_SR_WAKE           DEBUG_BIT(71)  // Wake word detection events
+#define DEBUG_SR_COMMAND        DEBUG_BIT(72)  // Command recognition + matching
+#define DEBUG_SR_AFE            DEBUG_BIT(73)  // AFE/audio chain (VAD, noise, gain)
+#define DEBUG_SR_LIFECYCLE      DEBUG_BIT(74)  // init / start / stop verbose
+#define DEBUG_SR_TUNING         DEBUG_BIT(75)  // Auto-tune + confidence threshold
+
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
 // This structure tracks which specific sub-categories are enabled
@@ -228,6 +240,13 @@ struct DebugSubFlags {
   bool ntpSetup;        // setupNTP() / configTime() calls, server & offset config
   bool ntpAnchor;       // Boot anchor write/read/cleanup, loadAndIncrementBootSeq
   bool ntpResolve;      // resolvePendingUserCreationTimes(), [resolve] messages
+
+  // ESP-SR sub-flags (parent: gSettings.debugSr -> DEBUG_SR)
+  bool srWake;          // Wake word events (HiLexin etc.)
+  bool srCommand;       // MultiNet command recognition / matching
+  bool srAfe;           // AFE chain — VAD, noise suppression, gain
+  bool srLifecycle;     // Init / start / stop verbose
+  bool srTuning;        // Auto-tune sweeps, confidence threshold changes
 };
 
 // Debug output queue configuration
@@ -299,7 +318,7 @@ extern char* gDebugBuffer;
 // 1 KB is plenty: any single return string is capped at DEBUG_MSG_SIZE
 // (256 B) by the message-queue pipeline anyway, so commands that need
 // long output stream line-by-line via broadcastOutput() and return a
-// short status string (see cmd_taskstats / cmd_heapowners). The
+// short status string (see cmd_taskstats). The
 // existing snprintf(gDebugBuffer, 1024, ...) callsites all produce
 // status strings under 256 B in practice — the 1024 cap was already
 // a no-op upper bound.
@@ -714,6 +733,14 @@ const char* cmd_debugllmforward(const String& argsInput);
 const char* cmd_debugllmgenerate(const String& argsInput);
 const char* cmd_debugllmmemory(const String& argsInput);
 #endif
+
+// ESP-SR debug commands (System_ESPSR — parent + 5 sub-flags)
+const char* cmd_debugsr(const String& argsInput);
+const char* cmd_debugsrwake(const String& argsInput);
+const char* cmd_debugsrcommand(const String& argsInput);
+const char* cmd_debugsrafe(const String& argsInput);
+const char* cmd_debugsrlifecycle(const String& argsInput);
+const char* cmd_debugsrtuning(const String& argsInput);
 
 // System logging commands
 const char* cmd_log(const String& argsInput);

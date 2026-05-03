@@ -1,5 +1,7 @@
 #include "System_G2_Protocol.h"
 
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+
 #include <Arduino.h>     // millis()
 #include <string.h>
 
@@ -356,7 +358,7 @@ static bool writeTextProperty(uint8_t* buf, size_t cap, size_t* pos,
 // we set it anyway in the hope that the firmware *does* fire
 // TextEvent CLICK when the user taps a captured text container. If
 // it doesn't, the caller falls back to user-activity-driven exit
-// (see Optional_EvenG2.cpp's TEXT exit path).
+// (see G2_Glasses.cpp's TEXT exit path).
 static bool writeTextPropertyGeom(uint8_t* buf, size_t cap, size_t* pos,
                                    const char* containerName,
                                    const char* content,
@@ -414,12 +416,40 @@ size_t g2BuildRebuildText(uint8_t seq, uint32_t magic,
                          payload, pos, out, outCap);
 }
 
+// pb-only variant of g2BuildRebuildText — emits the RebuildPageContainer
+// pb body without wrapping it in an envelope. The caller ships via
+// sendPbFragmented, which does protocol-level multi-fragment envelope
+// framing (totFrags > 1) — required when content exceeds the firmware's
+// single-fragment envelope cap (~240 B). Geom-aware so the rebuild can
+// match the CREATE's widget rectangle exactly. Mirrors
+// g2BuildCreateTextPagePb's argument shape.
+//
+// Uses caller-provided pb buffer (ps_alloc'd, typically 8 KB) so Status-
+// snapshot–sized content (~1-2 KB) doesn't overflow.
+size_t g2BuildRebuildTextPb(uint32_t magic,
+                            const char* containerName,
+                            const char* content,
+                            const G2ContainerGeom& geom,
+                            bool eventCapture,
+                            uint8_t* pbOut, size_t pbCap) {
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD, G2_CMD_REBUILD_PAGE)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_REBUILD, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, 1)) return 0;
+  if (!writeTextPropertyGeom(pbOut, pbCap, &pos,
+                              containerName, content, geom, eventCapture)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
 // ListContainerProperty container ID. Geometry now flows in from the
 // caller via G2ContainerGeom — see G2_GEOM_* presets in the header.
 static constexpr uint32_t G2_LIST_DEF_CID   = 1;
-// widgetId for the StartUpPage's inner wrapper is now a caller-supplied
-// parameter on g2BuildCreateStartupPage — see the header. Default 10000
-// (matching the reference) unless the caller is hijacking a menu-start.
+// widgetId for the StartUpPage's inner wrapper is supplied by the
+// caller. Default 10000 (matching the reference) unless the caller is
+// hijacking a menu-start.
 
 // Emit a ListContainerProperty (wrapper field 2 of RebuildPage/CreateStartup)
 // with N selectable items. Firmware draws a native selection highlight when
@@ -460,36 +490,13 @@ static bool writeListObjectWithItems(uint8_t* buf, size_t cap, size_t* pos,
   return g2PbEndNested(buf, cap, pos, listStart);
 }
 
-size_t g2BuildCreateStartupPage(uint8_t seq, uint32_t magic,
-                                const char* containerName,
-                                const char* text,
-                                uint8_t* out, size_t outCap,
-                                uint32_t widgetId) {
-  uint8_t payload[256];
-  size_t pos = 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_CREATE_STARTUP)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
-  size_t pageStart;
-  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_PAGE_F_TOTAL, 1)) return 0;
-  // Use TextObject (field 3), NOT ListObject (field 2). Rationale:
-  //   * A ListContainer that we later target with UPDATE_TEXT (Cmd=5) crashes
-  //     the firmware's plugin task — UPDATE_TEXT/TextContainerUpgrade is only
-  //     defined against a TextContainer. Observed 2026-04-24: CREATE-as-list
-  //     then UPDATE_TEXT froze the glasses (all subsequent acks — even
-  //     heartbeats — silently dropped).
-  //   * Reference ships CreateStartUpPageContainer with TextObject at wrapper
-  //     field 3 (`repeated TextContainerProperty`, ble/gen/EvenHub_pb.ts:457),
-  //     alongside ListObject=2 and ImageObject=4. All three are valid here.
-  //   * writeTextProperty shares the same TextContainerProperty layout used by
-  //     REBUILD_PAGE, so once this CREATE lands the container is immediately
-  //     REBUILD-compatible for content swaps.
-  if (!writeTextProperty(payload, sizeof(payload), &pos, containerName, text)) return 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
-  if (!g2PbEndNested(payload, sizeof(payload), &pos, pageStart)) return 0;
-  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
-                         payload, pos, out, outCap);
-}
+// (g2BuildCreateStartupPage was removed 2026-04-30. It built a single-
+// envelope CREATE_STARTUP_PAGE with a 256-byte internal payload buffer
+// — which clipped Status snapshots — and emitted single-fragment
+// envelopes that the firmware rejected once content exceeded ~240 B.
+// All callers migrated to g2BuildCreateTextPagePb (pb-only) +
+// sendPbFragmented for proper multi-fragment wire framing. See git
+// history if you need the legacy wire shape.)
 
 // REBUILD_PAGE (Cmd=7) carrying a fresh ListContainerProperty. Used by
 // stateful pages (file browser, settings editor) that need to swap the
@@ -552,7 +559,7 @@ size_t g2BuildCreateListPage(uint8_t seq, uint32_t magic,
   // Single-fragment build: builds pb into a stack buffer big enough for
   // the largest list that still fits one envelope (≤253 pb bytes), then
   // wraps. For larger lists, callers must use g2BuildCreateListPagePb +
-  // a fragmenting transport (see Optional_EvenG2.cpp::sendPbFragmented).
+  // a fragmenting transport (see G2_Glasses.cpp::sendPbFragmented).
   uint8_t payload[512];
   size_t pbLen = g2BuildCreateListPagePb(magic, containerName, items, itemCount,
                                           widgetId, geom, payload, sizeof(payload));
@@ -906,6 +913,248 @@ size_t g2BuildCreateMixedListImage(uint8_t seq, uint32_t magic,
                          payload, pbLen, out, outCap);
 }
 
+// Per-child TextObject emitter for the multi-text builder. Same shape
+// as writeTextProperty/writeTextPropertyGeom but takes the CID + name
+// + content + geom from the spec instead of the file-static defaults.
+// EvCap=0 (consistent with single-text case — "we don't tap text
+// areas"; tap dispatch in compound widgets goes through SysEvent).
+static bool writeTextChildSpec(uint8_t* buf, size_t cap, size_t* pos,
+                               const G2TextChildSpec& spec) {
+  size_t inner;
+  if (!g2PbBeginNested(buf, cap, pos, G2_PAGE_F_TEXT_OBJ, &inner)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_X, spec.geom.x)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_Y, spec.geom.y)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_W, spec.geom.w)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_H, spec.geom.h)) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_CID, spec.containerId)) return false;
+  if (!g2PbWriteString(buf, cap, pos, G2_TEXT_F_CNAME,
+                       spec.containerName ? spec.containerName : "")) return false;
+  if (!g2PbWriteUint32(buf, cap, pos, G2_TEXT_F_EVCAP, spec.eventCapture ? 1u : 0u)) return false;
+  if (!g2PbWriteString(buf, cap, pos, G2_TEXT_F_CONTENT,
+                       spec.content ? spec.content : "")) return false;
+  return g2PbEndNested(buf, cap, pos, inner);
+}
+
+size_t g2BuildCreateMultiTextPb(uint32_t magic,
+                                const G2TextChildSpec* children,
+                                size_t childCount,
+                                uint32_t widgetId,
+                                uint8_t* pbOut, size_t pbCap) {
+  if (!pbOut || pbCap == 0 || !children || childCount == 0) return 0;
+
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD,   G2_CMD_CREATE_STARTUP)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, (uint32_t)childCount)) return 0;
+  for (size_t i = 0; i < childCount; i++) {
+    if (!writeTextChildSpec(pbOut, pbCap, &pos, children[i])) return 0;
+  }
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+size_t g2BuildCreateMultiText(uint8_t seq, uint32_t magic,
+                              const G2TextChildSpec* children,
+                              size_t childCount,
+                              uint32_t widgetId,
+                              uint8_t* out, size_t outCap) {
+  // 1 KB payload is enough for a handful of short-text children. The
+  // worst single-child overhead is ~50 B (8 fixed fields + name +
+  // content); 5 children with ~20-char content each is ~400 B, well
+  // within the buffer.
+  uint8_t payload[1024];
+  size_t pbLen = g2BuildCreateMultiTextPb(magic, children, childCount,
+                                          widgetId,
+                                          payload, sizeof(payload));
+  if (pbLen == 0) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pbLen, out, outCap);
+}
+
+// REBUILD_PAGE counterpart to g2BuildCreateMultiTextPb — same wire shape
+// (TextObject children repeated under wrapper field 3) but with
+// Cmd=7 REBUILD_PAGE and the children packaged inside G2_WRAP_F_REBUILD
+// (field 7) instead of G2_WRAP_F_CREATE (field 2). No WidgetId field —
+// the existing widget binding is implicit on a REBUILD.
+//
+// Why this exists: per-child REBUILD-text on a compound CreateStartUpPage
+// (sendRebuildTextNamedAndWait) renders ONLY the named child on this
+// firmware (2.2.0.24) — the OTHER children blank. Verified empirically
+// 2026-04-30 with the body+batt Status compound: rebuilding "body" alone
+// blanked "batt", and vice versa. Sending all children in a single
+// REBUILD message lets the firmware re-render the whole compound at
+// once, keeping every child visible.
+//
+// SCHEMA RISK: this is the first time we ship a REBUILD-multitext shape
+// (cmd=7 + N TextObject children). The probe at g2ProbeRebuildTextChild
+// only exercised single-child REBUILD on a list+text compound. If the
+// firmware rejects this with RebuildResp res != 0, the caller's worker
+// bails and the user sees the failure in the log; we'd then need a
+// different approach (full SHUTDOWN+CREATE every tick, or drop the
+// compound entirely).
+size_t g2BuildRebuildMultiTextPb(uint32_t magic,
+                                  const G2TextChildSpec* children,
+                                  size_t childCount,
+                                  uint8_t* pbOut, size_t pbCap) {
+  if (!pbOut || pbCap == 0 || !children || childCount == 0) return 0;
+
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD,   G2_CMD_REBUILD_PAGE)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_REBUILD, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, (uint32_t)childCount)) return 0;
+  for (size_t i = 0; i < childCount; i++) {
+    if (!writeTextChildSpec(pbOut, pbCap, &pos, children[i])) return 0;
+  }
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+// REBUILD_PAGE counterpart for compound with 1 ListObject + N
+// TextObject children. Same shape as g2BuildCreateMixedListMultiTextPb
+// but with the REBUILD wrapper (cmd=7, G2_WRAP_F_REBUILD) instead of
+// CREATE (cmd=0, G2_WRAP_F_CREATE), and no WidgetId.
+//
+// SCHEMA RISK: empirically derived. We confirmed 2026-04-30 that
+// REBUILD-multitext (N×TextObject only) blanks any unmentioned
+// siblings on a list+text+text+text compound — Status' back-row list
+// disappeared on the first REBUILD tick when only the 3 texts were
+// sent. Including the list in every REBUILD keeps it visible by the
+// same rule. CreateResp / RebuildResp will surface rejection.
+size_t g2BuildRebuildMixedListMultiTextPb(uint32_t magic,
+                                           const char* listName,
+                                           const char* const* listItems,
+                                           size_t listItemCount,
+                                           const G2ContainerGeom& listGeom,
+                                           const G2TextChildSpec* textChildren,
+                                           size_t textChildCount,
+                                           uint8_t* pbOut, size_t pbCap) {
+  if (!pbOut || pbCap == 0) return 0;
+  if (!listName || !listItems || listItemCount == 0) return 0;
+  if (!textChildren || textChildCount == 0) return 0;
+
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD,   G2_CMD_REBUILD_PAGE)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_REBUILD, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL,
+                       (uint32_t)(1 + textChildCount))) return 0;
+  if (!writeListObjectWithItems(pbOut, pbCap, &pos,
+                                listName, listItems, listItemCount,
+                                listGeom)) return 0;
+  for (size_t i = 0; i < textChildCount; i++) {
+    if (!writeTextChildSpec(pbOut, pbCap, &pos, textChildren[i])) return 0;
+  }
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+// CREATE compound with one ListObject + N TextObject children. Same
+// wrapper shape as g2BuildCreateMixedListTextPb but with N text
+// children instead of one — used by Status' back-row + body/batt/meter
+// compound (1 list ≡ "<- Main Menu" tappable + 3 text panes).
+//
+// SCHEMA RISK: doc says firmware accepts mixed-type compound CREATEs
+// in arbitrary combinations of f2/f3/f4 (see "Mixed-widget composition"
+// in G2_PROTOCOL.md), but `1 list + 3 text` was not exercised before
+// 2026-04-30. If the firmware rejects this shape, CreateResp returns
+// res != 0 and the worker's CREATE branch logs the failure.
+size_t g2BuildCreateMixedListMultiTextPb(uint32_t magic,
+                                          const char* listName,
+                                          const char* const* listItems,
+                                          size_t listItemCount,
+                                          const G2ContainerGeom& listGeom,
+                                          const G2TextChildSpec* textChildren,
+                                          size_t textChildCount,
+                                          uint32_t widgetId,
+                                          uint8_t* pbOut, size_t pbCap) {
+  if (!pbOut || pbCap == 0) return 0;
+  if (!listName || !listItems || listItemCount == 0) return 0;
+  if (!textChildren || textChildCount == 0) return 0;
+
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD,   G2_CMD_CREATE_STARTUP)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL,
+                       (uint32_t)(1 + textChildCount))) return 0;
+
+  // ListObject (wrapper field 2) — eventCapture=1 inside
+  // writeListObjectWithItems, so the firmware fires ListEvent CLICK on
+  // tap.
+  if (!writeListObjectWithItems(pbOut, pbCap, &pos,
+                                listName, listItems, listItemCount,
+                                listGeom)) return 0;
+
+  // TextObjects (wrapper field 3, repeated). Each child needs a
+  // distinct ContainerId — caller is responsible for assigning unique
+  // IDs across the whole compound (list + texts share the cid space).
+  for (size_t i = 0; i < textChildCount; i++) {
+    if (!writeTextChildSpec(pbOut, pbCap, &pos, textChildren[i])) return 0;
+  }
+
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+size_t g2BuildCreateMixedListTextPb(uint32_t magic,
+                                    const char* listName,
+                                    const char* const* listItems,
+                                    size_t listItemCount,
+                                    const G2ContainerGeom& listGeom,
+                                    const G2TextChildSpec& textSpec,
+                                    uint32_t widgetId,
+                                    uint8_t* pbOut, size_t pbCap) {
+  if (!pbOut || pbCap == 0 || !listName || !listItems || listItemCount == 0) return 0;
+
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD,   G2_CMD_CREATE_STARTUP)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, 2)) return 0;
+
+  // ListObject (wrapper field 2) — selection + scroll + CLICK managed
+  // by firmware. This is what makes the page tappable.
+  if (!writeListObjectWithItems(pbOut, pbCap, &pos,
+                                listName, listItems, listItemCount,
+                                listGeom)) return 0;
+
+  // TextObject (wrapper field 3) — header / title; non-interactive
+  // unless caller opts into eventCapture, which is normally false for
+  // a header.
+  if (!writeTextChildSpec(pbOut, pbCap, &pos, textSpec)) return 0;
+
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+size_t g2BuildCreateMixedListText(uint8_t seq, uint32_t magic,
+                                  const char* listName,
+                                  const char* const* listItems,
+                                  size_t listItemCount,
+                                  const G2ContainerGeom& listGeom,
+                                  const G2TextChildSpec& textSpec,
+                                  uint32_t widgetId,
+                                  uint8_t* out, size_t outCap) {
+  uint8_t payload[1024];
+  size_t pbLen = g2BuildCreateMixedListTextPb(magic, listName,
+                                              listItems, listItemCount,
+                                              listGeom, textSpec, widgetId,
+                                              payload, sizeof(payload));
+  if (pbLen == 0) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pbLen, out, outCap);
+}
+
 bool g2DecodeHeartbeatAckTail(const uint8_t* pb, size_t pbLen,
                               uint64_t* seq, uint64_t* echo) {
   if (!pb || pbLen == 0) return false;
@@ -1060,7 +1309,7 @@ size_t g2BuildAppLaunch(uint8_t* out, size_t outCap) {
 #define G2_SET_REQ_BASIC    1
 #define G2_SET_REQ_F_TYPE   1
 // G2_SET_REQ_F_VER (5) and G2_SET_REQ_F_BATT (12) are defined in the
-// header so diagnostic callers (Optional_EvenG2.cpp verbose dumper) can
+// header so diagnostic callers (G2_Glasses.cpp verbose dumper) can
 // label known fields without hard-coding the numbers.
 
 size_t g2BuildSettingBasicRequest(uint8_t seq, uint32_t magic,
@@ -1241,3 +1490,268 @@ void g2DumpSettingFields(const uint8_t* payload, size_t payloadLen,
     if (!g2PbSkipField(payload, payloadLen, &pos, wire)) return;
   }
 }
+
+// =============================================================================
+// DevConfig builders — sid=0x80 (UX_DEVICE_SETTINGS_APP_ID)
+// =============================================================================
+// See header for tier policy and provenance. The wrapper uses
+// G2_WRAP_F_CMD (1) for commandId and G2_WRAP_F_MAGIC (2) for magicRandom,
+// which are the same field tags as EvenCore's wrapper, so we reuse them
+// instead of defining DevCfg-specific aliases. Inner sub-message field
+// tags follow dev_pair_manager.proto / dev_settings.proto.
+
+// AuthMgr fields (dev_pair_manager.proto)
+#define G2_DEVCFG_AUTHMGR_F_SEC_AUTH    1
+#define G2_DEVCFG_AUTHMGR_F_PHONE_TYPE  2
+
+// PipeRoleChange fields (dev_pair_manager.proto)
+#define G2_DEVCFG_ROLECHG_F_AS_CMD_ROLE  1
+
+// RingInfo fields (dev_pair_manager.proto)
+#define G2_DEVCFG_RINGINFO_F_CONNECT_RING  1
+#define G2_DEVCFG_RINGINFO_F_RING_MAC      2
+#define G2_DEVCFG_RINGINFO_F_RING_NAME     3
+
+// TimeSync fields (dev_settings.proto)
+#define G2_DEVCFG_TIMESYNC_F_TIMESTAMP  1
+#define G2_DEVCFG_TIMESYNC_F_TIMEZONE   2
+
+// DevCfgDataPackage wrapper field tags for the per-cmd nested sub-messages
+// (dev_config_protocol.proto). Note: TimeSync sits at field 128, which
+// requires a 2-byte varint tag — g2PbBeginNested handles this transparently.
+#define G2_DEVCFG_WRAP_F_AUTH_MGR        3
+#define G2_DEVCFG_WRAP_F_ROLE_CHANGE     4
+#define G2_DEVCFG_WRAP_F_RING_INFO       5
+#define G2_DEVCFG_WRAP_F_BASE_HEARTBEAT  13
+#define G2_DEVCFG_WRAP_F_TIME_SYNC       128
+
+// Helper: encode int64 as varint (proto3 int64 wire format = varint of the
+// 64-bit two's-complement bit pattern). Negative values produce 10-byte
+// varints. We need this for TimeSync.timezone, which is declared int64 in
+// the schema even though real-world values fit in a byte.
+static bool g2PbWriteInt64(uint8_t* buf, size_t cap, size_t* pos,
+                           uint32_t field, int64_t v) {
+  if (!g2PbWriteTag(buf, cap, pos, field, G2_PB_WIRE_VARINT)) return false;
+  return g2PbWriteVarint(buf, cap, pos, (uint64_t)v);
+}
+
+size_t g2BuildDevCfgHeartbeat(uint8_t seq, uint32_t magic,
+                              uint8_t* out, size_t outCap) {
+  uint8_t pb[16];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_CMD,
+                       G2_DEVCFG_CMD_BASE_HEART_BEAT)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  // BaseConnHeartBeat sub-message present but empty (no fields set on TX).
+  size_t inner;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos,
+                       G2_DEVCFG_WRAP_F_BASE_HEARTBEAT, &inner)) return 0;
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_DEV_CONFIG, G2_FLAG_REQUEST,
+                         pb, pos, out, outCap);
+}
+
+size_t g2BuildDevCfgAuth(uint8_t seq, uint32_t magic,
+                         uint8_t* out, size_t outCap) {
+  uint8_t pb[32];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_CMD,
+                       G2_DEVCFG_CMD_AUTHENTICATION)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos,
+                       G2_DEVCFG_WRAP_F_AUTH_MGR, &inner)) return 0;
+  if (!g2PbWriteBool(pb, sizeof(pb), &pos,
+                     G2_DEVCFG_AUTHMGR_F_SEC_AUTH, true)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos,
+                       G2_DEVCFG_AUTHMGR_F_PHONE_TYPE,
+                       G2_DEVCFG_PHONE_TYPE_ANDROID)) return 0;
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_DEV_CONFIG, G2_FLAG_REQUEST,
+                         pb, pos, out, outCap);
+}
+
+size_t g2BuildDevCfgPipeRoleChange(uint8_t seq, uint32_t magic, uint8_t role,
+                                   uint8_t* out, size_t outCap) {
+  if (role != G2_DEVCFG_ROLE_BOTH &&
+      role != G2_DEVCFG_ROLE_RIGHT &&
+      role != G2_DEVCFG_ROLE_LEFT) {
+    return 0;
+  }
+  uint8_t pb[24];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_CMD,
+                       G2_DEVCFG_CMD_PIPE_ROLE_CHANGE)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos,
+                       G2_DEVCFG_WRAP_F_ROLE_CHANGE, &inner)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos,
+                       G2_DEVCFG_ROLECHG_F_AS_CMD_ROLE, role)) return 0;
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_DEV_CONFIG, G2_FLAG_REQUEST,
+                         pb, pos, out, outCap);
+}
+
+size_t g2BuildDevCfgTimeSync(uint8_t seq, uint32_t magic,
+                             uint32_t timestamp, int32_t tzQuarterHours,
+                             uint8_t* out, size_t outCap) {
+  // Validation: reject pre-2020 / post-2099 timestamps and out-of-real-world
+  // timezone offsets. Caller should pass values from a synced RTC.
+  static const uint32_t TS_MIN = 1577836800u;  // 2020-01-01T00:00:00Z
+  static const uint32_t TS_MAX = 4102444800u;  // 2099-12-31T00:00:00Z (approx)
+  if (timestamp < TS_MIN || timestamp > TS_MAX) return 0;
+  if (tzQuarterHours < -56 || tzQuarterHours > 56) return 0;
+
+  uint8_t pb[40];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_CMD,
+                       G2_DEVCFG_CMD_TIME_SYNC)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos,
+                       G2_DEVCFG_WRAP_F_TIME_SYNC, &inner)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos,
+                       G2_DEVCFG_TIMESYNC_F_TIMESTAMP, timestamp)) return 0;
+  // timezone is int64 in the schema; sign-extend the int32 value.
+  if (!g2PbWriteInt64(pb, sizeof(pb), &pos,
+                      G2_DEVCFG_TIMESYNC_F_TIMEZONE,
+                      (int64_t)tzQuarterHours)) return 0;
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_DEV_CONFIG, G2_FLAG_REQUEST,
+                         pb, pos, out, outCap);
+}
+
+size_t g2BuildDevCfgRingConnect(uint8_t seq, uint32_t magic,
+                                bool connect,
+                                const uint8_t* ringMacBleOrder,
+                                const char* ringName,
+                                uint8_t* out, size_t outCap) {
+  if (!ringMacBleOrder || !ringName) return 0;
+  size_t nameLen = 0;
+  while (ringName[nameLen] && nameLen <= 32) nameLen++;
+  if (nameLen == 0 || nameLen > 32) return 0;
+
+  // Reverse the MAC: BLE address order → on-the-wire order per FlutterApp
+  // g2_messages.dart:109 (Uint8List.fromList(ringMac.reversed.toList())).
+  uint8_t macReversed[6];
+  for (int i = 0; i < 6; i++) macReversed[i] = ringMacBleOrder[5 - i];
+
+  uint8_t pb[80];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_CMD,
+                       G2_DEVCFG_CMD_RING_CONNECT_INFO)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos,
+                       G2_DEVCFG_WRAP_F_RING_INFO, &inner)) return 0;
+  if (!g2PbWriteBool(pb, sizeof(pb), &pos,
+                     G2_DEVCFG_RINGINFO_F_CONNECT_RING, connect)) return 0;
+  if (!g2PbWriteBytes(pb, sizeof(pb), &pos,
+                      G2_DEVCFG_RINGINFO_F_RING_MAC,
+                      macReversed, sizeof(macReversed))) return 0;
+  if (!g2PbWriteBytes(pb, sizeof(pb), &pos,
+                      G2_DEVCFG_RINGINFO_F_RING_NAME,
+                      reinterpret_cast<const uint8_t*>(ringName),
+                      nameLen)) return 0;
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_DEV_CONFIG, G2_FLAG_REQUEST,
+                         pb, pos, out, outCap);
+}
+
+// =============================================================================
+// g2BuildRingRawDataPush — synthesise a sid=0x90 RingDataPackage frame
+// =============================================================================
+// Field tag numbers for RingRawData (encoded as field<<3 | wire-type=0 for
+// varint = the byte value before the value bytes):
+#define G2_RING_RAW_F_BATTERY            ((1u  << 3) | 0)
+#define G2_RING_RAW_F_CHARGE_STATES      ((2u  << 3) | 0)
+#define G2_RING_RAW_F_HR                 ((3u  << 3) | 0)
+#define G2_RING_RAW_F_HR_TS              ((4u  << 3) | 0)
+#define G2_RING_RAW_F_SPO2               ((5u  << 3) | 0)
+#define G2_RING_RAW_F_SPO2_TS            ((6u  << 3) | 0)
+#define G2_RING_RAW_F_HRV                ((7u  << 3) | 0)
+#define G2_RING_RAW_F_HRV_TS             ((8u  << 3) | 0)
+#define G2_RING_RAW_F_TEMP               ((9u  << 3) | 0)
+#define G2_RING_RAW_F_TEMP_TS            ((10u << 3) | 0)
+#define G2_RING_RAW_F_ACT_KCAL           ((11u << 3) | 0)
+#define G2_RING_RAW_F_ACT_KCAL_TS        ((12u << 3) | 0)
+#define G2_RING_RAW_F_ALL_KCAL           ((13u << 3) | 0)
+#define G2_RING_RAW_F_ALL_KCAL_TS        ((14u << 3) | 0)
+#define G2_RING_RAW_F_STEPS              ((15u << 3) | 0)
+#define G2_RING_RAW_F_STEPS_TS           ((16u << 3) | 0)
+// Field tag numbers for the outer RingDataPackage:
+#define G2_RING_PKG_F_CMD                ((1u  << 3) | 0)
+#define G2_RING_PKG_F_MAGIC              ((2u  << 3) | 0)
+#define G2_RING_PKG_F_RAW_DATA           ((4u  << 3) | 2)  // wire-type 2 = length-delim
+
+size_t g2BuildRingRawDataPush(uint8_t seq, uint32_t magic,
+                              const G2RingPushFields& f,
+                              uint8_t* out, size_t outCap) {
+  uint8_t pb[160];
+  size_t pos = 0;
+
+  // Outer wrapper: commandId=2, magicRandom=N, rawData=<nested>
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_PKG_F_CMD,
+                       G2_RING_CMD_RAW_DATA)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_PKG_F_MAGIC, magic)) return 0;
+
+  // Nested RingRawData. Fields written only when *_valid is set.
+  size_t inner;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos,
+                       G2_RING_PKG_F_RAW_DATA, &inner)) return 0;
+  if (f.battery_valid &&
+      !g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_BATTERY,
+                       (uint32_t)f.battery)) return 0;
+  if (f.chargeStates_valid &&
+      !g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_CHARGE_STATES,
+                       (uint32_t)f.chargeStates)) return 0;
+  if (f.hr_valid) {
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_HR,
+                         (uint32_t)f.hr)) return 0;
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_HR_TS,
+                         (uint32_t)f.hrTs)) return 0;
+  }
+  if (f.spo2_valid) {
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_SPO2,
+                         (uint32_t)f.spo2)) return 0;
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_SPO2_TS,
+                         (uint32_t)f.spo2Ts)) return 0;
+  }
+  if (f.hrv_valid) {
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_HRV,
+                         (uint32_t)f.hrv)) return 0;
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_HRV_TS,
+                         (uint32_t)f.hrvTs)) return 0;
+  }
+  if (f.temp_valid) {
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_TEMP,
+                         (uint32_t)f.temp)) return 0;
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_TEMP_TS,
+                         (uint32_t)f.tempTs)) return 0;
+  }
+  if (f.actKcal_valid) {
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_ACT_KCAL,
+                         (uint32_t)f.actKcal)) return 0;
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_ACT_KCAL_TS,
+                         (uint32_t)f.actKcalTs)) return 0;
+  }
+  if (f.allKcal_valid) {
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_ALL_KCAL,
+                         (uint32_t)f.allKcal)) return 0;
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_ALL_KCAL_TS,
+                         (uint32_t)f.allKcalTs)) return 0;
+  }
+  if (f.steps_valid) {
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_STEPS,
+                         (uint32_t)f.steps)) return 0;
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_RING_RAW_F_STEPS_TS,
+                         (uint32_t)f.stepsTs)) return 0;
+  }
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
+
+  return g2BuildEnvelope(seq, G2_SID_RING_RAW_DATA, G2_FLAG_REQUEST,
+                         pb, pos, out, outCap);
+}
+
+#endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

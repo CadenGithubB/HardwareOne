@@ -137,6 +137,12 @@ struct Settings {
       debugLlmForward(false),
       debugLlmGenerate(false),
       debugLlmMemory(false),
+      debugSr(false),                 // ESP-SR speech recognition (master)
+      debugSrWake(false),
+      debugSrCommand(false),
+      debugSrAfe(false),
+      debugSrLifecycle(false),
+      debugSrTuning(false),
       logLevel(3),                    // Default: LOG_LEVEL_DEBUG (show everything)
       memorySampleIntervalSec(30),
       espnowenabled(false),
@@ -457,6 +463,15 @@ struct Settings {
   bool debugLlmForward;       // Transformer forward (verbose)
   bool debugLlmGenerate;      // Generation loop, sampling
   bool debugLlmMemory;        // PSRAM budget, context cap
+  // ESP-SR debug flags (System_ESPSR — parent + sub-flags). Replaces the
+  // legacy gSrDebugLevel integer; the runtime level is derived from the
+  // bools so old log sites keep working unchanged.
+  bool debugSr;             // All SR (parent)
+  bool debugSrWake;         // Wake word detection events
+  bool debugSrCommand;      // MultiNet command recognition + matching
+  bool debugSrAfe;          // AFE chain — VAD, noise suppression, gain
+  bool debugSrLifecycle;    // init / start / stop verbose
+  bool debugSrTuning;       // Auto-tune sweeps, confidence threshold
   // Auth sub-flags
   bool debugAuthSessions;
   bool debugAuthCookies;

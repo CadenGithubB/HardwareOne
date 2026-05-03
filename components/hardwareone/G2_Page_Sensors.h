@@ -7,7 +7,7 @@
 // One of the per-screen modules rendered on the Even Realities G2 lens.
 // Follows the compartmentalization pattern established by OLED_Mode_*.cpp
 // and WebPage_*.cpp — each G2 page gets its own file so the core G2
-// infrastructure (Optional_EvenG2.cpp) stays focused on transport /
+// infrastructure (G2_Glasses.cpp) stays focused on transport /
 // lifecycle concerns, not content.
 //
 // This page enumerates the device's sensor registry and reports each one's
@@ -48,12 +48,34 @@ void g2BuildSensorList(char* out, size_t cap);
 // the page self-contained.
 bool g2ShowSensorList();
 
+// On-glasses interactive Sensors page: show a list with one row per
+// COMPILED-IN sensor (non-compiled rows are filtered out entirely).
+// Tapping a row drills into a detail sub-menu (back / auto-start
+// toggle / live value). Used as the kSensorsPage showMenu hook.
+void g2ShowSensorsMenu();
+
+// Re-render the sensor detail page for whichever sensor was last
+// drilled into (uses the module-internal gSensorsDetailIdx cache).
+// Used by sub-pages — Camera Settings, future per-sensor flows —
+// that want to land the user back on the originating detail page
+// when they tap "<- Back" rather than dropping all the way to the
+// sensors landing list.
+void g2ReshowSensorsDetail();
+
+// Tap dispatcher for the Sensors landing list and its sub-menu. Routes
+// based on which level we're at (gSensorsLevel internal to the
+// implementation).
+void g2SensorsHandleTap(uint32_t idx);
+
 #else  // !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
 
 inline void g2BuildSensorList(char* out, size_t cap) {
   if (out && cap > 0) out[0] = '\0';
 }
 inline bool g2ShowSensorList() { return false; }
+inline void g2ShowSensorsMenu() {}
+inline void g2ReshowSensorsDetail() {}
+inline void g2SensorsHandleTap(uint32_t /*idx*/) {}
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 #endif  // G2_PAGE_SENSORS_H

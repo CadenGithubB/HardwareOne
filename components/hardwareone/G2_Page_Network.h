@@ -18,7 +18,7 @@
 //       ESPNOW_DEVS   paired-device list (info only)
 //     BLUETOOTH       status info / Start-Stop / Adv toggle / Disconnect
 //
-// The page-mode tracker in Optional_EvenG2.h tracks which top-level
+// The page-mode tracker in G2_Glasses.h tracks which top-level
 // page we're on; the local state struct here tracks the sub-mode
 // within Network.
 

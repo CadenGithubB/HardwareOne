@@ -5,7 +5,7 @@
 // Shared BLE Type Definitions
 // ============================================================================
 // Single source of truth for BLE enums and constants used by both
-// Optional_Bluetooth.h (Arduino BLE stack) and BLE_IDF.h (ESP-IDF native stack).
+// Bluetooth.h (Arduino BLE stack) and BLE_IDF.h (ESP-IDF native stack).
 
 enum BLEConnectionState {
   BLE_STATE_IDLE = 0,

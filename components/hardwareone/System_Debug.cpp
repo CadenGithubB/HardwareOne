@@ -6,8 +6,8 @@
 #include "System_BuildConfig.h"
 #include "System_Filesystem.h"
 #include "OLED_ConsoleBuffer.h"
-#include "Optional_Bluetooth.h"
-#include "Optional_EvenG2.h"
+#include "Bluetooth.h"
+#include "G2_Glasses.h"
 #include "System_CLI.h"
 #include "System_Command.h"
 #include "System_Debug.h"
@@ -18,6 +18,7 @@
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
 #include "WebServer_Utils.h"
+#include "System_ESPSR.h"  // srSyncDebugLevel()
 
 // External dependencies from .ino
 
@@ -1721,6 +1722,85 @@ const char* cmd_debugg2dump(const String& a) {
 }
 #endif
 
+// ESP-SR debug handlers. Parent (debugSr) is the explicit master switch.
+// Sub-flags are independent — they don't aggregate up. Old log sites that
+// check gSrDebugLevel still work because srSyncDebugLevel() derives that
+// integer from these bools after every change.
+const char* cmd_debugsr(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs ca(argsInput);
+  String mode = ca.arg(1);
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = ca.argInt(0, 0);
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_SR);
+    else clearDebugFlag(DEBUG_SR);
+#if ENABLE_ESP_SR
+    // Runtime-only path: temporarily flip gSettings just long enough for the
+    // sync to see it, then restore. Cheaper than a parallel "effective" mask.
+    bool prev = gSettings.debugSr;
+    gSettings.debugSr = (v != 0);
+    srSyncDebugLevel();
+    gSettings.debugSr = prev;
+#endif
+    return v ? "debugSr enabled (runtime only)" : "debugSr disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugSr, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_SR);
+    else clearDebugFlag(DEBUG_SR);
+#if ENABLE_ESP_SR
+    srSyncDebugLevel();
+#endif
+    return gSettings.debugSr ? "debugSr enabled (persistent)" : "debugSr disabled (persistent)";
+  }
+}
+
+static const char* cmd_debugsrsub_impl(const String& argsInput, bool* settingPtr,
+                                        DebugFlagMask flagBit, const char* name) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char buf[96];
+  CommandArgs ca(argsInput);
+  String mode = ca.arg(1);
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = ca.argInt(0, 0);
+  if (modeTemp) {
+    if (v) setDebugFlag(flagBit);
+    else clearDebugFlag(flagBit);
+#if ENABLE_ESP_SR
+    bool prev = *settingPtr;
+    *settingPtr = (v != 0);
+    srSyncDebugLevel();
+    *settingPtr = prev;
+#endif
+    snprintf(buf, sizeof(buf), "%s %s (runtime only)", name, v ? "enabled" : "disabled");
+    return buf;
+  }
+  setSetting(*settingPtr, (bool)(v != 0));
+  if (v) setDebugFlag(flagBit);
+  else clearDebugFlag(flagBit);
+#if ENABLE_ESP_SR
+  srSyncDebugLevel();
+#endif
+  snprintf(buf, sizeof(buf), "%s %s (persistent)", name, *settingPtr ? "enabled" : "disabled");
+  return buf;
+}
+
+const char* cmd_debugsrwake(const String& a) {
+  return cmd_debugsrsub_impl(a, &gSettings.debugSrWake, DEBUG_SR_WAKE, "debugSrWake");
+}
+const char* cmd_debugsrcommand(const String& a) {
+  return cmd_debugsrsub_impl(a, &gSettings.debugSrCommand, DEBUG_SR_COMMAND, "debugSrCommand");
+}
+const char* cmd_debugsrafe(const String& a) {
+  return cmd_debugsrsub_impl(a, &gSettings.debugSrAfe, DEBUG_SR_AFE, "debugSrAfe");
+}
+const char* cmd_debugsrlifecycle(const String& a) {
+  return cmd_debugsrsub_impl(a, &gSettings.debugSrLifecycle, DEBUG_SR_LIFECYCLE, "debugSrLifecycle");
+}
+const char* cmd_debugsrtuning(const String& a) {
+  return cmd_debugsrsub_impl(a, &gSettings.debugSrTuning, DEBUG_SR_TUNING, "debugSrTuning");
+}
+
 const char* cmd_memorysampleintervalsec(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -3037,6 +3117,12 @@ const CommandEntry debugCommands[] = {
   { "debugg2dump",      "Debug G2 ring-buffer dumps on errors.",        true, cmd_debugg2dump,      "Usage: debugg2dump <0|1>" },
 #endif
   { "outble", "Enable/disable BLE broadcast output.", false, cmd_outble, "Usage: outble <0|1> - streams broadcast output to authenticated BLE clients" },
+  { "debugsr",          "Debug ESP-SR speech recognition (parent flag).", true, cmd_debugsr,          "Usage: debugsr <0|1> [temp|runtime]" },
+  { "debugsrwake",      "Debug SR wake word detection events.",            true, cmd_debugsrwake,      "Usage: debugsrwake <0|1>" },
+  { "debugsrcommand",   "Debug SR MultiNet command recognition.",          true, cmd_debugsrcommand,   "Usage: debugsrcommand <0|1>" },
+  { "debugsrafe",       "Debug SR AFE chain (VAD/noise/gain).",            true, cmd_debugsrafe,       "Usage: debugsrafe <0|1>" },
+  { "debugsrlifecycle", "Debug SR init/start/stop verbose.",                true, cmd_debugsrlifecycle, "Usage: debugsrlifecycle <0|1>" },
+  { "debugsrtuning",    "Debug SR auto-tune sweeps + threshold.",           true, cmd_debugsrtuning,    "Usage: debugsrtuning <0|1>" },
   { "debugfmradio", "Debug FM Radio operations.", true, cmd_debugfmradio, "Usage: debugfmradio <0|1>" },
   { "memorysampleintervalsec", "Set memory sampling interval in seconds (0=disabled).", true, cmd_memorysampleintervalsec, "Usage: memorysampleintervalsec <0-300>" },
   { "loglevel", "Set log level (error|warn|info|debug).", true, cmd_loglevel },

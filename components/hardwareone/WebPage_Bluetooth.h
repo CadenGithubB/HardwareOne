@@ -634,8 +634,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   }
 
   // R1 ring status parser — mirrors the `ringstatus` CLI output format
-  // (Optional_EvenG2_Ring.cpp::g2RingGetStatus). Example line:
-  //   ring=up name='EVEN R1_BAAC1C' addr=f8:29:ca:ba:ac:1c mtu=64 rx=12 up=5.230s (scan=found)
+  // (G2_Ring.cpp::g2RingGetStatus). Example line:
+  //   ring=up name='EVEN R1_XXXXXX' addr=xx:xx:xx:xx:xx:xx mtu=64 rx=12 up=5.230s (scan=found)
   function parseRingStatus(text){
     if(!text) return { up:false, name:'--', addr:'--', mtu:'--', rx:'0', scan:'not-found' };
     function grab(re, def){ var m = text.match(re); return m ? m[1] : def; }

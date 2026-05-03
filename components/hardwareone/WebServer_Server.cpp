@@ -54,9 +54,9 @@
 #include "System_MQTT.h"
 #endif
 #if ENABLE_BLUETOOTH
-#include "Optional_Bluetooth.h"
+#include "Bluetooth.h"
 #if ENABLE_G2_GLASSES
-#include "Optional_EvenG2.h"
+#include "G2_Glasses.h"
 #endif
 #endif
 

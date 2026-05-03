@@ -62,6 +62,8 @@ const char* cmd_cameradenoise(const String& argsInput);
 const char* cmd_cameraeffect(const String& argsInput);
 const char* cmd_camerahmirror(const String& argsInput);
 const char* cmd_cameravflip(const String& argsInput);
+const char* cmd_cameraexposure(const String& argsInput);
+const char* cmd_cameraframesize(const String& argsInput);
 
 // Command registry
 struct CommandEntry;

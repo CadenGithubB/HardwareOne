@@ -18,6 +18,8 @@ set(HW_CFG_ENABLE_MAPS 0)
 set(HW_CFG_ENABLE_AUTOMATION 0)
 set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
 set(HW_CFG_ENABLE_GAMES 0)
+set(HW_CFG_ENABLE_BLUETOOTH 0)
+set(HW_CFG_ENABLE_G2_GLASSES 0)
 
 if(EXISTS "${hw_cfg_file}")
     file(READ "${hw_cfg_file}" HW_CFG_CONTENT)
@@ -80,6 +82,16 @@ if(EXISTS "${hw_cfg_file}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_GAMES "${CMAKE_MATCH_1}")
     endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_BLUETOOTH[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_BLUETOOTH "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_G2_GLASSES[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_G2_GLASSES "${CMAKE_MATCH_1}")
+    endif()
 endif()
 
 set(HW_CFG_ENABLE_HTTP_SERVER 0)
@@ -98,22 +110,36 @@ if(HW_CFG_DISPLAY_TYPE GREATER 0 AND HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
     set(HW_CFG_BUILD_OLED_MODES 1)
 endif()
 
+# G2 build gate. Matches the per-file `#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES`
+# guards in each G2/R1 .cpp. When off we drop the protocol .cpp's from the
+# source list entirely (System_G2_Protocol.cpp + System_R1_Protocol.cpp ≈
+# 2.7 KLOC of source) so the build doesn't pay the parse + compile cost.
+# The other G2 files (G2_Glasses, G2_Ring, G2_Page_*, G2_HijackFsm) stay
+# in the unconditional list — their bodies are #if-wrapped so they compile
+# to empty translation units quickly when disabled, and the linker dead-
+# strips any symbols they leak.
+set(HW_CFG_BUILD_G2 0)
+if(HW_CFG_ENABLE_BLUETOOTH GREATER 0 AND HW_CFG_ENABLE_G2_GLASSES GREATER 0)
+    set(HW_CFG_BUILD_G2 1)
+endif()
+
 set(hardwareone_srcs
         HardwareOne.cpp
-        Optional_Bluetooth.cpp
+        Bluetooth.cpp
         BLE_IDF.cpp
-        Optional_EvenG2.cpp
-        Optional_EvenG2_Ring.cpp
+        G2_Glasses.cpp
+        G2_Ring.cpp
         BLE_Events.cpp
         BLE_Peers.cpp
         G2_Page_Sensors.cpp
-        G2_Page_System.cpp
         G2_Page_Network.cpp
         G2_Page_Settings.cpp
         G2_Page_Files.cpp
+        G2_Page_Power.cpp
+        G2_Page_CameraSettings.cpp
         G2_Page_TestSuite.cpp
         G2_Page_TextEntry.cpp
-        System_G2_Protocol.cpp
+        G2_HijackFsm.cpp
         System_Battery.cpp
         System_CLI.cpp
         System_Command.cpp
@@ -163,6 +189,16 @@ set(hardwareone_srcs
 # files all have internal `#if ENABLE_*` guards, so excluding them at
 # CMake level is equivalent to compiling-and-getting-an-empty-.obj —
 # only faster and cleaner in the build graph.
+
+if(HW_CFG_BUILD_G2 GREATER 0)
+    list(APPEND hardwareone_srcs
+        System_G2_Protocol.cpp
+        System_R1_Protocol.cpp
+    )
+    message(STATUS "G2 protocol (R1 ring + glasses wire format) ENABLED")
+else()
+    message(STATUS "G2 protocol DISABLED — saves ~2.7 KLOC of compile per build")
+endif()
 
 if(HW_CFG_ENABLE_MAPS GREATER 0)
     list(APPEND hardwareone_srcs System_Maps.cpp)

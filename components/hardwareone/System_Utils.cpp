@@ -235,7 +235,7 @@ extern const size_t g2RingCommandsCount;
   #include "System_ESPNow.h"
 #endif
 #if ENABLE_BLUETOOTH
-  #include "Optional_Bluetooth.h"
+  #include "Bluetooth.h"
 #endif
 #include "System_Settings.h"
 #include "System_User.h"
@@ -1726,7 +1726,6 @@ const CommandEntry commands[] = {
   { "voltage", "Read supply voltage.", false, cmd_voltage },
   { "cpufreq", "Get/set CPU frequency.", true, cmd_cpufreq },
   { "taskstats", "Detailed task statistics.", false, cmd_taskstats },
-  { "heapowners", "Per-task heap usage (CONFIG_HEAP_TASK_TRACKING).", false, cmd_heapowners },
 
   // ---- Misc ----
   { "reboot", "Reboot the system.", true, cmd_reboot, nullptr, "system", "reboot" },
@@ -2651,123 +2650,6 @@ const char* cmd_taskstats(const String& originalCmd) {
   }
 
   return "OK";
-}
-
-
-// ============================================================================
-// cmd_heapowners — per-task heap ownership
-// ============================================================================
-// Asks the heap allocator who owns each block, grouped by the task that
-// allocated it. Requires CONFIG_HEAP_TASK_TRACKING=y in sdkconfig (we
-// set this in the same change). Without it, the API returns 0 results
-// and we print a hint pointing the user at menuconfig.
-//
-// Output format (one line per task):
-//   <task-name>  total=<bytes>  blocks=<count>  largest=<bytes>
-//
-// "Total" is the sum across all heap caps the task has touched
-// (internal DRAM + PSRAM). For per-cap detail, use heapcaps in the
-// memreport above.
-const char* cmd_heapowners(const String& originalCmd) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-
-#if CONFIG_HEAP_TASK_TRACKING
-  // Allocate a per-task totals array. Critical: ESP-IDF v5.3.1's
-  // heap_caps_get_per_task_info only initializes size[type]/count[type]
-  // for the type matching the heap region being scanned — leaves the
-  // other indices uninitialized (see heap_task_info.c:86-89). If we
-  // pass uninitialized memory in, those indices report whatever PSRAM
-  // garbage was there before. Use ps_calloc / memset to zero.
-  constexpr size_t kMaxTasks = 32;
-  const size_t totalsBytes = kMaxTasks * sizeof(heap_task_totals_t);
-  heap_task_totals_t* totals =
-      (heap_task_totals_t*)ps_alloc(totalsBytes,
-                                    AllocPref::PreferPSRAM, "heapowners.totals");
-  if (!totals) {
-    return "Error: Failed to allocate heap_task_totals array";
-  }
-  memset(totals, 0, totalsBytes);   // see comment above
-  size_t totals_count = 0;
-
-  heap_task_info_params_t params = {};
-  params.caps[0]    = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-  params.mask[0]    = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-  params.caps[1]    = MALLOC_CAP_SPIRAM;
-  params.mask[1]    = MALLOC_CAP_SPIRAM;
-  params.tasks      = nullptr;
-  params.num_tasks  = 0;
-  params.totals     = totals;
-  params.num_totals = &totals_count;
-  params.max_totals = kMaxTasks;
-  params.blocks     = nullptr;
-  params.max_blocks = 0;
-
-  heap_caps_get_per_task_info(&params);
-
-  // Sort by total bytes descending (selection sort over ≤32 entries).
-  for (size_t i = 0; i + 1 < totals_count; i++) {
-    size_t max_i = i;
-    for (size_t j = i + 1; j < totals_count; j++) {
-      if (totals[j].size[0] + totals[j].size[1] >
-          totals[max_i].size[0] + totals[max_i].size[1]) {
-        max_i = j;
-      }
-    }
-    if (max_i != i) {
-      heap_task_totals_t tmp = totals[i];
-      totals[i] = totals[max_i];
-      totals[max_i] = tmp;
-    }
-  }
-
-  // Stream per-line so DEBUG_MSG_SIZE (256 B) doesn't truncate the
-  // multi-task output — same reason cmd_taskstats above streams.
-  broadcastOutput("Heap Ownership (per-task allocations):");
-  broadcastOutput("=========================================");
-  for (size_t i = 0; i < totals_count; i++) {
-    char nameBuf[24];
-    const char* name = nameBuf;
-    if (!totals[i].task) {
-      strcpy(nameBuf, "(pre-scheduler)");
-    } else {
-      // pcTaskGetName reads from the TCB. If the task has been deleted
-      // and its TCB freed, the call returns whatever bytes happen to be
-      // at that address — usually garbage. ESP-IDF's heap_caps_get_per_
-      // task_info doesn't clear allocations from deleted tasks; their
-      // memory stays attributed to the now-dangling handle until freed
-      // (or until the heap walker re-runs and finds the task gone).
-      // We detect this by checking the first few bytes are printable
-      // ASCII. configMAX_TASK_NAME_LEN is 16; 12 sampled chars are
-      // plenty to distinguish a real name from random TCB bytes.
-      const char* tname = pcTaskGetName(totals[i].task);
-      bool looksValid = (tname != nullptr);
-      if (looksValid) {
-        for (int k = 0; k < 12; k++) {
-          uint8_t c = (uint8_t)tname[k];
-          if (c == 0) break;                // legitimate end of string
-          if (c < 0x20 || c > 0x7E) { looksValid = false; break; }
-        }
-      }
-      if (looksValid) {
-        strncpy(nameBuf, tname, sizeof(nameBuf) - 1);
-        nameBuf[sizeof(nameBuf) - 1] = '\0';
-      } else {
-        snprintf(nameBuf, sizeof(nameBuf), "(deleted @%p)", (void*)totals[i].task);
-      }
-    }
-    BROADCAST_PRINTF("%-18.18s  DRAM=%7lu  PSRAM=%7lu  total=%7lu B",
-                     name,
-                     (unsigned long)totals[i].size[0],
-                     (unsigned long)totals[i].size[1],
-                     (unsigned long)(totals[i].size[0] + totals[i].size[1]));
-  }
-
-  free(totals);
-  return "OK";
-#else
-  return "Error: CONFIG_HEAP_TASK_TRACKING is disabled — enable in menuconfig "
-         "(Component config -> Heap memory debugging) and rebuild.";
-#endif
 }
 
 

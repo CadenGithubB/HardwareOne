@@ -47,21 +47,47 @@ CONFIG_ARDUINO_SERIAL_EVENT_TASK_STACK_SIZE=2048
 CONFIG_ARDUINO_UDP_TASK_STACK_SIZE=4096
 
 # BLE stack sizes
+# =============================================================================
+# Bluetooth — currently DISABLED at the SDK level
+# =============================================================================
+# Setting CONFIG_BT_ENABLED=n drops the entire Bluedroid stack + controller +
+# PHY radio control from the binary. Frees roughly:
+#   ~14 KB IRAM         (was ~99% full with BT enabled — most of the headroom)
+#   ~70 KB Flash code   (libbtdm_app + libbt + libbtbb)
+#   ~80 KB DRAM bss/data (BT pools, queues, GATT cache)
+#
+# The application-level mirror is `ENABLE_BLUETOOTH=0` in
+# components/hardwareone/System_BuildConfig.h. Both must be flipped together
+# to fully disable Bluetooth.
+#
+# To re-enable: change to `=y` here, change `ENABLE_BLUETOOTH 1` in
+# System_BuildConfig.h, then `idf.py fullclean && idf.py build`. The
+# config-suite settings further down (BTC/BTU stack sizes, GATT cache, etc.)
+# are kept commented but not removed so the re-enable diff is small.
+# When BT is on with BLE 5.0 (CONFIG_BT_BLE_50_FEATURES_SUPPORTED), you must
+# also set CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y or Arduino's Bluedroid BLE
+# library will fail to link (legacy esp_ble_gap_* / esp_ble_gattc_* APIs).
+CONFIG_BT_ENABLED=n
+
+# Settings below ONLY apply when CONFIG_BT_ENABLED=y. Kept here as an audit
+# trail of the tuning that was done while BT was active. They're inert when
+# BT is disabled (no ESP-IDF kconfig dependency picks them up).
+#
 # BTC was 3072 — too tight for the G2 hijack tap dispatcher, which runs on
 # the BTC task and can transitively call g2ShowText (1 KB rebuild buffer)
 # and per-page handlers. Overflowed when tapping Status from the hijacked
 # Blocks menu. 8192 matches the ESP-IDF default for BLE-rich projects.
-CONFIG_BT_BTC_TASK_STACK_SIZE=8192
-CONFIG_BT_BTU_TASK_STACK_SIZE=4352
+# CONFIG_BT_BTC_TASK_STACK_SIZE=8192
+# CONFIG_BT_BTU_TASK_STACK_SIZE=4352
 # Move BLE host structs to the heap (PSRAM-backed) instead of BSS. Frees
 # ~14 KB of internal SRAM and gives the BT stack more headroom for HCI
 # command queue / fixed_pkt_queue allocations under load.
-CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
+# CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
 
-# BLE GATT configuration
-CONFIG_BT_GATT_MAX_SR_ATTRIBUTES=100
-CONFIG_BT_GATT_MAX_SR_PROFILES=8
-CONFIG_BT_GATTC_MAX_CACHE_CHAR=40
+# BLE GATT configuration (also inert when BT is off)
+# CONFIG_BT_GATT_MAX_SR_ATTRIBUTES=100
+# CONFIG_BT_GATT_MAX_SR_PROFILES=8
+# CONFIG_BT_GATTC_MAX_CACHE_CHAR=40
 
 # Interrupt watchdog - 1500ms gives headroom for I2C FSM reset under HTTPS load
 # The I2C driver's i2c_hw_fsm_reset enters nested spinlocks (I2C + periph clock),
@@ -125,16 +151,31 @@ CONFIG_ESP_EVENT_POST_FROM_IRAM_ISR=y
 CONFIG_PERIPH_CTRL_FUNC_IN_IRAM=y
 CONFIG_ESP_SPI_BUS_LOCK_ISR_FUNCS_IN_IRAM=y
 
-# ESP-SR configuration - load models from SD card
-# CONFIG_MODEL_IN_FLASH is not set
-CONFIG_MODEL_IN_SDCARD=y
+# ESP-SR configuration - models packed into the on-flash 'model' partition.
+# The runtime srModelSource setting (gSettings.srModelSource) defaults to 0
+# = partition mode. With CONFIG_MODEL_IN_SDCARD=y the build packages models
+# in a format meant for /sd/srmodels/ which the partition loader cannot
+# parse — esp_srmodel_filter(WN_PREFIX) returns NULL even though wn9_*
+# files are physically present in the partition. Use MODEL_IN_FLASH so the
+# bundle format matches the load path. Partition sizing is in
+# partitions_sr.csv (~3 MB for WN9_HILEXIN + EN_MN7 + fst).
+CONFIG_MODEL_IN_FLASH=y
+# CONFIG_MODEL_IN_SDCARD is not set
 CONFIG_USE_AFE=y
 CONFIG_AFE_INTERFACE_V1=y
 CONFIG_USE_WAKENET=y
 CONFIG_SR_WN_WN9_HILEXIN=y
 CONFIG_USE_MULTINET=y
 CONFIG_SR_MN_EN_MULTINET7_QUANT=y
-# CONFIG_SR_MN_CN_MULTINET6_QUANT is not set
+# Chinese model: pick "None" explicitly. ESP-SR's kconfig has a `choice`
+# block for the Chinese model with `default SR_MN_CN_MULTINET6_QUANT`. The
+# old `# CONFIG_SR_MN_CN_MULTINET6_QUANT is not set` style does NOT work
+# inside a choice block — kconfig will just fall back to the default.
+# Setting CONFIG_SR_MN_CN_NONE=y picks the None option in the choice and
+# keeps srmodels.bin small enough to fit the 3 MB model partition (with
+# CN MN6 enabled, srmodels.bin balloons to ~6.4 MB and overflows the
+# partition at flash time).
+CONFIG_SR_MN_CN_NONE=y
 
 # PSRAM common settings (mode set per-target)
 CONFIG_SPIRAM=y

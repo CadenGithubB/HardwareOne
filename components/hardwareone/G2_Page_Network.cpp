@@ -10,8 +10,9 @@
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
-#include "Optional_EvenG2.h"
-#include "Optional_Bluetooth.h"
+#include "G2_Glasses.h"
+#include "G2_Ring.h"   // g2RingConnect/Disconnect/IsConnected
+#include "Bluetooth.h"
 #include "G2_Page_TextEntry.h"   // on-glasses keyboard for "Set Name"
 #include "System_Debug.h"
 #include "freertos/FreeRTOS.h"
@@ -57,6 +58,25 @@ static NetworkSubMode gNetSub = NET_SUB_MAIN;
 struct CachedAp { String ssid; int rssi; bool secured; };
 static CachedAp gScanCache[8];
 static size_t   gScanCacheCount = 0;
+
+// "Pending..." overlay state for the WiFi toggle row.
+//
+// Rationale: WiFi.disconnect() returns immediately so the OFF render
+// snaps in place, but connectToBestWiFiNetwork() is async — by the
+// time it returns the kick is in flight but the connection isn't up
+// yet. Without this overlay the user sees "WiFi: OFF" for 3-4 s after
+// tapping (until DHCP completes and a later render picks it up),
+// which feels like the tap was ignored.
+//
+// While `millis() < gWifiPendingDeadlineMs`, showWiFiMenu() renders
+// the toggle row as "WiFi: Pending..." regardless of the live
+// WiFi.isConnected() value, so the user gets immediate visual feedback.
+// A short watchdog task polls WiFi.isConnected() every 500 ms and
+// re-renders the menu the moment the state flips (or when the deadline
+// expires, whichever comes first). Single-shot — re-tapping the toggle
+// while pending arms a fresh deadline + watchdog.
+static volatile uint32_t gWifiPendingDeadlineMs = 0;
+static volatile bool     gWifiPendingTaskActive = false;
 
 // -----------------------------------------------------------------------------
 // Info text (used by the CLI direct-invocation path)
@@ -152,15 +172,20 @@ static void showWiFiMenu() {
   gNetSub = NET_SUB_WIFI;
   static char wifiLine[64];
   static char httpLine[24];
+  static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-connect
 
 #if ENABLE_WIFI
   bool connected = WiFi.isConnected();
+  const bool pending = !connected && gWifiPendingDeadlineMs > 0 &&
+                       (int32_t)(millis() - gWifiPendingDeadlineMs) < 0;
   if (connected) {
     String ssid = WiFi.SSID();
     // Truncate long SSIDs so the "WiFi: ON | …" prefix still fits the
     // ~32-char visible row width.
     String shown = (ssid.length() > 14) ? (ssid.substring(0, 14) + "~") : ssid;
     snprintf(wifiLine, sizeof(wifiLine), "WiFi: ON | %s", shown.c_str());
+  } else if (pending) {
+    snprintf(wifiLine, sizeof(wifiLine), "WiFi: Pending...");
   } else {
     snprintf(wifiLine, sizeof(wifiLine), "WiFi: OFF");
   }
@@ -181,6 +206,9 @@ static void showWiFiMenu() {
   snprintf(httpLine, sizeof(httpLine), "HTTP: n/a");
 #endif
 
+  snprintf(autoLine, sizeof(autoLine), "Auto Start: %s",
+           gSettings.wifiAutoReconnect ? "ON" : "OFF");
+
   // Item indices match dispatch in handleWiFiTap. Top WiFi line is now
   // the on/off toggle; "Connect Best" / "Disconnect" were removed since
   // tapping the toggle does the same thing.
@@ -191,9 +219,11 @@ static void showWiFiMenu() {
     "Scan Networks",   // 3
     "List Saved",      // 4
     httpLine,          // 5
+    autoLine,          // 6 (toggle wifiAutoReconnect — boot-time)
   };
   g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-  DEBUG_G2F("[G2] WiFi submenu shown (connected=%d)", connected ? 1 : 0);
+  DEBUG_G2F("[G2] WiFi submenu shown (connected=%d, auto=%d)",
+            connected ? 1 : 0, gSettings.wifiAutoReconnect ? 1 : 0);
 }
 
 // Detailed WiFi status — shown when the user taps "Status" on the WiFi
@@ -317,6 +347,7 @@ static void showEspNowMenu() {
   static char stateLine[40];
   static char modeLine[40];
   static char devsLine[32];
+  static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-init
 
 #if ENABLE_ESPNOW
   static char nameLine[48];
@@ -324,6 +355,8 @@ static void showEspNowMenu() {
            gSettings.espnowDeviceName.length() > 0
                ? gSettings.espnowDeviceName.c_str()
                : "(unset)");
+  snprintf(autoLine, sizeof(autoLine), "Auto Start: %s",
+           gSettings.espnowenabled ? "ON" : "OFF");
   bool running = (gEspNow && gEspNow->initialized);
   if (running) {
     snprintf(stateLine, sizeof(stateLine), "ESP-NOW: ON");
@@ -337,6 +370,7 @@ static void showEspNowMenu() {
       devsLine,          // 3 (info)
       "View Devices",    // 4
       nameLine,          // 5 (tap → on-glasses text entry)
+      autoLine,          // 6 (toggle espnowenabled — boot-time)
     };
     g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   } else {
@@ -348,6 +382,7 @@ static void showEspNowMenu() {
       stateLine,         // 1 (toggle — tap to start)
       "View Devices",    // 2
       nameLine,          // 3 (tap → on-glasses text entry)
+      autoLine,          // 4 (toggle espnowenabled — boot-time)
     };
     g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   }
@@ -355,7 +390,8 @@ static void showEspNowMenu() {
   static const char* na[] = { "<- Network", "ESP-NOW: not compiled" };
   g2ShowListPage(na, 2);
 #endif
-  DEBUG_G2F("[G2] ESP-NOW submenu shown");
+  DEBUG_G2F("[G2] ESP-NOW submenu shown (auto=%d)",
+            gSettings.espnowenabled ? 1 : 0);
 }
 
 static void showEspNowDevices() {
@@ -398,11 +434,69 @@ static void showEspNowDevices() {
 // Bluetooth submenu
 // -----------------------------------------------------------------------------
 
+// R1 Ring connect — relocated here from the Test Suite so it sits next
+// to the rest of the BLE-peripheral controls. Identical heap-low guard
+// and disconnect-then-connect sequence as the original; the Arduino BLE
+// stack leaks ~30 KB per server↔client reconnect cycle, so a long
+// session can run DRAM low enough that spawning the ring connect task
+// AND the page-swap worker back-to-back triggers an xTaskCreate
+// failure followed seconds later by a BLE-stack assert-and-reboot
+// (observed 2026-04-25 at heap ~2.5 KB). 16 KB is "enough for both
+// tasks plus pb buffer plus a margin"; below that we abort with a
+// clear log and recovery instructions.
+static void triggerRingReconnect() {
+  const uint32_t freeNow = ESP.getFreeHeap();
+  if (freeNow < 16 * 1024) {
+    DEBUG_G2F("[G2] Reconnect Ring: ABORTED — DRAM free %u B < 16 KB safety "
+              "threshold. Reboot or disconnect/reconnect via web UI to "
+              "recover heap (Arduino BLE leak per reconnect cycle is the "
+              "usual cause).",
+              (unsigned)freeNow);
+    return;
+  }
+
+  // Force-disconnect first to give the BLE stack a clean slate.
+  const bool wasUp = g2RingIsConnected();
+  if (wasUp) {
+    DEBUG_G2F("[G2] Reconnect Ring: dropping current connection first "
+              "(heap=%u)", (unsigned)freeNow);
+    g2RingDisconnect();
+    vTaskDelay(pdMS_TO_TICKS(500));
+  } else {
+    DEBUG_G2F("[G2] Reconnect Ring: ring already disconnected, "
+              "skipping disconnect step (heap=%u)", (unsigned)freeNow);
+  }
+
+  if (g2RingConnect()) {
+    DEBUG_G2F("[G2] Reconnect Ring: connect task started — "
+              "watch ringstatus for completion");
+  } else {
+    DEBUG_G2F("[G2] Reconnect Ring: g2RingConnect() returned false — "
+              "run a Temples Scan first to populate ring advertisement");
+  }
+  // Caller is responsible for re-rendering the menu; this helper just
+  // kicks off the ring work.
+}
+
+// Force-disconnect the ring without re-connecting. Mirror of
+// triggerRingReconnect's first half. No heap guard — disconnect doesn't
+// allocate; only connect does.
+static void triggerRingDisconnect() {
+  if (!g2RingIsConnected()) {
+    DEBUG_G2F("[G2] Disconnect Ring: already disconnected — no-op");
+    return;
+  }
+  DEBUG_G2F("[G2] Disconnect Ring: dropping connection (heap=%u)",
+            (unsigned)ESP.getFreeHeap());
+  g2RingDisconnect();
+}
+
 static void showBluetoothMenu() {
   gNetSub = NET_SUB_BLUETOOTH;
   static char stateLine[40];
   static char modeLine[40];
   static char connLine[40];
+  static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-init
 
   // Aggregate-status pattern (mirrors the dashboard tile + ESPNow): the
   // BLE subsystem is "on" when EITHER the server OR the G2 client is
@@ -413,6 +507,8 @@ static void showBluetoothMenu() {
   const bool isClient = (gSettings.bleMode == BLE_MODE_G2_CLIENT);
   const bool clientUp = isG2ClientInitialized();
   const bool serverUp = isBLERunning();
+  snprintf(autoLine, sizeof(autoLine), "Auto Start: %s",
+           gSettings.bluetoothAutoStart ? "ON" : "OFF");
   // Per-mode "connected" semantics: server cares about phone connection,
   // client cares about whether the temple BLE links are live.
   const bool connected = isClient ? isG2Connected() : isBLEConnected();
@@ -426,15 +522,41 @@ static void showBluetoothMenu() {
     if (isClient) {
       // Client mode: no advertising row (server isn't running). Tapping
       // the toggle disconnects the client; "Disconnect G2" does the
-      // same so we don't double up.
-      const char* items[] = {
-        "<- Network",      // 0
-        stateLine,         // 1 (toggle = stop client)
-        modeLine,          // 2 (info)
-        connLine,          // 3 (info)
-        "Disconnect G2",   // 4
-      };
-      g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+      // same so we don't double up. R1 Ring rows appear after the G2
+      // controls — ring is a separate BLE-central peer that lives on
+      // the same controller and is most often paired with the glasses.
+      // "Disconnect Ring" only renders when actually connected so the
+      // menu doesn't carry a no-op row.
+      static char ringLine[40];
+      const bool ringUp = g2RingIsConnected();
+      snprintf(ringLine, sizeof(ringLine), "Ring: %s",
+               ringUp ? "connected" : "disconnected");
+      if (ringUp) {
+        const char* items[] = {
+          "<- Network",      // 0
+          stateLine,         // 1 (toggle = stop client)
+          modeLine,          // 2 (info)
+          connLine,          // 3 (info)
+          "Disconnect G2",   // 4
+          ringLine,          // 5 (info)
+          "Reconnect Ring",  // 6
+          "Disconnect Ring", // 7
+          autoLine,          // 8 (toggle bluetoothAutoStart)
+        };
+        g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+      } else {
+        const char* items[] = {
+          "<- Network",      // 0
+          stateLine,         // 1 (toggle = stop client)
+          modeLine,          // 2 (info)
+          connLine,          // 3 (info)
+          "Disconnect G2",   // 4
+          ringLine,          // 5 (info)
+          "Connect Ring",    // 6
+          autoLine,          // 7 (toggle bluetoothAutoStart)
+        };
+        g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+      }
     } else {
       // Server mode (legacy layout).
       const char* items[] = {
@@ -444,6 +566,7 @@ static void showBluetoothMenu() {
         connLine,          // 3 (info)
         "Toggle Adv",      // 4
         "Disconnect",      // 5
+        autoLine,          // 6 (toggle bluetoothAutoStart)
       };
       g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
     }
@@ -457,6 +580,7 @@ static void showBluetoothMenu() {
       "<- Network",      // 0
       stateLine,         // 1 (toggle — starts whichever mode is selected)
       modeLine,          // 2 (info)
+      autoLine,          // 3 (toggle bluetoothAutoStart)
     };
     g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   }
@@ -570,6 +694,52 @@ static void handleMainTap(uint32_t idx) {
   }
 }
 
+#if ENABLE_WIFI
+// Watchdog spawned by the WiFi-toggle ON branch. Polls WiFi.isConnected()
+// every 500 ms for up to ~10 s and re-renders the menu the moment the
+// connection comes up — replaces the "WiFi: Pending..." overlay with
+// the live "WiFi: ON | <ssid>" text. If the deadline expires without a
+// successful connect (no saved network, AP out of range, wrong creds),
+// it re-renders one final time so the menu drops back to "WiFi: OFF"
+// instead of getting stuck on "Pending...".
+//
+// Runs on its own task, not the BLE notify task, because the polling
+// loop yields with vTaskDelay — calling g2ShowListPage from a task
+// other than the original tap dispatcher is fine; the BLE write path
+// is already mutex-guarded.
+static void wifiPendingWatchdogTask(void* /*arg*/) {
+  bool wasConnected = false;
+  bool rerendered   = false;
+  while (gWifiPendingDeadlineMs > 0 &&
+         (int32_t)(millis() - gWifiPendingDeadlineMs) < 0) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+    const bool nowConnected = WiFi.isConnected();
+    if (nowConnected && !wasConnected) {
+      gWifiPendingDeadlineMs = 0;
+      // Only re-render if the user is still on the WiFi submenu —
+      // otherwise we'd clobber whatever they navigated to next.
+      if (gNetSub == NET_SUB_WIFI) {
+        showWiFiMenu();
+        rerendered = true;
+      }
+      break;
+    }
+    wasConnected = nowConnected;
+  }
+  // Final re-render when the deadline expired without a state change,
+  // so the menu drops the "Pending..." text and reflects whatever
+  // stuck (usually "OFF" if the connect failed).
+  if (!rerendered && gNetSub == NET_SUB_WIFI) {
+    gWifiPendingDeadlineMs = 0;
+    showWiFiMenu();
+  } else {
+    gWifiPendingDeadlineMs = 0;
+  }
+  gWifiPendingTaskActive = false;
+  vTaskDelete(nullptr);
+}
+#endif  // ENABLE_WIFI
+
 static void handleWiFiTap(uint32_t idx) {
   switch (idx) {
     case 0:  // <- Back to top-level
@@ -583,15 +753,55 @@ static void handleWiFiTap(uint32_t idx) {
         DEBUG_G2F("[G2] WiFi toggle: disconnect");
         WiFi.disconnect(false);
         BROADCAST_PRINTF("[G2] WiFi: disconnect requested from glasses");
+        // Disconnect is synchronous from the user's perspective —
+        // clear any leftover pending state and re-render OFF.
+        gWifiPendingDeadlineMs = 0;
+        showWiFiMenu();
       } else {
         DEBUG_G2F("[G2] WiFi toggle: connect best");
+        // Arm the "Pending..." overlay BEFORE we trigger the connect
+        // and BEFORE the immediate re-render — showWiFiMenu() reads
+        // gWifiPendingDeadlineMs to decide whether to show the
+        // overlay text. 10 s window covers DHCP + association on a
+        // healthy AP; the watchdog clears the flag the moment the
+        // link comes up.
+        gWifiPendingDeadlineMs = millis() + 10000;
+        showWiFiMenu();   // immediate "WiFi: Pending..." render
+
+        // Yield the radio briefly so the page-swap worker can flush
+        // the Pending REBUILD to the BLE TX before WiFi.begin() takes
+        // over coexistence. Without this, the user sees a ~2-3 s lag
+        // before "Pending..." appears: the BLE envelope IS queued
+        // synchronously, but the radio's actual transmit window is
+        // starved by WiFi's PHY mode-switch + association cycle that
+        // immediately follows. 150 ms is empirically enough for a
+        // single REBUILD envelope (~50 ms on the wire) plus a small
+        // margin. Cost: BLE notify task blocked for 150 ms; pending
+        // notifications queue and dispatch late but are not dropped.
+        // (Spawning a worker for the WiFi side was rejected — DRAM
+        // is tight and the existing ring-connect path already hits
+        // a heap-low cascade at ~16 KB free.)
+        vTaskDelay(pdMS_TO_TICKS(150));
+
         bool ok = connectToBestWiFiNetwork();
         BROADCAST_PRINTF("[G2] WiFi: Connect Best → %s",
                          ok ? "started" : "no saved networks / failed");
+        // Spawn the watchdog only if one isn't already running. A
+        // second tap before the previous watchdog finished re-arms
+        // the deadline — that watchdog observes the new deadline
+        // and keeps polling.
+        if (!gWifiPendingTaskActive) {
+          gWifiPendingTaskActive = true;
+          if (xTaskCreate(wifiPendingWatchdogTask, "g2_wifi_pending",
+                          4096, nullptr, /*prio*/ 5, nullptr) != pdPASS) {
+            DEBUG_G2F("[G2] WiFi pending: xTaskCreate failed — "
+                      "menu won't auto-refresh on connect");
+            gWifiPendingTaskActive = false;
+            gWifiPendingDeadlineMs = 0;
+            showWiFiMenu();   // drop the Pending overlay
+          }
+        }
       }
-      // Refresh so the label flips immediately. (Connect attempt is
-      // async; if it ultimately fails the row text stays "OFF".)
-      showWiFiMenu();
 #endif
       break;
     }
@@ -627,6 +837,16 @@ static void handleWiFiTap(uint32_t idx) {
 #else
       DEBUG_G2F("[G2] WiFi: HTTP not compiled in");
 #endif
+      break;
+    }
+
+    case 6: {  // Auto Start toggle — persists to NVS via setSetting
+      const bool prev = gSettings.wifiAutoReconnect;
+      setSetting(gSettings.wifiAutoReconnect, !prev);
+      BROADCAST_PRINTF("[G2] WiFi: Auto Start %s -> %s (from glasses)",
+                       prev ? "ON" : "OFF",
+                       gSettings.wifiAutoReconnect ? "ON" : "OFF");
+      showWiFiMenu();
       break;
     }
 
@@ -746,6 +966,21 @@ static void handleEspNowTap(uint32_t idx) {
   }
 #endif
 
+  // Auto Start row idx depends on running state — see showEspNowMenu().
+#if ENABLE_ESPNOW
+  const uint32_t kAutoIdxOn  = 6;
+  const uint32_t kAutoIdxOff = 4;
+  if ((running && idx == kAutoIdxOn) || (!running && idx == kAutoIdxOff)) {
+    const bool prev = gSettings.espnowenabled;
+    setSetting(gSettings.espnowenabled, !prev);
+    BROADCAST_PRINTF("[G2] ESP-NOW: Auto Start %s -> %s (from glasses)",
+                     prev ? "ON" : "OFF",
+                     gSettings.espnowenabled ? "ON" : "OFF");
+    showEspNowMenu();
+    return;
+  }
+#endif
+
   if (running) {
     if (idx == 2 || idx == 3) {  // info rows
       DEBUG_G2F("[G2] ESP-NOW: info row %u (no action)", (unsigned)idx);
@@ -765,11 +1000,26 @@ static void handleEspNowDevsTap(uint32_t idx) {
   DEBUG_G2F("[G2] ESP-NOW: device row %u tapped (info-only)", (unsigned)idx);
 }
 
+// Toggle the persisted Bluetooth auto-start flag. Hoisted out so every
+// branch of handleBluetoothTap can call it without copy-pasting the
+// setSetting + log + redraw triple.
+static void bluetoothToggleAutoStart() {
+  const bool prev = gSettings.bluetoothAutoStart;
+  setSetting(gSettings.bluetoothAutoStart, !prev);
+  BROADCAST_PRINTF("[G2] Bluetooth: Auto Start %s -> %s (from glasses)",
+                   prev ? "ON" : "OFF",
+                   gSettings.bluetoothAutoStart ? "ON" : "OFF");
+  showBluetoothMenu();
+}
+
 static void handleBluetoothTap(uint32_t idx) {
-  // Layout (kept in sync with showBluetoothMenu):
-  //   active + server: 0=Back 1=toggle 2=Mode 3=Conn 4=ToggleAdv 5=Disconnect
-  //   active + client: 0=Back 1=toggle 2=Mode 3=Conn 4=DisconnectG2
-  //   inactive:        0=Back 1=toggle 2=Mode
+  // Layout (kept in sync with showBluetoothMenu — "Auto Start" is the
+  // last row in every branch, so its idx varies):
+  //   active + server:               0=Back 1=toggle 2=Mode 3=Conn
+  //                                  4=ToggleAdv 5=Disconnect 6=AutoStart
+  //   active + client (ring up):     0..7 (see below) 8=AutoStart
+  //   active + client (ring down):   0..6 7=AutoStart
+  //   inactive:                      0=Back 1=toggle 2=Mode 3=AutoStart
   const bool active   = bleSubsystemActive();
   const bool isClient = (gSettings.bleMode == BLE_MODE_G2_CLIENT);
   if (idx == 0) { g2ShowNetworkMenu(); return; }
@@ -797,9 +1047,11 @@ static void handleBluetoothTap(uint32_t idx) {
   }
 
   if (!active) {
-    // Only Back + toggle + Mode-info are valid; Mode is read-only here.
+    // Layout: 0=Back 1=toggle 2=Mode 3=AutoStart
     if (idx == 2) {
       DEBUG_G2F("[G2] Bluetooth: mode info row (use blemode CLI to change)");
+    } else if (idx == 3) {
+      bluetoothToggleAutoStart();
     } else {
       DEBUG_G2F("[G2] Bluetooth: idx=%u while OFF (only toggle valid)",
                 (unsigned)idx);
@@ -808,8 +1060,18 @@ static void handleBluetoothTap(uint32_t idx) {
   }
 
   if (isClient) {
-    // Client-mode layout: 2/3 are info, 4 is Disconnect G2.
-    if (idx == 2 || idx == 3) {
+    // Client-mode layout (kept in sync with showBluetoothMenu):
+    //   ringUp:  0=Back 1=toggle 2=Mode 3=Conn 4=DisconnectG2
+    //            5=Ring(info) 6=ReconnectRing 7=DisconnectRing 8=AutoStart
+    //   ringDown: 0=Back 1=toggle 2=Mode 3=Conn 4=DisconnectG2
+    //             5=Ring(info) 6=ConnectRing 7=AutoStart
+    const bool ringUp = g2RingIsConnected();
+    const uint32_t kAutoIdx = ringUp ? 8 : 7;
+    if (idx == kAutoIdx) {
+      bluetoothToggleAutoStart();
+      return;
+    }
+    if (idx == 2 || idx == 3 || idx == 5) {
       DEBUG_G2F("[G2] Bluetooth: client info row %u (no action)", (unsigned)idx);
       return;
     }
@@ -817,6 +1079,29 @@ static void handleBluetoothTap(uint32_t idx) {
       deinitG2Client();
       BROADCAST_PRINTF("[G2] Bluetooth: G2 disconnect requested from glasses");
       showBluetoothMenu();
+      return;
+    }
+    if (idx == 6) {
+      // "Connect Ring" (ringDown) and "Reconnect Ring" (ringUp) both
+      // route to triggerRingReconnect — the helper handles the
+      // disconnect-first half when needed and skips it otherwise.
+      // Skip the menu redraw on purpose: re-rendering here means a
+      // SHUTDOWN+CREATE-list page swap (4 KB worker stack, 8 KB pb
+      // buffer) RIGHT after we already spent some heap on the ring
+      // connect task — the back-to-back allocation pattern that
+      // motivated the heap-low guard inside triggerRingReconnect.
+      // The lens still shows the actions menu (we never tore it
+      // down), and ring outcome surfaces in serial + the web UI's
+      // ring-status panel.
+      BROADCAST_PRINTF("[G2] Bluetooth: %s Ring requested from glasses",
+                       g2RingIsConnected() ? "Reconnect" : "Connect");
+      triggerRingReconnect();
+      return;
+    }
+    if (idx == 7) {
+      BROADCAST_PRINTF("[G2] Bluetooth: Disconnect Ring requested from glasses");
+      triggerRingDisconnect();
+      showBluetoothMenu();   // disconnect is synchronous; safe to redraw
       return;
     }
     DEBUG_G2F("[G2] Bluetooth (client): unknown idx=%u", (unsigned)idx);
@@ -852,6 +1137,10 @@ static void handleBluetoothTap(uint32_t idx) {
       showBluetoothMenu();
       break;
     }
+
+    case 6:  // Auto Start (server-mode layout)
+      bluetoothToggleAutoStart();
+      break;
 
     default:
       DEBUG_G2F("[G2] Bluetooth: unknown idx=%u", (unsigned)idx);
