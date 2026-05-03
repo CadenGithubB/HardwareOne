@@ -67,9 +67,9 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #if ENABLE_ESPNOW
   #include "System_ESPNow.h"
 #endif
-#include "Optional_Bluetooth.h"
-#include "Optional_EvenG2.h"
-#include "Optional_EvenG2_Ring.h"
+#include "Bluetooth.h"
+#include "G2_Glasses.h"
+#include "G2_Ring.h"
 #include "BLE_Peers.h"
 #include "System_Automation.h"
 #include "System_Utils.h"

@@ -1,5 +1,5 @@
-#ifndef OPTIONAL_EVEN_G2_H
-#define OPTIONAL_EVEN_G2_H
+#ifndef G2_GLASSES_H
+#define G2_GLASSES_H
 
 #include "System_BuildConfig.h"
 #include "System_G2_Protocol.h"   // G2ContainerGeom + G2_GEOM_* presets
@@ -10,7 +10,7 @@
 // =============================================================================
 // This module implements ESP32 as a BLE Central/GATT Client to connect to
 // Even Realities G2 smart glasses. This mode is mutually exclusive with the
-// phone BLE server mode (Optional_Bluetooth).
+// phone BLE server mode (Bluetooth).
 //
 // Requires: ENABLE_BLUETOOTH=1 AND ENABLE_G2_GLASSES=1
 // Protocol reference: https://github.com/i-soxi/even-g2-protocol
@@ -50,7 +50,14 @@ enum G2EventType {
   // we know the specific gesture. DISPLAY_OFF fires when the display
   // transitions on→off (either inactivity timeout or user close).
   G2_EVENT_USER_ACTIVITY,
-  G2_EVENT_DISPLAY_OFF
+  G2_EVENT_DISPLAY_OFF,
+  // Device-side system notification (NOT a user gesture). Observed
+  // (2026-05-02) on the 9B SysEvent path with code=224, src=33 —
+  // emitted when the on-lens "ring connected/disconnected" status banner
+  // appears or dismisses. Distinct from USER_ACTIVITY so widget-management
+  // consumers (TEXT-view auto-exit, hijacked menu dismissal) don't mistake
+  // a transient banner for a user tap and tear down their UI.
+  G2_EVENT_SYS_NOTIFY
 };
 
 typedef void (*G2EventCallback)(G2EventType event);
@@ -61,7 +68,7 @@ typedef void (*G2EventCallback)(G2EventType event);
 // -----------------------------------------------------------------------------
 // G2 BLE UUIDs (from protocol docs)
 // -----------------------------------------------------------------------------
-// Legacy #defines — Optional_EvenG2.cpp owns the authoritative UUIDs now.
+// Legacy #defines — G2_Glasses.cpp owns the authoritative UUIDs now.
 // The command-service value below was corrected from "...e0000" (wrong) to
 // "...e5450" after real-device service discovery.
 #define G2_UUID_BASE          "00002760-08c2-11e1-9073-0e8ac72e"
@@ -141,6 +148,56 @@ void g2Disconnect();
 bool isG2Connected();
 G2State getG2State();
 const char* getG2StateString();
+
+// Stricter than isG2Connected(): true iff BOTH temples have an active BLE
+// link. Useful when an operation needs full glasses presence (e.g. waiting
+// for boot-time reconnect to finish before kicking off a competing BLE
+// activity).
+bool g2BothConnected();
+
+// Block the calling task until g2BothConnected() returns true, or until
+// `timeoutMs` elapses. Returns true on success, false on timeout. Polls
+// every 100 ms — coarse but adequate for boot-time sequencing where
+// connects take seconds. Do not call from time-critical paths.
+bool g2WaitForBothConnected(uint32_t timeoutMs);
+
+// Update connection priority on every connected temple. Returns the count
+// of temples the request was sent to (0..2). The peripheral may
+// counter-offer; final values appear in ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT.
+//   high=true  → ~11.25-15 ms intervals (default for normal traffic).
+//   high=false → ~40-60 ms intervals (BALANCED). Frees ~3-4× more BLE
+//                radio idle time for scans and concurrent connects, at the
+//                cost of glasses input latency. Used during ring connect
+//                attempts to prevent the BLE controller from starving an
+//                existing temple link to supervision-timeout (rsn=0x8).
+int g2SetAllTemplesConnPriority(bool high);
+
+// Fill `out` with the 6-byte BLE address of the right (or left) temple in
+// natural high-to-low order (matching the colon-separated string form, e.g.
+// "c8:8d:65:00:97:69" → {0xC8,0x8D,0x65,0x00,0x97,0x69}). Returns true if
+// the temple link is currently up; on false, `out` is zeroed. Used by the
+// R1 ring's advStart payload, which wants the right-temple MAC reversed
+// (LSB-first); reverse on the caller side.
+bool g2GetLeftTempleMac(uint8_t out[6]);
+bool g2GetRightTempleMac(uint8_t out[6]);
+
+// Send a pre-built envelope (the byte stream returned by any g2Build*
+// function) to the right-temple BLE link. Used by external modules — most
+// notably the R1 ring spoof-push (G2_Ring.cpp) which synthesises sid=0x90
+// RingDataPackage frames so the glasses display real ring telemetry even
+// when the official bridge handshake never completes.
+//
+// Returns false if the right temple isn't connected, the writeChar isn't
+// available, or the BLE write fails. Acquires the temple's send mutex
+// internally so concurrent callers don't interleave bytes.
+bool g2SendToRightTemple(const uint8_t* env, size_t envLen);
+
+// Allocate the next outgoing-frame sequence number (shared monotonic
+// counter, wraps at 0xFF). Mirrors the existing internal `allocSeq()`.
+// Exposed so external builders can construct envelopes that follow the
+// glasses' expected ordering (the firmware's seq counter has to be
+// monotonic across all SIDs sent on a given temple link).
+uint8_t g2AllocSeq();
 
 // Scanning
 bool g2StartScan(uint32_t durationMs = 10000);
@@ -241,6 +298,65 @@ bool g2ShowTextPage(const char* content,
                     void (*exitFn)() = nullptr,
                     G2TapFn tapFn = nullptr);
 
+// Variant that CREATEs the TextObject with a small placeholder, then
+// immediately REBUILD-text's `content` into it. The placeholder always
+// fits in one fragment so the CREATE is guaranteed to ack; the
+// REBUILD then carries the real test payload. Used by Transport Tests
+// to compare REBUILD-text's reassembly ceiling against CREATE-text's.
+bool g2ShowTextPageRebuildProbe(const char* placeholder,
+                                const char* content,
+                                const G2ContainerGeom& geom = G2_GEOM_LARGE,
+                                void (*exitFn)() = nullptr);
+
+// Render a CreateStartUpPage with N TextObject children at independent
+// geometries (compound layout — e.g. two side-by-side buttons in the
+// bottom corners). Each child carries its own geom + ContainerId +
+// ContainerName + Content. `exitFn` is wired via the same
+// gTextViewExitFn slot g2ShowTextPage uses, so DOUBLE_CLICK (or any
+// SysEvent gesture if tapFn is null) routes through it for dismiss.
+//
+// Used by the Tests/Display/Selection Patterns test bench to canary
+// the firmware's compound-text-container behaviour. SCHEMA RISK: this
+// is the first compound shape in the codebase that emits multiple
+// TextObject children under wrapper field 3 — verified working only
+// at runtime.
+bool g2ShowMultiTextPage(const G2TextChildSpec* children, size_t childCount,
+                         void (*exitFn)() = nullptr,
+                         G2TapFn tapFn = nullptr);
+
+// Compound List + Text page — title (TextObject) + selectable list
+// (ListObject). The list manages focus + scroll + CLICK natively, so
+// row taps reach the dispatcher via the standard ListEvent path —
+// behaves identically to a plain list page from the tap-handling
+// perspective. The TextObject is a non-interactive header above (or
+// alongside) the list. Use for confirmation prompts, settings
+// sections, anything that wants a label above tappable rows.
+//
+// Both `items` and the title's `containerName` / `content` are deep-
+// copied; caller buffers can be reused immediately.
+bool g2ShowMixedListText(const char* const* items, size_t itemCount,
+                         const G2ContainerGeom& listGeom,
+                         const G2TextChildSpec& title);
+
+// REBUILD-text child probe — given a single compound container hosting
+// both a TextObject ("title") and a ListObject (the test R shape), can
+// we rebuild ONLY the TextObject child via Cmd=7 REBUILD_PAGE without
+// disturbing the list? Answers the dual-pane Status UX question: if
+// yes, the detail pane updates on selection change without resetting
+// list focus; if no, every change requires a full compound REBUILD.
+//
+// Sequence: tearDown → CREATE compound (title="Initial: foo" + list)
+// → hold 1.5 s → REBUILD-text(name="title", content="Updated: bar") →
+// wait ack → hold 4 s for visual observation → Shutdown.
+//
+// Returns a static result string. Synchronous; MUST be called from a
+// worker task, not the BLE notify task. The G2_ASSERT_NOT_NOTIFY_TASK
+// guard inside the helpers will catch a misuse.
+//
+// (Replaces the retired g2ProbeDualPaneCreate; see G2_PROTOCOL.md note
+// on single-container-per-widget for why that experiment was closed.)
+const char* g2ProbeRebuildTextChild();
+
 // Render a multi-line text blob as a read-only list page within the active
 // hijack list container. Splits on '\n', prepends "<- Back", and pushes
 // the result via g2ShowListPage. Sets gHijackPage to TEXT_VIEW so the tap
@@ -254,6 +370,53 @@ bool g2ShowTextPage(const char* content,
 // default "<- Back" — callers should pass the destination name so the
 // user knows where the tap goes (e.g. "<- Main Menu", "<- Network").
 bool g2ShowTextAsList(const char* text, const char* backLabel = nullptr);
+
+// Display a BMP from VFS as a one-shot image probe — same transport as
+// the `g2bmp` CLI command but async with a completion callback. Path is
+// heap-copied so the caller's buffer can be reused. Spawns a worker;
+// returns true on successful task creation. The worker holds the image
+// until the user double-taps (or 60 s safety cap) and then fires the
+// optional `onDone` callback so the caller can re-render its own page
+// (e.g. the Files page re-CREATEs the file list). `onDone` is called
+// from the worker task, NOT the BLE notify task, so it can call other
+// page-swap APIs safely.
+bool g2ShowBmpFile(const char* path, void (*onDone)() = nullptr);
+
+// Same as g2ShowBmpFile but renders the 288×144 source full-screen by
+// 2× upscaling (nearest-neighbour) and shipping as a 2×2 grid of
+// 288×144 tiles via the Q12-style multi-image transport. Use when the
+// caller wants the existing small image to fill the lens canvas
+// without re-prepping the asset on the host. Same async + onDone
+// contract as g2ShowBmpFile.
+bool g2ShowBmpFileFullScreen(const char* path, void (*onDone)() = nullptr);
+
+// Capture one camera frame, decode JPEG → grayscale, render in the
+// small 288×144 image container and hold until the user double-taps.
+// One-shot: there's no live-feed refresh and no single-tap recapture
+// (image-only widget state on this firmware only emits DOUBLE_CLICK,
+// so single-tap is silent). Returns true if the worker spawned;
+// returns false if camera is disabled / heap is too low. `onDone` is
+// invoked from the worker task once the user dismisses or the 60 s
+// safety cap fires — caller typically uses it to redraw its menu.
+bool g2ShowCameraViewer(void (*onDone)() = nullptr);
+
+// Continuous camera stream: capture → decode → push, looped until
+// the user double-taps. Effective frame rate is bounded by the
+// per-frame BLE push time (~2.7 s per 7-fragment 288×144 BMP), so
+// expect ~0.4 fps. Same dismiss contract as g2ShowCameraViewer
+// (firmware only emits DOUBLE_CLICK on image-only state). Returns
+// true if the worker spawned. `onDone` fires on stop / error.
+bool g2ShowCameraStream(void (*onDone)() = nullptr);
+
+// One-shot inter-fragment cadence override for the next sendPbFragmented
+// burst. 0 (or never calling) leaves the 20 ms default in place; any
+// other value applies to all fragments of the next multi-fragment send,
+// then auto-clears. Used by the Transport Tests bench to probe whether
+// firmware reassembly tolerates more bytes when given more time per
+// fragment. Test setting → call g2ShowTextPage / g2ShowListPage in the
+// same dispatcher tick → the page-swap worker's first multi-fragment
+// CREATE consumes the override.
+void g2DebugSetNextBurstFragDelay(uint32_t delayMs);
 
 // Live list page primitive — periodically rebuilds a list-shaped page in
 // place via Cmd=7 REBUILD-list (no flicker). `buildFn` is called on each
@@ -280,6 +443,28 @@ void g2StopLiveListPage();
 // when no live page is active. Same path the ring's double-tap takes.
 void g2KickLivePageRefresh();
 
+// Live TEXT page primitive — same lifecycle as g2StartLiveListPage but
+// uses the TEXT widget path (Cmd=7 REBUILD_PAGE) instead of REBUILD-list.
+// Text widgets have no row selection / scroll state, so REBUILDs snap
+// the new content in place — no visual cycling for long content that
+// refreshes periodically. NO tappable back row — exit is DOUBLE_CLICK
+// on the lens. Use this for read-only info pages (Status, Sensors)
+// whose content is longer than one screen. Page modules opt in via the
+// `prefersTextWidget` flag on G2PageModule; the dispatcher then chooses
+// this over the live-list path automatically.
+//
+// `renderFn` (optional, default null) replaces the default buildFn +
+// g2ShowText path with a caller-owned render hook. When non-null, the
+// worker calls renderFn() instead of buildFn(buf,2048)+g2ShowText(buf)
+// on both the initial render and every subsequent tick. Use for
+// compound layouts (multiple TextObject children at independent geoms)
+// where the default single-TEXT widget is too constraining — see
+// renderStatusCompound. buildFn must still be non-null (registry
+// validation requires it) but is not invoked when renderFn is set.
+bool g2StartLiveTextPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
+                         bool (*renderFn)() = nullptr);
+void g2StopLiveTextPage();
+
 // ─── Phase 2B: G2 mic → ESP-SR AFE feed ──────────────────────────────
 // When ESP-SR's mic source is switched to G2_LEFT, it drains 16 kHz mono
 // int16 PCM samples from this ring buffer instead of reading I2S. The
@@ -300,7 +485,7 @@ uint32_t g2MicAfeOverrunCount();
 
 // Page-mode tracker for the hijacked Blocks menu. Stateful pages register
 // their identity here so handleHijackMenuTap() can route taps to the
-// right per-page handler. See G2HijackPage enum in Optional_EvenG2.cpp
+// right per-page handler. See G2HijackPage enum in G2_Glasses.cpp
 // for the values; reproduced here so per-page modules don't need to
 // include the cpp.
 enum G2HijackPage : uint8_t {
@@ -319,6 +504,21 @@ enum G2HijackPage : uint8_t {
   // multi-fragment CREATE path against real hardware without a recompile
   // each time.
   G2_HIJACK_PAGE_TESTS     = 5,
+  // Sensors landing list (one row per compiled-in sensor) and the
+  // per-sensor detail sub-page reached by drilling into a row. Stateful
+  // because the dispatcher needs to know whether a tap is "open this
+  // sensor" or "act on the open sensor".
+  G2_HIJACK_PAGE_SENSORS   = 6,
+  // Power page: Restart / Power Off, with a confirmation sub-list so a
+  // stray tap can't reboot the device. Stateful because the tap
+  // dispatcher needs to know whether the user is on the action list or
+  // the confirmation prompt.
+  G2_HIJACK_PAGE_POWER     = 7,
+  // Camera settings sub-page reached by drilling from Sensors → CAM.
+  // Hidden from the main hijack menu (registered with hijackLabel=
+  // nullptr); navigated to programmatically. Stateful — each tap
+  // cycles the targeted setting's value and re-renders.
+  G2_HIJACK_PAGE_CAMERA_SETTINGS = 8,
 };
 G2HijackPage g2GetHijackPage();
 void         g2SetHijackPage(G2HijackPage p);
@@ -333,7 +533,7 @@ void         g2SetHijackPage(G2HijackPage p);
 // one place where we can log / SSE / fire side-effects consistently.
 //
 // Why this exists: before consolidation, lens state lived in five separate
-// places — gHijackActive (Optional_EvenG2.cpp), gHijackPage (same file),
+// places — gHijackActive (G2_Glasses.cpp), gHijackPage (same file),
 // per-temple G2Temple.containerReady/containerIsList, and gOverlayDeadline
 // (G2_Page_Files.cpp). New transient views (notifications, modal dialogs,
 // confirmation prompts) would each have spawned their own file-static,
@@ -430,8 +630,32 @@ struct G2PageModule {
   // knows the back tap returns to the hijack root rather than just
   // "back". nullptr falls back to "<- Back". Only consulted when the
   // dispatcher renders via g2ShowTextAsList / g2StartLiveListPage —
-  // pages with their own showMenu render the back row themselves.
+  // pages with their own showMenu render the back row themselves, and
+  // pages that opt into the text-widget path (prefersTextWidget below)
+  // ignore this entirely (no tappable rows).
   const char*   backLabel;
+
+  // When true (and liveIntervalMs > 0), the dispatcher renders this
+  // page using g2StartLiveTextPage() — Cmd=7 REBUILD_PAGE on a single
+  // TEXT widget — instead of g2StartLiveListPage(). Use this for
+  // read-only info pages whose content is longer than one screen and
+  // refreshes periodically: REBUILDing a list resets selection/scroll
+  // and produces visible cycling, while a text widget snaps the new
+  // content in place. There is no tappable back row in this mode —
+  // exit is via DOUBLE_CLICK (firmware emits this on the lens). Pages
+  // with their own showMenu (Network, Files, Settings, Tests) ignore
+  // this flag because they need tappable rows.
+  bool          prefersTextWidget;
+
+  // Optional custom live-render hook. When non-null AND prefersTextWidget
+  // is also true, the live-text worker calls this instead of the default
+  // buildText+g2ShowText path on every tick (initial CREATE and
+  // subsequent REBUILDs). The implementation owns its own widget
+  // lifecycle — typically a compound CreateStartUpPage with multiple
+  // TextObject children at independent geoms (Status uses this for the
+  // body+battery-corner layout). Returns true on success; false aborts
+  // the worker. Pages without compound layout needs leave this nullptr.
+  bool          (*liveRender)();
 };
 
 // Register a page module. Idempotent: a re-registration with the same
@@ -447,11 +671,25 @@ const G2PageModule*   g2FindPageByHijackPage(G2HijackPage page);
 
 // Mutators. Each one logs the transition for visibility. Setting
 // hijackActive=true also stamps hijackStartedMs.
+//
+// Phase 5: these are now thin event dispatchers. The actual gLens.*
+// writes happen on the FSM worker task (see g2LensApply* below). Reads
+// of gLens via g2LensGetState() / g2LensSnapshot() are eventually
+// consistent — fine for status JSON / external displays. Code that
+// needs a synchronous "is the hijack live?" answer should consult
+// hijackFsmState() (single-writer-task, atomic load) instead.
 void g2LensSetHijackActive(bool active);
 void g2LensSetContainer(bool ready, bool isList, uint32_t widgetId);
 void g2LensClearContainer();
 void g2LensStartOverlay(G2OverlayKind kind, uint32_t durationMs);
 void g2LensClearOverlay();
+
+// FSM worker hooks (Phase 5). NOT for general callers — these are the
+// raw mutators the FSM worker invokes when it processes the
+// corresponding event. Calling them directly bypasses the dispatch /
+// verify machinery and will desync the FSM from gLens.
+void g2LensApplyHijackActive(bool active);
+void g2LensApplyContainer(bool ready, bool isList, uint32_t widgetId);
 
 // Tick the overlay clock. Call from g2Tick (already wired). When an
 // overlay's deadline expires, this clears it AND optionally fires a
@@ -612,6 +850,12 @@ const char* g2ProbeImageQ17MixedOverlap();
 // matching small BMPs render at the requested geometry.
 const char* g2ProbeImageQ18MixedIcon();
 
+// Probe Q19 — solo small-dim image. CREATE-image at 96×96 (no list),
+// push stripes BMP. Confirms whether solo image widgets render below
+// the 288×144 we've used historically — gates the "fast streaming"
+// mode (96×96 → ~1 fps vs 288×144 → 0.45 fps).
+const char* g2ProbeImageQ19SmallSolo();
+
 #else // !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
 
 // -----------------------------------------------------------------------------
@@ -644,19 +888,32 @@ inline bool g2StartLiveListPage(G2LivePageBuildFn, uint32_t,
                                 const char* = nullptr) { return false; }
 inline void g2StopLiveListPage() {}
 inline void g2KickLivePageRefresh() {}
+inline bool g2StartLiveTextPage(G2LivePageBuildFn, uint32_t,
+                                bool (*)() = nullptr) { return false; }
+inline void g2StopLiveTextPage() {}
 inline bool g2MicSetAfeFeedActive(bool) { return false; }
 inline bool g2MicAfeFeedIsActive() { return false; }
 inline size_t g2MicReadPcmSamples(int16_t*, size_t, uint32_t) { return 0; }
 inline size_t g2MicAfeRingDepth() { return 0; }
 inline uint32_t g2MicAfeOverrunCount() { return 0; }
-inline bool g2ShowListPage(const char* const* items, size_t itemCount,
-                           const G2ContainerGeom& geom = G2_GEOM_LARGE) { return false; }
+// NB: when G2 is disabled, these stubs intentionally drop the
+// G2ContainerGeom / G2TextChildSpec parameters (those types only exist
+// inside the #if branch above). Callers are themselves gated by
+// ENABLE_G2_GLASSES, so they shouldn't be reaching these stubs in
+// practice — these exist only to keep "find a g2*-prototyped declaration"
+// compiles working for code that takes function-pointer addresses or
+// uses sizeof on the prototype set.
+inline bool g2ShowListPage(const char* const*, size_t) { return false; }
 enum G2TapKind : uint8_t { G2_TAP_PAGE_NEXT = 0, G2_TAP_PAGE_PREV = 1 };
 typedef void (*G2TapFn)(G2TapKind kind);
-inline bool g2ShowTextPage(const char* content,
-                           const G2ContainerGeom& geom = G2_GEOM_LARGE,
-                           void (*exitFn)() = nullptr,
-                           G2TapFn tapFn = nullptr) { return false; }
+inline bool g2ShowTextPage(const char*,
+                           void (*)() = nullptr,
+                           G2TapFn = nullptr) { return false; }
+inline bool g2ShowMultiTextPage(const void*, size_t,
+                                void (*)() = nullptr,
+                                G2TapFn = nullptr) { return false; }
+inline bool g2ShowMixedListText(const char* const*, size_t) { return false; }
+inline const char* g2ProbeRebuildTextChild() { return "G2 disabled"; }
 inline bool g2ShowNotification(const char* text, uint32_t durationMs = 5000) { return false; }
 inline bool g2ShowMultiLine(const char* lines[], size_t lineCount) { return false; }
 inline bool g2ClearDisplay() { return false; }
@@ -679,7 +936,8 @@ inline const char* g2ProbeImageQ15LeftArm()         { return "G2 disabled"; }
 inline const char* g2ProbeImageQ16MixedSideBySide() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ17MixedOverlap()    { return "G2 disabled"; }
 inline const char* g2ProbeImageQ18MixedIcon()       { return "G2 disabled"; }
+inline const char* g2ProbeImageQ19SmallSolo()       { return "G2 disabled"; }
 
 #endif // ENABLE_BLUETOOTH
 
-#endif // OPTIONAL_EVEN_G2_H
+#endif // G2_GLASSES_H

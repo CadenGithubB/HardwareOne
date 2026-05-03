@@ -34,6 +34,14 @@ uint32_t getESPSRCommandCount();       // Returns total commands executed
 extern const CommandEntry espsrCommands[];
 extern const size_t espsrCommandsCount;
 
+// Recompute the legacy gSrDebugLevel from the new bool-flag system
+// (gSettings.debugSr / debugSrWake / debugSrCommand / debugSrAfe /
+// debugSrLifecycle / debugSrTuning). Existing SR_DBG_L / SR_INFO_L call
+// sites use the integer level, so this lets the granular flags drive them
+// without rewriting every caller. Safe to call when SR is disabled at
+// build time — the inline #else above keeps it out of the build.
+void srSyncDebugLevel();
+
 const char* cmd_sr(const String& argsInput);
 const char* cmd_sr_enable(const String& argsInput);
 const char* cmd_sr_start(const String& argsInput);

@@ -73,14 +73,22 @@ int cameraWidth = 0;
 int cameraHeight = 0;
 
 static framesize_t cameraFramesizeFromSetting(int v) {
-  // Simplified to only confirmed working resolutions
+  // Indices 0..5 are the original "confirmed working" sizes — kept in
+  // their existing slots so saved settings don't shift. Indices 6..10
+  // append the sub-QVGA sizes added later (Apr 2026) for the lens
+  // viewer and ESP-NOW thumbnail use cases.
   static const framesize_t kMap[] = {
     FRAMESIZE_QVGA,     // 0 (320x240)
     FRAMESIZE_VGA,      // 1 (640x480)
     FRAMESIZE_SVGA,     // 2 (800x600)
     FRAMESIZE_XGA,      // 3 (1024x768)
     FRAMESIZE_SXGA,     // 4 (1280x1024)
-    FRAMESIZE_UXGA      // 5 (1600x1200)
+    FRAMESIZE_UXGA,     // 5 (1600x1200)
+    FRAMESIZE_96X96,    // 6  (96x96)
+    FRAMESIZE_QQVGA,    // 7  (160x120)
+    FRAMESIZE_QCIF,     // 8  (176x144)
+    FRAMESIZE_HQVGA,    // 9  (240x176)
+    FRAMESIZE_240X240,  // 10 (240x240)
   };
 
   if (v >= 0 && v < (int)(sizeof(kMap) / sizeof(kMap[0]))) {
@@ -92,14 +100,20 @@ static framesize_t cameraFramesizeFromSetting(int v) {
 }
 
 static int cameraFramesizeSettingFromEnum(framesize_t fs) {
-  // Match the simplified resolution list
+  // Match the order in cameraFramesizeFromSetting. New small sizes
+  // (6..10) are appended; existing 0..5 unchanged.
   switch (fs) {
-    case FRAMESIZE_QVGA: return 0;
-    case FRAMESIZE_VGA:  return 1;
-    case FRAMESIZE_SVGA: return 2;
-    case FRAMESIZE_XGA:  return 3;
-    case FRAMESIZE_SXGA: return 4;
-    case FRAMESIZE_UXGA: return 5;
+    case FRAMESIZE_QVGA:    return 0;
+    case FRAMESIZE_VGA:     return 1;
+    case FRAMESIZE_SVGA:    return 2;
+    case FRAMESIZE_XGA:     return 3;
+    case FRAMESIZE_SXGA:    return 4;
+    case FRAMESIZE_UXGA:    return 5;
+    case FRAMESIZE_96X96:   return 6;
+    case FRAMESIZE_QQVGA:   return 7;
+    case FRAMESIZE_QCIF:    return 8;
+    case FRAMESIZE_HQVGA:   return 9;
+    case FRAMESIZE_240X240: return 10;
     default: return 1;  // Default to VGA
   }
 }
@@ -112,6 +126,11 @@ static void cameraDimsForFramesize(framesize_t fs, int& w, int& h) {
     case FRAMESIZE_XGA:     w = 1024; h = 768; break;
     case FRAMESIZE_SXGA:    w = 1280; h = 1024; break;
     case FRAMESIZE_UXGA:    w = 1600; h = 1200; break;
+    case FRAMESIZE_96X96:   w = 96;   h = 96;  break;
+    case FRAMESIZE_QQVGA:   w = 160;  h = 120; break;
+    case FRAMESIZE_QCIF:    w = 176;  h = 144; break;
+    case FRAMESIZE_HQVGA:   w = 240;  h = 176; break;
+    case FRAMESIZE_240X240: w = 240;  h = 240; break;
     default:                w = 640;  h = 480; break;
   }
 }
@@ -155,6 +174,32 @@ bool initCamera() {
     INFO_SENSORSF("[Camera] Already initialized");
     unlockCameraMutex();
     return true;
+  }
+
+  // ---------------------------------------------------------------------
+  // Boot-safety guard for camera framesize.
+  // ---------------------------------------------------------------------
+  // Setting index 6 = FRAMESIZE_96X96. On the OV3660 (and likely other
+  // OV-family sensors) this produces JPEG output that consistently
+  // exceeds the auto-sized frame buffer (~1843 B per esp32-camera's
+  // internal estimate), causing a permanent FB-OVF storm. The flush
+  // loop further down calls esp_camera_fb_get() which blocks on an
+  // internal queue indefinitely when no complete frame ever arrives,
+  // so a device with this setting persisted bricks at boot.
+  //
+  // Detected and fixed 2026-05-01 after a user got stuck in the boot
+  // hang. Until we can size the frame buffer correctly for sub-QVGA
+  // JPEG (or move to a different pixel format for the lens viewer),
+  // revert this specific value to QVGA at boot and persist so the
+  // recovery is sticky across reboots.
+  //
+  // Other sub-QVGA sizes (QQVGA, QCIF, HQVGA, 240x240) haven't shown
+  // the same lockup in field testing — they may produce smaller JPEG
+  // bitstreams or bigger auto buffers. Leave them alone for now.
+  if (gSettings.cameraFramesize == 6) {
+    BROADCAST_PRINTF("[CAM_INIT] WARN: framesize=6 (96x96) is unsupported "
+                     "on this sensor (FB-OVF) — reverting to QVGA and persisting");
+    setSetting(gSettings.cameraFramesize, 0);
   }
 
   DEBUG_CAMERAF("[CAM_INIT] Starting initialization...");
@@ -495,16 +540,10 @@ bool initCamera() {
     INFO_SENSORSF("[Camera] WARNING: esp_camera_sensor_get() returned NULL!");
   }
 
-  // Set dimensions based on confirmed working resolutions
-  switch (fs) {
-    case FRAMESIZE_QVGA:   cameraWidth = 320;  cameraHeight = 240; break;
-    case FRAMESIZE_VGA:    cameraWidth = 640;  cameraHeight = 480; break;
-    case FRAMESIZE_SVGA:   cameraWidth = 800;  cameraHeight = 600; break;
-    case FRAMESIZE_XGA:    cameraWidth = 1024; cameraHeight = 768; break;
-    case FRAMESIZE_SXGA:   cameraWidth = 1280; cameraHeight = 1024; break;
-    case FRAMESIZE_UXGA:   cameraWidth = 1600; cameraHeight = 1200; break;
-    default:               cameraWidth = 640;  cameraHeight = 480; break;
-  }
+  // Set dimensions from the canonical helper so new sizes added to
+  // the kMap (cameraFramesizeFromSetting) and dim table flow here
+  // automatically.
+  cameraDimsForFramesize(fs, cameraWidth, cameraHeight);
 
   cameraConnected = true;
   gCameraEnabled = true;
@@ -663,16 +702,9 @@ bool setCameraResolution(framesize_t size) {
    
   int result = s->set_framesize(s, size);
   if (result == 0) {
-    // Update tracked dimensions (confirmed working resolutions only)
-    switch (size) {
-      case FRAMESIZE_QVGA:  cameraWidth = 320;  cameraHeight = 240; break;
-      case FRAMESIZE_VGA:   cameraWidth = 640;  cameraHeight = 480; break;
-      case FRAMESIZE_SVGA:  cameraWidth = 800;  cameraHeight = 600; break;
-      case FRAMESIZE_XGA:   cameraWidth = 1024; cameraHeight = 768; break;
-      case FRAMESIZE_SXGA:  cameraWidth = 1280; cameraHeight = 1024; break;
-      case FRAMESIZE_UXGA:  cameraWidth = 1600; cameraHeight = 1200; break;
-      default: break;
-    }
+    // Update tracked dimensions via the canonical helper (single
+    // source of truth shared with the init path above).
+    cameraDimsForFramesize(size, cameraWidth, cameraHeight);
     INFO_SENSORSF("[Camera] Resolution set to %dx%d", cameraWidth, cameraHeight);
     unlockCameraMutex();
     return true;
@@ -831,23 +863,30 @@ const char* cmd_camerares(const String& argsInput) {
   sizeStr.toLowerCase();
   
   if (sizeStr.length() == 0) {
-    static char result[192];
+    static char result[256];
     snprintf(result, sizeof(result),
-      "Current: %dx%d\nUsage: camerares <size>\nSizes: qqvga(160x120) qvga(320x240) vga(640x480) svga(800x600) xga(1024x768)\nNote: Requires camera restart",
+      "Current: %dx%d\nUsage: camerares <size>\n"
+      "Sizes: 96x96 qqvga(160x120) qcif(176x144) hqvga(240x176) 240x240 "
+      "qvga(320x240) vga(640x480) svga(800x600) xga(1024x768) "
+      "sxga(1280x1024) uxga(1600x1200)\nNote: Requires camera restart",
       cameraWidth, cameraHeight);
     return result;
   }
-  
+
   framesize_t newSize = FRAMESIZE_VGA;
-  if (sizeStr == "qqvga" || sizeStr == "160x120") newSize = FRAMESIZE_QQVGA;
-  else if (sizeStr == "qvga" || sizeStr == "320x240") newSize = FRAMESIZE_QVGA;
-  else if (sizeStr == "cif" || sizeStr == "400x296") newSize = FRAMESIZE_CIF;
-  else if (sizeStr == "vga" || sizeStr == "640x480") newSize = FRAMESIZE_VGA;
-  else if (sizeStr == "svga" || sizeStr == "800x600") newSize = FRAMESIZE_SVGA;
-  else if (sizeStr == "xga" || sizeStr == "1024x768") newSize = FRAMESIZE_XGA;
-  else if (sizeStr == "sxga" || sizeStr == "1280x1024") newSize = FRAMESIZE_SXGA;
-  else if (sizeStr == "uxga" || sizeStr == "1600x1200") newSize = FRAMESIZE_UXGA;
-  else return "Unknown resolution. Use: qqvga, qvga, vga, svga, xga, sxga, uxga";
+  if      (sizeStr == "96x96")                          newSize = FRAMESIZE_96X96;
+  else if (sizeStr == "qqvga" || sizeStr == "160x120")  newSize = FRAMESIZE_QQVGA;
+  else if (sizeStr == "qcif"  || sizeStr == "176x144")  newSize = FRAMESIZE_QCIF;
+  else if (sizeStr == "hqvga" || sizeStr == "240x176")  newSize = FRAMESIZE_HQVGA;
+  else if (sizeStr == "240x240")                        newSize = FRAMESIZE_240X240;
+  else if (sizeStr == "qvga"  || sizeStr == "320x240")  newSize = FRAMESIZE_QVGA;
+  else if (sizeStr == "cif"   || sizeStr == "400x296")  newSize = FRAMESIZE_CIF;
+  else if (sizeStr == "vga"   || sizeStr == "640x480")  newSize = FRAMESIZE_VGA;
+  else if (sizeStr == "svga"  || sizeStr == "800x600")  newSize = FRAMESIZE_SVGA;
+  else if (sizeStr == "xga"   || sizeStr == "1024x768") newSize = FRAMESIZE_XGA;
+  else if (sizeStr == "sxga"  || sizeStr == "1280x1024") newSize = FRAMESIZE_SXGA;
+  else if (sizeStr == "uxga"  || sizeStr == "1600x1200") newSize = FRAMESIZE_UXGA;
+  else return "Unknown resolution. Use: 96x96, qqvga, qcif, hqvga, 240x240, qvga, vga, svga, xga, sxga, uxga";
   
   // Save to settings for persistence
   setSetting(gSettings.cameraFramesize, (int)cameraFramesizeSettingFromEnum(newSize));
@@ -888,8 +927,8 @@ const char* cmd_cameraframesize(const String& argsInput) {
   }
   
   int newSize = valStr.toInt();
-  if (newSize < 0 || newSize > 5) {
-    return "Framesize must be 0-5 (QVGA/VGA/SVGA/XGA/SXGA/UXGA)";
+  if (newSize < 0 || newSize > 10) {
+    return "Framesize must be 0-10 (0-5: QVGA..UXGA, 6-10: 96x96/QQVGA/QCIF/HQVGA/240x240)";
   }
   
   setSetting(gSettings.cameraFramesize, newSize);
@@ -1627,8 +1666,9 @@ const CommandEntry cameraCommands[] = {
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry cameraSettingEntries[] = {
   { "cameraAutoStart",          SETTING_BOOL,   &gSettings.cameraAutoStart,              0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  { "cameraFramesize",          SETTING_INT,    &gSettings.cameraFramesize,              1, 0, nullptr, 0, 5, "Resolution",
-    "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA)" },
+  { "cameraFramesize",          SETTING_INT,    &gSettings.cameraFramesize,              1, 0, nullptr, 0, 10, "Resolution",
+    "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA),"
+    "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240" },
   { "cameraBrightness",         SETTING_INT,    &gSettings.cameraBrightness,             0, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr },
   { "cameraContrast",           SETTING_INT,    &gSettings.cameraContrast,               0, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr },
   { "cameraSaturation",         SETTING_INT,    &gSettings.cameraSaturation,             0, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr },

@@ -53,7 +53,7 @@ struct BondSensorDef {
   bool* streamSetting;   // Pointer to gSettings.bondStream* field
 };
 
-static BondSensorDef bondSensorDefs[] = {
+static const BondSensorDef bondSensorDefs[] = {
   { "Thermal",  "thermal",  0x01, &gSettings.bondStreamThermal },
   { "ToF",      "tof",      0x02, &gSettings.bondStreamTof },
   { "IMU",      "imu",      0x04, &gSettings.bondStreamImu },
@@ -214,7 +214,7 @@ static void displayBondSensors() {
   
   for (int v = scrollOffset; v < visCount && v < scrollOffset + maxVisible; v++) {
     int si = indices[v];
-    BondSensorDef& sd = bondSensorDefs[si];
+    const BondSensorDef& sd = bondSensorDefs[si];
     bool connected = isRemoteSensorConnected(sd.mask);
     bool enabled = isRemoteSensorEnabled(sd.mask);
     bool streaming = *(sd.streamSetting);
@@ -481,7 +481,7 @@ static void executeBondAction() {
     if (bondSensorSelection < 0 || bondSensorSelection >= visCount) return;
     
     int si = indices[bondSensorSelection];
-    BondSensorDef& sd = bondSensorDefs[si];
+    const BondSensorDef& sd = bondSensorDefs[si];
     
     if (!isRemoteSensorConnected(sd.mask)) return;  // Can't toggle disconnected
     

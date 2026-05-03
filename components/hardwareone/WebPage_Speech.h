@@ -391,12 +391,21 @@ inline void streamSpeechInner(httpd_req_t* req) {
       if(data.lastCommand) statusLines.push('Last: ' + data.lastCommand + ' (' + Math.round((data.lastConfidence||0)*100) + '%)');
       setStatus(statusLines.join('\n'));
       
-      // Update models info
+      // Update models info — show the actual loaded model names (e.g.
+      // "wn9_hilexin", "mn7_en") so users know which models are baked
+      // into the partition. Falls back to a green check if name unknown
+      // (older firmware), or "Not loaded" / "Disabled" when absent.
       var modelsEl = document.getElementById('sr-models-info');
       if(modelsEl){
+        var wnLabel = data.hasAFE
+          ? '✓ ' + (data.wnModelName || 'Loaded')
+          : '✗ Not loaded';
+        var mnLabel = data.hasMultiNet
+          ? '✓ ' + (data.mnModelName || 'Loaded')
+          : '✗ Disabled';
         var modelsHtml = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
-        modelsHtml += '<div><strong>Wake Word (AFE):</strong> ' + (data.hasAFE ? '✓ Loaded' : '✗ Not loaded') + '</div>';
-        modelsHtml += '<div><strong>Commands (MultiNet):</strong> ' + (data.hasMultiNet ? '✓ Loaded' : '✗ Disabled') + '</div>';
+        modelsHtml += '<div><strong>Wake Word (AFE):</strong> ' + wnLabel + '</div>';
+        modelsHtml += '<div><strong>Commands (MultiNet):</strong> ' + mnLabel + '</div>';
         modelsHtml += '</div>';
         modelsEl.innerHTML = modelsHtml;
       }

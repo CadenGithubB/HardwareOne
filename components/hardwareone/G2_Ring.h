@@ -1,5 +1,5 @@
-#ifndef OPTIONAL_EVEN_G2_RING_H
-#define OPTIONAL_EVEN_G2_RING_H
+#ifndef G2_RING_H
+#define G2_RING_H
 
 #include "System_BuildConfig.h"
 #include <Arduino.h>
@@ -35,7 +35,7 @@
 #define G2RING_CHAR_NOTIFY_UUID "bae80013-4f05-4503-8e65-3af1f7329d1f"
 
 // Advert name format: "EVEN R1_XXXXXX" where XXXXXX = last 3 bytes of MAC
-// in hex (e.g. mac F8:29:CA:BA:AC:1C → name "EVEN R1_BAAC1C").
+// in hex (e.g. mac AA:BB:CC:11:22:33 → name "EVEN R1_112233").
 
 // Ring command opcodes (reference ble/ring.ts §R1_CMD). Not exhaustive —
 // we only document the ones we might plausibly use in the info-only mode.
@@ -72,14 +72,37 @@ bool g2RingInit();
 // Scan for the ring advert (or use one already discovered by the main
 // glasses scan) and connect to it. Non-blocking: spawns a background
 // task and returns immediately, mirroring how g2Connect works for the
-// glasses. Use g2RingIsConnected() / g2RingGetStatus() to poll.
+// glasses. The background task auto-runs g2RingScan(15) if no advert is
+// stashed, so a prior `g2scan` is no longer required. Use
+// g2RingIsConnected() / g2RingGetStatus() to poll.
 bool g2RingConnect();
+
+// Dedicated ring-only scan. Watches for "EVEN R1_XXXXXX" adverts and
+// stashes the first match into gRingAdvertisedDevice for a subsequent
+// g2RingConnect() to use. Doesn't early-terminate on glasses-found like
+// the shared `g2scan` does, which makes it more reliable for picking up
+// the R1's slow advertising cycle. **Blocks the calling task** for up to
+// `timeoutSec` seconds (or until a ring is found, whichever comes first).
+// Returns true if a ring was stashed (either freshly seen or already
+// present from a prior scan). `timeoutSec` is clamped to [1, 300].
+bool g2RingScan(uint32_t timeoutSec);
 
 // Saved-MAC reconnect. Reads gSettings.bleRingMAC and connects directly
 // without requiring a prior scan-cached advertisement. Used by the boot
 // auto-reconnect hook. Returns false if no MAC saved or a connect is
 // already in flight.
 bool g2RingConnectSaved();
+
+// Caller-supplied MAC connect. Bypasses scan entirely; opens a direct
+// BLE connection to the address provided. Useful when the ring is bonded
+// to another central (phone) and not visible to broad scans, but the
+// peripheral may still accept a connection initiated to its known address.
+// Format: "aa:bb:cc:dd:ee:ff" (17 chars, colons required).
+//
+// Will fail (BLE connect timeout, ~30s) if the ring is sleeping, busy
+// with another central that doesn't allow co-occupancy, or simply out
+// of range. Async — spawns a connect task and returns immediately.
+bool g2RingConnectMac(const String& mac);
 
 // Tear down the BLE connection. Safe to call from any context.
 void g2RingDisconnect();
@@ -91,8 +114,26 @@ bool g2RingIsConnected();
 // `ringstatus` CLI command and the web UI Ring panel.
 void g2RingGetStatus(char* buf, size_t cap);
 
+// Bridge-progress hook. Called by parseSid80Rx() when a RING_CONNECT_INFO
+// poll arrives from either temple. We mirror the most recent connRet /
+// connectRing values so `ringbridge status` can show "scanning" / "fail" /
+// "ok" without the user having to scroll the log. Pass 0 / false for fields
+// that weren't present in the inbound payload.
+void g2RingNoteBridgePoll(uint64_t connRet, bool hasConnRet,
+                          uint64_t connectRing, bool hasConnectRing);
+
+// Forwarded-telemetry sink. Called by the G2 sid=0x90/0x91 RX handler when
+// the right temple's bridge is active and is forwarding RingDataPackage
+// frames to us. Parses the protobuf wrapper, extracts each populated
+// RingRawData field (battery / hr / spo2 / hrv / etc.), and updates the
+// internal R1TelemetryCache so the existing status / spoof-push code
+// stays useful regardless of which side actually owns the ring's BLE
+// link. `pb` / `pbLen` is the envelope body (post-header proto bytes).
+// Safe to call with malformed / partial frames — bails on first parse error.
+void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen);
+
 // Ring state shared with the G2 scan callback (defined in
-// Optional_EvenG2_Ring.cpp). Declared extern here so the scanner can
+// G2_Ring.cpp). Declared extern here so the scanner can
 // stash a discovered ring advert before our module's own scan runs.
 // Guarded behind the compile flag so stubs don't drag these in.
 class BLEAdvertisedDevice;
@@ -113,11 +154,15 @@ extern const size_t       g2RingCommandsCount;
 inline bool g2RingInit()         { return false; }
 inline bool g2RingConnect()      { return false; }
 inline bool g2RingConnectSaved() { return false; }
+inline bool g2RingConnectMac(const String& /*mac*/) { return false; }
+inline bool g2RingScan(uint32_t /*timeoutSec*/) { return false; }
 inline void g2RingDisconnect()   {}
 inline bool g2RingIsConnected()  { return false; }
 inline void g2RingGetStatus(char* buf, size_t cap) {
   if (buf && cap > 0) buf[0] = '\0';
 }
+inline void g2RingNoteForwardedTelemetry(const uint8_t*, size_t) {}
+inline void g2RingNoteBridgePoll(uint64_t, bool, uint64_t, bool) {}
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-#endif  // OPTIONAL_EVEN_G2_RING_H
+#endif  // G2_RING_H

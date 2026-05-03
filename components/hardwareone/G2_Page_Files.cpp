@@ -17,7 +17,7 @@
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
-#include "Optional_EvenG2.h"
+#include "G2_Glasses.h"
 #include "System_FileManager.h"
 #include "System_Debug.h"
 #include "esp_attr.h"   // EXT_RAM_BSS_ATTR
@@ -45,10 +45,19 @@ static size_t      gFilesRowCount = 0;
 EXT_RAM_BSS_ATTR static int  gFilesEntryForRow[FILES_MAX_ROWS];
 
 // File-info overlay duration. The deadline lives in the centralized
-// g2LensState (see Optional_EvenG2.h G2LensState). When the deadline
+// g2LensState (see G2_Glasses.h G2LensState). When the deadline
 // expires, the overlay-expired callback below fires and we redraw the
 // file list.
 static const uint32_t kFileInfoOverlayMs = 2200;
+
+// File-action chooser state. When the user taps a BMP file we show a
+// 3-row list (<- Files / View / Info) so they can pick whether to
+// render the image on the lens or look at metadata. Non-BMP files
+// route directly to the metadata page (no chooser). Active flag
+// gates the tap dispatcher; the cached entry lets View/Info reuse
+// the entry the user picked without a re-lookup.
+static bool      gFilesChooserActive = false;
+static FileEntry gFilesChooserEntry  = {};
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -64,7 +73,7 @@ static FileManager* ensureFm() {
     // lens-state tick auto-redraws our list when the file-info flash
     // ends. Idempotent — the lens module only stores one pointer; if
     // multiple modules want overlay events later, the lens module will
-    // need a multiplexer (see Optional_EvenG2.h G2OverlayKind for how
+    // need a multiplexer (see G2_Glasses.h G2OverlayKind for how
     // we'd dispatch by kind).
     g2LensSetOverlayExpiredCb(filesOverlayExpired);
   }
@@ -180,6 +189,63 @@ static size_t buildRows() {
 // File metadata overlay
 // -----------------------------------------------------------------------------
 
+// Case-insensitive ".bmp" suffix check. We only want the chooser path
+// for files we can actually preview — anything else falls through to
+// the existing metadata-only flow.
+static bool isBmpFilename(const char* name) {
+  if (!name) return false;
+  size_t n = strlen(name);
+  if (n < 4) return false;
+  const char* ext = name + n - 4;
+  return (ext[0] == '.') &&
+         (ext[1] == 'b' || ext[1] == 'B') &&
+         (ext[2] == 'm' || ext[2] == 'M') &&
+         (ext[3] == 'p' || ext[3] == 'P');
+}
+
+// Build an absolute VFS path for the cached chooser entry. Joins the
+// FileManager's current directory with the entry name, collapsing the
+// duplicate slash when the dir is "/".
+static void buildChooserPath(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  FileManager* fm = ensureFm();
+  if (!fm) return;
+  const char* dir = fm->getCurrentPath();
+  if (!dir || !*dir) dir = "/";
+  if (dir[0] == '/' && dir[1] == '\0') {
+    snprintf(out, cap, "/%s", gFilesChooserEntry.name);
+  } else {
+    snprintf(out, cap, "%s/%s", dir, gFilesChooserEntry.name);
+  }
+}
+
+// Show the View / View Full / Info chooser for a previewable file.
+// Stays in the FILES hijack page so g2FilesHandleTap routes the
+// chooser taps; the gFilesChooserActive flag tells the dispatcher to
+// interpret rows as chooser actions instead of file-list rows.
+//
+// "View"      — small image at native 288×144 (top-left of the lens).
+// "View Full" — same source upscaled 2× to 576×288 via 4-tile push.
+// "Info"      — metadata page (name / size / type).
+static void showFileChooser(const FileEntry& e) {
+  gFilesChooserEntry  = e;
+  gFilesChooserActive = true;
+
+  static char title[FILES_ROW_LEN];
+  snprintf(title, sizeof(title), "%s", e.name);
+  static const char* rows[5];
+  rows[0] = "<- Files";
+  rows[1] = title;       // header line so the user knows which file
+  rows[2] = "View";
+  rows[3] = "View Full"; // 2× upscale → 4-tile full-canvas
+  rows[4] = "Info";
+  g2ShowListPage(rows, 5);
+  // No overlay — chooser is a deliberate stop, not a flash.
+  g2LensClearOverlay();
+  DEBUG_G2F("[G2] Files: chooser shown for '%s'", e.name);
+}
+
 static void showFileInfo(const FileEntry& e) {
   // Render the metadata as a list page (one item per field) so we stay in
   // a list-widget container — the firmware bails out if we REBUILD a text
@@ -197,16 +263,15 @@ static void showFileInfo(const FileEntry& e) {
   static char nameRow[FILES_ROW_LEN];
   static char sizeRow[FILES_ROW_LEN];
   static char typeRow[FILES_ROW_LEN];
-  static const char* rows[5];
+  static const char* rows[4];
   rows[0] = "<- Files";   // back to the directory listing
-  snprintf(nameRow, sizeof(nameRow), "name %s", e.name);
-  snprintf(sizeRow, sizeof(sizeRow), "size %s", sizeStr);
-  snprintf(typeRow, sizeof(typeRow), "type %s", ext);
+  snprintf(nameRow, sizeof(nameRow), "Name: %s", e.name);
+  snprintf(sizeRow, sizeof(sizeRow), "Size: %s", sizeStr);
+  snprintf(typeRow, sizeof(typeRow), "Type: %s", ext);
   rows[1] = nameRow;
   rows[2] = sizeRow;
   rows[3] = typeRow;
-  rows[4] = "(closing...)";
-  g2ShowListPage(rows, 5);
+  g2ShowListPage(rows, 4);
   // Deliberately do NOT change the hijack page — leave it as FILES so a
   // tap on idx=0 routes through g2FilesHandleTap and goes back to the
   // file list. The lens overlay tracker handles auto-dismiss; the
@@ -266,6 +331,11 @@ bool g2ShowFilesPage() {
 }
 
 void g2ShowFilesMenu() {
+  // Whenever the real file list comes back up, the chooser is
+  // unconditionally gone — covers the View/Info → Back path, the
+  // post-BMP-dismiss callback, and any "redraw Files from main menu"
+  // entry, all without each call site having to remember.
+  gFilesChooserActive = false;
   size_t n = buildRows();
   if (g2ShowListPage(gFilesRowPtrs, n)) {
     g2SetHijackPage(G2_HIJACK_PAGE_FILES);
@@ -278,6 +348,53 @@ void g2ShowFilesMenu() {
 }
 
 void g2FilesHandleTap(uint32_t idx) {
+  // Chooser dispatcher — runs ahead of every other path so the chooser
+  // is the only consumer of taps while it's up. Rows: 0=<- Files,
+  // 1=filename header (no-op), 2=View, 3=View Full, 4=Info.
+  if (gFilesChooserActive) {
+    FileEntry cached = gFilesChooserEntry;
+    if (idx == 0) {
+      gFilesChooserActive = false;
+      DEBUG_G2F("[G2] Files: chooser back → file list");
+      g2ShowFilesMenu();
+      return;
+    }
+    if (idx == 2) {
+      // View → push BMP at native size. Worker fires g2ShowFilesMenu
+      // on dismiss so the file list comes back automatically.
+      char path[FILE_MANAGER_MAX_PATH + 32];
+      buildChooserPath(path, sizeof(path));
+      gFilesChooserActive = false;
+      DEBUG_G2F("[G2] Files: chooser View → '%s'", path);
+      if (!g2ShowBmpFile(path, &g2ShowFilesMenu)) {
+        DEBUG_G2F("[G2] Files: View dispatch failed — falling back to list");
+        g2ShowFilesMenu();
+      }
+      return;
+    }
+    if (idx == 3) {
+      // View Full → 2× upscale to 576×288 via 4-tile push.
+      char path[FILE_MANAGER_MAX_PATH + 32];
+      buildChooserPath(path, sizeof(path));
+      gFilesChooserActive = false;
+      DEBUG_G2F("[G2] Files: chooser View Full → '%s'", path);
+      if (!g2ShowBmpFileFullScreen(path, &g2ShowFilesMenu)) {
+        DEBUG_G2F("[G2] Files: View Full dispatch failed — falling back to list");
+        g2ShowFilesMenu();
+      }
+      return;
+    }
+    if (idx == 4) {
+      gFilesChooserActive = false;
+      DEBUG_G2F("[G2] Files: chooser Info → '%s'", cached.name);
+      showFileInfo(cached);
+      return;
+    }
+    // idx 1 (filename header) and any unexpected row — leave chooser up.
+    DEBUG_G2F("[G2] Files: chooser tap idx=%u — no-op", (unsigned)idx);
+    return;
+  }
+
   if (idx == 0) {
     // Context-sensitive back. If a file-info overlay is showing,
     // "<- Back" returns to the file list rather than the main hijack
@@ -339,8 +456,13 @@ void g2FilesHandleTap(uint32_t idx) {
     fm->navigateInto();
     g2ShowFilesMenu();
   } else {
-    // File tap → metadata overlay.
-    showFileInfo(e);
+    // File tap → previewable types get the View/Info chooser; everything
+    // else jumps straight to the metadata overlay (existing UX).
+    if (isBmpFilename(e.name)) {
+      showFileChooser(e);
+    } else {
+      showFileInfo(e);
+    }
   }
 }
 
@@ -358,7 +480,7 @@ static void filesOverlayExpired(G2OverlayKind kind) {
 void g2FilesTick() {
   // No longer needed — the centralized lens overlay tick handles auto-
   // dismiss. Kept as a no-op so existing call sites compile; safe to
-  // remove once Optional_EvenG2.cpp's g2Tick stops calling it.
+  // remove once G2_Glasses.cpp's g2Tick stops calling it.
 }
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

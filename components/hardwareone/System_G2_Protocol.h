@@ -1,9 +1,21 @@
 #ifndef SYSTEM_G2_PROTOCOL_H
 #define SYSTEM_G2_PROTOCOL_H
 
+#include "System_BuildConfig.h"
 #include <Arduino.h>
 #include <stddef.h>
 #include <stdint.h>
+
+// =============================================================================
+// Compile-time gate
+// =============================================================================
+// All G2 wire-protocol primitives below are gated behind ENABLE_BLUETOOTH +
+// ENABLE_G2_GLASSES so they don't compile (or get linked) when the build
+// has the G2 feature disabled. Header consumers outside the gate get an
+// empty translation unit — they shouldn't reference any of these symbols
+// since their own callers are also gated. Matches the gating pattern used
+// by System_R1_Protocol.{h,cpp}, G2_Glasses.{h,cpp}, and G2_Ring.{h,cpp}.
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 // =============================================================================
 // Even Realities G2 — wire protocol primitives
@@ -303,6 +315,22 @@ static constexpr G2ContainerGeom G2_GEOM_QUAD_BR = { 288, 144, 280, 136 };
 static constexpr G2ContainerGeom G2_GEOM_STATUS_BAR = {   8,   8, 560,  40 };
 static constexpr G2ContainerGeom G2_GEOM_FOOTER     = {   8, 240, 560,  40 };
 
+// Edge-anchored geoms. Verified 2026-04-30 on firmware 2.2.0.24 via
+// the Tests / Display / Selection Patterns / Edges + canaries bench
+// (tests N / O / L). Because TextObject content anchors top-left of
+// its bounding box, "bottom strip" geoms must hug y≈248 to actually
+// paint at the bottom of vision — a geom anchored at y=144 paints
+// in the vertical middle. STATUS_BAR above is the matching top
+// preset (verified by test P).
+//   BOTTOM_BAR    — 32 px strip across the full width
+//   BOTTOM_BAR_L  — left half of BOTTOM_BAR (paired Yes button)
+//   BOTTOM_BAR_R  — right half of BOTTOM_BAR (paired No button)
+//   RIGHT_COL     — narrow column hugging the right edge, full height
+static constexpr G2ContainerGeom G2_GEOM_BOTTOM_BAR    = {   8, 248, 560,  32 };
+static constexpr G2ContainerGeom G2_GEOM_BOTTOM_BAR_L  = {   8, 248, 280,  32 };
+static constexpr G2ContainerGeom G2_GEOM_BOTTOM_BAR_R  = { 288, 248, 280,  32 };
+static constexpr G2ContainerGeom G2_GEOM_RIGHT_COL     = { 438,   8, 130, 272 };
+
 // Stress shapes for geometry-edge testing — extreme aspect ratios that
 // production pages don't use, but that exercise the firmware's container
 // layout against unusual rectangles.
@@ -328,22 +356,25 @@ size_t g2BuildRebuildText(uint8_t seq, uint32_t magic,
                           const char* content,
                           uint8_t* out, size_t outCap);
 
-// EvenCore CREATE_STARTUP_PAGE (Cmd=0). Builds a single-item list container
-// carrying `text` as its sole ItemName. Must be sent and acked before the
-// firmware will accept subsequent REBUILD / UPDATE_TEXT against the same
-// container name. Reference: `buildCreateStartUpPageContainer` in
-// g2-kit-unofficial/ble/messages.ts.
-//
-// `widgetId` is the CreateStartUpPageContainer.widgetId pb field — the
-// reference defaults to 10000 for arbitrary content. Pass a built-in
-// widget id (e.g. 10509 Blocks) when hijacking a menu-startup event so
-// the firmware associates our CREATE with the launch it just announced,
-// instead of rejecting it as a collision against the in-flight app.
-size_t g2BuildCreateStartupPage(uint8_t seq, uint32_t magic,
-                                const char* containerName,
-                                const char* text,
-                                uint8_t* out, size_t outCap,
-                                uint32_t widgetId = 10000);
+// pb-only REBUILD-text — required when content exceeds the firmware's
+// single-fragment envelope cap (~240 B). Caller ships via
+// sendPbFragmented for multi-fragment wire framing. Geom-aware to
+// match the CREATE's widget rectangle. See g2BuildCreateTextPagePb
+// for the parallel CREATE shape.
+size_t g2BuildRebuildTextPb(uint32_t magic,
+                            const char* containerName,
+                            const char* content,
+                            const G2ContainerGeom& geom,
+                            bool eventCapture,
+                            uint8_t* pbOut, size_t pbCap);
+
+// (Legacy g2BuildCreateStartupPage was removed 2026-04-30. It built a
+// single-envelope CREATE_STARTUP_PAGE with a 256-byte internal payload
+// buffer, which clipped content >256 B and emitted single-fragment
+// envelopes the firmware refused past ~240 B. Use
+// g2BuildCreateTextPagePb (geom-aware, pb-only) shipped via
+// sendPbFragmented in G2_Glasses.cpp instead. See git history
+// if you need the old wire shape.)
 
 // EvenCore CREATE_STARTUP_PAGE (Cmd=0) carrying a ListContainerProperty with
 // N selectable items instead of a TextContainer. Firmware draws a native
@@ -366,7 +397,7 @@ size_t g2BuildCreateListPage(uint8_t seq, uint32_t magic,
 // The single-fragment envelope ceiling is what limits the existing
 // g2BuildCreateListPage; lists with more than ~6–10 short rows can't fit.
 // This entry point is used by the multi-fragment send path
-// (Optional_EvenG2.cpp::sendPbFragmented) to support arbitrarily long
+// (G2_Glasses.cpp::sendPbFragmented) to support arbitrarily long
 // lists without hitting that wall.
 //
 // Returns the pb body byte count, or 0 on buffer overflow.
@@ -594,6 +625,117 @@ size_t g2BuildCreateMixedListImage(uint8_t seq, uint32_t magic,
                                    uint32_t widgetId,
                                    uint8_t* out, size_t outCap);
 
+// CreateStartUpPageContainer carrying N TextObject children (wrapper
+// field 3 emitted N times, each with its own geometry + ContainerId +
+// ContainerName + Content). Used to lay out side-by-side button
+// affordances or any compound text layout that the single-TEXT widget
+// can't express.
+//
+// SCHEMA RISK: the firmware has been verified to accept compound
+// containers in the list+image shape (g2BuildCreateMixedListImagePb /
+// Q16-Q18). Two TextObjects in the same wrapper is the same wire
+// shape (repeated field 3) but not separately verified. Build it,
+// ship it, watch for CreateResp res != 0 to detect rejection.
+//
+// Each child must have a UNIQUE containerId — the firmware uses that
+// to disambiguate ListEvent / TextEvent reports if eventCapture were
+// ever enabled (we leave it 0 here; these are display-only).
+struct G2TextChildSpec {
+  const char*       containerName;  // e.g. "btnYes" — short ASCII
+  const char*       content;        // displayed text, may include \n
+  uint32_t          containerId;    // 1..N, must be distinct per child
+  G2ContainerGeom   geom;           // on-lens rectangle for THIS child
+  bool              eventCapture;   // set TRUE to ask firmware to fire tap
+                                    // events for this widget. The reference
+                                    // says it's unused for text widgets but
+                                    // the firmware empirically may emit
+                                    // TextEvent CLICK with this CID — see
+                                    // the Selection Patterns test bench's
+                                    // canary for verification on 2.2.0.24.
+};
+
+size_t g2BuildCreateMultiTextPb(uint32_t magic,
+                                const G2TextChildSpec* children,
+                                size_t childCount,
+                                uint32_t widgetId,
+                                uint8_t* pbOut, size_t pbCap);
+size_t g2BuildCreateMultiText(uint8_t seq, uint32_t magic,
+                              const G2TextChildSpec* children,
+                              size_t childCount,
+                              uint32_t widgetId,
+                              uint8_t* out, size_t outCap);
+
+// REBUILD_PAGE counterpart for compound TextObject containers — sends
+// all N children in a single REBUILD message. Required because per-
+// child REBUILD-text on a compound blanks the other children on
+// firmware 2.2.0.24. No WidgetId field; the widget binding is implicit
+// on REBUILD against an existing container. See implementation comment
+// for the schema-risk note.
+size_t g2BuildRebuildMultiTextPb(uint32_t magic,
+                                  const G2TextChildSpec* children,
+                                  size_t childCount,
+                                  uint8_t* pbOut, size_t pbCap);
+
+// CREATE compound with 1 ListObject + N TextObject children. Used by
+// Status' "<- Main Menu back row" + body/batt/meter compound. The list
+// is tappable (eventCapture=1 inside writeListObjectWithItems); the
+// text children are non-tappable panes. Each child needs a distinct
+// ContainerId (list + texts share the cid space). REBUILD path MUST
+// include the list child too — see g2BuildRebuildMixedListMultiTextPb
+// — because multi-child REBUILD-text blanks any unmentioned siblings,
+// regardless of widget type.
+size_t g2BuildCreateMixedListMultiTextPb(uint32_t magic,
+                                          const char* listName,
+                                          const char* const* listItems,
+                                          size_t listItemCount,
+                                          const G2ContainerGeom& listGeom,
+                                          const G2TextChildSpec* textChildren,
+                                          size_t textChildCount,
+                                          uint32_t widgetId,
+                                          uint8_t* pbOut, size_t pbCap);
+
+// REBUILD_PAGE counterpart — same shape as the CREATE above (cmd=7,
+// G2_WRAP_F_REBUILD wrapper, no WidgetId). All children must be listed
+// every REBUILD or unmentioned siblings go dark.
+size_t g2BuildRebuildMixedListMultiTextPb(uint32_t magic,
+                                           const char* listName,
+                                           const char* const* listItems,
+                                           size_t listItemCount,
+                                           const G2ContainerGeom& listGeom,
+                                           const G2TextChildSpec* textChildren,
+                                           size_t textChildCount,
+                                           uint8_t* pbOut, size_t pbCap);
+
+// CreateStartUpPage with one ListObject + one TextObject child. The
+// canonical "title + selectable list" layout: the TextObject acts as a
+// non-tappable header (e.g. "Save changes?"), the ListObject carries N
+// selectable rows that the firmware natively manages focus + scroll +
+// CLICK events for. Title geom is typically G2_GEOM_STATUS_BAR or
+// G2_GEOM_TOP_HALF; list geom typically G2_GEOM_BOTTOM_HALF or
+// G2_GEOM_LARGE depending on how prominent you want the title to be.
+//
+// Schema: f1=ContainerTotalNum=2, f2=ListObject, f3=TextObject,
+// f5=WidgetId. Same compound-widget pattern as
+// g2BuildCreateMixedListImage but with TextObject (f3) instead of
+// ImageObject (f4). Verified working on firmware 2.2.0.24 (see
+// G2_PROTOCOL.md "Mixed-widget composition" section).
+size_t g2BuildCreateMixedListTextPb(uint32_t magic,
+                                    const char* listName,
+                                    const char* const* listItems,
+                                    size_t listItemCount,
+                                    const G2ContainerGeom& listGeom,
+                                    const G2TextChildSpec& textSpec,
+                                    uint32_t widgetId,
+                                    uint8_t* pbOut, size_t pbCap);
+size_t g2BuildCreateMixedListText(uint8_t seq, uint32_t magic,
+                                  const char* listName,
+                                  const char* const* listItems,
+                                  size_t listItemCount,
+                                  const G2ContainerGeom& listGeom,
+                                  const G2TextChildSpec& textSpec,
+                                  uint32_t widgetId,
+                                  uint8_t* out, size_t outCap);
+
 // Decode the trailing field 15 sub-message of a HeartbeatAck pb body.
 // Returns true if the sub-message was found AND both inner fields
 // parsed; writes the seq counter (inner f1) to *seq and the cmd echo
@@ -643,7 +785,7 @@ const char* g2sidName(uint8_t sid);
 // Field numbers inside the DeviceReceiveRequestFromAPP body (field 4 of
 // the wrapper, carried in every sid=0x09 push). Only the ones we've
 // empirically identified are named; unknowns are numbered but not
-// labelled. Exposed here so the verbose-dump callback in Optional_EvenG2
+// labelled. Exposed here so the verbose-dump callback in G2_Glasses
 // can label known fields without hard-coding the numbers.
 #define G2_SET_REQ_F_VER   5   // string — firmware version (e.g. "2.1.1.10")
 #define G2_SET_REQ_F_BATT  12  // uint32 — battery percentage (0-100)
@@ -695,4 +837,170 @@ typedef void (*G2SettingsFieldLog)(uint32_t field, uint8_t wire,
 void g2DumpSettingFields(const uint8_t* payload, size_t payloadLen,
                          G2SettingsFieldLog logFn);
 
-#endif // SYSTEM_G2_PROTOCOL_H
+// =============================================================================
+// DevConfig builders — sid=0x80 (UX_DEVICE_SETTINGS_APP_ID)
+// =============================================================================
+// Each builder constructs a full G2 envelope (preamble..CRC) carrying a
+// well-formed `DevCfgDataPackage` protobuf with a HARDCODED commandId.
+// Caller cannot inject an arbitrary cmd value — the only way to send the
+// destructive ones (cmd=11 SET_DEVICE_INFO, cmd=13 RESTORE_TO_FACTORY_SETTINGS)
+// is to write a new builder, which forces conscious code review.
+//
+// These bypass the `g2probe` block (which defends only the raw-hex-from-CLI
+// path; see G2_Glasses.cpp:9141). The block intentionally stays in place.
+//
+// Schema reconstructed from the FlutterApp community RE project — see
+// docs/g2_proto/dev_config_protocol.proto and Ring_Bridge_Sequence.h.
+// **Test on a recoverable unit before shipping.** The brick incident that
+// triggered the original blocklist was non-terminal (recoverable via case
+// factory-reset) per G2_Glasses.cpp:9105-9106, but downtime is downtime.
+
+#define G2_SID_DEV_CONFIG               0x80  // canonical SID for DevCfgDataPackage
+
+// DevCfgDataPackage commandId values (matches eDevCfgCommandId in
+// docs/g2_proto/dev_config_protocol.proto). Only the SAFE-tier opcodes
+// have builders below. Soft-deny tier (UNPAIR=9, RESTART=15) and hard-deny
+// tier (SET_DEVICE_INFO=11, RESTORE_TO_FACTORY_SETTINGS=13) intentionally
+// have no builder — adding one requires an explicit code change.
+#define G2_DEVCFG_CMD_AUTHENTICATION         4
+#define G2_DEVCFG_CMD_PIPE_ROLE_CHANGE       5
+#define G2_DEVCFG_CMD_RING_CONNECT_INFO      6
+#define G2_DEVCFG_CMD_BASE_HEART_BEAT        14
+#define G2_DEVCFG_CMD_TIME_SYNC              128
+
+// PipeRoleChange.asCmdRole values (eGlassesLR enum)
+#define G2_DEVCFG_ROLE_BOTH   0
+#define G2_DEVCFG_ROLE_RIGHT  1
+#define G2_DEVCFG_ROLE_LEFT   2
+
+// AuthMgr.phoneType values (eDevice enum). We always send PHONE_ANDROID
+// to mirror FlutterApp's setting.
+#define G2_DEVCFG_PHONE_TYPE_ANDROID  4
+
+// Magic-correlation constants for DevConfig messages. Chosen distinct from
+// the EvenCore G2_MAGIC_* set above so DevConfig acks are unambiguous in
+// the reply ring buffer.
+#define G2_MAGIC_DEVCFG_HEARTBEAT      220
+#define G2_MAGIC_DEVCFG_AUTH           221
+#define G2_MAGIC_DEVCFG_TIME_SYNC      222
+#define G2_MAGIC_DEVCFG_RING_CONNECT   223
+#define G2_MAGIC_DEVCFG_PIPE_ROLE      224
+
+// BASE_CONNECT_HEART_BEAT (cmd=14). Empty body. Safest possible message —
+// no payload to corrupt. Use this first when validating that sid=0x80 TX
+// is non-bricking on a given firmware revision.
+size_t g2BuildDevCfgHeartbeat(uint8_t seq, uint32_t magic,
+                              uint8_t* out, size_t outCap);
+
+// AUTHENTICATION (cmd=4). Sends fixed payload: AuthMgr {
+//   secAuth=true, phoneType=PHONE_ANDROID
+// }. No caller-supplied data. Always safe within FlutterApp's known-good
+// envelope shape.
+size_t g2BuildDevCfgAuth(uint8_t seq, uint32_t magic,
+                         uint8_t* out, size_t outCap);
+
+// PIPE_ROLE_CHANGE (cmd=5). `role` must be one of
+// G2_DEVCFG_ROLE_{BOTH,RIGHT,LEFT}; out-of-range values are rejected
+// (returns 0). FlutterApp only ever sends RIGHT, to the right arm — we
+// match that convention but expose all three values for experimentation.
+size_t g2BuildDevCfgPipeRoleChange(uint8_t seq, uint32_t magic, uint8_t role,
+                                   uint8_t* out, size_t outCap);
+
+// TIME_SYNC (cmd=128). `timestamp` is unix seconds (s32). `tzQuarterHours`
+// is the UTC offset in QUARTER-HOURS — i.e. minutes/15 — to match FlutterApp's
+// g2_messages.dart:50 (`tzQuarterHours = inMinutes ~/ 15`). Range checked:
+//   timestamp ∈ [1577836800, 4102444800]    (2020-01-01 .. 2099-12-31)
+//   tzQuarterHours ∈ [-56, +56]             (±14 h, real-world max)
+// Returns 0 on validation failure.
+//
+// **NB**: R1 systemTime uses RAW MINUTES (not quarter-hours) for the same
+// concept. See R1 builders / docs/g2_proto/Ring_Bridge_Sequence.h Phase 2.2.
+size_t g2BuildDevCfgTimeSync(uint8_t seq, uint32_t magic,
+                             uint32_t timestamp, int32_t tzQuarterHours,
+                             uint8_t* out, size_t outCap);
+
+// RING_CONNECT_INFO (cmd=6). Establishes (or tears down) the ring → glasses
+// bridge. After a `connect=true` send lands, ring telemetry
+// (battery/HR/SpO2/HRV/temp/kcal/steps) starts arriving on sid=0x90
+// (UX_RING_ROW_DATA_ID) and ring events on sid=0x91 (UX_RING_DATA_RELAY_ID),
+// both as RingDataPackage protobuf — see docs/g2_proto/ring.proto.
+//
+//   `connect` — true asks the right temple to scan-and-bond with the named
+//      ring (and start forwarding telemetry); false asks it to release the
+//      ring so another central (e.g. us) can grab it. The MAC + name are
+//      still required on release so the temple knows which bonded ring to
+//      drop — empty MAC has been observed to be ignored.
+//   `ringMacBleOrder` — 6 bytes in BLE address order (the order
+//      esp_bd_addr_t / NimBLEAddress give you). The builder REVERSES them
+//      internally to match FlutterApp's g2_messages.dart:109.
+//   `ringName` — UTF-8 ring name (e.g. "EVEN R1_112233"). NOT
+//      null-terminated on the wire — caller passes a normal C string and
+//      the builder strips the terminator.
+//
+// Returns 0 if `ringMacBleOrder` is null, or `ringName` is null/empty,
+// or `ringName` length > 32.
+size_t g2BuildDevCfgRingConnect(uint8_t seq, uint32_t magic,
+                                bool connect,
+                                const uint8_t* ringMacBleOrder,
+                                const char* ringName,
+                                uint8_t* out, size_t outCap);
+
+// =============================================================================
+// Ring data push (sid=0x90 UX_RING_ROW_DATA_ID)
+// =============================================================================
+// **WARNING — direction matters.** sid=0x90 traffic in the official protocol
+// flows GLASSES → HOST only: once the right temple has bridged the ring
+// (via sid=0x80 cmd=6 RING_CONNECT_INFO; see `ringbridge` CLI), the temple
+// itself emits RingDataPackage frames on sid=0x90 and forwards them to us.
+// **Sending sid=0x90 in the OPPOSITE direction (host → temple) is silently
+// ignored** — verified empirically 2026-05-02 with 51-byte well-formed
+// RingDataPackage{rawData{...}} frames that produced zero ack, zero error,
+// and no UI change on firmware 2.2.0.24.
+//
+// `g2BuildRingRawDataPush()` is preserved for **custom display experiments**
+// (e.g. crafting frames the firmware might consume in some other context),
+// not for driving the official health UI. To drive that UI, use the
+// `ringbridge on` CLI which sends sid=0x80 cmd=6 RING_CONNECT_INFO and
+// hands the ring off to the temple's bridge firmware.
+//
+// Schema: see docs/g2_proto/ring.proto. We pack a `RingDataPackage` with
+// commandId=RAW_DATA(2), magicRandom set to a per-session correlation
+// token, and rawData populated with whatever fields the caller has fresh.
+//
+// Field-presence semantics: pass `_valid=false` to OMIT a field from the
+// proto entirely (proto3 default-suppression). The glasses' widget treats
+// missing fields as "no fresh value" and keeps the previous reading on
+// screen. So you can update HR every 30s and SpO2 every 5min by leaving
+// SpO2 invalid on the HR-only ticks.
+//
+// Timestamps are unix seconds. Values that exceed int32_t range or come
+// from "no data yet" cached state must be flagged invalid by the caller.
+//
+// SID and magic constants documented alongside the existing G2_SID_* /
+// G2_MAGIC_DEVCFG_* pairs.
+#define G2_SID_RING_RAW_DATA           0x90  // canonical SID for RingDataPackage rawData
+#define G2_SID_RING_DATA_RELAY         0x91  // canonical SID for RingDataPackage event
+#define G2_RING_CMD_NONE               0
+#define G2_RING_CMD_EVENT              1
+#define G2_RING_CMD_RAW_DATA           2
+#define G2_MAGIC_RING_RAW_PUSH         225   // chosen distinct from G2_MAGIC_DEVCFG_*
+
+struct G2RingPushFields {
+  // Each field is sent only when its `_valid` flag is true.
+  bool      battery_valid;       int32_t battery;
+  bool      chargeStates_valid;  int32_t chargeStates;
+  bool      hr_valid;            int32_t hr;            int32_t hrTs;
+  bool      spo2_valid;          int32_t spo2;          int32_t spo2Ts;
+  bool      hrv_valid;           int32_t hrv;           int32_t hrvTs;
+  bool      temp_valid;          int32_t temp;          int32_t tempTs;
+  bool      actKcal_valid;       int32_t actKcal;       int32_t actKcalTs;
+  bool      allKcal_valid;       int32_t allKcal;       int32_t allKcalTs;
+  bool      steps_valid;         int32_t steps;         int32_t stepsTs;
+};
+
+size_t g2BuildRingRawDataPush(uint8_t seq, uint32_t magic,
+                              const G2RingPushFields& f,
+                              uint8_t* out, size_t outCap);
+
+#endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#endif  // SYSTEM_G2_PROTOCOL_H

@@ -13,6 +13,7 @@
 #include "BLE_Peers.h"       // bluetooth.peers JSON (de)serialization
 #include "System_Command.h"
 #include "System_Notifications.h"
+#include "System_ESPSR.h"  // srSyncDebugLevel() — derive legacy gSrDebugLevel from flags
 #include <LittleFS.h>
 #include <esp_system.h>
 #include <esp_app_desc.h>
@@ -300,12 +301,12 @@ String encryptString(const String& password) {
 
   // PKCS#7 padding
   int paddedLen = ((password.length() / 16) + 1) * 16;
-  uint8_t* plaintext = (uint8_t*)malloc(paddedLen);
+  uint8_t* plaintext = (uint8_t*)ps_alloc(paddedLen, AllocPref::PreferPSRAM, "aes.enc.plain");
   if (!plaintext) {
     ERROR_MEMORYF("[AES] Failed to allocate plaintext buffer");
     return "";
   }
-  
+
   memcpy(plaintext, password.c_str(), password.length());
   uint8_t padValue = paddedLen - password.length();
   for (int i = password.length(); i < paddedLen; i++) {
@@ -317,7 +318,7 @@ String encryptString(const String& password) {
   mbedtls_aes_init(&aes);
   mbedtls_aes_setkey_enc(&aes, key, 128);
 
-  uint8_t* ciphertext = (uint8_t*)malloc(paddedLen);
+  uint8_t* ciphertext = (uint8_t*)ps_alloc(paddedLen, AllocPref::PreferPSRAM, "aes.enc.cipher");
   if (!ciphertext) {
     free(plaintext);
     mbedtls_aes_free(&aes);
@@ -344,7 +345,7 @@ String encryptString(const String& password) {
 
   // Encode: AES:<hex-iv>:<hex-ciphertext>
   int resultLen = 4 + 32 + 1 + (paddedLen * 2) + 1;  // "AES:" + IV + ":" + ciphertext + null
-  char* result = (char*)malloc(resultLen);
+  char* result = (char*)ps_alloc(resultLen, AllocPref::PreferPSRAM, "aes.enc.result");
   if (!result) {
     free(ciphertext);
     ERROR_MEMORYF("[AES] Failed to allocate result buffer");
@@ -410,7 +411,7 @@ String decryptString(const String& encryptedPassword) {
 
   // Decode ciphertext
   int ciphertextLen = ciphertextHex.length() / 2;
-  uint8_t* ciphertext = (uint8_t*)malloc(ciphertextLen);
+  uint8_t* ciphertext = (uint8_t*)ps_alloc(ciphertextLen, AllocPref::PreferPSRAM, "aes.dec.cipher");
   if (!ciphertext) {
     ERROR_MEMORYF("[AES] Failed to allocate ciphertext buffer");
     return "";
@@ -426,7 +427,7 @@ String decryptString(const String& encryptedPassword) {
   mbedtls_aes_init(&aes);
   mbedtls_aes_setkey_dec(&aes, key, 128);
 
-  uint8_t* plaintext = (uint8_t*)malloc(ciphertextLen);
+  uint8_t* plaintext = (uint8_t*)ps_alloc(ciphertextLen, AllocPref::PreferPSRAM, "aes.dec.plain");
   if (!plaintext) {
     free(ciphertext);
     mbedtls_aes_free(&aes);
@@ -510,7 +511,7 @@ void settingsDefaults() {
   // - oled (OLED_Settings.cpp): enabled, autoInit, modes, brightness
   // - led (System_NeoPixel.cpp): brightness, startup effect/color/duration
   // - power (System_Power.cpp): mode, autoMode, thresholds
-  // - bluetooth (Optional_Bluetooth.cpp): autoStart, requireAuth, deviceName
+  // - bluetooth (Bluetooth.cpp): autoStart, requireAuth, deviceName
   // ============================================================================
   applyRegisteredDefaults();
 }
@@ -607,6 +608,14 @@ void applySettings() {
     DBG_MAP(debugLlmGenerate,      DEBUG_LLM_GENERATE),
     DBG_MAP(debugLlmMemory,        DEBUG_LLM_MEMORY),
 #endif
+    // ESP-SR (parent + 5 sub-flags). Wired the same way as G2 — sub-flags
+    // are independent; parent debugSr is the explicit master switch.
+    DBG_MAP(debugSr,               DEBUG_SR),
+    DBG_MAP(debugSrWake,           DEBUG_SR_WAKE),
+    DBG_MAP(debugSrCommand,        DEBUG_SR_COMMAND),
+    DBG_MAP(debugSrAfe,            DEBUG_SR_AFE),
+    DBG_MAP(debugSrLifecycle,      DEBUG_SR_LIFECYCLE),
+    DBG_MAP(debugSrTuning,         DEBUG_SR_TUNING),
   };
   #undef DBG_MAP
 
@@ -707,6 +716,26 @@ void applySettings() {
                         gSettings.debugBluetoothCore ||
                         gSettings.debugBluetoothGatt ||
                         gSettings.debugBluetoothData);
+
+  // ESP-SR sub-flags + parent. Mirror to gDebugSubFlags so System_ESPSR
+  // can read them without re-touching gSettings on every audio frame.
+  gDebugSubFlags.srWake      = gSettings.debugSrWake;
+  gDebugSubFlags.srCommand   = gSettings.debugSrCommand;
+  gDebugSubFlags.srAfe       = gSettings.debugSrAfe;
+  gDebugSubFlags.srLifecycle = gSettings.debugSrLifecycle;
+  gDebugSubFlags.srTuning    = gSettings.debugSrTuning;
+  updateParentDebugFlag(DEBUG_SR,
+                        gSettings.debugSr ||
+                        gDebugSubFlags.srWake ||
+                        gDebugSubFlags.srCommand ||
+                        gDebugSubFlags.srAfe ||
+                        gDebugSubFlags.srLifecycle ||
+                        gDebugSubFlags.srTuning);
+#if ENABLE_ESP_SR
+  // Sync the legacy integer level from the new bool flags so existing
+  // SR_DBG_L / SR_INFO_L call sites in System_ESPSR keep producing output.
+  srSyncDebugLevel();
+#endif
 
   // Apply severity-based log level from settings
   {
@@ -1382,6 +1411,13 @@ static const SettingEntry debugSettingEntries[] = {
   { "heartbeat",  SETTING_BOOL, &gSettings.debugG2Heartbeat,  0, 0, nullptr, 0, 1, "Heartbeat",         nullptr, false, "g2", "debugg2heartbeat" },
   { "dump",       SETTING_BOOL, &gSettings.debugG2Dump,       0, 0, nullptr, 0, 1, "Dump",              nullptr, false, "g2", "debugg2dump" },
 #endif
+  // --- espsr group (ESP-SR speech recognition) ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugSr,           0, 0, nullptr, 0, 1, "All SR",            nullptr, false, "espsr", "debugsr" },
+  { "wake",       SETTING_BOOL, &gSettings.debugSrWake,       0, 0, nullptr, 0, 1, "Wake word",         nullptr, false, "espsr", "debugsrwake" },
+  { "command",    SETTING_BOOL, &gSettings.debugSrCommand,    0, 0, nullptr, 0, 1, "Command match",     nullptr, false, "espsr", "debugsrcommand" },
+  { "afe",        SETTING_BOOL, &gSettings.debugSrAfe,        0, 0, nullptr, 0, 1, "AFE / VAD",         nullptr, false, "espsr", "debugsrafe" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugSrLifecycle,  0, 0, nullptr, 0, 1, "Lifecycle",         nullptr, false, "espsr", "debugsrlifecycle" },
+  { "tuning",     SETTING_BOOL, &gSettings.debugSrTuning,     0, 0, nullptr, 0, 1, "Tuning / threshold",nullptr, false, "espsr", "debugsrtuning" },
   { "i2c",              SETTING_BOOL, &gSettings.debugI2C,            0, 0, nullptr, 0, 1, "I2C Bus",              nullptr, false, nullptr, "debugi2c" },
   { "mqtt",             SETTING_BOOL, &gSettings.debugMqtt,           0, 0, nullptr, 0, 1, "MQTT",                 nullptr, false, nullptr, "debugmqtt" },
   { "webConsole",       SETTING_BOOL, &gSettings.webConsoleDebug,     0, 0, nullptr, 0, 1, "Web Console",          nullptr, false, nullptr, "webconsole" },

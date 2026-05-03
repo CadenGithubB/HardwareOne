@@ -10,7 +10,7 @@
 #include "System_MemUtil.h"
 #include "System_Microphone.h"
 #include "System_Mutex.h"
-#include "Optional_EvenG2.h"  // g2MicSetAfeFeedActive / g2MicReadPcmSamples (Phase 2B)
+#include "G2_Glasses.h"  // g2MicSetAfeFeedActive / g2MicReadPcmSamples (Phase 2B)
 #include "System_Command.h"
 #include "System_CLI.h"
 #include "System_User.h"
@@ -69,9 +69,16 @@ static volatile bool gSRTaskShouldRun = false;
 // AFE and model handles
 static esp_afe_sr_iface_t* gAFE = nullptr;
 
+// Resolved model names (e.g. "wn9_hilexin", "mn7_en"). Populated when
+// initAFE/initMultiNet succeed so the web Models card can show what's
+// actually loaded rather than just a green check. Empty string when no
+// model is loaded (deinit / startup state).
+static char gWnModelName[64] = {0};
+static char gMnModelName[64] = {0};
+
 // Phase 2B: runtime mic source switch. The SR feed loop reads from
 // either the local PDM mic via I2S (default) or the G2 left-temple
-// mic via the BLE-driven LC3 → PCM ring buffer in Optional_EvenG2.
+// mic via the BLE-driven LC3 → PCM ring buffer in G2_Glasses.
 // `setmicsource g2|local` flips this; switching to G2 also arms the
 // ring buffer / decoder and assumes the caller has already issued
 // `g2micon` (which itself requires an active hijack page).
@@ -264,6 +271,28 @@ static const uint32_t kAutoTuneStepDurationMs = 8000;  // 8 seconds per config
 
 #define SR_DBG_L(lvl, fmt, ...) do { if (gSrDebugLevel >= (lvl)) { DEBUG_SRF(fmt, ##__VA_ARGS__); } } while (0)
 #define SR_INFO_L(lvl, fmt, ...) do { if (gSrDebugLevel >= (lvl)) { INFO_SRF(fmt, ##__VA_ARGS__); } } while (0)
+
+// Map the new bool-flag debug system to the legacy integer level so existing
+// SR_DBG_L/SR_INFO_L call sites keep working unchanged. The `cmd_sr_debug_level`
+// CLI command can still set gSrDebugLevel directly as a manual override.
+//   - parent debugSr            -> level 4 (everything)
+//   - any AFE / tuning sub      -> level 3 (chunk-level audio chain)
+//   - any wake / command sub    -> level 2 (recognizer events)
+//   - lifecycle only            -> level 1 (init / start / stop)
+//   - none                      -> level 0
+void srSyncDebugLevel() {
+  uint8_t lvl = 0;
+  if (gSettings.debugSr) {
+    lvl = 4;
+  } else if (gSettings.debugSrAfe || gSettings.debugSrTuning) {
+    lvl = 3;
+  } else if (gSettings.debugSrWake || gSettings.debugSrCommand) {
+    lvl = 2;
+  } else if (gSettings.debugSrLifecycle) {
+    lvl = 1;
+  }
+  gSrDebugLevel = lvl;
+}
 
 enum class SrSnipDest : uint8_t { Auto = 0, SD = 1, LittleFS = 2 };
 
@@ -1766,7 +1795,11 @@ static bool initAFE() {
   }
   
   INFO_SRF("Found wake word model: %s", wn_name);
-  
+  // Capture the resolved name so the web status card can display it.
+  // Cleared in stopESPSR() when AFE is torn down.
+  strncpy(gWnModelName, wn_name, sizeof(gWnModelName) - 1);
+  gWnModelName[sizeof(gWnModelName) - 1] = '\0';
+
   // Configure AFE
   WARN_SYSTEMF("[SR_AFE] Creating AFE config with AFE_CONFIG_DEFAULT()...");
   afe_config_t afe_config = AFE_CONFIG_DEFAULT();
@@ -1907,6 +1940,11 @@ static bool initMultiNet() {
     }
   }
   
+  // Capture the resolved name so the web status card can display it.
+  // Cleared in stopESPSR() when MultiNet is torn down.
+  strncpy(gMnModelName, mn_name, sizeof(gMnModelName) - 1);
+  gMnModelName[sizeof(gMnModelName) - 1] = '\0';
+
   INFO_SRF("MultiNet initialized: %s", mn_name);
   return true;
 }
@@ -2708,8 +2746,13 @@ void stopESPSR() {
   deinitAFE();
   deinitI2SMicrophone();
 
+  // Clear the resolved model names so the web status card stops showing
+  // them once SR has been torn down.
+  gWnModelName[0] = '\0';
+  gMnModelName[0] = '\0';
+
   restoreMicrophoneAfterSRIfNeeded();
-  
+
   gESPSRRunning = false;
   gESPSRWakeDetected = false;
   INFO_SRF("ESP-SR pipeline stopped");
@@ -2748,6 +2791,11 @@ void buildESPSRStatusJson(String& output) {
   doc["lowConfidenceRejects"] = gSrLowConfidenceRejects;
   doc["hasAFE"] = (gAFE != nullptr);
   doc["hasMultiNet"] = (gMNModel != nullptr);
+  // Concrete model names so the web status card can show what's actually
+  // loaded (e.g. "wn9_hilexin", "mn7_en") rather than just a green check.
+  // Empty strings when not loaded.
+  doc["wnModelName"] = gWnModelName;
+  doc["mnModelName"] = gMnModelName;
   doc["voiceCliMappings"] = (int)gVoiceCliMappingCount;
   doc["voiceArmed"] = gVoiceArmed;
   doc["voiceArmedUser"] = gVoiceArmedUser;

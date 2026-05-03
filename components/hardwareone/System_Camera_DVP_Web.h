@@ -51,6 +51,11 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
         <div style='margin-bottom:8px'>
           <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Resolution:</label>
           <select id='camera-framesize' style='width:100%'>
+            <option value='6'>96x96</option>
+            <option value='7'>160x120 (QQVGA)</option>
+            <option value='8'>176x144 (QCIF)</option>
+            <option value='9'>240x176 (HQVGA)</option>
+            <option value='10'>240x240</option>
             <option value='0'>320x240 (QVGA)</option>
             <option value='1'>640x480 (VGA)</option>
             <option value='2'>800x600 (SVGA)</option>

@@ -14,12 +14,13 @@
 //
 //   BLE (drill from ROOT):
 //     <- Back
-//     Reconnect Ring / Disconnect Ring (force)
 //     Hide AI Card
 //     Toggle Mic Feed
 //     G2 AutoConnect: ON|OFF (toggles boot auto-reconnect, persisted)
 //     Heap Snapshot (log) / Lens State Dump (log)
-//     (further BLE-recovery / diagnostic taps go here)
+//     (further BLE-recovery / diagnostic taps go here. R1 Ring connect
+//      / disconnect rows moved to Networking → Bluetooth submenu —
+//      see triggerRingReconnect / triggerRingDisconnect there.)
 //
 //   BRACKETS (drill from ROOT):
 //     <- Back
@@ -86,8 +87,7 @@
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
-#include "Optional_EvenG2.h"
-#include "Optional_EvenG2_Ring.h"   // g2RingDisconnect/Connect
+#include "G2_Glasses.h"
 #include "BLE_Peers.h"              // gBlePeerData / autoConnect toggle
 #include "System_Settings.h"        // setSetting() — persists autoConnect to NVS
 #include "System_Debug.h"
@@ -136,22 +136,70 @@ static const char kSourceText[] =
 // -----------------------------------------------------------------------------
 // Size brackets
 // -----------------------------------------------------------------------------
+// Each bracket is paired into list-widget (L) and text-widget (T)
+// variants so the operator can compare what each transport actually
+// tolerates. The list path uses g2ShowListPage (ListContainer with N
+// items[]); the text path uses g2ShowTextPage (single TextObject with
+// a multi-line content string). Empirical data has shown the two
+// transports diverge well before 2 KB, but we surface both at every
+// size so the ceiling can be measured rather than assumed.
+enum TestBracketKind : uint8_t {
+  TBK_LIST      = 0,
+  TBK_TEXT      = 1,
+  // Same wire shape as TBK_TEXT but the dispatcher pre-arms a 100 ms
+  // inter-fragment delay (vs. the default 20 ms) for the next burst.
+  // Used to test whether the firmware's per-widget reassembly ceiling
+  // moves when fragments are spaced further apart — answers "is the
+  // 1 KB text drop a buffer-fill or a parse-time race?"
+  TBK_TEXT_SLOW = 2,
+  // CREATE-text(small placeholder) → REBUILD-text(N B blob). Tests
+  // whether the in-place patch path has the same firmware reassembly
+  // ceiling as the initial CREATE — answers "can we stream long
+  // content into an existing TextObject even though we can't CREATE
+  // it directly?".
+  TBK_TEXT_REBUILD = 3,
+};
 struct TestBracket {
-  const char* label;
-  size_t      bytes;
+  const char*     label;
+  size_t          bytes;
+  TestBracketKind kind;
 };
 
 static const TestBracket kBrackets[] = {
-  // Single-fragment territory — should always pass.
-  { "Send 100 B",   100 },
-  { "Send 250 B",   250 },
+  // Single-fragment territory — should always pass for both transports.
+  { "Send 100 B (L)",      100, TBK_LIST },
+  { "Send 100 B (T)",      100, TBK_TEXT },
+  { "Send 250 B (L)",      250, TBK_LIST },
+  { "Send 250 B (T)",      250, TBK_TEXT },
   // Multi-fragment territory — exercises sendPbFragmented.
-  { "Send 500 B",   500 },
-  { "Send 1 KB",   1024 },
-  { "Send 2 KB",   2048 },
-  // 4 KB / 6 KB / 8 KB removed — they overflowed the row buffer needed
-  // by the AI panel sub-menu and the heaviest brackets weren't yielding
-  // new information vs. 2 KB. Restore if we re-enter that territory.
+  { "Send 500 B (L)",      500, TBK_LIST },
+  { "Send 500 B (T)",      500, TBK_TEXT },
+  // 750 B (T) — bisects the gap between 3-frag (works) and 5-frag
+  // (fails) text bursts so we can pin the actual ceiling.
+  { "Send 750 B (T)",      750, TBK_TEXT },
+  { "Send 1 KB (L)",      1024, TBK_LIST },
+  { "Send 1 KB (T)",      1024, TBK_TEXT },
+  // Same payload as Send 1 KB (T) but with a 100 ms inter-fragment
+  // delay instead of 20 ms. If this passes where the regular variant
+  // fails, the firmware's ceiling is timing/buffer-fill, not absolute
+  // payload size.
+  { "Send 1 KB (T-slow)", 1024, TBK_TEXT_SLOW },
+  { "Send 2 KB (L)",      2048, TBK_LIST },
+  { "Send 2 KB (T)",      2048, TBK_TEXT },
+  // Text-only stretch tests — list path can't reach these sizes
+  // (row buffer + firmware reassembly both push back), but text
+  // is one TextObject with a single content field; worth poking.
+  { "Send 4 KB (T)",      4096, TBK_TEXT },
+  { "Send 8 KB (T)",      8192, TBK_TEXT },
+  // REBUILD-text scaling probes. CREATE seeds a small placeholder so
+  // the firmware always acks, then the bracket's payload goes through
+  // REBUILD-text. If these pass at sizes where (T) fails, REBUILD has
+  // a higher (or no) reassembly ceiling and we have a building block
+  // for streaming long content into an existing TextObject.
+  { "Send 1 KB (R)",      1024, TBK_TEXT_REBUILD },
+  { "Send 2 KB (R)",      2048, TBK_TEXT_REBUILD },
+  { "Send 4 KB (R)",      4096, TBK_TEXT_REBUILD },
+  { "Send 8 KB (R)",      8192, TBK_TEXT_REBUILD },
 };
 static constexpr size_t kBracketCount =
   sizeof(kBrackets) / sizeof(kBrackets[0]);
@@ -172,8 +220,6 @@ struct TestAction {
   const char* (*dynLabel)();
 };
 
-static void actionReconnectRing();
-static void actionDisconnectRing();
 static void actionHideAICard();
 static void actionToggleMicFeed();
 static void actionToggleG2AutoReconnect();
@@ -182,11 +228,9 @@ static void actionHeapSnapshot();
 static void actionLensStateDump();
 
 static const TestAction kActions[] = {
-  // Ring recovery. Reconnect = force-disconnect + connect; Disconnect-
-  // only is the half-step useful when the next op (e.g. Temples Scan
-  // from the web UI) would re-trigger the connect itself.
-  { "Reconnect Ring",        actionReconnectRing,         nullptr },
-  { "Disconnect Ring",       actionDisconnectRing,        nullptr },
+  // (Ring Reconnect / Disconnect rows moved to Networking → Bluetooth
+  //  submenu — see triggerRingReconnect / triggerRingDisconnect in
+  //  G2_Page_Network.cpp.)
   // Front-pane card cleanup. AI card normally auto-dismisses after ~10 s
   // but a stuck card (firmware-side) blocks subsequent CTRL ENTER calls
   // with errorCode=7. Force-EXIT clears it.
@@ -609,6 +653,10 @@ enum TestLevel : uint8_t {
   TEST_LEVEL_IMAGE_CONFIRMED       = 16, // Doc + Q4 canary + Q6 + Q6b
   TEST_LEVEL_IMAGE_STATIC          = 17, // Q9 frame builder
   TEST_LEVEL_IMAGE_STREAMING       = 18, // Q11 then Q10
+  TEST_LEVEL_DISPLAY_SELECTION         = 19, // Selection Patterns parent (3 buckets)
+  TEST_LEVEL_DISPLAY_SELECT_LISTS      = 20, // Bucket 1 — native list widgets
+  TEST_LEVEL_DISPLAY_SELECT_MIXED      = 21, // Bucket 2 — compound TextObject layouts
+  TEST_LEVEL_DISPLAY_SELECT_EDGES      = 22, // Bucket 3 — edge-anchored geoms + canaries
 };
 static TestLevel gTestLevel = TEST_LEVEL_ROOT;
 
@@ -722,6 +770,7 @@ static size_t buildImageStaticRows() {
   snprintf(gRows[row], TEST_ROW_LEN, "Q9: frame builder (3-band)");       gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "QGlizzy: SD /PICTURES/test.bmp");   gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q12: full-screen 576x288 (4 tiles)"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q19: solo 96x96 (small-dim test)"); gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
 
@@ -746,6 +795,11 @@ static size_t buildImageStreamingRows() {
 // probe was launched from, including DISPLAY_COMBO whose builder is
 // defined further down with the rest of the Display section.
 static size_t buildDisplayComboRows();
+// Selection Edges bucket — needed by imgProbeWorker so it can rebuild
+// the right picker after the dual-pane CREATE probe (test S) returns.
+// Defined further down with the rest of the Selection Patterns
+// builders.
+static size_t buildSelectionEdgesRows();
 
 // -----------------------------------------------------------------------------
 // Image-probe worker (defined here so it can call buildImageRows + gRowPtrs)
@@ -764,18 +818,43 @@ static void imgProbeWorker(void* arg) {
     const char* result = fn();
     DEBUG_G2F("[G2] Image probe done → %s", result ? result : "(null)");
   }
+  // Settle window before rebuilding the picker. The probe's own
+  // teardown (typically a final Shutdown) often triggers firmware
+  // SYSTEM_EXIT + DISPLAY_OFF echoes that arrive ~300-500 ms later.
+  // Those echoes can race our picker-rebuild CREATE for the BLE
+  // write mutex, ending in a "sendPbFragmented: mutex timeout" and
+  // a wedged hijack state (observed 2026-04-30 with Selection-S
+  // dual-pane + REBUILD-text-child probes). 500 ms is enough for the
+  // echoes to land and our DISPLAY_OFF→sendHijackShutdown handler
+  // to complete before we contend for the wire.
+  vTaskDelay(pdMS_TO_TICKS(500));
+
+  // Sanity check: if the firmware tore down the hijack while we were
+  // probing (DISPLAY_OFF / SYSTEM_EXIT cleared lens.hijackActive), we
+  // shouldn't push more content — there's no widget to host it. The
+  // user has effectively exited; rebuilding the picker would just
+  // re-establish a fresh hijack they didn't ask for, and on the
+  // failure path it produces the noisy mutex-timeout sequence.
+  if (!g2LensGetState().hijackActive) {
+    DEBUG_G2F("[G2] Image probe: hijack ended during probe — "
+              "skipping picker rebuild (user exited or firmware "
+              "tore down)");
+    vTaskDelete(nullptr);
+    return;
+  }
+
   // Rebuild whichever sub-level the probe was launched from so the user
   // can chain probes without backing out to the parent. gTestLevel is
   // still set to the source sub-level since the dispatcher leaves it
   // alone when invoking a probe (only Back changes the level).
-  vTaskDelay(pdMS_TO_TICKS(200));
   size_t n;
   switch (gTestLevel) {
-    case TEST_LEVEL_IMAGE_CONFIRMED:  n = buildImageConfirmedRows();  break;
-    case TEST_LEVEL_IMAGE_STATIC:     n = buildImageStaticRows();     break;
-    case TEST_LEVEL_IMAGE_STREAMING:  n = buildImageStreamingRows();  break;
-    case TEST_LEVEL_DISPLAY_COMBO:    n = buildDisplayComboRows();    break;
-    default:                          n = buildImageRows();           break;
+    case TEST_LEVEL_IMAGE_CONFIRMED:     n = buildImageConfirmedRows();  break;
+    case TEST_LEVEL_IMAGE_STATIC:        n = buildImageStaticRows();     break;
+    case TEST_LEVEL_IMAGE_STREAMING:     n = buildImageStreamingRows();  break;
+    case TEST_LEVEL_DISPLAY_COMBO:       n = buildDisplayComboRows();    break;
+    case TEST_LEVEL_DISPLAY_SELECT_EDGES: n = buildSelectionEdgesRows(); break;
+    default:                             n = buildImageRows();           break;
   }
   g2ShowListPage(gRowPtrs, n);
   vTaskDelete(nullptr);
@@ -795,7 +874,7 @@ static bool spawnImgProbeWorker(ImgProbeFn fn) {
   return true;
 }
 
-// DISPLAY: parent picker — TEXT / LIST / Combo.
+// DISPLAY: parent picker — TEXT / LIST / Combo / Selection patterns.
 static size_t buildDisplayRows() {
   writeBackRow("<- Tests");
   size_t row = 1;
@@ -805,7 +884,453 @@ static size_t buildDisplayRows() {
   gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Combo (Text + Image) >>");
   gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Selection patterns >>");
+  gRowPtrs[row] = gRows[row]; row++;
   return row;
+}
+
+// DISPLAY/SELECTION: picker for "how should a 2-choice prompt look
+// on the lens" experiments. Empirical findings (firmware 2.2.0.24,
+// 2026-04-30):
+//
+//   * Native list widgets stack rows vertically at their geom; in
+//     containers shorter than ~40 px only the top row is visible.
+//   * Compound CreateStartUpPage with up to 4 TextObject children
+//     (repeated wrapper field 3) all render and ack — but content
+//     within each TextObject draws at the top-left of its box, so
+//     "bottom" content needs a geom with y near 240+, not just a
+//     box that occupies the lower half.
+//   * Compound TextObject CHILDREN ARE NOT NATIVELY TAPPABLE — the
+//     test bench's eventCapture canary (Q below) and the list+text
+//     mix (R below) explore the two viable selection paths.
+//
+// Three families:
+//
+//   Native list-widget at non-standard geom (cheap, no pb work):
+//     A.  Footer list (Yes/No) [BROKEN: rows clip at 40px]
+//     A3. List @ LEFT_HALF (narrow vertical list)
+//     A5. List @ SMALL (centered modal-style)
+//     C.  Vertical Yes/No (default geom — known good)
+//   (A1/A2/A4 dropped — overlapped existing text area or were
+//   visually identical to A3/C.)
+//
+//   Compound TextObject children — display only unless eventCapture
+//   is set on each child. Verified working at 1, 2, 3, 4 children.
+//     B. Bottom corners (Yes / No)              — 2 children @ QUAD_BL/BR
+//     D. Top corners (Yes / No)                 — 2 children @ QUAD_TL/TR
+//     E. Halves (Yes / No)                      — 2 children @ LEFT/RIGHT_HALF
+//     F. Triple bottom (Yes / Maybe / No)       — 3 children across bottom
+//     G. Title + corners (Q / Yes / No)         — 3 children: title + 2 buttons
+//     H. Quad 4 buttons (Yes/No/Maybe/Cancel)   — 4 children @ all 4 quadrants
+//     I. Header + halves (title + Yes/No)       — 3 children: top strip + halves
+//     J. Three stacked strips                   — 3 children: top/mid/bot horizontal
+//     K. Centered modal (CENTER_DOT)            — 1 child @ centered 128x80
+//
+//   New edge-anchored geoms + selectability canaries:
+//     L. Right column (text)                    — 1 TextObject @ rightmost 130px strip
+//     M. Right column (list)                    — list at same right strip
+//     N. Bottom-edge text strip                 — 1 TextObject @ {8,248,560,32}
+//     O. Bottom-edge buttons (mix)              — 2 TextObjects @ bottom edge
+//     P. Top notification bar                   — 1 TextObject @ STATUS_BAR
+//     Q. eventCapture=1 corners (canary)        — same as B with evcap=1
+//     R. Title + 2-row list (list+text mix)     — title TextObject + Yes/No ListObject
+// Top-level Selection Patterns picker: 3 sub-buckets. Originally this
+// was a flat 20-row menu, but the firmware on G2 (2.2.0.24) cannot
+// reassemble 3-fragment CREATE-list payloads — once the row count
+// pushed the protobuf past two MTU fragments the container never
+// primed. Splitting into three sub-pickers keeps every CREATE inside
+// the safe 1–2 fragment envelope. The buckets are organised by what
+// they exercise rather than evenly by count:
+//   1. Lists      — native ListObject geom variants (4 entries)
+//   2. Compound   — multi-TextObject CREATEs, display-only (9 entries)
+//   3. Edges      — edge-anchored geoms + selectability canaries (7)
+static size_t buildSelectionRows() {
+  writeBackRow("<- Display");
+  size_t row = 1;
+  snprintf(gRows[row], TEST_ROW_LEN, "Lists >>");            gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Compound text >>");    gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Edges + canaries >>"); gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// Bucket 1 — native ListObject geom variants. Each row tap spawns a
+// real list at a named geom; tap inside the list returns to picker.
+static size_t buildSelectionListsRows() {
+  writeBackRow("<- Selection");
+  size_t row = 1;
+  snprintf(gRows[row], TEST_ROW_LEN, "A. Footer list (BROKEN)");  gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "A3. List @ LEFT_HALF");     gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "A5. List @ SMALL (modal)"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "C. Vertical Yes/No");       gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// Bucket 2 — compound TextObject CREATEs. Each row spawns a multi-
+// TextObject page (display-only; DOUBLE_CLICK exits via worker). These
+// confirmed empirically that the firmware accepts up to 4 children in
+// a single CREATE on 2.2.0.24.
+static size_t buildSelectionMixedRows() {
+  writeBackRow("<- Selection");
+  size_t row = 1;
+  snprintf(gRows[row], TEST_ROW_LEN, "B. Bottom corners (mix)");  gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "D. Top corners (mix)");     gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "E. Halves L/R (mix)");      gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "F. Triple bottom (mix)");   gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "G. Title + corners (mix)"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "H. Quad 4 buttons (mix)");  gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "I. Header + halves (mix)"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "J. Stacked strips (mix)");  gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "K. Centered modal (mix)");  gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// Bucket 3 — edge-anchored geoms + selectability canaries. Probes the
+// firmware's geom honoring on extreme rects (right column, bottom
+// strip, top notification bar) and the eventCapture=1 flag (Q). R is
+// the recommended title+list interactive pattern. S is the dual-pane
+// CREATE probe — does the firmware accept two simultaneously CREATEd
+// containers with distinct ContainerNames?
+static size_t buildSelectionEdgesRows() {
+  writeBackRow("<- Selection");
+  size_t row = 1;
+  snprintf(gRows[row], TEST_ROW_LEN, "L. Right column (text)");    gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "M. Right column (list)");    gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "N. Bottom-edge text");       gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "O. Bottom-edge buttons");    gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "P. Top notif bar (text)");   gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q. EvCap=1 (REJECT)");       gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "R. Title + Y/N list (mix)"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "S. REBUILD-text child probe"); gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// Forward decl: defined further down (after the geom-variant tables)
+// but called from runSelectionPattern's compound-TextObject branches
+// for the gTextViewExitFn slot in g2ShowMultiTextPage.
+static void displayTestExitToPicker();
+
+// Run a Selection pattern on the lens. List-widget variants stay in
+// gInDisplayTest=true mode (any tap returns to picker via the
+// dispatcher). Compound-TextObject variants fire g2ShowMultiTextPage
+// with displayTestExitToPicker as the exit handler, so DOUBLE_CLICK
+// dismisses to the picker.
+static void runSelectionPattern(size_t idx) {
+  static const char* rows[3];
+  rows[0] = "<- Back";
+  rows[1] = "Yes";
+  rows[2] = "No";
+
+  // Geoms used by multiple cases below — aliases of the validated
+  // edge-anchored presets in System_G2_Protocol.h. Originally these
+  // were inline magic numbers in this file; the tests confirmed them
+  // empirically (2026-04-30) and they've been promoted to named
+  // presets so production UI code can pull from the same vetted
+  // library.
+  static constexpr G2ContainerGeom kRightCol      = G2_GEOM_RIGHT_COL;
+  static constexpr G2ContainerGeom kBottomEdge    = G2_GEOM_BOTTOM_BAR;
+  static constexpr G2ContainerGeom kBottomEdgeL   = G2_GEOM_BOTTOM_BAR_L;
+  static constexpr G2ContainerGeom kBottomEdgeR   = G2_GEOM_BOTTOM_BAR_R;
+  // Title strip + list region for R (title + 2-row list)
+  static constexpr G2ContainerGeom kTitleStrip    = G2_GEOM_STATUS_BAR;       // 576×40 at top
+  static constexpr G2ContainerGeom kListBelowTitle = {   8,  56, 560, 224 };  // remaining area
+
+  switch (idx) {
+    case 0:
+      // A. Footer — kept as a known-broken canary (40 px clips rows).
+      gInDisplayTest = true;
+      g2ShowListPage(rows, 3, G2_GEOM_FOOTER);
+      DEBUG_G2F("[G2] Selection pattern: A footer list [BROKEN: clips]");
+      return;
+    case 1:
+      gInDisplayTest = true;
+      g2ShowListPage(rows, 3, G2_GEOM_LEFT_HALF);
+      DEBUG_G2F("[G2] Selection pattern: A3 list @ LEFT_HALF (280x272)");
+      return;
+    case 2:
+      gInDisplayTest = true;
+      g2ShowListPage(rows, 3, G2_GEOM_SMALL);
+      DEBUG_G2F("[G2] Selection pattern: A5 list @ SMALL (280x130 ctr)");
+      return;
+    case 3:
+      gInDisplayTest = true;
+      g2ShowListPage(rows, 3, G2_GEOM_LARGE);
+      DEBUG_G2F("[G2] Selection pattern: C vertical list (3 rows @ LARGE)");
+      return;
+
+    case 4: {
+      // B. Bottom-corner buttons.
+      static const G2TextChildSpec children[] = {
+        { "btnYes", "Yes", 1, G2_GEOM_QUAD_BL, false },
+        { "btnNo",  "No",  2, G2_GEOM_QUAD_BR, false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 2, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: B failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: B bottom corners (2 children @ QUAD_BL/BR)");
+      }
+      return;
+    }
+    case 5: {
+      static const G2TextChildSpec children[] = {
+        { "btnYes", "Yes", 1, G2_GEOM_QUAD_TL, false },
+        { "btnNo",  "No",  2, G2_GEOM_QUAD_TR, false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 2, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: D failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: D top corners (2 children @ QUAD_TL/TR)");
+      }
+      return;
+    }
+    case 6: {
+      static const G2TextChildSpec children[] = {
+        { "btnYes", "Yes", 1, G2_GEOM_LEFT_HALF,  false },
+        { "btnNo",  "No",  2, G2_GEOM_RIGHT_HALF, false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 2, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: E failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: E halves L/R (2 children @ LEFT/RIGHT_HALF)");
+      }
+      return;
+    }
+    case 7: {
+      static constexpr G2ContainerGeom kThirdL  = {   0, 144, 190, 136 };
+      static constexpr G2ContainerGeom kThirdM  = { 193, 144, 190, 136 };
+      static constexpr G2ContainerGeom kThirdR  = { 386, 144, 190, 136 };
+      static const G2TextChildSpec children[] = {
+        { "btnYes", "Yes",   1, kThirdL, false },
+        { "btnMay", "Maybe", 2, kThirdM, false },
+        { "btnNo",  "No",    3, kThirdR, false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 3, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: F failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: F triple bottom (3 children @ thirds)");
+      }
+      return;
+    }
+    case 8: {
+      static const G2TextChildSpec children[] = {
+        { "title",  "Save changes?", 1, G2_GEOM_TOP_HALF, false },
+        { "btnYes", "Yes",           2, G2_GEOM_QUAD_BL,  false },
+        { "btnNo",  "No",            3, G2_GEOM_QUAD_BR,  false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 3, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: G failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: G title + corners (3 children)");
+      }
+      return;
+    }
+    case 9: {
+      static const G2TextChildSpec children[] = {
+        { "btnYes", "Yes",    1, G2_GEOM_QUAD_TL, false },
+        { "btnNo",  "No",     2, G2_GEOM_QUAD_TR, false },
+        { "btnMay", "Maybe",  3, G2_GEOM_QUAD_BL, false },
+        { "btnCan", "Cancel", 4, G2_GEOM_QUAD_BR, false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 4, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: H failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: H quad 4 buttons (4 children @ all quads)");
+      }
+      return;
+    }
+    case 10: {
+      static constexpr G2ContainerGeom kBtnL = {   8,  56, 280, 224 };
+      static constexpr G2ContainerGeom kBtnR = { 288,  56, 280, 224 };
+      static const G2TextChildSpec children[] = {
+        { "title",  "Confirm action", 1, G2_GEOM_STATUS_BAR, false },
+        { "btnYes", "Yes",            2, kBtnL,              false },
+        { "btnNo",  "No",             3, kBtnR,              false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 3, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: I failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: I header + halves (3 children)");
+      }
+      return;
+    }
+    case 11: {
+      static constexpr G2ContainerGeom kTop = {   8,   8, 560, 80 };
+      static constexpr G2ContainerGeom kMid = {   8,  96, 560, 96 };
+      static constexpr G2ContainerGeom kBot = {   8, 200, 560, 80 };
+      static const G2TextChildSpec children[] = {
+        { "topTxt", "Top strip",     1, kTop, false },
+        { "midTxt", "Middle strip",  2, kMid, false },
+        { "botTxt", "Bottom strip",  3, kBot, false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 3, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: J failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: J stacked strips (3 children)");
+      }
+      return;
+    }
+    case 12: {
+      static const G2TextChildSpec children[] = {
+        { "modal", "OK", 1, G2_GEOM_CENTER_DOT, false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 1, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: K failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: K centered modal (1 child @ CENTER_DOT)");
+      }
+      return;
+    }
+
+    case 13: {
+      // L. Right column — single TextObject at the rightmost 130-px
+      // strip. Lets us confirm whether the firmware honors a high-x
+      // geom or maps everything to the lens center as the user has
+      // observed for QUAD_BL/BR.
+      static const G2TextChildSpec children[] = {
+        { "rightCol", "Right side\nstatus", 1, kRightCol, false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 1, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: L failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: L right column text (130x272 @ x=438)");
+      }
+      return;
+    }
+    case 14:
+      gInDisplayTest = true;
+      g2ShowListPage(rows, 3, kRightCol);
+      DEBUG_G2F("[G2] Selection pattern: M list @ right column (130x272 @ x=438)");
+      return;
+    case 15: {
+      // N. Bottom-edge text strip at y=248 (last 32 px of canvas).
+      // If text-anchor-top-left is the firmware behaviour, content
+      // will appear at the actual bottom of the lens here.
+      static const G2TextChildSpec children[] = {
+        { "btmEdge", "Connected — battery 67%", 1, kBottomEdge, false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 1, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: N failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: N bottom-edge text (560x32 @ y=248)");
+      }
+      return;
+    }
+    case 16: {
+      // O. Bottom-edge buttons at y=248. Two TextObjects, ~280×32 each.
+      static const G2TextChildSpec children[] = {
+        { "btnYes", "Yes", 1, kBottomEdgeL, false },
+        { "btnNo",  "No",  2, kBottomEdgeR, false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 2, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: O failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: O bottom-edge buttons (2 children @ y=248)");
+      }
+      return;
+    }
+    case 17: {
+      // P. Top notification bar — single TextObject at STATUS_BAR
+      // (576×40 @ y=8). A "thin status strip across the top of vision"
+      // canary — the dual of N at the top.
+      static const G2TextChildSpec children[] = {
+        { "topBar", "WiFi up • 192.168.0.36 • 2 peers", 1, G2_GEOM_STATUS_BAR, false },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 1, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: P failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: P top notification bar (576x40 @ y=8)");
+      }
+      return;
+    }
+    case 18: {
+      // Q. eventCapture=1 corners — same geometry as B but with
+      // eventCapture=true on each TextObject. Verified 2026-04-30:
+      // firmware rejects this CREATE with res=1
+      // (CreateInvalidContainer); auto-recovery returns to root
+      // hijack menu. Kept as a regression canary so we notice if
+      // a future firmware drop ever starts accepting it.
+      static const G2TextChildSpec children[] = {
+        { "btnYes", "Yes", 1, G2_GEOM_QUAD_BL, true },
+        { "btnNo",  "No",  2, G2_GEOM_QUAD_BR, true },
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMultiTextPage(children, 2, displayTestExitToPicker)) {
+        DEBUG_G2F("[G2] Selection pattern: Q failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: Q eventCapture=1 corners — tap each button and watch log");
+      }
+      return;
+    }
+    case 19: {
+      // R. Title + 2-row list — TextObject header above ListObject.
+      // The list manages focus + scroll + CLICK natively, so this
+      // page is FULLY interactive: scroll up/down to change focused
+      // row, single tap to select. On tap the ListEvent CLICK reaches
+      // the dispatcher with the row index — we just log "Hijack tap:
+      // item N" here since we don't act on the choice. Use this
+      // pattern for real prompts.
+      static const char* listItems[] = { "<- Back", "Yes", "No" };
+      static const G2TextChildSpec title = {
+        "title", "Save changes?", 99, kTitleStrip, false
+      };
+      gInDisplayTest = true;
+      if (!g2ShowMixedListText(listItems, 3, kListBelowTitle, title)) {
+        DEBUG_G2F("[G2] Selection pattern: R failed to spawn worker");
+        gInDisplayTest = false;
+      } else {
+        DEBUG_G2F("[G2] Selection pattern: R title + 2-row list (TextObject + ListObject)");
+      }
+      return;
+    }
+
+    case 20: {
+      // S. REBUILD-text child probe — replaces the retired dual-pane
+      // CREATE experiment (closed 2026-04-30, see G2_PROTOCOL.md:
+      // ContainerName is not a multiplexer, second CREATE silently
+      // dropped + SYSTEM_EXIT). Now answers the next question: in
+      // a compound list+text container, does REBUILD-text targeting
+      // the child name only update that child? Probe runs on a
+      // worker task (synchronous ack-waits would deadlock the notify
+      // task) — same pattern as the image probes.
+      DEBUG_G2F("[G2] Selection pattern: S REBUILD-text child probe — spawning worker");
+      if (!spawnImgProbeWorker(g2ProbeRebuildTextChild)) {
+        DEBUG_G2F("[G2] Selection pattern: S failed to spawn worker");
+      }
+      // Don't set gInDisplayTest — the probe owns the lens for ~6 s
+      // then hands control back via the worker's picker rebuild.
+      return;
+    }
+
+    default:
+      DEBUG_G2F("[G2] Selection pattern: idx=%u out of range", (unsigned)idx);
+      return;
+  }
 }
 
 // DISPLAY/TEXT and DISPLAY/LIST share the same kGeomVariants table;
@@ -855,6 +1380,18 @@ static void displayTestExitToPicker() {
     case TEST_LEVEL_DISPLAY_TEXT:
     case TEST_LEVEL_DISPLAY_LIST:
       n = buildGeomVariantRows();
+      break;
+    case TEST_LEVEL_DISPLAY_SELECTION:
+      n = buildSelectionRows();
+      break;
+    case TEST_LEVEL_DISPLAY_SELECT_LISTS:
+      n = buildSelectionListsRows();
+      break;
+    case TEST_LEVEL_DISPLAY_SELECT_MIXED:
+      n = buildSelectionMixedRows();
+      break;
+    case TEST_LEVEL_DISPLAY_SELECT_EDGES:
+      n = buildSelectionEdgesRows();
       break;
     default:
       gTestLevel = TEST_LEVEL_DISPLAY;
@@ -1091,6 +1628,58 @@ static size_t buildPayloadRows(size_t targetBytes) {
   return row;
 }
 
+// Text-blob payload buffer — sized to the largest bracket. Lives in
+// PSRAM so the 8 KB cap doesn't eat DRAM. g2ShowTextPage heap-copies
+// the content, so this buffer is reused for every text bracket tap.
+EXT_RAM_BSS_ATTR static char gTextBlob[8200];
+
+// Build a multi-line text blob whose total length approximates
+// `targetBytes` (the rendered string, before pb encoding). Lines are
+// 64 chars wide so the firmware's TextObject auto-wrap behaviour is
+// less in play — we want to exercise transport size, not wrapping.
+// Returns the actual length written (including a leading "[N B test]"
+// banner and trailing "[end N B]" sentinel so the operator can confirm
+// the head and tail both made it through reassembly).
+static size_t buildPayloadTextBlob(size_t targetBytes) {
+  const size_t cap = sizeof(gTextBlob);
+  if (cap == 0) return 0;
+  gTextBlob[0] = '\0';
+
+  size_t pos = 0;
+  pos += (size_t)snprintf(gTextBlob + pos, cap - pos,
+                          "[%u B test]\n", (unsigned)targetBytes);
+
+  const size_t srcLen   = sizeof(kSourceText) - 1;
+  const size_t lineLen  = 64;
+  const char* sentinelFmt = "\n[end %u B]";
+  // Reserve room for sentinel + NUL.
+  const size_t sentinelMax = 32;
+  const size_t hardCap     = (cap > sentinelMax) ? cap - sentinelMax : cap;
+
+  size_t srcOff = 0;
+  while (pos + lineLen + 1 < hardCap) {
+    const size_t budgetLeft = (targetBytes > pos) ? (targetBytes - pos) : 0;
+    if (budgetLeft <= 1) break;
+    const size_t take = (budgetLeft < lineLen) ? budgetLeft : lineLen;
+    for (size_t i = 0; i < take; i++) {
+      gTextBlob[pos + i] = kSourceText[(srcOff + i) % srcLen];
+    }
+    pos += take;
+    if (pos < hardCap) gTextBlob[pos++] = '\n';
+    srcOff += take;
+  }
+
+  pos += (size_t)snprintf(gTextBlob + pos, cap - pos,
+                          sentinelFmt, (unsigned)targetBytes);
+  if (pos >= cap) pos = cap - 1;
+  gTextBlob[pos] = '\0';
+  return pos;
+}
+
+// Forward decl — defined in the dispatcher block below. The text-mode
+// payload's exit handler returns the operator to the brackets list.
+static void payloadTextExitToBrackets();
+
 // -----------------------------------------------------------------------------
 // Public — text-mode info dump (CLI direct invocation path)
 // -----------------------------------------------------------------------------
@@ -1178,6 +1767,16 @@ void g2ShowTestSuiteMenu() {
   } else {
     DEBUG_G2F("[G2] Test suite menu: g2ShowListPage failed");
   }
+}
+
+// Text-widget exit handler for the size-bracket payload tests. Wired
+// as g2ShowTextPage's exitFn so the user's dismiss gesture (double-
+// click on the lens, or DOUBLE_CLICK SysEvent from the ring) drops
+// straight back to the brackets list rather than the main hijack menu.
+static void payloadTextExitToBrackets() {
+  gTestLevel = TEST_LEVEL_BRACKETS;
+  size_t n = buildBracketsRows();
+  g2ShowListPage(gRowPtrs, n);
 }
 
 // -----------------------------------------------------------------------------
@@ -1272,6 +1871,11 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         case 3:
           gTestLevel = TEST_LEVEL_DISPLAY_COMBO;
           n = buildDisplayComboRows();
+          break;
+        case 4:
+          gTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
+          gInDisplayTest = false;
+          n = buildSelectionRows();
           break;
         default:
           DEBUG_G2F("[G2] Test suite DISPLAY: tap idx=%u out of range",
@@ -1372,6 +1976,132 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       return;
     }
 
+    case TEST_LEVEL_DISPLAY_SELECTION: {
+      // Top picker — 3 sub-buckets (Lists / Compound / Edges). No
+      // patterns fire from here; each row drills into a sub-list whose
+      // dispatcher case actually runs the tests.
+      //
+      // Splitting up was forced by firmware 2.2.0.24's inability to
+      // reassemble 3-fragment CREATE-list payloads — at 21+ rows the
+      // protobuf overflowed two MTU fragments and the container never
+      // primed.
+      if (idx == 0) {
+        gTestLevel = TEST_LEVEL_DISPLAY;
+        size_t n = buildDisplayRows();
+        g2ShowListPage(gRowPtrs, n);
+        return;
+      }
+      size_t n = 0;
+      switch (idx) {
+        case 1:
+          gTestLevel = TEST_LEVEL_DISPLAY_SELECT_LISTS;
+          gInDisplayTest = false;
+          n = buildSelectionListsRows();
+          break;
+        case 2:
+          gTestLevel = TEST_LEVEL_DISPLAY_SELECT_MIXED;
+          gInDisplayTest = false;
+          n = buildSelectionMixedRows();
+          break;
+        case 3:
+          gTestLevel = TEST_LEVEL_DISPLAY_SELECT_EDGES;
+          gInDisplayTest = false;
+          n = buildSelectionEdgesRows();
+          break;
+        default:
+          DEBUG_G2F("[G2] Test suite SELECTION: tap idx=%u out of range",
+                    (unsigned)idx);
+          return;
+      }
+      g2ShowListPage(gRowPtrs, n);
+      return;
+    }
+
+    case TEST_LEVEL_DISPLAY_SELECT_LISTS: {
+      // Bucket 1 — native ListObject geom variants (4 entries).
+      // Local idx 1..4 maps directly to flat runSelectionPattern
+      // indices 0..3 (offset = -1).
+      if (idx == 0) {
+        if (gInDisplayTest) {
+          displayTestExitToPicker();
+        } else {
+          gTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
+          size_t n = buildSelectionRows();
+          g2ShowListPage(gRowPtrs, n);
+        }
+        return;
+      }
+      if (gInDisplayTest) {
+        // Tap on Yes/No while pattern is shown — exit demo.
+        displayTestExitToPicker();
+        return;
+      }
+      const size_t local = idx - 1;
+      if (local >= 4) {
+        DEBUG_G2F("[G2] Test suite SELECT/LISTS: tap idx=%u out of range",
+                  (unsigned)idx);
+        return;
+      }
+      runSelectionPattern(local);  // flat 0..3
+      return;
+    }
+
+    case TEST_LEVEL_DISPLAY_SELECT_MIXED: {
+      // Bucket 2 — compound TextObject CREATEs (9 entries).
+      // Local idx 1..9 maps to flat runSelectionPattern indices
+      // 4..12 (offset = +3).
+      if (idx == 0) {
+        if (gInDisplayTest) {
+          displayTestExitToPicker();
+        } else {
+          gTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
+          size_t n = buildSelectionRows();
+          g2ShowListPage(gRowPtrs, n);
+        }
+        return;
+      }
+      if (gInDisplayTest) {
+        displayTestExitToPicker();
+        return;
+      }
+      const size_t local = idx - 1;
+      if (local >= 9) {
+        DEBUG_G2F("[G2] Test suite SELECT/MIXED: tap idx=%u out of range",
+                  (unsigned)idx);
+        return;
+      }
+      runSelectionPattern(local + 4);  // flat 4..12
+      return;
+    }
+
+    case TEST_LEVEL_DISPLAY_SELECT_EDGES: {
+      // Bucket 3 — edge-anchored geoms + selectability canaries
+      // (8 entries: L–S). Local idx 1..8 maps to flat
+      // runSelectionPattern indices 13..20 (offset = +12).
+      if (idx == 0) {
+        if (gInDisplayTest) {
+          displayTestExitToPicker();
+        } else {
+          gTestLevel = TEST_LEVEL_DISPLAY_SELECTION;
+          size_t n = buildSelectionRows();
+          g2ShowListPage(gRowPtrs, n);
+        }
+        return;
+      }
+      if (gInDisplayTest) {
+        displayTestExitToPicker();
+        return;
+      }
+      const size_t local = idx - 1;
+      if (local >= 8) {
+        DEBUG_G2F("[G2] Test suite SELECT/EDGES: tap idx=%u out of range",
+                  (unsigned)idx);
+        return;
+      }
+      runSelectionPattern(local + 13);  // flat 13..20
+      return;
+    }
+
     case TEST_LEVEL_IMAGE: {
       // Parent router: 3 sub-levels (Confirmed, Static, Streaming).
       // Tapping anything else is a misuse — we don't fire probes from
@@ -1436,6 +2166,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         case 1: fn = g2ProbeImageQ9FrameBuilder; break;
         case 2: fn = g2ProbeImageQGlizzy;        break;
         case 3: fn = g2ProbeImageQ12FullScreen;  break;
+        case 4: fn = g2ProbeImageQ19SmallSolo;   break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE/Static: tap idx=%u out of range",
                     (unsigned)idx);
@@ -1715,8 +2446,61 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         return;
       }
       const TestBracket& b = kBrackets[pos];
+      if (b.kind == TBK_TEXT_REBUILD) {
+        // CREATE-text with a 1-fragment placeholder, then REBUILD-text
+        // the actual blob. Logs report whether the REBUILD acks at
+        // sizes where the equivalent (T) bracket's CREATE-text fails.
+        const size_t blobLen = buildPayloadTextBlob(b.bytes);
+        DEBUG_G2F("[G2] Test suite: rendering %s (text-rebuild probe, "
+                  "blob=%u B, target=%u B)",
+                  b.label, (unsigned)blobLen, (unsigned)b.bytes);
+        if (!g2ShowTextPageRebuildProbe("Loading...", gTextBlob,
+                                        G2_GEOM_LARGE,
+                                        &payloadTextExitToBrackets)) {
+          DEBUG_G2F("[G2] Test suite: g2ShowTextPageRebuildProbe failed for %s",
+                    b.label);
+          gTestLevel = TEST_LEVEL_BRACKETS;
+          size_t bn = buildBracketsRows();
+          g2ShowListPage(gRowPtrs, bn);
+        }
+        return;
+      }
+      if (b.kind == TBK_TEXT || b.kind == TBK_TEXT_SLOW) {
+        // Text-widget bracket: build a multi-line content string and
+        // ship it via g2ShowTextPage (single TextObject, content = the
+        // blob). g2ShowTextPage heap-copies the string so gTextBlob can
+        // be reused on the next tap. The exit handler returns to the
+        // brackets list — no TEST_LEVEL_PAYLOAD transition needed
+        // because text-widget exit is gesture-based, not row-tap.
+        //
+        // T-slow variant: arm a 100 ms inter-fragment delay for the
+        // next sendPbFragmented call (which will be the CREATE-text
+        // for this page). The override is one-shot and consumed by
+        // the burst that immediately follows g2ShowTextPage's worker
+        // SHUTDOWN, so it doesn't bleed into post-dismiss page-swap.
+        const size_t blobLen = buildPayloadTextBlob(b.bytes);
+        if (b.kind == TBK_TEXT_SLOW) {
+          g2DebugSetNextBurstFragDelay(100);
+        }
+        DEBUG_G2F("[G2] Test suite: rendering %s (text-widget%s, "
+                  "blob=%u B, target=%u B)",
+                  b.label,
+                  b.kind == TBK_TEXT_SLOW ? ", 100 ms inter-frag" : "",
+                  (unsigned)blobLen, (unsigned)b.bytes);
+        if (!g2ShowTextPage(gTextBlob, G2_GEOM_LARGE,
+                            &payloadTextExitToBrackets, nullptr)) {
+          DEBUG_G2F("[G2] Test suite: g2ShowTextPage failed for %s",
+                    b.label);
+          gTestLevel = TEST_LEVEL_BRACKETS;
+          size_t bn = buildBracketsRows();
+          g2ShowListPage(gRowPtrs, bn);
+        }
+        return;
+      }
+      // Default: list-widget bracket (legacy path).
       size_t n = buildPayloadRows(b.bytes);
-      DEBUG_G2F("[G2] Test suite: rendering %s (rows=%u, target=%u B)",
+      DEBUG_G2F("[G2] Test suite: rendering %s (list-widget, "
+                "rows=%u, target=%u B)",
                 b.label, (unsigned)n, (unsigned)b.bytes);
       gTestLevel = TEST_LEVEL_PAYLOAD;
       if (!g2ShowListPage(gRowPtrs, n)) {
@@ -1751,76 +2535,6 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 // -----------------------------------------------------------------------------
 // Action handlers
 // -----------------------------------------------------------------------------
-
-static void actionReconnectRing() {
-  // Heap-low guard. Arduino BLE leaks ~30 KB per server↔client
-  // reconnect cycle, so a long session that's already cycled the BLE
-  // stack a few times can run DRAM down to single-digit KB. If we
-  // spawn the ring connect task AND the page-swap-worker
-  // back-to-back when the budget is tight, the second xTaskCreate
-  // fails and a few seconds later the BLE stack asserts-and-reboots
-  // when its own internal queue-send hits a half-allocated structure.
-  // Observed 2026-04-25: heap=2591 right before the cascade.
-  //
-  // 16 KB is "enough for both tasks plus pb buffer plus a margin."
-  // If we're below that, abort with a clear log and skip the action;
-  // user can hit Re-open Hijack from web UI, which doesn't allocate
-  // as much.
-  const uint32_t freeNow = ESP.getFreeHeap();
-  if (freeNow < 16 * 1024) {
-    DEBUG_G2F("[G2] Reconnect Ring: ABORTED — DRAM free %u B < 16 KB safety "
-              "threshold. Reboot or disconnect/reconnect via web UI to "
-              "recover heap (Arduino BLE leak per reconnect cycle is the "
-              "usual cause).",
-              (unsigned)freeNow);
-    return;
-  }
-
-  // Force-disconnect first to give the BLE stack a clean slate.
-  const bool wasUp = g2RingIsConnected();
-  if (wasUp) {
-    DEBUG_G2F("[G2] Reconnect Ring: dropping current connection first "
-              "(heap=%u)", (unsigned)freeNow);
-    g2RingDisconnect();
-    vTaskDelay(pdMS_TO_TICKS(500));
-  } else {
-    DEBUG_G2F("[G2] Reconnect Ring: ring already disconnected, "
-              "skipping disconnect step (heap=%u)", (unsigned)freeNow);
-  }
-
-  if (g2RingConnect()) {
-    DEBUG_G2F("[G2] Reconnect Ring: connect task started — "
-              "watch ringstatus for completion");
-  } else {
-    DEBUG_G2F("[G2] Reconnect Ring: g2RingConnect() returned false — "
-              "run a Temples Scan first to populate ring advertisement");
-  }
-
-  // Skip the menu redraw on purpose. Re-rendering the actions menu
-  // here means a SHUTDOWN+CREATE-list page swap (4 KB worker stack,
-  // 8 KB pb buffer) RIGHT after we already spent some heap on the
-  // ring connect task. That's exactly the back-to-back allocation
-  // pattern that triggered the heap-exhaustion crash before this
-  // guard was added. The user just tapped a row — the lens still
-  // shows the actions menu (we never tore it down), so there's
-  // nothing to redraw. The action's outcome surfaces in serial
-  // and via the web UI's ring-status panel.
-}
-
-// Force-disconnect the ring without re-connecting. The half-step that
-// Reconnect-Ring does first; useful when the next op (e.g. a Temples
-// Scan from the web UI) will re-trigger connect itself, or for
-// isolating disconnect-side bugs. No heap guard — disconnect doesn't
-// allocate; only connect does.
-static void actionDisconnectRing() {
-  if (!g2RingIsConnected()) {
-    DEBUG_G2F("[G2] Disconnect Ring: already disconnected — no-op");
-    return;
-  }
-  DEBUG_G2F("[G2] Disconnect Ring: dropping connection (heap=%u)",
-            (unsigned)ESP.getFreeHeap());
-  g2RingDisconnect();
-}
 
 // Force-dismiss the front-pane EvenAI card. Card normally auto-
 // dismisses after ~10 s but a stuck card (firmware-side) blocks

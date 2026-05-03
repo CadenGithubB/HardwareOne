@@ -10,8 +10,8 @@
  * - Sensor data notifications (push model)
  */
 
-#include "Optional_Bluetooth.h"
-#include "Optional_EvenG2.h"  // Header provides stubs when ENABLE_G2_GLASSES=0, so blemode CLI compiles either way
+#include "Bluetooth.h"
+#include "G2_Glasses.h"  // Header provides stubs when ENABLE_G2_GLASSES=0, so blemode CLI compiles either way
 #include "System_Utils.h"
 #include "BLE_Peers.h"        // peer registry + cmd_bleautoconnect / cmd_blepeers
 
@@ -1610,10 +1610,10 @@ const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoo
 // (see below) so they stay in sync with BLE_Peers.h's BlePeerKind enum. The
 // static rows here cover only the non-peer bluetooth settings.
 const SettingEntry bluetoothSettingsEntries[] = {
-  { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bluetoothAutoStart,    true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr },
-  { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr },
+  { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bluetoothAutoStart,    true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "bleautostart" },
+  { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
   { "bluetoothDeviceName",   SETTING_STRING, &gSettings.bleDeviceName,         true, 0, nullptr, 0, 0, "Device Name", nullptr },
-  { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            true, 3, nullptr, 0, 7, "TX Power (0-7)", nullptr },
+  { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            true, 3, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
   { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", nullptr, false, nullptr, "blemode" }
 };
 
@@ -1767,7 +1767,7 @@ static void bluetoothToggleConfirmedMenu(void* userData) {
 }
 
 #if ENABLE_G2_GLASSES
-#include "Optional_EvenG2.h"
+#include "G2_Glasses.h"
 
 // G2 text input buffer for Show Text feature
 static char g2TextInputBuffer[64] = "Hello from ESP32!";
@@ -2245,7 +2245,7 @@ REGISTER_OLED_MODE_MODULE(bluetoothOLEDModes, sizeof(bluetoothOLEDModes) / sizeo
 #endif // ENABLE_OLED_DISPLAY
 
 // ============================================================================
-// Bluetooth Streaming Extensions (merged from Optional_Bluetooth_Streaming.cpp)
+// Bluetooth Streaming Extensions (merged from Bluetooth_Streaming.cpp)
 // ============================================================================
 // Data Pipeline and Event System - provides continuous data streaming and 
 // event notifications over BLE.

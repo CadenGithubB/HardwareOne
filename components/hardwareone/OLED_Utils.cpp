@@ -2,7 +2,7 @@
 #include "OLED_Display.h"
 #include <esp_app_desc.h>
 #include "OLED_UI.h"
-#include "Optional_Bluetooth.h"
+#include "Bluetooth.h"
 #include "System_Battery.h"
 #include "System_BuildConfig.h"
 #include "System_Command.h"
@@ -2069,7 +2069,7 @@ uint32_t OLEDConsoleBuffer::getTimestamp(int index) const {
 #include "System_User.h"
 
 #if ENABLE_BLUETOOTH
-#include "Optional_Bluetooth.h"
+#include "Bluetooth.h"
 #endif
 
 #if ENABLE_HTTP_SERVER

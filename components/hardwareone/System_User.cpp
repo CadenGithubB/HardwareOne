@@ -18,7 +18,7 @@
 #include "System_Logging.h" // For log file paths and constants
 #include "System_Filesystem.h"    // For writeText, readText
 #include "System_Settings.h"
-#include "Optional_Bluetooth.h"
+#include "Bluetooth.h"
 #include "OLED_Display.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>

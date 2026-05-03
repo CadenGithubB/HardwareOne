@@ -273,9 +273,9 @@ static void buildSubmenuForModule(const char* moduleName, bool isRemote) {
   gSubmenuScrollOffset = 0;
   
   const int maxItems = 24;
-  gSubmenuItems = (UnifiedMenuItem*)malloc(sizeof(UnifiedMenuItem) * maxItems);
+  gSubmenuItems = (UnifiedMenuItem*)ps_calloc(maxItems, sizeof(UnifiedMenuItem),
+                                              AllocPref::PreferPSRAM, "unifiedmenu.sub");
   if (!gSubmenuItems) return;
-  memset(gSubmenuItems, 0, sizeof(UnifiedMenuItem) * maxItems);
   
   int count = 0;
   
@@ -330,10 +330,9 @@ static void buildUnifiedMenu() {
   
   // Allocate space for menu items
   const int maxItems = 32;
-  gUnifiedMenuItems = (UnifiedMenuItem*)malloc(sizeof(UnifiedMenuItem) * maxItems);
+  gUnifiedMenuItems = (UnifiedMenuItem*)ps_calloc(maxItems, sizeof(UnifiedMenuItem),
+                                                  AllocPref::PreferPSRAM, "unifiedmenu.main");
   if (!gUnifiedMenuItems) return;
-  
-  memset(gUnifiedMenuItems, 0, sizeof(UnifiedMenuItem) * maxItems);
   
   int count = 0;
   

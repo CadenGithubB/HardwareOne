@@ -155,6 +155,11 @@
 // BLE radio and the devices it talks to over GATT.
 
 // Bluetooth: BLE server with GATT services. Required for G2 Glasses below.
+//
+// **NB:** this flag only gates OUR application code. To actually free the
+// ~14 KB IRAM + ~70 KB flash + ~80 KB DRAM that the ESP-IDF Bluedroid
+// stack consumes, you also need `CONFIG_BT_ENABLED=n` in sdkconfig.
+// (Both flags are kept in sync below — see sdkconfig.defaults.)
 #define ENABLE_BLUETOOTH        1
 
 // Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses.

@@ -41,7 +41,7 @@
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
-#include "Optional_EvenG2.h"
+#include "G2_Glasses.h"
 #include "System_Settings.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"   // PSRAM_JSON_DOC
@@ -288,7 +288,7 @@ static size_t buildEntryRowsPretty(int moduleIdx) {
 // Exit is handled by `gTextViewExitFn` (registered when we call
 // g2ShowTextPage) — the next user-input event after the page renders
 // returns the user to the module list. See
-// Optional_EvenG2.cpp:dispatchEventPayload for the fallback path and
+// G2_Glasses.cpp:dispatchEventPayload for the fallback path and
 // the TextEvent CLICK handler in handleDevEvent for the cleaner
 // firmware-cooperates path.
 
@@ -345,7 +345,7 @@ static void rebuildAndShowModuleList() {
   }
 }
 
-// Fallback exit invoked by Optional_EvenG2.cpp's user-input handlers.
+// Fallback exit invoked by G2_Glasses.cpp's user-input handlers.
 // Tears down whatever's on the lens and re-CREATEs the module list
 // (LIST widget) so the user lands back where they started. Also clears
 // the page cache so the next drill-in builds fresh content (settings

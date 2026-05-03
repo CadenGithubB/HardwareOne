@@ -4,8 +4,9 @@ Notes accumulated while bringing up the G2 integration in this repo. Facts
 here were verified either against a real pair of G2 glasses over BLE or by
 reading the source of https://github.com/Commute773/g2-kit-unofficial (MIT,
 TypeScript). Things flagged "reference" come from that repo; things flagged
-"observed" came from live traffic against pair `Even G2_32_L_4F5AA0` /
-`Even G2_32_R_009769`.
+"observed" came from live traffic against a development G2 pair (the
+actual MAC-derived name suffixes are scrubbed from this doc — names
+match the regex below).
 
 ## Naming note
 
@@ -36,7 +37,8 @@ the firmware identifiers verbatim (`EvenHub_Cmd_List`, `evenhub_main_msg_ctx`,
 ## BLE advert / name
 
 - Name regex: `/(Even )?G\d+_\d+_[LR]_/`
-  - e.g. `Even G2_32_L_4F5AA0`, `Even G2_32_R_009769`
+  - e.g. `Even G2_32_L_XXXXXX`, `Even G2_32_R_XXXXXX` (suffix = last 6
+    hex of the temple's BLE MAC)
 - The `Even ` prefix may or may not be present — match both.
 - The pair ID (between the version and `L`/`R`) can be short (observed "32").
 - Use **active scan with duplicates enabled** — the name often arrives in the
@@ -473,14 +475,47 @@ inter-fragment delay):
 
 So the streaming pipeline saves ~100 ms per frame vs the full
 SHUTDOWN/CREATE/PUSH cycle, not the seconds we'd hoped for. The
-real bottleneck is per-fragment ack pacing — which the discord
-"4-tile sync trick" is supposed to compress (untested by us yet).
+real bottleneck is per-fragment ack pacing — see windowing below.
 
-Implication for feature code: a "live HUD" that pushes a fresh
-frame every ~3 s is feasible (~0.4 FPS). Anything snappier needs
-the pipelining trick or smaller-than-tile updates (which the
-firmware doesn't support — see "Render only fires when BMP
-dimensions match container dimensions" above).
+#### Windowed Cmd=3 (in-flight > 1)
+
+Confirmed 2026-05-01 against the camera stream worker: firmware
+accepts multiple unacked fragments in flight on a single Cmd=3
+session. With `kImgFragGapMs=30` and `kImgInFlightCap=3`, the
+host pipelines so frag N+1 starts before ack[N] arrives:
+
+| `kImgFragGapMs` | Push time (21 KB BMP) | In-flight peak | fps |
+|---|---|---|---|
+| 100 (default) | 2.66 s | 1 (serial) | 0.37 |
+| 35 | 2.22 s | 2 | 0.43 |
+| 30 (current) | ~2.16 s | 2 | ~0.45 |
+
+In-flight peak rarely reaches 3 because ack RTT (~70 ms) is much
+shorter than per-fragment send time (~280 ms × 14 BLE writes at
+the 15 ms connection interval) — by the time we'd ship frag N+2,
+ack[N] has long since arrived. The cap=3 is a safety margin for
+transient ack lag, not the steady-state target.
+
+**Cross-implementation comparison:**
+
+| Repo | Gap | Window | Ack handling |
+|---|---|---|---|
+| ours (this repo) | 30 ms | cap=3 (peaks at 2) | abort on stuck-throttle (>7 s no progress) |
+| g2-kit-unofficial | none | window=4 | tolerate up to 3 consecutive missed acks |
+| MentraOS | 200 ms fixed | none | fire-and-forget, no ack tracking |
+| EvenDemoApp | 5–8 ms | none | single end-of-burst ack |
+
+Practical ceiling on this BLE link is ~8.8 KB/s sustained per
+g2-kit's published number; we're at ~7.9 KB/s, within 10% of
+that. To go meaningfully faster requires either a smaller payload
+(half-tile = ~half the time), a different PHY (2M, untested with
+G2 firmware), or partial / dirty-region updates (architectural
+change — only retransmit changed tiles, like g2-kit's "8-tile"
+pattern).
+
+Implication for feature code: ~0.45 FPS for a full 21 KB BMP push
+is the realistic ceiling for this implementation. Anything
+snappier needs payload-side changes.
 
 #### BLE write transient — `esp_ble_gattc_write_char rc=-1`
 
@@ -831,7 +866,7 @@ the glasses become the BLE relay for ring events, and 2.2.0.242 sends
 them on the right temple specifically. If a cmd=3 frame ever shows up
 on the LEFT temple, that's either a fallback channel or a firmware
 behaviour change worth investigating — the dispatcher in
-`Optional_EvenG2.cpp` logs a `[G2] !!! GESTURE on LEFT temple` banner
+`G2_Glasses.cpp` logs a `[G2] !!! GESTURE on LEFT temple` banner
 plus a frame ring-dump if it ever happens.
 
 ### Notify channel topology on firmware 2.2.0.24 — right-only
@@ -1047,6 +1082,27 @@ as the standard `f1=1, codes={4,5}` form — so an "enter" reports
 asymmetrically. Useful as a "user is currently inside firmware-owned
 detail panel" hint if we ever want to suppress our own pushes while
 the firmware foreground is busy.
+
+### Observed but unclassified (single samples)
+
+Logged here so we can recognise them if they recur. Each is **a single
+observation** from one capture (2026-05-01, idle-then-engage on the
+right temple after the lens menu had been closed for ~2.5 min) — do
+**not** treat as confirmed mappings.
+
+- **`sid=0x01 GESTURE cmd=3` inner `codes={3,4}`.** Counters 1293–1298
+  fired in a quick burst after a long idle window, with no widget
+  hijack active. Doesn't match the documented `{0,1}`/`{1,2}`
+  (dashboard nav) or `{4,5}` (notification panel) pairs. Plausibly a
+  wake-from-idle swipe or a temple-input gesture distinct from
+  list-nav, but a single trace can't pin it down.
+- **`sid=0x0D USER_ACTIVITY 8B src=33` (0x21).** Fired ~6 s after the
+  burst above, no preceding cmd=3 in the immediate 200 ms window. The
+  documented `EventSourceType` enum tops out at 4 (notification
+  panel); 33 is well outside that range and may be a different field
+  (subsystem id? sensor id?) being repurposed in the same wire slot,
+  rather than an "extension" of the source enum. Hold off on adding
+  to the canonical src table until a second sighting confirms shape.
 
 ## Audio (sid=0xE0 Cmd=15, render notify 6402)
 
@@ -1744,7 +1800,7 @@ fast path** for in-place item swaps:
 
 The `g2listrebuild` CLI toggle defaults ON; it's exposed as a runtime
 kill-switch in case a future firmware regresses. Runtime helper:
-`sendRebuildListAndWait()` in `Optional_EvenG2.cpp` mirrors the CREATE
+`sendRebuildListAndWait()` in `G2_Glasses.cpp` mirrors the CREATE
 ack path with its own semaphore (`gRebuildAckSem`) keyed on
 `G2_MAGIC_REBUILD = 202`.
 
@@ -1779,7 +1835,7 @@ race between two REBUILD streams targeting the same widget.
 `f3=TextObject`, `f4=ImageObject` (each repeated). Until 2026-04-27 we'd
 only ever shipped CREATE envelopes containing a single widget type;
 empirical sweep that day (probes Q16/Q17/Q18 in
-[Optional_EvenG2.cpp](components/hardwareone/Optional_EvenG2.cpp))
+[G2_Glasses.cpp](components/hardwareone/G2_Glasses.cpp))
 confirmed the firmware accepts mixed declarations on **firmware 2.2.0.24**:
 
 | Probe | Geometry | Result |
@@ -1793,6 +1849,40 @@ Findings:
 - **One CREATE, multiple widget types** — no need to issue separate
   envelopes per widget. Build `f1=N`, then emit one `f2`/`f3`/`f4`
   per widget; firmware sets them up atomically.
+- **Multiple TextObjects in one CREATE** — verified 2026-04-30 with
+  the Tests/Display/Selection Patterns bench. Compound CREATEs with
+  1, 2, 3, and 4 repeated `f3=TextObject` children all return
+  `CreateResp res=0` and render simultaneously on firmware 2.2.0.24.
+  The g2-kit-unofficial reference doesn't ship this shape but the
+  schema and firmware support it. Each child needs a distinct
+  `ContainerId` (we use 1..N). One common use: `g2BuildCreateMixedListText`
+  ships a ListObject (selectable) + a TextObject header in one
+  CREATE — the canonical "title + selectable list" prompt shape.
+- **TextObject content anchors top-left of its bounding box.** A box
+  at `QUAD_BL = {8, 144, 280, 136}` paints "Yes" near `(8, 144)` —
+  the vertical *middle* of the 288 px canvas, not the bottom edge.
+  To put text at the actual bottom edge of the lens, use a thin
+  geom anchored low (e.g. `{8, 248, 560, 32}`). The Selection
+  Patterns bench's `N`/`O`/`P` tests demonstrate edge-anchored
+  layouts.
+- **TextObject children are not natively tappable, and
+  `eventCapture=1` on a TextObject is actively rejected by the
+  firmware.** Verified 2026-04-30 via Selection Patterns test Q
+  (same geometry as test B but with `eventCapture=true` on each
+  child): identical CREATE except for the eventCapture byte
+  returned `CreateResp res=1 (CreateInvalidContainer)` and the
+  whole page failed to spawn. So this isn't merely "ignored" —
+  the field flips the CREATE from accepted to rejected. The
+  reference comments this as "we don't tap text areas" and the
+  firmware enforces it. For genuinely selectable rows in a
+  compound page, pair the TextObject (header / title) with a
+  ListObject (rows) — the firmware natively manages focus,
+  scroll, and `ListEvent CLICK` with the row index for the list.
+  Verified end-to-end with test R (`g2BuildCreateMixedListText`):
+  TextObject "Save changes?" at the top + ListObject {Back, Yes,
+  No} below renders as a single CREATE with full scroll + tap
+  routing on the list rows. **This is the canonical recipe for an
+  on-lens prompt with a static title.**
 - **Z-order: image > list.** When containers overlap, the image widget
   paints on top of the list widget. Useful for icon overlays on a
   text menu, less useful if you want the list visible underneath —
@@ -1808,11 +1898,99 @@ Findings:
   ~5-row list plus one image fits comfortably. Larger lists (≥10 rows
   with long strings) may exceed the budget — split into separate
   CREATE+CREATE if needed (untested).
+- **Single container per widget instance — `ContainerName` is NOT a
+  multiplexer.** Verified 2026-04-30 via the dual-pane CREATE probe
+  (test S, since retired): with one CREATE-list `paneL` already live,
+  a second CREATE-text `paneR` (different `ContainerName`, same
+  `WidgetID`) is **silently dropped** — no `CreateResp` at all, our
+  1.5 s wait times out — and ~2 s later the firmware fires
+  `SysEvent SYSTEM_EXIT reason=1` to actively tear down the widget,
+  putting "Connection lost" on the lens. Reproducible across attempts.
+  The second CREATE isn't merely refused; it's punished. Implication:
+  for "list pane + detail pane" UX you cannot use two parallel
+  containers. Use a compound CREATE (`g2BuildCreateMixedListText` —
+  single container hosting both ListObject and TextObject children
+  with distinct child `ContainerName`s) and rebuild a single child
+  via `Cmd=7 REBUILD_PAGE` targeting that child's name. The
+  `ContainerName` field is widget-internal scope: it identifies a
+  child *inside* a single live container, not a peer container.
+  See the per-child REBUILD asymmetry note below — the per-child
+  shape works for list+text but blanks the other child on a
+  text+text compound.
+- **`REBUILD_PAGE` on a compound — single vs. multi-child have
+  different semantics.** Verified 2026-04-30 on firmware 2.2.0.24:
+    - **Single-child REBUILD-text** (`f1=ContainerTotalNum=1` + one
+      named TextObject child): patches that child in place. Other
+      children of the compound — even those of *different* widget
+      types — are NOT disturbed. Confirmed by
+      `g2ProbeRebuildTextChild` on a list+text compound: rebuilding
+      the text child by name updates its content, list keeps its
+      rows / focus / event-capture wiring intact.
+    - **Multi-child REBUILD** (`f1=N>1` + N children, even of mixed
+      widget types): the firmware treats this as a *replace* of the
+      current child set with the message's child set. **Any child
+      not explicitly named in the multi-child REBUILD goes dark.**
+      Reproducible:
+        - 2× TextObject compound, single-child REBUILD-text → blanks
+          the other text (bug we initially attributed to siblings of
+          the same type, but it's actually the multi-child semantic
+          firing because the first single-child REBUILD-text on a
+          two-text compound *is* counted as a "selective" REBUILD
+          missing the other; then on subsequent ticks blanking
+          accumulates).
+        - 1 List + 3 Text compound, multi-child REBUILD with just the
+          3 texts → list disappears on the first tick (verified with
+          Status' back-row compound).
+    - **Recipe for keeping every child alive across REBUILDs**: send
+      ALL children of the compound in every multi-child REBUILD
+      message. Don't try to "REBUILD just the subset that changed"
+      — the firmware will blank the unmentioned ones.
+- **Multi-child REBUILD wire shape (all-text and mixed-type both
+  supported).** Wrapper shape mirrors the matching CREATE shape but
+  with `cmd=7` and `G2_WRAP_F_REBUILD`, no `WidgetId`:
+    - **All-text** (`g2BuildRebuildMultiTextPb`):
+      - `f1 = G2_CMD_REBUILD_PAGE` (7)
+      - `f2 = magic` (`G2_MAGIC_REBUILD`)
+      - `f7 = G2_WRAP_F_REBUILD` containing:
+          - `f1 = ContainerTotalNum = N`
+          - N × `f3 = TextObject` children
+    - **Mixed list + N text** (`g2BuildRebuildMixedListMultiTextPb`):
+      - same wrapper
+      - `f7` containing:
+          - `f1 = ContainerTotalNum = 1+N`
+          - one `f2 = ListObject` child
+          - N × `f3 = TextObject` children
+  Status page exercises both: 3-child all-text REBUILD (`pb≈250 B`,
+  multi-fragment) when there's no back-row affordance, and 4-child
+  list+3text REBUILD (`pb≈290 B`, multi-fragment) when the page has
+  a "<- Main Menu" tappable row. Both verified working repeatedly on
+  firmware 2.2.0.24. Implementation files:
+  [System_G2_Protocol.cpp](components/hardwareone/System_G2_Protocol.cpp)
+  (`g2BuildRebuildMultiTextPb`,
+  `g2BuildRebuildMixedListMultiTextPb`);
+  [G2_Glasses.cpp](components/hardwareone/G2_Glasses.cpp)
+  (`sendRebuildMultiTextAndWait`,
+  `sendRebuildMixedListMultiTextAndWait`).
+  These shapes are **not documented in the g2-kit-unofficial
+  reference**.
+- **TextObject auto-renders a scroll-bar when content overflows.**
+  Empirically: a TextObject whose `\n`-separated content is taller
+  than the widget's render area causes the firmware to draw a
+  scroll-bar indicator inside the widget — even though there's no
+  way to scroll a text widget (no event capture, no scroll input).
+  The threshold is content height vs. widget height with a small
+  internal margin; e.g. 7 lines of typical Status text in a 168 px
+  body widget triggered the bar, while 6 lines in the same width
+  did not. Mitigations: keep content under the line-count threshold,
+  or grow the widget height if you have room. There is no protocol
+  field to disable the scroll affordance — TextObject schema fields
+  5–8 are border / padding metadata, not scroll-related (see
+  TextContainerProperty table earlier in this doc).
 
 Event channels are still per-widget — single-tap on the embedded list
 arrives as `ListEvent CLICK(0)` on the list's container name; the image
 widget itself emits no events. (See note on probe-hold dismissal:
-`Optional_EvenG2.cpp` watches both `SysEvent DOUBLE_CLICK(3) src=2` and
+`G2_Glasses.cpp` watches both `SysEvent DOUBLE_CLICK(3) src=2` and
 `ListEvent CLICK(0)` to dismiss image probes that surface a list,
 because users expect single-tap exit on either gesture.)
 
@@ -1828,7 +2006,7 @@ immediately, and returns. `gPageSwapActive` blocks concurrent taps from
 queueing a second worker while one is in flight.
 
 The CREATE envelope is built into a heap-allocated 2 KB buffer
-(`sendCreateListAndWait` in [Optional_EvenG2.cpp](components/hardwareone/Optional_EvenG2.cpp)).
+(`sendCreateListAndWait` in [G2_Glasses.cpp](components/hardwareone/G2_Glasses.cpp)).
 Stack-allocating it would eat most of the worker's 4 KB stack.
 
 ### Echo guards: SYSTEM_EXIT and DISPLAY_OFF
@@ -1842,7 +2020,7 @@ the worker's CREATE on the write mutex.
 
 Both handlers therefore consult `gOurShutdownAtMs` and ignore the event
 if `millis() - gOurShutdownAtMs < 2000`. The variable is forward-declared
-near the top of [Optional_EvenG2.cpp](components/hardwareone/Optional_EvenG2.cpp)
+near the top of [G2_Glasses.cpp](components/hardwareone/G2_Glasses.cpp)
 because the handlers and the worker live in different sections of the
 file. It's set to `millis()` immediately before `sendEnvelope(shutBuf)`
 and cleared back to `0` in the worker's `cleanup:` label.
