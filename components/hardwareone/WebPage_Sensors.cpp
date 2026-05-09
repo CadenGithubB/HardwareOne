@@ -8,6 +8,7 @@
 
 #include <Arduino.h>
 #include <LittleFS.h>
+#include "System_VFS.h"
 #include "WebServer_Server.h"           // httpd types, JSON_RESPONSE_SIZE, gJsonResponseBuffer, makeWebAuthCtx
 #include "WebServer_Utils.h"            // WEB_AUTH_OR_RETURN, sendJsonResponse
 #include "System_User.h"          // AuthContext, tgRequireAuth
@@ -605,53 +606,42 @@ esp_err_t handleCameraStatus(httpd_req_t* req) {
 
 // Camera frame endpoint (auth-protected): returns JPEG frame
 esp_err_t handleCameraFrame(httpd_req_t* req) {
-  // Verbose debug logging - uncomment for troubleshooting
-  // Serial.println("[CamFrame] handleCameraFrame() ENTRY");
-  
   AuthContext ctx = makeWebAuthCtx(req);
-  // Serial.printf("[CamFrame] Client IP: %s\n", ctx.ip.c_str());
-  
+  DEBUG_HTTPF("/api/camera/frame enter user=%s ip=%s", ctx.user.c_str(), ctx.ip.c_str());
+
   if (!tgRequireAuth(ctx)) {
-    // Serial.println("[CamFrame] Auth FAILED, returning");
+    DEBUG_HTTPF("/api/camera/frame auth failed ip=%s", ctx.ip.c_str());
     return ESP_OK;
   }
-  // Serial.println("[CamFrame] Auth OK");
 
 #if ENABLE_CAMERA_SENSOR
   extern bool gCameraEnabled;
   extern uint8_t* captureFrame(size_t* outLen);
-  
-  // Serial.printf("[CamFrame] gCameraEnabled=%d\n", gCameraEnabled);
-  
+
   if (!gCameraEnabled) {
-    // Serial.println("[CamFrame] Camera not enabled - returning 503");
+    DEBUG_CAMERAF("/api/camera/frame: camera not enabled, returning 503");
     httpd_resp_set_status(req, "503 Service Unavailable");
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Camera not enabled", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
 
-  // Serial.println("[CamFrame] Calling captureFrame()...");
   size_t len = 0;
   uint8_t* frame = captureFrame(&len);
-  // Serial.printf("[CamFrame] captureFrame() returned: frame=%p, len=%u\n", frame, (unsigned)len);
-  
+
   if (!frame || len == 0) {
-    // Serial.printf("[CamFrame] CAPTURE FAILED! frame=%p len=%u - returning 500\n", frame, (unsigned)len);
+    DEBUG_CAMERAF("/api/camera/frame: capture failed frame=%p len=%u", frame, (unsigned)len);
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Frame capture failed", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
 
-  // Serial.printf("[CamFrame] SUCCESS - sending %u bytes JPEG\n", (unsigned)len);
   httpd_resp_set_type(req, "image/jpeg");
   httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=frame.jpg");
   esp_err_t sendErr = httpd_resp_send(req, (const char*)frame, len);
-  (void)sendErr; // suppress unused warning
-  // Serial.printf("[CamFrame] httpd_resp_send returned: %d\n", sendErr);
+  DEBUG_HTTPF("/api/camera/frame sent %u bytes status=%d", (unsigned)len, (int)sendErr);
   free(frame);
-  // Serial.println("[CamFrame] Frame freed, returning OK");
 #else
   httpd_resp_set_status(req, "501 Not Implemented");
   httpd_resp_set_type(req, "text/plain");
@@ -868,20 +858,29 @@ esp_err_t handleMicRecordingFile(httpd_req_t* req) {
     httpd_resp_send(req, "Missing filename parameter", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  
-  // Construct full path
-  char pathBuf[64];
-  snprintf(pathBuf, sizeof(pathBuf), "/recordings/%s", filename);
-  String path = pathBuf;
-  
-  if (!LittleFS.exists(path)) {
+
+  if (strchr(filename, '/') != nullptr || strstr(filename, "..") != nullptr) {
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "Invalid filename", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  String pathSd = String("/sd/recordings/") + filename;
+  String pathLf = String("/recordings/") + filename;
+  String path;
+  if (VFS::existsGuarded(pathSd, ctx)) {
+    path = pathSd;
+  } else if (VFS::existsGuarded(pathLf, ctx)) {
+    path = pathLf;
+  } else {
     httpd_resp_set_status(req, "404 Not Found");
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Recording not found", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  
-  File f = LittleFS.open(path, "r");
+
+  File f = VFS::openGuarded(path, "r", ctx);
   if (!f) {
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "text/plain");

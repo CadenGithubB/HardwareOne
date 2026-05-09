@@ -9,6 +9,10 @@
 
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_VFS.h"
+
+extern AuthContext gExecAuthContext;
+
 #include "System_I2C.h"
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
@@ -294,13 +298,13 @@ bool MapCore::loadMapFile(const char* path) {
 
   FsLockGuard fsGuard("MapCore.loadMapFile");
   
-  if (!LittleFS.exists(path)) {
+  if (!VFS::existsGuarded(path, gExecAuthContext)) {
     WARN_SENSORSF("Map file not found: %s", path);
     gSensorPollingPaused = wasPaused;
     return false;
   }
-  
-  File f = LittleFS.open(path, "r");
+
+  File f = VFS::openGuarded(path, "r", gExecAuthContext);
   if (!f) {
     ERROR_SENSORSF("Failed to open map file: %s", path);
     gSensorPollingPaused = wasPaused;
@@ -901,7 +905,7 @@ const uint8_t* MapCore::loadTileData(uint16_t tileIdx, size_t* outSize) {
       usedPersistent = true;
     } else {
       // Fallback: open/close per miss
-      File f = LittleFS.open(_currentMap.filepath, "r");
+      File f = VFS::openGuarded(_currentMap.filepath, "r", gExecAuthContext);
       if (!f) {
         DEBUG_MAPS_RENDERINGF("[MAPS] loadTileData: failed to open '%s'", _currentMap.filepath);
         return nullptr;
@@ -973,11 +977,11 @@ int MapCore::getAvailableMaps(char maps[][96], int maxMaps) {
 
   FsLockGuard fsGuard("MapCore.getAvailableMaps");
   
-  if (!LittleFS.exists("/maps")) {
+  if (!VFS::existsGuarded("/maps", gExecAuthContext)) {
     return 0;
   }
-  
-  File dir = LittleFS.open("/maps");
+
+  File dir = VFS::openGuarded("/maps", "r", gExecAuthContext);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     return 0;
@@ -993,7 +997,7 @@ int MapCore::getAvailableMaps(char maps[][96], int maxMaps) {
         char subPathBuf[64];
         snprintf(subPathBuf, sizeof(subPathBuf), "/maps/%s", dirName.c_str());
         String subPath = subPathBuf;
-        File sub = LittleFS.open(subPath);
+        File sub = VFS::openGuarded(subPath, "r", gExecAuthContext);
         if (sub && sub.isDirectory()) {
           String preferred = dirName + ".hwmap";
           String found = "";
@@ -2072,11 +2076,11 @@ bool WaypointManager::loadWaypoints() {
   String wpPathStr3 = wp3;  // Fallback to old format
   
   String wpPathStr;
-  if (LittleFS.exists(wpPathStr1.c_str())) {
+  if (VFS::existsGuarded(wpPathStr1, gExecAuthContext)) {
     wpPathStr = wpPathStr1;
-  } else if (LittleFS.exists(wpPathStr2.c_str())) {
+  } else if (VFS::existsGuarded(wpPathStr2, gExecAuthContext)) {
     wpPathStr = wpPathStr2;
-  } else if (LittleFS.exists(wpPathStr3.c_str())) {
+  } else if (VFS::existsGuarded(wpPathStr3, gExecAuthContext)) {
     wpPathStr = wpPathStr3;
   } else {
     // No waypoints file for this map — clear any stale data from a previous map
@@ -2088,9 +2092,9 @@ bool WaypointManager::loadWaypoints() {
   char wpPath[128];
   strlcpy(wpPath, wpPathStr.c_str(), sizeof(wpPath));
   
-  File f = LittleFS.open(wpPath, "r");
+  File f = VFS::openGuarded(wpPath, "r", gExecAuthContext);
   if (!f) return false;
-  
+
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, f);
   f.close();
@@ -2174,8 +2178,8 @@ bool WaypointManager::saveWaypoints() {
   String mapPath = String(map.filepath);
   int slash = mapPath.lastIndexOf('/');
   String mapDir = (slash > 0) ? mapPath.substring(0, slash) : String("/maps");
-  if (!LittleFS.exists(mapDir)) {
-    LittleFS.mkdir(mapDir);
+  if (!VFS::existsGuarded(mapDir, gExecAuthContext)) {
+    VFS::mkdirGuarded(mapDir, gExecAuthContext);
   }
   
   // Extract map base name and save with pattern: waypoints_<mapbase>.json
@@ -2188,7 +2192,7 @@ bool WaypointManager::saveWaypoints() {
   char wpPath[128];
   snprintf(wpPath, sizeof(wpPath), "%s/waypoints_%s.json", mapDir.c_str(), mapBase.c_str());
   
-  File f = LittleFS.open(wpPath, "w");
+  File f = VFS::openGuarded(wpPath, "w", gExecAuthContext, true);
   if (!f) {
     ERROR_SENSORSF("Failed to write waypoints file: %s", wpPath);
     return false;
@@ -2566,20 +2570,20 @@ bool GPSTrackManager::loadTrack(const char* filepath, String& errorMsg) {
 
   FsLockGuard fsGuard("GPSTrackManager.loadTrack");
   
-  if (!LittleFS.exists(filepath)) {
+  if (!VFS::existsGuarded(filepath, gExecAuthContext)) {
     errorMsg = "File not found";
     return false;
   }
-  
+
   // Allocate track points array in PSRAM if available
-  _points = (GPSTrackPoint*)ps_alloc(MAX_TRACK_POINTS * sizeof(GPSTrackPoint), 
+  _points = (GPSTrackPoint*)ps_alloc(MAX_TRACK_POINTS * sizeof(GPSTrackPoint),
                                       AllocPref::PreferPSRAM, "gps.track");
   if (!_points) {
     errorMsg = "Memory allocation failed";
     return false;
   }
-  
-  File f = LittleFS.open(filepath, "r");
+
+  File f = VFS::openGuarded(filepath, "r", gExecAuthContext);
   if (!f) {
     free(_points);
     _points = nullptr;
@@ -2646,7 +2650,7 @@ bool GPSTrackManager::deleteTrackFile(const char* filepath) {
   }
   
   fsLock("gpstrack.delete");
-  bool success = LittleFS.remove(filepath);
+  bool success = VFS::removeGuarded(filepath, gExecAuthContext);
   fsUnlock();
   
   return success;
@@ -2658,8 +2662,8 @@ bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize) {
   // Generate timestamped filename
   const char* dir = "/logging_captures/tracks";
   fsLock("gpstrack.save");
-  if (!LittleFS.exists(dir)) {
-    LittleFS.mkdir(dir);
+  if (!VFS::existsGuarded(dir, gExecAuthContext)) {
+    VFS::mkdirGuarded(dir, gExecAuthContext);
   }
 
   time_t now = time(nullptr);
@@ -2673,7 +2677,7 @@ bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize) {
 
   snprintf(outPath, outPathSize, "%s/track-%s.csv", dir, timestamp);
 
-  File f = LittleFS.open(outPath, "w");
+  File f = VFS::openGuarded(outPath, "w", gExecAuthContext, true);
   if (!f) {
     fsUnlock();
     return false;
@@ -3079,7 +3083,7 @@ const char* cmd_waypointfile(const String& argsInput) {
     char wpName[WAYPOINT_NAME_LEN] = "";
     strlcpy(wpName, a.arg(3).c_str(), sizeof(wpName));
 
-    if (!LittleFS.exists(filepath)) {
+    if (!VFS::existsGuarded(filepath, gExecAuthContext)) {
       snprintf(buf, 1024, "File not found: %s", filepath);
       return buf;
     }
@@ -3129,7 +3133,7 @@ const char* cmd_waypointfile(const String& argsInput) {
   char wpNameOnly[WAYPOINT_NAME_LEN];
   strlcpy(wpNameOnly, arg1.c_str(), sizeof(wpNameOnly));
 
-  if (!LittleFS.exists(filepath)) {
+  if (!VFS::existsGuarded(filepath, gExecAuthContext)) {
     snprintf(buf, 1024, "File not found: %s", filepath);
     return buf;
   }
@@ -3202,7 +3206,7 @@ const char* cmd_waypointfiles(const String& argsInput) {
 
 bool isMapFileByMagic(const String& fullPath) {
   FsLockGuard guard("maps.magic");
-  File f = LittleFS.open(fullPath, "r");
+  File f = VFS::openGuarded(fullPath, "r", gExecAuthContext);
   if (!f) return false;
   char magic[4] = {0};
   size_t rd = f.read((uint8_t*)magic, 4);
@@ -3225,20 +3229,20 @@ bool organizeMapFromAnyPath(const String& srcPath, String& outErr) {
   String fileName = (lastSlash >= 0) ? srcPath.substring(lastSlash + 1) : srcPath;
   String base = mapBaseNameNoExt(fileName);
   if (base.length() == 0) { outErr = "empty_base"; return false; }
-  if (!LittleFS.exists(srcPath)) { outErr = "src_missing"; return false; }
+  if (!VFS::existsGuarded(srcPath, gExecAuthContext)) { outErr = "src_missing"; return false; }
   if (!isMapFileByMagic(srcPath)) { outErr = "not_map_file"; return false; }
-  if (!LittleFS.exists("/maps")) {
-    if (!LittleFS.mkdir("/maps")) { outErr = "maps_mkdir_failed"; return false; }
+  if (!VFS::existsGuarded("/maps", gExecAuthContext)) {
+    if (!VFS::mkdirGuarded("/maps", gExecAuthContext)) { outErr = "maps_mkdir_failed"; return false; }
   }
   char dstDir[64], dstMap[96];
   snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
   snprintf(dstMap, sizeof(dstMap), "%s/%s.hwmap", dstDir, base.c_str());
   if (srcPath == dstMap) { outErr = "already_organized"; return false; }
-  if (!LittleFS.exists(dstDir)) {
-    if (!LittleFS.mkdir(dstDir)) { outErr = "mkdir_failed"; return false; }
+  if (!VFS::existsGuarded(dstDir, gExecAuthContext)) {
+    if (!VFS::mkdirGuarded(dstDir, gExecAuthContext)) { outErr = "mkdir_failed"; return false; }
   }
-  if (LittleFS.exists(dstMap)) { outErr = "dst_exists"; return false; }
-  if (!LittleFS.rename(srcPath.c_str(), dstMap)) { outErr = "rename_failed"; return false; }
+  if (VFS::existsGuarded(dstMap, gExecAuthContext)) { outErr = "dst_exists"; return false; }
+  if (!VFS::renameGuarded(srcPath, dstMap, gExecAuthContext)) { outErr = "rename_failed"; return false; }
   return true;
 }
 
@@ -3250,13 +3254,13 @@ bool tryOrganizeLegacyWaypointsAtRoot(const String& wpFileName, String& outErr) 
   if (base.length() == 0) { outErr = "empty_base"; return false; }
   char srcWp[96];
   snprintf(srcWp, sizeof(srcWp), "/maps/%s", wpFileName.c_str());
-  if (!LittleFS.exists(srcWp)) { outErr = "src_missing"; return false; }
+  if (!VFS::existsGuarded(srcWp, gExecAuthContext)) { outErr = "src_missing"; return false; }
   char dstDir[64], dstWp[128];
   snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
   snprintf(dstWp, sizeof(dstWp), "%s/%s", dstDir, wpFileName.c_str());
-  if (!LittleFS.exists(dstDir)) { outErr = "dst_dir_missing"; return false; }
-  if (LittleFS.exists(dstWp)) { outErr = "dst_exists"; return false; }
-  if (!LittleFS.rename(srcWp, dstWp)) { outErr = "rename_failed"; return false; }
+  if (!VFS::existsGuarded(dstDir, gExecAuthContext)) { outErr = "dst_dir_missing"; return false; }
+  if (VFS::existsGuarded(dstWp, gExecAuthContext)) { outErr = "dst_exists"; return false; }
+  if (!VFS::renameGuarded(srcWp, dstWp, gExecAuthContext)) { outErr = "rename_failed"; return false; }
   return true;
 }
 
@@ -3266,7 +3270,7 @@ const char* cmd_maporganize(const String& argsInput) {
   char* buf = getDebugBuffer();
 
   FsLockGuard guard("cmd_maporganize");
-  File dir = LittleFS.open("/maps");
+  File dir = VFS::openGuarded("/maps", "r", gExecAuthContext);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     return "Error: /maps directory not found";

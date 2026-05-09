@@ -13,6 +13,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <LittleFS.h>
+#include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <mqtt_client.h>
 #include "System_Settings.h"
 #include "System_Debug.h"
@@ -881,7 +882,7 @@ bool startMQTT() {
   if (gSettings.mqttTLSMode == 2) {
     // TLS + Certificate Verification
     if (gSettings.mqttCACertPath.length() > 0) {
-      File certFile = LittleFS.open(gSettings.mqttCACertPath, "r");
+      File certFile = VFS::openGuarded(gSettings.mqttCACertPath, "r", VFS::systemAuth("mqtt.cert.load"));
       if (certFile) {
         caCertData = certFile.readString();
         certFile.close();
@@ -1272,9 +1273,9 @@ const char* cmd_mqtttlsmode(const String& argsInput) {
   setSetting(gSettings.mqttTLSMode, newMode);
   
   // Create /system/certs/ folder for TLS modes
-  if (newMode > 0 && !LittleFS.exists("/system/certs")) {
-    LittleFS.mkdir("/system");
-    LittleFS.mkdir("/system/certs");
+  if (newMode > 0 && !VFS::existsGuarded("/system/certs", VFS::systemAuth("mqtt.cert.dir"))) {
+    VFS::mkdirGuarded("/system",       VFS::systemAuth("mqtt.cert.dir"));
+    VFS::mkdirGuarded("/system/certs", VFS::systemAuth("mqtt.cert.dir"));
     INFO_SYSTEMF("[MQTT] Created /system/certs/ folder for certificates");
   }
   
@@ -1312,8 +1313,12 @@ const char* cmd_mqttcacertpath(const String& argsInput) {
     }
     return "MQTT CA cert path cleared";
   }
-  // Verify file exists
-  if (!LittleFS.exists(arg)) {
+  // CLI handler: dispatch sets gExecAuthContext to the caller's identity.
+  // The caller (web admin or serial) needs read perm on the path they're
+  // pointing MQTT at. If they can't read it, telling MQTT to use it is
+  // also denied.
+  extern AuthContext gExecAuthContext;
+  if (!VFS::existsGuarded(arg, gExecAuthContext)) {
     if (!ensureDebugBuffer()) return "Error";
     snprintf(getDebugBuffer(), 1024, "Warning: File not found: %s (setting anyway)", arg.c_str());
     setSetting(gSettings.mqttCACertPath, arg);

@@ -75,6 +75,22 @@ bool g2RingInit();
 // glasses. The background task auto-runs g2RingScan(15) if no advert is
 // stashed, so a prior `g2scan` is no longer required. Use
 // g2RingIsConnected() / g2RingGetStatus() to poll.
+// Synchronous connect helper used by the unified BLE-connect worker
+// (see G2_Glasses.h `g2SubmitBleConnect`). Public so the worker — which
+// lives in G2_Glasses.cpp — can dispatch RING_* job kinds to it without
+// reaching into Ring's static implementation. If `savedMac` is non-empty,
+// skips scan and tries to connect directly to that address; empty means
+// "scan-then-connect any matching ring." Returns true on successful link.
+// MUST run in a normal task context (allocations, blocking BLE calls).
+bool ringPerformConnect(const String& savedMac = String());
+
+// Clear the per-family in-flight flag that the public g2RingConnect*
+// wrappers set before submitting to the unified worker. The worker calls
+// this after ringPerformConnect returns, so producers can submit again.
+// (gRingConnectTaskActive itself is static to G2_Ring.cpp; this helper is
+// the worker's only handle on it.)
+void g2RingConnectMarkComplete();
+
 bool g2RingConnect();
 
 // Dedicated ring-only scan. Watches for "EVEN R1_XXXXXX" adverts and

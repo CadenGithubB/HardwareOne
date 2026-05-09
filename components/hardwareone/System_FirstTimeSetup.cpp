@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 
 #include "OLED_Display.h"
 #include "OLED_FirstTimeSetup.h"
@@ -78,7 +79,7 @@ extern void resolvePendingUserCreationTimes();
 void detectFirstTimeSetupState() {
   // Use USERS_JSON_FILE as the determinant - this is the actual indicator
   // that first-time setup has been completed. Settings can exist without users.
-  bool usersExist = LittleFS.exists(USERS_JSON_FILE);
+  bool usersExist = VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("setup.detect"));
   gFirstTimeSetupState = usersExist ? SETUP_NOT_NEEDED : SETUP_REQUIRED;
   
   DEBUG_SYSTEMF("[SETUP_STATE] Early detection: %s (users file exists: %s)", 
@@ -606,7 +607,7 @@ void firstTimeSetupIfNeeded() {
                 1, 1, (unsigned long)gNTPAnchorId);
   
   // Write to file
-  File file = LittleFS.open(USERS_JSON_FILE, "w");
+  File file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("setup.users.create"));
   if (!file) {
     broadcastOutput("ERROR: Failed to create users.json");
   } else {
@@ -642,7 +643,7 @@ void firstTimeSetupIfNeeded() {
 
   // Create automations.json (empty) on first-time setup
  #if ENABLE_AUTOMATION
-  if (!LittleFS.exists(AUTOMATIONS_JSON_FILE)) {
+  if (!VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth("setup.automations.init"))) {
     String a = "{\n  \"version\": 1,\n  \"automations\": []\n}\n";
     if (!writeAutomationsJsonAtomic(a)) {
       broadcastOutput("ERROR: Failed to write automations.json");

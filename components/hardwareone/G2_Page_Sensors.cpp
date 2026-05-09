@@ -20,6 +20,7 @@
 #include "System_Debug.h"
 #include "System_FeatureRegistry.h"     // getFeatureById, FeatureEntry
 #include "System_Settings.h"            // setSetting, gSettings
+#include "G2_HijackCmd.h"               // g2SubmitHijackCommand — Group A migration
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <stdio.h>
@@ -359,7 +360,7 @@ static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
 #endif
 
 #if ENABLE_MICROPHONE_SENSOR
-  add("MIC",   "PDM",      "microphone", true,  gMicEnabled,      gMicEnabled,       nullptr);
+  add("MIC",   "PDM",      "microphone", true,  gMicEnabled,      micConnected,      nullptr);
 #else
   add("MIC",   "PDM",      "microphone", false, false, false,                         nullptr);
 #endif
@@ -473,6 +474,18 @@ enum SensorsLevel : uint8_t {
 static SensorsLevel gSensorsLevel    = SENSORS_LEVEL_LIST;
 static size_t       gSensorsDetailIdx = 0;   // index into the LIST-level rows
 
+#if ENABLE_CAMERA_SENSOR
+// Set when CAM ON was queued to cam_pwr; cleared in g2SensorsOnCameraPowerDone.
+// Avoids "not connected" on Capture/Stream while initCamera() is still running.
+static bool sG2SensorsCamAsyncStartPending = false;
+#endif
+
+// Ignore repeat taps on the detail "Auto Start" row (idx 1) for this long.
+// Lens list events can fire twice (L/R) or in quick bursts; camera/mic
+// start/stop is expensive and should not thrash.
+static constexpr uint32_t kSensorsDetailToggleDebounceMs = 600;
+static uint32_t           sSensorsDetailToggleLastMs     = 0;
+
 // Row buffers for both levels — large enough for any of the layouts.
 // 16 sensors × 32 chars + headroom is ample; sized by the existing
 // buildRows() max output.
@@ -579,12 +592,28 @@ static void showSensorDetail(const G2SensorRow& r) {
   // so keep the explicit "Auto Start: ..." wording so they don't
   // expect the toggle to take effect immediately on those.
   bool labelAsLiveState = isCamera;
+  bool isMic            = false;
 #if ENABLE_MICROPHONE_SENSOR
-  if (strcmp(r.featureId, "microphone") == 0) labelAsLiveState = true;
+  isMic = (strcmp(r.featureId, "microphone") == 0);
+  if (isMic) labelAsLiveState = true;
 #endif
 
   if (autoStartPtr) {
-    if (labelAsLiveState) {
+    if (isMic) {
+      // MIC toggle row — live I2S state only. PDM has no probeable
+      // "connected" signal (no chip ID, no I2C address — just a
+      // clock+data slave), so we don't try to express hardware
+      // presence here. The legacy "Connected | Disconnected" half
+      // of this row was driven by the warmup-data heuristic, which
+      // was misleading whenever the mic was off (warmup had never
+      // run → row claimed "Disconnected" even when the mic chip
+      // was physically present and would work fine on toggle).
+      // Plain "MIC: On" / "MIC: Off" matches what tap actually
+      // controls and stops over-promising what we know.
+      snprintf(gSensorsRows[out], SENSORS_ROW_LEN,
+               "MIC: %s",
+               r.enabled ? "On" : "Off");
+    } else if (labelAsLiveState) {
       // Show live state (r.enabled = gCameraEnabled / gMicEnabled),
       // not the auto-start preference. The toggle action flips both
       // the live state AND the boot preference, so the visible row
@@ -633,27 +662,31 @@ static void showSensorDetail(const G2SensorRow& r) {
     out++;
   } else {
     // Generic layout for non-camera sensors: HW row then the live
-    // value row. Tap on the value row is info-only for now.
+    // value row. Tap on the value row is info-only for now. MIC
+    // skips the value row — its info is already folded into the
+    // merged toggle row above (see the isMic branch).
     //
     //   1: Auto Start: ON|OFF (or "<LABEL>: ON|OFF" for live-toggle features)
     //   2: HW: <chip>
-    //   3: <LABEL>: <live value>
+    //   3: <LABEL>: <live value>           — skipped for MIC
     snprintf(gSensorsRows[out], SENSORS_ROW_LEN, "HW: %s", r.hardware);
     gSensorsRowPtrs[out] = gSensorsRows[out];
     out++;
 
-    char value[24];
-    if (r.connected && r.format) {
-      r.format(value, sizeof(value));
-    } else {
-      snprintf(value, sizeof(value), "%s",
-               r.connected ? "connected" :
-               r.enabled   ? "missing"   :
-                             "off");
+    if (!isMic) {
+      char value[24];
+      if (r.connected && r.format) {
+        r.format(value, sizeof(value));
+      } else {
+        snprintf(value, sizeof(value), "%s",
+                 r.connected ? "connected" :
+                 r.enabled   ? "missing"   :
+                               "off");
+      }
+      snprintf(gSensorsRows[out], SENSORS_ROW_LEN, "%s: %s", r.label, value);
+      gSensorsRowPtrs[out] = gSensorsRows[out];
+      out++;
     }
-    snprintf(gSensorsRows[out], SENSORS_ROW_LEN, "%s: %s", r.label, value);
-    gSensorsRowPtrs[out] = gSensorsRows[out];
-    out++;
   }
 
   gSensorsLevel = SENSORS_LEVEL_DETAIL;
@@ -696,11 +729,48 @@ void g2SensorsHandleTap(uint32_t idx) {
     buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
     const size_t pos = idx - 1;
     if (pos >= count) {
+#if ENABLE_CAMERA_SENSOR
+      // Lens can still be showing the CAM detail page (indices 2..5 = Capture ..
+      // Settings) while our FSM is LIST — e.g. race during page-swap or duplicate
+      // RX. Re-sync to CAM detail and handle the tap as detail.
+      if (idx >= 2 && idx <= 5) {
+        int camPos = -1;
+        for (size_t i = 0; i < count; i++) {
+          if (strcmp(rows[i].featureId, "camera") == 0) {
+            camPos = (int)i;
+            break;
+          }
+        }
+        if (camPos >= 0) {
+          DEBUG_G2F("[G2] Sensors: LIST idx=%u vs count=%u — recovering CAM detail "
+                    "tap (glasses/host desync)",
+                    (unsigned)idx,
+                    (unsigned)count);
+          gSensorsDetailIdx = (size_t)camPos;
+          showSensorDetail(rows[(size_t)camPos]);
+          g2SensorsHandleTap(idx);
+          return;
+        }
+      }
+#endif
       DEBUG_G2F("[G2] Sensors: tap idx=%u out of range (count=%u)",
                 (unsigned)idx, (unsigned)count);
       return;
     }
     gSensorsDetailIdx = pos;
+#if ENABLE_MICROPHONE_SENSOR
+    // MIC drills into a dedicated compound page (list + live-readout
+    // text widget) instead of the generic list-only detail. Provides
+    // a per-tick UPDATE_TEXT readout (level, sample rate, recording)
+    // that doesn't disturb the list row selection — see g2ShowMicDetail
+    // and renderMicDetailLive in G2_Glasses.cpp. All other sensors
+    // still use the legacy showSensorDetail() path.
+    if (strcmp(rows[pos].featureId, "microphone") == 0) {
+      if (g2ShowMicDetail()) return;
+      DEBUG_G2F("[G2] Sensors: MIC detail compound start failed — "
+                "falling back to generic showSensorDetail");
+    }
+#endif
     showSensorDetail(rows[pos]);
     return;
   }
@@ -711,6 +781,15 @@ void g2SensorsHandleTap(uint32_t idx) {
     return;
   }
   if (idx == 1) {
+    const uint32_t now = millis();
+    if ((uint32_t)(now - sSensorsDetailToggleLastMs) <
+        kSensorsDetailToggleDebounceMs) {
+      DEBUG_G2F("[G2] Sensors: detail toggle debounced (%ums)",
+                (unsigned)kSensorsDetailToggleDebounceMs);
+      return;
+    }
+    sSensorsDetailToggleLastMs = now;
+
     // Auto Start toggle — look up the cached row and flip the setting
     // through setSetting so it persists to NVS and triggers any
     // registered apply hooks. For features that have a runtime
@@ -731,26 +810,46 @@ void g2SensorsHandleTap(uint32_t idx) {
                 "setting wired", r.label);
       return;
     }
+
     const bool prev = *feat->enabledSetting;
     const bool next = !prev;
-    setSetting(*feat->enabledSetting, next);
     BROADCAST_PRINTF("[G2] Sensors: %s Auto Start %s -> %s (from glasses)",
                      r.label, prev ? "ON" : "OFF",
                      next ? "ON" : "OFF");
 
-    // Runtime apply for hardware that supports hot start/stop. The
-    // auto-start setting persists the user's preference; the calls
-    // below make the change visible right now.
+    // Runtime apply for hardware that supports hot start/stop is kept
+    // INLINE on tap_disp rather than routed through cmd_exec. Two
+    // reasons:
+    //   (a) `cmd_camerastart` / `opencamera` is the SYNC variant
+    //       (cameraPowerRequestStartSync, 60-s timeout) — running it on
+    //       cmd_exec would stall the whole command queue. The inline
+    //       `cameraPowerRequestStartAsync` returns instantly.
+    //   (b) UX feedback. The redraw below depends on the new gXEnabled
+    //       flag; doing it inline gives immediate visual confirmation.
+    // The AUTHORITATIVE write — flipping the persisted auto-start flag
+    // — IS routed through cmd_exec further down (the `*autostart` CLI
+    // commands), so the auth check still gates persistence.
+    bool skipImmediateRedraw = false;
+    bool runtimeApplyOk      = true;
 #if ENABLE_CAMERA_SENSOR
     if (strcmp(r.featureId, "camera") == 0) {
       if (next && !gCameraEnabled) {
-        BROADCAST_PRINTF("[G2] Sensors: starting camera...");
-        if (!initCamera()) {
-          BROADCAST_PRINTF("[G2] Sensors: camera init FAILED");
+        BROADCAST_PRINTF("[G2] Sensors: starting camera (queued)...");
+        if (cameraPowerRequestStartAsync()) {
+          skipImmediateRedraw = true;
+          sG2SensorsCamAsyncStartPending = true;
+        } else {
+          BROADCAST_PRINTF("[G2] Sensors: camera start queue full — abort persist");
+          runtimeApplyOk = false;
         }
       } else if (!next && gCameraEnabled) {
-        BROADCAST_PRINTF("[G2] Sensors: stopping camera...");
-        stopCamera();
+        BROADCAST_PRINTF("[G2] Sensors: stopping camera (queued)...");
+        if (cameraPowerRequestStopAsync()) {
+          skipImmediateRedraw = true;
+        } else {
+          BROADCAST_PRINTF("[G2] Sensors: camera stop queue full — abort persist");
+          runtimeApplyOk = false;
+        }
       }
     }
 #endif
@@ -770,11 +869,53 @@ void g2SensorsHandleTap(uint32_t idx) {
 
     // Re-derive rows after the start/stop call so the freshly-updated
     // gXEnabled flag is reflected in the connected/value columns.
-    buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
-    if (gSensorsDetailIdx < count) {
-      showSensorDetail(rows[gSensorsDetailIdx]);
+    // Camera power runs asynchronously on `cam_pwr`; hook redraws when done.
+    if (!skipImmediateRedraw) {
+      buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
+      if (gSensorsDetailIdx < count) {
+        showSensorDetail(rows[gSensorsDetailIdx]);
+      } else {
+        showSensorDetail(r);
+      }
+    }
+
+    // Persist the auto-start flag via the per-feature CLI command
+    // (route through cmd_exec). Each *autostart command is a thin
+    // setSetting wrapper, so this is one queue submit + one NVS write —
+    // no separate `savesettings` needed (the previous code's batched
+    // writeSettingsJson is no longer required because we're not making
+    // multiple setSetting calls inline).
+    //
+    // If runtime apply failed (e.g. camera queue full) we DON'T persist
+    // — leaves the user's preference matching the actual hardware state.
+    if (!runtimeApplyOk) {
+      return;
+    }
+
+    char line[80];
+    if (strcmp(r.featureId, "camera") == 0) {
+      snprintf(line, sizeof(line), "cameraautostart %s", next ? "on" : "off");
+    } else if (strcmp(r.featureId, "microphone") == 0) {
+      snprintf(line, sizeof(line), "micautostart %s", next ? "on" : "off");
     } else {
-      showSensorDetail(r);
+      // Falls through to the generic per-sensor command, which covers
+      // thermal/tof/imu/gps/fmradio/apds/gamepad. Unknown featureIds will
+      // get a "Value must be on/off..." or similar error from the
+      // command, which the cmd_exec log will surface.
+      snprintf(line, sizeof(line), "sensorautostart %s %s",
+               r.featureId, next ? "on" : "off");
+    }
+
+    G2CmdCookie cookie{};
+    cookie.targetPage   = g2GetHijackPage();
+    cookie.targetNetSub = 0;
+    // No completion callback — the inline showSensorDetail() above
+    // already re-rendered (or the cam_pwr-done hook will). Persistence
+    // is fire-and-forget; if the submit fails we fall back inline so
+    // the flag still flips even if cmd_exec is wedged.
+    if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
+      DEBUG_G2F("[G2] Sensors: %s submit FAILED — inline setSetting fallback", line);
+      setSetting(*feat->enabledSetting, next);
     }
     return;
   }
@@ -801,7 +942,14 @@ void g2SensorsHandleTap(uint32_t idx) {
     if (idx == 2) {
       if (r.connected) {
         DEBUG_G2F("[G2] Sensors detail: CAM Capture tapped — opening viewer");
-        g2ShowCameraViewer([]() { g2ShowSensorsMenu(); });
+        // Dismiss returns to the CAM detail page (NOT the sensors landing
+        // list) so the user lands back where they started. Same pattern
+        // Camera Settings uses for its back row — see G2_Page_CameraSettings
+        // handleListTap idx==0.
+        g2ShowCameraViewer([]() { g2ReshowSensorsDetail(); });
+      } else if (sG2SensorsCamAsyncStartPending) {
+        DEBUG_G2F("[G2] Sensors detail: CAM Capture ignored — camera still "
+                  "initializing (wait for CAM row to show ON)");
       } else {
         DEBUG_G2F("[G2] Sensors detail: CAM Capture tapped but camera not "
                   "connected — turn it ON first");
@@ -811,7 +959,11 @@ void g2SensorsHandleTap(uint32_t idx) {
     if (idx == 3) {
       if (r.connected) {
         DEBUG_G2F("[G2] Sensors detail: CAM Stream tapped — opening stream");
-        g2ShowCameraStream([]() { g2ShowSensorsMenu(); });
+        // Same dismiss target as Capture — return to CAM detail.
+        g2ShowCameraStream([]() { g2ReshowSensorsDetail(); });
+      } else if (sG2SensorsCamAsyncStartPending) {
+        DEBUG_G2F("[G2] Sensors detail: CAM Stream ignored — camera still "
+                  "initializing (wait for CAM row to show ON)");
       } else {
         DEBUG_G2F("[G2] Sensors detail: CAM Stream tapped but camera not "
                   "connected — turn it ON first");
@@ -841,5 +993,23 @@ void g2SensorsHandleTap(uint32_t idx) {
   DEBUG_G2F("[G2] Sensors detail: value row %u tapped (info-only)",
             (unsigned)idx);
 }
+
+#if ENABLE_CAMERA_SENSOR
+static void g2SensorsOnCameraPowerDone() {
+  sG2SensorsCamAsyncStartPending = false;
+  if (gSensorsLevel != SENSORS_LEVEL_DETAIL) {
+    return;
+  }
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_SENSORS) {
+    return;
+  }
+  g2ReshowSensorsDetail();
+}
+
+void g2RegisterSensorsCameraPowerHook() {
+  cameraPowerWorkerEnsureStarted();
+  cameraPowerSetPostHook(g2SensorsOnCameraPowerDone);
+}
+#endif
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

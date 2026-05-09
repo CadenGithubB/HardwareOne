@@ -17,6 +17,7 @@
 #include "System_Debug.h"  // For DEBUG_AUTHF, DEBUG_USERF
 #include "System_Logging.h" // For log file paths and constants
 #include "System_Filesystem.h"    // For writeText, readText
+#include "System_VFS.h"    // For VFS::*Guarded + VFS::systemAuth
 #include "System_Settings.h"
 #include "Bluetooth.h"
 #include "OLED_Display.h"
@@ -154,7 +155,7 @@ bool tgRequireAuth(AuthContext& ctx) {
 bool isAdminUser(const String& who) {
   if (!filesystemReady) return false;
   // Prefer JSON
-  if (LittleFS.exists(USERS_JSON_FILE)) {
+  if (VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.isAdmin"))) {
     String json;
     if (!readText(USERS_JSON_FILE, json)) return false;
     int usersIdx = json.indexOf("\"users\"");
@@ -423,14 +424,14 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
     return false;
   }
 
-  if (!LittleFS.exists(USERS_JSON_FILE)) {
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.admin.create"))) {
     errorOut = "users.json not found";
     return false;
   }
 
   // Reject if already pending registration
-  if (LittleFS.exists(PENDING_USERS_FILE)) {
-    File pf = LittleFS.open(PENDING_USERS_FILE, "r");
+  if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.admin.create"))) {
+    File pf = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.admin.create"));
     if (pf) {
       PSRAM_JSON_DOC(pdoc);
       if (!deserializeJson(pdoc, pf)) {
@@ -453,7 +454,7 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
   int nextIdForSettings = 0;
   {
     FsLockGuard guard("users.admin_create");
-    File file = LittleFS.open(USERS_JSON_FILE, "r");
+    File file = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.admin.create"));
     if (!file) {
       errorOut = "Failed to read users.json";
       return false;
@@ -490,7 +491,7 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
     newUser["bootCount"] = gBootCounter;
     doc["nextId"] = nextId + 1;
 
-    file = LittleFS.open(USERS_JSON_FILE, "w");
+    file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.admin.create"));
     if (!file) {
       errorOut = "Failed to write users.json";
       return false;
@@ -569,8 +570,8 @@ bool hasUserGamepadPassword(const String& username) {
 bool isUserBanned(const String& username) {
   if (!filesystemReady || username.length() == 0) return false;
   FsLockGuard guard("users.is_banned");
-  if (!LittleFS.exists(USERS_JSON_FILE)) return false;
-  File f = LittleFS.open(USERS_JSON_FILE, "r");
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.isBanned"))) return false;
+  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.isBanned"));
   if (!f) return false;
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, f);
@@ -597,8 +598,8 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
 
   {
     FsLockGuard guard("users.set_ban");
-    if (!LittleFS.exists(USERS_JSON_FILE)) return "users.json not found";
-    File f = LittleFS.open(USERS_JSON_FILE, "r");
+    if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.setBan"))) return "users.json not found";
+    File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.setBan"));
     if (!f) return "Failed to read users.json";
     PSRAM_JSON_DOC(doc);
     if (deserializeJson(doc, f)) { f.close(); return "Malformed users.json"; }
@@ -622,7 +623,7 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
     }
     if (!found) return "User not found";
 
-    File wf = LittleFS.open(USERS_JSON_FILE, "w");
+    File wf = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.setBan"));
     if (!wf) return "Failed to write users.json";
     serializeJson(doc, wf);
     wf.close();
@@ -671,8 +672,8 @@ void updateUserLastSeen(const String& username) {
   strftime(isoTimestamp, sizeof(isoTimestamp), "%Y-%m-%dT%H:%M:%SZ", &tminfo);
 
   FsLockGuard guard("users.last_seen");
-  if (!LittleFS.exists(USERS_JSON_FILE)) return;
-  File f = LittleFS.open(USERS_JSON_FILE, "r");
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.lastSeen"))) return;
+  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.lastSeen"));
   if (!f) return;
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, f)) { f.close(); return; }
@@ -687,7 +688,7 @@ void updateUserLastSeen(const String& username) {
     }
   }
 
-  File wf = LittleFS.open(USERS_JSON_FILE, "w");
+  File wf = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.lastSeen"));
   if (!wf) return;
   serializeJson(doc, wf);
   wf.close();
@@ -733,8 +734,8 @@ bool getUserIdByUsername(const String& username, uint32_t& outUserId) {
 
   {
     FsLockGuard guard("users.get_id");
-    if (!LittleFS.exists(USERS_JSON_FILE)) return false;
-    File f = LittleFS.open(USERS_JSON_FILE, "r");
+    if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.getId"))) return false;
+    File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.getId"));
     if (!f) return false;
 
     PSRAM_JSON_DOC(doc);
@@ -765,8 +766,8 @@ bool getUserRole(const String& username, String& outRole) {
   if (username.length() == 0) return false;
 
   FsLockGuard guard("users.get_role");
-  if (!LittleFS.exists(USERS_JSON_FILE)) return false;
-  File f = LittleFS.open(USERS_JSON_FILE, "r");
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.getRole"))) return false;
+  File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.getRole"));
   if (!f) return false;
 
   PSRAM_JSON_DOC(doc);
@@ -804,13 +805,13 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   String userPassword = "";
   bool found = false;
 
-  if (!LittleFS.exists(PENDING_USERS_FILE)) {
+  if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.approve"))) {
     errorOut = "User not found in pending list";
     return false;
   }
 
   // Parse pending_users.json with ArduinoJson
-  File file = LittleFS.open(PENDING_USERS_FILE, "r");
+  File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.approve"));
   if (!file) {
     errorOut = "Could not read pending list";
     return false;
@@ -855,11 +856,11 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   if (newArray.size() == 0) {
     // Remove file if empty
     fsLock("pending_users.remove");
-    LittleFS.remove(PENDING_USERS_FILE);
+    VFS::removeGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.approve"));
     fsUnlock();
   } else {
     // Write updated list
-    file = LittleFS.open(PENDING_USERS_FILE, "w");
+    file = VFS::openGuarded(PENDING_USERS_FILE, "w", VFS::systemAuth("user.approve"));
     if (!file) {
       errorOut = "Could not update pending list";
       return false;
@@ -875,7 +876,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
 
   // Append approved user to users.json (JSON-only policy)
   uint32_t createdUserId = 0;
-  if (!LittleFS.exists(USERS_JSON_FILE)) {
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.approve"))) {
     // Create users.json with the first user (ID 1) using ArduinoJson
     PSRAM_JSON_DOC(doc);
     doc["version"] = 1;
@@ -899,7 +900,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     DEBUG_SYSTEMF("ApproveInit: Creating users.json with bootCounter=%lu, admin.bootCount=%lu, gNTPAnchorId=%lu", (unsigned long)gBootCounter, (unsigned long)gBootCounter, (unsigned long)gNTPAnchorId);
     
     // Serialize to file
-    File file = LittleFS.open(USERS_JSON_FILE, "w");
+    File file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.approve"));
     if (!file) {
       errorOut = "Failed to create users.json";
       return false;
@@ -915,7 +916,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     createdUserId = 1;
   } else {
     // Parse existing users.json with ArduinoJson
-    File file = LittleFS.open(USERS_JSON_FILE, "r");
+    File file = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.approve"));
     if (!file) {
       errorOut = "Failed to open users.json";
       return false;
@@ -965,14 +966,14 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     doc["nextId"] = nextId + 1;
     
     // Write back to file
-    file = LittleFS.open(USERS_JSON_FILE, "w");
+    file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.approve"));
     if (!file) {
       errorOut = "Failed to write users.json";
       return false;
     }
     size_t written = serializeJson(doc, file);
     file.close();
-    
+
     if (written == 0) {
       errorOut = "Failed to write users.json";
       return false;
@@ -1010,13 +1011,13 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
     return false;
   }
   
-  if (!LittleFS.exists(PENDING_USERS_FILE)) {
+  if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.deny"))) {
     errorOut = "User not found in pending list";
     return false;
   }
 
   // Parse pending_users.json with ArduinoJson
-  File file = LittleFS.open(PENDING_USERS_FILE, "r");
+  File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.deny"));
   if (!file) {
     errorOut = "Could not read pending list";
     return false;
@@ -1056,23 +1057,23 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
   // Write updated pending list or remove file if empty
   if (newArray.size() == 0) {
     // Remove file if empty
-    LittleFS.remove(PENDING_USERS_FILE);
+    VFS::removeGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.deny"));
   } else {
     // Write updated list
-    file = LittleFS.open(PENDING_USERS_FILE, "w");
+    file = VFS::openGuarded(PENDING_USERS_FILE, "w", VFS::systemAuth("user.deny"));
     if (!file) {
       errorOut = "Could not update pending list";
       return false;
     }
     size_t written = serializeJson(newDoc, file);
     file.close();
-    
+
     if (written == 0) {
       errorOut = "Could not update pending list";
       return false;
     }
   }
-  
+
   return true;
 }
 
@@ -1083,7 +1084,7 @@ static bool promoteUserToAdminInternal(const String& username, String& errorOut)
     errorOut = "Username required";
     return false;
   }
-  if (!LittleFS.exists(USERS_JSON_FILE)) {
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.promote"))) {
     errorOut = "users.json not found";
     return false;
   }
@@ -1195,7 +1196,7 @@ static bool demoteUserFromAdminInternal(const String& username, String& errorOut
     errorOut = "Username required";
     return false;
   }
-  if (!LittleFS.exists(USERS_JSON_FILE)) {
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.demote"))) {
     errorOut = "users.json not found";
     return false;
   }
@@ -1312,8 +1313,8 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
   // Get userId first so we can delete their settings file
   uint32_t userId = 0;
   getUserIdByUsername(username, userId);
-  
-  if (!LittleFS.exists(USERS_JSON_FILE)) {
+
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.delete"))) {
     errorOut = "users.json not found";
     return false;
   }
@@ -1422,8 +1423,8 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
   // Delete user settings file (contains password and preferences)
   if (userId > 0) {
     String settingsPath = getUserSettingsPath(userId);
-    if (LittleFS.exists(settingsPath.c_str())) {
-      LittleFS.remove(settingsPath.c_str());
+    if (VFS::existsGuarded(settingsPath.c_str(), VFS::systemAuth("user.settings.remove"))) {
+      VFS::removeGuarded(settingsPath.c_str(), VFS::systemAuth("user.settings.remove"));
       DEBUG_USERSF("[users] Deleted settings file for userId=%u", (unsigned)userId);
     }
   }
@@ -1673,13 +1674,13 @@ const char* cmd_user_list(const String& argsInput) {
   
   DEBUG_USERSF("[USER_LIST_DEBUG] Called with args='%s', jsonOutput=%d", argsInput.c_str(), jsonOutput);
 
-  if (!LittleFS.exists(USERS_JSON_FILE)) {
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.list"))) {
     DEBUG_USERSF("[USER_LIST_DEBUG] File not found: %s", USERS_JSON_FILE);
     return jsonOutput ? "[]" : "No users found";
   }
 
   // Open and parse users file with ArduinoJson
-  File file = LittleFS.open(USERS_JSON_FILE, "r");
+  File file = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.list"));
   if (!file) {
     ERROR_SESSIONF("Failed to open users file");
     if (jsonOutput) return "[]";
@@ -1747,14 +1748,14 @@ const char* cmd_pending_list(const String& argsInput) {
   // Check if JSON output is requested
   bool jsonOutput = (argsInput.indexOf("json") >= 0);
 
-  if (!LittleFS.exists(PENDING_USERS_FILE)) {
+  if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.pending.list"))) {
     if (jsonOutput) return "[]";
     broadcastOutput("No pending users");
     return "OK";
   }
 
   // Open and parse pending users file with ArduinoJson
-  File file = LittleFS.open(PENDING_USERS_FILE, "r");
+  File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.pending.list"));
   if (!file) {
     if (jsonOutput) return "[]";
     ERROR_SESSIONF("Failed to read pending users file");
@@ -2086,7 +2087,7 @@ const char* cmd_user_request(const String& argsInput) {
   DEBUG_CMD_FLOWF("[users] Adding user to pending_users.json, filesystemReady=%d", filesystemReady ? 1 : 0);
 
   String json = "[]";
-  if (LittleFS.exists(PENDING_USERS_FILE)) {
+  if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.request"))) {
     if (!readText(PENDING_USERS_FILE, json)) {
       DEBUG_CMD_FLOWF("[users] ERROR: Failed to read existing /system/pending_users.json");
       return "Error: could not read pending list";
@@ -2124,7 +2125,7 @@ const char* cmd_user_request(const String& argsInput) {
     return "Error: could not write pending list";
   }
   size_t fsz = 0;
-  File dbgFile = LittleFS.open(PENDING_USERS_FILE, "r");
+  File dbgFile = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.request"));
   if (dbgFile) {
     fsz = dbgFile.size();
     dbgFile.close();
@@ -2494,7 +2495,7 @@ static bool approximateUserTimestamp(String& usersJson, const UserTimestampInfo&
 
 // Cleanup old boot anchors (keep only most recent)
 void cleanupOldBootAnchors(void* docPtr) {
-  if (!filesystemReady || !LittleFS.exists(USERS_JSON_FILE)) return;
+  if (!filesystemReady || !VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.bootAnchor"))) return;
 
   PSRAM_JSON_DOC(localDoc);
   JsonDocument* workingDoc = static_cast<JsonDocument*>(docPtr);
@@ -2509,7 +2510,7 @@ void cleanupOldBootAnchors(void* docPtr) {
 
     size_t bytesRead = 0;
     {
-      File f = LittleFS.open(USERS_JSON_FILE, "r");
+      File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.bootAnchor"));
       if (!f) return;
       bytesRead = f.readBytes(cleanupBuf, CLEANUP_BUF_SIZE - 1);
       cleanupBuf[bytesRead] = '\0';
@@ -2558,7 +2559,7 @@ void cleanupOldBootAnchors(void* docPtr) {
     newAnchor["epochAtSync"] = (uint32_t)epochVal;
     newAnchor["millisAtSync"] = (uint32_t)millisVal;
 
-    File file = LittleFS.open(USERS_JSON_FILE, "w");
+    File file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.bootAnchor"));
     if (file) {
       serializeJson(*workingDoc, file);
       file.close();
@@ -2570,7 +2571,7 @@ void cleanupOldBootAnchors(void* docPtr) {
 void resolvePendingUserCreationTimes() {
   DEBUG_NTP_RESOLVEF("[resolve] Starting timestamp resolution");
   
-  if (!filesystemReady || !LittleFS.exists(USERS_JSON_FILE)) {
+  if (!filesystemReady || !VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.resolveCreated"))) {
     DEBUG_NTP_RESOLVEF("[resolve] Skipping - FS not ready or file missing");
     return;
   }
@@ -2584,7 +2585,7 @@ void resolvePendingUserCreationTimes() {
 
   size_t bytesRead = 0;
   {
-    File f = LittleFS.open(USERS_JSON_FILE, "r");
+    File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.resolveCreated"));
     if (!f) return;
     bytesRead = f.readBytes(usersJsonBuf, USERS_JSON_BUF_SIZE - 1);
     usersJsonBuf[bytesRead] = '\0';
@@ -2705,7 +2706,7 @@ void resolvePendingUserCreationTimes() {
 void writeBootAnchor() {
   time_t now = time(nullptr);
   if (now <= 0 || gNTPAnchorId == 0) return;
-  if (!filesystemReady || !LittleFS.exists(USERS_JSON_FILE)) return;
+  if (!filesystemReady || !VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.bootAnchor"))) return;
 
   unsigned long currentMillis = millis();
 
@@ -2730,7 +2731,7 @@ void writeBootAnchor() {
 
   char tempFile[48];
   snprintf(tempFile, sizeof(tempFile), "%s.tmp", USERS_JSON_FILE);
-  File file = LittleFS.open(tempFile, "w");
+  File file = VFS::openGuarded(tempFile, "w", VFS::systemAuth("user.bootAnchor"));
   if (!file) return;
 
   size_t written = serializeJson(doc, file);
@@ -2739,11 +2740,11 @@ void writeBootAnchor() {
 
   if (written > 0) {
     // Atomic rename (LittleFS rename overwrites destination)
-    if (!LittleFS.rename(tempFile, USERS_JSON_FILE)) {
-      LittleFS.remove(tempFile);
+    if (!VFS::renameGuarded(tempFile, USERS_JSON_FILE, VFS::systemAuth("user.bootAnchor"))) {
+      VFS::removeGuarded(tempFile, VFS::systemAuth("user.bootAnchor"));
     }
   } else {
-    LittleFS.remove(tempFile);
+    VFS::removeGuarded(tempFile, VFS::systemAuth("user.bootAnchor"));
   }
 }
 
@@ -2823,10 +2824,10 @@ void loadAndIncrementBootSeq() {
   // Temporarily enable DEBUG_SYSTEM for boot sequence initialization (runs before settings loaded)
   DebugFlagMask _dbgSaved = getDebugFlags();
   setDebugFlag(DEBUG_SYSTEM);
-  DEBUG_SYSTEMF("BootSeqInit: filesystemReady=%d, users.json exists=%d", (int)filesystemReady, (int)(filesystemReady && LittleFS.exists(USERS_JSON_FILE)));
+  DEBUG_SYSTEMF("BootSeqInit: filesystemReady=%d, users.json exists=%d", (int)filesystemReady, (int)(filesystemReady && VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.bootSeq"))));
 
-  if (filesystemReady && LittleFS.exists(USERS_JSON_FILE)) {
-    File file = LittleFS.open(USERS_JSON_FILE, "r");
+  if (filesystemReady && VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.bootSeq"))) {
+    File file = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.bootSeq"));
     if (!file) {
       ERROR_SYSTEMF("BootSeqInit: Failed to open users.json");
     } else {
@@ -2863,7 +2864,7 @@ void loadAndIncrementBootSeq() {
         DEBUG_NTP_ANCHORF("BootSeqInit: Updating bootCounter -> %lu", (unsigned long)newCounter);
 
         // Write back to file
-        file = LittleFS.open(USERS_JSON_FILE, "w");
+        file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.bootSeq"));
         if (file) {
           size_t written = serializeJson(doc, file);
           file.close();

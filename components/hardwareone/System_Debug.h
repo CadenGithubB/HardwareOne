@@ -176,6 +176,15 @@ struct DebugFlagMask {
 #define DEBUG_SR_LIFECYCLE      DEBUG_BIT(74)  // init / start / stop verbose
 #define DEBUG_SR_TUNING         DEBUG_BIT(75)  // Auto-tune + confidence threshold
 
+// Bits 76-79: Camera sub-flags (parent: DEBUG_CAMERA at bit 29)
+// All gated through DEBUG_CAMERA_*F macros with `DEBUG_CAMERA | DEBUG_CAMERA_<sub>`,
+// so the parent toggle still works as a master switch and sub-flags refine
+// *which* camera noise gets through. Mirrors the G2 sub-flag pattern.
+#define DEBUG_CAMERA_LIFECYCLE  DEBUG_BIT(76)  // initCamera(), stopCamera(), PWDN/RESET sequencing, GPIO state
+#define DEBUG_CAMERA_CAPTURE    DEBUG_BIT(77)  // captureFrame(), JPEG validation, frame buffer, recovery path
+#define DEBUG_CAMERA_SETTINGS   DEBUG_BIT(78)  // Runtime resolution / quality / sensor register changes
+#define DEBUG_CAMERA_VIDEO      DEBUG_BIT(79)  // Video recording start/finalize, frame writing, encoder state
+
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
 // This structure tracks which specific sub-categories are enabled
@@ -199,10 +208,11 @@ struct DebugSubFlags {
   bool wifiDriver;      // ESP-IDF API calls, low-level operations
   
   // Storage sub-flags
-  bool storageFiles;    // File read/write/delete operations
-  bool storageJson;     // JSON parsing, serialization, validation
-  bool storageSettings; // Settings load/save, module registration
-  bool storageMigration;// Filesystem migrations, directory creation
+  bool storageFiles;       // File read/write/delete operations
+  bool storageJson;        // JSON parsing, serialization, validation
+  bool storageSettings;    // Settings load/save, module registration
+  bool storageMigration;   // Filesystem migrations, directory creation
+  bool storagePermissions; // [PERM] DENY audit lines from VFS::*Guarded
   
   // System sub-flags
   bool systemBoot;      // Boot sequence, initialization
@@ -457,6 +467,12 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define DEBUG_G2_HEARTBEATF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_G2 | DEBUG_G2_HEARTBEAT, fmt, ##__VA_ARGS__)
 #define DEBUG_G2_DUMPF(fmt, ...)      DEBUGF_QUEUE_DEBUG(DEBUG_G2 | DEBUG_G2_DUMP,      fmt, ##__VA_ARGS__)
 #define DEBUG_CAMERAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CAMERA, fmt, ##__VA_ARGS__)
+// Camera sub-flag macros — gate on parent OR sub-flag so the Camera "All"
+// toggle still acts as a master switch. Mirrors DEBUG_G2_*F.
+#define DEBUG_CAMERA_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CAMERA | DEBUG_CAMERA_LIFECYCLE, fmt, ##__VA_ARGS__)
+#define DEBUG_CAMERA_CAPTUREF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_CAMERA | DEBUG_CAMERA_CAPTURE,   fmt, ##__VA_ARGS__)
+#define DEBUG_CAMERA_SETTINGSF(fmt, ...)  DEBUGF_QUEUE_DEBUG(DEBUG_CAMERA | DEBUG_CAMERA_SETTINGS,  fmt, ##__VA_ARGS__)
+#define DEBUG_CAMERA_VIDEOF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_CAMERA | DEBUG_CAMERA_VIDEO,     fmt, ##__VA_ARGS__)
 #define DEBUG_MICF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MICROPHONE, fmt, ##__VA_ARGS__)
 // Legacy DEBUG_FRAMEF and DEBUG_DATAF removed - use per-sensor macros instead
 #define DEBUG_THERMAL_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_THERMAL_FRAME, fmt, ##__VA_ARGS__)
@@ -547,6 +563,8 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 
 // INFO macros - Optional (controlled by debug flags)
 #define INFO_SENSORSF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_SENSORS, "[INFO][SENSORS] " fmt, ##__VA_ARGS__); } while (0)
+#define INFO_CAMERAF(fmt, ...)       do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_CAMERA | DEBUG_CAMERA_LIFECYCLE, "[INFO][CAMERA] " fmt, ##__VA_ARGS__); } while (0)
+#define INFO_CAMERA_VIDEOF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_CAMERA | DEBUG_CAMERA_VIDEO,     "[INFO][VIDEO] "  fmt, ##__VA_ARGS__); } while (0)
 #define INFO_I2CF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_I2C, "[INFO][I2C] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_ESPNOWF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ESPNOW_CORE, "[INFO][ESPNOW] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_AUTOMATIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_AUTOMATIONS, "[INFO][AUTO] " fmt, ##__VA_ARGS__); } while (0)
@@ -645,6 +663,10 @@ const char* cmd_debugsse(const String& argsInput);
 const char* cmd_debugcli(const String& argsInput);
 const char* cmd_debugsensorsgeneral(const String& argsInput);
 const char* cmd_debugcamera(const String& argsInput);
+const char* cmd_debugcameralifecycle(const String& a);
+const char* cmd_debugcameracapture(const String& a);
+const char* cmd_debugcamerasettings(const String& a);
+const char* cmd_debugcameravideo(const String& a);
 const char* cmd_debugmicrophone(const String& argsInput);
 const char* cmd_debugwifi(const String& argsInput);
 const char* cmd_debugstorage(const String& argsInput);
@@ -700,6 +722,7 @@ const char* cmd_debugstoragefiles(const String& argsInput);
 const char* cmd_debugstoragejson(const String& argsInput);
 const char* cmd_debugstoragesettings(const String& argsInput);
 const char* cmd_debugstoragemigration(const String& argsInput);
+const char* cmd_debugstoragepermissions(const String& argsInput);
 const char* cmd_debugsystemboot(const String& argsInput);
 const char* cmd_debugsystemconfig(const String& argsInput);
 const char* cmd_debugsystemtasks(const String& argsInput);

@@ -535,7 +535,7 @@ bool saveMeshPeers() {
   gSensorPollingPaused = true;
 
   FsLockGuard fsGuard("mesh.peers.save");
-  File file = LittleFS.open(MESH_PEERS_FILE, "w");
+  File file = VFS::openGuarded(MESH_PEERS_FILE, "w", VFS::systemAuth("espnow.mesh_peers_save"), true);
   if (!file) {
     gSensorPollingPaused = wasPaused;
     return false;
@@ -600,7 +600,7 @@ static bool saveEspNowDevices() {
   if (!filesystemReady) return false;
 
   FsLockGuard fsGuard("espnow.devices.save");
-  File f = LittleFS.open(ESPNOW_DEVICES_FILE, "w");
+  File f = VFS::openGuarded(ESPNOW_DEVICES_FILE, "w", VFS::systemAuth("espnow.devices_save"), true);
   if (!f) return false;
   int skipped = 0;
 
@@ -674,7 +674,7 @@ static void loadMeshPeers() {
   gSensorPollingPaused = true;
 
   FsLockGuard fsGuard("mesh.peers.load");
-  File file = LittleFS.open(MESH_PEERS_FILE, "r");
+  File file = VFS::openGuarded(MESH_PEERS_FILE, "r", VFS::systemAuth("espnow.mesh_peers_load"));
   if (!file) {
     gSensorPollingPaused = wasPaused;
     DEBUGF(DEBUG_ESPNOW_MESH, "[MESH] No saved peer list found");
@@ -2621,16 +2621,30 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     }
 
     // Create the user
+    //
+    // Trusted: V3 USER_SYNC has already verified the sender on three counts
+    // before reaching here:
+    //   1. The frame is encrypted (ESPNOW_V3_FLAG_ENCRYPTED checked above).
+    //   2. The payload-supplied `adminUser`/`adminPass` pass isValidUser().
+    //   3. `adminUser` passes isAdminUser() — i.e. an admin on a peer device
+    //      authorized this sync.
+    // The local users.json is owned by the system — the rule table grants
+    // PERM_READ to admin and PERM_ALL only to system, so admin AuthContext
+    // would be denied write here anyway. This matches every other
+    // users.json mutation in System_User.cpp (createAdminAccount,
+    // setUserBan, updateLastSeen, etc.), all of which use systemAuth().
     {
       FsLockGuard guard("user_sync.create");
 
-      if (!LittleFS.exists(USERS_JSON_FILE)) {
+      AuthContext userSyncCtx = VFS::systemAuth("user_sync.create");
+
+      if (!VFS::existsGuarded(USERS_JSON_FILE, userSyncCtx)) {
         ERROR_ESPNOWF("[USER_SYNC] users.json not found");
         v3_send_command_response(recv_info->src_addr, h->msgId, false, "users.json not found", strlen("users.json not found"));
         return true;
       }
 
-      File f = LittleFS.open(USERS_JSON_FILE, "r");
+      File f = VFS::openGuarded(USERS_JSON_FILE, "r", userSyncCtx);
       if (!f) {
         ERROR_ESPNOWF("[USER_SYNC] Could not open users.json");
         v3_send_command_response(recv_info->src_addr, h->msgId, false, "Could not open users.json", strlen("Could not open users.json"));
@@ -2665,7 +2679,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
       newUser["bootCount"]   = gBootCounter;
       userDoc["nextId"] = nextId + 1;
 
-      f = LittleFS.open(USERS_JSON_FILE, "w");
+      f = VFS::openGuarded(USERS_JSON_FILE, "w", userSyncCtx);
       if (!f || serializeJson(userDoc, f) == 0) {
         if (f) f.close();
         ERROR_ESPNOWF("[USER_SYNC] Failed to write users.json");
@@ -3462,12 +3476,12 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
         snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderMacHex.c_str());
         
         FsLockGuard guard("v3file.write");
-        LittleFS.mkdir("/espnow");
-        LittleFS.mkdir("/espnow/received");
-        LittleFS.mkdir(deviceDir);
+        VFS::mkdirGuarded("/espnow", VFS::systemAuth("espnow.v3_file_write_mkdir"));
+        VFS::mkdirGuarded("/espnow/received", VFS::systemAuth("espnow.v3_file_write_mkdir"));
+        VFS::mkdirGuarded(deviceDir, VFS::systemAuth("espnow.v3_file_write_mkdir"));
         char filepath[128];
         snprintf(filepath, sizeof(filepath), "%s/%s", deviceDir, gActiveFileTransfer->filename);
-        File f = LittleFS.open(filepath, "w");
+        File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("espnow.v3_file_write"), true);
         if (f) {
           f.write(gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
           f.close();
@@ -3884,7 +3898,7 @@ static bool ensureCaptureFile(time_t now) {
   }
   if (!gEspNowCaptureMkdirTried) {
     gEspNowCaptureMkdirTried = true;
-    if (!VFS::exists("/sd/espnow")) VFS::mkdir("/sd/espnow");
+    if (!VFS::existsGuarded("/sd/espnow", VFS::systemAuth("espnow.capture_mkdir"))) VFS::mkdirGuarded("/sd/espnow", VFS::systemAuth("espnow.capture_mkdir"));
   }
   return true;
 }
@@ -3945,7 +3959,7 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
     (unsigned)h->fragIndex, (unsigned)h->fragCount, b64);
   if (n <= 0) return;
 
-  File f = VFS::open(gEspNowCapturePath, "a", true);
+  File f = VFS::openGuarded(gEspNowCapturePath, "a", VFS::systemAuth("espnow.capture_append"), true);
   if (!f) return;
   f.write((const uint8_t*)line, (size_t)n);
   f.close();
@@ -4370,13 +4384,13 @@ static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& mani
   snprintf(path, sizeof(path), "/system/manifests/%s.json", hashHex);
   
   // Ensure directory exists
-  if (!LittleFS.exists("/system/manifests")) {
-    LittleFS.mkdir("/system/manifests");
+  if (!VFS::existsGuarded("/system/manifests", VFS::systemAuth("espnow.manifest_cache_mkdir"))) {
+    VFS::mkdirGuarded("/system/manifests", VFS::systemAuth("espnow.manifest_cache_mkdir"));
   }
-  
+
   // Write manifest
   FsLockGuard fsGuard("pair.manifest.cache");
-  File f = LittleFS.open(path, "w");
+  File f = VFS::openGuarded(path, "w", VFS::systemAuth("espnow.manifest_cache_write"), true);
   if (!f) {
     broadcastOutput("[BOND] ERROR: Failed to open manifest cache file");
     return false;
@@ -4468,10 +4482,10 @@ static bool cacheSettingsToLittleFS(const uint8_t* peerMac, const String& settin
   
   // Ensure per-peer directory exists (parent dirs created at filesystem init)
   FsLockGuard fsGuard("pair.settings.cache");
-  if (!LittleFS.exists(dirPath)) { LittleFS.mkdir(dirPath); }
-  
+  if (!VFS::existsGuarded(dirPath, VFS::systemAuth("espnow.settings_cache_mkdir"))) { VFS::mkdirGuarded(dirPath, VFS::systemAuth("espnow.settings_cache_mkdir")); }
+
   // Write settings
-  File f = LittleFS.open(filePath, "w");
+  File f = VFS::openGuarded(filePath, "w", VFS::systemAuth("espnow.settings_cache_write"), true);
   if (!f) {
     ERROR_ESPNOWF("[SETTINGS_CACHE] Failed to open %s for writing", filePath);
     return false;
@@ -4510,13 +4524,13 @@ String loadSettingsFromCache(const uint8_t* peerMac) {
   snprintf(filePath, sizeof(filePath), "/system/espnow/peers/%s/settings.json", macStr);
   DEBUG_ESPNOWF("[SETTINGS_LOAD] Checking path: %s", filePath);
   
-  if (!LittleFS.exists(filePath)) {
+  if (!VFS::existsGuarded(filePath, VFS::systemAuth("espnow.settings_cache_load"))) {
     DEBUG_ESPNOWF("[SETTINGS_LOAD] File does not exist");
     return "";  // Not cached
   }
-  
+
   FsLockGuard fsGuard("pair.settings.load");
-  File f = LittleFS.open(filePath, "r");
+  File f = VFS::openGuarded(filePath, "r", VFS::systemAuth("espnow.settings_cache_load"));
   if (!f) {
     ERROR_ESPNOWF("[SETTINGS_LOAD] Failed to open file");
     return "";
@@ -4618,7 +4632,7 @@ static void sendBondSettings(const uint8_t* peerMac) {
     DEBUG_ESPNOWF("[SETTINGS_SEND] Generated settings JSON: %d bytes", settingsLen);
 
     FsLockGuard guard("pair.settings.send");
-    File f = LittleFS.open(tempPath.c_str(), "w");
+    File f = VFS::openGuarded(tempPath, "w", VFS::systemAuth("espnow.settings_send_temp"), true);
     if (!f) {
       ERROR_ESPNOWF("[SETTINGS_SEND] Cannot create %s", tempPath.c_str());
       sSettingsTransferInProgress = false;
@@ -4645,7 +4659,7 @@ static void sendBondSettings(const uint8_t* peerMac) {
   // Cleanup temp file
   {
     FsLockGuard guard("pair.settings.cleanup");
-    LittleFS.remove(tempPath);
+    VFS::removeGuarded(tempPath, VFS::systemAuth("espnow.settings_send_cleanup"));
     DEBUG_ESPNOWF("[SETTINGS_SEND] Cleaned up temp file");
   }
   
@@ -4658,7 +4672,7 @@ static void sendBondSettings(const uint8_t* peerMac) {
   // /espnow/received/<mac>/automations.json and broadcasts a formatted summary.
   {
     extern const char* AUTOMATIONS_JSON_FILE;
-    if (filesystemReady && LittleFS.exists(AUTOMATIONS_JSON_FILE)) {
+    if (filesystemReady && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth("espnow.bond_automations_check"))) {
       vTaskDelay(pdMS_TO_TICKS(200));  // Brief gap between transfers
       bool autoSent = sendFileToMac(peerMac, String(AUTOMATIONS_JSON_FILE));
       if (autoSent) {
@@ -4762,16 +4776,16 @@ static String loadManifestFromCache(const uint8_t fwHash[16]) {
   char path[64];
   snprintf(path, sizeof(path), "/system/manifests/%s.json", hashHex);
   
-  if (!LittleFS.exists(path)) {
+  if (!VFS::existsGuarded(path, VFS::systemAuth("espnow.manifest_load"))) {
     return "";  // Not cached
   }
-  
+
   FsLockGuard fsGuard("pair.manifest.load");
-  File f = LittleFS.open(path, "r");
+  File f = VFS::openGuarded(path, "r", VFS::systemAuth("espnow.manifest_load"));
   if (!f) {
     return "";
   }
-  
+
   String manifest = f.readString();
   f.close();
   
@@ -5554,11 +5568,11 @@ const char* checkEspNowFirstTimeSetup() {
 // Load named ESP-NOW devices (paired devices with names/keys) from filesystem
 static void loadEspNowDevices() {
   if (!gEspNow) return;
-  if (!LittleFS.exists(ESPNOW_DEVICES_FILE)) {
+  if (!VFS::existsGuarded(ESPNOW_DEVICES_FILE, VFS::systemAuth("espnow.devices_load"))) {
     DEBUGF(DEBUG_ESPNOW_MESH, "[ESPNOW] No saved devices file at %s", ESPNOW_DEVICES_FILE);
     return;
   }
-  File f = LittleFS.open(ESPNOW_DEVICES_FILE, "r");
+  File f = VFS::openGuarded(ESPNOW_DEVICES_FILE, "r", VFS::systemAuth("espnow.devices_load"));
   if (!f) {
     WARN_ESPNOWF("[ESPNOW] Failed to open %s for reading", ESPNOW_DEVICES_FILE);
     return;
@@ -6288,8 +6302,8 @@ void processMeshHeartbeats() {
     {
       FsLockGuard guard("bond.manifest.send");
       if (filesystemReady) {
-        if (!LittleFS.exists("/system")) LittleFS.mkdir("/system");
-        File f = LittleFS.open(tempPath.c_str(), "w");
+        if (!VFS::existsGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"))) VFS::mkdirGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"));
+        File f = VFS::openGuarded(tempPath, "w", VFS::systemAuth("espnow.bond_manifest_send"), true);
         if (f) { f.print(manifest); f.close(); BROADCAST_PRINTF("[BOND] 9d: manifest written to %s", tempPath.c_str()); }
         else { BROADCAST_PRINTF("[BOND] 9d: ERROR failed to write manifest file"); }
       } else {
@@ -6303,7 +6317,7 @@ void processMeshHeartbeats() {
     BROADCAST_PRINTF("[BOND] 9d: sendFileToMac result=%d", (int)fileSent);
     {
       FsLockGuard guard("bond.manifest.cleanup");
-      LittleFS.remove(tempPath.c_str());
+      VFS::removeGuarded(tempPath, VFS::systemAuth("espnow.bond_manifest_cleanup"));
     }
     if (fileSent) {
       BROADCAST_PRINTF("[BOND] 9d: manifest sent to peer");
@@ -8560,8 +8574,11 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
     return false;
   }
 
-  // Security: Block sending sensitive files (credentials, passwords, keys)
-  if (!canRead(localPath)) {
+  // Security: Block sending sensitive files (credentials, passwords, keys).
+  // Uses gExecAuthContext so CLI/web callers see the same allow/deny they
+  // would on a direct read; internal bond/USER_SYNC callers run through the
+  // same gate using whatever context the caller had set.
+  if (!canRead(localPath, gExecAuthContext)) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] SECURITY: Blocked sending sensitive file: %s", localPath.c_str());
     broadcastOutput("[ESP-NOW] SECURITY: Cannot send file containing credentials: " + localPath);
     return false;
@@ -8569,14 +8586,14 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
 
   {
     FsLockGuard guard("espnow.send_file.exists");
-    if (!LittleFS.exists(localPath)) {
+    if (!VFS::existsGuarded(localPath, gExecAuthContext)) {
       DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] File not found: %s", localPath.c_str());
       return false;
     }
   }
 
   FsLockGuard fsGuard("espnow.send_file.open");
-  File file = LittleFS.open(localPath, "r");
+  File file = VFS::openGuarded(localPath, "r", gExecAuthContext);
   if (!file) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] Cannot open file: %s", localPath.c_str());
     return false;
@@ -8825,13 +8842,13 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
     BROADCAST_PRINTF("[ESP-NOW][mesh] file send accepted MAC=%s", formatMacAddress(mac).c_str());
   }
 
-  if (!LittleFS.exists(filepath)) {
+  if (!VFS::existsGuarded(filepath, gExecAuthContext)) {
     snprintf(sendfileBuffer, sizeof(sendfileBuffer), "Error: File not found: %s", filepath.c_str());
     return sendfileBuffer;
   }
 
   // Get file info for reporting
-  File file = LittleFS.open(filepath, "r");
+  File file = VFS::openGuarded(filepath, "r", gExecAuthContext);
   if (!file) {
     snprintf(sendfileBuffer, sizeof(sendfileBuffer), "Error: Cannot open file: %s", filepath.c_str());
     return sendfileBuffer;
@@ -9607,11 +9624,11 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
   
   // If no argument, list all cached manifests
   if (args.length() == 0) {
-    if (!LittleFS.exists(manifestDir)) {
+    if (!VFS::existsGuarded(manifestDir, gExecAuthContext)) {
       return "No cached manifests. Use 'bondrequestmanifest' to fetch from peer.";
     }
-    
-    File dir = LittleFS.open(manifestDir);
+
+    File dir = VFS::openGuarded(manifestDir, "r", gExecAuthContext);
     if (!dir || !dir.isDirectory()) {
       return "Cannot open manifests directory.";
     }
@@ -9644,12 +9661,12 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
   // Show specific manifest by fwHash
   char path[96];
   snprintf(path, sizeof(path), "%s/%s.json", manifestDir, args.c_str());
-  if (!LittleFS.exists(path)) {
+  if (!VFS::existsGuarded(path, gExecAuthContext)) {
     return "Manifest not found. Use 'bondshowremotemanifest' to list available.";
   }
-  
+
   FsLockGuard guard("bond.manifest.read");
-  File f = LittleFS.open(path, "r");
+  File f = VFS::openGuarded(path, "r", gExecAuthContext);
   if (!f) {
     return "Failed to open manifest file.";
   }

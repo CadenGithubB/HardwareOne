@@ -2,6 +2,7 @@
 #define FILESYSTEM_H
 
 #include <Arduino.h>
+#include "System_User.h"   // AuthContext for the role-aware permission API
 
 // Forward declarations
 class String;
@@ -24,7 +25,7 @@ extern bool filesystemReady;
  * @param asJson true for JSON format, false for text
  * @return true on success, false on error
  */
-bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hideAdminPaths = false);
+bool buildFilesListing(const String& inPath, String& out, bool asJson, const AuthContext& ctx, bool hideAdminPaths = false);
 
 // Filesystem command registry (for system_utils.cpp)
 struct CommandEntry;  // Forward declaration
@@ -58,69 +59,79 @@ enum FilePermission {
   PERM_ALL    = (PERM_READ | PERM_WRITE | PERM_DELETE | PERM_RENAME | PERM_CREATE | PERM_IMPORT)
 };
 
-/**
- * Check if a file can be read (blocks sensitive files with credentials/passwords)
- * @param path Absolute path to check
- * @return true if reading is allowed
- */
-bool canRead(const String& path);
+// ============================================================================
+// Permission API — three-role rule table
+// ============================================================================
+//
+// Every check resolves the caller's effective role:
+//   - SYSTEM   — internal trusted code (transport==SOURCE_INTERNAL && user=="system")
+//   - ADMIN    — authenticated user whose username is admin per isAdminUser()
+//   - USER     — authenticated non-admin user
+//   - ANON     — empty `ctx.user` (no auth). DENIED for every operation.
+//                Reaching this state from FS code is a bug above; the deny
+//                + [PERM] log surfaces the upstream gap.
+//
+// Each PathRule grants three independent perm masks (userPerms / adminPerms /
+// systemPerms). adminPerms is typically a superset of userPerms; systemPerms
+// is typically PERM_ALL for files the system manages.
+//
+// Anonymous callers always get 0 perms regardless of the rule. This is
+// intentional — there is no legitimate code path that should reach the FS
+// without auth.
 
 /**
- * Check if a file can be deleted
+ * Role-aware read check.
  * @param path Absolute path to check
- * @return true if deletion is allowed
+ * @param ctx  Caller identity (transport + user)
+ * @return true if reading is allowed for this caller
  */
-bool canDelete(const String& path);
+bool canRead   (const String& path, const AuthContext& ctx);
+bool canEdit   (const String& path, const AuthContext& ctx);
+bool canDelete (const String& path, const AuthContext& ctx);
+bool canRename (const String& path, const AuthContext& ctx);
+bool canCreate (const String& path, const AuthContext& ctx);
+bool canImport (const String& path, const AuthContext& ctx);
 
 /**
- * Check if a file can be edited (written to)
- * @param path Absolute path to check
- * @return true if editing is allowed
- */
-bool canEdit(const String& path);
-
-/**
- * Check if a file/folder can be renamed
- * @param path Absolute path to check
- * @return true if renaming is allowed
- */
-bool canRename(const String& path);
-
-/**
- * Check if a file/folder can be created in the given path (CLI mkdir/filecreate)
- * @param path Absolute path to check
- * @return true if creation is allowed
- */
-bool canCreate(const String& path);
-
-/**
- * Check if a file can be imported/uploaded to the given path
- * @param path Absolute path to check
- * @return true if import is allowed
- */
-bool canImport(const String& path);
-
-/**
- * Get aggregate permissions for contents of a directory (for toolbar buttons)
- * @param dirPath Absolute directory path
- * @return Bitmask of FilePermission flags that apply to children
- */
-uint8_t getDirPerms(const String& dirPath);
-
-/**
- * Get permission flags for a given path
- * @param path Absolute path to check
+ * Aggregate permissions for a path under the caller's identity.
+ * Pure query: never logs. Use freely for UI button-state computation.
  * @return Bitmask of FilePermission flags
  */
-uint8_t getPermissions(const String& path);
+uint8_t getPermissions(const String& path, const AuthContext& ctx);
 
 /**
- * Check if a path is restricted to admin users only.
- * Covers /system, /logging_captures and everything under them.
- * @param path Absolute path to check
- * @return true if admin role is required to access this path
+ * Emit a single [PERM] DENY line for an actual access attempt that was
+ * refused. Called from VFS::*Guarded after canX returns false — the canX
+ * functions themselves are silent so aggregate queries (getPermissions,
+ * file-listing UI) don't spam the log.
+ *
+ * `needed` is the FilePermission bit being checked (PERM_READ etc.).
+ * `op` is a short verb for the log line ("read", "edit", "create", ...).
+ */
+void logFsAccessDeny(const String& path, const AuthContext& ctx,
+                     uint8_t needed, const char* op);
+
+/**
+ * Aggregate permissions a child of `dirPath` would receive under the
+ * caller's identity. Used to drive toolbar enable/disable in file UIs.
+ */
+uint8_t getDirPerms(const String& dirPath, const AuthContext& ctx);
+
+/**
+ * True if the path's rule was authored as "admin-only territory" — i.e.
+ * userPerms is 0 AND (adminPerms != 0 OR systemPerms != 0). Used by the
+ * file-listing UI to hide entire branches from non-admins. Identity-free
+ * because it's about the path's classification, not the caller.
  */
 bool isAdminOnlyPath(const String& path);
+
+/**
+ * Path normalization for guarded VFS access. Rejects path traversal
+ * sequences (".."), collapses double slashes, strips a trailing slash
+ * (except for "/"), and rejects empty paths. Returns true if the path
+ * was acceptable; on success `out` holds the canonicalised form.
+ */
+bool normalizeFsPath(const String& in, String& out);
 
 // ============================================================================
 // File I/O Helpers

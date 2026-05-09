@@ -1,0 +1,185 @@
+syntax = "proto3";
+
+package even_connect.g2.even_ai;
+
+import "common.proto";
+
+// =============================================================================
+// EvenAIDataPackage — payload protobuf for sid=7 (UI_FOREGROUND_EVEN_AI_ID).
+// =============================================================================
+// Voice + AI front-pane card. Field 1 = commandId, field 2 = magicRandom,
+// fields 3..N = per-cmd nested sub-message (only one populated per packet).
+//
+// The firmware (System_G2_Protocol.h:158+) implements a SUBSET of the
+// commands here — see "FIRMWARE COVERAGE" notes below. The unhandled
+// device-initiated commands (PROMPT, SKILL, EVENT, CONFIG, COMM_RSP) may
+// be arriving on the notify char and getting silently dropped or logged
+// as "unknown EvenAI subCmd".
+
+enum eEvenAICommandId {
+  NONE_COMMAND = 0;
+  CTRL         = 1;   // FIRMWARE: G2_AI_CMD_CTRL
+  VAD_INFO     = 2;   // FIRMWARE: NOT IMPLEMENTED — voice activity detection
+  ASK          = 3;   // FIRMWARE: G2_AI_CMD_ASK
+  ANALYSE      = 4;   // FIRMWARE: G2_AI_CMD_ANALYSE
+  REPLY        = 5;   // FIRMWARE: G2_AI_CMD_REPLY
+  SKILL        = 6;   // FIRMWARE: NOT IMPLEMENTED — device → host skill request
+                      //           (e.g. "set brightness", "start translate")
+  PROMPT       = 7;   // FIRMWARE: NOT IMPLEMENTED — device → host UI prompt
+                      //           (network err, server err, etc.)
+  EVENT        = 8;   // FIRMWARE: NOT IMPLEMENTED — device → host scroll/done
+  HEARTBEAT    = 9;   // FIRMWARE: G2_AI_CMD_HEARTBEAT
+  CONFIG       = 10;  // FIRMWARE: NOT IMPLEMENTED — voice/stream-speed config
+  COMM_RSP     = 161; // FIRMWARE: NOT IMPLEMENTED — generic ack
+}
+
+enum eEvenAIStatus {
+  STATUS_UNKNOWN  = 0;
+  EVEN_AI_WAKE_UP = 1;  // wake-word firing — listen UI
+  EVEN_AI_ENTER   = 2;  // open card, no listening
+  EVEN_AI_EXIT    = 3;
+}
+
+enum eEvenAIVADStatus {
+  VAD_STATUS_UNKNOWN = 0;
+  VAD_START          = 1;
+  VAD_END            = 2;
+  VAD_TIMEOUT        = 3;
+}
+
+enum eEvenAIPrompt {
+  PROMPT_NONE        = 0;
+  NETWORK_ERR        = 1;
+  BLE_DISCONNECT     = 2;
+  SERVER_ERR         = 3;
+  TROUBLE_UNDERSTAND = 4;
+  COMMAND_UNSUPPORT  = 5;
+  AUDIO_ERROR        = 6;
+  ASR_SERVER_ERR     = 7;
+  AI_SERVER_ERR      = 8;
+  COMMAND_EXE_FAIL   = 9;
+}
+
+enum eEvenAISkill {
+  SKILL_NONE      = 0;
+  BRIGHTNESS      = 1;
+  TRANSLATE_CTRL  = 2;
+  NOTIFICATION    = 3;
+  TELEPROMPT      = 4;
+  NAVIGATE        = 5;
+  CONVERSATE      = 6;
+  QUICKLIST       = 7;
+  AUTO_BRIGHTNESS = 8;
+}
+
+enum eEvenAIEvent {
+  EVENT_NONE      = 0;
+  SCROLL          = 1;  // user scrolled the AI card
+  STREAM_COMPLETE = 2;  // device confirms stream ended
+}
+
+// CTRL = 1
+message EvenAIControl {
+  eEvenAIStatus              status    = 1;
+  even_connect.g2.common.eErrorCode errorCode = 2;
+}
+
+// VAD_INFO = 2
+message EvenAIVADInfo {
+  eEvenAIVADStatus           vadStatus = 1;
+  even_connect.g2.common.eErrorCode errorCode = 2;
+}
+
+// ASK = 3
+message EvenAIAskInfo {
+  bytes                      text      = 1;  // UTF-8 user utterance
+  even_connect.g2.common.eErrorCode errorCode = 2;
+}
+
+// ANALYSE = 4
+message EvenAIAnalyseInfo {
+  bytes                      text      = 1;
+  int32                      analyseId = 2;
+  even_connect.g2.common.eErrorCode errorCode = 3;
+}
+
+// REPLY = 5  — host→device streamed reply, multiple chunks per response
+message EvenAIReplyInfo {
+  int32                      cmdCnt        = 1;  // chunk index (FIRMWARE: G2_AI_REPLY_F_CNT)
+  int32                      streamEnable  = 2;  // 1 = streaming, 0 = single shot
+  int32                      textMode      = 3;  // unverified
+  bytes                      text          = 4;  // UTF-8 reply chunk
+  even_connect.g2.common.eErrorCode errorCode = 5;
+  int32                      fTextEnd      = 6;  // 1 = last chunk (FIRMWARE: G2_AI_REPLY_F_END)
+}
+
+// SKILL = 6  — device → host: "execute this skill"
+message EvenAISkillInfo {
+  int32                      streamEnable = 1;
+  eEvenAISkill               skillId      = 2;
+  int32                      skillParam   = 3;
+  bytes                      text         = 4;
+  even_connect.g2.common.eErrorCode errorCode = 5;
+  int32                      fTextEnd     = 6;
+}
+
+// PROMPT = 7  — device → host: "show this error to user"
+message EvenAIPromptInfo {
+  eEvenAIPrompt              promptType = 1;
+  even_connect.g2.common.eErrorCode errorCode = 2;
+}
+
+// EVENT = 8  — device → host: scroll, stream-complete, etc.
+message EvenAIEvent {
+  eEvenAIEvent               event     = 1;
+  even_connect.g2.common.eErrorCode errorCode = 2;
+}
+
+// HEARTBEAT = 9
+message EvenAIHeartbeat {
+  int32                      hbCnt     = 1;
+  even_connect.g2.common.eErrorCode errorCode = 2;
+}
+
+// CONFIG = 10
+message EvenAIConfig {
+  int32                      voiceSwitch = 1;
+  int32                      streamSpeed = 2;
+  even_connect.g2.common.eErrorCode errorCode = 3;
+}
+
+// COMM_RSP = 161
+message EvenAICommRsp {
+  even_connect.g2.common.eErrorCode errorCode = 1;
+}
+
+// Top-level wrapper. Field-tag-to-cmd mapping (verified against
+// EvenAIDataPackage.pb.dart BuilderInfo):
+//   commandId   = 1   (FIRMWARE: G2_AI_F_CMD)
+//   magicRandom = 2   (FIRMWARE: G2_AI_F_MAGIC)
+//   ctrl        = 3   (FIRMWARE: G2_AI_F_CTRL)         CTRL=1
+//   vadInfo     = 4                                    VAD_INFO=2
+//   ask         = 5   (FIRMWARE: G2_AI_F_ASK)          ASK=3
+//   analyse     = 6   (FIRMWARE: G2_AI_F_ANALYSE)      ANALYSE=4
+//   reply       = 7   (FIRMWARE: G2_AI_F_REPLY)        REPLY=5
+//   skill       = 8                                    SKILL=6
+//   prompt      = 9                                    PROMPT=7
+//   event       = 10                                   EVENT=8
+//   heartbeat   = 11                                   HEARTBEAT=9
+//   config      = 12                                   CONFIG=10
+//   commRsp     = 13                                   COMM_RSP=161
+message EvenAIDataPackage {
+  eEvenAICommandId    commandId   = 1;
+  int32               magicRandom = 2;
+  EvenAIControl       ctrl        = 3;
+  EvenAIVADInfo       vadInfo     = 4;
+  EvenAIAskInfo       ask         = 5;
+  EvenAIAnalyseInfo   analyse     = 6;
+  EvenAIReplyInfo     reply       = 7;
+  EvenAISkillInfo     skill       = 8;
+  EvenAIPromptInfo    prompt      = 9;
+  EvenAIEvent         event       = 10;
+  EvenAIHeartbeat     heartbeat   = 11;
+  EvenAIConfig        config      = 12;
+  EvenAICommRsp       commRsp     = 13;
+}

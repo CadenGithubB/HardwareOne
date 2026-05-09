@@ -140,6 +140,7 @@ set(hardwareone_srcs
         G2_Page_TestSuite.cpp
         G2_Page_TextEntry.cpp
         G2_HijackFsm.cpp
+        G2_HijackCmd.cpp
         System_Battery.cpp
         System_CLI.cpp
         System_Command.cpp
@@ -365,3 +366,35 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=format-truncation
     -Wno-error=maybe-uninitialized
 )
+
+# ============================================================================
+# Build-time guard: no raw LittleFS file I/O outside System_VFS.cpp
+# ============================================================================
+# The permission refactor (Phases 1-6) routes every file read/write through
+# VFS::*Guarded with an AuthContext, so the [PERM] DENY audit trail and the
+# role-based rule table actually apply. This check fails the build if anyone
+# reintroduces raw LittleFS.open / .exists / .remove / .rename / .mkdir /
+# .rmdir outside System_VFS.cpp — stops regressions before flash instead of
+# discovering them in an audit months later.
+#
+# Stat queries (totalBytes/usedBytes) and mount/format (begin/format) are
+# NOT file I/O and stay allowed. See tools/check_no_raw_littlefs.py for the
+# exact pattern + comment-line exclusion logic.
+#
+# Runs at CMake configure time — fires on every clean build / reconfigure.
+# Incremental builds skip it (CMake doesn't reconfigure), so the guard
+# catches new code as soon as someone adds it but doesn't slow rebuilds.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+execute_process(
+    COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_LIST_DIR}/tools/check_no_raw_littlefs.py"
+        "${CMAKE_CURRENT_LIST_DIR}"
+    RESULT_VARIABLE _hw_littlefs_check_rc
+    ERROR_VARIABLE  _hw_littlefs_check_err
+)
+if(NOT _hw_littlefs_check_rc EQUAL 0)
+    # Surface the script's stderr verbatim — it already includes the file:line
+    # offenders, the suggested fix, and the AuthContext picker. Wrapping in
+    # FATAL_ERROR halts the build with a clear "configure failed" exit.
+    message(FATAL_ERROR "${_hw_littlefs_check_err}")
+endif()

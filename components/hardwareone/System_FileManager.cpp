@@ -10,6 +10,12 @@
 #include "System_Mutex.h"
 #include "System_VFS.h"
 
+// Phase 4: FileManager has no AuthContext field of its own, so it reads
+// the active dispatch-time context. Every transport (web/serial/BT/OLED)
+// sets this before invoking the FileManager API. If a future caller
+// wants per-instance identity, this should grow into a member field.
+extern AuthContext gExecAuthContext;
+
 // Global instance (optional)
 FileManager* gFileManager = nullptr;
 
@@ -32,11 +38,12 @@ bool FileManager::navigate(const char* path) {
   if (path[0] != '/') return false;
 
   FsLockGuard guard("FileManager.navigate");
-  
+  const AuthContext& ctx = gExecAuthContext;
+
   // Check if directory exists (use VFS for unified access)
-  if (!VFS::exists(path)) return false;
-  
-  File dir = VFS::open(path, "r");
+  if (!VFS::existsGuarded(path, ctx)) return false;
+
+  File dir = VFS::openGuarded(path, "r", ctx);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     return false;
@@ -133,8 +140,9 @@ bool FileManager::getItem(int index, FileEntry& entry) {
   // (This should rarely happen with FILE_MANAGER_MAX_CACHED_ITEMS=64)
 
   FsLockGuard guard("FileManager.getItem.scan");
+  const AuthContext& ctx = gExecAuthContext;
 
-  File dir = VFS::open(state.currentPath, "r");
+  File dir = VFS::openGuarded(state.currentPath, "r", ctx);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     return false;
@@ -179,10 +187,12 @@ bool FileManager::getItem(int index, FileEntry& entry) {
       entry.isFolder = file.isDirectory();
       entry.size = entry.isFolder ? 0 : file.size();
       
-      // Get permissions
+      // Get permissions for the *current* caller (so the toolbar in the
+      // UI reflects what the user can actually do, not what some stale
+      // context allows).
       String fullPath = formatPath(state.currentPath, entry.name);
-      entry.permissions = getPermissions(fullPath);
-      
+      entry.permissions = getPermissions(fullPath, ctx);
+
       file.close();
       dir.close();
       return true;
@@ -207,14 +217,12 @@ int FileManager::getPageEnd() const {
 
 bool FileManager::createFolder(const char* name) {
   if (!name || strlen(name) == 0) return false;
-  
   String fullPath = formatPath(state.currentPath, name);
-  
-  if (!canCreate(fullPath)) return false;
+  const AuthContext& ctx = gExecAuthContext;
 
   FsLockGuard guard("FileManager.createFolder");
-  
-  bool success = VFS::mkdir(fullPath);
+
+  bool success = VFS::mkdirGuarded(fullPath, ctx);
   if (success) {
     state.dirty = true;
     loadDirectory();
@@ -224,16 +232,14 @@ bool FileManager::createFolder(const char* name) {
 
 bool FileManager::createFile(const char* name) {
   if (!name || strlen(name) == 0) return false;
-  
   String fullPath = formatPath(state.currentPath, name);
-  
-  if (!canCreate(fullPath)) return false;
+  const AuthContext& ctx = gExecAuthContext;
 
   FsLockGuard guard("FileManager.createFile");
-  
-  File f = VFS::open(fullPath, "w", true);
+
+  File f = VFS::openGuarded(fullPath, "w", ctx, /*create=*/true);
   if (!f) return false;
-  
+
   f.close();
   state.dirty = true;
   loadDirectory();
@@ -243,72 +249,68 @@ bool FileManager::createFile(const char* name) {
 bool FileManager::deleteItem() {
   FileEntry entry;
   if (!getCurrentItem(entry)) return false;
-  
   String fullPath = formatPath(state.currentPath, entry.name);
-  
-  if (!canDelete(fullPath)) return false;
+  const AuthContext& ctx = gExecAuthContext;
 
   FsLockGuard guard("FileManager.deleteItem");
-  
-  bool success;
-  if (entry.isFolder) {
-    success = VFS::rmdir(fullPath);
-  } else {
-    success = VFS::remove(fullPath);
-  }
-  
+
+  bool success = entry.isFolder
+                   ? VFS::rmdirGuarded(fullPath, ctx)
+                   : VFS::removeGuarded(fullPath, ctx);
+
   if (success) {
     state.dirty = true;
     loadDirectory();
     ensureValidSelection();
   }
-  
   return success;
 }
 
 bool FileManager::renameItem(const char* newName) {
   if (!newName || strlen(newName) == 0) return false;
-  
+
   FileEntry entry;
   if (!getCurrentItem(entry)) return false;
-  
+
   String oldPath = formatPath(state.currentPath, entry.name);
   String newPath = formatPath(state.currentPath, newName);
-  
-  if (!canRename(oldPath)) return false;  // Need rename permission
+  const AuthContext& ctx = gExecAuthContext;
 
   FsLockGuard guard("FileManager.renameItem");
-  
-  bool success = VFS::rename(oldPath, newPath);
+
+  bool success = VFS::renameGuarded(oldPath, newPath, ctx);
   if (success) {
     state.dirty = true;
     loadDirectory();
   }
-  
   return success;
 }
 
 bool FileManager::readFile(const char* filename, String& content) {
   String fullPath = formatPath(state.currentPath, filename);
-  
+  const AuthContext& ctx = gExecAuthContext;
+
   // Pause sensor polling during file I/O
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
 
   FsLockGuard guard("FileManager.readFile");
-  
-  File f = VFS::open(fullPath, "r");
+
+  // Phase 4: previous code skipped any read permission check entirely —
+  // FileManager would happily open sensitive files. openGuarded enforces
+  // canRead now (with sensitive-extension blocks).
+  File f = VFS::openGuarded(fullPath, "r", ctx);
   if (!f) {
     gSensorPollingPaused = wasPaused;
     return false;
   }
-  
+
   content = "";
   while (f.available()) {
     content += (char)f.read();
   }
-  
+
   f.close();
   gSensorPollingPaused = wasPaused;
   return true;
@@ -316,17 +318,16 @@ bool FileManager::readFile(const char* filename, String& content) {
 
 bool FileManager::writeFile(const char* filename, const String& content) {
   String fullPath = formatPath(state.currentPath, filename);
-  
-  if (!canEdit(fullPath)) return false;
-  
+  const AuthContext& ctx = gExecAuthContext;
+
   // Pause sensor polling during file I/O
   extern volatile bool gSensorPollingPaused;
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
 
   FsLockGuard guard("FileManager.writeFile");
-  
-  File f = VFS::open(fullPath, "w", true);
+
+  File f = VFS::openGuarded(fullPath, "w", ctx, /*create=*/true);
   if (!f) {
     gSensorPollingPaused = wasPaused;
     return false;
@@ -367,8 +368,9 @@ bool FileManager::loadDirectory() {
   gSensorPollingPaused = true;
 
   FsLockGuard guard("FileManager.loadDirectory");
+  const AuthContext& ctx = gExecAuthContext;
 
-  File dir = VFS::open(state.currentPath, "r");
+  File dir = VFS::openGuarded(state.currentPath, "r", ctx);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     gSensorPollingPaused = wasPaused;
@@ -407,7 +409,7 @@ bool FileManager::loadDirectory() {
       cachedEntries[cachedCount].isFolder = virtuals[v].isFolder;
       cachedEntries[cachedCount].size = 0;
       String fullPath = formatPath(state.currentPath, virtuals[v].name);
-      cachedEntries[cachedCount].permissions = getPermissions(fullPath);
+      cachedEntries[cachedCount].permissions = getPermissions(fullPath, ctx);
       cachedCount++;
       state.totalItems++;
     }
@@ -450,9 +452,10 @@ bool FileManager::loadDirectory() {
       cachedEntries[cachedCount].isFolder = file.isDirectory();
       cachedEntries[cachedCount].size = cachedEntries[cachedCount].isFolder ? 0 : file.size();
 
-      // Get permissions
+      // Get permissions for the *current* caller — drives toolbar
+      // enable/disable in the UI per actual identity.
       String fullPath = formatPath(state.currentPath, cachedEntries[cachedCount].name);
-      cachedEntries[cachedCount].permissions = getPermissions(fullPath);
+      cachedEntries[cachedCount].permissions = getPermissions(fullPath, ctx);
 
       cachedCount++;
     }
@@ -486,7 +489,9 @@ void FileManager::ensureValidSelection() {
 }
 
 bool FileManager::isProtectedPath(const char* path) {
-  return !canDelete(String(path));
+  // "Protected" is per-caller: a path is protected if the active caller
+  // can't delete it.
+  return !canDelete(String(path), gExecAuthContext);
 }
 
 // Helper functions

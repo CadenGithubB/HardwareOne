@@ -39,6 +39,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Filesystem.h"
+#include "System_VFS.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_User.h"
@@ -106,6 +107,27 @@ static bool isAutoInternalResult(const char* r) {
 bool gAutoLogActive = false;
 String gAutoLogFile = "";
 String gAutoLogAutomationName = "";
+
+// Captured AuthContext of the user who started automation logging. Each
+// automation log line is written via VFS::openGuarded with this context, so
+// the caller's permissions gate every write — not just the initial start.
+//
+// Why captured-and-held instead of read-from-gExecAuthContext at write time:
+// appendAutoLogEntry fires from the automation evaluator (and from command
+// dispatch hooks) at moments that have no relation to any user CLI session,
+// so gExecAuthContext is meaningless or stale at write time. Capturing the
+// starter's identity gives every subsequent write a stable, named principal.
+//
+// Lifecycle: zero-init (anon) at boot. Populated when `autolog start` runs.
+// Cleared back to anon when `autolog stop` runs. While active, the same ctx
+// applies to every line. If the starter's permissions change mid-run (e.g.
+// admin demoted to user), individual writes will start failing — that's the
+// intended behavior; they no longer have the right to write the log.
+//
+// This is the first long-lived AuthContext in the codebase. If you find
+// yourself adding a second (e.g. for scheduled commands), consider
+// generalising the pattern instead of growing per-feature globals.
+AuthContext gAutoLogOwnerCtx;
 extern bool gExecIsAdmin;
 
 // Forward declarations for functions implemented in this file
@@ -224,7 +246,7 @@ static int findJsonObjectEnd(const String& json, int objStart) {
 // Streaming automation parser: reads file in chunks and calls callback for each automation object
 bool streamParseAutomations(const char* path, AutomationCallback callback, void* userData) {
   FsLockGuard guard("streamParseAutos");
-  File f = LittleFS.open(path, "r");
+  File f = VFS::openGuarded(path, "r", VFS::systemAuth("auto.stream_parse"));
   if (!f) return false;
 
   // Read file in chunks, looking for automation objects
@@ -3370,6 +3392,13 @@ const char* cmd_autolog(const String& argsInput) {
     String filename = a.arg(1);
     if (filename.length() == 0) return "Usage: autolog start <filename>";
 
+    // Capture the starter's identity BEFORE flipping gAutoLogActive — every
+    // subsequent appendAutoLogEntry write is gated on this ctx via
+    // VFS::openGuarded. If the caller can't write the path, the LOG_START
+    // line below fails and we roll back cleanly.
+    extern AuthContext gExecAuthContext;
+    gAutoLogOwnerCtx = gExecAuthContext;
+
     gAutoLogActive = true;
     gAutoLogFile = filename;
     gAutoLogAutomationName = "";
@@ -3377,6 +3406,7 @@ const char* cmd_autolog(const String& argsInput) {
     if (!appendAutoLogEntry("LOG_START", "Automation logging started")) {
       gAutoLogActive = false;
       gAutoLogFile = "";
+      gAutoLogOwnerCtx = AuthContext{};  // clear captured identity on failure
       snprintf(getDebugBuffer(), 1024, "Error: Failed to create log file: %s", filename.c_str());
       return getDebugBuffer();
     }
@@ -3393,6 +3423,7 @@ const char* cmd_autolog(const String& argsInput) {
     gAutoLogActive = false;
     gAutoLogFile = "";
     gAutoLogAutomationName = "";
+    gAutoLogOwnerCtx = AuthContext{};  // clear captured identity
 
     return getDebugBuffer();
 

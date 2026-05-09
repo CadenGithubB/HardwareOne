@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package even_connect.g2.even_hub;
+
+// =============================================================================
+// EvenHub — payload protobuf for sid=224 (UI_BACKGROUND_EVENHUB_APP_ID).
+// =============================================================================
+// This is the back-pane render surface — the firmware's main on-lens drawing
+// subsystem. The firmware calls this "EvenCore" (System_G2_Protocol.h:48-54)
+// to avoid implying integration with Even's "EvenHub" plugin SDK; same wire
+// endpoint, different label.
+//
+// Wrapper pattern (matches DevCfgDataPackage / EvenAIDataPackage):
+//   field 1 = commandId  (EvenHub_Cmd_List)
+//   field 2 = magicRandom
+//   fields 3..N = per-cmd nested message bodies
+//
+// **Provenance**: enum integer values verified against base64 descriptors in
+// EvenHub.pbjson.dart. NAMES are FlutterApp RE inferences. Firmware
+// (System_G2_Protocol.h:125-133) defines a SUBSET with shorter empirical
+// names; the integer values match. Use this enum for grep-ability against
+// FlutterApp/RE traces.
+
+// --- EvenHub commands (EvenHub_Cmd_List) -------------------------------------
+// Names from FlutterApp RE. Firmware coverage in trailing comments:
+//   - YES = firmware has a builder/handler for this opcode
+//   - NO  = firmware does not implement (might still receive on the wire)
+enum EvenHub_Cmd_List {
+  APP_REQUEST_CREATE_STARTUP_PAGE_PACKET   = 0;   // YES (G2_CMD_CREATE_STARTUP)
+  OS_RESPONSE_CREATE_STARTUP_PAGE_PACKET   = 1;   // YES (parsed in CREATE-ack path)
+  OS_NOITY_EVENT_TO_APP_PACKET             = 2;   // YES [sic NOTIFY] (state events)
+  APP_UPDATE_IMAGE_RAW_DATA_PACKET         = 3;   // YES (G2_CMD_IMAGE_RAW_DATA)
+  OS_RESPONSE_IMAGE_RAW_DATA_PACKET        = 4;   // YES (image-ack)
+  APP_UPDATE_TEXT_DATA_PACKET              = 5;   // YES (G2_CMD_UPDATE_TEXT)
+  OS_RESPONSE_TEXT_DATA_PACKET             = 6;   // YES (text-ack)
+  APP_REQUEST_REBUILD_PAGE_PACKET          = 7;   // YES (G2_CMD_REBUILD_PAGE)
+  OS_RESPONSE_REBUILD_PAGE_PACKET          = 8;   // YES (rebuild-ack)
+  APP_REQUEST_SHUTDOWN_PAGE_PACKET         = 9;   // YES (G2_CMD_SHUTDOWN_PAGE)
+  OS_RESPONSE_SHUTDOWN_PAGE_PACKET         = 10;  // YES (shutdown-ack)
+  OS_PRIVATE_EVENT_PACKET                  = 11;  // NO  (device-initiated event)
+  APP_REQUEST_HEARTBEAT_PACKET             = 12;  // YES (G2_CMD_HEARTBEAT)
+  OS_RESPONSE_HEARTBEAT_PACKET             = 13;  // YES (heartbeat-ack)
+  OS_PRIVATE_SYSTEM_EVENT_PACKET           = 14;  // NO  (system event from device)
+  APP_REQUEST_AUDIO_CTR_PACKET             = 15;  // YES (G2_CMD_AUDIO_CTRL) [sic CTR]
+  OS_RESPONSE_AUDIO_CTR_PACKET             = 16;  // YES (audio-ack)
+  OS_NOTIFY_MENU_STARTUP_PACKET            = 17;  // YES (G2_CMD_MENU_STARTUP)
+  APP_RESPONSE_MENU_STARTUP_FAILED_PACKET  = 18;  // YES (G2_CMD_MENU_FAILED)
+  APP_REQUEST_OPEN_IMU_PACKET              = 19;  // NO  — phone can REQUEST IMU data
+  OS_RESPONSE_IMU_PACKET                   = 20;  // NO  — IMU samples come back here
+}
+
+// --- On-lens user gestures (OsEventTypeList) ---------------------------------
+// Inside OS_NOITY_EVENT_TO_APP_PACKET (cmd=2). Tells app what the user did
+// on a list/text container. Firmware routes these via sid=0x0D handler.
+enum OsEventTypeList {
+  CLICK_EVENT             = 0;  // tap on focused row / text widget
+  SCROLL_TOP_EVENT        = 1;  // scrolled past top
+  SCROLL_BOTTOM_EVENT     = 2;  // scrolled past bottom
+  DOUBLE_CLICK_EVENT      = 3;  // double-tap
+  FOREGROUND_ENTER_EVENT  = 4;  // page became foreground
+  FOREGROUND_EXIT_EVENT   = 5;  // page lost foreground
+  ABNORMAL_EXIT_EVENT     = 6;
+  SYSTEM_EXIT_EVENT       = 7;  // OS killed the page
+  IMU_DATA_REPORT         = 8;  // streaming IMU samples (only after OPEN_IMU)
+}
+
+// --- Where the gesture came from ---------------------------------------------
+// Useful for distinguishing left arm taps, right arm taps, and ring gestures
+// once the ring bridge is up.
+enum EventSourceType {
+  TOUCH_EVENT_FORM_DUMMY_NULL = 0;  // [sic FORM]
+  TOUCH_EVENT_FROM_GLASSES_R  = 1;
+  TOUCH_EVENT_FROM_RING       = 2;  // bridge active
+  TOUCH_EVENT_FROM_GLASSES_L  = 3;
+}
+
+// --- System-level error codes returned by OS_RESPONSE_* ---------------------
+enum EvenHub_ErrorCode_List {
+  APP_REQUEST_CREATE_PAGE_SUCCESS                   = 0;
+  APP_REQUEST_CREATE_INVAILD_CONTAINER              = 1;   // [sic INVAILD]
+  APP_REQUEST_CREATE_OVERSIZE_RESPONSE_CONTAINER    = 2;
+  APP_REQUEST_CREATE_OUTOFMEMORY_CONTAINER          = 3;
+  APP_REQUEST_UPGRADE_IMAGE_RAW_DATA_SUCCESS        = 4;
+  APP_REQUEST_UPGRADE_IMAGE_RAW_DATA_FAILED         = 5;
+  APP_REQUEST_REBUILD_PAGE_SUCCESS                  = 6;
+  APP_REQUEST_REBUILD_PAGE_FAILD                    = 7;   // [sic FAILD]
+  APP_REQUEST_UPGRADE_TEXT_DATA_SUCCESS             = 8;
+  APP_REQUEST_UPGRADE_TEXT_DATA_FAILED              = 9;
+  APP_REQUEST_UPGRADE_SHUTDOWN_SUCCESS              = 10;
+  APP_REQUEST_UPGRADE_SHUTDOWN_FAILED               = 11;
+  APP_REQUEST_UPGRADE_HEARTBEAT_PACKET_SUCCESS      = 12;
+  APP_REQUEST_AUDIO_CTR_SUCCESS                     = 13;
+  APP_REQUEST_AUDIO_CTR_FAILED                      = 14;
+}
+
+// --- System-event subset (different from OsEventType) -----------------------
+// Inside OS_PRIVATE_SYSTEM_EVENT_PACKET (cmd=14).
+enum SystmEventCommandList {
+  SYSTEM_ENTER_TIMEOUT_PAGE_EVENT = 0;  // device entered idle/timeout screen
+  SYSTEM_TIMEOUT_PAGE_EXIT_EVENT  = 1;  // device left idle screen
+}
+
+// =============================================================================
+// Message bodies — only the wrapper is sketched here. Full message schemas
+// (CreateStartUpPageContainer with TextObject/ListObject/ImageObject,
+// RebuildPagePropertyContainer, ImageRawData chunks, EventInfo, IMU sample
+// vector, etc.) are large. Refer directly to:
+//
+//   docs/FlutterApp-main/lib/src/proto/g2/EvenHub.pb.dart
+//
+// for the full BuilderInfo definitions. Firmware builders for the
+// implemented messages live in System_G2_Protocol.h:328+ — those are the
+// ground-truth wire format. Cross-check fields by hand if porting.
+// =============================================================================
+
+message EvenHubDataPackage {
+  EvenHub_Cmd_List           commandId   = 1;
+  int32                      magicRandom = 2;
+  // Field tags for nested messages 3..N follow the cmd values pattern;
+  // see EvenHub.pb.dart BuilderInfo for exact mapping.
+}

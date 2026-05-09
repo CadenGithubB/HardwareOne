@@ -119,7 +119,9 @@ HijackState nextState(HijackState s, HijackEvent e, bool& legal) {
         // Hijacked (the common path — user taps a probe in the test
         // menu).
         case HijackEvent::ImageProbeBegin:  return HijackState::ImageProbing;
-        case HijackEvent::ImageProbeEnd:    legal = false; return s;
+        // Duplicate / deferred: worker may emit ImageProbeEnd after we are
+        // already Hijacked (BLE wedge + disconnect, or shutdown race).
+        case HijackEvent::ImageProbeEnd:    return s;
       }
       break;
 
@@ -304,8 +306,13 @@ void hijackFsmInit() {
   }
   // Priority 5 sits above idle and below the BLE / page-swap worker
   // tasks so transitions drain promptly without preempting time-
-  // sensitive paths. 3 KB stack covers the DEBUG_G2F path comfortably.
-  const BaseType_t ok = xTaskCreate(fsmWorkerTask, "g2-fsm", 3072,
+  // sensitive paths.
+  // Stack in WORDS (4 bytes). Historical 3072 was 12 KB. Observed
+  // peak ~4.2 KB. 2560 words = 10 KB leaves ~6 KB headroom and reclaims
+  // 2 KB DRAM. The "3 KB stack" claim in the previous comment was off
+  // by a factor of 4 (stack arg is words not bytes).
+  const BaseType_t ok = xTaskCreate(fsmWorkerTask, "g2-fsm",
+                                    /*stack words*/ 2560,
                                     nullptr, 5, &gFsmTaskHandle);
   if (ok != pdPASS) {
     DEBUG_G2F("[FSM] worker task create failed — dispatches will apply inline");

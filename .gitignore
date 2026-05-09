@@ -22,3 +22,7 @@ __pycache__/
 # Nested git repos (have their own repos)
 components/hardwareone/icons/
 components/arduino/
+
+# Vendored upstream / reverse-engineering reference trees (not first-party)
+docs/FlutterApp-main/
+docs/evenrealities_rev_share-main/

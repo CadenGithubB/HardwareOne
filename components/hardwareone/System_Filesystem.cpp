@@ -15,11 +15,15 @@
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_Utils.h"
+#include "System_BuildConfig.h"
 #include "System_ImageManager.h"
 #include "System_Maps.h"
 #include "System_VFS.h"
 
 // External dependencies
+// CLI handlers below read the dispatch-time AuthContext to drive
+// permission checks.
+extern AuthContext gExecAuthContext;
 extern bool readText(const char* path, String& out);
 extern void getTimestampPrefixMsCached(char* buffer, size_t bufferSize);
 extern bool sanitizeAutomationsJson(String& json);
@@ -69,6 +73,12 @@ bool initFilesystem() {
 
   VFS::init();
 
+#if ENABLE_G2_GLASSES
+  if (VFS::isSDAvailable()) {
+    (void)VFS::mkdirGuarded(String(G2_ICON_ANIMATIONS_VFS_PATH), VFS::systemAuth("filesystem.g2_icon_anim_init"));
+  }
+#endif
+
   // Recover any log files left in an inconsistent state by a prior crash or
   // power-cut during rotation. Each call is cheap when no orphan exists
   // (single exists() check). Kept to the known logs that go through
@@ -83,33 +93,42 @@ bool initFilesystem() {
   gImageManager.init();
 #endif
   
-  // Ensure system directories exist
-  LittleFS.mkdir("/logging_captures");
-  LittleFS.mkdir("/system");  // For settings, automations, devices, etc.
-  LittleFS.mkdir("/system/sys_logs");  // For protected system logs (login, errors, command history)
-  LittleFS.mkdir("/system/users");  // For users.json and user settings
-  LittleFS.mkdir("/system/users/user_settings");  // For per-user setting files
-  LittleFS.mkdir("/system/certs");  // For TLS certificates (HTTPS, MQTT)
+  // Ensure system directories exist. All run as system — boot init is the
+  // canonical trusted-internal context (no user identity exists yet).
+  {
+    AuthContext sys = VFS::systemAuth("fs.init.mkdirs");
+    VFS::mkdirGuarded("/logging_captures",            sys);
+    VFS::mkdirGuarded("/system",                      sys);  // settings, automations, devices, etc.
+    VFS::mkdirGuarded("/system/sys_logs",             sys);  // protected system logs
+    VFS::mkdirGuarded("/system/users",                sys);  // users.json + per-user settings dir
+    VFS::mkdirGuarded("/system/users/user_settings",  sys);  // per-user setting files
+    VFS::mkdirGuarded("/system/certs",                sys);  // TLS certs (HTTPS, MQTT)
 #if ENABLE_ONDEVICE_LLM
-  LittleFS.mkdir("/system/llm");  // LLM1 model files (tokenizer embedded)
+    VFS::mkdirGuarded("/system/llm",                  sys);  // LLM1 model files
 #endif
 #if ENABLE_ESPNOW
-  LittleFS.mkdir("/espnow");  // For ESP-NOW related files (received subfolder created on-demand)
-  LittleFS.mkdir("/system/espnow");  // For ESP-NOW config (mesh peers, devices, bond peer settings)
-  LittleFS.mkdir("/system/espnow/peers");  // For per-peer cached settings
+    VFS::mkdirGuarded("/espnow",                      sys);  // ESP-NOW related files
+    VFS::mkdirGuarded("/system/espnow",               sys);  // ESP-NOW config (mesh peers, devices)
+    VFS::mkdirGuarded("/system/espnow/peers",         sys);  // per-peer cached settings
 #endif
 #if ENABLE_MAPS
-  LittleFS.mkdir("/maps");  // For GPS map files (.hwmap)
+    VFS::mkdirGuarded("/maps",                        sys);  // GPS map files (.hwmap)
 #endif
-  
+  }
+
   // Migrate pending_users.json from old location to /system/users/ (one-time)
-  if (LittleFS.exists("/system/pending_users.json") && !LittleFS.exists("/system/users/pending_users.json")) {
-    LittleFS.rename("/system/pending_users.json", "/system/users/pending_users.json");
-    DEBUG_STORAGEF("Migrated pending_users.json to /system/users/");
+  {
+    AuthContext sys = VFS::systemAuth("fs.init.migrate.pending_users");
+    if (VFS::existsGuarded("/system/pending_users.json", sys) &&
+        !VFS::existsGuarded("/system/users/pending_users.json", sys)) {
+      VFS::renameGuarded("/system/pending_users.json", "/system/users/pending_users.json", sys);
+      DEBUG_STORAGEF("Migrated pending_users.json to /system/users/");
+    }
   }
   
   // Boot-time cleanup: remove orphaned .tmp files from interrupted writes
   {
+    AuthContext sys = VFS::systemAuth("fs.init.tmp_cleanup");
     const char* cleanupDirs[] = {
         "/", "/system", "/system/users", "/system/users/user_settings", "/maps"
 #if ENABLE_ONDEVICE_LLM
@@ -118,7 +137,7 @@ bool initFilesystem() {
     };
     int cleaned = 0;
     for (const char* dir : cleanupDirs) {
-      File d = LittleFS.open(dir);
+      File d = VFS::openGuarded(dir, "r", sys);
       if (!d || !d.isDirectory()) continue;
       File entry = d.openNextFile();
       while (entry) {
@@ -128,7 +147,7 @@ bool initFilesystem() {
           String fullPath = String(dir);
           if (fullPath != "/") fullPath += "/";
           fullPath += name;
-          LittleFS.remove(fullPath.c_str());
+          VFS::removeGuarded(fullPath.c_str(), sys);
           ESP_LOGI("FS", "Cleaned orphaned temp file: %s", fullPath.c_str());
           cleaned++;
         }
@@ -143,15 +162,16 @@ bool initFilesystem() {
 
   // Boot-time JSON validation: warn about corrupt critical config files
   {
+    AuthContext sys = VFS::systemAuth("fs.init.json_validate");
     const char* criticalFiles[] = { "/settings.json", "/system/automations.json", "/system/users/users.json" };
     for (const char* path : criticalFiles) {
-      if (!LittleFS.exists(path)) continue;
+      if (!VFS::existsGuarded(path, sys)) continue;
       String content;
       if (readText(path, content) && content.length() > 0) {
         content.trim();
         if (content.length() > 0 && content[0] != '{' && content[0] != '[') {
           ESP_LOGW("FS", "%s appears corrupt (not valid JSON), removing", path);
-          LittleFS.remove(path);
+          VFS::removeGuarded(path, sys);
         }
       }
     }
@@ -173,7 +193,7 @@ bool initFilesystem() {
   // Skip if automation system is disabled
   uint32_t _dbgSaved = getDebugFlags();
   setDebugFlag(DEBUG_AUTO_SCHEDULER);
-  if (gSettings.automationsEnabled && LittleFS.exists(AUTOMATIONS_JSON_FILE)) {
+  if (gSettings.automationsEnabled && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth("fs.init.automations_check"))) {
     String json;
     if (readText(AUTOMATIONS_JSON_FILE, json)) {
       bool modified = false;
@@ -209,7 +229,7 @@ bool initFilesystem() {
 // Directory Listing Helper
 // ============================================================================
 
-bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hideAdminPaths) {
+bool buildFilesListing(const String& inPath, String& out, bool asJson, const AuthContext& ctx, bool hideAdminPaths) {
   String dirPath = VFS::normalize(inPath);
 
   DEBUG_STORAGEF("[buildFilesListing] START path='%s' heap=%u", dirPath.c_str(), (unsigned)ESP.getFreeHeap());
@@ -222,7 +242,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
 
   FsLockGuard _dirGuard("dir.list");
 
-  File root = VFS::open(dirPath, "r");
+  File root = VFS::openGuarded(dirPath, "r", ctx);
   if (!root || !root.isDirectory()) {
     ERROR_STORAGEF("Cannot open directory '%s'", dirPath.c_str());
     if (asJson) {
@@ -259,7 +279,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
                dirPath.c_str(), dirPath == "/" ? "" : "/", virtuals[v].name);
       uint32_t childCount = 0;
       if (virtuals[v].isFolder) {
-        File mount = VFS::open(fullPath, "r");
+        File mount = VFS::openGuarded(fullPath, "r", ctx);
         if (mount && mount.isDirectory()) {
           File child = mount.openNextFile();
           while (child) { childCount++; child = mount.openNextFile(); }
@@ -267,7 +287,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
         }
       }
       if (asJson) {
-        uint8_t perms = getPermissions(String(fullPath));
+        uint8_t perms = getPermissions(String(fullPath), ctx);
         char buf[128];
         snprintf(buf, sizeof(buf),
                  "{\"name\":\"%s\",\"type\":\"folder\",\"size\":\"%u items\",\"count\":%u,\"perms\":%u}",
@@ -289,7 +309,6 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
   while (file) {
     // Extract display name (strip leading directory)
     String fileName = String(file.name());
-    DEBUG_STORAGEF("[buildFilesListing] Processing file: '%s' heap=%u", fileName.c_str(), (unsigned)ESP.getFreeHeap());
     if (fsDirPath != "/") {
       String expectedPrefix = fsDirPath;
       if (!expectedPrefix.endsWith("/")) expectedPrefix += "/";
@@ -323,7 +342,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
         if (!subPath.endsWith("/")) subPath += "/";
         subPath += fileName;
         int itemCount = 0;
-        File subDir = VFS::open(subPath, "r");
+        File subDir = VFS::openGuarded(subPath, "r", ctx);
         if (subDir && subDir.isDirectory()) {
           File child = subDir.openNextFile();
           while (child) {
@@ -336,7 +355,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
         String folderFullPath = dirPath;
         if (dirPath != "/") folderFullPath += "/";
         folderFullPath += fileName;
-        uint8_t folderPerms = getPermissions(folderFullPath.c_str());
+        uint8_t folderPerms = getPermissions(folderFullPath, ctx);
         // Build JSON entry directly into out — no fixed buffer, handles any filename length
         out += "{\"name\":\"";
         for (size_t ci = 0; ci < fileName.length(); ci++) {
@@ -355,7 +374,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
         String fileFullPath = dirPath;
         if (dirPath != "/") fileFullPath += "/";
         fileFullPath += fileName;
-        uint8_t filePerms = getPermissions(fileFullPath.c_str());
+        uint8_t filePerms = getPermissions(fileFullPath, ctx);
         out += "{\"name\":\"";
         for (size_t ci = 0; ci < fileName.length(); ci++) {
           char c = fileName.charAt(ci);
@@ -377,7 +396,7 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hide
         if (!subPath.endsWith("/")) subPath += "/";
         subPath += fileName;
         int itemCount = 0;
-        File subDir = VFS::open(subPath, "r");
+        File subDir = VFS::openGuarded(subPath, "r", ctx);
         if (subDir && subDir.isDirectory()) {
           File child = subDir.openNextFile();
           while (child) {
@@ -431,7 +450,7 @@ const char* cmd_files(const String& argsInput) {
   if (argsTrimmed.length() > 0) path = argsTrimmed;
 
   String out;
-  bool ok = buildFilesListing(path, out, /*asJson=*/false);
+  bool ok = buildFilesListing(path, out, /*asJson=*/false, gExecAuthContext);
   if (!ok) {
     broadcastOutput(out);
     return "ERROR";
@@ -450,15 +469,17 @@ const char* cmd_mkdir(const String& argsInput) {
   path.trim();
   if (path.length() == 0) return "Usage: mkdir <path>";
   if (!path.startsWith("/")) { path = "/" + path; }
-  if (!canCreate(path)) {
-    snprintf(getDebugBuffer(), 1024, "Error: Creation not allowed: %s", path.c_str());
+  // Phase 4: read the dispatch-time AuthContext explicitly. Each transport
+  // (web/serial/BT/internal) sets this before executeCommand fires.
+  const AuthContext& ctx = gExecAuthContext;
+  // mkdirGuarded folds normalize + canCreate(path, ctx) + dispatch into one
+  // call. The previous canCreate(path) shim relied on the same global but
+  // didn't normalize ".." and skipped the explicit role-aware check.
+  if (!VFS::mkdirGuarded(path, ctx)) {
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to create folder (denied or fs error): %s", path.c_str());
     return getDebugBuffer();
   }
-  if (VFS::mkdir(path)) {
-    snprintf(getDebugBuffer(), 1024, "Created folder: %s", path.c_str());
-  } else {
-    snprintf(getDebugBuffer(), 1024, "Error: Failed to create folder: %s", path.c_str());
-  }
+  snprintf(getDebugBuffer(), 1024, "Created folder: %s", path.c_str());
   return getDebugBuffer();
 }
 
@@ -471,15 +492,12 @@ const char* cmd_rmdir(const String& argsInput) {
   path.trim();
   if (path.length() == 0) return "Usage: rmdir <path>";
   if (!path.startsWith("/")) { path = "/" + path; }
-  if (!canDelete(path)) {
-    snprintf(getDebugBuffer(), 1024, "Error: Removal not allowed: %s (protected)", path.c_str());
+  const AuthContext& ctx = gExecAuthContext;
+  if (!VFS::rmdirGuarded(path, ctx)) {
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to remove folder (denied, not empty, or fs error): %s", path.c_str());
     return getDebugBuffer();
   }
-  if (VFS::rmdir(path)) {
-    snprintf(getDebugBuffer(), 1024, "Removed folder: %s", path.c_str());
-  } else {
-    snprintf(getDebugBuffer(), 1024, "Error: Failed to remove folder (ensure it is empty): %s", path.c_str());
-  }
+  snprintf(getDebugBuffer(), 1024, "Removed folder: %s", path.c_str());
   return getDebugBuffer();
 }
 
@@ -493,13 +511,12 @@ const char* cmd_filecreate(const String& argsInput) {
   if (path.length() == 0) return "Usage: filecreate <path>";
   if (!path.startsWith("/")) { path = "/" + path; }
   if (path.endsWith("/")) return "Error: Path must be a file (not a directory)";
-  if (!canCreate(path)) {
-    snprintf(getDebugBuffer(), 1024, "Error: Creation not allowed: %s", path.c_str());
-    return getDebugBuffer();
-  }
-  File f = VFS::open(path, "w", true);
+  const AuthContext& ctx = gExecAuthContext;
+  // openGuarded("w", create=true) on a non-existent path falls back to
+  // canCreate(path, ctx) when canEdit denies (per the openGuarded logic).
+  File f = VFS::openGuarded(path, "w", ctx, /*create=*/true);
   if (!f) {
-    snprintf(getDebugBuffer(), 1024, "Error: Failed to create file: %s", path.c_str());
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to create file (denied or fs error): %s", path.c_str());
     return getDebugBuffer();
   }
   f.close();
@@ -516,18 +533,13 @@ const char* cmd_fileview(const String& argsInput) {
   if (path.length() == 0) return "Usage: fileview <path>";
   if (!path.startsWith("/")) { path = "/" + path; }
 
-  // Security: Block reading sensitive files (credentials, passwords, keys)
-  if (!canRead(path)) {
+  const AuthContext& ctx = gExecAuthContext;
+  // existsGuarded gates by canRead — combines the previous canRead +
+  // VFS::exists pair into one decision. If it denies we get the same
+  // "not found" UX, with the actual reason in the [PERM] log.
+  if (!VFS::existsGuarded(path, ctx)) {
     if (ensureDebugBuffer()) {
-      snprintf(getDebugBuffer(), 1024, "Error: Access denied - %s contains sensitive data", path.c_str());
-      broadcastOutput(getDebugBuffer());
-    }
-    return "ERROR: Access denied";
-  }
-
-  if (!VFS::exists(path)) {
-    if (ensureDebugBuffer()) {
-      snprintf(getDebugBuffer(), 1024, "Error: File not found: %s", path.c_str());
+      snprintf(getDebugBuffer(), 1024, "Error: File not found or access denied: %s", path.c_str());
       broadcastOutput(getDebugBuffer());
     }
     return "ERROR";
@@ -579,13 +591,12 @@ const char* cmd_filerename(const String& argsInput) {
   String parentDir = (lastSlash > 0) ? oldPath.substring(0, lastSlash) : "";
   String newPath = parentDir + "/" + newName;
 
-  if (!canRename(oldPath)) {
-    snprintf(getDebugBuffer(), 1024, "Error: Rename not allowed: %s (protected)", oldPath.c_str());
-    return getDebugBuffer();
-  }
-  if (!VFS::exists(oldPath)) return "Error: File does not exist";
-  if (!VFS::rename(oldPath, newPath)) {
-    snprintf(getDebugBuffer(), 1024, "Error: Failed to rename: %s -> %s", oldPath.c_str(), newPath.c_str());
+  const AuthContext& ctx = gExecAuthContext;
+  // existsGuarded gates by canRead — must be readable to be checked for
+  // existence. renameGuarded then checks RENAME on src AND CREATE on dst.
+  if (!VFS::existsGuarded(oldPath, ctx)) return "Error: File does not exist or access denied";
+  if (!VFS::renameGuarded(oldPath, newPath, ctx)) {
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to rename (denied or fs error): %s -> %s", oldPath.c_str(), newPath.c_str());
     return getDebugBuffer();
   }
   snprintf(getDebugBuffer(), 1024, "Renamed: %s -> %s", oldPath.c_str(), newPath.c_str());
@@ -602,12 +613,8 @@ const char* cmd_filedelete(const String& argsInput) {
   if (path.length() == 0) return "Usage: filedelete <path>";
   if (!path.startsWith("/")) { path = "/" + path; }
   
-  if (!canDelete(path)) {
-    snprintf(getDebugBuffer(), 1024, "Error: Deletion not allowed: %s (protected)", path.c_str());
-    return getDebugBuffer();
-  }
-  
-  if (!VFS::exists(path)) return "Error: File does not exist";
+  const AuthContext& ctx = gExecAuthContext;
+  if (!VFS::existsGuarded(path, ctx)) return "Error: File does not exist or access denied";
 
   // If the file to delete is the currently loaded map, unload it first to close the FD
 #if ENABLE_MAPS
@@ -616,7 +623,10 @@ const char* cmd_filedelete(const String& argsInput) {
   }
 #endif
 
-  if (!VFS::remove(path)) return "Error: Failed to delete file";
+  if (!VFS::removeGuarded(path, ctx)) {
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to delete file (denied or fs error): %s", path.c_str());
+    return getDebugBuffer();
+  }
   snprintf(getDebugBuffer(), 1024, "Deleted file: %s", path.c_str());
   return getDebugBuffer();
 }
@@ -693,74 +703,93 @@ const size_t filesystemCommandsCount = sizeof(filesystemCommands) / sizeof(files
 // Registration handled by gCommandModules[] in System_Utils.cpp
 
 // ============================================================================
-// File Permissions — Table-Driven System
+// File Permissions — Table-Driven, Role-Aware
 // ============================================================================
 //
-// All path permission rules are defined in a single table (sPathRules).
-// Rules are matched in order; first match wins.  More specific paths go first.
+// Three roles, three perm columns per rule:
+//   USER    — authenticated non-admin
+//   ADMIN   — authenticated user where isAdminUser(ctx.user) == true
+//   SYSTEM  — internal trusted code (transport==SOURCE_INTERNAL && user=="system")
 //
-// Permission flags (from System_Filesystem.h):
-//   PERM_READ   0x01  — can view/download file contents
-//   PERM_WRITE  0x02  — can edit file contents
-//   PERM_DELETE 0x04  — can delete file/folder
-//   PERM_RENAME 0x08  — can rename file/folder
-//   PERM_CREATE 0x10  — can create new files/folders (CLI mkdir/filecreate)
-//   PERM_IMPORT 0x20  — can upload/import files via web
+// Anonymous (empty ctx.user) callers are denied EVERYTHING regardless of
+// rule. Reaching this state from FS code is a bug above; the deny + [PERM]
+// log line surfaces the upstream auth gap.
 //
-// To add a new path rule, insert it in the table below.
+// Permission flags (System_Filesystem.h):
+//   PERM_READ   0x01  PERM_WRITE  0x02  PERM_DELETE 0x04
+//   PERM_RENAME 0x08  PERM_CREATE 0x10  PERM_IMPORT 0x20
+//   PERM_ALL    = OR of all six.
+//
+// Rule order matters: first match wins, so put more-specific paths first.
 // ============================================================================
 
 struct PathRule {
-  const char* path;      // Path prefix (or exact path if exactMatch is true)
-  uint8_t     perms;     // Bitmask of allowed FilePermission flags
-  bool        exactMatch;// true = match path exactly, false = prefix match
-  bool        adminOnly; // true = requires admin role to access
+  const char* path;          // Path prefix (or exact path if exactMatch is true)
+  uint8_t     userPerms;     // Bitmask granted to authenticated non-admin users
+  uint8_t     adminPerms;    // Bitmask granted to admins (typically ⊇ userPerms)
+  uint8_t     systemPerms;   // Bitmask granted to internal trusted code
+  bool        exactMatch;    // true = match path exactly, false = prefix match
 };
 
-// Columns: path (prefix or exact), perms (PERM_* bitmask), exactMatch, adminOnly
+// Columns: path, userPerms, adminPerms, systemPerms, exactMatch
+//
+// Sizing intent recap (preserves the prior single-column behavior, plus
+// admin/system grants where the old `adminOnly` flag implied it):
+//
+//   Old `{perms=X, adminOnly=true}`  →  user=0, admin=X, system=PERM_ALL
+//   Old `{perms=X, adminOnly=false}` →  user=X, admin=X, system=PERM_ALL
+//   Old `{perms=0,  adminOnly=true}` →  user=0, admin=PERM_READ, system=PERM_ALL
+//                                       (NEW: admin can now read user_settings,
+//                                        which fixes the original bug that
+//                                        triggered this whole refactor.)
 static const PathRule sPathRules[] = {
-  // ---- Sensitive credentials: no access ----
-  {"/system/users/user_settings",       0,                                          false, true},
-  {"/system/users/pending_users.json",  0,                                          true,  true},
+  // ---- Sensitive credentials ----
+  // Per-user settings: admin can READ them (the lens-Files admin-view bug fix);
+  // system has full access (loadUserSettings/saveUserSettings); user gets nothing.
+  {"/system/users/user_settings",       0,         PERM_READ,                              PERM_ALL,  false},
+  // pending_users.json: same — admin reads, system writes, user nothing.
+  {"/system/users/pending_users.json",  0,         PERM_READ,                              PERM_ALL,  true},
 
-  // ---- Immutable config files: read-only ----
-  {"/system/settings.json",             PERM_READ,                                  true,  true},
-  {"/system/automations.json",          PERM_READ,                                  true,  true},
-  {"/system/espnow/devices.json",       PERM_READ,                                  true,  true},
+  // ---- Immutable config files: read-only for admin, full for system ----
+  {"/system/settings.json",             0,         PERM_READ,                              PERM_ALL,  true},
+  {"/system/automations.json",          0,         PERM_READ,                              PERM_ALL,  true},
+  {"/system/espnow/devices.json",       0,         PERM_READ,                              PERM_ALL,  true},
 
-  // ---- TLS certificates: read + delete + import (no edit/rename/create) ----
-  {"/system/certs/",                    PERM_READ | PERM_DELETE | PERM_IMPORT,      false, true},
+  // ---- TLS certificates: admin can read/delete/import; system full access ----
+  {"/system/certs/",                    0,         PERM_READ | PERM_DELETE | PERM_IMPORT,  PERM_ALL,  false},
 
+  // ---- On-device LLM model files (same policy as certs) ----
+  {"/system/llm/",                      0,         PERM_READ | PERM_DELETE | PERM_IMPORT,  PERM_ALL,  false},
 
-  // ---- On-device LLM: LLM1 model files (same policy as certs) ----
-  {"/system/llm/",                      PERM_READ | PERM_DELETE | PERM_IMPORT,      false, true},
+  // ---- G2 animated icon packs (SD; test bench + web upload) ----
+  {"/sd/g2_icon_animations/",           0,         PERM_READ | PERM_DELETE | PERM_IMPORT | PERM_CREATE, PERM_ALL, false},
 
+  // ---- System logs: admin read-only; system full ----
+  {"/system/sys_logs/",                 0,         PERM_READ,                              PERM_ALL,  false},
 
-  // ---- System logs: read-only ----
-  {"/system/sys_logs/",                 PERM_READ,                                  false, true},
+  // ---- Protected root directories (browse only) ----
+  {"/system",                           0,         PERM_READ,                              PERM_ALL,  true},
+  {"/logging_captures",                 0,         PERM_READ,                              PERM_ALL,  true},
+  {"/espnow",                           PERM_READ, PERM_READ,                              PERM_ALL,  true},
+  {"/maps",                             PERM_READ, PERM_READ,                              PERM_ALL,  true},
+  {"/sd",                               PERM_READ, PERM_READ,                              PERM_ALL,  true},
+  {"/Users",                            PERM_READ, PERM_READ,                              PERM_ALL,  true},
 
-  // ---- Protected root directories (browse only — no delete/rename) ----
-  {"/system",                           PERM_READ,                                  true,  true},
-  {"/logging_captures",                 PERM_READ,                                  true,  true},
-  {"/espnow",                           PERM_READ,                                  true,  false},
-  {"/maps",                             PERM_READ,                                  true,  false},
-  {"/sd",                               PERM_READ,                                  true,  false},
-  {"/Users",                            PERM_READ,                                  true,  false},
+  // ---- General system paths: admin read-only; system full ----
+  {"/system/",                          0,         PERM_READ,                              PERM_ALL,  false},
 
-  // ---- General system paths: read-only ----
-  {"/system/",                          PERM_READ,                                  false, true},
+  // ---- Logging captures: admin can read + delete; system full ----
+  {"/logging_captures/",                0,         PERM_READ | PERM_DELETE,                PERM_ALL,  false},
 
-  // ---- Logging captures: read + delete ----
-  {"/logging_captures/",                PERM_READ | PERM_DELETE,                    false, true},
+  // ---- ESP-NOW data: user can read+write+delete; admin same; system full ----
+  {"/espnow/",                          PERM_READ | PERM_WRITE | PERM_DELETE,
+                                        PERM_READ | PERM_WRITE | PERM_DELETE,             PERM_ALL,  false},
 
-  // ---- ESP-NOW data: read + edit + delete ----
-  {"/espnow/",                          PERM_READ | PERM_WRITE | PERM_DELETE,       false, false},
-
-  // ---- Default: full access (user data, maps, etc.) ----
-  {nullptr,                             PERM_ALL,                                   false, false},
+  // ---- Default: user data (maps, photos, recordings, etc.) — full for everyone authenticated ----
+  {nullptr,                             PERM_ALL,  PERM_ALL,                               PERM_ALL,  false},
 };
 
-// Look up the first matching rule for a path
+// Look up the first matching rule for a path.
 static const PathRule& lookupRule(const String& path) {
   for (size_t i = 0; i < sizeof(sPathRules) / sizeof(sPathRules[0]); i++) {
     const PathRule& rule = sPathRules[i];
@@ -774,19 +803,40 @@ static const PathRule& lookupRule(const String& path) {
   return sPathRules[sizeof(sPathRules) / sizeof(sPathRules[0]) - 1];
 }
 
-// Filename-based sensitivity check (blocks reading contents of credential files)
+// ----------------------------------------------------------------------------
+// Filename-based sensitivity check.
+//
+// Suffix-matched (NOT substring) so that benign filenames containing the
+// substring "secret" or "password" aren't false-positive blocked. The
+// previous indexOf()-based check would block "my-secret-notes.txt" but
+// would also miss "config.crt" / "model.bin" / etc.
+// ----------------------------------------------------------------------------
 static bool hasSensitiveExtension(const String& path) {
   String lower = path;
   lower.toLowerCase();
-  if (lower.indexOf("password") >= 0)   return true;
-  if (lower.indexOf("secret") >= 0)     return true;
-  if (lower.indexOf("credential") >= 0) return true;
-  if (lower.indexOf(".key") >= 0)       return true;
-  if (lower.indexOf(".pem") >= 0)       return true;
+
+  // Block specific extensions (suffix match).
+  static const char* kBlockedSuffixes[] = {
+    ".key",  ".pem",  ".crt",  ".cert",  ".cer",   // TLS / cryptographic material
+    ".credentials",                                 // generic credential file
+    ".bin",  ".hex",  ".elf",                       // firmware images / executables
+  };
+  for (const char* sfx : kBlockedSuffixes) {
+    if (lower.endsWith(sfx)) return true;
+  }
+
+  // Block filenames whose final segment contains the words "password" or
+  // "secret" (whole-name substring on the basename only, not the directory).
+  int lastSlash = lower.lastIndexOf('/');
+  String base = (lastSlash >= 0) ? lower.substring(lastSlash + 1) : lower;
+  if (base.indexOf("password") >= 0)   return true;
+  if (base.indexOf("secret") >= 0)     return true;
+  if (base.indexOf("credential") >= 0) return true;
+
   return false;
 }
 
-// Image files: can be viewed but not text-edited
+// Image files: can be viewed but not text-edited.
 static bool isImageFile(const String& path) {
   String lower = path;
   lower.toLowerCase();
@@ -795,56 +845,207 @@ static bool isImageFile(const String& path) {
           lower.endsWith(".ico") || lower.endsWith(".avif") || lower.endsWith(".heif"));
 }
 
-// --- Public permission API (all derived from the table) ---
+// ============================================================================
+// Path normalization
+// ============================================================================
+// Used by the guarded VFS layer (Phase 1+) before any rule lookup. Rejects
+// path traversal, collapses double slashes, strips a trailing slash (except
+// for "/" itself), and rejects empty paths. Callers that fail this should
+// treat the request as denied — `out` is undefined on failure.
+bool normalizeFsPath(const String& in, String& out) {
+  if (in.length() == 0) return false;
 
-bool canRead(const String& path) {
-  if (hasSensitiveExtension(path)) return false;
-  return (lookupRule(path).perms & PERM_READ) != 0;
+  // Reject ".." anywhere — even resolved-to-here ("/foo/bar/.." should
+  // collapse to "/foo" but Arduino LittleFS does not collapse it, so the
+  // permission check would see "/foo/bar/.." literally and either bypass
+  // the rule (no startsWith match) or behave unpredictably). Easier and
+  // safer to reject outright.
+  if (in.indexOf("..") >= 0) return false;
+
+  out.reserve(in.length());
+  out = "";
+  bool prevSlash = false;
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '/') {
+      if (prevSlash) continue;  // collapse //
+      prevSlash = true;
+    } else {
+      prevSlash = false;
+    }
+    out += c;
+  }
+  // Strip trailing slash unless the whole path is "/".
+  if (out.length() > 1 && out[out.length() - 1] == '/') {
+    out.remove(out.length() - 1);
+  }
+  return out.length() > 0;
 }
 
-bool canEdit(const String& path) {
-  if (hasSensitiveExtension(path)) return false;
-  if (isImageFile(path)) return false;
-  return (lookupRule(path).perms & PERM_WRITE) != 0;
+// ============================================================================
+// Role resolution + permission lookup
+// ============================================================================
+
+// Forward decl from System_User.cpp.
+extern bool isAdminUser(const String& who);
+
+enum class FsRole : uint8_t { ANON, USER, ADMIN, SYSTEM };
+
+static FsRole resolveRole(const AuthContext& ctx) {
+  if (ctx.user.length() == 0) return FsRole::ANON;
+  if (ctx.transport == SOURCE_INTERNAL && ctx.user == "system") return FsRole::SYSTEM;
+  if (isAdminUser(ctx.user)) return FsRole::ADMIN;
+  return FsRole::USER;
 }
 
-bool canDelete(const String& path) {
-  return (lookupRule(path).perms & PERM_DELETE) != 0;
+static const char* roleName(FsRole r) {
+  switch (r) {
+    case FsRole::ANON:   return "anon";
+    case FsRole::USER:   return "user";
+    case FsRole::ADMIN:  return "admin";
+    case FsRole::SYSTEM: return "system";
+  }
+  return "?";
 }
 
-bool canRename(const String& path) {
-  return (lookupRule(path).perms & PERM_RENAME) != 0;
+static uint8_t permsForRole(const PathRule& rule, FsRole r) {
+  switch (r) {
+    case FsRole::ANON:   return 0;
+    case FsRole::USER:   return rule.userPerms;
+    case FsRole::ADMIN:  return rule.adminPerms;
+    case FsRole::SYSTEM: return rule.systemPerms;
+  }
+  return 0;
 }
 
-bool canCreate(const String& path) {
-  return (lookupRule(path).perms & PERM_CREATE) != 0;
+// Single decision point. Pure: returns true/false, no logging. The
+// per-denial [PERM] log line is emitted only at actual-access boundaries
+// (VFS::*Guarded) via logFsAccessDeny() — see the comment on that function
+// for the rationale. Calling checkPerm from an aggregate query like
+// getPermissions() must NOT spam the log — those are UI button-state probes,
+// not security events.
+static bool checkPerm(const String& path, const AuthContext& ctx,
+                      uint8_t needed,
+                      bool sensitiveExtensionApplies,
+                      bool imageEditApplies) {
+  FsRole role = resolveRole(ctx);
+  if (role == FsRole::ANON) return false;
+  if (sensitiveExtensionApplies && hasSensitiveExtension(path) && role != FsRole::SYSTEM) return false;
+  if (imageEditApplies && isImageFile(path) && role != FsRole::SYSTEM) return false;
+  uint8_t granted = permsForRole(lookupRule(path), role);
+  return (granted & needed) == needed;
 }
 
-bool canImport(const String& path) {
-  return (lookupRule(path).perms & PERM_IMPORT) != 0;
+// --- Public permission API (role-aware) ---
+//
+// All six canX() functions are pure queries — they decide true/false and
+// stay silent. Use them freely for UI button-state computation (e.g.
+// getPermissions in a file listing) without flooding the log.
+//
+// To audit an actual access denial, call logFsAccessDeny() yourself after
+// canX returns false at the point where the access was being attempted
+// (usually inside VFS::*Guarded — the caller of canX in those wrappers
+// emits the log line themselves).
+
+bool canRead   (const String& path, const AuthContext& ctx) {
+  return checkPerm(path, ctx, PERM_READ,   /*sensitive*/ true,  /*imageEdit*/ false);
+}
+bool canEdit   (const String& path, const AuthContext& ctx) {
+  return checkPerm(path, ctx, PERM_WRITE,  /*sensitive*/ true,  /*imageEdit*/ true);
+}
+bool canDelete (const String& path, const AuthContext& ctx) {
+  return checkPerm(path, ctx, PERM_DELETE, /*sensitive*/ false, /*imageEdit*/ false);
+}
+bool canRename (const String& path, const AuthContext& ctx) {
+  return checkPerm(path, ctx, PERM_RENAME, /*sensitive*/ false, /*imageEdit*/ false);
+}
+bool canCreate (const String& path, const AuthContext& ctx) {
+  return checkPerm(path, ctx, PERM_CREATE, /*sensitive*/ false, /*imageEdit*/ false);
+}
+bool canImport (const String& path, const AuthContext& ctx) {
+  return checkPerm(path, ctx, PERM_IMPORT, /*sensitive*/ false, /*imageEdit*/ false);
 }
 
-bool isAdminOnlyPath(const String& path) {
-  return lookupRule(path).adminOnly;
+// Emit a single [PERM] DENY line for an actual access attempt that was
+// refused. Re-runs role/rule resolution to format a useful message — only
+// called on real denials, so the cost is bounded by how often legitimate
+// access attempts are blocked.
+//
+// Why this exists as a separate function: the canX query API is silent so
+// aggregate queries (getPermissions, isAdminOnlyPath, file-listing UI button
+// state) don't spam the log. When VFS::openGuarded actually decides to
+// refuse a read, IT calls this to record the security event.
+//
+// Gated by gDebugSubFlags.storagePermissions (default true). Allows muting
+// the denial audit trail independently of other Storage debug subflags.
+void logFsAccessDeny(const String& path, const AuthContext& ctx,
+                     uint8_t needed, const char* op) {
+  if (!gDebugSubFlags.storagePermissions) return;
+  FsRole role = resolveRole(ctx);
+  if (role == FsRole::ANON) {
+    DEBUG_STORAGEF("[PERM] DENY %s '%s' role=anon user='' transport=%d (anonymous never permitted)",
+                   op, path.c_str(), (int)ctx.transport);
+    return;
+  }
+  // Re-check the special-case denials so the log line names the actual reason.
+  bool sensitiveApplies = (needed & (PERM_READ | PERM_WRITE)) != 0;
+  bool imageEditApplies = (needed == PERM_WRITE);
+  if (sensitiveApplies && hasSensitiveExtension(path) && role != FsRole::SYSTEM) {
+    DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s reason=sensitive-extension",
+                   op, path.c_str(), roleName(role));
+    return;
+  }
+  if (imageEditApplies && isImageFile(path) && role != FsRole::SYSTEM) {
+    DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s reason=image-not-editable",
+                   op, path.c_str(), roleName(role));
+    return;
+  }
+  uint8_t granted = permsForRole(lookupRule(path), role);
+  DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s granted=0x%02X needed=0x%02X",
+                 op, path.c_str(), roleName(role), (unsigned)granted, (unsigned)needed);
 }
 
-uint8_t getPermissions(const String& path) {
-  uint8_t perms = 0;
-  if (canRead(path))   perms |= PERM_READ;
-  if (canEdit(path))   perms |= PERM_WRITE;
-  if (canDelete(path)) perms |= PERM_DELETE;
-  if (canRename(path)) perms |= PERM_RENAME;
-  if (canCreate(path)) perms |= PERM_CREATE;
-  if (canImport(path)) perms |= PERM_IMPORT;
-  return perms;
+uint8_t getPermissions(const String& path, const AuthContext& ctx) {
+  // Hot path — called once per entry by buildFilesListing for UI button state.
+  // Naive impl was six calls to canX() each of which redid resolveRole +
+  // lookupRule + hasSensitiveExtension + isImageFile. That's 6× redundant
+  // work on every directory listing. This version computes each input once
+  // and applies the special-case masks directly.
+  FsRole role = resolveRole(ctx);
+  if (role == FsRole::ANON) return 0;
+
+  uint8_t granted = permsForRole(lookupRule(path), role);
+
+  // Special-case denials, applied as bitmask filters. These mirror the
+  // sensitiveExtensionApplies / imageEditApplies flags that canRead/canEdit
+  // pass to checkPerm:
+  //   - hasSensitiveExtension blocks PERM_READ and PERM_WRITE (used by
+  //     canRead and canEdit). Other ops (delete/rename/create/import) are
+  //     unaffected — you can still delete a .key file you can't read.
+  //   - isImageFile blocks PERM_WRITE only (used by canEdit). Reading,
+  //     deleting, renaming an image stays allowed.
+  // SYSTEM identity is exempt from both — internal code can read certs etc.
+  if (role != FsRole::SYSTEM) {
+    if (hasSensitiveExtension(path)) granted &= ~(PERM_READ | PERM_WRITE);
+    if (isImageFile(path))           granted &= ~PERM_WRITE;
+  }
+  return granted;
 }
 
-uint8_t getDirPerms(const String& dirPath) {
-  // What permissions would a child of this directory have?
+uint8_t getDirPerms(const String& dirPath, const AuthContext& ctx) {
+  // Probe what permissions a child of this directory would receive.
   String testPath = dirPath;
   if (!testPath.endsWith("/")) testPath += "/";
   testPath += "_";
-  return lookupRule(testPath).perms;
+  return getPermissions(testPath, ctx);
+}
+
+// `isAdminOnlyPath` classifies the rule itself (does the path belong to the
+// "admin/system territory" branch?) so it stays identity-free. Used by file
+// listings to hide entire subtrees from non-admin browsers.
+bool isAdminOnlyPath(const String& path) {
+  const PathRule& rule = lookupRule(path);
+  return rule.userPerms == 0 && (rule.adminPerms != 0 || rule.systemPerms != 0);
 }
 
 // ============================================================================
@@ -854,7 +1055,11 @@ uint8_t getDirPerms(const String& dirPath) {
 bool readTextLimited(const char* path, String& out, size_t maxBytes) {
   out = "";
   FsLockGuard guard("readTextLimited");
-  File f = LittleFS.open(path, "r");
+  // Unguarded VFS::open by design — readTextLimited is a policy-free byte
+  // shovel called from many trusted callers that already gated their own
+  // access checks. Routing through VFS keeps the LittleFS-vs-SD dispatch
+  // consistent without re-running perms here.
+  File f = VFS::open(String(path), "r");
   if (!f) return false;
   out.reserve(maxBytes);
   const size_t chunk = 512;

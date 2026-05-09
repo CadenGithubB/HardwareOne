@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <FS.h>
+#include "System_User.h"   // AuthContext (for the *Guarded variants)
 
 // ============================================================================
 // VFS — Virtual File System dispatcher
@@ -118,6 +119,54 @@ bool rename(const String& pathFrom, const String& pathTo);
 bool rmdir(const String& path);
 
 bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint64_t& freeBytes);
+
+// ============================================================================
+// Guarded VFS — single enforcement point for filesystem permissions
+// ============================================================================
+// Every guarded call runs the same pipeline:
+//   1. normalizeFsPath() — reject ".." traversal, collapse double slashes,
+//      strip trailing slash. Failure → deny + log.
+//   2. canX(path, ctx) — three-role permission lookup. Failure → log + deny.
+//   3. Dispatch to the underlying VFS::open/exists/etc.
+//
+// Use these instead of raw VFS::open / LittleFS.open / etc. anywhere you
+// have an AuthContext available (web handlers, CLI handlers via
+// gExecAuthContext, etc.). For internal trusted code, construct a context
+// via systemAuth("reason") and pass it through.
+//
+// Naming convention: every callsite that uses systemAuth() should be
+// commented "// trusted: <reason>" so a future reader sees the explicit
+// privilege escalation rather than wondering why the check passed.
+//
+// Returns: open returns an empty File on denial (caller must check `!file`
+// or `file.operator bool()`). The bool-returning variants return false on
+// denial AND log to [PERM]. Grants are silent.
+
+File openGuarded   (const String& path, const char* mode, const AuthContext& ctx, bool create = false);
+bool existsGuarded (const String& path, const AuthContext& ctx);
+bool removeGuarded (const String& path, const AuthContext& ctx);
+bool renameGuarded (const String& pathFrom, const String& pathTo, const AuthContext& ctx);
+bool mkdirGuarded  (const String& path, const AuthContext& ctx);
+bool rmdirGuarded  (const String& path, const AuthContext& ctx);
+
+/**
+ * Construct an AuthContext representing the trusted internal "system"
+ * identity. Pass `reason` describing why this code legitimately needs to
+ * bypass user-level permission checks (it shows up in [PERM] denial logs
+ * and any future audit trail).
+ *
+ * Use deliberately and sparingly. Examples of valid use:
+ *   - loadUsersFromFile() — system owns the user database
+ *   - loadSettings() — system owns the global settings file
+ *   - boot-time TLS cert read — no user identity exists yet
+ *   - log rotation — internal infrastructure
+ *
+ * Examples of MISUSE:
+ *   - "I'm a CLI handler" — use gExecAuthContext instead
+ *   - "I'm in a web request" — use makeWebAuthCtx(req) instead
+ *   - "I don't want to figure out the right context" — figure it out
+ */
+AuthContext systemAuth(const char* reason);
 
 // ============================================================================
 // Overflow-aware path resolution (opt-in for append-only data)

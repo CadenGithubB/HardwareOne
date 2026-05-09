@@ -564,7 +564,9 @@ End-to-end stack confirmed working 2026-04-27:
 
 Probe coverage: Q4 (CREATE canary), Q6 (full-tile baseline), Q6b
 (tap-dismiss variant), Q9 (frame builder), Q10 (3-frame
-clear-then-push), Q11 (2-frame swap), QGlizzy (SD-loaded canary).
+clear-then-push), Q11 (2-frame swap), QGlizzy (SD-loaded canary),
+Q20/Q22/Q23 (icon-sized live bar @ paced Cmd=3), Q24 (32×32 procedural
+20-frame loop).
 
 #### Image-up dismissal: only DOUBLE_CLICK fires SysEvents
 
@@ -581,6 +583,78 @@ plan on double-tap as the dismiss gesture and add a safety timeout
 doesn't lock up the picker. Single-tap responsive UIs require either
 overlaying a list/text widget on top (which we don't currently do
 because it occludes the image) or future firmware changes.
+
+### Icon-sized live BMP streaming (Q20 / Q22 / Q23) and looped sprite animation (Q24)
+
+All of the image rules above still apply: **BMP width/height must match the
+CREATE-image container**, 4-bpp indexed BMP on the wire, `MagicRandom ≤ 255`
+on CREATE and every Cmd=3 fragment, and **streaming without a fresh CREATE**
+between frames works the same way as Q11 (`sendImageBmpFragmentsNoCreate`
+after the first `sendImageBmpMultiFragment`). What changes at **32×32,
+64×64, or 96×96** is payload size (often **one** Cmd=3 fragment per frame) and
+therefore how hard you can drive the lens before BLE or firmware back-pressure
+wins.
+
+**Live bar probes** (from **Test Suite → Image → Animated Icons → Back**, then
+Q22/Q23/Q20 rows) exercise a fixed pattern (stripes + horizontal bar) in solo
+image containers. Entering **Animated Icons** from Image opens the **LittleFS
+flash pack list** first; use **Back** to reach the Q22–Q24 rows.
+
+| Probe | Tile | CREATE / first-push magic band (`G2_MAGIC_IMAGE_BASE` = 210) | Between-frame pacing |
+|-------|------|---------------------------------------------------------------|----------------------|
+| Q22 | 32×32 | +39 / +40 (249, 250) | **280 ms** minimum between **frame starts** (fixed override) |
+| Q23 | 64×64 | +43 / +44 (253, 254) | **380 ms** |
+| Q20 | 96×96 | +36 / +37 (246, 247) in code as `+0x24/+0x25` | Uses global **`gG2LiveRateMs`** (CLI `g2liverate`, default **600 ms**) |
+
+Implementation detail: pacing is **`max(0, paceBudgetMs − frameWallMs)`**
+after each frame — i.e. a **minimum gap between frame starts**, not a flat
+sleep after every frame. If a frame’s push+acks already exceed the budget, the
+next frame starts immediately. Tuning `g2liverate` affects Q20 only among
+these three; Q22/Q23 isolate smaller vs larger icon payloads at fixed
+cadences for A/B comparison in logs.
+
+**Q24** is a **20-phase looped “slime jump”** at **32×32**: each frame is a
+full 4-bpp BMP built in firmware (grayscale blob + eyes on a striped
+background — not shipped as twenty raster assets). Same transport as Q22;
+CREATE magic **251**, first push **252**, **320 ms** between frame starts.
+CREATE still uses the shared helper name **`imgQ4`** (CID 2); subsequent
+`Cmd=3` sessions pass **`imgSl`** in the image-raw body — observed working on
+our test firmware; if another revision rejects updates, try keeping the
+CREATE name on every fragment. Double-tap dismiss and idle-timeout recreate
+behaviour match the other image probes.
+
+**Protocol takeaway:** small, full-tile BMPs are the right way to ship **icon-
+sized animation** or status glyphs: one CREATE, then many Cmd=3 sessions, with
+host-chosen pacing and magic rotation so no fragment magic exceeds 255 across
+a long run.
+
+#### SD user icon packs (Q25)
+
+Animated **user** packs live on the **SD card** under
+`/sd/g2_icon_animations/` (`G2_ICON_ANIMATIONS_VFS_PATH` in `System_BuildConfig.h`).
+With `ENABLE_G2_GLASSES` on, that directory is created at boot after the SD
+mount when a card is present.
+
+- **On-disk layout:** `/sd/g2_icon_animations/<pack_name>/frame_00.bmp`,
+  `frame_01.bmp`, … — 4 bpp indexed BMP, dimensions within the usual G2 image
+  limits (see `g2ReadBmp4bppFromVfs` / Q25 probe in `G2_Glasses.cpp`).
+  `g2ProbeImageQ25SetPackPath` only accepts a subdirectory **under** that prefix
+  (rejects `..` and any path outside the tree).
+- **Runtime:** `g2ProbeImageQ25SdFrameAnimation` reads every `frame_XX.bmp` from
+  VFS **once** into PSRAM (`g2ReadBmp4bppFromVfs` uses `ps_alloc`), then loops
+  sends from those buffers only (no per-frame SD reads).
+- **Test Suite navigation:** **Image → Animated Icons** opens the **pack list**
+  when SD is mounted (each immediate subfolder that contains `frame_00.bmp`
+  becomes a row). **Back** returns to the Animated Icons hub (**Custom icon packs >>**
+  reopens the list, plus Q22–Q27 live bars and built-in Q24 slime).
+- **Web upload:** use the device’s authenticated file upload
+  (`POST /api/files/upload`) with `path=/sd/g2_icon_animations/<pack>/frame_NN.bmp`.
+  Import is allowed for that prefix in the filesystem permission table
+  (`System_Filesystem.cpp` → `sPathRules`); the upload handler creates missing
+  parent folders as needed. There is no separate firmware writer into this tree
+  beyond normal file I/O and your uploads.
+- **Host tooling:** `tools/gif_to_g2_bmps.py` in this repo emits the same folder
+  layout for sideloading or upload.
 
 ## Heartbeat
 
@@ -1272,7 +1346,12 @@ don't need a real heading.
   rate at which the firmware accepts back-to-back app transitions or
   some app-context bookkeeping we don't see. Until characterised,
   treat the front-pane card as best-effort from any non-Test-menu
-  context and have a back-pane fallback (Network scan now uses one).
+  context and have a back-pane fallback. **Network → Scan Networks**
+  tries the **EvenAI front card** first (after settle + `g2HideEvenAICard`);
+  only if `g2ShowEvenAIReplyNoAsk` fails does it paint a **back-pane list**
+  (“Scanning…”) so progress is still visible. A prior ordering that called
+  `g2ShowListPage` *before* EvenAI raced the page-swap worker against the
+  sid=0x07 pipeline and often prevented the front card from appearing.
   Test menu invocation is reliable for iterating on the front-pane UX.
 
 ### Auto-dismiss
@@ -1765,53 +1844,63 @@ ShutdownResp` arrives within ~100 ms, but it sometimes carries
 fixed delay covers both the response latency and the firmware-side
 release of the widget slot.
 
-### REBUILD-list fast path (corrects 2026-04-25 claim)
+### REBUILD-list vs SHUTDOWN+CREATE (hijack page swaps)
 
-**Update 2026-04-27:** the earlier blanket warning above that `Cmd=7
-REBUILD_PAGE` with a different item set "reliably crashes the firmware
-plugin task" is **wrong on firmware 2.2.0.24** — disproven empirically
-by exercising rapid item-count changes via the runtime-tunable
-`g2listrebuild` toggle:
+**Canonical safe sequence** for changing Blocks-hijack content is always
+the four-step **SHUTDOWN + 500 ms + CREATE** flow in the section above
+(`Cmd=9` → wait → `Cmd=0` → wait for `CreateResp`). That is the contract
+other docs in this tree imply: `docs/g2_proto/README.md` (schema RE from
+FlutterApp protos) is for **field numbers**, not for assuming `Cmd=7` is
+interchangeable with a full re-create when the **container shape** or
+**row geometry** changes.
 
-| Transition | RebuildResp | Outcome |
-|---|---|---|
-| 7 items → 2 items | res=6 (Success) | OK |
-| 2 → 7 | res=6 | OK |
-| 7 → 6 | res=6 | OK |
-| 7 → 9 | res=6 | OK |
-| 9 → 7 | res=6 | OK |
-| 7 → 12 | res=6 | OK |
-| 12 → 7 | res=6 | OK |
+**Optional fast path (`g2listrebuild`, default ON):** `G2_Glasses.cpp`
+may send `Cmd=7 REBUILD_PAGE` *instead* of SHUTDOWN+CREATE only when all
+of the following hold (see `pageSwapJobBody` + `HijackListPageShape`):
 
-All in rapid succession, no firmware wedge, no plugin-task death. The
-prior crash claim came from testing on firmware 2.2.0.242, which may
-behave differently — but on 2.2.0.24, **REBUILD-list is the correct
-fast path** for in-place item swaps:
+1. **`gG2ListRebuildEnabled`** is true (CLI `g2listrebuild on`).
+2. The right-temple list container is still considered live
+   (`containerReady` / `containerIsList`).
+3. The incoming swap is **PSK_LIST** (plain `ListObject` list — the same
+   wire shape as `sendRebuildListAndWait` builds).
+4. The last page we put on-lens was also a **pure list**, not a
+   **list + title** compound (`CreateStartUpPage` with list + text —
+   `containerIsList` is still true for compounds, so we track
+   `HijackListPageShape` separately).
+5. The **row count** matches the previous list (`gLastHijackListRowCount`).
 
-- ~70 ms wire time vs ~700 ms for SHUTDOWN+CREATE (10× faster)
-- Single Cmd=7 envelope instead of two-round-trip teardown+create
-- **No flicker** — the lens never blanks between content swaps
-- Caveat: the firmware does **not** preserve cursor/selection state
-  across the rebuild; the highlighted row resets to row 0 every swap.
-  No CREATE/REBUILD-side schema field exists to seed an initial select
-  index — this is a hard firmware limitation (see `ListContainerProperty`
-  schema in g2-kit-unofficial — fields 1-12 fully accounted for, none
-  for selection state).
+If any check fails — different row count, compound → pure, text → list,
+BLE drop on R, `SYSTEM_EXIT`, `DISPLAY_OFF`, `g2NoteContainerCleared`,
+or right-temple **plugin silent** — the swap cache is reset and the
+worker uses **SHUTDOWN+CREATE**.
 
-The `g2listrebuild` CLI toggle defaults ON; it's exposed as a runtime
-kill-switch in case a future firmware regresses. Runtime helper:
-`sendRebuildListAndWait()` in `G2_Glasses.cpp` mirrors the CREATE
-ack path with its own semaphore (`gRebuildAckSem`) keyed on
-`G2_MAGIC_REBUILD = 202`.
+**Lab note (2026-04-27):** on firmware **2.2.0.24** we once saw `Cmd=7`
+succeed across many *rapid* row-count changes in a dedicated stress
+hijack session (table in older doc revisions). **Production policy
+(2026-05-03+)** is stricter than that lab: we still observed **missed
+`RebuildResp`** / wedged navigation on real menu flows (e.g. 5-row Image
+router → 2-row empty pack picker). Prefer the gated REBUILD above; keep
+`g2listrebuild off` if a future firmware revision regresses further.
+
+**When REBUILD is used:** same benefits as before when the gate passes —
+~70 ms, single `Cmd=7`, minimal flicker. **Cursor** still resets to row 0;
+there is no schema field to preserve selection (`ListContainerProperty`
+in g2-kit-unofficial).
+
+The `g2listrebuild` CLI toggle defaults ON. Runtime helper:
+`sendRebuildListAndWait()` mirrors the CREATE ack path (`gRebuildAckSem`,
+`G2_MAGIC_REBUILD = 202`).
 
 ### Live-list page primitive
 
-Built on the REBUILD-list fast path: a page can opt into automatic
-periodic refresh by setting `liveIntervalMs > 0` on its
-`G2PageModule`. The dispatcher then renders via `g2StartLiveListPage()`
-instead of `g2ShowTextAsList()` — an initial CREATE seeds the widget,
-and a worker task ticks every `liveIntervalMs` calling the page's
-`buildText` callback and shipping a Cmd=7 REBUILD with the fresh rows.
+Built on **Cmd=7** against a **single** list container: a page can opt into
+automatic periodic refresh by setting `liveIntervalMs > 0` on its
+`G2PageModule`. The dispatcher renders via `g2StartLiveListPage()` — an
+initial **CREATE** seeds a **pure** list widget, then a worker ticks every
+`liveIntervalMs` rebuilding **the same row structure** (same row count;
+strings refresh). This is narrower than arbitrary hijack **page swaps**,
+which may change row counts or compound layout — those go through
+`pageSwapJobBody` and the REBUILD gate above.
 
 **Manual refresh trigger:** `SysEvent type=DOUBLE_CLICK(3) src=2` on
 sid=0xE0 fires when the user double-taps a List widget — distinct from

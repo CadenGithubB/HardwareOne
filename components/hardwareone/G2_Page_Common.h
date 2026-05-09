@@ -52,10 +52,13 @@ inline G2Paginator g2PaginatorPrepare(size_t itemCount, size_t itemsPerPage,
 // back into `p` so the dispatcher can identify taps without re-deriving
 // layout. `rowsFlat` points at row 0 (the rows buffer flattened to a
 // single char* — `&rows[0][0]` for a `char[N][LEN]` buffer).
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
 inline size_t g2PaginatorWriteChrome(G2Paginator& p, size_t curPage,
                                       size_t row, size_t maxRow,
                                       char* rowsFlat, size_t rowLen,
                                       const char** rowPtrs) {
+  if (rowLen == 0 || !rowsFlat) return row;  // Guard: invalid buffer
   if (curPage > 0 && row < maxRow) {
     char* dst = rowsFlat + row * rowLen;
     snprintf(dst, rowLen, "<< Prev page");
@@ -73,3 +76,4 @@ inline size_t g2PaginatorWriteChrome(G2Paginator& p, size_t curPage,
   }
   return row;
 }
+#pragma GCC diagnostic pop

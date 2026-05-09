@@ -275,7 +275,7 @@ static void finalizeAndClose() {
   s_file.flush();
   s_file.close();
 
-  INFO_SENSORSF("[Video] Recording finalized: %s (%u frames, %u bytes)",
+  INFO_CAMERA_VIDEOF("Recording finalized: %s (%u frames, %u bytes)",
                 s_path, (unsigned)s_frameCount, (unsigned)fileSize);
 }
 
@@ -326,12 +326,12 @@ bool startVideoRecording() {
   STACK_TRACEF("startVideoRecording.enter");
   extern bool gCameraEnabled;
   if (!gCameraEnabled) {
-    INFO_SENSORSF("[Video] Cannot record — camera not enabled");
+    INFO_CAMERA_VIDEOF("Cannot record — camera not enabled");
     STACK_TRACEF("startVideoRecording.camera_disabled_exit");
     return false;
   }
   if (videoRecording) {
-    INFO_SENSORSF("[Video] Already recording");
+    INFO_CAMERA_VIDEOF("Already recording");
     STACK_TRACEF("startVideoRecording.already_recording_exit");
     return false;
   }
@@ -343,7 +343,7 @@ bool startVideoRecording() {
   STACK_TRACEF("startVideoRecording.sd_writable=%d (mounted=%d)",
                sdWritable ? 1 : 0, VFS::isSDAvailable() ? 1 : 0);
   if (!sdWritable) {
-    INFO_SENSORSF("[Video] Cannot record — SD card not writable");
+    INFO_CAMERA_VIDEOF("Cannot record — SD card not writable");
     return false;
   }
   if (!ensureVideosFolder()) {
@@ -409,7 +409,7 @@ bool startVideoRecording() {
     return false;
   }
 
-  INFO_SENSORSF("[Video] Recording started: %s", s_path);
+  INFO_CAMERA_VIDEOF("Recording started: %s", s_path);
   return true;
 }
 

@@ -109,6 +109,10 @@ struct Settings {
       debugG2Heartbeat(false),
       debugG2Dump(false),
       debugCamera(false),
+      debugCameraLifecycle(false),
+      debugCameraCapture(false),
+      debugCameraSettings(false),
+      debugCameraVideo(false),
       debugMicrophone(false),
       debugI2C(false),  // I2C bus transactions, mutex, clock changes
       debugGps(false),        // Individual sensor flags disabled by default
@@ -239,8 +243,10 @@ struct Settings {
       cameraHMirror(false),
       cameraVFlip(false),
       cameraQuality(12),
-      cameraFramesize(1),
+      cameraFramesize(10),  // 240x240 — see cameraFramesizeFromSetting in System_Camera_DVP.cpp for the index map
       cameraStreamIntervalMs(200),
+      g2StreamWidth(96),
+      g2StreamHeight(96),
       cameraStorageLocation(0),
       cameraCaptureFolder("/photos"),
       cameraAutoCapture(false),
@@ -431,6 +437,10 @@ struct Settings {
   bool debugG2Heartbeat;  // Heartbeat TX + HeartbeatAck (every ~5 s; loud)
   bool debugG2Dump;       // [G2-DUMP] diagnostic ring buffer dumps on errors
   bool debugCamera;
+  bool debugCameraLifecycle;  // initCamera/stopCamera, PWDN/RESET, GPIO state
+  bool debugCameraCapture;    // captureFrame, JPEG validation, fb buffer, recovery
+  bool debugCameraSettings;   // Runtime resolution/quality/sensor register changes
+  bool debugCameraVideo;      // Video recording start/finalize, frame writing
   bool debugMicrophone;
   bool debugI2C;  // I2C bus transactions, mutex, clock changes
   // Individual I2C sensor debug flags
@@ -487,6 +497,11 @@ struct Settings {
   bool debugStorageJson;
   bool debugStorageSettings;
   bool debugStorageMigration;
+  // [PERM] DENY audit lines from VFS::*Guarded. Defaults to true so the
+  // pre-subflag "always-on" audit behavior is preserved out of the box;
+  // user can `debugstoragepermissions 0` to mute denial spam while keeping
+  // other Storage subflags enabled.
+  bool debugStoragePermissions{true};
   // System sub-flags
   bool debugSystemBoot;
   bool debugSystemConfig;
@@ -633,8 +648,14 @@ struct Settings {
   bool cameraHMirror;           // Horizontal mirror
   bool cameraVFlip;             // Vertical flip
   int cameraQuality;            // JPEG quality 0-63 (lower=better, default 12)
-  int cameraFramesize;          // Framesize enum (default VGA=8)
+  int cameraFramesize;          // Setting-index (NOT esp_camera framesize_t). 10 = 240x240 default. See cameraFramesizeFromSetting().
   int cameraStreamIntervalMs;   // MJPEG stream delay (ms) - lower=faster, default 200 (~5 fps)
+  // G2 lens stream resolution. Caps at 288x144 (lens panel native size) and
+  // floors at 16. Wider/taller = more Cmd=3 fragments per frame = lower fps;
+  // user picks from a small preset list in the lens Camera Settings page.
+  // Defaults match the legacy hardcoded gG2StreamW/H values (96x96).
+  int g2StreamWidth;
+  int g2StreamHeight;
   // Camera storage settings
   int cameraStorageLocation;    // 0=LittleFS, 1=SD, 2=Both
   String cameraCaptureFolder;   // Folder for saved images (default: "/photos")

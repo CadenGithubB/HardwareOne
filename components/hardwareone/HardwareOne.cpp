@@ -36,6 +36,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
   #include <esp_http_server.h>
 #endif
 #include <LittleFS.h>
+#include "System_VFS.h"
 #include <Preferences.h>
 #include <time.h>
 #include <esp_timer.h>
@@ -436,8 +437,8 @@ extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, s
   // Ensure /logging_captures exists (best-effort)
   {
     FsLockGuard guard("alloclog.ensure_logs");
-    if (!LittleFS.exists("/logging_captures")) {
-      LittleFS.mkdir("/logging_captures");
+    if (!VFS::existsGuarded("/logging_captures", VFS::systemAuth("hwone.alloclog_mkdir"))) {
+      VFS::mkdirGuarded("/logging_captures", VFS::systemAuth("hwone.alloclog_mkdir"));
     }
   }
   // Timestamp prefix with ms precision, via boot-epoch offset and esp_timer
@@ -1072,7 +1073,7 @@ void hardwareone_setup() {
   bool haveSettings = false;
   if (filesystemReady) {
     FsLockGuard guard("settings.exists");
-    haveSettings = LittleFS.exists(SETTINGS_JSON_FILE);
+    haveSettings = VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth("hwone.settings_load_check"));
   }
 
   if (filesystemReady && haveSettings) {

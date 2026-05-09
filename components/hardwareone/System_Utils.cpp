@@ -889,9 +889,20 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
 }
 
 // Automation logging
+//
+// Writes are gated by gAutoLogOwnerCtx — the AuthContext captured when the
+// user ran `autolog start`. See the comment on gAutoLogOwnerCtx in
+// System_Automation.cpp for the design rationale (captured identity vs.
+// reading gExecAuthContext at write time, which fires from event triggers
+// detached from any CLI session).
+//
+// If the captured ctx loses permission to the path mid-run (e.g. admin
+// demoted to user), individual writes start failing — that's intentional.
 bool appendAutoLogEntry(const char* type, const String& message) {
   if (!gAutoLogActive || gAutoLogFile.length() == 0) return false;
   if (!filesystemReady) return false;
+
+  extern AuthContext gAutoLogOwnerCtx;
 
   // Get timestamp in same format as existing logs: [YYYY-MM-DD HH:MM:SS.mmm]
   char tsPrefix[32];
@@ -912,14 +923,18 @@ bool appendAutoLogEntry(const char* type, const String& message) {
                            dest, sizeof(dest));
 
   // Ensure the parent directory exists on whichever FS we're writing to.
+  // Both exists and mkdir go through the guarded path so the captured user
+  // can't create directories they don't have CREATE perm on.
   String destStr(dest);
   int lastSlash = destStr.lastIndexOf('/');
   if (lastSlash > 0) {
     String dir = destStr.substring(0, lastSlash);
-    if (!VFS::exists(dir)) VFS::mkdir(dir);
+    if (!VFS::existsGuarded(dir, gAutoLogOwnerCtx)) {
+      if (!VFS::mkdirGuarded(dir, gAutoLogOwnerCtx)) return false;
+    }
   }
 
-  File f = VFS::open(destStr, "a", true);
+  File f = VFS::openGuarded(destStr, "a", gAutoLogOwnerCtx);
   if (!f) return false;
 
   size_t written = f.print(line);

@@ -488,7 +488,7 @@ void sensorLogTick() {
       bool onSd = VFS::resolveOverflowPath(gSensorLogPath.c_str(),
                                            (size_t)gSensorLogMaxSize,
                                            activePath, sizeof(activePath));
-      File f = VFS::open(String(activePath), "a", true);
+      File f = VFS::openGuarded(String(activePath), "a", VFS::systemAuth("senlog.append"), true);
       if (f) {
         size_t len = strlen(line);
         f.write((const uint8_t*)line, len);
@@ -510,8 +510,8 @@ void sensorLogTick() {
             if (gSensorLogMaxRotations > 1) {
               char oldestFile[128];
               snprintf(oldestFile, sizeof(oldestFile), "%s.%d", activePath, gSensorLogMaxRotations);
-              if (VFS::exists(String(oldestFile))) {
-                VFS::remove(String(oldestFile));
+              if (VFS::existsGuarded(String(oldestFile), VFS::systemAuth("senlog.rotate"))) {
+                VFS::removeGuarded(String(oldestFile), VFS::systemAuth("senlog.rotate"));
               }
             }
 
@@ -520,17 +520,17 @@ void sensorLogTick() {
               if (i == 1) snprintf(fromFile, sizeof(fromFile), "%s", activePath);
               else snprintf(fromFile, sizeof(fromFile), "%s.%d", activePath, i);
               snprintf(toFile, sizeof(toFile), "%s.%d", activePath, i + 1);
-              if (VFS::exists(String(fromFile))) {
-                VFS::rename(String(fromFile), String(toFile));
+              if (VFS::existsGuarded(String(fromFile), VFS::systemAuth("senlog.rotate"))) {
+                VFS::renameGuarded(String(fromFile), String(toFile), VFS::systemAuth("senlog.rotate"));
               }
             }
 
-            if (VFS::exists(String(activePath))) {
+            if (VFS::existsGuarded(String(activePath), VFS::systemAuth("senlog.rotate"))) {
               String rotatedFile = String(activePath) + ".1";
-              VFS::rename(String(activePath), rotatedFile);
+              VFS::renameGuarded(String(activePath), rotatedFile, VFS::systemAuth("senlog.rotate"));
             }
           } else {
-            VFS::remove(String(activePath));
+            VFS::removeGuarded(String(activePath), VFS::systemAuth("senlog.rotate"));
           }
 
           approxSizeBytes = 0;
@@ -690,18 +690,18 @@ const char* cmd_sensorlog(const String& argsInput) {
     int lastSlash = filepath.lastIndexOf('/');
     if (lastSlash > 0) {
       String dir = filepath.substring(0, lastSlash);
-      if (!VFS::exists(dir)) {
+      if (!VFS::existsGuarded(dir, VFS::systemAuth("senlog.setup_mkdir"))) {
         // Create parent directories iteratively via VFS so the sensor log's
         // write path and directory creation use the same dispatcher.
         for (int i = 1; i <= (int)dir.length(); i++) {
           if (i == (int)dir.length() || dir.charAt(i) == '/') {
             String parent = dir.substring(0, i);
-            if (parent.length() > 0 && !VFS::exists(parent)) {
-              VFS::mkdir(parent);
+            if (parent.length() > 0 && !VFS::existsGuarded(parent, VFS::systemAuth("senlog.setup_mkdir"))) {
+              VFS::mkdirGuarded(parent, VFS::systemAuth("senlog.setup_mkdir"));
             }
           }
         }
-        if (!VFS::exists(dir)) {
+        if (!VFS::existsGuarded(dir, VFS::systemAuth("senlog.setup_mkdir"))) {
           snprintf(getDebugBuffer(), 1024, "Error: Failed to create directory: %s", dir.c_str());
           return getDebugBuffer();
         }
@@ -710,8 +710,8 @@ const char* cmd_sensorlog(const String& argsInput) {
     }
 
     // Create file if needed
-    if (!LittleFS.exists(filepath)) {
-      File f = LittleFS.open(filepath, "w");
+    if (!VFS::existsGuarded(filepath, VFS::systemAuth("senlog.setup_create"))) {
+      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("senlog.setup_create"), true);
       if (!f) {
         snprintf(getDebugBuffer(), 1024, "Error: Failed to create file: %s", filepath.c_str());
         return getDebugBuffer();
@@ -1117,12 +1117,12 @@ void sensorLogAutoStart() {
   path = pathBuf;
 
   // Ensure /logs/sensors directory exists before starting (mkdir is non-recursive).
-  // Uses VFS::mkdir for consistency with the overflow-capable write path.
-  if (!VFS::exists("/logs")) {
-    VFS::mkdir("/logs");
+  // Uses VFS::mkdirGuarded for consistency with the overflow-capable write path.
+  if (!VFS::existsGuarded("/logs", VFS::systemAuth("senlog.autostart_mkdir"))) {
+    VFS::mkdirGuarded("/logs", VFS::systemAuth("senlog.autostart_mkdir"));
   }
-  if (!VFS::exists("/logs/sensors")) {
-    if (!VFS::mkdir("/logs/sensors")) {
+  if (!VFS::existsGuarded("/logs/sensors", VFS::systemAuth("senlog.autostart_mkdir"))) {
+    if (!VFS::mkdirGuarded("/logs/sensors", VFS::systemAuth("senlog.autostart_mkdir"))) {
       broadcastOutput("[sensorlog] Auto-start failed: Could not create /logs/sensors directory");
       return;
     }

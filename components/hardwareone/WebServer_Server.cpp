@@ -751,10 +751,10 @@ void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg);
 void loadIpBans() {
   memset(sIpBans, 0, sizeof(sIpBans));
   sIpBansLoaded = true;
-  if (!filesystemReady || !LittleFS.exists(IP_BANS_FILE)) return;
+  if (!filesystemReady || !VFS::existsGuarded(IP_BANS_FILE, VFS::systemAuth("ipbans.load"))) return;
 
   FsLockGuard guard("ipbans.load");
-  File f = LittleFS.open(IP_BANS_FILE, "r");
+  File f = VFS::openGuarded(IP_BANS_FILE, "r", VFS::systemAuth("ipbans.load"));
   if (!f) return;
 
   PSRAM_JSON_DOC(doc);
@@ -814,7 +814,7 @@ static bool saveIpBans() {
   }
 
   FsLockGuard guard("ipbans.save");
-  File f = LittleFS.open(IP_BANS_FILE, "w");
+  File f = VFS::openGuarded(IP_BANS_FILE, "w", VFS::systemAuth("ipbans.save"));
   if (!f) return false;
   size_t written = serializeJson(doc, f);
   f.close();
@@ -1649,6 +1649,12 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   path.replace("%20", " ");
   DEBUG_STORAGEF("[handleFileRead] Decoded path: %s", path.c_str());
 
+  // Keep the 403 response for "admin-only path, non-admin caller" so users
+  // get a clear message rather than an ambiguous "not found". The
+  // openGuarded call below would also deny (userPerms=0 on those rules),
+  // but the 403 is better UX. Non-admin paths fall through to openGuarded
+  // which handles canRead, sensitive-extension blocks, and path traversal
+  // in one place.
   if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
     gSensorPollingPaused = wasPaused;
     httpd_resp_set_status(req, "403 Forbidden");
@@ -1659,9 +1665,13 @@ esp_err_t handleFileRead(httpd_req_t* req) {
 
   FsLockGuard fsGuard("handleFileRead");
 
-  File f = VFS::open(path, "r");
+  // Phase 3: openGuarded enforces canRead (the previous code skipped this
+  // check, so non-admin-only sensitive-extension files were readable),
+  // path normalization (".." traversal rejection), and the rule-table
+  // permission lookup against the caller's actual identity.
+  File f = VFS::openGuarded(path, "r", ctx);
   if (!f) {
-    WARN_STORAGEF("File not found: %s", path.c_str());
+    WARN_STORAGEF("File not found or access denied: %s", path.c_str());
     gSensorPollingPaused = wasPaused;
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "File not found", HTTPD_RESP_USE_STRLEN);
@@ -1786,15 +1796,12 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
     return ESP_OK;
   }
 
+  // Keep the 403-style "Admin required" message for admin-only paths so
+  // the UX stays informative. The openGuarded call below would also deny
+  // for non-admin attempts on those rules but with a less specific
+  // response.
   if (isAdminOnlyPath(name) && !isAdminUser(ctx.user)) {
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Admin required\"}");
-    return ESP_OK;
-  }
-
-  // Use centralized permission check (also block .bin firmware files)
-  if (name.endsWith(".bin") || !canEdit(name)) {
-    WARN_STORAGEF("Protected path write attempt: %s", name.c_str());
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Writes to this path are not allowed\"}");
     return ESP_OK;
   }
 
@@ -1802,10 +1809,14 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
 
   FsLockGuard fsGuard("handleFileWrite");
 
-  File f = VFS::open(name, "w", true);
+  // Phase 3: openGuarded does the canEdit check (which now suffix-blocks
+  // .bin/.hex/.elf/.crt/.cert/.cer/.key/.pem/.credentials and rejects
+  // images for editing), normalises the path, and runs role-based perms
+  // against the caller's identity.
+  File f = VFS::openGuarded(name, "w", ctx, /*create=*/true);
   if (!f) {
-    ERROR_STORAGEF("Failed to open file for write: %s", name.c_str());
-    sendJsonResponse(req, "{\"success\":false, \"error\":\"Open failed\"}");
+    ERROR_STORAGEF("Failed to open file for write or denied: %s", name.c_str());
+    sendJsonResponse(req, "{\"success\":false, \"error\":\"Writes to this path are not allowed\"}");
     return ESP_OK;
   }
 
@@ -2036,16 +2047,20 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       DEBUG_STORAGEF("[handleFileUpload] ERROR: Empty path");
       return false;
     }
-    // Block path traversal
-    if (path.indexOf("..") >= 0) {
-      WARN_SYSTEMF("[handleFileUpload] BLOCKED: Path traversal not allowed: %s", path.c_str());
-      return false;
-    }
-    // Use centralized permission check (import = upload via web)
-    if (!canImport(path)) {
+
+    // Phase 3: canImport(path, ctx) folds the per-role permission check,
+    // path normalization (".." traversal rejection), and sensitive-extension
+    // checks into a single call. The previous code did: traversal check,
+    // canImport(path) using gExecAuthContext leak, and a separate
+    // isAdminOnlyPath gate — three branches that could disagree. Now one
+    // decision point.
+    if (!canImport(path, ctx)) {
       WARN_SYSTEMF("[handleFileUpload] BLOCKED: Import not allowed: %s", path.c_str());
       return false;
     }
+    // Keep the explicit admin-only check for the warning log clarity —
+    // canImport already denied for non-admins, but logging the specific
+    // reason ("admin-only path") helps diagnose user reports.
     if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
       WARN_SYSTEMF("[handleFileUpload] BLOCKED: Admin-only path: %s", path.c_str());
       return false;
@@ -2056,9 +2071,9 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       String parentDir = path.substring(0, lastSlash);
       {
         FsLockGuard fsGuard("handleFileUpload.mkdir");
-        if (!VFS::exists(parentDir)) {
+        if (!VFS::existsGuarded(parentDir, ctx)) {
           DEBUG_STORAGEF("[handleFileUpload] Creating parent directory: %s", parentDir.c_str());
-          VFS::mkdir(parentDir);
+          VFS::mkdirGuarded(parentDir, ctx);
         }
       }
     }
@@ -2066,9 +2081,9 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
     fsLock("handleFileUpload.file");
     fsLockedForUpload = true;
-    file = VFS::open(path, "w", true);
+    file = VFS::openGuarded(path, "w", ctx, /*create=*/true);
     if (!file) {
-      ERROR_STORAGEF("Failed to open file for write: %s", path.c_str());
+      ERROR_STORAGEF("Failed to open file for write or denied: %s", path.c_str());
       fsUnlock();
       fsLockedForUpload = false;
       return false;
@@ -2258,7 +2273,15 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     }
     {
       FsLockGuard fsGuard("handleFileUpload.cleanup");
-      LittleFS.remove(path);
+      // We just opened this file with the user's identity; cleaning up
+      // the failed write should use the same identity, not system. The
+      // user wouldn't have been allowed to OPEN it without DELETE-able
+      // semantics for the directory; but if cleanup denies (rule says
+      // user can write but not delete?), fall back to system as a last
+      // resort to avoid leaving an orphan partial upload.
+      if (!VFS::removeGuarded(path, ctx)) {
+        VFS::removeGuarded(path, VFS::systemAuth("upload.cleanup.partial"));
+      }
     }
     if (fsLockedForUpload) {
       fsUnlock();
@@ -3738,7 +3761,7 @@ esp_err_t handleRegisterSubmit(httpd_req_t* req) {
 
 // File handler dependencies
 extern bool filesystemReady;
-extern bool buildFilesListing(const String& inPath, String& out, bool asJson, bool hideAdminPaths);
+extern bool buildFilesListing(const String& inPath, String& out, bool asJson, const AuthContext& ctx, bool hideAdminPaths);
 extern bool ensureFileViewBuffers();
 extern char* gFileReadBuf;
 extern char* gFileOutBuf;
@@ -3779,10 +3802,13 @@ esp_err_t handleFilesList(httpd_req_t* req) {
 
   bool userIsAdmin = isAdminUser(ctx.user);
   String body;
-  bool ok = buildFilesListing(dirPath, body, /*asJson=*/true, /*hideAdminPaths=*/!userIsAdmin);
+  bool ok = buildFilesListing(dirPath, body, /*asJson=*/true, ctx, /*hideAdminPaths=*/!userIsAdmin);
   String json;
   if (ok) {
-    uint8_t dp = getDirPerms(dirPath);
+    // Phase 3: pass caller's identity so the dirPerms reflect what THIS
+    // user can do in the directory (admin gets more, etc.). Previous
+    // path-only call used gExecAuthContext which may have stale identity.
+    uint8_t dp = getDirPerms(dirPath, ctx);
     char hdrBuf[64];
     snprintf(hdrBuf, sizeof(hdrBuf), "{\"success\":true,\"dirPerms\":%d,\"files\":[", (int)dp);
     json = hdrBuf;
@@ -4034,8 +4060,11 @@ esp_err_t handleFileView(httpd_req_t* req) {
       return ESP_OK;
     }
 
-    // Open file via VFS (handles both LittleFS and SD)
-    File file = VFS::open(path, "r");
+    // Open file via guarded VFS — enforces canRead, blocks sensitive
+    // extensions (.bin/.crt/.key/etc.), normalises path (rejects "..").
+    // Phase 3: previous code skipped canRead which let admins read any
+    // .bin/.crt the rule table didn't explicitly admin-only.
+    File file = VFS::openGuarded(path, "r", ctx);
     if (!file) {
       gSensorPollingPaused = wasPaused;
       httpd_resp_set_type(req, "text/plain");
@@ -4139,8 +4168,11 @@ esp_err_t handleFileView(httpd_req_t* req) {
   // Serialize file operations to prevent concurrent access crashes
   FsLockGuard fsLock("handleFileView");
 
-  if (!VFS::exists(path)) {
-    DEBUG_STORAGEF("[handleFileView] ERROR: File does not exist: %s", path.c_str());
+  // Phase 3: existsGuarded gates by canRead (no information leak about
+  // files the caller can't read), normalises path, and runs the same
+  // sensitive-extension / role-based checks as openGuarded below.
+  if (!VFS::existsGuarded(path, ctx)) {
+    DEBUG_STORAGEF("[handleFileView] ERROR: File does not exist or access denied: %s", path.c_str());
     gSensorPollingPaused = wasPaused;
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "File not found", HTTPD_RESP_USE_STRLEN);
@@ -4148,7 +4180,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
   }
 
   DEBUG_STORAGEF("[handleFileView] File exists, opening: %s (heap=%u)", path.c_str(), (unsigned)ESP.getFreeHeap());
-  File file = VFS::open(path, "r");
+  File file = VFS::openGuarded(path, "r", ctx);
   if (!file) {
     ERROR_STORAGEF("Failed to open file: %s", path.c_str());
     gSensorPollingPaused = wasPaused;
@@ -4519,8 +4551,12 @@ esp_err_t handleAdminPending(httpd_req_t* req) {
   response["success"] = true;
   JsonArray pendingArray = response["pending"].to<JsonArray>();
 
-  if (LittleFS.exists("/system/users/pending_users.json")) {
-    File file = LittleFS.open("/system/users/pending_users.json", "r");
+  // Phase 3: caller is verified-admin (line 4542), so admin's ctx grants
+  // PERM_READ on pending_users.json per the rule table. Use the guarded
+  // API with the caller's identity rather than systemAuth so the [PERM]
+  // log shows which admin actually viewed the list.
+  if (VFS::existsGuarded("/system/users/pending_users.json", ctx)) {
+    File file = VFS::openGuarded("/system/users/pending_users.json", "r", ctx);
     if (file) {
       PSRAM_JSON_DOC(doc);
       DeserializationError err = deserializeJson(doc, file);
@@ -4940,9 +4976,10 @@ void startHttpServer() {
     static const char* KEY_PATH  = "/system/certs/https_server.key";
 
     bool certsOk = false;
-    if (LittleFS.exists(CERT_PATH) && LittleFS.exists(KEY_PATH)) {
-      File certFile = LittleFS.open(CERT_PATH, "r");
-      File keyFile  = LittleFS.open(KEY_PATH, "r");
+    AuthContext sysHttps = VFS::systemAuth("web.https.cert.load");
+    if (VFS::existsGuarded(CERT_PATH, sysHttps) && VFS::existsGuarded(KEY_PATH, sysHttps)) {
+      File certFile = VFS::openGuarded(CERT_PATH, "r", sysHttps);
+      File keyFile  = VFS::openGuarded(KEY_PATH,  "r", sysHttps);
       if (certFile && keyFile) {
         sHttpsCertData = certFile.readString();
         sHttpsKeyData  = keyFile.readString();
@@ -4960,6 +4997,10 @@ void startHttpServer() {
       httpd_ssl_config_t sslConfig = HTTPD_SSL_CONFIG_DEFAULT();
       sslConfig.httpd.max_uri_handlers = 100;
       sslConfig.httpd.lru_purge_enable = true;
+      // Stack arg is in WORDS (see sizing notes on the plain HTTP
+      // path below). 11059 words = 44 KB. Peak under HTTPS load
+      // (HTTP request handling ~18 KB + mbedtls TLS handshake
+      // ~8–12 KB) is ~30 KB → 44 KB leaves ~14 KB headroom.
       sslConfig.httpd.stack_size = 11059;
       sslConfig.httpd.recv_wait_timeout = 20;
       sslConfig.httpd.send_wait_timeout = 20;
@@ -5021,7 +5062,21 @@ void startHttpServer() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 100;
     config.lru_purge_enable = true;
-    config.stack_size = 11059;  // ~11KB – reduced 10% from 12KB for memory optimization
+    // Stack arg is in WORDS (4 bytes) — NOT bytes, despite what the
+    // ESP-IDF docs imply. The historical "11059 ≈ 11KB" comment was
+    // wrong: 11059 words = 44 KB.
+    //
+    // This is the HTTP-ONLY fallback path — only reached when no
+    // HTTPS certs are present (or HTTPS init failed). Plain HTTP
+    // doesn't pay the mbedtls handshake cost, so we can be tighter
+    // here than the HTTPS path above.
+    //
+    // Measured peak under live HTTP load (login + JSON APIs + settings
+    // writes): ~18 KB. 7680 words = 30 KB leaves ~12 KB headroom (40%).
+    // If you ever upload HTTPS certs and reboot, the HTTPS branch
+    // runs with its own larger stack — this value is only in effect
+    // when running unencrypted.
+    config.stack_size = 7680;
     config.recv_wait_timeout = 30;  // 30 second timeout for large uploads
     config.send_wait_timeout = 30;  // 30 second timeout for large responses
     // Note: max header length is set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig

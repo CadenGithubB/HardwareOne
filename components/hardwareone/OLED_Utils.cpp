@@ -40,7 +40,11 @@ bool shouldBlockForDisplayAuth() {
 
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include "System_VFS.h"
 #include "i2csensor-rda5807.h"
+
+extern AuthContext gExecAuthContext;
+
 #include "OLED_ConsoleBuffer.h"
 #include "OLED_Footer.h"
 #include "OLED_SettingsEditor.h"
@@ -4309,12 +4313,12 @@ static String loadCachedManifest() {
   snprintf(pathBuf, sizeof(pathBuf), "/system/manifests/%s.json", hashHex);
   
   FsLockGuard guard("manifest.load");
-  if (!LittleFS.exists(pathBuf)) {
+  if (!VFS::existsGuarded(pathBuf, gExecAuthContext)) {
     DEBUG_USERSF("[RMENU] Manifest not cached: %s\n", pathBuf);
     return "";
   }
-  
-  File f = LittleFS.open(pathBuf, "r");
+
+  File f = VFS::openGuarded(pathBuf, "r", gExecAuthContext);
   if (!f) return "";
   
   String content = f.readString();
