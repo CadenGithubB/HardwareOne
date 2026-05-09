@@ -6,6 +6,7 @@
 #include <LittleFS.h>
 
 #include "System_User.h"
+#include "System_VFS.h"
 #include "WebPage_ESPNow.h"
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
@@ -380,7 +381,7 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
     char pathBuf[80];
     snprintf(pathBuf, sizeof(pathBuf), "%s/%s.json", manifestDir, fwHashParam);
     String path = pathBuf;
-    File f = LittleFS.open(path.c_str(), "r");
+    File f = VFS::openGuarded(path, "r", ctx);
     if (!f) {
       httpd_resp_send(req, "{\"error\":\"Manifest not found\"}", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
@@ -405,12 +406,12 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
   }
   
   // No fwHash - list all cached manifests
-  if (!LittleFS.exists(manifestDir)) {
+  if (!VFS::existsGuarded(manifestDir, ctx)) {
     httpd_resp_send(req, "{\"manifests\":[]}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
-  
-  File dir = LittleFS.open(manifestDir);
+
+  File dir = VFS::openGuarded(manifestDir, "r", ctx);
   if (!dir || !dir.isDirectory()) {
     httpd_resp_send(req, "{\"manifests\":[]}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;

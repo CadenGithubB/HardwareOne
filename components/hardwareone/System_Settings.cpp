@@ -15,6 +15,7 @@
 #include "System_Notifications.h"
 #include "System_ESPSR.h"  // srSyncDebugLevel() — derive legacy gSrDebugLevel from flags
 #include <LittleFS.h>
+#include "System_VFS.h"      // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <esp_system.h>
 #include <esp_app_desc.h>
 #include <esp_log.h>
@@ -548,6 +549,10 @@ void applySettings() {
     DBG_MAP(debugSensors,          DEBUG_SENSORS),
     DBG_MAP(debugSensorsGeneral,   DEBUG_SENSORS),
     DBG_MAP(debugCamera,           DEBUG_CAMERA),
+    DBG_MAP(debugCameraLifecycle,  DEBUG_CAMERA_LIFECYCLE),
+    DBG_MAP(debugCameraCapture,    DEBUG_CAMERA_CAPTURE),
+    DBG_MAP(debugCameraSettings,   DEBUG_CAMERA_SETTINGS),
+    DBG_MAP(debugCameraVideo,      DEBUG_CAMERA_VIDEO),
     DBG_MAP(debugMicrophone,       DEBUG_MICROPHONE),
     DBG_MAP(debugWifi,             DEBUG_WIFI),
     DBG_MAP(debugStorage,          DEBUG_STORAGE),
@@ -654,7 +659,8 @@ void applySettings() {
   gDebugSubFlags.storageJson = gSettings.debugStorageJson;
   gDebugSubFlags.storageSettings = gSettings.debugStorageSettings;
   gDebugSubFlags.storageMigration = gSettings.debugStorageMigration;
-  updateParentDebugFlag(DEBUG_STORAGE, gSettings.debugStorage || gDebugSubFlags.storageFiles || gDebugSubFlags.storageJson || gDebugSubFlags.storageSettings || gDebugSubFlags.storageMigration);
+  gDebugSubFlags.storagePermissions = gSettings.debugStoragePermissions;
+  updateParentDebugFlag(DEBUG_STORAGE, gSettings.debugStorage || gDebugSubFlags.storageFiles || gDebugSubFlags.storageJson || gDebugSubFlags.storageSettings || gDebugSubFlags.storageMigration || gDebugSubFlags.storagePermissions);
   
   // System sub-flags
   gDebugSubFlags.systemBoot = gSettings.debugSystemBoot;
@@ -898,9 +904,9 @@ bool writeSettingsJson() {
   
   // CRITICAL: Read existing settings first to preserve orphaned sensor sections
   // This allows settings from disabled sensors to persist and show as grayed-out in UI
-  if (LittleFS.exists(SETTINGS_JSON_FILE)) {
+  if (VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth("settings.write"))) {
     fsLock("settings.read_for_merge");
-    File existingFile = LittleFS.open(SETTINGS_JSON_FILE, "r");
+    File existingFile = VFS::openGuarded(SETTINGS_JSON_FILE, "r", VFS::systemAuth("settings.write"));
     if (existingFile) {
       DeserializationError err = deserializeJson(doc, existingFile);
       existingFile.close();
@@ -931,7 +937,7 @@ bool writeSettingsJson() {
   const char* tmp = "/settings.tmp";
   
   fsLock("settings.write");
-  File file = LittleFS.open(tmp, "w");
+  File file = VFS::openGuarded(tmp, "w", VFS::systemAuth("settings.write"));
   if (!file) {
     fsUnlock();
     ERROR_STORAGEF("Failed to open temp file for writing");
@@ -947,7 +953,7 @@ bool writeSettingsJson() {
 
   if (bytesWritten == 0) {
     ERROR_STORAGEF("Failed to serialize JSON");
-    LittleFS.remove(tmp);
+    VFS::removeGuarded(tmp, VFS::systemAuth("settings.write"));
     gSensorPollingPaused = wasPaused;
     return false;
   }
@@ -956,14 +962,14 @@ bool writeSettingsJson() {
 
   // Atomic rename (LittleFS rename overwrites destination)
   fsLock("settings.rename");
-  bool okRename = LittleFS.rename(tmp, SETTINGS_JSON_FILE);
+  bool okRename = VFS::renameGuarded(tmp, SETTINGS_JSON_FILE, VFS::systemAuth("settings.write"));
   fsUnlock();
 
   if (!okRename) {
     WARN_STORAGEF("Rename failed, trying direct write");
     // Fallback: write directly
     fsLock("settings.direct");
-    File directFile = LittleFS.open(SETTINGS_JSON_FILE, "w");
+    File directFile = VFS::openGuarded(SETTINGS_JSON_FILE, "w", VFS::systemAuth("settings.write"));
     if (!directFile) {
       fsUnlock();
       gSensorPollingPaused = wasPaused;
@@ -1003,14 +1009,14 @@ bool readSettingsJson() {
   bool wasPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
 
-  if (!LittleFS.exists(SETTINGS_JSON_FILE)) {
+  if (!VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth("settings.read"))) {
     DEBUG_STORAGEF("[Settings] File does not exist: %s", SETTINGS_JSON_FILE);
     gSensorPollingPaused = wasPaused;
     return false;
   }
 
   // Open file and parse JSON directly (no intermediate String)
-  File file = LittleFS.open(SETTINGS_JSON_FILE, "r");
+  File file = VFS::openGuarded(SETTINGS_JSON_FILE, "r", VFS::systemAuth("settings.read"));
   if (!file) {
     ERROR_STORAGEF("Failed to open settings file");
     gSensorPollingPaused = wasPaused;
@@ -1298,10 +1304,11 @@ static const SettingEntry debugSettingEntries[] = {
   { "driver",     SETTING_BOOL, &gSettings.debugWifiDriver,     0, 0, nullptr, 0, 1, "Driver",              nullptr, false, "wifi", "debugwifidriver" },
   // --- storage group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugStorage,          0, 0, nullptr, 0, 1, "All Storage",       nullptr, false, "storage", "debugstorage" },
-  { "files",      SETTING_BOOL, &gSettings.debugStorageFiles,     0, 0, nullptr, 0, 1, "Files",             nullptr, false, "storage", "debugstoragefiles" },
-  { "json",       SETTING_BOOL, &gSettings.debugStorageJson,      0, 0, nullptr, 0, 1, "JSON",              nullptr, false, "storage", "debugstoragejson" },
-  { "settings",   SETTING_BOOL, &gSettings.debugStorageSettings,  0, 0, nullptr, 0, 1, "Settings",          nullptr, false, "storage", "debugstoragesettings" },
-  { "migration",  SETTING_BOOL, &gSettings.debugStorageMigration, 0, 0, nullptr, 0, 1, "Migration",         nullptr, false, "storage", "debugstoragemigration" },
+  { "files",       SETTING_BOOL, &gSettings.debugStorageFiles,       0, 0, nullptr, 0, 1, "Files",       nullptr, false, "storage", "debugstoragefiles" },
+  { "json",        SETTING_BOOL, &gSettings.debugStorageJson,        0, 0, nullptr, 0, 1, "JSON",        nullptr, false, "storage", "debugstoragejson" },
+  { "settings",    SETTING_BOOL, &gSettings.debugStorageSettings,    0, 0, nullptr, 0, 1, "Settings",    nullptr, false, "storage", "debugstoragesettings" },
+  { "migration",   SETTING_BOOL, &gSettings.debugStorageMigration,   0, 0, nullptr, 0, 1, "Migration",   nullptr, false, "storage", "debugstoragemigration" },
+  { "permissions", SETTING_BOOL, &gSettings.debugStoragePermissions, 0, 0, nullptr, 0, 1, "Permissions", nullptr, false, "storage", "debugstoragepermissions" },
   // --- esp-now group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugEspNow,           0, 0, nullptr, 0, 1, "All ESP-NOW",       nullptr, false, "esp-now", "debugespnow" },
   { "stream",     SETTING_BOOL, &gSettings.debugEspNowStream,     0, 0, nullptr, 0, 1, "Stream",            nullptr, false, "esp-now", "debugespnowstream" },
@@ -1353,7 +1360,11 @@ static const SettingEntry debugSettingEntries[] = {
   { "enabled",    SETTING_BOOL, &gSettings.debugSensors,         0, 0, nullptr, 0, 1, "All Sensors",         nullptr, false, "sensors",     "debugsensors" },
   { "general",    SETTING_BOOL, &gSettings.debugSensorsGeneral,  0, 0, nullptr, 0, 1, "General",             nullptr, false, "sensors",     "debugsensorsgeneral" },
   // --- per-sensor groups (each sensor gets its own card in the debug UI) ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugCamera,          0, 0, nullptr, 0, 1, "Camera",              nullptr, false, "camera",      "debugcamera" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugCamera,          0, 0, nullptr, 0, 1, "All Camera",          nullptr, false, "camera",      "debugcamera" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugCameraLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "camera",      "debugcameralifecycle" },
+  { "capture",    SETTING_BOOL, &gSettings.debugCameraCapture,   0, 0, nullptr, 0, 1, "Capture",             nullptr, false, "camera",      "debugcameracapture" },
+  { "settings",   SETTING_BOOL, &gSettings.debugCameraSettings,  0, 0, nullptr, 0, 1, "Settings",            nullptr, false, "camera",      "debugcamerasettings" },
+  { "video",      SETTING_BOOL, &gSettings.debugCameraVideo,     0, 0, nullptr, 0, 1, "Video",               nullptr, false, "camera",      "debugcameravideo" },
   { "enabled",    SETTING_BOOL, &gSettings.debugMicrophone,      0, 0, nullptr, 0, 1, "Microphone",          nullptr, false, "microphone",  "debugmicrophone" },
   { "enabled",    SETTING_BOOL, &gSettings.debugGps,             0, 0, nullptr, 0, 1, "GPS",                 nullptr, false, "gps",         "debuggps" },
   { "enabled",    SETTING_BOOL, &gSettings.debugRtc,             0, 0, nullptr, 0, 1, "RTC",                 nullptr, false, "rtc",         "debugrtc" },
@@ -1971,11 +1982,11 @@ bool loadUserSettings(uint32_t userId, JsonDocument& doc) {
   String path = getUserSettingsPath(userId);
   {
     FsLockGuard guard("user_settings.load");
-    if (!LittleFS.exists(path.c_str())) {
+    if (!VFS::existsGuarded(path.c_str(), VFS::systemAuth("user_settings.load"))) {
       doc.to<JsonObject>();
       return true;
     }
-    File f = LittleFS.open(path.c_str(), "r");
+    File f = VFS::openGuarded(path.c_str(), "r", VFS::systemAuth("user_settings.load"));
     if (!f) return false;
     DeserializationError err = deserializeJson(doc, f);
     f.close();
@@ -1999,28 +2010,28 @@ bool saveUserSettings(uint32_t userId, const JsonDocument& doc) {
 
   {
     FsLockGuard guard("user_settings.save");
-    File f = LittleFS.open(tmp.c_str(), "w");
+    File f = VFS::openGuarded(tmp.c_str(), "w", VFS::systemAuth("user_settings.save"));
     if (!f) return false;
     size_t written = serializeJson(doc, f);
     f.flush();
     f.close();
     if (written == 0) {
-      LittleFS.remove(tmp.c_str());
+      VFS::removeGuarded(tmp.c_str(), VFS::systemAuth("user_settings.save"));
       return false;
     }
 
     // Atomic rename (LittleFS rename overwrites destination)
-    if (!LittleFS.rename(tmp.c_str(), path.c_str())) {
+    if (!VFS::renameGuarded(tmp.c_str(), path.c_str(), VFS::systemAuth("user_settings.save"))) {
       // Rename failed; fallback to direct overwrite
-      File direct = LittleFS.open(path.c_str(), "w");
+      File direct = VFS::openGuarded(path.c_str(), "w", VFS::systemAuth("user_settings.save"));
       if (!direct) {
-        LittleFS.remove(tmp.c_str());
+        VFS::removeGuarded(tmp.c_str(), VFS::systemAuth("user_settings.save"));
         return false;
       }
       written = serializeJson(doc, direct);
       direct.flush();
       direct.close();
-      LittleFS.remove(tmp.c_str());
+      VFS::removeGuarded(tmp.c_str(), VFS::systemAuth("user_settings.save"));
       return written > 0;
     }
   }

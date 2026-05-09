@@ -9,6 +9,7 @@
 #include "System_Debug.h"
 #include "System_Mutex.h"
 #include "System_Filesystem.h"
+#include "System_VFS.h"
 #include "System_User.h"
 #include <ArduinoJson.h>
 #include "System_MemUtil.h"
@@ -241,14 +242,14 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
   bool firstFile = true;
   
   for (int d = 0; d < 3; d++) {
-    File root = LittleFS.open(dirs[d]);
+    File root = VFS::openGuarded(dirs[d], "r", ctx);
     if (!root || !root.isDirectory()) continue;
-    
+
     File file = root.openNextFile();
     while (file) {
       if (!file.isDirectory()) {
         bool hasGPS = false;
-        File check = LittleFS.open(file.path(), "r");
+        File check = VFS::openGuarded(file.path(), "r", ctx);
         if (check) {
           for (int i = 0; i < 15 && check.available(); i++) {
             String line = check.readStringUntil('\n');

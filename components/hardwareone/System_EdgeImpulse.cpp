@@ -11,6 +11,9 @@
 #include "img_converters.h"
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include "System_VFS.h"
+
+extern AuthContext gExecAuthContext;
 
 // TensorFlow Lite Micro includes
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -77,11 +80,11 @@ static void freeLabels() {
 }
 
 static bool loadLabelsFromExplicitPath(const String& labelsPath) {
-  if (!LittleFS.exists(labelsPath.c_str())) {
+  if (!VFS::existsGuarded(labelsPath, VFS::systemAuth("edge.labels_load"))) {
     return false;
   }
 
-  File labelsFile = LittleFS.open(labelsPath.c_str(), "r");
+  File labelsFile = VFS::openGuarded(labelsPath, "r", VFS::systemAuth("edge.labels_load"));
   if (!labelsFile) {
     return false;
   }
@@ -460,7 +463,7 @@ bool loadModelFromFile(const char* path) {
   freeModelResources();
   
   // Open file
-  File modelFile = LittleFS.open(path, "r");
+  File modelFile = VFS::openGuarded(path, "r", VFS::systemAuth("edge.model_load"));
   if (!modelFile) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to open model file: %s", path);
     return false;
@@ -712,7 +715,7 @@ const char* getLoadedModelPath() {
 }
 
 static void listModelsRecursive(const String& absDir, const String& relPrefix, String& output, int& count) {
-  File dir = LittleFS.open(absDir.c_str());
+  File dir = VFS::openGuarded(absDir, "r", VFS::systemAuth("edge.list_models"));
   if (!dir || !dir.isDirectory()) return;
 
   File file = dir.openNextFile();
@@ -753,7 +756,7 @@ void listAvailableModels(String& output) {
   snprintf(hdrBuf, sizeof(hdrBuf), "Available models in %s:\n", MODEL_DIR);
   output = hdrBuf;
   
-  File root = LittleFS.open(MODEL_DIR);
+  File root = VFS::openGuarded(MODEL_DIR, "r", VFS::systemAuth("edge.list_models"));
   if (!root || !root.isDirectory()) {
     char errBuf[64];
     snprintf(errBuf, sizeof(errBuf), "  (directory not found - create %s)\n", MODEL_DIR);
@@ -771,8 +774,8 @@ void listAvailableModels(String& output) {
 
 // Create models directory if it doesn't exist
 static void ensureModelDirectory() {
-  if (!LittleFS.exists(MODEL_DIR)) {
-    LittleFS.mkdir(MODEL_DIR);
+  if (!VFS::existsGuarded(MODEL_DIR, VFS::systemAuth("edge.ensure_model_dir"))) {
+    VFS::mkdirGuarded(MODEL_DIR, VFS::systemAuth("edge.ensure_model_dir"));
     DEBUG_SYSTEMF("[EdgeImpulse] Created models directory: %s", MODEL_DIR);
   }
 }
@@ -900,7 +903,7 @@ void initEdgeImpulse() {
   
   // Try to load default model if it exists
   DEBUG_SYSTEMF("[EI_DEBUG] Checking for default model: %s", DEFAULT_MODEL);
-  if (LittleFS.exists(DEFAULT_MODEL)) {
+  if (VFS::existsGuarded(DEFAULT_MODEL, VFS::systemAuth("edge.default_model_check"))) {
     DEBUG_SYSTEMF("[EI_DEBUG] Default model found, loading...");
     if (loadModelFromFile(DEFAULT_MODEL)) {
       DEBUG_SYSTEMF("[EI_DEBUG] Default model loaded successfully");
@@ -909,9 +912,9 @@ void initEdgeImpulse() {
     }
   } else {
     DEBUG_SYSTEMF("[EI_DEBUG] No default model at %s", DEFAULT_MODEL);
-    
+
     // List available models
-    File dir = LittleFS.open(MODEL_DIR);
+    File dir = VFS::openGuarded(MODEL_DIR, "r", VFS::systemAuth("edge.list_models_init"));
     if (dir && dir.isDirectory()) {
       int modelCount = 0;
       File file = dir.openNextFile();
@@ -1452,7 +1455,7 @@ EIResults runInferenceFromFile(const char* imagePath) {
   DEBUG_SYSTEMF("[EI_DEBUG] Step 1: Loading image from file...");
   uint32_t loadStart = millis();
   
-  File imgFile = LittleFS.open(imagePath, "r");
+  File imgFile = VFS::openGuarded(imagePath, "r", VFS::systemAuth("edge.image_classify"));
   if (!imgFile) {
     DEBUG_SYSTEMF("[EI_DEBUG] FAIL: Cannot open file: %s", imagePath);
     results.errorMessage = "Failed to open image file";
@@ -1920,7 +1923,7 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  File dir = LittleFS.open(MODEL_DIR);
+  File dir = VFS::openGuarded(MODEL_DIR, "r", ctx);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     httpd_resp_set_type(req, "application/json");
@@ -1972,23 +1975,23 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
     String dstModel = dstModelBuf;
     
     // Create folder
-    if (!LittleFS.exists(dstDir)) {
-      if (!LittleFS.mkdir(dstDir)) {
+    if (!VFS::existsGuarded(dstDir, ctx)) {
+      if (!VFS::mkdirGuarded(dstDir, ctx)) {
         failed++;
         continue;
       }
     }
-    
+
     // Move .tflite
-    if (!LittleFS.exists(dstModel)) {
-      if (LittleFS.rename(srcModel.c_str(), dstModel.c_str())) {
+    if (!VFS::existsGuarded(dstModel, ctx)) {
+      if (VFS::renameGuarded(srcModel, dstModel, ctx)) {
         moved++;
       } else {
         failed++;
         continue;
       }
     }
-    
+
     // Look for matching labels file
     char labelsNameBuf[64], srcLabelsBuf[128], dstLabelsBuf[128];
     snprintf(labelsNameBuf, sizeof(labelsNameBuf), "%s.labels.txt", modelName.c_str());
@@ -1996,9 +1999,9 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
     snprintf(dstLabelsBuf, sizeof(dstLabelsBuf), "%s/%s", dstDirBuf, labelsNameBuf);
     String srcLabels = srcLabelsBuf;
     String dstLabels = dstLabelsBuf;
-    
-    if (LittleFS.exists(srcLabels) && !LittleFS.exists(dstLabels)) {
-      if (LittleFS.rename(srcLabels.c_str(), dstLabels.c_str())) {
+
+    if (VFS::existsGuarded(srcLabels, ctx) && !VFS::existsGuarded(dstLabels, ctx)) {
+      if (VFS::renameGuarded(srcLabels, dstLabels, ctx)) {
         moved++;
       }
     }
@@ -2152,11 +2155,11 @@ const char* cmd_ei_file(const String& argsInput) {
   }
   
   // Check file exists
-  if (!LittleFS.exists(path)) {
+  if (!VFS::existsGuarded(path, gExecAuthContext)) {
     snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "File not found: %s", path.c_str());
     return gEICmdBuffer;
   }
-  
+
   EIResults results = runInferenceFromFile(path.c_str());
   
   if (!results.success) {
@@ -2287,7 +2290,7 @@ const char* cmd_ei_model_load(const String& argsInput) {
     path = pathBuf;
   }
   
-  if (!LittleFS.exists(path)) {
+  if (!VFS::existsGuarded(path, gExecAuthContext)) {
     snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Model not found: %s", path.c_str());
     return gEICmdBuffer;
   }

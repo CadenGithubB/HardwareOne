@@ -10,6 +10,7 @@
 #include "System_Debug.h"
 #include "System_Utils.h"      // RETURN_VALID_IF_VALIDATE_CSTR, parseBoolArg
 #include "System_Command.h"    // CommandEntry, ensureDebugBuffer, getDebugBuffer
+#include "System_User.h"       // AuthContext (gExecAuthContext for paired-by capture)
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -116,12 +117,39 @@ const BlePeerSpec* bleRegisteredPeerAt(size_t i) {
 // MAC auto-save
 // -----------------------------------------------------------------------------
 
+// Stamp the running user's identity onto the peer record if it isn't
+// already set. Called from the two natural pairing gestures:
+//   * `bleautoconnect <peer> on` (explicit opt-in — strong intent signal)
+//   * bleSavePeerMac on first successful connect (catches paths that
+//     skip bleautoconnect, e.g. a UI scan-and-pair button)
+// Idempotent: once a user owns the peer, re-pairing under a different
+// account doesn't silently transfer ownership. To re-assign, clear the
+// peer first (e.g. via bondrm or settings edit). This avoids surprise
+// privilege swaps if a non-admin briefly handles the device.
+static void bleStampPairedByIfBlank(BlePeerKind kind) {
+  if (kind >= BLE_PEER_MAX) return;
+  BlePeerData& d = gBlePeerData[kind];
+  if (d.pairedByUser.length() > 0) return;  // already owned
+  extern AuthContext gExecAuthContext;
+  const String& who = gExecAuthContext.user;
+  if (who.length() == 0) return;             // no current user (e.g. boot reconnect)
+  setSetting(d.pairedByUser, who);
+  const BlePeerSpec* spec = bleFindPeer(kind);
+  DEBUG_G2F("[BLE-Peers] Paired-by user for '%s' set to '%s'",
+            spec ? spec->name : "?", who.c_str());
+}
+
 void bleSavePeerMac(BlePeerKind kind, const String& mac1, const String& mac2) {
   if (kind >= BLE_PEER_MAX) return;
   // setSetting is a no-op when the value already matches, so calling on
   // every successful connect is cheap (no flash churn).
   if (mac1.length() > 0) setSetting(gBlePeerData[kind].mac1, mac1);
   if (mac2.length() > 0) setSetting(gBlePeerData[kind].mac2, mac2);
+  // Capture paired-by identity from whoever ran the connect command (if
+  // any). On boot auto-reconnect gExecAuthContext.user is blank and the
+  // helper no-ops — the pairedByUser field will already be populated
+  // from the original pairing in that case.
+  bleStampPairedByIfBlank(kind);
   // Don't auto-flip autoConnect — that's an explicit user opt-in. Pairing
   // saves the MAC; turning on auto-reconnect is a separate gesture.
   const BlePeerSpec* spec = bleFindPeer(kind);
@@ -243,6 +271,11 @@ const char* cmd_bleautoconnect(const String& argsInput) {
     return buf;
   }
   setSetting(d.autoConnect, on != 0);
+  // Capture paired-by identity at the explicit opt-in moment. This is
+  // the strongest pairing-intent signal we have — the user is taking
+  // ownership of the peer. The helper no-ops if pairedByUser is
+  // already set, so flipping on/off in a session won't churn ownership.
+  if (on) bleStampPairedByIfBlank(p->kind);
   snprintf(buf, sizeof(buf),
            "[BLE] %s auto-reconnect %s%s",
            p->displayName ? p->displayName : p->name,
@@ -285,6 +318,10 @@ void blePeersWriteJson(JsonDocument& doc) {
     // Only emit mac2 if it has content — keeps single-MAC peers tidy.
     if (d.mac2.length() > 0) e["mac2"] = d.mac2;
     e["autoConnect"] = d.autoConnect;
+    // Only emit pairedByUser if set — legacy peers paired before this
+    // field existed leave it blank, and callers fall back to
+    // firstAdminUser().
+    if (d.pairedByUser.length() > 0) e["pairedByUser"] = d.pairedByUser;
   }
 }
 
@@ -295,9 +332,10 @@ void blePeersReadJson(JsonDocument& doc) {
     JsonObjectConst e = peers[row.name].as<JsonObjectConst>();
     if (e.isNull()) continue;
     BlePeerData& d = gBlePeerData[row.kind];
-    if (!e["mac1"].isNull())        d.mac1        = e["mac1"].as<const char*>();
-    if (!e["mac2"].isNull())        d.mac2        = e["mac2"].as<const char*>();
-    if (!e["autoConnect"].isNull()) d.autoConnect = e["autoConnect"].as<bool>();
+    if (!e["mac1"].isNull())         d.mac1         = e["mac1"].as<const char*>();
+    if (!e["mac2"].isNull())         d.mac2         = e["mac2"].as<const char*>();
+    if (!e["autoConnect"].isNull())  d.autoConnect  = e["autoConnect"].as<bool>();
+    if (!e["pairedByUser"].isNull()) d.pairedByUser = e["pairedByUser"].as<const char*>();
   }
 }
 

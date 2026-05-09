@@ -4,7 +4,11 @@
 
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include "System_VFS.h"
 #include "System_Debug.h"
+
+extern AuthContext gExecAuthContext;
+
 #include "System_ESPNow.h"
 #include "System_Mutex.h"
 #include "System_Utils.h"
@@ -289,7 +293,7 @@ bool hasRemoteSettings() {
   DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] Checking path: %s", filePath.c_str());
   
   extern bool filesystemReady;
-  bool exists = filesystemReady && LittleFS.exists(filePath.c_str());
+  bool exists = filesystemReady && VFS::existsGuarded(filePath, gExecAuthContext);
   DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] fsReady=%d exists=%d -> returning %d",
                 filesystemReady ? 1 : 0, exists ? 1 : 0, exists ? 1 : 0);
   return exists;

@@ -21,7 +21,12 @@ enum CommandOrigin {
   ORIGIN_WEB,
   ORIGIN_AUTOMATION,
   ORIGIN_SYSTEM,
-  ORIGIN_BLUETOOTH
+  ORIGIN_BLUETOOTH,
+  ORIGIN_G2_HIJACK    // G2 glasses hijack UI — taps that mutate system state
+                      // are routed through cmd_exec_task via g2SubmitHijackCommand()
+                      // (see G2_HijackCmd.h). Distinguished from ORIGIN_BLUETOOTH
+                      // because G2 hijack has no logged-in user and a different
+                      // audit path (/g2/hijack/...) than the BLE CLI characteristic.
 };
 
 // Per-command output routing mask.

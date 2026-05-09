@@ -27,6 +27,19 @@ extern int cameraHeight;
 bool initCamera();
 void stopCamera();
 
+// Stack-heavy power transitions run on a dedicated worker (see System_Camera_DVP.cpp).
+// G2 tap path uses *_Async; CLI / web use *_Sync so callers block until done.
+typedef void (*CameraPowerPostHook)(void);
+void cameraPowerSetPostHook(CameraPowerPostHook hook);
+// Spawn cam_pwr task + queue early (e.g. G2 init) so the first tap does not
+// pay xTaskCreate on the tap worker stack.
+void cameraPowerWorkerEnsureStarted();
+bool cameraPowerRequestStartAsync();
+bool cameraPowerRequestStopAsync();
+bool cameraPowerRequestStartSync(uint32_t waitMs);
+void cameraPowerRequestStopSync(uint32_t waitMs);
+bool cameraPowerRequestRestartSync(uint32_t waitMs);
+
 // Capture a single frame (returns JPEG data)
 // Caller must free the buffer with free() when done
 uint8_t* captureFrame(size_t* outLen);

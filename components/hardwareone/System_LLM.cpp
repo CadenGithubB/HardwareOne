@@ -2276,7 +2276,7 @@ static bool allocateRunState(LoadContext& ctx) {
 }
 
 static bool loadWeights(const char* path) {
-  File f = VFS::open(path, "r");
+  File f = VFS::openGuarded(path, "r", VFS::systemAuth("llm.load_weights"));
   if (!f) {
     snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Cannot open model: %s", path);
     return false;
@@ -3775,7 +3775,7 @@ String llmListModels() {
   // dirPath: full VFS path e.g. "/system/llm" or "/sd/llm"
   // storage: "internal" or "sd"
   auto scanDir = [&](const char* dirPath, const char* storage) {
-    File dir = VFS::open(dirPath, FILE_READ);
+    File dir = VFS::openGuarded(dirPath, FILE_READ, VFS::systemAuth("llm.list_models"));
     if (!dir || !dir.isDirectory()) return;
     File entry;
     while ((entry = dir.openNextFile())) {
@@ -3935,7 +3935,7 @@ static const char* cmd_llm_load(const String& args) {
     } else {
       // Bare filename — try SD card first, then internal
       snprintf(customPath, sizeof(customPath), "/sd/llm/%s", a.c_str());
-      if (!VFS::isSDAvailable() || !VFS::exists(customPath)) {
+      if (!VFS::isSDAvailable() || !VFS::existsGuarded(customPath, VFS::systemAuth("llm.load_check"))) {
         snprintf(customPath, sizeof(customPath), "/system/llm/%s", a.c_str());
       }
     }

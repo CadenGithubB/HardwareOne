@@ -24,6 +24,7 @@
 #include <freertos/queue.h>
 #if ENABLE_HTTPS
 #include <LittleFS.h>
+#include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <time.h>
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/pk.h"
@@ -940,11 +941,11 @@ const char* cmd_certinfo(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   static const char* CERT_PATH = "/system/certs/https_server.crt";
-  if (!LittleFS.exists(CERT_PATH)) {
+  if (!VFS::existsGuarded(CERT_PATH, VFS::systemAuth("wifi.cert.info"))) {
     return "No certificate found at /system/certs/https_server.crt";
   }
 
-  File f = LittleFS.open(CERT_PATH, "r");
+  File f = VFS::openGuarded(CERT_PATH, "r", VFS::systemAuth("wifi.cert.info"));
   if (!f) return "Error: Cannot open certificate file";
   String certPem = f.readString();
   f.close();
@@ -1157,10 +1158,10 @@ const char* cmd_certgen(const String& argsInput) {
 
   // Save to filesystem
   {
-    if (!LittleFS.exists("/system")) LittleFS.mkdir("/system");
-    if (!LittleFS.exists("/system/certs")) LittleFS.mkdir("/system/certs");
+    if (!VFS::existsGuarded("/system",       VFS::systemAuth("wifi.cert.gen"))) VFS::mkdirGuarded("/system",       VFS::systemAuth("wifi.cert.gen"));
+    if (!VFS::existsGuarded("/system/certs", VFS::systemAuth("wifi.cert.gen"))) VFS::mkdirGuarded("/system/certs", VFS::systemAuth("wifi.cert.gen"));
 
-    File cf = LittleFS.open("/system/certs/https_server.crt", "w");
+    File cf = VFS::openGuarded("/system/certs/https_server.crt", "w", VFS::systemAuth("wifi.cert.gen"));
     if (!cf) {
       snprintf(gDebugBuffer, 1024, "Error: Cannot create certificate file");
       goto cleanup;
@@ -1168,7 +1169,7 @@ const char* cmd_certgen(const String& argsInput) {
     cf.print((const char*)certPem);
     cf.close();
 
-    File kf = LittleFS.open("/system/certs/https_server.key", "w");
+    File kf = VFS::openGuarded("/system/certs/https_server.key", "w", VFS::systemAuth("wifi.cert.gen"));
     if (!kf) {
       snprintf(gDebugBuffer, 1024, "Error: Cannot create key file");
       goto cleanup;

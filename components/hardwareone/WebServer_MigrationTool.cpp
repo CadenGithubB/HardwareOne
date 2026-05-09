@@ -26,6 +26,7 @@
 #include "esp_https_server.h"
 #endif
 #include "System_Filesystem.h"
+#include "System_VFS.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_User.h"
@@ -95,10 +96,10 @@ static bool isCertFile(const String& path) {
   return path.endsWith(".pem") || path.endsWith(".crt") || path.endsWith(".key");
 }
 
-static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, JsonArray& encFields, const char* dirPath, int depth = 0) {
+static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, JsonArray& encFields, const char* dirPath, const AuthContext& ctx, int depth = 0) {
   if (!filesystemReady || depth > 3) return;
 
-  File dir = LittleFS.open(dirPath);
+  File dir = VFS::openGuarded(dirPath, "r", ctx);
   if (!dir || !dir.isDirectory()) {
     char warn[128];
     snprintf(warn, sizeof(warn), "%s directory not found, skipped", dirPath);
@@ -113,7 +114,7 @@ static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, JsonArr
     if (!path.startsWith("/")) { char pBuf[128]; snprintf(pBuf, sizeof(pBuf), "%s/%s", dirPath, path.c_str()); path = pBuf; }
 
     if (entry.isDirectory()) {
-      addDirectoryToBackup(files, warnings, encFields, path.c_str(), depth + 1);
+      addDirectoryToBackup(files, warnings, encFields, path.c_str(), ctx, depth + 1);
     } else {
       // Include .hwmap, .json, and certificate files
       if (path.endsWith(".hwmap") || path.endsWith(".json") ||
@@ -264,15 +265,15 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   if (wantSettings)    addFileToBackup(files, warnings, SETTINGS_FILE);
   if (wantUsers) {
     addFileToBackup(files, warnings, USERS_FILE);
-    addDirectoryToBackup(files, warnings, encFields, USER_SETTINGS_DIR);
+    addDirectoryToBackup(files, warnings, encFields, USER_SETTINGS_DIR, ctx);
   }
   if (wantAutomations) addFileToBackup(files, warnings, AUTOMATIONS_FILE);
   if (wantEspnow) {
     addFileToBackup(files, warnings, ESPNOW_DEVICES);
     addFileToBackup(files, warnings, ESPNOW_MESH_PEERS);
   }
-  if (wantMaps) addDirectoryToBackup(files, warnings, encFields, MAPS_DIR);
-  if (wantCerts) addDirectoryToBackup(files, warnings, encFields, "/system/certs");
+  if (wantMaps) addDirectoryToBackup(files, warnings, encFields, MAPS_DIR, ctx);
+  if (wantCerts) addDirectoryToBackup(files, warnings, encFields, "/system/certs", ctx);
 
   // Serialize and send
   httpd_resp_set_type(req, "application/json");
@@ -445,7 +446,8 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     int lastSlash = pathStr.lastIndexOf('/');
     if (lastSlash > 0) {
       String dir = pathStr.substring(0, lastSlash);
-      LittleFS.mkdir(dir);
+      // trusted: first-time-setup restore creates parent dirs for system files
+      VFS::mkdirGuarded(dir, VFS::systemAuth("migration.restore_mkdir"));
     }
 
     // Serialize the value to a string for writing
@@ -609,9 +611,10 @@ void startRestoreOnlyHttpServer() {
     static const char* CERT_PATH = "/system/certs/https_server.crt";
     static const char* KEY_PATH  = "/system/certs/https_server.key";
     bool certsOk = false;
-    if (LittleFS.exists(CERT_PATH) && LittleFS.exists(KEY_PATH)) {
-      File cf = LittleFS.open(CERT_PATH, "r");
-      File kf = LittleFS.open(KEY_PATH, "r");
+    if (VFS::existsGuarded(CERT_PATH, VFS::systemAuth("migration.restore_certs")) &&
+        VFS::existsGuarded(KEY_PATH, VFS::systemAuth("migration.restore_certs"))) {
+      File cf = VFS::openGuarded(CERT_PATH, "r", VFS::systemAuth("migration.restore_certs"));
+      File kf = VFS::openGuarded(KEY_PATH, "r", VFS::systemAuth("migration.restore_certs"));
       if (cf && kf) {
         sRestoreCertData = cf.readString();
         sRestoreKeyData  = kf.readString();

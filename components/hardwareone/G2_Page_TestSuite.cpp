@@ -16,11 +16,10 @@
 //     <- Back
 //     Hide AI Card
 //     Toggle Mic Feed
-//     G2 AutoConnect: ON|OFF (toggles boot auto-reconnect, persisted)
 //     Heap Snapshot (log) / Lens State Dump (log)
-//     (further BLE-recovery / diagnostic taps go here. R1 Ring connect
-//      / disconnect rows moved to Networking → Bluetooth submenu —
-//      see triggerRingReconnect / triggerRingDisconnect there.)
+//     (G2 boot AutoConnect, saved-MAC reconnect, and disconnect live under
+//      Network → Bluetooth → G2 >>. R1 Ring connect/disconnect stays on the
+//      Bluetooth menu — see G2_Page_Network.cpp.)
 //
 //   BRACKETS (drill from ROOT):
 //     <- Back
@@ -88,14 +87,17 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "G2_Glasses.h"
-#include "BLE_Peers.h"              // gBlePeerData / autoConnect toggle
-#include "System_Settings.h"        // setSetting() — persists autoConnect to NVS
 #include "System_Debug.h"
 #include "System_MemUtil.h"   // ps_alloc
 #include "G2_Page_Common.h"
+#include "System_VFS.h"
+
+extern AuthContext gExecAuthContext;
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_attr.h"   // EXT_RAM_BSS_ATTR
+#include "esp_heap_caps.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -215,22 +217,18 @@ struct TestAction {
   const char* label;
   void (*handler)();
   // Optional state-aware label. When non-null, buildActionsRows calls this
-  // and uses the result instead of `label`. Lets toggles render their
-  // current state on the lens (e.g. "G2 AutoConnect: ON").
+  // and uses the result instead of `label`.
   const char* (*dynLabel)();
 };
 
 static void actionHideAICard();
 static void actionToggleMicFeed();
-static void actionToggleG2AutoReconnect();
-static const char* labelG2AutoReconnect();
 static void actionHeapSnapshot();
 static void actionLensStateDump();
 
 static const TestAction kActions[] = {
-  // (Ring Reconnect / Disconnect rows moved to Networking → Bluetooth
-  //  submenu — see triggerRingReconnect / triggerRingDisconnect in
-  //  G2_Page_Network.cpp.)
+  // (Ring + G2 reconnect/autoconnect controls live under Network → Bluetooth
+  //  in G2_Page_Network.cpp.)
   // Front-pane card cleanup. AI card normally auto-dismisses after ~10 s
   // but a stuck card (firmware-side) blocks subsequent CTRL ENTER calls
   // with errorCode=7. Force-EXIT clears it.
@@ -238,9 +236,6 @@ static const TestAction kActions[] = {
   // Toggle the G2 → ESP-SR mic feed without going through the Settings
   // page. Logs new state + AFE ring depth + overrun count.
   { "Toggle Mic Feed",       actionToggleMicFeed,         nullptr },
-  // Toggle the G2 auto-reconnect-at-boot flag (gBlePeerData[G2].autoConnect).
-  // Dynamic label shows ON/OFF; tap flips it and re-renders the page.
-  { "G2 AutoConnect",        actionToggleG2AutoReconnect, labelG2AutoReconnect },
   // Pure-log entries: snapshot diagnostic state to serial. Safe — no BLE
   // I/O — useful as canaries before/after a heavy probe.
   { "Heap Snapshot (log)",   actionHeapSnapshot,          nullptr },
@@ -649,14 +644,18 @@ enum TestLevel : uint8_t {
   TEST_LEVEL_DISPLAY_TEXT          = 12, // Display Tests / TEXT widget geom variants
   TEST_LEVEL_DISPLAY_LIST          = 13, // Display Tests / LIST widget geom variants
   TEST_LEVEL_DISPLAY_COMBO         = 14, // Display Tests / Combo (text + image)
-  TEST_LEVEL_IMAGE                 = 15, // Image Tests router (3 sub-levels below)
+  TEST_LEVEL_IMAGE                 = 15, // Image Tests router (4 sub-levels below)
   TEST_LEVEL_IMAGE_CONFIRMED       = 16, // Doc + Q4 canary + Q6 + Q6b
   TEST_LEVEL_IMAGE_STATIC          = 17, // Q9 frame builder
-  TEST_LEVEL_IMAGE_STREAMING       = 18, // Q11 then Q10
+  TEST_LEVEL_IMAGE_STREAMING       = 18, // Q11 / Q10 / Q13 / Q14 / Q21 / mixed…
   TEST_LEVEL_DISPLAY_SELECTION         = 19, // Selection Patterns parent (3 buckets)
   TEST_LEVEL_DISPLAY_SELECT_LISTS      = 20, // Bucket 1 — native list widgets
   TEST_LEVEL_DISPLAY_SELECT_MIXED      = 21, // Bucket 2 — compound TextObject layouts
   TEST_LEVEL_DISPLAY_SELECT_EDGES      = 22, // Bucket 3 — edge-anchored geoms + canaries
+  TEST_LEVEL_IMAGE_ANIMATED_ICONS      = 23, // Q22–Q27 live bars + Q24 + packs
+  TEST_LEVEL_IMAGE_ANIMATED_CHOOSE     = 24, // SD G2_ICON_ANIMATIONS_VFS_PATH/* packs
+  TEST_LEVEL_IMAGE_STREAM_SINGLE       = 25, // Streaming / Single image — Q10/Q11/Q13/Q15/Q21
+  TEST_LEVEL_IMAGE_STREAM_COMPOUND     = 26, // Streaming / Compound (list/text + image) — Q16/Q17/Q18/Q28
 };
 static TestLevel gTestLevel = TEST_LEVEL_ROOT;
 
@@ -682,6 +681,12 @@ static TestLevel gTestLevel = TEST_LEVEL_ROOT;
 // for BLE/WiFi/HTTP runtime allocations.
 EXT_RAM_BSS_ATTR static char        gRows[TEST_MAX_ROWS][TEST_ROW_LEN];
 EXT_RAM_BSS_ATTR static const char* gRowPtrs[TEST_MAX_ROWS];
+
+// Animated Icons → SD pack list: full VFS paths under G2_ICON_ANIMATIONS_VFS_PATH
+// that contain frame_00.bmp (max 8), filled by buildImageAnimatedChooseRows().
+#define TS_ANIM_ICON_DIR_MAX 8
+static char        gAnimIconPickPaths[TS_ANIM_ICON_DIR_MAX][96];
+static unsigned    gAnimIconPickCount;
 
 // Pagination state for char-test lists. One page var per paginated
 // level — they're independent (you can be on page 2 of ASCII and page
@@ -735,13 +740,15 @@ static size_t buildRootRows() {
 // IMAGE: parent router. Each entry drills into a sub-level grouped by
 // what the probes are for: Confirmed/Diagnostic for known-good things
 // to re-run as canaries, Static for single-frame draw API tests,
-// Streaming for multi-frame swap tests. Keeps each sub-list short
-// enough to fit one screen on the lens.
+// Animated Icons for live bars + custom SD icon packs, Streaming for broader
+// multi-frame swap tests. Keeps each sub-list short enough for one
+// lens screen.
 static size_t buildImageRows() {
   writeBackRow("<- Tests");
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "Confirmed / Diagnostic >>"); gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Static Tests >>");           gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Animated Icons >>");          gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Streaming Tests >>");        gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
@@ -774,20 +781,137 @@ static size_t buildImageStaticRows() {
   return row;
 }
 
-// IMAGE / Streaming — multi-frame swap tests, no re-CREATE between
-// frames. Q11 first (simplest); Q10 only if Q11 leaves visible tearing.
-// Q13/Q14 are live-update pipelines paced by `g2liverate` (CLI).
+// IMAGE / Streaming — parent router. Split into two sub-buckets by
+// widget composition (single image widget vs. compound list/text +
+// image), plus Q14 as a leaf because it's a text-rebuild rate test
+// that doesn't fit either bucket but historically lives here under
+// "live updates". Live bar icons 32–144 live under Animated Icons
+// (Q22/Q23/Q20/Q26/Q27), not Streaming.
 static size_t buildImageStreamingRows() {
   writeBackRow("<- Image");
+  size_t row = 1;
+  snprintf(gRows[row], TEST_ROW_LEN, "Single image >>");                 gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Compound (list/text + image) >>"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q14: live TEXT (rebuild) @ rate"); gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// IMAGE / Streaming / Single image — multi-frame swap + live tile
+// pipelines that target a single image widget (no compound layout).
+// Q11 first (simplest A->B swap); Q10 only if Q11 leaves visible
+// tearing. Q13 is the live tile paced by `g2liverate` (CLI). Q15 is
+// LEFT-arm targeting (different temple). Q21 is two full-screen
+// multi-tile refresh rounds.
+static size_t buildImageStreamingSingleRows() {
+  writeBackRow("<- Streaming");
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "Q11: simple swap (A->B)");          gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q10: clear-then-push (A->blk->B)"); gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q13: live image tile @ rate");      gRowPtrs[row] = gRows[row]; row++;
-  snprintf(gRows[row], TEST_ROW_LEN, "Q14: live TEXT (rebuild) @ rate");  gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q15: LEFT-arm image push test");    gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q21: full-screen 2 refresh rounds"); gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// IMAGE / Streaming / Compound — multi-widget CREATEs (list+image or
+// text+image) testing whether the lens firmware composites two child
+// widgets simultaneously. Q16/Q17/Q18 are list+image variants (verified
+// rendering 2026-04 onward); Q28 is the text+image counterpart and is
+// the reference probe for the empirical finding that text+image
+// compounds ack but the image half doesn't paint on this firmware.
+static size_t buildImageStreamingCompoundRows() {
+  writeBackRow("<- Streaming");
+  size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "Q16: mixed list+image side-by-side"); gRowPtrs[row] = gRows[row]; row++;
-  snprintf(gRows[row], TEST_ROW_LEN, "Q17: mixed list+image overlap");    gRowPtrs[row] = gRows[row]; row++;
-  snprintf(gRows[row], TEST_ROW_LEN, "Q18: mixed list+icon (80x80)");     gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q17: mixed list+image overlap");      gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q18: mixed list+icon (80x80)");       gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q28: img+text live (indep. rates)");  gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q28L: img+list live (Q28 ctrl)");     gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// IMAGE / Animated Icons — live bar sizes + Q24 slime + Custom icon packs.
+// Keep row text compact: 8-item CREATE+REBUILD must stay within the ~240 B
+// single-fragment EvenCore list envelope (longer labels force SHUTDOWN+CREATE).
+static size_t buildImageAnimatedIconsRows() {
+  writeBackRow("<- Image");
+  size_t row = 1;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q22: 32x32 bar"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q23: 64x64 bar"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q20: 96x96 bar");  gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q26: 124x124 bar"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q27: 144x144 bar"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q24: slime 32 (20f)"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "SD icon packs >>"); gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// SD: each subdir of G2_ICON_ANIMATIONS_VFS_PATH/ that contains frame_00.bmp
+// becomes a list row (lens picker — no host OS dialog).
+static size_t buildImageAnimatedChooseRows() {
+  writeBackRow("<- Anim Icons");
+  size_t row = 1;
+
+  gAnimIconPickCount = 0;
+  static constexpr const char* kRoot = G2_ICON_ANIMATIONS_VFS_PATH;
+  if (!VFS::isSDAvailable()) {
+    snprintf(gRows[row], TEST_ROW_LEN, "SD not mounted");
+    gRows[row][TEST_ROW_LEN - 1] = '\0';
+    gRowPtrs[row] = gRows[row];
+    row++;
+    snprintf(gRows[row], TEST_ROW_LEN, "Insert card for icon packs");
+    gRows[row][TEST_ROW_LEN - 1] = '\0';
+    gRowPtrs[row] = gRows[row];
+    row++;
+    return row;
+  }
+  if (VFS::isLittleFSReady() && VFS::existsGuarded(String(kRoot), gExecAuthContext)) {
+    File dir = VFS::openGuarded(kRoot, FILE_READ, gExecAuthContext);
+    if (dir && dir.isDirectory()) {
+      while (row < TEST_MAX_ROWS && gAnimIconPickCount < TS_ANIM_ICON_DIR_MAX) {
+        File ent = dir.openNextFile();
+        if (!ent) break;
+        if (!ent.isDirectory()) {
+          ent.close();
+          continue;
+        }
+        String name = ent.name();
+        const int slash = name.lastIndexOf('/');
+        if (slash >= 0) name = name.substring(slash + 1);
+        ent.close();
+        if (name.length() == 0 || name.startsWith(".")) continue;
+
+        String full = String(kRoot) + "/" + name;
+        const String probe = full + "/frame_00.bmp";
+        if (!VFS::existsGuarded(probe, gExecAuthContext)) continue;
+
+        strncpy(gAnimIconPickPaths[gAnimIconPickCount], full.c_str(), 95);
+        gAnimIconPickPaths[gAnimIconPickCount][95] = '\0';
+        gAnimIconPickCount++;
+
+        snprintf(gRows[row], TEST_ROW_LEN, "%s", name.c_str());
+        gRows[row][TEST_ROW_LEN - 1] = '\0';
+        gRowPtrs[row] = gRows[row];
+        row++;
+      }
+      dir.close();
+    }
+  }
+  if (gAnimIconPickCount == 0) {
+    // ASCII only: UTF-8 punctuation (e.g. em dash) and angle brackets have
+    // been suspected to break list rendering / CREATE ack on lens firmware.
+    // Two short rows also avoids a 2-item CREATE (empty chooser was timing out).
+    snprintf(gRows[row], TEST_ROW_LEN,
+             "No packs - add subdirs under");
+    gRows[row][TEST_ROW_LEN - 1] = '\0';
+    gRowPtrs[row] = gRows[row];
+    row++;
+    snprintf(gRows[row], TEST_ROW_LEN,
+             "%s with frame_00.bmp", kRoot);
+    gRows[row][TEST_ROW_LEN - 1] = '\0';
+    gRowPtrs[row] = gRows[row];
+    row++;
+  }
   return row;
 }
 
@@ -812,8 +936,14 @@ static size_t buildSelectionEdgesRows();
 // reason the existing AI tests use spawnAIWorker. Mirror that pattern:
 // the worker runs the probe AND rebuilds the picker afterward, so the
 // dispatcher returns immediately and the notify thread stays live.
-static void imgProbeWorker(void* arg) {
-  ImgProbeFn fn = (ImgProbeFn)arg;
+
+struct ImgProbeTaskCtx {
+  ImgProbeFn     fn;
+  StackType_t*   stack;
+  StaticTask_t*  tcb;
+};
+
+static void imgProbeWorkerImpl(ImgProbeFn fn) {
   if (fn) {
     const char* result = fn();
     DEBUG_G2F("[G2] Image probe done → %s", result ? result : "(null)");
@@ -839,7 +969,6 @@ static void imgProbeWorker(void* arg) {
     DEBUG_G2F("[G2] Image probe: hijack ended during probe — "
               "skipping picker rebuild (user exited or firmware "
               "tore down)");
-    vTaskDelete(nullptr);
     return;
   }
 
@@ -852,11 +981,31 @@ static void imgProbeWorker(void* arg) {
     case TEST_LEVEL_IMAGE_CONFIRMED:     n = buildImageConfirmedRows();  break;
     case TEST_LEVEL_IMAGE_STATIC:        n = buildImageStaticRows();     break;
     case TEST_LEVEL_IMAGE_STREAMING:     n = buildImageStreamingRows();  break;
+    case TEST_LEVEL_IMAGE_STREAM_SINGLE:   n = buildImageStreamingSingleRows();   break;
+    case TEST_LEVEL_IMAGE_STREAM_COMPOUND: n = buildImageStreamingCompoundRows(); break;
+    case TEST_LEVEL_IMAGE_ANIMATED_ICONS:  n = buildImageAnimatedIconsRows(); break;
+    case TEST_LEVEL_IMAGE_ANIMATED_CHOOSE: n = buildImageAnimatedChooseRows(); break;
     case TEST_LEVEL_DISPLAY_COMBO:       n = buildDisplayComboRows();    break;
     case TEST_LEVEL_DISPLAY_SELECT_EDGES: n = buildSelectionEdgesRows(); break;
     default:                             n = buildImageRows();           break;
   }
   g2ShowListPage(gRowPtrs, n);
+}
+
+// xTaskCreateStatic entry: frees SPIRAM stack + static TCB, then deletes self.
+static void imgProbeWorker(void* arg) {
+  ImgProbeTaskCtx* ctx = static_cast<ImgProbeTaskCtx*>(arg);
+  imgProbeWorkerImpl(ctx->fn);
+  heap_caps_free(ctx->stack);
+  heap_caps_free(ctx->tcb);
+  heap_caps_free(ctx);
+  vTaskDelete(nullptr);
+}
+
+// Fallback when SPIRAM stack alloc fails: same 8 KB from internal heap.
+static void imgProbeWorkerInternalStack(void* arg) {
+  // void* → function pointer: reinterpret_cast only (not static_cast).
+  imgProbeWorkerImpl(reinterpret_cast<ImgProbeFn>(arg));
   vTaskDelete(nullptr);
 }
 
@@ -867,11 +1016,57 @@ static bool spawnImgProbeWorker(ImgProbeFn fn) {
   // DEBUG_G2F vsnprintf path. 4 KB was tight enough to overflow on Q5
   // (observed 2026-04-26: stack overflow on g2_img_probe). 8 KB gives
   // ~3 KB of headroom over the worst-case probe footprint.
-  if (xTaskCreate(imgProbeWorker, "g2_img_probe", 8192, (void*)fn, 5, nullptr) != pdPASS) {
-    DEBUG_G2F("[G2] Image probe: xTaskCreate failed");
+  static constexpr uint32_t kStackBytes = 8192;
+  // FreeRTOS task depth is StackType_t *words* (see prvInitialiseNewTask),
+  // same as xTaskCreate — never pass raw byte counts here. SPIRAM static
+  // stack buffer is kStackBytes wide; depth must be kStackBytes/sizeof word.
+  const uint32_t kStackWords = kStackBytes / sizeof(StackType_t);
+
+  // Prefer normal internal stack first (no SPIRAM stack quirks). When dual
+  // G2 + WiFi leaves too little contiguous internal heap, xTaskCreate fails
+  // and we fall back to an 8 KB stack in PSRAM (sdkconfig:
+  // CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y) via xTaskCreateStatic.
+  if (xTaskCreate(imgProbeWorkerInternalStack, "g2_img_probe", kStackWords,
+                  reinterpret_cast<void*>(fn), 5, nullptr) == pdPASS) {
+    return true;
+  }
+
+  ImgProbeTaskCtx* ctx = static_cast<ImgProbeTaskCtx*>(
+      heap_caps_malloc(sizeof(ImgProbeTaskCtx), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  if (!ctx) {
+    DEBUG_G2F("[G2] Image probe: ctx malloc failed (internal) dram=%u largest=%u",
+              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     return false;
   }
-  return true;
+  ctx->fn = fn;
+  ctx->stack = static_cast<StackType_t*>(
+      heap_caps_malloc(kStackBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  ctx->tcb = static_cast<StaticTask_t*>(heap_caps_malloc(
+      sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+
+  if (ctx->stack && ctx->tcb) {
+    TaskHandle_t h = xTaskCreateStatic(imgProbeWorker, "g2_img_probe", kStackWords,
+                                       ctx, 5, ctx->stack, ctx->tcb);
+    if (h) {
+      DEBUG_G2F("[G2] Image probe: using PSRAM stack (internal xTaskCreate failed)");
+      return true;
+    }
+    DEBUG_G2F("[G2] Image probe: xTaskCreateStatic failed");
+    heap_caps_free(ctx->stack);
+    heap_caps_free(ctx->tcb);
+    heap_caps_free(ctx);
+  } else {
+    if (ctx->stack) heap_caps_free(ctx->stack);
+    if (ctx->tcb) heap_caps_free(ctx->tcb);
+    heap_caps_free(ctx);
+    DEBUG_G2F("[G2] Image probe: SPIRAM stack/tcb alloc failed");
+  }
+
+  DEBUG_G2F("[G2] Image probe: all spawn paths failed (internal dram=%u largest=%u)",
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  return false;
 }
 
 // DISPLAY: parent picker — TEXT / LIST / Combo / Selection patterns.
@@ -2103,9 +2298,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     }
 
     case TEST_LEVEL_IMAGE: {
-      // Parent router: 3 sub-levels (Confirmed, Static, Streaming).
-      // Tapping anything else is a misuse — we don't fire probes from
-      // here.
+      // Parent router: Confirmed, Static, Animated Icons, Streaming.
       if (idx == 0) {
         gTestLevel = TEST_LEVEL_ROOT;
         size_t n = buildRootRows();
@@ -2114,9 +2307,10 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       }
       size_t n = 0;
       switch (idx) {
-        case 1: gTestLevel = TEST_LEVEL_IMAGE_CONFIRMED; n = buildImageConfirmedRows(); break;
-        case 2: gTestLevel = TEST_LEVEL_IMAGE_STATIC;    n = buildImageStaticRows();    break;
-        case 3: gTestLevel = TEST_LEVEL_IMAGE_STREAMING; n = buildImageStreamingRows(); break;
+        case 1: gTestLevel = TEST_LEVEL_IMAGE_CONFIRMED;     n = buildImageConfirmedRows();     break;
+        case 2: gTestLevel = TEST_LEVEL_IMAGE_STATIC;        n = buildImageStaticRows();        break;
+        case 3: gTestLevel = TEST_LEVEL_IMAGE_ANIMATED_ICONS; n = buildImageAnimatedIconsRows(); break;
+        case 4: gTestLevel = TEST_LEVEL_IMAGE_STREAMING;      n = buildImageStreamingRows();     break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE: tap idx=%u out of range",
                     (unsigned)idx);
@@ -2181,32 +2375,157 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     }
 
     case TEST_LEVEL_IMAGE_STREAMING: {
-      // Streaming: Q11 first, Q10 second. Run order matters per the
-      // sub-list comment in buildImageStreamingRows.
+      // Parent router: idx 1/2 push into the Single/Compound sub-buckets;
+      // idx 3 dispatches Q14 directly (it's a text-rebuild test that
+      // historically lives here without fitting either bucket).
       if (idx == 0) {
         gTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
-      ImgProbeFn fn = nullptr;
+      size_t n = 0;
       switch (idx) {
-        case 1: fn = g2ProbeImageQ11SimpleSwap;        break;
-        case 2: fn = g2ProbeImageQ10ClearThenPush;     break;
-        case 3: fn = g2ProbeImageQ13LiveTile;          break;
-        case 4: fn = g2ProbeImageQ14LiveText;          break;
-        case 5: fn = g2ProbeImageQ15LeftArm;           break;
-        case 6: fn = g2ProbeImageQ16MixedSideBySide;   break;
-        case 7: fn = g2ProbeImageQ17MixedOverlap;      break;
-        case 8: fn = g2ProbeImageQ18MixedIcon;         break;
+        case 1:
+          gTestLevel = TEST_LEVEL_IMAGE_STREAM_SINGLE;
+          n = buildImageStreamingSingleRows();
+          break;
+        case 2:
+          gTestLevel = TEST_LEVEL_IMAGE_STREAM_COMPOUND;
+          n = buildImageStreamingCompoundRows();
+          break;
+        case 3: {
+          DEBUG_G2F("[G2] Image probe (Streaming/Q14) → spawning worker");
+          if (!spawnImgProbeWorker(g2ProbeImageQ14LiveText)) {
+            n = buildImageStreamingRows();
+            g2ShowListPage(gRowPtrs, n);
+          }
+          return;
+        }
         default:
           DEBUG_G2F("[G2] Test suite IMAGE/Streaming: tap idx=%u out of range",
                     (unsigned)idx);
           return;
       }
-      DEBUG_G2F("[G2] Image probe (Streaming) idx=%u → spawning worker", (unsigned)idx);
-      if (!spawnImgProbeWorker(fn)) {
+      g2ShowListPage(gRowPtrs, n);
+      return;
+    }
+
+    case TEST_LEVEL_IMAGE_STREAM_SINGLE: {
+      // Single image — Q11/Q10/Q13/Q15/Q21. Q11 first (simplest); Q10
+      // only if Q11 leaves visible tearing. See buildImageStreamingSingleRows.
+      if (idx == 0) {
+        gTestLevel = TEST_LEVEL_IMAGE_STREAMING;
         size_t n = buildImageStreamingRows();
+        g2ShowListPage(gRowPtrs, n);
+        return;
+      }
+      ImgProbeFn fn = nullptr;
+      switch (idx) {
+        case 1: fn = g2ProbeImageQ11SimpleSwap;          break;
+        case 2: fn = g2ProbeImageQ10ClearThenPush;       break;
+        case 3: fn = g2ProbeImageQ13LiveTile;            break;
+        case 4: fn = g2ProbeImageQ15LeftArm;             break;
+        case 5: fn = g2ProbeImageQ21LiveFullScreenBurst; break;
+        default:
+          DEBUG_G2F("[G2] Test suite IMAGE/Stream/Single: tap idx=%u out of range",
+                    (unsigned)idx);
+          return;
+      }
+      DEBUG_G2F("[G2] Image probe (Stream/Single) idx=%u → spawning worker", (unsigned)idx);
+      if (!spawnImgProbeWorker(fn)) {
+        size_t n = buildImageStreamingSingleRows();
+        g2ShowListPage(gRowPtrs, n);
+      }
+      return;
+    }
+
+    case TEST_LEVEL_IMAGE_STREAM_COMPOUND: {
+      // Compound layouts — Q16/Q17/Q18 list+image (verified-rendering),
+      // Q28 text+image (image half currently fails to paint — diagnostic).
+      if (idx == 0) {
+        gTestLevel = TEST_LEVEL_IMAGE_STREAMING;
+        size_t n = buildImageStreamingRows();
+        g2ShowListPage(gRowPtrs, n);
+        return;
+      }
+      ImgProbeFn fn = nullptr;
+      switch (idx) {
+        case 1: fn = g2ProbeImageQ16MixedSideBySide;     break;
+        case 2: fn = g2ProbeImageQ17MixedOverlap;        break;
+        case 3: fn = g2ProbeImageQ18MixedIcon;           break;
+        case 4: fn = g2ProbeImageQ28MixedImageTextLive;  break;
+        case 5: fn = g2ProbeImageQ28LMixedListImageLive; break;
+        default:
+          DEBUG_G2F("[G2] Test suite IMAGE/Stream/Compound: tap idx=%u out of range",
+                    (unsigned)idx);
+          return;
+      }
+      DEBUG_G2F("[G2] Image probe (Stream/Compound) idx=%u → spawning worker", (unsigned)idx);
+      if (!spawnImgProbeWorker(fn)) {
+        size_t n = buildImageStreamingCompoundRows();
+        g2ShowListPage(gRowPtrs, n);
+      }
+      return;
+    }
+
+    case TEST_LEVEL_IMAGE_ANIMATED_ICONS: {
+      if (idx == 0) {
+        gTestLevel = TEST_LEVEL_IMAGE;
+        size_t n = buildImageRows();
+        g2ShowListPage(gRowPtrs, n);
+        return;
+      }
+      if (idx == 7) {
+        gTestLevel = TEST_LEVEL_IMAGE_ANIMATED_CHOOSE;
+        size_t n = buildImageAnimatedChooseRows();
+        g2ShowListPage(gRowPtrs, n);
+        return;
+      }
+      ImgProbeFn fn = nullptr;
+      switch (idx) {
+        case 1: fn = g2ProbeImageQ22LiveTile32; break;
+        case 2: fn = g2ProbeImageQ23LiveTile64; break;
+        case 3: fn = g2ProbeImageQ20LiveTile96; break;
+        case 4: fn = g2ProbeImageQ26LiveTile124; break;
+        case 5: fn = g2ProbeImageQ27LiveTile144; break;
+        case 6: fn = g2ProbeImageQ24SlimeJump32; break;
+        default:
+          DEBUG_G2F("[G2] Test suite IMAGE/AnimatedIcons: tap idx=%u out of range",
+                    (unsigned)idx);
+          return;
+      }
+      DEBUG_G2F("[G2] Image probe (Animated Icons) idx=%u → spawning worker", (unsigned)idx);
+      if (!spawnImgProbeWorker(fn)) {
+        size_t n = buildImageAnimatedIconsRows();
+        g2ShowListPage(gRowPtrs, n);
+      }
+      return;
+    }
+
+    case TEST_LEVEL_IMAGE_ANIMATED_CHOOSE: {
+      if (idx == 0) {
+        gTestLevel = TEST_LEVEL_IMAGE_ANIMATED_ICONS;
+        size_t n = buildImageAnimatedIconsRows();
+        g2ShowListPage(gRowPtrs, n);
+        return;
+      }
+      if (gAnimIconPickCount == 0) {
+        DEBUG_G2F("[G2] Test suite IMAGE/AnimChoose: tap idx=%u (no LFS packs)",
+                  (unsigned)idx);
+        return;
+      }
+      const size_t k = (size_t)idx - 1;
+      if (k >= gAnimIconPickCount) {
+        DEBUG_G2F("[G2] Test suite IMAGE/AnimChoose: tap idx=%u out of range",
+                  (unsigned)idx);
+        return;
+      }
+      g2ProbeImageQ25SetPackPath(gAnimIconPickPaths[k]);
+      DEBUG_G2F("[G2] Image probe (Choose pack) path=%s → worker",
+                gAnimIconPickPaths[k]);
+      if (!spawnImgProbeWorker(g2ProbeImageQ25SdFrameAnimation)) {
+        size_t n = buildImageAnimatedChooseRows();
         g2ShowListPage(gRowPtrs, n);
       }
       return;
@@ -2560,31 +2879,6 @@ static void actionToggleMicFeed() {
             ok     ? "ok"  : "FAILED",
             (unsigned)g2MicAfeRingDepth(),
             (unsigned)g2MicAfeOverrunCount());
-}
-
-// Toggle the G2 auto-reconnect-at-boot flag. Backed by the same
-// gBlePeerData[BLE_PEER_G2_GLASSES].autoConnect that `bleautoconnect
-// g2-glasses [on|off]` writes — setSetting() persists it to NVS, so
-// the choice survives reboot. Lets a tester flip auto-reconnect from
-// the lens (e.g. before flashing, or to stop the boot-time scan when
-// debugging another peer) without a host CLI.
-static void actionToggleG2AutoReconnect() {
-  BlePeerData& d = gBlePeerData[BLE_PEER_G2_GLASSES];
-  const bool wasOn = d.autoConnect;
-  setSetting(d.autoConnect, !wasOn);
-  DEBUG_G2F("[G2] AutoConnect: %s -> %s",
-            wasOn ? "ON" : "OFF",
-            d.autoConnect ? "ON" : "OFF");
-}
-
-// Buffer is static so the returned pointer stays valid until the next
-// buildActionsRows() copies it into gRows. buildActionsRows is the only
-// caller, so a single shared buffer is fine.
-static const char* labelG2AutoReconnect() {
-  static char buf[TEST_ROW_LEN];
-  const bool on = gBlePeerData[BLE_PEER_G2_GLASSES].autoConnect;
-  snprintf(buf, sizeof(buf), "G2 AutoConnect: %s", on ? "ON" : "OFF");
-  return buf;
 }
 
 // Snapshot heap state to serial. Pure log — no BLE I/O. Useful as a

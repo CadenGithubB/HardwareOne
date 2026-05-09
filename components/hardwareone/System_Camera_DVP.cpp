@@ -14,7 +14,10 @@
 #include <Wire.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "esp_camera.h"
+#include "sdkconfig.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
 #include "System_Command.h"
@@ -160,18 +163,18 @@ static char* cameraStatusBuffer = nullptr;
 static const size_t kStatusBufSize = 512;
 
 bool initCamera() {
-  DEBUG_CAMERAF("[CAM_INIT] ========== initCamera() ENTRY ==========");
-  DEBUG_CAMERAF("[CAM_INIT] gCameraEnabled=%d cameraConnected=%d", gCameraEnabled, cameraConnected);
-  DEBUG_CAMERAF("[CAM_INIT] Heap free: %u, PSRAM free: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] ========== initCamera() ENTRY ==========");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gCameraEnabled=%d cameraConnected=%d", gCameraEnabled, cameraConnected);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Heap free: %u, PSRAM free: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
   if (!lockCameraMutex(15000)) {
-    DEBUG_CAMERAF("[CAM_INIT] ERROR: camera mutex timeout (camera busy)");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] ERROR: camera mutex timeout (camera busy)");
     return false;
   }
   
   if (gCameraEnabled) {
-    DEBUG_CAMERAF("[CAM_INIT] Already initialized - returning true");
-    INFO_SENSORSF("[Camera] Already initialized");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Already initialized - returning true");
+    INFO_CAMERAF("Already initialized");
     unlockCameraMutex();
     return true;
   }
@@ -202,25 +205,25 @@ bool initCamera() {
     setSetting(gSettings.cameraFramesize, 0);
   }
 
-  DEBUG_CAMERAF("[CAM_INIT] Starting initialization...");
-  INFO_SENSORSF("[Camera] Initializing camera...");
-  DEBUG_CAMERAF("[CAM_INIT] gSettings: framesize=%d quality=%d brightness=%d contrast=%d saturation=%d",
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Starting initialization...");
+  INFO_CAMERAF("Initializing camera...");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gSettings: framesize=%d quality=%d brightness=%d contrast=%d saturation=%d",
                 gSettings.cameraFramesize, gSettings.cameraQuality,
                 gSettings.cameraBrightness, gSettings.cameraContrast, gSettings.cameraSaturation);
-  DEBUG_CAMERAF("[CAM_INIT] gSettings: hmirror=%d vflip=%d aeLevel=%d",
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gSettings: hmirror=%d vflip=%d aeLevel=%d",
                 gSettings.cameraHMirror, gSettings.cameraVFlip, gSettings.cameraAELevel);
-  INFO_SENSORSF("[Camera] Settings from gSettings: framesize=%d quality=%d brightness=%d contrast=%d",
+  INFO_CAMERAF("Settings from gSettings: framesize=%d quality=%d brightness=%d contrast=%d",
                 gSettings.cameraFramesize, gSettings.cameraQuality,
                 gSettings.cameraBrightness, gSettings.cameraContrast);
 
-  DEBUG_CAMERAF("[CAM_INIT] Creating camera_config_t struct...");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Creating camera_config_t struct...");
   camera_config_t config;
   memset(&config, 0, sizeof(config));  // Zero-initialize for safety
-  DEBUG_CAMERAF("[CAM_INIT] config struct zeroed, size=%u bytes", sizeof(config));
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] config struct zeroed, size=%u bytes", sizeof(config));
   
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
-  DEBUG_CAMERAF("[CAM_INIT] LEDC: channel=%d timer=%d", config.ledc_channel, config.ledc_timer);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] LEDC: channel=%d timer=%d", config.ledc_channel, config.ledc_timer);
   config.pin_d0 = Y2_GPIO_NUM;
   config.pin_d1 = Y3_GPIO_NUM;
   config.pin_d2 = Y4_GPIO_NUM;
@@ -238,63 +241,63 @@ bool initCamera() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   
-  DEBUG_CAMERAF("[CAM_INIT] GPIO pins configured:");
-  DEBUG_CAMERAF("[CAM_INIT]   D0-D7: %d %d %d %d %d %d %d %d", 
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO pins configured:");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   D0-D7: %d %d %d %d %d %d %d %d", 
                 config.pin_d0, config.pin_d1, config.pin_d2, config.pin_d3,
                 config.pin_d4, config.pin_d5, config.pin_d6, config.pin_d7);
-  DEBUG_CAMERAF("[CAM_INIT]   XCLK=%d PCLK=%d VSYNC=%d HREF=%d",
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   XCLK=%d PCLK=%d VSYNC=%d HREF=%d",
                 config.pin_xclk, config.pin_pclk, config.pin_vsync, config.pin_href);
-  DEBUG_CAMERAF("[CAM_INIT]   SDA=%d SCL=%d PWDN=%d RESET=%d",
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   SDA=%d SCL=%d PWDN=%d RESET=%d",
                 config.pin_sccb_sda, config.pin_sccb_scl, config.pin_pwdn, config.pin_reset);
   
   // === DEBUG: Log GPIO states before init ===
-  DEBUG_CAMERAF("[CAM_INIT] === GPIO STATE CHECK (before init) ===");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] === GPIO STATE CHECK (before init) ===");
   // Data pins
   for (int i = 0; i < 8; i++) {
     int pins[] = {config.pin_d0, config.pin_d1, config.pin_d2, config.pin_d3,
                   config.pin_d4, config.pin_d5, config.pin_d6, config.pin_d7};
     if (pins[i] >= 0) {
-      DEBUG_CAMERAF("[CAM_INIT] GPIO D%d (pin %d): level=%d", i, pins[i], gpio_get_level((gpio_num_t)pins[i]));
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO D%d (pin %d): level=%d", i, pins[i], gpio_get_level((gpio_num_t)pins[i]));
     }
   }
   // Control pins
-  if (config.pin_xclk >= 0) DEBUG_CAMERAF("[CAM_INIT] GPIO XCLK (pin %d): configured for LEDC output", config.pin_xclk);
-  if (config.pin_pclk >= 0) DEBUG_CAMERAF("[CAM_INIT] GPIO PCLK (pin %d): level=%d", config.pin_pclk, gpio_get_level((gpio_num_t)config.pin_pclk));
-  if (config.pin_vsync >= 0) DEBUG_CAMERAF("[CAM_INIT] GPIO VSYNC (pin %d): level=%d", config.pin_vsync, gpio_get_level((gpio_num_t)config.pin_vsync));
-  if (config.pin_href >= 0) DEBUG_CAMERAF("[CAM_INIT] GPIO HREF (pin %d): level=%d", config.pin_href, gpio_get_level((gpio_num_t)config.pin_href));
-  if (config.pin_sccb_sda >= 0) DEBUG_CAMERAF("[CAM_INIT] GPIO SDA (pin %d): level=%d", config.pin_sccb_sda, gpio_get_level((gpio_num_t)config.pin_sccb_sda));
-  if (config.pin_sccb_scl >= 0) DEBUG_CAMERAF("[CAM_INIT] GPIO SCL (pin %d): level=%d", config.pin_sccb_scl, gpio_get_level((gpio_num_t)config.pin_sccb_scl));
-  if (config.pin_pwdn >= 0) DEBUG_CAMERAF("[CAM_INIT] GPIO PWDN (pin %d): level=%d", config.pin_pwdn, gpio_get_level((gpio_num_t)config.pin_pwdn));
-  if (config.pin_reset >= 0) DEBUG_CAMERAF("[CAM_INIT] GPIO RESET (pin %d): level=%d", config.pin_reset, gpio_get_level((gpio_num_t)config.pin_reset));
+  if (config.pin_xclk >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO XCLK (pin %d): configured for LEDC output", config.pin_xclk);
+  if (config.pin_pclk >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO PCLK (pin %d): level=%d", config.pin_pclk, gpio_get_level((gpio_num_t)config.pin_pclk));
+  if (config.pin_vsync >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO VSYNC (pin %d): level=%d", config.pin_vsync, gpio_get_level((gpio_num_t)config.pin_vsync));
+  if (config.pin_href >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO HREF (pin %d): level=%d", config.pin_href, gpio_get_level((gpio_num_t)config.pin_href));
+  if (config.pin_sccb_sda >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO SDA (pin %d): level=%d", config.pin_sccb_sda, gpio_get_level((gpio_num_t)config.pin_sccb_sda));
+  if (config.pin_sccb_scl >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO SCL (pin %d): level=%d", config.pin_sccb_scl, gpio_get_level((gpio_num_t)config.pin_sccb_scl));
+  if (config.pin_pwdn >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO PWDN (pin %d): level=%d", config.pin_pwdn, gpio_get_level((gpio_num_t)config.pin_pwdn));
+  if (config.pin_reset >= 0) DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] GPIO RESET (pin %d): level=%d", config.pin_reset, gpio_get_level((gpio_num_t)config.pin_reset));
 
   // === DEBUG: Manual power/reset sequence with timing ===
-  DEBUG_CAMERAF("[CAM_INIT] === POWER/RESET SEQUENCE ===");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] === POWER/RESET SEQUENCE ===");
   if (config.pin_pwdn >= 0) {
-    DEBUG_CAMERAF("[CAM_INIT] Toggling PWDN pin %d: HIGH (power down)...", config.pin_pwdn);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Toggling PWDN pin %d: HIGH (power down)...", config.pin_pwdn);
     gpio_set_direction((gpio_num_t)config.pin_pwdn, GPIO_MODE_OUTPUT);
     gpio_set_level((gpio_num_t)config.pin_pwdn, 1);  // Power down
     vTaskDelay(pdMS_TO_TICKS(10));
-    DEBUG_CAMERAF("[CAM_INIT] PWDN pin %d: LOW (power up)...", config.pin_pwdn);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PWDN pin %d: LOW (power up)...", config.pin_pwdn);
     gpio_set_level((gpio_num_t)config.pin_pwdn, 0);  // Power up
     vTaskDelay(pdMS_TO_TICKS(10));
-    DEBUG_CAMERAF("[CAM_INIT] PWDN sequence complete, level now=%d", gpio_get_level((gpio_num_t)config.pin_pwdn));
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PWDN sequence complete, level now=%d", gpio_get_level((gpio_num_t)config.pin_pwdn));
   }
   if (config.pin_reset >= 0) {
-    DEBUG_CAMERAF("[CAM_INIT] Toggling RESET pin %d: LOW (reset active)...", config.pin_reset);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Toggling RESET pin %d: LOW (reset active)...", config.pin_reset);
     gpio_set_direction((gpio_num_t)config.pin_reset, GPIO_MODE_OUTPUT);
     gpio_set_level((gpio_num_t)config.pin_reset, 0);  // Reset active
     vTaskDelay(pdMS_TO_TICKS(10));
-    DEBUG_CAMERAF("[CAM_INIT] RESET pin %d: HIGH (reset released)...", config.pin_reset);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] RESET pin %d: HIGH (reset released)...", config.pin_reset);
     gpio_set_level((gpio_num_t)config.pin_reset, 1);  // Reset released
     vTaskDelay(pdMS_TO_TICKS(10));
-    DEBUG_CAMERAF("[CAM_INIT] RESET sequence complete, level now=%d", gpio_get_level((gpio_num_t)config.pin_reset));
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] RESET sequence complete, level now=%d", gpio_get_level((gpio_num_t)config.pin_reset));
   }
-  DEBUG_CAMERAF("[CAM_INIT] Waiting 100ms for camera to stabilize after power/reset...");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Waiting 100ms for camera to stabilize after power/reset...");
   vTaskDelay(pdMS_TO_TICKS(100));
 
   // === DEBUG: SCCB/I2C Probe for camera ===
-  DEBUG_CAMERAF("[CAM_INIT] === SCCB/I2C PROBE ===");
-  DEBUG_CAMERAF("[CAM_INIT] Probing for camera on SCCB bus (SDA=%d, SCL=%d)...", config.pin_sccb_sda, config.pin_sccb_scl);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] === SCCB/I2C PROBE ===");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Probing for camera on SCCB bus (SDA=%d, SCL=%d)...", config.pin_sccb_sda, config.pin_sccb_scl);
   // Common OV camera I2C addresses: 0x30 (OV2640 write), 0x3C (OV3660/OV5640 write)
   // We'll try a simple I2C scan using Wire
   Wire.begin(config.pin_sccb_sda, config.pin_sccb_scl, 100000);  // 100kHz for SCCB
@@ -303,17 +306,28 @@ bool initCamera() {
   for (int i = 0; i < sizeof(camAddrs); i++) {
     Wire.beginTransmission(camAddrs[i]);
     uint8_t err = Wire.endTransmission();
-    DEBUG_CAMERAF("[CAM_INIT] SCCB probe 0x%02X: %s", camAddrs[i], err == 0 ? "FOUND!" : (err == 2 ? "NACK" : "Error"));
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] SCCB probe 0x%02X: %s", camAddrs[i], err == 0 ? "FOUND!" : (err == 2 ? "NACK" : "Error"));
     if (err == 0) foundCam = true;
   }
   Wire.end();  // Release I2C for camera driver
   if (!foundCam) {
-    DEBUG_CAMERAF("[CAM_INIT] *** WARNING: No camera found on SCCB bus! Check connections! ***");
-    INFO_SENSORSF("[Camera] WARNING: No camera detected on I2C bus!");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] *** WARNING: No camera found on SCCB bus! Check connections! ***");
+    INFO_CAMERAF("WARNING: No camera detected on I2C bus!");
   }
 
   // Start with conservative defaults - OV3660 is sensitive
   framesize_t fs = cameraFramesizeFromSetting(gSettings.cameraFramesize);
+  // Hard cap at VGA (640×480) regardless of user setting. Larger frame
+  // sizes (SVGA/XGA/UXGA) require ~60 KB+ contiguous DMA + frame buffers,
+  // which is fragile under our load (BLE central + WiFi + HTTP all
+  // contending for memory). VGA's JPEG output is ~25–40 KB, fits comfortably
+  // in PSRAM, and reduces camera DMA bandwidth ~40% vs SVGA. If a user
+  // really needs higher resolution, raise this manually after measuring
+  // peak heap under the actual load they care about.
+  if (fs > FRAMESIZE_VGA) {
+    INFO_CAMERAF("Requested framesize=%d capped to VGA (memory-pressure guard)", (int)fs);
+    fs = FRAMESIZE_VGA;
+  }
   int jpegQ = gSettings.cameraQuality;
   // Clamp quality: 0 means "unset", use 10 as minimum for stability
   if (jpegQ < 10) jpegQ = 10;
@@ -327,87 +341,120 @@ bool initCamera() {
   config.fb_count = 1;  // Start with 1, increase if PSRAM available
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;  // Default, changed to LATEST if PSRAM
   
-  DEBUG_CAMERAF("[CAM_INIT] Initial config: xclk=%dHz fs=%d pix=%d fb_loc=%d qual=%d fb_cnt=%d grab=%d",
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Initial config: xclk=%dHz fs=%d pix=%d fb_loc=%d qual=%d fb_cnt=%d grab=%d",
                 config.xclk_freq_hz, config.frame_size, config.pixel_format,
                 config.fb_location, config.jpeg_quality, config.fb_count, config.grab_mode);
   
-  // OV3660 fix: Use conservative grab mode even with PSRAM to avoid FB-OVF/timeout
-  DEBUG_CAMERAF("[CAM_INIT] Checking PSRAM...");
+  // menuconfig: Component config → Camera → "Enable PSRAM DMA mode by default".
+  // When disabled, CAM DMA does not target PSRAM; framebuffers must live in DRAM.
+#if CONFIG_CAMERA_PSRAM_DMA
+  const bool camPsramDma = true;
+#else
+  const bool camPsramDma = false;
+#endif
+
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Checking PSRAM...");
   bool hasPsram = psramFound();
-  DEBUG_CAMERAF("[CAM_INIT] psramFound() = %d", hasPsram);
-  if (hasPsram) {
-    config.jpeg_quality = 10;  // Higher quality when PSRAM available
-    config.fb_count = 2;       // Need 2 buffers for GRAB_LATEST - DMA fills one while other is processed
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] psramFound()=%d CONFIG_CAMERA_PSRAM_DMA=%d",
+                hasPsram ? 1 : 0, camPsramDma ? 1 : 0);
+
+  if (hasPsram && camPsramDma) {
+    config.jpeg_quality = 10;  // Higher quality when PSRAM DMA available
+    config.fb_count = 2;
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-    DEBUG_CAMERAF("[CAM_INIT] PSRAM found - using quality=10, fb_count=2, GRAB_WHEN_EMPTY");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PSRAM + PSRAM-DMA — quality=10, fb_count=2, FB in PSRAM");
+  } else if (hasPsram && !camPsramDma) {
+    // PSRAM_DMA disabled in menuconfig: the camera DMA peripheral writes
+    // to internal DRAM line buffers (avoids PSRAM-bus contention during
+    // DMA), and the driver memcpy's each completed frame into the FB.
+    //
+    // We KEEP the FB in PSRAM (don't force DRAM) for two reasons:
+    //   1) Internal DRAM is fragmented under our load (BLE + WiFi + HTTP
+    //      coexist). A 60 KB contiguous alloc routinely fails even when
+    //      total free DRAM is 140+ KB. Forcing FB to DRAM caused
+    //      `cam_dma_config: frame buffer malloc failed` on init.
+    //   2) PSRAM has 8 MB free — trivially fits the FB.
+    //
+    // Net trade vs PSRAM_DMA=on:
+    //   - Less peak PSRAM bandwidth during DMA → fewer NO-SOI/NO-EOI
+    //     truncation errors when WiFi/BT are also touching PSRAM.
+    //   - Slightly more CPU (one memcpy per frame, ~60 KB at PSRAM speed).
+    //   - Frame rate loss is small at SVGA and below.
+    config.fb_location = CAMERA_FB_IN_PSRAM;
+    config.jpeg_quality = jpegQ;
+    config.fb_count = 1;  // Single buffer — DMA→DRAM→FB pipeline is serial.
+    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PSRAM_DMA disabled — DMA→DRAM line buf, FB in PSRAM, fb_count=1, jpeg_quality=%d", jpegQ);
   } else {
-    // Fallback for no PSRAM - reduce resolution and use internal DRAM
-    if (config.frame_size > FRAMESIZE_SVGA) {
-      config.frame_size = FRAMESIZE_SVGA;
-      INFO_SENSORSF("[Camera] No PSRAM detected, limiting to SVGA resolution");
+    // No PSRAM chip — use internal DRAM. Resolution is already capped
+    // at VGA above, but if a future change raises that cap and PSRAM
+    // is absent, drop to QVGA so the FB fits in DRAM.
+    if (config.frame_size > FRAMESIZE_QVGA) {
+      config.frame_size = FRAMESIZE_QVGA;
+      INFO_CAMERAF("No PSRAM detected, limiting to QVGA resolution");
     }
     config.fb_location = CAMERA_FB_IN_DRAM;
     config.fb_count = 1;
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   }
 
-  INFO_SENSORSF("[Camera] Config: xclk=%dMHz framesize=%d quality=%d fb_count=%d",
+  INFO_CAMERAF("Config: xclk=%dMHz framesize=%d quality=%d fb_count=%d",
                 config.xclk_freq_hz / 1000000, config.frame_size, 
                 config.jpeg_quality, config.fb_count);
 
   // Initialize the camera
-  DEBUG_CAMERAF("[CAM_INIT] Final config before esp_camera_init():");
-  DEBUG_CAMERAF("[CAM_INIT]   xclk_freq_hz=%d", config.xclk_freq_hz);
-  DEBUG_CAMERAF("[CAM_INIT]   frame_size=%d pixel_format=%d", config.frame_size, config.pixel_format);
-  DEBUG_CAMERAF("[CAM_INIT]   fb_location=%d jpeg_quality=%d", config.fb_location, config.jpeg_quality);
-  DEBUG_CAMERAF("[CAM_INIT]   fb_count=%d grab_mode=%d", config.fb_count, config.grab_mode);
-  DEBUG_CAMERAF("[CAM_INIT] Heap before esp_camera_init: %u", esp_get_free_heap_size());
-  DEBUG_CAMERAF("[CAM_INIT] Calling esp_camera_init()...");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Final config before esp_camera_init():");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   xclk_freq_hz=%d", config.xclk_freq_hz);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   frame_size=%d pixel_format=%d", config.frame_size, config.pixel_format);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   fb_location=%d jpeg_quality=%d", config.fb_location, config.jpeg_quality);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   fb_count=%d grab_mode=%d", config.fb_count, config.grab_mode);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Heap before esp_camera_init: %u", esp_get_free_heap_size());
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Calling esp_camera_init()...");
   
   unsigned long initStart = millis();
   esp_err_t err = esp_camera_init(&config);
   unsigned long initTime = millis() - initStart;
   
-  DEBUG_CAMERAF("[CAM_INIT] esp_camera_init() returned 0x%x after %lu ms", err, initTime);
-  DEBUG_CAMERAF("[CAM_INIT] Error decode: %s", cameraErrorToString(err));
-  DEBUG_CAMERAF("[CAM_INIT] Heap after esp_camera_init: %u", esp_get_free_heap_size());
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] esp_camera_init() returned 0x%x after %lu ms", err, initTime);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Error decode: %s", cameraErrorToString(err));
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Heap after esp_camera_init: %u", esp_get_free_heap_size());
   
   if (err != ESP_OK) {
-    DEBUG_CAMERAF("[CAM_INIT] *** INIT FAILED! ***");
-    DEBUG_CAMERAF("[CAM_INIT] Error code: 0x%x", err);
-    DEBUG_CAMERAF("[CAM_INIT] Error meaning: %s", cameraErrorToString(err));
-    DEBUG_CAMERAF("[CAM_INIT] Possible causes:");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] *** INIT FAILED! ***");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Error code: 0x%x", err);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Error meaning: %s", cameraErrorToString(err));
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Possible causes:");
     if (err == ESP_ERR_NOT_FOUND || err == ESP_ERR_INVALID_STATE || err == 0x20001) {
-      DEBUG_CAMERAF("[CAM_INIT]   - Camera not connected or bad ribbon cable");
-      DEBUG_CAMERAF("[CAM_INIT]   - SCCB/I2C communication failed");
-      DEBUG_CAMERAF("[CAM_INIT]   - Wrong I2C address for camera model");
-      DEBUG_CAMERAF("[CAM_INIT]   - PWDN/RESET pins not configured correctly");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - Camera not connected or bad ribbon cable");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - SCCB/I2C communication failed");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - Wrong I2C address for camera model");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - PWDN/RESET pins not configured correctly");
     } else if (err == ESP_ERR_NO_MEM) {
-      DEBUG_CAMERAF("[CAM_INIT]   - Not enough memory for frame buffers");
-      DEBUG_CAMERAF("[CAM_INIT]   - Try reducing resolution or fb_count");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - Not enough memory for frame buffers");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - Try reducing resolution or fb_count");
     } else if (err == ESP_ERR_TIMEOUT) {
-      DEBUG_CAMERAF("[CAM_INIT]   - Camera not responding (check XCLK)");
-      DEBUG_CAMERAF("[CAM_INIT]   - DVP timing issue");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - Camera not responding (check XCLK)");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT]   - DVP timing issue");
     }
-    INFO_SENSORSF("[Camera] Init failed: 0x%x (%s)", err, cameraErrorToString(err));
+    INFO_CAMERAF("Init failed: 0x%x (%s)", err, cameraErrorToString(err));
     cameraConnected = false;
     gCameraEnabled = false;
     unlockCameraMutex();
     return false;
   }
   
-  DEBUG_CAMERAF("[CAM_INIT] esp_camera_init() SUCCESS");
-  INFO_SENSORSF("[Camera] esp_camera_init() succeeded");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] esp_camera_init() SUCCESS");
+  INFO_CAMERAF("esp_camera_init() succeeded");
 
   // Get camera sensor info
-  DEBUG_CAMERAF("[CAM_INIT] Getting camera sensor handle...");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Getting camera sensor handle...");
   sensor_t* s = esp_camera_sensor_get();
-  DEBUG_CAMERAF("[CAM_INIT] esp_camera_sensor_get() returned %p", s);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] esp_camera_sensor_get() returned %p", s);
   
   if (s) {
-    DEBUG_CAMERAF("[CAM_INIT] Sensor info: PID=0x%x VER=0x%x MIDL=0x%x MIDH=0x%x",
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Sensor info: PID=0x%x VER=0x%x MIDL=0x%x MIDH=0x%x",
                   s->id.PID, s->id.VER, s->id.MIDL, s->id.MIDH);
-    INFO_SENSORSF("[Camera] Sensor PID=0x%x", s->id.PID);
+    INFO_CAMERAF("Sensor PID=0x%x", s->id.PID);
     switch (s->id.PID) {
       case OV2640_PID:
         cameraModel = "OV2640";
@@ -422,78 +469,78 @@ bool initCamera() {
         cameraModel = "Unknown";
         break;
     }
-    DEBUG_CAMERAF("[CAM_INIT] Detected camera model: %s", cameraModel);
-    INFO_SENSORSF("[Camera] Detected: %s", cameraModel);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Detected camera model: %s", cameraModel);
+    INFO_CAMERAF("Detected: %s", cameraModel);
     
     // OV3660 specific: needs time to stabilize before changing settings
     if (s->id.PID == OV3660_PID) {
-      DEBUG_CAMERAF("[CAM_INIT] OV3660 detected - waiting 500ms for stabilization");
-      INFO_SENSORSF("[Camera] OV3660 detected - waiting 500ms for sensor stabilization...");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] OV3660 detected - waiting 500ms for stabilization");
+      INFO_CAMERAF("OV3660 detected - waiting 500ms for sensor stabilization...");
       vTaskDelay(pdMS_TO_TICKS(500));
-      DEBUG_CAMERAF("[CAM_INIT] OV3660 stabilization wait complete");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] OV3660 stabilization wait complete");
     }
     
     // Flush any garbage frames BEFORE applying settings
     // OV3660 needs more flushes to clear overflow state
-    DEBUG_CAMERAF("[CAM_INIT] Starting frame flush phase...");
-    INFO_SENSORSF("[Camera] Flushing initial frames...");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Starting frame flush phase...");
+    INFO_CAMERAF("Flushing initial frames...");
     int flushCount = (s->id.PID == OV3660_PID) ? 5 : 3;
-    DEBUG_CAMERAF("[CAM_INIT] Will flush %d frames", flushCount);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Will flush %d frames", flushCount);
     
     for (int i = 0; i < flushCount; i++) {
-      DEBUG_CAMERAF("[CAM_INIT] Flush %d: calling esp_camera_fb_get()...", i);
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Flush %d: calling esp_camera_fb_get()...", i);
       unsigned long flushStart = millis();
       camera_fb_t* fb = esp_camera_fb_get();
       unsigned long flushTime = millis() - flushStart;
       
       if (fb) {
-        DEBUG_CAMERAF("[CAM_INIT] Flush %d: got frame in %lu ms - len=%u format=%d w=%u h=%u",
+        DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Flush %d: got frame in %lu ms - len=%u format=%d w=%u h=%u",
                       i, flushTime, fb->len, fb->format, fb->width, fb->height);
         if (fb->format == PIXFORMAT_JPEG && fb->len >= 2) {
-          DEBUG_CAMERAF("[CAM_INIT] Flush %d: JPEG header bytes: 0x%02X 0x%02X",
+          DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Flush %d: JPEG header bytes: 0x%02X 0x%02X",
                         i, fb->buf[0], fb->buf[1]);
         }
-        INFO_SENSORSF("[Camera] Flush frame %d: %u bytes, format=%d", i, fb->len, fb->format);
+        INFO_CAMERAF("Flush frame %d: %u bytes, format=%d", i, fb->len, fb->format);
         esp_camera_fb_return(fb);
-        DEBUG_CAMERAF("[CAM_INIT] Flush %d: frame returned to camera", i);
+        DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Flush %d: frame returned to camera", i);
       } else {
-        DEBUG_CAMERAF("[CAM_INIT] Flush %d: TIMEOUT after %lu ms - fb is NULL!", i, flushTime);
-        INFO_SENSORSF("[Camera] Flush frame %d: NULL (timeout)", i);
+        DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Flush %d: TIMEOUT after %lu ms - fb is NULL!", i, flushTime);
+        INFO_CAMERAF("Flush frame %d: NULL (timeout)", i);
         // Don't break - keep trying to clear overflow
       }
       vTaskDelay(pdMS_TO_TICKS(50));
     }
-    DEBUG_CAMERAF("[CAM_INIT] Frame flush phase complete");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Frame flush phase complete");
     
     // NOW apply user settings (after camera has stabilized)
-    DEBUG_CAMERAF("[CAM_INIT] Applying user settings phase...");
-    INFO_SENSORSF("[Camera] Applying user settings...");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Applying user settings phase...");
+    INFO_CAMERAF("Applying user settings...");
     
-    DEBUG_CAMERAF("[CAM_INIT] set_framesize(%d)...", fs);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_framesize(%d)...", fs);
     int r1 = s->set_framesize(s, fs);
-    DEBUG_CAMERAF("[CAM_INIT] set_framesize returned %d", r1);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_framesize returned %d", r1);
     
-    DEBUG_CAMERAF("[CAM_INIT] set_quality(%d)...", jpegQ);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_quality(%d)...", jpegQ);
     int r2 = s->set_quality(s, jpegQ);
-    DEBUG_CAMERAF("[CAM_INIT] set_quality returned %d", r2);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_quality returned %d", r2);
     
-    DEBUG_CAMERAF("[CAM_INIT] set_brightness(%d)...", gSettings.cameraBrightness);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_brightness(%d)...", gSettings.cameraBrightness);
     s->set_brightness(s, gSettings.cameraBrightness);
     
-    DEBUG_CAMERAF("[CAM_INIT] set_contrast(%d)...", gSettings.cameraContrast);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_contrast(%d)...", gSettings.cameraContrast);
     s->set_contrast(s, gSettings.cameraContrast);
     
-    DEBUG_CAMERAF("[CAM_INIT] set_saturation(%d)...", gSettings.cameraSaturation);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_saturation(%d)...", gSettings.cameraSaturation);
     s->set_saturation(s, gSettings.cameraSaturation);
     
-    DEBUG_CAMERAF("[CAM_INIT] set_hmirror(%d)...", gSettings.cameraHMirror ? 1 : 0);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_hmirror(%d)...", gSettings.cameraHMirror ? 1 : 0);
     s->set_hmirror(s, gSettings.cameraHMirror ? 1 : 0);
     
-    DEBUG_CAMERAF("[CAM_INIT] set_vflip(%d)...", gSettings.cameraVFlip ? 1 : 0);
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_vflip(%d)...", gSettings.cameraVFlip ? 1 : 0);
     s->set_vflip(s, gSettings.cameraVFlip ? 1 : 0);
     
     // Standard settings
-    DEBUG_CAMERAF("[CAM_INIT] Applying standard settings (AWB, AE, gain, etc.)...");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Applying standard settings (AWB, AE, gain, etc.)...");
     s->set_special_effect(s, gSettings.cameraSpecialEffect);
     s->set_whitebal(s, 1);
     s->set_awb_gain(s, 1);
@@ -513,31 +560,31 @@ bool initCamera() {
     s->set_dcw(s, 1);
     s->set_colorbar(s, 0);
     
-    DEBUG_CAMERAF("[CAM_INIT] All sensor settings applied");
-    INFO_SENSORSF("[Camera] Settings applied: brightness=%d contrast=%d saturation=%d hmirror=%d vflip=%d",
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] All sensor settings applied");
+    INFO_CAMERAF("Settings applied: brightness=%d contrast=%d saturation=%d hmirror=%d vflip=%d",
                   gSettings.cameraBrightness, gSettings.cameraContrast, 
                   gSettings.cameraSaturation, gSettings.cameraHMirror, gSettings.cameraVFlip);
     
     // OV3660: Flush frames AFTER changing settings to clear stale buffers
     // This prevents FB-OVF when resolution was changed
     if (s->id.PID == OV3660_PID) {
-      DEBUG_CAMERAF("[CAM_INIT] OV3660 post-settings flush starting...");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] OV3660 post-settings flush starting...");
       vTaskDelay(pdMS_TO_TICKS(100));  // Let new settings take effect
       for (int i = 0; i < 3; i++) {
         camera_fb_t* fb = esp_camera_fb_get();
         if (fb) {
-          DEBUG_CAMERAF("[CAM_INIT] Post-flush %d: %u bytes %ux%u", i, fb->len, fb->width, fb->height);
+          DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Post-flush %d: %u bytes %ux%u", i, fb->len, fb->width, fb->height);
           esp_camera_fb_return(fb);
         } else {
-          DEBUG_CAMERAF("[CAM_INIT] Post-flush %d: NULL", i);
+          DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Post-flush %d: NULL", i);
         }
         vTaskDelay(pdMS_TO_TICKS(50));
       }
-      DEBUG_CAMERAF("[CAM_INIT] OV3660 post-settings flush complete");
+      DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] OV3660 post-settings flush complete");
     }
   } else {
-    DEBUG_CAMERAF("[CAM_INIT] WARNING: sensor handle is NULL!");
-    INFO_SENSORSF("[Camera] WARNING: esp_camera_sensor_get() returned NULL!");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] WARNING: sensor handle is NULL!");
+    INFO_CAMERAF("WARNING: esp_camera_sensor_get() returned NULL!");
   }
 
   // Set dimensions from the canonical helper so new sizes added to
@@ -549,80 +596,77 @@ bool initCamera() {
   gCameraEnabled = true;
   sensorStatusBumpWith("opencamera");
 
-  DEBUG_CAMERAF("[CAM_INIT] ========== initCamera() COMPLETE ==========");
-  DEBUG_CAMERAF("[CAM_INIT] gCameraEnabled=%d cameraConnected=%d", gCameraEnabled, cameraConnected);
-  DEBUG_CAMERAF("[CAM_INIT] Model=%s Resolution=%dx%d", cameraModel, cameraWidth, cameraHeight);
-  DEBUG_CAMERAF("[CAM_INIT] Final heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  INFO_SENSORSF("[Camera] Initialized: %s (%dx%d)", cameraModel, cameraWidth, cameraHeight);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] ========== initCamera() COMPLETE ==========");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gCameraEnabled=%d cameraConnected=%d", gCameraEnabled, cameraConnected);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Model=%s Resolution=%dx%d", cameraModel, cameraWidth, cameraHeight);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Final heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  INFO_CAMERAF("Initialized: %s (%dx%d)", cameraModel, cameraWidth, cameraHeight);
   unlockCameraMutex();
   return true;
 }
 
 void stopCamera() {
-  DEBUG_CAMERAF("[CAM_STOP] stopCamera() called, gCameraEnabled=%d", gCameraEnabled);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] stopCamera() called, gCameraEnabled=%d", gCameraEnabled);
   if (!gCameraEnabled) {
-    DEBUG_CAMERAF("[CAM_STOP] Already stopped, returning");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Already stopped, returning");
     return;
   }
 
   if (!lockCameraMutex(15000)) {
-    DEBUG_CAMERAF("[CAM_STOP] ERROR: camera mutex timeout (camera busy)");
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] ERROR: camera mutex timeout (camera busy)");
     return;
   }
 
-  DEBUG_CAMERAF("[CAM_STOP] Heap before deinit: %u", esp_get_free_heap_size());
-  INFO_SENSORSF("[Camera] Stopping camera...");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Heap before deinit: %u", esp_get_free_heap_size());
+  INFO_CAMERAF("Stopping camera...");
   
-  DEBUG_CAMERAF("[CAM_STOP] Calling esp_camera_deinit()...");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Calling esp_camera_deinit()...");
   esp_camera_deinit();
-  DEBUG_CAMERAF("[CAM_STOP] esp_camera_deinit() complete");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] esp_camera_deinit() complete");
   
   gCameraEnabled = false;
   cameraStreaming = false;
   sensorStatusBumpWith("closecamera");
   
-  DEBUG_CAMERAF("[CAM_STOP] Heap after deinit: %u", esp_get_free_heap_size());
-  INFO_SENSORSF("[Camera] Stopped");
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Heap after deinit: %u", esp_get_free_heap_size());
+  INFO_CAMERAF("Stopped");
 
   unlockCameraMutex();
 }
 
 uint8_t* captureFrame(size_t* outLen) {
-  // Verbose debug logging - uncomment for troubleshooting camera issues
-  // DEBUG_CAMERAF("[CAM_CAPTURE] ========== captureFrame() ENTRY ==========");
-  // DEBUG_CAMERAF("[CAM_CAPTURE] gCameraEnabled=%d cameraConnected=%d cameraStreaming=%d",
-  //               gCameraEnabled, cameraConnected, cameraStreaming);
-  // DEBUG_CAMERAF("[CAM_CAPTURE] Heap: %u, PSRAM: %u", 
-  //               esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  
+  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] ========== captureFrame() ENTRY ==========");
+  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] gCameraEnabled=%d cameraConnected=%d cameraStreaming=%d",
+                gCameraEnabled, cameraConnected, cameraStreaming);
+  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Heap: %u, PSRAM: %u",
+                esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
   if (!gCameraEnabled) {
-    // DEBUG_CAMERAF("[CAM_CAPTURE] Camera not enabled - returning NULL");
-    // INFO_SENSORSF("[Camera] captureFrame() - camera not enabled, returning NULL");
+    DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Camera not enabled - returning NULL");
     if (outLen) *outLen = 0;
     return nullptr;
   }
 
   // Fast-fail: don't queue behind other captures, return busy immediately
   if (!lockCameraMutex(0)) {
-    // DEBUG_CAMERAF("[CAM_CAPTURE] Camera busy (another capture in progress)");
-    // INFO_SENSORSF("[Camera] captureFrame() - camera busy, try again");
+    DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Camera busy (another capture in progress)");
     if (outLen) *outLen = 0;
     return nullptr;
   }
 
   // Single attempt - fail fast, recover immediately if needed
   camera_fb_t* fb = nullptr;
-  // DEBUG_CAMERAF("[CAM_CAPTURE] Calling esp_camera_fb_get()...");
-  
-  // unsigned long startMs = millis();
+  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Calling esp_camera_fb_get()...");
+
+  unsigned long startMs = millis();
   fb = esp_camera_fb_get();
-  // unsigned long elapsed = millis() - startMs;
-  
-  // DEBUG_CAMERAF("[CAM_CAPTURE] esp_camera_fb_get() returned in %lu ms, fb=%p", elapsed, fb);
+  unsigned long elapsed = millis() - startMs;
+
+  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] esp_camera_fb_get() returned in %lu ms, fb=%p", elapsed, fb);
   
   if (!fb) {
     // Recovery logging - keep these for diagnosing camera issues
-    DEBUG_CAMERAF("[CAM_CAPTURE] Capture failed - attempting recovery...");
+    DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Capture failed - attempting recovery...");
 
     stopCamera();
     vTaskDelay(pdMS_TO_TICKS(150));
@@ -631,7 +675,7 @@ uint8_t* captureFrame(size_t* outLen) {
       fb = esp_camera_fb_get();
     }
     if (!ok || !fb) {
-      DEBUG_CAMERAF("[CAM_CAPTURE] Recovery failed");
+      DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Recovery failed");
     }
 
     if (!fb) {
@@ -641,21 +685,14 @@ uint8_t* captureFrame(size_t* outLen) {
     }
   }
   
-  // DEBUG_CAMERAF("[CAM_CAPTURE] Frame buffer details:");
-  // DEBUG_CAMERAF("[CAM_CAPTURE]   fb->buf = %p", fb->buf);
-  // DEBUG_CAMERAF("[CAM_CAPTURE]   fb->len = %u", fb->len);
-  // DEBUG_CAMERAF("[CAM_CAPTURE]   fb->width = %u", fb->width);
-  // DEBUG_CAMERAF("[CAM_CAPTURE]   fb->height = %u", fb->height);
-  // DEBUG_CAMERAF("[CAM_CAPTURE]   fb->format = %d", fb->format);
-  // DEBUG_CAMERAF("[CAM_CAPTURE]   fb->timestamp = {%ld, %ld}", 
-  //               (long)fb->timestamp.tv_sec, (long)fb->timestamp.tv_usec);
-  // INFO_SENSORSF("[Camera] Got frame: len=%u, format=%d, width=%u, height=%u", 
-  //               fb->len, fb->format, fb->width, fb->height);
+  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] fb buf=%p len=%u %ux%u fmt=%d ts=%ld.%06ld",
+                fb->buf, fb->len, fb->width, fb->height, fb->format,
+                (long)fb->timestamp.tv_sec, (long)fb->timestamp.tv_usec);
 
   // Validate JPEG header (silent unless error)
   if (fb->format == PIXFORMAT_JPEG && fb->len >= 2) {
     if (fb->buf[0] != 0xFF || fb->buf[1] != 0xD8) {
-      DEBUG_CAMERAF("[CAM_CAPTURE] Invalid JPEG header: %02X %02X", fb->buf[0], fb->buf[1]);
+      DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Invalid JPEG header: %02X %02X", fb->buf[0], fb->buf[1]);
       esp_camera_fb_return(fb);
       unlockCameraMutex();
       if (outLen) *outLen = 0;
@@ -670,7 +707,7 @@ uint8_t* captureFrame(size_t* outLen) {
     memcpy(buf, fb->buf, fb->len);
     if (outLen) *outLen = fb->len;
   } else {
-    DEBUG_CAMERAF("[CAM_CAPTURE] ALLOC FAILED: %u bytes, Heap: %u", 
+    DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] ALLOC FAILED: %u bytes, Heap: %u", 
                   fb->len, esp_get_free_heap_size());
     if (outLen) *outLen = 0;
   }
@@ -678,7 +715,7 @@ uint8_t* captureFrame(size_t* outLen) {
   esp_camera_fb_return(fb);
   
   // Note: With GRAB_LATEST mode, no flush needed - camera always gives latest frame
-  // DEBUG_CAMERAF("[CAM_CAPTURE] EXIT buf=%p, len=%u", buf, outLen ? *outLen : 0);
+  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] EXIT buf=%p, len=%u", buf, outLen ? *outLen : 0);
   unlockCameraMutex();
   return buf;
 }
@@ -690,7 +727,7 @@ bool setCameraResolution(framesize_t size) {
   }
 
   if (!lockCameraMutex(15000)) {
-    DEBUG_CAMERAF("[CAM_SET] ERROR: camera mutex timeout (camera busy)");
+    DEBUG_CAMERA_SETTINGSF("[CAM_SET] ERROR: camera mutex timeout (camera busy)");
     return false;
   }
    
@@ -705,7 +742,7 @@ bool setCameraResolution(framesize_t size) {
     // Update tracked dimensions via the canonical helper (single
     // source of truth shared with the init path above).
     cameraDimsForFramesize(size, cameraWidth, cameraHeight);
-    INFO_SENSORSF("[Camera] Resolution set to %dx%d", cameraWidth, cameraHeight);
+    INFO_CAMERAF("Resolution set to %dx%d", cameraWidth, cameraHeight);
     unlockCameraMutex();
     return true;
   }
@@ -718,7 +755,7 @@ bool setCameraQuality(int quality) {
   if (!gCameraEnabled) return false;
 
   if (!lockCameraMutex(15000)) {
-    DEBUG_CAMERAF("[CAM_SET] ERROR: camera mutex timeout (camera busy)");
+    DEBUG_CAMERA_SETTINGSF("[CAM_SET] ERROR: camera mutex timeout (camera busy)");
     return false;
   }
   sensor_t* s = esp_camera_sensor_get();
@@ -739,7 +776,7 @@ uint8_t* captureFrameAtResolution(framesize_t size, int quality, size_t* outLen)
   }
 
   if (!lockCameraMutex(15000)) {
-    DEBUG_CAMERAF("[CAM_CAPTURE] ERROR: camera mutex timeout (camera busy)");
+    DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] ERROR: camera mutex timeout (camera busy)");
     if (outLen) *outLen = 0;
     return nullptr;
   }
@@ -817,6 +854,182 @@ const char* buildCameraStatusJson() {
   return cameraStatusBuffer;
 }
 
+// =============================================================================
+// Camera power worker — init/stop/restart run here (large stack), not on the
+// G2 tap dispatcher (4 KB) or other shallow stacks. captureFrame() recovery
+// still calls init/stop inline while holding the camera mutex from the same
+// task; do not route that path through this queue (deadlock risk).
+// =============================================================================
+
+enum : uint8_t {
+  CAM_PWR_CMD_START   = 0,
+  CAM_PWR_CMD_STOP    = 1,
+  CAM_PWR_CMD_RESTART = 2,
+};
+
+struct CameraPwrMsg {
+  uint8_t      cmd;
+  TaskHandle_t notify;  // optional: xTaskNotifyGive after handling
+};
+
+static QueueHandle_t       sCamPwrQueue = nullptr;
+static TaskHandle_t        sCamPwrTask  = nullptr;
+static CameraPowerPostHook sCamPwrHook  = nullptr;
+
+void cameraPowerSetPostHook(CameraPowerPostHook hook) { sCamPwrHook = hook; }
+
+static void cameraPwrRunOne(const CameraPwrMsg& m) {
+  switch (m.cmd) {
+    case CAM_PWR_CMD_STOP:
+      stopCamera();
+      break;
+    case CAM_PWR_CMD_START:
+      if (!gCameraEnabled) {
+        if (!initCamera()) {
+          BROADCAST_PRINTF("[CAM_PWR] initCamera failed — reverting camera auto-start");
+          setSetting(gSettings.cameraAutoStart, false);
+        }
+      }
+      break;
+    case CAM_PWR_CMD_RESTART: {
+      const bool was = gCameraEnabled;
+      if (was) {
+        stopCamera();
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if (!initCamera()) {
+          BROADCAST_PRINTF("[CAM_PWR] restart: initCamera failed after stop");
+        }
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  if (sCamPwrHook) {
+    sCamPwrHook();
+  }
+  if (m.notify) {
+    xTaskNotifyGive(m.notify);
+  }
+}
+
+static void cameraPwrWorker(void* /*arg*/) {
+  CameraPwrMsg m;
+  for (;;) {
+    if (xQueueReceive(sCamPwrQueue, &m, portMAX_DELAY) != pdTRUE) {
+      continue;
+    }
+    cameraPwrRunOne(m);
+  }
+}
+
+void cameraPowerWorkerEnsureStarted() {
+  if (sCamPwrQueue) {
+    return;
+  }
+  constexpr UBaseType_t kDepth = 6;
+  // xTaskCreate stack arg is in WORDS (4 bytes), not bytes — 10240
+  // here is 40 KB. Observed HWM was very low (~2.5 KB used) but the
+  // camera had not been exercised heavily in that test, so the cut
+  // isn't safe to take without a real worst-case capture/stream load
+  // measurement. Leaving as-is until then.
+  constexpr uint32_t  kStack = 10240;
+  sCamPwrQueue = xQueueCreate(kDepth, sizeof(CameraPwrMsg));
+  if (!sCamPwrQueue) {
+    ERROR_SENSORSF("[CAM_PWR] queue create failed");
+    return;
+  }
+  const BaseType_t ok =
+      xTaskCreate(cameraPwrWorker, "cam_pwr", kStack, nullptr,
+                  tskIDLE_PRIORITY + 2, &sCamPwrTask);
+  if (ok != pdPASS) {
+    ERROR_SENSORSF("[CAM_PWR] worker task create failed");
+    vQueueDelete(sCamPwrQueue);
+    sCamPwrQueue = nullptr;
+    sCamPwrTask  = nullptr;
+  }
+}
+
+static bool cameraPwrSend(const CameraPwrMsg& m, TickType_t queueTicks) {
+  cameraPowerWorkerEnsureStarted();
+  if (!sCamPwrQueue) {
+    return false;
+  }
+  return xQueueSend(sCamPwrQueue, &m, queueTicks) == pdTRUE;
+}
+
+bool cameraPowerRequestStartAsync() {
+  const CameraPwrMsg m{CAM_PWR_CMD_START, nullptr};
+  return cameraPwrSend(m, 0);
+}
+
+bool cameraPowerRequestStopAsync() {
+  const CameraPwrMsg m{CAM_PWR_CMD_STOP, nullptr};
+  return cameraPwrSend(m, 0);
+}
+
+static void cameraPwrWaitDone(TaskHandle_t self, uint32_t waitMs) {
+  (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
+}
+
+bool cameraPowerRequestStartSync(uint32_t waitMs) {
+  cameraPowerWorkerEnsureStarted();
+  if (!sCamPwrQueue) {
+    return false;
+  }
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  (void)ulTaskNotifyTake(pdTRUE, 0);
+  const CameraPwrMsg m{CAM_PWR_CMD_START, self};
+  if (!cameraPwrSend(m, pdMS_TO_TICKS(5000))) {
+    return false;
+  }
+  cameraPwrWaitDone(self, waitMs);
+  return gCameraEnabled;
+}
+
+void cameraPowerRequestStopSync(uint32_t waitMs) {
+  cameraPowerWorkerEnsureStarted();
+  if (!sCamPwrQueue) {
+    stopCamera();
+    return;
+  }
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  (void)ulTaskNotifyTake(pdTRUE, 0);
+  const CameraPwrMsg m{CAM_PWR_CMD_STOP, self};
+  if (!cameraPwrSend(m, pdMS_TO_TICKS(5000))) {
+    stopCamera();
+    return;
+  }
+  cameraPwrWaitDone(self, waitMs);
+}
+
+bool cameraPowerRequestRestartSync(uint32_t waitMs) {
+  cameraPowerWorkerEnsureStarted();
+  if (!sCamPwrQueue) {
+    const bool was = gCameraEnabled;
+    if (was) {
+      stopCamera();
+      vTaskDelay(pdMS_TO_TICKS(100));
+      return initCamera();
+    }
+    return false;
+  }
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  (void)ulTaskNotifyTake(pdTRUE, 0);
+  const CameraPwrMsg m{CAM_PWR_CMD_RESTART, self};
+  if (!cameraPwrSend(m, pdMS_TO_TICKS(5000))) {
+    const bool was = gCameraEnabled;
+    if (was) {
+      stopCamera();
+      vTaskDelay(pdMS_TO_TICKS(100));
+      return initCamera();
+    }
+    return false;
+  }
+  cameraPwrWaitDone(self, waitMs);
+  return gCameraEnabled;
+}
+
 // Command handlers
 const char* cmd_camera(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -825,7 +1038,7 @@ const char* cmd_camera(const String& argsInput) {
 
 const char* cmd_camerastart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (initCamera()) {
+  if (cameraPowerRequestStartSync(60000)) {
     return "Camera started successfully";
   }
   return "Camera initialization failed";
@@ -833,7 +1046,7 @@ const char* cmd_camerastart(const String& argsInput) {
 
 const char* cmd_camerastop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  stopCamera();
+  cameraPowerRequestStopSync(30000);
   return "Camera stopped";
 }
 
@@ -896,9 +1109,7 @@ const char* cmd_camerares(const String& argsInput) {
   bool wasStreaming = cameraStreaming;
   
   if (wasEnabled) {
-    stopCamera();
-    vTaskDelay(pdMS_TO_TICKS(100));  // Brief delay for hardware to settle
-    initCamera();
+    (void)cameraPowerRequestRestartSync(60000);
   }
   
   static char result[96];
@@ -936,9 +1147,7 @@ const char* cmd_cameraframesize(const String& argsInput) {
   // If camera is running, restart to apply
   bool wasEnabled = gCameraEnabled;
   if (wasEnabled) {
-    stopCamera();
-    vTaskDelay(pdMS_TO_TICKS(100));
-    initCamera();
+    (void)cameraPowerRequestRestartSync(60000);
   }
   
   static char result[80];
@@ -1666,7 +1875,7 @@ const CommandEntry cameraCommands[] = {
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry cameraSettingEntries[] = {
   { "cameraAutoStart",          SETTING_BOOL,   &gSettings.cameraAutoStart,              0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  { "cameraFramesize",          SETTING_INT,    &gSettings.cameraFramesize,              1, 0, nullptr, 0, 10, "Resolution",
+  { "cameraFramesize",          SETTING_INT,    &gSettings.cameraFramesize,              10, 0, nullptr, 0, 10, "Resolution",
     "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA),"
     "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240" },
   { "cameraBrightness",         SETTING_INT,    &gSettings.cameraBrightness,             0, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr },

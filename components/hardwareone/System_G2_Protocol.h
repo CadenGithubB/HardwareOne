@@ -443,6 +443,13 @@ size_t g2BuildCreateTextPagePb(uint32_t magic,
 // size for the envelope `len` byte (which is u8, ceiling 255).
 #define G2_FRAG_CHUNK_PB    232
 
+// Bytes of MapRawData (Cmd=3 field 8) per logical image fragment, before
+// protobuf wrapper (~50 B). Total pb per Cmd=3 must stay under the
+// firmware's ~4 KB reassembly ceiling; sendPbFragmented then splits that
+// pb into G2_FRAG_CHUNK_PB-sized BLE envelopes. Not the same constant as
+// G2_FRAG_CHUNK_PB.
+#define G2_IMG_MAPRAW_CHUNK_BYTES 3800
+
 // REBUILD_PAGE with a fresh ListContainerProperty — swap the items in an
 // already-CREATEd list container. Used by stateful pages (Files, Settings)
 // where each tap navigates / mutates the list contents in place.
@@ -624,6 +631,7 @@ size_t g2BuildCreateMixedListImage(uint8_t seq, uint32_t magic,
                                    const G2ImageTile& imageTile,
                                    uint32_t widgetId,
                                    uint8_t* out, size_t outCap);
+// (g2BuildCreateMixedImageText* declared below, after G2TextChildSpec.)
 
 // CreateStartUpPageContainer carrying N TextObject children (wrapper
 // field 3 emitted N times, each with its own geometry + ContainerId +
@@ -705,6 +713,39 @@ size_t g2BuildRebuildMixedListMultiTextPb(uint32_t magic,
                                            const G2TextChildSpec* textChildren,
                                            size_t textChildCount,
                                            uint8_t* pbOut, size_t pbCap);
+
+// Image + Text compound CREATE. Same wrapper shape as the list+image
+// variant — `f1=ContainerTotalNum=2` carrying one TextObject (`f3`) and
+// one ImageObject (`f4`). Used by the Q28 probe to validate "camera-style
+// image push + independent text REBUILD" on a single compound, before
+// productionising the pattern in the camera stream worker.
+//
+// SCHEMA RISK: image+text mix is structurally identical to list+image
+// (Q16-Q18 verified) and to list+text (g2BuildCreateMixedListText
+// verified). The only untested combination is image+text specifically,
+// which is the whole point of Q28. Watch for CreateResp res != 0 on
+// regressions.
+//
+// Independent refresh contract:
+//   - Image refresh: Cmd=3 ImageMapRaw fragments via
+//     sendImageBmpFragmentsNoCreate(arm, ..., cid, cname, bmp, ...) where
+//     cid/cname target the imageTile's child. Pure data push, no widget
+//     rebuild — text child is unaffected.
+//   - Text refresh: single-child REBUILD-text via
+//     sendRebuildTextNamedAndWait(arm, textChild.containerName, ...).
+//     The doc verifies this preserves OTHER-WIDGET-TYPE siblings (like
+//     image) on a compound — only same-type siblings (text+text) suffer
+//     the multi-child blanking.
+size_t g2BuildCreateMixedImageTextPb(uint32_t magic,
+                                     const G2TextChildSpec& textChild,
+                                     const G2ImageTile& imageTile,
+                                     uint32_t widgetId,
+                                     uint8_t* pbOut, size_t pbCap);
+size_t g2BuildCreateMixedImageText(uint8_t seq, uint32_t magic,
+                                   const G2TextChildSpec& textChild,
+                                   const G2ImageTile& imageTile,
+                                   uint32_t widgetId,
+                                   uint8_t* out, size_t outCap);
 
 // CreateStartUpPage with one ListObject + one TextObject child. The
 // canonical "title + selectable list" layout: the TextObject acts as a

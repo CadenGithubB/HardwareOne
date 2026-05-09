@@ -7,6 +7,7 @@
 // set to 60 s as a passive watchdog; every tap explicitly kicks the
 // refresh semaphore so the visible buffer updates immediately.
 #include "G2_Page_TextEntry.h"
+#include "G2_HijackCmd.h"   // g2BumpMenuGen() — bumped on text-entry enter/exit
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -120,6 +121,7 @@ static void finishCommit() {
   snap[sizeof(snap) - 1] = '\0';
   TextEntryCommitFn cb = gTE.onCommit;
   gTE.active = false;
+  g2BumpMenuGen();   // exiting text entry invalidates view snapshots
   g2StopLiveListPage();
   if (cb) cb(snap);
 }
@@ -127,6 +129,7 @@ static void finishCommit() {
 static void finishCancel() {
   TextEntryCancelFn cb = gTE.onCancel;
   gTE.active = false;
+  g2BumpMenuGen();   // exiting text entry invalidates view snapshots
   g2StopLiveListPage();
   if (cb) cb();
 }
@@ -143,6 +146,7 @@ bool g2BeginTextEntry(const TextEntryConfig& cfg) {
   // firing its callback. Caller guarantees they're not stomping their
   // own session by checking g2TextEntryIsActive().
   gTE.active   = true;
+  g2BumpMenuGen();   // entering text entry invalidates view snapshots
   gTE.maxLen   = cfg.maxLen;
   gTE.onCommit = cfg.onCommit;
   gTE.onCancel = cfg.onCancel;
@@ -173,6 +177,7 @@ bool g2BeginTextEntry(const TextEntryConfig& cfg) {
   // session's cancel affordance — see kRow* note above.
   if (!g2StartLiveListPage(buildTextEntryText, 60000, "X Cancel")) {
     gTE.active = false;
+    g2BumpMenuGen();   // rollback also counts as a transition
     DEBUG_G2F("[G2] text-entry: live-page start failed");
     return false;
   }

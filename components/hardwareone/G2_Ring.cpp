@@ -120,10 +120,16 @@ static volatile bool   gSpoofEnabled       = false;
 static uint32_t        gSpoofIntervalSec   = 30;
 static TaskHandle_t    gSpoofTaskHandle    = nullptr;
 
-// Async connect-task state (mirrors the glasses' g2ConnectTask pattern to
-// keep the CLI handler from blocking on scan+connect).
+// Per-family in-flight flag — set by the public g2RingConnect* wrappers
+// before submitting to the unified BLE-connect worker (see G2_Glasses.h
+// `g2SubmitBleConnect`), cleared by the worker's dispatch (via the
+// g2RingConnectMarkComplete helper below, since the flag is file-static
+// and the worker lives in a different TU). Producers check this to reject
+// duplicate submissions. Group B retired the per-call task spawn; the
+// handle that used to track each transient task is gone.
 static volatile bool  gRingConnectTaskActive = false;
-static TaskHandle_t   gRingConnectTaskHandle = nullptr;
+
+void g2RingConnectMarkComplete() { gRingConnectTaskActive = false; }
 
 // Push a `ring-status` SSE to any open browser so the Bluetooth page's
 // Ring card flips state without a manual refresh. Fired on every
@@ -692,7 +698,11 @@ struct GlassesPriorityGuard {
 // requiring a prior scan-cached gRingAdvertisedDevice. Used by the boot
 // auto-reconnect path. When empty, behaves as before (uses the cached
 // advertisement from the most recent G2 scan).
-static bool ringDoConnect(const String& savedMac = String()) {
+// Promoted from `static` to a public helper as part of Group B so the
+// unified BLE-connect worker (in G2_Glasses.cpp) can dispatch RING_*
+// jobs to it. Internal callers (the now-deleted ring*TaskBody functions)
+// are gone; only the worker calls this.
+bool ringPerformConnect(const String& savedMac /* = String() */) {
   // Drop glasses to BALANCED for the entire connect attempt. Auto-restored
   // on any return path. Cheap no-op if no glasses are connected.
   GlassesPriorityGuard prio_guard;
@@ -853,65 +863,17 @@ static bool ringDoConnect(const String& savedMac = String()) {
   return true;
 }
 
-// Background connect task — returns immediately from the CLI path.
-static void ringConnectTaskBody(void* /*arg*/) {
-  ringDoConnect();
-  gRingConnectTaskActive = false;
-  gRingConnectTaskHandle = nullptr;
-  vTaskDelete(nullptr);
-}
-
-// Saved-MAC variant: reads the registered ring MAC and connects directly.
-//
-// Boot-time sequencing: bleBootReconnect kicks both g2-glasses and r1-ring
-// in quick succession (2s stagger). Without this wait, the ring's connect
-// task races the glasses' scan-and-connect for BLE controller resources,
-// which reliably fails (~30s timeout, sometimes drops a glasses link).
-// We block here until both temples are up, OR a generous timeout elapses
-// in case the user is running glasses-less for some reason. Manual
-// `ringconnect` paths (g2RingConnect, g2RingConnectMac) intentionally do
-// NOT take this wait — the user wants their command to start immediately.
-static void ringConnectSavedTaskBody(void* /*arg*/) {
-  if (g2WaitForBothConnected(/*timeoutMs=*/20000)) {
-    DEBUG_G2F("[RING] auto-reconnect: both glasses up — settling 3s before "
-              "competing for BLE radio");
-    vTaskDelay(pdMS_TO_TICKS(3000));
-  } else {
-    DEBUG_G2F("[RING] auto-reconnect: glasses not both ready after 20s — "
-              "proceeding anyway (may degrade if they come up mid-connect)");
-  }
-
-  String mac = gBlePeerData[BLE_PEER_R1_RING].mac1;
-  mac.trim();
-  if (mac.length() == 0) {
-    DEBUG_G2F("[RING] auto-reconnect: no saved MAC — skipping");
-  } else {
-    ringDoConnect(mac);
-  }
-  gRingConnectTaskActive = false;
-  gRingConnectTaskHandle = nullptr;
-  vTaskDelete(nullptr);
-}
-
-// Caller-supplied MAC variant. Bypasses scan entirely and attempts a direct
-// BLE connection to the given address. Useful when the ring is bonded with
-// another central (phone) and only directed-advertising — broad scans won't
-// see it, but the BLE stack can still try to initiate a connection by MAC.
-// Will fail with a controller-level connect-timeout if the ring isn't
-// advertising in any form OR if it doesn't accept a second simultaneous
-// central (most BLE peripherals are single-central).
-static String        gRingPendingMac;
-static void ringConnectMacTaskBody(void* /*arg*/) {
-  String mac = gRingPendingMac;
-  if (mac.length() == 0) {
-    DEBUG_G2F("[RING] connect-mac: empty MAC — aborting");
-  } else {
-    ringDoConnect(mac);
-  }
-  gRingConnectTaskActive = false;
-  gRingConnectTaskHandle = nullptr;
-  vTaskDelete(nullptr);
-}
+// Group B: ring connect task bodies removed — connects now flow through
+// the unified BLE-connect worker (see G2_Glasses.h `g2SubmitBleConnect`),
+// which dispatches RING_SCAN / RING_SAVED / RING_MAC kinds to
+// ringPerformConnect() above. The 3 retired *TaskBody functions were:
+//   - ringConnectTaskBody         → BleConnectKind::RING_SCAN
+//   - ringConnectSavedTaskBody    → BleConnectKind::RING_SAVED  (worker
+//                                    inlines the wait-for-glasses + 3 s
+//                                    settle that this used to do)
+//   - ringConnectMacTaskBody      → BleConnectKind::RING_MAC
+// The static gRingPendingMac that the MAC variant used to stash through
+// is also gone — the MAC now travels in the BleConnectJob payload.
 
 // =============================================================================
 // Public API
@@ -943,14 +905,15 @@ bool g2RingConnect() {
     DEBUG_G2F("[RING] Connect task already running");
     return false;
   }
+  // Group B: submit to the unified worker. Active flag flips true here so
+  // duplicate g2RingConnect* calls reject before we ever hit the queue;
+  // the worker's dispatch clears it after ringPerformConnect returns.
   gRingConnectTaskActive = true;
-  BaseType_t rc = xTaskCreate(ringConnectTaskBody, "ring_connect",
-                              /*stack*/ 5120, nullptr,
-                              /*prio*/  5,    &gRingConnectTaskHandle);
-  if (rc != pdPASS) {
-    DEBUG_G2F("[RING] xTaskCreate failed (rc=%d)", (int)rc);
+  BleConnectJob job{};
+  job.kind = BleConnectKind::RING_SCAN;
+  if (!g2SubmitBleConnect(job)) {
+    DEBUG_G2F("[RING] g2SubmitBleConnect(RING_SCAN) failed — queue full or G2 not init'd");
     gRingConnectTaskActive = false;
-    gRingConnectTaskHandle = nullptr;
     return false;
   }
   return true;
@@ -967,13 +930,11 @@ bool g2RingConnectSaved() {
     return false;
   }
   gRingConnectTaskActive = true;
-  BaseType_t rc = xTaskCreate(ringConnectSavedTaskBody, "ring_reconnect",
-                              /*stack*/ 5120, nullptr,
-                              /*prio*/  5,    &gRingConnectTaskHandle);
-  if (rc != pdPASS) {
-    DEBUG_G2F("[RING] xTaskCreate (saved) failed (rc=%d)", (int)rc);
+  BleConnectJob job{};
+  job.kind = BleConnectKind::RING_SAVED;
+  if (!g2SubmitBleConnect(job)) {
+    DEBUG_G2F("[RING] g2SubmitBleConnect(RING_SAVED) failed — queue full or G2 not init'd");
     gRingConnectTaskActive = false;
-    gRingConnectTaskHandle = nullptr;
     return false;
   }
   return true;
@@ -987,23 +948,23 @@ bool g2RingConnectMac(const String& mac) {
   }
   String m = mac;
   m.trim();
-  // Loose validation — full BLEAddress parsing happens inside ringDoConnect.
+  // Loose validation — full BLEAddress parsing happens inside ringPerformConnect.
   // Just reject obviously-wrong inputs here (need at least "aa:bb:cc:dd:ee:ff"
-  // = 17 chars).
-  if (m.length() < 17) {
+  // = 17 chars; BleConnectJob.mac is a 18-byte buffer including NUL).
+  if (m.length() < 17 || m.length() > 17) {
     DEBUG_G2F("[RING] connect-mac: invalid MAC '%s' (need aa:bb:cc:dd:ee:ff)",
               m.c_str());
     return false;
   }
-  gRingPendingMac        = m;
   gRingConnectTaskActive = true;
-  BaseType_t rc = xTaskCreate(ringConnectMacTaskBody, "ring_connect_mac",
-                              /*stack*/ 5120, nullptr,
-                              /*prio*/  5,    &gRingConnectTaskHandle);
-  if (rc != pdPASS) {
-    DEBUG_G2F("[RING] xTaskCreate (mac) failed (rc=%d)", (int)rc);
+  BleConnectJob job{};
+  job.kind = BleConnectKind::RING_MAC;
+  // 17 chars + NUL fits exactly in the 18-byte mac buffer.
+  memcpy(job.mac, m.c_str(), 17);
+  job.mac[17] = '\0';
+  if (!g2SubmitBleConnect(job)) {
+    DEBUG_G2F("[RING] g2SubmitBleConnect(RING_MAC) failed — queue full or G2 not init'd");
     gRingConnectTaskActive = false;
-    gRingConnectTaskHandle = nullptr;
     return false;
   }
   return true;

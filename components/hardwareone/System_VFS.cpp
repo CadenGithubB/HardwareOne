@@ -729,6 +729,146 @@ bool formatSD() {
 #endif
 }
 
+// ============================================================================
+// Guarded VFS — single enforcement point
+// ============================================================================
+// Pipeline:
+//   1. normalizeFsPath — reject .., collapse //, strip trailing /. Failure
+//      → log + deny. Failure here is treated as a path-injection attempt
+//      so we log a stronger reason than a normal perm denial.
+//   2. canX(normalized, ctx) — three-role check. Logs its own denial.
+//   3. Dispatch to the underlying VFS operation.
+//
+// File openGuarded returns an empty File on denial (caller checks `!file`).
+
+static bool guardedNormalize(const String& in, String& out, const char* op,
+                             const AuthContext& ctx) {
+  if (!normalizeFsPath(in, out)) {
+    DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s reason=path-rejected (traversal/empty)",
+                   op, in.c_str(),
+                   ctx.user.length() == 0 ? "anon" : ctx.user.c_str());
+    return false;
+  }
+  return true;
+}
+
+// NOTE on logging: canX() are silent queries. Each *Guarded function below
+// emits a single [PERM] DENY line via logFsAccessDeny() ONLY when an actual
+// access attempt is refused. This keeps the audit trail intact for real
+// security events while leaving aggregate UI permission queries (e.g.
+// getPermissions in a file listing) noise-free.
+
+File openGuarded(const String& path, const char* mode, const AuthContext& ctx, bool create) {
+  String norm;
+  if (!guardedNormalize(path, norm, "open", ctx)) return File();
+
+  // Determine which permission the requested mode needs. "r" → read,
+  // anything else → edit (the underlying VFS::open with a write/append
+  // mode will create-or-truncate, which is an edit).
+  bool needsRead  = (mode != nullptr && mode[0] == 'r');
+  bool needsWrite = !needsRead;
+
+  if (needsRead && !canRead(norm, ctx)) {
+    logFsAccessDeny(norm, ctx, PERM_READ, "read");
+    return File();
+  }
+  if (needsWrite && !canEdit(norm, ctx)) {
+    // If the path doesn't exist yet, this is a create rather than an
+    // edit. Try canCreate as a fallback; the rule table author can grant
+    // CREATE without WRITE for "drop-in only" directories like
+    // /sd/g2_icon_animations.
+    if (!exists(norm)) {
+      if (!canCreate(norm, ctx)) {
+        logFsAccessDeny(norm, ctx, PERM_CREATE, "create");
+        return File();
+      }
+    } else {
+      // Existing file + no edit perm = denied
+      logFsAccessDeny(norm, ctx, PERM_WRITE, "edit");
+      return File();
+    }
+  }
+  return open(norm, mode, create);
+}
+
+bool existsGuarded(const String& path, const AuthContext& ctx) {
+  String norm;
+  if (!guardedNormalize(path, norm, "exists", ctx)) return false;
+  // exists() leaks information about whether a file is present; gate it
+  // behind READ. If you can't read the file, you can't probe its presence.
+  if (!canRead(norm, ctx)) {
+    logFsAccessDeny(norm, ctx, PERM_READ, "exists");
+    return false;
+  }
+  return exists(norm);
+}
+
+bool removeGuarded(const String& path, const AuthContext& ctx) {
+  String norm;
+  if (!guardedNormalize(path, norm, "remove", ctx)) return false;
+  if (!canDelete(norm, ctx)) {
+    logFsAccessDeny(norm, ctx, PERM_DELETE, "delete");
+    return false;
+  }
+  return remove(norm);
+}
+
+bool renameGuarded(const String& pathFrom, const String& pathTo, const AuthContext& ctx) {
+  String normFrom, normTo;
+  if (!guardedNormalize(pathFrom, normFrom, "rename(from)", ctx)) return false;
+  if (!guardedNormalize(pathTo,   normTo,   "rename(to)",   ctx)) return false;
+  // Rename requires RENAME on source AND CREATE on destination — moving a
+  // file into a directory you can't create in is denied.
+  if (!canRename(normFrom, ctx)) {
+    logFsAccessDeny(normFrom, ctx, PERM_RENAME, "rename");
+    return false;
+  }
+  if (!canCreate(normTo, ctx)) {
+    logFsAccessDeny(normTo, ctx, PERM_CREATE, "rename-dst");
+    return false;
+  }
+  return rename(normFrom, normTo);
+}
+
+bool mkdirGuarded(const String& path, const AuthContext& ctx) {
+  String norm;
+  if (!guardedNormalize(path, norm, "mkdir", ctx)) return false;
+  if (!canCreate(norm, ctx)) {
+    logFsAccessDeny(norm, ctx, PERM_CREATE, "mkdir");
+    return false;
+  }
+  return mkdir(norm);
+}
+
+bool rmdirGuarded(const String& path, const AuthContext& ctx) {
+  String norm;
+  if (!guardedNormalize(path, norm, "rmdir", ctx)) return false;
+  if (!canDelete(norm, ctx)) {
+    logFsAccessDeny(norm, ctx, PERM_DELETE, "rmdir");
+    return false;
+  }
+  return rmdir(norm);
+}
+
+// ============================================================================
+// systemAuth — explicit trusted-internal identity, per-call
+// ============================================================================
+// Constructed fresh on each call. The `reason` string is folded into the
+// AuthContext.path so that any [PERM] denial (which won't happen for
+// system, but the pattern stays consistent) and any future audit log
+// records why this code was running as system. Cheap — three String
+// assignments.
+AuthContext systemAuth(const char* reason) {
+  AuthContext ctx;
+  ctx.transport = SOURCE_INTERNAL;
+  ctx.user      = "system";
+  ctx.path      = reason ? String("system:") + reason : String("system:");
+  ctx.ip        = "local";
+  ctx.sid       = "";
+  ctx.opaque    = nullptr;
+  return ctx;
+}
+
 }  // namespace VFS
 
 // ============================================================================

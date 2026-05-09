@@ -1221,6 +1221,25 @@ static const char* cmd_bledisconnect(const String& argsInput) {
 }
 
 static const char* cmd_bleadv(const String& argsInput) {
+  // Optional argument: start (default) / stop / toggle. Toggle relies on
+  // startBLEAdvertising returning false when already advertising — same
+  // signal the legacy G2 tap handler used. No arg keeps back-compat with
+  // the original "start-only" form.
+  String a = argsInput; a.trim(); a.toLowerCase();
+  if (a == "stop") {
+    stopBLEAdvertising();
+    BLE_DEBUGF(DEBUG_BLE_CORE, "bleadv stop");
+    return "Advertising stopped";
+  }
+  if (a == "toggle") {
+    if (startBLEAdvertising()) {
+      BLE_DEBUGF(DEBUG_BLE_CORE, "bleadv toggle → start");
+      return "Advertising started";
+    }
+    stopBLEAdvertising();
+    BLE_DEBUGF(DEBUG_BLE_CORE, "bleadv toggle → stop");
+    return "Advertising stopped";
+  }
   if (startBLEAdvertising()) {
     BLE_DEBUGF(DEBUG_BLE_CORE, "bleadv manual trigger success");
     return "Advertising started";
@@ -1573,7 +1592,7 @@ const CommandEntry bluetoothCommands[] = {
   { "blename",      "Get/set BLE device name [name].",           false, cmd_blename },
   { "bletxpower",   "Get/set BLE TX power [0-7].",               false, cmd_bletxpower },
   { "bledisconnect","Disconnect current BLE client.",            false, cmd_bledisconnect },
-  { "bleadv",       "Start BLE advertising.",                    false, cmd_bleadv },
+  { "bleadv",       "Start/stop/toggle BLE advertising [start|stop|toggle].", false, cmd_bleadv, "Usage: bleadv [start|stop|toggle]" },
   { "blesend",      "Send message to BLE client: <message>.",    false, cmd_blesend },
   { "blestream",    "Control streaming: <on|off|sensors|system>.",false, cmd_blestream },
   { "bleevent",     "Send event to BLE client: <event>.",        false, cmd_bleevent },

@@ -913,6 +913,68 @@ size_t g2BuildCreateMixedListImage(uint8_t seq, uint32_t magic,
                          payload, pbLen, out, outCap);
 }
 
+// Forward decl — writeTextChildSpec is defined further down alongside
+// the multi-text builders. The image+text CREATE builder needs it now.
+static bool writeTextChildSpec(uint8_t* buf, size_t cap, size_t* pos,
+                               const G2TextChildSpec& spec);
+
+// Image + Text compound CREATE. See g2BuildCreateMixedImageTextPb in the
+// header for the design + independent-refresh contract. Body mirrors
+// g2BuildCreateMixedListImagePb with the ListObject swapped for a
+// TextObject (writeTextChildSpec — same helper used by the multi-text
+// builders below). f1=ContainerTotalNum=2; f3 emitted before f4 so the
+// text child sits before the image child on the wire.
+size_t g2BuildCreateMixedImageTextPb(uint32_t magic,
+                                     const G2TextChildSpec& textChild,
+                                     const G2ImageTile& imageTile,
+                                     uint32_t widgetId,
+                                     uint8_t* pbOut, size_t pbCap) {
+  if (!pbOut || pbCap == 0 || !imageTile.containerName) return 0;
+
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD,   G2_CMD_CREATE_STARTUP)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, 2)) return 0;
+
+  // TextObject (wrapper field 3). writeTextChildSpec is local-static in
+  // this .cpp; same helper used by the multi-text and list+text builders.
+  if (!writeTextChildSpec(pbOut, pbCap, &pos, textChild)) return 0;
+
+  // ImageObject (wrapper field 4) — identical to the list+image variant.
+  size_t imgStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, /*F_IMAGE_OBJ*/4, &imgStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 1, imageTile.x)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 2, imageTile.y)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 3, imageTile.w)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 4, imageTile.h)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 5, imageTile.containerId)) return 0;
+  if (!g2PbWriteString(pbOut, pbCap, &pos, 6, imageTile.containerName)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, imgStart)) return 0;
+
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+size_t g2BuildCreateMixedImageText(uint8_t seq, uint32_t magic,
+                                   const G2TextChildSpec& textChild,
+                                   const G2ImageTile& imageTile,
+                                   uint32_t widgetId,
+                                   uint8_t* out, size_t outCap) {
+  // 1 KB payload — same headroom as the list+image variant. Image-decl
+  // is fixed-size, text content is bounded by writeTextChildSpec internal
+  // limits, so 1 KB is generous.
+  uint8_t payload[1024];
+  size_t pbLen = g2BuildCreateMixedImageTextPb(magic, textChild, imageTile,
+                                                widgetId,
+                                                payload, sizeof(payload));
+  if (pbLen == 0) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pbLen, out, outCap);
+}
+
 // Per-child TextObject emitter for the multi-text builder. Same shape
 // as writeTextProperty/writeTextPropertyGeom but takes the CID + name
 // + content + geom from the spec instead of the file-static defaults.

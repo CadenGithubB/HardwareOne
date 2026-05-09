@@ -1129,13 +1129,13 @@ static void srSnipWriterTask(void* param) {
         continue;
       }
       String folder = srSnipGetFolder();
-      if (!VFS::exists(folder)) {
-        VFS::mkdir(folder);
+      if (!VFS::existsGuarded(folder, VFS::systemAuth("espsr.snip_writer_mkdir"))) {
+        VFS::mkdirGuarded(folder, VFS::systemAuth("espsr.snip_writer_mkdir"));
       }
       char fname[128];
       snprintf(fname, sizeof(fname), "%s/%s_%lu_%ld.wav",
                folder.c_str(), job.reason, (unsigned long)job.session_id, (long)job.cmd_id);
-      File f = VFS::open(fname, FILE_WRITE, true);
+      File f = VFS::openGuarded(fname, FILE_WRITE, VFS::systemAuth("espsr.snip_writer"), true);
       if (!f) {
         ERROR_SRF("SnipWriter: failed to open %s", fname);
         free(job.pcm);
@@ -1514,11 +1514,11 @@ static bool loadCommandsFileLocked(size_t& outAdded, size_t& outErrors) {
     return false;
   }
 
-  if (!VFS::exists(kESPSRCommandFile)) {
+  if (!VFS::existsGuarded(kESPSRCommandFile, VFS::systemAuth("espsr.commands_load"))) {
     return true;
   }
 
-  File f = VFS::open(kESPSRCommandFile, "r");
+  File f = VFS::openGuarded(kESPSRCommandFile, "r", VFS::systemAuth("espsr.commands_load"));
   if (!f) {
     return false;
   }
@@ -1555,8 +1555,8 @@ static bool saveCommandsFileLocked(size_t& outSaved) {
     return false;
   }
 
-  VFS::mkdir("/sd/ESPSR");
-  File f = VFS::open(kESPSRCommandFile, "w");
+  VFS::mkdirGuarded("/sd/ESPSR", VFS::systemAuth("espsr.commands_save_mkdir"));
+  File f = VFS::openGuarded(kESPSRCommandFile, "w", VFS::systemAuth("espsr.commands_save"), true);
   if (!f) {
     return false;
   }
@@ -2609,19 +2609,19 @@ void initESPSR() {
   bool folderCreated = false;
   
   if (VFS::isSDAvailable()) {
-    if (VFS::mkdir("/sd/ESPSR")) {
+    if (VFS::mkdirGuarded("/sd/ESPSR", VFS::systemAuth("espsr.init_mkdir"))) {
       INFO_SRF("Created /sd/ESPSR folder on SD card");
       folderCreated = true;
-    } else if (VFS::exists("/sd/ESPSR")) {
+    } else if (VFS::existsGuarded("/sd/ESPSR", VFS::systemAuth("espsr.init_mkdir"))) {
       DEBUG_SRF("/sd/ESPSR already exists");
       folderCreated = true;
     }
   }
-  
+
   if (!folderCreated) {
-    if (VFS::mkdir("/ESPSR")) {
+    if (VFS::mkdirGuarded("/ESPSR", VFS::systemAuth("espsr.init_mkdir"))) {
       INFO_SRF("Created /ESPSR folder on LittleFS");
-    } else if (VFS::exists("/ESPSR")) {
+    } else if (VFS::existsGuarded("/ESPSR", VFS::systemAuth("espsr.init_mkdir"))) {
       DEBUG_SRF("/ESPSR already exists on LittleFS");
     }
   }
@@ -2806,6 +2806,24 @@ void buildESPSRStatusJson(String& output) {
   doc["volumeDb"] = gSrLastVolumeDb;
   doc["vadState"] = gSrLastVadState;
   doc["micgain"] = gSettings.microphoneGain;
+  // Stack: FreeRTOS high-water mark = minimum *unused* stack left (in words).
+  // Peak depth estimate ≈ allocWords - hwmWords (upper bound since last reset).
+  doc["srTaskStackAllocWords"] = SR_STACK_WORDS;
+  doc["srTaskStackAllocBytes"] = (uint32_t)SR_STACK_WORDS * 4u;
+  if (gESPSRRunning && gSRTaskHandle) {
+    const UBaseType_t hwm = uxTaskGetStackHighWaterMark(gSRTaskHandle);
+    doc["srTaskStackHwmWords"] = (uint32_t)hwm;
+    doc["srTaskStackHwmBytes"] = (uint32_t)hwm * 4u;
+    const uint32_t usedWords =
+        (SR_STACK_WORDS > hwm) ? (uint32_t)(SR_STACK_WORDS - hwm) : 0u;
+    doc["srTaskStackPeakUsedBytesEst"] = usedWords * 4u;
+  } else {
+    doc["srTaskStackHwmWords"] = 0;
+    doc["srTaskStackHwmBytes"] = 0;
+    doc["srTaskStackPeakUsedBytesEst"] = 0;
+    doc["srTaskStackHwmNote"] =
+        "Run srstart; HWM resets when task is created. Sample after stress.";
+  }
   serializeJson(doc, output);
 }
 
@@ -2817,7 +2835,7 @@ static const char* setEnabledFromArgs(const String& argsInput) {
 const char* cmd_sr(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  return "Usage: sr <enable|start|stop|status|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>";
+  return "Usage: sr <enable|start|stop|status|stack|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>";
 }
 
 const char* cmd_sr_enable(const String& argsInput) {
@@ -2942,6 +2960,27 @@ const char* cmd_sr_status(const String& argsInput) {
   out = "";
   buildESPSRStatusJson(out);
   return out.c_str();
+}
+
+// Stack watermark for sr_task — run after wake/commands/G2 mic stress; see cmd_sr().
+static const char* cmd_sr_stack(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  (void)argsInput;
+  static char buf[224];
+  if (!gSRTaskHandle || !gESPSRRunning) {
+    return "sr_task: not running — use srstart first";
+  }
+  const UBaseType_t hwm = uxTaskGetStackHighWaterMark(gSRTaskHandle);
+  const uint32_t allocB = (uint32_t)SR_STACK_WORDS * 4u;
+  const uint32_t freeB = (uint32_t)hwm * 4u;
+  const uint32_t usedEst =
+      (SR_STACK_WORDS > hwm) ? (uint32_t)(SR_STACK_WORDS - hwm) * 4u : 0u;
+  snprintf(buf, sizeof(buf),
+           "sr_task: alloc=%uB est_peak_used=%uB hwm_free=%uB (%u words free). "
+           "Shrink SR_STACK_WORDS in System_TaskUtils.h only if hwm_free stays "
+           ">= ~25%% of alloc after your worst-case voice test.",
+           (unsigned)allocB, (unsigned)usedEst, (unsigned)freeB, (unsigned)hwm);
+  return buf;
 }
 
 // Voice control commands - these are handled specially in onVoiceCommandDetected
@@ -3863,11 +3902,12 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry espsrCommands[] = {
-  { "sr", "ESP-SR speech recognition commands.", false, cmd_sr, "Usage: sr <enable|start|stop|status|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>" },
+  { "sr", "ESP-SR speech recognition commands.", false, cmd_sr, "Usage: sr <enable|start|stop|status|stack|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>" },
   { "srenable", "Enable/disable ESP-SR (compile-time flag).", true, cmd_sr_enable, "Usage: srenable <0|1>" },
   { "opensr", "Start ESP-SR pipeline.", false, cmd_sr_start, "Usage: opensr" },
   { "closesr", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: closesr", "voice", "close" },
   { "srstatus", "Show ESP-SR status.", false, cmd_sr_status, "Usage: srstatus" },
+  { "srstack", "Show sr_task stack high-water mark (run after voice stress test).", false, cmd_sr_stack, "Usage: srstack" },
   { "srstart", "Start ESP-SR pipeline.", false, cmd_sr_start, "Usage: srstart" },
   { "srstop", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: srstop" },
   { "voicearm", "Arm voice command execution as the current authenticated user.", false, cmd_voice_arm_cli, "Usage: voicearm" },

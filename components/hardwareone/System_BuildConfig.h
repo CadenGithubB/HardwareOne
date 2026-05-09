@@ -167,6 +167,10 @@
 // Auto-disabled if ENABLE_BLUETOOTH=0.
 #define ENABLE_G2_GLASSES       1
 
+// VFS root for G2 animated icon packs (BMP frames): SD card (`/sd/...`).
+// Keeps pack data off LittleFS; requires SD mounted (web + lens picker use VFS).
+#define G2_ICON_ANIMATIONS_VFS_PATH "/sd/g2_icon_animations"
+
 
 // =============================================================================
 // 4. ON-DEVICE SUBSYSTEMS  —  Inference, voice, scheduling

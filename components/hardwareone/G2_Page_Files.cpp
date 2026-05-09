@@ -18,8 +18,14 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "G2_Glasses.h"
+#include "G2_HijackCmd.h"        // G2HijackCtxGuard — sets gExecAuthContext to pairedByUser
 #include "System_FileManager.h"
+#include "System_Filesystem.h"
 #include "System_Debug.h"
+
+extern AuthContext gExecAuthContext;
+
+#include <ArduinoJson.h>
 #include "esp_attr.h"   // EXT_RAM_BSS_ATTR
 
 // -----------------------------------------------------------------------------
@@ -32,16 +38,30 @@ static FileManager* gFilesFm = nullptr;
 // "header" rows (back, ..) plus FILE_MANAGER_MAX_CACHED_ITEMS data rows.
 #define FILES_MAX_ROWS  (FILE_MANAGER_MAX_CACHED_ITEMS + 4)
 #define FILES_ROW_LEN   48
+// Keep list placement visually stable across directories with very different
+// item counts. The firmware tends to vertically center short lists in a tall
+// container; padding to a fixed minimum row count keeps the first rows near
+// the same top-left position as you browse (/photos vs /sd, etc.).
+static constexpr size_t kFilesMinRenderRows = 8;
 
 // Row buffers in PSRAM — ~3.3 KB total. Filled by buildRows() from the
 // page worker, read by the BLE notify task; both run in regular task
 // context, no DMA / ISR access.
 EXT_RAM_BSS_ATTR static char        gFilesRows[FILES_MAX_ROWS][FILES_ROW_LEN];
 EXT_RAM_BSS_ATTR static const char* gFilesRowPtrs[FILES_MAX_ROWS];
+EXT_RAM_BSS_ATTR static char        gFilesPathTitleBuf[FILES_ROW_LEN];
 static size_t      gFilesRowCount = 0;
 
+// Mixed list+text layout: keep the path in a TextObject at top-right while
+// pinning the list to the top-left quadrant/half (not vertically centered).
+// LEFT_HALF is {8,8,280,272}, so row 0 starts near the top edge.
+static constexpr G2ContainerGeom kFilesListGeom = G2_GEOM_LEFT_HALF;
+// Text is top-left within its box — anchor the box on the right for "top right"
+// path readout without consuming a list row.
+static constexpr G2ContainerGeom kFilesPathGeom = { 280,   8, 288,  40 };
+
 // Indices we keep so taps know what idx → which directory entry. -1 = not a
-// real entry (back / parent / blank).
+// real entry (back / blank); -2 = parent row ".. (up)".
 EXT_RAM_BSS_ATTR static int  gFilesEntryForRow[FILES_MAX_ROWS];
 
 // File-info overlay duration. The deadline lives in the centralized
@@ -58,12 +78,36 @@ static const uint32_t kFileInfoOverlayMs = 2200;
 // the entry the user picked without a re-lookup.
 static bool      gFilesChooserActive = false;
 static FileEntry gFilesChooserEntry  = {};
+enum FilesChooserKind : uint8_t {
+  FILE_CHOOSER_BMP  = 0,
+  FILE_CHOOSER_JSON = 1,
+  FILE_CHOOSER_JPG  = 2,  // same chooser shape as BMP, but View/View
+                          //  Full dispatch through g2ShowJpgFile path
+                          //  (decode JPEG → 4-bpp BMP, then same wire
+                          //   transport as the BMP viewers).
+};
+static FilesChooserKind gFilesChooserKind = FILE_CHOOSER_BMP;
+
+// JSON text viewer state (mirrors Settings JSON flow: paged TEXT widget,
+// tap/scroll to advance, gesture/double-tap to exit back to Files list).
+#define FILES_JSON_MAX_PAGES         24
+#define FILES_JSON_PAGE_BODY_BUDGET  180
+static constexpr size_t kFilesJsonReadCapBytes = 12 * 1024;  // bounded heap use
+static String   gFilesJsonPages[FILES_JSON_MAX_PAGES];
+static size_t   gFilesJsonPageCount   = 0;
+static size_t   gFilesJsonCurrentPage = 0;
+static char     gFilesJsonTitle[FILES_ROW_LEN] = {0};
+static char     gFilesJsonPath[FILE_MANAGER_MAX_PATH + 32] = {0};
+static bool     gFilesJsonTruncated = false;
 
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
 
 static void filesOverlayExpired(G2OverlayKind kind);  // forward decl
+static void exitJsonViewBackToFiles();
+static void navJsonPage(G2TapKind kind);
+static bool renderCurrentJsonPage();
 
 static FileManager* ensureFm() {
   if (!gFilesFm) {
@@ -125,16 +169,9 @@ static size_t buildRows() {
   gFilesRowPtrs[row] = gFilesRows[row];
   row++;
 
-  // Row 1: path indicator (informational, no-op tap).
-  {
-    char shortPath[FILES_ROW_LEN];
-    truncateInto(shortPath, sizeof(shortPath), path, FILES_ROW_LEN - 6);
-    snprintf(gFilesRows[row], FILES_ROW_LEN, "@ %s", shortPath);
-    gFilesRowPtrs[row] = gFilesRows[row];
-    row++;
-  }
+  // Current path is shown via g2ShowMixedListText title (top-right), not here.
 
-  // Row 2: parent dir (skip when at root).
+  // Parent dir row (skip when at root).
   size_t parentRow = SIZE_MAX;
   if (!atRoot) {
     snprintf(gFilesRows[row], FILES_ROW_LEN, ".. (up)");
@@ -169,10 +206,20 @@ static size_t buildRows() {
     row++;
   }
 
-  if (row == (atRoot ? 2u : 3u)) {
+  if (row == (atRoot ? 1u : 2u)) {
     // No entries — show empty marker.
     snprintf(gFilesRows[row], FILES_ROW_LEN, "(empty)");
     gFilesRowPtrs[row] = gFilesRows[row];
+    row++;
+  }
+
+  // Pad with inert spacer rows so directories with only a few entries don't
+  // jump to a different vertical origin than dense directories.
+  while (row < kFilesMinRenderRows && row < FILES_MAX_ROWS) {
+    gFilesRows[row][0] = ' ';
+    gFilesRows[row][1] = '\0';
+    gFilesRowPtrs[row] = gFilesRows[row];
+    // gFilesEntryForRow[] is already initialized to -1 for no-op rows.
     row++;
   }
 
@@ -203,6 +250,51 @@ static bool isBmpFilename(const char* name) {
          (ext[3] == 'p' || ext[3] == 'P');
 }
 
+// Same shape for ".jpg" and ".jpeg". Both extensions accepted because
+// the camera-stream snapshot writes ".jpg" but a user might drop
+// either form on the SD card. Routes through the same View / View
+// Full chooser as BMP since the on-lens experience is identical
+// (g2ShowJpgFile / g2ShowJpgFileFullScreen do the JPEG → 4-bpp BMP
+// conversion before pushing through the same wire transport).
+static bool isJpgFilename(const char* name) {
+  if (!name) return false;
+  size_t n = strlen(name);
+  // ".jpg" — 4 chars
+  if (n >= 4) {
+    const char* ext = name + n - 4;
+    if ((ext[0] == '.') &&
+        (ext[1] == 'j' || ext[1] == 'J') &&
+        (ext[2] == 'p' || ext[2] == 'P') &&
+        (ext[3] == 'g' || ext[3] == 'G')) {
+      return true;
+    }
+  }
+  // ".jpeg" — 5 chars
+  if (n >= 5) {
+    const char* ext = name + n - 5;
+    if ((ext[0] == '.') &&
+        (ext[1] == 'j' || ext[1] == 'J') &&
+        (ext[2] == 'p' || ext[2] == 'P') &&
+        (ext[3] == 'e' || ext[3] == 'E') &&
+        (ext[4] == 'g' || ext[4] == 'G')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool isJsonFilename(const char* name) {
+  if (!name) return false;
+  size_t n = strlen(name);
+  if (n < 5) return false;
+  const char* ext = name + n - 5;
+  return (ext[0] == '.') &&
+         (ext[1] == 'j' || ext[1] == 'J') &&
+         (ext[2] == 's' || ext[2] == 'S') &&
+         (ext[3] == 'o' || ext[3] == 'O') &&
+         (ext[4] == 'n' || ext[4] == 'N');
+}
+
 // Build an absolute VFS path for the cached chooser entry. Joins the
 // FileManager's current directory with the entry name, collapsing the
 // duplicate slash when the dir is "/".
@@ -228,22 +320,187 @@ static void buildChooserPath(char* out, size_t cap) {
 // "View"      — small image at native 288×144 (top-left of the lens).
 // "View Full" — same source upscaled 2× to 576×288 via 4-tile push.
 // "Info"      — metadata page (name / size / type).
-static void showFileChooser(const FileEntry& e) {
+static void showFileChooser(const FileEntry& e, FilesChooserKind kind) {
   gFilesChooserEntry  = e;
   gFilesChooserActive = true;
+  gFilesChooserKind   = kind;
 
   static char title[FILES_ROW_LEN];
   snprintf(title, sizeof(title), "%s", e.name);
-  static const char* rows[5];
-  rows[0] = "<- Files";
-  rows[1] = title;       // header line so the user knows which file
-  rows[2] = "View";
-  rows[3] = "View Full"; // 2× upscale → 4-tile full-canvas
-  rows[4] = "Info";
-  g2ShowListPage(rows, 5);
+  if (kind == FILE_CHOOSER_BMP || kind == FILE_CHOOSER_JPG) {
+    static const char* rows[5];
+    rows[0] = "<- Files";
+    rows[1] = title;       // header line so the user knows which file
+    rows[2] = "View";
+    rows[3] = "View Full"; // 2x upscale -> 4-tile full-canvas
+    rows[4] = "Info";
+    g2ShowListPage(rows, 5);
+  } else {
+    static const char* rows[5];
+    rows[0] = "<- Files";
+    rows[1] = title;
+    rows[2] = "Pretty View";
+    rows[3] = "JSON View";
+    rows[4] = "Info";
+    g2ShowListPage(rows, 5);
+  }
   // No overlay — chooser is a deliberate stop, not a flash.
   g2LensClearOverlay();
-  DEBUG_G2F("[G2] Files: chooser shown for '%s'", e.name);
+  DEBUG_G2F("[G2] Files: chooser shown for '%s' (%s)", e.name,
+            kind == FILE_CHOOSER_BMP ? "bmp" : "json");
+}
+
+static size_t splitJsonIntoPages(const String& s) {
+  for (size_t i = 0; i < FILES_JSON_MAX_PAGES; i++) gFilesJsonPages[i] = "";
+  gFilesJsonTruncated = false;
+
+  size_t pageIdx = 0;
+  size_t lineStart = 0;
+  String current;
+  current.reserve(FILES_JSON_PAGE_BODY_BUDGET + 16);
+
+  const size_t total = s.length();
+  while (lineStart < total && pageIdx < FILES_JSON_MAX_PAGES) {
+    int lineEnd = s.indexOf('\n', lineStart);
+    if (lineEnd < 0) lineEnd = total;
+    const size_t lineLen = (size_t)lineEnd - lineStart + 1;  // include '\n'
+
+    if (current.length() > 0 &&
+        current.length() + lineLen > FILES_JSON_PAGE_BODY_BUDGET) {
+      gFilesJsonPages[pageIdx++] = current;
+      current = "";
+      if (pageIdx >= FILES_JSON_MAX_PAGES) break;
+    }
+
+    size_t copyLen = lineLen;
+    if (copyLen > FILES_JSON_PAGE_BODY_BUDGET) copyLen = FILES_JSON_PAGE_BODY_BUDGET;
+    current += s.substring(lineStart, lineStart + copyLen);
+    lineStart += copyLen;
+    if (copyLen < lineLen) continue;
+    lineStart = (size_t)lineEnd + 1;
+  }
+
+  if (current.length() > 0 && pageIdx < FILES_JSON_MAX_PAGES) {
+    gFilesJsonPages[pageIdx++] = current;
+  }
+  if (lineStart < total) gFilesJsonTruncated = true;
+  return pageIdx;
+}
+
+static bool renderCurrentJsonPage() {
+  if (gFilesJsonPageCount == 0 || gFilesJsonCurrentPage >= gFilesJsonPageCount) return false;
+
+  String body;
+  body.reserve(gFilesJsonPages[gFilesJsonCurrentPage].length() + 120);
+  body += gFilesJsonTitle;
+  if (gFilesJsonPageCount > 1) {
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), " [%u/%u] tap/scroll=nav, 2x-tap=exit\n",
+             (unsigned)(gFilesJsonCurrentPage + 1),
+             (unsigned)gFilesJsonPageCount);
+    body += hdr;
+  } else {
+    body += " - tap to back\n";
+  }
+  body += "--------------------\n";
+  body += gFilesJsonPages[gFilesJsonCurrentPage];
+  if (gFilesJsonTruncated && gFilesJsonCurrentPage == gFilesJsonPageCount - 1) {
+    body += "\n...\n[TRUNCATED: cap reached]\n";
+  }
+
+  return g2ShowTextPage(body.c_str(), G2_GEOM_LARGE,
+                        exitJsonViewBackToFiles,
+                        gFilesJsonPageCount > 1 ? navJsonPage : nullptr);
+}
+
+static void navJsonPage(G2TapKind kind) {
+  if (gFilesJsonPageCount == 0) return;
+  if (kind == G2_TAP_PAGE_PREV) {
+    gFilesJsonCurrentPage = (gFilesJsonCurrentPage == 0)
+                              ? gFilesJsonPageCount - 1
+                              : gFilesJsonCurrentPage - 1;
+  } else {
+    gFilesJsonCurrentPage = (gFilesJsonCurrentPage + 1) % gFilesJsonPageCount;
+  }
+  renderCurrentJsonPage();
+}
+
+static void clearJsonViewerState() {
+  for (size_t i = 0; i < gFilesJsonPageCount && i < FILES_JSON_MAX_PAGES; i++) {
+    gFilesJsonPages[i] = "";
+  }
+  gFilesJsonPageCount = 0;
+  gFilesJsonCurrentPage = 0;
+  gFilesJsonTitle[0] = '\0';
+  gFilesJsonPath[0] = '\0';
+  gFilesJsonTruncated = false;
+}
+
+static void exitJsonViewBackToFiles() {
+  clearJsonViewerState();
+  g2ShowFilesMenu();
+}
+
+static bool showJsonFileViaTextWidget(bool pretty) {
+  char path[FILE_MANAGER_MAX_PATH + 32];
+  buildChooserPath(path, sizeof(path));
+  if (!path[0]) return false;
+
+  if (!canRead(String(path), gExecAuthContext)) {
+    DEBUG_G2F("[G2] Files JSON: blocked by canRead '%s'", path);
+    return g2ShowTextPage("JSON viewer blocked: read permission denied.", G2_GEOM_LARGE,
+                          exitJsonViewBackToFiles, nullptr);
+  }
+
+  String raw;
+  if (!readTextLimited(path, raw, kFilesJsonReadCapBytes)) {
+    DEBUG_G2F("[G2] Files JSON: read failed '%s'", path);
+    return false;
+  }
+  const bool hitReadCap = raw.length() >= kFilesJsonReadCapBytes;
+
+  String display;
+  if (pretty) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, raw);
+    if (err) {
+      display = "// Pretty parse failed: ";
+      display += err.c_str();
+      display += "\n// Falling back to raw JSON text\n\n";
+      display += raw;
+      DEBUG_G2F("[G2] Files JSON: pretty parse failed '%s' (%s)",
+                path, err.c_str());
+    } else {
+      serializeJsonPretty(doc, display);
+    }
+  } else {
+    display = raw;
+  }
+
+  clearJsonViewerState();
+  strncpy(gFilesJsonPath, path, sizeof(gFilesJsonPath) - 1);
+  gFilesJsonPath[sizeof(gFilesJsonPath) - 1] = '\0';
+  const char* base = strrchr(path, '/');
+  base = base ? (base + 1) : path;
+  snprintf(gFilesJsonTitle, sizeof(gFilesJsonTitle), "%s%s",
+           pretty ? "Pretty " : "JSON ",
+           base);
+
+  gFilesJsonPageCount = splitJsonIntoPages(display);
+  if (gFilesJsonPageCount == 0) return false;
+  gFilesJsonCurrentPage = 0;
+  if (hitReadCap) gFilesJsonTruncated = true;
+
+  DEBUG_G2F("[G2] Files JSON: %s '%s' src=%uB cap=%uB pages=%u truncated=%d "
+            "(hard cap ~%u chars/page x %u pages)",
+            pretty ? "pretty" : "raw",
+            path, (unsigned)display.length(),
+            (unsigned)kFilesJsonReadCapBytes,
+            (unsigned)gFilesJsonPageCount,
+            gFilesJsonTruncated ? 1 : 0,
+            (unsigned)FILES_JSON_PAGE_BODY_BUDGET,
+            (unsigned)FILES_JSON_MAX_PAGES);
+  return renderCurrentJsonPage();
 }
 
 static void showFileInfo(const FileEntry& e) {
@@ -331,15 +588,29 @@ bool g2ShowFilesPage() {
 }
 
 void g2ShowFilesMenu() {
+  // Run all FS work under the paired-by user's identity. Without this,
+  // gExecAuthContext is whatever was last set (often empty on a fresh
+  // boot) and FileManager::navigate() denies every read as ANON.
+  G2HijackCtxGuard ctxGuard;
+
   // Whenever the real file list comes back up, the chooser is
   // unconditionally gone — covers the View/Info → Back path, the
   // post-BMP-dismiss callback, and any "redraw Files from main menu"
   // entry, all without each call site having to remember.
   gFilesChooserActive = false;
   size_t n = buildRows();
-  if (g2ShowListPage(gFilesRowPtrs, n)) {
+  const char* path = "/";
+  FileManager* fmMenu = ensureFm();
+  if (fmMenu) path = fmMenu->getCurrentPath();
+  // Shorten for the ~288 px-wide title strip (monospace-ish lens font).
+  truncateInto(gFilesPathTitleBuf, sizeof(gFilesPathTitleBuf), path, 36);
+
+  const G2TextChildSpec pathTitle = {
+      "filesPath", gFilesPathTitleBuf, 99, kFilesPathGeom, false };
+
+  if (g2ShowMixedListText(gFilesRowPtrs, n, kFilesListGeom, pathTitle)) {
     g2SetHijackPage(G2_HIJACK_PAGE_FILES);
-    DEBUG_G2F("[G2] Files menu shown (rows=%u)", (unsigned)n);
+    DEBUG_G2F("[G2] Files menu shown (list+path title, rows=%u)", (unsigned)n);
   } else {
     DEBUG_G2F("[G2] Files menu show FAILED");
   }
@@ -348,9 +619,13 @@ void g2ShowFilesMenu() {
 }
 
 void g2FilesHandleTap(uint32_t idx) {
+  // Same guard as g2ShowFilesMenu — every tap may navigate, view a
+  // file, or invoke the JSON viewer, all of which hit guarded VFS.
+  G2HijackCtxGuard ctxGuard;
+
   // Chooser dispatcher — runs ahead of every other path so the chooser
   // is the only consumer of taps while it's up. Rows: 0=<- Files,
-  // 1=filename header (no-op), 2=View, 3=View Full, 4=Info.
+  // 1=filename header (no-op), 2/3 action rows, 4=Info.
   if (gFilesChooserActive) {
     FileEntry cached = gFilesChooserEntry;
     if (idx == 0) {
@@ -360,27 +635,55 @@ void g2FilesHandleTap(uint32_t idx) {
       return;
     }
     if (idx == 2) {
-      // View → push BMP at native size. Worker fires g2ShowFilesMenu
-      // on dismiss so the file list comes back automatically.
-      char path[FILE_MANAGER_MAX_PATH + 32];
-      buildChooserPath(path, sizeof(path));
-      gFilesChooserActive = false;
-      DEBUG_G2F("[G2] Files: chooser View → '%s'", path);
-      if (!g2ShowBmpFile(path, &g2ShowFilesMenu)) {
-        DEBUG_G2F("[G2] Files: View dispatch failed — falling back to list");
-        g2ShowFilesMenu();
+      if (gFilesChooserKind == FILE_CHOOSER_BMP ||
+          gFilesChooserKind == FILE_CHOOSER_JPG) {
+        // View -> push at native 288×144. BMP path uses the file
+        // bytes directly; JPG path decodes via fmt2rgb888 first then
+        // shares the same wire transport.
+        char path[FILE_MANAGER_MAX_PATH + 32];
+        buildChooserPath(path, sizeof(path));
+        const bool isJpg = (gFilesChooserKind == FILE_CHOOSER_JPG);
+        gFilesChooserActive = false;
+        DEBUG_G2F("[G2] Files: chooser View -> '%s' (%s)",
+                  path, isJpg ? "JPG" : "BMP");
+        const bool ok = isJpg ? g2ShowJpgFile(path, &g2ShowFilesMenu)
+                              : g2ShowBmpFile(path, &g2ShowFilesMenu);
+        if (!ok) {
+          DEBUG_G2F("[G2] Files: View dispatch failed — falling back to list");
+          g2ShowFilesMenu();
+        }
+      } else {
+        gFilesChooserActive = false;
+        DEBUG_G2F("[G2] Files: chooser Pretty View -> '%s'", cached.name);
+        if (!showJsonFileViaTextWidget(/*pretty=*/true)) {
+          g2ShowFilesMenu();
+        }
       }
       return;
     }
     if (idx == 3) {
-      // View Full → 2× upscale to 576×288 via 4-tile push.
-      char path[FILE_MANAGER_MAX_PATH + 32];
-      buildChooserPath(path, sizeof(path));
-      gFilesChooserActive = false;
-      DEBUG_G2F("[G2] Files: chooser View Full → '%s'", path);
-      if (!g2ShowBmpFileFullScreen(path, &g2ShowFilesMenu)) {
-        DEBUG_G2F("[G2] Files: View Full dispatch failed — falling back to list");
-        g2ShowFilesMenu();
+      if (gFilesChooserKind == FILE_CHOOSER_BMP ||
+          gFilesChooserKind == FILE_CHOOSER_JPG) {
+        // View Full -> 2× upscale to 576×288 via 4-tile push. Same
+        // fork as View above.
+        char path[FILE_MANAGER_MAX_PATH + 32];
+        buildChooserPath(path, sizeof(path));
+        const bool isJpg = (gFilesChooserKind == FILE_CHOOSER_JPG);
+        gFilesChooserActive = false;
+        DEBUG_G2F("[G2] Files: chooser View Full -> '%s' (%s)",
+                  path, isJpg ? "JPG" : "BMP");
+        const bool ok = isJpg ? g2ShowJpgFileFullScreen(path, &g2ShowFilesMenu)
+                              : g2ShowBmpFileFullScreen(path, &g2ShowFilesMenu);
+        if (!ok) {
+          DEBUG_G2F("[G2] Files: View Full dispatch failed — falling back to list");
+          g2ShowFilesMenu();
+        }
+      } else {
+        gFilesChooserActive = false;
+        DEBUG_G2F("[G2] Files: chooser JSON View -> '%s'", cached.name);
+        if (!showJsonFileViaTextWidget(/*pretty=*/false)) {
+          g2ShowFilesMenu();
+        }
       }
       return;
     }
@@ -459,7 +762,11 @@ void g2FilesHandleTap(uint32_t idx) {
     // File tap → previewable types get the View/Info chooser; everything
     // else jumps straight to the metadata overlay (existing UX).
     if (isBmpFilename(e.name)) {
-      showFileChooser(e);
+      showFileChooser(e, FILE_CHOOSER_BMP);
+    } else if (isJpgFilename(e.name)) {
+      showFileChooser(e, FILE_CHOOSER_JPG);
+    } else if (isJsonFilename(e.name)) {
+      showFileChooser(e, FILE_CHOOSER_JSON);
     } else {
       showFileInfo(e);
     }

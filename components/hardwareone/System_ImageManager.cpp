@@ -121,8 +121,8 @@ bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
     if (!littleFSAvailable) return false;
     {
       FsLockGuard guard("ImageManager.ensureCaptureFolder.lfs");
-      if (!LittleFS.exists(folder)) {
-        if (LittleFS.mkdir(folder)) {
+      if (!VFS::existsGuarded(folder, VFS::systemAuth("imgmgr.ensure_capture_folder"))) {
+        if (VFS::mkdirGuarded(folder, VFS::systemAuth("imgmgr.ensure_capture_folder"))) {
           INFO_STORAGEF("[ImageManager] Created folder on LittleFS: %s", folder.c_str());
           return true;
         } else {
@@ -228,7 +228,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
       String lfsPath = getCaptureFolder(IMAGE_STORAGE_LITTLEFS) + "/" + filename;
       {
         FsLockGuard guard("ImageManager.saveImage.lfs_both");
-        File f = LittleFS.open(lfsPath, "w");
+        File f = VFS::openGuarded(lfsPath, "w", VFS::systemAuth("imgmgr.save_image_lfs"), true);
         if (f) {
           f.write(data, len);
           f.close();
@@ -279,7 +279,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     ensureCaptureFolder(IMAGE_STORAGE_LITTLEFS);
     {
       FsLockGuard guard("ImageManager.saveImage.lfs");
-      File f = LittleFS.open(fullPath, "w");
+      File f = VFS::openGuarded(fullPath, "w", VFS::systemAuth("imgmgr.save_image_lfs"), true);
       if (f) {
         f.write(data, len);
         f.close();
@@ -334,7 +334,7 @@ std::vector<ImageInfo> ImageManager::listImages(ImageStorageLocation location) {
     if (!littleFSAvailable) return images;
 
     FsLockGuard guard("ImageManager.listImages.lfs");
-    File dir = LittleFS.open(folder);
+    File dir = VFS::openGuarded(folder, "r", VFS::systemAuth("imgmgr.list_images"));
     if (!dir || !dir.isDirectory()) return images;
     
     File file = dir.openNextFile();
@@ -380,7 +380,7 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
   } else {
     if (!littleFSAvailable) return nullptr;
     FsLockGuard guard("ImageManager.getImage.open");
-    f = LittleFS.open(path);
+    f = VFS::openGuarded(path, "r", VFS::systemAuth("imgmgr.get_image"));
   }
   
   if (!f) return nullptr;
@@ -415,7 +415,7 @@ bool ImageManager::getImageInfo(const String& path, ImageInfo& info) {
   } else {
     if (!littleFSAvailable) return false;
     FsLockGuard guard("ImageManager.getImageInfo.open");
-    f = LittleFS.open(path);
+    f = VFS::openGuarded(path, "r", VFS::systemAuth("imgmgr.get_image_info"));
   }
   
   if (!f) return false;
@@ -440,7 +440,7 @@ bool ImageManager::deleteImage(const String& path) {
   } else {
     if (!littleFSAvailable) return false;
     FsLockGuard guard("ImageManager.deleteImage");
-    return LittleFS.remove(path);
+    return VFS::removeGuarded(path, VFS::systemAuth("imgmgr.delete_image"));
   }
 }
 

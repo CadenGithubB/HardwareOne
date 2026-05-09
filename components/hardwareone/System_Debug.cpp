@@ -5,6 +5,7 @@
 
 #include "System_BuildConfig.h"
 #include "System_Filesystem.h"
+#include "System_VFS.h"
 #include "OLED_ConsoleBuffer.h"
 #include "Bluetooth.h"
 #include "G2_Glasses.h"
@@ -192,7 +193,7 @@ void debugOutputTask(void* parameter) {
           gSystemLogEnabled && gSystemLogPath.length() > 0) {
         fsLock("debug.log");
         if (!gSystemLogFile) {
-          gSystemLogFile = LittleFS.open(gSystemLogPath.c_str(), "a");
+          gSystemLogFile = VFS::openGuarded(gSystemLogPath, "a", VFS::systemAuth("debug.system_log_append"), true);
           if (gSystemLogFile) {
             gSystemLogLastFlush = millis();
             gSystemLogUnflushedCount = 0;
@@ -887,6 +888,33 @@ const char* cmd_debugsensorsgeneral(const String& argsInput) {
   }
 }
 
+// Generic sub-flag handler shared by feature groups (G2, Camera, ...).
+// Toggles the bool setting + the bit, but does NOT aggregate to the parent
+// flag — granular sub-toggles let users light up "Capture only" without
+// dragging in unrelated noise. The DEBUG_<feature>_*F macros gate on
+// `DEBUG_<parent> | DEBUG_<sub>`, so the parent toggle still acts as a
+// master switch when desired.
+static const char* cmd_debugsubflag_impl(const String& argsInput, bool* settingPtr,
+                                         DebugFlagMask flagBit, const char* name) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char buf[96];
+  CommandArgs ca(argsInput);
+  String mode = ca.arg(1);
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = ca.argInt(0, 0);
+  if (modeTemp) {
+    if (v) setDebugFlag(flagBit);
+    else clearDebugFlag(flagBit);
+    snprintf(buf, sizeof(buf), "%s %s (runtime only)", name, v ? "enabled" : "disabled");
+    return buf;
+  }
+  setSetting(*settingPtr, (bool)(v != 0));
+  if (v) setDebugFlag(flagBit);
+  else clearDebugFlag(flagBit);
+  snprintf(buf, sizeof(buf), "%s %s (persistent)", name, *settingPtr ? "enabled" : "disabled");
+  return buf;
+}
+
 const char* cmd_debugcamera(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs ca(argsInput);
@@ -903,6 +931,19 @@ const char* cmd_debugcamera(const String& argsInput) {
     else clearDebugFlag(DEBUG_CAMERA);
     return gSettings.debugCamera ? "debugCamera enabled (persistent)" : "debugCamera disabled (persistent)";
   }
+}
+
+const char* cmd_debugcameralifecycle(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugCameraLifecycle, DEBUG_CAMERA_LIFECYCLE, "debugCameraLifecycle");
+}
+const char* cmd_debugcameracapture(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugCameraCapture, DEBUG_CAMERA_CAPTURE, "debugCameraCapture");
+}
+const char* cmd_debugcamerasettings(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugCameraSettings, DEBUG_CAMERA_SETTINGS, "debugCameraSettings");
+}
+const char* cmd_debugcameravideo(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugCameraVideo, DEBUG_CAMERA_VIDEO, "debugCameraVideo");
 }
 
 const char* cmd_debugmicrophone(const String& argsInput) {
@@ -1676,49 +1717,23 @@ const char* cmd_debugg2(const String& argsInput) {
   }
 }
 
-// G2 sub-flag handler. Mirrors cmd_debugllm_impl but does NOT aggregate
-// to the parent DEBUG_G2 — we deliberately want granular control here so
-// "Heartbeat only" doesn't drag in everything else parented under G2.
-// The DEBUG_G2_*F macros gate on `DEBUG_G2 | DEBUG_G2_<sub>`, so the
-// parent toggle still acts as a master switch when the user wants it.
-static const char* cmd_debugg2sub_impl(const String& argsInput, bool* settingPtr,
-                                       DebugFlagMask flagBit, const char* name) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  static char buf[96];
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(flagBit);
-    else clearDebugFlag(flagBit);
-    snprintf(buf, sizeof(buf), "%s %s (runtime only)", name, v ? "enabled" : "disabled");
-    return buf;
-  }
-  setSetting(*settingPtr, (bool)(v != 0));
-  if (v) setDebugFlag(flagBit);
-  else clearDebugFlag(flagBit);
-  snprintf(buf, sizeof(buf), "%s %s (persistent)", name, *settingPtr ? "enabled" : "disabled");
-  return buf;
-}
-
 const char* cmd_debugg2lifecycle(const String& a) {
-  return cmd_debugg2sub_impl(a, &gSettings.debugG2Lifecycle, DEBUG_G2_LIFECYCLE, "debugG2Lifecycle");
+  return cmd_debugsubflag_impl(a, &gSettings.debugG2Lifecycle, DEBUG_G2_LIFECYCLE, "debugG2Lifecycle");
 }
 const char* cmd_debugg2protocol(const String& a) {
-  return cmd_debugg2sub_impl(a, &gSettings.debugG2Protocol, DEBUG_G2_PROTOCOL, "debugG2Protocol");
+  return cmd_debugsubflag_impl(a, &gSettings.debugG2Protocol, DEBUG_G2_PROTOCOL, "debugG2Protocol");
 }
 const char* cmd_debugg2events(const String& a) {
-  return cmd_debugg2sub_impl(a, &gSettings.debugG2Events, DEBUG_G2_EVENTS, "debugG2Events");
+  return cmd_debugsubflag_impl(a, &gSettings.debugG2Events, DEBUG_G2_EVENTS, "debugG2Events");
 }
 const char* cmd_debugg2pages(const String& a) {
-  return cmd_debugg2sub_impl(a, &gSettings.debugG2Pages, DEBUG_G2_PAGES, "debugG2Pages");
+  return cmd_debugsubflag_impl(a, &gSettings.debugG2Pages, DEBUG_G2_PAGES, "debugG2Pages");
 }
 const char* cmd_debugg2heartbeat(const String& a) {
-  return cmd_debugg2sub_impl(a, &gSettings.debugG2Heartbeat, DEBUG_G2_HEARTBEAT, "debugG2Heartbeat");
+  return cmd_debugsubflag_impl(a, &gSettings.debugG2Heartbeat, DEBUG_G2_HEARTBEAT, "debugG2Heartbeat");
 }
 const char* cmd_debugg2dump(const String& a) {
-  return cmd_debugg2sub_impl(a, &gSettings.debugG2Dump, DEBUG_G2_DUMP, "debugG2Dump");
+  return cmd_debugsubflag_impl(a, &gSettings.debugG2Dump, DEBUG_G2_DUMP, "debugG2Dump");
 }
 #endif
 
@@ -2098,7 +2113,7 @@ const char* cmd_debugautotiming(const String& argsInput) {
 static inline void syncAuthParent()    { updateParentDebugFlag(DEBUG_AUTH,        gSettings.debugAuth        || gDebugSubFlags.authSessions   || gDebugSubFlags.authCookies    || gDebugSubFlags.authLogin      || gDebugSubFlags.authBootId); }
 static inline void syncHttpParent()    { updateParentDebugFlag(DEBUG_HTTP,        gSettings.debugHttp        || gDebugSubFlags.httpHandlers   || gDebugSubFlags.httpRequests   || gDebugSubFlags.httpResponses  || gDebugSubFlags.httpStreaming); }
 static inline void syncWifiParent()    { updateParentDebugFlag(DEBUG_WIFI,        gSettings.debugWifi        || gDebugSubFlags.wifiConnection || gDebugSubFlags.wifiConfig     || gDebugSubFlags.wifiScanning   || gDebugSubFlags.wifiDriver); }
-static inline void syncStorageParent() { updateParentDebugFlag(DEBUG_STORAGE,     gSettings.debugStorage     || gDebugSubFlags.storageFiles   || gDebugSubFlags.storageJson    || gDebugSubFlags.storageSettings || gDebugSubFlags.storageMigration); }
+static inline void syncStorageParent() { updateParentDebugFlag(DEBUG_STORAGE,     gSettings.debugStorage     || gDebugSubFlags.storageFiles   || gDebugSubFlags.storageJson    || gDebugSubFlags.storageSettings || gDebugSubFlags.storageMigration || gDebugSubFlags.storagePermissions); }
 static inline void syncSystemParent()  { updateParentDebugFlag(DEBUG_SYSTEM,      gSettings.debugSystem      || gDebugSubFlags.systemBoot     || gDebugSubFlags.systemConfig   || gDebugSubFlags.systemTasks    || gDebugSubFlags.systemHardware); }
 static inline void syncUsersParent()   { updateParentDebugFlag(DEBUG_USERS,       gSettings.debugUsers       || gDebugSubFlags.usersMgmt      || gDebugSubFlags.usersRegister  || gDebugSubFlags.usersQuery); }
 static inline void syncCliParent()     { updateParentDebugFlag(DEBUG_CLI,         gSettings.debugCli         || gDebugSubFlags.cliExecution   || gDebugSubFlags.cliQueue       || gDebugSubFlags.cliValidation); }
@@ -2269,6 +2284,10 @@ const char* getDebugCategoryName(DebugFlagMask flag) {
   if (flag & DEBUG_AUTO_TIMING) return "AUTO_TIME";
   if (flag & DEBUG_AUTOMATIONS) return "AUTO";
   if (flag & DEBUG_CAMERA) return "CAMERA";
+  if (flag & DEBUG_CAMERA_LIFECYCLE) return "CAMERA_LIFECYCLE";
+  if (flag & DEBUG_CAMERA_CAPTURE)   return "CAMERA_CAPTURE";
+  if (flag & DEBUG_CAMERA_SETTINGS)  return "CAMERA_SETTINGS";
+  if (flag & DEBUG_CAMERA_VIDEO)     return "CAMERA_VIDEO";
   if (flag & DEBUG_AUTO_SCHEDULER) return "AUTO_SCHED";
   if (flag & DEBUG_ESPNOW_ENCRYPTION) return "ESPNOW_ENC";
   // Bits 32-39: per-sensor device flags
@@ -2507,9 +2526,9 @@ const char* cmd_log(const String& argsInput) {
     int lastSlash = filepath.lastIndexOf('/');
     if (lastSlash > 0) {
       String dir = filepath.substring(0, lastSlash);
-      if (!LittleFS.exists(dir)) {
+      if (!VFS::existsGuarded(dir, VFS::systemAuth("debug.log_setup_mkdir"))) {
         fsLock("log.mkdir");
-        bool created = LittleFS.mkdir(dir);
+        bool created = VFS::mkdirGuarded(dir, VFS::systemAuth("debug.log_setup_mkdir"));
         fsUnlock();
         if (!created) {
           snprintf(gDebugBuffer, 1024, "Error: Failed to create directory: %s", dir.c_str());
@@ -2518,11 +2537,11 @@ const char* cmd_log(const String& argsInput) {
         broadcastOutput("Created directory: " + dir);
       }
     }
-    
+
     // Create file if needed
     fsLock("log.create");
-    if (!LittleFS.exists(filepath)) {
-      File f = LittleFS.open(filepath, "w");
+    if (!VFS::existsGuarded(filepath, VFS::systemAuth("debug.log_setup_create"))) {
+      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("debug.log_setup_create"), true);
       if (!f) {
         fsUnlock();
         snprintf(gDebugBuffer, 1024, "Error: Failed to create file: %s", filepath.c_str());
@@ -2716,6 +2735,24 @@ const char* cmd_debugstoragemigration(const String& argsInput) {
   syncStorageParent();
   if (modeTemp) return v ? "debugStorageMigration enabled (runtime only)" : "debugStorageMigration disabled (runtime only)";
   return gSettings.debugStorageMigration ? "debugStorageMigration enabled (persistent)" : "debugStorageMigration disabled (persistent)";
+}
+
+// [PERM] DENY audit toggle. Unlike the other Storage subflags, this one
+// gates an actual log line per call (logFsAccessDeny in System_Filesystem.cpp
+// checks gDebugSubFlags.storagePermissions before emitting). Defaults to
+// true. Mute with `debugstoragepermissions 0` if you want other Storage
+// debug on but don't want the denial audit trail.
+const char* cmd_debugstoragepermissions(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs ca(argsInput);
+  String mode = ca.arg(1);
+  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
+  int v = ca.argInt(0, 0);
+  gDebugSubFlags.storagePermissions = (v!=0);
+  if (!modeTemp) setSetting(gSettings.debugStoragePermissions, (bool)(v!=0));
+  syncStorageParent();
+  if (modeTemp) return v ? "debugStoragePermissions enabled (runtime only)" : "debugStoragePermissions disabled (runtime only)";
+  return gSettings.debugStoragePermissions ? "debugStoragePermissions enabled (persistent)" : "debugStoragePermissions disabled (persistent)";
 }
 
 // Low-level stack/heap trace toggle (bypasses debug queue, writes directly
@@ -3007,7 +3044,11 @@ const CommandEntry debugCommands[] = {
   { "debugbluetoothgatt", "Debug Bluetooth GATT operations.", true, cmd_debugbluetoothgatt, "Usage: debugbluetoothgatt <0|1> [temp|runtime]" },
   { "debugbluetoothdata", "Debug Bluetooth command/data path.", true, cmd_debugbluetoothdata, "Usage: debugbluetoothdata <0|1> [temp|runtime]" },
   { "debugsensorsgeneral", "Debug general sensor operations.", true, cmd_debugsensorsgeneral },
-  { "debugcamera", "Debug camera operations.", true, cmd_debugcamera },
+  { "debugcamera",          "Debug camera (parent flag).",                              true, cmd_debugcamera,          "Usage: debugcamera <0|1> [temp|runtime]" },
+  { "debugcameralifecycle", "Debug camera init/stop/PWDN-RESET/GPIO state.",            true, cmd_debugcameralifecycle, "Usage: debugcameralifecycle <0|1>" },
+  { "debugcameracapture",   "Debug captureFrame, JPEG validation, fb buffer, recovery.",true, cmd_debugcameracapture,   "Usage: debugcameracapture <0|1>" },
+  { "debugcamerasettings",  "Debug runtime camera resolution/quality changes.",         true, cmd_debugcamerasettings,  "Usage: debugcamerasettings <0|1>" },
+  { "debugcameravideo",     "Debug video recording start/finalize, frame writing.",     true, cmd_debugcameravideo,     "Usage: debugcameravideo <0|1>" },
   { "debugmicrophone", "Debug microphone operations.", true, cmd_debugmicrophone },
   { "debuggps", "Debug GPS sensor (PA1010D).", true, cmd_debuggps, "Usage: debuggps <0|1>" },
   { "debugrtc", "Debug RTC sensor (DS3231).", true, cmd_debugrtc, "Usage: debugrtc <0|1>" },
@@ -3079,6 +3120,7 @@ const CommandEntry debugCommands[] = {
   { "debugstoragejson", "Debug storage JSON.", true, cmd_debugstoragejson },
   { "debugstoragesettings", "Debug storage settings.", true, cmd_debugstoragesettings },
   { "debugstoragemigration", "Debug storage migration.", true, cmd_debugstoragemigration },
+  { "debugstoragepermissions", "Debug storage [PERM] DENY audit.", true, cmd_debugstoragepermissions },
   { "debugstack", "Low-level stack/heap trace to Serial: <on|off>.", true, cmd_debugstack },
   { "debugsystemboot", "Debug system boot.", true, cmd_debugsystemboot },
   { "debugsystemconfig", "Debug system config.", true, cmd_debugsystemconfig },
@@ -3319,7 +3361,7 @@ void systemLogAutoStart() {
   
   // Create the log file
   fsLock("debug.log");
-  File f = LittleFS.open(filepath.c_str(), "w");
+  File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("debug.log_autostart"), true);
   if (!f) {
     fsUnlock();
     broadcastOutput("[SYSTEM_LOG] Auto-start failed: Could not create file: " + filepath);

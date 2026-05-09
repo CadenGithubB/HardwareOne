@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package even_connect.g2.ota_transmit;
+
+// =============================================================================
+// OTA Transmit — payloads for sid=192..195.
+// =============================================================================
+// Firmware update transport. Same pattern as efs_transmit but with its own
+// sub-cmd / response enums.
+//
+// SID layout:
+//   192 (UX_OTA_TRANSMIT_CMD_ID)              — host→device OTA cmd channel
+//        carries eOTATransmitCID payloads (start/info/file/check/notify)
+//   193 (UX_OTA_TRANSMIT_RAW_DATA_ID)         — host→device firmware bytes
+//   194 (UX_OTA_EXPORT_FILE_CMD_ID)           — device→host log/file export cmds
+//   195 (UX_OTA_EXPORT_FILE_RAW_DATA_ID)      — device→host raw bytes
+//
+// Firmware coverage: transport is reachable (sid 192/193 routed) but no
+// OTA state-machine in firmware. Implementing OTA would require driving
+// the cmd sequence manually.
+
+enum eOTATransmitCID {
+  OTA_TRANSMIT_START        = 0;  // begin OTA session
+  OTA_TRANSMIT_INFORMATION  = 1;  // firmware version, total size, partition target
+  OTA_TRANSMIT_FILE         = 2;  // ack of raw firmware-byte chunks (on sid=193)
+  OTA_TRANSMIT_RESULT_CHECK = 3;  // final CRC verification
+  OTA_TRANSMIT_NOTIFY       = 4;  // device → host status push (e.g. UPDATING)
+}
+
+enum eOTATransmitRsp {
+  OTA_RECV_RSP_SUCCESS         = 0;
+  OTA_RECV_RSP_HEADER_ERR      = 1;
+  OTA_RECV_RSP_PATH_ERR        = 2;
+  OTA_RECV_RSP_CRC_ERR         = 3;
+  OTA_RECV_RSP_TIMEOUT         = 4;
+  OTA_RECV_RSP_NO_RESOURCES    = 5;
+  OTA_RECV_RSP_FLASH_WRITE_ERR = 6;
+  OTA_RECV_RSP_CHECK_FAIL      = 7;
+  OTA_RECV_RSP_UPDATING        = 8;  // pushed via NOTIFY
+  OTA_RECV_RSP_SYS_RESTART     = 9;  // device restarted to apply update
+  OTA_RECV_RSP_FAIL            = 10;
+}
+
+// Message bodies not reproduced — refer to ota_transmit.pb.dart.

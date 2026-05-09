@@ -137,6 +137,45 @@ bool initG2Client();
 void deinitG2Client();
 bool isG2ClientInitialized();
 
+// =============================================================================
+// Unified BLE connect worker (Group B, see docs/G2_REFACTOR_PROPOSAL.md)
+// =============================================================================
+// Single persistent task spawned in initG2Client() that drains a small queue
+// of BleConnectJob entries. Replaces the 5 distinct `xTaskCreate(*TaskBody)`
+// patterns (g2 connect/saved + ring connect/saved/mac) with one worker — the
+// 6 KB stack is paid ONCE at G2 init time, not transiently during connect
+// when internal DRAM is already tight.
+//
+// Public API for callers (g2Connect, g2RingConnect, etc.) stays unchanged;
+// internally those functions now build a BleConnectJob and call
+// g2SubmitBleConnect. The G2 family (G2_EYE/G2_SAVED) and Ring family
+// (RING_*) each maintain their own in-flight flag so producers serialize
+// per-family before submission — but at runtime, all kinds dispatch through
+// one worker, so a G2 connect and Ring connect run sequentially rather than
+// in parallel (intentional: BLE radio contention during overlapping connects
+// was a real source of failures).
+enum class BleConnectKind : uint8_t {
+  G2_EYE     = 0,   // single eye; uses `eye` field
+  G2_SAVED   = 1,   // both eyes from saved MACs
+  RING_SCAN  = 2,   // scan + connect any ring
+  RING_SAVED = 3,   // saved MAC reconnect (waits for glasses up first)
+  RING_MAC   = 4,   // direct MAC connect; uses `mac` field
+};
+
+struct BleConnectJob {
+  BleConnectKind kind;
+  uint8_t        eye;        // valid for G2_EYE only (cast from G2Eye)
+  char           mac[18];    // valid for RING_MAC only ("AA:BB:CC:DD:EE:FF\0")
+};
+
+// Heap-copies the job and pushes onto the BLE-connect queue. Returns false
+// if initG2Client() hasn't been called (queue not yet alive) or the queue
+// is full (some other connect is queued ahead). Caller should set its
+// per-family in-flight flag (gConnectTaskActive / gRingConnectTaskActive)
+// BEFORE calling this and clear it from the worker's dispatch only after
+// the underlying *Sync function returns.
+bool g2SubmitBleConnect(const BleConnectJob& job);
+
 // Connection management
 bool g2Connect(G2Eye eye = G2_EYE_LEFT);
 // Saved-MAC reconnect. Uses gSettings.bleGlasses{Left,Right}MAC and matches
@@ -390,6 +429,18 @@ bool g2ShowBmpFile(const char* path, void (*onDone)() = nullptr);
 // contract as g2ShowBmpFile.
 bool g2ShowBmpFileFullScreen(const char* path, void (*onDone)() = nullptr);
 
+// Same shape as g2ShowBmpFile / g2ShowBmpFileFullScreen but the source
+// is a JPEG file (e.g. snapshots saved by the camera-stream page to
+// /sd/PICTURES/cam_<ms>.jpg). The worker reads the JPEG, decodes via
+// img_converters.h::fmt2rgb888 to RGB888, downsamples + quantizes to a
+// 288×144 4-bpp grayscale BMP (same buildBmp4bppFromRgb888 path the
+// camera viewer uses), then pushes through the same wire transport as
+// the BMP viewers. Returns true on worker spawn, false on heap-low /
+// alloc fail. Requires ENABLE_CAMERA_SENSOR (the JPEG decoder lives
+// in the esp32-camera component).
+bool g2ShowJpgFile(const char* path, void (*onDone)() = nullptr);
+bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)() = nullptr);
+
 // Capture one camera frame, decode JPEG → grayscale, render in the
 // small 288×144 image container and hold until the user double-taps.
 // One-shot: there's no live-feed refresh and no single-tap recapture
@@ -407,6 +458,25 @@ bool g2ShowCameraViewer(void (*onDone)() = nullptr);
 // (firmware only emits DOUBLE_CLICK on image-only state). Returns
 // true if the worker spawned. `onDone` fires on stop / error.
 bool g2ShowCameraStream(void (*onDone)() = nullptr);
+
+// When the camera stream's "Settings >>" row is tapped, the worker sets
+// this flag and chains into g2ShowCameraSettingsMenu(). The settings
+// page's back-row handler checks this and, if set, RELAUNCHES the stream
+// instead of returning to the CAM detail page (so the user immediately
+// sees their setting changes apply on the live stream). Cleared by the
+// settings page after consuming, and at the top of g2CameraStreamWorker
+// so a fresh entry never inherits a stale flag.
+extern volatile bool g2CamStreamSettingsExitRelaunch;
+
+// MIC detail compound page entry / tap handler. Reached from
+// Sensors → MIC tap; spawns the live-text worker with a render fn
+// that does the initial list+text CREATE, then per-tick UPDATE_TEXT
+// (Cmd=5) on the readout child only — list child is never touched
+// after CREATE so row selection persists indefinitely. Tap handler
+// is registered on kMicDetailPage.handleTap and invoked by the
+// hijack-tap dispatcher when the active page is MIC_DETAIL.
+bool g2ShowMicDetail();
+void g2MicDetailHandleTap(uint32_t idx);
 
 // One-shot inter-fragment cadence override for the next sendPbFragmented
 // burst. 0 (or never calling) leaves the 20 ms default in place; any
@@ -519,6 +589,12 @@ enum G2HijackPage : uint8_t {
   // nullptr); navigated to programmatically. Stateful — each tap
   // cycles the targeted setting's value and re-renders.
   G2_HIJACK_PAGE_CAMERA_SETTINGS = 8,
+  // MIC detail compound page (list + live-readout text). Reached only
+  // via Sensors → MIC; hidden from the main hijack menu so the entry
+  // point is single-source. Drives a live readout via Cmd=5
+  // UPDATE_TEXT (per-widget data push, no REBUILD) so list-row
+  // selection persists across ticks — see g2ShowMicDetail.
+  G2_HIJACK_PAGE_MIC_DETAIL      = 9,
 };
 G2HijackPage g2GetHijackPage();
 void         g2SetHijackPage(G2HijackPage p);
@@ -856,6 +932,58 @@ const char* g2ProbeImageQ18MixedIcon();
 // mode (96×96 → ~1 fps vs 288×144 → 0.45 fps).
 const char* g2ProbeImageQ19SmallSolo();
 
+// Probe Q20 — same live pipeline as Q13 but 96×96 solo tile (~2 Cmd=3
+// fragments per frame). Moving horizontal bar; cadence `g2liverate`.
+// Isolates small-dim sustained refresh vs full-tile BLE cost.
+const char* g2ProbeImageQ20LiveTile96();
+
+// Probes Q22/Q23 — same live bar pattern as Q20 at 32×32 and 64×64
+// (Animated Icons test menu). Cadence `g2liverate`.
+const char* g2ProbeImageQ22LiveTile32();
+const char* g2ProbeImageQ23LiveTile64();
+// Q26 / Q27 — same moving-bar pattern at 124×124 and 144×144 (max solo tile).
+const char* g2ProbeImageQ26LiveTile124();
+const char* g2ProbeImageQ27LiveTile144();
+// Q24 — procedural 32×32 “slime” jump (20 key poses, looped; grayscale 4bpp).
+const char* g2ProbeImageQ24SlimeJump32();
+
+// Q25 — loop BMPs from a VFS directory: frame_00.bmp … frame_63.bmp max (4bpp,
+// |w|≤288, |h|≤144). Call g2ProbeImageQ25SetPackPath(G2_ICON_ANIMATIONS_VFS_PATH "/foo")
+// before spawning the probe worker (Test Suite → Choose icon pack).
+void        g2ProbeImageQ25SetPackPath(const char* dirPath);
+const char* g2ProbeImageQ25SdFrameAnimation();
+
+// Q28 — mixed image+text compound with INDEPENDENT refresh rates. CREATE
+// once with text top + image bottom-centered. Loop ~24 frames pushing
+// alternating procedural BMPs to the image child every ~750 ms; rebuild
+// the text child via single-child REBUILD-text every other frame.
+// Validates whether text REBUILD on a compound preserves an image
+// sibling (different-widget-types case — should pattern-match the
+// list+text verification). Gates a possible camera-stream + caption
+// productionisation. Standalone — does NOT touch the existing camera
+// stream worker.
+const char* g2ProbeImageQ28MixedImageTextLive();
+
+// Probe Q28L — list+image counterpart to Q28. Same image position
+// (240, 168), same 96×96 dim, same 750 ms cadence, but uses
+// g2BuildCreateMixedListImage (5-item list top + image bottom) instead
+// of g2BuildCreateMixedImageText. If the image renders in Q28L but
+// stays blank in Q28, the firmware-side rule is "image children only
+// composite when paired with a List parent, not Text" — actionable as
+// a workaround for caption-style use cases.
+const char* g2ProbeImageQ28LMixedListImageLive();
+
+// Load a single-tile 4bpp uncompressed BMP from VFS (any size up to 288×144).
+// Caller must free(*outData) with free() on success.
+bool g2ReadBmp4bppFromVfs(const char* vfsPath, uint8_t** outData, size_t* outLen,
+                          int32_t* outW, int32_t* outH, const char** outErr);
+
+// Probe Q21 — Q12-style 2×2 full-screen CREATE, then two update rounds:
+// round 0 paints all four tiles; round 1 re-pushes TL+BR only with
+// shifted corner markers (disjoint magic bands). Logs wall time per
+// round so you can compare multi-tile refresh vs Q13 single-tile rate.
+const char* g2ProbeImageQ21LiveFullScreenBurst();
+
 #else // !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
 
 // -----------------------------------------------------------------------------
@@ -937,6 +1065,21 @@ inline const char* g2ProbeImageQ16MixedSideBySide() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ17MixedOverlap()    { return "G2 disabled"; }
 inline const char* g2ProbeImageQ18MixedIcon()       { return "G2 disabled"; }
 inline const char* g2ProbeImageQ19SmallSolo()       { return "G2 disabled"; }
+inline const char* g2ProbeImageQ20LiveTile96()     { return "G2 disabled"; }
+inline const char* g2ProbeImageQ22LiveTile32()    { return "G2 disabled"; }
+inline const char* g2ProbeImageQ23LiveTile64()    { return "G2 disabled"; }
+inline const char* g2ProbeImageQ26LiveTile124()  { return "G2 disabled"; }
+inline const char* g2ProbeImageQ27LiveTile144()  { return "G2 disabled"; }
+inline const char* g2ProbeImageQ24SlimeJump32() { return "G2 disabled"; }
+inline void        g2ProbeImageQ25SetPackPath(const char*) {}
+inline const char* g2ProbeImageQ25SdFrameAnimation() { return "G2 disabled"; }
+inline const char* g2ProbeImageQ28MixedImageTextLive() { return "G2 disabled"; }
+inline const char* g2ProbeImageQ28LMixedListImageLive() { return "G2 disabled"; }
+inline bool g2ReadBmp4bppFromVfs(const char*, uint8_t**, size_t*, int32_t*, int32_t*,
+                                 const char**) {
+  return false;
+}
+inline const char* g2ProbeImageQ21LiveFullScreenBurst() { return "G2 disabled"; }
 
 #endif // ENABLE_BLUETOOTH
 

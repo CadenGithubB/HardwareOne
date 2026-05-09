@@ -11,6 +11,9 @@
 #include <ArduinoJson.h>
 #include "System_MemUtil.h"
 #include <LittleFS.h>
+#include "System_VFS.h"
+
+extern AuthContext gExecAuthContext;
 
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
@@ -176,7 +179,7 @@ static int buildRemoteMenuItems(UnifiedMenuItem* items, int maxItems, const uint
   char manifestPathBuf[64];
   snprintf(manifestPathBuf, sizeof(manifestPathBuf), "/system/manifests/%s.json", fwHashHex);
   String manifestPath = manifestPathBuf;
-  if (!LittleFS.exists(manifestPath.c_str())) {
+  if (!VFS::existsGuarded(manifestPath, gExecAuthContext)) {
     // No cached manifest - add placeholder items based on capability summary
     CapabilitySummary& cap = gEspNow->lastRemoteCap;
     
@@ -217,9 +220,9 @@ static int buildRemoteMenuItems(UnifiedMenuItem* items, int maxItems, const uint
   }
   
   // Parse cached manifest for CLI modules - create submenu entries per module
-  File f = LittleFS.open(manifestPath.c_str(), "r");
+  File f = VFS::openGuarded(manifestPath, "r", gExecAuthContext);
   if (!f) return count;
-  
+
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, f);
   f.close();
@@ -288,7 +291,7 @@ static void buildSubmenuForModule(const char* moduleName, bool isRemote) {
     char manifestPathBuf[64];
   snprintf(manifestPathBuf, sizeof(manifestPathBuf), "/system/manifests/%s.json", fwHashHex);
   String manifestPath = manifestPathBuf;
-    File f = LittleFS.open(manifestPath.c_str(), "r");
+    File f = VFS::openGuarded(manifestPath, "r", gExecAuthContext);
     if (f) {
       PSRAM_JSON_DOC(doc);
       DeserializationError err = deserializeJson(doc, f);

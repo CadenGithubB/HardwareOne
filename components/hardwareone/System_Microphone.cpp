@@ -10,7 +10,7 @@
 
 #include <Arduino.h>
 #include <driver/i2s_pdm.h>
-#include <LittleFS.h>
+#include "System_VFS.h"
 #include "System_MemUtil.h"
 #include "System_Debug.h"
 #include "System_TaskUtils.h"
@@ -19,6 +19,8 @@
 #include "System_Settings.h"
 #include "System_I2C.h"
 #include "System_Microphone_OLED.h"
+
+extern AuthContext gExecAuthContext;
 
 // XIAO ESP32S3 Sense PDM Microphone Pins
 #define MIC_PDM_CLK_PIN     42        // PDM CLK (GPIO42 on XIAO Sense)
@@ -35,8 +37,18 @@ static i2s_chan_handle_t rx_handle = NULL;
 // Buffer for audio capture
 #define AUDIO_BUFFER_SIZE     1024
 #define RECORDING_CHUNK_SIZE  4096
-#define RECORDINGS_FOLDER     "/recordings"
 #define MAX_RECORDING_SEC     60
+
+// Defaults: new recordings go to SD when writable; legacy/internal copies may remain on LittleFS.
+static const char kMicRecLittleFS[] = "/recordings";
+static const char kMicRecSD[]       = "/sd/recordings";
+
+static String micPrimaryRecordingsFolder() {
+  if (VFS::isSDWritable()) {
+    return String(kMicRecSD);
+  }
+  return String(kMicRecLittleFS);
+}
 
 // Microphone state
 bool gMicEnabled = false;
@@ -298,13 +310,13 @@ bool startRecording() {
     return false;
   }
   
-  // Ensure recordings folder exists
-  DEBUG_MICF("[MIC_START_REC] Checking recordings folder: %s", RECORDINGS_FOLDER);
+  String recDir = micPrimaryRecordingsFolder();
+  DEBUG_MICF("[MIC_START_REC] Checking recordings folder: %s", recDir.c_str());
   {
     FsLockGuard fsGuard("mic.record.mkdir");
-    if (!LittleFS.exists(RECORDINGS_FOLDER)) {
+    if (!VFS::existsGuarded(recDir, gExecAuthContext)) {
       DEBUG_MICF("[MIC_START_REC] Creating recordings folder...");
-      bool created = LittleFS.mkdir(RECORDINGS_FOLDER);
+      bool created = VFS::mkdirGuarded(recDir, gExecAuthContext);
       DEBUG_MICF("[MIC_START_REC] mkdir returned: %d", created);
     } else {
       DEBUG_MICF("[MIC_START_REC] Recordings folder exists");
@@ -312,14 +324,14 @@ bool startRecording() {
   }
   
   // Generate filename with timestamp
-  snprintf(currentRecordingPath, sizeof(currentRecordingPath), 
-           "%s/rec_%lu.wav", RECORDINGS_FOLDER, millis());
+  snprintf(currentRecordingPath, sizeof(currentRecordingPath),
+           "%s/rec_%lu.wav", recDir.c_str(), (unsigned long)millis());
   DEBUG_MICF("[MIC_START_REC] Recording path: %s", currentRecordingPath);
   
   DEBUG_MICF("[MIC_START_REC] Opening file for write...");
   {
     FsLockGuard fsGuard("mic.record.open");
-    recordingFile = LittleFS.open(currentRecordingPath, "w");
+    recordingFile = VFS::openGuarded(String(currentRecordingPath), "w", gExecAuthContext, true);
   }
   if (!recordingFile) {
     DEBUG_MICF("[MIC_START_REC] *** FAILED to create file! ***");
@@ -396,51 +408,59 @@ void stopRecording() {
 
 int getRecordingCount() {
   FsLockGuard fsGuard("mic.record.count");
-  if (!LittleFS.exists(RECORDINGS_FOLDER)) return 0;
-  
   int count = 0;
-  File dir = LittleFS.open(RECORDINGS_FOLDER);
-  if (dir && dir.isDirectory()) {
-    File f = dir.openNextFile();
-    while (f) {
-      if (!f.isDirectory() && String(f.name()).endsWith(".wav")) {
-        count++;
-      }
-      f = dir.openNextFile();
+  String seen = ",";
+  auto walk = [&](const String& folder) {
+    if (!VFS::existsGuarded(folder, gExecAuthContext)) return;
+    File dir = VFS::openGuarded(folder, "r", gExecAuthContext);
+    if (!dir || !dir.isDirectory()) return;
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+      if (f.isDirectory()) continue;
+      String name = f.name();
+      if (!name.endsWith(".wav")) continue;
+      String token = "," + name + ",";
+      if (seen.indexOf(token) >= 0) continue;
+      seen += name + ",";
+      count++;
     }
-  }
+  };
+  walk(String(kMicRecSD));
+  walk(String(kMicRecLittleFS));
   return count;
 }
 
 String getRecordingsList() {
   String list = "";
   FsLockGuard fsGuard("mic.record.list");
-  if (!LittleFS.exists(RECORDINGS_FOLDER)) return list;
-  
-  File dir = LittleFS.open(RECORDINGS_FOLDER);
-  if (dir && dir.isDirectory()) {
-    File f = dir.openNextFile();
-    while (f) {
-      if (!f.isDirectory() && String(f.name()).endsWith(".wav")) {
-        if (list.length() > 0) list += ",";
-        char entryBuf[80];
-        snprintf(entryBuf, sizeof(entryBuf), "%s:%d", f.name(), (int)f.size());
-        list += entryBuf;
-      }
-      f = dir.openNextFile();
+  String seen = ",";
+  auto walk = [&](const String& folder) {
+    if (!VFS::existsGuarded(folder, gExecAuthContext)) return;
+    File dir = VFS::openGuarded(folder, "r", gExecAuthContext);
+    if (!dir || !dir.isDirectory()) return;
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+      if (f.isDirectory()) continue;
+      String name = f.name();
+      if (!name.endsWith(".wav")) continue;
+      String token = "," + name + ",";
+      if (seen.indexOf(token) >= 0) continue;
+      seen += name + ",";
+      if (list.length() > 0) list += ",";
+      char entryBuf[80];
+      snprintf(entryBuf, sizeof(entryBuf), "%s:%d", name.c_str(), (int)f.size());
+      list += entryBuf;
     }
-  }
+  };
+  walk(String(kMicRecSD));
+  walk(String(kMicRecLittleFS));
   return list;
 }
 
 bool deleteRecording(const char* filename) {
-  char pathBuf[128];
-  snprintf(pathBuf, sizeof(pathBuf), "%s/%s", RECORDINGS_FOLDER, filename);
-  String path = pathBuf;
+  String sdPath = String(kMicRecSD) + "/" + filename;
+  String lfPath = String(kMicRecLittleFS) + "/" + filename;
   FsLockGuard fsGuard("mic.record.delete");
-  if (LittleFS.exists(path)) {
-    return LittleFS.remove(path);
-  }
+  if (VFS::existsGuarded(sdPath, gExecAuthContext)) return VFS::removeGuarded(sdPath, gExecAuthContext);
+  if (VFS::existsGuarded(lfPath, gExecAuthContext)) return VFS::removeGuarded(lfPath, gExecAuthContext);
   return false;
 }
 
@@ -941,24 +961,27 @@ const char* cmd_micdelete(const String& argsInput) {
   }
   
   if (arg.equalsIgnoreCase("all")) {
-    if (!LittleFS.exists(RECORDINGS_FOLDER)) {
-      return "No recordings folder";
-    }
-    int deleted = 0;
-    File dir = LittleFS.open(RECORDINGS_FOLDER);
-    if (dir && dir.isDirectory()) {
+    auto wipeWavs = [](const char* folder) -> int {
+      int deleted = 0;
+      if (!VFS::existsGuarded(folder, gExecAuthContext)) return 0;
+      File dir = VFS::openGuarded(String(folder), "r", gExecAuthContext);
+      if (!dir || !dir.isDirectory()) return 0;
       File f = dir.openNextFile();
       while (f) {
         String name = f.name();
+        bool isWav = name.endsWith(".wav");
         f.close();
-        if (name.endsWith(".wav")) {
-          char pathBuf[64];
-          snprintf(pathBuf, sizeof(pathBuf), "%s/%s", RECORDINGS_FOLDER, name.c_str());
-          String path = pathBuf;
-          if (LittleFS.remove(path)) deleted++;
+        if (isWav) {
+          String path = String(folder) + "/" + name;
+          if (VFS::removeGuarded(path, gExecAuthContext)) deleted++;
         }
         f = dir.openNextFile();
       }
+      return deleted;
+    };
+    int deleted = wipeWavs(kMicRecSD) + wipeWavs(kMicRecLittleFS);
+    if (deleted == 0) {
+      return "No recordings found";
     }
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Deleted %d recording(s)", deleted);
     return gMicCmdBuffer;

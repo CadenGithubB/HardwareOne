@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package even_connect.g2.efs_transmit;
+
+// =============================================================================
+// Even File Service — payloads for sid=196..199.
+// =============================================================================
+// Generic file transfer subsystem. Used for:
+//   - Android JSON notifications pushed to the glasses (file type
+//     ANDROID_MSG_JSON_NOTIFICATION = 1)
+//   - Whitelist config (NOTIFICATION_JSON_WHITELIST = 0)
+//   - Arbitrary "other" files (OTHER_FILE = 170)
+//
+// SID layout:
+//   196 (UX_EVEN_FILE_SERVICE_CMD_SEND_ID)        — host→device file send cmds
+//        carries eEvenFileSendServiceCID payloads (start/data/result-check)
+//   197 (UX_EVEN_FILE_SERVICE_RAW_SEND_DATA_ID)   — host→device raw bytes
+//   198 (UX_EVEN_FILE_SERVICE_CMD_EXPORT_ID)      — device→host file export cmds
+//        carries eEvenFileExportServiceCID payloads
+//   199 (UX_EVEN_FILE_SERVICE_RAW_EXPORT_DATA_ID) — device→host raw bytes
+//
+// Firmware coverage (G2_Glasses.cpp:438-569): the "send" half is wired up
+// for notification push. CRC32 of the payload is computed at the file-data
+// level (in addition to the per-envelope CRC16 at the transport layer).
+
+enum eEvenFileServiceType {
+  NOTIFICATION_JSON_WHITELIST   = 0;
+  ANDROID_MSG_JSON_NOTIFICATION = 1;
+  OTHER_FILE                    = 170;
+}
+
+enum eEvenFileServiceRsp {
+  EVEN_FILE_SERVICE_RSP_SUCCESS           = 0;
+  EVEN_FILE_SERVICE_RSP_START_ERR         = 1;
+  EVEN_FILE_SERVICE_RSP_DATA_CRC_ERR      = 2;
+  EVEN_FILE_SERVICE_RSP_FLASH_WRITE_ERR   = 3;
+  EVEN_FILE_SERVICE_RSP_TIMEOUT           = 4;
+  EVEN_FILE_SERVICE_RSP_NO_RESOURCES      = 5;
+  EVEN_FILE_SERVICE_RSP_RESULT_CHECK_FAIL = 6;
+  EVEN_FILE_SERVICE_RSP_FAIL              = 7;
+}
+
+// Sub-cmds carried on sid=196 (host→device send phase).
+enum eEvenFileSendServiceCID {
+  EVEN_FILE_SERVICE_CMD_SEND_START        = 0;  // metadata: type, total len, CRC32
+  EVEN_FILE_SERVICE_CMD_SEND_DATA         = 1;  // ack of raw data chunks
+  EVEN_FILE_SERVICE_CMD_SEND_RESULT_CHECK = 2;  // final CRC + result
+}
+
+// Sub-cmds carried on sid=198 (device→host export phase).
+enum eEvenFileExportServiceCID {
+  EVEN_FILE_SERVICE_CMD_EXPORT_START        = 0;
+  EVEN_FILE_SERVICE_CMD_EXPORT_DATA         = 1;
+  EVEN_FILE_SERVICE_CMD_EXPORT_RESULT_CHECK = 2;
+}
+
+// Message bodies (EvenFileServiceCmdSendStart, EvenFileServiceCmdSendData,
+// etc.) are not reproduced here — refer to efs_transmit.pb.dart.

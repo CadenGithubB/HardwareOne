@@ -18,6 +18,9 @@
 #include "System_I2C.h"
 #include "System_Command.h"
 #include "System_TaskUtils.h"
+#include "System_VFS.h"
+
+extern AuthContext gExecAuthContext;
 
 #if ENABLE_GPS_SENSOR
 #include <Adafruit_GPS.h>
@@ -583,14 +586,14 @@ static void scanTrackFiles() {
   const char* dirs[] = {"/logging_captures", "/logging_captures/tracks"};
   
   for (int d = 0; d < 2 && gTrackFileCount < 8; d++) {
-    File root = LittleFS.open(dirs[d]);
+    File root = VFS::openGuarded(dirs[d], "r", gExecAuthContext);
     if (!root || !root.isDirectory()) continue;
-    
+
     File file = root.openNextFile();
     while (file && gTrackFileCount < 8) {
       if (!file.isDirectory()) {
         // Check if file has GPS data
-        File check = LittleFS.open(file.path(), "r");
+        File check = VFS::openGuarded(file.path(), "r", gExecAuthContext);
         if (check) {
           bool hasGPS = false;
           for (int i = 0; i < 15 && check.available(); i++) {
@@ -1437,20 +1440,31 @@ static void executeSubmenuAction(int submenuType, int action) {
           }
           break;
         case 4:  // Live Track - toggle
-          if (GPSTrackManager::isLiveTracking()) {
-            GPSTrackManager::setLiveTracking(false);
-            executeCommandThroughRegistry("sensorlog stop");
-          } else {
-            // Auto-start GPS sensor if not running
-            if (!gGpsEnabled) {
-              executeCommandThroughRegistry("opengps");
+          // Phase 4: switched from executeCommandThroughRegistry (which
+          // dispatches without setting gExecAuthContext, leaking
+          // whichever transport set it last) to executeOLEDCommand
+          // (which builds a proper SOURCE_LOCAL_DISPLAY AuthContext
+          // and goes through the cmd_exec queue). This makes the
+          // permission decisions in `sensorlog start` and friends
+          // correctly attributed to the local-display user, and any
+          // future per-user file write rule will Just Work.
+          {
+            extern void executeOLEDCommand(const String& argsInput);
+            if (GPSTrackManager::isLiveTracking()) {
+              GPSTrackManager::setLiveTracking(false);
+              executeOLEDCommand("sensorlog stop");
+            } else {
+              // Auto-start GPS sensor if not running
+              if (!gGpsEnabled) {
+                executeOLEDCommand("opengps");
+              }
+              GPSTrackManager::clearTrack();
+              GPSTrackManager::setLiveTracking(true);
+              // Auto-start file logging in track format so data persists
+              executeOLEDCommand("sensorlog format track");
+              executeOLEDCommand("sensorlog sensors gps");
+              executeOLEDCommand("sensorlog start /logging_captures/tracks/live.csv 1000");
             }
-            GPSTrackManager::clearTrack();
-            GPSTrackManager::setLiveTracking(true);
-            // Auto-start file logging in track format so data persists
-            executeCommandThroughRegistry("sensorlog format track");
-            executeCommandThroughRegistry("sensorlog sensors gps");
-            executeCommandThroughRegistry("sensorlog start /logging_captures/tracks/live.csv 1000");
           }
           break;
         case 5:  // Save Track

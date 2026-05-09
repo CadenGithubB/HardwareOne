@@ -89,6 +89,14 @@ struct BlePeerData {
   String mac1;
   String mac2;        // empty unless macCount==2
   bool   autoConnect;
+  // Username of whoever first paired this peer (turned autoConnect on
+  // or saved the MAC). Used by callers that act *on behalf of* the
+  // peer — most notably G2_HijackCmd, which needs an AuthContext.user
+  // when submitting tap-driven commands through cmd_exec. Stamped once
+  // by bleStampPairedByIfBlank and never overwritten in-session; to
+  // re-assign ownership, clear the peer (bondrm or settings edit).
+  // When blank, callers should treat the action as unauthenticated.
+  String pairedByUser;
 };
 
 extern BlePeerData gBlePeerData[BLE_PEER_MAX];

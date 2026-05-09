@@ -62,6 +62,11 @@ void g2ShowSensorsMenu();
 // sensors landing list.
 void g2ReshowSensorsDetail();
 
+#if ENABLE_CAMERA_SENSOR
+// Register UI refresh after async camera power ops (call once from G2 init).
+void g2RegisterSensorsCameraPowerHook();
+#endif
+
 // Tap dispatcher for the Sensors landing list and its sub-menu. Routes
 // based on which level we're at (gSensorsLevel internal to the
 // implementation).
@@ -75,6 +80,9 @@ inline void g2BuildSensorList(char* out, size_t cap) {
 inline bool g2ShowSensorList() { return false; }
 inline void g2ShowSensorsMenu() {}
 inline void g2ReshowSensorsDetail() {}
+#if ENABLE_CAMERA_SENSOR
+inline void g2RegisterSensorsCameraPowerHook() {}
+#endif
 inline void g2SensorsHandleTap(uint32_t /*idx*/) {}
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
