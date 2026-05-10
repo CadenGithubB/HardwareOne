@@ -1631,7 +1631,7 @@ const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoo
 const SettingEntry bluetoothSettingsEntries[] = {
   { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bluetoothAutoStart,    true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "bleautostart" },
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
-  { "bluetoothDeviceName",   SETTING_STRING, &gSettings.bleDeviceName,         true, 0, nullptr, 0, 0, "Device Name", nullptr },
+  { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, true, 0, nullptr, 0, 0, "Device Name", nullptr, false, nullptr, nullptr },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            true, 3, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
   { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", nullptr, false, nullptr, "blemode" }
 };
@@ -1642,10 +1642,10 @@ const size_t bluetoothSettingsCount = sizeof(bluetoothSettingsEntries) / sizeof(
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule bluetoothSettingsModule = {
   "bluetooth",
-  "bluetooth",
+  "network.bluetooth",
   bluetoothSettingsEntries,
   bluetoothSettingsCount,
-  nullptr,
+  isBLERunning,
   "Bluetooth classic and BLE settings"
 };
 

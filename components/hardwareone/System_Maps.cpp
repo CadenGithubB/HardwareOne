@@ -299,21 +299,21 @@ bool MapCore::loadMapFile(const char* path) {
   FsLockGuard fsGuard("MapCore.loadMapFile");
   
   if (!VFS::existsGuarded(path, gExecAuthContext)) {
-    WARN_SENSORSF("Map file not found: %s", path);
+    WARN_MAPSF("Map file not found: %s", path);
     gSensorPollingPaused = wasPaused;
     return false;
   }
 
   File f = VFS::openGuarded(path, "r", gExecAuthContext);
   if (!f) {
-    ERROR_SENSORSF("Failed to open map file: %s", path);
+    ERROR_MAPSF("Failed to open map file: %s", path);
     gSensorPollingPaused = wasPaused;
     return false;
   }
   
   size_t fileSize = f.size();
   if (fileSize < sizeof(HWMapHeader)) {
-    ERROR_SENSORSF("Map file too small: %zu bytes", fileSize);
+    ERROR_MAPSF("Map file too small: %zu bytes", fileSize);
     f.close();
     gSensorPollingPaused = wasPaused;
     return false;
@@ -322,7 +322,7 @@ bool MapCore::loadMapFile(const char* path) {
   // Read header first
   HWMapHeader header;
   if (f.read((uint8_t*)&header, sizeof(header)) != sizeof(header)) {
-    ERROR_SENSORSF("Failed to read map header");
+    ERROR_MAPSF("Failed to read map header");
     f.close();
     gSensorPollingPaused = wasPaused;
     return false;
@@ -330,7 +330,7 @@ bool MapCore::loadMapFile(const char* path) {
   
   // Validate magic
   if (memcmp(header.magic, "HWMP", 4) != 0) {
-    ERROR_SENSORSF("Invalid map magic: %.4s", header.magic);
+    ERROR_MAPSF("Invalid map magic: %.4s", header.magic);
     f.close();
     gSensorPollingPaused = wasPaused;
     return false;
@@ -338,7 +338,7 @@ bool MapCore::loadMapFile(const char* path) {
   
   // Validate version (v6 only)
   if (header.version != 6) {
-    ERROR_SENSORSF("Unsupported map version: %u (need v6)", header.version);
+    ERROR_MAPSF("Unsupported map version: %u (need v6)", header.version);
     f.close();
     gSensorPollingPaused = wasPaused;
     return false;
@@ -395,7 +395,7 @@ bool MapCore::loadMapFile(const char* path) {
   strncpy(_currentMap.filename, fname, sizeof(_currentMap.filename) - 1);
   _currentMap.filename[sizeof(_currentMap.filename) - 1] = '\0';
   
-  INFO_SENSORSF("Loading map v%u: %s (%zu bytes, %u features, %ux%u tiles)", 
+  INFO_MAPSF("Loading map v%u: %s (%zu bytes, %u features, %ux%u tiles)", 
                header.version, _currentMap.filename, fileSize, header.featureCount,
                _currentMap.tileGridSize, _currentMap.tileGridSize);
   
@@ -420,7 +420,7 @@ bool MapCore::loadMapFile(const char* path) {
     if (nameTableScanOk) {
       nameTableEnd = (size_t)f.position();
     } else {
-      ERROR_SENSORSF("Failed to scan name table");
+      ERROR_MAPSF("Failed to scan name table");
       f.close();
       gSensorPollingPaused = wasPaused;
       unloadMap();
@@ -448,15 +448,15 @@ bool MapCore::loadMapFile(const char* path) {
       }
       _currentMap.names = names;
       _currentMap.nameCount = parsed;
-      INFO_SENSORSF("Parsed %u names", parsed);
+      INFO_MAPSF("Parsed %u names", parsed);
     }
   }
   
   // === PARSE TILE DIRECTORY (small, keep in RAM) ===
   if (_currentMap.tileCount == 0) {
-    ERROR_SENSORSF("Tile count is 0 (gridSize=%u, flags=0x%04X)", _currentMap.tileGridSize, header.flags);
+    ERROR_MAPSF("Tile count is 0 (gridSize=%u, flags=0x%04X)", _currentMap.tileGridSize, header.flags);
   } else if (_currentMap.tileCount > HWMAP_MAX_TILES) {
-    ERROR_SENSORSF("Tile count %u exceeds max %u (gridSize=%u)", _currentMap.tileCount, HWMAP_MAX_TILES, _currentMap.tileGridSize);
+    ERROR_MAPSF("Tile count %u exceeds max %u (gridSize=%u)", _currentMap.tileCount, HWMAP_MAX_TILES, _currentMap.tileGridSize);
   }
   if (_currentMap.tileCount > 0 && _currentMap.tileCount <= HWMAP_MAX_TILES) {
     size_t tileDirSize = sizeof(HWMapTileDirEntry) * _currentMap.tileCount;
@@ -467,7 +467,7 @@ bool MapCore::loadMapFile(const char* path) {
       size_t readBytes = f.read((uint8_t*)tileDir, tileDirSize);
       if (readBytes == tileDirSize) {
         _currentMap.tileDir = tileDir;
-        INFO_SENSORSF("Tile directory: %u tiles, first at offset %u", 
+        INFO_MAPSF("Tile directory: %u tiles, first at offset %u", 
                       _currentMap.tileCount, tileDir[0].offset);
         // Detailed tile stats for debugging
         int nonEmpty = 0;
@@ -480,7 +480,7 @@ bool MapCore::loadMapFile(const char* path) {
                             (long)_currentMap.haloW, (long)_currentMap.haloH);
       } else {
         free(tileDir);
-        ERROR_SENSORSF("Failed to read tile directory");
+        ERROR_MAPSF("Failed to read tile directory");
       }
     }
   }
@@ -560,8 +560,11 @@ bool MapCore::loadMapFile(const char* path) {
     numTiers = 1;
   }
 
-  // Allocate pool
-  size_t poolSize = MAP_CACHE_POOL_SIZE;
+  // Allocate pool — size driven by gSettings.mapCacheSizeKB (default 1024 KB).
+  // Halves on alloc failure so the cache still comes up on tight PSRAM.
+  size_t poolSize = (size_t)gSettings.mapCacheSizeKB * 1024;
+  if (poolSize < 64 * 1024) poolSize = 64 * 1024;          // sanity floor
+  if (poolSize > 8 * 1024 * 1024) poolSize = 8 * 1024 * 1024; // sanity cap
   uint8_t* pool = nullptr;
   while (poolSize >= tierSpecs[0].slotSize && !pool) {
     pool = (uint8_t*)ps_malloc(poolSize);
@@ -570,7 +573,7 @@ bool MapCore::loadMapFile(const char* path) {
     }
   }
   if (!pool) {
-    ERROR_SENSORSF("Failed to allocate tile cache pool in PSRAM");
+    ERROR_MAPSF("Failed to allocate tile cache pool in PSRAM");
     gSensorPollingPaused = wasPaused;
     unloadMap();
     return false;
@@ -631,7 +634,7 @@ bool MapCore::loadMapFile(const char* path) {
   TileCacheSlot* slots = (TileCacheSlot*)ps_malloc(sizeof(TileCacheSlot) * totalSlots);
   if (!slots) {
     free(pool);
-    ERROR_SENSORSF("Failed to allocate %u tile cache slot entries", totalSlots);
+    ERROR_MAPSF("Failed to allocate %u tile cache slot entries", totalSlots);
     gSensorPollingPaused = wasPaused;
     unloadMap();
     return false;
@@ -659,11 +662,11 @@ bool MapCore::loadMapFile(const char* path) {
   _currentMap.tilesDropped = 0;
 
   uint32_t avgPayload = nonEmptyTiles ? (totalPayload / nonEmptyTiles) : 0;
-  INFO_SENSORSF("Tile cache: %uKB pool, %u tiers, %u total slots | tiles: %u non-empty, avg %uB, max %uB",
+  INFO_MAPSF("Tile cache: %uKB pool, %u tiers, %u total slots | tiles: %u non-empty, avg %uB, max %uB",
                 (unsigned)(poolSize / 1024), numTiers, totalSlots,
                 nonEmptyTiles, avgPayload, maxPayload);
   for (uint8_t t = 0; t < numTiers; t++) {
-    INFO_SENSORSF("  Tier %u: %uKB slots x %u = %uKB (offset %u, slots %u-%u)",
+    INFO_MAPSF("  Tier %u: %uKB slots x %u = %uKB (offset %u, slots %u-%u)",
                   t, (unsigned)(tiers[t].slotSize / 1024), tiers[t].slotCount,
                   (unsigned)(tiers[t].slotSize * tiers[t].slotCount / 1024),
                   (unsigned)tiers[t].poolOffset,
@@ -704,10 +707,10 @@ bool MapCore::loadMapFile(const char* path) {
         preloaded++;
       }
     }
-    INFO_SENSORSF("Cache pre-warmed: %u tiles loaded in %lums (zero runtime misses expected)",
+    INFO_MAPSF("Cache pre-warmed: %u tiles loaded in %lums (zero runtime misses expected)",
                   preloaded, (unsigned long)(millis() - preloadStart));
   } else if (nonEmptyTiles > totalSlots) {
-    INFO_SENSORSF("Map too large for full pre-warm: %u tiles > %u slots (LRU will handle misses)",
+    INFO_MAPSF("Map too large for full pre-warm: %u tiles > %u slots (LRU will handle misses)",
                   nonEmptyTiles, totalSlots);
   }
   
@@ -732,7 +735,7 @@ void MapCore::unloadMap() {
   // Log cache stats before freeing
   if (_currentMap.valid && (_currentMap.cacheHits > 0 || _currentMap.cacheMisses > 0)) {
     uint32_t total = _currentMap.cacheHits + _currentMap.cacheMisses;
-    INFO_SENSORSF("Tile cache stats: %u hits, %u misses (%.1f%% hit rate), %u slots, %u dropped",
+    INFO_MAPSF("Tile cache stats: %u hits, %u misses (%.1f%% hit rate), %u slots, %u dropped",
                   _currentMap.cacheHits, _currentMap.cacheMisses,
                   total > 0 ? (100.0f * _currentMap.cacheHits / total) : 0.0f,
                   _currentMap.numSlots, _currentMap.tilesDropped);
@@ -2100,7 +2103,7 @@ bool WaypointManager::loadWaypoints() {
   f.close();
   
   if (err) {
-    WARN_SENSORSF("Waypoint JSON parse error: %s", err.c_str());
+    WARN_MAPSF("Waypoint JSON parse error: %s", err.c_str());
     return false;
   }
   
@@ -2140,7 +2143,7 @@ bool WaypointManager::loadWaypoints() {
     _selectedTarget = -1;
   }
   
-  INFO_SENSORSF("Loaded %d waypoints", i);
+  INFO_MAPSF("Loaded %d waypoints", i);
   return true;
 }
 
@@ -2194,7 +2197,7 @@ bool WaypointManager::saveWaypoints() {
   
   File f = VFS::openGuarded(wpPath, "w", gExecAuthContext, true);
   if (!f) {
-    ERROR_SENSORSF("Failed to write waypoints file: %s", wpPath);
+    ERROR_MAPSF("Failed to write waypoints file: %s", wpPath);
     return false;
   }
   
@@ -2626,7 +2629,7 @@ bool GPSTrackManager::loadTrack(const char* filepath, String& errorMsg) {
   calculateBounds();
   calculateStats();
   
-  INFO_SENSORSF("Loaded GPS track: %d points from %s", _pointCount, filepath);
+  INFO_MAPSF("Loaded GPS track: %d points from %s", _pointCount, filepath);
   return true;
 }
 
@@ -2692,7 +2695,7 @@ bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize) {
   f.close();
   fsUnlock();
 
-  INFO_SENSORSF("Saved GPS track: %d points to %s", _pointCount, outPath);
+  INFO_MAPSF("Saved GPS track: %d points to %s", _pointCount, outPath);
   return true;
 }
 
@@ -2703,7 +2706,7 @@ void GPSTrackManager::setLiveTracking(bool enabled) {
       _points = (GPSTrackPoint*)ps_alloc(MAX_TRACK_POINTS * sizeof(GPSTrackPoint), 
                                           AllocPref::PreferPSRAM, "gps.live");
       if (!_points) {
-        ERROR_SENSORSF("Failed to allocate live track buffer");
+        ERROR_MAPSF("Failed to allocate live track buffer");
         return;
       }
     }
@@ -2711,9 +2714,9 @@ void GPSTrackManager::setLiveTracking(bool enabled) {
     _bounds.valid = false;
     _stats.valid = false;
     strlcpy(_filename, "[LIVE]", sizeof(_filename));
-    INFO_SENSORSF("Live tracking started");
+    INFO_MAPSF("Live tracking started");
   } else if (!enabled && _liveTracking) {
-    INFO_SENSORSF("Live tracking stopped (%d points)", _pointCount);
+    INFO_MAPSF("Live tracking stopped (%d points)", _pointCount);
     // Calculate final stats
     calculateBounds();
     calculateStats();
@@ -3542,12 +3545,96 @@ float LocationContextManager::haversineDistance(float lat1, float lon1, float la
   return R * c;
 }
 
+// =============================================================================
+// Maps Settings Module — persisted defaults under apps.maps
+// =============================================================================
+// Wired into the schema-driven settings registry. Field semantics:
+//   mapZoom            — initial zoom applied to gMapZoom at boot
+//   mapVisibleLayers   — initial visibility mask applied to gVisibleLayers
+//   mapCacheSizeKB     — pool size for the tile LRU cache; takes effect at next
+//                        map load (re-init of the pool happens per-map)
+// CLI setters mirror the gSettings field into the matching live runtime
+// variable so changes apply without a reboot (cache size aside).
+
+static const char* cmd_mapzoom(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String v = argsInput; v.trim();
+  if (v.length() == 0) return "Usage: mapzoom <0.5..20.0>";
+  float f = v.toFloat();
+  if (f < 0.5f) f = 0.5f;
+  if (f > 20.0f) f = 20.0f;
+  setSetting(gSettings.mapZoom, f);
+  gMapZoom = f;
+  snprintf(getDebugBuffer(), 1024, "mapZoom set to %.2f", f);
+  return getDebugBuffer();
+}
+
+static const char* cmd_maplayers(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String v = argsInput; v.trim();
+  if (v.length() == 0) return "Usage: maplayers <bitmask 0..1023>";
+  int n = v.toInt();
+  if (n < 0) n = 0;
+  if (n > 0x3FF) n = 0x3FF;
+  setSetting(gSettings.mapVisibleLayers, n);
+  gVisibleLayers = (uint16_t)n;
+  snprintf(getDebugBuffer(), 1024, "mapVisibleLayers set to 0x%03X", n);
+  return getDebugBuffer();
+}
+
+static const char* cmd_mapcachekb(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String v = argsInput; v.trim();
+  if (v.length() == 0) return "Usage: mapcachekb <256..4096>";
+  int n = v.toInt();
+  if (n < 256) n = 256;
+  if (n > 4096) n = 4096;
+  setSetting(gSettings.mapCacheSizeKB, n);
+  snprintf(getDebugBuffer(), 1024, "mapCacheSizeKB set to %d (effective on next map load)", n);
+  return getDebugBuffer();
+}
+
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
+static const SettingEntry mapsSettingEntries[] = {
+  { "zoom",        SETTING_FLOAT, &gSettings.mapZoom,           0,    1.0f, nullptr, 0, 0,    "Default zoom (0.5-20.0)",            nullptr, false, nullptr, "mapzoom" },
+  { "layers",      SETTING_INT,   &gSettings.mapVisibleLayers,  0x3FF, 0,   nullptr, 0, 0x3FF, "Visible layers (bitmask, 0-0x3FF)", nullptr, false, nullptr, "maplayers" },
+  { "cacheSizeKB", SETTING_INT,   &gSettings.mapCacheSizeKB,    1024, 0,    nullptr, 256, 4096, "Tile cache size (KB, reboot to apply)", nullptr, false, nullptr, "mapcachekb" },
+};
+
+// Columns: name, jsonSection, entries, count, isConnected, description
+extern const SettingsModule mapsSettingsModule = {
+  "maps",
+  "apps.maps",
+  mapsSettingEntries,
+  sizeof(mapsSettingEntries) / sizeof(mapsSettingEntries[0]),
+  nullptr,
+  "Map rendering defaults and tile cache"
+};
+
+// Apply persisted defaults to live runtime variables. Call after settings
+// have loaded but before the first map render.
+void mapsApplyPersistedSettings() {
+  gMapZoom = gSettings.mapZoom;
+  gVisibleLayers = (uint16_t)gSettings.mapVisibleLayers;
+}
+
+// CLI commands exposed to the global registry — picked up alongside
+// mapCommands[] via the include in System_Command.cpp.
+const CommandEntry mapsSettingCommands[] = {
+  { "mapzoom",      "Set default map zoom: <0.5..20.0>",                 true, cmd_mapzoom,      "Usage: mapzoom <0.5..20.0>" },
+  { "maplayers",    "Set visible layer bitmask: <0..1023>",              true, cmd_maplayers,    "Usage: maplayers <bitmask 0..1023>" },
+  { "mapcachekb",   "Set tile cache size in KB (reboot to apply)",        true, cmd_mapcachekb,   "Usage: mapcachekb <256..4096>" },
+};
+const size_t mapsSettingCommandsCount = sizeof(mapsSettingCommands) / sizeof(mapsSettingCommands[0]);
+
 #else // !ENABLE_MAPS
 
 // Stubs so the linker is happy when maps are disabled
 #include "System_Command.h"
 const CommandEntry mapCommands[] = {};
 const size_t mapCommandsCount = 0;
+const CommandEntry mapsSettingCommands[] = {};
+const size_t mapsSettingCommandsCount = 0;
 float gMapRotation = 0;
 
 #endif // ENABLE_MAPS

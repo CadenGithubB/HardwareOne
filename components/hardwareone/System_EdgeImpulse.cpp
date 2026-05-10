@@ -346,19 +346,19 @@ void buildStateChangeJson(String& output) {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry edgeImpulseSettingEntries[] = {
-  { "enabled", SETTING_BOOL, &gSettings.edgeImpulseEnabled, 0, 0, nullptr, 0, 1, "Enable Inference", nullptr },
-  { "requireLabels", SETTING_BOOL, &gSettings.edgeImpulseRequireLabels, 1, 0, nullptr, 0, 1, "Require Labels", nullptr },
-  { "minConfidence", SETTING_FLOAT, &gSettings.edgeImpulseMinConfidence, 0, 0.6f, nullptr, 0, 1, "Min Confidence", nullptr },
-  { "maxDetections", SETTING_INT, &gSettings.edgeImpulseMaxDetections, 5, 0, nullptr, 1, 10, "Max Detections", nullptr },
-  { "inputSize", SETTING_INT, &gSettings.edgeImpulseInputSize, 96, 0, nullptr, 48, 320, "Input Size", nullptr },
-  { "continuous", SETTING_BOOL, &gSettings.edgeImpulseContinuous, 0, 0, nullptr, 0, 1, "Continuous Mode", nullptr },
-  { "intervalMs", SETTING_INT, &gSettings.edgeImpulseIntervalMs, 1000, 0, nullptr, 100, 10000, "Interval (ms)", nullptr }
+  { "enabled", SETTING_BOOL, &gSettings.edgeImpulseEnabled, 0, 0, nullptr, 0, 1, "Enable Inference", nullptr, false, nullptr, nullptr },
+  { "requireLabels", SETTING_BOOL, &gSettings.edgeImpulseRequireLabels, 1, 0, nullptr, 0, 1, "Require Labels", nullptr, false, nullptr, nullptr },
+  { "minConfidence", SETTING_FLOAT, &gSettings.edgeImpulseMinConfidence, 0, 0.6f, nullptr, 0, 1, "Min Confidence", nullptr, false, nullptr, nullptr },
+  { "maxDetections", SETTING_INT, &gSettings.edgeImpulseMaxDetections, 5, 0, nullptr, 1, 10, "Max Detections", nullptr, false, nullptr, nullptr },
+  { "inputSize", SETTING_INT, &gSettings.edgeImpulseInputSize, 96, 0, nullptr, 48, 320, "Input Size", nullptr, false, nullptr, nullptr },
+  { "continuous", SETTING_BOOL, &gSettings.edgeImpulseContinuous, 0, 0, nullptr, 0, 1, "Continuous Mode", nullptr, false, nullptr, nullptr },
+  { "intervalMs", SETTING_INT, &gSettings.edgeImpulseIntervalMs, 1000, 0, nullptr, 100, 10000, "Interval (ms)", nullptr, false, nullptr, nullptr }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule edgeImpulseSettingsModule = {
   "edgeimpulse",
-  "edgeimpulse",
+  "apps.edgeimpulse",
   edgeImpulseSettingEntries,
   sizeof(edgeImpulseSettingEntries) / sizeof(edgeImpulseSettingEntries[0]),
   nullptr,

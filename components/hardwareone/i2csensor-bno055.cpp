@@ -124,10 +124,10 @@ bool imuStartInternal() {
   if (!gImuCache.mutex) {
     gImuCache.mutex = xSemaphoreCreateMutex();
     if (!gImuCache.mutex) {
-      ERROR_SENSORSF("[IMU] Failed to create cache mutex");
+      ERROR_IMUF("Failed to create cache mutex");
       return false;
     }
-    DEBUG_SENSORSF("[IMU] Cache mutex created");
+    DEBUG_IMU_LIFECYCLEF("[IMU] Cache mutex created");
   }
 
   // Clean up any stale cache from previous run BEFORE starting
@@ -326,7 +326,7 @@ bool imuInit() {
     return true;
   }
 
-  INFO_SENSORSF("Starting BNO055 IMU initialization (STEMMA QT)...");
+  INFO_IMUF("Starting BNO055 IMU initialization (STEMMA QT)...");
 
   // Reset grace period for this initialization attempt (device may have been registered at boot)
   i2cResetGracePeriod(I2C_ADDR_IMU);
@@ -344,15 +344,15 @@ bool imuInit() {
 
   return i2cDeviceTransaction(I2C_ADDR_IMU, 100000, 5000, [&]() -> bool {
     // Wire1 already initialized in setup() - no need to call begin() again
-    INFO_SENSORSF("Starting IMU initialization at 100kHz I2C clock");
+    INFO_IMUF("Starting IMU initialization at 100kHz I2C clock");
 
     // BNO055 needs time after power-up/reset before responding reliably
     delay(1000);
 
     if (foundIndex < 0) {
-      WARN_SENSORSF("[IMU] Error: Not detected at 0x%02X or 0x%02X (initial probe). Will attempt init anyway with retries", I2C_ADDR_IMU, BNO055_ADDRESS_B);
+      WARN_IMUF("Error: Not detected at 0x%02X or 0x%02X (initial probe). Will attempt init anyway with retries", I2C_ADDR_IMU, BNO055_ADDRESS_B);
     } else {
-      INFO_SENSORSF("Detected BNO055 at address 0x%02X", candidateAddrs[foundIndex]);
+      INFO_IMUF("Detected BNO055 at address 0x%02X", candidateAddrs[foundIndex]);
     }
 
     // Retry loop with conservative I2C clocks (BNO055 doesn't like high speeds)
@@ -360,7 +360,7 @@ bool imuInit() {
     uint32_t clocks[maxAttempts] = { 100000, 100000, 50000, 100000, 100000 };
     
     for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
-      DEBUG_SENSORSF("[IMU] Error: Init attempt %d/%d at I2C %lu Hz", attempt, maxAttempts, clocks[attempt - 1]);
+      DEBUG_IMU_LIFECYCLEF("[IMU] Error: Init attempt %d/%d at I2C %lu Hz", attempt, maxAttempts, clocks[attempt - 1]);
 
       // Clock management now handled by I2CDeviceManager
       delay(150);
@@ -375,10 +375,10 @@ bool imuInit() {
       bool begun = false;
       for (int i = 0; i < 2 && !begun; i++) {
         uint8_t addr = (foundIndex >= 0) ? candidateAddrs[foundIndex] : candidateAddrs[i];
-        INFO_SENSORSF("Trying BNO055 address 0x%02X", addr);
+        INFO_IMUF("Trying BNO055 address 0x%02X", addr);
         gBNO055 = new Adafruit_BNO055(55, addr, &Wire1);
         if (gBNO055 == nullptr) {
-          ERROR_SENSORSF("[IMU] Error: Failed to allocate memory for BNO055 object");
+          ERROR_IMUF("Error: Failed to allocate memory for BNO055 object");
           return false;
         }
         delay(20);
@@ -398,7 +398,7 @@ bool imuInit() {
         delay(100);
         gImuConnected = true;
         
-        INFO_SENSORSF("[IMU] BNO055 IMU sensor initialized successfully");
+        INFO_IMUF("BNO055 IMU sensor initialized successfully");
         return true;
       }
 
@@ -411,7 +411,7 @@ bool imuInit() {
       delete gBNO055;
       gBNO055 = nullptr;
     }
-    ERROR_SENSORSF("[IMU] Error: Failed to initialize BNO055 IMU sensor after %d attempts", maxAttempts);
+    ERROR_IMUF("Error: Failed to initialize BNO055 IMU sensor after %d attempts", maxAttempts);
     broadcastOutput("[IMU] Error: Failed to initialize IMU sensor (timeout after 3s)");
     return false;
   });
@@ -557,9 +557,9 @@ void imuPoll() {
     xSemaphoreGive(gImuCache.mutex);
 
     imuUpdateActions();
-    DEBUG_IMU_DATAF("IMU data updated");
+    DEBUG_IMU_VALUESF("IMU data updated");
   } else {
-    DEBUG_IMU_FRAMEF("imuPoll() failed to lock cache - skipping update");
+    DEBUG_IMU_POLLINGF("imuPoll() failed to lock cache - skipping update");
   }
 }
 // JSON Building
@@ -1021,10 +1021,10 @@ const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);
 // ============================================================================
 
 void imuTask(void* parameter) {
-  INFO_SENSORSF("[IMU] Task started (handle=%p, stack=%u words)", 
+  INFO_IMUF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_SENSORSF("[MODULAR] imuTask() running from Sensor_IMU_BNO055.cpp");
+  INFO_IMUF("[MODULAR] imuTask() running from Sensor_IMU_BNO055.cpp");
   unsigned long lastIMURead = 0;
   unsigned long lastStackLog = 0;
   while (true) {
@@ -1043,7 +1043,7 @@ void imuTask(void* parameter) {
       gImuInitDone = false;
       gImuInitResult = false;
       
-      SENSOR_TASK_EXIT("IMU");
+      SENSOR_TASK_EXIT(IMU);
     }
     
     // Update watermark diagnostics (only when enabled)
@@ -1059,7 +1059,7 @@ void imuTask(void* parameter) {
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (gImuEnabled) {
         DEBUG_PERFORMANCEF("[STACK] imu_task watermark_now=%u min=%u words", (unsigned)gIMUWatermarkNow, (unsigned)gIMUWatermarkMin);
-        DEBUG_MEMORYF("[HEAP] imu_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+        DEBUG_MEMORY_HEAPF("[HEAP] imu_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     // Handle deferred IMU initialization on task stack
@@ -1097,7 +1097,7 @@ void imuTask(void* parameter) {
         // Auto-disable if too many consecutive failures
         if (!result) {
           if (i2cShouldAutoDisable(I2C_ADDR_IMU)) {
-            ERROR_SENSORSF("Too many consecutive IMU failures - auto-disabling");
+            ERROR_IMUF("Too many consecutive IMU failures - auto-disabling");
             gImuEnabled = false;
             sensorStatusBumpWith("imu@auto_disabled");
           }
@@ -1128,17 +1128,17 @@ void imuTask(void* parameter) {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry imuSettingEntries[] = {
-  { "imuAutoStart",                    SETTING_BOOL,  &gSettings.imuAutoStart,                    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  { "imuPollingMs",                    SETTING_INT,   &gSettings.imuPollingMs,                    200, 0, nullptr, 50, 2000, "Polling (ms)", nullptr },
-  { "imuEWMAFactor",                   SETTING_FLOAT, &gSettings.imuEWMAFactor,                   0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr },
-  { "imuTransitionMs",                 SETTING_INT,   &gSettings.imuTransitionMs,                 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr },
-  { "imuWebMaxFps",                    SETTING_INT,   &gSettings.imuWebMaxFps,                    15, 0, nullptr, 1, 30, "Web Max FPS", nullptr },
-  { "imuDevicePollMs",                 SETTING_INT,   &gSettings.imuDevicePollMs,                 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr },
-  { "imuOrientationMode",              SETTING_INT,   &gSettings.imuOrientationMode,              8, 0, nullptr, 0, 8, "Orientation Mode", nullptr },
-  { "imuOrientationCorrectionEnabled", SETTING_BOOL,  &gSettings.imuOrientationCorrectionEnabled, true, 0, nullptr, 0, 1, "Orientation Correction", nullptr },
-  { "imuPitchOffset",                  SETTING_FLOAT, &gSettings.imuPitchOffset,                  0, 0.0f, nullptr, -180, 180, "Pitch Offset", nullptr },
-  { "imuRollOffset",                   SETTING_FLOAT, &gSettings.imuRollOffset,                   0, 0.0f, nullptr, -180, 180, "Roll Offset", nullptr },
-  { "imuYawOffset",                    SETTING_FLOAT, &gSettings.imuYawOffset,                    0, 0.0f, nullptr, -180, 180, "Yaw Offset", nullptr }
+  { "imuAutoStart", SETTING_BOOL, &gSettings.imuAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
+  { "imuPollingMs", SETTING_INT, &gSettings.imuPollingMs, 200, 0, nullptr, 50, 2000, "Polling (ms)", nullptr, false, "timing", nullptr },
+  { "imuEWMAFactor", SETTING_FLOAT, &gSettings.imuEWMAFactor, 0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "timing", nullptr },
+  { "imuTransitionMs", SETTING_INT, &gSettings.imuTransitionMs, 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr, false, "timing", nullptr },
+  { "imuWebMaxFps", SETTING_INT, &gSettings.imuWebMaxFps, 15, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", nullptr },
+  { "imuDevicePollMs", SETTING_INT, &gSettings.imuDevicePollMs, 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr, false, "timing", nullptr },
+  { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 8, 0, nullptr, 0, 8, "Orientation Mode", nullptr, false, "orientation", nullptr },
+  { "imuOrientationCorrectionEnabled", SETTING_BOOL, &gSettings.imuOrientationCorrectionEnabled, true, 0, nullptr, 0, 1, "Orientation Correction", nullptr, false, "orientation", nullptr },
+  { "imuPitchOffset", SETTING_FLOAT, &gSettings.imuPitchOffset, 0, 0.0f, nullptr, -180, 180, "Pitch Offset", nullptr, false, "orientation", nullptr },
+  { "imuRollOffset", SETTING_FLOAT, &gSettings.imuRollOffset, 0, 0.0f, nullptr, -180, 180, "Roll Offset", nullptr, false, "orientation", nullptr },
+  { "imuYawOffset", SETTING_FLOAT, &gSettings.imuYawOffset, 0, 0.0f, nullptr, -180, 180, "Yaw Offset", nullptr, false, "orientation", nullptr }
 };
 
 static bool isIMUConnected() {
@@ -1148,7 +1148,7 @@ static bool isIMUConnected() {
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule imuSettingsModule = {
   "imu",
-  "imu_bno055",
+  "hardware.sensors.imu",
   imuSettingEntries,
   sizeof(imuSettingEntries) / sizeof(imuSettingEntries[0]),
   isIMUConnected,

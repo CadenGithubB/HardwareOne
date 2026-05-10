@@ -126,7 +126,7 @@ void initI2CManager() {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   
   // Print device registry capacity
-  INFO_I2CF("[I2C_REGISTRY] Device manager initialized with capacity for %d devices", I2CDeviceManager::MAX_DEVICES);
+  INFO_I2C_DISCOVERYF("[I2C_REGISTRY] Device manager initialized with capacity for %d devices", I2CDeviceManager::MAX_DEVICES);
   
   
   // Pre-register only compiled-in devices from database with their timing parameters
@@ -139,17 +139,17 @@ void initI2CManager() {
       I2CDevice* dev = mgr->registerDevice(sensor.address, sensor.name, clock, timeout);
       if (dev) {
         compiledCount++;
-        INFO_I2CF("Pre-registered compiled device: 0x%02X (%s)", sensor.address, sensor.name);
+        INFO_I2C_DISCOVERYF("Pre-registered compiled device: 0x%02X (%s)", sensor.address, sensor.name);
       } else {
         ERROR_I2CF("Failed to pre-register compiled device: 0x%02X (%s)", sensor.address, sensor.name);
       }
     }
   }
   
-  INFO_I2CF("Pre-registered %d compiled devices from database", compiledCount);
+  INFO_I2C_DISCOVERYF("Pre-registered %d compiled devices from database", compiledCount);
   
   // Print registry summary
-  INFO_I2CF("[I2C_REGISTRY] Registration summary: %d/%d slots used (%d available)", 
+  INFO_I2C_DISCOVERYF("[I2C_REGISTRY] Registration summary: %d/%d slots used (%d available)", 
                 compiledCount, I2CDeviceManager::MAX_DEVICES, 
                 I2CDeviceManager::MAX_DEVICES - compiledCount);
 }
@@ -257,7 +257,7 @@ bool isSensorConnected(const char* moduleName) {
 // Now managed by I2CDeviceManager - this is a no-op
 void initSensorQueue() {
   // Queue mutex is created by I2CDeviceManager::initialize()
-  INFO_I2CF("initSensorQueue() - queue managed by I2CDeviceManager");
+  INFO_I2C_DISCOVERYF("initSensorQueue() - queue managed by I2CDeviceManager");
 }
 
 // =========================================================================
@@ -363,7 +363,7 @@ void initI2CBuses() {
   
   if (forceForSetup) {
     gI2CBusEnabled = true;
-    INFO_I2CF("[I2C] Force-enabling for first-time setup wizard");
+    INFO_I2C_BUSF("[I2C] Force-enabling for first-time setup wizard");
   } else {
     // Copy setting to global flag
     gI2CBusEnabled = gSettings.i2cBusEnabled;
@@ -372,8 +372,8 @@ void initI2CBuses() {
   // Early exit if I2C bus is disabled via settings (and not first-time setup)
   if (!gI2CBusEnabled) {
     if (!gI2CBusDisabledLogged) {
-      INFO_I2CF("[I2C] Bus disabled via settings - skipping initialization");
-      INFO_I2CF("[I2C] OLED display and I2C sensors will not be available");
+      INFO_I2C_BUSF("[I2C] Bus disabled via settings - skipping initialization");
+      INFO_I2C_BUSF("[I2C] OLED display and I2C sensors will not be available");
       gI2CBusDisabledLogged = true;
     }
     return;
@@ -850,14 +850,14 @@ static void addDiscoveredDevice(uint8_t address, uint8_t bus) {
     device.name = i2cSensors[sensorIndex].name;
     device.description = i2cSensors[sensorIndex].description;
     device.manufacturer = i2cSensors[sensorIndex].manufacturer;
-    INFO_I2CF("Found device at 0x%02X on bus %d - %s (%s)", address, bus, device.name, device.description);
+    INFO_I2C_DISCOVERYF("Found device at 0x%02X on bus %d - %s (%s)", address, bus, device.name, device.description);
     
     // Don't register here - devices register themselves when initialized by their sensor modules
   } else {
     device.name = "Unknown";
     device.description = "Unidentified Device";
     device.manufacturer = "Unknown";
-    INFO_I2CF("Found device at 0x%02X on bus %d - Unknown device", address, bus);
+    INFO_I2C_DISCOVERYF("Found device at 0x%02X on bus %d - Unknown device", address, bus);
     
     // Don't register unknown devices - only actual initialized sensors should be in the manager
   }
@@ -963,11 +963,11 @@ static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, 
 void discoverI2CDevices() {
   // Early exit if I2C bus is disabled
   if (!gI2CBusEnabled) {
-    INFO_I2CF("Device discovery skipped - bus disabled");
+    INFO_I2C_DISCOVERYF("Device discovery skipped - bus disabled");
     return;
   }
   
-  INFO_I2CF("Starting device discovery (smart scan - compiled sensors only)");
+  INFO_I2C_DISCOVERYF("Starting device discovery (smart scan - compiled sensors only)");
 
   // Clear existing registry
   connectedDeviceCount = 0;
@@ -1021,7 +1021,7 @@ void discoverI2CDevices() {
     }
   }
   
-  INFO_I2CF("[Discovery] Smart scan: %d addresses on Wire1 (SDA=%d, SCL=%d)",
+  INFO_I2C_DISCOVERYF("[Discovery] Smart scan: %d addresses on Wire1 (SDA=%d, SCL=%d)",
             scanCount, gSettings.i2cSdaPin, gSettings.i2cSclPin);
 
   // Scan Wire1 (sensor bus) - use smart scan list
@@ -1040,7 +1040,7 @@ void discoverI2CDevices() {
                        connectedDevices[i].address, connectedDevices[i].name);
       }
     }
-    INFO_I2CF("%s", devLine);
+    INFO_I2C_DISCOVERYF("%s", devLine);
   }
 
 }
@@ -1104,9 +1104,9 @@ const char* cmd_discover(const String& originalCmd) {
     // Initialize radio and keep it in stable low-power state
     extern bool fmRadioInit();
     if (fmRadioInit()) {
-      INFO_SENSORSF("FM radio initialized successfully - kept in low-power state");
+      INFO_I2C_BUSF("FM radio initialized successfully - kept in low-power state");
     } else {
-      WARN_SENSORSF("FM radio initialization failed, may cause I2C interference");
+      WARN_I2CF("FM radio initialization failed, may cause I2C interference");
     }
   }
 
@@ -1714,7 +1714,7 @@ void handleDeviceStopped(I2CDeviceType sensor) {
 
 // Helper: set cause then bump (to preserve existing call-sites)
 void sensorStatusBumpWith(const char* cause) {
-  INFO_SENSORSF("Status bump: %s", cause ? cause : "(null)");
+  INFO_I2C_BUSF("Status bump: %s", cause ? cause : "(null)");
   gLastStatusCause = cause ? cause : "";
   sensorStatusBump();
 }
@@ -1981,7 +1981,7 @@ void sensorQueueProcessorTask(void* param) {
       bool batchPaused = false;
       if (!gSensorPollingPaused) {
         mgr->pausePolling();
-        INFO_I2CF("Paused polling for sensor initialization batch");
+        INFO_I2C_AUTOSTARTF("Paused polling for sensor initialization batch");
         batchPaused = true;
       }
 
@@ -1993,7 +1993,7 @@ void sensorQueueProcessorTask(void* param) {
       // Stack instrumentation (do not assume any fixed stack size)
       if (isDebugFlagSet(DEBUG_MEMORY)) {
         UBaseType_t hwmWords = uxTaskGetStackHighWaterMark(NULL);
-        DEBUG_MEMORYF("[STACK][QUEUE] before start type=%d hwm=%u words (%u bytes)",
+        DEBUG_MEMORY_STACKF("[STACK][QUEUE] before start type=%d hwm=%u words (%u bytes)",
                       (int)req.device, (unsigned)hwmWords, (unsigned)(hwmWords * 4));
       }
 
@@ -2100,57 +2100,57 @@ void sensorQueueProcessorTask(void* param) {
       switch (req.device) {
         case I2C_DEVICE_THERMAL:
           thermalStartInternal();
-          INFO_SENSORSF("Thermal: %s", gThermalEnabled ? "SUCCESS" : "FAILED");
+          INFO_I2C_AUTOSTARTF("Thermal: %s", gThermalEnabled ? "SUCCESS" : "FAILED");
           notifySensorStarted("Thermal", gThermalEnabled);
           break;
         case I2C_DEVICE_TOF:
           tofStartInternal();
-          INFO_SENSORSF("ToF: %s", gTofEnabled ? "SUCCESS" : "FAILED");
+          INFO_I2C_AUTOSTARTF("ToF: %s", gTofEnabled ? "SUCCESS" : "FAILED");
           notifySensorStarted("ToF", gTofEnabled);
           break;
         case I2C_DEVICE_IMU:
           imuStartInternal();
-          INFO_SENSORSF("IMU: %s", gImuEnabled ? "SUCCESS" : "FAILED");
+          INFO_I2C_AUTOSTARTF("IMU: %s", gImuEnabled ? "SUCCESS" : "FAILED");
           notifySensorStarted("IMU", gImuEnabled);
           break;
         case I2C_DEVICE_GAMEPAD:
           gamepadStartInternal();
-          INFO_SENSORSF("Gamepad: %s", gGamepadEnabled ? "SUCCESS" : "FAILED");
+          INFO_I2C_AUTOSTARTF("Gamepad: %s", gGamepadEnabled ? "SUCCESS" : "FAILED");
           notifySensorStarted("Gamepad", gGamepadEnabled);
           break;
         case I2C_DEVICE_APDS:
 #if ENABLE_APDS_SENSOR
           apdsStartInternal();
           { bool apdsOk = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
-          INFO_SENSORSF("APDS: %s (color=%d prox=%d gest=%d)",
+          INFO_I2C_AUTOSTARTF("APDS: %s (color=%d prox=%d gest=%d)",
                         apdsOk ? "SUCCESS" : "FAILED",
                         gApdsColorEnabled ? 1 : 0, gApdsProximityEnabled ? 1 : 0, gApdsGestureEnabled ? 1 : 0);
           notifySensorStarted("APDS", apdsOk); }
 #else
-          INFO_SENSORSF("APDS: skipped (not compiled)");
+          INFO_I2C_AUTOSTARTF("APDS: skipped (not compiled)");
 #endif
           break;
         case I2C_DEVICE_GPS:
           gpsStartInternal();
-          INFO_SENSORSF("GPS: %s", gGpsEnabled ? "SUCCESS" : "FAILED");
+          INFO_I2C_AUTOSTARTF("GPS: %s", gGpsEnabled ? "SUCCESS" : "FAILED");
           notifySensorStarted("GPS", gGpsEnabled);
           break;
         case I2C_DEVICE_FMRADIO:
 #if ENABLE_FM_RADIO
           fmRadioStartInternal();
-          INFO_SENSORSF("FM Radio: %s", gFmRadioEnabled ? "SUCCESS" : "FAILED");
+          INFO_I2C_AUTOSTARTF("FM Radio: %s", gFmRadioEnabled ? "SUCCESS" : "FAILED");
           notifySensorStarted("FM Radio", gFmRadioEnabled);
 #else
-          INFO_SENSORSF("FM Radio: skipped (not compiled)");
+          INFO_I2C_AUTOSTARTF("FM Radio: skipped (not compiled)");
 #endif
           break;
         case I2C_DEVICE_RTC:
 #if ENABLE_RTC_SENSOR
           rtcStartInternal();
-          INFO_SENSORSF("RTC: %s", gRtcEnabled ? "SUCCESS" : "FAILED");
+          INFO_I2C_AUTOSTARTF("RTC: %s", gRtcEnabled ? "SUCCESS" : "FAILED");
           notifySensorStarted("RTC", gRtcEnabled);
 #else
-          INFO_SENSORSF("RTC: skipped (not compiled)");
+          INFO_I2C_AUTOSTARTF("RTC: skipped (not compiled)");
 #endif
           break;
         case I2C_DEVICE_PRESENCE:
@@ -2158,10 +2158,10 @@ void sensorQueueProcessorTask(void* param) {
           extern bool presenceStartInternal();
           extern bool gPresenceEnabled;
           presenceStartInternal();
-          INFO_SENSORSF("Presence: %s", gPresenceEnabled ? "SUCCESS" : "FAILED");
+          INFO_I2C_AUTOSTARTF("Presence: %s", gPresenceEnabled ? "SUCCESS" : "FAILED");
           notifySensorStarted("Presence", gPresenceEnabled);
 #else
-          INFO_SENSORSF("Presence: skipped (not compiled)");
+          INFO_I2C_AUTOSTARTF("Presence: skipped (not compiled)");
 #endif
           break;
       }
@@ -2183,7 +2183,7 @@ void sensorQueueProcessorTask(void* param) {
         int peakPct = (stackPeak * 100) / (sensorQueueStackWords * 4);
         size_t heapFree = ESP.getFreeHeap();
         size_t heapMin = ESP.getMinFreeHeap();
-        DEBUG_MEMORYF("[STACK] sensor_queue: peak=%lu bytes (%d%%), free_min=%lu bytes | heap=%lu min=%lu",
+        DEBUG_MEMORY_STACKF("[STACK] sensor_queue: peak=%lu bytes (%d%%), free_min=%lu bytes | heap=%lu min=%lu",
                       (unsigned long)stackPeak, peakPct,
                       (unsigned long)(stackHighWater * 4),
                       (unsigned long)heapFree, (unsigned long)heapMin);
@@ -2199,7 +2199,7 @@ void sensorQueueProcessorTask(void* param) {
       // Resume sensor polling after ALL queued sensors are initialized
       if (batchPaused) {
         mgr->resumePolling();
-        INFO_I2CF("Resumed sensor polling after initialization batch");
+        INFO_I2C_AUTOSTARTF("Resumed sensor polling after initialization batch");
       }
     } else {
       // Queue empty, sleep for a bit
@@ -2225,7 +2225,7 @@ static const SettingEntry i2cSettingEntries[] = {
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule i2cSettingsModule = {
-  "i2c", "i2c", i2cSettingEntries,
+  "i2c", "hardware.i2c", i2cSettingEntries,
   sizeof(i2cSettingEntries) / sizeof(i2cSettingEntries[0]),
   nullptr,
   "I2C bus configuration"
@@ -2253,7 +2253,7 @@ static bool isSensorAvailableForAutoStart(const char* moduleName, I2CDeviceType 
   // Registry miss — try a direct I2C ping as fallback
   uint8_t addr = i2cAddressForDeviceType(deviceType);
   if (addr != 0 && i2cPingAddress(addr, 100000, 50)) {
-    INFO_I2CF("[AutoStart] %s not in registry but responds to I2C ping", moduleName);
+    INFO_I2C_AUTOSTARTF("[AutoStart] %s not in registry but responds to I2C ping", moduleName);
     return true;
   }
   return false;
@@ -2261,10 +2261,10 @@ static bool isSensorAvailableForAutoStart(const char* moduleName, I2CDeviceType 
 
 void processAutoStartSensors() {
   // Debug: Print I2C flags to diagnose auto-start issues
-  DEBUG_I2CF("[AutoStart] I2C check: i2cBus=%d", gSettings.i2cBusEnabled ? 1 : 0);
+  DEBUG_I2C_AUTOSTARTF("[AutoStart] I2C check: i2cBus=%d", gSettings.i2cBusEnabled ? 1 : 0);
   
   if (!gSettings.i2cBusEnabled) {
-    INFO_I2CF("[AutoStart] I2C bus disabled, skipping sensor auto-start");
+    INFO_I2C_AUTOSTARTF("[AutoStart] I2C bus disabled, skipping sensor auto-start");
     return;
   }
 
@@ -2276,11 +2276,11 @@ void processAutoStartSensors() {
       queueProcessorTask = nullptr;
       return;
     }
-    INFO_I2CF("[I2C_SENSORS] Queue processor task created (late init)");
+    INFO_I2C_DISCOVERYF("[I2C_SENSORS] Queue processor task created (late init)");
   }
  #endif
   
-  INFO_I2CF("[AutoStart] Flags: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d",
+  INFO_I2C_AUTOSTARTF("[AutoStart] Flags: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d",
             gSettings.thermalAutoStart ? 1 : 0,
             gSettings.tofAutoStart ? 1 : 0,
             gSettings.imuAutoStart ? 1 : 0,
@@ -2290,16 +2290,16 @@ void processAutoStartSensors() {
             gSettings.gamepadAutoStart ? 1 : 0,
             gSettings.rtcAutoStart ? 1 : 0,
             gSettings.presenceAutoStart ? 1 : 0);
-  INFO_I2CF("[AutoStart] Processing sensor auto-start settings...");
+  INFO_I2C_AUTOSTARTF("[AutoStart] Processing sensor auto-start settings...");
   int autoStartQueued = 0;
   
   #if ENABLE_THERMAL_SENSOR
   if (gSettings.thermalAutoStart) {
     if (isSensorAvailableForAutoStart("thermal", I2C_DEVICE_THERMAL)) {
-      INFO_I2CF("[AutoStart] Queuing thermal sensor");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing thermal sensor");
       enqueueDeviceStart(I2C_DEVICE_THERMAL); autoStartQueued++;
     } else {
-      INFO_I2CF("[AutoStart] Skipping thermal sensor (not detected on I2C bus)");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping thermal sensor (not detected on I2C bus)");
     }
   }
   #endif
@@ -2307,10 +2307,10 @@ void processAutoStartSensors() {
   #if ENABLE_TOF_SENSOR
   if (gSettings.tofAutoStart) {
     if (isSensorAvailableForAutoStart("tof", I2C_DEVICE_TOF)) {
-      INFO_I2CF("[AutoStart] Queuing ToF sensor");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing ToF sensor");
       enqueueDeviceStart(I2C_DEVICE_TOF); autoStartQueued++;
     } else {
-      INFO_I2CF("[AutoStart] Skipping ToF sensor (not detected on I2C bus)");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping ToF sensor (not detected on I2C bus)");
     }
   }
   #endif
@@ -2318,10 +2318,10 @@ void processAutoStartSensors() {
   #if ENABLE_IMU_SENSOR
   if (gSettings.imuAutoStart) {
     if (isSensorAvailableForAutoStart("imu", I2C_DEVICE_IMU)) {
-      INFO_I2CF("[AutoStart] Queuing IMU sensor");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing IMU sensor");
       enqueueDeviceStart(I2C_DEVICE_IMU); autoStartQueued++;
     } else {
-      INFO_I2CF("[AutoStart] Skipping IMU sensor (not detected on I2C bus)");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping IMU sensor (not detected on I2C bus)");
     }
   }
   #endif
@@ -2329,10 +2329,10 @@ void processAutoStartSensors() {
   #if ENABLE_GPS_SENSOR
   if (gSettings.gpsAutoStart) {
     if (isSensorAvailableForAutoStart("gps", I2C_DEVICE_GPS)) {
-      INFO_I2CF("[AutoStart] Queuing GPS sensor");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing GPS sensor");
       enqueueDeviceStart(I2C_DEVICE_GPS); autoStartQueued++;
     } else {
-      INFO_I2CF("[AutoStart] Skipping GPS sensor (not detected on I2C bus)");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping GPS sensor (not detected on I2C bus)");
     }
   }
   #endif
@@ -2340,10 +2340,10 @@ void processAutoStartSensors() {
   #if ENABLE_FMRADIO_SENSOR
   if (gSettings.fmRadioAutoStart) {
     if (isSensorAvailableForAutoStart("fmradio", I2C_DEVICE_FMRADIO)) {
-      INFO_I2CF("[AutoStart] Queuing FM Radio sensor");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing FM Radio sensor");
       enqueueDeviceStart(I2C_DEVICE_FMRADIO); autoStartQueued++;
     } else {
-      INFO_I2CF("[AutoStart] Skipping FM Radio sensor (not detected on I2C bus)");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping FM Radio sensor (not detected on I2C bus)");
     }
   }
   #endif
@@ -2351,10 +2351,10 @@ void processAutoStartSensors() {
   #if ENABLE_APDS_SENSOR
   if (gSettings.apdsAutoStart) {
     if (isSensorAvailableForAutoStart("apds", I2C_DEVICE_APDS)) {
-      INFO_I2CF("[AutoStart] Queuing APDS sensor");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing APDS sensor");
       enqueueDeviceStart(I2C_DEVICE_APDS); autoStartQueued++;
     } else {
-      INFO_I2CF("[AutoStart] Skipping APDS sensor (not detected on I2C bus)");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping APDS sensor (not detected on I2C bus)");
     }
   }
   #endif
@@ -2362,10 +2362,10 @@ void processAutoStartSensors() {
   #if ENABLE_GAMEPAD_SENSOR
   if (gSettings.gamepadAutoStart) {
     if (isSensorAvailableForAutoStart("gamepad", I2C_DEVICE_GAMEPAD)) {
-      INFO_I2CF("[AutoStart] Queuing Gamepad sensor");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Gamepad sensor");
       enqueueDeviceStart(I2C_DEVICE_GAMEPAD); autoStartQueued++;
     } else {
-      INFO_I2CF("[AutoStart] Skipping Gamepad sensor (not detected on I2C bus)");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping Gamepad sensor (not detected on I2C bus)");
     }
   }
   #endif
@@ -2373,10 +2373,10 @@ void processAutoStartSensors() {
   #if ENABLE_RTC_SENSOR
   if (gSettings.rtcAutoStart) {
     if (isSensorAvailableForAutoStart("rtc", I2C_DEVICE_RTC)) {
-      INFO_I2CF("[AutoStart] Queuing RTC sensor");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing RTC sensor");
       enqueueDeviceStart(I2C_DEVICE_RTC); autoStartQueued++;
     } else {
-      INFO_I2CF("[AutoStart] Skipping RTC sensor (not detected on I2C bus)");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping RTC sensor (not detected on I2C bus)");
     }
   }
   #endif
@@ -2384,14 +2384,14 @@ void processAutoStartSensors() {
   #if ENABLE_PRESENCE_SENSOR
   if (gSettings.presenceAutoStart) {
     if (isSensorAvailableForAutoStart("presence", I2C_DEVICE_PRESENCE)) {
-      INFO_I2CF("[AutoStart] Queuing Presence sensor");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Presence sensor");
       enqueueDeviceStart(I2C_DEVICE_PRESENCE); autoStartQueued++;
     } else {
-      INFO_I2CF("[AutoStart] Skipping Presence sensor (not detected on I2C bus)");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping Presence sensor (not detected on I2C bus)");
     }
   }
   #endif
   
-  INFO_I2CF("[AutoStart] Queued %d sensor(s) for startup", autoStartQueued);
-  INFO_I2CF("[AutoStart] Sensor auto-start processing complete");
+  INFO_I2C_AUTOSTARTF("[AutoStart] Queued %d sensor(s) for startup", autoStartQueued);
+  INFO_I2C_AUTOSTARTF("[AutoStart] Sensor auto-start processing complete");
 }

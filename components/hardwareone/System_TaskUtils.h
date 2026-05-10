@@ -78,11 +78,12 @@ bool createRTCTask();
 // ============================================================================
 
 // Emit the standard "task disabled" log message and self-delete the task.
-// tag must be a string literal, e.g. SENSOR_TASK_EXIT("IMU").
+// `subsys` must match one of the per-subsystem INFO_*F macros — e.g.
+// SENSOR_TASK_EXIT(IMU) expands to INFO_IMUF(...).
 // NOTE: do NOT clear the task handle before calling this — the create/start
 // function uses eTaskGetState() to detect whether the task is still running.
-#define SENSOR_TASK_EXIT(tag)                                                  \
-  INFO_SENSORSF("[" tag "] Task disabled - cleaning up and deleting");         \
+#define SENSOR_TASK_EXIT(subsys)                                               \
+  INFO_##subsys##F("Task disabled - cleaning up and deleting");                \
   vTaskDelete(nullptr)
 
 // ============================================================================

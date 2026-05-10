@@ -340,7 +340,7 @@ void sensorStatusBump() {
   uint32_t s = gSensorStatusSeq + 1;
   if (s == 0) s = 1;
   gSensorStatusSeq = s;
-  DEBUG_SENSORSF("[STATUS_BUMP] seq=%lu cause='%s' | thermal=%d tof=%d imu=%d gamepad=%d",
+  DEBUG_ESPNOW_METADATAF("[STATUS_BUMP] seq=%lu cause='%s' | thermal=%d tof=%d imu=%d gamepad=%d",
                  (unsigned long)gSensorStatusSeq, gLastStatusCause,
                  gThermalEnabled ? 1 : 0, gTofEnabled ? 1 : 0, gImuEnabled ? 1 : 0, gGamepadEnabled ? 1 : 0);
   DEBUG_SSEF("sensorStatusBump: seq now %lu | cause=%s (debounced)", (unsigned long)gSensorStatusSeq, gLastStatusCause);
@@ -349,9 +349,9 @@ void sensorStatusBump() {
   unsigned long nowMs = millis();
   if (gNextSensorStatusBroadcastDue == 0 || (long)(nowMs - gNextSensorStatusBroadcastDue) > 0) {
     gNextSensorStatusBroadcastDue = nowMs + kSensorStatusDebounceMs;
-    DEBUG_SENSORSF("[STATUS_BUMP] Broadcast scheduled for %lu ms from now", kSensorStatusDebounceMs);
+    DEBUG_ESPNOW_METADATAF("[STATUS_BUMP] Broadcast scheduled for %lu ms from now", kSensorStatusDebounceMs);
   } else {
-    DEBUG_SENSORSF("[STATUS_BUMP] Broadcast already scheduled (due in %ld ms)", (long)(gNextSensorStatusBroadcastDue - nowMs));
+    DEBUG_ESPNOW_METADATAF("[STATUS_BUMP] Broadcast already scheduled (due in %ld ms)", (long)(gNextSensorStatusBroadcastDue - nowMs));
   }
 #if ENABLE_BONDED_MODE
   // Proactively push status to bonded peer so master sees changes immediately
@@ -505,7 +505,6 @@ extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, s
     line += String(psDelta);
   }
 
-  // Memory allocation logging removed - LOG_ALLOC_FILE is obsolete
   s_inMemLog = false;
 }
 
@@ -774,7 +773,7 @@ static void commandExecTask(void* pv) {
       uint32_t stackPeak = stackBytes - (stackHighWater * 4);
       int peakPct = (stackPeak * 100) / stackBytes;
 
-      DEBUG_MEMORYF("[STACK] cmd_exec: peak=%lu bytes (%d%%), free_min=%lu bytes, total=%lu",
+      DEBUG_MEMORY_STACKF("[STACK] cmd_exec: peak=%lu bytes (%d%%), free_min=%lu bytes, total=%lu",
                     (unsigned long)stackPeak, peakPct,
                     (unsigned long)(stackHighWater * 4), (unsigned long)stackBytes);
       lastStackCheck = now;
@@ -1303,7 +1302,7 @@ void hardwareone_setup() {
     if (oledConnected && gOledEnabled) {
       DEBUG_SYSTEMF("[Boot] Starting gamepad sensor for OLED first-time setup");
       bool ok = gamepadStartInternal();  // Properly initializes hardware and creates task
-      DEBUG_SENSORSF("[Boot] Gamepad init result: %s", ok ? "SUCCESS" : "FAILED");
+      DEBUG_GAMEPADF("[Boot] Gamepad init result: %s", ok ? "SUCCESS" : "FAILED");
       delay(100);  // Give gamepad task time to start polling
     }
 #endif
@@ -1705,16 +1704,16 @@ void hardwareone_loop() {
 
   if (gSensorStatusDirty) {
     unsigned long nowMs = millis();
-    DEBUG_SENSORSF("[SSE_BROADCAST_CHECK] dirty=true, due=%lu, now=%lu, ready=%d",
+    DEBUG_SSEF("[SSE_BROADCAST_CHECK] dirty=true, due=%lu, now=%lu, ready=%d",
                    gNextSensorStatusBroadcastDue, nowMs,
                    (gNextSensorStatusBroadcastDue != 0 && (long)(nowMs - gNextSensorStatusBroadcastDue) >= 0) ? 1 : 0);
     if (gNextSensorStatusBroadcastDue != 0 && (long)(nowMs - gNextSensorStatusBroadcastDue) >= 0) {
-      DEBUG_SENSORSF("[SSE_BROADCAST] SENDING | seq=%lu thermal=%d tof=%d imu=%d gamepad=%d apdsColor=%d apdsProx=%d apdsGest=%d",
+      DEBUG_SSEF("[SSE_BROADCAST] SENDING | seq=%lu thermal=%d tof=%d imu=%d gamepad=%d apdsColor=%d apdsProx=%d apdsGest=%d",
                      (unsigned long)gSensorStatusSeq,
                      gThermalEnabled ? 1 : 0, gTofEnabled ? 1 : 0, gImuEnabled ? 1 : 0, gGamepadEnabled ? 1 : 0,
                      gApdsColorEnabled ? 1 : 0, gApdsProximityEnabled ? 1 : 0, gApdsGestureEnabled ? 1 : 0);
       broadcastSensorStatusToAllSessions();
-      DEBUG_SENSORSF("[SSE_BROADCAST] SENT successfully");
+      DEBUG_SSEF("[SSE_BROADCAST] SENT successfully");
       gSensorStatusDirty = false;
       gNextSensorStatusBroadcastDue = 0;
     }

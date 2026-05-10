@@ -82,8 +82,8 @@ TaskHandle_t gPresenceTaskHandle = nullptr;
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry presenceSettingEntries[] = {
-  { "presenceAutoStart",    SETTING_BOOL, &gSettings.presenceAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  { "presenceDevicePollMs", SETTING_INT,  &gSettings.presenceDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr }
+  { "presenceAutoStart", SETTING_BOOL, &gSettings.presenceAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
+  { "presenceDevicePollMs", SETTING_INT, &gSettings.presenceDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, nullptr }
 };
 
 static bool isPresenceConnected() {
@@ -93,7 +93,7 @@ static bool isPresenceConnected() {
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule presenceSettingsModule = {
   "presence",
-  "presence",
+  "hardware.sensors.presence",
   presenceSettingEntries,
   sizeof(presenceSettingEntries) / sizeof(presenceSettingEntries[0]),
   isPresenceConnected,
@@ -235,7 +235,7 @@ const char* cmd_presencestatus(const String& argsInput) {
 bool presenceStartInternal() {
   // Check memory before creating task
   if (!checkMemoryAvailable("presence", nullptr)) {
-    ERROR_SENSORSF("[PRESENCE] Error: Insufficient memory for presence sensor");
+    ERROR_PRESENCEF("Error: Insufficient memory for presence sensor");
     return false;
   }
 
@@ -243,10 +243,10 @@ bool presenceStartInternal() {
   if (!gPresenceCache.mutex) {
     gPresenceCache.mutex = xSemaphoreCreateMutex();
     if (!gPresenceCache.mutex) {
-      ERROR_SENSORSF("[PRESENCE] Error: Failed to create cache mutex");
+      ERROR_PRESENCEF("Error: Failed to create cache mutex");
       return false;
     }
-    DEBUG_SENSORSF("[PRESENCE] Cache mutex created");
+    DEBUG_PRESENCE_LIFECYCLEF("[PRESENCE] Cache mutex created");
   }
 
   // Clean up stale cache
@@ -263,12 +263,12 @@ bool presenceStartInternal() {
     gPresenceCache.tempShockDetected = false;
     xSemaphoreGive(gPresenceCache.mutex);
   }
-  INFO_SENSORSF("[PRESENCE] Cleaned up stale cache");
+  INFO_PRESENCEF("Cleaned up stale cache");
 
   // Initialize sensor synchronously
   if (!gPresenceConnected) {
     if (!presenceInit()) {
-      ERROR_SENSORSF("[PRESENCE] Error: Failed to initialize STHS34PF80 sensor");
+      ERROR_PRESENCEF("Error: Failed to initialize STHS34PF80 sensor");
       return false;
     }
   }
@@ -280,11 +280,11 @@ bool presenceStartInternal() {
   // Create task
   if (!createPresenceTask()) {
     gPresenceEnabled = false;
-    ERROR_SENSORSF("[PRESENCE] Error: Failed to create presence task");
+    ERROR_PRESENCEF("Error: Failed to create presence task");
     return false;
   }
   sensorStatusBumpWith("PRESENCE initialized");
-  INFO_SENSORSF("[PRESENCE] Sensor started successfully");
+  INFO_PRESENCEF("Sensor started successfully");
   return true;
 }
 
@@ -297,29 +297,29 @@ bool presenceInit() {
     // Check WHO_AM_I
     uint8_t whoami;
     if (!readRegister(STHS34PF80_WHO_AM_I, &whoami)) {
-      ERROR_SENSORSF("[PRESENCE] Failed to read WHO_AM_I");
+      ERROR_PRESENCEF("Failed to read WHO_AM_I");
       return false;
     }
     
     if (whoami != STHS34PF80_WHO_AM_I_VALUE) {
-      ERROR_SENSORSF("[PRESENCE] Wrong WHO_AM_I: 0x%02X (expected 0x%02X)", whoami, STHS34PF80_WHO_AM_I_VALUE);
+      ERROR_PRESENCEF("Wrong WHO_AM_I: 0x%02X (expected 0x%02X)", whoami, STHS34PF80_WHO_AM_I_VALUE);
       return false;
     }
     
-    INFO_SENSORSF("[PRESENCE] WHO_AM_I verified: 0x%02X", whoami);
+    INFO_PRESENCEF("WHO_AM_I verified: 0x%02X", whoami);
     
     // Configure CTRL1: Set ODR to 8Hz, BDU enabled
     // Bits [6:4] = ODR, Bit 3 = BDU
     uint8_t ctrl1 = (STHS34PF80_ODR_8HZ << 4) | 0x08;
     if (!writeRegister(STHS34PF80_CTRL1, ctrl1)) {
-      ERROR_SENSORSF("[PRESENCE] Failed to configure CTRL1");
+      ERROR_PRESENCEF("Failed to configure CTRL1");
       return false;
     }
     
     // Configure CTRL2: Enable presence, motion, and ambient shock detection
     // Defaults are usually fine, but ensure FUNC_CFG_ACCESS is 0
     if (!writeRegister(STHS34PF80_CTRL2, 0x00)) {
-      ERROR_SENSORSF("[PRESENCE] Failed to configure CTRL2");
+      ERROR_PRESENCEF("Failed to configure CTRL2");
       return false;
     }
     
@@ -469,10 +469,10 @@ int presenceBuildDataJSON(char* buf, size_t bufSize) {
 // ============================================================================
 
 void presenceTask(void* parameter) {
-  INFO_SENSORSF("[PRESENCE] Task started (handle=%p, stack=%u words)", 
+  INFO_PRESENCEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_SENSORSF("[MODULAR] presenceTask() running from i2csensor-sths34pf80.cpp");
+  INFO_PRESENCEF("[MODULAR] presenceTask() running from i2csensor-sths34pf80.cpp");
   
   unsigned long lastPresenceRead = 0;
   unsigned long lastStackLog = 0;
@@ -482,7 +482,7 @@ void presenceTask(void* parameter) {
     if (!gPresenceEnabled) {
       gPresenceConnected = false;
       gPresenceCache.dataValid = false;
-      SENSOR_TASK_EXIT("PRESENCE");
+      SENSOR_TASK_EXIT(PRESENCE);
     }
 
     // Stack watermark tracking + safety bailout
@@ -495,7 +495,7 @@ void presenceTask(void* parameter) {
         DEBUG_PERFORMANCEF("[STACK] presence_task watermark=%u words", (unsigned)watermark);
       }
       if (gPresenceEnabled && isDebugFlagSet(DEBUG_MEMORY)) {
-        DEBUG_MEMORYF("[HEAP] presence_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+        DEBUG_MEMORY_HEAPF("[HEAP] presence_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     
@@ -523,7 +523,7 @@ void presenceTask(void* parameter) {
             gPresenceEnabled = false;
             gPresenceConnected = false;
             sensorStatusBumpWith("presence@auto_disabled");
-            DEBUG_SENSORSF("Presence auto-disabled after %u consecutive I2C failures", errors);
+            DEBUG_PRESENCE_LIFECYCLEF("Presence auto-disabled after %u consecutive I2C failures", errors);
             break;
           }
         }

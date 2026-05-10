@@ -145,7 +145,6 @@ const char* validateConditionalCommand(const char* command);
 bool automationIdExistsInJson(const String& json, unsigned long id);
 // jsonEscape now provided by system_utils.h
 void findAutomationsArrayBounds(const String& json, int& arrStart, int& arrEnd);
-// appendAutoLogEntry forward declaration removed - implemented in .ino with bool return
 
 // DEBUG flags and RETURN_VALID_IF_VALIDATE_CSTR are defined centrally in debug_system.h
 // and system_utils.h to keep logging behavior consistent across modules.
@@ -375,8 +374,6 @@ bool automationIdExistsInJson(const String& json, unsigned long id) {
   snprintf(needle, sizeof(needle), "\"id\": %lu", id);
   return strstr(json.c_str(), needle) != nullptr;
 }
-
-// jsonEscape implementation removed - now in system_utils.cpp
 
 // Sanitize duplicate IDs in automations array using ArduinoJson
 bool sanitizeAutomationsJson(String& jsonRef) {
@@ -3829,12 +3826,12 @@ const size_t automationCommandsCount = sizeof(automationCommands) / sizeof(autom
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry automationSettingEntries[] = {
-  { "automationsEnabled", SETTING_BOOL, &gSettings.automationsEnabled, false, 0, nullptr, 0, 1, "Automations Enabled", nullptr }
+  { "automationsEnabled", SETTING_BOOL, &gSettings.automationsEnabled, false, 0, nullptr, 0, 1, "Automations Enabled", nullptr, false, nullptr, nullptr }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule automationSettingsModule = {
-  "automation", "automation", automationSettingEntries,
+  "automation", "apps.automation", automationSettingEntries,
   sizeof(automationSettingEntries) / sizeof(automationSettingEntries[0]),
   nullptr,
   "Automation rules and scheduling"

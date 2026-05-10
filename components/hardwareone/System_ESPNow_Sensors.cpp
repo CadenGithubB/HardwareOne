@@ -183,31 +183,31 @@ void updateRemoteSensorStatus(const uint8_t* mac, const char* name, RemoteSensor
 // ==========================
 
 void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled) {
-  DEBUG_SENSORSF("[SENSOR_STATUS_TX] broadcastSensorStatus() called: type=%d (%s), enabled=%d",
+  DEBUG_ESPNOW_METADATAF("[SENSOR_STATUS_TX] broadcastSensorStatus() called: type=%d (%s), enabled=%d",
          sensorType, sensorTypeToString(sensorType), enabled);
   
   // Check master broadcast flag first
   if (!gSensorBroadcastEnabled) {
-    DEBUG_SENSORSF("%s", "[SENSOR_STATUS_TX] SKIP: Sensor broadcasting not enabled");
+    DEBUG_ESPNOW_METADATAF("%s", "[SENSOR_STATUS_TX] SKIP: Sensor broadcasting not enabled");
     return;
   }
   
   // Only workers should broadcast to master
   bool meshEn = meshEnabled();
-  DEBUG_SENSORSF("[SENSOR_STATUS_TX] Pre-checks: meshEnabled=%d, meshRole=%d", meshEn, gSettings.meshRole);
+  DEBUG_ESPNOW_METADATAF("[SENSOR_STATUS_TX] Pre-checks: meshEnabled=%d, meshRole=%d", meshEn, gSettings.meshRole);
   
   if (!meshEn) {
-    DEBUG_SENSORSF("%s", "[SENSOR_STATUS_TX] SKIP: Mesh not enabled");
+    DEBUG_ESPNOW_METADATAF("%s", "[SENSOR_STATUS_TX] SKIP: Mesh not enabled");
     return;
   }
   
   if (gSettings.meshRole == MESH_ROLE_MASTER) {
-    DEBUG_SENSORSF("%s", "[SENSOR_STATUS_TX] SKIP: Master devices don't broadcast status");
+    DEBUG_ESPNOW_METADATAF("%s", "[SENSOR_STATUS_TX] SKIP: Master devices don't broadcast status");
     return;
   }
   
   // Build and send V3 status message
-  DEBUG_SENSORSF("%s", "[SENSOR_STATUS_TX] Broadcasting V3 sensor status");
+  DEBUG_ESPNOW_METADATAF("%s", "[SENSOR_STATUS_TX] Broadcasting V3 sensor status");
   
   DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Broadcasting status: %s = %s",
          sensorTypeToString(sensorType), enabled ? "enabled" : "disabled");
@@ -217,9 +217,9 @@ void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled) {
   bool sent = v3_broadcast_sensor_status(sensorType, enabled);
   
   if (sent) {
-    DEBUG_SENSORSF("[SENSOR_STATUS_TX] SUCCESS: Broadcast %s status", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_METADATAF("[SENSOR_STATUS_TX] SUCCESS: Broadcast %s status", sensorTypeToString(sensorType));
   } else {
-    DEBUG_SENSORSF("[SENSOR_STATUS_TX] ERROR: Failed to broadcast %s status", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_METADATAF("[SENSOR_STATUS_TX] ERROR: Failed to broadcast %s status", sensorTypeToString(sensorType));
   }
 }
 
@@ -228,10 +228,10 @@ static bool startSensorBroadcaster();
 static void stopSensorBroadcaster();
 
 void startSensorDataStreaming(RemoteSensorType sensorType) {
-  DEBUG_SENSORSF("[SENSOR_STREAM] startSensorDataStreaming() called with type=%d (%s)", sensorType, sensorTypeToString(sensorType));
+  DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] startSensorDataStreaming() called with type=%d (%s)", sensorType, sensorTypeToString(sensorType));
   
   if (sensorType >= REMOTE_SENSOR_MAX) {
-    DEBUG_SENSORSF("[SENSOR_STREAM] ERROR: Invalid sensor type %d (max=%d)", sensorType, REMOTE_SENSOR_MAX);
+    DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] ERROR: Invalid sensor type %d (max=%d)", sensorType, REMOTE_SENSOR_MAX);
     return;
   }
   
@@ -239,7 +239,7 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
   // Bond master: send STREAM_CTRL to worker — master doesn't have the sensors locally
   if (gSettings.bondModeEnabled && isBondMaster()) {
     extern bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable);
-    DEBUG_SENSORSF("[SENSOR_STREAM] Bond master: sending STREAM_CTRL %s ON to worker", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Bond master: sending STREAM_CTRL %s ON to worker", sensorTypeToString(sensorType));
     bool sent = sendBondStreamCtrl(sensorType, true);
     if (sent) {
       // Update local flag so UI reflects the requested streaming state
@@ -252,7 +252,7 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
   }
 #endif
   
-  DEBUG_SENSORSF("[SENSOR_STREAM] Setting streaming flag for %s to TRUE", sensorTypeToString(sensorType));
+  DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Setting streaming flag for %s to TRUE", sensorTypeToString(sensorType));
   
   // Ensure master broadcast flag is enabled so sensor data reaches the cache
   if (!gSensorBroadcastEnabled) {
@@ -275,7 +275,7 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
     xSemaphoreGive(gSensorCacheMutex);
   }
   
-  DEBUG_SENSORSF("[SENSOR_STREAM] Streaming enabled: %s (flag=%d)",
+  DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Streaming enabled: %s (flag=%d)",
          sensorTypeToString(sensorType), gSensorStreamingEnabled[sensorType]);
   
   DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Started streaming for %s",
@@ -285,10 +285,10 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
 }
 
 void stopSensorDataStreaming(RemoteSensorType sensorType) {
-  DEBUG_SENSORSF("[SENSOR_STREAM] stopSensorDataStreaming() called with type=%d (%s)", sensorType, sensorTypeToString(sensorType));
+  DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] stopSensorDataStreaming() called with type=%d (%s)", sensorType, sensorTypeToString(sensorType));
   
   if (sensorType >= REMOTE_SENSOR_MAX) {
-    DEBUG_SENSORSF("[SENSOR_STREAM] ERROR: Invalid sensor type %d (max=%d)", sensorType, REMOTE_SENSOR_MAX);
+    DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] ERROR: Invalid sensor type %d (max=%d)", sensorType, REMOTE_SENSOR_MAX);
     return;
   }
   
@@ -296,7 +296,7 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
   // Bond master: send STREAM_CTRL OFF to worker
   if (gSettings.bondModeEnabled && isBondMaster()) {
     extern bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable);
-    DEBUG_SENSORSF("[SENSOR_STREAM] Bond master: sending STREAM_CTRL %s OFF to worker", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Bond master: sending STREAM_CTRL %s OFF to worker", sensorTypeToString(sensorType));
     sendBondStreamCtrl(sensorType, false);
     // Update local flag so UI reflects the stopped streaming state
     gSensorStreamingEnabled[sensorType] = false;
@@ -305,7 +305,7 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
   }
 #endif
   
-  DEBUG_SENSORSF("[SENSOR_STREAM] Setting streaming flag for %s to FALSE", sensorTypeToString(sensorType));
+  DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Setting streaming flag for %s to FALSE", sensorTypeToString(sensorType));
   gSensorStreamingEnabled[sensorType] = false;
   
   // Check if all sensors are now disabled - if so, stop broadcaster task
@@ -321,7 +321,7 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
     DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] All sensors disabled, task stopped");
   }
   
-  DEBUG_SENSORSF("[SENSOR_STREAM] Streaming disabled: %s (flag=%d)",
+  DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Streaming disabled: %s (flag=%d)",
          sensorTypeToString(sensorType), gSensorStreamingEnabled[sensorType]);
   
   DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Stopped streaming for %s",
@@ -341,7 +341,7 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
 
 void setSensorBroadcastEnabled(bool enabled) {
   gSensorBroadcastEnabled = enabled;
-  DEBUG_SENSORSF("[SENSOR_BROADCAST] Sensor broadcasting %s", enabled ? "ENABLED" : "DISABLED");
+  DEBUG_ESPNOW_STREAMF("[SENSOR_BROADCAST] Sensor broadcasting %s", enabled ? "ENABLED" : "DISABLED");
 }
 
 bool isSensorBroadcastEnabled() {
@@ -401,7 +401,7 @@ void espnowSensorStatusPeriodicTick() {
 // This is a fast, non-blocking write - no ESP-NOW transmission here
 void sendSensorDataUpdate(RemoteSensorType sensorType, const char* jsonData, size_t jsonLen) {
   if (sensorType >= REMOTE_SENSOR_MAX) {
-    DEBUG_SENSORSF("[CACHE_UPDATE] REJECT: Invalid sensor type %d", sensorType);
+    DEBUG_ESPNOW_METADATAF("[CACHE_UPDATE] REJECT: Invalid sensor type %d", sensorType);
     return;
   }
   if (!jsonData) return;
@@ -424,24 +424,24 @@ void sendSensorDataUpdate(RemoteSensorType sensorType, const char* jsonData, siz
     cache->dirty = true;
     cache->lastUpdate = millis();
     
-    DEBUG_SENSORSF("[CACHE_UPDATE] %s len=%u wasDirty=%d age=%lums json=%.60s",
+    DEBUG_ESPNOW_METADATAF("[CACHE_UPDATE] %s len=%u wasDirty=%d age=%lums json=%.60s",
                    sensorTypeToString(sensorType), (unsigned)len, wasDirty, 
                    timeSinceLastUpdate, cache->jsonData);
     
     xSemaphoreGive(gSensorCacheMutex);
   } else {
-    DEBUG_SENSORSF("[CACHE_UPDATE] %s MUTEX_TIMEOUT", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_METADATAF("[CACHE_UPDATE] %s MUTEX_TIMEOUT", sensorTypeToString(sensorType));
   }
 }
 
 // Force immediate broadcast of a sensor (event-driven API)
 void forceSensorBroadcast(RemoteSensorType sensorType) {
   if (sensorType >= REMOTE_SENSOR_MAX) {
-    DEBUG_SENSORSF("[FORCE_SEND] REJECT: Invalid sensor type %d", sensorType);
+    DEBUG_ESPNOW_STREAMF("[FORCE_SEND] REJECT: Invalid sensor type %d", sensorType);
     return;
   }
   if (!gSensorStreamingEnabled[sensorType]) {
-    DEBUG_SENSORSF("[FORCE_SEND] REJECT: %s streaming not enabled", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_STREAMF("[FORCE_SEND] REJECT: %s streaming not enabled", sensorTypeToString(sensorType));
     return;
   }
   
@@ -450,18 +450,18 @@ void forceSensorBroadcast(RemoteSensorType sensorType) {
     unsigned long cacheAge = millis() - gLocalSensorCache[sensorType].lastUpdate;
     gLocalSensorCache[sensorType].forceSend = true;
     
-    DEBUG_SENSORSF("[FORCE_SEND] %s SET (wasDirty=%d age=%lums)", 
+    DEBUG_ESPNOW_STREAMF("[FORCE_SEND] %s SET (wasDirty=%d age=%lums)", 
                    sensorTypeToString(sensorType), wasDirty, cacheAge);
     
     xSemaphoreGive(gSensorCacheMutex);
   } else {
-    DEBUG_SENSORSF("[FORCE_SEND] %s MUTEX_TIMEOUT", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_STREAMF("[FORCE_SEND] %s MUTEX_TIMEOUT", sensorTypeToString(sensorType));
   }
 }
 
 // Internal: Actually transmit sensor data via ESP-NOW (called by broadcaster task)
 static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen) {
-  DEBUG_SENSORSF("[SENSOR_TX] type=%s len=%u", sensorTypeToString(sensorType), jsonLen);
+  DEBUG_ESPNOW_STREAMF("[SENSOR_TX] type=%s len=%u", sensorTypeToString(sensorType), jsonLen);
   
   
   // Send via V3 binary protocol (both bond and mesh modes)
@@ -472,22 +472,22 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
   if (gSettings.bondModeEnabled && isBondWorker()) {
     // Bond mode worker - send via v3 binary protocol to master
     if (isBondModeOnline()) {
-      DEBUG_SENSORSF("[SENSOR_DATA_TX] Using v3 binary protocol for bond mode");
+      DEBUG_ESPNOW_STREAMF("[SENSOR_DATA_TX] Using v3 binary protocol for bond mode");
       
       // Send JSON data directly via v3 (receiver will store in cache)
       bool sent = sendBondedSensorData((uint8_t)sensorType, 
                                        (const uint8_t*)jsonData, 
                                        jsonLen);
       if (sent) {
-        DEBUG_SENSORSF("[SENSOR_DATA_TX] SUCCESS: Sent %s data via v3 to bonded master", 
+        DEBUG_ESPNOW_STREAMF("[SENSOR_DATA_TX] SUCCESS: Sent %s data via v3 to bonded master", 
                        sensorTypeToString(sensorType));
       } else {
-        DEBUG_SENSORSF("[SENSOR_DATA_TX] FAILED: v3 send failed for %s", 
+        DEBUG_ESPNOW_STREAMF("[SENSOR_DATA_TX] FAILED: v3 send failed for %s", 
                        sensorTypeToString(sensorType));
       }
       return;
     } else {
-      DEBUG_SENSORSF("[SENSOR_DATA_TX] SKIP: Bond mode but peer not online");
+      DEBUG_ESPNOW_STREAMF("[SENSOR_DATA_TX] SKIP: Bond mode but peer not online");
       return;
     }
   }
@@ -495,32 +495,32 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
   
   // Mesh mode - check prerequisites and use v2 JSON
   if (!gSensorBroadcastEnabled) {
-    DEBUG_SENSORSF("%s", "[SENSOR_DATA_TX] SKIP: Sensor broadcasting not enabled");
+    DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_DATA_TX] SKIP: Sensor broadcasting not enabled");
     return;
   }
   
   bool meshEn = meshEnabled();
-  DEBUG_SENSORSF("[SENSOR_DATA_TX] Pre-checks: meshEnabled=%d, meshRole=%d (0=worker,1=master)",
+  DEBUG_ESPNOW_STREAMF("[SENSOR_DATA_TX] Pre-checks: meshEnabled=%d, meshRole=%d (0=worker,1=master)",
          meshEn, gSettings.meshRole);
   
   if (!meshEn) {
-    DEBUG_SENSORSF("%s", "[SENSOR_DATA_TX] SKIP: Mesh not enabled");
+    DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_DATA_TX] SKIP: Mesh not enabled");
     return;
   }
   
   if (gSettings.meshRole == MESH_ROLE_MASTER) {
-    DEBUG_SENSORSF("%s", "[SENSOR_DATA_TX] SKIP: Master devices don't send sensor data");
+    DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_DATA_TX] SKIP: Master devices don't send sensor data");
     return;
   }
   
   // Mesh mode - send via V3 binary protocol
-  DEBUG_SENSORSF("%s", "[SENSOR_DATA_TX] Using V3 binary protocol for mesh broadcast");
+  DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_DATA_TX] Using V3 binary protocol for mesh broadcast");
   
   bool sent = v3_broadcast_sensor_data(sensorType, jsonData, jsonLen);
   if (sent) {
-    DEBUG_SENSORSF("[SENSOR_TX] SUCCESS: Broadcast %s data (mesh)", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_STREAMF("[SENSOR_TX] SUCCESS: Broadcast %s data (mesh)", sensorTypeToString(sensorType));
   } else {
-    DEBUG_SENSORSF("[SENSOR_TX] ERROR: Failed to broadcast %s data", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_STREAMF("[SENSOR_TX] ERROR: Failed to broadcast %s data", sensorTypeToString(sensorType));
   }
 }
 
@@ -543,7 +543,7 @@ static void sensorBroadcasterTask(void* param) {
     
     // Log interval check every 20 loops (~1 second)
     if ((loopCount % 20) == 0) {
-      DEBUG_SENSORSF("[BCAST_TICK] loop=%lu interval=%lums elapsed=%lums shouldBcast=%d",
+      DEBUG_ESPNOW_STREAMF("[BCAST_TICK] loop=%lu interval=%lums elapsed=%lums shouldBcast=%d",
                      loopCount, interval, timeSinceLastBroadcast, shouldBroadcast);
     }
     
@@ -569,7 +569,7 @@ static void sensorBroadcasterTask(void* param) {
         // Decision logic with detailed path tracking
         if (cache->forceSend) {
           // PATH A: Force-send (event-driven, immediate)
-          DEBUG_SENSORSF("[BCAST_PATH_A] %s FORCE_SEND (age=%lums len=%u)",
+          DEBUG_ESPNOW_STREAMF("[BCAST_PATH_A] %s FORCE_SEND (age=%lums len=%u)",
                          sensorTypeToString((RemoteSensorType)i), cacheAge, cache->jsonLength);
           memcpy(jsonCopy, cache->jsonData, cache->jsonLength);
           jsonCopy[cache->jsonLength] = '\0';
@@ -579,7 +579,7 @@ static void sensorBroadcasterTask(void* param) {
           needsSend = true;
         } else if (cache->dirty && shouldBroadcast) {
           // PATH B: Dirty cache + interval elapsed (periodic)
-          DEBUG_SENSORSF("[BCAST_PATH_B] %s DIRTY+INTERVAL (age=%lums len=%u elapsed=%lums)",
+          DEBUG_ESPNOW_STREAMF("[BCAST_PATH_B] %s DIRTY+INTERVAL (age=%lums len=%u elapsed=%lums)",
                          sensorTypeToString((RemoteSensorType)i), cacheAge, cache->jsonLength, timeSinceLastBroadcast);
           memcpy(jsonCopy, cache->jsonData, cache->jsonLength);
           jsonCopy[cache->jsonLength] = '\0';
@@ -590,13 +590,13 @@ static void sensorBroadcasterTask(void* param) {
         } else if (cache->dirty && !shouldBroadcast) {
           // PATH C: Dirty but waiting for interval (rate-limited)
           if ((loopCount % 20) == 0) {  // Log every ~1 second
-            DEBUG_SENSORSF("[BCAST_PATH_C] %s DIRTY_WAITING (age=%lums wait=%lums)",
+            DEBUG_ESPNOW_STREAMF("[BCAST_PATH_C] %s DIRTY_WAITING (age=%lums wait=%lums)",
                            sensorTypeToString((RemoteSensorType)i), cacheAge, interval - timeSinceLastBroadcast);
           }
         } else if (!cache->dirty && shouldBroadcast) {
           // PATH D: Interval elapsed but cache is clean (no new data)
           if ((loopCount % 20) == 0) {  // Log every ~1 second
-            DEBUG_SENSORSF("[BCAST_PATH_D] %s CLEAN_SKIP (age=%lums)",
+            DEBUG_ESPNOW_STREAMF("[BCAST_PATH_D] %s CLEAN_SKIP (age=%lums)",
                            sensorTypeToString((RemoteSensorType)i), cacheAge);
           }
         } else {
@@ -609,14 +609,14 @@ static void sensorBroadcasterTask(void* param) {
       
       // Transmit outside of mutex to avoid blocking sensor updates
       if (needsSend && jsonLen > 0) {
-        DEBUG_SENSORSF("[BCAST_TX] %s len=%u forced=%d dirty=%d",
+        DEBUG_ESPNOW_STREAMF("[BCAST_TX] %s len=%u forced=%d dirty=%d",
                        sensorTypeToString((RemoteSensorType)i), jsonLen, wasForced, wasDirty);
         transmitSensorData((RemoteSensorType)i, jsonCopy, jsonLen);
       }
     }
     
     if (shouldBroadcast) {
-      DEBUG_SENSORSF("[BCAST_INTERVAL_RESET] Next broadcast in %lums", interval);
+      DEBUG_ESPNOW_STREAMF("[BCAST_INTERVAL_RESET] Next broadcast in %lums", interval);
       gLastBroadcastTime = now;
     }
     
@@ -673,7 +673,7 @@ static void stopSensorBroadcaster() {
 String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensorType) {
   RemoteSensorData* entry = findCacheEntry(deviceMac, sensorType);
   if (!entry || !entry->valid) {
-    DEBUG_SENSORSF("[GET_REMOTE_JSON] No valid entry for sensor type %d", sensorType);
+    DEBUG_ESPNOW_METADATAF("[GET_REMOTE_JSON] No valid entry for sensor type %d", sensorType);
     return "{\"error\":\"No data available\"}";
   }
   
@@ -681,11 +681,11 @@ String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensor
   unsigned long now = millis();
   if (now - entry->lastUpdate > REMOTE_SENSOR_TTL_MS) {
     entry->valid = false;
-    DEBUG_SENSORSF("[GET_REMOTE_JSON] Data expired for sensor type %d (age=%lu)", sensorType, now - entry->lastUpdate);
+    DEBUG_ESPNOW_METADATAF("[GET_REMOTE_JSON] Data expired for sensor type %d (age=%lu)", sensorType, now - entry->lastUpdate);
     return "{\"error\":\"Data expired\"}";
   }
   
-  DEBUG_SENSORSF("[GET_REMOTE_JSON] Returning cached data: entry=%p, valid=%d, lastUpdate=%lu, age=%lu, len=%u, data=%.80s",
+  DEBUG_ESPNOW_METADATAF("[GET_REMOTE_JSON] Returning cached data: entry=%p, valid=%d, lastUpdate=%lu, age=%lu, len=%u, data=%.80s",
                  entry, entry->valid, entry->lastUpdate, now - entry->lastUpdate, entry->jsonLength, entry->jsonData);
   // Return from fixed buffer (creates String only at API response time, not on every cache update)
   return String(entry->jsonData);
@@ -835,57 +835,57 @@ int buildThermalDataJSONInteger(char* buf, size_t bufSize) {
 const char* cmd_espnow_sensorstream(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Command received: '%s'", argsInput.c_str());
+  DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] Command received: '%s'", argsInput.c_str());
   
   // Parse: <sensor> <on|off>  (dispatcher strips "espnow sensorstream" prefix)
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2)) {
-    DEBUG_SENSORSF("%s", "[SENSOR_STREAM_CMD] ERROR: Missing sensor name");
+    DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_STREAM_CMD] ERROR: Missing sensor name");
     return "Usage: espnow sensorstream <sensor> <on|off>";
   }
 
   String sensorName = a.arg(0);
   normalizeCliArg(sensorName);
 
-  DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Parsed: sensor='%s' action='%s'", sensorName.c_str(), a.arg(1).c_str());
+  DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] Parsed: sensor='%s' action='%s'", sensorName.c_str(), a.arg(1).c_str());
 
   // Convert sensor name to type
   RemoteSensorType sensorType = stringToSensorType(sensorName.c_str());
   if (strcmp(sensorTypeToString(sensorType), sensorName.c_str()) != 0) {
-    DEBUG_SENSORSF("[SENSOR_STREAM_CMD] ERROR: Unknown sensor '%s'", sensorName.c_str());
+    DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] ERROR: Unknown sensor '%s'", sensorName.c_str());
     return "Usage: espnow sensorstream <sensor> <on|off>";
   }
-  DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Sensor type resolved: %d (%s)", sensorType, sensorTypeToString(sensorType));
+  DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] Sensor type resolved: %d (%s)", sensorType, sensorTypeToString(sensorType));
 
   // Parse action
   int boolResult = parseBoolArg(a.arg(1));
   if (boolResult < 0) {
-    DEBUG_SENSORSF("[SENSOR_STREAM_CMD] ERROR: Invalid action '%s'", a.arg(1).c_str());
+    DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] ERROR: Invalid action '%s'", a.arg(1).c_str());
     return "Usage: espnow sensorstream <sensor> <on|off>";
   }
   bool enable = (boolResult == 1);
   
-  DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Action: %s streaming", enable ? "ENABLE" : "DISABLE");
+  DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] Action: %s streaming", enable ? "ENABLE" : "DISABLE");
   
   // Only workers can stream sensor data
-  DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Current mesh role: %d (0=worker, 1=master)", gSettings.meshRole);
+  DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] Current mesh role: %d (0=worker, 1=master)", gSettings.meshRole);
   
   if (gSettings.meshRole == MESH_ROLE_MASTER) {
-    DEBUG_SENSORSF("%s", "[SENSOR_STREAM_CMD] ERROR: Master devices cannot stream sensor data");
+    DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_STREAM_CMD] ERROR: Master devices cannot stream sensor data");
     return "Error: Master devices receive sensor data, they don't stream it";
   }
   
   // Enable/disable streaming
   if (enable) {
-    DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Calling startSensorDataStreaming(%d)", sensorType);
+    DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] Calling startSensorDataStreaming(%d)", sensorType);
     startSensorDataStreaming(sensorType);
-    DEBUG_SENSORSF("[SENSOR_STREAM_CMD] SUCCESS: Started streaming %s", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] SUCCESS: Started streaming %s", sensorTypeToString(sensorType));
     BROADCAST_PRINTF("[ESP-NOW] Started streaming %s sensor data to master", sensorTypeToString(sensorType));
     return "OK: Sensor streaming started";
   } else {
-    DEBUG_SENSORSF("[SENSOR_STREAM_CMD] Calling stopSensorDataStreaming(%d)", sensorType);
+    DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] Calling stopSensorDataStreaming(%d)", sensorType);
     stopSensorDataStreaming(sensorType);
-    DEBUG_SENSORSF("[SENSOR_STREAM_CMD] SUCCESS: Stopped streaming %s", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] SUCCESS: Stopped streaming %s", sensorTypeToString(sensorType));
     BROADCAST_PRINTF("[ESP-NOW] Stopped streaming %s sensor data", sensorTypeToString(sensorType));
     return "OK: Sensor streaming stopped";
   }

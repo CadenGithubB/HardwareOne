@@ -108,7 +108,7 @@ static void updateExternalSensor(const char* topic, int topicLen, const char* da
         externalSensors[i].value = dataStr;
         externalSensors[i].lastUpdate = millis();
         xSemaphoreGive(externalSensorMutex);
-        DEBUG_SYSTEMF("[MQTT] Updated sensor: %s", topicStr.c_str());
+        DEBUG_MQTT_PUBSUBF("Updated sensor: %s", topicStr.c_str());
         return;
       }
     }
@@ -123,7 +123,7 @@ static void updateExternalSensor(const char* topic, int topicLen, const char* da
       externalSensors[externalSensorCount].value = dataStr;
       externalSensors[externalSensorCount].lastUpdate = millis();
       externalSensorCount++;
-      INFO_SYSTEMF("[MQTT] New external sensor: %s", topicStr.c_str());
+      INFO_MQTT_PUBSUBF("New external sensor: %s", topicStr.c_str());
     }
     xSemaphoreGive(externalSensorMutex);
   }
@@ -146,9 +146,9 @@ static void subscribeToExternalTopics() {
     if (topic.length() > 0) {
       int msgId = esp_mqtt_client_subscribe(mqttClient, topic.c_str(), 0);
       if (msgId >= 0) {
-        INFO_SYSTEMF("[MQTT] Subscribed to: %s", topic.c_str());
+        INFO_MQTT_PUBSUBF("Subscribed to: %s", topic.c_str());
       } else {
-        WARN_SYSTEMF("[MQTT] Failed to subscribe: %s", topic.c_str());
+        WARN_MQTTF("Failed to subscribe: %s", topic.c_str());
       }
     }
     
@@ -187,29 +187,29 @@ bool getExternalSensor(int index, String& topic, String& name, String& value, un
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry mqttSettingEntries[] = {
-  { "mqttClientEnabled",       SETTING_BOOL,   &gSettings.mqttClientEnabled,      false, 0, nullptr, 0, 1, "MQTT Enabled", nullptr, false },
-  { "mqttAutoStart",          SETTING_BOOL,   &gSettings.mqttAutoStart,          false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false },
-  { "mqttHost",               SETTING_STRING, &gSettings.mqttHost,               0, 0, "", 0, 0, "Broker Host", nullptr, false },
-  { "mqttPort",               SETTING_INT,    &gSettings.mqttPort,               1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false },
-  { "mqttTLSMode",            SETTING_INT,    &gSettings.mqttTLSMode,            0, 0, nullptr, 0, 2, "TLS Mode (0=None, 1=TLS, 2=TLS+Verify)", nullptr, false },
-  { "mqttCACertPath",         SETTING_STRING, &gSettings.mqttCACertPath,         0, 0, "/system/certs/mqtt_ca.crt", 0, 0, "CA certificate path", nullptr, false },
-  { "mqttSubscribeExternal",  SETTING_BOOL,   &gSettings.mqttSubscribeExternal,  false, 0, nullptr, 0, 1, "Subscribe to external topics", nullptr, false },
-  { "mqttSubscribeTopics",    SETTING_STRING, &gSettings.mqttSubscribeTopics,    0, 0, "", 0, 0, "Topics (comma-separated)", nullptr, false },
-  { "mqttUser",               SETTING_STRING, &gSettings.mqttUser,               0, 0, "", 0, 0, "Username", nullptr, false },
-  { "mqttPassword",           SETTING_STRING, &gSettings.mqttPassword,           0, 0, "", 0, 0, "Password", nullptr, true },
-  { "mqttBaseTopic",          SETTING_STRING, &gSettings.mqttBaseTopic,          0, 0, "", 0, 0, "Base Topic", nullptr, false },
-  { "mqttDiscoveryPrefix",    SETTING_STRING, &gSettings.mqttDiscoveryPrefix,    0, 0, "homeassistant", 0, 0, "Discovery Prefix", nullptr, false },
-  { "mqttPublishIntervalMs",  SETTING_INT,    &gSettings.mqttPublishIntervalMs,  10000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false },
-  { "mqttPublishWiFi",        SETTING_BOOL,   &gSettings.mqttPublishWiFi,        false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false },
-  { "mqttPublishSystem",      SETTING_BOOL,   &gSettings.mqttPublishSystem,      false, 0, nullptr, 0, 1, "Publish system info", nullptr, false },
-  { "mqttPublishThermal",     SETTING_BOOL,   &gSettings.mqttPublishThermal,     false, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false },
-  { "mqttPublishToF",         SETTING_BOOL,   &gSettings.mqttPublishToF,         false, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false },
-  { "mqttPublishIMU",         SETTING_BOOL,   &gSettings.mqttPublishIMU,         false, 0, nullptr, 0, 1, "Publish IMU data", nullptr, false },
-  { "mqttPublishPresence",    SETTING_BOOL,   &gSettings.mqttPublishPresence,    false, 0, nullptr, 0, 1, "Publish presence data", nullptr, false },
-  { "mqttPublishGPS",         SETTING_BOOL,   &gSettings.mqttPublishGPS,         false, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false },
-  { "mqttPublishAPDS",        SETTING_BOOL,   &gSettings.mqttPublishAPDS,        false, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false },
-  { "mqttPublishRTC",         SETTING_BOOL,   &gSettings.mqttPublishRTC,         false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false },
-  { "mqttPublishGamepad",     SETTING_BOOL,   &gSettings.mqttPublishGamepad,     false, 0, nullptr, 0, 1, "Publish gamepad data", nullptr, false }
+  { "mqttClientEnabled", SETTING_BOOL, &gSettings.mqttClientEnabled, false, 0, nullptr, 0, 1, "MQTT Enabled", nullptr, false, nullptr, nullptr },
+  { "mqttAutoStart", SETTING_BOOL, &gSettings.mqttAutoStart, false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, "broker", nullptr },
+  { "mqttHost", SETTING_STRING, &gSettings.mqttHost, 0, 0, "", 0, 0, "Broker Host", nullptr, false, "broker", nullptr },
+  { "mqttPort", SETTING_INT, &gSettings.mqttPort, 1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false, "broker", nullptr },
+  { "mqttTLSMode", SETTING_INT, &gSettings.mqttTLSMode, 0, 0, nullptr, 0, 2, "TLS Mode (0=None, 1=TLS, 2=TLS+Verify)", nullptr, false, "broker", nullptr },
+  { "mqttCACertPath", SETTING_STRING, &gSettings.mqttCACertPath, 0, 0, "/system/certs/mqtt_ca.crt", 0, 0, "CA certificate path", nullptr, false, "broker", nullptr },
+  { "mqttSubscribeExternal", SETTING_BOOL, &gSettings.mqttSubscribeExternal, false, 0, nullptr, 0, 1, "Subscribe to external topics", nullptr, false, "topics", nullptr },
+  { "mqttSubscribeTopics", SETTING_STRING, &gSettings.mqttSubscribeTopics, 0, 0, "", 0, 0, "Topics (comma-separated)", nullptr, false, "topics", nullptr },
+  { "mqttUser", SETTING_STRING, &gSettings.mqttUser, 0, 0, "", 0, 0, "Username", nullptr, false, "broker", nullptr },
+  { "mqttPassword", SETTING_STRING, &gSettings.mqttPassword, 0, 0, "", 0, 0, "Password", nullptr, true, "broker", nullptr },
+  { "mqttBaseTopic", SETTING_STRING, &gSettings.mqttBaseTopic, 0, 0, "", 0, 0, "Base Topic", nullptr, false, "topics", nullptr },
+  { "mqttDiscoveryPrefix", SETTING_STRING, &gSettings.mqttDiscoveryPrefix, 0, 0, "homeassistant", 0, 0, "Discovery Prefix", nullptr, false, "topics", nullptr },
+  { "mqttPublishIntervalMs", SETTING_INT, &gSettings.mqttPublishIntervalMs, 10000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false, "publish", nullptr },
+  { "mqttPublishWiFi", SETTING_BOOL, &gSettings.mqttPublishWiFi, false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false, "publish", nullptr },
+  { "mqttPublishSystem", SETTING_BOOL, &gSettings.mqttPublishSystem, false, 0, nullptr, 0, 1, "Publish system info", nullptr, false, "publish", nullptr },
+  { "mqttPublishThermal", SETTING_BOOL, &gSettings.mqttPublishThermal, false, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false, "publish", nullptr },
+  { "mqttPublishToF", SETTING_BOOL, &gSettings.mqttPublishToF, false, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false, "publish", nullptr },
+  { "mqttPublishIMU", SETTING_BOOL, &gSettings.mqttPublishIMU, false, 0, nullptr, 0, 1, "Publish IMU data", nullptr, false, "publish", nullptr },
+  { "mqttPublishPresence", SETTING_BOOL, &gSettings.mqttPublishPresence, false, 0, nullptr, 0, 1, "Publish presence data", nullptr, false, "publish", nullptr },
+  { "mqttPublishGPS", SETTING_BOOL, &gSettings.mqttPublishGPS, false, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false, "publish", nullptr },
+  { "mqttPublishAPDS", SETTING_BOOL, &gSettings.mqttPublishAPDS, false, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false, "publish", nullptr },
+  { "mqttPublishRTC", SETTING_BOOL, &gSettings.mqttPublishRTC, false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false, "publish", nullptr },
+  { "mqttPublishGamepad", SETTING_BOOL, &gSettings.mqttPublishGamepad, false, 0, nullptr, 0, 1, "Publish gamepad data", nullptr, false, "publish", nullptr }
 };
 
 static bool isMqttAvailable() {
@@ -219,7 +219,7 @@ static bool isMqttAvailable() {
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule mqttSettingsModule = {
   "mqtt",
-  "mqtt",
+  "network.mqtt",
   mqttSettingEntries,
   sizeof(mqttSettingEntries) / sizeof(mqttSettingEntries[0]),
   isMqttAvailable,
@@ -309,7 +309,7 @@ static void publishDiscoveryConfig(const char* component, const char* objectId,
   
   // Publish with retain so HA picks it up even if it restarts
   esp_mqtt_client_publish(mqttClient, discoveryTopic.c_str(), configJson, 0, 1, true);
-  DEBUG_SYSTEMF("[MQTT] Discovery: %s", objectId);
+  DEBUG_MQTT_DISCOVERYF("Discovery: %s", objectId);
 }
 
 // Subscribe to command topic for receiving commands from HA
@@ -319,9 +319,9 @@ static void subscribeToCommandTopic() {
   String commandTopic = gSettings.mqttBaseTopic + "/command";
   int msgId = esp_mqtt_client_subscribe(mqttClient, commandTopic.c_str(), 1);
   if (msgId >= 0) {
-    INFO_SYSTEMF("[MQTT] Subscribed to command topic: %s", commandTopic.c_str());
+    INFO_MQTT_PUBSUBF("Subscribed to command topic: %s", commandTopic.c_str());
   } else {
-    WARN_SYSTEMF("[MQTT] Failed to subscribe to command topic");
+    WARN_MQTTF("Failed to subscribe to command topic");
   }
 }
 
@@ -347,13 +347,13 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   
   if (payload.length() == 0) return;
   
-  DEBUG_SYSTEMF("[MQTT] Command payload: %s", payload.c_str());
+  DEBUG_MQTT_COMMANDSF("Command payload: %s", payload.c_str());
   
   // Parse JSON payload
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, payload);
   if (err) {
-    WARN_SYSTEMF("[MQTT] Command JSON parse error: %s", err.c_str());
+    WARN_MQTTF("Command JSON parse error: %s", err.c_str());
     esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), 
       "{\"ok\":false,\"error\":\"Invalid JSON format\"}", 0, 0, false);
     return;
@@ -365,7 +365,7 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   
   // Validate required fields
   if (strlen(username) == 0 || strlen(password) == 0 || strlen(command) == 0) {
-    WARN_SYSTEMF("[MQTT] Command missing user/pass/cmd fields");
+    WARN_MQTTF("Command missing user/pass/cmd fields");
     esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
       "{\"ok\":false,\"error\":\"Missing user, pass, or cmd field\"}", 0, 0, false);
     return;
@@ -374,18 +374,18 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   // Check for target field (mesh bridge routing)
   const char* target = doc["target"] | "";
   
-  INFO_SYSTEMF("[MQTT] Command from user '%s': %s%s%s", username, command,
+  INFO_MQTT_COMMANDSF("Command from user '%s': %s%s%s", username, command,
                strlen(target) > 0 ? " target=" : "", target);
   
   // Authenticate user
   if (!isValidUser(String(username), String(password))) {
-    WARN_SYSTEMF("[MQTT] Authentication FAILED for user '%s'", username);
+    WARN_MQTTF("Authentication FAILED for user '%s'", username);
     esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
       "{\"ok\":false,\"error\":\"Authentication failed\"}", 0, 0, false);
     return;
   }
   
-  DEBUG_SYSTEMF("[MQTT] Authentication successful for user '%s'", username);
+  DEBUG_MQTT_COMMANDSF("Authentication successful for user '%s'", username);
   
 #if ENABLE_ESPNOW
   // If target is specified, route command to mesh devices instead of executing locally
@@ -435,7 +435,7 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   static char* cmdResult = nullptr;
   if (!cmdResult) cmdResult = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "mqtt.cmdResult");
   if (!cmdResult) {
-    DEBUG_SYSTEMF("[MQTT] Failed to allocate command result buffer");
+    DEBUG_MQTT_COMMANDSF("Failed to allocate command result buffer");
     return;
   }
   bool success = executeCommand(ctx, command, cmdResult, 2048);
@@ -455,7 +455,7 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   serializeJson(respDoc, respStr);
   esp_mqtt_client_publish(mqttClient, responseTopic.c_str(), respStr.c_str(), 0, 0, false);
   
-  DEBUG_SYSTEMF("[MQTT] Command response: ok=%d", success);
+  DEBUG_MQTT_COMMANDSF("Command response: ok=%d", success);
 }
 
 // Forward declarations for mesh peer discovery (defined below)
@@ -467,7 +467,7 @@ static void publishMeshPeerDiscovery();
 static void publishMQTTDiscovery() {
   if (!mqttTofConnected || gSettings.mqttDiscoveryPrefix.length() == 0) return;
   
-  INFO_SYSTEMF("[MQTT] Publishing Home Assistant discovery configs...");
+  INFO_MQTT_DISCOVERYF("Publishing Home Assistant discovery configs...");
   
   // System sensors (always available)
   if (gSettings.mqttPublishSystem) {
@@ -551,7 +551,7 @@ static void publishMQTTDiscovery() {
   }
 #endif
 
-  INFO_SYSTEMF("[MQTT] Discovery configs published");
+  INFO_MQTT_DISCOVERYF("Discovery configs published");
   
   // Publish discovery for mesh peers (master bridge mode)
 #if ENABLE_ESPNOW
@@ -686,7 +686,7 @@ static void publishMeshPeerDiscovery() {
   }
 
   if (peerCount > 0) {
-    INFO_SYSTEMF("[MQTT] Mesh bridge: published discovery for %d peer(s)", peerCount);
+    INFO_MQTT_DISCOVERYF("Mesh bridge: published discovery for %d peer(s)", peerCount);
   }
 }
 
@@ -779,7 +779,7 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       mqttTofConnected = true;
       lastError = "";
       broadcastOutput("[MQTT] Connected to broker");
-      INFO_SYSTEMF("[MQTT] Connected to %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
+      INFO_MQTT_CONNECTIONF("Connected to %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
       
       // Publish availability
       if (gSettings.mqttBaseTopic.length() > 0) {
@@ -799,13 +799,13 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       
     case MQTT_EVENT_DISCONNECTED:
       mqttTofConnected = false;
-      WARN_SYSTEMF("[MQTT] Disconnected from broker");
+      WARN_MQTTF("Disconnected from broker");
       break;
       
     case MQTT_EVENT_ERROR:
       mqttTofConnected = false;
       lastError = "Connection error";
-      ERROR_SYSTEMF("[MQTT] Error event");
+      ERROR_MQTTF("Error event");
       break;
       
     case MQTT_EVENT_DATA:
@@ -816,7 +816,7 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       if (gSettings.mqttSubscribeExternal && event->topic_len > 0) {
         updateExternalSensor(event->topic, event->topic_len, event->data, event->data_len);
       }
-      DEBUG_SYSTEMF("[MQTT] Received: topic=%.*s data=%.*s",
+      DEBUG_MQTT_PUBSUBF("Received: topic=%.*s data=%.*s",
                     event->topic_len, event->topic,
                     event->data_len, event->data);
       break;
@@ -861,7 +861,7 @@ bool startMQTT() {
     snprintf(macStr, sizeof(macStr), "%02x%02x%02x%02x%02x%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     { char topicBuf[32]; snprintf(topicBuf, sizeof(topicBuf), "hardwareone/%s", macStr); setSetting(gSettings.mqttBaseTopic, String(topicBuf)); }
-    INFO_SYSTEMF("[MQTT] Auto-generated base topic: %s", gSettings.mqttBaseTopic.c_str());
+    INFO_MQTT_DISCOVERYF("Auto-generated base topic: %s", gSettings.mqttBaseTopic.c_str());
   }
   
   // Configure MQTT client - strings must persist until esp_mqtt_client_init() completes
@@ -888,22 +888,22 @@ bool startMQTT() {
         certFile.close();
         mqtt_cfg.broker.verification.certificate = caCertData.c_str();
         mqtt_cfg.broker.verification.skip_cert_common_name_check = false;
-        INFO_SYSTEMF("[MQTT] TLS + Verify: using %s", gSettings.mqttCACertPath.c_str());
+        INFO_MQTT_CONNECTIONF("TLS + Verify: using %s", gSettings.mqttCACertPath.c_str());
       } else {
         lastError = "CA cert file not found: " + gSettings.mqttCACertPath;
-        ERROR_SYSTEMF("[MQTT] %s", lastError.c_str());
+        ERROR_MQTTF("%s", lastError.c_str());
         return false;
       }
     } else {
       lastError = "TLS+Verify requires CA cert path";
-      ERROR_SYSTEMF("[MQTT] %s", lastError.c_str());
+      ERROR_MQTTF("%s", lastError.c_str());
       return false;
     }
   } else if (gSettings.mqttTLSMode == 1) {
     // TLS without certificate verification (encrypted but trusts any server)
     mqtt_cfg.broker.verification.skip_cert_common_name_check = true;
     mqtt_cfg.broker.verification.certificate = nullptr;
-    INFO_SYSTEMF("[MQTT] TLS enabled (no cert verification)");
+    INFO_MQTT_CONNECTIONF("TLS enabled (no cert verification)");
   }
   // Mode 0 = no TLS, no special config needed
   
@@ -923,7 +923,7 @@ bool startMQTT() {
   mqttClient = esp_mqtt_client_init(&mqtt_cfg);
   if (!mqttClient) {
     lastError = "Failed to initialize MQTT client";
-    ERROR_SYSTEMF("[MQTT] Client init failed");
+    ERROR_MQTTF("Client init failed");
     return false;
   }
   
@@ -933,7 +933,7 @@ bool startMQTT() {
   mqttEnabled = true;
   lastError = "";
   broadcastOutput("[MQTT] Client started");
-  INFO_SYSTEMF("[MQTT] Connecting to %s://%s:%d", (gSettings.mqttTLSMode > 0) ? "mqtts" : "mqtt", 
+  INFO_MQTT_CONNECTIONF("Connecting to %s://%s:%d", (gSettings.mqttTLSMode > 0) ? "mqtts" : "mqtt", 
                gSettings.mqttHost.c_str(), gSettings.mqttPort);
   
   return true;
@@ -973,7 +973,7 @@ void publishMQTTSensorData() {
   // Build sensor data JSON blob from caches
   char* jsonBuf = (char*)ps_alloc(16384, AllocPref::PreferPSRAM, "mqtt.json");
   if (!jsonBuf) {
-    WARN_SYSTEMF("[MQTT] Failed to allocate JSON buffer");
+    WARN_MQTTF("Failed to allocate JSON buffer");
     return;
   }
   
@@ -1086,9 +1086,9 @@ void publishMQTTSensorData() {
   int msg_id = esp_mqtt_client_publish(mqttClient, stateTopic.c_str(), jsonBuf, 0, 0, false);
   
   if (msg_id >= 0) {
-    DEBUG_SYSTEMF("[MQTT] Published %d bytes to %s", pos, stateTopic.c_str());
+    DEBUG_MQTT_PUBSUBF("Published %d bytes to %s", pos, stateTopic.c_str());
   } else {
-    WARN_SYSTEMF("[MQTT] Publish failed");
+    WARN_MQTTF("Publish failed");
   }
   
   free(jsonBuf);
@@ -1276,7 +1276,7 @@ const char* cmd_mqtttlsmode(const String& argsInput) {
   if (newMode > 0 && !VFS::existsGuarded("/system/certs", VFS::systemAuth("mqtt.cert.dir"))) {
     VFS::mkdirGuarded("/system",       VFS::systemAuth("mqtt.cert.dir"));
     VFS::mkdirGuarded("/system/certs", VFS::systemAuth("mqtt.cert.dir"));
-    INFO_SYSTEMF("[MQTT] Created /system/certs/ folder for certificates");
+    INFO_MQTT_CONNECTIONF("Created /system/certs/ folder for certificates");
   }
   
   // Auto-switch ports

@@ -3965,15 +3965,15 @@ static bool isESPSRConnected() {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry espsrSettingsEntries[] = {
-  { "srAutoStart",      SETTING_BOOL, &gSettings.srAutoStart,      0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr },
-  { "srModelSource",    SETTING_INT,  &gSettings.srModelSource,    0, 0, nullptr, 0, 2, "Model source (0=partition, 1=SD, 2=LittleFS)", nullptr },
-  { "srCommandTimeout", SETTING_INT,  &gSettings.srCommandTimeout, 6000, 0, nullptr, 1000, 30000, "Command timeout (ms)", nullptr }
+  { "srAutoStart", SETTING_BOOL, &gSettings.srAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, nullptr },
+  { "srModelSource", SETTING_INT, &gSettings.srModelSource, 0, 0, nullptr, 0, 2, "Model source (0=partition, 1=SD, 2=LittleFS)", nullptr, false, nullptr, nullptr },
+  { "srCommandTimeout", SETTING_INT, &gSettings.srCommandTimeout, 6000, 0, nullptr, 1000, 30000, "Command timeout (ms)", nullptr, false, nullptr, nullptr }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule espsrSettingsModule = {
   "espsr",
-  "espsr",
+  "apps.espsr",
   espsrSettingsEntries,
   sizeof(espsrSettingsEntries) / sizeof(espsrSettingsEntries[0]),
   isESPSRConnected,

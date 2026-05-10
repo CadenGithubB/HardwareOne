@@ -448,14 +448,13 @@ bool CommandArgs::hasKey(const String& key) const {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry cliSettingsEntries[] = {
-  { "webHistorySize", SETTING_INT, &gSettings.webCliHistorySize, 10, 0, nullptr, 1, 100, "Web History", nullptr },
-  { "oledHistorySize", SETTING_INT, &gSettings.oledCliHistorySize, 50, 0, nullptr, 10, 100, "OLED History", nullptr }
+  { "oledHistorySize", SETTING_INT, &gSettings.oledCliHistorySize, 50, 0, nullptr, 10, 100, "OLED History", nullptr, false, nullptr, nullptr }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule cliSettingsModule = {
   "cli",
-  "cli",
+  "system.cli",
   cliSettingsEntries,
   sizeof(cliSettingsEntries) / sizeof(cliSettingsEntries[0]),
   nullptr,

@@ -458,17 +458,17 @@ const size_t neopixelCommandsCount = sizeof(neopixelCommands) / sizeof(neopixelC
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry ledSettingEntries[] = {
-  { "ledBrightness",      SETTING_INT,    &gSettings.ledBrightness,      100, 0, nullptr, 0, 255, "Brightness", nullptr },
-  { "ledStartupEnabled",  SETTING_BOOL,   &gSettings.ledStartupEnabled,  true, 0, nullptr, 0, 1, "Startup Enabled", nullptr },
-  { "ledStartupEffect",   SETTING_STRING, &gSettings.ledStartupEffect,   0, 0, "rainbow", 0, 0, "Startup Effect", "rainbow,pulse,solid,chase,breathe" },
-  { "ledStartupColor",    SETTING_STRING, &gSettings.ledStartupColor,    0, 0, "cyan", 0, 0, "Startup Color", nullptr },
-  { "ledStartupColor2",   SETTING_STRING, &gSettings.ledStartupColor2,   0, 0, "magenta", 0, 0, "Startup Color 2", nullptr },
-  { "ledStartupDuration", SETTING_INT,    &gSettings.ledStartupDuration, 1000, 0, nullptr, 100, 10000, "Startup Duration (ms)", nullptr }
+  { "ledBrightness", SETTING_INT, &gSettings.ledBrightness, 100, 0, nullptr, 0, 255, "Brightness", nullptr, false, nullptr, nullptr },
+  { "ledStartupEnabled", SETTING_BOOL, &gSettings.ledStartupEnabled, true, 0, nullptr, 0, 1, "Startup Enabled", nullptr, false, nullptr, nullptr },
+  { "ledStartupEffect", SETTING_STRING, &gSettings.ledStartupEffect, 0, 0, "rainbow", 0, 0, "Startup Effect", "rainbow,pulse,solid,chase,breathe", false, nullptr, nullptr },
+  { "ledStartupColor", SETTING_STRING, &gSettings.ledStartupColor, 0, 0, "cyan", 0, 0, "Startup Color", nullptr, false, nullptr, nullptr },
+  { "ledStartupColor2", SETTING_STRING, &gSettings.ledStartupColor2, 0, 0, "magenta", 0, 0, "Startup Color 2", nullptr, false, nullptr, nullptr },
+  { "ledStartupDuration", SETTING_INT, &gSettings.ledStartupDuration, 1000, 0, nullptr, 100, 10000, "Startup Duration (ms)", nullptr, false, nullptr, nullptr }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule ledSettingsModule = {
-  "led", "led", ledSettingEntries,
+  "led", "hardware.led", ledSettingEntries,
   sizeof(ledSettingEntries) / sizeof(ledSettingEntries[0]),
   nullptr,
   "LED brightness and startup effects"

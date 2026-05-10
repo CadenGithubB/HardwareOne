@@ -289,7 +289,7 @@ String getCookieSID(httpd_req_t* req) {
   if (cookieLen > 100) {  // Only log if cookie is larger than expected
     int usagePct = (cookieLen * 100) / COOKIE_BUF_SIZE;
     // Limit URI length in logs to avoid format-truncation warnings
-    DEBUG_MEMORYF("[COOKIE_BUF] Used %u/%u bytes (%d%%) for %.96s",
+    DEBUG_MEMORY_BUFFERSF("[COOKIE_BUF] Used %u/%u bytes (%d%%) for %.96s",
                   (unsigned)cookieLen, (unsigned)COOKIE_BUF_SIZE, usagePct, req->uri);
   }
   // Trim leading spaces

@@ -968,7 +968,7 @@ static void displayGPSMap() {
       const char* wpName = oledKeyboardGetText();
       int idx = WaypointManager::addWaypoint(gMapCenterLat, gMapCenterLon, wpName);
       if (idx >= 0) {
-        INFO_SENSORSF("Marked waypoint %d: %s at %.5f, %.5f", idx, wpName, gMapCenterLat, gMapCenterLon);
+        INFO_MAPSF("Marked waypoint %d: %s at %.5f, %.5f", idx, wpName, gMapCenterLat, gMapCenterLon);
       }
       oledKeyboardReset();
       gOLEDKeyboardState.active = false;
@@ -1612,7 +1612,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     if (oledKeyboardIsCompleted()) {
       strncpy(gSearchResult, oledKeyboardGetText(), sizeof(gSearchResult) - 1);
       gSearchResult[sizeof(gSearchResult) - 1] = '\0';
-      DEBUG_SENSORSF("[MAP_SEARCH] Selected: '%s'", gSearchResult);
+      DEBUG_MAPSF("[MAP_SEARCH] Selected: '%s'", gSearchResult);
       
       // Find ALL matching features (iterate through tiles)
       gSearchResultCount = 0;
@@ -1673,7 +1673,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
           gMapManuallyPanned = true;
           gSearchResultsActive = (gSearchResultCount > 1);
           
-          DEBUG_SENSORSF("[MAP_SEARCH] Found %d matches for '%s', showing 1/%d", 
+          DEBUG_MAPSF("[MAP_SEARCH] Found %d matches for '%s', showing 1/%d", 
                        gSearchResultCount, gSearchResult, gSearchResultCount);
         }
       }
@@ -1703,7 +1703,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       // Use stored coordinates directly (tiled format stores coords, not indices)
       gMapCenterLat = gSearchResultCoords[gSearchResultCurrent].lat;
       gMapCenterLon = gSearchResultCoords[gSearchResultCurrent].lon;
-      DEBUG_SENSORSF("[MAP_SEARCH] Showing result %d/%d", 
+      DEBUG_MAPSF("[MAP_SEARCH] Showing result %d/%d", 
                    gSearchResultCurrent + 1, gSearchResultCount);
       return true;
     }

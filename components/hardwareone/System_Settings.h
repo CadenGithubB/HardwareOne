@@ -61,9 +61,7 @@ struct Settings {
       debugSse(false),
       debugCli(false),
       debugAuth(false),
-      debugSensors(false),
       debugEspNow(false),
-      debugSensorsGeneral(false),
       debugWifi(false),
       debugWifiConnection(false),
       debugWifiConfig(false),
@@ -83,6 +81,10 @@ struct Settings {
       debugLogger(false),
       debugEspNowStream(false),
       debugMqtt(false),
+      debugMqttConnection(false),
+      debugMqttPubsub(false),
+      debugMqttDiscovery(false),
+      debugMqttCommands(false),
       debugEspNowCore(false),
       debugEspNowRouter(false),
       debugEspNowMesh(false),
@@ -94,8 +96,10 @@ struct Settings {
       debugAutoCondition(false),
       debugAutoTiming(false),
       debugMemory(false),
+      debugMemoryHeap(false),
+      debugMemoryStack(false),
+      debugMemoryBuffers(false),
       debugCommandSystem(false),
-      debugSettingsSystem(false),
       debugBluetooth(false),
       debugBluetoothCore(false),
       debugBluetoothGatt(false),
@@ -113,8 +117,12 @@ struct Settings {
       debugCameraCapture(false),
       debugCameraSettings(false),
       debugCameraVideo(false),
+      debugDisplay(false),
       debugMicrophone(false),
       debugI2C(false),  // I2C bus transactions, mutex, clock changes
+      debugI2CBus(false),
+      debugI2CDiscovery(false),
+      debugI2CAutoStart(false),
       debugGps(false),        // Individual sensor flags disabled by default
       debugRtc(false),
       debugImu(false),
@@ -123,14 +131,36 @@ struct Settings {
       debugGamepad(false),
       debugApds(false),
       debugPresence(false),
-      debugThermalFrame(false),
-      debugThermalData(false),
-      debugTofFrame(false),
-      debugGamepadFrame(false),
-      debugGamepadData(false),
-      debugImuFrame(false),
-      debugImuData(false),
-      debugApdsFrame(false),
+      debugThermalLifecycle(false),
+      debugThermalPolling(false),
+      debugThermalValues(false),
+      debugTofLifecycle(false),
+      debugTofPolling(false),
+      debugTofValues(false),
+      debugGamepadLifecycle(false),
+      debugGamepadPolling(false),
+      debugGamepadValues(false),
+      debugImuLifecycle(false),
+      debugImuPolling(false),
+      debugImuValues(false),
+      debugApdsLifecycle(false),
+      debugApdsPolling(false),
+      debugApdsValues(false),
+      debugGpsLifecycle(false),
+      debugGpsPolling(false),
+      debugGpsValues(false),
+      debugRtcLifecycle(false),
+      debugRtcPolling(false),
+      debugRtcValues(false),
+      debugFmRadioLifecycle(false),
+      debugFmRadioPolling(false),
+      debugFmRadioValues(false),
+      debugMicLifecycle(false),
+      debugMicPolling(false),
+      debugMicValues(false),
+      debugPresenceLifecycle(false),
+      debugPresencePolling(false),
+      debugPresenceValues(false),
       debugMaps(false),
       debugMapsLoading(false),
       debugMapsRendering(false),
@@ -320,6 +350,10 @@ struct Settings {
       ,llmDynTemp(false)
       ,llmDefaultModel("model.bin")
 #endif
+      // Maps app
+      ,mapZoom(1.0f)
+      ,mapVisibleLayers(0x3FF)   // LAYER_ALL
+      ,mapCacheSizeKB(1024)      // 1 MB pool
     {
     // String members are now initialized in initializer list
   }
@@ -389,9 +423,7 @@ struct Settings {
   bool debugSse;
   bool debugCli;
   bool debugAuth;
-  bool debugSensors;
   bool debugEspNow;
-  bool debugSensorsGeneral;
   bool debugWifi;
   bool debugWifiConnection;
   bool debugWifiConfig;
@@ -411,6 +443,10 @@ struct Settings {
   bool debugLogger;
   bool debugEspNowStream;
   bool debugMqtt;
+  bool debugMqttConnection; // connect/disconnect, TLS config, broker errors, init
+  bool debugMqttPubsub;     // subscribe events, publish results, JSON buffer alloc, received messages
+  bool debugMqttDiscovery;  // Home Assistant auto-discovery configs, base topic
+  bool debugMqttCommands;   // inbound MQTT command parsing, auth, response
   bool debugEspNowCore;
   bool debugEspNowRouter;
   bool debugEspNowMesh;
@@ -422,8 +458,10 @@ struct Settings {
   bool debugAutoCondition;
   bool debugAutoTiming;
   bool debugMemory;
+  bool debugMemoryHeap;     // [HEAP] per-task free/min/largest, [HEAP_MONITOR]
+  bool debugMemoryStack;    // [STACK] per-task watermark + peak reports
+  bool debugMemoryBuffers;  // [JSON_RESP_BUF], [COOKIE_BUF] sizing diagnostics
   bool debugCommandSystem;
-  bool debugSettingsSystem;
   bool debugBluetooth;
   bool debugBluetoothCore;
   bool debugBluetoothGatt;
@@ -441,8 +479,12 @@ struct Settings {
   bool debugCameraCapture;    // captureFrame, JPEG validation, fb buffer, recovery
   bool debugCameraSettings;   // Runtime resolution/quality/sensor register changes
   bool debugCameraVideo;      // Video recording start/finalize, frame writing
+  bool debugDisplay;          // OLED init/probe/boot-animation/mode-transitions
   bool debugMicrophone;
   bool debugI2C;  // I2C bus transactions, mutex, clock changes
+  bool debugI2CBus;        // [I2C] bus lifecycle, polling pause/resume, status bumps
+  bool debugI2CDiscovery;  // [Discovery] / registry / scan results
+  bool debugI2CAutoStart;  // [AutoStart] sensor auto-start orchestration + init results
   // Individual I2C sensor debug flags
   bool debugGps;        // GPS (PA1010D)
   bool debugRtc;        // RTC (DS3231)
@@ -453,14 +495,40 @@ struct Settings {
   bool debugApds;       // APDS (APDS9960)
   bool debugPresence;   // Presence (STHS34PF80)
   // Per-sensor frame/data debug flags (granular timing and data processing)
-  bool debugThermalFrame;   // Thermal frame timing, capture, FPS
-  bool debugThermalData;    // Thermal data interpolation, processing
-  bool debugTofFrame;       // ToF frame capture, object detection
-  bool debugGamepadFrame;   // Gamepad frame timing, connection
-  bool debugGamepadData;    // Gamepad button press/release events
-  bool debugImuFrame;       // IMU frame timing, cache operations
-  bool debugImuData;        // IMU data updates
-  bool debugApdsFrame;      // APDS frame timing, connection
+  // Per-sensor sub-flags (Lifecycle / Polling / Values).
+  // Lifecycle: init, connect/disconnect, recovery, error retries.
+  // Polling:   poll/sample cadence, capture timing, FPS, frame events.
+  // Values:    parsed readings, value-change events, data processing.
+  bool debugThermalLifecycle;
+  bool debugThermalPolling;
+  bool debugThermalValues;
+  bool debugTofLifecycle;
+  bool debugTofPolling;
+  bool debugTofValues;
+  bool debugGamepadLifecycle;
+  bool debugGamepadPolling;
+  bool debugGamepadValues;
+  bool debugImuLifecycle;
+  bool debugImuPolling;
+  bool debugImuValues;
+  bool debugApdsLifecycle;
+  bool debugApdsPolling;
+  bool debugApdsValues;
+  bool debugGpsLifecycle;
+  bool debugGpsPolling;
+  bool debugGpsValues;
+  bool debugRtcLifecycle;
+  bool debugRtcPolling;
+  bool debugRtcValues;
+  bool debugFmRadioLifecycle;
+  bool debugFmRadioPolling;
+  bool debugFmRadioValues;
+  bool debugMicLifecycle;
+  bool debugMicPolling;
+  bool debugMicValues;
+  bool debugPresenceLifecycle;
+  bool debugPresencePolling;
+  bool debugPresenceValues;
   // Maps debug flags
   bool debugMaps;           // Maps (parent flag)
   bool debugMapsLoading;    // Map file loading, tile directory parsing
@@ -744,6 +812,13 @@ struct Settings {
   bool llmDynTemp;              // Dynamic temperature scaling (default: false)
   String llmDefaultModel;       // Default model filename for auto-load (default: "model.bin")
 #endif
+
+  // Maps app — persisted defaults applied at boot to gMapZoom / gVisibleLayers
+  // and used to size the tile cache pool. Cache size requires a reboot to
+  // take effect; zoom and layers apply live via their setters.
+  float mapZoom;             // Default zoom level (1.0 = identity)
+  int   mapVisibleLayers;    // Layer-visibility bitmask (10 bits, default 0x3FF = LAYER_ALL)
+  int   mapCacheSizeKB;      // Tile cache pool size in KB (default 1024)
 };
 
 // Global settings instance (defined in .ino)

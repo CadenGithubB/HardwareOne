@@ -141,19 +141,19 @@ bool rtcEarlyBootSync() {
   
   // Quick probe to check if RTC is present (mutex-protected)
   if (!i2cPingAddress(I2C_ADDR_DS3231, 100000, 200)) {
-    DEBUG_SENSORSF("[RTC] Early boot sync: RTC not detected at 0x%02X", I2C_ADDR_DS3231);
+    DEBUG_RTC_LIFECYCLEF("[RTC] Early boot sync: RTC not detected at 0x%02X", I2C_ADDR_DS3231);
     return false;
   }
   
   RTCDateTime dt;
   if (!rtcReadDateTime(&dt)) {
-    DEBUG_SENSORSF("[RTC] Early boot sync: Failed to read RTC");
+    DEBUG_RTC_LIFECYCLEF("[RTC] Early boot sync: Failed to read RTC");
     return false;
   }
   
   // Sanity check - make sure RTC has valid time (year >= 2020)
   if (dt.year < 2020 || dt.year > 2099) {
-    DEBUG_SENSORSF("[RTC] Early boot sync: RTC time invalid (year=%d)", dt.year);
+    DEBUG_RTC_LIFECYCLEF("[RTC] Early boot sync: RTC time invalid (year=%d)", dt.year);
     return false;
   }
   
@@ -181,7 +181,7 @@ bool rtcEarlyBootSync() {
   struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
   settimeofday(&tv, nullptr);
   
-  INFO_SENSORSF("[RTC] Early boot sync: System time set to %s", rtcDateTimeToString(&dt).c_str());
+  INFO_RTCF("Early boot sync: System time set to %s", rtcDateTimeToString(&dt).c_str());
   return true;
 }
 
@@ -216,7 +216,7 @@ bool rtcSyncToSystem() {
   struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
   settimeofday(&tv, nullptr);
   
-  DEBUG_SENSORSF("[RTC] Synced system time from RTC: %s", rtcDateTimeToString(&dt).c_str());
+  DEBUG_RTC_VALUESF("[RTC] Synced system time from RTC: %s", rtcDateTimeToString(&dt).c_str());
   return true;
 }
 
@@ -240,7 +240,7 @@ bool rtcSyncFromSystem() {
     return false;
   }
   
-  DEBUG_SENSORSF("[RTC] Synced RTC from system time: %s", rtcDateTimeToString(&dt).c_str());
+  DEBUG_RTC_VALUESF("[RTC] Synced RTC from system time: %s", rtcDateTimeToString(&dt).c_str());
   return true;
 }
 
@@ -382,7 +382,7 @@ int rtcBuildDataJSON(char* buf, size_t bufSize) {
 static void rtcTask(void* pvParameters) {
   (void)pvParameters;
   
-  DEBUG_SENSORSF("[RTC] Task started");
+  DEBUG_RTC_LIFECYCLEF("[RTC] Task started");
   
   // Check if system time is already valid (from RTC early boot sync or NTP)
   struct tm timeinfo;
@@ -401,7 +401,7 @@ static void rtcTask(void* pvParameters) {
         setSetting(gSettings.rtcTimeHasBeenSet, true);
       }
     } else {
-      DEBUG_SENSORSF("[RTC] System time already valid from RTC early boot - no sync needed");
+      DEBUG_RTC_LIFECYCLEF("[RTC] System time already valid from RTC early boot - no sync needed");
     }
   } else {
     // No valid system time yet - sync FROM RTC to system
@@ -472,7 +472,7 @@ static void rtcTask(void* pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(100));
   }
   
-  DEBUG_SENSORSF("[RTC] Task exiting");
+  DEBUG_RTC_LIFECYCLEF("[RTC] Task exiting");
   gRtcTaskHandle = nullptr;
   vTaskDelete(nullptr);
 }
@@ -482,12 +482,12 @@ static void rtcTask(void* pvParameters) {
 // ============================================================================
 
 bool rtcInit() {
-  DEBUG_SENSORSF("[RTC] Initializing DS3231...");
+  DEBUG_RTC_LIFECYCLEF("[RTC] Initializing DS3231...");
   
   // Check if device responds
   bool found = i2cPingAddress(I2C_ADDR_DS3231, 100000, 50);
   if (!found) {
-    DEBUG_SENSORSF("[RTC] DS3231 not found at 0x%02X", I2C_ADDR_DS3231);
+    DEBUG_RTC_LIFECYCLEF("[RTC] DS3231 not found at 0x%02X", I2C_ADDR_DS3231);
     return false;
   }
   
@@ -495,7 +495,7 @@ bool rtcInit() {
   if (!gRTCCache.mutex) {
     gRTCCache.mutex = xSemaphoreCreateMutex();
     if (!gRTCCache.mutex) {
-      DEBUG_SENSORSF("[RTC] Failed to create cache mutex");
+      DEBUG_RTC_LIFECYCLEF("[RTC] Failed to create cache mutex");
       return false;
     }
   }
@@ -504,13 +504,13 @@ bool rtcInit() {
   uint8_t status;
   if (rtcReadRegisters(DS3231_REG_STATUS, &status, 1)) {
     if (status & 0x80) {  // OSF bit
-      DEBUG_SENSORSF("[RTC] Oscillator was stopped - RTC time may be invalid");
+      DEBUG_RTC_LIFECYCLEF("[RTC] Oscillator was stopped - RTC time may be invalid");
       rtcWriteRegister(DS3231_REG_STATUS, status & ~0x80);
     }
   }
   
   gRtcConnected = true;
-  DEBUG_SENSORSF("[RTC] DS3231 initialized successfully");
+  DEBUG_RTC_LIFECYCLEF("[RTC] DS3231 initialized successfully");
   return true;
 }
 
@@ -531,19 +531,19 @@ void rtcStop() {
   }
   
   gRtcConnected = false;
-  DEBUG_SENSORSF("[RTC] Sensor stopped");
+  DEBUG_RTC_LIFECYCLEF("[RTC] Sensor stopped");
 }
 
 // Internal start function for sensor queue processor
 bool rtcStartInternal() {
   if (gRtcEnabled && gRtcConnected) {
-    DEBUG_SENSORSF("[RTC] Already running");
+    DEBUG_RTC_LIFECYCLEF("[RTC] Already running");
     return true;
   }
 
   // Check memory before creating RTC task
   if (!checkMemoryAvailable("rtc", nullptr)) {
-    ERROR_SENSORSF("[RTC] Insufficient memory for RTC sensor");
+    ERROR_RTCF("Insufficient memory for RTC sensor");
     return false;
   }
 
@@ -553,20 +553,20 @@ bool rtcStartInternal() {
     gRTCCache.temperature = 0.0f;
     memset(&gRTCCache.dateTime, 0, sizeof(RTCDateTime));
     xSemaphoreGive(gRTCCache.mutex);
-    DEBUG_SENSORSF("[RTC] Cleaned up stale cache from previous run");
+    DEBUG_RTC_LIFECYCLEF("[RTC] Cleaned up stale cache from previous run");
   }
 
   if (!rtcInit()) {
-    DEBUG_SENSORSF("[RTC] Failed to initialize");
+    DEBUG_RTC_LIFECYCLEF("[RTC] Failed to initialize");
     return false;
   }
 
   if (!createRTCTask()) {
-    DEBUG_SENSORSF("[RTC] Failed to create task");
+    DEBUG_RTC_LIFECYCLEF("[RTC] Failed to create task");
     return false;
   }
 
-  DEBUG_SENSORSF("[RTC] Started successfully via queue");
+  DEBUG_RTC_LIFECYCLEF("[RTC] Started successfully via queue");
   return true;
 }
 
@@ -816,8 +816,8 @@ float rtcGetTemperature() {
 // RTC settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry rtcSettingEntries[] = {
-  { "rtcAutoStart", SETTING_BOOL, &gSettings.rtcAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  { "rtcTimeHasBeenSet", SETTING_BOOL, &gSettings.rtcTimeHasBeenSet, 0, 0, nullptr, 0, 1, "RTC time has been set (NTP/manual)", nullptr }
+  { "rtcAutoStart", SETTING_BOOL, &gSettings.rtcAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
+  { "rtcTimeHasBeenSet", SETTING_BOOL, &gSettings.rtcTimeHasBeenSet, 0, 0, nullptr, 0, 1, "RTC time has been set (NTP/manual)", nullptr, false, nullptr, nullptr }
 };
 
 static bool isRTCConnectedSetting() {
@@ -827,7 +827,7 @@ static bool isRTCConnectedSetting() {
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule rtcSettingsModule = {
   "rtc",
-  "rtc_ds3231",
+  "hardware.sensors.rtc",
   rtcSettingEntries,
   sizeof(rtcSettingEntries) / sizeof(rtcSettingEntries[0]),
   isRTCConnectedSetting,

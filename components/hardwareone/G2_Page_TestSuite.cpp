@@ -29,8 +29,9 @@
 //     Send 1 KB
 //     Send 2 KB
 //     (renders a payload of the chosen size to validate the multi-fragment
-//      CREATE path against firmware's reassembler. 4 KB+ removed — they
-//      consumed the row-buffer headroom needed by other categories.)
+//      CREATE path against firmware's reassembler. Sizes capped at 2 KB —
+//      anything larger consumes the row-buffer headroom needed by other
+//      categories.)
 //
 //   AI PANEL (drill from ROOT):
 //     <- Back

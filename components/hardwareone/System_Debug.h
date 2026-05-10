@@ -81,7 +81,7 @@ struct DebugFlagMask {
 #define DEBUG_SSE             ((DebugFlagMask)0x0004ULL)
 #define DEBUG_CLI             ((DebugFlagMask)0x0008ULL)
 // Bits 4-5: Security and G2 (legacy sensor frame/data flags moved to bits 32-47)
-#define DEBUG_SENSORS         ((DebugFlagMask)0x0040ULL)
+#define DEBUG_MQTT            ((DebugFlagMask)0x0040ULL)  // Bit 6 (reclaimed from DEBUG_SENSORS) — MQTT parent flag
 #define DEBUG_FMRADIO         ((DebugFlagMask)0x0080ULL)  // FM Radio operations and I2C debugging
 #define DEBUG_I2C             ((DebugFlagMask)0x0100ULL)  // I2C bus operations, transactions, clock changes, mutex
 #define DEBUG_WIFI            ((DebugFlagMask)0x0200ULL)
@@ -101,7 +101,7 @@ struct DebugFlagMask {
 #define DEBUG_ESPNOW_TOPO     ((DebugFlagMask)0x200000ULL)
 #define DEBUG_ESPNOW_STREAM   ((DebugFlagMask)0x400000ULL)
 #define DEBUG_COMMAND_SYSTEM  ((DebugFlagMask)0x800000ULL)  // Modular command registry operations
-#define DEBUG_SETTINGS_SYSTEM ((DebugFlagMask)0x1000000ULL) // Settings module registration and validation
+// Bit 24 (formerly DEBUG_SETTINGS_SYSTEM) — FREED; flag had zero callsites. Available for reuse.
 #define DEBUG_AUTO_EXEC       ((DebugFlagMask)0x2000000ULL)     // Bit 25
 #define DEBUG_AUTO_CONDITION  ((DebugFlagMask)0x4000000ULL)     // Bit 26
 #define DEBUG_AUTO_TIMING     ((DebugFlagMask)0x8000000ULL)     // Bit 27
@@ -121,14 +121,14 @@ struct DebugFlagMask {
 #define DEBUG_PRESENCE        ((DebugFlagMask)0x8000000000ULL) // Bit 39 - Presence (STHS34PF80)
 
 // Bits 40-47: Per-sensor frame/data debug flags (granular timing and data processing)
-#define DEBUG_THERMAL_FRAME   ((DebugFlagMask)0x10000000000ULL)  // Bit 40 - Thermal frame timing, capture, FPS
-#define DEBUG_THERMAL_DATA    ((DebugFlagMask)0x20000000000ULL)  // Bit 41 - Thermal data interpolation, processing
-#define DEBUG_TOF_FRAME       ((DebugFlagMask)0x40000000000ULL)  // Bit 42 - ToF frame capture, object detection
-#define DEBUG_GAMEPAD_FRAME   ((DebugFlagMask)0x80000000000ULL)  // Bit 43 - Gamepad frame timing, connection
-#define DEBUG_GAMEPAD_DATA    ((DebugFlagMask)0x100000000000ULL) // Bit 44 - Gamepad button press/release events
-#define DEBUG_IMU_FRAME       ((DebugFlagMask)0x200000000000ULL) // Bit 45 - IMU frame timing, cache operations
-#define DEBUG_IMU_DATA        ((DebugFlagMask)0x400000000000ULL) // Bit 46 - IMU data updates
-#define DEBUG_APDS_FRAME      ((DebugFlagMask)0x800000000000ULL) // Bit 47 - APDS frame timing, connection
+#define DEBUG_THERMAL_POLLING   ((DebugFlagMask)0x10000000000ULL)  // Bit 40 - Thermal frame timing, capture, FPS
+#define DEBUG_THERMAL_VALUES    ((DebugFlagMask)0x20000000000ULL)  // Bit 41 - Thermal data interpolation, processing
+#define DEBUG_TOF_POLLING       ((DebugFlagMask)0x40000000000ULL)  // Bit 42 - ToF frame capture, object detection
+#define DEBUG_GAMEPAD_POLLING   ((DebugFlagMask)0x80000000000ULL)  // Bit 43 - Gamepad frame timing, connection
+#define DEBUG_GAMEPAD_VALUES    ((DebugFlagMask)0x100000000000ULL) // Bit 44 - Gamepad button press/release events
+#define DEBUG_IMU_POLLING       ((DebugFlagMask)0x200000000000ULL) // Bit 45 - IMU frame timing, cache operations
+#define DEBUG_IMU_VALUES        ((DebugFlagMask)0x400000000000ULL) // Bit 46 - IMU data updates
+#define DEBUG_APDS_POLLING      ((DebugFlagMask)0x800000000000ULL) // Bit 47 - APDS frame timing, connection
 #define DEBUG_ESPNOW_METADATA ((DebugFlagMask)0x1000000000000ULL) // Bit 48 - ESP-NOW metadata exchange (REQ/RESP/PUSH/store)
 
 // Bits 49-52: Maps debug flags
@@ -184,6 +184,65 @@ struct DebugFlagMask {
 #define DEBUG_CAMERA_CAPTURE    DEBUG_BIT(77)  // captureFrame(), JPEG validation, frame buffer, recovery path
 #define DEBUG_CAMERA_SETTINGS   DEBUG_BIT(78)  // Runtime resolution / quality / sensor register changes
 #define DEBUG_CAMERA_VIDEO      DEBUG_BIT(79)  // Video recording start/finalize, frame writing, encoder state
+
+// Bit 80: Display subsystem (OLED init/probe/boot-animation/mode-transitions).
+// Previously folded into DEBUG_SENSORS umbrella; broken out during the
+// Sensors umbrella removal so display noise can be toggled independently.
+#define DEBUG_DISPLAY           DEBUG_BIT(80)
+
+// Bits 81-83: Memory sub-flags (parent: DEBUG_MEMORY at bit 18)
+// Mirrors the Performance group's Stack/Heap/Timing split. Lets you isolate
+// per-task heap noise from stack-watermark reports from buffer-sizing logs.
+#define DEBUG_MEMORY_HEAP       DEBUG_BIT(81)  // [HEAP] per-task free/min/largest, [HEAP_MONITOR] DRAM low watermarks
+#define DEBUG_MEMORY_STACK      DEBUG_BIT(82)  // [STACK] per-task watermark + peak reports
+#define DEBUG_MEMORY_BUFFERS    DEBUG_BIT(83)  // [JSON_RESP_BUF], [COOKIE_BUF] sizing diagnostics
+
+// Bits 84-86: I2C bus sub-flags (parent: DEBUG_I2C at bit 8)
+// Bus enable/disable + sensor auto-start happen at runtime, not just boot,
+// so being able to silence each independently matters.
+#define DEBUG_I2C_BUS           DEBUG_BIT(84)  // [I2C] bus lifecycle, polling pause/resume, status bumps, raw transactions
+#define DEBUG_I2C_DISCOVERY     DEBUG_BIT(85)  // [Discovery] / [I2C_REGISTRY] / [I2C_SENSORS] — device probing, registration, scan results
+#define DEBUG_I2C_AUTOSTART     DEBUG_BIT(86)  // [AutoStart] sensor auto-start orchestration + per-sensor init result reporting
+
+// Bits 87-90: MQTT sub-flags (parent: DEBUG_MQTT at bit 6)
+// Mirrors the G2/Camera/Memory/I2C pattern. Lets you isolate connection
+// noise from publish/subscribe flow from HA discovery from inbound commands.
+#define DEBUG_MQTT_CONNECTION   DEBUG_BIT(87)  // connect/disconnect, TLS config, broker errors, client init
+#define DEBUG_MQTT_PUBSUB       DEBUG_BIT(88)  // subscribe events, publish results, JSON buffer alloc, received messages
+#define DEBUG_MQTT_DISCOVERY    DEBUG_BIT(89)  // Home Assistant auto-discovery configs, base topic generation
+#define DEBUG_MQTT_COMMANDS     DEBUG_BIT(90)  // inbound MQTT command parsing, auth, response
+
+// Bits 91-112: Per-sensor Lifecycle / Polling / Values sub-flags.
+// Existing bits 40-47 host POLLING + VALUES for THERMAL / TOF / GAMEPAD /
+// IMU / APDS (see above, kept for ABI stability). LIFECYCLE for those plus
+// the full triplet for sensors that previously had no sub-flags
+// (GPS / RTC / FMRADIO / MIC / PRESENCE) live here in the hi-half.
+//   LIFECYCLE — init, connect/disconnect, recovery, error retries
+//   POLLING   — poll/sample cadence, capture timing, FPS, frame events
+//   VALUES    — parsed readings, value-change events, data processing
+// Macros gate on parent-OR-sub like every other sub-flag pattern.
+#define DEBUG_THERMAL_LIFECYCLE  DEBUG_BIT(91)
+#define DEBUG_TOF_LIFECYCLE      DEBUG_BIT(92)
+#define DEBUG_TOF_VALUES         DEBUG_BIT(93)
+#define DEBUG_GAMEPAD_LIFECYCLE  DEBUG_BIT(94)
+#define DEBUG_IMU_LIFECYCLE      DEBUG_BIT(95)
+#define DEBUG_APDS_LIFECYCLE     DEBUG_BIT(96)
+#define DEBUG_APDS_VALUES        DEBUG_BIT(97)
+#define DEBUG_GPS_LIFECYCLE      DEBUG_BIT(98)
+#define DEBUG_GPS_POLLING        DEBUG_BIT(99)
+#define DEBUG_GPS_VALUES         DEBUG_BIT(100)
+#define DEBUG_RTC_LIFECYCLE      DEBUG_BIT(101)
+#define DEBUG_RTC_POLLING        DEBUG_BIT(102)
+#define DEBUG_RTC_VALUES         DEBUG_BIT(103)
+#define DEBUG_FMRADIO_LIFECYCLE  DEBUG_BIT(104)
+#define DEBUG_FMRADIO_POLLING    DEBUG_BIT(105)
+#define DEBUG_FMRADIO_VALUES     DEBUG_BIT(106)
+#define DEBUG_MIC_LIFECYCLE      DEBUG_BIT(107)
+#define DEBUG_MIC_POLLING        DEBUG_BIT(108)
+#define DEBUG_MIC_VALUES         DEBUG_BIT(109)
+#define DEBUG_PRESENCE_LIFECYCLE DEBUG_BIT(110)
+#define DEBUG_PRESENCE_POLLING   DEBUG_BIT(111)
+#define DEBUG_PRESENCE_VALUES    DEBUG_BIT(112)
 
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
@@ -450,8 +509,17 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define DEBUG_SSEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SSE, fmt, ##__VA_ARGS__)
 #define DEBUG_CLIF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CLI, fmt, ##__VA_ARGS__)
 #define DEBUG_I2CF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_I2C, fmt, ##__VA_ARGS__)
+// I2C sub-flag macros — parent OR sub gating so the I2C "All" toggle stays a master.
+#define DEBUG_I2C_BUSF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_I2C | DEBUG_I2C_BUS,       fmt, ##__VA_ARGS__)
+#define DEBUG_I2C_DISCOVERYF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_I2C | DEBUG_I2C_DISCOVERY, fmt, ##__VA_ARGS__)
+#define DEBUG_I2C_AUTOSTARTF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_I2C | DEBUG_I2C_AUTOSTART, fmt, ##__VA_ARGS__)
+// MQTT debug macros — parent + 4 sub-flag-aware variants.
+#define DEBUG_MQTTF(fmt, ...)             DEBUGF_QUEUE_DEBUG(DEBUG_MQTT, fmt, ##__VA_ARGS__)
+#define DEBUG_MQTT_CONNECTIONF(fmt, ...)  DEBUGF_QUEUE_DEBUG(DEBUG_MQTT | DEBUG_MQTT_CONNECTION, fmt, ##__VA_ARGS__)
+#define DEBUG_MQTT_PUBSUBF(fmt, ...)      DEBUGF_QUEUE_DEBUG(DEBUG_MQTT | DEBUG_MQTT_PUBSUB,     fmt, ##__VA_ARGS__)
+#define DEBUG_MQTT_DISCOVERYF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_MQTT | DEBUG_MQTT_DISCOVERY,  fmt, ##__VA_ARGS__)
+#define DEBUG_MQTT_COMMANDSF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_MQTT | DEBUG_MQTT_COMMANDS,   fmt, ##__VA_ARGS__)
 #define DEBUG_CMD_FLOWF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_CMD_FLOW, fmt, ##__VA_ARGS__)
-#define DEBUG_SENSORSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SENSORS, fmt, ##__VA_ARGS__)
 #define DEBUG_FMRADIOF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_FMRADIO, fmt, ##__VA_ARGS__)
 #define DEBUG_G2F(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_G2, fmt, ##__VA_ARGS__)
 // G2 sub-flag macros. Each gate ORs the parent DEBUG_G2 with the
@@ -474,15 +542,39 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define DEBUG_CAMERA_SETTINGSF(fmt, ...)  DEBUGF_QUEUE_DEBUG(DEBUG_CAMERA | DEBUG_CAMERA_SETTINGS,  fmt, ##__VA_ARGS__)
 #define DEBUG_CAMERA_VIDEOF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_CAMERA | DEBUG_CAMERA_VIDEO,     fmt, ##__VA_ARGS__)
 #define DEBUG_MICF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MICROPHONE, fmt, ##__VA_ARGS__)
-// Legacy DEBUG_FRAMEF and DEBUG_DATAF removed - use per-sensor macros instead
-#define DEBUG_THERMAL_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_THERMAL_FRAME, fmt, ##__VA_ARGS__)
-#define DEBUG_THERMAL_DATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_THERMAL_DATA, fmt, ##__VA_ARGS__)
-#define DEBUG_TOF_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_TOF_FRAME, fmt, ##__VA_ARGS__)
-#define DEBUG_GAMEPAD_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD_FRAME, fmt, ##__VA_ARGS__)
-#define DEBUG_GAMEPAD_DATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD_DATA, fmt, ##__VA_ARGS__)
-#define DEBUG_IMU_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_IMU_FRAME, fmt, ##__VA_ARGS__)
-#define DEBUG_IMU_DATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_IMU_DATA, fmt, ##__VA_ARGS__)
-#define DEBUG_APDS_FRAMEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_APDS_FRAME, fmt, ##__VA_ARGS__)
+// Per-sensor sub-flag macros (Lifecycle / Polling / Values).
+// Each gates on parent OR sub so master "All <Sensor>" toggle still acts as
+// a master switch. Mirrors DEBUG_CAMERA_*F / DEBUG_G2_*F.
+#define DEBUG_THERMAL_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_THERMAL    | DEBUG_THERMAL_LIFECYCLE,  fmt, ##__VA_ARGS__)
+#define DEBUG_THERMAL_POLLINGF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_THERMAL    | DEBUG_THERMAL_POLLING,    fmt, ##__VA_ARGS__)
+#define DEBUG_THERMAL_VALUESF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_THERMAL    | DEBUG_THERMAL_VALUES,     fmt, ##__VA_ARGS__)
+#define DEBUG_TOF_LIFECYCLEF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_TOF        | DEBUG_TOF_LIFECYCLE,      fmt, ##__VA_ARGS__)
+#define DEBUG_TOF_POLLINGF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_TOF        | DEBUG_TOF_POLLING,        fmt, ##__VA_ARGS__)
+#define DEBUG_TOF_VALUESF(fmt, ...)        DEBUGF_QUEUE_DEBUG(DEBUG_TOF        | DEBUG_TOF_VALUES,         fmt, ##__VA_ARGS__)
+#define DEBUG_GAMEPAD_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD    | DEBUG_GAMEPAD_LIFECYCLE,  fmt, ##__VA_ARGS__)
+#define DEBUG_GAMEPAD_POLLINGF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD    | DEBUG_GAMEPAD_POLLING,    fmt, ##__VA_ARGS__)
+#define DEBUG_GAMEPAD_VALUESF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD    | DEBUG_GAMEPAD_VALUES,     fmt, ##__VA_ARGS__)
+#define DEBUG_IMU_LIFECYCLEF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_IMU        | DEBUG_IMU_LIFECYCLE,      fmt, ##__VA_ARGS__)
+#define DEBUG_IMU_POLLINGF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_IMU        | DEBUG_IMU_POLLING,        fmt, ##__VA_ARGS__)
+#define DEBUG_IMU_VALUESF(fmt, ...)        DEBUGF_QUEUE_DEBUG(DEBUG_IMU        | DEBUG_IMU_VALUES,         fmt, ##__VA_ARGS__)
+#define DEBUG_APDS_LIFECYCLEF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_APDS       | DEBUG_APDS_LIFECYCLE,     fmt, ##__VA_ARGS__)
+#define DEBUG_APDS_POLLINGF(fmt, ...)      DEBUGF_QUEUE_DEBUG(DEBUG_APDS       | DEBUG_APDS_POLLING,       fmt, ##__VA_ARGS__)
+#define DEBUG_APDS_VALUESF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_APDS       | DEBUG_APDS_VALUES,        fmt, ##__VA_ARGS__)
+#define DEBUG_GPS_LIFECYCLEF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_GPS        | DEBUG_GPS_LIFECYCLE,      fmt, ##__VA_ARGS__)
+#define DEBUG_GPS_POLLINGF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_GPS        | DEBUG_GPS_POLLING,        fmt, ##__VA_ARGS__)
+#define DEBUG_GPS_VALUESF(fmt, ...)        DEBUGF_QUEUE_DEBUG(DEBUG_GPS        | DEBUG_GPS_VALUES,         fmt, ##__VA_ARGS__)
+#define DEBUG_RTC_LIFECYCLEF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_RTC        | DEBUG_RTC_LIFECYCLE,      fmt, ##__VA_ARGS__)
+#define DEBUG_RTC_POLLINGF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_RTC        | DEBUG_RTC_POLLING,        fmt, ##__VA_ARGS__)
+#define DEBUG_RTC_VALUESF(fmt, ...)        DEBUGF_QUEUE_DEBUG(DEBUG_RTC        | DEBUG_RTC_VALUES,         fmt, ##__VA_ARGS__)
+#define DEBUG_FMRADIO_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_FMRADIO    | DEBUG_FMRADIO_LIFECYCLE,  fmt, ##__VA_ARGS__)
+#define DEBUG_FMRADIO_POLLINGF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_FMRADIO    | DEBUG_FMRADIO_POLLING,    fmt, ##__VA_ARGS__)
+#define DEBUG_FMRADIO_VALUESF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_FMRADIO    | DEBUG_FMRADIO_VALUES,     fmt, ##__VA_ARGS__)
+#define DEBUG_MIC_LIFECYCLEF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_MICROPHONE | DEBUG_MIC_LIFECYCLE,      fmt, ##__VA_ARGS__)
+#define DEBUG_MIC_POLLINGF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_MICROPHONE | DEBUG_MIC_POLLING,        fmt, ##__VA_ARGS__)
+#define DEBUG_MIC_VALUESF(fmt, ...)        DEBUGF_QUEUE_DEBUG(DEBUG_MICROPHONE | DEBUG_MIC_VALUES,         fmt, ##__VA_ARGS__)
+#define DEBUG_PRESENCE_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_PRESENCE  | DEBUG_PRESENCE_LIFECYCLE, fmt, ##__VA_ARGS__)
+#define DEBUG_PRESENCE_POLLINGF(fmt, ...)  DEBUGF_QUEUE_DEBUG(DEBUG_PRESENCE   | DEBUG_PRESENCE_POLLING,   fmt, ##__VA_ARGS__)
+#define DEBUG_PRESENCE_VALUESF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_PRESENCE   | DEBUG_PRESENCE_VALUES,    fmt, ##__VA_ARGS__)
 #define DEBUG_ESPNOW_METADATAF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ESPNOW_METADATA, fmt, ##__VA_ARGS__)
 #define DEBUG_MAPSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MAPS, fmt, ##__VA_ARGS__)
 #define DEBUG_MAPS_LOADINGF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MAPS_LOADING, fmt, ##__VA_ARGS__)
@@ -507,10 +599,14 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define DEBUG_AUTOMATIONSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_AUTOMATIONS, fmt, ##__VA_ARGS__)
 #define DEBUG_LOGGERF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_LOGGER, fmt, ##__VA_ARGS__)
 #define DEBUG_MEMORYF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MEMORY, fmt, ##__VA_ARGS__)
+// Memory sub-flag macros — gate on parent OR sub-flag so the Memory "All"
+// toggle still acts as a master switch. Mirrors DEBUG_CAMERA_*F / DEBUG_G2_*F.
+#define DEBUG_MEMORY_HEAPF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_MEMORY | DEBUG_MEMORY_HEAP,    fmt, ##__VA_ARGS__)
+#define DEBUG_MEMORY_STACKF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_MEMORY | DEBUG_MEMORY_STACK,   fmt, ##__VA_ARGS__)
+#define DEBUG_MEMORY_BUFFERSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_MEMORY | DEBUG_MEMORY_BUFFERS, fmt, ##__VA_ARGS__)
 #define DEBUG_ESPNOW_STREAMF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ESPNOW_STREAM, fmt, ##__VA_ARGS__)
 #define DEBUG_ESPNOWF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ESPNOW_CORE, fmt, ##__VA_ARGS__)  // General ESP-NOW debug
 #define DEBUG_COMMAND_SYSTEMF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_COMMAND_SYSTEM, fmt, ##__VA_ARGS__)
-#define DEBUG_SETTINGS_SYSTEMF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SETTINGS_SYSTEM, fmt, ##__VA_ARGS__)
 
 
 // Individual I2C sensor debug macros
@@ -522,6 +618,7 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define DEBUG_GAMEPADF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD, fmt, ##__VA_ARGS__)
 #define DEBUG_APDSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_APDS, fmt, ##__VA_ARGS__)
 #define DEBUG_PRESENCEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_PRESENCE, fmt, ##__VA_ARGS__)
+#define DEBUG_DISPLAYF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_DISPLAY, fmt, ##__VA_ARGS__)
 
 // Legacy compatibility macro
 #define DEBUGF(flag, fmt, ...) DEBUGF_QUEUE_DEBUG(flag, fmt, ##__VA_ARGS__)
@@ -531,7 +628,6 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 // ============================================================================
 
 // ERROR macros - Always visible (cannot be disabled)
-#define ERROR_SENSORSF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][SENSORS] " fmt, ##__VA_ARGS__)
 #define ERROR_I2CF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][I2C] " fmt, ##__VA_ARGS__)
 #define ERROR_ESPNOWF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][ESPNOW] " fmt, ##__VA_ARGS__)
 #define ERROR_AUTOMATIONF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][AUTO] " fmt, ##__VA_ARGS__)
@@ -545,9 +641,25 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define ERROR_WIFIF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][WIFI] " fmt, ##__VA_ARGS__)
 #define ERROR_MEMORYF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][MEM] " fmt, ##__VA_ARGS__)
 #define ERROR_LLMF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][LLM] " fmt, ##__VA_ARGS__)
+// Per-sensor / display ERROR macros — always visible (gate=0xFFFFFFFF).
+// Added during DEBUG_SENSORS umbrella removal so error tags match their
+// actual subsystem instead of all reading "[ERROR][SENSORS]".
+#define ERROR_CAMERAF(fmt, ...)   DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][CAMERA] "   fmt, ##__VA_ARGS__)
+#define ERROR_THERMALF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][THERMAL] "  fmt, ##__VA_ARGS__)
+#define ERROR_TOFF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][TOF] "      fmt, ##__VA_ARGS__)
+#define ERROR_IMUF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][IMU] "      fmt, ##__VA_ARGS__)
+#define ERROR_GAMEPADF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][GAMEPAD] "  fmt, ##__VA_ARGS__)
+#define ERROR_APDSF(fmt, ...)     DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][APDS] "     fmt, ##__VA_ARGS__)
+#define ERROR_PRESENCEF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][PRESENCE] " fmt, ##__VA_ARGS__)
+#define ERROR_GPSF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][GPS] "      fmt, ##__VA_ARGS__)
+#define ERROR_RTCF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][RTC] "      fmt, ##__VA_ARGS__)
+#define ERROR_FMRADIOF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][FMRADIO] "  fmt, ##__VA_ARGS__)
+#define ERROR_MAPSF(fmt, ...)     DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][MAPS] "     fmt, ##__VA_ARGS__)
+#define ERROR_MICF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][MIC] "      fmt, ##__VA_ARGS__)
+#define ERROR_DISPLAYF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][DISPLAY] "  fmt, ##__VA_ARGS__)
+#define ERROR_MQTTF(fmt, ...)     DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][MQTT] "     fmt, ##__VA_ARGS__)
 
 // WARN macros - Always visible (cannot be disabled)
-#define WARN_SENSORSF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][SENSORS] " fmt, ##__VA_ARGS__); } while (0)
 #define WARN_I2CF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][I2C] " fmt, ##__VA_ARGS__); } while (0)
 #define WARN_ESPNOWF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][ESPNOW] " fmt, ##__VA_ARGS__); } while (0)
 #define WARN_AUTOMATIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][AUTO] " fmt, ##__VA_ARGS__); } while (0)
@@ -560,12 +672,41 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define WARN_STORAGEF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][STORAGE] " fmt, ##__VA_ARGS__); } while (0)
 #define WARN_WIFIF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][WIFI] " fmt, ##__VA_ARGS__); } while (0)
 #define WARN_MEMORYF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][MEM] " fmt, ##__VA_ARGS__); } while (0)
+// Per-sensor WARN macros — added during DEBUG_SENSORS umbrella removal.
+// Only added for subsystems that actually use WARN_SENSORSF today.
+#define WARN_GAMEPADF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][GAMEPAD] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_MAPSF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][MAPS] "    fmt, ##__VA_ARGS__); } while (0)
+#define WARN_IMUF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][IMU] "     fmt, ##__VA_ARGS__); } while (0)
+#define WARN_MQTTF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][MQTT] "    fmt, ##__VA_ARGS__); } while (0)
 
 // INFO macros - Optional (controlled by debug flags)
-#define INFO_SENSORSF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_SENSORS, "[INFO][SENSORS] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_CAMERAF(fmt, ...)       do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_CAMERA | DEBUG_CAMERA_LIFECYCLE, "[INFO][CAMERA] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_CAMERA_VIDEOF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_CAMERA | DEBUG_CAMERA_VIDEO,     "[INFO][VIDEO] "  fmt, ##__VA_ARGS__); } while (0)
+// Per-sensor INFO macros — added during DEBUG_SENSORS umbrella removal.
+// Each gates on its own per-sensor flag so the sensor's UI toggle actually
+// controls its INFO output (previously these all funneled through DEBUG_SENSORS).
+#define INFO_THERMALF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_THERMAL,    "[INFO][THERMAL] "  fmt, ##__VA_ARGS__); } while (0)
+#define INFO_TOFF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_TOF,        "[INFO][TOF] "      fmt, ##__VA_ARGS__); } while (0)
+#define INFO_IMUF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_IMU,        "[INFO][IMU] "      fmt, ##__VA_ARGS__); } while (0)
+#define INFO_GAMEPADF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_GAMEPAD,    "[INFO][GAMEPAD] "  fmt, ##__VA_ARGS__); } while (0)
+#define INFO_APDSF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_APDS,       "[INFO][APDS] "     fmt, ##__VA_ARGS__); } while (0)
+#define INFO_PRESENCEF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_PRESENCE,   "[INFO][PRESENCE] " fmt, ##__VA_ARGS__); } while (0)
+#define INFO_GPSF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_GPS,        "[INFO][GPS] "      fmt, ##__VA_ARGS__); } while (0)
+#define INFO_RTCF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_RTC,        "[INFO][RTC] "      fmt, ##__VA_ARGS__); } while (0)
+#define INFO_FMRADIOF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_FMRADIO,    "[INFO][FMRADIO] "  fmt, ##__VA_ARGS__); } while (0)
+#define INFO_MAPSF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MAPS,       "[INFO][MAPS] "     fmt, ##__VA_ARGS__); } while (0)
+#define INFO_MICF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MICROPHONE, "[INFO][MIC] "      fmt, ##__VA_ARGS__); } while (0)
+#define INFO_DISPLAYF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_DISPLAY,    "[INFO][DISPLAY] "  fmt, ##__VA_ARGS__); } while (0)
 #define INFO_I2CF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_I2C, "[INFO][I2C] " fmt, ##__VA_ARGS__); } while (0)
+#define INFO_I2C_BUSF(fmt, ...)       do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_I2C | DEBUG_I2C_BUS,       "[INFO][I2C_BUS] "       fmt, ##__VA_ARGS__); } while (0)
+#define INFO_I2C_DISCOVERYF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_I2C | DEBUG_I2C_DISCOVERY, "[INFO][I2C_DISCOVERY] " fmt, ##__VA_ARGS__); } while (0)
+#define INFO_I2C_AUTOSTARTF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_I2C | DEBUG_I2C_AUTOSTART, "[INFO][I2C_AUTOSTART] " fmt, ##__VA_ARGS__); } while (0)
+// MQTT INFO macros — parent + 4 sub-flag-aware variants.
+#define INFO_MQTTF(fmt, ...)            do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MQTT,                       "[INFO][MQTT] "            fmt, ##__VA_ARGS__); } while (0)
+#define INFO_MQTT_CONNECTIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MQTT | DEBUG_MQTT_CONNECTION, "[INFO][MQTT_CONN] "      fmt, ##__VA_ARGS__); } while (0)
+#define INFO_MQTT_PUBSUBF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MQTT | DEBUG_MQTT_PUBSUB,     "[INFO][MQTT_PUBSUB] "    fmt, ##__VA_ARGS__); } while (0)
+#define INFO_MQTT_DISCOVERYF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MQTT | DEBUG_MQTT_DISCOVERY,  "[INFO][MQTT_DISCOVERY] " fmt, ##__VA_ARGS__); } while (0)
+#define INFO_MQTT_COMMANDSF(fmt, ...)   do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MQTT | DEBUG_MQTT_COMMANDS,   "[INFO][MQTT_CMD] "       fmt, ##__VA_ARGS__); } while (0)
 #define INFO_ESPNOWF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ESPNOW_CORE, "[INFO][ESPNOW] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_AUTOMATIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_AUTOMATIONS, "[INFO][AUTO] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_SESSIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_AUTH, "[INFO][SESSION] " fmt, ##__VA_ARGS__); } while (0)
@@ -661,12 +802,12 @@ const char* cmd_debugauthcookies(const String& argsInput);
 const char* cmd_debughttp(const String& argsInput);
 const char* cmd_debugsse(const String& argsInput);
 const char* cmd_debugcli(const String& argsInput);
-const char* cmd_debugsensorsgeneral(const String& argsInput);
 const char* cmd_debugcamera(const String& argsInput);
 const char* cmd_debugcameralifecycle(const String& a);
 const char* cmd_debugcameracapture(const String& a);
 const char* cmd_debugcamerasettings(const String& a);
 const char* cmd_debugcameravideo(const String& a);
+const char* cmd_debugdisplay(const String& a);
 const char* cmd_debugmicrophone(const String& argsInput);
 const char* cmd_debugwifi(const String& argsInput);
 const char* cmd_debugstorage(const String& argsInput);
@@ -674,7 +815,6 @@ const char* cmd_debuglogger(const String& argsInput);
 const char* cmd_debugautomations(const String& argsInput);
 const char* cmd_debugperformance(const String& argsInput);
 const char* cmd_debugauth(const String& argsInput);
-const char* cmd_debugsensors(const String& argsInput);
 const char* cmd_debugespnow(const String& argsInput);
 const char* cmd_debugdatetime(const String& argsInput);
 const char* cmd_debugdatetimesync(const String& argsInput);
@@ -706,6 +846,9 @@ const char* cmd_debugautoexec(const String& argsInput);
 const char* cmd_debugautocondition(const String& argsInput);
 const char* cmd_debugautotiming(const String& argsInput);
 const char* cmd_debugmemory(const String& argsInput);
+const char* cmd_debugmemoryheap(const String& a);
+const char* cmd_debugmemorystack(const String& a);
+const char* cmd_debugmemorybuffers(const String& a);
 const char* cmd_debugauthsessions(const String& argsInput);
 const char* cmd_debugauthcookies(const String& argsInput);
 const char* cmd_debugauthlogin(const String& argsInput);

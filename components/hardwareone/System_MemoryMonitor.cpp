@@ -220,7 +220,7 @@ void sampleMemoryState(bool forceFullScan) {
   }
   
   if (isNewLow) {
-    DEBUG_MEMORYF("[HEAP_MONITOR] New DRAM low: %u bytes (min_ever=%u)", 
+    DEBUG_MEMORY_HEAPF("[HEAP_MONITOR] New DRAM low: %u bytes (min_ever=%u)", 
                   (unsigned)dramFree, (unsigned)dramMinFree);
   }
   if (isPressured) {

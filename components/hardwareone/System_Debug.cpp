@@ -870,24 +870,6 @@ const char* cmd_debugcli(const String& argsInput) {
   }
 }
 
-const char* cmd_debugsensorsgeneral(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_SENSORS);
-    else clearDebugFlag(DEBUG_SENSORS);
-    return v ? "debugSensorsGeneral enabled (runtime only)" : "debugSensorsGeneral disabled (runtime only)";
-  } else {
-    setSetting(gSettings.debugSensorsGeneral, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_SENSORS);
-    else clearDebugFlag(DEBUG_SENSORS);
-    return gSettings.debugSensorsGeneral ? "debugSensorsGeneral enabled (persistent)" : "debugSensorsGeneral disabled (persistent)";
-  }
-}
-
 // Generic sub-flag handler shared by feature groups (G2, Camera, ...).
 // Toggles the bool setting + the bit, but does NOT aggregate to the parent
 // flag — granular sub-toggles let users light up "Capture only" without
@@ -946,6 +928,40 @@ const char* cmd_debugcameravideo(const String& a) {
   return cmd_debugsubflag_impl(a, &gSettings.debugCameraVideo, DEBUG_CAMERA_VIDEO, "debugCameraVideo");
 }
 
+const char* cmd_debugmqtt(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs ca(argsInput);
+  String mode = ca.arg(1);
+  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
+  int v = ca.argInt(0, 0);
+  if (modeTemp) {
+    if (v) setDebugFlag(DEBUG_MQTT);
+    else clearDebugFlag(DEBUG_MQTT);
+    return v ? "debugMqtt enabled (runtime only)" : "debugMqtt disabled (runtime only)";
+  } else {
+    setSetting(gSettings.debugMqtt, (bool)(v != 0));
+    if (v) setDebugFlag(DEBUG_MQTT);
+    else clearDebugFlag(DEBUG_MQTT);
+    return gSettings.debugMqtt ? "debugMqtt enabled (persistent)" : "debugMqtt disabled (persistent)";
+  }
+}
+const char* cmd_debugmqttconnection(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugMqttConnection, DEBUG_MQTT_CONNECTION, "debugMqttConnection");
+}
+const char* cmd_debugmqttpubsub(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugMqttPubsub, DEBUG_MQTT_PUBSUB, "debugMqttPubsub");
+}
+const char* cmd_debugmqttdiscovery(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugMqttDiscovery, DEBUG_MQTT_DISCOVERY, "debugMqttDiscovery");
+}
+const char* cmd_debugmqttcommands(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugMqttCommands, DEBUG_MQTT_COMMANDS, "debugMqttCommands");
+}
+
+const char* cmd_debugdisplay(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugDisplay, DEBUG_DISPLAY, "debugDisplay");
+}
+
 const char* cmd_debugmicrophone(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs ca(argsInput);
@@ -980,6 +996,16 @@ const char* cmd_debugi2c(const String& argsInput) {
     else clearDebugFlag(DEBUG_I2C);
     return gSettings.debugI2C ? "debugI2C enabled (persistent)" : "debugI2C disabled (persistent)";
   }
+}
+
+const char* cmd_debugi2cbus(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugI2CBus, DEBUG_I2C_BUS, "debugI2CBus");
+}
+const char* cmd_debugi2cdiscovery(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugI2CDiscovery, DEBUG_I2C_DISCOVERY, "debugI2CDiscovery");
+}
+const char* cmd_debugi2cautostart(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugI2CAutoStart, DEBUG_I2C_AUTOSTART, "debugI2CAutoStart");
 }
 
 const char* cmd_debugwifi(const String& argsInput) {
@@ -1087,24 +1113,6 @@ const char* cmd_debugauth(const String& argsInput) {
     if (v) setDebugFlag(DEBUG_AUTH);
     else clearDebugFlag(DEBUG_AUTH);
     return gSettings.debugAuth ? "debugAuth enabled (persistent)" : "debugAuth disabled (persistent)";
-  }
-}
-
-const char* cmd_debugsensors(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_SENSORS);
-    else clearDebugFlag(DEBUG_SENSORS);
-    return v ? "debugSensors enabled (runtime only)" : "debugSensors disabled (runtime only)";
-  } else {
-    setSetting(gSettings.debugSensors, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_SENSORS);
-    else clearDebugFlag(DEBUG_SENSORS);
-    return gSettings.debugSensors ? "debugSensors enabled (persistent)" : "debugSensors disabled (persistent)";
   }
 }
 
@@ -1253,27 +1261,6 @@ const char* cmd_webconsole(const String& argsInput) {
   return gSettings.webConsoleDebug ? "webConsole enabled (persistent)" : "webConsole disabled (persistent)";
 }
 
-const char* cmd_debugsettingssystem(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) {
-    return "Usage: debugsettingssystem <0|1> [temp|runtime]";
-  }
-  if (!modeTemp) {
-    setSetting(gSettings.debugSettingsSystem, (bool)(v != 0));
-  }
-  if (v) setDebugFlag(DEBUG_SETTINGS_SYSTEM);
-  else clearDebugFlag(DEBUG_SETTINGS_SYSTEM);
-  if (modeTemp) {
-    return v ? "debugSettingsSystem enabled (runtime only)" : "debugSettingsSystem disabled (runtime only)";
-  } else {
-    return gSettings.debugSettingsSystem ? "debugSettingsSystem enabled (persistent)" : "debugSettingsSystem disabled (persistent)";
-  }
-}
-
 // Individual I2C sensor debug command handlers
 const char* cmd_debuggps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1419,150 +1406,38 @@ const char* cmd_debugpresence(const String& argsInput) {
   }
 }
 
-// Per-sensor frame/data debug command handlers
-const char* cmd_debugthermalframe(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_THERMAL_FRAME);
-    else clearDebugFlag(DEBUG_THERMAL_FRAME);
-    return v ? "debugThermalFrame enabled (runtime only)" : "debugThermalFrame disabled (runtime only)";
-  } else {
-    setSetting(gSettings.debugThermalFrame, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_THERMAL_FRAME);
-    else clearDebugFlag(DEBUG_THERMAL_FRAME);
-    return gSettings.debugThermalFrame ? "debugThermalFrame enabled (persistent)" : "debugThermalFrame disabled (persistent)";
-  }
-}
-
-const char* cmd_debugthermaldata(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_THERMAL_DATA);
-    else clearDebugFlag(DEBUG_THERMAL_DATA);
-    return v ? "debugThermalData enabled (runtime only)" : "debugThermalData disabled (runtime only)";
-  } else {
-    setSetting(gSettings.debugThermalData, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_THERMAL_DATA);
-    else clearDebugFlag(DEBUG_THERMAL_DATA);
-    return gSettings.debugThermalData ? "debugThermalData enabled (persistent)" : "debugThermalData disabled (persistent)";
-  }
-}
-
-const char* cmd_debugtofframe(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_TOF_FRAME);
-    else clearDebugFlag(DEBUG_TOF_FRAME);
-    return v ? "debugTofFrame enabled (runtime only)" : "debugTofFrame disabled (runtime only)";
-  } else {
-    setSetting(gSettings.debugTofFrame, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_TOF_FRAME);
-    else clearDebugFlag(DEBUG_TOF_FRAME);
-    return gSettings.debugTofFrame ? "debugTofFrame enabled (persistent)" : "debugTofFrame disabled (persistent)";
-  }
-}
-
-const char* cmd_debuggamepadframe(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_GAMEPAD_FRAME);
-    else clearDebugFlag(DEBUG_GAMEPAD_FRAME);
-    return v ? "debugGamepadFrame enabled (runtime only)" : "debugGamepadFrame disabled (runtime only)";
-  } else {
-    setSetting(gSettings.debugGamepadFrame, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_GAMEPAD_FRAME);
-    else clearDebugFlag(DEBUG_GAMEPAD_FRAME);
-    return gSettings.debugGamepadFrame ? "debugGamepadFrame enabled (persistent)" : "debugGamepadFrame disabled (persistent)";
-  }
-}
-
-const char* cmd_debuggamepaddata(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_GAMEPAD_DATA);
-    else clearDebugFlag(DEBUG_GAMEPAD_DATA);
-    return v ? "debugGamepadData enabled (runtime only)" : "debugGamepadData disabled (runtime only)";
-  } else {
-    setSetting(gSettings.debugGamepadData, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_GAMEPAD_DATA);
-    else clearDebugFlag(DEBUG_GAMEPAD_DATA);
-    return gSettings.debugGamepadData ? "debugGamepadData enabled (persistent)" : "debugGamepadData disabled (persistent)";
-  }
-}
-
-const char* cmd_debugimuframe(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_IMU_FRAME);
-    else clearDebugFlag(DEBUG_IMU_FRAME);
-    return v ? "debugImuFrame enabled (runtime only)" : "debugImuFrame disabled (runtime only)";
-  } else {
-    setSetting(gSettings.debugImuFrame, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_IMU_FRAME);
-    else clearDebugFlag(DEBUG_IMU_FRAME);
-    return gSettings.debugImuFrame ? "debugImuFrame enabled (persistent)" : "debugImuFrame disabled (persistent)";
-  }
-}
-
-const char* cmd_debugimudata(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_IMU_DATA);
-    else clearDebugFlag(DEBUG_IMU_DATA);
-    return v ? "debugImuData enabled (runtime only)" : "debugImuData disabled (runtime only)";
-  } else {
-    setSetting(gSettings.debugImuData, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_IMU_DATA);
-    else clearDebugFlag(DEBUG_IMU_DATA);
-    return gSettings.debugImuData ? "debugImuData enabled (persistent)" : "debugImuData disabled (persistent)";
-  }
-}
-
-const char* cmd_debugapdsframe(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_APDS_FRAME);
-    else clearDebugFlag(DEBUG_APDS_FRAME);
-    return v ? "debugApdsFrame enabled (runtime only)" : "debugApdsFrame disabled (runtime only)";
-  } else {
-    setSetting(gSettings.debugApdsFrame, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_APDS_FRAME);
-    else clearDebugFlag(DEBUG_APDS_FRAME);
-    return gSettings.debugApdsFrame ? "debugApdsFrame enabled (persistent)" : "debugApdsFrame disabled (persistent)";
-  }
-}
+// Per-sensor sub-flag handlers (Lifecycle / Polling / Values).
+// All use the shared cmd_debugsubflag_impl helper.
+const char* cmd_debugthermallifecycle(const String& a)  { return cmd_debugsubflag_impl(a, &gSettings.debugThermalLifecycle,  DEBUG_THERMAL_LIFECYCLE,  "debugThermalLifecycle"); }
+const char* cmd_debugthermalpolling(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugThermalPolling,    DEBUG_THERMAL_POLLING,    "debugThermalPolling"); }
+const char* cmd_debugthermalvalues(const String& a)     { return cmd_debugsubflag_impl(a, &gSettings.debugThermalValues,     DEBUG_THERMAL_VALUES,     "debugThermalValues"); }
+const char* cmd_debugtoflifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugTofLifecycle,      DEBUG_TOF_LIFECYCLE,      "debugTofLifecycle"); }
+const char* cmd_debugtofpolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugTofPolling,        DEBUG_TOF_POLLING,        "debugTofPolling"); }
+const char* cmd_debugtofvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugTofValues,         DEBUG_TOF_VALUES,         "debugTofValues"); }
+const char* cmd_debuggamepadlifecycle(const String& a)  { return cmd_debugsubflag_impl(a, &gSettings.debugGamepadLifecycle,  DEBUG_GAMEPAD_LIFECYCLE,  "debugGamepadLifecycle"); }
+const char* cmd_debuggamepadpolling(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugGamepadPolling,    DEBUG_GAMEPAD_POLLING,    "debugGamepadPolling"); }
+const char* cmd_debuggamepadvalues(const String& a)     { return cmd_debugsubflag_impl(a, &gSettings.debugGamepadValues,     DEBUG_GAMEPAD_VALUES,     "debugGamepadValues"); }
+const char* cmd_debugimulifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugImuLifecycle,      DEBUG_IMU_LIFECYCLE,      "debugImuLifecycle"); }
+const char* cmd_debugimupolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugImuPolling,        DEBUG_IMU_POLLING,        "debugImuPolling"); }
+const char* cmd_debugimuvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugImuValues,         DEBUG_IMU_VALUES,         "debugImuValues"); }
+const char* cmd_debugapdslifecycle(const String& a)     { return cmd_debugsubflag_impl(a, &gSettings.debugApdsLifecycle,     DEBUG_APDS_LIFECYCLE,     "debugApdsLifecycle"); }
+const char* cmd_debugapdspolling(const String& a)       { return cmd_debugsubflag_impl(a, &gSettings.debugApdsPolling,       DEBUG_APDS_POLLING,       "debugApdsPolling"); }
+const char* cmd_debugapdsvalues(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugApdsValues,        DEBUG_APDS_VALUES,        "debugApdsValues"); }
+const char* cmd_debuggpslifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugGpsLifecycle,      DEBUG_GPS_LIFECYCLE,      "debugGpsLifecycle"); }
+const char* cmd_debuggpspolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugGpsPolling,        DEBUG_GPS_POLLING,        "debugGpsPolling"); }
+const char* cmd_debuggpsvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugGpsValues,         DEBUG_GPS_VALUES,         "debugGpsValues"); }
+const char* cmd_debugrtclifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugRtcLifecycle,      DEBUG_RTC_LIFECYCLE,      "debugRtcLifecycle"); }
+const char* cmd_debugrtcpolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugRtcPolling,        DEBUG_RTC_POLLING,        "debugRtcPolling"); }
+const char* cmd_debugrtcvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugRtcValues,         DEBUG_RTC_VALUES,         "debugRtcValues"); }
+const char* cmd_debugfmradiolifecycle(const String& a)  { return cmd_debugsubflag_impl(a, &gSettings.debugFmRadioLifecycle,  DEBUG_FMRADIO_LIFECYCLE,  "debugFmRadioLifecycle"); }
+const char* cmd_debugfmradiopolling(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugFmRadioPolling,    DEBUG_FMRADIO_POLLING,    "debugFmRadioPolling"); }
+const char* cmd_debugfmradiovalues(const String& a)     { return cmd_debugsubflag_impl(a, &gSettings.debugFmRadioValues,     DEBUG_FMRADIO_VALUES,     "debugFmRadioValues"); }
+const char* cmd_debugmiclifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugMicLifecycle,      DEBUG_MIC_LIFECYCLE,      "debugMicLifecycle"); }
+const char* cmd_debugmicpolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugMicPolling,        DEBUG_MIC_POLLING,        "debugMicPolling"); }
+const char* cmd_debugmicvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugMicValues,         DEBUG_MIC_VALUES,         "debugMicValues"); }
+const char* cmd_debugpresencelifecycle(const String& a) { return cmd_debugsubflag_impl(a, &gSettings.debugPresenceLifecycle, DEBUG_PRESENCE_LIFECYCLE, "debugPresenceLifecycle"); }
+const char* cmd_debugpresencepolling(const String& a)   { return cmd_debugsubflag_impl(a, &gSettings.debugPresencePolling,   DEBUG_PRESENCE_POLLING,   "debugPresencePolling"); }
+const char* cmd_debugpresencevalues(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugPresenceValues,    DEBUG_PRESENCE_VALUES,    "debugPresenceValues"); }
 
 const char* cmd_debugmaps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1979,6 +1854,16 @@ const char* cmd_debugmemory(const String& argsInput) {
   }
 }
 
+const char* cmd_debugmemoryheap(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugMemoryHeap, DEBUG_MEMORY_HEAP, "debugMemoryHeap");
+}
+const char* cmd_debugmemorystack(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugMemoryStack, DEBUG_MEMORY_STACK, "debugMemoryStack");
+}
+const char* cmd_debugmemorybuffers(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugMemoryBuffers, DEBUG_MEMORY_BUFFERS, "debugMemoryBuffers");
+}
+
 const char* cmd_debugespnowmesh(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs ca(argsInput);
@@ -2260,9 +2145,16 @@ const char* getDebugCategoryName(DebugFlagMask flag) {
   if (flag & DEBUG_HTTP) return "HTTP";
   if (flag & DEBUG_SSE) return "SSE";
   if (flag & DEBUG_CLI) return "CLI";
-  if (flag & DEBUG_SENSORS) return "SENSORS";
   if (flag & DEBUG_FMRADIO) return "FMRADIO";
   if (flag & DEBUG_I2C) return "I2C";
+  if (flag & DEBUG_I2C_BUS)       return "I2C_BUS";
+  if (flag & DEBUG_I2C_DISCOVERY) return "I2C_DISCOVERY";
+  if (flag & DEBUG_I2C_AUTOSTART) return "I2C_AUTOSTART";
+  if (flag & DEBUG_MQTT)            return "MQTT";
+  if (flag & DEBUG_MQTT_CONNECTION) return "MQTT_CONN";
+  if (flag & DEBUG_MQTT_PUBSUB)     return "MQTT_PUBSUB";
+  if (flag & DEBUG_MQTT_DISCOVERY)  return "MQTT_DISCOVERY";
+  if (flag & DEBUG_MQTT_COMMANDS)   return "MQTT_CMD";
   if (flag & DEBUG_WIFI) return "WIFI";
   if (flag & DEBUG_PERFORMANCE) return "PERF";
   if (flag & DEBUG_MICROPHONE) return "MIC";
@@ -2273,12 +2165,14 @@ const char* getDebugCategoryName(DebugFlagMask flag) {
   if (flag & DEBUG_ESPNOW_CORE) return "ESPNOW";
   if (flag & DEBUG_LOGGER) return "LOGGER";
   if (flag & DEBUG_MEMORY) return "MEMORY";
+  if (flag & DEBUG_MEMORY_HEAP)    return "MEMORY_HEAP";
+  if (flag & DEBUG_MEMORY_STACK)   return "MEMORY_STACK";
+  if (flag & DEBUG_MEMORY_BUFFERS) return "MEMORY_BUFFERS";
   if (flag & DEBUG_ESPNOW_ROUTER) return "ESPNOW_ROUTER";
   if (flag & DEBUG_ESPNOW_MESH) return "ESPNOW_MESH";
   if (flag & DEBUG_ESPNOW_TOPO) return "ESPNOW_TOPO";
   if (flag & DEBUG_ESPNOW_STREAM) return "ESPNOW_STREAM";
   if (flag & DEBUG_COMMAND_SYSTEM) return "CMD_SYS";
-  if (flag & DEBUG_SETTINGS_SYSTEM) return "SETTINGS_SYS";
   if (flag & DEBUG_AUTO_EXEC) return "AUTO_EXEC";
   if (flag & DEBUG_AUTO_CONDITION) return "AUTO_COND";
   if (flag & DEBUG_AUTO_TIMING) return "AUTO_TIME";
@@ -2288,6 +2182,7 @@ const char* getDebugCategoryName(DebugFlagMask flag) {
   if (flag & DEBUG_CAMERA_CAPTURE)   return "CAMERA_CAPTURE";
   if (flag & DEBUG_CAMERA_SETTINGS)  return "CAMERA_SETTINGS";
   if (flag & DEBUG_CAMERA_VIDEO)     return "CAMERA_VIDEO";
+  if (flag & DEBUG_DISPLAY)          return "DISPLAY";
   if (flag & DEBUG_AUTO_SCHEDULER) return "AUTO_SCHED";
   if (flag & DEBUG_ESPNOW_ENCRYPTION) return "ESPNOW_ENC";
   // Bits 32-39: per-sensor device flags
@@ -2300,14 +2195,37 @@ const char* getDebugCategoryName(DebugFlagMask flag) {
   if (flag & DEBUG_APDS) return "APDS";
   if (flag & DEBUG_PRESENCE) return "PRESENCE";
   // Bits 40-47: per-sensor frame/data flags
-  if (flag & DEBUG_THERMAL_FRAME) return "THERMAL_FRAME";
-  if (flag & DEBUG_THERMAL_DATA) return "THERMAL_DATA";
-  if (flag & DEBUG_TOF_FRAME) return "TOF_FRAME";
-  if (flag & DEBUG_GAMEPAD_FRAME) return "GAMEPAD_FRAME";
-  if (flag & DEBUG_GAMEPAD_DATA) return "GAMEPAD_DATA";
-  if (flag & DEBUG_IMU_FRAME) return "IMU_FRAME";
-  if (flag & DEBUG_IMU_DATA) return "IMU_DATA";
-  if (flag & DEBUG_APDS_FRAME) return "APDS_FRAME";
+  // Per-sensor sub-flags (Lifecycle / Polling / Values)
+  if (flag & DEBUG_THERMAL_LIFECYCLE)  return "THERMAL_LIFE";
+  if (flag & DEBUG_THERMAL_POLLING)    return "THERMAL_POLL";
+  if (flag & DEBUG_THERMAL_VALUES)     return "THERMAL_VAL";
+  if (flag & DEBUG_TOF_LIFECYCLE)      return "TOF_LIFE";
+  if (flag & DEBUG_TOF_POLLING)        return "TOF_POLL";
+  if (flag & DEBUG_TOF_VALUES)         return "TOF_VAL";
+  if (flag & DEBUG_GAMEPAD_LIFECYCLE)  return "GAMEPAD_LIFE";
+  if (flag & DEBUG_GAMEPAD_POLLING)    return "GAMEPAD_POLL";
+  if (flag & DEBUG_GAMEPAD_VALUES)     return "GAMEPAD_VAL";
+  if (flag & DEBUG_IMU_LIFECYCLE)      return "IMU_LIFE";
+  if (flag & DEBUG_IMU_POLLING)        return "IMU_POLL";
+  if (flag & DEBUG_IMU_VALUES)         return "IMU_VAL";
+  if (flag & DEBUG_APDS_LIFECYCLE)     return "APDS_LIFE";
+  if (flag & DEBUG_APDS_POLLING)       return "APDS_POLL";
+  if (flag & DEBUG_APDS_VALUES)        return "APDS_VAL";
+  if (flag & DEBUG_GPS_LIFECYCLE)      return "GPS_LIFE";
+  if (flag & DEBUG_GPS_POLLING)        return "GPS_POLL";
+  if (flag & DEBUG_GPS_VALUES)         return "GPS_VAL";
+  if (flag & DEBUG_RTC_LIFECYCLE)      return "RTC_LIFE";
+  if (flag & DEBUG_RTC_POLLING)        return "RTC_POLL";
+  if (flag & DEBUG_RTC_VALUES)         return "RTC_VAL";
+  if (flag & DEBUG_FMRADIO_LIFECYCLE)  return "FMRADIO_LIFE";
+  if (flag & DEBUG_FMRADIO_POLLING)    return "FMRADIO_POLL";
+  if (flag & DEBUG_FMRADIO_VALUES)     return "FMRADIO_VAL";
+  if (flag & DEBUG_MIC_LIFECYCLE)      return "MIC_LIFE";
+  if (flag & DEBUG_MIC_POLLING)        return "MIC_POLL";
+  if (flag & DEBUG_MIC_VALUES)         return "MIC_VAL";
+  if (flag & DEBUG_PRESENCE_LIFECYCLE) return "PRESENCE_LIFE";
+  if (flag & DEBUG_PRESENCE_POLLING)   return "PRESENCE_POLL";
+  if (flag & DEBUG_PRESENCE_VALUES)    return "PRESENCE_VAL";
   // Bit 48
   if (flag & DEBUG_ESPNOW_METADATA) return "ESPNOW_META";
   // Bits 49-52: Maps
@@ -3037,18 +2955,17 @@ const CommandEntry debugCommands[] = {
   { "debugsse", "Debug Server-Sent Events.", true, cmd_debugsse },
   { "debugcli", "Debug CLI processing.", true, cmd_debugcli },
   { "debugauth", "Debug authentication (parent flag).", true, cmd_debugauth, "Usage: debugauth <0|1>" },
-  { "debugsensors", "Debug sensors (parent flag).", true, cmd_debugsensors, "Usage: debugsensors <0|1>" },
   { "debugespnow", "Debug ESP-NOW (parent flag).", true, cmd_debugespnow, "Usage: debugespnow <0|1>" },
   { "debugbluetooth", "Debug Bluetooth (parent flag).", true, cmd_debugbluetooth, "Usage: debugbluetooth <0|1> [temp|runtime]" },
   { "debugbluetoothcore", "Debug Bluetooth core lifecycle.", true, cmd_debugbluetoothcore, "Usage: debugbluetoothcore <0|1> [temp|runtime]" },
   { "debugbluetoothgatt", "Debug Bluetooth GATT operations.", true, cmd_debugbluetoothgatt, "Usage: debugbluetoothgatt <0|1> [temp|runtime]" },
   { "debugbluetoothdata", "Debug Bluetooth command/data path.", true, cmd_debugbluetoothdata, "Usage: debugbluetoothdata <0|1> [temp|runtime]" },
-  { "debugsensorsgeneral", "Debug general sensor operations.", true, cmd_debugsensorsgeneral },
   { "debugcamera",          "Debug camera (parent flag).",                              true, cmd_debugcamera,          "Usage: debugcamera <0|1> [temp|runtime]" },
   { "debugcameralifecycle", "Debug camera init/stop/PWDN-RESET/GPIO state.",            true, cmd_debugcameralifecycle, "Usage: debugcameralifecycle <0|1>" },
   { "debugcameracapture",   "Debug captureFrame, JPEG validation, fb buffer, recovery.",true, cmd_debugcameracapture,   "Usage: debugcameracapture <0|1>" },
   { "debugcamerasettings",  "Debug runtime camera resolution/quality changes.",         true, cmd_debugcamerasettings,  "Usage: debugcamerasettings <0|1>" },
   { "debugcameravideo",     "Debug video recording start/finalize, frame writing.",     true, cmd_debugcameravideo,     "Usage: debugcameravideo <0|1>" },
+  { "debugdisplay",         "Debug OLED init/probe/boot-animation/mode-transitions.",   true, cmd_debugdisplay,         "Usage: debugdisplay <0|1>" },
   { "debugmicrophone", "Debug microphone operations.", true, cmd_debugmicrophone },
   { "debuggps", "Debug GPS sensor (PA1010D).", true, cmd_debuggps, "Usage: debuggps <0|1>" },
   { "debugrtc", "Debug RTC sensor (DS3231).", true, cmd_debugrtc, "Usage: debugrtc <0|1>" },
@@ -3058,14 +2975,37 @@ const CommandEntry debugCommands[] = {
   { "debuggamepad", "Debug gamepad (Seesaw).", true, cmd_debuggamepad, "Usage: debuggamepad <0|1>" },
   { "debugapds", "Debug APDS sensor (APDS9960).", true, cmd_debugapds, "Usage: debugapds <0|1>" },
   { "debugpresence", "Debug presence sensor (STHS34PF80).", true, cmd_debugpresence, "Usage: debugpresence <0|1>" },
-  { "debugthermalframe", "Debug thermal frame timing/capture.", true, cmd_debugthermalframe, "Usage: debugthermalframe <0|1>" },
-  { "debugthermaldata", "Debug thermal data processing.", true, cmd_debugthermaldata, "Usage: debugthermaldata <0|1>" },
-  { "debugtofframe", "Debug ToF frame capture.", true, cmd_debugtofframe, "Usage: debugtofframe <0|1>" },
-  { "debuggamepadframe", "Debug gamepad frame timing.", true, cmd_debuggamepadframe, "Usage: debuggamepadframe <0|1>" },
-  { "debuggamepaddata", "Debug gamepad button events.", true, cmd_debuggamepaddata, "Usage: debuggamepaddata <0|1>" },
-  { "debugimuframe", "Debug IMU frame timing.", true, cmd_debugimuframe, "Usage: debugimuframe <0|1>" },
-  { "debugimudata", "Debug IMU data updates.", true, cmd_debugimudata, "Usage: debugimudata <0|1>" },
-  { "debugapdsframe", "Debug APDS frame timing.", true, cmd_debugapdsframe, "Usage: debugapdsframe <0|1>" },
+  // Per-sensor sub-flag setters (Lifecycle / Polling / Values)
+  { "debugthermallifecycle",  "Debug thermal init/connect/recovery.",         true, cmd_debugthermallifecycle,  "Usage: debugthermallifecycle <0|1>" },
+  { "debugthermalpolling",    "Debug thermal poll cadence/FPS/capture.",      true, cmd_debugthermalpolling,    "Usage: debugthermalpolling <0|1>" },
+  { "debugthermalvalues",     "Debug thermal value updates/interpolation.",   true, cmd_debugthermalvalues,     "Usage: debugthermalvalues <0|1>" },
+  { "debugtoflifecycle",      "Debug ToF init/connect/recovery.",             true, cmd_debugtoflifecycle,      "Usage: debugtoflifecycle <0|1>" },
+  { "debugtofpolling",        "Debug ToF poll cadence/capture.",              true, cmd_debugtofpolling,        "Usage: debugtofpolling <0|1>" },
+  { "debugtofvalues",         "Debug ToF range/object detection values.",     true, cmd_debugtofvalues,         "Usage: debugtofvalues <0|1>" },
+  { "debuggamepadlifecycle",  "Debug gamepad init/connect/recovery.",         true, cmd_debuggamepadlifecycle,  "Usage: debuggamepadlifecycle <0|1>" },
+  { "debuggamepadpolling",    "Debug gamepad poll cadence.",                  true, cmd_debuggamepadpolling,    "Usage: debuggamepadpolling <0|1>" },
+  { "debuggamepadvalues",     "Debug gamepad button press/release events.",   true, cmd_debuggamepadvalues,     "Usage: debuggamepadvalues <0|1>" },
+  { "debugimulifecycle",      "Debug IMU init/connect/recovery.",             true, cmd_debugimulifecycle,      "Usage: debugimulifecycle <0|1>" },
+  { "debugimupolling",        "Debug IMU poll cadence.",                      true, cmd_debugimupolling,        "Usage: debugimupolling <0|1>" },
+  { "debugimuvalues",         "Debug IMU orientation/acceleration values.",   true, cmd_debugimuvalues,         "Usage: debugimuvalues <0|1>" },
+  { "debugapdslifecycle",     "Debug APDS init/connect/recovery.",            true, cmd_debugapdslifecycle,     "Usage: debugapdslifecycle <0|1>" },
+  { "debugapdspolling",       "Debug APDS poll cadence.",                     true, cmd_debugapdspolling,       "Usage: debugapdspolling <0|1>" },
+  { "debugapdsvalues",        "Debug APDS color/proximity/gesture values.",   true, cmd_debugapdsvalues,        "Usage: debugapdsvalues <0|1>" },
+  { "debuggpslifecycle",      "Debug GPS init/connect/recovery.",             true, cmd_debuggpslifecycle,      "Usage: debuggpslifecycle <0|1>" },
+  { "debuggpspolling",        "Debug GPS poll cadence.",                      true, cmd_debuggpspolling,        "Usage: debuggpspolling <0|1>" },
+  { "debuggpsvalues",         "Debug GPS NMEA/fix/coordinate values.",        true, cmd_debuggpsvalues,         "Usage: debuggpsvalues <0|1>" },
+  { "debugrtclifecycle",      "Debug RTC init/connect/recovery.",             true, cmd_debugrtclifecycle,      "Usage: debugrtclifecycle <0|1>" },
+  { "debugrtcpolling",        "Debug RTC poll cadence.",                      true, cmd_debugrtcpolling,        "Usage: debugrtcpolling <0|1>" },
+  { "debugrtcvalues",         "Debug RTC time-read values.",                  true, cmd_debugrtcvalues,         "Usage: debugrtcvalues <0|1>" },
+  { "debugfmradiolifecycle",  "Debug FM radio init/tune/recovery.",           true, cmd_debugfmradiolifecycle,  "Usage: debugfmradiolifecycle <0|1>" },
+  { "debugfmradiopolling",    "Debug FM radio poll cadence.",                 true, cmd_debugfmradiopolling,    "Usage: debugfmradiopolling <0|1>" },
+  { "debugfmradiovalues",     "Debug FM radio RDS/RSSI/state values.",        true, cmd_debugfmradiovalues,     "Usage: debugfmradiovalues <0|1>" },
+  { "debugmiclifecycle",      "Debug microphone init/start/stop.",            true, cmd_debugmiclifecycle,      "Usage: debugmiclifecycle <0|1>" },
+  { "debugmicpolling",        "Debug microphone capture cadence.",            true, cmd_debugmicpolling,        "Usage: debugmicpolling <0|1>" },
+  { "debugmicvalues",         "Debug microphone level/sample values.",        true, cmd_debugmicvalues,         "Usage: debugmicvalues <0|1>" },
+  { "debugpresencelifecycle", "Debug presence sensor init/connect/recovery.", true, cmd_debugpresencelifecycle, "Usage: debugpresencelifecycle <0|1>" },
+  { "debugpresencepolling",   "Debug presence sensor poll cadence.",          true, cmd_debugpresencepolling,   "Usage: debugpresencepolling <0|1>" },
+  { "debugpresencevalues",    "Debug presence detection values.",             true, cmd_debugpresencevalues,    "Usage: debugpresencevalues <0|1>" },
   { "debugmaps", "Debug maps (parent flag).", true, cmd_debugmaps, "Usage: debugmaps <0|1>" },
   { "debugmapsloading", "Debug map file loading and tile directory.", true, cmd_debugmapsloading, "Usage: debugmapsloading <0|1>" },
   { "debugmapsrendering", "Debug map render pipeline and feature drawing.", true, cmd_debugmapsrendering, "Usage: debugmapsrendering <0|1>" },
@@ -3078,7 +3018,10 @@ const CommandEntry debugCommands[] = {
   { "debugllmgenerate", "Debug LLM generation loop and sampling.", true, cmd_debugllmgenerate, "Usage: debugllmgenerate <0|1> [temp|runtime]" },
   { "debugllmmemory", "Debug LLM PSRAM budget and context cap.", true, cmd_debugllmmemory, "Usage: debugllmmemory <0|1> [temp|runtime]" },
 #endif
-  { "debugi2c", "Debug I2C bus transactions, mutex, clock changes.", true, cmd_debugi2c },
+  { "debugi2c",          "Debug I2C bus (parent flag).",                                true, cmd_debugi2c,          "Usage: debugi2c <0|1>" },
+  { "debugi2cbus",       "Debug I2C bus lifecycle, polling pause/resume, status bumps.", true, cmd_debugi2cbus,       "Usage: debugi2cbus <0|1>" },
+  { "debugi2cdiscovery", "Debug I2C device probing, registry, scan results.",            true, cmd_debugi2cdiscovery, "Usage: debugi2cdiscovery <0|1>" },
+  { "debugi2cautostart", "Debug I2C sensor auto-start orchestration + init results.",    true, cmd_debugi2cautostart, "Usage: debugi2cautostart <0|1>" },
   { "debugwifi", "Debug WiFi operations.", true, cmd_debugwifi },
   { "debugstorage", "Debug storage operations.", true, cmd_debugstorage },
   { "debugperformance", "Debug performance metrics.", true, cmd_debugperformance },
@@ -3103,7 +3046,15 @@ const CommandEntry debugCommands[] = {
   { "debugautoexec", "Debug automations execution.", true, cmd_debugautoexec, "Usage: debugautoexec <0|1>" },
   { "debugautocondition", "Debug automations conditions.", true, cmd_debugautocondition, "Usage: debugautocondition <0|1>" },
   { "debugautotiming", "Debug automations timing.", true, cmd_debugautotiming, "Usage: debugautotiming <0|1>" },
-  { "debugmemory", "Debug memory buffer usage instrumentation.", true, cmd_debugmemory, "Usage: debugmemory <0|1>" },
+  { "debugmemory",         "Debug memory (parent flag).",                              true, cmd_debugmemory,         "Usage: debugmemory <0|1>" },
+  { "debugmemoryheap",     "Debug per-task heap (free/min/largest), DRAM low watermark.", true, cmd_debugmemoryheap,    "Usage: debugmemoryheap <0|1>" },
+  { "debugmemorystack",    "Debug per-task stack watermarks + peak reports.",          true, cmd_debugmemorystack,    "Usage: debugmemorystack <0|1>" },
+  { "debugmemorybuffers",  "Debug response/cookie buffer sizing diagnostics.",         true, cmd_debugmemorybuffers,  "Usage: debugmemorybuffers <0|1>" },
+  { "debugmqtt",           "Debug MQTT (parent flag).",                                true, cmd_debugmqtt,           "Usage: debugmqtt <0|1> [temp|runtime]" },
+  { "debugmqttconnection", "Debug MQTT connect/disconnect/TLS/init.",                  true, cmd_debugmqttconnection, "Usage: debugmqttconnection <0|1>" },
+  { "debugmqttpubsub",     "Debug MQTT publish/subscribe + received messages.",        true, cmd_debugmqttpubsub,     "Usage: debugmqttpubsub <0|1>" },
+  { "debugmqttdiscovery",  "Debug MQTT Home Assistant auto-discovery.",                true, cmd_debugmqttdiscovery,  "Usage: debugmqttdiscovery <0|1>" },
+  { "debugmqttcommands",   "Debug MQTT inbound commands + auth.",                      true, cmd_debugmqttcommands,   "Usage: debugmqttcommands <0|1>" },
   { "debugauthsessions", "Debug auth sessions.", true, cmd_debugauthsessions, "Usage: debugauthsessions <0|1>" },
   { "debugauthcookies", "Debug auth cookies.", true, cmd_debugauthcookies, "Usage: debugauthcookies <0|1>" },
   { "debugauthlogin", "Debug auth login.", true, cmd_debugauthlogin, "Usage: debugauthlogin <0|1>" },
@@ -3142,7 +3093,6 @@ const CommandEntry debugCommands[] = {
   { "debugcmdflowqueue", "Debug command flow queue.", true, cmd_debugcmdflowqueue },
   { "debugcmdflowcontext", "Debug command flow context.", true, cmd_debugcmdflowcontext },
   { "debugcommandsystem", "Debug modular command registry operations.", true, cmd_debugcommandsystem, "Usage: debugcommandsystem <0|1> [temp|runtime]" },
-  { "debugsettingssystem", "Debug settings module registration and validation.", true, cmd_debugsettingssystem, "Usage: debugsettingssystem <0|1> [temp|runtime]" },
   { "debugautomations", "Debug automations scheduler and actions.", true, cmd_debugautomations },
   { "debuglogger", "Debug sensor logger internals.", true, cmd_debuglogger },
   { "commandmodulesummary", "Show command module summary.", true, cmd_commandmodulesummary },
@@ -3385,13 +3335,13 @@ void systemLogAutoStart() {
 
 static const SettingEntry systemLogSettingEntries[] = {
   { "systemLogAutoStart",    SETTING_BOOL,   &gSettings.systemLogAutoStart,    0, 0, nullptr, 0, 1, "Auto-start logging after boot", nullptr, false, nullptr, "log autostart" },
-  { "systemLogPath",         SETTING_STRING, &gSettings.systemLogPath,         0, 0, "",      0, 0, "Log file path (empty = auto-generate)", nullptr },
-  { "systemLogCategoryTags", SETTING_BOOL,   &gSettings.systemLogCategoryTags, 1, 0, nullptr, 0, 1, "Include category tags",         nullptr },
+  { "systemLogPath", SETTING_STRING, &gSettings.systemLogPath, 0, 0, "", 0, 0, "Log file path (empty = auto-generate)", nullptr, false, nullptr, nullptr },
+  { "systemLogCategoryTags", SETTING_BOOL, &gSettings.systemLogCategoryTags, 1, 0, nullptr, 0, 1, "Include category tags", nullptr, false, nullptr, nullptr },
 };
 
 extern const SettingsModule systemLogSettingsModule = {
   "systemlog",
-  "systemlog",
+  "logging.systemlog",
   systemLogSettingEntries,
   sizeof(systemLogSettingEntries) / sizeof(systemLogSettingEntries[0]),
   nullptr,

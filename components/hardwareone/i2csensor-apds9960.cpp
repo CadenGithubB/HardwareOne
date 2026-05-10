@@ -45,8 +45,8 @@ TaskHandle_t gApdsTaskHandle = nullptr;
 // APDS settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry apdsSettingEntries[] = {
-  { "apdsAutoStart",    SETTING_BOOL, &gSettings.apdsAutoStart,    0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  { "apdsDevicePollMs", SETTING_INT,  &gSettings.apdsDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr }
+  { "apdsAutoStart", SETTING_BOOL, &gSettings.apdsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
+  { "apdsDevicePollMs", SETTING_INT, &gSettings.apdsDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, nullptr }
 };
 
 static bool isAPDSConnected() {
@@ -56,7 +56,7 @@ static bool isAPDSConnected() {
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule apdsSettingsModule = {
   "apds",
-  "apds",
+  "hardware.sensors.apds",
   apdsSettingEntries,
   sizeof(apdsSettingEntries) / sizeof(apdsSettingEntries[0]),
   isAPDSConnected,
@@ -226,7 +226,7 @@ const char* cmd_apdsmode(const String& argsInput) {
 bool apdsStartInternal() {
   // Check memory before creating task
   if (!checkMemoryAvailable("apds", nullptr)) {
-    ERROR_SENSORSF("[APDS] Error: Insufficient memory for APDS sensor");
+    ERROR_APDSF("Error: Insufficient memory for APDS sensor");
     return false;
   }
 
@@ -234,10 +234,10 @@ bool apdsStartInternal() {
   if (!gAPDSCache.mutex) {
     gAPDSCache.mutex = xSemaphoreCreateMutex();
     if (!gAPDSCache.mutex) {
-      ERROR_SENSORSF("[APDS] Failed to create cache mutex");
+      ERROR_APDSF("Failed to create cache mutex");
       return false;
     }
-    DEBUG_SENSORSF("[APDS] Cache mutex created");
+    DEBUG_APDS_LIFECYCLEF("[APDS] Cache mutex created");
   }
 
   // Clean up any stale cache from previous run BEFORE starting
@@ -251,12 +251,12 @@ bool apdsStartInternal() {
     gAPDSCache.apdsGesture = 0;
     xSemaphoreGive(gAPDSCache.mutex);
   }
-  INFO_SENSORSF("[APDS] Cleaned up stale cache from previous run");
+  INFO_APDSF("Cleaned up stale cache from previous run");
 
   // Initialize APDS sensor synchronously
   if (!gApdsConnected || gAPDS9960 == nullptr) {
     if (!apdsInit()) {
-      ERROR_SENSORSF("[APDS] Error: Failed to initialize APDS9960 sensor");
+      ERROR_APDSF("Error: Failed to initialize APDS9960 sensor");
       return false;
     }
   }
@@ -264,17 +264,17 @@ bool apdsStartInternal() {
   // Enable color mode by default (user can change with apdsmode command)
   gAPDS9960->enableColor(true);
   gApdsColorEnabled = true;
-  INFO_SENSORSF("[APDS] Color mode enabled by default");
+  INFO_APDSF("Color mode enabled by default");
 
   // Create APDS task
   if (!createAPDSTask()) {
-    ERROR_SENSORSF("[APDS] Error: Failed to create APDS task");
+    ERROR_APDSF("Error: Failed to create APDS task");
     gApdsColorEnabled = false;
     return false;
   }
 
   sensorStatusBumpWith("APDS initialized");
-  INFO_SENSORSF("[APDS] Sensor started successfully (color mode active)");
+  INFO_APDSF("Sensor started successfully (color mode active)");
   return true;
 }
 
@@ -426,10 +426,10 @@ const size_t apdsCommandsCount = sizeof(apdsCommands) / sizeof(apdsCommands[0]);
 // ============================================================================
 
 void apdsTask(void* parameter) {
-  INFO_SENSORSF("[APDS] Task started (handle=%p, stack=%u words)", 
+  INFO_APDSF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_SENSORSF("[MODULAR] apdsTask() running from Sensor_APDS_APDS9960.cpp");
+  INFO_APDSF("[MODULAR] apdsTask() running from Sensor_APDS_APDS9960.cpp");
   unsigned long lastApdsRead = 0;
   unsigned long lastStackLog = 0;
   // Note: Failure tracking now handled by centralized I2CDevice health system
@@ -445,7 +445,7 @@ void apdsTask(void* parameter) {
         gAPDS9960 = nullptr;
       }
       gAPDSCache.apdsDataValid = false;
-      SENSOR_TASK_EXIT("APDS");
+      SENSOR_TASK_EXIT(APDS);
     }
 
     // Stack watermark tracking + safety bailout
@@ -462,7 +462,7 @@ void apdsTask(void* parameter) {
         DEBUG_PERFORMANCEF("[STACK] apds_task watermark=%u words", (unsigned)watermark);
       }
       if (anyEnabled && isDebugFlagSet(DEBUG_MEMORY)) {
-        DEBUG_MEMORYF("[HEAP] apds_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+        DEBUG_MEMORY_HEAPF("[HEAP] apds_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     
@@ -513,7 +513,7 @@ void apdsTask(void* parameter) {
             gApdsGestureEnabled = false;
             gApdsConnected = false;
             sensorStatusBumpWith("apds@auto_disabled");
-            DEBUG_APDS_FRAMEF("APDS auto-disabled after %u consecutive I2C failures", errors);
+            DEBUG_APDS_LIFECYCLEF("APDS auto-disabled after %u consecutive I2C failures", errors);
             break;
           }
         }

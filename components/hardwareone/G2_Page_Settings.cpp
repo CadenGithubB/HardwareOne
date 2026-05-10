@@ -493,7 +493,21 @@ static bool showModuleJsonViaTextWidget(int moduleIdx) {
   String s;
   s.reserve(1024);
   if (m->jsonSection) {
-    JsonVariant v = fullDoc[m->jsonSection];
+    // jsonSection may be a dotted path (e.g. "hardware.sensors.camera"),
+    // so walk one segment at a time instead of doing a single keyed lookup.
+    JsonVariantConst v = fullDoc.as<JsonVariantConst>();
+    const char* segStart = m->jsonSection;
+    while (true) {
+      const char* dot = strchr(segStart, '.');
+      size_t segLen = dot ? (size_t)(dot - segStart) : strlen(segStart);
+      char segment[64];
+      if (segLen == 0 || segLen >= sizeof(segment)) { v = JsonVariantConst(); break; }
+      memcpy(segment, segStart, segLen);
+      segment[segLen] = '\0';
+      v = v[segment];
+      if (v.isNull() || !dot) break;
+      segStart = dot + 1;
+    }
     if (v.isNull()) {
       s = "(no JSON section)";
     } else {

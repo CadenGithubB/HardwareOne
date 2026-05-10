@@ -203,6 +203,8 @@ extern const size_t imageCommandsCount;
 #endif
 extern const CommandEntry mapCommands[];
 extern const size_t mapCommandsCount;
+extern const CommandEntry mapsSettingCommands[];
+extern const size_t mapsSettingCommandsCount;
 extern const CommandEntry powerCommands[];
 extern const size_t powerCommandsCount;
 #if ENABLE_OLED_DISPLAY
@@ -1870,6 +1872,7 @@ static const CommandModule gCommandModules[] = {
 #endif
 #if ENABLE_MAPS
   { "map",        "Map navigation and waypoints", mapCommands,          mapCommandsCount, 0, nullptr },
+  { "mapsettings","Maps app settings (zoom, layers, cache)", mapsSettingCommands, mapsSettingCommandsCount, 0, nullptr },
 #endif
   { "power",      "Power management", powerCommands,        powerCommandsCount, 0, nullptr },
 #if ENABLE_OLED_DISPLAY

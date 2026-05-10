@@ -157,14 +157,14 @@ String ImageManager::captureAndSave(ImageStorageLocation location) {
 #if ENABLE_CAMERA_SENSOR
   extern bool gCameraEnabled;
   if (!gCameraEnabled) {
-    ERROR_SENSORSF("[ImageManager] Camera not enabled");
+    ERROR_CAMERAF("[ImageManager] Camera not enabled");
     return "";
   }
   
   size_t len = 0;
   uint8_t* data = captureFrame(&len);
   if (!data || len == 0) {
-    ERROR_SENSORSF("[ImageManager] Failed to capture frame");
+    ERROR_CAMERAF("[ImageManager] Failed to capture frame");
     return "";
   }
   
@@ -173,7 +173,7 @@ String ImageManager::captureAndSave(ImageStorageLocation location) {
   
   return result;
 #else
-  ERROR_SENSORSF("[ImageManager] Camera not compiled in");
+  ERROR_CAMERAF("[ImageManager] Camera not compiled in");
   return "";
 #endif
 }

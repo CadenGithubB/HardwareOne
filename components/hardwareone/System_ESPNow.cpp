@@ -473,7 +473,6 @@ struct FileTransfer {
   uint16_t chunkMapBytes;
 };
 static FileTransfer* gActiveFileTransfer = nullptr;
-// NOTE: gActiveFileTransferFile removed - v3 protocol buffers in PSRAM and writes at end
 
 // ============================================================================
 // ESP-NOW Mesh Chunking Pattern (New Architecture)
@@ -1021,8 +1020,6 @@ void sendTextMessage(const uint8_t* targetMac, const String& text) {
   v3_send_text(targetMac, text.c_str(), text.length());
 }
 
-// NOTE: V2 cleanupExpiredChunkedMessage() removed — V3 binary protocol handles all chunking
-
 // Forward declaration for session-based streaming helper (defined in V3 protocol section)
 static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t len);
 uint32_t gCurrentStreamCmdId = 0;  // Set during command execution on cmd_exec task (non-static for HardwareOne.cpp)
@@ -1068,8 +1065,6 @@ void sendEspNowStreamMessage(const String& message) {
            (unsigned long)gEspNow->streamSentCount, message.c_str());
   }
 }
-
-// NOTE: V2 handleGenericChunkedMessage() removed — V3 binary protocol handles all chunking
 
 // Minimal RX callback: enqueue raw frame into tiny ring and return immediately
 static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8_t* incomingData, int len) {
@@ -5663,7 +5658,7 @@ static void loadEspNowDevices() {
 
 
 // ============================================================================
-// RESTORED PUBLIC HELPER FUNCTIONS (removed during V2 cleanup, rebuilt)
+// Public helper functions
 // ============================================================================
 
 // Convert 6-byte MAC to colon-separated hex string ("AA:BB:CC:DD:EE:FF")
@@ -10341,50 +10336,50 @@ extern const size_t espNowCommandsCount = sizeof(espNowCommands) / sizeof(espNow
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry espnowSettingEntries[] = {
   { "enabled",                    SETTING_BOOL,   &gSettings.espnowenabled,              false, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr, false, nullptr, "espnowenabled" },
-  { "mesh",                       SETTING_BOOL,   &gSettings.espnowmesh,                 false, 0, nullptr, 0, 1, "Mesh Mode", nullptr, false, nullptr, "espnowmode" },
+  { "mesh", SETTING_BOOL, &gSettings.espnowmesh, false, 0, nullptr, 0, 1, "Mesh Mode", nullptr, false, "mesh", "espnowmode" },
   { "userSyncEnabled",            SETTING_BOOL,   &gSettings.espnowUserSyncEnabled,      false, 0, nullptr, 0, 1, "User Sync Enabled", nullptr, false, nullptr, "espnowusersync" },
-  { "captureToSd",                SETTING_BOOL,   &gSettings.espnowCaptureToSd,          false, 0, nullptr, 0, 1, "Capture ESP-NOW traffic to SD card", nullptr, false, nullptr, "espnowcapturetosd" },
-  { "captureSkipHeartbeats",      SETTING_BOOL,   &gSettings.espnowCaptureSkipHeartbeats, true, 0, nullptr, 0, 1, "Skip heartbeat frames in capture", nullptr, false, nullptr, "espnowcaptureskipheartbeats" },
-  { "deviceName",                 SETTING_STRING, &gSettings.espnowDeviceName,           0, 0, "", 0, 0, "Device Name", nullptr, false, nullptr, "espnowsetname" },
-  { "room",                       SETTING_STRING, &gSettings.espnowRoom,                 0, 0, "", 0, 0, "Room", nullptr, false, nullptr, "espnowroom" },
-  { "zone",                       SETTING_STRING, &gSettings.espnowZone,                 0, 0, "", 0, 0, "Zone", nullptr, false, nullptr, "espnowzone" },
-  { "tags",                       SETTING_STRING, &gSettings.espnowTags,                 0, 0, "", 0, 0, "Tags", nullptr, false, nullptr, "espnowtags" },
-  { "friendlyName",               SETTING_STRING, &gSettings.espnowFriendlyName,         0, 0, "", 0, 0, "Friendly Name", nullptr, false, nullptr, "espnowfriendlyname" },
-  { "stationary",                 SETTING_BOOL,   &gSettings.espnowStationary,           false, 0, nullptr, 0, 1, "Stationary", nullptr, false, nullptr, "espnowstationary" },
+  { "captureToSd", SETTING_BOOL, &gSettings.espnowCaptureToSd, false, 0, nullptr, 0, 1, "Capture ESP-NOW traffic to SD card", nullptr, false, "capture", "espnowcapturetosd" },
+  { "captureSkipHeartbeats", SETTING_BOOL, &gSettings.espnowCaptureSkipHeartbeats, true, 0, nullptr, 0, 1, "Skip heartbeat frames in capture", nullptr, false, "capture", "espnowcaptureskipheartbeats" },
+  { "deviceName", SETTING_STRING, &gSettings.espnowDeviceName, 0, 0, "", 0, 0, "Device Name", nullptr, false, "identity", "espnowsetname" },
+  { "room", SETTING_STRING, &gSettings.espnowRoom, 0, 0, "", 0, 0, "Room", nullptr, false, "identity", "espnowroom" },
+  { "zone", SETTING_STRING, &gSettings.espnowZone, 0, 0, "", 0, 0, "Zone", nullptr, false, "identity", "espnowzone" },
+  { "tags", SETTING_STRING, &gSettings.espnowTags, 0, 0, "", 0, 0, "Tags", nullptr, false, "identity", "espnowtags" },
+  { "friendlyName", SETTING_STRING, &gSettings.espnowFriendlyName, 0, 0, "", 0, 0, "Friendly Name", nullptr, false, "identity", "espnowfriendlyname" },
+  { "stationary", SETTING_BOOL, &gSettings.espnowStationary, false, 0, nullptr, 0, 1, "Stationary", nullptr, false, "identity", "espnowstationary" },
   { "firstTimeSetup",             SETTING_BOOL,   &gSettings.espnowFirstTimeSetup,       false, 0, nullptr, 0, 1, "First Time Setup", nullptr, false, nullptr, "espnowfirsttimesetup" },
-  { "passphrase",                  SETTING_STRING, &gSettings.espnowPassphrase,           0, 0, "", 0, 0, "Passphrase", nullptr, true, nullptr, "espnowsetpassphrase" },
-  { "meshRole",                   SETTING_INT,    &gSettings.meshRole,                   0, 0, nullptr, 0, 2, "Mesh Role", nullptr, false, nullptr, "espnowmeshrole" },
-  { "masterMAC",                  SETTING_STRING, &gSettings.meshMasterMAC,              0, 0, "", 0, 0, "Master MAC", nullptr, false, nullptr, "espnowmeshmaster" },
-  { "backupMAC",                  SETTING_STRING, &gSettings.meshBackupMAC,              0, 0, "", 0, 0, "Backup MAC", nullptr, false, nullptr, "espnowmeshbackup" },
-  { "backupEnabled",              SETTING_BOOL,   &gSettings.meshBackupEnabled,           false, 0, nullptr, 0, 1, "Backup Master Enabled", nullptr, false, nullptr, "espnowbackupenable" },
-  { "masterHeartbeatInterval",    SETTING_INT,    &gSettings.meshMasterHeartbeatInterval,10000, 0, nullptr, 1000, 60000, "Heartbeat Interval (ms)", nullptr, false, nullptr, "espnowheartbeatinterval" },
-  { "failoverTimeout",            SETTING_INT,    &gSettings.meshFailoverTimeout,        20000, 0, nullptr, 5000, 120000, "Failover Timeout (ms)", nullptr, false, nullptr, "espnowfailovertimeout" },
-  { "workerStatusInterval",       SETTING_INT,    &gSettings.meshWorkerStatusInterval,   30000, 0, nullptr, 5000, 120000, "Worker Status Interval (ms)", nullptr, false, nullptr, "espnowworkerstatusinterval" },
-  { "topoDiscoveryInterval",      SETTING_INT,    &gSettings.meshTopoDiscoveryInterval,  0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr, false, nullptr, "espnowtopodiscoveryinterval" },
-  { "topoAutoRefresh",            SETTING_BOOL,   &gSettings.meshTopoAutoRefresh,        false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr, false, nullptr, "espnowtopoautorefresh" },
-  { "heartbeatBroadcast",         SETTING_BOOL,   &gSettings.meshHeartbeatBroadcast,     false, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr, false, nullptr, "espnowheartbeatbroadcast" },
-  { "meshTTL",                    SETTING_INT,    &gSettings.meshTTL,                    3, 0, nullptr, 1, 10, "TTL", nullptr, false, nullptr, "espnowmeshttl" },
-  { "meshAdaptiveTTL",            SETTING_BOOL,   &gSettings.meshAdaptiveTTL,            false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr, false, nullptr, "espnowmeshadaptivettl" },
-  { "meshPeerMax",                SETTING_INT,    &gSettings.meshPeerMax,                8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr, false, nullptr, "espnowmeshpeermax" },
-  { "sensorBroadcastIntervalMs",  SETTING_INT,    &gSettings.sensorBroadcastIntervalMs,  1000, 0, nullptr, 100, 10000, "Sensor Broadcast Interval (ms)", nullptr, false, nullptr, "espnowsensorbroadcastinterval" },
+  { "passphrase", SETTING_STRING, &gSettings.espnowPassphrase, 0, 0, "", 0, 0, "Passphrase", nullptr, true, "identity", "espnowsetpassphrase" },
+  { "meshRole", SETTING_INT, &gSettings.meshRole, 0, 0, nullptr, 0, 2, "Mesh Role", nullptr, false, "mesh", "espnowmeshrole" },
+  { "masterMAC", SETTING_STRING, &gSettings.meshMasterMAC, 0, 0, "", 0, 0, "Master MAC", nullptr, false, "mesh", "espnowmeshmaster" },
+  { "backupMAC", SETTING_STRING, &gSettings.meshBackupMAC, 0, 0, "", 0, 0, "Backup MAC", nullptr, false, "mesh", "espnowmeshbackup" },
+  { "backupEnabled", SETTING_BOOL, &gSettings.meshBackupEnabled, false, 0, nullptr, 0, 1, "Backup Master Enabled", nullptr, false, "mesh", "espnowbackupenable" },
+  { "masterHeartbeatInterval", SETTING_INT, &gSettings.meshMasterHeartbeatInterval, 10000, 0, nullptr, 1000, 60000, "Heartbeat Interval (ms)", nullptr, false, "mesh", "espnowheartbeatinterval" },
+  { "failoverTimeout", SETTING_INT, &gSettings.meshFailoverTimeout, 20000, 0, nullptr, 5000, 120000, "Failover Timeout (ms)", nullptr, false, "mesh", "espnowfailovertimeout" },
+  { "workerStatusInterval", SETTING_INT, &gSettings.meshWorkerStatusInterval, 30000, 0, nullptr, 5000, 120000, "Worker Status Interval (ms)", nullptr, false, "mesh", "espnowworkerstatusinterval" },
+  { "topoDiscoveryInterval", SETTING_INT, &gSettings.meshTopoDiscoveryInterval, 0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr, false, "mesh", "espnowtopodiscoveryinterval" },
+  { "topoAutoRefresh", SETTING_BOOL, &gSettings.meshTopoAutoRefresh, false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr, false, "mesh", "espnowtopoautorefresh" },
+  { "heartbeatBroadcast", SETTING_BOOL, &gSettings.meshHeartbeatBroadcast, false, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr, false, "mesh", "espnowheartbeatbroadcast" },
+  { "meshTTL", SETTING_INT, &gSettings.meshTTL, 3, 0, nullptr, 1, 10, "TTL", nullptr, false, "mesh", "espnowmeshttl" },
+  { "meshAdaptiveTTL", SETTING_BOOL, &gSettings.meshAdaptiveTTL, false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr, false, "mesh", "espnowmeshadaptivettl" },
+  { "meshPeerMax", SETTING_INT, &gSettings.meshPeerMax, 8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr, false, "mesh", "espnowmeshpeermax" },
+  { "sensorBroadcastIntervalMs", SETTING_INT, &gSettings.sensorBroadcastIntervalMs, 1000, 0, nullptr, 100, 10000, "Sensor Broadcast Interval (ms)", nullptr, false, "mesh", "espnowsensorbroadcastinterval" },
 #if ENABLE_BONDED_MODE
-  { "bondModeEnabled",          SETTING_BOOL,   &gSettings.bondModeEnabled,          false, 0, nullptr, 0, 1, "Bond Mode Enabled", nullptr, false, nullptr, "espnowbondmodeenabled" },
-  { "bondRole",                 SETTING_INT,    &gSettings.bondRole,                 0, 0, nullptr, 0, 1, "Bond Role", nullptr, false, nullptr, "bondrole" },
-  { "bondPeerMac",              SETTING_STRING, &gSettings.bondPeerMac,              0, 0, "", 0, 0, "Bond Peer MAC", nullptr, false, nullptr, "espnowbondpeermac" },
-  { "bondStreamThermal",          SETTING_BOOL,   &gSettings.bondStreamThermal,          false, 0, nullptr, 0, 1, "Auto-stream Thermal", nullptr, false, nullptr, "bondstreamthermal" },
-  { "bondStreamTof",              SETTING_BOOL,   &gSettings.bondStreamTof,              false, 0, nullptr, 0, 1, "Auto-stream ToF", nullptr, false, nullptr, "bondstreamtof" },
-  { "bondStreamImu",              SETTING_BOOL,   &gSettings.bondStreamImu,              false, 0, nullptr, 0, 1, "Auto-stream IMU", nullptr, false, nullptr, "bondstreamimu" },
-  { "bondStreamGps",              SETTING_BOOL,   &gSettings.bondStreamGps,              false, 0, nullptr, 0, 1, "Auto-stream GPS", nullptr, false, nullptr, "bondstreamgps" },
-  { "bondStreamGamepad",          SETTING_BOOL,   &gSettings.bondStreamGamepad,          false, 0, nullptr, 0, 1, "Auto-stream Gamepad", nullptr, false, nullptr, "bondstreamgamepad" },
-  { "bondStreamFmradio",          SETTING_BOOL,   &gSettings.bondStreamFmradio,          false, 0, nullptr, 0, 1, "Auto-stream FM Radio", nullptr, false, nullptr, "bondstreamfmradio" },
-  { "bondStreamRtc",              SETTING_BOOL,   &gSettings.bondStreamRtc,              false, 0, nullptr, 0, 1, "Auto-stream RTC", nullptr, false, nullptr, "bondstreamrtc" },
-  { "bondStreamPresence",         SETTING_BOOL,   &gSettings.bondStreamPresence,         false, 0, nullptr, 0, 1, "Auto-stream Presence", nullptr, false, nullptr, "bondstreampresence" },
+  { "bondModeEnabled", SETTING_BOOL, &gSettings.bondModeEnabled, false, 0, nullptr, 0, 1, "Bond Mode Enabled", nullptr, false, "bond", "espnowbondmodeenabled" },
+  { "bondRole", SETTING_INT, &gSettings.bondRole, 0, 0, nullptr, 0, 1, "Bond Role", nullptr, false, "bond", "bondrole" },
+  { "bondPeerMac", SETTING_STRING, &gSettings.bondPeerMac, 0, 0, "", 0, 0, "Bond Peer MAC", nullptr, false, "bond", "espnowbondpeermac" },
+  { "bondStreamThermal", SETTING_BOOL, &gSettings.bondStreamThermal, false, 0, nullptr, 0, 1, "Auto-stream Thermal", nullptr, false, "bond", "bondstreamthermal" },
+  { "bondStreamTof", SETTING_BOOL, &gSettings.bondStreamTof, false, 0, nullptr, 0, 1, "Auto-stream ToF", nullptr, false, "bond", "bondstreamtof" },
+  { "bondStreamImu", SETTING_BOOL, &gSettings.bondStreamImu, false, 0, nullptr, 0, 1, "Auto-stream IMU", nullptr, false, "bond", "bondstreamimu" },
+  { "bondStreamGps", SETTING_BOOL, &gSettings.bondStreamGps, false, 0, nullptr, 0, 1, "Auto-stream GPS", nullptr, false, "bond", "bondstreamgps" },
+  { "bondStreamGamepad", SETTING_BOOL, &gSettings.bondStreamGamepad, false, 0, nullptr, 0, 1, "Auto-stream Gamepad", nullptr, false, "bond", "bondstreamgamepad" },
+  { "bondStreamFmradio", SETTING_BOOL, &gSettings.bondStreamFmradio, false, 0, nullptr, 0, 1, "Auto-stream FM Radio", nullptr, false, "bond", "bondstreamfmradio" },
+  { "bondStreamRtc", SETTING_BOOL, &gSettings.bondStreamRtc, false, 0, nullptr, 0, 1, "Auto-stream RTC", nullptr, false, "bond", "bondstreamrtc" },
+  { "bondStreamPresence", SETTING_BOOL, &gSettings.bondStreamPresence, false, 0, nullptr, 0, 1, "Auto-stream Presence", nullptr, false, "bond", "bondstreampresence" },
 #endif
   // Buffer size settings (requires reinit to take effect)
-  { "txQueueSize",                SETTING_INT,    (int*)&gSettings.espnowTxQueueSize,    8, 0, nullptr, 1, 16, "TX Queue Size", nullptr, false, nullptr, "espnowtxqueuesize" },
-  { "rxBufferSize",               SETTING_INT,    (int*)&gSettings.espnowRxBufferSize,   256, 0, nullptr, 64, 512, "RX Buffer Size", nullptr, false, nullptr, "espnowrxbuffersize" },
-  { "chunkSize",                  SETTING_INT,    (int*)&gSettings.espnowChunkSize,      200, 0, nullptr, 100, 220, "Chunk Size", nullptr, false, nullptr, "espnowchunksize" },
-  { "fileChunkSize",              SETTING_INT,    (int*)&gSettings.espnowFileChunkSize,  224, 0, nullptr, 100, 224, "File Chunk Size", nullptr, false, nullptr, "espnowfilechunksize" }
+  { "txQueueSize", SETTING_INT, (int*)&gSettings.espnowTxQueueSize, 8, 0, nullptr, 1, 16, "TX Queue Size", nullptr, false, "buffers", "espnowtxqueuesize" },
+  { "rxBufferSize", SETTING_INT, (int*)&gSettings.espnowRxBufferSize, 256, 0, nullptr, 64, 512, "RX Buffer Size", nullptr, false, "buffers", "espnowrxbuffersize" },
+  { "chunkSize", SETTING_INT, (int*)&gSettings.espnowChunkSize, 200, 0, nullptr, 100, 220, "Chunk Size", nullptr, false, "buffers", "espnowchunksize" },
+  { "fileChunkSize", SETTING_INT, (int*)&gSettings.espnowFileChunkSize, 224, 0, nullptr, 100, 224, "File Chunk Size", nullptr, false, "buffers", "espnowfilechunksize" }
 };
 
 // Helper: find an ESP-NOW setting entry by jsonKey
@@ -10429,11 +10424,15 @@ ESPNOW_SETTING_CMD(cmd_espnow_bondstreamrtc, "bondStreamRtc")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreampresence, "bondStreamPresence")
 #endif
 
+static bool isEspNowInitialized() {
+  return gEspNow && gEspNow->initialized;
+}
+
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule espnowSettingsModule = {
-  "espnow", "espnow", espnowSettingEntries,
+  "espnow", "network.espnow", espnowSettingEntries,
   sizeof(espnowSettingEntries) / sizeof(espnowSettingEntries[0]),
-  nullptr,
+  isEspNowInitialized,
   "ESP-NOW mesh networking"
 };
 

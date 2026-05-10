@@ -37,6 +37,56 @@
 // External dependencies from main .ino
 
 extern bool filesystemReady;
+
+// ----------------------------------------------------------------------------
+// Dotted-path JSON helpers
+// ----------------------------------------------------------------------------
+// SettingsModule::jsonSection now supports dotted paths like
+// "hardware.sensors.camera" so settings can nest in JSON without bloating the
+// flat top level. These two helpers walk such a path:
+//   - jsonPathCreate: get-or-create each segment, returns the leaf JsonObject.
+//   - jsonPathRead:   read-only traversal, returns null-variant on any miss.
+// Path == nullptr or "" returns the document root (legacy behavior).
+static JsonObject jsonPathCreate(JsonDocument& doc, const char* path) {
+  if (!path || !*path) return doc.as<JsonObject>();
+  JsonVariant current = doc.as<JsonVariant>();
+  const char* segStart = path;
+  while (true) {
+    const char* dot = strchr(segStart, '.');
+    size_t segLen = dot ? (size_t)(dot - segStart) : strlen(segStart);
+    char segment[64];
+    if (segLen == 0 || segLen >= sizeof(segment)) return JsonObject();
+    memcpy(segment, segStart, segLen);
+    segment[segLen] = '\0';
+    JsonVariant next = current[segment];
+    if (next.isNull() || !next.is<JsonObject>()) {
+      next = current[segment].to<JsonObject>();
+    }
+    current = next;
+    if (!dot) break;
+    segStart = dot + 1;
+  }
+  return current.as<JsonObject>();
+}
+
+static JsonVariantConst jsonPathRead(const JsonDocument& doc, const char* path) {
+  if (!path || !*path) return doc.as<JsonVariantConst>();
+  JsonVariantConst current = doc.as<JsonVariantConst>();
+  const char* segStart = path;
+  while (true) {
+    const char* dot = strchr(segStart, '.');
+    size_t segLen = dot ? (size_t)(dot - segStart) : strlen(segStart);
+    char segment[64];
+    if (segLen == 0 || segLen >= sizeof(segment)) return JsonVariantConst();
+    memcpy(segment, segStart, segLen);
+    segment[segLen] = '\0';
+    current = current[segment];
+    if (current.isNull()) return current;
+    if (!dot) break;
+    segStart = dot + 1;
+  }
+  return current;
+}
 extern volatile uint32_t gOutputFlags;
 // gDebugFlags now from debug_system.h
 
@@ -546,13 +596,12 @@ void applySettings() {
     DBG_MAP(debugHttp,             DEBUG_HTTP),
     DBG_MAP(debugSse,              DEBUG_SSE),
     DBG_MAP(debugCli,              DEBUG_CLI),
-    DBG_MAP(debugSensors,          DEBUG_SENSORS),
-    DBG_MAP(debugSensorsGeneral,   DEBUG_SENSORS),
     DBG_MAP(debugCamera,           DEBUG_CAMERA),
     DBG_MAP(debugCameraLifecycle,  DEBUG_CAMERA_LIFECYCLE),
     DBG_MAP(debugCameraCapture,    DEBUG_CAMERA_CAPTURE),
     DBG_MAP(debugCameraSettings,   DEBUG_CAMERA_SETTINGS),
     DBG_MAP(debugCameraVideo,      DEBUG_CAMERA_VIDEO),
+    DBG_MAP(debugDisplay,          DEBUG_DISPLAY),
     DBG_MAP(debugMicrophone,       DEBUG_MICROPHONE),
     DBG_MAP(debugWifi,             DEBUG_WIFI),
     DBG_MAP(debugStorage,          DEBUG_STORAGE),
@@ -564,8 +613,10 @@ void applySettings() {
     DBG_MAP(debugAutomations,      DEBUG_AUTOMATIONS),
     DBG_MAP(debugLogger,           DEBUG_LOGGER),
     DBG_MAP(debugMemory,           DEBUG_MEMORY),
+    DBG_MAP(debugMemoryHeap,       DEBUG_MEMORY_HEAP),
+    DBG_MAP(debugMemoryStack,      DEBUG_MEMORY_STACK),
+    DBG_MAP(debugMemoryBuffers,    DEBUG_MEMORY_BUFFERS),
     DBG_MAP(debugCommandSystem,    DEBUG_COMMAND_SYSTEM),
-    DBG_MAP(debugSettingsSystem,   DEBUG_SETTINGS_SYSTEM),
     DBG_MAP(debugBluetooth,        DEBUG_BLUETOOTH),
     DBG_MAP(debugBluetoothCore,    DEBUG_BLUETOOTH_CORE),
     DBG_MAP(debugBluetoothGatt,    DEBUG_BLUETOOTH_GATT),
@@ -591,15 +642,40 @@ void applySettings() {
     DBG_MAP(debugFmRadio,          DEBUG_FMRADIO),
     DBG_MAP(debugG2,               DEBUG_G2),
     DBG_MAP(debugI2C,              DEBUG_I2C),
-    // Per-sensor frame/data flags
-    DBG_MAP(debugThermalFrame,     DEBUG_THERMAL_FRAME),
-    DBG_MAP(debugThermalData,      DEBUG_THERMAL_DATA),
-    DBG_MAP(debugTofFrame,         DEBUG_TOF_FRAME),
-    DBG_MAP(debugGamepadFrame,     DEBUG_GAMEPAD_FRAME),
-    DBG_MAP(debugGamepadData,      DEBUG_GAMEPAD_DATA),
-    DBG_MAP(debugImuFrame,         DEBUG_IMU_FRAME),
-    DBG_MAP(debugImuData,          DEBUG_IMU_DATA),
-    DBG_MAP(debugApdsFrame,        DEBUG_APDS_FRAME),
+    DBG_MAP(debugI2CBus,           DEBUG_I2C_BUS),
+    DBG_MAP(debugI2CDiscovery,     DEBUG_I2C_DISCOVERY),
+    DBG_MAP(debugI2CAutoStart,     DEBUG_I2C_AUTOSTART),
+    // Per-sensor sub-flags (Lifecycle / Polling / Values)
+    DBG_MAP(debugThermalLifecycle,   DEBUG_THERMAL_LIFECYCLE),
+    DBG_MAP(debugThermalPolling,     DEBUG_THERMAL_POLLING),
+    DBG_MAP(debugThermalValues,      DEBUG_THERMAL_VALUES),
+    DBG_MAP(debugTofLifecycle,       DEBUG_TOF_LIFECYCLE),
+    DBG_MAP(debugTofPolling,         DEBUG_TOF_POLLING),
+    DBG_MAP(debugTofValues,          DEBUG_TOF_VALUES),
+    DBG_MAP(debugGamepadLifecycle,   DEBUG_GAMEPAD_LIFECYCLE),
+    DBG_MAP(debugGamepadPolling,     DEBUG_GAMEPAD_POLLING),
+    DBG_MAP(debugGamepadValues,      DEBUG_GAMEPAD_VALUES),
+    DBG_MAP(debugImuLifecycle,       DEBUG_IMU_LIFECYCLE),
+    DBG_MAP(debugImuPolling,         DEBUG_IMU_POLLING),
+    DBG_MAP(debugImuValues,          DEBUG_IMU_VALUES),
+    DBG_MAP(debugApdsLifecycle,      DEBUG_APDS_LIFECYCLE),
+    DBG_MAP(debugApdsPolling,        DEBUG_APDS_POLLING),
+    DBG_MAP(debugApdsValues,         DEBUG_APDS_VALUES),
+    DBG_MAP(debugGpsLifecycle,       DEBUG_GPS_LIFECYCLE),
+    DBG_MAP(debugGpsPolling,         DEBUG_GPS_POLLING),
+    DBG_MAP(debugGpsValues,          DEBUG_GPS_VALUES),
+    DBG_MAP(debugRtcLifecycle,       DEBUG_RTC_LIFECYCLE),
+    DBG_MAP(debugRtcPolling,         DEBUG_RTC_POLLING),
+    DBG_MAP(debugRtcValues,          DEBUG_RTC_VALUES),
+    DBG_MAP(debugFmRadioLifecycle,   DEBUG_FMRADIO_LIFECYCLE),
+    DBG_MAP(debugFmRadioPolling,     DEBUG_FMRADIO_POLLING),
+    DBG_MAP(debugFmRadioValues,      DEBUG_FMRADIO_VALUES),
+    DBG_MAP(debugMicLifecycle,       DEBUG_MIC_LIFECYCLE),
+    DBG_MAP(debugMicPolling,         DEBUG_MIC_POLLING),
+    DBG_MAP(debugMicValues,          DEBUG_MIC_VALUES),
+    DBG_MAP(debugPresenceLifecycle,  DEBUG_PRESENCE_LIFECYCLE),
+    DBG_MAP(debugPresencePolling,    DEBUG_PRESENCE_POLLING),
+    DBG_MAP(debugPresenceValues,     DEBUG_PRESENCE_VALUES),
     // Maps flags
     DBG_MAP(debugMaps,             DEBUG_MAPS),
     DBG_MAP(debugMapsLoading,      DEBUG_MAPS_LOADING),
@@ -621,6 +697,11 @@ void applySettings() {
     DBG_MAP(debugSrAfe,            DEBUG_SR_AFE),
     DBG_MAP(debugSrLifecycle,      DEBUG_SR_LIFECYCLE),
     DBG_MAP(debugSrTuning,         DEBUG_SR_TUNING),
+    DBG_MAP(debugMqtt,             DEBUG_MQTT),
+    DBG_MAP(debugMqttConnection,   DEBUG_MQTT_CONNECTION),
+    DBG_MAP(debugMqttPubsub,       DEBUG_MQTT_PUBSUB),
+    DBG_MAP(debugMqttDiscovery,    DEBUG_MQTT_DISCOVERY),
+    DBG_MAP(debugMqttCommands,     DEBUG_MQTT_COMMANDS),
   };
   #undef DBG_MAP
 
@@ -783,6 +864,12 @@ void applySettings() {
   }
 #endif
 
+  // Push persisted Maps defaults into the live runtime variables.
+#if ENABLE_MAPS
+  extern void mapsApplyPersistedSettings();
+  mapsApplyPersistedSettings();
+#endif
+
   // Apply power mode from settings
   #include "System_Power.h"
   applyPowerMode(gSettings.powerMode);
@@ -837,9 +924,11 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
         const SettingsModule* mod = mods[m];
         if (!mod) continue;
         
-        JsonObject section = mod->jsonSection ? doc[mod->jsonSection].as<JsonObject>() : doc.as<JsonObject>();
+        // Walk dotted jsonSection path (e.g. "hardware.sensors.camera")
+        // Use create-or-get so we get a mutable handle for .remove() below.
+        JsonObject section = jsonPathCreate(doc, mod->jsonSection);
         if (section.isNull()) continue;
-        
+
         for (size_t i = 0; i < mod->count; i++) {
           const SettingEntry* e = &mod->entries[i];
           if (e->isSecret && e->type == SETTING_STRING) {
@@ -863,9 +952,9 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
   blePeersWriteJson(doc);
 #endif
 
-  // WiFi networks array - now nested under wifi.networks
+  // WiFi networks array - now nested under network.wifi.networks
   if (gWifiNetworks && gWifiNetworkCount > 0) {
-    JsonArray networks = doc["wifi"]["networks"].to<JsonArray>();
+    JsonArray networks = doc["network"]["wifi"]["networks"].to<JsonArray>();
     for (int i = 0; i < gWifiNetworkCount; i++) {
       JsonObject net = networks.add<JsonObject>();
       net["ssid"] = gWifiNetworks[i].ssid;
@@ -1057,32 +1146,6 @@ bool readSettingsJson() {
 
   registerAllSettingsModules();
 
-  // ---- Migration: debug.sensors.{camera,microphone,...} → debug.{group}.enabled ----
-  // These flags were split from a shared "sensors" group into per-sensor groups.
-  // Run before readRegisteredSettings() so the new paths are populated before reading.
-  {
-    JsonVariant sensorsSect = doc["debug"]["sensors"];
-    if (!sensorsSect.isNull() && sensorsSect.is<JsonObject>()) {
-      static const struct { const char* oldKey; const char* newGroup; } kMigrations[] = {
-        { "camera",     "camera"     },
-        { "microphone", "microphone" },
-        { "gps",        "gps"        },
-        { "rtc",        "rtc"        },
-        { "presence",   "presence"   },
-        { "fmRadio",    "fmradio"    },
-      };
-      JsonObject sensorsObj = sensorsSect.as<JsonObject>();
-      for (const auto& m : kMigrations) {
-        JsonVariant oldVal = sensorsObj[m.oldKey];
-        if (!oldVal.isNull()) {
-          doc["debug"][m.newGroup]["enabled"] = oldVal.as<bool>();
-          sensorsObj.remove(m.oldKey);
-          INFO_STORAGEF("[Settings] Migrated debug.sensors.%s → debug.%s.enabled", m.oldKey, m.newGroup);
-        }
-      }
-    }
-  }
-
   // BLE peers — read before registered-modules call to avoid races; the
   // peer modules will see the data populated when they bleRegisterPeer
   // during init.
@@ -1096,19 +1159,9 @@ bool readSettingsJson() {
     DEBUG_STORAGEF("[Settings] Applied %zu settings from registered modules", registeredCount);
   }
 
-  // All settings are now read by their registered modules above.
-
-  // Thermal settings are loaded by the modular registry below (no backward compatibility)
-
-  // OLED settings are now handled by the modular registry with backward compatibility
-  // Registry checks for "oled_ssd1306" first, then falls back to "oled"
-
-  // Note: readRegisteredSettings() already called above after module registration
-  // to avoid duplicate processing of registered settings
-
   // WiFi networks array
 #if ENABLE_WIFI
-  JsonArray networks = doc["wifi"]["networks"];
+  JsonArray networks = doc["network"]["wifi"]["networks"];
   if (networks && gWifiNetworks) {
     gWifiNetworkCount = 0;
     for (JsonObject net : networks) {
@@ -1356,38 +1409,63 @@ static const SettingEntry debugSettingEntries[] = {
   { "execution",  SETTING_BOOL, &gSettings.debugAutoExec,       0, 0, nullptr, 0, 1, "Execution",           nullptr, false, "automations", "debugautoexec" },
   { "condition",  SETTING_BOOL, &gSettings.debugAutoCondition,  0, 0, nullptr, 0, 1, "Condition",           nullptr, false, "automations", "debugautocondition" },
   { "timing",     SETTING_BOOL, &gSettings.debugAutoTiming,     0, 0, nullptr, 0, 1, "Timing",              nullptr, false, "automations", "debugautotiming" },
-  // --- sensors group (general only; per-sensor flags have their own groups below) ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugSensors,         0, 0, nullptr, 0, 1, "All Sensors",         nullptr, false, "sensors",     "debugsensors" },
-  { "general",    SETTING_BOOL, &gSettings.debugSensorsGeneral,  0, 0, nullptr, 0, 1, "General",             nullptr, false, "sensors",     "debugsensorsgeneral" },
   // --- per-sensor groups (each sensor gets its own card in the debug UI) ---
   { "enabled",    SETTING_BOOL, &gSettings.debugCamera,          0, 0, nullptr, 0, 1, "All Camera",          nullptr, false, "camera",      "debugcamera" },
   { "lifecycle",  SETTING_BOOL, &gSettings.debugCameraLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "camera",      "debugcameralifecycle" },
   { "capture",    SETTING_BOOL, &gSettings.debugCameraCapture,   0, 0, nullptr, 0, 1, "Capture",             nullptr, false, "camera",      "debugcameracapture" },
   { "settings",   SETTING_BOOL, &gSettings.debugCameraSettings,  0, 0, nullptr, 0, 1, "Settings",            nullptr, false, "camera",      "debugcamerasettings" },
   { "video",      SETTING_BOOL, &gSettings.debugCameraVideo,     0, 0, nullptr, 0, 1, "Video",               nullptr, false, "camera",      "debugcameravideo" },
-  { "enabled",    SETTING_BOOL, &gSettings.debugMicrophone,      0, 0, nullptr, 0, 1, "Microphone",          nullptr, false, "microphone",  "debugmicrophone" },
-  { "enabled",    SETTING_BOOL, &gSettings.debugGps,             0, 0, nullptr, 0, 1, "GPS",                 nullptr, false, "gps",         "debuggps" },
-  { "enabled",    SETTING_BOOL, &gSettings.debugRtc,             0, 0, nullptr, 0, 1, "RTC",                 nullptr, false, "rtc",         "debugrtc" },
-  { "enabled",    SETTING_BOOL, &gSettings.debugPresence,        0, 0, nullptr, 0, 1, "Presence",            nullptr, false, "presence",    "debugpresence" },
-  { "enabled",    SETTING_BOOL, &gSettings.debugFmRadio,         0, 0, nullptr, 0, 1, "FM Radio",            nullptr, false, "fmradio",     "debugfmradio" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugDisplay,         0, 0, nullptr, 0, 1, "Display",             nullptr, false, "oled",        "debugdisplay" },
+  // --- microphone group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugMicrophone,      0, 0, nullptr, 0, 1, "All Microphone",      nullptr, false, "microphone",  "debugmicrophone" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugMicLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "microphone",  "debugmiclifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugMicPolling,      0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "microphone",  "debugmicpolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugMicValues,       0, 0, nullptr, 0, 1, "Values",              nullptr, false, "microphone",  "debugmicvalues" },
+  // --- gps group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugGps,             0, 0, nullptr, 0, 1, "All GPS",             nullptr, false, "gps",         "debuggps" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugGpsLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "gps",         "debuggpslifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugGpsPolling,      0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "gps",         "debuggpspolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugGpsValues,       0, 0, nullptr, 0, 1, "Values",              nullptr, false, "gps",         "debuggpsvalues" },
+  // --- rtc group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugRtc,             0, 0, nullptr, 0, 1, "All RTC",             nullptr, false, "rtc",         "debugrtc" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugRtcLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "rtc",         "debugrtclifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugRtcPolling,      0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "rtc",         "debugrtcpolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugRtcValues,       0, 0, nullptr, 0, 1, "Values",              nullptr, false, "rtc",         "debugrtcvalues" },
+  // --- presence group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugPresence,        0, 0, nullptr, 0, 1, "All Presence",        nullptr, false, "presence",    "debugpresence" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugPresenceLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",         nullptr, false, "presence",    "debugpresencelifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugPresencePolling, 0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "presence",    "debugpresencepolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugPresenceValues,  0, 0, nullptr, 0, 1, "Values",              nullptr, false, "presence",    "debugpresencevalues" },
+  // --- fm radio group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugFmRadio,         0, 0, nullptr, 0, 1, "All FM Radio",        nullptr, false, "fmradio",     "debugfmradio" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugFmRadioLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",          nullptr, false, "fmradio",     "debugfmradiolifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugFmRadioPolling,  0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "fmradio",     "debugfmradiopolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugFmRadioValues,   0, 0, nullptr, 0, 1, "Values",              nullptr, false, "fmradio",     "debugfmradiovalues" },
   // --- thermal group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugThermal,         0, 0, nullptr, 0, 1, "All Thermal",         nullptr, false, "thermal", "debugthermal" },
-  { "frame",      SETTING_BOOL, &gSettings.debugThermalFrame,    0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "thermal", "debugthermalframe" },
-  { "data",       SETTING_BOOL, &gSettings.debugThermalData,     0, 0, nullptr, 0, 1, "Data",                nullptr, false, "thermal", "debugthermaldata" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugThermal,         0, 0, nullptr, 0, 1, "All Thermal",         nullptr, false, "thermal",     "debugthermal" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugThermalLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",          nullptr, false, "thermal",     "debugthermallifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugThermalPolling,  0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "thermal",     "debugthermalpolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugThermalValues,   0, 0, nullptr, 0, 1, "Values",              nullptr, false, "thermal",     "debugthermalvalues" },
   // --- imu group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugImu,             0, 0, nullptr, 0, 1, "All IMU",             nullptr, false, "imu", "debugimu" },
-  { "frame",      SETTING_BOOL, &gSettings.debugImuFrame,        0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "imu", "debugimuframe" },
-  { "data",       SETTING_BOOL, &gSettings.debugImuData,         0, 0, nullptr, 0, 1, "Data",                nullptr, false, "imu", "debugimudata" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugImu,             0, 0, nullptr, 0, 1, "All IMU",             nullptr, false, "imu",         "debugimu" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugImuLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "imu",         "debugimulifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugImuPolling,      0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "imu",         "debugimupolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugImuValues,       0, 0, nullptr, 0, 1, "Values",              nullptr, false, "imu",         "debugimuvalues" },
   // --- gamepad group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugGamepad,         0, 0, nullptr, 0, 1, "All Gamepad",         nullptr, false, "gamepad", "debuggamepad" },
-  { "frame",      SETTING_BOOL, &gSettings.debugGamepadFrame,    0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "gamepad", "debuggamepadframe" },
-  { "data",       SETTING_BOOL, &gSettings.debugGamepadData,     0, 0, nullptr, 0, 1, "Data",                nullptr, false, "gamepad", "debuggamepaddata" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugGamepad,         0, 0, nullptr, 0, 1, "All Gamepad",         nullptr, false, "gamepad",     "debuggamepad" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugGamepadLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",          nullptr, false, "gamepad",     "debuggamepadlifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugGamepadPolling,  0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "gamepad",     "debuggamepadpolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugGamepadValues,   0, 0, nullptr, 0, 1, "Values",              nullptr, false, "gamepad",     "debuggamepadvalues" },
   // --- tof group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugTof,             0, 0, nullptr, 0, 1, "All ToF",             nullptr, false, "tof", "debugtof" },
-  { "frame",      SETTING_BOOL, &gSettings.debugTofFrame,        0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "tof", "debugtofframe" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugTof,             0, 0, nullptr, 0, 1, "All ToF",             nullptr, false, "tof",         "debugtof" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugTofLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "tof",         "debugtoflifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugTofPolling,      0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "tof",         "debugtofpolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugTofValues,       0, 0, nullptr, 0, 1, "Values",              nullptr, false, "tof",         "debugtofvalues" },
   // --- apds group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugApds,            0, 0, nullptr, 0, 1, "All APDS",            nullptr, false, "apds", "debugapds" },
-  { "frame",      SETTING_BOOL, &gSettings.debugApdsFrame,       0, 0, nullptr, 0, 1, "Frame",               nullptr, false, "apds", "debugapdsframe" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugApds,            0, 0, nullptr, 0, 1, "All APDS",            nullptr, false, "apds",        "debugapds" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugApdsLifecycle,   0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "apds",        "debugapdslifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugApdsPolling,     0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "apds",        "debugapdspolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugApdsValues,      0, 0, nullptr, 0, 1, "Values",              nullptr, false, "apds",        "debugapdsvalues" },
   // --- maps group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugMaps,            0, 0, nullptr, 0, 1, "All Maps",            nullptr, false, "maps", "debugmaps" },
   { "loading",    SETTING_BOOL, &gSettings.debugMapsLoading,     0, 0, nullptr, 0, 1, "Loading",             nullptr, false, "maps", "debugmapsloading" },
@@ -1409,9 +1487,12 @@ static const SettingEntry debugSettingEntries[] = {
   { "anchor",    SETTING_BOOL, &gSettings.debugDatetimeAnchor, 0, 0, nullptr, 0, 1, "Boot anchors",          nullptr, false, "datetime", "debugdatetimeanchor" },
   { "resolve",   SETTING_BOOL, &gSettings.debugDatetimeResolve,0, 0, nullptr, 0, 1, "Timestamp resolution",  nullptr, false, "datetime", "debugdatetimeresolve" },
   // --- standalone (no group) ---
-  { "logger",           SETTING_BOOL, &gSettings.debugLogger,         0, 0, nullptr, 0, 1, "Logger",               nullptr, false, nullptr, "debuglogger" },
-  { "memory",           SETTING_BOOL, &gSettings.debugMemory,         0, 0, nullptr, 0, 1, "Memory",               nullptr, false, nullptr, "debugmemory" },
-  { "settingsSystem",   SETTING_BOOL, &gSettings.debugSettingsSystem, 0, 0, nullptr, 0, 1, "Settings",             nullptr, false, nullptr, "debugsettingssystem" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugLogger,         0, 0, nullptr, 0, 1, "Enabled",     nullptr, false, "logger", "debuglogger" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugMemory,         0, 0, nullptr, 0, 1, "All Memory",  nullptr, false, "memory", "debugmemory" },
+  { "heap",       SETTING_BOOL, &gSettings.debugMemoryHeap,     0, 0, nullptr, 0, 1, "Heap",        nullptr, false, "memory", "debugmemoryheap" },
+  { "stack",      SETTING_BOOL, &gSettings.debugMemoryStack,    0, 0, nullptr, 0, 1, "Stack",       nullptr, false, "memory", "debugmemorystack" },
+  { "buffers",    SETTING_BOOL, &gSettings.debugMemoryBuffers,  0, 0, nullptr, 0, 1, "Buffers",     nullptr, false, "memory", "debugmemorybuffers" },
+  { "sampleIntervalSec", SETTING_INT, &gSettings.memorySampleIntervalSec, 30, 0, nullptr, 0, 300, "Sample Interval (sec)", nullptr, false, "memory", "memorysampleintervalsec" },
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   // --- g2 group (Even Realities G2 glasses) ---
   { "enabled",    SETTING_BOOL, &gSettings.debugG2,           0, 0, nullptr, 0, 1, "All G2",            nullptr, false, "g2", "debugg2" },
@@ -1429,17 +1510,22 @@ static const SettingEntry debugSettingEntries[] = {
   { "afe",        SETTING_BOOL, &gSettings.debugSrAfe,        0, 0, nullptr, 0, 1, "AFE / VAD",         nullptr, false, "espsr", "debugsrafe" },
   { "lifecycle",  SETTING_BOOL, &gSettings.debugSrLifecycle,  0, 0, nullptr, 0, 1, "Lifecycle",         nullptr, false, "espsr", "debugsrlifecycle" },
   { "tuning",     SETTING_BOOL, &gSettings.debugSrTuning,     0, 0, nullptr, 0, 1, "Tuning / threshold",nullptr, false, "espsr", "debugsrtuning" },
-  { "i2c",              SETTING_BOOL, &gSettings.debugI2C,            0, 0, nullptr, 0, 1, "I2C Bus",              nullptr, false, nullptr, "debugi2c" },
-  { "mqtt",             SETTING_BOOL, &gSettings.debugMqtt,           0, 0, nullptr, 0, 1, "MQTT",                 nullptr, false, nullptr, "debugmqtt" },
-  { "webConsole",       SETTING_BOOL, &gSettings.webConsoleDebug,     0, 0, nullptr, 0, 1, "Web Console",          nullptr, false, nullptr, "webconsole" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugI2C,            0, 0, nullptr, 0, 1, "All I2C",     nullptr, false, "i2c", "debugi2c" },
+  { "bus",        SETTING_BOOL, &gSettings.debugI2CBus,         0, 0, nullptr, 0, 1, "Bus",         nullptr, false, "i2c", "debugi2cbus" },
+  { "discovery",  SETTING_BOOL, &gSettings.debugI2CDiscovery,   0, 0, nullptr, 0, 1, "Discovery",   nullptr, false, "i2c", "debugi2cdiscovery" },
+  { "autoStart",  SETTING_BOOL, &gSettings.debugI2CAutoStart,   0, 0, nullptr, 0, 1, "AutoStart",   nullptr, false, "i2c", "debugi2cautostart" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugMqtt,           0, 0, nullptr, 0, 1, "All MQTT",   nullptr, false, "mqtt", "debugmqtt" },
+  { "connection", SETTING_BOOL, &gSettings.debugMqttConnection, 0, 0, nullptr, 0, 1, "Connection", nullptr, false, "mqtt", "debugmqttconnection" },
+  { "pubsub",     SETTING_BOOL, &gSettings.debugMqttPubsub,     0, 0, nullptr, 0, 1, "Pub/Sub",    nullptr, false, "mqtt", "debugmqttpubsub" },
+  { "discovery",  SETTING_BOOL, &gSettings.debugMqttDiscovery,  0, 0, nullptr, 0, 1, "Discovery",  nullptr, false, "mqtt", "debugmqttdiscovery" },
+  { "commands",   SETTING_BOOL, &gSettings.debugMqttCommands,   0, 0, nullptr, 0, 1, "Commands",   nullptr, false, "mqtt", "debugmqttcommands" },
   { "logLevel",         SETTING_INT,  &gSettings.logLevel,            3, 0, nullptr, 0, 3, "Log Level",            nullptr, false, nullptr, "loglevel" },
-  { "memorySampleIntervalSec", SETTING_INT, &gSettings.memorySampleIntervalSec, 30, 0, nullptr, 0, 300, "Memory Sample Interval (sec)", nullptr, false, nullptr, "memorysampleintervalsec" },
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 static const SettingsModule debugSettingsModule = {
   "debug",
-  "debug",
+  "system.debug",
   debugSettingEntries,
   sizeof(debugSettingEntries) / sizeof(debugSettingEntries[0]),
   nullptr,  // Always available
@@ -1452,14 +1538,17 @@ static const SettingsModule debugSettingsModule = {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry outputSettingEntries[] = {
-  { "serial", SETTING_BOOL, &gSettings.outSerial, 1, 0, nullptr, 0, 1, "Serial Output", nullptr, false, nullptr, "outserial" },
-  { "web", SETTING_BOOL, &gSettings.outWeb, 1, 0, nullptr, 0, 1, "Web Output", nullptr, false, nullptr, "outweb" },
-  { "display", SETTING_BOOL, &gSettings.outDisplay, 0, 0, nullptr, 0, 1, "Display Output", nullptr, false, nullptr, "outdisplay" },
-  { "serialRequireAuth", SETTING_BOOL, &gSettings.serialRequireAuth, 1, 0, nullptr, 0, 1, "Serial Require Auth", nullptr, false, nullptr, "serialrequireauth" },
-  { "displayRequireAuth", SETTING_BOOL, &gSettings.localDisplayRequireAuth, 1, 0, nullptr, 0, 1, "Display Require Auth", nullptr, false, nullptr, "displayrequireauth" },
+  // --- channels: where firmware output is routed ---
+  { "serial",     SETTING_BOOL, &gSettings.outSerial,           1, 0, nullptr, 0, 1, "Serial Output",     nullptr, false, "channels", "outserial" },
+  { "web",        SETTING_BOOL, &gSettings.outWeb,              1, 0, nullptr, 0, 1, "Web Output",        nullptr, false, "channels", "outweb" },
+  { "display",    SETTING_BOOL, &gSettings.outDisplay,          0, 0, nullptr, 0, 1, "Display Output",    nullptr, false, "channels", "outdisplay" },
+  { "webConsole", SETTING_BOOL, &gSettings.webConsoleDebug,     0, 0, nullptr, 0, 1, "Browser Console",   nullptr, false, "channels", "webconsole" },
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  { "g2", SETTING_BOOL, &gSettings.outG2, 0, 0, nullptr, 0, 1, "G2 Glasses Output", nullptr, false, nullptr, "outg2" },
+  { "g2",         SETTING_BOOL, &gSettings.outG2,               0, 0, nullptr, 0, 1, "G2 Glasses Output", nullptr, false, "channels", "outg2" },
 #endif
+  // --- auth: per-channel access gates ---
+  { "serialRequireAuth",  SETTING_BOOL, &gSettings.serialRequireAuth,       1, 0, nullptr, 0, 1, "Serial Require Auth",  nullptr, false, "auth", "serialrequireauth" },
+  { "displayRequireAuth", SETTING_BOOL, &gSettings.localDisplayRequireAuth, 1, 0, nullptr, 0, 1, "Display Require Auth", nullptr, false, "auth", "displayrequireauth" },
 };
 
 // Helper: find an output setting entry by jsonKey
@@ -1483,7 +1572,7 @@ const char* cmd_displayrequireauth(const String& a) {
 // Columns: name, jsonSection, entries, count, isConnected, description
 static const SettingsModule outputSettingsModule = {
   "output",
-  "output",
+  "system.output",
   outputSettingEntries,
   sizeof(outputSettingEntries) / sizeof(outputSettingEntries[0]),
   nullptr,  // Always available
@@ -1495,8 +1584,8 @@ static const SettingsModule outputSettingsModule = {
 // ============================================================================
 
 static const SettingEntry crashSettingEntries[] = {
-  { "crashCount",      SETTING_INT, &gSettings.crashCount,      0, 0, nullptr, 0, 0xFFFF, "Abnormal Reset Count", nullptr },
-  { "lastResetReason", SETTING_INT, &gSettings.lastResetReason, 0, 0, nullptr, 0, 0xFF,   "Last Reset Reason",    nullptr },
+  { "crashCount", SETTING_INT, &gSettings.crashCount, 0, 0, nullptr, 0, 0xFFFF, "Abnormal Reset Count", nullptr, false, nullptr, nullptr },
+  { "lastResetReason", SETTING_INT, &gSettings.lastResetReason, 0, 0, nullptr, 0, 0xFF, "Last Reset Reason", nullptr, false, nullptr, nullptr },
 };
 
 static const SettingsModule crashSettingsModule = {
@@ -1695,6 +1784,11 @@ void registerAllSettingsModules() {
   registerSettingsModule(&llmSettingsModule);
 #endif
 
+#if ENABLE_MAPS
+  extern const SettingsModule mapsSettingsModule;
+  registerSettingsModule(&mapsSettingsModule);
+#endif
+
   DEBUG_SYSTEMF("[Settings] All %zu modules registered", gSettingsModuleCount);
 }
 
@@ -1732,18 +1826,19 @@ size_t readRegisteredSettings(JsonDocument& doc) {
 
   for (size_t m = 0; m < gSettingsModuleCount; m++) {
     const SettingsModule* mod = gSettingsModules[m];
-    JsonVariant section = mod->jsonSection ? doc[mod->jsonSection].as<JsonObject>() : doc.as<JsonObject>();
+    // Walk dotted jsonSection path
+    JsonVariantConst section = jsonPathRead(doc, mod->jsonSection);
     if (section.isNull()) continue;
-    
+
     for (size_t i = 0; i < mod->count; i++) {
       const SettingEntry* e = &mod->entries[i];
       // Navigate to group sub-object if specified
-      JsonVariant current = section;
+      JsonVariantConst current = section;
       if (e->group) {
         current = current[e->group];
         if (current.isNull()) continue;
       }
-      JsonVariant val = current[e->jsonKey];
+      JsonVariantConst val = current[e->jsonKey];
       if (val.isNull()) continue;
       switch (e->type) {
         case SETTING_INT:
@@ -1787,16 +1882,13 @@ void printSettingsModuleSummary() {
 
 size_t writeRegisteredSettings(JsonDocument& doc) {
   size_t count = 0;
-  
+
   for (size_t m = 0; m < gSettingsModuleCount; m++) {
     const SettingsModule* mod = gSettingsModules[m];
-    // Get or create section object if specified
-    // IMPORTANT: Use as<JsonObject>() for root to avoid clearing existing content
-    // Use to<JsonObject>() for named sections to create/replace them
-    JsonObject section = mod->jsonSection
-                           ? doc[mod->jsonSection].to<JsonObject>()
-                           : doc.as<JsonObject>();
-    
+    // Walk dotted jsonSection path, creating intermediate objects as needed.
+    // Empty/null jsonSection writes directly to the doc root.
+    JsonObject section = jsonPathCreate(doc, mod->jsonSection);
+
     if (section.isNull()) {
       ERROR_STORAGEF("Failed to create section for module %s", mod->name);
       continue;

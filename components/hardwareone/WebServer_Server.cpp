@@ -2525,7 +2525,7 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
 
   // DEBUG: Log buffer usage
   int usagePct = (len * 100) / JSON_RESPONSE_SIZE;
-  DEBUG_MEMORYF("[JSON_RESP_BUF] Settings JSON: %zu/%u bytes (%d%%)",
+  DEBUG_MEMORY_BUFFERSF("[JSON_RESP_BUF] Settings JSON: %zu/%u bytes (%d%%)",
                 len, (unsigned)JSON_RESPONSE_SIZE, usagePct);
 
   sendJsonResponse(req, gJsonResponseBuffer, len);
@@ -2574,12 +2574,14 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
     modObj["section"] = mod->jsonSection ? mod->jsonSection : mod->name;
     modObj["description"] = mod->description ? mod->description : "";
     
-    // Check connection status
-    bool connected = true;
+    // Connection status — only emit when the module actually defines a check.
+    // Modules without an isConnected callback (loggers, plain settings stores,
+    // network services without runtime probes) skip this so the UI doesn't
+    // show a misleading "Connected" badge for things that aren't really
+    // connectable.
     if (mod->isConnected) {
-      connected = mod->isConnected();
+      modObj["connected"] = mod->isConnected();
     }
-    modObj["connected"] = connected;
     
     JsonArray entries = modObj["entries"].to<JsonArray>();
     for (size_t i = 0; i < mod->count; i++) {
