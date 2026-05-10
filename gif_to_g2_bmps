@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Run from anywhere: ./gif_to_g2_bmps …  OR  ~/esp/hardwareone-idf/gif_to_g2_bmps …
-set -euo pipefail
-ROOT="$(cd "$(dirname "$0")" && pwd)"
-exec python3 "$ROOT/tools/gif_to_g2_bmps.py" "$@"
