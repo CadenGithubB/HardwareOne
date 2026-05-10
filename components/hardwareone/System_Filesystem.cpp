@@ -116,16 +116,6 @@ bool initFilesystem() {
 #endif
   }
 
-  // Migrate pending_users.json from old location to /system/users/ (one-time)
-  {
-    AuthContext sys = VFS::systemAuth("fs.init.migrate.pending_users");
-    if (VFS::existsGuarded("/system/pending_users.json", sys) &&
-        !VFS::existsGuarded("/system/users/pending_users.json", sys)) {
-      VFS::renameGuarded("/system/pending_users.json", "/system/users/pending_users.json", sys);
-      DEBUG_STORAGEF("Migrated pending_users.json to /system/users/");
-    }
-  }
-  
   // Boot-time cleanup: remove orphaned .tmp files from interrupted writes
   {
     AuthContext sys = VFS::systemAuth("fs.init.tmp_cleanup");

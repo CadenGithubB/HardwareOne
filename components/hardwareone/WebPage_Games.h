@@ -10917,7 +10917,7 @@ function stopGame() {
 
 function fwDebugOn() {
   FW_DEBUG = true;
-  var cmds = ['debugsensorsgeneral 1', 'debugimudata 1'];
+  var cmds = ['debugimu 1', 'debugimuvalues 1'];
   Promise.all(cmds.map(function(c) {
     return fetch('/api/cli', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(c)})
       .then(function(r) { return r.text(); }).catch(function(_) { return ''; });
@@ -10926,7 +10926,7 @@ function fwDebugOn() {
 
 function fwDebugOff() {
   FW_DEBUG = false;
-  var cmds = ['debugsensorsgeneral 0', 'debugimudata 0'];
+  var cmds = ['debugimu 0', 'debugimuvalues 0'];
   Promise.all(cmds.map(function(c) {
     return fetch('/api/cli', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(c)})
       .then(function(r) { return r.text(); }).catch(function(_) { return ''; });
@@ -10948,7 +10948,7 @@ function startLogPoller() {
         for (var i = 0; i < lines.length; i++) {
           var ln = lines[i];
           if (!ln) continue;
-          if (ln.indexOf('[DEBUG_SENSORS') >= 0 || /IMU|BNO|ori|gyro|accel/i.test(ln)) {
+          if (ln.indexOf('[INFO][IMU]') >= 0 || ln.indexOf('[ERROR][IMU]') >= 0 || /IMU|BNO|ori|gyro|accel/i.test(ln)) {
             try { console.log('[FW]', ln); } catch (_) {}
           }
         }

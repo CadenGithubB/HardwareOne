@@ -403,7 +403,7 @@ bool startVideoRecording() {
     recordingTask, "cam_record", VIDEO_REC_STACK_WORDS, nullptr,
     /*priority*/ 5, &s_task, /*core*/ 1);
   if (ok != pdPASS) {
-    ERROR_SENSORSF("[Video] Failed to start recorder task");
+    ERROR_CAMERAF("[Video] Failed to start recorder task");
     videoRecording = false;
     s_file.close();
     return false;

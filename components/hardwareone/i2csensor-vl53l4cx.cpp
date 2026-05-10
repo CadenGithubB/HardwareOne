@@ -168,10 +168,10 @@ bool tofStartInternal() {
   if (!gTofCache.mutex) {
     gTofCache.mutex = xSemaphoreCreateMutex();
     if (!gTofCache.mutex) {
-      ERROR_SENSORSF("[TOF] Failed to create cache mutex");
+      ERROR_TOFF("Failed to create cache mutex");
       return false;
     }
-    DEBUG_SENSORSF("[TOF] Cache mutex created");
+    DEBUG_TOF_LIFECYCLEF("[TOF] Cache mutex created");
   }
 
   // Clean up any stale cache from previous run BEFORE starting
@@ -195,7 +195,7 @@ bool tofStartInternal() {
 
   // Set gTofEnabled FIRST to prevent race condition with task cleanup code
   gTofEnabled = true;
-  INFO_SENSORSF("Set gTofEnabled=1 BEFORE init to prevent race condition");
+  INFO_TOFF("Set gTofEnabled=1 BEFORE init to prevent race condition");
 
   // Initialize ToF sensor synchronously (like thermal sensor)
   if (!gTofConnected || gVL53L4CX == nullptr) {
@@ -301,7 +301,7 @@ const char* cmd_tofmaxdistancemm(const String& argsInput) {
 bool tofInit() {
   if (gVL53L4CX != nullptr) {
     // Sensor object exists - clean it up and reinitialize to ensure fresh state
-    INFO_SENSORSF("Cleaning up existing sensor object before reinit");
+    INFO_TOFF("Cleaning up existing sensor object before reinit");
     (void)gVL53L4CX->VL53L4CX_StopMeasurement();
     delete gVL53L4CX;
     gVL53L4CX = nullptr;
@@ -443,10 +443,8 @@ bool tofPoll() {
 
       bool hasGoodSignal = (signal_rate > minSignalRate);
 
-      if (isDebugFlagSet(DEBUG_TOF_FRAME)) {
-        DEBUG_TOF_FRAMEF("ToF obj[%d]: range=%dmm, status=%d, signal=%.3f (min=%.3f), isValid=%d, hasGoodSignal=%d",
-                     j, range_mm, range_status, signal_rate, minSignalRate, isValid ? 1 : 0, hasGoodSignal ? 1 : 0);
-      }
+      DEBUG_TOF_VALUESF("ToF obj[%d]: range=%dmm, status=%d, signal=%.3f (min=%.3f), isValid=%d, hasGoodSignal=%d",
+                   j, range_mm, range_status, signal_rate, minSignalRate, isValid ? 1 : 0, hasGoodSignal ? 1 : 0);
 
       if (isValid && hasGoodSignal && range_mm > 0 && range_mm <= 6000 && validObjectIndex < 4) {
         float distance_cm = range_mm / 10.0;
@@ -487,11 +485,9 @@ bool tofPoll() {
     gTofCache.tofDataValid = true;
     gTofCache.tofSeq++;
 
-    if (isDebugFlagSet(DEBUG_TOF_FRAME)) {
-      DEBUG_TOF_FRAMEF("tofPoll: found=%d, valid=%d, seq=%lu",
-                   no_of_object_found, validObjectIndex,
-                   (unsigned long)gTofCache.tofSeq);
-    }
+    DEBUG_TOF_POLLINGF("tofPoll: found=%d, valid=%d, seq=%lu",
+                 no_of_object_found, validObjectIndex,
+                 (unsigned long)gTofCache.tofSeq);
 
     xSemaphoreGive(gTofCache.mutex);
 
@@ -515,10 +511,8 @@ int tofBuildDataJSON(char* buf, size_t bufSize) {
 
   if (gTofCache.mutex && xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS)) == pdTRUE) {
     if (!gTofCache.tofDataValid) {
-      if (isDebugFlagSet(DEBUG_TOF_FRAME)) {
-        DEBUG_TOF_FRAMEF("tofBuildDataJSON: tofDataValid=%s, gTofEnabled=%d, gTofConnected=%d, lastUpdate=%lu",
-                     "false", gTofEnabled ? 1 : 0, gTofConnected ? 1 : 0, gTofCache.tofLastUpdate);
-      }
+      DEBUG_TOF_POLLINGF("tofBuildDataJSON: tofDataValid=%s, gTofEnabled=%d, gTofConnected=%d, lastUpdate=%lu",
+                   "false", gTofEnabled ? 1 : 0, gTofConnected ? 1 : 0, gTofCache.tofLastUpdate);
       pos = snprintf(buf, bufSize, "{\"error\":\"ToF sensor not ready\"}");
       xSemaphoreGive(gTofCache.mutex);
       return pos;
@@ -675,10 +669,10 @@ const size_t tofCommandsCount = sizeof(tofCommands) / sizeof(tofCommands[0]);
 // ============================================================================
 
 void tofTask(void* parameter) {
-  INFO_SENSORSF("[ToF] Task started (handle=%p, stack=%u words)", 
+  INFO_TOFF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_SENSORSF("[MODULAR] tofTask() running from Sensor_ToF_VL53L4CX.cpp");
+  INFO_TOFF("[MODULAR] tofTask() running from Sensor_ToF_VL53L4CX.cpp");
   unsigned long lastToFRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {
@@ -696,7 +690,7 @@ void tofTask(void* parameter) {
         gTofCache.tofObjects[j].detected = false;
         gTofCache.tofObjects[j].valid = false;
       }
-      SENSOR_TASK_EXIT("ToF");
+      SENSOR_TASK_EXIT(TOF);
     }
     
     // Update watermark diagnostics (only when enabled)
@@ -712,7 +706,7 @@ void tofTask(void* parameter) {
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (gTofEnabled) {
         DEBUG_PERFORMANCEF("[STACK] tof_task watermark_now=%u min=%u words", (unsigned)gTofWatermarkNow, (unsigned)gTofWatermarkMin);
-        DEBUG_MEMORYF("[HEAP] tof_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+        DEBUG_MEMORY_HEAPF("[HEAP] tof_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     if (gTofEnabled && gTofConnected && gVL53L4CX != nullptr && !gSensorPollingPaused) {
@@ -732,7 +726,7 @@ void tofTask(void* parameter) {
         // Auto-disable if too many consecutive failures
         if (!ok) {
           if (i2cShouldAutoDisable(I2C_ADDR_TOF)) {
-            ERROR_SENSORSF("Too many consecutive ToF failures - auto-disabling");
+            ERROR_TOFF("Too many consecutive ToF failures - auto-disabling");
             gTofEnabled = false;
             sensorStatusBumpWith("tof@auto_disabled");
           }
@@ -740,7 +734,7 @@ void tofTask(void* parameter) {
         
         // SAFE: Debug output AFTER transaction, with enabled check
         if (gTofEnabled) {
-          DEBUG_TOF_FRAMEF("ToF readObjects: %s", ok ? "ok" : "fail");
+          DEBUG_TOF_POLLINGF("ToF readObjects: %s", ok ? "ok" : "fail");
         }
         
         // Stream data to ESP-NOW master if enabled (worker devices only)
@@ -766,13 +760,13 @@ void tofTask(void* parameter) {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry tofSettingEntries[] = {
-  { "tofAutoStart",          SETTING_BOOL, &gSettings.tofAutoStart,          0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  { "tofPollingMs",          SETTING_INT,  &gSettings.tofPollingMs,          220, 0, nullptr, 50, 5000, "Polling (ms)", nullptr },
-  { "tofStabilityThreshold", SETTING_INT,  &gSettings.tofStabilityThreshold, 3, 0, nullptr, 0, 50, "Stability Threshold", nullptr },
-  { "tofTransitionMs",       SETTING_INT,  &gSettings.tofTransitionMs,       200, 0, nullptr, 0, 5000, "Transition (ms)", nullptr },
-  { "tofMaxDistanceMm",      SETTING_INT,  &gSettings.tofUiMaxDistanceMm,    3400, 0, nullptr, 100, 10000, "Max Distance (mm)", nullptr },
-  { "tofDevicePollMs",       SETTING_INT,  &gSettings.tofDevicePollMs,       220, 0, nullptr, 100, 2000, "Poll Interval (ms)", nullptr },
-  { "tofI2cClockHz",         SETTING_INT,  &gSettings.i2cClockToFHz,         200000, 0, nullptr, 50000, 400000, "I2C Clock (Hz)", nullptr }
+  { "tofAutoStart", SETTING_BOOL, &gSettings.tofAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
+  { "tofPollingMs", SETTING_INT, &gSettings.tofPollingMs, 220, 0, nullptr, 50, 5000, "Polling (ms)", nullptr, false, nullptr, nullptr },
+  { "tofStabilityThreshold", SETTING_INT, &gSettings.tofStabilityThreshold, 3, 0, nullptr, 0, 50, "Stability Threshold", nullptr, false, nullptr, nullptr },
+  { "tofTransitionMs", SETTING_INT, &gSettings.tofTransitionMs, 200, 0, nullptr, 0, 5000, "Transition (ms)", nullptr, false, nullptr, nullptr },
+  { "tofMaxDistanceMm", SETTING_INT, &gSettings.tofUiMaxDistanceMm, 3400, 0, nullptr, 100, 10000, "Max Distance (mm)", nullptr, false, nullptr, nullptr },
+  { "tofDevicePollMs", SETTING_INT, &gSettings.tofDevicePollMs, 220, 0, nullptr, 100, 2000, "Poll Interval (ms)", nullptr, false, nullptr, nullptr },
+  { "tofI2cClockHz", SETTING_INT, &gSettings.i2cClockToFHz, 200000, 0, nullptr, 50000, 400000, "I2C Clock (Hz)", nullptr, false, nullptr, nullptr }
 };
 
 static bool isToFConnected() {
@@ -782,7 +776,7 @@ static bool isToFConnected() {
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule tofSettingsModule = {
   "tof",
-  "tof_vl53l4cx",
+  "hardware.sensors.tof",
   tofSettingEntries,
   sizeof(tofSettingEntries) / sizeof(tofSettingEntries[0]),
   isToFConnected,

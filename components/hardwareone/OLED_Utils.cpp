@@ -2585,7 +2585,7 @@ void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack) {
   // Standardised transition log — always emitted so serial trace shows all mode changes.
   DEBUG_USERSF("[OLED_MODE] %s -> %s | %s\n", getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
                 reason ? reason : "");
-  DEBUG_SENSORSF("[OLED_MODE] %s -> %s | %s",
+  DEBUG_DISPLAYF("[OLED_MODE] %s -> %s | %s",
                  getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
                  reason ? reason : "");
 
@@ -2861,7 +2861,7 @@ bool initOLEDDisplay() {
     return true;
   }
 
-  DEBUG_SENSORSF("Starting display initialization (%s)...", DISPLAY_NAME);
+  DEBUG_DISPLAYF("Starting display initialization (%s)...", DISPLAY_NAME);
 
   // Use Display HAL initialization
   bool success = displayInit();
@@ -2926,7 +2926,7 @@ void stopOLEDDisplay() {
   oledConnected = false;
   gOledEnabled = false;
 
-  DEBUG_SENSORSF("Display stopped");
+  DEBUG_DISPLAYF("Display stopped");
 }
 
 // ============================================================================
@@ -3886,7 +3886,7 @@ extern ConnectedDevice connectedDevices[];
 bool earlyOLEDInit() {
   // Early exit if I2C bus is disabled
   if (!gI2CBusEnabled) {
-    DEBUG_SENSORSF("OLED init skipped - I2C bus disabled");
+    DEBUG_DISPLAYF("OLED init skipped - I2C bus disabled");
     oledConnected = false;
     gOledEnabled = false;
     return false;
@@ -3913,12 +3913,12 @@ bool earlyOLEDInit() {
   for (int attempt = 0; attempt < kOledProbeAttempts && detectedAddr == 0; attempt++) {
     if (attempt > 0) {
       delay(50);
-      DEBUG_SENSORSF("OLED probe retry %d/%d", attempt + 1, kOledProbeAttempts);
+      DEBUG_DISPLAYF("OLED probe retry %d/%d", attempt + 1, kOledProbeAttempts);
     }
     for (uint8_t addr : oledAddresses) {
-      DEBUG_SENSORSF("Probing for OLED at 0x%02X on Wire1 (SDA=%d, SCL=%d)", addr, gSettings.i2cSdaPin, gSettings.i2cSclPin);
+      DEBUG_DISPLAYF("Probing for OLED at 0x%02X on Wire1 (SDA=%d, SCL=%d)", addr, gSettings.i2cSdaPin, gSettings.i2cSclPin);
       uint8_t probeResult = i2cProbeAddress(addr, 100000, 200);
-      DEBUG_SENSORSF("OLED probe at 0x%02X result: %d (0=found, 2=NACK)", addr, probeResult);
+      DEBUG_DISPLAYF("OLED probe at 0x%02X result: %d (0=found, 2=NACK)", addr, probeResult);
       if (probeResult == 0) {
         detectedAddr = addr;
         break;
@@ -3927,7 +3927,7 @@ bool earlyOLEDInit() {
   }
 
   if (detectedAddr != 0) {
-    DEBUG_SENSORSF("OLED detected at 0x%02X - initializing for boot animation", detectedAddr);
+    DEBUG_DISPLAYF("OLED detected at 0x%02X - initializing for boot animation", detectedAddr);
 
     // Use Display HAL's gDisplay (oledDisplay is a macro alias for gDisplay in Display_HAL.h)
     extern DisplayDriver* gDisplay;
@@ -3966,13 +3966,13 @@ bool earlyOLEDInit() {
         oledDisplay->display();
       });
 
-      DEBUG_SENSORSF("OLED boot animation started at 0x%02X", detectedAddr);
+      DEBUG_DISPLAYF("OLED boot animation started at 0x%02X", detectedAddr);
       
       return true;
     }
   }
   
-  DEBUG_SENSORSF("OLED not detected or initialization failed");
+  DEBUG_DISPLAYF("OLED not detected or initialization failed");
   return false;
 }
 
@@ -3999,7 +3999,7 @@ void processOLEDBootSequence() {
         bootPhaseStartTime = now;
         requestOLEDMode(OLED_LOGO, "boot.animation->logo", false);
         debugOLEDModeChange("boot.phase.animation->logo", prevMode, currentOLEDMode, "");
-        DEBUG_SENSORSF("OLED boot sequence: Animation -> Logo");
+        DEBUG_DISPLAYF("OLED boot sequence: Animation -> Logo");
       }
       break;
 
@@ -4012,7 +4012,7 @@ void processOLEDBootSequence() {
         // Only transition if user hasn't manually changed mode during boot
         if (userOverrodeBootMode) {
           DEBUG_USERSF("[OLED_MODE] boot.complete: User overrode boot, keeping mode %d\n", (int)currentOLEDMode);
-          DEBUG_SENSORSF("OLED boot sequence complete (user overrode, keeping current mode)");
+          DEBUG_DISPLAYF("OLED boot sequence complete (user overrode, keeping current mode)");
         } else {
           OLEDMode prevMode = currentOLEDMode;
           
@@ -4021,7 +4021,7 @@ void processOLEDBootSequence() {
             requestOLEDMode(OLED_LOGIN, "boot.login", false);
             // B-button from login falls back to OLED_MENU via empty-stack default in popOLEDMode().
             debugOLEDModeChange("boot.complete.login", prevMode, currentOLEDMode, "Auth required");
-            DEBUG_SENSORSF("OLED boot sequence: Logo -> Login (auth required)");
+            DEBUG_DISPLAYF("OLED boot sequence: Logo -> Login (auth required)");
           } else {
             // No auth required or already authed - go to default mode
             String defaultMode = gSettings.oledDefaultMode;
@@ -4034,7 +4034,7 @@ void processOLEDBootSequence() {
             requestOLEDMode(defMode, "boot.default", false);
 
             { char dbgBuf[48]; snprintf(dbgBuf, sizeof(dbgBuf), "defaultMode=%s", defaultMode.c_str()); debugOLEDModeChange("boot.complete.defaultMode", prevMode, currentOLEDMode, dbgBuf); }
-            DEBUG_SENSORSF("OLED boot sequence: Logo -> %s (complete, B returns to menu)", defaultMode.c_str());
+            DEBUG_DISPLAYF("OLED boot sequence: Logo -> %s (complete, B returns to menu)", defaultMode.c_str());
           }
           
           // Auto-start gamepad if setting is enabled and I2C bus is enabled
@@ -5750,7 +5750,6 @@ bool processGamepadMenuInput() {
         oledCycleDataSource();
         inputProcessed = true;
       }
-      // X button layout toggle removed - only used for data source cycling now
     } else if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
       // B button: exit submenu if in one, otherwise do nothing in main menu
       if (oledMenuBack()) {
@@ -5967,7 +5966,7 @@ void tryAutoStartGamepadForMenu() {
     if (!inQueue) {
       bool enqueued = enqueueDeviceStart(I2C_DEVICE_GAMEPAD);
       DEBUG_USERSF("[GAMEPAD_AUTO] enqueueDeviceStart result: %d\n", enqueued);
-      DEBUG_SENSORSF("[OLED] Auto-starting gamepad for menu navigation");
+      DEBUG_DISPLAYF("[OLED] Auto-starting gamepad for menu navigation");
     }
   }
 }

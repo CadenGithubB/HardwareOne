@@ -118,8 +118,13 @@ final XOR.
 - Incrementing `seq` per fragment makes the firmware see orphaned tail
   fragments and silently drop the whole message. **Keep seq constant across
   fragments of one message**; increment only between messages.
-- In our current implementation every message fits in one fragment, so this
-  is moot for now, but mandatory once we add image streaming.
+- **Multi-fragment is effectively mandatory for any real-world CREATE.**
+  An earlier text-only `sendCreateAndWait` helper used a 1 KB on-stack
+  buffer with a single-fragment envelope; Status-page snapshots regularly
+  overflowed it and the firmware rejected the resulting truncated envelope
+  with no useful error. The current path (`sendCreateTextAndWait`) fragments
+  on the wire. Don't bother optimising a single-fragment fast path —
+  empirically, real CREATE payloads don't fit.
 
 ### Flag byte
 

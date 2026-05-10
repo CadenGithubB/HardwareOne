@@ -361,21 +361,14 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
 // We log each incoming packet with a one-line header (decoded fields), a
 // raw payload hex dump, and a speculative parsed annotation when we have
 // one for that opcode. See System_R1_Protocol.{h,cpp} for the wire spec
-// and per-opcode parsers.
-//
-// (The older ringFlagName / ringCmdName helpers documented an out-of-date
-// envelope layout from the g2-kit-unofficial RE; both removed once the real
-// FlutterApp-derived decoder landed.)
+// and per-opcode parsers (provenance documented in
+// docs/g2_proto/R1_RE_Reference.h).
 
 // Decode and print a single ring notify frame using the real R1 wire format
 // (See System_R1_Protocol.h for the full envelope spec.) `data` is the raw
 // BLE characteristic value — the ring writes one logical frame per notify
 // in our usage so far.
 //
-// Earlier versions of this function decoded the older g2-kit-unofficial
-// header layout (10-byte header, BE flags). That layout was off-by-one
-// against what firmware 2.0.8.0011 actually emits — this version matches
-// the FlutterApp test fixtures byte-for-byte.
 static void ringDumpFrame(const uint8_t* data, size_t len) {
   if (!data || len == 0) return;
   gRing.packetsReceived++;
@@ -863,17 +856,16 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
   return true;
 }
 
-// Group B: ring connect task bodies removed — connects now flow through
-// the unified BLE-connect worker (see G2_Glasses.h `g2SubmitBleConnect`),
-// which dispatches RING_SCAN / RING_SAVED / RING_MAC kinds to
-// ringPerformConnect() above. The 3 retired *TaskBody functions were:
-//   - ringConnectTaskBody         → BleConnectKind::RING_SCAN
-//   - ringConnectSavedTaskBody    → BleConnectKind::RING_SAVED  (worker
-//                                    inlines the wait-for-glasses + 3 s
-//                                    settle that this used to do)
-//   - ringConnectMacTaskBody      → BleConnectKind::RING_MAC
-// The static gRingPendingMac that the MAC variant used to stash through
-// is also gone — the MAC now travels in the BleConnectJob payload.
+// Ring connect dispatch:
+// All three connect entry points (scan, saved, MAC) flow through the
+// unified BLE-connect worker (see `g2SubmitBleConnect` in G2_Glasses.h).
+// The worker dispatches the BleConnectJob `kind` to ringPerformConnect()
+// above:
+//   - BleConnectKind::RING_SCAN   — discover by name, connect first match
+//   - BleConnectKind::RING_SAVED  — read saved MAC + wait for glasses,
+//                                   then 3 s settle before connect
+//   - BleConnectKind::RING_MAC    — connect to MAC supplied in the job's
+//                                   payload (no static handoff)
 
 // =============================================================================
 // Public API

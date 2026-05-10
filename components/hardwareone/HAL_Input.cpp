@@ -71,9 +71,9 @@ void inputAbstractionInit() {
   gCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEESAW;
 #endif
   
-  DEBUG_SENSORSF("[HAL_INPUT] Initialized with controller type: %d", gCurrentControllerType);
+  DEBUG_GAMEPAD_LIFECYCLEF("[HAL_INPUT] Initialized with controller type: %d", gCurrentControllerType);
 #if ENABLE_GAMEPAD_SENSOR
-  DEBUG_SENSORSF("[HAL_INPUT] Button mappings: A=0x%08lX B=0x%08lX X=0x%08lX Y=0x%08lX START=0x%08lX",
+  DEBUG_GAMEPAD_LIFECYCLEF("[HAL_INPUT] Button mappings: A=0x%08lX B=0x%08lX X=0x%08lX Y=0x%08lX START=0x%08lX",
                 (unsigned long)GAMEPAD_BUTTON_A, (unsigned long)GAMEPAD_BUTTON_B,
                 (unsigned long)GAMEPAD_BUTTON_X, (unsigned long)GAMEPAD_BUTTON_Y,
                 (unsigned long)GAMEPAD_BUTTON_START);
@@ -86,13 +86,13 @@ InputControllerType inputGetControllerType() {
 
 void inputSetControllerType(InputControllerType type) {
   gCurrentControllerType = type;
-  DEBUG_SENSORSF("[HAL_INPUT] Controller type changed to: %d", type);
+  DEBUG_GAMEPAD_LIFECYCLEF("[HAL_INPUT] Controller type changed to: %d", type);
 }
 
 uint32_t inputGetButtonMask(InputButton button) {
   // Validate button index
   if (button < INPUT_BUTTON_A || button > INPUT_BUTTON_SELECT) {
-    ERROR_SENSORSF("[HAL_INPUT] Invalid button: %d", button);
+    ERROR_GAMEPADF("[HAL_INPUT] Invalid button: %d", button);
     return 0;
   }
   
@@ -108,7 +108,7 @@ uint32_t inputGetButtonMask(InputButton button) {
       return gCustomMapping[button];
       
     default:
-      ERROR_SENSORSF("[HAL_INPUT] Unknown controller type: %d", gCurrentControllerType);
+      ERROR_GAMEPADF("[HAL_INPUT] Unknown controller type: %d", gCurrentControllerType);
       return 0;
   }
 }
@@ -124,7 +124,7 @@ bool inputIsButtonPressed(uint32_t buttonState, InputButton button) {
 void inputSetCustomButtonMapping(InputButton button, uint32_t mask) {
   if (button >= INPUT_BUTTON_A && button <= INPUT_BUTTON_SELECT) {
     gCustomMapping[button] = mask;
-    DEBUG_SENSORSF("[HAL_INPUT] Custom mapping set: button %d = 0x%08lX", 
+    DEBUG_GAMEPAD_LIFECYCLEF("[HAL_INPUT] Custom mapping set: button %d = 0x%08lX",
                   button, (unsigned long)mask);
   }
 }

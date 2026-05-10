@@ -130,41 +130,10 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </script>
 )EARLYJS", HTTPD_RESP_USE_STRLEN);
 
-  // Part 1: Header and WiFi section
+  // Part 1: Header
   httpd_resp_send_chunk(req, R"SETPART1(
 <h2>System Settings</h2>
 <p>Configure your HardwareOne device settings</p>
-<div class='settings-panel'>
-  <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>WiFi Network</div><div style='color:var(--panel-fg);font-size:0.9rem'>Current WiFi network and connection settings.</div></div>
-    <button class='btn' id='btn-wifi-toggle' onclick="togglePane('wifi-pane','btn-wifi-toggle')">Expand</button>
-  </div>
-  <div id='wifi-pane' style='display:none;margin-top:0.75rem'>
-  <div style='margin-bottom:1rem'>
-    <span style='color:var(--panel-fg)'>SSID: <span style='font-weight:bold;color:var(--accent)' id='wifi-ssid'>-</span></span>
-  </div>
-  <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
-    <span style='color:var(--panel-fg)' title='Automatically reconnect to saved WiFi networks after power loss or disconnection'>Auto-Reconnect: <span style='font-weight:bold;color:var(--accent)' id='wifi-value'>-</span></span>
-    <button class='btn' onclick='toggleWifi()' id='wifi-btn' title='Enable/disable automatic WiFi reconnection on boot'>Toggle</button>
-  </div>
-  <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
-    <button class='btn' onclick='disconnectWifi()' title='Disconnect from current WiFi network (may lose connection to device)'>Disconnect WiFi</button>
-    <button class='btn' onclick='scanNetworks()' title='Scan for available WiFi networks in range'>Scan Networks</button>
-  </div>
-  <div id='wifi-scan-results' style='margin-top:1rem'></div>
-  <div id='wifi-connect-panel' style='display:none;margin-top:0.75rem'>
-    <div style='margin-bottom:0.5rem'>Selected SSID: <strong id='sel-ssid'>-</strong></div>
-    <input type='password' id='sel-pass' placeholder='WiFi password (leave blank if open)' class='form-input input-medium'>
-    <button class='btn' onclick="(function(){ var ssid=(document.getElementById('sel-ssid')||{}).textContent||''; var pass=(document.getElementById('sel-pass')||{}).value||''; if(!ssid){ alert('No SSID selected'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 0'; fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent(cmd1)}).then(function(r){return r.text();}).then(function(t1){ return hwConfirm('Credentials saved for \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent('wificonnect')}); }); }).then(function(r){ if(!r) return ''; return r.text(); }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
-  </div>
-  <div id='wifi-manual-panel' style='display:none;margin-top:0.75rem'>
-    <div style='margin-bottom:0.5rem'>Enter hidden network credentials</div>
-    <input type='text' id='manual-ssid' placeholder='Hidden SSID' class='form-input input-medium' style='margin-right:6px'>
-    <input type='password' id='manual-pass' placeholder='Password (leave blank if open)' class='form-input input-medium' style='margin-right:6px'>
-    <button class='btn' onclick="(function(){ var ssid=(document.getElementById('manual-ssid')||{}).value||''; var pass=(document.getElementById('manual-pass')||{}).value||''; if(!ssid){ alert('Enter SSID'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 1'; fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent(cmd1)}).then(function(r){return r.text();}).then(function(t1){ return hwConfirm('Credentials saved for hidden network \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent('wificonnect')}); }); }).then(function(r){ if(!r) return ''; return r.text(); }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
-  </div>
-  </div>
-</div>
 )SETPART1", HTTPD_RESP_USE_STRLEN);
 
   // Part 2: System Time, Output Channels, CLI History sections
@@ -218,25 +187,9 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 <!-- Output Channels settings now in schema-driven Sensors panel -->
 )SETPART2", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, R"SP2B(
-<div class='settings-panel'>
-  <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Web CLI History Size</div><div style='color:var(--panel-fg);font-size:0.9rem'>Number of commands to keep in history buffer.</div></div>
-    <button class='btn' id='btn-cli-toggle' onclick="togglePane('cli-pane','btn-cli-toggle')">Expand</button>
-  </div>
-  <div id='cli-pane' style='display:none;margin-top:0.75rem'>
-  <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
-    <span style='color:var(--panel-fg)' title='Number of CLI commands stored in web history buffer'>Current: <span style='font-weight:bold;color:var(--accent)' id='cli-value'>-</span></span>
-    <input type='number' id='cli-input' min='1' max='100' value='10' class='form-input' style='width:80px' title='Set web CLI history buffer size (1-100 commands)'>
-    <button class='btn' onclick='updateWebCliHistory()' title='Save new web CLI history buffer size'>Update</button>
-    <button class='btn' onclick='clearCliHistory()' title='Clear all stored CLI command history'>Clear History</button>
-  </div>
-</div>
-</div>
-)SP2B", HTTPD_RESP_USE_STRLEN);
 
-#if ENABLE_MQTT || ENABLE_HTTP_SERVER || ENABLE_BLUETOOTH || ENABLE_ESPNOW
-  // Part 3.5: Network Services section - renders from /api/settings/schema
+#if ENABLE_WIFI || ENABLE_MQTT || ENABLE_HTTP_SERVER || ENABLE_BLUETOOTH || ENABLE_ESPNOW
+  // Part 3.5: Network Services section - WiFi (static) + dynamic schema-driven cards
   httpd_resp_send_chunk(req, R"SETPART3_5(
 <div class='settings-panel'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
@@ -244,6 +197,37 @@ window.sendSequential = function(cmds, onDone, onFail) {
     <button class='btn' id='btn-network-toggle' onclick="togglePane('network-pane','btn-network-toggle')">Expand</button>
   </div>
   <div id='network-pane' style='display:none;margin-top:1rem;color:var(--panel-fg)'>
+    <div class='settings-panel' style='margin:0 0 0.75rem 0'>
+      <div style='display:flex;align-items:center;justify-content:space-between'>
+        <div><div style='font-size:1.05rem;font-weight:bold;color:var(--panel-fg)'>WiFi <span id='wifi-status-badge'></span></div></div>
+        <button class='btn' id='btn-wifi-toggle' onclick="togglePane('wifi-pane','btn-wifi-toggle')">Expand</button>
+      </div>
+      <div id='wifi-pane' style='display:none;margin-top:0.75rem'>
+        <div style='margin-bottom:1rem'>
+          <span style='color:var(--panel-fg)'>SSID: <span style='font-weight:bold;color:var(--accent)' id='wifi-ssid'>-</span></span>
+        </div>
+        <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
+          <span style='color:var(--panel-fg)' title='Automatically reconnect to saved WiFi networks after power loss or disconnection'>Auto-Reconnect: <span style='font-weight:bold;color:var(--accent)' id='wifi-value'>-</span></span>
+          <button class='btn' onclick='toggleWifi()' id='wifi-btn' title='Enable/disable automatic WiFi reconnection on boot'>Toggle</button>
+        </div>
+        <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
+          <button class='btn' onclick='disconnectWifi()' title='Disconnect from current WiFi network (may lose connection to device)'>Disconnect WiFi</button>
+          <button class='btn' onclick='scanNetworks()' title='Scan for available WiFi networks in range'>Scan Networks</button>
+        </div>
+        <div id='wifi-scan-results' style='margin-top:1rem'></div>
+        <div id='wifi-connect-panel' style='display:none;margin-top:0.75rem'>
+          <div style='margin-bottom:0.5rem'>Selected SSID: <strong id='sel-ssid'>-</strong></div>
+          <input type='password' id='sel-pass' placeholder='WiFi password (leave blank if open)' class='form-input input-medium'>
+          <button class='btn' onclick="(function(){ var ssid=(document.getElementById('sel-ssid')||{}).textContent||''; var pass=(document.getElementById('sel-pass')||{}).value||''; if(!ssid){ alert('No SSID selected'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 0'; fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent(cmd1)}).then(function(r){return r.text();}).then(function(t1){ return hwConfirm('Credentials saved for \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent('wificonnect')}); }); }).then(function(r){ if(!r) return ''; return r.text(); }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
+        </div>
+        <div id='wifi-manual-panel' style='display:none;margin-top:0.75rem'>
+          <div style='margin-bottom:0.5rem'>Enter hidden network credentials</div>
+          <input type='text' id='manual-ssid' placeholder='Hidden SSID' class='form-input input-medium' style='margin-right:6px'>
+          <input type='password' id='manual-pass' placeholder='Password (leave blank if open)' class='form-input input-medium' style='margin-right:6px'>
+          <button class='btn' onclick="(function(){ var ssid=(document.getElementById('manual-ssid')||{}).value||''; var pass=(document.getElementById('manual-pass')||{}).value||''; if(!ssid){ alert('Enter SSID'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 1'; fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent(cmd1)}).then(function(r){return r.text();}).then(function(t1){ return hwConfirm('Credentials saved for hidden network \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent('wificonnect')}); }); }).then(function(r){ if(!r) return ''; return r.text(); }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
+        </div>
+      </div>
+    </div>
     <div id='network-dynamic-container'>
       <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading network settings...</div>
     </div>
@@ -307,11 +291,31 @@ window.sendSequential = function(cmds, onDone, onFail) {
     }
   }
   
+  function readNetSection(settings, mod) {
+    if (!settings || !mod) return {};
+    var path = mod.section || mod.name || '';
+    if (!path) return settings;
+    var v = settings;
+    var parts = path.split('.');
+    for (var i = 0; i < parts.length && v != null; i++) v = v[parts[i]];
+    if (v == null) v = settings[mod.name];   // legacy fallback
+    return v || {};
+  }
+
   function renderNetworkModule(mod, settings) {
-    var section = settings[mod.section] || settings[mod.name] || {};
+    var section = readNetSection(settings, mod);
     var entries = mod.entries || [];
+    // Only show an Enabled/Disabled badge if the schema reports a real
+    // runtime status (mod.connected is a boolean). Modules without an
+    // isConnected callback omit the badge entirely.
+    var hasConnStatus = (typeof mod.connected === 'boolean');
     var isDisconnected = mod.connected === false;
-    var statusBadge = isDisconnected ? '<span style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>' : '<span style="background:rgba(102,126,234,0.15);color:var(--accent);border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Connected</span>';
+    var statusBadge = '';
+    if (hasConnStatus && isDisconnected) {
+      statusBadge = '<span style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disabled</span>';
+    } else if (hasConnStatus) {
+      statusBadge = '<span style="background:rgba(102,126,234,0.15);color:var(--accent);border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Enabled</span>';
+    }
     
     var html = '<div style="background:var(--panel-bg);border-radius:8px;padding:1rem 1.5rem;margin:0.5rem 0;box-shadow:0 1px 3px rgba(0,0,0,0.1);border:1px solid var(--border)">';
     html += '<div style="display:flex;align-items:center;justify-content:space-between">';
@@ -327,7 +331,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     
     if (isDisconnected) {
       html += '<div style="background:rgba(255,152,0,0.08);padding:0.75rem;margin-bottom:1rem;color:var(--panel-fg);opacity:0.8;font-size:0.85rem">';
-      html += 'Service not available. Check WiFi connection and configuration.';
+      html += 'Service is currently disabled. Settings can still be changed; toggle Auto-start at boot or start it manually to enable.';
       html += '</div>';
     }
     
@@ -355,7 +359,21 @@ window.sendSequential = function(cmds, onDone, onFail) {
     var settings = settingsResp.settings || {};
     var container = document.getElementById('network-dynamic-container');
     if (!container) return;
-    
+
+    // Update the static WiFi card's status badge from the schema's wifi module
+    // connected flag (driven by isWifiConnected() server-side).
+    var wifiBadge = document.getElementById('wifi-status-badge');
+    if (wifiBadge) {
+      var wifiMod = (schema.modules || []).find(function(m) { return m.name === 'wifi'; });
+      if (wifiMod && typeof wifiMod.connected === 'boolean') {
+        if (wifiMod.connected) {
+          wifiBadge.outerHTML = '<span id="wifi-status-badge" style="background:rgba(102,126,234,0.15);color:var(--accent);border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Enabled</span>';
+        } else {
+          wifiBadge.outerHTML = '<span id="wifi-status-badge" style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disabled</span>';
+        }
+      }
+    }
+
     var relevantModules = (schema.modules || []).filter(function(m) {
       return networkModules.indexOf(m.name) !== -1;
     });
@@ -417,6 +435,17 @@ window.sendSequential = function(cmds, onDone, onFail) {
 )SETPART3_5B", HTTPD_RESP_USE_STRLEN);
 #endif // ENABLE_MQTT || ENABLE_HTTP_SERVER || ENABLE_BLUETOOTH
 
+  // Hardware umbrella opens here. Sensors / I2C / LED render as nested cards
+  // inside hardware-pane; the umbrella closes after the LED container below.
+  httpd_resp_send_chunk(req, R"HWOPEN(
+<div class='settings-panel'>
+  <div style='display:flex;align-items:center;justify-content:space-between'>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Hardware</div><div style='color:var(--panel-fg);font-size:0.9rem'>Sensors, I2C bus, and onboard LED.</div></div>
+    <button class='btn' id='btn-hardware-toggle' onclick="togglePane('hardware-pane','btn-hardware-toggle')">Expand</button>
+  </div>
+  <div id='hardware-pane' style='display:none;margin-top:0.75rem'>
+)HWOPEN", HTTPD_RESP_USE_STRLEN);
+
   // Part 4: Dynamic Sensors section - renders from /api/settings/schema
   httpd_resp_send_chunk(req, R"SETPART4(
 <div class='settings-panel'>
@@ -432,14 +461,18 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 <script>
 (function(){
-  var sensorModules = ['camera','microphone','thermal','tof','imu','gps','fmradio','servo','apds','rtc','presence','espsr','oled','gamepad','led'];
+  var sensorModules = ['camera','microphone','thermal','tof','imu','gps','fmradio','servo','apds','rtc','presence','oled','gamepad'];
+  var hardwareTopModules = ['led'];   // sibling of Sensors/I2C inside Hardware
   var i2cModules = ['i2c'];
   var outputModules = ['output'];
-  var llmModules = ['llm'];
+  var appsModules = ['automation','llm','espsr','edgeimpulse','maps'];   // top-level Apps umbrella
   var loggingModules = ['sensorlog','systemlog'];
-  var mlSubsections = {camera:'edgeimpulse',microphone:'espsr'};
+  // mlSubsections used to nest espsr/edgeimpulse INSIDE Microphone/Camera. Now
+  // these render as their own cards under Apps; leave empty for backwards
+  // compatibility (renderModule still consults this map).
+  var mlSubsections = {};
   var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','espsr':'espsr','thermal_mlx90640':'thermal','tof_vl53l4cx':'tof','imu_bno055':'imu','gps':'gps','fmradio':'fmradio','apds':'apds','rtc':'rtc','presence':'presence','sensorlog':'sensorlog','power':'power','debug':'debug','output':'output','oled_ssd1306':'oled','gamepad':'gamepad','led':'led','llm':'llm'};
-  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',systemlog:'System Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels',oled:'OLED Display (SSD1306)',led:'LED Startup & Brightness',llm:'On-Device LLM'};
+  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',systemlog:'System Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels',oled:'OLED Display (SSD1306)',led:'LED Startup & Brightness',llm:'On-Device LLM',maps:'Maps'};
   
   function inferType(val) {
     if (typeof val === 'boolean') return 'bool';
@@ -561,21 +594,49 @@ window.sendSequential = function(cmds, onDone, onFail) {
     return h;
   }
 
+  // Walk a dotted module section path (e.g. "hardware.sensors.camera") into
+  // the settings tree, falling back to the module name for legacy/orphan
+  // sections that haven't been migrated.
+  function readModuleSection(settings, mod) {
+    if (!settings || !mod) return {};
+    var path = mod.section || mod.name || '';
+    if (!path) return settings;
+    var v = settings;
+    var parts = path.split('.');
+    for (var i = 0; i < parts.length && v != null; i++) v = v[parts[i]];
+    if (v == null) v = settings[mod.name];   // legacy fallback
+    return v || {};
+  }
+
+  // Read a setting value out of the settings JSON, honoring the entry's
+  // optional `group` field (which nests the value one level deeper in JSON).
+  function readEntryValue(section, e) {
+    var v = (section && e.group) ? section[e.group] : section;
+    if (v == null) return undefined;
+    var parts = (e.key || '').split('.');
+    for (var i = 0; i < parts.length && v != null; i++) v = v[parts[i]];
+    return v;
+  }
+
   function renderModule(mod, settings, isOrphan, allModules, allSettings) {
-    var section = settings[mod.section] || settings[mod.name] || {};
+    var section = readModuleSection(settings, mod);
     var entries = mod.entries || [];
     var uiEntries = entries.filter(function(e) { return e.key.indexOf('ui.') === 0; });
     var devEntries = entries.filter(function(e) { return e.key.indexOf('device.') === 0; });
     var otherEntries = entries.filter(function(e) { return e.key.indexOf('ui.') !== 0 && e.key.indexOf('device.') !== 0; });
     
-    // Check if module is disconnected (from schema API)
+    // Status badge — only render when the schema reports a real connection
+    // status (mod.connected is a boolean). Modules without an isConnected
+    // callback omit it from the schema, so they show no badge instead of a
+    // misleading "Connected".
+    var hasConnStatus = (typeof mod.connected === 'boolean');
     var isDisconnected = mod.connected === false;
     var statusBadge = '';
     if (isOrphan) {
       statusBadge = '<span style="background:#6b7280;color:#fff;padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Inactive</span>';
-    } else if (isDisconnected) {
+    } else if (hasConnStatus && isDisconnected) {
       statusBadge = '<span style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>';
-    } else if (mod.name !== 'sensorlog') {
+    } else if (hasConnStatus) {
       statusBadge = '<span style="background:rgba(102,126,234,0.15);color:var(--accent);border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Connected</span>';
     }
     
@@ -601,23 +662,18 @@ window.sendSequential = function(cmds, onDone, onFail) {
       html += '</div>';
     }
     
-    function getValue(key) {
-      var parts = key.split('.');
-      var v = section;
-      for (var i = 0; i < parts.length && v; i++) v = v[parts[i]];
-      return v;
-    }
-    
+    function getValue(e) { return readEntryValue(section, e); }
+
     if (devEntries.length > 0) {
       html += '<div style="font-weight:bold;margin-bottom:0.5rem;color:var(--panel-fg);border-bottom:1px solid var(--border);padding-bottom:0.25rem">Device Settings</div>';
       html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
-      devEntries.forEach(function(e) { html += renderInput(e, getValue(e.key), isOrphan); });
+      devEntries.forEach(function(e) { html += renderInput(e, getValue(e), isOrphan); });
       html += '</div>';
     }
     if (uiEntries.length > 0) {
       html += '<div style="font-weight:bold;margin-bottom:0.5rem;color:var(--panel-fg);border-bottom:1px solid var(--border);padding-bottom:0.25rem">Client UI Settings</div>';
       html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
-      uiEntries.forEach(function(e) { html += renderInput(e, getValue(e.key), isOrphan); });
+      uiEntries.forEach(function(e) { html += renderInput(e, getValue(e), isOrphan); });
       html += '</div>';
     }
     if (otherEntries.length > 0) {
@@ -625,24 +681,24 @@ window.sendSequential = function(cmds, onDone, onFail) {
       var espnowKeys = ['cameraSendAfterCapture', 'cameraTargetDevice'];
       var regularEntries = otherEntries.filter(function(e) { return espnowKeys.indexOf(e.key) === -1; });
       var espnowEntries = otherEntries.filter(function(e) { return espnowKeys.indexOf(e.key) !== -1; });
-      
+
       if (regularEntries.length > 0) {
         html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
-        regularEntries.forEach(function(e) { html += renderInput(e, getValue(e.key), isOrphan); });
+        regularEntries.forEach(function(e) { html += renderInput(e, getValue(e), isOrphan); });
         html += '</div>';
       }
-      
+
       if (espnowEntries.length > 0 && mod.name === 'camera') {
         html += '<div style="font-weight:bold;margin:1rem 0 0.5rem 0;color:var(--panel-fg);border-bottom:1px solid var(--border);padding-bottom:0.25rem">ESP-NOW Integration</div>';
         html += '<div style="background:rgba(100,149,237,0.1);padding:0.5rem 0.75rem;margin-bottom:0.75rem;color:var(--panel-fg);font-size:0.85rem">';
         html += 'Send captured images to another device via ESP-NOW mesh network.';
         html += '</div>';
         html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
-        espnowEntries.forEach(function(e) { html += renderInput(e, getValue(e.key), isOrphan); });
+        espnowEntries.forEach(function(e) { html += renderInput(e, getValue(e), isOrphan); });
         html += '</div>';
       } else if (espnowEntries.length > 0) {
         html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
-        espnowEntries.forEach(function(e) { html += renderInput(e, getValue(e.key), isOrphan); });
+        espnowEntries.forEach(function(e) { html += renderInput(e, getValue(e), isOrphan); });
         html += '</div>';
       }
     }
@@ -658,24 +714,21 @@ window.sendSequential = function(cmds, onDone, onFail) {
     if (mlModName && allModules) {
       var mlMod = allModules.find(function(m) { return m.name === mlModName; });
       if (mlMod) {
-        var mlSection = allSettings[mlMod.section] || {};
+        var mlSection = readModuleSection(allSettings, mlMod);
         var mlEntries = mlMod.entries || [];
         html += '<div style="margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)">';
         html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">';
-        html += '<span style="font-weight:bold;color:var(--panel-fg)">Machine Learning</span>';
+        html += '<span style="font-weight:bold;color:var(--panel-fg)">' + (moduleLabels[mlModName] || 'Machine Learning') + '</span>';
         html += '<button class="btn" id="btn-' + mlModName + '-toggle" onclick="togglePane(\'' + mlModName + '-pane\',\'btn-' + mlModName + '-toggle\')">Expand</button>';
         html += '</div>';
         html += '<div id="' + mlModName + '-pane" style="display:none">';
         html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
         mlEntries.forEach(function(e) {
-          var parts = e.key.split('.');
-          var v = mlSection;
-          for (var i = 0; i < parts.length && v; i++) v = v[parts[i]];
-          html += renderInput(e, v, isOrphan);
+          html += renderInput(e, readEntryValue(mlSection, e), isOrphan);
         });
         html += '</div>';
         if (!isOrphan) {
-          html += '<button class="btn" onclick="saveDynamicSettings(\'' + mlModName + '\',\'' + mlMod.section + '\')">Save ML Settings</button>';
+          html += '<button class="btn" onclick="saveDynamicSettings(\'' + mlModName + '\',\'' + mlMod.section + '\')">Save ' + (moduleLabels[mlModName] || mlModName) + ' Settings</button>';
         }
         html += '</div></div>';
       }
@@ -699,7 +752,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     var schemaModuleNames = (schema.modules || []).map(function(m) { return m.name; });
     var schemaSections = (schema.modules || []).map(function(m) { return m.section; });
     
-    var allKnownModules = sensorModules.concat(i2cModules).concat(outputModules).concat(llmModules).concat(loggingModules);
+    var allKnownModules = sensorModules.concat(hardwareTopModules).concat(i2cModules).concat(outputModules).concat(appsModules).concat(loggingModules);
     var relevantModules = (schema.modules || []).filter(function(m) {
       return allKnownModules.indexOf(m.name) !== -1;
     });
@@ -725,37 +778,36 @@ window.sendSequential = function(cmds, onDone, onFail) {
     var html = '';
     var i2cHtml = '';
     var outputHtml = '';
-    var llmHtml = '';
+    var appsHtml = '';
     var loggingHtml = '';
+    var hwLedHtml = '';
 
     // Render active (compiled) modules first
     var allMods = schema.modules || [];
     relevantModules.forEach(function(mod) {
       if (i2cModules.indexOf(mod.name) !== -1) {
-        var sec = settings[mod.section] || settings[mod.name] || {};
+        var sec = readModuleSection(settings, mod);
         var ents = mod.entries || [];
         i2cHtml += '<div id="i2c-pane"><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
         ents.forEach(function(e) {
-          var parts = e.key.split('.'), v = sec;
-          for (var pi = 0; pi < parts.length && v; pi++) v = v[parts[pi]];
-          i2cHtml += renderInput(e, v, false);
+          i2cHtml += renderInput(e, readEntryValue(sec, e), false);
         });
         i2cHtml += '</div><button class="btn" onclick="saveDynamicSettings(\'' + mod.name + '\',\'' + mod.section + '\')">Save I2C Bus Configuration Settings</button></div>';
       } else if (outputModules.indexOf(mod.name) !== -1) {
         // Render output module flat (no inner card/badge/expand) — outer panel provides the expand
         // Auth toggles (serialRequireAuth, displayRequireAuth) are shown in Admin Controls > Authentication
         var authCmds = ['serialrequireauth', 'displayrequireauth'];
-        var sec = settings[mod.section] || settings[mod.name] || {};
+        var sec = readModuleSection(settings, mod);
         var ents = (mod.entries || []).filter(function(e) { return authCmds.indexOf(e.cmdKey) === -1; });
-        outputHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
+        outputHtml += '<div id="output-pane"><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:1rem">';
         ents.forEach(function(e) {
-          var parts = e.key.split('.'), v = sec;
-          for (var pi = 0; pi < parts.length && v; pi++) v = v[parts[pi]];
-          outputHtml += renderInput(e, v, false);
+          outputHtml += renderInput(e, readEntryValue(sec, e), false);
         });
-        outputHtml += '</div><button class="btn" onclick="saveDynamicSettings(\'' + mod.name + '\',\'' + mod.section + '\')">Save Output Channels Settings</button>';
-      } else if (llmModules.indexOf(mod.name) !== -1) {
-        llmHtml += renderModule(mod, settings, false, allMods, settings);
+        outputHtml += '</div><button class="btn" onclick="saveDynamicSettings(\'' + mod.name + '\',\'' + mod.section + '\')">Save Output Channels Settings</button></div>';
+      } else if (hardwareTopModules.indexOf(mod.name) !== -1) {
+        hwLedHtml += renderModule(mod, settings, false, allMods, settings);
+      } else if (appsModules.indexOf(mod.name) !== -1) {
+        appsHtml += renderModule(mod, settings, false, allMods, settings);
       } else if (loggingModules.indexOf(mod.name) !== -1) {
         loggingHtml += renderModule(mod, settings, false, allMods, settings);
       } else {
@@ -778,8 +830,8 @@ window.sendSequential = function(cmds, onDone, onFail) {
         outputHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem">';
         ents.forEach(function(e) { outputHtml += renderInput(e, e.value, true); });
         outputHtml += '</div>';
-      } else if (llmModules.indexOf(mod.name) !== -1) {
-        llmHtml += renderModule(mod, settings, true, allMods, settings);
+      } else if (appsModules.indexOf(mod.name) !== -1) {
+        appsHtml += renderModule(mod, settings, true, allMods, settings);
       } else if (loggingModules.indexOf(mod.name) !== -1) {
         loggingHtml += renderModule(mod, settings, true, allMods, settings);
       } else {
@@ -800,6 +852,13 @@ window.sendSequential = function(cmds, onDone, onFail) {
       i2cCont.innerHTML = i2cHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">I2C settings not available</div>';
     }
 
+    // Populate Hardware LED card host (sibling of Sensors/I2C inside Hardware)
+    var hwLedCont = document.getElementById('hw-led-container');
+    if (hwLedCont) {
+      hwLedCont.innerHTML = hwLedHtml || '';
+      if (hwLedHtml) window._snapshotContainer(hwLedCont);
+    }
+
     // Populate output container
     var outputCont = document.getElementById('output-dynamic-container');
     if (outputCont) {
@@ -807,11 +866,11 @@ window.sendSequential = function(cmds, onDone, onFail) {
       if (outputHtml) window._snapshotContainer(outputCont);
     }
 
-    // Populate LLM container
-    var llmCont = document.getElementById('llm-dynamic-container');
-    if (llmCont) {
-      llmCont.innerHTML = llmHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">LLM not compiled in current build</div>';
-      if (llmHtml) window._snapshotContainer(llmCont);
+    // Populate Apps container (automation, llm, espsr, edgeimpulse)
+    var appsCont = document.getElementById('apps-dynamic-container');
+    if (appsCont) {
+      appsCont.innerHTML = appsHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">No apps available in this build</div>';
+      if (appsHtml) window._snapshotContainer(appsCont);
     }
     
     if (html === '') {
@@ -874,6 +933,49 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </script>
 )SETPART4", HTTPD_RESP_USE_STRLEN);
 
+#if ENABLE_I2C_SYSTEM
+  // I2C Bus Configuration — nested card inside Hardware umbrella
+  httpd_resp_send_chunk(req, R"I2CPART(
+<div class='settings-panel'>
+  <div style='display:flex;align-items:center;justify-content:space-between'>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>I2C Bus Configuration</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure I2C bus pins, clock speeds, and enable/disable settings.</div></div>
+    <button class='btn' id='btn-i2cbus-toggle' onclick="togglePane('i2cbus-pane','btn-i2cbus-toggle')">Expand</button>
+  </div>
+  <div id='i2cbus-pane' style='display:none;margin-top:0.75rem'>
+    <div id='i2c-bus-dynamic-container'>
+      <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading I2C settings...</div>
+    </div>
+  </div>
+</div>
+)I2CPART", HTTPD_RESP_USE_STRLEN);
+#endif // ENABLE_I2C_SYSTEM
+
+  // LED card host inside Hardware. Populated by the Sensors IIFE script
+  // alongside the other module renders. Then close the Hardware umbrella.
+  httpd_resp_send_chunk(req, R"HWCLOSE(
+<div id='hw-led-container'></div>
+</div>
+</div>
+)HWCLOSE", HTTPD_RESP_USE_STRLEN);
+
+  // Apps umbrella — high-level features that run on top of the hardware:
+  // automation, on-device LLM, ESP-SR voice recognition, Edge Impulse ML.
+  // Cards are populated by the Sensors IIFE based on which modules the
+  // current build includes; the umbrella stays even if some are absent.
+  httpd_resp_send_chunk(req, R"APPSPART(
+<div class='settings-panel'>
+  <div style='display:flex;align-items:center;justify-content:space-between'>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Apps</div><div style='color:var(--panel-fg);font-size:0.9rem'>Automation, on-device LLM, voice recognition, and ML.</div></div>
+    <button class='btn' id='btn-apps-toggle' onclick="togglePane('apps-pane','btn-apps-toggle')">Expand</button>
+  </div>
+  <div id='apps-pane' style='display:none;margin-top:0.75rem'>
+    <div id='apps-dynamic-container'>
+      <div style='text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic'>No apps available in this build</div>
+    </div>
+  </div>
+</div>
+)APPSPART", HTTPD_RESP_USE_STRLEN);
+
   // Logging section (standalone)
   httpd_resp_send_chunk(req, R"LOGGINGPART(
 <div class='settings-panel'>
@@ -904,40 +1006,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 )OUTPUTPART", HTTPD_RESP_USE_STRLEN);
 
-#if ENABLE_I2C_SYSTEM
-  // I2C Bus Configuration section (standalone, not under Sensors)
-  httpd_resp_send_chunk(req, R"I2CPART(
-<div class='settings-panel'>
-  <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>I2C Bus Configuration</div><div style='color:var(--panel-fg);font-size:0.9rem'>Configure I2C bus pins, clock speeds, and enable/disable settings.</div></div>
-    <button class='btn' id='btn-i2cbus-toggle' onclick="togglePane('i2cbus-pane','btn-i2cbus-toggle')">Expand</button>
-  </div>
-  <div id='i2cbus-pane' style='display:none;margin-top:0.75rem'>
-    <div id='i2c-bus-dynamic-container'>
-      <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading I2C settings...</div>
-    </div>
-  </div>
-</div>
-)I2CPART", HTTPD_RESP_USE_STRLEN);
-#endif // ENABLE_I2C_SYSTEM
-
-#if ENABLE_ONDEVICE_LLM
-  // On-Device LLM settings section
-  httpd_resp_send_chunk(req, R"LLMPART(
-<div class='settings-panel'>
-  <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>On-Device LLM</div>
-    <div style='color:var(--panel-fg);font-size:0.9rem'>Default generation parameters and context window for on-device inference.</div></div>
-    <button class='btn' id='btn-llm-toggle' onclick="togglePane('llm-panel-pane','btn-llm-toggle')">Expand</button>
-  </div>
-  <div id='llm-panel-pane' style='display:none;margin-top:0.75rem'>
-    <div id='llm-dynamic-container'>
-      <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading LLM settings...</div>
-    </div>
-  </div>
-</div>
-)LLMPART", HTTPD_RESP_USE_STRLEN);
-#endif // ENABLE_ONDEVICE_LLM
+  // (On-Device LLM panel folded into the Apps umbrella above.)
 
   // Part 6: (LED settings now rendered dynamically via schema in Sensors panel)
   httpd_resp_send_chunk(req, R"SETPART6(
@@ -978,7 +1047,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 <script>
 (function(){
-  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',g2:'G2 Glasses',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',camera:'Camera',microphone:'Microphone',gps:'GPS',rtc:'RTC',presence:'Presence',fmradio:'FM Radio',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps',datetime:'Date / Time',llm:'LLM',espsr:'ESP-SR Speech'};
+  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',g2:'G2 Glasses',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',camera:'Camera',microphone:'Microphone',gps:'GPS',rtc:'RTC',presence:'Presence',fmradio:'FM Radio',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps',datetime:'Date / Time',llm:'LLM',espsr:'ESP-SR Speech',memory:'Memory',mqtt:'MQTT',i2c:'i2c',display:'Display',oled:'OLED',logger:'Sensor Data Logger',channels:'Channels',auth:'Auth',boot:'Boot',broker:'Broker',topics:'Topics',publish:'Publish',image:'Image',tuning:'Tuning',storage:'Storage',autoCapture:'Auto Capture',timing:'Timing',orientation:'Orientation',filtering:'Filtering',interpolation:'Interpolation',scale:'Scale',mesh:'Mesh',bond:'Bond',identity:'Identity',buffers:'Buffers',capture:'Capture',lifecycle:'Lifecycle',polling:'Polling',values:'Values'};
   // Hover help for each debug flag. Keyed by the CLI cmdKey so it survives
   // label changes. Missing keys fall back to a generic group-level hint.
   var HELP={
@@ -1059,33 +1128,57 @@ window.sendSequential = function(cmds, onDone, onFail) {
     debugautocondition:"Logs IF/THEN condition evaluation inside automation command lists.",
     debugautotiming:"Logs nextAt computation and post-fire reschedule details. Noisy when many automations exist.",
     // sensors
-    debugsensors:"Master toggle for shared sensor-subsystem logs.",
-    debugsensorsgeneral:"General sensor-queue events: start/stop requests, init failures, clock-rate changes.",
-    // per-sensor (each is its own group with just 'enabled')
     debugcamera:"All camera (OV2640/OV3660) debug output: init, frame capture, streaming.",
-    debugmicrophone:"All microphone debug output: I2S init, recording sessions, level calculation.",
-    debuggps:"All GPS debug output: NMEA parsing, fix acquisition, cached coordinate updates.",
-    debugrtc:"All RTC debug output: DS3231 reads, NTP sync, anchor writes.",
-    debugpresence:"All presence-sensor (STHS34PF80) debug output: presence/motion detections.",
-    debugfmradio:"All FM Radio (RDA5807) debug output: tune, scan, RDS station name/text, signal.",
+    // microphone
+    debugmicrophone:"Master toggle for microphone debug (I2S init, recording sessions, level calc).",
+    debugmiclifecycle:"Logs microphone start/stop and recording-task lifecycle.",
+    debugmicpolling:"Logs microphone capture cadence — verbose during recording.",
+    debugmicvalues:"Logs microphone level-meter readings and audio sample stats.",
+    // gps
+    debuggps:"Master toggle for GPS (PA1010D) debug.",
+    debuggpslifecycle:"Logs GPS init, connect, and recovery.",
+    debuggpspolling:"Logs GPS poll cadence and NMEA-sentence parse activity.",
+    debuggpsvalues:"Logs GPS fix coordinates, satellite count, and parsed NMEA payload data.",
+    // rtc
+    debugrtc:"Master toggle for RTC (DS3231) debug.",
+    debugrtclifecycle:"Logs RTC init, connect, recovery, and time-source switches.",
+    debugrtcpolling:"Logs RTC poll cadence.",
+    debugrtcvalues:"Logs RTC time-read values and drift correction.",
+    // presence
+    debugpresence:"Master toggle for presence-sensor (STHS34PF80) debug.",
+    debugpresencelifecycle:"Logs presence-sensor init, connect, and auto-disable.",
+    debugpresencepolling:"Logs presence-sensor poll cadence.",
+    debugpresencevalues:"Logs presence/motion detection events and value changes.",
+    // fmradio
+    debugfmradio:"Master toggle for FM Radio (RDA5807) debug.",
+    debugfmradiolifecycle:"Logs FM radio init, tune, and recovery.",
+    debugfmradiopolling:"Logs FM radio poll cadence and tuning-task activity.",
+    debugfmradiovalues:"Logs FM radio RDS strings, RSSI/signal values, and station info.",
     // thermal
     debugthermal:"Master toggle for thermal camera (MLX90640) debug.",
-    debugthermalframe:"Logs per-frame capture timing — very noisy at higher frame rates.",
-    debugthermaldata:"Logs the raw pixel values / min-max-avg stats of each captured frame. Extremely verbose.",
+    debugthermallifecycle:"Logs thermal sensor init, connect, and recovery.",
+    debugthermalpolling:"Logs per-frame capture timing — very noisy at higher frame rates.",
+    debugthermalvalues:"Logs the raw pixel values / min-max-avg stats of each captured frame. Extremely verbose.",
     // imu
     debugimu:"Master toggle for IMU (BNO055) debug.",
-    debugimuframe:"Logs each IMU poll cycle (orientation + accel + gyro).",
-    debugimudata:"Logs the raw quaternion and Euler-angle values read from the sensor. Verbose.",
+    debugimulifecycle:"Logs IMU init, connect, and recovery.",
+    debugimupolling:"Logs each IMU poll cycle (orientation + accel + gyro).",
+    debugimuvalues:"Logs the raw quaternion and Euler-angle values read from the sensor. Verbose.",
     // gamepad
     debuggamepad:"Master toggle for Seesaw gamepad debug.",
-    debuggamepadframe:"Logs each gamepad read cycle (stick + button snapshot).",
-    debuggamepaddata:"Logs the raw button mask and stick XY values. Verbose.",
+    debuggamepadlifecycle:"Logs gamepad init, connect, and auto-disable.",
+    debuggamepadpolling:"Logs each gamepad read cycle (stick + button snapshot).",
+    debuggamepadvalues:"Logs the raw button mask and stick XY values. Verbose.",
     // tof
     debugtof:"Master toggle for Time-of-Flight (VL53L4CX) debug.",
-    debugtofframe:"Logs each ToF measurement frame — detected objects, distances, statuses.",
+    debugtoflifecycle:"Logs ToF init, connect, and recovery.",
+    debugtofpolling:"Logs each ToF measurement frame — detected objects, distances, statuses.",
+    debugtofvalues:"Logs ToF distance and object-detection values.",
     // apds
     debugapds:"Master toggle for APDS9960 debug (color + proximity + gesture).",
-    debugapdsframe:"Logs each APDS poll cycle — RGB color, clear, proximity, gesture events.",
+    debugapdslifecycle:"Logs APDS init, connect, and recovery.",
+    debugapdspolling:"Logs each APDS poll cycle — RGB color, clear, proximity, gesture events.",
+    debugapdsvalues:"Logs APDS color, proximity, and gesture values.",
     // maps
     debugmaps:"Master toggle for offline-maps subsystem debug.",
     debugmapsloading:"Logs tile file opens and chunk reads from LittleFS.",
@@ -1170,10 +1263,22 @@ window.sendSequential = function(cmds, onDone, onFail) {
       h+='<div class="dbg-card'+(anyOn?' on':'')+'" id="'+gid+'" title="'+esc(groupTip)+'">';
       h+='<div class="dbg-card-hdr" onclick="dbgToggleAll(\''+gn+'\')" title="'+esc(groupTip)+'"><span class="dbg-dot"></span><span>'+gl+'</span></div>';
       ge.forEach(function(e){
-        var v=!!(e.key==='enabled'?gd.enabled:gd[e.key]);
         var lbl=e.key==='enabled'?'All':'&ensp;'+e.label;
         var rowTip = esc(helpFor(e.cmdKey||e.key, gn, e.key==='enabled'));
-        h+='<div class="dbg-row" title="'+rowTip+'"><span class="lbl">'+lbl+'</span>'+sw(e.cmdKey||e.key,gn,v,e.key==='enabled')+'</div>';
+        var cmd = e.cmdKey || e.key;
+        if (e.type === 'int' || e.type === 'float') {
+          // Numeric setting inside a folder — render as number input, not toggle.
+          var nv = gd[e.key]; if (nv === undefined) nv = e['default'];
+          var step = e.type === 'float' ? '0.01' : '1';
+          var mi = e.min !== undefined ? ' min="'+e.min+'"' : '';
+          var ma = e.max !== undefined ? ' max="'+e.max+'"' : '';
+          h+='<div class="dbg-row" title="'+rowTip+'"><span class="lbl">'+lbl+'</span>';
+          h+='<input type="number" class="dbg-input form-input" data-cmd="'+cmd+'" value="'+nv+'" step="'+step+'"'+mi+ma+' style="width:80px"></div>';
+        } else {
+          // Bool / default — render as toggle switch.
+          var v=!!(e.key==='enabled'?gd.enabled:gd[e.key]);
+          h+='<div class="dbg-row" title="'+rowTip+'"><span class="lbl">'+lbl+'</span>'+sw(cmd,gn,v,e.key==='enabled')+'</div>';
+        }
       });
       h+='</div>';
     });
@@ -1652,9 +1757,6 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         if (list && list.length) __S.state.savedSSIDs = __S.state.savedSSIDs.concat(list);
         var wifiAutoReconnect = s.wifiAutoReconnect || (s.wifi && s.wifi.wifiAutoReconnect) || false;
         $('wifi-value').textContent = wifiAutoReconnect ? 'Enabled' : 'Disabled';
-        var webHistorySize = (s.cli && s.cli.webHistorySize) || s.webCliHistorySize || 10;
-        $('cli-value').textContent = webHistorySize;
-        $('cli-input').value = webHistorySize;
         $('wifi-btn').textContent = wifiAutoReconnect ? 'Disable' : 'Enable';
         // Timezone and NTP from wifi module
         // Settings are serialized as s.wifi.global.tzOffsetMinutes / s.wifi.global.ntpServer
@@ -1845,57 +1947,6 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     
     // saveEspNowSettings removed - ESP-NOW settings now saved via schema-driven saveNetworkSettings
 
-    // Update Web CLI history size
-    window.updateWebCliHistory = function() {
-      console.log('[SETTINGS] updateWebCliHistory called');
-      var v = parseInt($('cli-input').value);
-      console.log('[SETTINGS] updateWebCliHistory value:', v);
-      if (v < 1) {
-        alert('Must be at least 1');
-        return;
-      }
-      var cmd = 'webclihistorysize ' + v;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) { return r.text(); })
-      .then(function(t) {
-        console.log('[SETTINGS] updateWebCliHistory result:', t);
-        refreshSettings();
-      })
-      .catch(function(e) {
-        console.error('[SETTINGS] updateWebCliHistory error:', e);
-        alert('Error: ' + e.message);
-      });
-    };
-    console.log('[SETTINGS] updateWebCliHistory defined');
-    
-    // Clear CLI history
-    window.clearCliHistory = function() {
-      var cmd = 'clear';
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) { return r.text(); })
-      .then(function(t) {
-        try {
-          if (t && t.indexOf('Error') >= 0) {
-            alert(t);
-          }
-        } catch(_) {}
-        if (typeof refreshSettings === 'function') refreshSettings();
-      })
-      .catch(function(e) {
-        alert('Error: ' + e.message);
-      });
-    };
-    
     // Save authentication settings
     window.saveAuthSettings = function() {
       var serial  = document.getElementById('auth-serial');
@@ -2394,9 +2445,6 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           var userSessions = sessionsByUser[username] || [];
           var sessionCount = userSessions.length;
           var uid = 'u' + Math.random().toString(36).substr(2, 9);
-          // Compute last active from most recent session lastSeen
-          var lastActive = 0;
-          userSessions.forEach(function(s) { if (s.lastSeen && s.lastSeen > lastActive) lastActive = s.lastSeen; });
           var createdAt = user.createdAt || '';
           var rowBorder = isPending ? 'border-left:3px solid #b8860b;' : (isBanned ? 'border-left:3px solid #dc3545;' : '');
           html += '<div style="margin-bottom:0.25rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;' + rowBorder + '">';
@@ -2417,9 +2465,6 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           if (!isPending) {
             var meta = [];
             if (createdAt) meta.push('<strong>Created:</strong> ' + createdAt.replace('T', ' ').replace('Z', ''));
-            if (lastActive) meta.push('<strong>Last Active:</strong> ' + formatMillisTimestamp(lastActive));
-            else if (user.lastSeen) meta.push('<strong>Last Seen:</strong> ' + new Date(user.lastSeen).toLocaleString());
-            else if (user.lastSeenSec) meta.push('<strong>Last Seen:</strong> ' + formatMillisTimestamp(user.lastSeenSec * 1000));
             if (meta.length) html += '<div style="font-size:0.8rem;color:var(--muted,#888);margin-bottom:0.5rem">' + meta.join(' &middot; ') + '</div>';
           }
           if (!isPending && sessionCount > 0) {

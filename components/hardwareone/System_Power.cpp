@@ -249,16 +249,16 @@ static bool isPowerModuleConnected() {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry powerSettingEntries[] = {
-  { "mode",             SETTING_INT,  &gSettings.powerMode,             0, 0, nullptr, 0, 3, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver" },
-  { "autoMode",         SETTING_BOOL, &gSettings.powerAutoMode,         false, 0, nullptr, 0, 1, "Auto Mode", nullptr },
-  { "batteryThreshold", SETTING_INT,  &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr },
-  { "displayDimLevel",  SETTING_INT,  &gSettings.powerDisplayDimLevel,  30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr }
+  { "mode", SETTING_INT, &gSettings.powerMode, 0, 0, nullptr, 0, 3, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver", false, nullptr, nullptr },
+  { "autoMode", SETTING_BOOL, &gSettings.powerAutoMode, false, 0, nullptr, 0, 1, "Auto Mode", nullptr, false, nullptr, nullptr },
+  { "batteryThreshold", SETTING_INT, &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr, false, nullptr, nullptr },
+  { "displayDimLevel", SETTING_INT, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr, false, nullptr, nullptr }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule powerSettingsModule = {
   "power",
-  "power",
+  "system.power",
   powerSettingEntries,
   sizeof(powerSettingEntries) / sizeof(powerSettingEntries[0]),
   isPowerModuleConnected,

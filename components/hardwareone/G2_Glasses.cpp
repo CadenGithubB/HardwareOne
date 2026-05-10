@@ -938,12 +938,6 @@ static void handleHijackMenuTap(uint32_t idx);
 // Shutdown+CREATE handshake helpers — defined alongside g2ShowText
 // (bottom of file) but referenced earlier by the Blocks-hijack worker.
 //
-// (The legacy sendCreateAndWait — text-only, 1 KB on-stack buffer,
-// single-fragment envelope — was removed 2026-04-30 after g2ShowText
-// migrated to the multi-fragment-capable sendCreateTextAndWait. Its
-// 1 KB buffer was overflowing on Status snapshots and the firmware
-// rejected the resulting truncated envelope.)
-//
 // Default containerName lives on the forward decl (not the definition)
 // so callers between this decl and the definition can omit the arg.
 // C++ rule: a default argument is in scope for callers that have seen
@@ -3365,18 +3359,16 @@ buildG2StatusSnapshot(char* out, size_t cap) {
   //      gRingViaGlassesLastSeenMs in handleDevEvent).
   // The two are independent: a ring can be linked to glasses without
   // being directly connected to us, and vice versa.
-  // Ring body line removed 2026-05-09: the corner R1 row owns ring
-  // status reporting (currently a "R1: --%" placeholder until ring
-  // battery is plumbed through; later it'll be the real percentage).
-  // Keeping a body line here was redundant AND turned the body into
-  // a 5-line block that overflowed the bottom-aligned text box, so
-  // the body now stays at exactly 4 lines:
+  //
+  // Status-page body is exactly 4 lines (any 5th line overflows the
+  // bottom-aligned text box):
   //   1. device name
   //   2. Up XhYm - NC
   //   3. IP: ... (or "WiFi off")
   //   4. ESPNow: Np (or "ESPNow off")
-  // The (rxCount, tap-seen-Ns) info we used to surface here is still
-  // available via the ringstatus CLI command for diagnostics.
+  // Ring status reports through the corner R1 row, not the body. The
+  // (rxCount, tap-seen-Ns) ring telemetry is available via the
+  // ringstatus CLI command for diagnostics.
 #endif
 
   // Trim trailing newline. Each line above ends with '\n' for clarity
@@ -6570,9 +6562,6 @@ static bool g2ConnectSavedSync() {
   return ok;
 }
 
-// Group B: g2ConnectSavedTaskBody removed — see comment above
-// g2Connect about the unified worker.
-
 // Public API: non-blocking auto-reconnect from saved MACs. Used by the
 // boot hook; safe to call from any context.
 bool g2ConnectSaved() {
@@ -9481,8 +9470,8 @@ static bool renderStatusCompound() {
   // layout doesn't shift when telemetry comes online. Ring battery
   // isn't plumbed through yet — the placeholder is permanent until the
   // R1 protocol exposes a battery reading; swap to an int read at that
-  // point. The legacy body "Ring off" line was removed because this
-  // corner already communicates the disconnected state.
+  // point. Disconnected state is communicated by this corner row alone
+  // (no separate body line needed).
   char r1Str[32];
   snprintf(r1Str, sizeof(r1Str), "R1: --%%");
 

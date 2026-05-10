@@ -108,7 +108,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
             if (jsonLen > 0) {
               // DEBUG: Log buffer usage
               int usagePct = (jsonLen * 100) / JSON_RESPONSE_SIZE;
-              DEBUG_MEMORYF("[JSON_RESP_BUF] Thermal JSON: %d/%u bytes (%d%%)", jsonLen, (unsigned)JSON_RESPONSE_SIZE, usagePct);
+              DEBUG_MEMORY_BUFFERSF("[JSON_RESP_BUF] Thermal JSON: %d/%u bytes (%d%%)", jsonLen, (unsigned)JSON_RESPONSE_SIZE, usagePct);
 
               sendJsonResponse(req, buf, jsonLen);
               xSemaphoreGive(gJsonResponseMutex);

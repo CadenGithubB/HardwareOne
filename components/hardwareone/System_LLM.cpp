@@ -4021,7 +4021,7 @@ static const SettingEntry llmSettingEntries[] = {
 };
 
 extern const SettingsModule llmSettingsModule = {
-  "llm", "llm", llmSettingEntries,
+  "llm", "apps.llm", llmSettingEntries,
   sizeof(llmSettingEntries) / sizeof(llmSettingEntries[0]),
   nullptr,
   "On-device LLM generation defaults"

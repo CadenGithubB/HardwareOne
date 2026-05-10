@@ -805,7 +805,7 @@ uint8_t* captureFrameAtResolution(framesize_t size, int quality, size_t* outLen)
     if (result) {
       memcpy(result, fb->buf, fb->len);
       if (outLen) *outLen = fb->len;
-      DEBUG_SENSORSF("[Camera] Captured %dx%d frame: %u bytes (q=%d)", 
+      DEBUG_CAMERA_CAPTUREF("Captured %dx%d frame: %u bytes (q=%d)",
                      fb->width, fb->height, (unsigned)fb->len, quality);
     } else {
       if (outLen) *outLen = 0;
@@ -936,14 +936,14 @@ void cameraPowerWorkerEnsureStarted() {
   constexpr uint32_t  kStack = 10240;
   sCamPwrQueue = xQueueCreate(kDepth, sizeof(CameraPwrMsg));
   if (!sCamPwrQueue) {
-    ERROR_SENSORSF("[CAM_PWR] queue create failed");
+    ERROR_CAMERAF("[CAM_PWR] queue create failed");
     return;
   }
   const BaseType_t ok =
       xTaskCreate(cameraPwrWorker, "cam_pwr", kStack, nullptr,
                   tskIDLE_PRIORITY + 2, &sCamPwrTask);
   if (ok != pdPASS) {
-    ERROR_SENSORSF("[CAM_PWR] worker task create failed");
+    ERROR_CAMERAF("[CAM_PWR] worker task create failed");
     vQueueDelete(sCamPwrQueue);
     sCamPwrQueue = nullptr;
     sCamPwrTask  = nullptr;
@@ -1874,31 +1874,28 @@ const CommandEntry cameraCommands[] = {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry cameraSettingEntries[] = {
-  { "cameraAutoStart",          SETTING_BOOL,   &gSettings.cameraAutoStart,              0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
-  { "cameraFramesize",          SETTING_INT,    &gSettings.cameraFramesize,              10, 0, nullptr, 0, 10, "Resolution",
-    "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA),"
-    "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240" },
-  { "cameraBrightness",         SETTING_INT,    &gSettings.cameraBrightness,             0, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr },
-  { "cameraContrast",           SETTING_INT,    &gSettings.cameraContrast,               0, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr },
-  { "cameraSaturation",         SETTING_INT,    &gSettings.cameraSaturation,             0, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr },
-  { "cameraAELevel",            SETTING_INT,    &gSettings.cameraAELevel,                0, 0, nullptr, -2, 2, "Exposure Compensation (-2 to 2)", nullptr },
-  { "cameraWBMode",             SETTING_INT,    &gSettings.cameraWBMode,                 0, 0, nullptr, 0, 4, "White Balance",
-    "0:Auto,1:Sunny,2:Cloudy,3:Office,4:Home" },
-  { "cameraSharpness",          SETTING_INT,    &gSettings.cameraSharpness,              0, 0, nullptr, -2, 2, "Sharpness (-2 to 2, OV3660)", nullptr },
-  { "cameraDenoise",            SETTING_INT,    &gSettings.cameraDenoise,                0, 0, nullptr, 0, 8, "Denoise (0-8)", nullptr },
-  { "cameraSpecialEffect",      SETTING_INT,    &gSettings.cameraSpecialEffect,          0, 0, nullptr, 0, 6, "Special Effect",
-    "0:None,1:Negative,2:Grayscale,3:Red Tint,4:Green Tint,5:Blue Tint,6:Sepia" },
-  { "cameraHMirror",            SETTING_BOOL,   &gSettings.cameraHMirror,                0, 0, nullptr, 0, 1, "Horizontal mirror", nullptr },
-  { "cameraVFlip",              SETTING_BOOL,   &gSettings.cameraVFlip,                  0, 0, nullptr, 0, 1, "Vertical flip", nullptr },
-  { "cameraQuality",            SETTING_INT,    &gSettings.cameraQuality,                0, 0, nullptr, 0, 63, "JPEG quality (0-63, lower=better)", nullptr },
-  { "cameraStreamIntervalMs",   SETTING_INT,    &gSettings.cameraStreamIntervalMs,     200, 0, nullptr, 50, 2000, "Stream interval ms (lower=faster)", nullptr },
-  { "cameraStorageLocation",    SETTING_INT,    &gSettings.cameraStorageLocation,        0, 0, nullptr, 0, 2, "Storage Location", "0:LittleFS (Internal),1:SD Card,2:Both" },
-  { "cameraCaptureFolder",      SETTING_STRING, &gSettings.cameraCaptureFolder,          0, 0, nullptr, 0, 0, "Photo folder path", nullptr },
-  { "cameraMaxStoredImages",    SETTING_INT,    &gSettings.cameraMaxStoredImages,        0, 0, nullptr, 0, 1000, "Max images (0=unlimited)", nullptr },
-  { "cameraAutoCapture",        SETTING_BOOL,   &gSettings.cameraAutoCapture,            0, 0, nullptr, 0, 1, "Enable auto-capture", nullptr },
-  { "cameraAutoCaptureInterval",SETTING_INT,    &gSettings.cameraAutoCaptureIntervalSec, 0, 0, nullptr, 10, 3600, "Auto-capture interval (sec)", nullptr },
-  { "cameraSendAfterCapture",   SETTING_BOOL,   &gSettings.cameraSendAfterCapture,       0, 0, nullptr, 0, 1, "Send to target after capture", nullptr },
-  { "cameraTargetDevice",       SETTING_STRING, &gSettings.cameraTargetDevice,           0, 0, nullptr, 0, 0, "ESP-NOW target device name", nullptr },
+  { "cameraAutoStart", SETTING_BOOL, &gSettings.cameraAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
+  { "cameraFramesize", SETTING_INT, &gSettings.cameraFramesize, 10, 0, nullptr, 0, 10, "Resolution", "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA),"
+    "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240", false, "image", nullptr },
+  { "cameraBrightness", SETTING_INT, &gSettings.cameraBrightness, 0, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr, false, "tuning", nullptr },
+  { "cameraContrast", SETTING_INT, &gSettings.cameraContrast, 0, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr, false, "tuning", nullptr },
+  { "cameraSaturation", SETTING_INT, &gSettings.cameraSaturation, 0, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr, false, "tuning", nullptr },
+  { "cameraAELevel", SETTING_INT, &gSettings.cameraAELevel, 0, 0, nullptr, -2, 2, "Exposure Compensation (-2 to 2)", nullptr, false, "tuning", nullptr },
+  { "cameraWBMode", SETTING_INT, &gSettings.cameraWBMode, 0, 0, nullptr, 0, 4, "White Balance", "0:Auto,1:Sunny,2:Cloudy,3:Office,4:Home", false, "tuning", nullptr },
+  { "cameraSharpness", SETTING_INT, &gSettings.cameraSharpness, 0, 0, nullptr, -2, 2, "Sharpness (-2 to 2, OV3660)", nullptr, false, "tuning", nullptr },
+  { "cameraDenoise", SETTING_INT, &gSettings.cameraDenoise, 0, 0, nullptr, 0, 8, "Denoise (0-8)", nullptr, false, "tuning", nullptr },
+  { "cameraSpecialEffect", SETTING_INT, &gSettings.cameraSpecialEffect, 0, 0, nullptr, 0, 6, "Special Effect", "0:None,1:Negative,2:Grayscale,3:Red Tint,4:Green Tint,5:Blue Tint,6:Sepia", false, "tuning", nullptr },
+  { "cameraHMirror", SETTING_BOOL, &gSettings.cameraHMirror, 0, 0, nullptr, 0, 1, "Horizontal mirror", nullptr, false, "image", nullptr },
+  { "cameraVFlip", SETTING_BOOL, &gSettings.cameraVFlip, 0, 0, nullptr, 0, 1, "Vertical flip", nullptr, false, "image", nullptr },
+  { "cameraQuality", SETTING_INT, &gSettings.cameraQuality, 0, 0, nullptr, 0, 63, "JPEG quality (0-63, lower=better)", nullptr, false, "image", nullptr },
+  { "cameraStreamIntervalMs", SETTING_INT, &gSettings.cameraStreamIntervalMs, 200, 0, nullptr, 50, 2000, "Stream interval ms (lower=faster)", nullptr, false, "image", nullptr },
+  { "cameraStorageLocation", SETTING_INT, &gSettings.cameraStorageLocation, 0, 0, nullptr, 0, 2, "Storage Location", "0:LittleFS (Internal),1:SD Card,2:Both", false, "storage", nullptr },
+  { "cameraCaptureFolder", SETTING_STRING, &gSettings.cameraCaptureFolder, 0, 0, nullptr, 0, 0, "Photo folder path", nullptr, false, "storage", nullptr },
+  { "cameraMaxStoredImages", SETTING_INT, &gSettings.cameraMaxStoredImages, 0, 0, nullptr, 0, 1000, "Max images (0=unlimited)", nullptr, false, "storage", nullptr },
+  { "cameraAutoCapture", SETTING_BOOL, &gSettings.cameraAutoCapture, 0, 0, nullptr, 0, 1, "Enable auto-capture", nullptr, false, "autoCapture", nullptr },
+  { "cameraAutoCaptureInterval", SETTING_INT, &gSettings.cameraAutoCaptureIntervalSec, 0, 0, nullptr, 10, 3600, "Auto-capture interval (sec)", nullptr, false, "autoCapture", nullptr },
+  { "cameraSendAfterCapture", SETTING_BOOL, &gSettings.cameraSendAfterCapture, 0, 0, nullptr, 0, 1, "Send to target after capture", nullptr, false, "autoCapture", nullptr },
+  { "cameraTargetDevice", SETTING_STRING, &gSettings.cameraTargetDevice, 0, 0, nullptr, 0, 0, "ESP-NOW target device name", nullptr, false, "autoCapture", nullptr },
 };
 
 static bool isCameraConnected() {
@@ -1909,7 +1906,7 @@ static bool isCameraConnected() {
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule cameraSettingsModule = {
   "camera",
-  "camera",
+  "hardware.sensors.camera",
   cameraSettingEntries,
   sizeof(cameraSettingEntries) / sizeof(cameraSettingEntries[0]),
   isCameraConnected,

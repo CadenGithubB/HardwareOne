@@ -1333,21 +1333,23 @@ void setupWiFi() {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry wifiSettingsEntries[] = {
-  { "enabled",            SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "WiFi Enabled", nullptr, false, "global", "wifienabled" },
-  { "ssid",               SETTING_STRING, &gSettings.wifiSSID,          0, 0, "", 0, 0, "WiFi SSID", nullptr, false, "global", "wifissid" },
-  { "password",           SETTING_STRING, &gSettings.wifiPassword,      0, 0, "", 0, 0, "WiFi Password", nullptr, true, "global", "wifipassword" },
-  { "autoReconnect",      SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr, false, "global", "wifiautoreconnect" },
-  { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, "global", "ntpserver" },
-  { "tzOffsetMinutes",    SETTING_INT,    &gSettings.tzOffsetMinutes,   -240, 0, nullptr, -720, 840, "Timezone Offset (min)", nullptr, false, "global", "tzoffsetminutes" }
+  { "enabled",            SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "WiFi Enabled", nullptr, false, nullptr, "wifienabled" },
+  { "ssid",               SETTING_STRING, &gSettings.wifiSSID,          0, 0, "", 0, 0, "WiFi SSID", nullptr, false, nullptr, "wifissid" },
+  { "password",           SETTING_STRING, &gSettings.wifiPassword,      0, 0, "", 0, 0, "WiFi Password", nullptr, true, nullptr, "wifipassword" },
+  { "autoReconnect",      SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr, false, nullptr, "wifiautoreconnect" },
+  { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, nullptr, "ntpserver" },
+  { "tzOffsetMinutes",    SETTING_INT,    &gSettings.tzOffsetMinutes,   -240, 0, nullptr, -720, 840, "Timezone Offset (min)", nullptr, false, nullptr, "tzoffsetminutes" }
 };
+
+static bool isWifiConnected() { return WiFi.status() == WL_CONNECTED; }
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule wifiSettingsModule = {
   "wifi",
-  "wifi",
+  "network.wifi",
   wifiSettingsEntries,
   sizeof(wifiSettingsEntries) / sizeof(wifiSettingsEntries[0]),
-  nullptr,
+  isWifiConnected,
   "WiFi connection and network settings"
 };
 
@@ -1358,21 +1360,26 @@ extern const SettingsModule wifiSettingsModule = {
 // ============================================================================
 #if ENABLE_HTTP_SERVER
 
+// Server handle is owned by WebServer_Server.cpp; non-null when running.
+extern httpd_handle_t server;
+static bool isHttpServerRunning() { return server != nullptr; }
+
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry httpSettingsEntries[] = {
-  { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr },
+  { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, nullptr },
 #if ENABLE_HTTPS
-  { "httpsEnabled", SETTING_BOOL, &gSettings.httpsEnabled, false, 0, nullptr, 0, 1, "Enable HTTPS (requires certs + reboot)", nullptr },
+  { "httpsEnabled", SETTING_BOOL, &gSettings.httpsEnabled, false, 0, nullptr, 0, 1, "Enable HTTPS (requires certs + reboot)", nullptr, false, nullptr, nullptr },
 #endif
+  { "webCliHistorySize", SETTING_INT, &gSettings.webCliHistorySize, 10, 0, nullptr, 1, 100, "Web CLI history size", nullptr, false, nullptr, "webclihistorysize" },
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule httpSettingsModule = {
   "http",
-  "http",
+  "network.http",
   httpSettingsEntries,
   sizeof(httpSettingsEntries) / sizeof(httpSettingsEntries[0]),
-  nullptr,
+  isHttpServerRunning,
   "HTTP server settings"
 };
 

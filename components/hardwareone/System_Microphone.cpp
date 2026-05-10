@@ -197,18 +197,18 @@ static void writeWavHeader(File& f, uint32_t dataSize) {
 }
 
 static void recordingTask(void* param) {
-  DEBUG_MICF("[MIC_REC_TASK] ========== recordingTask() ENTRY ==========");
-  DEBUG_MICF("[MIC_REC_TASK] Task running on core %d", xPortGetCoreID());
-  DEBUG_MICF("[MIC_REC_TASK] Heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  INFO_SENSORSF("[Microphone] Recording task started");
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] ========== recordingTask() ENTRY ==========");
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Task running on core %d", xPortGetCoreID());
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  INFO_MICF("Recording task started");
   
-  DEBUG_MICF("[MIC_REC_TASK] Allocating %d byte recording buffer...", RECORDING_CHUNK_SIZE);
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Allocating %d byte recording buffer...", RECORDING_CHUNK_SIZE);
   int16_t* buffer = (int16_t*)ps_alloc(RECORDING_CHUNK_SIZE, AllocPref::PreferPSRAM, "mic.rec.buf");
-  DEBUG_MICF("[MIC_REC_TASK] ps_alloc returned: %p", buffer);
-  
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] ps_alloc returned: %p", buffer);
+
   if (!buffer) {
-    DEBUG_MICF("[MIC_REC_TASK] *** BUFFER ALLOCATION FAILED! ***");
-    INFO_SENSORSF("[Microphone] Failed to allocate recording buffer");
+    DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] *** BUFFER ALLOCATION FAILED! ***");
+    INFO_MICF("Failed to allocate recording buffer");
     micRecording = false;
     recordingTaskHandle = nullptr;
     vTaskDelete(NULL);
@@ -216,7 +216,7 @@ static void recordingTask(void* param) {
   }
   
   uint32_t maxSamples = micSampleRate * MAX_RECORDING_SEC;
-  DEBUG_MICF("[MIC_REC_TASK] Max samples: %lu (sampleRate=%d, maxSec=%d)", maxSamples, micSampleRate, MAX_RECORDING_SEC);
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Max samples: %lu (sampleRate=%d, maxSec=%d)", maxSamples, micSampleRate, MAX_RECORDING_SEC);
   
   uint32_t loopCount = 0;
   while (micRecording && gMicEnabled && recordingSamples < maxSamples) {
@@ -250,15 +250,15 @@ static void recordingTask(void* param) {
       
       // Log every 100 iterations
       if (loopCount % 100 == 0) {
-        DEBUG_MICF("[MIC_REC_TASK] Loop %lu: read=%u, written=%u, totalSamples=%lu",
+        DEBUG_MIC_POLLINGF("[MIC_REC_TASK] Loop %lu: read=%u, written=%u, totalSamples=%lu",
                    loopCount, bytesRead, written, recordingSamples);
       }
     } else if (err != ESP_OK) {
-      DEBUG_MICF("[MIC_REC_TASK] i2s_channel_read error: 0x%x", err);
+      DEBUG_MIC_POLLINGF("[MIC_REC_TASK] i2s_channel_read error: 0x%x", err);
     } else if (bytesRead == 0) {
       // Log zero-byte reads periodically
       if (loopCount % 50 == 0) {
-        DEBUG_MICF("[MIC_REC_TASK] Loop %lu: i2s_channel_read returned 0 bytes (no data from mic)", loopCount);
+        DEBUG_MIC_POLLINGF("[MIC_REC_TASK] Loop %lu: i2s_channel_read returned 0 bytes (no data from mic)", loopCount);
       }
     }
     
@@ -267,86 +267,86 @@ static void recordingTask(void* param) {
     taskYIELD();
   }
   
-  DEBUG_MICF("[MIC_REC_TASK] Recording loop ended: micRecording=%d gMicEnabled=%d samples=%lu",
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Recording loop ended: micRecording=%d gMicEnabled=%d samples=%lu",
              micRecording, gMicEnabled, recordingSamples);
   
   free(buffer);
-  DEBUG_MICF("[MIC_REC_TASK] Buffer freed");
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Buffer freed");
   
   // Finalize WAV file
   if (recordingFile) {
     uint32_t dataSize = recordingSamples * sizeof(int16_t);
-    DEBUG_MICF("[MIC_REC_TASK] Finalizing WAV: dataSize=%lu", dataSize);
+    DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Finalizing WAV: dataSize=%lu", dataSize);
     {
       FsLockGuard fsGuard("mic.record.finalize");
       writeWavHeader(recordingFile, dataSize);
       recordingFile.close();
     }
-    DEBUG_MICF("[MIC_REC_TASK] WAV file closed");
-    INFO_SENSORSF("[Microphone] Recording saved: %s (%lu samples)", currentRecordingPath, recordingSamples);
+    DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] WAV file closed");
+    INFO_MICF("Recording saved: %s (%lu samples)", currentRecordingPath, recordingSamples);
   } else {
-    DEBUG_MICF("[MIC_REC_TASK] WARNING: recordingFile is invalid!");
+    DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] WARNING: recordingFile is invalid!");
   }
   
   micRecording = false;
   recordingTaskHandle = nullptr;
-  DEBUG_MICF("[MIC_REC_TASK] ========== recordingTask() EXIT ==========");
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] ========== recordingTask() EXIT ==========");
   vTaskDelete(NULL);
 }
 
 bool startRecording() {
-  DEBUG_MICF("[MIC_START_REC] ========== startRecording() ENTRY ==========");
-  DEBUG_MICF("[MIC_START_REC] gMicEnabled=%d micRecording=%d", gMicEnabled, micRecording);
-  DEBUG_MICF("[MIC_START_REC] Heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] ========== startRecording() ENTRY ==========");
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] gMicEnabled=%d micRecording=%d", gMicEnabled, micRecording);
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
   if (!gMicEnabled) {
-    DEBUG_MICF("[MIC_START_REC] FAILED: mic not enabled");
-    INFO_SENSORSF("[Microphone] Cannot record - mic not enabled");
+    DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] FAILED: mic not enabled");
+    INFO_MICF("Cannot record - mic not enabled");
     return false;
   }
   if (micRecording) {
-    DEBUG_MICF("[MIC_START_REC] FAILED: already recording");
-    INFO_SENSORSF("[Microphone] Already recording");
+    DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] FAILED: already recording");
+    INFO_MICF("Already recording");
     return false;
   }
   
   String recDir = micPrimaryRecordingsFolder();
-  DEBUG_MICF("[MIC_START_REC] Checking recordings folder: %s", recDir.c_str());
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Checking recordings folder: %s", recDir.c_str());
   {
     FsLockGuard fsGuard("mic.record.mkdir");
     if (!VFS::existsGuarded(recDir, gExecAuthContext)) {
-      DEBUG_MICF("[MIC_START_REC] Creating recordings folder...");
+      DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Creating recordings folder...");
       bool created = VFS::mkdirGuarded(recDir, gExecAuthContext);
-      DEBUG_MICF("[MIC_START_REC] mkdir returned: %d", created);
+      DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] mkdir returned: %d", created);
     } else {
-      DEBUG_MICF("[MIC_START_REC] Recordings folder exists");
+      DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Recordings folder exists");
     }
   }
   
   // Generate filename with timestamp
   snprintf(currentRecordingPath, sizeof(currentRecordingPath),
            "%s/rec_%lu.wav", recDir.c_str(), (unsigned long)millis());
-  DEBUG_MICF("[MIC_START_REC] Recording path: %s", currentRecordingPath);
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Recording path: %s", currentRecordingPath);
   
-  DEBUG_MICF("[MIC_START_REC] Opening file for write...");
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Opening file for write...");
   {
     FsLockGuard fsGuard("mic.record.open");
     recordingFile = VFS::openGuarded(String(currentRecordingPath), "w", gExecAuthContext, true);
   }
   if (!recordingFile) {
-    DEBUG_MICF("[MIC_START_REC] *** FAILED to create file! ***");
-    INFO_SENSORSF("[Microphone] Failed to create recording file");
+    DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] *** FAILED to create file! ***");
+    INFO_MICF("Failed to create recording file");
     return false;
   }
-  DEBUG_MICF("[MIC_START_REC] File opened successfully");
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] File opened successfully");
   
   // Write placeholder header (will be updated at end)
-  DEBUG_MICF("[MIC_START_REC] Writing placeholder WAV header...");
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Writing placeholder WAV header...");
   {
     FsLockGuard fsGuard("mic.record.header");
     writeWavHeader(recordingFile, 0);
   }
-  DEBUG_MICF("[MIC_START_REC] Header written, file position: %lu", recordingFile.position());
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Header written, file position: %lu", recordingFile.position());
   
   recordingStartTime = millis();
   recordingSamples = 0;
@@ -363,47 +363,47 @@ bool startRecording() {
     &recordingTaskHandle,
     1
   );
-  DEBUG_MICF("[MIC_START_REC] xTaskCreatePinnedToCore returned: %d, handle=%p", taskCreated, recordingTaskHandle);
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] xTaskCreatePinnedToCore returned: %d, handle=%p", taskCreated, recordingTaskHandle);
   
   if (taskCreated != pdPASS) {
-    DEBUG_MICF("[MIC_START_REC] *** TASK CREATION FAILED! ***");
+    DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] *** TASK CREATION FAILED! ***");
     micRecording = false;
     sensorStatusBumpWith("micrecstop");
     recordingFile.close();
     return false;
   }
   
-  DEBUG_MICF("[MIC_START_REC] ========== startRecording() SUCCESS ==========");
-  INFO_SENSORSF("[Microphone] Recording started: %s", currentRecordingPath);
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] ========== startRecording() SUCCESS ==========");
+  INFO_MICF("Recording started: %s", currentRecordingPath);
   return true;
 }
 
 void stopRecording() {
-  DEBUG_MICF("[MIC_STOP_REC] stopRecording() called, micRecording=%d", micRecording);
+  DEBUG_MIC_LIFECYCLEF("[MIC_STOP_REC] stopRecording() called, micRecording=%d", micRecording);
   if (!micRecording) {
-    DEBUG_MICF("[MIC_STOP_REC] Not recording, returning");
+    DEBUG_MIC_LIFECYCLEF("[MIC_STOP_REC] Not recording, returning");
     return;
   }
   
-  DEBUG_MICF("[MIC_STOP_REC] Setting micRecording=false to signal task");
+  DEBUG_MIC_LIFECYCLEF("[MIC_STOP_REC] Setting micRecording=false to signal task");
   micRecording = false;  // Signal task to stop
   sensorStatusBumpWith("micrecstop");
   
   // Wait for task to finish
   int timeout = 50;
-  DEBUG_MICF("[MIC_STOP_REC] Waiting for task to finish (timeout=%d iterations)...", timeout);
+  DEBUG_MIC_LIFECYCLEF("[MIC_STOP_REC] Waiting for task to finish (timeout=%d iterations)...", timeout);
   while (recordingTaskHandle && timeout-- > 0) {
     vTaskDelay(pdMS_TO_TICKS(20));
   }
   
   if (timeout <= 0 && recordingTaskHandle) {
-    DEBUG_MICF("[MIC_STOP_REC] WARNING: Task did not finish within timeout!");
+    DEBUG_MIC_LIFECYCLEF("[MIC_STOP_REC] WARNING: Task did not finish within timeout!");
   } else {
-    DEBUG_MICF("[MIC_STOP_REC] Task finished, remaining timeout=%d", timeout);
+    DEBUG_MIC_LIFECYCLEF("[MIC_STOP_REC] Task finished, remaining timeout=%d", timeout);
   }
   
-  DEBUG_MICF("[MIC_STOP_REC] Recording stopped");
-  INFO_SENSORSF("[Microphone] Recording stopped");
+  DEBUG_MIC_LIFECYCLEF("[MIC_STOP_REC] Recording stopped");
+  INFO_MICF("Recording stopped");
 }
 
 int getRecordingCount() {
@@ -478,7 +478,7 @@ bool initMicrophone() {
   
   if (gMicEnabled) {
     WARN_SYSTEMF("[MIC_INIT] Already initialized - returning true");
-    INFO_SENSORSF("[Microphone] Already initialized");
+    INFO_MICF("Already initialized");
     return true;
   }
 
@@ -497,7 +497,7 @@ bool initMicrophone() {
   WARN_SYSTEMF("[MIC_INIT] Audio settings: sampleRate=%d, bitDepth=%d, channels=%d, gain=%d%%",
                micSampleRate, micBitDepth, micChannels, micGain);
   WARN_SYSTEMF("[MIC_INIT] Pin config: CLK=%d, DATA=%d", MIC_PDM_CLK_PIN, MIC_PDM_DATA_PIN);
-  INFO_SENSORSF("[Microphone] Initializing PDM microphone...");
+  INFO_MICF("Initializing PDM microphone...");
   STACK_TRACEF("initMicrophone.enter rate=%d bitDepth=%d channels=%d",
                micSampleRate, micBitDepth, micChannels);
 
@@ -527,7 +527,7 @@ bool initMicrophone() {
 
   if (err != ESP_OK) {
     WARN_SYSTEMF("[MIC_INIT] *** I2S CHANNEL CREATE FAILED! ***");
-    INFO_SENSORSF("[Microphone] Failed to create I2S channel: 0x%x", err);
+    INFO_MICF("Failed to create I2S channel: 0x%x", err);
     STACK_TRACEF("initMicrophone.exit_channel_create_fail");
     return false;
   }
@@ -565,7 +565,7 @@ bool initMicrophone() {
 
   if (err != ESP_OK) {
     WARN_SYSTEMF("[MIC_INIT] *** PDM RX INIT FAILED at rate=%d Hz — this is a known bad combo on S3 ***", micSampleRate);
-    INFO_SENSORSF("[Microphone] Failed to init PDM RX: 0x%x (%s)", err, esp_err_to_name(err));
+    INFO_MICF("Failed to init PDM RX: 0x%x (%s)", err, esp_err_to_name(err));
     STACK_TRACEF("initMicrophone.exit_pdm_init_fail rate=%d", micSampleRate);
     i2s_del_channel(rx_handle);
     rx_handle = NULL;
@@ -582,7 +582,7 @@ bool initMicrophone() {
 
   if (err != ESP_OK) {
     WARN_SYSTEMF("[MIC_INIT] *** I2S CHANNEL ENABLE FAILED! ***");
-    INFO_SENSORSF("[Microphone] Failed to enable I2S channel: 0x%x", err);
+    INFO_MICF("Failed to enable I2S channel: 0x%x", err);
     STACK_TRACEF("initMicrophone.exit_enable_fail");
     i2s_del_channel(rx_handle);
     rx_handle = NULL;
@@ -619,7 +619,7 @@ bool initMicrophone() {
   
   if (successCount == 0) {
     WARN_SYSTEMF("[MIC_INIT] WARNING: No data received from microphone during flush!");
-    INFO_SENSORSF("[Microphone] WARNING: Microphone may not be connected or responding");
+    INFO_MICF("WARNING: Microphone may not be connected or responding");
   }
 
   STACK_TRACEF("initMicrophone.warmup_done success=%d/%d", successCount, flushCount);
@@ -633,7 +633,7 @@ bool initMicrophone() {
   WARN_SYSTEMF("[MIC_INIT] Final heap: free=%u, PSRAM_free=%u", 
                (unsigned)esp_get_free_heap_size(), 
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  INFO_SENSORSF("[Microphone] Initialized: %dHz, %d-bit, %d channel(s)", 
+  INFO_MICF("Initialized: %dHz, %d-bit, %d channel(s)", 
                 micSampleRate, micBitDepth, micChannels);
   return true;
 }
@@ -650,7 +650,7 @@ void stopMicrophone() {
 
   if (!gMicEnabled) {
     WARN_SYSTEMF("[MIC_STOP] Already stopped - returning");
-    INFO_SENSORSF("[Microphone] Already stopped");
+    INFO_MICF("Already stopped");
     STACK_TRACEF("stopMicrophone.exit_already_stopped");
     return;
   }
@@ -689,7 +689,7 @@ void stopMicrophone() {
   WARN_SYSTEMF("[MIC_STOP] Heap after stop: free=%u, PSRAM_free=%u", 
                (unsigned)esp_get_free_heap_size(), 
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  INFO_SENSORSF("[Microphone] Stopped");
+  INFO_MICF("Stopped");
 }
 
 int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
@@ -713,7 +713,7 @@ int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
   
   if (!buffer) {
     WARN_SYSTEMF("[MIC_CAPTURE] *** ALLOCATION FAILED! ***");
-    INFO_SENSORSF("[Microphone] Failed to allocate %u bytes", bufferSize);
+    INFO_MICF("Failed to allocate %u bytes", bufferSize);
     if (outLen) *outLen = 0;
     return nullptr;
   }
@@ -733,7 +733,7 @@ int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
   
   if (err != ESP_OK) {
     WARN_SYSTEMF("[MIC_CAPTURE] *** I2S READ FAILED! ***");
-    INFO_SENSORSF("[Microphone] Failed to read samples: 0x%x", err);
+    INFO_MICF("Failed to read samples: 0x%x", err);
     free(buffer);
     if (outLen) *outLen = 0;
     return nullptr;
@@ -769,11 +769,11 @@ int getAudioLevel() {
   bool shouldLog = (callCount % 50 == 1);
   
   if (shouldLog) {
-    DEBUG_MICF("[MIC_LEVEL] getAudioLevel() call #%lu, gMicEnabled=%d", callCount, gMicEnabled);
+    DEBUG_MIC_VALUESF("[MIC_LEVEL] getAudioLevel() call #%lu, gMicEnabled=%d", callCount, gMicEnabled);
   }
   
   if (!gMicEnabled) {
-    if (shouldLog) DEBUG_MICF("[MIC_LEVEL] Mic not enabled - returning 0");
+    if (shouldLog) DEBUG_MIC_VALUESF("[MIC_LEVEL] Mic not enabled - returning 0");
     return 0;
   }
 
@@ -794,7 +794,7 @@ int getAudioLevel() {
     took = true;
   } else {
     if (shouldLog) {
-      DEBUG_MICF("[MIC_LEVEL] i2sMicMutex busy; returning cached last=%d", lastAudioLevel);
+      DEBUG_MIC_VALUESF("[MIC_LEVEL] i2sMicMutex busy; returning cached last=%d", lastAudioLevel);
     }
     return lastAudioLevel;
   }
@@ -807,7 +807,7 @@ int getAudioLevel() {
   
   if (err != ESP_OK || bytesRead == 0) {
     if (shouldLog) {
-      DEBUG_MICF("[MIC_LEVEL] i2s_channel_read failed or no data: err=0x%x bytesRead=%u, returning last=%d",
+      DEBUG_MIC_VALUESF("[MIC_LEVEL] i2s_channel_read failed or no data: err=0x%x bytesRead=%u, returning last=%d",
                  err, bytesRead, lastAudioLevel);
     }
     return lastAudioLevel;
@@ -832,7 +832,7 @@ int getAudioLevel() {
   level = constrain(level, 0, 100);
   
   if (shouldLog) {
-    DEBUG_MICF("[MIC_LEVEL] samples=%u avg=%ld min=%d max=%d level=%d%%",
+    DEBUG_MIC_VALUESF("[MIC_LEVEL] samples=%u avg=%ld min=%d max=%d level=%d%%",
                sampleCount, avg, minVal, maxVal, level);
   }
   
@@ -1232,7 +1232,7 @@ const size_t micCommandsCount = sizeof(micCommands) / sizeof(micCommands[0]);
 // Settings module registration
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry micSettingEntries[] = {
-  { "microphoneAutoStart", SETTING_BOOL, &gSettings.microphoneAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr },
+  { "microphoneAutoStart", SETTING_BOOL, &gSettings.microphoneAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
 };
 
 static bool isMicConnected() {
@@ -1243,7 +1243,7 @@ static bool isMicConnected() {
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule micSettingsModule = {
   "microphone",
-  "microphone",
+  "hardware.sensors.microphone",
   micSettingEntries,
   sizeof(micSettingEntries) / sizeof(micSettingEntries[0]),
   isMicConnected,

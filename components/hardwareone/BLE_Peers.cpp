@@ -308,9 +308,9 @@ static const PeerJsonEntry kPeerJsonTable[] = {
 };
 
 void blePeersWriteJson(JsonDocument& doc) {
-  // Materialise bluetooth.peers as a nested object keyed by peer name.
-  // Each value is { mac1, [mac2], autoConnect }.
-  JsonObject peers = doc["bluetooth"]["peers"].to<JsonObject>();
+  // Materialise network.bluetooth.peers as a nested object keyed by peer
+  // name. Each value is { mac1, [mac2], autoConnect }.
+  JsonObject peers = doc["network"]["bluetooth"]["peers"].to<JsonObject>();
   for (const auto& row : kPeerJsonTable) {
     BlePeerData& d = gBlePeerData[row.kind];
     JsonObject e = peers[row.name].to<JsonObject>();
@@ -326,7 +326,7 @@ void blePeersWriteJson(JsonDocument& doc) {
 }
 
 void blePeersReadJson(JsonDocument& doc) {
-  JsonObjectConst peers = doc["bluetooth"]["peers"].as<JsonObjectConst>();
+  JsonObjectConst peers = doc["network"]["bluetooth"]["peers"].as<JsonObjectConst>();
   if (peers.isNull()) return;
   for (const auto& row : kPeerJsonTable) {
     JsonObjectConst e = peers[row.name].as<JsonObjectConst>();

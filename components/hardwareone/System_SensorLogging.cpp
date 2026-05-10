@@ -1019,16 +1019,16 @@ const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry sensorLogSettingEntries[] = {
   { "sensorLogAutoStart",    SETTING_BOOL,   &gSettings.sensorLogAutoStart,    0, 0, nullptr, 0, 1,       "Auto-start logging after boot", nullptr, false, nullptr, "sensorlog autostart" },
-  { "sensorLogPath",         SETTING_STRING, &gSettings.sensorLogPath,         0, 0, "/logging_captures/sensors/sensors.txt", 0, 0, "Log file path", nullptr },
-  { "sensorLogIntervalMs",   SETTING_INT,    &gSettings.sensorLogIntervalMs,   5000, 0, nullptr, 100, 3600000, "Poll interval (ms)", nullptr },
-  { "sensorLogMask",         SETTING_INT,    &gSettings.sensorLogMask,         0, 0, nullptr, 0, 255,     "Sensor bitmask", nullptr },
-  { "sensorLogFormat",       SETTING_INT,    &gSettings.sensorLogFormat,       0, 0, nullptr, 0, 2,       "Format (0=text,1=csv,2=track)", nullptr }
+  { "sensorLogPath", SETTING_STRING, &gSettings.sensorLogPath, 0, 0, "/logging_captures/sensors/sensors.txt", 0, 0, "Log file path", nullptr, false, nullptr, nullptr },
+  { "sensorLogIntervalMs", SETTING_INT, &gSettings.sensorLogIntervalMs, 5000, 0, nullptr, 100, 3600000, "Poll interval (ms)", nullptr, false, nullptr, nullptr },
+  { "sensorLogMask", SETTING_INT, &gSettings.sensorLogMask, 0, 0, nullptr, 0, 255, "Sensor bitmask", nullptr, false, nullptr, nullptr },
+  { "sensorLogFormat", SETTING_INT, &gSettings.sensorLogFormat, 0, 0, nullptr, 0, 2, "Format (0=text,1=csv,2=track)", nullptr, false, nullptr, nullptr }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 extern const SettingsModule sensorLogSettingsModule = {
   "sensorlog",
-  "sensorlog",
+  "logging.sensorlog",
   sensorLogSettingEntries,
   sizeof(sensorLogSettingEntries) / sizeof(sensorLogSettingEntries[0]),
   nullptr,
