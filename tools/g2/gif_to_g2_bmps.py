@@ -12,19 +12,18 @@ Output size defaults to the GIF canvas. Pick a common size with --preset, or
 set --width/--height for anything else.
 
   # from repo root (hardwareone-idf/):
-  python3 tools/gif_to_g2_bmps.py slime.gif out/ --preset 64
-  ./gif_to_g2_bmps slime.gif out/ --preset 64
+  python3 tools/g2/gif_to_g2_bmps.py slime.gif out/ --preset 64
 
-  # from tools/ — do NOT prefix tools/ again:
+  # from tools/g2/ — do NOT prefix the path again:
   python3 gif_to_g2_bmps.py slime.gif out/ --preset 64
 
 On-device playback (G2 test menu): put frames on the SD card as
   /sd/g2_icon_animations/<short_name>/frame_00.bmp …
 Then Tests → Image → Animated Icons (pack list opens first) → tap a pack row,
 or Back → Custom icon packs >> to reopen the list. Web upload: POST
-/api/files/upload with path under that same prefix (see docs/G2_PROTOCOL.md).
+/api/files/upload with path under that same prefix.
 
-Install (from repo root): pip install -r tools/requirements-gif.txt
+Install (from repo root): pip install -r tools/g2/requirements-gif.txt
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ from pathlib import Path
 try:
     from PIL import Image, ImageOps
 except ImportError as e:
-    print("Install Pillow:  pip install -r tools/requirements-gif.txt", file=sys.stderr)
+    print("Install Pillow:  pip install -r tools/g2/requirements-gif.txt", file=sys.stderr)
     raise SystemExit(1) from e
 
 # Named outputs (G2-friendly). Square presets match live-tile probe sizes.
@@ -162,10 +161,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Presets for --preset: native, 32, 64, 96, 288x144 "
         "(mutually exclusive with --width/--height).\n\n"
-        "Paths: from repo root use  python3 tools/gif_to_g2_bmps.py  …  "
-        "or  ./gif_to_g2_bmps  …\n"
-        "If your shell is already in tools/, use  python3 gif_to_g2_bmps.py  …  "
-        "(not python3 tools/gif_to_g2_bmps.py).",
+        "Paths: from repo root use  python3 tools/g2/gif_to_g2_bmps.py  …\n"
+        "If your shell is already in tools/g2/, use  python3 gif_to_g2_bmps.py  …  "
+        "(not python3 tools/g2/gif_to_g2_bmps.py).",
     )
     p.add_argument("gif", type=Path, help="Input GIF path")
     p.add_argument(
