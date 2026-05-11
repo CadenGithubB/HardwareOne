@@ -10,8 +10,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_VFS.h"
-
-extern AuthContext gExecAuthContext;
+#include "System_AuthIdentity.h"  // currentAuthContext
 
 #include "System_I2C.h"
 #include "System_MemUtil.h"
@@ -298,13 +297,13 @@ bool MapCore::loadMapFile(const char* path) {
 
   FsLockGuard fsGuard("MapCore.loadMapFile");
   
-  if (!VFS::existsGuarded(path, gExecAuthContext)) {
+  if (!VFS::existsGuarded(path, currentAuthContext())) {
     WARN_MAPSF("Map file not found: %s", path);
     gSensorPollingPaused = wasPaused;
     return false;
   }
 
-  File f = VFS::openGuarded(path, "r", gExecAuthContext);
+  File f = VFS::openGuarded(path, "r", currentAuthContext());
   if (!f) {
     ERROR_MAPSF("Failed to open map file: %s", path);
     gSensorPollingPaused = wasPaused;
@@ -908,7 +907,7 @@ const uint8_t* MapCore::loadTileData(uint16_t tileIdx, size_t* outSize) {
       usedPersistent = true;
     } else {
       // Fallback: open/close per miss
-      File f = VFS::openGuarded(_currentMap.filepath, "r", gExecAuthContext);
+      File f = VFS::openGuarded(_currentMap.filepath, "r", currentAuthContext());
       if (!f) {
         DEBUG_MAPS_RENDERINGF("[MAPS] loadTileData: failed to open '%s'", _currentMap.filepath);
         return nullptr;
@@ -980,11 +979,11 @@ int MapCore::getAvailableMaps(char maps[][96], int maxMaps) {
 
   FsLockGuard fsGuard("MapCore.getAvailableMaps");
   
-  if (!VFS::existsGuarded("/maps", gExecAuthContext)) {
+  if (!VFS::existsGuarded("/maps", currentAuthContext())) {
     return 0;
   }
 
-  File dir = VFS::openGuarded("/maps", "r", gExecAuthContext);
+  File dir = VFS::openGuarded("/maps", "r", currentAuthContext());
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     return 0;
@@ -1000,7 +999,7 @@ int MapCore::getAvailableMaps(char maps[][96], int maxMaps) {
         char subPathBuf[64];
         snprintf(subPathBuf, sizeof(subPathBuf), "/maps/%s", dirName.c_str());
         String subPath = subPathBuf;
-        File sub = VFS::openGuarded(subPath, "r", gExecAuthContext);
+        File sub = VFS::openGuarded(subPath, "r", currentAuthContext());
         if (sub && sub.isDirectory()) {
           String preferred = dirName + ".hwmap";
           String found = "";
@@ -2079,11 +2078,11 @@ bool WaypointManager::loadWaypoints() {
   String wpPathStr3 = wp3;  // Fallback to old format
   
   String wpPathStr;
-  if (VFS::existsGuarded(wpPathStr1, gExecAuthContext)) {
+  if (VFS::existsGuarded(wpPathStr1, currentAuthContext())) {
     wpPathStr = wpPathStr1;
-  } else if (VFS::existsGuarded(wpPathStr2, gExecAuthContext)) {
+  } else if (VFS::existsGuarded(wpPathStr2, currentAuthContext())) {
     wpPathStr = wpPathStr2;
-  } else if (VFS::existsGuarded(wpPathStr3, gExecAuthContext)) {
+  } else if (VFS::existsGuarded(wpPathStr3, currentAuthContext())) {
     wpPathStr = wpPathStr3;
   } else {
     // No waypoints file for this map — clear any stale data from a previous map
@@ -2095,7 +2094,7 @@ bool WaypointManager::loadWaypoints() {
   char wpPath[128];
   strlcpy(wpPath, wpPathStr.c_str(), sizeof(wpPath));
   
-  File f = VFS::openGuarded(wpPath, "r", gExecAuthContext);
+  File f = VFS::openGuarded(wpPath, "r", currentAuthContext());
   if (!f) return false;
 
   PSRAM_JSON_DOC(doc);
@@ -2181,8 +2180,8 @@ bool WaypointManager::saveWaypoints() {
   String mapPath = String(map.filepath);
   int slash = mapPath.lastIndexOf('/');
   String mapDir = (slash > 0) ? mapPath.substring(0, slash) : String("/maps");
-  if (!VFS::existsGuarded(mapDir, gExecAuthContext)) {
-    VFS::mkdirGuarded(mapDir, gExecAuthContext);
+  if (!VFS::existsGuarded(mapDir, currentAuthContext())) {
+    VFS::mkdirGuarded(mapDir, currentAuthContext());
   }
   
   // Extract map base name and save with pattern: waypoints_<mapbase>.json
@@ -2195,7 +2194,7 @@ bool WaypointManager::saveWaypoints() {
   char wpPath[128];
   snprintf(wpPath, sizeof(wpPath), "%s/waypoints_%s.json", mapDir.c_str(), mapBase.c_str());
   
-  File f = VFS::openGuarded(wpPath, "w", gExecAuthContext, true);
+  File f = VFS::openGuarded(wpPath, "w", currentAuthContext(), true);
   if (!f) {
     ERROR_MAPSF("Failed to write waypoints file: %s", wpPath);
     return false;
@@ -2573,7 +2572,7 @@ bool GPSTrackManager::loadTrack(const char* filepath, String& errorMsg) {
 
   FsLockGuard fsGuard("GPSTrackManager.loadTrack");
   
-  if (!VFS::existsGuarded(filepath, gExecAuthContext)) {
+  if (!VFS::existsGuarded(filepath, currentAuthContext())) {
     errorMsg = "File not found";
     return false;
   }
@@ -2586,7 +2585,7 @@ bool GPSTrackManager::loadTrack(const char* filepath, String& errorMsg) {
     return false;
   }
 
-  File f = VFS::openGuarded(filepath, "r", gExecAuthContext);
+  File f = VFS::openGuarded(filepath, "r", currentAuthContext());
   if (!f) {
     free(_points);
     _points = nullptr;
@@ -2653,7 +2652,7 @@ bool GPSTrackManager::deleteTrackFile(const char* filepath) {
   }
   
   fsLock("gpstrack.delete");
-  bool success = VFS::removeGuarded(filepath, gExecAuthContext);
+  bool success = VFS::removeGuarded(filepath, currentAuthContext());
   fsUnlock();
   
   return success;
@@ -2665,8 +2664,8 @@ bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize) {
   // Generate timestamped filename
   const char* dir = "/logging_captures/tracks";
   fsLock("gpstrack.save");
-  if (!VFS::existsGuarded(dir, gExecAuthContext)) {
-    VFS::mkdirGuarded(dir, gExecAuthContext);
+  if (!VFS::existsGuarded(dir, currentAuthContext())) {
+    VFS::mkdirGuarded(dir, currentAuthContext());
   }
 
   time_t now = time(nullptr);
@@ -2680,7 +2679,7 @@ bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize) {
 
   snprintf(outPath, outPathSize, "%s/track-%s.csv", dir, timestamp);
 
-  File f = VFS::openGuarded(outPath, "w", gExecAuthContext, true);
+  File f = VFS::openGuarded(outPath, "w", currentAuthContext(), true);
   if (!f) {
     fsUnlock();
     return false;
@@ -3086,7 +3085,7 @@ const char* cmd_waypointfile(const String& argsInput) {
     char wpName[WAYPOINT_NAME_LEN] = "";
     strlcpy(wpName, a.arg(3).c_str(), sizeof(wpName));
 
-    if (!VFS::existsGuarded(filepath, gExecAuthContext)) {
+    if (!VFS::existsGuarded(filepath, currentAuthContext())) {
       snprintf(buf, 1024, "File not found: %s", filepath);
       return buf;
     }
@@ -3136,7 +3135,7 @@ const char* cmd_waypointfile(const String& argsInput) {
   char wpNameOnly[WAYPOINT_NAME_LEN];
   strlcpy(wpNameOnly, arg1.c_str(), sizeof(wpNameOnly));
 
-  if (!VFS::existsGuarded(filepath, gExecAuthContext)) {
+  if (!VFS::existsGuarded(filepath, currentAuthContext())) {
     snprintf(buf, 1024, "File not found: %s", filepath);
     return buf;
   }
@@ -3209,7 +3208,7 @@ const char* cmd_waypointfiles(const String& argsInput) {
 
 bool isMapFileByMagic(const String& fullPath) {
   FsLockGuard guard("maps.magic");
-  File f = VFS::openGuarded(fullPath, "r", gExecAuthContext);
+  File f = VFS::openGuarded(fullPath, "r", currentAuthContext());
   if (!f) return false;
   char magic[4] = {0};
   size_t rd = f.read((uint8_t*)magic, 4);
@@ -3232,20 +3231,20 @@ bool organizeMapFromAnyPath(const String& srcPath, String& outErr) {
   String fileName = (lastSlash >= 0) ? srcPath.substring(lastSlash + 1) : srcPath;
   String base = mapBaseNameNoExt(fileName);
   if (base.length() == 0) { outErr = "empty_base"; return false; }
-  if (!VFS::existsGuarded(srcPath, gExecAuthContext)) { outErr = "src_missing"; return false; }
+  if (!VFS::existsGuarded(srcPath, currentAuthContext())) { outErr = "src_missing"; return false; }
   if (!isMapFileByMagic(srcPath)) { outErr = "not_map_file"; return false; }
-  if (!VFS::existsGuarded("/maps", gExecAuthContext)) {
-    if (!VFS::mkdirGuarded("/maps", gExecAuthContext)) { outErr = "maps_mkdir_failed"; return false; }
+  if (!VFS::existsGuarded("/maps", currentAuthContext())) {
+    if (!VFS::mkdirGuarded("/maps", currentAuthContext())) { outErr = "maps_mkdir_failed"; return false; }
   }
   char dstDir[64], dstMap[96];
   snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
   snprintf(dstMap, sizeof(dstMap), "%s/%s.hwmap", dstDir, base.c_str());
   if (srcPath == dstMap) { outErr = "already_organized"; return false; }
-  if (!VFS::existsGuarded(dstDir, gExecAuthContext)) {
-    if (!VFS::mkdirGuarded(dstDir, gExecAuthContext)) { outErr = "mkdir_failed"; return false; }
+  if (!VFS::existsGuarded(dstDir, currentAuthContext())) {
+    if (!VFS::mkdirGuarded(dstDir, currentAuthContext())) { outErr = "mkdir_failed"; return false; }
   }
-  if (VFS::existsGuarded(dstMap, gExecAuthContext)) { outErr = "dst_exists"; return false; }
-  if (!VFS::renameGuarded(srcPath, dstMap, gExecAuthContext)) { outErr = "rename_failed"; return false; }
+  if (VFS::existsGuarded(dstMap, currentAuthContext())) { outErr = "dst_exists"; return false; }
+  if (!VFS::renameGuarded(srcPath, dstMap, currentAuthContext())) { outErr = "rename_failed"; return false; }
   return true;
 }
 
@@ -3257,13 +3256,13 @@ bool tryOrganizeLegacyWaypointsAtRoot(const String& wpFileName, String& outErr) 
   if (base.length() == 0) { outErr = "empty_base"; return false; }
   char srcWp[96];
   snprintf(srcWp, sizeof(srcWp), "/maps/%s", wpFileName.c_str());
-  if (!VFS::existsGuarded(srcWp, gExecAuthContext)) { outErr = "src_missing"; return false; }
+  if (!VFS::existsGuarded(srcWp, currentAuthContext())) { outErr = "src_missing"; return false; }
   char dstDir[64], dstWp[128];
   snprintf(dstDir, sizeof(dstDir), "/maps/%s", base.c_str());
   snprintf(dstWp, sizeof(dstWp), "%s/%s", dstDir, wpFileName.c_str());
-  if (!VFS::existsGuarded(dstDir, gExecAuthContext)) { outErr = "dst_dir_missing"; return false; }
-  if (VFS::existsGuarded(dstWp, gExecAuthContext)) { outErr = "dst_exists"; return false; }
-  if (!VFS::renameGuarded(srcWp, dstWp, gExecAuthContext)) { outErr = "rename_failed"; return false; }
+  if (!VFS::existsGuarded(dstDir, currentAuthContext())) { outErr = "dst_dir_missing"; return false; }
+  if (VFS::existsGuarded(dstWp, currentAuthContext())) { outErr = "dst_exists"; return false; }
+  if (!VFS::renameGuarded(srcWp, dstWp, currentAuthContext())) { outErr = "rename_failed"; return false; }
   return true;
 }
 
@@ -3273,7 +3272,7 @@ const char* cmd_maporganize(const String& argsInput) {
   char* buf = getDebugBuffer();
 
   FsLockGuard guard("cmd_maporganize");
-  File dir = VFS::openGuarded("/maps", "r", gExecAuthContext);
+  File dir = VFS::openGuarded("/maps", "r", currentAuthContext());
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     return "Error: /maps directory not found";

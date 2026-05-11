@@ -13,8 +13,6 @@
 #include <LittleFS.h>
 #include "System_VFS.h"
 
-extern AuthContext gExecAuthContext;
-
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 extern DisplayDriver* oledDisplay;
@@ -179,7 +177,7 @@ static int buildRemoteMenuItems(UnifiedMenuItem* items, int maxItems, const uint
   char manifestPathBuf[64];
   snprintf(manifestPathBuf, sizeof(manifestPathBuf), "/system/manifests/%s.json", fwHashHex);
   String manifestPath = manifestPathBuf;
-  if (!VFS::existsGuarded(manifestPath, gExecAuthContext)) {
+  if (!VFS::existsGuarded(manifestPath, VFS::systemAuth("oled.unified_menu.manifest"))) {
     // No cached manifest - add placeholder items based on capability summary
     CapabilitySummary& cap = gEspNow->lastRemoteCap;
     
@@ -220,7 +218,7 @@ static int buildRemoteMenuItems(UnifiedMenuItem* items, int maxItems, const uint
   }
   
   // Parse cached manifest for CLI modules - create submenu entries per module
-  File f = VFS::openGuarded(manifestPath, "r", gExecAuthContext);
+  File f = VFS::openGuarded(manifestPath, "r", VFS::systemAuth("oled.unified_menu.manifest"));
   if (!f) return count;
 
   PSRAM_JSON_DOC(doc);
@@ -291,7 +289,7 @@ static void buildSubmenuForModule(const char* moduleName, bool isRemote) {
     char manifestPathBuf[64];
   snprintf(manifestPathBuf, sizeof(manifestPathBuf), "/system/manifests/%s.json", fwHashHex);
   String manifestPath = manifestPathBuf;
-    File f = VFS::openGuarded(manifestPath, "r", gExecAuthContext);
+    File f = VFS::openGuarded(manifestPath, "r", VFS::systemAuth("oled.unified_menu.manifest"));
     if (f) {
       PSRAM_JSON_DOC(doc);
       DeserializationError err = deserializeJson(doc, f);

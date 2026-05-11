@@ -43,6 +43,7 @@
 #include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_User.h"
+#include "System_AuthIdentity.h"  // currentAuthContext / currentExecUser / currentExecIsAdmin
 #include "System_Utils.h"
 
 #if ENABLE_APDS_SENSOR
@@ -112,11 +113,12 @@ String gAutoLogAutomationName = "";
 // automation log line is written via VFS::openGuarded with this context, so
 // the caller's permissions gate every write — not just the initial start.
 //
-// Why captured-and-held instead of read-from-gExecAuthContext at write time:
+// Why captured-and-held instead of read-from-current-task at write time:
 // appendAutoLogEntry fires from the automation evaluator (and from command
 // dispatch hooks) at moments that have no relation to any user CLI session,
-// so gExecAuthContext is meaningless or stale at write time. Capturing the
-// starter's identity gives every subsequent write a stable, named principal.
+// so currentAuthContext() would resolve to ANON or whatever the firing task
+// happens to have installed. Capturing the starter's identity gives every
+// subsequent write a stable, named principal.
 //
 // Lifecycle: zero-init (anon) at boot. Populated when `autolog start` runs.
 // Cleared back to anon when `autolog stop` runs. While active, the same ctx
@@ -128,7 +130,6 @@ String gAutoLogAutomationName = "";
 // yourself adding a second (e.g. for scheduled commands), consider
 // generalising the pattern instead of growing per-feature globals.
 AuthContext gAutoLogOwnerCtx;
-extern bool gExecIsAdmin;
 
 // Forward declarations for functions implemented in this file
 bool updateAutomationNextAt(long automationId, time_t newNextAt);
@@ -990,7 +991,7 @@ const char* cmd_automation_add(const String& argsInput) {
           ctx.transport = SOURCE_INTERNAL;
           ctx.path = "/automation/validate";
           ctx.ip = "127.0.0.1";
-          ctx.user = gExecUser.length() > 0 ? gExecUser : "system";
+          ctx.user = currentExecUser().length() > 0 ? currentExecUser() : "system";
           ctx.sid = "";
           ctx.opaque = nullptr;
           
@@ -1087,11 +1088,11 @@ const char* cmd_automation_add(const String& argsInput) {
           String existingCreatedBy = existingCreatedByBuf;
           
           DEBUGF(DEBUG_AUTOMATIONS, "[autos add/edit] Editing existing id=%lu createdBy='%s' requestedBy='%s' isAdmin=%d",
-                 overrideId, existingCreatedBy.c_str(), gExecUser.c_str(), gExecIsAdmin);
-          
-          if (!gExecIsAdmin && existingCreatedBy != gExecUser) {
+                 overrideId, existingCreatedBy.c_str(), currentExecUser().c_str(), currentExecIsAdmin());
+
+          if (!currentExecIsAdmin() && existingCreatedBy != currentExecUser()) {
             DEBUGF(DEBUG_AUTOMATIONS, "[autos add/edit] AUTHORIZATION DENIED: non-admin '%s' cannot edit automation created by '%s'",
-                   gExecUser.c_str(), existingCreatedBy.c_str());
+                   currentExecUser().c_str(), existingCreatedBy.c_str());
             broadcastOutput("Error: You do not have permission to edit this automation. Only the creator or an admin can edit it.");
             return "ERROR";
           }
@@ -1303,7 +1304,7 @@ const char* cmd_automation_add(const String& argsInput) {
 
   // Build final automation object
   String obj = "{\n";
-  String createdBy = gExecUser;
+  String createdBy = currentExecUser();
   DEBUGF(DEBUG_AUTOMATIONS, "[autos add] Storing automation id=%ld name='%s' createdBy='%s'", id, name.c_str(), createdBy.c_str());
   obj += "  \"id\": " + String(id) + ",\n";
   obj += "  \"name\": \"" + jsonEscape(name) + "\",\n";
@@ -1373,11 +1374,11 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
   String createdBy = createdByBuf;
   
   DEBUGF(DEBUG_AUTOMATIONS, "[autos %s] id=%s createdBy='%s' requestedBy='%s' isAdmin=%d",
-         enable ? "enable" : "disable", idStr.c_str(), createdBy.c_str(), gExecUser.c_str(), gExecIsAdmin);
-  
-  if (!gExecIsAdmin && createdBy != gExecUser) {
+         enable ? "enable" : "disable", idStr.c_str(), createdBy.c_str(), currentExecUser().c_str(), currentExecIsAdmin());
+
+  if (!currentExecIsAdmin() && createdBy != currentExecUser()) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos %s] AUTHORIZATION DENIED: non-admin '%s' cannot modify automation created by '%s'",
-           enable ? "enable" : "disable", gExecUser.c_str(), createdBy.c_str());
+           enable ? "enable" : "disable", currentExecUser().c_str(), createdBy.c_str());
     broadcastOutput("Error: You do not have permission to modify this automation. Only the creator or an admin can modify it.");
     return "ERROR";
   }
@@ -1452,11 +1453,11 @@ const char* cmd_automation_delete(const String& argsInput) {
   String createdBy = createdByBuf;
   
   DEBUGF(DEBUG_AUTOMATIONS, "[autos delete] id=%s createdBy='%s' requestedBy='%s' isAdmin=%d",
-         idStr.c_str(), createdBy.c_str(), gExecUser.c_str(), gExecIsAdmin);
-  
-  if (!gExecIsAdmin && createdBy != gExecUser) {
+         idStr.c_str(), createdBy.c_str(), currentExecUser().c_str(), currentExecIsAdmin());
+
+  if (!currentExecIsAdmin() && createdBy != currentExecUser()) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos delete] AUTHORIZATION DENIED: non-admin '%s' cannot delete automation created by '%s'",
-           gExecUser.c_str(), createdBy.c_str());
+           currentExecUser().c_str(), createdBy.c_str());
     broadcastOutput("Error: You do not have permission to delete this automation. Only the creator or an admin can delete it.");
     return "ERROR";
   }
@@ -1585,7 +1586,7 @@ const char* cmd_automation_run(const String& argsInput) {
   if (gAutoLogActive) {
     gAutoLogAutomationName = autoName;
     char startBuf[256];
-    snprintf(startBuf, sizeof(startBuf), "Automation started: ID=%s Name=%s User=%s", idStr.c_str(), autoName.c_str(), gExecUser.c_str());
+    snprintf(startBuf, sizeof(startBuf), "Automation started: ID=%s Name=%s User=%s", idStr.c_str(), autoName.c_str(), currentExecUser().c_str());
     appendAutoLogEntry("AUTO_START", startBuf);
   }
   
@@ -1712,9 +1713,9 @@ const char* cmd_automation_run(const String& argsInput) {
   }
 
   // Authorization: non-admins may only trigger automations they created themselves
-  if (!gExecIsAdmin && gCurrentAutomationUser != gExecUser) {
+  if (!currentExecIsAdmin() && gCurrentAutomationUser != currentExecUser()) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION DENIED: user='%s' isAdmin=%d tried to run automation created by '%s'",
-           gExecUser.c_str(), gExecIsAdmin, gCurrentAutomationUser.c_str());
+           currentExecUser().c_str(), currentExecIsAdmin(), gCurrentAutomationUser.c_str());
     {
       char authErr[120];
       snprintf(authErr, sizeof(authErr), "Error: Admin required to trigger automation created by %s", gCurrentAutomationUser.c_str());
@@ -1723,7 +1724,7 @@ const char* cmd_automation_run(const String& argsInput) {
     return "Error: Admin required";
   }
   DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION OK: user='%s' isAdmin=%d running automation created by '%s'",
-         gExecUser.c_str(), gExecIsAdmin, gCurrentAutomationUser.c_str());
+         currentExecUser().c_str(), currentExecIsAdmin(), gCurrentAutomationUser.c_str());
 
   // Execute all commands (with conditional logic support)
   for (int ci = 0; ci < cmdsCount; ++ci) {
@@ -3393,8 +3394,7 @@ const char* cmd_autolog(const String& argsInput) {
     // subsequent appendAutoLogEntry write is gated on this ctx via
     // VFS::openGuarded. If the caller can't write the path, the LOG_START
     // line below fails and we roll back cleanly.
-    extern AuthContext gExecAuthContext;
-    gAutoLogOwnerCtx = gExecAuthContext;
+    gAutoLogOwnerCtx = currentAuthContext();
 
     gAutoLogActive = true;
     gAutoLogFile = filename;
@@ -3826,7 +3826,7 @@ const size_t automationCommandsCount = sizeof(automationCommands) / sizeof(autom
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry automationSettingEntries[] = {
-  { "automationsEnabled", SETTING_BOOL, &gSettings.automationsEnabled, false, 0, nullptr, 0, 1, "Automations Enabled", nullptr, false, nullptr, nullptr }
+  { "automationsEnabled", SETTING_BOOL, &gSettings.automationsEnabled, true, 0, nullptr, 0, 1, "Automations Enabled", nullptr, false, nullptr, nullptr }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

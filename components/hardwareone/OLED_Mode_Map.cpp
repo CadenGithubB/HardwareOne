@@ -20,8 +20,6 @@
 #include "System_TaskUtils.h"
 #include "System_VFS.h"
 
-extern AuthContext gExecAuthContext;
-
 #if ENABLE_GPS_SENSOR
 #include <Adafruit_GPS.h>
 #include "i2csensor-pa1010d.h"
@@ -586,14 +584,16 @@ static void scanTrackFiles() {
   const char* dirs[] = {"/logging_captures", "/logging_captures/tracks"};
   
   for (int d = 0; d < 2 && gTrackFileCount < 8; d++) {
-    File root = VFS::openGuarded(dirs[d], "r", gExecAuthContext);
+    // trusted: OLED-local scan of logging captures for the track-picker UI.
+    // No per-user identity exists at the physical-display layer.
+    File root = VFS::openGuarded(dirs[d], "r", VFS::systemAuth("oled.map.scan_tracks"));
     if (!root || !root.isDirectory()) continue;
 
     File file = root.openNextFile();
     while (file && gTrackFileCount < 8) {
       if (!file.isDirectory()) {
         // Check if file has GPS data
-        File check = VFS::openGuarded(file.path(), "r", gExecAuthContext);
+        File check = VFS::openGuarded(file.path(), "r", VFS::systemAuth("oled.map.scan_tracks"));
         if (check) {
           bool hasGPS = false;
           for (int i = 0; i < 15 && check.available(); i++) {
@@ -1440,14 +1440,10 @@ static void executeSubmenuAction(int submenuType, int action) {
           }
           break;
         case 4:  // Live Track - toggle
-          // Phase 4: switched from executeCommandThroughRegistry (which
-          // dispatches without setting gExecAuthContext, leaking
-          // whichever transport set it last) to executeOLEDCommand
-          // (which builds a proper SOURCE_LOCAL_DISPLAY AuthContext
-          // and goes through the cmd_exec queue). This makes the
-          // permission decisions in `sensorlog start` and friends
-          // correctly attributed to the local-display user, and any
-          // future per-user file write rule will Just Work.
+          // executeOLEDCommand builds a proper SOURCE_LOCAL_DISPLAY
+          // AuthContext and goes through the cmd_exec queue. Permission
+          // decisions in `sensorlog start` and friends are correctly
+          // attributed to the local-display user.
           {
             extern void executeOLEDCommand(const String& argsInput);
             if (GPSTrackManager::isLiveTracking()) {

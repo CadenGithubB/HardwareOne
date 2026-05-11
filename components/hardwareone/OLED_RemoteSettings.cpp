@@ -7,8 +7,6 @@
 #include "System_VFS.h"
 #include "System_Debug.h"
 
-extern AuthContext gExecAuthContext;
-
 #include "System_ESPNow.h"
 #include "System_Mutex.h"
 #include "System_Utils.h"
@@ -55,19 +53,96 @@ static void getValueRange(const char* key, int& minVal, int& maxVal) {
   }
 }
 
+// ----------------------------------------------------------------------------
+// Recursive JSON walk
+// ----------------------------------------------------------------------------
+// The remote settings.json mirrors the device's nested layout (post-v0.93:
+// hardware.sensors.camera.image.cameraQuality, network.wifi.enabled, etc.).
+// The OLED viewer renders modules → entries one level deep, so we flatten the
+// tree by emitting a synthetic SettingsModule for every JSON object that has
+// at least one leaf child. Each leaf becomes an entry on that module; nested
+// object children recurse and produce additional modules with a dotted-path
+// jsonSection (e.g. "hardware.sensors.camera.image"). The display name is
+// the last path segment so the OLED list stays readable.
+
+// Pass 1: count modules + entries so we can allocate flat arrays.
+static void countNodesRecursive(JsonObjectConst node,
+                                size_t& moduleCount,
+                                size_t& entryCount) {
+  bool hasLeaves = false;
+  for (JsonPairConst kv : node) {
+    if (kv.value().is<JsonObjectConst>()) {
+      countNodesRecursive(kv.value().as<JsonObjectConst>(), moduleCount, entryCount);
+    } else {
+      hasLeaves = true;
+      entryCount++;
+    }
+  }
+  if (hasLeaves) moduleCount++;
+}
+
+// Pass 2: populate the pre-allocated arrays. dottedPath is the full path to
+// `node` (empty for root); displayName is what shows in the OLED list.
+static void buildNodesRecursive(JsonObjectConst node,
+                                const String& dottedPath,
+                                const String& displayName,
+                                size_t& moduleIdx,
+                                size_t& entryIdx) {
+  size_t startIdx = entryIdx;
+  bool hasLeaves = false;
+
+  // Direct-leaf children become entries on a module rooted at this node.
+  for (JsonPairConst kv : node) {
+    if (kv.value().is<JsonObjectConst>()) continue;
+
+    SettingEntry& entry = gRemoteEntries[entryIdx++];
+    entry.jsonKey = strdup(kv.key().c_str());
+    entry.label = strdup(kv.key().c_str());
+    entry.type = jsonTypeToSettingType(kv.value());
+    entry.valuePtr = nullptr;
+    getValueRange(kv.key().c_str(), entry.minVal, entry.maxVal);
+    entry.intDefault = 0;
+    entry.floatDefault = 0.0f;
+    entry.stringDefault = nullptr;
+    entry.options = nullptr;
+    entry.isSecret = false;
+    hasLeaves = true;
+  }
+
+  if (hasLeaves) {
+    SettingsModule& module = gRemoteModules[moduleIdx++];
+    module.name = strdup(displayName.c_str());
+    module.jsonSection = strdup(dottedPath.c_str());
+    module.entries = &gRemoteEntries[startIdx];
+    module.count = entryIdx - startIdx;
+    module.isConnected = nullptr;
+    module.description = "Remote settings";
+  }
+
+  // Recurse into nested object children — each becomes its own module(s).
+  for (JsonPairConst kv : node) {
+    if (!kv.value().is<JsonObjectConst>()) continue;
+    String childKey(kv.key().c_str());
+    String childPath = dottedPath.length() > 0 ? (dottedPath + "." + childKey) : childKey;
+    buildNodesRecursive(kv.value().as<JsonObjectConst>(),
+                        childPath, childKey,
+                        moduleIdx, entryIdx);
+  }
+}
+
 /**
  * Load remote settings from cache and create virtual SettingsModule entries
  */
 bool loadRemoteSettingsModules() {
   // Free any existing remote modules
   freeRemoteSettingsModules();
-  
+
   // Get bonded peer MAC
   if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() < 12) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] Not bonded");
     return false;
   }
-  
+
   // Build path to cached settings
   uint8_t peerMac[6];
   String macHex = gSettings.bondPeerMac;
@@ -76,16 +151,16 @@ bool loadRemoteSettingsModules() {
     char byteStr[3] = {macHex[i*2], macHex[i*2+1], '\0'};
     peerMac[i] = (uint8_t)strtol(byteStr, nullptr, 16);
   }
-  
+
   // Load settings from cache
   extern String loadSettingsFromCache(const uint8_t* peerMac);
   String settingsJson = loadSettingsFromCache(peerMac);
-  
+
   if (settingsJson.length() == 0) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] No cached settings");
     return false;
   }
-  
+
   // Parse JSON
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, settingsJson);
@@ -93,101 +168,33 @@ bool loadRemoteSettingsModules() {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] JSON parse error: %s", err.c_str());
     return false;
   }
-  
-  // Count total entries across all sections
-  size_t totalEntries = 0;
+
+  // Pass 1: count
   size_t moduleCount = 0;
-  
-  for (JsonPair section : doc.as<JsonObject>()) {
-    if (section.value().is<JsonObject>()) {
-      moduleCount++;
-      totalEntries += section.value().as<JsonObject>().size();
-    } else {
-      // Root-level setting
-      totalEntries++;
-    }
-  }
-  
+  size_t totalEntries = 0;
+  countNodesRecursive(doc.as<JsonObjectConst>(), moduleCount, totalEntries);
+
   if (totalEntries == 0) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] No settings found");
     return false;
   }
-  
-  // Allocate storage
-  gRemoteModules = new SettingsModule[moduleCount + 1]; // +1 for root settings
+
+  // Allocate flat arrays sized exactly to the counts.
+  gRemoteModules = new SettingsModule[moduleCount];
   gRemoteEntries = new SettingEntry[totalEntries];
-  
+
+  // Pass 2: populate. The root object's display name is "Device" so its
+  // direct-leaf children (firmwareVersion, etc.) get a sensible header.
   size_t moduleIdx = 0;
   size_t entryIdx = 0;
-  
-  // First pass: root-level settings (deviceName, bondRole)
-  size_t rootEntryStart = entryIdx;
-  for (JsonPair kv : doc.as<JsonObject>()) {
-    if (!kv.value().is<JsonObject>()) {
-      SettingEntry& entry = gRemoteEntries[entryIdx++];
-      entry.jsonKey = strdup(kv.key().c_str());
-      entry.label = strdup(kv.key().c_str());
-      entry.type = jsonTypeToSettingType(kv.value());
-      entry.valuePtr = nullptr; // Not used for remote
-      entry.minVal = 0;
-      entry.maxVal = 100;
-      entry.intDefault = 0;
-      entry.floatDefault = 0.0f;
-      entry.stringDefault = nullptr;
-      entry.options = nullptr;
-      entry.isSecret = false;
-    }
-  }
-  
-  if (entryIdx > rootEntryStart) {
-    SettingsModule& rootModule = gRemoteModules[moduleIdx++];
-    rootModule.name = "Device";
-    rootModule.jsonSection = nullptr;
-    rootModule.entries = &gRemoteEntries[rootEntryStart];
-    rootModule.count = entryIdx - rootEntryStart;
-    rootModule.isConnected = nullptr;
-    rootModule.description = "Device settings";
-  }
-  
-  // Second pass: nested sections (network, display, sensors, etc.)
-  for (JsonPair section : doc.as<JsonObject>()) {
-    if (!section.value().is<JsonObject>()) continue;
-    
-    size_t sectionEntryStart = entryIdx;
-    JsonObject sectionObj = section.value().as<JsonObject>();
-    
-    for (JsonPair kv : sectionObj) {
-      SettingEntry& entry = gRemoteEntries[entryIdx++];
-      entry.jsonKey = strdup(kv.key().c_str());
-      entry.label = strdup(kv.key().c_str());
-      entry.type = jsonTypeToSettingType(kv.value());
-      entry.valuePtr = nullptr; // Not used for remote
-      
-      // Set appropriate ranges
-      getValueRange(kv.key().c_str(), entry.minVal, entry.maxVal);
-      
-      entry.intDefault = 0;
-      entry.floatDefault = 0.0f;
-      entry.stringDefault = nullptr;
-      entry.options = nullptr;
-      entry.isSecret = false;
-    }
-    
-    SettingsModule& module = gRemoteModules[moduleIdx++];
-    module.name = strdup(section.key().c_str());
-    module.jsonSection = strdup(section.key().c_str());
-    module.entries = &gRemoteEntries[sectionEntryStart];
-    module.count = entryIdx - sectionEntryStart;
-    module.isConnected = nullptr;
-    module.description = "Remote settings";
-  }
-  
+  buildNodesRecursive(doc.as<JsonObjectConst>(), "", "Device", moduleIdx, entryIdx);
+
   gRemoteModuleCount = moduleIdx;
   gRemoteEntryCount = entryIdx;
-  
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] Loaded %zu modules, %zu entries", 
+
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] Loaded %zu modules, %zu entries",
          gRemoteModuleCount, gRemoteEntryCount);
-  
+
   return true;
 }
 
@@ -206,12 +213,11 @@ void freeRemoteSettingsModules() {
   }
   
   if (gRemoteModules) {
-    // Free duplicated module names
+    // Both name and jsonSection are strdup'd for every module (the recursive
+    // builder allocates uniformly), so free each independently if non-null.
     for (size_t i = 0; i < gRemoteModuleCount; i++) {
-      if (gRemoteModules[i].name && gRemoteModules[i].jsonSection) {
-        free((void*)gRemoteModules[i].name);
-        free((void*)gRemoteModules[i].jsonSection);
-      }
+      if (gRemoteModules[i].name)        free((void*)gRemoteModules[i].name);
+      if (gRemoteModules[i].jsonSection) free((void*)gRemoteModules[i].jsonSection);
     }
     delete[] gRemoteModules;
     gRemoteModules = nullptr;
@@ -293,7 +299,8 @@ bool hasRemoteSettings() {
   DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] Checking path: %s", filePath.c_str());
   
   extern bool filesystemReady;
-  bool exists = filesystemReady && VFS::existsGuarded(filePath, gExecAuthContext);
+  // trusted: cached remote-device settings manifest read for OLED rendering.
+  bool exists = filesystemReady && VFS::existsGuarded(filePath, VFS::systemAuth("oled.remote_settings.read"));
   DEBUG_SYSTEMF("[HAS_REMOTE_SETTINGS] fsReady=%d exists=%d -> returning %d",
                 filesystemReady ? 1 : 0, exists ? 1 : 0, exists ? 1 : 0);
   return exists;

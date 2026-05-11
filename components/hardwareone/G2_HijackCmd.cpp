@@ -35,7 +35,8 @@ extern bool submitCommandAsync(const Command& cmd,
 // empty user string. Downstream tgRequireAuth will reject it and the
 // command fails gracefully with an auth error. To recover, re-run
 // `bleautoconnect g2-glasses on` (or any pair gesture that triggers
-// bleSavePeerMac) — that stamps pairedByUser from gExecAuthContext.user.
+// bleSavePeerMac) — that stamps pairedByUser from the caller's
+// currentAuthContext().user.
 // =============================================================================
 
 // =============================================================================
@@ -143,15 +144,14 @@ bool g2SubmitHijackCommand(const char* line,
 // =============================================================================
 // In-callback AuthContext helper + RAII guard. See G2_HijackCmd.h for the
 // rationale (file-UI hijack handlers run synchronously in BLE callbacks
-// without going through cmd_exec, so gExecAuthContext stays empty and
-// every guarded VFS call fails ANON).
+// without going through cmd_exec, so the task's TLS slot stays at the
+// default ANON identity and every guarded VFS call fails).
 //
 // Identity matches g2SubmitHijackCommand exactly: pairedByUser as user,
 // transport = SOURCE_LOCAL_DISPLAY (the lens IS a local display, even
 // though it's BLE-attached). Path/ip strings are documentary — they only
 // ever surface in [PERM] DENY logs and audit output.
 // =============================================================================
-extern AuthContext gExecAuthContext;
 
 AuthContext g2HijackAuthContext() {
   AuthContext ctx;
@@ -164,13 +164,11 @@ AuthContext g2HijackAuthContext() {
   return ctx;
 }
 
+// Thin wrapper around ExecIdentityGuard so callers (handleHijackMenuTap and
+// friends) keep their existing G2HijackCtxGuard usage. The TLS-aware guard
+// installs the hijack identity into the calling task's slot for the scope of
+// this object's lifetime and restores on destruction.
 G2HijackCtxGuard::G2HijackCtxGuard()
-    : saved_(gExecAuthContext) {
-  gExecAuthContext = g2HijackAuthContext();
-}
-
-G2HijackCtxGuard::~G2HijackCtxGuard() {
-  gExecAuthContext = saved_;
-}
+    : guard_(g2HijackAuthContext()) {}
 
 #endif // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

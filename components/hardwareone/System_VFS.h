@@ -131,8 +131,8 @@ bool getStats(StorageType type, uint64_t& totalBytes, uint64_t& usedBytes, uint6
 //
 // Use these instead of raw VFS::open / LittleFS.open / etc. anywhere you
 // have an AuthContext available (web handlers, CLI handlers via
-// gExecAuthContext, etc.). For internal trusted code, construct a context
-// via systemAuth("reason") and pass it through.
+// currentAuthContext(), etc.). For internal trusted code, construct a
+// context via systemAuth("reason") and pass it through.
 //
 // Naming convention: every callsite that uses systemAuth() should be
 // commented "// trusted: <reason>" so a future reader sees the explicit
@@ -162,7 +162,7 @@ bool rmdirGuarded  (const String& path, const AuthContext& ctx);
  *   - log rotation — internal infrastructure
  *
  * Examples of MISUSE:
- *   - "I'm a CLI handler" — use gExecAuthContext instead
+ *   - "I'm a CLI handler" — use currentAuthContext() instead
  *   - "I'm in a web request" — use makeWebAuthCtx(req) instead
  *   - "I don't want to figure out the right context" — figure it out
  */

@@ -1152,7 +1152,7 @@ extern const SettingsModule imuSettingsModule = {
   imuSettingEntries,
   sizeof(imuSettingEntries) / sizeof(imuSettingEntries[0]),
   isIMUConnected,
-  "BNO055 IMU sensor settings"
+  "BNO055 9-axis IMU"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

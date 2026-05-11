@@ -10,7 +10,8 @@
 #include "System_Debug.h"
 #include "System_Utils.h"      // RETURN_VALID_IF_VALIDATE_CSTR, parseBoolArg
 #include "System_Command.h"    // CommandEntry, ensureDebugBuffer, getDebugBuffer
-#include "System_User.h"       // AuthContext (gExecAuthContext for paired-by capture)
+#include "System_User.h"
+#include "System_AuthIdentity.h"  // currentAuthContext — paired-by capture
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -130,8 +131,7 @@ static void bleStampPairedByIfBlank(BlePeerKind kind) {
   if (kind >= BLE_PEER_MAX) return;
   BlePeerData& d = gBlePeerData[kind];
   if (d.pairedByUser.length() > 0) return;  // already owned
-  extern AuthContext gExecAuthContext;
-  const String& who = gExecAuthContext.user;
+  const String& who = currentAuthContext().user;
   if (who.length() == 0) return;             // no current user (e.g. boot reconnect)
   setSetting(d.pairedByUser, who);
   const BlePeerSpec* spec = bleFindPeer(kind);
@@ -146,8 +146,8 @@ void bleSavePeerMac(BlePeerKind kind, const String& mac1, const String& mac2) {
   if (mac1.length() > 0) setSetting(gBlePeerData[kind].mac1, mac1);
   if (mac2.length() > 0) setSetting(gBlePeerData[kind].mac2, mac2);
   // Capture paired-by identity from whoever ran the connect command (if
-  // any). On boot auto-reconnect gExecAuthContext.user is blank and the
-  // helper no-ops — the pairedByUser field will already be populated
+  // any). On boot auto-reconnect the current task's identity is ANON and
+  // the helper no-ops — the pairedByUser field will already be populated
   // from the original pairing in that case.
   bleStampPairedByIfBlank(kind);
   // Don't auto-flip autoConnect — that's an explicit user opt-in. Pairing

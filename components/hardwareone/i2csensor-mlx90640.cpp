@@ -64,7 +64,7 @@ extern const SettingsModule thermalSettingsModule = {
   thermalSettingEntries,
   sizeof(thermalSettingEntries) / sizeof(thermalSettingEntries[0]),
   isThermalConnected,
-  "MLX90640 thermal camera settings"
+  "MLX90640 32x24 thermal camera"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

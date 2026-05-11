@@ -131,20 +131,39 @@ enum CamCategory : uint8_t {
   CAM_CAT_POSTPROC  = 2,
 };
 
-// Stream size presets — each is W,H. 96×96 is the legacy default (square,
-// fastest). The rest preserve the lens widget's 2:1 aspect (no letterbox)
-// and step up to the panel-native 288×144 max. Reference cadence comments
-// are in G2_Glasses.cpp's camera-stream worker.
+// Stream size presets — each is W,H plus a label. The list is split into
+// two visual sections by header rows (w/h = -1 sentinels): the camera is
+// 4:3 today, so 4:3-aspect dst sizes fill the panel slot with no black
+// bars (and with smaller wire payloads than 1:1 / 2:1 alternatives at
+// the same panel area). The "with bars" section keeps the historical
+// 1:1 and 2:1 sizes for users who want square/wide framing and accept
+// the bandwidth cost of the bars (~25% of payload at 1:1, ~33% at 2:1
+// against a 4:3 camera). Reference cadence comments are in
+// G2_Glasses.cpp's camera-stream worker.
 struct StreamSizePreset { int16_t w; int16_t h; const char* label; };
 static const StreamSizePreset kStreamPresets[] = {
-  {  96,  96, "96x96 (Small)" },
-  { 160,  80, "160x80"        },
-  { 192,  96, "192x96"        },
-  { 240, 120, "240x120"       },
-  { 288, 144, "288x144 (Full)"},
+  // ── Fill (4:3, no bars with current camera) ──
+  {  -1,  -1, "-- Fill (no bars) --" },
+  {  96,  72, "96x72 (Small)"        },
+  { 128,  96, "128x96"               },
+  { 192, 144, "192x144 (Full panel)" },
+
+  // ── With bars/pillars (against 4:3 camera) ──
+  {  -1,  -1, "-- With bars/pillars --" },
+  {  96,  96, "96x96 (1:1)"   },
+  { 128, 128, "128x128 (1:1)" },
+  { 144, 144, "144x144 (1:1)" },
+  { 160,  80, "160x80 (2:1)"  },
+  { 192,  96, "192x96 (2:1)"  },
+  { 240, 120, "240x120 (2:1)" },
+  { 288, 144, "288x144 (Full 2:1)" },
 };
 static const size_t kStreamPresetCount =
     sizeof(kStreamPresets) / sizeof(kStreamPresets[0]);
+
+static inline bool streamPresetIsHeader(const StreamSizePreset& p) {
+  return p.w < 0 || p.h < 0;
+}
 
 // One row per exposed setting. cycle() takes the current value and
 // returns the next; the dispatcher does the read-modify-write through
@@ -446,6 +465,14 @@ static size_t buildStreamPickerRows() {
 
   for (size_t i = 0; i < kStreamPresetCount && row < (sizeof(gRows) / sizeof(gRows[0])); i++) {
     const StreamSizePreset& p = kStreamPresets[i];
+    if (streamPresetIsHeader(p)) {
+      // Section header — render the label only, no [X] gutter, no
+      // selection state. Tap handler ignores rows that hit a header.
+      snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "%s", p.label);
+      gRowPtrs[row] = gRows[row];
+      row++;
+      continue;
+    }
     const bool selected = (p.w == curW && p.h == curH);
     snprintf(gRows[row], CAM_SETTINGS_ROW_LEN,
              "%s%s",
@@ -666,6 +693,14 @@ static void handleStreamPickerTap(uint32_t idx) {
     return;
   }
   const StreamSizePreset& p = kStreamPresets[i];
+  if (streamPresetIsHeader(p)) {
+    // Tap on a section header — no-op; just re-render so the user sees
+    // the picker is still active.
+    DEBUG_G2F("[G2] Camera settings: stream picker tap on header row idx=%u — ignored",
+              (unsigned)idx);
+    showStreamPicker();
+    return;
+  }
   const int prevW = gSettings.g2StreamWidth;
   const int prevH = gSettings.g2StreamHeight;
   if (p.w == prevW && p.h == prevH) {

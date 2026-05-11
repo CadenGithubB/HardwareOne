@@ -19,11 +19,9 @@
 #include "System_ImageManager.h"
 #include "System_Maps.h"
 #include "System_VFS.h"
+#include "System_AuthIdentity.h"  // currentAuthContext — CLI handlers' per-task identity
 
 // External dependencies
-// CLI handlers below read the dispatch-time AuthContext to drive
-// permission checks.
-extern AuthContext gExecAuthContext;
 extern bool readText(const char* path, String& out);
 extern void getTimestampPrefixMsCached(char* buffer, size_t bufferSize);
 extern bool sanitizeAutomationsJson(String& json);
@@ -440,7 +438,7 @@ const char* cmd_files(const String& argsInput) {
   if (argsTrimmed.length() > 0) path = argsTrimmed;
 
   String out;
-  bool ok = buildFilesListing(path, out, /*asJson=*/false, gExecAuthContext);
+  bool ok = buildFilesListing(path, out, /*asJson=*/false, currentAuthContext());
   if (!ok) {
     broadcastOutput(out);
     return "ERROR";
@@ -461,7 +459,7 @@ const char* cmd_mkdir(const String& argsInput) {
   if (!path.startsWith("/")) { path = "/" + path; }
   // Phase 4: read the dispatch-time AuthContext explicitly. Each transport
   // (web/serial/BT/internal) sets this before executeCommand fires.
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
   // mkdirGuarded folds normalize + canCreate(path, ctx) + dispatch into one
   // call. The previous canCreate(path) shim relied on the same global but
   // didn't normalize ".." and skipped the explicit role-aware check.
@@ -482,7 +480,7 @@ const char* cmd_rmdir(const String& argsInput) {
   path.trim();
   if (path.length() == 0) return "Usage: rmdir <path>";
   if (!path.startsWith("/")) { path = "/" + path; }
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
   if (!VFS::rmdirGuarded(path, ctx)) {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to remove folder (denied, not empty, or fs error): %s", path.c_str());
     return getDebugBuffer();
@@ -501,7 +499,7 @@ const char* cmd_filecreate(const String& argsInput) {
   if (path.length() == 0) return "Usage: filecreate <path>";
   if (!path.startsWith("/")) { path = "/" + path; }
   if (path.endsWith("/")) return "Error: Path must be a file (not a directory)";
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
   // openGuarded("w", create=true) on a non-existent path falls back to
   // canCreate(path, ctx) when canEdit denies (per the openGuarded logic).
   File f = VFS::openGuarded(path, "w", ctx, /*create=*/true);
@@ -523,7 +521,7 @@ const char* cmd_fileview(const String& argsInput) {
   if (path.length() == 0) return "Usage: fileview <path>";
   if (!path.startsWith("/")) { path = "/" + path; }
 
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
   // existsGuarded gates by canRead — combines the previous canRead +
   // VFS::exists pair into one decision. If it denies we get the same
   // "not found" UX, with the actual reason in the [PERM] log.
@@ -581,7 +579,7 @@ const char* cmd_filerename(const String& argsInput) {
   String parentDir = (lastSlash > 0) ? oldPath.substring(0, lastSlash) : "";
   String newPath = parentDir + "/" + newName;
 
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
   // existsGuarded gates by canRead — must be readable to be checked for
   // existence. renameGuarded then checks RENAME on src AND CREATE on dst.
   if (!VFS::existsGuarded(oldPath, ctx)) return "Error: File does not exist or access denied";
@@ -603,7 +601,7 @@ const char* cmd_filedelete(const String& argsInput) {
   if (path.length() == 0) return "Usage: filedelete <path>";
   if (!path.startsWith("/")) { path = "/" + path; }
   
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
   if (!VFS::existsGuarded(path, ctx)) return "Error: File does not exist or access denied";
 
   // If the file to delete is the currently loaded map, unload it first to close the FD

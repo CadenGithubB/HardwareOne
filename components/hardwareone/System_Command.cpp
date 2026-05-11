@@ -458,7 +458,7 @@ extern const SettingsModule cliSettingsModule = {
   cliSettingsEntries,
   sizeof(cliSettingsEntries) / sizeof(cliSettingsEntries[0]),
   nullptr,
-  "CLI history and display settings"
+  "CLI history and display"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

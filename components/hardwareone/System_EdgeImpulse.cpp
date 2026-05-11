@@ -12,8 +12,7 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include "System_VFS.h"
-
-extern AuthContext gExecAuthContext;
+#include "System_AuthIdentity.h"
 
 // TensorFlow Lite Micro includes
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -362,7 +361,7 @@ extern const SettingsModule edgeImpulseSettingsModule = {
   edgeImpulseSettingEntries,
   sizeof(edgeImpulseSettingEntries) / sizeof(edgeImpulseSettingEntries[0]),
   nullptr,
-  "Edge Impulse ML object detection settings"
+  "Edge Impulse on-device object detection"
 };
 
 // ============================================================================
@@ -2155,7 +2154,7 @@ const char* cmd_ei_file(const String& argsInput) {
   }
   
   // Check file exists
-  if (!VFS::existsGuarded(path, gExecAuthContext)) {
+  if (!VFS::existsGuarded(path, currentAuthContext())) {
     snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "File not found: %s", path.c_str());
     return gEICmdBuffer;
   }
@@ -2290,7 +2289,7 @@ const char* cmd_ei_model_load(const String& argsInput) {
     path = pathBuf;
   }
   
-  if (!VFS::existsGuarded(path, gExecAuthContext)) {
+  if (!VFS::existsGuarded(path, currentAuthContext())) {
     snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Model not found: %s", path.c_str());
     return gEICmdBuffer;
   }

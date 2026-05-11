@@ -183,6 +183,7 @@ set(hardwareone_srcs
         System_Microphone.cpp
         System_SensorRegistry.cpp
         System_Notifications.cpp
+        System_AuthIdentity.cpp
 )
 
 # ── Per-feature source lists (added below based on HW_CFG_* flags) ──

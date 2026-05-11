@@ -199,7 +199,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
   <div id='network-pane' style='display:none;margin-top:1rem;color:var(--panel-fg)'>
     <div class='settings-panel' style='margin:0 0 0.75rem 0'>
       <div style='display:flex;align-items:center;justify-content:space-between'>
-        <div><div style='font-size:1.05rem;font-weight:bold;color:var(--panel-fg)'>WiFi <span id='wifi-status-badge'></span></div></div>
+        <div><div style='font-size:1.05rem;font-weight:bold;color:var(--panel-fg)'>WiFi <span id='wifi-status-badge'></span></div><div style='color:var(--panel-fg);font-size:0.85rem;margin-top:0.25rem'>Current network, scan, and saved-credential management.</div></div>
         <button class='btn' id='btn-wifi-toggle' onclick="togglePane('wifi-pane','btn-wifi-toggle')">Expand</button>
       </div>
       <div id='wifi-pane' style='display:none;margin-top:0.75rem'>
@@ -317,11 +317,21 @@ window.sendSequential = function(cmds, onDone, onFail) {
       statusBadge = '<span style="background:rgba(102,126,234,0.15);color:var(--accent);border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Enabled</span>';
     }
     
+    // Build the card title. The http module gets a special "HTTP(S) Server"
+    // label when httpsEnabled is true in the saved settings — purely cosmetic
+    // hint that the build also serves over TLS.
+    var titleLabel = networkLabels[mod.name] || mod.description || mod.name;
+    if (mod.name === 'http' && section && section.httpsEnabled) {
+      titleLabel = 'HTTP(S) Server';
+    }
     var html = '<div style="background:var(--panel-bg);border-radius:8px;padding:1rem 1.5rem;margin:0.5rem 0;box-shadow:0 1px 3px rgba(0,0,0,0.1);border:1px solid var(--border)">';
     html += '<div style="display:flex;align-items:center;justify-content:space-between">';
     html += '<div>';
-    html += '<span style="font-size:1.1rem;font-weight:bold;color:var(--panel-fg)">' + (networkLabels[mod.name] || mod.description || mod.name) + '</span>' + statusBadge;
-    if (mod.description && !networkLabels[mod.name]) {
+    html += '<span style="font-size:1.1rem;font-weight:bold;color:var(--panel-fg)">' + titleLabel + '</span>' + statusBadge;
+    // Always show the description as a subtitle when present (and distinct
+    // from the title). The earlier !networkLabels[mod.name] guard hid it
+    // for every labelled module, leaving cards without context.
+    if (mod.description && mod.description !== (networkLabels[mod.name] || mod.name)) {
       html += '<div style="color:var(--panel-fg);font-size:0.85rem;margin-top:0.25rem">' + mod.description + '</div>';
     }
     html += '</div>';
@@ -471,7 +481,14 @@ window.sendSequential = function(cmds, onDone, onFail) {
   // these render as their own cards under Apps; leave empty for backwards
   // compatibility (renderModule still consults this map).
   var mlSubsections = {};
-  var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','espsr':'espsr','thermal_mlx90640':'thermal','tof_vl53l4cx':'tof','imu_bno055':'imu','gps':'gps','fmradio':'fmradio','apds':'apds','rtc':'rtc','presence':'presence','sensorlog':'sensorlog','power':'power','debug':'debug','output':'output','oled_ssd1306':'oled','gamepad':'gamepad','led':'led','llm':'llm'};
+  // Map from a top-level settings.json key to the module name. Used by the
+  // orphan-detection loop below: a key in /api/settings whose schema module
+  // isn't compiled becomes a read-only "Inactive" card. Post-v0.93 the JSON
+  // top-level keys are now umbrellas (hardware, network, logging, system,
+  // apps), so orphan detection effectively no-ops until that loop is taught
+  // to recurse into the nested layout. Identity mappings kept here for
+  // backwards compatibility with any older flat settings.json that lingers.
+  var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','espsr':'espsr','thermal':'thermal','tof':'tof','imu':'imu','gps':'gps','fmradio':'fmradio','apds':'apds','rtc':'rtc','presence':'presence','sensorlog':'sensorlog','power':'power','debug':'debug','output':'output','oled':'oled','gamepad':'gamepad','led':'led','llm':'llm','maps':'maps'};
   var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',systemlog:'System Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels',oled:'OLED Display (SSD1306)',led:'LED Startup & Brightness',llm:'On-Device LLM',maps:'Maps'};
   
   function inferType(val) {
@@ -644,7 +661,10 @@ window.sendSequential = function(cmds, onDone, onFail) {
     html += '<div style="display:flex;align-items:center;justify-content:space-between">';
     html += '<div>';
     html += '<span style="font-size:1.1rem;font-weight:bold;color:var(--panel-fg)">' + (moduleLabels[mod.name] || mod.description || mod.name) + '</span>' + statusBadge;
-    if (mod.description && !moduleLabels[mod.name]) {
+    // Always show the description as a subtitle when present (and distinct
+    // from the title). The earlier !moduleLabels[mod.name] guard hid it
+    // for every labelled module, leaving cards without context.
+    if (mod.description && mod.description !== (moduleLabels[mod.name] || mod.name)) {
       html += '<div style="color:var(--panel-fg);font-size:0.85rem;margin-top:0.25rem">' + mod.description + '</div>';
     }
     html += '</div>';
@@ -1243,7 +1263,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     if(!c)return;
     var dm=null;(schema.modules||[]).forEach(function(m){if(m.name==='debug')dm=m;});
     if(!dm){c.innerHTML='<div>Debug module not found</div>';return;}
-    var entries=dm.entries||[],dbg=settings.debug||{},groups={},gOrder=[],standalone=[];
+    var entries=dm.entries||[],dbg=((settings.system&&settings.system.debug)||settings.debug||{}),groups={},gOrder=[],standalone=[];
     entries.forEach(function(e){
       if(e.group){if(!groups[e.group]){groups[e.group]=[];gOrder.push(e.group);}groups[e.group].push(e);}
       else standalone.push(e);
@@ -1382,7 +1402,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
   httpd_resp_send_chunk(req, R"SETPART8(
 <div id='admin-section' style='display:none;background:var(--panel-bg);border-radius:8px;border:1px solid var(--border);padding:1.0rem 1.5rem;margin:1rem 0;color:var(--panel-fg)'>
   <div style='display:flex;align-items:center;justify-content:space-between'>
-    <div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Admin Controls</div>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Admin Controls</div><div style='color:var(--panel-fg);font-size:0.9rem'>User management, authentication policy, and HTTPS controls.</div></div>
     <button class='btn' id='btn-admin-toggle' onclick="togglePane('admin-pane','btn-admin-toggle')">Expand</button>
   </div>
   <div id='admin-pane' style='display:none;margin-top:0.75rem'>
@@ -1590,7 +1610,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     fetch('/api/settings',{credentials:'same-origin'})
       .then(function(r){return r.json()})
       .then(function(j){
-        var val = j && j.settings && j.settings.http && j.settings.http.httpsEnabled;
+        var val = j && j.settings && j.settings.network && j.settings.network.http && j.settings.network.http.httpsEnabled;
         window._httpsCurrentValue = !!val;
         var el = document.getElementById('https-enabled-value');
         if(el){ el.textContent = val ? 'Enabled' : 'Disabled'; el.style.color = 'var(--accent)'; }
@@ -1746,25 +1766,27 @@ console.log('[SETTINGS] Part 1: Core init starting...');
     __S.renderSettings = function(s) {
       try {
         console.log('[SETTINGS] renderSettings called with:', s);
-        __S.state.currentSSID = (s.wifiPrimarySSID || (s.wifi && s.wifi.wifiSSID) || '');
+        // WiFi settings are nested under network.wifi after the v0.93 refactor.
+        // Older flat fallbacks (s.wifiSSID etc.) kept defensively in case an
+        // upgrade path leaves stale shapes around.
+        var wifiSect = (s.network && s.network.wifi) || s.wifi || {};
+        __S.state.currentSSID = (s.wifiPrimarySSID || wifiSect.ssid || wifiSect.wifiSSID || '');
         $('wifi-ssid').textContent = __S.state.currentSSID;
         var primary = __S.state.currentSSID || '';
-        var list = Array.isArray(s.wifiNetworks) 
-          ? s.wifiNetworks.map(function(n) { return n && n.ssid; }).filter(function(x) { return !!x; })
+        var netList = wifiSect.networks || s.wifiNetworks || [];
+        var list = Array.isArray(netList)
+          ? netList.map(function(n) { return n && n.ssid; }).filter(function(x) { return !!x; })
           : [];
         __S.state.savedSSIDs = [];
         if (primary) __S.state.savedSSIDs.push(primary);
         if (list && list.length) __S.state.savedSSIDs = __S.state.savedSSIDs.concat(list);
-        var wifiAutoReconnect = s.wifiAutoReconnect || (s.wifi && s.wifi.wifiAutoReconnect) || false;
+        var wifiAutoReconnect = (wifiSect.autoReconnect !== undefined ? wifiSect.autoReconnect
+                              : (wifiSect.wifiAutoReconnect !== undefined ? wifiSect.wifiAutoReconnect
+                              : (s.wifiAutoReconnect || false)));
         $('wifi-value').textContent = wifiAutoReconnect ? 'Enabled' : 'Disabled';
         $('wifi-btn').textContent = wifiAutoReconnect ? 'Disable' : 'Enable';
-        // Timezone and NTP from wifi module
-        // Settings are serialized as s.wifi.global.tzOffsetMinutes / s.wifi.global.ntpServer
-        // (all WiFi entries use group="global" in their SettingEntry registration)
-        var wifiSect = s.wifi || {};
-        var wifiGlobal = wifiSect.global || {};
-        var tzMin = (wifiGlobal.tzOffsetMinutes !== undefined) ? wifiGlobal.tzOffsetMinutes
-                  : (wifiSect.wifiTzOffsetMinutes !== undefined) ? wifiSect.wifiTzOffsetMinutes
+        // Timezone and NTP live directly under network.wifi (no sub-group).
+        var tzMin = (wifiSect.tzOffsetMinutes !== undefined) ? wifiSect.tzOffsetMinutes
                   : (s.tzOffsetMinutes !== undefined ? s.tzOffsetMinutes : null);
         if (tzMin !== null) {
           var tzSel = $('tz-select');
@@ -1777,7 +1799,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
             tzVal.textContent = 'UTC' + sign + h + (m ? ':' + (m < 10 ? '0' : '') + m : '') + ' (' + tzMin + ' min)';
           }
         }
-        var ntpSrv = wifiGlobal.ntpServer || wifiSect.wifiNtpServer || s.ntpServer || '';
+        var ntpSrv = wifiSect.ntpServer || wifiSect.wifiNtpServer || s.ntpServer || '';
         if (ntpSrv) {
           var ntpEl = $('ntp-value');
           if (ntpEl) ntpEl.textContent = ntpSrv;
@@ -1786,9 +1808,10 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         }
         // ESP-NOW toggle states now handled by schema-driven Network Services panel
         
-        // Output and LED settings now rendered dynamically via schema in Sensors panel
-        var th = (s.thermal_mlx90640 || {}), tof = (s.tof_vl53l4cx || {}), imu = (s.imu_bno055 || {}), i2c = (s.i2c || {});
-        var thUI = (th.ui || {}), thDev = (th.device || {}), tofUI = (tof.ui || {}), tofDev = (tof.device || {});
+        // Output and LED settings now rendered dynamically via schema in Sensors panel.
+        // (Removed dead reads of s.thermal_mlx90640 / s.tof_vl53l4cx / s.imu_bno055 / s.i2c —
+        //  those flat-key sections no longer exist after the v0.93 refactor and the locals
+        //  weren't consumed anywhere downstream.)
         var isAdm = (s && s.user && (s.user.isAdmin === true)) || (__S && __S.user && (__S.user.isAdmin === true));
         var hasFeat = (__S && __S.features && __S.features.adminSessions === true);
         var admin = isAdm && hasFeat;
@@ -1804,15 +1827,19 @@ console.log('[SETTINGS] Part 1: Core init starting...');
           } catch(e) {}
           // Populate Authentication panel
           try {
-            var outSect = s.output || {};
-            var btSect  = s.bluetooth || {};
+            // Output auth lives under system.output.auth; bluetooth under network.bluetooth.
+            // Older flat shapes kept as fallback in case of mid-upgrade state.
+            var outSectV093  = (s.system && s.system.output) || s.output || {};
+            var outAuthSect  = outSectV093.auth || outSectV093;
+            var btSect       = (s.network && s.network.bluetooth) || s.bluetooth || {};
             var el;
-            el = document.getElementById('auth-serial');    if (el) el.checked = outSect.serialRequireAuth  !== false;
-            el = document.getElementById('auth-display');   if (el) el.checked = outSect.displayRequireAuth !== false;
+            el = document.getElementById('auth-serial');    if (el) el.checked = outAuthSect.serialRequireAuth  !== false;
+            el = document.getElementById('auth-display');   if (el) el.checked = outAuthSect.displayRequireAuth !== false;
             el = document.getElementById('auth-bluetooth'); if (el) el.checked = btSect.bluetoothRequireAuth !== false;
             // Hide bluetooth row if module not present in settings
+            var btPresent = (s.network && s.network.bluetooth !== undefined) || (s.bluetooth !== undefined);
             var btWrap = document.getElementById('auth-bluetooth-wrap');
-            if (btWrap) btWrap.style.display = (s.bluetooth !== undefined) ? '' : 'none';
+            if (btWrap) btWrap.style.display = btPresent ? '' : 'none';
           } catch(e) {}
         }
       } catch(e) {

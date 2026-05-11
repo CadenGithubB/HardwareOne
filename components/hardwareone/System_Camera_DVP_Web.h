@@ -81,8 +81,8 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
           <input type='range' id='camera-quality' min='0' max='63' value='12' step='1' style='width:100%'>
         </div>
         <div style='margin-bottom:8px'>
-          <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Stream FPS: <span id='fps-val'>5</span> fps (<span id='fps-ms-val'>200</span>ms)</label>
-          <input type='range' id='camera-fps' min='50' max='2000' value='200' step='50' style='width:100%'>
+          <label style='display:block;margin-bottom:4px;font-size:0.9em;color:var(--panel-fg)'>Camera FPS: <span id='fps-val'>5</span> fps</label>
+          <input type='range' id='camera-fps' min='1' max='20' value='5' step='1' style='width:100%'>
         </div>
         <div style='display:flex;gap:8px;margin-top:10px;flex-wrap:wrap'>
           <button class='btn' id='btn-hmirror' onclick="applyCameraAdjustment('camerahmirror', 'toggle')" style='flex:1;min-width:100px'>H-Mirror</button>
@@ -302,12 +302,11 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "}\n"
     "function __cameraStopStreamUi() {\n"
     "  try {\n"
-    "    var img = document.getElementById('camera-image');\n"
     "    var streamBtn = document.getElementById('btn-camera-stream');\n"
     "    var streamStopBtn = document.getElementById('btn-camera-stream-stop');\n"
     "    if (__cameraStreamTimer) { clearTimeout(__cameraStreamTimer); __cameraStreamTimer = null; }\n"
     "    __cameraStreamRunning = false;\n"
-    "    if (img) { img.src = 'about:blank'; }\n"
+    "    /* Leave img.src alone so the last loaded frame stays visible. */\n"
     "    if (streamBtn) streamBtn.style.display = 'inline-block';\n"
     "    if (streamStopBtn) streamStopBtn.style.display = 'none';\n"
     "  } catch(e) { console.error('[Camera] stop stream UI error', e); }\n"
@@ -406,20 +405,17 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  var fpsSlider = document.getElementById('camera-fps');\n"
     "  var framesizeSel = document.getElementById('camera-framesize');\n"
     "  \n"
-    "  __cameraCli('camerastreaminterval').then(function(t){\n"
+    "  __cameraCli('camerafps').then(function(t){\n"
     "    try {\n"
-    "      var m = /Stream interval:\\s*(\\d+)\\s*ms/i.exec(String(t || ''));\n"
+    "      var m = /Camera FPS:\\s*(\\d+)\\s*fps/i.exec(String(t || ''));\n"
     "      if (m && m[1] !== undefined) {\n"
-    "        var v = parseInt(m[1], 10);\n"
-    "        if (!isNaN(v) && v >= 50 && v <= 2000) {\n"
-    "          __cameraStreamPollMs = v;\n"
+    "        var fps = parseInt(m[1], 10);\n"
+    "        if (!isNaN(fps) && fps >= 1 && fps <= 20) {\n"
+    "          __cameraStreamPollMs = Math.round(1000 / fps);\n"
     "          if (fpsSlider) {\n"
-    "            fpsSlider.value = v;\n"
-    "            var fps = Math.round(1000 / v);\n"
+    "            fpsSlider.value = fps;\n"
     "            var fpsVal = document.getElementById('fps-val');\n"
-    "            var fpsMs = document.getElementById('fps-ms-val');\n"
     "            if (fpsVal) fpsVal.textContent = fps;\n"
-    "            if (fpsMs) fpsMs.textContent = v;\n"
     "          }\n"
     "        }\n"
     "      }\n"
@@ -490,17 +486,14 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "  }\n"
     "  if (fpsSlider) {\n"
     "    fpsSlider.addEventListener('input', function() {\n"
-    "      var v = parseInt(this.value, 10);\n"
-    "      var fps = Math.round(1000 / v);\n"
+    "      var fps = parseInt(this.value, 10);\n"
     "      var fpsVal = document.getElementById('fps-val');\n"
-    "      var fpsMs = document.getElementById('fps-ms-val');\n"
     "      if (fpsVal) fpsVal.textContent = fps;\n"
-    "      if (fpsMs) fpsMs.textContent = v;\n"
-    "      __cameraStreamPollMs = v;\n"
+    "      __cameraStreamPollMs = Math.round(1000 / fps);\n"
     "    });\n"
     "    fpsSlider.addEventListener('change', function() {\n"
-    "      var v = parseInt(this.value, 10);\n"
-    "      applyCameraAdjustment('camerastreaminterval', v);\n"
+    "      var fps = parseInt(this.value, 10);\n"
+    "      applyCameraAdjustment('camerafps', fps);\n"
     "    });\n"
     "  }\n"
     "  \n"

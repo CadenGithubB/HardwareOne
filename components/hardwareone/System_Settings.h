@@ -20,7 +20,7 @@ struct Settings {
       wifiAutoReconnect(true),
       webCliHistorySize(10),
       oledCliHistorySize(50),
-      ntpServer(""),
+      ntpServer("pool.ntp.org"),
       tzOffsetMinutes(0),
       outSerial(true),
       outWeb(false),
@@ -31,7 +31,7 @@ struct Settings {
       thermalPollingMs(250),
       tofPollingMs(220),
       tofStabilityThreshold(3),
-      thermalPaletteDefault(""),
+      thermalPaletteDefault("grayscale"),
       thermalInterpolationEnabled(true),
       thermalInterpolationSteps(5),
       thermalInterpolationBufferSize(2),
@@ -52,6 +52,14 @@ struct Settings {
       thermalDevicePollMs(100),
       tofDevicePollMs(220),
       imuDevicePollMs(200),
+      gpsDevicePollMs(200),
+      apdsDevicePollMs(200),
+      gamepadDevicePollMs(90),
+      fmRadioDevicePollMs(250),
+      imuPollingMs(200),
+      imuEWMAFactor(0.1f),
+      imuTransitionMs(100),
+      imuWebMaxFps(15),
       imuOrientationCorrectionEnabled(true),
       imuOrientationMode(8),
       imuPitchOffset(0.0f),
@@ -225,19 +233,19 @@ struct Settings {
       i2cBusEnabled(true),
       ledBrightness(100),
       ledStartupEnabled(true),
-      ledStartupEffect(""),
-      ledStartupColor(""),
-      ledStartupColor2(""),
+      ledStartupEffect("rainbow"),
+      ledStartupColor("cyan"),
+      ledStartupColor2("magenta"),
       ledStartupDuration(1000),
       oledEnabled(false),
       localDisplayRequireAuth(true),
-      oledBootMode(""),
-      oledDefaultMode(""),
+      oledBootMode("logo"),
+      oledDefaultMode("status"),
       oledBootDuration(2000),
       oledUpdateInterval(125),
       oledBrightness(255),
       oledThermalScale(2.5f),
-      oledThermalColorMode(""),
+      oledThermalColorMode("3level"),
       gamepadAutoStart(false),
       thermalAutoStart(false),
       tofAutoStart(false),
@@ -262,9 +270,9 @@ struct Settings {
       microphoneSampleRate(16000),
       microphoneGain(70),
       microphoneBitDepth(16),
-      cameraBrightness(0),
-      cameraContrast(0),
-      cameraSaturation(0),
+      cameraBrightness(2),
+      cameraContrast(2),
+      cameraSaturation(2),
       cameraSharpness(0),
       cameraAELevel(0),
       cameraWBMode(0),
@@ -274,10 +282,12 @@ struct Settings {
       cameraVFlip(false),
       cameraQuality(12),
       cameraFramesize(10),  // 240x240 — see cameraFramesizeFromSetting in System_Camera_DVP.cpp for the index map
-      cameraStreamIntervalMs(200),
+      cameraStreamFps(5),
       g2StreamWidth(96),
       g2StreamHeight(96),
-      cameraStorageLocation(0),
+      g2StreamToneMap(true),
+      g2PackRateMs(80),
+      cameraStorageLocation(1),  // 1 = SD card (default — LittleFS is too small for photos)
       cameraCaptureFolder("/photos"),
       cameraAutoCapture(false),
       cameraAutoCaptureIntervalSec(60),
@@ -705,9 +715,12 @@ struct Settings {
   int microphoneGain;           // Software gain 0-100% (default 90)
   int microphoneBitDepth;       // Bit depth (16 or 32)
   // Camera image settings (persisted) - use int for settings system compatibility
-  int cameraBrightness;         // -2 to 2 (default 0)
-  int cameraContrast;           // -2 to 2 (default 0)
-  int cameraSaturation;         // -2 to 2 (default 0)
+  // OV3660 ships flat/washed-out, so we default brightness/contrast/saturation
+  // to +2 (the API max). User-validated empirically — see camerafx command +
+  // notes in System_Camera_DVP.cpp::initCamera.
+  int cameraBrightness;         // -2 to 2 (default +2)
+  int cameraContrast;           // -2 to 2 (default +2)
+  int cameraSaturation;         // -2 to 2 (default +2)
   int cameraSharpness;          // -2 to 2 (default 0, OV3660 only)
   int cameraAELevel;            // Auto-exposure level/compensation -2 to 2 (default 0)
   int cameraWBMode;             // White balance mode 0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home (default 0)
@@ -717,13 +730,27 @@ struct Settings {
   bool cameraVFlip;             // Vertical flip
   int cameraQuality;            // JPEG quality 0-63 (lower=better, default 12)
   int cameraFramesize;          // Setting-index (NOT esp_camera framesize_t). 10 = 240x240 default. See cameraFramesizeFromSetting().
-  int cameraStreamIntervalMs;   // MJPEG stream delay (ms) - lower=faster, default 200 (~5 fps)
+  int cameraStreamFps;          // Camera stream + recording FPS target (1-20, default 5). Drivers convert to ms internally.
   // G2 lens stream resolution. Caps at 288x144 (lens panel native size) and
   // floors at 16. Wider/taller = more Cmd=3 fragments per frame = lower fps;
   // user picks from a small preset list in the lens Camera Settings page.
   // Defaults match the legacy hardcoded gG2StreamW/H values (96x96).
   int g2StreamWidth;
   int g2StreamHeight;
+  // G2 lens stream auto-levels tone mapping. When true, the BMP build path
+  // does a per-frame luma min/max scan and linearly remaps to full 0..255
+  // range before quantizing to 4-bpp nibbles — recovers dynamic range on
+  // washed-out OV3660 frames that would otherwise quantize to a narrow
+  // band of similar-looking shades on the green-tinted lens panel.
+  bool g2StreamToneMap;
+  // Frame cadence (ms) for Q25 SD-pack BMP animations (gif→bmp packs).
+  // Independent of g2liverate (which paces the live-tile test probes) so
+  // tuning playback speed for animations doesn't interfere with the
+  // cinematic cadence used for test-suite comparisons. For small frames
+  // (32×32, 64×64) this is the actual frame-time floor; for larger frames
+  // the BLE push itself dominates and this value is effectively ignored.
+  // Default 80 ms ≈ 12 fps; CLI: g2packrate <ms>.
+  int g2PackRateMs;
   // Camera storage settings
   int cameraStorageLocation;    // 0=LittleFS, 1=SD, 2=Both
   String cameraCaptureFolder;   // Folder for saved images (default: "/photos")
