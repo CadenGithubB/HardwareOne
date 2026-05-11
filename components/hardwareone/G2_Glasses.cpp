@@ -10410,6 +10410,19 @@ static const char* cmd_g2connect(const String& argsInput) {
   G2Eye eye = G2_EYE_AUTO;
   if (arg == "left")       eye = G2_EYE_LEFT;
   else if (arg == "right") eye = G2_EYE_RIGHT;
+
+  // Pair-intent stamp from the CALLING task's identity. `openg2` from a
+  // logged-in CLI session IS the natural pairing gesture — the user is
+  // saying "these are my glasses." Stamp pairedByUser NOW, before the
+  // connect is dispatched to the g2_ble_connect worker. The worker runs
+  // as ANON; if we relied on `bleSavePeerMac`'s end-of-connect stamp,
+  // the [WARN][BT] SKIPPED path would fire and pairedByUser would stay
+  // blank — exactly the trap we hit before this change.
+  //
+  // Stamping eagerly means even if the actual BLE connect fails, we've
+  // captured intent. Idempotent: helper no-ops if already owned.
+  bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
+
   if (!g2Connect(eye)) {
     return gConnectTaskActive
            ? "G2: connect already in progress — wait or use closeg2"

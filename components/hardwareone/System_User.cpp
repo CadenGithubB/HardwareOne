@@ -258,6 +258,87 @@ void logoutTransport(CommandSource transport) {
   }
 }
 
+// ============================================================================
+// revokeUserSessions — force-logout helper used by user-mutation paths
+// ============================================================================
+//
+// Walks every transport's session state and clears any session belonging to
+// `username`. Optionally skips a single web SID (for self-password-change
+// where the user just authenticated with the new password and would be
+// annoyed to be kicked out of the session they're typing into) and/or skips
+// one transport entirely (same reason for serial/oled/bluetooth — those
+// transports use a single session-per-transport model, no SID).
+//
+// Callers:
+//   * cmd_user_delete  → revoke everywhere (account is gone)
+//   * cmd_user_demote  → revoke everywhere (was admin, now isn't —
+//                        existing session was running with admin perms)
+//   * cmd_user_changepassword → revoke everywhere EXCEPT the calling
+//                        session (self-service: credential rotated,
+//                        kick other devices but keep current alive)
+//   * cmd_user_resetpassword  → revoke everywhere (admin reset target's
+//                        password; admin's own session is a different
+//                        user, so no exception needed)
+//
+// This is intentionally NOT wired to gIdentityGeneration. The clock is for
+// permission-topology changes that invalidate auth-derived caches like
+// FileManager. Session revocation is a separate concern with its own
+// trigger points — calling it from mutators directly is cleaner than
+// bumping the clock and having a generic listener trawl sessions on
+// every cache-relevant event.
+int revokeUserSessions(const String& username,
+                       const String& reason,
+                       const String& exceptSid,
+                       CommandSource exceptTransport) {
+  if (username.length() == 0) return 0;
+  int revoked = 0;
+
+  // Web: walk gSessions, skip exceptSid if set.
+  if (gSessions) {
+    for (int i = 0; i < MAX_SESSIONS; ++i) {
+      if (!gSessions[i].sid.length()) continue;
+      if (!gSessions[i].user.equalsIgnoreCase(username)) continue;
+      if (exceptSid.length() > 0 && gSessions[i].sid == exceptSid) continue;
+      if (gSessions[i].ip.length() > 0) {
+        storeLogoutReason(gSessions[i].ip, reason);
+      }
+      enqueueTargetedRevokeForSessionIdx(i, reason);
+      revoked++;
+    }
+  }
+
+  // Serial transport: single per-device session, skipped if this is the
+  // calling transport (self-modify case).
+  if (exceptTransport != SOURCE_SERIAL
+      && gSerialAuthed
+      && gSerialUser.equalsIgnoreCase(username)) {
+    gSerialAuthed = false;
+    gSerialUser   = String();
+    revoked++;
+  }
+
+  // Local display (OLED).
+  if (exceptTransport != SOURCE_LOCAL_DISPLAY
+      && gLocalDisplayAuthed
+      && gLocalDisplayUser.equalsIgnoreCase(username)) {
+    gLocalDisplayAuthed = false;
+    gLocalDisplayUser   = String();
+    oledNotifyLocalDisplayAuthChanged();
+    revoked++;
+  }
+
+  // Bluetooth (its own session table inside the BT module).
+  if (exceptTransport != SOURCE_BLUETOOTH) {
+    revoked += bleRevokeUserSessions(username);
+  }
+
+  if (revoked > 0) {
+    WARN_USERF("[SESSION-REVOKE] user='%s' count=%d reason='%s'",
+               username.c_str(), revoked, reason.c_str());
+  }
+  return revoked;
+}
+
 bool isTransportAuthenticated(CommandSource transport) {
   switch (transport) {
     case SOURCE_SERIAL:
@@ -519,6 +600,9 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
     }
   }
 
+  // Identity topology changed (a new account is now usable). Invalidate
+  // any auth-dependent caches — see System_AuthIdentity.h for the protocol.
+  bumpIdentityGeneration("user.add");
   DEBUG_USERSF("[users] admin created user '%s' id=%u mustChange=%d", u.c_str(), (unsigned)createdUserId,
                mustChangeOnLogin ? 1 : 0);
   return true;
@@ -995,6 +1079,12 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     }
   }
 
+  // Identity topology changed (pending account is now real and usable).
+  // Note: userrequest/userdeny do NOT bump — pending accounts can't
+  // authenticate, so their existence/removal doesn't change "who can read
+  // what." Approval is when the account first matters. See
+  // System_AuthIdentity.h for the full bump-site list.
+  bumpIdentityGeneration("user.approve");
   BROADCAST_PRINTF("[admin] Approved user: %s", username.c_str());
 
   // If NTP already synced, resolve the creation timestamp immediately
@@ -1180,6 +1270,9 @@ static bool promoteUserToAdminInternal(const String& username, String& errorOut)
     errorOut = "Failed to write users.json";
     return false;
   }
+  // Identity topology changed (user gained admin permissions). Invalidate
+  // any auth-dependent caches — see System_AuthIdentity.h for the protocol.
+  bumpIdentityGeneration("user.promote");
   BROADCAST_PRINTF("[admin] Promoted user to admin: %s", username.c_str());
 
   // Serial admin status now checked in real-time via isAdminUser()
@@ -1293,12 +1386,24 @@ static bool demoteUserFromAdminInternal(const String& username, String& errorOut
     errorOut = "Failed to write users.json";
     return false;
   }
-  BROADCAST_PRINTF("[admin] Demoted user from admin: %s", username.c_str());
-
-  // Serial admin status now checked in real-time via isAdminUser()
+  // Identity topology changed (user lost admin permissions). Invalidate
+  // any auth-dependent caches — see System_AuthIdentity.h for the protocol.
+  bumpIdentityGeneration("user.demote");
+  // Force-logout the demoted user across all transports. Per the design:
+  // a session that was running with admin privileges should NOT silently
+  // continue with reduced privileges — the admin who clicked "demote"
+  // expects immediate effect. The user re-authenticates and resumes
+  // with their now-correct non-admin permissions.
+  //
+  // Self-demote case: if the calling admin is demoting themselves, they
+  // get kicked too. That's intentional — they explicitly asked for the
+  // change and the principle of least surprise is "demote takes effect
+  // immediately, no exceptions."
   if (gSerialAuthed && gSerialUser == username) {
     broadcastOutput("[serial] Your admin privileges have been revoked");
   }
+  revokeUserSessions(username, "Your admin privileges have been revoked. Please log in again.");
+  BROADCAST_PRINTF("[admin] Demoted user from admin: %s", username.c_str());
 
   return true;
 }
@@ -1420,7 +1525,22 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
     errorOut = "Failed to write users.json";
     return false;
   }
-  
+  // Identity topology changed (user removed — their permission set
+  // evaporates). Invalidate any auth-dependent caches — see
+  // System_AuthIdentity.h for the protocol.
+  bumpIdentityGeneration("user.delete");
+  // Forcibly log out every active session for the deleted user across
+  // all transports (web/serial/oled/bluetooth). No exception filter:
+  // the account is gone, so even if the calling admin is themselves
+  // the user being deleted, kick them too. revokeUserSessions returns
+  // the count and emits [SESSION-REVOKE] to the audit log; we just
+  // need a per-transport user-facing notice on serial in addition.
+  if (gSerialAuthed && gSerialUser.equalsIgnoreCase(username)) {
+    broadcastOutput("[serial] Your account has been deleted. You have been logged out.");
+  }
+  int revokedSessions =
+      revokeUserSessions(username, "Account deleted by administrator");
+
   // Delete user settings file (contains password and preferences)
   if (userId > 0) {
     String settingsPath = getUserSettingsPath(userId);
@@ -1428,31 +1548,6 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
       VFS::removeGuarded(settingsPath.c_str(), VFS::systemAuth("user.settings.remove"));
       DEBUG_USERSF("[users] Deleted settings file for userId=%u", (unsigned)userId);
     }
-  }
-
-  // Force logout all sessions for the deleted user
-  int revokedSessions = 0;
-  String reason = "Account deleted by administrator";
-
-#if ENABLE_HTTP_SERVER
-  // Revoke web sessions
-  for (int i = 0; i < MAX_SESSIONS; ++i) {
-    if (!gSessions[i].sid.length()) continue;
-    if (!gSessions[i].user.equalsIgnoreCase(username)) continue;
-    if (gSessions[i].ip.length() > 0) {
-      storeLogoutReason(gSessions[i].ip, reason);
-    }
-    enqueueTargetedRevokeForSessionIdx(i, reason);
-    revokedSessions++;
-  }
-#endif
-
-  // Force logout serial session if this user is logged in
-  if (gSerialAuthed && gSerialUser.equalsIgnoreCase(username)) {
-    gSerialAuthed = false;
-    gSerialUser = String();
-    broadcastOutput("[serial] Your account has been deleted. You have been logged out.");
-    revokedSessions++;  // Count serial session too
   }
 
   if (revokedSessions > 0) {
@@ -1594,6 +1689,18 @@ const char* cmd_user_changepassword(const String& argsInput) {
     return getDebugBuffer();
   }
 
+  // Force-logout the user's OTHER sessions across all transports —
+  // their credentials just rotated. Keep the calling session alive
+  // (they just authenticated with the new password; kicking them
+  // immediately would be bad UX). No clock bump: password change
+  // does not change permission topology, so auth-derived caches
+  // (FileManager etc.) don't need to invalidate.
+  const AuthContext& caller = currentAuthContext();
+  revokeUserSessions(username,
+                     "Your password was changed. Please log in again.",
+                     caller.sid,         // skip current web SID (if any)
+                     caller.transport);  // skip current transport's session
+
   if (!ensureDebugBuffer()) return "Password changed successfully";
   snprintf(getDebugBuffer(), 1024, "Password changed successfully for user '%s'", username.c_str());
   return getDebugBuffer();
@@ -1622,7 +1729,14 @@ const char* cmd_user_resetpassword(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to reset password for user '%s'", username.c_str());
     return getDebugBuffer();
   }
-  
+
+  // Force-logout target user's sessions everywhere. Admin's own session
+  // is a different user, so no exception filter — the target gets
+  // kicked from every transport and must log in with the new password.
+  // No clock bump: password reset does not change permission topology.
+  revokeUserSessions(username,
+                     "Your password was reset by an administrator. Please log in again.");
+
   if (!ensureDebugBuffer()) return "Password reset successfully";
   snprintf(getDebugBuffer(), 1024, "Password reset successfully for user '%s'%s", username.c_str(),
            mustChange ? " (must change password on next login)" : "");

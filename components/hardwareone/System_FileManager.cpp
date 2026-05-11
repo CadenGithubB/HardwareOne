@@ -63,6 +63,31 @@ bool FileManager::navigate(const char* path) {
   return loadDirectory();
 }
 
+bool FileManager::refresh() {
+  // Cache-invalidation against the identity generation counter. See
+  // System_AuthIdentity.h for the full protocol — this is the canonical
+  // consumer site, so the logic is worth reading.
+  //
+  // Two cases re-fill:
+  //   1. loadedAtGen_ == 0: we've never successfully loaded under any
+  //      identity (e.g. first-ever Files-menu tap, or every prior load
+  //      hit PERM DENY). Always retry.
+  //   2. loadedAtGen_ != gIdentityGeneration: a producer (pairing, user
+  //      add/del/promote/demote) bumped the counter since we last filled
+  //      the cache. Re-fill under the now-current permission topology.
+  //
+  // Otherwise the cache is still authoritative — return without a scan.
+  // This is the hot path: typical menu redraw, returning from a file
+  // viewer, scrolling. Re-scanning these would compound per-entry
+  // VFS::openGuarded permission checks into 1-2 s of menu latency.
+  const uint32_t curGen =
+      gIdentityGeneration.load(std::memory_order_acquire);
+  if (loadedAtGen_ != 0 && loadedAtGen_ == curGen) return true;
+  cacheValid = false;
+  state.dirty = true;
+  return loadDirectory();
+}
+
 bool FileManager::navigateUp() {
   // Find last slash
   char* lastSlash = strrchr(state.currentPath, '/');
@@ -374,6 +399,7 @@ bool FileManager::loadDirectory() {
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
     gSensorPollingPaused = wasPaused;
+    loadedAtGen_ = 0;  // mark "never loaded ok" — refresh() will retry
     return false;
   }
 
@@ -466,6 +492,9 @@ bool FileManager::loadDirectory() {
 
   dir.close();
   cacheValid = true;
+  // Tag the cache with the generation it was filled under. refresh() reads
+  // this and re-fills only when gIdentityGeneration has advanced past it.
+  loadedAtGen_ = gIdentityGeneration.load(std::memory_order_acquire);
   ensureValidSelection();
   state.dirty = false;
 

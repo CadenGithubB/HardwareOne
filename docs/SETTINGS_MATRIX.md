@@ -43,9 +43,9 @@ _hand-edit; re-run after changes to the settings registry._
 |  | ESP-NOW target device name | `cameraTargetDevice` | `` | STRING |
 |  | Enable auto-capture | `cameraAutoCapture` | `` | BOOL |
 |  | Send to target after capture | `cameraSendAfterCapture` | `` | BOOL |
-| Image (`image`) | Horizontal mirror | `cameraHMirror` | `` | BOOL |
+| Image (`image`) | Camera FPS (higher=smoother) | `cameraStreamFps` | `camerafps` | INT |
+|  | Horizontal mirror | `cameraHMirror` | `` | BOOL |
 |  | JPEG quality (0-63, lower=better) | `cameraQuality` | `` | INT |
-|  | Stream interval ms (lower=faster) | `cameraStreamIntervalMs` | `` | INT |
 |  | Vertical flip | `cameraVFlip` | `` | BOOL |
 | Storage (`storage`) | Max images (0=unlimited) | `cameraMaxStoredImages` | `` | INT |
 |  | Photo folder path | `cameraCaptureFolder` | `` | STRING |

@@ -39,25 +39,29 @@ void setNotificationContext(uint8_t source, const char* subsource = nullptr);
 // Clear the source context (call after command completes)
 void clearNotificationContext();
 
-// RAII guard — sets the notification context on construction and clears it
-// automatically when the guard goes out of scope, covering every return path.
+// RAII guard — installs the notification context on construction and
+// restores the prior context on destruction (save/restore, NOT
+// clear-to-UNKNOWN). Nested guards within a single task now compose
+// correctly: an inner guard's destructor puts back the outer guard's
+// values, not zeros. Per-task storage means concurrent tasks each have
+// their own context without interference.
 //
 // Use this instead of manual set/clear pairs:
 //   NotificationContextGuard guard(NOTIF_SOURCE_WEB, "hub");
-//   // ... any early returns, throws, etc. all clear cleanly
+//   // ... any early returns, throws, etc. all restore cleanly
 //
 struct NotificationContextGuard {
-  NotificationContextGuard(uint8_t source, const char* subsource = nullptr) {
-    setNotificationContext(source, subsource);
-  }
-  ~NotificationContextGuard() {
-    clearNotificationContext();
-  }
+  NotificationContextGuard(uint8_t source, const char* subsource = nullptr);
+  ~NotificationContextGuard();
   // Stack-only: prevent copy and move so the destructor fires exactly once
   NotificationContextGuard(const NotificationContextGuard&) = delete;
   NotificationContextGuard& operator=(const NotificationContextGuard&) = delete;
   NotificationContextGuard(NotificationContextGuard&&) = delete;
   NotificationContextGuard& operator=(NotificationContextGuard&&) = delete;
+
+ private:
+  uint8_t savedSource_;
+  char    savedSubsource_[32];
 };
 
 // ============================================================================

@@ -63,6 +63,24 @@ bool isTransportAuthenticated(CommandSource transport);
 String getTransportUser(CommandSource transport);
 bool isTransportAdmin(CommandSource transport);
 
+// Force-logout every session belonging to `username` across all transports.
+// Returns count of sessions revoked. Called by user-mutation paths (delete,
+// demote, password-change/reset) — see definition for the full rationale
+// and the relationship to gIdentityGeneration (they are separate mechanisms;
+// this one is for kicking sessions, the clock is for invalidating caches).
+//
+// `exceptSid` (web only): keep this specific web SID alive even if it
+//   matches `username`. Used by self-password-change to keep the calling
+//   session active.
+// `exceptTransport`: keep this whole transport's session alive (the
+//   non-web transports use one-session-per-transport, so SID isn't enough
+//   to distinguish). Pass the calling task's transport when the caller is
+//   themselves the user being modified.
+int revokeUserSessions(const String& username,
+                       const String& reason,
+                       const String& exceptSid       = String(),
+                       CommandSource exceptTransport = SOURCE_INTERNAL);
+
 // Credentials validation helpers (moved from main .ino)
 bool isValidUser(const String& username, const String& password);
 bool verifyUserPassword(const String& inputPassword, const String& storedHash);
@@ -114,6 +132,30 @@ bool loadUsersFromFile(String& outUser, String& outPass);
 // ============================================================================
 // User Command Handlers (implemented in user_system.cpp)
 // ============================================================================
+//
+// TWO PROTOCOLS LIVE HERE: CLOCK BUMPS + SESSION REVOCATION
+// ---------------------------------------------------------
+// These are SEPARATE mechanisms. A command may use both, one, or neither:
+//
+//   * bumpIdentityGeneration(reason) — "permission topology changed,
+//     auth-derived caches need to invalidate." See System_AuthIdentity.h
+//     for the full protocol. Bumped when: a user is created/deleted, a
+//     role changes (promote/demote), or peer ownership stamps (BLE pair).
+//     NOT bumped on login/logout (sessions), password change/reset
+//     (creds rotated but perms unchanged), or userrequest/userdeny
+//     (pending acct has no perms).
+//
+//   * revokeUserSessions(user, reason [, except…]) — "kick this user
+//     out of every active session." See System_User.cpp::revokeUserSessions
+//     definition for the design. Called when: a user is deleted, demoted
+//     from admin, or has their password changed/reset. NOT called on
+//     promote (gained access, no kick needed) or add/approve (no sessions
+//     existed before the account did).
+//
+// Annotations on each cmd_user_* below show which protocols fire. When
+// adding a new mutator here, decide both questions independently:
+//   - "Does the permission topology change?" → bump or don't.
+//   - "Should affected users be kicked out?" → revoke or don't.
 
 const char* cmd_login(const String& argsInput);
 const char* cmd_logout(const String& argsInput);
@@ -121,20 +163,20 @@ const char* cmd_logout(const String& argsInput);
 // Export command registry for system_utils.cpp
 extern const CommandEntry userSystemCommands[];
 extern const size_t userSystemCommandsCount;
-const char* cmd_user_approve(const String& argsInput);
-const char* cmd_user_deny(const String& argsInput);
-const char* cmd_user_promote(const String& argsInput);
-const char* cmd_user_demote(const String& argsInput);
-const char* cmd_user_delete(const String& argsInput);
-const char* cmd_user_changepassword(const String& argsInput);
-const char* cmd_user_resetpassword(const String& argsInput);
-const char* cmd_user_add(const String& argsInput);
+const char* cmd_user_approve(const String& argsInput);   // bump        — approval makes account real
+const char* cmd_user_deny(const String& argsInput);      // —           — pending acct had no perms or sessions
+const char* cmd_user_promote(const String& argsInput);   // bump        — gains admin perms (no kick: gained access)
+const char* cmd_user_demote(const String& argsInput);    // bump+revoke — admin session must restart with lower perms
+const char* cmd_user_delete(const String& argsInput);    // bump+revoke — account is gone, kick everywhere
+const char* cmd_user_changepassword(const String& argsInput);  // revoke other — keep calling session, kick the rest
+const char* cmd_user_resetpassword(const String& argsInput);   // revoke       — admin reset target's creds
+const char* cmd_user_add(const String& argsInput);       // bump        — new usable account exists (no sessions yet)
 const char* cmd_user_list(const String& argsInput);
-const char* cmd_user_request(const String& argsInput);
+const char* cmd_user_request(const String& argsInput);   // —           — pending, can't auth yet
 const char* cmd_user_sync(const String& argsInput);
 const char* cmd_pending_list(const String& argsInput);
 const char* cmd_session_list(const String& argsInput);
-const char* cmd_session_revoke(const String& argsInput);
+const char* cmd_session_revoke(const String& argsInput); // manual revoke — uses revokeUserSessions internally
 
 // ============================================================================
 // Boot Sequence Management

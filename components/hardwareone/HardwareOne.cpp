@@ -744,13 +744,15 @@ bool hasAdminPrivilege(const AuthContext& ctx) {
 // CommandOrigin, CommandContext, Command, ExecReq, ExecAsyncCallback, CmdOutputMask
 // are defined in System_CommandTypes.h (included at top of file)
 
-// Global current command context (set during command execution)
-// Exposed as void* so System_Debug.cpp can check outputMask without knowing CommandContext type
-void* gCurrentCommandContext = nullptr;
-
+// Per-task current command context lives in the calling task's TLS slot
+// (Stage 3) — was a shared void* global, which routed background-task
+// broadcasts to whichever WebSocket session cmd_exec was currently serving.
+// Accessor lives in System_AuthIdentity; getCurrentCommandOutputMask() is
+// the convenience wrapper for the broadcastOutput route-mask computation.
 uint32_t getCurrentCommandOutputMask() {
-  if (!gCurrentCommandContext) return 0xFFFFFFFF;
-  return ((CommandContext*)gCurrentCommandContext)->outputMask;
+  void* ctx = currentCommandContext();
+  if (!ctx) return 0xFFFFFFFF;
+  return ((CommandContext*)ctx)->outputMask;
 }
 
 // Per-command identity install lives inside executeCommand via
@@ -784,24 +786,22 @@ static void commandExecTask(void* pv) {
       DEBUG_CMD_FLOWF("[cmd_exec] exec '%.80s' user='%s' heap=%lu",
                   r->line, r->ctx.auth.user.c_str(), (unsigned long)ESP.getFreeHeap());
       
-      gCurrentCommandContext = &r->ctx;
+      setCurrentCommandContext(&r->ctx);
       bool prevValidate = gCLIValidateOnly;
       gCLIValidateOnly = r->ctx.validateOnly;
 
       // Set up output capture if requested (for HTTP responses that need
       // the actual broadcast output, not just the return code).
       // Heap-allocate the capture buffer to avoid blowing cmd_exec_task stack.
+      // Per-task TLS now — broadcastOutput on other tasks won't see this
+      // buffer and won't append into it.
       static constexpr size_t CAPTURE_BUF_SIZE = 4096;
       char* captureBuf = nullptr;
       if (r->ctx.captureOutput) {
         captureBuf = (char*)malloc(CAPTURE_BUF_SIZE);
         if (captureBuf) {
           captureBuf[0] = '\0';
-          extern char* gCmdCaptureBuf;
-          extern size_t gCmdCaptureLen, gCmdCaptureCap;
-          gCmdCaptureBuf = captureBuf;
-          gCmdCaptureLen = 0;
-          gCmdCaptureCap = CAPTURE_BUF_SIZE;
+          setCaptureBuffer(captureBuf, CAPTURE_BUF_SIZE);
         }
       }
 
@@ -809,20 +809,20 @@ static void commandExecTask(void* pv) {
 
       // Tear down capture and merge captured output into r->out
       if (captureBuf) {
-        extern char* gCmdCaptureBuf;
-        extern size_t gCmdCaptureLen;
-        gCmdCaptureBuf = nullptr;
-        if (gCmdCaptureLen > 0) {
+        CaptureBufState* capState = currentCaptureState();
+        size_t capturedLen = capState ? capState->len : 0;
+        clearCaptureBuffer();
+        if (capturedLen > 0) {
           bool trivialReturn = (strcmp(r->out, "OK") == 0);
           if (trivialReturn) {
             // Replace "OK" with the captured output
-            size_t copyLen = gCmdCaptureLen < sizeof(r->out) - 1 ? gCmdCaptureLen : sizeof(r->out) - 1;
+            size_t copyLen = capturedLen < sizeof(r->out) - 1 ? capturedLen : sizeof(r->out) - 1;
             memcpy(r->out, captureBuf, copyLen);
             r->out[copyLen] = '\0';
           } else {
             // Prepend captured output to the return value.
             // Shift existing r->out right to make room, then copy capture in front.
-            size_t capLen = gCmdCaptureLen;
+            size_t capLen = capturedLen;
             size_t retLen = strlen(r->out);
             size_t maxOut = sizeof(r->out) - 1;
             if (capLen + retLen > maxOut) {
@@ -838,7 +838,7 @@ static void commandExecTask(void* pv) {
       }
 
       gCLIValidateOnly = prevValidate;
-      gCurrentCommandContext = nullptr;
+      clearCurrentCommandContext();
       DEBUG_CMD_FLOWF("[cmd_exec] done ok=%d out_len=%zu heap=%lu",
                   r->ok ? 1 : 0, strlen(r->out), (unsigned long)ESP.getFreeHeap());
       
@@ -889,8 +889,10 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   uint8_t route = (uint8_t)(ctx.outputMask & (MSG_ROUTE_SERIAL | MSG_ROUTE_WEB | MSG_ROUTE_FILE | MSG_ROUTE_BLE))
                 | MSG_ROUTE_OLED | MSG_ROUTE_G2;
 
-  // Pass explicit route to broadcastOutputCore (gCurrentCommandContext is
-  // already NULL at this point since command execution is complete).
+  // Pass explicit route to broadcastOutputCore — this runs AFTER the
+  // command's per-task currentCommandContext has been cleared, so the
+  // implicit fallback would be MSG_ROUTE_ALL. Use the ctx we already
+  // have to compute the correct route instead.
   extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
   broadcastOutputCore_Routed(prefixed.c_str(), prefixed.length(), route);
 

@@ -2987,12 +2987,11 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
     }
     // executeCommand installs the command identity via ExecIdentityGuard, so
     // the early-boot direct path no longer needs an outer save/restore. The
-    // void* gCurrentCommandContext pointer is still wired explicitly for the
-    // broadcast-output mask plumbing.
-    extern void* gCurrentCommandContext;
-    gCurrentCommandContext = (void*)&cmd.ctx;
+    // current command context pointer is still wired explicitly for the
+    // broadcast-output mask plumbing — per-task TLS now (Stage 3).
+    setCurrentCommandContext((void*)&cmd.ctx);
     bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, 2048);
-    gCurrentCommandContext = nullptr;
+    clearCurrentCommandContext();
     out = outBuf;
     free(outBuf);
     return ok;

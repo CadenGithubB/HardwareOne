@@ -12,6 +12,19 @@
 // kFileInfoOverlayMs the tick handler swaps back to the list. We can't get a
 // "list still showing" signal from the lens, so we fudge it with a millis()
 // timer that ticks from g2FilesTick().
+//
+// IDENTITY / CACHE INVALIDATION
+// -----------------------------
+// FileManager caches directory entries, and those entries depend on the
+// calling task's auth identity (VFS::openGuarded permission checks per
+// entry). The cache is invalidated via the identity-generation protocol
+// — see System_AuthIdentity.h for the full doc block. The short version:
+// every time g2ShowFilesMenu runs we call fm->refresh(), which is a
+// no-op when the cache's generation matches gIdentityGeneration and a
+// re-scan otherwise. Producers (pairing, user add/del/promote/demote)
+// bump the generation, so the next refresh() picks up the new picture.
+// If you add a new caching subsystem that depends on auth, follow the
+// same pattern.
 
 #include "G2_Page_Files.h"
 
@@ -591,6 +604,17 @@ void g2ShowFilesMenu() {
   // the task's TLS identity stays at ANON (the safe default) and
   // FileManager::navigate() denies every read.
   G2HijackCtxGuard ctxGuard;
+
+  // Re-scan the current directory under the now-installed identity. The
+  // FileManager is a per-boot singleton: its first navigate("/") happens
+  // on the very first Files tap, and if that tap ran with ANON
+  // (pairedByUser blank — pre-pairing or stuck-state — the cache lands
+  // at totalItems=0 and would stay there for the rest of the boot, even
+  // after pairing is fixed. refresh() rebuilds the entry list without
+  // touching scroll/selection state. Cheap, runs once per menu (re-)entry.
+  if (FileManager* fmRefresh = ensureFm()) {
+    fmRefresh->refresh();
+  }
 
   // Whenever the real file list comes back up, the chooser is
   // unconditionally gone — covers the View/Info → Back path, the
