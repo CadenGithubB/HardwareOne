@@ -17,6 +17,11 @@
 
 #include <Arduino.h>
 #include <cstdio>
+#include <cstring>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/idf_additions.h"  // vTaskSetThreadLocalStoragePointerAndDelCallback
 
 // Real impl in WebServer_Server.cpp; inline no-op stub when HTTP server disabled
 #if ENABLE_HTTP_SERVER
@@ -26,30 +31,112 @@
 #endif
 
 // ============================================================================
-// Notification Source Context Tracking
+// Notification Source Context — per-task TLS
 // ============================================================================
+//
+// Each FreeRTOS task gets its own (source, subsource) tuple. Solves two
+// long-standing bugs in one move:
+//
+//   1. Cross-task interference. Pre-refactor the context was a shared
+//      global; task A setting source=WEB stomped task B's view, so a
+//      notification fired from B got misattributed to A.
+//
+//   2. Nested-guard destructor clobber. Pre-refactor
+//      NotificationContextGuard's dtor cleared the global to
+//      {UNKNOWN, ""}. An inner guard's dtor wiped the outer guard's
+//      state — RAII looked correct but didn't compose. Now the guard
+//      saves prior values on ctor and restores them on dtor; nesting
+//      works.
+//
+// Slot coordination:
+//   slot 0 — ESP-IDF pthread (PTHREAD_TLS_INDEX in
+//            components/pthread/pthread_local_storage.c). DO NOT use.
+//   slot 1 — auth identity (System_AuthIdentity.cpp).
+//   slot 2 — this module.
+//   slot 3 — unused (CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS=4).
+//
+// Future TLS users: claim slot 3 and update this comment + the matching
+// note in System_AuthIdentity.cpp.
 
-// Global context for tracking the source of the current command/action
-static struct {
-  uint8_t source;
-  char subsource[32];
-} gNotificationContext = { NOTIF_SOURCE_UNKNOWN, "" };
+static constexpr BaseType_t kNotifTlsSlot = 2;
 
-// Set notification context (called before executing commands)
+namespace {
+
+struct NotifContext {
+  uint8_t source = NOTIF_SOURCE_UNKNOWN;
+  char    subsource[32] = {};
+};
+
+const NotifContext& anonSentinel() {
+  static const NotifContext kAnon{};
+  return kAnon;
+}
+
+void deleteNotifContext(int /*index*/, void* p) {
+  delete static_cast<NotifContext*>(p);
+}
+
+NotifContext* getOrCreateSlot() {
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  if (!self) return nullptr;  // pre-scheduler
+  NotifContext* slot = static_cast<NotifContext*>(
+      pvTaskGetThreadLocalStoragePointer(self, kNotifTlsSlot));
+  if (!slot) {
+    slot = new NotifContext{};
+    vTaskSetThreadLocalStoragePointerAndDelCallback(
+        self, kNotifTlsSlot, slot, deleteNotifContext);
+  }
+  return slot;
+}
+
+const NotifContext* getSlotReadOnly() {
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  if (!self) return &anonSentinel();
+  NotifContext* slot = static_cast<NotifContext*>(
+      pvTaskGetThreadLocalStoragePointer(self, kNotifTlsSlot));
+  return slot ? slot : &anonSentinel();
+}
+
+}  // namespace
+
 void setNotificationContext(uint8_t source, const char* subsource) {
-  gNotificationContext.source = source;
+  NotifContext* slot = getOrCreateSlot();
+  if (!slot) return;  // pre-scheduler — no-op (no task to attribute to)
+  slot->source = source;
   if (subsource && subsource[0]) {
-    strncpy(gNotificationContext.subsource, subsource, sizeof(gNotificationContext.subsource) - 1);
-    gNotificationContext.subsource[sizeof(gNotificationContext.subsource) - 1] = '\0';
+    strncpy(slot->subsource, subsource, sizeof(slot->subsource) - 1);
+    slot->subsource[sizeof(slot->subsource) - 1] = '\0';
   } else {
-    gNotificationContext.subsource[0] = '\0';
+    slot->subsource[0] = '\0';
   }
 }
 
-// Clear notification context (called after command completes)
+// Legacy clear-to-UNKNOWN entry. The RAII guard no longer calls this
+// (it does save/restore); kept for any direct callers that want the
+// old "reset to unknown" semantics. New code should use the guard.
 void clearNotificationContext() {
-  gNotificationContext.source = NOTIF_SOURCE_UNKNOWN;
-  gNotificationContext.subsource[0] = '\0';
+  NotifContext* slot = getOrCreateSlot();
+  if (!slot) return;
+  slot->source = NOTIF_SOURCE_UNKNOWN;
+  slot->subsource[0] = '\0';
+}
+
+NotificationContextGuard::NotificationContextGuard(uint8_t source, const char* subsource)
+    : savedSource_(NOTIF_SOURCE_UNKNOWN),
+      savedSubsource_{} {
+  NotifContext* slot = getOrCreateSlot();
+  if (slot) {
+    savedSource_ = slot->source;
+    memcpy(savedSubsource_, slot->subsource, sizeof(savedSubsource_));
+  }
+  setNotificationContext(source, subsource);
+}
+
+NotificationContextGuard::~NotificationContextGuard() {
+  NotifContext* slot = getOrCreateSlot();
+  if (!slot) return;
+  slot->source = savedSource_;
+  memcpy(slot->subsource, savedSubsource_, sizeof(slot->subsource));
 }
 
 // Convert level string to numeric level for notification queue
@@ -68,11 +155,14 @@ static void notifyWeb(const char* level, const char* msg, uint32_t ms = 4000) {
   snprintf(json, sizeof(json), "{\"level\":\"%s\",\"msg\":\"%s\",\"ms\":%u}",
            level, msg, (unsigned)ms);
   broadcastEventToAllSessions("notification", json);
-  
-  // Add to persistent OLED notification queue with source context
+
+  // Add to persistent OLED notification queue with source context. Reads
+  // the calling task's TLS slot — concurrent notifications on other tasks
+  // have their own independent contexts.
   #if ENABLE_OLED_DISPLAY
-  oledNotificationAdd(msg, levelToNum(level), gNotificationContext.source, 
-                      gNotificationContext.subsource[0] ? gNotificationContext.subsource : nullptr);
+  const NotifContext& nctx = *getSlotReadOnly();
+  oledNotificationAdd(msg, levelToNum(level), nctx.source,
+                      nctx.subsource[0] ? nctx.subsource : nullptr);
   #endif
 }
 

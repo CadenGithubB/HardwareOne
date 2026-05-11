@@ -448,11 +448,10 @@ void broadcastOutput(const char* s);
 struct CommandContext;
 void broadcastOutput(const String& s, const CommandContext& ctx);
 
-// Output capture: when active, broadcastOutput also appends to this buffer.
-// Used by cmd_exec_task to capture command output for HTTP responses.
-extern char* gCmdCaptureBuf;
-extern size_t gCmdCaptureLen;
-extern size_t gCmdCaptureCap;
+// Output capture is now per-task (System_AuthIdentity.h). Use
+// setCaptureBuffer() / clearCaptureBuffer() / currentCaptureState() instead
+// of the previous gCmdCaptureBuf/Len/Cap globals — those routed cross-task
+// broadcasts into whichever buffer cmd_exec_task had set.
 
 void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...);
 
@@ -678,6 +677,7 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define WARN_MAPSF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][MAPS] "    fmt, ##__VA_ARGS__); } while (0)
 #define WARN_IMUF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][IMU] "     fmt, ##__VA_ARGS__); } while (0)
 #define WARN_MQTTF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][MQTT] "    fmt, ##__VA_ARGS__); } while (0)
+#define WARN_BLUETOOTHF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][BT] " fmt, ##__VA_ARGS__); } while (0)
 
 // INFO macros - Optional (controlled by debug flags)
 #define INFO_CAMERAF(fmt, ...)       do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_CAMERA | DEBUG_CAMERA_LIFECYCLE, "[INFO][CAMERA] " fmt, ##__VA_ARGS__); } while (0)

@@ -264,7 +264,14 @@ Available debug modules (type `help debug` on device for full list):
 | `debugespnowmetadata` | Metadata REQ/RESP/PUSH pipeline |
 | `debugmqtt` | MQTT publish/subscribe |
 | `debugautomations` | Automation scheduling and execution |
-| `debugsensors` | Sensor polling and data |
+| `debuggps` | GPS NMEA parsing and fix events |
+| `debugrtc` | RTC reads/writes and drift |
+| `debugimu` | IMU polling, calibration, motion events |
+| `debugthermal` | Thermal sensor frames and events |
+| `debugtof` | Time-of-flight ranging |
+| `debugapds` | APDS gesture/proximity/colour |
+| `debuggamepad` | Gamepad button/axis events |
+| `debugpresence` | Presence sensor activity |
 | `debugstorage` | Filesystem read/write |
 | `debugcli` | Command execution flow |
 | `debugauth` | Authentication events |

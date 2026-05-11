@@ -1275,7 +1275,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
       var pe=null,ce=[];
       ge.forEach(function(e){if(e.key==='enabled')pe=e;else ce.push(e);});
       var gd=dbg[gn]||{},anyOn=false;
-      ge.forEach(function(e){if(gd[e.key])anyOn=true;});
+      ge.forEach(function(e){if(e.type!=='int'&&e.type!=='float'&&gd[e.key])anyOn=true;});
       // Group-level hint: prefer the 'enabled' entry's help text; fall back to generic.
       var groupTip = '';
       if (pe) groupTip = helpFor(pe.cmdKey || pe.key, gn, true);

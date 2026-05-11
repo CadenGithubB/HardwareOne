@@ -18,6 +18,7 @@
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
+#include "System_AuthIdentity.h"  // currentCommandContext / currentCaptureState
 #include "WebServer_Utils.h"
 #include "System_ESPSR.h"  // srSyncDebugLevel()
 
@@ -563,14 +564,14 @@ void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
 // Broadcast Output Functions
 // ============================================================================
 
-// Global current command context (set during command execution, checked here)
-extern void* gCurrentCommandContext;  // Forward declare - actual type is CommandContext*
-extern uint32_t getCurrentCommandOutputMask();  // Helper to get outputMask from context
+// Per-task current command context lives in System_AuthIdentity's TLS slot.
+// Read via currentCommandContext() (returns void*); the outputMask helper
+// is getCurrentCommandOutputMask() in HardwareOne.cpp.
+extern uint32_t getCurrentCommandOutputMask();
 
-// Output capture buffer (set by cmd_exec_task when captureOutput is requested)
-char* gCmdCaptureBuf = nullptr;
-size_t gCmdCaptureLen = 0;
-size_t gCmdCaptureCap = 0;
+// Output capture state lives in the calling task's TLS slot too (Stage 3).
+// Access via currentCaptureState() — returns nullptr for tasks that never
+// set a capture buffer, in which case broadcastOutput skips capture.
 
 // ============================================================================
 // broadcastOutputCore — single implementation for all broadcast overloads
@@ -580,24 +581,29 @@ size_t gCmdCaptureCap = 0;
 // (String, const char*) are thin wrappers that call this.
 //
 // routeOverride: when non-zero, used as the MSG_ROUTE_* mask directly.
-//   When zero, route is computed from gCurrentCommandContext->outputMask
-//   (or MSG_ROUTE_ALL if no command context is active).
+//   When zero, route is computed from currentCommandContext()->outputMask
+//   for the calling task (or MSG_ROUTE_ALL if no command context is active
+//   on this task — most non-cmd_exec tasks).
 //
 static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverride) {
   // 1. Suppress output in validation mode
   if (gCLIValidateOnly) return;
 
-  // 2. Capture output if active (used for HTTP response with capture=1)
-  if (gCmdCaptureBuf && gCmdCaptureLen < gCmdCaptureCap) {
-    size_t avail = gCmdCaptureCap - gCmdCaptureLen - 1;  // leave room for NUL
+  // 2. Capture output if active (used for HTTP response with capture=1).
+  //    Per-task state — only the task that ran setCaptureBuffer() captures
+  //    its own broadcasts. Other tasks' broadcasts are not appended into
+  //    this buffer, fixing the cross-task contamination bug.
+  if (CaptureBufState* cap = currentCaptureState();
+      cap && cap->buf && cap->len < cap->cap) {
+    size_t avail = cap->cap - cap->len - 1;  // leave room for NUL
     size_t copyLen = len < avail ? len : avail;
     if (copyLen > 0) {
-      memcpy(gCmdCaptureBuf + gCmdCaptureLen, text, copyLen);
-      gCmdCaptureLen += copyLen;
-      if (gCmdCaptureLen < gCmdCaptureCap - 1) {
-        gCmdCaptureBuf[gCmdCaptureLen++] = '\n';
+      memcpy(cap->buf + cap->len, text, copyLen);
+      cap->len += copyLen;
+      if (cap->len < cap->cap - 1) {
+        cap->buf[cap->len++] = '\n';
       }
-      gCmdCaptureBuf[gCmdCaptureLen] = '\0';
+      cap->buf[cap->len] = '\0';
     }
   }
 
@@ -623,8 +629,10 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
   uint8_t route;
   if (routeOverride) {
     route = routeOverride;
-  } else if (gCurrentCommandContext) {
-    // Map CMD_OUT_* to MSG_ROUTE_* (bits 0-2 and 4 are aligned by design)
+  } else if (currentCommandContext()) {
+    // Map CMD_OUT_* to MSG_ROUTE_* (bits 0-2 and 4 are aligned by design).
+    // Reads the calling task's slot; broadcasts from non-cmd_exec tasks
+    // see nullptr and fall through to MSG_ROUTE_ALL below.
     uint32_t mask = getCurrentCommandOutputMask();
     route = (uint8_t)(mask & (MSG_ROUTE_SERIAL | MSG_ROUTE_WEB | MSG_ROUTE_FILE | MSG_ROUTE_BLE))
           | MSG_ROUTE_OLED | MSG_ROUTE_G2;  // OLED and G2 always receive command output
@@ -673,7 +681,9 @@ void broadcastOutput(const char* s) {
 }
 
 // Explicit-route entry point for context-aware overload (HardwareOne.cpp)
-// Called when gCurrentCommandContext is already NULL and the caller knows the route.
+// Called when the caller already knows the route (e.g. after
+// clearCurrentCommandContext, where falling back to MSG_ROUTE_ALL wouldn't
+// match the just-finished command).
 void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route) {
   broadcastOutputCore(text, len, route);
 }

@@ -1,6 +1,16 @@
 // =============================================================================
 // BLE_Peers.cpp — runtime peer registry implementation
 // =============================================================================
+//
+// IDENTITY-GENERATION BUMP SITE
+// -----------------------------
+// `bleStampPairedByIfBlank` bumps gIdentityGeneration when it successfully
+// stamps a previously-empty pairedByUser. That signals to consumers (e.g.
+// FileManager's directory cache) that the G2 hijack identity just gained
+// a real user, and any cache that was filled under the previous (anon /
+// blank) identity should re-fill. The bump is one line, immediately after
+// setSetting succeeds — see CASE C inside the helper. The corresponding
+// consumer protocol lives in System_AuthIdentity.h.
 
 #include "BLE_Peers.h"
 
@@ -11,7 +21,7 @@
 #include "System_Utils.h"      // RETURN_VALID_IF_VALIDATE_CSTR, parseBoolArg
 #include "System_Command.h"    // CommandEntry, ensureDebugBuffer, getDebugBuffer
 #include "System_User.h"
-#include "System_AuthIdentity.h"  // currentAuthContext — paired-by capture
+#include "System_AuthIdentity.h"  // currentAuthContext + bumpIdentityGeneration
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -127,20 +137,59 @@ const BlePeerSpec* bleRegisteredPeerAt(size_t i) {
 // account doesn't silently transfer ownership. To re-assign, clear the
 // peer first (e.g. via bondrm or settings edit). This avoids surprise
 // privilege swaps if a non-admin briefly handles the device.
-static void bleStampPairedByIfBlank(BlePeerKind kind) {
+void bleStampPairedByIfBlank(BlePeerKind kind) {
   if (kind >= BLE_PEER_MAX) return;
   BlePeerData& d = gBlePeerData[kind];
-  if (d.pairedByUser.length() > 0) return;  // already owned
-  const String& who = currentAuthContext().user;
-  if (who.length() == 0) return;             // no current user (e.g. boot reconnect)
-  setSetting(d.pairedByUser, who);
   const BlePeerSpec* spec = bleFindPeer(kind);
-  DEBUG_G2F("[BLE-Peers] Paired-by user for '%s' set to '%s'",
-            spec ? spec->name : "?", who.c_str());
+  const char* name = spec ? spec->name : "?";
+  const char* task = pcTaskGetName(xTaskGetCurrentTaskHandle());
+
+  // CASE A — peer already owned. Idempotent re-pair gestures land here.
+  if (d.pairedByUser.length() > 0) {
+    DEBUG_G2F("[BLE-Peers] stamp '%s': already owned by '%s' — no-op (task='%s')",
+              name, d.pairedByUser.c_str(), task ? task : "?");
+    return;
+  }
+
+  // CASE B — no current user installed in the calling task's TLS slot.
+  // Previously a silent no-op; that silent failure is exactly how peers
+  // ended up with mac1/mac2/autoConnect=true persisted but pairedByUser
+  // missing — auto-reconnect at boot runs as ANON, and any hijack-menu
+  // toggle of `bleautoconnect ... on` re-enters this path with
+  // cmd.ctx.auth.user already empty (chicken-and-egg). Both paths fall
+  // through here and the peer ends up unowned permanently until an
+  // authenticated CLI session re-runs `bleautoconnect <peer> on`.
+  //
+  // Make it loud. The WARN is the audit signal — if this fires after
+  // a successful BLE connect, that's the trap being sprung; you've
+  // got 5 seconds to fix it before downstream code cares.
+  const String& who = currentAuthContext().user;
+  if (who.length() == 0) {
+    WARN_BLUETOOTHF("stamp '%s' SKIPPED: pairedByUser is blank AND calling task has no user in TLS (task='%s'). Peer will remain unowned — every G2 hijack command will run as anonymous and admin checks will fail. To recover: from a web/serial CLI logged in as admin, run `bleautoconnect %s on`",
+                    name, task ? task : "?", name);
+    return;
+  }
+
+  // CASE C — stamping happens here.
+  setSetting(d.pairedByUser, who);
+  // Bump the identity generation: a previously-unowned peer just acquired
+  // an owner. Any cached state that derived its visibility from "the
+  // hijack identity is X" needs to re-fill. See System_AuthIdentity.h
+  // (the canonical doc block for the gen-counter protocol).
+  bumpIdentityGeneration("ble.stamp.pairedByUser");
+  DEBUG_G2F("[BLE-Peers] stamp '%s': pairedByUser='%s' (from task='%s')",
+            name, who.c_str(), task ? task : "?");
 }
 
 void bleSavePeerMac(BlePeerKind kind, const String& mac1, const String& mac2) {
   if (kind >= BLE_PEER_MAX) return;
+  const BlePeerSpec* spec = bleFindPeer(kind);
+  DEBUG_G2F("[BLE-Peers] savePeerMac '%s' enter: mac1='%s' mac2='%s' currentUser='%s' priorPairedBy='%s' task='%s'",
+            spec ? spec->name : "?",
+            mac1.c_str(), mac2.c_str(),
+            currentAuthContext().user.c_str(),
+            gBlePeerData[kind].pairedByUser.c_str(),
+            pcTaskGetName(xTaskGetCurrentTaskHandle()));
   // setSetting is a no-op when the value already matches, so calling on
   // every successful connect is cheap (no flash churn).
   if (mac1.length() > 0) setSetting(gBlePeerData[kind].mac1, mac1);
@@ -152,7 +201,6 @@ void bleSavePeerMac(BlePeerKind kind, const String& mac1, const String& mac2) {
   bleStampPairedByIfBlank(kind);
   // Don't auto-flip autoConnect — that's an explicit user opt-in. Pairing
   // saves the MAC; turning on auto-reconnect is a separate gesture.
-  const BlePeerSpec* spec = bleFindPeer(kind);
   DEBUG_G2F("[BLE-Peers] Saved MAC for '%s': mac1='%s'%s%s",
             spec ? spec->name : "?",
             mac1.c_str(),
@@ -309,7 +357,7 @@ static const PeerJsonEntry kPeerJsonTable[] = {
 
 void blePeersWriteJson(JsonDocument& doc) {
   // Materialise network.bluetooth.peers as a nested object keyed by peer
-  // name. Each value is { mac1, [mac2], autoConnect }.
+  // name. Each value is { mac1, [mac2], autoConnect, [pairedByUser] }.
   JsonObject peers = doc["network"]["bluetooth"]["peers"].to<JsonObject>();
   for (const auto& row : kPeerJsonTable) {
     BlePeerData& d = gBlePeerData[row.kind];
@@ -319,9 +367,14 @@ void blePeersWriteJson(JsonDocument& doc) {
     if (d.mac2.length() > 0) e["mac2"] = d.mac2;
     e["autoConnect"] = d.autoConnect;
     // Only emit pairedByUser if set — legacy peers paired before this
-    // field existed leave it blank, and callers fall back to
-    // firstAdminUser().
+    // field existed leave it blank.
     if (d.pairedByUser.length() > 0) e["pairedByUser"] = d.pairedByUser;
+    DEBUG_G2F("[BLE-Peers] writeJson peer='%s' mac1='%s' autoConnect=%d pairedByUser='%s'%s",
+              row.name,
+              d.mac1.c_str(),
+              (int)d.autoConnect,
+              d.pairedByUser.c_str(),
+              d.pairedByUser.length() == 0 ? " (OMITTED from JSON)" : "");
   }
 }
 
@@ -364,6 +417,8 @@ const char* cmd_blepeers(const String& /*argsInput*/) {
       pos += snprintf(out + pos, cap - pos, " mac2=%s",
                       d.mac2.length() ? d.mac2.c_str() : "(none)");
     }
+    pos += snprintf(out + pos, cap - pos, " pairedBy=%s",
+                    d.pairedByUser.length() ? d.pairedByUser.c_str() : "(none)");
     pos += snprintf(out + pos, cap - pos, "\n");
   }
   return out;

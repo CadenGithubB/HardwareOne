@@ -133,6 +133,11 @@ bool g2SubmitHijackCommand(const char* line,
   cmd.ctx.replyHandle  = nullptr;
   cmd.ctx.httpReq      = nullptr;
 
+  DEBUG_G2F("[G2-Hijack] submit '%.40s' user='%s' transport=%d seq=%u menuGen=%u",
+            line, cmd.ctx.auth.user.c_str(),
+            (int)cmd.ctx.auth.transport,
+            (unsigned)ctx->cookie.seq,
+            (unsigned)ctx->cookie.menuGen);
   if (!submitCommandAsync(cmd, g2HijackInternalCallback, ctx)) {
     WARN_COMMANDF("g2.hijack.cmd: queue full line='%s'", line);
     delete ctx;
@@ -161,6 +166,27 @@ AuthContext g2HijackAuthContext() {
   ctx.ip        = "g2.local";
   ctx.sid       = "";
   ctx.opaque    = nullptr;
+
+  // Stuck-state detector — fires once per boot. If macs + autoConnect
+  // are persisted but pairedByUser is blank, every hijack command and
+  // direct-FS hijack op will run with empty user, all admin checks
+  // will fail, and `bleStampPairedByIfBlank` can't self-heal because
+  // it has no current user to read either (CASE B inside
+  // bleStampPairedByIfBlank — see BLE_Peers.cpp). The only recovery is
+  // running `bleautoconnect g2-glasses on` from an authenticated
+  // web/serial CLI session — that path has the user identity in TLS
+  // and stamps the field. After stamping, this warning never fires
+  // again on this boot.
+  static bool warnedStuck = false;
+  if (!warnedStuck
+      && ctx.user.length() == 0
+      && gBlePeerData[BLE_PEER_G2_GLASSES].mac1.length() > 0
+      && gBlePeerData[BLE_PEER_G2_GLASSES].autoConnect) {
+    warnedStuck = true;
+    WARN_BLUETOOTHF("g2-glasses peer is in STUCK state: mac1='%s' autoConnect=true but pairedByUser is BLANK in settings. All hijack commands will run anonymously and admin checks will fail. RECOVERY: from an admin web/serial CLI, run `bleautoconnect g2-glasses on` — that stamps pairedByUser from your session's identity.",
+                    gBlePeerData[BLE_PEER_G2_GLASSES].mac1.c_str());
+  }
+
   return ctx;
 }
 

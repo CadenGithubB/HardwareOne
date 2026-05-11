@@ -3,6 +3,26 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"  // vTaskSetThreadLocalStoragePointerAndDelCallback
+#include "System_Debug.h"            // WARN_USERF for bump audit log
+
+// Identity generation counter. See the header comment block above the
+// declaration for the full protocol; this is just storage + the bump
+// helper.
+std::atomic<uint32_t> gIdentityGeneration{1};
+
+void bumpIdentityGeneration(const char* reason) {
+  // memory_order_release pairs with the acquire load on the consumer side
+  // (FileManager::refresh()) so that any state mutations that motivated
+  // the bump (e.g. setSetting writes to users.json or pairedByUser) are
+  // visible before a consumer sees the new generation and re-fills.
+  const uint32_t newGen =
+      gIdentityGeneration.fetch_add(1, std::memory_order_release) + 1;
+  // Always emit at WARN level — these events are rare (a handful per
+  // device lifetime) and useful for audit. If this ever shows up in
+  // hot logs, something is bumping when it shouldn't be.
+  WARN_USERF("[IDENTITY-GEN] bump → gen=%u (reason: %s)",
+             (unsigned)newGen, reason ? reason : "?");
+}
 
 // FreeRTOS gives us configNUM_THREAD_LOCAL_STORAGE_POINTERS slots per task
 // (raised to 4 in sdkconfig to leave headroom for future TLS-backed state).
@@ -23,6 +43,10 @@ struct TaskIdentity {
   AuthContext ctx;        // default-constructed: user="", transport=0 → ANON
   String      user;
   bool        isAdmin = false;
+
+  // Stage 3: per-task command-execution context. Default nullptr / inactive.
+  void*       currentCmdCtx = nullptr;
+  CaptureBufState capture   = {nullptr, 0, 0};
 };
 
 const TaskIdentity& anonSentinel() {
@@ -98,3 +122,61 @@ ExecIdentityGuard::~ExecIdentityGuard() {
 }
 
 void initAuthIdentityForCurrentTask() { (void)getOrCreateSlot(); }
+
+// ============================================================================
+// Stage 3 — per-task command-execution context accessors
+// ============================================================================
+
+void* currentCommandContext() {
+  // Reads can run from any task. Tasks with no allocated slot see nullptr
+  // via the anon sentinel — broadcastOutput then falls back to MSG_ROUTE_ALL.
+  return getSlotReadOnly()->currentCmdCtx;
+}
+
+CaptureBufState* currentCaptureState() {
+  // Returns a writable pointer to the slot's capture state so broadcastOutput
+  // can update len in place. Returns nullptr when no slot exists yet (pre-
+  // scheduler, or task that never touched any TLS-backed API); broadcastOutput
+  // skips capture entirely in that case.
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  if (!self) return nullptr;
+  TaskIdentity* slot = static_cast<TaskIdentity*>(
+      pvTaskGetThreadLocalStoragePointer(self, kAuthTlsSlot));
+  return slot ? &slot->capture : nullptr;
+}
+
+void setCurrentCommandContext(void* ctx) {
+  TaskIdentity* slot = getOrCreateSlot();
+  if (!slot) return;
+  slot->currentCmdCtx = ctx;
+}
+
+void clearCurrentCommandContext() {
+  // Don't allocate just to clear — the read accessor returns nullptr for
+  // unallocated slots anyway.
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  if (!self) return;
+  TaskIdentity* slot = static_cast<TaskIdentity*>(
+      pvTaskGetThreadLocalStoragePointer(self, kAuthTlsSlot));
+  if (slot) slot->currentCmdCtx = nullptr;
+}
+
+void setCaptureBuffer(char* buf, size_t cap) {
+  TaskIdentity* slot = getOrCreateSlot();
+  if (!slot) return;
+  slot->capture.buf = buf;
+  slot->capture.len = 0;
+  slot->capture.cap = cap;
+}
+
+void clearCaptureBuffer() {
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  if (!self) return;
+  TaskIdentity* slot = static_cast<TaskIdentity*>(
+      pvTaskGetThreadLocalStoragePointer(self, kAuthTlsSlot));
+  if (slot) {
+    slot->capture.buf = nullptr;
+    slot->capture.len = 0;
+    slot->capture.cap = 0;
+  }
+}

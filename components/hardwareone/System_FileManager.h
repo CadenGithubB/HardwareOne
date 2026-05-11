@@ -56,6 +56,14 @@ public:
   bool navigate(const char* path);
   bool navigateUp();
   bool navigateInto();  // Enter selected folder
+
+  // Re-scan the current directory without resetting selectedIndex /
+  // scrollOffset. Use when the underlying VFS view may have changed
+  // since the cache was filled — e.g. the calling task's identity now
+  // grants reads that previously failed (post-pairing, after login).
+  // Without this, an early permission-denied navigate() leaves the
+  // cache at totalItems=0 for the rest of the boot.
+  bool refresh();
   
   // Selection
   void moveUp();
@@ -98,7 +106,24 @@ private:
   FileEntry cachedEntries[FILE_MANAGER_MAX_CACHED_ITEMS];
   int cachedCount;
   bool cacheValid;
-  
+
+  // Generation the cache was filled under. Compared against
+  // gIdentityGeneration on refresh() — see System_AuthIdentity.h for the
+  // full protocol. The short version:
+  //
+  //   * 0 (initial) means "never successfully loaded under any identity"
+  //     — refresh() will always retry.
+  //   * Any nonzero value N means "cache reflects what was visible at
+  //     gen=N" — refresh() will only re-scan if gIdentityGeneration has
+  //     advanced past N (e.g. a peer got newly paired, a user was added,
+  //     a role changed).
+  //
+  // This is the bug guard from the two-session investigation: pre-pairing
+  // first-tap loaded the cache as empty under ANON identity; without
+  // generation-versioning the cache stayed empty for the rest of the boot
+  // even after the user paired.
+  uint32_t loadedAtGen_ = 0;
+
   bool loadDirectory();
   void ensureValidSelection();
   bool isProtectedPath(const char* path);

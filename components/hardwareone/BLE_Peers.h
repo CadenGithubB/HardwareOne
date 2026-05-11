@@ -140,6 +140,19 @@ void bleSavePeerMac(BlePeerKind kind,
                     const String& mac1,
                     const String& mac2 = String());
 
+// Stamp pairedByUser from the CALLING TASK's TLS identity. Idempotent —
+// no-op when pairedByUser is already set (peer is owned), and a loud
+// [WARN][BT] when the calling task has no user identity (typical for
+// boot-time BLE auto-reconnect workers — see CASE B comment at the
+// function body for the full design).
+//
+// Call from a CLI-task pairing-intent site (`openg2`, `bleautoconnect on`,
+// future `openring`, etc.) so the user that just typed "connect my
+// glasses" becomes pairedByUser — instead of waiting for the BLE worker
+// task to finish, by which point that task is anonymous and the stamp
+// would silently skip.
+void bleStampPairedByIfBlank(BlePeerKind kind);
+
 // -----------------------------------------------------------------------------
 // Boot reconnect orchestrator
 // -----------------------------------------------------------------------------
