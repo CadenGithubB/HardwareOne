@@ -280,9 +280,11 @@ static void finalizeAndClose() {
 }
 
 static void recordingTask(void* /*arg*/) {
-  const uint32_t intervalMs = gSettings.cameraStreamIntervalMs > 0
-                                ? (uint32_t)gSettings.cameraStreamIntervalMs
-                                : 100;
+  // gSettings.cameraStreamFps is 1..20; convert to ms per frame for the
+  // pacing delay. Fall back to ~10 fps if the setting is somehow zero.
+  const uint32_t fps = (gSettings.cameraStreamFps > 0)
+                         ? (uint32_t)gSettings.cameraStreamFps : 10;
+  const uint32_t intervalMs = 1000 / fps;
 
   while (videoRecording && s_frameCount < MAX_FRAMES) {
     TickType_t loopStart = xTaskGetTickCount();
@@ -377,14 +379,11 @@ bool startVideoRecording() {
     s_idxCap = s_idx ? MAX_FRAMES : 0;
   }
 
-  // Initial header — dims will be patched on the first frame. FPS comes from
-  // the currently configured stream interval.
-  uint32_t fps = 10;
-  if (gSettings.cameraStreamIntervalMs > 0) {
-    fps = 1000 / gSettings.cameraStreamIntervalMs;
-    if (fps < 1) fps = 1;
-    if (fps > 60) fps = 60;
-  }
+  // Initial header — dims will be patched on the first frame. FPS taken
+  // directly from the persisted camera FPS setting (1-20 range).
+  uint32_t fps = (gSettings.cameraStreamFps > 0)
+                   ? (uint32_t)gSettings.cameraStreamFps : 10;
+  if (fps > 60) fps = 60;
 
   uint8_t header[AVI_HEADER_SIZE];
   buildHeaderSkeleton(header, 640, 480, fps);  // placeholder dims

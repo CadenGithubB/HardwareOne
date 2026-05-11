@@ -33,8 +33,7 @@
 #include "System_Battery.h"   // BatteryState + getBatteryPercentage etc — for ESP corner widget
 #include "System_Microphone.h"  // gMicEnabled, micConnected, getAudioLevel, etc — for MIC detail page
 #include "G2_HijackCmd.h"   // g2BumpMenuGen() — called from g2SetHijackPage
-
-extern AuthContext gExecAuthContext;
+#include "System_AuthIdentity.h"  // ExecIdentityGuard + currentAuthContext
 
 extern "C" {
 #include "lc3.h"  // vendored Google liblc3 — Apache-2.0 (components/hardwareone_libs/liblc3)
@@ -608,6 +607,7 @@ static void pageSwapInit();
 // Mirrors the page-swap and hijack-FSM queue-worker patterns.
 static void tapDispatcherInit();
 static bool tapDispatcherEnqueue(uint32_t idx, const char* iname);
+static bool tapDispatcherEnqueueExit(void (*fn)());
 
 // Echo-guard stamp for intentional Cmd=9 sends. clearOurShutdownStamp is
 // called in the worker cleanup so the window doesn't bleed into unrelated
@@ -2471,12 +2471,16 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
             }
           }
           if (!deferred) {
-            DEBUG_G2F("[G2] TEXT view: TextEvent CLICK → invoking exit handler");
+            DEBUG_G2F("[G2] TEXT view: TextEvent CLICK → deferring exit handler to g2_tap_disp");
+            // Snapshot fn before clearing state. State-clear happens on
+            // BTC synchronously so subsequent notify events bail out via
+            // the gTextViewActive guard while the exit work runs on the
+            // dispatcher worker (25 KB stack vs BTC_TASK's 4 KB).
             void (*fn)() = gTextViewExitFn;
             gTextViewActive = false;
             gTextViewExitFn = nullptr;
             gTextViewTapFn  = nullptr;
-            fn();
+            tapDispatcherEnqueueExit(fn);
           }
         }
       }
@@ -2645,14 +2649,18 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
               return;
             }
           }
-          DEBUG_G2F("[G2] TEXT view: SysEvent %s(%u) src=%u → invoking exit "
-                    "handler", osEventTypeName(etype), (unsigned)etype,
-                    (unsigned)src);
+          DEBUG_G2F("[G2] TEXT view: SysEvent %s(%u) src=%u → deferring exit "
+                    "handler to g2_tap_disp", osEventTypeName(etype),
+                    (unsigned)etype, (unsigned)src);
+          // Snapshot fn and clear state synchronously on BTC; heavy work
+          // (file chooser redraw, page swap, FS reads) runs on the
+          // dispatcher worker. Inline fn() here used to overflow the
+          // 4 KB BTC stack — see tapDispatcherEnqueueExit().
           void (*fn)() = gTextViewExitFn;
           gTextViewActive = false;
           gTextViewExitFn = nullptr;
           gTextViewTapFn  = nullptr;
-          fn();
+          tapDispatcherEnqueueExit(fn);
           return;
         }
       }
@@ -2854,12 +2862,12 @@ static void dispatchEventPayload(char side, const uint8_t* payload, size_t len) 
         }
       }
       if (!deferred) {
-        DEBUG_G2F("[G2] TEXT view: user-activity → invoking exit handler");
+        DEBUG_G2F("[G2] TEXT view: user-activity → deferring exit handler to g2_tap_disp");
         void (*fn)() = gTextViewExitFn;
         gTextViewActive = false;
         gTextViewExitFn = nullptr;
         gTextViewTapFn  = nullptr;
-        fn();
+        tapDispatcherEnqueueExit(fn);
       }
     }
   }
@@ -4177,9 +4185,9 @@ static bool shouldDedupHijackTap(uint32_t idx) {
 // use it (stateful pages with their own list layout). Otherwise build
 // text and render via g2ShowTextAsList (read-only info views).
 //
-// Sets gExecAuthContext to the paired-user identity for the duration of
-// every page render. Any guarded VFS access from inside a page handler
-// (Files, future pages) inherits this automatically — pages don't need
+// Installs the paired-user identity into this task's TLS slot for the
+// duration of every page render. Any guarded VFS access from inside a page
+// handler (Files, future pages) inherits it automatically — pages don't need
 // per-handler boilerplate. See G2_HijackCmd.h for the rationale.
 static void invokePageFromMain(const G2PageModule& p) {
   G2HijackCtxGuard ctxGuard;
@@ -5222,44 +5230,39 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len) {
     bool wrote = t.writeChar->writeValue(const_cast<uint8_t*>(data + off),
                                          take, false);
     if (!wrote) {
-      // `esp_ble_gattc_write_char rc=-1` — observed transient during long
-      // image bursts. The BT controller's TX queue momentarily refuses; pauses
-      // let it drain. Stepped backoff (50/100/100 ms) survives longer stalls
-      // without disconnecting; holding mutex slightly longer here is better
-      // than aborting the burst and leaving firmware half-assembled.
+      // `esp_ble_gattc_write_char rc=-1` — controller TX queue momentarily
+      // refused the write at the GATT API boundary. We used to retry 3×
+      // here with stepped backoff (50/100/100 ms) on the theory that the
+      // queue would drain and the second attempt would land. That worked
+      // for the typical brief-stall case at 96×96 (2 chunks per frame, ~34
+      // envelopes), where the rc=-1 was rare and isolated.
       //
-      // Each retry MUST re-check t.connected and t.writeChar — the BLE
-      // disconnect callback (G2_Glasses.cpp:1178) runs on the BT stack
-      // task and sets writeChar=nullptr when the link drops. If we retry
-      // unconditionally and the disconnect fired between the initial
-      // failure and the retry's vTaskDelay, t.writeChar->writeValue
-      // dereferences a null vtable pointer and crashes (LoadProhibited
-      // at offset 0x18). Bail the retry loop on disconnect — the burst
-      // is dead anyway, the worker above us will notice via the !ok
-      // outer-loop exit.
-      static const uint8_t kWriteRetryBackoffMs[] = {50, 100, 100};
-      for (size_t ri = 0; !wrote && ri < sizeof(kWriteRetryBackoffMs); ++ri) {
-        DEBUG_G2F("[G2-%c] writeValue transient fail at offset %u/%u — "
-                  "retry %u after %u ms",
-                  t.side, (unsigned)off, (unsigned)len,
-                  (unsigned)(ri + 1), (unsigned)kWriteRetryBackoffMs[ri]);
-        vTaskDelay(pdMS_TO_TICKS(kWriteRetryBackoffMs[ri]));
-        // Re-check link state AFTER the delay. The disconnect callback
-        // may have nullified writeChar while we slept.
-        if (!t.connected || !t.writeChar) {
-          DEBUG_G2F("[G2-%c] writeValue retry aborted at offset %u/%u — "
-                    "link dropped during backoff (connected=%d, writeChar=%p)",
-                    t.side, (unsigned)off, (unsigned)len,
-                    (int)t.connected, (void*)t.writeChar);
-          break;
-        }
-        wrote = t.writeChar->writeValue(const_cast<uint8_t*>(data + off),
-                                        take, false);
-      }
-      if (wrote) {
-        DEBUG_G2F("[G2-%c] writeValue retry OK at offset %u/%u",
-                  t.side, (unsigned)off, (unsigned)len);
-      }
+      // Wedge observed 2026-05-10 during sustained 288×144 streaming
+      // (~96 envelopes per frame, ~3× the rc=-1 surface area): the FIRST
+      // writeValue returned false at the rc=-1 fast path inside
+      // BLERemoteCharacteristic::writeValue (esp_ble_gattc_write_char
+      // rejected synchronously, no semaphore wait). The retry path then
+      // called writeValue() AGAIN, but this time the write was accepted
+      // by esp_ble_gattc_write_char and the call dropped into the
+      // GATT-event semaphore wait (m_semaphoreWriteCharEvt) — which
+      // never got given because the underlying GATT was still in a
+      // degraded state from the first failure. The retry's writeValue
+      // call blocked indefinitely with t.writeMutex held → heartbeats
+      // started failing with "Write mutex timeout" → the 25 s TX-wedged
+      // watchdog forced a disconnect to recover. Frame 21 onward of the
+      // stream was lost AND the entire BLE link had to be re-established.
+      //
+      // New policy: on rc=-1, abort the burst immediately. Don't retry.
+      // The caller (sendImageBmpFragmentsNoCreate or similar) sees ok=false,
+      // breaks its frame loop, releases the mutex, and the next frame's
+      // first envelope is a fresh start. We lose one frame instead of
+      // the whole link. If rc=-1 transients become frequent enough to
+      // notice in practice (frequent stream stutters), the right fix is
+      // a controller-level cooldown / backpressure signal, not a blind
+      // retry that can wedge the worker.
+      DEBUG_G2F("[G2-%c] writeValue rc=-1 at offset %u/%u — aborting burst "
+                "(no retry; retry path can wedge on GATT semaphore — see comment)",
+                t.side, (unsigned)off, (unsigned)len);
     }
     ok = wrote;
     off += take;
@@ -5892,6 +5895,48 @@ static bool runSessionPrelude(G2Temple& t) {
   return true;
 }
 
+// After the right temple is up and the prelude has settled, push the
+// ESP's current epoch + tz offset to the glasses' RTC. This handles the
+// "G2 fully discharged and lost the time it got from the phone" case —
+// once we connect and the ESP has a valid NTP-synced clock, the glasses
+// get the right time without the user needing to repair to the phone.
+//
+// Mirrors the `g2devcfg time` CLI path (uses the same builder + arm). No
+// hijack involved — straight SID 0x80 / cmd=128 to the native firmware.
+//
+// Footgun: G2 takes timezone as **quarter-hours** from UTC (PST = -32,
+// JST = +36). gSettings.tzOffsetMinutes is in minutes, so we divide by
+// 15. R1 takes raw minutes; do NOT use this helper for R1.
+static void g2AutoTimeSyncIfReady(G2Temple& t) {
+  if (t.side != 'R') return;          // builder targets right arm only
+  if (!t.connected || t.pluginDead) return;
+
+  const time_t now = time(nullptr);
+  // Sanity-check ESP has a real (post-2020) time. If NTP hasn't run yet
+  // we'd push garbage — better to skip and let a later trigger retry.
+  if (now < 1577836800) {              // 2020-01-01 00:00:00 UTC
+    DEBUG_G2F("[G2-R] Auto time-sync skipped: ESP RTC not yet NTP-synced (now=%ld)",
+              (long)now);
+    return;
+  }
+  const int32_t tzQ = gSettings.tzOffsetMinutes / 15;
+
+  uint8_t env[96];
+  const size_t n = g2BuildDevCfgTimeSync(allocSeq(), G2_MAGIC_DEVCFG_TIME_SYNC,
+                                         (uint32_t)now, tzQ, env, sizeof(env));
+  if (n == 0) {
+    DEBUG_G2F("[G2-R] Auto time-sync: builder rejected (tzQ=%ld out of ±56?)",
+              (long)tzQ);
+    return;
+  }
+  if (!sendEnvelope(t, env, n)) {
+    DEBUG_G2F("[G2-R] Auto time-sync: send failed");
+    return;
+  }
+  DEBUG_G2F("[G2-R] Auto time-sync sent: epoch=%lu tzQ=%ld (tzMin=%d)",
+            (unsigned long)now, (long)tzQ, gSettings.tzOffsetMinutes);
+}
+
 // =============================================================================
 // Per-temple lifecycle
 // =============================================================================
@@ -6081,6 +6126,10 @@ static bool connectTemple(G2Temple& t) {
     t.connected = false;
     return false;
   }
+
+  // Auto-push our NTP-synced time to the glasses' RTC. Only the right
+  // arm goes through here (g2AutoTimeSyncIfReady is a no-op on left).
+  g2AutoTimeSyncIfReady(t);
 
   DEBUG_G2F("[G2-%c] Ready (heap=%u internal=%u)", t.side,
             (unsigned)ESP.getFreeHeap(),
@@ -8317,9 +8366,22 @@ bool g2EnqueueLensJob(LensUiJob* job) {
 // Queue payload carries the tap idx plus the item name so the
 // "Hijack tap: …" BROADCAST_PRINTF runs on the worker (off the small
 // BTC stack), not on the BLE notify task.
+//
+// The TAP_IDX variant is the original use — hijack list-tap dispatch.
+// The EXIT_FN variant carries a TEXT-view exit callback (function pointer
+// only; no args). It exists for the same reason: the exit-handler call
+// chain (file chooser redraw, page swap, FS access) overflows BTC_TASK's
+// 4 KB stack when invoked synchronously from the BLE notify path.
+enum TapDispatchKind : uint8_t {
+  TAP_DISPATCH_IDX     = 0,  // hijack list-tap by index + iname
+  TAP_DISPATCH_EXIT_FN = 1,  // TEXT-view exit handler (function pointer)
+};
+
 struct TapDispatchEntry {
-  uint32_t idx;
-  char     iname[32];   // matches the iname[32] decoded in handleDevEvent
+  TapDispatchKind kind;
+  uint32_t        idx;       // valid when kind == TAP_DISPATCH_IDX
+  char            iname[32]; // valid when kind == TAP_DISPATCH_IDX
+  void          (*exitFn)(); // valid when kind == TAP_DISPATCH_EXIT_FN
 };
 
 static QueueHandle_t gTapQueue       = nullptr;
@@ -8335,15 +8397,29 @@ static void tapDispatcherWorkerLoop(void* /*arg*/) {
       // Spurious wake — try again.
       continue;
     }
-    // Emit the user-facing log here, off the BLE notify task. Uses
-    // vsnprintf internally (~300-500 B stack). The worker stack is
-    // sized for writeSettingsJson() + sensor toggles (not 4 KB).
-    BROADCAST_PRINTF("[G2] Hijack tap: item %u (%s)",
-                     (unsigned)e.idx, e.iname);
-    // Run the heavy handler from this safe task context. handleHijackMenuTap
-    // may allocate, enqueue page swaps, send BLE frames, etc. — all legal
-    // here because we're not on the Bluedroid notify-task stack.
-    handleHijackMenuTap(e.idx);
+    switch (e.kind) {
+      case TAP_DISPATCH_IDX: {
+        // Emit the user-facing log here, off the BLE notify task. Uses
+        // vsnprintf internally (~300-500 B stack). The worker stack is
+        // sized for writeSettingsJson() + sensor toggles (not 4 KB).
+        BROADCAST_PRINTF("[G2] Hijack tap: item %u (%s)",
+                         (unsigned)e.idx, e.iname);
+        // Run the heavy handler from this safe task context. handleHijackMenuTap
+        // may allocate, enqueue page swaps, send BLE frames, etc. — all legal
+        // here because we're not on the Bluedroid notify-task stack.
+        handleHijackMenuTap(e.idx);
+        break;
+      }
+      case TAP_DISPATCH_EXIT_FN: {
+        // TEXT-view exit handler deferred off BTC_TASK. The exit fn
+        // typically redraws the previous page (file chooser, menu, …) which
+        // is a heavy call chain: G2HijackCtxGuard → FS access → page-swap
+        // enqueue → BLE frame send. Producer cleared gTextViewActive
+        // synchronously on BTC so further notify events skip the dead view.
+        if (e.exitFn) e.exitFn();
+        break;
+      }
+    }
 
     // Surface any drop counter increments since the last loop, so a stuck
     // worker / overflow burst is visible in the log instead of silent.
@@ -8409,8 +8485,9 @@ static bool tapDispatcherEnqueue(uint32_t idx, const char* iname) {
               (unsigned)idx);
     return false;
   }
-  TapDispatchEntry e;
-  e.idx = idx;
+  TapDispatchEntry e{};
+  e.kind = TAP_DISPATCH_IDX;
+  e.idx  = idx;
   // Bounded copy — iname source is already decoded into a 32-byte
   // buffer in handleDevEvent, but use strncpy + null-term defensively
   // for any future caller. No vsnprintf here (would defeat the point).
@@ -8421,6 +8498,34 @@ static bool tapDispatcherEnqueue(uint32_t idx, const char* iname) {
   } else {
     e.iname[0] = '\0';
   }
+  if (xQueueSend(gTapQueue, &e, 0) != pdPASS) {
+    __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
+    return false;
+  }
+  return true;
+}
+
+// Producer for the TEXT-view exit handler. Same rationale as
+// tapDispatcherEnqueue: the exit fn does heavy work (file chooser redraw,
+// page swap, FS access) that overflows BTC_TASK's small stack when invoked
+// inline from the BLE notify path. The BTC-side caller must clear
+// gTextViewActive / gTextViewExitFn / gTextViewTapFn *before* this returns
+// so further notify events ignore the now-closing view in the window
+// between enqueue and worker execution.
+//
+// On queue-full or pre-init we drop (don't fall back to inline) — calling
+// fn() from BTC_TASK is exactly the hazard this dispatcher exists to
+// prevent. User can re-tap to retry. The drop counter surfaces in the
+// worker log so a stuck dispatcher is visible.
+static bool tapDispatcherEnqueueExit(void (*fn)()) {
+  if (!fn) return false;
+  if (!gTapQueue) {
+    DEBUG_G2F("[G2] tap-dispatch: queue not initialised — exit-fn dropped");
+    return false;
+  }
+  TapDispatchEntry e{};
+  e.kind   = TAP_DISPATCH_EXIT_FN;
+  e.exitFn = fn;
   if (xQueueSend(gTapQueue, &e, 0) != pdPASS) {
     __atomic_add_fetch(&gTapDropped, 1, __ATOMIC_RELAXED);
     return false;
@@ -9034,11 +9139,10 @@ static SemaphoreHandle_t   gLivePageRefreshSem = nullptr;
 // without the caller needing to thread it down.
 static const char*         gLivePageBackLabel = nullptr;
 
-// AuthContext captured at g2StartLiveListPage time. The worker re-installs
-// this into gExecAuthContext for each buildFn call so any guarded VFS
-// access inside the page render runs as the user who paired the glasses,
-// not whatever stale ctx the global last held (the worker runs on its own
-// task — it doesn't go through the lens-tap dispatcher's RAII guard).
+// AuthContext captured at g2StartLiveListPage time. The worker installs this
+// into its own TLS slot via ExecIdentityGuard for each buildFn call so any
+// guarded VFS access inside the page render runs as the user who paired
+// the glasses (the worker task's default identity is ANON).
 //
 // No live page today reads the FS, so this is purely defensive — but a
 // future "Storage" / "File-stats" live page would need it, and forgetting
@@ -9130,14 +9234,10 @@ static void livePageWorker(void* /*arg*/) {
     if (!gLivePageBuildFn) continue;
     textBuf[0] = '\0';
     // Install the captured lens identity for the buildFn call so any
-    // guarded VFS access inside it reads as the paired user. Save/restore
-    // bracket because gExecAuthContext is a single global shared across
-    // tasks — leaving our value installed would corrupt other readers.
+    // guarded VFS access inside it reads as the paired user.
     {
-      AuthContext savedCtx = gExecAuthContext;
-      gExecAuthContext = gLivePageOwnerCtx;
+      ExecIdentityGuard identity(gLivePageOwnerCtx);
       gLivePageBuildFn(textBuf, 2048);
-      gExecAuthContext = savedCtx;
     }
     size_t n = splitTextIntoRows(textBuf, rows, ptrs, kMaxRows,
                                  gLivePageBackLabel);
@@ -9707,13 +9807,11 @@ static void liveTextWorker(void* /*arg*/) {
   // existing g2ShowText auto-routing.
   // Install the captured lens identity for the render call. Both buildFn
   // and renderFn paths get it — either may touch guarded VFS, and we want
-  // them to see the paired user instead of whatever stale ctx the global
-  // last held. Save/restore around the call so other tasks reading
-  // gExecAuthContext aren't corrupted. See gLiveTextOwnerCtx for design.
+  // them to see the paired user instead of this worker task's default
+  // ANON identity. See gLiveTextOwnerCtx for design.
   bool initOk;
   {
-    AuthContext savedCtx = gExecAuthContext;
-    gExecAuthContext = gLiveTextOwnerCtx;
+    ExecIdentityGuard identity(gLiveTextOwnerCtx);
     if (useRenderFn) {
       initOk = gLiveTextRenderFn();
     } else {
@@ -9721,7 +9819,6 @@ static void liveTextWorker(void* /*arg*/) {
       if (gLiveTextBuildFn) gLiveTextBuildFn(textBuf, 2048);
       initOk = g2ShowText(textBuf);
     }
-    gExecAuthContext = savedCtx;
   }
   if (!initOk) {
     DEBUG_G2F("[G2] live-text: worker — initial render failed");
@@ -9806,8 +9903,7 @@ static void liveTextWorker(void* /*arg*/) {
     // works without remembering this plumbing."
     bool tickOk;
     {
-      AuthContext savedCtx = gExecAuthContext;
-      gExecAuthContext = gLiveTextOwnerCtx;
+      ExecIdentityGuard identity(gLiveTextOwnerCtx);
       if (useRenderFn) {
         tickOk = gLiveTextRenderFn();
       } else {
@@ -9815,7 +9911,6 @@ static void liveTextWorker(void* /*arg*/) {
         gLiveTextBuildFn(textBuf, 2048);
         tickOk = g2ShowText(textBuf);
       }
-      gExecAuthContext = savedCtx;
     }
     if (tickOk) {
       DEBUG_G2F("[G2] live-text: tick rendered");
@@ -11160,7 +11255,7 @@ static const char* cmd_g2micrec(const String& argsInput) {
     } else if (!path.startsWith("/")) {
       path = String("/sd/") + path;
     }
-    File* f = new File(VFS::openGuarded(path, "w", gExecAuthContext, true));
+    File* f = new File(VFS::openGuarded(path, "w", currentAuthContext(), true));
     if (!f || !*f) {
       delete f;
       xSemaphoreGive(gMicRecMutex);
@@ -11278,7 +11373,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
     } else if (!path.startsWith("/")) {
       path = String("/sd/") + path;
     }
-    File* f = new File(VFS::openGuarded(path, "w", gExecAuthContext, true));
+    File* f = new File(VFS::openGuarded(path, "w", currentAuthContext(), true));
     if (!f || !*f) {
       delete f;
       free(mem);
@@ -11617,6 +11712,62 @@ static const char* cmd_g2streamres(const String& argsInput) {
   return ret;
 }
 
+// Q25 (SD-pack animation) playback cadence in ms per frame. Independent
+// of g2liverate (which paces the live-tile test probes) so animation
+// playback speed doesn't interfere with cinematic test cadences.
+// Takes effect on the next pack run. For large frames the BLE push
+// time dominates and the cap is effectively ignored.
+static const char* cmd_g2packrate(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char ret[160];
+  String s = argsInput; s.trim();
+  if (s.length() == 0) {
+    snprintf(ret, sizeof(ret),
+             "G2 pack playback cadence: %d ms/frame (~%d fps). Set: g2packrate <ms>",
+             gSettings.g2PackRateMs,
+             gSettings.g2PackRateMs > 0 ? (1000 / gSettings.g2PackRateMs) : 0);
+    return ret;
+  }
+  int v = s.toInt();
+  if (v < 20 || v > 2000) {
+    return "Usage: g2packrate <ms>  (range 20..2000)";
+  }
+  setSetting(gSettings.g2PackRateMs, v);
+  snprintf(ret, sizeof(ret),
+           "G2 pack playback cadence set to %d ms/frame (~%d fps). Takes effect on next pack run.",
+           v, 1000 / v);
+  return ret;
+}
+
+// G2 stream tone mapping (auto-levels). When enabled, each frame's BMP
+// build does a per-frame luma min/max scan and remaps to full 0..255
+// range before quantizing to 4-bpp. Recovers dynamic range on washed-out
+// OV3660 frames that would otherwise quantize to similar shades on the
+// green-tinted G2 panel. Applies on the next frame after the change —
+// no stream restart needed.
+static const char* cmd_g2streamtonemap(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static char ret[140];
+  String s = argsInput; s.trim();
+  if (s.length() == 0) {
+    snprintf(ret, sizeof(ret),
+             "G2 stream tone-map (auto-levels): %s. Toggle: g2streamtonemap <on|off>",
+             gSettings.g2StreamToneMap ? "ON" : "OFF");
+    return ret;
+  }
+  int p = parseBoolArg(s);
+  if (p < 0) {
+    return "Usage: g2streamtonemap <on|off>";
+  }
+  setSetting(gSettings.g2StreamToneMap, p ? true : false);
+  snprintf(ret, sizeof(ret),
+           "G2 stream tone-map (auto-levels): %s%s",
+           p ? "ON" : "OFF",
+           p ? " — washed-out frames will get stretched to full 0..255 range"
+             : " — frames render with raw luma quantization");
+  return ret;
+}
+
 static const char* cmd_g2nav(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs ca(argsInput);
@@ -11747,6 +11898,8 @@ extern const CommandEntry g2Commands[] = {
   { "g2deinit",     "Deinitialize G2 client mode",                     false, cmd_g2deinit },
   { "g2nav",        "Menu navigation mode: g2nav [on|off|toggle] (bare = report state)", false, cmd_g2nav },
   { "g2streamres",  "Lens stream resolution: g2streamres [<W>x<H>] (bare = report; e.g., 96x96, 160x120, 288x144)", false, cmd_g2streamres },
+  { "g2streamtonemap", "Lens stream auto-levels: g2streamtonemap [on|off] (bare = report state)", false, cmd_g2streamtonemap },
+  { "g2packrate",   "SD-pack animation cadence: g2packrate [<ms>] (range 20..2000, default 80)", false, cmd_g2packrate },
   { "g2battery",    "Query G2 battery % on connected temples",         false, cmd_g2battery },
   { "g2mic",        "Enable/disable G2 mic capture: g2mic <on|off>",   false, cmd_g2mic },
   { "g2verbose",    "Scan-verbose logging: g2verbose [on|off|toggle] (bare = report state)", false, cmd_g2verbose },
@@ -11871,6 +12024,80 @@ static size_t buildBmp4bpp(uint8_t* out, size_t outCap,
   return total;
 }
 
+// 2-bpp BMP builder — same shape as buildBmp4bpp but with biBitCount=2,
+// a 4-entry grayscale palette (0/85/170/255), and pixel data packed at
+// 4 px/byte. Exists only to test whether the G2 lens firmware decodes
+// lower bit depths; if it does, the camera streamer can cut payload
+// size by ~50% with no resolution change. If it doesn't, lens stays
+// blank but acks still come back (same diagnostic shape as Q19).
+static size_t buildBmp2bpp(uint8_t* out, size_t outCap,
+                           int32_t width, int32_t height,
+                           BmpPattern pattern) {
+  if (!out || outCap == 0) return 0;
+  const uint32_t aw = (uint32_t)(width  < 0 ? -width  : width);
+  const uint32_t ah = (uint32_t)(height < 0 ? -height : height);
+  if (aw == 0 || ah == 0) return 0;
+  // 2-bpp = 4 px/byte. Row stride is 4-byte aligned per BMP spec.
+  const uint32_t rowStride  = ((aw * 2 + 31) / 32) * 4;
+  const uint32_t pixelSize  = rowStride * ah;
+  const uint32_t paletteSize = 4 * 4;          // 4 entries × BGRA
+  const uint32_t headerSize  = 14 + 40 + paletteSize;
+  const uint32_t total       = headerSize + pixelSize;
+  if (total > outCap) return 0;
+
+  auto wr16 = [](uint8_t* p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xff); p[1] = (uint8_t)((v >> 8) & 0xff);
+  };
+  auto wr32 = [](uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xff);          p[1] = (uint8_t)((v >> 8) & 0xff);
+    p[2] = (uint8_t)((v >> 16) & 0xff);  p[3] = (uint8_t)((v >> 24) & 0xff);
+  };
+
+  // BITMAPFILEHEADER (14 B)
+  out[0] = 'B'; out[1] = 'M';
+  wr32(out + 2,  total);
+  wr16(out + 6,  0);
+  wr16(out + 8,  0);
+  wr32(out + 10, headerSize);
+
+  // BITMAPINFOHEADER (40 B) — biBitCount = 2, biClrUsed = 4
+  wr32(out + 14, 40);
+  wr32(out + 18, (uint32_t)width);
+  wr32(out + 22, (uint32_t)height);
+  wr16(out + 26, 1);
+  wr16(out + 28, 2);                 // 2-bpp
+  wr32(out + 30, 0);                 // BI_RGB
+  wr32(out + 34, pixelSize);
+  wr32(out + 38, 2835);
+  wr32(out + 42, 2835);
+  wr32(out + 46, 4);                 // biClrUsed = 4
+  wr32(out + 50, 0);
+
+  // 4-shade grayscale palette (BGRA): 0, 85, 170, 255.
+  for (int i = 0; i < 4; i++) {
+    const uint8_t v = (uint8_t)((i * 255) / 3);
+    out[54 + i*4 + 0] = v;
+    out[54 + i*4 + 1] = v;
+    out[54 + i*4 + 2] = v;
+    out[54 + i*4 + 3] = 0;
+  }
+
+  // Pixel data. 2-bpp packing: high bits = leftmost pixel.
+  //   0xCC = 11 00 11 00 → indices 3,0,3,0 (W,B,W,B)
+  //   0x33 = 00 11 00 11 → indices 0,3,0,3 (B,W,B,W)
+  // Alternating bytes give 1-px vertical stripes — equivalent diagnostic
+  // to Q19's 4-bpp 0xF0/0x0F pattern.
+  uint8_t* pixels = out + headerSize;
+  if (pattern == BMP_PAT_ALL_BLACK) {
+    memset(pixels, 0, pixelSize);
+  } else {
+    for (uint32_t i = 0; i < pixelSize; i++) {
+      pixels[i] = (i & 1) ? 0x33 : 0xCC;
+    }
+  }
+  return total;
+}
+
 // Pretty-print up to `cap` bytes of pb body to the debug log as hex
 // pairs. Probes call this so each TX is grep-able alongside its
 // response in the next log section.
@@ -11929,10 +12156,12 @@ static constexpr uint32_t kImgCreateAckTimeoutMs = 3000;
 static constexpr uint32_t kImgPushAckTimeoutMs = 7000;
 
 // Inter-fragment gap during a Cmd=3 burst (between sendPbFragmented calls).
-// kImgInFlightCap=3: 15 ms still pipelines ~2 in flight on a healthy link;
-// tune up (e.g. 30) if rc=-1 spikes return under transient queue pressure
+// kImgInFlightCap=3: 10 ms keeps ~2 frags in flight on a healthy link
+// (lowered from 15 ms 2026-05-10 to reclaim per-frame ms in the camera
+// stream — small win, but cheap to revert if rc=-1 spikes return).
+// Tune up (e.g. 30) if rc=-1 spikes return under transient queue pressure
 // (pairs with stepped write retries in sendEnvelopeNoMutex).
-static constexpr uint32_t kImgFragGapMs = 15;
+static constexpr uint32_t kImgFragGapMs = 10;
 
 // In-burst envelope gap (within a single sendPbFragmented call) for
 // image push only. The default sendPbFragmented gap is 15 ms — fine for
@@ -11940,18 +12169,27 @@ static constexpr uint32_t kImgFragGapMs = 15;
 // pushes. But COMPOUND CREATEs (list+image, text+image) make the
 // firmware's plugin task slower to drain ATT WRITE_CMDs, and at 15 ms
 // gap the BLE controller's L2CAP-CMD buffer (≈8–16 packets on ESP32)
-// fills around envelope 15/17 of a 3800 B image fragment — observed
-// 2026-05-07 in Q28/Q28L logs as `esp_ble_gattc_write_char rc=-1` at
-// envelope 15/17, never recovering. 25 ms gave the controller plenty
-// of drain time per packet but cost ~120 ms/frame on a 96×96 stream.
-// Empirically lowered to 20 ms on 2026-05-08 to reclaim ~110 ms/frame
-// (~1.3 fps vs ~1.15 at 25 ms) — envelope 15 now lands at ~280 ms,
-// still 70 ms past the original 210 ms failure point. If a future
-// build sees the rc=-1 wedge return at envelope 15ish, bump back up
-// to 22 or 25. Image-push paths set this via gFragNextBurstDelayMs
-// before each sendPbFragmented call so non-image bursts keep their
-// faster cadence.
-static constexpr uint32_t kImgInBurstEnvelopeGapMs = 20;
+// historically filled around envelope 15/17 of a 3800 B image fragment —
+// observed 2026-05-07 in Q28/Q28L logs as `esp_ble_gattc_write_char
+// rc=-1` at envelope 15/17, never recovering.
+//
+// Tuning history:
+//   25 ms — original safe value, ~120 ms/frame overhead
+//   20 ms (2026-05-08) — reclaimed ~110 ms/frame, envelope 15 at ~280 ms
+//   15 ms (2026-05-10) — pushed lower after sendEnvelopeNoMutex got the
+//                        rc=-1 50ms-retry path; the rare transient now
+//                        recovers in-line instead of stranding the mutex.
+//                        Cleared 57 frames at 96×96 with 0 phantom-acks
+//                        and 0 retry log lines, so the steady-state push
+//                        stream tolerates 15 ms even though compound
+//                        CREATE was the original failure case (only 1
+//                        compound CREATE per stream session, vs N×17
+//                        envelopes per frame).
+//
+// If rc=-1 / phantom-ack lines return in the camStream log, bump back up
+// to 18 or 20. Image-push paths set this via gFragNextBurstDelayMs before
+// each sendPbFragmented call so non-image bursts keep their faster cadence.
+static constexpr uint32_t kImgInBurstEnvelopeGapMs = 15;
 
 // Hold the image visible after the last fragment, before SHUTDOWN.
 // The lens's 4-tile sync settles for ~2 s post-last-frag (per the
@@ -13100,9 +13338,9 @@ static bool readBmpFromVfs(const String& rawPath,
   path.trim();
   if (path.length() == 0) { if (outErr) *outErr = "empty path"; return false; }
   if (!path.startsWith("/")) path = "/" + path;
-  if (!VFS::existsGuarded(path, gExecAuthContext)) { if (outErr) *outErr = "file not found"; return false; }
+  if (!VFS::existsGuarded(path, currentAuthContext())) { if (outErr) *outErr = "file not found"; return false; }
 
-  File f = VFS::openGuarded(path, FILE_READ, gExecAuthContext);
+  File f = VFS::openGuarded(path, FILE_READ, currentAuthContext());
   if (!f || !f.available()) { if (outErr) *outErr = "failed to open file"; return false; }
   const size_t len = (size_t)f.size();
   const size_t kMaxBmpBytes = 65536;
@@ -13166,12 +13404,12 @@ bool g2ReadBmp4bppFromVfs(const char* vfsPath, uint8_t** outData, size_t* outLen
     return false;
   }
   if (!path.startsWith("/")) path = "/" + path;
-  if (!VFS::existsGuarded(path, gExecAuthContext)) {
+  if (!VFS::existsGuarded(path, currentAuthContext())) {
     if (outErr) *outErr = "file not found";
     return false;
   }
 
-  File f = VFS::openGuarded(path, FILE_READ, gExecAuthContext);
+  File f = VFS::openGuarded(path, FILE_READ, currentAuthContext());
   if (!f || !f.available()) {
     if (outErr) *outErr = "failed to open file";
     return false;
@@ -13398,6 +13636,9 @@ struct BmpViewerArgs {
 };
 
 static void g2BmpViewerWorker(void* arg) {
+  // Install the paired-user identity so readBmpFromVfs's guarded reads
+  // succeed from this worker task's default ANON TLS slot.
+  ExecIdentityGuard identity(g2HijackAuthContext());
   auto* a = (BmpViewerArgs*)arg;
 
   do {
@@ -13515,11 +13756,28 @@ bool g2ShowBmpFile(const char* path, void (*onDone)()) {
 // (one source pixel per destination pixel) — fast and good enough for
 // the 288×144 lens window. Returns total bytes written, or 0 on
 // failure (capacity / dim).
+//
+// `toneMap`:
+//   None        — quantize raw luma directly (gray >> 4). Preserves source
+//                 levels but washed-out frames map to a narrow nibble range
+//                 (e.g. mid-grays only), which on a green-tinted G2 panel
+//                 means everything shows similar brightness.
+//   AutoLevels  — pre-pass over the fit region to find actual luma min/max,
+//                 then linearly remap [min..max] → [0..255] before
+//                 quantizing. Costs one extra fit-region scan (~1 ms at
+//                 192×144 dst). Skipped when range is below kAutoLevelsMinRange
+//                 to avoid amplifying noise in near-uniform frames.
+enum class BmpToneMap : uint8_t {
+  None       = 0,
+  AutoLevels = 1,
+};
+
 static size_t buildBmp4bppFromRgb888(uint8_t* out, size_t outCap,
                                      const uint8_t* src,
                                      int32_t srcW, int32_t srcH,
                                      int32_t dstW = 288,
-                                     int32_t dstH = 144) {
+                                     int32_t dstH = 144,
+                                     BmpToneMap toneMap = BmpToneMap::None) {
   if (!out || !src) return 0;
   if (srcW <= 0 || srcH <= 0) return 0;
   if (dstW <= 0 || dstH <= 0) return 0;
@@ -13591,6 +13849,44 @@ static size_t buildBmp4bppFromRgb888(uint8_t* out, size_t outCap,
   const int32_t offX = (dstW - fitW) / 2;
   const int32_t offY = (dstH - fitH) / 2;
 
+  // Tone-map pre-pass. When AutoLevels is requested, scan the fit region
+  // to find true luma min/max, then in the writing loop below remap
+  // [min..max] → [0..255] before quantizing to a 4-bpp nibble. This
+  // recovers dynamic range from washed-out frames where the source luma
+  // sits in (e.g.) 70..170 — without it those map to nibble bins 4..10,
+  // i.e. only 7 distinct shades on the lens.
+  //
+  // tmMin/tmMax are the remap endpoints. When toneMap == None or the
+  // range is too small to be useful, they stay at 0/255 so the remap
+  // becomes a no-op (gray * 255 / 255 == gray).
+  //
+  // kAutoLevelsMinRange: floor on (max-min) below which auto-levels is
+  // skipped. Below this you'd be amplifying sensor noise in a
+  // near-uniform frame — looks worse than letting it stay flat.
+  uint8_t tmMin = 0;
+  uint8_t tmMax = 255;
+  if (toneMap == BmpToneMap::AutoLevels) {
+    constexpr int kAutoLevelsMinRange = 24;
+    uint8_t lmin = 255, lmax = 0;
+    for (int32_t dy = 0; dy < fitH; dy++) {
+      const int32_t sy = (dy * srcH) / fitH;
+      const uint8_t* srcRow = src + (size_t)sy * (size_t)srcW * 3;
+      for (int32_t dx = 0; dx < fitW; dx++) {
+        const int32_t sx = (dx * srcW) / fitW;
+        const uint8_t* p = srcRow + (size_t)sx * 3;
+        const uint32_t gray = ((uint32_t)p[0] + p[1] + p[2]) / 3;
+        const uint8_t g8 = (uint8_t)(gray > 255 ? 255 : gray);
+        if (g8 < lmin) lmin = g8;
+        if (g8 > lmax) lmax = g8;
+      }
+    }
+    if ((int)lmax - (int)lmin >= kAutoLevelsMinRange) {
+      tmMin = lmin;
+      tmMax = lmax;
+    }
+  }
+  const int tmRange = (int)tmMax - (int)tmMin;
+
   // Pixel rows. esp32-camera fmt2rgb888 emits BGR order in RGB888 (the
   // function name is historical) but for grayscale conversion the
   // channel order doesn't matter — we average all three.
@@ -13635,7 +13931,19 @@ static size_t buildBmp4bppFromRgb888(uint8_t* out, size_t outCap,
       if (gray8 > diagMax) diagMax = gray8;
       diagSum  += gray8;
       diagSamp += 1;
-      const uint8_t nibble = (uint8_t)(gray >> 4);  // 0..15
+      // Remap [tmMin..tmMax] -> [0..255]. When auto-levels is off or the
+      // pre-pass found the range too small to stretch safely, tmMin=0
+      // and tmMax=255 so this is a no-op.
+      uint32_t mapped;
+      if (tmRange > 0) {
+        int v = (int)gray8 - (int)tmMin;
+        if (v < 0) v = 0;
+        mapped = ((uint32_t)v * 255U) / (uint32_t)tmRange;
+        if (mapped > 255) mapped = 255;
+      } else {
+        mapped = gray8;
+      }
+      const uint8_t nibble = (uint8_t)(mapped >> 4);  // 0..15
       // 4-bpp packing: high nibble = even column, low nibble = odd
       const uint32_t byteIdx = (uint32_t)dx >> 1;
       if ((dx & 1) == 0) {
@@ -14119,9 +14427,13 @@ static void g2CameraStreamWorker(void* arg) {
         free(rgbBuf);
         break;
       }
+      const BmpToneMap toneMap = gSettings.g2StreamToneMap
+                                   ? BmpToneMap::AutoLevels
+                                   : BmpToneMap::None;
       const size_t bmpLen = buildBmp4bppFromRgb888(bmpBuf, kBmpCap,
                                                    rgbBuf, srcW, srcH,
-                                                   streamW, streamH);
+                                                   streamW, streamH,
+                                                   toneMap);
       free(rgbBuf);
       if (bmpLen == 0) {
         DEBUG_G2F("[G2] Camera stream: bmp build failed (frame %d)", frame);
@@ -14157,11 +14469,14 @@ static void g2CameraStreamWorker(void* arg) {
       frame++;
 
       // Per-frame floor (defensive cap; natural cadence already
-      // exceeds this).
+      // exceeds this). When natural cadence is the binding constraint
+      // (always true at any sane stream dim), the small post-burst
+      // breather lets FreeRTOS run idle/heartbeat tasks without
+      // appreciably hurting fps.
       const uint32_t elapsedMs = millis() - frameStartMs;
       const uint32_t toSleepMs = (elapsedMs < kMinFramePeriodMs)
                                    ? (kMinFramePeriodMs - elapsedMs)
-                                   : 50;
+                                   : 25;
       vTaskDelay(pdMS_TO_TICKS(toSleepMs));
     }
 
@@ -14359,6 +14674,7 @@ struct BmpFullViewerArgs {
 };
 
 static void g2BmpFullViewerWorker(void* arg) {
+  ExecIdentityGuard identity(g2HijackAuthContext());
   auto* a = (BmpFullViewerArgs*)arg;
 
   do {
@@ -14621,12 +14937,12 @@ static bool loadJpgAsBmp288x144(const String& rawPath,
   path.trim();
   if (path.length() == 0) { if (outErr) *outErr = "empty path"; return false; }
   if (!path.startsWith("/")) path = "/" + path;
-  if (!VFS::existsGuarded(path, gExecAuthContext)) {
+  if (!VFS::existsGuarded(path, currentAuthContext())) {
     if (outErr) *outErr = "file not found";
     return false;
   }
 
-  File f = VFS::openGuarded(path, FILE_READ, gExecAuthContext);
+  File f = VFS::openGuarded(path, FILE_READ, currentAuthContext());
   if (!f || !f.available()) {
     if (outErr) *outErr = "failed to open file";
     return false;
@@ -14738,6 +15054,7 @@ struct JpgViewerArgs {
 };
 
 static void g2JpgViewerWorker(void* arg) {
+  ExecIdentityGuard identity(g2HijackAuthContext());
   auto* a = (JpgViewerArgs*)arg;
 
   do {
@@ -14828,6 +15145,7 @@ struct JpgFullViewerArgs {
 };
 
 static void g2JpgFullViewerWorker(void* arg) {
+  ExecIdentityGuard identity(g2HijackAuthContext());
   auto* a = (JpgFullViewerArgs*)arg;
 
   do {
@@ -15821,6 +16139,75 @@ const char* g2ProbeImageQ19SmallSolo() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Q29 — 2-bpp BMP solo. Same shape as Q19 (CREATE-image, multi-fragment
+// push, hold for tap) but the BMP is 2-bpp grayscale instead of 4-bpp.
+// Tests whether the lens firmware's BMP parser honours biBitCount=2 and
+// a 4-entry palette. If it renders the stripes pattern, the camera
+// streamer can drop payload by ~50% with no resolution change. If lens
+// stays blank but acks come back, parser is hardcoded to 4-bpp.
+//
+// Math at 144×144 2-bpp: 14 + 40 + 16 + (144*2/8)*144 = 70 + 5184 =
+// 5254 B → ~2 fragments (vs 3 frags / 10486 B at 4-bpp). If decode
+// works, expected wall-clock ≈ 500 ms vs ~770 ms at 4-bpp.
+// ─────────────────────────────────────────────────────────────────────
+const char* g2ProbeImageQ29Bmp2bppSolo() {
+  static char ret[240];
+
+  G2Temple* arm = pickEvenAIArm("imgQ29");
+  if (!arm) return "Img Q29: no reachable temple";
+
+  const uint32_t kCreateMagic   = G2_MAGIC_IMAGE_BASE + 0x28;  // 248
+  const uint32_t kPushMagicBase = G2_MAGIC_IMAGE_BASE + 0x29;  // 249..250 (~2 frags)
+  const int32_t  kImgW          = 144;
+  const int32_t  kImgH          = 144;
+
+  probeBanner("Q29: 2-bpp solo 144×144 image",
+              kCreateMagic, kPushMagicBase + 1,
+              "tests whether lens firmware decodes biBitCount=2 BMPs. "
+              "Pixel data is half the size of 4-bpp at the same dims. "
+              "If lens shows stripes, 2-bpp is supported and camera "
+              "streaming can cut payload ~50%. If lens is blank but "
+              "acks come back, parser is 4-bpp only.");
+  if (!probeTearDownActiveContainer(*arm)) return "Img Q29: pre-burst SHUTDOWN failed";
+
+  // 2-bpp 144×144 BMP: ~5.3 KB. Allocate 8 KB for headroom.
+  const size_t kBmpCap = 8 * 1024;
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.q29.bmp");
+  if (!bmp) {
+    probePostProbeShutdown(*arm);
+    return "Img Q29: BMP heap alloc failed";
+  }
+  const size_t bmpLen = buildBmp2bpp(bmp, kBmpCap, kImgW, -kImgH, BMP_PAT_STRIPES);
+  if (bmpLen == 0) {
+    free(bmp);
+    probePostProbeShutdown(*arm);
+    return "Img Q29: BMP build failed";
+  }
+  DEBUG_G2F("[ImgProbe] Q29 BMP %u B (%dx%d 2bpp stripes)",
+            (unsigned)bmpLen, (int)kImgW, (int)kImgH);
+
+  unsigned okFrags = 0, totalFrags = 0;
+  (void)sendImageBmpMultiFragment(*arm, "Q29", kCreateMagic, kPushMagicBase,
+                                  bmp, bmpLen, &okFrags, &totalFrags,
+                                  /*tolerateMissedAcks*/ 0,
+                                  kImgW, kImgH);
+  free(bmp);
+
+  DEBUG_G2F("[ImgProbe] Q29 — image up, double-tap to dismiss (60 s cap)");
+  const bool tapped = probeHoldUntilTapOrTimeout(60000);
+  DEBUG_G2F("[ImgProbe] Q29 — hold ended via %s",
+            tapped ? "user tap" : "60 s timeout");
+
+  probePostProbeShutdown(*arm);
+  probeFooter("Q29", okFrags, totalFrags);
+  snprintf(ret, sizeof(ret),
+           "Img Q29: 2-bpp 144×144, %u/%u frags acked — %s — "
+           "did the lens render the stripes? (blank=parser is 4-bpp only)",
+           okFrags, totalFrags, tapped ? "user tap" : "60s timeout");
+  return ret;
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Q20 / Q22 / Q23 / Q26 / Q27 — shared solo live tile: stripes + moving bar,
 // double-tap / 30 s safety window. Each probe uses disjoint magic bands so
 // logs stay grep-clean.
@@ -16054,177 +16441,10 @@ const char* g2ProbeImageQ27LiveTile144() {
       "g2liverate ms/frame than Q20 if lens drops frames.");
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Q24 — 32×32 procedural “slime” jump: twenty draw phases on a parabolic
-// arc, looped (sprite-sheet behaviour without shipping 20 PNGs). Uses the
-// same 16-gray 4bpp BMP path as other probes. Magic 251/252 keeps logs
-// disjoint from Q22/Q23 bands.
-// ─────────────────────────────────────────────────────────────────────
-static void bmpFillDisk4bpp(uint8_t* pixelRows, int32_t imgW, int32_t imgH,
-                            int32_t cx, int32_t cy, int32_t r,
-                            uint8_t palIdx) {
-  for (int32_t dy = -r; dy <= r; dy++) {
-    for (int32_t dx = -r; dx <= r; dx++) {
-      if (dx * dx + dy * dy > r * r) continue;
-      bmpDrawRect4bpp(pixelRows, imgW, imgH, cx + dx, cy + dy, 1, 1,
-                        palIdx);
-    }
-  }
-}
+// (Q24 procedural slime probe removed — replaced operationally by Q25
+// SD-frame BMP packs, which serve the same "loop animated frames"
+// purpose with arbitrary user content.)
 
-static size_t buildSlimeJumpBmp32(uint8_t* bmp, size_t cap, unsigned phase) {
-  const int32_t imgW = 32;
-  const int32_t imgH = 32;
-  constexpr unsigned kCycle = 20;
-  const unsigned f = phase % kCycle;
-  size_t bmpLen = buildBmp4bpp(bmp, cap, imgW, -imgH, BMP_PAT_STRIPES);
-  if (bmpLen == 0) return 0;
-  const size_t kPixOffset = 14 + 40 + 16 * 4;
-  uint8_t* rows = bmp + kPixOffset;
-  bmpDrawRect4bpp(rows, imgW, -imgH, 0, 27, imgW, 5, 6);
-  const int jumpPx = (int)((f * (kCycle - f) * 13) / 100);
-  const int cx = 16;
-  const int cy = 19 - jumpPx;
-  bmpDrawRect4bpp(rows, imgW, -imgH, 4, 26, 24, 2, 4);
-  bmpFillDisk4bpp(rows, imgW, -imgH, cx, cy, 7, 11);
-  bmpFillDisk4bpp(rows, imgW, -imgH, cx - 4, cy - 2, 2, 15);
-  bmpFillDisk4bpp(rows, imgW, -imgH, cx + 4, cy - 2, 2, 15);
-  bmpDrawRect4bpp(rows, imgW, -imgH, cx - 5, cy - 5, 2, 2, 14);
-  return bmpLen;
-}
-
-const char* g2ProbeImageQ24SlimeJump32() {
-  static char ret[280];
-  G2Temple* arm = pickEvenAIArm("imgQ24");
-  if (!arm) {
-    snprintf(ret, sizeof(ret), "Img Q24: no reachable temple");
-    return ret;
-  }
-  const uint32_t kCreateMagic   = G2_MAGIC_IMAGE_BASE + 41;  // 251
-  const uint32_t kFirstPushBase = G2_MAGIC_IMAGE_BASE + 42;  // 252
-  const int32_t  imgW           = 32;
-  const int32_t  imgH           = 32;
-  const uint32_t kSafetyCapMs   = 30000;
-  const uint32_t kSafetyCapFrames = 400;
-  const uint32_t kPaceMs        = 320;
-
-  probeBanner("Q24: slime jump 32x32 (20 poses, loop)",
-              kCreateMagic, kFirstPushBase + 6,
-              "procedural gray blob + eyes; parabolic hop; double-tap out");
-  if (!probeTearDownActiveContainer(*arm)) {
-    snprintf(ret, sizeof(ret), "Img Q24: pre-burst SHUTDOWN failed");
-    return ret;
-  }
-
-  const size_t kBmpCap = 4096;
-  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM,
-                                     "g2.img.slime");
-  if (!bmp) {
-    probePostProbeShutdown(*arm);
-    snprintf(ret, sizeof(ret), "Img Q24: BMP heap alloc failed");
-    return ret;
-  }
-
-  gImgProbeHoldTapPending = false;
-  gImgProbeAbort          = false;
-  gImgProbeHoldActive     = true;
-
-  const uint32_t paceBudgetMs = kPaceMs;
-  uint32_t       pushMagicBase = kFirstPushBase;
-  bool           createdOnce = false;
-  unsigned       framesOk = 0;
-  unsigned       framesAttempted = 0;
-  unsigned       recreateCount = 0;
-  const uint32_t startMs = millis();
-  bool           dismissed = false;
-  bool           lensTimedOut = false;
-
-  while ((millis() - startMs) < kSafetyCapMs &&
-         framesAttempted < kSafetyCapFrames) {
-    if (gImgProbeHoldTapPending) {
-      dismissed = true;
-      break;
-    }
-    if (createdOnce && !arm->containerReady) {
-      if (gG2LiveLoopKeepAlive) {
-        recreateCount++;
-        DEBUG_G2F("[ImgProbe] Q24 lens idle-timeout (recreate #%u)",
-                  recreateCount);
-        createdOnce = false;
-      } else {
-        lensTimedOut = true;
-        break;
-      }
-    }
-
-    size_t bmpLen = buildSlimeJumpBmp32(bmp, kBmpCap, framesAttempted);
-    if (bmpLen == 0) break;
-    const unsigned fragsThisFrame =
-        (unsigned)((bmpLen + G2_IMG_MAPRAW_CHUNK_BYTES - 1) /
-                   G2_IMG_MAPRAW_CHUNK_BYTES);
-    if (pushMagicBase + fragsThisFrame > 256) pushMagicBase = kFirstPushBase;
-
-    const uint32_t frameStartMs = millis();
-    bool           ok = false;
-    if (!createdOnce) {
-      unsigned okFrags = 0, totalFrags = 0;
-      ok = sendImageBmpMultiFragment(*arm, "Q24", kCreateMagic, pushMagicBase,
-                                      bmp, bmpLen, &okFrags, &totalFrags,
-                                      /*tolerateMissedAcks*/ 0, imgW, imgH);
-      createdOnce = ok;
-      if (ok) {
-        arm->containerReady  = true;
-        arm->containerIsList = false;
-        g2LensSetContainer(true, false, BLOCKS_WIDGET_ID);
-      }
-    } else {
-      unsigned okFrags = 0, totalFrags = 0;
-      ok = sendImageBmpFragmentsNoCreate(*arm, "Q24", pushMagicBase,
-                                          /*cid*/ 2, /*cname*/ "imgSl",
-                                          bmp, bmpLen, &okFrags, &totalFrags);
-    }
-    pushMagicBase += fragsThisFrame;
-    framesAttempted++;
-    if (ok) framesOk++;
-
-    const uint32_t frameMs = millis() - frameStartMs;
-    DEBUG_G2F("[ImgProbe] Q24 frame %u: %s in %u ms (pace=%u ms)",
-              framesAttempted, ok ? "OK" : "FAIL", (unsigned)frameMs,
-              (unsigned)paceBudgetMs);
-
-    if (frameMs < paceBudgetMs) {
-      const uint32_t sleepMs = paceBudgetMs - frameMs;
-      const uint32_t sleepStart = millis();
-      while ((millis() - sleepStart) < sleepMs) {
-        if (gImgProbeHoldTapPending) {
-          dismissed = true;
-          break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(50));
-      }
-      if (dismissed) break;
-    }
-  }
-  gImgProbeHoldActive = false;
-  free(bmp);
-
-  const char* reason = dismissed    ? "user tap"
-                       : lensTimedOut ? "lens timeout"
-                                      : "safety cap";
-  const uint32_t totalMs = millis() - startMs;
-  DEBUG_G2F("[ImgProbe] Q24 ended (%s): %u/%u frames %u recreates in %u ms",
-            reason, framesOk, framesAttempted, recreateCount,
-            (unsigned)totalMs);
-
-  probePostProbeShutdown(*arm);
-  probeFooter("Q24", framesOk, framesAttempted);
-  snprintf(ret, sizeof(ret),
-           "Img Q24: %u/%u frames (32x32 slime, 20 pose loop) in %u ms, "
-           "%u re-creates, end via %s",
-           framesOk, framesAttempted, (unsigned)totalMs, recreateCount,
-           reason);
-  return ret;
-}
 
 // ─────────────────────────────────────────────────────────────────────
 // Q25 — loop 4bpp BMPs from a VFS directory (frame_00.bmp …). Path is set
@@ -16255,7 +16475,7 @@ const char* g2ProbeImageQ25SdFrameAnimation() {
   unsigned frameCount = 0;
   for (unsigned i = 0; i < kQ25PackMaxFrames; i++) {
     snprintf(pathBuf, sizeof(pathBuf), "%s/frame_%02u.bmp", s_q25PackDir, i);
-    if (!VFS::existsGuarded(String(pathBuf), gExecAuthContext)) break;
+    if (!VFS::existsGuarded(String(pathBuf), currentAuthContext())) break;
     frameCount++;
   }
   if (frameCount == 0) {
@@ -16314,7 +16534,12 @@ const char* g2ProbeImageQ25SdFrameAnimation() {
   const uint32_t kFirstPushBase = G2_MAGIC_IMAGE_BASE + 11;  // 221
   const uint32_t kSafetyCapMs     = 30000;
   const uint32_t kSafetyCapFrames = 500;
-  const uint32_t kPaceMs          = 320;
+  // Q25 cadence is user-tunable via gSettings.g2PackRateMs (CLI: g2packrate).
+  // Independent of g2liverate so animation playback speed is decoupled from
+  // the live-tile test cadence. Floor 20 ms keeps the worker from busy-looping;
+  // upper bound 2000 ms is the setting range. For large frames the BLE push
+  // dominates and this value is effectively ignored.
+  const uint32_t kPaceMs          = (uint32_t)gSettings.g2PackRateMs;
 
   probeBanner("Q25: PSRAM-cached BMP loop", kCreateMagic, kFirstPushBase + 10,
               s_q25PackDir);

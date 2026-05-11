@@ -1338,7 +1338,7 @@ static const SettingEntry wifiSettingsEntries[] = {
   { "password",           SETTING_STRING, &gSettings.wifiPassword,      0, 0, "", 0, 0, "WiFi Password", nullptr, true, nullptr, "wifipassword" },
   { "autoReconnect",      SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr, false, nullptr, "wifiautoreconnect" },
   { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, nullptr, "ntpserver" },
-  { "tzOffsetMinutes",    SETTING_INT,    &gSettings.tzOffsetMinutes,   -240, 0, nullptr, -720, 840, "Timezone Offset (min)", nullptr, false, nullptr, "tzoffsetminutes" }
+  { "tzOffsetMinutes",    SETTING_INT,    &gSettings.tzOffsetMinutes,   0, 0, nullptr, -720, 840, "Timezone Offset (min)", nullptr, false, nullptr, "tzoffsetminutes" }
 };
 
 static bool isWifiConnected() { return WiFi.status() == WL_CONNECTED; }
@@ -1350,7 +1350,7 @@ extern const SettingsModule wifiSettingsModule = {
   wifiSettingsEntries,
   sizeof(wifiSettingsEntries) / sizeof(wifiSettingsEntries[0]),
   isWifiConnected,
-  "WiFi connection and network settings"
+  "WiFi connection and network configuration"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
@@ -1380,7 +1380,7 @@ extern const SettingsModule httpSettingsModule = {
   httpSettingsEntries,
   sizeof(httpSettingsEntries) / sizeof(httpSettingsEntries[0]),
   isHttpServerRunning,
-  "HTTP server settings"
+  "HTTP/HTTPS web server"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

@@ -816,7 +816,7 @@ float rtcGetTemperature() {
 // RTC settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry rtcSettingEntries[] = {
-  { "rtcAutoStart", SETTING_BOOL, &gSettings.rtcAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
+  { "rtcAutoStart", SETTING_BOOL, &gSettings.rtcAutoStart, 1, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
   { "rtcTimeHasBeenSet", SETTING_BOOL, &gSettings.rtcTimeHasBeenSet, 0, 0, nullptr, 0, 1, "RTC time has been set (NTP/manual)", nullptr, false, nullptr, nullptr }
 };
 
@@ -831,7 +831,7 @@ extern const SettingsModule rtcSettingsModule = {
   rtcSettingEntries,
   sizeof(rtcSettingEntries) / sizeof(rtcSettingEntries[0]),
   isRTCConnectedSetting,
-  "DS3231 RTC sensor settings"
+  "DS3231 real-time clock"
 };
 
 // ============================================================================

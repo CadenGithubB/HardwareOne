@@ -99,7 +99,6 @@ extern bool gAutosDirty;
 extern bool gAutoLogActive;
 extern String gAutoLogFile;
 extern String gAutoLogAutomationName;
-extern String gExecUser;
 
 #else // !ENABLE_AUTOMATION
 

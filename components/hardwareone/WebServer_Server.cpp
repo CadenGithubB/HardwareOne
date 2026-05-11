@@ -2048,12 +2048,9 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       return false;
     }
 
-    // Phase 3: canImport(path, ctx) folds the per-role permission check,
-    // path normalization (".." traversal rejection), and sensitive-extension
-    // checks into a single call. The previous code did: traversal check,
-    // canImport(path) using gExecAuthContext leak, and a separate
-    // isAdminOnlyPath gate — three branches that could disagree. Now one
-    // decision point.
+    // canImport(path, ctx) folds the per-role permission check, path
+    // normalization (".." traversal rejection), and sensitive-extension
+    // checks into a single call. One decision point, one consistent answer.
     if (!canImport(path, ctx)) {
       WARN_SYSTEMF("[handleFileUpload] BLOCKED: Import not allowed: %s", path.c_str());
       return false;
@@ -3807,9 +3804,8 @@ esp_err_t handleFilesList(httpd_req_t* req) {
   bool ok = buildFilesListing(dirPath, body, /*asJson=*/true, ctx, /*hideAdminPaths=*/!userIsAdmin);
   String json;
   if (ok) {
-    // Phase 3: pass caller's identity so the dirPerms reflect what THIS
-    // user can do in the directory (admin gets more, etc.). Previous
-    // path-only call used gExecAuthContext which may have stale identity.
+    // Pass caller's identity so the dirPerms reflect what THIS user can do
+    // in the directory (admin gets more, etc.).
     uint8_t dp = getDirPerms(dirPath, ctx);
     char hdrBuf[64];
     snprintf(hdrBuf, sizeof(hdrBuf), "{\"success\":true,\"dirPerms\":%d,\"files\":[", (int)dp);

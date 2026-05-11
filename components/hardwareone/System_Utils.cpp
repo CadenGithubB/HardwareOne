@@ -30,6 +30,7 @@
 #include "System_TaskUtils.h"
 #include "System_I2C.h"
 #include "System_User.h"
+#include "System_AuthIdentity.h"  // ExecIdentityGuard (executeCommand + submitAndExecuteSync)
 #include "System_Command.h"
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
@@ -895,8 +896,8 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
 // Writes are gated by gAutoLogOwnerCtx — the AuthContext captured when the
 // user ran `autolog start`. See the comment on gAutoLogOwnerCtx in
 // System_Automation.cpp for the design rationale (captured identity vs.
-// reading gExecAuthContext at write time, which fires from event triggers
-// detached from any CLI session).
+// reading the current task's identity at write time, which fires from event
+// triggers detached from any CLI session).
 //
 // If the captured ctx loses permission to the path mid-run (e.g. admin
 // demoted to user), individual writes start failing — that's intentional.
@@ -2675,9 +2676,6 @@ const char* cmd_taskstats(const String& originalCmd) {
 // Command Execution Functions - MIGRATED from main .ino
 // ============================================================================
 // External dependencies for command execution
-extern String gExecUser;
-extern bool gExecIsAdmin;
-extern AuthContext gExecAuthContext;
 extern bool gAutoLogActive;
 extern bool gInAutomationContext;
 extern String gAutoLogAutomationName;
@@ -2692,7 +2690,6 @@ extern String redactCmdForAudit(const String& argsInput);
 extern bool hasAdminPrivilege(const AuthContext& ctx);
 extern bool isAdminUser(const String& user);
 extern void logAuthAttempt(bool success, const char* path, const String& user, const String& ip, const String& extra);
-extern void setCurrentCommandContext(const CommandContext& ctx);
 
 // Note: resolveRegistryCommandKey() is now defined in command_system.cpp
 
@@ -2734,12 +2731,14 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
 
 // Core command execution with authentication and registry dispatch
 bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize) {
-  gExecUser = ctx.user;
-
   // Clear output buffer
   out[0] = '\0';
-  gExecIsAdmin = isAdminUser(ctx.user);
-  gExecAuthContext = ctx;  // Store full context (includes opaque for ESP-NOW streaming)
+
+  // Install the command's identity into the calling task's TLS slot for the
+  // duration of this call. RAII restores on every return path (success, auth
+  // failure, validation, etc.). Cross-task identity isolation is structural
+  // — no other task can observe this command's identity.
+  ExecIdentityGuard identity(ctx);
 
   // Scoped notification context: attributes all notifications from this command
   // to the correct transport + user. The RAII guard automatically clears the
@@ -2986,7 +2985,10 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
       out = "Error: Out of memory for command output";
       return false;
     }
-    setCurrentCommandContext(cmd.ctx);
+    // executeCommand installs the command identity via ExecIdentityGuard, so
+    // the early-boot direct path no longer needs an outer save/restore. The
+    // void* gCurrentCommandContext pointer is still wired explicitly for the
+    // broadcast-output mask plumbing.
     extern void* gCurrentCommandContext;
     gCurrentCommandContext = (void*)&cmd.ctx;
     bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, 2048);

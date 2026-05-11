@@ -780,7 +780,7 @@ extern const SettingsModule tofSettingsModule = {
   tofSettingEntries,
   sizeof(tofSettingEntries) / sizeof(tofSettingEntries[0]),
   isToFConnected,
-  "VL53L4CX time-of-flight distance sensor settings"
+  "VL53L4CX time-of-flight distance sensor"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

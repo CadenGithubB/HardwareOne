@@ -92,8 +92,7 @@
 #include "System_MemUtil.h"   // ps_alloc
 #include "G2_Page_Common.h"
 #include "System_VFS.h"
-
-extern AuthContext gExecAuthContext;
+#include "System_AuthIdentity.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -653,7 +652,7 @@ enum TestLevel : uint8_t {
   TEST_LEVEL_DISPLAY_SELECT_LISTS      = 20, // Bucket 1 — native list widgets
   TEST_LEVEL_DISPLAY_SELECT_MIXED      = 21, // Bucket 2 — compound TextObject layouts
   TEST_LEVEL_DISPLAY_SELECT_EDGES      = 22, // Bucket 3 — edge-anchored geoms + canaries
-  TEST_LEVEL_IMAGE_ANIMATED_ICONS      = 23, // Q22–Q27 live bars + Q24 + packs
+  TEST_LEVEL_IMAGE_ANIMATED_ICONS      = 23, // Q22–Q27 live bars + SD packs
   TEST_LEVEL_IMAGE_ANIMATED_CHOOSE     = 24, // SD G2_ICON_ANIMATIONS_VFS_PATH/* packs
   TEST_LEVEL_IMAGE_STREAM_SINGLE       = 25, // Streaming / Single image — Q10/Q11/Q13/Q15/Q21
   TEST_LEVEL_IMAGE_STREAM_COMPOUND     = 26, // Streaming / Compound (list/text + image) — Q16/Q17/Q18/Q28
@@ -779,6 +778,7 @@ static size_t buildImageStaticRows() {
   snprintf(gRows[row], TEST_ROW_LEN, "QGlizzy: SD /PICTURES/test.bmp");   gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q12: full-screen 576x288 (4 tiles)"); gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q19: solo 96x96 (small-dim test)"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q29: 2-bpp 144x144 (bit-depth test)"); gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
 
@@ -831,7 +831,7 @@ static size_t buildImageStreamingCompoundRows() {
   return row;
 }
 
-// IMAGE / Animated Icons — live bar sizes + Q24 slime + Custom icon packs.
+// IMAGE / Animated Icons — live bar sizes + SD icon packs.
 // Keep row text compact: 8-item CREATE+REBUILD must stay within the ~240 B
 // single-fragment EvenCore list envelope (longer labels force SHUTDOWN+CREATE).
 static size_t buildImageAnimatedIconsRows() {
@@ -842,7 +842,6 @@ static size_t buildImageAnimatedIconsRows() {
   snprintf(gRows[row], TEST_ROW_LEN, "Q20: 96x96 bar");  gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q26: 124x124 bar"); gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q27: 144x144 bar"); gRowPtrs[row] = gRows[row]; row++;
-  snprintf(gRows[row], TEST_ROW_LEN, "Q24: slime 32 (20f)"); gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "SD icon packs >>"); gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
@@ -866,8 +865,8 @@ static size_t buildImageAnimatedChooseRows() {
     row++;
     return row;
   }
-  if (VFS::isLittleFSReady() && VFS::existsGuarded(String(kRoot), gExecAuthContext)) {
-    File dir = VFS::openGuarded(kRoot, FILE_READ, gExecAuthContext);
+  if (VFS::isLittleFSReady() && VFS::existsGuarded(String(kRoot), currentAuthContext())) {
+    File dir = VFS::openGuarded(kRoot, FILE_READ, currentAuthContext());
     if (dir && dir.isDirectory()) {
       while (row < TEST_MAX_ROWS && gAnimIconPickCount < TS_ANIM_ICON_DIR_MAX) {
         File ent = dir.openNextFile();
@@ -884,7 +883,7 @@ static size_t buildImageAnimatedChooseRows() {
 
         String full = String(kRoot) + "/" + name;
         const String probe = full + "/frame_00.bmp";
-        if (!VFS::existsGuarded(probe, gExecAuthContext)) continue;
+        if (!VFS::existsGuarded(probe, currentAuthContext())) continue;
 
         strncpy(gAnimIconPickPaths[gAnimIconPickCount], full.c_str(), 95);
         gAnimIconPickPaths[gAnimIconPickCount][95] = '\0';
@@ -944,7 +943,22 @@ struct ImgProbeTaskCtx {
   StaticTask_t*  tcb;
 };
 
+// Captured at spawn time so the async worker (which runs after the tap
+// dispatcher returns and its G2HijackCtxGuard has expired) can re-apply
+// the same identity. Mirrors gLivePageOwnerCtx / gLiveTextOwnerCtx in
+// G2_Glasses.cpp — one capture-and-apply pattern for every async worker
+// spawned from a hijack tap. Single in-flight probe at a time (enforced
+// by the test-suite picker UX), so a single global is sufficient.
+static AuthContext gImgProbeOwnerCtx;
+
 static void imgProbeWorkerImpl(ImgProbeFn fn) {
+  // Install the captured spawn-time identity into this worker task's
+  // TLS slot. Without it, VFS::*Guarded() calls in fn() (e.g., Q25's
+  // frame_XX.bmp existence checks) would see this task's default ANON
+  // identity and get PERM DENY for files that exist. RAII restores on
+  // every exit path, including the early return below.
+  ExecIdentityGuard identity(gImgProbeOwnerCtx);
+
   if (fn) {
     const char* result = fn();
     DEBUG_G2F("[G2] Image probe done → %s", result ? result : "(null)");
@@ -1011,6 +1025,14 @@ static void imgProbeWorkerInternalStack(void* arg) {
 }
 
 static bool spawnImgProbeWorker(ImgProbeFn fn) {
+  // Capture the spawn-time auth context for the worker to install in its
+  // own TLS slot. The tap dispatcher had a G2HijackCtxGuard in scope when
+  // it called us — that's the right identity (paired-user + SOURCE_LOCAL_
+  // DISPLAY). Without this capture the worker task would default to ANON
+  // and PERM-DENY guarded reads (e.g. Q25's frame_XX.bmp checks). Pattern
+  // matches gLivePageOwnerCtx in G2_Glasses.cpp.
+  gImgProbeOwnerCtx = currentAuthContext();
+
   // 8 KB stack — image probes that build a small BMP (Q5/Q7) keep the
   // pixel buffer (~1 KB) and pb body (~1.1 KB) on the stack, plus
   // sendPbFragmented's per-fragment frame buffer (242 B), plus the
@@ -2362,6 +2384,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         case 2: fn = g2ProbeImageQGlizzy;        break;
         case 3: fn = g2ProbeImageQ12FullScreen;  break;
         case 4: fn = g2ProbeImageQ19SmallSolo;   break;
+        case 5: fn = g2ProbeImageQ29Bmp2bppSolo; break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE/Static: tap idx=%u out of range",
                     (unsigned)idx);
@@ -2477,7 +2500,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         g2ShowListPage(gRowPtrs, n);
         return;
       }
-      if (idx == 7) {
+      if (idx == 6) {
         gTestLevel = TEST_LEVEL_IMAGE_ANIMATED_CHOOSE;
         size_t n = buildImageAnimatedChooseRows();
         g2ShowListPage(gRowPtrs, n);
@@ -2490,7 +2513,6 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         case 3: fn = g2ProbeImageQ20LiveTile96; break;
         case 4: fn = g2ProbeImageQ26LiveTile124; break;
         case 5: fn = g2ProbeImageQ27LiveTile144; break;
-        case 6: fn = g2ProbeImageQ24SlimeJump32; break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE/AnimatedIcons: tap idx=%u out of range",
                     (unsigned)idx);

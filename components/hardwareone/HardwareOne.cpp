@@ -75,6 +75,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_Automation.h"
 #include "System_Utils.h"
 #include "System_User.h"
+#include "System_AuthIdentity.h"
 #include "System_Filesystem.h"
 #include "System_CLI.h"
 #include "System_I2C.h"
@@ -169,7 +170,6 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 
 bool createGamepadTask();
 bool isSensorConnected(const char* moduleName);
-void setCurrentCommandContext(const CommandContext& ctx);
 bool gamepadInit();
 
 
@@ -378,9 +378,10 @@ static const size_t THERMAL_RESPONSE_SIZE = 8192;  // 8KB typically fits 32x24 f
 
 volatile unsigned long gWebMirrorSeq = 0;
 
-String gExecUser = "";
-bool gExecIsAdmin = false;
-AuthContext gExecAuthContext;
+// Per-task identity (formerly gExecUser / gExecIsAdmin / gExecAuthContext) now
+// lives in each task's TLS slot via System_AuthIdentity. Use currentAuthContext()
+// / currentExecUser() / currentExecIsAdmin() for reads, ExecIdentityGuard or
+// SYSTEM_IDENTITY_SCOPE for writes.
 
 #include "System_Settings.h"
 Settings gSettings;
@@ -752,13 +753,9 @@ uint32_t getCurrentCommandOutputMask() {
   return ((CommandContext*)gCurrentCommandContext)->outputMask;
 }
 
-void setCurrentCommandContext(const CommandContext& ctx) {
-  gExecUser = ctx.auth.user;
-  gExecAuthContext = ctx.auth;
-}
-void clearCurrentCommandContext() {
-  gCurrentCommandContext = nullptr;
-}
+// Per-command identity install lives inside executeCommand via
+// ExecIdentityGuard, which writes the calling task's TLS slot. There is no
+// global save/restore here — the prior pattern is structurally obsolete.
 
 // Now that ExecReq is fully defined we can implement the task
 static void commandExecTask(void* pv) {
@@ -787,7 +784,6 @@ static void commandExecTask(void* pv) {
       DEBUG_CMD_FLOWF("[cmd_exec] exec '%.80s' user='%s' heap=%lu",
                   r->line, r->ctx.auth.user.c_str(), (unsigned long)ESP.getFreeHeap());
       
-      setCurrentCommandContext(r->ctx);
       gCurrentCommandContext = &r->ctx;
       bool prevValidate = gCLIValidateOnly;
       gCLIValidateOnly = r->ctx.validateOnly;
@@ -953,7 +949,7 @@ static void performanceCounter() {
 
 static String exitHelpAndExecute(const String& originalCmd) {
   String banner = exitToNormalBanner() + "\n";
-  AuthContext ctx = gExecAuthContext;
+  AuthContext ctx = currentAuthContext();
   ctx.path = "/help/exit";
   char out[2048];
   (void)executeCommand(ctx, originalCmd.c_str(), out, sizeof(out));

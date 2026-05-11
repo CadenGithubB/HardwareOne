@@ -18,12 +18,11 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "G2_Glasses.h"
-#include "G2_HijackCmd.h"        // G2HijackCtxGuard — sets gExecAuthContext to pairedByUser
+#include "G2_HijackCmd.h"        // G2HijackCtxGuard — installs pairedByUser identity
 #include "System_FileManager.h"
 #include "System_Filesystem.h"
 #include "System_Debug.h"
-
-extern AuthContext gExecAuthContext;
+#include "System_AuthIdentity.h"
 
 #include <ArduinoJson.h>
 #include "esp_attr.h"   // EXT_RAM_BSS_ATTR
@@ -446,7 +445,7 @@ static bool showJsonFileViaTextWidget(bool pretty) {
   buildChooserPath(path, sizeof(path));
   if (!path[0]) return false;
 
-  if (!canRead(String(path), gExecAuthContext)) {
+  if (!canRead(String(path), currentAuthContext())) {
     DEBUG_G2F("[G2] Files JSON: blocked by canRead '%s'", path);
     return g2ShowTextPage("JSON viewer blocked: read permission denied.", G2_GEOM_LARGE,
                           exitJsonViewBackToFiles, nullptr);
@@ -588,9 +587,9 @@ bool g2ShowFilesPage() {
 }
 
 void g2ShowFilesMenu() {
-  // Run all FS work under the paired-by user's identity. Without this,
-  // gExecAuthContext is whatever was last set (often empty on a fresh
-  // boot) and FileManager::navigate() denies every read as ANON.
+  // Run all FS work under the paired-by user's identity. Without this guard
+  // the task's TLS identity stays at ANON (the safe default) and
+  // FileManager::navigate() denies every read.
   G2HijackCtxGuard ctxGuard;
 
   // Whenever the real file list comes back up, the chooser is

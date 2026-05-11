@@ -83,7 +83,7 @@ TaskHandle_t gPresenceTaskHandle = nullptr;
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry presenceSettingEntries[] = {
   { "presenceAutoStart", SETTING_BOOL, &gSettings.presenceAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "presenceDevicePollMs", SETTING_INT, &gSettings.presenceDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, nullptr }
+  { "presenceDevicePollMs", SETTING_INT, &gSettings.presenceDevicePollMs, 100, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, nullptr }
 };
 
 static bool isPresenceConnected() {
@@ -97,7 +97,7 @@ extern const SettingsModule presenceSettingsModule = {
   presenceSettingEntries,
   sizeof(presenceSettingEntries) / sizeof(presenceSettingEntries[0]),
   isPresenceConnected,
-  "STHS34PF80 IR presence/motion sensor settings"
+  "STHS34PF80 IR presence and motion sensor"
 };
 
 // ============================================================================

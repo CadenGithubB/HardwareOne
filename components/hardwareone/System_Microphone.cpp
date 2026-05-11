@@ -19,8 +19,7 @@
 #include "System_Settings.h"
 #include "System_I2C.h"
 #include "System_Microphone_OLED.h"
-
-extern AuthContext gExecAuthContext;
+#include "System_AuthIdentity.h"  // currentAuthContext (recording path checks)
 
 // XIAO ESP32S3 Sense PDM Microphone Pins
 #define MIC_PDM_CLK_PIN     42        // PDM CLK (GPIO42 on XIAO Sense)
@@ -314,9 +313,9 @@ bool startRecording() {
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Checking recordings folder: %s", recDir.c_str());
   {
     FsLockGuard fsGuard("mic.record.mkdir");
-    if (!VFS::existsGuarded(recDir, gExecAuthContext)) {
+    if (!VFS::existsGuarded(recDir, currentAuthContext())) {
       DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Creating recordings folder...");
-      bool created = VFS::mkdirGuarded(recDir, gExecAuthContext);
+      bool created = VFS::mkdirGuarded(recDir, currentAuthContext());
       DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] mkdir returned: %d", created);
     } else {
       DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Recordings folder exists");
@@ -331,7 +330,7 @@ bool startRecording() {
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Opening file for write...");
   {
     FsLockGuard fsGuard("mic.record.open");
-    recordingFile = VFS::openGuarded(String(currentRecordingPath), "w", gExecAuthContext, true);
+    recordingFile = VFS::openGuarded(String(currentRecordingPath), "w", currentAuthContext(), true);
   }
   if (!recordingFile) {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] *** FAILED to create file! ***");
@@ -411,8 +410,8 @@ int getRecordingCount() {
   int count = 0;
   String seen = ",";
   auto walk = [&](const String& folder) {
-    if (!VFS::existsGuarded(folder, gExecAuthContext)) return;
-    File dir = VFS::openGuarded(folder, "r", gExecAuthContext);
+    if (!VFS::existsGuarded(folder, currentAuthContext())) return;
+    File dir = VFS::openGuarded(folder, "r", currentAuthContext());
     if (!dir || !dir.isDirectory()) return;
     for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
       if (f.isDirectory()) continue;
@@ -434,8 +433,8 @@ String getRecordingsList() {
   FsLockGuard fsGuard("mic.record.list");
   String seen = ",";
   auto walk = [&](const String& folder) {
-    if (!VFS::existsGuarded(folder, gExecAuthContext)) return;
-    File dir = VFS::openGuarded(folder, "r", gExecAuthContext);
+    if (!VFS::existsGuarded(folder, currentAuthContext())) return;
+    File dir = VFS::openGuarded(folder, "r", currentAuthContext());
     if (!dir || !dir.isDirectory()) return;
     for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
       if (f.isDirectory()) continue;
@@ -459,8 +458,8 @@ bool deleteRecording(const char* filename) {
   String sdPath = String(kMicRecSD) + "/" + filename;
   String lfPath = String(kMicRecLittleFS) + "/" + filename;
   FsLockGuard fsGuard("mic.record.delete");
-  if (VFS::existsGuarded(sdPath, gExecAuthContext)) return VFS::removeGuarded(sdPath, gExecAuthContext);
-  if (VFS::existsGuarded(lfPath, gExecAuthContext)) return VFS::removeGuarded(lfPath, gExecAuthContext);
+  if (VFS::existsGuarded(sdPath, currentAuthContext())) return VFS::removeGuarded(sdPath, currentAuthContext());
+  if (VFS::existsGuarded(lfPath, currentAuthContext())) return VFS::removeGuarded(lfPath, currentAuthContext());
   return false;
 }
 
@@ -963,8 +962,8 @@ const char* cmd_micdelete(const String& argsInput) {
   if (arg.equalsIgnoreCase("all")) {
     auto wipeWavs = [](const char* folder) -> int {
       int deleted = 0;
-      if (!VFS::existsGuarded(folder, gExecAuthContext)) return 0;
-      File dir = VFS::openGuarded(String(folder), "r", gExecAuthContext);
+      if (!VFS::existsGuarded(folder, currentAuthContext())) return 0;
+      File dir = VFS::openGuarded(String(folder), "r", currentAuthContext());
       if (!dir || !dir.isDirectory()) return 0;
       File f = dir.openNextFile();
       while (f) {
@@ -973,7 +972,7 @@ const char* cmd_micdelete(const String& argsInput) {
         f.close();
         if (isWav) {
           String path = String(folder) + "/" + name;
-          if (VFS::removeGuarded(path, gExecAuthContext)) deleted++;
+          if (VFS::removeGuarded(path, currentAuthContext())) deleted++;
         }
         f = dir.openNextFile();
       }

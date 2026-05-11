@@ -9,12 +9,12 @@
 #include "System_Filesystem.h"
 #include "System_Mutex.h"
 #include "System_VFS.h"
+#include "System_AuthIdentity.h"  // currentAuthContext
 
-// Phase 4: FileManager has no AuthContext field of its own, so it reads
-// the active dispatch-time context. Every transport (web/serial/BT/OLED)
-// sets this before invoking the FileManager API. If a future caller
-// wants per-instance identity, this should grow into a member field.
-extern AuthContext gExecAuthContext;
+// FileManager has no AuthContext field of its own, so it reads the calling
+// task's installed identity. Every transport (web/serial/BT/OLED) installs
+// an identity before invoking the FileManager API. If a future caller wants
+// per-instance identity, this should grow into a member field.
 
 // Global instance (optional)
 FileManager* gFileManager = nullptr;
@@ -38,7 +38,7 @@ bool FileManager::navigate(const char* path) {
   if (path[0] != '/') return false;
 
   FsLockGuard guard("FileManager.navigate");
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
 
   // Check if directory exists (use VFS for unified access)
   if (!VFS::existsGuarded(path, ctx)) return false;
@@ -140,7 +140,7 @@ bool FileManager::getItem(int index, FileEntry& entry) {
   // (This should rarely happen with FILE_MANAGER_MAX_CACHED_ITEMS=64)
 
   FsLockGuard guard("FileManager.getItem.scan");
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
 
   File dir = VFS::openGuarded(state.currentPath, "r", ctx);
   if (!dir || !dir.isDirectory()) {
@@ -218,7 +218,7 @@ int FileManager::getPageEnd() const {
 bool FileManager::createFolder(const char* name) {
   if (!name || strlen(name) == 0) return false;
   String fullPath = formatPath(state.currentPath, name);
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
 
   FsLockGuard guard("FileManager.createFolder");
 
@@ -233,7 +233,7 @@ bool FileManager::createFolder(const char* name) {
 bool FileManager::createFile(const char* name) {
   if (!name || strlen(name) == 0) return false;
   String fullPath = formatPath(state.currentPath, name);
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
 
   FsLockGuard guard("FileManager.createFile");
 
@@ -250,7 +250,7 @@ bool FileManager::deleteItem() {
   FileEntry entry;
   if (!getCurrentItem(entry)) return false;
   String fullPath = formatPath(state.currentPath, entry.name);
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
 
   FsLockGuard guard("FileManager.deleteItem");
 
@@ -274,7 +274,7 @@ bool FileManager::renameItem(const char* newName) {
 
   String oldPath = formatPath(state.currentPath, entry.name);
   String newPath = formatPath(state.currentPath, newName);
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
 
   FsLockGuard guard("FileManager.renameItem");
 
@@ -288,7 +288,7 @@ bool FileManager::renameItem(const char* newName) {
 
 bool FileManager::readFile(const char* filename, String& content) {
   String fullPath = formatPath(state.currentPath, filename);
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
 
   // Pause sensor polling during file I/O
   extern volatile bool gSensorPollingPaused;
@@ -318,7 +318,7 @@ bool FileManager::readFile(const char* filename, String& content) {
 
 bool FileManager::writeFile(const char* filename, const String& content) {
   String fullPath = formatPath(state.currentPath, filename);
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
 
   // Pause sensor polling during file I/O
   extern volatile bool gSensorPollingPaused;
@@ -368,7 +368,7 @@ bool FileManager::loadDirectory() {
   gSensorPollingPaused = true;
 
   FsLockGuard guard("FileManager.loadDirectory");
-  const AuthContext& ctx = gExecAuthContext;
+  const AuthContext& ctx = currentAuthContext();
 
   File dir = VFS::openGuarded(state.currentPath, "r", ctx);
   if (!dir || !dir.isDirectory()) {
@@ -491,7 +491,7 @@ void FileManager::ensureValidSelection() {
 bool FileManager::isProtectedPath(const char* path) {
   // "Protected" is per-caller: a path is protected if the active caller
   // can't delete it.
-  return !canDelete(String(path), gExecAuthContext);
+  return !canDelete(String(path), currentAuthContext());
 }
 
 // Helper functions

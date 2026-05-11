@@ -14,6 +14,7 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
+#include "System_AuthIdentity.h"
 #include <mqtt_client.h>
 #include "System_Settings.h"
 #include "System_Debug.h"
@@ -1313,12 +1314,11 @@ const char* cmd_mqttcacertpath(const String& argsInput) {
     }
     return "MQTT CA cert path cleared";
   }
-  // CLI handler: dispatch sets gExecAuthContext to the caller's identity.
   // The caller (web admin or serial) needs read perm on the path they're
-  // pointing MQTT at. If they can't read it, telling MQTT to use it is
+  // pointing MQTT at — currentAuthContext() resolves to this command's
+  // installed identity. If they can't read it, telling MQTT to use it is
   // also denied.
-  extern AuthContext gExecAuthContext;
-  if (!VFS::existsGuarded(arg, gExecAuthContext)) {
+  if (!VFS::existsGuarded(arg, currentAuthContext())) {
     if (!ensureDebugBuffer()) return "Error";
     snprintf(getDebugBuffer(), 1024, "Warning: File not found: %s (setting anyway)", arg.c_str());
     setSetting(gSettings.mqttCACertPath, arg);

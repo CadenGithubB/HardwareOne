@@ -43,8 +43,6 @@ bool shouldBlockForDisplayAuth() {
 #include "System_VFS.h"
 #include "i2csensor-rda5807.h"
 
-extern AuthContext gExecAuthContext;
-
 #include "OLED_ConsoleBuffer.h"
 #include "OLED_Footer.h"
 #include "OLED_SettingsEditor.h"
@@ -4313,12 +4311,14 @@ static String loadCachedManifest() {
   snprintf(pathBuf, sizeof(pathBuf), "/system/manifests/%s.json", hashHex);
   
   FsLockGuard guard("manifest.load");
-  if (!VFS::existsGuarded(pathBuf, gExecAuthContext)) {
+  // trusted: cached manifest read for OLED capability rendering.
+  AuthContext sys = VFS::systemAuth("oled.utils.manifest_read");
+  if (!VFS::existsGuarded(pathBuf, sys)) {
     DEBUG_USERSF("[RMENU] Manifest not cached: %s\n", pathBuf);
     return "";
   }
 
-  File f = VFS::openGuarded(pathBuf, "r", gExecAuthContext);
+  File f = VFS::openGuarded(pathBuf, "r", sys);
   if (!f) return "";
   
   String content = f.readString();

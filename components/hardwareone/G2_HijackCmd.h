@@ -31,6 +31,7 @@
 #include "G2_Glasses.h"            // G2HijackPage
 #include "System_CommandTypes.h"   // ExecAsyncCallback (forward used by callers)
 #include "System_User.h"           // AuthContext (for g2HijackAuthContext / G2HijackCtxGuard)
+#include "System_AuthIdentity.h"   // ExecIdentityGuard (wrapped by G2HijackCtxGuard)
 
 // Snapshot of UI state at the moment a hijack command is submitted.
 // The completion callback uses this to detect staleness — if the user has
@@ -94,40 +95,40 @@ bool g2SubmitHijackCommand(const char* line,
 // =============================================================================
 // AuthContext for in-callback hijack work (no cmd_exec dispatch).
 //
-// g2SubmitHijackCommand sends taps through cmd_exec_task, which sets
-// gExecAuthContext from cmd.ctx.auth.user (= pairedByUser) for the
-// duration of the command. That covers any tap that mutates state via a
-// CLI command.
+// g2SubmitHijackCommand sends taps through cmd_exec_task, which installs the
+// command's identity (cmd.ctx.auth.user = pairedByUser) into the executor
+// task's TLS slot for the duration of the command. That covers any tap that
+// mutates state via a CLI command.
 //
 // But some hijack handlers — notably the file browser (g2ShowFilesMenu /
-// g2FilesHandleTap) — don't go through cmd_exec. They run synchronously
-// in the BLE callback and call FileManager / VFS::*Guarded directly. Those
-// reads need an AuthContext too: without one, gExecAuthContext is whatever
-// was last set (often empty on a fresh boot) and every guarded call fails
-// "anonymous never permitted".
+// g2FilesHandleTap) — don't go through cmd_exec. They run synchronously in
+// the BLE callback and call FileManager / VFS::*Guarded directly. Those
+// reads need an AuthContext too: without one the task's TLS slot is still
+// ANON and every guarded call fails "anonymous never permitted".
 //
-// g2HijackAuthContext() builds the same identity g2SubmitHijackCommand
-// uses (pairedByUser, transport=SOURCE_LOCAL_DISPLAY). G2HijackCtxGuard is
-// an RAII wrapper that installs it into gExecAuthContext for the duration
-// of a scope — drop one at the top of every direct-FS hijack callback.
+// g2HijackAuthContext() builds the same identity g2SubmitHijackCommand uses
+// (pairedByUser, transport=SOURCE_LOCAL_DISPLAY). G2HijackCtxGuard is a thin
+// wrapper around ExecIdentityGuard that installs it into the calling task's
+// slot for the lifetime of the scope — drop one at the top of every
+// direct-FS hijack callback.
 //
 // Glasses inherit the privileges of their pairer: admin pairs → admin
 // reads, regular user pairs → user-level reads. If pairedByUser is blank
 // (legacy peer paired before this field existed), the guard installs an
 // empty user → all guarded reads fail. To recover, re-run
-// `bleautoconnect g2-glasses on` which stamps pairedByUser from
-// gExecAuthContext.user via bleSavePeerMac.
+// `bleautoconnect g2-glasses on` which stamps pairedByUser from the
+// caller's currentAuthContext().user via bleSavePeerMac.
 // =============================================================================
 AuthContext g2HijackAuthContext();
 
 class G2HijackCtxGuard {
  public:
   G2HijackCtxGuard();
-  ~G2HijackCtxGuard();
+  ~G2HijackCtxGuard() = default;
   G2HijackCtxGuard(const G2HijackCtxGuard&) = delete;
   G2HijackCtxGuard& operator=(const G2HijackCtxGuard&) = delete;
  private:
-  AuthContext saved_;
+  ExecIdentityGuard guard_;
 };
 
 // =============================================================================

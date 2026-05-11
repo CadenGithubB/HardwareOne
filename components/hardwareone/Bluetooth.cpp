@@ -441,7 +441,6 @@ class CmdStatusCallbacks : public BLECharacteristicCallbacks {
 // =============================================================================
 
 extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
-extern AuthContext gExecAuthContext;
 
 // Command types + ExecAsyncCallback from shared header
 #include "System_CommandTypes.h"
@@ -1631,8 +1630,8 @@ const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoo
 const SettingEntry bluetoothSettingsEntries[] = {
   { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bluetoothAutoStart,    true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "bleautostart" },
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
-  { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, true, 0, nullptr, 0, 0, "Device Name", nullptr, false, nullptr, nullptr },
-  { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            true, 3, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
+  { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, nullptr },
+  { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
   { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", nullptr, false, nullptr, "blemode" }
 };
 
@@ -1646,7 +1645,7 @@ extern const SettingsModule bluetoothSettingsModule = {
   bluetoothSettingsEntries,
   bluetoothSettingsCount,
   isBLERunning,
-  "Bluetooth classic and BLE settings"
+  "Bluetooth Classic and BLE"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

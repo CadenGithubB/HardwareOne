@@ -18,6 +18,7 @@
 #include "System_Logging.h" // For log file paths and constants
 #include "System_Filesystem.h"    // For writeText, readText
 #include "System_VFS.h"    // For VFS::*Guarded + VFS::systemAuth
+#include "System_AuthIdentity.h"   // currentAuthContext (createdBy stamp, admin sync)
 #include "System_Settings.h"
 #include "Bluetooth.h"
 #include "OLED_Display.h"
@@ -1646,8 +1647,7 @@ const char* cmd_user_add(const String& argsInput) {
     return "Error: Password must be at least 6 characters";
   }
 
-  extern AuthContext gExecAuthContext;
-  String createdBy = gExecAuthContext.user;
+  String createdBy = currentAuthContext().user;
   if (createdBy.length() == 0) {
     createdBy = "cli";
   }
@@ -3002,8 +3002,7 @@ const char* cmd_user_sync(const String& argsInput) {
   }
   
   // Get admin credentials from current auth context
-  extern AuthContext gExecAuthContext;
-  String adminUser = gExecAuthContext.user;
+  String adminUser = currentAuthContext().user;
   
   if (adminUser.length() == 0) {
     return "Error: Not authenticated - admin login required";

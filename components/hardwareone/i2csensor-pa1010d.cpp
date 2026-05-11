@@ -500,7 +500,7 @@ extern const SettingsModule gpsSettingsModule = {
   gpsSettingEntries,
   sizeof(gpsSettingEntries) / sizeof(gpsSettingEntries[0]),
   isGPSConnected,
-  "PA1010D GPS sensor settings"
+  "PA1010D GPS receiver"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

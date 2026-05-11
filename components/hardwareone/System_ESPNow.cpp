@@ -21,6 +21,7 @@
 
 #include "OLED_Display.h"
 #include "OLED_UI.h"
+#include "System_AuthIdentity.h"   // currentAuthContext (CLI handlers + ESP-NOW frame ctx)
 #include "System_Command.h"
 #include "System_Notifications.h"
 #include "System_Debug.h"
@@ -64,8 +65,6 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
 // Debug flags (defined in .ino)
 // Removed local DEBUG_HTTP define; use debug_system.h as single source of truth
 
-// General system functions from .ino (non-ESP-NOW specific)
-extern AuthContext gExecAuthContext;
 // Note: handleFileTransferMessage and sendTopologyResponse are static in this file, not extern
 
 // ============================================================================
@@ -8570,10 +8569,10 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   }
 
   // Security: Block sending sensitive files (credentials, passwords, keys).
-  // Uses gExecAuthContext so CLI/web callers see the same allow/deny they
-  // would on a direct read; internal bond/USER_SYNC callers run through the
-  // same gate using whatever context the caller had set.
-  if (!canRead(localPath, gExecAuthContext)) {
+  // Uses currentAuthContext() so CLI/web callers see the same allow/deny
+  // they would on a direct read; internal bond/USER_SYNC callers run
+  // through the same gate using whatever identity their task installed.
+  if (!canRead(localPath, currentAuthContext())) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] SECURITY: Blocked sending sensitive file: %s", localPath.c_str());
     broadcastOutput("[ESP-NOW] SECURITY: Cannot send file containing credentials: " + localPath);
     return false;
@@ -8581,14 +8580,14 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
 
   {
     FsLockGuard guard("espnow.send_file.exists");
-    if (!VFS::existsGuarded(localPath, gExecAuthContext)) {
+    if (!VFS::existsGuarded(localPath, currentAuthContext())) {
       DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] File not found: %s", localPath.c_str());
       return false;
     }
   }
 
   FsLockGuard fsGuard("espnow.send_file.open");
-  File file = VFS::openGuarded(localPath, "r", gExecAuthContext);
+  File file = VFS::openGuarded(localPath, "r", currentAuthContext());
   if (!file) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] Cannot open file: %s", localPath.c_str());
     return false;
@@ -8837,13 +8836,13 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
     BROADCAST_PRINTF("[ESP-NOW][mesh] file send accepted MAC=%s", formatMacAddress(mac).c_str());
   }
 
-  if (!VFS::existsGuarded(filepath, gExecAuthContext)) {
+  if (!VFS::existsGuarded(filepath, currentAuthContext())) {
     snprintf(sendfileBuffer, sizeof(sendfileBuffer), "Error: File not found: %s", filepath.c_str());
     return sendfileBuffer;
   }
 
   // Get file info for reporting
-  File file = VFS::openGuarded(filepath, "r", gExecAuthContext);
+  File file = VFS::openGuarded(filepath, "r", currentAuthContext());
   if (!file) {
     snprintf(sendfileBuffer, sizeof(sendfileBuffer), "Error: Cannot open file: %s", filepath.c_str());
     return sendfileBuffer;
@@ -9309,12 +9308,12 @@ const char* cmd_espnow_startstream(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
 
-  if (!gExecAuthContext.ip.startsWith("espnow:")) {
+  if (!currentAuthContext().ip.startsWith("espnow:")) {
     return "Error: 'startstream' only works via ESP-NOW remote execution.\n"
            "Usage from Device A: espnow remote DeviceB admin pass startstream";
   }
 
-  const uint8_t* senderMac = (const uint8_t*)gExecAuthContext.opaque;
+  const uint8_t* senderMac = (const uint8_t*)currentAuthContext().opaque;
 
   if (!gEspNow->streamTarget) {
     gEspNow->streamTarget = (uint8_t*)ps_alloc(6, AllocPref::PreferPSRAM, "espnow.mac");
@@ -9619,11 +9618,11 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
   
   // If no argument, list all cached manifests
   if (args.length() == 0) {
-    if (!VFS::existsGuarded(manifestDir, gExecAuthContext)) {
+    if (!VFS::existsGuarded(manifestDir, currentAuthContext())) {
       return "No cached manifests. Use 'bondrequestmanifest' to fetch from peer.";
     }
 
-    File dir = VFS::openGuarded(manifestDir, "r", gExecAuthContext);
+    File dir = VFS::openGuarded(manifestDir, "r", currentAuthContext());
     if (!dir || !dir.isDirectory()) {
       return "Cannot open manifests directory.";
     }
@@ -9656,12 +9655,12 @@ const char* cmd_bond_showremotemanifest(const String& argsInput) {
   // Show specific manifest by fwHash
   char path[96];
   snprintf(path, sizeof(path), "%s/%s.json", manifestDir, args.c_str());
-  if (!VFS::existsGuarded(path, gExecAuthContext)) {
+  if (!VFS::existsGuarded(path, currentAuthContext())) {
     return "Manifest not found. Use 'bondshowremotemanifest' to list available.";
   }
 
   FsLockGuard guard("bond.manifest.read");
-  File f = VFS::openGuarded(path, "r", gExecAuthContext);
+  File f = VFS::openGuarded(path, "r", currentAuthContext());
   if (!f) {
     return "Failed to open manifest file.";
   }
@@ -10357,7 +10356,7 @@ static const SettingEntry espnowSettingEntries[] = {
   { "workerStatusInterval", SETTING_INT, &gSettings.meshWorkerStatusInterval, 30000, 0, nullptr, 5000, 120000, "Worker Status Interval (ms)", nullptr, false, "mesh", "espnowworkerstatusinterval" },
   { "topoDiscoveryInterval", SETTING_INT, &gSettings.meshTopoDiscoveryInterval, 0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr, false, "mesh", "espnowtopodiscoveryinterval" },
   { "topoAutoRefresh", SETTING_BOOL, &gSettings.meshTopoAutoRefresh, false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr, false, "mesh", "espnowtopoautorefresh" },
-  { "heartbeatBroadcast", SETTING_BOOL, &gSettings.meshHeartbeatBroadcast, false, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr, false, "mesh", "espnowheartbeatbroadcast" },
+  { "heartbeatBroadcast", SETTING_BOOL, &gSettings.meshHeartbeatBroadcast, true, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr, false, "mesh", "espnowheartbeatbroadcast" },
   { "meshTTL", SETTING_INT, &gSettings.meshTTL, 3, 0, nullptr, 1, 10, "TTL", nullptr, false, "mesh", "espnowmeshttl" },
   { "meshAdaptiveTTL", SETTING_BOOL, &gSettings.meshAdaptiveTTL, false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr, false, "mesh", "espnowmeshadaptivettl" },
   { "meshPeerMax", SETTING_INT, &gSettings.meshPeerMax, 8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr, false, "mesh", "espnowmeshpeermax" },

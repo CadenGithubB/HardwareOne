@@ -339,7 +339,24 @@ bool initCamera() {
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.jpeg_quality = jpegQ;
   config.fb_count = 1;  // Start with 1, increase if PSRAM available
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;  // Default, changed to LATEST if PSRAM
+  // CAMERA_GRAB_LATEST: fb_get() returns the most recently captured frame;
+  // older unread frames are silently overwritten by the sensor task.
+  //
+  // Was CAMERA_GRAB_WHEN_EMPTY until 2026-05-10. WHEN_EMPTY treats the fb
+  // ring as a FIFO — the sensor stalls when full (cam_hal: FB-OVF) and
+  // fb_get() returns the OLDEST queued frame. With fb_count=2 and a slow
+  // consumer (e.g. G2 BLE stream draining one frame every ~1.5 s at
+  // 288×144), every captured frame was already ~1.5 s old before we
+  // started the BLE push, giving a ~3 s end-to-end preview latency.
+  //
+  // LATEST means streaming consumers (G2 lens, web MJPEG, snapshots) get
+  // current frames at the cost of dropping old unread ones — the right
+  // trade for live preview. Recording (System_Camera_Video.cpp recordingTask)
+  // also benefits: when disk I/O hiccups, LATEST drops stale frames cleanly
+  // instead of stalling the sensor and producing chunked playback. The
+  // "frame-perfect contiguous capture" semantics of WHEN_EMPTY only matter
+  // for use cases this firmware doesn't have (high-fps motion analysis).
+  config.grab_mode = CAMERA_GRAB_LATEST;
   
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Initial config: xclk=%dHz fs=%d pix=%d fb_loc=%d qual=%d fb_cnt=%d grab=%d",
                 config.xclk_freq_hz, config.frame_size, config.pixel_format,
@@ -361,7 +378,7 @@ bool initCamera() {
   if (hasPsram && camPsramDma) {
     config.jpeg_quality = 10;  // Higher quality when PSRAM DMA available
     config.fb_count = 2;
-    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+    config.grab_mode = CAMERA_GRAB_LATEST;
     DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PSRAM + PSRAM-DMA — quality=10, fb_count=2, FB in PSRAM");
   } else if (hasPsram && !camPsramDma) {
     // PSRAM_DMA disabled in menuconfig: the camera DMA peripheral writes
@@ -383,7 +400,7 @@ bool initCamera() {
     config.fb_location = CAMERA_FB_IN_PSRAM;
     config.jpeg_quality = jpegQ;
     config.fb_count = 1;  // Single buffer — DMA→DRAM→FB pipeline is serial.
-    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+    config.grab_mode = CAMERA_GRAB_LATEST;
     DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] PSRAM_DMA disabled — DMA→DRAM line buf, FB in PSRAM, fb_count=1, jpeg_quality=%d", jpegQ);
   } else {
     // No PSRAM chip — use internal DRAM. Resolution is already capped
@@ -395,7 +412,7 @@ bool initCamera() {
     }
     config.fb_location = CAMERA_FB_IN_DRAM;
     config.fb_count = 1;
-    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+    config.grab_mode = CAMERA_GRAB_LATEST;
   }
 
   INFO_CAMERAF("Config: xclk=%dMHz framesize=%d quality=%d fb_count=%d",
@@ -524,12 +541,18 @@ bool initCamera() {
     int r2 = s->set_quality(s, jpegQ);
     DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_quality returned %d", r2);
     
-    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_brightness(%d)...", gSettings.cameraBrightness);
-    s->set_brightness(s, gSettings.cameraBrightness);
-    
+    // Order: contrast → brightness → saturation. Mirrors the camerafx
+    // command's order, which the user validated empirically as the
+    // best-looking combination on OV3660. ESPHome bug #5499 reports each
+    // call clears the others' enable bits on this sensor block; calling
+    // them back-to-back here in this order matches what the user found
+    // produces the "juiced" look they want as the default.
     DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_contrast(%d)...", gSettings.cameraContrast);
     s->set_contrast(s, gSettings.cameraContrast);
-    
+
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_brightness(%d)...", gSettings.cameraBrightness);
+    s->set_brightness(s, gSettings.cameraBrightness);
+
     DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] set_saturation(%d)...", gSettings.cameraSaturation);
     s->set_saturation(s, gSettings.cameraSaturation);
     
@@ -548,11 +571,16 @@ bool initCamera() {
     if (s->set_sharpness) s->set_sharpness(s, gSettings.cameraSharpness);
     if (s->set_denoise) s->set_denoise(s, gSettings.cameraDenoise);
     s->set_exposure_ctrl(s, 1);
-    s->set_aec2(s, 0);
+    s->set_aec2(s, 1);  // Alt AEC algorithm — user-validated as part of "juiced" defaults.
     s->set_ae_level(s, gSettings.cameraAELevel);  // Apply saved exposure compensation
     s->set_gain_ctrl(s, 1);
     s->set_agc_gain(s, 0);
-    s->set_gainceiling(s, (gainceiling_t)0);
+    // GAINCEILING_128X (=6). The previous default of 2X starved AGC under
+    // typical indoor light → image stayed dim → colors looked washed out
+    // because chroma channels quantized to small numbers near the noise
+    // floor. Higher ceiling lets AEC actually expose the scene, which is
+    // a prerequisite for any of the saturation/contrast knobs to register.
+    s->set_gainceiling(s, (gainceiling_t)6);
     s->set_bpc(s, 0);
     s->set_wpc(s, 1);
     s->set_raw_gma(s, 1);
@@ -1123,17 +1151,20 @@ const char* cmd_camerares(const String& argsInput) {
   return result;
 }
 
-// Numeric framesize command for settings UI (accepts framesize enum value directly)
+// Numeric framesize command for the settings UI. The value is the setting
+// INDEX (0-10) that maps to a framesize_t via cameraFramesizeFromSetting().
+// Dropdown options on the web Sensors page also use this index space, so the
+// query response (no args) must report the index — NOT the enum value, which
+// would collide (e.g. setting index 5 = UXGA, but enum FRAMESIZE_240X240 = 5).
 const char* cmd_cameraframesize(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
   String valStr = argsInput;
   valStr.trim();
-  
+
   if (valStr.length() == 0) {
     static char result[64];
-    framesize_t fs = cameraFramesizeFromSetting(gSettings.cameraFramesize);
-    snprintf(result, sizeof(result), "cameraFramesize=%d", (int)fs);
+    snprintf(result, sizeof(result), "cameraFramesize=%d", gSettings.cameraFramesize);
     return result;
   }
   
@@ -1453,24 +1484,24 @@ const char* cmd_cameraaec(const String& argsInput) {
   return "Failed";
 }
 
-const char* cmd_camerastreaminterval(const String& argsInput) {
+const char* cmd_camerafps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   String valStr = argsInput;
   valStr.trim();
-  
+
   if (valStr.length() == 0) {
     static char buf[96];
-    snprintf(buf, sizeof(buf), "Stream interval: %d ms (lower=faster)\nUsage: camerastreaminterval <50-2000>",
-             gSettings.cameraStreamIntervalMs);
+    snprintf(buf, sizeof(buf), "Camera FPS: %d fps\nUsage: camerafps <1-20>",
+             gSettings.cameraStreamFps);
     return buf;
   }
 
   int val = valStr.toInt();
-  if (val < 50 || val > 2000) return "cameraStreamIntervalMs must be 50-2000";
-  setSetting(gSettings.cameraStreamIntervalMs, val);
+  if (val < 1 || val > 20) return "cameraStreamFps must be 1-20";
+  setSetting(gSettings.cameraStreamFps, val);
   static char buf[64];
-  snprintf(buf, sizeof(buf), "cameraStreamIntervalMs set to %d ms", val);
+  snprintf(buf, sizeof(buf), "cameraStreamFps set to %d fps", val);
   return buf;
 }
 
@@ -1548,6 +1579,271 @@ const char* cmd_cameraagcgain(const String& argsInput) {
     return result;
   }
   return "Failed";
+}
+
+// =============================================================================
+// Runtime-only sensor controls — no persistence, no UI integration.
+// Use these to test which OV3660 settings actually improve image quality
+// before promoting any of them to gSettings + persisted JSON.
+// =============================================================================
+
+// Gainceiling: 0..6 → 2X, 4X, 8X, 16X, 32X, 64X, 128X.
+// Most likely fix for "washed out" indoor symptom: default value 0 caps the
+// sensor at 2× analog gain so AGC can't expose dim scenes; raising to 6 (128X)
+// gives AEC headroom to actually brighten the image.
+const char* cmd_cameragainceiling(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gCameraEnabled) return "Camera not enabled";
+
+  String s = argsInput; s.trim();
+  sensor_t* sens = esp_camera_sensor_get();
+  if (!sens) return "Camera sensor not available";
+
+  if (s.length() == 0) {
+    static char r[64];
+    static const char* kNames[] = {"2X","4X","8X","16X","32X","64X","128X"};
+    int v = sens->status.gainceiling;
+    snprintf(r, sizeof(r), "Gainceiling: %d (%s). Set with: cameragainceiling <0-6>",
+             v, (v >= 0 && v <= 6) ? kNames[v] : "?");
+    return r;
+  }
+  int v = s.toInt();
+  if (v < 0 || v > 6) return "gainceiling must be 0..6 (2X..128X)";
+  if (sens->set_gainceiling(sens, (gainceiling_t)v) == 0) {
+    static char r[64];
+    static const char* kNames[] = {"2X","4X","8X","16X","32X","64X","128X"};
+    snprintf(r, sizeof(r), "Gainceiling set to %d (%s)", v, kNames[v]);
+    return r;
+  }
+  return "Failed";
+}
+
+// parseBoolArg(const String&) is defined in System_Utils.h. It returns
+// -1 on empty, 0/1 on parsed values, -2 on unparseable input — same
+// semantics this file's command handlers use.
+
+// Shared shape for the simple on/off sensor toggles below. argsInput
+// empty → report current value; valid bool → call setter; bad input →
+// usage hint. `currentVal` is read from sensor_t::status; setter is the
+// sensor_t function pointer.
+static const char* cameraBoolToggle(const String& argsInput,
+                                    const char* tag,
+                                    uint8_t currentVal,
+                                    int (*setter)(sensor_t*, int)) {
+  if (!gCameraEnabled) return "Camera not enabled";
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s || !setter) return "Camera sensor not available";
+
+  static char r[80];
+  String a = argsInput; a.trim();
+  if (a.length() == 0) {
+    snprintf(r, sizeof(r), "%s: %s", tag, currentVal ? "ON" : "OFF");
+    return r;
+  }
+  int p = parseBoolArg(a);
+  if (p < 0) {
+    snprintf(r, sizeof(r), "Usage: <on|off>  (current %s: %s)",
+             tag, currentVal ? "ON" : "OFF");
+    return r;
+  }
+  if (setter(s, p) == 0) {
+    snprintf(r, sizeof(r), "%s: %s", tag, p ? "ON" : "OFF");
+    return r;
+  }
+  return "Failed";
+}
+
+const char* cmd_camerawhitebal(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  sensor_t* s = esp_camera_sensor_get();
+  return cameraBoolToggle(argsInput, "whitebal", s ? s->status.awb : 0,
+                          s ? s->set_whitebal : nullptr);
+}
+
+const char* cmd_cameraawbgain(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  sensor_t* s = esp_camera_sensor_get();
+  return cameraBoolToggle(argsInput, "awb_gain", s ? s->status.awb_gain : 0,
+                          s ? s->set_awb_gain : nullptr);
+}
+
+const char* cmd_cameraaec2(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  sensor_t* s = esp_camera_sensor_get();
+  return cameraBoolToggle(argsInput, "aec2", s ? s->status.aec2 : 0,
+                          s ? s->set_aec2 : nullptr);
+}
+
+const char* cmd_cameradcw(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  sensor_t* s = esp_camera_sensor_get();
+  return cameraBoolToggle(argsInput, "dcw", s ? s->status.dcw : 0,
+                          s ? s->set_dcw : nullptr);
+}
+
+const char* cmd_camerabpc(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  sensor_t* s = esp_camera_sensor_get();
+  return cameraBoolToggle(argsInput, "bpc", s ? s->status.bpc : 0,
+                          s ? s->set_bpc : nullptr);
+}
+
+const char* cmd_camerawpc(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  sensor_t* s = esp_camera_sensor_get();
+  return cameraBoolToggle(argsInput, "wpc", s ? s->status.wpc : 0,
+                          s ? s->set_wpc : nullptr);
+}
+
+const char* cmd_cameragamma(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  sensor_t* s = esp_camera_sensor_get();
+  return cameraBoolToggle(argsInput, "raw_gma", s ? s->status.raw_gma : 0,
+                          s ? s->set_raw_gma : nullptr);
+}
+
+const char* cmd_cameralenc(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  sensor_t* s = esp_camera_sensor_get();
+  return cameraBoolToggle(argsInput, "lenc", s ? s->status.lenc : 0,
+                          s ? s->set_lenc : nullptr);
+}
+
+// Color bar test pattern. Use to confirm the decode + display pipeline is
+// honest before chasing tuning: if the colorbar renders vivid+saturated,
+// the issue is exposure/gain, not the BMP build / palette / lens.
+const char* cmd_cameracolorbar(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  sensor_t* s = esp_camera_sensor_get();
+  return cameraBoolToggle(argsInput, "colorbar", s ? s->status.colorbar : 0,
+                          s ? s->set_colorbar : nullptr);
+}
+
+// Direct sensor register poke. Escape hatch for OV3660 register tweaks
+// the high-level API doesn't cover (e.g. issue #220 register fix:
+// camerareg 0x3824 0x1f 0x04). Format: <addr_hex> <mask_hex> <value_hex>.
+const char* cmd_camerareg(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gCameraEnabled) return "Camera not enabled";
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) return "Camera sensor not available";
+
+  String a = argsInput; a.trim();
+  if (a.length() == 0) {
+    return "Usage: camerareg <addr_hex> <mask_hex> <value_hex>  "
+           "(example: camerareg 0x3824 0x1f 0x04)";
+  }
+  unsigned addr = 0, mask = 0, val = 0;
+  // Accept "0x" prefix and bare hex. sscanf with %x handles both.
+  if (sscanf(a.c_str(), "%x %x %x", &addr, &mask, &val) != 3) {
+    return "Bad format. Usage: camerareg <addr_hex> <mask_hex> <value_hex>";
+  }
+  if (s->set_reg(s, (int)addr, (int)mask, (int)val) == 0) {
+    static char r[80];
+    snprintf(r, sizeof(r), "set_reg(0x%04X, 0x%02X, 0x%02X) ok", addr, mask, val);
+    return r;
+  }
+  return "set_reg failed";
+}
+
+// Print all current sensor status values. Emits each section as its own
+// broadcast line so the per-broadcast 256-byte cap in BROADCAST_PRINTF
+// doesn't truncate the dump. Returns a short summary so the cmd
+// dispatcher's response line shows something useful too.
+//
+// NOTE: these values come from sensor_t::status (software-side cache).
+// On OV3660, brightness/contrast/saturation share a DSP control block
+// where each setter clears the enable bits of the others — so
+// status.brightness=2 doesn't guarantee the brightness bit is enabled
+// in the hardware register. Use camerafx to set them together.
+const char* cmd_cameradump(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gCameraEnabled) return "Camera not enabled";
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) return "Camera sensor not available";
+
+  static const char* kGCNames[] = {"2X","4X","8X","16X","32X","64X","128X"};
+  const camera_status_t& st = s->status;
+  int gc = (st.gainceiling <= 6) ? st.gainceiling : 0;
+
+  BROADCAST_PRINTF("[CAM_DUMP] PID=0x%04X  framesize=%u  quality=%u  scale=%d",
+                   (unsigned)s->id.PID, (unsigned)st.framesize,
+                   (unsigned)st.quality, (int)st.scale);
+  BROADCAST_PRINTF("[CAM_DUMP] brightness=%d  contrast=%d  saturation=%d  "
+                   "sharpness=%d  denoise=%u  special_effect=%u",
+                   (int)st.brightness, (int)st.contrast, (int)st.saturation,
+                   (int)st.sharpness, (unsigned)st.denoise,
+                   (unsigned)st.special_effect);
+  BROADCAST_PRINTF("[CAM_DUMP] wb_mode=%u  awb=%u  awb_gain=%u",
+                   (unsigned)st.wb_mode, (unsigned)st.awb, (unsigned)st.awb_gain);
+  BROADCAST_PRINTF("[CAM_DUMP] aec=%u  aec2=%u  aec_value=%u  ae_level=%d",
+                   (unsigned)st.aec, (unsigned)st.aec2,
+                   (unsigned)st.aec_value, (int)st.ae_level);
+  BROADCAST_PRINTF("[CAM_DUMP] agc=%u  agc_gain=%u  gainceiling=%u (%s)",
+                   (unsigned)st.agc, (unsigned)st.agc_gain,
+                   (unsigned)st.gainceiling, kGCNames[gc]);
+  BROADCAST_PRINTF("[CAM_DUMP] bpc=%u  wpc=%u  raw_gma=%u  lenc=%u  dcw=%u",
+                   (unsigned)st.bpc, (unsigned)st.wpc,
+                   (unsigned)st.raw_gma, (unsigned)st.lenc, (unsigned)st.dcw);
+  BROADCAST_PRINTF("[CAM_DUMP] hmirror=%u  vflip=%u  colorbar=%u",
+                   (unsigned)st.hmirror, (unsigned)st.vflip,
+                   (unsigned)st.colorbar);
+  return "Sensor status dumped (see [CAM_DUMP] lines above)";
+}
+
+// Set brightness, contrast, and saturation together in one sequence.
+// Workaround for the OV3660 DSP-block chained-set behaviour: each of
+// set_brightness/contrast/saturation clears the other two's enable
+// bits, so cycling them individually leaves only the most-recent one
+// active. By calling all three back-to-back here, only the LAST call
+// clears the others — but since we set all three to known values, the
+// final state has all three set deterministically. (Documented in
+// esphome/issues#5499.)
+//
+// Usage: camerafx <bri> <con> <sat>   (each -2..+2)
+const char* cmd_camerafx(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gCameraEnabled) return "Camera not enabled";
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) return "Camera sensor not available";
+
+  String a = argsInput; a.trim();
+  if (a.length() == 0) {
+    static char r[96];
+    snprintf(r, sizeof(r),
+             "camerafx: bri=%d con=%d sat=%d. Usage: camerafx <bri> <con> <sat>  (-2..+2 each)",
+             (int)s->status.brightness, (int)s->status.contrast,
+             (int)s->status.saturation);
+    return r;
+  }
+  int bri = -99, con = -99, sat = -99;
+  if (sscanf(a.c_str(), "%d %d %d", &bri, &con, &sat) != 3) {
+    return "Usage: camerafx <bri> <con> <sat>  (-2..+2 each)";
+  }
+  if (bri < -2 || bri > 2 || con < -2 || con > 2 || sat < -2 || sat > 2) {
+    return "Each value must be -2..+2";
+  }
+
+  // Order matters: write contrast first, brightness second, saturation
+  // last. The last call's enable bit always wins for the *other* two,
+  // but we've explicitly set all three values just before — so the
+  // hardware register ends with the latest brightness/contrast values
+  // (preserved since they were written into the DSP block) and the
+  // saturation value (the last call).
+  int rc1 = s->set_contrast(s, con);
+  int rc2 = s->set_brightness(s, bri);
+  int rc3 = s->set_saturation(s, sat);
+
+  // Persist so reboot picks them up.
+  setSetting(gSettings.cameraBrightness, bri);
+  setSetting(gSettings.cameraContrast,   con);
+  setSetting(gSettings.cameraSaturation, sat);
+
+  static char r[120];
+  snprintf(r, sizeof(r),
+           "camerafx applied: bri=%d (rc=%d), con=%d (rc=%d), sat=%d (rc=%d) — saved",
+           bri, rc2, con, rc1, sat, rc3);
+  return r;
 }
 
 const char* cmd_camerahmirror(const String& argsInput) {
@@ -1842,7 +2138,7 @@ const CommandEntry cameraCommands[] = {
   {"camerares",        "Set camera resolution: <res>",    false, cmd_camerares},
   {"cameraframesize",  "Set resolution: <0-5>",           true,  cmd_cameraframesize},
   {"cameraquality",    "Set JPEG quality: <0-63>",        false, cmd_cameraquality},
-  {"camerastreaminterval", "Stream interval: <ms>",       true, cmd_camerastreaminterval},
+  {"camerafps",            "Camera FPS: <1-20>",          true, cmd_camerafps},
   {"cameratiny",       "Capture tiny frame for ESP-NOW",  false, cmd_cameratiny},
   {"camerabrightness", "Set brightness: <-2..2>",         false, cmd_camerabrightness},
   {"cameracontrast",   "Set contrast: <-2..2>",           false, cmd_cameracontrast},
@@ -1856,6 +2152,20 @@ const CommandEntry cameraCommands[] = {
   {"cameraaecvalue",   "Exposure value: <0-1200>",        true,  cmd_cameraaecvalue},
   {"cameraagc",        "Auto gain: <on|off>",             true,  cmd_cameraagc},
   {"cameraagcgain",    "Gain value: <0-30>",              true,  cmd_cameraagcgain},
+  // ── Runtime sensor tuning (no persistence — for testing OV3660 image quality) ──
+  {"cameragainceiling","Gainceiling: <0-6> (2X..128X)",   true,  cmd_cameragainceiling},
+  {"camerawhitebal",   "AWB master: <on|off>",            true,  cmd_camerawhitebal},
+  {"cameraawbgain",    "AWB gain: <on|off>",              true,  cmd_cameraawbgain},
+  {"cameraaec2",       "Alt AEC algorithm: <on|off>",     true,  cmd_cameraaec2},
+  {"cameradcw",        "Downsize crop window: <on|off>",  true,  cmd_cameradcw},
+  {"camerabpc",        "Black pixel correction: <on|off>",true,  cmd_camerabpc},
+  {"camerawpc",        "White pixel correction: <on|off>",true,  cmd_camerawpc},
+  {"cameragamma",      "Raw gamma: <on|off>",             true,  cmd_cameragamma},
+  {"cameralenc",       "Lens shading correction: <on|off>",true, cmd_cameralenc},
+  {"cameracolorbar",   "Color bar test pattern: <on|off>",true,  cmd_cameracolorbar},
+  {"camerareg",        "Direct register write: <addr_hex> <mask_hex> <value_hex>", true, cmd_camerareg},
+  {"cameradump",       "Print all current sensor values", false, cmd_cameradump},
+  {"camerafx",         "Set bri/con/sat together: <bri> <con> <sat> (-2..+2 each)", false, cmd_camerafx},
   {"camerahmirror",    "Horizontal mirror: <on|off>",     false, cmd_camerahmirror},
   {"cameravflip",      "Vertical flip: <on|off>",         false, cmd_cameravflip},
   {"camerarotate",     "Rotate 180°: <on|off>",           false, cmd_camerarotate},
@@ -1877,9 +2187,9 @@ static const SettingEntry cameraSettingEntries[] = {
   { "cameraAutoStart", SETTING_BOOL, &gSettings.cameraAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
   { "cameraFramesize", SETTING_INT, &gSettings.cameraFramesize, 10, 0, nullptr, 0, 10, "Resolution", "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA),"
     "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240", false, "image", nullptr },
-  { "cameraBrightness", SETTING_INT, &gSettings.cameraBrightness, 0, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr, false, "tuning", nullptr },
-  { "cameraContrast", SETTING_INT, &gSettings.cameraContrast, 0, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr, false, "tuning", nullptr },
-  { "cameraSaturation", SETTING_INT, &gSettings.cameraSaturation, 0, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr, false, "tuning", nullptr },
+  { "cameraBrightness", SETTING_INT, &gSettings.cameraBrightness, 2, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr, false, "tuning", nullptr },
+  { "cameraContrast", SETTING_INT, &gSettings.cameraContrast, 2, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr, false, "tuning", nullptr },
+  { "cameraSaturation", SETTING_INT, &gSettings.cameraSaturation, 2, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr, false, "tuning", nullptr },
   { "cameraAELevel", SETTING_INT, &gSettings.cameraAELevel, 0, 0, nullptr, -2, 2, "Exposure Compensation (-2 to 2)", nullptr, false, "tuning", nullptr },
   { "cameraWBMode", SETTING_INT, &gSettings.cameraWBMode, 0, 0, nullptr, 0, 4, "White Balance", "0:Auto,1:Sunny,2:Cloudy,3:Office,4:Home", false, "tuning", nullptr },
   { "cameraSharpness", SETTING_INT, &gSettings.cameraSharpness, 0, 0, nullptr, -2, 2, "Sharpness (-2 to 2, OV3660)", nullptr, false, "tuning", nullptr },
@@ -1887,13 +2197,15 @@ static const SettingEntry cameraSettingEntries[] = {
   { "cameraSpecialEffect", SETTING_INT, &gSettings.cameraSpecialEffect, 0, 0, nullptr, 0, 6, "Special Effect", "0:None,1:Negative,2:Grayscale,3:Red Tint,4:Green Tint,5:Blue Tint,6:Sepia", false, "tuning", nullptr },
   { "cameraHMirror", SETTING_BOOL, &gSettings.cameraHMirror, 0, 0, nullptr, 0, 1, "Horizontal mirror", nullptr, false, "image", nullptr },
   { "cameraVFlip", SETTING_BOOL, &gSettings.cameraVFlip, 0, 0, nullptr, 0, 1, "Vertical flip", nullptr, false, "image", nullptr },
-  { "cameraQuality", SETTING_INT, &gSettings.cameraQuality, 0, 0, nullptr, 0, 63, "JPEG quality (0-63, lower=better)", nullptr, false, "image", nullptr },
-  { "cameraStreamIntervalMs", SETTING_INT, &gSettings.cameraStreamIntervalMs, 200, 0, nullptr, 50, 2000, "Stream interval ms (lower=faster)", nullptr, false, "image", nullptr },
-  { "cameraStorageLocation", SETTING_INT, &gSettings.cameraStorageLocation, 0, 0, nullptr, 0, 2, "Storage Location", "0:LittleFS (Internal),1:SD Card,2:Both", false, "storage", nullptr },
-  { "cameraCaptureFolder", SETTING_STRING, &gSettings.cameraCaptureFolder, 0, 0, nullptr, 0, 0, "Photo folder path", nullptr, false, "storage", nullptr },
-  { "cameraMaxStoredImages", SETTING_INT, &gSettings.cameraMaxStoredImages, 0, 0, nullptr, 0, 1000, "Max images (0=unlimited)", nullptr, false, "storage", nullptr },
+  { "cameraQuality", SETTING_INT, &gSettings.cameraQuality, 12, 0, nullptr, 0, 63, "JPEG quality (0-63, lower=better)", nullptr, false, "image", nullptr },
+  { "cameraStreamFps", SETTING_INT, &gSettings.cameraStreamFps, 5, 0, nullptr, 1, 20, "Camera FPS (higher=smoother)", nullptr, false, "image", "camerafps" },
+  { "g2StreamToneMap", SETTING_BOOL, &gSettings.g2StreamToneMap, 1, 0, nullptr, 0, 1, "G2 lens auto-levels (stretches washed-out frames to full range)", nullptr, false, "image", "g2streamtonemap" },
+  { "g2PackRateMs", SETTING_INT, &gSettings.g2PackRateMs, 80, 0, nullptr, 20, 2000, "G2 SD-pack animation cadence (ms per frame)", nullptr, false, "image", "g2packrate" },
+  { "cameraStorageLocation", SETTING_INT, &gSettings.cameraStorageLocation, 1, 0, nullptr, 0, 2, "Storage Location", "0:LittleFS (Internal),1:SD Card,2:Both", false, "storage", nullptr },
+  { "cameraCaptureFolder", SETTING_STRING, &gSettings.cameraCaptureFolder, 0, 0, "/photos", 0, 0, "Photo folder path", nullptr, false, "storage", nullptr },
+  { "cameraMaxStoredImages", SETTING_INT, &gSettings.cameraMaxStoredImages, 100, 0, nullptr, 0, 1000, "Max images (0=unlimited)", nullptr, false, "storage", nullptr },
   { "cameraAutoCapture", SETTING_BOOL, &gSettings.cameraAutoCapture, 0, 0, nullptr, 0, 1, "Enable auto-capture", nullptr, false, "autoCapture", nullptr },
-  { "cameraAutoCaptureInterval", SETTING_INT, &gSettings.cameraAutoCaptureIntervalSec, 0, 0, nullptr, 10, 3600, "Auto-capture interval (sec)", nullptr, false, "autoCapture", nullptr },
+  { "cameraAutoCaptureInterval", SETTING_INT, &gSettings.cameraAutoCaptureIntervalSec, 60, 0, nullptr, 10, 3600, "Auto-capture interval (sec)", nullptr, false, "autoCapture", nullptr },
   { "cameraSendAfterCapture", SETTING_BOOL, &gSettings.cameraSendAfterCapture, 0, 0, nullptr, 0, 1, "Send to target after capture", nullptr, false, "autoCapture", nullptr },
   { "cameraTargetDevice", SETTING_STRING, &gSettings.cameraTargetDevice, 0, 0, nullptr, 0, 0, "ESP-NOW target device name", nullptr, false, "autoCapture", nullptr },
 };

@@ -14,6 +14,7 @@
 #include "System_Command.h"
 #include "System_CLI.h"
 #include "System_User.h"
+#include "System_AuthIdentity.h"  // currentAuthContext (voice arm captures caller identity)
 #include <ctype.h>
 #include <math.h>
 #include "esp_timer.h"
@@ -110,7 +111,6 @@ static CommandSource gVoiceArmedByTransport = SOURCE_INTERNAL;
 static String gVoiceArmedByIp = "";
 static uint32_t gVoiceArmedAtMs = 0;
 
-extern AuthContext gExecAuthContext;
 extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
 
 static void ensureVoiceArmMutex() {
@@ -2852,10 +2852,10 @@ const char* cmd_sr_start(const String& argsInput) {
   ensureVoiceArmMutex();
   bool armed = false;
   if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-    armed = voiceArmFromContextInternal(gExecAuthContext);
+    armed = voiceArmFromContextInternal(currentAuthContext());
     xSemaphoreGive(gVoiceArmMutex);
   } else {
-    armed = voiceArmFromContextInternal(gExecAuthContext);
+    armed = voiceArmFromContextInternal(currentAuthContext());
   }
 
   if (armed) {
@@ -2898,10 +2898,10 @@ static const char* cmd_voice_arm_cli(const String& argsInput) {
   ensureVoiceArmMutex();
   bool armed = false;
   if (gVoiceArmMutex && xSemaphoreTake(gVoiceArmMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-    armed = voiceArmFromContextInternal(gExecAuthContext);
+    armed = voiceArmFromContextInternal(currentAuthContext());
     xSemaphoreGive(gVoiceArmMutex);
   } else {
-    armed = voiceArmFromContextInternal(gExecAuthContext);
+    armed = voiceArmFromContextInternal(currentAuthContext());
   }
   if (!armed) return "Error: cannot arm voice from this transport/user";
   static String out;
@@ -3977,7 +3977,7 @@ extern const SettingsModule espsrSettingsModule = {
   espsrSettingsEntries,
   sizeof(espsrSettingsEntries) / sizeof(espsrSettingsEntries[0]),
   isESPSRConnected,
-  "ESP-SR speech recognition settings"
+  "ESP-SR on-device speech recognition"
 };
 
 void registerESPSRHandlers(httpd_handle_t server) {

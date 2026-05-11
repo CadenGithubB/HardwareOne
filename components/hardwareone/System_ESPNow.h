@@ -47,7 +47,6 @@ extern const size_t espNowCommandsCount;
 
 // Forward declarations from main system (broadcastOutput provided by System_Debug.h)
 bool writeSettingsJson();
-extern AuthContext gExecAuthContext;
 String base64Encode(const uint8_t* data, size_t len);
 
 // Message types

@@ -786,7 +786,7 @@ extern const SettingsModule fmRadioSettingsModule = {
   fmRadioSettingEntries,
   sizeof(fmRadioSettingEntries) / sizeof(fmRadioSettingEntries[0]),
   isFMRadioConnected,
-  "RDA5807 FM radio settings"
+  "RDA5807 FM radio receiver"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

@@ -722,7 +722,9 @@ esp_err_t handleCameraStream(httpd_req_t* req) {
  #if ENABLE_EDGE_IMPULSE
     if (isContinuousInferenceRunning()) {
       unsigned long now = millis();
-      int delayMs = gSettings.cameraStreamIntervalMs;
+      // cameraStreamFps is 1..20; convert to ms per frame.
+      int fps = (gSettings.cameraStreamFps > 0) ? gSettings.cameraStreamFps : 5;
+      int delayMs = 1000 / fps;
       if (delayMs < 50) delayMs = 50;
       if (delayMs > 2000) delayMs = 2000;
 
@@ -768,7 +770,9 @@ esp_err_t handleCameraStream(httpd_req_t* req) {
     err = httpd_resp_send_chunk(req, "\r\n", 2);
     if (err != ESP_OK) break;
 
-    int delayMs = gSettings.cameraStreamIntervalMs;
+    // cameraStreamFps is 1..20; convert to ms per frame.
+    int fps2 = (gSettings.cameraStreamFps > 0) ? gSettings.cameraStreamFps : 5;
+    int delayMs = 1000 / fps2;
     if (delayMs < 50) delayMs = 50;
     if (delayMs > 2000) delayMs = 2000;
     vTaskDelay(pdMS_TO_TICKS(delayMs));

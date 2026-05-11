@@ -932,6 +932,13 @@ const char* g2ProbeImageQ18MixedIcon();
 // mode (96×96 → ~1 fps vs 288×144 → 0.45 fps).
 const char* g2ProbeImageQ19SmallSolo();
 
+// Probe Q29 — 2-bpp solo BMP at 144×144. Same shape as Q19 but the
+// payload is 2-bpp grayscale (4-entry palette) instead of 4-bpp (16
+// palette). Tests whether the lens BMP parser honours biBitCount=2.
+// If yes, camera streamer can cut payload ~50% with no resolution
+// change. If lens stays blank but acks come back, parser is 4-bpp only.
+const char* g2ProbeImageQ29Bmp2bppSolo();
+
 // Probe Q20 — same live pipeline as Q13 but 96×96 solo tile (~2 Cmd=3
 // fragments per frame). Moving horizontal bar; cadence `g2liverate`.
 // Isolates small-dim sustained refresh vs full-tile BLE cost.
@@ -944,8 +951,7 @@ const char* g2ProbeImageQ23LiveTile64();
 // Q26 / Q27 — same moving-bar pattern at 124×124 and 144×144 (max solo tile).
 const char* g2ProbeImageQ26LiveTile124();
 const char* g2ProbeImageQ27LiveTile144();
-// Q24 — procedural 32×32 “slime” jump (20 key poses, looped; grayscale 4bpp).
-const char* g2ProbeImageQ24SlimeJump32();
+// (Q24 procedural slime probe removed — superseded by Q25 SD frame packs.)
 
 // Q25 — loop BMPs from a VFS directory: frame_00.bmp … frame_63.bmp max (4bpp,
 // |w|≤288, |h|≤144). Call g2ProbeImageQ25SetPackPath(G2_ICON_ANIMATIONS_VFS_PATH "/foo")
@@ -1065,12 +1071,12 @@ inline const char* g2ProbeImageQ16MixedSideBySide() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ17MixedOverlap()    { return "G2 disabled"; }
 inline const char* g2ProbeImageQ18MixedIcon()       { return "G2 disabled"; }
 inline const char* g2ProbeImageQ19SmallSolo()       { return "G2 disabled"; }
+inline const char* g2ProbeImageQ29Bmp2bppSolo()     { return "G2 disabled"; }
 inline const char* g2ProbeImageQ20LiveTile96()     { return "G2 disabled"; }
 inline const char* g2ProbeImageQ22LiveTile32()    { return "G2 disabled"; }
 inline const char* g2ProbeImageQ23LiveTile64()    { return "G2 disabled"; }
 inline const char* g2ProbeImageQ26LiveTile124()  { return "G2 disabled"; }
 inline const char* g2ProbeImageQ27LiveTile144()  { return "G2 disabled"; }
-inline const char* g2ProbeImageQ24SlimeJump32() { return "G2 disabled"; }
 inline void        g2ProbeImageQ25SetPackPath(const char*) {}
 inline const char* g2ProbeImageQ25SdFrameAnimation() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ28MixedImageTextLive() { return "G2 disabled"; }

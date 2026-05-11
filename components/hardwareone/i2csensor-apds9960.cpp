@@ -60,7 +60,7 @@ extern const SettingsModule apdsSettingsModule = {
   apdsSettingEntries,
   sizeof(apdsSettingEntries) / sizeof(apdsSettingEntries[0]),
   isAPDSConnected,
-  "APDS9960 gesture/color/proximity sensor settings"
+  "APDS9960 gesture, colour, and proximity sensor"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp

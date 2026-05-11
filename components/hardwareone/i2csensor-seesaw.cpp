@@ -378,7 +378,7 @@ extern const SettingsModule gamepadSettingsModule = {
   gamepadSettingEntries,
   sizeof(gamepadSettingEntries) / sizeof(gamepadSettingEntries[0]),
   isGamepadConnected,
-  "Seesaw gamepad settings"
+  "Seesaw mini gamepad"
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
