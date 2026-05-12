@@ -1,4 +1,5 @@
 #include "System_VFS.h"
+#include <esp_attr.h>
 
 #include "System_BuildConfig.h"
 #include "System_Command.h"
@@ -924,7 +925,7 @@ static const char* cmd_sdunmount(const String& argsInput) {
 }
 
 static const char* cmd_sdformat(const String& argsInput) {
-  static char buf[256];
+  EXT_RAM_BSS_ATTR static char buf[256];
   
 #if !defined(SD_CS_PIN)
   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
@@ -951,7 +952,7 @@ static const char* cmd_sdformat(const String& argsInput) {
 }
 
 static const char* cmd_sdinfo(const String& argsInput) {
-  static char buf[512];
+  EXT_RAM_BSS_ATTR static char buf[512];
   
 #if !defined(SD_CS_PIN)
   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");

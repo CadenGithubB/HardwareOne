@@ -5,6 +5,7 @@
  */
 
 #include "System_SetupWizard.h"
+#include <esp_attr.h>
 #include "System_FeatureRegistry.h"
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
@@ -132,14 +133,15 @@ static int ntpSelection = 0;       // pool.ntp.org default
 static int ledEffectSelection = 1; // rainbow default
 static char wizardDeviceName[21] = "";  // Device name entry (used when ESPNOW not compiled)
 
-// Feature items per page
-static WizardFeatureItem featuresPage[16];
+// Feature items per page. Only touched during first-time setup; dormant
+// after FTS completes — safe to park in PSRAM.
+EXT_RAM_BSS_ATTR static WizardFeatureItem featuresPage[16];
 static size_t featuresPageCount = 0;
 
-static WizardFeatureItem sensorsPage[16];
+EXT_RAM_BSS_ATTR static WizardFeatureItem sensorsPage[16];
 static size_t sensorsPageCount = 0;
 
-static WizardNetworkItem networkPage[20];
+EXT_RAM_BSS_ATTR static WizardNetworkItem networkPage[20];
 static size_t networkPageCount = 0;
 
 // ============================================================================

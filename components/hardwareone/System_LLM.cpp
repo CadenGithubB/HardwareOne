@@ -47,6 +47,7 @@
  */
 
 #include "System_BuildConfig.h"
+#include <esp_attr.h>
 
 #if ENABLE_ONDEVICE_LLM
 
@@ -3890,7 +3891,7 @@ int  llmGetSessionId()     { return (int)gLLMSessionId; }
 
 #include "System_Utils.h"  // CommandEntry
 
-static char llmCmdBuf[512];
+EXT_RAM_BSS_ATTR static char llmCmdBuf[512];
 
 static const char* cmd_llm_status(const String&) {
   LLMStatus st = llmGetStatus();

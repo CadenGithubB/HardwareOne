@@ -5,6 +5,7 @@
  */
 
 #include "System_Camera_DVP.h"
+#include <esp_attr.h>
 #include "System_Camera_Video.h"
 #include "System_BuildConfig.h"
 
@@ -1104,7 +1105,7 @@ const char* cmd_camerares(const String& argsInput) {
   sizeStr.toLowerCase();
   
   if (sizeStr.length() == 0) {
-    static char result[256];
+    EXT_RAM_BSS_ATTR static char result[256];
     snprintf(result, sizeof(result),
       "Current: %dx%d\nUsage: camerares <size>\n"
       "Sizes: 96x96 qqvga(160x120) qcif(176x144) hqvga(240x176) 240x240 "
@@ -1961,12 +1962,12 @@ const char* cmd_cameracapturefolder(const String& argsInput) {
   val.trim();
   
   if (val.length() == 0) {
-    static char buf[256];
+    EXT_RAM_BSS_ATTR static char buf[256];
     snprintf(buf, sizeof(buf), "cameraCaptureFolder = %s", gSettings.cameraCaptureFolder.c_str());
     return buf;
   }
   setSetting(gSettings.cameraCaptureFolder, val);
-  static char buf[256];
+  EXT_RAM_BSS_ATTR static char buf[256];
   snprintf(buf, sizeof(buf), "cameraCaptureFolder set to %s", val.c_str());
   return buf;
 }
@@ -2043,12 +2044,12 @@ const char* cmd_cameratargetdevice(const String& argsInput) {
   val.trim();
   
   if (val.length() == 0) {
-    static char buf[256];
+    EXT_RAM_BSS_ATTR static char buf[256];
     snprintf(buf, sizeof(buf), "cameraTargetDevice = %s", gSettings.cameraTargetDevice.c_str());
     return buf;
   }
   setSetting(gSettings.cameraTargetDevice, val);
-  static char buf[256];
+  EXT_RAM_BSS_ATTR static char buf[256];
   snprintf(buf, sizeof(buf), "cameraTargetDevice set to %s", val.c_str());
   return buf;
 }

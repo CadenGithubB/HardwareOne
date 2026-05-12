@@ -5,6 +5,7 @@
  */
 
 #include "System_FeatureRegistry.h"
+#include <esp_attr.h>
 #include "System_Settings.h"
 #include "System_Command.h"
 #include "System_MemUtil.h"
@@ -483,7 +484,7 @@ const char* cmd_features(const String& argsInput) {
       return "Unknown feature. Run 'features' to see list.";
     }
     
-    static char buf[512];
+    EXT_RAM_BSS_ATTR static char buf[512];
     bool compiled = isFeatureCompiled(f);
     bool enabled = isFeatureEnabled(f);
     

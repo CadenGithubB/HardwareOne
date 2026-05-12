@@ -1,4 +1,5 @@
 #include "System_ESPSR.h"
+#include <esp_attr.h>
 
 #if ENABLE_ESP_SR
 
@@ -3540,7 +3541,7 @@ static const char* cmd_sr_autotune(const String& argsInput) {
     if (gSrAutoTuneActive) {
       uint32_t elapsed = millis() - gSrAutoTuneStepStartMs;
       uint32_t remaining = (elapsed < kAutoTuneStepDurationMs) ? (kAutoTuneStepDurationMs - elapsed) / 1000 : 0;
-      static char buf[256];
+      EXT_RAM_BSS_ATTR static char buf[256];
       snprintf(buf, sizeof(buf), 
                "Auto-tune ACTIVE: step %d/%d\n  Config: %s\n  %lu sec remaining\n  Say test phrases now!\nUsage: sr autotune [start|stop]",
                gSrAutoTuneStep + 1, (int)kAutoTuneConfigCount,
