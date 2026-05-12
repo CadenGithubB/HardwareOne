@@ -1,4 +1,5 @@
 #include "System_EdgeImpulse.h"
+#include <esp_attr.h>
 
 #if ENABLE_EDGE_IMPULSE
 
@@ -2070,7 +2071,7 @@ esp_err_t handleEdgeImpulseDetect(httpd_req_t* req) {
 // CLI Command Handlers
 // ============================================================================
 
-static char gEICmdBuffer[512];
+EXT_RAM_BSS_ATTR static char gEICmdBuffer[512];
 
 const char* cmd_ei(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();

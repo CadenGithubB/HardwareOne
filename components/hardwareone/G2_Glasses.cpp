@@ -50,6 +50,7 @@ extern "C" {
 #include "G2_Page_CameraSettings.h"  // g2ShowCameraSettingsMenu / g2CameraSettingsHandleTap
 #include "G2_Page_TestSuite.h" // g2ShowTestSuiteMenu / g2TestSuiteHandleTap
 #include "G2_Page_TextEntry.h" // generic on-glasses text-entry overlay
+#include "G2_Page_ESPNow.h"    // g2ShowESPNowAppMenu / g2ESPNowAppHandleTap
 #include "G2_HijackFsm.h"      // shadow FSM tracking page-swap / hijack lifecycle
 #include "System_Settings.h"
 #if ENABLE_WIFI
@@ -3726,6 +3727,25 @@ static const G2PageModule kPowerPage = {
   /*liveRender=*/    nullptr,
 };
 
+static const G2PageModule kEspNowAppPage = {
+  "espnowapp", "ESPNOW App",
+  "Show ESPNOW App page (send/broadcast/ping/peers) on the lens",
+  g2BuildESPNowAppInfo,
+  g2ShowESPNowAppMenu,
+  g2ESPNowAppHandleTap,
+  G2_HIJACK_PAGE_ESPNOW_APP,
+  // No live tick — pages with their own showMenu don't get the live
+  // worker (see invokePageFromMain). The renderers re-read gEspNow / WiFi
+  // mode on every show; cmd_exec completion callbacks enqueue a Redraw
+  // job that re-runs the appropriate show*Menu(). For ping, the user
+  // double-taps (or re-taps a row) to pick up the result — Phase 2 will
+  // wire a push-kick path if we want sub-second RTT updates.
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Main Menu",
+  /*prefersTextWidget=*/ false,   // own showMenu — flag is irrelevant
+  /*liveRender=*/    nullptr,
+};
+
 #if ENABLE_CAMERA_SENSOR
 // Hidden sub-page reached by drilling from Sensors → CAM → "Settings >".
 // hijackLabel=nullptr keeps it out of the main hijack menu — the only
@@ -4044,6 +4064,7 @@ static void registerG2Pages(void) {
   g2RegisterPage(kFilesPage);
   g2RegisterPage(kSettingsPage);
   g2RegisterPage(kPowerPage);
+  g2RegisterPage(kEspNowAppPage);
   g2RegisterPage(kTestSuitePage);
 #if ENABLE_CAMERA_SENSOR
   g2RegisterPage(kCameraSettingsPage);   // hidden — see kCameraSettingsPage above
@@ -10458,7 +10479,7 @@ static const char* cmd_g2disconnect(const String& argsInput) {
 
 static const char* cmd_g2status(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char buf[256];
+  EXT_RAM_BSS_ATTR static char buf[256];
   getG2Status(buf, sizeof(buf));
   return buf;
 }
@@ -10468,7 +10489,7 @@ static const char* cmd_g2status(const String& /*argsInput*/) {
 // state (MAC, MTU, battery). Expand as we identify more fields.
 static const char* cmd_g2info(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char buf[512];
+  EXT_RAM_BSS_ATTR static char buf[512];
   snprintf(buf, sizeof(buf),
            "G2 device info:\n"
            "  firmware: %s\n"

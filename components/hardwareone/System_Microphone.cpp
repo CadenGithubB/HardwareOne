@@ -5,6 +5,7 @@
  */
 
 #include "System_Microphone.h"
+#include <esp_attr.h>
 
 #if ENABLE_MICROPHONE_SENSOR
 
@@ -68,7 +69,7 @@ static uint32_t recordingSamples = 0;
 static char currentRecordingPath[64] = {0};
 
 // Command buffer
-static char gMicCmdBuffer[512];
+EXT_RAM_BSS_ATTR static char gMicCmdBuffer[512];
 
 // Audio level tracking
 static int lastAudioLevel = 0;

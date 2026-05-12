@@ -1584,10 +1584,21 @@ bool syncNTPAndResolve() {
 
   DEBUG_NTP_SYNCF("[syncNTPAndResolve] WiFi connected, proceeding with NTP sync");
 
-  // Wait for DNS to be ready after WiFi connection
-  DEBUG_NTP_SYNCF("[syncNTPAndResolve] Waiting 500ms for DNS initialization...");
-  delay(500);
+  // DNS is ready by the time WiFi reports an assigned IP — no separate
+  // initialization phase to wait on. (Previously: hardcoded delay(500).)
 
+  // Pre-flight DNS check — disabled.
+  //
+  // The synchronous WiFi.hostByName() call below was adding 5-8 s of dead
+  // wait to every boot on otherwise-healthy networks (lwIP's DNS retry
+  // strategy + IPv6/IPv4 dual-stack timeouts). It was originally there to
+  // fail fast when DNS was broken, but lwIP's SNTP client does its own
+  // resolution and the 15 s polling loop below already detects sync failure.
+  // With MAX_SERVERS=3 plus DHCP-provided NTP, SNTP can succeed even when
+  // one server's DNS is unhealthy — making this check actively misleading.
+  //
+  // To re-enable: change `#if 0` to `#if 1`.
+#if 0
   // Test DNS resolution before attempting NTP
   IPAddress testIP;
   bool dnsWorking = WiFi.hostByName("time.google.com", testIP);
@@ -1613,21 +1624,25 @@ bool syncNTPAndResolve() {
       return false;
     }
   }
+#endif
 
   broadcastOutput("Synchronizing time with NTP server...");
   setupNTP();
   broadcastOutput("  Contacting NTP server, please wait...");
 
   bool ntpSynced = false;
-  // SNTP has a startup delay of up to 5 seconds (CONFIG_LWIP_SNTP_MAXIMUM_STARTUP_DELAY)
-  // plus network round-trip time, so we need to wait longer than that
+  // SNTP startup delay is now CONFIG_LWIP_SNTP_MAXIMUM_STARTUP_DELAY=100 ms,
+  // and DHCP-provided NTP servers (router-local, RTT ~1 ms) win when present.
+  // 100 ms polling cadence catches the response within one iteration on a
+  // healthy network. 15 s window kept as a safety net for offline / blocked-NTP
+  // boots; typical sync exits in 1-3 iterations.
   const int maxWaitSeconds = 15;
-  const int iterationsPerSecond = 5;  // 200ms per iteration
+  const int iterationsPerSecond = 10;  // 100ms per iteration
   const int maxIterations = maxWaitSeconds * iterationsPerSecond;
   DEBUG_NTP_SYNCF("[syncNTPAndResolve] Starting %d-second wait loop for NTP response", maxWaitSeconds);
 
   for (int i = 0; i < maxIterations && !ntpSynced; i++) {
-    delay(200);
+    delay(100);
     oledUpdate();  // Keep boot animation running during NTP wait
 
     if (i > 0 && i % iterationsPerSecond == 0) {
@@ -2167,6 +2182,7 @@ void printMemoryReport() {
 
   size_t total_known = 0;
   size_t tracked_total = 0;
+  size_t tracked_dram = 0;  // DRAM-only subset — only this rolls into total_known
 
   // ========== SECTION 1: Dynamic Allocations (ps_alloc tracked) ==========
   if (useDynamicTracking) {
@@ -2192,6 +2208,7 @@ void printMemoryReport() {
       if (!gAllocTracker[idx].isActive) continue;
 
       tracked_total += gAllocTracker[idx].totalBytes;
+      tracked_dram += gAllocTracker[idx].dramBytes;
 
       // Show actual memory type breakdown
       char location[12];
@@ -2214,18 +2231,22 @@ void printMemoryReport() {
     if (displayed < gAllocTrackerCount) {
       BROADCAST_PRINTF("  ... and %d more allocations",
                       gAllocTrackerCount - displayed);
-      // Add remaining to total
+      // Add remaining to totals
       for (int i = displayed; i < gAllocTrackerCount; i++) {
         int idx = sorted[i];
         if (gAllocTracker[idx].isActive) {
           tracked_total += gAllocTracker[idx].totalBytes;
+          tracked_dram += gAllocTracker[idx].dramBytes;
         }
       }
     }
 
-    BROADCAST_PRINTF("  Subtotal (tracked): %6lu bytes (%3lu KB)",
-                    (unsigned long)tracked_total, (unsigned long)(tracked_total / 1024));
-    total_known += tracked_total;
+    BROADCAST_PRINTF("  Subtotal (tracked): %6lu bytes (%3lu KB)  [DRAM %lu B, PSRAM %lu B]",
+                    (unsigned long)tracked_total, (unsigned long)(tracked_total / 1024),
+                    (unsigned long)tracked_dram, (unsigned long)(tracked_total - tracked_dram));
+    // Only the DRAM portion contributes to the DRAM "TOTAL ACCOUNTED" roll-up.
+    // PSRAM is accounted separately further down in this report.
+    total_known += tracked_dram;
   }
 
   // ========== SECTION 2: System Components ==========

@@ -42,6 +42,16 @@ inline void __capture_mem_before() {
 extern "C" void memAllocDebug(const char* op, void* ptr, size_t size,
                               bool requestedPS, bool usedPS, const char* tag);
 
+// Compute usedPS from the returned pointer and dispatch to memAllocDebug.
+// usedPS is decided by the actual region of the pointer (esp_ptr_external_ram),
+// not by which branch produced it — under CONFIG_SPIRAM_USE_MALLOC, a plain
+// malloc() can still land in PSRAM for sizes above CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL.
+inline void __memAllocReport(const char* op, void* ptr, size_t size,
+                             bool requestedPS, const char* tag) {
+  const bool usedPS = (ptr != nullptr) && esp_ptr_external_ram(ptr);
+  memAllocDebug(op, ptr, size, requestedPS, usedPS, tag);
+}
+
 inline bool hasPSRAMAvail() {
 #if defined(BOARD_HAS_PSRAM) || defined(CONFIG_SPIRAM)
   return true;
@@ -125,11 +135,15 @@ inline void* ps_alloc(size_t size, AllocPref pref = AllocPref::PreferPSRAM) {
   if (wantPS) {
     __capture_mem_before();
     void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
-    if (p) return p;
+    if (p) {
+      __memAllocReport("malloc", p, size, wantPS, nullptr);
+      return p;
+    }
   }
   __capture_mem_before();
   void* p2 = malloc(size);
   if (p2 && wantPS) __psAllocReportFallback(size, nullptr);
+  __memAllocReport("malloc", p2, size, wantPS, nullptr);
   return p2;
 }
 
@@ -139,11 +153,15 @@ inline void* ps_alloc(size_t size, AllocPref pref, const char* tag) {
   if (wantPS) {
     __capture_mem_before();
     void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
-    if (p) return p;
+    if (p) {
+      __memAllocReport("malloc", p, size, wantPS, tag);
+      return p;
+    }
   }
   __capture_mem_before();
   void* p2 = malloc(size);
   if (p2 && wantPS) __psAllocReportFallback(size, tag);
+  __memAllocReport("malloc", p2, size, wantPS, tag);
   return p2;
 }
 
@@ -152,11 +170,15 @@ inline void* ps_calloc(size_t n, size_t size, AllocPref pref = AllocPref::Prefer
   if (wantPS) {
     __capture_mem_before();
     void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
-    if (p) return p;
+    if (p) {
+      __memAllocReport("calloc", p, n * size, wantPS, nullptr);
+      return p;
+    }
   }
   __capture_mem_before();
   void* p2 = calloc(n, size);
   if (p2 && wantPS) __psAllocReportFallback(n * size, nullptr);
+  __memAllocReport("calloc", p2, n * size, wantPS, nullptr);
   return p2;
 }
 
@@ -166,11 +188,15 @@ inline void* ps_calloc(size_t n, size_t size, AllocPref pref, const char* tag) {
   if (wantPS) {
     __capture_mem_before();
     void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM);
-    if (p) return p;
+    if (p) {
+      __memAllocReport("calloc", p, n * size, wantPS, tag);
+      return p;
+    }
   }
   __capture_mem_before();
   void* p2 = calloc(n, size);
   if (p2 && wantPS) __psAllocReportFallback(n * size, tag);
+  __memAllocReport("calloc", p2, n * size, wantPS, tag);
   return p2;
 }
 
@@ -179,12 +205,16 @@ inline void* ps_realloc(void* ptr, size_t size, AllocPref pref = AllocPref::Pref
   if (wantPS) {
     __capture_mem_before();
     void* p = heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM);
-    if (p) return p;
+    if (p) {
+      __memAllocReport("realloc", p, size, wantPS, nullptr);
+      return p;
+    }
     // Fall through to internal realloc if PSRAM attempt failed
   }
   __capture_mem_before();
   void* p2 = realloc(ptr, size);
   if (p2 && wantPS) __psAllocReportFallback(size, nullptr);
+  __memAllocReport("realloc", p2, size, wantPS, nullptr);
   return p2;
 }
 
@@ -195,11 +225,13 @@ inline void* ps_realloc(void* ptr, size_t size, AllocPref pref, const char* tag)
     __capture_mem_before();
     void* p = heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM);
     if (p) {
+      __memAllocReport("realloc", p, size, wantPS, tag);
       return p;
     }
   }
   __capture_mem_before();
   void* p2 = realloc(ptr, size);
+  __memAllocReport("realloc", p2, size, wantPS, tag);
   return p2;
 }
 

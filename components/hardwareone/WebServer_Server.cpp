@@ -6,6 +6,7 @@
 
 #include "System_BuildConfig.h"
 #include <esp_app_desc.h>
+#include <esp_attr.h>
 
 #if ENABLE_HTTP_SERVER
 
@@ -649,7 +650,7 @@ bool hasLogoutReason(const char* ip) {
 // Brute-Force / Login Rate Limiting
 // ============================================================================
 
-static LoginAttemptEntry sLoginAttempts[MAX_LOGIN_ATTEMPT_ENTRIES];
+EXT_RAM_BSS_ATTR static LoginAttemptEntry sLoginAttempts[MAX_LOGIN_ATTEMPT_ENTRIES];
 
 // Find the entry for the given IP, or a free/oldest slot if createIfMissing is true.
 static LoginAttemptEntry* findLoginEntry(const char* ip, bool createIfMissing = false) {
@@ -743,7 +744,7 @@ void clearLoginAttempts(const char* ip) {
 // IP Ban List
 // ============================================================================
 
-static IpBanEntry sIpBans[MAX_IP_BANS];
+EXT_RAM_BSS_ATTR static IpBanEntry sIpBans[MAX_IP_BANS];
 static bool sIpBansLoaded = false;
 // Forward declaration — defined below after session helpers
 void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg);

@@ -4,6 +4,7 @@
  */
 
 #include "System_BuildConfig.h"
+#include <esp_attr.h>
 
 #if ENABLE_ESPNOW
 
@@ -27,6 +28,7 @@
 #include "System_Debug.h"
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sensors.h"
+#include "G2_Page_ESPNow.h"        // g2ESPNowAppOnRxText push-kick (inline no-op when BT/G2 off)
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"
 #include "System_Mutex.h"
@@ -486,7 +488,7 @@ static FileTransfer* gActiveFileTransfer = nullptr;
 // ESP-NOW topology streaming support (NEW PATTERN - Multiple Concurrent Streams)
 // Note: TopologyStream, TopoDeviceEntry, BufferedPeerMessage structs and constants are now in espnow_system.h
 static TopologyStream gTopoStreams[MAX_CONCURRENT_TOPO_STREAMS];  // Array of concurrent streams
-static TopoDeviceEntry gTopoDeviceCache[MAX_TOPO_DEVICE_CACHE];
+EXT_RAM_BSS_ATTR static TopoDeviceEntry gTopoDeviceCache[MAX_TOPO_DEVICE_CACHE];
 static BufferedPeerMessage gPeerBuffer[MAX_BUFFERED_PEERS];
 
 // ESP-NOW file transfer support (NEW PATTERN - Single Stream with Lock)
@@ -2073,7 +2075,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     // Check V3 fragment ACK waiters
     bool foundV3 = false;
     for (int i = 0; i < V3_FRAG_ACK_WAIT_MAX; i++) {
-      if (gV3FragAckWait[i].active && gV3FragAckWait[i].msgId == h->msgId && 
+      if (gV3FragAckWait[i].active && gV3FragAckWait[i].msgId == h->msgId &&
           gV3FragAckWait[i].fragIndex == h->fragIndex) {
         gV3FragAckWait[i].acked = true;
         foundV3 = true;
@@ -2082,7 +2084,15 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
         break;
       }
     }
-    
+
+    // ESPNOW App page ping bookkeeping — see espnowAppPingStart below.
+    // One in-flight slot; we only match if the msgId AND source MAC line up.
+    // Stays in this branch (no early return above) because the per-peer
+    // health update + tracker recording above are still legitimate side
+    // effects of an ACK regardless of whether anyone is pinging.
+    extern void espnowAppPingNoteAck(const uint8_t* src, uint32_t msgId);
+    espnowAppPingNoteAck(recv_info->src_addr, h->msgId);
+
     if (!foundV3) {
       DEBUGF(DEBUG_ESPNOW_CORE, "[V3_ACK_RX] No matching ACK waiter found (msgId=%lu fragIdx=%u)",
              (unsigned long)h->msgId, h->fragIndex);
@@ -3939,8 +3949,9 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
     strcpy(macStr, "??:??:??:??:??:??");
   }
 
-  // Base64-encode the full frame (header + payload).
-  static char b64[512];
+  // Base64-encode the full frame (header + payload). Per-frame scratch when
+  // SD capture is enabled (off by default) — PSRAM is fine here.
+  EXT_RAM_BSS_ATTR static char b64[512];
   espnowCaptureBase64(data, (size_t)len, b64, sizeof(b64));
 
   // One line: timestamp, direction, peer, rssi, V3 type, flags, len, payload.
@@ -6508,10 +6519,20 @@ void processMeshHeartbeats() {
       if (entry.used) {
         String devName = String(entry.deviceName);
         if (devName.length() == 0) devName = formatMacAddress(entry.srcMac);
-        storeMessageInPeerHistory(entry.srcMac, devName.c_str(),
-                                  entry.content, entry.encrypted, MSG_TEXT);
+        bool stored = storeMessageInPeerHistory(entry.srcMac, devName.c_str(),
+                                                entry.content, entry.encrypted,
+                                                MSG_TEXT);
         BROADCAST_PRINTF("[%s%s] %s", devName.c_str(),
                          entry.encrypted ? " [enc]" : "", entry.content);
+        // ESPNOW App page push-kick: if the user is currently viewing the
+        // inbox (merged or per-peer), enqueue a Redraw so the new entry
+        // appears within one applier-tick. No-op when the page isn't
+        // active or the user is on a non-message sub-mode; safe to call
+        // from this task (the lens applier queue is thread-safe). When
+        // BT/G2 are compiled out the header provides an inline no-op.
+        if (stored) {
+          g2ESPNowAppOnRxText(entry.srcMac);
+        }
         entry.used = false;
       }
       tail = (tail + 1) & (EspNowState::TEXT_QUEUE_SIZE - 1);
@@ -6554,8 +6575,100 @@ TaskHandle_t getEspNowTaskHandle() {
   return gEspNowHbTaskHandle;
 }
 
+// =============================================================================
+// ESPNOW App ping — single-slot HEARTBEAT-with-ACK probe used by the on-glasses
+// ESPNOW App page (see G2_Page_ESPNow). One round-trip in flight at a time.
+// =============================================================================
+// The ACK RX path in onEspNowDataReceived (V3_TYPE_ACK branch, around line
+// 2061) calls espnowAppPingNoteAck() unconditionally — that function early-
+// outs if the ping slot is Idle, so the cost when nobody's pinging is one
+// load + one compare.
+//
+// State machine: Idle → Pending (after Start) → Ok (rttMs set) | Timeout.
+// "Timeout" is computed lazily inside espnowAppPingPoll() when the caller's
+// timeoutMs has elapsed since startMs — no timer task.
+
+struct EspNowAppPingSlot {
+  uint8_t  peerMac[6];
+  uint32_t msgId;
+  uint32_t startMs;
+  uint32_t rttMs;
+  EspNowAppPingState state;
+};
+
+static EspNowAppPingSlot gEspNowAppPing = {
+  /*peerMac*/ {0,0,0,0,0,0},
+  /*msgId*/   0,
+  /*startMs*/ 0,
+  /*rttMs*/   0,
+  /*state*/   EspNowAppPingState::Idle,
+};
+
+bool espnowAppPingStart(const uint8_t* mac) {
+  if (!mac || !gEspNow || !gEspNow->initialized) return false;
+  uint32_t msgId = generateMessageId();
+  // Slot first — if the ACK lands in the gap between v3_send_frame returning
+  // and the slot being populated, espnowAppPingNoteAck would see Pending=false
+  // and drop the match.
+  memcpy(gEspNowAppPing.peerMac, mac, 6);
+  gEspNowAppPing.msgId   = msgId;
+  gEspNowAppPing.startMs = (uint32_t)millis();
+  gEspNowAppPing.rttMs   = 0;
+  gEspNowAppPing.state   = EspNowAppPingState::Pending;
+
+  bool ok = v3_send_frame(mac, ESPNOW_V3_TYPE_HEARTBEAT, ESPNOW_V3_FLAG_ACK_REQ,
+                          msgId, nullptr, 0, /*ttl=*/1);
+  if (!ok) {
+    // Send refused (queue full / radio off / no peer). Don't leave the slot
+    // Pending — that would let a stale ACK from an unrelated send win.
+    gEspNowAppPing.state = EspNowAppPingState::Idle;
+  }
+  DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_APP_PING] start msgId=%lu peer=%02X:%02X:%02X:%02X:%02X:%02X ok=%d",
+         (unsigned long)msgId, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5], (int)ok);
+  return ok;
+}
+
+void espnowAppPingNoteAck(const uint8_t* src, uint32_t msgId) {
+  if (gEspNowAppPing.state != EspNowAppPingState::Pending) return;
+  if (gEspNowAppPing.msgId != msgId) return;
+  if (memcmp(gEspNowAppPing.peerMac, src, 6) != 0) return;
+  gEspNowAppPing.rttMs = (uint32_t)millis() - gEspNowAppPing.startMs;
+  gEspNowAppPing.state = EspNowAppPingState::Ok;
+  DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_APP_PING] ack matched: rtt=%lums",
+         (unsigned long)gEspNowAppPing.rttMs);
+}
+
+EspNowAppPingState espnowAppPingPoll(uint32_t* outRttMs,
+                                     uint8_t* outPeerMac,
+                                     uint32_t timeoutMs) {
+  if (outPeerMac) memcpy(outPeerMac, gEspNowAppPing.peerMac, 6);
+  if (gEspNowAppPing.state == EspNowAppPingState::Pending) {
+    if ((uint32_t)millis() - gEspNowAppPing.startMs > timeoutMs) {
+      gEspNowAppPing.state = EspNowAppPingState::Timeout;
+    }
+  }
+  if (outRttMs) {
+    *outRttMs = (gEspNowAppPing.state == EspNowAppPingState::Ok)
+                ? gEspNowAppPing.rttMs : 0;
+  }
+  return gEspNowAppPing.state;
+}
+
+void espnowAppPingClear() {
+  gEspNowAppPing.state = EspNowAppPingState::Idle;
+  gEspNowAppPing.msgId = 0;
+  gEspNowAppPing.rttMs = 0;
+}
+
+// Last-failure reason from initEspNow(), readable by cmd_espnow_init so the
+// CLI/UI caller sees the *actual* cause rather than a generic "failed"
+// string. Static char buffer (not String) — keeps this off the heap and
+// usable from any context. Cleared on each new init attempt.
+static char gLastInitErrorReason[96] = {0};
+
 // Helper: Initialize ESP-NOW subsystem (static - internal use only)
 static bool initEspNow() {
+  gLastInitErrorReason[0] = '\0';
   // Capture heap before initialization
   size_t heapBefore = ESP.getFreeHeap();
   
@@ -6571,6 +6684,8 @@ static bool initEspNow() {
     if (gMeshPeers) {
       memset(gMeshPeers, 0, healthSize);
     } else {
+      snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+               "out of PSRAM (peer health array)");
       broadcastOutput("[ESP-NOW] ERROR: Failed to allocate mesh peer health");
       return false;
     }
@@ -6581,6 +6696,8 @@ static bool initEspNow() {
     if (gMeshPeerMeta) {
       for (int i = 0; i < gMeshPeerSlots; i++) gMeshPeerMeta[i].clear();
     } else {
+      snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+               "out of PSRAM (peer meta array)");
       broadcastOutput("[ESP-NOW] ERROR: Failed to allocate mesh peer meta");
       return false;
     }
@@ -6590,6 +6707,8 @@ static bool initEspNow() {
   if (!gEspNow) {
     gEspNow = (EspNowState*)ps_alloc(sizeof(EspNowState), AllocPref::PreferPSRAM, "espnow.state");
     if (!gEspNow) {
+      snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+               "out of PSRAM (state structure)");
       broadcastOutput("[ESP-NOW] ERROR: Failed to allocate state structure");
       return false;
     }
@@ -6658,6 +6777,8 @@ static bool initEspNow() {
 
   const char* setupError = checkEspNowFirstTimeSetup();
   if (setupError && strlen(setupError) > 0) {
+    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+             "%s", setupError);
     broadcastOutput(setupError);
     return false;
   }
@@ -6697,9 +6818,42 @@ static bool initEspNow() {
     gEspNow->channel = 1;  // Final fallback
   }
 
-  // Initialize ESP-NOW
-  if (esp_now_init() != ESP_OK) {
-    broadcastOutput("[ESP-NOW] Failed to initialize ESP-NOW");
+  // Initialize ESP-NOW. Translate the esp_err_t into a plain-English
+  // explanation of what's actually wrong so the user doesn't have to look
+  // up an error code — most of the time it's one of three things (WiFi
+  // driver wasn't brought up, DRAM is too low, or the radio is in a bad
+  // coex state) and we can say so directly.
+  esp_err_t initErr = esp_now_init();
+  if (initErr != ESP_OK) {
+    size_t heapNow = ESP.getFreeHeap();
+    wifi_mode_t wMode = WIFI_MODE_NULL;
+    esp_wifi_get_mode(&wMode);
+
+    const char* reason = "unknown driver error";
+    switch (initErr) {
+      case ESP_ERR_WIFI_NOT_INIT:
+        reason = "WiFi driver not started — radio must be on first";
+        break;
+      case ESP_ERR_ESPNOW_INTERNAL:
+        reason = "radio busy or in bad state (BLE coex glitch — try again)";
+        break;
+      case ESP_ERR_NO_MEM:
+        reason = "out of memory — free up DRAM and retry";
+        break;
+      case ESP_ERR_INVALID_ARG:
+        reason = "invalid arg (firmware bug, please report)";
+        break;
+      default:
+        reason = esp_err_to_name(initErr);  // fallback to IDF name string
+        break;
+    }
+    snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
+             "%s", reason);
+    BROADCAST_PRINTF("[ESP-NOW] Cannot start: %s. (heap=%uB, was %uB, wifi_mode=%d)",
+                     reason,
+                     (unsigned)heapNow,
+                     (unsigned)heapBefore,
+                     (int)wMode);
     return false;
   }
 
@@ -6864,9 +7018,20 @@ const char* cmd_espnow_init(const String& argsInput) {
 
   if (initEspNow()) {
     return "ESP-NOW initialized successfully";
-  } else {
-    return "Failed to initialize ESP-NOW";
   }
+  // Surface the actual reason captured by initEspNow() instead of a generic
+  // "failed" string. cmd_exec returns this via the result field; the lens
+  // ESPNOW App page logs it in onMainRedrawDone so the user can see what
+  // went wrong without digging through serial broadcasts.
+  static char fullMsg[128];
+  if (gLastInitErrorReason[0]) {
+    snprintf(fullMsg, sizeof(fullMsg), "Cannot start ESP-NOW: %s",
+             gLastInitErrorReason);
+  } else {
+    snprintf(fullMsg, sizeof(fullMsg),
+             "Cannot start ESP-NOW (no reason captured)");
+  }
+  return fullMsg;
 }
 
 // Helper: Deinitialize ESP-NOW subsystem (static - internal use only)
@@ -8468,7 +8633,7 @@ const char* cmd_espnow_unpair(const String& argsInput) {
 
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(target, mac)) {
-    static char errBuf[256];
+    EXT_RAM_BSS_ATTR static char errBuf[256];
     snprintf(errBuf, sizeof(errBuf), 
              "Device '%s' not found. Use 'espnowdevices' to see paired devices.", 
              target.c_str());
@@ -8813,7 +8978,7 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
 
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(target, mac)) {
-    static char errBuf[256];
+    EXT_RAM_BSS_ATTR static char errBuf[256];
     snprintf(errBuf, sizeof(errBuf), 
              "Device '%s' not found. Use 'espnowdevices' to see paired devices.", 
              target.c_str());
@@ -8825,7 +8990,7 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
     deviceName = formatMacAddress(mac);
   }
 
-  static char sendfileBuffer[512];
+  EXT_RAM_BSS_ATTR static char sendfileBuffer[512];
 
   if (isMeshMode()) {
     if (!espnowPeerExists(mac)) {
@@ -9127,7 +9292,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
 
   uint8_t targetMac[6];
   if (!resolveDeviceNameOrMac(target, targetMac)) {
-    static char browseBuffer[256];
+    EXT_RAM_BSS_ATTR static char browseBuffer[256];
     snprintf(browseBuffer, sizeof(browseBuffer),
              "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
              target.c_str());
@@ -9156,7 +9321,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
   bool sent = v3_send_frame(targetMac, ESPNOW_V3_TYPE_CMD, ESPNOW_V3_FLAG_ACK_REQ, msgId,
                             (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1);
   
-  static char browseBuffer[256];
+  EXT_RAM_BSS_ATTR static char browseBuffer[256];
   if (!sent) {
     snprintf(browseBuffer, sizeof(browseBuffer), "Failed to send V3 browse request");
     return browseBuffer;
@@ -9189,7 +9354,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
 
   uint8_t targetMac[6];
   if (!resolveDeviceNameOrMac(target, targetMac)) {
-    static char fetchBuffer[256];
+    EXT_RAM_BSS_ATTR static char fetchBuffer[256];
     snprintf(fetchBuffer, sizeof(fetchBuffer),
              "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
              target.c_str());
@@ -9220,7 +9385,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   bool sent = v3_send_frame(targetMac, ESPNOW_V3_TYPE_CMD, ESPNOW_V3_FLAG_ACK_REQ, msgId,
                             (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1);
   
-  static char fetchBuffer[256];
+  EXT_RAM_BSS_ATTR static char fetchBuffer[256];
   if (!sent) {
     snprintf(fetchBuffer, sizeof(fetchBuffer), "Failed to send V3 fetch request");
     return fetchBuffer;
@@ -9255,7 +9420,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
 
   uint8_t targetMac[6];
   if (!resolveDeviceNameOrMac(target, targetMac)) {
-    static char remoteBuffer[256];
+    EXT_RAM_BSS_ATTR static char remoteBuffer[256];
     snprintf(remoteBuffer, sizeof(remoteBuffer),
              "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
              target.c_str());
@@ -9288,7 +9453,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
     if (success) break;
   }
   
-  static char remoteBuffer[256];
+  EXT_RAM_BSS_ATTR static char remoteBuffer[256];
   if (!success) {
     snprintf(remoteBuffer, sizeof(remoteBuffer), "Failed to send remote command");
     return remoteBuffer;
@@ -9336,7 +9501,7 @@ const char* cmd_espnow_startstream(const String& argsInput) {
   DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Activated: target=%s name=%s active=%d counters_reset=YES",
          formatMacAddress(gEspNow->streamTarget).c_str(), senderName.c_str(), gEspNow->streamActive);
 
-  static char streamBuffer[512];
+  EXT_RAM_BSS_ATTR static char streamBuffer[512];
   snprintf(streamBuffer, sizeof(streamBuffer),
            "Stream started - all output will be sent to %s\n"
            "Rate limited to 10 messages/second.\n"
@@ -9365,7 +9530,7 @@ const char* cmd_espnow_stopstream(const String& argsInput) {
   }
 
   // Report statistics before stopping
-  static char streamBuffer[512];
+  EXT_RAM_BSS_ATTR static char streamBuffer[512];
   int pos = snprintf(streamBuffer, sizeof(streamBuffer),
                      "Stream stopped - output no longer sent to %s\n"
                      "Statistics: %lu messages sent, %lu dropped (rate limiting)",
@@ -9414,7 +9579,7 @@ const char* cmd_espnow_send(const String& argsInput) {
   // Resolve device name or MAC address
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(target, mac)) {
-    static char errBuf[256];
+    EXT_RAM_BSS_ATTR static char errBuf[256];
     snprintf(errBuf, sizeof(errBuf), 
              "Device '%s' not found. Use 'espnowdevices' to see paired devices.", 
              target.c_str());

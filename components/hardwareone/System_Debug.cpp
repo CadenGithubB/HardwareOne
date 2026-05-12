@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <stdarg.h>
+#include <esp_attr.h>
 #include <esp_log.h>
 
 #include "System_BuildConfig.h"
@@ -99,7 +100,7 @@ extern volatile bool gInHelpRender;
 // Suppressed tail ring buffer
 static const size_t kHelpTailLines = 32;
 static const size_t kHelpTailCols = 120;
-static char gHelpTail[kHelpTailLines][kHelpTailCols];
+EXT_RAM_BSS_ATTR static char gHelpTail[kHelpTailLines][kHelpTailCols];
 static size_t gHelpTailCount = 0;
 static size_t gHelpTailIndex = 0;
 

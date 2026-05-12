@@ -6,6 +6,7 @@
  */
 
 #include <Arduino.h>
+#include <esp_attr.h>
 #include <string.h>
 
 #include "System_CLI.h"
@@ -37,7 +38,7 @@ static size_t gCommandRegistryDropped = 0;
 #define MAX_MODULES 32
 
 // Module tracking for debug summary
-static ModuleInfo registeredModules[MAX_MODULES];
+EXT_RAM_BSS_ATTR static ModuleInfo registeredModules[MAX_MODULES];
 static size_t registeredModuleCount = 0;
 
 // Global access pointers (extern declarations in header)

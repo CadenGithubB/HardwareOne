@@ -220,7 +220,7 @@ void broadcastOutput(const String& s, const CommandContext& ctx);
 
 
 #ifndef DEBUG_MEM_SUMMARY
-#define DEBUG_MEM_SUMMARY 0
+#define DEBUG_MEM_SUMMARY 1
 #endif
 
 // File paths (LittleFS)
@@ -395,118 +395,37 @@ int gWifiNetworkCount = 0;
 
 extern "C" void __attribute__((weak)) memAllocDebug(const char* op, void* ptr, size_t size,
                                                     bool requestedPS, bool usedPS, const char* tag) {
-  // Update allocation tracker if enabled (lightweight, no FS access)
-  if (gAllocTrackerEnabled && tag && ptr) {
-    // Find or create entry for this tag
-    int idx = -1;
-    for (int i = 0; i < gAllocTrackerCount; i++) {
-      if (strcmp(gAllocTracker[i].tag, tag) == 0) {
-        idx = i;
-        break;
-      }
-    }
-    if (idx == -1 && gAllocTrackerCount < MAX_ALLOC_ENTRIES) {
-      idx = gAllocTrackerCount++;
-      strncpy(gAllocTracker[idx].tag, tag, sizeof(gAllocTracker[idx].tag) - 1);
-      gAllocTracker[idx].tag[sizeof(gAllocTracker[idx].tag) - 1] = '\0';
-      gAllocTracker[idx].totalBytes = 0;
-      gAllocTracker[idx].psramBytes = 0;
-      gAllocTracker[idx].dramBytes = 0;
-      gAllocTracker[idx].count = 0;
-      gAllocTracker[idx].isActive = true;
-    }
-    if (idx >= 0) {
-      gAllocTracker[idx].totalBytes += size;
-      gAllocTracker[idx].count++;
-      // Track actual memory type used (usedPS tells us where it ended up)
-      if (usedPS) {
-        gAllocTracker[idx].psramBytes += size;
-      } else {
-        gAllocTracker[idx].dramBytes += size;
-      }
+  (void)op;
+  (void)requestedPS;
+  if (!gAllocTrackerEnabled || !tag || !ptr) return;
+
+  // Find-or-insert by tag. No mutex: tracker is a diagnostic accumulator and
+  // races at worst produce slightly wrong byte totals — never crashes.
+  int idx = -1;
+  for (int i = 0; i < gAllocTrackerCount; i++) {
+    if (strcmp(gAllocTracker[i].tag, tag) == 0) {
+      idx = i;
+      break;
     }
   }
-
-  // Avoid work if filesystem not ready
-  if (!filesystemReady) return;
-  // Reentrancy guard to prevent recursion when logging triggers allocations
-  static volatile bool s_inMemLog = false;
-  if (s_inMemLog) return;
-  // Deadlock safeguard: if current task already holds fsMutex, skip FS logging
-  if (isFsLockedByCurrentTask()) return;
-  s_inMemLog = true;
-  // Ensure /logging_captures exists (best-effort)
-  {
-    FsLockGuard guard("alloclog.ensure_logs");
-    if (!VFS::existsGuarded("/logging_captures", VFS::systemAuth("hwone.alloclog_mkdir"))) {
-      VFS::mkdirGuarded("/logging_captures", VFS::systemAuth("hwone.alloclog_mkdir"));
-    }
+  if (idx == -1) {
+    if (gAllocTrackerCount >= MAX_ALLOC_ENTRIES) return;
+    idx = gAllocTrackerCount++;
+    strncpy(gAllocTracker[idx].tag, tag, sizeof(gAllocTracker[idx].tag) - 1);
+    gAllocTracker[idx].tag[sizeof(gAllocTracker[idx].tag) - 1] = '\0';
+    gAllocTracker[idx].totalBytes = 0;
+    gAllocTracker[idx].psramBytes = 0;
+    gAllocTracker[idx].dramBytes = 0;
+    gAllocTracker[idx].count = 0;
+    gAllocTracker[idx].isActive = true;
   }
-  // Timestamp prefix with ms precision, via boot-epoch offset and esp_timer
-  char tsPrefix[40];
-  getTimestampPrefixMsCached(tsPrefix, sizeof(tsPrefix));
-
-  // After values
-  size_t heapAfter = ESP.getFreeHeap();
-  size_t psTot = ESP.getPsramSize();
-  size_t psAfter = (psTot > 0) ? ESP.getFreePsram() : 0;
-
-  // Deltas (positive means memory consumed)
-  long heapDelta = (long)gAllocHeapBefore - (long)heapAfter;
-  long psDelta = (long)gAllocPsBefore - (long)psAfter;
-
-  // Build one-line entry with before/after info
-  // Format: [YYYY-mm-dd HH:MM:SS] | ms=<millis> op=... size=... reqPS=0|1 usedPS=0|1 ptr=0x... tag=...
-  //         heapBefore=... heapAfter=... heapDelta=... [psBefore=... psAfter=... psDelta=...]
-  String line;
-  line.reserve(200);
-  // Always include a prefix; if NTP time isn't ready yet or invalid, use a stable fallback
-  bool ok = (tsPrefix[0] == '[');
-  if (ok) {
-    for (size_t i = 1; tsPrefix[i] && i < sizeof(tsPrefix); ++i) {
-      if (tsPrefix[i] == ']') {
-        ok = true;
-        break;
-      }
-      if (i == sizeof(tsPrefix) - 1) ok = false;
-    }
+  gAllocTracker[idx].totalBytes += size;
+  gAllocTracker[idx].count++;
+  if (usedPS) {
+    gAllocTracker[idx].psramBytes += size;
+  } else {
+    gAllocTracker[idx].dramBytes += size;
   }
-  String prefix = ok ? String(tsPrefix) : String("[BOOTING] | ");
-  line += prefix;
-  line += "ms=";
-  line += String(millis());
-  line += " op=";
-  line += (op ? op : "?");
-  line += " size=";
-  line += String((unsigned long)size);
-  line += " reqPS=";
-  line += (requestedPS ? "1" : "0");
-  line += " usedPS=";
-  line += (usedPS ? "1" : "0");
-  line += " ptr=0x";
-  line += String((uint32_t)ptr, HEX);
-  if (tag && tag[0]) {
-    line += " tag=";
-    line += tag;
-  }
-
-  line += " heapBefore=";
-  line += String(gAllocHeapBefore);
-  line += " heapAfter=";
-  line += String(heapAfter);
-  line += " heapDelta=";
-  line += String(heapDelta);
-
-  if (psTot > 0) {
-    line += " psBefore=";
-    line += String(gAllocPsBefore);
-    line += " psAfter=";
-    line += String(psAfter);
-    line += " psDelta=";
-    line += String(psDelta);
-  }
-
-  s_inMemLog = false;
 }
 
 #if ENABLE_HTTP_SERVER
@@ -968,7 +887,9 @@ static void heapLogSummary(const char* tag) {
   size_t dram_free = ESP.getFreeHeap();
   size_t dram_min = ESP.getMinFreeHeap();
   size_t dram_maxalloc = ESP.getMaxAllocHeap();
-  size_t dram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  // MALLOC_CAP_8BIT alone matches PSRAM too; restrict to internal so this
+  // reports the actual DRAM largest free block (was returning ~1.9 MB PSRAM).
+  size_t dram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   bool has_ps = psramFound();
   size_t ps_total = has_ps ? ESP.getPsramSize() : 0;
   size_t ps_free = has_ps ? ESP.getFreePsram() : 0;

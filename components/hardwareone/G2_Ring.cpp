@@ -7,6 +7,7 @@
 // ring — we are strictly a listener in this first implementation.
 
 #include "G2_Ring.h"
+#include <esp_attr.h>
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -1178,7 +1179,7 @@ static void ringSpoofStop() {
 
 static const char* cmd_ringstatus(const String& /*args*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char buf[256];
+  EXT_RAM_BSS_ATTR static char buf[256];
   g2RingGetStatus(buf, sizeof(buf));
   return buf;
 }
