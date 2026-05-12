@@ -8,8 +8,14 @@
 // Command System - Centralized command registry and execution
 // ============================================================================
 
-// Maximum number of commands that can be registered
-#define MAX_COMMANDS 512
+// Maximum number of commands that can be registered.
+// Cost: +4 B BSS per slot on 32-bit (one const-ptr per entry). At 1024 the
+// table is 4 KB, vs ~30 KB of typical free heap — negligible. Was 512;
+// bumped after the registry silently dropped `g2scan`, all of `even_r1`,
+// and onward when the firmware crossed the old ceiling mid-`g2Commands`
+// (see registerCommand below — `gCommandRegistryDropped` now surfaces a
+// boot-time WARN if it ever happens again).
+#define MAX_COMMANDS 1024
 
 // Command registry functions
 void registerCommand(const CommandEntry* command);

@@ -373,6 +373,25 @@ static void ringDumpFrame(const uint8_t* data, size_t len) {
   if (!data || len == 0) return;
   gRing.packetsReceived++;
 
+  // Ring1Error short-frame fast-path. The ring emits this 6-byte form on
+  // some malformed-input rejections instead of a full envelope: a single
+  // transfer-type byte (0x00) followed by the offending request's CRC32
+  // and a 1-byte errorCode. r1Decode rejects anything < 17 B, so without
+  // this branch the meaning is lost (only visible as raw bytes under
+  // `ringverbose`). Format observed in the community RE decoder at
+  // docs/FlutterApp-main/lib/src/protocol/r1_messages.dart:390 with a
+  // pinned test fixture `00 D4 C9 BA 70 07` → errorCode=0x07.
+  if (len == 6 && data[0] == 0x00) {
+    const uint32_t crc32 = (uint32_t)data[1]
+                         | ((uint32_t)data[2] << 8)
+                         | ((uint32_t)data[3] << 16)
+                         | ((uint32_t)data[4] << 24);
+    const uint8_t errorCode = data[5];
+    DEBUG_G2F("[RING] RX Ring1Error errorCode=0x%02X crc32=0x%08lX",
+              (unsigned)errorCode, (unsigned long)crc32);
+    return;
+  }
+
   R1Decoded d;
   if (r1Decode(data, len, d)) {
     const char* mod = r1ModuleName(d.module);
@@ -1271,7 +1290,11 @@ static const char* cmd_ringquery(const String& args) {
     return "Usage: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [type]\n"
            "       ringquery hr [daily|point|measure]   (same shape for hrv/spo2/temp/activity/sleep)\n"
            "       ringquery report on|off|<byte>       (e.g. 0x10 to set bit 4 only — bit-bash to find what triggers push)\n"
-           "       ringquery raw <module> <cmd> <subCmd> [hex_payload]  (decimal mod/cmd/sub; hex payload optional, status=notify/get/ok)";
+           "       ringquery raw <module> <cmd> <subCmd> [hex_payload] [status=NN]\n"
+           "         decimal mod/cmd/sub; hex payload optional; status byte hex (default 00 = notify/get/ok).\n"
+           "         Common status bytes: 00=notify/get/ok (queries), 02=notify/set/ok (writes/SET),\n"
+           "         03=ack/set/ok (echoing an ack). Bit layout: bit0 type(0=notify,1=ack), bit1 method\n"
+           "         (0=get,1=set), bits2-3 ack(0=ok,1=err,2=refuse,3=notSup).";
   }
   String subject = ca.arg(0); subject.toLowerCase();
 
@@ -1329,18 +1352,66 @@ static const char* cmd_ringquery(const String& args) {
 
     // Optional hex payload (e.g. "01" or "01FF" or "0x01 0xFF" — strip
     // 0x prefixes, spaces, and colons, then parse pairs of hex digits).
-    // Status is fixed at notify/get/ok — this matches buildGenericQuery
-    // and avoids the risky set/SET path the user explicitly excluded.
+    //
+    // Optional `status=NN` token: a single full status-byte override, hex.
+    // Default 0x00 = notify/get/ok (the read-only path). Bit layout:
+    //   bit 0   : type    0=notify, 1=ack
+    //   bit 1   : method  0=get,    1=set
+    //   bits 2-3: ack     0=ok, 1=error, 2=refuse, 3=notSupport
+    // Common values:
+    //   0x00 notify/get/ok  — default, used to read most opcodes
+    //   0x02 notify/set/ok  — write/enable opcodes (e.g. touchSwitch with payload)
+    //   0x03 ack/set/ok     — echoing the ring's own ack shape
+    // Discovery context: until this knob existed, every probe was notify/get,
+    // which is silently ignored or returns ack/set/error on write-only opcodes
+    // (userInfo, touchSwitch, etc.). See R1_RING_PROTOCOL.md §6 for per-opcode
+    // markings.
+    uint8_t statusByte = 0x00;
     uint8_t payload[R1_MAX_PAYLOAD];
     size_t payloadLen = 0;
     if (ca.count() >= 5) {
-      // Concatenate all remaining args so "0x01 0xFF" works as well as
-      // "01FF".
+      // Pass 1: peel off any `status=NN` token, concatenate the rest as the
+      // payload hex string. Order-insensitive — `status=` can appear before,
+      // after, or between payload-hex tokens.
+      //
+      // Detection uses indexOf('=') + case-insensitive key compare rather
+      // than startsWith() because an earlier version of this code lost the
+      // status= token silently (likely from String::startsWith with an
+      // implicit const-char* prefix conversion). indexOf is unambiguous.
       String raw;
       for (int i = 4; i < ca.count(); i++) {
-        raw += ca.arg(i);
+        String arg = ca.arg(i);
+        int eqPos = arg.indexOf('=');
+        bool isStatusToken = false;
+        if (eqPos > 0) {
+          String key = arg.substring(0, eqPos);
+          key.toLowerCase();
+          if (key == "status") {
+            isStatusToken = true;
+            String val = arg.substring(eqPos + 1);
+            val.toLowerCase();
+            if (val.startsWith("0x")) val = val.substring(2);
+            if (val.length() == 0 || val.length() > 2) {
+              return "ringquery raw: status=NN must be 1-2 hex digits (00..FF)";
+            }
+            char* end = nullptr;
+            long parsed = strtol(val.c_str(), &end, 16);
+            if (end == val.c_str() || parsed < 0 || parsed > 0xFF) {
+              return "ringquery raw: status=NN must be a hex byte 00..FF";
+            }
+            statusByte = (uint8_t)parsed;
+          }
+        }
+        if (!isStatusToken) {
+          raw += arg;
+        }
       }
-      // Strip everything that isn't a hex digit.
+      // Debug breadcrumb so future "status= didn't take" mysteries can be
+      // verified at a glance instead of guessing.
+      DEBUG_G2F("[RING] raw-args: count=%d payloadHex='%s' statusByte=0x%02X",
+                ca.count(), raw.c_str(), (unsigned)statusByte);
+      // Pass 2: parse the hex payload from whatever remains. Strip everything
+      // that isn't a hex digit (handles "0x", spaces, colons in the input).
       String clean;
       for (size_t i = 0; i < raw.length(); i++) {
         char c = raw.charAt(i);
@@ -1349,31 +1420,44 @@ static const char* cmd_ringquery(const String& args) {
           clean += c;
         }
       }
-      if (clean.length() == 0 || (clean.length() & 1)) {
-        return "ringquery raw: hex payload must be an even number of hex digits";
-      }
-      payloadLen = clean.length() / 2;
-      if (payloadLen > R1_MAX_PAYLOAD) {
-        return "ringquery raw: payload too large";
-      }
-      for (size_t i = 0; i < payloadLen; i++) {
-        char hi = clean.charAt(2 * i);
-        char lo = clean.charAt(2 * i + 1);
-        auto nyb = [](char c) -> int {
-          if (c >= '0' && c <= '9') return c - '0';
-          if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-          if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-          return 0;
-        };
-        payload[i] = (uint8_t)((nyb(hi) << 4) | nyb(lo));
+      if (clean.length() > 0) {
+        if (clean.length() & 1) {
+          return "ringquery raw: hex payload must be an even number of hex digits";
+        }
+        payloadLen = clean.length() / 2;
+        if (payloadLen > R1_MAX_PAYLOAD) {
+          return "ringquery raw: payload too large";
+        }
+        for (size_t i = 0; i < payloadLen; i++) {
+          char hi = clean.charAt(2 * i);
+          char lo = clean.charAt(2 * i + 1);
+          auto nyb = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+            if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+            return 0;
+          };
+          payload[i] = (uint8_t)((nyb(hi) << 4) | nyb(lo));
+        }
       }
     }
 
+    // Decompose the status byte into the three fields the encoder takes.
+    const uint8_t statusType   = (statusByte >> 0) & 0x01;
+    const uint8_t statusMethod = (statusByte >> 1) & 0x01;
+    const uint8_t statusAck    = (statusByte >> 2) & 0x03;
+
     f = gR1Encoder.build((uint8_t)mod, (uint8_t)cmd, (uint8_t)sub,
-                         R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_GET,
-                         R1_STATUS_ACK_OK,
+                         statusType, statusMethod, statusAck,
                          payloadLen ? payload : nullptr, payloadLen);
     tag = "raw";
+    DEBUG_G2F("[RING] raw: mod=%lu cmd=%lu sub=%lu status=0x%02X (%s/%s/%s) payloadLen=%u",
+              (unsigned long)mod, (unsigned long)cmd, (unsigned long)sub,
+              (unsigned)statusByte,
+              r1StatusTypeName(statusType),
+              r1StatusMethodName(statusMethod),
+              r1StatusAckName(statusAck),
+              (unsigned)payloadLen);
   } else {
     int cmdId = -1;
     if      (subject == "hr"       || subject == "heartrate")   cmdId = R1_CMD_HEARTRATE;
@@ -1421,6 +1505,9 @@ static const char* cmd_ringquery(const String& args) {
 //              (won't poll first — useful to test the codec without waiting
 //              a whole interval)
 //   status     print enable flag, interval, and current cache contents
+// DEPRECATED: unregistered from g2RingCommands — see registry table for why.
+// Kept as compiled reference so the spoof-push plumbing isn't lost.
+__attribute__((unused))
 static const char* cmd_ringtoglasses(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   static char ret[300];
@@ -1588,6 +1675,10 @@ void g2RingNoteBridgePoll(uint64_t connRet, bool hasConnRet,
 // of the session but a reboot returns to the bleautoconnect default).
 static volatile bool gBridgeRequested = false;
 
+// DEPRECATED: unregistered from g2RingCommands — see registry table for why.
+// Kept as compiled reference so the RING_CONNECT_INFO + heartbeat plumbing
+// isn't lost.
+__attribute__((unused))
 static const char* cmd_ringbridge(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   static char ret[300];
@@ -1785,8 +1876,23 @@ extern const CommandEntry g2RingCommands[] = {
   { "ringdisconnect", "Disconnect from the R1 ring",               false, cmd_ringdisconnect },
   { "ringverbose",    "Toggle full hex dump of ring notify frames", false, cmd_ringverbose    },
   { "ringquery",      "Send an R1 health/status request: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [type] [hex_payload]", false, cmd_ringquery },
-  { "ringtoglasses",  "Spoof-push ring telemetry to glasses UI: ringtoglasses <on [sec]|off|now|status> (custom path; sid=0x90 is silently ignored by the temple — see ringbridge for the official UI path)", false, cmd_ringtoglasses },
-  { "ringbridge",     "Hand the ring to the right temple's bridge so the glasses' built-in health UI works: ringbridge <on|off|status>", false, cmd_ringbridge },
+  // NOTE: `ringtoglasses` and `ringbridge` are UNREGISTERED on purpose.
+  // Both targeted getting ring data onto the G2's built-in health UI, and
+  // both are dead ends. See R1_RING_PROTOCOL.md §13 for the full writeup:
+  //   * ringtoglasses (postman) — pushed RingDataPackage on sid=0x90 to the
+  //     right temple. Temple silently ignores; the community RE codebases
+  //     never send in that direction either (sid=144/145 are temple→host,
+  //     not host→temple).
+  //   * ringbridge   (matchmaker) — issued RING_CONNECT_INFO so the temple
+  //     bonds with the ring directly. Fails with connRet=8 (terminal)
+  //     because the R1 firmware accepts only one BLE central at a time
+  //     and we still hold the link. Releasing the ESP32's link doesn't
+  //     help either (verified empirically; see §13).
+  // The implementations of `cmd_ringtoglasses` / `cmd_ringbridge` and their
+  // helpers (spoof task, bridge-heartbeat task, telemetry cache,
+  // g2BuildRingRawDataPush) are kept compiled-in but unreachable, so any
+  // future investigator can re-register them and pick up where we stopped
+  // without re-implementing the plumbing.
 };
 extern const size_t g2RingCommandsCount =
     sizeof(g2RingCommands) / sizeof(g2RingCommands[0]);

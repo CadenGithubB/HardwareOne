@@ -20,10 +20,18 @@ String exitToNormalBanner();
 // Command Registry Storage
 // ============================================================================
 
-// Static storage for all commands (avoid dynamic allocation on embedded systems)
-// Maximum 256 commands should be sufficient for the entire system
+// Static storage for all commands (avoid dynamic allocation on embedded systems).
+// MAX_COMMANDS lives in the header — bump it there if `gCommandRegistryDropped`
+// fires (see initializeCommandSystem boot WARN).
 static const CommandEntry* commandRegistry[MAX_COMMANDS];
 static size_t commandRegistrySize = 0;
+
+// Count of registerCommand() calls that were dropped because the registry was
+// full. Bumped silently in the hot path (which runs during early boot before
+// the debug queue is reliably up); a single summary WARN is emitted at the end
+// of initializeCommandSystem so the failure mode is loud the next boot but the
+// registration loop itself stays log-free.
+static size_t gCommandRegistryDropped = 0;
 
 // Maximum number of command modules we can track for debug summary
 #define MAX_MODULES 32
@@ -41,9 +49,12 @@ size_t gCommandsCount = 0;
 // ============================================================================
 
 void registerCommand(const CommandEntry* command) {
-  if (!command || commandRegistrySize >= MAX_COMMANDS) {
-    // IMPORTANT: do not log here. This function may be called before
-    // Serial/logging is ready.
+  if (!command) return;
+  if (commandRegistrySize >= MAX_COMMANDS) {
+    // IMPORTANT: do not log here — this runs during early boot before the
+    // debug queue is reliably up. Bump a counter; initializeCommandSystem
+    // emits a single loud WARN at the end if it's non-zero.
+    gCommandRegistryDropped++;
     return;
   }
 
@@ -291,7 +302,17 @@ void initializeCommandSystem() {
   }
 
   DEBUG_COMMAND_SYSTEMF("[REG_INIT] Registry initialized with %d commands", commandRegistrySize);
-  
+
+  // If we hit the cap, surface it loudly — silent drops are how `g2scan`,
+  // all of `even_r1`, and downstream modules vanished from the registry
+  // last time. Bump MAX_COMMANDS in System_Command.h to fix.
+  if (gCommandRegistryDropped > 0) {
+    WARN_COMMANDF("[REG_INIT] DROPPED %zu commands: registry full at MAX_COMMANDS=%d. "
+                  "Trailing modules in gCommandModules are partially or fully missing — "
+                  "bump MAX_COMMANDS in System_Command.h.",
+                  gCommandRegistryDropped, (int)MAX_COMMANDS);
+  }
+
   // Update global pointers
   gCommands = commandRegistry;
   gCommandsCount = commandRegistrySize;
