@@ -29,6 +29,7 @@
 #include "System_Settings.h"
 
 #include <esp_gatts_api.h>
+#include <esp_bt.h>            // esp_bt_controller_get_status() — used by isBLERunning()
 #include <stdlib.h>
 #include <string.h>
 
@@ -1087,6 +1088,19 @@ void bleSessionTick() {
 // =============================================================================
 
 bool isBLERunning() {
+  // True whenever the BT controller is up, regardless of which sub-stack
+  // is using it. Mirrors how the WiFi/HTTP modules report runtime liveness
+  // (WiFi.status() == WL_CONNECTED, server != nullptr).
+  //
+  // The previous implementation only checked `gBLEState->initialized`,
+  // which is server-mode state. In g2-client mode (bluetoothMode=1) the
+  // BLE radio is active and connected to the glasses/ring, but the
+  // server-mode struct is never initialized — so the settings UI showed
+  // "Disabled" while BT was clearly running. Checking the controller
+  // status covers both modes plus any future sub-stack.
+  if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
+    return true;
+  }
   return gBLEState && gBLEState->initialized;
 }
 

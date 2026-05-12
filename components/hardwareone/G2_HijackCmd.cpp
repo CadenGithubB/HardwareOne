@@ -183,8 +183,13 @@ AuthContext g2HijackAuthContext() {
       && gBlePeerData[BLE_PEER_G2_GLASSES].mac1.length() > 0
       && gBlePeerData[BLE_PEER_G2_GLASSES].autoConnect) {
     warnedStuck = true;
-    WARN_BLUETOOTHF("g2-glasses peer is in STUCK state: mac1='%s' autoConnect=true but pairedByUser is BLANK in settings. All hijack commands will run anonymously and admin checks will fail. RECOVERY: from an admin web/serial CLI, run `bleautoconnect g2-glasses on` — that stamps pairedByUser from your session's identity.",
+    // Split across multiple queue entries — each WARN line is capped at
+    // DEBUG_MSG_SIZE (256B), so a single long line gets truncated mid-
+    // recovery-instruction. Same task, sequential submission → ordered.
+    WARN_BLUETOOTHF("g2-glasses peer is in STUCK state: mac1='%s' autoConnect=true but pairedByUser is BLANK in settings.",
                     gBlePeerData[BLE_PEER_G2_GLASSES].mac1.c_str());
+    WARN_BLUETOOTHF("  Effect: all hijack commands run anonymously and admin checks will fail.");
+    WARN_BLUETOOTHF("  Recovery: from an admin web/serial CLI, run `bleautoconnect g2-glasses on` — stamps pairedByUser from your session identity.");
   }
 
   return ctx;

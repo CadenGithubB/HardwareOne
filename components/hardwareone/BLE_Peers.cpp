@@ -165,8 +165,16 @@ void bleStampPairedByIfBlank(BlePeerKind kind) {
   // got 5 seconds to fix it before downstream code cares.
   const String& who = currentAuthContext().user;
   if (who.length() == 0) {
-    WARN_BLUETOOTHF("stamp '%s' SKIPPED: pairedByUser is blank AND calling task has no user in TLS (task='%s'). Peer will remain unowned — every G2 hijack command will run as anonymous and admin checks will fail. To recover: from a web/serial CLI logged in as admin, run `bleautoconnect %s on`",
-                    name, task ? task : "?", name);
+    // Split across multiple queue entries — each WARN line is capped at
+    // DEBUG_MSG_SIZE (256B) in the debug queue, so a single long line
+    // gets truncated mid-recovery-instruction. Same task, sequential
+    // submission → lines land in order.
+    WARN_BLUETOOTHF("stamp '%s' SKIPPED: pairedByUser blank AND task '%s' has no user identity in TLS.",
+                    name, task ? task : "?");
+    WARN_BLUETOOTHF("  Effect: peer '%s' remains UNOWNED — every hijack command runs anonymously and admin checks will fail.",
+                    name);
+    WARN_BLUETOOTHF("  Recovery: from a web/serial CLI logged in as admin, run `bleautoconnect %s on`.",
+                    name);
     return;
   }
 

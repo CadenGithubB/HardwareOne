@@ -414,6 +414,10 @@ static inline uint32_t readU32LE(const uint8_t* p) {
          ((uint32_t)p[3] << 24);
 }
 
+static inline uint16_t readU16LE(const uint8_t* p) {
+  return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
 // Format an epoch as ISO 8601 in UTC. Returns chars written. If the epoch is
 // 0 (sentinel "no data"), writes "n/a" instead.
 static size_t formatEpoch(uint32_t epochSec, char* out, size_t cap) {
@@ -643,7 +647,26 @@ static size_t annotateHealthPoint(uint8_t cmd, const uint8_t* p, size_t len,
 // emit the count + timestamps anyway and bail on records — the firmware
 // has been observed to vary header layouts across versions, so don't
 // assume our hypothesis holds for unfamiliar shapes.
-static size_t annotateHrDaily(const uint8_t* p, size_t len, char* out, size_t cap) {
+// health/{heartRate,spo2,hrv,temperature}/daily — count-prefixed history
+// with a fixed-size record stream. Hand-rolled against firmware 2.2.0.0011
+// HR captures (3-record fixture verified live 2026-05-02); applied
+// speculatively to the sibling metrics (spo2/hrv/temperature) under the
+// hypothesis that they share the envelope and only differ in per-record
+// interpretation.
+//
+// The Python codec (ring1_packet_codec.py _parse_common_daily) was developed
+// against firmware v2.1.0_beta_v3 and has a multi-layout dispatcher we don't
+// match — the codec's header is 5-6 bytes vs our 11-byte hr header. So we
+// emit a "size mismatch" breadcrumb when the hypothesis fails, which is what
+// lets a first-capture-of-spo2-daily debug itself rather than show raw hex.
+//
+// CONFIDENCE per metric:
+//   * heartRate  ✓   verified live 2026-05-02 (3-record fixture, hr=69)
+//   * spo2       ◯   no capture yet on our firmware — record[0] guess is %
+//   * hrv        ◯   no capture yet — record[0] guess is RMSSD ms (low byte)
+//   * temperature ✗  ring rejects all temperature opcodes on our firmware
+static size_t annotateGenericDaily(uint8_t cmd, const uint8_t* p, size_t len,
+                                   char* out, size_t cap) {
   if (len < 11) return 0;
   uint8_t count = p[0];
   uint32_t startTs = readU32LE(p + 3);
@@ -651,28 +674,97 @@ static size_t annotateHrDaily(const uint8_t* p, size_t len, char* out, size_t ca
   size_t recordsStart = 11;
   size_t expectedLen  = recordsStart + (size_t)count * 4 + 1;
 
+  // Metric tag for log readability + per-metric record[0] label.
+  // For HR the label is verified (BPM). For the others we use a guess
+  // tag so the log makes clear we haven't confirmed.
+  const char* tag      = "?Daily";
+  const char* valLabel = "val";
+  switch (cmd) {
+    case R1_CMD_HEARTRATE:   tag = "hrDaily";   valLabel = "hr";        break;
+    case R1_CMD_SPO2:        tag = "spo2Daily"; valLabel = "spo2?";     break;
+    case R1_CMD_HRV:         tag = "hrvDaily";  valLabel = "hrv?";      break;
+    case R1_CMD_TEMPERATURE: tag = "tempDaily"; valLabel = "temp?";     break;
+    default: break;
+  }
+
   char tsStartBuf[32], tsEndBuf[32];
   formatEpoch(startTs, tsStartBuf, sizeof(tsStartBuf));
   formatEpoch(endTs,   tsEndBuf,   sizeof(tsEndBuf));
 
   if (expectedLen != len) {
-    // Header says count=N but body doesn't fit our hypothesis. Don't
+    // Header says count=N but body doesn't fit the hr template. Don't
     // pretend we parsed records; emit the header fields and a length
-    // breadcrumb so we can spot new firmware variants in the log.
+    // breadcrumb so we can spot a new firmware variant or a per-metric
+    // shape difference in the log.
     return (size_t)snprintf(out, cap,
-        "hrDaily count=%u start=%s end=%s (size mismatch: got %u B, expected %u for our hypothesis — new firmware variant?)",
-        count, tsStartBuf, tsEndBuf,
-        (unsigned)len, (unsigned)expectedLen);
+        "%s count=%u start=%s end=%s (size mismatch: got %u B, expected %u for hr-template — metric=%s may have different shape)",
+        tag, count, tsStartBuf, tsEndBuf,
+        (unsigned)len, (unsigned)expectedLen, valLabel);
   }
 
   size_t off = (size_t)snprintf(out, cap,
-      "hrDaily count=%u start=%s end=%s recs=[",
-      count, tsStartBuf, tsEndBuf);
+      "%s count=%u start=%s end=%s recs=[",
+      tag, count, tsStartBuf, tsEndBuf);
   for (uint8_t i = 0; i < count && off + 32 < cap; i++) {
     const uint8_t* r = p + recordsStart + (size_t)i * 4;
     off += snprintf(out + off, cap - off,
-                    "%s{hr=%u b1=%u b2=%02X b3=%02X}",
-                    i ? "," : "", r[0], r[1], r[2], r[3]);
+                    "%s{%s=%u b1=%u b2=%02X b3=%02X}",
+                    i ? "," : "", valLabel, r[0], r[1], r[2], r[3]);
+  }
+  off += snprintf(out + off, cap - off, "]");
+  return off;
+}
+
+// health/sleep/daily — sleep session with a trailing stage array.
+//
+// Speculative parser ported from ring1_packet_codec.py _parse_sleep
+// (firmware v2.1.0_beta_v3). NOT yet captured on our firmware
+// 2.2.0.0011 — the ring's test wearer hasn't logged a sleep session
+// yet, so all queries return ack-only. This parser is staged so the
+// first real response is readable instead of a hex blob; expect
+// adjustments after live capture.
+//
+// Wire layout (per python codec — bytes 1..29 are sparsely-named
+// fields whose semantics weren't reverse-engineered; we just label
+// the meaningful ones):
+//   [0]      sleep_type_code (BleRing1SleepType: 0=long, 1=short)
+//   [1..29]  unknown fields (sleep onset/wakeup times, totals, ...)
+//   [30..31] stage_count u16 LE
+//   [32..]   stage_count × { stage_type:u8, duration_minutes:u16 LE }
+//
+// Stage types per BleRing1SleepStageType:
+//   0 = awake, 1 = rem, 2 = light, 3 = deep
+static size_t annotateSleep(const uint8_t* p, size_t len, char* out, size_t cap) {
+  if (len < 1) return 0;
+  const char* sleepType =
+      (p[0] == 0) ? "long" :
+      (p[0] == 1) ? "short" : "?";
+  size_t off = (size_t)snprintf(out, cap,
+      "sleep type=%u(%s) totalLen=%u",
+      p[0], sleepType, (unsigned)len);
+  if (len < 32) {
+    off += snprintf(out + off, cap - off, " (no stage block — payload too short)");
+    return off;
+  }
+  uint16_t stageCount = readU16LE(p + 30);
+  off += snprintf(out + off, cap - off, " stages=%u recs=[", stageCount);
+  const size_t stageBase = 32;
+  for (uint16_t i = 0; i < stageCount && off + 32 < cap; i++) {
+    const size_t recOff = stageBase + (size_t)i * 3;
+    if (recOff + 3 > len) {
+      off += snprintf(out + off, cap - off, "%s(truncated)", i ? "," : "");
+      break;
+    }
+    const uint8_t stageType = p[recOff];
+    const uint16_t duration = readU16LE(p + recOff + 1);
+    const char* stageName =
+        (stageType == 0) ? "awake" :
+        (stageType == 1) ? "rem"   :
+        (stageType == 2) ? "light" :
+        (stageType == 3) ? "deep"  : "?";
+    off += snprintf(out + off, cap - off,
+                    "%s{%s=%um}",
+                    i ? "," : "", stageName, duration);
   }
   off += snprintf(out + off, cap - off, "]");
   return off;
@@ -772,11 +864,21 @@ size_t r1AnnotatePayload(const R1Decoded& d, char* out, size_t cap) {
          d.cmd == R1_CMD_SPO2      || d.cmd == R1_CMD_TEMPERATURE)) {
       return annotateHealthPoint(d.cmd, d.payload, d.payloadLength, out, cap);
     }
-    if (d.cmd == R1_CMD_HEARTRATE && d.subCmd == R1_SUB_DAILY) {
-      return annotateHrDaily(d.payload, d.payloadLength, out, cap);
+    // Daily history — same hr-template envelope across all four metrics.
+    // Confidence is high only for HR; the others use the same dispatcher
+    // and emit a size-mismatch breadcrumb if the hypothesis fails on a
+    // first real capture. See annotateGenericDaily for confidence notes.
+    if (d.subCmd == R1_SUB_DAILY &&
+        (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_SPO2 ||
+         d.cmd == R1_CMD_HRV       || d.cmd == R1_CMD_TEMPERATURE)) {
+      return annotateGenericDaily(d.cmd, d.payload, d.payloadLength, out, cap);
     }
     if (d.cmd == R1_CMD_ACTIVITY && d.subCmd == R1_SUB_DAILY) {
       return annotateActivityDaily(d.payload, d.payloadLength, out, cap);
+    }
+    // Sleep — speculative parser staged for the first real session capture.
+    if (d.cmd == R1_CMD_SLEEP && d.subCmd == R1_SUB_DAILY) {
+      return annotateSleep(d.payload, d.payloadLength, out, cap);
     }
   }
   return 0;
