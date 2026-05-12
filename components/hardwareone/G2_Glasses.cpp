@@ -12198,11 +12198,42 @@ static constexpr uint32_t kImgFragGapMs = 10;
 //                        CREATE was the original failure case (only 1
 //                        compound CREATE per stream session, vs N×17
 //                        envelopes per frame).
+//   tiered (2026-05-12) — 15 ms still fails on larger frames (spinning_earth
+//                        animation pack at 3800 B/fragment → envelope 17/17
+//                        rc=-1, ImageRawResp timeout). Root cause is shared
+//                        controller TX buffer under 3-connection load:
+//                        sustained 15ms cadence drains slower than submitted
+//                        when G2-L + G2-R + R1 all hold connections. Picking
+//                        the gap per-fragment from `pbLen` keeps slime-sized
+//                        pushes at full speed and only slows down on
+//                        fragments large enough to stress the buffer.
 //
-// If rc=-1 / phantom-ack lines return in the camStream log, bump back up
-// to 18 or 20. Image-push paths set this via gFragNextBurstDelayMs before
-// each sendPbFragmented call so non-image bursts keep their faster cadence.
-static constexpr uint32_t kImgInBurstEnvelopeGapMs = 15;
+// Selection: pickImgEnvelopeGapMs(pbLen) — see below. Image-push paths set
+// this via gFragNextBurstDelayMs before each sendPbFragmented call so
+// non-image bursts keep their faster cadence.
+static constexpr uint32_t kImgEnvGapMs_Small  = 15;   // ≤ ~6 envelopes
+static constexpr uint32_t kImgEnvGapMs_Medium = 20;   // 7-12 envelopes
+static constexpr uint32_t kImgEnvGapMs_Large  = 25;   // 13+ envelopes
+static constexpr size_t   kImgFragSizeSmallMaxB  = 1500;  // bytes ≈ 6 env @ MTU 244
+static constexpr size_t   kImgFragSizeMediumMaxB = 3000;  // bytes ≈ 12 env
+
+// Backward-compat alias — the small-tier default. Tier-aware call sites
+// should use pickImgEnvelopeGapMs(pbLen) instead so they auto-scale.
+static constexpr uint32_t kImgInBurstEnvelopeGapMs = kImgEnvGapMs_Small;
+
+// Pick the inter-envelope gap for one upcoming image-push fragment based
+// on its serialized protobuf size. Small fragments fit inside the
+// controller's TX buffer window and never stress it — keep the fast 15 ms
+// gap. Larger fragments sustain pressure long enough across many
+// connection events that the buffer drain rate (shared with the other two
+// connections) can't keep up at 15 ms; bump to 20/25 ms to widen the
+// window. Failure mode at undersize gap: rc=-1 from writeValue mid-burst,
+// ImageRawResp never arrives, the next burst inherits the wedge.
+static uint32_t pickImgEnvelopeGapMs(size_t pbLen) {
+  if (pbLen <= kImgFragSizeSmallMaxB)  return kImgEnvGapMs_Small;
+  if (pbLen <= kImgFragSizeMediumMaxB) return kImgEnvGapMs_Medium;
+  return kImgEnvGapMs_Large;
+}
 
 // Hold the image visible after the last fragment, before SHUTDOWN.
 // The lens's 4-tile sync settles for ~2 s post-last-frag (per the
@@ -12714,11 +12745,12 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
               tag, i + 1, kFrags, (unsigned)magic, i,
               (unsigned)chunk, (unsigned)off, (unsigned)bmpLen,
               (unsigned)(i + 1u - gImgPushAcked));
-    // Pace this burst's envelopes wider than the default 15 ms — see
-    // kImgInBurstEnvelopeGapMs comment. Without this, compound CREATEs
-    // wedge the BLE controller around envelope 15/17 of a 3800 B image
-    // fragment.
-    g2DebugSetNextBurstFragDelay(kImgInBurstEnvelopeGapMs);
+    // Pace this burst's envelopes based on fragment size — see the
+    // tier picker comment above kImgEnvGapMs_*. Small fragments keep
+    // the fast 15 ms cadence; large fragments (animation packs etc.)
+    // get 20-25 ms so the controller TX buffer has time to drain
+    // between submissions.
+    g2DebugSetNextBurstFragDelay(pickImgEnvelopeGapMs(pbLen));
     if (!sendPbFragmented(arm, allocSeq(), G2_SID_EVEN_CORE,
                           G2_FLAG_REQUEST, pbBuf, pbLen)) {
       break;
@@ -13122,11 +13154,12 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
               tag, i + 1, kFrags, (unsigned)magic, i,
               (unsigned)chunk, (unsigned)off, (unsigned)bmpLen,
               (unsigned)(i + 1u - gImgPushAcked));
-    // Pace this burst's envelopes wider than the default 15 ms — see
-    // kImgInBurstEnvelopeGapMs comment. Without this, compound CREATEs
-    // wedge the BLE controller around envelope 15/17 of a 3800 B image
-    // fragment.
-    g2DebugSetNextBurstFragDelay(kImgInBurstEnvelopeGapMs);
+    // Pace this burst's envelopes based on fragment size — see the
+    // tier picker comment above kImgEnvGapMs_*. Small fragments keep
+    // the fast 15 ms cadence; large fragments (animation packs etc.)
+    // get 20-25 ms so the controller TX buffer has time to drain
+    // between submissions.
+    g2DebugSetNextBurstFragDelay(pickImgEnvelopeGapMs(pbLen));
     if (!sendPbFragmented(arm, allocSeq(), G2_SID_EVEN_CORE,
                           G2_FLAG_REQUEST, pbBuf, pbLen)) {
       break;
@@ -16538,6 +16571,13 @@ const char* g2ProbeImageQ25SdFrameAnimation() {
     }
     frameCache[i] = bmp;
     frameLen[i]   = blen;
+    // Yield between frame reads so the IDLE task on this core can reset
+    // the task watchdog. Without it, loading a multi-frame pack
+    // (especially large ones) trips `task_wdt: IDLE1 (CPU 1) ...
+    // g2_img_probe` because the SD reads stay on-CPU long enough to
+    // starve the idle task. 1 tick (≈1 ms) is enough — load time
+    // overhead is negligible compared to BLE push time downstream.
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 
   const int32_t cw = (imgW < 0) ? -imgW : imgW;
