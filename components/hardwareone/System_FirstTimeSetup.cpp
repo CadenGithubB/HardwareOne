@@ -31,7 +31,7 @@
 #if ENABLE_WIFI
 #include <WiFi.h>
 #endif
-#if ENABLE_HTTP_SERVER
+#if ENABLE_MIGRATION_TOOL
 #include "WebServer_MigrationTool.h"
 #endif
 
@@ -201,7 +201,7 @@ static bool serialWifiSelectionForRestore(String& outSSID) {
 #endif // ENABLE_WIFI
 
 // Migration restore handler registration (from WebServer_MigrationTool.cpp)
-#if ENABLE_HTTP_SERVER
+#if ENABLE_MIGRATION_TOOL
 #include "WebServer_MigrationTool.h"
 extern httpd_handle_t server;
 #endif
@@ -240,7 +240,7 @@ void firstTimeSetupIfNeeded() {
     broadcastOutput("Select setup mode:");
     broadcastOutput("  1. Basic Setup        - Quick start (username + password only)");
     broadcastOutput("  2. Advanced Setup     - Full configuration wizard");
-#if ENABLE_HTTP_SERVER && ENABLE_WIFI
+#if ENABLE_MIGRATION_TOOL && ENABLE_WIFI
     broadcastOutput("  3. Import from Backup - Restore settings from .hwbackup file");
     broadcastOutput("");
     broadcastOutput("Enter 1, 2, or 3 (default: 1): ");
@@ -253,7 +253,7 @@ void firstTimeSetupIfNeeded() {
     modeInput.trim();
     if (modeInput == "2" || modeInput.equalsIgnoreCase("advanced")) {
       setupMode = 1;
-#if ENABLE_HTTP_SERVER && ENABLE_WIFI
+#if ENABLE_MIGRATION_TOOL && ENABLE_WIFI
     } else if (modeInput == "3" || modeInput.equalsIgnoreCase("restore") || modeInput.equalsIgnoreCase("import")) {
       setupMode = 2;
 #endif
@@ -271,7 +271,7 @@ void firstTimeSetupIfNeeded() {
     broadcastOutput("Import from Backup selected.");
     broadcastOutput("");
 
-#if ENABLE_HTTP_SERVER && ENABLE_WIFI
+#if ENABLE_MIGRATION_TOOL && ENABLE_WIFI
     // Step 1: Collect WiFi credentials — reuse the same scan+select UI as the setup wizard
     broadcastOutput("WiFi is required for the Migration Tool to connect.");
     broadcastOutput("");
@@ -396,7 +396,6 @@ void firstTimeSetupIfNeeded() {
 #endif
       while (!gRestoreComplete && !goBack) {
         delay(500);
-        Serial.print(".");
 
         // Serial 'back' escape
         if (Serial.available()) {
@@ -429,7 +428,6 @@ void firstTimeSetupIfNeeded() {
         }
 #endif
       }
-      Serial.println();
 
       // Gate 3: Stop the restore-only server entirely
       gAcceptingRestore = false;

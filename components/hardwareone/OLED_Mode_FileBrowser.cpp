@@ -80,6 +80,9 @@ static bool initFileBrowser() {
  */
 // Gather file browser data (called OUTSIDE I2C transaction to avoid blocking gamepad)
 void prepareFileBrowserData() {
+  // Identity for FS access comes from the main task's sticky SYSTEM install
+  // in app_main(). OLED actions inherit it because they run on the same task.
+
   // Initialize or reinitialize if needed
   if (!gOLEDFileManager || oledFileBrowserNeedsInit) {
     if (!initFileBrowser()) {
@@ -97,7 +100,7 @@ void prepareFileBrowserData() {
           if (entry.isFolder) {
             gOLEDFileManager->navigateInto();
           } else {
-#if ENABLE_GPS_SENSOR
+#if ENABLE_GPS_SENSOR && ENABLE_MAPS
             // Check if it's a .hwmap file
             String filename = String(entry.name);
             if (filename.endsWith(".hwmap")) {
@@ -105,7 +108,7 @@ void prepareFileBrowserData() {
               String fullPath = String(gOLEDFileManager->getCurrentPath());
               if (!fullPath.endsWith("/")) fullPath += "/";
               fullPath += entry.name;
-              
+
               if (MapCore::loadMapFile(fullPath.c_str())) {
                 extern bool gMapCenterSet;
                 extern bool gMapManuallyPanned;

@@ -1,10 +1,23 @@
 /**
  * WebServer_MigrationTool.cpp - Migration tool backup/restore endpoints
  *
- * Provides 3 CORS-enabled endpoints for the HardwareOne Migration Tool:
- *   GET  /api/ping    - Connection test (handled in WebServer_Server.cpp, OPTIONS here)
- *   POST /api/backup  - Authenticated export of device configuration
- *   POST /api/restore - Unauthenticated import, triple-gated to first-time setup only
+ * This file holds two logically distinct sub-features, gated independently:
+ *
+ *   1. Backup export (requires ENABLE_HTTP_SERVER)
+ *      POST /api/backup    - Authenticated export of device configuration.
+ *      Registered alongside the main web UI; uses makeWebAuthCtx /
+ *      tgRequireAuth from WebServer_Server.h. Compiles only when the
+ *      regular web UI is available.
+ *
+ *   2. FTS restore-only server (requires ENABLE_MIGRATION_TOOL)
+ *      GET  /                  - Plain-text splash explaining restore mode.
+ *      POST /api/restore       - Unauthenticated import, triple-gated to
+ *                                first-time setup only (gFirstTimeSetupState
+ *                                + gAcceptingRestore + handler unregister).
+ *      OPTIONS+POST /api/ping  - Connection test + CORS preflight.
+ *      Spun up by FTS "Import from Backup", torn down on completion or
+ *      user abort. Self-contained — no dependency on WebServer_Server.cpp.
+ *      Works in headless builds (ENABLE_HTTP_SERVER=0) as a recovery path.
  *
  * CORS headers are applied ONLY to these endpoints. All other device
  * endpoints remain same-origin only.
@@ -12,7 +25,7 @@
 
 #include "System_BuildConfig.h"
 
-#if ENABLE_HTTP_SERVER
+#if ENABLE_MIGRATION_TOOL
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -31,7 +44,9 @@
 #include "System_Settings.h"
 #include "System_User.h"
 #include "System_Utils.h"
-#include "WebServer_Server.h"
+#if ENABLE_HTTP_SERVER
+#include "WebServer_Server.h"  // auth helpers (makeWebAuthCtx, tgRequireAuth) for backup endpoint
+#endif
 #include "WebServer_MigrationTool.h"
 
 // External dependencies (httpd_handle_t server declared in WebServer_Server.h)
@@ -66,6 +81,25 @@ static esp_err_t handleCorsOptions(httpd_req_t* req) {
 }
 
 // ============================================================================
+// Shared helper used by both backup-export and restore — kept outside the
+// ENABLE_HTTP_SERVER block so the restore-only path (HTTP=0, MIG=1) can
+// still classify cert files in incoming backup payloads.
+// ============================================================================
+
+static bool isCertFile(const String& path) {
+  return path.endsWith(".pem") || path.endsWith(".crt") || path.endsWith(".key");
+}
+
+// ============================================================================
+// BACKUP EXPORT (authenticated; requires ENABLE_HTTP_SERVER for auth helpers)
+// ============================================================================
+// Everything between this guard and the matching `#endif // ENABLE_HTTP_SERVER`
+// further down depends on makeWebAuthCtx / tgRequireAuth from
+// WebServer_Server.h. In a (HTTP=0, MIG=1) build, the backup endpoint is
+// silently omitted but the restore-only server below remains available.
+#if ENABLE_HTTP_SERVER
+
+// ============================================================================
 // Helper: Add a file to the backup JSON if it exists
 // ============================================================================
 
@@ -91,10 +125,6 @@ static void addFileToBackup(JsonObject& files, JsonArray& warnings, const char* 
 // ============================================================================
 // Helper: Recursively add all files from a directory
 // ============================================================================
-
-static bool isCertFile(const String& path) {
-  return path.endsWith(".pem") || path.endsWith(".crt") || path.endsWith(".key");
-}
 
 static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, JsonArray& encFields, const char* dirPath, const AuthContext& ctx, int depth = 0) {
   if (!filesystemReady || depth > 3) return;
@@ -299,6 +329,8 @@ static esp_err_t handleBackup(httpd_req_t* req) {
 
   return ESP_OK;
 }
+
+#endif // ENABLE_HTTP_SERVER  (end of backup-export block)
 
 // ============================================================================
 // POST /api/restore - Unauthenticated, CORS-enabled, triple-gated
@@ -509,6 +541,10 @@ static esp_err_t handleRestore(httpd_req_t* req) {
 // Handler Registration
 // ============================================================================
 
+#if ENABLE_HTTP_SERVER
+// Backup-export handlers and the /api/ping CORS preflight are registered
+// from WebServer_Server.cpp's startup path. Both depend on the main web
+// UI being compiled in.
 void registerMigrationBackupHandler(httpd_handle_t server) {
   static httpd_uri_t backupPost = {
     .uri = "/api/backup",
@@ -535,6 +571,7 @@ void registerPingOptionsHandler(httpd_handle_t server) {
   };
   httpd_register_uri_handler(server, &pingOptions);
 }
+#endif // ENABLE_HTTP_SERVER  (end of backup-registration block)
 
 // Gate 1: Only register /api/restore when user selects "Import from Backup"
 void registerMigrationRestoreHandler(httpd_handle_t server) {
@@ -722,4 +759,4 @@ void stopRestoreOnlyHttpServer() {
   }
 }
 
-#endif // ENABLE_HTTP_SERVER
+#endif // ENABLE_MIGRATION_TOOL

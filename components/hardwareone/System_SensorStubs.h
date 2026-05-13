@@ -268,6 +268,11 @@
   // HTTP server stubs when disabled
   // SessionEntry, LogoutReason, and constants come from WebServer_Server.h (single source of truth)
   #include "WebServer_Server.h"
+
+  // Type/macro stubs — needed for *any* HTTP=0 build so headers that take
+  // httpd_req_t* parameters can still compile. Compatible with the real
+  // <esp_http_server.h> typedef (same struct tag), so safe to keep on even
+  // when ENABLE_MIGRATION_TOOL=1 pulls in the real header in some TUs.
   #ifndef HW_HTTPD_TYPES_DEFINED
     #define HW_HTTPD_TYPES_DEFINED 1
     struct httpd_req;
@@ -279,26 +284,38 @@
     #define ESP_OK 0
   #endif
   #define HTTPD_RESP_USE_STRLEN -1
+
+  // Inline httpd_* function stubs — only when *nothing* in the build pulls
+  // in the real <esp_http_server.h>. The migration tool always includes it
+  // for restore-only mode, so under ENABLE_MIGRATION_TOOL=1 we must let the
+  // real C-linkage declarations win to avoid signature/linkage conflicts
+  // (real httpd_* fns are extern "C"; our inline definitions were not).
+  #if !ENABLE_MIGRATION_TOOL
+    inline size_t httpd_req_get_url_query_len(httpd_req_t* req) { return 0; }
+    inline esp_err_t httpd_req_get_url_query_str(httpd_req_t* req, char* buf, size_t len) { return -1; }
+    inline esp_err_t httpd_query_key_value(const char* qry, const char* key, char* val, size_t len) { return -1; }
+    inline esp_err_t httpd_resp_set_type(httpd_req_t* req, const char* type) { return ESP_OK; }
+    inline esp_err_t httpd_resp_send(httpd_req_t* req, const char* buf, int len) { return ESP_OK; }
+    inline esp_err_t httpd_resp_send_chunk(httpd_req_t* req, const char* buf, int len) { return ESP_OK; }
+    inline int httpd_req_to_sockfd(httpd_req_t* req) { return -1; }
+    inline esp_err_t httpd_resp_set_status(httpd_req_t* req, const char* status) { return ESP_OK; }
+  #endif // !ENABLE_MIGRATION_TOOL
+
+  // App-level stubs — needed whenever the regular web UI is off, regardless
+  // of whether the migration tool's restore-only server is being built.
+  // These are *our* symbols (sessions, auth, SSE) — not in any external header.
   extern httpd_handle_t server;
   inline void startHttpServer() {}
   inline void stopHttpServer() {}
   inline bool isAdminUser(httpd_req_t* req) { return false; }
   inline void getClientIP(httpd_req_t* req, String& ipOut) { ipOut = "0.0.0.0"; }
   inline void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize) { if (bufSize > 0) ipBuf[0] = '\0'; }
-  inline size_t httpd_req_get_url_query_len(httpd_req_t* req) { return 0; }
-  inline esp_err_t httpd_req_get_url_query_str(httpd_req_t* req, char* buf, size_t len) { return -1; }
-  inline esp_err_t httpd_query_key_value(const char* qry, const char* key, char* val, size_t len) { return -1; }
-  inline esp_err_t httpd_resp_set_type(httpd_req_t* req, const char* type) { return ESP_OK; }
-  inline esp_err_t httpd_resp_send(httpd_req_t* req, const char* buf, int len) { return ESP_OK; }
-  inline esp_err_t httpd_resp_send_chunk(httpd_req_t* req, const char* buf, int len) { return ESP_OK; }
-  inline int httpd_req_to_sockfd(httpd_req_t* req) { return -1; }
   // Session and SSE stub functions
   inline void sseEnqueueNotice(SessionEntry& s, const String& msg) {}
   inline bool sseDequeueNotice(SessionEntry& s, String& out) { return false; }
   inline void sseEnqueueEvent(SessionEntry& s, const char* name, const char* data) {}
   inline String getCookieSID(httpd_req_t* req) { return ""; }
   inline int findSessionIndexBySID(const String& sid) { return -1; }
-  inline esp_err_t httpd_resp_set_status(httpd_req_t* req, const char* status) { return ESP_OK; }
   inline void storeLogoutReason(const String& ip, const String& reason) {}
   inline void enqueueTargetedRevokeForSessionIdx(int idx, const String& reason) {}
   // Auth and session stubs

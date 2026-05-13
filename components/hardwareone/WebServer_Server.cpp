@@ -5243,8 +5243,10 @@ register_handlers:
   // /api/backup (authenticated) + OPTIONS preflight for /api/ping and /api/backup
   // Note: /api/restore is NOT registered here — it's only registered dynamically
   // during first-time setup when the user selects "Import from Backup"
+#if ENABLE_MIGRATION_TOOL
   registerMigrationBackupHandler(server);
   registerPingOptionsHandler(server);
+#endif
   
   // Enable web output when server starts
   gOutputFlags |= OUTPUT_WEB;

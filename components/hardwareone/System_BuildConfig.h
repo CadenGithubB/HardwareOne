@@ -114,7 +114,7 @@
 //   2 = STANDALONE - OLED + Gamepad
 //   3 = FULL       - OLED + all sensors
 //   4 = CUSTOM     - Use individual CUSTOM_ENABLE_* flags below
-#define I2C_FEATURE_LEVEL       4
+#define I2C_FEATURE_LEVEL       3
 
 #if I2C_FEATURE_LEVEL == 4
   // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
@@ -134,15 +134,15 @@
 // Display: hardware display selection. 0 forces all OLED_*.cpp out of the
 // build via the CMakeLists DISPLAY_TYPE gate.
 //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
-#define DISPLAY_TYPE            0
+#define DISPLAY_TYPE            1
 
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640).
 #ifndef ENABLE_CAMERA_SENSOR
-#define ENABLE_CAMERA_SENSOR    1
+#define ENABLE_CAMERA_SENSOR    0
 #endif
 
 // Microphone: PDM microphone via I2S.
-#define ENABLE_MICROPHONE_SENSOR 1
+#define ENABLE_MICROPHONE_SENSOR 0
 
 // Battery monitor: ADC-based LiPo voltage. Disable when board has no
 // battery-monitoring hardware (shows "USB" on OLED/web instead).
@@ -160,12 +160,12 @@
 // ~14 KB IRAM + ~70 KB flash + ~80 KB DRAM that the ESP-IDF Bluedroid
 // stack consumes, you also need `CONFIG_BT_ENABLED=n` in sdkconfig.
 // (Both flags are kept in sync below — see sdkconfig.defaults.)
-#define ENABLE_BLUETOOTH        1
+#define ENABLE_BLUETOOTH        0
 
 // Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses.
 // ESP32 acts as BLE central; mutually exclusive with phone BLE at runtime.
 // Auto-disabled if ENABLE_BLUETOOTH=0.
-#define ENABLE_G2_GLASSES       1
+#define ENABLE_G2_GLASSES       0
 
 // VFS root for G2 animated icon packs (BMP frames): SD card (`/sd/...`).
 // Keeps pack data off LittleFS; requires SD mounted (web + lens picker use VFS).
@@ -180,7 +180,7 @@
 
 // Speech recognition (ESP-SR): WakeNet wake word + MultiNet command grammar.
 // Runtime: srstart / srstop. Web page: CUSTOM_ENABLE_WEB_SPEECH (Connectivity).
-#define ENABLE_ESP_SR           1
+#define ENABLE_ESP_SR           0
 
 // Edge Impulse: ML inference engine.
 #define ENABLE_EDGE_IMPULSE     0
@@ -380,6 +380,23 @@
   #define ENABLE_HTTP_SERVER 1
 #endif
 
+// Migration tool: backup/restore endpoints for the HardwareOne Migration Tool.
+// Defaults to whatever ENABLE_HTTP_SERVER is — turning HTTP on/off flips this
+// in lockstep, matching the historical single-gate behavior. Set explicitly
+// to 1 with ENABLE_HTTP_SERVER=0 to ship a headless build that still offers
+// FTS restore-from-backup as a recovery path. The authenticated /api/backup
+// endpoint requires ENABLE_HTTP_SERVER=1 (uses auth helpers from
+// WebServer_Server); the unauthenticated FTS restore-only server is
+// self-contained and works under either configuration.
+#ifndef ENABLE_MIGRATION_TOOL
+#define ENABLE_MIGRATION_TOOL ENABLE_HTTP_SERVER
+#endif
+
+// httpd type stubs — provided whenever the real <esp_http_server.h> isn't
+// pulled in by this TU. The typedef alias is compatible with the real
+// header (same struct tag), so it's safe even when both are visible.
+// Function-level stubs that DO conflict live in System_SensorStubs.h and
+// are guarded against ENABLE_MIGRATION_TOOL there.
 #if !ENABLE_HTTP_SERVER
   #ifndef HW_HTTPD_TYPES_DEFINED
     #define HW_HTTPD_TYPES_DEFINED 1

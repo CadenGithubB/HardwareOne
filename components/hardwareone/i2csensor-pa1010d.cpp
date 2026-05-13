@@ -391,9 +391,11 @@ void gpsTask(void* parameter) {
           gGPSCache.lastUpdate = nowMs;
 
           // Feed live track directly from GPS task (independent of sensor logging)
+#if ENABLE_MAPS
           if (gPA1010D->fix && GPSTrackManager::isLiveTracking()) {
             GPSTrackManager::appendPoint(gPA1010D->latitudeDegrees, gPA1010D->longitudeDegrees);
           }
+#endif
 
           xSemaphoreGive(gGPSCache.mutex);
         }
@@ -421,9 +423,11 @@ void gpsTask(void* parameter) {
 #endif
 
         // Mark OLED dirty if GPS page is active (enables real-time display updates)
+#if ENABLE_OLED_DISPLAY
         if (currentOLEDMode == OLED_GPS_DATA) {
           oledMarkDirty();
         }
+#endif
       }
 
       vTaskDelay(pdMS_TO_TICKS(10));
