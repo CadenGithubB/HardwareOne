@@ -115,16 +115,16 @@ static void RDS_Process(uint16_t block1, uint16_t block2, uint16_t block3, uint1
 // ============================================================================
 
 bool fmRadioInit() {
-  INFO_FMRADIOF("fmRadioInit() called - gFmRadioConnected=%s, gRadioInitialized=%s", 
+  INFO_FMRADIO_LIFECYCLEF("fmRadioInit() called - gFmRadioConnected=%s, gRadioInitialized=%s",
                 gFmRadioConnected ? "true" : "false", gRadioInitialized ? "true" : "false");
   
   if (gFmRadioConnected && gRadioInitialized) {
-    INFO_FMRADIOF("FM Radio already initialized");
+    INFO_FMRADIO_LIFECYCLEF("FM Radio already initialized");
     return true;  // Already initialized
   }
   
   bool success = false;
-  INFO_FMRADIOF("Starting FM Radio I2C initialization");
+  INFO_FMRADIO_LIFECYCLEF("Starting FM Radio I2C initialization");
   
   i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 1000, [&]() {
     DEBUG_FMRADIO_LIFECYCLEF("I2C transaction started, calling radio.initWire(Wire1)");
@@ -133,7 +133,7 @@ bool fmRadioInit() {
       ERROR_FMRADIOF("FM Radio initWire() failed - check I2C connections");
       return;  // Init failed
     }
-    INFO_FMRADIOF("FM Radio initWire() success - RDA5807M chip detected");
+    INFO_FMRADIO_LIFECYCLEF("FM Radio initWire() success - RDA5807M chip detected");
     radio.debugEnable(false);
     
     // Set band and initial frequency
@@ -162,7 +162,7 @@ bool fmRadioInit() {
   });
   
   if (success) {
-    INFO_FMRADIOF("FM Radio initialized successfully - RDA5807M ready at %.1f MHz, volume %d", 
+    INFO_FMRADIO_LIFECYCLEF("FM Radio initialized successfully - RDA5807M ready at %.1f MHz, volume %d",
                   gFmRadioCache.frequency / 100.0, gFmRadioCache.volume);
     sensorStatusBumpWith("fmradio initialized");
   } else {
@@ -201,7 +201,7 @@ void fmRadioDeinit() {
 // ============================================================================
 
 void fmRadioTask(void* parameter) {
-  INFO_FMRADIOF("FM Radio task started (handle=%p)", gFmRadioTaskHandle);
+  INFO_FMRADIO_LIFECYCLEF("FM Radio task started (handle=%p)", gFmRadioTaskHandle);
   unsigned long lastStackLog = 0;
   unsigned long loopCount = 0;
   bool initWatermarkLogged = false;
@@ -211,7 +211,7 @@ void fmRadioTask(void* parameter) {
 
     // Deferred initialization on the FM radio task stack (keeps sensor_queue stack safe)
     if (gFmRadioEnabled && !gRadioInitialized && fmRadioInitRequested) {
-      INFO_FMRADIOF("Performing deferred FM Radio init on task stack");
+      INFO_FMRADIO_LIFECYCLEF("Performing deferred FM Radio init on task stack");
       bool ok = fmRadioInit();
       fmRadioInitResult = ok;
       fmRadioInitDone = true;

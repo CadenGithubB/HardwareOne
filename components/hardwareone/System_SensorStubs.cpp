@@ -202,8 +202,6 @@ httpd_handle_t server = nullptr;
 SessionEntry* gSessions = nullptr;
 LogoutReason* gLogoutReasons = nullptr;
 char* gJsonResponseBuffer = nullptr;
-String gAuthUser = "";
-String gAuthPass = "";
 String gBootId = "";
 // Pre-existing readers (G2_Page_Network, System_WiFi, OLED_Mode_Network) reference
 // this even with HTTP=0. Migration-tool-only builds need the stub too because

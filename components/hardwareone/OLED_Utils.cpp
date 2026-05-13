@@ -2420,7 +2420,12 @@ static Command buildOLEDCommand(const String& cmdLine) {
   uc.line = cmdLine;
   uc.ctx.origin = ORIGIN_SYSTEM;
   uc.ctx.auth.transport = SOURCE_LOCAL_DISPLAY;
-  uc.ctx.auth.user = gLocalDisplayAuthed ? gLocalDisplayUser : "";
+  // When displayRequireAuth is off, no user identity exists for the local
+  // display. Stamp the audit log with "AuthBypass" instead of an empty user
+  // so log lines read `[CMD] AuthBypass@display: ...` (clear physical-user
+  // origin) instead of `[CMD] @display: ...` (ambiguous — could be a
+  // username-propagation bug). Reserved name; see adminCreateUser.
+  uc.ctx.auth.user = gLocalDisplayAuthed ? gLocalDisplayUser : String("AuthBypass");
   uc.ctx.auth.ip = "oled";
   uc.ctx.auth.path = "/oled/command";
   uc.ctx.auth.sid = "";

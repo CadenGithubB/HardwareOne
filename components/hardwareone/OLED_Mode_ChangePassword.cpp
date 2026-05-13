@@ -254,13 +254,19 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         return true;
       }
       
-      // Execute password change command
+      // Execute password change via the unified command dispatcher so the
+      // request runs under the OLED-logged-in user's identity (built by
+      // executeOLEDCommand from SOURCE_LOCAL_DISPLAY + gLocalDisplayUser) and
+      // gets a normal [CMD] audit-log entry. Direct cmd_user_changepassword()
+      // call previously bypassed both the identity install and the audit log.
       passwordChangeInProgress = true;
-      String args = currentPassBuffer + " " + newPassBuffer + " " + confirmPassBuffer;
-      const char* result = cmd_user_changepassword(args);
-      
+      String args = "userchangepassword " + currentPassBuffer + " " + newPassBuffer + " " + confirmPassBuffer;
+      char resultBuf[256];
+      executeOLEDCommandWithResult(args, resultBuf, sizeof(resultBuf));
+      const char* result = resultBuf;
+
       passwordChangeInProgress = false;
-      
+
       if (result && strstr(result, "Error") == NULL && strstr(result, "successfully") != NULL) {
         // Success
         errorMessage = "Password changed!";

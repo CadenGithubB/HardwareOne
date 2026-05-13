@@ -83,7 +83,7 @@ extern const char* cmd_gamepadstart_queued(const String& argsInput);
 const char* cmd_gamepadstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  INFO_GAMEPADF("cmd_gamepadstop: Stop requested");
+  INFO_GAMEPAD_LIFECYCLEF("cmd_gamepadstop: Stop requested");
   handleDeviceStopped(I2C_DEVICE_GAMEPAD);
   return "[Gamepad] Stop requested; cleanup will complete asynchronously";
 }
@@ -200,7 +200,7 @@ bool gamepadInit() {
     return true;
   }
 
-  INFO_GAMEPADF("gamepadInit: starting initialization...");
+  INFO_GAMEPAD_LIFECYCLEF("gamepadInit: starting initialization...");
 
   // Use device-aware transaction wrapper for safe mutex + clock management + health tracking
   bool initSuccess = i2cDeviceTransaction(I2C_ADDR_GAMEPAD, 100000, 3000, [&]() -> bool {
@@ -224,7 +224,7 @@ bool gamepadInit() {
 
     // Verify product ID (upper 16 bits of getVersion()) should be 5743
     uint32_t version = ((gGamepadSeesaw.getVersion() >> 16) & 0xFFFF);
-    INFO_GAMEPADF("Seesaw version: %lu (expected 5743)", (unsigned long)version);
+    INFO_GAMEPAD_LIFECYCLEF("Seesaw version: %lu (expected 5743)", (unsigned long)version);
     if (version != 5743) {
       WARN_GAMEPADF("Seesaw product mismatch: got %lu, expected 5743 (Mini I2C Gamepad)", (unsigned long)version);
       // Not fatal: continue, as other seesaw variants may still be usable
@@ -323,12 +323,12 @@ bool gamepadInitConnection() {
       gGamepadConnected = true;
       DEBUG_GAMEPAD_LIFECYCLEF("[GAMEPAD_DEBUG] gamepadInitConnection: &enabled=%p &connected=%p &gGamepadCache=%p", (void*)&gGamepadEnabled, (void*)&gGamepadConnected, (void*)&gGamepadCache);
       
-      INFO_GAMEPADF("Gamepad connected on attempt %d", attempt);
+      INFO_GAMEPAD_LIFECYCLEF("Gamepad connected on attempt %d", attempt);
       snprintf(msg, sizeof(msg), "Gamepad: re-init success (attempt %d)", attempt);
       broadcastOutput(msg);
       return true;
     }
-    INFO_GAMEPADF("Gamepad attempt %d failed, retrying", attempt);
+    INFO_GAMEPAD_LIFECYCLEF("Gamepad attempt %d failed, retrying", attempt);
     snprintf(msg, sizeof(msg), "Gamepad: attempt %d failed", attempt);
     broadcastOutput(msg);
     delay(15);
@@ -420,10 +420,10 @@ const size_t gamepadCommandsCount = sizeof(gamepadCommands) / sizeof(gamepadComm
 // ============================================================================
 
 void gamepadTask(void* parameter) {
-  INFO_GAMEPADF("Task started (handle=%p, stack=%u words)", 
+  INFO_GAMEPAD_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_GAMEPADF("[MODULAR] gamepadTask() running from Sensor_Gamepad_Seesaw.cpp");
+  INFO_GAMEPAD_LIFECYCLEF("[MODULAR] gamepadTask() running from Sensor_Gamepad_Seesaw.cpp");
   DEBUG_GAMEPAD_LIFECYCLEF("[GAMEPAD_TASK] Initial state: enabled=%d connected=%d", gGamepadEnabled, gGamepadConnected);
   gamepadLogHeap("task.entry");
   unsigned long lastGamepadRead = 0;

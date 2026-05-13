@@ -119,6 +119,12 @@ void recordFailedLogin(const char* ip);
 // Clear the failure record for the given IP (call on successful login).
 void clearLoginAttempts(const char* ip);
 
+// Cumulative count of failed login attempts since boot. Monotonic (not
+// affected by window expiry or successful login). Surfaced in the OLED
+// Web Stats card; safe to call from any task — no synchronization needed
+// because the writer is single-threaded inside recordFailedLogin().
+uint32_t getTotalFailedLoginCount();
+
 // ============================================================================
 // IP Ban List (permanent, admin-managed, persisted to flash)
 // ============================================================================

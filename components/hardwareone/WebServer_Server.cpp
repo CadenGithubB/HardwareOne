@@ -29,6 +29,7 @@
 #include "System_Settings.h"
 #include "System_Filesystem.h"
 #include "System_User.h"
+#include "System_AuthIdentity.h"  // ExecIdentityGuard — install web ctx into TLS before calling userChangePasswordCore
 #include "System_CLI.h"
 #include "System_UserSettings.h"
 #include "System_FirstTimeSetup.h"
@@ -161,11 +162,6 @@ String gBootId = "";
 // Session TTL
 const unsigned long SESSION_TTL_MS = 24UL * 60UL * 60UL * 1000UL;  // 24h
 
-// Basic Auth Globals (Legacy - kept for compatibility)
-String gAuthUser = "admin";
-String gAuthPass = "admin";
-String gExpectedAuthHeader = "";  // e.g., "Basic dXNlcjpwYXNz"
-
 // JSON response buffer (shared across web modules)
 char* gJsonResponseBuffer = nullptr;
 
@@ -221,6 +217,41 @@ void pruneExpiredSessions() {
   }
 }
 
+// Build and send a Set-Cookie header for the session cookie. Empty `sid`
+// clears the cookie (Max-Age=0); non-empty `sid` installs a new session
+// value. Attributes are applied uniformly across set + clear paths:
+//
+//   * HttpOnly  — blocks document.cookie reads from JavaScript, mitigating
+//                 session-theft via XSS.
+//   * SameSite=Strict — browser never sends the cookie on cross-site
+//                       requests, mitigating CSRF.
+//   * Secure    — emitted only when serving HTTPS. On plaintext HTTP a
+//                 Secure cookie is silently dropped by the browser, so
+//                 gating on gServerIsHttps keeps HTTP-mode builds working.
+//
+// Stack-local cookieBuf — replaces the previous per-callsite `static char
+// cookieBuf[96]` which was a process-global the auth assessment report
+// flagged as not thread-safe across concurrent httpd workers (a latent
+// race today; an actual race if CONFIG_HTTPD_* ever raises the worker
+// count). Local buffer makes the helper reentrant.
+//
+// Returns the esp_err_t from httpd_resp_set_hdr so callers can diagnose
+// set-header failures via DEBUG_AUTHF if they want.
+static esp_err_t writeSessionCookie(httpd_req_t* req, const String& sid) {
+  char cookieBuf[160];
+  if (sid.length() > 0) {
+    snprintf(cookieBuf, sizeof(cookieBuf),
+             "session=%s; Path=/; HttpOnly; SameSite=Strict%s",
+             sid.c_str(),
+             gServerIsHttps ? "; Secure" : "");
+  } else {
+    snprintf(cookieBuf, sizeof(cookieBuf),
+             "session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict%s",
+             gServerIsHttps ? "; Secure" : "");
+  }
+  return httpd_resp_set_hdr(req, "Set-Cookie", cookieBuf);
+}
+
 // Cookie/token helpers and makeSessToken moved to WebCore_Utils.cpp
 
 // Session creation
@@ -241,12 +272,10 @@ String setSession(httpd_req_t* req, const String& u) {
           // Refresh and reuse existing session
           gSessions[i].lastSeen = nowMs;
           gSessions[i].expiresAt = nowMs + SESSION_TTL_MS;
-          static char cookieBuf[96];
-          snprintf(cookieBuf, sizeof(cookieBuf), "session=%s; Path=/", gSessions[i].sid.c_str());
-          esp_err_t sc = httpd_resp_set_hdr(req, "Set-Cookie", cookieBuf);
+          esp_err_t sc = writeSessionCookie(req, gSessions[i].sid);
           DEBUG_AUTHF("Reusing existing session idx=%d user=%s sid=%s | refreshed", i, u.c_str(), gSessions[i].sid.c_str());
           BROADCAST_PRINTF("[auth] reusedSession user=%s, sid=%s, exp(ms)=%lu", u.c_str(), gSessions[i].sid.c_str(), gSessions[i].expiresAt);
-          DEBUG_AUTHF("Set-Cookie (reuse) rc=%d: %s", (int)sc, cookieBuf);
+          DEBUG_AUTHF("Set-Cookie (reuse) rc=%d", (int)sc);
           return gSessions[i].sid;
         }
       }
@@ -292,11 +321,10 @@ String setSession(httpd_req_t* req, const String& u) {
   gSessions[idx].lastSensorSeqSent = 0;
   DEBUG_AUTHF("New session created idx=%d user=%s sid=%s | needsStatusUpdate=1", idx, u.c_str(), s.sid.c_str());
 
-  // Set new session cookie with minimal attributes for maximum compatibility
-  static char cookieBuf[96];
-  snprintf(cookieBuf, sizeof(cookieBuf), "session=%s; Path=/", s.sid.c_str());
-  esp_err_t sc = httpd_resp_set_hdr(req, "Set-Cookie", cookieBuf);
-  DEBUG_AUTHF("Setting session cookie: %s", cookieBuf);
+  // Set new session cookie via writeSessionCookie — HttpOnly + SameSite=Strict
+  // (+ Secure on HTTPS) applied uniformly. See helper comment for rationale.
+  esp_err_t sc = writeSessionCookie(req, s.sid);
+  DEBUG_AUTHF("Setting session cookie for sid=%s", s.sid.c_str());
   DEBUG_AUTHF("Set-Cookie rc=%d", (int)sc);
 
   BROADCAST_PRINTF("[auth] setSession user=%s, sid=%s, exp(ms)=%lu", u.c_str(), s.sid.c_str(), s.expiresAt);
@@ -422,7 +450,7 @@ void clearSession(httpd_req_t* req, const char* logoutReason) {
   int idx = findSessionIndexBySID(sid);
   if (idx >= 0) { gSessions[idx] = SessionEntry(); }
   // Clear session cookie client-side
-  httpd_resp_set_hdr(req, "Set-Cookie", "session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
+  writeSessionCookie(req, String());  // empty sid → Max-Age=0
   broadcastOutput("[auth] clearSession (revoked current if present)");
 }
 
@@ -652,6 +680,14 @@ bool hasLogoutReason(const char* ip) {
 
 EXT_RAM_BSS_ATTR static LoginAttemptEntry sLoginAttempts[MAX_LOGIN_ATTEMPT_ENTRIES];
 
+// Cumulative count of failed login attempts since boot. Distinct from the
+// per-IP failCount in sLoginAttempts (which is windowed + clears on success):
+// this counter is monotonic, surfaces in the OLED Web Stats card, and answers
+// the "did anyone try to brute me this session?" question regardless of window
+// expiry or successful retry. uint32_t wraps after ~4 billion failures, which
+// the tiered lockout makes physically impossible inside one boot.
+static uint32_t sTotalFailedLogins = 0;
+
 // Find the entry for the given IP, or a free/oldest slot if createIfMissing is true.
 static LoginAttemptEntry* findLoginEntry(const char* ip, bool createIfMissing = false) {
   if (!ip || ip[0] == '\0') return nullptr;
@@ -722,6 +758,7 @@ void recordFailedLogin(const char* ip) {
   }
 
   e->failCount++;
+  sTotalFailedLogins++;
   unsigned long lockMs = lockoutDurationMs(e->failCount);
   if (lockMs > 0) {
     e->lockedUntil = now + lockMs;
@@ -738,6 +775,14 @@ void clearLoginAttempts(const char* ip) {
     DEBUG_AUTHF("[brute] cleared attempt record for IP=%s (successful login)", ip);
     memset(e, 0, sizeof(*e));
   }
+}
+
+// Cumulative since-boot count, exposed to the OLED Web Stats card (and any
+// future caller — keep it cheap; no locking). Intentionally not reset by
+// clearLoginAttempts() — successful login clears the per-IP rate-limit state
+// but the audit count keeps climbing.
+uint32_t getTotalFailedLoginCount() {
+  return sTotalFailedLogins;
 }
 
 // ============================================================================
@@ -1159,14 +1204,15 @@ bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& h
   
   // Expect: "Basic base64"
   if (!header.startsWith("Basic ")) return false;
-  
-  // Fast path: compare raw header string to precomputed expected
-  if (gExpectedAuthHeader.length() && header == gExpectedAuthHeader) {
-    userOut = gAuthUser;
-    passOut = gAuthPass;
-    return true;
-  }
-  
+
+  // Decode the base64 payload to (user, pass). The caller validates via
+  // isValidUser() — this function is just a parser. The legacy "fast path"
+  // that short-circuited on a precomputed admin/admin header was deleted
+  // along with gAuthUser/gAuthPass/gExpectedAuthHeader: loadUsersFromFile
+  // read a passwordHash field that no longer exists in users.json, so the
+  // precomputed header had been frozen at literal "admin/admin" for ages
+  // and the fast path never actually matched the real admin's credentials.
+  // See AUTH_ASSESSMENT_REPORT.md §4 #6 for the full history.
   String b64 = header.substring(6);
   b64.trim();
   
@@ -1187,31 +1233,8 @@ bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& h
   return true;
 }
 
-// Build the expected Authorization header for fast comparisons
-void rebuildExpectedAuthHeader() {
-  char credsBuf[128];
-  snprintf(credsBuf, sizeof(credsBuf), "%s:%s", gAuthUser.c_str(), gAuthPass.c_str());
-  String creds(credsBuf);
-  size_t in_len = creds.length();
-  size_t out_len = 0;
-  unsigned char out_buf[256];
-  
-  if (in_len > 180) {
-    gExpectedAuthHeader = "";
-    return;
-  }
-  
-  if (mbedtls_base64_encode(out_buf, sizeof(out_buf), &out_len,
-                            (const unsigned char*)creds.c_str(), in_len) == 0
-      && out_len > 0) {
-    String b64 = String((const char*)out_buf);
-    char authBuf[256];
-    snprintf(authBuf, sizeof(authBuf), "Basic %s", b64.c_str());
-    gExpectedAuthHeader = authBuf;
-  } else {
-    gExpectedAuthHeader = "";
-  }
-}
+// rebuildExpectedAuthHeader() deleted (was the producer for the Basic-Auth
+// fast-path cache). decodeBasicAuth now always uses the base64 slow path.
 
 // Send basic auth required response
 void sendAuthRequired(httpd_req_t* req) {
@@ -2439,20 +2462,36 @@ esp_err_t handlePasswordChangePage(httpd_req_t* req) {
     String newp = urlDecode(extractFormField(body, "newPassword"));
     String conf = urlDecode(extractFormField(body, "confirmPassword"));
 
-    String err;
-    if (newp != conf) {
-      err = "New passwords do not match";
-    } else if (newp.length() < 6) {
-      err = "Password must be at least 6 characters";
-    } else if (newp == current) {
-      err = "New password must differ from current password";
-    } else if (!isValidUser(ctx.user, current)) {
-      err = "Current password is incorrect";
-    } else if (!setUserPassword(ctx.user, newp)) {
-      err = "Could not save new password";
-    }
+    // Delegate to the shared userChangePasswordCore() helper (System_User.cpp)
+    // so this surface stays in lockstep with the CLI/OLED/BLE path. The helper
+    // resolves the user via currentExecUser() and calls revokeUserSessions()
+    // to log out the user's other sessions across all transports — behavior
+    // the previous inline implementation was missing (changing a password via
+    // web left every other session still valid).
+    //
+    // Identity install: ExecIdentityGuard puts ctx (the WEB_AUTH_OR_RETURN-
+    // resolved AuthContext for this request) into the calling task's TLS
+    // slot. currentExecUser() then returns ctx.user, and currentAuthContext()
+    // returns ctx (so revoke skips ctx.sid + SOURCE_WEB and the user's own
+    // browser tab stays logged in). RAII restores any prior identity on
+    // return.
+    ExecIdentityGuard identity(ctx);
+    const char* result = userChangePasswordCore(current, newp, conf);
 
-    if (err.length() > 0) {
+    // Helper returns "Password changed successfully for user '<name>'" on
+    // success, "Error: <reason>" on every failure mode (mismatch, length,
+    // wrong current password, storage failure, not authenticated). Match the
+    // "Error" prefix rather than full-string compare so future enrichments
+    // of the success message don't break this check.
+    const bool ok = (result != nullptr && strncmp(result, "Error", 5) != 0);
+
+    if (!ok) {
+      // Strip "Error: " prefix for display — the page template expects just
+      // the human-readable message. Fall back to the full string if the
+      // prefix is absent (defensive, shouldn't happen).
+      String err = (result && strncmp(result, "Error: ", 7) == 0)
+                     ? String(result + 7)
+                     : String(result ? result : "Unknown error");
       httpd_resp_set_type(req, "text/html");
       gMeshActivitySuspended = true;
       streamPasswordChangeInner(req, ctx.user, err);
@@ -3031,7 +3070,7 @@ esp_err_t handleNotice(httpd_req_t* req) {
       // If this is a revoke notice, immediately clear the session and expire cookie
       if (note.startsWith("[revoke]")) {
         gSessions[idx] = SessionEntry();
-        httpd_resp_set_hdr(req, "Set-Cookie", "session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
+        writeSessionCookie(req, String());  // empty sid → Max-Age=0
       }
     }
   }

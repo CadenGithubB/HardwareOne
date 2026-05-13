@@ -263,7 +263,7 @@ bool presenceStartInternal() {
     gPresenceCache.tempShockDetected = false;
     xSemaphoreGive(gPresenceCache.mutex);
   }
-  INFO_PRESENCEF("Cleaned up stale cache");
+  INFO_PRESENCE_LIFECYCLEF("Cleaned up stale cache");
 
   // Initialize sensor synchronously
   if (!gPresenceConnected) {
@@ -284,7 +284,7 @@ bool presenceStartInternal() {
     return false;
   }
   sensorStatusBumpWith("PRESENCE initialized");
-  INFO_PRESENCEF("Sensor started successfully");
+  INFO_PRESENCE_LIFECYCLEF("Sensor started successfully");
   return true;
 }
 
@@ -306,7 +306,7 @@ bool presenceInit() {
       return false;
     }
     
-    INFO_PRESENCEF("WHO_AM_I verified: 0x%02X", whoami);
+    INFO_PRESENCE_LIFECYCLEF("WHO_AM_I verified: 0x%02X", whoami);
     
     // Configure CTRL1: Set ODR to 8Hz, BDU enabled
     // Bits [6:4] = ODR, Bit 3 = BDU
@@ -469,10 +469,10 @@ int presenceBuildDataJSON(char* buf, size_t bufSize) {
 // ============================================================================
 
 void presenceTask(void* parameter) {
-  INFO_PRESENCEF("Task started (handle=%p, stack=%u words)", 
+  INFO_PRESENCE_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_PRESENCEF("[MODULAR] presenceTask() running from i2csensor-sths34pf80.cpp");
+  INFO_PRESENCE_LIFECYCLEF("[MODULAR] presenceTask() running from i2csensor-sths34pf80.cpp");
   
   unsigned long lastPresenceRead = 0;
   unsigned long lastStackLog = 0;

@@ -139,6 +139,7 @@ set(hardwareone_srcs
         G2_Page_CameraSettings.cpp
         G2_Page_TestSuite.cpp
         G2_Page_TextEntry.cpp
+        G2_Page_ESPNow.cpp
         G2_HijackFsm.cpp
         G2_HijackCmd.cpp
         System_Battery.cpp

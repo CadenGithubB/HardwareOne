@@ -595,6 +595,13 @@ enum G2HijackPage : uint8_t {
   // UPDATE_TEXT (per-widget data push, no REBUILD) so list-row
   // selection persists across ticks — see g2ShowMicDetail.
   G2_HIJACK_PAGE_MIC_DETAIL      = 9,
+  // ESPNOW App — top-level page exposing actions (send / broadcast / ping /
+  // peer detail / stats) over the existing ESPNOW backend. Separate from
+  // Network → ESP-NOW (which remains for settings/info: toggle, name,
+  // auto-start, paired-device list). Stateful: tracks its own sub-mode
+  // (peers / peer detail / broadcast / stats) and selected peer index in
+  // file-static within G2_Page_ESPNow.cpp.
+  G2_HIJACK_PAGE_ESPNOW_APP      = 10,
 };
 G2HijackPage g2GetHijackPage();
 void         g2SetHijackPage(G2HijackPage p);

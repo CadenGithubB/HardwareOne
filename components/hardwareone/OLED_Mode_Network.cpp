@@ -676,6 +676,7 @@ void displayNetworkInfoRendered() {
 
 #if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
+#include "WebServer_Server.h"  // getTotalFailedLoginCount()
 extern httpd_handle_t server;
 #endif
 
@@ -721,8 +722,14 @@ void prepareWebStatsData() {
   webStatsRenderData.httpServerRunning = false;
 #endif
   
-  // TODO: Track failed login attempts (needs global counter)
+  // Surfaced from WebServer_Server's cumulative since-boot counter. Distinct
+  // from per-IP failCount (which is windowed + clears on success) — this is
+  // the "did anyone hammer my login?" audit number.
+#if ENABLE_HTTP_SERVER
+  webStatsRenderData.failedLoginAttempts = (int)getTotalFailedLoginCount();
+#else
   webStatsRenderData.failedLoginAttempts = 0;
+#endif
   
   webStatsRenderData.valid = true;
 }

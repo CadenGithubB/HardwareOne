@@ -181,7 +181,7 @@ bool rtcEarlyBootSync() {
   struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
   settimeofday(&tv, nullptr);
   
-  INFO_RTCF("Early boot sync: System time set to %s", rtcDateTimeToString(&dt).c_str());
+  INFO_RTC_LIFECYCLEF("Early boot sync: System time set to %s", rtcDateTimeToString(&dt).c_str());
   return true;
 }
 

@@ -586,7 +586,7 @@ bool thermalPoll() {
       ERROR_THERMALF("Failed to allocate tempFrame buffer (3KB)");
       return false;
     }
-    INFO_THERMALF("Allocated tempFrame buffer: 3072 bytes in PSRAM");
+    INFO_THERMAL_LIFECYCLEF("Allocated tempFrame buffer: 3072 bytes in PSRAM");
   }
   
   if (!g_localFrame) {
@@ -595,7 +595,7 @@ bool thermalPoll() {
       ERROR_THERMALF("Failed to allocate localFrame buffer (1.5KB)");
       return false;
     }
-    INFO_THERMALF("Allocated localFrame buffer: 1536 bytes in PSRAM");
+    INFO_THERMAL_LIFECYCLEF("Allocated localFrame buffer: 1536 bytes in PSRAM");
   }
   
   // Detailed pre-capture diagnostics
@@ -687,7 +687,7 @@ bool thermalPoll() {
       if (!previousFrame) {
         ERROR_THERMALF("Failed to allocate previousFrame buffer");
       } else {
-        INFO_THERMALF("Allocated temporal smoothing buffer: 1536 bytes");
+        INFO_THERMAL_LIFECYCLEF("Allocated temporal smoothing buffer: 1536 bytes");
       }
     }
     
@@ -966,7 +966,7 @@ bool thermalPoll() {
 
 // Helper function to reset frame buffers during thermal task cleanup
 void resetThermalFrameBuffers() {
-  INFO_THERMALF("Freeing frame buffers to prevent heap corruption on restart");
+  INFO_THERMAL_LIFECYCLEF("Freeing frame buffers to prevent heap corruption on restart");
   
   if (g_tempFrame) {
     free(g_tempFrame);
@@ -1339,10 +1339,10 @@ const size_t thermalCommandsCount = sizeof(thermalCommands) / sizeof(thermalComm
 // ============================================================================
 
 void thermalTask(void* parameter) {
-  INFO_THERMALF("Task started (handle=%p, stack=%u words)", 
+  INFO_THERMAL_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_THERMALF("[MODULAR] thermalTask() running from Sensor_Thermal_MLX90640.cpp");
+  INFO_THERMAL_LIFECYCLEF("[MODULAR] thermalTask() running from Sensor_Thermal_MLX90640.cpp");
   unsigned long lastThermalRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {

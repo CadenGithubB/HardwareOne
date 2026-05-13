@@ -298,10 +298,6 @@ void broadcastOutput(const String& s);
 void broadcastOutput(const char* s);
 void broadcastOutput(const String& s, const CommandContext& ctx);
 extern String gBootId;
-extern String gAuthUser;
-extern String gAuthPass;
-extern String gExpectedAuthHeader;
-void rebuildExpectedAuthHeader();
 
 // ---------------------------------------------------------------------------
 // Serial auth globals
@@ -1229,13 +1225,12 @@ void hardwareone_setup() {
   firstTimeSetupIfNeeded();
   oledUpdate();  // Update OLED animation during boot
 
-  // Load user credentials
-  String fu, fp;
-  if (loadUsersFromFile(fu, fp)) {
-    gAuthUser = fu;
-    gAuthPass = fp;
-  }
-  rebuildExpectedAuthHeader();
+  // (Removed: legacy Basic-Auth gAuthUser/gAuthPass priming via
+  // loadUsersFromFile. The function read a passwordHash field that has
+  // long been gone from users.json, so this sequence was a no-op that
+  // left the literal admin/admin defaults in place. decodeBasicAuth now
+  // always parses the actual Authorization header and lets isValidUser
+  // decide. See AUTH_ASSESSMENT_REPORT.md §4 #6.)
 
   // RTC early boot sync - only if RTC time has been previously set
   // If rtcTimeHasBeenSet is false, we'll prioritize NTP at boot to get accurate time first
@@ -1742,7 +1737,13 @@ void hardwareone_loop() {
 
           AuthContext actx;
           actx.transport = SOURCE_SERIAL;
-          actx.user = gSerialUser;
+          // When serialRequireAuth is off and no one has explicitly logged in,
+          // stamp the audit log with "AuthBypass" instead of an empty user so
+          // log lines read `[CMD] AuthBypass@serial: ...` (clear physical-user
+          // origin) instead of `[CMD] @serial: ...` (ambiguous). Reserved
+          // username; see adminCreateUser. Matches the OLED sentinel pattern
+          // in buildOLEDCommand.
+          actx.user = gSerialUser.length() > 0 ? gSerialUser : String("AuthBypass");
           actx.ip = "local";
           actx.path = "serial";
           Command uc;

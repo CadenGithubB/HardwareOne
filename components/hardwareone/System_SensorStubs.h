@@ -318,11 +318,9 @@
   inline int findSessionIndexBySID(const String& sid) { return -1; }
   inline void storeLogoutReason(const String& ip, const String& reason) {}
   inline void enqueueTargetedRevokeForSessionIdx(int idx, const String& reason) {}
-  // Auth and session stubs
-  extern String gAuthUser;
-  extern String gAuthPass;
+  // Auth and session stubs (gAuthUser/gAuthPass + rebuildExpectedAuthHeader
+  // removed along with the Basic-Auth fast-path vestige in WebServer_Server.cpp)
   extern String gBootId;
-  inline void rebuildExpectedAuthHeader() {}
   inline void broadcastSensorStatusToAllSessions() {}
   inline void broadcastEventToAllSessions(const char* eventName, const char* jsonData) {}
   inline void logAuthAttempt(bool success, const char* transport, const String& ip, const String& user, const String& reason) {}

@@ -501,6 +501,19 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
       return false;
     }
   }
+  // Reserved names — used by the audit-log/dispatch layer as identity
+  // sentinels. Allowing a user to claim one would let their commands be
+  // mistaken for system or anonymous-local activity in the audit trail.
+  // Case-insensitive so "authbypass" / "AUTHBYPASS" don't sneak through.
+  {
+    static const char* kReserved[] = { "system", "AuthBypass" };
+    for (const char* r : kReserved) {
+      if (strcasecmp(u.c_str(), r) == 0) {
+        errorOut = String("Username \"") + r + "\" is reserved";
+        return false;
+      }
+    }
+  }
   if (plainPassword.length() < 6) {
     errorOut = "Password must be at least 6 characters";
     return false;
@@ -1650,17 +1663,21 @@ const char* cmd_user_delete(const String& argsInput) {
   return getDebugBuffer();
 }
 
-const char* cmd_user_changepassword(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
+// Shared password-change implementation. Both the CLI command wrapper below
+// and the web POST handler call this. Resolves the caller via the per-task
+// TLS identity (ExecIdentityGuard installed upstream by executeCommand for
+// command-pipeline callers, or by the web handler before invocation).
+//
+// Previously the body of cmd_user_changepassword hard-coded
+// getTransportUser(SOURCE_LOCAL_DISPLAY) for user resolution, which only
+// worked from the OLED. Every non-OLED transport got the OLED user's name
+// back regardless of who actually called. Now currentExecUser() returns the
+// right user for every transport because each dispatch path installs its own
+// AuthContext into the TLS slot.
+const char* userChangePasswordCore(const String& currentPassword,
+                                   const String& newPassword,
+                                   const String& confirmPassword) {
   if (!filesystemReady) return "Error: LittleFS not ready";
-
-  // Parse: "currentPassword newPassword confirmPassword"
-  CommandArgs a(argsInput);
-  if (!a.hasMinArgs(3)) return "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
-
-  String currentPassword = a.arg(0);
-  String newPassword     = a.arg(1);
-  String confirmPassword = a.arg(2);
 
   if (newPassword != confirmPassword) {
     return "Error: New passwords do not match";
@@ -1674,8 +1691,10 @@ const char* cmd_user_changepassword(const String& argsInput) {
     return "Error: New password must differ from current password";
   }
 
-  // Determine which user is changing their password (local display transport)
-  String username = getTransportUser(SOURCE_LOCAL_DISPLAY);
+  // Resolve calling user from per-task TLS identity. Works for every
+  // transport (web / CLI / OLED / BLE / ESP-NOW / serial) because each
+  // dispatch path installs its own AuthContext via ExecIdentityGuard.
+  String username = currentExecUser();
   if (username.length() == 0) return "Error: Not authenticated";
 
   // Verify current password
@@ -1694,7 +1713,9 @@ const char* cmd_user_changepassword(const String& argsInput) {
   // (they just authenticated with the new password; kicking them
   // immediately would be bad UX). No clock bump: password change
   // does not change permission topology, so auth-derived caches
-  // (FileManager etc.) don't need to invalidate.
+  // (FileManager etc.) don't need to invalidate. See
+  // System_AuthIdentity.h "SISTER PROTOCOL: SESSION REVOCATION"
+  // for the bump-vs-revoke decision matrix.
   const AuthContext& caller = currentAuthContext();
   revokeUserSessions(username,
                      "Your password was changed. Please log in again.",
@@ -1704,6 +1725,16 @@ const char* cmd_user_changepassword(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Password changed successfully";
   snprintf(getDebugBuffer(), 1024, "Password changed successfully for user '%s'", username.c_str());
   return getDebugBuffer();
+}
+
+const char* cmd_user_changepassword(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  // Parse: "currentPassword newPassword confirmPassword"
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(3)) return "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
+
+  return userChangePasswordCore(a.arg(0), a.arg(1), a.arg(2));
 }
 
 const char* cmd_user_resetpassword(const String& argsInput) {
@@ -2038,30 +2069,23 @@ const char* cmd_session_revoke(const String& argsInput) {
     String username = a.arg(1);
     String reason = a.has(2) ? a.remaining(1) : String();
     if (!reason.length()) reason = defaultReason;
-    // Revoke web sessions
-    for (int i = 0; i < MAX_SESSIONS; ++i) {
-      if (!gSessions[i].sid.length()) continue;
-      if (!gSessions[i].user.equalsIgnoreCase(username)) continue;
-      if (gSessions[i].ip.length() > 0) {
-        storeLogoutReason(gSessions[i].ip, reason);
-      }
-      enqueueTargetedRevokeForSessionIdx(i, reason);
-      revoked++;
-    }
-    // Revoke transport sessions (OLED, Serial, Bluetooth)
-    if (gSerialAuthed && gSerialUser.equalsIgnoreCase(username)) {
-      gSerialAuthed = false;
-      gSerialUser   = String();
-      revoked++;
-    }
-    if (gLocalDisplayAuthed && gLocalDisplayUser.equalsIgnoreCase(username)) {
-      gLocalDisplayAuthed = false;
-      gLocalDisplayUser   = String();
-      revoked++;
-    }
-    revoked += bleRevokeUserSessions(username);
+
+    // Delegate fan-out to revokeUserSessions — single source of truth for
+    // "kick user X out of every transport's session table." The previous
+    // inline implementation duplicated this loop and drifted: it was
+    // missing the oledNotifyLocalDisplayAuthChanged() call that
+    // revokeUserSessions emits when clearing the OLED session, so the
+    // OLED UI didn't refresh after an admin-revoke. Routing through the
+    // shared helper picks that up automatically, and any future revoke-
+    // protocol additions land in one place. We do NOT pass exceptSid /
+    // exceptTransport because this command is admin-driven and revokes
+    // someone else's sessions (not a self-modify).
+    revoked = revokeUserSessions(username, reason);
+
     if (revoked > 0) {
-      // Admin audit broadcast
+      // Admin audit broadcast — emitted at the command layer (not inside
+      // revokeUserSessions, which only WARN_USERFs internally) so the
+      // operator running the CLI sees confirmation in their terminal.
       if (ensureDebugBuffer()) {
         snprintf(getDebugBuffer(), 1024, "Admin audit: revoked %d session(s) for user '%s' reason='%s'", revoked, username.c_str(), reason.c_str());
         broadcastOutput(getDebugBuffer());
@@ -2311,35 +2335,13 @@ bool usernameExistsInUsersJson(const String& json, const String& username) {
   return json.indexOf(needle) >= 0;
 }
 
-// Helper: Load users from file (for first-time setup)
-bool loadUsersFromFile(String& outUser, String& outPass) {
-  if (!filesystemReady) return false;
-  
-  String usersJson;
-  if (!readText(USERS_JSON_FILE, usersJson)) return false;
-  
-  // Simple parsing - find first user entry
-  int userStart = usersJson.indexOf("\"username\":");
-  if (userStart < 0) return false;
-  
-  int usernameStart = usersJson.indexOf("\"", userStart + 11);
-  int usernameEnd = usersJson.indexOf("\"", usernameStart + 1);
-  if (usernameStart < 0 || usernameEnd < 0) return false;
-  
-  outUser = usersJson.substring(usernameStart + 1, usernameEnd);
-  
-  // Find password hash
-  int passStart = usersJson.indexOf("\"passwordHash\":", userStart);
-  if (passStart < 0) return false;
-  
-  int passValueStart = usersJson.indexOf("\"", passStart + 15);
-  int passValueEnd = usersJson.indexOf("\"", passValueStart + 1);
-  if (passValueStart < 0 || passValueEnd < 0) return false;
-  
-  outPass = usersJson.substring(passValueStart + 1, passValueEnd);
-  
-  return true;
-}
+// (Removed: loadUsersFromFile — read a `passwordHash` field that no longer
+// exists in users.json since the User struct moved to PBKDF2 with per-device
+// salt. The function returned false every time, so its only caller in
+// HardwareOne.cpp boot left the legacy gAuthUser/gAuthPass globals at their
+// "admin"/"admin" defaults. Both the function and its callers + the Basic-
+// Auth fast path that consumed those globals were deleted together. See
+// AUTH_ASSESSMENT_REPORT.md §4 #6.)
 
 // Forward declarations for helper functions
 static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int maxCount);
