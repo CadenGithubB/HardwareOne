@@ -1,18 +1,11 @@
-# Partition table for builds WITH ESP-SR (speech recognition)
-# Factory: 4992K  (BLE 4.2 legacy APIs + ~34KB vs prior image; still tight)
-# Model:   3008K  Sized for WN9_HIESP (~292K) + MN7_EN_QUANT (~2.6M) +
-#          fst (~12K). Packed srmodels.bin is ~2980K — 2944K (the prior
-#          size) overflowed by 36K and silent-truncated the WN entry into
-#          the next partition, so esp_srmodel_filter(WN_PREFIX) returned
-#          NULL and srstart failed with "No wake word model found!". Bumped
-#          to 3008K to give ~28K headroom. Chinese MultiNet (~3.5M) is
-#          disabled in sdkconfig — a smaller model bundle is what makes
-#          everything fit on the 8M chip.
-# LittleFS: 128K  (trimmed vs 172K so factory can grow for BLE 4.2 + app;
-#          logs/cache; bulk content on SD card.)
+# Partition table for builds WITHOUT ESP-SR (no speech recognition)
+# No "model" partition — all available space goes to LittleFS
+# Factory: 4948K  (matches partitions_sr.csv so a binary built for either
+#          target fits in either partition layout.)
+# LittleFS: 3180K (~3.1MB — slightly smaller than before to keep the
+#          factory partition aligned with the SR variant.)
 # Name,   Type, SubType, Offset,   Size,    Flags
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x4E0000,
-model,    data, spiffs,  0x4F0000, 0x2F0000,
-littlefs, data, littlefs, 0x7E0000, 0x20000,
+factory,  app,  factory, 0x10000,  0x4D5000,
+littlefs, data, littlefs, 0x4E5000, 0x31B000,

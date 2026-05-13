@@ -195,7 +195,7 @@ bool tofStartInternal() {
 
   // Set gTofEnabled FIRST to prevent race condition with task cleanup code
   gTofEnabled = true;
-  INFO_TOFF("Set gTofEnabled=1 BEFORE init to prevent race condition");
+  INFO_TOF_LIFECYCLEF("Set gTofEnabled=1 BEFORE init to prevent race condition");
 
   // Initialize ToF sensor synchronously (like thermal sensor)
   if (!gTofConnected || gVL53L4CX == nullptr) {
@@ -301,7 +301,7 @@ const char* cmd_tofmaxdistancemm(const String& argsInput) {
 bool tofInit() {
   if (gVL53L4CX != nullptr) {
     // Sensor object exists - clean it up and reinitialize to ensure fresh state
-    INFO_TOFF("Cleaning up existing sensor object before reinit");
+    INFO_TOF_LIFECYCLEF("Cleaning up existing sensor object before reinit");
     (void)gVL53L4CX->VL53L4CX_StopMeasurement();
     delete gVL53L4CX;
     gVL53L4CX = nullptr;
@@ -669,10 +669,10 @@ const size_t tofCommandsCount = sizeof(tofCommands) / sizeof(tofCommands[0]);
 // ============================================================================
 
 void tofTask(void* parameter) {
-  INFO_TOFF("Task started (handle=%p, stack=%u words)", 
+  INFO_TOF_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_TOFF("[MODULAR] tofTask() running from Sensor_ToF_VL53L4CX.cpp");
+  INFO_TOF_LIFECYCLEF("[MODULAR] tofTask() running from Sensor_ToF_VL53L4CX.cpp");
   unsigned long lastToFRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {

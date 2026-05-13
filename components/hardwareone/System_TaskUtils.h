@@ -78,12 +78,15 @@ bool createRTCTask();
 // ============================================================================
 
 // Emit the standard "task disabled" log message and self-delete the task.
-// `subsys` must match one of the per-subsystem INFO_*F macros — e.g.
-// SENSOR_TASK_EXIT(IMU) expands to INFO_IMUF(...).
+// `subsys` must match one of the per-subsystem INFO_*_LIFECYCLEF macros — e.g.
+// SENSOR_TASK_EXIT(IMU) expands to INFO_IMU_LIFECYCLEF(...).
+// Routes through the Lifecycle sub-flag (added in Option β) so the user can
+// suppress task-exit chatter via the per-sensor Lifecycle toggle without
+// touching the master flag.
 // NOTE: do NOT clear the task handle before calling this — the create/start
 // function uses eTaskGetState() to detect whether the task is still running.
 #define SENSOR_TASK_EXIT(subsys)                                               \
-  INFO_##subsys##F("Task disabled - cleaning up and deleting");                \
+  INFO_##subsys##_LIFECYCLEF("Task disabled - cleaning up and deleting");      \
   vTaskDelete(nullptr)
 
 // ============================================================================

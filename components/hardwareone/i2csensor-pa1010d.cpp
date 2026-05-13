@@ -57,7 +57,7 @@ GPSCache gGPSCache = {
 // Helper function to start GPS internal (called by queue processor)
 // Moved from HardwareOne.ino to consolidate GPS initialization logic
 bool gpsStartInternal() {
-  INFO_GPSF("Starting GPS initialization...");
+  INFO_GPS_LIFECYCLEF("Starting GPS initialization...");
 
   if (gGpsEnabled) {
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] GPS already started (enabled=1)");
@@ -130,7 +130,7 @@ bool gpsStartInternal() {
       ERROR_GPSF("Failed to initialize GPS module at 0x%02X after 3 attempts", I2C_ADDR_GPS);
       return false;
     }
-    INFO_GPSF("GPS module initialized successfully at I2C address 0x%02X", I2C_ADDR_GPS);
+    INFO_GPS_LIFECYCLEF("GPS module initialized successfully at I2C address 0x%02X", I2C_ADDR_GPS);
     
     // Configure GPS module (wrapped for mutex/clock management)
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] Configuring GPS: RMC+GGA sentences, 1Hz update rate");
@@ -288,10 +288,10 @@ const char* cmd_gps(const String& argsInput) {
 // ============================================================================
 
 void gpsTask(void* parameter) {
-  INFO_GPSF("Task started (handle=%p, stack=%u words)", 
-                (void*)xTaskGetCurrentTaskHandle(), 
+  INFO_GPS_LIFECYCLEF("Task started (handle=%p, stack=%u words)",
+                (void*)xTaskGetCurrentTaskHandle(),
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_GPSF("[MODULAR] gpsTask() running from Sensor_GPS_PA1010D.cpp");
+  INFO_GPS_LIFECYCLEF("[MODULAR] gpsTask() running from Sensor_GPS_PA1010D.cpp");
   unsigned long lastStackLog = 0;
   unsigned long lastStatusLog = 0;
   unsigned long lastGPSRead = 0;

@@ -200,7 +200,7 @@ static void recordingTask(void* param) {
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] ========== recordingTask() ENTRY ==========");
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Task running on core %d", xPortGetCoreID());
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  INFO_MICF("Recording task started");
+  INFO_MIC_LIFECYCLEF("Recording task started");
   
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Allocating %d byte recording buffer...", RECORDING_CHUNK_SIZE);
   int16_t* buffer = (int16_t*)ps_alloc(RECORDING_CHUNK_SIZE, AllocPref::PreferPSRAM, "mic.rec.buf");
@@ -208,7 +208,7 @@ static void recordingTask(void* param) {
 
   if (!buffer) {
     DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] *** BUFFER ALLOCATION FAILED! ***");
-    INFO_MICF("Failed to allocate recording buffer");
+    INFO_MIC_LIFECYCLEF("Failed to allocate recording buffer");
     micRecording = false;
     recordingTaskHandle = nullptr;
     vTaskDelete(NULL);
@@ -283,7 +283,7 @@ static void recordingTask(void* param) {
       recordingFile.close();
     }
     DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] WAV file closed");
-    INFO_MICF("Recording saved: %s (%lu samples)", currentRecordingPath, recordingSamples);
+    INFO_MIC_LIFECYCLEF("Recording saved: %s (%lu samples)", currentRecordingPath, recordingSamples);
   } else {
     DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] WARNING: recordingFile is invalid!");
   }
@@ -301,12 +301,12 @@ bool startRecording() {
 
   if (!gMicEnabled) {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] FAILED: mic not enabled");
-    INFO_MICF("Cannot record - mic not enabled");
+    INFO_MIC_LIFECYCLEF("Cannot record - mic not enabled");
     return false;
   }
   if (micRecording) {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] FAILED: already recording");
-    INFO_MICF("Already recording");
+    INFO_MIC_LIFECYCLEF("Already recording");
     return false;
   }
   
@@ -335,7 +335,7 @@ bool startRecording() {
   }
   if (!recordingFile) {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] *** FAILED to create file! ***");
-    INFO_MICF("Failed to create recording file");
+    INFO_MIC_LIFECYCLEF("Failed to create recording file");
     return false;
   }
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] File opened successfully");
@@ -374,7 +374,7 @@ bool startRecording() {
   }
   
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] ========== startRecording() SUCCESS ==========");
-  INFO_MICF("Recording started: %s", currentRecordingPath);
+  INFO_MIC_LIFECYCLEF("Recording started: %s", currentRecordingPath);
   return true;
 }
 
@@ -403,7 +403,7 @@ void stopRecording() {
   }
   
   DEBUG_MIC_LIFECYCLEF("[MIC_STOP_REC] Recording stopped");
-  INFO_MICF("Recording stopped");
+  INFO_MIC_LIFECYCLEF("Recording stopped");
 }
 
 int getRecordingCount() {
@@ -478,7 +478,7 @@ bool initMicrophone() {
   
   if (gMicEnabled) {
     WARN_SYSTEMF("[MIC_INIT] Already initialized - returning true");
-    INFO_MICF("Already initialized");
+    INFO_MIC_LIFECYCLEF("Already initialized");
     return true;
   }
 
@@ -497,7 +497,7 @@ bool initMicrophone() {
   WARN_SYSTEMF("[MIC_INIT] Audio settings: sampleRate=%d, bitDepth=%d, channels=%d, gain=%d%%",
                micSampleRate, micBitDepth, micChannels, micGain);
   WARN_SYSTEMF("[MIC_INIT] Pin config: CLK=%d, DATA=%d", MIC_PDM_CLK_PIN, MIC_PDM_DATA_PIN);
-  INFO_MICF("Initializing PDM microphone...");
+  INFO_MIC_LIFECYCLEF("Initializing PDM microphone...");
   STACK_TRACEF("initMicrophone.enter rate=%d bitDepth=%d channels=%d",
                micSampleRate, micBitDepth, micChannels);
 
@@ -527,7 +527,7 @@ bool initMicrophone() {
 
   if (err != ESP_OK) {
     WARN_SYSTEMF("[MIC_INIT] *** I2S CHANNEL CREATE FAILED! ***");
-    INFO_MICF("Failed to create I2S channel: 0x%x", err);
+    INFO_MIC_LIFECYCLEF("Failed to create I2S channel: 0x%x", err);
     STACK_TRACEF("initMicrophone.exit_channel_create_fail");
     return false;
   }
@@ -565,7 +565,7 @@ bool initMicrophone() {
 
   if (err != ESP_OK) {
     WARN_SYSTEMF("[MIC_INIT] *** PDM RX INIT FAILED at rate=%d Hz — this is a known bad combo on S3 ***", micSampleRate);
-    INFO_MICF("Failed to init PDM RX: 0x%x (%s)", err, esp_err_to_name(err));
+    INFO_MIC_LIFECYCLEF("Failed to init PDM RX: 0x%x (%s)", err, esp_err_to_name(err));
     STACK_TRACEF("initMicrophone.exit_pdm_init_fail rate=%d", micSampleRate);
     i2s_del_channel(rx_handle);
     rx_handle = NULL;
@@ -582,7 +582,7 @@ bool initMicrophone() {
 
   if (err != ESP_OK) {
     WARN_SYSTEMF("[MIC_INIT] *** I2S CHANNEL ENABLE FAILED! ***");
-    INFO_MICF("Failed to enable I2S channel: 0x%x", err);
+    INFO_MIC_LIFECYCLEF("Failed to enable I2S channel: 0x%x", err);
     STACK_TRACEF("initMicrophone.exit_enable_fail");
     i2s_del_channel(rx_handle);
     rx_handle = NULL;
@@ -619,7 +619,7 @@ bool initMicrophone() {
   
   if (successCount == 0) {
     WARN_SYSTEMF("[MIC_INIT] WARNING: No data received from microphone during flush!");
-    INFO_MICF("WARNING: Microphone may not be connected or responding");
+    INFO_MIC_LIFECYCLEF("WARNING: Microphone may not be connected or responding");
   }
 
   STACK_TRACEF("initMicrophone.warmup_done success=%d/%d", successCount, flushCount);
@@ -633,7 +633,7 @@ bool initMicrophone() {
   WARN_SYSTEMF("[MIC_INIT] Final heap: free=%u, PSRAM_free=%u", 
                (unsigned)esp_get_free_heap_size(), 
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  INFO_MICF("Initialized: %dHz, %d-bit, %d channel(s)", 
+  INFO_MIC_LIFECYCLEF("Initialized: %dHz, %d-bit, %d channel(s)", 
                 micSampleRate, micBitDepth, micChannels);
   return true;
 }
@@ -650,7 +650,7 @@ void stopMicrophone() {
 
   if (!gMicEnabled) {
     WARN_SYSTEMF("[MIC_STOP] Already stopped - returning");
-    INFO_MICF("Already stopped");
+    INFO_MIC_LIFECYCLEF("Already stopped");
     STACK_TRACEF("stopMicrophone.exit_already_stopped");
     return;
   }
@@ -689,7 +689,7 @@ void stopMicrophone() {
   WARN_SYSTEMF("[MIC_STOP] Heap after stop: free=%u, PSRAM_free=%u", 
                (unsigned)esp_get_free_heap_size(), 
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  INFO_MICF("Stopped");
+  INFO_MIC_LIFECYCLEF("Stopped");
 }
 
 int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
@@ -713,7 +713,7 @@ int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
   
   if (!buffer) {
     WARN_SYSTEMF("[MIC_CAPTURE] *** ALLOCATION FAILED! ***");
-    INFO_MICF("Failed to allocate %u bytes", bufferSize);
+    INFO_MIC_POLLINGF("Failed to allocate %u bytes", bufferSize);
     if (outLen) *outLen = 0;
     return nullptr;
   }
@@ -733,7 +733,7 @@ int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
   
   if (err != ESP_OK) {
     WARN_SYSTEMF("[MIC_CAPTURE] *** I2S READ FAILED! ***");
-    INFO_MICF("Failed to read samples: 0x%x", err);
+    INFO_MIC_POLLINGF("Failed to read samples: 0x%x", err);
     free(buffer);
     if (outLen) *outLen = 0;
     return nullptr;

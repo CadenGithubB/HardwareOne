@@ -127,7 +127,6 @@ bool usernameExistsInUsersJson(const String& json, const String& username);
 void resolvePendingUserCreationTimes();
 void writeBootAnchor();
 void cleanupOldBootAnchors(void* doc = nullptr);  // doc is StaticJsonDocument<8192>*
-bool loadUsersFromFile(String& outUser, String& outPass);
 
 // ============================================================================
 // User Command Handlers (implemented in user_system.cpp)
@@ -169,6 +168,25 @@ const char* cmd_user_promote(const String& argsInput);   // bump        — gain
 const char* cmd_user_demote(const String& argsInput);    // bump+revoke — admin session must restart with lower perms
 const char* cmd_user_delete(const String& argsInput);    // bump+revoke — account is gone, kick everywhere
 const char* cmd_user_changepassword(const String& argsInput);  // revoke other — keep calling session, kick the rest
+
+// Internal implementation shared between cmd_user_changepassword (CLI / OLED
+// / serial / BLE — invoked via executeCommand which installs identity) and
+// the web POST handler (which must install identity manually).
+//
+// PRECONDITION: caller MUST have an ExecIdentityGuard active for the
+// requesting user's AuthContext. The function resolves the user via
+// currentExecUser() and reads the calling session's sid/transport via
+// currentAuthContext() to skip-revoke the caller's own session. Without an
+// installed identity it returns "Error: Not authenticated".
+//
+// Returns a result string compatible with the CLI command convention:
+//   "Password changed successfully for user '<name>'" on success,
+//   "Error: <reason>" on validation/auth/storage failure.
+// Pointer lifetime: backed by the shared debug buffer; valid until the next
+// debug-buffer use. Caller should copy or consume immediately.
+const char* userChangePasswordCore(const String& currentPassword,
+                                   const String& newPassword,
+                                   const String& confirmPassword);
 const char* cmd_user_resetpassword(const String& argsInput);   // revoke       — admin reset target's creds
 const char* cmd_user_add(const String& argsInput);       // bump        — new usable account exists (no sessions yet)
 const char* cmd_user_list(const String& argsInput);

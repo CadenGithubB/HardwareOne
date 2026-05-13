@@ -1105,6 +1105,37 @@ inline bool isBondSynced() { return false; }
 bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 
+// =============================================================================
+// ESPNOW App ping (used by the on-glasses ESPNOW App page).
+// =============================================================================
+// Sends a HEARTBEAT-with-ACK_REQ to one peer, records msgId + startMs, and
+// classifies the response in the existing ACK RX path. There is exactly one
+// in-flight ping slot — starting a new ping while one is pending clobbers
+// the previous attempt's bookkeeping (the previous ACK, if it ever lands,
+// is silently ignored).
+//
+// Lifecycle: Idle → Pending (after Start) → Ok (rttMs set) | Timeout.
+//   espnowAppPingStart(mac) — fires the probe, transitions to Pending.
+//   espnowAppPingState(...) — read current state; recomputes Timeout if
+//                              startMs is older than timeoutMs.
+//   espnowAppPingClear()   — force back to Idle.
+//
+// The state read is intentionally one-shot polled by the page's live-refresh
+// tick rather than push-driven; the bookkeeping is one cacheline of static
+// state, no task / no queue.
+enum class EspNowAppPingState : uint8_t {
+  Idle    = 0,
+  Pending = 1,
+  Ok      = 2,
+  Timeout = 3,
+};
+
+bool espnowAppPingStart(const uint8_t* mac);
+EspNowAppPingState espnowAppPingPoll(uint32_t* outRttMs,
+                                     uint8_t* outPeerMac /* may be null */,
+                                     uint32_t timeoutMs = 2000);
+void espnowAppPingClear();
+
 #else // !ENABLE_ESPNOW
 
 // ============================================================================
@@ -1179,6 +1210,23 @@ inline bool sendFileToMac(const uint8_t* mac, const String& localPath) {
 inline bool sendBondedSensorData(uint8_t, const uint8_t*, uint16_t) { return false; }
 inline bool isBondModeOnline() { return false; }
 inline bool isBondSynced() { return false; }
+
+// Ping stubs — see real declarations above the ENABLE_ESPNOW else.
+enum class EspNowAppPingState : uint8_t {
+  Idle    = 0,
+  Pending = 1,
+  Ok      = 2,
+  Timeout = 3,
+};
+inline bool espnowAppPingStart(const uint8_t*) { return false; }
+inline EspNowAppPingState espnowAppPingPoll(uint32_t* outRttMs,
+                                            uint8_t* outPeerMac,
+                                            uint32_t /*timeoutMs*/ = 2000) {
+  if (outRttMs)  *outRttMs  = 0;
+  (void)outPeerMac;
+  return EspNowAppPingState::Idle;
+}
+inline void espnowAppPingClear() {}
 
 #endif // ENABLE_ESPNOW
 

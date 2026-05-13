@@ -156,7 +156,6 @@ bool rmdirGuarded  (const String& path, const AuthContext& ctx);
  * and any future audit trail).
  *
  * Use deliberately and sparingly. Examples of valid use:
- *   - loadUsersFromFile() — system owns the user database
  *   - loadSettings() — system owns the global settings file
  *   - boot-time TLS cert read — no user identity exists yet
  *   - log rotation — internal infrastructure

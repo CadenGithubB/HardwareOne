@@ -251,7 +251,7 @@ bool apdsStartInternal() {
     gAPDSCache.apdsGesture = 0;
     xSemaphoreGive(gAPDSCache.mutex);
   }
-  INFO_APDSF("Cleaned up stale cache from previous run");
+  INFO_APDS_LIFECYCLEF("Cleaned up stale cache from previous run");
 
   // Initialize APDS sensor synchronously
   if (!gApdsConnected || gAPDS9960 == nullptr) {
@@ -264,7 +264,7 @@ bool apdsStartInternal() {
   // Enable color mode by default (user can change with apdsmode command)
   gAPDS9960->enableColor(true);
   gApdsColorEnabled = true;
-  INFO_APDSF("Color mode enabled by default");
+  INFO_APDS_LIFECYCLEF("Color mode enabled by default");
 
   // Create APDS task
   if (!createAPDSTask()) {
@@ -274,7 +274,7 @@ bool apdsStartInternal() {
   }
 
   sensorStatusBumpWith("APDS initialized");
-  INFO_APDSF("Sensor started successfully (color mode active)");
+  INFO_APDS_LIFECYCLEF("Sensor started successfully (color mode active)");
   return true;
 }
 
@@ -426,10 +426,10 @@ const size_t apdsCommandsCount = sizeof(apdsCommands) / sizeof(apdsCommands[0]);
 // ============================================================================
 
 void apdsTask(void* parameter) {
-  INFO_APDSF("Task started (handle=%p, stack=%u words)", 
+  INFO_APDS_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_APDSF("[MODULAR] apdsTask() running from Sensor_APDS_APDS9960.cpp");
+  INFO_APDS_LIFECYCLEF("[MODULAR] apdsTask() running from Sensor_APDS_APDS9960.cpp");
   unsigned long lastApdsRead = 0;
   unsigned long lastStackLog = 0;
   // Note: Failure tracking now handled by centralized I2CDevice health system

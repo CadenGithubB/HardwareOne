@@ -326,7 +326,7 @@ bool imuInit() {
     return true;
   }
 
-  INFO_IMUF("Starting BNO055 IMU initialization (STEMMA QT)...");
+  INFO_IMU_LIFECYCLEF("Starting BNO055 IMU initialization (STEMMA QT)...");
 
   // Reset grace period for this initialization attempt (device may have been registered at boot)
   i2cResetGracePeriod(I2C_ADDR_IMU);
@@ -344,7 +344,7 @@ bool imuInit() {
 
   return i2cDeviceTransaction(I2C_ADDR_IMU, 100000, 5000, [&]() -> bool {
     // Wire1 already initialized in setup() - no need to call begin() again
-    INFO_IMUF("Starting IMU initialization at 100kHz I2C clock");
+    INFO_IMU_LIFECYCLEF("Starting IMU initialization at 100kHz I2C clock");
 
     // BNO055 needs time after power-up/reset before responding reliably
     delay(1000);
@@ -352,7 +352,7 @@ bool imuInit() {
     if (foundIndex < 0) {
       WARN_IMUF("Error: Not detected at 0x%02X or 0x%02X (initial probe). Will attempt init anyway with retries", I2C_ADDR_IMU, BNO055_ADDRESS_B);
     } else {
-      INFO_IMUF("Detected BNO055 at address 0x%02X", candidateAddrs[foundIndex]);
+      INFO_IMU_LIFECYCLEF("Detected BNO055 at address 0x%02X", candidateAddrs[foundIndex]);
     }
 
     // Retry loop with conservative I2C clocks (BNO055 doesn't like high speeds)
@@ -375,7 +375,7 @@ bool imuInit() {
       bool begun = false;
       for (int i = 0; i < 2 && !begun; i++) {
         uint8_t addr = (foundIndex >= 0) ? candidateAddrs[foundIndex] : candidateAddrs[i];
-        INFO_IMUF("Trying BNO055 address 0x%02X", addr);
+        INFO_IMU_LIFECYCLEF("Trying BNO055 address 0x%02X", addr);
         gBNO055 = new Adafruit_BNO055(55, addr, &Wire1);
         if (gBNO055 == nullptr) {
           ERROR_IMUF("Error: Failed to allocate memory for BNO055 object");
@@ -398,7 +398,7 @@ bool imuInit() {
         delay(100);
         gImuConnected = true;
         
-        INFO_IMUF("BNO055 IMU sensor initialized successfully");
+        INFO_IMU_LIFECYCLEF("BNO055 IMU sensor initialized successfully");
         return true;
       }
 
@@ -1021,10 +1021,10 @@ const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);
 // ============================================================================
 
 void imuTask(void* parameter) {
-  INFO_IMUF("Task started (handle=%p, stack=%u words)", 
+  INFO_IMU_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_IMUF("[MODULAR] imuTask() running from Sensor_IMU_BNO055.cpp");
+  INFO_IMU_LIFECYCLEF("[MODULAR] imuTask() running from Sensor_IMU_BNO055.cpp");
   unsigned long lastIMURead = 0;
   unsigned long lastStackLog = 0;
   while (true) {

@@ -29,6 +29,15 @@ CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 
+# Per-task TLS storage pointers. The IDF default is 1, which is not enough:
+# slot 0 is owned by ESP-IDF's pthread library (pthread_getspecific reads it
+# from inside libc / ArduinoJson serialization paths). The HardwareOne auth-
+# identity code uses slot 1 for its per-task TaskIdentity struct (see
+# System_AuthIdentity.cpp). With only 1 slot, slot-1 reads return junk and
+# anything in broadcastOutput's capture path StoreProhibited-crashes during
+# first-time setup. Raise to 4 to leave headroom for additional TLS users.
+CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS=4
+
 # Arduino core requirements
 CONFIG_FREERTOS_HZ=1000
 
