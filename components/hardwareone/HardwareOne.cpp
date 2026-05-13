@@ -1324,7 +1324,7 @@ void hardwareone_setup() {
   // Some sensors need 1-2 seconds to become responsive on I2C bus
   // Use loop instead of blocking delay to keep boot animation running
   for (int i = 0; i < 20; i++) {
-    delay(100);
+    delay(80);
     oledUpdate();
   }
   

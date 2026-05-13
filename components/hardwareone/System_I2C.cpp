@@ -2395,3 +2395,11 @@ void processAutoStartSensors() {
   INFO_I2C_AUTOSTARTF("[AutoStart] Queued %d sensor(s) for startup", autoStartQueued);
   INFO_I2C_AUTOSTARTF("[AutoStart] Sensor auto-start processing complete");
 }
+
+// Reset Wire1 to the bus's default clock speed. Sensors that bump the bus
+// to a higher frequency for their own transactions (e.g. MLX90640's 1 MHz
+// burst reads, VL53L4CX's fast frames) call this in their init/cleanup
+// paths to leave the bus in a known state for other devices that share it.
+void i2cSetDefaultWire1Clock() {
+  Wire1.setClock(I2C_WIRE1_DEFAULT_FREQ);
+}

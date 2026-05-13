@@ -379,7 +379,7 @@ int rtcBuildDataJSON(char* buf, size_t bufSize) {
 // RTC Task
 // ============================================================================
 
-static void rtcTask(void* pvParameters) {
+void rtcTask(void* pvParameters) {
   (void)pvParameters;
   
   DEBUG_RTC_LIFECYCLEF("[RTC] Task started");
@@ -424,11 +424,15 @@ static void rtcTask(void* pvParameters) {
     }
     
     // Poll fast when OLED is displaying RTC, slow otherwise
+#if ENABLE_OLED_DISPLAY
     unsigned long interval = (currentOLEDMode == OLED_RTC_DATA) ? CACHE_UPDATE_FAST : CACHE_UPDATE_SLOW;
+#else
+    unsigned long interval = CACHE_UPDATE_SLOW;
+#endif
     if (now - lastCacheUpdate >= interval) {
       RTCDateTime dt;
       float temp = rtcReadTemperature();
-      
+
       if (rtcReadDateTime(&dt)) {
         if (gRTCCache.mutex && xSemaphoreTake(gRTCCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
           gRTCCache.dateTime = dt;
@@ -438,9 +442,11 @@ static void rtcTask(void* pvParameters) {
           xSemaphoreGive(gRTCCache.mutex);
         }
         // Mark OLED dirty if RTC page is active (enables real-time display updates)
+#if ENABLE_OLED_DISPLAY
         if (currentOLEDMode == OLED_RTC_DATA) {
           oledMarkDirty();
         }
+#endif
 #if ENABLE_ESPNOW
         {
           char rtcJson[256];
@@ -561,8 +567,14 @@ bool rtcStartInternal() {
     return false;
   }
 
+  gRtcEnabled = true;  // Set this BEFORE task creation — the task's main loop
+                       // is `while (gRtcEnabled)`, so flipping this after
+                       // createRTCTask() races and the task exits immediately
+                       // (web UI then shows "RTC Closed" despite a successful
+                       // openrtc command). Matches IMU/Thermal pattern.
   if (!createRTCTask()) {
     DEBUG_RTC_LIFECYCLEF("[RTC] Failed to create task");
+    gRtcEnabled = false;
     return false;
   }
 

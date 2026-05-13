@@ -2333,12 +2333,16 @@ void drawOLEDFooter() {
       
     case OLED_GPS_MAP:
       {
+#if ENABLE_MAPS
         extern bool gMapMenuOpen;
         if (gMapMenuOpen) {
           hints = "A:Select B:Close";
         } else {
           hints = "X/Y:Zoom A+J:Rot B:Back";
         }
+#else
+        hints = "B:Back";
+#endif
       }
       break;
       

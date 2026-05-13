@@ -1090,9 +1090,11 @@ void imuTask(void* parameter) {
         lastIMURead = nowMs;
         
         // Mark OLED dirty if IMU page is active (enables real-time display updates)
+#if ENABLE_OLED_DISPLAY
         if (result && currentOLEDMode == OLED_IMU_ACTIONS) {
           oledMarkDirty();
         }
+#endif
         
         // Auto-disable if too many consecutive failures
         if (!result) {

@@ -20,7 +20,7 @@ static size_t gRemoteModuleCount = 0;
 static size_t gRemoteEntryCount = 0;
 
 // Helper: Convert JSON type to SettingType
-static SettingType jsonTypeToSettingType(JsonVariant value) {
+static SettingType jsonTypeToSettingType(JsonVariantConst value) {
   if (value.is<bool>()) return SETTING_BOOL;
   if (value.is<int>()) return SETTING_INT;
   if (value.is<const char*>()) return SETTING_STRING;

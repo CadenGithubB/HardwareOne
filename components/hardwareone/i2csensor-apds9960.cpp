@@ -112,11 +112,11 @@ const char* cmd_apdsread(const String& argsInput) {
 
   if (gApdsColorEnabled) {
     n = snprintf(buf, remaining, "  RGBC: R=%u G=%u B=%u C=%u\n",
-                 gAPDSCache.red, gAPDSCache.green, gAPDSCache.blue, gAPDSCache.clear);
+                 gAPDSCache.apdsRed, gAPDSCache.apdsGreen, gAPDSCache.apdsBlue, gAPDSCache.apdsClear);
     buf += n; remaining -= n;
   }
   if (gApdsProximityEnabled) {
-    n = snprintf(buf, remaining, "  Proximity: %u\n", gAPDSCache.proximity);
+    n = snprintf(buf, remaining, "  Proximity: %u\n", gAPDSCache.apdsProximity);
     buf += n; remaining -= n;
   }
 
