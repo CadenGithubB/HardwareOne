@@ -11,6 +11,8 @@
 #include "System_MemUtil.h"
 #include "System_Utils.h"
 #include "System_SetupWizard.h"
+#include "System_AuthIdentity.h"  // currentAuthContext() for cmd_featuresetup transport check
+#include "System_User.h"          // CommandSource enum
 #include <esp_heap_caps.h>
 
 // External settings
@@ -566,7 +568,28 @@ const char* cmd_features(const String& argsInput) {
 static const char* cmd_featuresetup(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  SetupWizardResult result = runAndApplyFeatureWizard();
+  // The wizard's input loop reads directly from Serial / OLED joystick. It
+  // does NOT read from the CLI dispatcher's per-transport input stream.
+  // That means invoking from web / Bluetooth / MQTT / ESP-NOW / internal
+  // will park the cmd_exec task in waitForSerialInputBlocking() forever
+  // (or until our timeout fires, but the user can't recover until then
+  // and every other CLI command queued in the meantime times out).
+  //
+  // Permitted transports are the two the wizard can actually receive input
+  // from: serial (Serial.read in waitForSerialInputBlocking) and the OLED
+  // display (joystick reads inside the OLED page handlers).
+  const CommandSource src = currentAuthContext().transport;
+  if (src != SOURCE_SERIAL && src != SOURCE_LOCAL_DISPLAY) {
+    return "Error: featuresetup must be run from the serial console or OLED display. "
+           "Other transports cannot deliver input to the interactive wizard.";
+  }
+
+  // 60-second idle timeout: if no input arrives for a minute the wizard
+  // aborts cleanly so the cmd_exec task is freed. FTS at boot uses the
+  // 0-timeout default (wait forever) so a fresh-device owner has time
+  // to read the prompts.
+  static constexpr unsigned long kFeatureSetupIdleTimeoutMs = 60UL * 1000UL;
+  SetupWizardResult result = runAndApplyFeatureWizard(kFeatureSetupIdleTimeoutMs);
   return result.completed ? "Feature setup complete." : "Feature setup cancelled.";
 }
 

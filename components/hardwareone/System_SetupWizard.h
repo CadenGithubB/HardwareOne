@@ -172,7 +172,36 @@ SetupWizardResult runSetupWizard();
 
 // Shared helper: runs the wizard and applies results (WiFi credentials,
 // settings save). Used by both cmd_featuresetup and firstTimeSetupIfNeeded().
-SetupWizardResult runAndApplyFeatureWizard();
+//
+// idleTimeoutMs: 0 = wait forever (correct for first-time-setup at boot —
+// fresh-device owner may need time to read instructions). Non-zero = cancel
+// the wizard if no input arrives for `idleTimeoutMs` milliseconds (correct
+// for `featuresetup` CLI, to prevent the cmd_exec task from being parked
+// indefinitely if the invoking user can't actually deliver wizard input).
+SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs = 0);
+
+// Wizard-input timing controls (definitions in System_Utils.cpp).
+// setSerialWaitTimeout: set idle timeout for waitForSerialInputBlocking().
+//   Pass 0 to wait forever (default state at boot).
+// isWizardCancelRequested: true after a timeout fired. Wizard code polls
+//   this to short-circuit cleanly from sub-page handlers.
+void setSerialWaitTimeout(unsigned long timeoutMs);
+bool isWizardCancelRequested();
+
+// "Wizard owns Serial" flag. The setup wizard reads Serial directly via
+// waitForSerialInputBlocking() on the cmd_exec task. Meanwhile, the main
+// task's loop() ALSO reads Serial for CLI command input (HardwareOne.cpp
+// "USER INPUT — Serial CLI" section). Without coordination they race for
+// every byte — half the user's keystrokes land in the wizard (advancing
+// pages), the other half land in the CLI dispatcher and submit as commands
+// that time out 10 s later because cmd_exec is busy with the wizard.
+//
+// The wizard sets this flag while running. The main loop's serial-input
+// drain skips its read+dispatch when the flag is set, so all keystrokes
+// reach waitForSerialInputBlocking() instead.
+//
+// Defined in System_SetupWizard.cpp.
+extern volatile bool gWizardOwnsSerial;
 
 // Serial-only fallback for builds without OLED compiled in.
 // When ENABLE_OLED_DISPLAY=1, this just calls runSetupWizard().

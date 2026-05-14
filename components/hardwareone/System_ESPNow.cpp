@@ -7115,7 +7115,9 @@ const char* cmd_espnow_deinit(const String& argsInput) {
 // ESP-NOW status command
 const char* cmd_espnow_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  // Read-only status: report "idle" instead of erroring when not initialized
+  // (dashboard polls this; classifier sees no "Error:" prefix -> logs OK).
+  if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
   char* p = getDebugBuffer();
@@ -7168,8 +7170,9 @@ const char* cmd_espnow_status(const String& argsInput) {
 // ESP-NOW statistics command
 const char* cmd_espnow_stats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
-  
+  // Read-only status: see comment in cmd_espnow_status above.
+  if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
+
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("ESP-NOW Statistics:");
   BROADCAST_PRINTF("  Messages Sent: %lu", (unsigned long)gEspNow->routerMetrics.messagesSent);
@@ -7202,7 +7205,8 @@ const char* cmd_espnow_stats(const String& argsInput) {
 // ESP-NOW broadcast tracking statistics command
 const char* cmd_espnow_broadcaststats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  // Read-only status: see comment in cmd_espnow_status above.
+  if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
   
   broadcastOutput("Broadcast ACK Tracking Statistics:");
   BROADCAST_PRINTF("  Broadcasts Tracked: %lu", (unsigned long)gBroadcastsTracked);
@@ -7240,7 +7244,8 @@ const char* cmd_espnow_broadcaststats(const String& argsInput) {
 // ESP-NOW router statistics command
 const char* cmd_espnow_routerstats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  // Read-only status: see comment in cmd_espnow_status above.
+  if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
   
   broadcastOutput("=== ESP-NOW Router Statistics ===");
   BROADCAST_PRINTF("Messages Sent: %lu", (unsigned long)gEspNow->routerMetrics.messagesSent);
@@ -7454,8 +7459,9 @@ const char* cmd_espnow_meshttl(const String& argsInput) {
 // Mesh metrics command
 const char* cmd_espnow_meshmetrics(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+
+  // Read-only status: see comment in cmd_espnow_status above.
+  if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
   if (!ensureDebugBuffer()) return "Error: Buffer allocation failed";
   
   RouterMetrics& m = gEspNow->routerMetrics;
@@ -9087,7 +9093,8 @@ const char* cmd_espnow_setpassphrase(const String& argsInput) {
 // Encryption status command
 const char* cmd_espnow_encstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  // Read-only status: see comment in cmd_espnow_status above.
+  if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
   if (!gEspNow->initialized) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }

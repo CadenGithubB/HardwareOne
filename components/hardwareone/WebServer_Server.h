@@ -10,9 +10,30 @@
 
 #include "System_User.h"
 
-// Shared JSON response buffer size (available to all modules)
-// Increased to 32KB to accommodate expanded ESP-NOW settings schema and 64x48 thermal data
-#define JSON_RESPONSE_SIZE 32768
+// Shared JSON response buffer size (available to all modules).
+//
+// Sized for the LARGEST response served from this buffer, currently the
+// /api/settings/schema endpoint -- it emits every registered SettingEntry
+// across every module (debug flags, output channels, wifi, mqtt, espnow,
+// camera, all per-sensor modules, etc.). Each entry serializes to ~120-180
+// bytes (key, label, type, default, group, cmdKey, +optional min/max/
+// options). The codebase currently registers ~330 entries.
+//
+// History: 32KB was sufficient before commit 13a0629 fixed 7 silent ENABLE_*
+// typos (which had been quietly excluding settings modules from the build).
+// Re-including those modules pushed the schema serialization to exactly
+// 32768 bytes -- the buffer-full check `len >= JSON_RESPONSE_SIZE` then
+// fired with `[Schema] Serialization failed or buffer overflow: 32768 >=
+// 32768`, returning HTTP 500.
+//
+// 64KB doubles the headroom. The buffer lives in PSRAM (ps_alloc) so the
+// extra 32KB costs essentially nothing on this 8MB-PSRAM target.
+//
+// If the schema continues to grow past 64KB in the future, options include:
+//  (a) bump this further (cheap in PSRAM)
+//  (b) emit schema per-module on demand instead of all-at-once
+//  (c) use ArduinoJson's measureJson() to size-and-allocate per request
+#define JSON_RESPONSE_SIZE 65536
 
 // Shared JSON response buffer for web handlers (size defined per TU)
 // Buffer is defined in web_server.cpp; other modules use this extern.

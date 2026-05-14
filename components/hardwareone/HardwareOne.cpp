@@ -93,6 +93,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #endif
 #include "System_Battery.h"
 #include "System_FirstTimeSetup.h"
+#include "System_SetupWizard.h"  // gWizardOwnsSerial — main loop yields Serial while wizard is running
 #include "System_TaskUtils.h"
 // sensor_config.h included early (before WiFi)
 #if ENABLE_THERMAL_SENSOR
@@ -1684,7 +1685,18 @@ void hardwareone_loop() {
   // 6. USER INPUT — Serial CLI (always last before yield)
   // ========================================================================
 
-  while (Serial.available()) {
+  // Yield Serial to the setup wizard while it's running. The wizard reads
+  // bytes directly via waitForSerialInputBlocking() on the cmd_exec task.
+  // If this main-loop drain also reads from Serial, the two consumers race
+  // for each byte — half the user's keystrokes land in the wizard (advances
+  // pages), the other half get parsed as CLI commands here and submitted
+  // to the cmd_exec queue. cmd_exec is busy with the wizard, so those
+  // submissions sit in the queue for 10 s and print "[ERROR] Command
+  // timed out". The `!gWizardOwnsSerial` guard on the while condition
+  // makes this drain a no-op while the wizard is active, so every byte
+  // reaches waitForSerialInputBlocking() instead. See declaration in
+  // System_SetupWizard.h.
+  while (!gWizardOwnsSerial && Serial.available()) {
     char c = Serial.read();
     if (c == '\r') continue;
     if (c == '\n') {
