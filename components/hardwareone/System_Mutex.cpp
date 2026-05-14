@@ -12,7 +12,7 @@
 // Global Mutex Definitions
 // ============================================================================
 
-SemaphoreHandle_t fsMutex = nullptr;
+SemaphoreHandle_t gFsMutex = nullptr;
 SemaphoreHandle_t gJsonResponseMutex = nullptr;
 SemaphoreHandle_t gMeshRetryMutex = nullptr;
 SemaphoreHandle_t gFileTransferMutex = nullptr;
@@ -25,7 +25,7 @@ SemaphoreHandle_t i2sMicMutex = nullptr;
 
 void initMutexes() {
   // Create standard mutexes
-  fsMutex = xSemaphoreCreateMutex();
+  gFsMutex = xSemaphoreCreateMutex();
   gJsonResponseMutex = xSemaphoreCreateMutex();
   gMeshRetryMutex = xSemaphoreCreateMutex();
   gFileTransferMutex = xSemaphoreCreateMutex();
@@ -35,7 +35,7 @@ void initMutexes() {
   // i2cMutex removed — I2cLockGuard and i2cLock/Unlock go through I2CDeviceManager::getBusMutex() directly
 
   // Log creation status
-  bool allCreated = (fsMutex != nullptr) && (gJsonResponseMutex != nullptr) && 
+  bool allCreated = (gFsMutex != nullptr) && (gJsonResponseMutex != nullptr) && 
                     (gMeshRetryMutex != nullptr) && (gFileTransferMutex != nullptr) &&
                     (gTopoStreamsMutex != nullptr) && (i2sMicMutex != nullptr);
   
@@ -63,7 +63,7 @@ static bool isHeldByCurrentTask(SemaphoreHandle_t mutex) {
 }
 
 bool isFsLockedByCurrentTask() {
-  return isHeldByCurrentTask(fsMutex);
+  return isHeldByCurrentTask(gFsMutex);
 }
 
 bool isI2cLockedByCurrentTask() {
@@ -76,35 +76,35 @@ bool isI2cLockedByCurrentTask() {
 // ============================================================================
 
 FsLockGuard::FsLockGuard(const char* owner) : held(false) {
-  if (fsMutex) {
+  if (gFsMutex) {
     // Reentrant-safe: if already owned by this task, skip
-    if (isHeldByCurrentTask(fsMutex)) {
+    if (isHeldByCurrentTask(gFsMutex)) {
       // Debug: uncomment to trace reentrant calls
       // Serial.printf("[MUTEX] FsLockGuard reentry (owner=%s)\n", owner ? owner : "");
       return;
     }
-    if (xSemaphoreTake(fsMutex, portMAX_DELAY) == pdTRUE) {
+    if (xSemaphoreTake(gFsMutex, portMAX_DELAY) == pdTRUE) {
       held = true;
     }
   }
 }
 
 FsLockGuard::~FsLockGuard() {
-  if (held && fsMutex) {
-    xSemaphoreGive(fsMutex);
+  if (held && gFsMutex) {
+    xSemaphoreGive(gFsMutex);
   }
 }
 
 // Manual lock/unlock
 void fsLock(const char* owner) {
-  if (fsMutex && !isHeldByCurrentTask(fsMutex)) {
-    xSemaphoreTake(fsMutex, portMAX_DELAY);
+  if (gFsMutex && !isHeldByCurrentTask(gFsMutex)) {
+    xSemaphoreTake(gFsMutex, portMAX_DELAY);
   }
 }
 
 void fsUnlock() {
-  if (fsMutex && isHeldByCurrentTask(fsMutex)) {
-    xSemaphoreGive(fsMutex);
+  if (gFsMutex && isHeldByCurrentTask(gFsMutex)) {
+    xSemaphoreGive(gFsMutex);
   }
 }
 

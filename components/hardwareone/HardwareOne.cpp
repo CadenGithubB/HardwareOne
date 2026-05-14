@@ -1028,7 +1028,7 @@ void hardwareone_setup() {
   // Sensor cache mutexes are now created lazily in each *StartInternal() function
   // This saves memory for disabled sensors and allows better error handling
 
-  // Global mutexes (fsMutex, gJsonResponseMutex, gMeshRetryMutex, etc.)
+  // Global mutexes (gFsMutex, gJsonResponseMutex, gMeshRetryMutex, etc.)
   initMutexes();
 
   if (gSettings.i2cBusEnabled) {
