@@ -579,7 +579,7 @@ const char* cmd_gpslog(const String& argsInput) {
     sensorLogAutoStart();
   }
 
-  static char result[300];
+  EXT_RAM_BSS_ATTR static char result[300];
   snprintf(result, sizeof(result),
     "[gpslog] Active — interval=%lums, autostart=on\n"
     "  GPS:    %s\n"

@@ -11205,7 +11205,7 @@ static const char* cmd_g2micoff(const String& /*argsInput*/) {
 
 static const char* cmd_g2micstats(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[320];
+  EXT_RAM_BSS_ATTR static char ret[320];
   auto fmtArm = [](char side, const G2MicProbe& m, char* out, size_t cap) {
     uint32_t span = (m.frameCount > 1) ? (m.lastFrameMs - m.firstFrameMs) : 0;
     uint32_t fps = span ? (m.frameCount * 1000u) / span : 0;
@@ -11360,7 +11360,7 @@ static const char* cmd_g2micrec(const String& argsInput) {
 // File capped at 16 MB (~8.7 min @ 32 KB/s decoded).
 static const char* cmd_g2micwav(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
   CommandArgs ca(argsInput);
   String sub = ca.count() > 0 ? ca.arg(0) : String("");
   sub.toLowerCase();
@@ -13309,7 +13309,7 @@ const char* g2ProbeImageQ11SimpleSwap() {
 // meaningful if Q11 leaves visible artifacts.
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ10ClearThenPush() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
 
   G2Temple* arm = pickEvenAIArm("imgQ10");
   if (!arm) return "Img Q10: no reachable temple";
@@ -15413,7 +15413,7 @@ const char* g2ProbeImageQGlizzy() {
 // block at the dead centre of the lens.
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ12FullScreen() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
 
   G2Temple* arm = pickEvenAIArm("imgQ12");
   if (!arm) return "Img Q12: no reachable temple";
@@ -15551,7 +15551,7 @@ const char* g2ProbeImageQ12FullScreen() {
 // characterise sustained throughput.
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ13LiveTile() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
 
   G2Temple* arm = pickEvenAIArm("imgQ13");
   if (!arm) return "Img Q13: no reachable temple";
@@ -15717,7 +15717,7 @@ const char* g2ProbeImageQ13LiveTile() {
 // the surface ticking. Cadence governed by gG2LiveRateMs.
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ14LiveText() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
 
   if (!gR.connected && !gL.connected) {
     return "Img Q14: no reachable temple";
@@ -15865,7 +15865,7 @@ const char* g2ProbeImageQ14LiveText() {
 //     other code path (e.g. an explicit teardown) sets it.
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ15LeftArm() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
 
   if (!gL.connected) {
     return "Img Q15: LEFT temple not connected";
@@ -16077,7 +16077,7 @@ static const char* runMixedListImageProbe(const char* tag,
 // bottom half (centered horizontally). No overlap. The most likely-to-
 // work shape — if this fails, mixed CREATE is rejected outright.
 const char* g2ProbeImageQ16MixedSideBySide() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
   // List in top half (8..568 wide, 8..138 tall) — leaves room for ~5
   // text rows.
   const G2ContainerGeom listGeom = { 8, 8, 560, 130 };
@@ -16099,7 +16099,7 @@ const char* g2ProbeImageQ16MixedSideBySide() {
 // list area) so the left half stays fully readable while still exercising
 // the overlap codepath.
 const char* g2ProbeImageQ17MixedOverlap() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
   // List spans most of the lens (G2_GEOM_LARGE = 8,8,560,272).
   const G2ContainerGeom listGeom = G2_GEOM_LARGE;
   // Image 288×144 tile positioned on the right half of the list:
@@ -16119,7 +16119,7 @@ const char* g2ProbeImageQ17MixedOverlap() {
 // size; this probe tests both directions of that constraint at a
 // smaller size).
 const char* g2ProbeImageQ18MixedIcon() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
   const G2ContainerGeom listGeom = G2_GEOM_LARGE;
   // 80×80 icon in the top-right corner. 80 px @ 4 bpp = 40 bytes/row,
   // already 4-byte aligned for BMP stride; total pixel data = 3200 B,
@@ -16435,7 +16435,7 @@ static const char* probeLiveScrollingBarSolo(
 // Q20 — live 96×96 (Animated Icons menu). Same transport as Q13 bar
 // pattern; fewer Cmd=3 fragments per frame than 288×144.
 const char* g2ProbeImageQ20LiveTile96() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
   return probeLiveScrollingBarSolo(
       ret, sizeof(ret),
       "Q20", "imgQ20",
@@ -16450,7 +16450,7 @@ const char* g2ProbeImageQ20LiveTile96() {
 
 // Q22 — live 32×32 scrolling bar (icon-sized cadence bench).
 const char* g2ProbeImageQ22LiveTile32() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
   return probeLiveScrollingBarSolo(
       ret, sizeof(ret),
       "Q22", "imgQ22",
@@ -16465,7 +16465,7 @@ const char* g2ProbeImageQ22LiveTile32() {
 
 // Q23 — live 64×64 scrolling bar.
 const char* g2ProbeImageQ23LiveTile64() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
   return probeLiveScrollingBarSolo(
       ret, sizeof(ret),
       "Q23", "imgQ23",
@@ -16480,7 +16480,7 @@ const char* g2ProbeImageQ23LiveTile64() {
 
 // Q26 — live 124×124 scrolling bar (between 96 and max solo tile).
 const char* g2ProbeImageQ26LiveTile124() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
   return probeLiveScrollingBarSolo(
       ret, sizeof(ret),
       "Q26", "imgQ26",
@@ -16495,7 +16495,7 @@ const char* g2ProbeImageQ26LiveTile124() {
 
 // Q27 — live 144×144 scrolling bar (max single-image container).
 const char* g2ProbeImageQ27LiveTile144() {
-  static char ret[260];
+  EXT_RAM_BSS_ATTR static char ret[260];
   return probeLiveScrollingBarSolo(
       ret, sizeof(ret),
       "Q27", "imgQ27",
@@ -16521,7 +16521,7 @@ const char* g2ProbeImageQ27LiveTile144() {
 // animation loop only reuses those buffers — no per-frame card reads.
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ25SdFrameAnimation() {
-  static char ret[320];
+  EXT_RAM_BSS_ATTR static char ret[320];
   static char pathBuf[192];
 
   G2Temple* arm = pickEvenAIArm("imgQ25");
@@ -16766,7 +16766,7 @@ const char* g2ProbeImageQ25SdFrameAnimation() {
 // keeping this as a separate probe.
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ28MixedImageTextLive() {
-  static char ret[300];
+  EXT_RAM_BSS_ATTR static char ret[300];
   G2Temple* arm = pickEvenAIArm("imgQ28");
   if (!arm) {
     snprintf(ret, sizeof(ret), "Img Q28: no reachable temple");
@@ -16971,7 +16971,7 @@ const char* g2ProbeImageQ28MixedImageTextLive() {
 // parent, not under Text".
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ28LMixedListImageLive() {
-  static char ret[300];
+  EXT_RAM_BSS_ATTR static char ret[300];
   G2Temple* arm = pickEvenAIArm("imgQ28L");
   if (!arm) {
     snprintf(ret, sizeof(ret), "Img Q28L: no reachable temple");
@@ -17146,7 +17146,7 @@ const char* g2ProbeImageQ28LMixedListImageLive() {
 // production streaming paths — probe-only.
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ21LiveFullScreenBurst() {
-  static char ret[280];
+  EXT_RAM_BSS_ATTR static char ret[280];
 
   G2Temple* arm = pickEvenAIArm("imgQ21");
   if (!arm) return "Img Q21: no reachable temple";
