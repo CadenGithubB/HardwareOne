@@ -31,7 +31,7 @@ static constexpr uint32_t CACHE_MUTEX_TIMEOUT_MS = 100;
 // ============================================================================
 
 // Filesystem mutex - protects LittleFS access (not thread-safe)
-extern SemaphoreHandle_t fsMutex;
+extern SemaphoreHandle_t gFsMutex;
 
 // JSON response buffer mutex - protects shared gJsonResponseBuffer
 extern SemaphoreHandle_t gJsonResponseMutex;
