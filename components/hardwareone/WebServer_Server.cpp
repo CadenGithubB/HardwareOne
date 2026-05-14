@@ -1510,14 +1510,22 @@ void logAuthAttempt(bool success, const char* path, const String& userTried, con
   cleanPath.replace("%2F", "/");
   cleanPath.replace("%20", " ");
   
-  // Only log to file if this is an actual login event
-  // Login events: /login, serial/login, or reason contains "Login successful"
-  bool isLoginEvent = (cleanPath.indexOf("/login") >= 0) || 
-                      (cleanPath.indexOf("serial/login") >= 0) ||
-                      (reason.indexOf("Login successful") >= 0);
-  
-  if (!isLoginEvent) {
-    // Not a login event - skip file logging (command audit handles command tracking)
+  // Only log to file if this is an actual security event (login or credential
+  // rotation). Path checks use exact equality to avoid spurious matches like
+  // "/configure-login-page" or "/login-help" triggering on the substring
+  // "/login". The reason-based matches catch events whose path varies by
+  // transport (e.g. password change is "/account/password-change" from web
+  // but "/oled/command" from OLED).
+  bool isSecurityAuditEvent =
+      (cleanPath == "/login") ||
+      (cleanPath == "serial/login") ||
+      (reason.indexOf("Login successful") >= 0) ||
+      (reason.indexOf("Password changed") >= 0) ||
+      (reason.indexOf("Current password incorrect") >= 0) ||
+      (reason.indexOf("Password storage failed") >= 0);
+
+  if (!isSecurityAuditEvent) {
+    // Not a security event - skip file logging (command audit handles command tracking)
     return;
   }
 

@@ -122,7 +122,17 @@ bool tgRequireAuth(AuthContext& ctx) {
     if (ctx.ip.length() == 0) ctx.ip = "local";
     return true;
   } else {
-    // Internal/ESP-NOW commands - already authenticated upstream
+    // SOURCE_BLUETOOTH and SOURCE_ESPNOW are expected to validate auth in
+    // their command-receive handlers BEFORE submitting the command to
+    // executeCommand:
+    //   * BLE  — per-conn session token check in Bluetooth.cpp before submit
+    //   * ESPNOW — v3 protocol signed msgId verification before submit
+    // SOURCE_MQTT currently has NO such upstream check: MQTT-received
+    // commands are administrator-trusted, equivalent to SOURCE_INTERNAL.
+    // If/when MQTT is opened to untrusted clients, split this branch and
+    // wire MQTT through a proper session/token check.
+    // SOURCE_INTERNAL is firmware-generated and trusted by design (used by
+    // automation rules, boot sequences, scheduled tasks).
     return true;
   }
 }
@@ -1696,13 +1706,18 @@ const char* userChangePasswordCore(const String& currentPassword,
   // dispatch path installs its own AuthContext via ExecIdentityGuard.
   String username = currentExecUser();
   if (username.length() == 0) return "Error: Not authenticated";
+  const AuthContext& caller = currentAuthContext();
 
   // Verify current password
   if (!isValidUser(username, currentPassword)) {
+    // Security event — log alongside login attempts so the auth-events
+    // file shows both authentication AND credential-rotation activity.
+    logAuthAttempt(false, caller.path.c_str(), username, caller.ip, "Current password incorrect");
     return "Error: Current password incorrect";
   }
 
   if (!setUserPassword(username, newPassword)) {
+    logAuthAttempt(false, caller.path.c_str(), username, caller.ip, "Password storage failed");
     if (!ensureDebugBuffer()) return "Error: Failed to change password";
     snprintf(getDebugBuffer(), 1024, "Error: Failed to change password for user '%s'", username.c_str());
     return getDebugBuffer();
@@ -1716,11 +1731,15 @@ const char* userChangePasswordCore(const String& currentPassword,
   // (FileManager etc.) don't need to invalidate. See
   // System_AuthIdentity.h "SISTER PROTOCOL: SESSION REVOCATION"
   // for the bump-vs-revoke decision matrix.
-  const AuthContext& caller = currentAuthContext();
   revokeUserSessions(username,
                      "Your password was changed. Please log in again.",
                      caller.sid,         // skip current web SID (if any)
                      caller.transport);  // skip current transport's session
+
+  // Audit-log the successful rotation. The reason string "Password changed"
+  // is what logAuthAttempt's filter matches on to write this to the
+  // security-events file (rather than the verbose command-audit log).
+  logAuthAttempt(true, caller.path.c_str(), username, caller.ip, "Password changed");
 
   if (!ensureDebugBuffer()) return "Password changed successfully";
   snprintf(getDebugBuffer(), 1024, "Password changed successfully for user '%s'", username.c_str());
