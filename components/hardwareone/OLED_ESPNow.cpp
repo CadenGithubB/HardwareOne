@@ -41,66 +41,66 @@ static const char* espnowMenuItems[] = {
 static const int ESPNOW_MENU_ITEM_COUNT = 6;
 
 // Global state
-OLEDEspNowState gOLEDEspNowState;
+OLEDEspNowState gOledEspNowState;
 
 void oledEspNowInit() {
-  gOLEDEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
-  gOLEDEspNowState.interactionMode = ESPNOW_MODE_TEXT;
-  gOLEDEspNowState.modeSelectorIndex = 0;
-  gOLEDEspNowState.modeSelectorActive = false;
-  gOLEDEspNowState.lastUpdate = 0;
-  gOLEDEspNowState.needsRefresh = true;
-  memset(gOLEDEspNowState.selectedDeviceMac, 0, 6);
-  gOLEDEspNowState.selectedDeviceName = "";
+  gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
+  gOledEspNowState.interactionMode = ESPNOW_MODE_TEXT;
+  gOledEspNowState.modeSelectorIndex = 0;
+  gOledEspNowState.modeSelectorActive = false;
+  gOledEspNowState.lastUpdate = 0;
+  gOledEspNowState.needsRefresh = true;
+  memset(gOledEspNowState.selectedDeviceMac, 0, 6);
+  gOledEspNowState.selectedDeviceName = "";
   
   // Text mode state
-  gOLEDEspNowState.textMessageBuffer = "";
+  gOledEspNowState.textMessageBuffer = "";
   
   // Remote mode state
-  gOLEDEspNowState.remoteFormField = 0;
-  gOLEDEspNowState.remoteUsername = "";
-  gOLEDEspNowState.remotePassword = "";
-  gOLEDEspNowState.remoteCommand = "";
+  gOledEspNowState.remoteFormField = 0;
+  gOledEspNowState.remoteUsername = "";
+  gOledEspNowState.remotePassword = "";
+  gOledEspNowState.remoteCommand = "";
   
   // Initialize scrolling lists
-  oledScrollInit(&gOLEDEspNowState.deviceList, "ESP-NOW Devices", 3);
-  oledScrollInit(&gOLEDEspNowState.messageList, nullptr, 3);
+  oledScrollInit(&gOledEspNowState.deviceList, "ESP-NOW Devices", 3);
+  oledScrollInit(&gOledEspNowState.messageList, nullptr, 3);
   
   // Settings menu state (local)
-  gOLEDEspNowState.settingsMenuIndex = 0;
-  gOLEDEspNowState.settingsEditField = -1;
+  gOledEspNowState.settingsMenuIndex = 0;
+  gOledEspNowState.settingsEditField = -1;
   
   // Device config menu state (remote)
-  gOLEDEspNowState.deviceConfigMenuIndex = 0;
-  gOLEDEspNowState.deviceConfigEditField = -1;
+  gOledEspNowState.deviceConfigMenuIndex = 0;
+  gOledEspNowState.deviceConfigEditField = -1;
   
   // Device list filtering and sorting
-  gOLEDEspNowState.filterMode = 0;  // All devices
-  gOLEDEspNowState.sortMode = 0;    // Sort by name
-  memset(gOLEDEspNowState.filterValue, 0, sizeof(gOLEDEspNowState.filterValue));
+  gOledEspNowState.filterMode = 0;  // All devices
+  gOledEspNowState.sortMode = 0;    // Sort by name
+  memset(gOledEspNowState.filterValue, 0, sizeof(gOledEspNowState.filterValue));
   
   // Main menu state (Bluetooth-style)
-  gOLEDEspNowState.mainMenuSelection = 0;
-  gOLEDEspNowState.mainMenuScrollOffset = 0;
-  gOLEDEspNowState.showingStatusDetail = false;
+  gOledEspNowState.mainMenuSelection = 0;
+  gOledEspNowState.mainMenuScrollOffset = 0;
+  gOledEspNowState.showingStatusDetail = false;
   
   // Rooms view state
-  gOLEDEspNowState.roomsMenuSelection = 0;
-  gOLEDEspNowState.roomsDeviceSelection = 0;
-  gOLEDEspNowState.inRoomDeviceList = false;
+  gOledEspNowState.roomsMenuSelection = 0;
+  gOledEspNowState.roomsDeviceSelection = 0;
+  gOledEspNowState.inRoomDeviceList = false;
   
   // Start at main menu if ESP-NOW is initialized
   if (gEspNow && gEspNow->initialized) {
-    gOLEDEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
+    gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
   }
 }
 
 void oledEspNowShowInitPrompt() {
-  gOLEDEspNowState.currentView = ESPNOW_VIEW_INIT_PROMPT;
+  gOledEspNowState.currentView = ESPNOW_VIEW_INIT_PROMPT;
 }
 
 void oledEspNowShowNameKeyboard() {
-  gOLEDEspNowState.currentView = ESPNOW_VIEW_NAME_KEYBOARD;
+  gOledEspNowState.currentView = ESPNOW_VIEW_NAME_KEYBOARD;
   const char* initialText = "";
   if (gSettings.espnowDeviceName.length() > 0) {
     initialText = gSettings.espnowDeviceName.c_str();
@@ -111,15 +111,15 @@ void oledEspNowShowNameKeyboard() {
 void oledEspNowDisplay(Adafruit_SSD1306* display) {
   if (!display) return;
 
-  if (gOLEDEspNowState.currentView == ESPNOW_VIEW_INIT_PROMPT && gEspNow && gEspNow->initialized) {
+  if (gOledEspNowState.currentView == ESPNOW_VIEW_INIT_PROMPT && gEspNow && gEspNow->initialized) {
     oledEspNowInit();
   }
   
   // Handle views that don't require ESP-NOW to be initialized
-  if (gOLEDEspNowState.currentView == ESPNOW_VIEW_INIT_PROMPT ||
-      gOLEDEspNowState.currentView == ESPNOW_VIEW_NAME_KEYBOARD) {
+  if (gOledEspNowState.currentView == ESPNOW_VIEW_INIT_PROMPT ||
+      gOledEspNowState.currentView == ESPNOW_VIEW_NAME_KEYBOARD) {
     // These views are shown before ESP-NOW init
-    switch (gOLEDEspNowState.currentView) {
+    switch (gOledEspNowState.currentView) {
       case ESPNOW_VIEW_INIT_PROMPT:
         {
           // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
@@ -150,18 +150,18 @@ void oledEspNowDisplay(Adafruit_SSD1306* display) {
   
   // Refresh data periodically
   unsigned long now = millis();
-  if (now - gOLEDEspNowState.lastUpdate > 1000 || gOLEDEspNowState.needsRefresh) {
-    if (gOLEDEspNowState.currentView == ESPNOW_VIEW_DEVICE_LIST) {
+  if (now - gOledEspNowState.lastUpdate > 1000 || gOledEspNowState.needsRefresh) {
+    if (gOledEspNowState.currentView == ESPNOW_VIEW_DEVICE_LIST) {
       oledEspNowRefreshDeviceList();
-    } else if (gOLEDEspNowState.currentView == ESPNOW_VIEW_DEVICE_DETAIL) {
+    } else if (gOledEspNowState.currentView == ESPNOW_VIEW_DEVICE_DETAIL) {
       oledEspNowRefreshMessages();
     }
-    gOLEDEspNowState.lastUpdate = now;
-    gOLEDEspNowState.needsRefresh = false;
+    gOledEspNowState.lastUpdate = now;
+    gOledEspNowState.needsRefresh = false;
   }
   
   // Display current view
-  switch (gOLEDEspNowState.currentView) {
+  switch (gOledEspNowState.currentView) {
     case ESPNOW_VIEW_MAIN_MENU:
       oledEspNowDisplayMainMenu(display);
       break;
@@ -242,20 +242,20 @@ void oledEspNowDisplayMainMenu(Adafruit_SSD1306* display) {
   const int kTotalItems = ESPNOW_MENU_ITEM_COUNT;
   
   // Clamp selection
-  if (gOLEDEspNowState.mainMenuSelection >= kTotalItems) {
-    gOLEDEspNowState.mainMenuSelection = kTotalItems - 1;
+  if (gOledEspNowState.mainMenuSelection >= kTotalItems) {
+    gOledEspNowState.mainMenuSelection = kTotalItems - 1;
   }
-  if (gOLEDEspNowState.mainMenuSelection < 0) {
-    gOLEDEspNowState.mainMenuSelection = 0;
+  if (gOledEspNowState.mainMenuSelection < 0) {
+    gOledEspNowState.mainMenuSelection = 0;
   }
   
   // Adjust scroll offset to keep selection visible
-  int& scrollOffset = gOLEDEspNowState.mainMenuScrollOffset;
-  if (gOLEDEspNowState.mainMenuSelection < scrollOffset) {
-    scrollOffset = gOLEDEspNowState.mainMenuSelection;
+  int& scrollOffset = gOledEspNowState.mainMenuScrollOffset;
+  if (gOledEspNowState.mainMenuSelection < scrollOffset) {
+    scrollOffset = gOledEspNowState.mainMenuSelection;
   }
-  if (gOLEDEspNowState.mainMenuSelection >= scrollOffset + kMaxVisibleItems) {
-    scrollOffset = gOLEDEspNowState.mainMenuSelection - kMaxVisibleItems + 1;
+  if (gOledEspNowState.mainMenuSelection >= scrollOffset + kMaxVisibleItems) {
+    scrollOffset = gOledEspNowState.mainMenuSelection - kMaxVisibleItems + 1;
   }
   // Clamp scroll offset
   if (scrollOffset > kTotalItems - kMaxVisibleItems) {
@@ -270,7 +270,7 @@ void oledEspNowDisplayMainMenu(Adafruit_SSD1306* display) {
   for (int i = 0; i < kMaxVisibleItems && (scrollOffset + i) < kTotalItems; i++) {
     int itemIndex = scrollOffset + i;
     display->setCursor(0, menuStartY + i * kLineHeight);
-    if (itemIndex == gOLEDEspNowState.mainMenuSelection) {
+    if (itemIndex == gOledEspNowState.mainMenuSelection) {
       display->print("> ");
     } else {
       display->print("  ");
@@ -440,7 +440,7 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
   display->setTextSize(1);
   display->setTextColor(DISPLAY_COLOR_WHITE);
   
-  if (!gOLEDEspNowState.inRoomDeviceList) {
+  if (!gOledEspNowState.inRoomDeviceList) {
     // === Room list view ===
     if (sRoomCount == 0) {
       display->setCursor(0, OLED_CONTENT_START_Y);
@@ -456,26 +456,26 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
     const int maxVisible = OLED_CONTENT_HEIGHT / lineHeight;  // ~4 items
     
     // Clamp selection
-    if (gOLEDEspNowState.roomsMenuSelection >= sRoomCount) {
-      gOLEDEspNowState.roomsMenuSelection = sRoomCount - 1;
+    if (gOledEspNowState.roomsMenuSelection >= sRoomCount) {
+      gOledEspNowState.roomsMenuSelection = sRoomCount - 1;
     }
-    if (gOLEDEspNowState.roomsMenuSelection < 0) {
-      gOLEDEspNowState.roomsMenuSelection = 0;
+    if (gOledEspNowState.roomsMenuSelection < 0) {
+      gOledEspNowState.roomsMenuSelection = 0;
     }
     
     // Scroll offset
     static int roomsScrollOffset = 0;
-    if (gOLEDEspNowState.roomsMenuSelection < roomsScrollOffset) {
-      roomsScrollOffset = gOLEDEspNowState.roomsMenuSelection;
-    } else if (gOLEDEspNowState.roomsMenuSelection >= roomsScrollOffset + maxVisible) {
-      roomsScrollOffset = gOLEDEspNowState.roomsMenuSelection - maxVisible + 1;
+    if (gOledEspNowState.roomsMenuSelection < roomsScrollOffset) {
+      roomsScrollOffset = gOledEspNowState.roomsMenuSelection;
+    } else if (gOledEspNowState.roomsMenuSelection >= roomsScrollOffset + maxVisible) {
+      roomsScrollOffset = gOledEspNowState.roomsMenuSelection - maxVisible + 1;
     }
     
     for (int v = 0; v < maxVisible && (roomsScrollOffset + v) < sRoomCount; v++) {
       int idx = roomsScrollOffset + v;
       int y = OLED_CONTENT_START_Y + v * lineHeight;
       
-      if (idx == gOLEDEspNowState.roomsMenuSelection) {
+      if (idx == gOledEspNowState.roomsMenuSelection) {
         display->fillRect(0, y, 128, lineHeight, DISPLAY_COLOR_WHITE);
         display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
       } else {
@@ -503,7 +503,7 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
     // === Device list within a room ===
     // Title: room name
     display->setCursor(0, OLED_CONTENT_START_Y);
-    display->print(sRoomList[gOLEDEspNowState.roomsMenuSelection].name);
+    display->print(sRoomList[gOledEspNowState.roomsMenuSelection].name);
     display->drawFastHLine(0, OLED_CONTENT_START_Y + 9, 128, DISPLAY_COLOR_WHITE);
     
     if (sRoomDeviceCount == 0) {
@@ -513,11 +513,11 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
     }
     
     // Clamp selection
-    if (gOLEDEspNowState.roomsDeviceSelection >= sRoomDeviceCount) {
-      gOLEDEspNowState.roomsDeviceSelection = sRoomDeviceCount - 1;
+    if (gOledEspNowState.roomsDeviceSelection >= sRoomDeviceCount) {
+      gOledEspNowState.roomsDeviceSelection = sRoomDeviceCount - 1;
     }
-    if (gOLEDEspNowState.roomsDeviceSelection < 0) {
-      gOLEDEspNowState.roomsDeviceSelection = 0;
+    if (gOledEspNowState.roomsDeviceSelection < 0) {
+      gOledEspNowState.roomsDeviceSelection = 0;
     }
     
     const int lineHeight = 10;
@@ -525,17 +525,17 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
     const int maxVisible = (OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - listStartY) / lineHeight;  // ~3 items
     
     static int devScrollOffset = 0;
-    if (gOLEDEspNowState.roomsDeviceSelection < devScrollOffset) {
-      devScrollOffset = gOLEDEspNowState.roomsDeviceSelection;
-    } else if (gOLEDEspNowState.roomsDeviceSelection >= devScrollOffset + maxVisible) {
-      devScrollOffset = gOLEDEspNowState.roomsDeviceSelection - maxVisible + 1;
+    if (gOledEspNowState.roomsDeviceSelection < devScrollOffset) {
+      devScrollOffset = gOledEspNowState.roomsDeviceSelection;
+    } else if (gOledEspNowState.roomsDeviceSelection >= devScrollOffset + maxVisible) {
+      devScrollOffset = gOledEspNowState.roomsDeviceSelection - maxVisible + 1;
     }
     
     for (int v = 0; v < maxVisible && (devScrollOffset + v) < sRoomDeviceCount; v++) {
       int idx = devScrollOffset + v;
       int y = listStartY + v * lineHeight;
       
-      if (idx == gOLEDEspNowState.roomsDeviceSelection) {
+      if (idx == gOledEspNowState.roomsDeviceSelection) {
         display->fillRect(0, y, 128, lineHeight, DISPLAY_COLOR_WHITE);
         display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
       } else {
@@ -590,34 +590,34 @@ int oledEspNowGetMainMenuItemCount() {
 }
 
 void oledEspNowMainMenuUp() {
-  if (gOLEDEspNowState.mainMenuSelection > 0) {
-    gOLEDEspNowState.mainMenuSelection--;
+  if (gOledEspNowState.mainMenuSelection > 0) {
+    gOledEspNowState.mainMenuSelection--;
   }
 }
 
 void oledEspNowMainMenuDown() {
-  if (gOLEDEspNowState.mainMenuSelection < ESPNOW_MENU_ITEM_COUNT - 1) {
-    gOLEDEspNowState.mainMenuSelection++;
+  if (gOledEspNowState.mainMenuSelection < ESPNOW_MENU_ITEM_COUNT - 1) {
+    gOledEspNowState.mainMenuSelection++;
   }
 }
 
 void oledEspNowMainMenuSelect() {
-  switch (gOLEDEspNowState.mainMenuSelection) {
+  switch (gOledEspNowState.mainMenuSelection) {
     case 0:  // Status
-      gOLEDEspNowState.currentView = ESPNOW_VIEW_STATUS;
+      gOledEspNowState.currentView = ESPNOW_VIEW_STATUS;
       break;
     case 1:  // Devices
-      gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_LIST;
+      gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_LIST;
       oledEspNowRefreshDeviceList();
       break;
     case 2:  // Rooms
       rebuildRoomList();
-      gOLEDEspNowState.roomsMenuSelection = 0;
-      gOLEDEspNowState.inRoomDeviceList = false;
-      gOLEDEspNowState.currentView = ESPNOW_VIEW_ROOMS;
+      gOledEspNowState.roomsMenuSelection = 0;
+      gOledEspNowState.inRoomDeviceList = false;
+      gOledEspNowState.currentView = ESPNOW_VIEW_ROOMS;
       break;
     case 3:  // Settings
-      gOLEDEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
+      gOledEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
       break;
     case 4:  // Start/Stop
       {
@@ -630,7 +630,7 @@ void oledEspNowMainMenuSelect() {
       }
       break;
     case 5:  // Pairing
-      gOLEDEspNowState.currentView = ESPNOW_VIEW_PAIRING;
+      gOledEspNowState.currentView = ESPNOW_VIEW_PAIRING;
       break;
   }
 }
@@ -649,17 +649,17 @@ void oledEspNowDisplayDeviceList(Adafruit_SSD1306* display) {
   
   // Filter indicator: All, Room, Zone
   const char* filterStr = "";
-  if (gOLEDEspNowState.filterMode == 1) {
+  if (gOledEspNowState.filterMode == 1) {
     filterStr = "R";
-  } else if (gOLEDEspNowState.filterMode == 2) {
+  } else if (gOledEspNowState.filterMode == 2) {
     filterStr = "Z";
   }
   
   // Sort indicator: Name, Room, Status
   const char* sortStr = "N";
-  if (gOLEDEspNowState.sortMode == 1) {
+  if (gOledEspNowState.sortMode == 1) {
     sortStr = "Rm";
-  } else if (gOLEDEspNowState.sortMode == 2) {
+  } else if (gOledEspNowState.sortMode == 2) {
     sortStr = "St";
   }
   
@@ -669,18 +669,18 @@ void oledEspNowDisplayDeviceList(Adafruit_SSD1306* display) {
   } else {
     snprintf(titleBuf, sizeof(titleBuf), "ESP-NOW %s %s:%s", roleStr, filterStr[0] ? filterStr : "A", sortStr);
   }
-  gOLEDEspNowState.deviceList.title = titleBuf;
+  gOledEspNowState.deviceList.title = titleBuf;
   
   // Render device list using scrolling system
-  oledScrollRender(display, &gOLEDEspNowState.deviceList, true, true);
+  oledScrollRender(display, &gOledEspNowState.deviceList, true, true);
 }
 
 void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
   if (!display) return;
   
   // Look up mesh metadata and health for this device
-  MeshPeerMeta* meta = findPeerMeta(gOLEDEspNowState.selectedDeviceMac);
-  MeshPeerHealth* health = getMeshPeerHealth(gOLEDEspNowState.selectedDeviceMac, false);
+  MeshPeerMeta* meta = findPeerMeta(gOledEspNowState.selectedDeviceMac);
+  MeshPeerHealth* health = getMeshPeerHealth(gOledEspNowState.selectedDeviceMac, false);
   bool alive = health ? isMeshPeerAlive(health) : false;
   
   // Draw header with device name + online indicator
@@ -691,8 +691,8 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
   // Prefer friendly name from metadata
   String header = "";
   if (meta && meta->friendlyName[0]) header = meta->friendlyName;
-  else if (gOLEDEspNowState.selectedDeviceName.length() > 0) header = gOLEDEspNowState.selectedDeviceName;
-  else header = oledEspNowFormatMac(gOLEDEspNowState.selectedDeviceMac);
+  else if (gOledEspNowState.selectedDeviceName.length() > 0) header = gOledEspNowState.selectedDeviceName;
+  else header = oledEspNowFormatMac(gOledEspNowState.selectedDeviceMac);
   
   // Append online/offline indicator
   int maxNameLen = health ? 18 : 21;  // Reserve space for status if health data exists
@@ -712,16 +712,16 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
       display->print(meta->zone);
     }
     // Show mode indicator compactly on the right
-    const char* modeChar = gOLEDEspNowState.interactionMode == ESPNOW_MODE_TEXT ? "T" :
-                           gOLEDEspNowState.interactionMode == ESPNOW_MODE_REMOTE ? "R" : "F";
+    const char* modeChar = gOledEspNowState.interactionMode == ESPNOW_MODE_TEXT ? "T" :
+                           gOledEspNowState.interactionMode == ESPNOW_MODE_REMOTE ? "R" : "F";
     int modeX = 128 - 6;  // Right-align single char
     display->setCursor(modeX, 8);
     display->print(modeChar);
   } else {
     display->print("Mode: ");
-    if (gOLEDEspNowState.interactionMode == ESPNOW_MODE_TEXT) {
+    if (gOledEspNowState.interactionMode == ESPNOW_MODE_TEXT) {
       display->println("Text");
-    } else if (gOLEDEspNowState.interactionMode == ESPNOW_MODE_REMOTE) {
+    } else if (gOledEspNowState.interactionMode == ESPNOW_MODE_REMOTE) {
       display->println("Remote");
     } else {
       display->println("File");
@@ -732,7 +732,7 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
   display->drawFastHLine(0, 17, 128, DISPLAY_COLOR_WHITE);
   
   // If in File mode, show file browser prompt instead of message list
-  if (gOLEDEspNowState.interactionMode == ESPNOW_MODE_FILE) {
+  if (gOledEspNowState.interactionMode == ESPNOW_MODE_FILE) {
     display->setCursor(0, 20);
     display->setTextSize(1);
     display->println("File Transfer Mode");
@@ -745,16 +745,16 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
   
   // Render message list (offset by header height)
   int yOffset = 18;
-  int visibleStart = gOLEDEspNowState.messageList.scrollOffset;
-  int visibleEnd = min(gOLEDEspNowState.messageList.itemCount, 
-                       visibleStart + gOLEDEspNowState.messageList.visibleLines);
+  int visibleStart = gOledEspNowState.messageList.scrollOffset;
+  int visibleEnd = min(gOledEspNowState.messageList.itemCount, 
+                       visibleStart + gOledEspNowState.messageList.visibleLines);
   
   int yPos = yOffset;
   int lineHeight = 8;
   
   for (int i = visibleStart; i < visibleEnd && yPos < 56; i++) {
-    OLEDScrollItem* item = &gOLEDEspNowState.messageList.items[i];
-    bool isSelected = (i == gOLEDEspNowState.messageList.selectedIndex);
+    OLEDScrollItem* item = &gOledEspNowState.messageList.items[i];
+    bool isSelected = (i == gOledEspNowState.messageList.selectedIndex);
     
     // Draw selection indicator
     if (isSelected) {
@@ -783,18 +783,18 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
   }
   
   // Show scrollbar if needed
-  if (gOLEDEspNowState.messageList.itemCount > gOLEDEspNowState.messageList.visibleLines) {
+  if (gOledEspNowState.messageList.itemCount > gOledEspNowState.messageList.visibleLines) {
     int scrollbarX = SCREEN_WIDTH - 1;
     int scrollbarHeight = 38;  // 56 - 18
     int scrollbarY = yOffset;
     
     display->drawFastVLine(scrollbarX, scrollbarY, scrollbarHeight, DISPLAY_COLOR_WHITE);
     
-    int thumbHeight = max(4, (scrollbarHeight * gOLEDEspNowState.messageList.visibleLines) / 
-                            gOLEDEspNowState.messageList.itemCount);
+    int thumbHeight = max(4, (scrollbarHeight * gOledEspNowState.messageList.visibleLines) / 
+                            gOledEspNowState.messageList.itemCount);
     int thumbY = scrollbarY + (scrollbarHeight - thumbHeight) * 
-                 gOLEDEspNowState.messageList.scrollOffset / 
-                 max(1, gOLEDEspNowState.messageList.itemCount - gOLEDEspNowState.messageList.visibleLines);
+                 gOledEspNowState.messageList.scrollOffset / 
+                 max(1, gOledEspNowState.messageList.itemCount - gOledEspNowState.messageList.visibleLines);
     
     display->fillRect(scrollbarX - 1, thumbY, 3, thumbHeight, DISPLAY_COLOR_WHITE);
   }
@@ -815,7 +815,7 @@ void oledEspNowDisplayModeSelect(Adafruit_SSD1306* display) {
   
   // Draw options
   display->setCursor(24, 28);
-  if (gOLEDEspNowState.modeSelectorIndex == 0) {
+  if (gOledEspNowState.modeSelectorIndex == 0) {
     display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
     display->print("> Text     ");
   } else {
@@ -824,7 +824,7 @@ void oledEspNowDisplayModeSelect(Adafruit_SSD1306* display) {
   }
   
   display->setCursor(24, 36);
-  if (gOLEDEspNowState.modeSelectorIndex == 1) {
+  if (gOledEspNowState.modeSelectorIndex == 1) {
     display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
     display->print("> Remote   ");
   } else {
@@ -833,7 +833,7 @@ void oledEspNowDisplayModeSelect(Adafruit_SSD1306* display) {
   }
   
   display->setCursor(24, 44);
-  if (gOLEDEspNowState.modeSelectorIndex == 2) {
+  if (gOledEspNowState.modeSelectorIndex == 2) {
     display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
     display->print("> File     ");
   } else {
@@ -845,7 +845,7 @@ void oledEspNowDisplayModeSelect(Adafruit_SSD1306* display) {
 
 bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   // Handle input based on current view
-  switch (gOLEDEspNowState.currentView) {
+  switch (gOledEspNowState.currentView) {
     case ESPNOW_VIEW_INIT_PROMPT:
       // Init prompt is handled in oled_display.cpp
       return false;
@@ -881,61 +881,61 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     case ESPNOW_VIEW_PAIRING:
       // B button: Back to main menu
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
+        gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
         return true;
       }
       return false;
       
     case ESPNOW_VIEW_ROOMS:
-      if (!gOLEDEspNowState.inRoomDeviceList) {
+      if (!gOledEspNowState.inRoomDeviceList) {
         // Room list navigation
-        if (gNavEvents.up && gOLEDEspNowState.roomsMenuSelection > 0) {
-          gOLEDEspNowState.roomsMenuSelection--;
+        if (gNavEvents.up && gOledEspNowState.roomsMenuSelection > 0) {
+          gOledEspNowState.roomsMenuSelection--;
           return true;
         }
-        if (gNavEvents.down && gOLEDEspNowState.roomsMenuSelection < sRoomCount - 1) {
-          gOLEDEspNowState.roomsMenuSelection++;
+        if (gNavEvents.down && gOledEspNowState.roomsMenuSelection < sRoomCount - 1) {
+          gOledEspNowState.roomsMenuSelection++;
           return true;
         }
         // A button: drill into room
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) && sRoomCount > 0) {
-          rebuildRoomDeviceList(sRoomList[gOLEDEspNowState.roomsMenuSelection].name);
-          gOLEDEspNowState.roomsDeviceSelection = 0;
-          gOLEDEspNowState.inRoomDeviceList = true;
+          rebuildRoomDeviceList(sRoomList[gOledEspNowState.roomsMenuSelection].name);
+          gOledEspNowState.roomsDeviceSelection = 0;
+          gOledEspNowState.inRoomDeviceList = true;
           return true;
         }
         // B button: back to main menu
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-          gOLEDEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
+          gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
           return true;
         }
       } else {
         // Device list within room navigation
-        if (gNavEvents.up && gOLEDEspNowState.roomsDeviceSelection > 0) {
-          gOLEDEspNowState.roomsDeviceSelection--;
+        if (gNavEvents.up && gOledEspNowState.roomsDeviceSelection > 0) {
+          gOledEspNowState.roomsDeviceSelection--;
           return true;
         }
-        if (gNavEvents.down && gOLEDEspNowState.roomsDeviceSelection < sRoomDeviceCount - 1) {
-          gOLEDEspNowState.roomsDeviceSelection++;
+        if (gNavEvents.down && gOledEspNowState.roomsDeviceSelection < sRoomDeviceCount - 1) {
+          gOledEspNowState.roomsDeviceSelection++;
           return true;
         }
         // A button: select device -> go to device detail (if not local device)
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) && sRoomDeviceCount > 0) {
-          int sel = gOLEDEspNowState.roomsDeviceSelection;
+          int sel = gOledEspNowState.roomsDeviceSelection;
           // Check if this is a remote device (non-zero MAC)
           uint8_t zeroMac[6] = {0};
           if (memcmp(sRoomDevices[sel].mac, zeroMac, 6) != 0) {
-            memcpy(gOLEDEspNowState.selectedDeviceMac, sRoomDevices[sel].mac, 6);
-            gOLEDEspNowState.selectedDeviceName = sRoomDevices[sel].name;
-            gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
-            gOLEDEspNowState.needsRefresh = true;
+            memcpy(gOledEspNowState.selectedDeviceMac, sRoomDevices[sel].mac, 6);
+            gOledEspNowState.selectedDeviceName = sRoomDevices[sel].name;
+            gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+            gOledEspNowState.needsRefresh = true;
             oledEspNowRefreshMessages();
           }
           return true;
         }
         // B button: back to room list
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-          gOLEDEspNowState.inRoomDeviceList = false;
+          gOledEspNowState.inRoomDeviceList = false;
           return true;
         }
       }
@@ -944,11 +944,11 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     case ESPNOW_VIEW_DEVICE_LIST:
       // Navigate device list using centralized navigation events
       if (gNavEvents.up) {
-        oledScrollUp(&gOLEDEspNowState.deviceList);
+        oledScrollUp(&gOledEspNowState.deviceList);
         return true;
       }
       if (gNavEvents.down) {
-        oledScrollDown(&gOLEDEspNowState.deviceList);
+        oledScrollDown(&gOledEspNowState.deviceList);
         return true;
       }
       
@@ -960,40 +960,40 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       
       // X button: Cycle filter mode (All -> Room -> Zone -> All)
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-        gOLEDEspNowState.filterMode = (gOLEDEspNowState.filterMode + 1) % 3;
+        gOledEspNowState.filterMode = (gOledEspNowState.filterMode + 1) % 3;
         
         // If switching to room/zone filter, pick first available value
-        if (gOLEDEspNowState.filterMode > 0 && gMeshPeerMeta) {
-          memset(gOLEDEspNowState.filterValue, 0, sizeof(gOLEDEspNowState.filterValue));
+        if (gOledEspNowState.filterMode > 0 && gMeshPeerMeta) {
+          memset(gOledEspNowState.filterValue, 0, sizeof(gOledEspNowState.filterValue));
           
           // Find first device with room or zone set
           for (int i = 0; i < gMeshPeerSlots; i++) {
             if (!gMeshPeerMeta[i].isActive) continue;
             
-            if (gOLEDEspNowState.filterMode == 1 && gMeshPeerMeta[i].room[0]) {
-              strncpy(gOLEDEspNowState.filterValue, gMeshPeerMeta[i].room, sizeof(gOLEDEspNowState.filterValue) - 1);
+            if (gOledEspNowState.filterMode == 1 && gMeshPeerMeta[i].room[0]) {
+              strncpy(gOledEspNowState.filterValue, gMeshPeerMeta[i].room, sizeof(gOledEspNowState.filterValue) - 1);
               break;
-            } else if (gOLEDEspNowState.filterMode == 2 && gMeshPeerMeta[i].zone[0]) {
-              strncpy(gOLEDEspNowState.filterValue, gMeshPeerMeta[i].zone, sizeof(gOLEDEspNowState.filterValue) - 1);
+            } else if (gOledEspNowState.filterMode == 2 && gMeshPeerMeta[i].zone[0]) {
+              strncpy(gOledEspNowState.filterValue, gMeshPeerMeta[i].zone, sizeof(gOledEspNowState.filterValue) - 1);
               break;
             }
           }
         }
         
-        gOLEDEspNowState.needsRefresh = true;
+        gOledEspNowState.needsRefresh = true;
         return true;
       }
       
       // Y button: Cycle sort mode (Name -> Room -> Status -> Name)
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-        gOLEDEspNowState.sortMode = (gOLEDEspNowState.sortMode + 1) % 3;
-        gOLEDEspNowState.needsRefresh = true;
+        gOledEspNowState.sortMode = (gOledEspNowState.sortMode + 1) % 3;
+        gOledEspNowState.needsRefresh = true;
         return true;
       }
       
       // B button: Back to main menu
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
+        gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
         return true;
       }
       return false;  // No input handled
@@ -1007,14 +1007,14 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
           String value = oledKeyboardGetText();
           oledEspNowApplySettingsEdit(value);
           oledKeyboardReset();
-          gOLEDEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
+          gOledEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
         }
         return true;
       }
       // B button cancels keyboard
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
         oledKeyboardReset();
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
+        gOledEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
         return true;
       }
       return false;
@@ -1028,20 +1028,20 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
           String value = oledKeyboardGetText();
           oledEspNowApplyDeviceConfigEdit(value);
           oledKeyboardReset();
-          gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
+          gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
         }
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
         oledKeyboardReset();
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
+        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
         return true;
       }
       return false;
       
     case ESPNOW_VIEW_DEVICE_DETAIL:
       // If in File mode, A button opens file browser
-      if (gOLEDEspNowState.interactionMode == ESPNOW_MODE_FILE) {
+      if (gOledEspNowState.interactionMode == ESPNOW_MODE_FILE) {
         // A button: Open file browser
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
           extern void resetOLEDFileBrowser();
@@ -1049,22 +1049,22 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
           resetOLEDFileBrowser();
           return true;
         }
-      } else if (gOLEDEspNowState.interactionMode == ESPNOW_MODE_TEXT) {
+      } else if (gOledEspNowState.interactionMode == ESPNOW_MODE_TEXT) {
         // A button: Open text keyboard
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-          gOLEDEspNowState.currentView = ESPNOW_VIEW_TEXT_KEYBOARD;
-          gOLEDEspNowState.textMessageBuffer = "";
+          gOledEspNowState.currentView = ESPNOW_VIEW_TEXT_KEYBOARD;
+          gOledEspNowState.textMessageBuffer = "";
           oledKeyboardInit("Send Message:", "", 128);
           return true;
         }
         
         // Navigate message list using centralized navigation events
         if (gNavEvents.up) {
-          oledScrollUp(&gOLEDEspNowState.messageList);
+          oledScrollUp(&gOledEspNowState.messageList);
           return true;
         }
         if (gNavEvents.down) {
-          oledScrollDown(&gOLEDEspNowState.messageList);
+          oledScrollDown(&gOledEspNowState.messageList);
           return true;
         }
         
@@ -1073,24 +1073,24 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
           oledEspNowOpenDeviceConfig();
           return true;
         }
-      } else if (gOLEDEspNowState.interactionMode == ESPNOW_MODE_REMOTE) {
+      } else if (gOledEspNowState.interactionMode == ESPNOW_MODE_REMOTE) {
         // A button: Open remote form
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-          gOLEDEspNowState.currentView = ESPNOW_VIEW_REMOTE_FORM;
-          gOLEDEspNowState.remoteFormField = 0;
-          gOLEDEspNowState.remoteUsername = "";
-          gOLEDEspNowState.remotePassword = "";
-          gOLEDEspNowState.remoteCommand = "";
+          gOledEspNowState.currentView = ESPNOW_VIEW_REMOTE_FORM;
+          gOledEspNowState.remoteFormField = 0;
+          gOledEspNowState.remoteUsername = "";
+          gOledEspNowState.remotePassword = "";
+          gOledEspNowState.remoteCommand = "";
           return true;
         }
         
         // Navigate message list using centralized navigation events
         if (gNavEvents.up) {
-          oledScrollUp(&gOLEDEspNowState.messageList);
+          oledScrollUp(&gOledEspNowState.messageList);
           return true;
         }
         if (gNavEvents.down) {
-          oledScrollDown(&gOLEDEspNowState.messageList);
+          oledScrollDown(&gOledEspNowState.messageList);
           return true;
         }
         
@@ -1116,12 +1116,12 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       
     case ESPNOW_VIEW_MODE_SELECT:
       // Navigate mode selector using centralized navigation events
-      if (gNavEvents.up && gOLEDEspNowState.modeSelectorIndex > 0) {
-        gOLEDEspNowState.modeSelectorIndex--;
+      if (gNavEvents.up && gOledEspNowState.modeSelectorIndex > 0) {
+        gOledEspNowState.modeSelectorIndex--;
         return true;
       }
-      if (gNavEvents.down && gOLEDEspNowState.modeSelectorIndex < 2) {
-        gOLEDEspNowState.modeSelectorIndex++;
+      if (gNavEvents.down && gOledEspNowState.modeSelectorIndex < 2) {
+        gOledEspNowState.modeSelectorIndex++;
         return true;
       }
       
@@ -1133,7 +1133,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       
       // B button: Cancel
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
         return true;
       }
       return false;  // No input handled
@@ -1146,15 +1146,15 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       
       // Check if keyboard completed or cancelled
       if (oledKeyboardIsCompleted()) {
-        gOLEDEspNowState.textMessageBuffer = String(oledKeyboardGetText());
+        gOledEspNowState.textMessageBuffer = String(oledKeyboardGetText());
         oledEspNowSendTextMessage();
         oledKeyboardReset();
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
         return true;
       }
       if (oledKeyboardIsCancelled()) {
         oledKeyboardReset();
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
         return true;
       }
       return false;
@@ -1167,57 +1167,57 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 void oledEspNowSelectDevice() {
-  OLEDScrollItem* selected = oledScrollGetSelected(&gOLEDEspNowState.deviceList);
+  OLEDScrollItem* selected = oledScrollGetSelected(&gOledEspNowState.deviceList);
   if (!selected || !selected->userData) return;
   
   // Store selected device MAC
   EspNowDevice* device = (EspNowDevice*)selected->userData;
-  memcpy(gOLEDEspNowState.selectedDeviceMac, device->mac, 6);
-  gOLEDEspNowState.selectedDeviceName = String(device->name);
+  memcpy(gOledEspNowState.selectedDeviceMac, device->mac, 6);
+  gOledEspNowState.selectedDeviceName = String(device->name);
   
   // Switch to device detail view
-  gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
-  gOLEDEspNowState.needsRefresh = true;
+  gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+  gOledEspNowState.needsRefresh = true;
   
   // Refresh messages for this device
   oledEspNowRefreshMessages();
 }
 
 void oledEspNowBackToList() {
-  gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_LIST;
-  gOLEDEspNowState.needsRefresh = true;
+  gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_LIST;
+  gOledEspNowState.needsRefresh = true;
 }
 
 void oledEspNowOpenModeSelector() {
-  gOLEDEspNowState.currentView = ESPNOW_VIEW_MODE_SELECT;
+  gOledEspNowState.currentView = ESPNOW_VIEW_MODE_SELECT;
   // Map current mode to selector index: Text=0, Remote=1, File=2
-  if (gOLEDEspNowState.interactionMode == ESPNOW_MODE_TEXT) {
-    gOLEDEspNowState.modeSelectorIndex = 0;
-  } else if (gOLEDEspNowState.interactionMode == ESPNOW_MODE_REMOTE) {
-    gOLEDEspNowState.modeSelectorIndex = 1;
+  if (gOledEspNowState.interactionMode == ESPNOW_MODE_TEXT) {
+    gOledEspNowState.modeSelectorIndex = 0;
+  } else if (gOledEspNowState.interactionMode == ESPNOW_MODE_REMOTE) {
+    gOledEspNowState.modeSelectorIndex = 1;
   } else {
-    gOLEDEspNowState.modeSelectorIndex = 2;  // File
+    gOledEspNowState.modeSelectorIndex = 2;  // File
   }
-  gOLEDEspNowState.modeSelectorActive = true;
+  gOledEspNowState.modeSelectorActive = true;
 }
 
 void oledEspNowSelectMode() {
   // Map selector index to mode: 0=Text, 1=Remote, 2=File
-  if (gOLEDEspNowState.modeSelectorIndex == 0) {
-    gOLEDEspNowState.interactionMode = ESPNOW_MODE_TEXT;
-  } else if (gOLEDEspNowState.modeSelectorIndex == 1) {
-    gOLEDEspNowState.interactionMode = ESPNOW_MODE_REMOTE;
+  if (gOledEspNowState.modeSelectorIndex == 0) {
+    gOledEspNowState.interactionMode = ESPNOW_MODE_TEXT;
+  } else if (gOledEspNowState.modeSelectorIndex == 1) {
+    gOledEspNowState.interactionMode = ESPNOW_MODE_REMOTE;
   } else {
-    gOLEDEspNowState.interactionMode = ESPNOW_MODE_FILE;
+    gOledEspNowState.interactionMode = ESPNOW_MODE_FILE;
   }
-  gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
-  gOLEDEspNowState.modeSelectorActive = false;
+  gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+  gOledEspNowState.modeSelectorActive = false;
 }
 
 void oledEspNowUnpairDevice() {
   if (!gEspNow) return;
-  esp_now_del_peer(gOLEDEspNowState.selectedDeviceMac);
-  removeEspNowDevice(gOLEDEspNowState.selectedDeviceMac);
+  esp_now_del_peer(gOledEspNowState.selectedDeviceMac);
+  removeEspNowDevice(gOledEspNowState.selectedDeviceMac);
   oledEspNowBackToList();
 }
 
@@ -1269,7 +1269,7 @@ static int compareByStatus(const void* a, const void* b) {
 void oledEspNowRefreshDeviceList() {
   if (!gEspNow) return;
   
-  oledScrollClear(&gOLEDEspNowState.deviceList);
+  oledScrollClear(&gOledEspNowState.deviceList);
   
   // Get own MAC to skip self
   uint8_t myMac[6];
@@ -1297,12 +1297,12 @@ void oledEspNowRefreshDeviceList() {
     bool alive = health ? isMeshPeerAlive(health) : false;
     
     // Apply filter
-    if (gOLEDEspNowState.filterMode == 1) {  // Filter by room
-      if (!meta || !meta->room[0] || strcasecmp(meta->room, gOLEDEspNowState.filterValue) != 0) {
+    if (gOledEspNowState.filterMode == 1) {  // Filter by room
+      if (!meta || !meta->room[0] || strcasecmp(meta->room, gOledEspNowState.filterValue) != 0) {
         continue;  // Skip devices not in selected room
       }
-    } else if (gOLEDEspNowState.filterMode == 2) {  // Filter by zone
-      if (!meta || !meta->zone[0] || strcasecmp(meta->zone, gOLEDEspNowState.filterValue) != 0) {
+    } else if (gOledEspNowState.filterMode == 2) {  // Filter by zone
+      if (!meta || !meta->zone[0] || strcasecmp(meta->zone, gOledEspNowState.filterValue) != 0) {
         continue;  // Skip devices not in selected zone
       }
     }
@@ -1328,9 +1328,9 @@ void oledEspNowRefreshDeviceList() {
   
   // Sort entries based on sort mode
   if (entryCount > 1) {
-    if (gOLEDEspNowState.sortMode == 1) {  // Sort by room
+    if (gOledEspNowState.sortMode == 1) {  // Sort by room
       qsort(entries, entryCount, sizeof(DeviceEntry), compareByRoom);
-    } else if (gOLEDEspNowState.sortMode == 2) {  // Sort by status
+    } else if (gOledEspNowState.sortMode == 2) {  // Sort by status
       qsort(entries, entryCount, sizeof(DeviceEntry), compareByStatus);
     } else {  // Sort by name (default)
       qsort(entries, entryCount, sizeof(DeviceEntry), compareByName);
@@ -1355,34 +1355,34 @@ void oledEspNowRefreshDeviceList() {
                entry->device->encrypted ? " E" : "");
     }
     
-    oledScrollAddItem(&gOLEDEspNowState.deviceList, line1Bufs[i], line2Bufs[i], true, entry->device);
+    oledScrollAddItem(&gOledEspNowState.deviceList, line1Bufs[i], line2Bufs[i], true, entry->device);
   }
   
   // If no visible devices (excluding self), show message
   if (entryCount == 0) {
     static const char* noDevLine1 = "No devices";
     static const char* noDevLine2;
-    if (gOLEDEspNowState.filterMode > 0) {
+    if (gOledEspNowState.filterMode > 0) {
       noDevLine2 = "(filtered out)";
     } else {
       noDevLine2 = "Pair via web UI";
     }
-    oledScrollAddItem(&gOLEDEspNowState.deviceList, noDevLine1, noDevLine2, false, nullptr);
+    oledScrollAddItem(&gOledEspNowState.deviceList, noDevLine1, noDevLine2, false, nullptr);
   }
 }
 
 void oledEspNowRefreshMessages() {
   if (!gEspNow) return;
   
-  oledScrollClear(&gOLEDEspNowState.messageList);
+  oledScrollClear(&gOledEspNowState.messageList);
   
   // Get pointer to peer message history (direct access, no copy)
-  PeerMessageHistory* peerHistory = findOrCreatePeerHistory(gOLEDEspNowState.selectedDeviceMac);
+  PeerMessageHistory* peerHistory = findOrCreatePeerHistory(gOledEspNowState.selectedDeviceMac);
   if (!peerHistory || peerHistory->count == 0) {
     // No messages, show placeholder
     static const char* noMsgLine1 = "No messages yet";
     static const char* noMsgLine2 = "Start chatting!";
-    oledScrollAddItem(&gOLEDEspNowState.messageList, noMsgLine1, noMsgLine2, false, nullptr);
+    oledScrollAddItem(&gOledEspNowState.messageList, noMsgLine1, noMsgLine2, false, nullptr);
     return;
   }
   
@@ -1400,7 +1400,7 @@ void oledEspNowRefreshMessages() {
     if (!msg->active) continue;
     
     // SAFETY: Validate pointer is still within bounds
-    if (!oledEspNowValidateMessagePtr(msg, gOLEDEspNowState.selectedDeviceMac)) continue;
+    if (!oledEspNowValidateMessagePtr(msg, gOledEspNowState.selectedDeviceMac)) continue;
     
     // Use direct pointers to message buffer data (no String copies)
     const char* line1 = msg->message;
@@ -1422,7 +1422,7 @@ void oledEspNowRefreshMessages() {
     }
     
     // Add item with direct pointers - no data copying
-    oledScrollAddItem(&gOLEDEspNowState.messageList, line1, line2, true, (void*)msg);
+    oledScrollAddItem(&gOledEspNowState.messageList, line1, line2, true, (void*)msg);
   }
 }
 
@@ -1513,25 +1513,25 @@ void oledEspNowDisplayRemoteForm(Adafruit_SSD1306* display) {
   
   // Display form fields with selection indicator
   // Field 0: Username
-  if (gOLEDEspNowState.remoteFormField == 0) {
+  if (gOledEspNowState.remoteFormField == 0) {
     display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
   } else {
     display->setTextColor(DISPLAY_COLOR_WHITE);
   }
   display->print("> User: ");
-  display->println(gOLEDEspNowState.remoteUsername.length() > 0 ? 
-                   gOLEDEspNowState.remoteUsername.c_str() : "_____");
+  display->println(gOledEspNowState.remoteUsername.length() > 0 ? 
+                   gOledEspNowState.remoteUsername.c_str() : "_____");
   
   // Field 1: Password
-  if (gOLEDEspNowState.remoteFormField == 1) {
+  if (gOledEspNowState.remoteFormField == 1) {
     display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
   } else {
     display->setTextColor(DISPLAY_COLOR_WHITE);
   }
   display->print("> Pass: ");
   // Show asterisks for password
-  if (gOLEDEspNowState.remotePassword.length() > 0) {
-    for (size_t i = 0; i < gOLEDEspNowState.remotePassword.length(); i++) {
+  if (gOledEspNowState.remotePassword.length() > 0) {
+    for (size_t i = 0; i < gOledEspNowState.remotePassword.length(); i++) {
       display->print("*");
     }
     display->println();
@@ -1540,14 +1540,14 @@ void oledEspNowDisplayRemoteForm(Adafruit_SSD1306* display) {
   }
   
   // Field 2: Command
-  if (gOLEDEspNowState.remoteFormField == 2) {
+  if (gOledEspNowState.remoteFormField == 2) {
     display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
   } else {
     display->setTextColor(DISPLAY_COLOR_WHITE);
   }
   display->print("> Cmd: ");
-  display->println(gOLEDEspNowState.remoteCommand.length() > 0 ? 
-                   gOLEDEspNowState.remoteCommand.c_str() : "_____");
+  display->println(gOledEspNowState.remoteCommand.length() > 0 ? 
+                   gOledEspNowState.remoteCommand.c_str() : "_____");
 }
 
 bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPressed) {
@@ -1559,15 +1559,15 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
     // Check if keyboard completed
     if (oledKeyboardIsCompleted()) {
       const char* text = oledKeyboardGetText();
-      switch (gOLEDEspNowState.remoteFormField) {
+      switch (gOledEspNowState.remoteFormField) {
         case 0:
-          gOLEDEspNowState.remoteUsername = String(text);
+          gOledEspNowState.remoteUsername = String(text);
           break;
         case 1:
-          gOLEDEspNowState.remotePassword = String(text);
+          gOledEspNowState.remotePassword = String(text);
           break;
         case 2:
-          gOLEDEspNowState.remoteCommand = String(text);
+          gOledEspNowState.remoteCommand = String(text);
           break;
       }
       oledKeyboardReset();
@@ -1585,12 +1585,12 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
   
   // Keyboard not active - handle form navigation
   // Navigate between fields using centralized navigation events
-  if (gNavEvents.up && gOLEDEspNowState.remoteFormField > 0) {
-    gOLEDEspNowState.remoteFormField--;
+  if (gNavEvents.up && gOledEspNowState.remoteFormField > 0) {
+    gOledEspNowState.remoteFormField--;
     return true;
   }
-  if (gNavEvents.down && gOLEDEspNowState.remoteFormField < 2) {
-    gOLEDEspNowState.remoteFormField++;
+  if (gNavEvents.down && gOledEspNowState.remoteFormField < 2) {
+    gOledEspNowState.remoteFormField++;
     return true;
   }
   
@@ -1599,18 +1599,18 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
     const char* title = "";
     const char* initialText = "";
     
-    switch (gOLEDEspNowState.remoteFormField) {
+    switch (gOledEspNowState.remoteFormField) {
       case 0:
         title = "Username:";
-        initialText = gOLEDEspNowState.remoteUsername.c_str();
+        initialText = gOledEspNowState.remoteUsername.c_str();
         break;
       case 1:
         title = "Password:";
-        initialText = gOLEDEspNowState.remotePassword.c_str();
+        initialText = gOledEspNowState.remotePassword.c_str();
         break;
       case 2:
         title = "Command:";
-        initialText = gOLEDEspNowState.remoteCommand.c_str();
+        initialText = gOledEspNowState.remoteCommand.c_str();
         break;
     }
     
@@ -1621,13 +1621,13 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
   // Y button: Send remote command
   if (newlyPressed & GAMEPAD_BUTTON_Y) {
     oledEspNowSendRemoteCommand();
-    gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+    gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
     return true;
   }
   
   // B button: Cancel form
   if (newlyPressed & GAMEPAD_BUTTON_B) {
-    gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+    gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
     return true;
   }
   
@@ -1635,7 +1635,7 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
 }
 
 void oledEspNowSendTextMessage() {
-  if (!gEspNow || gOLEDEspNowState.textMessageBuffer.length() == 0) return;
+  if (!gEspNow || gOledEspNowState.textMessageBuffer.length() == 0) return;
   
   // Send text message to selected device
   extern void executeOLEDCommand(const String& argsInput);
@@ -1643,32 +1643,32 @@ void oledEspNowSendTextMessage() {
   // Format MAC address
   char macStr[18];
   snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-           gOLEDEspNowState.selectedDeviceMac[0],
-           gOLEDEspNowState.selectedDeviceMac[1],
-           gOLEDEspNowState.selectedDeviceMac[2],
-           gOLEDEspNowState.selectedDeviceMac[3],
-           gOLEDEspNowState.selectedDeviceMac[4],
-           gOLEDEspNowState.selectedDeviceMac[5]);
+           gOledEspNowState.selectedDeviceMac[0],
+           gOledEspNowState.selectedDeviceMac[1],
+           gOledEspNowState.selectedDeviceMac[2],
+           gOledEspNowState.selectedDeviceMac[3],
+           gOledEspNowState.selectedDeviceMac[4],
+           gOledEspNowState.selectedDeviceMac[5]);
   
   // Build command: espnow send <mac> <message>
   char cmdBuf[256];
-  snprintf(cmdBuf, sizeof(cmdBuf), "espnowsend %s %s", macStr, gOLEDEspNowState.textMessageBuffer.c_str());
+  snprintf(cmdBuf, sizeof(cmdBuf), "espnowsend %s %s", macStr, gOledEspNowState.textMessageBuffer.c_str());
   executeOLEDCommand(cmdBuf);
   
   // Clear buffer
-  gOLEDEspNowState.textMessageBuffer = "";
+  gOledEspNowState.textMessageBuffer = "";
   
   // Refresh message list
-  gOLEDEspNowState.needsRefresh = true;
+  gOledEspNowState.needsRefresh = true;
 }
 
 void oledEspNowSendRemoteCommand() {
   if (!gEspNow) return;
   
   // Validate that all fields are filled
-  if (gOLEDEspNowState.remoteUsername.length() == 0 ||
-      gOLEDEspNowState.remotePassword.length() == 0 ||
-      gOLEDEspNowState.remoteCommand.length() == 0) {
+  if (gOledEspNowState.remoteUsername.length() == 0 ||
+      gOledEspNowState.remotePassword.length() == 0 ||
+      gOledEspNowState.remoteCommand.length() == 0) {
     return;  // Don't send if any field is empty
   }
   
@@ -1677,28 +1677,28 @@ void oledEspNowSendRemoteCommand() {
   // Format MAC address
   char macStr[18];
   snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-           gOLEDEspNowState.selectedDeviceMac[0],
-           gOLEDEspNowState.selectedDeviceMac[1],
-           gOLEDEspNowState.selectedDeviceMac[2],
-           gOLEDEspNowState.selectedDeviceMac[3],
-           gOLEDEspNowState.selectedDeviceMac[4],
-           gOLEDEspNowState.selectedDeviceMac[5]);
+           gOledEspNowState.selectedDeviceMac[0],
+           gOledEspNowState.selectedDeviceMac[1],
+           gOledEspNowState.selectedDeviceMac[2],
+           gOledEspNowState.selectedDeviceMac[3],
+           gOledEspNowState.selectedDeviceMac[4],
+           gOledEspNowState.selectedDeviceMac[5]);
   
   // Build command: espnow remote <mac> <username> <password> <command>
   char cmdBuf[384];
   snprintf(cmdBuf, sizeof(cmdBuf), "espnowremote %s %s %s %s", macStr,
-           gOLEDEspNowState.remoteUsername.c_str(),
-           gOLEDEspNowState.remotePassword.c_str(),
-           gOLEDEspNowState.remoteCommand.c_str());
+           gOledEspNowState.remoteUsername.c_str(),
+           gOledEspNowState.remotePassword.c_str(),
+           gOledEspNowState.remoteCommand.c_str());
   executeOLEDCommand(cmdBuf);
   
   // Clear form
-  gOLEDEspNowState.remoteUsername = "";
-  gOLEDEspNowState.remotePassword = "";
-  gOLEDEspNowState.remoteCommand = "";
+  gOledEspNowState.remoteUsername = "";
+  gOledEspNowState.remotePassword = "";
+  gOledEspNowState.remoteCommand = "";
   
   // Refresh message list
-  gOLEDEspNowState.needsRefresh = true;
+  gOledEspNowState.needsRefresh = true;
 }
 
 // =============================================================================
@@ -1722,9 +1722,9 @@ static const char* espnowSettingsLabels[ESPNOW_SETTINGS_COUNT] = {
 };
 
 void oledEspNowOpenSettings() {
-  gOLEDEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
-  gOLEDEspNowState.settingsMenuIndex = 0;
-  gOLEDEspNowState.settingsEditField = -1;
+  gOledEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
+  gOledEspNowState.settingsMenuIndex = 0;
+  gOledEspNowState.settingsEditField = -1;
 }
 
 void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
@@ -1741,10 +1741,10 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
   
   // Calculate scroll offset to keep selection visible
   static int settingsScrollOffset = 0;
-  if (gOLEDEspNowState.settingsMenuIndex < settingsScrollOffset) {
-    settingsScrollOffset = gOLEDEspNowState.settingsMenuIndex;
-  } else if (gOLEDEspNowState.settingsMenuIndex >= settingsScrollOffset + maxVisible) {
-    settingsScrollOffset = gOLEDEspNowState.settingsMenuIndex - maxVisible + 1;
+  if (gOledEspNowState.settingsMenuIndex < settingsScrollOffset) {
+    settingsScrollOffset = gOledEspNowState.settingsMenuIndex;
+  } else if (gOledEspNowState.settingsMenuIndex >= settingsScrollOffset + maxVisible) {
+    settingsScrollOffset = gOledEspNowState.settingsMenuIndex - maxVisible + 1;
   }
   
   for (int v = 0; v < maxVisible && (settingsScrollOffset + v) < ESPNOW_SETTINGS_COUNT; v++) {
@@ -1752,7 +1752,7 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
     int y = startY + v * lineHeight;
     
     // Selection indicator
-    if (i == gOLEDEspNowState.settingsMenuIndex) {
+    if (i == gOledEspNowState.settingsMenuIndex) {
       display->fillRect(0, y, 2, lineHeight - 1, DISPLAY_COLOR_WHITE);
     }
     
@@ -1828,29 +1828,29 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
 
 bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   // Navigation
-  if (gNavEvents.up && gOLEDEspNowState.settingsMenuIndex > 0) {
-    gOLEDEspNowState.settingsMenuIndex--;
+  if (gNavEvents.up && gOledEspNowState.settingsMenuIndex > 0) {
+    gOledEspNowState.settingsMenuIndex--;
     return true;
   }
-  if (gNavEvents.down && gOLEDEspNowState.settingsMenuIndex < ESPNOW_SETTINGS_COUNT - 1) {
-    gOLEDEspNowState.settingsMenuIndex++;
+  if (gNavEvents.down && gOledEspNowState.settingsMenuIndex < ESPNOW_SETTINGS_COUNT - 1) {
+    gOledEspNowState.settingsMenuIndex++;
     return true;
   }
   
   // A button: Edit selected item
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    gOLEDEspNowState.settingsEditField = gOLEDEspNowState.settingsMenuIndex;
+    gOledEspNowState.settingsEditField = gOledEspNowState.settingsMenuIndex;
     
     // Stationary: toggle boolean via command
-    if (gOLEDEspNowState.settingsEditField == 5) {
+    if (gOledEspNowState.settingsEditField == 5) {
       extern void executeOLEDCommand(const String& argsInput);
       executeOLEDCommand(gSettings.espnowStationary ? "espnowstationary 0" : "espnowstationary 1");
-      gOLEDEspNowState.settingsEditField = -1;
+      gOledEspNowState.settingsEditField = -1;
       return true;
     }
     
     // Role: cycle through options via command
-    if (gOLEDEspNowState.settingsEditField == 7) {
+    if (gOledEspNowState.settingsEditField == 7) {
       extern void executeOLEDCommand(const String& argsInput);
       if (gSettings.meshRole == MESH_ROLE_WORKER) {
         executeOLEDCommand("espnowmeshrole master");
@@ -1859,16 +1859,16 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
       } else {
         executeOLEDCommand("espnowmeshrole worker");
       }
-      gOLEDEspNowState.settingsEditField = -1;
+      gOledEspNowState.settingsEditField = -1;
       return true;
     }
     
     // For other fields, open keyboard
-    const char* prompt = espnowSettingsLabels[gOLEDEspNowState.settingsEditField];
+    const char* prompt = espnowSettingsLabels[gOledEspNowState.settingsEditField];
     String initialValue = "";
     int maxLen = 32;
     
-    switch (gOLEDEspNowState.settingsEditField) {
+    switch (gOledEspNowState.settingsEditField) {
       case 0: // Device Name
         initialValue = gSettings.espnowDeviceName;
         maxLen = 16;
@@ -1904,13 +1904,13 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
     }
     
     oledKeyboardInit(prompt, initialValue.c_str(), maxLen);
-    gOLEDEspNowState.currentView = ESPNOW_VIEW_SETTINGS_KEYBOARD;
+    gOledEspNowState.currentView = ESPNOW_VIEW_SETTINGS_KEYBOARD;
     return true;
   }
   
   // B button: Back to main menu
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    gOLEDEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
+    gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
     return true;
   }
   
@@ -1920,7 +1920,7 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
 void oledEspNowApplySettingsEdit(const String& value) {
   extern void executeOLEDCommand(const String& argsInput);
   String cmd;
-  switch (gOLEDEspNowState.settingsEditField) {
+  switch (gOledEspNowState.settingsEditField) {
     case 0: // Device Name
       cmd = "espnowsetname " + value;
       break;
@@ -1951,7 +1951,7 @@ void oledEspNowApplySettingsEdit(const String& value) {
   if (cmd.length() > 0) {
     executeOLEDCommand(cmd);
   }
-  gOLEDEspNowState.settingsEditField = -1;
+  gOledEspNowState.settingsEditField = -1;
 }
 
 // ============================================================================
@@ -1972,9 +1972,9 @@ static const char* deviceConfigLabels[DEVICE_CONFIG_COUNT] = {
 };
 
 void oledEspNowOpenDeviceConfig() {
-  gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
-  gOLEDEspNowState.deviceConfigMenuIndex = 0;
-  gOLEDEspNowState.deviceConfigEditField = -1;
+  gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
+  gOledEspNowState.deviceConfigMenuIndex = 0;
+  gOledEspNowState.deviceConfigEditField = -1;
 }
 
 void oledEspNowDisplayDeviceConfig(Adafruit_SSD1306* display) {
@@ -1986,7 +1986,7 @@ void oledEspNowDisplayDeviceConfig(Adafruit_SSD1306* display) {
   // Header with device name
   display->setCursor(0, 0);
   display->print("Config: ");
-  String name = gOLEDEspNowState.selectedDeviceName;
+  String name = gOledEspNowState.selectedDeviceName;
   if (name.length() > 14) { name = name.substring(0, 13); name += '~'; }
   display->println(name);
   
@@ -2001,7 +2001,7 @@ void oledEspNowDisplayDeviceConfig(Adafruit_SSD1306* display) {
     if (y > 48) break;
     
     // Selection indicator
-    if (i == gOLEDEspNowState.deviceConfigMenuIndex) {
+    if (i == gOledEspNowState.deviceConfigMenuIndex) {
       display->fillRect(0, y, 2, lineHeight - 1, DISPLAY_COLOR_WHITE);
     }
     
@@ -2014,12 +2014,12 @@ void oledEspNowDisplayDeviceConfig(Adafruit_SSD1306* display) {
 
 bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   // Navigation
-  if (gNavEvents.up && gOLEDEspNowState.deviceConfigMenuIndex > 0) {
-    gOLEDEspNowState.deviceConfigMenuIndex--;
+  if (gNavEvents.up && gOledEspNowState.deviceConfigMenuIndex > 0) {
+    gOledEspNowState.deviceConfigMenuIndex--;
     return true;
   }
-  if (gNavEvents.down && gOLEDEspNowState.deviceConfigMenuIndex < DEVICE_CONFIG_COUNT - 1) {
-    gOLEDEspNowState.deviceConfigMenuIndex++;
+  if (gNavEvents.down && gOledEspNowState.deviceConfigMenuIndex < DEVICE_CONFIG_COUNT - 1) {
+    gOledEspNowState.deviceConfigMenuIndex++;
     return true;
   }
   
@@ -2028,52 +2028,52 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
     extern void executeOLEDCommand(const String& argsInput);
     char macStr[18];
     snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             gOLEDEspNowState.selectedDeviceMac[0],
-             gOLEDEspNowState.selectedDeviceMac[1],
-             gOLEDEspNowState.selectedDeviceMac[2],
-             gOLEDEspNowState.selectedDeviceMac[3],
-             gOLEDEspNowState.selectedDeviceMac[4],
-             gOLEDEspNowState.selectedDeviceMac[5]);
+             gOledEspNowState.selectedDeviceMac[0],
+             gOledEspNowState.selectedDeviceMac[1],
+             gOledEspNowState.selectedDeviceMac[2],
+             gOledEspNowState.selectedDeviceMac[3],
+             gOledEspNowState.selectedDeviceMac[4],
+             gOledEspNowState.selectedDeviceMac[5]);
     
-    switch (gOLEDEspNowState.deviceConfigMenuIndex) {
+    switch (gOledEspNowState.deviceConfigMenuIndex) {
       case 0: // Restart Device
         {
           char cmdBuf[64];
           snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s restart", macStr);
           executeOLEDCommand(cmdBuf);
           broadcastOutput("[ESP-NOW] Sent restart command");
-          gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+          gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
         }
         break;
         
       case 1: // Set Role
-        gOLEDEspNowState.deviceConfigEditField = 1;
+        gOledEspNowState.deviceConfigEditField = 1;
         oledKeyboardInit("Role (master/backup/worker):", "", 16);
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
+        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 2: // Set Name
-        gOLEDEspNowState.deviceConfigEditField = 2;
-        oledKeyboardInit("Device Name:", gOLEDEspNowState.selectedDeviceName.c_str(), 16);
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
+        gOledEspNowState.deviceConfigEditField = 2;
+        oledKeyboardInit("Device Name:", gOledEspNowState.selectedDeviceName.c_str(), 16);
+        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 3: // Set Room
-        gOLEDEspNowState.deviceConfigEditField = 3;
+        gOledEspNowState.deviceConfigEditField = 3;
         oledKeyboardInit("Room:", "", 16);
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
+        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 4: // Set Zone
-        gOLEDEspNowState.deviceConfigEditField = 4;
+        gOledEspNowState.deviceConfigEditField = 4;
         oledKeyboardInit("Zone:", "", 16);
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
+        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 5: // Set Pretty Name
-        gOLEDEspNowState.deviceConfigEditField = 5;
+        gOledEspNowState.deviceConfigEditField = 5;
         oledKeyboardInit("Pretty Name:", "", 24);
-        gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
+        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD;
         break;
         
       case 6: // Unpair Device
@@ -2085,7 +2085,7 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
   
   // B button: Back to device detail
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    gOLEDEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
+    gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
     return true;
   }
   
@@ -2094,21 +2094,21 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
 
 void oledEspNowApplyDeviceConfigEdit(const String& value) {
   if (value.length() == 0) {
-    gOLEDEspNowState.deviceConfigEditField = -1;
+    gOledEspNowState.deviceConfigEditField = -1;
     return;
   }
   
   extern void executeOLEDCommand(const String& argsInput);
   char macStr[18];
   snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-           gOLEDEspNowState.selectedDeviceMac[0],
-           gOLEDEspNowState.selectedDeviceMac[1],
-           gOLEDEspNowState.selectedDeviceMac[2],
-           gOLEDEspNowState.selectedDeviceMac[3],
-           gOLEDEspNowState.selectedDeviceMac[4],
-           gOLEDEspNowState.selectedDeviceMac[5]);
+           gOledEspNowState.selectedDeviceMac[0],
+           gOledEspNowState.selectedDeviceMac[1],
+           gOledEspNowState.selectedDeviceMac[2],
+           gOledEspNowState.selectedDeviceMac[3],
+           gOledEspNowState.selectedDeviceMac[4],
+           gOledEspNowState.selectedDeviceMac[5]);
   
-  switch (gOLEDEspNowState.deviceConfigEditField) {
+  switch (gOledEspNowState.deviceConfigEditField) {
     case 1: // Set Role
       {
         char cmdBuf[96];
@@ -2123,7 +2123,7 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
         char cmdBuf[96];
         snprintf(cmdBuf, sizeof(cmdBuf), "espnow cmd %s espnowname %s", macStr, value.c_str());
         executeOLEDCommand(cmdBuf);
-        gOLEDEspNowState.selectedDeviceName = value;
+        gOledEspNowState.selectedDeviceName = value;
         broadcastOutput("[ESP-NOW] Sent name change command");
       }
       break;
@@ -2156,7 +2156,7 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
       break;
   }
   
-  gOLEDEspNowState.deviceConfigEditField = -1;
+  gOledEspNowState.deviceConfigEditField = -1;
 }
 
 // ============================================================================

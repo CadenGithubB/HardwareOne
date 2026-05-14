@@ -21,7 +21,7 @@ struct APDSCache {
 // Forward declarations
 class String;
 
-extern APDSCache gAPDSCache;
+extern APDSCache gApdsCache;
 extern bool gApdsColorEnabled;
 extern bool gApdsProximityEnabled;
 extern bool gApdsGestureEnabled;

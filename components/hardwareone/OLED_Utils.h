@@ -232,7 +232,7 @@ struct OLEDKeyboardState {
 extern const char OLED_KEYBOARD_CHARS_UPPER[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
 extern const char OLED_KEYBOARD_CHARS_LOWER[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
 extern const char OLED_KEYBOARD_CHARS_NUMBERS[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
-extern OLEDKeyboardState gOLEDKeyboardState;
+extern OLEDKeyboardState gOledKeyboardState;
 
 void oledKeyboardInit(const char* title = nullptr, const char* initialText = nullptr, int maxLength = OLED_KEYBOARD_MAX_LENGTH);
 void oledKeyboardReset();

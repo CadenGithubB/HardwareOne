@@ -2812,10 +2812,10 @@ bool evaluateCondition(const char* condition) {
     uint16_t clear = 0;
     bool ok = false;
     {
-      SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(50), "automation.apdsLightRead");
+      SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(50), "automation.apdsLightRead");
       if (g.held) {
-        ok = gAPDSCache.apdsDataValid;
-        clear = gAPDSCache.apdsClear;
+        ok = gApdsCache.apdsDataValid;
+        clear = gApdsCache.apdsClear;
       }
     }
     if (!ok) return false;
@@ -2829,10 +2829,10 @@ bool evaluateCondition(const char* condition) {
     uint8_t prox = 0;
     bool ok = false;
     {
-      SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(50), "automation.apdsMotionRead");
+      SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(50), "automation.apdsMotionRead");
       if (g.held) {
-        ok = gAPDSCache.apdsDataValid;
-        prox = gAPDSCache.apdsProximity;
+        ok = gApdsCache.apdsDataValid;
+        prox = gApdsCache.apdsProximity;
       }
     }
     if (!ok) return false;

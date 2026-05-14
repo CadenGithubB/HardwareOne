@@ -105,7 +105,7 @@ struct OLEDEspNowState {
 };
 
 // Global ESP-NOW OLED state
-extern OLEDEspNowState gOLEDEspNowState;
+extern OLEDEspNowState gOledEspNowState;
 
 // Initialize OLED ESP-NOW interface
 void oledEspNowInit();

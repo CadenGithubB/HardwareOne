@@ -31,10 +31,10 @@
   #include "i2csensor-seesaw.h"     // gamepadEnabled, gamepadConnected
 #endif
 #if ENABLE_GPS_SENSOR
-  #include "i2csensor-pa1010d.h"    // GPSCache, gGPSCache
+  #include "i2csensor-pa1010d.h"    // GPSCache, gGpsCache
 #endif
 #if ENABLE_RTC_SENSOR
-  #include "i2csensor-ds3231.h"     // RTCCache, RTCDateTime, gRTCCache
+  #include "i2csensor-ds3231.h"     // RTCCache, RTCDateTime, gRtcCache
 #endif
 #if ENABLE_PRESENCE_SENSOR
   #include "i2csensor-sths34pf80.h" // presenceEnabled, presenceConnected, gPresenceCache
@@ -332,7 +332,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #if ENABLE_GPS_SENSOR
         extern bool gGpsEnabled;
         extern bool gGpsConnected;
-        extern GPSCache gGPSCache;
+        extern GPSCache gGpsCache;
         
         if (!gGpsEnabled || !gGpsConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
@@ -349,23 +349,23 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         uint16_t year = 0;
         
         {
-          SensorCacheGuard g(gGPSCache.mutex, pdMS_TO_TICKS(50), "web.gpsApi");
+          SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(50), "web.gpsApi");
           if (g.held) {
-            dataValid = gGPSCache.dataValid;
-            lat = gGPSCache.latitude;
-            lon = gGPSCache.longitude;
-            alt = gGPSCache.altitude;
-            speed = gGPSCache.speed;
-            angle = gGPSCache.angle;
-            hasFix = gGPSCache.hasFix;
-            quality = gGPSCache.fixQuality;
-            sats = gGPSCache.satellites;
-            hour = gGPSCache.hour;
-            minute = gGPSCache.minute;
-            second = gGPSCache.second;
-            day = gGPSCache.day;
-            month = gGPSCache.month;
-            year = gGPSCache.year;
+            dataValid = gGpsCache.dataValid;
+            lat = gGpsCache.latitude;
+            lon = gGpsCache.longitude;
+            alt = gGpsCache.altitude;
+            speed = gGpsCache.speed;
+            angle = gGpsCache.angle;
+            hasFix = gGpsCache.hasFix;
+            quality = gGpsCache.fixQuality;
+            sats = gGpsCache.satellites;
+            hour = gGpsCache.hour;
+            minute = gGpsCache.minute;
+            second = gGpsCache.second;
+            day = gGpsCache.day;
+            month = gGpsCache.month;
+            year = gGpsCache.year;
           }
         }
         
@@ -389,7 +389,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #if ENABLE_RTC_SENSOR
         extern bool gRtcEnabled;
         extern bool gRtcConnected;
-        extern RTCCache gRTCCache;
+        extern RTCCache gRtcCache;
         
         if (!gRtcEnabled || !gRtcConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
@@ -403,11 +403,11 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         float temp = 0.0f;
         
         {
-          SensorCacheGuard g(gRTCCache.mutex, pdMS_TO_TICKS(50), "web.rtcApi");
+          SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(50), "web.rtcApi");
           if (g.held) {
-            dataValid = gRTCCache.dataValid;
-            dt = gRTCCache.dateTime;
-            temp = gRTCCache.temperature;
+            dataValid = gRtcCache.dataValid;
+            dt = gRtcCache.dateTime;
+            temp = gRtcCache.temperature;
           }
         }
         

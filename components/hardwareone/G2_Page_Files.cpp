@@ -2,7 +2,7 @@
 // G2 glasses — "Files" page implementation
 // =============================================================================
 // Wraps a private FileManager instance. We deliberately don't share
-// gOLEDFileManager — the OLED browser uses it from the OLED render thread, so
+// gOledFileManager — the OLED browser uses it from the OLED render thread, so
 // reusing it here would mean either coordinating selection state across two
 // UIs or fighting over the cursor. A separate instance is cheap (~couple KB)
 // and decouples the two paths cleanly.

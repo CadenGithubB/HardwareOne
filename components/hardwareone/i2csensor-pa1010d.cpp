@@ -34,7 +34,7 @@ bool gGpsConnected = false;
 unsigned long gGpsLastStopTime = 0;
 
 // GPS cache for thread-safe data access (mutex created in setup())
-GPSCache gGPSCache = {
+GPSCache gGpsCache = {
   .mutex = nullptr,
   .latitude = 0.0f,
   .longitude = 0.0f,
@@ -71,9 +71,9 @@ bool gpsStartInternal() {
   }
 
   // Create cache mutex if not already created
-  if (!gGPSCache.mutex) {
-    gGPSCache.mutex = xSemaphoreCreateMutex();
-    if (!gGPSCache.mutex) {
+  if (!gGpsCache.mutex) {
+    gGpsCache.mutex = xSemaphoreCreateMutex();
+    if (!gGpsCache.mutex) {
       ERROR_GPSF("Failed to create cache mutex");
       return false;
     }
@@ -82,17 +82,17 @@ bool gpsStartInternal() {
 
   // Clean up any stale cache from previous run BEFORE starting
   {
-    SensorCacheGuard g(gGPSCache.mutex, pdMS_TO_TICKS(100), "gps.cleanStaleCache");
+    SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(100), "gps.cleanStaleCache");
     if (g.held) {
-      gGPSCache.dataValid = false;
-      gGPSCache.latitude = 0.0f;
-      gGPSCache.longitude = 0.0f;
-      gGPSCache.altitude = 0.0f;
-      gGPSCache.speed = 0.0f;
-      gGPSCache.angle = 0.0f;
-      gGPSCache.hasFix = false;
-      gGPSCache.fixQuality = 0;
-      gGPSCache.satellites = 0;
+      gGpsCache.dataValid = false;
+      gGpsCache.latitude = 0.0f;
+      gGpsCache.longitude = 0.0f;
+      gGpsCache.altitude = 0.0f;
+      gGpsCache.speed = 0.0f;
+      gGpsCache.angle = 0.0f;
+      gGpsCache.hasFix = false;
+      gGpsCache.fixQuality = 0;
+      gGpsCache.satellites = 0;
       DEBUG_GPS_LIFECYCLEF("[GPS] Cleaned up stale cache from previous run");
     }
   }
@@ -374,24 +374,24 @@ void gpsTask(void* parameter) {
       // Previously dataValid was set unconditionally, causing the sensor logger to
       // write the same stale position repeatedly between real fixes.
       if (parsedNewSentence) {
-        SensorCacheGuard g(gGPSCache.mutex, pdMS_TO_TICKS(50), "gps.pollWrite");
+        SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(50), "gps.pollWrite");
         if (g.held) {
-          gGPSCache.latitude = gPA1010D->latitudeDegrees;
-          gGPSCache.longitude = gPA1010D->longitudeDegrees;
-          gGPSCache.altitude = gPA1010D->altitude;
-          gGPSCache.speed = gPA1010D->speed;
-          gGPSCache.angle = gPA1010D->angle;
-          gGPSCache.hasFix = gPA1010D->fix;
-          gGPSCache.fixQuality = gPA1010D->fixquality;
-          gGPSCache.satellites = gPA1010D->satellites;
-          gGPSCache.year = 2000 + gPA1010D->year;
-          gGPSCache.month = gPA1010D->month;
-          gGPSCache.day = gPA1010D->day;
-          gGPSCache.hour = gPA1010D->hour;
-          gGPSCache.minute = gPA1010D->minute;
-          gGPSCache.second = gPA1010D->seconds;
-          gGPSCache.dataValid = true;
-          gGPSCache.lastUpdate = nowMs;
+          gGpsCache.latitude = gPA1010D->latitudeDegrees;
+          gGpsCache.longitude = gPA1010D->longitudeDegrees;
+          gGpsCache.altitude = gPA1010D->altitude;
+          gGpsCache.speed = gPA1010D->speed;
+          gGpsCache.angle = gPA1010D->angle;
+          gGpsCache.hasFix = gPA1010D->fix;
+          gGpsCache.fixQuality = gPA1010D->fixquality;
+          gGpsCache.satellites = gPA1010D->satellites;
+          gGpsCache.year = 2000 + gPA1010D->year;
+          gGpsCache.month = gPA1010D->month;
+          gGpsCache.day = gPA1010D->day;
+          gGpsCache.hour = gPA1010D->hour;
+          gGpsCache.minute = gPA1010D->minute;
+          gGpsCache.second = gPA1010D->seconds;
+          gGpsCache.dataValid = true;
+          gGpsCache.lastUpdate = nowMs;
 
           // Feed live track directly from GPS task (independent of sensor logging)
 #if ENABLE_MAPS

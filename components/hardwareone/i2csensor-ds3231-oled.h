@@ -33,11 +33,11 @@ static void displayRTCData() {
   float temp = 0.0f;
   bool valid = false;
   
-  if (gRTCCache.mutex && xSemaphoreTake(gRTCCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    dt = rtcLocalTime(&gRTCCache.dateTime);  // Apply timezone offset for display
-    temp = gRTCCache.temperature;
-    valid = gRTCCache.dataValid;
-    xSemaphoreGive(gRTCCache.mutex);
+  if (gRtcCache.mutex && xSemaphoreTake(gRtcCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    dt = rtcLocalTime(&gRtcCache.dateTime);  // Apply timezone offset for display
+    temp = gRtcCache.temperature;
+    valid = gRtcCache.dataValid;
+    xSemaphoreGive(gRtcCache.mutex);
   }
   
   if (!valid) {

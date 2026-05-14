@@ -293,9 +293,9 @@ int oledRenderHeader(Adafruit_SSD1306* display, const OLEDHeaderInfo* info) {
       }
     } else if (currentOLEDMode == OLED_FILE_BROWSER) {
       // File browser breadcrumb - show "Files>folder/sub"
-      extern FileManager* gOLEDFileManager;
-      if (gOLEDFileManager) {
-        const char* path = gOLEDFileManager->getCurrentPath();
+      extern FileManager* gOledFileManager;
+      if (gOledFileManager) {
+        const char* path = gOledFileManager->getCurrentPath();
         if (path && strcmp(path, "/") != 0) {
           // Truncate path to fit: "Files>" (6 chars) + path (max 15 chars)
           snprintf(breadcrumbBuf, sizeof(breadcrumbBuf), "Files>%s", path);
@@ -1165,7 +1165,7 @@ const char OLED_KEYBOARD_CHARS_NUMBERS[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS] =
 
 // Helper to get character at position based on current mode
 static char getCharAt(int row, int col) {
-  switch (gOLEDKeyboardState.mode) {
+  switch (gOledKeyboardState.mode) {
     case KEYBOARD_MODE_UPPERCASE: return OLED_KEYBOARD_CHARS_UPPER[row][col];
     case KEYBOARD_MODE_LOWERCASE: return OLED_KEYBOARD_CHARS_LOWER[row][col];
     case KEYBOARD_MODE_NUMBERS: return OLED_KEYBOARD_CHARS_NUMBERS[row][col];
@@ -1175,41 +1175,41 @@ static char getCharAt(int row, int col) {
 }
 
 // Global keyboard state
-OLEDKeyboardState gOLEDKeyboardState;
+OLEDKeyboardState gOledKeyboardState;
 
 void oledKeyboardInit(const char* title, const char* initialText, int maxLength) {
-  memset(gOLEDKeyboardState.text, 0, sizeof(gOLEDKeyboardState.text));
-  gOLEDKeyboardState.textLength = 0;
-  gOLEDKeyboardState.cursorX = 0;
-  gOLEDKeyboardState.cursorY = 0;
-  gOLEDKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;  // Start with lowercase
-  gOLEDKeyboardState.active = true;
-  gOLEDKeyboardState.cancelled = false;
-  gOLEDKeyboardState.completed = false;
-  gOLEDKeyboardState.title = title ? String(title) : "Enter Text:";
-  gOLEDKeyboardState.maxLength = min(maxLength, OLED_KEYBOARD_MAX_LENGTH);
+  memset(gOledKeyboardState.text, 0, sizeof(gOledKeyboardState.text));
+  gOledKeyboardState.textLength = 0;
+  gOledKeyboardState.cursorX = 0;
+  gOledKeyboardState.cursorY = 0;
+  gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;  // Start with lowercase
+  gOledKeyboardState.active = true;
+  gOledKeyboardState.cancelled = false;
+  gOledKeyboardState.completed = false;
+  gOledKeyboardState.title = title ? String(title) : "Enter Text:";
+  gOledKeyboardState.maxLength = min(maxLength, OLED_KEYBOARD_MAX_LENGTH);
   
   // Initialize autocomplete state
-  gOLEDKeyboardState.autocompleteFunc = nullptr;
-  gOLEDKeyboardState.autocompleteUserData = nullptr;
-  gOLEDKeyboardState.showingSuggestions = false;
-  gOLEDKeyboardState.suggestionCount = 0;
-  gOLEDKeyboardState.selectedSuggestion = 0;
-  memset(gOLEDKeyboardState.suggestions, 0, sizeof(gOLEDKeyboardState.suggestions));
+  gOledKeyboardState.autocompleteFunc = nullptr;
+  gOledKeyboardState.autocompleteUserData = nullptr;
+  gOledKeyboardState.showingSuggestions = false;
+  gOledKeyboardState.suggestionCount = 0;
+  gOledKeyboardState.selectedSuggestion = 0;
+  memset(gOledKeyboardState.suggestions, 0, sizeof(gOledKeyboardState.suggestions));
   
   // Copy initial text if provided
   if (initialText && strlen(initialText) > 0) {
-    strncpy(gOLEDKeyboardState.text, initialText, gOLEDKeyboardState.maxLength);
-    gOLEDKeyboardState.textLength = strlen(gOLEDKeyboardState.text);
+    strncpy(gOledKeyboardState.text, initialText, gOledKeyboardState.maxLength);
+    gOledKeyboardState.textLength = strlen(gOledKeyboardState.text);
   }
 }
 
 void oledKeyboardReset() {
-  gOLEDKeyboardState.active = false;
-  gOLEDKeyboardState.cancelled = false;
-  gOLEDKeyboardState.completed = false;
-  memset(gOLEDKeyboardState.text, 0, sizeof(gOLEDKeyboardState.text));
-  gOLEDKeyboardState.textLength = 0;
+  gOledKeyboardState.active = false;
+  gOledKeyboardState.cancelled = false;
+  gOledKeyboardState.completed = false;
+  memset(gOledKeyboardState.text, 0, sizeof(gOledKeyboardState.text));
+  gOledKeyboardState.textLength = 0;
 }
 
 void oledKeyboardDisplay(Adafruit_SSD1306* display) {
@@ -1222,7 +1222,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
   const int keyboardStartY = 0;
   
   // If showing suggestions, render suggestion list instead of keyboard
-  if (gOLEDKeyboardState.showingSuggestions && gOLEDKeyboardState.suggestionCount > 0) {
+  if (gOledKeyboardState.showingSuggestions && gOledKeyboardState.suggestionCount > 0) {
     // Title at top
     display->setCursor(0, keyboardStartY);
     display->print("Suggestions:");
@@ -1230,22 +1230,22 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
     // Show current input
     display->setCursor(75, keyboardStartY);
     char inputPreview[10];
-    strncpy(inputPreview, gOLEDKeyboardState.text, 8);
+    strncpy(inputPreview, gOledKeyboardState.text, 8);
     inputPreview[8] = '\0';
     display->print(inputPreview);
     
     // List suggestions (up to 5 visible with full screen)
-    int visibleCount = min(gOLEDKeyboardState.suggestionCount, 5);
+    int visibleCount = min(gOledKeyboardState.suggestionCount, 5);
     int startIdx = 0;
-    if (gOLEDKeyboardState.selectedSuggestion >= 5) {
-      startIdx = gOLEDKeyboardState.selectedSuggestion - 4;
+    if (gOledKeyboardState.selectedSuggestion >= 5) {
+      startIdx = gOledKeyboardState.selectedSuggestion - 4;
     }
     
-    for (int i = 0; i < visibleCount && (startIdx + i) < gOLEDKeyboardState.suggestionCount; i++) {
+    for (int i = 0; i < visibleCount && (startIdx + i) < gOledKeyboardState.suggestionCount; i++) {
       int idx = startIdx + i;
       int y = keyboardStartY + 10 + i * 11;
       
-      bool isSelected = (idx == gOLEDKeyboardState.selectedSuggestion);
+      bool isSelected = (idx == gOledKeyboardState.selectedSuggestion);
       
       if (isSelected) {
         display->fillRect(0, y - 1, 128, 10, DISPLAY_COLOR_WHITE);
@@ -1255,7 +1255,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
       }
       
       display->setCursor(2, y);
-      const char* suggestion = gOLEDKeyboardState.suggestions[idx];
+      const char* suggestion = gOledKeyboardState.suggestions[idx];
       if (suggestion) {
         // Truncate long names
         char truncated[22];
@@ -1272,20 +1272,20 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
   }
   
   // Pattern mode display (replaces grid with compass/direction input)
-  if (gOLEDKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
+  if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
     // Title at top
     display->setCursor(0, keyboardStartY);
-    display->print(gOLEDKeyboardState.title);
+    display->print(gOledKeyboardState.title);
 
     // Text preview box - show pattern as arrow characters
     display->drawRect(0, keyboardStartY + 9, 128, 11, DISPLAY_COLOR_WHITE);
     display->setCursor(2, keyboardStartY + 11);
     int startChar = 0;
-    if (gOLEDKeyboardState.textLength > 20) {
-      startChar = gOLEDKeyboardState.textLength - 20;
+    if (gOledKeyboardState.textLength > 20) {
+      startChar = gOledKeyboardState.textLength - 20;
     }
-    for (int i = startChar; i < gOLEDKeyboardState.textLength; i++) {
-      display->print(gOLEDKeyboardState.text[i]);
+    for (int i = startChar; i < gOledKeyboardState.textLength; i++) {
+      display->print(gOledKeyboardState.text[i]);
     }
     if ((millis() / 500) % 2 == 0) {
       display->print("_");
@@ -1307,7 +1307,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
 
     // Move count (right side)
     char buf[16];
-    snprintf(buf, sizeof(buf), "%d moves", gOLEDKeyboardState.textLength);
+    snprintf(buf, sizeof(buf), "%d moves", gOledKeyboardState.textLength);
     display->setCursor(64, compassY + 5);
     display->print(buf);
 
@@ -1317,11 +1317,11 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
   // Normal keyboard display
   // Draw title at top
   display->setCursor(0, keyboardStartY);
-  display->print(gOLEDKeyboardState.title);
+  display->print(gOledKeyboardState.title);
   
   // Show mode indicator at right edge (compact format)
   const char* modeStr = "";
-  switch (gOLEDKeyboardState.mode) {
+  switch (gOledKeyboardState.mode) {
     case KEYBOARD_MODE_UPPERCASE: modeStr = "ABC"; break;
     case KEYBOARD_MODE_LOWERCASE: modeStr = "abc"; break;
     case KEYBOARD_MODE_NUMBERS: modeStr = "123"; break;
@@ -1337,11 +1337,11 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
   display->setCursor(2, keyboardStartY + 11);
   
   // Show current text with cursor
-  int textLen = strlen(gOLEDKeyboardState.text);
-  const char* displayStart = gOLEDKeyboardState.text;
+  int textLen = strlen(gOledKeyboardState.text);
+  const char* displayStart = gOledKeyboardState.text;
   if (textLen > 20) {
     // Scroll text if too long
-    displayStart = gOLEDKeyboardState.text + (textLen - 20);
+    displayStart = gOledKeyboardState.text + (textLen - 20);
   }
   display->print(displayStart);
   
@@ -1363,7 +1363,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
       char c = getCharAt(row, col);
       
       // Highlight current cursor position
-      bool isCursor = (col == gOLEDKeyboardState.cursorX && row == gOLEDKeyboardState.cursorY);
+      bool isCursor = (col == gOledKeyboardState.cursorX && row == gOledKeyboardState.cursorY);
       
       if (isCursor) {
         // Draw filled rectangle for cursor
@@ -1396,7 +1396,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
 }
 
 bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
-  if (!gOLEDKeyboardState.active) {
+  if (!gOledKeyboardState.active) {
     // Reset state when keyboard becomes inactive
     return false;
   }
@@ -1404,17 +1404,17 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   bool inputHandled = false;
   
   // Handle suggestion mode differently
-  if (gOLEDKeyboardState.showingSuggestions) {
+  if (gOledKeyboardState.showingSuggestions) {
     // Y-axis navigates suggestions
     if (abs(deltaY) > JOYSTICK_DEADZONE) {
       static unsigned long lastSuggMove = 0;
       if (millis() - lastSuggMove > 150) {
-        if (deltaY > 0 && gOLEDKeyboardState.selectedSuggestion < gOLEDKeyboardState.suggestionCount - 1) {
-          gOLEDKeyboardState.selectedSuggestion++;
+        if (deltaY > 0 && gOledKeyboardState.selectedSuggestion < gOledKeyboardState.suggestionCount - 1) {
+          gOledKeyboardState.selectedSuggestion++;
           lastSuggMove = millis();
           inputHandled = true;
-        } else if (deltaY < 0 && gOLEDKeyboardState.selectedSuggestion > 0) {
-          gOLEDKeyboardState.selectedSuggestion--;
+        } else if (deltaY < 0 && gOledKeyboardState.selectedSuggestion > 0) {
+          gOledKeyboardState.selectedSuggestion--;
           lastSuggMove = millis();
           inputHandled = true;
         }
@@ -1439,7 +1439,7 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   }
   
   // Pattern mode: joystick directions add direction characters directly
-  if (gOLEDKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
+  if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
     static bool patternWasDeflected = false;
 
     bool deflected = (abs(deltaX) > JOYSTICK_DEADZONE) || (abs(deltaY) > JOYSTICK_DEADZONE);
@@ -1457,10 +1457,10 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         dirChar = (deltaY > 0) ? PATTERN_DOWN : PATTERN_UP;
       }
 
-      if (dirChar && gOLEDKeyboardState.textLength < gOLEDKeyboardState.maxLength) {
-        gOLEDKeyboardState.text[gOLEDKeyboardState.textLength] = dirChar;
-        gOLEDKeyboardState.textLength++;
-        gOLEDKeyboardState.text[gOLEDKeyboardState.textLength] = '\0';
+      if (dirChar && gOledKeyboardState.textLength < gOledKeyboardState.maxLength) {
+        gOledKeyboardState.text[gOledKeyboardState.textLength] = dirChar;
+        gOledKeyboardState.textLength++;
+        gOledKeyboardState.text[gOledKeyboardState.textLength] = '\0';
         inputHandled = true;
       }
     }
@@ -1578,9 +1578,9 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   }
   
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-    DEBUG_DISPLAYF("[KEYBOARD] Y button pressed - backspace (textLen=%d)\n", gOLEDKeyboardState.textLength);
+    DEBUG_DISPLAYF("[KEYBOARD] Y button pressed - backspace (textLen=%d)\n", gOledKeyboardState.textLength);
     oledKeyboardBackspace();
-    DEBUG_DISPLAYF("[KEYBOARD] After backspace: textLen=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD] After backspace: textLen=%d text='%s'\n", gOledKeyboardState.textLength, gOledKeyboardState.text);
     inputHandled = true;
   }
   
@@ -1598,7 +1598,7 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   // SELECT button: autocomplete if provider set, otherwise toggle keyboard mode
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_SELECT)) {
-    if (gOLEDKeyboardState.autocompleteFunc) {
+    if (gOledKeyboardState.autocompleteFunc) {
       DEBUG_DISPLAYF("[KEYBOARD] SELECT button pressed - triggering autocomplete");
       oledKeyboardTriggerAutocomplete();
     } else {
@@ -1612,7 +1612,7 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   // that resulted in an action). This avoids spamming logs every frame when
   // the keyboard is idle.
   if (inputHandled) {
-    DEBUG_DISPLAYF("[KEYBOARD] HANDLED: dX=%d dY=%d newly=0x%08lX textLen=%d\n", deltaX, deltaY, (unsigned long)newlyPressed, gOLEDKeyboardState.textLength);
+    DEBUG_DISPLAYF("[KEYBOARD] HANDLED: dX=%d dY=%d newly=0x%08lX textLen=%d\n", deltaX, deltaY, (unsigned long)newlyPressed, gOledKeyboardState.textLength);
     static bool sLoggedMasks = false;
     if (!sLoggedMasks) {
       DEBUG_DISPLAYF("[KEYBOARD] Button masks: A=0x%08lX B=0x%08lX X=0x%08lX Y=0x%08lX START=0x%08lX SEL=0x%08lX\n", (unsigned long)INPUT_MASK(INPUT_BUTTON_A), (unsigned long)INPUT_MASK(INPUT_BUTTON_B), 
@@ -1626,58 +1626,58 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 const char* oledKeyboardGetText() {
-  return gOLEDKeyboardState.text;
+  return gOledKeyboardState.text;
 }
 
 bool oledKeyboardIsActive() {
-  return gOLEDKeyboardState.active;
+  return gOledKeyboardState.active;
 }
 
 bool oledKeyboardIsCompleted() {
-  return gOLEDKeyboardState.completed;
+  return gOledKeyboardState.completed;
 }
 
 bool oledKeyboardIsCancelled() {
-  return gOLEDKeyboardState.cancelled;
+  return gOledKeyboardState.cancelled;
 }
 
 void oledKeyboardMoveUp() {
-  if (gOLEDKeyboardState.cursorY > 0) {
-    gOLEDKeyboardState.cursorY--;
+  if (gOledKeyboardState.cursorY > 0) {
+    gOledKeyboardState.cursorY--;
   } else {
-    gOLEDKeyboardState.cursorY = OLED_KEYBOARD_ROWS - 1;  // Wrap to bottom
+    gOledKeyboardState.cursorY = OLED_KEYBOARD_ROWS - 1;  // Wrap to bottom
   }
 }
 
 void oledKeyboardMoveDown() {
-  if (gOLEDKeyboardState.cursorY < OLED_KEYBOARD_ROWS - 1) {
-    gOLEDKeyboardState.cursorY++;
+  if (gOledKeyboardState.cursorY < OLED_KEYBOARD_ROWS - 1) {
+    gOledKeyboardState.cursorY++;
   } else {
-    gOLEDKeyboardState.cursorY = 0;  // Wrap to top
+    gOledKeyboardState.cursorY = 0;  // Wrap to top
   }
 }
 
 void oledKeyboardMoveLeft() {
-  if (gOLEDKeyboardState.cursorX > 0) {
-    gOLEDKeyboardState.cursorX--;
+  if (gOledKeyboardState.cursorX > 0) {
+    gOledKeyboardState.cursorX--;
   } else {
-    gOLEDKeyboardState.cursorX = OLED_KEYBOARD_COLS - 1;  // Wrap to right
+    gOledKeyboardState.cursorX = OLED_KEYBOARD_COLS - 1;  // Wrap to right
   }
 }
 
 void oledKeyboardMoveRight() {
-  if (gOLEDKeyboardState.cursorX < OLED_KEYBOARD_COLS - 1) {
-    gOLEDKeyboardState.cursorX++;
+  if (gOledKeyboardState.cursorX < OLED_KEYBOARD_COLS - 1) {
+    gOledKeyboardState.cursorX++;
   } else {
-    gOLEDKeyboardState.cursorX = 0;  // Wrap to left
+    gOledKeyboardState.cursorX = 0;  // Wrap to left
   }
 }
 
 void oledKeyboardSelectChar() {
   // Get character at current cursor position
-  char selectedChar = getCharAt(gOLEDKeyboardState.cursorY, gOLEDKeyboardState.cursorX);
+  char selectedChar = getCharAt(gOledKeyboardState.cursorY, gOledKeyboardState.cursorX);
   
-  DEBUG_DISPLAYF("[KEYBOARD_SELECT] Cursor at [%d,%d] char='%c' (0x%02X)\n", gOLEDKeyboardState.cursorX, gOLEDKeyboardState.cursorY, 
+  DEBUG_DISPLAYF("[KEYBOARD_SELECT] Cursor at [%d,%d] char='%c' (0x%02X)\n", gOledKeyboardState.cursorX, gOledKeyboardState.cursorY, 
                 selectedChar, (unsigned char)selectedChar);
   // Handle special characters
   if (selectedChar == CHAR_MODE) {
@@ -1693,44 +1693,44 @@ void oledKeyboardSelectChar() {
   }
   
   // Add character if not at max length
-  if (gOLEDKeyboardState.textLength < gOLEDKeyboardState.maxLength) {
-    gOLEDKeyboardState.text[gOLEDKeyboardState.textLength] = selectedChar;
-    gOLEDKeyboardState.textLength++;
-    gOLEDKeyboardState.text[gOLEDKeyboardState.textLength] = '\0';
-    DEBUG_DISPLAYF("[KEYBOARD_SELECT] Added char: textLength=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
+  if (gOledKeyboardState.textLength < gOledKeyboardState.maxLength) {
+    gOledKeyboardState.text[gOledKeyboardState.textLength] = selectedChar;
+    gOledKeyboardState.textLength++;
+    gOledKeyboardState.text[gOledKeyboardState.textLength] = '\0';
+    DEBUG_DISPLAYF("[KEYBOARD_SELECT] Added char: textLength=%d text='%s'\n", gOledKeyboardState.textLength, gOledKeyboardState.text);
   } else {
-    DEBUG_DISPLAYF("[KEYBOARD_SELECT] At max length (%d), cannot add char\n", gOLEDKeyboardState.maxLength);
+    DEBUG_DISPLAYF("[KEYBOARD_SELECT] At max length (%d), cannot add char\n", gOledKeyboardState.maxLength);
   }
 }
 
 void oledKeyboardBackspace() {
-  DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] Called: textLength=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
-  if (gOLEDKeyboardState.textLength > 0) {
-    gOLEDKeyboardState.textLength--;
-    gOLEDKeyboardState.text[gOLEDKeyboardState.textLength] = '\0';
-    DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] Deleted char: new textLength=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
+  DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] Called: textLength=%d text='%s'\n", gOledKeyboardState.textLength, gOledKeyboardState.text);
+  if (gOledKeyboardState.textLength > 0) {
+    gOledKeyboardState.textLength--;
+    gOledKeyboardState.text[gOledKeyboardState.textLength] = '\0';
+    DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] Deleted char: new textLength=%d text='%s'\n", gOledKeyboardState.textLength, gOledKeyboardState.text);
   } else {
     DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] No characters to delete (textLength=0)");
   }
 }
 
 void oledKeyboardComplete() {
-  gOLEDKeyboardState.completed = true;
-  gOLEDKeyboardState.active = false;
+  gOledKeyboardState.completed = true;
+  gOledKeyboardState.active = false;
 }
 
 void oledKeyboardCancel() {
-  gOLEDKeyboardState.cancelled = true;
-  gOLEDKeyboardState.active = false;
+  gOledKeyboardState.cancelled = true;
+  gOledKeyboardState.active = false;
   DEBUG_DISPLAYF("[KEYBOARD] Cancelled");
 }
 
 void oledKeyboardToggleMode() {
   // Cycle through modes: lowercase -> uppercase -> numbers -> pattern -> lowercase
-  gOLEDKeyboardState.mode = (OLEDKeyboardMode)((gOLEDKeyboardState.mode + 1) % KEYBOARD_MODE_COUNT);
+  gOledKeyboardState.mode = (OLEDKeyboardMode)((gOledKeyboardState.mode + 1) % KEYBOARD_MODE_COUNT);
   
   const char* modeName = "unknown";
-  switch (gOLEDKeyboardState.mode) {
+  switch (gOledKeyboardState.mode) {
     case KEYBOARD_MODE_UPPERCASE: modeName = "UPPERCASE"; break;
     case KEYBOARD_MODE_LOWERCASE: modeName = "lowercase"; break;
     case KEYBOARD_MODE_NUMBERS: modeName = "123/symbols"; break;
@@ -1746,45 +1746,45 @@ void oledKeyboardToggleMode() {
 // ============================================================================
 
 void oledKeyboardSetAutocomplete(OLEDKeyboardAutocompleteFunc func, void* userData) {
-  gOLEDKeyboardState.autocompleteFunc = func;
-  gOLEDKeyboardState.autocompleteUserData = userData;
+  gOledKeyboardState.autocompleteFunc = func;
+  gOledKeyboardState.autocompleteUserData = userData;
   DEBUG_DISPLAYF("[KEYBOARD] Autocomplete provider %s\n", func ? "set" : "cleared");
 }
 
 void oledKeyboardTriggerAutocomplete() {
-  if (!gOLEDKeyboardState.autocompleteFunc) {
+  if (!gOledKeyboardState.autocompleteFunc) {
     DEBUG_DISPLAYF("[KEYBOARD] No autocomplete provider set");
     return;
   }
   
   // Call the autocomplete provider
-  gOLEDKeyboardState.suggestionCount = gOLEDKeyboardState.autocompleteFunc(
-    gOLEDKeyboardState.text,
-    gOLEDKeyboardState.suggestions,
+  gOledKeyboardState.suggestionCount = gOledKeyboardState.autocompleteFunc(
+    gOledKeyboardState.text,
+    gOledKeyboardState.suggestions,
     OLED_KEYBOARD_MAX_SUGGESTIONS,
-    gOLEDKeyboardState.autocompleteUserData
+    gOledKeyboardState.autocompleteUserData
   );
   
-  if (gOLEDKeyboardState.suggestionCount > 0) {
-    gOLEDKeyboardState.showingSuggestions = true;
-    gOLEDKeyboardState.selectedSuggestion = 0;
-    DEBUG_DISPLAYF("[KEYBOARD] Autocomplete found %d suggestions for '%s'\n", gOLEDKeyboardState.suggestionCount, gOLEDKeyboardState.text);
+  if (gOledKeyboardState.suggestionCount > 0) {
+    gOledKeyboardState.showingSuggestions = true;
+    gOledKeyboardState.selectedSuggestion = 0;
+    DEBUG_DISPLAYF("[KEYBOARD] Autocomplete found %d suggestions for '%s'\n", gOledKeyboardState.suggestionCount, gOledKeyboardState.text);
   } else {
-    DEBUG_DISPLAYF("[KEYBOARD] No suggestions found for '%s'\n", gOLEDKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD] No suggestions found for '%s'\n", gOledKeyboardState.text);
   }
 }
 
 void oledKeyboardSelectSuggestion() {
-  if (!gOLEDKeyboardState.showingSuggestions || gOLEDKeyboardState.suggestionCount == 0) {
+  if (!gOledKeyboardState.showingSuggestions || gOledKeyboardState.suggestionCount == 0) {
     return;
   }
   
-  const char* selected = gOLEDKeyboardState.suggestions[gOLEDKeyboardState.selectedSuggestion];
+  const char* selected = gOledKeyboardState.suggestions[gOledKeyboardState.selectedSuggestion];
   if (selected) {
     // Copy the selected suggestion to the text field
-    strncpy(gOLEDKeyboardState.text, selected, gOLEDKeyboardState.maxLength);
-    gOLEDKeyboardState.text[gOLEDKeyboardState.maxLength] = '\0';
-    gOLEDKeyboardState.textLength = strlen(gOLEDKeyboardState.text);
+    strncpy(gOledKeyboardState.text, selected, gOledKeyboardState.maxLength);
+    gOledKeyboardState.text[gOledKeyboardState.maxLength] = '\0';
+    gOledKeyboardState.textLength = strlen(gOledKeyboardState.text);
     DEBUG_DISPLAYF("[KEYBOARD] Selected suggestion: '%s'\n", selected);
   }
   
@@ -1792,13 +1792,13 @@ void oledKeyboardSelectSuggestion() {
 }
 
 void oledKeyboardDismissSuggestions() {
-  gOLEDKeyboardState.showingSuggestions = false;
-  gOLEDKeyboardState.suggestionCount = 0;
-  gOLEDKeyboardState.selectedSuggestion = 0;
+  gOledKeyboardState.showingSuggestions = false;
+  gOledKeyboardState.suggestionCount = 0;
+  gOledKeyboardState.selectedSuggestion = 0;
 }
 
 bool oledKeyboardShowingSuggestions() {
-  return gOLEDKeyboardState.showingSuggestions;
+  return gOledKeyboardState.showingSuggestions;
 }
 
 struct OLEDConfirmState {
@@ -1810,16 +1810,16 @@ struct OLEDConfirmState {
   void* userData;
 };
 
-static OLEDConfirmState gOLEDConfirmState = {false, nullptr, nullptr, true, nullptr, nullptr};
+static OLEDConfirmState gOledConfirmState = {false, nullptr, nullptr, true, nullptr, nullptr};
 
 bool oledConfirmRequest(const char* line1, const char* line2, OLEDConfirmCallback onYes, void* userData, bool defaultYes) {
-  if (gOLEDConfirmState.active) return false;
-  gOLEDConfirmState.active = true;
-  gOLEDConfirmState.line1 = line1;
-  gOLEDConfirmState.line2 = line2;
-  gOLEDConfirmState.selectYes = defaultYes;
-  gOLEDConfirmState.onYes = onYes;
-  gOLEDConfirmState.userData = userData;
+  if (gOledConfirmState.active) return false;
+  gOledConfirmState.active = true;
+  gOledConfirmState.line1 = line1;
+  gOledConfirmState.line2 = line2;
+  gOledConfirmState.selectYes = defaultYes;
+  gOledConfirmState.onYes = onYes;
+  gOledConfirmState.userData = userData;
 
   DEBUG_DISPLAYF("[OLED_CONFIRM] %s%s%s\n", line1 ? line1 : "",
                 (line1 && line2) ? " | " : "",
@@ -1830,44 +1830,44 @@ bool oledConfirmRequest(const char* line1, const char* line2, OLEDConfirmCallbac
 }
 
 bool oledConfirmIsActive() {
-  return gOLEDConfirmState.active;
+  return gOledConfirmState.active;
 }
 
 static void oledConfirmClose(bool confirmed) {
-  if (!gOLEDConfirmState.active) return;
+  if (!gOledConfirmState.active) return;
   DEBUG_DISPLAYF("[OLED_CONFIRM] %s\n", confirmed ? "CONFIRMED" : "CANCELLED");
-  gOLEDConfirmState.active = false;
-  gOLEDConfirmState.line1 = nullptr;
-  gOLEDConfirmState.line2 = nullptr;
-  gOLEDConfirmState.selectYes = true;
-  gOLEDConfirmState.onYes = nullptr;
-  gOLEDConfirmState.userData = nullptr;
+  gOledConfirmState.active = false;
+  gOledConfirmState.line1 = nullptr;
+  gOledConfirmState.line2 = nullptr;
+  gOledConfirmState.selectYes = true;
+  gOledConfirmState.onYes = nullptr;
+  gOledConfirmState.userData = nullptr;
   oledMarkDirty();
 }
 
 static bool oledConfirmHandleInput(uint32_t newlyPressed) {
-  if (!gOLEDConfirmState.active) return false;
+  if (!gOledConfirmState.active) return false;
 
   bool handled = false;
 
   if (gNavEvents.up) {
-    gOLEDConfirmState.selectYes = true;
+    gOledConfirmState.selectYes = true;
     oledMarkDirty();
     handled = true;
   } else if (gNavEvents.down) {
-    gOLEDConfirmState.selectYes = false;
+    gOledConfirmState.selectYes = false;
     oledMarkDirty();
     handled = true;
   } else if (gNavEvents.left || gNavEvents.right) {
-    gOLEDConfirmState.selectYes = !gOLEDConfirmState.selectYes;
+    gOledConfirmState.selectYes = !gOledConfirmState.selectYes;
     oledMarkDirty();
     handled = true;
   }
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    if (gOLEDConfirmState.selectYes) {
-      if (gOLEDConfirmState.onYes) {
-        gOLEDConfirmState.onYes(gOLEDConfirmState.userData);
+    if (gOledConfirmState.selectYes) {
+      if (gOledConfirmState.onYes) {
+        gOledConfirmState.onYes(gOledConfirmState.userData);
       }
       oledConfirmClose(true);
     } else {
@@ -1883,7 +1883,7 @@ static bool oledConfirmHandleInput(uint32_t newlyPressed) {
 }
 
 static void oledConfirmRender() {
-  if (!gOLEDConfirmState.active || !oledDisplay) return;
+  if (!gOledConfirmState.active || !oledDisplay) return;
 
   const int boxX = 2;
   const int boxY = 2;
@@ -1899,14 +1899,14 @@ static void oledConfirmRender() {
   oledDisplay->print("CONFIRM");
 
   int y = boxY + 14;
-  if (gOLEDConfirmState.line1) {
+  if (gOledConfirmState.line1) {
     oledDisplay->setCursor(boxX + 4, y);
-    oledDisplay->print(gOLEDConfirmState.line1);
+    oledDisplay->print(gOledConfirmState.line1);
     y += 10;
   }
-  if (gOLEDConfirmState.line2) {
+  if (gOledConfirmState.line2) {
     oledDisplay->setCursor(boxX + 4, y);
-    oledDisplay->print(gOLEDConfirmState.line2);
+    oledDisplay->print(gOledConfirmState.line2);
     y += 10;
   }
 
@@ -1915,7 +1915,7 @@ static void oledConfirmRender() {
   const int optW = boxW - 12;
   const int optH = 9;
 
-  if (gOLEDConfirmState.selectYes) {
+  if (gOledConfirmState.selectYes) {
     oledDisplay->fillRect(optX, optY, optW, optH, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
   } else {
@@ -1924,7 +1924,7 @@ static void oledConfirmRender() {
   oledDisplay->setCursor(optX + 2, optY + 1);
   oledDisplay->print("Yes");
 
-  if (!gOLEDConfirmState.selectYes) {
+  if (!gOledConfirmState.selectYes) {
     oledDisplay->fillRect(optX, optY + 10, optW, optH, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
   } else {
@@ -1944,7 +1944,7 @@ static void oledConfirmRender() {
 #include "System_Debug.h"  // For DEBUG_SYSTEMF, ERROR_SYSTEMF
 
 // Global instance
-OLEDConsoleBuffer gOLEDConsole;
+OLEDConsoleBuffer gOledConsole;
 
 // Constructor
 OLEDConsoleBuffer::OLEDConsoleBuffer() 
@@ -2160,15 +2160,15 @@ void drawOLEDFooter() {
   
   // Check if keyboard is active - override mode hints with keyboard hints
   if (oledKeyboardIsActive()) {
-    extern OLEDKeyboardState gOLEDKeyboardState;
-    if (gOLEDKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
+    extern OLEDKeyboardState gOledKeyboardState;
+    if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
       oledDisplay->print("A:Done Y:Undo B:");
       drawBackArrowIcon(oledDisplay, footerY);
-    } else if (gOLEDKeyboardState.showingSuggestions) {
+    } else if (gOledKeyboardState.showingSuggestions) {
       oledDisplay->print("A:Pick B:");
       drawBackArrowIcon(oledDisplay, footerY);
       oledDisplay->print("\x1e\x1f:Nav");
-    } else if (gOLEDKeyboardState.autocompleteFunc) {
+    } else if (gOledKeyboardState.autocompleteFunc) {
       oledDisplay->print("A:Sel Y:Del S:OK");
     } else {
       oledDisplay->print("A:Sel Y:Del B:");
@@ -2198,8 +2198,8 @@ void drawOLEDFooter() {
     case OLED_ESPNOW:
       #if ENABLE_ESPNOW
       {
-        extern OLEDEspNowState gOLEDEspNowState;
-        switch (gOLEDEspNowState.currentView) {
+        extern OLEDEspNowState gOledEspNowState;
+        switch (gOledEspNowState.currentView) {
           case ESPNOW_VIEW_INIT_PROMPT:
             hints = "Y:Setup B:Back";
             break;
@@ -2303,9 +2303,9 @@ void drawOLEDFooter() {
     case OLED_CLI_VIEWER:
       {
         // Show selected/total in footer
-        extern OLEDConsoleBuffer gOLEDConsole;
+        extern OLEDConsoleBuffer gOledConsole;
         extern int getCLIViewerSelectedIndex();
-        int lineCount = gOLEDConsole.getLineCount();
+        int lineCount = gOledConsole.getLineCount();
         int selected = getCLIViewerSelectedIndex();
         static char cliHints[32];
         snprintf(cliHints, sizeof(cliHints), "A:Info B:Back [%d/%d]", selected, lineCount);
@@ -5990,7 +5990,7 @@ void tryAutoStartGamepadForMenu() {}
 // ============================================================================
 // OLED File Browser (128x64 optimized)
 // ============================================================================
-FileManager* gOLEDFileManager = nullptr;
+FileManager* gOledFileManager = nullptr;
 bool oledFileBrowserNeedsInit = true;
 
 // FileBrowserPendingAction, FileBrowserRenderData moved to OLED_Mode_FileBrowser.cpp

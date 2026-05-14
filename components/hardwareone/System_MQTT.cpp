@@ -1041,12 +1041,12 @@ void publishMQTTSensorData() {
 
 #if ENABLE_GPS_SENSOR
   if (gSettings.mqttPublishGPS && gGpsEnabled && gGpsConnected && gPA1010D) {
-    if (gGPSCache.hasFix) {
+    if (gGpsCache.hasFix) {
       pos += snprintf(jsonBuf + pos, 16384 - pos,
         ",\"gps\":{\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.1f,\"speed\":%.1f,\"satellites\":%d}",
-        gGPSCache.latitude, gGPSCache.longitude, gGPSCache.altitude, gGPSCache.speed, gGPSCache.satellites);
+        gGpsCache.latitude, gGpsCache.longitude, gGpsCache.altitude, gGpsCache.speed, gGpsCache.satellites);
     } else {
-      pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"gps\":{\"fix\":false,\"satellites\":%d}", gGPSCache.satellites);
+      pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"gps\":{\"fix\":false,\"satellites\":%d}", gGpsCache.satellites);
     }
   }
 #endif

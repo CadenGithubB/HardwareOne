@@ -17,7 +17,7 @@
 #include "System_Debug.h"
 #include "System_Utils.h"
 
-extern OLEDConsoleBuffer gOLEDConsole;
+extern OLEDConsoleBuffer gOledConsole;
 
 // Number of output preview lines shown above the keyboard
 static const int CLI_INPUT_PREVIEW_LINES = 2;
@@ -46,8 +46,8 @@ static void displayCLIInput() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 
   // Always show last N output lines at the top of the content area
-  if (gOLEDConsole.mutex && xSemaphoreTake(gOLEDConsole.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    int total = gOLEDConsole.getLineCount();
+  if (gOledConsole.mutex && xSemaphoreTake(gOledConsole.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    int total = gOledConsole.getLineCount();
     int previewY = OLED_CONTENT_START_Y;
 
     for (int i = 0; i < CLI_INPUT_PREVIEW_LINES; i++) {
@@ -56,7 +56,7 @@ static void displayCLIInput() {
         previewY += CLI_INPUT_LINE_HEIGHT;
         continue;
       }
-      const char* line = gOLEDConsole.getLine(idx);
+      const char* line = gOledConsole.getLine(idx);
       if (line) {
         oledDisplay->setCursor(0, previewY);
         char truncated[22];
@@ -66,7 +66,7 @@ static void displayCLIInput() {
       }
       previewY += CLI_INPUT_LINE_HEIGHT;
     }
-    xSemaphoreGive(gOLEDConsole.mutex);
+    xSemaphoreGive(gOledConsole.mutex);
   }
 
   // Separator line between preview and keyboard
@@ -107,10 +107,10 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       // Echo the command into the console so the user can see what was typed
       char echoBuf[64];
       snprintf(echoBuf, sizeof(echoBuf), "> %s", cmd.c_str());
-      gOLEDConsole.append(echoBuf, millis());
+      gOledConsole.append(echoBuf, millis());
 
       // Record console size before executing so we can detect new output
-      sPreSubmitCount = gOLEDConsole.getLineCount();
+      sPreSubmitCount = gOledConsole.getLineCount();
       sAwaitingResult = true;
 
       // Execute through the same auth context used by all OLED commands
@@ -119,9 +119,9 @@ static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
 
       // If the command produced no output to the console buffer itself,
       // show the returned string so there's always visible feedback.
-      if (gOLEDConsole.getLineCount() == sPreSubmitCount) {
+      if (gOledConsole.getLineCount() == sPreSubmitCount) {
         const char* feedback = (strlen(out) > 0) ? out : (ok ? "OK" : "Error");
-        gOLEDConsole.append(feedback, millis());
+        gOledConsole.append(feedback, millis());
       }
       sAwaitingResult = false;
     }

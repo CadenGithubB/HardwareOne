@@ -47,7 +47,7 @@ extern float gMapVelocityLon;
 extern float gMapRotationVelocity;
 
 // Singleton renderer for OLED (used only for overlays now)
-static OLEDMapRenderer* gOLEDMapRenderer = nullptr;
+static OLEDMapRenderer* gOledMapRenderer = nullptr;
 
 // =============================================================================
 // Async Double-Buffer Rendering
@@ -154,11 +154,11 @@ static const char* gMapsSubmenu[] = {
 static const int gMapsSubmenuCount = 5;
 
 #if ENABLE_GPS_SENSOR
-static const char* gGPSSubmenu[] = {
+static const char* gGpsSubmenu[] = {
   "Center on GPS", "Toggle GPS",
   "< Back"
 };
-static const int gGPSSubmenuCount = 3;
+static const int gGpsSubmenuCount = 3;
 #endif
 
 static const char* gWaypointsSubmenu[] = {
@@ -799,8 +799,8 @@ static void drawMapMenu() {
         break;
 #if ENABLE_GPS_SENSOR
       case MENU_CAT_GPS:
-        menuItems = gGPSSubmenu;
-        menuItemCount = gGPSSubmenuCount;
+        menuItems = gGpsSubmenu;
+        menuItemCount = gGpsSubmenuCount;
         menuTitle = "== GPS ==";
         break;
 #endif
@@ -961,7 +961,7 @@ static void displayGPSMap() {
   
   // Handle OLED keyboard for waypoint naming
     
-  if (gOLEDKeyboardState.active) {
+  if (gOledKeyboardState.active) {
     oledKeyboardDisplay(oledDisplay);
     
     if (oledKeyboardIsCompleted()) {
@@ -971,10 +971,10 @@ static void displayGPSMap() {
         INFO_MAPSF("Marked waypoint %d: %s at %.5f, %.5f", idx, wpName, gMapCenterLat, gMapCenterLon);
       }
       oledKeyboardReset();
-      gOLEDKeyboardState.active = false;
+      gOledKeyboardState.active = false;
     } else if (oledKeyboardIsCancelled()) {
       oledKeyboardReset();
-      gOLEDKeyboardState.active = false;
+      gOledKeyboardState.active = false;
     }
     return;
   }
@@ -1075,8 +1075,8 @@ static void displayGPSMap() {
   initAsyncMapRenderer();
   
   // Create OLED renderer for overlays (context bar, text, etc.)
-  if (!gOLEDMapRenderer) {
-    gOLEDMapRenderer = new OLEDMapRenderer(oledDisplay);
+  if (!gOledMapRenderer) {
+    gOledMapRenderer = new OLEDMapRenderer(oledDisplay);
   }
   
   // Check if viewport changed since last render request
@@ -1169,13 +1169,13 @@ static void displayGPSMap() {
     }
     
     if (pos > 0) {
-      gOLEDMapRenderer->drawContextBar(contextBuf, gContextScrollOffset);
+      gOledMapRenderer->drawContextBar(contextBuf, gContextScrollOffset);
     }
   } else {
     // No context - just show region name
     char regionBuf[24];
     snprintf(regionBuf, sizeof(regionBuf), " %.8s ", map.header.regionName);
-    gOLEDMapRenderer->drawOverlayText(0, 0, regionBuf, true);
+    gOledMapRenderer->drawOverlayText(0, 0, regionBuf, true);
   }
   
   char overlayBuf[32];
@@ -1183,19 +1183,19 @@ static void displayGPSMap() {
     int pos = 50;
     if (gMapZoom != 1.0f) {
       snprintf(overlayBuf, sizeof(overlayBuf), " %.1fx ", gMapZoom);
-      gOLEDMapRenderer->drawOverlayText(pos, 0, overlayBuf, true);
+      gOledMapRenderer->drawOverlayText(pos, 0, overlayBuf, true);
       pos += 30;
     }
     if (gMapRotation != 0.0f) {
       snprintf(overlayBuf, sizeof(overlayBuf), " %d\xf8 ", (int)gMapRotation);
-      gOLEDMapRenderer->drawOverlayText(pos, 0, overlayBuf, true);
+      gOledMapRenderer->drawOverlayText(pos, 0, overlayBuf, true);
     }
   }
   
   // Show cache pressure indicator if tiles were dropped this frame
   if (map.valid && map.tilesDropped > 0) {
     snprintf(overlayBuf, sizeof(overlayBuf), " -%lu ", map.tilesDropped);
-    gOLEDMapRenderer->drawOverlayText(50, 0, overlayBuf, true);
+    gOledMapRenderer->drawOverlayText(50, 0, overlayBuf, true);
   }
 
   // Show satellite count with source indicator
@@ -1205,18 +1205,18 @@ static void displayGPSMap() {
     } else {
       snprintf(overlayBuf, sizeof(overlayBuf), " %dS ", satellites);
     }
-    gOLEDMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
+    gOledMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
   }
 #if ENABLE_GPS_SENSOR
   else if (gGpsEnabled) {
     // Local GPS enabled but no fix - show searching indicator
     snprintf(overlayBuf, sizeof(overlayBuf), " %dS ", satellites);
-    gOLEDMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
+    gOledMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
   }
   
   // Show LIVE indicator when live tracking
   if (GPSTrackManager::isLiveTracking()) {
-    gOLEDMapRenderer->drawOverlayText(0, gOLEDMapRenderer->getHeight() - 8, " LIVE ", true);
+    gOledMapRenderer->drawOverlayText(0, gOledMapRenderer->getHeight() - 8, " LIVE ", true);
   }
 #endif
   
@@ -1229,14 +1229,14 @@ static void displayGPSMap() {
       } else {
         snprintf(overlayBuf, sizeof(overlayBuf), "%dm %d\xf8", (int)distM, (int)bearingDeg);
       }
-      gOLEDMapRenderer->drawOverlayText(0, gOLEDMapRenderer->getHeight() - 8, overlayBuf, true);
+      gOledMapRenderer->drawOverlayText(0, gOledMapRenderer->getHeight() - 8, overlayBuf, true);
     }
   }
   
   // Show search results navigation indicator
   if (gSearchResultsActive && gSearchResultCount > 1) {
     snprintf(overlayBuf, sizeof(overlayBuf), " %d/%d <> ", gSearchResultCurrent + 1, gSearchResultCount);
-    gOLEDMapRenderer->drawOverlayText(40, gOLEDMapRenderer->getHeight() - 8, overlayBuf, true);
+    gOledMapRenderer->drawOverlayText(40, gOledMapRenderer->getHeight() - 8, overlayBuf, true);
   }
   
   if (gMapMenuOpen) {
@@ -1298,10 +1298,10 @@ static void executeSubmenuAction(int submenuType, int action) {
       switch (action) {
         case 0:  // Select Map
           {
-            extern class FileManager* gOLEDFileManager;
+            extern class FileManager* gOledFileManager;
             extern bool oledFileBrowserNeedsInit;
             requestOLEDMode(OLED_FILE_BROWSER, "map.browse.maps");  // pushes currentOLEDMode so B returns here
-            if (gOLEDFileManager) gOLEDFileManager->navigate("/maps");
+            if (gOledFileManager) gOledFileManager->navigate("/maps");
             else oledFileBrowserNeedsInit = true;
             gMapMenuOpen = false;
             gMapSubmenuLevel = 0;
@@ -1393,7 +1393,7 @@ static void executeSubmenuAction(int submenuType, int action) {
             char defaultName[WAYPOINT_NAME_LEN];
             snprintf(defaultName, sizeof(defaultName), "WP%d", WaypointManager::getActiveCount());
             oledKeyboardInit("Name Waypoint", defaultName, WAYPOINT_NAME_LEN - 1);
-            gOLEDKeyboardState.active = true;
+            gOledKeyboardState.active = true;
             gMapMenuOpen = false;
             gMapSubmenuLevel = 0;
           }
@@ -1999,7 +1999,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
         case MENU_CAT_VIEW: menuItemCount = gViewSubmenuCount; break;
         case MENU_CAT_MAPS: menuItemCount = gMapsSubmenuCount; break;
 #if ENABLE_GPS_SENSOR
-        case MENU_CAT_GPS: menuItemCount = gGPSSubmenuCount; break;
+        case MENU_CAT_GPS: menuItemCount = gGpsSubmenuCount; break;
 #endif
         case MENU_CAT_WAYPOINTS: menuItemCount = gWaypointsSubmenuCount; break;
         case MENU_CAT_TRACKS: menuItemCount = gTracksSubmenuCount; break;

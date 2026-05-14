@@ -435,7 +435,7 @@ uint32_t getNewlyPressedButtons();
 void getJoystickDelta(int& deltaX, int& deltaY);
 
 // File browser state (defined in oled_display.cpp)
-extern class FileManager* gOLEDFileManager;
+extern class FileManager* gOledFileManager;
 extern bool oledFileBrowserNeedsInit;
 
 // File browser navigation (defined in oled_file_browser.cpp)

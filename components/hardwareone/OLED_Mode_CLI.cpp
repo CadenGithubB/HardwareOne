@@ -15,7 +15,7 @@
 #include "System_Debug.h"
 
 // External OLED console buffer (display pointer via HAL_Display.h #define oledDisplay gDisplay)
-extern OLEDConsoleBuffer gOLEDConsole;
+extern OLEDConsoleBuffer gOledConsole;
 
 // CLI viewer state
 static int cliScrollOffset = 0;
@@ -28,9 +28,9 @@ static const int CLI_MAX_VISIBLE_LINES = OLED_CONTENT_HEIGHT / 10;
 // Helper: find index by timestamp, returns -1 if not found
 static int findIndexByTimestamp(uint32_t ts) {
   if (ts == 0) return -1;
-  int count = gOLEDConsole.getLineCount();
+  int count = gOledConsole.getLineCount();
   for (int i = 0; i < count; i++) {
-    if (gOLEDConsole.getTimestamp(i) == ts) return i;
+    if (gOledConsole.getTimestamp(i) == ts) return i;
   }
   return -1;  // Message was evicted from buffer
 }
@@ -61,16 +61,16 @@ static void displayCLIViewer() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
   // Lock buffer for reading
-  if (!gOLEDConsole.mutex || xSemaphoreTake(gOLEDConsole.mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
+  if (!gOledConsole.mutex || xSemaphoreTake(gOledConsole.mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->print("Buffer locked...");
     return;
   }
   
-  int totalLines = gOLEDConsole.getLineCount();
+  int totalLines = gOledConsole.getLineCount();
   
   if (totalLines == 0) {
-    xSemaphoreGive(gOLEDConsole.mutex);
+    xSemaphoreGive(gOledConsole.mutex);
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->print("No CLI output yet");
     return;
@@ -81,7 +81,7 @@ static void displayCLIViewer() {
   if (cliSelectedIndex < 0) {
     // Message was evicted or not set - select newest
     cliSelectedIndex = totalLines - 1;
-    cliSelectedTimestamp = gOLEDConsole.getTimestamp(cliSelectedIndex);
+    cliSelectedTimestamp = gOledConsole.getTimestamp(cliSelectedIndex);
   }
   
   // Auto-scroll to keep selection visible
@@ -109,11 +109,11 @@ static void displayCLIViewer() {
     if (selectedIdx < 0) {
       // Message was evicted - fall back to current selection
       selectedIdx = cliSelectedIndex;
-      cliDetailLockedTimestamp = gOLEDConsole.getTimestamp(selectedIdx);
+      cliDetailLockedTimestamp = gOledConsole.getTimestamp(selectedIdx);
     }
     
-    const char* line = gOLEDConsole.getLine(selectedIdx);
-    uint32_t timestamp = gOLEDConsole.getTimestamp(selectedIdx);
+    const char* line = gOledConsole.getLine(selectedIdx);
+    uint32_t timestamp = gOledConsole.getTimestamp(selectedIdx);
     
     if (line) {
       // Full screen detail view in content area
@@ -153,7 +153,7 @@ static void displayCLIViewer() {
       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     }
     
-    xSemaphoreGive(gOLEDConsole.mutex);
+    xSemaphoreGive(gOledConsole.mutex);
     return;
   }
   
@@ -163,7 +163,7 @@ static void displayCLIViewer() {
   const int maxY = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - lineHeight;
   
   for (int i = startIdx; i < endIdx && y <= maxY; i++) {
-    const char* line = gOLEDConsole.getLine(i);
+    const char* line = gOledConsole.getLine(i);
     if (line) {
       bool isSelected = (i == cliSelectedIndex);
       
@@ -181,7 +181,7 @@ static void displayCLIViewer() {
     }
   }
   
-  xSemaphoreGive(gOLEDConsole.mutex);
+  xSemaphoreGive(gOledConsole.mutex);
   
   // Scroll indicators (in content area)
   if (cliScrollOffset > 0) {
@@ -199,13 +199,13 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
   bool handled = false;
   
   // Acquire mutex for thread-safe buffer access
-  if (!gOLEDConsole.mutex || xSemaphoreTake(gOLEDConsole.mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
+  if (!gOledConsole.mutex || xSemaphoreTake(gOledConsole.mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
     return false;
   }
   
-  int totalLines = gOLEDConsole.getLineCount();
+  int totalLines = gOledConsole.getLineCount();
   if (totalLines == 0) {
-    xSemaphoreGive(gOLEDConsole.mutex);
+    xSemaphoreGive(gOledConsole.mutex);
     return false;
   }
   
@@ -213,7 +213,7 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
   int currentIdx = findIndexByTimestamp(cliSelectedTimestamp);
   if (currentIdx < 0) {
     currentIdx = totalLines - 1;
-    cliSelectedTimestamp = gOLEDConsole.getTimestamp(currentIdx);
+    cliSelectedTimestamp = gOledConsole.getTimestamp(currentIdx);
   }
 
   if (gNavEvents.up || gNavEvents.down || newlyPressed) {
@@ -254,21 +254,21 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
     int lockedIdx = findIndexByTimestamp(cliDetailLockedTimestamp);
     if (lockedIdx < 0) {
       lockedIdx = currentIdx;
-      cliDetailLockedTimestamp = gOLEDConsole.getTimestamp(lockedIdx);
+      cliDetailLockedTimestamp = gOledConsole.getTimestamp(lockedIdx);
     }
 
     if (gNavEvents.up && lockedIdx > 0) {
-      cliDetailLockedTimestamp = gOLEDConsole.getTimestamp(lockedIdx - 1);
+      cliDetailLockedTimestamp = gOledConsole.getTimestamp(lockedIdx - 1);
       DEBUG_CLIF("[CLI_VIEWER] detail up: %d -> %d", lockedIdx, lockedIdx - 1);
       handled = true;
     } else if (gNavEvents.down && lockedIdx < totalLines - 1) {
-      cliDetailLockedTimestamp = gOLEDConsole.getTimestamp(lockedIdx + 1);
+      cliDetailLockedTimestamp = gOledConsole.getTimestamp(lockedIdx + 1);
       DEBUG_CLIF("[CLI_VIEWER] detail down: %d -> %d", lockedIdx, lockedIdx + 1);
       handled = true;
     } else if (gNavEvents.up || gNavEvents.down) {
       DEBUG_CLIF("[CLI_VIEWER] detail nav blocked: lockedIdx=%d total=%d", lockedIdx, totalLines);
     }
-    xSemaphoreGive(gOLEDConsole.mutex);
+    xSemaphoreGive(gOledConsole.mutex);
     return handled;
   }
 
@@ -277,7 +277,7 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
     // Move to older message (scroll up in history)
     if (currentIdx > 0) {
       DEBUG_CLIF("[CLI_VIEWER] up: idx %d -> %d (total=%d scroll=%d)", currentIdx, currentIdx - 1, totalLines, cliScrollOffset);
-      cliSelectedTimestamp = gOLEDConsole.getTimestamp(currentIdx - 1);
+      cliSelectedTimestamp = gOledConsole.getTimestamp(currentIdx - 1);
     } else {
       DEBUG_CLIF("[CLI_VIEWER] up: already at top (idx=%d total=%d scroll=%d)", currentIdx, totalLines, cliScrollOffset);
     }
@@ -286,7 +286,7 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
     // Move to newer message (scroll down in history)
     if (currentIdx < totalLines - 1) {
       DEBUG_CLIF("[CLI_VIEWER] down: idx %d -> %d (total=%d scroll=%d)", currentIdx, currentIdx + 1, totalLines, cliScrollOffset);
-      cliSelectedTimestamp = gOLEDConsole.getTimestamp(currentIdx + 1);
+      cliSelectedTimestamp = gOledConsole.getTimestamp(currentIdx + 1);
     } else {
       DEBUG_CLIF("[CLI_VIEWER] down: already at bottom (idx=%d total=%d scroll=%d)", currentIdx, totalLines, cliScrollOffset);
     }
@@ -295,25 +295,25 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
   
   // X button = jump to newest
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    cliSelectedTimestamp = gOLEDConsole.getTimestamp(totalLines - 1);
+    cliSelectedTimestamp = gOledConsole.getTimestamp(totalLines - 1);
     cliScrollOffset = 0;
     handled = true;
   }
   
   // Y button = jump to oldest
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-    cliSelectedTimestamp = gOLEDConsole.getTimestamp(0);  // Oldest message
+    cliSelectedTimestamp = gOledConsole.getTimestamp(0);  // Oldest message
     cliScrollOffset = max(0, totalLines - CLI_MAX_VISIBLE_LINES);
     handled = true;
   }
   
-  xSemaphoreGive(gOLEDConsole.mutex);
+  xSemaphoreGive(gOledConsole.mutex);
   return handled;
 }
 
 // CLI availability check
 static bool isCLIViewerAvailable(String* outReason) {
-  if (!gOLEDConsole.mutex) {
+  if (!gOledConsole.mutex) {
     if (outReason) *outReason = "Console buffer not initialized";
     return false;
   }

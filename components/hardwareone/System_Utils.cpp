@@ -2077,7 +2077,7 @@ extern bool gAllocTrackerEnabled;
 
 // External task watermark globals
 extern volatile UBaseType_t gTofWatermarkNow, gTofWatermarkMin;
-extern volatile UBaseType_t gIMUWatermarkNow, gIMUWatermarkMin;
+extern volatile UBaseType_t gImuWatermarkNow, gImuWatermarkMin;
 extern volatile UBaseType_t gThermalWatermarkNow, gThermalWatermarkMin;
 
 // Command/context types - shared header eliminates duplication
@@ -2395,7 +2395,7 @@ void printMemoryReport() {
   size_t imu_state_bytes = sizeof(gImuCache) + sizeof(gImuEnabled) + sizeof(gImuConnected) + sizeof(gImuTaskHandle);
   size_t tof_state_bytes = sizeof(gTofCache) + sizeof(gTofEnabled) + sizeof(gTofConnected) + sizeof(gTofTaskHandle);
   size_t gamepad_state_bytes = sizeof(gGamepadCache) + sizeof(gGamepadEnabled) + sizeof(gGamepadConnected) + sizeof(gGamepadTaskHandle);
-  size_t apds_state_bytes = sizeof(gAPDSCache) + sizeof(gApdsConnected) + sizeof(gApdsColorEnabled) + sizeof(gApdsProximityEnabled) + sizeof(gApdsGestureEnabled);
+  size_t apds_state_bytes = sizeof(gApdsCache) + sizeof(gApdsConnected) + sizeof(gApdsColorEnabled) + sizeof(gApdsProximityEnabled) + sizeof(gApdsGestureEnabled);
   size_t gps_state_bytes = sizeof(gGpsEnabled) + sizeof(gGpsConnected);
   size_t oled_state_bytes = sizeof(gOledEnabled) + sizeof(oledConnected);
 

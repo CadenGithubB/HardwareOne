@@ -109,15 +109,15 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
       if (canSkip && serialInput.equalsIgnoreCase("n")) serialInput = "";
       // 'b' = cancel (if caller supports wasCancelled)
       if (serialInput.equalsIgnoreCase("b") || serialInput.equalsIgnoreCase("back")) {
-        gOLEDKeyboardState.textLength = 0;
-        gOLEDKeyboardState.text[0] = '\0';
+        gOledKeyboardState.textLength = 0;
+        gOledKeyboardState.text[0] = '\0';
         oledKeyboardComplete();
         if (wasCancelled) *wasCancelled = true;
         break;
       }
-      strncpy(gOLEDKeyboardState.text, serialInput.c_str(), OLED_KEYBOARD_MAX_LENGTH);
-      gOLEDKeyboardState.textLength = min((int)serialInput.length(), OLED_KEYBOARD_MAX_LENGTH);
-      gOLEDKeyboardState.text[gOLEDKeyboardState.textLength] = '\0';
+      strncpy(gOledKeyboardState.text, serialInput.c_str(), OLED_KEYBOARD_MAX_LENGTH);
+      gOledKeyboardState.textLength = min((int)serialInput.length(), OLED_KEYBOARD_MAX_LENGTH);
+      gOledKeyboardState.text[gOledKeyboardState.textLength] = '\0';
       oledKeyboardComplete();
       if (serialInput.length() > 0 && !isPassword) broadcastOutput(serialInput);
       break;
@@ -133,21 +133,21 @@ String getOLEDTextInput(const char* prompt, bool isPassword,
       oledDisplay->clearDisplay();
       
       // If password mode, temporarily modify the displayed text
-      if (isPassword && gOLEDKeyboardState.textLength > 0) {
+      if (isPassword && gOledKeyboardState.textLength > 0) {
         // Save original text
         char originalText[OLED_KEYBOARD_MAX_LENGTH + 1];
-        strncpy(originalText, gOLEDKeyboardState.text, sizeof(originalText));
+        strncpy(originalText, gOledKeyboardState.text, sizeof(originalText));
         
         // Replace with asterisks for display
-        for (int i = 0; i < gOLEDKeyboardState.textLength; i++) {
-          gOLEDKeyboardState.text[i] = '*';
+        for (int i = 0; i < gOledKeyboardState.textLength; i++) {
+          gOledKeyboardState.text[i] = '*';
         }
         
         // Display keyboard with masked text
         oledKeyboardDisplay(oledDisplay);
         
         // Restore original text
-        strncpy(gOLEDKeyboardState.text, originalText, sizeof(gOLEDKeyboardState.text));
+        strncpy(gOledKeyboardState.text, originalText, sizeof(gOledKeyboardState.text));
       } else {
         // Normal display
         oledKeyboardDisplay(oledDisplay);
