@@ -1,5 +1,5 @@
-#ifndef WIFI_SYSTEM_H
-#define WIFI_SYSTEM_H
+#ifndef SYSTEM_WIFI_H
+#define SYSTEM_WIFI_H
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
@@ -48,4 +48,4 @@ extern const size_t wifiCommandsCount;
 
 #endif // ENABLE_WIFI
 
-#endif // WIFI_SYSTEM_H
+#endif // SYSTEM_WIFI_H

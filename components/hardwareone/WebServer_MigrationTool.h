@@ -1,5 +1,5 @@
-#ifndef WEBSERVER_MIGRATION_TOOL_H
-#define WEBSERVER_MIGRATION_TOOL_H
+#ifndef WEBSERVER_MIGRATIONTOOL_H
+#define WEBSERVER_MIGRATIONTOOL_H
 
 #include "System_BuildConfig.h"
 
@@ -41,4 +41,4 @@ void stopRestoreOnlyHttpServer();
 
 #endif // ENABLE_MIGRATION_TOOL
 
-#endif // WEBSERVER_MIGRATION_TOOL_H
+#endif // WEBSERVER_MIGRATIONTOOL_H

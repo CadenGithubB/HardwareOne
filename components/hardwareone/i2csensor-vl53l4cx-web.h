@@ -1,5 +1,5 @@
-#ifndef VL53L4CX_TOF_SENSOR_WEB_H
-#define VL53L4CX_TOF_SENSOR_WEB_H
+#ifndef I2CSENSOR_VL53L4CX_WEB_H
+#define I2CSENSOR_VL53L4CX_WEB_H
 
 #include <Arduino.h>
 #include "WebServer_Utils.h"
@@ -117,4 +117,4 @@ inline void streamVL53L4CXTofDashboardDef(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'VL53L4CX',key:'tof',name:'ToF (VL53L4CX)',desc:'Distance Measurement'});", HTTPD_RESP_USE_STRLEN);
 }
 
-#endif // VL53L4CX_TOF_SENSOR_WEB_H
+#endif // I2CSENSOR_VL53L4CX_WEB_H

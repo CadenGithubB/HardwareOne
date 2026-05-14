@@ -14,47 +14,39 @@
 #include "System_ESPNow.h"
 #include "System_I2C.h"
 
-// Sensor connection externs (stubs provide these when sensor disabled, actual sensor files when enabled)
+// Per-sensor enabled/connected flags + task handles come from the sensor
+// headers (which gate their own decls on ENABLE_*_SENSOR). System_SensorStubs.h
+// (included above) provides stubs for sensors compiled out.
 #if ENABLE_IMU_SENSOR
-extern bool gImuConnected;
+#include "i2csensor-bno055.h"
 #endif
 #if ENABLE_THERMAL_SENSOR
-extern bool gThermalConnected;
+#include "i2csensor-mlx90640.h"
 #endif
 #if ENABLE_TOF_SENSOR
-extern bool gTofConnected;
+#include "i2csensor-vl53l4cx.h"
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-extern bool gGamepadConnected;
+#include "i2csensor-seesaw.h"
 #endif
 #if ENABLE_FM_RADIO
-extern bool gFmRadioConnected;
+#include "i2csensor-rda5807.h"
+#endif
+#if ENABLE_GPS_SENSOR
+#include "i2csensor-pa1010d.h"
+#endif
+#if ENABLE_APDS_SENSOR
+#include "i2csensor-apds9960.h"
+#endif
+#if ENABLE_PRESENCE_SENSOR
+#include "i2csensor-sths34pf80.h"
+#endif
+#if ENABLE_RTC_SENSOR
+#include "i2csensor-ds3231.h"
 #endif
 
-// External sensor enabled flags (for safe stale-handle detection)
-extern bool gGamepadEnabled;
-extern bool gThermalEnabled;
-extern bool gImuEnabled;
-extern bool gTofEnabled;
-extern bool gFmRadioEnabled;
-extern bool gGpsEnabled;
-extern bool gApdsColorEnabled;
-extern bool gApdsProximityEnabled;
-extern bool gApdsGestureEnabled;
-extern bool gPresenceEnabled;
-extern bool gRtcEnabled;
-
-// External task handles for stack monitoring
+// Command-exec task handle is NOT a sensor — declared separately.
 extern TaskHandle_t gCmdExecTaskHandle;
-extern TaskHandle_t gGamepadTaskHandle;
-extern TaskHandle_t gThermalTaskHandle;
-extern TaskHandle_t gImuTaskHandle;
-extern TaskHandle_t gTofTaskHandle;
-extern TaskHandle_t gFmRadioTaskHandle;
-extern TaskHandle_t gGpsTaskHandle;
-extern TaskHandle_t gApdsTaskHandle;
-extern TaskHandle_t gPresenceTaskHandle;
-extern TaskHandle_t gRtcTaskHandle;
 
 // AllocEntry struct + gAllocTracker declared in System_MemUtil.h
 extern int gAllocTrackerCount;

@@ -1,5 +1,5 @@
-#ifndef OLED_SETTINGS_EDITOR_H
-#define OLED_SETTINGS_EDITOR_H
+#ifndef OLED_SETTINGSEDITOR_H
+#define OLED_SETTINGSEDITOR_H
 
 #include "System_BuildConfig.h"
 
@@ -57,4 +57,4 @@ bool openSettingsEditorForModule(const char* moduleName);
 
 #endif // ENABLE_OLED_DISPLAY
 
-#endif // OLED_SETTINGS_EDITOR_H
+#endif // OLED_SETTINGSEDITOR_H

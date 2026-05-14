@@ -1,5 +1,5 @@
-#ifndef WEBPAGE_AVI_PLAYER_H
-#define WEBPAGE_AVI_PLAYER_H
+#ifndef WEBPAGE_AVIPLAYER_H
+#define WEBPAGE_AVIPLAYER_H
 
 #include <Arduino.h>
 #include "esp_http_server.h"
@@ -177,4 +177,4 @@ inline void streamAviPlayerJs(httpd_req_t* req) {
     HTTPD_RESP_USE_STRLEN);
 }
 
-#endif // WEBPAGE_AVI_PLAYER_H
+#endif // WEBPAGE_AVIPLAYER_H

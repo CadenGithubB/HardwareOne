@@ -7,8 +7,8 @@
  * Memory cost: 50 lines × 64 chars = 3.2KB + overhead ≈ 3.5KB total
  */
 
-#ifndef OLED_CONSOLE_BUFFER_H
-#define OLED_CONSOLE_BUFFER_H
+#ifndef OLED_CONSOLEBUFFER_H
+#define OLED_CONSOLEBUFFER_H
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -42,4 +42,4 @@ extern OLEDConsoleBuffer gOLEDConsole;
 
 #endif // ENABLE_OLED_DISPLAY
 
-#endif // OLED_CONSOLE_BUFFER_H
+#endif // OLED_CONSOLEBUFFER_H

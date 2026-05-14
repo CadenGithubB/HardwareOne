@@ -4,8 +4,8 @@
  * Controls the single built-in NeoPixel LED on the QT Py board
  */
 
-#ifndef NEOPIXEL_LED_H
-#define NEOPIXEL_LED_H
+#ifndef SYSTEM_NEOPIXEL_H
+#define SYSTEM_NEOPIXEL_H
 
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
@@ -57,4 +57,4 @@ struct CommandEntry;
 extern const CommandEntry neopixelCommands[];
 extern const size_t neopixelCommandsCount;
 
-#endif // NEOPIXEL_LED_H
+#endif // SYSTEM_NEOPIXEL_H

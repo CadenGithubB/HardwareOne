@@ -12,12 +12,12 @@
 #include "System_MemUtil.h"
 #include <LittleFS.h>
 #include "System_VFS.h"
+#include "System_Filesystem.h"  // filesystemReady
 
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 extern DisplayDriver* oledDisplay;
 extern EspNowState* gEspNow;
-extern bool filesystemReady;
 
 extern String getEspNowDeviceName(const uint8_t* mac);
 extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);

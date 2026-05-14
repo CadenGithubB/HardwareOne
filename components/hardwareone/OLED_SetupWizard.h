@@ -5,8 +5,8 @@
  * Core logic is in System_SetupWizard.cpp
  */
 
-#ifndef OLED_SETUP_WIZARD_H
-#define OLED_SETUP_WIZARD_H
+#ifndef OLED_SETUPWIZARD_H
+#define OLED_SETUPWIZARD_H
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
@@ -50,4 +50,4 @@ SetupWizardResult runOLEDSetupWizard();
 
 #endif // ENABLE_OLED_DISPLAY
 
-#endif // OLED_SETUP_WIZARD_H
+#endif // OLED_SETUPWIZARD_H

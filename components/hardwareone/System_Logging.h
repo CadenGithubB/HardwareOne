@@ -1,5 +1,5 @@
-#ifndef LOGGING_SYSTEM_H
-#define LOGGING_SYSTEM_H
+#ifndef SYSTEM_LOGGING_H
+#define SYSTEM_LOGGING_H
 
 #include <Arduino.h>
 
@@ -59,4 +59,4 @@ void logI2CRecovery(uint8_t address, const char* deviceName, int totalErrors);
 // Generic logging utility (wraps appendLineWithCap)
 void logToFile(const char* path, const String& line, size_t capBytes);
 
-#endif // LOGGING_SYSTEM_H
+#endif // SYSTEM_LOGGING_H

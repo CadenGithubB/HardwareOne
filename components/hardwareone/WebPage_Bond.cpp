@@ -852,10 +852,10 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
 #if ENABLE_MQTT
     localFeatures |= CAP_FEATURE_MQTT;
 #endif
-#if ENABLE_CAMERA
+#if ENABLE_CAMERA_SENSOR
     localFeatures |= CAP_FEATURE_CAMERA;
 #endif
-#if ENABLE_MICROPHONE
+#if ENABLE_MICROPHONE_SENSOR
     localFeatures |= CAP_FEATURE_MICROPHONE;
 #endif
 #if ENABLE_ESP_SR
@@ -864,7 +864,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
 #if ENABLE_AUTOMATION
     localFeatures |= CAP_FEATURE_AUTOMATION;
 #endif
-#if ENABLE_OLED
+#if ENABLE_OLED_DISPLAY
     localFeatures |= CAP_FEATURE_OLED;
 #endif
 #if ENABLE_ESPNOW

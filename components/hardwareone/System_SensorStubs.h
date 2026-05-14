@@ -1,5 +1,5 @@
-#ifndef SENSOR_STUBS_MINIMAL_H
-#define SENSOR_STUBS_MINIMAL_H
+#ifndef SYSTEM_SENSORSTUBS_H
+#define SYSTEM_SENSORSTUBS_H
 
 #include <Arduino.h>
 #include <IPAddress.h>
@@ -338,4 +338,4 @@
   extern const size_t mqttCommandsCount;
 #endif
 
-#endif // SENSOR_STUBS_MINIMAL_H
+#endif // SYSTEM_SENSORSTUBS_H

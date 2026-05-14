@@ -28,15 +28,9 @@
 #define MIN_RESTART_DELAY_MS 2000
 #endif
 
-// ============================================================================
-// Cache mutex timeout - used when sensor task loops and HTTP handlers lock a
-// sensor-data cache semaphore.  A short timeout (not infinite wait) avoids
-// blocking the HTTP or I2C task if the other side stalls.
-// ============================================================================
-#ifndef HW_CACHE_MUTEX_TIMEOUT_MS
-#define HW_CACHE_MUTEX_TIMEOUT_MS
-static constexpr uint32_t CACHE_MUTEX_TIMEOUT_MS = 100;
-#endif
+// CACHE_MUTEX_TIMEOUT_MS lives in System_Mutex.h (single canonical home).
+// System_Mutex.h is included above, so the constant is available to anyone
+// who includes this header.
 
 // ============================================================================
 // Legacy Wrapper Functions - Delegate to Manager

@@ -1,5 +1,5 @@
-#ifndef USER_SYSTEM_H
-#define USER_SYSTEM_H
+#ifndef SYSTEM_USER_H
+#define SYSTEM_USER_H
 
 #include <Arduino.h>
 
@@ -206,4 +206,4 @@ void loadAndIncrementBootSeq();
 // User system command registration
 // User system command module is automatically registered
 
-#endif // USER_SYSTEM_H
+#endif // SYSTEM_USER_H

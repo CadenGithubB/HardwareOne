@@ -50,7 +50,6 @@
 #include "WebServer_MigrationTool.h"
 
 // External dependencies (httpd_handle_t server declared in WebServer_Server.h)
-extern bool filesystemReady;
 extern bool readText(const char* path, String& out);
 extern bool writeText(const char* path, const String& content);
 

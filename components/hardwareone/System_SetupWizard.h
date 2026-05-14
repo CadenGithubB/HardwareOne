@@ -5,8 +5,8 @@
  * Display-agnostic - can be rendered on OLED or Serial console.
  */
 
-#ifndef SYSTEM_SETUP_WIZARD_H
-#define SYSTEM_SETUP_WIZARD_H
+#ifndef SYSTEM_SETUPWIZARD_H
+#define SYSTEM_SETUPWIZARD_H
 
 #include <Arduino.h>
 
@@ -185,4 +185,4 @@ SetupWizardResult runSerialSetupWizard();
 // Get heap bar data
 void getHeapBarData(uint32_t* enabledKB, uint32_t* maxKB, int* percentage);
 
-#endif // SYSTEM_SETUP_WIZARD_H
+#endif // SYSTEM_SETUPWIZARD_H

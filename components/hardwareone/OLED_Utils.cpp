@@ -80,6 +80,7 @@ bool shouldBlockForDisplayAuth() {
 #endif
 #if ENABLE_RTC_SENSOR
 #include "i2csensor-ds3231.h"
+#include "i2csensor-pa1010d.h"  // gGpsEnabled, gGpsConnected
 #endif
 
 #if ENABLE_WIFI || ENABLE_ESPNOW
@@ -1422,14 +1423,14 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     
     // A button selects suggestion
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-      DEBUG_USERSF("[KEYBOARD] A button - selecting suggestion");
+      DEBUG_DISPLAYF("[KEYBOARD] A button - selecting suggestion");
       oledKeyboardSelectSuggestion();
       inputHandled = true;
     }
     
     // B button dismisses suggestions
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-      DEBUG_USERSF("[KEYBOARD] B button - dismissing suggestions");
+      DEBUG_DISPLAYF("[KEYBOARD] B button - dismissing suggestions");
       oledKeyboardDismissSuggestions();
       inputHandled = true;
     }
@@ -1571,26 +1572,26 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   // Button actions using input abstraction
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    DEBUG_USERSF("[KEYBOARD] A button pressed - selecting char");
+    DEBUG_DISPLAYF("[KEYBOARD] A button pressed - selecting char");
     oledKeyboardSelectChar();
     inputHandled = true;
   }
   
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-    DEBUG_USERSF("[KEYBOARD] Y button pressed - backspace (textLen=%d)\n", gOLEDKeyboardState.textLength);
+    DEBUG_DISPLAYF("[KEYBOARD] Y button pressed - backspace (textLen=%d)\n", gOLEDKeyboardState.textLength);
     oledKeyboardBackspace();
-    DEBUG_USERSF("[KEYBOARD] After backspace: textLen=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD] After backspace: textLen=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
     inputHandled = true;
   }
   
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    DEBUG_USERSF("[KEYBOARD] B button pressed - cancel");
+    DEBUG_DISPLAYF("[KEYBOARD] B button pressed - cancel");
     oledKeyboardCancel();
     inputHandled = true;
   }
   
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_START)) {
-    DEBUG_USERSF("[KEYBOARD] X/START button pressed - complete");
+    DEBUG_DISPLAYF("[KEYBOARD] X/START button pressed - complete");
     oledKeyboardComplete();
     inputHandled = true;
   }
@@ -1598,10 +1599,10 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   // SELECT button: autocomplete if provider set, otherwise toggle keyboard mode
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_SELECT)) {
     if (gOLEDKeyboardState.autocompleteFunc) {
-      DEBUG_USERSF("[KEYBOARD] SELECT button pressed - triggering autocomplete");
+      DEBUG_DISPLAYF("[KEYBOARD] SELECT button pressed - triggering autocomplete");
       oledKeyboardTriggerAutocomplete();
     } else {
-      DEBUG_USERSF("[KEYBOARD] SELECT button pressed - toggling mode");
+      DEBUG_DISPLAYF("[KEYBOARD] SELECT button pressed - toggling mode");
       oledKeyboardToggleMode();
     }
     inputHandled = true;
@@ -1611,10 +1612,10 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   // that resulted in an action). This avoids spamming logs every frame when
   // the keyboard is idle.
   if (inputHandled) {
-    DEBUG_USERSF("[KEYBOARD] HANDLED: dX=%d dY=%d newly=0x%08lX textLen=%d\n", deltaX, deltaY, (unsigned long)newlyPressed, gOLEDKeyboardState.textLength);
+    DEBUG_DISPLAYF("[KEYBOARD] HANDLED: dX=%d dY=%d newly=0x%08lX textLen=%d\n", deltaX, deltaY, (unsigned long)newlyPressed, gOLEDKeyboardState.textLength);
     static bool sLoggedMasks = false;
     if (!sLoggedMasks) {
-      DEBUG_USERSF("[KEYBOARD] Button masks: A=0x%08lX B=0x%08lX X=0x%08lX Y=0x%08lX START=0x%08lX SEL=0x%08lX\n", (unsigned long)INPUT_MASK(INPUT_BUTTON_A), (unsigned long)INPUT_MASK(INPUT_BUTTON_B), 
+      DEBUG_DISPLAYF("[KEYBOARD] Button masks: A=0x%08lX B=0x%08lX X=0x%08lX Y=0x%08lX START=0x%08lX SEL=0x%08lX\n", (unsigned long)INPUT_MASK(INPUT_BUTTON_A), (unsigned long)INPUT_MASK(INPUT_BUTTON_B), 
                     (unsigned long)INPUT_MASK(INPUT_BUTTON_X), (unsigned long)INPUT_MASK(INPUT_BUTTON_Y), 
                     (unsigned long)INPUT_MASK(INPUT_BUTTON_START), (unsigned long)INPUT_MASK(INPUT_BUTTON_SELECT));
       sLoggedMasks = true;
@@ -1676,17 +1677,17 @@ void oledKeyboardSelectChar() {
   // Get character at current cursor position
   char selectedChar = getCharAt(gOLEDKeyboardState.cursorY, gOLEDKeyboardState.cursorX);
   
-  DEBUG_USERSF("[KEYBOARD_SELECT] Cursor at [%d,%d] char='%c' (0x%02X)\n", gOLEDKeyboardState.cursorX, gOLEDKeyboardState.cursorY, 
+  DEBUG_DISPLAYF("[KEYBOARD_SELECT] Cursor at [%d,%d] char='%c' (0x%02X)\n", gOLEDKeyboardState.cursorX, gOLEDKeyboardState.cursorY, 
                 selectedChar, (unsigned char)selectedChar);
   // Handle special characters
   if (selectedChar == CHAR_MODE) {
     // Toggle keyboard mode
-    DEBUG_USERSF("[KEYBOARD_SELECT] Mode toggle selected");
+    DEBUG_DISPLAYF("[KEYBOARD_SELECT] Mode toggle selected");
     oledKeyboardToggleMode();
     return;
   } else if (selectedChar == CHAR_BACK) {
     // Backspace
-    DEBUG_USERSF("[KEYBOARD_SELECT] DEL button selected");
+    DEBUG_DISPLAYF("[KEYBOARD_SELECT] DEL button selected");
     oledKeyboardBackspace();
     return;
   }
@@ -1696,20 +1697,20 @@ void oledKeyboardSelectChar() {
     gOLEDKeyboardState.text[gOLEDKeyboardState.textLength] = selectedChar;
     gOLEDKeyboardState.textLength++;
     gOLEDKeyboardState.text[gOLEDKeyboardState.textLength] = '\0';
-    DEBUG_USERSF("[KEYBOARD_SELECT] Added char: textLength=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD_SELECT] Added char: textLength=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
   } else {
-    DEBUG_USERSF("[KEYBOARD_SELECT] At max length (%d), cannot add char\n", gOLEDKeyboardState.maxLength);
+    DEBUG_DISPLAYF("[KEYBOARD_SELECT] At max length (%d), cannot add char\n", gOLEDKeyboardState.maxLength);
   }
 }
 
 void oledKeyboardBackspace() {
-  DEBUG_USERSF("[KEYBOARD_BACKSPACE] Called: textLength=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
+  DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] Called: textLength=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
   if (gOLEDKeyboardState.textLength > 0) {
     gOLEDKeyboardState.textLength--;
     gOLEDKeyboardState.text[gOLEDKeyboardState.textLength] = '\0';
-    DEBUG_USERSF("[KEYBOARD_BACKSPACE] Deleted char: new textLength=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] Deleted char: new textLength=%d text='%s'\n", gOLEDKeyboardState.textLength, gOLEDKeyboardState.text);
   } else {
-    DEBUG_USERSF("[KEYBOARD_BACKSPACE] No characters to delete (textLength=0)");
+    DEBUG_DISPLAYF("[KEYBOARD_BACKSPACE] No characters to delete (textLength=0)");
   }
 }
 
@@ -1721,7 +1722,7 @@ void oledKeyboardComplete() {
 void oledKeyboardCancel() {
   gOLEDKeyboardState.cancelled = true;
   gOLEDKeyboardState.active = false;
-  DEBUG_USERSF("[KEYBOARD] Cancelled");
+  DEBUG_DISPLAYF("[KEYBOARD] Cancelled");
 }
 
 void oledKeyboardToggleMode() {
@@ -1737,7 +1738,7 @@ void oledKeyboardToggleMode() {
     case KEYBOARD_MODE_COUNT: break; // Should never happen
   }
   
-  DEBUG_USERSF("[KEYBOARD] Mode changed to: %s\n", modeName);
+  DEBUG_DISPLAYF("[KEYBOARD] Mode changed to: %s\n", modeName);
 }
 
 // ============================================================================
@@ -1747,12 +1748,12 @@ void oledKeyboardToggleMode() {
 void oledKeyboardSetAutocomplete(OLEDKeyboardAutocompleteFunc func, void* userData) {
   gOLEDKeyboardState.autocompleteFunc = func;
   gOLEDKeyboardState.autocompleteUserData = userData;
-  DEBUG_USERSF("[KEYBOARD] Autocomplete provider %s\n", func ? "set" : "cleared");
+  DEBUG_DISPLAYF("[KEYBOARD] Autocomplete provider %s\n", func ? "set" : "cleared");
 }
 
 void oledKeyboardTriggerAutocomplete() {
   if (!gOLEDKeyboardState.autocompleteFunc) {
-    DEBUG_USERSF("[KEYBOARD] No autocomplete provider set");
+    DEBUG_DISPLAYF("[KEYBOARD] No autocomplete provider set");
     return;
   }
   
@@ -1767,9 +1768,9 @@ void oledKeyboardTriggerAutocomplete() {
   if (gOLEDKeyboardState.suggestionCount > 0) {
     gOLEDKeyboardState.showingSuggestions = true;
     gOLEDKeyboardState.selectedSuggestion = 0;
-    DEBUG_USERSF("[KEYBOARD] Autocomplete found %d suggestions for '%s'\n", gOLEDKeyboardState.suggestionCount, gOLEDKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD] Autocomplete found %d suggestions for '%s'\n", gOLEDKeyboardState.suggestionCount, gOLEDKeyboardState.text);
   } else {
-    DEBUG_USERSF("[KEYBOARD] No suggestions found for '%s'\n", gOLEDKeyboardState.text);
+    DEBUG_DISPLAYF("[KEYBOARD] No suggestions found for '%s'\n", gOLEDKeyboardState.text);
   }
 }
 
@@ -1784,7 +1785,7 @@ void oledKeyboardSelectSuggestion() {
     strncpy(gOLEDKeyboardState.text, selected, gOLEDKeyboardState.maxLength);
     gOLEDKeyboardState.text[gOLEDKeyboardState.maxLength] = '\0';
     gOLEDKeyboardState.textLength = strlen(gOLEDKeyboardState.text);
-    DEBUG_USERSF("[KEYBOARD] Selected suggestion: '%s'\n", selected);
+    DEBUG_DISPLAYF("[KEYBOARD] Selected suggestion: '%s'\n", selected);
   }
   
   oledKeyboardDismissSuggestions();
@@ -1820,10 +1821,10 @@ bool oledConfirmRequest(const char* line1, const char* line2, OLEDConfirmCallbac
   gOLEDConfirmState.onYes = onYes;
   gOLEDConfirmState.userData = userData;
 
-  DEBUG_USERSF("[OLED_CONFIRM] %s%s%s\n", line1 ? line1 : "",
+  DEBUG_DISPLAYF("[OLED_CONFIRM] %s%s%s\n", line1 ? line1 : "",
                 (line1 && line2) ? " | " : "",
                 line2 ? line2 : "");
-  DEBUG_USERSF("[OLED_CONFIRM] Use UP/DOWN to select, A to confirm, B to cancel");
+  DEBUG_DISPLAYF("[OLED_CONFIRM] Use UP/DOWN to select, A to confirm, B to cancel");
   oledMarkDirty();
   return true;
 }
@@ -1834,7 +1835,7 @@ bool oledConfirmIsActive() {
 
 static void oledConfirmClose(bool confirmed) {
   if (!gOLEDConfirmState.active) return;
-  DEBUG_USERSF("[OLED_CONFIRM] %s\n", confirmed ? "CONFIRMED" : "CANCELLED");
+  DEBUG_DISPLAYF("[OLED_CONFIRM] %s\n", confirmed ? "CONFIRMED" : "CANCELLED");
   gOLEDConfirmState.active = false;
   gOLEDConfirmState.line1 = nullptr;
   gOLEDConfirmState.line2 = nullptr;
@@ -2446,7 +2447,7 @@ void executeOLEDCommand(const String& argsInput) {
   bool success = submitAndExecuteSync(uc, out);
 
   if (!success && out.length() > 0) {
-    DEBUG_USERSF("[OLED_CMD] Command failed: %s", out.c_str());
+    DEBUG_DISPLAYF("[OLED_CMD] Command failed: %s", out.c_str());
   }
 }
 
@@ -2462,7 +2463,7 @@ bool executeOLEDCommandWithResult(const String& argsInput, char* out, size_t out
   out[outSize - 1] = '\0';
 
   if (!success && outStr.length() > 0) {
-    DEBUG_USERSF("[OLED_CMD] Command failed: %s", out);
+    DEBUG_DISPLAYF("[OLED_CMD] Command failed: %s", out);
   }
   return success;
 }
@@ -2582,36 +2583,42 @@ void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack) {
   // Boot sequence bypasses this (oledBootModeActive guards the check).
   if (shouldBlockForDisplayAuth()) {
     if (newMode != OLED_LOGIN) {
-      DEBUG_USERSF("[OLED_MODE] AUTH_GATE %s -> LOGIN (wanted:%s) | %s\n", getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
+      DEBUG_DISPLAYF("[OLED_MODE] AUTH_GATE %s -> LOGIN (wanted:%s) | %s\n", getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
                     reason ? reason : "");
       newMode = OLED_LOGIN;
       pushStack = false;  // auth redirects don't pollute back-nav
     }
   }
 
-  // Standardised transition log — always emitted so serial trace shows all mode changes.
-  DEBUG_USERSF("[OLED_MODE] %s -> %s | %s\n", getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
+  // Standardised transition log — always emitted so serial trace shows all
+  // mode changes. (A duplicate DEBUG_DISPLAYF call used to live here from
+  // the era when the author wasn't sure which flag was right; collapsed to
+  // one line after migrating all OLED-internal logs to DEBUG_DISPLAYF.)
+  DEBUG_DISPLAYF("[OLED_MODE] %s -> %s | %s\n", getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
                 reason ? reason : "");
-  DEBUG_DISPLAYF("[OLED_MODE] %s -> %s | %s",
-                 getOLEDModeName(currentOLEDMode), getOLEDModeName(newMode),
-                 reason ? reason : "");
 
   // Push current mode to back-nav stack before switching (if requested and mode actually changes).
   if (pushStack && newMode != currentOLEDMode) {
     pushOLEDMode(currentOLEDMode);
   }
 
-  // Reset per-mode transient state on entry.
+  // Reset per-mode transient state on entry. Each branch logs a one-line
+  // "mode-entry hook fired" notice through DEBUG_DISPLAYF so the audit log
+  // shows the setup work that previously ran silently — useful when debugging
+  // "mode change announced but UI looks stale" symptoms.
   if (newMode == OLED_CLI_VIEWER && newMode != currentOLEDMode) {
+    DEBUG_DISPLAYF("[OLED_MODE] entry hook: CLI_VIEWER state reset");
     extern void resetCLIViewerState();
     resetCLIViewerState();
   }
   if (newMode == OLED_CLI_INPUT && newMode != currentOLEDMode) {
+    DEBUG_DISPLAYF("[OLED_MODE] entry hook: CLI_INPUT state reset");
     extern void resetCLIInputState();
     resetCLIInputState();
   }
 #if ENABLE_ONDEVICE_LLM
   if (newMode == OLED_LLM && newMode != currentOLEDMode) {
+    DEBUG_DISPLAYF("[OLED_MODE] entry hook: LLM state reset");
     extern void resetLLMOLEDState();
     resetLLMOLEDState();
   }
@@ -2774,9 +2781,9 @@ void printRegisteredOLEDModes() {
     builtInRegistered = true;
   }
   
-  DEBUG_USERSF("[OLED_MODE] %d modes registered from %d modules:\n", oledModeRegistrySize, registeredOLEDModuleCount);
+  DEBUG_DISPLAYF("[OLED_MODE] %d modes registered from %d modules:\n", oledModeRegistrySize, registeredOLEDModuleCount);
   for (size_t i = 0; i < registeredOLEDModuleCount; i++) {
-    DEBUG_USERSF("  - %s (%d modes)\n", registeredOLEDModules[i].name, 
+    DEBUG_DISPLAYF("  - %s (%d modes)\n", registeredOLEDModules[i].name, 
                   registeredOLEDModules[i].count);
   }
 }
@@ -2791,9 +2798,9 @@ static bool userOverrodeBootMode = false;
 static void debugOLEDModeChange(const char* src, OLEDMode from, OLEDMode to, const String& extra) {
   if (from == to) return;
   if (extra.length() > 0) {
-    DEBUG_USERSF("[OLED_MODE] %s: %d -> %d | %s\n", src, (int)from, (int)to, extra.c_str());
+    DEBUG_DISPLAYF("[OLED_MODE] %s: %d -> %d | %s\n", src, (int)from, (int)to, extra.c_str());
   } else {
-    DEBUG_USERSF("[OLED_MODE] %s: %d -> %d\n", src, (int)from, (int)to);
+    DEBUG_DISPLAYF("[OLED_MODE] %s: %d -> %d\n", src, (int)from, (int)to);
   }
 }
 
@@ -2814,18 +2821,8 @@ extern const OLEDAnimation gAnimationRegistry[];
 extern const int gAnimationCount;
 
 // Sensor state (managed by I2C system)
-extern bool gImuConnected;
-extern bool gImuEnabled;
-extern bool gTofConnected;
-extern bool gTofEnabled;
-extern bool gThermalConnected;
-extern bool gThermalEnabled;
-extern bool gGpsConnected;
-extern bool gGpsEnabled;
-extern bool gGamepadConnected;
-extern bool gGamepadEnabled;
-extern bool gApdsConnected;
-extern bool gRtcConnected;
+// (Sensor enabled/connected flags are provided by the per-sensor i2csensor-*.h
+// headers included above; no extern re-declarations needed here.)
 
 // Modular sensor caches (each sensor defines its own cache)
 // Includes are conditional based on sensor availability
@@ -3082,7 +3079,7 @@ void updateOLEDDisplay() {
     unsigned long nowLog = millis();
     if ((isDebugFlagSet(DEBUG_MEMORY) || isDebugFlagSet(DEBUG_SYSTEM)) && (nowLog - lastDegradedLog > 2000)) {
       lastDegradedLog = nowLog;
-      DEBUG_USERSF("[OLED] Skipping render - I2C device marked DEGRADED");
+      DEBUG_DISPLAYF("[OLED] Skipping render - I2C device marked DEGRADED");
     }
     return;
   }
@@ -3152,7 +3149,7 @@ void updateOLEDDisplay() {
     // Log every 50th render or if mode changes to help track black flash
     static OLEDMode lastLoggedMode = OLED_OFF;
     if (currentOLEDMode != lastLoggedMode || (renderCount % 50) == 0) {
-      DEBUG_USERSF("[OLED_RENDER] mode=%d render#%lu\n", (int)currentOLEDMode, renderCount);
+      DEBUG_DISPLAYF("[OLED_RENDER] mode=%d render#%lu\n", (int)currentOLEDMode, renderCount);
       lastLoggedMode = currentOLEDMode;
     }
 
@@ -3204,7 +3201,7 @@ void updateOLEDDisplay() {
           } else {
             contentDrawn = false;
             // DEBUG: Log when mode not found - this would cause black screen!
-            DEBUG_USERSF("[OLED_RENDER_FAIL] Mode %d not found! render#%lu registeredMode=%p\n", (int)currentOLEDMode, renderCount, (void*)registeredMode);
+            DEBUG_DISPLAYF("[OLED_RENDER_FAIL] Mode %d not found! render#%lu registeredMode=%p\n", (int)currentOLEDMode, renderCount, (void*)registeredMode);
           }
         }
         break;
@@ -3212,7 +3209,7 @@ void updateOLEDDisplay() {
 
     // Failsafe: if no content was drawn, draw an error message so screen isn't black
     if (!contentDrawn) {
-      DEBUG_USERSF("[OLED_BLACK_FLASH] No content drawn! mode=%d render#%lu\n", (int)currentOLEDMode, renderCount);
+      DEBUG_DISPLAYF("[OLED_BLACK_FLASH] No content drawn! mode=%d render#%lu\n", (int)currentOLEDMode, renderCount);
       gDisplay->setCursor(0, 20);
       gDisplay->print("Mode ");
       gDisplay->print((int)currentOLEDMode);
@@ -3478,7 +3475,7 @@ const char* cmd_oledmode(const String& argsInput) {
   // If boot sequence is still running, mark that user overrode it
   if (oledBootModeActive) {
     userOverrodeBootMode = true;
-    DEBUG_USERSF("[OLED_MODE] User overrode boot sequence - will not auto-transition");
+    DEBUG_DISPLAYF("[OLED_MODE] User overrode boot sequence - will not auto-transition");
   }
 
   // Slug -> enum lookup (validates the slug in one place).
@@ -3900,7 +3897,7 @@ bool earlyOLEDInit() {
   }
 
   bool inFirstTimeSetup = (gFirstTimeSetupState != SETUP_NOT_NEEDED);
-  DEBUG_USERSF("[OLED_INIT] fts=%d settings.oledEnabled=%d\n", inFirstTimeSetup ? 1 : 0,
+  DEBUG_DISPLAYF("[OLED_INIT] fts=%d settings.oledEnabled=%d\n", inFirstTimeSetup ? 1 : 0,
                 gSettings.oledEnabled ? 1 : 0);
   if (!inFirstTimeSetup) {
     if (!gSettings.oledEnabled) {
@@ -4018,7 +4015,7 @@ void processOLEDBootSequence() {
 
         // Only transition if user hasn't manually changed mode during boot
         if (userOverrodeBootMode) {
-          DEBUG_USERSF("[OLED_MODE] boot.complete: User overrode boot, keeping mode %d\n", (int)currentOLEDMode);
+          DEBUG_DISPLAYF("[OLED_MODE] boot.complete: User overrode boot, keeping mode %d\n", (int)currentOLEDMode);
           DEBUG_DISPLAYF("OLED boot sequence complete (user overrode, keeping current mode)");
         } else {
           OLEDMode prevMode = currentOLEDMode;
@@ -4241,7 +4238,7 @@ static void startRemoteCommandInput(const char* baseCommand) {
   oledKeyboardInit("Remote Command", initialText, OLED_KEYBOARD_MAX_LENGTH);
   
   gRemoteCommandInputActive = true;
-  DEBUG_USERSF("[RMENU] Started command input for: %s\n", baseCommand);
+  DEBUG_DISPLAYF("[RMENU] Started command input for: %s\n", baseCommand);
 }
 
 // Check if remote command input is active
@@ -4323,7 +4320,7 @@ static String loadCachedManifest() {
   // trusted: cached manifest read for OLED capability rendering.
   AuthContext sys = VFS::systemAuth("oled.utils.manifest_read");
   if (!VFS::existsGuarded(pathBuf, sys)) {
-    DEBUG_USERSF("[RMENU] Manifest not cached: %s\n", pathBuf);
+    DEBUG_DISPLAYF("[RMENU] Manifest not cached: %s\n", pathBuf);
     return "";
   }
 
@@ -4332,7 +4329,7 @@ static String loadCachedManifest() {
   
   String content = f.readString();
   f.close();
-  DEBUG_USERSF("[RMENU] Loaded manifest: %d bytes\n", content.length());
+  DEBUG_DISPLAYF("[RMENU] Loaded manifest: %d bytes\n", content.length());
   return content;
 }
 
@@ -4367,7 +4364,7 @@ void buildRemoteSubmenu(const char* submenuId) {
   // Load cached manifest
   String manifestStr = loadCachedManifest();
   if (manifestStr.length() == 0) {
-    DEBUG_USERSF("[RMENU] No cached manifest, using fallback");
+    DEBUG_DISPLAYF("[RMENU] No cached manifest, using fallback");
     // Fallback to basic commands
     add("Status", "notify_system", "status", "Show system status");
     add("Help", "help", "help", "Show available commands");
@@ -4379,7 +4376,7 @@ void buildRemoteSubmenu(const char* submenuId) {
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, manifestStr);
   if (err) {
-    DEBUG_USERSF("[RMENU] Manifest parse error: %s\n", err.c_str());
+    DEBUG_DISPLAYF("[RMENU] Manifest parse error: %s\n", err.c_str());
     gInRemoteSubmenu = true;
     return;
   }
@@ -4430,7 +4427,7 @@ void buildRemoteSubmenu(const char* submenuId) {
   }
   
   gInRemoteSubmenu = true;
-  DEBUG_USERSF("[RMENU] Built submenu '%s' with %d items from manifest\n", submenuId, gRemoteSubmenuItemCount);
+  DEBUG_DISPLAYF("[RMENU] Built submenu '%s' with %d items from manifest\n", submenuId, gRemoteSubmenuItemCount);
 }
 
 // Exit remote submenu
@@ -4476,22 +4473,22 @@ const char* getRemoteSubmenuId() {
 static int loadRemoteMenuItems(OLEDMenuItemEx* items, int maxItems, int startIdx) {
   extern EspNowState* gEspNow;
 
-  DEBUG_USERSF("[RMENU] loadRemoteMenuItems called: startIdx=%d maxItems=%d\n", startIdx, maxItems);
+  DEBUG_DISPLAYF("[RMENU] loadRemoteMenuItems called: startIdx=%d maxItems=%d\n", startIdx, maxItems);
   if (!gSettings.bondModeEnabled) {
-    DEBUG_USERSF("[RMENU] EXIT: bondModeEnabled=false");
+    DEBUG_DISPLAYF("[RMENU] EXIT: bondModeEnabled=false");
     return 0;
   }
   if (gSettings.bondPeerMac.length() == 0) {
-    DEBUG_USERSF("[RMENU] EXIT: bondPeerMac is empty");
+    DEBUG_DISPLAYF("[RMENU] EXIT: bondPeerMac is empty");
     return 0;
   }
-  DEBUG_USERSF("[RMENU] bondPeerMac=%s\n", gSettings.bondPeerMac.c_str());
+  DEBUG_DISPLAYF("[RMENU] bondPeerMac=%s\n", gSettings.bondPeerMac.c_str());
   if (!gEspNow) {
-    DEBUG_USERSF("[RMENU] EXIT: gEspNow is NULL");
+    DEBUG_DISPLAYF("[RMENU] EXIT: gEspNow is NULL");
     return 0;
   }
   if (!gEspNow->lastRemoteCapValid) {
-    DEBUG_USERSF("[RMENU] EXIT: lastRemoteCapValid=false (no capability received yet)");
+    DEBUG_DISPLAYF("[RMENU] EXIT: lastRemoteCapValid=false (no capability received yet)");
     return 0;
   }
 
@@ -4500,7 +4497,7 @@ static int loadRemoteMenuItems(OLEDMenuItemEx* items, int maxItems, int startIdx
   // Load cached manifest to get actual CLI modules
   String manifestStr = loadCachedManifest();
   if (manifestStr.length() == 0) {
-    DEBUG_USERSF("[RMENU] No cached manifest, using fallback headers");
+    DEBUG_DISPLAYF("[RMENU] No cached manifest, using fallback headers");
     // Fallback to basic headers
     addSubmenuHeader(items, count, maxItems, startIdx, "Commands", "terminal", "core");
     return count;
@@ -4510,7 +4507,7 @@ static int loadRemoteMenuItems(OLEDMenuItemEx* items, int maxItems, int startIdx
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, manifestStr);
   if (err) {
-    DEBUG_USERSF("[RMENU] Manifest parse error: %s\n", err.c_str());
+    DEBUG_DISPLAYF("[RMENU] Manifest parse error: %s\n", err.c_str());
     addSubmenuHeader(items, count, maxItems, startIdx, "Commands", "terminal", "core");
     return count;
   }
@@ -4558,7 +4555,7 @@ static int loadRemoteMenuItems(OLEDMenuItemEx* items, int maxItems, int startIdx
     addSubmenuHeader(items, count, maxItems, startIdx, displayName, icon, moduleName);
   }
 
-  DEBUG_USERSF("[RMENU] Created %d module submenu headers from manifest\n", count);
+  DEBUG_DISPLAYF("[RMENU] Created %d module submenu headers from manifest\n", count);
   return count;
 }
 #endif // ENABLE_BONDED_MODE
@@ -4608,15 +4605,15 @@ void buildDynamicMenu() {
 #if ENABLE_BONDED_MODE
   // Add remote items if REMOTE or BOTH
   if (gDataSource == DataSource::REMOTE || gDataSource == DataSource::BOTH) {
-    DEBUG_USERSF("[MENU] Building REMOTE menu (source=%d)\n", (int)gDataSource);
+    DEBUG_DISPLAYF("[MENU] Building REMOTE menu (source=%d)\n", (int)gDataSource);
     int added = loadRemoteMenuItems(gDynamicMenuItems, MAX_DYNAMIC_MENU_ITEMS, gDynamicMenuItemCount);
-    DEBUG_USERSF("[MENU] loadRemoteMenuItems returned %d items\n", added);
+    DEBUG_DISPLAYF("[MENU] loadRemoteMenuItems returned %d items\n", added);
     gDynamicMenuItemCount += added;
     
     // Add "Remote Settings" menu item if remote settings are available
     extern bool hasRemoteSettings();
     bool hasSettings = hasRemoteSettings();
-    DEBUG_USERSF("[MENU] hasRemoteSettings()=%d\n", hasSettings ? 1 : 0);
+    DEBUG_DISPLAYF("[MENU] hasRemoteSettings()=%d\n", hasSettings ? 1 : 0);
     if (hasSettings && gDynamicMenuItemCount < MAX_DYNAMIC_MENU_ITEMS) {
       OLEDMenuItemEx& item = gDynamicMenuItems[gDynamicMenuItemCount];
       strncpy(item.name, "Remote Settings", sizeof(item.name) - 1);
@@ -4637,7 +4634,7 @@ void buildDynamicMenu() {
   gDynamicMenuBuilt = true;
   gLastBuildSource = gDataSource;
   
-  DEBUG_USERSF("[MENU] Built dynamic menu: %d items (source=%s)\n", gDynamicMenuItemCount, oledGetDataSourceLabel());
+  DEBUG_DISPLAYF("[MENU] Built dynamic menu: %d items (source=%s)\n", gDynamicMenuItemCount, oledGetDataSourceLabel());
 }
 
 // Invalidate dynamic menu (call when source changes or manifest updates)
@@ -5057,7 +5054,7 @@ void oledMenuSelect() {
     if (gRemoteSubmenuSelection >= 0 && gRemoteSubmenuSelection < gRemoteSubmenuItemCount) {
       OLEDMenuItemEx& item = gRemoteSubmenuItems[gRemoteSubmenuSelection];
       
-      DEBUG_USERSF("[SUBMENU_SELECT] sel=%d name='%s' cmd='%s'\n", gRemoteSubmenuSelection, item.name, item.command);
+      DEBUG_DISPLAYF("[SUBMENU_SELECT] sel=%d name='%s' cmd='%s'\n", gRemoteSubmenuSelection, item.name, item.command);
       if (strlen(item.command) > 0) {
         // Check if command needs user input (determined at menu load time)
         if (item.needsInput) {
@@ -5087,7 +5084,7 @@ void oledMenuSelect() {
     if (oledMenuSelectedIndex >= 0 && oledMenuSelectedIndex < oledMenuCategoryCount) {
       oledMenuCategorySelected = oledMenuSelectedIndex;
       oledMenuCategoryItemIndex = 0;
-      DEBUG_USERSF("[CATEGORY_MENU] Entered category %d\n", oledMenuCategorySelected);
+      DEBUG_DISPLAYF("[CATEGORY_MENU] Entered category %d\n", oledMenuCategorySelected);
     }
     return;
   }
@@ -5101,7 +5098,7 @@ void oledMenuSelect() {
   if (oledMenuCategoryItemIndex >= 0 && oledMenuCategoryItemIndex < categoryItemCount) {
     const OLEDMenuItem& item = categoryItems[oledMenuCategoryItemIndex];
     
-    DEBUG_USERSF("[MENU_SELECT] sel=%d name='%s' mode=%d\n", oledMenuCategoryItemIndex, item.name, (int)item.targetMode);
+    DEBUG_DISPLAYF("[MENU_SELECT] sel=%d name='%s' mode=%d\n", oledMenuCategoryItemIndex, item.name, (int)item.targetMode);
     // Category items are plain OLEDMenuItem structs - just switch to the target mode
     OLEDMode target = item.targetMode;
     String reason;
@@ -5122,7 +5119,7 @@ void oledMenuSelect() {
     }
 
     requestOLEDMode(target, "menu.select");
-    DEBUG_USERSF("[MENU_SELECT] currentOLEDMode now = %d (%s)\n", (int)currentOLEDMode, getOLEDModeName(currentOLEDMode));
+    DEBUG_DISPLAYF("[MENU_SELECT] currentOLEDMode now = %d (%s)\n", (int)currentOLEDMode, getOLEDModeName(currentOLEDMode));
 #if ENABLE_ESPNOW
     if (currentOLEDMode == OLED_ESPNOW) {
       if (!gEspNow || !gEspNow->initialized) {
@@ -5350,13 +5347,13 @@ void getJoystickDelta(int& deltaX, int& deltaY) {
  * This function only handles special cases like OLED_UNAVAILABLE.
  */
 void handleOLEDActionButton() {
-  DEBUG_USERSF("[GAMEPAD_ACTION] X button pressed in mode %d\n", (int)currentOLEDMode);
+  DEBUG_DISPLAYF("[GAMEPAD_ACTION] X button pressed in mode %d\n", (int)currentOLEDMode);
   // Check if this mode has a registered custom input handler
   const OLEDModeEntry* registeredMode = findOLEDMode(currentOLEDMode);
   if (registeredMode && registeredMode->inputFunc) {
     // Custom handler exists - it should have already handled the input
     // This function is called as fallback, so just log and return
-    DEBUG_USERSF("[GAMEPAD_ACTION] Mode has custom inputFunc, skipping centralized handler");
+    DEBUG_DISPLAYF("[GAMEPAD_ACTION] Mode has custom inputFunc, skipping centralized handler");
     return;
   }
   
@@ -5456,7 +5453,7 @@ void handleOLEDActionButton() {
         oledConfirmRequest("Start HTTP?", nullptr, httpStartConfirmedUnavail, nullptr);
 #endif
       } else {
-        DEBUG_USERSF("[GAMEPAD_ACTION] No action for unavailable: %s\n", unavailableOLEDTitle.c_str());
+        DEBUG_DISPLAYF("[GAMEPAD_ACTION] No action for unavailable: %s\n", unavailableOLEDTitle.c_str());
       }
       break;
       
@@ -5485,7 +5482,7 @@ void handleOLEDActionButton() {
       break;
       
     default:
-      DEBUG_USERSF("[GAMEPAD_ACTION] No action defined for mode %d\n", (int)currentOLEDMode);
+      DEBUG_DISPLAYF("[GAMEPAD_ACTION] No action defined for mode %d\n", (int)currentOLEDMode);
       break;
   }
 }
@@ -5507,7 +5504,7 @@ bool processGamepadMenuInput() {
   // Read from gamepad cache (thread-safe)
   if (!gGamepadCache.mutex) {
     if (shouldDebug) {
-      DEBUG_USERSF("[GAMEPAD_MENU] Exit: gGamepadCache.mutex is NULL addrs &en=%p &conn=%p &cache=%p\n", (void*)&gGamepadEnabled, (void*)&gGamepadConnected, (void*)&gGamepadCache);
+      DEBUG_DISPLAYF("[GAMEPAD_MENU] Exit: gGamepadCache.mutex is NULL addrs &en=%p &conn=%p &cache=%p\n", (void*)&gGamepadEnabled, (void*)&gGamepadConnected, (void*)&gGamepadCache);
       lastGamepadDebugTime = now;
     }
     return false;
@@ -5534,7 +5531,7 @@ bool processGamepadMenuInput() {
   
   if (!dataValid) {
     if (shouldDebug) {
-      DEBUG_USERSF("[GAMEPAD_MENU] Exit: mutexTaken=%d dataValid=%d\n", mutexTaken, dataValid);
+      DEBUG_DISPLAYF("[GAMEPAD_MENU] Exit: mutexTaken=%d dataValid=%d\n", mutexTaken, dataValid);
       lastGamepadDebugTime = now;
     }
     return false;
@@ -5544,7 +5541,7 @@ bool processGamepadMenuInput() {
   if (shouldDebug) {
     int deltaX = joyX - JOYSTICK_CENTER;
     int deltaY = JOYSTICK_CENTER - joyY;
-    DEBUG_USERSF("[GAMEPAD_MENU] joyX=%d joyY=%d dX=%d dY=%d buttons=0x%08lX mode=%d sel=%d\n", joyX, joyY, deltaX, deltaY,
+    DEBUG_DISPLAYF("[GAMEPAD_MENU] joyX=%d joyY=%d dX=%d dY=%d buttons=0x%08lX mode=%d sel=%d\n", joyX, joyY, deltaX, deltaY,
                   (unsigned long)buttons, currentOLEDMode, oledMenuSelectedIndex);
     lastGamepadDebugTime = now;
   }
@@ -5588,7 +5585,7 @@ bool processGamepadMenuInput() {
   if (!lastButtonStateInitialized) {
     lastButtonState = buttons;
     lastButtonStateInitialized = true;
-    DEBUG_USERSF("[GAMEPAD_INIT] Initialized lastButtonState=0x%08lX\n", (unsigned long)buttons);
+    DEBUG_DISPLAYF("[GAMEPAD_INIT] Initialized lastButtonState=0x%08lX\n", (unsigned long)buttons);
     return false;  // Skip this frame to allow button state to change
   }
   
@@ -5604,7 +5601,7 @@ bool processGamepadMenuInput() {
   
   // Debug button state changes
   if (shouldDebug && buttons != lastButtonState) {
-    DEBUG_USERSF("[GAMEPAD_BUTTONS] buttons=0x%08lX last=0x%08lX changed=0x%08lX\n", (unsigned long)buttons, (unsigned long)lastButtonState,
+    DEBUG_DISPLAYF("[GAMEPAD_BUTTONS] buttons=0x%08lX last=0x%08lX changed=0x%08lX\n", (unsigned long)buttons, (unsigned long)lastButtonState,
                   (unsigned long)(buttons ^ lastButtonState));
   }
   
@@ -5735,7 +5732,7 @@ bool processGamepadMenuInput() {
     uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;  // Rising edge + latched
 
     if (shouldDebug && newlyPressed) {
-      DEBUG_USERSF("[GAMEPAD_LOGICAL] MODE=MENU newly=0x%08lX A=%d B=%d X=%d Y=%d START=%d SEL=%d\n", (unsigned long)newlyPressed,
+      DEBUG_DISPLAYF("[GAMEPAD_LOGICAL] MODE=MENU newly=0x%08lX A=%d B=%d X=%d Y=%d START=%d SEL=%d\n", (unsigned long)newlyPressed,
                     INPUT_CHECK(newlyPressed, INPUT_BUTTON_A),
                     INPUT_CHECK(newlyPressed, INPUT_BUTTON_B),
                     INPUT_CHECK(newlyPressed, INPUT_BUTTON_X),
@@ -5777,9 +5774,9 @@ bool processGamepadMenuInput() {
     uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
     
     if (shouldDebug) {
-      DEBUG_USERSF("[ESPNOW_BUTTONS] buttons=0x%08lX pressedNow=0x%08lX pressedLast=0x%08lX newlyPressed=0x%08lX\n", (unsigned long)buttons, (unsigned long)pressedNow, 
+      DEBUG_DISPLAYF("[ESPNOW_BUTTONS] buttons=0x%08lX pressedNow=0x%08lX pressedLast=0x%08lX newlyPressed=0x%08lX\n", (unsigned long)buttons, (unsigned long)pressedNow, 
                     (unsigned long)pressedLast, (unsigned long)newlyPressed);
-      DEBUG_USERSF("[GAMEPAD_LOGICAL] MODE=ESPNOW newly=0x%08lX A=%d B=%d X=%d Y=%d START=%d\n", (unsigned long)newlyPressed,
+      DEBUG_DISPLAYF("[GAMEPAD_LOGICAL] MODE=ESPNOW newly=0x%08lX A=%d B=%d X=%d Y=%d START=%d\n", (unsigned long)newlyPressed,
                     INPUT_CHECK(newlyPressed, INPUT_BUTTON_A),
                     INPUT_CHECK(newlyPressed, INPUT_BUTTON_B),
                     INPUT_CHECK(newlyPressed, INPUT_BUTTON_X),
@@ -5833,15 +5830,15 @@ bool processGamepadMenuInput() {
         }
       } else {
         // Show init prompt, Y button opens keyboard
-        DEBUG_USERSF("[ESPNOW_INIT] Checking buttons: newlyPressed=0x%08lX Y_mask=0x%08lX B_mask=0x%08lX\n", (unsigned long)newlyPressed, 
+        DEBUG_DISPLAYF("[ESPNOW_INIT] Checking buttons: newlyPressed=0x%08lX Y_mask=0x%08lX B_mask=0x%08lX\n", (unsigned long)newlyPressed, 
                       (unsigned long)INPUT_MASK(INPUT_BUTTON_Y),
                       (unsigned long)INPUT_MASK(INPUT_BUTTON_B));
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
           if (gSettings.espnowDeviceName.length() == 0) {
-            DEBUG_USERSF("[ESPNOW_INIT] Y button pressed - opening keyboard");
+            DEBUG_DISPLAYF("[ESPNOW_INIT] Y button pressed - opening keyboard");
             oledEspNowShowNameKeyboard();
           } else {
-            DEBUG_USERSF("[ESPNOW_INIT] Y button pressed - initializing ESP-NOW (name already set)");
+            DEBUG_DISPLAYF("[ESPNOW_INIT] Y button pressed - initializing ESP-NOW (name already set)");
             executeOLEDCommand("openespnow");
             if (gEspNow && gEspNow->initialized) {
               oledEspNowInit();
@@ -5851,7 +5848,7 @@ bool processGamepadMenuInput() {
         }
         // B button: Back to menu
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-          DEBUG_USERSF("[ESPNOW_INIT] B button pressed - going back");
+          DEBUG_DISPLAYF("[ESPNOW_INIT] B button pressed - going back");
           oledMenuBack();
           inputProcessed = true;
         }
@@ -5941,7 +5938,7 @@ bool processGamepadMenuInput() {
   
   if (inputProcessed) {
     lastGamepadNavTime = now;
-    DEBUG_USERSF("[GAMEPAD_MENU] ACTION! sel=%d mode=%d\n", oledMenuSelectedIndex, currentOLEDMode);
+    DEBUG_DISPLAYF("[GAMEPAD_MENU] ACTION! sel=%d mode=%d\n", oledMenuSelectedIndex, currentOLEDMode);
   }
   
   lastButtonState = buttons;
@@ -5952,9 +5949,9 @@ bool processGamepadMenuInput() {
  * Try to auto-start gamepad when entering menu mode
  */
 void tryAutoStartGamepadForMenu() {
-  DEBUG_USERSF("[GAMEPAD_AUTO] tryAutoStartGamepadForMenu: enabled=%d connected=%d\n", gGamepadEnabled, gGamepadConnected);
+  DEBUG_DISPLAYF("[GAMEPAD_AUTO] tryAutoStartGamepadForMenu: enabled=%d connected=%d\n", gGamepadEnabled, gGamepadConnected);
   if (gGamepadEnabled && gGamepadConnected) {
-    DEBUG_USERSF("[GAMEPAD_AUTO] Already running, skipping");
+    DEBUG_DISPLAYF("[GAMEPAD_AUTO] Already running, skipping");
     return;  // Already running
   }
 
@@ -5967,14 +5964,14 @@ void tryAutoStartGamepadForMenu() {
   
   // Check if gamepad hardware is present via I2C ping
   bool pingResult = i2cPingAddress(I2C_ADDR_GAMEPAD, 100000, 50);
-  DEBUG_USERSF("[GAMEPAD_AUTO] I2C ping 0x50 result: %d\n", pingResult);
+  DEBUG_DISPLAYF("[GAMEPAD_AUTO] I2C ping 0x50 result: %d\n", pingResult);
   if (pingResult) {
     // Gamepad detected - try to start it
     bool inQueue = isInQueue(I2C_DEVICE_GAMEPAD);
-    DEBUG_USERSF("[GAMEPAD_AUTO] inQueue=%d\n", inQueue);
+    DEBUG_DISPLAYF("[GAMEPAD_AUTO] inQueue=%d\n", inQueue);
     if (!inQueue) {
       bool enqueued = enqueueDeviceStart(I2C_DEVICE_GAMEPAD);
-      DEBUG_USERSF("[GAMEPAD_AUTO] enqueueDeviceStart result: %d\n", enqueued);
+      DEBUG_DISPLAYF("[GAMEPAD_AUTO] enqueueDeviceStart result: %d\n", enqueued);
       DEBUG_DISPLAYF("[OLED] Auto-starting gamepad for menu navigation");
     }
   }

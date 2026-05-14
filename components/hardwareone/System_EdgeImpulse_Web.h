@@ -5,8 +5,8 @@
  * Includes state change tracking for object detection
  */
 
-#ifndef SYSTEM_EDGE_IMPULSE_WEB_H
-#define SYSTEM_EDGE_IMPULSE_WEB_H
+#ifndef SYSTEM_EDGEIMPULSE_WEB_H
+#define SYSTEM_EDGEIMPULSE_WEB_H
 
 #include <Arduino.h>
 #include "WebServer_Utils.h"
@@ -471,4 +471,4 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
 }
 
 #endif // ENABLE_EDGE_IMPULSE
-#endif // SYSTEM_EDGE_IMPULSE_WEB_H
+#endif // SYSTEM_EDGEIMPULSE_WEB_H

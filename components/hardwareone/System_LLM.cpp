@@ -75,8 +75,6 @@
 // esp-dsp for accelerated dot product on S3
 #include "dsps_dotprod.h"
 
-extern bool filesystemReady;
-
 // ============================================================================
 // Table of Contents
 // ============================================================================
@@ -951,9 +949,6 @@ static float* forward(int token, int pos) {
   // Debug: post-final-norm activation
   if (FORWARD_DBG_POS(pos)) {
     VecStats fn = vecstats(s->x, dim);
-    //DEBUG_LLM_FORWARDF("[LLM] pos=%d final_norm: [%.3f,%.3f] mean=%.3f L2=%.3f nan=%d bias=%s",
-    //                   pos, fn.vmin, fn.vmax, fn.mean, fn.l2, fn.nans + fn.infs,
-    //                   (isGPT2 && w->rms_final_bias) ? "yes" : "no");
     (void)fn;
   }
 

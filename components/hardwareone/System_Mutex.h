@@ -5,12 +5,26 @@
  * to shared resources across tasks (web server, sensors, automation, CLI)
  */
 
-#ifndef MUTEX_SYSTEM_H
-#define MUTEX_SYSTEM_H
+#ifndef SYSTEM_MUTEX_H
+#define SYSTEM_MUTEX_H
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+
+// ============================================================================
+// Shared Timing Constants
+// ============================================================================
+
+// Timeout for acquiring a sensor-cache mutex. Used by sensor task loops and
+// web/HTTP/OLED handlers that lock a per-cache semaphore. A short, finite
+// timeout (vs. portMAX_DELAY) keeps the caller unblocked if the other side
+// stalls.
+//
+// Canonical home — was previously duplicated in System_I2C.h and
+// WebServer_Utils.h with a coordinating HW_CACHE_MUTEX_TIMEOUT_MS guard to
+// dodge redefinition errors. Both duplicates have been removed.
+static constexpr uint32_t CACHE_MUTEX_TIMEOUT_MS = 100;
 
 // ============================================================================
 // Global Mutexes (created by initMutexes() in setup())
@@ -167,4 +181,4 @@ void i2cUnlock();
 bool isFsLockedByCurrentTask();
 bool isI2cLockedByCurrentTask();
 
-#endif // MUTEX_SYSTEM_H
+#endif // SYSTEM_MUTEX_H

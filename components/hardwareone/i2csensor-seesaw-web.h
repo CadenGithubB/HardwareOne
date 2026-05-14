@@ -1,5 +1,5 @@
-#ifndef SEESAW_GAMEPAD_SENSOR_WEB_H
-#define SEESAW_GAMEPAD_SENSOR_WEB_H
+#ifndef I2CSENSOR_SEESAW_WEB_H
+#define I2CSENSOR_SEESAW_WEB_H
 
 #include <Arduino.h>
 #include "WebServer_Utils.h"
@@ -142,4 +142,4 @@ inline void streamSeesawGamepadDashboardDef(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'Seesaw',key:'gamepad',name:'Gamepad (Seesaw)',desc:'Joystick & Buttons'});", HTTPD_RESP_USE_STRLEN);
 }
 
-#endif // SEESAW_GAMEPAD_SENSOR_WEB_H
+#endif // I2CSENSOR_SEESAW_WEB_H

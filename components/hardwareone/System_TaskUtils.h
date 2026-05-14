@@ -1,5 +1,5 @@
-#ifndef TASK_UTILS_H
-#define TASK_UTILS_H
+#ifndef SYSTEM_TASKUTILS_H
+#define SYSTEM_TASKUTILS_H
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -99,4 +99,4 @@ void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedWo
 // Report all sensor task stacks plus system tasks
 void reportAllTaskStacks();
 
-#endif // TASK_UTILS_H
+#endif // SYSTEM_TASKUTILS_H

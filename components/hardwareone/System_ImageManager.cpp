@@ -6,6 +6,7 @@
 #include "System_ESPNow.h"
 #include "System_Mutex.h"
 #include "System_VFS.h"
+#include "System_Filesystem.h"  // filesystemReady
 
 #include <LittleFS.h>
 #include <SD.h>
@@ -23,8 +24,6 @@ ImageManager gImageManager;
 #ifndef SD_CS_PIN
   #define SD_CS_PIN 21
 #endif
-
-extern bool filesystemReady;
 
 // ============================================================================
 // ImageManager Implementation

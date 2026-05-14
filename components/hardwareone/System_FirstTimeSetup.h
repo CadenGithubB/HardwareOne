@@ -1,5 +1,5 @@
-#ifndef FIRST_TIME_SETUP_H
-#define FIRST_TIME_SETUP_H
+#ifndef SYSTEM_FIRSTTIMESETUP_H
+#define SYSTEM_FIRSTTIMESETUP_H
 
 #include <Arduino.h>
 
@@ -68,4 +68,4 @@ const char* getSetupProgressMessage(SetupProgressStage stage);
 // Sets gFirstTimeSetupPerformed to true if setup was performed
 void firstTimeSetupIfNeeded();
 
-#endif // FIRST_TIME_SETUP_H
+#endif // SYSTEM_FIRSTTIMESETUP_H

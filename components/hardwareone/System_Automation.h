@@ -1,5 +1,5 @@
-#ifndef AUTOMATION_SYSTEM_H
-#define AUTOMATION_SYSTEM_H
+#ifndef SYSTEM_AUTOMATION_H
+#define SYSTEM_AUTOMATION_H
 
 #include <Arduino.h>
 #include <time.h>
@@ -124,4 +124,4 @@ static bool gAutoLogActive = false;
 
 #endif // ENABLE_AUTOMATION
 
-#endif // AUTOMATION_SYSTEM_H
+#endif // SYSTEM_AUTOMATION_H

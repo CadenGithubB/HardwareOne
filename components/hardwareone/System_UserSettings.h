@@ -1,5 +1,5 @@
-#ifndef USER_SETTINGS_H
-#define USER_SETTINGS_H
+#ifndef SYSTEM_USERSETTINGS_H
+#define SYSTEM_USERSETTINGS_H
 
 #include <Arduino.h>
 #include <ArduinoJson.h>

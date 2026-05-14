@@ -5,8 +5,8 @@
  * and enable/disable capabilities for boot-time configuration.
  */
 
-#ifndef SYSTEM_FEATURE_REGISTRY_H
-#define SYSTEM_FEATURE_REGISTRY_H
+#ifndef SYSTEM_FEATUREREGISTRY_H
+#define SYSTEM_FEATUREREGISTRY_H
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
@@ -61,4 +61,4 @@ bool canToggleFeature(const FeatureEntry* feature);
 // CLI command
 const char* cmd_features(const String& argsInput);
 
-#endif // SYSTEM_FEATURE_REGISTRY_H
+#endif // SYSTEM_FEATUREREGISTRY_H

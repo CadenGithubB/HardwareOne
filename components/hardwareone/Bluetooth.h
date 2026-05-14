@@ -1,5 +1,5 @@
-#ifndef BLUETOOTH_SYSTEM_H
-#define BLUETOOTH_SYSTEM_H
+#ifndef BLUETOOTH_H
+#define BLUETOOTH_H
 
 #include <Arduino.h>
 
@@ -247,4 +247,4 @@ extern bool gBluetoothShowingStatus;
 
 #endif // ENABLE_BLUETOOTH
 
-#endif // BLUETOOTH_SYSTEM_H
+#endif // BLUETOOTH_H

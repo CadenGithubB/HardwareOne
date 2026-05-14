@@ -1,5 +1,5 @@
-#ifndef G2_HIJACK_CMD_H
-#define G2_HIJACK_CMD_H
+#ifndef G2_HIJACKCMD_H
+#define G2_HIJACKCMD_H
 
 // =============================================================================
 // G2 hijack command bridge — routes glasses-tap-driven system mutations
@@ -224,4 +224,4 @@ struct LensUiJob {
 bool g2EnqueueLensJob(LensUiJob* job);
 
 #endif // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-#endif // G2_HIJACK_CMD_H
+#endif // G2_HIJACKCMD_H

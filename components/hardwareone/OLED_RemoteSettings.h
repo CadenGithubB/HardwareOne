@@ -1,5 +1,5 @@
-#ifndef OLED_REMOTE_SETTINGS_H
-#define OLED_REMOTE_SETTINGS_H
+#ifndef OLED_REMOTESETTINGS_H
+#define OLED_REMOTESETTINGS_H
 
 #include "System_BuildConfig.h"
 
@@ -30,4 +30,4 @@ bool hasRemoteSettings();
 
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
 
-#endif // OLED_REMOTE_SETTINGS_H
+#endif // OLED_REMOTESETTINGS_H

@@ -1,5 +1,5 @@
-#ifndef BNO055_IMU_SENSOR_WEB_H
-#define BNO055_IMU_SENSOR_WEB_H
+#ifndef I2CSENSOR_BNO055_WEB_H
+#define I2CSENSOR_BNO055_WEB_H
 
 #include <Arduino.h>
 #include "WebServer_Utils.h"
@@ -227,4 +227,4 @@ inline void streamBNO055ImuDashboardDef(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'BNO055',key:'imu',name:'IMU (BNO055)',desc:'Gyroscope & Accelerometer'});", HTTPD_RESP_USE_STRLEN);
 }
 
-#endif // BNO055_IMU_SENSOR_WEB_H
+#endif // I2CSENSOR_BNO055_WEB_H
