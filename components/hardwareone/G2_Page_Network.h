@@ -14,7 +14,7 @@
 //                     Scan / List Saved / HTTP toggle
 //       WIFI_SCAN     scan-results list (tap = log SSID; can't enter pwd)
 //       WIFI_SAVED    saved-network list (tap = forget that network)
-//     ESPNOW          status info / Mode / Start-Stop / View Devices
+//     ESP-NOW          status info / Mode / Start-Stop / View Devices
 //       ESPNOW_DEVS   paired-device list (info only)
 //     BLUETOOTH       BLE on-off, Auto Start, ring controls; client mode
 //                     also has G2 >> (AutoConnect, reconnect, disconnect)

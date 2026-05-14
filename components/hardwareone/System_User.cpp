@@ -126,7 +126,7 @@ bool tgRequireAuth(AuthContext& ctx) {
     // their command-receive handlers BEFORE submitting the command to
     // executeCommand:
     //   * BLE  — per-conn session token check in Bluetooth.cpp before submit
-    //   * ESPNOW — v3 protocol signed msgId verification before submit
+    //   * ESP-NOW — v3 protocol signed msgId verification before submit
     // SOURCE_MQTT currently has NO such upstream check: MQTT-received
     // commands are administrator-trusted, equivalent to SOURCE_INTERNAL.
     // If/when MQTT is opened to untrusted clients, split this branch and

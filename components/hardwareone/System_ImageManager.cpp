@@ -651,7 +651,7 @@ const char* cmd_imagesend(const String& argsInput) {
     path = a.arg(1);
   }
   
-  // Use ESP-NOW file send (stubs return false when ESPNOW disabled)
+  // Use ESP-NOW file send (stubs return false when ESP-NOW disabled)
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(device, mac)) {
     static char errBuf[128];

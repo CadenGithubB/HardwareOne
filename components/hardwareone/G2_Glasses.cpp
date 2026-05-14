@@ -3728,8 +3728,8 @@ static const G2PageModule kPowerPage = {
 };
 
 static const G2PageModule kEspNowAppPage = {
-  "espnowapp", "ESPNOW App",
-  "Show ESPNOW App page (send/broadcast/ping/peers) on the lens",
+  "espnowapp", "ESP-NOW App",
+  "Show ESP-NOW App page (send/broadcast/ping/peers) on the lens",
   g2BuildESPNowAppInfo,
   g2ShowESPNowAppMenu,
   g2ESPNowAppHandleTap,

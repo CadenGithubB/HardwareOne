@@ -614,7 +614,7 @@ static bool saveEspNowDevices() {
     formatMacAddressBuf(gEspNow->devices[i].mac, rawDevMacBuf, sizeof(rawDevMacBuf));
     String encMac = encryptString(String(rawDevMacBuf));
     if (encMac.length() == 0) {
-      ERROR_ESPNOWF("[ESPNOW] Failed to encrypt device MAC for '%s', skipping entry", gEspNow->devices[i].name.c_str());
+      ERROR_ESPNOWF("[ESP-NOW] Failed to encrypt device MAC for '%s', skipping entry", gEspNow->devices[i].name.c_str());
       skipped++;
       continue;
     }
@@ -634,7 +634,7 @@ static bool saveEspNowDevices() {
       keyHex[32] = '\0';
       String encKey = encryptString(String(keyHex));
       if (encKey.length() == 0) {
-        ERROR_ESPNOWF("[ESPNOW] Failed to encrypt device key for '%s', skipping entry", gEspNow->devices[i].name.c_str());
+        ERROR_ESPNOWF("[ESP-NOW] Failed to encrypt device key for '%s', skipping entry", gEspNow->devices[i].name.c_str());
         skipped++;
         continue;
       }
@@ -656,7 +656,7 @@ static bool saveEspNowDevices() {
   f.println("  ]");
   f.println("}");
   f.close();
-  DEBUGF(DEBUG_ESPNOW_MESH, "[ESPNOW] Saved %d device(s) to %s", count, ESPNOW_DEVICES_FILE);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] Saved %d device(s) to %s", count, ESPNOW_DEVICES_FILE);
   return skipped == 0;
 }
 
@@ -2085,7 +2085,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
       }
     }
 
-    // ESPNOW App page ping bookkeeping — see espnowAppPingStart below.
+    // ESP-NOW App page ping bookkeeping — see espnowAppPingStart below.
     // One in-flight slot; we only match if the msgId AND source MAC line up.
     // Stays in this branch (no early return above) because the per-peer
     // health update + tracker recording above are still legitimate side
@@ -5574,12 +5574,12 @@ const char* checkEspNowFirstTimeSetup() {
 static void loadEspNowDevices() {
   if (!gEspNow) return;
   if (!VFS::existsGuarded(ESPNOW_DEVICES_FILE, VFS::systemAuth("espnow.devices_load"))) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[ESPNOW] No saved devices file at %s", ESPNOW_DEVICES_FILE);
+    DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] No saved devices file at %s", ESPNOW_DEVICES_FILE);
     return;
   }
   File f = VFS::openGuarded(ESPNOW_DEVICES_FILE, "r", VFS::systemAuth("espnow.devices_load"));
   if (!f) {
-    WARN_ESPNOWF("[ESPNOW] Failed to open %s for reading", ESPNOW_DEVICES_FILE);
+    WARN_ESPNOWF("[ESP-NOW] Failed to open %s for reading", ESPNOW_DEVICES_FILE);
     return;
   }
   String content = f.readString();
@@ -5589,7 +5589,7 @@ static void loadEspNowDevices() {
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, content);
   if (err) {
-    WARN_ESPNOWF("[ESPNOW] Failed to parse %s: %s", ESPNOW_DEVICES_FILE, err.c_str());
+    WARN_ESPNOWF("[ESP-NOW] Failed to parse %s: %s", ESPNOW_DEVICES_FILE, err.c_str());
     return;
   }
 
@@ -5610,7 +5610,7 @@ static void loadEspNowDevices() {
       if (decrypted.length() > 0) {
         macStr = decrypted;
       } else {
-        WARN_ESPNOWF("[ESPNOW] Failed to decrypt device MAC for '%s', skipping", name);
+        WARN_ESPNOWF("[ESP-NOW] Failed to decrypt device MAC for '%s', skipping", name);
         continue;
       }
     }
@@ -5623,7 +5623,7 @@ static void loadEspNowDevices() {
     for (int i = 0; i < gEspNow->deviceCount; i++) {
       if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
         alreadyLoaded = true;
-        WARN_ESPNOWF("[ESPNOW] Skipping duplicate device in saved file: %s (%s)", name, macStr.c_str());
+        WARN_ESPNOWF("[ESP-NOW] Skipping duplicate device in saved file: %s (%s)", name, macStr.c_str());
         break;
       }
     }
@@ -5643,7 +5643,7 @@ static void loadEspNowDevices() {
         if (decryptedKey.length() == 32) {
           keyStr = decryptedKey;
         } else {
-          WARN_ESPNOWF("[ESPNOW] Failed to decrypt encryption key for '%s'", name);
+          WARN_ESPNOWF("[ESP-NOW] Failed to decrypt encryption key for '%s'", name);
           keyStr = "";
         }
       }
@@ -5663,7 +5663,7 @@ static void loadEspNowDevices() {
     gEspNow->deviceCount++;
     count++;
   }
-  DEBUGF(DEBUG_ESPNOW_MESH, "[ESPNOW] Loaded %d device(s) from %s", count, ESPNOW_DEVICES_FILE);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[ESP-NOW] Loaded %d device(s) from %s", count, ESPNOW_DEVICES_FILE);
 }
 
 
@@ -6524,7 +6524,7 @@ void processMeshHeartbeats() {
                                                 MSG_TEXT);
         BROADCAST_PRINTF("[%s%s] %s", devName.c_str(),
                          entry.encrypted ? " [enc]" : "", entry.content);
-        // ESPNOW App page push-kick: if the user is currently viewing the
+        // ESP-NOW App page push-kick: if the user is currently viewing the
         // inbox (merged or per-peer), enqueue a Redraw so the new entry
         // appears within one applier-tick. No-op when the page isn't
         // active or the user is on a non-message sub-mode; safe to call
@@ -6576,8 +6576,8 @@ TaskHandle_t getEspNowTaskHandle() {
 }
 
 // =============================================================================
-// ESPNOW App ping — single-slot HEARTBEAT-with-ACK probe used by the on-glasses
-// ESPNOW App page (see G2_Page_ESPNow). One round-trip in flight at a time.
+// ESP-NOW App ping — single-slot HEARTBEAT-with-ACK probe used by the on-glasses
+// ESP-NOW App page (see G2_Page_ESPNow). One round-trip in flight at a time.
 // =============================================================================
 // The ACK RX path in onEspNowDataReceived (V3_TYPE_ACK branch, around line
 // 2061) calls espnowAppPingNoteAck() unconditionally — that function early-
@@ -7021,7 +7021,7 @@ const char* cmd_espnow_init(const String& argsInput) {
   }
   // Surface the actual reason captured by initEspNow() instead of a generic
   // "failed" string. cmd_exec returns this via the result field; the lens
-  // ESPNOW App page logs it in onMainRedrawDone so the user can see what
+  // ESP-NOW App page logs it in onMainRedrawDone so the user can see what
   // went wrong without digging through serial broadcasts.
   static char fullMsg[128];
   if (gLastInitErrorReason[0]) {
@@ -8532,7 +8532,7 @@ const char* cmd_espnow_list(const String& argsInput) {
   if (!gEspNow->listBuffer) return "{}";
   serializeJson(doc, gEspNow->listBuffer, needed);
 
-  DEBUGF(DEBUG_HTTP, "[ESPNOW] list: %d devices", gEspNow->deviceCount);
+  DEBUGF(DEBUG_HTTP, "[ESP-NOW] list: %d devices", gEspNow->deviceCount);
   return gEspNow->listBuffer;
 }
 
