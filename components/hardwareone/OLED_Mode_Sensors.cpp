@@ -18,22 +18,27 @@
 #include "i2csensor-sths34pf80.h"
 #endif
 
-// External references
+#if ENABLE_IMU_SENSOR
+#include "i2csensor-bno055.h"     // gImuEnabled / gImuConnected
+#endif
+#if ENABLE_TOF_SENSOR
+#include "i2csensor-vl53l4cx.h"   // gTofEnabled / gTofConnected
+#endif
+#if ENABLE_THERMAL_SENSOR
+#include "i2csensor-mlx90640.h"   // gThermalEnabled / gThermalConnected
+#endif
+#if ENABLE_GPS_SENSOR
+#include "i2csensor-pa1010d.h"    // gGpsEnabled / gGpsConnected
+#endif
+#if ENABLE_GAMEPAD_SENSOR
+#include "i2csensor-seesaw.h"     // gGamepadEnabled / gGamepadConnected
+#endif
+#if ENABLE_APDS_SENSOR
+#include "i2csensor-apds9960.h"   // gApdsConnected
+#endif
 
-// Sensor state (managed by I2C system)
-extern bool gImuConnected;
-extern bool gImuEnabled;
-extern bool gTofConnected;
-extern bool gTofEnabled;
-extern bool gThermalConnected;
-extern bool gThermalEnabled;
-extern bool gGpsConnected;
-extern bool gGpsEnabled;
-extern bool gGamepadConnected;
-extern bool gGamepadEnabled;
-extern bool gApdsConnected;
-extern bool gPresenceConnected;
-extern bool gPresenceEnabled;
+// External references
+// (Sensor enabled/connected flags are provided by the per-sensor headers above.)
 
 // Device registry
 extern ConnectedDevice connectedDevices[];

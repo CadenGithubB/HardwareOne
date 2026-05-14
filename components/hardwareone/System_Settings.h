@@ -1,5 +1,5 @@
-#ifndef SETTINGS_H
-#define SETTINGS_H
+#ifndef SYSTEM_SETTINGS_H
+#define SYSTEM_SETTINGS_H
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -1041,4 +1041,4 @@ bool writeSettingsJson();
 // Apply persisted settings to runtime flags/state
 void applySettings();
 
-#endif // SETTINGS_H
+#endif // SYSTEM_SETTINGS_H

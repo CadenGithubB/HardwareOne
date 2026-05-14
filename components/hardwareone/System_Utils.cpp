@@ -36,6 +36,19 @@
 #include "System_MemoryMonitor.h"
 #include "System_Notifications.h"
 #include "i2csensor-ds3231.h"  // RTC for time functions
+// Additional sensor headers for the gXxxEnabled/gXxxConnected externs used by cmd_voltage.
+#if ENABLE_IMU_SENSOR
+#include "i2csensor-bno055.h"
+#endif
+#if ENABLE_THERMAL_SENSOR
+#include "i2csensor-mlx90640.h"
+#endif
+#if ENABLE_TOF_SENSOR
+#include "i2csensor-vl53l4cx.h"
+#endif
+#if ENABLE_APDS_SENSOR
+#include "i2csensor-apds9960.h"
+#endif
 #include "System_ESPSR.h"
 
 extern "C" {
@@ -265,7 +278,7 @@ extern const size_t g2RingCommandsCount;
 #include "i2csensor-rda5807.h"        // For fmRadioCommands
 
 // External dependencies from .ino
-extern bool filesystemReady;
+// (filesystemReady is provided by System_Filesystem.h, included above)
 extern bool gAutoLogActive;
 extern String gAutoLogFile;
 // ============================================================================
@@ -692,14 +705,7 @@ void getTimestampPrefixMsCached(char* out, size_t outSize) {
   snprintf(out, outSize, "%s.%03d] | ", base, ms);
 }
 
-// Sensor state externs for cmd_voltage
-extern bool gThermalConnected;
-extern bool gThermalEnabled;
-extern bool gImuConnected;
-extern bool gImuEnabled;
-extern bool gTofConnected;
-extern bool gTofEnabled;
-extern bool gApdsConnected;
+// Sensor state externs for cmd_voltage come from the sensor headers (included above).
 
 // ============================================================================
 // File I/O Functions
@@ -1432,8 +1438,6 @@ const char* cmd_timeset(const String& argsInput) {
   
   return "OK";
 }
-
-extern bool filesystemReady;  // From filesystem.cpp
 
 const char* cmd_fsusage(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();

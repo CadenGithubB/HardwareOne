@@ -1,5 +1,5 @@
-#ifndef CLI_SYSTEM_H
-#define CLI_SYSTEM_H
+#ifndef SYSTEM_CLI_H
+#define SYSTEM_CLI_H
 
 #include <Arduino.h>
 
@@ -87,4 +87,4 @@ struct CommandEntry;
 extern const CommandEntry cliCommands[];
 extern const size_t cliCommandsCount;
 
-#endif // CLI_SYSTEM_H
+#endif // SYSTEM_CLI_H

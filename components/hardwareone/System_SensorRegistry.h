@@ -6,8 +6,8 @@
  * their underlying interface (I2C, DVP, PDM, etc.)
  */
 
-#ifndef SYSTEM_SENSOR_REGISTRY_H
-#define SYSTEM_SENSOR_REGISTRY_H
+#ifndef SYSTEM_SENSORREGISTRY_H
+#define SYSTEM_SENSORREGISTRY_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -71,4 +71,4 @@ const NonI2CSensorEntry* findNonI2CSensor(const char* id);
 // Initialize the sensor registry (call during setup)
 void initSensorRegistry();
 
-#endif // SYSTEM_SENSOR_REGISTRY_H
+#endif // SYSTEM_SENSORREGISTRY_H

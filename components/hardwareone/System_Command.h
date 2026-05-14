@@ -1,5 +1,5 @@
-#ifndef COMMAND_SYSTEM_H
-#define COMMAND_SYSTEM_H
+#ifndef SYSTEM_COMMAND_H
+#define SYSTEM_COMMAND_H
 
 #include "System_Utils.h"
 #include <Arduino.h>
@@ -101,4 +101,4 @@ private:
   void parse();
 };
 
-#endif // COMMAND_SYSTEM_H
+#endif // SYSTEM_COMMAND_H

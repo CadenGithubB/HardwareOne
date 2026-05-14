@@ -1,5 +1,5 @@
-#ifndef OLED_FIRST_TIME_SETUP_H
-#define OLED_FIRST_TIME_SETUP_H
+#ifndef OLED_FIRSTTIMESETUP_H
+#define OLED_FIRSTTIMESETUP_H
 
 #include <Arduino.h>
 
@@ -64,4 +64,4 @@ void showOLEDMessage(const char* message, bool waitForButton = false);
 
 #endif // ENABLE_OLED_DISPLAY
 
-#endif // OLED_FIRST_TIME_SETUP_H
+#endif // OLED_FIRSTTIMESETUP_H

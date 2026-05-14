@@ -29,19 +29,41 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 // External timestamp function
 extern void getTimestampPrefixMsCached(char* buf, size_t bufSize);
 
-// External task handles (defined in .ino / HardwareOne.cpp / sensor modules)
-extern TaskHandle_t gGamepadTaskHandle;
-extern TaskHandle_t gThermalTaskHandle;
-extern TaskHandle_t gImuTaskHandle;
-extern TaskHandle_t gTofTaskHandle;
-extern TaskHandle_t gFmRadioTaskHandle;
-extern TaskHandle_t gCmdExecTaskHandle;
-extern TaskHandle_t gGpsTaskHandle;
-extern TaskHandle_t gApdsTaskHandle;
-extern TaskHandle_t gPresenceTaskHandle;
-extern TaskHandle_t gRtcTaskHandle;
+// Per-sensor TaskHandle_t and enabled-flag externs come from the sensor
+// headers (each header gates its decls on ENABLE_*_SENSOR; System_SensorStubs.h
+// supplies stubs for sensors compiled out).
+#if ENABLE_GAMEPAD_SENSOR
+#include "i2csensor-seesaw.h"
+#endif
+#if ENABLE_THERMAL_SENSOR
+#include "i2csensor-mlx90640.h"
+#endif
+#if ENABLE_IMU_SENSOR
+#include "i2csensor-bno055.h"
+#endif
+#if ENABLE_TOF_SENSOR
+#include "i2csensor-vl53l4cx.h"
+#endif
+#if ENABLE_FM_RADIO
+#include "i2csensor-rda5807.h"
+#endif
+#if ENABLE_GPS_SENSOR
+#include "i2csensor-pa1010d.h"
+#endif
+#if ENABLE_APDS_SENSOR
+#include "i2csensor-apds9960.h"
+#endif
+#if ENABLE_PRESENCE_SENSOR
+#include "i2csensor-sths34pf80.h"
+#endif
+#if ENABLE_RTC_SENSOR
+#include "i2csensor-ds3231.h"
+#endif
 
-// External task functions (defined in sensor modules)
+// gCmdExecTaskHandle is not a sensor — declared separately.
+extern TaskHandle_t gCmdExecTaskHandle;
+
+// Per-sensor task functions (each defined in its own .cpp module).
 extern void gamepadTask(void* parameter);
 extern void thermalTask(void* parameter);
 extern void imuTask(void* parameter);
@@ -51,20 +73,6 @@ extern void apdsTask(void* parameter);
 extern void presenceTask(void* parameter);
 extern void gpsTask(void* parameter);
 extern void rtcTask(void* parameter);
-
-// External sensor enabled flags (for safe stale-handle detection)
-extern bool gGamepadEnabled;
-extern bool gGamepadConnected;
-extern bool gThermalEnabled;
-extern bool gImuEnabled;
-extern bool gTofEnabled;
-extern bool gFmRadioEnabled;
-extern bool gGpsEnabled;
-extern bool gApdsColorEnabled;
-extern bool gApdsProximityEnabled;
-extern bool gApdsGestureEnabled;
-extern bool gPresenceEnabled;
-extern bool gRtcEnabled;
 
 // ============================================================================
 // Task Creation with Memory Logging

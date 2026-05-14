@@ -28,7 +28,7 @@
 #if ENABLE_TOF_SENSOR
 #include "i2csensor-vl53l4cx.h"
 #endif
-#if ENABLE_FMRADIO_SENSOR
+#if ENABLE_FM_RADIO
   #include "i2csensor-rda5807.h"
 #endif
 #if ENABLE_CAMERA_SENSOR

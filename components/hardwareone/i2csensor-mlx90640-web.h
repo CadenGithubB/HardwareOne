@@ -1,5 +1,5 @@
-#ifndef MLX90640_THERMAL_SENSOR_WEB_H
-#define MLX90640_THERMAL_SENSOR_WEB_H
+#ifndef I2CSENSOR_MLX90640_WEB_H
+#define I2CSENSOR_MLX90640_WEB_H
 
 #include <Arduino.h>
 #include "WebServer_Utils.h"
@@ -117,4 +117,4 @@ inline void streamMLX90640ThermalDashboardDef(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'MLX90640',key:'thermal',name:'Thermal (MLX90640)',desc:'32x24 IR Camera'});", HTTPD_RESP_USE_STRLEN);
 }
 
-#endif // MLX90640_THERMAL_SENSOR_WEB_H
+#endif // I2CSENSOR_MLX90640_WEB_H

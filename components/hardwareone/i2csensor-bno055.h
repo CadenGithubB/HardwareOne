@@ -70,9 +70,8 @@ class Adafruit_BNO055;
 
 extern Adafruit_BNO055* gBNO055;
 
-extern volatile bool gImuInitRequested;
-extern volatile bool gImuInitDone;
-extern volatile bool gImuInitResult;
+// (gImuInit{Requested,Done,Result} declared further below — duplicated set
+// at this position has been removed.)
 
 extern ImuCache gImuCache;
 extern IMUActionState gIMUActions;

@@ -278,7 +278,7 @@ extern bool gSkipNTPInWifiConnect;
 // Output/logging used widely before definition
 
 // Global variables forward declarations
-extern bool filesystemReady;
+// filesystemReady is provided by System_Filesystem.h (included above).
 
 // Centralized command execution with AuthContext (transport-agnostic)
 static const char* originFrom(const AuthContext& ctx);

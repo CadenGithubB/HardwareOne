@@ -49,7 +49,7 @@ void streamPageFooter(httpd_req_t* req);
 
 // Thread-safe waypoint operations using existing mutex
 extern SemaphoreHandle_t gJsonResponseMutex;
-extern bool filesystemReady;
+// filesystemReady is provided by System_Filesystem.h (included above).
 
 // =============================================================================
 // Map Features API

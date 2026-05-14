@@ -1,5 +1,5 @@
-#ifndef FILESYSTEM_H
-#define FILESYSTEM_H
+#ifndef SYSTEM_FILESYSTEM_H
+#define SYSTEM_FILESYSTEM_H
 
 #include <Arduino.h>
 #include "System_User.h"   // AuthContext for the role-aware permission API
@@ -171,4 +171,4 @@ void cleanupLogOrphan(const char* path);
 // Log-overflow tiering lives in the VFS namespace now. See System_VFS.h for
 // VFS::resolveOverflowPath, VFS::isLogOverflowActive, VFS::getCachedLittleFsFree.
 
-#endif // FILESYSTEM_H
+#endif // SYSTEM_FILESYSTEM_H

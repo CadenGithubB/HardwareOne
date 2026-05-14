@@ -38,16 +38,8 @@ extern size_t gWebMirrorCap;
 
 #include <esp_http_server.h>
 
-// ============================================================================
-// Shared Timing Constants
-// ============================================================================
-
-// Timeout for acquiring a sensor-cache mutex.  All sensor task loops and web
-// handlers that lock a cache semaphore use this value.
-#ifndef HW_CACHE_MUTEX_TIMEOUT_MS
-#define HW_CACHE_MUTEX_TIMEOUT_MS
-static constexpr uint32_t CACHE_MUTEX_TIMEOUT_MS = 100;
-#endif
+// CACHE_MUTEX_TIMEOUT_MS lives in System_Mutex.h (single canonical home).
+// Callers that need it should include System_Mutex.h directly or via System_I2C.h.
 
 // ============================================================================
 // HTTP Response Helpers  (inline — avoids an extra function call)

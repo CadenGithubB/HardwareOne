@@ -41,6 +41,7 @@ extern bool gFmRadioEnabled;
 extern bool gFmRadioConnected;
 extern unsigned long gFmRadioLastStopTime;
 extern bool gRadioInitialized;      // Radio hardware initialization status
+extern TaskHandle_t gFmRadioTaskHandle;
 
 // FM Radio data cache (mutex-protected)
 extern FMRadioCache gFmRadioCache;

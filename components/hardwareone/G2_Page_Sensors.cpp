@@ -36,40 +36,31 @@
 // build doesn't reference the cache symbols.
 
 #if ENABLE_IMU_SENSOR
-#include "i2csensor-bno055.h"     // ImuCache, gImuCache
-extern bool gImuEnabled;       extern bool gImuConnected;
+#include "i2csensor-bno055.h"     // gImuCache + gImuEnabled / gImuConnected
 #endif
 #if ENABLE_TOF_SENSOR
-#include "i2csensor-vl53l4cx.h"   // TofCache, gTofCache
-extern bool gTofEnabled;       extern bool gTofConnected;
+#include "i2csensor-vl53l4cx.h"   // gTofCache + gTofEnabled / gTofConnected
 #endif
 #if ENABLE_THERMAL_SENSOR
-#include "i2csensor-mlx90640.h"   // ThermalCache, gThermalCache
-extern bool gThermalEnabled;   extern bool gThermalConnected;
+#include "i2csensor-mlx90640.h"   // gThermalCache + gThermalEnabled / gThermalConnected
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor-seesaw.h"     // GamepadCache, gGamepadCache
-extern bool gGamepadEnabled;   extern bool gGamepadConnected;
+#include "i2csensor-seesaw.h"     // gGamepadCache + gGamepadEnabled / gGamepadConnected
 #endif
 #if ENABLE_APDS_SENSOR
-#include "i2csensor-apds9960.h"   // APDSCache, gAPDSCache
-extern bool gApdsEnabled;      extern bool gApdsConnected;
+#include "i2csensor-apds9960.h"   // gAPDSCache + gApdsEnabled / gApdsConnected
 #endif
 #if ENABLE_RTC_SENSOR
-#include "i2csensor-ds3231.h"     // RTCCache, gRTCCache
-extern bool gRtcEnabled;       extern bool gRtcConnected;
+#include "i2csensor-ds3231.h"     // gRTCCache + gRtcEnabled / gRtcConnected
 #endif
 #if ENABLE_FM_RADIO
-#include "i2csensor-rda5807.h"    // FMRadioCache, gFmRadioCache
-extern bool gFmRadioEnabled;   extern bool gFmRadioConnected;
+#include "i2csensor-rda5807.h"    // gFmRadioCache + gFmRadioEnabled / gFmRadioConnected
 #endif
 #if ENABLE_GPS_SENSOR
-#include "i2csensor-pa1010d.h"    // GPSCache, gGPSCache
-extern bool gGpsEnabled;       extern bool gGpsConnected;
+#include "i2csensor-pa1010d.h"    // gGPSCache + gGpsEnabled / gGpsConnected
 #endif
 #if ENABLE_PRESENCE_SENSOR
-#include "i2csensor-sths34pf80.h" // PresenceCache, gPresenceCache
-extern bool gPresenceEnabled;  extern bool gPresenceConnected;
+#include "i2csensor-sths34pf80.h" // gPresenceCache + gPresenceEnabled / gPresenceConnected
 #endif
 #if ENABLE_OLED_DISPLAY
 extern bool gOledEnabled;

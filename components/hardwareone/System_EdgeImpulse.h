@@ -1,5 +1,5 @@
-#ifndef SYSTEM_EDGE_IMPULSE_H
-#define SYSTEM_EDGE_IMPULSE_H
+#ifndef SYSTEM_EDGEIMPULSE_H
+#define SYSTEM_EDGEIMPULSE_H
 
 #include "System_BuildConfig.h"
 
@@ -155,4 +155,4 @@ inline void registerEdgeImpulseHandlers(httpd_handle_t server) { (void)server; }
 inline void registerEdgeImpulseHandlers(httpd_handle_t server) { (void)server; }
 
 #endif // ENABLE_EDGE_IMPULSE
-#endif // SYSTEM_EDGE_IMPULSE_H
+#endif // SYSTEM_EDGEIMPULSE_H

@@ -34,7 +34,7 @@
 // External Dependencies from .ino
 // ============================================================================
 
-extern bool filesystemReady;
+// filesystemReady is provided by System_Filesystem.h (included above).
 
 // Session management now in web_server.h (included above)
 

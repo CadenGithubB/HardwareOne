@@ -13,12 +13,12 @@
 #include "System_Settings.h"
 #include "System_Utils.h"
 
-// External sensor connection flags
+// gThermalConnected / gTofConnected come from the sensor headers.
 #if ENABLE_THERMAL_SENSOR
-extern bool gThermalConnected;
+#include "i2csensor-mlx90640.h"
 #endif
 #if ENABLE_TOF_SENSOR
-extern bool gTofConnected;
+#include "i2csensor-vl53l4cx.h"
 #endif
 
 // Check if a setting entry should be visible (used for conditional I2C clock settings)

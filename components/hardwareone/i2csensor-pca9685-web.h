@@ -1,5 +1,5 @@
-#ifndef PCA9685_SERVO_DRIVER_WEB_H
-#define PCA9685_SERVO_DRIVER_WEB_H
+#ifndef I2CSENSOR_PCA9685_WEB_H
+#define I2CSENSOR_PCA9685_WEB_H
 
 #include <Arduino.h>
 #include "WebServer_Utils.h"
@@ -32,4 +32,4 @@ inline void streamPCA9685ServoDriverDashboardDef(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'PCA9685',key:'pwm',name:'Servo Driver (PCA9685)',desc:'16-Channel PWM/Servo'});", HTTPD_RESP_USE_STRLEN);
 }
 
-#endif // PCA9685_SERVO_DRIVER_WEB_H
+#endif // I2CSENSOR_PCA9685_WEB_H

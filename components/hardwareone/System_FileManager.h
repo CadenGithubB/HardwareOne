@@ -1,5 +1,5 @@
-#ifndef FILE_MANAGER_H
-#define FILE_MANAGER_H
+#ifndef SYSTEM_FILEMANAGER_H
+#define SYSTEM_FILEMANAGER_H
 
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -136,4 +136,4 @@ extern FileManager* gFileManager;
 String formatFileSize(uint32_t bytes);
 String formatPath(const char* base, const char* append);
 
-#endif // FILE_MANAGER_H
+#endif // SYSTEM_FILEMANAGER_H

@@ -1,5 +1,5 @@
-#ifndef PA1010D_GPS_SENSOR_H
-#define PA1010D_GPS_SENSOR_H
+#ifndef I2CSENSOR_PA1010D_H
+#define I2CSENSOR_PA1010D_H
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -57,4 +57,4 @@ extern const size_t gpsCommandsCount;
 
 #endif // ENABLE_GPS_SENSOR
 
-#endif // PA1010D_GPS_SENSOR_H
+#endif // I2CSENSOR_PA1010D_H

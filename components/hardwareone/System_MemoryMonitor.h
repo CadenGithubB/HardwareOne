@@ -1,5 +1,5 @@
-#ifndef MEMORY_MONITOR_H
-#define MEMORY_MONITOR_H
+#ifndef SYSTEM_MEMORYMONITOR_H
+#define SYSTEM_MEMORYMONITOR_H
 
 #include <Arduino.h>
 
@@ -41,4 +41,4 @@ const char* cmd_memsample(const String& argsInput);
 // Periodic memory sampling (called from main loop when debug flag enabled)
 void periodicMemorySample();
 
-#endif // MEMORY_MONITOR_H
+#endif // SYSTEM_MEMORYMONITOR_H

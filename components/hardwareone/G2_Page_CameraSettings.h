@@ -1,5 +1,5 @@
-#ifndef G2_PAGE_CAMERA_SETTINGS_H
-#define G2_PAGE_CAMERA_SETTINGS_H
+#ifndef G2_PAGE_CAMERASETTINGS_H
+#define G2_PAGE_CAMERASETTINGS_H
 
 // =============================================================================
 // G2 glasses — "Camera Settings" sub-page
@@ -47,4 +47,4 @@ inline void g2ShowCameraSettingsMenu() {}
 inline void g2CameraSettingsHandleTap(uint32_t idx) { (void)idx; }
 #endif
 
-#endif  // G2_PAGE_CAMERA_SETTINGS_H
+#endif  // G2_PAGE_CAMERASETTINGS_H

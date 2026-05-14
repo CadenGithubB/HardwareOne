@@ -164,9 +164,7 @@ extern volatile bool gSensorPollingPaused;
 // Queue processor task handle
 TaskHandle_t queueProcessorTask = nullptr;
 
-// External dependencies from .ino
-extern TaskHandle_t gImuTaskHandle;
-extern unsigned long gImuLastStopTime;
+// gImuTaskHandle and gImuLastStopTime are declared in i2csensor-bno055.h (included above)
 // Clock management is now unified through I2CDeviceManager
 // Legacy i2cSetWire1Clock() removed - all sensors use i2cDeviceTransaction wrapper
 
@@ -174,21 +172,14 @@ extern unsigned long gImuLastStopTime;
 extern volatile unsigned long gSensorStatusSeq;
 extern const char* gLastStatusCause;
 extern void sensorStatusBump();
-extern bool gApdsColorEnabled;
-extern bool gApdsProximityEnabled;
-extern bool gApdsGestureEnabled;
+// gApds{Color,Proximity,Gesture}Enabled provided by i2csensor-apds9960.h (included above)
 #if ENABLE_SERVO
 extern bool gPwmDriverConnected;
 #endif
 
 // BROADCAST_PRINTF now defined in debug_system.h with performance optimizations
 
-// Sensor connection status (defined in sensor files)
-extern bool gGamepadConnected;
-extern bool gImuConnected;
-extern bool gApdsConnected;
-extern bool gTofConnected;
-extern bool gThermalConnected;
+// Sensor connection status — provided by the per-sensor i2csensor-*.h headers (all included above)
 
 // ============================================================================
 // I2C Clock Management (Wire1)
@@ -264,9 +255,7 @@ void initSensorQueue() {
 // Queued Sensor Start Commands (moved from .ino)
 // =========================================================================
 
-extern bool gThermalEnabled;
-extern bool gTofEnabled;
-extern bool gImuEnabled;
+// gThermalEnabled / gTofEnabled / gImuEnabled provided by their i2csensor-*.h headers
 
 // Map I2CDeviceType → I2C address for pre-start hardware presence checks.
 // Returns 0 if the device type has no single fixed address (or should skip the check).
@@ -343,7 +332,7 @@ const char* cmd_apdsstart_queued(const String& argsInput) {
   return cmd_sensorstart_queued(I2C_DEVICE_APDS, "APDS", gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled, "openapds@enqueue");
 }
 
-extern bool gGamepadEnabled;
+// gGamepadEnabled provided by i2csensor-seesaw.h
 const char* cmd_gamepadstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return cmd_sensorstart_queued(I2C_DEVICE_GAMEPAD, "Gamepad", gGamepadEnabled, "opengamepad@enqueue");
@@ -711,70 +700,23 @@ const char* cmd_i2cstats(const String& originalCmd) {
 // ========== End I2C Infrastructure Commands ==========
 
 #if ENABLE_TOF_SENSOR
-extern bool gTofEnabled;
-extern bool gTofConnected;
-extern VL53L4CX* gVL53L4CX;
-// gTofWatermarkNow, gTofWatermarkMin, gTofLastStopTime now in i2c_system.h
-extern TaskHandle_t gTofTaskHandle;
+// gTofEnabled / gTofConnected / gTofTaskHandle / gVL53L4CX provided by i2csensor-vl53l4cx.h
 extern bool tofPoll();
 #endif
 // i2cOledTransactionVoid/i2cOledTransaction and i2cDeviceTransaction are template functions in System_I2C.h
-extern bool gThermalEnabled;
+// gThermalEnabled provided by i2csensor-mlx90640.h
 
 // SensorCache struct is now defined in i2c_system.h
 
-// IMU sensor globals
+// Per-sensor state, handles, and driver-object pointers are declared in the
+// respective i2csensor-*.h headers (all already included at top of file).
+// Only sensor-side function declarations that aren't in their headers remain.
 #if ENABLE_IMU_SENSOR
-extern bool gImuEnabled;
-extern bool gImuConnected;
-extern Adafruit_BNO055* gBNO055;
-// gIMUWatermarkNow, gIMUWatermarkMin, gImuInitRequested, gImuInitResult, gImuInitDone, initIMUSensor now in i2c_system.h
-extern void imuPoll();
+extern void imuPoll();        // Sensor_IMU_BNO055.cpp
 #endif
-
-// Thermal sensor globals
 #if ENABLE_THERMAL_SENSOR
-extern bool gThermalConnected;
-extern TaskHandle_t gThermalTaskHandle;
-// thermalSensor, gThermalLastStopTime, gThermalWatermarkNow, gThermalWatermarkMin, thermalInitRequested, thermalInitResult, thermalInitDone now in i2c_system.h
-extern bool thermalInit();
+extern bool thermalInit();    // Sensor_Thermal_MLX90640.cpp
 extern bool thermalPoll();
-#endif
-// thermalArmAtMs, thermalPendingFirstFrame now in Sensor_Thermal_MLX90640.h
-// lockThermalCache, unlockThermalCache now in i2c_system.h
-
-// Thermal cache comes from Sensor_Thermal_MLX90640.h
-
-// Gamepad sensor globals
-#if ENABLE_GAMEPAD_SENSOR
-extern bool gGamepadEnabled;
-extern bool gGamepadConnected;
-extern Adafruit_seesaw gGamepadSeesaw;
-extern TaskHandle_t gGamepadTaskHandle;
-// gGamepadWatermarkNow, gGamepadWatermarkMin now in i2c_system.h
-#endif
-
-// APDS9960 sensor globals
-#if ENABLE_APDS_SENSOR
-extern bool gApdsColorEnabled;
-extern bool gApdsProximityEnabled;
-extern bool gApdsGestureEnabled;
-extern bool gApdsConnected;
-extern Adafruit_APDS9960* gAPDS9960;
-extern TaskHandle_t gApdsTaskHandle;
-#endif
-
-// GPS sensor globals
-#if ENABLE_GPS_SENSOR
-extern bool gGpsEnabled;
-extern bool gGpsConnected;
-extern Adafruit_GPS* gPA1010D;
-extern TaskHandle_t gGpsTaskHandle;
-#endif
-
-// RTC sensor globals
-#if ENABLE_RTC_SENSOR
-#include "i2csensor-ds3231.h"
 #endif
 
 // ============================================================================
@@ -1090,7 +1032,14 @@ const char* cmd_discover(const String& originalCmd) {
 
   BROADCAST_PRINTF("Device discovery completed. Found %d devices.", connectedDeviceCount);
 
-  // Initialize FM radio if detected to prevent I2C bus lockups
+#if ENABLE_FM_RADIO
+  // Initialize FM radio if detected to prevent I2C bus lockups. Gated on
+  // ENABLE_FM_RADIO because (1) the device-scan loop is wasted work when the
+  // feature is compiled out, and (2) without this guard the WARN_I2CF on
+  // failure misleads — fmRadioInit() resolves to the stub (always false)
+  // when ENABLE_FM_RADIO=0, so a plugged-in RDA5807 produces "FM radio
+  // initialization failed, may cause I2C interference" when the real reason
+  // is "this firmware build doesn't include FM radio support."
   bool fmRadioDetected = false;
   for (int i = 0; i < connectedDeviceCount; i++) {
     if (connectedDevices[i].address == 0x11 && strcmp(connectedDevices[i].name, "RDA5807") == 0) {
@@ -1098,7 +1047,7 @@ const char* cmd_discover(const String& originalCmd) {
       break;
     }
   }
-  
+
   if (fmRadioDetected) {
     DEBUG_SYSTEMF("FM radio detected, initializing to prevent I2C bus interference");
     // Initialize radio and keep it in stable low-power state
@@ -1109,6 +1058,7 @@ const char* cmd_discover(const String& originalCmd) {
       WARN_I2CF("FM radio initialization failed, may cause I2C interference");
     }
   }
+#endif  // ENABLE_FM_RADIO
 
   streamDeviceRegistryOutput();
 
@@ -2337,7 +2287,7 @@ void processAutoStartSensors() {
   }
   #endif
   
-  #if ENABLE_FMRADIO_SENSOR
+  #if ENABLE_FM_RADIO
   if (gSettings.fmRadioAutoStart) {
     if (isSensorAvailableForAutoStart("fmradio", I2C_DEVICE_FMRADIO)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing FM Radio sensor");

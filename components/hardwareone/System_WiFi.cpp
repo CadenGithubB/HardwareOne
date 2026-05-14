@@ -15,6 +15,7 @@
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro
 #include "System_Command.h"
 #include "System_Notifications.h"
+#include "System_Filesystem.h"  // filesystemReady
 #include <WiFi.h>
 #include <esp_wifi.h>
 #if ENABLE_HTTP_SERVER
@@ -420,8 +421,7 @@ const char* cmd_wifiautoreconnect(const String& argsInput) {
 // WiFi Helper Functions
 // ============================================================================
 
-// External dependencies (already declared at top of file)
-extern bool filesystemReady;
+// (filesystemReady is provided by System_Filesystem.h, included at top of file)
 
 // Global flags (exported for use in .ino and commands)
 // Declarations are at the top of the file, definitions here

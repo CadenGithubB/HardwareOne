@@ -46,7 +46,6 @@
 #include "WebPage_Settings.h"
 #include "System_EdgeImpulse.h"
 #include "System_ESPSR.h"
-#include "System_Filesystem.h"
 #include "System_VFS.h"
 #include "WebServer_MigrationTool.h"
 #if ENABLE_ESPNOW
@@ -97,8 +96,7 @@
 #include "WebPage_Sensors.h"
 #endif
 
-// Filesystem ready flag (defined in System_Filesystem.cpp)
-extern bool filesystemReady;
+// filesystemReady is provided by System_Filesystem.h (included above).
 
 // External dependencies from .ino (httpd_handle_t server declared in WebServer_Server.h)
 extern void streamCommonCSS(httpd_req_t* req);
@@ -981,7 +979,6 @@ void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg) {
 // tgRequireAuth is now in user_system.h (included above)
 extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
 extern void streamSensorsContent(httpd_req_t* req, const String& username);
-extern bool filesystemReady;
 extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
 #if ENABLE_AUTOMATION
 extern bool sanitizeAutomationsJson(String& json);
@@ -3799,7 +3796,6 @@ esp_err_t handleRegisterSubmit(httpd_req_t* req) {
 // ============================================================================
 
 // File handler dependencies
-extern bool filesystemReady;
 extern bool buildFilesListing(const String& inPath, String& out, bool asJson, const AuthContext& ctx, bool hideAdminPaths);
 extern bool ensureFileViewBuffers();
 extern char* gFileReadBuf;

@@ -35,8 +35,8 @@
 // Note: WifiNetwork struct and gWifiNetworks are defined in wifi_system.h
 
 // External dependencies from main .ino
-
-extern bool filesystemReady;
+// (filesystemReady is provided by System_Filesystem.h, included below)
+#include "System_Filesystem.h"
 
 // ----------------------------------------------------------------------------
 // Dotted-path JSON helpers
@@ -1415,7 +1415,19 @@ static const SettingEntry debugSettingEntries[] = {
   { "capture",    SETTING_BOOL, &gSettings.debugCameraCapture,   0, 0, nullptr, 0, 1, "Capture",             nullptr, false, "camera",      "debugcameracapture" },
   { "settings",   SETTING_BOOL, &gSettings.debugCameraSettings,  0, 0, nullptr, 0, 1, "Settings",            nullptr, false, "camera",      "debugcamerasettings" },
   { "video",      SETTING_BOOL, &gSettings.debugCameraVideo,     0, 0, nullptr, 0, 1, "Video",               nullptr, false, "camera",      "debugcameravideo" },
-  { "enabled",    SETTING_BOOL, &gSettings.debugDisplay,         0, 0, nullptr, 0, 1, "Display",             nullptr, false, "oled",        "debugdisplay" },
+  // DEBUG_DISPLAY now catches every OLED-internal log line (~106 callsites
+  // across OLED_Utils.cpp): keyboard input, mode transitions + entry hooks,
+  // menu construction, gamepad input handling on OLED, render dispatch, I2C
+  // discovery + probe results, boot animation sequence. The earlier era when
+  // OLED state events were misclassified through DEBUG_USERSF is gone (see
+  // commit message for the migration).
+  //
+  // What this flag does NOT catch: events that *happen via* OLED but belong
+  // to another subsystem semantically (login = USERS, settings save = SYSTEM,
+  // map rendering = MAPS). Those still log through their owner flag — grep
+  // `[CMD] *@oled:` in command-audit.log if you want every OLED-triggered
+  // command regardless of the underlying event type.
+  { "enabled",    SETTING_BOOL, &gSettings.debugDisplay,         0, 0, nullptr, 0, 1, "All OLED",            nullptr, false, "oled",        "debugdisplay" },
   // --- microphone group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugMicrophone,      0, 0, nullptr, 0, 1, "All Microphone",      nullptr, false, "microphone",  "debugmicrophone" },
   { "lifecycle",  SETTING_BOOL, &gSettings.debugMicLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "microphone",  "debugmiclifecycle" },
@@ -1665,7 +1677,7 @@ extern const SettingsModule apdsSettingsModule;
 #if ENABLE_GPS_SENSOR
 extern const SettingsModule gpsSettingsModule;
 #endif
-#if ENABLE_FMRADIO_SENSOR
+#if ENABLE_FM_RADIO
 extern const SettingsModule fmRadioSettingsModule;
 #endif
 #if ENABLE_RTC_SENSOR
@@ -1751,7 +1763,7 @@ void registerAllSettingsModules() {
 #if ENABLE_GPS_SENSOR
   registerSettingsModule(&gpsSettingsModule);
 #endif
-#if ENABLE_FMRADIO_SENSOR
+#if ENABLE_FM_RADIO
   registerSettingsModule(&fmRadioSettingsModule);
 #endif
 #if ENABLE_RTC_SENSOR

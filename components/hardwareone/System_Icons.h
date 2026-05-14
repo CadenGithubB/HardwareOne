@@ -1,5 +1,5 @@
-#ifndef ICONS_EMBEDDED_H
-#define ICONS_EMBEDDED_H
+#ifndef SYSTEM_ICONS_H
+#define SYSTEM_ICONS_H
 
 #include <Arduino.h>
 

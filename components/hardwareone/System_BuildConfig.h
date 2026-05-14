@@ -1,5 +1,5 @@
-#ifndef SYSTEM_BUILD_CONFIG_H
-#define SYSTEM_BUILD_CONFIG_H
+#ifndef SYSTEM_BUILDCONFIG_H
+#define SYSTEM_BUILDCONFIG_H
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
 // ║                     USER CONFIGURATION - EDIT HERE                        ║
@@ -775,4 +775,4 @@
   #error "Unsupported board detected! Please add your board configuration to System_BuildConfig.h or disable REQUIRE_SUPPORTED_BOARD."
 #endif
 
-#endif // SYSTEM_BUILD_CONFIG_H
+#endif // SYSTEM_BUILDCONFIG_H

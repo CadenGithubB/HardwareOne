@@ -780,8 +780,8 @@ const char* cmd_outg2(const String& argsInput) {
     bool enabled = (gOutputFlags & OUTPUT_G2) != 0;
     bool connected = isG2Connected();
     static char buf[128];
-    snprintf(buf, sizeof(buf), "G2 output: %s, G2 connected: %s", 
-             enabled ? "ON" : "OFF", connected ? "yes" : "no");
+    snprintf(buf, sizeof(buf), "G2 output: %s, G2 connected: %s",
+             enabled ? "yes" : "no", connected ? "yes" : "no");
     return buf;
   }
   if (v) {
@@ -812,7 +812,7 @@ const char* cmd_outble(const String& argsInput) {
     bool authed = bleHasAuthenticatedSession();
     static char buf[160];
     snprintf(buf, sizeof(buf), "BLE output: %s, BLE connected: %s, authenticated: %s",
-             enabled ? "ON" : "OFF", connected ? "yes" : "no", authed ? "yes" : "no");
+             enabled ? "yes" : "no", connected ? "yes" : "no", authed ? "yes" : "no");
     return buf;
   }
   if (v) {

@@ -1,5 +1,5 @@
-#ifndef ESPNOW_SYSTEM_H
-#define ESPNOW_SYSTEM_H
+#ifndef SYSTEM_ESPNOW_H
+#define SYSTEM_ESPNOW_H
 
 #include <Arduino.h>
 
@@ -1230,4 +1230,4 @@ inline void espnowAppPingClear() {}
 
 #endif // ENABLE_ESPNOW
 
-#endif // ESPNOW_SYSTEM_H
+#endif // SYSTEM_ESPNOW_H

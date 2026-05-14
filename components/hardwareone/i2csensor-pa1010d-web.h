@@ -1,5 +1,5 @@
-#ifndef PA1010D_GPS_SENSOR_WEB_H
-#define PA1010D_GPS_SENSOR_WEB_H
+#ifndef I2CSENSOR_PA1010D_WEB_H
+#define I2CSENSOR_PA1010D_WEB_H
 
 #include <Arduino.h>
 #include "WebServer_Utils.h"
@@ -86,4 +86,4 @@ inline void streamPA1010DGpsSensorJs(httpd_req_t* req) {
     HTTPD_RESP_USE_STRLEN);
 }
 
-#endif // PA1010D_GPS_SENSOR_WEB_H
+#endif // I2CSENSOR_PA1010D_WEB_H

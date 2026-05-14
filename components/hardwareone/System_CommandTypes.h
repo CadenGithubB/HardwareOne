@@ -1,8 +1,8 @@
 // System_CommandTypes.h - Shared command execution types
 // Eliminates duplication of CommandOrigin, CommandContext, ExecReq
 // across HardwareOne.cpp, System_Utils.cpp, System_ESPNow.cpp, etc.
-#ifndef SYSTEM_COMMAND_TYPES_H
-#define SYSTEM_COMMAND_TYPES_H
+#ifndef SYSTEM_COMMANDTYPES_H
+#define SYSTEM_COMMANDTYPES_H
 
 #include <Arduino.h>
 #include "System_User.h"    // AuthContext
@@ -73,4 +73,4 @@ struct ExecReq {
   void* asyncUserData;              // Passed to callback
 };
 
-#endif // SYSTEM_COMMAND_TYPES_H
+#endif // SYSTEM_COMMANDTYPES_H

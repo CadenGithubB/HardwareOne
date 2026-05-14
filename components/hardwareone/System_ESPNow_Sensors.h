@@ -1,5 +1,5 @@
-#ifndef ESPNOW_SENSORS_H
-#define ESPNOW_SENSORS_H
+#ifndef SYSTEM_ESPNOW_SENSORS_H
+#define SYSTEM_ESPNOW_SENSORS_H
 
 #include "System_BuildConfig.h"
 
@@ -148,4 +148,4 @@ bool getRemoteGPSData(RemoteGPSData* outData);
 bool hasRemoteGPSData();
 
 #endif // ENABLE_ESPNOW
-#endif // ESPNOW_SENSORS_H
+#endif // SYSTEM_ESPNOW_SENSORS_H
