@@ -199,20 +199,22 @@ const char* cmd_presenceread(const String& argsInput) {
   
   if (!ensureDebugBuffer()) return "[PRESENCE] Error: Debug buffer unavailable";
   
-  if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    snprintf(getDebugBuffer(), 1024,
-      "[PRESENCE] Ambient: %.2f°C | Presence: %d %s | Motion: %d %s | TShock: %d %s",
-      gPresenceCache.ambientTemp,
-      gPresenceCache.presenceValue,
-      gPresenceCache.presenceDetected ? "[DETECTED]" : "",
-      gPresenceCache.motionValue,
-      gPresenceCache.motionDetected ? "[DETECTED]" : "",
-      gPresenceCache.tempShockValue,
-      gPresenceCache.tempShockDetected ? "[DETECTED]" : "");
-    xSemaphoreGive(gPresenceCache.mutex);
-    return getDebugBuffer();
+  {
+    SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(100), "presence.cmdRead");
+    if (g.held) {
+      snprintf(getDebugBuffer(), 1024,
+        "[PRESENCE] Ambient: %.2f°C | Presence: %d %s | Motion: %d %s | TShock: %d %s",
+        gPresenceCache.ambientTemp,
+        gPresenceCache.presenceValue,
+        gPresenceCache.presenceDetected ? "[DETECTED]" : "",
+        gPresenceCache.motionValue,
+        gPresenceCache.motionDetected ? "[DETECTED]" : "",
+        gPresenceCache.tempShockValue,
+        gPresenceCache.tempShockDetected ? "[DETECTED]" : "");
+      return getDebugBuffer();
+    }
   }
-  
+
   return "[PRESENCE] Error: Could not read cache";
 }
 
@@ -250,18 +252,20 @@ bool presenceStartInternal() {
   }
 
   // Clean up stale cache
-  if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gPresenceCache.dataValid = false;
-    gPresenceCache.ambientTemp = 0.0f;
-    gPresenceCache.objectTemp = 0;
-    gPresenceCache.compObjectTemp = 0.0f;
-    gPresenceCache.presenceValue = 0;
-    gPresenceCache.motionValue = 0;
-    gPresenceCache.tempShockValue = 0;
-    gPresenceCache.presenceDetected = false;
-    gPresenceCache.motionDetected = false;
-    gPresenceCache.tempShockDetected = false;
-    xSemaphoreGive(gPresenceCache.mutex);
+  {
+    SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(100), "presence.cleanStaleCache");
+    if (g.held) {
+      gPresenceCache.dataValid = false;
+      gPresenceCache.ambientTemp = 0.0f;
+      gPresenceCache.objectTemp = 0;
+      gPresenceCache.compObjectTemp = 0.0f;
+      gPresenceCache.presenceValue = 0;
+      gPresenceCache.motionValue = 0;
+      gPresenceCache.tempShockValue = 0;
+      gPresenceCache.presenceDetected = false;
+      gPresenceCache.motionDetected = false;
+      gPresenceCache.tempShockDetected = false;
+    }
   }
   INFO_PRESENCE_LIFECYCLEF("Cleaned up stale cache");
 
@@ -379,19 +383,21 @@ bool presencePoll() {
   bool tempShock = (funcStatus & 0x01) != 0;
   
   // Update cache
-  if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    gPresenceCache.ambientTemp = ambient;
-    gPresenceCache.objectTemp = objectRaw;
-    gPresenceCache.compObjectTemp = compObj;
-    gPresenceCache.presenceValue = presenceVal;
-    gPresenceCache.motionValue = motionVal;
-    gPresenceCache.tempShockValue = tempShockVal;
-    gPresenceCache.presenceDetected = presence;
-    gPresenceCache.motionDetected = motion;
-    gPresenceCache.tempShockDetected = tempShock;
-    gPresenceCache.lastUpdate = millis();
-    gPresenceCache.dataValid = true;
-    xSemaphoreGive(gPresenceCache.mutex);
+  {
+    SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(50), "presence.pollWrite");
+    if (g.held) {
+      gPresenceCache.ambientTemp = ambient;
+      gPresenceCache.objectTemp = objectRaw;
+      gPresenceCache.compObjectTemp = compObj;
+      gPresenceCache.presenceValue = presenceVal;
+      gPresenceCache.motionValue = motionVal;
+      gPresenceCache.tempShockValue = tempShockVal;
+      gPresenceCache.presenceDetected = presence;
+      gPresenceCache.motionDetected = motion;
+      gPresenceCache.tempShockDetected = tempShock;
+      gPresenceCache.lastUpdate = millis();
+      gPresenceCache.dataValid = true;
+    }
   }
   
   return true;
@@ -442,24 +448,26 @@ int presenceBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
   int pos = 0;
-  if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    pos = snprintf(buf, bufSize,
-                   "{\"valid\":%s,\"ambient\":%.2f,"
-                   "\"presence\":%d,\"presenceDetected\":%s,"
-                   "\"motion\":%d,\"motionDetected\":%s,"
-                   "\"tempShock\":%d,\"tempShockDetected\":%s,"
-                   "\"ts\":%lu}",
-                   gPresenceCache.dataValid ? "true" : "false",
-                   gPresenceCache.ambientTemp,
-                   gPresenceCache.presenceValue,
-                   gPresenceCache.presenceDetected ? "true" : "false",
-                   gPresenceCache.motionValue,
-                   gPresenceCache.motionDetected ? "true" : "false",
-                   gPresenceCache.tempShockValue,
-                   gPresenceCache.tempShockDetected ? "true" : "false",
-                   gPresenceCache.lastUpdate);
-    xSemaphoreGive(gPresenceCache.mutex);
-    if (pos < 0 || (size_t)pos >= bufSize) pos = 0;
+  {
+    SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(50), "presence.buildJSON");
+    if (g.held) {
+      pos = snprintf(buf, bufSize,
+                     "{\"valid\":%s,\"ambient\":%.2f,"
+                     "\"presence\":%d,\"presenceDetected\":%s,"
+                     "\"motion\":%d,\"motionDetected\":%s,"
+                     "\"tempShock\":%d,\"tempShockDetected\":%s,"
+                     "\"ts\":%lu}",
+                     gPresenceCache.dataValid ? "true" : "false",
+                     gPresenceCache.ambientTemp,
+                     gPresenceCache.presenceValue,
+                     gPresenceCache.presenceDetected ? "true" : "false",
+                     gPresenceCache.motionValue,
+                     gPresenceCache.motionDetected ? "true" : "false",
+                     gPresenceCache.tempShockValue,
+                     gPresenceCache.tempShockDetected ? "true" : "false",
+                     gPresenceCache.lastUpdate);
+      if (pos < 0 || (size_t)pos >= bufSize) pos = 0;
+    }
   }
   return pos;
 }

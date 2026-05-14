@@ -2052,9 +2052,11 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   bool aHeld = false;
 #if ENABLE_GAMEPAD_SENSOR
-  if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-    aHeld = !(gGamepadCache.gamepadButtons & GAMEPAD_BUTTON_A);
-    xSemaphoreGive(gGamepadCache.mutex);
+  {
+    SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(5), "map.aHeldCheck");
+    if (g.held) {
+      aHeld = !(gGamepadCache.gamepadButtons & GAMEPAD_BUTTON_A);
+    }
   }
 #endif
   

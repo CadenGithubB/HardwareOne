@@ -2432,44 +2432,38 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
   int pos = snprintf(buf, bufSize, "{\"sensors\":{");
   
   #if ENABLE_THERMAL_SENSOR
-  if (gThermalEnabled && gThermalConnected && gThermalCache.mutex) {
-    if (xSemaphoreTake(gThermalCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      if (gThermalCache.thermalDataValid) {
-        pos += snprintf(buf + pos, bufSize - pos,
-                        "\"thermal\":{\"min\":%.1f,\"max\":%.1f,\"center\":%.1f,\"valid\":true},",
-                        gThermalCache.thermalMinTemp,
-                        gThermalCache.thermalMaxTemp,
-                        gThermalCache.thermalCenterTemp);
-      }
-      xSemaphoreGive(gThermalCache.mutex);
+  if (gThermalEnabled && gThermalConnected) {
+    SensorCacheGuard g(gThermalCache.mutex, pdMS_TO_TICKS(10), "ble.thermalStream");
+    if (g.held && gThermalCache.thermalDataValid) {
+      pos += snprintf(buf + pos, bufSize - pos,
+                      "\"thermal\":{\"min\":%.1f,\"max\":%.1f,\"center\":%.1f,\"valid\":true},",
+                      gThermalCache.thermalMinTemp,
+                      gThermalCache.thermalMaxTemp,
+                      gThermalCache.thermalCenterTemp);
     }
   }
   #endif
   
   #if ENABLE_TOF_SENSOR
-  if (gTofEnabled && gTofConnected && gTofCache.mutex) {
-    if (xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      if (gTofCache.tofDataValid && gTofCache.tofTotalObjects > 0) {
-        pos += snprintf(buf + pos, bufSize - pos,
-                        "\"tof\":{\"dist_mm\":%d,\"valid\":true},",
-                        gTofCache.tofObjects[0].distance_mm);
-      }
-      xSemaphoreGive(gTofCache.mutex);
+  if (gTofEnabled && gTofConnected) {
+    SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(10), "ble.tofStream");
+    if (g.held && gTofCache.tofDataValid && gTofCache.tofTotalObjects > 0) {
+      pos += snprintf(buf + pos, bufSize - pos,
+                      "\"tof\":{\"dist_mm\":%d,\"valid\":true},",
+                      gTofCache.tofObjects[0].distance_mm);
     }
   }
   #endif
   
   #if ENABLE_IMU_SENSOR
-  if (gImuEnabled && gImuConnected && gImuCache.mutex) {
-    if (xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      if (gImuCache.imuDataValid) {
-        pos += snprintf(buf + pos, bufSize - pos,
-                        "\"imu\":{\"heading\":%.1f,\"pitch\":%.1f,\"roll\":%.1f,\"valid\":true},",
-                        gImuCache.heading,
-                        gImuCache.pitch,
-                        gImuCache.roll);
-      }
-      xSemaphoreGive(gImuCache.mutex);
+  if (gImuEnabled && gImuConnected) {
+    SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(10), "ble.imuStream");
+    if (g.held && gImuCache.imuDataValid) {
+      pos += snprintf(buf + pos, bufSize - pos,
+                      "\"imu\":{\"heading\":%.1f,\"pitch\":%.1f,\"roll\":%.1f,\"valid\":true},",
+                      gImuCache.heading,
+                      gImuCache.pitch,
+                      gImuCache.roll);
     }
   }
   #endif

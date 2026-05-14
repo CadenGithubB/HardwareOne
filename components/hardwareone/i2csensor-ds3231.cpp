@@ -359,7 +359,8 @@ int rtcBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
   int pos = 0;
-  if (gRTCCache.mutex && xSemaphoreTake(gRTCCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+  SensorCacheGuard g(gRTCCache.mutex, pdMS_TO_TICKS(50), "rtc.buildJSON");
+  if (g.held) {
     pos = snprintf(buf, bufSize,
                    "{\"valid\":%s,\"year\":%u,\"month\":%u,\"day\":%u,"
                    "\"hour\":%u,\"minute\":%u,\"second\":%u,"
@@ -369,7 +370,6 @@ int rtcBuildDataJSON(char* buf, size_t bufSize) {
                    gRTCCache.dateTime.hour, gRTCCache.dateTime.minute, gRTCCache.dateTime.second,
                    gRTCCache.temperature,
                    gRTCCache.lastUpdate);
-    xSemaphoreGive(gRTCCache.mutex);
     if (pos < 0 || (size_t)pos >= bufSize) pos = 0;
   }
   return pos;
@@ -434,12 +434,14 @@ void rtcTask(void* pvParameters) {
       float temp = rtcReadTemperature();
 
       if (rtcReadDateTime(&dt)) {
-        if (gRTCCache.mutex && xSemaphoreTake(gRTCCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-          gRTCCache.dateTime = dt;
-          gRTCCache.temperature = temp;
-          gRTCCache.dataValid = true;
-          gRTCCache.lastUpdate = now;
-          xSemaphoreGive(gRTCCache.mutex);
+        {
+          SensorCacheGuard g(gRTCCache.mutex, pdMS_TO_TICKS(50), "rtc.pollWrite");
+          if (g.held) {
+            gRTCCache.dateTime = dt;
+            gRTCCache.temperature = temp;
+            gRTCCache.dataValid = true;
+            gRTCCache.lastUpdate = now;
+          }
         }
         // Mark OLED dirty if RTC page is active (enables real-time display updates)
 #if ENABLE_OLED_DISPLAY
@@ -554,12 +556,14 @@ bool rtcStartInternal() {
   }
 
   // Clean up any stale cache from previous run BEFORE starting
-  if (gRTCCache.mutex && xSemaphoreTake(gRTCCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gRTCCache.dataValid = false;
-    gRTCCache.temperature = 0.0f;
-    memset(&gRTCCache.dateTime, 0, sizeof(RTCDateTime));
-    xSemaphoreGive(gRTCCache.mutex);
-    DEBUG_RTC_LIFECYCLEF("[RTC] Cleaned up stale cache from previous run");
+  {
+    SensorCacheGuard g(gRTCCache.mutex, pdMS_TO_TICKS(100), "rtc.cleanStaleCache");
+    if (g.held) {
+      gRTCCache.dataValid = false;
+      gRTCCache.temperature = 0.0f;
+      memset(&gRTCCache.dateTime, 0, sizeof(RTCDateTime));
+      DEBUG_RTC_LIFECYCLEF("[RTC] Cleaned up stale cache from previous run");
+    }
   }
 
   if (!rtcInit()) {

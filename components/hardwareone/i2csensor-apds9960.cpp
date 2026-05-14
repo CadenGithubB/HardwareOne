@@ -241,15 +241,17 @@ bool apdsStartInternal() {
   }
 
   // Clean up any stale cache from previous run BEFORE starting
-  if (gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gAPDSCache.apdsDataValid = false;
-    gAPDSCache.apdsRed = 0;
-    gAPDSCache.apdsGreen = 0;
-    gAPDSCache.apdsBlue = 0;
-    gAPDSCache.apdsClear = 0;
-    gAPDSCache.apdsProximity = 0;
-    gAPDSCache.apdsGesture = 0;
-    xSemaphoreGive(gAPDSCache.mutex);
+  {
+    SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(100), "apds.cleanStaleCache");
+    if (g.held) {
+      gAPDSCache.apdsDataValid = false;
+      gAPDSCache.apdsRed = 0;
+      gAPDSCache.apdsGreen = 0;
+      gAPDSCache.apdsBlue = 0;
+      gAPDSCache.apdsClear = 0;
+      gAPDSCache.apdsProximity = 0;
+      gAPDSCache.apdsGesture = 0;
+    }
   }
   INFO_APDS_LIFECYCLEF("Cleaned up stale cache from previous run");
 
@@ -492,16 +494,18 @@ void apdsTask(void* parameter) {
           // Note: I2CDevice::recordSuccess() called automatically by transaction
           // which resets consecutiveErrors - no local counter needed
           
-          if (gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            gAPDSCache.apdsRed = red;
-            gAPDSCache.apdsGreen = green;
-            gAPDSCache.apdsBlue = blue;
-            gAPDSCache.apdsClear = clear;
-            gAPDSCache.apdsProximity = proximity;
-            gAPDSCache.apdsGesture = gesture;
-            gAPDSCache.apdsLastUpdate = nowMs;
-            gAPDSCache.apdsDataValid = true;
-            xSemaphoreGive(gAPDSCache.mutex);
+          {
+            SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(50), "apds.pollWrite");
+            if (g.held) {
+              gAPDSCache.apdsRed = red;
+              gAPDSCache.apdsGreen = green;
+              gAPDSCache.apdsBlue = blue;
+              gAPDSCache.apdsClear = clear;
+              gAPDSCache.apdsProximity = proximity;
+              gAPDSCache.apdsGesture = gesture;
+              gAPDSCache.apdsLastUpdate = nowMs;
+              gAPDSCache.apdsDataValid = true;
+            }
           }
         } else {
           // Note: I2CDevice::recordError() called automatically by transaction

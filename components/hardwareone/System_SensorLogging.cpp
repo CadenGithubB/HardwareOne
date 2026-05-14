@@ -337,65 +337,73 @@ void sensorLogTick() {
     }
     
 #if ENABLE_TOF_SENSOR
-    if ((mask & LOG_TOF) && gTofCache.mutex && xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      snap.gTofEnabled = gTofEnabled;
-      snap.gTofConnected = gTofConnected;
-      snap.tofValid = gTofCache.tofDataValid;
-      snap.tofTotal = gTofCache.tofTotalObjects;
-      for (int i = 0; i < 4; i++) {
-        snap.tof[i].valid = gTofCache.tofObjects[i].valid;
-        snap.tof[i].detected = gTofCache.tofObjects[i].detected;
-        snap.tof[i].distance_mm = gTofCache.tofObjects[i].distance_mm;
-        snap.tof[i].status = gTofCache.tofObjects[i].status;
+    if (mask & LOG_TOF) {
+      SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(10), "sensorLog.tofSnapshot");
+      if (g.held) {
+        snap.gTofEnabled = gTofEnabled;
+        snap.gTofConnected = gTofConnected;
+        snap.tofValid = gTofCache.tofDataValid;
+        snap.tofTotal = gTofCache.tofTotalObjects;
+        for (int i = 0; i < 4; i++) {
+          snap.tof[i].valid = gTofCache.tofObjects[i].valid;
+          snap.tof[i].detected = gTofCache.tofObjects[i].detected;
+          snap.tof[i].distance_mm = gTofCache.tofObjects[i].distance_mm;
+          snap.tof[i].status = gTofCache.tofObjects[i].status;
+        }
       }
-      xSemaphoreGive(gTofCache.mutex);
     }
 #endif
 
 #if ENABLE_IMU_SENSOR
-    if ((mask & LOG_IMU) && gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      snap.gImuEnabled = gImuEnabled;
-      snap.gImuConnected = gImuConnected;
-      snap.yaw = gImuCache.oriYaw;
-      snap.pitch = gImuCache.oriPitch;
-      snap.roll = gImuCache.oriRoll;
-      snap.ax = gImuCache.accelX;
-      snap.ay = gImuCache.accelY;
-      snap.az = gImuCache.accelZ;
-      snap.gx = gImuCache.gyroX;
-      snap.gy = gImuCache.gyroY;
-      snap.gz = gImuCache.gyroZ;
-      snap.imuTemp = gImuCache.imuTemp;
-      xSemaphoreGive(gImuCache.mutex);
+    if (mask & LOG_IMU) {
+      SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(10), "sensorLog.imuSnapshot");
+      if (g.held) {
+        snap.gImuEnabled = gImuEnabled;
+        snap.gImuConnected = gImuConnected;
+        snap.yaw = gImuCache.oriYaw;
+        snap.pitch = gImuCache.oriPitch;
+        snap.roll = gImuCache.oriRoll;
+        snap.ax = gImuCache.accelX;
+        snap.ay = gImuCache.accelY;
+        snap.az = gImuCache.accelZ;
+        snap.gx = gImuCache.gyroX;
+        snap.gy = gImuCache.gyroY;
+        snap.gz = gImuCache.gyroZ;
+        snap.imuTemp = gImuCache.imuTemp;
+      }
     }
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
-    if ((mask & LOG_GAMEPAD) && gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      snap.gGamepadEnabled = gGamepadEnabled;
-      snap.gGamepadConnected = gGamepadConnected;
-      snap.gamepadValid = gGamepadCache.gamepadDataValid;
-      snap.gamepadButtons = gGamepadCache.gamepadButtons;
-      snap.gamepadX = gGamepadCache.gamepadX;
-      snap.gamepadY = gGamepadCache.gamepadY;
-      xSemaphoreGive(gGamepadCache.mutex);
+    if (mask & LOG_GAMEPAD) {
+      SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "sensorLog.gamepadSnapshot");
+      if (g.held) {
+        snap.gGamepadEnabled = gGamepadEnabled;
+        snap.gGamepadConnected = gGamepadConnected;
+        snap.gamepadValid = gGamepadCache.gamepadDataValid;
+        snap.gamepadButtons = gGamepadCache.gamepadButtons;
+        snap.gamepadX = gGamepadCache.gamepadX;
+        snap.gamepadY = gGamepadCache.gamepadY;
+      }
     }
 #endif
 
 #if ENABLE_APDS_SENSOR
-    if ((mask & LOG_APDS) && gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      snap.gApdsColorEnabled = gApdsColorEnabled;
-      snap.gApdsProximityEnabled = gApdsProximityEnabled;
-      snap.gApdsGestureEnabled = gApdsGestureEnabled;
-      snap.gApdsConnected = gApdsConnected;
-      snap.apdsValid = gAPDSCache.apdsDataValid;
-      snap.apdsRed = gAPDSCache.apdsRed;
-      snap.apdsGreen = gAPDSCache.apdsGreen;
-      snap.apdsBlue = gAPDSCache.apdsBlue;
-      snap.apdsClear = gAPDSCache.apdsClear;
-      snap.apdsProximity = gAPDSCache.apdsProximity;
-      snap.apdsGesture = gAPDSCache.apdsGesture;
-      xSemaphoreGive(gAPDSCache.mutex);
+    if (mask & LOG_APDS) {
+      SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(10), "sensorLog.apdsSnapshot");
+      if (g.held) {
+        snap.gApdsColorEnabled = gApdsColorEnabled;
+        snap.gApdsProximityEnabled = gApdsProximityEnabled;
+        snap.gApdsGestureEnabled = gApdsGestureEnabled;
+        snap.gApdsConnected = gApdsConnected;
+        snap.apdsValid = gAPDSCache.apdsDataValid;
+        snap.apdsRed = gAPDSCache.apdsRed;
+        snap.apdsGreen = gAPDSCache.apdsGreen;
+        snap.apdsBlue = gAPDSCache.apdsBlue;
+        snap.apdsClear = gAPDSCache.apdsClear;
+        snap.apdsProximity = gAPDSCache.apdsProximity;
+        snap.apdsGesture = gAPDSCache.apdsGesture;
+      }
     }
 #endif
 
@@ -403,7 +411,8 @@ void sensorLogTick() {
     if (mask & LOG_GPS) {
       snap.gGpsEnabled = gGpsEnabled;
       snap.gGpsConnected = gGpsConnected;
-      if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      SensorCacheGuard g(gGPSCache.mutex, pdMS_TO_TICKS(10), "sensorLog.gpsSnapshot");
+      if (g.held) {
         if (gGPSCache.dataValid && gGPSCache.hasFix) {
           snap.gpsFix = true;
           snap.gpsLatitude = gGPSCache.latitude;
@@ -420,7 +429,6 @@ void sensorLogTick() {
           snap.gpsFix = false;
           snap.gpsHasTime = false;
         }
-        xSemaphoreGive(gGPSCache.mutex);
       }
     }
 #endif
@@ -429,13 +437,13 @@ void sensorLogTick() {
     if (mask & LOG_PRESENCE) {
       snap.gPresenceEnabled = gPresenceEnabled;
       snap.gPresenceConnected = gPresenceConnected;
-      if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(10), "sensorLog.presenceSnapshot");
+      if (g.held) {
         snap.presenceAmbientTemp = gPresenceCache.ambientTemp;
         snap.presenceValue = gPresenceCache.presenceValue;
         snap.motionValue = gPresenceCache.motionValue;
         snap.presenceDetected = gPresenceCache.presenceDetected;
         snap.motionDetected = gPresenceCache.motionDetected;
-        xSemaphoreGive(gPresenceCache.mutex);
       }
     }
 #endif

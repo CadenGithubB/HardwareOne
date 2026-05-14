@@ -89,14 +89,14 @@ extern bool gOledEnabled;
 
 #if ENABLE_IMU_SENSOR
 static void imuG2FormatValue(char* out, size_t cap) {
-  if (gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+  SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(5), "g2.imuFormat");
+  if (g.held) {
     if (gImuCache.imuDataValid) {
       snprintf(out, cap, "Y%d P%d R%d",
                (int)gImuCache.oriYaw, (int)gImuCache.oriPitch, (int)gImuCache.oriRoll);
     } else {
       snprintf(out, cap, "...");
     }
-    xSemaphoreGive(gImuCache.mutex);
   } else {
     snprintf(out, cap, "busy");
   }
@@ -105,7 +105,8 @@ static void imuG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_TOF_SENSOR
 static void tofG2FormatValue(char* out, size_t cap) {
-  if (gTofCache.mutex && xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+  SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(5), "g2.tofFormat");
+  if (g.held) {
     if (gTofCache.tofDataValid && gTofCache.tofTotalObjects > 0) {
       snprintf(out, cap, "%dmm", gTofCache.tofObjects[0].distance_mm);
     } else if (gTofCache.tofDataValid) {
@@ -113,7 +114,6 @@ static void tofG2FormatValue(char* out, size_t cap) {
     } else {
       snprintf(out, cap, "...");
     }
-    xSemaphoreGive(gTofCache.mutex);
   } else {
     snprintf(out, cap, "busy");
   }
@@ -122,14 +122,14 @@ static void tofG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_THERMAL_SENSOR
 static void thermalG2FormatValue(char* out, size_t cap) {
-  if (gThermalCache.mutex && xSemaphoreTake(gThermalCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+  SensorCacheGuard g(gThermalCache.mutex, pdMS_TO_TICKS(5), "g2.thermalFormat");
+  if (g.held) {
     if (gThermalCache.thermalDataValid) {
       snprintf(out, cap, "%d/%dC",
                (int)gThermalCache.thermalMinTemp, (int)gThermalCache.thermalMaxTemp);
     } else {
       snprintf(out, cap, "...");
     }
-    xSemaphoreGive(gThermalCache.mutex);
   } else {
     snprintf(out, cap, "busy");
   }
@@ -138,13 +138,13 @@ static void thermalG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_APDS_SENSOR
 static void apdsG2FormatValue(char* out, size_t cap) {
-  if (gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+  SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(5), "g2.apdsFormat");
+  if (g.held) {
     if (gAPDSCache.apdsDataValid) {
       snprintf(out, cap, "px:%u", (unsigned)gAPDSCache.apdsProximity);
     } else {
       snprintf(out, cap, "...");
     }
-    xSemaphoreGive(gAPDSCache.mutex);
   } else {
     snprintf(out, cap, "busy");
   }
@@ -153,13 +153,13 @@ static void apdsG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_GAMEPAD_SENSOR
 static void gamepadG2FormatValue(char* out, size_t cap) {
-  if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+  SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(5), "g2.gamepadFormat");
+  if (g.held) {
     if (gGamepadCache.gamepadDataValid) {
       snprintf(out, cap, "btn:%lx", (unsigned long)gGamepadCache.gamepadButtons);
     } else {
       snprintf(out, cap, "...");
     }
-    xSemaphoreGive(gGamepadCache.mutex);
   } else {
     snprintf(out, cap, "busy");
   }
@@ -168,7 +168,8 @@ static void gamepadG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_RTC_SENSOR
 static void rtcG2FormatValue(char* out, size_t cap) {
-  if (gRTCCache.mutex && xSemaphoreTake(gRTCCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+  SensorCacheGuard g(gRTCCache.mutex, pdMS_TO_TICKS(5), "g2.rtcFormat");
+  if (g.held) {
     if (gRTCCache.dataValid) {
       // Show clock time HH:MM — the temperature reading is a
       // secondary feature on this part and the date eats too much
@@ -179,7 +180,6 @@ static void rtcG2FormatValue(char* out, size_t cap) {
     } else {
       snprintf(out, cap, "...");
     }
-    xSemaphoreGive(gRTCCache.mutex);
   } else {
     snprintf(out, cap, "busy");
   }
@@ -188,7 +188,8 @@ static void rtcG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_GPS_SENSOR
 static void gpsG2FormatValue(char* out, size_t cap) {
-  if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+  SensorCacheGuard g(gGPSCache.mutex, pdMS_TO_TICKS(5), "g2.gpsFormat");
+  if (g.held) {
     if (gGPSCache.dataValid) {
       if (gGPSCache.hasFix) {
         snprintf(out, cap, "fix %u", (unsigned)gGPSCache.satellites);
@@ -198,7 +199,6 @@ static void gpsG2FormatValue(char* out, size_t cap) {
     } else {
       snprintf(out, cap, "...");
     }
-    xSemaphoreGive(gGPSCache.mutex);
   } else {
     snprintf(out, cap, "busy");
   }
@@ -207,7 +207,8 @@ static void gpsG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_PRESENCE_SENSOR
 static void presenceG2FormatValue(char* out, size_t cap) {
-  if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+  SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(5), "g2.presenceFormat");
+  if (g.held) {
     if (gPresenceCache.dataValid) {
       const char* tag = gPresenceCache.presenceDetected ? "yes" :
                         gPresenceCache.motionDetected   ? "mot" : "no";
@@ -215,7 +216,6 @@ static void presenceG2FormatValue(char* out, size_t cap) {
     } else {
       snprintf(out, cap, "...");
     }
-    xSemaphoreGive(gPresenceCache.mutex);
   } else {
     snprintf(out, cap, "busy");
   }
@@ -224,7 +224,8 @@ static void presenceG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_FM_RADIO
 static void fmG2FormatValue(char* out, size_t cap) {
-  if (gFmRadioCache.mutex && xSemaphoreTake(gFmRadioCache.mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+  SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(5), "g2.fmRadioFormat");
+  if (g.held) {
     if (gFmRadioCache.dataValid) {
       // Frequency stored in 10 kHz units (10390 = 103.9 MHz).
       snprintf(out, cap, "%u.%uMHz",
@@ -233,7 +234,6 @@ static void fmG2FormatValue(char* out, size_t cap) {
     } else {
       snprintf(out, cap, "...");
     }
-    xSemaphoreGive(gFmRadioCache.mutex);
   } else {
     snprintf(out, cap, "busy");
   }

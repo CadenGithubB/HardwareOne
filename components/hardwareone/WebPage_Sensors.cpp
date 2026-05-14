@@ -216,12 +216,14 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         int x = 0, y = 0;
         bool dataValid = false;
 
-        if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-          buttons = gGamepadCache.gamepadButtons;
-          x = gGamepadCache.gamepadX;
-          y = gGamepadCache.gamepadY;
-          dataValid = gGamepadCache.gamepadDataValid;
-          xSemaphoreGive(gGamepadCache.mutex);
+        {
+          SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(50), "web.gamepadApi");
+          if (g.held) {
+            buttons = gGamepadCache.gamepadButtons;
+            x = gGamepadCache.gamepadX;
+            y = gGamepadCache.gamepadY;
+            dataValid = gGamepadCache.gamepadDataValid;
+          }
         }
 
         if (!dataValid) {
@@ -297,14 +299,16 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         int16_t presenceVal = 0, motionVal = 0;
         bool presenceDetected = false, motionDetected = false;
         
-        if (gPresenceCache.mutex && xSemaphoreTake(gPresenceCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-          dataValid = gPresenceCache.dataValid;
-          ambient = gPresenceCache.ambientTemp;
-          presenceVal = gPresenceCache.presenceValue;
-          motionVal = gPresenceCache.motionValue;
-          presenceDetected = gPresenceCache.presenceDetected;
-          motionDetected = gPresenceCache.motionDetected;
-          xSemaphoreGive(gPresenceCache.mutex);
+        {
+          SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(50), "web.presenceApi");
+          if (g.held) {
+            dataValid = gPresenceCache.dataValid;
+            ambient = gPresenceCache.ambientTemp;
+            presenceVal = gPresenceCache.presenceValue;
+            motionVal = gPresenceCache.motionValue;
+            presenceDetected = gPresenceCache.presenceDetected;
+            motionDetected = gPresenceCache.motionDetected;
+          }
         }
         
         if (!dataValid) {
@@ -344,23 +348,25 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         uint8_t hour = 0, minute = 0, second = 0, day = 0, month = 0;
         uint16_t year = 0;
         
-        if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-          dataValid = gGPSCache.dataValid;
-          lat = gGPSCache.latitude;
-          lon = gGPSCache.longitude;
-          alt = gGPSCache.altitude;
-          speed = gGPSCache.speed;
-          angle = gGPSCache.angle;
-          hasFix = gGPSCache.hasFix;
-          quality = gGPSCache.fixQuality;
-          sats = gGPSCache.satellites;
-          hour = gGPSCache.hour;
-          minute = gGPSCache.minute;
-          second = gGPSCache.second;
-          day = gGPSCache.day;
-          month = gGPSCache.month;
-          year = gGPSCache.year;
-          xSemaphoreGive(gGPSCache.mutex);
+        {
+          SensorCacheGuard g(gGPSCache.mutex, pdMS_TO_TICKS(50), "web.gpsApi");
+          if (g.held) {
+            dataValid = gGPSCache.dataValid;
+            lat = gGPSCache.latitude;
+            lon = gGPSCache.longitude;
+            alt = gGPSCache.altitude;
+            speed = gGPSCache.speed;
+            angle = gGPSCache.angle;
+            hasFix = gGPSCache.hasFix;
+            quality = gGPSCache.fixQuality;
+            sats = gGPSCache.satellites;
+            hour = gGPSCache.hour;
+            minute = gGPSCache.minute;
+            second = gGPSCache.second;
+            day = gGPSCache.day;
+            month = gGPSCache.month;
+            year = gGPSCache.year;
+          }
         }
         
         if (!dataValid) {
@@ -396,11 +402,13 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         RTCDateTime dt = {0};
         float temp = 0.0f;
         
-        if (gRTCCache.mutex && xSemaphoreTake(gRTCCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-          dataValid = gRTCCache.dataValid;
-          dt = gRTCCache.dateTime;
-          temp = gRTCCache.temperature;
-          xSemaphoreGive(gRTCCache.mutex);
+        {
+          SensorCacheGuard g(gRTCCache.mutex, pdMS_TO_TICKS(50), "web.rtcApi");
+          if (g.held) {
+            dataValid = gRTCCache.dataValid;
+            dt = gRTCCache.dateTime;
+            temp = gRTCCache.temperature;
+          }
         }
         
         if (!dataValid) {

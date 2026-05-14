@@ -103,9 +103,61 @@ struct I2sMicLockGuard {
   bool held;
   explicit I2sMicLockGuard(const char* owner = nullptr);
   ~I2sMicLockGuard();
-  
+
   I2sMicLockGuard(const I2sMicLockGuard&) = delete;
   I2sMicLockGuard& operator=(const I2sMicLockGuard&) = delete;
+};
+
+/**
+ * SensorCacheGuard - RAII guard for per-sensor cache mutexes.
+ *
+ * Sensor cache structs (gImuCache, gTofCache, gGpsCache, gThermalCache,
+ * gApdsCache, gGamepadCache, gRTCCache, gPresenceCache, gFmRadioCache) all
+ * follow the convention `SemaphoreHandle_t mutex = nullptr;` as their first
+ * field. This guard takes that mutex by handle. Unlike the other guards in
+ * this file, it has no "the" mutex — each sensor cache has its own, so the
+ * handle is stored in the guard for the destructor.
+ *
+ * Timeouts are caller-specified because reads (UI, snapshot) and writes
+ * (driver task) have different patience: UI uses 5ms ("show '...' if busy"),
+ * writes use 100ms ("must succeed"). The default of CACHE_MUTEX_TIMEOUT_MS
+ * (100ms, defined above) matches the most common driver-side usage.
+ *
+ * Reentrant-safe: if the current task already holds the mutex, the guard
+ * skips the take (held stays false). Matches the convention of the other
+ * guards above.
+ *
+ * Usage (block-scoped read/write):
+ *   {
+ *     SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(5), "g2.imuRead");
+ *     if (g.held) {
+ *       // ... read/write gImuCache.* fields ...
+ *       if (errorCondition) return "ERROR";  // dtor releases automatically
+ *     }
+ *   }
+ *
+ * Usage (function-scoped with intentional early release):
+ *   void someTask() {
+ *     {
+ *       SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(10), "imu.snapshot");
+ *       if (!g.held) return;
+ *       // copy cache fields into locals
+ *     }  // ← guard released here, BEFORE the work below
+ *     // do work on locals without holding the lock
+ *   }
+ */
+struct SensorCacheGuard {
+  bool held;
+  SemaphoreHandle_t mutex;  // remembered for destructor (each cache has its own)
+
+  explicit SensorCacheGuard(SemaphoreHandle_t m,
+                             TickType_t timeoutTicks = pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS),
+                             const char* owner = nullptr);
+  ~SensorCacheGuard();
+
+  // Non-copyable, non-movable — RAII guards shouldn't move.
+  SensorCacheGuard(const SensorCacheGuard&) = delete;
+  SensorCacheGuard& operator=(const SensorCacheGuard&) = delete;
 };
 
 /**
