@@ -226,16 +226,16 @@ endif()
 
 if(HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
     list(APPEND hardwareone_srcs
-        i2csensor-apds9960.cpp
-        i2csensor-pa1010d.cpp
-        i2csensor-seesaw.cpp
-        i2csensor-bno055.cpp
-        i2csensor-mlx90640.cpp
-        i2csensor-vl53l4cx.cpp
-        i2csensor-rda5807.cpp
-        i2csensor-ds3231.cpp
-        i2csensor-sths34pf80.cpp
-        i2csensor-pca9685.cpp
+        i2csensor_apds9960.cpp
+        i2csensor_pa1010d.cpp
+        i2csensor_seesaw.cpp
+        i2csensor_bno055.cpp
+        i2csensor_mlx90640.cpp
+        i2csensor_vl53l4cx.cpp
+        i2csensor_rda5807.cpp
+        i2csensor_ds3231.cpp
+        i2csensor_sths34pf80.cpp
+        i2csensor_pca9685.cpp
     )
     message(STATUS "I2C sensors INCLUDED (per-sensor flags inside each .cpp)")
 else()

@@ -1,4 +1,4 @@
-// i2csensor-sths34pf80-web.h - STHS34PF80 Web interface functions
+// i2csensor_sths34pf80_web.h - STHS34PF80 Web interface functions
 #ifndef I2CSENSOR_STHS34PF80_WEB_H
 #define I2CSENSOR_STHS34PF80_WEB_H
 
@@ -9,7 +9,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <esp_http_server.h>
-#include "i2csensor-sths34pf80.h"  // For PresenceCache definition
+#include "i2csensor_sths34pf80.h"  // For PresenceCache definition
 
 // Get presence sensor data as JSON for web API
 inline void getPresenceDataJson(JsonObject& doc) {

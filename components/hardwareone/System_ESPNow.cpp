@@ -45,10 +45,10 @@
 #endif
 
 #if ENABLE_IMU_SENSOR
-#include "i2csensor-bno055.h"
+#include "i2csensor_bno055.h"
 #endif
 #if ENABLE_THERMAL_SENSOR
-#include "i2csensor-mlx90640.h"
+#include "i2csensor_mlx90640.h"
 #endif
 
 // External dependencies from main .ino - now in espnow_system.h

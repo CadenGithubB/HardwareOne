@@ -34,11 +34,11 @@
 // =============================================================================
 // Gamepad Button Definitions
 // =============================================================================
-// These are defined in the hardware-specific sensor header (i2csensor-seesaw.h).
+// These are defined in the hardware-specific sensor header (i2csensor_seesaw.h).
 // Forward-declare them here for files that need HAL_Input but don't include seesaw.
-// The actual values come from i2csensor-seesaw.h when it's included.
+// The actual values come from i2csensor_seesaw.h when it's included.
 
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 
 // =============================================================================
 // Logical Button Identifiers (hardware-agnostic)
@@ -95,6 +95,6 @@ uint32_t inputGetCustomButtonMapping(InputButton button);
 // =============================================================================
 // Joystick Configuration
 // =============================================================================
-// JOYSTICK_CENTER and JOYSTICK_DEADZONE are defined in i2csensor-seesaw.h
+// JOYSTICK_CENTER and JOYSTICK_DEADZONE are defined in i2csensor_seesaw.h
 
 #endif // HAL_INPUT_H

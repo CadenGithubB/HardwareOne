@@ -14,22 +14,22 @@
 #include "System_Utils.h"
 
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 #endif
 #if ENABLE_GPS_SENSOR
-#include "i2csensor-pa1010d.h"
+#include "i2csensor_pa1010d.h"
 #endif
 #if ENABLE_IMU_SENSOR
-#include "i2csensor-bno055.h"
+#include "i2csensor_bno055.h"
 #endif
 #if ENABLE_THERMAL_SENSOR
-#include "i2csensor-mlx90640.h"
+#include "i2csensor_mlx90640.h"
 #endif
 #if ENABLE_TOF_SENSOR
-#include "i2csensor-vl53l4cx.h"
+#include "i2csensor_vl53l4cx.h"
 #endif
 #if ENABLE_FM_RADIO
-  #include "i2csensor-rda5807.h"
+  #include "i2csensor_rda5807.h"
 #endif
 #if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"

@@ -35,19 +35,19 @@
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
 #include "System_Notifications.h"
-#include "i2csensor-ds3231.h"  // RTC for time functions
+#include "i2csensor_ds3231.h"  // RTC for time functions
 // Additional sensor headers for the gXxxEnabled/gXxxConnected externs used by cmd_voltage.
 #if ENABLE_IMU_SENSOR
-#include "i2csensor-bno055.h"
+#include "i2csensor_bno055.h"
 #endif
 #if ENABLE_THERMAL_SENSOR
-#include "i2csensor-mlx90640.h"
+#include "i2csensor_mlx90640.h"
 #endif
 #if ENABLE_TOF_SENSOR
-#include "i2csensor-vl53l4cx.h"
+#include "i2csensor_vl53l4cx.h"
 #endif
 #if ENABLE_APDS_SENSOR
-#include "i2csensor-apds9960.h"
+#include "i2csensor_apds9960.h"
 #endif
 #include "System_ESPSR.h"
 
@@ -243,7 +243,7 @@ extern const size_t g2RingCommandsCount;
 #include "OLED_Display.h"
 #include "System_NeoPixel.h"
 #if ENABLE_SERVO
-#include "i2csensor-pca9685.h"
+#include "i2csensor_pca9685.h"
 #endif
 #include "System_Automation.h"
 #include "System_I2C.h"
@@ -257,25 +257,25 @@ extern const size_t g2RingCommandsCount;
 #include "System_User.h"
 #include "System_VFS.h"  // For sdCommands (SD card management)
 #if ENABLE_THERMAL_SENSOR
-  #include "i2csensor-mlx90640.h"  // For thermalCommands
+  #include "i2csensor_mlx90640.h"  // For thermalCommands
 #endif
 #if ENABLE_TOF_SENSOR
-  #include "i2csensor-vl53l4cx.h"      // For tofCommands
+  #include "i2csensor_vl53l4cx.h"      // For tofCommands
 #endif
 #if ENABLE_IMU_SENSOR
-  #include "i2csensor-bno055.h"      // For imuCommands
+  #include "i2csensor_bno055.h"      // For imuCommands
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor-seesaw.h"  // For gamepadCommands
+  #include "i2csensor_seesaw.h"  // For gamepadCommands
 #endif
 #if ENABLE_APDS_SENSOR
-  #include "i2csensor-apds9960.h"     // For apdsCommands
+  #include "i2csensor_apds9960.h"     // For apdsCommands
 #endif
 #include "System_SensorStubs.h" // Stubs for disabled sensors
 #if ENABLE_GPS_SENSOR
-  #include "i2csensor-pa1010d.h"      // For gpsCommands
+  #include "i2csensor_pa1010d.h"      // For gpsCommands
 #endif
-#include "i2csensor-rda5807.h"        // For fmRadioCommands
+#include "i2csensor_rda5807.h"        // For fmRadioCommands
 
 // External dependencies from .ino
 // (filesystemReady is provided by System_Filesystem.h, included above)

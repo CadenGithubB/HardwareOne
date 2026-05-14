@@ -1,5 +1,5 @@
-// i2csensor-sths34pf80-oled.h - STHS34PF80 OLED display functions
-// Include this at the end of i2csensor-sths34pf80.cpp
+// i2csensor_sths34pf80_oled.h - STHS34PF80 OLED display functions
+// Include this at the end of i2csensor_sths34pf80.cpp
 #ifndef I2CSENSOR_STHS34PF80_OLED_H
 #define I2CSENSOR_STHS34PF80_OLED_H
 

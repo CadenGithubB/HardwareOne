@@ -13,7 +13,7 @@
 #include "System_Settings.h"
 #include "System_Utils.h"
 #include "System_User.h"
-#include "i2csensor-seesaw.h"  // For JOYSTICK_DEADZONE
+#include "i2csensor_seesaw.h"  // For JOYSTICK_DEADZONE
 
 #if ENABLE_WIFI
 #include <WiFi.h>

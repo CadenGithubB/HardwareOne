@@ -10,7 +10,7 @@
  * Library: https://github.com/mathertel/Radio
  */
 
-#include "i2csensor-rda5807.h"
+#include "i2csensor_rda5807.h"
 #include "System_BuildConfig.h"
 #include "System_Utils.h"
 #include "System_TaskUtils.h"
@@ -793,7 +793,7 @@ extern const SettingsModule fmRadioSettingsModule = {
 // FM Radio OLED Mode (Display Function + Registration)
 // ============================================================================
 #if DISPLAY_TYPE > 0
-#include "i2csensor-rda5807-oled.h"
+#include "i2csensor_rda5807_oled.h"
 #endif
 
 #endif // ENABLE_FM_RADIO

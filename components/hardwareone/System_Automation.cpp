@@ -47,13 +47,13 @@
 #include "System_Utils.h"
 
 #if ENABLE_APDS_SENSOR
-#include "i2csensor-apds9960.h"
+#include "i2csensor_apds9960.h"
 #endif
 #if ENABLE_THERMAL_SENSOR
-#include "i2csensor-mlx90640.h"
+#include "i2csensor_mlx90640.h"
 #endif
 #if ENABLE_TOF_SENSOR
-#include "i2csensor-vl53l4cx.h"
+#include "i2csensor_vl53l4cx.h"
 #endif
 
 // External dependencies from .ino

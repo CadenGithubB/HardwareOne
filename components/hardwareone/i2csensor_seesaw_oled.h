@@ -1,5 +1,5 @@
-// i2csensor-seesaw-oled.h - Seesaw Gamepad OLED display functions
-// Include this at the end of i2csensor-seesaw.cpp
+// i2csensor_seesaw_oled.h - Seesaw Gamepad OLED display functions
+// Include this at the end of i2csensor_seesaw.cpp
 #ifndef I2CSENSOR_SEESAW_OLED_H
 #define I2CSENSOR_SEESAW_OLED_H
 

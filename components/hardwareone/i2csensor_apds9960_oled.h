@@ -1,5 +1,5 @@
-// i2csensor-apds9960-oled.h - APDS9960 OLED display functions
-// Include this at the end of i2csensor-apds9960.cpp
+// i2csensor_apds9960_oled.h - APDS9960 OLED display functions
+// Include this at the end of i2csensor_apds9960.cpp
 #ifndef I2CSENSOR_APDS9960_OLED_H
 #define I2CSENSOR_APDS9960_OLED_H
 

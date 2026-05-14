@@ -23,7 +23,7 @@
 // OLED_I2C_ADDRESS and OLED_TRANSACTION defined in OLED_Display.h
 
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor-seesaw.h"  // For JOYSTICK_DEADZONE
+#include "i2csensor_seesaw.h"  // For JOYSTICK_DEADZONE
 #endif
 
 #if ENABLE_WIFI

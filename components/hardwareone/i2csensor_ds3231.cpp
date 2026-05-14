@@ -1,7 +1,7 @@
-// i2csensor-ds3231.cpp - DS3231 Precision RTC sensor driver
+// i2csensor_ds3231.cpp - DS3231 Precision RTC sensor driver
 // Minimal IRAM footprint - uses standard I2C transactions
 
-#include "i2csensor-ds3231.h"
+#include "i2csensor_ds3231.h"
 #include "System_BuildConfig.h"
 
 #if ENABLE_RTC_SENSOR
@@ -892,7 +892,7 @@ const size_t rtcCommandsCount = sizeof(rtcCommands) / sizeof(rtcCommands[0]);
 // RTC OLED Mode (Display Function + Registration)
 // ============================================================================
 #if DISPLAY_TYPE > 0
-#include "i2csensor-ds3231-oled.h"
+#include "i2csensor_ds3231_oled.h"
 #endif
 
 #endif // ENABLE_RTC_SENSOR

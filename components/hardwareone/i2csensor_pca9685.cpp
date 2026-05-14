@@ -8,7 +8,7 @@
 
 #if ENABLE_SERVO
 
-#include "i2csensor-pca9685.h"
+#include "i2csensor_pca9685.h"
 #include "System_Utils.h"
 #include "System_Debug.h"  // For BROADCAST_PRINTF macro
 #include "System_Command.h"

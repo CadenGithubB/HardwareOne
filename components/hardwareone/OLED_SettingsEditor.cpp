@@ -5,7 +5,7 @@
 #include <Adafruit_SSD1306.h>
 #include <cstring>
 
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
 #include "System_Debug.h"
@@ -15,10 +15,10 @@
 
 // gThermalConnected / gTofConnected come from the sensor headers.
 #if ENABLE_THERMAL_SENSOR
-#include "i2csensor-mlx90640.h"
+#include "i2csensor_mlx90640.h"
 #endif
 #if ENABLE_TOF_SENSOR
-#include "i2csensor-vl53l4cx.h"
+#include "i2csensor_vl53l4cx.h"
 #endif
 
 // Check if a setting entry should be visible (used for conditional I2C clock settings)

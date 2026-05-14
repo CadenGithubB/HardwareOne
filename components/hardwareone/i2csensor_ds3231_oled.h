@@ -1,5 +1,5 @@
-// i2csensor-ds3231-oled.h - DS3231 RTC OLED display functions
-// Include this at the end of i2csensor-ds3231.cpp
+// i2csensor_ds3231_oled.h - DS3231 RTC OLED display functions
+// Include this at the end of i2csensor_ds3231.cpp
 #ifndef I2CSENSOR_DS3231_OLED_H
 #define I2CSENSOR_DS3231_OLED_H
 

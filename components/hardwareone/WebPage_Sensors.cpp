@@ -19,25 +19,25 @@
 #include "System_I2C.h"           // I2C system helpers
 #include "System_BuildConfig.h"        // Conditional sensor configuration
 #if ENABLE_THERMAL_SENSOR
-  #include "i2csensor-mlx90640.h"     // ThermalCache, gThermalCache, thermalBuildDataJSON
+  #include "i2csensor_mlx90640.h"     // ThermalCache, gThermalCache, thermalBuildDataJSON
 #endif
 #if ENABLE_TOF_SENSOR
-  #include "i2csensor-vl53l4cx.h"         // tofBuildDataJSON
+  #include "i2csensor_vl53l4cx.h"         // tofBuildDataJSON
 #endif
 #if ENABLE_IMU_SENSOR
-  #include "i2csensor-bno055.h"         // imuBuildDataJSON
+  #include "i2csensor_bno055.h"         // imuBuildDataJSON
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor-seesaw.h"     // gamepadEnabled, gamepadConnected
+  #include "i2csensor_seesaw.h"     // gamepadEnabled, gamepadConnected
 #endif
 #if ENABLE_GPS_SENSOR
-  #include "i2csensor-pa1010d.h"    // GPSCache, gGpsCache
+  #include "i2csensor_pa1010d.h"    // GPSCache, gGpsCache
 #endif
 #if ENABLE_RTC_SENSOR
-  #include "i2csensor-ds3231.h"     // RTCCache, RTCDateTime, gRtcCache
+  #include "i2csensor_ds3231.h"     // RTCCache, RTCDateTime, gRtcCache
 #endif
 #if ENABLE_PRESENCE_SENSOR
-  #include "i2csensor-sths34pf80.h" // presenceEnabled, presenceConnected, gPresenceCache
+  #include "i2csensor_sths34pf80.h" // presenceEnabled, presenceConnected, gPresenceCache
 #endif
 #if ENABLE_EDGE_IMPULSE
   #include "System_EdgeImpulse.h"
@@ -46,7 +46,7 @@
   #include "System_ESPNow_Sensors.h"            // Remote sensor functions
 #endif
 #include "System_SensorStubs.h" // Stubs for disabled sensors
-#include "i2csensor-rda5807.h"             // fmRadioEnabled, radioInitialized, fmRadioBuildDataJSON
+#include "i2csensor_rda5807.h"             // fmRadioEnabled, radioInitialized, fmRadioBuildDataJSON
 #include "System_MemUtil.h"             // ps_alloc, AllocPref
 
 // External helpers

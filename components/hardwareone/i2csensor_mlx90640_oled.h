@@ -1,5 +1,5 @@
-// i2csensor-mlx90640-oled.h - MLX90640 Thermal OLED display functions
-// Include this at the end of i2csensor-mlx90640.cpp
+// i2csensor_mlx90640_oled.h - MLX90640 Thermal OLED display functions
+// Include this at the end of i2csensor_mlx90640.cpp
 #ifndef I2CSENSOR_MLX90640_OLED_H
 #define I2CSENSOR_MLX90640_OLED_H
 

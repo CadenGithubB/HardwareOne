@@ -1,4 +1,4 @@
-#include "i2csensor-mlx90640.h"
+#include "i2csensor_mlx90640.h"
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
 #include "System_Utils.h"
@@ -1480,7 +1480,7 @@ const char* cmd_thermaldevicepollms(const String& argsInput) {
 // Thermal OLED Mode (Display Function + Registration)
 // ============================================================================
 #if DISPLAY_TYPE > 0
-#include "i2csensor-mlx90640-oled.h"
+#include "i2csensor_mlx90640_oled.h"
 #endif
 
 #endif // ENABLE_THERMAL_SENSOR

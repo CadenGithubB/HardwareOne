@@ -5,7 +5,7 @@
 #include <Arduino.h>
 #include "Adafruit_APDS9960.h"
 
-#include "i2csensor-apds9960.h"
+#include "i2csensor_apds9960.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
@@ -535,7 +535,7 @@ void apdsTask(void* parameter) {
 // ============================================================================
 
 #if ENABLE_OLED_DISPLAY
-#include "i2csensor-apds9960-oled.h"
+#include "i2csensor_apds9960_oled.h"
 #endif // ENABLE_OLED_DISPLAY
 
 // ============================================================================
