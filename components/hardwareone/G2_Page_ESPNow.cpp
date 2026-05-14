@@ -1,7 +1,7 @@
 // =============================================================================
-// G2 glasses — "ESPNOW App" page implementation
+// G2 glasses — "ESP-NOW App" page implementation
 // =============================================================================
-// See header for the contract. This page surfaces ESPNOW actions on the
+// See header for the contract. This page surfaces ESP-NOW actions on the
 // lens (send / broadcast / ping / per-peer detail / stats). State-mutating
 // taps route through g2SubmitHijackCommand so they run on cmd_exec_task
 // with the glasses user's auth identity (same path the Network page uses).
@@ -71,8 +71,8 @@ static void showPeerInboxMenu();
 // -----------------------------------------------------------------------------
 // Three independent states the user cares about:
 //   "Radio Off" — WiFi driver itself is down (esp_wifi_set_mode hasn't been
-//                 called or was set to WIFI_OFF). ESPNOW cannot operate.
-//   "OFF"       — WiFi up, ESPNOW subsystem not initialized. Tap to start.
+//                 called or was set to WIFI_OFF). ESP-NOW cannot operate.
+//   "OFF"       — WiFi up, ESP-NOW subsystem not initialized. Tap to start.
 //   "ON"        — gEspNow->initialized. All actions usable.
 
 enum class EspNowAppPhase : uint8_t {
@@ -94,18 +94,18 @@ static EspNowAppPhase currentPhase() {
 
 static const char* phaseLabel(EspNowAppPhase p) {
   switch (p) {
-    case EspNowAppPhase::RadioOff: return "ESPNOW: Radio Off";
-    case EspNowAppPhase::Off:      return "ESPNOW: OFF";
-    case EspNowAppPhase::On:       return "ESPNOW: ON";
+    case EspNowAppPhase::RadioOff: return "ESP-NOW: Radio Off";
+    case EspNowAppPhase::Off:      return "ESP-NOW: OFF";
+    case EspNowAppPhase::On:       return "ESP-NOW: ON";
   }
-  return "ESPNOW: ?";
+  return "ESP-NOW: ?";
 }
 
-// Convenience guard for action rows: when ESPNOW isn't ON, we no-op + log.
+// Convenience guard for action rows: when ESP-NOW isn't ON, we no-op + log.
 // Returns true if the caller should bail.
 static bool bailIfNotReady(const char* what) {
   if (currentPhase() != EspNowAppPhase::On) {
-    DEBUG_G2F("[G2-ESPNOW-APP] %s: not ready (phase=%d)",
+    DEBUG_G2F("[G2-ESP-NOW-APP] %s: not ready (phase=%d)",
               what, (int)currentPhase());
     return true;
   }
@@ -197,14 +197,14 @@ static void enqueueRedrawFromCallback(const G2CmdCookie& cookie,
                                       const char* tag) {
   RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
   if (!spec) {
-    DEBUG_G2F("[G2-ESPNOW-APP] %s: RedrawSpec alloc failed", tag);
+    DEBUG_G2F("[G2-ESP-NOW-APP] %s: RedrawSpec alloc failed", tag);
     return;
   }
   spec->render = renderFn;
 
   LensUiJob* job = new (std::nothrow) LensUiJob{};
   if (!job) {
-    DEBUG_G2F("[G2-ESPNOW-APP] %s: LensUiJob alloc failed", tag);
+    DEBUG_G2F("[G2-ESP-NOW-APP] %s: LensUiJob alloc failed", tag);
     delete spec;
     return;
   }
@@ -216,7 +216,7 @@ static void enqueueRedrawFromCallback(const G2CmdCookie& cookie,
   job->payload.redraw = spec;
 
   if (!g2EnqueueLensJob(job)) {
-    DEBUG_G2F("[G2-ESPNOW-APP] %s: lens job enqueue FAILED", tag);
+    DEBUG_G2F("[G2-ESP-NOW-APP] %s: lens job enqueue FAILED", tag);
     delete spec;
     delete job;
   }
@@ -244,7 +244,7 @@ void g2BuildESPNowAppInfo(char* out, size_t cap) {
 
   String s;
   s.reserve(256);
-  s += "ESPNOW App\n";
+  s += "ESP-NOW App\n";
   s += phaseLabel(currentPhase());
   s += "\n";
 
@@ -298,14 +298,14 @@ static void showMainMenu() {
 
   const char* items[] = {
     "<- Main Menu",   // 0
-    stateLine,        // 1 — tap = toggle ESPNOW / jump to WiFi
+    stateLine,        // 1 — tap = toggle ESP-NOW / jump to WiFi
     peersLine,        // 2
     inboxLine,        // 3 — merged chronological view of all peers' history
     "Broadcast >>",   // 4
     "Stats >>",       // 5
   };
   g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-  DEBUG_G2F("[G2-ESPNOW-APP] main menu shown (phase=%d, peers=%d, inbox=%d)",
+  DEBUG_G2F("[G2-ESP-NOW-APP] main menu shown (phase=%d, peers=%d, inbox=%d)",
             (int)currentPhase(), nPeers, nInbox);
 }
 
@@ -356,9 +356,9 @@ static void showPeersMenu() {
   } else {
     g2ShowListPage(ptrs, n);
   }
-  DEBUG_G2F("[G2-ESPNOW-APP] peers menu shown (%u rows)", (unsigned)(n - 1));
+  DEBUG_G2F("[G2-ESP-NOW-APP] peers menu shown (%u rows)", (unsigned)(n - 1));
 #else
-  static const char* na[] = { "<- Back", "(ESPNOW not compiled)" };
+  static const char* na[] = { "<- Back", "(ESP-NOW not compiled)" };
   g2ShowListPage(na, 2);
 #endif
 }
@@ -438,10 +438,10 @@ static void showPeerDetail() {
     "Forget",       // 8
   };
   g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-  DEBUG_G2F("[G2-ESPNOW-APP] peer detail shown (idx=%d, name='%s')",
+  DEBUG_G2F("[G2-ESP-NOW-APP] peer detail shown (idx=%d, name='%s')",
             gSelectedPeer, nm);
 #else
-  static const char* na[] = { "<- Back", "(ESPNOW not compiled)" };
+  static const char* na[] = { "<- Back", "(ESP-NOW not compiled)" };
   g2ShowListPage(na, 2);
 #endif
 }
@@ -460,7 +460,7 @@ static void showBroadcastMenu() {
     "Type message...",  // 4 — opens TextEntry
   };
   g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-  DEBUG_G2F("[G2-ESPNOW-APP] broadcast menu shown");
+  DEBUG_G2F("[G2-ESP-NOW-APP] broadcast menu shown");
 }
 
 // -----------------------------------------------------------------------------
@@ -509,7 +509,7 @@ static void showStatsMenu() {
 
   g2ShowListPage(ptrs, n);
 #else
-  static const char* na[] = { "<- Back", "(ESPNOW not compiled)" };
+  static const char* na[] = { "<- Back", "(ESP-NOW not compiled)" };
   g2ShowListPage(na, 2);
 #endif
 }
@@ -558,9 +558,9 @@ static void showInboxMenu() {
   } else {
     g2ShowListPage(ptrs, n);
   }
-  DEBUG_G2F("[G2-ESPNOW-APP] inbox shown (%d msgs)", got);
+  DEBUG_G2F("[G2-ESP-NOW-APP] inbox shown (%d msgs)", got);
 #else
-  static const char* na[] = { "<- Main Menu", "(ESPNOW not compiled)" };
+  static const char* na[] = { "<- Main Menu", "(ESP-NOW not compiled)" };
   g2ShowListPage(na, 2);
 #endif
 }
@@ -602,10 +602,10 @@ static void showPeerInboxMenu() {
   } else {
     g2ShowListPage(ptrs, n);
   }
-  DEBUG_G2F("[G2-ESPNOW-APP] peer-inbox shown (peer=%d, %d msgs)",
+  DEBUG_G2F("[G2-ESP-NOW-APP] peer-inbox shown (peer=%d, %d msgs)",
             gSelectedPeer, got);
 #else
-  static const char* na[] = { "<- Peer", "(ESPNOW not compiled)" };
+  static const char* na[] = { "<- Peer", "(ESP-NOW not compiled)" };
   g2ShowListPage(na, 2);
 #endif
 }
@@ -618,7 +618,7 @@ static void onMainRedrawDone(bool ok,
                              const char* result,
                              const G2CmdCookie& cookie,
                              void* /*userData*/) {
-  DEBUG_G2F("[G2-ESPNOW-APP] main redraw cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
+  DEBUG_G2F("[G2-ESP-NOW-APP] main redraw cmd done: ok=%d seq=%llu menuGen=%u result='%s'",
             (int)ok, (unsigned long long)cookie.seq,
             (unsigned)cookie.menuGen, result ? result : "");
   enqueueRedrawFromCallback(cookie, &showMainMenu, "main redraw");
@@ -628,7 +628,7 @@ static void onPeerDetailRedrawDone(bool ok,
                                    const char* result,
                                    const G2CmdCookie& cookie,
                                    void* /*userData*/) {
-  DEBUG_G2F("[G2-ESPNOW-APP] peer-detail redraw cmd done: ok=%d result='%s'",
+  DEBUG_G2F("[G2-ESP-NOW-APP] peer-detail redraw cmd done: ok=%d result='%s'",
             (int)ok, result ? result : "");
   enqueueRedrawFromCallback(cookie, &showPeerDetail, "peer-detail redraw");
 }
@@ -637,7 +637,7 @@ static void onPeersRedrawDone(bool ok,
                               const char* result,
                               const G2CmdCookie& cookie,
                               void* /*userData*/) {
-  DEBUG_G2F("[G2-ESPNOW-APP] peers redraw cmd done: ok=%d result='%s'",
+  DEBUG_G2F("[G2-ESP-NOW-APP] peers redraw cmd done: ok=%d result='%s'",
             (int)ok, result ? result : "");
   enqueueRedrawFromCallback(cookie, &showPeersMenu, "peers redraw");
 }
@@ -646,7 +646,7 @@ static void onBroadcastRedrawDone(bool ok,
                                   const char* result,
                                   const G2CmdCookie& cookie,
                                   void* /*userData*/) {
-  DEBUG_G2F("[G2-ESPNOW-APP] broadcast redraw cmd done: ok=%d result='%s'",
+  DEBUG_G2F("[G2-ESP-NOW-APP] broadcast redraw cmd done: ok=%d result='%s'",
             (int)ok, result ? result : "");
   enqueueRedrawFromCallback(cookie, &showBroadcastMenu, "broadcast redraw");
 }
@@ -670,11 +670,11 @@ static bool submitSendToSelectedPeer(const char* text) {
            text);
   G2CmdCookie cookie = buildCookie();
   if (!g2SubmitHijackCommand(line, cookie, onPeerDetailRedrawDone, nullptr)) {
-    DEBUG_G2F("[G2-ESPNOW-APP] send submit FAILED — '%s'", line);
+    DEBUG_G2F("[G2-ESP-NOW-APP] send submit FAILED — '%s'", line);
     showPeerDetail();
     return false;
   }
-  BROADCAST_PRINTF("[G2-ESPNOW-APP] send → %s: '%s'",
+  BROADCAST_PRINTF("[G2-ESP-NOW-APP] send → %s: '%s'",
                    d.friendlyName.length() > 0 ? d.friendlyName.c_str() :
                    d.name.length()         > 0 ? d.name.c_str()         : "(peer)",
                    text);
@@ -688,11 +688,11 @@ static bool submitBroadcast(const char* text) {
   snprintf(line, sizeof(line), "espnowbroadcast %s", text);
   G2CmdCookie cookie = buildCookie();
   if (!g2SubmitHijackCommand(line, cookie, onBroadcastRedrawDone, nullptr)) {
-    DEBUG_G2F("[G2-ESPNOW-APP] broadcast submit FAILED — '%s'", line);
+    DEBUG_G2F("[G2-ESP-NOW-APP] broadcast submit FAILED — '%s'", line);
     showBroadcastMenu();
     return false;
   }
-  BROADCAST_PRINTF("[G2-ESPNOW-APP] broadcast: '%s'", text);
+  BROADCAST_PRINTF("[G2-ESP-NOW-APP] broadcast: '%s'", text);
   return true;
 }
 
@@ -713,25 +713,25 @@ static bool submitForgetSelectedPeer() {
   cookie.targetNetSub = (uint8_t)ESPN_APP_SUB_PEERS;
   gSelectedPeer = -1;
   if (!g2SubmitHijackCommand(line, cookie, onPeersRedrawDone, nullptr)) {
-    DEBUG_G2F("[G2-ESPNOW-APP] forget submit FAILED — '%s'", line);
+    DEBUG_G2F("[G2-ESP-NOW-APP] forget submit FAILED — '%s'", line);
     showPeersMenu();
     return false;
   }
-  BROADCAST_PRINTF("[G2-ESPNOW-APP] forget peer: %s", line + 13);
+  BROADCAST_PRINTF("[G2-ESP-NOW-APP] forget peer: %s", line + 13);
   return true;
 }
 
-// Toggle ESPNOW on/off via the existing CLI commands (same path the Network
+// Toggle ESP-NOW on/off via the existing CLI commands (same path the Network
 // page uses for the ESP-NOW state line).
 static void submitToggleEspNow(bool running) {
   const char* line = running ? "closeespnow" : "openespnow";
   G2CmdCookie cookie = buildCookie();
   if (!g2SubmitHijackCommand(line, cookie, onMainRedrawDone, nullptr)) {
-    DEBUG_G2F("[G2-ESPNOW-APP] toggle submit FAILED — '%s'", line);
+    DEBUG_G2F("[G2-ESP-NOW-APP] toggle submit FAILED — '%s'", line);
     showMainMenu();
     return;
   }
-  BROADCAST_PRINTF("[G2-ESPNOW-APP] toggle: %s", line);
+  BROADCAST_PRINTF("[G2-ESP-NOW-APP] toggle: %s", line);
 }
 #endif  // ENABLE_ESPNOW
 
@@ -781,10 +781,10 @@ static void handleMainTap(uint32_t idx) {
   if (idx == 1) {
     EspNowAppPhase p = currentPhase();
     if (p == EspNowAppPhase::RadioOff) {
-      // Wi-Fi radio itself is down — ESPNOW can't start until it's up.
+      // Wi-Fi radio itself is down — ESP-NOW can't start until it's up.
       // Send the user to the Network top-level so they can navigate
       // into WiFi and bring the radio up there.
-      DEBUG_G2F("[G2-ESPNOW-APP] state-tap: radio off, jumping to Network");
+      DEBUG_G2F("[G2-ESP-NOW-APP] state-tap: radio off, jumping to Network");
       g2ShowNetworkMenu();
       return;
     }
@@ -798,7 +798,7 @@ static void handleMainTap(uint32_t idx) {
   if (idx == 3) { showInboxMenu();     return; }
   if (idx == 4) { showBroadcastMenu(); return; }
   if (idx == 5) { showStatsMenu();     return; }
-  DEBUG_G2F("[G2-ESPNOW-APP] main: unknown idx=%u", (unsigned)idx);
+  DEBUG_G2F("[G2-ESP-NOW-APP] main: unknown idx=%u", (unsigned)idx);
 }
 
 static void handlePeersTap(uint32_t idx) {
@@ -808,7 +808,7 @@ static void handlePeersTap(uint32_t idx) {
   int peerIdx = (int)idx - 1;
   if (!gEspNow || !gEspNow->initialized ||
       peerIdx < 0 || peerIdx >= gEspNow->deviceCount) {
-    DEBUG_G2F("[G2-ESPNOW-APP] peers: invalid idx=%u (count=%d)",
+    DEBUG_G2F("[G2-ESP-NOW-APP] peers: invalid idx=%u (count=%d)",
               (unsigned)idx,
               (gEspNow && gEspNow->initialized) ? gEspNow->deviceCount : -1);
     return;
@@ -828,7 +828,7 @@ static void handlePeerDetailTap(uint32_t idx) {
   }
   // 1, 2 are info rows — no action.
   if (idx == 1 || idx == 2) {
-    DEBUG_G2F("[G2-ESPNOW-APP] peer-detail: info row %u", (unsigned)idx);
+    DEBUG_G2F("[G2-ESP-NOW-APP] peer-detail: info row %u", (unsigned)idx);
     return;
   }
 
@@ -849,7 +849,7 @@ static void handlePeerDetailTap(uint32_t idx) {
       // "Ping (pending...)" on the redraw below.
       espnowAppPingClear();
       bool ok = espnowAppPingStart(d.mac);
-      DEBUG_G2F("[G2-ESPNOW-APP] ping start ok=%d", (int)ok);
+      DEBUG_G2F("[G2-ESP-NOW-APP] ping start ok=%d", (int)ok);
       showPeerDetail();
       return;
     }
@@ -867,7 +867,7 @@ static void handlePeerDetailTap(uint32_t idx) {
       cfg.onCommit = sendTypedToPeerCommit;
       cfg.onCancel = sendTypedToPeerCancel;
       if (!g2BeginTextEntry(cfg)) {
-        DEBUG_G2F("[G2-ESPNOW-APP] text-entry start FAILED");
+        DEBUG_G2F("[G2-ESP-NOW-APP] text-entry start FAILED");
       }
       return;
     }
@@ -875,7 +875,7 @@ static void handlePeerDetailTap(uint32_t idx) {
       submitForgetSelectedPeer();
       return;
     default:
-      DEBUG_G2F("[G2-ESPNOW-APP] peer-detail: unknown idx=%u", (unsigned)idx);
+      DEBUG_G2F("[G2-ESP-NOW-APP] peer-detail: unknown idx=%u", (unsigned)idx);
       return;
   }
 #else
@@ -899,12 +899,12 @@ static void handleBroadcastTap(uint32_t idx) {
       cfg.onCommit = broadcastTypedCommit;
       cfg.onCancel = broadcastTypedCancel;
       if (!g2BeginTextEntry(cfg)) {
-        DEBUG_G2F("[G2-ESPNOW-APP] broadcast text-entry start FAILED");
+        DEBUG_G2F("[G2-ESP-NOW-APP] broadcast text-entry start FAILED");
       }
       return;
     }
     default:
-      DEBUG_G2F("[G2-ESPNOW-APP] broadcast: unknown idx=%u", (unsigned)idx);
+      DEBUG_G2F("[G2-ESP-NOW-APP] broadcast: unknown idx=%u", (unsigned)idx);
       return;
   }
 #else
@@ -935,7 +935,7 @@ static void handleInboxTap(uint32_t idx) {
   int got = getAllMessages(msgs, ESPN_APP_INBOX_DISPLAY_MAX, /*sinceSeq=*/0);
   int slot = (int)idx - 1;
   if (slot < 0 || slot >= got) {
-    DEBUG_G2F("[G2-ESPNOW-APP] inbox: tap idx=%u out of range (got=%d)",
+    DEBUG_G2F("[G2-ESP-NOW-APP] inbox: tap idx=%u out of range (got=%d)",
               (unsigned)idx, got);
     return;
   }
@@ -949,7 +949,7 @@ static void handleInboxTap(uint32_t idx) {
       return;
     }
   }
-  DEBUG_G2F("[G2-ESPNOW-APP] inbox: sender no longer paired (slot=%d)", slot);
+  DEBUG_G2F("[G2-ESP-NOW-APP] inbox: sender no longer paired (slot=%d)", slot);
 #else
   (void)idx;
 #endif
@@ -962,7 +962,7 @@ static void handlePeerInboxTap(uint32_t idx) {
   // Phase 2: rows are info-only. A future phase could open a per-message
   // detail overlay (full text + reply) — not needed for the walkie-talkie
   // use case.
-  DEBUG_G2F("[G2-ESPNOW-APP] peer-inbox: tap idx=%u (info-only)",
+  DEBUG_G2F("[G2-ESP-NOW-APP] peer-inbox: tap idx=%u (info-only)",
             (unsigned)idx);
 }
 
@@ -1032,7 +1032,7 @@ void g2ESPNowAppOnRxText(const uint8_t* senderMac) {
   job->payload.redraw = spec;
 
   if (!g2EnqueueLensJob(job)) {
-    DEBUG_G2F("[G2-ESPNOW-APP] rx push-kick: enqueue FAILED");
+    DEBUG_G2F("[G2-ESP-NOW-APP] rx push-kick: enqueue FAILED");
     delete spec;
     delete job;
   }

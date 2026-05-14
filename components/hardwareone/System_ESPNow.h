@@ -1106,7 +1106,7 @@ bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msg
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 
 // =============================================================================
-// ESPNOW App ping (used by the on-glasses ESPNOW App page).
+// ESP-NOW App ping (used by the on-glasses ESP-NOW App page).
 // =============================================================================
 // Sends a HEARTBEAT-with-ACK_REQ to one peer, records msgId + startMs, and
 // classifies the response in the existing ACK RX path. There is exactly one

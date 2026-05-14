@@ -132,7 +132,7 @@ static int timezoneSelection = 1;  // EDT default (index 1 — US Eastern Daylig
 static int logLevelSelection = 3;  // DEBUG default (all logging enabled)
 static int ntpSelection = 0;       // pool.ntp.org default
 static int ledEffectSelection = 1; // rainbow default
-static char wizardDeviceName[21] = "";  // Device name entry (used when ESPNOW not compiled)
+static char wizardDeviceName[21] = "";  // Device name entry (used when ESP-NOW not compiled)
 
 // Feature items per page. Only touched during first-time setup; dormant
 // after FTS completes — safe to park in PSRAM.

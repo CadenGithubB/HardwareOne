@@ -5778,7 +5778,7 @@ bool processGamepadMenuInput() {
     if (shouldDebug) {
       DEBUG_DISPLAYF("[ESPNOW_BUTTONS] buttons=0x%08lX pressedNow=0x%08lX pressedLast=0x%08lX newlyPressed=0x%08lX\n", (unsigned long)buttons, (unsigned long)pressedNow, 
                     (unsigned long)pressedLast, (unsigned long)newlyPressed);
-      DEBUG_DISPLAYF("[GAMEPAD_LOGICAL] MODE=ESPNOW newly=0x%08lX A=%d B=%d X=%d Y=%d START=%d\n", (unsigned long)newlyPressed,
+      DEBUG_DISPLAYF("[GAMEPAD_LOGICAL] MODE=ESP-NOW newly=0x%08lX A=%d B=%d X=%d Y=%d START=%d\n", (unsigned long)newlyPressed,
                     INPUT_CHECK(newlyPressed, INPUT_BUTTON_A),
                     INPUT_CHECK(newlyPressed, INPUT_BUTTON_B),
                     INPUT_CHECK(newlyPressed, INPUT_BUTTON_X),

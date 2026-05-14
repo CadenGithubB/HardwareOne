@@ -615,7 +615,7 @@ void gamepadTask(void* parameter) {
             gGamepadCache.gamepadDataValid = true;
             if (changed) gGamepadCache.gamepadSeq++;
             }
-          }  // gamepad guard releases here, before the ESPNOW streaming below
+          }  // gamepad guard releases here, before the ESP-NOW streaming below
 
           // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW

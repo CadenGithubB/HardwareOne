@@ -2,9 +2,9 @@
 #define G2_PAGE_ESPNOW_H
 
 // =============================================================================
-// G2 glasses — "ESPNOW App" page
+// G2 glasses — "ESP-NOW App" page
 // =============================================================================
-// Top-level hijack page that surfaces ESPNOW *actions* (send / broadcast /
+// Top-level hijack page that surfaces ESP-NOW *actions* (send / broadcast /
 // ping / per-peer detail / stats). Distinct from Network → ESP-NOW, which
 // remains the home for settings/info: ON/OFF toggle, device name, Auto Start,
 // paired-device info list.
@@ -40,7 +40,7 @@
 void g2BuildESPNowAppInfo(char* out, size_t cap);
 
 // Render the top-level chooser. Called from the hijack tap dispatcher when
-// the user lands on the ESPNOW App page from the main menu.
+// the user lands on the ESP-NOW App page from the main menu.
 void g2ShowESPNowAppMenu();
 
 // Tap dispatch from handleHijackMenuTap when gHijackPage == ESPNOW_APP.
@@ -49,7 +49,7 @@ void g2ESPNowAppHandleTap(uint32_t idx);
 
 // Push-kick: called from the espnow_task RX drain after a new TEXT message
 // is stored in PeerMessageHistory. No-op unless the user is currently on
-// one of the ESPNOW App page's message-displaying sub-modes (merged Inbox
+// one of the ESP-NOW App page's message-displaying sub-modes (merged Inbox
 // or matching per-peer Inbox); in that case it enqueues a Redraw via the
 // lens applier so the list picks up the new entry within one tick of the
 // applier worker.

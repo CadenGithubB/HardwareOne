@@ -2173,7 +2173,7 @@ const char* getDebugCategoryName(DebugFlagMask flag) {
   if (flag & DEBUG_USERS) return "USERS";
   if (flag & DEBUG_SYSTEM) return "SYSTEM";
   if (flag & DEBUG_STORAGE) return "STORAGE";
-  if (flag & DEBUG_ESPNOW_CORE) return "ESPNOW";
+  if (flag & DEBUG_ESPNOW_CORE) return "ESP-NOW";
   if (flag & DEBUG_LOGGER) return "LOGGER";
   if (flag & DEBUG_MEMORY) return "MEMORY";
   if (flag & DEBUG_MEMORY_HEAP)    return "MEMORY_HEAP";

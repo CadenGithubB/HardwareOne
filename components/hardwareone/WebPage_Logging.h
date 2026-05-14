@@ -1508,7 +1508,7 @@ function getCategoryColor(category) {
     'AUTO': '#d7ba7d',       'AUTO_EXEC': '#d7ba7d',   'AUTO_COND': '#d7ba7d',
     'AUTO_SCHED': '#d7ba7d', 'AUTO_TIME': '#d7ba7d',
     // ESP-NOW (hyphens normalised to underscores by parser)
-    'ESPNOW': '#d16969',     'ESP_NOW': '#d16969',
+    'ESP-NOW': '#d16969',     'ESP_NOW': '#d16969',
     'ESPNOW_CORE': '#d16969','ESPNOW_MESH': '#d16969',
     'ESPNOW_ROUTER': '#d16969','ESPNOW_TOPO': '#d16969',
     'ESPNOW_STREAM': '#d16969','ESPNOW_ENCRYPTION': '#d16969',
