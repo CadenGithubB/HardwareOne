@@ -5,7 +5,7 @@
 #include "HAL_Input.h"
 #include "System_Debug.h"
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 #endif
 
 // =============================================================================

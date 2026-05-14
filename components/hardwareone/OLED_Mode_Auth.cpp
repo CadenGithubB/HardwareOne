@@ -14,7 +14,7 @@
 #include "System_Utils.h"
 #include "System_Notifications.h"
 #include "System_Settings.h"
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 #include "System_Debug.h"
 
 // External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)

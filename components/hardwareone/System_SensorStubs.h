@@ -17,7 +17,7 @@
 // so the rest of the codebase compiles and links cleanly.
 
 #if !ENABLE_THERMAL_SENSOR
-  #include "i2csensor-mlx90640.h"  // Provides ThermalCache struct
+  #include "i2csensor_mlx90640.h"  // Provides ThermalCache struct
   extern ThermalCache gThermalCache;
   extern bool gThermalEnabled;
   extern bool gThermalConnected;
@@ -33,7 +33,7 @@
 #endif
 
 #if !ENABLE_TOF_SENSOR
-  #include "i2csensor-vl53l4cx.h"  // Provides TofCache struct
+  #include "i2csensor_vl53l4cx.h"  // Provides TofCache struct
   extern TofCache gTofCache;
   extern bool gTofEnabled;
   extern bool gTofConnected;
@@ -49,7 +49,7 @@
 #endif
 
 #if !ENABLE_IMU_SENSOR
-  #include "i2csensor-bno055.h"  // Provides ImuCache and IMUActionState structs
+  #include "i2csensor_bno055.h"  // Provides ImuCache and IMUActionState structs
   extern ImuCache gImuCache;
   extern bool gImuEnabled;
   extern bool gImuConnected;
@@ -66,7 +66,7 @@
 #endif
 
 #if !ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor-seesaw.h"  // Provides GamepadCache struct
+  #include "i2csensor_seesaw.h"  // Provides GamepadCache struct
   extern GamepadCache gGamepadCache;
   extern bool gGamepadEnabled;
   extern bool gGamepadConnected;
@@ -95,7 +95,7 @@
 #endif
 
 #if !ENABLE_APDS_SENSOR
-  #include "i2csensor-apds9960.h"  // Provides APDSCache struct
+  #include "i2csensor_apds9960.h"  // Provides APDSCache struct
   extern APDSCache gApdsCache;
   extern bool gApdsConnected;
   extern bool gApdsColorEnabled;
@@ -110,7 +110,7 @@
 #endif
 
 #if !ENABLE_GPS_SENSOR
-  #include "i2csensor-pa1010d.h"  // Provides GPSCache struct
+  #include "i2csensor_pa1010d.h"  // Provides GPSCache struct
   extern GPSCache gGpsCache;
   extern bool gGpsEnabled;
   extern bool gGpsConnected;
@@ -125,7 +125,7 @@
 
 #if !ENABLE_FM_RADIO
   // FM Radio stubs when disabled
-  #include "i2csensor-rda5807.h"  // Provides FMRadioCache struct
+  #include "i2csensor_rda5807.h"  // Provides FMRadioCache struct
   extern bool gFmRadioEnabled;
   extern bool gFmRadioConnected;
   extern unsigned long gFmRadioLastStopTime;
@@ -142,7 +142,7 @@
 #endif
 
 #if !ENABLE_PRESENCE_SENSOR
-  #include "i2csensor-sths34pf80.h"  // Provides PresenceCache struct
+  #include "i2csensor_sths34pf80.h"  // Provides PresenceCache struct
   extern PresenceCache gPresenceCache;
   extern bool gPresenceEnabled;
   extern bool gPresenceConnected;
@@ -158,7 +158,7 @@
 #endif
 
 #if !ENABLE_RTC_SENSOR
-  #include "i2csensor-ds3231.h"  // Provides RTCDateTime and RTCCache structs
+  #include "i2csensor_ds3231.h"  // Provides RTCDateTime and RTCCache structs
   extern RTCCache gRtcCache;
   extern bool gRtcEnabled;
   extern bool gRtcConnected;
@@ -174,7 +174,7 @@
 #endif
 
 #if !ENABLE_SERVO
-  #include "i2csensor-pca9685.h"  // Provides ServoProfile, PCA9685_I2C_ADDRESS, MAX_SERVO_CHANNELS
+  #include "i2csensor_pca9685.h"  // Provides ServoProfile, PCA9685_I2C_ADDRESS, MAX_SERVO_CHANNELS
   extern const struct CommandEntry servoCommands[];
   extern const size_t servoCommandsCount;
   // Servo stub functions

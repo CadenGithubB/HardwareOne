@@ -9,7 +9,7 @@
 #include <LittleFS.h>
 #include <Wire.h>
 
-#include "i2csensor-rda5807.h"
+#include "i2csensor_rda5807.h"
 #include "System_BuildConfig.h"
 #include "System_Command.h"
 #include "System_Debug.h"
@@ -32,34 +32,34 @@
 
 #if ENABLE_APDS_SENSOR
 #include "Adafruit_APDS9960.h"
-#include "i2csensor-apds9960.h"
+#include "i2csensor_apds9960.h"
 #endif
 #if ENABLE_GAMEPAD_SENSOR
 #include "Adafruit_seesaw.h"
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 #endif
 #if ENABLE_GPS_SENSOR
 #include <Adafruit_GPS.h>
-#include "i2csensor-pa1010d.h"
+#include "i2csensor_pa1010d.h"
 #endif
 #if ENABLE_IMU_SENSOR
 #include <Adafruit_BNO055.h>
 #include <Adafruit_Sensor.h>
-#include "i2csensor-bno055.h"
+#include "i2csensor_bno055.h"
 #endif
 #if ENABLE_THERMAL_SENSOR
 #include <Adafruit_MLX90640.h>
-#include "i2csensor-mlx90640.h"
+#include "i2csensor_mlx90640.h"
 #endif
 #if ENABLE_TOF_SENSOR
-#include "i2csensor-vl53l4cx.h"
+#include "i2csensor_vl53l4cx.h"
 #include "vl53l4cx_class.h"
 #endif
 #if ENABLE_RTC_SENSOR
-#include "i2csensor-ds3231.h"
+#include "i2csensor_ds3231.h"
 #endif
 #if ENABLE_PRESENCE_SENSOR
-#include "i2csensor-sths34pf80.h"
+#include "i2csensor_sths34pf80.h"
 #endif
 
 // ============================================================================
@@ -164,7 +164,7 @@ extern volatile bool gSensorPollingPaused;
 // Queue processor task handle
 TaskHandle_t queueProcessorTask = nullptr;
 
-// gImuTaskHandle and gImuLastStopTime are declared in i2csensor-bno055.h (included above)
+// gImuTaskHandle and gImuLastStopTime are declared in i2csensor_bno055.h (included above)
 // Clock management is now unified through I2CDeviceManager
 // Legacy i2cSetWire1Clock() removed - all sensors use i2cDeviceTransaction wrapper
 
@@ -172,14 +172,14 @@ TaskHandle_t queueProcessorTask = nullptr;
 extern volatile unsigned long gSensorStatusSeq;
 extern const char* gLastStatusCause;
 extern void sensorStatusBump();
-// gApds{Color,Proximity,Gesture}Enabled provided by i2csensor-apds9960.h (included above)
+// gApds{Color,Proximity,Gesture}Enabled provided by i2csensor_apds9960.h (included above)
 #if ENABLE_SERVO
 extern bool gPwmDriverConnected;
 #endif
 
 // BROADCAST_PRINTF now defined in debug_system.h with performance optimizations
 
-// Sensor connection status — provided by the per-sensor i2csensor-*.h headers (all included above)
+// Sensor connection status — provided by the per-sensor i2csensor_*.h headers (all included above)
 
 // ============================================================================
 // I2C Clock Management (Wire1)
@@ -255,7 +255,7 @@ void initSensorQueue() {
 // Queued Sensor Start Commands (moved from .ino)
 // =========================================================================
 
-// gThermalEnabled / gTofEnabled / gImuEnabled provided by their i2csensor-*.h headers
+// gThermalEnabled / gTofEnabled / gImuEnabled provided by their i2csensor_*.h headers
 
 // Map I2CDeviceType → I2C address for pre-start hardware presence checks.
 // Returns 0 if the device type has no single fixed address (or should skip the check).
@@ -332,7 +332,7 @@ const char* cmd_apdsstart_queued(const String& argsInput) {
   return cmd_sensorstart_queued(I2C_DEVICE_APDS, "APDS", gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled, "openapds@enqueue");
 }
 
-// gGamepadEnabled provided by i2csensor-seesaw.h
+// gGamepadEnabled provided by i2csensor_seesaw.h
 const char* cmd_gamepadstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return cmd_sensorstart_queued(I2C_DEVICE_GAMEPAD, "Gamepad", gGamepadEnabled, "opengamepad@enqueue");
@@ -595,8 +595,8 @@ const char* cmd_i2csclpin(const String& argsInput) {
 }
 
 // Sensor-specific I2C clock commands moved to their respective sensor modules:
-// - thermalI2cClockHz -> i2csensor-mlx90640.cpp (thermal module)
-// - tofI2cClockHz -> i2csensor-vl53l4cx.cpp (ToF module)
+// - thermalI2cClockHz -> i2csensor_mlx90640.cpp (thermal module)
+// - tofI2cClockHz -> i2csensor_vl53l4cx.cpp (ToF module)
 
 const char* cmd_i2cscan(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -700,16 +700,16 @@ const char* cmd_i2cstats(const String& originalCmd) {
 // ========== End I2C Infrastructure Commands ==========
 
 #if ENABLE_TOF_SENSOR
-// gTofEnabled / gTofConnected / gTofTaskHandle / gVL53L4CX provided by i2csensor-vl53l4cx.h
+// gTofEnabled / gTofConnected / gTofTaskHandle / gVL53L4CX provided by i2csensor_vl53l4cx.h
 extern bool tofPoll();
 #endif
 // i2cOledTransactionVoid/i2cOledTransaction and i2cDeviceTransaction are template functions in System_I2C.h
-// gThermalEnabled provided by i2csensor-mlx90640.h
+// gThermalEnabled provided by i2csensor_mlx90640.h
 
 // SensorCache struct is now defined in i2c_system.h
 
 // Per-sensor state, handles, and driver-object pointers are declared in the
-// respective i2csensor-*.h headers (all already included at top of file).
+// respective i2csensor_*.h headers (all already included at top of file).
 // Only sensor-side function declarations that aren't in their headers remain.
 #if ENABLE_IMU_SENSOR
 extern void imuPoll();        // Sensor_IMU_BNO055.cpp
@@ -2186,13 +2186,13 @@ extern const SettingsModule i2cSettingsModule = {
 // ============================================================================
 // Process Sensor Auto-Start on Boot
 // Note: autoStart settings are now in each sensor's own module:
-// - thermal (i2csensor-mlx90640.cpp)
-// - tof (i2csensor-vl53l4cx.cpp)
-// - imu (i2csensor-bno055.cpp)
-// - gps (i2csensor-pa1010d.cpp)
-// - fmradio (i2csensor-rda5807.cpp)
-// - apds (i2csensor-apds9960.cpp)
-// - gamepad (i2csensor-seesaw.cpp)
+// - thermal (i2csensor_mlx90640.cpp)
+// - tof (i2csensor_vl53l4cx.cpp)
+// - imu (i2csensor_bno055.cpp)
+// - gps (i2csensor_pa1010d.cpp)
+// - fmradio (i2csensor_rda5807.cpp)
+// - apds (i2csensor_apds9960.cpp)
+// - gamepad (i2csensor_seesaw.cpp)
 // ============================================================================
 
 // Check if a sensor is available for auto-start:

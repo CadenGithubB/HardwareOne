@@ -27,12 +27,12 @@
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 #endif
 
 #if ENABLE_GPS_SENSOR
 #include <Adafruit_GPS.h>
-#include "i2csensor-pa1010d.h"
+#include "i2csensor_pa1010d.h"
 #include "System_I2C_Manager.h"
 #endif
 

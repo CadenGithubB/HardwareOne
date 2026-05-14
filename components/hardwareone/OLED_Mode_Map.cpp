@@ -13,7 +13,7 @@
 #include "System_Maps.h"
 #include "OLED_Utils.h"
 #include "System_FileManager.h"
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
 #include "System_Command.h"
@@ -22,7 +22,7 @@
 
 #if ENABLE_GPS_SENSOR
 #include <Adafruit_GPS.h>
-#include "i2csensor-pa1010d.h"
+#include "i2csensor_pa1010d.h"
 #endif
 
 #if ENABLE_ESPNOW

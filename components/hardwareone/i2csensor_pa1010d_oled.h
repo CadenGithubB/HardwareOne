@@ -1,5 +1,5 @@
-// i2csensor-pa1010d-oled.h - PA1010D GPS OLED display functions
-// Include this at the end of i2csensor-pa1010d.cpp
+// i2csensor_pa1010d_oled.h - PA1010D GPS OLED display functions
+// Include this at the end of i2csensor_pa1010d.cpp
 #ifndef I2CSENSOR_PA1010D_OLED_H
 #define I2CSENSOR_PA1010D_OLED_H
 

@@ -1,5 +1,5 @@
-// i2csensor-vl53l4cx-oled.h - VL53L4CX ToF OLED display functions
-// Include this at the end of i2csensor-vl53l4cx.cpp
+// i2csensor_vl53l4cx_oled.h - VL53L4CX ToF OLED display functions
+// Include this at the end of i2csensor_vl53l4cx.cpp
 #ifndef I2CSENSOR_VL53L4CX_OLED_H
 #define I2CSENSOR_VL53L4CX_OLED_H
 

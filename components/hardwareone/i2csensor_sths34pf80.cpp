@@ -5,7 +5,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-#include "i2csensor-sths34pf80.h"
+#include "i2csensor_sths34pf80.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_ESPNow.h"
@@ -480,7 +480,7 @@ void presenceTask(void* parameter) {
   INFO_PRESENCE_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_PRESENCE_LIFECYCLEF("[MODULAR] presenceTask() running from i2csensor-sths34pf80.cpp");
+  INFO_PRESENCE_LIFECYCLEF("[MODULAR] presenceTask() running from i2csensor_sths34pf80.cpp");
   
   unsigned long lastPresenceRead = 0;
   unsigned long lastStackLog = 0;
@@ -549,7 +549,7 @@ void presenceTask(void* parameter) {
 // ============================================================================
 
 #if ENABLE_OLED_DISPLAY
-#include "i2csensor-sths34pf80-oled.h"
+#include "i2csensor_sths34pf80_oled.h"
 #endif // ENABLE_OLED_DISPLAY
 
 #endif // ENABLE_PRESENCE_SENSOR

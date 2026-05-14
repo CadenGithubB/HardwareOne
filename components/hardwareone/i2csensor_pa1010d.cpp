@@ -1,4 +1,4 @@
-#include "i2csensor-pa1010d.h"
+#include "i2csensor_pa1010d.h"
 #include "System_Utils.h"
 
 #if ENABLE_GPS_SENSOR
@@ -619,7 +619,7 @@ const size_t gpsCommandsCount = sizeof(gpsCommands) / sizeof(gpsCommands[0]);
 // GPS OLED Mode (Display Function + Registration)
 // ============================================================================
 #if DISPLAY_TYPE > 0
-#include "i2csensor-pa1010d-oled.h"
+#include "i2csensor_pa1010d_oled.h"
 #endif
 
 #endif // ENABLE_GPS_SENSOR

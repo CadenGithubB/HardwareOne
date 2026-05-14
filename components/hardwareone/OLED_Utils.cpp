@@ -41,7 +41,7 @@ bool shouldBlockForDisplayAuth() {
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include "System_VFS.h"
-#include "i2csensor-rda5807.h"
+#include "i2csensor_rda5807.h"
 
 #include "OLED_ConsoleBuffer.h"
 #include "OLED_Footer.h"
@@ -64,23 +64,23 @@ bool shouldBlockForDisplayAuth() {
 #include "System_ESPNow.h"
 #endif
 #if ENABLE_APDS_SENSOR
-#include "i2csensor-apds9960.h"
+#include "i2csensor_apds9960.h"
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 #endif
 #if ENABLE_IMU_SENSOR
-#include "i2csensor-bno055.h"
+#include "i2csensor_bno055.h"
 #endif
 #if ENABLE_THERMAL_SENSOR
-#include "i2csensor-mlx90640.h"
+#include "i2csensor_mlx90640.h"
 #endif
 #if ENABLE_TOF_SENSOR
-#include "i2csensor-vl53l4cx.h"
+#include "i2csensor_vl53l4cx.h"
 #endif
 #if ENABLE_RTC_SENSOR
-#include "i2csensor-ds3231.h"
-#include "i2csensor-pa1010d.h"  // gGpsEnabled, gGpsConnected
+#include "i2csensor_ds3231.h"
+#include "i2csensor_pa1010d.h"  // gGpsEnabled, gGpsConnected
 #endif
 
 #if ENABLE_WIFI || ENABLE_ESPNOW
@@ -1126,7 +1126,7 @@ void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state,
 #include "System_Utils.h"
 
 #if ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor-seesaw.h"  // For JOYSTICK_DEADZONE
+  #include "i2csensor_seesaw.h"  // For JOYSTICK_DEADZONE
 #endif
 
 // Character grid layouts - three modes (3 rows each)
@@ -2821,7 +2821,7 @@ extern const OLEDAnimation gAnimationRegistry[];
 extern const int gAnimationCount;
 
 // Sensor state (managed by I2C system)
-// (Sensor enabled/connected flags are provided by the per-sensor i2csensor-*.h
+// (Sensor enabled/connected flags are provided by the per-sensor i2csensor_*.h
 // headers included above; no extern re-declarations needed here.)
 
 // Modular sensor caches (each sensor defines its own cache)
@@ -3181,7 +3181,7 @@ void updateOLEDDisplay() {
 
       // OLED_ESPNOW handled by registered mode in OLED_Mode_Network.cpp
       // OLED_TOF_DATA handled by registered mode in Sensor_ToF_VL53L4CX.cpp
-      // OLED_APDS_DATA handled by registered mode in i2csensor-apds9960-oled.h
+      // OLED_APDS_DATA handled by registered mode in i2csensor_apds9960_oled.h
       // OLED_POWER / OLED_POWER_CPU / OLED_POWER_SLEEP handled by registered mode in OLED_Mode_Power.cpp
       // OLED_MEMORY_STATS handled by registered mode in OLED_Mode_System.cpp
       // OLED_WEB_STATS handled by registered mode in OLED_Mode_Network.cpp

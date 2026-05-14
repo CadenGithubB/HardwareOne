@@ -1,5 +1,5 @@
-// i2csensor-rda5807-oled.h - RDA5807 FM Radio OLED display functions
-// Include this at the end of i2csensor-rda5807.cpp
+// i2csensor_rda5807_oled.h - RDA5807 FM Radio OLED display functions
+// Include this at the end of i2csensor_rda5807.cpp
 #ifndef I2CSENSOR_RDA5807_OLED_H
 #define I2CSENSOR_RDA5807_OLED_H
 

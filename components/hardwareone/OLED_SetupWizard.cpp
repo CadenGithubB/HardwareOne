@@ -17,7 +17,7 @@
 #include "System_Settings.h"
 #include "System_SetupWizard.h"
 #include "HAL_Input.h"
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 #include "System_I2C.h"
 
 // OLED_I2C_ADDRESS, OLED_TRANSACTION, and oledConnected from OLED_Display.h

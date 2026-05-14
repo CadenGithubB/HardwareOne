@@ -1,4 +1,4 @@
-#include "i2csensor-bno055.h"
+#include "i2csensor_bno055.h"
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
 #include "System_Utils.h"
@@ -1177,7 +1177,7 @@ extern const SettingsModule imuSettingsModule = {
 // IMU OLED Mode (Display Function + Registration)
 // ============================================================================
 #if DISPLAY_TYPE > 0
-#include "i2csensor-bno055-oled.h"
+#include "i2csensor_bno055_oled.h"
 #endif
 
 #endif // ENABLE_IMU_SENSOR

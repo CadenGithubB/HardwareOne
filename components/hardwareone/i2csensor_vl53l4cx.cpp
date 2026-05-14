@@ -1,4 +1,4 @@
-#include "i2csensor-vl53l4cx.h"
+#include "i2csensor_vl53l4cx.h"
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
 #include "System_Utils.h"
@@ -794,7 +794,7 @@ extern const SettingsModule tofSettingsModule = {
 // ToF OLED Mode (Display Function + Registration)
 // ============================================================================
 #if DISPLAY_TYPE > 0
-#include "i2csensor-vl53l4cx-oled.h"
+#include "i2csensor_vl53l4cx_oled.h"
 #endif
 
 #endif // ENABLE_TOF_SENSOR

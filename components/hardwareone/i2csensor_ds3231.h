@@ -1,4 +1,4 @@
-// i2csensor-ds3231.h - DS3231 Precision RTC sensor driver
+// i2csensor_ds3231.h - DS3231 Precision RTC sensor driver
 // I2C Address: 0x68 (fixed)
 // Features: Temperature-compensated RTC with battery backup
 

@@ -1,5 +1,5 @@
-// i2csensor-bno055-oled.h - BNO055 IMU OLED display functions
-// Include this at the end of i2csensor-bno055.cpp
+// i2csensor_bno055_oled.h - BNO055 IMU OLED display functions
+// Include this at the end of i2csensor_bno055.cpp
 #ifndef I2CSENSOR_BNO055_OLED_H
 #define I2CSENSOR_BNO055_OLED_H
 

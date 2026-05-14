@@ -1,4 +1,4 @@
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
 #include "System_MemUtil.h"
@@ -719,7 +719,7 @@ uint32_t gamepadGetButtons() {
 // Gamepad OLED Mode
 // ============================================================================
 #if DISPLAY_TYPE > 0
-#include "i2csensor-seesaw-oled.h"
+#include "i2csensor_seesaw_oled.h"
 #endif
 
 #endif // ENABLE_GAMEPAD_SENSOR

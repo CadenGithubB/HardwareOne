@@ -36,31 +36,31 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username);
 
 // Individual sensor web modules (conditionally included)
 #if ENABLE_THERMAL_SENSOR
-#include "i2csensor-mlx90640-web.h"
+#include "i2csensor_mlx90640_web.h"
 #endif
 #if ENABLE_TOF_SENSOR
-#include "i2csensor-vl53l4cx-web.h"
+#include "i2csensor_vl53l4cx_web.h"
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor-seesaw-web.h"
+#include "i2csensor_seesaw_web.h"
 #endif
 #if ENABLE_GPS_SENSOR
-#include "i2csensor-pa1010d-web.h"
+#include "i2csensor_pa1010d_web.h"
 #endif
 #if ENABLE_RTC_SENSOR
-#include "i2csensor-ds3231-web.h"
+#include "i2csensor_ds3231_web.h"
 #endif
 #if ENABLE_PRESENCE_SENSOR
-#include "i2csensor-sths34pf80-web.h"
+#include "i2csensor_sths34pf80_web.h"
 #endif
 #if ENABLE_FM_RADIO
-#include "i2csensor-rda5807-web.h"
+#include "i2csensor_rda5807_web.h"
 #endif
 #if ENABLE_IMU_SENSOR
-#include "i2csensor-bno055-web.h"
+#include "i2csensor_bno055_web.h"
 #endif
 #if ENABLE_SERVO
-#include "i2csensor-pca9685-web.h"
+#include "i2csensor_pca9685_web.h"
 #endif
 #if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP_Web.h"

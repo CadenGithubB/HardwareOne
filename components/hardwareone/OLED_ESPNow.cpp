@@ -8,7 +8,7 @@
 #include "System_Utils.h"
 
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor-seesaw.h"
+#include "i2csensor_seesaw.h"
 #endif
 
 // Mesh health data for online/offline status display

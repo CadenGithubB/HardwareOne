@@ -552,13 +552,13 @@ void settingsDefaults() {
   // - debug (System_Settings.cpp): all debug flags
   // - output (System_Settings.cpp): outSerial, outWeb, outDisplay
   // - i2c (System_I2C.cpp): bus settings, clock speeds
-  // - thermal (i2csensor-mlx90640.cpp): autoStart, polling, interpolation, EWMA, rotation
-  // - tof (i2csensor-vl53l4cx.cpp): autoStart, polling, stability, transition
-  // - imu (i2csensor-bno055.cpp): autoStart, polling, EWMA, orientation correction
-  // - gps (i2csensor-pa1010d.cpp): autoStart, polling
-  // - apds (i2csensor-apds9960.cpp): autoStart, polling
-  // - gamepad (i2csensor-seesaw.cpp): autoStart, polling
-  // - fmradio (i2csensor-rda5807.cpp): autoStart, polling
+  // - thermal (i2csensor_mlx90640.cpp): autoStart, polling, interpolation, EWMA, rotation
+  // - tof (i2csensor_vl53l4cx.cpp): autoStart, polling, stability, transition
+  // - imu (i2csensor_bno055.cpp): autoStart, polling, EWMA, orientation correction
+  // - gps (i2csensor_pa1010d.cpp): autoStart, polling
+  // - apds (i2csensor_apds9960.cpp): autoStart, polling
+  // - gamepad (i2csensor_seesaw.cpp): autoStart, polling
+  // - fmradio (i2csensor_rda5807.cpp): autoStart, polling
   // - oled (OLED_Settings.cpp): enabled, autoInit, modes, brightness
   // - led (System_NeoPixel.cpp): brightness, startup effect/color/duration
   // - power (System_Power.cpp): mode, autoMode, thresholds
