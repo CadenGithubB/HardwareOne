@@ -1703,21 +1703,48 @@ void hardwareone_loop() {
           } else {
             String u = rest.substring(0, sp);
             String p = rest.substring(sp + 1);
-            if (isValidUser(u, p)) {
+            // Serial console uses the literal "local" as the brute-force key
+            // so failed attempts from the console accumulate against one
+            // tier counter (separate from any web/BLE attempts).
+            const char* serialIp = "local";
+
+#if ENABLE_HTTP_SERVER
+            unsigned long lockoutRemainingMs = 0;
+            bool locked = isLoginLocked(serialIp, &lockoutRemainingMs);
+#else
+            bool locked = false;
+#endif
+            if (locked) {
+#if ENABLE_HTTP_SERVER
+              BROADCAST_PRINTF("[serial] Login locked out. Retry in %lu seconds.",
+                               lockoutRemainingMs / 1000UL);
+              logAuthAttempt(false, "serial/login", u, serialIp, "Locked out");
+#endif
+            } else if (isValidUser(u, p)) {
               AuthContext ctx;
               ctx.transport = SOURCE_SERIAL;
               ctx.user = u;
-              ctx.ip = "local";
+              ctx.ip = serialIp;
               ctx.path = "serial/login";
               ctx.sid = String();
 #if ENABLE_HTTP_SERVER
+              // authSuccessUnified sets gSerialAuthed = true and gSerialUser
+              // internally for SOURCE_SERIAL; no need to duplicate that here.
+              clearLoginAttempts(serialIp);
               authSuccessUnified(ctx, nullptr);
-#endif
+              logAuthAttempt(true, "serial/login", u, serialIp, "Login successful");
+#else
+              // Stub build: minimal local state set since authSuccessUnified is a no-op stub.
               gSerialAuthed = true;
               gSerialUser = u;
+#endif
               bool isCurrentlyAdmin = isAdminUser(u);
               BROADCAST_PRINTF("[serial] Login successful. User: %s%s", u.c_str(), isCurrentlyAdmin ? " (admin)" : "");
             } else {
+#if ENABLE_HTTP_SERVER
+              recordFailedLogin(serialIp);
+              logAuthAttempt(false, "serial/login", u, serialIp, "Invalid credentials");
+#endif
               broadcastOutput("[serial] Authentication failed.");
             }
           }
