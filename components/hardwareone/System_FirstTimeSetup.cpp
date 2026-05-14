@@ -408,22 +408,25 @@ void firstTimeSetupIfNeeded() {
 
 #if ENABLE_GAMEPAD_SENSOR
         // Gamepad B button escape (active-low, detect new press)
-        if (!goBack && gGamepadCache.mutex &&
-            xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-          uint32_t btns = gGamepadCache.gamepadButtons;
-          bool valid = gGamepadCache.gamepadDataValid;
-          xSemaphoreGive(gGamepadCache.mutex);
-          if (valid) {
-            if (!btnStateInit) {
-              lastBtnState = btns;
-              btnStateInit = true;
-            } else {
-              uint32_t newPressed = ~btns & lastBtnState;  // active-low: was 1 (up), now 0 (down)
-              if (newPressed & INPUT_MASK(INPUT_BUTTON_B)) {
-                goBack = true;
-              }
-              lastBtnState = btns;
+        uint32_t btns = 0;
+        bool valid = false;
+        if (!goBack) {
+          SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "fts.gamepadEscape");
+          if (g.held) {
+            btns = gGamepadCache.gamepadButtons;
+            valid = gGamepadCache.gamepadDataValid;
+          }
+        }
+        if (!goBack && valid) {
+          if (!btnStateInit) {
+            lastBtnState = btns;
+            btnStateInit = true;
+          } else {
+            uint32_t newPressed = ~btns & lastBtnState;  // active-low: was 1 (up), now 0 (down)
+            if (newPressed & INPUT_MASK(INPUT_BUTTON_B)) {
+              goBack = true;
             }
+            lastBtnState = btns;
           }
         }
 #endif

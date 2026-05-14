@@ -151,12 +151,14 @@ bool gamepadStartInternal() {
   }
 
   // Clean up any stale cache from previous run BEFORE starting
-  if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gGamepadCache.gamepadDataValid = false;
-    gGamepadCache.gamepadButtons = 0;
-    gGamepadCache.gamepadX = 0;
-    gGamepadCache.gamepadY = 0;
-    xSemaphoreGive(gGamepadCache.mutex);
+  {
+    SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(100), "gamepad.cleanStaleCache");
+    if (g.held) {
+      gGamepadCache.gamepadDataValid = false;
+      gGamepadCache.gamepadButtons = 0;
+      gGamepadCache.gamepadX = 0;
+      gGamepadCache.gamepadY = 0;
+    }
   }
 
   // Initialize Seesaw
@@ -580,7 +582,9 @@ void gamepadTask(void* parameter) {
             filtY = (int)lroundf(kAlpha * rawY + (1.0f - kAlpha) * filtY);
           }
 
-          if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          {
+            SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(50), "gamepad.pollWrite");
+            if (g.held) {
             // Only increment seq when data actually changes to avoid unnecessary OLED re-renders
             // Use threshold of 2 for joystick to ignore ADC noise/rounding jitter
             bool changed = (gGamepadCache.gamepadButtons != buttons ||
@@ -610,9 +614,9 @@ void gamepadTask(void* parameter) {
             gGamepadCache.gamepadLastUpdate = nowMs;
             gGamepadCache.gamepadDataValid = true;
             if (changed) gGamepadCache.gamepadSeq++;
-            xSemaphoreGive(gGamepadCache.mutex);
-          }
-          
+            }
+          }  // gamepad guard releases here, before the ESPNOW streaming below
+
           // Stream data to ESP-NOW master if enabled (worker devices only)
 #if ENABLE_ESPNOW
           if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {

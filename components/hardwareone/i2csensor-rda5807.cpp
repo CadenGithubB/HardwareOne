@@ -78,13 +78,11 @@ static void RDS_ServiceNameCallback(const char* name) {
   DEBUG_FMRADIO_VALUESF("[FM_RADIO] RDS Station Name callback: '%s'", name ? name : "null");
 
   if (name != nullptr && strlen(name) > 0) {
-    if (gFmRadioCache.mutex && xSemaphoreTake(gFmRadioCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      if (strncmp(gFmRadioCache.stationName, name, 8) != 0) {
-        DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station name changed from '%s' to '%s'", gFmRadioCache.stationName, name);
-        strncpy(gFmRadioCache.stationName, name, 8);
-        gFmRadioCache.stationName[8] = '\0';
-      }
-      xSemaphoreGive(gFmRadioCache.mutex);
+    SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(50), "fmRadio.rdsStationName");
+    if (g.held && strncmp(gFmRadioCache.stationName, name, 8) != 0) {
+      DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station name changed from '%s' to '%s'", gFmRadioCache.stationName, name);
+      strncpy(gFmRadioCache.stationName, name, 8);
+      gFmRadioCache.stationName[8] = '\0';
     }
   }
 }
@@ -94,13 +92,11 @@ static void RDS_TextCallback(const char* text) {
   DEBUG_FMRADIO_VALUESF("[FM_RADIO] RDS Text callback: '%s'", text ? text : "null");
 
   if (text != nullptr && strlen(text) > 0) {
-    if (gFmRadioCache.mutex && xSemaphoreTake(gFmRadioCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      if (strncmp(gFmRadioCache.stationText, text, 64) != 0) {
-        DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station text changed from '%s' to '%s'", gFmRadioCache.stationText, text);
-        strncpy(gFmRadioCache.stationText, text, 64);
-        gFmRadioCache.stationText[64] = '\0';
-      }
-      xSemaphoreGive(gFmRadioCache.mutex);
+    SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(50), "fmRadio.rdsStationText");
+    if (g.held && strncmp(gFmRadioCache.stationText, text, 64) != 0) {
+      DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station text changed from '%s' to '%s'", gFmRadioCache.stationText, text);
+      strncpy(gFmRadioCache.stationText, text, 64);
+      gFmRadioCache.stationText[64] = '\0';
     }
   }
 }
@@ -698,13 +694,15 @@ int fmRadioBuildDataJSON(char* buf, size_t bufSize) {
   // Take a consistent snapshot under the mutex so RDS callbacks can't tear
   // strings mid-serialize and callers get coherent values.
   FMRadioCache snap;
-  if (gFmRadioCache.mutex && xSemaphoreTake(gFmRadioCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    snap = gFmRadioCache;  // value copy
-    xSemaphoreGive(gFmRadioCache.mutex);
-  } else {
-    // Best-effort: mutex unavailable or contended. Read directly; strings may
-    // tear in rare races but values stay in valid ranges.
-    snap = gFmRadioCache;
+  {
+    SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(50), "fmRadio.buildJSONSnapshot");
+    if (g.held) {
+      snap = gFmRadioCache;  // value copy
+    } else {
+      // Best-effort: mutex unavailable or contended. Read directly; strings may
+      // tear in rare races but values stay in valid ranges.
+      snap = gFmRadioCache;
+    }
   }
 
   int len = snprintf(buf, bufSize,

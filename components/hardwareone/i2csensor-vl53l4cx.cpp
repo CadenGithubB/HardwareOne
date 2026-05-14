@@ -176,21 +176,23 @@ bool tofStartInternal() {
 
   // Clean up any stale cache from previous run BEFORE starting
   // CRITICAL: Cache wasn't invalidated during stop to avoid dying-task crashes
-  if (gTofCache.mutex && xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gTofCache.tofDataValid = false;
-    gTofCache.tofTotalObjects = 0;
-    for (int j = 0; j < 4; j++) {
-      gTofCache.tofObjects[j].detected = false;
-      gTofCache.tofObjects[j].valid = false;
-      gTofCache.tofObjects[j].distance_mm = 0;
-      gTofCache.tofObjects[j].distance_cm = 0.0;
-      gTofCache.tofObjects[j].status = 0;
-      gTofCache.tofObjects[j].smoothed_distance_mm = 0.0;
-      gTofCache.tofObjects[j].smoothed_distance_cm = 0.0;
-      gTofCache.tofObjects[j].hasHistory = false;
+  {
+    SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(100), "tof.cleanStaleCache");
+    if (g.held) {
+      gTofCache.tofDataValid = false;
+      gTofCache.tofTotalObjects = 0;
+      for (int j = 0; j < 4; j++) {
+        gTofCache.tofObjects[j].detected = false;
+        gTofCache.tofObjects[j].valid = false;
+        gTofCache.tofObjects[j].distance_mm = 0;
+        gTofCache.tofObjects[j].distance_cm = 0.0;
+        gTofCache.tofObjects[j].status = 0;
+        gTofCache.tofObjects[j].smoothed_distance_mm = 0.0;
+        gTofCache.tofObjects[j].smoothed_distance_cm = 0.0;
+        gTofCache.tofObjects[j].hasHistory = false;
+      }
+      DEBUG_CLIF("[TOF_INTERNAL] Cleaned up stale cache from previous run");
     }
-    xSemaphoreGive(gTofCache.mutex);
-    DEBUG_CLIF("[TOF_INTERNAL] Cleaned up stale cache from previous run");
   }
 
   // Set gTofEnabled FIRST to prevent race condition with task cleanup code
@@ -406,11 +408,17 @@ bool tofPoll() {
 
     int no_of_object_found = pMultiRangingData->NumberOfObjectsFound;
 
-    if (!gTofCache.mutex || xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-      return false;
-    }
+    // Pattern 3: take, do all cache writes, release BEFORE the
+    // VL53L4CX_ClearInterruptAndStartMeasurement hardware call. Explicit
+    // { } block scopes the guard so the dtor releases before line 1 of
+    // the post-block hardware call.
+    {
+      SensorCacheGuard tofGuard(gTofCache.mutex, pdMS_TO_TICKS(50), "tof.pollWrite");
+      if (!tofGuard.held) {
+        return false;
+      }
 
-    gTofCache.tofTotalObjects = no_of_object_found;
+      gTofCache.tofTotalObjects = no_of_object_found;
 
     for (int j = 0; j < 4; j++) {
       gTofCache.tofObjects[j].detected = false;
@@ -488,8 +496,7 @@ bool tofPoll() {
     DEBUG_TOF_POLLINGF("tofPoll: found=%d, valid=%d, seq=%lu",
                  no_of_object_found, validObjectIndex,
                  (unsigned long)gTofCache.tofSeq);
-
-    xSemaphoreGive(gTofCache.mutex);
+    }  // tofGuard releases here, before the hardware call
 
     gVL53L4CX->VL53L4CX_ClearInterruptAndStartMeasurement();
 
@@ -509,12 +516,12 @@ int tofBuildDataJSON(char* buf, size_t bufSize) {
 
   int pos = 0;
 
-  if (gTofCache.mutex && xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS)) == pdTRUE) {
+  SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS), "tof.buildJSON");
+  if (g.held) {
     if (!gTofCache.tofDataValid) {
       DEBUG_TOF_POLLINGF("tofBuildDataJSON: tofDataValid=%s, gTofEnabled=%d, gTofConnected=%d, lastUpdate=%lu",
                    "false", gTofEnabled ? 1 : 0, gTofConnected ? 1 : 0, gTofCache.tofLastUpdate);
       pos = snprintf(buf, bufSize, "{\"error\":\"ToF sensor not ready\"}");
-      xSemaphoreGive(gTofCache.mutex);
       return pos;
     }
 
@@ -548,8 +555,6 @@ int tofBuildDataJSON(char* buf, size_t bufSize) {
                     gTofCache.tofTotalObjects,
                     (unsigned long)gTofCache.tofSeq,
                     gTofCache.tofLastUpdate);
-
-    xSemaphoreGive(gTofCache.mutex);
   } else {
     // Timeout - return error response
     pos = snprintf(buf, bufSize, "{\"error\":\"ToF cache timeout\"}");

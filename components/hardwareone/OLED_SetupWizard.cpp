@@ -424,8 +424,9 @@ void resetWizardJoystickState() {
 
 JoystickNav readWizardJoystickNav() {
   JoystickNav nav = {false, false, false, false};
-  
-  if (xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+
+  SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.joystickNav");
+  if (g.held) {
     if (gGamepadCache.gamepadDataValid) {
       int joyX = gGamepadCache.gamepadX;
       int joyY = gGamepadCache.gamepadY;
@@ -450,9 +451,8 @@ JoystickNav readWizardJoystickNav() {
       sJoyLeftHeld = deflectedLeft;
       sJoyRightHeld = deflectedRight;
     }
-    xSemaphoreGive(gGamepadCache.mutex);
   }
-  
+
   return nav;
 }
 
@@ -615,9 +615,12 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
 
     uint32_t buttons = lastButtons;
     bool haveButtons = false;
-    if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      if (gGamepadCache.gamepadDataValid) { buttons = gGamepadCache.gamepadButtons; haveButtons = true; }
-      xSemaphoreGive(gGamepadCache.mutex);
+    {
+      SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+      if (g.held && gGamepadCache.gamepadDataValid) {
+        buttons = gGamepadCache.gamepadButtons;
+        haveButtons = true;
+      }
     }
     if (haveButtons && !lastButtonsInitialized) { lastButtons = buttons; lastButtonsInitialized = true; continue; }
     uint32_t pressedNow = ~buttons;
@@ -716,9 +719,12 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
 
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
-      if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (gGamepadCache.gamepadDataValid) { buttons = gGamepadCache.gamepadButtons; haveButtons = true; }
-        xSemaphoreGive(gGamepadCache.mutex);
+      {
+        SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+        if (g.held && gGamepadCache.gamepadDataValid) {
+          buttons = gGamepadCache.gamepadButtons;
+          haveButtons = true;
+        }
       }
       if (haveButtons && !lastButtonsInitialized) { lastButtons = buttons; lastButtonsInitialized = true; continue; }
       uint32_t pressedNow = ~buttons;
@@ -902,12 +908,12 @@ bool getOLEDSetupModeSelection(int& setupMode) {
       // Read buttons
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
-      if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (gGamepadCache.gamepadDataValid) {
+      {
+        SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+        if (g.held && gGamepadCache.gamepadDataValid) {
           buttons = gGamepadCache.gamepadButtons;
           haveButtons = true;
         }
-        xSemaphoreGive(gGamepadCache.mutex);
       }
 
       if (haveButtons && !lastButtonsInitialized) {
@@ -1017,12 +1023,12 @@ bool getOLEDThemeSelection(bool& darkMode) {
       // Read buttons
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
-      if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (gGamepadCache.gamepadDataValid) {
+      {
+        SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+        if (g.held && gGamepadCache.gamepadDataValid) {
           buttons = gGamepadCache.gamepadButtons;
           haveButtons = true;
         }
-        xSemaphoreGive(gGamepadCache.mutex);
       }
       
       if (haveButtons && !lastButtonsInitialized) {

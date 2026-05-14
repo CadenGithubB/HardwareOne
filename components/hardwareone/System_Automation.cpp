@@ -2745,10 +2745,12 @@ bool evaluateCondition(const char* condition) {
  #if ENABLE_THERMAL_SENSOR
     float v = 0.0f;
     bool ok = false;
-    if (gThermalCache.mutex && xSemaphoreTake(gThermalCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      ok = gThermalCache.thermalDataValid;
-      v = gThermalCache.thermalAvgTemp;
-      xSemaphoreGive(gThermalCache.mutex);
+    {
+      SensorCacheGuard g(gThermalCache.mutex, pdMS_TO_TICKS(50), "automation.thermalAvgRead");
+      if (g.held) {
+        ok = gThermalCache.thermalDataValid;
+        v = gThermalCache.thermalAvgTemp;
+      }
     }
     if (!ok) return false;
     currentValue = v;
@@ -2766,10 +2768,12 @@ bool evaluateCondition(const char* condition) {
     int tofTotal = 0;
     TofCache::TofObject objs[4];
     for (int i = 0; i < 4; i++) objs[i] = gTofCache.tofObjects[i];
-    if (gTofCache.mutex && xSemaphoreTake(gTofCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      tofTotal = gTofCache.tofTotalObjects;
-      for (int i = 0; i < 4; i++) objs[i] = gTofCache.tofObjects[i];
-      xSemaphoreGive(gTofCache.mutex);
+    {
+      SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(50), "automation.tofObjectsRead");
+      if (g.held) {
+        tofTotal = gTofCache.tofTotalObjects;
+        for (int i = 0; i < 4; i++) objs[i] = gTofCache.tofObjects[i];
+      }
     }
 
     DEBUGF(DEBUG_AUTOMATIONS, "[condition] distance: checking %d objects against %s%.1f",
@@ -2807,10 +2811,12 @@ bool evaluateCondition(const char* condition) {
  #if ENABLE_APDS_SENSOR
     uint16_t clear = 0;
     bool ok = false;
-    if (gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      ok = gAPDSCache.apdsDataValid;
-      clear = gAPDSCache.apdsClear;
-      xSemaphoreGive(gAPDSCache.mutex);
+    {
+      SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(50), "automation.apdsLightRead");
+      if (g.held) {
+        ok = gAPDSCache.apdsDataValid;
+        clear = gAPDSCache.apdsClear;
+      }
     }
     if (!ok) return false;
     currentValue = (float)clear;
@@ -2822,10 +2828,12 @@ bool evaluateCondition(const char* condition) {
  #if ENABLE_APDS_SENSOR
     uint8_t prox = 0;
     bool ok = false;
-    if (gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      ok = gAPDSCache.apdsDataValid;
-      prox = gAPDSCache.apdsProximity;
-      xSemaphoreGive(gAPDSCache.mutex);
+    {
+      SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(50), "automation.apdsMotionRead");
+      if (g.held) {
+        ok = gAPDSCache.apdsDataValid;
+        prox = gAPDSCache.apdsProximity;
+      }
     }
     if (!ok) return false;
     strncpy(currentStringValue, (prox > 50) ? "DETECTED" : "NONE", sizeof(currentStringValue) - 1);

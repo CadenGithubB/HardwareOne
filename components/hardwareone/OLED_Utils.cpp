@@ -5271,7 +5271,8 @@ void updateInputState() {
     return;
   }
   
-  if (xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+  SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "oled.inputStateRead");
+  if (g.held) {
     if (gGamepadCache.gamepadDataValid) {
       gCurrentJoyX = gGamepadCache.gamepadX;
       gCurrentJoyY = gGamepadCache.gamepadY;
@@ -5280,7 +5281,6 @@ void updateInputState() {
     } else {
       gInputStateValid = false;
     }
-    xSemaphoreGive(gGamepadCache.mutex);
   } else {
     gInputStateValid = false;
   }
@@ -5516,17 +5516,19 @@ bool processGamepadMenuInput() {
   bool mutexTaken = false;
   
   uint32_t latchedPresses = 0;
-  if (xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    mutexTaken = true;
-    if (gGamepadCache.gamepadDataValid) {
-      joyX = gGamepadCache.gamepadX;
-      joyY = gGamepadCache.gamepadY;
-      buttons = gGamepadCache.gamepadButtons;
-      latchedPresses = gGamepadCache.buttonPressedAccum;
-      gGamepadCache.buttonPressedAccum = 0;  // Consume accumulated presses
-      dataValid = true;
+  {
+    SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "oled.gamepadMenuRead");
+    if (g.held) {
+      mutexTaken = true;
+      if (gGamepadCache.gamepadDataValid) {
+        joyX = gGamepadCache.gamepadX;
+        joyY = gGamepadCache.gamepadY;
+        buttons = gGamepadCache.gamepadButtons;
+        latchedPresses = gGamepadCache.buttonPressedAccum;
+        gGamepadCache.buttonPressedAccum = 0;  // Consume accumulated presses
+        dataValid = true;
+      }
     }
-    xSemaphoreGive(gGamepadCache.mutex);
   }
   
   if (!dataValid) {

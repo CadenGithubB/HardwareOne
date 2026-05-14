@@ -145,6 +145,32 @@ I2sMicLockGuard::~I2sMicLockGuard() {
   }
 }
 
+// ============================================================================
+// SensorCacheGuard Implementation
+// ============================================================================
+
+SensorCacheGuard::SensorCacheGuard(SemaphoreHandle_t m,
+                                    TickType_t timeoutTicks,
+                                    const char* owner)
+    : held(false), mutex(m) {
+  if (mutex) {
+    // Reentrant-safe (matches the convention of the other guards in this
+    // file): if the current task already holds the mutex, skip the take.
+    // held stays false; dtor won't release. The outer holder releases
+    // when its scope ends.
+    if (isHeldByCurrentTask(mutex)) return;
+    if (xSemaphoreTake(mutex, timeoutTicks) == pdTRUE) {
+      held = true;
+    }
+  }
+}
+
+SensorCacheGuard::~SensorCacheGuard() {
+  if (held && mutex) {
+    xSemaphoreGive(mutex);
+  }
+}
+
 void i2cLock(const char* owner) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   SemaphoreHandle_t m = mgr ? mgr->getBusMutex() : nullptr;

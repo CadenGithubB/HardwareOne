@@ -10,6 +10,7 @@
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
+#include "System_Mutex.h"  // SensorCacheGuard
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -1363,12 +1364,12 @@ SetupWizardResult runSetupWizard() {
     if (oledDisplay && oledConnected) {
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
-      if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        if (gGamepadCache.gamepadDataValid) {
+      {
+        SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+        if (g.held && gGamepadCache.gamepadDataValid) {
           buttons = gGamepadCache.gamepadButtons;
           haveButtons = true;
         }
-        xSemaphoreGive(gGamepadCache.mutex);
       }
 
       if (haveButtons && !lastButtonsInitialized) {

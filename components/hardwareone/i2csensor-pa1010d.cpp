@@ -81,18 +81,20 @@ bool gpsStartInternal() {
   }
 
   // Clean up any stale cache from previous run BEFORE starting
-  if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gGPSCache.dataValid = false;
-    gGPSCache.latitude = 0.0f;
-    gGPSCache.longitude = 0.0f;
-    gGPSCache.altitude = 0.0f;
-    gGPSCache.speed = 0.0f;
-    gGPSCache.angle = 0.0f;
-    gGPSCache.hasFix = false;
-    gGPSCache.fixQuality = 0;
-    gGPSCache.satellites = 0;
-    xSemaphoreGive(gGPSCache.mutex);
-    DEBUG_GPS_LIFECYCLEF("[GPS] Cleaned up stale cache from previous run");
+  {
+    SensorCacheGuard g(gGPSCache.mutex, pdMS_TO_TICKS(100), "gps.cleanStaleCache");
+    if (g.held) {
+      gGPSCache.dataValid = false;
+      gGPSCache.latitude = 0.0f;
+      gGPSCache.longitude = 0.0f;
+      gGPSCache.altitude = 0.0f;
+      gGPSCache.speed = 0.0f;
+      gGPSCache.angle = 0.0f;
+      gGPSCache.hasFix = false;
+      gGPSCache.fixQuality = 0;
+      gGPSCache.satellites = 0;
+      DEBUG_GPS_LIFECYCLEF("[GPS] Cleaned up stale cache from previous run");
+    }
   }
   
   // Initialize GPS module if not already done
@@ -372,7 +374,8 @@ void gpsTask(void* parameter) {
       // Previously dataValid was set unconditionally, causing the sensor logger to
       // write the same stale position repeatedly between real fixes.
       if (parsedNewSentence) {
-        if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        SensorCacheGuard g(gGPSCache.mutex, pdMS_TO_TICKS(50), "gps.pollWrite");
+        if (g.held) {
           gGPSCache.latitude = gPA1010D->latitudeDegrees;
           gGPSCache.longitude = gPA1010D->longitudeDegrees;
           gGPSCache.altitude = gPA1010D->altitude;
@@ -396,8 +399,6 @@ void gpsTask(void* parameter) {
             GPSTrackManager::appendPoint(gPA1010D->latitudeDegrees, gPA1010D->longitudeDegrees);
           }
 #endif
-
-          xSemaphoreGive(gGPSCache.mutex);
         }
 
         // Stream data to ESP-NOW master if enabled (worker devices only)

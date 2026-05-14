@@ -82,22 +82,24 @@ const char* cmd_imu(const String& argsInput) {
   }
 
   // Read from sensor cache instead of accessing hardware directly
-  if (gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    if (gImuCache.imuDataValid) {
-      BROADCAST_PRINTF("Orientation - Yaw: %.1f° Pitch: %.1f° Roll: %.1f°",
-                       gImuCache.oriYaw, gImuCache.oriPitch, gImuCache.oriRoll);
-      BROADCAST_PRINTF("Acceleration - X: %.2f Y: %.2f Z: %.2f m/s²",
-                       gImuCache.accelX, gImuCache.accelY, gImuCache.accelZ);
-      BROADCAST_PRINTF("Gyroscope - X: %.2f Y: %.2f Z: %.2f rad/s",
-                       gImuCache.gyroX, gImuCache.gyroY, gImuCache.gyroZ);
-      BROADCAST_PRINTF("Temperature: %.1f°C", gImuCache.imuTemp);
+  {
+    SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(100), "imu.cmdRead");
+    if (g.held) {
+      if (gImuCache.imuDataValid) {
+        BROADCAST_PRINTF("Orientation - Yaw: %.1f° Pitch: %.1f° Roll: %.1f°",
+                         gImuCache.oriYaw, gImuCache.oriPitch, gImuCache.oriRoll);
+        BROADCAST_PRINTF("Acceleration - X: %.2f Y: %.2f Z: %.2f m/s²",
+                         gImuCache.accelX, gImuCache.accelY, gImuCache.accelZ);
+        BROADCAST_PRINTF("Gyroscope - X: %.2f Y: %.2f Z: %.2f rad/s",
+                         gImuCache.gyroX, gImuCache.gyroY, gImuCache.gyroZ);
+        BROADCAST_PRINTF("Temperature: %.1f°C", gImuCache.imuTemp);
+      } else {
+        broadcastOutput("IMU data not yet available");
+      }
     } else {
-      broadcastOutput("IMU data not yet available");
+      broadcastOutput("Failed to access sensor cache");
+      return "ERROR";
     }
-    xSemaphoreGive(gImuCache.mutex);
-  } else {
-    broadcastOutput("Failed to access sensor cache");
-    return "ERROR";
   }
 
   return "OK";
@@ -132,20 +134,22 @@ bool imuStartInternal() {
 
   // Clean up any stale cache from previous run BEFORE starting
   // CRITICAL: Cache wasn't invalidated during stop to avoid dying-task crashes
-  if (gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    gImuCache.imuDataValid = false;
-    gImuCache.oriYaw = 0;
-    gImuCache.oriPitch = 0;
-    gImuCache.oriRoll = 0;
-    gImuCache.accelX = 0;
-    gImuCache.accelY = 0;
-    gImuCache.accelZ = 0;
-    gImuCache.gyroX = 0;
-    gImuCache.gyroY = 0;
-    gImuCache.gyroZ = 0;
-    gImuCache.imuTemp = 0;
-    xSemaphoreGive(gImuCache.mutex);
-    DEBUG_CLIF("[IMU_INTERNAL] Cleaned up stale cache from previous run");
+  {
+    SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(100), "imu.cleanStaleCache");
+    if (g.held) {
+      gImuCache.imuDataValid = false;
+      gImuCache.oriYaw = 0;
+      gImuCache.oriPitch = 0;
+      gImuCache.oriRoll = 0;
+      gImuCache.accelX = 0;
+      gImuCache.accelY = 0;
+      gImuCache.accelZ = 0;
+      gImuCache.gyroX = 0;
+      gImuCache.gyroY = 0;
+      gImuCache.gyroZ = 0;
+      gImuCache.imuTemp = 0;
+      DEBUG_CLIF("[IMU_INTERNAL] Cleaned up stale cache from previous run");
+    }
   }
 
   // CRITICAL: Enable flag BEFORE creating task to prevent race condition
@@ -540,22 +544,29 @@ void imuPoll() {
 
   imuApplyOrientationCorrection(rawPitch, rawRoll, rawYaw);
 
-  if (gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    gImuCache.accelX = accelEvent.acceleration.x;
-    gImuCache.accelY = accelEvent.acceleration.y;
-    gImuCache.accelZ = accelEvent.acceleration.z;
-    gImuCache.gyroX = gyroEvent.gyro.x;
-    gImuCache.gyroY = gyroEvent.gyro.y;
-    gImuCache.gyroZ = gyroEvent.gyro.z;
-    gImuCache.oriYaw = rawYaw;
-    gImuCache.oriPitch = rawPitch;
-    gImuCache.oriRoll = rawRoll;
-    gImuCache.imuTemp = (float)t;
-    gImuCache.imuLastUpdate = millis();
-    gImuCache.imuDataValid = true;
-    gImuCache.imuSeq++;
-    xSemaphoreGive(gImuCache.mutex);
-
+  bool updated = false;
+  {
+    // Pattern 3: take/write/release, then run imuUpdateActions WITHOUT the lock
+    // (intentional — action detection does its own short take in the function).
+    SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(50), "imu.pollWrite");
+    if (g.held) {
+      gImuCache.accelX = accelEvent.acceleration.x;
+      gImuCache.accelY = accelEvent.acceleration.y;
+      gImuCache.accelZ = accelEvent.acceleration.z;
+      gImuCache.gyroX = gyroEvent.gyro.x;
+      gImuCache.gyroY = gyroEvent.gyro.y;
+      gImuCache.gyroZ = gyroEvent.gyro.z;
+      gImuCache.oriYaw = rawYaw;
+      gImuCache.oriPitch = rawPitch;
+      gImuCache.oriRoll = rawRoll;
+      gImuCache.imuTemp = (float)t;
+      gImuCache.imuLastUpdate = millis();
+      gImuCache.imuDataValid = true;
+      gImuCache.imuSeq++;
+      updated = true;
+    }
+  }
+  if (updated) {
     imuUpdateActions();
     DEBUG_IMU_VALUESF("IMU data updated");
   } else {
@@ -571,7 +582,8 @@ int imuBuildDataJSON(char* buf, size_t bufSize) {
 
   int pos = 0;
 
-  if (gImuCache.mutex && xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS)) == pdTRUE) {
+  SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS), "imu.buildJSON");
+  if (g.held) {
     unsigned long nowMs = millis();
     unsigned long lastUpdateMs = gImuCache.imuLastUpdate;
     unsigned long ageMs = (lastUpdateMs > 0 && nowMs >= lastUpdateMs) ? (nowMs - lastUpdateMs) : 0;
@@ -609,8 +621,6 @@ int imuBuildDataJSON(char* buf, size_t bufSize) {
     if (pos < 0 || (size_t)pos >= bufSize) {
       pos = snprintf(buf, bufSize, "{\"error\":\"IMU JSON overflow\"}");
     }
-
-    xSemaphoreGive(gImuCache.mutex);
   } else {
     // Timeout - return error response
     pos = snprintf(buf, bufSize, "{\"error\":\"IMU cache timeout\"}");
@@ -628,18 +638,22 @@ void imuUpdateActions() {
 
   unsigned long now = millis();
 
-  if (!gImuCache.mutex || xSemaphoreTake(gImuCache.mutex, pdMS_TO_TICKS(10)) != pdTRUE) return;
-
-  float ax = gImuCache.accelX;
-  float ay = gImuCache.accelY;
-  float az = gImuCache.accelZ;
-  float gx = gImuCache.gyroX;
-  float gy = gImuCache.gyroY;
-  float gz = gImuCache.gyroZ;
-  float roll = gImuCache.oriRoll;
-  float pitch = gImuCache.oriPitch;
-
-  xSemaphoreGive(gImuCache.mutex);
+  // Pattern 3: snapshot cache values into locals, release the lock, then do
+  // the math (sqrt, history buffer) outside the lock. The explicit { } block
+  // controls the guard's lifetime so the lock releases before the math runs.
+  float ax, ay, az, gx, gy, gz, roll, pitch;
+  {
+    SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(10), "imu.actionDetect");
+    if (!g.held) return;
+    ax = gImuCache.accelX;
+    ay = gImuCache.accelY;
+    az = gImuCache.accelZ;
+    gx = gImuCache.gyroX;
+    gy = gImuCache.gyroY;
+    gz = gImuCache.gyroZ;
+    roll = gImuCache.oriRoll;
+    pitch = gImuCache.oriPitch;
+  }
 
   // Calculate acceleration magnitude
   float accelMag = sqrt(ax * ax + ay * ay + az * az);
