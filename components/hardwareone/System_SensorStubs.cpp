@@ -49,8 +49,8 @@ bool gImuEnabled = false;
 bool gImuConnected = false;
 unsigned long gImuLastStopTime = 0;
 TaskHandle_t gImuTaskHandle = nullptr;
-volatile UBaseType_t gIMUWatermarkNow = 0;
-volatile UBaseType_t gIMUWatermarkMin = 0;
+volatile UBaseType_t gImuWatermarkNow = 0;
+volatile UBaseType_t gImuWatermarkMin = 0;
 const struct CommandEntry imuCommands[] = {};
 const size_t imuCommandsCount = 0;
 
@@ -73,7 +73,7 @@ const size_t gamepadCommandsCount = 0;
 
 #if !ENABLE_APDS_SENSOR
 // APDS stub variables (global definitions)
-APDSCache gAPDSCache;
+APDSCache gApdsCache;
 bool gApdsConnected = false;
 bool gApdsColorEnabled = false;
 bool gApdsProximityEnabled = false;
@@ -86,7 +86,7 @@ const size_t apdsCommandsCount = 0;
 
 #if !ENABLE_GPS_SENSOR
 // GPS stub variables (global definitions)
-GPSCache gGPSCache;
+GPSCache gGpsCache;
 bool gGpsEnabled = false;
 bool gGpsConnected = false;
 unsigned long gGpsLastStopTime = 0;
@@ -131,13 +131,13 @@ const size_t fmRadioCommandsCount = 0;
 #if !ENABLE_RTC_SENSOR
 // RTC stub variables (global definitions)
 // Types are defined in System_SensorStubs.h when disabled
-RTCCache gRTCCache = {nullptr, {0, 0, 0, 0, 0, 0, 0}, 0.0f, false, 0};
+RTCCache gRtcCache = {nullptr, {0, 0, 0, 0, 0, 0, 0}, 0.0f, false, 0};
 bool gRtcEnabled = false;
 bool gRtcConnected = false;
 unsigned long gRtcLastStopTime = 0;
 TaskHandle_t gRtcTaskHandle = nullptr;
-volatile UBaseType_t gRTCWatermarkNow = 0;
-volatile UBaseType_t gRTCWatermarkMin = 0;
+volatile UBaseType_t gRtcWatermarkNow = 0;
+volatile UBaseType_t gRtcWatermarkMin = 0;
 const struct CommandEntry rtcCommands[] = {};
 const size_t rtcCommandsCount = 0;
 bool rtcStartInternal() { return false; }

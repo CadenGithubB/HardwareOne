@@ -26,18 +26,18 @@ void displayAPDSData() {
     oledDisplay->println("== APDS DATA ==");
     oledDisplay->println();
     
-    if (gAPDSCache.mutex && xSemaphoreTake(gAPDSCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (gApdsCache.mutex && xSemaphoreTake(gApdsCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       oledDisplay->print("R:");
-      oledDisplay->print(gAPDSCache.apdsRed);
+      oledDisplay->print(gApdsCache.apdsRed);
       oledDisplay->print(" G:");
-      oledDisplay->println(gAPDSCache.apdsGreen);
+      oledDisplay->println(gApdsCache.apdsGreen);
       oledDisplay->print("B:");
-      oledDisplay->print(gAPDSCache.apdsBlue);
+      oledDisplay->print(gApdsCache.apdsBlue);
       oledDisplay->print(" C:");
-      oledDisplay->println(gAPDSCache.apdsClear);
+      oledDisplay->println(gApdsCache.apdsClear);
       oledDisplay->print("Prox: ");
-      oledDisplay->println(gAPDSCache.apdsProximity);
-      xSemaphoreGive(gAPDSCache.mutex);
+      oledDisplay->println(gApdsCache.apdsProximity);
+      xSemaphoreGive(gApdsCache.mutex);
     }
   }
   

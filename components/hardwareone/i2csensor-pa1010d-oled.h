@@ -35,19 +35,19 @@ static void displayGPSData() {
   uint8_t hour = 0, minute = 0, second = 0;
   bool hasFix = false, valid = false;
 
-  if (gGPSCache.mutex && xSemaphoreTake(gGPSCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    lat     = gGPSCache.latitude;
-    lon     = gGPSCache.longitude;
-    alt     = gGPSCache.altitude;
-    speed   = gGPSCache.speed;
-    hasFix  = gGPSCache.hasFix;
-    quality = gGPSCache.fixQuality;
-    sats    = gGPSCache.satellites;
-    hour    = gGPSCache.hour;
-    minute  = gGPSCache.minute;
-    second  = gGPSCache.second;
-    valid   = gGPSCache.dataValid;
-    xSemaphoreGive(gGPSCache.mutex);
+  if (gGpsCache.mutex && xSemaphoreTake(gGpsCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    lat     = gGpsCache.latitude;
+    lon     = gGpsCache.longitude;
+    alt     = gGpsCache.altitude;
+    speed   = gGpsCache.speed;
+    hasFix  = gGpsCache.hasFix;
+    quality = gGpsCache.fixQuality;
+    sats    = gGpsCache.satellites;
+    hour    = gGpsCache.hour;
+    minute  = gGpsCache.minute;
+    second  = gGpsCache.second;
+    valid   = gGpsCache.dataValid;
+    xSemaphoreGive(gGpsCache.mutex);
   }
 
   if (!valid) {

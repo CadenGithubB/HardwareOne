@@ -255,8 +255,8 @@ void debugOutputTask(void* parameter) {
 
       // OLED console
       #if ENABLE_OLED_DISPLAY
-      if ((msg->routing & MSG_ROUTE_OLED) && gOLEDConsole.mutex) {
-        gOLEDConsole.append(msg->text, msg->timestamp);
+      if ((msg->routing & MSG_ROUTE_OLED) && gOledConsole.mutex) {
+        gOledConsole.append(msg->text, msg->timestamp);
       }
       #endif
 
@@ -471,7 +471,7 @@ void initDebugSystem() {
   
   // Initialize OLED console buffer
   #if ENABLE_OLED_DISPLAY
-  gOLEDConsole.init();
+  gOledConsole.init();
   #endif
   
   // Initialize web mirror buffer for CLI history

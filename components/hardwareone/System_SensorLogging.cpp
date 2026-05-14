@@ -390,19 +390,19 @@ void sensorLogTick() {
 
 #if ENABLE_APDS_SENSOR
     if (mask & LOG_APDS) {
-      SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(10), "sensorLog.apdsSnapshot");
+      SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(10), "sensorLog.apdsSnapshot");
       if (g.held) {
         snap.gApdsColorEnabled = gApdsColorEnabled;
         snap.gApdsProximityEnabled = gApdsProximityEnabled;
         snap.gApdsGestureEnabled = gApdsGestureEnabled;
         snap.gApdsConnected = gApdsConnected;
-        snap.apdsValid = gAPDSCache.apdsDataValid;
-        snap.apdsRed = gAPDSCache.apdsRed;
-        snap.apdsGreen = gAPDSCache.apdsGreen;
-        snap.apdsBlue = gAPDSCache.apdsBlue;
-        snap.apdsClear = gAPDSCache.apdsClear;
-        snap.apdsProximity = gAPDSCache.apdsProximity;
-        snap.apdsGesture = gAPDSCache.apdsGesture;
+        snap.apdsValid = gApdsCache.apdsDataValid;
+        snap.apdsRed = gApdsCache.apdsRed;
+        snap.apdsGreen = gApdsCache.apdsGreen;
+        snap.apdsBlue = gApdsCache.apdsBlue;
+        snap.apdsClear = gApdsCache.apdsClear;
+        snap.apdsProximity = gApdsCache.apdsProximity;
+        snap.apdsGesture = gApdsCache.apdsGesture;
       }
     }
 #endif
@@ -411,19 +411,19 @@ void sensorLogTick() {
     if (mask & LOG_GPS) {
       snap.gGpsEnabled = gGpsEnabled;
       snap.gGpsConnected = gGpsConnected;
-      SensorCacheGuard g(gGPSCache.mutex, pdMS_TO_TICKS(10), "sensorLog.gpsSnapshot");
+      SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(10), "sensorLog.gpsSnapshot");
       if (g.held) {
-        if (gGPSCache.dataValid && gGPSCache.hasFix) {
+        if (gGpsCache.dataValid && gGpsCache.hasFix) {
           snap.gpsFix = true;
-          snap.gpsLatitude = gGPSCache.latitude;
-          snap.gpsLongitude = gGPSCache.longitude;
-          snap.gpsAltitude = gGPSCache.altitude;
-          snap.gpsSpeed = gGPSCache.speed;
-          snap.gpsSatellites = gGPSCache.satellites;
-          snap.gpsFixQuality = gGPSCache.fixQuality;
-          snap.gpsHour = gGPSCache.hour;
-          snap.gpsMinute = gGPSCache.minute;
-          snap.gpsSecond = gGPSCache.second;
+          snap.gpsLatitude = gGpsCache.latitude;
+          snap.gpsLongitude = gGpsCache.longitude;
+          snap.gpsAltitude = gGpsCache.altitude;
+          snap.gpsSpeed = gGpsCache.speed;
+          snap.gpsSatellites = gGpsCache.satellites;
+          snap.gpsFixQuality = gGpsCache.fixQuality;
+          snap.gpsHour = gGpsCache.hour;
+          snap.gpsMinute = gGpsCache.minute;
+          snap.gpsSecond = gGpsCache.second;
           snap.gpsHasTime = true;
         } else {
           snap.gpsFix = false;

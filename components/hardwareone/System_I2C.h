@@ -379,8 +379,8 @@ extern const size_t i2cCommandsCount;
 // ============================================================================
 extern volatile UBaseType_t gTofWatermarkNow;
 extern volatile UBaseType_t gTofWatermarkMin;
-extern volatile UBaseType_t gIMUWatermarkNow;
-extern volatile UBaseType_t gIMUWatermarkMin;
+extern volatile UBaseType_t gImuWatermarkNow;
+extern volatile UBaseType_t gImuWatermarkMin;
 extern volatile UBaseType_t gThermalWatermarkNow;
 extern volatile UBaseType_t gThermalWatermarkMin;
 extern volatile UBaseType_t gGamepadWatermarkNow;

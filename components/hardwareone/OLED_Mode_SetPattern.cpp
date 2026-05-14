@@ -45,14 +45,14 @@ static bool sAuthUsingGamepad = false;  // True if authenticating with gamepad p
 static void startPatternKeyboard(const char* title) {
   oledKeyboardInit(title, nullptr, OLED_KEYBOARD_MAX_LENGTH);
   // Force pattern mode as default for this flow
-  gOLEDKeyboardState.mode = KEYBOARD_MODE_PATTERN;
+  gOledKeyboardState.mode = KEYBOARD_MODE_PATTERN;
   sKeyboardActive = true;
 }
 
 static void startTextKeyboard(const char* title) {
   oledKeyboardInit(title, nullptr, OLED_KEYBOARD_MAX_LENGTH);
   // Use lowercase mode for text password entry
-  gOLEDKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;
+  gOledKeyboardState.mode = KEYBOARD_MODE_LOWERCASE;
   sKeyboardActive = true;
 }
 

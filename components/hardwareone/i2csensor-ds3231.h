@@ -34,7 +34,7 @@ struct RTCCache {
 #include "System_I2C.h"
 
 // State variables
-extern RTCCache gRTCCache;
+extern RTCCache gRtcCache;
 extern bool gRtcEnabled;
 extern bool gRtcConnected;
 extern unsigned long gRtcLastStopTime;

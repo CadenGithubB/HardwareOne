@@ -55,8 +55,8 @@
   extern bool gImuConnected;
   extern unsigned long gImuLastStopTime;
   extern TaskHandle_t gImuTaskHandle;
-  extern volatile UBaseType_t gIMUWatermarkNow;
-  extern volatile UBaseType_t gIMUWatermarkMin;
+  extern volatile UBaseType_t gImuWatermarkNow;
+  extern volatile UBaseType_t gImuWatermarkMin;
   extern const struct CommandEntry imuCommands[];
   extern const size_t imuCommandsCount;
   // IMU stub functions
@@ -96,7 +96,7 @@
 
 #if !ENABLE_APDS_SENSOR
   #include "i2csensor-apds9960.h"  // Provides APDSCache struct
-  extern APDSCache gAPDSCache;
+  extern APDSCache gApdsCache;
   extern bool gApdsConnected;
   extern bool gApdsColorEnabled;
   extern bool gApdsProximityEnabled;
@@ -111,7 +111,7 @@
 
 #if !ENABLE_GPS_SENSOR
   #include "i2csensor-pa1010d.h"  // Provides GPSCache struct
-  extern GPSCache gGPSCache;
+  extern GPSCache gGpsCache;
   extern bool gGpsEnabled;
   extern bool gGpsConnected;
   extern unsigned long gGpsLastStopTime;
@@ -159,13 +159,13 @@
 
 #if !ENABLE_RTC_SENSOR
   #include "i2csensor-ds3231.h"  // Provides RTCDateTime and RTCCache structs
-  extern RTCCache gRTCCache;
+  extern RTCCache gRtcCache;
   extern bool gRtcEnabled;
   extern bool gRtcConnected;
   extern unsigned long gRtcLastStopTime;
   extern TaskHandle_t gRtcTaskHandle;
-  extern volatile UBaseType_t gRTCWatermarkNow;
-  extern volatile UBaseType_t gRTCWatermarkMin;
+  extern volatile UBaseType_t gRtcWatermarkNow;
+  extern volatile UBaseType_t gRtcWatermarkMin;
   extern const struct CommandEntry rtcCommands[];
   extern const size_t rtcCommandsCount;
   // RTC stub functions

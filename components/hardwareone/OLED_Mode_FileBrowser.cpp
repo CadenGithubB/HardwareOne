@@ -16,7 +16,7 @@
 #endif
 
 // External references
-extern FileManager* gOLEDFileManager;
+extern FileManager* gOledFileManager;
 extern bool oledFileBrowserNeedsInit;
 extern bool oledMenuBack();
 
@@ -54,15 +54,15 @@ static const unsigned long OLED_FILE_BROWSER_DEBOUNCE = 200; // ms
  * Initialize file browser
  */
 static bool initFileBrowser() {
-  if (gOLEDFileManager == nullptr) {
-    gOLEDFileManager = new FileManager();
-    if (gOLEDFileManager == nullptr) {
+  if (gOledFileManager == nullptr) {
+    gOledFileManager = new FileManager();
+    if (gOledFileManager == nullptr) {
       return false;
     }
   }
   
   // Start at root
-  gOLEDFileManager->navigate("/");
+  gOledFileManager->navigate("/");
   oledFileBrowserNeedsInit = false;
   return true;
 }
@@ -84,7 +84,7 @@ void prepareFileBrowserData() {
   // in app_main(). OLED actions inherit it because they run on the same task.
 
   // Initialize or reinitialize if needed
-  if (!gOLEDFileManager || oledFileBrowserNeedsInit) {
+  if (!gOledFileManager || oledFileBrowserNeedsInit) {
     if (!initFileBrowser()) {
       fileBrowserRenderData.valid = false;
       return;
@@ -96,16 +96,16 @@ void prepareFileBrowserData() {
     switch (fileBrowserPendingAction) {
       case FileBrowserPendingAction::NAVIGATE_INTO: {
         FileEntry entry;
-        if (gOLEDFileManager->getCurrentItem(entry)) {
+        if (gOledFileManager->getCurrentItem(entry)) {
           if (entry.isFolder) {
-            gOLEDFileManager->navigateInto();
+            gOledFileManager->navigateInto();
           } else {
 #if ENABLE_GPS_SENSOR && ENABLE_MAPS
             // Check if it's a .hwmap file
             String filename = String(entry.name);
             if (filename.endsWith(".hwmap")) {
               // Load the map and return to map mode
-              String fullPath = String(gOLEDFileManager->getCurrentPath());
+              String fullPath = String(gOledFileManager->getCurrentPath());
               if (!fullPath.endsWith("/")) fullPath += "/";
               fullPath += entry.name;
 
@@ -123,16 +123,16 @@ void prepareFileBrowserData() {
         break;
       }
       case FileBrowserPendingAction::NAVIGATE_UP:
-        gOLEDFileManager->navigateUp();
+        gOledFileManager->navigateUp();
         break;
       case FileBrowserPendingAction::NAVIGATE_BACK:
-        if (strcmp(gOLEDFileManager->getCurrentPath(), "/") == 0) {
+        if (strcmp(gOledFileManager->getCurrentPath(), "/") == 0) {
           fileBrowserPendingAction = FileBrowserPendingAction::NONE;
           fileBrowserRenderData.valid = false;
           oledMenuBack();
           return;
         } else {
-          gOLEDFileManager->navigateUp();
+          gOledFileManager->navigateUp();
         }
         break;
       default:
@@ -142,17 +142,17 @@ void prepareFileBrowserData() {
   }
   
   // Gather all data needed for rendering
-  strncpy(fileBrowserRenderData.path, gOLEDFileManager->getCurrentPath(), FILE_MANAGER_MAX_PATH - 1);
+  strncpy(fileBrowserRenderData.path, gOledFileManager->getCurrentPath(), FILE_MANAGER_MAX_PATH - 1);
   fileBrowserRenderData.path[FILE_MANAGER_MAX_PATH - 1] = '\0';
-  fileBrowserRenderData.itemCount = gOLEDFileManager->getItemCount();
-  fileBrowserRenderData.selectedIdx = gOLEDFileManager->getSelectedIndex();
-  fileBrowserRenderData.pageStart = gOLEDFileManager->getPageStart();
-  fileBrowserRenderData.pageEnd = gOLEDFileManager->getPageEnd();
+  fileBrowserRenderData.itemCount = gOledFileManager->getItemCount();
+  fileBrowserRenderData.selectedIdx = gOledFileManager->getSelectedIndex();
+  fileBrowserRenderData.pageStart = gOledFileManager->getPageStart();
+  fileBrowserRenderData.pageEnd = gOledFileManager->getPageEnd();
   
   // Pre-fetch all visible items (filesystem I/O happens here)
   int itemsFetched = 0;
   for (int i = fileBrowserRenderData.pageStart; i < fileBrowserRenderData.pageEnd && i < fileBrowserRenderData.itemCount && itemsFetched < FILE_MANAGER_PAGE_SIZE; i++) {
-    if (gOLEDFileManager->getItem(i, fileBrowserRenderData.items[itemsFetched])) {
+    if (gOledFileManager->getItem(i, fileBrowserRenderData.items[itemsFetched])) {
       itemsFetched++;
     }
   }
@@ -309,29 +309,29 @@ void displayFileBrowserRendered() {
  * Call these from your button interrupt handlers or main loop
  */
 void oledFileBrowserUp() {
-  if (!gOLEDFileManager) return;
+  if (!gOledFileManager) return;
   
   unsigned long now = millis();
   if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
   oledFileBrowserLastInput = now;
   
-  gOLEDFileManager->moveUp();
+  gOledFileManager->moveUp();
   // Display will update on next updateOLEDDisplay() call
 }
 
 void oledFileBrowserDown() {
-  if (!gOLEDFileManager) return;
+  if (!gOledFileManager) return;
   
   unsigned long now = millis();
   if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
   oledFileBrowserLastInput = now;
   
-  gOLEDFileManager->moveDown();
+  gOledFileManager->moveDown();
   // Display will update on next updateOLEDDisplay() call
 }
 
 void oledFileBrowserSelect() {
-  if (!gOLEDFileManager) return;
+  if (!gOledFileManager) return;
   
   unsigned long now = millis();
   if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
@@ -343,7 +343,7 @@ void oledFileBrowserSelect() {
 }
 
 void oledFileBrowserBack() {
-  if (!gOLEDFileManager) return;
+  if (!gOledFileManager) return;
   
   unsigned long now = millis();
   if (now - oledFileBrowserLastInput < OLED_FILE_BROWSER_DEBOUNCE) return;
@@ -393,9 +393,9 @@ REGISTER_OLED_MODE_MODULE(sFileBrowserModes, sizeof(sFileBrowserModes) / sizeof(
  */
 void resetOLEDFileBrowser() {
   // Clean up existing manager
-  if (gOLEDFileManager) {
-    delete gOLEDFileManager;
-    gOLEDFileManager = nullptr;
+  if (gOledFileManager) {
+    delete gOledFileManager;
+    gOledFileManager = nullptr;
   }
   
   // Initialize immediately (not on next display call)

@@ -25,7 +25,7 @@
 extern TwoWire Wire1;
 
 // RTC Cache
-RTCCache gRTCCache = {nullptr, {0}, 0.0f, false, 0};
+RTCCache gRtcCache = {nullptr, {0}, 0.0f, false, 0};
 
 // Sensor state
 bool gRtcEnabled = false;
@@ -34,8 +34,8 @@ unsigned long gRtcLastStopTime = 0;
 TaskHandle_t gRtcTaskHandle = nullptr;
 
 // Task stack watermark tracking
-volatile UBaseType_t gRTCWatermarkMin = (UBaseType_t)0xFFFFFFFF;
-volatile UBaseType_t gRTCWatermarkNow = (UBaseType_t)0;
+volatile UBaseType_t gRtcWatermarkMin = (UBaseType_t)0xFFFFFFFF;
+volatile UBaseType_t gRtcWatermarkNow = (UBaseType_t)0;
 
 // ============================================================================
 // BCD Conversion Helpers
@@ -359,17 +359,17 @@ int rtcBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
   int pos = 0;
-  SensorCacheGuard g(gRTCCache.mutex, pdMS_TO_TICKS(50), "rtc.buildJSON");
+  SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(50), "rtc.buildJSON");
   if (g.held) {
     pos = snprintf(buf, bufSize,
                    "{\"valid\":%s,\"year\":%u,\"month\":%u,\"day\":%u,"
                    "\"hour\":%u,\"minute\":%u,\"second\":%u,"
                    "\"temp\":%.1f,\"ts\":%lu}",
-                   gRTCCache.dataValid ? "true" : "false",
-                   gRTCCache.dateTime.year, gRTCCache.dateTime.month, gRTCCache.dateTime.day,
-                   gRTCCache.dateTime.hour, gRTCCache.dateTime.minute, gRTCCache.dateTime.second,
-                   gRTCCache.temperature,
-                   gRTCCache.lastUpdate);
+                   gRtcCache.dataValid ? "true" : "false",
+                   gRtcCache.dateTime.year, gRtcCache.dateTime.month, gRtcCache.dateTime.day,
+                   gRtcCache.dateTime.hour, gRtcCache.dateTime.minute, gRtcCache.dateTime.second,
+                   gRtcCache.temperature,
+                   gRtcCache.lastUpdate);
     if (pos < 0 || (size_t)pos >= bufSize) pos = 0;
   }
   return pos;
@@ -435,12 +435,12 @@ void rtcTask(void* pvParameters) {
 
       if (rtcReadDateTime(&dt)) {
         {
-          SensorCacheGuard g(gRTCCache.mutex, pdMS_TO_TICKS(50), "rtc.pollWrite");
+          SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(50), "rtc.pollWrite");
           if (g.held) {
-            gRTCCache.dateTime = dt;
-            gRTCCache.temperature = temp;
-            gRTCCache.dataValid = true;
-            gRTCCache.lastUpdate = now;
+            gRtcCache.dateTime = dt;
+            gRtcCache.temperature = temp;
+            gRtcCache.dataValid = true;
+            gRtcCache.lastUpdate = now;
           }
         }
         // Mark OLED dirty if RTC page is active (enables real-time display updates)
@@ -465,9 +465,9 @@ void rtcTask(void* pvParameters) {
     
     // Track stack watermark + safety bailout (check every ~10s = 100 iterations at 100ms)
     UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
-    gRTCWatermarkNow = watermark;
-    if (watermark < gRTCWatermarkMin) {
-      gRTCWatermarkMin = watermark;
+    gRtcWatermarkNow = watermark;
+    if (watermark < gRtcWatermarkMin) {
+      gRtcWatermarkMin = watermark;
     }
     {
       static uint32_t sRtcSafetyCounter = 0;
@@ -500,9 +500,9 @@ bool rtcInit() {
   }
   
   // Initialize cache mutex
-  if (!gRTCCache.mutex) {
-    gRTCCache.mutex = xSemaphoreCreateMutex();
-    if (!gRTCCache.mutex) {
+  if (!gRtcCache.mutex) {
+    gRtcCache.mutex = xSemaphoreCreateMutex();
+    if (!gRtcCache.mutex) {
       DEBUG_RTC_LIFECYCLEF("[RTC] Failed to create cache mutex");
       return false;
     }
@@ -557,11 +557,11 @@ bool rtcStartInternal() {
 
   // Clean up any stale cache from previous run BEFORE starting
   {
-    SensorCacheGuard g(gRTCCache.mutex, pdMS_TO_TICKS(100), "rtc.cleanStaleCache");
+    SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(100), "rtc.cleanStaleCache");
     if (g.held) {
-      gRTCCache.dataValid = false;
-      gRTCCache.temperature = 0.0f;
-      memset(&gRTCCache.dateTime, 0, sizeof(RTCDateTime));
+      gRtcCache.dataValid = false;
+      gRtcCache.temperature = 0.0f;
+      memset(&gRtcCache.dateTime, 0, sizeof(RTCDateTime));
       DEBUG_RTC_LIFECYCLEF("[RTC] Cleaned up stale cache from previous run");
     }
   }
@@ -789,38 +789,38 @@ const char* cmd_rtcstop(const String& argsInput) {
 // ============================================================================
 
 int rtcGetYear() {
-  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
-  return gRTCCache.dateTime.year;
+  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
+  return gRtcCache.dateTime.year;
 }
 
 int rtcGetMonth() {
-  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
-  return gRTCCache.dateTime.month;
+  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
+  return gRtcCache.dateTime.month;
 }
 
 int rtcGetDay() {
-  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
-  return gRTCCache.dateTime.day;
+  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
+  return gRtcCache.dateTime.day;
 }
 
 int rtcGetHour() {
-  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
-  return gRTCCache.dateTime.hour;
+  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
+  return gRtcCache.dateTime.hour;
 }
 
 int rtcGetMinute() {
-  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
-  return gRTCCache.dateTime.minute;
+  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
+  return gRtcCache.dateTime.minute;
 }
 
 int rtcGetSecond() {
-  if (!gRtcConnected || !gRTCCache.dataValid) return 0;
-  return gRTCCache.dateTime.second;
+  if (!gRtcConnected || !gRtcCache.dataValid) return 0;
+  return gRtcCache.dateTime.second;
 }
 
 float rtcGetTemperature() {
-  if (!gRtcConnected || !gRTCCache.dataValid) return 0.0f;
-  return gRTCCache.temperature;
+  if (!gRtcConnected || !gRtcCache.dataValid) return 0.0f;
+  return gRtcCache.temperature;
 }
 
 // ============================================================================

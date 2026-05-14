@@ -48,16 +48,16 @@
 #include "i2csensor-seesaw.h"     // gGamepadCache + gGamepadEnabled / gGamepadConnected
 #endif
 #if ENABLE_APDS_SENSOR
-#include "i2csensor-apds9960.h"   // gAPDSCache + gApdsEnabled / gApdsConnected
+#include "i2csensor-apds9960.h"   // gApdsCache + gApdsEnabled / gApdsConnected
 #endif
 #if ENABLE_RTC_SENSOR
-#include "i2csensor-ds3231.h"     // gRTCCache + gRtcEnabled / gRtcConnected
+#include "i2csensor-ds3231.h"     // gRtcCache + gRtcEnabled / gRtcConnected
 #endif
 #if ENABLE_FM_RADIO
 #include "i2csensor-rda5807.h"    // gFmRadioCache + gFmRadioEnabled / gFmRadioConnected
 #endif
 #if ENABLE_GPS_SENSOR
-#include "i2csensor-pa1010d.h"    // gGPSCache + gGpsEnabled / gGpsConnected
+#include "i2csensor-pa1010d.h"    // gGpsCache + gGpsEnabled / gGpsConnected
 #endif
 #if ENABLE_PRESENCE_SENSOR
 #include "i2csensor-sths34pf80.h" // gPresenceCache + gPresenceEnabled / gPresenceConnected
@@ -138,10 +138,10 @@ static void thermalG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_APDS_SENSOR
 static void apdsG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(5), "g2.apdsFormat");
+  SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(5), "g2.apdsFormat");
   if (g.held) {
-    if (gAPDSCache.apdsDataValid) {
-      snprintf(out, cap, "px:%u", (unsigned)gAPDSCache.apdsProximity);
+    if (gApdsCache.apdsDataValid) {
+      snprintf(out, cap, "px:%u", (unsigned)gApdsCache.apdsProximity);
     } else {
       snprintf(out, cap, "...");
     }
@@ -168,15 +168,15 @@ static void gamepadG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_RTC_SENSOR
 static void rtcG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gRTCCache.mutex, pdMS_TO_TICKS(5), "g2.rtcFormat");
+  SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(5), "g2.rtcFormat");
   if (g.held) {
-    if (gRTCCache.dataValid) {
+    if (gRtcCache.dataValid) {
       // Show clock time HH:MM — the temperature reading is a
       // secondary feature on this part and the date eats too much
       // of the value column.
       snprintf(out, cap, "%02u:%02u",
-               (unsigned)gRTCCache.dateTime.hour,
-               (unsigned)gRTCCache.dateTime.minute);
+               (unsigned)gRtcCache.dateTime.hour,
+               (unsigned)gRtcCache.dateTime.minute);
     } else {
       snprintf(out, cap, "...");
     }
@@ -188,13 +188,13 @@ static void rtcG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_GPS_SENSOR
 static void gpsG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gGPSCache.mutex, pdMS_TO_TICKS(5), "g2.gpsFormat");
+  SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(5), "g2.gpsFormat");
   if (g.held) {
-    if (gGPSCache.dataValid) {
-      if (gGPSCache.hasFix) {
-        snprintf(out, cap, "fix %u", (unsigned)gGPSCache.satellites);
+    if (gGpsCache.dataValid) {
+      if (gGpsCache.hasFix) {
+        snprintf(out, cap, "fix %u", (unsigned)gGpsCache.satellites);
       } else {
-        snprintf(out, cap, "no fix %u", (unsigned)gGPSCache.satellites);
+        snprintf(out, cap, "no fix %u", (unsigned)gGpsCache.satellites);
       }
     } else {
       snprintf(out, cap, "...");

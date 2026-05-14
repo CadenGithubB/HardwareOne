@@ -38,7 +38,7 @@ struct OLEDConsoleBuffer {
 };
 
 // Global OLED console buffer instance
-extern OLEDConsoleBuffer gOLEDConsole;
+extern OLEDConsoleBuffer gOledConsole;
 
 #endif // ENABLE_OLED_DISPLAY
 

@@ -36,7 +36,7 @@ volatile bool gImuInitResult = false;
 ImuCache gImuCache;
 
 // IMU Action Detection System - definitions
-IMUActionState gIMUActions = {
+IMUActionState gImuActions = {
   false, 0, 0, 0.0f,  // shake
   false, 0.0f, 'N',   // tilt
   false, 0, 0, 0.0f,  // tap
@@ -49,8 +49,8 @@ IMUActionState gIMUActions = {
 };
 
 // IMU watermark tracking
-volatile UBaseType_t gIMUWatermarkMin = (UBaseType_t)0xFFFFFFFF;
-volatile UBaseType_t gIMUWatermarkNow = (UBaseType_t)0;
+volatile UBaseType_t gImuWatermarkMin = (UBaseType_t)0xFFFFFFFF;
+volatile UBaseType_t gImuWatermarkNow = (UBaseType_t)0;
 
 // IMU initialization handoff flags - defined above (lines 17-19)
 
@@ -252,62 +252,62 @@ const char* cmd_imuactions(const String& argsInput) {
   broadcastOutput("IMU Action Detection Status:");
 
   // Shake
-  if (gIMUActions.isShaking) {
+  if (gImuActions.isShaking) {
     BROADCAST_PRINTF("  Shake: YES (intensity: %.1f, count: %lu)",
-                     gIMUActions.shakeIntensity, (unsigned long)gIMUActions.shakeCount);
+                     gImuActions.shakeIntensity, (unsigned long)gImuActions.shakeCount);
   } else {
     broadcastOutput("  Shake: no");
   }
 
   // Tilt
-  if (gIMUActions.isTilted) {
+  if (gImuActions.isTilted) {
     const char* dir = "?";
-    switch (gIMUActions.tiltDirection) {
+    switch (gImuActions.tiltDirection) {
       case 'F': dir = "Forward"; break;
       case 'B': dir = "Back"; break;
       case 'L': dir = "Left"; break;
       case 'R': dir = "Right"; break;
     }
-    BROADCAST_PRINTF("  Tilt: YES (%s, %.1f deg)", dir, gIMUActions.tiltAngle);
+    BROADCAST_PRINTF("  Tilt: YES (%s, %.1f deg)", dir, gImuActions.tiltAngle);
   } else {
     broadcastOutput("  Tilt: no");
   }
 
   // Tap
-  if (gIMUActions.tapDetected || gIMUActions.tapCount > 0) {
+  if (gImuActions.tapDetected || gImuActions.tapCount > 0) {
     BROADCAST_PRINTF("  Tap: %s (count: %lu, strength: %.1f)",
-                     gIMUActions.tapDetected ? "YES" : "no",
-                     (unsigned long)gIMUActions.tapCount, gIMUActions.tapStrength);
+                     gImuActions.tapDetected ? "YES" : "no",
+                     (unsigned long)gImuActions.tapCount, gImuActions.tapStrength);
   } else {
     broadcastOutput("  Tap: no");
   }
 
   // Rotation
-  if (gIMUActions.isRotating) {
+  if (gImuActions.isRotating) {
     BROADCAST_PRINTF("  Rotation: YES (%c-axis, %.1f deg/s)",
-                     gIMUActions.rotationAxis, gIMUActions.rotationRate);
+                     gImuActions.rotationAxis, gImuActions.rotationRate);
   } else {
     broadcastOutput("  Rotation: no");
   }
 
   // Freefall
-  if (gIMUActions.isFreefalling) {
-    BROADCAST_PRINTF("  Freefall: YES (%lu ms)", (unsigned long)gIMUActions.freefallDurationMs);
+  if (gImuActions.isFreefalling) {
+    BROADCAST_PRINTF("  Freefall: YES (%lu ms)", (unsigned long)gImuActions.freefallDurationMs);
   } else {
     broadcastOutput("  Freefall: no");
   }
 
   // Steps
-  if (gIMUActions.isWalking) {
+  if (gImuActions.isWalking) {
     BROADCAST_PRINTF("  Steps: %lu (WALKING, %.1f steps/min)",
-                     (unsigned long)gIMUActions.stepCount, gIMUActions.stepFrequency);
+                     (unsigned long)gImuActions.stepCount, gImuActions.stepFrequency);
   } else {
-    BROADCAST_PRINTF("  Steps: %lu", (unsigned long)gIMUActions.stepCount);
+    BROADCAST_PRINTF("  Steps: %lu", (unsigned long)gImuActions.stepCount);
   }
 
   // Orientation
   const char* orient = "?";
-  switch (gIMUActions.orientation) {
+  switch (gImuActions.orientation) {
     case 'P': orient = "Portrait"; break;
     case 'L': orient = "Landscape"; break;
     case 'U': orient = "Upside-down"; break;
@@ -659,33 +659,33 @@ void imuUpdateActions() {
   float accelMag = sqrt(ax * ax + ay * ay + az * az);
 
   // Store in history buffer
-  gIMUActions.accelHistory[gIMUActions.accelHistoryIndex] = accelMag;
-  gIMUActions.accelHistoryIndex = (gIMUActions.accelHistoryIndex + 1) % 10;
+  gImuActions.accelHistory[gImuActions.accelHistoryIndex] = accelMag;
+  gImuActions.accelHistoryIndex = (gImuActions.accelHistoryIndex + 1) % 10;
 
   // 1. SHAKE DETECTION - High frequency acceleration changes
   float accelVariance = 0.0f;
   float accelMean = 0.0f;
   for (int i = 0; i < 10; i++) {
-    accelMean += gIMUActions.accelHistory[i];
+    accelMean += gImuActions.accelHistory[i];
   }
   accelMean /= 10.0f;
   for (int i = 0; i < 10; i++) {
-    float diff = gIMUActions.accelHistory[i] - accelMean;
+    float diff = gImuActions.accelHistory[i] - accelMean;
     accelVariance += diff * diff;
   }
   accelVariance /= 10.0f;
 
   const float shakeThreshold = 15.0f;  // m/s² variance
   if (accelVariance > shakeThreshold) {
-    if (!gIMUActions.isShaking) {
-      gIMUActions.shakeCount++;
+    if (!gImuActions.isShaking) {
+      gImuActions.shakeCount++;
     }
-    gIMUActions.isShaking = true;
-    gIMUActions.lastShakeMs = now;
-    gIMUActions.shakeIntensity = min(accelVariance / 50.0f, 1.0f);
-  } else if (now - gIMUActions.lastShakeMs > 500) {
-    gIMUActions.isShaking = false;
-    gIMUActions.shakeIntensity = 0.0f;
+    gImuActions.isShaking = true;
+    gImuActions.lastShakeMs = now;
+    gImuActions.shakeIntensity = min(accelVariance / 50.0f, 1.0f);
+  } else if (now - gImuActions.lastShakeMs > 500) {
+    gImuActions.isShaking = false;
+    gImuActions.shakeIntensity = 0.0f;
   }
 
   // 2. TILT DETECTION - Device tilted past threshold
@@ -693,33 +693,33 @@ void imuUpdateActions() {
   float maxTilt = max(abs(roll), abs(pitch));
 
   if (maxTilt > tiltThreshold) {
-    gIMUActions.isTilted = true;
-    gIMUActions.tiltAngle = maxTilt;
+    gImuActions.isTilted = true;
+    gImuActions.tiltAngle = maxTilt;
 
     // Determine direction
     if (abs(pitch) > abs(roll)) {
-      gIMUActions.tiltDirection = (pitch > 0) ? 'F' : 'B';  // Forward/Back
+      gImuActions.tiltDirection = (pitch > 0) ? 'F' : 'B';  // Forward/Back
     } else {
-      gIMUActions.tiltDirection = (roll > 0) ? 'R' : 'L';  // Right/Left
+      gImuActions.tiltDirection = (roll > 0) ? 'R' : 'L';  // Right/Left
     }
   } else {
-    gIMUActions.isTilted = false;
-    gIMUActions.tiltAngle = maxTilt;
-    gIMUActions.tiltDirection = 'N';
+    gImuActions.isTilted = false;
+    gImuActions.tiltAngle = maxTilt;
+    gImuActions.tiltDirection = 'N';
   }
 
   // 3. TAP/KNOCK DETECTION - Sharp acceleration spike
   const float tapThreshold = 25.0f;  // m/s²
   const float tapDecay = 500;        // ms
 
-  if (accelMag > tapThreshold && (now - gIMUActions.lastTapMs) > 200) {
-    gIMUActions.tapDetected = true;
-    gIMUActions.lastTapMs = now;
-    gIMUActions.tapCount++;
-    gIMUActions.tapStrength = min((accelMag - tapThreshold) / 20.0f, 1.0f);
-  } else if (now - gIMUActions.lastTapMs > tapDecay) {
-    gIMUActions.tapDetected = false;
-    gIMUActions.tapStrength = 0.0f;
+  if (accelMag > tapThreshold && (now - gImuActions.lastTapMs) > 200) {
+    gImuActions.tapDetected = true;
+    gImuActions.lastTapMs = now;
+    gImuActions.tapCount++;
+    gImuActions.tapStrength = min((accelMag - tapThreshold) / 20.0f, 1.0f);
+  } else if (now - gImuActions.lastTapMs > tapDecay) {
+    gImuActions.tapDetected = false;
+    gImuActions.tapStrength = 0.0f;
   }
 
   // 4. ROTATION DETECTION - High angular velocity
@@ -727,35 +727,35 @@ void imuUpdateActions() {
   float maxGyro = max(abs(gx), max(abs(gy), abs(gz)));
 
   if (maxGyro > rotationThreshold) {
-    gIMUActions.isRotating = true;
-    gIMUActions.rotationRate = maxGyro;
+    gImuActions.isRotating = true;
+    gImuActions.rotationRate = maxGyro;
 
     // Determine axis
     if (abs(gx) > abs(gy) && abs(gx) > abs(gz)) {
-      gIMUActions.rotationAxis = 'X';
+      gImuActions.rotationAxis = 'X';
     } else if (abs(gy) > abs(gz)) {
-      gIMUActions.rotationAxis = 'Y';
+      gImuActions.rotationAxis = 'Y';
     } else {
-      gIMUActions.rotationAxis = 'Z';
+      gImuActions.rotationAxis = 'Z';
     }
   } else {
-    gIMUActions.isRotating = false;
-    gIMUActions.rotationRate = maxGyro;
-    gIMUActions.rotationAxis = 'N';
+    gImuActions.isRotating = false;
+    gImuActions.rotationRate = maxGyro;
+    gImuActions.rotationAxis = 'N';
   }
 
   // 5. FREEFALL DETECTION - Near-zero acceleration
   const float freefallThreshold = 2.0f;  // m/s² (significantly less than 9.8)
 
   if (accelMag < freefallThreshold) {
-    if (!gIMUActions.isFreefalling) {
-      gIMUActions.freefallStartMs = now;
+    if (!gImuActions.isFreefalling) {
+      gImuActions.freefallStartMs = now;
     }
-    gIMUActions.isFreefalling = true;
-    gIMUActions.freefallDurationMs = now - gIMUActions.freefallStartMs;
+    gImuActions.isFreefalling = true;
+    gImuActions.freefallDurationMs = now - gImuActions.freefallStartMs;
   } else {
-    gIMUActions.isFreefalling = false;
-    gIMUActions.freefallDurationMs = 0;
+    gImuActions.isFreefalling = false;
+    gImuActions.freefallDurationMs = 0;
   }
 
   // 6. STEP COUNTING - Periodic vertical acceleration peaks
@@ -765,40 +765,40 @@ void imuUpdateActions() {
   const unsigned long stepMaxInterval = 2000;  // ms - if longer, not walking
 
   // Detect peak
-  if (accelMag > stepPeakThreshold && gIMUActions.lastAccelMag < stepPeakThreshold) {
-    if (!gIMUActions.stepPeakDetected && (now - gIMUActions.lastStepMs) > stepMinInterval) {
-      gIMUActions.stepPeakDetected = true;
+  if (accelMag > stepPeakThreshold && gImuActions.lastAccelMag < stepPeakThreshold) {
+    if (!gImuActions.stepPeakDetected && (now - gImuActions.lastStepMs) > stepMinInterval) {
+      gImuActions.stepPeakDetected = true;
     }
   }
 
   // Detect valley (step complete)
-  if (accelMag < stepValleyThreshold && gIMUActions.stepPeakDetected) {
-    gIMUActions.stepCount++;
-    gIMUActions.lastStepMs = now;
-    gIMUActions.stepPeakDetected = false;
-    gIMUActions.stepsInWindow++;
+  if (accelMag < stepValleyThreshold && gImuActions.stepPeakDetected) {
+    gImuActions.stepCount++;
+    gImuActions.lastStepMs = now;
+    gImuActions.stepPeakDetected = false;
+    gImuActions.stepsInWindow++;
   }
 
   // Update walking state and frequency
-  if (now - gIMUActions.lastStepMs < stepMaxInterval) {
-    gIMUActions.isWalking = true;
+  if (now - gImuActions.lastStepMs < stepMaxInterval) {
+    gImuActions.isWalking = true;
 
     // Calculate step frequency over last minute
-    if (now - gIMUActions.stepWindowStartMs > 60000) {
-      gIMUActions.stepFrequency = gIMUActions.stepsInWindow;
-      gIMUActions.stepWindowStartMs = now;
-      gIMUActions.stepsInWindow = 0;
+    if (now - gImuActions.stepWindowStartMs > 60000) {
+      gImuActions.stepFrequency = gImuActions.stepsInWindow;
+      gImuActions.stepWindowStartMs = now;
+      gImuActions.stepsInWindow = 0;
     }
   } else {
-    gIMUActions.isWalking = false;
-    if (now - gIMUActions.stepWindowStartMs > 60000) {
-      gIMUActions.stepFrequency = 0.0f;
-      gIMUActions.stepWindowStartMs = now;
-      gIMUActions.stepsInWindow = 0;
+    gImuActions.isWalking = false;
+    if (now - gImuActions.stepWindowStartMs > 60000) {
+      gImuActions.stepFrequency = 0.0f;
+      gImuActions.stepWindowStartMs = now;
+      gImuActions.stepsInWindow = 0;
     }
   }
 
-  gIMUActions.lastAccelMag = accelMag;
+  gImuActions.lastAccelMag = accelMag;
 
   // 7. ORIENTATION DETECTION - Device orientation in space
   char newOrientation = 'F';  // Default: face-up
@@ -818,10 +818,10 @@ void imuUpdateActions() {
     newOrientation = 'F';  // Face-up
   }
 
-  if (newOrientation != gIMUActions.orientation) {
-    gIMUActions.lastOrientation = gIMUActions.orientation;
-    gIMUActions.orientation = newOrientation;
-    gIMUActions.lastOrientationChangeMs = now;
+  if (newOrientation != gImuActions.orientation) {
+    gImuActions.lastOrientation = gImuActions.orientation;
+    gImuActions.orientation = newOrientation;
+    gImuActions.lastOrientationChangeMs = now;
   }
 }
 
@@ -1063,8 +1063,8 @@ void imuTask(void* parameter) {
     // Update watermark diagnostics (only when enabled)
     if (isDebugFlagSet(DEBUG_PERFORMANCE)) {
       UBaseType_t wm = uxTaskGetStackHighWaterMark(NULL);
-      gIMUWatermarkNow = wm;
-      if (wm < gIMUWatermarkMin) gIMUWatermarkMin = wm;
+      gImuWatermarkNow = wm;
+      if (wm < gImuWatermarkMin) gImuWatermarkMin = wm;
     }
     unsigned long nowLog = millis();
     if (nowLog - lastStackLog >= 5000UL) {
@@ -1072,7 +1072,7 @@ void imuTask(void* parameter) {
       if (checkTaskStackSafety("imu", IMU_STACK_WORDS, &gImuEnabled)) break;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (gImuEnabled) {
-        DEBUG_PERFORMANCEF("[STACK] imu_task watermark_now=%u min=%u words", (unsigned)gIMUWatermarkNow, (unsigned)gIMUWatermarkMin);
+        DEBUG_PERFORMANCEF("[STACK] imu_task watermark_now=%u min=%u words", (unsigned)gImuWatermarkNow, (unsigned)gImuWatermarkMin);
         DEBUG_MEMORY_HEAPF("[HEAP] imu_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }

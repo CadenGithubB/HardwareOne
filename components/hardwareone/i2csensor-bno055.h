@@ -74,11 +74,11 @@ extern Adafruit_BNO055* gBNO055;
 // at this position has been removed.)
 
 extern ImuCache gImuCache;
-extern IMUActionState gIMUActions;
+extern IMUActionState gImuActions;
 
 // IMU watermark tracking
-extern volatile UBaseType_t gIMUWatermarkMin;
-extern volatile UBaseType_t gIMUWatermarkNow;
+extern volatile UBaseType_t gImuWatermarkMin;
+extern volatile UBaseType_t gImuWatermarkNow;
 
 // IMU initialization handoff flags
 extern volatile bool gImuInitRequested;

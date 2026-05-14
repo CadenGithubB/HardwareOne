@@ -40,7 +40,7 @@ extern bool gGpsConnected;
 extern unsigned long gGpsLastStopTime;
 extern TaskHandle_t gGpsTaskHandle;
 
-extern GPSCache gGPSCache;
+extern GPSCache gGpsCache;
 
 // GPS initialization (called by sensor queue processor)
 bool gpsStartInternal();

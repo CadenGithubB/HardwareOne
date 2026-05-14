@@ -112,7 +112,7 @@ struct I2sMicLockGuard {
  * SensorCacheGuard - RAII guard for per-sensor cache mutexes.
  *
  * Sensor cache structs (gImuCache, gTofCache, gGpsCache, gThermalCache,
- * gApdsCache, gGamepadCache, gRTCCache, gPresenceCache, gFmRadioCache) all
+ * gApdsCache, gGamepadCache, gRtcCache, gPresenceCache, gFmRadioCache) all
  * follow the convention `SemaphoreHandle_t mutex = nullptr;` as their first
  * field. This guard takes that mutex by handle. Unlike the other guards in
  * this file, it has no "the" mutex — each sensor cache has its own, so the

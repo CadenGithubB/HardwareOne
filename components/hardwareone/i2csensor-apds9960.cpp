@@ -25,7 +25,7 @@ Adafruit_APDS9960* gAPDS9960 = nullptr;
 // ============================================================================
 // APDS/Peripheral Sensor Cache (owned by this module)
 // ============================================================================
-APDSCache gAPDSCache;
+APDSCache gApdsCache;
 
 // APDS sensor state (definitions - matching pattern of thermal/tof/imu/gamepad sensors)
 bool gApdsEnabled = false;
@@ -112,11 +112,11 @@ const char* cmd_apdsread(const String& argsInput) {
 
   if (gApdsColorEnabled) {
     n = snprintf(buf, remaining, "  RGBC: R=%u G=%u B=%u C=%u\n",
-                 gAPDSCache.apdsRed, gAPDSCache.apdsGreen, gAPDSCache.apdsBlue, gAPDSCache.apdsClear);
+                 gApdsCache.apdsRed, gApdsCache.apdsGreen, gApdsCache.apdsBlue, gApdsCache.apdsClear);
     buf += n; remaining -= n;
   }
   if (gApdsProximityEnabled) {
-    n = snprintf(buf, remaining, "  Proximity: %u\n", gAPDSCache.apdsProximity);
+    n = snprintf(buf, remaining, "  Proximity: %u\n", gApdsCache.apdsProximity);
     buf += n; remaining -= n;
   }
 
@@ -231,9 +231,9 @@ bool apdsStartInternal() {
   }
 
   // Create cache mutex if not already created
-  if (!gAPDSCache.mutex) {
-    gAPDSCache.mutex = xSemaphoreCreateMutex();
-    if (!gAPDSCache.mutex) {
+  if (!gApdsCache.mutex) {
+    gApdsCache.mutex = xSemaphoreCreateMutex();
+    if (!gApdsCache.mutex) {
       ERROR_APDSF("Failed to create cache mutex");
       return false;
     }
@@ -242,15 +242,15 @@ bool apdsStartInternal() {
 
   // Clean up any stale cache from previous run BEFORE starting
   {
-    SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(100), "apds.cleanStaleCache");
+    SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(100), "apds.cleanStaleCache");
     if (g.held) {
-      gAPDSCache.apdsDataValid = false;
-      gAPDSCache.apdsRed = 0;
-      gAPDSCache.apdsGreen = 0;
-      gAPDSCache.apdsBlue = 0;
-      gAPDSCache.apdsClear = 0;
-      gAPDSCache.apdsProximity = 0;
-      gAPDSCache.apdsGesture = 0;
+      gApdsCache.apdsDataValid = false;
+      gApdsCache.apdsRed = 0;
+      gApdsCache.apdsGreen = 0;
+      gApdsCache.apdsBlue = 0;
+      gApdsCache.apdsClear = 0;
+      gApdsCache.apdsProximity = 0;
+      gApdsCache.apdsGesture = 0;
     }
   }
   INFO_APDS_LIFECYCLEF("Cleaned up stale cache from previous run");
@@ -446,7 +446,7 @@ void apdsTask(void* parameter) {
         delete gAPDS9960;
         gAPDS9960 = nullptr;
       }
-      gAPDSCache.apdsDataValid = false;
+      gApdsCache.apdsDataValid = false;
       SENSOR_TASK_EXIT(APDS);
     }
 
@@ -495,16 +495,16 @@ void apdsTask(void* parameter) {
           // which resets consecutiveErrors - no local counter needed
           
           {
-            SensorCacheGuard g(gAPDSCache.mutex, pdMS_TO_TICKS(50), "apds.pollWrite");
+            SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(50), "apds.pollWrite");
             if (g.held) {
-              gAPDSCache.apdsRed = red;
-              gAPDSCache.apdsGreen = green;
-              gAPDSCache.apdsBlue = blue;
-              gAPDSCache.apdsClear = clear;
-              gAPDSCache.apdsProximity = proximity;
-              gAPDSCache.apdsGesture = gesture;
-              gAPDSCache.apdsLastUpdate = nowMs;
-              gAPDSCache.apdsDataValid = true;
+              gApdsCache.apdsRed = red;
+              gApdsCache.apdsGreen = green;
+              gApdsCache.apdsBlue = blue;
+              gApdsCache.apdsClear = clear;
+              gApdsCache.apdsProximity = proximity;
+              gApdsCache.apdsGesture = gesture;
+              gApdsCache.apdsLastUpdate = nowMs;
+              gApdsCache.apdsDataValid = true;
             }
           }
         } else {
@@ -543,28 +543,28 @@ void apdsTask(void* parameter) {
 // ============================================================================
 
 uint8_t apdsGetProximity() {
-  if (!gApdsConnected || !gAPDSCache.apdsDataValid) return 0;
-  return gAPDSCache.apdsProximity;
+  if (!gApdsConnected || !gApdsCache.apdsDataValid) return 0;
+  return gApdsCache.apdsProximity;
 }
 
 uint16_t apdsGetColorR() {
-  if (!gApdsConnected || !gAPDSCache.apdsDataValid) return 0;
-  return gAPDSCache.apdsRed;
+  if (!gApdsConnected || !gApdsCache.apdsDataValid) return 0;
+  return gApdsCache.apdsRed;
 }
 
 uint16_t apdsGetColorG() {
-  if (!gApdsConnected || !gAPDSCache.apdsDataValid) return 0;
-  return gAPDSCache.apdsGreen;
+  if (!gApdsConnected || !gApdsCache.apdsDataValid) return 0;
+  return gApdsCache.apdsGreen;
 }
 
 uint16_t apdsGetColorB() {
-  if (!gApdsConnected || !gAPDSCache.apdsDataValid) return 0;
-  return gAPDSCache.apdsBlue;
+  if (!gApdsConnected || !gApdsCache.apdsDataValid) return 0;
+  return gApdsCache.apdsBlue;
 }
 
 uint16_t apdsGetColorC() {
-  if (!gApdsConnected || !gAPDSCache.apdsDataValid) return 0;
-  return gAPDSCache.apdsClear;
+  if (!gApdsConnected || !gApdsCache.apdsDataValid) return 0;
+  return gApdsCache.apdsClear;
 }
 
 #endif // ENABLE_APDS_SENSOR
