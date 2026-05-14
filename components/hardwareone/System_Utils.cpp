@@ -653,12 +653,46 @@ String waitForSerialInput(unsigned long timeoutMs) {
   return "";
 }
 
+// Wizard-input timeout state. When timeoutMs > 0, waitForSerialInputBlocking
+// gives up after `timeoutMs` of no input and sets the cancel flag. Callers
+// (the setup wizard, first-time-setup) can poll isWizardCancelRequested() to
+// short-circuit out of the wizard cleanly.
+//
+// FTS at boot uses timeout=0 (wait forever — fresh-device owner may need
+// time to read instructions). cmd_featuresetup uses timeout=60s so a CLI
+// invocation can't park the cmd_exec task indefinitely if the user walks
+// away or invokes from a transport that can't actually deliver input.
+//
+// Single-writer single-reader semantics: only the wizard entry points
+// (setSerialWaitTimeout) write the timeout, only waitForSerialInputBlocking
+// reads + writes the activity timestamp. The cancel flag is set by the
+// timeout path and read by wizard code on the same task.
+static volatile unsigned long sSerialWaitTimeoutMs = 0;
+static volatile unsigned long sSerialWaitLastActivityMs = 0;
+static volatile bool sWizardCancelRequested = false;
+
+void setSerialWaitTimeout(unsigned long timeoutMs) {
+  sSerialWaitTimeoutMs = timeoutMs;
+  sSerialWaitLastActivityMs = millis();
+  sWizardCancelRequested = false;
+}
+
+bool isWizardCancelRequested() {
+  return sWizardCancelRequested;
+}
+
 String waitForSerialInputBlocking() {
   for (;;) {
     if (Serial.available()) {
+      sSerialWaitLastActivityMs = millis();
       String input = Serial.readStringUntil('\n');
       input.trim();
       return input;
+    }
+    if (sSerialWaitTimeoutMs > 0 &&
+        (millis() - sSerialWaitLastActivityMs) > sSerialWaitTimeoutMs) {
+      sWizardCancelRequested = true;
+      return String();
     }
     delay(10);
   }

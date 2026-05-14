@@ -989,6 +989,15 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   result.espnowStationary = (stat.equalsIgnoreCase("s") || stat.equalsIgnoreCase("stationary")); }
 
 espnow_done:
+  // If the wizard timed out partway through this page (waitForSerialInputBlocking
+  // returns empty + sets the cancel flag), don't write any of the fields the
+  // user didn't actually confirm. The outer loop will pick up the cancel flag
+  // next iteration and abort the whole wizard.
+  if (isWizardCancelRequested()) {
+    running = false;
+    return;
+  }
+
   // Apply to settings
   gSettings.bleDeviceName = deviceName;
   gSettings.espnowDeviceName = deviceName;
@@ -1073,6 +1082,13 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
     result.mqttPassword = pass;
   }
 
+  // Mirror the ESP-NOW page: if we timed out partway, don't half-apply
+  // settings — let the outer loop catch the cancel flag and abort.
+  if (isWizardCancelRequested()) {
+    running = false;
+    return;
+  }
+
   // Apply to settings
   if (result.mqttHost.length() > 0) gSettings.mqttHost = result.mqttHost;
   if (result.mqttPort > 0) gSettings.mqttPort = result.mqttPort;
@@ -1112,9 +1128,14 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
     Serial.println("Enter number, SSID directly, 'rescan', or 'skip':");
     Serial.println("('b' or 'back' to return to previous page)");
     Serial.print("> ");
-    while (!Serial.available()) { delay(10); }
-    String ssidInput = Serial.readStringUntil('\n');
-    ssidInput.trim();
+    String ssidInput = waitForSerialInputBlocking();
+    // Honor wizard-input timeout (CLI featuresetup installs one; FTS doesn't).
+    if (isWizardCancelRequested()) {
+      WiFi.scanDelete();
+      result.completed = false;
+      running = false;
+      return;
+    }
     if (ssidInput.equalsIgnoreCase("b") || ssidInput.equalsIgnoreCase("back")) {
       WiFi.scanDelete();
       wizardPrevPage();
@@ -1141,9 +1162,12 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
     if (ssid.length() > 0) {
       Serial.println("Enter WiFi password (or 'b' to go back):");
       Serial.print("> ");
-      while (!Serial.available()) { delay(10); }
-      String pass = Serial.readStringUntil('\n');
-      pass.trim();
+      String pass = waitForSerialInputBlocking();
+      if (isWizardCancelRequested()) {
+        result.completed = false;
+        running = false;
+        return;
+      }
       if (pass.equalsIgnoreCase("b") || pass.equalsIgnoreCase("back")) {
         continue;
       }
@@ -1212,6 +1236,18 @@ SetupWizardResult runSetupWizard() {
   bool running = true;
 
   while (running) {
+    // Idle-timeout escape hatch: when running under cmd_featuresetup the
+    // caller installs a timeout (see runAndApplyFeatureWizard). If the
+    // user didn't deliver any input within that window,
+    // waitForSerialInputBlocking flips the cancel flag and we bail here
+    // without saving anything. FTS at boot uses timeout=0 so this branch
+    // never fires for fresh-device setup.
+    if (isWizardCancelRequested()) {
+      result.completed = false;
+      running = false;
+      break;
+    }
+
     SetupWizardPage currentPage = getWizardCurrentPage();
     int currentSel = getWizardCurrentSelection();
 
@@ -1418,8 +1454,39 @@ SetupWizardResult runSetupWizard() {
 // Used by both cmd_featuresetup (CLI) and firstTimeSetupIfNeeded() (FTS).
 // ============================================================================
 
-SetupWizardResult runAndApplyFeatureWizard() {
+// "Wizard owns Serial" flag — see header for rationale. RAII-style
+// management via runAndApplyFeatureWizard ensures it's always cleared
+// even on early-return paths.
+volatile bool gWizardOwnsSerial = false;
+
+SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
+  // Install the wizard-input timeout BEFORE entering runSetupWizard. The
+  // setter also clears any stale cancel flag from a prior wizard run.
+  // idleTimeoutMs=0 means waitForSerialInputBlocking() waits forever (FTS
+  // boot behavior). Non-zero means we cancel the wizard after that many
+  // milliseconds of idleness (CLI featuresetup behavior).
+  setSerialWaitTimeout(idleTimeoutMs);
+
+  // Claim Serial. While this is true, the main loop's CLI-input section
+  // skips its drain, so every byte the user types reaches the wizard
+  // (instead of being half-stolen by the CLI dispatcher and submitted
+  // as a command that then times out because cmd_exec is in the wizard).
+  gWizardOwnsSerial = true;
+
   SetupWizardResult result = runSetupWizard();
+
+  gWizardOwnsSerial = false;
+
+  // Always reset to "wait forever" after the wizard returns so a later
+  // FTS-style use of waitForSerialInputBlocking() doesn't inherit a stale
+  // CLI timeout.
+  setSerialWaitTimeout(0);
+
+  if (isWizardCancelRequested()) {
+    broadcastOutput("Feature setup timed out. No changes saved.");
+    result.completed = false;
+    return result;
+  }
 
   if (!result.completed) {
     broadcastOutput("Feature setup cancelled. No changes saved.");

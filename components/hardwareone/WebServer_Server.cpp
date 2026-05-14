@@ -227,16 +227,27 @@ void pruneExpiredSessions() {
 //                 Secure cookie is silently dropped by the browser, so
 //                 gating on gServerIsHttps keeps HTTP-mode builds working.
 //
-// Stack-local cookieBuf — replaces the previous per-callsite `static char
-// cookieBuf[96]` which was a process-global the auth assessment report
-// flagged as not thread-safe across concurrent httpd workers (a latent
-// race today; an actual race if CONFIG_HTTPD_* ever raises the worker
-// count). Local buffer makes the helper reentrant.
+// IMPORTANT lifetime contract: `httpd_resp_set_hdr` does NOT copy the value
+// pointer. From the ESP-IDF doc: "Make sure that the lifetime of the field
+// value strings are valid till send function is called." That makes a
+// stack-local buffer here a use-after-free — this function returns to
+// setSession, which returns to handleLogin, which only THEN calls
+// httpd_resp_send. By that time a stack-local buffer is reclaimed memory
+// and the browser sees whatever overwrote those bytes (typically a
+// truncated/garbled Set-Cookie that fails to install).
+//
+// `static` is the correct lifetime here. ESP-IDF's httpd is single-task
+// (all handlers run sequentially on httpd's worker task — `max_open_sockets`
+// controls concurrent TCP connections but not concurrent handler execution),
+// so there is no thread-safety concern from the static buffer either.
+// If the request-processing model ever changes to be multi-threaded, this
+// will need per-task storage (via vTaskSetThreadLocalStoragePointer, not
+// thread_local — pthread owns FreeRTOS TLS slot 0; see System_AuthIdentity).
 //
 // Returns the esp_err_t from httpd_resp_set_hdr so callers can diagnose
 // set-header failures via DEBUG_AUTHF if they want.
 static esp_err_t writeSessionCookie(httpd_req_t* req, const String& sid) {
-  char cookieBuf[160];
+  static char cookieBuf[160];
   if (sid.length() > 0) {
     snprintf(cookieBuf, sizeof(cookieBuf),
              "session=%s; Path=/; HttpOnly; SameSite=Strict%s",
