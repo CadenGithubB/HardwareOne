@@ -3620,7 +3620,7 @@ static const char* cmd_sr_timeout(const String& argsInput) {
 static const char* cmd_sr_tuning(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  static char buf[520];
+  EXT_RAM_BSS_ATTR static char buf[520];
   int mg = gSettings.microphoneGain;
   float swgain = 24.0f * ((float)mg / 50.0f);
   snprintf(buf, sizeof(buf),

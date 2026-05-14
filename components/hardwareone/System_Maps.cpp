@@ -2443,7 +2443,7 @@ GPSTrackPoint* GPSTrackManager::_points = nullptr;
 int GPSTrackManager::_pointCount = 0;
 GPSTrackBounds GPSTrackManager::_bounds = {0, 0, 0, 0, false};
 GPSTrackStats GPSTrackManager::_stats = {0, 0, 0, false};
-char GPSTrackManager::_filename[256] = "";
+EXT_RAM_BSS_ATTR char GPSTrackManager::_filename[256];
 bool GPSTrackManager::_liveTracking = false;
 uint32_t GPSTrackManager::_lastUpdateMs = 0;
 

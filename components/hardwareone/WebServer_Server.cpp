@@ -3172,7 +3172,7 @@ esp_err_t handleSystemStatus(httpd_req_t* req) {
   buildSystemInfoJson(doc);
   
   // Serialize to static buffer
-  static char sysJsonBuf[1024];
+  EXT_RAM_BSS_ATTR static char sysJsonBuf[1024];
   serializeJson(doc, sysJsonBuf, sizeof(sysJsonBuf));
 
   httpd_resp_send(req, sysJsonBuf, HTTPD_RESP_USE_STRLEN);

@@ -1511,7 +1511,7 @@ static const char* cmd_ringquery(const String& args) {
 __attribute__((unused))
 static const char* cmd_ringtoglasses(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[300];
+  EXT_RAM_BSS_ATTR static char ret[300];
   CommandArgs ca(args);
   String sub = ca.arg(0); sub.toLowerCase();
 
@@ -1682,7 +1682,7 @@ static volatile bool gBridgeRequested = false;
 __attribute__((unused))
 static const char* cmd_ringbridge(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[300];
+  EXT_RAM_BSS_ATTR static char ret[300];
   CommandArgs ca(args);
   String sub = ca.arg(0); sub.toLowerCase();
 
