@@ -88,7 +88,7 @@
   #define CUSTOM_ENABLE_WEB_ESPNOW     1
   #define CUSTOM_ENABLE_WEB_BOND       1
   #define CUSTOM_ENABLE_WEB_MQTT       0
-  #define CUSTOM_ENABLE_WEB_GAMES      0
+  #define CUSTOM_ENABLE_WEB_GAMES      1
   #define CUSTOM_ENABLE_WEB_MAPS       0
 #endif
 
@@ -212,7 +212,7 @@
 // its own web page and (where applicable) OLED mode.
 
 // Games: browser-based games web page.
-#define ENABLE_GAMES            0
+#define ENABLE_GAMES            1
 
 // Maps: offline maps and waypoints web page.
 #define ENABLE_MAPS             0

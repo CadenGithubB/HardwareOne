@@ -27,6 +27,7 @@
 #include "System_Notifications.h"
 #include "System_Debug.h"
 #include "System_ESPNow.h"
+#include "System_ESPNow_Wire.h"      // V3 wire schema (Phase 0 extraction)
 #include "System_ESPNow_Sensors.h"
 #include "G2_Page_ESPNow.h"        // g2ESPNowAppOnRxText push-kick (inline no-op when BT/G2 off)
 #include "System_MemUtil.h"
@@ -80,157 +81,10 @@ static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8
 static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* data, int len);
 
 // ============================================================================
-// ESP-NOW V3 Binary Protocol - Forward Declarations
+// ESP-NOW V3 Binary Protocol — wire schema moved to System_ESPNow_Wire.h.
+// Constants, EspNowV3Type, EspNowV3Flags, EspNowV3Header, and payload structs
+// all live there now. Phase 0 of docs/ESPNOW_V4_PLAN.md.
 // ============================================================================
-#define ESPNOW_V3_MAGIC 0x3148u
-#define ESPNOW_V3_MAX_PAYLOAD (250 - 24)  // 226 bytes max payload
-
-enum EspNowV3Type : uint8_t {
-  ESPNOW_V3_TYPE_ACK          = 1,
-  ESPNOW_V3_TYPE_BOND_CAP_REQ = 2,
-  ESPNOW_V3_TYPE_BOND_CAP_RESP= 3,
-  ESPNOW_V3_TYPE_TEXT         = 4,
-  ESPNOW_V3_TYPE_CMD          = 5,
-  ESPNOW_V3_TYPE_CMD_RESP     = 6,
-  ESPNOW_V3_TYPE_HEARTBEAT    = 7,
-  ESPNOW_V3_TYPE_FILE_START   = 8,
-  ESPNOW_V3_TYPE_FILE_DATA    = 9,
-  ESPNOW_V3_TYPE_FILE_END     = 10,
-  ESPNOW_V3_TYPE_MANIFEST_REQ = 11,
-  ESPNOW_V3_TYPE_MANIFEST_RESP= 12,
-  ESPNOW_V3_TYPE_STREAM       = 13,
-  ESPNOW_V3_TYPE_BOND_HEARTBEAT = 14,
-  ESPNOW_V3_TYPE_SENSOR_DATA  = 15,  // Binary sensor data (bond mode)
-  ESPNOW_V3_TYPE_SETTINGS_REQ = 16,  // Request settings from bonded device
-  ESPNOW_V3_TYPE_SETTINGS_RESP= 17,  // Settings response (JSON payload)
-  ESPNOW_V3_TYPE_SETTINGS_PUSH= 18,  // RESERVED (push removed — settings changes use remote commands)
-  ESPNOW_V3_TYPE_METADATA_REQ = 19,  // Request peer's metadata
-  ESPNOW_V3_TYPE_METADATA_RESP= 20,  // Metadata response
-  ESPNOW_V3_TYPE_METADATA_PUSH= 21,  // Push metadata update (when changed)
-  ESPNOW_V3_TYPE_TIME_SYNC    = 22,  // Time synchronization (epoch + millis)
-  ESPNOW_V3_TYPE_TOPO_REQ     = 23,  // Topology discovery request
-  ESPNOW_V3_TYPE_TOPO_START   = 24,  // Topology response start (peer count)
-  ESPNOW_V3_TYPE_TOPO_PEER    = 25,  // Topology response peer entry
-  ESPNOW_V3_TYPE_USER_SYNC    = 26,  // User data synchronization
-  ESPNOW_V3_TYPE_WORKER_STATUS= 27,  // Worker status report to master (detailed)
-  ESPNOW_V3_TYPE_SENSOR_STATUS= 28,  // Sensor status broadcast (enabled/disabled)
-  ESPNOW_V3_TYPE_SENSOR_BROADCAST= 29, // Sensor data broadcast to mesh
-  ESPNOW_V3_TYPE_BOND_STATUS_REQ = 30, // Request live status from bonded peer
-  ESPNOW_V3_TYPE_BOND_STATUS_RESP= 31, // Live status response (BondPeerStatus payload)
-  ESPNOW_V3_TYPE_STREAM_CTRL     = 32, // Stream control (master->worker: start/stop sensor streaming)
-};
-
-struct __attribute__((packed)) V3PayloadHeartbeat {
-  uint8_t role;
-  uint8_t peerCount;
-  int8_t  rssi;
-  uint8_t reserved;
-  uint32_t uptimeSec;
-  uint32_t freeHeap;
-  char deviceName[20];
-};
-
-// Time sync payload
-struct __attribute__((packed)) V3PayloadTimeSync {
-  uint32_t epochTime;     // Unix epoch time
-  int64_t timeOffset;     // Time offset in milliseconds
-  uint32_t senderUptime;  // Sender uptime in seconds
-};
-
-// Topology request payload
-struct __attribute__((packed)) V3PayloadTopoReq {
-  uint32_t reqId;       // Request ID for correlation
-  uint8_t reserved[4];  // Padding for alignment
-};
-
-// Topology start payload (first message in topology response)
-struct __attribute__((packed)) V3PayloadTopoStart {
-  uint32_t reqId;       // Matches request ID
-  uint8_t peerCount;    // Number of TOPO_PEER messages to follow
-  uint8_t reserved[3];
-};
-
-// Topology peer entry (one per peer)
-struct __attribute__((packed)) V3PayloadTopoPeer {
-  uint32_t reqId;       // Matches request ID
-  uint8_t peerIndex;    // Which peer (0-based)
-  uint8_t isLast;       // 1 if this is the last peer
-  uint8_t mac[6];       // Peer MAC
-  int8_t rssi;          // Last RSSI
-  uint8_t encrypted;    // 1 if encrypted
-  char name[32];        // Peer name
-};
-
-// Worker status payload (detailed, for master consumption)
-struct __attribute__((packed)) V3PayloadWorkerStatus {
-  uint32_t freeHeap;
-  uint32_t totalHeap;
-  int8_t rssi;
-  uint8_t gThermalEnabled;
-  uint8_t gImuEnabled;
-  uint8_t reserved;
-  char name[20];
-  // Metadata fields follow as variable JSON payload if needed
-};
-
-#if ENABLE_BONDED_MODE
-// Bond mode heartbeat payload (lightweight)
-struct __attribute__((packed)) V3PayloadBondHeartbeat {
-  uint8_t role;           // Bond role (master/worker)
-  int8_t  rssi;           // WiFi RSSI
-  uint8_t reserved[2];    // Padding for alignment
-  uint32_t uptimeSec;     // Uptime in seconds
-  uint32_t freeHeap;      // Free heap bytes
-  uint32_t seqNum;        // Sequence number for tracking
-  uint32_t bootCounter;   // Persistent boot counter
-  uint32_t settingsHash;  // Hash of local settings (exclude passwords)
-};
-#endif // ENABLE_BONDED_MODE
-
-#if ENABLE_BONDED_MODE
-// Binary sensor data payload for bond mode streaming (compact, no JSON overhead)
-// Max payload is 226 bytes, header is 8 bytes, leaving 218 bytes for sensor data
-struct __attribute__((packed)) V3PayloadSensorData {
-  uint8_t sensorType;     // RemoteSensorType enum value
-  uint8_t flags;          // Bit 0: valid, Bit 1: streaming enabled
-  uint16_t dataLen;       // Length of data[] that follows
-  uint32_t seqNum;        // Sequence number for ordering
-  uint8_t data[];         // Variable-length sensor data (flexible array member)
-};
-// Stream control payload for bond mode (master -> worker)
-struct __attribute__((packed)) V3PayloadStreamCtrl {
-  uint8_t sensorType;   // RemoteSensorType enum value
-  uint8_t enable;       // 1 = start streaming, 0 = stop streaming
-  uint8_t reserved[2];  // Padding
-};
-#endif // ENABLE_BONDED_MODE
-
-// Sensor status payload for mesh broadcast
-struct __attribute__((packed)) V3PayloadSensorStatus {
-  uint8_t sensorType;   // RemoteSensorType enum value
-  uint8_t enabled;      // 1 if enabled, 0 if disabled
-  uint8_t reserved[2];  // Padding for alignment
-};
-
-// Sensor broadcast payload (sensor data to mesh)
-struct __attribute__((packed)) V3PayloadSensorBroadcast {
-  uint8_t sensorType;   // RemoteSensorType enum value
-  uint16_t dataLen;     // Length of JSON data that follows
-  uint8_t reserved;     // Padding for alignment
-  uint8_t data[];       // Variable-length JSON data (flexible array member)
-};
-
-// Metadata payload for metadata exchange (REQ/RESP/PUSH)
-// Total: 180 bytes (fits comfortably in 226 byte payload limit)
-struct __attribute__((packed)) V3PayloadMetadata {
-  char deviceName[32];
-  char friendlyName[48];
-  char room[32];
-  char zone[32];
-  char tags[64];
-  uint8_t stationary;
-  uint8_t reserved[3];    // Padding for future fields
-};
 
 // ============================================================================
 // V3 FRAGMENTATION CONSTANTS AND REASSEMBLY
@@ -1085,13 +939,7 @@ static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8
 // (enum EspNowV3Type and V3PayloadHeartbeat forward-declared near top of file)
 // ============================================================================
 
-enum EspNowV3Flags : uint8_t {
-  ESPNOW_V3_FLAG_ACK_REQ      = 0x01,  // Request ACK from receiver
-  ESPNOW_V3_FLAG_ENCRYPTED    = 0x02,  // Payload is encrypted
-  ESPNOW_V3_FLAG_COMPRESS     = 0x04,  // Payload is compressed (future)
-  ESPNOW_V3_FLAG_STREAM_BEGIN = 0x10,  // First chunk of stream
-  ESPNOW_V3_FLAG_STREAM_END   = 0x20,  // Last chunk of stream
-};
+// EspNowV3Flags moved to System_ESPNow_Wire.h
 
 // Stream session for real-time command output streaming
 // Links a CMD msgId to a target MAC so output can be routed correctly
@@ -1166,46 +1014,7 @@ static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t l
   return true;
 }
 
-struct __attribute__((packed)) EspNowV3Header {
-  uint16_t magic;        // 0x3148 ('H1' little-endian)
-  uint8_t  ver;          // Protocol version (3)
-  uint8_t  type;         // Message type (EspNowV3Type)
-  uint8_t  flags;        // Flags (EspNowV3Flags)
-  uint8_t  headerLen;    // Header length (24)
-  uint16_t payloadLen;   // Payload length in bytes
-  uint32_t msgId;        // Unique message ID
-  uint8_t  origin[6];    // Original sender MAC (for mesh forwarding)
-  uint8_t  ttl;          // Time-to-live (hops remaining)
-  uint8_t  fragIndex;    // Fragment index (0-based)
-  uint8_t  fragCount;    // Total fragment count (1 = not fragmented)
-  uint16_t crc16;        // CRC16-CCITT of payload
-  uint8_t  reserved;     // Reserved for future use
-};
-static_assert(sizeof(EspNowV3Header) == 24, "EspNowV3Header must be 24 bytes");
-static_assert(sizeof(V3PayloadHeartbeat) == 32, "V3PayloadHeartbeat must be 32 bytes");
-
-// V3 Payload structures (all packed, no heap allocation)
-struct __attribute__((packed)) V3PayloadCmdResp {
-  uint8_t success;                    // 1=success, 0=failure
-  char result[ESPNOW_V3_MAX_PAYLOAD - 1];  // Null-terminated result (truncated if needed)
-};
-
-struct __attribute__((packed)) V3PayloadFileStart {
-  uint32_t fileSize;      // Total file size in bytes
-  uint16_t chunkCount;    // Total number of chunks
-  uint16_t chunkSize;     // Size of each chunk (except last)
-  char filename[64];      // Destination filename
-};
-
-struct __attribute__((packed)) V3PayloadFileData {
-  uint16_t chunkIndex;    // Chunk index (0-based)
-  uint8_t  data[ESPNOW_V3_MAX_PAYLOAD - 2];  // Chunk data (224 bytes max)
-};
-
-struct __attribute__((packed)) V3PayloadFileEnd {
-  uint32_t crc32;         // CRC32 of entire file
-  uint8_t  success;       // 1=transfer complete, 0=aborted
-};
+// EspNowV3Header, V3PayloadCmdResp, V3PayloadFile* moved to System_ESPNow_Wire.h
 
 struct V3DedupEntry { uint8_t origin[6]; uint32_t id; uint32_t ts; bool active; };
 #define V3_DEDUP_SIZE 64
@@ -1911,6 +1720,1167 @@ static void processBondModeManifestResp(const uint8_t* srcMac, const String& dev
 // Forward declaration for command execution
 static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, const char* cmd);
 
+// ============================================================================
+// V3 RX dispatch table (Phase 0 of docs/ESPNOW_V4_PLAN.md).
+//
+// The legacy if-ladder in v3_try_handle_incoming() is being replaced
+// incrementally by a handler table. For each opcode in this table, the
+// corresponding if-branch in v3_try_handle_incoming() has been removed —
+// the dispatcher below runs first and claims the frame.
+//
+// New opcodes get migrated by:
+//   1. Implementing a `static void v3h_<name>(const V3RxCtx&)` function.
+//   2. Adding one row to kV3HandlerTable[].
+//   3. Deleting the corresponding `if (h->type == ESPNOW_V3_TYPE_<X>)` branch
+//      from v3_try_handle_incoming().
+//
+// The dispatcher preserves the exact behavior of the original branches,
+// including the per-branch reassembly cleanup that ran at the end of each.
+// That cleanup is centralized in the dispatcher so handlers don't repeat it.
+// ============================================================================
+
+struct V3RxCtx {
+  const esp_now_recv_info* recv_info;
+  const EspNowV3Header*    h;
+  const uint8_t*           payload;
+  uint16_t                 payloadLen;
+  bool                     isPaired;
+  const char*              deviceName;
+};
+
+using V3OpcodeHandler = void (*)(const V3RxCtx& ctx);
+
+// Flags on handler-table entries
+static constexpr uint8_t V3_OPC_FLAG_REQ_PAIRED    = 0x01;  // require src to be a paired peer
+static constexpr uint8_t V3_OPC_FLAG_REQ_BOND_MODE = 0x02;  // require gSettings.bondModeEnabled
+
+struct V3OpcodeEntry {
+  uint8_t          opcode;
+  uint8_t          flags;
+  V3OpcodeHandler  handler;
+};
+
+// ----- Per-opcode handlers (Phase 0 migrations) -----
+
+// TIME_SYNC — synchronous, updates gTimeOffset / gTimeIsSynced.
+static void v3h_time_sync(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] Received from %s msgId=%lu payloadLen=%u",
+         ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
+  if (ctx.payloadLen >= sizeof(V3PayloadTimeSync)) {
+    const V3PayloadTimeSync* ts = (const V3PayloadTimeSync*)ctx.payload;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] epochTime=%lu timeOffset=%ld",
+           (unsigned long)ts->epochTime, (long)ts->timeOffset);
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] Previous time state: synced=%s offset=%lld",
+           gTimeIsSynced ? "YES" : "NO", (long long)gTimeOffset);
+    gTimeOffset = (int64_t)ts->timeOffset;
+    gTimeIsSynced = true;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] Time sync applied successfully");
+  } else {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V3PayloadTimeSync));
+  }
+}
+
+// TEXT — deferred to task via ring buffer (gEspNow->textQueue).
+static void v3h_text(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message detected, payload: %.80s",
+         ctx.payloadLen > 0 ? (const char*)ctx.payload : "(empty)");
+  if (ctx.payloadLen > 0 && ctx.payloadLen <= ESPNOW_V3_MAX_PAYLOAD && gEspNow) {
+    int head = gEspNow->textQueueHead;
+    int nextHead = (head + 1) & (EspNowState::TEXT_QUEUE_SIZE - 1);
+    if (nextHead != gEspNow->textQueueTail) {
+      auto& slot = gEspNow->textQueue[head];
+      size_t copyLen = (ctx.payloadLen < sizeof(slot.content) - 1) ? ctx.payloadLen : sizeof(slot.content) - 1;
+      memcpy(slot.content, ctx.payload, copyLen);
+      slot.content[copyLen] = '\0';
+      memcpy(slot.srcMac, ctx.recv_info->src_addr, 6);
+      strncpy(slot.deviceName, ctx.deviceName, sizeof(slot.deviceName) - 1);
+      slot.deviceName[sizeof(slot.deviceName) - 1] = '\0';
+      slot.encrypted = (ctx.h->flags & ESPNOW_V3_FLAG_ENCRYPTED) != 0;
+      slot.used = true;
+      gEspNow->textQueueHead = nextHead;
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message enqueued slot=%d (encrypted=%s)",
+             head, slot.encrypted ? "YES" : "NO");
+      if (ctx.isPaired && meshEnabled()) {
+        noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::RxActivity);
+      }
+    } else {
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT queue full, message dropped");
+    }
+  } else {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message REJECTED: payloadLen=%u gEspNow=%p",
+           ctx.payloadLen, gEspNow);
+  }
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] ========================================");
+}
+
+// CMD — deferred to task via gEspNow->deferredCmd* fields (one in flight).
+// Auth/validation runs later in v3_handle_cmd() on the espnow task.
+static void v3h_cmd(const V3RxCtx& ctx) {
+  if (ctx.payloadLen > 0 && ctx.payloadLen <= ESPNOW_V3_MAX_PAYLOAD && gEspNow && !gEspNow->deferredCmdPending) {
+    size_t copyLen = (ctx.payloadLen < sizeof(gEspNow->deferredCmdPayload) - 1)
+                       ? ctx.payloadLen
+                       : sizeof(gEspNow->deferredCmdPayload) - 1;
+    memcpy(gEspNow->deferredCmdPayload, ctx.payload, copyLen);
+    gEspNow->deferredCmdPayload[copyLen] = '\0';
+    memcpy(gEspNow->deferredCmdSrcMac, ctx.recv_info->src_addr, 6);
+    strncpy(gEspNow->deferredCmdDeviceName, ctx.deviceName, sizeof(gEspNow->deferredCmdDeviceName) - 1);
+    gEspNow->deferredCmdDeviceName[sizeof(gEspNow->deferredCmdDeviceName) - 1] = '\0';
+    gEspNow->deferredCmdMsgId = ctx.h->msgId;
+    gEspNow->deferredCmdPending = true;
+  }
+}
+
+// CMD_RESP — deferred to task via gEspNow->deferredCmdResp* fields.
+static void v3h_cmd_resp(const V3RxCtx& ctx) {
+  if (ctx.payloadLen >= 1 && gEspNow) {
+    const V3PayloadCmdResp* resp = (const V3PayloadCmdResp*)ctx.payload;
+    size_t resultLen = ctx.payloadLen - 1;
+    if (resultLen > 2047) resultLen = 2047;
+    if (!gEspNow->deferredCmdRespResult) { gEspNow->deferredCmdRespPending = false; return; }
+    memcpy(gEspNow->deferredCmdRespResult, resp->result, resultLen);
+    gEspNow->deferredCmdRespResult[resultLen] = '\0';
+    memcpy(gEspNow->deferredCmdRespSrcMac, ctx.recv_info->src_addr, 6);
+    strncpy(gEspNow->deferredCmdRespDeviceName, ctx.deviceName, sizeof(gEspNow->deferredCmdRespDeviceName) - 1);
+    gEspNow->deferredCmdRespDeviceName[sizeof(gEspNow->deferredCmdRespDeviceName) - 1] = '\0';
+    gEspNow->deferredCmdRespSuccess = resp->success;
+    gEspNow->deferredCmdRespPending = true;
+  }
+}
+
+// HEARTBEAT — mesh peer heartbeat; updates rx activity, mesh-backup tracking,
+// and sends ACK if requested. Note: ACK_REQ frames also get an auto-ACK from
+// the early auto-ACK block in v3_try_handle_incoming; preserving the
+// double-send here to match original behavior exactly.
+static void v3h_heartbeat(const V3RxCtx& ctx) {
+  if (ctx.payloadLen >= sizeof(V3PayloadHeartbeat)) {
+    const V3PayloadHeartbeat* hb = (const V3PayloadHeartbeat*)ctx.payload;
+    noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::MeshHeartbeat, hb->rssi);
+    if (gEspNow) gEspNow->heartbeatsReceived++;
+
+    // Backup master failover: track heartbeats from the configured master MAC
+    if (meshEnabled() && gSettings.meshBackupEnabled &&
+        gSettings.meshMasterMAC.length() > 0) {
+      bool isBackupOrPromoted = (gSettings.meshRole == MESH_ROLE_BACKUP_MASTER) ||
+                                 (gSettings.meshRole == MESH_ROLE_MASTER && gBackupPromoted);
+      if (isBackupOrPromoted) {
+        uint8_t masterMac[6] = {};
+        if (parseMacAddress(gSettings.meshMasterMAC, masterMac) &&
+            memcmp(ctx.recv_info->src_addr, masterMac, 6) == 0) {
+          gLastMasterHeartbeat = millis();
+          if (gBackupPromoted) {
+            // Original master is back — demote to backup role (runtime only, not saved)
+            gBackupPromoted = false;
+            setMeshRole(MESH_ROLE_BACKUP_MASTER, "backup.master_returned");
+            BROADCAST_PRINTF("[BACKUP] Master returned — demoted back to backup role");
+          }
+        }
+      }
+    }
+  }
+  // Send ACK if requested
+  if (ctx.h->flags & ESPNOW_V3_FLAG_ACK_REQ) {
+    v3_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
+  }
+}
+
+// SENSOR_STATUS — remote sensor enable/disable announcement (mesh broadcast).
+static void v3h_sensor_status(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] Received from %s msgId=%lu payloadLen=%u",
+         ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
+  if (ctx.payloadLen >= sizeof(V3PayloadSensorStatus)) {
+    const V3PayloadSensorStatus* ss = (const V3PayloadSensorStatus*)ctx.payload;
+    RemoteSensorType sensorType = (RemoteSensorType)ss->sensorType;
+    bool enabled = (ss->enabled != 0);
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] sensor=%s enabled=%s",
+           sensorTypeToString(sensorType), enabled ? "YES" : "NO");
+
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] Updating remote sensor status");
+    extern void updateRemoteSensorStatus(const uint8_t* mac, const char* name, RemoteSensorType type, bool enabled);
+    updateRemoteSensorStatus(ctx.recv_info->src_addr, ctx.deviceName, sensorType, enabled);
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] Status update complete");
+  } else {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V3PayloadSensorStatus));
+  }
+}
+
+// SENSOR_BROADCAST — remote sensor data broadcast to mesh; cache to remote-sensor table.
+static void v3h_sensor_broadcast(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] Received from %s msgId=%lu payloadLen=%u",
+         ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
+  if (ctx.payloadLen >= sizeof(V3PayloadSensorBroadcast)) {
+    const V3PayloadSensorBroadcast* sb = (const V3PayloadSensorBroadcast*)ctx.payload;
+    RemoteSensorType sensorType = (RemoteSensorType)sb->sensorType;
+    uint16_t dataLen = sb->dataLen;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] sensor=%s dataLen=%u",
+           sensorTypeToString(sensorType), dataLen);
+
+    if (dataLen > 0 && ctx.payloadLen >= (sizeof(V3PayloadSensorBroadcast) + dataLen)) {
+      const char* jsonData = (const char*)sb->data;
+      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] JSON (first 100 chars): %.100s", jsonData);
+
+      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] Caching sensor data");
+      RemoteSensorData* entry = findOrCreateCacheEntry(ctx.recv_info->src_addr, ctx.deviceName, sensorType);
+      if (entry) {
+        size_t copyLen = (dataLen < REMOTE_SENSOR_BUFFER_SIZE - 1) ? dataLen : REMOTE_SENSOR_BUFFER_SIZE - 1;
+        memcpy(entry->jsonData, jsonData, copyLen);
+        entry->jsonData[copyLen] = '\0';
+        entry->jsonLength = (uint16_t)copyLen;
+        entry->lastUpdate = millis();
+        entry->valid = true;
+        DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] Data cached successfully (%u bytes)", (unsigned)copyLen);
+      } else {
+        DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] ERROR: Failed to allocate cache entry");
+      }
+    } else {
+      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] ERROR: Invalid data length (%u) or truncated payload",
+             dataLen);
+    }
+  } else {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V3PayloadSensorBroadcast));
+  }
+}
+
+#if ENABLE_BONDED_MODE
+// BOND_HEARTBEAT — bond-mode keepalive from paired peer; updates bond peer
+// online state, boot counter, settings hash, RSSI; may trigger sync recovery.
+static void v3h_bond_heartbeat(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_HB_RX] from %s payloadLen=%u (need %u) isPaired=%d",
+         ctx.deviceName, ctx.payloadLen, (unsigned)sizeof(V3PayloadBondHeartbeat), (int)ctx.isPaired);
+  if (ctx.payloadLen < sizeof(V3PayloadBondHeartbeat)) return;
+
+  const V3PayloadBondHeartbeat* hb = (const V3PayloadBondHeartbeat*)ctx.payload;
+  if (!gEspNow) return;
+
+  bool bootChanged = (hb->bootCounter != 0 && gEspNow->bondPeerBootCounter != 0 &&
+                      hb->bootCounter != gEspNow->bondPeerBootCounter);
+  bool wasOffline = !gEspNow->bondPeerOnline || bootChanged;
+  uint32_t oldSettingsHash = gEspNow->bondPeerSettingsHash;
+
+  gEspNow->bondPeerBootCounter = hb->bootCounter;
+  gEspNow->bondPeerSettingsHash = hb->settingsHash;
+  gEspNow->bondPeerUptime = hb->uptimeSec;
+
+  if (bootChanged) {
+    resetBondSync();
+  }
+
+  // Detect live settings change: peer's hash changed while we had their settings cached
+  bool settingsChanged = (gEspNow->bondSettingsReceived && oldSettingsHash != 0 &&
+                          hb->settingsHash != 0 && hb->settingsHash != oldSettingsHash);
+  if (settingsChanged && !bootChanged) {
+    gEspNow->bondSettingsReceived = false;
+    gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
+    gEspNow->bondSyncRetryCount = 0;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_HB_RX] Peer settings hash changed 0x%08lX->0x%08lX, will re-fetch",
+           (unsigned long)oldSettingsHash, (unsigned long)hb->settingsHash);
+  }
+
+  gEspNow->lastBondHeartbeatReceivedMs = millis();
+  gEspNow->bondHeartbeatsReceived++;
+  gEspNow->bondPeerOnline = true;
+
+  // Update RSSI from rx_ctrl
+  if (ctx.recv_info->rx_ctrl) {
+    gEspNow->bondRssiLast = ctx.recv_info->rx_ctrl->rssi;
+    if (gEspNow->bondLastRssiUpdateMs == 0) {
+      gEspNow->bondRssiAvg = gEspNow->bondRssiLast;
+    } else {
+      gEspNow->bondRssiAvg = (int8_t)((9 * (int)gEspNow->bondRssiAvg + (int)gEspNow->bondRssiLast) / 10);
+    }
+    gEspNow->bondLastRssiUpdateMs = millis();
+  }
+
+  // Worker recovery: if caps are exchanged but bondSettingsSent was never
+  // set (e.g. firmware update without wipe on an already-synced session),
+  // infer that settings were already sent and complete the worker sync.
+  // Time gate: only after 30s of caps exchanged, to avoid false-triggering
+  // during normal handshake when the master just hasn't asked for settings yet.
+  bool capExchangedLongEnough = (gEspNow->lastRemoteCapTime > 0 &&
+                                 (millis() - gEspNow->lastRemoteCapTime) > 30000);
+  if (isBondWorker() && !gEspNow->bondSessionTokenValid &&
+      gEspNow->lastRemoteCapValid && gEspNow->bondCapSent &&
+      !gEspNow->bondSettingsSent && capExchangedLongEnough) {
+    gEspNow->bondSettingsSent = true;
+    if (isBondSynced()) {
+      uint8_t pMac[6];
+      if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
+        computeBondSessionToken(pMac);
+      }
+      BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=0 (worker, recovered)");
+    }
+  }
+
+  if (wasOffline) {
+    // Deferred: master starts sync tick
+    if (isBondMaster()) {
+      gEspNow->bondNeedsCapabilityRequest = true;
+      // bondNeedsStreamingSetup is set after sync completes in processBondSettings()
+    }
+  }
+}
+
+// STREAM_CTRL — bond mode master->worker: start/stop sensor streaming.
+// Deferred to task because startSensorDataStreaming creates tasks/mutexes.
+static void v3h_stream_ctrl(const V3RxCtx& ctx) {
+  if (ctx.payloadLen >= 2 && gEspNow) {
+    gEspNow->bondDeferredStreamCtrlSensor = ctx.payload[0];  // sensorType
+    gEspNow->bondDeferredStreamCtrlEnable = ctx.payload[1];  // enable
+    gEspNow->bondDeferredStreamCtrlPending = true;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STREAM_CTRL_RX] sensor=%u enable=%u (deferred)",
+           ctx.payload[0], ctx.payload[1]);
+  }
+}
+#endif // ENABLE_BONDED_MODE
+
+// TOPO_REQ — peer is asking for our topology; respond with TOPO_START + N×TOPO_PEER.
+static void v3h_topo_req(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] Received from %s msgId=%lu payloadLen=%u",
+         ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
+  if (ctx.payloadLen < sizeof(V3PayloadTopoReq)) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V3PayloadTopoReq));
+    return;
+  }
+  const V3PayloadTopoReq* tr = (const V3PayloadTopoReq*)ctx.payload;
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] reqId=%lu", (unsigned long)tr->reqId);
+
+  // Count active peers (excluding self)
+  int peerCount = 0;
+  for (int i = 0; i < gMeshPeerSlots; i++) {
+    if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) {
+      peerCount++;
+    }
+  }
+
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] Responding with %d peer(s)", peerCount);
+  v3_send_topo_start(ctx.recv_info->src_addr, tr->reqId, (uint8_t)peerCount);
+
+  int peerIndex = 0;
+  for (int i = 0; i < gMeshPeerSlots; i++) {
+    if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) {
+      bool isLast = (peerIndex == peerCount - 1);
+      const char* peerNamePtr = nullptr;
+      char peerNameBuf[48];
+      if (gMeshPeerMeta) {
+        for (int _pni = 0; _pni < gMeshPeerSlots; _pni++) {
+          if (gMeshPeerMeta[_pni].isActive && memcmp(gMeshPeerMeta[_pni].mac, gMeshPeers[i].mac, 6) == 0 && gMeshPeerMeta[_pni].name[0]) {
+            peerNamePtr = gMeshPeerMeta[_pni].name; break;
+          }
+        }
+      }
+      if (!peerNamePtr && gEspNow) {
+        for (int _pni = 0; _pni < gEspNow->deviceCount; _pni++) {
+          if (memcmp(gEspNow->devices[_pni].mac, gMeshPeers[i].mac, 6) == 0 && gEspNow->devices[_pni].name.length()) {
+            strlcpy(peerNameBuf, gEspNow->devices[_pni].name.c_str(), sizeof(peerNameBuf));
+            peerNamePtr = peerNameBuf; break;
+          }
+        }
+      }
+      MeshPeerHealth* ph = getMeshPeerHealth(gMeshPeers[i].mac, false);
+      int8_t rssi = ph ? ph->rssi : 0;
+      v3_send_topo_peer(ctx.recv_info->src_addr, tr->reqId, (uint8_t)peerIndex,
+                        isLast, gMeshPeers[i].mac, rssi,
+                        false, peerNamePtr ? peerNamePtr : "Unknown");
+      peerIndex++;
+    }
+  }
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] Sent %d TOPO_PEER frame(s)", peerIndex);
+}
+
+// TOPO_START — incoming topology response start (peer count). Initializes stream.
+static void v3h_topo_start(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] Received from %s msgId=%lu payloadLen=%u",
+         ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
+  if (ctx.payloadLen < sizeof(V3PayloadTopoStart)) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V3PayloadTopoStart));
+    return;
+  }
+  const V3PayloadTopoStart* ts = (const V3PayloadTopoStart*)ctx.payload;
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] reqId=%lu peerCount=%u",
+         (unsigned long)ts->reqId, ts->peerCount);
+  if (ts->reqId != gTopoRequestId || millis() >= gTopoRequestTimeout) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] Rejected: reqId mismatch or timeout");
+    return;
+  }
+  TopologyStream* stream = findOrCreateTopoStream(ctx.recv_info->src_addr, ts->reqId);
+  if (!stream || !stream->active) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] ERROR: Could not allocate stream");
+    return;
+  }
+  if (stream->receivedPeers == 0 && stream->totalPeers == 0) {
+    const char* senderNamePtr = (ctx.deviceName && ctx.deviceName[0]) ? ctx.deviceName : nullptr;
+    char senderNameFallBuf[48];
+    if (!senderNamePtr && gMeshPeerMeta) {
+      for (int _sni = 0; _sni < gMeshPeerSlots; _sni++) {
+        if (gMeshPeerMeta[_sni].isActive && memcmp(gMeshPeerMeta[_sni].mac, ctx.recv_info->src_addr, 6) == 0 && gMeshPeerMeta[_sni].name[0]) {
+          senderNamePtr = gMeshPeerMeta[_sni].name; break;
+        }
+      }
+    }
+    if (!senderNamePtr && gEspNow) {
+      for (int _sni = 0; _sni < gEspNow->deviceCount; _sni++) {
+        if (memcmp(gEspNow->devices[_sni].mac, ctx.recv_info->src_addr, 6) == 0 && gEspNow->devices[_sni].name.length()) {
+          strlcpy(senderNameFallBuf, gEspNow->devices[_sni].name.c_str(), sizeof(senderNameFallBuf));
+          senderNamePtr = senderNameFallBuf; break;
+        }
+      }
+    }
+    if (!senderNamePtr) {
+      formatMacAddressBuf(ctx.recv_info->src_addr, senderNameFallBuf, sizeof(senderNameFallBuf));
+      senderNamePtr = senderNameFallBuf;
+    }
+    strncpy(stream->senderName, senderNamePtr, 31);
+    stream->senderName[31] = '\0';
+    stream->totalPeers = ts->peerCount;
+    stream->accumulatedData = "";
+    addTopoDeviceName(ctx.recv_info->src_addr, senderNamePtr);
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] Stream initialized for %s: expecting %d peers",
+           stream->senderName, ts->peerCount);
+  }
+  if (ts->peerCount == 0) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] 0 peers - edge device, finalizing");
+    finalizeTopologyStream(stream);
+  }
+}
+
+// TOPO_PEER — incoming topology peer entry. Appends to accumulated data.
+static void v3h_topo_peer(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Received from %s msgId=%lu payloadLen=%u",
+         ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
+  if (ctx.payloadLen < sizeof(V3PayloadTopoPeer)) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V3PayloadTopoPeer));
+    return;
+  }
+  const V3PayloadTopoPeer* tp = (const V3PayloadTopoPeer*)ctx.payload;
+  char peerMacStr[18];
+  formatMacAddressBuf(tp->mac, peerMacStr, sizeof(peerMacStr));
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] reqId=%lu idx=%u isLast=%u mac=%s name=%s",
+         (unsigned long)tp->reqId, tp->peerIndex, tp->isLast, peerMacStr, tp->name);
+  if (tp->reqId != gTopoRequestId || millis() >= gTopoRequestTimeout) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Rejected: reqId mismatch or timeout");
+    return;
+  }
+  TopologyStream* stream = findTopoStream(ctx.recv_info->src_addr, tp->reqId);
+  if (!stream || !stream->active) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] No active stream for this sender");
+    return;
+  }
+  if (stream->accumulatedData.indexOf(peerMacStr) != -1) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Duplicate peer %s, skipping", peerMacStr);
+    return;
+  }
+  const char* peerNamePtr2 = (tp->name[0] && strcmp(tp->name, "Unknown") != 0) ? tp->name : nullptr;
+  char peerNameFallBuf[48];
+  if (!peerNamePtr2) {
+    if (getTopoDeviceName(tp->mac, peerNameFallBuf, sizeof(peerNameFallBuf)) && peerNameFallBuf[0]) {
+      peerNamePtr2 = peerNameFallBuf;
+    }
+  }
+  if (!peerNamePtr2 && gMeshPeerMeta) {
+    for (int _tni = 0; _tni < gMeshPeerSlots; _tni++) {
+      if (gMeshPeerMeta[_tni].isActive && memcmp(gMeshPeerMeta[_tni].mac, tp->mac, 6) == 0 && gMeshPeerMeta[_tni].name[0]) {
+        peerNamePtr2 = gMeshPeerMeta[_tni].name; break;
+      }
+    }
+  }
+  if (!peerNamePtr2 && gEspNow) {
+    for (int _tni = 0; _tni < gEspNow->deviceCount; _tni++) {
+      if (memcmp(gEspNow->devices[_tni].mac, tp->mac, 6) == 0 && gEspNow->devices[_tni].name.length()) {
+        strlcpy(peerNameFallBuf, gEspNow->devices[_tni].name.c_str(), sizeof(peerNameFallBuf));
+        peerNamePtr2 = peerNameFallBuf; break;
+      }
+    }
+  }
+  if (peerNamePtr2) {
+    addTopoDeviceName(tp->mac, peerNamePtr2);
+  }
+  char peerInfoBuf[128];
+  snprintf(peerInfoBuf, sizeof(peerInfoBuf), "  \xe2\x86\x92 %s (%s)\n    RSSI: %d dBm\n",
+           peerNamePtr2 ? peerNamePtr2 : "Unknown", peerMacStr, (int)tp->rssi);
+  stream->accumulatedData += peerInfoBuf;
+  stream->receivedPeers++;
+  gTopoLastResponseTime = millis();
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Accumulated peer %d/%d: %s",
+         stream->receivedPeers, stream->totalPeers, peerNamePtr2 ? peerNamePtr2 : "Unknown");
+}
+
+// USER_SYNC — propagates user credentials between bonded peers; requires
+// ESPNOW_V3_FLAG_ENCRYPTED, admin authentication, and a setting opt-in.
+// All early-rejection paths send their own ACK or CMD_RESP back.
+static void v3h_user_sync(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_USER_SYNC] Received from %s msgId=%lu encrypted=%s",
+         ctx.deviceName, (unsigned long)ctx.h->msgId, (ctx.h->flags & ESPNOW_V3_FLAG_ENCRYPTED) ? "YES" : "NO");
+
+  // Security: must be encrypted
+  if (!(ctx.h->flags & ESPNOW_V3_FLAG_ENCRYPTED)) {
+    ERROR_ESPNOWF("[USER_SYNC] SECURITY: Rejected from %s — encryption required", ctx.deviceName);
+    broadcastOutput("[ESP-NOW] SECURITY: User sync rejected - encryption required");
+    v3_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
+    return;
+  }
+
+  // User sync must be enabled
+  if (!gSettings.espnowUserSyncEnabled) {
+    WARN_ESPNOWF("[USER_SYNC] Disabled — rejecting from %s", ctx.deviceName);
+    broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnowusersync on'");
+    v3_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
+    return;
+  }
+
+  if (ctx.payloadLen == 0) {
+    WARN_ESPNOWF("[USER_SYNC] Empty payload from %s", ctx.deviceName);
+    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Empty payload", strlen("Empty payload"));
+    return;
+  }
+
+  PSRAM_JSON_DOC(doc);
+  String jsonStr((const char*)ctx.payload, ctx.payloadLen);
+  if (deserializeJson(doc, jsonStr) != DeserializationError::Ok) {
+    WARN_ESPNOWF("[USER_SYNC] Malformed JSON from %s", ctx.deviceName);
+    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Malformed JSON", strlen("Malformed JSON"));
+    return;
+  }
+
+  const char* adminUser  = doc["admin_user"]  | "";
+  const char* adminPass  = doc["admin_pass"]  | "";
+  const char* targetUser = doc["target_user"] | "";
+  const char* targetPass = doc["target_pass"] | "";
+  const char* role       = doc["role"]        | "user";
+
+  if (!strlen(adminUser) || !strlen(adminPass) || !strlen(targetUser) || !strlen(targetPass)) {
+    WARN_ESPNOWF("[USER_SYNC] Missing required fields from %s", ctx.deviceName);
+    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Missing required fields", strlen("Missing required fields"));
+    return;
+  }
+
+  if (!isValidUser(String(adminUser), String(adminPass))) {
+    ERROR_ESPNOWF("[USER_SYNC] Admin auth FAILED for '%s' from %s", adminUser, ctx.deviceName);
+    broadcastOutput("[ESP-NOW] User sync: Admin authentication FAILED");
+    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Admin authentication failed", strlen("Admin authentication failed"));
+    return;
+  }
+
+  if (!isAdminUser(String(adminUser))) {
+    ERROR_ESPNOWF("[USER_SYNC] '%s' is not admin — sync rejected from %s", adminUser, ctx.deviceName);
+    broadcastOutput("[ESP-NOW] User sync: Admin privileges required");
+    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Admin privileges required", strlen("Admin privileges required"));
+    return;
+  }
+
+  uint32_t existingId = 0;
+  if (getUserIdByUsername(String(targetUser), existingId)) {
+    WARN_ESPNOWF("[USER_SYNC] User '%s' already exists (id=%u) — skipping", targetUser, (unsigned)existingId);
+    BROADCAST_PRINTF("[ESP-NOW] User sync: '%s' already exists", targetUser);
+    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, true, "User already exists (skipped)", strlen("User already exists (skipped)"));
+    return;
+  }
+
+  if (!filesystemReady) {
+    ERROR_ESPNOWF("[USER_SYNC] Filesystem not ready");
+    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Filesystem not ready", strlen("Filesystem not ready"));
+    return;
+  }
+
+  // Create the user. See original branch for the trust-model rationale —
+  // V3 USER_SYNC has already validated encryption + admin auth above; the
+  // local users.json mutation runs under systemAuth() like every other
+  // users.json mutation in System_User.cpp.
+  {
+    FsLockGuard guard("user_sync.create");
+    AuthContext userSyncCtx = VFS::systemAuth("user_sync.create");
+
+    if (!VFS::existsGuarded(USERS_JSON_FILE, userSyncCtx)) {
+      ERROR_ESPNOWF("[USER_SYNC] users.json not found");
+      v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "users.json not found", strlen("users.json not found"));
+      return;
+    }
+
+    File f = VFS::openGuarded(USERS_JSON_FILE, "r", userSyncCtx);
+    if (!f) {
+      ERROR_ESPNOWF("[USER_SYNC] Could not open users.json");
+      v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Could not open users.json", strlen("Could not open users.json"));
+      return;
+    }
+
+    PSRAM_JSON_DOC(userDoc);
+    DeserializationError err = deserializeJson(userDoc, f);
+    f.close();
+
+    if (err || !userDoc["users"]) {
+      ERROR_ESPNOWF("[USER_SYNC] Malformed users.json");
+      v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Malformed users.json", strlen("Malformed users.json"));
+      return;
+    }
+
+    int nextId = userDoc["nextId"] | 2;
+    JsonArray users = userDoc["users"];
+
+    JsonObject newUser = users.add<JsonObject>();
+    newUser["id"]        = nextId;
+    newUser["username"]  = targetUser;
+    newUser["role"]      = role;
+    newUser["createdAt"] = (const char*)nullptr;
+    char createdByBuf[48];
+    snprintf(createdByBuf, sizeof(createdByBuf), "espnow:%s", ctx.deviceName);
+    newUser["createdBy"] = createdByBuf;
+    newUser["createdMs"] = millis();
+    extern uint32_t gNTPAnchorId;
+    extern uint32_t gBootCounter;
+    newUser["ntpAnchorId"] = gNTPAnchorId;
+    newUser["bootCount"]   = gBootCounter;
+    userDoc["nextId"] = nextId + 1;
+
+    f = VFS::openGuarded(USERS_JSON_FILE, "w", userSyncCtx);
+    if (!f || serializeJson(userDoc, f) == 0) {
+      if (f) f.close();
+      ERROR_ESPNOWF("[USER_SYNC] Failed to write users.json");
+      v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Failed to write users.json", strlen("Failed to write users.json"));
+      return;
+    }
+    f.close();
+
+    String hashedPassword = hashUserPassword(String(targetPass));
+    PSRAM_JSON_DOC(defaults);
+    defaults["theme"]    = "light";
+    defaults["password"] = hashedPassword;
+    saveUserSettings((uint32_t)nextId, defaults);
+
+    INFO_ESPNOWF("[USER_SYNC] Created user '%s' (id=%d role=%s) from %s",
+                 targetUser, nextId, role, ctx.deviceName);
+    BROADCAST_PRINTF("[ESP-NOW] User sync: Created '%s' (role=%s) from %s",
+                     targetUser, role, ctx.deviceName);
+
+    char respBuf[128];
+    snprintf(respBuf, sizeof(respBuf), "User '%s' created (id=%d)", targetUser, nextId);
+    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, true, respBuf, strlen(respBuf));
+  }
+}
+
+#if ENABLE_BONDED_MODE
+// BOND_CAP_REQ — peer asks for our capability summary. Defer to task.
+static void v3h_bond_cap_req(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_REQ_RX] from %s role=%d capSent=%d",
+         ctx.deviceName, (int)gSettings.bondRole,
+         gEspNow ? (int)gEspNow->bondCapSent : -1);
+  if (gEspNow) {
+    memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
+    gEspNow->bondNeedsCapabilityResponse = true;
+  }
+}
+
+// BOND_CAP_RESP — peer's capability summary. Cache it; queue our own back
+// if we haven't sent one yet. NOTE: extra payloadLen check is done here
+// (was in the original if-condition) since the dispatcher can't express it.
+static void v3h_bond_cap_resp(const V3RxCtx& ctx) {
+  if (ctx.payloadLen != sizeof(CapabilitySummary)) return;
+  const CapabilitySummary* cap = (const CapabilitySummary*)ctx.payload;
+  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] from %s role=%d capSent=%d sensorMask=0x%04lX devName='%.16s'",
+         ctx.deviceName, (int)gSettings.bondRole,
+         gEspNow ? (int)gEspNow->bondCapSent : -1,
+         (unsigned long)cap->sensorMask, cap->deviceName);
+  if (!gEspNow) return;
+  memcpy(&gEspNow->lastRemoteCap, cap, sizeof(CapabilitySummary));
+  gEspNow->lastRemoteCapValid = true;
+  gEspNow->lastRemoteCapTime = millis();
+  gEspNow->bondReceivedCapability = true;
+  gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
+  gEspNow->bondSyncRetryCount = 0;
+  gEspNow->bondSyncLastAttemptMs = 0;
+  if (!gEspNow->bondCapSent) {
+    memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
+    gEspNow->bondNeedsCapabilityResponse = true;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] queued reciprocal CAP_RESP (bondCapSent was false)");
+  } else {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] NOT sending reciprocal (bondCapSent already true)");
+  }
+}
+
+// SENSOR_DATA — bond mode binary sensor data; cache to remote sensor entry.
+static void v3h_sensor_data(const V3RxCtx& ctx) {
+  if (ctx.payloadLen < sizeof(V3PayloadSensorData)) return;
+  const V3PayloadSensorData* sd = (const V3PayloadSensorData*)ctx.payload;
+  size_t totalExpected = sizeof(V3PayloadSensorData) + sd->dataLen;
+  if (sd->dataLen == 0 || totalExpected > ctx.payloadLen) return;
+  RemoteSensorType sensorType = (RemoteSensorType)sd->sensorType;
+  if (sensorType >= REMOTE_SENSOR_MAX) return;
+  RemoteSensorData* entry = findOrCreateCacheEntry(ctx.recv_info->src_addr, ctx.deviceName, sensorType);
+  if (!entry) return;
+  size_t copyLen = (sd->dataLen < REMOTE_SENSOR_BUFFER_SIZE - 1) ? sd->dataLen : REMOTE_SENSOR_BUFFER_SIZE - 1;
+  memcpy(entry->jsonData, sd->data, copyLen);
+  entry->jsonData[copyLen] = '\0';
+  entry->jsonLength = (uint16_t)copyLen;
+  entry->lastUpdate = millis();
+  entry->valid = true;
+  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] Sensor %s from %s len=%u seq=%lu",
+         sensorTypeToString(sensorType), ctx.deviceName, (unsigned)copyLen, (unsigned long)sd->seqNum);
+}
+
+// SETTINGS_REQ — peer asks for our settings file. Defer to task.
+static void v3h_settings_req(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SETTINGS_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
+  if (gEspNow) {
+    memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
+    gEspNow->bondNeedsSettingsResponse = true;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SETTINGS_REQ_RX] set bondNeedsSettingsResponse=true");
+  }
+}
+
+// BOND_STATUS_REQ — peer asks for live status. Defer to task.
+static void v3h_bond_status_req(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STATUS_REQ_RX] from %s", ctx.deviceName);
+  if (gEspNow) {
+    memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
+    gEspNow->bondNeedsStatusResponse = true;
+  }
+}
+
+// BOND_STATUS_RESP — peer's live status; cache it.
+static void v3h_bond_status_resp(const V3RxCtx& ctx) {
+  if (ctx.payloadLen < sizeof(BondPeerStatus) || !gEspNow) return;
+  memcpy(&gEspNow->bondPeerStatus, ctx.payload, sizeof(BondPeerStatus));
+  gEspNow->bondPeerStatusValid = true;
+  gEspNow->bondPeerStatusTimeMs = millis();
+  BROADCAST_PRINTF("[BOND_STATUS_RESP_RX] from %s enabled=0x%04X connected=0x%04X heap=%lu",
+         ctx.deviceName, gEspNow->bondPeerStatus.sensorEnabledMask,
+         gEspNow->bondPeerStatus.sensorConnectedMask,
+         (unsigned long)gEspNow->bondPeerStatus.freeHeap);
+}
+
+// MANIFEST_REQ — peer asks for our manifest file. Defer to task.
+static void v3h_manifest_req(const V3RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_MANIFEST_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
+  if (gEspNow) {
+    memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
+    gEspNow->bondNeedsManifestResponse = true;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_MANIFEST_REQ_RX] set bondNeedsManifestResponse=true");
+  }
+}
+#endif // ENABLE_BONDED_MODE
+
+// METADATA_REQ — peer asks for our metadata. Defer to task.
+static void v3h_metadata_req(const V3RxCtx& ctx) {
+  bool isEncrypted = false;
+  if (gEspNow) {
+    for (int i = 0; i < gEspNow->deviceCount; i++) {
+      if (memcmp(gEspNow->devices[i].mac, ctx.recv_info->src_addr, 6) == 0) {
+        isEncrypted = gEspNow->devices[i].encrypted;
+        break;
+      }
+    }
+  }
+  DEBUG_ESPNOW_METADATAF("[METADATA] REQ received from %s (%s) msgId=%lu isPaired=%d isEncrypted=%d",
+    ctx.deviceName, MAC_STR(ctx.recv_info->src_addr), (unsigned long)ctx.h->msgId,
+    (int)ctx.isPaired, (int)isEncrypted);
+  if (gEspNow) {
+    memcpy(gEspNow->metadataPendingResponseMac, ctx.recv_info->src_addr, 6);
+    gEspNow->bondNeedsMetadataResponse = true;
+    DEBUG_ESPNOW_METADATAF("[METADATA] bondNeedsMetadataResponse=true, will RESP to %s",
+      MAC_STR(ctx.recv_info->src_addr));
+  } else {
+    WARN_ESPNOWF("[METADATA] REQ from %s ignored: gEspNow is null", ctx.deviceName);
+  }
+}
+
+// METADATA_RESP / METADATA_PUSH — shared handler. Type comes from header.
+static void v3h_metadata_resp_push(const V3RxCtx& ctx) {
+  const char* metaType = (ctx.h->type == ESPNOW_V3_TYPE_METADATA_PUSH) ? "PUSH" : "RESP";
+  DEBUG_ESPNOW_METADATAF("[METADATA] %s received from %s (%s) msgId=%lu payloadLen=%u (need %u) isPaired=%d",
+    metaType, ctx.deviceName, MAC_STR(ctx.recv_info->src_addr),
+    (unsigned long)ctx.h->msgId, ctx.payloadLen, (unsigned)sizeof(V3PayloadMetadata), (int)ctx.isPaired);
+  if (ctx.payloadLen < sizeof(V3PayloadMetadata)) {
+    WARN_ESPNOWF("[METADATA] %s from %s REJECTED: payload too small (%u < %u)",
+      metaType, ctx.deviceName, ctx.payloadLen, (unsigned)sizeof(V3PayloadMetadata));
+    return;
+  }
+  const V3PayloadMetadata* meta = (const V3PayloadMetadata*)ctx.payload;
+  DEBUG_ESPNOW_METADATAF("[METADATA] %s payload: name='%s' friendlyName='%s' room='%s' zone='%s' tags='%s' stationary=%d",
+    metaType, meta->deviceName, meta->friendlyName, meta->room, meta->zone, meta->tags, (int)meta->stationary);
+  if (!gEspNow) {
+    WARN_ESPNOWF("[METADATA] %s from %s dropped: gEspNow is null", metaType, ctx.deviceName);
+    return;
+  }
+  bool wasPending = gEspNow->deferredMetadataPending;
+  memcpy(gEspNow->deferredMetadataSrcMac, ctx.recv_info->src_addr, 6);
+  memcpy(&gEspNow->deferredMetadataPayload, meta, sizeof(V3PayloadMetadata));
+  gEspNow->deferredMetadataPending = true;
+  DEBUG_ESPNOW_METADATAF("[METADATA] %s deferred for task processing (overwrote=%d)",
+    metaType, (int)wasPending);
+}
+
+// STREAM — incoming stream output; ring-buffer enqueue to task. Bypasses
+// dedup (see special-cased dedup bypass in v3_try_handle_incoming).
+static void v3h_stream(const V3RxCtx& ctx) {
+  if (ctx.payloadLen == 0 || ctx.payloadLen > ESPNOW_V3_MAX_PAYLOAD || !gEspNow) return;
+  int head = gEspNow->streamQueueHead;
+  int nextHead = (head + 1) & (EspNowState::STREAM_QUEUE_SIZE - 1);
+  if (nextHead != gEspNow->streamQueueTail) {
+    auto& entry = gEspNow->streamQueue[head];
+    size_t copyLen = (ctx.payloadLen < sizeof(entry.content) - 1) ? ctx.payloadLen : sizeof(entry.content) - 1;
+    memcpy(entry.content, ctx.payload, copyLen);
+    entry.content[copyLen] = '\0';
+    memcpy(entry.srcMac, ctx.recv_info->src_addr, 6);
+    strncpy(entry.deviceName, ctx.deviceName, sizeof(entry.deviceName) - 1);
+    entry.deviceName[sizeof(entry.deviceName) - 1] = '\0';
+    entry.used = true;
+    gEspNow->streamQueueHead = nextHead;
+  }
+  // else: queue full, drop this frame (better than overwriting)
+  gEspNow->streamReceivedCount++;
+}
+
+// FILE_START — initialize a file transfer; allocate PSRAM buffer + chunk bitmap.
+// Rejects if a different sender already has an active transfer. Stale transfers
+// (>30s) and same-sender restarts are tolerated by cleaning up first.
+static void v3h_file_start(const V3RxCtx& ctx) {
+  if (ctx.payloadLen < sizeof(V3PayloadFileStart)) return;
+  const V3PayloadFileStart* fs = (const V3PayloadFileStart*)ctx.payload;
+
+  if (gActiveFileTransfer) {
+    bool isStale = (millis() - gActiveFileTransfer->startTime) > 30000;
+    bool sameSender = (memcmp(gActiveFileTransfer->senderMac, ctx.recv_info->src_addr, 6) == 0);
+    if (!isStale && !sameSender) {
+      ERROR_ESPNOWF("[V3_FILE] Rejected: transfer already in progress from different sender");
+      return;
+    }
+    if (gActiveFileTransfer->chunkMap) {
+      heap_caps_free(gActiveFileTransfer->chunkMap);
+      gActiveFileTransfer->chunkMap = nullptr;
+    }
+    if (gActiveFileTransfer->dataBuffer) {
+      heap_caps_free(gActiveFileTransfer->dataBuffer);
+    }
+    delete gActiveFileTransfer;
+    gActiveFileTransfer = nullptr;
+  }
+
+  if (fs->fileSize > 65536) {
+    ERROR_ESPNOWF("[V3_FILE] File too large for buffer: %lu bytes (max 64KB)", (unsigned long)fs->fileSize);
+    return;
+  }
+  if (fs->fileSize == 0) {
+    DEBUG_ESPNOWF("[V3_FILE] Warning: zero-size file transfer: %s", fs->filename);
+  }
+  if (fs->chunkSize == 0 || (fs->chunkCount == 0 && fs->fileSize > 0)) {
+    ERROR_ESPNOWF("[V3_FILE] Rejected invalid chunk params: chunkSize=%u chunkCount=%u",
+                  (unsigned)fs->chunkSize, (unsigned)fs->chunkCount);
+    return;
+  }
+
+  gActiveFileTransfer = new FileTransfer();
+  if (!gActiveFileTransfer) {
+    ERROR_ESPNOWF("[V3_FILE] Failed to allocate FileTransfer");
+    return;
+  }
+  memset(gActiveFileTransfer, 0, sizeof(FileTransfer));
+
+  uint32_t allocSize = fs->fileSize > 0 ? fs->fileSize : 1;
+  gActiveFileTransfer->dataBuffer = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM);
+  if (!gActiveFileTransfer->dataBuffer) {
+    ERROR_ESPNOWF("[V3_FILE] Failed to allocate %lu byte PSRAM buffer", (unsigned long)allocSize);
+    delete gActiveFileTransfer;
+    gActiveFileTransfer = nullptr;
+    return;
+  }
+  gActiveFileTransfer->bufferSize = fs->fileSize;
+
+  strncpy(gActiveFileTransfer->filename, fs->filename, 63);
+  gActiveFileTransfer->filename[63] = '\0';
+  gActiveFileTransfer->totalSize = fs->fileSize;
+  gActiveFileTransfer->totalChunks = fs->chunkCount;
+  gActiveFileTransfer->chunkSize = fs->chunkSize;
+  gActiveFileTransfer->receivedBytes = 0;
+  gActiveFileTransfer->receivedChunks = 0;
+
+  gActiveFileTransfer->chunkMap = nullptr;
+  gActiveFileTransfer->chunkMapBytes = (uint16_t)((fs->chunkCount + 7) / 8);
+  if (gActiveFileTransfer->chunkMapBytes == 0) gActiveFileTransfer->chunkMapBytes = 1;
+  gActiveFileTransfer->chunkMap = (uint8_t*)heap_caps_malloc(gActiveFileTransfer->chunkMapBytes, MALLOC_CAP_8BIT);
+  if (!gActiveFileTransfer->chunkMap) {
+    ERROR_ESPNOWF("[V3_FILE] Failed to allocate chunk bitmap (%u bytes)", (unsigned)gActiveFileTransfer->chunkMapBytes);
+    heap_caps_free(gActiveFileTransfer->dataBuffer);
+    delete gActiveFileTransfer;
+    gActiveFileTransfer = nullptr;
+    return;
+  }
+  memset(gActiveFileTransfer->chunkMap, 0, gActiveFileTransfer->chunkMapBytes);
+  snprintf(gActiveFileTransfer->hash, sizeof(gActiveFileTransfer->hash), "%lu", (unsigned long)ctx.h->msgId);
+  gActiveFileTransfer->active = true;
+  gActiveFileTransfer->startTime = millis();
+  memcpy(gActiveFileTransfer->senderMac, ctx.recv_info->src_addr, 6);
+
+  DEBUG_ESPNOWF("[V3_FILE_RX] FILE_START: %s (%lu bytes, %u chunks, chunkSize=%u) from %s",
+               fs->filename, (unsigned long)fs->fileSize, fs->chunkCount, fs->chunkSize, ctx.deviceName);
+  DEBUG_ESPNOWF("[V3_FILE_RX] Allocated: dataBuffer=%lu bytes, chunkMap=%u bytes",
+               (unsigned long)gActiveFileTransfer->bufferSize, (unsigned)gActiveFileTransfer->chunkMapBytes);
+}
+
+// FILE_DATA — receive a chunk into the active transfer's PSRAM buffer.
+// Original branch had inline `if (!isPaired) return true;` — using REQ_PAIRED
+// flag yields identical behavior (silent drop for unpaired senders).
+static void v3h_file_data(const V3RxCtx& ctx) {
+  if (!gActiveFileTransfer || !gActiveFileTransfer->active || !gActiveFileTransfer->dataBuffer) {
+    DEBUG_ESPNOWF("[V3_FILE_RX] FILE_DATA ignored: no active transfer (active=%d)",
+                 gActiveFileTransfer ? gActiveFileTransfer->active : 0);
+    return;
+  }
+  if (memcmp(gActiveFileTransfer->senderMac, ctx.recv_info->src_addr, 6) != 0) {
+    return;  // Silently ignore data from different sender
+  }
+  if (ctx.payloadLen < 3) return;
+  const V3PayloadFileData* fd = (const V3PayloadFileData*)ctx.payload;
+  uint16_t dataLen = ctx.payloadLen - 2;
+  if (!gActiveFileTransfer->chunkMap || gActiveFileTransfer->chunkSize == 0 || gActiveFileTransfer->totalChunks == 0) {
+    return;
+  }
+  uint16_t idx = fd->chunkIndex;
+  if (idx >= gActiveFileTransfer->totalChunks) return;
+  uint32_t offset = (uint32_t)idx * (uint32_t)gActiveFileTransfer->chunkSize;
+  if (offset + dataLen > gActiveFileTransfer->bufferSize) {
+    ERROR_ESPNOWF("[V3_FILE] Buffer overflow: offset=%lu + len=%u > size=%lu",
+                 (unsigned long)offset, dataLen, (unsigned long)gActiveFileTransfer->bufferSize);
+    return;
+  }
+  uint16_t byteIndex = (uint16_t)(idx / 8);
+  uint8_t bitMask = (uint8_t)(1u << (idx % 8));
+  bool alreadyHave = (byteIndex < gActiveFileTransfer->chunkMapBytes) && ((gActiveFileTransfer->chunkMap[byteIndex] & bitMask) != 0);
+  if (alreadyHave) {
+    DEBUG_ESPNOWF("[V3_FILE_RX] Chunk %u: DUPLICATE", idx);
+  } else {
+    DEBUG_ESPNOWF("[V3_FILE_RX] Chunk %u: offset=%lu len=%u", idx, (unsigned long)offset, dataLen);
+  }
+  memcpy(gActiveFileTransfer->dataBuffer + offset, fd->data, dataLen);
+  if (!alreadyHave) {
+    if (byteIndex < gActiveFileTransfer->chunkMapBytes) {
+      gActiveFileTransfer->chunkMap[byteIndex] |= bitMask;
+    }
+    gActiveFileTransfer->receivedBytes += dataLen;
+    gActiveFileTransfer->receivedChunks++;
+    if ((gActiveFileTransfer->receivedChunks % 10) == 0) {
+      DEBUG_ESPNOWF("[V3_FILE_RX] Progress: %u/%u chunks, %lu/%lu bytes",
+                   gActiveFileTransfer->receivedChunks,
+                   gActiveFileTransfer->totalChunks,
+                   (unsigned long)gActiveFileTransfer->receivedBytes,
+                   (unsigned long)gActiveFileTransfer->totalSize);
+    }
+  }
+}
+
+// FILE_END — finalize transfer; route manifest/settings to bond processors,
+// otherwise write to filesystem. Sends ACK back; cleans up state.
+static void v3h_file_end(const V3RxCtx& ctx) {
+  if (!gActiveFileTransfer || !gActiveFileTransfer->active) {
+    ERROR_ESPNOWF("[V3_FILE] Received FILE_END without active transfer");
+    return;
+  }
+  if (memcmp(gActiveFileTransfer->senderMac, ctx.recv_info->src_addr, 6) != 0) {
+    ERROR_ESPNOWF("[V3_FILE] FILE_END from different sender than FILE_START");
+    return;
+  }
+  const V3PayloadFileEnd* fe = (const V3PayloadFileEnd*)ctx.payload;
+  String senderMacStr = formatMacAddress(gActiveFileTransfer->senderMac);
+
+  DEBUG_ESPNOWF("[V3_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, success=%d)",
+               gActiveFileTransfer->filename,
+               (unsigned long)gActiveFileTransfer->receivedBytes,
+               gActiveFileTransfer->receivedChunks,
+               gActiveFileTransfer->totalChunks,
+               fe->success);
+
+  bool isComplete = (gActiveFileTransfer->totalSize == 0) ||
+                    ((gActiveFileTransfer->receivedChunks == gActiveFileTransfer->totalChunks) &&
+                     (gActiveFileTransfer->receivedBytes == gActiveFileTransfer->totalSize));
+
+  if (!isComplete) {
+    BROADCAST_PRINTF("[V3_FILE] REJECTED incomplete transfer '%s': %u/%u chunks, %lu/%lu bytes",
+                 gActiveFileTransfer->filename,
+                 (unsigned)gActiveFileTransfer->receivedChunks,
+                 (unsigned)gActiveFileTransfer->totalChunks,
+                 (unsigned long)gActiveFileTransfer->receivedBytes,
+                 (unsigned long)gActiveFileTransfer->totalSize);
+    if (gActiveFileTransfer->chunkMap) heap_caps_free(gActiveFileTransfer->chunkMap);
+    if (gActiveFileTransfer->dataBuffer) heap_caps_free(gActiveFileTransfer->dataBuffer);
+    delete gActiveFileTransfer;
+    gActiveFileTransfer = nullptr;
+    return;
+  }
+
+  if (fe->success && gActiveFileTransfer->dataBuffer) {
+#if ENABLE_BONDED_MODE
+    if (strcmp(gActiveFileTransfer->filename, "_manifest_out.json") == 0) {
+      String manifestStr((char*)gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
+      processBondModeManifestResp(gActiveFileTransfer->senderMac, senderMacStr, manifestStr);
+      BROADCAST_PRINTF("[V3_FILE] Manifest processed: %lu bytes", (unsigned long)gActiveFileTransfer->receivedBytes);
+    } else if (strcmp(gActiveFileTransfer->filename, "_settings_out.json") == 0) {
+      DEBUG_ESPNOWF("[FILE_END] Detected settings file: %s (%lu bytes)",
+                    gActiveFileTransfer->filename, (unsigned long)gActiveFileTransfer->receivedBytes);
+      String settingsStr((char*)gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
+      DEBUG_ESPNOWF("[FILE_END] Calling processBondSettings (settingsStr len=%d)", settingsStr.length());
+      processBondSettings(gActiveFileTransfer->senderMac, senderMacStr, settingsStr);
+      BROADCAST_PRINTF("[V3_FILE] Settings processed: %lu bytes", (unsigned long)gActiveFileTransfer->receivedBytes);
+    } else
+#endif // ENABLE_BONDED_MODE
+    {
+      String senderMacHex = macToHexString(gActiveFileTransfer->senderMac);
+      senderMacHex.replace(":", "");
+      char deviceDir[64];
+      snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderMacHex.c_str());
+
+      FsLockGuard guard("v3file.write");
+      VFS::mkdirGuarded("/espnow", VFS::systemAuth("espnow.v3_file_write_mkdir"));
+      VFS::mkdirGuarded("/espnow/received", VFS::systemAuth("espnow.v3_file_write_mkdir"));
+      VFS::mkdirGuarded(deviceDir, VFS::systemAuth("espnow.v3_file_write_mkdir"));
+      char filepath[128];
+      snprintf(filepath, sizeof(filepath), "%s/%s", deviceDir, gActiveFileTransfer->filename);
+      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("espnow.v3_file_write"), true);
+      if (f) {
+        f.write(gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
+        f.close();
+        BROADCAST_PRINTF("[V3_FILE] Complete: %s (%lu bytes)", gActiveFileTransfer->filename, (unsigned long)gActiveFileTransfer->receivedBytes);
+
+        if (strcmp(gActiveFileTransfer->filename, "automations.json") == 0) {
+          String senderName = getEspNowDeviceName(gActiveFileTransfer->senderMac);
+          if (senderName.length() == 0) senderName = formatMacAddress(gActiveFileTransfer->senderMac);
+          String jsonStr((char*)gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
+          PSRAM_JSON_DOC(adoc);
+          DeserializationError aerr = deserializeJson(adoc, jsonStr);
+          if (!aerr && adoc["automations"].is<JsonArray>()) {
+            JsonArray arr = adoc["automations"].as<JsonArray>();
+            int total = (int)arr.size();
+            BROADCAST_PRINTF("[AUTOMATIONS] %s: %d automation%s", senderName.c_str(), total, total == 1 ? "" : "s");
+            int idx = 0;
+            for (JsonObject a : arr) {
+              if (idx >= 10) {
+                BROADCAST_PRINTF("  ... (%d more)", total - idx);
+                break;
+              }
+              const char* aname = a["name"] | "(unnamed)";
+              bool enabled = a["enabled"] | true;
+              JsonObject sched = a["schedule"];
+              String schedStr = sched ? String(sched["type"] | "?") : String("?");
+              if (schedStr == "time") {
+                const char* t = sched["time"] | "";
+                if (t && t[0]) schedStr = String(t);
+              }
+              int cmdCount = a["commands"].is<JsonArray>()
+                             ? (int)a["commands"].as<JsonArray>().size() : 0;
+              BROADCAST_PRINTF("  [%s] %s @ %s (%d cmd%s)", enabled ? "ON " : "OFF", aname, schedStr.c_str(), cmdCount, cmdCount == 1 ? "" : "s");
+              idx++;
+            }
+          } else {
+            BROADCAST_PRINTF("[AUTOMATIONS] Parse failed from %s%s%s", senderName.c_str(), aerr ? ": " : "", aerr ? aerr.c_str() : "");
+          }
+        }
+      }
+    }
+
+    logFileTransferEvent(gActiveFileTransfer->senderMac, senderMacStr.c_str(),
+                        gActiveFileTransfer->filename, MSG_FILE_RECV_SUCCESS);
+    if (gEspNow) gEspNow->fileTransfersReceived++;
+  } else {
+    logFileTransferEvent(gActiveFileTransfer->senderMac, senderMacStr.c_str(),
+                        gActiveFileTransfer->filename, MSG_FILE_RECV_FAILED);
+  }
+
+  v3_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
+
+  if (gActiveFileTransfer->chunkMap) {
+    heap_caps_free(gActiveFileTransfer->chunkMap);
+    gActiveFileTransfer->chunkMap = nullptr;
+  }
+  if (gActiveFileTransfer->dataBuffer) {
+    heap_caps_free(gActiveFileTransfer->dataBuffer);
+  }
+  delete gActiveFileTransfer;
+  gActiveFileTransfer = nullptr;
+}
+
+// ----- Handler table ------
+// Stable static table; lookup is linear over a small N. Adding a new opcode
+// is one row here plus its v3h_<name> function. No edits to the dispatcher.
+static const V3OpcodeEntry kV3HandlerTable[] = {
+  { ESPNOW_V3_TYPE_TIME_SYNC,        0,                                                    v3h_time_sync         },
+  { ESPNOW_V3_TYPE_TEXT,             0,                                                    v3h_text              },
+  { ESPNOW_V3_TYPE_CMD,              V3_OPC_FLAG_REQ_PAIRED,                               v3h_cmd               },
+  { ESPNOW_V3_TYPE_CMD_RESP,         0,                                                    v3h_cmd_resp          },
+  { ESPNOW_V3_TYPE_HEARTBEAT,        0,                                                    v3h_heartbeat         },
+  { ESPNOW_V3_TYPE_SENSOR_STATUS,    0,                                                    v3h_sensor_status     },
+  { ESPNOW_V3_TYPE_SENSOR_BROADCAST, 0,                                                    v3h_sensor_broadcast  },
+  { ESPNOW_V3_TYPE_TOPO_REQ,         0,                                                    v3h_topo_req          },
+  { ESPNOW_V3_TYPE_TOPO_START,       0,                                                    v3h_topo_start        },
+  { ESPNOW_V3_TYPE_TOPO_PEER,        0,                                                    v3h_topo_peer         },
+  { ESPNOW_V3_TYPE_USER_SYNC,        0,                                                    v3h_user_sync         },
+  { ESPNOW_V3_TYPE_METADATA_REQ,     0,                                                    v3h_metadata_req      },
+  { ESPNOW_V3_TYPE_METADATA_RESP,    0,                                                    v3h_metadata_resp_push},
+  { ESPNOW_V3_TYPE_METADATA_PUSH,    0,                                                    v3h_metadata_resp_push},
+  { ESPNOW_V3_TYPE_STREAM,           0,                                                    v3h_stream            },
+  { ESPNOW_V3_TYPE_FILE_START,       V3_OPC_FLAG_REQ_PAIRED,                               v3h_file_start        },
+  { ESPNOW_V3_TYPE_FILE_DATA,        V3_OPC_FLAG_REQ_PAIRED,                               v3h_file_data         },
+  { ESPNOW_V3_TYPE_FILE_END,         V3_OPC_FLAG_REQ_PAIRED,                               v3h_file_end          },
+#if ENABLE_BONDED_MODE
+  { ESPNOW_V3_TYPE_BOND_HEARTBEAT,   V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_bond_heartbeat    },
+  { ESPNOW_V3_TYPE_STREAM_CTRL,      V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_stream_ctrl       },
+  { ESPNOW_V3_TYPE_BOND_CAP_REQ,     V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_bond_cap_req      },
+  { ESPNOW_V3_TYPE_BOND_CAP_RESP,    V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_bond_cap_resp     },
+  { ESPNOW_V3_TYPE_SENSOR_DATA,      V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_sensor_data       },
+  { ESPNOW_V3_TYPE_SETTINGS_REQ,     V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_settings_req      },
+  { ESPNOW_V3_TYPE_BOND_STATUS_REQ,  V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_bond_status_req   },
+  { ESPNOW_V3_TYPE_BOND_STATUS_RESP, V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_bond_status_resp  },
+  { ESPNOW_V3_TYPE_MANIFEST_REQ,     V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_manifest_req      },
+#endif
+};
+static constexpr size_t kV3HandlerTableSize = sizeof(kV3HandlerTable) / sizeof(kV3HandlerTable[0]);
+
+// Lookup by opcode; nullptr if not migrated yet (falls through to legacy ladder).
+static const V3OpcodeEntry* v3_dispatch_lookup(uint8_t opcode) {
+  for (size_t i = 0; i < kV3HandlerTableSize; i++) {
+    if (kV3HandlerTable[i].opcode == opcode) return &kV3HandlerTable[i];
+  }
+  return nullptr;
+}
+
+// Centralized reassembly cleanup that each migrated branch used to do inline.
+static void v3_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const EspNowV3Header* h) {
+  if (h->fragCount > 1) {
+    for (int i = 0; i < V3_REASM_MAX; i++) {
+      if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId &&
+          memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
+        v3_reasm_reset(gV3Reasm[i]);
+        break;
+      }
+    }
+  }
+}
+
+// Returns true if the dispatch table claimed the frame; false to fall through
+// to the legacy if-ladder for opcodes not yet migrated.
+static bool v3_dispatch_table_try(const esp_now_recv_info* recv_info, const EspNowV3Header* h,
+                                  const uint8_t* payload, uint16_t payloadLen,
+                                  bool isPaired, const char* deviceName) {
+  const V3OpcodeEntry* e = v3_dispatch_lookup(h->type);
+  if (!e) return false;
+  if ((e->flags & V3_OPC_FLAG_REQ_PAIRED) && !isPaired) {
+    // Match original behavior: branch was gated `&& isPaired`, so unpaired frames
+    // for this opcode were silently dropped (no other branch matched). Same here.
+    v3_dispatch_post_cleanup(recv_info, h);
+    return true;
+  }
+  if ((e->flags & V3_OPC_FLAG_REQ_BOND_MODE) && !gSettings.bondModeEnabled) {
+    // Bond-mode-only opcodes were gated `&& gSettings.bondModeEnabled` originally.
+    // When bond mode is off, drop silently (no other branch handles these types).
+    v3_dispatch_post_cleanup(recv_info, h);
+    return true;
+  }
+  V3RxCtx ctx{recv_info, h, payload, payloadLen, isPaired, deviceName};
+  e->handler(ctx);
+  v3_dispatch_post_cleanup(recv_info, h);
+  return true;
+}
+
 static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uint8_t* data, int len) {
   if (!recv_info || !data || len < (int)sizeof(EspNowV3Header)) return false;
   const EspNowV3Header* h = (const EspNowV3Header*)data;
@@ -2184,1409 +3154,41 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   }
 #endif
 
-  // === TEXT MESSAGE ===
-  // NOTE: Deferred to task context - callback is ISR-like with limited stack
-  if (h->type == ESPNOW_V3_TYPE_TEXT) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message detected, payload: %.80s", 
-           payloadLen > 0 ? (const char*)payload : "(empty)");
-    if (payloadLen > 0 && payloadLen <= ESPNOW_V3_MAX_PAYLOAD && gEspNow) {
-      int head = gEspNow->textQueueHead;
-      int nextHead = (head + 1) & (EspNowState::TEXT_QUEUE_SIZE - 1);
-      if (nextHead != gEspNow->textQueueTail) {
-        auto& slot = gEspNow->textQueue[head];
-        size_t copyLen = (payloadLen < sizeof(slot.content) - 1) ? payloadLen : sizeof(slot.content) - 1;
-        memcpy(slot.content, payload, copyLen);
-        slot.content[copyLen] = '\0';
-        memcpy(slot.srcMac, recv_info->src_addr, 6);
-        strncpy(slot.deviceName, deviceName, sizeof(slot.deviceName) - 1);
-        slot.deviceName[sizeof(slot.deviceName) - 1] = '\0';
-        slot.encrypted = (h->flags & ESPNOW_V3_FLAG_ENCRYPTED) != 0;
-        slot.used = true;
-        gEspNow->textQueueHead = nextHead;
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message enqueued slot=%d (encrypted=%s)",
-               head, slot.encrypted ? "YES" : "NO");
-        if (isPaired && meshEnabled()) {
-          noteMeshPeerRxActivity(recv_info->src_addr, EspNowMeshRxKind::RxActivity);
-        }
-      } else {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT queue full, message dropped");
-      }
-    } else {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message REJECTED: payloadLen=%u gEspNow=%p",
-             payloadLen, gEspNow);
-    }
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] ========================================");
-    // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
+  // === Handler-table dispatch (Phase 0 of docs/ESPNOW_V4_PLAN.md) ===
+  // Opcodes registered in kV3HandlerTable are handled here; anything not
+  // in the table falls through to the legacy if-ladder below. Migration is
+  // incremental — opcodes move from the ladder into kV3HandlerTable one at
+  // a time. Today's migrated set: TEXT, CMD, CMD_RESP, TIME_SYNC.
+  if (v3_dispatch_table_try(recv_info, h, payload, payloadLen, isPaired, deviceName)) {
     return true;
   }
 
-  // === COMMAND REQUEST ===
-  // NOTE: Deferred to task context - callback is ISR-like with limited stack
-  // v3_handle_cmd has malloc, String ops, auth checks - all ISR-unsafe
-  if (h->type == ESPNOW_V3_TYPE_CMD && isPaired) {
-    if (payloadLen > 0 && payloadLen <= ESPNOW_V3_MAX_PAYLOAD && gEspNow && !gEspNow->deferredCmdPending) {
-      size_t copyLen = (payloadLen < sizeof(gEspNow->deferredCmdPayload) - 1) ? payloadLen : sizeof(gEspNow->deferredCmdPayload) - 1;
-      memcpy(gEspNow->deferredCmdPayload, payload, copyLen);
-      gEspNow->deferredCmdPayload[copyLen] = '\0';
-      memcpy(gEspNow->deferredCmdSrcMac, recv_info->src_addr, 6);
-      strncpy(gEspNow->deferredCmdDeviceName, deviceName, sizeof(gEspNow->deferredCmdDeviceName) - 1);
-      gEspNow->deferredCmdDeviceName[sizeof(gEspNow->deferredCmdDeviceName) - 1] = '\0';
-      gEspNow->deferredCmdMsgId = h->msgId;
-      gEspNow->deferredCmdPending = true;
-    }
-    // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
+  // TOPO_REQ migrated to handler table.
 
-  // === COMMAND RESPONSE ===
-  // NOTE: Deferred to task context - callback is ISR-like with limited stack
-  if (h->type == ESPNOW_V3_TYPE_CMD_RESP) {
-    if (payloadLen >= 1 && gEspNow) {
-      const V3PayloadCmdResp* resp = (const V3PayloadCmdResp*)payload;
-      size_t resultLen = payloadLen - 1;
-      if (resultLen > 2047) resultLen = 2047;
-      if (!gEspNow->deferredCmdRespResult) { gEspNow->deferredCmdRespPending = false; return true; }
-      memcpy(gEspNow->deferredCmdRespResult, resp->result, resultLen);
-      gEspNow->deferredCmdRespResult[resultLen] = '\0';
-      memcpy(gEspNow->deferredCmdRespSrcMac, recv_info->src_addr, 6);
-      strncpy(gEspNow->deferredCmdRespDeviceName, deviceName, sizeof(gEspNow->deferredCmdRespDeviceName) - 1);
-      gEspNow->deferredCmdRespDeviceName[sizeof(gEspNow->deferredCmdRespDeviceName) - 1] = '\0';
-      gEspNow->deferredCmdRespSuccess = resp->success;
-      gEspNow->deferredCmdRespPending = true;
-    }
-    // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
+  // TOPO_START migrated to handler table.
 
-  // === TIME SYNC ===
-  if (h->type == ESPNOW_V3_TYPE_TIME_SYNC) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] Received from %s msgId=%lu payloadLen=%u",
-           deviceName, (unsigned long)h->msgId, payloadLen);
-    if (payloadLen >= sizeof(V3PayloadTimeSync)) {
-      const V3PayloadTimeSync* ts = (const V3PayloadTimeSync*)payload;
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] epochTime=%lu timeOffset=%ld",
-             (unsigned long)ts->epochTime, (long)ts->timeOffset);
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] Previous time state: synced=%s offset=%lld",
-             gTimeIsSynced ? "YES" : "NO", (long long)gTimeOffset);
-      gTimeOffset = (int64_t)ts->timeOffset;
-      gTimeIsSynced = true;
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] Time sync applied successfully");
-    } else {
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] ERROR: Payload too small (%u < %u)",
-             payloadLen, (unsigned)sizeof(V3PayloadTimeSync));
-    }
-    // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-  
-  // === TOPOLOGY REQUEST ===
-  if (h->type == ESPNOW_V3_TYPE_TOPO_REQ) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] Received from %s msgId=%lu payloadLen=%u",
-           deviceName, (unsigned long)h->msgId, payloadLen);
-    if (payloadLen >= sizeof(V3PayloadTopoReq)) {
-      const V3PayloadTopoReq* tr = (const V3PayloadTopoReq*)payload;
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] reqId=%lu", (unsigned long)tr->reqId);
-      
-      // Count active peers (excluding self)
-      int peerCount = 0;
-      for (int i = 0; i < gMeshPeerSlots; i++) {
-        if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) {
-          peerCount++;
-        }
-      }
-      
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] Responding with %d peer(s)", peerCount);
-      
-      // Send TOPO_START to requester
-      v3_send_topo_start(recv_info->src_addr, tr->reqId, (uint8_t)peerCount);
-      
-      // Send one TOPO_PEER per active peer
-      int peerIndex = 0;
-      for (int i = 0; i < gMeshPeerSlots; i++) {
-        if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) {
-          bool isLast = (peerIndex == peerCount - 1);
-          const char* peerNamePtr = nullptr;
-          char peerNameBuf[48];
-          if (gMeshPeerMeta) {
-            for (int _pni = 0; _pni < gMeshPeerSlots; _pni++) {
-              if (gMeshPeerMeta[_pni].isActive && memcmp(gMeshPeerMeta[_pni].mac, gMeshPeers[i].mac, 6) == 0 && gMeshPeerMeta[_pni].name[0]) {
-                peerNamePtr = gMeshPeerMeta[_pni].name; break;
-              }
-            }
-          }
-          if (!peerNamePtr && gEspNow) {
-            for (int _pni = 0; _pni < gEspNow->deviceCount; _pni++) {
-              if (memcmp(gEspNow->devices[_pni].mac, gMeshPeers[i].mac, 6) == 0 && gEspNow->devices[_pni].name.length()) {
-                strlcpy(peerNameBuf, gEspNow->devices[_pni].name.c_str(), sizeof(peerNameBuf));
-                peerNamePtr = peerNameBuf; break;
-              }
-            }
-          }
-          MeshPeerHealth* ph = getMeshPeerHealth(gMeshPeers[i].mac, false);
-          int8_t rssi = ph ? ph->rssi : 0;
-          v3_send_topo_peer(recv_info->src_addr, tr->reqId, (uint8_t)peerIndex,
-                            isLast, gMeshPeers[i].mac, rssi,
-                            false, peerNamePtr ? peerNamePtr : "Unknown");
-          peerIndex++;
-        }
-      }
-      
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] Sent %d TOPO_PEER frame(s)", peerIndex);
-    } else {
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] ERROR: Payload too small (%u < %u)",
-             payloadLen, (unsigned)sizeof(V3PayloadTopoReq));
-    }
-    // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-  
-  // === TOPOLOGY START (response from peer) ===
-  if (h->type == ESPNOW_V3_TYPE_TOPO_START) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] Received from %s msgId=%lu payloadLen=%u",
-           deviceName, (unsigned long)h->msgId, payloadLen);
-    if (payloadLen >= sizeof(V3PayloadTopoStart)) {
-      const V3PayloadTopoStart* ts = (const V3PayloadTopoStart*)payload;
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] reqId=%lu peerCount=%u",
-             (unsigned long)ts->reqId, ts->peerCount);
-      
-      // Check if this matches our active request
-      if (ts->reqId != gTopoRequestId || millis() >= gTopoRequestTimeout) {
-        DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] Rejected: reqId mismatch or timeout");
-      } else {
-        // Find or create stream for this sender
-        TopologyStream* stream = findOrCreateTopoStream(recv_info->src_addr, ts->reqId);
-        if (stream && stream->active) {
-          // Initialize stream if newly created
-          if (stream->receivedPeers == 0 && stream->totalPeers == 0) {
-            const char* senderNamePtr = (deviceName && deviceName[0]) ? deviceName : nullptr;
-            char senderNameFallBuf[48];
-            if (!senderNamePtr && gMeshPeerMeta) {
-              for (int _sni = 0; _sni < gMeshPeerSlots; _sni++) {
-                if (gMeshPeerMeta[_sni].isActive && memcmp(gMeshPeerMeta[_sni].mac, recv_info->src_addr, 6) == 0 && gMeshPeerMeta[_sni].name[0]) {
-                  senderNamePtr = gMeshPeerMeta[_sni].name; break;
-                }
-              }
-            }
-            if (!senderNamePtr && gEspNow) {
-              for (int _sni = 0; _sni < gEspNow->deviceCount; _sni++) {
-                if (memcmp(gEspNow->devices[_sni].mac, recv_info->src_addr, 6) == 0 && gEspNow->devices[_sni].name.length()) {
-                  strlcpy(senderNameFallBuf, gEspNow->devices[_sni].name.c_str(), sizeof(senderNameFallBuf));
-                  senderNamePtr = senderNameFallBuf; break;
-                }
-              }
-            }
-            if (!senderNamePtr) {
-              formatMacAddressBuf(recv_info->src_addr, senderNameFallBuf, sizeof(senderNameFallBuf));
-              senderNamePtr = senderNameFallBuf;
-            }
-            strncpy(stream->senderName, senderNamePtr, 31);
-            stream->senderName[31] = '\0';
-            stream->totalPeers = ts->peerCount;
-            stream->accumulatedData = "";
-            
-            // Cache device name for topology display
-            addTopoDeviceName(recv_info->src_addr, senderNamePtr);
-            
-            DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] Stream initialized for %s: expecting %d peers",
-                   stream->senderName, ts->peerCount);
-          }
-          
-          // If 0 peers, finalize immediately (edge device)
-          if (ts->peerCount == 0) {
-            DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] 0 peers - edge device, finalizing");
-            finalizeTopologyStream(stream);
-          }
-        } else {
-          DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] ERROR: Could not allocate stream");
-        }
-      }
-    } else {
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] ERROR: Payload too small (%u < %u)",
-             payloadLen, (unsigned)sizeof(V3PayloadTopoStart));
-    }
-    // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-  
-  // === TOPOLOGY PEER (response from peer) ===
-  if (h->type == ESPNOW_V3_TYPE_TOPO_PEER) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Received from %s msgId=%lu payloadLen=%u",
-           deviceName, (unsigned long)h->msgId, payloadLen);
-    if (payloadLen >= sizeof(V3PayloadTopoPeer)) {
-      const V3PayloadTopoPeer* tp = (const V3PayloadTopoPeer*)payload;
-      char peerMacStr[18];
-      formatMacAddressBuf(tp->mac, peerMacStr, sizeof(peerMacStr));
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] reqId=%lu idx=%u isLast=%u mac=%s name=%s",
-             (unsigned long)tp->reqId, tp->peerIndex, tp->isLast, peerMacStr, tp->name);
-      
-      // Check if this matches our active request
-      if (tp->reqId != gTopoRequestId || millis() >= gTopoRequestTimeout) {
-        DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Rejected: reqId mismatch or timeout");
-      } else {
-        // Find stream for this sender
-        TopologyStream* stream = findTopoStream(recv_info->src_addr, tp->reqId);
-        if (stream && stream->active) {
-          // Check for duplicate
-          if (stream->accumulatedData.indexOf(peerMacStr) != -1) {
-            DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Duplicate peer %s, skipping", peerMacStr);
-          } else {
-            // Get peer name
-            const char* peerNamePtr2 = (tp->name[0] && strcmp(tp->name, "Unknown") != 0) ? tp->name : nullptr;
-            char peerNameFallBuf[48];
-            if (!peerNamePtr2) {
-              if (getTopoDeviceName(tp->mac, peerNameFallBuf, sizeof(peerNameFallBuf)) && peerNameFallBuf[0]) {
-                peerNamePtr2 = peerNameFallBuf;
-              }
-            }
-            if (!peerNamePtr2 && gMeshPeerMeta) {
-              for (int _tni = 0; _tni < gMeshPeerSlots; _tni++) {
-                if (gMeshPeerMeta[_tni].isActive && memcmp(gMeshPeerMeta[_tni].mac, tp->mac, 6) == 0 && gMeshPeerMeta[_tni].name[0]) {
-                  peerNamePtr2 = gMeshPeerMeta[_tni].name; break;
-                }
-              }
-            }
-            if (!peerNamePtr2 && gEspNow) {
-              for (int _tni = 0; _tni < gEspNow->deviceCount; _tni++) {
-                if (memcmp(gEspNow->devices[_tni].mac, tp->mac, 6) == 0 && gEspNow->devices[_tni].name.length()) {
-                  strlcpy(peerNameFallBuf, gEspNow->devices[_tni].name.c_str(), sizeof(peerNameFallBuf));
-                  peerNamePtr2 = peerNameFallBuf; break;
-                }
-              }
-            }
-            
-            // Cache peer name
-            if (peerNamePtr2) {
-              addTopoDeviceName(tp->mac, peerNamePtr2);
-            }
-            
-            // Accumulate peer info (same format as JSON handler)
-            char peerInfoBuf[128];
-            snprintf(peerInfoBuf, sizeof(peerInfoBuf), "  \xe2\x86\x92 %s (%s)\n    RSSI: %d dBm\n",
-                     peerNamePtr2 ? peerNamePtr2 : "Unknown", peerMacStr, (int)tp->rssi);
-            stream->accumulatedData += peerInfoBuf;
-            stream->receivedPeers++;
-            
-            // Update collection window timer
-            gTopoLastResponseTime = millis();
-            
-            DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Accumulated peer %d/%d: %s",
-                   stream->receivedPeers, stream->totalPeers, peerNamePtr2 ? peerNamePtr2 : "Unknown");
-          }
-        } else {
-          DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] No active stream for this sender");
-        }
-      }
-    } else {
-      DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] ERROR: Payload too small (%u < %u)",
-             payloadLen, (unsigned)sizeof(V3PayloadTopoPeer));
-    }
-    // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-  
+  // TOPO_PEER migrated to handler table.
+
+
   // === USER SYNC (propagate user credentials to peer) ===
-  if (h->type == ESPNOW_V3_TYPE_USER_SYNC) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_USER_SYNC] Received from %s msgId=%lu encrypted=%s",
-           deviceName, (unsigned long)h->msgId, (h->flags & ESPNOW_V3_FLAG_ENCRYPTED) ? "YES" : "NO");
-
-    // Security: must be encrypted
-    if (!(h->flags & ESPNOW_V3_FLAG_ENCRYPTED)) {
-      ERROR_ESPNOWF("[USER_SYNC] SECURITY: Rejected from %s — encryption required", deviceName);
-      broadcastOutput("[ESP-NOW] SECURITY: User sync rejected - encryption required");
-      v3_send_ack(recv_info->src_addr, h->msgId);
-      return true;
-    }
-
-    // User sync must be enabled
-    if (!gSettings.espnowUserSyncEnabled) {
-      WARN_ESPNOWF("[USER_SYNC] Disabled — rejecting from %s", deviceName);
-      broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnowusersync on'");
-      v3_send_ack(recv_info->src_addr, h->msgId);
-      return true;
-    }
-
-    // Payload is JSON: { "admin_user", "admin_pass", "target_user", "target_pass", "role" }
-    if (payloadLen == 0) {
-      WARN_ESPNOWF("[USER_SYNC] Empty payload from %s", deviceName);
-      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Empty payload", strlen("Empty payload"));
-      return true;
-    }
-
-    PSRAM_JSON_DOC(doc);
-    String jsonStr((const char*)payload, payloadLen);
-    if (deserializeJson(doc, jsonStr) != DeserializationError::Ok) {
-      WARN_ESPNOWF("[USER_SYNC] Malformed JSON from %s", deviceName);
-      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Malformed JSON", strlen("Malformed JSON"));
-      return true;
-    }
-
-    const char* adminUser  = doc["admin_user"]  | "";
-    const char* adminPass  = doc["admin_pass"]  | "";
-    const char* targetUser = doc["target_user"] | "";
-    const char* targetPass = doc["target_pass"] | "";
-    const char* role       = doc["role"]        | "user";
-
-    if (!strlen(adminUser) || !strlen(adminPass) || !strlen(targetUser) || !strlen(targetPass)) {
-      WARN_ESPNOWF("[USER_SYNC] Missing required fields from %s", deviceName);
-      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Missing required fields", strlen("Missing required fields"));
-      return true;
-    }
-
-    if (!isValidUser(String(adminUser), String(adminPass))) {
-      ERROR_ESPNOWF("[USER_SYNC] Admin auth FAILED for '%s' from %s", adminUser, deviceName);
-      broadcastOutput("[ESP-NOW] User sync: Admin authentication FAILED");
-      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Admin authentication failed", strlen("Admin authentication failed"));
-      return true;
-    }
-
-    if (!isAdminUser(String(adminUser))) {
-      ERROR_ESPNOWF("[USER_SYNC] '%s' is not admin — sync rejected from %s", adminUser, deviceName);
-      broadcastOutput("[ESP-NOW] User sync: Admin privileges required");
-      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Admin privileges required", strlen("Admin privileges required"));
-      return true;
-    }
-
-    // Check if user already exists
-    uint32_t existingId = 0;
-    if (getUserIdByUsername(String(targetUser), existingId)) {
-      WARN_ESPNOWF("[USER_SYNC] User '%s' already exists (id=%u) — skipping", targetUser, (unsigned)existingId);
-      BROADCAST_PRINTF("[ESP-NOW] User sync: '%s' already exists", targetUser);
-      v3_send_command_response(recv_info->src_addr, h->msgId, true, "User already exists (skipped)", strlen("User already exists (skipped)"));
-      return true;
-    }
-
-    if (!filesystemReady) {
-      ERROR_ESPNOWF("[USER_SYNC] Filesystem not ready");
-      v3_send_command_response(recv_info->src_addr, h->msgId, false, "Filesystem not ready", strlen("Filesystem not ready"));
-      return true;
-    }
-
-    // Create the user
-    //
-    // Trusted: V3 USER_SYNC has already verified the sender on three counts
-    // before reaching here:
-    //   1. The frame is encrypted (ESPNOW_V3_FLAG_ENCRYPTED checked above).
-    //   2. The payload-supplied `adminUser`/`adminPass` pass isValidUser().
-    //   3. `adminUser` passes isAdminUser() — i.e. an admin on a peer device
-    //      authorized this sync.
-    // The local users.json is owned by the system — the rule table grants
-    // PERM_READ to admin and PERM_ALL only to system, so admin AuthContext
-    // would be denied write here anyway. This matches every other
-    // users.json mutation in System_User.cpp (createAdminAccount,
-    // setUserBan, updateLastSeen, etc.), all of which use systemAuth().
-    {
-      FsLockGuard guard("user_sync.create");
-
-      AuthContext userSyncCtx = VFS::systemAuth("user_sync.create");
-
-      if (!VFS::existsGuarded(USERS_JSON_FILE, userSyncCtx)) {
-        ERROR_ESPNOWF("[USER_SYNC] users.json not found");
-        v3_send_command_response(recv_info->src_addr, h->msgId, false, "users.json not found", strlen("users.json not found"));
-        return true;
-      }
-
-      File f = VFS::openGuarded(USERS_JSON_FILE, "r", userSyncCtx);
-      if (!f) {
-        ERROR_ESPNOWF("[USER_SYNC] Could not open users.json");
-        v3_send_command_response(recv_info->src_addr, h->msgId, false, "Could not open users.json", strlen("Could not open users.json"));
-        return true;
-      }
-
-      PSRAM_JSON_DOC(userDoc);
-      DeserializationError err = deserializeJson(userDoc, f);
-      f.close();
-
-      if (err || !userDoc["users"]) {
-        ERROR_ESPNOWF("[USER_SYNC] Malformed users.json");
-        v3_send_command_response(recv_info->src_addr, h->msgId, false, "Malformed users.json", strlen("Malformed users.json"));
-        return true;
-      }
-
-      int nextId = userDoc["nextId"] | 2;
-      JsonArray users = userDoc["users"];
-
-      JsonObject newUser = users.add<JsonObject>();
-      newUser["id"]        = nextId;
-      newUser["username"]  = targetUser;
-      newUser["role"]      = role;
-      newUser["createdAt"] = (const char*)nullptr;
-      char createdByBuf[48];
-      snprintf(createdByBuf, sizeof(createdByBuf), "espnow:%s", deviceName);
-      newUser["createdBy"] = createdByBuf;
-      newUser["createdMs"] = millis();
-      extern uint32_t gNTPAnchorId;
-      extern uint32_t gBootCounter;
-      newUser["ntpAnchorId"] = gNTPAnchorId;
-      newUser["bootCount"]   = gBootCounter;
-      userDoc["nextId"] = nextId + 1;
-
-      f = VFS::openGuarded(USERS_JSON_FILE, "w", userSyncCtx);
-      if (!f || serializeJson(userDoc, f) == 0) {
-        if (f) f.close();
-        ERROR_ESPNOWF("[USER_SYNC] Failed to write users.json");
-        v3_send_command_response(recv_info->src_addr, h->msgId, false, "Failed to write users.json", strlen("Failed to write users.json"));
-        return true;
-      }
-      f.close();
-
-      // Store hashed password in user settings
-      String hashedPassword = hashUserPassword(String(targetPass));
-      PSRAM_JSON_DOC(defaults);
-      defaults["theme"]    = "light";
-      defaults["password"] = hashedPassword;
-      saveUserSettings((uint32_t)nextId, defaults);
-
-      INFO_ESPNOWF("[USER_SYNC] Created user '%s' (id=%d role=%s) from %s",
-                   targetUser, nextId, role, deviceName);
-      BROADCAST_PRINTF("[ESP-NOW] User sync: Created '%s' (role=%s) from %s",
-                       targetUser, role, deviceName);
-
-      char respBuf[128];
-      snprintf(respBuf, sizeof(respBuf), "User '%s' created (id=%d)", targetUser, nextId);
-      v3_send_command_response(recv_info->src_addr, h->msgId, true, respBuf, strlen(respBuf));
-    }
-
-    // Reassembly cleanup
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId &&
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
+  // USER_SYNC migrated to handler table.
 
   // === SENSOR STATUS (mesh broadcast) ===
-  if (h->type == ESPNOW_V3_TYPE_SENSOR_STATUS) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] Received from %s msgId=%lu payloadLen=%u",
-           deviceName, (unsigned long)h->msgId, payloadLen);
-    if (payloadLen >= sizeof(V3PayloadSensorStatus)) {
-      const V3PayloadSensorStatus* ss = (const V3PayloadSensorStatus*)payload;
-      RemoteSensorType sensorType = (RemoteSensorType)ss->sensorType;
-      bool enabled = (ss->enabled != 0);
-      extern const char* sensorTypeToString(RemoteSensorType type);
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] sensor=%s enabled=%s",
-             sensorTypeToString(sensorType), enabled ? "YES" : "NO");
-      
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] Updating remote sensor status");
-      extern void updateRemoteSensorStatus(const uint8_t* mac, const char* name, RemoteSensorType type, bool enabled);
-      updateRemoteSensorStatus(recv_info->src_addr, deviceName, sensorType, enabled);
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] Status update complete");
-    } else {
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] ERROR: Payload too small (%u < %u)",
-             payloadLen, (unsigned)sizeof(V3PayloadSensorStatus));
-    }
-    // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-  
-  // === SENSOR BROADCAST (mesh data) ===
-  if (h->type == ESPNOW_V3_TYPE_SENSOR_BROADCAST) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] Received from %s msgId=%lu payloadLen=%u",
-           deviceName, (unsigned long)h->msgId, payloadLen);
-    if (payloadLen >= sizeof(V3PayloadSensorBroadcast)) {
-      const V3PayloadSensorBroadcast* sb = (const V3PayloadSensorBroadcast*)payload;
-      RemoteSensorType sensorType = (RemoteSensorType)sb->sensorType;
-      uint16_t dataLen = sb->dataLen;
-      extern const char* sensorTypeToString(RemoteSensorType type);
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] sensor=%s dataLen=%u",
-             sensorTypeToString(sensorType), dataLen);
-      
-      if (dataLen > 0 && payloadLen >= (sizeof(V3PayloadSensorBroadcast) + dataLen)) {
-        const char* jsonData = (const char*)sb->data;
-        DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] JSON (first 100 chars): %.100s", jsonData);
-        
-        DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] Caching sensor data");
-        extern RemoteSensorData* findOrCreateCacheEntry(const uint8_t* mac, const char* name, RemoteSensorType type);
-        RemoteSensorData* entry = findOrCreateCacheEntry(recv_info->src_addr, deviceName, sensorType);
-        if (entry) {
-          size_t copyLen = (dataLen < REMOTE_SENSOR_BUFFER_SIZE - 1) ? dataLen : REMOTE_SENSOR_BUFFER_SIZE - 1;
-          memcpy(entry->jsonData, jsonData, copyLen);
-          entry->jsonData[copyLen] = '\0';
-          entry->jsonLength = (uint16_t)copyLen;
-          entry->lastUpdate = millis();
-          entry->valid = true;
-          DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] Data cached successfully (%u bytes)", (unsigned)copyLen);
-        } else {
-          DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] ERROR: Failed to allocate cache entry");
-        }
-      } else {
-        DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] ERROR: Invalid data length (%u) or truncated payload",
-               dataLen);
-      }
-    } else {
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] ERROR: Payload too small (%u < %u)",
-             payloadLen, (unsigned)sizeof(V3PayloadSensorBroadcast));
-    }
-    // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
+  // SENSOR_STATUS, SENSOR_BROADCAST, HEARTBEAT migrated to handler table.
 
-  // === HEARTBEAT ===
-  if (h->type == ESPNOW_V3_TYPE_HEARTBEAT) {
-    if (payloadLen >= sizeof(V3PayloadHeartbeat)) {
-      const V3PayloadHeartbeat* hb = (const V3PayloadHeartbeat*)payload;
-      noteMeshPeerRxActivity(recv_info->src_addr, EspNowMeshRxKind::MeshHeartbeat, hb->rssi);
-      if (gEspNow) gEspNow->heartbeatsReceived++;
+  // BOND_HEARTBEAT migrated to handler table.
 
-      // Backup master failover: track heartbeats from the configured master MAC
-      if (meshEnabled() && gSettings.meshBackupEnabled &&
-          gSettings.meshMasterMAC.length() > 0) {
-        bool isBackupOrPromoted = (gSettings.meshRole == MESH_ROLE_BACKUP_MASTER) ||
-                                   (gSettings.meshRole == MESH_ROLE_MASTER && gBackupPromoted);
-        if (isBackupOrPromoted) {
-          uint8_t masterMac[6] = {};
-          if (parseMacAddress(gSettings.meshMasterMAC, masterMac) &&
-              memcmp(recv_info->src_addr, masterMac, 6) == 0) {
-            gLastMasterHeartbeat = millis();
-            if (gBackupPromoted) {
-              // Original master is back — demote to backup role (runtime only, not saved)
-              gBackupPromoted = false;
-              setMeshRole(MESH_ROLE_BACKUP_MASTER, "backup.master_returned");
-              BROADCAST_PRINTF("[BACKUP] Master returned — demoted back to backup role");
-            }
-          }
-        }
-      }
-    }
-    // Send ACK if requested
-    if (h->flags & ESPNOW_V3_FLAG_ACK_REQ) {
-      v3_send_ack(recv_info->src_addr, h->msgId);
-    }
-    // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
+  // BOND_CAP_REQ, BOND_CAP_RESP, SENSOR_DATA, STREAM_CTRL, SETTINGS_REQ,
+  // BOND_STATUS_REQ, BOND_STATUS_RESP all migrated to handler table.
+  // SETTINGS_RESP/PUSH unused on the wire — settings arrive as FILE_END for
+  // _settings_out.json (handled in FILE_END handler).
 
-#if ENABLE_BONDED_MODE
-  // === BOND HEARTBEAT ===
-  if (h->type == ESPNOW_V3_TYPE_BOND_HEARTBEAT && isPaired && gSettings.bondModeEnabled) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_HB_RX] from %s payloadLen=%u (need %u) isPaired=%d",
-           deviceName, payloadLen, (unsigned)sizeof(V3PayloadBondHeartbeat), (int)isPaired);
-    if (payloadLen >= sizeof(V3PayloadBondHeartbeat)) {
-      const V3PayloadBondHeartbeat* hb = (const V3PayloadBondHeartbeat*)payload;
-      if (gEspNow) {
-        bool bootChanged = (hb->bootCounter != 0 && gEspNow->bondPeerBootCounter != 0 &&
-                            hb->bootCounter != gEspNow->bondPeerBootCounter);
-        bool wasOffline = !gEspNow->bondPeerOnline || bootChanged;
-        uint32_t oldSettingsHash = gEspNow->bondPeerSettingsHash;
+  // METADATA_REQ, METADATA_RESP, METADATA_PUSH, STREAM all migrated to handler table.
 
-        gEspNow->bondPeerBootCounter = hb->bootCounter;
-        gEspNow->bondPeerSettingsHash = hb->settingsHash;
-        gEspNow->bondPeerUptime = hb->uptimeSec;
+  // FILE_START and FILE_DATA migrated to handler table.
 
-        if (bootChanged) {
-          resetBondSync();
-        }
-
-        // Detect live settings change: peer's hash changed while we had their settings cached
-        bool settingsChanged = (gEspNow->bondSettingsReceived && oldSettingsHash != 0 &&
-                                hb->settingsHash != 0 && hb->settingsHash != oldSettingsHash);
-        if (settingsChanged && !bootChanged) {
-          gEspNow->bondSettingsReceived = false;
-          gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
-          gEspNow->bondSyncRetryCount = 0;
-          DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_HB_RX] Peer settings hash changed 0x%08lX->0x%08lX, will re-fetch",
-                 (unsigned long)oldSettingsHash, (unsigned long)hb->settingsHash);
-        }
-
-        gEspNow->lastBondHeartbeatReceivedMs = millis();
-        gEspNow->bondHeartbeatsReceived++;
-        gEspNow->bondPeerOnline = true;
-        
-        // Update RSSI from rx_ctrl
-        if (recv_info->rx_ctrl) {
-          gEspNow->bondRssiLast = recv_info->rx_ctrl->rssi;
-          if (gEspNow->bondLastRssiUpdateMs == 0) {
-            gEspNow->bondRssiAvg = gEspNow->bondRssiLast;
-          } else {
-            gEspNow->bondRssiAvg = (int8_t)((9 * (int)gEspNow->bondRssiAvg + (int)gEspNow->bondRssiLast) / 10);
-          }
-          gEspNow->bondLastRssiUpdateMs = millis();
-        }
-        
-        // Worker recovery: if caps are exchanged but bondSettingsSent was never
-        // set (e.g. firmware update without wipe on an already-synced session),
-        // infer that settings were already sent and complete the worker sync.
-        // Time gate: only after 30s of caps exchanged, to avoid false-triggering
-        // during normal handshake when the master just hasn't asked for settings yet.
-        bool capExchangedLongEnough = (gEspNow->lastRemoteCapTime > 0 &&
-                                       (millis() - gEspNow->lastRemoteCapTime) > 30000);
-        if (isBondWorker() && !gEspNow->bondSessionTokenValid &&
-            gEspNow->lastRemoteCapValid && gEspNow->bondCapSent &&
-            !gEspNow->bondSettingsSent && capExchangedLongEnough) {
-          gEspNow->bondSettingsSent = true;
-          if (isBondSynced()) {
-            uint8_t pMac[6];
-            if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
-              computeBondSessionToken(pMac);
-            }
-            BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=0 (worker, recovered)");
-          }
-        }
-        
-        if (wasOffline) {
-          // Deferred: master starts sync tick
-          if (isBondMaster()) {
-            gEspNow->bondNeedsCapabilityRequest = true;
-            // bondNeedsStreamingSetup is set after sync completes in processBondSettings()
-          }
-        }
-      }
-    }
-    // Cleanup reassembly buffer if this was a fragmented message
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-#endif // ENABLE_BONDED_MODE
-
-#if ENABLE_BONDED_MODE  
-  // === BOND CAP REQ ===
-  // NOTE: Defer heavy work to main loop - callback context has limited stack and is ISR-like
-  if (h->type == ESPNOW_V3_TYPE_BOND_CAP_REQ && isPaired && gSettings.bondModeEnabled) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_REQ_RX] from %s role=%d capSent=%d",
-           deviceName, (int)gSettings.bondRole,
-           gEspNow ? (int)gEspNow->bondCapSent : -1);
-    if (gEspNow) {
-      memcpy(gEspNow->bondPendingResponseMac, recv_info->src_addr, 6);
-      gEspNow->bondNeedsCapabilityResponse = true;
-    }
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  // === BOND CAP RESP ===
-  // NOTE: Defer heavy work to main loop - callback context is ISR-like
-  if (h->type == ESPNOW_V3_TYPE_BOND_CAP_RESP && isPaired && gSettings.bondModeEnabled && payloadLen == sizeof(CapabilitySummary)) {
-    const CapabilitySummary* cap = (const CapabilitySummary*)payload;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] from %s role=%d capSent=%d sensorMask=0x%04lX devName='%.16s'",
-           deviceName, (int)gSettings.bondRole,
-           gEspNow ? (int)gEspNow->bondCapSent : -1,
-           (unsigned long)cap->sensorMask, cap->deviceName);
-    if (gEspNow) {
-      memcpy(&gEspNow->lastRemoteCap, cap, sizeof(CapabilitySummary));
-      gEspNow->lastRemoteCapValid = true;
-      gEspNow->lastRemoteCapTime = millis();
-      gEspNow->bondReceivedCapability = true;  // Defer logging
-      gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
-      gEspNow->bondSyncRetryCount = 0;
-      gEspNow->bondSyncLastAttemptMs = 0;
-      // Send our own CAP_RESP back so the peer also gets our capabilities.
-      // Without this, the master never learns the worker's caps (one-directional exchange).
-      // bondCapSent prevents infinite ping-pong: each side sends at most once per handshake.
-      if (!gEspNow->bondCapSent) {
-        memcpy(gEspNow->bondPendingResponseMac, recv_info->src_addr, 6);
-        gEspNow->bondNeedsCapabilityResponse = true;
-        DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] queued reciprocal CAP_RESP (bondCapSent was false)");
-      } else {
-        DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] NOT sending reciprocal (bondCapSent already true)");
-      }
-    }
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  // === SENSOR DATA (bond mode binary streaming) ===
-  // NOTE: This runs in ESP-NOW callback context - minimize debug prints!
-  if (h->type == ESPNOW_V3_TYPE_SENSOR_DATA && isPaired && gSettings.bondModeEnabled) {
-    if (payloadLen >= sizeof(V3PayloadSensorData)) {
-      const V3PayloadSensorData* sd = (const V3PayloadSensorData*)payload;
-      
-      // Validate data length
-      size_t totalExpected = sizeof(V3PayloadSensorData) + sd->dataLen;
-      if (sd->dataLen > 0 && totalExpected <= payloadLen) {
-        // Store in remote sensor cache (reuse existing mesh infrastructure)
-        RemoteSensorType sensorType = (RemoteSensorType)sd->sensorType;
-        
-        if (sensorType < REMOTE_SENSOR_MAX) {
-          RemoteSensorData* entry = findOrCreateCacheEntry(recv_info->src_addr, deviceName, sensorType);
-          if (entry) {
-            // Copy data directly into cache (it's already JSON-encoded by sender)
-            size_t copyLen = (sd->dataLen < REMOTE_SENSOR_BUFFER_SIZE - 1) ? sd->dataLen : REMOTE_SENSOR_BUFFER_SIZE - 1;
-            memcpy(entry->jsonData, sd->data, copyLen);
-            entry->jsonData[copyLen] = '\0';
-            entry->jsonLength = (uint16_t)copyLen;
-            entry->lastUpdate = millis();
-            entry->valid = true;
-            
-            // Single concise debug line - safe in callback context
-            DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] Sensor %s from %s len=%u seq=%lu",
-                   sensorTypeToString(sensorType), deviceName, (unsigned)copyLen, (unsigned long)sd->seqNum);
-          }
-        }
-      }
-    }
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  // === STREAM CONTROL (bond mode: master -> worker) ===
-  // NOTE: Deferred to task context - startSensorDataStreaming creates tasks/mutexes
-  if (h->type == ESPNOW_V3_TYPE_STREAM_CTRL && isPaired && gSettings.bondModeEnabled) {
-    if (payloadLen >= 2 && gEspNow) {
-      gEspNow->bondDeferredStreamCtrlSensor = payload[0];  // sensorType
-      gEspNow->bondDeferredStreamCtrlEnable = payload[1];   // enable
-      gEspNow->bondDeferredStreamCtrlPending = true;
-      DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STREAM_CTRL_RX] sensor=%u enable=%u (deferred)", payload[0], payload[1]);
-    }
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  // === SETTINGS REQUEST ===
-  // NOTE: Defer to task context - callback is ISR-like with limited stack
-  if (h->type == ESPNOW_V3_TYPE_SETTINGS_REQ && isPaired && gSettings.bondModeEnabled) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SETTINGS_REQ_RX] from %s isPaired=%d", deviceName, (int)isPaired);
-    if (gEspNow) {
-      memcpy(gEspNow->bondPendingResponseMac, recv_info->src_addr, 6);
-      gEspNow->bondNeedsSettingsResponse = true;
-      DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SETTINGS_REQ_RX] set bondNeedsSettingsResponse=true");
-    }
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  // === SETTINGS RESPONSE/PUSH ===
-  // NOTE: Settings are sent via file transfer, so they arrive as FILE_END
-  // The file path will indicate it's a settings file (/system/_settings_out.json)
-  // Processing happens in the FILE_END handler below
-
-  // === BOND STATUS REQ ===
-  if (h->type == ESPNOW_V3_TYPE_BOND_STATUS_REQ && isPaired && gSettings.bondModeEnabled) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STATUS_REQ_RX] from %s", deviceName);
-    if (gEspNow) {
-      memcpy(gEspNow->bondPendingResponseMac, recv_info->src_addr, 6);
-      gEspNow->bondNeedsStatusResponse = true;
-    }
-    return true;
-  }
-
-  // === BOND STATUS RESP ===
-  if (h->type == ESPNOW_V3_TYPE_BOND_STATUS_RESP && isPaired && gSettings.bondModeEnabled) {
-    if (payloadLen >= sizeof(BondPeerStatus) && gEspNow) {
-      memcpy(&gEspNow->bondPeerStatus, payload, sizeof(BondPeerStatus));
-      gEspNow->bondPeerStatusValid = true;
-      gEspNow->bondPeerStatusTimeMs = millis();
-      BROADCAST_PRINTF("[BOND_STATUS_RESP_RX] from %s enabled=0x%04X connected=0x%04X heap=%lu",
-             deviceName, gEspNow->bondPeerStatus.sensorEnabledMask,
-             gEspNow->bondPeerStatus.sensorConnectedMask,
-             (unsigned long)gEspNow->bondPeerStatus.freeHeap);
-    }
-    return true;
-  }
-#endif // ENABLE_BONDED_MODE
-
-  // === METADATA REQUEST ===
-  // Check if peer is encrypted by looking in device list
-  bool isEncrypted = false;
-  if (gEspNow) {
-    for (int i = 0; i < gEspNow->deviceCount; i++) {
-      if (memcmp(gEspNow->devices[i].mac, recv_info->src_addr, 6) == 0) {
-        isEncrypted = gEspNow->devices[i].encrypted;
-        break;
-      }
-    }
-  }
-  
-  if (h->type == ESPNOW_V3_TYPE_METADATA_REQ) {
-    DEBUG_ESPNOW_METADATAF("[METADATA] REQ received from %s (%s) msgId=%lu isPaired=%d isEncrypted=%d",
-      deviceName, MAC_STR(recv_info->src_addr), (unsigned long)h->msgId,
-      (int)isPaired, (int)isEncrypted);
-    if (gEspNow) {
-      memcpy(gEspNow->metadataPendingResponseMac, recv_info->src_addr, 6);
-      gEspNow->bondNeedsMetadataResponse = true;
-      DEBUG_ESPNOW_METADATAF("[METADATA] bondNeedsMetadataResponse=true, will RESP to %s",
-        MAC_STR(recv_info->src_addr));
-    } else {
-      WARN_ESPNOWF("[METADATA] REQ from %s ignored: gEspNow is null", deviceName);
-    }
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  // === METADATA RESPONSE/PUSH ===
-  if ((h->type == ESPNOW_V3_TYPE_METADATA_RESP || h->type == ESPNOW_V3_TYPE_METADATA_PUSH)) {
-    const char* metaType = (h->type == ESPNOW_V3_TYPE_METADATA_PUSH) ? "PUSH" : "RESP";
-    DEBUG_ESPNOW_METADATAF("[METADATA] %s received from %s (%s) msgId=%lu payloadLen=%u (need %u) isPaired=%d",
-      metaType, deviceName, MAC_STR(recv_info->src_addr),
-      (unsigned long)h->msgId, payloadLen, (unsigned)sizeof(V3PayloadMetadata), (int)isPaired);
-    if (payloadLen >= sizeof(V3PayloadMetadata)) {
-      const V3PayloadMetadata* meta = (const V3PayloadMetadata*)payload;
-      DEBUG_ESPNOW_METADATAF("[METADATA] %s payload: name='%s' friendlyName='%s' room='%s' zone='%s' tags='%s' stationary=%d",
-        metaType, meta->deviceName, meta->friendlyName, meta->room, meta->zone, meta->tags, (int)meta->stationary);
-      if (gEspNow) {
-        bool wasPending = gEspNow->deferredMetadataPending;
-        memcpy(gEspNow->deferredMetadataSrcMac, recv_info->src_addr, 6);
-        memcpy(&gEspNow->deferredMetadataPayload, meta, sizeof(V3PayloadMetadata));
-        gEspNow->deferredMetadataPending = true;
-        DEBUG_ESPNOW_METADATAF("[METADATA] %s deferred for task processing (overwrote=%d)",
-          metaType, (int)wasPending);
-      } else {
-        WARN_ESPNOWF("[METADATA] %s from %s dropped: gEspNow is null", metaType, deviceName);
-      }
-    } else {
-      WARN_ESPNOWF("[METADATA] %s from %s REJECTED: payload too small (%u < %u)",
-        metaType, deviceName, payloadLen, (unsigned)sizeof(V3PayloadMetadata));
-    }
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  // === STREAM OUTPUT ===
-  // NOTE: Deferred to task context - callback is ISR-like with limited stack
-  // Uses ring buffer queue to prevent message loss when frames arrive faster than task processes
-  if (h->type == ESPNOW_V3_TYPE_STREAM) {
-    if (payloadLen > 0 && payloadLen <= ESPNOW_V3_MAX_PAYLOAD && gEspNow) {
-      int head = gEspNow->streamQueueHead;
-      int nextHead = (head + 1) & (EspNowState::STREAM_QUEUE_SIZE - 1);
-      if (nextHead != gEspNow->streamQueueTail) {
-        // Slot available - enqueue
-        auto& entry = gEspNow->streamQueue[head];
-        size_t copyLen = (payloadLen < sizeof(entry.content) - 1) ? payloadLen : sizeof(entry.content) - 1;
-        memcpy(entry.content, payload, copyLen);
-        entry.content[copyLen] = '\0';
-        memcpy(entry.srcMac, recv_info->src_addr, 6);
-        strncpy(entry.deviceName, deviceName, sizeof(entry.deviceName) - 1);
-        entry.deviceName[sizeof(entry.deviceName) - 1] = '\0';
-        entry.used = true;
-        gEspNow->streamQueueHead = nextHead;  // Publish to consumer
-      }
-      // else: queue full, drop this frame (better than overwriting)
-      gEspNow->streamReceivedCount++;
-    }
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  // === V3 FILE_START ===
-  // Buffer file data in PSRAM to avoid filesystem I/O in callback (causes watchdog timeout)
-  if (h->type == ESPNOW_V3_TYPE_FILE_START && isPaired) {
-    if (payloadLen >= sizeof(V3PayloadFileStart)) {
-      const V3PayloadFileStart* fs = (const V3PayloadFileStart*)payload;
-      
-      // Check for stale transfer (timeout after 30 seconds) or same sender restarting
-      if (gActiveFileTransfer) {
-        bool isStale = (millis() - gActiveFileTransfer->startTime) > 30000;
-        bool sameSender = (memcmp(gActiveFileTransfer->senderMac, recv_info->src_addr, 6) == 0);
-        
-        if (!isStale && !sameSender) {
-          // Different sender trying to start while transfer in progress - reject
-          ERROR_ESPNOWF("[V3_FILE] Rejected: transfer already in progress from different sender");
-          return true;
-        }
-        
-        // Cleanup stale or same-sender transfer
-        if (gActiveFileTransfer->chunkMap) {
-          heap_caps_free(gActiveFileTransfer->chunkMap);
-          gActiveFileTransfer->chunkMap = nullptr;
-        }
-        if (gActiveFileTransfer->dataBuffer) {
-          heap_caps_free(gActiveFileTransfer->dataBuffer);
-        }
-        delete gActiveFileTransfer;
-        gActiveFileTransfer = nullptr;
-      }
-      
-      // Reject files larger than 64KB (PSRAM limit for single transfer)
-      if (fs->fileSize > 65536) {
-        ERROR_ESPNOWF("[V3_FILE] File too large for buffer: %lu bytes (max 64KB)", (unsigned long)fs->fileSize);
-        return true;
-      }
-      
-      // Allow zero-size files but log warning (unusual but valid)
-      if (fs->fileSize == 0) {
-        DEBUG_ESPNOWF("[V3_FILE] Warning: zero-size file transfer: %s", fs->filename);
-      }
-
-      if (fs->chunkSize == 0 || (fs->chunkCount == 0 && fs->fileSize > 0)) {
-        ERROR_ESPNOWF("[V3_FILE] Rejected invalid chunk params: chunkSize=%u chunkCount=%u", (unsigned)fs->chunkSize, (unsigned)fs->chunkCount);
-        return true;
-      }
-      
-      // Allocate new transfer
-      gActiveFileTransfer = new FileTransfer();
-      if (!gActiveFileTransfer) {
-        ERROR_ESPNOWF("[V3_FILE] Failed to allocate FileTransfer");
-        return true;
-      }
-      
-      memset(gActiveFileTransfer, 0, sizeof(FileTransfer));
-      
-      // Allocate PSRAM buffer for file data
-      uint32_t allocSize = fs->fileSize > 0 ? fs->fileSize : 1;  // Allocate at least 1 byte (malloc(0) is undefined)
-      gActiveFileTransfer->dataBuffer = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM);
-      if (!gActiveFileTransfer->dataBuffer) {
-        ERROR_ESPNOWF("[V3_FILE] Failed to allocate %lu byte PSRAM buffer", (unsigned long)allocSize);
-        delete gActiveFileTransfer;
-        gActiveFileTransfer = nullptr;
-        return true;
-      }
-      gActiveFileTransfer->bufferSize = fs->fileSize;
-      
-      strncpy(gActiveFileTransfer->filename, fs->filename, 63);
-      gActiveFileTransfer->filename[63] = '\0';
-      gActiveFileTransfer->totalSize = fs->fileSize;
-      gActiveFileTransfer->totalChunks = fs->chunkCount;
-      gActiveFileTransfer->chunkSize = fs->chunkSize;
-      gActiveFileTransfer->receivedBytes = 0;
-      gActiveFileTransfer->receivedChunks = 0;
-
-      gActiveFileTransfer->chunkMap = nullptr;
-      gActiveFileTransfer->chunkMapBytes = (uint16_t)((fs->chunkCount + 7) / 8);
-      if (gActiveFileTransfer->chunkMapBytes == 0) gActiveFileTransfer->chunkMapBytes = 1;
-      gActiveFileTransfer->chunkMap = (uint8_t*)heap_caps_malloc(gActiveFileTransfer->chunkMapBytes, MALLOC_CAP_8BIT);
-      if (!gActiveFileTransfer->chunkMap) {
-        ERROR_ESPNOWF("[V3_FILE] Failed to allocate chunk bitmap (%u bytes)", (unsigned)gActiveFileTransfer->chunkMapBytes);
-        heap_caps_free(gActiveFileTransfer->dataBuffer);
-        delete gActiveFileTransfer;
-        gActiveFileTransfer = nullptr;
-        return true;
-      }
-      memset(gActiveFileTransfer->chunkMap, 0, gActiveFileTransfer->chunkMapBytes);
-      snprintf(gActiveFileTransfer->hash, sizeof(gActiveFileTransfer->hash), "%lu", (unsigned long)h->msgId);
-      gActiveFileTransfer->active = true;
-      gActiveFileTransfer->startTime = millis();  // Track start time for timeout
-      memcpy(gActiveFileTransfer->senderMac, recv_info->src_addr, 6);
-      
-      DEBUG_ESPNOWF("[V3_FILE_RX] FILE_START: %s (%lu bytes, %u chunks, chunkSize=%u) from %s",
-                   fs->filename, (unsigned long)fs->fileSize, fs->chunkCount, fs->chunkSize, deviceName);
-      DEBUG_ESPNOWF("[V3_FILE_RX] Allocated: dataBuffer=%lu bytes, chunkMap=%u bytes",
-                   (unsigned long)gActiveFileTransfer->bufferSize, (unsigned)gActiveFileTransfer->chunkMapBytes);
-    }
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  // === V3 FILE_DATA ===
-  // Copy chunks into PSRAM buffer - NO filesystem I/O here
-  if (h->type == ESPNOW_V3_TYPE_FILE_DATA) {
-    if (!isPaired) {
-      DEBUG_ESPNOWF("[V3_FILE_RX] FILE_DATA rejected: sender not paired");
-      return true;
-    }
-    if (!gActiveFileTransfer || !gActiveFileTransfer->active || !gActiveFileTransfer->dataBuffer) {
-      DEBUG_ESPNOWF("[V3_FILE_RX] FILE_DATA ignored: no active transfer (active=%d)",
-                   gActiveFileTransfer ? gActiveFileTransfer->active : 0);
-      return true;
-    }
-    
-    // Validate sender MAC matches the transfer initiator (prevents cross-talk)
-    if (memcmp(gActiveFileTransfer->senderMac, recv_info->src_addr, 6) != 0) {
-      return true;  // Silently ignore data from different sender
-    }
-    
-    if (payloadLen < 3) return true;  // Need at least chunkIndex + 1 byte data
-    
-    const V3PayloadFileData* fd = (const V3PayloadFileData*)payload;
-    uint16_t dataLen = payloadLen - 2;  // Subtract chunkIndex size
-    
-    if (!gActiveFileTransfer->chunkMap || gActiveFileTransfer->chunkSize == 0 || gActiveFileTransfer->totalChunks == 0) {
-      return true;
-    }
-
-    uint16_t idx = fd->chunkIndex;
-    if (idx >= gActiveFileTransfer->totalChunks) {
-      return true;
-    }
-
-    uint32_t offset = (uint32_t)idx * (uint32_t)gActiveFileTransfer->chunkSize;
-    
-    // Bounds check
-    if (offset + dataLen > gActiveFileTransfer->bufferSize) {
-      ERROR_ESPNOWF("[V3_FILE] Buffer overflow: offset=%lu + len=%u > size=%lu",
-                   (unsigned long)offset, dataLen, (unsigned long)gActiveFileTransfer->bufferSize);
-      return true;
-    }
-    
-    uint16_t byteIndex = (uint16_t)(idx / 8);
-    uint8_t bitMask = (uint8_t)(1u << (idx % 8));
-    bool alreadyHave = (byteIndex < gActiveFileTransfer->chunkMapBytes) && ((gActiveFileTransfer->chunkMap[byteIndex] & bitMask) != 0);
-
-    if (alreadyHave) {
-      DEBUG_ESPNOWF("[V3_FILE_RX] Chunk %u: DUPLICATE", idx);
-    } else {
-      DEBUG_ESPNOWF("[V3_FILE_RX] Chunk %u: offset=%lu len=%u", idx, (unsigned long)offset, dataLen);
-    }
-
-    memcpy(gActiveFileTransfer->dataBuffer + offset, fd->data, dataLen);
-    if (!alreadyHave) {
-      if (byteIndex < gActiveFileTransfer->chunkMapBytes) {
-        gActiveFileTransfer->chunkMap[byteIndex] |= bitMask;
-      }
-      gActiveFileTransfer->receivedBytes += dataLen;
-      gActiveFileTransfer->receivedChunks++;
-      if ((gActiveFileTransfer->receivedChunks % 10) == 0) {
-        DEBUG_ESPNOWF("[V3_FILE_RX] Progress: %u/%u chunks, %lu/%lu bytes",
-                     gActiveFileTransfer->receivedChunks,
-                     gActiveFileTransfer->totalChunks,
-                     (unsigned long)gActiveFileTransfer->receivedBytes,
-                     (unsigned long)gActiveFileTransfer->totalSize);
-      }
-    }
-    
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  // === V3 FILE_END ===
-  // Write buffered data to filesystem and process
-  if (h->type == ESPNOW_V3_TYPE_FILE_END && isPaired) {
-    if (!gActiveFileTransfer || !gActiveFileTransfer->active) {
-      ERROR_ESPNOWF("[V3_FILE] Received FILE_END without active transfer");
-      return true;
-    }
-    
-    // Validate sender MAC matches the transfer initiator
-    if (memcmp(gActiveFileTransfer->senderMac, recv_info->src_addr, 6) != 0) {
-      ERROR_ESPNOWF("[V3_FILE] FILE_END from different sender than FILE_START");
-      return true;
-    }
-    
-    const V3PayloadFileEnd* fe = (const V3PayloadFileEnd*)payload;
-    String senderMacStr = formatMacAddress(gActiveFileTransfer->senderMac);
-    
-    DEBUG_ESPNOWF("[V3_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, success=%d)",
-                 gActiveFileTransfer->filename,
-                 (unsigned long)gActiveFileTransfer->receivedBytes,
-                 gActiveFileTransfer->receivedChunks,
-                 gActiveFileTransfer->totalChunks,
-                 fe->success);
-
-    bool isComplete = (gActiveFileTransfer->totalSize == 0) ||
-                      ((gActiveFileTransfer->receivedChunks == gActiveFileTransfer->totalChunks) &&
-                       (gActiveFileTransfer->receivedBytes == gActiveFileTransfer->totalSize));
-
-    if (!isComplete) {
-      BROADCAST_PRINTF("[V3_FILE] REJECTED incomplete transfer '%s': %u/%u chunks, %lu/%lu bytes",
-                   gActiveFileTransfer->filename,
-                   (unsigned)gActiveFileTransfer->receivedChunks,
-                   (unsigned)gActiveFileTransfer->totalChunks,
-                   (unsigned long)gActiveFileTransfer->receivedBytes,
-                   (unsigned long)gActiveFileTransfer->totalSize);
-      // Clean up — sync tick will re-request if this was manifest/settings
-      if (gActiveFileTransfer->chunkMap) heap_caps_free(gActiveFileTransfer->chunkMap);
-      if (gActiveFileTransfer->dataBuffer) heap_caps_free(gActiveFileTransfer->dataBuffer);
-      delete gActiveFileTransfer;
-      gActiveFileTransfer = nullptr;
-      return true;
-    }
-
-    if (fe->success && gActiveFileTransfer->dataBuffer) {
-#if ENABLE_BONDED_MODE
-      // Check if this is a manifest file - process directly from buffer without filesystem
-      if (strcmp(gActiveFileTransfer->filename, "_manifest_out.json") == 0) {
-        // Process manifest directly from PSRAM buffer
-        String manifestStr((char*)gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
-        processBondModeManifestResp(gActiveFileTransfer->senderMac, senderMacStr, manifestStr);
-        BROADCAST_PRINTF("[V3_FILE] Manifest processed: %lu bytes", (unsigned long)gActiveFileTransfer->receivedBytes);
-      }
-      // Check if this is a settings file - process directly from buffer without filesystem
-      else if (strcmp(gActiveFileTransfer->filename, "_settings_out.json") == 0) {
-        DEBUG_ESPNOWF("[FILE_END] Detected settings file: %s (%lu bytes)", 
-                      gActiveFileTransfer->filename, (unsigned long)gActiveFileTransfer->receivedBytes);
-        // Process settings directly from PSRAM buffer
-        String settingsStr((char*)gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
-        DEBUG_ESPNOWF("[FILE_END] Calling processBondSettings (settingsStr len=%d)", settingsStr.length());
-        processBondSettings(gActiveFileTransfer->senderMac, senderMacStr, settingsStr);
-        BROADCAST_PRINTF("[V3_FILE] Settings processed: %lu bytes", (unsigned long)gActiveFileTransfer->receivedBytes);
-      } 
-      else
-#endif // ENABLE_BONDED_MODE
-      {
-        // For non-manifest files, write to filesystem (single write operation)
-        String senderMacHex = macToHexString(gActiveFileTransfer->senderMac);
-        senderMacHex.replace(":", "");
-        char deviceDir[64];
-        snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderMacHex.c_str());
-        
-        FsLockGuard guard("v3file.write");
-        VFS::mkdirGuarded("/espnow", VFS::systemAuth("espnow.v3_file_write_mkdir"));
-        VFS::mkdirGuarded("/espnow/received", VFS::systemAuth("espnow.v3_file_write_mkdir"));
-        VFS::mkdirGuarded(deviceDir, VFS::systemAuth("espnow.v3_file_write_mkdir"));
-        char filepath[128];
-        snprintf(filepath, sizeof(filepath), "%s/%s", deviceDir, gActiveFileTransfer->filename);
-        File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("espnow.v3_file_write"), true);
-        if (f) {
-          f.write(gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
-          f.close();
-          BROADCAST_PRINTF("[V3_FILE] Complete: %s (%lu bytes)", gActiveFileTransfer->filename, (unsigned long)gActiveFileTransfer->receivedBytes);
-          
-          // If this is an automations file, broadcast a formatted summary so CLI users
-          // can read it directly without needing the web UI (works radio-only)
-          if (strcmp(gActiveFileTransfer->filename, "automations.json") == 0) {
-            String senderName = getEspNowDeviceName(gActiveFileTransfer->senderMac);
-            if (senderName.length() == 0) senderName = formatMacAddress(gActiveFileTransfer->senderMac);
-            String jsonStr((char*)gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
-            PSRAM_JSON_DOC(adoc);
-            DeserializationError aerr = deserializeJson(adoc, jsonStr);
-            if (!aerr && adoc["automations"].is<JsonArray>()) {
-              JsonArray arr = adoc["automations"].as<JsonArray>();
-              int total = (int)arr.size();
-              BROADCAST_PRINTF("[AUTOMATIONS] %s: %d automation%s", senderName.c_str(), total, total == 1 ? "" : "s");
-              int idx = 0;
-              for (JsonObject a : arr) {
-                if (idx >= 10) {
-                  BROADCAST_PRINTF("  ... (%d more)", total - idx);
-                  break;
-                }
-                const char* aname = a["name"] | "(unnamed)";
-                bool enabled = a["enabled"] | true;
-                JsonObject sched = a["schedule"];
-                String schedStr = sched ? String(sched["type"] | "?") : String("?");
-                if (schedStr == "time") {
-                  const char* t = sched["time"] | "";
-                  if (t && t[0]) schedStr = String(t);
-                }
-                int cmdCount = a["commands"].is<JsonArray>()
-                               ? (int)a["commands"].as<JsonArray>().size() : 0;
-                BROADCAST_PRINTF("  [%s] %s @ %s (%d cmd%s)", enabled ? "ON " : "OFF", aname, schedStr.c_str(), cmdCount, cmdCount == 1 ? "" : "s");
-                idx++;
-              }
-            } else {
-              BROADCAST_PRINTF("[AUTOMATIONS] Parse failed from %s%s%s", senderName.c_str(), aerr ? ": " : "", aerr ? aerr.c_str() : "");
-            }
-          }
-        }
-      }
-      
-      logFileTransferEvent(gActiveFileTransfer->senderMac, senderMacStr.c_str(),
-                          gActiveFileTransfer->filename, MSG_FILE_RECV_SUCCESS);
-      if (gEspNow) gEspNow->fileTransfersReceived++;
-    } else {
-      logFileTransferEvent(gActiveFileTransfer->senderMac, senderMacStr.c_str(),
-                          gActiveFileTransfer->filename, MSG_FILE_RECV_FAILED);
-    }
-    
-    // Send final ACK
-    v3_send_ack(recv_info->src_addr, h->msgId);
-    
-    // Cleanup
-    if (gActiveFileTransfer->chunkMap) {
-      heap_caps_free(gActiveFileTransfer->chunkMap);
-      gActiveFileTransfer->chunkMap = nullptr;
-    }
-    if (gActiveFileTransfer->dataBuffer) {
-      heap_caps_free(gActiveFileTransfer->dataBuffer);
-    }
-    delete gActiveFileTransfer;
-    gActiveFileTransfer = nullptr;
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-#if ENABLE_BONDED_MODE
-  // === MANIFEST REQ (v3) ===
-  // NOTE: Defer heavy work to main loop - callback context has limited stack and is ISR-like
-  if (h->type == ESPNOW_V3_TYPE_MANIFEST_REQ && isPaired && gSettings.bondModeEnabled) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_MANIFEST_REQ_RX] from %s isPaired=%d", deviceName, (int)isPaired);
-    if (gEspNow) {
-      memcpy(gEspNow->bondPendingResponseMac, recv_info->src_addr, 6);
-      gEspNow->bondNeedsManifestResponse = true;
-      DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_MANIFEST_REQ_RX] set bondNeedsManifestResponse=true");
-    }
-    if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
-          break;
-        }
-      }
-    }
-    return true;
-  }
-
-  // === MANIFEST RESP is handled via FILE_END for _manifest_out.json ===
-  // (Large manifests are sent as file transfers, not as single frames)
-#endif // ENABLE_BONDED_MODE
+  // FILE_END and MANIFEST_REQ migrated to handler table.
+  // (MANIFEST_RESP travels as a FILE_END for _manifest_out.json — handled inside v3h_file_end.)
 
   // Unknown V3 type - log and ignore
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3] Unknown type %d from %s", h->type, deviceName);
@@ -6318,7 +5920,14 @@ void processMeshHeartbeats() {
     uint8_t destMac[6];
     memcpy(destMac, gEspNow->bondPendingResponseMac, 6);
     extern bool sendFileToMac(const uint8_t* mac, const String& localPath);
-    bool fileSent = sendFileToMac(destMac, tempPath);
+    // sendFileToMac gates on currentAuthContext().canRead(). Bond manifest
+    // contains restricted data, so install system identity around the call —
+    // matches the systemAuth() used by the write a few lines up.
+    bool fileSent = false;
+    {
+      SYSTEM_IDENTITY_SCOPE("espnow.bond_manifest_send");
+      fileSent = sendFileToMac(destMac, tempPath);
+    }
     BROADCAST_PRINTF("[BOND] 9d: sendFileToMac result=%d", (int)fileSent);
     {
       FsLockGuard guard("bond.manifest.cleanup");
@@ -6337,7 +5946,13 @@ void processMeshHeartbeats() {
                      MAC_STR(gEspNow->bondPendingResponseMac));
     uint8_t destMac[6];
     memcpy(destMac, gEspNow->bondPendingResponseMac, 6);
-    sendBondSettings(destMac);
+    // sendBondSettings -> sendFileToMac for settings + automations; both
+    // need system identity to pass canRead() on /system/_settings_out.json
+    // and AUTOMATIONS_JSON_FILE. Same reasoning as the manifest path above.
+    {
+      SYSTEM_IDENTITY_SCOPE("espnow.bond_settings_send");
+      sendBondSettings(destMac);
+    }
     gEspNow->bondSettingsSent = true;
     
     // Worker sync-complete: capSent + settingsSent + capValid → isBondSynced() now true
