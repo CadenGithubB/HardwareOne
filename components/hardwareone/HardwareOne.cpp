@@ -93,7 +93,8 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #endif
 #include "System_Battery.h"
 #include "System_FirstTimeSetup.h"
-#include "System_SetupWizard.h"  // gWizardOwnsSerial — main loop yields Serial while wizard is running
+#include "System_SetupWizard.h"  // gWizardOwnsSerial — main loop yields Serial while legacy wizard is running
+#include "System_CLIMode.h"      // cliModeTick — periodic tick for active CLIMode (Phase 5 wizard)
 #include "System_TaskUtils.h"
 // sensor_config.h included early (before WiFi)
 #if ENABLE_THERMAL_SENSOR
@@ -1680,6 +1681,12 @@ void hardwareone_loop() {
 #endif
 
   oledUpdate();
+
+  // Periodic tick for an active CLIMode (no-op when no mode is active or
+  // when the mode doesn't define onTick). Used by the Phase 5 wizard's
+  // future OLED-joystick polling; help and confirm modes don't define
+  // onTick so this is a branch-and-return for them.
+  cliModeTick();
 
   // ========================================================================
   // 6. USER INPUT — Serial CLI (always last before yield)

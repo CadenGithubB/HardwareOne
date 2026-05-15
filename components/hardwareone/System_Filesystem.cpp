@@ -20,6 +20,7 @@
 #include "System_Maps.h"
 #include "System_VFS.h"
 #include "System_AuthIdentity.h"  // currentAuthContext — CLI handlers' per-task identity
+#include "System_CLIConfirm.h"    // cliRequestConfirm — yes/no gate for destructive filedelete
 
 // External dependencies
 extern bool readText(const char* path, String& out);
@@ -591,32 +592,97 @@ const char* cmd_filerename(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// filedelete is now a two-step interactive flow built on the CLIMode
+// framework's confirm mode. The flow:
+//   1. cmd_filedelete validates the path and captures the caller's
+//      AuthContext into s_pendingFiledelete{Path,Ctx}.
+//   2. Calls cliRequestConfirm() -- enters confirm mode, prints the
+//      "Confirm delete of /foo?" prompt via broadcastOutput, frees
+//      cmd_exec.
+//   3. User's next command line is interpreted by confirm mode:
+//        - "yes"/"y"/"true"/"1"/"on" -> filedelete_confirmed runs,
+//          performs the actual delete, returns the result.
+//        - anything else             -> filedelete_cancelled runs,
+//          returns "Cancelled."
+// Single-slot statics are safe because only one CLIMode is active at a
+// time (cliRequestConfirm returns false if another mode is already up).
+static String      s_pendingFiledeletePath;
+static AuthContext s_pendingFiledeleteCtx;  // captured by VALUE so it survives between commands
+
+static const char* filedelete_confirmed(void* /*userData*/) {
+  // Static response buffer -- the dispatcher copies the return string
+  // before this callback's frame is reclaimed, but using a static keeps
+  // the lifetime explicit and avoids a getDebugBuffer dependency here.
+  static char respBuf[256];
+
+  if (!filesystemReady) return "Error: LittleFS not ready";
+
+  // Re-check existence: the user had time to look at the prompt, and
+  // something else could have removed the file in the meantime (rare,
+  // but possible with concurrent SSE/MQTT writes).
+  if (!VFS::existsGuarded(s_pendingFiledeletePath, s_pendingFiledeleteCtx)) {
+    return "Error: File no longer exists or access denied";
+  }
+
+  // If the file is the currently loaded map, unload it first to close the FD.
+#if ENABLE_MAPS
+  if (MapCore::hasValidMap() &&
+      s_pendingFiledeletePath == String(MapCore::getCurrentMap().filepath)) {
+    MapCore::unloadMap();
+  }
+#endif
+
+  if (!VFS::removeGuarded(s_pendingFiledeletePath, s_pendingFiledeleteCtx)) {
+    snprintf(respBuf, sizeof(respBuf),
+             "Error: Failed to delete file (denied or fs error): %s",
+             s_pendingFiledeletePath.c_str());
+    return respBuf;
+  }
+  snprintf(respBuf, sizeof(respBuf), "Deleted file: %s",
+           s_pendingFiledeletePath.c_str());
+  return respBuf;
+}
+
+static const char* filedelete_cancelled(void* /*userData*/) {
+  // Static buffer so the response survives until the dispatcher reads it.
+  static char respBuf[160];
+  snprintf(respBuf, sizeof(respBuf), "Cancelled. %s not deleted.",
+           s_pendingFiledeletePath.c_str());
+  return respBuf;
+}
+
 const char* cmd_filedelete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-
   if (!filesystemReady) return "Error: LittleFS not ready";
   String path = argsInput;
   path.trim();
   if (path.length() == 0) return "Usage: filedelete <path>";
   if (!path.startsWith("/")) { path = "/" + path; }
-  
+
   const AuthContext& ctx = currentAuthContext();
   if (!VFS::existsGuarded(path, ctx)) return "Error: File does not exist or access denied";
 
-  // If the file to delete is the currently loaded map, unload it first to close the FD
-#if ENABLE_MAPS
-  if (MapCore::hasValidMap() && path == String(MapCore::getCurrentMap().filepath)) {
-    MapCore::unloadMap();
-  }
-#endif
+  // Stash for the confirm callbacks. Capture the AuthContext BY VALUE
+  // because currentAuthContext() returns a reference to per-task TLS
+  // state that's owned by the current ExecIdentityGuard -- when this
+  // function returns and the next command starts, the TLS reference
+  // points at a different AuthContext.
+  s_pendingFiledeletePath = path;
+  s_pendingFiledeleteCtx  = ctx;
 
-  if (!VFS::removeGuarded(path, ctx)) {
-    snprintf(getDebugBuffer(), 1024, "Error: Failed to delete file (denied or fs error): %s", path.c_str());
-    return getDebugBuffer();
+  String prompt = "Confirm delete of " + path + "? (cannot be undone)";
+  // Originating command line stored for the resolution audit -- shows up
+  // in [CMD] log as "filedelete /foo (confirm: yes) -> Deleted file: /foo"
+  // (or "(confirm: no) -> Cancelled. /foo not deleted." on cancel).
+  String origCmd = "filedelete " + path;
+  if (!cliRequestConfirm(prompt, origCmd, filedelete_confirmed, filedelete_cancelled, nullptr)) {
+    return "Error: cannot request confirm (another interactive mode is active)";
   }
-  snprintf(getDebugBuffer(), 1024, "Deleted file: %s", path.c_str());
-  return getDebugBuffer();
+
+  // cliRequestConfirm already printed `prompt` via broadcastOutput from
+  // confirm_onEnter. Return the yes/no hint as our command response so
+  // the user sees a single coherent prompt.
+  return "Type 'yes' to confirm or anything else to cancel.";
 }
 
 // ============================================================================

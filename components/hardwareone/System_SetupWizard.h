@@ -207,6 +207,13 @@ extern volatile bool gWizardOwnsSerial;
 // When ENABLE_OLED_DISPLAY=1, this just calls runSetupWizard().
 SetupWizardResult runSerialSetupWizard();
 
+// Render the standard "SETUP n/N: <page>" banner + entries + nav hint
+// for the current page via broadcastOutput. Defined in
+// System_SetupWizard.cpp; consumed by the legacy runSetupWizard loop
+// AND the new CLIMode-based wizard (System_SetupWizardMode.cpp) so they
+// share identical paint output.
+void printSerialPageStatus();
+
 // ============================================================================
 // Heap Bar Helper
 // ============================================================================

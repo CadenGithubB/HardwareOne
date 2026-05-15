@@ -112,6 +112,22 @@ struct CLIMode {
   // Receives the same userData pointer as the other callbacks.
   void (*onExit)(void* userData);
 
+  // Optional periodic tick. Called by cliModeTick() from the main loop
+  // every iteration while this mode is active. Use this for non-textual
+  // input that arrives outside the command dispatcher -- e.g. the setup
+  // wizard polls OLED joystick state in its onTick so joystick presses
+  // translate into page transitions without needing to flow through the
+  // CLI input pipeline.
+  //
+  // KEEP THIS FAST. It's called from the main task's loop and competes
+  // for the same time budget as oledUpdate, the serial-CLI drain, and
+  // every other periodic concern. Sub-millisecond work only. If a tick
+  // needs to do something heavier, mark a flag and schedule the work
+  // on a different task / esp_timer.
+  //
+  // Pass nullptr if the mode is purely input-driven (help, confirm).
+  void (*onTick)(void* userData);
+
   // Per-mode opaque pointer. Lifetime is owned by the mode -- typically a
   // file-static struct or a heap allocation made in onEnter and freed in
   // onExit. The framework never dereferences it.
@@ -152,5 +168,14 @@ const CLIMode* cliCurrentMode();
 // for passthrough. If the result was CLI_MODE_PASSTHROUGH_AND_EXIT the
 // mode has already been exited by the time this returns.
 bool cliModeDispatchInput(const String& line, char* out, size_t outSize);
+
+// Called periodically from the main task's loop(). If a mode is active
+// and has an onTick callback, invokes it. Used by the wizard mode to
+// poll OLED joystick state and translate presses into page transitions
+// without needing to route through the CLI input pipeline.
+//
+// Safe to call when no mode is active (no-op) or when the active mode
+// has no onTick (also no-op).
+void cliModeTick();
 
 #endif // SYSTEM_CLIMODE_H

@@ -91,7 +91,8 @@ static const CLIMode kHelpMode = {
   helpMode_onEnter,
   helpMode_onInput,
   helpMode_onExit,
-  nullptr,  // help mode keeps its state in gCLIState/gShowAllCommands, no userData needed
+  nullptr,  // onTick — help is purely input-driven
+  nullptr,  // userData — help keeps state in gCLIState/gShowAllCommands
 };
 
 // ============================================================================

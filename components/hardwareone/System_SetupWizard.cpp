@@ -819,7 +819,10 @@ static void printSerialSystemPage() {
 // Shared serial page printer (used by runSetupWizard for both OLED and no-OLED)
 // ============================================================================
 
-static void printSerialPageStatus() {
+// External linkage so the new CLIMode-based wizard (System_SetupWizardMode.cpp)
+// can reuse the page-status renderer without duplicating its logic.
+// Previously `static`; promoting doesn't change behavior, just visibility.
+void printSerialPageStatus() {
   SetupWizardPage page = getWizardCurrentPage();
   int sel = getWizardCurrentSelection();
   int pageNum = getWizardPageNumber(page);

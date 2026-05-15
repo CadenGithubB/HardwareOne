@@ -66,6 +66,14 @@ const CLIMode* cliCurrentMode() {
   return sActiveMode;
 }
 
+void cliModeTick() {
+  // Hot-path predicate -- gets called from the main loop every iteration.
+  // Keep the no-mode-active case branchless-friendly.
+  if (sActiveMode == nullptr) return;
+  if (sActiveMode->onTick == nullptr) return;
+  sActiveMode->onTick(sActiveMode->userData);
+}
+
 bool cliModeDispatchInput(const String& line, char* out, size_t outSize) {
   if (sActiveMode == nullptr) return false;
   if (sActiveMode->onInput == nullptr) {
