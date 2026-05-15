@@ -144,6 +144,7 @@ set(hardwareone_srcs
         G2_HijackCmd.cpp
         System_Battery.cpp
         System_CLI.cpp
+        System_CLIMode.cpp
         System_Command.cpp
         System_Debug.cpp
         System_ESPNow.cpp
