@@ -2,6 +2,7 @@
 
 #include "OLED_Display.h"
 #include "System_CLI.h"
+#include "System_CLIMode.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Utils.h"
@@ -23,6 +24,75 @@ static void renderModuleHelp(const CommandModule* module, bool showAll);
 CLIState gCLIState = CLI_NORMAL;
 bool gShowAllCommands = false;
 volatile bool gInHelpRender = false;
+
+// ============================================================================
+// Help mode — CLIMode adapter
+// ============================================================================
+// The help system is the canonical example of a CLIMode: short, non-blocking
+// per-input handlers + persistent state in a side global (gCLIState). This
+// adapter routes the dispatcher's per-line callbacks through the new
+// CLIMode framework so the SAME machinery can host the upcoming wizard
+// migration and confirm prompts.
+//
+// Implementation strategy for THIS phase: keep the existing
+// handleHelpNavigation() logic unchanged underneath; the adapter just maps
+// its true/false return into a CLIModeInputResult. The longer-term goal
+// is to fold handleHelpNavigation INTO the onInput callback once other
+// modes are stable; for now we minimize risk by delegating.
+
+static void helpMode_onEnter(void* /*userData*/) {
+  // gCLIState was already set to CLI_HELP_MAIN by cmd_help before it called
+  // cliEnterMode -- there's nothing extra to do here for the moment. Keeping
+  // the callback wired lets us add per-enter setup later (e.g. snapshot
+  // gShowAllCommands so it can be restored on exit) without re-touching the
+  // call sites.
+  DEBUGF(DEBUG_CLI, "[climode/help] entered (gCLIState=%d)", (int)gCLIState);
+}
+
+static CLIModeInputResult helpMode_onInput(const String& line, void* /*userData*/,
+                                           char* out, size_t outSize) {
+  // Delegate to the existing help-navigation handler. It writes "OK" into
+  // out and returns true if it consumed the input ("back"/"exit"/"clear"/
+  // "tail"/"sensors"/<module name>); false if the input is something else
+  // and should be dispatched as a normal command.
+  if (handleHelpNavigation(line, out, outSize)) {
+    // handleHelpNavigation already called exitToNormalBanner() for the
+    // back/exit cases, which set gCLIState back to CLI_NORMAL. Detect that
+    // and propagate as HANDLED_AND_EXIT so the framework also clears its
+    // own active-mode pointer; otherwise we'd be stuck with sActiveMode
+    // pointing at us even though help is logically over.
+    if (gCLIState == CLI_NORMAL) {
+      return CLI_MODE_HANDLED_AND_EXIT;
+    }
+    return CLI_MODE_HANDLED;
+  }
+  // Not a help-navigation command -- let the dispatcher do normal command
+  // lookup. The dispatcher's post-lookup isHelpModeCommand() check
+  // (System_Utils.cpp / System_Command.cpp) still decides whether to
+  // auto-exit help before running the looked-up command.
+  return CLI_MODE_PASSTHROUGH;
+}
+
+static void helpMode_onExit(void* /*userData*/) {
+  // If we exit via PASSTHROUGH_AND_EXIT or external cliExitMode(), the
+  // dispatcher may not have called exitToNormalBanner() yet. Make sure
+  // gCLIState is back to CLI_NORMAL so the rest of the codebase (debug
+  // suppression, prompt rendering, web-mirror capture) returns to its
+  // default state.
+  if (gCLIState != CLI_NORMAL) {
+    gCLIState = CLI_NORMAL;
+    gShowAllCommands = false;
+  }
+  DEBUGF(DEBUG_CLI, "[climode/help] exited");
+}
+
+static const CLIMode kHelpMode = {
+  "help",
+  helpMode_onEnter,
+  helpMode_onInput,
+  helpMode_onExit,
+  nullptr,  // help mode keeps its state in gCLIState/gShowAllCommands, no userData needed
+};
 
 // ============================================================================
 // Help Rendering Functions
@@ -165,8 +235,29 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
   lc.trim();
 
   // ── Utility commands ─────────────────────────────────────────────────────
-  if (lc == "back" || lc == "exit") {
+  // The help footer documents two distinct verbs:
+  //   back  - return to the main help menu (one level up)
+  //   exit  - leave help mode entirely (return to normal CLI)
+  // The previous code treated them identically (both fully exited). Now
+  // "back" only exits when we're already at the main menu; from a module
+  // page it re-renders the main menu and stays in help mode.
+  if (lc == "exit") {
     broadcastOutput(exitToNormalBanner());
+    respond();
+    return true;
+  }
+  if (lc == "back") {
+    if (gCLIState == CLI_HELP_MAIN) {
+      // Already at the top of the help hierarchy -- nowhere to go up to.
+      // Treat as "exit" so a second `back` at the main menu still leaves
+      // help mode (matches the legacy behavior at this level).
+      broadcastOutput(exitToNormalBanner());
+      respond();
+      return true;
+    }
+    // Inside a module page (CLI_HELP_MODULE) -- go back to main menu.
+    gCLIState = CLI_HELP_MAIN;
+    renderHelpMain(gShowAllCommands);
     respond();
     return true;
   }
@@ -217,6 +308,14 @@ bool handleHelpNavigation(const String& cmd, char* out, size_t outSize) {
 String exitToNormalBanner() {
   gCLIState = CLI_NORMAL;
   gShowAllCommands = false;  // Reset show all flag
+  // Also tell the CLIMode framework if it currently has help registered.
+  // This covers callsites OUTSIDE helpMode_onInput -- e.g. cmd_back, and
+  // the System_Command.cpp dispatcher's "exit help before running a normal
+  // command" path. Idempotent: if help wasn't the active mode, cliExitMode
+  // is a no-op.
+  if (cliCurrentMode() == &kHelpMode) {
+    cliExitMode();
+  }
   // Restore hidden history when leaving help
   String banner = "Returned to normal CLI mode.";
   return banner;
@@ -391,6 +490,16 @@ static const char* cmd_help(const String& argsInput) {
   args.trim();
 
   if (!gWebMirror.buf) { gWebMirror.init(gWebMirrorCap); }
+
+  // Register the help CLIMode with the framework if no mode is active.
+  // Every cmd_help branch below sets gCLIState = CLI_HELP_*; the framework
+  // needs to know too so subsequent input is routed through
+  // helpMode_onInput rather than going straight to normal command lookup.
+  // If a mode is already active (e.g. user typed `help` while already in
+  // help mode) cliEnterMode is a no-op.
+  if (!cliInModeActive()) {
+    cliEnterMode(&kHelpMode);
+  }
 
   // ── Plain "help" — enter / return to main help menu ──────────────────────
   if (args.length() == 0) {

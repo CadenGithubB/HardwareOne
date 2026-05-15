@@ -236,6 +236,7 @@ extern const size_t g2RingCommandsCount;
 #include "System_Filesystem.h"
 #include "System_Debug.h"
 #include "System_CLI.h"
+#include "System_CLIMode.h"
 #include "System_BuildConfig.h"   // Conditional sensor configuration - must be early
 #if ENABLE_WIFI
   #include "System_WiFi.h"
@@ -2925,8 +2926,17 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   const CommandEntry* found = nullptr;
   size_t foundLen = 0;
 
-  // In help mode, handle navigation commands using cli_system module
-  if (handleHelpNavigation(command, out, outSize)) {
+  // Interactive CLI modes (help today; wizard/confirm in the future) get
+  // first crack at the input. The dispatch function returns true when the
+  // active mode consumed the command -- response was written into `out`,
+  // we return immediately. Returns false when no mode is active or the
+  // mode wants normal command lookup to proceed.
+  //
+  // Concretely for help today: the active helpMode's onInput delegates to
+  // the same handleHelpNavigation() the old code called directly. The new
+  // call shape lets other modes register without each one growing its own
+  // dispatcher hook line here.
+  if (cliModeDispatchInput(command, out, outSize)) {
     return true;
   }
 
