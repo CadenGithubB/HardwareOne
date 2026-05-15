@@ -145,6 +145,8 @@ set(hardwareone_srcs
         System_Battery.cpp
         System_CLI.cpp
         System_CLIMode.cpp
+        System_CLIConfirm.cpp
+        System_SetupWizardMode.cpp
         System_Command.cpp
         System_Debug.cpp
         System_ESPNow.cpp

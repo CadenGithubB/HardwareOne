@@ -19,6 +19,7 @@
 #include "System_Filesystem.h"    // For writeText, readText
 #include "System_VFS.h"    // For VFS::*Guarded + VFS::systemAuth
 #include "System_AuthIdentity.h"   // currentAuthContext (createdBy stamp, admin sync)
+#include "System_CLIConfirm.h"     // cliRequestConfirm — yes/no gate for destructive userdelete
 #include "System_Settings.h"
 #include "Bluetooth.h"
 #include "OLED_Display.h"
@@ -1655,22 +1656,59 @@ const char* cmd_user_demote(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// userdelete is two-step like filedelete: prompt + yes/no confirm via the
+// CLIMode framework. Static state survives the gap between the prompting
+// command and the user's yes/no reply (cmd_exec runs both, sequentially,
+// with the framework holding sActiveMode in between).
+static String s_pendingUserDeleteName;
+
+static const char* user_delete_confirmed(void* /*userData*/) {
+  static char respBuf[160];
+  if (!filesystemReady) return "Error: LittleFS not ready";
+
+  DEBUG_USERSF("[users] CLI delete (confirmed) username=%s",
+               s_pendingUserDeleteName.c_str());
+  String err;
+  if (!deleteUserInternal(s_pendingUserDeleteName, err)) {
+    snprintf(respBuf, sizeof(respBuf), "Error: %s", err.c_str());
+    return respBuf;
+  }
+  snprintf(respBuf, sizeof(respBuf), "Deleted user '%s'",
+           s_pendingUserDeleteName.c_str());
+  return respBuf;
+}
+
+static const char* user_delete_cancelled(void* /*userData*/) {
+  static char respBuf[120];
+  snprintf(respBuf, sizeof(respBuf), "Cancelled. User '%s' not deleted.",
+           s_pendingUserDeleteName.c_str());
+  return respBuf;
+}
+
 const char* cmd_user_delete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
   String username = argsInput;
   username.trim();
   if (username.length() == 0) return "Usage: user delete <username>";
-  DEBUG_USERSF("[users] CLI delete username=%s", username.c_str());
-  String err;
-  if (!deleteUserInternal(username, err)) {
-    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    snprintf(getDebugBuffer(), 1024, "Error: %s", err.c_str());
-    return getDebugBuffer();
+  DEBUG_USERSF("[users] CLI delete (prompt) username=%s", username.c_str());
+
+  // Stash the target name for the confirm callbacks. We do NOT capture
+  // the AuthContext here because deleteUserInternal doesn't take one --
+  // it has internal permission logic. (Compare to filedelete which uses
+  // VFS::removeGuarded(path, ctx).)
+  s_pendingUserDeleteName = username;
+
+  String prompt = "Confirm delete of user '" + username +
+                  "'? All sessions for this user will be revoked.";
+  // Originating command line stored for the resolution audit -- shows up
+  // in [CMD] log as "userdelete bob (confirm: yes) -> Deleted user 'bob'"
+  // (or "(confirm: no) -> Cancelled. User 'bob' not deleted." on cancel).
+  String origCmd = "userdelete " + username;
+  if (!cliRequestConfirm(prompt, origCmd, user_delete_confirmed, user_delete_cancelled, nullptr)) {
+    return "Error: cannot request confirm (another interactive mode is active)";
   }
-  if (!ensureDebugBuffer()) return "Deleted";
-  snprintf(getDebugBuffer(), 1024, "Deleted user '%s'", username.c_str());
-  return getDebugBuffer();
+  return "Type 'yes' to confirm or anything else to cancel.";
 }
 
 // Shared password-change implementation. Both the CLI command wrapper below

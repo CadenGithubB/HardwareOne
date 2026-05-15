@@ -1555,6 +1555,122 @@ const char* cmd_reboot(const String& originalCmd) {
   return "[System] Rebooting";  // Won't actually return due to restart
 }
 
+// ============================================================================
+// factoryreset -- wipe users.json + reboot to re-trigger first-time setup
+// ============================================================================
+//
+// Phase 4 of the CLIMode framework rollout: a real user-facing destructive
+// command that runs through the same yes/no confirm flow as filedelete and
+// userdelete (Phase 3). What it does:
+//
+//   1. Prompt: "Confirm FACTORY RESET? Wipes user accounts -- next boot
+//      runs first-time setup wizard. Settings (WiFi, debug flags) are
+//      PRESERVED."
+//   2. If user says yes:
+//      a. Delete /system/users/users.json via VFS::systemAuth (admin
+//         can't delete /system/* under normal permissions -- only the
+//         internal "system" auth has PERM_DELETE in the path table).
+//      b. Schedule a reboot 1 second in the future via esp_timer.
+//      c. Return "Factory reset complete. Rebooting in 1 second..."
+//         -- this lets confirm_onInput audit the resolution + the
+//         dispatcher flush the response to the user before the device
+//         restarts.
+//   3. If user says no: "Cancelled. No changes."
+//
+// Why esp_timer instead of inline delay+ESP.restart() like cmd_reboot:
+// the confirm framework's audit hook fires AFTER the callback returns.
+// If the callback never returns (because of ESP.restart()), the audit
+// log entry for "factoryreset (confirm: yes) -> Factory reset complete"
+// is lost. The esp_timer one-shot defers the actual restart until after
+// the callback has returned, the audit has fired, and the response has
+// flushed to the user. Without this, forensic auditors would see the
+// prompt step but no resolution -- the device just reboots into FTS
+// with no log trail of who triggered it.
+
+#include "System_CLIConfirm.h"
+#include "System_AuthIdentity.h"
+#include "System_User.h"   // USERS_JSON_FILE
+#include "System_VFS.h"
+
+extern const char* USERS_JSON_FILE;  // defined in System_User.cpp
+
+// One-shot timer callback: actually performs the reboot 1 second after
+// scheduling. Runs on the esp_timer task, not cmd_exec, so it can call
+// ESP.restart() without disrupting any in-flight audit writes.
+static void factoryreset_doRestart(void* /*arg*/) {
+  ESP.restart();
+}
+
+static const char* factoryreset_confirmed(void* /*userData*/) {
+  static char respBuf[200];
+
+  // Use the internal SYSTEM auth to delete users.json. The VFS path-rule
+  // table grants admin only PERM_READ over /system/* -- only system auth
+  // has PERM_DELETE. This is by design: an admin-credentials compromise
+  // shouldn't be able to wipe accounts (which would lock everyone out
+  // and trigger FTS the next boot). factoryreset is gated by the
+  // requiresAdmin=true flag in the registry + the confirm prompt; system
+  // auth is just the right capability to actually carry out the delete.
+  AuthContext sysCtx = VFS::systemAuth("factory.reset");
+  if (!VFS::removeGuarded(USERS_JSON_FILE, sysCtx)) {
+    snprintf(respBuf, sizeof(respBuf),
+             "Error: factory reset failed -- could not delete %s",
+             USERS_JSON_FILE);
+    return respBuf;
+  }
+
+  // Schedule the reboot for 1 second from now. This gives the confirm
+  // framework time to audit the resolution and the dispatcher time to
+  // flush "Factory reset complete..." to the user's serial / web client
+  // before the device restarts. Memory note: the timer struct is
+  // intentionally leaked (we're rebooting in 1 second; nothing else
+  // will run) -- no esp_timer_delete needed.
+  esp_timer_handle_t timer = nullptr;
+  const esp_timer_create_args_t timerArgs = {
+    .callback = factoryreset_doRestart,
+    .arg = nullptr,
+    .dispatch_method = ESP_TIMER_TASK,
+    .name = "factoryreset_reboot",
+    .skip_unhandled_events = false,
+  };
+  esp_timer_create(&timerArgs, &timer);
+  esp_timer_start_once(timer, 1000ULL * 1000ULL);  // 1 s expressed in microseconds
+
+  snprintf(respBuf, sizeof(respBuf),
+           "Factory reset complete. %s deleted. Rebooting in 1 second to start setup wizard...",
+           USERS_JSON_FILE);
+  return respBuf;
+}
+
+static const char* factoryreset_cancelled(void* /*userData*/) {
+  return "Cancelled. No changes made.";
+}
+
+const char* cmd_factoryreset(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  (void)argsInput;  // factoryreset takes no arguments
+
+  String prompt =
+    "Confirm FACTORY RESET? This will:\n"
+    "  - Delete all user accounts (/system/users/users.json)\n"
+    "  - Reboot the device\n"
+    "  - First-time setup wizard runs on next boot\n"
+    "Settings (WiFi credentials, debug flags) are PRESERVED.\n"
+    "This cannot be undone.";
+
+  // Originating cmd line for the resolution audit -- mirrors how
+  // filedelete and userdelete pass theirs. The audit log will read:
+  //   [CMD] asd@serial: factoryreset (confirm: yes) -> OK   Factory reset complete...
+  //   [CMD] asd@serial: factoryreset (confirm: no)  -> OK   Cancelled. No changes made.
+  if (!cliRequestConfirm(prompt, "factoryreset",
+                         factoryreset_confirmed,
+                         factoryreset_cancelled,
+                         nullptr)) {
+    return "Error: cannot request confirm (another interactive mode is active)";
+  }
+  return "Type 'yes' to confirm or anything else to cancel.";
+}
+
 const char* cmd_broadcast(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String msg = argsInput;
@@ -1801,6 +1917,11 @@ const CommandEntry commands[] = {
 
   // ---- Misc ----
   { "reboot", "Reboot the system.", true, cmd_reboot, nullptr, "system", "reboot" },
+  { "factoryreset", "Wipe user accounts and reboot to re-run setup wizard.", true,
+    cmd_factoryreset,
+    "Usage: factoryreset (no args, confirmation required)\n"
+    "Deletes /system/users/users.json so the first-time setup wizard runs\n"
+    "on next boot. WiFi credentials and other settings are preserved." },
   { "broadcast", "Send message to all or specific user.", true, cmd_broadcast },
   { "pendinglist", "List pending user requests.", true, cmd_pending_list },
   { "wait", "Delay execution for N milliseconds: wait <ms>.", false, cmd_wait },
@@ -3007,13 +3128,33 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     }
     DEBUG_CMD_FLOWF("[registry_exec] executing: %s (args: %s)", normalizedCmd.c_str(), args.c_str());
     DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s (args: %s)", normalizedCmd.c_str(), args.c_str());
+
+    // Capture CLIMode state BEFORE the handler runs. If the handler enters
+    // a mode (e.g. cmd_filedelete -> cliRequestConfirm) the command hasn't
+    // actually completed -- it just prompted the user. The real completion
+    // (and the right moment to audit) is when the user resolves the prompt
+    // and the mode's onInput composes the audit line with full context.
+    // See System_CLIConfirm::confirm_onInput for the resolution audit.
+    bool modeWasActiveBeforeHandler = cliInModeActive();
+
     const char* result = found->handler(args);
     strncpy(out, result, outSize - 1);
     out[outSize - 1] = '\0';
-    
-    // Command audit logging (always-on)
-    bool success = (strncmp(out, "Error", 5) != 0) && (strncmp(out, "ERROR", 5) != 0);
-    logCommandExecution(ctx, cmd, success, out);
+
+    // Command audit logging (always-on, EXCEPT when the handler just
+    // entered an interactive mode -- skip the prompt step so the audit
+    // log doesn't claim a destructive action completed when it only asked
+    // for confirmation. The mode is responsible for auditing the
+    // resolution if it wants to (confirm mode does; help mode doesn't).
+    const bool handlerEnteredMode = !modeWasActiveBeforeHandler && cliInModeActive();
+    if (!handlerEnteredMode) {
+      bool success = (strncmp(out, "Error", 5) != 0) && (strncmp(out, "ERROR", 5) != 0);
+      logCommandExecution(ctx, cmd, success, out);
+    } else {
+      DEBUG_CMD_FLOWF("[execCmd] suppressing audit -- handler entered mode '%s'",
+                      cliCurrentMode() && cliCurrentMode()->name
+                        ? cliCurrentMode()->name : "(unnamed)");
+    }
   } else {
     // Command not found
     snprintf(out, outSize, "Unknown command: %s\nType 'help' for available commands", command.c_str());

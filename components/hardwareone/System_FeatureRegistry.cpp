@@ -13,6 +13,7 @@
 #include "System_SetupWizard.h"
 #include "System_AuthIdentity.h"  // currentAuthContext() for cmd_featuresetup transport check
 #include "System_User.h"          // CommandSource enum
+#include "System_SetupWizardMode.h"  // Phase 5: new CLIMode-based wizard for cmd_featuresetup
 #include <esp_heap_caps.h>
 
 // External settings
@@ -567,30 +568,30 @@ const char* cmd_features(const String& argsInput) {
 
 static const char* cmd_featuresetup(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  (void)argsInput;
 
-  // The wizard's input loop reads directly from Serial / OLED joystick. It
-  // does NOT read from the CLI dispatcher's per-transport input stream.
-  // That means invoking from web / Bluetooth / MQTT / ESP-NOW / internal
-  // will park the cmd_exec task in waitForSerialInputBlocking() forever
-  // (or until our timeout fires, but the user can't recover until then
-  // and every other CLI command queued in the meantime times out).
+  // Phase 5: the wizard now runs as a CLIMode state machine. Each user
+  // input is one short handler call that mutates persistent state and
+  // returns; cmd_exec is free between keystrokes. The transport guard
+  // and 60-second idle timeout from the prior implementation are no
+  // longer needed:
+  //   - The new wizard reads input via the CLI dispatcher (NOT directly
+  //     from Serial), so it works from any transport that routes through
+  //     the dispatcher: serial console, web CLI, BLE, MQTT, ESP-NOW,
+  //     automations. No more "cannot deliver input" hostage scenario.
+  //   - cmd_exec isn't parked in a blocking read, so other commands keep
+  //     working while the wizard is open. A user who walks away mid-
+  //     wizard just leaves the device in wizard mode -- they can resume
+  //     by typing in any transport's CLI, or `cancel` to exit cleanly.
   //
-  // Permitted transports are the two the wizard can actually receive input
-  // from: serial (Serial.read in waitForSerialInputBlocking) and the OLED
-  // display (joystick reads inside the OLED page handlers).
-  const CommandSource src = currentAuthContext().transport;
-  if (src != SOURCE_SERIAL && src != SOURCE_LOCAL_DISPLAY) {
-    return "Error: featuresetup must be run from the serial console or OLED display. "
-           "Other transports cannot deliver input to the interactive wizard.";
+  // (FTS-at-boot continues to use the legacy runAndApplyFeatureWizard()
+  // because that path runs on the main task BEFORE cmd_exec exists,
+  // and the OLED + joystick integration there is already correct.)
+  if (!setupWizardMode_start()) {
+    return "Error: another interactive mode is active. Type 'exit' or 'cancel' first.";
   }
-
-  // 60-second idle timeout: if no input arrives for a minute the wizard
-  // aborts cleanly so the cmd_exec task is freed. FTS at boot uses the
-  // 0-timeout default (wait forever) so a fresh-device owner has time
-  // to read the prompts.
-  static constexpr unsigned long kFeatureSetupIdleTimeoutMs = 60UL * 1000UL;
-  SetupWizardResult result = runAndApplyFeatureWizard(kFeatureSetupIdleTimeoutMs);
-  return result.completed ? "Feature setup complete." : "Feature setup cancelled.";
+  return "Wizard started. Use 'n' (next), 'b' (back), or numbers to navigate. "
+         "Type 'cancel' at any time to abort.";
 }
 
 // ============================================================================
