@@ -1225,6 +1225,7 @@ window.togglePane = function(paneId, btnId) {
       const sensorsInput = document.getElementById('sensors-input-' + mac);
       const messageLog = document.getElementById('log-' + mac);
       const btnText = document.getElementById('btn-text-' + mac);
+      const btnRemote = document.getElementById('btn-remote-' + mac);
       const btnFile = document.getElementById('btn-file-' + mac);
       const btnMetadata = document.getElementById('btn-metadata-' + mac);
       const btnAutomations = document.getElementById('btn-automations-' + mac);
