@@ -2857,10 +2857,13 @@ window.togglePane = function(paneId, btnId) {
           alert('Please enter a passphrase');
           return;
         }
+        // Target the primary mesh by default — this UI predates the multi-mesh
+        // model. A future mesh-management UI will let the user pick which slot
+        // to modify. For now: any mesh-aware operator should use the CLI.
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnowsetpassphrase "' + passphrase + '"')
+          body: 'cmd=' + encodeURIComponent('espnowsetpassphrase primary "' + passphrase + '"')
         })
         .then(response => response.text())
         .then(text => {
@@ -2880,7 +2883,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnowsetpassphrase clear')
+          body: 'cmd=' + encodeURIComponent('espnowsetpassphrase primary clear')
         })
         .then(response => response.text())
         .then(text => {

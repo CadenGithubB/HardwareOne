@@ -1938,7 +1938,9 @@ void oledEspNowApplySettingsEdit(const String& value) {
       break;
     case 6: // Passphrase
       if (value.length() > 0) {
-        cmd = "espnowsetpassphrase \"" + value + "\"";
+        // OLED first-time setup configures the primary mesh's passphrase.
+        // Multi-mesh setup is done from the CLI / web UI later.
+        cmd = "espnowsetpassphrase primary \"" + value + "\"";
       }
       break;
     case 8: // Master MAC
