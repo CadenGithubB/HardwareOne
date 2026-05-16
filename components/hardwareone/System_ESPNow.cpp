@@ -8623,29 +8623,27 @@ static int findFreeMeshSlot() {
 }
 
 static const char* meshesCmd_list() {
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  char* buf = getDebugBuffer();
-  int pos = 0;
-  pos += snprintf(buf + pos, 1024 - pos, "=== Configured meshes (N_MESHES=%d) ===\n",
-                  (int)Settings::N_MESHES);
+  // Emit one broadcastOutput per line — a single returned blob is capped at
+  // DEBUG_MSG_SIZE (256 bytes) by the debug task and would truncate mid-line
+  // once 3+ meshes are configured. See System_Debug.cpp's cmd_debugqueue pattern.
+  BROADCAST_PRINTF("=== Configured meshes (N_MESHES=%d) ===", (int)Settings::N_MESHES);
   int configured = 0;
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     const Settings::MeshIdentity& m = gSettings.meshes[i];
     if (m.label.length() == 0 && !m.enabled) continue;
     configured++;
-    pos += snprintf(buf + pos, 1024 - pos,
-                    "  [%u] %-16s  %s  fp=0x%04X%s%s\n",
-                    (unsigned)i,
-                    m.label.length() ? m.label.c_str() : "(empty)",
-                    m.enabled ? "enabled" : "disabled",
-                    (unsigned)m.fingerprint,
-                    m.isDefault ? "  (default)" : "",
-                    m.passphrase.length() ? "  passphrase set" : "");
+    BROADCAST_PRINTF("  [%u] %-16s  %s  fp=0x%04X%s%s",
+                     (unsigned)i,
+                     m.label.length() ? m.label.c_str() : "(empty)",
+                     m.enabled ? "enabled" : "disabled",
+                     (unsigned)m.fingerprint,
+                     m.isDefault ? "  (default)" : "",
+                     m.passphrase.length() ? "  passphrase set" : "");
   }
   if (configured == 0) {
-    pos += snprintf(buf + pos, 1024 - pos, "  (none — run 'espnowmeshes add <label> <passphrase>')\n");
+    broadcastOutput("  (none - run 'espnowmeshes add <label> <passphrase>')");
   }
-  return buf;
+  return "OK";
 }
 
 static const char* meshesCmd_add(const String& label, const String& passphrase) {
@@ -8816,7 +8814,7 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(1)) return "Usage: espnow unpair <name_or_mac>";
+  if (!a.hasMinArgs(1)) return "Usage: espnowunpair <name_or_mac>";
   String target = a.arg(0);
 
   uint8_t mac[6];
