@@ -952,6 +952,13 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
   blePeersWriteJson(doc);
 #endif
 
+  // ESP-NOW meshes — array-of-struct, serialised by System_ESPNow for the
+  // same reason as BLE peers. Persists gSettings.meshes[] and the per-mesh
+  // bond arrays under doc["espnow"]["meshes"] / doc["espnow"]["bondsByMesh"].
+#if ENABLE_ESPNOW
+  espnowMeshesWriteJson(doc, excludePasswords);
+#endif
+
   // WiFi networks array - now nested under network.wifi.networks
   if (gWifiNetworks && gWifiNetworkCount > 0) {
     JsonArray networks = doc["network"]["wifi"]["networks"].to<JsonArray>();
@@ -1151,6 +1158,13 @@ bool readSettingsJson() {
   // during init.
 #if ENABLE_BLUETOOTH
   blePeersReadJson(doc);
+#endif
+
+  // ESP-NOW meshes — array-of-struct, deserialised by System_ESPNow.
+  // Reads gSettings.meshes[] and per-mesh bond arrays. fingerprint is
+  // recomputed from the label inside the read function.
+#if ENABLE_ESPNOW
+  espnowMeshesReadJson(doc);
 #endif
 
   // Apply settings from registered modules first (handles defaults automatically)

@@ -1071,6 +1071,13 @@ String buildBootNotification(uint32_t msgId, const char* src, uint32_t bootCount
 void v2_init_envelope(JsonDocument& doc, const char* type, uint32_t msgId, const char* src, const char* dst, int ttl);
 uint32_t generateMessageId();
 
+// Phase 2 multi-mesh — custom JSON serializers for gSettings.meshes[] and
+// the per-mesh bond arrays (the SettingsRegistry pattern can't handle
+// arrays of structs). Called from System_Settings.cpp's save/load paths,
+// mirroring the BLE_Peers writeJson/readJson pattern.
+void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords = false);
+void espnowMeshesReadJson(JsonDocument& doc);
+
 // Mesh heartbeat processing (FreeRTOS task)
 extern bool gMeshActivitySuspended;  // Suspend mesh during HTTP requests
 void processMeshHeartbeats();  // Internal worker function (called by task)

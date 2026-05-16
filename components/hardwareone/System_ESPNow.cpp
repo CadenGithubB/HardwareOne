@@ -508,6 +508,10 @@ static bool saveEspNowDevices() {
     if (dev.zone.length())         { f.print(",\"zone\":\""); f.print(dev.zone); f.print("\""); }
     if (dev.tags.length())         { f.print(",\"tags\":\""); f.print(dev.tags); f.print("\""); }
     if (dev.stationary)            { f.print(",\"stationary\":true"); }
+    // Phase 2 multi-mesh — record which mesh this peer belongs to. Omit
+    // the key when meshId==0 to keep the on-disk file compact for the
+    // common single-mesh case (loader defaults missing field to 0).
+    if (dev.meshId != 0)           { f.print(",\"meshId\":"); f.print((int)dev.meshId); }
     f.print("}");
     count++;
   }
@@ -663,11 +667,37 @@ void deriveKeyFromPassphrase(const String& passphrase, uint8_t* key) {
 }
 
 // Set ESP-NOW passphrase and derive encryption key
+// Forward decl — defined further down with other multi-mesh helpers
+static uint16_t meshFingerprintForLabel(const String& label);
+
 static void setEspNowPassphrase(const String& passphrase) {
   if (!gEspNow) return;
   gEspNow->passphrase = passphrase;
   setSetting(gSettings.espnowPassphrase, passphrase);
   deriveKeyFromPassphrase(passphrase, gEspNow->derivedKey);
+
+  // Phase 2 (Fix A): keep meshes[0] in sync with the legacy passphrase.
+  // Without this, runtime passphrase changes via CLI would leave
+  // meshes[0].passphrase stale (only the init shim populates it, and that
+  // runs once at boot). Phase 3 will read meshes[].passphrase for key
+  // derivation, so the sync matters before Phase 3 lands.
+  //
+  // Also bootstrap meshes[0] metadata if it hasn't been set up yet — first-
+  // time setup might write the passphrase before the init shim has run.
+  Settings::MeshIdentity& m0 = gSettings.meshes[0];
+  setSetting(m0.passphrase, passphrase);
+  if (m0.label.length() == 0 && passphrase.length() > 0) {
+    setSetting(m0.label, String("primary"));
+    setSetting(m0.enabled, true);
+    setSetting(m0.isDefault, true);
+  }
+  if (passphrase.length() == 0) {
+    // Clearing: keep the mesh slot but mark it disabled. Preserves label
+    // for future re-enable; matches the "clear means disabled, not deleted"
+    // expectation from the CLI ('espnow setpassphrase clear').
+    setSetting(m0.enabled, false);
+  }
+  m0.fingerprint = meshFingerprintForLabel(m0.label);
 }
 
 // ============================================================================
@@ -1174,6 +1204,91 @@ static uint16_t fingerprintForPeer(const uint8_t* mac) {
     }
   }
   return 0;
+}
+
+// ============================================================================
+// Phase 2 — Settings JSON persistence for multi-mesh fields
+// ============================================================================
+//
+// The SettingsRegistry pattern (SETTING_INT / SETTING_STRING / ...) handles
+// flat scalar fields automatically, but doesn't fit an array-of-structs like
+// gSettings.meshes[] or the per-mesh bond arrays. Mirror the BLE_Peers
+// pattern: dedicated writeJson/readJson functions called from
+// buildSettingsJsonDoc and the settings-load path.
+//
+// On-disk shape (under doc["espnow"]):
+//   "meshes": [
+//     {"label":"primary", "passphrase":"...", "enabled":true, "isDefault":true},
+//     ...
+//   ],
+//   "bondsByMesh": [
+//     {"enabled":false, "role":0, "peer":""},
+//     ...
+//   ]
+//
+// `fingerprint` is NOT persisted — it's a pure function of `label` and is
+// recomputed at load time via recomputeAllMeshFingerprints().
+
+void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords) {
+  JsonArray meshesArr = doc["espnow"]["meshes"].to<JsonArray>();
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    const Settings::MeshIdentity& m = gSettings.meshes[i];
+    // Skip fully-empty slots to keep settings.json small. A slot that's
+    // disabled but has a label is still persisted (lets users keep a
+    // mesh configured-but-off).
+    if (!m.enabled && m.label.length() == 0) continue;
+    JsonObject e = meshesArr.add<JsonObject>();
+    e["label"]     = m.label;
+    if (!excludePasswords) {
+      e["passphrase"] = m.passphrase;
+    }
+    e["enabled"]   = m.enabled;
+    e["isDefault"] = m.isDefault;
+  }
+#if ENABLE_BONDED_MODE
+  JsonArray bondsArr = doc["espnow"]["bondsByMesh"].to<JsonArray>();
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    JsonObject e = bondsArr.add<JsonObject>();
+    e["enabled"] = gSettings.bondModeEnabledMesh[i];
+    e["role"]    = gSettings.bondRoleMesh[i];
+    e["peer"]    = gSettings.bondPeerMacMesh[i];
+  }
+#endif
+}
+
+void espnowMeshesReadJson(JsonDocument& doc) {
+  JsonArrayConst meshesArr = doc["espnow"]["meshes"].as<JsonArrayConst>();
+  if (!meshesArr.isNull()) {
+    // Reset all slots to defaults first — load is authoritative for what's
+    // in the file. Slots not in the file get default (empty/disabled).
+    for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+      gSettings.meshes[i] = Settings::MeshIdentity();
+    }
+    uint8_t idx = 0;
+    for (JsonObjectConst e : meshesArr) {
+      if (idx >= Settings::N_MESHES) break;
+      gSettings.meshes[idx].label      = String((const char*)(e["label"]      | ""));
+      gSettings.meshes[idx].passphrase = String((const char*)(e["passphrase"] | ""));
+      gSettings.meshes[idx].enabled    = e["enabled"]   | false;
+      gSettings.meshes[idx].isDefault  = e["isDefault"] | false;
+      // fingerprint recomputed below
+      idx++;
+    }
+    recomputeAllMeshFingerprints();
+  }
+#if ENABLE_BONDED_MODE
+  JsonArrayConst bondsArr = doc["espnow"]["bondsByMesh"].as<JsonArrayConst>();
+  if (!bondsArr.isNull()) {
+    uint8_t idx = 0;
+    for (JsonObjectConst e : bondsArr) {
+      if (idx >= Settings::N_MESHES) break;
+      gSettings.bondModeEnabledMesh[idx] = e["enabled"] | false;
+      gSettings.bondRoleMesh[idx]        = (uint8_t)(e["role"] | 0);
+      gSettings.bondPeerMacMesh[idx]     = String((const char*)(e["peer"] | ""));
+      idx++;
+    }
+  }
+#endif
 }
 
 // Phase 2.1 init shim: populate meshes[0] from the legacy single-mesh fields
@@ -5439,6 +5554,12 @@ static void loadEspNowDevices() {
     dev.zone         = String(entry["zone"] | "");
     dev.tags         = String(entry["tags"] | "");
     dev.stationary   = entry["stationary"] | false;
+    // Phase 2 multi-mesh — meshId persisted on save; default 0 (primary mesh)
+    // when missing for backwards-compat with pre-Phase-2 devices.json files.
+    {
+      uint8_t loadedMid = (uint8_t)(entry["meshId"] | 0);
+      dev.meshId = (loadedMid < Settings::N_MESHES) ? loadedMid : 0;
+    }
     gEspNow->deviceCount++;
     count++;
   }
