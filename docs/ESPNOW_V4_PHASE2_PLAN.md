@@ -3,6 +3,11 @@
 **Parent plan:** [docs/ESPNOW_V4_PLAN.md](ESPNOW_V4_PLAN.md)
 **Previous phase:** [docs/ESPNOW_V4_PHASE1_PLAN.md](ESPNOW_V4_PHASE1_PLAN.md) (✅ landed in commit `c6157f2`)
 **Phase 2.1–2.4 status:** ✅ landed in commit `2fdec6b`
+**Phase 2.x supplementary status:** ✅ landed in a follow-up commit:
+  - Settings JSON persistence for `meshes[]` and per-mesh bond arrays
+  - `EspNowDevice.meshId` persisted in `/system/espnow/devices.json`
+  - Fix A: `setEspNowPassphrase()` (called from CLI / web / setup wizard)
+    now syncs to `meshes[0]` — fixes the runtime-passphrase-change debt
 **Phase 2.5–2.8 status:** 🟡 pending — this document describes them in detail
 **Target end state:** A device can participate in up to `N_MESHES = 4` independent meshes simultaneously, with per-mesh pairing, bond mode, and passphrase. Mesh isolation is enforced at the wire layer; multi-mesh is exposed via CLI + web UX.
 
@@ -25,13 +30,16 @@ Open questions are in §Open Questions; ask the user before assuming an answer.
 
 A device used to belong to **one** mesh, identified implicitly by `gSettings.espnowPassphrase`. Phase 2 turns this into a small array `gSettings.meshes[N_MESHES]` so the same device can simultaneously be in (e.g.) a "home" mesh and a "work" mesh, with distinct passphrases and peer sets per mesh. The V4 wire format already carries a `meshFingerprint` field in the header (added in Phase 1); Phase 2 populates and validates it.
 
-**Done** (commit `2fdec6b`):
+**Done** (commit `2fdec6b` + follow-up):
 - Schema: `Settings::MeshIdentity`, `Settings::N_MESHES = 4`, `gSettings.meshes[]`, per-mesh bond arrays
 - `EspNowDevice.meshId` — every paired peer tagged with which mesh
 - TX path stamps `meshFingerprint` from peer's mesh
 - RX path validates `meshFingerprint`; silent drop on mismatch
 - Topology responses filtered by requester's mesh
 - Init shim populates `meshes[0]` from legacy single-mesh fields
+- **Settings JSON persistence** for `meshes[]` and `bondsByMesh[]` arrays (`espnowMeshesWriteJson` / `espnowMeshesReadJson`, mirroring the BLE_Peers pattern)
+- **`EspNowDevice.meshId` persistence** in `devices.json` (omitted from output when meshId==0 to keep single-mesh files compact)
+- **Fix A:** `setEspNowPassphrase()` syncs `meshes[0].passphrase` AND bootstraps `meshes[0]` metadata if it hasn't been set up. Fixes the runtime-passphrase-change debt that would have orphaned Phase 3's key derivation
 
 **Remaining** (Phase 2.5–2.8, ~1 day total):
 - 2.5: `addPeer` / `espnowpair` accept `[mesh]` arg (30 min)
@@ -292,10 +300,10 @@ if (h->meshFingerprint != 0 && meshByFingerprint(h->meshFingerprint) == nullptr)
 
 - `addPeer()` signature — still `addPeer(mac, name)`; all existing peers get `meshId = 0` (Phase 2.5 fixes this)
 - `bondconnect` CLI command — still single-mesh (Phase 2.6)
-- `espnowsetpassphrase` CLI — still writes to legacy `gSettings.espnowPassphrase` (Phase 2.7)
 - Bond consumer task loop — still iterates a single bond (Phase 2.6)
 - Web `/espnow` page — single-mesh peer list (Phase 6 or Phase 2.8 light touch)
 - Web `/bond` page — single-mesh bond display (Phase 2.6 or 2.8)
+- `espnowsetpassphrase` writes BOTH `gSettings.espnowPassphrase` AND `meshes[0]` (fixed in supplementary commit), but other CLI commands that write the legacy bond fields still don't sync to per-mesh arrays — Phase 2.6 / 2.7's job
 
 ---
 
@@ -553,28 +561,37 @@ This is **acceptable** for Phase 2 because:
 
 **Action:** Document this limitation. Defer to Phase 3 where per-pair AEAD keys derived from per-mesh group keys solve it correctly.
 
-### CC2. Persistence: settings JSON serialization
+### CC2. Persistence: settings JSON serialization (✅ resolved in supplementary commit)
 
-`gSettings` is persisted as JSON. The new `meshes[N_MESHES]` array needs to serialize/deserialize correctly. Inspect `System_Settings.cpp` (or wherever `saveSettings` / `loadSettings` live) and add:
+Originally flagged as a debt. **Now resolved.** The follow-up commit added:
 
-```cpp
-// On save:
-JsonArray meshesArr = doc.createNestedArray("meshes");
-for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
-  JsonObject m = meshesArr.createNestedObject();
-  m["label"]      = gSettings.meshes[i].label;
-  m["passphrase"] = gSettings.meshes[i].passphrase;
-  m["enabled"]    = gSettings.meshes[i].enabled;
-  m["isDefault"]  = gSettings.meshes[i].isDefault;
-  // Note: don't serialize .fingerprint — it's derived from .label,
-  // recomputed by recomputeAllMeshFingerprints() at load time.
+- `espnowMeshesWriteJson(JsonDocument&, bool excludePasswords)` in `System_ESPNow.cpp`, called from `buildSettingsJsonDoc` after `blePeersWriteJson`.
+- `espnowMeshesReadJson(JsonDocument&)` in `System_ESPNow.cpp`, called from the settings load path after `blePeersReadJson`.
+- `EspNowDevice.meshId` serialized in `saveEspNowDevices` (omitted when 0 to keep single-mesh files compact) and loaded with bounds-check default in `loadEspNowDevices`.
+
+On-disk shape (inside `settings.json`):
+
+```jsonc
+"espnow": {
+  // ... existing flat settings ...
+  "meshes": [
+    {"label":"primary", "passphrase":"...", "enabled":true, "isDefault":true}
+    // ... up to N_MESHES entries ...
+  ],
+  "bondsByMesh": [
+    {"enabled":false, "role":0, "peer":""}
+    // ... N_MESHES entries ...
+  ]
 }
-// Same shape for bondModeEnabledMesh, bondRoleMesh, bondPeerMacMesh arrays.
-
-// On load: reverse, then call recomputeAllMeshFingerprints().
 ```
 
-**Footgun:** the legacy `espnowPassphrase` / `bondPeerMac` etc. still serialize during Phase 2.x to support the init shim. After Phase 2.7 removes them from the struct, also remove from the serializer. Don't leave dead serialization code.
+And in `devices.json`:
+
+```jsonc
+{"mac":"...","name":"asd","encrypted":true,"key":"...","meshId":0}
+```
+
+`fingerprint` is NOT persisted — recomputed from `label` at load via `recomputeAllMeshFingerprints()`. The legacy `gSettings.espnowPassphrase` continues to serialize too during Phase 2.x; Phase 2.7 removes the duplicate writes when the legacy field is dropped.
 
 ### CC3. Mesh label collisions
 
@@ -591,18 +608,22 @@ Three places display bond state today:
 
 All three currently read singleton `gSettings.bondModeEnabled` / `gSettings.bondPeerMac`. Phase 2.6's "simpler model" lets them read the same way (just substitute `findActiveBondMesh()` lookup), so they don't need major refactoring. Phase 6 polish would let them iterate all meshes and show per-mesh status.
 
-### CC5. The init shim ordering
+### CC5. The init shim ordering (✅ mostly resolved by Fix A)
 
-`initPrimaryMeshFromLegacySettings()` runs at the top of `initEspNow()`. If the user changes `gSettings.espnowPassphrase` *after* boot (via `espnowsetpassphrase`), the shim has already run and won't repopulate `meshes[0]`. The CLI command must explicitly update both fields during the transition (Phase 2.x).
+`initPrimaryMeshFromLegacySettings()` runs at the top of `initEspNow()`. It populated `meshes[0]` from legacy fields *only once at boot*. If the user changed `gSettings.espnowPassphrase` *after* boot, the shim wouldn't re-run.
 
-**Phase 2.7's job:** remove this footgun by making CLI commands write to `meshes[]` directly, removing the shim.
+**Fix A (landed in supplementary commit):** `setEspNowPassphrase()` now writes to BOTH the legacy field AND `meshes[0].passphrase`, and bootstraps `meshes[0].label = "primary"` / `enabled = true` / `isDefault = true` if not already set. Recomputes fingerprint inline.
+
+Remaining gap: other CLI commands that write legacy bond fields (`bondconnect` writes `gSettings.bondPeerMac`, etc.) still don't sync to the per-mesh arrays. That's Phase 2.6's job — when the bond consumer task migrates to read per-mesh arrays, the CLI commands that write the legacy fields also migrate.
+
+**Phase 2.7's job:** remove the legacy fields entirely, removing the need for these dual writes.
 
 ---
 
 ## Footguns and gotchas (collected list)
 
 1. **`gMeshPeers[]` has no `meshId`.** Routing-layer peers fall back to default mesh in topology filter. Fix when full per-mesh routing is needed.
-2. **CLI passphrase change doesn't auto-mirror to `meshes[]`.** Until Phase 2.7, the init shim only runs at boot — runtime passphrase changes via CLI must explicitly update both fields.
+2. ~~**CLI passphrase change doesn't auto-mirror to `meshes[]`.**~~ ✅ Resolved by Fix A in supplementary commit. `setEspNowPassphrase()` (the funnel used by `espnowsetpassphrase` CLI, web POST, and setup wizard) now writes both fields and bootstraps `meshes[0]` metadata.
 3. **Mesh rename = fingerprint change = peers stop receiving.** Renames are intentional break-glass operations.
 4. **Mesh removal doesn't auto-unpair peers** unless explicitly coded. `espnowmeshes remove` should cascade.
 5. **`gSettings.bondPeerMac` boolean checks**: `if (gSettings.bondPeerMac.length() > 0)` becomes `if (findActiveBondMesh() != 0xFF)` — different meaning, watch each site.
