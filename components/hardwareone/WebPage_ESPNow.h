@@ -145,6 +145,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <div class='en-pair-inputs'>
 <input type='text' id='pair-mac' class='mac-input' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17'>
 <input type='text' id='pair-name' placeholder='Device Name'>
+<select id='pair-mesh' title='Target mesh for this pairing' style='display:none'></select>
 <button class='btn' id='btn-pair-device'>Pair</button>
 <button class='btn' id='btn-pair-secure'>Pair Encrypted</button>
 </div>
@@ -675,10 +676,27 @@ window.togglePane = function(paneId, btnId) {
         var encInd = isEncrypted ? 'encryption-enabled' : 'encryption-disabled';
         var bondBadge = isBonded ? '<span style="color:var(--warning);margin-right:4px;font-weight:bold" title="Bonded Device">[BOND]</span>' : '';
 
+        // Phase 2.8: render a mesh badge next to the device name when meshId
+        // is available. Greys out + line-throughs the label if the mesh is
+        // currently disabled — frames from this peer would be dropped.
+        var meshBadge = '';
+        if (typeof dev.meshId === 'number' && dev.meshId >= 0 && typeof window.meshLabelForSlot === 'function') {
+          var meshLabel = window.meshLabelForSlot(dev.meshId);
+          if (meshLabel) {
+            var meshEn = (typeof window.meshEnabledForSlot === 'function') ? window.meshEnabledForSlot(dev.meshId) : true;
+            var mbg  = meshEn ? 'rgba(74,144,226,.15)' : 'rgba(120,120,120,.15)';
+            var mfg  = meshEn ? '#4a90e2' : 'var(--muted)';
+            var mdeco = meshEn ? '' : ';text-decoration:line-through';
+            var mhint = meshEn ? 'mesh: ' + meshLabel : 'mesh: ' + meshLabel + ' (disabled - frames dropped)';
+            meshBadge = '<span style="font-size:.72em;padding:2px 8px;border-radius:6px;background:' + mbg + ';color:' + mfg + ';margin-left:6px' + mdeco + '" title="' + mhint + '">' + meshLabel + '</span>';
+          }
+        }
+
         html += '<div class="device-item">';
         html += '<div style="flex:1;min-width:0">';
         html += '<div class="device-mac">' + statusDot + bondBadge + '<strong>' + (deviceName || mac) + '</strong>';
         html += '<span class="encryption-indicator ' + encInd + '" title="' + encText + '"></span>';
+        html += meshBadge;
         html += statusLabel + '</div>';
         html += '<div class="device-channel ' + encClass + '">' + mac + ' • ' + encText;
         if (isBonded) html += ' • <strong>Bonded</strong>';
@@ -2751,6 +2769,17 @@ window.togglePane = function(paneId, btnId) {
           .then(t=>{ try { /* optional toast */ } catch(_) {}; refreshStatus(); })
           .catch(e=>{ try { alert('Error: ' + e.message); } catch(_) {}; });
       });
+      // Build the optional ' <meshLabel>' suffix for pair commands. Only
+      // appended when the pair-mesh <select> is actually visible (i.e. when
+      // 2+ meshes are configured) AND the user picked something other than
+      // the default. When omitted, the CLI uses the default mesh.
+      function pairMeshArg() {
+        var sel = document.getElementById('pair-mesh');
+        if (!sel) return '';
+        if (sel.style.display === 'none') return '';
+        if (!sel.value) return '';
+        return ' ' + sel.value;
+      }
       document.getElementById('btn-pair-device').addEventListener('click', function() {
         const mac = document.getElementById('pair-mac').value.trim();
         const name = document.getElementById('pair-name').value.trim();
@@ -2761,7 +2790,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnowpair ' + mac + ' ' + name)
+          body: 'cmd=' + encodeURIComponent('espnowpair ' + mac + ' ' + name + pairMeshArg())
         })
         .then(response => response.text())
         .then(text => {
@@ -2786,7 +2815,7 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnowpairsecure ' + mac + ' ' + name)
+          body: 'cmd=' + encodeURIComponent('espnowpairsecure ' + mac + ' ' + name + pairMeshArg())
         })
         .then(response => response.text())
         .then(text => {
@@ -3251,6 +3280,233 @@ window.togglePane = function(paneId, btnId) {
       if (fullMsg) fullMsg.style.display = hasFreeSlot ? 'none' : '';
     }
 
+    // Update the pair-form mesh chooser. Only visible when 2+ enabled meshes
+    // exist (per UX decision D4). Default mesh is preselected.
+    function updatePairChooser(data) {
+      var sel = document.getElementById('pair-mesh');
+      if (!sel) return;
+      var meshes = (data && Array.isArray(data.meshes)) ? data.meshes.filter(function(m) { return m.enabled; }) : [];
+      if (meshes.length < 2) {
+        sel.style.display = 'none';
+        sel.innerHTML = '';
+        return;
+      }
+      var html = '';
+      for (var i = 0; i < meshes.length; i++) {
+        var sa = meshes[i].isDefault ? ' selected' : '';
+        html += '<option value="' + escHtml(meshes[i].label) + '"' + sa + '>mesh: ' + escHtml(meshes[i].label) + '</option>';
+      }
+      sel.innerHTML = html;
+      sel.style.display = '';
+    }
+
+    // ---- CLI command bridge -------------------------------------------------
+    // All mesh management actions go through this — fires the CLI command,
+    // logs the response, then refreshes the meshes table. If addMessageToLog
+    // is unavailable, fall back to console.log so we don't break anything.
+    function fireMeshCmd(cmd, logTag) {
+      return fetch('/api/cli', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'cmd=' + encodeURIComponent(cmd)
+      })
+      .then(function(r) { return r.text(); })
+      .then(function(text) {
+        try {
+          if (typeof addMessageToLog === 'function') addMessageToLog(logTag || 'MESH', text);
+          else console.log('[MESH] ' + (logTag || '') + ': ' + text);
+        } catch (e) { console.warn('[MESH] log err:', e); }
+        if (typeof window.loadMeshes === 'function') window.loadMeshes();
+        // Refresh device list too — meshId stamping or mesh enable state may
+        // change which peers are reachable / how badges render.
+        if (typeof window.listDevices === 'function') window.listDevices();
+        return text;
+      });
+    }
+
+    // ---- Per-row inline action panel ---------------------------------------
+    function renderActionPanel(slot, label, isDefault, hasPassphrase) {
+      var setpassText = hasPassphrase ? 'Change passphrase' : 'Set passphrase';
+      var clearpassBtn = hasPassphrase
+        ? '<button class="btn btn-mesh-clearpass" data-label="' + label + '" style="font-size:.82em;padding:3px 10px">Clear passphrase</button>'
+        : '';
+      var setdefaultBtn = isDefault
+        ? ''
+        : '<button class="btn btn-mesh-setdefault" data-label="' + label + '" style="font-size:.82em;padding:3px 10px">Set as default</button>';
+      var disableBtn = isDefault
+        ? '<button class="btn" disabled title="Cannot disable the default mesh — set another as default first" style="font-size:.82em;padding:3px 10px;opacity:.5;cursor:not-allowed">Disable</button>'
+        : '<button class="btn btn-mesh-disable" data-label="' + label + '" style="font-size:.82em;padding:3px 10px">Disable</button>';
+
+      return '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">' +
+        '<button class="btn btn-mesh-setpass" data-label="' + label + '" data-slot="' + slot + '" style="font-size:.82em;padding:3px 10px">' + setpassText + '</button>' +
+        clearpassBtn +
+        '<button class="btn btn-mesh-rename" data-label="' + label + '" data-slot="' + slot + '" style="font-size:.82em;padding:3px 10px">Rename</button>' +
+        setdefaultBtn +
+        disableBtn +
+        '<button class="btn btn-mesh-close" data-slot="' + slot + '" style="font-size:.82em;padding:3px 10px;margin-left:auto">Close</button>' +
+        '</div>' +
+        '<div class="mesh-subform"></div>';
+    }
+
+    function findMesh(slot) {
+      var m = (window.gMeshes && window.gMeshes.meshes) || [];
+      for (var i = 0; i < m.length; i++) if (m[i].slot === parseInt(slot, 10)) return m[i];
+      return null;
+    }
+
+    function toggleActionPanel(slot, label) {
+      var mesh = findMesh(slot);
+      if (!mesh) return;
+      var panel = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+      if (!panel) return;
+      // Close any other open panels first
+      document.querySelectorAll('.mesh-row-actions').forEach(function(p) {
+        if (p !== panel) { p.style.display = 'none'; p.innerHTML = ''; }
+      });
+      // Toggle this one
+      if (panel.style.display === 'none' || !panel.style.display) {
+        panel.innerHTML = renderActionPanel(slot, mesh.label, !!mesh.isDefault, !!mesh.hasPassphrase);
+        panel.style.display = 'block';
+      } else {
+        panel.style.display = 'none';
+        panel.innerHTML = '';
+      }
+    }
+
+    function closeAllActionPanels() {
+      document.querySelectorAll('.mesh-row-actions').forEach(function(p) {
+        p.style.display = 'none';
+        p.innerHTML = '';
+      });
+    }
+
+    // Inline-expand passphrase entry (UX decision D1).
+    function showPassphraseSubform(slot, label) {
+      var panel = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+      if (!panel) return;
+      var sf = panel.querySelector('.mesh-subform');
+      if (!sf) return;
+      sf.innerHTML = '<div class="en-form-row" style="margin-top:8px">' +
+        '<input type="password" class="mesh-pass-input" placeholder="New passphrase (min 8 chars)" maxlength="64">' +
+        '<button class="btn btn-mesh-savepass" data-label="' + label + '" data-slot="' + slot + '" style="font-size:.82em">Save</button>' +
+        '<button class="btn btn-mesh-cancelsub" data-slot="' + slot + '" style="font-size:.82em">Cancel</button>' +
+        '</div>';
+      var inp = sf.querySelector('.mesh-pass-input');
+      if (inp) inp.focus();
+    }
+
+    function showRenameSubform(slot, label) {
+      var panel = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+      if (!panel) return;
+      var sf = panel.querySelector('.mesh-subform');
+      if (!sf) return;
+      sf.innerHTML = '<div class="en-form-row" style="margin-top:8px">' +
+        '<input type="text" class="mesh-rename-input" placeholder="New label" maxlength="16" value="' + escHtml(label) + '">' +
+        '<button class="btn btn-mesh-saverename" data-oldlabel="' + label + '" data-slot="' + slot + '" style="font-size:.82em">Save</button>' +
+        '<button class="btn btn-mesh-cancelsub" data-slot="' + slot + '" style="font-size:.82em">Cancel</button>' +
+        '</div>';
+      var inp = sf.querySelector('.mesh-rename-input');
+      if (inp) { inp.focus(); inp.select(); }
+    }
+
+    function clearSubform(slot) {
+      var panel = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+      if (!panel) return;
+      var sf = panel.querySelector('.mesh-subform');
+      if (sf) sf.innerHTML = '';
+    }
+
+    // ---- Event delegation: one listener for the whole meshes card ----------
+    function attachMeshDelegation() {
+      var card = document.getElementById('meshes-card');
+      if (!card || card.__meshHandlersAttached) return;
+      card.__meshHandlersAttached = true;
+      card.addEventListener('click', function(e) {
+        var t = e.target;
+        if (!t || !t.classList) return;
+        var slot = t.dataset ? t.dataset.slot : null;
+        var label = t.dataset ? t.dataset.label : null;
+
+        // Add a new mesh
+        if (t.id === 'btn-mesh-add') {
+          var inp = document.getElementById('mesh-add-label');
+          var lbl = inp ? inp.value.trim() : '';
+          if (!lbl) { alert('Please enter a mesh label'); return; }
+          fireMeshCmd('espnowmeshes add ' + lbl, 'MESH_ADD').then(function() {
+            if (inp) inp.value = '';
+          });
+          return;
+        }
+        // Re-enable a disabled mesh
+        if (t.classList.contains('btn-mesh-enable')) {
+          if (!label) return;
+          fireMeshCmd('espnowmeshes enable ' + label, 'MESH_ENABLE');
+          return;
+        }
+        // Open/close action panel
+        if (t.classList.contains('btn-mesh-actions')) {
+          toggleActionPanel(slot, label);
+          return;
+        }
+        if (t.classList.contains('btn-mesh-close')) {
+          closeAllActionPanels();
+          return;
+        }
+        // Set/change passphrase — opens inline form
+        if (t.classList.contains('btn-mesh-setpass')) {
+          showPassphraseSubform(slot, label);
+          return;
+        }
+        if (t.classList.contains('btn-mesh-savepass')) {
+          var panel = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+          var passInp = panel ? panel.querySelector('.mesh-pass-input') : null;
+          var pw = passInp ? passInp.value : '';
+          if (!pw) { alert('Please enter a passphrase'); return; }
+          if (pw.length < 8) { alert('Passphrase must be at least 8 characters'); return; }
+          // Wrap in quotes so the CLI parser keeps it as a single token.
+          fireMeshCmd('espnowsetpassphrase ' + label + ' "' + pw + '"', 'MESH_PASS');
+          return;
+        }
+        // Clear passphrase
+        if (t.classList.contains('btn-mesh-clearpass')) {
+          if (!confirm('Clear passphrase for mesh "' + label + '"? Encrypted communication will fail until a new passphrase is set.')) return;
+          fireMeshCmd('espnowsetpassphrase ' + label + ' clear', 'MESH_PASS_CLEAR');
+          return;
+        }
+        // Rename — opens inline form
+        if (t.classList.contains('btn-mesh-rename')) {
+          showRenameSubform(slot, label);
+          return;
+        }
+        if (t.classList.contains('btn-mesh-saverename')) {
+          var oldLabel = t.dataset.oldlabel;
+          var panel2 = document.querySelector('.mesh-row-actions[data-slot="' + slot + '"]');
+          var nameInp = panel2 ? panel2.querySelector('.mesh-rename-input') : null;
+          var newLabel = nameInp ? nameInp.value.trim() : '';
+          if (!newLabel) { alert('Please enter a new label'); return; }
+          if (newLabel === oldLabel) { clearSubform(slot); return; }
+          fireMeshCmd('espnowmeshes rename ' + oldLabel + ' ' + newLabel, 'MESH_RENAME');
+          return;
+        }
+        // Cancel sub-form
+        if (t.classList.contains('btn-mesh-cancelsub')) {
+          clearSubform(slot);
+          return;
+        }
+        // Set as default
+        if (t.classList.contains('btn-mesh-setdefault')) {
+          fireMeshCmd('espnowmeshes setdefault ' + label, 'MESH_DEFAULT');
+          return;
+        }
+        // Disable (alias for remove — soft delete)
+        if (t.classList.contains('btn-mesh-disable')) {
+          if (!confirm('Disable mesh "' + label + '"? Paired peers in this mesh will stop receiving frames until you re-enable it.')) return;
+          fireMeshCmd('espnowmeshes disable ' + label, 'MESH_DISABLE');
+          return;
+        }
+      });
+    }
+
     // Public entry point. Accepts an optional preloaded JSON string from the
     // batch refresh; otherwise fetches fresh.
     window.loadMeshes = function(preloadedJsonText) {
@@ -3270,6 +3526,8 @@ window.togglePane = function(paneId, btnId) {
         }
         window.gMeshes = data;
         renderMeshesTable(data);
+        updatePairChooser(data);
+        attachMeshDelegation();
       }
 
       if (preloadedJsonText !== undefined) {
@@ -3289,7 +3547,7 @@ window.togglePane = function(paneId, btnId) {
       });
     };
 
-    console.log('[ESP-NOW] Chunk 5d: Meshes ready (skeleton)');
+    console.log('[ESP-NOW] Chunk 5d: Meshes ready (full)');
   } catch(e) { console.error('[ESP-NOW] Chunk 5d error:', e); }
 })();
 </script>
