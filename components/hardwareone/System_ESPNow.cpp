@@ -8482,6 +8482,10 @@ const char* cmd_espnow_list(const String& argsInput) {
     d["mac"]       = listMacBuf;
     d["name"]      = gEspNow->devices[i].name;
     d["encrypted"] = gEspNow->devices[i].encrypted;
+    // Phase 2.8: surface which mesh slot this peer was paired into so
+    // the web UI can show a "mesh: <label>" badge per row and grey out
+    // peers whose mesh is currently disabled.
+    d["meshId"]    = (int)gEspNow->devices[i].meshId;
     listedCount++;
   }
 
@@ -8640,9 +8644,61 @@ static const char* meshesCmd_list() {
                      m.passphrase.length() ? "  passphrase set" : "");
   }
   if (configured == 0) {
-    broadcastOutput("  (none - run 'espnowmeshes add <label> <passphrase>')");
+    broadcastOutput("  (none - run 'espnowmeshes add <label>')");
   }
   return "OK";
+}
+
+// JSON variant of meshesCmd_list — feeds the web UI multi-mesh table.
+// Returned shape:
+//   {
+//     "nMeshes": 4,
+//     "configuredCount": 3,
+//     "defaultSlot": 0,
+//     "meshes": [
+//       { "slot": 0, "label": "primary", "enabled": true,
+//         "fingerprint": 18265, "fingerprintHex": "0x4759",
+//         "isDefault": true, "hasPassphrase": true },
+//       ...
+//     ]
+//   }
+// Only configured slots (label != "" or enabled) are emitted, but the
+// caller can compute free slots = nMeshes - configuredCount.
+static const char* meshesCmd_listjson() {
+  PSRAM_JSON_DOC(doc);
+  doc["nMeshes"] = (int)Settings::N_MESHES;
+  int configured = 0;
+  int defaultSlot = -1;
+  JsonArray arr = doc["meshes"].to<JsonArray>();
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    const Settings::MeshIdentity& m = gSettings.meshes[i];
+    if (m.label.length() == 0 && !m.enabled) continue;
+    JsonObject o = arr.add<JsonObject>();
+    o["slot"]          = (int)i;
+    o["label"]         = m.label;
+    o["enabled"]       = m.enabled;
+    o["fingerprint"]   = (int)m.fingerprint;
+    char fpHex[8];
+    snprintf(fpHex, sizeof(fpHex), "0x%04X", (unsigned)m.fingerprint);
+    o["fingerprintHex"] = fpHex;
+    o["isDefault"]     = m.isDefault;
+    o["hasPassphrase"] = (m.passphrase.length() > 0);
+    if (m.isDefault && m.enabled) defaultSlot = (int)i;
+    configured++;
+  }
+  doc["configuredCount"] = configured;
+  doc["defaultSlot"]     = defaultSlot;
+
+  // Reuse the existing per-EspNow list buffer (1024 bytes) — same pattern as
+  // cmd_espnow_list. The serialized payload for 4 meshes is ~500 bytes.
+  if (!gEspNow || !gEspNow->listBuffer) {
+    return "{\"error\":\"buffer unavailable\"}";
+  }
+  size_t needed = measureJson(doc) + 1;
+  static const size_t bufSize = 1024;
+  if (needed > bufSize) needed = bufSize;
+  serializeJson(doc, gEspNow->listBuffer, needed);
+  return gEspNow->listBuffer;
 }
 
 static const char* meshesCmd_add(const String& label) {
@@ -8837,6 +8893,7 @@ const char* cmd_espnow_meshes(const String& argsInput) {
   sub.toLowerCase();
 
   if (sub == "list")     return meshesCmd_list();
+  if (sub == "listjson") return meshesCmd_listjson();
   if (sub == "add") {
     if (!a.hasMinArgs(2)) return "Usage: espnowmeshes add <label>  (run 'espnowsetpassphrase <label> <pw>' after to enable encryption)";
     return meshesCmd_add(a.arg(1));
