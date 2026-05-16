@@ -3213,9 +3213,9 @@ const char* cmd_user_sync(const String& argsInput) {
   String jsonStr;
   serializeJson(doc, jsonStr);
   
-  // Send via V3 binary protocol
-  extern bool v3_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
-  if (!v3_send_user_sync(targetMac, jsonStr.c_str(), jsonStr.length())) {
+  // Send via V4 binary protocol
+  extern bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
+  if (!v4_send_user_sync(targetMac, jsonStr.c_str(), jsonStr.length())) {
     ERROR_USERF("[USER_SYNC] Failed to send sync message to %s", deviceName.c_str());
     snprintf(getDebugBuffer(), 1024, "Error: Failed to send user sync to '%s'", deviceName.c_str());
     return getDebugBuffer();

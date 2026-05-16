@@ -212,9 +212,9 @@ void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled) {
   DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Broadcasting status: %s = %s",
          sensorTypeToString(sensorType), enabled ? "enabled" : "disabled");
   
-  // Send via V3 binary protocol
-  extern bool v3_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
-  bool sent = v3_broadcast_sensor_status(sensorType, enabled);
+  // Send via V4 binary protocol
+  extern bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
+  bool sent = v4_broadcast_sensor_status(sensorType, enabled);
   
   if (sent) {
     DEBUG_ESPNOW_METADATAF("[SENSOR_STATUS_TX] SUCCESS: Broadcast %s status", sensorTypeToString(sensorType));
@@ -464,8 +464,8 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
   DEBUG_ESPNOW_STREAMF("[SENSOR_TX] type=%s len=%u", sensorTypeToString(sensorType), jsonLen);
   
   
-  // Send via V3 binary protocol (both bond and mesh modes)
-  extern bool v3_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
+  // Send via V4 binary protocol (both bond and mesh modes)
+  extern bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
   
 #if ENABLE_BONDED_MODE
   // Check for bond mode first
@@ -513,10 +513,10 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
     return;
   }
   
-  // Mesh mode - send via V3 binary protocol
-  DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_DATA_TX] Using V3 binary protocol for mesh broadcast");
+  // Mesh mode - send via V4 binary protocol
+  DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_DATA_TX] Using V4 binary protocol for mesh broadcast");
   
-  bool sent = v3_broadcast_sensor_data(sensorType, jsonData, jsonLen);
+  bool sent = v4_broadcast_sensor_data(sensorType, jsonData, jsonLen);
   if (sent) {
     DEBUG_ESPNOW_STREAMF("[SENSOR_TX] SUCCESS: Broadcast %s data (mesh)", sensorTypeToString(sensorType));
   } else {

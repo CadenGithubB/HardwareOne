@@ -2988,7 +2988,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     extern bool isBondSynced();
     extern bool isBondSessionTokenValid();
     extern String buildBondedCommandPayload(const String& command);
-    extern bool v3_send_frame(const uint8_t* dstMac, uint8_t type, uint8_t flags, 
+    extern bool v4_send_frame(const uint8_t* dstMac, uint8_t type, uint8_t flags, 
                               uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
     extern uint32_t generateMessageId();
     extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
@@ -3018,7 +3018,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     }
     
     uint32_t msgId = generateMessageId();
-    bool sent = v3_send_frame(peerMac, 5 /* ESPNOW_V3_TYPE_CMD */, 0x01 /* ACK_REQ */, 
+    bool sent = v4_send_frame(peerMac, 5 /* ESPNOW_V4_TYPE_CMD */, 0x01 /* ACK_REQ */, 
                               msgId, (const uint8_t*)payload.c_str(), payload.length(), 1);
     
     if (sent) {
