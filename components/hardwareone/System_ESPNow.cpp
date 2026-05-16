@@ -8689,16 +8689,15 @@ static const char* meshesCmd_listjson() {
   doc["configuredCount"] = configured;
   doc["defaultSlot"]     = defaultSlot;
 
-  // Reuse the existing per-EspNow list buffer (1024 bytes) — same pattern as
-  // cmd_espnow_list. The serialized payload for 4 meshes is ~500 bytes.
-  if (!gEspNow || !gEspNow->listBuffer) {
-    return "{\"error\":\"buffer unavailable\"}";
-  }
+  // Use a static buffer so this command works pre-init (meshes are settings,
+  // not runtime state — the user may want to view/configure them before
+  // running 'openespnow'). gEspNow->listBuffer would be null pre-init.
+  // 1 KB is plenty for 4 meshes (~500 bytes serialized).
+  static char meshesJsonBuf[1024];
   size_t needed = measureJson(doc) + 1;
-  static const size_t bufSize = 1024;
-  if (needed > bufSize) needed = bufSize;
-  serializeJson(doc, gEspNow->listBuffer, needed);
-  return gEspNow->listBuffer;
+  if (needed > sizeof(meshesJsonBuf)) needed = sizeof(meshesJsonBuf);
+  serializeJson(doc, meshesJsonBuf, needed);
+  return meshesJsonBuf;
 }
 
 static const char* meshesCmd_add(const String& label) {

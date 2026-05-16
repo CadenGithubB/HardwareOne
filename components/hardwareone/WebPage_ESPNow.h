@@ -213,15 +213,20 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <span style='color:var(--panel-fg);font-size:.9em'>Stationary Device</span>
 </label>
 </div>
-<div id='encryption-card' style='margin-bottom:16px'>
-<div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Encryption</div>
-<div style='color:var(--muted);font-size:.82em;margin-bottom:10px'>All paired devices must share the same passphrase.</div>
-<div class='en-form-row'>
-<input type='password' id='encryption-passphrase' placeholder='Encryption passphrase' maxlength='64'>
-<button class='btn' id='btn-set-passphrase'>Set</button>
-<button class='btn' id='btn-clear-passphrase' style='display:none'>Clear</button>
+<div id='meshes-card' style='margin-bottom:16px'>
+<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px'>
+<div style='font-size:1rem;font-weight:600;color:var(--panel-fg)'>Meshes</div>
+<div id='mesh-active-pill' style='font-size:.82em;color:var(--panel-fg);padding:3px 10px;border-radius:8px;background:var(--crumb-bg);border:1px solid var(--border)'>Mesh: <span id='mesh-active-label' style='font-weight:600'>&hellip;</span></div>
 </div>
-<div style='background:var(--crumb-bg);border-radius:8px;padding:10px;font-size:.85em;color:var(--panel-fg);border:1px solid var(--border);margin-top:8px' id='encryption-status'>No encryption passphrase set</div>
+<div style='color:var(--muted);font-size:.82em;margin-bottom:10px'>Up to 4 mesh slots. The default mesh is used when no mesh is specified on pair/send.</div>
+<div id='meshes-table' style='display:flex;flex-direction:column;gap:6px;margin-bottom:10px'>
+<div style='color:var(--muted);font-size:.85em;padding:8px 0' id='meshes-loading'>Loading meshes&hellip;</div>
+</div>
+<div id='meshes-add-row' class='en-form-row' style='display:none'>
+<input type='text' id='mesh-add-label' placeholder='New mesh label (e.g., lab2)' maxlength='16'>
+<button class='btn' id='btn-mesh-add'>Add Mesh</button>
+</div>
+<div id='meshes-full-msg' style='display:none;color:var(--muted);font-size:.82em;text-align:center;padding:6px'>All 4 mesh slots configured. Remove one to free a slot.</div>
 </div>
 <div id='mesh-role-card' style='display:none;padding-top:16px;border-top:1px solid var(--border)'>
 <div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Mesh Role Configuration</div>
@@ -386,8 +391,8 @@ window.togglePane = function(paneId, btnId) {
           document.getElementById('espnow-status-data').style.display = 'block';
           /* Load device list */
           try { if (typeof listDevices === 'function') { listDevices(); } } catch(e) { console.warn('[ESP-NOW] listDevices not defined yet'); }
-          /* Check encryption status now that ESP-NOW is initialized */
-          try { if (typeof window.checkEncryptionStatus === 'function') { window.checkEncryptionStatus(); } } catch(e) { console.warn('[ESP-NOW] checkEncryptionStatus call error:', e); }
+          /* Load meshes now that ESP-NOW is initialized */
+          try { if (typeof window.loadMeshes === 'function') { window.loadMeshes(); } } catch(e) { console.warn('[ESP-NOW] loadMeshes call error:', e); }
           /* Load smart home metadata */
           try { if (typeof window.loadSmartHomeMetadata === 'function') { window.loadSmartHomeMetadata(); } } catch(e) { console.warn('[ESP-NOW] loadSmartHomeMetadata call error:', e); }
           /* Start message polling now that ESP-NOW is initialized */
@@ -460,14 +465,14 @@ window.togglePane = function(paneId, btnId) {
     // Falls back to individual refreshStatus() if the batch endpoint is unavailable.
     window.refreshStatusBatch = function() {
       var CMDS = [
-        'espnowstatus',     // 0
-        'espnowmode',      // 1
-        'bondstatus',      // 2
-        'espnowlist',      // 3
-        'espnowencstatus', // 4
-        'espnowdeviceinfo',// 5
-        'espnowmeshrole',  // 6
-        'espnowmeshstatus' // 7
+        'espnowstatus',          // 0
+        'espnowmode',            // 1
+        'bondstatus',            // 2
+        'espnowlist',            // 3
+        'espnowmeshes listjson', // 4  (was 'espnowencstatus' — replaced by multi-mesh JSON)
+        'espnowdeviceinfo',      // 5
+        'espnowmeshrole',        // 6
+        'espnowmeshstatus'       // 7
       ];
       fetch('/api/cli/batch', {
         method: 'POST',
@@ -533,7 +538,7 @@ window.togglePane = function(paneId, btnId) {
         // --- distribute remaining results to sub-functions ---
         if (isInitialized) {
           try { if (typeof listDevices === 'function') listDevices(results[2], results[3]); } catch(e) { console.warn('[ESP-NOW] Batch listDevices error:', e); }
-          try { if (typeof window.checkEncryptionStatus === 'function') window.checkEncryptionStatus(results[4]); } catch(e) { console.warn('[ESP-NOW] Batch encstatus error:', e); }
+          try { if (typeof window.loadMeshes === 'function') window.loadMeshes(results[4]); } catch(e) { console.warn('[ESP-NOW] Batch loadMeshes error:', e); }
           try { if (typeof window.loadSmartHomeMetadata === 'function') window.loadSmartHomeMetadata(results[5]); } catch(e) { console.warn('[ESP-NOW] Batch deviceinfo error:', e); }
           var isMeshInit = window.espnowIsMesh;
           if (isMeshInit) {
@@ -2851,53 +2856,11 @@ window.togglePane = function(paneId, btnId) {
         fetch('/api/cli', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd='+encodeURIComponent('espnowstationary '+(checked?'on':'off')) })
           .then(r=>r.text()).then(t=>{ var el=document.getElementById('smarthome-status'); if(el)el.textContent=t; if(typeof window.loadSmartHomeMetadata==='function')window.loadSmartHomeMetadata(); });
       });
-      document.getElementById('btn-set-passphrase').addEventListener('click', function() {
-        const passphrase = document.getElementById('encryption-passphrase').value.trim();
-        if (!passphrase) {
-          alert('Please enter a passphrase');
-          return;
-        }
-        // Target the primary mesh by default — this UI predates the multi-mesh
-        // model. A future mesh-management UI will let the user pick which slot
-        // to modify. For now: any mesh-aware operator should use the CLI.
-        fetch('/api/cli', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnowsetpassphrase primary "' + passphrase + '"')
-        })
-        .then(response => response.text())
-        .then(text => {
-          document.getElementById('encryption-passphrase').value = '';
-          addMessageToLog('ENCRYPTION', text);
-          // Refresh status to show actual state
-          if (typeof window.checkEncryptionStatus === 'function') {
-            window.checkEncryptionStatus();
-          }
-        })
-        .catch(error => {
-          document.getElementById('encryption-status').textContent = 'Error setting passphrase';
-          addMessageToLog('ERROR', 'Passphrase error: ' + error);
-        });
-      });
-      document.getElementById('btn-clear-passphrase').addEventListener('click', function() {
-        fetch('/api/cli', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=' + encodeURIComponent('espnowsetpassphrase primary clear')
-        })
-        .then(response => response.text())
-        .then(text => {
-          addMessageToLog('ENCRYPTION', text);
-          // Refresh status to show actual state
-          if (typeof window.checkEncryptionStatus === 'function') {
-            window.checkEncryptionStatus();
-          }
-        })
-        .catch(error => {
-          document.getElementById('encryption-status').textContent = 'Error clearing passphrase';
-          addMessageToLog('ERROR', 'Clear passphrase error: ' + error);
-        });
-      });
+      // NOTE: The old single-passphrase Encryption card was replaced by the
+      // Meshes card. Per-row action handlers (set passphrase, clear, rename,
+      // enable, disable, remove, set default) are wired in the meshes JS
+      // chunk below. The standalone btn-set-passphrase / btn-clear-passphrase
+      // buttons no longer exist.
       _on('btn-send-message','click', function() {
         const mac = document.getElementById('send-mac').value.trim();
         const message = document.getElementById('send-message').value.trim();
@@ -3191,48 +3154,143 @@ window.togglePane = function(paneId, btnId) {
 <script>
 (function() {
   try {
-    console.log('[ESP-NOW] Chunk 5d: Encryption status check');
-    window.checkEncryptionStatus = function(preloadedEncText) {
-      function applyEncStatus(text) {
-        const statusDiv = document.getElementById('encryption-status');
-        const setBtn = document.getElementById('btn-set-passphrase');
-        const clearBtn = document.getElementById('btn-clear-passphrase');
-        if (!statusDiv) return;
-        var hasPass = text && text.indexOf('Passphrase Set: Yes') >= 0;
-        if (hasPass) {
-          statusDiv.textContent = 'Encryption passphrase is set';
-        } else if (text.includes('Passphrase Set: No') || text.includes('Encryption Enabled: No')) {
-          statusDiv.textContent = 'No encryption passphrase set';
-        } else {
-          statusDiv.textContent = 'Encryption status unknown';
+    console.log('[ESP-NOW] Chunk 5d: Meshes (multi-mesh management)');
+
+    // window.gMeshes is the cached meshes JSON, kept so other UI bits (the
+    // pair-form chooser, the device-row badge resolver) can look up labels
+    // without re-fetching.
+    window.gMeshes = { nMeshes: 4, configuredCount: 0, defaultSlot: -1, meshes: [] };
+
+    function escHtml(s) {
+      if (s === null || s === undefined) return '';
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Resolve a meshId (slot index) to its label. Used by the device list to
+    // render the per-row mesh badge.
+    window.meshLabelForSlot = function(slot) {
+      var m = (window.gMeshes && window.gMeshes.meshes) || [];
+      for (var i = 0; i < m.length; i++) {
+        if (m[i].slot === slot) return m[i].label;
+      }
+      return '';
+    };
+    window.meshEnabledForSlot = function(slot) {
+      var m = (window.gMeshes && window.gMeshes.meshes) || [];
+      for (var i = 0; i < m.length; i++) {
+        if (m[i].slot === slot) return !!m[i].enabled;
+      }
+      return false;
+    };
+
+    function renderMeshesTable(data) {
+      var tbl = document.getElementById('meshes-table');
+      var addRow = document.getElementById('meshes-add-row');
+      var fullMsg = document.getElementById('meshes-full-msg');
+      var activeLabel = document.getElementById('mesh-active-label');
+      if (!tbl) return;
+
+      // Active mesh pill
+      var defLabel = '(none)';
+      if (data && Array.isArray(data.meshes)) {
+        for (var i = 0; i < data.meshes.length; i++) {
+          if (data.meshes[i].isDefault && data.meshes[i].enabled) {
+            defLabel = data.meshes[i].label;
+            break;
+          }
         }
-        if (setBtn) setBtn.style.display = hasPass ? 'none' : 'inline-flex';
-        if (clearBtn) clearBtn.style.display = hasPass ? 'inline-flex' : 'none';
       }
-      if (preloadedEncText !== undefined) {
-        applyEncStatus(preloadedEncText);
+      if (activeLabel) activeLabel.textContent = defLabel;
+
+      // Empty state
+      if (!data || !Array.isArray(data.meshes) || data.meshes.length === 0) {
+        tbl.innerHTML = '<div style="color:var(--muted);font-size:.85em;padding:8px 0">No meshes configured.</div>';
+        if (addRow) addRow.style.display = '';
+        if (fullMsg) fullMsg.style.display = 'none';
         return;
       }
-      // Only check if ESP-NOW is initialized
-      const indicator = document.getElementById('espnow-status-indicator');
-      const isInitialized = indicator && indicator.className.indexOf('status-enabled') >= 0;
-      if (!isInitialized) {
-        console.log('[ESP-NOW] Skipping encryption status check - ESP-NOW not initialized');
+
+      // Render rows. Step 2 = skeleton, no actions wired yet. Step 3 will
+      // attach handlers + inline-expand passphrase/rename forms.
+      var html = '';
+      for (var j = 0; j < data.meshes.length; j++) {
+        var m = data.meshes[j];
+        var label = escHtml(m.label);
+        var enabledPill = m.enabled
+          ? '<span style="font-size:.75em;padding:2px 8px;border-radius:6px;background:rgba(80,200,120,.15);color:#3a9d5d;border:1px solid rgba(80,200,120,.3)">enabled</span>'
+          : '<span style="font-size:.75em;padding:2px 8px;border-radius:6px;background:rgba(200,120,80,.15);color:#b86a3a;border:1px solid rgba(200,120,80,.3)">disabled</span>';
+        var defaultPill = m.isDefault
+          ? '<span style="font-size:.75em;padding:2px 8px;border-radius:6px;background:var(--accent,#4a90e2);color:#fff">default</span>'
+          : '';
+        var passPill = m.hasPassphrase
+          ? '<span style="font-size:.78em;color:var(--panel-fg)">passphrase ✓</span>'
+          : '<span style="font-size:.78em;color:var(--muted)">no passphrase</span>';
+
+        // Prominent Enable button when disabled (per UX decision); the
+        // catch-all action menu lives behind the ⋯ button for the rest.
+        var primaryAction = m.enabled
+          ? '<button class="btn btn-mesh-actions" data-slot="' + m.slot + '" data-label="' + label + '" style="font-size:.82em;padding:4px 10px">⋯</button>'
+          : '<button class="btn btn-mesh-enable" data-slot="' + m.slot + '" data-label="' + label + '" style="font-size:.82em;padding:4px 10px">Enable</button>';
+
+        html += '<div class="mesh-row" data-slot="' + m.slot + '" data-label="' + label + '" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:var(--crumb-bg);border:1px solid var(--border);flex-wrap:wrap">' +
+          '<span style="font-weight:600;color:var(--panel-fg);min-width:80px">' + label + '</span>' +
+          enabledPill +
+          defaultPill +
+          '<span style="font-size:.78em;color:var(--muted);font-family:monospace">' + escHtml(m.fingerprintHex || '') + '</span>' +
+          passPill +
+          '<span style="flex:1"></span>' +
+          primaryAction +
+          '</div>' +
+          '<div class="mesh-row-actions" data-slot="' + m.slot + '" style="display:none;padding:6px 10px;background:var(--bg);border-radius:8px;border:1px solid var(--border);margin-top:-2px"></div>';
+      }
+      tbl.innerHTML = html;
+
+      // Show "+ Add mesh" form only if there's a free slot.
+      var hasFreeSlot = (data.configuredCount || 0) < (data.nMeshes || 4);
+      if (addRow) addRow.style.display = hasFreeSlot ? '' : 'none';
+      if (fullMsg) fullMsg.style.display = hasFreeSlot ? 'none' : '';
+    }
+
+    // Public entry point. Accepts an optional preloaded JSON string from the
+    // batch refresh; otherwise fetches fresh.
+    window.loadMeshes = function(preloadedJsonText) {
+      function apply(jsonText) {
+        var data = null;
+        try { data = JSON.parse(jsonText); }
+        catch (e) {
+          console.warn('[ESP-NOW] loadMeshes: JSON parse failed:', e, 'raw=', jsonText);
+          return;
+        }
+        if (data && data.error) {
+          // Most commonly "ESP-NOW not initialized" before openespnow.
+          console.log('[ESP-NOW] loadMeshes: backend not ready:', data.error);
+          var tbl = document.getElementById('meshes-table');
+          if (tbl) tbl.innerHTML = '<div style="color:var(--muted);font-size:.85em;padding:8px 0">ESP-NOW not initialized.</div>';
+          return;
+        }
+        window.gMeshes = data;
+        renderMeshesTable(data);
+      }
+
+      if (preloadedJsonText !== undefined) {
+        apply(preloadedJsonText);
         return;
       }
+      // Standalone (non-batch) fetch
       fetch('/api/cli', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'cmd=' + encodeURIComponent('espnowencstatus')
+        body: 'cmd=' + encodeURIComponent('espnowmeshes listjson')
       })
-      .then(response => response.text())
-      .then(applyEncStatus)
-      .catch(error => {
-        console.error('[ESP-NOW] Error checking encryption status:', error);
+      .then(function(r) { return r.text(); })
+      .then(apply)
+      .catch(function(err) {
+        console.error('[ESP-NOW] loadMeshes error:', err);
       });
     };
-    console.log('[ESP-NOW] Chunk 5c: Encryption status check ready');
-  } catch(e) { console.error('[ESP-NOW] Chunk 5c error:', e); }
+
+    console.log('[ESP-NOW] Chunk 5d: Meshes ready (skeleton)');
+  } catch(e) { console.error('[ESP-NOW] Chunk 5d error:', e); }
 })();
 </script>
 <script>
