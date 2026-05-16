@@ -1305,13 +1305,12 @@ static void initPrimaryMeshFromLegacySettings() {
     m0.fingerprint = meshFingerprintForLabel(m0.label);
     return;
   }
-  if (gSettings.espnowPassphrase.length() == 0) {
-    // No legacy passphrase either — fresh device with nothing configured.
-    // Leave meshes[0] empty; user will configure via setup wizard or CLI.
-    return;
-  }
+  // Always bootstrap "primary" in slot 0, even on a fresh device with no
+  // passphrase yet. Decoupling 'espnowmeshes add' from passphrase setup
+  // (Phase 2.8 refactor) means CLI users target a mesh by name first and
+  // set its passphrase second — so the named slot has to exist at boot.
   m0.label       = "primary";
-  m0.passphrase  = gSettings.espnowPassphrase;
+  m0.passphrase  = gSettings.espnowPassphrase;  // empty on a fresh device
   m0.fingerprint = meshFingerprintForLabel(m0.label);
   m0.enabled     = true;
   m0.isDefault   = true;
@@ -8646,18 +8645,19 @@ static const char* meshesCmd_list() {
   return "OK";
 }
 
-static const char* meshesCmd_add(const String& label, const String& passphrase) {
+static const char* meshesCmd_add(const String& label) {
   if (!isValidMeshLabel(label)) {
     return "Invalid label. Use 1-16 printable ASCII chars, no whitespace/quotes/slash. "
            "Reserved labels: system, internal, all, default, none.";
   }
-  if (passphrase.length() < 8) {
-    return "Passphrase must be at least 8 characters.";
-  }
   // Already exists?
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     if (gSettings.meshes[i].label == label) {
-      return "Mesh with that label already exists. Use 'setpassphrase' to change it.";
+      if (gSettings.meshes[i].enabled) {
+        return "Mesh with that label already exists. Use 'espnowsetpassphrase' to change its passphrase.";
+      } else {
+        return "Mesh with that label exists but is disabled. Use 'espnowmeshes enable <label>' to re-enable.";
+      }
     }
   }
   // Fingerprint collision check (16-bit hash; vanishingly unlikely but cheap to verify)
@@ -8671,10 +8671,10 @@ static const char* meshesCmd_add(const String& label, const String& passphrase) 
   if (slot < 0) {
     return "All mesh slots full. Remove an existing mesh first.";
   }
-  setSetting(gSettings.meshes[slot].label,      label);
-  setSetting(gSettings.meshes[slot].passphrase, passphrase);
+  setSetting(gSettings.meshes[slot].label, label);
+  setSetting(gSettings.meshes[slot].passphrase, String(""));
   gSettings.meshes[slot].fingerprint = fp;
-  setSetting(gSettings.meshes[slot].enabled,    true);
+  setSetting(gSettings.meshes[slot].enabled, true);
   // First mesh added becomes default if no other is flagged
   bool anyDefault = false;
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
@@ -8682,23 +8682,54 @@ static const char* meshesCmd_add(const String& label, const String& passphrase) 
   }
   if (!anyDefault) setSetting(gSettings.meshes[slot].isDefault, true);
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  snprintf(getDebugBuffer(), 1024, "Added mesh '%s' in slot %d (fp=0x%04X)%s",
+  snprintf(getDebugBuffer(), 1024,
+           "Added mesh '%s' in slot %d (fp=0x%04X)%s. "
+           "No passphrase set yet — run 'espnowsetpassphrase %s <passphrase>' to enable encryption.",
            label.c_str(), slot, (unsigned)fp,
-           gSettings.meshes[slot].isDefault ? " — set as default" : "");
+           gSettings.meshes[slot].isDefault ? " — set as default" : "",
+           label.c_str());
   return getDebugBuffer();
 }
 
 static const char* meshesCmd_remove(const String& label) {
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     if (gSettings.meshes[i].label == label) {
+      if (gSettings.meshes[i].isDefault) {
+        return "Cannot remove the default mesh. Use 'espnowmeshes setdefault <other>' first.";
+      }
       setSetting(gSettings.meshes[i].enabled, false);
       // Don't clear label — preserves it for future re-enable. To fully
       // delete, use rename to "" or wipe via 'espnowmeshes wipe' (future cmd).
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       snprintf(getDebugBuffer(), 1024,
                "Disabled mesh '%s'. Paired peers in this mesh remain in their slots "
-               "but their frames will be silently dropped. Run 'espnowunpair' to clean up.",
-               label.c_str());
+               "but their frames will be silently dropped. Re-enable with "
+               "'espnowmeshes enable %s' or fully unpair with 'espnowunpair'.",
+               label.c_str(), label.c_str());
+      return getDebugBuffer();
+    }
+  }
+  return "Mesh not found. Run 'espnowmeshes' to list.";
+}
+
+static const char* meshesCmd_enable(const String& label) {
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].label == label) {
+      if (gSettings.meshes[i].enabled) {
+        return "Mesh is already enabled.";
+      }
+      if (gSettings.meshes[i].passphrase.length() == 0) {
+        return "Mesh has no passphrase set. Run 'espnowmeshes setpassphrase' first.";
+      }
+      setSetting(gSettings.meshes[i].enabled, true);
+      // Re-stamp fingerprint defensively in case the label was mutated
+      // while disabled (rename doesn't refuse renaming disabled slots).
+      gSettings.meshes[i].fingerprint = meshFingerprintForLabel(label);
+      if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+      snprintf(getDebugBuffer(), 1024,
+               "Enabled mesh '%s' (fp=0x%04X). Paired peers in this mesh "
+               "will start exchanging frames again.",
+               label.c_str(), (unsigned)gSettings.meshes[i].fingerprint);
       return getDebugBuffer();
     }
   }
@@ -8723,28 +8754,51 @@ static const char* meshesCmd_setdefault(const String& label) {
   return "Mesh not found.";
 }
 
+// Set/clear the passphrase on a mesh by label. Pass an empty passphrase
+// to clear. For slot 0 (the legacy primary mesh) this routes through
+// setEspNowPassphrase() so gEspNow->derivedKey is re-derived immediately —
+// otherwise the new passphrase wouldn't take effect for encrypted pairings
+// until reboot.
 static const char* meshesCmd_setpassphrase(const String& label, const String& passphrase) {
-  if (passphrase.length() < 8) {
-    return "Passphrase must be at least 8 characters.";
+  // Length check — but allow empty as a "clear" sentinel.
+  if (passphrase.length() > 0 && passphrase.length() < 8) {
+    return "Passphrase must be at least 8 characters (or empty to clear).";
+  }
+  if (passphrase.length() > 128) {
+    return "Passphrase must be 128 characters or less.";
   }
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     if (gSettings.meshes[i].label == label) {
-      setSetting(gSettings.meshes[i].passphrase, passphrase);
-      // If this is mesh 0, also sync the legacy field — keeps Fix A's
-      // invariant intact (setEspNowPassphrase is the canonical funnel,
-      // but direct mesh-passphrase edits should also keep legacy in sync
-      // until Phase 2.7 removes the legacy field).
       if (i == 0) {
-        setSetting(gSettings.espnowPassphrase, passphrase);
+        // Route slot 0 through the canonical funnel: updates the legacy
+        // field, re-derives gEspNow->derivedKey, and re-stamps mesh
+        // metadata. Without this, encrypted pairings would keep using
+        // the OLD derivedKey until reboot.
+        setEspNowPassphrase(passphrase);
+      } else {
+        setSetting(gSettings.meshes[i].passphrase, passphrase);
+        gSettings.meshes[i].fingerprint = meshFingerprintForLabel(label);
+        // Non-zero slots don't have their own derived key yet — that lands
+        // in Phase 3 (Signed Ephemeral DH). Until then the stored passphrase
+        // is just persisted metadata, not used for runtime encryption.
       }
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-      snprintf(getDebugBuffer(), 1024,
-               "Updated passphrase for mesh '%s'. Existing paired peers will need to "
-               "re-pair if they were using the old passphrase for encryption.", label.c_str());
+      if (passphrase.length() == 0) {
+        snprintf(getDebugBuffer(), 1024,
+                 "Cleared passphrase for mesh '%s'.%s", label.c_str(),
+                 i == 0 ? " ESP-NOW encryption disabled for primary mesh." : "");
+      } else {
+        snprintf(getDebugBuffer(), 1024,
+                 "Updated passphrase for mesh '%s'.%s "
+                 "Existing paired peers will need to re-pair if they were "
+                 "using the old passphrase for encryption.",
+                 label.c_str(),
+                 i == 0 ? " Key re-derived." : " (Not used for current encryption — Phase 3.)");
+      }
       return getDebugBuffer();
     }
   }
-  return "Mesh not found.";
+  return "Mesh not found. Run 'espnowmeshes add <label>' first.";
 }
 
 static const char* meshesCmd_rename(const String& oldLabel, const String& newLabel) {
@@ -8784,12 +8838,16 @@ const char* cmd_espnow_meshes(const String& argsInput) {
 
   if (sub == "list")     return meshesCmd_list();
   if (sub == "add") {
-    if (!a.hasMinArgs(3)) return "Usage: espnowmeshes add <label> <passphrase>";
-    return meshesCmd_add(a.arg(1), a.arg(2));
+    if (!a.hasMinArgs(2)) return "Usage: espnowmeshes add <label>  (run 'espnowsetpassphrase <label> <pw>' after to enable encryption)";
+    return meshesCmd_add(a.arg(1));
   }
-  if (sub == "remove") {
+  if (sub == "remove" || sub == "disable") {
     if (!a.hasMinArgs(2)) return "Usage: espnowmeshes remove <label>";
     return meshesCmd_remove(a.arg(1));
+  }
+  if (sub == "enable") {
+    if (!a.hasMinArgs(2)) return "Usage: espnowmeshes enable <label>";
+    return meshesCmd_enable(a.arg(1));
   }
   if (sub == "setdefault") {
     if (!a.hasMinArgs(2)) return "Usage: espnowmeshes setdefault <label>";
@@ -8803,7 +8861,7 @@ const char* cmd_espnow_meshes(const String& argsInput) {
     if (!a.hasMinArgs(3)) return "Usage: espnowmeshes rename <oldlabel> <newlabel>";
     return meshesCmd_rename(a.arg(1), a.arg(2));
   }
-  return "Usage: espnowmeshes [list|add|remove|setdefault|setpassphrase|rename] ...";
+  return "Usage: espnowmeshes [list|add|remove|enable|setdefault|setpassphrase|rename] ...";
 }
 
 const char* cmd_espnow_unpair(const String& argsInput) {
@@ -9228,6 +9286,22 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
 // ============================================================================
 
 // Set passphrase command
+// Resolve a mesh label to its slot index. Returns -1 if not found.
+static int meshSlotByLabel(const String& label) {
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].label == label) return (int)i;
+  }
+  return -1;
+}
+
+// Return the slot index of the currently-default mesh, or 0 as a fallback.
+static int defaultMeshSlot() {
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].enabled && gSettings.meshes[i].isDefault) return (int)i;
+  }
+  return 0;
+}
+
 const char* cmd_espnow_setpassphrase(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
@@ -9235,39 +9309,59 @@ const char* cmd_espnow_setpassphrase(const String& argsInput) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  String passphrase = argsInput;
-  passphrase.trim();
-
-  if (passphrase.length() == 0) {
-    return "Usage: espnow setpassphrase \"your_passphrase_here\"\n"
-           "       espnow setpassphrase clear";
+  // Required form: espnowsetpassphrase <mesh> <passphrase>
+  //                espnowsetpassphrase <mesh> clear
+  // No backward-compat for the single-arg form — the mesh name is
+  // mandatory so the operator is always explicit about which slot
+  // they're modifying.
+  CommandArgs a(argsInput);
+  if (a.count() < 2) {
+    return "Usage: espnowsetpassphrase <mesh> <passphrase>\n"
+           "       espnowsetpassphrase <mesh> clear\n"
+           "Run 'espnowmeshes list' to see available mesh labels.";
   }
 
-  if (passphrase == "clear") {
-    setEspNowPassphrase("");
-    return "ESP-NOW encryption disabled. All future pairings will be unencrypted.";
+  String meshLabel = a.arg(0);
+  String passphrase = a.arg(1);
+  // Allow extra tokens to flow in (e.g. unquoted passphrases with spaces)
+  for (uint8_t i = 2; i < a.count(); i++) {
+    passphrase += " ";
+    passphrase += a.arg(i);
   }
 
-  if (passphrase.startsWith("\"") && passphrase.endsWith("\"")) {
+  bool clearing = (passphrase == "clear");
+  if (clearing) passphrase = "";
+
+  // Strip surrounding quotes if present
+  if (passphrase.length() >= 2 &&
+      passphrase.startsWith("\"") && passphrase.endsWith("\"")) {
     passphrase = passphrase.substring(1, passphrase.length() - 1);
   }
 
-  if (passphrase.length() < 8) {
-    return "Error: Passphrase must be at least 8 characters long.";
+  // Resolve mesh
+  int slot = meshSlotByLabel(meshLabel);
+  if (slot < 0) {
+    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+    snprintf(getDebugBuffer(), 1024,
+             "Mesh '%s' not found. Run 'espnowmeshes add %s' first, "
+             "or 'espnowmeshes list' to see configured meshes.",
+             meshLabel.c_str(), meshLabel.c_str());
+    return getDebugBuffer();
   }
 
-  if (passphrase.length() > 128) {
-    return "Error: Passphrase must be 128 characters or less.";
+  // Validate passphrase length (clearing bypasses)
+  if (!clearing) {
+    if (passphrase.length() < 8) {
+      return "Error: Passphrase must be at least 8 characters long.";
+    }
+    if (passphrase.length() > 128) {
+      return "Error: Passphrase must be 128 characters or less.";
+    }
   }
 
-  setEspNowPassphrase(passphrase);
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  snprintf(getDebugBuffer(), 1024,
-           "ESP-NOW encryption passphrase set. Use 'espnowpairsecure' to pair with encryption.\n"
-           "Key derived from: %s...%s",
-           passphrase.substring(0, 3).c_str(),
-           passphrase.substring(passphrase.length() - 3).c_str());
-  return getDebugBuffer();
+  // Delegate to the canonical mesh-aware path (handles slot-0 key
+  // re-derivation, non-zero slots get persisted metadata only).
+  return meshesCmd_setpassphrase(meshLabel, passphrase);
 }
 
 // Encryption status command
@@ -9331,7 +9425,7 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return "Encryption not enabled. Run 'espnowsetpassphrase \"your_phrase\"' first.";
+    return "Encryption not enabled. Run 'espnowsetpassphrase <mesh> <passphrase>' first.";
   }
 
   CommandArgs a(argsInput);
@@ -9474,7 +9568,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase \"your_phrase\"' and pair securely.";
+    return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase <mesh> <passphrase>' and pair securely.";
   }
 
   CommandArgs a(argsInput);
@@ -9537,7 +9631,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase \"your_phrase\"' and pair securely.";
+    return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase <mesh> <passphrase>' and pair securely.";
   }
 
   CommandArgs a(argsInput);
@@ -9601,9 +9695,8 @@ const char* cmd_espnow_remote(const String& argsInput) {
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase "
-           "your_phrase"
-           "' and pair securely.";
+    return "ESP-NOW encryption required. Set a passphrase with "
+           "'espnowsetpassphrase <mesh> <passphrase>' and pair securely.";
   }
 
   CommandArgs a(argsInput);
@@ -10582,7 +10675,7 @@ extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Mesh Configuration ----
   { "espnowmeshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
   { "espnowmeshmetrics", "Show mesh routing metrics (forwards, path stats, drops).", false, cmd_espnow_meshmetrics },
-  { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|setdefault|setpassphrase|rename] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label> <passphrase>\n       espnowmeshes remove <label>\n       espnowmeshes setdefault <label>\n       espnowmeshes setpassphrase <label> <passphrase>\n       espnowmeshes rename <oldLabel> <newLabel>" },
+  { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|enable|setdefault|rename] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label>          (then set passphrase via 'espnowsetpassphrase <label> <pw>')\n       espnowmeshes remove <label>       (alias: disable)\n       espnowmeshes enable <label>\n       espnowmeshes setdefault <label>\n       espnowmeshes rename <oldLabel> <newLabel>" },
   { "espnowmode", "Get/set ESP-NOW mode: 'espnowmode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnowmode [direct|mesh]" },
   { "espnowmeshttl", "Get/set mesh TTL: 'espnowmeshttl [1-10|adaptive]'.", false, cmd_espnow_meshttl },
   { "espnowsetname", "Get/set device name: 'espnowsetname [name]'.", true, cmd_espnow_setname },
@@ -10644,7 +10737,7 @@ extern const CommandEntry espNowCommands[] = {
 #endif
   
   // ---- ESP-NOW Encryption ----
-  { "espnowsetpassphrase", "Set encryption passphrase: 'espnowsetpassphrase \"phrase\"'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase \"your_passphrase_here\"\n       espnowsetpassphrase clear" },
+  { "espnowsetpassphrase", "Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase <mesh> <passphrase>\n       espnowsetpassphrase <mesh> clear" },
   { "espnowencstatus", "Show ESP-NOW encryption status and key fingerprint.", true, cmd_espnow_encstatus },
   { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'.", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name> [mesh]" },
   
@@ -10708,7 +10801,10 @@ static const SettingEntry espnowSettingEntries[] = {
   { "friendlyName", SETTING_STRING, &gSettings.espnowFriendlyName, 0, 0, "", 0, 0, "Friendly Name", nullptr, false, "identity", "espnowfriendlyname" },
   { "stationary", SETTING_BOOL, &gSettings.espnowStationary, false, 0, nullptr, 0, 1, "Stationary", nullptr, false, "identity", "espnowstationary" },
   { "firstTimeSetup",             SETTING_BOOL,   &gSettings.espnowFirstTimeSetup,       false, 0, nullptr, 0, 1, "First Time Setup", nullptr, false, nullptr, "espnowfirsttimesetup" },
-  { "passphrase", SETTING_STRING, &gSettings.espnowPassphrase, 0, 0, "", 0, 0, "Passphrase", nullptr, true, "identity", "espnowsetpassphrase" },
+  // NOTE: the legacy "passphrase" settings-registry entry was removed —
+  // passphrase is now mesh-scoped. Use 'espnowsetpassphrase <mesh> <pw>'
+  // from the CLI, or the mesh-management UI (TODO). Auto-saving from
+  // Settings JSON to the legacy gSettings.espnowPassphrase field is gone.
   { "meshRole", SETTING_INT, &gSettings.meshRole, 0, 0, nullptr, 0, 2, "Mesh Role", nullptr, false, "mesh", "espnowmeshrole" },
   { "masterMAC", SETTING_STRING, &gSettings.meshMasterMAC, 0, 0, "", 0, 0, "Master MAC", nullptr, false, "mesh", "espnowmeshmaster" },
   { "backupMAC", SETTING_STRING, &gSettings.meshBackupMAC, 0, 0, "", 0, 0, "Backup MAC", nullptr, false, "mesh", "espnowmeshbackup" },
