@@ -7260,6 +7260,32 @@ const char* cmd_espnow_resetstats(const String& argsInput) {
 }
 
 // ESP-NOW pair device command
+// Phase 2.5: parse an optional mesh argument from a CLI command.
+// Accepts either a numeric index (0..N_MESHES-1) or a configured mesh label.
+// Returns N_MESHES on parse error, or 0xFE if the arg is missing entirely
+// (which the caller should interpret as "default mesh" — meshId=0 today).
+// Caller is responsible for validating the resulting meshId is enabled.
+static uint8_t parseMeshArgOrDefault(const String& arg) {
+  if (arg.length() == 0) return 0xFE;  // missing
+  // Try numeric first
+  if (arg.length() <= 2) {
+    bool isNum = true;
+    for (size_t i = 0; i < arg.length(); i++) {
+      if (arg[i] < '0' || arg[i] > '9') { isNum = false; break; }
+    }
+    if (isNum) {
+      int n = arg.toInt();
+      if (n < 0 || n >= (int)Settings::N_MESHES) return Settings::N_MESHES;  // out of range
+      return (uint8_t)n;
+    }
+  }
+  // Treat as label
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].label == arg) return i;
+  }
+  return Settings::N_MESHES;  // not found
+}
+
 const char* cmd_espnow_pair(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
@@ -7268,13 +7294,21 @@ const char* cmd_espnow_pair(const String& argsInput) {
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: espnow pair <mac> <name>";
+  if (!a.hasMinArgs(2)) return "Usage: espnow pair <mac> <name> [mesh]";
 
   uint8_t mac[6];
   if (!a.argMac(0, mac)) {
     return "Invalid MAC address format. Use AA:BB:CC:DD:EE:FF";
   }
-  String name = a.remaining(0);
+  // Phase 2.5: name is now a single token (was: a.remaining(0)). The
+  // optional 3rd arg is the mesh (label or 0..N_MESHES-1). Drops support
+  // for spaces in peer names via this command — use underscores instead.
+  String name = a.arg(1);
+  uint8_t meshId = parseMeshArgOrDefault(a.arg(2));
+  if (meshId == Settings::N_MESHES) {
+    return "Invalid mesh. Use a configured label or numeric index 0..3.";
+  }
+  if (meshId == 0xFE) meshId = 0;  // default to mesh 0 (primary)
   String macStr = a.arg(0);
   // Prevent pairing with self MAC (STA or AP interface)
   {
@@ -7307,6 +7341,7 @@ const char* cmd_espnow_pair(const String& argsInput) {
   gEspNow->devices[gEspNow->deviceCount].name = name;
   gEspNow->devices[gEspNow->deviceCount].encrypted = false;
   memset(gEspNow->devices[gEspNow->deviceCount].key, 0, 16);
+  gEspNow->devices[gEspNow->deviceCount].meshId = meshId;  // Phase 2.5
   gEspNow->deviceCount++;
 
   removeFromUnpairedList(mac);
@@ -8547,6 +8582,232 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
 }
 
 // Unpair device command
+// ============================================================================
+// Phase 2.8 — espnowmeshes CLI: manage the multi-mesh data model
+// ============================================================================
+//
+// Subcommands:
+//   espnowmeshes                                       — list all configured meshes
+//   espnowmeshes add <label> <passphrase>              — add a new mesh
+//   espnowmeshes remove <label>                        — disable a mesh (does NOT unpair peers)
+//   espnowmeshes setdefault <label>                    — set the default mesh
+//   espnowmeshes setpassphrase <label> <passphrase>    — change a mesh's passphrase
+//   espnowmeshes rename <oldlabel> <newlabel>          — rename (changes fingerprint!)
+//
+// Mesh slot 0 ("primary") is special: it's auto-populated from the legacy
+// gSettings.espnowPassphrase via the init shim and Fix A's setEspNowPassphrase
+// sync. Removing or renaming it is allowed but breaks comms with existing
+// peers until they too rename.
+
+static bool isValidMeshLabel(const String& label) {
+  if (label.length() == 0 || label.length() > 16) return false;
+  // ASCII printable, no whitespace, no special-meaning characters
+  for (size_t i = 0; i < label.length(); i++) {
+    char c = label[i];
+    if (c < 0x21 || c > 0x7E) return false;  // printable, no space
+    if (c == '"' || c == '\\' || c == '/' || c == '=') return false;
+  }
+  // Reserved labels — avoid colliding with system/audit log conventions
+  if (label == "system" || label == "internal" || label == "all" ||
+      label == "default" || label == "none") return false;
+  return true;
+}
+
+static int findFreeMeshSlot() {
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (!gSettings.meshes[i].enabled && gSettings.meshes[i].label.length() == 0) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+static const char* meshesCmd_list() {
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  char* buf = getDebugBuffer();
+  int pos = 0;
+  pos += snprintf(buf + pos, 1024 - pos, "=== Configured meshes (N_MESHES=%d) ===\n",
+                  (int)Settings::N_MESHES);
+  int configured = 0;
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    const Settings::MeshIdentity& m = gSettings.meshes[i];
+    if (m.label.length() == 0 && !m.enabled) continue;
+    configured++;
+    pos += snprintf(buf + pos, 1024 - pos,
+                    "  [%u] %-16s  %s  fp=0x%04X%s%s\n",
+                    (unsigned)i,
+                    m.label.length() ? m.label.c_str() : "(empty)",
+                    m.enabled ? "enabled" : "disabled",
+                    (unsigned)m.fingerprint,
+                    m.isDefault ? "  (default)" : "",
+                    m.passphrase.length() ? "  passphrase set" : "");
+  }
+  if (configured == 0) {
+    pos += snprintf(buf + pos, 1024 - pos, "  (none — run 'espnowmeshes add <label> <passphrase>')\n");
+  }
+  return buf;
+}
+
+static const char* meshesCmd_add(const String& label, const String& passphrase) {
+  if (!isValidMeshLabel(label)) {
+    return "Invalid label. Use 1-16 printable ASCII chars, no whitespace/quotes/slash. "
+           "Reserved labels: system, internal, all, default, none.";
+  }
+  if (passphrase.length() < 8) {
+    return "Passphrase must be at least 8 characters.";
+  }
+  // Already exists?
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].label == label) {
+      return "Mesh with that label already exists. Use 'setpassphrase' to change it.";
+    }
+  }
+  // Fingerprint collision check (16-bit hash; vanishingly unlikely but cheap to verify)
+  uint16_t fp = meshFingerprintForLabel(label);
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].enabled && gSettings.meshes[i].fingerprint == fp) {
+      return "Label fingerprint collides with an existing mesh. Pick a different label.";
+    }
+  }
+  int slot = findFreeMeshSlot();
+  if (slot < 0) {
+    return "All mesh slots full. Remove an existing mesh first.";
+  }
+  setSetting(gSettings.meshes[slot].label,      label);
+  setSetting(gSettings.meshes[slot].passphrase, passphrase);
+  gSettings.meshes[slot].fingerprint = fp;
+  setSetting(gSettings.meshes[slot].enabled,    true);
+  // First mesh added becomes default if no other is flagged
+  bool anyDefault = false;
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].enabled && gSettings.meshes[i].isDefault) { anyDefault = true; break; }
+  }
+  if (!anyDefault) setSetting(gSettings.meshes[slot].isDefault, true);
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  snprintf(getDebugBuffer(), 1024, "Added mesh '%s' in slot %d (fp=0x%04X)%s",
+           label.c_str(), slot, (unsigned)fp,
+           gSettings.meshes[slot].isDefault ? " — set as default" : "");
+  return getDebugBuffer();
+}
+
+static const char* meshesCmd_remove(const String& label) {
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].label == label) {
+      setSetting(gSettings.meshes[i].enabled, false);
+      // Don't clear label — preserves it for future re-enable. To fully
+      // delete, use rename to "" or wipe via 'espnowmeshes wipe' (future cmd).
+      if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+      snprintf(getDebugBuffer(), 1024,
+               "Disabled mesh '%s'. Paired peers in this mesh remain in their slots "
+               "but their frames will be silently dropped. Run 'espnowunpair' to clean up.",
+               label.c_str());
+      return getDebugBuffer();
+    }
+  }
+  return "Mesh not found. Run 'espnowmeshes' to list.";
+}
+
+static const char* meshesCmd_setdefault(const String& label) {
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].label == label) {
+      if (!gSettings.meshes[i].enabled) {
+        return "Cannot set a disabled mesh as default. Enable it first.";
+      }
+      // Clear isDefault on all, then set on target
+      for (uint8_t j = 0; j < Settings::N_MESHES; j++) {
+        setSetting(gSettings.meshes[j].isDefault, j == i);
+      }
+      if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+      snprintf(getDebugBuffer(), 1024, "Set '%s' as default mesh.", label.c_str());
+      return getDebugBuffer();
+    }
+  }
+  return "Mesh not found.";
+}
+
+static const char* meshesCmd_setpassphrase(const String& label, const String& passphrase) {
+  if (passphrase.length() < 8) {
+    return "Passphrase must be at least 8 characters.";
+  }
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].label == label) {
+      setSetting(gSettings.meshes[i].passphrase, passphrase);
+      // If this is mesh 0, also sync the legacy field — keeps Fix A's
+      // invariant intact (setEspNowPassphrase is the canonical funnel,
+      // but direct mesh-passphrase edits should also keep legacy in sync
+      // until Phase 2.7 removes the legacy field).
+      if (i == 0) {
+        setSetting(gSettings.espnowPassphrase, passphrase);
+      }
+      if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+      snprintf(getDebugBuffer(), 1024,
+               "Updated passphrase for mesh '%s'. Existing paired peers will need to "
+               "re-pair if they were using the old passphrase for encryption.", label.c_str());
+      return getDebugBuffer();
+    }
+  }
+  return "Mesh not found.";
+}
+
+static const char* meshesCmd_rename(const String& oldLabel, const String& newLabel) {
+  if (!isValidMeshLabel(newLabel)) {
+    return "Invalid new label. See 'espnowmeshes add' for label rules.";
+  }
+  // New label must not collide
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].label == newLabel) {
+      return "Another mesh already has that label.";
+    }
+  }
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].label == oldLabel) {
+      setSetting(gSettings.meshes[i].label, newLabel);
+      gSettings.meshes[i].fingerprint = meshFingerprintForLabel(newLabel);
+      if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+      snprintf(getDebugBuffer(), 1024,
+               "Renamed mesh '%s' -> '%s' (new fp=0x%04X). WARNING: peers in this mesh "
+               "must also rename or comms will break — the fingerprint changed.",
+               oldLabel.c_str(), newLabel.c_str(),
+               (unsigned)gSettings.meshes[i].fingerprint);
+      return getDebugBuffer();
+    }
+  }
+  return "Mesh not found.";
+}
+
+const char* cmd_espnow_meshes(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs a(argsInput);
+
+  if (a.count() == 0) return meshesCmd_list();
+
+  String sub = a.arg(0);
+  sub.toLowerCase();
+
+  if (sub == "list")     return meshesCmd_list();
+  if (sub == "add") {
+    if (!a.hasMinArgs(3)) return "Usage: espnowmeshes add <label> <passphrase>";
+    return meshesCmd_add(a.arg(1), a.arg(2));
+  }
+  if (sub == "remove") {
+    if (!a.hasMinArgs(2)) return "Usage: espnowmeshes remove <label>";
+    return meshesCmd_remove(a.arg(1));
+  }
+  if (sub == "setdefault") {
+    if (!a.hasMinArgs(2)) return "Usage: espnowmeshes setdefault <label>";
+    return meshesCmd_setdefault(a.arg(1));
+  }
+  if (sub == "setpassphrase") {
+    if (!a.hasMinArgs(3)) return "Usage: espnowmeshes setpassphrase <label> <passphrase>";
+    return meshesCmd_setpassphrase(a.arg(1), a.arg(2));
+  }
+  if (sub == "rename") {
+    if (!a.hasMinArgs(3)) return "Usage: espnowmeshes rename <oldlabel> <newlabel>";
+    return meshesCmd_rename(a.arg(1), a.arg(2));
+  }
+  return "Usage: espnowmeshes [list|add|remove|setdefault|setpassphrase|rename] ...";
+}
+
 const char* cmd_espnow_unpair(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
@@ -9077,11 +9338,19 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
 
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2)) {
-    return "Usage: espnow pairsecure <mac_address> <device_name>";
+    return "Usage: espnow pairsecure <mac_address> <device_name> [mesh]";
   }
 
   String macStr = a.arg(0);
-  String deviceName = a.remaining(0);
+  // Phase 2.5: name is now a single token (was: a.remaining(0)). Optional
+  // 3rd arg is mesh label or numeric index. Use underscores in names if
+  // you previously relied on multi-word peer names.
+  String deviceName = a.arg(1);
+  uint8_t meshId = parseMeshArgOrDefault(a.arg(2));
+  if (meshId == Settings::N_MESHES) {
+    return "Invalid mesh. Use a configured label or numeric index 0..3.";
+  }
+  if (meshId == 0xFE) meshId = 0;
 
   uint8_t mac[6];
   if (!parseMacAddress(macStr, mac)) {
@@ -9119,6 +9388,7 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   gEspNow->devices[gEspNow->deviceCount].name = deviceName;
   gEspNow->devices[gEspNow->deviceCount].encrypted = true;
   memcpy(gEspNow->devices[gEspNow->deviceCount].key, gEspNow->derivedKey, 16);
+  gEspNow->devices[gEspNow->deviceCount].meshId = meshId;  // Phase 2.5
   gEspNow->deviceCount++;
 
   removeFromUnpairedList(mac);
@@ -10307,13 +10577,14 @@ extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Initialization & Pairing ----
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },
   { "closeespnow", "Deinitialize ESP-NOW and free resources.", true, cmd_espnow_deinit },
-  { "espnowpair", "Pair ESP-NOW device: 'espnowpair <mac> <name>'.", true, cmd_espnow_pair, "Usage: espnowpair <mac> <name>" },
+  { "espnowpair", "Pair ESP-NOW device: 'espnowpair <mac> <name> [mesh]'.", true, cmd_espnow_pair, "Usage: espnowpair <mac> <name> [mesh]" },
   { "espnowunpair", "Unpair ESP-NOW device: 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>" },
   { "espnowlist", "List all paired ESP-NOW devices.", false, cmd_espnow_list },
   
   // ---- ESP-NOW Mesh Configuration ----
   { "espnowmeshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
   { "espnowmeshmetrics", "Show mesh routing metrics (forwards, path stats, drops).", false, cmd_espnow_meshmetrics },
+  { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|setdefault|setpassphrase|rename] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label> <passphrase>\n       espnowmeshes remove <label>\n       espnowmeshes setdefault <label>\n       espnowmeshes setpassphrase <label> <passphrase>\n       espnowmeshes rename <oldLabel> <newLabel>" },
   { "espnowmode", "Get/set ESP-NOW mode: 'espnowmode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnowmode [direct|mesh]" },
   { "espnowmeshttl", "Get/set mesh TTL: 'espnowmeshttl [1-10|adaptive]'.", false, cmd_espnow_meshttl },
   { "espnowsetname", "Get/set device name: 'espnowsetname [name]'.", true, cmd_espnow_setname },
@@ -10377,7 +10648,7 @@ extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Encryption ----
   { "espnowsetpassphrase", "Set encryption passphrase: 'espnowsetpassphrase \"phrase\"'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase \"your_passphrase_here\"\n       espnowsetpassphrase clear" },
   { "espnowencstatus", "Show ESP-NOW encryption status and key fingerprint.", true, cmd_espnow_encstatus },
-  { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name>'.", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name>" },
+  { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'.", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name> [mesh]" },
   
   // ---- ESP-NOW Testing Commands ----
   { "teststreams", "Test topology stream management functions.", false, cmd_test_streams },
