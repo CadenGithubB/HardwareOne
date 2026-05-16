@@ -192,7 +192,7 @@ struct MeshPeerHealth {
   bool isActive;                 // true if this slot is in use
 };
 
-// hbRssi: pass RSSI from V3PayloadHeartbeat; use -128 to leave peer->rssi unchanged.
+// hbRssi: pass RSSI from V4PayloadHeartbeat; use -128 to leave peer->rssi unchanged.
 void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi = -128);
 
 // Fills JsonArray for espnow meshstatus: union of active gMeshPeers + paired remotes not yet in slots.
@@ -579,10 +579,10 @@ struct RouterMetrics {
   uint32_t retriesSucceeded;     // Successful retries
   uint32_t queueOverflows;       // Times queue was full
   // V3 binary fragmentation metrics
-  uint32_t v3FragTx;             // Total V3 fragments transmitted
-  uint32_t v3FragRx;             // Total V3 fragments received
-  uint32_t v3FragRxCompleted;    // V3 messages fully reassembled
-  uint32_t v3FragRxGc;           // V3 reassembly contexts GC'ed due to timeout
+  uint32_t v4FragTx;             // Total V3 fragments transmitted
+  uint32_t v4FragRx;             // Total V3 fragments received
+  uint32_t v4FragRxCompleted;    // V3 messages fully reassembled
+  uint32_t v4FragRxGc;           // V3 reassembly contexts GC'ed due to timeout
   // Mesh routing metrics (per-message-type tracking)
   uint32_t meshForwardsByType[8];    // Forwards by type: [HB, ACK, MESH_SYS, FILE, CMD, TEXT, RESPONSE, STREAM]
   uint32_t meshTTLExhausted;         // Messages dropped due to TTL=0
@@ -600,7 +600,7 @@ struct RouterMetrics {
                     chunksTimedOut(0), avgSendTimeUs(0), maxSendTimeUs(0),
                     messagesQueued(0), messagesDequeued(0), retriesAttempted(0),
                     retriesSucceeded(0), queueOverflows(0),
-                    v3FragTx(0), v3FragRx(0), v3FragRxCompleted(0), v3FragRxGc(0),
+                    v4FragTx(0), v4FragRx(0), v4FragRxCompleted(0), v4FragRxGc(0),
                     meshTTLExhausted(0), meshLoopDetected(0), meshPathLengthSum(0), 
                     meshPathLengthCount(0), meshMaxPathLength(0), meshFallbacks(0) {
     memset(meshForwardsByType, 0, sizeof(meshForwardsByType));
@@ -750,7 +750,7 @@ struct EspNowState {
   // Deferred metadata processing (set in callback, handled in task)
   bool deferredMetadataPending;
   uint8_t deferredMetadataSrcMac[6];
-  uint8_t deferredMetadataPayload[216];  // V3PayloadMetadata size (212) + 4 bytes padding
+  uint8_t deferredMetadataPayload[216];  // V4PayloadMetadata size (212) + 4 bytes padding
   
   // Deferred message handling (ISR-safe pattern: callback sets flag, task processes)
   // TEXT message ring buffer (4 slots — prevents silent overwrite when messages arrive back-to-back)
@@ -770,7 +770,7 @@ struct EspNowState {
   bool deferredCmdRespPending;
   uint8_t deferredCmdRespSrcMac[6];
   char deferredCmdRespDeviceName[32];
-  char* deferredCmdRespResult;  // PSRAM-allocated at init (2048 bytes)
+  char* deferredCmdRespResult;  // PSRAM-allocated at init (6144 bytes — matches V4_FRAG_MAX × V4_MAX_FRAGMENT_PAYLOAD)
   bool deferredCmdRespSuccess;
   
   // STREAM message ring buffer (replaces single-buffer to prevent overwrite loss)
@@ -1102,7 +1102,7 @@ inline bool isBondSynced() { return false; }
 #endif // ENABLE_BONDED_MODE
 
 // V3 frame sending (for remote command execution from System_Utils)
-bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
+bool v4_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 
 // =============================================================================

@@ -60,7 +60,7 @@ extern volatile uint32_t gOutputFlags;
 extern bool gCLIValidateOnly;
 
 // Forward declaration — definition is further down near onEspNowRawRecv. Used
-// by the send paths (v3_send_frame, fragmented tx) defined above that point.
+// by the send paths (v4_send_frame, fragmented tx) defined above that point.
 static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
                                int rssi, const uint8_t* data, int len);
 // gDebugBuffer, gDebugFlags, ensureDebugBuffer now from debug_system.h
@@ -82,35 +82,40 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* d
 
 // ============================================================================
 // ESP-NOW V3 Binary Protocol — wire schema moved to System_ESPNow_Wire.h.
-// Constants, EspNowV3Type, EspNowV3Flags, EspNowV3Header, and payload structs
+// Constants, EspNowV4Type, EspNowV4Flags, EspNowV4Header, and payload structs
 // all live there now. Phase 0 of docs/ESPNOW_V4_PLAN.md.
 // ============================================================================
 
 // ============================================================================
-// V3 FRAGMENTATION CONSTANTS AND REASSEMBLY
+// V4 FRAGMENTATION CONSTANTS AND REASSEMBLY
 // ============================================================================
-#define V3_MAX_FRAGMENT_PAYLOAD 200   // Max payload bytes per fragment
-#define V3_FRAG_MAX             16    // Max fragments per message (max msg = 3200 bytes)
-#define V3_REASM_MAX            2     // Max concurrent reassembly contexts
-#define V3_REASM_TIMEOUT_MS     5000  // Reassembly context GC timeout (ms)
-#define V3_FRAG_ACK_WAIT_MAX    8     // Max concurrent fragment ACK waiters
+#define V4_MAX_FRAGMENT_PAYLOAD 200   // Max payload bytes per fragment
+#define V4_FRAG_MAX             32    // Max fragments per message (max msg = 6400 bytes)
+                                       // Cost: ~12.6 KB PSRAM (2 reassembly slots × 32 × 200 B + overhead).
+                                       // DRAM impact: zero — gV4Reasm is ps_alloc'd.
+#define V4_REASM_MAX            2     // Max concurrent reassembly contexts
+#define V4_REASM_TIMEOUT_MS     5000  // Reassembly context GC timeout (ms)
+#define V4_FRAG_ACK_WAIT_MAX    8     // Max concurrent fragment ACK waiters
+                                       // Not bumped with V4_FRAG_MAX — at 32 fragments,
+                                       // the sender serializes into 4×8 batches (~80 ms vs
+                                       // ~20 ms for a 6 KB message). Acceptable trade-off.
 
-struct V3ReasmEntry {
+struct V4ReasmEntry {
   bool     active;
   uint8_t  src[6];
   uint32_t msgId;
   uint8_t  type;
   uint8_t  fragCount;
   uint8_t  received;
-  bool     have[V3_FRAG_MAX];
-  uint8_t  buffer[V3_FRAG_MAX * V3_MAX_FRAGMENT_PAYLOAD];
+  bool     have[V4_FRAG_MAX];
+  uint8_t  buffer[V4_FRAG_MAX * V4_MAX_FRAGMENT_PAYLOAD];
   uint16_t bufferSize;
   uint32_t lastUpdateMs;
 };
 
-static V3ReasmEntry* gV3Reasm = nullptr;  // Allocated in PSRAM at init (~6.4KB)
+static V4ReasmEntry* gV4Reasm = nullptr;  // Allocated in PSRAM at init (~6.4KB)
 
-static void v3_reasm_reset(V3ReasmEntry& e) {
+static void v4_reasm_reset(V4ReasmEntry& e) {
   e.active   = false;
   e.msgId    = 0;
   e.received = 0;
@@ -119,45 +124,45 @@ static void v3_reasm_reset(V3ReasmEntry& e) {
   memset(e.have, 0, sizeof(e.have));
 }
 
-static void v3_reasm_gc(uint32_t nowMs) {
-  if (!gV3Reasm) return;
-  for (int i = 0; i < V3_REASM_MAX; i++) {
-    if (gV3Reasm[i].active && (nowMs - gV3Reasm[i].lastUpdateMs) > V3_REASM_TIMEOUT_MS) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_REASM_GC] Evicting stale msgId=%lu from %02X:%02X:%02X:%02X:%02X:%02X",
-             (unsigned long)gV3Reasm[i].msgId,
-             gV3Reasm[i].src[0], gV3Reasm[i].src[1], gV3Reasm[i].src[2],
-             gV3Reasm[i].src[3], gV3Reasm[i].src[4], gV3Reasm[i].src[5]);
-      if (gEspNow) { gEspNow->routerMetrics.v3FragRxGc++; }
-      v3_reasm_reset(gV3Reasm[i]);
+static void v4_reasm_gc(uint32_t nowMs) {
+  if (!gV4Reasm) return;
+  for (int i = 0; i < V4_REASM_MAX; i++) {
+    if (gV4Reasm[i].active && (nowMs - gV4Reasm[i].lastUpdateMs) > V4_REASM_TIMEOUT_MS) {
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_REASM_GC] Evicting stale msgId=%lu from %02X:%02X:%02X:%02X:%02X:%02X",
+             (unsigned long)gV4Reasm[i].msgId,
+             gV4Reasm[i].src[0], gV4Reasm[i].src[1], gV4Reasm[i].src[2],
+             gV4Reasm[i].src[3], gV4Reasm[i].src[4], gV4Reasm[i].src[5]);
+      if (gEspNow) { gEspNow->routerMetrics.v4FragRxGc++; }
+      v4_reasm_reset(gV4Reasm[i]);
     }
   }
 }
 
-static V3ReasmEntry* v3_reasm_find_or_alloc(const uint8_t* src, uint32_t msgId, uint8_t type, uint8_t fragCount) {
-  if (!gV3Reasm) return nullptr;
-  for (int i = 0; i < V3_REASM_MAX; i++) {
-    if (gV3Reasm[i].active && gV3Reasm[i].msgId == msgId &&
-        memcmp(gV3Reasm[i].src, src, 6) == 0) {
-      return &gV3Reasm[i];
+static V4ReasmEntry* v4_reasm_find_or_alloc(const uint8_t* src, uint32_t msgId, uint8_t type, uint8_t fragCount) {
+  if (!gV4Reasm) return nullptr;
+  for (int i = 0; i < V4_REASM_MAX; i++) {
+    if (gV4Reasm[i].active && gV4Reasm[i].msgId == msgId &&
+        memcmp(gV4Reasm[i].src, src, 6) == 0) {
+      return &gV4Reasm[i];
     }
   }
-  for (int i = 0; i < V3_REASM_MAX; i++) {
-    if (!gV3Reasm[i].active) {
-      v3_reasm_reset(gV3Reasm[i]);
-      memcpy(gV3Reasm[i].src, src, 6);
-      gV3Reasm[i].msgId       = msgId;
-      gV3Reasm[i].type        = type;
-      gV3Reasm[i].fragCount   = (fragCount <= V3_FRAG_MAX) ? fragCount : V3_FRAG_MAX;
-      gV3Reasm[i].bufferSize  = (uint16_t)(gV3Reasm[i].fragCount * V3_MAX_FRAGMENT_PAYLOAD);
-      gV3Reasm[i].lastUpdateMs = millis();
-      gV3Reasm[i].active      = true;
-      return &gV3Reasm[i];
+  for (int i = 0; i < V4_REASM_MAX; i++) {
+    if (!gV4Reasm[i].active) {
+      v4_reasm_reset(gV4Reasm[i]);
+      memcpy(gV4Reasm[i].src, src, 6);
+      gV4Reasm[i].msgId       = msgId;
+      gV4Reasm[i].type        = type;
+      gV4Reasm[i].fragCount   = (fragCount <= V4_FRAG_MAX) ? fragCount : V4_FRAG_MAX;
+      gV4Reasm[i].bufferSize  = (uint16_t)(gV4Reasm[i].fragCount * V4_MAX_FRAGMENT_PAYLOAD);
+      gV4Reasm[i].lastUpdateMs = millis();
+      gV4Reasm[i].active      = true;
+      return &gV4Reasm[i];
     }
   }
   return nullptr;
 }
 
-struct V3FragAckWait {
+struct V4FragAckWait {
   bool     active;
   uint32_t msgId;
   uint8_t  fragIndex;
@@ -166,18 +171,18 @@ struct V3FragAckWait {
   uint32_t sentMs;
 };
 
-static V3FragAckWait gV3FragAckWait[V3_FRAG_ACK_WAIT_MAX];
+static V4FragAckWait gV4FragAckWait[V4_FRAG_ACK_WAIT_MAX];
 
-static V3FragAckWait* v3_frag_ack_alloc(const uint8_t* dst, uint32_t msgId, uint8_t fragIdx) {
-  for (int i = 0; i < V3_FRAG_ACK_WAIT_MAX; i++) {
-    if (!gV3FragAckWait[i].active) {
-      gV3FragAckWait[i].msgId     = msgId;
-      gV3FragAckWait[i].fragIndex = fragIdx;
-      gV3FragAckWait[i].acked     = false;
-      gV3FragAckWait[i].sentMs    = 0;
-      memcpy(gV3FragAckWait[i].dstMac, dst, 6);
-      gV3FragAckWait[i].active    = true;
-      return &gV3FragAckWait[i];
+static V4FragAckWait* v4_frag_ack_alloc(const uint8_t* dst, uint32_t msgId, uint8_t fragIdx) {
+  for (int i = 0; i < V4_FRAG_ACK_WAIT_MAX; i++) {
+    if (!gV4FragAckWait[i].active) {
+      gV4FragAckWait[i].msgId     = msgId;
+      gV4FragAckWait[i].fragIndex = fragIdx;
+      gV4FragAckWait[i].acked     = false;
+      gV4FragAckWait[i].sentMs    = 0;
+      memcpy(gV4FragAckWait[i].dstMac, dst, 6);
+      gV4FragAckWait[i].active    = true;
+      return &gV4FragAckWait[i];
     }
   }
   return nullptr;
@@ -194,21 +199,21 @@ static const uint32_t BOND_SYNC_RETRY_MS = 3000;   // Retry sync request every 3
 static void resetBondSync();
 #endif
 
-// Forward declaration for v3_send_frame (implemented later)
-bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
+// Forward declaration for v4_send_frame (implemented later)
+bool v4_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 
 // Forward declarations for V3 helper functions (non-static for external linkage)
-bool v3_broadcast(uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
-bool v3_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
-bool v3_broadcast_topo_request(uint32_t reqId);
-bool v3_send_worker_status(const uint8_t* dst, const V3PayloadWorkerStatus& status, const char* jsonMetadata, uint16_t jsonLen);
-bool v3_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen);
-bool v3_send_text(const uint8_t* dst, const char* text, uint16_t textLen);
-bool v3_broadcast_text(const char* text, uint16_t textLen);
-bool v3_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
-bool v3_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
-bool v3_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
+bool v4_broadcast(uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
+bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
+bool v4_broadcast_topo_request(uint32_t reqId);
+bool v4_send_worker_status(const uint8_t* dst, const V4PayloadWorkerStatus& status, const char* jsonMetadata, uint16_t jsonLen);
+bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen);
+bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen);
+bool v4_broadcast_text(const char* text, uint16_t textLen);
+bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
+bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
+bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
 
 // MAC address formatting (stack buffer version to reduce heap churn)
 void formatMacAddressBuf(const uint8_t* mac, char* buf, size_t bufSize);
@@ -855,7 +860,7 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
   BROADCAST_PRINTF("[ESP-NOW] Sending response to %s (%u bytes)", senderName.c_str(), (unsigned)result.length());
 
   // Send via V3 command response
-  bool sent = v3_send_command_response(targetMac, msgId, success, fullResult.c_str(), fullResult.length());
+  bool sent = v4_send_command_response(targetMac, msgId, success, fullResult.c_str(), fullResult.length());
 
   if (sent) {
     broadcastOutput("[ESP-NOW] V3 response sent successfully");
@@ -872,7 +877,7 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
 void sendTextMessage(const uint8_t* targetMac, const String& text) {
   if (!gEspNow) return;
   
-  v3_send_text(targetMac, text.c_str(), text.length());
+  v4_send_text(targetMac, text.c_str(), text.length());
 }
 
 // Forward declaration for session-based streaming helper (defined in V3 protocol section)
@@ -890,7 +895,7 @@ void sendEspNowStreamMessage(const String& message) {
   // Check for session-based streaming first (V3 CMD output)
   if (gCurrentStreamCmdId != 0) {
     size_t msgLen = message.length();
-    if (msgLen > ESPNOW_V3_MAX_PAYLOAD - 1) msgLen = ESPNOW_V3_MAX_PAYLOAD - 1;
+    if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
     if (trySendToStreamSession(gCurrentStreamCmdId, message.c_str(), msgLen)) {
       return;  // Sent via session
     }
@@ -908,10 +913,10 @@ void sendEspNowStreamMessage(const String& message) {
   gEspNow->lastStreamSendTime = now;
 
   size_t msgLen = message.length();
-  if (msgLen > ESPNOW_V3_MAX_PAYLOAD - 1) msgLen = ESPNOW_V3_MAX_PAYLOAD - 1;
+  if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
   
   uint32_t msgId = generateMessageId();
-  bool sent = v3_send_chunked(gEspNow->streamTarget, ESPNOW_V3_TYPE_STREAM, 0, msgId,
+  bool sent = v4_send_chunked(gEspNow->streamTarget, ESPNOW_V4_TYPE_STREAM, 0, msgId,
                               (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1);
 
   if (sent) {
@@ -936,10 +941,10 @@ static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8
 
 // ============================================================================
 // ESP-NOW V3 Binary Protocol - Additional Structures
-// (enum EspNowV3Type and V3PayloadHeartbeat forward-declared near top of file)
+// (enum EspNowV4Type and V4PayloadHeartbeat forward-declared near top of file)
 // ============================================================================
 
-// EspNowV3Flags moved to System_ESPNow_Wire.h
+// EspNowV4Flags moved to System_ESPNow_Wire.h
 
 // Stream session for real-time command output streaming
 // Links a CMD msgId to a target MAC so output can be routed correctly
@@ -999,7 +1004,7 @@ static void sendSessionStreamFrame(uint32_t cmdMsgId, const char* data, size_t l
   StreamSession* sess = findStreamSession(cmdMsgId);
   if (!sess || !sess->active) return;
   
-  v3_send_chunked(sess->targetMac, ESPNOW_V3_TYPE_STREAM, flags, cmdMsgId,
+  v4_send_chunked(sess->targetMac, ESPNOW_V4_TYPE_STREAM, flags, cmdMsgId,
                   data ? (const uint8_t*)data : nullptr, (uint16_t)len, 1);
 }
 
@@ -1008,18 +1013,18 @@ static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t l
   StreamSession* sess = findStreamSession(cmdMsgId);
   if (!sess || !sess->active) return false;
   
-  v3_send_chunked(sess->targetMac, ESPNOW_V3_TYPE_STREAM, 0, cmdMsgId,
+  v4_send_chunked(sess->targetMac, ESPNOW_V4_TYPE_STREAM, 0, cmdMsgId,
                   (const uint8_t*)data, (uint16_t)len, 1);
   DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Session %lu sent: %.50s", (unsigned long)cmdMsgId, data);
   return true;
 }
 
-// EspNowV3Header, V3PayloadCmdResp, V3PayloadFile* moved to System_ESPNow_Wire.h
+// EspNowV4Header, V4PayloadCmdResp, V4PayloadFile* moved to System_ESPNow_Wire.h
 
-struct V3DedupEntry { uint8_t origin[6]; uint32_t id; uint32_t ts; bool active; };
-#define V3_DEDUP_SIZE 64
-static V3DedupEntry gV3Dedup[V3_DEDUP_SIZE];
-static int gV3DedupIdx = 0;
+struct V4DedupEntry { uint8_t origin[6]; uint32_t id; uint32_t ts; bool active; };
+#define V4_DEDUP_SIZE 64
+static V4DedupEntry gV4Dedup[V4_DEDUP_SIZE];
+static int gV4DedupIdx = 0;
 
 // Broadcast ACK tracking
 static BroadcastTracker gBroadcastTrackers[BROADCAST_TRACKER_SLOTS];
@@ -1072,7 +1077,7 @@ static void broadcast_tracker_record_ack(uint32_t msgId, const uint8_t* peerMac)
   }
 }
 
-static uint16_t v3_crc16_ccitt(const uint8_t* data, size_t len) {
+static uint16_t v4_crc16_ccitt(const uint8_t* data, size_t len) {
   uint16_t crc = 0xFFFF;
   for (size_t i = 0; i < len; i++) {
     crc ^= (uint16_t)data[i] << 8;
@@ -1081,13 +1086,13 @@ static uint16_t v3_crc16_ccitt(const uint8_t* data, size_t len) {
   return crc;
 }
 
-static bool v3_dedup_seen_and_insert(const uint8_t* origin, uint32_t id) {
-  for (int i = 0; i < V3_DEDUP_SIZE; i++) {
-    if (gV3Dedup[i].active && gV3Dedup[i].id == id && memcmp(gV3Dedup[i].origin, origin, 6) == 0) return true;
+static bool v4_dedup_seen_and_insert(const uint8_t* origin, uint32_t id) {
+  for (int i = 0; i < V4_DEDUP_SIZE; i++) {
+    if (gV4Dedup[i].active && gV4Dedup[i].id == id && memcmp(gV4Dedup[i].origin, origin, 6) == 0) return true;
   }
-  V3DedupEntry& e = gV3Dedup[gV3DedupIdx];
+  V4DedupEntry& e = gV4Dedup[gV4DedupIdx];
   memcpy(e.origin, origin, 6); e.id = id; e.ts = (uint32_t)millis(); e.active = true;
-  gV3DedupIdx = (gV3DedupIdx + 1) % V3_DEDUP_SIZE;
+  gV4DedupIdx = (gV4DedupIdx + 1) % V4_DEDUP_SIZE;
   return false;
 }
 
@@ -1133,18 +1138,18 @@ static void broadcast_tracker_check_timeouts() {
   }
 }
 
-bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
+bool v4_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
   if (!dst || (payloadLen > 0 && !payload)) return false;
-  size_t totalLen = sizeof(EspNowV3Header) + payloadLen;
+  size_t totalLen = sizeof(EspNowV4Header) + payloadLen;
   if (totalLen > 250) return false;
   uint8_t frame[250];
-  EspNowV3Header h = {};
-  h.magic = (uint16_t)ESPNOW_V3_MAGIC; h.ver = 3; h.type = type; h.flags = flags;
-  h.headerLen = (uint8_t)sizeof(EspNowV3Header); h.payloadLen = payloadLen; h.msgId = msgId;
+  EspNowV4Header h = {};
+  h.magic = (uint16_t)ESPNOW_V4_MAGIC; h.ver = ESPNOW_V4_VERSION; h.type = type; h.flags = flags;
+  h.headerLen = (uint8_t)sizeof(EspNowV4Header); h.msgId = msgId;
   uint8_t myMac[6]; esp_wifi_get_mac(WIFI_IF_STA, myMac); memcpy(h.origin, myMac, 6);
   h.ttl = ttl; h.fragIndex = 0; h.fragCount = 1;
-  h.crc16 = payloadLen > 0 ? v3_crc16_ccitt(payload, payloadLen) : 0;
+  h.crc16 = payloadLen > 0 ? v4_crc16_ccitt(payload, payloadLen) : 0;
   memcpy(frame, &h, sizeof(h));
   if (payloadLen > 0) memcpy(frame + sizeof(h), payload, payloadLen);
   captureEspNowFrame("TX", dst, 0, frame, (int)totalLen);
@@ -1154,9 +1159,9 @@ bool v3_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msg
 /**
  * Broadcast message to all mesh peers
  * Sends to each active peer individually (ESP-NOW doesn't support true broadcast)
- * If ESPNOW_V3_FLAG_ACK_REQ is set, tracks ACKs for delivery confirmation
+ * If ESPNOW_V4_FLAG_ACK_REQ is set, tracks ACKs for delivery confirmation
  */
-bool v3_broadcast(uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
+bool v4_broadcast(uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
   if (!gEspNow || !gEspNow->initialized) return false;
   
   bool anySuccess = false;
@@ -1164,7 +1169,7 @@ bool v3_broadcast(uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* pa
   BroadcastTracker* tracker = nullptr;
   
   // If ACK requested, allocate tracker
-  if (flags & ESPNOW_V3_FLAG_ACK_REQ) {
+  if (flags & ESPNOW_V4_FLAG_ACK_REQ) {
     tracker = broadcast_tracker_alloc();
     if (tracker) {
       tracker->msgId = msgId;
@@ -1183,7 +1188,7 @@ bool v3_broadcast(uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* pa
   // Send to all active mesh peers
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) {
-      bool sent = v3_send_frame(gMeshPeers[i].mac, type, flags, msgId, payload, payloadLen, ttl);
+      bool sent = v4_send_frame(gMeshPeers[i].mac, type, flags, msgId, payload, payloadLen, ttl);
       if (sent) {
         anySuccess = true;
         sentCount++;
@@ -1209,21 +1214,21 @@ bool v3_broadcast(uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* pa
  * Splits payload into multiple fragments if needed
  * Returns true if all fragments sent successfully
  */
-bool v3_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
+bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
                             const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
   if (!dst || (payloadLen > 0 && !payload)) return false;
   
   // If payload fits in single frame, use regular send
-  if (payloadLen <= ESPNOW_V3_MAX_PAYLOAD) {
-    return v3_send_frame(dst, type, flags, msgId, payload, payloadLen, ttl);
+  if (payloadLen <= ESPNOW_V4_MAX_PAYLOAD) {
+    return v4_send_frame(dst, type, flags, msgId, payload, payloadLen, ttl);
   }
   
   // Calculate fragments needed
-  uint16_t fragPayloadSize = V3_MAX_FRAGMENT_PAYLOAD;
+  uint16_t fragPayloadSize = V4_MAX_FRAGMENT_PAYLOAD;
   uint8_t fragCount = (payloadLen + fragPayloadSize - 1) / fragPayloadSize;
-  if (fragCount > V3_FRAG_MAX) {
+  if (fragCount > V4_FRAG_MAX) {
     WARN_ESPNOWF("[V3_FRAG_TX] Payload too large: %u bytes requires %u frags (max %u)", 
-                 payloadLen, fragCount, V3_FRAG_MAX);
+                 payloadLen, fragCount, V4_FRAG_MAX);
     return false;
   }
   
@@ -1251,19 +1256,18 @@ bool v3_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t m
     
     // Build fragment frame
     uint8_t frame[250];
-    EspNowV3Header h = {};
-    h.magic = (uint16_t)ESPNOW_V3_MAGIC;
-    h.ver = 3;
+    EspNowV4Header h = {};
+    h.magic = (uint16_t)ESPNOW_V4_MAGIC;
+    h.ver = ESPNOW_V4_VERSION;
     h.type = type;
-    h.flags = flags | ESPNOW_V3_FLAG_ACK_REQ;  // Always request ACK for fragments
-    h.headerLen = (uint8_t)sizeof(EspNowV3Header);
-    h.payloadLen = fragLen;
+    h.flags = flags | ESPNOW_V4_FLAG_ACK_REQ;  // Always request ACK for fragments
+    h.headerLen = (uint8_t)sizeof(EspNowV4Header);
     h.msgId = msgId;
     memcpy(h.origin, myMac, 6);
     h.ttl = ttl;
     h.fragIndex = fragIdx;
     h.fragCount = fragCount;
-    h.crc16 = v3_crc16_ccitt(payload + offset, fragLen);
+    h.crc16 = v4_crc16_ccitt(payload + offset, fragLen);
     
     memcpy(frame, &h, sizeof(h));
     memcpy(frame + sizeof(h), payload + offset, fragLen);
@@ -1276,7 +1280,7 @@ bool v3_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t m
                retry + 1, MAX_RETRIES, fragIdx + 1);
       }
       // Allocate ACK wait slot
-      V3FragAckWait* ackWait = v3_frag_ack_alloc(dst, msgId, fragIdx);
+      V4FragAckWait* ackWait = v4_frag_ack_alloc(dst, msgId, fragIdx);
       if (!ackWait) {
         WARN_ESPNOWF("[V3_FRAG_TX] No ACK slot available for frag %u/%u", fragIdx + 1, fragCount);
         DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] Aborting: ACK tracking full");
@@ -1303,7 +1307,7 @@ bool v3_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t m
         continue;
       }
       
-      if (gEspNow) { gEspNow->routerMetrics.v3FragTx++; }
+      if (gEspNow) { gEspNow->routerMetrics.v4FragTx++; }
       
       DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] ✓ Fragment %u/%u sent: %u bytes (offset=%u, retry=%u)",
              fragIdx + 1, fragCount, fragLen, offset, retry);
@@ -1351,17 +1355,17 @@ bool v3_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t m
   return true;
 }
 
-static bool v3_send_ack(const uint8_t* dst, uint32_t ackFor) {
+static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_CORE, "[V3_ACK_TX] Sending ACK to %s for msgId=%lu", dstMac, (unsigned long)ackFor);
-  bool result = v3_send_frame(dst, ESPNOW_V3_TYPE_ACK, 0, ackFor, nullptr, 0, 1);
+  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_ACK, 0, ackFor, nullptr, 0, 1);
   DEBUGF(DEBUG_ESPNOW_CORE, "[V3_ACK_TX] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
 // Send ACK for a specific fragment
-static bool v3_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragIndex, uint8_t fragCount) {
+static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragIndex, uint8_t fragCount) {
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_CORE, "[V3_FRAG_ACK_TX] Sending fragment ACK to %s", dstMac);
@@ -1372,13 +1376,12 @@ static bool v3_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
   uint8_t myMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, myMac);
   
-  EspNowV3Header h = {};
-  h.magic = (uint16_t)ESPNOW_V3_MAGIC;
-  h.ver = 3;
-  h.type = ESPNOW_V3_TYPE_ACK;
+  EspNowV4Header h = {};
+  h.magic = (uint16_t)ESPNOW_V4_MAGIC;
+  h.ver = ESPNOW_V4_VERSION;
+  h.type = ESPNOW_V4_TYPE_ACK;
   h.flags = 0;
-  h.headerLen = (uint8_t)sizeof(EspNowV3Header);
-  h.payloadLen = 0;
+  h.headerLen = (uint8_t)sizeof(EspNowV4Header);
   h.msgId = msgId;
   memcpy(h.origin, myMac, 6);
   h.ttl = 1;
@@ -1400,8 +1403,8 @@ static bool v3_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
 }
 
 // V3 sender functions for mesh system messages
-static bool v3_send_time_sync(const uint8_t* dst, uint32_t epochTime, int32_t timeOffset) {
-  V3PayloadTimeSync payload;
+static bool v4_send_time_sync(const uint8_t* dst, uint32_t epochTime, int32_t timeOffset) {
+  V4PayloadTimeSync payload;
   payload.epochTime = epochTime;
   payload.timeOffset = timeOffset;
   
@@ -1411,18 +1414,18 @@ static bool v3_send_time_sync(const uint8_t* dst, uint32_t epochTime, int32_t ti
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_TIME_SYNC] Sending to %s msgId=%lu", dstMac, (unsigned long)msgId);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_TIME_SYNC] epochTime=%lu timeOffset=%ld",
          (unsigned long)epochTime, (long)timeOffset);
-  bool result = v3_send_frame(dst, ESPNOW_V3_TYPE_TIME_SYNC, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
+  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_TIME_SYNC, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_TIME_SYNC] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
-static bool v3_broadcast_time_sync(uint32_t epochTime, int32_t timeOffset) {
+static bool v4_broadcast_time_sync(uint32_t epochTime, int32_t timeOffset) {
   uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-  return v3_send_time_sync(broadcastMac, epochTime, timeOffset);
+  return v4_send_time_sync(broadcastMac, epochTime, timeOffset);
 }
 
-static bool v3_send_topo_request(const uint8_t* dst, uint32_t reqId) {
-  V3PayloadTopoReq payload;
+static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
+  V4PayloadTopoReq payload;
   payload.reqId = reqId;
   memset(payload.reserved, 0, sizeof(payload.reserved));
   
@@ -1431,81 +1434,81 @@ static bool v3_send_topo_request(const uint8_t* dst, uint32_t reqId) {
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_TX_TOPO_REQ] Sending to %s msgId=%lu reqId=%lu",
          dstMac, (unsigned long)msgId, (unsigned long)reqId);
-  bool result = v3_send_frame(dst, ESPNOW_V3_TYPE_TOPO_REQ, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
+  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_REQ, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_TX_TOPO_REQ] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
-bool v3_broadcast_topo_request(uint32_t reqId) {
+bool v4_broadcast_topo_request(uint32_t reqId) {
   DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_BROADCAST_TOPO_REQ] Broadcasting reqId=%lu", (unsigned long)reqId);
   uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-  return v3_send_topo_request(broadcastMac, reqId);
+  return v4_send_topo_request(broadcastMac, reqId);
 }
 
-bool v3_send_worker_status(const uint8_t* dst, const V3PayloadWorkerStatus& status, 
+bool v4_send_worker_status(const uint8_t* dst, const V4PayloadWorkerStatus& status, 
                                    const char* jsonMetadata, uint16_t jsonLen) {
   uint32_t msgId = generateMessageId();
   
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] Sending to %s msgId=%lu", dstMac, (unsigned long)msgId);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] Payload: freeHeap=%lu totalHeap=%lu rssi=%d thermal=%d imu=%d",
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Sending to %s msgId=%lu", dstMac, (unsigned long)msgId);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Payload: freeHeap=%lu totalHeap=%lu rssi=%d thermal=%d imu=%d",
          (unsigned long)status.freeHeap, (unsigned long)status.totalHeap, status.rssi, status.gThermalEnabled, status.gImuEnabled);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] name='%s' metadata=%s (%u bytes)",
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] name='%s' metadata=%s (%u bytes)",
          status.name, jsonMetadata ? "YES" : "NO", jsonLen);
   
   if (jsonMetadata && jsonLen > 0) {
     // Has metadata - combine struct + JSON
     uint16_t totalLen = sizeof(status) + jsonLen;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] Total payload: %u bytes (struct=%u + json=%u)",
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Total payload: %u bytes (struct=%u + json=%u)",
            totalLen, (unsigned)sizeof(status), jsonLen);
-    if (totalLen > ESPNOW_V3_MAX_PAYLOAD) {
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] Payload exceeds max, using fragmented send");
+    if (totalLen > ESPNOW_V4_MAX_PAYLOAD) {
+      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Payload exceeds max, using fragmented send");
       // Use chunked send for large payloads
       uint8_t* buffer = (uint8_t*)malloc(totalLen);
       if (!buffer) return false;
       memcpy(buffer, &status, sizeof(status));
       memcpy(buffer + sizeof(status), jsonMetadata, jsonLen);
-      bool result = v3_send_chunked(dst, ESPNOW_V3_TYPE_WORKER_STATUS, ESPNOW_V3_FLAG_ACK_REQ, 
+      bool result = v4_send_chunked(dst, ESPNOW_V4_TYPE_WORKER_STATUS, ESPNOW_V4_FLAG_ACK_REQ, 
                                      msgId, buffer, totalLen, 2);
       free(buffer);
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] Fragmented send result: %s", result ? "SUCCESS" : "FAILED");
+      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Fragmented send result: %s", result ? "SUCCESS" : "FAILED");
       return result;
     } else {
       // Fits in one frame
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] Sending single frame");
+      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Sending single frame");
       uint8_t buffer[250];
       memcpy(buffer, &status, sizeof(status));
       memcpy(buffer + sizeof(status), jsonMetadata, jsonLen);
-      bool result = v3_send_frame(dst, ESPNOW_V3_TYPE_WORKER_STATUS, ESPNOW_V3_FLAG_ACK_REQ, 
+      bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_WORKER_STATUS, ESPNOW_V4_FLAG_ACK_REQ, 
                           msgId, buffer, totalLen, 2);
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] Single frame result: %s", result ? "SUCCESS" : "FAILED");
+      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Single frame result: %s", result ? "SUCCESS" : "FAILED");
       return result;
     }
   } else {
     // No metadata - just struct
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] No metadata, sending struct only (%u bytes)", (unsigned)sizeof(status));
-    bool result = v3_send_frame(dst, ESPNOW_V3_TYPE_WORKER_STATUS, ESPNOW_V3_FLAG_ACK_REQ, 
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] No metadata, sending struct only (%u bytes)", (unsigned)sizeof(status));
+    bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_WORKER_STATUS, ESPNOW_V4_FLAG_ACK_REQ, 
                         msgId, (const uint8_t*)&status, sizeof(status), 2);
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_WORKER_STATUS] Result: %s", result ? "SUCCESS" : "FAILED");
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Result: %s", result ? "SUCCESS" : "FAILED");
     return result;
   }
 }
 
-static bool v3_send_topo_start(const uint8_t* dst, uint32_t reqId, uint8_t peerCount) {
-  V3PayloadTopoStart payload;
+static bool v4_send_topo_start(const uint8_t* dst, uint32_t reqId, uint8_t peerCount) {
+  V4PayloadTopoStart payload;
   payload.reqId = reqId;
   payload.peerCount = peerCount;
   memset(payload.reserved, 0, sizeof(payload.reserved));
   
   uint32_t msgId = generateMessageId();
-  return v3_send_frame(dst, ESPNOW_V3_TYPE_TOPO_START, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
+  return v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_START, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
 }
 
-static bool v3_send_topo_peer(const uint8_t* dst, uint32_t reqId, uint8_t peerIndex, 
+static bool v4_send_topo_peer(const uint8_t* dst, uint32_t reqId, uint8_t peerIndex, 
                                bool isLast, const uint8_t* peerMac, int8_t rssi, 
                                bool encrypted, const char* peerName) {
-  V3PayloadTopoPeer payload;
+  V4PayloadTopoPeer payload;
   payload.reqId = reqId;
   payload.peerIndex = peerIndex;
   payload.isLast = isLast ? 1 : 0;
@@ -1516,12 +1519,12 @@ static bool v3_send_topo_peer(const uint8_t* dst, uint32_t reqId, uint8_t peerIn
   payload.name[sizeof(payload.name) - 1] = '\0';
   
   uint32_t msgId = generateMessageId();
-  return v3_send_frame(dst, ESPNOW_V3_TYPE_TOPO_PEER, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
+  return v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_PEER, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
 }
 
 // Broadcast sensor status to all mesh peers
-bool v3_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
-  V3PayloadSensorStatus payload;
+bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
+  V4PayloadSensorStatus payload;
   payload.sensorType = (uint8_t)sensorType;
   payload.enabled = enabled ? 1 : 0;
   memset(payload.reserved, 0, sizeof(payload.reserved));
@@ -1531,13 +1534,13 @@ bool v3_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_STATUS] Broadcasting msgId=%lu", (unsigned long)msgId);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_STATUS] sensor=%s enabled=%s",
          sensorTypeToString(sensorType), enabled ? "YES" : "NO");
-  bool result = v3_broadcast(ESPNOW_V3_TYPE_SENSOR_STATUS, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
+  bool result = v4_broadcast(ESPNOW_V4_TYPE_SENSOR_STATUS, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_STATUS] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
 // Broadcast sensor data to all mesh peers
-bool v3_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen) {
+bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen) {
   if (!jsonData || jsonLen == 0 || jsonLen > 200) {
     DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] ERROR: Invalid params (jsonData=%p len=%u)",
            jsonData, jsonLen);
@@ -1546,46 +1549,46 @@ bool v3_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData,
   
   // Build payload: struct + JSON data
   uint8_t buffer[256];
-  V3PayloadSensorBroadcast* payload = (V3PayloadSensorBroadcast*)buffer;
+  V4PayloadSensorBroadcast* payload = (V4PayloadSensorBroadcast*)buffer;
   payload->sensorType = (uint8_t)sensorType;
   payload->dataLen = jsonLen;
   memcpy(payload->data, jsonData, jsonLen);
   
-  uint16_t totalLen = sizeof(V3PayloadSensorBroadcast) + jsonLen;
+  uint16_t totalLen = sizeof(V4PayloadSensorBroadcast) + jsonLen;
   uint32_t msgId = generateMessageId();
   extern const char* sensorTypeToString(RemoteSensorType type);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] Broadcasting msgId=%lu", (unsigned long)msgId);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] sensor=%s jsonLen=%u totalLen=%u",
          sensorTypeToString(sensorType), jsonLen, totalLen);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] JSON (first 80 chars): %.80s", jsonData);
-  bool result = v3_broadcast(ESPNOW_V3_TYPE_SENSOR_BROADCAST, 0, msgId, buffer, totalLen, 2);
+  bool result = v4_broadcast(ESPNOW_V4_TYPE_SENSOR_BROADCAST, 0, msgId, buffer, totalLen, 2);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
 // Send user sync to specific device (JSON payload)
-bool v3_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen) {
+bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen) {
   if (!jsonPayload || jsonLen == 0) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_USER_SYNC] ERROR: Invalid params (jsonPayload=%p len=%u)",
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] ERROR: Invalid params (jsonPayload=%p len=%u)",
            jsonPayload, jsonLen);
     return false;
   }
   
   uint32_t msgId = generateMessageId();
-  uint8_t flags = ESPNOW_V3_FLAG_ACK_REQ;  // User sync requires ACK
+  uint8_t flags = ESPNOW_V4_FLAG_ACK_REQ;  // User sync requires ACK
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_USER_SYNC] Sending to %s msgId=%lu", dstMac, (unsigned long)msgId);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_USER_SYNC] jsonLen=%u JSON (first 100 chars): %.100s",
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Sending to %s msgId=%lu", dstMac, (unsigned long)msgId);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] jsonLen=%u JSON (first 100 chars): %.100s",
          jsonLen, jsonPayload);
-  bool result = v3_send_frame(dst, ESPNOW_V3_TYPE_USER_SYNC, flags, msgId, (const uint8_t*)jsonPayload, jsonLen, 3);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_USER_SYNC] Result: %s", result ? "SUCCESS" : "FAILED");
+  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_USER_SYNC, flags, msgId, (const uint8_t*)jsonPayload, jsonLen, 3);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
 // V3 helper functions for command responses and text messages
-bool v3_send_text(const uint8_t* dst, const char* text, uint16_t textLen) {
-  if (!text || textLen == 0 || textLen > ESPNOW_V3_MAX_PAYLOAD) return false;
+bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen) {
+  if (!text || textLen == 0 || textLen > ESPNOW_V4_MAX_PAYLOAD) return false;
   
   uint32_t msgId = generateMessageId();
   char dstMac[18];
@@ -1593,18 +1596,18 @@ bool v3_send_text(const uint8_t* dst, const char* text, uint16_t textLen) {
   DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_TEXT] Sending to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, textLen);
   DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_TEXT] Text (first 100 chars): %.100s", text);
   
-  bool result = v3_send_frame(dst, ESPNOW_V3_TYPE_TEXT, ESPNOW_V3_FLAG_ACK_REQ, msgId, 
+  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId, 
                               (const uint8_t*)text, textLen, 1);
   DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
-bool v3_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen) {
+bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen) {
   if (!resultText || textLen == 0) return false;
   
   // Build response payload: success byte + result text
   uint16_t totalLen = 1 + textLen;
-  if (totalLen > ESPNOW_V3_MAX_PAYLOAD) {
+  if (totalLen > ESPNOW_V4_MAX_PAYLOAD) {
     // Use chunked send for large responses
     uint8_t* buffer = (uint8_t*)malloc(totalLen);
     if (!buffer) return false;
@@ -1616,7 +1619,7 @@ bool v3_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool succes
     DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_CMD_RESP] Sending to %s cmdMsgId=%lu success=%d len=%u (chunked)",
            dstMac, (unsigned long)cmdMsgId, success, totalLen);
     
-    bool result = v3_send_chunked(dst, ESPNOW_V3_TYPE_CMD_RESP, ESPNOW_V3_FLAG_ACK_REQ, 
+    bool result = v4_send_chunked(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, 
                                    cmdMsgId, buffer, totalLen, 1);
     free(buffer);
     DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_CMD_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
@@ -1632,14 +1635,14 @@ bool v3_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool succes
     DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_CMD_RESP] Sending to %s cmdMsgId=%lu success=%d len=%u",
            dstMac, (unsigned long)cmdMsgId, success, totalLen);
     
-    bool result = v3_send_frame(dst, ESPNOW_V3_TYPE_CMD_RESP, ESPNOW_V3_FLAG_ACK_REQ, 
+    bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, 
                                 cmdMsgId, buffer, totalLen, 1);
     DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_CMD_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
     return result;
   }
 }
 
-static bool v3_send_file_response(const uint8_t* dst, uint32_t reqMsgId, bool success, const char* message) {
+static bool v4_send_file_response(const uint8_t* dst, uint32_t reqMsgId, bool success, const char* message) {
   if (!message) return false;
   
   uint16_t msgLen = strlen(message);
@@ -1654,19 +1657,19 @@ static bool v3_send_file_response(const uint8_t* dst, uint32_t reqMsgId, bool su
   DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_FILE_RESP] Sending to %s reqMsgId=%lu success=%d",
          dstMac, (unsigned long)reqMsgId, success);
   
-  bool result = v3_send_frame(dst, ESPNOW_V3_TYPE_CMD_RESP, ESPNOW_V3_FLAG_ACK_REQ, 
+  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, 
                               reqMsgId, buffer, totalLen, 1);
   DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_FILE_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
-bool v3_broadcast_text(const char* text, uint16_t textLen) {
-  if (!text || textLen == 0 || textLen > ESPNOW_V3_MAX_PAYLOAD) return false;
+bool v4_broadcast_text(const char* text, uint16_t textLen) {
+  if (!text || textLen == 0 || textLen > ESPNOW_V4_MAX_PAYLOAD) return false;
   
   uint32_t msgId = generateMessageId();
   DEBUGF(DEBUG_ESPNOW_CORE, "[V3_BROADCAST_TEXT] Broadcasting msgId=%lu len=%u", (unsigned long)msgId, textLen);
   
-  bool result = v3_broadcast(ESPNOW_V3_TYPE_TEXT, 0, msgId, (const uint8_t*)text, textLen, 2);
+  bool result = v4_broadcast(ESPNOW_V4_TYPE_TEXT, 0, msgId, (const uint8_t*)text, textLen, 2);
   DEBUGF(DEBUG_ESPNOW_CORE, "[V3_BROADCAST_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
@@ -1718,74 +1721,74 @@ static void processBondModeManifestResp(const uint8_t* srcMac, const String& dev
 #endif // ENABLE_BONDED_MODE
 
 // Forward declaration for command execution
-static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, const char* cmd);
+static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, const char* cmd);
 
 // ============================================================================
 // V3 RX dispatch table (Phase 0 of docs/ESPNOW_V4_PLAN.md).
 //
-// The legacy if-ladder in v3_try_handle_incoming() is being replaced
+// The legacy if-ladder in v4_try_handle_incoming() is being replaced
 // incrementally by a handler table. For each opcode in this table, the
-// corresponding if-branch in v3_try_handle_incoming() has been removed —
+// corresponding if-branch in v4_try_handle_incoming() has been removed —
 // the dispatcher below runs first and claims the frame.
 //
 // New opcodes get migrated by:
-//   1. Implementing a `static void v3h_<name>(const V3RxCtx&)` function.
-//   2. Adding one row to kV3HandlerTable[].
-//   3. Deleting the corresponding `if (h->type == ESPNOW_V3_TYPE_<X>)` branch
-//      from v3_try_handle_incoming().
+//   1. Implementing a `static void v4h_<name>(const V4RxCtx&)` function.
+//   2. Adding one row to kV4HandlerTable[].
+//   3. Deleting the corresponding `if (h->type == ESPNOW_V4_TYPE_<X>)` branch
+//      from v4_try_handle_incoming().
 //
 // The dispatcher preserves the exact behavior of the original branches,
 // including the per-branch reassembly cleanup that ran at the end of each.
 // That cleanup is centralized in the dispatcher so handlers don't repeat it.
 // ============================================================================
 
-struct V3RxCtx {
+struct V4RxCtx {
   const esp_now_recv_info* recv_info;
-  const EspNowV3Header*    h;
+  const EspNowV4Header*    h;
   const uint8_t*           payload;
   uint16_t                 payloadLen;
   bool                     isPaired;
   const char*              deviceName;
 };
 
-using V3OpcodeHandler = void (*)(const V3RxCtx& ctx);
+using V4OpcodeHandler = void (*)(const V4RxCtx& ctx);
 
 // Flags on handler-table entries
-static constexpr uint8_t V3_OPC_FLAG_REQ_PAIRED    = 0x01;  // require src to be a paired peer
-static constexpr uint8_t V3_OPC_FLAG_REQ_BOND_MODE = 0x02;  // require gSettings.bondModeEnabled
+static constexpr uint8_t V4_OPC_FLAG_REQ_PAIRED    = 0x01;  // require src to be a paired peer
+static constexpr uint8_t V4_OPC_FLAG_REQ_BOND_MODE = 0x02;  // require gSettings.bondModeEnabled
 
-struct V3OpcodeEntry {
+struct V4OpcodeEntry {
   uint8_t          opcode;
   uint8_t          flags;
-  V3OpcodeHandler  handler;
+  V4OpcodeHandler  handler;
 };
 
 // ----- Per-opcode handlers (Phase 0 migrations) -----
 
 // TIME_SYNC — synchronous, updates gTimeOffset / gTimeIsSynced.
-static void v3h_time_sync(const V3RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] Received from %s msgId=%lu payloadLen=%u",
+static void v4h_time_sync(const V4RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
-  if (ctx.payloadLen >= sizeof(V3PayloadTimeSync)) {
-    const V3PayloadTimeSync* ts = (const V3PayloadTimeSync*)ctx.payload;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] epochTime=%lu timeOffset=%ld",
+  if (ctx.payloadLen >= sizeof(V4PayloadTimeSync)) {
+    const V4PayloadTimeSync* ts = (const V4PayloadTimeSync*)ctx.payload;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] epochTime=%lu timeOffset=%ld",
            (unsigned long)ts->epochTime, (long)ts->timeOffset);
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] Previous time state: synced=%s offset=%lld",
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] Previous time state: synced=%s offset=%lld",
            gTimeIsSynced ? "YES" : "NO", (long long)gTimeOffset);
     gTimeOffset = (int64_t)ts->timeOffset;
     gTimeIsSynced = true;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] Time sync applied successfully");
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] Time sync applied successfully");
   } else {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_TIME_SYNC] ERROR: Payload too small (%u < %u)",
-           ctx.payloadLen, (unsigned)sizeof(V3PayloadTimeSync));
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V4PayloadTimeSync));
   }
 }
 
 // TEXT — deferred to task via ring buffer (gEspNow->textQueue).
-static void v3h_text(const V3RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message detected, payload: %.80s",
+static void v4h_text(const V4RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message detected, payload: %.80s",
          ctx.payloadLen > 0 ? (const char*)ctx.payload : "(empty)");
-  if (ctx.payloadLen > 0 && ctx.payloadLen <= ESPNOW_V3_MAX_PAYLOAD && gEspNow) {
+  if (ctx.payloadLen > 0 && ctx.payloadLen <= ESPNOW_V4_MAX_PAYLOAD && gEspNow) {
     int head = gEspNow->textQueueHead;
     int nextHead = (head + 1) & (EspNowState::TEXT_QUEUE_SIZE - 1);
     if (nextHead != gEspNow->textQueueTail) {
@@ -1796,28 +1799,28 @@ static void v3h_text(const V3RxCtx& ctx) {
       memcpy(slot.srcMac, ctx.recv_info->src_addr, 6);
       strncpy(slot.deviceName, ctx.deviceName, sizeof(slot.deviceName) - 1);
       slot.deviceName[sizeof(slot.deviceName) - 1] = '\0';
-      slot.encrypted = (ctx.h->flags & ESPNOW_V3_FLAG_ENCRYPTED) != 0;
+      slot.encrypted = (ctx.h->flags & ESPNOW_V4_FLAG_ENCRYPTED) != 0;
       slot.used = true;
       gEspNow->textQueueHead = nextHead;
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message enqueued slot=%d (encrypted=%s)",
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message enqueued slot=%d (encrypted=%s)",
              head, slot.encrypted ? "YES" : "NO");
       if (ctx.isPaired && meshEnabled()) {
         noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::RxActivity);
       }
     } else {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT queue full, message dropped");
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT queue full, message dropped");
     }
   } else {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] TEXT message REJECTED: payloadLen=%u gEspNow=%p",
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message REJECTED: payloadLen=%u gEspNow=%p",
            ctx.payloadLen, gEspNow);
   }
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] ========================================");
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] ========================================");
 }
 
 // CMD — deferred to task via gEspNow->deferredCmd* fields (one in flight).
-// Auth/validation runs later in v3_handle_cmd() on the espnow task.
-static void v3h_cmd(const V3RxCtx& ctx) {
-  if (ctx.payloadLen > 0 && ctx.payloadLen <= ESPNOW_V3_MAX_PAYLOAD && gEspNow && !gEspNow->deferredCmdPending) {
+// Auth/validation runs later in v4_handle_cmd() on the espnow task.
+static void v4h_cmd(const V4RxCtx& ctx) {
+  if (ctx.payloadLen > 0 && ctx.payloadLen <= ESPNOW_V4_MAX_PAYLOAD && gEspNow && !gEspNow->deferredCmdPending) {
     size_t copyLen = (ctx.payloadLen < sizeof(gEspNow->deferredCmdPayload) - 1)
                        ? ctx.payloadLen
                        : sizeof(gEspNow->deferredCmdPayload) - 1;
@@ -1832,11 +1835,11 @@ static void v3h_cmd(const V3RxCtx& ctx) {
 }
 
 // CMD_RESP — deferred to task via gEspNow->deferredCmdResp* fields.
-static void v3h_cmd_resp(const V3RxCtx& ctx) {
+static void v4h_cmd_resp(const V4RxCtx& ctx) {
   if (ctx.payloadLen >= 1 && gEspNow) {
-    const V3PayloadCmdResp* resp = (const V3PayloadCmdResp*)ctx.payload;
+    const V4PayloadCmdResp* resp = (const V4PayloadCmdResp*)ctx.payload;
     size_t resultLen = ctx.payloadLen - 1;
-    if (resultLen > 2047) resultLen = 2047;
+    if (resultLen > 6143) resultLen = 6143;  // V4 fragmentation budget: 32 × 200 = 6400 B (matches V4_FRAG_MAX)
     if (!gEspNow->deferredCmdRespResult) { gEspNow->deferredCmdRespPending = false; return; }
     memcpy(gEspNow->deferredCmdRespResult, resp->result, resultLen);
     gEspNow->deferredCmdRespResult[resultLen] = '\0';
@@ -1850,11 +1853,11 @@ static void v3h_cmd_resp(const V3RxCtx& ctx) {
 
 // HEARTBEAT — mesh peer heartbeat; updates rx activity, mesh-backup tracking,
 // and sends ACK if requested. Note: ACK_REQ frames also get an auto-ACK from
-// the early auto-ACK block in v3_try_handle_incoming; preserving the
+// the early auto-ACK block in v4_try_handle_incoming; preserving the
 // double-send here to match original behavior exactly.
-static void v3h_heartbeat(const V3RxCtx& ctx) {
-  if (ctx.payloadLen >= sizeof(V3PayloadHeartbeat)) {
-    const V3PayloadHeartbeat* hb = (const V3PayloadHeartbeat*)ctx.payload;
+static void v4h_heartbeat(const V4RxCtx& ctx) {
+  if (ctx.payloadLen >= sizeof(V4PayloadHeartbeat)) {
+    const V4PayloadHeartbeat* hb = (const V4PayloadHeartbeat*)ctx.payload;
     noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::MeshHeartbeat, hb->rssi);
     if (gEspNow) gEspNow->heartbeatsReceived++;
 
@@ -1879,48 +1882,48 @@ static void v3h_heartbeat(const V3RxCtx& ctx) {
     }
   }
   // Send ACK if requested
-  if (ctx.h->flags & ESPNOW_V3_FLAG_ACK_REQ) {
-    v3_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
+  if (ctx.h->flags & ESPNOW_V4_FLAG_ACK_REQ) {
+    v4_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
   }
 }
 
 // SENSOR_STATUS — remote sensor enable/disable announcement (mesh broadcast).
-static void v3h_sensor_status(const V3RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] Received from %s msgId=%lu payloadLen=%u",
+static void v4h_sensor_status(const V4RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
-  if (ctx.payloadLen >= sizeof(V3PayloadSensorStatus)) {
-    const V3PayloadSensorStatus* ss = (const V3PayloadSensorStatus*)ctx.payload;
+  if (ctx.payloadLen >= sizeof(V4PayloadSensorStatus)) {
+    const V4PayloadSensorStatus* ss = (const V4PayloadSensorStatus*)ctx.payload;
     RemoteSensorType sensorType = (RemoteSensorType)ss->sensorType;
     bool enabled = (ss->enabled != 0);
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] sensor=%s enabled=%s",
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] sensor=%s enabled=%s",
            sensorTypeToString(sensorType), enabled ? "YES" : "NO");
 
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] Updating remote sensor status");
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] Updating remote sensor status");
     extern void updateRemoteSensorStatus(const uint8_t* mac, const char* name, RemoteSensorType type, bool enabled);
     updateRemoteSensorStatus(ctx.recv_info->src_addr, ctx.deviceName, sensorType, enabled);
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] Status update complete");
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] Status update complete");
   } else {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_STATUS] ERROR: Payload too small (%u < %u)",
-           ctx.payloadLen, (unsigned)sizeof(V3PayloadSensorStatus));
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_STATUS] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V4PayloadSensorStatus));
   }
 }
 
 // SENSOR_BROADCAST — remote sensor data broadcast to mesh; cache to remote-sensor table.
-static void v3h_sensor_broadcast(const V3RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] Received from %s msgId=%lu payloadLen=%u",
+static void v4h_sensor_broadcast(const V4RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
-  if (ctx.payloadLen >= sizeof(V3PayloadSensorBroadcast)) {
-    const V3PayloadSensorBroadcast* sb = (const V3PayloadSensorBroadcast*)ctx.payload;
+  if (ctx.payloadLen >= sizeof(V4PayloadSensorBroadcast)) {
+    const V4PayloadSensorBroadcast* sb = (const V4PayloadSensorBroadcast*)ctx.payload;
     RemoteSensorType sensorType = (RemoteSensorType)sb->sensorType;
     uint16_t dataLen = sb->dataLen;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] sensor=%s dataLen=%u",
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] sensor=%s dataLen=%u",
            sensorTypeToString(sensorType), dataLen);
 
-    if (dataLen > 0 && ctx.payloadLen >= (sizeof(V3PayloadSensorBroadcast) + dataLen)) {
+    if (dataLen > 0 && ctx.payloadLen >= (sizeof(V4PayloadSensorBroadcast) + dataLen)) {
       const char* jsonData = (const char*)sb->data;
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] JSON (first 100 chars): %.100s", jsonData);
+      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] JSON (first 100 chars): %.100s", jsonData);
 
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] Caching sensor data");
+      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] Caching sensor data");
       RemoteSensorData* entry = findOrCreateCacheEntry(ctx.recv_info->src_addr, ctx.deviceName, sensorType);
       if (entry) {
         size_t copyLen = (dataLen < REMOTE_SENSOR_BUFFER_SIZE - 1) ? dataLen : REMOTE_SENSOR_BUFFER_SIZE - 1;
@@ -1929,29 +1932,29 @@ static void v3h_sensor_broadcast(const V3RxCtx& ctx) {
         entry->jsonLength = (uint16_t)copyLen;
         entry->lastUpdate = millis();
         entry->valid = true;
-        DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] Data cached successfully (%u bytes)", (unsigned)copyLen);
+        DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] Data cached successfully (%u bytes)", (unsigned)copyLen);
       } else {
-        DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] ERROR: Failed to allocate cache entry");
+        DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] ERROR: Failed to allocate cache entry");
       }
     } else {
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] ERROR: Invalid data length (%u) or truncated payload",
+      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] ERROR: Invalid data length (%u) or truncated payload",
              dataLen);
     }
   } else {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_SENSOR_BROADCAST] ERROR: Payload too small (%u < %u)",
-           ctx.payloadLen, (unsigned)sizeof(V3PayloadSensorBroadcast));
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V4PayloadSensorBroadcast));
   }
 }
 
 #if ENABLE_BONDED_MODE
 // BOND_HEARTBEAT — bond-mode keepalive from paired peer; updates bond peer
 // online state, boot counter, settings hash, RSSI; may trigger sync recovery.
-static void v3h_bond_heartbeat(const V3RxCtx& ctx) {
+static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_HB_RX] from %s payloadLen=%u (need %u) isPaired=%d",
-         ctx.deviceName, ctx.payloadLen, (unsigned)sizeof(V3PayloadBondHeartbeat), (int)ctx.isPaired);
-  if (ctx.payloadLen < sizeof(V3PayloadBondHeartbeat)) return;
+         ctx.deviceName, ctx.payloadLen, (unsigned)sizeof(V4PayloadBondHeartbeat), (int)ctx.isPaired);
+  if (ctx.payloadLen < sizeof(V4PayloadBondHeartbeat)) return;
 
-  const V3PayloadBondHeartbeat* hb = (const V3PayloadBondHeartbeat*)ctx.payload;
+  const V4PayloadBondHeartbeat* hb = (const V4PayloadBondHeartbeat*)ctx.payload;
   if (!gEspNow) return;
 
   bool bootChanged = (hb->bootCounter != 0 && gEspNow->bondPeerBootCounter != 0 &&
@@ -2024,7 +2027,7 @@ static void v3h_bond_heartbeat(const V3RxCtx& ctx) {
 
 // STREAM_CTRL — bond mode master->worker: start/stop sensor streaming.
 // Deferred to task because startSensorDataStreaming creates tasks/mutexes.
-static void v3h_stream_ctrl(const V3RxCtx& ctx) {
+static void v4h_stream_ctrl(const V4RxCtx& ctx) {
   if (ctx.payloadLen >= 2 && gEspNow) {
     gEspNow->bondDeferredStreamCtrlSensor = ctx.payload[0];  // sensorType
     gEspNow->bondDeferredStreamCtrlEnable = ctx.payload[1];  // enable
@@ -2036,16 +2039,16 @@ static void v3h_stream_ctrl(const V3RxCtx& ctx) {
 #endif // ENABLE_BONDED_MODE
 
 // TOPO_REQ — peer is asking for our topology; respond with TOPO_START + N×TOPO_PEER.
-static void v3h_topo_req(const V3RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] Received from %s msgId=%lu payloadLen=%u",
+static void v4h_topo_req(const V4RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
-  if (ctx.payloadLen < sizeof(V3PayloadTopoReq)) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] ERROR: Payload too small (%u < %u)",
-           ctx.payloadLen, (unsigned)sizeof(V3PayloadTopoReq));
+  if (ctx.payloadLen < sizeof(V4PayloadTopoReq)) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V4PayloadTopoReq));
     return;
   }
-  const V3PayloadTopoReq* tr = (const V3PayloadTopoReq*)ctx.payload;
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] reqId=%lu", (unsigned long)tr->reqId);
+  const V4PayloadTopoReq* tr = (const V4PayloadTopoReq*)ctx.payload;
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] reqId=%lu", (unsigned long)tr->reqId);
 
   // Count active peers (excluding self)
   int peerCount = 0;
@@ -2055,8 +2058,8 @@ static void v3h_topo_req(const V3RxCtx& ctx) {
     }
   }
 
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] Responding with %d peer(s)", peerCount);
-  v3_send_topo_start(ctx.recv_info->src_addr, tr->reqId, (uint8_t)peerCount);
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] Responding with %d peer(s)", peerCount);
+  v4_send_topo_start(ctx.recv_info->src_addr, tr->reqId, (uint8_t)peerCount);
 
   int peerIndex = 0;
   for (int i = 0; i < gMeshPeerSlots; i++) {
@@ -2081,34 +2084,34 @@ static void v3h_topo_req(const V3RxCtx& ctx) {
       }
       MeshPeerHealth* ph = getMeshPeerHealth(gMeshPeers[i].mac, false);
       int8_t rssi = ph ? ph->rssi : 0;
-      v3_send_topo_peer(ctx.recv_info->src_addr, tr->reqId, (uint8_t)peerIndex,
+      v4_send_topo_peer(ctx.recv_info->src_addr, tr->reqId, (uint8_t)peerIndex,
                         isLast, gMeshPeers[i].mac, rssi,
                         false, peerNamePtr ? peerNamePtr : "Unknown");
       peerIndex++;
     }
   }
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_REQ] Sent %d TOPO_PEER frame(s)", peerIndex);
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] Sent %d TOPO_PEER frame(s)", peerIndex);
 }
 
 // TOPO_START — incoming topology response start (peer count). Initializes stream.
-static void v3h_topo_start(const V3RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] Received from %s msgId=%lu payloadLen=%u",
+static void v4h_topo_start(const V4RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
-  if (ctx.payloadLen < sizeof(V3PayloadTopoStart)) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] ERROR: Payload too small (%u < %u)",
-           ctx.payloadLen, (unsigned)sizeof(V3PayloadTopoStart));
+  if (ctx.payloadLen < sizeof(V4PayloadTopoStart)) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V4PayloadTopoStart));
     return;
   }
-  const V3PayloadTopoStart* ts = (const V3PayloadTopoStart*)ctx.payload;
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] reqId=%lu peerCount=%u",
+  const V4PayloadTopoStart* ts = (const V4PayloadTopoStart*)ctx.payload;
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] reqId=%lu peerCount=%u",
          (unsigned long)ts->reqId, ts->peerCount);
   if (ts->reqId != gTopoRequestId || millis() >= gTopoRequestTimeout) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] Rejected: reqId mismatch or timeout");
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] Rejected: reqId mismatch or timeout");
     return;
   }
   TopologyStream* stream = findOrCreateTopoStream(ctx.recv_info->src_addr, ts->reqId);
   if (!stream || !stream->active) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] ERROR: Could not allocate stream");
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] ERROR: Could not allocate stream");
     return;
   }
   if (stream->receivedPeers == 0 && stream->totalPeers == 0) {
@@ -2138,40 +2141,40 @@ static void v3h_topo_start(const V3RxCtx& ctx) {
     stream->totalPeers = ts->peerCount;
     stream->accumulatedData = "";
     addTopoDeviceName(ctx.recv_info->src_addr, senderNamePtr);
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] Stream initialized for %s: expecting %d peers",
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] Stream initialized for %s: expecting %d peers",
            stream->senderName, ts->peerCount);
   }
   if (ts->peerCount == 0) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_START] 0 peers - edge device, finalizing");
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_START] 0 peers - edge device, finalizing");
     finalizeTopologyStream(stream);
   }
 }
 
 // TOPO_PEER — incoming topology peer entry. Appends to accumulated data.
-static void v3h_topo_peer(const V3RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Received from %s msgId=%lu payloadLen=%u",
+static void v4h_topo_peer(const V4RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
-  if (ctx.payloadLen < sizeof(V3PayloadTopoPeer)) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] ERROR: Payload too small (%u < %u)",
-           ctx.payloadLen, (unsigned)sizeof(V3PayloadTopoPeer));
+  if (ctx.payloadLen < sizeof(V4PayloadTopoPeer)) {
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] ERROR: Payload too small (%u < %u)",
+           ctx.payloadLen, (unsigned)sizeof(V4PayloadTopoPeer));
     return;
   }
-  const V3PayloadTopoPeer* tp = (const V3PayloadTopoPeer*)ctx.payload;
+  const V4PayloadTopoPeer* tp = (const V4PayloadTopoPeer*)ctx.payload;
   char peerMacStr[18];
   formatMacAddressBuf(tp->mac, peerMacStr, sizeof(peerMacStr));
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] reqId=%lu idx=%u isLast=%u mac=%s name=%s",
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] reqId=%lu idx=%u isLast=%u mac=%s name=%s",
          (unsigned long)tp->reqId, tp->peerIndex, tp->isLast, peerMacStr, tp->name);
   if (tp->reqId != gTopoRequestId || millis() >= gTopoRequestTimeout) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Rejected: reqId mismatch or timeout");
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Rejected: reqId mismatch or timeout");
     return;
   }
   TopologyStream* stream = findTopoStream(ctx.recv_info->src_addr, tp->reqId);
   if (!stream || !stream->active) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] No active stream for this sender");
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] No active stream for this sender");
     return;
   }
   if (stream->accumulatedData.indexOf(peerMacStr) != -1) {
-    DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Duplicate peer %s, skipping", peerMacStr);
+    DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Duplicate peer %s, skipping", peerMacStr);
     return;
   }
   const char* peerNamePtr2 = (tp->name[0] && strcmp(tp->name, "Unknown") != 0) ? tp->name : nullptr;
@@ -2205,22 +2208,22 @@ static void v3h_topo_peer(const V3RxCtx& ctx) {
   stream->accumulatedData += peerInfoBuf;
   stream->receivedPeers++;
   gTopoLastResponseTime = millis();
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_RX_TOPO_PEER] Accumulated peer %d/%d: %s",
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_PEER] Accumulated peer %d/%d: %s",
          stream->receivedPeers, stream->totalPeers, peerNamePtr2 ? peerNamePtr2 : "Unknown");
 }
 
 // USER_SYNC — propagates user credentials between bonded peers; requires
-// ESPNOW_V3_FLAG_ENCRYPTED, admin authentication, and a setting opt-in.
+// ESPNOW_V4_FLAG_ENCRYPTED, admin authentication, and a setting opt-in.
 // All early-rejection paths send their own ACK or CMD_RESP back.
-static void v3h_user_sync(const V3RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_RX_USER_SYNC] Received from %s msgId=%lu encrypted=%s",
-         ctx.deviceName, (unsigned long)ctx.h->msgId, (ctx.h->flags & ESPNOW_V3_FLAG_ENCRYPTED) ? "YES" : "NO");
+static void v4h_user_sync(const V4RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_USER_SYNC] Received from %s msgId=%lu encrypted=%s",
+         ctx.deviceName, (unsigned long)ctx.h->msgId, (ctx.h->flags & ESPNOW_V4_FLAG_ENCRYPTED) ? "YES" : "NO");
 
   // Security: must be encrypted
-  if (!(ctx.h->flags & ESPNOW_V3_FLAG_ENCRYPTED)) {
+  if (!(ctx.h->flags & ESPNOW_V4_FLAG_ENCRYPTED)) {
     ERROR_ESPNOWF("[USER_SYNC] SECURITY: Rejected from %s — encryption required", ctx.deviceName);
     broadcastOutput("[ESP-NOW] SECURITY: User sync rejected - encryption required");
-    v3_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
+    v4_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
     return;
   }
 
@@ -2228,13 +2231,13 @@ static void v3h_user_sync(const V3RxCtx& ctx) {
   if (!gSettings.espnowUserSyncEnabled) {
     WARN_ESPNOWF("[USER_SYNC] Disabled — rejecting from %s", ctx.deviceName);
     broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnowusersync on'");
-    v3_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
+    v4_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
     return;
   }
 
   if (ctx.payloadLen == 0) {
     WARN_ESPNOWF("[USER_SYNC] Empty payload from %s", ctx.deviceName);
-    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Empty payload", strlen("Empty payload"));
+    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Empty payload", strlen("Empty payload"));
     return;
   }
 
@@ -2242,7 +2245,7 @@ static void v3h_user_sync(const V3RxCtx& ctx) {
   String jsonStr((const char*)ctx.payload, ctx.payloadLen);
   if (deserializeJson(doc, jsonStr) != DeserializationError::Ok) {
     WARN_ESPNOWF("[USER_SYNC] Malformed JSON from %s", ctx.deviceName);
-    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Malformed JSON", strlen("Malformed JSON"));
+    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Malformed JSON", strlen("Malformed JSON"));
     return;
   }
 
@@ -2254,21 +2257,21 @@ static void v3h_user_sync(const V3RxCtx& ctx) {
 
   if (!strlen(adminUser) || !strlen(adminPass) || !strlen(targetUser) || !strlen(targetPass)) {
     WARN_ESPNOWF("[USER_SYNC] Missing required fields from %s", ctx.deviceName);
-    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Missing required fields", strlen("Missing required fields"));
+    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Missing required fields", strlen("Missing required fields"));
     return;
   }
 
   if (!isValidUser(String(adminUser), String(adminPass))) {
     ERROR_ESPNOWF("[USER_SYNC] Admin auth FAILED for '%s' from %s", adminUser, ctx.deviceName);
     broadcastOutput("[ESP-NOW] User sync: Admin authentication FAILED");
-    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Admin authentication failed", strlen("Admin authentication failed"));
+    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Admin authentication failed", strlen("Admin authentication failed"));
     return;
   }
 
   if (!isAdminUser(String(adminUser))) {
     ERROR_ESPNOWF("[USER_SYNC] '%s' is not admin — sync rejected from %s", adminUser, ctx.deviceName);
     broadcastOutput("[ESP-NOW] User sync: Admin privileges required");
-    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Admin privileges required", strlen("Admin privileges required"));
+    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Admin privileges required", strlen("Admin privileges required"));
     return;
   }
 
@@ -2276,13 +2279,13 @@ static void v3h_user_sync(const V3RxCtx& ctx) {
   if (getUserIdByUsername(String(targetUser), existingId)) {
     WARN_ESPNOWF("[USER_SYNC] User '%s' already exists (id=%u) — skipping", targetUser, (unsigned)existingId);
     BROADCAST_PRINTF("[ESP-NOW] User sync: '%s' already exists", targetUser);
-    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, true, "User already exists (skipped)", strlen("User already exists (skipped)"));
+    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, true, "User already exists (skipped)", strlen("User already exists (skipped)"));
     return;
   }
 
   if (!filesystemReady) {
     ERROR_ESPNOWF("[USER_SYNC] Filesystem not ready");
-    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Filesystem not ready", strlen("Filesystem not ready"));
+    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Filesystem not ready", strlen("Filesystem not ready"));
     return;
   }
 
@@ -2296,14 +2299,14 @@ static void v3h_user_sync(const V3RxCtx& ctx) {
 
     if (!VFS::existsGuarded(USERS_JSON_FILE, userSyncCtx)) {
       ERROR_ESPNOWF("[USER_SYNC] users.json not found");
-      v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "users.json not found", strlen("users.json not found"));
+      v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "users.json not found", strlen("users.json not found"));
       return;
     }
 
     File f = VFS::openGuarded(USERS_JSON_FILE, "r", userSyncCtx);
     if (!f) {
       ERROR_ESPNOWF("[USER_SYNC] Could not open users.json");
-      v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Could not open users.json", strlen("Could not open users.json"));
+      v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Could not open users.json", strlen("Could not open users.json"));
       return;
     }
 
@@ -2313,7 +2316,7 @@ static void v3h_user_sync(const V3RxCtx& ctx) {
 
     if (err || !userDoc["users"]) {
       ERROR_ESPNOWF("[USER_SYNC] Malformed users.json");
-      v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Malformed users.json", strlen("Malformed users.json"));
+      v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Malformed users.json", strlen("Malformed users.json"));
       return;
     }
 
@@ -2339,7 +2342,7 @@ static void v3h_user_sync(const V3RxCtx& ctx) {
     if (!f || serializeJson(userDoc, f) == 0) {
       if (f) f.close();
       ERROR_ESPNOWF("[USER_SYNC] Failed to write users.json");
-      v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Failed to write users.json", strlen("Failed to write users.json"));
+      v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Failed to write users.json", strlen("Failed to write users.json"));
       return;
     }
     f.close();
@@ -2357,13 +2360,13 @@ static void v3h_user_sync(const V3RxCtx& ctx) {
 
     char respBuf[128];
     snprintf(respBuf, sizeof(respBuf), "User '%s' created (id=%d)", targetUser, nextId);
-    v3_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, true, respBuf, strlen(respBuf));
+    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, true, respBuf, strlen(respBuf));
   }
 }
 
 #if ENABLE_BONDED_MODE
 // BOND_CAP_REQ — peer asks for our capability summary. Defer to task.
-static void v3h_bond_cap_req(const V3RxCtx& ctx) {
+static void v4h_bond_cap_req(const V4RxCtx& ctx) {
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_REQ_RX] from %s role=%d capSent=%d",
          ctx.deviceName, (int)gSettings.bondRole,
          gEspNow ? (int)gEspNow->bondCapSent : -1);
@@ -2376,7 +2379,7 @@ static void v3h_bond_cap_req(const V3RxCtx& ctx) {
 // BOND_CAP_RESP — peer's capability summary. Cache it; queue our own back
 // if we haven't sent one yet. NOTE: extra payloadLen check is done here
 // (was in the original if-condition) since the dispatcher can't express it.
-static void v3h_bond_cap_resp(const V3RxCtx& ctx) {
+static void v4h_bond_cap_resp(const V4RxCtx& ctx) {
   if (ctx.payloadLen != sizeof(CapabilitySummary)) return;
   const CapabilitySummary* cap = (const CapabilitySummary*)ctx.payload;
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_CAP_RESP_RX] from %s role=%d capSent=%d sensorMask=0x%04lX devName='%.16s'",
@@ -2401,10 +2404,10 @@ static void v3h_bond_cap_resp(const V3RxCtx& ctx) {
 }
 
 // SENSOR_DATA — bond mode binary sensor data; cache to remote sensor entry.
-static void v3h_sensor_data(const V3RxCtx& ctx) {
-  if (ctx.payloadLen < sizeof(V3PayloadSensorData)) return;
-  const V3PayloadSensorData* sd = (const V3PayloadSensorData*)ctx.payload;
-  size_t totalExpected = sizeof(V3PayloadSensorData) + sd->dataLen;
+static void v4h_sensor_data(const V4RxCtx& ctx) {
+  if (ctx.payloadLen < sizeof(V4PayloadSensorData)) return;
+  const V4PayloadSensorData* sd = (const V4PayloadSensorData*)ctx.payload;
+  size_t totalExpected = sizeof(V4PayloadSensorData) + sd->dataLen;
   if (sd->dataLen == 0 || totalExpected > ctx.payloadLen) return;
   RemoteSensorType sensorType = (RemoteSensorType)sd->sensorType;
   if (sensorType >= REMOTE_SENSOR_MAX) return;
@@ -2421,7 +2424,7 @@ static void v3h_sensor_data(const V3RxCtx& ctx) {
 }
 
 // SETTINGS_REQ — peer asks for our settings file. Defer to task.
-static void v3h_settings_req(const V3RxCtx& ctx) {
+static void v4h_settings_req(const V4RxCtx& ctx) {
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SETTINGS_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
@@ -2431,7 +2434,7 @@ static void v3h_settings_req(const V3RxCtx& ctx) {
 }
 
 // BOND_STATUS_REQ — peer asks for live status. Defer to task.
-static void v3h_bond_status_req(const V3RxCtx& ctx) {
+static void v4h_bond_status_req(const V4RxCtx& ctx) {
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STATUS_REQ_RX] from %s", ctx.deviceName);
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
@@ -2440,7 +2443,7 @@ static void v3h_bond_status_req(const V3RxCtx& ctx) {
 }
 
 // BOND_STATUS_RESP — peer's live status; cache it.
-static void v3h_bond_status_resp(const V3RxCtx& ctx) {
+static void v4h_bond_status_resp(const V4RxCtx& ctx) {
   if (ctx.payloadLen < sizeof(BondPeerStatus) || !gEspNow) return;
   memcpy(&gEspNow->bondPeerStatus, ctx.payload, sizeof(BondPeerStatus));
   gEspNow->bondPeerStatusValid = true;
@@ -2452,7 +2455,7 @@ static void v3h_bond_status_resp(const V3RxCtx& ctx) {
 }
 
 // MANIFEST_REQ — peer asks for our manifest file. Defer to task.
-static void v3h_manifest_req(const V3RxCtx& ctx) {
+static void v4h_manifest_req(const V4RxCtx& ctx) {
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_MANIFEST_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
@@ -2463,7 +2466,7 @@ static void v3h_manifest_req(const V3RxCtx& ctx) {
 #endif // ENABLE_BONDED_MODE
 
 // METADATA_REQ — peer asks for our metadata. Defer to task.
-static void v3h_metadata_req(const V3RxCtx& ctx) {
+static void v4h_metadata_req(const V4RxCtx& ctx) {
   bool isEncrypted = false;
   if (gEspNow) {
     for (int i = 0; i < gEspNow->deviceCount; i++) {
@@ -2487,17 +2490,17 @@ static void v3h_metadata_req(const V3RxCtx& ctx) {
 }
 
 // METADATA_RESP / METADATA_PUSH — shared handler. Type comes from header.
-static void v3h_metadata_resp_push(const V3RxCtx& ctx) {
-  const char* metaType = (ctx.h->type == ESPNOW_V3_TYPE_METADATA_PUSH) ? "PUSH" : "RESP";
+static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
+  const char* metaType = (ctx.h->type == ESPNOW_V4_TYPE_METADATA_PUSH) ? "PUSH" : "RESP";
   DEBUG_ESPNOW_METADATAF("[METADATA] %s received from %s (%s) msgId=%lu payloadLen=%u (need %u) isPaired=%d",
     metaType, ctx.deviceName, MAC_STR(ctx.recv_info->src_addr),
-    (unsigned long)ctx.h->msgId, ctx.payloadLen, (unsigned)sizeof(V3PayloadMetadata), (int)ctx.isPaired);
-  if (ctx.payloadLen < sizeof(V3PayloadMetadata)) {
+    (unsigned long)ctx.h->msgId, ctx.payloadLen, (unsigned)sizeof(V4PayloadMetadata), (int)ctx.isPaired);
+  if (ctx.payloadLen < sizeof(V4PayloadMetadata)) {
     WARN_ESPNOWF("[METADATA] %s from %s REJECTED: payload too small (%u < %u)",
-      metaType, ctx.deviceName, ctx.payloadLen, (unsigned)sizeof(V3PayloadMetadata));
+      metaType, ctx.deviceName, ctx.payloadLen, (unsigned)sizeof(V4PayloadMetadata));
     return;
   }
-  const V3PayloadMetadata* meta = (const V3PayloadMetadata*)ctx.payload;
+  const V4PayloadMetadata* meta = (const V4PayloadMetadata*)ctx.payload;
   DEBUG_ESPNOW_METADATAF("[METADATA] %s payload: name='%s' friendlyName='%s' room='%s' zone='%s' tags='%s' stationary=%d",
     metaType, meta->deviceName, meta->friendlyName, meta->room, meta->zone, meta->tags, (int)meta->stationary);
   if (!gEspNow) {
@@ -2506,16 +2509,16 @@ static void v3h_metadata_resp_push(const V3RxCtx& ctx) {
   }
   bool wasPending = gEspNow->deferredMetadataPending;
   memcpy(gEspNow->deferredMetadataSrcMac, ctx.recv_info->src_addr, 6);
-  memcpy(&gEspNow->deferredMetadataPayload, meta, sizeof(V3PayloadMetadata));
+  memcpy(&gEspNow->deferredMetadataPayload, meta, sizeof(V4PayloadMetadata));
   gEspNow->deferredMetadataPending = true;
   DEBUG_ESPNOW_METADATAF("[METADATA] %s deferred for task processing (overwrote=%d)",
     metaType, (int)wasPending);
 }
 
 // STREAM — incoming stream output; ring-buffer enqueue to task. Bypasses
-// dedup (see special-cased dedup bypass in v3_try_handle_incoming).
-static void v3h_stream(const V3RxCtx& ctx) {
-  if (ctx.payloadLen == 0 || ctx.payloadLen > ESPNOW_V3_MAX_PAYLOAD || !gEspNow) return;
+// dedup (see special-cased dedup bypass in v4_try_handle_incoming).
+static void v4h_stream(const V4RxCtx& ctx) {
+  if (ctx.payloadLen == 0 || ctx.payloadLen > ESPNOW_V4_MAX_PAYLOAD || !gEspNow) return;
   int head = gEspNow->streamQueueHead;
   int nextHead = (head + 1) & (EspNowState::STREAM_QUEUE_SIZE - 1);
   if (nextHead != gEspNow->streamQueueTail) {
@@ -2536,15 +2539,15 @@ static void v3h_stream(const V3RxCtx& ctx) {
 // FILE_START — initialize a file transfer; allocate PSRAM buffer + chunk bitmap.
 // Rejects if a different sender already has an active transfer. Stale transfers
 // (>30s) and same-sender restarts are tolerated by cleaning up first.
-static void v3h_file_start(const V3RxCtx& ctx) {
-  if (ctx.payloadLen < sizeof(V3PayloadFileStart)) return;
-  const V3PayloadFileStart* fs = (const V3PayloadFileStart*)ctx.payload;
+static void v4h_file_start(const V4RxCtx& ctx) {
+  if (ctx.payloadLen < sizeof(V4PayloadFileStart)) return;
+  const V4PayloadFileStart* fs = (const V4PayloadFileStart*)ctx.payload;
 
   if (gActiveFileTransfer) {
     bool isStale = (millis() - gActiveFileTransfer->startTime) > 30000;
     bool sameSender = (memcmp(gActiveFileTransfer->senderMac, ctx.recv_info->src_addr, 6) == 0);
     if (!isStale && !sameSender) {
-      ERROR_ESPNOWF("[V3_FILE] Rejected: transfer already in progress from different sender");
+      ERROR_ESPNOWF("[V4_FILE] Rejected: transfer already in progress from different sender");
       return;
     }
     if (gActiveFileTransfer->chunkMap) {
@@ -2559,21 +2562,21 @@ static void v3h_file_start(const V3RxCtx& ctx) {
   }
 
   if (fs->fileSize > 65536) {
-    ERROR_ESPNOWF("[V3_FILE] File too large for buffer: %lu bytes (max 64KB)", (unsigned long)fs->fileSize);
+    ERROR_ESPNOWF("[V4_FILE] File too large for buffer: %lu bytes (max 64KB)", (unsigned long)fs->fileSize);
     return;
   }
   if (fs->fileSize == 0) {
-    DEBUG_ESPNOWF("[V3_FILE] Warning: zero-size file transfer: %s", fs->filename);
+    DEBUG_ESPNOWF("[V4_FILE] Warning: zero-size file transfer: %s", fs->filename);
   }
   if (fs->chunkSize == 0 || (fs->chunkCount == 0 && fs->fileSize > 0)) {
-    ERROR_ESPNOWF("[V3_FILE] Rejected invalid chunk params: chunkSize=%u chunkCount=%u",
+    ERROR_ESPNOWF("[V4_FILE] Rejected invalid chunk params: chunkSize=%u chunkCount=%u",
                   (unsigned)fs->chunkSize, (unsigned)fs->chunkCount);
     return;
   }
 
   gActiveFileTransfer = new FileTransfer();
   if (!gActiveFileTransfer) {
-    ERROR_ESPNOWF("[V3_FILE] Failed to allocate FileTransfer");
+    ERROR_ESPNOWF("[V4_FILE] Failed to allocate FileTransfer");
     return;
   }
   memset(gActiveFileTransfer, 0, sizeof(FileTransfer));
@@ -2581,7 +2584,7 @@ static void v3h_file_start(const V3RxCtx& ctx) {
   uint32_t allocSize = fs->fileSize > 0 ? fs->fileSize : 1;
   gActiveFileTransfer->dataBuffer = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM);
   if (!gActiveFileTransfer->dataBuffer) {
-    ERROR_ESPNOWF("[V3_FILE] Failed to allocate %lu byte PSRAM buffer", (unsigned long)allocSize);
+    ERROR_ESPNOWF("[V4_FILE] Failed to allocate %lu byte PSRAM buffer", (unsigned long)allocSize);
     delete gActiveFileTransfer;
     gActiveFileTransfer = nullptr;
     return;
@@ -2601,7 +2604,7 @@ static void v3h_file_start(const V3RxCtx& ctx) {
   if (gActiveFileTransfer->chunkMapBytes == 0) gActiveFileTransfer->chunkMapBytes = 1;
   gActiveFileTransfer->chunkMap = (uint8_t*)heap_caps_malloc(gActiveFileTransfer->chunkMapBytes, MALLOC_CAP_8BIT);
   if (!gActiveFileTransfer->chunkMap) {
-    ERROR_ESPNOWF("[V3_FILE] Failed to allocate chunk bitmap (%u bytes)", (unsigned)gActiveFileTransfer->chunkMapBytes);
+    ERROR_ESPNOWF("[V4_FILE] Failed to allocate chunk bitmap (%u bytes)", (unsigned)gActiveFileTransfer->chunkMapBytes);
     heap_caps_free(gActiveFileTransfer->dataBuffer);
     delete gActiveFileTransfer;
     gActiveFileTransfer = nullptr;
@@ -2613,18 +2616,18 @@ static void v3h_file_start(const V3RxCtx& ctx) {
   gActiveFileTransfer->startTime = millis();
   memcpy(gActiveFileTransfer->senderMac, ctx.recv_info->src_addr, 6);
 
-  DEBUG_ESPNOWF("[V3_FILE_RX] FILE_START: %s (%lu bytes, %u chunks, chunkSize=%u) from %s",
+  DEBUG_ESPNOWF("[V4_FILE_RX] FILE_START: %s (%lu bytes, %u chunks, chunkSize=%u) from %s",
                fs->filename, (unsigned long)fs->fileSize, fs->chunkCount, fs->chunkSize, ctx.deviceName);
-  DEBUG_ESPNOWF("[V3_FILE_RX] Allocated: dataBuffer=%lu bytes, chunkMap=%u bytes",
+  DEBUG_ESPNOWF("[V4_FILE_RX] Allocated: dataBuffer=%lu bytes, chunkMap=%u bytes",
                (unsigned long)gActiveFileTransfer->bufferSize, (unsigned)gActiveFileTransfer->chunkMapBytes);
 }
 
 // FILE_DATA — receive a chunk into the active transfer's PSRAM buffer.
 // Original branch had inline `if (!isPaired) return true;` — using REQ_PAIRED
 // flag yields identical behavior (silent drop for unpaired senders).
-static void v3h_file_data(const V3RxCtx& ctx) {
+static void v4h_file_data(const V4RxCtx& ctx) {
   if (!gActiveFileTransfer || !gActiveFileTransfer->active || !gActiveFileTransfer->dataBuffer) {
-    DEBUG_ESPNOWF("[V3_FILE_RX] FILE_DATA ignored: no active transfer (active=%d)",
+    DEBUG_ESPNOWF("[V4_FILE_RX] FILE_DATA ignored: no active transfer (active=%d)",
                  gActiveFileTransfer ? gActiveFileTransfer->active : 0);
     return;
   }
@@ -2632,7 +2635,7 @@ static void v3h_file_data(const V3RxCtx& ctx) {
     return;  // Silently ignore data from different sender
   }
   if (ctx.payloadLen < 3) return;
-  const V3PayloadFileData* fd = (const V3PayloadFileData*)ctx.payload;
+  const V4PayloadFileData* fd = (const V4PayloadFileData*)ctx.payload;
   uint16_t dataLen = ctx.payloadLen - 2;
   if (!gActiveFileTransfer->chunkMap || gActiveFileTransfer->chunkSize == 0 || gActiveFileTransfer->totalChunks == 0) {
     return;
@@ -2641,7 +2644,7 @@ static void v3h_file_data(const V3RxCtx& ctx) {
   if (idx >= gActiveFileTransfer->totalChunks) return;
   uint32_t offset = (uint32_t)idx * (uint32_t)gActiveFileTransfer->chunkSize;
   if (offset + dataLen > gActiveFileTransfer->bufferSize) {
-    ERROR_ESPNOWF("[V3_FILE] Buffer overflow: offset=%lu + len=%u > size=%lu",
+    ERROR_ESPNOWF("[V4_FILE] Buffer overflow: offset=%lu + len=%u > size=%lu",
                  (unsigned long)offset, dataLen, (unsigned long)gActiveFileTransfer->bufferSize);
     return;
   }
@@ -2649,9 +2652,9 @@ static void v3h_file_data(const V3RxCtx& ctx) {
   uint8_t bitMask = (uint8_t)(1u << (idx % 8));
   bool alreadyHave = (byteIndex < gActiveFileTransfer->chunkMapBytes) && ((gActiveFileTransfer->chunkMap[byteIndex] & bitMask) != 0);
   if (alreadyHave) {
-    DEBUG_ESPNOWF("[V3_FILE_RX] Chunk %u: DUPLICATE", idx);
+    DEBUG_ESPNOWF("[V4_FILE_RX] Chunk %u: DUPLICATE", idx);
   } else {
-    DEBUG_ESPNOWF("[V3_FILE_RX] Chunk %u: offset=%lu len=%u", idx, (unsigned long)offset, dataLen);
+    DEBUG_ESPNOWF("[V4_FILE_RX] Chunk %u: offset=%lu len=%u", idx, (unsigned long)offset, dataLen);
   }
   memcpy(gActiveFileTransfer->dataBuffer + offset, fd->data, dataLen);
   if (!alreadyHave) {
@@ -2661,7 +2664,7 @@ static void v3h_file_data(const V3RxCtx& ctx) {
     gActiveFileTransfer->receivedBytes += dataLen;
     gActiveFileTransfer->receivedChunks++;
     if ((gActiveFileTransfer->receivedChunks % 10) == 0) {
-      DEBUG_ESPNOWF("[V3_FILE_RX] Progress: %u/%u chunks, %lu/%lu bytes",
+      DEBUG_ESPNOWF("[V4_FILE_RX] Progress: %u/%u chunks, %lu/%lu bytes",
                    gActiveFileTransfer->receivedChunks,
                    gActiveFileTransfer->totalChunks,
                    (unsigned long)gActiveFileTransfer->receivedBytes,
@@ -2672,19 +2675,19 @@ static void v3h_file_data(const V3RxCtx& ctx) {
 
 // FILE_END — finalize transfer; route manifest/settings to bond processors,
 // otherwise write to filesystem. Sends ACK back; cleans up state.
-static void v3h_file_end(const V3RxCtx& ctx) {
+static void v4h_file_end(const V4RxCtx& ctx) {
   if (!gActiveFileTransfer || !gActiveFileTransfer->active) {
-    ERROR_ESPNOWF("[V3_FILE] Received FILE_END without active transfer");
+    ERROR_ESPNOWF("[V4_FILE] Received FILE_END without active transfer");
     return;
   }
   if (memcmp(gActiveFileTransfer->senderMac, ctx.recv_info->src_addr, 6) != 0) {
-    ERROR_ESPNOWF("[V3_FILE] FILE_END from different sender than FILE_START");
+    ERROR_ESPNOWF("[V4_FILE] FILE_END from different sender than FILE_START");
     return;
   }
-  const V3PayloadFileEnd* fe = (const V3PayloadFileEnd*)ctx.payload;
+  const V4PayloadFileEnd* fe = (const V4PayloadFileEnd*)ctx.payload;
   String senderMacStr = formatMacAddress(gActiveFileTransfer->senderMac);
 
-  DEBUG_ESPNOWF("[V3_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, success=%d)",
+  DEBUG_ESPNOWF("[V4_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, success=%d)",
                gActiveFileTransfer->filename,
                (unsigned long)gActiveFileTransfer->receivedBytes,
                gActiveFileTransfer->receivedChunks,
@@ -2696,7 +2699,7 @@ static void v3h_file_end(const V3RxCtx& ctx) {
                      (gActiveFileTransfer->receivedBytes == gActiveFileTransfer->totalSize));
 
   if (!isComplete) {
-    BROADCAST_PRINTF("[V3_FILE] REJECTED incomplete transfer '%s': %u/%u chunks, %lu/%lu bytes",
+    BROADCAST_PRINTF("[V4_FILE] REJECTED incomplete transfer '%s': %u/%u chunks, %lu/%lu bytes",
                  gActiveFileTransfer->filename,
                  (unsigned)gActiveFileTransfer->receivedChunks,
                  (unsigned)gActiveFileTransfer->totalChunks,
@@ -2714,14 +2717,14 @@ static void v3h_file_end(const V3RxCtx& ctx) {
     if (strcmp(gActiveFileTransfer->filename, "_manifest_out.json") == 0) {
       String manifestStr((char*)gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
       processBondModeManifestResp(gActiveFileTransfer->senderMac, senderMacStr, manifestStr);
-      BROADCAST_PRINTF("[V3_FILE] Manifest processed: %lu bytes", (unsigned long)gActiveFileTransfer->receivedBytes);
+      BROADCAST_PRINTF("[V4_FILE] Manifest processed: %lu bytes", (unsigned long)gActiveFileTransfer->receivedBytes);
     } else if (strcmp(gActiveFileTransfer->filename, "_settings_out.json") == 0) {
       DEBUG_ESPNOWF("[FILE_END] Detected settings file: %s (%lu bytes)",
                     gActiveFileTransfer->filename, (unsigned long)gActiveFileTransfer->receivedBytes);
       String settingsStr((char*)gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
       DEBUG_ESPNOWF("[FILE_END] Calling processBondSettings (settingsStr len=%d)", settingsStr.length());
       processBondSettings(gActiveFileTransfer->senderMac, senderMacStr, settingsStr);
-      BROADCAST_PRINTF("[V3_FILE] Settings processed: %lu bytes", (unsigned long)gActiveFileTransfer->receivedBytes);
+      BROADCAST_PRINTF("[V4_FILE] Settings processed: %lu bytes", (unsigned long)gActiveFileTransfer->receivedBytes);
     } else
 #endif // ENABLE_BONDED_MODE
     {
@@ -2730,17 +2733,17 @@ static void v3h_file_end(const V3RxCtx& ctx) {
       char deviceDir[64];
       snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderMacHex.c_str());
 
-      FsLockGuard guard("v3file.write");
-      VFS::mkdirGuarded("/espnow", VFS::systemAuth("espnow.v3_file_write_mkdir"));
-      VFS::mkdirGuarded("/espnow/received", VFS::systemAuth("espnow.v3_file_write_mkdir"));
-      VFS::mkdirGuarded(deviceDir, VFS::systemAuth("espnow.v3_file_write_mkdir"));
+      FsLockGuard guard("v4file.write");
+      VFS::mkdirGuarded("/espnow", VFS::systemAuth("espnow.v4_file_write_mkdir"));
+      VFS::mkdirGuarded("/espnow/received", VFS::systemAuth("espnow.v4_file_write_mkdir"));
+      VFS::mkdirGuarded(deviceDir, VFS::systemAuth("espnow.v4_file_write_mkdir"));
       char filepath[128];
       snprintf(filepath, sizeof(filepath), "%s/%s", deviceDir, gActiveFileTransfer->filename);
-      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("espnow.v3_file_write"), true);
+      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("espnow.v4_file_write"), true);
       if (f) {
         f.write(gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
         f.close();
-        BROADCAST_PRINTF("[V3_FILE] Complete: %s (%lu bytes)", gActiveFileTransfer->filename, (unsigned long)gActiveFileTransfer->receivedBytes);
+        BROADCAST_PRINTF("[V4_FILE] Complete: %s (%lu bytes)", gActiveFileTransfer->filename, (unsigned long)gActiveFileTransfer->receivedBytes);
 
         if (strcmp(gActiveFileTransfer->filename, "automations.json") == 0) {
           String senderName = getEspNowDeviceName(gActiveFileTransfer->senderMac);
@@ -2786,7 +2789,7 @@ static void v3h_file_end(const V3RxCtx& ctx) {
                         gActiveFileTransfer->filename, MSG_FILE_RECV_FAILED);
   }
 
-  v3_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
+  v4_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
 
   if (gActiveFileTransfer->chunkMap) {
     heap_caps_free(gActiveFileTransfer->chunkMap);
@@ -2801,55 +2804,55 @@ static void v3h_file_end(const V3RxCtx& ctx) {
 
 // ----- Handler table ------
 // Stable static table; lookup is linear over a small N. Adding a new opcode
-// is one row here plus its v3h_<name> function. No edits to the dispatcher.
-static const V3OpcodeEntry kV3HandlerTable[] = {
-  { ESPNOW_V3_TYPE_TIME_SYNC,        0,                                                    v3h_time_sync         },
-  { ESPNOW_V3_TYPE_TEXT,             0,                                                    v3h_text              },
-  { ESPNOW_V3_TYPE_CMD,              V3_OPC_FLAG_REQ_PAIRED,                               v3h_cmd               },
-  { ESPNOW_V3_TYPE_CMD_RESP,         0,                                                    v3h_cmd_resp          },
-  { ESPNOW_V3_TYPE_HEARTBEAT,        0,                                                    v3h_heartbeat         },
-  { ESPNOW_V3_TYPE_SENSOR_STATUS,    0,                                                    v3h_sensor_status     },
-  { ESPNOW_V3_TYPE_SENSOR_BROADCAST, 0,                                                    v3h_sensor_broadcast  },
-  { ESPNOW_V3_TYPE_TOPO_REQ,         0,                                                    v3h_topo_req          },
-  { ESPNOW_V3_TYPE_TOPO_START,       0,                                                    v3h_topo_start        },
-  { ESPNOW_V3_TYPE_TOPO_PEER,        0,                                                    v3h_topo_peer         },
-  { ESPNOW_V3_TYPE_USER_SYNC,        0,                                                    v3h_user_sync         },
-  { ESPNOW_V3_TYPE_METADATA_REQ,     0,                                                    v3h_metadata_req      },
-  { ESPNOW_V3_TYPE_METADATA_RESP,    0,                                                    v3h_metadata_resp_push},
-  { ESPNOW_V3_TYPE_METADATA_PUSH,    0,                                                    v3h_metadata_resp_push},
-  { ESPNOW_V3_TYPE_STREAM,           0,                                                    v3h_stream            },
-  { ESPNOW_V3_TYPE_FILE_START,       V3_OPC_FLAG_REQ_PAIRED,                               v3h_file_start        },
-  { ESPNOW_V3_TYPE_FILE_DATA,        V3_OPC_FLAG_REQ_PAIRED,                               v3h_file_data         },
-  { ESPNOW_V3_TYPE_FILE_END,         V3_OPC_FLAG_REQ_PAIRED,                               v3h_file_end          },
+// is one row here plus its v4h_<name> function. No edits to the dispatcher.
+static const V4OpcodeEntry kV4HandlerTable[] = {
+  { ESPNOW_V4_TYPE_TIME_SYNC,        0,                                                    v4h_time_sync         },
+  { ESPNOW_V4_TYPE_TEXT,             0,                                                    v4h_text              },
+  { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED,                               v4h_cmd               },
+  { ESPNOW_V4_TYPE_CMD_RESP,         0,                                                    v4h_cmd_resp          },
+  { ESPNOW_V4_TYPE_HEARTBEAT,        0,                                                    v4h_heartbeat         },
+  { ESPNOW_V4_TYPE_SENSOR_STATUS,    0,                                                    v4h_sensor_status     },
+  { ESPNOW_V4_TYPE_SENSOR_BROADCAST, 0,                                                    v4h_sensor_broadcast  },
+  { ESPNOW_V4_TYPE_TOPO_REQ,         0,                                                    v4h_topo_req          },
+  { ESPNOW_V4_TYPE_TOPO_START,       0,                                                    v4h_topo_start        },
+  { ESPNOW_V4_TYPE_TOPO_PEER,        0,                                                    v4h_topo_peer         },
+  { ESPNOW_V4_TYPE_USER_SYNC,        0,                                                    v4h_user_sync         },
+  { ESPNOW_V4_TYPE_METADATA_REQ,     0,                                                    v4h_metadata_req      },
+  { ESPNOW_V4_TYPE_METADATA_RESP,    0,                                                    v4h_metadata_resp_push},
+  { ESPNOW_V4_TYPE_METADATA_PUSH,    0,                                                    v4h_metadata_resp_push},
+  { ESPNOW_V4_TYPE_STREAM,           0,                                                    v4h_stream            },
+  { ESPNOW_V4_TYPE_FILE_START,       V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_start        },
+  { ESPNOW_V4_TYPE_FILE_DATA,        V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_data         },
+  { ESPNOW_V4_TYPE_FILE_END,         V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_end          },
 #if ENABLE_BONDED_MODE
-  { ESPNOW_V3_TYPE_BOND_HEARTBEAT,   V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_bond_heartbeat    },
-  { ESPNOW_V3_TYPE_STREAM_CTRL,      V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_stream_ctrl       },
-  { ESPNOW_V3_TYPE_BOND_CAP_REQ,     V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_bond_cap_req      },
-  { ESPNOW_V3_TYPE_BOND_CAP_RESP,    V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_bond_cap_resp     },
-  { ESPNOW_V3_TYPE_SENSOR_DATA,      V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_sensor_data       },
-  { ESPNOW_V3_TYPE_SETTINGS_REQ,     V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_settings_req      },
-  { ESPNOW_V3_TYPE_BOND_STATUS_REQ,  V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_bond_status_req   },
-  { ESPNOW_V3_TYPE_BOND_STATUS_RESP, V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_bond_status_resp  },
-  { ESPNOW_V3_TYPE_MANIFEST_REQ,     V3_OPC_FLAG_REQ_PAIRED | V3_OPC_FLAG_REQ_BOND_MODE,   v3h_manifest_req      },
+  { ESPNOW_V4_TYPE_BOND_HEARTBEAT,   V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_bond_heartbeat    },
+  { ESPNOW_V4_TYPE_STREAM_CTRL,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_stream_ctrl       },
+  { ESPNOW_V4_TYPE_BOND_CAP_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_bond_cap_req      },
+  { ESPNOW_V4_TYPE_BOND_CAP_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_bond_cap_resp     },
+  { ESPNOW_V4_TYPE_SENSOR_DATA,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_sensor_data       },
+  { ESPNOW_V4_TYPE_SETTINGS_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_settings_req      },
+  { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_bond_status_req   },
+  { ESPNOW_V4_TYPE_BOND_STATUS_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_bond_status_resp  },
+  { ESPNOW_V4_TYPE_MANIFEST_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_manifest_req      },
 #endif
 };
-static constexpr size_t kV3HandlerTableSize = sizeof(kV3HandlerTable) / sizeof(kV3HandlerTable[0]);
+static constexpr size_t kV4HandlerTableSize = sizeof(kV4HandlerTable) / sizeof(kV4HandlerTable[0]);
 
 // Lookup by opcode; nullptr if not migrated yet (falls through to legacy ladder).
-static const V3OpcodeEntry* v3_dispatch_lookup(uint8_t opcode) {
-  for (size_t i = 0; i < kV3HandlerTableSize; i++) {
-    if (kV3HandlerTable[i].opcode == opcode) return &kV3HandlerTable[i];
+static const V4OpcodeEntry* v4_dispatch_lookup(uint8_t opcode) {
+  for (size_t i = 0; i < kV4HandlerTableSize; i++) {
+    if (kV4HandlerTable[i].opcode == opcode) return &kV4HandlerTable[i];
   }
   return nullptr;
 }
 
 // Centralized reassembly cleanup that each migrated branch used to do inline.
-static void v3_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const EspNowV3Header* h) {
+static void v4_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const EspNowV4Header* h) {
   if (h->fragCount > 1) {
-    for (int i = 0; i < V3_REASM_MAX; i++) {
-      if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId &&
-          memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-        v3_reasm_reset(gV3Reasm[i]);
+    for (int i = 0; i < V4_REASM_MAX; i++) {
+      if (gV4Reasm[i].active && gV4Reasm[i].msgId == h->msgId &&
+          memcmp(gV4Reasm[i].src, recv_info->src_addr, 6) == 0) {
+        v4_reasm_reset(gV4Reasm[i]);
         break;
       }
     }
@@ -2858,105 +2861,103 @@ static void v3_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const E
 
 // Returns true if the dispatch table claimed the frame; false to fall through
 // to the legacy if-ladder for opcodes not yet migrated.
-static bool v3_dispatch_table_try(const esp_now_recv_info* recv_info, const EspNowV3Header* h,
+static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
                                   const uint8_t* payload, uint16_t payloadLen,
                                   bool isPaired, const char* deviceName) {
-  const V3OpcodeEntry* e = v3_dispatch_lookup(h->type);
+  const V4OpcodeEntry* e = v4_dispatch_lookup(h->type);
   if (!e) return false;
-  if ((e->flags & V3_OPC_FLAG_REQ_PAIRED) && !isPaired) {
+  if ((e->flags & V4_OPC_FLAG_REQ_PAIRED) && !isPaired) {
     // Match original behavior: branch was gated `&& isPaired`, so unpaired frames
     // for this opcode were silently dropped (no other branch matched). Same here.
-    v3_dispatch_post_cleanup(recv_info, h);
+    v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
-  if ((e->flags & V3_OPC_FLAG_REQ_BOND_MODE) && !gSettings.bondModeEnabled) {
+  if ((e->flags & V4_OPC_FLAG_REQ_BOND_MODE) && !gSettings.bondModeEnabled) {
     // Bond-mode-only opcodes were gated `&& gSettings.bondModeEnabled` originally.
     // When bond mode is off, drop silently (no other branch handles these types).
-    v3_dispatch_post_cleanup(recv_info, h);
+    v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
-  V3RxCtx ctx{recv_info, h, payload, payloadLen, isPaired, deviceName};
+  V4RxCtx ctx{recv_info, h, payload, payloadLen, isPaired, deviceName};
   e->handler(ctx);
-  v3_dispatch_post_cleanup(recv_info, h);
+  v4_dispatch_post_cleanup(recv_info, h);
   return true;
 }
 
-static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uint8_t* data, int len) {
-  if (!recv_info || !data || len < (int)sizeof(EspNowV3Header)) return false;
-  const EspNowV3Header* h = (const EspNowV3Header*)data;
-  if (h->magic != (uint16_t)ESPNOW_V3_MAGIC) return false;
-  if (h->ver != 3 || h->headerLen != sizeof(EspNowV3Header)) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] REJECTED: ver=%u headerLen=%u (expected ver=3 headerLen=%u)",
-           h->ver, h->headerLen, (unsigned)sizeof(EspNowV3Header));
+static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uint8_t* data, int len) {
+  if (!recv_info || !data || len < (int)sizeof(EspNowV4Header)) return false;
+  const EspNowV4Header* h = (const EspNowV4Header*)data;
+  if (h->magic != (uint16_t)ESPNOW_V4_MAGIC) return false;
+  if (h->ver != ESPNOW_V4_VERSION || h->headerLen != sizeof(EspNowV4Header)) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] REJECTED: ver=%u headerLen=%u (expected ver=%u headerLen=%u)",
+           h->ver, h->headerLen, (unsigned)ESPNOW_V4_VERSION, (unsigned)sizeof(EspNowV4Header));
     return true;
   }
-  if ((int)h->headerLen + h->payloadLen > len) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] REJECTED: headerLen(%u)+payloadLen(%u)=%u > len(%d)",
-           h->headerLen, h->payloadLen, (unsigned)(h->headerLen + h->payloadLen), len);
-    return true;
-  }
-  const uint8_t* payload = data + sizeof(EspNowV3Header);
-  uint16_t payloadLen = h->payloadLen;
-  if (payloadLen > 0 && v3_crc16_ccitt(payload, payloadLen) != h->crc16) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] REJECTED: CRC mismatch (got=0x%04X expected=0x%04X) payloadLen=%u",
-           v3_crc16_ccitt(payload, payloadLen), h->crc16, payloadLen);
+  // V4 derives payloadLen from the ESPNOW radio length minus the fixed header
+  // size (V3 carried a redundant payloadLen field in the header; V4 saves
+  // those 2 bytes since the radio already gives us the frame length).
+  const uint8_t* payload = data + sizeof(EspNowV4Header);
+  uint16_t payloadLen = (uint16_t)(len - sizeof(EspNowV4Header));
+  if (payloadLen > 0 && v4_crc16_ccitt(payload, payloadLen) != h->crc16) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] REJECTED: CRC mismatch (got=0x%04X expected=0x%04X) payloadLen=%u",
+           v4_crc16_ccitt(payload, payloadLen), h->crc16, payloadLen);
     return true;
   }
   
-  // === V3 FRAGMENTATION REASSEMBLY ===
+  // === V4 FRAGMENTATION REASSEMBLY ===
   if (h->fragCount > 1) {
     // Multi-fragment message - reassemble
-    if (gEspNow) { gEspNow->routerMetrics.v3FragRx++; }
+    if (gEspNow) { gEspNow->routerMetrics.v4FragRx++; }
     
     char srcMac[18];
     formatMacAddressBuf(recv_info->src_addr, srcMac, sizeof(srcMac));
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] ==============================");
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Fragment received from %s", srcMac);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Fragment %u/%u msgId=%lu type=%u len=%u",
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment received from %s", srcMac);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u/%u msgId=%lu type=%u len=%u",
            h->fragIndex + 1, h->fragCount, (unsigned long)h->msgId, h->type, payloadLen);
     
     // Run GC
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Running reassembly GC...");
-    v3_reasm_gc(millis());
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Running reassembly GC...");
+    v4_reasm_gc(millis());
     
     // Find or allocate reassembly buffer
-    V3ReasmEntry* e = v3_reasm_find_or_alloc(recv_info->src_addr, h->msgId, h->type, h->fragCount);
+    V4ReasmEntry* e = v4_reasm_find_or_alloc(recv_info->src_addr, h->msgId, h->type, h->fragCount);
     if (!e) {
-      WARN_ESPNOWF("[V3_FRAG_RX] No reassembly slot available - all %u slots in use", V3_REASM_MAX);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] ==============================");
+      WARN_ESPNOWF("[V4_FRAG_RX] No reassembly slot available - all %u slots in use", V4_REASM_MAX);
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
       return true;
     }
     
     bool isNewEntry = (e->received == 0);
     if (isNewEntry) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Allocated new reassembly buffer: bufSize=%u", e->bufferSize);
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Allocated new reassembly buffer: bufSize=%u", e->bufferSize);
     } else {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Using existing reassembly buffer: %u/%u fragments already received",
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Using existing reassembly buffer: %u/%u fragments already received",
              e->received, e->fragCount);
     }
     
     // Store fragment if not duplicate
     if (h->fragIndex >= h->fragCount) {
-      WARN_ESPNOWF("[V3_FRAG_RX] Invalid fragment index %u (max %u)", h->fragIndex, h->fragCount - 1);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] ==============================");
+      WARN_ESPNOWF("[V4_FRAG_RX] Invalid fragment index %u (max %u)", h->fragIndex, h->fragCount - 1);
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
       return true;
     }
     
     if (e->have[h->fragIndex]) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Duplicate fragment %u - ignoring", h->fragIndex + 1);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] ==============================");
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Duplicate fragment %u - ignoring", h->fragIndex + 1);
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
       return true;
     }
     
     // Copy fragment data to buffer
-    uint16_t offset = h->fragIndex * V3_MAX_FRAGMENT_PAYLOAD;
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Storing at offset=%u len=%u (bufSize=%u)",
+    uint16_t offset = h->fragIndex * V4_MAX_FRAGMENT_PAYLOAD;
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Storing at offset=%u len=%u (bufSize=%u)",
            offset, payloadLen, e->bufferSize);
     if (offset + payloadLen > e->bufferSize) {
-      WARN_ESPNOWF("[V3_FRAG_RX] Fragment overflow: offset=%u len=%u bufSize=%u", offset, payloadLen, e->bufferSize);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Resetting corrupted reassembly buffer");
-      v3_reasm_reset(*e);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] ==============================");
+      WARN_ESPNOWF("[V4_FRAG_RX] Fragment overflow: offset=%u len=%u bufSize=%u", offset, payloadLen, e->bufferSize);
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Resetting corrupted reassembly buffer");
+      v4_reasm_reset(*e);
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
       return true;
     }
     
@@ -2965,11 +2966,11 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     e->received++;
     e->lastUpdateMs = millis();
     
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Fragment %u stored successfully", h->fragIndex + 1);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Fragment %u stored successfully", h->fragIndex + 1);
     
     // Check if complete
     if (e->received < e->fragCount) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Progress: %u/%u fragments received",
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Progress: %u/%u fragments received",
              e->received, e->fragCount);
       
       // Log which fragments are still missing
@@ -2987,11 +2988,11 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
           }
         }
         if (offset > 0) {
-          DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Still waiting for fragments: %s", missing);
+          DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Still waiting for fragments: %s", missing);
         }
       }
       
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] ==============================");
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ==============================");
       return true;  // Not complete yet
     }
     
@@ -3003,16 +3004,16 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
         // We need to track this - for now estimate conservatively
         reassembledSize += payloadLen;  // Last fragment's size
       } else {
-        reassembledSize += V3_MAX_FRAGMENT_PAYLOAD;
+        reassembledSize += V4_MAX_FRAGMENT_PAYLOAD;
       }
     }
     
     unsigned long totalTime = millis() - (e->lastUpdateMs - (millis() - e->lastUpdateMs));
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] ✓✓✓ REASSEMBLY COMPLETE ✓✓✓");
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] All %u fragments received! Total size: %u bytes",
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ✓✓✓ REASSEMBLY COMPLETE ✓✓✓");
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] All %u fragments received! Total size: %u bytes",
            e->fragCount, reassembledSize);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Proceeding to handle reassembled message type=%u", h->type);
-    if (gEspNow) { gEspNow->routerMetrics.v3FragRxCompleted++; }
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Proceeding to handle reassembled message type=%u", h->type);
+    if (gEspNow) { gEspNow->routerMetrics.v4FragRxCompleted++; }
     
     // Update pointers to point to reassembled buffer
     payload = e->buffer;
@@ -3024,16 +3025,16 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     // Note: Store the entry pointer for cleanup (h->fragCount check at end will handle it)
   }
   
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] ========================================");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] V3 BINARY MESSAGE RECEIVED");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] Type=%u MsgId=%lu PayloadLen=%u Flags=0x%02X",
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] ========================================");
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] V4 BINARY MESSAGE RECEIVED");
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] Type=%u MsgId=%lu PayloadLen=%u Flags=0x%02X",
          h->type, (unsigned long)h->msgId, payloadLen, h->flags);
   
   // Handle ACK (no dedup needed)
-  if (h->type == ESPNOW_V3_TYPE_ACK) {
+  if (h->type == ESPNOW_V4_TYPE_ACK) {
     char srcMac[18];
     formatMacAddressBuf(recv_info->src_addr, srcMac, sizeof(srcMac));
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V3_ACK_RX] ACK received from %s for msgId=%lu fragIdx=%u fragCnt=%u",
+    DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_RX] ACK received from %s for msgId=%lu fragIdx=%u fragCnt=%u",
            srcMac, (unsigned long)h->msgId, h->fragIndex, h->fragCount);
     
     // Update peer health ACK tracking
@@ -3044,12 +3045,12 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     
     // Check V3 fragment ACK waiters
     bool foundV3 = false;
-    for (int i = 0; i < V3_FRAG_ACK_WAIT_MAX; i++) {
-      if (gV3FragAckWait[i].active && gV3FragAckWait[i].msgId == h->msgId &&
-          gV3FragAckWait[i].fragIndex == h->fragIndex) {
-        gV3FragAckWait[i].acked = true;
+    for (int i = 0; i < V4_FRAG_ACK_WAIT_MAX; i++) {
+      if (gV4FragAckWait[i].active && gV4FragAckWait[i].msgId == h->msgId &&
+          gV4FragAckWait[i].fragIndex == h->fragIndex) {
+        gV4FragAckWait[i].acked = true;
         foundV3 = true;
-        DEBUGF(DEBUG_ESPNOW_CORE, "[V3_ACK_RX] Matched V3 fragment ACK waiter slot %d (msgId=%lu fragIdx=%u)",
+        DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_RX] Matched V3 fragment ACK waiter slot %d (msgId=%lu fragIdx=%u)",
                i, (unsigned long)h->msgId, h->fragIndex);
         break;
       }
@@ -3064,16 +3065,16 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     espnowAppPingNoteAck(recv_info->src_addr, h->msgId);
 
     if (!foundV3) {
-      DEBUGF(DEBUG_ESPNOW_CORE, "[V3_ACK_RX] No matching ACK waiter found (msgId=%lu fragIdx=%u)",
+      DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_RX] No matching ACK waiter found (msgId=%lu fragIdx=%u)",
              (unsigned long)h->msgId, h->fragIndex);
     }
     
     // Cleanup reassembly buffer if this was a fragmented message
     if (h->fragCount > 1) {
-      for (int i = 0; i < V3_REASM_MAX; i++) {
-        if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-            memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-          v3_reasm_reset(gV3Reasm[i]);
+      for (int i = 0; i < V4_REASM_MAX; i++) {
+        if (gV4Reasm[i].active && gV4Reasm[i].msgId == h->msgId && 
+            memcmp(gV4Reasm[i].src, recv_info->src_addr, 6) == 0) {
+          v4_reasm_reset(gV4Reasm[i]);
           break;
         }
       }
@@ -3082,14 +3083,14 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   }
   
   // Send ACK if requested
-  if (h->flags & ESPNOW_V3_FLAG_ACK_REQ) {
+  if (h->flags & ESPNOW_V4_FLAG_ACK_REQ) {
     // For fragmented messages, send fragment-specific ACK
     if (h->fragCount > 1) {
-      v3_send_frag_ack(recv_info->src_addr, h->msgId, h->fragIndex, h->fragCount);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_ACK] Sent ACK for fragment %u/%u msgId=%lu",
+      v4_send_frag_ack(recv_info->src_addr, h->msgId, h->fragIndex, h->fragCount);
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_ACK] Sent ACK for fragment %u/%u msgId=%lu",
              h->fragIndex + 1, h->fragCount, (unsigned long)h->msgId);
     } else {
-      v3_send_ack(recv_info->src_addr, h->msgId);
+      v4_send_ack(recv_info->src_addr, h->msgId);
     }
   }
   
@@ -3097,16 +3098,16 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // STREAM frames intentionally reuse msgId=cmdMsgId for correlation and are multi-frame.
   // If we dedup STREAM by msgId, STREAM_BEGIN (payloadLen=0) will cause the sender to drop
   // all subsequent stream data frames and even CMD_RESP with the same msgId.
-  if (h->type != ESPNOW_V3_TYPE_STREAM &&
-      h->type != ESPNOW_V3_TYPE_FILE_START &&
-      h->type != ESPNOW_V3_TYPE_FILE_DATA &&
-      h->type != ESPNOW_V3_TYPE_FILE_END) {
-    if (h->msgId != 0 && v3_dedup_seen_and_insert(h->origin, h->msgId)) {
-      DEBUG_ESPNOWF("[V3_DEDUP] Dropped duplicate: type=%u msgId=%lu", h->type, (unsigned long)h->msgId);
+  if (h->type != ESPNOW_V4_TYPE_STREAM &&
+      h->type != ESPNOW_V4_TYPE_FILE_START &&
+      h->type != ESPNOW_V4_TYPE_FILE_DATA &&
+      h->type != ESPNOW_V4_TYPE_FILE_END) {
+    if (h->msgId != 0 && v4_dedup_seen_and_insert(h->origin, h->msgId)) {
+      DEBUG_ESPNOWF("[V4_DEDUP] Dropped duplicate: type=%u msgId=%lu", h->type, (unsigned long)h->msgId);
       return true;
     }
   } else {
-    DEBUG_ESPNOWF("[V3_DEDUP] Bypassed for type=%u msgId=%lu", h->type, (unsigned long)h->msgId);
+    DEBUG_ESPNOWF("[V4_DEDUP] Bypassed for type=%u msgId=%lu", h->type, (unsigned long)h->msgId);
   }
   
   if (!gEspNow || !gEspNow->initialized) return true;
@@ -3127,18 +3128,18 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     deviceName = macStrBuf; 
   }
   
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_RX] Source: %s (paired=%s encrypted=%s)",
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] Source: %s (paired=%s encrypted=%s)",
          deviceName, isPaired ? "YES" : "NO", 
-         (h->flags & ESPNOW_V3_FLAG_ENCRYPTED) ? "YES" : "NO");
+         (h->flags & ESPNOW_V4_FLAG_ENCRYPTED) ? "YES" : "NO");
 
 #if ENABLE_BONDED_MODE
   // Track when bond-type messages arrive but would be rejected due to isPaired=false
   // Can't use BROADCAST_PRINTF here (ISR-like context) — use deferred counter instead
-  if (!isPaired && (h->type == ESPNOW_V3_TYPE_BOND_HEARTBEAT ||
-                    h->type == ESPNOW_V3_TYPE_BOND_CAP_REQ ||
-                    h->type == ESPNOW_V3_TYPE_BOND_CAP_RESP ||
-                    h->type == ESPNOW_V3_TYPE_MANIFEST_REQ ||
-                    h->type == ESPNOW_V3_TYPE_SETTINGS_REQ)) {
+  if (!isPaired && (h->type == ESPNOW_V4_TYPE_BOND_HEARTBEAT ||
+                    h->type == ESPNOW_V4_TYPE_BOND_CAP_REQ ||
+                    h->type == ESPNOW_V4_TYPE_BOND_CAP_RESP ||
+                    h->type == ESPNOW_V4_TYPE_MANIFEST_REQ ||
+                    h->type == ESPNOW_V4_TYPE_SETTINGS_REQ)) {
     static volatile uint32_t sBondUnpairedRejectCount = 0;
     static volatile uint8_t  sBondUnpairedRejectType = 0;
     static volatile uint8_t  sBondUnpairedRejectMac[6] = {};
@@ -3155,11 +3156,11 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
 #endif
 
   // === Handler-table dispatch (Phase 0 of docs/ESPNOW_V4_PLAN.md) ===
-  // Opcodes registered in kV3HandlerTable are handled here; anything not
+  // Opcodes registered in kV4HandlerTable are handled here; anything not
   // in the table falls through to the legacy if-ladder below. Migration is
-  // incremental — opcodes move from the ladder into kV3HandlerTable one at
+  // incremental — opcodes move from the ladder into kV4HandlerTable one at
   // a time. Today's migrated set: TEXT, CMD, CMD_RESP, TIME_SYNC.
-  if (v3_dispatch_table_try(recv_info, h, payload, payloadLen, isPaired, deviceName)) {
+  if (v4_dispatch_table_try(recv_info, h, payload, payloadLen, isPaired, deviceName)) {
     return true;
   }
 
@@ -3188,7 +3189,7 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // FILE_START and FILE_DATA migrated to handler table.
 
   // FILE_END and MANIFEST_REQ migrated to handler table.
-  // (MANIFEST_RESP travels as a FILE_END for _manifest_out.json — handled inside v3h_file_end.)
+  // (MANIFEST_RESP travels as a FILE_END for _manifest_out.json — handled inside v4h_file_end.)
 
   // Unknown V3 type - log and ignore
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3] Unknown type %d from %s", h->type, deviceName);
@@ -3198,12 +3199,12 @@ static bool v3_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // for message types that returned early (TEXT, CMD, HEARTBEAT, etc.)
   // Now we cleanup immediately after processing any fragmented message
   if (h->fragCount > 1) {
-    for (int i = 0; i < V3_REASM_MAX; i++) {
-      if (gV3Reasm[i].active && gV3Reasm[i].msgId == h->msgId && 
-          memcmp(gV3Reasm[i].src, recv_info->src_addr, 6) == 0) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_RX] Cleaning up reassembly buffer for msgId=%lu",
+    for (int i = 0; i < V4_REASM_MAX; i++) {
+      if (gV4Reasm[i].active && gV4Reasm[i].msgId == h->msgId && 
+          memcmp(gV4Reasm[i].src, recv_info->src_addr, 6) == 0) {
+        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Cleaning up reassembly buffer for msgId=%lu",
                (unsigned long)h->msgId);
-        v3_reasm_reset(gV3Reasm[i]);
+        v4_reasm_reset(gV4Reasm[i]);
         break;
       }
     }
@@ -3226,7 +3227,7 @@ struct V3CmdAsyncCtx {
 extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
 
 // Async callback for V3 CMD results - called on cmd_exec task (large stack)
-static void v3CmdResultCallback(bool ok, const char* result, void* userData) {
+static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   V3CmdAsyncCtx* ctx = (V3CmdAsyncCtx*)userData;
   if (!ctx) return;
   
@@ -3238,16 +3239,20 @@ static void v3CmdResultCallback(bool ok, const char* result, void* userData) {
   gCurrentStreamCmdId = 0;
   
   // Send STREAM_END frame to signal output is complete
-  sendSessionStreamFrame(ctx->cmdMsgId, nullptr, 0, ESPNOW_V3_FLAG_STREAM_END);
+  sendSessionStreamFrame(ctx->cmdMsgId, nullptr, 0, ESPNOW_V4_FLAG_STREAM_END);
   
   // Send CMD_RESP with success/fail byte + actual command result text.
-  // v3_send_chunked handles fragmentation for large results automatically.
+  // v4_send_chunked handles fragmentation for large results automatically.
   // The receiver reassembles fragments before processing.
   const char* resultText = (result && resultLen > 0) ? result : 
                            (ctx->cmdName[0] ? ctx->cmdName : (ok ? "OK" : "FAIL"));
   size_t textLen = strlen(resultText);
-  // Cap at 2KB to avoid excessive fragmentation (matches ExecReq.out buffer size)
-  if (textLen > 2047) textLen = 2047;
+  // Cap at 6KB — within V4 fragmentation budget (32 frags × 200 B = 6400 B,
+  // minus 1 success byte + 1 null = 6398 B usable; rounded to 6143 for margin).
+  // ExecReq.out is 4KB so the handler bottleneck moves there for results
+  // larger than 4KB (but those rarely happen; see Phase 1 plan for the
+  // streaming alternative if ever needed).
+  if (textLen > 6143) textLen = 6143;
   
   // Allocate payload: 1 byte success + result text + null terminator
   size_t payloadLen = 1 + textLen + 1;
@@ -3257,7 +3262,7 @@ static void v3CmdResultCallback(bool ok, const char* result, void* userData) {
     memcpy(respPayload + 1, resultText, textLen);
     respPayload[1 + textLen] = '\0';
     
-    v3_send_chunked(ctx->srcMac, ESPNOW_V3_TYPE_CMD_RESP, ESPNOW_V3_FLAG_ACK_REQ,
+    v4_send_chunked(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
                     ctx->cmdMsgId, respPayload, payloadLen, 1);
     free(respPayload);
   } else {
@@ -3268,7 +3273,7 @@ static void v3CmdResultCallback(bool ok, const char* result, void* userData) {
     size_t nameLen = strlen(name) + 1;
     if (nameLen > sizeof(fallback) - 1) nameLen = sizeof(fallback) - 1;
     memcpy(fallback + 1, name, nameLen);
-    v3_send_chunked(ctx->srcMac, ESPNOW_V3_TYPE_CMD_RESP, ESPNOW_V3_FLAG_ACK_REQ,
+    v4_send_chunked(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
                     ctx->cmdMsgId, fallback, 1 + nameLen, 1);
   }
   
@@ -3282,7 +3287,7 @@ static void v3CmdResultCallback(bool ok, const char* result, void* userData) {
 //   1. "username:password:command" - Traditional auth with credentials
 //   2. "@BOND:<32-hex-token>:command" - Bond mode session token auth
 // Authenticates quickly, then queues to cmd_exec task for execution
-static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, const char* cmdPayload) {
+static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, const char* cmdPayload) {
   const char* firstColon = strchr(cmdPayload, ':');
   if (!firstColon) {
     BROADCAST_PRINTF("[ESP-NOW] Invalid CMD format from %s (missing delimiter)", deviceName);
@@ -3336,7 +3341,7 @@ static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       respPayload[0] = 0;
       const char* errMsg = "Session token auth failed";
       memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-      v3_send_chunked(srcMac, ESPNOW_V3_TYPE_CMD_RESP, ESPNOW_V3_FLAG_ACK_REQ, 
+      v4_send_chunked(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, 
                       generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
       return;
     }
@@ -3361,7 +3366,7 @@ static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       respPayload[0] = 0;
       const char* errMsg = "Auth failed";
       memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-      v3_send_chunked(srcMac, ESPNOW_V3_TYPE_CMD_RESP, ESPNOW_V3_FLAG_ACK_REQ, 
+      v4_send_chunked(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, 
                       generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
       return;
     }
@@ -3377,7 +3382,7 @@ static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     respPayload[0] = 0;
     const char* errMsg = "No session slots";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-    v3_send_chunked(srcMac, ESPNOW_V3_TYPE_CMD_RESP, ESPNOW_V3_FLAG_ACK_REQ,
+    v4_send_chunked(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
                     msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
     return;
   }
@@ -3406,7 +3411,7 @@ static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   }
   
   // Send STREAM_BEGIN frame to signal output is starting
-  sendSessionStreamFrame(msgId, nullptr, 0, ESPNOW_V3_FLAG_STREAM_BEGIN);
+  sendSessionStreamFrame(msgId, nullptr, 0, ESPNOW_V4_FLAG_STREAM_BEGIN);
   
   // Set the current stream session ID (cmd_exec task will use this)
   gCurrentStreamCmdId = msgId;
@@ -3420,6 +3425,14 @@ static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   cmd.ctx.auth.user = username;
   cmd.ctx.auth.sid = "";
   cmd.ctx.auth.opaque = (void*)asyncCtx->srcMac;
+  // V4: stamp the sender MAC in `ip` so log lines + gates that expect the
+  // "espnow:..." prefix (e.g. cmd_espnow_startstream) work correctly.
+  {
+    char ipBuf[28];
+    snprintf(ipBuf, sizeof(ipBuf), "espnow:%02X:%02X:%02X:%02X:%02X:%02X",
+             srcMac[0], srcMac[1], srcMac[2], srcMac[3], srcMac[4], srcMac[5]);
+    cmd.ctx.auth.ip = ipBuf;
+  }
   cmd.ctx.id = msgId;
   cmd.ctx.timestampMs = millis();
   cmd.ctx.outputMask = CMD_OUT_WEB | CMD_OUT_LOG;  // local sinks; output also streams via V3 STREAM frames
@@ -3428,7 +3441,7 @@ static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   cmd.ctx.httpReq = nullptr;
   
   // Queue for execution on cmd_exec task (has large stack)
-  if (!submitCommandAsync(cmd, v3CmdResultCallback, asyncCtx)) {
+  if (!submitCommandAsync(cmd, v4CmdResultCallback, asyncCtx)) {
     BROADCAST_PRINTF("[ESP-NOW] Failed to queue CMD from %s", deviceName);
     gCurrentStreamCmdId = 0;
     destroyStreamSession(msgId);
@@ -3437,7 +3450,7 @@ static void v3_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     respPayload[0] = 0;
     const char* errMsg = "Queue failed";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-    v3_send_chunked(srcMac, ESPNOW_V3_TYPE_CMD_RESP, ESPNOW_V3_FLAG_ACK_REQ,
+    v4_send_chunked(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
                     msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
   }
 }
@@ -3515,15 +3528,15 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
                                int rssi, const uint8_t* data, int len) {
   if (!gSettings.espnowCaptureToSd) return;
   if (!VFS::isSDAvailable()) return;
-  if (!data || len < (int)sizeof(EspNowV3Header)) return;
+  if (!data || len < (int)sizeof(EspNowV4Header)) return;
 
-  const EspNowV3Header* h = (const EspNowV3Header*)data;
+  const EspNowV4Header* h = (const EspNowV4Header*)data;
   // Validate magic quickly — avoid capturing random junk if something non-V3 sneaks in.
-  if (h->magic != (uint16_t)ESPNOW_V3_MAGIC || h->ver != 3) return;
+  if (h->magic != (uint16_t)ESPNOW_V4_MAGIC || h->ver != 3) return;
 
   // Heartbeat filter (types 7=HEARTBEAT, 14=BOND_HEARTBEAT).
   if (gSettings.espnowCaptureSkipHeartbeats &&
-      (h->type == ESPNOW_V3_TYPE_HEARTBEAT || h->type == ESPNOW_V3_TYPE_BOND_HEARTBEAT)) {
+      (h->type == ESPNOW_V4_TYPE_HEARTBEAT || h->type == ESPNOW_V4_TYPE_BOND_HEARTBEAT)) {
     return;
   }
 
@@ -3587,7 +3600,7 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* i
 
   // === V3-ONLY MODE ===
   // Try v3 binary protocol (only handler enabled)
-  if (recv_info && incomingData && len > 0 && v3_try_handle_incoming(recv_info, incomingData, len)) {
+  if (recv_info && incomingData && len > 0 && v4_try_handle_incoming(recv_info, incomingData, len)) {
     return;
   }
 
@@ -4175,7 +4188,7 @@ static void requestBondSettings(const uint8_t* peerMac) {
   // NOTE: retry count is managed by the sync tick retry block — don't increment here
   
   uint32_t msgId = generateMessageId();
-  bool sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_SETTINGS_REQ, 0, msgId, nullptr, 0, 1);
+  bool sent = v4_send_frame(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ, 0, msgId, nullptr, 0, 1);
   
   if (sent) {
     DEBUG_ESPNOWF("[SETTINGS_REQ] Sent (msgId=%lu retry=%d)", (unsigned long)msgId, (int)gEspNow->bondSyncRetryCount);
@@ -4347,7 +4360,7 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
         if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
           computeBondSessionToken(pMac);
           uint32_t statusReqId = generateMessageId();
-          v3_send_frame(pMac, ESPNOW_V3_TYPE_BOND_STATUS_REQ, 0, statusReqId, nullptr, 0, 1);
+          v4_send_frame(pMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0, statusReqId, nullptr, 0, 1);
           gEspNow->bondLastStatusReqMs = millis();
         }
       }
@@ -4408,10 +4421,10 @@ static String loadManifestFromCache(const uint8_t fwHash[16]) {
 /**
  * Build metadata payload from current settings
  */
-static void buildMetadataPayload(V3PayloadMetadata* payload) {
+static void buildMetadataPayload(V4PayloadMetadata* payload) {
   if (!payload) return;
   
-  memset(payload, 0, sizeof(V3PayloadMetadata));
+  memset(payload, 0, sizeof(V4PayloadMetadata));
   
   strncpy(payload->deviceName, gSettings.espnowDeviceName.c_str(), sizeof(payload->deviceName) - 1);
   strncpy(payload->friendlyName, gSettings.espnowFriendlyName.c_str(), sizeof(payload->friendlyName) - 1);
@@ -4443,7 +4456,7 @@ void requestMetadata(const uint8_t* peerMac, bool force) {
   uint32_t msgId = generateMessageId();
   DEBUG_ESPNOW_METADATAF("[METADATA] Sending REQ to %s msgId=%lu force=%d",
     MAC_STR(peerMac), (unsigned long)msgId, (int)force);
-  bool sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_METADATA_REQ, 0, msgId, nullptr, 0, 1);
+  bool sent = v4_send_frame(peerMac, ESPNOW_V4_TYPE_METADATA_REQ, 0, msgId, nullptr, 0, 1);
   
   if (sent) {
     DEBUG_ESPNOW_METADATAF("[METADATA] REQ sent OK to %s msgId=%lu",
@@ -4470,16 +4483,16 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
   }
   sLastMetadataSendMs = now;
   
-  V3PayloadMetadata payload;
+  V4PayloadMetadata payload;
   buildMetadataPayload(&payload);
   
   uint32_t msgId = generateMessageId();
-  uint8_t type = isPush ? ESPNOW_V3_TYPE_METADATA_PUSH : ESPNOW_V3_TYPE_METADATA_RESP;
+  uint8_t type = isPush ? ESPNOW_V4_TYPE_METADATA_PUSH : ESPNOW_V4_TYPE_METADATA_RESP;
   DEBUG_ESPNOW_METADATAF("[METADATA] Sending %s to %s msgId=%lu payloadLen=%u name='%s' room='%s' zone='%s' tags='%s' force=%d",
     isPush ? "PUSH" : "RESP", MAC_STR(peerMac), (unsigned long)msgId,
     (unsigned)sizeof(payload), payload.deviceName, payload.room, payload.zone, payload.tags, (int)force);
   
-  bool sent = v3_send_frame(peerMac, type, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 1);
+  bool sent = v4_send_frame(peerMac, type, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 1);
   
   if (sent) {
     DEBUG_ESPNOW_METADATAF("[METADATA] %s sent OK to %s msgId=%lu",
@@ -4493,7 +4506,7 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
 /**
  * Process received metadata - store in gMeshPeerMeta
  */
-static void processMetadata(const uint8_t* srcMac, const V3PayloadMetadata* metadata) {
+static void processMetadata(const uint8_t* srcMac, const V4PayloadMetadata* metadata) {
   if (!srcMac || !metadata || !gMeshPeerMeta) {
     WARN_ESPNOWF("[METADATA] processMetadata: null guard failed srcMac=%p metadata=%p gMeshPeerMeta=%p slots=%d",
       srcMac, metadata, gMeshPeerMeta, gMeshPeerSlots);
@@ -4601,7 +4614,7 @@ static void broadcastMetadataToMesh() {
   uint8_t myMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, myMac);
   
-  V3PayloadMetadata myMetadata;
+  V4PayloadMetadata myMetadata;
   buildMetadataPayload(&myMetadata);
   
   int sentCount = 0;
@@ -4613,7 +4626,7 @@ static void broadcastMetadataToMesh() {
       if (peer.encrypt) {
         // Send our metadata
         uint32_t msgId = generateMessageId();
-        if (v3_send_frame(peer.peer_addr, ESPNOW_V3_TYPE_METADATA_PUSH, 0, msgId, 
+        if (v4_send_frame(peer.peer_addr, ESPNOW_V4_TYPE_METADATA_PUSH, 0, msgId, 
                          (const uint8_t*)&myMetadata, sizeof(myMetadata), 1)) {
           sentCount++;
           delay(5);  // Small delay between sends to avoid congestion
@@ -4626,7 +4639,7 @@ static void broadcastMetadataToMesh() {
               !macEqual6(gMeshPeerMeta[j].mac, myMac)) {  // Don't forward our own
             
             // Build metadata payload from stored data
-            V3PayloadMetadata fwdMetadata;
+            V4PayloadMetadata fwdMetadata;
             memset(&fwdMetadata, 0, sizeof(fwdMetadata));
             strncpy(fwdMetadata.deviceName, gMeshPeerMeta[j].name, sizeof(fwdMetadata.deviceName) - 1);
             strncpy(fwdMetadata.friendlyName, gMeshPeerMeta[j].friendlyName, sizeof(fwdMetadata.friendlyName) - 1);
@@ -4636,7 +4649,7 @@ static void broadcastMetadataToMesh() {
             fwdMetadata.stationary = gMeshPeerMeta[j].stationary ? 1 : 0;
             
             uint32_t fwdMsgId = generateMessageId();
-            v3_send_frame(peer.peer_addr, ESPNOW_V3_TYPE_METADATA_PUSH, 0, fwdMsgId,
+            v4_send_frame(peer.peer_addr, ESPNOW_V4_TYPE_METADATA_PUSH, 0, fwdMsgId,
                          (const uint8_t*)&fwdMetadata, sizeof(fwdMetadata), 1);
             delay(5);
           }
@@ -5501,7 +5514,7 @@ void meshSendEnvelopeToPeers(const String& envelope) {
   uint32_t msgId = generateMessageId();
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac))
-      v3_send_chunked(gMeshPeers[i].mac, ESPNOW_V3_TYPE_TEXT, 0, msgId, data, len, 3);
+      v4_send_chunked(gMeshPeers[i].mac, ESPNOW_V4_TYPE_TEXT, 0, msgId, data, len, 3);
   }
 }
 
@@ -5527,11 +5540,11 @@ void requestTopologyDiscovery() {
   gTopoResponsesReceived = 0;
   gTopoResultsBuffer    = "";
   gLastTopoRequest      = millis();
-  V3PayloadTopoReq req  = {};
+  V4PayloadTopoReq req  = {};
   req.reqId = gTopoRequestId;
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac))
-      v3_send_frame(gMeshPeers[i].mac, ESPNOW_V3_TYPE_TOPO_REQ, 0,
+      v4_send_frame(gMeshPeers[i].mac, ESPNOW_V4_TYPE_TOPO_REQ, 0,
                     generateMessageId(), (const uint8_t*)&req, sizeof(req), 3);
   }
   DEBUGF(DEBUG_ESPNOW_TOPO, "[TOPO] Discovery request sent (reqId=%lu)",
@@ -5596,7 +5609,7 @@ void processMeshHeartbeats() {
     }
     // Send heartbeat if we have either active peers OR paired devices
     if (activePeerCount > 0 || pairedDeviceCount > 0) {
-      V3PayloadHeartbeat hb = {};
+      V4PayloadHeartbeat hb = {};
       hb.role = gSettings.meshRole;
       hb.peerCount = activePeerCount > 0 ? activePeerCount : pairedDeviceCount;
       wifi_ap_record_t ap = {};
@@ -5604,7 +5617,7 @@ void processMeshHeartbeats() {
       hb.uptimeSec = now / 1000;
       hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
       strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
-      v3_broadcast(ESPNOW_V3_TYPE_HEARTBEAT, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(),
+      v4_broadcast(ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
                    (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
       gEspNow->heartbeatsSent++;
     }
@@ -5617,14 +5630,14 @@ void processMeshHeartbeats() {
       gLastBackupHeartbeat = now;
       uint8_t backupMac[6] = {};
       if (parseMacAddress(gSettings.meshBackupMAC, backupMac)) {
-        V3PayloadHeartbeat hb = {};
+        V4PayloadHeartbeat hb = {};
         hb.role      = MESH_ROLE_MASTER;
         hb.uptimeSec = now / 1000;
         hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
         wifi_ap_record_t ap = {};
         hb.rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
         strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
-        v3_send_frame(backupMac, ESPNOW_V3_TYPE_HEARTBEAT, ESPNOW_V3_FLAG_ACK_REQ,
+        v4_send_frame(backupMac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
                       generateMessageId(), (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
       }
     }
@@ -5648,7 +5661,7 @@ void processMeshHeartbeats() {
       gLastBondHeartbeatSentMs = now;
       uint8_t bondMac[6] = {};
       if (parseMacAddress(gSettings.bondPeerMac, bondMac)) {
-        V3PayloadBondHeartbeat phb = {};
+        V4PayloadBondHeartbeat phb = {};
         phb.role      = gSettings.bondRole;
         phb.uptimeSec = now / 1000;
         phb.freeHeap  = (uint32_t)ESP.getFreeHeap();
@@ -5658,7 +5671,7 @@ void processMeshHeartbeats() {
         phb.settingsHash = gEspNow ? gEspNow->bondLocalSettingsHash : 0;
         wifi_ap_record_t ap2 = {};
         phb.rssi = (esp_wifi_sta_get_ap_info(&ap2) == ESP_OK) ? ap2.rssi : (int8_t)-127;
-        bool sent = v3_send_frame(bondMac, ESPNOW_V3_TYPE_BOND_HEARTBEAT, 0,
+        bool sent = v4_send_frame(bondMac, ESPNOW_V4_TYPE_BOND_HEARTBEAT, 0,
                       generateMessageId(), (const uint8_t*)&phb, (uint16_t)sizeof(phb), 1);
         gEspNow->bondHeartbeatsSent++;
         // Log every 6th heartbeat (every 30s) or first one, plus full state
@@ -5713,7 +5726,7 @@ void processMeshHeartbeats() {
   // 6b. Clean up abandoned file transfers (no FILE_END received within 30s)
   if (gActiveFileTransfer && gActiveFileTransfer->active &&
       (now - gActiveFileTransfer->startTime) > 30000) {
-    BROADCAST_PRINTF("[V3_FILE] Abandoned transfer '%s' after 30s (%u/%u chunks)",
+    BROADCAST_PRINTF("[V4_FILE] Abandoned transfer '%s' after 30s (%u/%u chunks)",
                      gActiveFileTransfer->filename,
                      (unsigned)gActiveFileTransfer->receivedChunks,
                      (unsigned)gActiveFileTransfer->totalChunks);
@@ -5726,7 +5739,7 @@ void processMeshHeartbeats() {
   // 7. Process deferred CMD (remote command received from another device)
   if (gEspNow->deferredCmdPending) {
     gEspNow->deferredCmdPending = false;
-    v3_handle_cmd(gEspNow->deferredCmdSrcMac, gEspNow->deferredCmdDeviceName,
+    v4_handle_cmd(gEspNow->deferredCmdSrcMac, gEspNow->deferredCmdDeviceName,
                   gEspNow->deferredCmdMsgId, gEspNow->deferredCmdPayload);
   }
   
@@ -5814,7 +5827,7 @@ void processMeshHeartbeats() {
       if (!haveCap) {
         // Need capabilities
         uint32_t reqId = generateMessageId();
-        v3_send_frame(peerMac, ESPNOW_V3_TYPE_BOND_CAP_REQ, ESPNOW_V3_FLAG_ACK_REQ, reqId, nullptr, 0, 1);
+        v4_send_frame(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId, nullptr, 0, 1);
         gEspNow->bondSyncInFlight = BOND_SYNC_CAP;
         gEspNow->bondSyncLastAttemptMs = now;
         gEspNow->bondSyncRetryCount = 1;
@@ -5829,7 +5842,7 @@ void processMeshHeartbeats() {
           BROADCAST_PRINTF("[BOND_SYNC] Manifest found in cache, skipping request");
         } else {
           uint32_t msgId = generateMessageId();
-          v3_send_frame(peerMac, ESPNOW_V3_TYPE_MANIFEST_REQ, ESPNOW_V3_FLAG_ACK_REQ, msgId, nullptr, 0, 1);
+          v4_send_frame(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0, 1);
           gEspNow->bondSyncInFlight = BOND_SYNC_MANIFEST;
           gEspNow->bondSyncLastAttemptMs = now;
           gEspNow->bondSyncRetryCount = 1;
@@ -5852,10 +5865,10 @@ void processMeshHeartbeats() {
         gEspNow->bondSyncLastAttemptMs = now;
         gEspNow->bondSyncRetryCount++;
         if (gEspNow->bondSyncInFlight == BOND_SYNC_CAP) {
-          v3_send_frame(peerMac, ESPNOW_V3_TYPE_BOND_CAP_REQ, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(), nullptr, 0, 1);
+          v4_send_frame(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), nullptr, 0, 1);
           BROADCAST_PRINTF("[BOND_SYNC] Retry CAP_REQ (%d/3)", (int)gEspNow->bondSyncRetryCount);
         } else if (gEspNow->bondSyncInFlight == BOND_SYNC_MANIFEST) {
-          v3_send_frame(peerMac, ESPNOW_V3_TYPE_MANIFEST_REQ, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(), nullptr, 0, 1);
+          v4_send_frame(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), nullptr, 0, 1);
           BROADCAST_PRINTF("[BOND_SYNC] Retry MANIFEST_REQ (%d/3)", (int)gEspNow->bondSyncRetryCount);
         } else if (gEspNow->bondSyncInFlight == BOND_SYNC_SETTINGS) {
           requestBondSettings(peerMac);
@@ -5890,8 +5903,8 @@ void processMeshHeartbeats() {
     CapabilitySummary cap;
     buildCapabilitySummary(cap);
     uint32_t respId = generateMessageId();
-    bool sent = v3_send_frame(gEspNow->bondPendingResponseMac, ESPNOW_V3_TYPE_BOND_CAP_RESP,
-                  ESPNOW_V3_FLAG_ACK_REQ, respId,
+    bool sent = v4_send_frame(gEspNow->bondPendingResponseMac, ESPNOW_V4_TYPE_BOND_CAP_RESP,
+                  ESPNOW_V4_FLAG_ACK_REQ, respId,
                   (const uint8_t*)&cap, (uint16_t)sizeof(cap), 1);
     gEspNow->bondCapSent = true;
     BROADCAST_PRINTF("[BOND] 9b: CAP_RESP sent=%d featureMask=0x%08lX", (int)sent, (unsigned long)cap.featureMask);
@@ -6055,7 +6068,7 @@ void processMeshHeartbeats() {
     BondPeerStatus localStatus;
     buildLocalBondStatus(localStatus);
     uint32_t respId = generateMessageId();
-    v3_send_frame(gEspNow->bondPendingResponseMac, ESPNOW_V3_TYPE_BOND_STATUS_RESP,
+    v4_send_frame(gEspNow->bondPendingResponseMac, ESPNOW_V4_TYPE_BOND_STATUS_RESP,
                   0, respId, (const uint8_t*)&localStatus, sizeof(localStatus), 1);
     BROADCAST_PRINTF("[BOND] 9j: Sent status response enabled=0x%04X connected=0x%04X heap=%lu",
            localStatus.sensorEnabledMask, localStatus.sensorConnectedMask,
@@ -6071,7 +6084,7 @@ void processMeshHeartbeats() {
         BondPeerStatus localStatus;
         buildLocalBondStatus(localStatus);
         uint32_t respId = generateMessageId();
-        v3_send_frame(peerMac, ESPNOW_V3_TYPE_BOND_STATUS_RESP,
+        v4_send_frame(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_RESP,
                       0, respId, (const uint8_t*)&localStatus, sizeof(localStatus), 1);
         BROADCAST_PRINTF("[BOND] 9j2: Proactive status push enabled=0x%04X connected=0x%04X",
                localStatus.sensorEnabledMask, localStatus.sensorConnectedMask);
@@ -6088,7 +6101,7 @@ void processMeshHeartbeats() {
       uint8_t peerMac[6];
       if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
         uint32_t reqId = generateMessageId();
-        v3_send_frame(peerMac, ESPNOW_V3_TYPE_BOND_STATUS_REQ, 0, reqId, nullptr, 0, 1);
+        v4_send_frame(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0, reqId, nullptr, 0, 1);
         DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] 9k: Sent status request to peer");
       }
     }
@@ -6108,11 +6121,11 @@ void processMeshHeartbeats() {
     gEspNow->deferredMetadataPending = false;
     DEBUG_ESPNOW_METADATAF("[METADATA] Task: calling processMetadata for %s gMeshPeerMeta=%p slots=%d",
       MAC_STR(gEspNow->deferredMetadataSrcMac), gMeshPeerMeta, gMeshPeerSlots);
-    processMetadata(gEspNow->deferredMetadataSrcMac, (const V3PayloadMetadata*)gEspNow->deferredMetadataPayload);
+    processMetadata(gEspNow->deferredMetadataSrcMac, (const V4PayloadMetadata*)gEspNow->deferredMetadataPayload);
     DEBUG_ESPNOW_METADATAF("[METADATA] Task: processMetadata complete");
     
     // Log metadata to message history for web UI
-    const V3PayloadMetadata* meta = (const V3PayloadMetadata*)gEspNow->deferredMetadataPayload;
+    const V4PayloadMetadata* meta = (const V4PayloadMetadata*)gEspNow->deferredMetadataPayload;
     char metaMsg[384];
     snprintf(metaMsg, sizeof(metaMsg), 
              "Metadata: name=%s friendly=%s room=%s zone=%s tags=%s stationary=%d",
@@ -6222,7 +6235,7 @@ static EspNowAppPingSlot gEspNowAppPing = {
 bool espnowAppPingStart(const uint8_t* mac) {
   if (!mac || !gEspNow || !gEspNow->initialized) return false;
   uint32_t msgId = generateMessageId();
-  // Slot first — if the ACK lands in the gap between v3_send_frame returning
+  // Slot first — if the ACK lands in the gap between v4_send_frame returning
   // and the slot being populated, espnowAppPingNoteAck would see Pending=false
   // and drop the match.
   memcpy(gEspNowAppPing.peerMac, mac, 6);
@@ -6231,7 +6244,7 @@ bool espnowAppPingStart(const uint8_t* mac) {
   gEspNowAppPing.rttMs   = 0;
   gEspNowAppPing.state   = EspNowAppPingState::Pending;
 
-  bool ok = v3_send_frame(mac, ESPNOW_V3_TYPE_HEARTBEAT, ESPNOW_V3_FLAG_ACK_REQ,
+  bool ok = v4_send_frame(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
                           msgId, nullptr, 0, /*ttl=*/1);
   if (!ok) {
     // Send refused (queue full / radio off / no peer). Don't leave the slot
@@ -6336,9 +6349,9 @@ static bool initEspNow() {
     } else {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate listBuffer");
     }
-    gEspNow->deferredCmdRespResult = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "espnow.cmdResp");
+    gEspNow->deferredCmdRespResult = (char*)ps_alloc(6144, AllocPref::PreferPSRAM, "espnow.cmdResp");
     if (gEspNow->deferredCmdRespResult) {
-      memset(gEspNow->deferredCmdRespResult, 0, 2048);
+      memset(gEspNow->deferredCmdRespResult, 0, 6144);
     } else {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate deferredCmdRespResult");
     }
@@ -6375,11 +6388,11 @@ static bool initEspNow() {
   }
 
   // Allocate V3 reassembly buffers in PSRAM (saves ~6.4KB of internal BSS)
-  if (!gV3Reasm) {
-    size_t reasмSize = sizeof(V3ReasmEntry) * V3_REASM_MAX;
-    gV3Reasm = (V3ReasmEntry*)ps_alloc(reasмSize, AllocPref::PreferPSRAM, "espnow.reasm");
-    if (gV3Reasm) {
-      memset(gV3Reasm, 0, reasмSize);
+  if (!gV4Reasm) {
+    size_t reasмSize = sizeof(V4ReasmEntry) * V4_REASM_MAX;
+    gV4Reasm = (V4ReasmEntry*)ps_alloc(reasмSize, AllocPref::PreferPSRAM, "espnow.reasm");
+    if (gV4Reasm) {
+      memset(gV4Reasm, 0, reasмSize);
     } else {
       broadcastOutput("[ESP-NOW] WARNING: Failed to allocate reassembly buffers in PSRAM — fragmentation disabled");
     }
@@ -7005,19 +7018,19 @@ const char* cmd_espnow_pair(const String& argsInput) {
 
   removeFromUnpairedList(mac);
 
-  // Seed gMeshPeers immediately so v3_broadcast reaches this peer on the next
+  // Seed gMeshPeers immediately so v4_broadcast reaches this peer on the next
   // heartbeat tick (without this, two freshly-paired devices never exchange
   // heartbeats until one reboots, so mesh topology stays empty)
   if (meshEnabled()) {
     noteMeshPeerRxActivity(mac, EspNowMeshRxKind::BootstrapLiveness);
-    V3PayloadHeartbeat hb = {};
+    V4PayloadHeartbeat hb = {};
     hb.role = gSettings.meshRole;
     hb.uptimeSec = (uint32_t)(millis() / 1000);
     hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
     strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
     wifi_ap_record_t ap = {};
     hb.rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
-    v3_send_frame(mac, ESPNOW_V3_TYPE_HEARTBEAT, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(),
+    v4_send_frame(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
                   (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
   }
   bool peersOk   = saveMeshPeers();
@@ -7472,9 +7485,9 @@ const char* cmd_espnow_roomcmd(const String& argsInput) {
     // Send remote command directly — no String concat, no re-parse
     char macStrBuf[18];
     formatMacAddressBuf(gMeshPeerMeta[i].mac, macStrBuf, sizeof(macStrBuf));
-    char roomCmdPayload[ESPNOW_V3_MAX_PAYLOAD];
+    char roomCmdPayload[ESPNOW_V4_MAX_PAYLOAD];
     snprintf(roomCmdPayload, sizeof(roomCmdPayload), "%s:%s:%s", user.c_str(), pass.c_str(), command.c_str());
-    v3_send_frame(gMeshPeerMeta[i].mac, ESPNOW_V3_TYPE_CMD, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(),
+    v4_send_frame(gMeshPeerMeta[i].mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
                   (const uint8_t*)roomCmdPayload, (uint16_t)strlen(roomCmdPayload), 1);
     sent++;
 
@@ -7530,9 +7543,9 @@ const char* cmd_espnow_tagcmd(const String& argsInput) {
     // Send remote command directly — no String concat, no re-parse
     char tagMacStrBuf[18];
     formatMacAddressBuf(gMeshPeerMeta[i].mac, tagMacStrBuf, sizeof(tagMacStrBuf));
-    char tagCmdPayload[ESPNOW_V3_MAX_PAYLOAD];
+    char tagCmdPayload[ESPNOW_V4_MAX_PAYLOAD];
     snprintf(tagCmdPayload, sizeof(tagCmdPayload), "%s:%s:%s", user.c_str(), pass.c_str(), command.c_str());
-    v3_send_frame(gMeshPeerMeta[i].mac, ESPNOW_V3_TYPE_CMD, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(),
+    v4_send_frame(gMeshPeerMeta[i].mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
                   (const uint8_t*)tagCmdPayload, (uint16_t)strlen(tagCmdPayload), 1);
     sent++;
 
@@ -7841,9 +7854,9 @@ const char* cmd_espnow_timesync(const String& argsInput) {
   
   DEBUG_ESPNOWF("[TIME_SYNC] Broadcasting time sync: epoch=%lu", (unsigned long)epoch);
   
-  // Use V3 binary protocol instead of V2 JSON
+  // Use V4 binary protocol instead of V2 JSON
   uint32_t millisAtEpoch = millis();
-  bool sent = v3_broadcast_time_sync(epoch, millisAtEpoch);
+  bool sent = v4_broadcast_time_sync(epoch, millisAtEpoch);
   
   if (sent) {
     BROADCAST_PRINTF("Time sync broadcast sent (epoch: %lu)", (unsigned long)epoch);
@@ -8330,7 +8343,7 @@ const char* cmd_espnow_broadcast(const String& argsInput) {
   }
 
   // Send to all mesh peers via V3 broadcast
-  bool result = v3_broadcast_text(payload.c_str(), payload.length());
+  bool result = v4_broadcast_text(payload.c_str(), payload.length());
   int sent = result ? 1 : 0;
   int failed = result ? 0 : 1;
 
@@ -8359,7 +8372,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   // they would on a direct read; internal bond/USER_SYNC callers run
   // through the same gate using whatever identity their task installed.
   if (!canRead(localPath, currentAuthContext())) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] SECURITY: Blocked sending sensitive file: %s", localPath.c_str());
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] SECURITY: Blocked sending sensitive file: %s", localPath.c_str());
     broadcastOutput("[ESP-NOW] SECURITY: Cannot send file containing credentials: " + localPath);
     return false;
   }
@@ -8367,7 +8380,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   {
     FsLockGuard guard("espnow.send_file.exists");
     if (!VFS::existsGuarded(localPath, currentAuthContext())) {
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] File not found: %s", localPath.c_str());
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] File not found: %s", localPath.c_str());
       return false;
     }
   }
@@ -8375,18 +8388,18 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   FsLockGuard fsGuard("espnow.send_file.open");
   File file = VFS::openGuarded(localPath, "r", currentAuthContext());
   if (!file) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] Cannot open file: %s", localPath.c_str());
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Cannot open file: %s", localPath.c_str());
     return false;
   }
   
   uint32_t fileSize = file.size();
   
-  // V3 chunk size is 224 bytes (ESPNOW_V3_MAX_PAYLOAD - 2 for chunkIndex)
-  const uint16_t v3ChunkSize = ESPNOW_V3_MAX_PAYLOAD - 2;
-  uint32_t maxFileSize = 65535 * v3ChunkSize;  // 16-bit chunk count max
+  // V3 chunk size is 224 bytes (ESPNOW_V4_MAX_PAYLOAD - 2 for chunkIndex)
+  const uint16_t v4ChunkSize = ESPNOW_V4_MAX_PAYLOAD - 2;
+  uint32_t maxFileSize = 65535 * v4ChunkSize;  // 16-bit chunk count max
   if (fileSize > maxFileSize) {
     file.close();
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] File too large: %lu bytes (max %lu)", 
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] File too large: %lu bytes (max %lu)", 
            (unsigned long)fileSize, (unsigned long)maxFileSize);
     return false;
   }
@@ -8397,56 +8410,56 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
     filename = localPath.substring(lastSlash + 1);
   }
   
-  uint16_t totalChunks = (fileSize > 0) ? (uint16_t)((fileSize + v3ChunkSize - 1) / v3ChunkSize) : 0;
+  uint16_t totalChunks = (fileSize > 0) ? (uint16_t)((fileSize + v4ChunkSize - 1) / v4ChunkSize) : 0;
   
   uint32_t transferId = generateMessageId();
   
   // Build and send FILE_START
-  V3PayloadFileStart startPayload = {};
+  V4PayloadFileStart startPayload = {};
   startPayload.fileSize = fileSize;
   startPayload.chunkCount = totalChunks;
-  startPayload.chunkSize = v3ChunkSize;
+  startPayload.chunkSize = v4ChunkSize;
   strncpy(startPayload.filename, filename.c_str(), sizeof(startPayload.filename) - 1);
   
-  if (!v3_send_frame(mac, ESPNOW_V3_TYPE_FILE_START, ESPNOW_V3_FLAG_ACK_REQ, transferId,
+  if (!v4_send_frame(mac, ESPNOW_V4_TYPE_FILE_START, ESPNOW_V4_FLAG_ACK_REQ, transferId,
                      (const uint8_t*)&startPayload, sizeof(startPayload), 1)) {
     file.close();
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] Failed to send FILE_START");
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Failed to send FILE_START");
     return false;
   }
   
-  DEBUG_ESPNOWF("[V3_FILE_TX] START: %s (%lu bytes, %u chunks, chunkSize=%u) to %s, transferId=%lu",
-         filename.c_str(), (unsigned long)fileSize, totalChunks, v3ChunkSize, formatMacAddress(mac).c_str(), (unsigned long)transferId);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] Transfer initiated: %s -> %s", filename.c_str(), formatMacAddress(mac).c_str());
+  DEBUG_ESPNOWF("[V4_FILE_TX] START: %s (%lu bytes, %u chunks, chunkSize=%u) to %s, transferId=%lu",
+         filename.c_str(), (unsigned long)fileSize, totalChunks, v4ChunkSize, formatMacAddress(mac).c_str(), (unsigned long)transferId);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Transfer initiated: %s -> %s", filename.c_str(), formatMacAddress(mac).c_str());
   
   vTaskDelay(pdMS_TO_TICKS(100));  // Give receiver more time to set up
   
   // Send chunks - use stack buffer sized for v3 payload
-  uint8_t chunkPayload[ESPNOW_V3_MAX_PAYLOAD];
+  uint8_t chunkPayload[ESPNOW_V4_MAX_PAYLOAD];
   uint16_t chunkIdx = 0;
   while (file.available() && chunkIdx < totalChunks) {
-    V3PayloadFileData* fd = (V3PayloadFileData*)chunkPayload;
+    V4PayloadFileData* fd = (V4PayloadFileData*)chunkPayload;
     fd->chunkIndex = chunkIdx;
     
-    int bytesRead = file.read(fd->data, v3ChunkSize);
+    int bytesRead = file.read(fd->data, v4ChunkSize);
     if (bytesRead <= 0) break;
     
     uint16_t payloadLen = 2 + bytesRead;  // chunkIndex (2) + data
     
     bool sent = false;
     for (int attempt = 0; attempt < 3 && !sent; attempt++) {
-      sent = v3_send_frame(mac, ESPNOW_V3_TYPE_FILE_DATA, 0, transferId,
+      sent = v4_send_frame(mac, ESPNOW_V4_TYPE_FILE_DATA, 0, transferId,
                            chunkPayload, payloadLen, 1);
       if (!sent) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FILE_TX] Chunk %u send failed, retry %d", chunkIdx, attempt + 1);
+        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Chunk %u send failed, retry %d", chunkIdx, attempt + 1);
         vTaskDelay(pdMS_TO_TICKS(20));
       } else {
-        DEBUG_ESPNOWF("[V3_FILE_TX] Chunk %u sent: %u bytes (attempt %d)", chunkIdx, payloadLen, attempt + 1);
+        DEBUG_ESPNOWF("[V4_FILE_TX] Chunk %u sent: %u bytes (attempt %d)", chunkIdx, payloadLen, attempt + 1);
       }
     }
     
     if (!sent) {
-      ERROR_ESPNOWF("[V3_FILE_TX] Chunk %u failed after 3 retries", chunkIdx);
+      ERROR_ESPNOWF("[V4_FILE_TX] Chunk %u failed after 3 retries", chunkIdx);
     }
     
     chunkIdx++;
@@ -8456,7 +8469,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
     
     // Yield every 10 chunks with longer delay for receiver to process
     if ((chunkIdx % 10) == 0) {
-      DEBUG_ESPNOWF("[V3_FILE_TX] Progress: %u/%u chunks sent", chunkIdx, totalChunks);
+      DEBUG_ESPNOWF("[V4_FILE_TX] Progress: %u/%u chunks sent", chunkIdx, totalChunks);
       vTaskDelay(pdMS_TO_TICKS(50));
     }
   }
@@ -8466,21 +8479,21 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   vTaskDelay(pdMS_TO_TICKS(100));
   
   // Send FILE_END with retries for reliability
-  V3PayloadFileEnd endPayload = {};
+  V4PayloadFileEnd endPayload = {};
   endPayload.crc32 = 0;  // CRC not implemented yet
   endPayload.success = 1;
   
   bool endSent = false;
   for (int attempt = 0; attempt < 3 && !endSent; attempt++) {
-    endSent = v3_send_frame(mac, ESPNOW_V3_TYPE_FILE_END, ESPNOW_V3_FLAG_ACK_REQ, transferId,
+    endSent = v4_send_frame(mac, ESPNOW_V4_TYPE_FILE_END, ESPNOW_V4_FLAG_ACK_REQ, transferId,
                             (const uint8_t*)&endPayload, sizeof(endPayload), 1);
     if (!endSent) {
-      WARN_ESPNOWF("[V3_FILE_TX] FILE_END send failed, retry %d", attempt + 1);
+      WARN_ESPNOWF("[V4_FILE_TX] FILE_END send failed, retry %d", attempt + 1);
       vTaskDelay(pdMS_TO_TICKS(50));
     }
   }
   
-  DEBUG_ESPNOWF("[V3_FILE_TX] COMPLETE: %s (%u chunks) to %s, END_sent=%d", 
+  DEBUG_ESPNOWF("[V4_FILE_TX] COMPLETE: %s (%u chunks) to %s, END_sent=%d", 
          filename.c_str(), chunkIdx, formatMacAddress(mac).c_str(), endSent);
   return true;
 }
@@ -8527,16 +8540,16 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
   if (!parseMacAddress(gSettings.bondPeerMac, peerMac)) return false;
   
   // Build payload: header + data
-  // V3PayloadSensorData is 8 bytes header, max payload is 226, so max data is 218 bytes
-  const uint16_t maxDataLen = ESPNOW_V3_MAX_PAYLOAD - sizeof(V3PayloadSensorData);
+  // V4PayloadSensorData is 8 bytes header, max payload is 226, so max data is 218 bytes
+  const uint16_t maxDataLen = ESPNOW_V4_MAX_PAYLOAD - sizeof(V4PayloadSensorData);
   if (dataLen > maxDataLen) {
     DEBUGF(DEBUG_ESPNOW_MESH, "[V3_SENSOR_TX] Data too large: %u > %u", dataLen, maxDataLen);
     return false;
   }
   
   // Allocate payload on stack
-  uint8_t payloadBuf[ESPNOW_V3_MAX_PAYLOAD];
-  V3PayloadSensorData* sd = (V3PayloadSensorData*)payloadBuf;
+  uint8_t payloadBuf[ESPNOW_V4_MAX_PAYLOAD];
+  V4PayloadSensorData* sd = (V4PayloadSensorData*)payloadBuf;
   sd->sensorType = sensorType;
   sd->flags = 0x01;  // Valid flag
   sd->dataLen = dataLen;
@@ -8546,10 +8559,10 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
     memcpy(sd->data, data, dataLen);
   }
   
-  uint16_t totalLen = sizeof(V3PayloadSensorData) + dataLen;
+  uint16_t totalLen = sizeof(V4PayloadSensorData) + dataLen;
   uint32_t msgId = generateMessageId();
   
-  bool sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_SENSOR_DATA, 0, msgId, payloadBuf, totalLen, 1);
+  bool sent = v4_send_frame(peerMac, ESPNOW_V4_TYPE_SENSOR_DATA, 0, msgId, payloadBuf, totalLen, 1);
   
   // Single concise debug line only on success/failure
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] Sensor TX type=%u len=%u seq=%lu %s",
@@ -8568,12 +8581,12 @@ bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable) {
   uint8_t peerMac[6];
   if (!parseMacAddress(gSettings.bondPeerMac, peerMac)) return false;
   
-  V3PayloadStreamCtrl ctrl = {};
+  V4PayloadStreamCtrl ctrl = {};
   ctrl.sensorType = (uint8_t)sensorType;
   ctrl.enable = enable ? 1 : 0;
   
   uint32_t msgId = generateMessageId();
-  bool sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_STREAM_CTRL, ESPNOW_V3_FLAG_ACK_REQ, 
+  bool sent = v4_send_frame(peerMac, ESPNOW_V4_TYPE_STREAM_CTRL, ESPNOW_V4_FLAG_ACK_REQ, 
                             msgId, (const uint8_t*)&ctrl, sizeof(ctrl), 1);
   
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STREAM_CTRL] TX %s %s -> %s",
@@ -8817,19 +8830,19 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
 
   removeFromUnpairedList(mac);
 
-  // Seed gMeshPeers immediately so v3_broadcast reaches this peer on the next
+  // Seed gMeshPeers immediately so v4_broadcast reaches this peer on the next
   // heartbeat tick (without this, two freshly-paired devices never exchange
   // heartbeats until one reboots, so mesh topology stays empty)
   if (meshEnabled()) {
     noteMeshPeerRxActivity(mac, EspNowMeshRxKind::BootstrapLiveness);
-    V3PayloadHeartbeat hb = {};
+    V4PayloadHeartbeat hb = {};
     hb.role = gSettings.meshRole;
     hb.uptimeSec = (uint32_t)(millis() / 1000);
     hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
     strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
     wifi_ap_record_t ap = {};
     hb.rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
-    v3_send_frame(mac, ESPNOW_V3_TYPE_HEARTBEAT, ESPNOW_V3_FLAG_ACK_REQ, generateMessageId(),
+    v4_send_frame(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
                   (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
   }
   bool peersOk   = saveMeshPeers();
@@ -8922,7 +8935,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
   }
 
   // Build V3 CMD payload: "user:pass:files /path"
-  char cmdPayload[ESPNOW_V3_MAX_PAYLOAD];
+  char cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
   int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:files %s",
                             username.c_str(), password.c_str(), path.c_str());
   if (payloadLen >= (int)sizeof(cmdPayload)) payloadLen = sizeof(cmdPayload) - 1;
@@ -8940,7 +8953,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
 
   // Send via V3 CMD (receiver parses user:pass:cmd format)
   uint32_t msgId = generateMessageId();
-  bool sent = v3_send_frame(targetMac, ESPNOW_V3_TYPE_CMD, ESPNOW_V3_FLAG_ACK_REQ, msgId,
+  bool sent = v4_send_frame(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
                             (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1);
   
   EXT_RAM_BSS_ATTR static char browseBuffer[256];
@@ -8985,7 +8998,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
 
   // Build V3 CMD payload: "user:pass:espnow sendfile <our_name> <path>"
   // This tells the remote device to send the file back to us via V3 binary file transfer
-  char cmdPayload[ESPNOW_V3_MAX_PAYLOAD];
+  char cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
   int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:espnow sendfile %s %s",
                             username.c_str(), password.c_str(),
                             gSettings.espnowDeviceName.c_str(), path.c_str());
@@ -9004,7 +9017,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
 
   // Send via V3 CMD (receiver parses user:pass:cmd format)
   uint32_t msgId = generateMessageId();
-  bool sent = v3_send_frame(targetMac, ESPNOW_V3_TYPE_CMD, ESPNOW_V3_FLAG_ACK_REQ, msgId,
+  bool sent = v4_send_frame(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
                             (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1);
   
   EXT_RAM_BSS_ATTR static char fetchBuffer[256];
@@ -9061,7 +9074,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
 
   // V3 binary CMD message (credentials checked on receiver)
   // Build command payload: "user:pass:cmd"
-  char cmdPayload[ESPNOW_V3_MAX_PAYLOAD];
+  char cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
   int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:%s", 
                             username.c_str(), password.c_str(), command.c_str());
   if (payloadLen >= (int)sizeof(cmdPayload)) payloadLen = sizeof(cmdPayload) - 1;
@@ -9070,7 +9083,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
   
   bool success = false;
   for (int attempt = 0; attempt < 2; attempt++) {
-    success = v3_send_frame(targetMac, ESPNOW_V3_TYPE_CMD, ESPNOW_V3_FLAG_ACK_REQ, msgId,
+    success = v4_send_frame(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
                             (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1);
     if (success) break;
   }
@@ -9219,13 +9232,13 @@ const char* cmd_espnow_send(const String& argsInput) {
 
   // V3 binary TEXT message (no JSON, no heap allocation)
   size_t msgLen = message.length();
-  if (msgLen > ESPNOW_V3_MAX_PAYLOAD - 1) msgLen = ESPNOW_V3_MAX_PAYLOAD - 1;
+  if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
   
   uint32_t msgId = generateMessageId();
   
   bool success = false;
   for (int attempt = 0; attempt < 2; attempt++) {
-    success = v3_send_frame(mac, ESPNOW_V3_TYPE_TEXT, ESPNOW_V3_FLAG_ACK_REQ, msgId,
+    success = v4_send_frame(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
                             (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1);
     if (success) break;
   }
@@ -9271,7 +9284,7 @@ const char* cmd_espnow_bigsend(const String& argsInput) {
 
   // Send via V3
   uint32_t msgId = generateMessageId();
-  bool ok = v3_send_chunked(mac, ESPNOW_V3_TYPE_TEXT, ESPNOW_V3_FLAG_ACK_REQ, msgId,
+  bool ok = v4_send_chunked(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
                             (const uint8_t*)payload.c_str(), payload.length(), 1);
   if (!ensureDebugBuffer()) return ok ? "OK" : "Failed";
   snprintf(getDebugBuffer(), 1024, "bigsend: %s (id=%lu, bytes=%ld)", ok ? "OK" : "FAILED", (unsigned long)msgId, size);
@@ -9324,7 +9337,7 @@ const char* cmd_bond_requestcap(const String& argsInput) {
   uint32_t reqId = generateMessageId();
   bool sent = false;
   for (int attempt = 0; attempt < 2; attempt++) {
-    sent = v3_send_frame(peerMac, ESPNOW_V3_TYPE_BOND_CAP_REQ, ESPNOW_V3_FLAG_ACK_REQ, reqId, nullptr, 0, 1);
+    sent = v4_send_frame(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId, nullptr, 0, 1);
     if (sent) break;
   }
   return sent ? "Capability request sent. Check output for response." : "Failed to send capability request.";
@@ -9379,7 +9392,7 @@ const char* cmd_bond_requestmanifest(const String& argsInput) {
   
   // Send v3 manifest request
   uint32_t msgId = generateMessageId();
-  if (v3_send_frame(peerMac, ESPNOW_V3_TYPE_MANIFEST_REQ, ESPNOW_V3_FLAG_ACK_REQ, msgId, nullptr, 0, 1)) {
+  if (v4_send_frame(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0, 1)) {
     return "Manifest request sent (v3). Response will arrive via file transfer.";
   } else {
     return "Failed to send manifest request.";
@@ -9741,8 +9754,8 @@ const char* cmd_bond_stream(const String& argsInput) {
     BROADCAST_PRINTF("  ESP-NOW init: %s", (gEspNow && gEspNow->initialized) ? "YES" : "NO");
     BROADCAST_PRINTF("  Peer online: %s", gEspNow ? (gEspNow->bondPeerOnline ? "YES" : "NO") : "N/A");
     BROADCAST_PRINTF("  isBondModeOnline(): %s", isBondModeOnline() ? "YES" : "NO");
-    BROADCAST_PRINTF("  V3PayloadSensorData size: %u bytes", (unsigned)sizeof(V3PayloadSensorData));
-    BROADCAST_PRINTF("  Max sensor data: %u bytes", (unsigned)(ESPNOW_V3_MAX_PAYLOAD - sizeof(V3PayloadSensorData)));
+    BROADCAST_PRINTF("  V4PayloadSensorData size: %u bytes", (unsigned)sizeof(V4PayloadSensorData));
+    BROADCAST_PRINTF("  Max sensor data: %u bytes", (unsigned)(ESPNOW_V4_MAX_PAYLOAD - sizeof(V4PayloadSensorData)));
     broadcastOutput("");
     broadcastOutput("  Sensor streaming (runtime / saved):");
     bool savedFlags[] = {gSettings.bondStreamThermal, gSettings.bondStreamTof, gSettings.bondStreamImu, 
@@ -9882,11 +9895,11 @@ const char* cmd_espnow_buffers(const String& argsInput) {
     pos += snprintf(buf + pos, 1024 - pos, "=== ESP-NOW Buffer Settings ===\n");
     pos += snprintf(buf + pos, 1024 - pos, "TX Queue Size:     %u (1-16, default: 8)\n", gSettings.espnowTxQueueSize);
     pos += snprintf(buf + pos, 1024 - pos, "RX Buffer Size:    %u (64-512, default: 256)\n", gSettings.espnowRxBufferSize);
-    pos += snprintf(buf + pos, 1024 - pos, "Chunk Size:        %u (100-220, default: 200)\n", gSettings.espnowChunkSize);
-    pos += snprintf(buf + pos, 1024 - pos, "File Chunk Size:   %u (100-224, default: 224)\n", gSettings.espnowFileChunkSize);
-    pos += snprintf(buf + pos, 1024 - pos, "\nV3 Protocol Constants:\n");
-    pos += snprintf(buf + pos, 1024 - pos, "  Max Payload:     %d bytes\n", ESPNOW_V3_MAX_PAYLOAD);
-    pos += snprintf(buf + pos, 1024 - pos, "  Dedup Buffer:    %d entries\n", V3_DEDUP_SIZE);
+    pos += snprintf(buf + pos, 1024 - pos, "Chunk Size:        %u (100-212, default: 200)\n", gSettings.espnowChunkSize);
+    pos += snprintf(buf + pos, 1024 - pos, "File Chunk Size:   %u (100-216, default: 216)\n", gSettings.espnowFileChunkSize);
+    pos += snprintf(buf + pos, 1024 - pos, "\nV4 Protocol Constants:\n");
+    pos += snprintf(buf + pos, 1024 - pos, "  Max Payload:     %d bytes\n", ESPNOW_V4_MAX_PAYLOAD);
+    pos += snprintf(buf + pos, 1024 - pos, "  Dedup Buffer:    %d entries\n", V4_DEDUP_SIZE);
     pos += snprintf(buf + pos, 1024 - pos, "\nNote: Changes take effect after ESP-NOW reinit or reboot.");
     return buf;
   }
@@ -9902,9 +9915,9 @@ const char* cmd_espnow_buffers(const String& argsInput) {
     } else if (bufType == "rx") {
       snprintf(getDebugBuffer(), 1024, "RX Buffer Size: %u (range: 64-512)", gSettings.espnowRxBufferSize);
     } else if (bufType == "chunk") {
-      snprintf(getDebugBuffer(), 1024, "Chunk Size: %u (range: 100-220)", gSettings.espnowChunkSize);
+      snprintf(getDebugBuffer(), 1024, "Chunk Size: %u (range: 100-212)", gSettings.espnowChunkSize);
     } else if (bufType == "filechunk") {
-      snprintf(getDebugBuffer(), 1024, "File Chunk Size: %u (range: 100-224)", gSettings.espnowFileChunkSize);
+      snprintf(getDebugBuffer(), 1024, "File Chunk Size: %u (range: 100-216)", gSettings.espnowFileChunkSize);
     } else {
       return "Usage: espnow buffers [tx|rx|chunk|filechunk] [value]";
     }
@@ -9924,11 +9937,11 @@ const char* cmd_espnow_buffers(const String& argsInput) {
     setSetting(gSettings.espnowRxBufferSize, (uint16_t)value);
     snprintf(getDebugBuffer(), 1024, "RX Buffer Size set to %d (takes effect after reinit)", value);
   } else if (bufType == "chunk") {
-    if (value < 100 || value > 220) return "Error: Chunk size must be 100-220";
+    if (value < 100 || value > 212) return "Error: Chunk size must be 100-212";
     setSetting(gSettings.espnowChunkSize, (uint16_t)value);
     snprintf(getDebugBuffer(), 1024, "Chunk Size set to %d (takes effect after reinit)", value);
   } else if (bufType == "filechunk") {
-    if (value < 100 || value > 224) return "Error: File chunk size must be 100-224";
+    if (value < 100 || value > 216) return "Error: File chunk size must be 100-216";
     setSetting(gSettings.espnowFileChunkSize, (uint16_t)value);
     snprintf(getDebugBuffer(), 1024, "File Chunk Size set to %d (takes effect after reinit)", value);
   } else {
@@ -10096,7 +10109,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowtxqueuesize",             "Set TX queue size: <1-16>", true, cmd_espnow_txqueuesize },
   { "espnowrxbuffersize",            "Set RX buffer size: <64-512>", true, cmd_espnow_rxbuffersize },
   { "espnowchunksize",               "Set chunk size: <100-220>", true, cmd_espnow_chunksize },
-  { "espnowfilechunksize",           "Set file chunk size: <100-224>", true, cmd_espnow_filechunksize },
+  { "espnowfilechunksize",           "Set file chunk size: <100-216>", true, cmd_espnow_filechunksize },
 #if ENABLE_BONDED_MODE
   { "espnowbondmodeenabled",         "Enable/disable bond mode: <0|1>", true, cmd_espnow_bondmodeenabled },
   { "espnowbondpeermac",             "Set bond peer MAC address", true, cmd_espnow_bondpeermac },
@@ -10164,8 +10177,8 @@ static const SettingEntry espnowSettingEntries[] = {
   // Buffer size settings (requires reinit to take effect)
   { "txQueueSize", SETTING_INT, (int*)&gSettings.espnowTxQueueSize, 8, 0, nullptr, 1, 16, "TX Queue Size", nullptr, false, "buffers", "espnowtxqueuesize" },
   { "rxBufferSize", SETTING_INT, (int*)&gSettings.espnowRxBufferSize, 256, 0, nullptr, 64, 512, "RX Buffer Size", nullptr, false, "buffers", "espnowrxbuffersize" },
-  { "chunkSize", SETTING_INT, (int*)&gSettings.espnowChunkSize, 200, 0, nullptr, 100, 220, "Chunk Size", nullptr, false, "buffers", "espnowchunksize" },
-  { "fileChunkSize", SETTING_INT, (int*)&gSettings.espnowFileChunkSize, 224, 0, nullptr, 100, 224, "File Chunk Size", nullptr, false, "buffers", "espnowfilechunksize" }
+  { "chunkSize", SETTING_INT, (int*)&gSettings.espnowChunkSize, 200, 0, nullptr, 100, 212, "Chunk Size", nullptr, false, "buffers", "espnowchunksize" },
+  { "fileChunkSize", SETTING_INT, (int*)&gSettings.espnowFileChunkSize, 216, 0, nullptr, 100, 216, "File Chunk Size", nullptr, false, "buffers", "espnowfilechunksize" }
 };
 
 // Helper: find an ESP-NOW setting entry by jsonKey

@@ -454,6 +454,12 @@ static void exitJsonViewBackToFiles() {
 }
 
 static bool showJsonFileViaTextWidget(bool pretty) {
+  // Install the G2-paired user's identity for this page action. The g2_tap_disp
+  // worker that drives this page leaves the task's TLS slot at its default
+  // (ANON), so canRead/readTextLimited below would see no user and deny
+  // restricted files. Mirrors the pattern at G2_Glasses.cpp:13708,14744,15124,15215.
+  ExecIdentityGuard identity(g2HijackAuthContext());
+
   char path[FILE_MANAGER_MAX_PATH + 32];
   buildChooserPath(path, sizeof(path));
   if (!path[0]) return false;
