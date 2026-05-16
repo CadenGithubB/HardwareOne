@@ -1086,6 +1086,127 @@ static uint16_t v4_crc16_ccitt(const uint8_t* data, size_t len) {
   return crc;
 }
 
+// ============================================================================
+// Multi-mesh helpers (Phase 2 of docs/ESPNOW_V4_PLAN.md)
+// ============================================================================
+//
+// Each mesh has a human-readable label (e.g. "primary", "work") and a
+// non-cryptographic 16-bit fingerprint = CRC16-CCITT(label). The fingerprint
+// is what goes on the wire in the V4 header's meshFingerprint field — local
+// mesh indices differ between devices, so we hash a stable string both
+// devices agree on.
+//
+// Phase 2.1 (this commit): infrastructure only. The TX path still emits
+// fingerprint=0 (V4 default). RX path doesn't yet validate. meshes[0] gets
+// initialized from the legacy gSettings.espnowPassphrase + bondPeerMac so
+// later Phase 2.x sub-commits can migrate readers one at a time without
+// breaking existing single-mesh deployments.
+
+// Compute the CRC16-CCITT fingerprint of a mesh label. Stable across devices
+// — both peers compute the same fingerprint for the same label.
+static uint16_t meshFingerprintForLabel(const String& label) {
+  if (label.length() == 0) return 0;
+  return v4_crc16_ccitt((const uint8_t*)label.c_str(), label.length());
+}
+
+// Recompute and cache the fingerprint of every configured mesh. Cheap (CRC16
+// over a few bytes per mesh × at most N_MESHES meshes). Called from
+// initEspNow and whenever a mesh's label changes.
+static void recomputeAllMeshFingerprints() {
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    gSettings.meshes[i].fingerprint =
+        meshFingerprintForLabel(gSettings.meshes[i].label);
+  }
+}
+
+// Look up a local mesh by its on-wire fingerprint. Returns nullptr if no
+// enabled mesh matches — caller should drop the frame silently.
+static Settings::MeshIdentity* meshByFingerprint(uint16_t fingerprint) {
+  if (fingerprint == 0) return nullptr;
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].enabled &&
+        gSettings.meshes[i].fingerprint == fingerprint) {
+      return &gSettings.meshes[i];
+    }
+  }
+  return nullptr;
+}
+
+// Find a mesh by label (case-sensitive). Returns nullptr if not found.
+static Settings::MeshIdentity* meshByLabel(const String& label) {
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].enabled && gSettings.meshes[i].label == label) {
+      return &gSettings.meshes[i];
+    }
+  }
+  return nullptr;
+}
+
+// Look up the mesh fingerprint to stamp on a frame addressed to `mac`. For
+// known peers, uses the peer's stored meshId. For broadcast (FF:FF:...) and
+// unknown peers, falls back to the default mesh (the one flagged isDefault,
+// or meshes[0] if none flagged). Returns 0 if no mesh is configured —
+// frame goes out with fingerprint=0 and receivers may drop it.
+static uint16_t fingerprintForPeer(const uint8_t* mac) {
+  if (!mac) return 0;
+  // Known peer?
+  if (gEspNow) {
+    for (int i = 0; i < gEspNow->deviceCount; i++) {
+      if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
+        uint8_t mid = gEspNow->devices[i].meshId;
+        if (mid < Settings::N_MESHES && gSettings.meshes[mid].enabled) {
+          return gSettings.meshes[mid].fingerprint;
+        }
+        break;
+      }
+    }
+  }
+  // Unknown peer or broadcast — use default mesh
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].enabled && gSettings.meshes[i].isDefault) {
+      return gSettings.meshes[i].fingerprint;
+    }
+  }
+  // No default flagged — use first enabled
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].enabled) {
+      return gSettings.meshes[i].fingerprint;
+    }
+  }
+  return 0;
+}
+
+// Phase 2.1 init shim: populate meshes[0] from the legacy single-mesh fields
+// if it hasn't been configured yet. Lets existing user flows (e.g. CLI
+// `espnowsetpassphrase`) keep writing the legacy field; meshes[0] picks up
+// the value at next boot. Phase 2.x sub-commits will rewire the CLI/web
+// commands to write meshes[] directly, at which point this shim becomes
+// dead code.
+static void initPrimaryMeshFromLegacySettings() {
+  Settings::MeshIdentity& m0 = gSettings.meshes[0];
+  if (m0.label.length() > 0) {
+    // Already configured (probably from a previous boot that already ran
+    // this shim and persisted). Just recompute fingerprint and move on.
+    m0.fingerprint = meshFingerprintForLabel(m0.label);
+    return;
+  }
+  if (gSettings.espnowPassphrase.length() == 0) {
+    // No legacy passphrase either — fresh device with nothing configured.
+    // Leave meshes[0] empty; user will configure via setup wizard or CLI.
+    return;
+  }
+  m0.label       = "primary";
+  m0.passphrase  = gSettings.espnowPassphrase;
+  m0.fingerprint = meshFingerprintForLabel(m0.label);
+  m0.enabled     = true;
+  m0.isDefault   = true;
+#if ENABLE_BONDED_MODE
+  gSettings.bondModeEnabledMesh[0] = gSettings.bondModeEnabled;
+  gSettings.bondRoleMesh[0]        = gSettings.bondRole;
+  gSettings.bondPeerMacMesh[0]     = gSettings.bondPeerMac;
+#endif
+}
+
 static bool v4_dedup_seen_and_insert(const uint8_t* origin, uint32_t id) {
   for (int i = 0; i < V4_DEDUP_SIZE; i++) {
     if (gV4Dedup[i].active && gV4Dedup[i].id == id && memcmp(gV4Dedup[i].origin, origin, 6) == 0) return true;
@@ -1149,6 +1270,7 @@ bool v4_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msg
   h.headerLen = (uint8_t)sizeof(EspNowV4Header); h.msgId = msgId;
   uint8_t myMac[6]; esp_wifi_get_mac(WIFI_IF_STA, myMac); memcpy(h.origin, myMac, 6);
   h.ttl = ttl; h.fragIndex = 0; h.fragCount = 1;
+  h.meshFingerprint = fingerprintForPeer(dst);  // Phase 2: scope frame to dst's mesh
   h.crc16 = payloadLen > 0 ? v4_crc16_ccitt(payload, payloadLen) : 0;
   memcpy(frame, &h, sizeof(h));
   if (payloadLen > 0) memcpy(frame + sizeof(h), payload, payloadLen);
@@ -1267,6 +1389,7 @@ bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t m
     h.ttl = ttl;
     h.fragIndex = fragIdx;
     h.fragCount = fragCount;
+    h.meshFingerprint = fingerprintForPeer(dst);  // Phase 2: per-fragment scope
     h.crc16 = v4_crc16_ccitt(payload + offset, fragLen);
     
     memcpy(frame, &h, sizeof(h));
@@ -1387,9 +1510,10 @@ static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
   h.ttl = 1;
   h.fragIndex = fragIndex;
   h.fragCount = fragCount;
+  h.meshFingerprint = fingerprintForPeer(dst);  // Phase 2: ACK rides the requester's mesh
   h.crc16 = 0;
-  
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_FRAG_ACK_TX] Calling esp_now_send: headerLen=%u", (unsigned)sizeof(h));
+
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] Calling esp_now_send: headerLen=%u", (unsigned)sizeof(h));
   captureEspNowFrame("TX", dst, 0, (const uint8_t*)&h, (int)sizeof(h));
   esp_err_t result = esp_now_send(dst, (uint8_t*)&h, sizeof(h));
   
@@ -2048,22 +2172,52 @@ static void v4h_topo_req(const V4RxCtx& ctx) {
     return;
   }
   const V4PayloadTopoReq* tr = (const V4PayloadTopoReq*)ctx.payload;
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] reqId=%lu", (unsigned long)tr->reqId);
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] reqId=%lu requesterMeshFp=0x%04X",
+         (unsigned long)tr->reqId, ctx.h->meshFingerprint);
 
-  // Count active peers (excluding self)
+  // Phase 2: filter peers by requester's mesh. If the requester stamped a
+  // mesh fingerprint, only report peers belonging to that mesh. fingerprint=0
+  // (transitional / pre-mesh) → no filter, report all peers as in V3.
+  uint16_t requesterFp = ctx.h->meshFingerprint;
+  auto peerIsInRequesterMesh = [&](const uint8_t* mac) -> bool {
+    if (requesterFp == 0) return true;  // no scope → report all
+    if (!gEspNow) return false;
+    for (int i = 0; i < gEspNow->deviceCount; i++) {
+      if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
+        uint8_t mid = gEspNow->devices[i].meshId;
+        if (mid < Settings::N_MESHES) {
+          return gSettings.meshes[mid].fingerprint == requesterFp;
+        }
+        return false;
+      }
+    }
+    // Peer not in our paired-device table — only in mesh routing layer.
+    // Phase 2 transitional: treat as default-mesh member. Phase 2.x may
+    // tighten this once gMeshPeers gains a meshId field of its own.
+    for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+      if (gSettings.meshes[i].enabled && gSettings.meshes[i].isDefault) {
+        return gSettings.meshes[i].fingerprint == requesterFp;
+      }
+    }
+    return false;
+  };
+
+  // Count active peers (excluding self) that are in the requester's mesh
   int peerCount = 0;
   for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) {
+    if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac) &&
+        peerIsInRequesterMesh(gMeshPeers[i].mac)) {
       peerCount++;
     }
   }
 
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] Responding with %d peer(s)", peerCount);
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_RX_TOPO_REQ] Responding with %d peer(s) in requester's mesh", peerCount);
   v4_send_topo_start(ctx.recv_info->src_addr, tr->reqId, (uint8_t)peerCount);
 
   int peerIndex = 0;
   for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) {
+    if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac) &&
+        peerIsInRequesterMesh(gMeshPeers[i].mac)) {
       bool isLast = (peerIndex == peerCount - 1);
       const char* peerNamePtr = nullptr;
       char peerNameBuf[48];
@@ -2903,7 +3057,17 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
            v4_crc16_ccitt(payload, payloadLen), h->crc16, payloadLen);
     return true;
   }
-  
+
+  // === Mesh fingerprint validation (Phase 2) ===
+  // fingerprint=0 is "no mesh scope" — allowed for compatibility (e.g.,
+  // first-boot devices that haven't yet configured a mesh). Non-zero
+  // fingerprints must match one of our enabled meshes; mismatches drop
+  // silently per V4 plan decision #5 (no log spam from neighboring fleets).
+  if (h->meshFingerprint != 0 && meshByFingerprint(h->meshFingerprint) == nullptr) {
+    // Silent drop. Frame is for a mesh we're not a member of.
+    return true;
+  }
+
   // === V4 FRAGMENTATION REASSEMBLY ===
   if (h->fragCount > 1) {
     // Multi-fragment message - reassemble
@@ -6332,6 +6496,14 @@ static bool initEspNow() {
   }
 
   // Allocate ESP-NOW state on first use
+  // Phase 2 multi-mesh init: populate meshes[0] from legacy single-mesh
+  // settings (espnowPassphrase, bondPeerMac, ...) on first boot of V4
+  // Phase 2.1 firmware. Subsequent Phase 2.x sub-commits will rewire the
+  // CLI/web flows to write meshes[] directly; this shim becomes dead code
+  // when no callers still write the legacy fields.
+  initPrimaryMeshFromLegacySettings();
+  recomputeAllMeshFingerprints();
+
   if (!gEspNow) {
     gEspNow = (EspNowState*)ps_alloc(sizeof(EspNowState), AllocPref::PreferPSRAM, "espnow.state");
     if (!gEspNow) {

@@ -109,6 +109,11 @@ struct EspNowDevice {
   String zone;           // Cached from mesh peer metadata
   String tags;           // Cached from mesh peer metadata (comma-separated)
   bool stationary;       // Cached from mesh peer metadata
+  // Phase 2 (multi-mesh): which of gSettings.meshes[] this peer belongs to.
+  // Defaults to 0 (the primary/default mesh) for existing-style pairings.
+  // Phase 2.x will start using this in TX/RX paths to stamp/validate the
+  // V4 header's meshFingerprint field.
+  uint8_t meshId;
 };
 
 // ==========================
