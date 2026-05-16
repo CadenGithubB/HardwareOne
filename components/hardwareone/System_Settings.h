@@ -642,8 +642,40 @@ struct Settings {
   bool meshAdaptiveTTL;                // Enable adaptive TTL based on peer count
   uint8_t meshPeerMax;                 // Max mesh peer slots (1-16, default: 8, changes on reboot)
   uint16_t sensorBroadcastIntervalMs;  // Sensor broadcast interval in ms (100-10000, default: 1000)
+  // ============================================================================
+  // Multi-mesh data model (Phase 2 of docs/ESPNOW_V4_PLAN.md)
+  // ============================================================================
+  // A device can belong to up to N_MESHES independent meshes simultaneously
+  // (home + work + lab, etc.). Each mesh has its own passphrase, group key,
+  // and peer set. The V4 frame header carries a `meshFingerprint` (CRC16 of
+  // the label) so receivers know which mesh a frame belongs to regardless
+  // of local-index differences between devices.
+  //
+  // Phase 2.1 (this commit): the data model exists alongside the legacy
+  // single-mesh fields below. meshes[0] is the "primary" mesh, mirrored
+  // from the legacy espnowPassphrase/bondPeerMac/etc. fields. Subsequent
+  // sub-commits migrate callsites to read from meshes[] directly.
+  static constexpr uint8_t N_MESHES = 4;
+
+  struct MeshIdentity {
+    String   label;                    // Human-readable name, e.g. "primary", "work"
+    String   passphrase;               // User-typed (Phase 3 will replace with PBKDF2-stretched hash)
+    uint16_t fingerprint;              // CRC16-CCITT of label — stamped in V4 header meshFingerprint
+    bool     enabled;                  // Inactive meshes are skipped in heartbeat emission, RX validation
+    bool     isDefault;                // The mesh new pairings join unless overridden
+    MeshIdentity() : label(""), passphrase(""), fingerprint(0), enabled(false), isDefault(false) {}
+  };
+  MeshIdentity meshes[N_MESHES];
+
 #if ENABLE_BONDED_MODE
   // Bond mode settings (two-device bonded pair)
+  // Phase 2: arrays indexed by meshId. Each mesh can have its own bond.
+  // [0] is the primary mesh's bond — mirrored from the legacy scalar
+  // fields below during Phase 2.1.
+  bool    bondModeEnabledMesh[N_MESHES] = {};   // all false by default
+  uint8_t bondRoleMesh[N_MESHES] = {};           // per-mesh bond role; 0 = worker
+  String  bondPeerMacMesh[N_MESHES];             // per-mesh bond peer MAC (String default-constructs to "")
+  // Legacy single-mesh fields (still read by most callers as of Phase 2.1):
   bool bondModeEnabled;              // Enable bond mode (master/worker)
   uint8_t bondRole;                  // 0=worker (compute/network), 1=master (display/gamepad)
   String bondPeerMac;                // MAC address of bonded peer device
