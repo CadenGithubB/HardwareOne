@@ -619,6 +619,11 @@ void sessionApplyRekeyedKeys(SessionState* s,
   s->state          = SESSION_ACTIVE;
   s->establishedAtMs = (uint32_t)millis();  // age clock resets on rekey
   s->lastUseMs       = s->establishedAtMs;
+  // Phase 3.5 task #6 — drain any app-layer sends that got queued while we
+  // were in REKEYING state (sessionWrapFrame rejects sends in that state, so
+  // v4_send_encrypted_or_queue parks them in the pending-frame ring). Without
+  // this drain, those frames would just expire via the 5 s timeout sweep.
+  pendingFrameDrainForPeer(s->peerMac);
 }
 
 bool sessionMarkRekeyInitiated(SessionState* s,
