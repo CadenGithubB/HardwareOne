@@ -29,6 +29,7 @@
 #include "System_ESPNow.h"
 #include "System_ESPNow_Wire.h"      // V3 wire schema (Phase 0 extraction)
 #include "System_ESPNow_Crypto.h"    // Phase 3.0: libsodium init / RNG / Ed25519 keygen
+#include <sodium.h>                 // Phase 3.5 task #32: sodium_memcmp (constant-time)
 #include "System_ESPNow_Handlers_Crypto.h"  // Phase 3.3: KEY_EX handlers + initiator
 #include "System_ESPNow_Identity.h"  // Phase 3.0: long-term Ed25519 identity load/store
 #include "System_ESPNow_MeshKeys.h"  // Phase 3.1: per-mesh PBKDF2 hash + bootstrap/group key cache
@@ -211,13 +212,18 @@ static const uint32_t BOND_SYNC_RETRY_MS = 3000;   // Retry sync request every 3
 static void resetBondSync();
 #endif
 
-// Forward declaration for v4_send_frame (implemented later)
-bool v4_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
+// Forward declaration for v4_send_frame (implemented later).
+// Phase 3.5 task #32: flags widened uint8_t -> uint16_t to carry the
+// high-byte flag bits (BROADCAST_AUTH=0x0100, SESSION_FRAME=0x0200,
+// HANDSHAKE=0x0400). Pre-existing bug: these bits were silently truncated
+// on every call — SESSION_OPEN / KEY_EX frames went out with HANDSHAKE
+// bit zero. Fixing now since BROADCAST_AUTH would have the same fate.
+bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 
 // Forward declarations for V3 helper functions (non-static for external linkage)
-bool v4_broadcast(uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
-bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
+bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
+bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 bool v4_broadcast_topo_request(uint32_t reqId);
 bool v4_send_worker_status(const uint8_t* dst, const V4PayloadWorkerStatus& status, const char* jsonMetadata, uint16_t jsonLen);
 bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen);
@@ -1406,21 +1412,62 @@ static void broadcast_tracker_check_timeouts() {
   }
 }
 
-bool v4_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
+bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
   if (!dst || (payloadLen > 0 && !payload)) return false;
-  size_t totalLen = sizeof(EspNowV4Header) + payloadLen;
-  if (totalLen > 250) return false;
-  uint8_t frame[250];
   EspNowV4Header h = {};
   h.magic = (uint16_t)ESPNOW_V4_MAGIC; h.ver = ESPNOW_V4_VERSION; h.type = type; h.flags = flags;
   h.headerLen = (uint8_t)sizeof(EspNowV4Header); h.msgId = msgId;
   uint8_t myMac[6]; esp_wifi_get_mac(WIFI_IF_STA, myMac); memcpy(h.origin, myMac, 6);
   h.ttl = ttl; h.fragIndex = 0; h.fragCount = 1;
   h.meshFingerprint = fingerprintForPeer(dst);  // Phase 2: scope frame to dst's mesh
-  h.crc16 = payloadLen > 0 ? v4_crc16_ccitt(payload, payloadLen) : 0;
+
+  // Phase 3.5 task #32 — if the caller flagged BROADCAST_AUTH, append an
+  // HMAC-SHA256 tag computed over (header[0..30] || payload) with the mesh
+  // group key. Receivers verify and silently drop forgeries. Tag is part of
+  // the on-wire payload (CRC covers it too, as a transport-level check).
+  uint8_t outBuf[ESPNOW_V4_MAX_PAYLOAD];
+  const uint8_t* finalPayload = payload;
+  uint16_t       finalPayloadLen = payloadLen;
+  if ((h.flags & ESPNOW_V4_FLAG_BROADCAST_AUTH) && h.meshFingerprint != 0) {
+    const MeshDerivedKeys* mk = meshKeysFindByFingerprint(h.meshFingerprint);
+    if (mk && mk->valid) {
+      if (payloadLen + ESPNOW_V4_BROADCAST_AUTH_TAG_LEN > ESPNOW_V4_MAX_PAYLOAD) {
+        DEBUGF(DEBUG_ESPNOW_CORE,
+               "[V4_TX] BROADCAST_AUTH: payload too large (%u + %u tag > %u) — dropping",
+               payloadLen, ESPNOW_V4_BROADCAST_AUTH_TAG_LEN, ESPNOW_V4_MAX_PAYLOAD);
+        return false;
+      }
+      memcpy(outBuf, payload, payloadLen);
+      uint8_t hmac[32];
+      // HMAC AAD = header bytes 0..29 (everything except crc16, mirroring
+      // the SESSION_FRAME AAD convention). Pass header first, payload second.
+      if (!espnowCryptoHmacSha256(hmac,
+                                   mk->groupKey, 32,
+                                   reinterpret_cast<const uint8_t*>(&h), 30,
+                                   payload, payloadLen,
+                                   nullptr, 0)) {
+        ERROR_ESPNOWF("[V4_TX] BROADCAST_AUTH: HMAC compute failed");
+        return false;
+      }
+      memcpy(outBuf + payloadLen, hmac, ESPNOW_V4_BROADCAST_AUTH_TAG_LEN);
+      finalPayload    = outBuf;
+      finalPayloadLen = payloadLen + ESPNOW_V4_BROADCAST_AUTH_TAG_LEN;
+    } else {
+      // No mesh group key available — strip the flag and send plaintext.
+      // Happens during early-boot before mesh keys derive, or if the peer
+      // belongs to a mesh we don't have the passphrase for (shouldn't reach
+      // v4_broadcast in that case, but defensive).
+      h.flags = (uint16_t)(h.flags & ~ESPNOW_V4_FLAG_BROADCAST_AUTH);
+    }
+  }
+
+  size_t totalLen = sizeof(EspNowV4Header) + finalPayloadLen;
+  if (totalLen > 250) return false;
+  uint8_t frame[250];
+  h.crc16 = finalPayloadLen > 0 ? v4_crc16_ccitt(finalPayload, finalPayloadLen) : 0;
   memcpy(frame, &h, sizeof(h));
-  if (payloadLen > 0) memcpy(frame + sizeof(h), payload, payloadLen);
+  if (finalPayloadLen > 0) memcpy(frame + sizeof(h), finalPayload, finalPayloadLen);
   captureEspNowFrame("TX", dst, 0, frame, (int)totalLen);
   return esp_now_send(dst, frame, totalLen) == ESP_OK;
 }
@@ -1584,7 +1631,7 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t bas
  * Sends to each active peer individually (ESP-NOW doesn't support true broadcast)
  * If ESPNOW_V4_FLAG_ACK_REQ is set, tracks ACKs for delivery confirmation
  */
-bool v4_broadcast(uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
+bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
   if (!gEspNow || !gEspNow->initialized) return false;
   
   bool anySuccess = false;
@@ -1608,10 +1655,16 @@ bool v4_broadcast(uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* pa
     }
   }
   
+  // Phase 3.5 task #32 — OR in BROADCAST_AUTH so v4_send_frame appends an
+  // HMAC tag keyed by the mesh group key. Receivers verify; outsiders' forged
+  // broadcasts drop silently on bad HMAC. Skipped at TX time per-peer if
+  // their meshFingerprint is 0 or we don't hold a key for that mesh.
+  uint16_t flagsAuthed = (uint16_t)(flags | ESPNOW_V4_FLAG_BROADCAST_AUTH);
+
   // Send to all active mesh peers
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) {
-      bool sent = v4_send_frame(gMeshPeers[i].mac, type, flags, msgId, payload, payloadLen, ttl);
+      bool sent = v4_send_frame(gMeshPeers[i].mac, type, flagsAuthed, msgId, payload, payloadLen, ttl);
       if (sent) {
         anySuccess = true;
         sentCount++;
@@ -1637,7 +1690,7 @@ bool v4_broadcast(uint8_t type, uint8_t flags, uint32_t msgId, const uint8_t* pa
  * Splits payload into multiple fragments if needed
  * Returns true if all fragments sent successfully
  */
-bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
+bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                             const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
   if (!dst || (payloadLen > 0 && !payload)) return false;
   
@@ -1992,79 +2045,86 @@ bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData,
 }
 
 // Send user sync to specific device (JSON payload)
+// Phase 3.5 task #6 — helper functions for app-unicast opcodes now route
+// through v4_send_encrypted_or_queue: wraps in SESSION_FRAME if a session
+// exists, queues + auto-kicks SESSION_OPEN otherwise. Returns false if the
+// peer has no long-term identity yet (KEY_EX never completed) — strict
+// rather than silently falling back to plaintext, since these opcodes can
+// carry credentials (CMD payload format is "user:pass:command").
+
 bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen) {
   if (!jsonPayload || jsonLen == 0) {
     DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] ERROR: Invalid params (jsonPayload=%p len=%u)",
            jsonPayload, jsonLen);
     return false;
   }
-  
+  if (jsonLen > ESPNOW_V4_MAX_PLAINTEXT) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] ERROR: payload %u > MAX_PLAINTEXT %u; "
+           "encrypted fragmentation pending (task #51)", jsonLen, ESPNOW_V4_MAX_PLAINTEXT);
+    return false;
+  }
   uint32_t msgId = generateMessageId();
-  uint8_t flags = ESPNOW_V4_FLAG_ACK_REQ;  // User sync requires ACK
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Sending to %s msgId=%lu", dstMac, (unsigned long)msgId);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] jsonLen=%u JSON (first 100 chars): %.100s",
-         jsonLen, jsonPayload);
-  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_USER_SYNC, flags, msgId, (const uint8_t*)jsonPayload, jsonLen, 3);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, jsonLen);
+  bool result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_USER_SYNC, ESPNOW_V4_FLAG_ACK_REQ,
+                                            msgId, (const uint8_t*)jsonPayload, jsonLen, 3,
+                                            nullptr, 0);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
-// V3 helper functions for command responses and text messages
 bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen) {
-  if (!text || textLen == 0 || textLen > ESPNOW_V4_MAX_PAYLOAD) return false;
-  
+  if (!text || textLen == 0) return false;
+  if (textLen > ESPNOW_V4_MAX_PLAINTEXT) {
+    DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_TEXT] ERROR: payload %u > MAX_PLAINTEXT %u; "
+           "encrypted fragmentation pending (task #51)", textLen, ESPNOW_V4_MAX_PLAINTEXT);
+    return false;
+  }
   uint32_t msgId = generateMessageId();
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_TEXT] Sending to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, textLen);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_TEXT] Text (first 100 chars): %.100s", text);
-  
-  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId, 
-                              (const uint8_t*)text, textLen, 1);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_TEXT] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, textLen);
+  bool result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
+                                            msgId, (const uint8_t*)text, textLen, 1,
+                                            nullptr, 0);
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
 bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen) {
   if (!resultText || textLen == 0) return false;
-  
+
   // Build response payload: success byte + result text
   uint16_t totalLen = 1 + textLen;
-  if (totalLen > ESPNOW_V4_MAX_PAYLOAD) {
-    // Use chunked send for large responses
+  char dstMac[18];
+  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
+
+  if (totalLen > ESPNOW_V4_MAX_PLAINTEXT) {
+    // Response too large for a single SESSION_FRAME — fall back to plaintext
+    // fragmented send. Task #51 (encrypted fragmentation) will let this go
+    // encrypted too. WARN here so the regression is visible.
     uint8_t* buffer = (uint8_t*)malloc(totalLen);
     if (!buffer) return false;
     buffer[0] = success ? 1 : 0;
     memcpy(buffer + 1, resultText, textLen);
-    
-    char dstMac[18];
-    formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_CMD_RESP] Sending to %s cmdMsgId=%lu success=%d len=%u (chunked)",
-           dstMac, (unsigned long)cmdMsgId, success, totalLen);
-    
-    bool result = v4_send_chunked(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, 
+    DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_CMD_RESP] Sending PLAINTEXT (large; task #51 pending) to %s cmdMsgId=%lu len=%u",
+           dstMac, (unsigned long)cmdMsgId, totalLen);
+    bool result = v4_send_chunked(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
                                    cmdMsgId, buffer, totalLen, 1);
     free(buffer);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_CMD_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
-    return result;
-  } else {
-    // Single frame
-    uint8_t buffer[256];
-    buffer[0] = success ? 1 : 0;
-    memcpy(buffer + 1, resultText, textLen);
-    
-    char dstMac[18];
-    formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_CMD_RESP] Sending to %s cmdMsgId=%lu success=%d len=%u",
-           dstMac, (unsigned long)cmdMsgId, success, totalLen);
-    
-    bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, 
-                                cmdMsgId, buffer, totalLen, 1);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_CMD_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
     return result;
   }
+  // Single-frame: encrypted via SESSION_FRAME.
+  uint8_t buffer[ESPNOW_V4_MAX_PLAINTEXT];
+  buffer[0] = success ? 1 : 0;
+  memcpy(buffer + 1, resultText, textLen);
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_CMD_RESP] Sending (encrypted) to %s cmdMsgId=%lu len=%u",
+         dstMac, (unsigned long)cmdMsgId, totalLen);
+  bool result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                                            cmdMsgId, buffer, totalLen, 1, nullptr, 0);
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_CMD_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
+  return result;
 }
 
 static bool v4_send_file_response(const uint8_t* dst, uint32_t reqMsgId, bool success, const char* message) {
@@ -3421,6 +3481,54 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   if (h->meshFingerprint != 0 && meshByFingerprint(h->meshFingerprint) == nullptr) {
     // Silent drop. Frame is for a mesh we're not a member of.
     return true;
+  }
+
+  // === Phase 3.5 task #32 — BROADCAST_AUTH HMAC verification ===
+  // If the BROADCAST_AUTH flag is set, the last 32 bytes of the payload are
+  // an HMAC-SHA256 tag keyed by the mesh group key. Verify before any
+  // dispatch — forged broadcasts drop silently here. After verification we
+  // strip the tag so downstream handlers see only the core payload.
+  if (h->flags & ESPNOW_V4_FLAG_BROADCAST_AUTH) {
+    if (h->fragCount > 1) {
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] BROADCAST_AUTH cannot be fragmented — dropping");
+      return true;
+    }
+    if (payloadLen < ESPNOW_V4_BROADCAST_AUTH_TAG_LEN) {
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] BROADCAST_AUTH payload too short for tag (%u) — dropping",
+             payloadLen);
+      return true;
+    }
+    if (h->meshFingerprint == 0) {
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] BROADCAST_AUTH requires mesh fingerprint — dropping");
+      return true;
+    }
+    const MeshDerivedKeys* mk = meshKeysFindByFingerprint(h->meshFingerprint);
+    if (!mk || !mk->valid) {
+      // Mesh known (passed fingerprint check above) but no key cached. Could
+      // happen during early-boot before passphrase stretch completes.
+      // Silent drop — sender will retry on next heartbeat tick.
+      return true;
+    }
+    uint16_t corePayloadLen = (uint16_t)(payloadLen - ESPNOW_V4_BROADCAST_AUTH_TAG_LEN);
+    const uint8_t* receivedTag = payload + corePayloadLen;
+    uint8_t expectedTag[32];
+    if (!espnowCryptoHmacSha256(expectedTag,
+                                 mk->groupKey, 32,
+                                 reinterpret_cast<const uint8_t*>(h), 30,
+                                 payload, corePayloadLen,
+                                 nullptr, 0)) {
+      ERROR_ESPNOWF("[V4_RX] BROADCAST_AUTH HMAC compute failed (sessionId=N/A, broadcast)");
+      return true;
+    }
+    if (sodium_memcmp(expectedTag, receivedTag, 32) != 0) {
+      WARN_ESPNOWF("[V4_RX] BROADCAST_AUTH HMAC mismatch from %02X:%02X:%02X:%02X:%02X:%02X — "
+                   "forged or wrong group key, dropping",
+                   recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
+                   recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
+      return true;
+    }
+    // Tag verified — strip it so downstream handlers see only the real payload.
+    payloadLen = corePayloadLen;
   }
 
   // === V4 FRAGMENTATION REASSEMBLY ===
@@ -4978,9 +5086,12 @@ void requestMetadata(const uint8_t* peerMac, bool force) {
   sLastMetadataRequestMs = now;
   
   uint32_t msgId = generateMessageId();
-  DEBUG_ESPNOW_METADATAF("[METADATA] Sending REQ to %s msgId=%lu force=%d",
+  DEBUG_ESPNOW_METADATAF("[METADATA] Sending REQ (encrypted-or-queue) to %s msgId=%lu force=%d",
     MAC_STR(peerMac), (unsigned long)msgId, (int)force);
-  bool sent = v4_send_frame(peerMac, ESPNOW_V4_TYPE_METADATA_REQ, 0, msgId, nullptr, 0, 1);
+  // Phase 3.5 task #6 — flip METADATA_REQ to encrypted send. Returns false
+  // if peer has no long-term identity yet; we just don't request from those.
+  bool sent = v4_send_encrypted_or_queue(peerMac, ESPNOW_V4_TYPE_METADATA_REQ, 0, msgId,
+                                          nullptr, 0, 1, nullptr, 0);
   
   if (sent) {
     DEBUG_ESPNOW_METADATAF("[METADATA] REQ sent OK to %s msgId=%lu",
@@ -5146,22 +5257,27 @@ static void broadcastMetadataToMesh() {
   // Iterate through all peers
   for (int i = 0; i < peerNum.total_num; i++) {
     if (esp_now_fetch_peer(true, &peer) == ESP_OK) {
-      // Security: Only send to encrypted peers (verified mesh members)
-      if (peer.encrypt) {
+      // Phase 3.5 task #6 — was: gated on peer.encrypt (LMK flag). With LMK
+      // removed in task #47, peer.encrypt is always false. New gate: have we
+      // got a long-term identity for this peer? v4_send_encrypted_or_queue
+      // returns false if not, which is the right behaviour (silently skip
+      // metadata push to unknown peers — they'll surface later via KEY_EX).
+      {
         // Send our metadata
         uint32_t msgId = generateMessageId();
-        if (v4_send_frame(peer.peer_addr, ESPNOW_V4_TYPE_METADATA_PUSH, 0, msgId, 
-                         (const uint8_t*)&myMetadata, sizeof(myMetadata), 1)) {
+        if (v4_send_encrypted_or_queue(peer.peer_addr, ESPNOW_V4_TYPE_METADATA_PUSH, 0, msgId,
+                                        (const uint8_t*)&myMetadata, sizeof(myMetadata), 1,
+                                        nullptr, 0)) {
           sentCount++;
           delay(5);  // Small delay between sends to avoid congestion
         }
-        
+
         // Also forward stored metadata from other workers (master push)
         for (int j = 0; j < gMeshPeerSlots; j++) {
-          if (gMeshPeerMeta && gMeshPeerMeta[j].isActive && gMeshPeerMeta[j].lastMetaUpdate > 0 && 
+          if (gMeshPeerMeta && gMeshPeerMeta[j].isActive && gMeshPeerMeta[j].lastMetaUpdate > 0 &&
               !macEqual6(gMeshPeerMeta[j].mac, peer.peer_addr) &&  // Don't echo back
               !macEqual6(gMeshPeerMeta[j].mac, myMac)) {  // Don't forward our own
-            
+
             // Build metadata payload from stored data
             V4PayloadMetadata fwdMetadata;
             memset(&fwdMetadata, 0, sizeof(fwdMetadata));
@@ -5171,10 +5287,11 @@ static void broadcastMetadataToMesh() {
             strncpy(fwdMetadata.zone, gMeshPeerMeta[j].zone, sizeof(fwdMetadata.zone) - 1);
             strncpy(fwdMetadata.tags, gMeshPeerMeta[j].tags, sizeof(fwdMetadata.tags) - 1);
             fwdMetadata.stationary = gMeshPeerMeta[j].stationary ? 1 : 0;
-            
+
             uint32_t fwdMsgId = generateMessageId();
-            v4_send_frame(peer.peer_addr, ESPNOW_V4_TYPE_METADATA_PUSH, 0, fwdMsgId,
-                         (const uint8_t*)&fwdMetadata, sizeof(fwdMetadata), 1);
+            v4_send_encrypted_or_queue(peer.peer_addr, ESPNOW_V4_TYPE_METADATA_PUSH, 0, fwdMsgId,
+                                        (const uint8_t*)&fwdMetadata, sizeof(fwdMetadata), 1,
+                                        nullptr, 0);
             delay(5);
           }
         }
@@ -8369,10 +8486,15 @@ const char* cmd_espnow_roomcmd(const String& argsInput) {
     // Send remote command directly — no String concat, no re-parse
     char macStrBuf[18];
     formatMacAddressBuf(gMeshPeerMeta[i].mac, macStrBuf, sizeof(macStrBuf));
-    char roomCmdPayload[ESPNOW_V4_MAX_PAYLOAD];
+    char roomCmdPayload[ESPNOW_V4_MAX_PLAINTEXT];
     snprintf(roomCmdPayload, sizeof(roomCmdPayload), "%s:%s:%s", user.c_str(), pass.c_str(), command.c_str());
-    v4_send_frame(gMeshPeerMeta[i].mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
-                  (const uint8_t*)roomCmdPayload, (uint16_t)strlen(roomCmdPayload), 1);
+    // Phase 3.5 task #6 — encrypted-or-queue. Payload carries credentials;
+    // peers without KEY_EX-derived identity get silently skipped (return false)
+    // rather than leaking the password over plaintext.
+    v4_send_encrypted_or_queue(gMeshPeerMeta[i].mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ,
+                                generateMessageId(),
+                                (const uint8_t*)roomCmdPayload, (uint16_t)strlen(roomCmdPayload), 1,
+                                nullptr, 0);
     sent++;
 
     const char* displayName = gMeshPeerMeta[i].friendlyName[0]
@@ -8427,10 +8549,13 @@ const char* cmd_espnow_tagcmd(const String& argsInput) {
     // Send remote command directly — no String concat, no re-parse
     char tagMacStrBuf[18];
     formatMacAddressBuf(gMeshPeerMeta[i].mac, tagMacStrBuf, sizeof(tagMacStrBuf));
-    char tagCmdPayload[ESPNOW_V4_MAX_PAYLOAD];
+    char tagCmdPayload[ESPNOW_V4_MAX_PLAINTEXT];
     snprintf(tagCmdPayload, sizeof(tagCmdPayload), "%s:%s:%s", user.c_str(), pass.c_str(), command.c_str());
-    v4_send_frame(gMeshPeerMeta[i].mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
-                  (const uint8_t*)tagCmdPayload, (uint16_t)strlen(tagCmdPayload), 1);
+    // Phase 3.5 task #6 — encrypted-or-queue (credentials protection).
+    v4_send_encrypted_or_queue(gMeshPeerMeta[i].mac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ,
+                                generateMessageId(),
+                                (const uint8_t*)tagCmdPayload, (uint16_t)strlen(tagCmdPayload), 1,
+                                nullptr, 0);
     sent++;
 
     const char* displayName = gMeshPeerMeta[i].friendlyName[0]
@@ -10246,9 +10371,11 @@ const char* cmd_espnow_browse(const String& argsInput) {
 
   // Send via V3 CMD (receiver parses user:pass:cmd format)
   uint32_t msgId = generateMessageId();
-  bool sent = v4_send_frame(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                            (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1);
-  
+  // Phase 3.5 task #6 — encrypted-or-queue (credentials protection).
+  bool sent = v4_send_encrypted_or_queue(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
+                                          (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1,
+                                          nullptr, 0);
+
   EXT_RAM_BSS_ATTR static char browseBuffer[256];
   if (!sent) {
     snprintf(browseBuffer, sizeof(browseBuffer), "Failed to send V3 browse request");
@@ -10308,11 +10435,12 @@ const char* cmd_espnow_fetch(const String& argsInput) {
     }
   }
 
-  // Send via V3 CMD (receiver parses user:pass:cmd format)
+  // Phase 3.5 task #6 — encrypted-or-queue (credentials protection).
   uint32_t msgId = generateMessageId();
-  bool sent = v4_send_frame(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                            (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1);
-  
+  bool sent = v4_send_encrypted_or_queue(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
+                                          (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1,
+                                          nullptr, 0);
+
   EXT_RAM_BSS_ATTR static char fetchBuffer[256];
   if (!sent) {
     snprintf(fetchBuffer, sizeof(fetchBuffer), "Failed to send V3 fetch request");
@@ -10372,14 +10500,16 @@ const char* cmd_espnow_remote(const String& argsInput) {
   if (payloadLen >= (int)sizeof(cmdPayload)) payloadLen = sizeof(cmdPayload) - 1;
 
   uint32_t msgId = generateMessageId();
-  
+
+  // Phase 3.5 task #6 — encrypted-or-queue (credentials protection).
   bool success = false;
   for (int attempt = 0; attempt < 2; attempt++) {
-    success = v4_send_frame(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                            (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1);
+    success = v4_send_encrypted_or_queue(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
+                                          (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1,
+                                          nullptr, 0);
     if (success) break;
   }
-  
+
   EXT_RAM_BSS_ATTR static char remoteBuffer[256];
   if (!success) {
     snprintf(remoteBuffer, sizeof(remoteBuffer), "Failed to send remote command");

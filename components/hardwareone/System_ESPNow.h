@@ -1113,8 +1113,11 @@ inline bool isBondModeOnline() { return false; }
 inline bool isBondSynced() { return false; }
 #endif // ENABLE_BONDED_MODE
 
-// V3 frame sending (for remote command execution from System_Utils)
-bool v4_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msgId,
+// V3 frame sending (for remote command execution from System_Utils).
+// Phase 3.5 task #32: flags widened uint8_t -> uint16_t so high-byte flag
+// bits (BROADCAST_AUTH/SESSION_FRAME/HANDSHAKE) survive instead of being
+// silently truncated.
+bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 
 // =============================================================================

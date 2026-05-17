@@ -44,7 +44,9 @@ struct V4RxCtx {
 };
 
 // v4_send_frame is a non-static, file-scope function in System_ESPNow.cpp.
-extern bool v4_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags,
+// Phase 3.5 task #32: flags widened uint8_t -> uint16_t to carry the
+// high-byte flag bits (BROADCAST_AUTH/SESSION_FRAME/HANDSHAKE).
+extern bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags,
                           uint32_t msgId, const uint8_t* payload,
                           uint16_t payloadLen, uint8_t ttl);
 extern uint32_t generateMessageId();
