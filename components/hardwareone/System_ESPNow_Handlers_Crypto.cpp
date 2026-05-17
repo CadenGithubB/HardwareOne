@@ -663,6 +663,10 @@ void runDeferredSessionConfirm(void* arg) {
                msg->responderMac[0], msg->responderMac[1], msg->responderMac[2],
                msg->responderMac[3], msg->responderMac[4], msg->responderMac[5],
                (unsigned)msg->sessionId, s->myDirection == 0 ? 'A' : 'B');
+  // Phase 3.5 step 3 — drain any frames the app queued while we were handshaking.
+  // Runs on cmd_exec_task (same task that handled the heavy crypto above), so
+  // the drain's session-wrap + esp_now_send fits in this task's stack.
+  pendingFrameDrainForPeer(msg->responderMac);
   free(w);
 }
 

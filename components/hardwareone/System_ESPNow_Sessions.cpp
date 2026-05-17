@@ -299,4 +299,148 @@ bool sessionUnwrapFrame(SessionState* s,
   return true;
 }
 
+// ============================================================================
+// Phase 3.5 step 3 — pending-frame queue
+// ============================================================================
+
+// Forward decl into System_ESPNow.cpp. We call this to wrap+send a drained
+// frame; it does the session lookup, AEAD seal, and esp_now_send for us.
+extern bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type,
+                                    uint16_t baseFlags, uint32_t msgId,
+                                    const uint8_t* plaintext, uint16_t plaintextLen,
+                                    uint8_t ttl, char* errOut, size_t errOutLen);
+
+namespace {
+
+constexpr uint8_t kPendingFrameSlots = 4;
+
+struct PendingFrame {
+  bool     inUse;
+  uint8_t  peerMac[6];
+  uint8_t  type;
+  uint16_t flags;
+  uint32_t msgId;
+  uint8_t  ttl;
+  uint16_t plaintextLen;
+  uint32_t queuedAtMs;
+  uint8_t  plaintext[kPendingFramePlaintextMax];
+};
+
+PendingFrame* gPending = nullptr;
+
+bool ensurePendingAllocated() {
+  if (gPending) return true;
+  gPending = (PendingFrame*)ps_alloc(sizeof(PendingFrame) * kPendingFrameSlots,
+                                     AllocPref::PreferPSRAM, "espnow.pendframes");
+  if (!gPending) {
+    ERROR_ESPNOWF("pending: failed to allocate %u-slot table", (unsigned)kPendingFrameSlots);
+    return false;
+  }
+  memset(gPending, 0, sizeof(PendingFrame) * kPendingFrameSlots);
+  return true;
+}
+
+}  // namespace
+
+bool pendingFrameQueue(const uint8_t peerMac[6], uint8_t type, uint16_t flags,
+                       uint32_t msgId, uint8_t ttl,
+                       const uint8_t* plaintext, uint16_t plaintextLen) {
+  if (!peerMac || (plaintextLen > 0 && !plaintext)) return false;
+  if (plaintextLen > kPendingFramePlaintextMax) {
+    ERROR_ESPNOWF("pending: plaintext %u > max %u",
+                  (unsigned)plaintextLen, (unsigned)kPendingFramePlaintextMax);
+    return false;
+  }
+  if (!ensurePendingAllocated()) return false;
+
+  // Eviction policy: if a slot already holds a pending frame for this peer,
+  // overwrite it (newest wins) — typical case is the app re-sending while the
+  // previous one is still mid-handshake. Otherwise grab any free slot.
+  PendingFrame* slot = nullptr;
+  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
+    PendingFrame& p = gPending[i];
+    if (p.inUse && memcmp(p.peerMac, peerMac, 6) == 0) {
+      WARN_ESPNOWF("pending: evicting older pending frame for %02X:%02X:%02X:%02X:%02X:%02X "
+                   "(msgId=%lu→%lu)",
+                   peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
+                   (unsigned long)p.msgId, (unsigned long)msgId);
+      slot = &p;
+      break;
+    }
+  }
+  if (!slot) {
+    for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
+      if (!gPending[i].inUse) { slot = &gPending[i]; break; }
+    }
+  }
+  if (!slot) {
+    ERROR_ESPNOWF("pending: queue full (%u slots), dropping msgId=%lu",
+                  (unsigned)kPendingFrameSlots, (unsigned long)msgId);
+    return false;
+  }
+  slot->inUse        = true;
+  memcpy(slot->peerMac, peerMac, 6);
+  slot->type         = type;
+  slot->flags        = flags;
+  slot->msgId        = msgId;
+  slot->ttl          = ttl;
+  slot->plaintextLen = plaintextLen;
+  slot->queuedAtMs   = (uint32_t)millis();
+  if (plaintextLen) memcpy(slot->plaintext, plaintext, plaintextLen);
+  return true;
+}
+
+void pendingFrameDrainForPeer(const uint8_t peerMac[6]) {
+  if (!gPending || !peerMac) return;
+  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
+    PendingFrame& p = gPending[i];
+    if (!p.inUse || memcmp(p.peerMac, peerMac, 6) != 0) continue;
+    char err[96] = {0};
+    bool ok = v4_send_session_wrapped(p.peerMac, p.type, p.flags, p.msgId,
+                                      p.plaintext, p.plaintextLen, p.ttl,
+                                      err, sizeof(err));
+    if (ok) {
+      INFO_ESPNOWF("pending: drained msgId=%lu to %02X:%02X:%02X:%02X:%02X:%02X",
+                   (unsigned long)p.msgId,
+                   p.peerMac[0], p.peerMac[1], p.peerMac[2], p.peerMac[3], p.peerMac[4], p.peerMac[5]);
+    } else {
+      ERROR_ESPNOWF("pending: drain failed for msgId=%lu to %02X:%02X:%02X:%02X:%02X:%02X — %s",
+                    (unsigned long)p.msgId,
+                    p.peerMac[0], p.peerMac[1], p.peerMac[2], p.peerMac[3], p.peerMac[4], p.peerMac[5],
+                    err[0] ? err : "(no detail)");
+    }
+    // Wipe the slot regardless — we don't auto-retry.
+    sodium_memzero(p.plaintext, p.plaintextLen);
+    memset(&p, 0, sizeof(p));
+  }
+}
+
+uint8_t pendingFrameTimeoutSweep(uint32_t nowMs) {
+  if (!gPending) return 0;
+  uint8_t expired = 0;
+  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
+    PendingFrame& p = gPending[i];
+    if (!p.inUse) continue;
+    if ((nowMs - p.queuedAtMs) < kPendingFrameTimeoutMs) continue;
+    WARN_ESPNOWF("pending: timeout msgId=%lu to %02X:%02X:%02X:%02X:%02X:%02X "
+                 "(no SESSION_CONFIRM in %ums) — dropping",
+                 (unsigned long)p.msgId,
+                 p.peerMac[0], p.peerMac[1], p.peerMac[2], p.peerMac[3], p.peerMac[4], p.peerMac[5],
+                 (unsigned)kPendingFrameTimeoutMs);
+    sodium_memzero(p.plaintext, p.plaintextLen);
+    memset(&p, 0, sizeof(p));
+    expired++;
+  }
+  return expired;
+}
+
+uint8_t pendingFrameCount() {
+  if (!gPending) return 0;
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
+    if (gPending[i].inUse) n++;
+  }
+  return n;
+}
+
 #endif  // ENABLE_ESPNOW

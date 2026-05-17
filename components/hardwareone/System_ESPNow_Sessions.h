@@ -130,6 +130,41 @@ bool sessionUnwrapFrame(SessionState* s,
                         const uint8_t* cipherWithTag, uint16_t payloadLen,
                         uint8_t* outPlain, uint16_t* outPlainLen);
 
+// ---- Phase 3.5 step 3 — pending-frame queue ---------------------------------
+//
+// When the application sends to a peer that has no ACTIVE session, the send
+// path kicks a SESSION_OPEN and parks the frame here. On the SESSION_CONFIRM
+// initiator-side "established" event the queue is drained for that peer.
+// Slots cap is small (kPendingFrameSlots) — one slot per peer is the typical
+// usage; a second queued frame for the same peer evicts the older one with a
+// WARN log. Frames sit at most kPendingFrameTimeoutMs before being expired by
+// the periodic sweep.
+
+constexpr uint16_t kPendingFramePlaintextMax = 202;   // ESPNOW_V4_MAX_PAYLOAD - 16
+constexpr uint32_t kPendingFrameTimeoutMs    = 5000;  // SESSION_OPEN budget
+
+// Queue a frame for later send. Returns true on enqueue success, false if the
+// queue is full and the eviction policy could not free a slot.
+// `flags` should be the application's base flags WITHOUT SESSION_FRAME — the
+// drain path runs the frame through sessionWrapFrame which sets it.
+bool pendingFrameQueue(const uint8_t peerMac[6], uint8_t type, uint16_t flags,
+                       uint32_t msgId, uint8_t ttl,
+                       const uint8_t* plaintext, uint16_t plaintextLen);
+
+// Drain all pending frames for a peer. Called from the SESSION_CONFIRM
+// initiator-side "established" path. Each drained frame is wrap-and-sent via
+// the v4_send_session_wrapped path; on success the slot is freed. On failure
+// the slot is freed with an [ERROR] log (we don't re-queue — caller can retry
+// from the application layer).
+void pendingFrameDrainForPeer(const uint8_t peerMac[6]);
+
+// Expire slots older than kPendingFrameTimeoutMs. Called from the periodic
+// espnow heartbeat tick. Returns count expired (for diagnostics).
+uint8_t pendingFrameTimeoutSweep(uint32_t nowMs);
+
+// Inspector for the espnowsessions CLI / debugging.
+uint8_t pendingFrameCount();
+
 #endif  // ENABLE_ESPNOW
 
 #endif  // SYSTEM_ESPNOW_SESSIONS_H
