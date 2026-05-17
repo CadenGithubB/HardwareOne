@@ -3276,6 +3276,10 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // Ed25519 signature against stored long-term pubkey, no LMK dependency).
   { ESPNOW_V4_TYPE_SESSION_OPEN,     0,                                                    v4hSessionOpen        },
   { ESPNOW_V4_TYPE_SESSION_CONFIRM,  0,                                                    v4hSessionConfirm     },
+  // Phase 3.6: SESSION_REKEY refreshes AEAD keys for an active session. NOT
+  // REQ_PAIRED — handler verifies Ed25519 sig against the peer's stored
+  // long-term pubkey (same trust path as SESSION_OPEN/CONFIRM).
+  { ESPNOW_V4_TYPE_SESSION_REKEY,    0,                                                    v4hSessionRekey       },
   { ESPNOW_V4_TYPE_TIME_SYNC,        0,                                                    v4h_time_sync         },
   { ESPNOW_V4_TYPE_TEXT,             0,                                                    v4h_text              },
   { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED,                               v4h_cmd               },
@@ -6121,6 +6125,34 @@ void processMeshHeartbeats() {
   // after 10s; resolved entries cleared after 30s so the polling window has
   // time to surface them to the web UI).
   sendStatusSweep((uint32_t)millis());
+  // 1d. Phase 3.6 — zero expired prev-keys (held briefly after a REKEY so
+  // in-flight frames sent under the old keys still decrypt).
+  sessionRekeyPrevKeysSweep((uint32_t)millis());
+  // 1e. Phase 3.6 — auto-trigger REKEY on threshold (txSeq>=10k OR age>=1h).
+  // Walks the SessionState table; uses the kRekeyMinIntervalMs guard inside
+  // espnowRekeyInitiate to avoid re-firing while a rekey is in flight.
+  {
+    uint32_t nowMs2 = (uint32_t)millis();
+    uint8_t nSessions = sessionSlotCount();
+    for (uint8_t i = 0; i < nSessions; i++) {
+      const SessionState* sc = sessionAt(i);
+      if (!sc || sc->state != SESSION_ACTIVE) continue;
+      bool ageTrigger = (nowMs2 - sc->establishedAtMs) >= kRekeyAgeThresholdMs;
+      bool txTrigger  = sc->txSeqNext >= kRekeyTxFramesThreshold;
+      if (ageTrigger || txTrigger) {
+        // Log once per trigger (the initiate function's guard prevents spam).
+        INFO_ESPNOWF("REKEY auto-trigger for sessionId=%u peer=%02X:%02X:%02X:%02X:%02X:%02X "
+                     "(reason=%s txSeq=%lu ageMs=%lu)",
+                     (unsigned)sc->sessionId,
+                     sc->peerMac[0], sc->peerMac[1], sc->peerMac[2],
+                     sc->peerMac[3], sc->peerMac[4], sc->peerMac[5],
+                     txTrigger ? (ageTrigger ? "tx+age" : "tx") : "age",
+                     (unsigned long)sc->txSeqNext,
+                     (unsigned long)(nowMs2 - sc->establishedAtMs));
+        espnowRekeyInitiate(sc->peerMac);
+      }
+    }
+  }
 
   // 2. Send periodic V3 mesh heartbeat (if we have active peers OR paired devices)
   static const uint32_t HB_INTERVAL_MS = 5000;
@@ -7625,6 +7657,41 @@ const char* cmd_espnow_sessionopen(const String& argsInput) {
            "SESSION_OPEN sent to %02X:%02X:%02X:%02X:%02X:%02X. Handshake completes "
            "asynchronously — watch for 'SESSION established (initiator)' log line. "
            "Run 'espnowsessions' to inspect.",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return getDebugBuffer();
+}
+
+// Phase 3.6: force an immediate SESSION_REKEY for a peer. Useful for manual
+// testing without waiting for the periodic threshold trigger. Requires an
+// ACTIVE session.
+const char* cmd_espnow_rekey(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow || !gEspNow->initialized) {
+    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  }
+  CommandArgs a(argsInput);
+  if (a.count() < 1) {
+    return "Usage: espnowrekey <name_or_mac>\n"
+           "  Forces immediate SESSION_REKEY; requires ACTIVE session.";
+  }
+  uint8_t mac[6];
+  // Accept either a paired device name or a literal MAC, matching the
+  // convention used by espnowsend / espnowremote.
+  if (!resolveDeviceNameOrMac(a.arg(0), mac)) {
+    EXT_RAM_BSS_ATTR static char errBuf[160];
+    snprintf(errBuf, sizeof(errBuf),
+             "Device '%s' not found. Use a paired device name or AA:BB:CC:DD:EE:FF MAC.",
+             a.arg(0).c_str());
+    return errBuf;
+  }
+  bool ok = espnowRekeyInitiate(mac);
+  if (!ok) {
+    return "Error: REKEY initiate failed (no session, or just rekeyed recently — see log).";
+  }
+  if (!ensureDebugBuffer()) return "REKEY sent.";
+  snprintf(getDebugBuffer(), 1024,
+           "REKEY sent to %02X:%02X:%02X:%02X:%02X:%02X. Symmetric exchange completes "
+           "asynchronously — watch for 'SESSION rekeyed' log line.",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   return getDebugBuffer();
 }
@@ -11303,6 +11370,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsessionopen", "Initiate SESSION handshake (Phase 3.4 — requires prior espnowkeyex).", true, cmd_espnow_sessionopen, "Usage: espnowsessionopen <mac> [<mesh>]" },
   { "espnowsessions", "Show in-RAM session state (peer, sessionId, dir, age, counters).", false, cmd_espnow_sessions },
   { "espnowsessionsend", "Send AEAD-wrapped TEXT through active session (Phase 3.5a demo).", true, cmd_espnow_sessionsend, "Usage: espnowsessionsend <mac> <message>" },
+  { "espnowrekey", "Force immediate SESSION_REKEY for a peer (Phase 3.6 — manual trigger).", true, cmd_espnow_rekey, "Usage: espnowrekey <mac>" },
 
   // ---- ESP-NOW Initialization & Pairing ----
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },

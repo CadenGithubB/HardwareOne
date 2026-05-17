@@ -264,7 +264,7 @@ bool sessionUnwrapFrame(SessionState* s,
                         const struct EspNowV4Header* header,
                         const uint8_t* cipherWithTag, uint16_t payloadLen,
                         uint8_t* outPlain, uint16_t* outPlainLen) {
-  if (!s || s->state != SESSION_ACTIVE) return false;
+  if (!s || (s->state != SESSION_ACTIVE && s->state != SESSION_REKEYING)) return false;
   if (!header || !cipherWithTag || !outPlain || !outPlainLen) return false;
   if (payloadLen < kAeadTagBytes) return false;
   uint16_t cipherLen = (uint16_t)(payloadLen - kAeadTagBytes);
@@ -277,8 +277,23 @@ bool sessionUnwrapFrame(SessionState* s,
   buildNonce(nonce, s->sessionId, peerDir, header->frameSeq);
 
   const uint8_t* aad = reinterpret_cast<const uint8_t*>(header);
-  if (!espnowCryptoAeadOpen(outPlain, cipher, cipherLen, tag,
-                            aad, 30, nonce, s->aeadKeyRx)) {
+  bool openedWithCurrent = espnowCryptoAeadOpen(outPlain, cipher, cipherLen, tag,
+                                                aad, 30, nonce, s->aeadKeyRx);
+  // Phase 3.6 — if the current key fails AND we have a recent prev key in the
+  // retention window, try it. This catches frames sent by the peer under the
+  // old key before they processed our REKEY-driven key swap.
+  if (!openedWithCurrent && s->prevKeysValidUntilMs != 0 &&
+      (uint32_t)millis() <= s->prevKeysValidUntilMs) {
+    if (espnowCryptoAeadOpen(outPlain, cipher, cipherLen, tag,
+                             aad, 30, nonce, s->aeadKeyRxPrev)) {
+      INFO_ESPNOWF("session: decrypted under prev key (sessionId=%u seq=%lu) — "
+                   "peer hadn't applied REKEY yet",
+                   (unsigned)s->sessionId, (unsigned long)header->frameSeq);
+      // Treat as success — fall through to replay check.
+      openedWithCurrent = true;
+    }
+  }
+  if (!openedWithCurrent) {
     WARN_ESPNOWF("session: AEAD open failed (sessionId=%u seq=%lu) — "
                  "tampered, wrong key, or wrong direction",
                  (unsigned)s->sessionId, (unsigned long)header->frameSeq);
@@ -575,6 +590,59 @@ extern "C" uint8_t sendStatusSlotCount() { return kSendStatusSlots; }
 extern "C" const SendStatus* sendStatusAt(uint8_t i) {
   if (!gSendStatus || i >= kSendStatusSlots) return nullptr;
   return &gSendStatus[i];
+}
+
+// ============================================================================
+// Phase 3.6 — REKEY helpers
+// ============================================================================
+
+void sessionApplyRekeyedKeys(SessionState* s,
+                             const uint8_t newKeyTx[32],
+                             const uint8_t newKeyRx[32]) {
+  if (!s || !newKeyTx || !newKeyRx) return;
+  // Stash current RX key as the prev — gives in-flight frames from the peer
+  // (sent under the old key before they processed our REKEY) a window to
+  // decrypt. We don't keep old TX keys because we control when we switch.
+  memcpy(s->aeadKeyRxPrev, s->aeadKeyRx, 32);
+  s->prevKeysValidUntilMs = (uint32_t)millis() + kRekeyPrevKeysWindowMs;
+  // Install the new keys.
+  memcpy(s->aeadKeyTx, newKeyTx, 32);
+  memcpy(s->aeadKeyRx, newKeyRx, 32);
+  // New keys = new nonce namespace. Reset frame counters and replay window.
+  s->txSeqNext      = 0;
+  s->rxSeqHighWater = 0;
+  s->rxSeqBitmap    = 0;
+  // Done with the rekey transient state.
+  sodium_memzero(s->rekeyEphPrivKey, sizeof(s->rekeyEphPrivKey));
+  s->rekeyInitiatedAtMs = 0;
+  s->rekeyTxSeqAtInit   = 0;
+  s->state          = SESSION_ACTIVE;
+  s->establishedAtMs = (uint32_t)millis();  // age clock resets on rekey
+  s->lastUseMs       = s->establishedAtMs;
+}
+
+bool sessionMarkRekeyInitiated(SessionState* s,
+                               const uint8_t ephPrivKey[32],
+                               uint32_t txSeqAtSign) {
+  if (!s || !ephPrivKey) return false;
+  if (s->state != SESSION_ACTIVE) return false;
+  memcpy(s->rekeyEphPrivKey, ephPrivKey, 32);
+  s->rekeyInitiatedAtMs = (uint32_t)millis();
+  s->rekeyTxSeqAtInit   = txSeqAtSign;
+  s->state              = SESSION_REKEYING;
+  return true;
+}
+
+void sessionRekeyPrevKeysSweep(uint32_t nowMs) {
+  if (!gSessions) return;
+  for (uint8_t i = 0; i < kSessionSlots; i++) {
+    SessionState& s = gSessions[i];
+    if (s.state == SESSION_FREE) continue;
+    if (s.prevKeysValidUntilMs != 0 && nowMs > s.prevKeysValidUntilMs) {
+      sodium_memzero(s.aeadKeyRxPrev, sizeof(s.aeadKeyRxPrev));
+      s.prevKeysValidUntilMs = 0;
+    }
+  }
 }
 
 #endif  // ENABLE_ESPNOW

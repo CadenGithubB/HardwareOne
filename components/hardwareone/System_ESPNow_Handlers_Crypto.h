@@ -59,6 +59,32 @@ void v4hSessionConfirm(const V4RxCtx& ctx);
 // Ed25519 secret, and sends. The session goes to ACTIVE when CONFIRM lands.
 bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel);
 
+// ---- Phase 3.6 — SESSION_REKEY ---------------------------------------------
+//
+// Refreshes AEAD keys for an active session without a full re-handshake.
+// Single opcode, symmetric two-message exchange: each side sends one REKEY
+// containing its fresh ephemeral X25519 pub + Ed25519 signature. Either side
+// can initiate. Concurrent rekeys converge (both sides derive the same shared
+// from the same (ephA, ephB) pair).
+//
+// Handler runs on espnow_task: size-check + PSRAM copy + submitDeferredToCmdExec.
+// Heavy crypto (verify, ECDH, KDF, optional sign) runs on cmd_exec_task.
+
+void v4hSessionRekey(const V4RxCtx& ctx);
+
+// Initiator entrypoint. Generates fresh ephemeral X25519 keypair, parks the
+// priv key in SessionState.rekeyEphPrivKey for the eventual ECDH when the
+// peer's REKEY reply arrives, signs the REKEY transcript with our long-term
+// Ed25519 secret, sends. Caller is typically the periodic threshold check in
+// the heartbeat tick, or the `espnowrekey` CLI for manual testing.
+//
+// Returns true if the REKEY was sent. Returns false if no ACTIVE session
+// exists for the peer, the peer identity record is missing, or the eph
+// keypair / signature failed. The session goes to SESSION_REKEYING on success;
+// transitions back to SESSION_ACTIVE when the peer's REKEY arrives and the
+// new keys are derived.
+bool espnowRekeyInitiate(const uint8_t peerMac[6]);
+
 #endif  // ENABLE_ESPNOW
 
 #endif  // SYSTEM_ESPNOW_HANDLERS_CRYPTO_H

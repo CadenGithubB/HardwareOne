@@ -405,6 +405,7 @@ namespace {
 
 constexpr const char* kOpenLabel    = "v4-sopen:";   // 9 bytes including ':'
 constexpr const char* kConfirmLabel = "v4-sconf:";   // 9 bytes
+constexpr const char* kRekeyLabel   = "v4-rekey:";   // 9 bytes (Phase 3.6)
 constexpr size_t      kLabelLen     = 9;
 
 // Build the OPEN transcript for sign/verify:
@@ -444,6 +445,30 @@ void buildConfirmTranscript(uint8_t out[87],
   memcpy(out + 23, eph, 32);
   memcpy(out + 55, nonceA, 16);
   memcpy(out + 71, nonceB, 16);
+}
+
+// Build the REKEY transcript:
+//   "v4-rekey:" || sessionId(2 LE) || senderMac(6) || receiverMac(6) ||
+//   newEphX25519Pub(32) || nonceRekey(16) || prevTxSeqAtRekey(4 LE)
+// Total 9 + 2 + 6 + 6 + 32 + 16 + 4 = 75 bytes.
+void buildRekeyTranscript(uint8_t out[75],
+                          uint16_t sessionId,
+                          const uint8_t senderMac[6],
+                          const uint8_t receiverMac[6],
+                          const uint8_t newEph[32],
+                          const uint8_t nonceRekey[16],
+                          uint32_t prevTxSeqAtRekey) {
+  memcpy(out, kRekeyLabel, kLabelLen);
+  out[9]  = (uint8_t)(sessionId & 0xFF);
+  out[10] = (uint8_t)((sessionId >> 8) & 0xFF);
+  memcpy(out + 11, senderMac, 6);
+  memcpy(out + 17, receiverMac, 6);
+  memcpy(out + 23, newEph, 32);
+  memcpy(out + 55, nonceRekey, 16);
+  out[71] = (uint8_t)(prevTxSeqAtRekey & 0xFF);
+  out[72] = (uint8_t)((prevTxSeqAtRekey >> 8)  & 0xFF);
+  out[73] = (uint8_t)((prevTxSeqAtRekey >> 16) & 0xFF);
+  out[74] = (uint8_t)((prevTxSeqAtRekey >> 24) & 0xFF);
 }
 
 }  // namespace
@@ -794,6 +819,238 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel) 
     sessionClear(s);
   }
   return ok;
+}
+
+// ============================================================================
+// Phase 3.6 — SESSION_REKEY handler + initiator
+// ============================================================================
+
+namespace {
+
+struct DeferredRekeyWork {
+  V4PayloadSessionRekey msg;
+  uint8_t               srcMac[6];   // recv_info->src_addr
+};
+
+// Compute the new AEAD keys from a freshly-derived shared secret. Mirrors
+// sessionDeriveAeadKeys but writes into caller-provided buffers instead of
+// SessionState — we apply the swap atomically via sessionApplyRekeyedKeys.
+bool deriveRekeyedKeysFromShared(SessionState* s,
+                                 const uint8_t shared[32],
+                                 uint8_t outTx[32],
+                                 uint8_t outRx[32]) {
+  // Same KDF as initial session derivation: Blake2b with contexts
+  // "esp-AtoB" / "esp-BtoA" keyed off the X25519 shared. A-side TX = AtoB,
+  // B-side TX = BtoA (and vice versa for RX).
+  uint8_t kAtoB[32], kBtoA[32];
+  if (!espnowCryptoKdfSubkey(kAtoB, shared, 1, "esp-AtoB")) return false;
+  if (!espnowCryptoKdfSubkey(kBtoA, shared, 2, "esp-BtoA")) return false;
+  if (s->myDirection == 0) {
+    memcpy(outTx, kAtoB, 32);
+    memcpy(outRx, kBtoA, 32);
+  } else {
+    memcpy(outTx, kBtoA, 32);
+    memcpy(outRx, kAtoB, 32);
+  }
+  sodium_memzero(kAtoB, sizeof(kAtoB));
+  sodium_memzero(kBtoA, sizeof(kBtoA));
+  return true;
+}
+
+// Build + send a REKEY payload to peerMac. Generates a fresh ephemeral
+// X25519 keypair and parks the priv key in SessionState for the eventual
+// ECDH. Used both for initiator-side first REKEY and responder-side reply.
+// Returns true on send success.
+bool sendRekey(SessionState* s, const uint8_t peerMac[6]) {
+  if (!s) return false;
+  const auto& self = espnowIdentityGet();
+  if (!self.valid) return false;
+
+  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+
+  // Fresh ephemeral keypair.
+  uint8_t newEphPub[32], newEphSec[32];
+  if (!espnowCryptoX25519Keygen(newEphPub, newEphSec)) {
+    ERROR_ESPNOWF("REKEY: X25519 keygen failed");
+    return false;
+  }
+
+  uint8_t nonceRekey[16];
+  espnowCryptoRandomBytes(nonceRekey, sizeof(nonceRekey));
+
+  // Snapshot txSeq before we send (the REKEY itself bumps it via wrap, but
+  // the signature commits to the pre-send count for transcript uniqueness).
+  uint32_t txSeqAtSign = s->txSeqNext;
+
+  V4PayloadSessionRekey rk = {};
+  rk.sessionId = s->sessionId;
+  memcpy(rk.senderMac, selfMac, 6);
+  memcpy(rk.receiverMac, peerMac, 6);
+  memcpy(rk.newEphX25519Pub, newEphPub, 32);
+  memcpy(rk.nonceRekey, nonceRekey, 16);
+  rk.prevTxSeqAtRekey = txSeqAtSign;
+
+  uint8_t transcript[75];
+  buildRekeyTranscript(transcript, s->sessionId, selfMac, peerMac,
+                       newEphPub, nonceRekey, txSeqAtSign);
+  if (!espnowCryptoEd25519Sign(rk.signature, transcript, sizeof(transcript), self.sec)) {
+    ERROR_ESPNOWF("REKEY: signing failed");
+    sodium_memzero(newEphSec, sizeof(newEphSec));
+    return false;
+  }
+
+  // Park our eph priv in the session for the eventual ECDH on REKEY reply.
+  // Even if we're the *responder* here (we received a REKEY first), parking
+  // is still the right thing: the peer might have a stale view of us and
+  // initiate yet another REKEY before our reply arrives — having our priv
+  // already in the slot makes that benign.
+  if (!sessionMarkRekeyInitiated(s, newEphSec, txSeqAtSign)) {
+    // Already REKEYING — keep the previously-parked priv; just use the new
+    // outbound one for this round. Stash via direct memcpy.
+    memcpy(s->rekeyEphPrivKey, newEphSec, 32);
+    s->rekeyTxSeqAtInit = txSeqAtSign;
+  }
+  sodium_memzero(newEphSec, sizeof(newEphSec));
+
+  bool ok = v4_send_frame(peerMac, ESPNOW_V4_TYPE_SESSION_REKEY,
+                          ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                          generateMessageId(),
+                          reinterpret_cast<const uint8_t*>(&rk), sizeof(rk), 1);
+  if (ok) {
+    INFO_ESPNOWF("REKEY sent to %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u "
+                 "(txSeqAtSign=%lu)",
+                 peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
+                 (unsigned)s->sessionId, (unsigned long)txSeqAtSign);
+  } else {
+    ERROR_ESPNOWF("REKEY send failed");
+  }
+  return ok;
+}
+
+void runDeferredRekey(void* arg) {
+  auto* w = static_cast<DeferredRekeyWork*>(arg);
+  if (!w) return;
+  const V4PayloadSessionRekey* msg = &w->msg;
+
+  // Locate the session being rekeyed.
+  SessionState* s = sessionFindBySessionId(msg->sessionId, w->srcMac);
+  if (!s || (s->state != SESSION_ACTIVE && s->state != SESSION_REKEYING)) {
+    WARN_ESPNOWF("REKEY rx: no ACTIVE session for sessionId=%u from %02X:%02X:%02X:%02X:%02X:%02X — dropping",
+                 (unsigned)msg->sessionId,
+                 w->srcMac[0], w->srcMac[1], w->srcMac[2], w->srcMac[3], w->srcMac[4], w->srcMac[5]);
+    free(w);
+    return;
+  }
+
+  // Verify the peer's Ed25519 signature over the REKEY transcript.
+  const PeerIdentity* peer = peerIdentityFindByMac(w->srcMac);
+  if (!peer) {
+    WARN_ESPNOWF("REKEY rx: no peer identity for sender — dropping");
+    free(w);
+    return;
+  }
+  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  uint8_t transcript[75];
+  buildRekeyTranscript(transcript, msg->sessionId,
+                       msg->senderMac, msg->receiverMac,
+                       msg->newEphX25519Pub, msg->nonceRekey, msg->prevTxSeqAtRekey);
+  if (!espnowCryptoEd25519Verify(msg->signature, transcript, sizeof(transcript),
+                                 peer->longTermPub)) {
+    WARN_ESPNOWF("REKEY rx: signature verify FAILED for sessionId=%u — dropping",
+                 (unsigned)msg->sessionId);
+    free(w);
+    return;
+  }
+
+  // If we don't already have an outstanding REKEY of our own, generate one
+  // now and send it. This is the "responder" path. The sendRekey() call
+  // parks our fresh eph priv in s->rekeyEphPrivKey.
+  bool weHadOutstanding = (s->state == SESSION_REKEYING && s->rekeyInitiatedAtMs != 0);
+  if (!weHadOutstanding) {
+    if (!sendRekey(s, w->srcMac)) {
+      ERROR_ESPNOWF("REKEY rx: responder failed to send our REKEY reply");
+      free(w);
+      return;
+    }
+  }
+
+  // Now we have both ends' fresh eph pubkeys. Derive shared secret + new
+  // AEAD keys, swap atomically.
+  uint8_t shared[32];
+  if (!espnowCryptoX25519Shared(shared, s->rekeyEphPrivKey, msg->newEphX25519Pub)) {
+    ERROR_ESPNOWF("REKEY rx: X25519 shared computation failed");
+    free(w);
+    return;
+  }
+  uint8_t newKeyTx[32], newKeyRx[32];
+  bool kdfOk = deriveRekeyedKeysFromShared(s, shared, newKeyTx, newKeyRx);
+  sodium_memzero(shared, sizeof(shared));
+  if (!kdfOk) {
+    ERROR_ESPNOWF("REKEY rx: KDF failed");
+    free(w);
+    return;
+  }
+
+  sessionApplyRekeyedKeys(s, newKeyTx, newKeyRx);
+  sodium_memzero(newKeyTx, sizeof(newKeyTx));
+  sodium_memzero(newKeyRx, sizeof(newKeyRx));
+
+  INFO_ESPNOWF("SESSION rekeyed with %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u "
+               "(role=%s) — new keys active, prev keys valid %ums",
+               w->srcMac[0], w->srcMac[1], w->srcMac[2], w->srcMac[3], w->srcMac[4], w->srcMac[5],
+               (unsigned)s->sessionId,
+               weHadOutstanding ? "initiator" : "responder",
+               (unsigned)kRekeyPrevKeysWindowMs);
+  free(w);
+}
+
+}  // namespace
+
+void v4hSessionRekey(const V4RxCtx& ctx) {
+  if (ctx.payloadLen != sizeof(V4PayloadSessionRekey)) {
+    WARN_ESPNOWF("REKEY: bad payload size %u (expected %u)",
+                 (unsigned)ctx.payloadLen, (unsigned)sizeof(V4PayloadSessionRekey));
+    return;
+  }
+  // PSRAM-copy + defer to cmd_exec_task (verify+ECDH+KDF+optional sign+send
+  // is the same crypto profile as SESSION_OPEN/CONFIRM, so the same defer
+  // architecture applies — keeps espnow_task's stack at 22 KB).
+  auto* w = (DeferredRekeyWork*)ps_alloc(sizeof(DeferredRekeyWork),
+                                         AllocPref::PreferPSRAM, "espnow.rekey.defer");
+  if (!w) {
+    ERROR_ESPNOWF("REKEY: PSRAM alloc failed");
+    return;
+  }
+  memcpy(&w->msg, ctx.payload, sizeof(V4PayloadSessionRekey));
+  memcpy(w->srcMac, ctx.recv_info->src_addr, 6);
+  if (!submitDeferredToCmdExec(runDeferredRekey, w)) {
+    ERROR_ESPNOWF("REKEY: cmd_exec queue full — dropping");
+    free(w);
+  }
+}
+
+bool espnowRekeyInitiate(const uint8_t peerMac[6]) {
+  if (!gEspNow || !gEspNow->initialized) return false;
+  const PeerIdentity* peer = peerIdentityFindByMac(peerMac);
+  if (!peer) {
+    ERROR_ESPNOWF("REKEY initiate: no peer identity");
+    return false;
+  }
+  SessionState* s = sessionFindByPeer(peerMac, peer->meshId);
+  if (!s || s->state != SESSION_ACTIVE) {
+    ERROR_ESPNOWF("REKEY initiate: no ACTIVE session");
+    return false;
+  }
+  // Re-init guard: if we recently initiated, skip to let the in-flight one
+  // converge before re-firing on the same trigger.
+  uint32_t nowMs = (uint32_t)millis();
+  if (s->rekeyInitiatedAtMs != 0 &&
+      (nowMs - s->rekeyInitiatedAtMs) < kRekeyMinIntervalMs) {
+    DEBUGF(DEBUG_ESPNOW_CORE, "REKEY initiate: skipping — last attempt was %ums ago",
+           (unsigned)(nowMs - s->rekeyInitiatedAtMs));
+    return false;
+  }
+  return sendRekey(s, peerMac);
 }
 
 #endif  // ENABLE_ESPNOW

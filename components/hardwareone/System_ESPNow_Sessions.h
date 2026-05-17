@@ -35,6 +35,18 @@ enum SessionStateLifecycle : uint8_t {
   SESSION_CLOSED      = 4,  // explicit teardown; kept briefly to suppress late frames
 };
 
+// Phase 3.6 — prev-keys retention window after a successful REKEY. Frames sent
+// under the old keys before the peer learned about the rotation still decrypt
+// during this window. 5 s is generous given the ~10 ms typical ESP-NOW one-way
+// latency; longer windows reduce the security gain of forward secrecy.
+constexpr uint32_t kRekeyPrevKeysWindowMs = 5000;
+// Periodic-rekey thresholds. Either firing triggers a REKEY.
+constexpr uint32_t kRekeyTxFramesThreshold = 10000;     // frames sent
+constexpr uint32_t kRekeyAgeThresholdMs    = 3600000;   // 1 hour
+// Don't re-initiate a rekey if one was started recently — gives the
+// in-flight exchange time to complete before we re-fire on the same trigger.
+constexpr uint32_t kRekeyMinIntervalMs = 30000;
+
 struct SessionState {
   uint8_t  peerMac[6];
   uint8_t  meshId;
@@ -50,8 +62,20 @@ struct SessionState {
   uint32_t lastUseMs;          // millis() of last TX or RX through this session
   uint8_t  state;              // SessionStateLifecycle enum
   uint8_t  _pad2[3];
+
+  // ---- Phase 3.6 — REKEY state -----------------------------------------------
+  // Previous AEAD keys, kept valid briefly after a key swap so in-flight frames
+  // sent under the old keys still decrypt. Cleared after kRekeyPrevKeysWindowMs.
+  uint8_t  aeadKeyRxPrev[32];      // previous RX key
+  uint32_t prevKeysValidUntilMs;   // 0 = no prev keys; otherwise millis() deadline
+  // In-flight rekey state. When this side has SENT a REKEY but not yet received
+  // the peer's REKEY reply, the ephemeral private key is parked here so we can
+  // complete the ECDH when the reply arrives. Zeroed once REKEY completes.
+  uint8_t  rekeyEphPrivKey[32];    // X25519 priv key for our outstanding REKEY
+  uint32_t rekeyInitiatedAtMs;     // 0 = no rekey outstanding; otherwise start time
+  uint32_t rekeyTxSeqAtInit;       // txSeqNext snapshot at moment of REKEY signing
 };
-static_assert(sizeof(SessionState) <= 128, "keep session record small");
+static_assert(sizeof(SessionState) <= 192, "keep session record reasonably small");
 
 // One-time allocation of the gSessions table in PSRAM. Idempotent; safe to
 // call multiple times. Returns false only on alloc failure.
@@ -224,6 +248,29 @@ bool sendStatusGet(uint32_t msgId, SendStatus* out);
 // i = 0..sendStatusSlotCount()-1 and check returned slot's inUse flag.
 extern "C" uint8_t sendStatusSlotCount();
 extern "C" const SendStatus* sendStatusAt(uint8_t i);
+
+// ---- Phase 3.6 — REKEY helpers ---------------------------------------------
+
+// Apply a freshly-derived AEAD key pair to a session, stashing the existing
+// RX key into the prev slot with a kRekeyPrevKeysWindowMs validity window.
+// (TX key isn't kept — we control our own TX so old TX keys won't see use.)
+// Resets txSeqNext to 0 and clears the rx replay window — the new keys define
+// a fresh frame-seq namespace. State transitions to SESSION_ACTIVE.
+// rekeyEphPrivKey + rekeyInitiatedAtMs + rekeyTxSeqAtInit are all zeroed.
+void sessionApplyRekeyedKeys(SessionState* s,
+                             const uint8_t newKeyTx[32],
+                             const uint8_t newKeyRx[32]);
+
+// Mark a session as having a REKEY in flight. Parks our ephemeral X25519
+// priv key for the eventual ECDH when the peer's REKEY reply arrives.
+// Returns false if the session isn't ACTIVE (can't rekey from any other state).
+bool sessionMarkRekeyInitiated(SessionState* s,
+                               const uint8_t ephPrivKey[32],
+                               uint32_t txSeqAtSign);
+
+// Sweep prev-keys retention windows. Called from the espnow heartbeat tick.
+// Zeros expired aeadKeyRxPrev material.
+void sessionRekeyPrevKeysSweep(uint32_t nowMs);
 
 #endif  // ENABLE_ESPNOW
 
