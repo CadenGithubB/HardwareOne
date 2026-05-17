@@ -29,6 +29,15 @@
 #define ESPNOW_V4_HEADER_LEN   32            // Header size in bytes (was 24 in V3)
 #define ESPNOW_V4_MAX_PAYLOAD  (250 - 32)    // 218 bytes max payload (was 226 in V3)
 
+// Phase 3.5 — when a frame is wrapped in SESSION_FRAME, 16 of the 218 payload
+// bytes are consumed by the Poly1305 AEAD tag (cipher || tag layout on wire).
+// Structs that may be encrypted MUST fit in this lower bound, not the raw
+// MAX_PAYLOAD. static_asserts below enforce this for the encrypt-eligible
+// payload types; new structs in the 30–49 (app unicast) / 60–69 (files) /
+// 80–89 (sensors) ranges should pick this constant for their size cap.
+#define ESPNOW_V4_AEAD_TAG_LEN 16
+#define ESPNOW_V4_MAX_PLAINTEXT (ESPNOW_V4_MAX_PAYLOAD - ESPNOW_V4_AEAD_TAG_LEN)  // 202 bytes
+
 // ---- Opcode enum -----------------------------------------------------------
 // Category-based numbering with reserved slots for future phases.
 // Ranges:
@@ -255,28 +264,36 @@ struct __attribute__((packed)) V4PayloadSensorBroadcast {
 };
 
 // Metadata payload for metadata exchange (REQ/RESP/PUSH)
-// Total: 212 bytes (fits in 218 byte V4 payload limit with 6 byte headroom).
+// Phase 3.5: trimmed tags 64→54 so the struct fits ESPNOW_V4_MAX_PLAINTEXT
+// (202 B) for future SESSION_FRAME wrapping. Total now exactly 202.
 struct __attribute__((packed)) V4PayloadMetadata {
   char    deviceName[32];
   char    friendlyName[48];
   char    room[32];
   char    zone[32];
-  char    tags[64];
+  char    tags[54];       // was 64 — trimmed to fit encrypted-frame budget
   uint8_t stationary;
   uint8_t reserved[3];    // Padding for future fields
 };
-static_assert(sizeof(V4PayloadMetadata) <= ESPNOW_V4_MAX_PAYLOAD,
-              "V4PayloadMetadata must fit in single V4 frame; if this fails, "
-              "either trim a field or convert to fragmented send");
+static_assert(sizeof(V4PayloadMetadata) <= ESPNOW_V4_MAX_PLAINTEXT,
+              "V4PayloadMetadata must fit a SESSION_FRAME plaintext budget "
+              "(MAX_PAYLOAD - AEAD_TAG = 202 B). If you need more space, "
+              "either trim a field, fragment, or wait for encrypted "
+              "fragmentation (Phase 3.5 task #51).");
 
 // Command response payload — V4 keeps the V3 semantics for Phase 1
 // (single buffer, truncated). Phase 1.5 / Phase 2 may refactor to streaming
-// for unlimited output; for now, the cap is whatever ESPNOW_V4_MAX_PAYLOAD
-// allows minus the success byte.
+// for unlimited output; for now, the cap is whatever ESPNOW_V4_MAX_PLAINTEXT
+// allows minus the success byte (so the response fits even when wrapped in
+// SESSION_FRAME — single-frame encrypted CMD_RESP). Larger responses use the
+// fragmented path (v4_send_chunked); see Phase 3.5 task #51 for tag-aware
+// fragmentation that'll let encrypted fragmented CMD_RESP work.
 struct __attribute__((packed)) V4PayloadCmdResp {
-  uint8_t success;                          // 1=success, 0=failure
-  char    result[ESPNOW_V4_MAX_PAYLOAD - 1]; // Null-terminated result (truncated if needed)
+  uint8_t success;                            // 1=success, 0=failure
+  char    result[ESPNOW_V4_MAX_PLAINTEXT - 1]; // Null-terminated, 201 bytes — fits a SESSION_FRAME
 };
+static_assert(sizeof(V4PayloadCmdResp) <= ESPNOW_V4_MAX_PLAINTEXT,
+              "V4PayloadCmdResp must fit a SESSION_FRAME plaintext budget");
 
 // ---- Phase 3.3 — KEY_EX handshake payloads ---------------------------------
 //
@@ -381,10 +398,19 @@ struct __attribute__((packed)) V4PayloadFileStart {
   char     filename[64];  // Destination filename
 };
 
+// Phase 3.5: chunk data sized for ESPNOW_V4_MAX_PLAINTEXT so encrypted
+// file transfers (when task #6 flips FILE_DATA to encrypted) don't silently
+// truncate every chunk by 16 bytes. Per-chunk payload drops 216→200; total
+// file transfer takes ⌈N/200⌉ chunks instead of ⌈N/216⌉ — small bandwidth
+// hit. Plaintext file transfers also use the new smaller size for a single
+// code path; old firmware reading the V4PayloadFileStart.chunkSize field
+// adapts automatically.
 struct __attribute__((packed)) V4PayloadFileData {
   uint16_t chunkIndex;    // Chunk index (0-based)
-  uint8_t  data[ESPNOW_V4_MAX_PAYLOAD - 2];  // Chunk data (216 bytes max in V4)
+  uint8_t  data[ESPNOW_V4_MAX_PLAINTEXT - 2];  // 200 bytes — fits a SESSION_FRAME
 };
+static_assert(sizeof(V4PayloadFileData) <= ESPNOW_V4_MAX_PLAINTEXT,
+              "V4PayloadFileData must fit a SESSION_FRAME plaintext budget");
 
 struct __attribute__((packed)) V4PayloadFileEnd {
   uint32_t crc32;         // CRC32 of entire file

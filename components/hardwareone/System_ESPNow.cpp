@@ -94,7 +94,14 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* d
 // ============================================================================
 // V4 FRAGMENTATION CONSTANTS AND REASSEMBLY
 // ============================================================================
-#define V4_MAX_FRAGMENT_PAYLOAD 200   // Max payload bytes per fragment
+// TODO (Phase 3.5 task #51 — encrypted fragmentation): this constant is the
+// PLAINTEXT-only fragment size. When task #6 flips fragmented opcodes
+// (CMD_RESP > 201 B, FILE_DATA >= 200 B, large METADATA) to SESSION_FRAME,
+// each fragment will be its own AEAD-sealed frame, dropping plaintext-
+// per-fragment by 16 bytes (200 → 184). v4_send_chunked + reassembly path
+// will need a parallel encrypted version that wraps/unwraps per fragment.
+// Until then, all fragmented sends remain plaintext.
+#define V4_MAX_FRAGMENT_PAYLOAD 200   // Max payload bytes per fragment (plaintext)
 #define V4_FRAG_MAX             32    // Max fragments per message (max msg = 6400 bytes)
                                        // Cost: ~12.6 KB PSRAM (2 reassembly slots × 32 × 200 B + overhead).
                                        // DRAM impact: zero — gV4Reasm is ps_alloc'd.
@@ -9552,8 +9559,15 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   
   uint32_t fileSize = file.size();
   
-  // V3 chunk size is 224 bytes (ESPNOW_V4_MAX_PAYLOAD - 2 for chunkIndex)
-  const uint16_t v4ChunkSize = ESPNOW_V4_MAX_PAYLOAD - 2;
+  // Phase 3.5: chunk size aligned to ESPNOW_V4_MAX_PLAINTEXT so that the
+  // V4PayloadFileData.data[] declared size (200) matches what we put on the
+  // wire. Old code used MAX_PAYLOAD - 2 = 216, which only "worked" because
+  // the surrounding stack buffer was MAX_PAYLOAD-sized and we wrote past
+  // the struct's declared bounds (UB in C++). Smaller chunkSize also means
+  // FILE_DATA is ready to be flipped to SESSION_FRAME (task #6) — when that
+  // happens, each chunk's 200 plaintext + 16 tag = 216 still fits the
+  // 218-byte wire payload budget.
+  const uint16_t v4ChunkSize = ESPNOW_V4_MAX_PLAINTEXT - 2;  // 200 bytes
   uint32_t maxFileSize = 65535 * v4ChunkSize;  // 16-bit chunk count max
   if (fileSize > maxFileSize) {
     file.close();
