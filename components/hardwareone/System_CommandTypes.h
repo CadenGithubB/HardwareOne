@@ -71,6 +71,20 @@ struct ExecReq {
   // Async callback mode (alternative to semaphore)
   ExecAsyncCallback asyncCallback;  // If non-NULL, called instead of semaphore
   void* asyncUserData;              // Passed to callback
+
+  // Deferred-work mode — used by espnow_task to push heavy crypto onto
+  // cmd_exec_task's deeper stack. When deferredFn is set, commandExecTask
+  // bypasses the CLI executeCommand() path entirely and just invokes
+  // deferredFn(deferredArg). The deferred fn is responsible for freeing
+  // its own arg. line/ctx/out/done/asyncCallback are all ignored.
+  //
+  // Why this instead of a separate task: cmd_exec_task is single-threaded,
+  // so the new HWM is max(existing CLI peak, deferred crypto peak) — and
+  // crypto peak (~5 KB) is far below the existing CLI peak (~17 KB), so
+  // total stack budget stays unchanged. Adds zero new task overhead.
+  typedef void (*DeferredFn)(void* arg);
+  DeferredFn deferredFn;            // If non-NULL, called instead of executeCommand
+  void*      deferredArg;
 };
 
 #endif // SYSTEM_COMMANDTYPES_H

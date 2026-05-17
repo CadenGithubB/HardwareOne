@@ -199,7 +199,6 @@ struct Settings {
       espnowFriendlyName(""),
       espnowStationary(false),
       espnowFirstTimeSetup(false),
-      espnowPassphrase(""),
       meshRole(0),
       meshMasterMAC(""),
       meshBackupMAC(""),
@@ -626,7 +625,6 @@ struct Settings {
   String espnowFriendlyName;           // Longer display name: "Kitchen Thermal Cam"
   bool espnowStationary;               // true = mounted/fixed, false = mobile/wearable
   bool espnowFirstTimeSetup;           // True if ESP-NOW setup has been completed
-  String espnowPassphrase;             // Encryption passphrase for secure pairing (persisted)
   // Mesh role settings
   uint8_t meshRole;                    // 0=worker, 1=master, 2=backup_master
   String meshMasterMAC;                // MAC of current master (empty if this is master)
@@ -651,19 +649,25 @@ struct Settings {
   // the label) so receivers know which mesh a frame belongs to regardless
   // of local-index differences between devices.
   //
-  // Phase 2.1 (this commit): the data model exists alongside the legacy
-  // single-mesh fields below. meshes[0] is the "primary" mesh, mirrored
-  // from the legacy espnowPassphrase/bondPeerMac/etc. fields. Subsequent
-  // sub-commits migrate callsites to read from meshes[] directly.
+  // meshes[0] is the "primary" mesh. A device can participate in up to N_MESHES
+  // independent meshes simultaneously.
   static constexpr uint8_t N_MESHES = 4;
 
   struct MeshIdentity {
     String   label;                    // Human-readable name, e.g. "primary", "work"
-    String   passphrase;               // User-typed (Phase 3 will replace with PBKDF2-stretched hash)
+    String   passphrase;               // User-typed (raw). 3.6 will remove this from persistence — only ever
+                                       //   held in RAM long enough to (re)compute passphraseHashPbkdf2.
     uint16_t fingerprint;              // CRC16-CCITT of label — stamped in V4 header meshFingerprint
     bool     enabled;                  // Inactive meshes are skipped in heartbeat emission, RX validation
     bool     isDefault;                // The mesh new pairings join unless overridden
-    MeshIdentity() : label(""), passphrase(""), fingerprint(0), enabled(false), isDefault(false) {}
+    // Phase 3.1: PBKDF2-HMAC-SHA256(passphrase, salt=SHA256("espnow-v4-mesh-salt:"||label), 100k iters).
+    // 32 bytes. Persisted in plaintext (irreversible). Refreshed on passphrase change or label rename.
+    // Source of truth for downstream KDFs (bootstrap key, group key) from 3.1 onward.
+    uint8_t  passphraseHashPbkdf2[32];
+    bool     passphraseHashValid;      // false until first stretch completes (lazy boot-time fill)
+    MeshIdentity()
+      : label(""), passphrase(""), fingerprint(0), enabled(false), isDefault(false),
+        passphraseHashPbkdf2{0}, passphraseHashValid(false) {}
   };
   MeshIdentity meshes[N_MESHES];
 

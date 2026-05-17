@@ -1,0 +1,795 @@
+#include "System_BuildConfig.h"
+
+#if ENABLE_ESPNOW
+
+#include "System_ESPNow_Handlers_Crypto.h"
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <string.h>
+#include <time.h>
+
+#include <esp_now.h>
+#include <esp_wifi.h>
+
+#include "System_Debug.h"
+#include "System_ESPNow.h"          // EspNowState (gEspNow), V4RxCtx is in .cpp — see note
+#include "System_ESPNow_Crypto.h"
+#include "System_ESPNow_Identity.h"
+#include "System_ESPNow_MeshKeys.h"
+#include "System_ESPNow_Sessions.h"
+#include "System_ESPNow_Wire.h"
+#include "System_CommandTypes.h"   // ExecReq::DeferredFn
+#include "System_MemUtil.h"        // ps_alloc
+#include "System_Settings.h"
+
+#include <sodium.h>  // sodium_memzero
+
+// submitDeferredToCmdExec — implemented in System_Utils.cpp. Pushes a
+// callback onto cmd_exec_task's queue so heavy crypto runs there instead
+// of on espnow_task's tighter stack. Declared inline (no header) matching
+// the existing convention used by submitCommandAsync.
+extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
+
+// V4RxCtx is defined in System_ESPNow.cpp as a private struct. To keep handlers
+// in a separate translation unit, we duplicate its declaration here — must
+// stay byte-for-byte in sync with the original. If you change one, change both.
+struct V4RxCtx {
+  const esp_now_recv_info* recv_info;
+  const EspNowV4Header*    h;
+  const uint8_t*           payload;
+  uint16_t                 payloadLen;
+  bool                     isPaired;
+  const char*              deviceName;
+};
+
+// v4_send_frame is a non-static, file-scope function in System_ESPNow.cpp.
+extern bool v4_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags,
+                          uint32_t msgId, const uint8_t* payload,
+                          uint16_t payloadLen, uint8_t ttl);
+extern uint32_t generateMessageId();
+
+namespace {
+
+// Resolve mesh slot from a label, "" / nullptr → first enabled+default mesh,
+// else -1. Returns slot index in gSettings.meshes[].
+int resolveMeshSlot(const char* label) {
+  if (label && *label) {
+    for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+      if (gSettings.meshes[i].enabled && gSettings.meshes[i].label == label) {
+        return i;
+      }
+    }
+    return -1;
+  }
+  // Default lookup: first enabled+default, else first enabled.
+  int fallback = -1;
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (!gSettings.meshes[i].enabled) continue;
+    if (fallback < 0) fallback = i;
+    if (gSettings.meshes[i].isDefault) return i;
+  }
+  return fallback;
+}
+
+// Compute HMAC over (meshFingerprint LE || senderMac || senderPub) with the
+// mesh bootstrap key. 40 bytes input, 32 bytes output.
+bool computeKeyExHmac(uint16_t meshFingerprint,
+                      const uint8_t senderMac[6],
+                      const uint8_t senderPub[32],
+                      const uint8_t bootstrapKey[32],
+                      uint8_t outHmac[32]) {
+  uint8_t fpLE[2] = { (uint8_t)(meshFingerprint & 0xFF),
+                      (uint8_t)((meshFingerprint >> 8) & 0xFF) };
+  return espnowCryptoHmacSha256(outHmac,
+                                bootstrapKey, 32,
+                                fpLE, 2,
+                                senderMac, 6,
+                                senderPub, 32);
+}
+
+// Make sure the ESPNOW peer table knows about this MAC. We add as unencrypted
+// (LMK off) — KEY_EX frames travel as plaintext-but-authenticated. Idempotent;
+// reuses the existing slot if already present.
+bool ensureUnencryptedPeer(const uint8_t mac[6]) {
+  if (esp_now_is_peer_exist(mac)) return true;
+  esp_now_peer_info_t info = {};
+  memcpy(info.peer_addr, mac, 6);
+  info.channel = gEspNow ? gEspNow->channel : 0;
+  info.ifidx   = WIFI_IF_STA;
+  info.encrypt = false;
+  esp_err_t rc = esp_now_add_peer(&info);
+  if (rc != ESP_OK) {
+    WARN_ESPNOWF("KEY_EX: esp_now_add_peer failed for %02X:%02X:%02X:%02X:%02X:%02X (rc=%d)",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], (int)rc);
+    return false;
+  }
+  return true;
+}
+
+void logMac(const char* tag, const uint8_t mac[6]) {
+  INFO_ESPNOWF("%s %02X:%02X:%02X:%02X:%02X:%02X",
+               tag, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+// Constant-time 32-byte compare. Avoids leaking how many leading bytes matched
+// when an attacker sprays HMAC guesses. (libsodium provides sodium_memcmp
+// but we don't pull it in here; trivial constant-time loop.)
+bool ctMemcmp32(const uint8_t* a, const uint8_t* b) {
+  uint8_t diff = 0;
+  for (int i = 0; i < 32; i++) diff |= (uint8_t)(a[i] ^ b[i]);
+  return diff == 0;
+}
+
+// Common verification step for HELLO and REPLY: payload size, mesh lookup,
+// HMAC verify, sender MAC sanity check. On success, *outBootstrapKey is set
+// to point into the mesh derived-key cache.
+//
+// Returns:
+//   -1 = invalid payload (size mismatch)
+//   -2 = unknown mesh (fingerprint doesn't match any configured slot)
+//   -3 = HMAC verification failed
+//   -4 = sender MAC mismatch between header.origin and payload
+//   >=0 = OK, value is the mesh slot index
+int verifyKeyExPayload(const V4RxCtx& ctx, uint16_t expectedFp,
+                       const uint8_t senderMac[6],
+                       const uint8_t senderPub[32],
+                       const uint8_t hmac[32],
+                       const uint8_t** outBootstrapKey) {
+  // Header origin must match the sender MAC field inside the payload.
+  if (memcmp(ctx.h->origin, senderMac, 6) != 0) return -4;
+
+  // Look up mesh by fingerprint.
+  const MeshDerivedKeys* mk = meshKeysFindByFingerprint(expectedFp);
+  if (!mk) return -2;
+
+  // Recompute HMAC and constant-time compare.
+  uint8_t expected[32];
+  if (!computeKeyExHmac(expectedFp, senderMac, senderPub,
+                        mk->bootstrapKey, expected)) {
+    return -3;
+  }
+  if (!ctMemcmp32(expected, hmac)) return -3;
+
+  *outBootstrapKey = mk->bootstrapKey;
+  // Find the meshIdx (slot) that matches this fingerprint.
+  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].enabled && gSettings.meshes[i].fingerprint == expectedFp) {
+      return i;
+    }
+  }
+  return -2;
+}
+
+}  // namespace
+
+// ============================================================================
+// Receive handlers
+// ============================================================================
+
+void v4hKeyExHello(const V4RxCtx& ctx) {
+  if (ctx.payloadLen != sizeof(V4PayloadKeyExHello)) {
+    WARN_ESPNOWF("KEY_EX_HELLO: bad payload size %u (want %u)",
+                 (unsigned)ctx.payloadLen, (unsigned)sizeof(V4PayloadKeyExHello));
+    return;
+  }
+  const auto* msg = reinterpret_cast<const V4PayloadKeyExHello*>(ctx.payload);
+
+  const uint8_t* bootKey = nullptr;
+  int meshSlot = verifyKeyExPayload(ctx, msg->meshFingerprint,
+                                    msg->senderMac, msg->senderPubEd25519,
+                                    msg->hmac, &bootKey);
+  if (meshSlot < 0) {
+    WARN_ESPNOWF("KEY_EX_HELLO rejected (reason=%d) from %02X:%02X:%02X:%02X:%02X:%02X meshFp=0x%04X",
+                 meshSlot,
+                 msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
+                 msg->senderMac[3], msg->senderMac[4], msg->senderMac[5],
+                 (unsigned)msg->meshFingerprint);
+    return;
+  }
+
+  // Check for conflicting existing identity. If we already know a different
+  // pubkey for this MAC, refuse to overwrite — operator must espnowforget
+  // first. Without this, an attacker who learns the passphrase later can
+  // silently replace a paired peer's identity.
+  const PeerIdentity* existing = peerIdentityFindByMac(msg->senderMac);
+  uint8_t confirmStatus = 0;
+  if (existing && memcmp(existing->longTermPub, msg->senderPubEd25519, 32) != 0) {
+    WARN_ESPNOWF("KEY_EX_HELLO: peer %02X:%02X:%02X:%02X:%02X:%02X presented new pubkey, "
+                 "refusing overwrite — run 'espnowforget' first",
+                 msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
+                 msg->senderMac[3], msg->senderMac[4], msg->senderMac[5]);
+    confirmStatus = 2;
+  } else {
+    time_t now = time(nullptr);
+    uint32_t bondedAt = (uint32_t)((now > 0) ? now : 0);
+    if (!peerIdentityPersist(msg->senderMac, (uint8_t)meshSlot,
+                             msg->senderPubEd25519, bondedAt)) {
+      ERROR_ESPNOWF("KEY_EX_HELLO: identity persist failed; not replying");
+      return;
+    }
+    logMac("KEY_EX_HELLO accepted from", msg->senderMac);
+  }
+
+  // Add to ESPNOW peer table so we can send REPLY.
+  if (!ensureUnencryptedPeer(msg->senderMac)) return;
+
+  // If status != 0 (conflict), emit a CONFIRM with the status instead of REPLY.
+  if (confirmStatus != 0) {
+    V4PayloadKeyExConfirm conf = {};
+    conf.meshFingerprint = msg->meshFingerprint;
+    uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+    memcpy(conf.confirmerMac, selfMac, 6);
+    conf.status = confirmStatus;
+    const auto& self = espnowIdentityGet();
+    if (self.valid) memcpy(conf.pubFingerprint, self.pub, 8);
+    v4_send_frame(msg->senderMac, ESPNOW_V4_TYPE_KEY_EX_CONFIRM,
+                  ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                  generateMessageId(),
+                  reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
+    return;
+  }
+
+  // Build REPLY: our pubkey + HMAC over (fp || ourMac || ourPub).
+  const auto& self = espnowIdentityGet();
+  if (!self.valid) {
+    ERROR_ESPNOWF("KEY_EX_HELLO: own identity not loaded; cannot REPLY");
+    return;
+  }
+  V4PayloadKeyExReply reply = {};
+  reply.meshFingerprint = msg->meshFingerprint;
+  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  memcpy(reply.responderMac, selfMac, 6);
+  memcpy(reply.responderPubEd25519, self.pub, 32);
+  if (!computeKeyExHmac(msg->meshFingerprint, selfMac, self.pub, bootKey, reply.hmac)) {
+    ERROR_ESPNOWF("KEY_EX_HELLO: HMAC compute failed for REPLY");
+    return;
+  }
+
+  v4_send_frame(msg->senderMac, ESPNOW_V4_TYPE_KEY_EX_REPLY,
+                ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                generateMessageId(),
+                reinterpret_cast<const uint8_t*>(&reply), sizeof(reply), 1);
+}
+
+void v4hKeyExReply(const V4RxCtx& ctx) {
+  if (ctx.payloadLen != sizeof(V4PayloadKeyExReply)) {
+    WARN_ESPNOWF("KEY_EX_REPLY: bad payload size %u", (unsigned)ctx.payloadLen);
+    return;
+  }
+  const auto* msg = reinterpret_cast<const V4PayloadKeyExReply*>(ctx.payload);
+
+  const uint8_t* bootKey = nullptr;
+  int meshSlot = verifyKeyExPayload(ctx, msg->meshFingerprint,
+                                    msg->responderMac, msg->responderPubEd25519,
+                                    msg->hmac, &bootKey);
+  if (meshSlot < 0) {
+    WARN_ESPNOWF("KEY_EX_REPLY rejected (reason=%d) from %02X:%02X:%02X:%02X:%02X:%02X",
+                 meshSlot,
+                 msg->responderMac[0], msg->responderMac[1], msg->responderMac[2],
+                 msg->responderMac[3], msg->responderMac[4], msg->responderMac[5]);
+    return;
+  }
+
+  const PeerIdentity* existing = peerIdentityFindByMac(msg->responderMac);
+  if (existing && memcmp(existing->longTermPub, msg->responderPubEd25519, 32) != 0) {
+    WARN_ESPNOWF("KEY_EX_REPLY: peer presented new pubkey, refusing overwrite");
+    return;
+  }
+
+  time_t now = time(nullptr);
+  uint32_t bondedAt = (uint32_t)((now > 0) ? now : 0);
+  if (!peerIdentityPersist(msg->responderMac, (uint8_t)meshSlot,
+                           msg->responderPubEd25519, bondedAt)) {
+    ERROR_ESPNOWF("KEY_EX_REPLY: identity persist failed");
+    return;
+  }
+  logMac("KEY_EX_REPLY accepted from", msg->responderMac);
+
+  if (!ensureUnencryptedPeer(msg->responderMac)) return;
+
+  // Send CONFIRM (status=0) with our pubkey fingerprint for OOB display.
+  const auto& self = espnowIdentityGet();
+  V4PayloadKeyExConfirm conf = {};
+  conf.meshFingerprint = msg->meshFingerprint;
+  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  memcpy(conf.confirmerMac, selfMac, 6);
+  conf.status = 0;
+  if (self.valid) memcpy(conf.pubFingerprint, self.pub, 8);
+
+  v4_send_frame(msg->responderMac, ESPNOW_V4_TYPE_KEY_EX_CONFIRM,
+                ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                generateMessageId(),
+                reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
+}
+
+void v4hKeyExConfirm(const V4RxCtx& ctx) {
+  if (ctx.payloadLen != sizeof(V4PayloadKeyExConfirm)) {
+    WARN_ESPNOWF("KEY_EX_CONFIRM: bad payload size %u", (unsigned)ctx.payloadLen);
+    return;
+  }
+  const auto* msg = reinterpret_cast<const V4PayloadKeyExConfirm*>(ctx.payload);
+
+  // No HMAC on CONFIRM — it's just an acknowledgement, the prior REPLY's
+  // HMAC already authenticated this peer. We do sanity-check the mesh and
+  // the sender MAC is a known peer.
+  if (memcmp(ctx.h->origin, msg->confirmerMac, 6) != 0) {
+    WARN_ESPNOWF("KEY_EX_CONFIRM: header.origin / payload.confirmerMac mismatch");
+    return;
+  }
+  const PeerIdentity* p = peerIdentityFindByMac(msg->confirmerMac);
+  if (!p) {
+    WARN_ESPNOWF("KEY_EX_CONFIRM: from unknown peer; ignored");
+    return;
+  }
+
+  if (msg->status == 0) {
+    INFO_ESPNOWF("KEY_EX with %02X:%02X:%02X:%02X:%02X:%02X complete "
+                 "(remote pub fp: %02X%02X%02X%02X%02X%02X%02X%02X)",
+                 msg->confirmerMac[0], msg->confirmerMac[1], msg->confirmerMac[2],
+                 msg->confirmerMac[3], msg->confirmerMac[4], msg->confirmerMac[5],
+                 msg->pubFingerprint[0], msg->pubFingerprint[1], msg->pubFingerprint[2],
+                 msg->pubFingerprint[3], msg->pubFingerprint[4], msg->pubFingerprint[5],
+                 msg->pubFingerprint[6], msg->pubFingerprint[7]);
+  } else {
+    WARN_ESPNOWF("KEY_EX with %02X:%02X:%02X:%02X:%02X:%02X reported status=%u "
+                 "(0=ok, 1=hmac-fail, 2=pub-conflict)",
+                 msg->confirmerMac[0], msg->confirmerMac[1], msg->confirmerMac[2],
+                 msg->confirmerMac[3], msg->confirmerMac[4], msg->confirmerMac[5],
+                 (unsigned)msg->status);
+  }
+}
+
+// ============================================================================
+// Initiator
+// ============================================================================
+
+bool espnowKeyExInitiate(const uint8_t peerMac[6], const char* meshLabel) {
+  if (!gEspNow || !gEspNow->initialized) {
+    ERROR_ESPNOWF("KEY_EX initiate: ESPNOW not initialized");
+    return false;
+  }
+  int slot = resolveMeshSlot(meshLabel);
+  if (slot < 0) {
+    ERROR_ESPNOWF("KEY_EX initiate: no enabled mesh matches label '%s'",
+                  meshLabel ? meshLabel : "(default)");
+    return false;
+  }
+  const MeshDerivedKeys* mk = meshKeysGet((uint8_t)slot);
+  if (!mk) {
+    ERROR_ESPNOWF("KEY_EX initiate: mesh slot %d has no derived keys (passphrase not set?)",
+                  slot);
+    return false;
+  }
+  const auto& self = espnowIdentityGet();
+  if (!self.valid) {
+    ERROR_ESPNOWF("KEY_EX initiate: own identity not loaded");
+    return false;
+  }
+
+  if (!ensureUnencryptedPeer(peerMac)) return false;
+
+  uint8_t selfMac[6];
+  esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+
+  V4PayloadKeyExHello hello = {};
+  hello.meshFingerprint = gSettings.meshes[slot].fingerprint;
+  memcpy(hello.senderMac, selfMac, 6);
+  memcpy(hello.senderPubEd25519, self.pub, 32);
+  if (!computeKeyExHmac(hello.meshFingerprint, selfMac, self.pub,
+                        mk->bootstrapKey, hello.hmac)) {
+    ERROR_ESPNOWF("KEY_EX initiate: HMAC compute failed");
+    return false;
+  }
+
+  bool ok = v4_send_frame(peerMac, ESPNOW_V4_TYPE_KEY_EX_HELLO,
+                          ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                          generateMessageId(),
+                          reinterpret_cast<const uint8_t*>(&hello), sizeof(hello), 1);
+  if (ok) {
+    INFO_ESPNOWF("KEY_EX_HELLO sent to %02X:%02X:%02X:%02X:%02X:%02X (mesh '%s', fp=0x%04X)",
+                 peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
+                 gSettings.meshes[slot].label.c_str(),
+                 (unsigned)hello.meshFingerprint);
+  } else {
+    ERROR_ESPNOWF("KEY_EX_HELLO send failed");
+  }
+  return ok;
+}
+
+// ============================================================================
+// Phase 3.4 — SESSION handshake
+// ============================================================================
+
+namespace {
+
+constexpr const char* kOpenLabel    = "v4-sopen:";   // 9 bytes including ':'
+constexpr const char* kConfirmLabel = "v4-sconf:";   // 9 bytes
+constexpr size_t      kLabelLen     = 9;
+
+// Build the OPEN transcript for sign/verify:
+//   "v4-sopen:" || sessionId(2 LE) || initMac(6) || respMac(6) || eph(32) || nonceA(16)
+// Total 9 + 2 + 6 + 6 + 32 + 16 = 71 bytes.
+void buildOpenTranscript(uint8_t out[71],
+                         uint16_t sessionId,
+                         const uint8_t initMac[6],
+                         const uint8_t respMac[6],
+                         const uint8_t eph[32],
+                         const uint8_t nonceA[16]) {
+  memcpy(out, kOpenLabel, kLabelLen);
+  out[9]  = (uint8_t)(sessionId & 0xFF);
+  out[10] = (uint8_t)((sessionId >> 8) & 0xFF);
+  memcpy(out + 11, initMac, 6);
+  memcpy(out + 17, respMac, 6);
+  memcpy(out + 23, eph, 32);
+  memcpy(out + 55, nonceA, 16);
+}
+
+// Build the CONFIRM transcript:
+//   "v4-sconf:" || sessionId(2 LE) || respMac(6) || initMac(6) || eph(32) ||
+//   nonceA(16) || nonceB(16)
+// Total 9 + 2 + 6 + 6 + 32 + 16 + 16 = 87 bytes.
+void buildConfirmTranscript(uint8_t out[87],
+                            uint16_t sessionId,
+                            const uint8_t respMac[6],
+                            const uint8_t initMac[6],
+                            const uint8_t eph[32],
+                            const uint8_t nonceA[16],
+                            const uint8_t nonceB[16]) {
+  memcpy(out, kConfirmLabel, kLabelLen);
+  out[9]  = (uint8_t)(sessionId & 0xFF);
+  out[10] = (uint8_t)((sessionId >> 8) & 0xFF);
+  memcpy(out + 11, respMac, 6);
+  memcpy(out + 17, initMac, 6);
+  memcpy(out + 23, eph, 32);
+  memcpy(out + 55, nonceA, 16);
+  memcpy(out + 71, nonceB, 16);
+}
+
+}  // namespace
+
+// ----------------------------------------------------------------------------
+// Deferred-to-cmd_exec_task work structs + worker functions.
+//
+// Ed25519 sign+verify each use ~3 KB of libsodium internal stack — adding
+// that to espnow_task (22 KB budget, ~9 KB idle HWM) caused overflows during
+// SESSION_OPEN handling. cmd_exec_task has 24 KB and is single-threaded
+// w.r.t. the existing CLI peak (17 KB), so deferring keeps everything under
+// budget without bumping any task's stack.
+//
+// On-wire RX handlers (v4hSessionOpen/Confirm) do only size validation +
+// PSRAM copy + enqueue. Heavy lifting runs in runDeferredSessionOpen/Confirm
+// on cmd_exec_task. The work struct + callback own their own lifetime.
+// ----------------------------------------------------------------------------
+
+namespace {
+
+struct DeferredSessionOpenWork {
+  V4PayloadSessionOpen msg;
+  uint8_t              headerOrigin[6];
+};
+
+struct DeferredSessionConfirmWork {
+  V4PayloadSessionConfirm msg;
+  uint8_t                 headerOrigin[6];
+};
+
+void runDeferredSessionOpen(void* arg) {
+  auto* w = static_cast<DeferredSessionOpenWork*>(arg);
+  const V4PayloadSessionOpen* msg = &w->msg;
+
+  if (memcmp(w->headerOrigin, msg->initiatorMac, 6) != 0) {
+    WARN_ESPNOWF("SESSION_OPEN: header.origin / payload.initiatorMac mismatch");
+    free(w);
+    return;
+  }
+
+  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  if (memcmp(msg->responderMac, selfMac, 6) != 0) {
+    WARN_ESPNOWF("SESSION_OPEN: responderMac is not us — ignoring");
+    free(w);
+    return;
+  }
+
+  const PeerIdentity* peer = peerIdentityFindByMac(msg->initiatorMac);
+  if (!peer) {
+    WARN_ESPNOWF("SESSION_OPEN from %02X:%02X:%02X:%02X:%02X:%02X — no KEY_EX identity, rejecting",
+                 msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
+                 msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5]);
+    free(w);
+    return;
+  }
+
+  uint8_t transcript[71];
+  buildOpenTranscript(transcript, msg->sessionId,
+                      msg->initiatorMac, msg->responderMac,
+                      msg->ephX25519Pub, msg->nonceA);
+  if (!espnowCryptoEd25519Verify(msg->signature, transcript, sizeof(transcript),
+                                 peer->longTermPub)) {
+    WARN_ESPNOWF("SESSION_OPEN: Ed25519 verify failed (sessionId=%u peer=%02X:%02X:%02X:%02X:%02X:%02X)",
+                 (unsigned)msg->sessionId,
+                 msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
+                 msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5]);
+    free(w);
+    return;
+  }
+
+  SessionState* s = sessionAllocate(msg->initiatorMac, peer->meshId);
+  if (!s) { free(w); return; }
+  s->sessionId    = msg->sessionId;
+  s->myDirection  = sessionIsASide(selfMac, msg->initiatorMac) ? 0 : 1;
+
+  uint8_t ephPub[32], ephSec[32], nonceB[16];
+  if (!espnowCryptoX25519Keygen(ephPub, ephSec)) {
+    ERROR_ESPNOWF("SESSION_OPEN: X25519 keygen failed");
+    sessionClear(s);
+    free(w);
+    return;
+  }
+  espnowCryptoRandomBytes(nonceB, sizeof(nonceB));
+
+  uint8_t shared[32];
+  if (!espnowCryptoX25519Shared(shared, ephSec, msg->ephX25519Pub)) {
+    ERROR_ESPNOWF("SESSION_OPEN: X25519 ECDH failed (bad peer eph?)");
+    sodium_memzero(ephSec, sizeof(ephSec));
+    sodium_memzero(shared, sizeof(shared));
+    sessionClear(s);
+    free(w);
+    return;
+  }
+  sodium_memzero(ephSec, sizeof(ephSec));
+  if (!sessionDeriveAeadKeys(s, shared)) {
+    sodium_memzero(shared, sizeof(shared));
+    sessionClear(s);
+    free(w);
+    return;
+  }
+  sodium_memzero(shared, sizeof(shared));
+
+  V4PayloadSessionConfirm conf = {};
+  conf.sessionId = msg->sessionId;
+  memcpy(conf.responderMac, selfMac, 6);
+  memcpy(conf.initiatorMac, msg->initiatorMac, 6);
+  memcpy(conf.ephX25519Pub, ephPub, 32);
+  memcpy(conf.nonceA, msg->nonceA, 16);
+  memcpy(conf.nonceB, nonceB, 16);
+
+  uint8_t confTranscript[87];
+  buildConfirmTranscript(confTranscript, msg->sessionId,
+                         selfMac, msg->initiatorMac,
+                         ephPub, msg->nonceA, nonceB);
+  const auto& self = espnowIdentityGet();
+  if (!self.valid ||
+      !espnowCryptoEd25519Sign(conf.signature, confTranscript,
+                               sizeof(confTranscript), self.sec)) {
+    ERROR_ESPNOWF("SESSION_OPEN: own signature failed");
+    sessionClear(s);
+    free(w);
+    return;
+  }
+
+  s->state           = SESSION_ACTIVE;
+  s->establishedAtMs = (uint32_t)millis();
+  s->lastUseMs       = s->establishedAtMs;
+  INFO_ESPNOWF("SESSION established (responder) with %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u dir=%c",
+               msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
+               msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5],
+               (unsigned)msg->sessionId, s->myDirection == 0 ? 'A' : 'B');
+
+  v4_send_frame(msg->initiatorMac, ESPNOW_V4_TYPE_SESSION_CONFIRM,
+                ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                generateMessageId(),
+                reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
+  free(w);
+}
+
+void runDeferredSessionConfirm(void* arg) {
+  auto* w = static_cast<DeferredSessionConfirmWork*>(arg);
+  const V4PayloadSessionConfirm* msg = &w->msg;
+
+  if (memcmp(w->headerOrigin, msg->responderMac, 6) != 0) {
+    WARN_ESPNOWF("SESSION_CONFIRM: header.origin / responderMac mismatch");
+    free(w);
+    return;
+  }
+  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  if (memcmp(msg->initiatorMac, selfMac, 6) != 0) {
+    WARN_ESPNOWF("SESSION_CONFIRM: initiatorMac is not us");
+    free(w);
+    return;
+  }
+
+  SessionState* s = sessionFindBySessionId(msg->sessionId, msg->responderMac);
+  if (!s || s->state != SESSION_ESTABLISHING) {
+    WARN_ESPNOWF("SESSION_CONFIRM: no in-flight session for sessionId=%u peer=%02X:%02X:%02X:%02X:%02X:%02X",
+                 (unsigned)msg->sessionId,
+                 msg->responderMac[0], msg->responderMac[1], msg->responderMac[2],
+                 msg->responderMac[3], msg->responderMac[4], msg->responderMac[5]);
+    free(w);
+    return;
+  }
+
+  if (memcmp(msg->nonceA, s->aeadKeyTx /*storage reused for stashed nonceA*/, 16) != 0) {
+    WARN_ESPNOWF("SESSION_CONFIRM: nonceA mismatch — replay or wrong session");
+    sessionClear(s);
+    free(w);
+    return;
+  }
+
+  const PeerIdentity* peer = peerIdentityFindByMac(msg->responderMac);
+  if (!peer) {
+    WARN_ESPNOWF("SESSION_CONFIRM: no peer identity for responder");
+    sessionClear(s);
+    free(w);
+    return;
+  }
+
+  uint8_t transcript[87];
+  buildConfirmTranscript(transcript, msg->sessionId,
+                         msg->responderMac, msg->initiatorMac,
+                         msg->ephX25519Pub, msg->nonceA, msg->nonceB);
+  if (!espnowCryptoEd25519Verify(msg->signature, transcript, sizeof(transcript),
+                                 peer->longTermPub)) {
+    WARN_ESPNOWF("SESSION_CONFIRM: Ed25519 verify failed");
+    sessionClear(s);
+    free(w);
+    return;
+  }
+
+  uint8_t shared[32];
+  if (!espnowCryptoX25519Shared(shared, s->aeadKeyRx /*stashed ephSec*/,
+                                msg->ephX25519Pub)) {
+    ERROR_ESPNOWF("SESSION_CONFIRM: X25519 ECDH failed");
+    sodium_memzero(shared, sizeof(shared));
+    sessionClear(s);
+    free(w);
+    return;
+  }
+  sodium_memzero(s->aeadKeyTx, sizeof(s->aeadKeyTx));
+  sodium_memzero(s->aeadKeyRx, sizeof(s->aeadKeyRx));
+
+  if (!sessionDeriveAeadKeys(s, shared)) {
+    sodium_memzero(shared, sizeof(shared));
+    sessionClear(s);
+    free(w);
+    return;
+  }
+  sodium_memzero(shared, sizeof(shared));
+
+  s->state           = SESSION_ACTIVE;
+  s->establishedAtMs = (uint32_t)millis();
+  s->lastUseMs       = s->establishedAtMs;
+  INFO_ESPNOWF("SESSION established (initiator) with %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u dir=%c",
+               msg->responderMac[0], msg->responderMac[1], msg->responderMac[2],
+               msg->responderMac[3], msg->responderMac[4], msg->responderMac[5],
+               (unsigned)msg->sessionId, s->myDirection == 0 ? 'A' : 'B');
+  free(w);
+}
+
+}  // namespace
+
+// On-RX handlers — espnow_task scope. Lightweight: size-check + PSRAM copy +
+// enqueue. All heavy crypto runs in the deferred function on cmd_exec_task.
+void v4hSessionOpen(const V4RxCtx& ctx) {
+  if (ctx.payloadLen != sizeof(V4PayloadSessionOpen)) {
+    WARN_ESPNOWF("SESSION_OPEN: bad payload size %u", (unsigned)ctx.payloadLen);
+    return;
+  }
+  auto* w = static_cast<DeferredSessionOpenWork*>(
+      ps_alloc(sizeof(DeferredSessionOpenWork), AllocPref::PreferPSRAM, "espnow.sopen.defer"));
+  if (!w) {
+    ERROR_ESPNOWF("SESSION_OPEN: PSRAM alloc failed (defer drop)");
+    return;
+  }
+  memcpy(&w->msg, ctx.payload, sizeof(w->msg));
+  memcpy(w->headerOrigin, ctx.h->origin, 6);
+  if (!submitDeferredToCmdExec(runDeferredSessionOpen, w)) {
+    ERROR_ESPNOWF("SESSION_OPEN: cmd_exec queue full, dropping");
+    free(w);
+  }
+}
+
+void v4hSessionConfirm(const V4RxCtx& ctx) {
+  if (ctx.payloadLen != sizeof(V4PayloadSessionConfirm)) {
+    WARN_ESPNOWF("SESSION_CONFIRM: bad payload size %u", (unsigned)ctx.payloadLen);
+    return;
+  }
+  auto* w = static_cast<DeferredSessionConfirmWork*>(
+      ps_alloc(sizeof(DeferredSessionConfirmWork), AllocPref::PreferPSRAM, "espnow.sconf.defer"));
+  if (!w) {
+    ERROR_ESPNOWF("SESSION_CONFIRM: PSRAM alloc failed (defer drop)");
+    return;
+  }
+  memcpy(&w->msg, ctx.payload, sizeof(w->msg));
+  memcpy(w->headerOrigin, ctx.h->origin, 6);
+  if (!submitDeferredToCmdExec(runDeferredSessionConfirm, w)) {
+    ERROR_ESPNOWF("SESSION_CONFIRM: cmd_exec queue full, dropping");
+    free(w);
+  }
+}
+
+bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel) {
+  if (!gEspNow || !gEspNow->initialized) {
+    ERROR_ESPNOWF("SESSION_OPEN initiate: ESPNOW not initialized");
+    return false;
+  }
+  if (!sessionsInit()) return false;
+
+  // Peer must already have an identity record from KEY_EX (3.3).
+  const PeerIdentity* peer = peerIdentityFindByMac(peerMac);
+  if (!peer) {
+    ERROR_ESPNOWF("SESSION_OPEN initiate: no peer identity for %02X:%02X:%02X:%02X:%02X:%02X "
+                  "— run 'espnowkeyex' first",
+                  peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+    return false;
+  }
+
+  const auto& self = espnowIdentityGet();
+  if (!self.valid) return false;
+  if (!ensureUnencryptedPeer(peerMac)) return false;
+
+  // Allocate the slot and generate keys/nonces.
+  SessionState* s = sessionAllocate(peerMac, peer->meshId);
+  if (!s) return false;
+
+  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  s->myDirection = sessionIsASide(selfMac, peerMac) ? 0 : 1;
+
+  // Random sessionId in [1, 0xFFFE]. randombytes_uniform returns [0, n).
+  uint8_t idBytes[4];
+  espnowCryptoRandomBytes(idBytes, 4);
+  uint16_t sessionId = (uint16_t)((idBytes[0] | (idBytes[1] << 8)) & 0xFFFF);
+  if (sessionId == 0)      sessionId = 1;
+  if (sessionId == 0xFFFF) sessionId = 0xFFFE;
+  s->sessionId = sessionId;
+
+  uint8_t ephPub[32], ephSec[32], nonceA[16];
+  if (!espnowCryptoX25519Keygen(ephPub, ephSec)) {
+    sessionClear(s);
+    return false;
+  }
+  espnowCryptoRandomBytes(nonceA, sizeof(nonceA));
+
+  // Stash ephSec in aeadKeyRx and nonceA in aeadKeyTx until CONFIRM arrives.
+  // These fields are written-but-not-yet-used at this stage; they get
+  // overwritten by sessionDeriveAeadKeys in v4hSessionConfirm.
+  memcpy(s->aeadKeyRx, ephSec, 32);
+  memcpy(s->aeadKeyTx, nonceA, 16);
+  // Zero the upper half of aeadKeyTx so we don't accidentally treat
+  // uninitialised stack data as the stashed nonce on lookup.
+  memset(s->aeadKeyTx + 16, 0, 16);
+  sodium_memzero(ephSec, sizeof(ephSec));
+
+  // Build OPEN payload + signature.
+  V4PayloadSessionOpen open = {};
+  open.sessionId = sessionId;
+  memcpy(open.initiatorMac, selfMac, 6);
+  memcpy(open.responderMac, peerMac, 6);
+  memcpy(open.ephX25519Pub, ephPub, 32);
+  memcpy(open.nonceA, nonceA, 16);
+
+  uint8_t transcript[71];
+  buildOpenTranscript(transcript, sessionId, selfMac, peerMac, ephPub, nonceA);
+  if (!espnowCryptoEd25519Sign(open.signature, transcript, sizeof(transcript), self.sec)) {
+    ERROR_ESPNOWF("SESSION_OPEN initiate: signing failed");
+    sessionClear(s);
+    return false;
+  }
+
+  bool ok = v4_send_frame(peerMac, ESPNOW_V4_TYPE_SESSION_OPEN,
+                          ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                          generateMessageId(),
+                          reinterpret_cast<const uint8_t*>(&open), sizeof(open), 1);
+  if (ok) {
+    INFO_ESPNOWF("SESSION_OPEN sent to %02X:%02X:%02X:%02X:%02X:%02X sessionId=%u dir=%c "
+                 "(awaiting CONFIRM)",
+                 peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
+                 (unsigned)sessionId, s->myDirection == 0 ? 'A' : 'B');
+  } else {
+    ERROR_ESPNOWF("SESSION_OPEN send failed");
+    sessionClear(s);
+  }
+  return ok;
+}
+
+#endif  // ENABLE_ESPNOW

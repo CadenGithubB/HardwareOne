@@ -3326,6 +3326,30 @@ bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* us
   return true;
 }
 
+// Deferred work submission — runs an arbitrary callback on cmd_exec_task,
+// bypassing the CLI execution pipeline. Used by espnow_task to push heavy
+// Ed25519 / X25519 work onto cmd_exec_task's deeper stack without bloating
+// espnow_task's budget. The callback owns its arg's lifetime (must free it).
+// Returns true if successfully queued.
+bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg) {
+  if (!fn) return false;
+  if (gCmdExecQ == nullptr) return false;
+
+  ExecReq* r = (ExecReq*)ps_alloc(sizeof(ExecReq), AllocPref::PreferPSRAM, "cmd.exec.deferred");
+  if (!r) return false;
+  new (r) ExecReq();
+
+  r->deferredFn  = fn;
+  r->deferredArg = arg;
+
+  if (xQueueSend(gCmdExecQ, &r, 0) != pdTRUE) {
+    r->~ExecReq();
+    free(r);
+    return false;
+  }
+  return true;
+}
+
 // Convenience wrapper: execute a command with an existing context and return output
 String execCommandUnified(const CommandContext& baseCtx, const String& line) {
   DEBUG_CMD_FLOWF("[exec] enter origin=%d user=%s path=%s cmd=%s", (int)baseCtx.origin, baseCtx.auth.user.c_str(), baseCtx.auth.path.c_str(), line.c_str());

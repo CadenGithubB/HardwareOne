@@ -67,6 +67,10 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 
 #if ENABLE_ESPNOW
   #include "System_ESPNow.h"
+  #include "System_ESPNow_Crypto.h"
+  #include "System_ESPNow_Identity.h"
+  #include "System_ESPNow_MeshKeys.h"
+  #include "System_ESPNow_Sessions.h"
 #endif
 #include "Bluetooth.h"
 #include "G2_Glasses.h"
@@ -700,9 +704,22 @@ static void commandExecTask(void* pv) {
     
     if (receiveResult == pdTRUE) {
       if (!r) continue;
+
+      // Deferred-work fast path — used by espnow_task to run heavy crypto
+      // (Ed25519 sign/verify in SESSION_OPEN/CONFIRM) on cmd_exec_task's
+      // deeper stack. Skip the entire CLI execution pipeline: no auth
+      // context push, no capture buffer, no output formatting. The deferred
+      // function owns its arg's lifetime.
+      if (r->deferredFn) {
+        r->deferredFn(r->deferredArg);
+        r->~ExecReq();
+        free(r);
+        continue;
+      }
+
       DEBUG_CMD_FLOWF("[cmd_exec] exec '%.80s' user='%s' heap=%lu",
                   r->line, r->ctx.auth.user.c_str(), (unsigned long)ESP.getFreeHeap());
-      
+
       setCurrentCommandContext(&r->ctx);
       bool prevValidate = gCLIValidateOnly;
       gCLIValidateOnly = r->ctx.validateOnly;
@@ -1523,7 +1540,59 @@ void hardwareone_setup() {
 #endif
 
 #if ENABLE_ESPNOW
-  if (gSettings.espnowenabled) {
+  // Phase 3.0 — initialize libsodium and load (or first-boot-generate) the
+  // long-term Ed25519 identity BEFORE ESPNOW init. This must happen on every
+  // boot (even when ESPNOW init is gated off by settings) so the identity
+  // file exists for later phases (3.3+) to consume and so the on-disk format
+  // is exercised early. If identity init fails fatally, ESPNOW does not
+  // initialize regardless of the user setting; the operator can recover via
+  // the `espnowregenidentity --confirm-wipe-all-bonds` CLI.
+  bool cryptoOk = espnowCryptoInit();
+  if (!cryptoOk) {
+    broadcastOutput("[ESP-NOW] FATAL: libsodium init failed — ESPNOW disabled this boot");
+  }
+  bool identityOk = false;
+  if (cryptoOk) {
+    EspNowIdentity bootIdentity = {};
+    identityOk = espnowIdentityLoadOrGenerate(bootIdentity);
+    if (!identityOk) {
+      broadcastOutput("[ESP-NOW] FATAL: long-term identity load failed — ESPNOW disabled this boot");
+      broadcastOutput("[ESP-NOW] Recovery: 'espnowregenidentity --confirm-wipe-all-bonds'");
+    }
+  }
+
+  // Phase 3.1 — stretch each mesh's passphrase to PBKDF2 once (cached on disk),
+  // then derive bootstrap + group subkeys into RAM. No on-wire effect yet; the
+  // 3.3 KEY_EX handshake and 3.5 BROADCAST_AUTH path will consume these.
+  if (identityOk) {
+    // Walk meshes, stretch any that have a passphrase but no cached hash.
+    // Persist once at the end if anything changed (avoids N writes).
+    bool meshesDirty = false;
+    for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
+      Settings::MeshIdentity& m = gSettings.meshes[i];
+      if (!m.enabled || m.label.length() == 0) continue;
+      if (!m.passphraseHashValid && m.passphrase.length() > 0) {
+        if (meshKeysStretchPassphrase(i)) meshesDirty = true;
+      }
+    }
+    if (meshesDirty && filesystemReady) {
+      writeSettingsJson();
+    }
+    uint8_t derivedCount = meshKeysInitAll();
+    (void)derivedCount;  // logged inside meshKeysInitAll on a per-mesh basis
+
+    // Phase 3.2 — walk /system/espnow/peers/*/identity.json and populate the
+    // in-memory peer identity cache. Empty on a fresh boot; populates once
+    // KEY_EX (3.3) has paired peers. No-op + 0-line log if the directory
+    // doesn't exist yet, which it won't until the first pair completes.
+    peerIdentityLoadAll();
+
+    // Phase 3.4 — allocate the in-RAM SessionState table. Sessions vanish
+    // on reboot by design (forward secrecy); just need the slot table ready.
+    sessionsInit();
+  }
+
+  if (gSettings.espnowenabled && identityOk) {
     broadcastOutput("[ESP-NOW] Auto-initialization enabled in settings");
     const char* setupError = checkEspNowFirstTimeSetup();
     if (setupError && strlen(setupError) > 0) {
