@@ -408,6 +408,7 @@ void pendingFrameDrainForPeer(const uint8_t peerMac[6]) {
                     (unsigned long)p.msgId,
                     p.peerMac[0], p.peerMac[1], p.peerMac[2], p.peerMac[3], p.peerMac[4], p.peerMac[5],
                     err[0] ? err : "(no detail)");
+      sendStatusMarkFailed(p.msgId, p.peerMac);
     }
     // Wipe the slot regardless — we don't auto-retry.
     sodium_memzero(p.plaintext, p.plaintextLen);
@@ -427,6 +428,9 @@ uint8_t pendingFrameTimeoutSweep(uint32_t nowMs) {
                  (unsigned long)p.msgId,
                  p.peerMac[0], p.peerMac[1], p.peerMac[2], p.peerMac[3], p.peerMac[4], p.peerMac[5],
                  (unsigned)kPendingFrameTimeoutMs);
+    // Phase 3.5 task #49 — propagate the drop into the tracked-send table
+    // so the web UI flips the bubble to ✗ Failed instead of hanging at ✓ Sent.
+    sendStatusMarkFailed(p.msgId, p.peerMac);
     sodium_memzero(p.plaintext, p.plaintextLen);
     memset(&p, 0, sizeof(p));
     expired++;
@@ -441,6 +445,136 @@ uint8_t pendingFrameCount() {
     if (gPending[i].inUse) n++;
   }
   return n;
+}
+
+// ============================================================================
+// Phase 3.5 task #49 — tracked-send status (web-UI delivery confirmation)
+// ============================================================================
+
+namespace {
+
+constexpr uint8_t kSendStatusSlots = 16;
+SendStatus* gSendStatus = nullptr;
+
+bool ensureSendStatusAllocated() {
+  if (gSendStatus) return true;
+  gSendStatus = (SendStatus*)ps_alloc(sizeof(SendStatus) * kSendStatusSlots,
+                                      AllocPref::PreferPSRAM, "espnow.sendstatus");
+  if (!gSendStatus) {
+    ERROR_ESPNOWF("sendstatus: failed to allocate %u-slot table", (unsigned)kSendStatusSlots);
+    return false;
+  }
+  memset(gSendStatus, 0, sizeof(SendStatus) * kSendStatusSlots);
+  return true;
+}
+
+SendStatus* findByMsgId(uint32_t msgId) {
+  if (!gSendStatus || msgId == 0) return nullptr;
+  for (uint8_t i = 0; i < kSendStatusSlots; i++) {
+    if (gSendStatus[i].inUse && gSendStatus[i].msgId == msgId) {
+      return &gSendStatus[i];
+    }
+  }
+  return nullptr;
+}
+
+// Pick a slot for a new registration: prefer FREE; else evict the oldest
+// resolved entry (DELIVERED/TIMEOUT/FAILED); else evict the oldest entry
+// overall. Newest-wins eviction policy keeps recent activity visible.
+SendStatus* allocateSlot(uint32_t nowMs) {
+  if (!gSendStatus) return nullptr;
+  SendStatus* freeSlot     = nullptr;
+  SendStatus* oldestResolved = nullptr;
+  SendStatus* oldestAny    = nullptr;
+  uint32_t resolvedAge = 0, anyAge = 0;
+  for (uint8_t i = 0; i < kSendStatusSlots; i++) {
+    SendStatus& s = gSendStatus[i];
+    if (!s.inUse) { freeSlot = &s; continue; }
+    uint32_t age = nowMs - s.registeredAtMs;
+    if (s.state != SEND_STATUS_PENDING) {
+      if (!oldestResolved || age > resolvedAge) { oldestResolved = &s; resolvedAge = age; }
+    }
+    if (!oldestAny || age > anyAge) { oldestAny = &s; anyAge = age; }
+  }
+  if (freeSlot)       return freeSlot;
+  if (oldestResolved) return oldestResolved;
+  return oldestAny;
+}
+
+}  // namespace
+
+void sendStatusRegister(uint32_t msgId, const uint8_t peerMac[6]) {
+  if (msgId == 0 || !peerMac) return;
+  if (!ensureSendStatusAllocated()) return;
+  uint32_t nowMs = (uint32_t)millis();
+  // De-dup: if msgId already exists, just refresh it (drain re-sends the
+  // same msgId — we don't want two entries for one logical send).
+  SendStatus* existing = findByMsgId(msgId);
+  SendStatus* slot = existing ? existing : allocateSlot(nowMs);
+  if (!slot) return;
+  slot->inUse          = true;
+  slot->state          = SEND_STATUS_PENDING;
+  memcpy(slot->peerMac, peerMac, 6);
+  slot->msgId          = msgId;
+  slot->registeredAtMs = nowMs;
+  slot->resolvedAtMs   = 0;
+}
+
+void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]) {
+  if (!gSendStatus || msgId == 0 || !srcMac) return;
+  SendStatus* s = findByMsgId(msgId);
+  if (!s || s->state != SEND_STATUS_PENDING) return;
+  // Safety: confirm the ACK source matches the original dst. If they differ
+  // a stale msgId from a different peer slipped in — leave the entry pending
+  // rather than mark it delivered against the wrong peer.
+  if (memcmp(s->peerMac, srcMac, 6) != 0) return;
+  s->state        = SEND_STATUS_DELIVERED;
+  s->resolvedAtMs = (uint32_t)millis();
+}
+
+void sendStatusMarkFailed(uint32_t msgId, const uint8_t peerMac[6]) {
+  if (!gSendStatus || msgId == 0) return;
+  SendStatus* s = findByMsgId(msgId);
+  if (!s || s->state != SEND_STATUS_PENDING) return;
+  if (peerMac && memcmp(s->peerMac, peerMac, 6) != 0) return;
+  s->state        = SEND_STATUS_FAILED;
+  s->resolvedAtMs = (uint32_t)millis();
+}
+
+void sendStatusSweep(uint32_t nowMs) {
+  if (!gSendStatus) return;
+  for (uint8_t i = 0; i < kSendStatusSlots; i++) {
+    SendStatus& s = gSendStatus[i];
+    if (!s.inUse) continue;
+    if (s.state == SEND_STATUS_PENDING) {
+      if ((nowMs - s.registeredAtMs) >= kSendStatusPendingTimeoutMs) {
+        s.state        = SEND_STATUS_TIMEOUT;
+        s.resolvedAtMs = nowMs;
+      }
+    } else {
+      // Resolved — free the slot after the polling-window retention period.
+      if ((nowMs - s.resolvedAtMs) >= kSendStatusKeepResolvedMs) {
+        memset(&s, 0, sizeof(s));
+      }
+    }
+  }
+}
+
+bool sendStatusGet(uint32_t msgId, SendStatus* out) {
+  if (!out) return false;
+  SendStatus* s = findByMsgId(msgId);
+  if (!s) return false;
+  *out = *s;
+  return true;
+}
+
+// Allow the WebPage_ESPNow handler to walk all entries for the snapshot
+// JSON payload. Returns the static slot count; caller passes i = 0..N-1 and
+// checks the returned slot's inUse flag.
+extern "C" uint8_t sendStatusSlotCount() { return kSendStatusSlots; }
+extern "C" const SendStatus* sendStatusAt(uint8_t i) {
+  if (!gSendStatus || i >= kSendStatusSlots) return nullptr;
+  return &gSendStatus[i];
 }
 
 #endif  // ENABLE_ESPNOW

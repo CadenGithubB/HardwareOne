@@ -165,6 +165,66 @@ uint8_t pendingFrameTimeoutSweep(uint32_t nowMs);
 // Inspector for the espnowsessions CLI / debugging.
 uint8_t pendingFrameCount();
 
+// ---- Phase 3.5 task #49 — tracked-send status (web-UI delivery confirmation)
+//
+// When the CLI accepts a user-initiated send, it registers the msgId+peerMac
+// here. The V4_ACK_RX path marks the entry DELIVERED on a matching ACK. The
+// pending-frame timeout-sweep or an early send failure marks it FAILED. A
+// periodic sweep ages out PENDING entries that never got an ACK. The web UI
+// polls /api/espnow/sendstatus?msgId=X to drive the chat bubble's ✓ → ✓✓.
+//
+// Capacity is small (kSendStatusSlots) and the table is a ring — newest
+// registrations evict the oldest entry. Web UI polling caps at ~15 attempts
+// (7.5s) so client gives up before the 30s server sweep would otherwise
+// expire a still-being-watched entry.
+
+constexpr uint32_t kSendStatusPendingTimeoutMs = 10000;  // PENDING → TIMEOUT
+constexpr uint32_t kSendStatusKeepResolvedMs   = 30000;  // hold resolved entries this long for the poll window
+
+enum SendStatusState : uint8_t {
+  SEND_STATUS_PENDING   = 0,
+  SEND_STATUS_DELIVERED = 1,
+  SEND_STATUS_TIMEOUT   = 2,
+  SEND_STATUS_FAILED    = 3,
+};
+
+struct SendStatus {
+  bool     inUse;
+  uint8_t  state;          // SendStatusState
+  uint8_t  peerMac[6];
+  uint32_t msgId;
+  uint32_t registeredAtMs;
+  uint32_t resolvedAtMs;   // 0 while PENDING
+};
+
+// Register a new tracked send. Called from cmd_espnow_send after the send
+// (or queueing) has been accepted. Always succeeds (oldest entry evicted on
+// overflow).
+void sendStatusRegister(uint32_t msgId, const uint8_t peerMac[6]);
+
+// Mark the matching tracked send as DELIVERED. Called from V4_ACK_RX.
+// Match key is (msgId AND peerMac). No-op if no matching PENDING entry.
+void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]);
+
+// Mark a tracked send as FAILED. Called from the pending-frame timeout sweep
+// when a queued encrypted frame gets dropped (handshake never completed).
+void sendStatusMarkFailed(uint32_t msgId, const uint8_t peerMac[6]);
+
+// Periodic sweep — PENDING → TIMEOUT after kSendStatusPendingTimeoutMs,
+// RESOLVED entries cleared after kSendStatusKeepResolvedMs. Called from the
+// espnow heartbeat tick.
+void sendStatusSweep(uint32_t nowMs);
+
+// Lookup for the HTTP endpoint. Fills out *out and returns true if the
+// msgId is known. Returns false if the entry has been evicted or never
+// existed — caller should report state="unknown".
+bool sendStatusGet(uint32_t msgId, SendStatus* out);
+
+// Walk all slots for the JSON snapshot in handleEspNowMessages. Callers do
+// i = 0..sendStatusSlotCount()-1 and check returned slot's inUse flag.
+extern "C" uint8_t sendStatusSlotCount();
+extern "C" const SendStatus* sendStatusAt(uint8_t i);
+
 #endif  // ENABLE_ESPNOW
 
 #endif  // SYSTEM_ESPNOW_SESSIONS_H

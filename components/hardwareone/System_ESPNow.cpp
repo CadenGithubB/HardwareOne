@@ -3557,6 +3557,11 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     
     // Check broadcast tracker
     broadcast_tracker_record_ack(h->msgId, recv_info->src_addr);
+
+    // Phase 3.5 task #49 — mark any tracked CLI-originated send as delivered
+    // so the web UI's chat bubble can transition from ✓ Sent to ✓✓ Delivered
+    // on the next /api/espnow/messages poll cycle.
+    sendStatusMarkDelivered(h->msgId, recv_info->src_addr);
     
     // Check V3 fragment ACK waiters
     bool foundV3 = false;
@@ -6112,6 +6117,10 @@ void processMeshHeartbeats() {
   // 1b. Phase 3.5 — sweep expired pending encrypted frames (queued while
   // waiting for SESSION_OPEN that never completed). 5-second budget per slot.
   pendingFrameTimeoutSweep((uint32_t)millis());
+  // 1c. Phase 3.5 task #49 — age out tracked-send entries (PENDING → TIMEOUT
+  // after 10s; resolved entries cleared after 30s so the polling window has
+  // time to surface them to the web UI).
+  sendStatusSweep((uint32_t)millis());
 
   // 2. Send periodic V3 mesh heartbeat (if we have active peers OR paired devices)
   static const uint32_t HB_INTERVAL_MS = 5000;
@@ -10480,6 +10489,11 @@ const char* cmd_espnow_send(const String& argsInput) {
       snprintf(getDebugBuffer(), 1024, "Error: %s.", status[0] ? status : "encrypted send failed");
       return getDebugBuffer();
     }
+    // Phase 3.5 task #49 — register the msgId so the web UI's polling loop
+    // can flip the bubble to ✓✓ Delivered when the ACK lands. Works for both
+    // "sent" (immediate) and "queued" (drains after SESSION_CONFIRM) paths
+    // because the drain reuses the same msgId.
+    sendStatusRegister(msgId, mac);
     if (!ensureDebugBuffer()) return "Encrypted message sent";
     // Use the literal phrase "message sent" in both branches so the web UI's
     // substring-based parser (WebPage_ESPNow.h doSendMessage) shows ✓✓ Delivered
@@ -10512,6 +10526,9 @@ const char* cmd_espnow_send(const String& argsInput) {
   }
 
   if (success) {
+    // Phase 3.5 task #49 — also track plaintext sends so the bubble flip
+    // works the same way for --plaintext as for the encrypted default.
+    sendStatusRegister(msgId, mac);
     if (!ensureDebugBuffer()) return "Message sent";
     snprintf(getDebugBuffer(), 1024, "Message sent via V3 (ID: %lu)", (unsigned long)msgId);
     return getDebugBuffer();
