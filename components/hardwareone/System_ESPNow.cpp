@@ -7607,8 +7607,11 @@ const char* cmd_espnow_keyex(const String& argsInput) {
   String meshLabel = (a.count() >= 2) ? a.arg(1) : String("");
 
   uint8_t mac[6];
-  if (!parseMacAddress(macStr, mac)) {
-    return "Error: invalid MAC. Expected AA:BB:CC:DD:EE:FF.";
+  // Permissive: accept a paired device name OR a raw MAC. Raw-MAC path lets
+  // users run KEY_EX with brand-new peers that aren't in the legacy paired
+  // device registry yet (KEY_EX is typically the *first* contact).
+  if (!resolveDeviceNameOrMac(macStr, mac) && !parseMacAddress(macStr, mac)) {
+    return "Error: not a paired device name and not a valid MAC.";
   }
 
   bool ok = espnowKeyExInitiate(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
@@ -7640,12 +7643,12 @@ const char* cmd_espnow_sessionopen(const String& argsInput) {
   }
   CommandArgs a(argsInput);
   if (a.count() < 1) {
-    return "Usage: espnowsessionopen <mac> [<mesh>]\n"
+    return "Usage: espnowsessionopen <name_or_mac> [<mesh>]\n"
            "  Requires prior 'espnowkeyex' completion with the same peer.";
   }
   uint8_t mac[6];
-  if (!parseMacAddress(a.arg(0), mac)) {
-    return "Error: invalid MAC. Expected AA:BB:CC:DD:EE:FF.";
+  if (!resolveDeviceNameOrMac(a.arg(0), mac) && !parseMacAddress(a.arg(0), mac)) {
+    return "Error: not a paired device name and not a valid MAC.";
   }
   String meshLabel = (a.count() >= 2) ? a.arg(1) : String("");
   bool ok = espnowSessionOpenInitiate(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
@@ -7675,14 +7678,11 @@ const char* cmd_espnow_rekey(const String& argsInput) {
            "  Forces immediate SESSION_REKEY; requires ACTIVE session.";
   }
   uint8_t mac[6];
-  // Accept either a paired device name or a literal MAC, matching the
-  // convention used by espnowsend / espnowremote.
-  if (!resolveDeviceNameOrMac(a.arg(0), mac)) {
-    EXT_RAM_BSS_ATTR static char errBuf[160];
-    snprintf(errBuf, sizeof(errBuf),
-             "Device '%s' not found. Use a paired device name or AA:BB:CC:DD:EE:FF MAC.",
-             a.arg(0).c_str());
-    return errBuf;
+  // Permissive: try a paired device name first (covers KEY_EX-paired peers
+  // that are ALSO in the legacy device registry), fall back to raw MAC so
+  // peers that completed KEY_EX without being registered still resolve.
+  if (!resolveDeviceNameOrMac(a.arg(0), mac) && !parseMacAddress(a.arg(0), mac)) {
+    return "Error: not a paired device name and not a valid MAC.";
   }
   bool ok = espnowRekeyInitiate(mac);
   if (!ok) {
@@ -7706,11 +7706,11 @@ const char* cmd_espnow_sessionsend(const String& argsInput) {
 
   CommandArgs a(argsInput);
   if (a.count() < 2) {
-    return "Usage: espnowsessionsend <mac> <message...>";
+    return "Usage: espnowsessionsend <name_or_mac> <message...>";
   }
   uint8_t mac[6];
-  if (!parseMacAddress(a.arg(0), mac)) {
-    return "Error: invalid MAC. Expected AA:BB:CC:DD:EE:FF.";
+  if (!resolveDeviceNameOrMac(a.arg(0), mac) && !parseMacAddress(a.arg(0), mac)) {
+    return "Error: not a paired device name and not a valid MAC.";
   }
   // Reassemble the message from args 1..N so spaces survive.
   String message = a.arg(1);
