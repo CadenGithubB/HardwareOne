@@ -224,6 +224,13 @@ bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t ms
 // Forward declarations for V3 helper functions (non-static for external linkage)
 bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
+// Phase 3.5 A1+A2 — encrypted-if-fits-else-plaintext-chunked dispatcher for
+// CMD_RESP and STREAM senders. Defined after v4_send_chunked (which it
+// falls back to).
+bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
+                           uint32_t msgId,
+                           const uint8_t* payload, uint16_t payloadLen,
+                           uint8_t ttl);
 bool v4_broadcast_topo_request(uint32_t reqId);
 bool v4_send_worker_status(const uint8_t* dst, const V4PayloadWorkerStatus& status, const char* jsonMetadata, uint16_t jsonLen);
 bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen);
@@ -950,8 +957,9 @@ void sendEspNowStreamMessage(const String& message) {
   if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
   
   uint32_t msgId = generateMessageId();
-  bool sent = v4_send_chunked(gEspNow->streamTarget, ESPNOW_V4_TYPE_STREAM, 0, msgId,
-                              (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1);
+  // Phase 3.5 A2 — legacy stream path also routes through the smart helper.
+  bool sent = v4_send_payload_smart(gEspNow->streamTarget, ESPNOW_V4_TYPE_STREAM, 0, msgId,
+                                     (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1);
 
   if (sent) {
     gEspNow->streamSentCount++;
@@ -1033,22 +1041,27 @@ static void destroyStreamSession(uint32_t cmdMsgId) {
   }
 }
 
-// Send stream frame to session target with optional flags
+// Send stream frame to session target with optional flags. Phase 3.5 A2:
+// each STREAM chunk goes through v4_send_payload_smart so individual chunks
+// (≤ V4_MAX_FRAGMENT_PAYLOAD = 200B, well under MAX_PLAINTEXT) are
+// AEAD-wrapped via SESSION_FRAME, closing the input/output encryption
+// asymmetry where CMD went encrypted but the streamed output came back
+// plaintext.
 static void sendSessionStreamFrame(uint32_t cmdMsgId, const char* data, size_t len, uint8_t flags) {
   StreamSession* sess = findStreamSession(cmdMsgId);
   if (!sess || !sess->active) return;
-  
-  v4_send_chunked(sess->targetMac, ESPNOW_V4_TYPE_STREAM, flags, cmdMsgId,
-                  data ? (const uint8_t*)data : nullptr, (uint16_t)len, 1);
+
+  v4_send_payload_smart(sess->targetMac, ESPNOW_V4_TYPE_STREAM, flags, cmdMsgId,
+                        data ? (const uint8_t*)data : nullptr, (uint16_t)len, 1);
 }
 
 // Helper for sendEspNowStreamMessage - tries to send via session, returns true if sent
 static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t len) {
   StreamSession* sess = findStreamSession(cmdMsgId);
   if (!sess || !sess->active) return false;
-  
-  v4_send_chunked(sess->targetMac, ESPNOW_V4_TYPE_STREAM, 0, cmdMsgId,
-                  (const uint8_t*)data, (uint16_t)len, 1);
+
+  v4_send_payload_smart(sess->targetMac, ESPNOW_V4_TYPE_STREAM, 0, cmdMsgId,
+                        (const uint8_t*)data, (uint16_t)len, 1);
   DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Session %lu sent: %.50s", (unsigned long)cmdMsgId, data);
   return true;
 }
@@ -1830,6 +1843,40 @@ bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t 
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] ✓ SUCCESS: All %u fragments sent with ACKs!", fragCount);
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] ==============================");
   return true;
+}
+
+// Phase 3.5 follow-on (A1+A2) — encrypted-or-plaintext-chunked dispatcher.
+// Used by CMD_RESP and STREAM senders that previously called v4_send_chunked
+// directly (bypassing the helper-level encryption flip in task #6). Logic:
+//   - If payload fits in a single SESSION_FRAME (<= MAX_PLAINTEXT 202B),
+//     route through v4_send_encrypted_or_queue. Returns true on send-or-queue.
+//   - If encryption isn't possible (no peer identity / queue full) OR payload
+//     exceeds MAX_PLAINTEXT, fall back to plaintext v4_send_chunked. Debug-
+//     logs the fallback so the regression is visible.
+// Task #51 (encrypted fragmentation) will replace the plaintext fallback for
+// large payloads; this helper is the seam where that work plugs in.
+bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
+                           uint32_t msgId,
+                           const uint8_t* payload, uint16_t payloadLen,
+                           uint8_t ttl) {
+  if (!dst) return false;
+  if (payloadLen <= ESPNOW_V4_MAX_PLAINTEXT) {
+    char status[64] = {0};
+    if (v4_send_encrypted_or_queue(dst, type, flags, msgId, payload, payloadLen,
+                                    ttl, status, sizeof(status))) {
+      return true;
+    }
+    DEBUGF(DEBUG_ESPNOW_CORE,
+           "[V4_TX] smart-send: encrypt failed (%s) for type=%u msgId=%lu — "
+           "falling back to plaintext chunked",
+           status[0] ? status : "no detail", type, (unsigned long)msgId);
+  } else {
+    DEBUGF(DEBUG_ESPNOW_CORE,
+           "[V4_TX] smart-send: payload %u > MAX_PLAINTEXT %u for type=%u msgId=%lu — "
+           "plaintext chunked (task #51 will encrypt these)",
+           payloadLen, ESPNOW_V4_MAX_PLAINTEXT, type, (unsigned long)msgId);
+  }
+  return v4_send_chunked(dst, type, flags, msgId, payload, payloadLen, ttl);
 }
 
 static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
@@ -3894,8 +3941,9 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
     memcpy(respPayload + 1, resultText, textLen);
     respPayload[1 + textLen] = '\0';
     
-    v4_send_chunked(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                    ctx->cmdMsgId, respPayload, payloadLen, 1);
+    // Phase 3.5 A1 — route CMD result through smart helper (encrypted if fits).
+    v4_send_payload_smart(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                          ctx->cmdMsgId, respPayload, payloadLen, 1);
     free(respPayload);
   } else {
     // Fallback: send just command name if malloc fails
@@ -3905,8 +3953,8 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
     size_t nameLen = strlen(name) + 1;
     if (nameLen > sizeof(fallback) - 1) nameLen = sizeof(fallback) - 1;
     memcpy(fallback + 1, name, nameLen);
-    v4_send_chunked(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                    ctx->cmdMsgId, fallback, 1 + nameLen, 1);
+    v4_send_payload_smart(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                          ctx->cmdMsgId, fallback, 1 + nameLen, 1);
   }
   
   // Clean up session
@@ -3973,8 +4021,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       respPayload[0] = 0;
       const char* errMsg = "Session token auth failed";
       memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-      v4_send_chunked(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, 
-                      generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
+      // Phase 3.5 A1 — error responses go encrypted too.
+      v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                            generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
       return;
     }
   } else {
@@ -3998,8 +4047,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       respPayload[0] = 0;
       const char* errMsg = "Auth failed";
       memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-      v4_send_chunked(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, 
-                      generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
+      // Phase 3.5 A1 — error responses go encrypted too.
+      v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                            generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
       return;
     }
   }
@@ -4014,8 +4064,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     respPayload[0] = 0;
     const char* errMsg = "No session slots";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-    v4_send_chunked(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                    msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
+    // Phase 3.5 A1 — error responses go encrypted too.
+    v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                          msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
     return;
   }
   
@@ -4082,8 +4133,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     respPayload[0] = 0;
     const char* errMsg = "Queue failed";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-    v4_send_chunked(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                    msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
+    // Phase 3.5 A1 — error responses go encrypted too.
+    v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                          msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
   }
 }
 

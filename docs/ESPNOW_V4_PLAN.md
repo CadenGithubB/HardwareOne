@@ -6,6 +6,22 @@
 
 ---
 
+## Implementation status (2026-05-17 update)
+
+| Phase | Status | Notes |
+|---|---|---|
+| 0 — handler-table refactor | ✓ shipped | commit `6705ee3` |
+| 1 — V4 wire cutover | ✓ shipped | commit `c6157f2` |
+| 2 — multi-mesh data model | ✓ shipped | commits `2fdec6b` through `848a7de` |
+| **3 — per-peer crypto (this doc's main content)** | **✓ shipped** | see "Phase 3 retrospective" below; what actually landed differs from the plan in interesting ways |
+| 4 — file transfer concurrency | — not started | |
+| 5 — event subscription registry | — not started | |
+| 6 — UX (web + CLI) | partial | Phase 3 produced several UI improvements (CLI flag widening, "Delivered means delivered" web fix); the broader Phase 6 work is unstarted |
+
+The Phase 3 section below describes the original design. The "Phase 3 retrospective" subsection at the end of that section documents what actually shipped and where it diverged.
+
+---
+
 ## TL;DR
 
 V4 is a clean break from V3. The goals are:
@@ -524,6 +540,90 @@ If A and B both send SESSION_OPEN simultaneously: tiebreak by MAC — lower MAC'
 - Phase 3 sits on stable foundations (handler-table from Phase 0, V4 wire from Phase 1, multi-mesh data from Phase 2) — no concurrent moving pieces.
 
 **Estimate:** 5–7 days.
+
+---
+
+## Phase 3 retrospective (2026-05-17)
+
+Phase 3 shipped across ~25 commits over a long evening of focused work. Field-verified on two ESP32-PICO boards. The major design lines all held; several details changed during implementation. Documented here so the next person reading this codebase understands why what shipped doesn't exactly match what's described above.
+
+### What shipped (sub-phase breakdown)
+
+| Sub-phase | What | Commit (initial) |
+|---|---|---|
+| 3.0 | Long-term Ed25519 identity, generate/persist, CLI (`espnowidentity` / `espnowregenidentity`) | `f0ac821` |
+| 3.1 | PBKDF2-HMAC-SHA256 passphrase stretching, Blake2b KDF for mesh subkeys, in-RAM cache | `f0ac821` |
+| 3.2 | Per-peer identity persistence at `/system/espnow/peers/<MAC>/identity.json` | `f0ac821` |
+| 3.3 | KEY_EX_HELLO/REPLY/CONFIRM handshake (HMAC-authenticated via mesh bootstrap key) | `f0ac821` |
+| 3.4 | SESSION_OPEN/CONFIRM (SIGMA-I pattern: Ed25519-signed ephemeral X25519 DH), `SessionState` table, replay window | `f0ac821` |
+| 3.5 step 1+2 | Opt-in `--encrypt` flag on `espnowsend`, passive RX unwrap of `SESSION_FRAME` | `f0ac821` |
+| 3.5 step 3 | Default-encrypt for TEXT, auto-kick `SESSION_OPEN` + per-peer pending-frame queue | `ef4e77b` |
+| 3.5 step 4 | LMK removal (radio-layer encryption stripped; AEAD is the only confidentiality layer now) | `ef4e77b` |
+| 3.5 task #49 | UI "Delivered" semantics: piggyback ACK-driven delivery state on existing `/api/espnow/messages` poll, no SSE | `981c6d1` |
+| 3.5 task #50 (#4-now) | `ESPNOW_V4_MAX_PLAINTEXT = 202` constant, shrink encrypt-eligible structs, static_assert | `63e4584` |
+| 3.6 | SESSION_REKEY (symmetric two-message exchange, prev-keys 5s retention window, auto-trigger on 10k frames / 1h age) | `8fcb8e4` |
+| 3.5 task #32 | BROADCAST_AUTH HMAC on every mesh broadcast (auth-only, plaintext payload) | `61281b3` |
+| 3.5 task #6 | Default-encrypt for CMD, CMD_RESP, USER_SYNC, METADATA_* (single-frame opcodes) | `61281b3` |
+| 3.5 A1+A2 | Encrypted CMD_RESP at the legacy callsites + per-chunk encrypted STREAM | _this commit_ |
+
+### Design decisions that changed during implementation
+
+**Crypto library: libsodium instead of mbedtls.** The plan said "All cryptographic primitives via mbedtls — no homebrew." We ended up using libsodium for Ed25519 / X25519 / ChaCha20-Poly1305 / Blake2b, and mbedtls only for PBKDF2-HMAC-SHA256 (hardware SHA acceleration). Reason: libsodium has a cleaner one-shot API for the operations we needed; mbedtls's PK setup ceremony was clunky for our use case. We pay a binary-size cost (~80 KB libsodium static) which is fine on 8 MB flash.
+
+**AEAD: ChaCha20-Poly1305 instead of AES-GCM.** Plan said GCM. Switched because libsodium's AES-GCM implementation has a CPU-feature-check pitfall on ESP32 (no AES-NI); ChaCha20-Poly1305 has a simpler portable implementation and runs at full speed without hardware acceleration.
+
+**KDF: Blake2b subkey derivation instead of HKDF.** Plan said HKDF. libsodium provides `crypto_kdf_blake2b_derive_from_key` which is functionally equivalent for our needs (per-direction key derivation from a shared secret) and avoids dragging in the HKDF dependency.
+
+**SessionState is RAM-only, but reboots survive better than expected.** Plan said sessions vanish on reboot. They do — but the long-term identity (3.0) and peer identity files (3.2) survive, so post-reboot session re-establishment is one SESSION_OPEN round-trip away. The user doesn't re-pair.
+
+**Concurrent-handshake tiebreak: SIGMA-I converges, no tiebreak needed.** Plan said "lower MAC wins." Turns out the SIGMA-I exchange converges naturally — if both sides initiate simultaneously, they each treat the peer's REKEY as the responder's reply, derive shared from the same (ephA, ephB) pair, end up with identical keys. No tiebreak logic needed.
+
+**Stack management: defer to cmd_exec_task, not bump espnow_task.** We discovered during 3.4 that Ed25519 sign+verify uses ~3 KB libsodium internal stack each, and SESSION_OPEN runs verify→keygen→ECDH→KDF→sign sequentially. We initially bumped `ESPNOW_HB_STACK_WORDS` 22→30 KB. Then we refactored to PSRAM-copy the payload and `submitDeferredToCmdExec()` — the heavy crypto runs on cmd_exec_task (24 KB, deeper, single-threaded). Reverted the stack bump. Net DRAM cost: −8 KB vs. the initial fix.
+
+**Auto-kick + queue: had to be invented.** Plan implied "session establishment is a separate user step." But forcing the user to manually run `espnowsessionopen` before every encrypted send was unacceptable UX. We added a 4-slot per-peer pending-frame queue. When `v4_send_encrypted_or_queue` sees no active session, it queues the frame and kicks `SESSION_OPEN`. The deferred `runDeferredSessionConfirm` drains the queue on success. 5-second timeout on stuck queued frames. The drain also fires on `sessionApplyRekeyedKeys` (Phase 3.6 follow-up).
+
+**REKEY: symmetric two-message, not three-message confirm.** Plan said "Default: rotate session keys every 24 hours, or every 100k frames sent." We shipped this but with simpler protocol than the SESSION_OPEN/CONFIRM pattern would suggest: a single `SESSION_REKEY` opcode, each side sends one carrying its fresh ephemeral pub, both derive shared. Concurrent rekeys converge via the same shared-ECDH property. Plus a prev-keys retention window so in-flight frames sent under old keys decrypt cleanly.
+
+**LMK removal was a deliberate "no fallback" decision.** Plan implicitly assumed coexistence. We stripped LMK entirely in step 4 — every peer is added with `peerInfo.encrypt = false` regardless of arguments. Confidentiality is now AEAD-only. Discovered a regression where the METADATA_PUSH loop was gated on `peer.encrypt` (always false post-rip), making it dead code. Fixed in the same commit by switching the gate to "has peer identity?"
+
+### Pre-existing bug surfaced & fixed during Phase 3
+
+**`v4_send_frame` flags parameter was `uint8_t` but the flags enum is `uint16_t`.** Every send with a high-byte flag bit (BROADCAST_AUTH=0x0100, SESSION_FRAME=0x0200, HANDSHAKE=0x0400) silently truncated to `0x00`. We confirmed in earlier Phase 3.4 logs that SESSION_OPEN was being sent with `Flags=0x01` instead of `0x0401`. The handshake worked anyway because dispatch is keyed on `type`, not `flags`. Widening to `uint16_t` (one-line change, three declarations) fixed three protocol-correctness issues at once. Caught only because BROADCAST_AUTH would have had the same fate.
+
+### What's deferred (intentionally not in scope)
+
+- **Encrypted fragmentation (#51).** Plaintext payloads > 202 B still go through `v4_send_chunked` plaintext fragmenter. Affects: FILE_DATA, large CMD_RESP output, large METADATA. Plan: per-fragment SESSION_FRAME wrap (Design X), drops plaintext-per-fragment 200→184 bytes.
+- **Bond mode token re-derivation.** Bond is the auth/RCE channel between paired devices; it has its own token that should be re-derived off the new Ed25519 identity. Separate workstream — bond's threat model differs from general messaging.
+- **Encrypted broadcasts.** Current BROADCAST_AUTH is auth-only (HMAC tag on plaintext payload). Broadcast confidentiality would require group-key AEAD + per-sender replay state on receivers. Locked decision to keep broadcasts plaintext: heartbeat / sensor data are inherently observable from a sniffer regardless of which AP the device is associated with.
+
+### Field-verification summary
+
+Two-device end-to-end tests covered:
+- Identity persistence across reflash (Ed25519 keypair survives)
+- KEY_EX completes, peer pubkeys cross-persist
+- SESSION_OPEN establishes a session in ~250 ms
+- Cold-path encrypted send (no session): queue → kick → drain in ~280 ms
+- Warm-path encrypted send: immediate SESSION_FRAME with `Flags=0x201, PayloadLen=plaintext+16`
+- REKEY: ~12 sequential rekeys in rapid succession without crashes, AEAD failures, or replay rejects
+- BROADCAST_AUTH: every heartbeat shows `Flags=0x101`, no HMAC mismatch warnings
+- Encrypted CMD: `espnowremote <peer> <user> <pass> <cmd>` arrives as `Type=30 Flags=0x201` — credentials no longer leak
+
+What's NOT exhaustively verified:
+- REKEY auto-trigger (thresholds set to 10k frames / 1h; never hit in test)
+- Concurrent rekey race (both sides initiate within RTT window) — design-correct, untested
+- Prev-keys fallback window — reachable in principle, untested (timing-sensitive)
+
+### Memory budget
+
+Phase 3 RAM cost (approximate):
+- `gPeerIdentities[N]`: 16 slots × ~50 B = ~800 B PSRAM
+- `gSessions[16]`: 16 × 192 B = 3072 B PSRAM (bumped from 128 B/slot for REKEY prev-keys state)
+- `gPending[4]`: 4 × ~220 B = ~880 B PSRAM
+- `gSendStatus[16]`: 16 × ~30 B = ~480 B PSRAM
+- `gMeshKeys` cache: per-mesh PBKDF2 hash + 2 subkeys + meta = ~150 B per mesh × N meshes
+- libsodium static state: ~10 KB DRAM/IRAM
+
+Binary size grew from ~3.9 MB (pre-Phase-3) to ~4.16 MB (post-Phase-3). Mostly libsodium.
 
 ---
 
