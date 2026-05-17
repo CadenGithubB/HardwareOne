@@ -1103,19 +1103,29 @@ window.togglePane = function(paneId, btnId) {
         .then(r=>r.text())
         .then(t=>{
           console.log('[ESP-NOW] Send result:', t);
-          // Update bubble status based on result
+          // Update bubble status based on result.
+          // Phase 3.5 task #49 — "✓✓ Delivered" no longer fires immediately on
+          // CLI accept. We tag the bubble with the msgId extracted from the
+          // response and let the existing /api/espnow/messages poll loop flip
+          // the bubble to Delivered (or Failed/Timeout) once the server
+          // tracker reports the terminal state from the ACK.
           if (bubble) {
             const statusDiv = bubble.querySelector('.message-status');
             const lowerResult = (t || '').toLowerCase();
-            // Check for ACK confirmation (v2 protocol with ACK)
             if (lowerResult.indexOf('failed') >= 0 || lowerResult.indexOf('error') >= 0) {
               statusDiv.innerHTML = '<span class="status-icon">✗</span>Failed';
-            } else if (lowerResult.indexOf('message sent') >= 0 || lowerResult.indexOf('sent via v3') >= 0) {
-              statusDiv.innerHTML = '<span class="status-icon">✓✓</span>Delivered';
-            } else if (lowerResult.indexOf('sent') >= 0) {
-              statusDiv.innerHTML = '<span class="status-icon">✓</span>Sent';
             } else {
-              statusDiv.innerHTML = '<span class="status-icon">✓</span>' + t;
+              // Extract "ID: <num>" from the response and tag the bubble so
+              // the poller can match the eventual delivery event.
+              var idMatch = (t || '').match(/ID:\s*(\d+)/i);
+              if (idMatch) {
+                bubble.setAttribute('data-msg-id', idMatch[1]);
+              }
+              if (lowerResult.indexOf('queued') >= 0) {
+                statusDiv.innerHTML = '<span class="status-icon">⌛</span>Queued';
+              } else {
+                statusDiv.innerHTML = '<span class="status-icon">✓</span>Sent';
+              }
             }
           }
         })
@@ -3596,21 +3606,46 @@ window.togglePane = function(paneId, btnId) {
     fetchFn('/api/espnow/messages?since=' + lastSeqNum)
       .then(function(data){
         console.log('[ESP-NOW] Poll response:', data);
-        if (!data || !data.messages) return;
-        console.log('[ESP-NOW] Processing ' + data.messages.length + ' messages');
-        data.messages.forEach(function(msg){
-          if (msg.seq > lastSeqNum) lastSeqNum = msg.seq;
-          var mac = (msg.mac || '').toUpperCase();
-          var text = msg.msg || '';
-          if (!mac) return;
-          console.log('[ESP-NOW] Received message from ' + mac + ': ' + text);
-          console.log('[ESP-NOW] Looking for container: log-' + mac);
-          if (typeof window.appendLogLine === 'function') {
-            window.appendLogLine('log-' + mac, 'RECEIVED', text, null);
-          } else {
-            console.error('[ESP-NOW] appendLogLine not available');
-          }
-        });
+        if (!data) return;
+        if (data.messages) {
+          console.log('[ESP-NOW] Processing ' + data.messages.length + ' messages');
+          data.messages.forEach(function(msg){
+            if (msg.seq > lastSeqNum) lastSeqNum = msg.seq;
+            var mac = (msg.mac || '').toUpperCase();
+            var text = msg.msg || '';
+            if (!mac) return;
+            console.log('[ESP-NOW] Received message from ' + mac + ': ' + text);
+            console.log('[ESP-NOW] Looking for container: log-' + mac);
+            if (typeof window.appendLogLine === 'function') {
+              window.appendLogLine('log-' + mac, 'RECEIVED', text, null);
+            } else {
+              console.error('[ESP-NOW] appendLogLine not available');
+            }
+          });
+        }
+        // Phase 3.5 task #49 — apply delivery-state updates to bubbles tagged
+        // with data-msg-id. The server sends a full snapshot of its tracked-
+        // send ring on every poll; we update every bubble we can match. Idem-
+        // potent — re-applying the same delivered state is a no-op.
+        if (data.deliveries && Array.isArray(data.deliveries)) {
+          data.deliveries.forEach(function(d){
+            var bubble = document.querySelector('.message-bubble[data-msg-id="' + d.msgId + '"]');
+            if (!bubble) return;
+            var statusDiv = bubble.querySelector('.message-status');
+            if (!statusDiv) return;
+            if (d.state === 'delivered') {
+              statusDiv.innerHTML = '<span class="status-icon">✓✓</span>Delivered';
+            } else if (d.state === 'timeout') {
+              statusDiv.innerHTML = '<span class="status-icon">✗</span>No ACK (timeout)';
+              bubble.classList.add('message-error');
+            } else if (d.state === 'failed') {
+              statusDiv.innerHTML = '<span class="status-icon">✗</span>Failed (handshake)';
+              bubble.classList.add('message-error');
+            }
+            // 'pending' — leave the bubble at whatever the send-side set
+            // (Sent / Queued); no transition needed.
+          });
+        }
       })
       .catch(function(e){ 
         if (e && e.message === 'auth_required') {

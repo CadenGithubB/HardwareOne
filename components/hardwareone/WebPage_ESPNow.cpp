@@ -39,6 +39,7 @@ static esp_err_t handleEspNowPage(httpd_req_t* req) {
 #if ENABLE_ESPNOW
 
 #include "System_ESPNow.h"
+#include "System_ESPNow_Sessions.h"  // SendStatus snapshot for delivery-tracking JSON
 #include "System_MemUtil.h"
 
 extern EspNowState* gEspNow;
@@ -250,8 +251,36 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
 
   free(messages);
 
+  // Phase 3.5 task #49 — append the tracked-send snapshot so the web UI can
+  // flip chat bubbles from ✓ Sent to ✓✓ Delivered (or ✗ Failed/Timeout) on
+  // the same poll cadence as message delivery. Full snapshot of the 16-slot
+  // ring; client filters by msgId. Compact (~30 bytes per entry × 16 = 480 B
+  // worst case).
   if (err == ESP_OK) {
-    err = webEspnowSendChunk(req, "]}");
+    err = webEspnowSendChunk(req, "],\"deliveries\":[");
+    bool firstDelivery = true;
+    uint8_t ssSlots = sendStatusSlotCount();
+    uint32_t nowMs = (uint32_t)millis();
+    for (uint8_t i = 0; i < ssSlots && err == ESP_OK; i++) {
+      const SendStatus* s = sendStatusAt(i);
+      if (!s || !s->inUse) continue;
+      static const char* kStateNames[] = { "pending", "delivered", "timeout", "failed" };
+      const char* stateName = (s->state < 4) ? kStateNames[s->state] : "unknown";
+      char macStr[18];
+      snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+               s->peerMac[0], s->peerMac[1], s->peerMac[2],
+               s->peerMac[3], s->peerMac[4], s->peerMac[5]);
+      if (!firstDelivery) {
+        err = webEspnowSendChunk(req, ",");
+        if (err != ESP_OK) break;
+      }
+      firstDelivery = false;
+      uint32_t ageMs = nowMs - s->registeredAtMs;
+      err = webEspnowSendChunkf(req,
+        "{\"msgId\":%lu,\"state\":\"%s\",\"mac\":\"%s\",\"ageMs\":%lu}",
+        (unsigned long)s->msgId, stateName, macStr, (unsigned long)ageMs);
+    }
+    if (err == ESP_OK) err = webEspnowSendChunk(req, "]}");
   }
   httpd_resp_send_chunk(req, NULL, 0);
   return err;
