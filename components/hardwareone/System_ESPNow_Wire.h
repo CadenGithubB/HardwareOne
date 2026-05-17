@@ -390,6 +390,48 @@ struct __attribute__((packed)) V4PayloadSessionConfirm {
 };
 static_assert(sizeof(V4PayloadSessionConfirm) == 142, "V4PayloadSessionConfirm layout");
 
+// ---- Phase 3.6 — SESSION_REKEY (forward-secrecy rotation) -------------------
+//
+// Refreshes the AEAD keys without a full handshake. Used when txSeqNext
+// crosses a threshold (e.g. 10k frames) or sessionAge crosses a duration
+// (e.g. 1h). The long-term Ed25519 identities established in 3.0 are reused
+// to sign fresh ephemeral X25519 pubkeys; the resulting shared secret feeds
+// the Blake2b KDF to produce a new aeadKeyTx/Rx pair.
+//
+// Two-message symmetric exchange (each side sends one REKEY containing its
+// own fresh ephemeral pub):
+//   A → B: SESSION_REKEY (newEphA, nonceA, sig_A)
+//   B → A: SESSION_REKEY (newEphB, nonceB, sig_B)
+// Either side can initiate. On receiving a REKEY without having sent one,
+// the receiver picks its own fresh ephemeral and replies with REKEY. On
+// receiving a REKEY while own REKEY is in flight (concurrent rekey race),
+// the same protocol still converges — both ends derive shared from the same
+// (newEphA, newEphB) pair, so they end up with identical keys regardless of
+// who "started" it.
+//
+// Transcript signed:
+//   "v4-rekey:" || sessionId(2) || senderMac(6) || receiverMac(6) ||
+//                  newEphX25519Pub(32) || nonceRekey(16) || prevTxSeqAtRekey(4)
+// prevTxSeqAtRekey binds the signature to a specific point in the existing
+// session's transcript — prevents replay of a stale REKEY from a previous
+// rekey round.
+//
+// Old keys stay valid in SessionState.aeadKey{Tx,Rx}Prev for ~5 seconds
+// after the switch so in-flight frames sent under the old keys still decrypt.
+
+struct __attribute__((packed)) V4PayloadSessionRekey {
+  uint16_t sessionId;            // existing session this rekey applies to
+  uint8_t  senderMac[6];
+  uint8_t  receiverMac[6];
+  uint8_t  newEphX25519Pub[32];
+  uint8_t  nonceRekey[16];
+  uint32_t prevTxSeqAtRekey;     // sender's txSeqNext at the moment of REKEY signing
+  uint8_t  signature[64];        // Ed25519 over the transcript above
+};
+static_assert(sizeof(V4PayloadSessionRekey) == 130, "V4PayloadSessionRekey layout");
+static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_MAX_PLAINTEXT,
+              "REKEY must fit a SESSION_FRAME budget; rekey messages are sent inside the existing session");
+
 // File transfer payloads
 struct __attribute__((packed)) V4PayloadFileStart {
   uint32_t fileSize;      // Total file size in bytes
