@@ -28,6 +28,11 @@
 #include "System_Debug.h"
 #include "System_ESPNow.h"
 #include "System_ESPNow_Wire.h"      // V3 wire schema (Phase 0 extraction)
+#include "System_ESPNow_Crypto.h"    // Phase 3.0: libsodium init / RNG / Ed25519 keygen
+#include "System_ESPNow_Handlers_Crypto.h"  // Phase 3.3: KEY_EX handlers + initiator
+#include "System_ESPNow_Identity.h"  // Phase 3.0: long-term Ed25519 identity load/store
+#include "System_ESPNow_MeshKeys.h"  // Phase 3.1: per-mesh PBKDF2 hash + bootstrap/group key cache
+#include "System_ESPNow_Sessions.h"  // Phase 3.4: per-peer-per-mesh session state
 #include "System_ESPNow_Sensors.h"
 #include "G2_Page_ESPNow.h"        // g2ESPNowAppOnRxText push-kick (inline no-op when BT/G2 off)
 #include "System_MemUtil.h"
@@ -673,17 +678,8 @@ static uint16_t meshFingerprintForLabel(const String& label);
 static void setEspNowPassphrase(const String& passphrase) {
   if (!gEspNow) return;
   gEspNow->passphrase = passphrase;
-  setSetting(gSettings.espnowPassphrase, passphrase);
   deriveKeyFromPassphrase(passphrase, gEspNow->derivedKey);
 
-  // Phase 2 (Fix A): keep meshes[0] in sync with the legacy passphrase.
-  // Without this, runtime passphrase changes via CLI would leave
-  // meshes[0].passphrase stale (only the init shim populates it, and that
-  // runs once at boot). Phase 3 will read meshes[].passphrase for key
-  // derivation, so the sync matters before Phase 3 lands.
-  //
-  // Also bootstrap meshes[0] metadata if it hasn't been set up yet — first-
-  // time setup might write the passphrase before the init shim has run.
   Settings::MeshIdentity& m0 = gSettings.meshes[0];
   setSetting(m0.passphrase, passphrase);
   if (m0.label.length() == 0 && passphrase.length() > 0) {
@@ -692,9 +688,6 @@ static void setEspNowPassphrase(const String& passphrase) {
     setSetting(m0.isDefault, true);
   }
   if (passphrase.length() == 0) {
-    // Clearing: keep the mesh slot but mark it disabled. Preserves label
-    // for future re-enable; matches the "clear means disabled, not deleted"
-    // expectation from the CLI ('espnow setpassphrase clear').
     setSetting(m0.enabled, false);
   }
   m0.fingerprint = meshFingerprintForLabel(m0.label);
@@ -712,31 +705,31 @@ static void computeBondSessionToken(const uint8_t* peerMac) {
     ERROR_ESPNOWF("[BOND_AUTH] computeToken: gEspNow null");
     return;
   }
-  if (gSettings.espnowPassphrase.length() == 0) {
+  if (gEspNow->passphrase.length() == 0) {
     gEspNow->bondSessionTokenValid = false;
     memset(gEspNow->bondSessionToken, 0, 16);
     DEBUG_ESPNOWF("[BOND_AUTH] No passphrase set - session token disabled");
     return;
   }
-  
+
   uint8_t ourMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, ourMac);
-  
+
   bool peerFirst = memcmp(peerMac, ourMac, 6) < 0;
-  
+
   DEBUG_ESPNOWF("[BOND_AUTH] Computing token: passLen=%d, peerFirst=%d",
-                gSettings.espnowPassphrase.length(), peerFirst);
+                gEspNow->passphrase.length(), peerFirst);
   DEBUG_ESPNOWF("[BOND_AUTH]   ourMac=%02X:%02X:%02X:%02X:%02X:%02X",
                 ourMac[0], ourMac[1], ourMac[2], ourMac[3], ourMac[4], ourMac[5]);
   DEBUG_ESPNOWF("[BOND_AUTH]   peerMac=%02X:%02X:%02X:%02X:%02X:%02X",
                 peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
-  
+
   uint8_t input[128];
   size_t inputLen = 0;
-  
-  size_t passLen = gSettings.espnowPassphrase.length();
+
+  size_t passLen = gEspNow->passphrase.length();
   if (passLen > 64) passLen = 64;
-  memcpy(input + inputLen, gSettings.espnowPassphrase.c_str(), passLen);
+  memcpy(input + inputLen, gEspNow->passphrase.c_str(), passLen);
   inputLen += passLen;
   
   if (peerFirst) {
@@ -1128,9 +1121,7 @@ static uint16_t v4_crc16_ccitt(const uint8_t* data, size_t len) {
 //
 // Phase 2.1 (this commit): infrastructure only. The TX path still emits
 // fingerprint=0 (V4 default). RX path doesn't yet validate. meshes[0] gets
-// initialized from the legacy gSettings.espnowPassphrase + bondPeerMac so
-// later Phase 2.x sub-commits can migrate readers one at a time without
-// breaking existing single-mesh deployments.
+// initialized from boot settings.
 
 // Compute the CRC16-CCITT fingerprint of a mesh label. Stable across devices
 // — both peers compute the same fingerprint for the same label.
@@ -1244,6 +1235,23 @@ void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords) {
     }
     e["enabled"]   = m.enabled;
     e["isDefault"] = m.isDefault;
+    // Phase 3.1: persist the PBKDF2-stretched hash in hex. Irreversible, so
+    // safe at rest in plaintext. Boot-time stretching is skipped when this
+    // is present — keeps cold-boot fast after the first generation.
+    // IMPORTANT: ArduinoJson stores const char* by reference (zero-copy).
+    // We wrap in String() to force a deep copy into ArduinoJson's pool,
+    // otherwise the stack buffer goes out of scope before serializeJson()
+    // runs and we crash on strlen(NULL).
+    if (m.passphraseHashValid) {
+      char hex[65];
+      static const char* kHex = "0123456789abcdef";
+      for (int k = 0; k < 32; k++) {
+        hex[k * 2]     = kHex[(m.passphraseHashPbkdf2[k] >> 4) & 0xF];
+        hex[k * 2 + 1] = kHex[m.passphraseHashPbkdf2[k] & 0xF];
+      }
+      hex[64] = '\0';
+      e["passphraseHashPbkdf2"] = String(hex);
+    }
   }
 #if ENABLE_BONDED_MODE
   JsonArray bondsArr = doc["espnow"]["bondsByMesh"].to<JsonArray>();
@@ -1271,6 +1279,27 @@ void espnowMeshesReadJson(JsonDocument& doc) {
       gSettings.meshes[idx].passphrase = String((const char*)(e["passphrase"] | ""));
       gSettings.meshes[idx].enabled    = e["enabled"]   | false;
       gSettings.meshes[idx].isDefault  = e["isDefault"] | false;
+      // Phase 3.1: load the cached PBKDF2 hash if present. Hex-decode strict;
+      // any malformed value falls back to "no cached hash" (will trigger a
+      // re-stretch at boot) rather than refusing to load settings.
+      gSettings.meshes[idx].passphraseHashValid = false;
+      const char* hashHex = e["passphraseHashPbkdf2"] | (const char*)nullptr;
+      if (hashHex && strlen(hashHex) == 64) {
+        auto nyb = [](char c) -> int {
+          if (c >= '0' && c <= '9') return c - '0';
+          if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+          if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+          return -1;
+        };
+        bool ok = true;
+        for (int k = 0; k < 32 && ok; k++) {
+          int hi = nyb(hashHex[k * 2]);
+          int lo = nyb(hashHex[k * 2 + 1]);
+          if (hi < 0 || lo < 0) { ok = false; break; }
+          gSettings.meshes[idx].passphraseHashPbkdf2[k] = (uint8_t)((hi << 4) | lo);
+        }
+        gSettings.meshes[idx].passphraseHashValid = ok;
+      }
       // fingerprint recomputed below
       idx++;
     }
@@ -1310,7 +1339,6 @@ static void initPrimaryMeshFromLegacySettings() {
   // (Phase 2.8 refactor) means CLI users target a mesh by name first and
   // set its passphrase second — so the named slot has to exist at boot.
   m0.label       = "primary";
-  m0.passphrase  = gSettings.espnowPassphrase;  // empty on a fresh device
   m0.fingerprint = meshFingerprintForLabel(m0.label);
   m0.enabled     = true;
   m0.isDefault   = true;
@@ -1390,6 +1418,76 @@ bool v4_send_frame(const uint8_t* dst, uint8_t type, uint8_t flags, uint32_t msg
   if (payloadLen > 0) memcpy(frame + sizeof(h), payload, payloadLen);
   captureEspNowFrame("TX", dst, 0, frame, (int)totalLen);
   return esp_now_send(dst, frame, totalLen) == ESP_OK;
+}
+
+// Phase 3.5 step 1 — session-wrapped unicast send. Mirrors v4_send_frame's
+// signature minus features that don't apply when a frame is AEAD-sealed:
+// no CRC (the Poly1305 tag is the integrity check), no v4 ACK tracking via
+// the broadcast tracker path, no fragmentation (caller's responsibility to
+// keep plaintext under ESPNOW_V4_MAX_PAYLOAD - 16).
+//
+// Looks up the peer's ACTIVE SessionState by (peerMac, meshId derived from
+// PeerIdentity), builds the V4 header, defers to sessionWrapFrame for the
+// AEAD seal + flag/sessionId/frameSeq stamping, then sends raw.
+//
+// Returns true on success. On failure, *errOut (if non-null) is filled with
+// a short human-readable reason ("no peer identity", "no active session",
+// "payload too large", "AEAD seal failed", "esp_now_send rc=N").
+bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
+                             uint32_t msgId,
+                             const uint8_t* plaintext, uint16_t plaintextLen,
+                             uint8_t ttl, char* errOut, size_t errOutLen) {
+  auto setErr = [&](const char* msg) {
+    if (errOut && errOutLen) { strncpy(errOut, msg, errOutLen - 1); errOut[errOutLen - 1] = 0; }
+  };
+  if (!dst || (plaintextLen > 0 && !plaintext)) {
+    setErr("invalid args");
+    return false;
+  }
+  if (plaintextLen > (uint16_t)(ESPNOW_V4_MAX_PAYLOAD - 16)) {
+    setErr("payload too large for SESSION_FRAME (max 202 plaintext bytes)");
+    return false;
+  }
+  const PeerIdentity* pid = peerIdentityFindByMac(dst);
+  if (!pid) {
+    setErr("no peer identity — run espnowkeyex first");
+    return false;
+  }
+  SessionState* s = sessionFindByPeer(dst, pid->meshId);
+  if (!s || s->state != SESSION_ACTIVE) {
+    setErr("no ACTIVE session — run espnowsessionopen first");
+    return false;
+  }
+
+  uint8_t frame[sizeof(EspNowV4Header) + ESPNOW_V4_MAX_PAYLOAD];
+  EspNowV4Header* h = reinterpret_cast<EspNowV4Header*>(frame);
+  memset(h, 0, sizeof(*h));
+  h->magic           = (uint16_t)ESPNOW_V4_MAGIC;
+  h->ver             = ESPNOW_V4_VERSION;
+  h->type            = type;
+  h->flags           = baseFlags;  // sessionWrapFrame ORs in ESPNOW_V4_FLAG_SESSION_FRAME
+  h->headerLen       = (uint8_t)sizeof(EspNowV4Header);
+  h->msgId           = msgId;
+  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  memcpy(h->origin, selfMac, 6);
+  h->ttl             = ttl;
+  h->fragIndex       = 0;
+  h->fragCount       = 1;
+  h->meshFingerprint = fingerprintForPeer(dst);
+
+  uint8_t* outPayload = frame + sizeof(EspNowV4Header);
+  if (!sessionWrapFrame(s, h, plaintext, plaintextLen, outPayload)) {
+    setErr("sessionWrapFrame failed");
+    return false;
+  }
+  size_t frameLen = sizeof(EspNowV4Header) + plaintextLen + 16;
+  captureEspNowFrame("TX", dst, 0, frame, (int)frameLen);
+  esp_err_t rc = esp_now_send(dst, frame, frameLen);
+  if (rc != ESP_OK) {
+    if (errOut && errOutLen) snprintf(errOut, errOutLen, "esp_now_send rc=%d", (int)rc);
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -3074,6 +3172,16 @@ static void v4h_file_end(const V4RxCtx& ctx) {
 // Stable static table; lookup is linear over a small N. Adding a new opcode
 // is one row here plus its v4h_<name> function. No edits to the dispatcher.
 static const V4OpcodeEntry kV4HandlerTable[] = {
+  // Phase 3.3: KEY_EX handshake. NOT REQ_PAIRED — these *establish* pairing.
+  // Handler verifies HMAC via mesh bootstrap key; loud-rejects bad frames.
+  { ESPNOW_V4_TYPE_KEY_EX_HELLO,     0,                                                    v4hKeyExHello         },
+  { ESPNOW_V4_TYPE_KEY_EX_REPLY,     0,                                                    v4hKeyExReply         },
+  { ESPNOW_V4_TYPE_KEY_EX_CONFIRM,   0,                                                    v4hKeyExConfirm       },
+  // Phase 3.4: SESSION establishment. NOT REQ_PAIRED for the same reason — sessions
+  // are negotiated between peers that have completed KEY_EX (verified via
+  // Ed25519 signature against stored long-term pubkey, no LMK dependency).
+  { ESPNOW_V4_TYPE_SESSION_OPEN,     0,                                                    v4hSessionOpen        },
+  { ESPNOW_V4_TYPE_SESSION_CONFIRM,  0,                                                    v4hSessionConfirm     },
   { ESPNOW_V4_TYPE_TIME_SYNC,        0,                                                    v4h_time_sync         },
   { ESPNOW_V4_TYPE_TEXT,             0,                                                    v4h_text              },
   { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED,                               v4h_cmd               },
@@ -3146,7 +3254,37 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
-  V4RxCtx ctx{recv_info, h, payload, payloadLen, isPaired, deviceName};
+
+  // Phase 3.5a: if the frame is SESSION_FRAME-wrapped, decrypt + replay-check
+  // into a stack buffer, then dispatch the handler with the plaintext payload.
+  // Only invoked when the sender opted in to wrapping (via espnowsessionsend
+  // CLI or future TX-path integration). Non-wrapped frames flow through
+  // unchanged, preserving all existing behaviour.
+  uint8_t plainBuf[ESPNOW_V4_MAX_PAYLOAD];
+  uint16_t plainLen = 0;
+  const uint8_t* dispatchPayload    = payload;
+  uint16_t       dispatchPayloadLen = payloadLen;
+  if (h->flags & ESPNOW_V4_FLAG_SESSION_FRAME) {
+    SessionState* s = sessionFindBySessionId(h->sessionId, recv_info->src_addr);
+    if (!s || s->state != SESSION_ACTIVE) {
+      WARN_ESPNOWF("V4_RX session frame for sessionId=%u from %02X:%02X:%02X:%02X:%02X:%02X "
+                   "— no active session, dropping",
+                   (unsigned)h->sessionId,
+                   recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
+                   recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
+      v4_dispatch_post_cleanup(recv_info, h);
+      return true;
+    }
+    if (!sessionUnwrapFrame(s, h, payload, payloadLen, plainBuf, &plainLen)) {
+      // sessionUnwrapFrame already logged the reason (AEAD-fail or replay).
+      v4_dispatch_post_cleanup(recv_info, h);
+      return true;
+    }
+    dispatchPayload    = plainBuf;
+    dispatchPayloadLen = plainLen;
+  }
+
+  V4RxCtx ctx{recv_info, h, dispatchPayload, dispatchPayloadLen, isPaired, deviceName};
   e->handler(ctx);
   v4_dispatch_post_cleanup(recv_info, h);
   return true;
@@ -3166,7 +3304,12 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // those 2 bytes since the radio already gives us the frame length).
   const uint8_t* payload = data + sizeof(EspNowV4Header);
   uint16_t payloadLen = (uint16_t)(len - sizeof(EspNowV4Header));
-  if (payloadLen > 0 && v4_crc16_ccitt(payload, payloadLen) != h->crc16) {
+  // SESSION_FRAME-wrapped payloads (Phase 3.5) use the AEAD tag as their
+  // integrity check; the CRC field is zeroed on the wire and would never
+  // match the encrypted payload, so skip CRC validation for them.
+  const bool isSessionFrame = (h->flags & ESPNOW_V4_FLAG_SESSION_FRAME) != 0;
+  if (!isSessionFrame && payloadLen > 0 &&
+      v4_crc16_ccitt(payload, payloadLen) != h->crc16) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] REJECTED: CRC mismatch (got=0x%04X expected=0x%04X) payloadLen=%u",
            v4_crc16_ccitt(payload, payloadLen), h->crc16, payloadLen);
     return true;
@@ -6616,11 +6759,7 @@ static bool initEspNow() {
   }
 
   // Allocate ESP-NOW state on first use
-  // Phase 2 multi-mesh init: populate meshes[0] from legacy single-mesh
-  // settings (espnowPassphrase, bondPeerMac, ...) on first boot of V4
-  // Phase 2.1 firmware. Subsequent Phase 2.x sub-commits will rewire the
-  // CLI/web flows to write meshes[] directly; this shim becomes dead code
-  // when no callers still write the legacy fields.
+  // Initialize primary mesh metadata
   initPrimaryMeshFromLegacySettings();
   recomputeAllMeshFingerprints();
 
@@ -6810,11 +6949,23 @@ static bool initEspNow() {
   // Use BROADCAST_PRINTF for user-visible init message (safe, doesn't trigger streaming)
   BROADCAST_PRINTF("[ESP-NOW] Initialized successfully on channel %d", gEspNow->channel);
 
-  // Restore encryption passphrase from settings (if previously set)
-  if (gSettings.espnowPassphrase.length() > 0) {
-    gEspNow->passphrase = gSettings.espnowPassphrase;
-    deriveKeyFromPassphrase(gSettings.espnowPassphrase, gEspNow->derivedKey);
+  // Restore encryption passphrase from the primary mesh
+  String bootPw = gSettings.meshes[0].passphrase;
+  for (uint8_t i = 1; i < Settings::N_MESHES; i++) {
+    if (gSettings.meshes[i].enabled && gSettings.meshes[i].isDefault &&
+        gSettings.meshes[i].passphrase.length() > 0) {
+      bootPw = gSettings.meshes[i].passphrase;
+      break;
+    }
+  }
+  if (bootPw.length() > 0) {
+    gEspNow->passphrase = bootPw;
+    deriveKeyFromPassphrase(bootPw, gEspNow->derivedKey);
     DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Restored encryption passphrase from settings");
+  } else {
+    BROADCAST_PRINTF("[ESP-NOW] WARNING: No passphrase configured — encrypted "
+                     "frames from peers will fail to decrypt. "
+                     "Run 'espnowsetpassphrase primary <pw>'.");
   }
 
   // Add broadcast peer for public heartbeat mode
@@ -7254,8 +7405,240 @@ const char* cmd_espnow_resetstats(const String& argsInput) {
   gEspNow->lastResetTime = millis();
   
   gEspNow->routerMetrics = RouterMetrics();
-  
+
   return "ESP-NOW statistics reset (including router metrics)";
+}
+
+// ============================================================================
+// Phase 3.0 — long-term identity CLI
+// ============================================================================
+// `espnowidentity` is the read-only inspection command — every operator should
+// know how to display the device's public key for OOB pairing verification
+// once 3.3 (KEY_EX) lands. `espnowregenidentity` is destructive; the explicit
+// flag is required so it can't be triggered by autocomplete or a typo. The
+// flag also reads as forward-looking: from 3.2 onward, regenerating identity
+// invalidates every paired peer's trust record, hence "wipe all bonds".
+
+const char* cmd_espnow_identity(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  const EspNowIdentity& id = espnowIdentityGet();
+  if (!id.valid) {
+    return "Error: ESP-NOW identity not initialized (crypto/identity boot path failed)";
+  }
+
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+
+  char pubHex[65];
+  espnowIdentityFormatPubHex(id.pub, pubHex, sizeof(pubHex));
+
+  char* p = getDebugBuffer();
+  snprintf(p, 1024,
+           "ESP-NOW Long-Term Identity:\n"
+           "  MAC:          %02X:%02X:%02X:%02X:%02X:%02X\n"
+           "  Ed25519 pub:  %s\n"
+           "  createdAtSec: %u\n"
+           "  regenCount:   %u",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           pubHex,
+           (unsigned)id.createdAtSec,
+           (unsigned)id.regenCount);
+  return getDebugBuffer();
+}
+
+// Phase 3.3: initiate KEY_EX handshake with a paired-or-unpaired peer MAC.
+// Additive command — does not interact with the existing espnowpair /
+// espnowpairsecure LMK flows. Once the REPLY + CONFIRM round-trip completes,
+// /system/espnow/peers/<mac>/identity.json appears on both ends. Subsequent
+// phases (3.4 SESSION_OPEN, 3.5 SESSION_FRAME) consume that identity.
+const char* cmd_espnow_keyex(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow || !gEspNow->initialized) {
+    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  }
+  CommandArgs a(argsInput);
+  if (a.count() < 1) {
+    return "Usage: espnowkeyex <mac> [<mesh>]\n"
+           "  <mac>   target peer MAC (AA:BB:CC:DD:EE:FF)\n"
+           "  <mesh>  mesh label (defaults to current default mesh)";
+  }
+  String macStr = a.arg(0);
+  String meshLabel = (a.count() >= 2) ? a.arg(1) : String("");
+
+  uint8_t mac[6];
+  if (!parseMacAddress(macStr, mac)) {
+    return "Error: invalid MAC. Expected AA:BB:CC:DD:EE:FF.";
+  }
+
+  bool ok = espnowKeyExInitiate(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
+  if (!ok) {
+    return "Error: KEY_EX initiate failed (see [ERROR][ESP-NOW] log).";
+  }
+
+  if (!ensureDebugBuffer()) return "KEY_EX_HELLO sent. Watch logs for REPLY/CONFIRM.";
+  snprintf(getDebugBuffer(), 1024,
+           "KEY_EX_HELLO sent to %02X:%02X:%02X:%02X:%02X:%02X (mesh '%s').\n"
+           "Handshake completes asynchronously — watch for "
+           "'KEY_EX with ... complete' log line. Peer identity will appear at "
+           "/system/espnow/peers/%02X%02X%02X%02X%02X%02X/identity.json on success.",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           meshLabel.length() > 0 ? meshLabel.c_str() : "default",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return getDebugBuffer();
+}
+
+// Phase 3.4: initiate a SESSION_OPEN handshake. Requires the peer to have a
+// prior KEY_EX identity record on disk (else there's no Ed25519 pubkey to
+// verify the responder's CONFIRM signature against). Result lands in the
+// in-RAM gSessions table; survives until reboot. Phase 3.5 will start
+// requiring an active session for app-level unicast traffic.
+const char* cmd_espnow_sessionopen(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow || !gEspNow->initialized) {
+    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  }
+  CommandArgs a(argsInput);
+  if (a.count() < 1) {
+    return "Usage: espnowsessionopen <mac> [<mesh>]\n"
+           "  Requires prior 'espnowkeyex' completion with the same peer.";
+  }
+  uint8_t mac[6];
+  if (!parseMacAddress(a.arg(0), mac)) {
+    return "Error: invalid MAC. Expected AA:BB:CC:DD:EE:FF.";
+  }
+  String meshLabel = (a.count() >= 2) ? a.arg(1) : String("");
+  bool ok = espnowSessionOpenInitiate(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
+  if (!ok) {
+    return "Error: SESSION_OPEN initiate failed (see [ERROR][ESP-NOW] log).";
+  }
+  if (!ensureDebugBuffer()) return "SESSION_OPEN sent.";
+  snprintf(getDebugBuffer(), 1024,
+           "SESSION_OPEN sent to %02X:%02X:%02X:%02X:%02X:%02X. Handshake completes "
+           "asynchronously — watch for 'SESSION established (initiator)' log line. "
+           "Run 'espnowsessions' to inspect.",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return getDebugBuffer();
+}
+
+// Phase 3.5a: send a TEXT message AEAD-wrapped through the active session
+// to the peer. Demonstrates SESSION_FRAME end-to-end without touching the
+// existing espnowsend / v4_send_frame paths. Requires an ACTIVE session
+// (run espnowsessionopen first).
+const char* cmd_espnow_sessionsend(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized.";
+
+  CommandArgs a(argsInput);
+  if (a.count() < 2) {
+    return "Usage: espnowsessionsend <mac> <message...>";
+  }
+  uint8_t mac[6];
+  if (!parseMacAddress(a.arg(0), mac)) {
+    return "Error: invalid MAC. Expected AA:BB:CC:DD:EE:FF.";
+  }
+  // Reassemble the message from args 1..N so spaces survive.
+  String message = a.arg(1);
+  for (uint8_t i = 2; i < a.count(); i++) {
+    message += " ";
+    message += a.arg(i);
+  }
+  if (message.length() == 0) return "Error: empty message.";
+  // Plaintext + 16-byte tag must fit in ESPNOW_V4_MAX_PAYLOAD (218 B).
+  if (message.length() > (size_t)(ESPNOW_V4_MAX_PAYLOAD - 16)) {
+    return "Error: message too long for SESSION_FRAME (max 202 plaintext bytes).";
+  }
+
+  uint32_t msgId = generateMessageId();
+  uint16_t plaintextLen = (uint16_t)message.length();
+  char err[96] = {0};
+  if (!v4_send_session_wrapped(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
+                               msgId,
+                               reinterpret_cast<const uint8_t*>(message.c_str()),
+                               plaintextLen, 1, err, sizeof(err))) {
+    if (!ensureDebugBuffer()) return "Error: session send failed.";
+    snprintf(getDebugBuffer(), 1024, "Error: %s.", err[0] ? err : "session send failed");
+    return getDebugBuffer();
+  }
+
+  // Re-look up the session just for the success-message details (cheap).
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  SessionState* s = pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
+  if (!ensureDebugBuffer()) return "Session-encrypted TEXT sent.";
+  snprintf(getDebugBuffer(), 1024,
+           "Session-encrypted TEXT sent to %02X:%02X:%02X:%02X:%02X:%02X "
+           "(sessionId=%u seq=%lu cipherLen=%u tagLen=16)",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           s ? (unsigned)s->sessionId : 0,
+           s ? (unsigned long)(s->txSeqNext - 1) : 0,
+           (unsigned)plaintextLen);
+  return getDebugBuffer();
+}
+
+// Phase 3.4: dump all in-RAM SessionState slots — peer, sessionId, age, dir,
+// counters. RAM-only; reboots wipe everything.
+const char* cmd_espnow_sessions(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  char* p   = getDebugBuffer();
+  size_t cap = 1024;
+  int written = snprintf(p, cap, "ESP-NOW Sessions:\n");
+  if (written < 0) return p;
+  uint8_t slots = sessionSlotCount();
+  uint32_t nowMs = (uint32_t)millis();
+  bool any = false;
+  for (uint8_t i = 0; i < slots; i++) {
+    const SessionState* s = sessionAt(i);
+    if (!s) continue;
+    any = true;
+    static const char* kStates[] = { "FREE", "ESTAB", "ACTIVE", "REKEY", "CLOSED" };
+    const char* stateStr = (s->state < 5) ? kStates[s->state] : "?";
+    int n = snprintf(p + written, cap - written,
+                     "  [%u] peer=%02X:%02X:%02X:%02X:%02X:%02X meshId=%u sessionId=%u "
+                     "dir=%c state=%s ageMs=%lu txSeq=%lu rxHWM=%lu\n",
+                     (unsigned)i,
+                     s->peerMac[0], s->peerMac[1], s->peerMac[2],
+                     s->peerMac[3], s->peerMac[4], s->peerMac[5],
+                     (unsigned)s->meshId, (unsigned)s->sessionId,
+                     s->myDirection == 0 ? 'A' : 'B',
+                     stateStr,
+                     (unsigned long)(nowMs - s->establishedAtMs),
+                     (unsigned long)s->txSeqNext,
+                     (unsigned long)s->rxSeqHighWater);
+    if (n < 0 || (size_t)n >= cap - written) break;
+    written += n;
+  }
+  if (!any) snprintf(p + written, cap - written, "  (no active sessions)\n");
+  return p;
+}
+
+const char* cmd_espnow_regenidentity(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String args = argsInput;
+  args.trim();
+  if (args != "--confirm-wipe-all-bonds") {
+    return "Error: destructive command — re-run with: "
+           "espnowregenidentity --confirm-wipe-all-bonds";
+  }
+
+  EspNowIdentity fresh = {};
+  if (!espnowIdentityRegenerate(fresh)) {
+    return "Error: identity regeneration failed (see [ERROR][ESP-NOW] log lines)";
+  }
+
+  if (!ensureDebugBuffer()) return "OK (regenerated, but debug buffer unavailable for echo)";
+  char pubHex[65];
+  espnowIdentityFormatPubHex(fresh.pub, pubHex, sizeof(pubHex));
+  char* p = getDebugBuffer();
+  snprintf(p, 1024,
+           "ESP-NOW identity regenerated.\n"
+           "  Ed25519 pub: %s\n"
+           "  regenCount:  %u\n"
+           "NOTE: all previously paired peers must be re-paired once Phase 3.3 lands.",
+           pubHex,
+           (unsigned)fresh.regenCount);
+  return getDebugBuffer();
 }
 
 // ESP-NOW pair device command
@@ -8597,10 +8980,9 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
 //   espnowmeshes setpassphrase <label> <passphrase>    — change a mesh's passphrase
 //   espnowmeshes rename <oldlabel> <newlabel>          — rename (changes fingerprint!)
 //
-// Mesh slot 0 ("primary") is special: it's auto-populated from the legacy
-// gSettings.espnowPassphrase via the init shim and Fix A's setEspNowPassphrase
-// sync. Removing or renaming it is allowed but breaks comms with existing
-// peers until they too rename.
+// Mesh slot 0 ("primary") is special: it's bootstrapped at boot and holds
+// the primary mesh passphrase. Removing or renaming it is allowed but breaks
+// comms with existing peers until they too rename.
 
 static bool isValidMeshLabel(const String& label) {
   if (label.length() == 0 || label.length() > 16) return false;
@@ -8837,6 +9219,16 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
         // in Phase 3 (Signed Ephemeral DH). Until then the stored passphrase
         // is just persisted metadata, not used for runtime encryption.
       }
+      // Phase 3.1: passphrase changed → cached stretched hash is stale.
+      // Invalidate first (so callers can't accidentally use a stale subkey),
+      // then re-stretch and re-derive synchronously. Stretching is ~1-2 s
+      // so callers experience a brief pause — acceptable for a CLI command.
+      meshKeysInvalidate(i);
+      gSettings.meshes[i].passphraseHashValid = false;
+      if (passphrase.length() > 0) {
+        meshKeysStretchPassphrase(i);
+        meshKeysDerive(i);
+      }
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       if (passphrase.length() == 0) {
         snprintf(getDebugBuffer(), 1024,
@@ -8870,6 +9262,15 @@ static const char* meshesCmd_rename(const String& oldLabel, const String& newLab
     if (gSettings.meshes[i].label == oldLabel) {
       setSetting(gSettings.meshes[i].label, newLabel);
       gSettings.meshes[i].fingerprint = meshFingerprintForLabel(newLabel);
+      // Phase 3.1: salt = SHA256("...salt:" || label). Rename → new salt →
+      // cached hash is wrong for the new label. Recompute now if we have a
+      // passphrase to stretch from.
+      meshKeysInvalidate(i);
+      gSettings.meshes[i].passphraseHashValid = false;
+      if (gSettings.meshes[i].passphrase.length() > 0) {
+        meshKeysStretchPassphrase(i);
+        meshKeysDerive(i);
+      }
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
       snprintf(getDebugBuffer(), 1024,
                "Renamed mesh '%s' -> '%s' (new fp=0x%04X). WARNING: peers in this mesh "
@@ -9912,21 +10313,30 @@ const char* cmd_espnow_send(const String& argsInput) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  // Parse: <name_or_mac> <message>
+  // Parse: <name_or_mac> [--encrypt] <message>
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: espnow send <name_or_mac> <message>";
+  if (!a.hasMinArgs(2)) return "Usage: espnow send <name_or_mac> [--encrypt] <message>";
 
   String target = a.arg(0);
-  String message = a.remaining(0);
+  bool encrypt = false;
+  String message;
+  if (a.arg(1) == "--encrypt") {
+    if (!a.hasMinArgs(3)) return "Usage: espnow send <name_or_mac> --encrypt <message>";
+    encrypt = true;
+    message = a.remaining(1);  // everything after "--encrypt"
+  } else {
+    message = a.remaining(0);  // everything after target
+  }
 
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] message.length()=%d", message.length());
+  DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] message.length()=%d encrypt=%d",
+         message.length(), encrypt ? 1 : 0);
 
   // Resolve device name or MAC address
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(target, mac)) {
     EXT_RAM_BSS_ATTR static char errBuf[256];
-    snprintf(errBuf, sizeof(errBuf), 
-             "Device '%s' not found. Use 'espnowdevices' to see paired devices.", 
+    snprintf(errBuf, sizeof(errBuf),
+             "Device '%s' not found. Use 'espnowdevices' to see paired devices.",
              target.c_str());
     return errBuf;
   }
@@ -9940,19 +10350,40 @@ const char* cmd_espnow_send(const String& argsInput) {
     return "Cannot send message to self. Use a different device MAC address.";
   }
 
-  // V3 binary TEXT message (no JSON, no heap allocation)
   size_t msgLen = message.length();
-  if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
-  
   uint32_t msgId = generateMessageId();
-  
+
+  if (encrypt) {
+    // Plaintext + 16-byte Poly1305 tag must fit in ESPNOW_V4_MAX_PAYLOAD (218 B).
+    if (msgLen > (size_t)(ESPNOW_V4_MAX_PAYLOAD - 16)) {
+      return "Error: --encrypt message too long (max 202 plaintext bytes; fragment support is Phase 3.5+).";
+    }
+    char err[96] = {0};
+    if (!v4_send_session_wrapped(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
+                                 msgId,
+                                 (const uint8_t*)message.c_str(), (uint16_t)msgLen,
+                                 1, err, sizeof(err))) {
+      if (!ensureDebugBuffer()) return "Error: encrypted send failed.";
+      snprintf(getDebugBuffer(), 1024, "Error: %s.", err[0] ? err : "encrypted send failed");
+      return getDebugBuffer();
+    }
+    if (!ensureDebugBuffer()) return "Encrypted message sent";
+    snprintf(getDebugBuffer(), 1024,
+             "Encrypted message sent via SESSION_FRAME (ID: %lu, %u plaintext bytes)",
+             (unsigned long)msgId, (unsigned)msgLen);
+    return getDebugBuffer();
+  }
+
+  // Plaintext path (unchanged).
+  if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
+
   bool success = false;
   for (int attempt = 0; attempt < 2; attempt++) {
     success = v4_send_frame(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
                             (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1);
     if (success) break;
   }
-  
+
   if (success) {
     if (!ensureDebugBuffer()) return "Message sent";
     snprintf(getDebugBuffer(), 1024, "Message sent via V3 (ID: %lu)", (unsigned long)msgId);
@@ -10720,7 +11151,15 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowrouterstats", "Show message router statistics and metrics.", false, cmd_espnow_routerstats },
   { "espnowbroadcaststats", "Show broadcast ACK tracking statistics.", false, cmd_espnow_broadcaststats },
   { "espnowresetstats", "Reset ESP-NOW statistics counters.", true, cmd_espnow_resetstats },
-  
+
+  // ---- ESP-NOW Cryptographic Identity (Phase 3.0/3.3) ----
+  { "espnowidentity", "Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount).", false, cmd_espnow_identity },
+  { "espnowregenidentity", "Regenerate Ed25519 identity. Requires '--confirm-wipe-all-bonds'.", true, cmd_espnow_regenidentity, "Usage: espnowregenidentity --confirm-wipe-all-bonds" },
+  { "espnowkeyex", "Initiate KEY_EX handshake with a peer (Phase 3.3 — runs alongside legacy pairing).", true, cmd_espnow_keyex, "Usage: espnowkeyex <mac> [<mesh>]" },
+  { "espnowsessionopen", "Initiate SESSION handshake (Phase 3.4 — requires prior espnowkeyex).", true, cmd_espnow_sessionopen, "Usage: espnowsessionopen <mac> [<mesh>]" },
+  { "espnowsessions", "Show in-RAM session state (peer, sessionId, dir, age, counters).", false, cmd_espnow_sessions },
+  { "espnowsessionsend", "Send AEAD-wrapped TEXT through active session (Phase 3.5a demo).", true, cmd_espnow_sessionsend, "Usage: espnowsessionsend <mac> <message>" },
+
   // ---- ESP-NOW Initialization & Pairing ----
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },
   { "closeespnow", "Deinitialize ESP-NOW and free resources.", true, cmd_espnow_deinit },
@@ -10857,10 +11296,6 @@ static const SettingEntry espnowSettingEntries[] = {
   { "friendlyName", SETTING_STRING, &gSettings.espnowFriendlyName, 0, 0, "", 0, 0, "Friendly Name", nullptr, false, "identity", "espnowfriendlyname" },
   { "stationary", SETTING_BOOL, &gSettings.espnowStationary, false, 0, nullptr, 0, 1, "Stationary", nullptr, false, "identity", "espnowstationary" },
   { "firstTimeSetup",             SETTING_BOOL,   &gSettings.espnowFirstTimeSetup,       false, 0, nullptr, 0, 1, "First Time Setup", nullptr, false, nullptr, "espnowfirsttimesetup" },
-  // NOTE: the legacy "passphrase" settings-registry entry was removed —
-  // passphrase is now mesh-scoped. Use 'espnowsetpassphrase <mesh> <pw>'
-  // from the CLI, or the mesh-management UI (TODO). Auto-saving from
-  // Settings JSON to the legacy gSettings.espnowPassphrase field is gone.
   { "meshRole", SETTING_INT, &gSettings.meshRole, 0, 0, nullptr, 0, 2, "Mesh Role", nullptr, false, "mesh", "espnowmeshrole" },
   { "masterMAC", SETTING_STRING, &gSettings.meshMasterMAC, 0, 0, "", 0, 0, "Master MAC", nullptr, false, "mesh", "espnowmeshmaster" },
   { "backupMAC", SETTING_STRING, &gSettings.meshBackupMAC, 0, 0, "", 0, 0, "Backup MAC", nullptr, false, "mesh", "espnowmeshbackup" },

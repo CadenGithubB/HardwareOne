@@ -278,6 +278,101 @@ struct __attribute__((packed)) V4PayloadCmdResp {
   char    result[ESPNOW_V4_MAX_PAYLOAD - 1]; // Null-terminated result (truncated if needed)
 };
 
+// ---- Phase 3.3 — KEY_EX handshake payloads ---------------------------------
+//
+// Three-way handshake between two peers in the same mesh. Authenticates via
+// HMAC-SHA256 over (meshFingerprint || senderMac || senderPubEd25519) keyed by
+// the mesh bootstrap key (Blake2b subkey of the PBKDF2-stretched passphrase —
+// see System_ESPNow_MeshKeys). Only peers that know the passphrase can produce
+// a valid HMAC.
+//
+// On wire, each frame carries:
+//   ESPNOW_V4_FLAG_HANDSHAKE  (so RX path knows it's plaintext-but-authenticated)
+//   header.type               (KEY_EX_HELLO / KEY_EX_REPLY / KEY_EX_CONFIRM)
+//   header.meshFingerprint    (RX dispatches mesh lookup off this)
+//
+// Flow:
+//   A → B:  KEY_EX_HELLO   (A's pubkey + HMAC)
+//   B → A:  KEY_EX_REPLY   (B's pubkey + HMAC) — only if A's HMAC verified
+//   A → B:  KEY_EX_CONFIRM (status byte + pubkey fingerprint for OOB display)
+//
+// On success both sides persist each other's pubkey to
+//   /system/espnow/peers/<MAC>/identity.json
+// SESSION establishment (X25519 ephemeral DH, AEAD keys) happens in Phase 3.4
+// — KEY_EX in 3.3 only proves "this peer knows the mesh passphrase + owns
+// this Ed25519 pubkey".
+
+struct __attribute__((packed)) V4PayloadKeyExHello {
+  uint16_t meshFingerprint;     // also redundant with header.meshFingerprint
+  uint8_t  senderMac[6];        // redundant with header.origin (HMAC input clarity)
+  uint8_t  senderPubEd25519[32];
+  uint8_t  hmac[32];            // HMAC-SHA256 over (meshFingerprint || senderMac || pub)
+                                //   keyed by mesh bootstrap key
+};
+static_assert(sizeof(V4PayloadKeyExHello) == 72, "V4PayloadKeyExHello layout");
+
+struct __attribute__((packed)) V4PayloadKeyExReply {
+  uint16_t meshFingerprint;
+  uint8_t  responderMac[6];
+  uint8_t  responderPubEd25519[32];
+  uint8_t  hmac[32];            // same construction as HELLO, with responder fields
+};
+static_assert(sizeof(V4PayloadKeyExReply) == 72, "V4PayloadKeyExReply layout");
+
+struct __attribute__((packed)) V4PayloadKeyExConfirm {
+  uint16_t meshFingerprint;
+  uint8_t  confirmerMac[6];
+  uint8_t  status;              // 0 = paired OK, 1 = HMAC fail, 2 = already-paired-different-key
+  uint8_t  _pad;
+  uint8_t  pubFingerprint[8];   // first 8 bytes of own pub key (for OOB display verification)
+};
+static_assert(sizeof(V4PayloadKeyExConfirm) == 18, "V4PayloadKeyExConfirm layout");
+
+// ---- Phase 3.4 — SESSION establishment payloads -----------------------------
+//
+// Signed Ephemeral Diffie-Hellman (SIGMA-I pattern). Both sides have already
+// exchanged long-term Ed25519 pubkeys via KEY_EX (3.3) and have those keys
+// persisted at /system/espnow/peers/<MAC>/identity.json. SESSION_OPEN/CONFIRM
+// negotiates fresh ephemeral X25519 keys, signs them under the long-term
+// identity, and derives forward-secret AEAD session keys.
+//
+// Transcript signed:
+//   OPEN:    "v4-sopen:" || sessionId(2) || initMac(6) || respMac(6) ||
+//                          ephX25519Pub(32) || nonceA(16)
+//   CONFIRM: "v4-sconf:" || sessionId(2) || respMac(6) || initMac(6) ||
+//                          ephX25519Pub(32) || nonceA(16) || nonceB(16)
+//
+// nonceA is sent in OPEN and echoed back inside the CONFIRM signature input
+// — that's the freshness binding from A to B. nonceB is added on the B side.
+// Total signed length: OPEN = 9 + 2 + 6 + 6 + 32 + 16 = 71 bytes; CONFIRM = 88.
+//
+// Flow:
+//   A → B: SESSION_OPEN    (sessionId, ephPub_A, nonceA, sig over OPEN transcript)
+//   B → A: SESSION_CONFIRM (sessionId, ephPub_B, nonceB, sig over CONFIRM transcript)
+// On success both sides hold matching aeadKeyAtoB / aeadKeyBtoA derived via
+// Blake2b KDF (contexts "esp-AtoB" / "esp-BtoA") from the X25519 shared secret.
+
+struct __attribute__((packed)) V4PayloadSessionOpen {
+  uint16_t sessionId;            // initiator-chosen, 16-bit random non-zero
+  uint8_t  initiatorMac[6];
+  uint8_t  responderMac[6];
+  uint8_t  ephX25519Pub[32];
+  uint8_t  nonceA[16];
+  uint8_t  signature[64];        // Ed25519 over "v4-sopen:"||sessionId||initMac||respMac||eph||nonceA
+};
+static_assert(sizeof(V4PayloadSessionOpen) == 126, "V4PayloadSessionOpen layout");
+
+struct __attribute__((packed)) V4PayloadSessionConfirm {
+  uint16_t sessionId;            // mirrors initiator's choice
+  uint8_t  responderMac[6];
+  uint8_t  initiatorMac[6];
+  uint8_t  ephX25519Pub[32];
+  uint8_t  nonceA[16];           // echoed from OPEN — freshness binding
+  uint8_t  nonceB[16];
+  uint8_t  signature[64];        // Ed25519 over "v4-sconf:"||sessionId||respMac||initMac||eph||nonceA||nonceB
+};
+static_assert(sizeof(V4PayloadSessionConfirm) == 142, "V4PayloadSessionConfirm layout");
+
 // File transfer payloads
 struct __attribute__((packed)) V4PayloadFileStart {
   uint32_t fileSize;      // Total file size in bytes

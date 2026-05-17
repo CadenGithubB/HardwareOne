@@ -150,7 +150,12 @@ set(hardwareone_srcs
         System_Command.cpp
         System_Debug.cpp
         System_ESPNow.cpp
+        System_ESPNow_Crypto.cpp
+        System_ESPNow_Handlers_Crypto.cpp
+        System_ESPNow_Identity.cpp
+        System_ESPNow_MeshKeys.cpp
         System_ESPNow_Sensors.cpp
+        System_ESPNow_Sessions.cpp
         System_FileManager.cpp
         System_Filesystem.cpp
         System_FirstTimeSetup.cpp
@@ -296,6 +301,7 @@ set(hardwareone_requires
         fatfs
         sdmmc
         esp_driver_sdspi
+        espressif__libsodium
 )
 
 if(HW_CFG_ENABLE_MQTT GREATER 0)

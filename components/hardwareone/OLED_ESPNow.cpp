@@ -1787,7 +1787,7 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
         value = gSettings.espnowStationary ? "Yes" : "No";
         break;
       case 6: // Passphrase
-        value = gSettings.espnowPassphrase.length() > 0 ? "****" : "(not set)";
+        value = gSettings.meshes[0].passphrase.length() > 0 ? "****" : "(not set)";
         break;
       case 7: // Role
         if (gSettings.meshRole == MESH_ROLE_MASTER) value = "Master";

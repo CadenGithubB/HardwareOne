@@ -11,7 +11,13 @@
 
 constexpr uint32_t CMD_EXEC_STACK_WORDS = 6144;      // ~24KB (automation run + debug vsnprintf frames need deep stack)
 constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 2765;  // ~11KB - reduced 10%
-constexpr uint32_t ESPNOW_HB_STACK_WORDS = 5530;     // ~22KB (mesh processing + debug logging + multi-peer scaling) - reduced 10%
+constexpr uint32_t ESPNOW_HB_STACK_WORDS = 5530;     // ~22KB. Phase 3.4+ Ed25519/X25519 work is NOT done here:
+                                                     // SESSION_OPEN/CONFIRM RX handlers PSRAM-copy the payload and
+                                                     // submitDeferredToCmdExec() the verify→keygen→ECDH→KDF→sign chain
+                                                     // onto cmd_exec_task (24KB stack, single-threaded, HWM ~17KB →
+                                                     // crypto peak ~5KB fits in existing headroom). Keeping this task
+                                                     // small (~22KB) saves DRAM; do not bump back up without first
+                                                     // checking whether the heavy work has been re-inlined.
 constexpr uint32_t THERMAL_STACK_WORDS = 4096;       // ~16KB
 constexpr uint32_t IMU_STACK_WORDS = 4096;           // ~16KB (BNO055 init retries need extra stack)
 constexpr uint32_t TOF_STACK_WORDS = 3072;           // ~12KB

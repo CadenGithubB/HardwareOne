@@ -1412,7 +1412,7 @@ void buildSystemInfoJson(JsonDocument& doc) {
     espnow["mesh"] = gSettings.espnowmesh;
     espnow["deviceName"] = gSettings.espnowDeviceName;
     espnow["encrypted"] = (gEspNow && gEspNow->encryptionEnabled);
-    espnow["passphraseSet"] = (gSettings.espnowPassphrase.length() > 0);
+    espnow["passphraseSet"] = (gSettings.meshes[0].passphrase.length() > 0);
 #if ENABLE_BONDED_MODE
     JsonObject bond = conn["bond"].to<JsonObject>();
     bond["enabled"] = gSettings.bondModeEnabled;
