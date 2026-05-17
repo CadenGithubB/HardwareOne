@@ -38,6 +38,14 @@
 #define ESPNOW_V4_AEAD_TAG_LEN 16
 #define ESPNOW_V4_MAX_PLAINTEXT (ESPNOW_V4_MAX_PAYLOAD - ESPNOW_V4_AEAD_TAG_LEN)  // 202 bytes
 
+// Phase 3.5 task #32 — BROADCAST_AUTH tag is HMAC-SHA256 (32 bytes) appended
+// to the broadcast payload. Receivers verify against the mesh group key (the
+// "esp-grup" subkey from Phase 3.1's mesh-key derivation). Auth-only — the
+// payload stays plaintext; only forge-resistance, not confidentiality.
+#define ESPNOW_V4_BROADCAST_AUTH_TAG_LEN 32
+#define ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT \
+            (ESPNOW_V4_MAX_PAYLOAD - ESPNOW_V4_BROADCAST_AUTH_TAG_LEN)  // 186 bytes
+
 // ---- Opcode enum -----------------------------------------------------------
 // Category-based numbering with reserved slots for future phases.
 // Ranges:
