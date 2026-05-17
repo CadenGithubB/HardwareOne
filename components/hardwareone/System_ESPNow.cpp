@@ -836,34 +836,32 @@ String buildBondedCommandPayload(const String& command) {
 }
 
 // Add ESP-NOW peer with optional encryption
-static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool useEncryption, const uint8_t* encryptionKey) {
-  // Check if peer already exists
+// Phase 3.5 step 4 — LMK removed. Peers are now ALWAYS added unencrypted at
+// the radio layer; confidentiality+integrity come from the application-layer
+// SESSION_FRAME AEAD (Phase 3.4/3.5). The `useEncryption` and `encryptionKey`
+// arguments are kept in the signature to avoid churn at every call site, but
+// they're ignored — `peerInfo.encrypt = false` unconditionally.
+// Note: bond-mode token derivation is a separate concern and not touched here.
+static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool /*useEncryption*/,
+                                        const uint8_t* /*encryptionKey*/) {
   if (esp_now_is_peer_exist(mac)) {
-    // Remove existing peer first
     esp_now_del_peer(mac);
   }
 
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, mac, 6);
   peerInfo.channel = gEspNow->channel;
-  peerInfo.ifidx = WIFI_IF_STA;
+  peerInfo.ifidx   = WIFI_IF_STA;
+  peerInfo.encrypt = false;  // LMK removed — confidentiality via SESSION_FRAME
 
-  if (useEncryption && encryptionKey) {
-    peerInfo.encrypt = true;
-    memcpy(peerInfo.lmk, encryptionKey, 16);  // Local Master Key
-
-    DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Adding encrypted peer: %s", formatMacAddress(mac).c_str());
-  } else {
-    peerInfo.encrypt = false;
-    DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Adding unencrypted peer: %s", formatMacAddress(mac).c_str());
-  }
+  DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Adding peer: %s (radio plaintext; AEAD via session if any)",
+         formatMacAddress(mac).c_str());
 
   esp_err_t result = esp_now_add_peer(&peerInfo);
   if (result != ESP_OK) {
     DEBUGF(DEBUG_ESPNOW_STREAM, "[ESP-NOW] Failed to add peer: %d", result);
     return false;
   }
-
   return true;
 }
 
@@ -1487,6 +1485,90 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
     if (errOut && errOutLen) snprintf(errOut, errOutLen, "esp_now_send rc=%d", (int)rc);
     return false;
   }
+  return true;
+}
+
+// Phase 3.5 step 3 — encrypted send with auto-kick + queue.
+// Behaviour:
+//   - If a peer identity is on file AND an ACTIVE session exists, wrap & send
+//     immediately (same path as v4_send_session_wrapped).
+//   - If a peer identity exists but no ACTIVE session, queue the frame and
+//     kick a SESSION_OPEN (unless one is already ESTABLISHING for this peer,
+//     in which case just queue). The frame will drain on SESSION_CONFIRM.
+//   - If no peer identity exists, hard-fail — we can't encrypt to a peer
+//     whose long-term pubkey we don't know.
+//
+// Returns true on either path (sent immediately OR queued for later). Returns
+// false only on hard errors (no peer identity, payload too large, queue full).
+// `outStatus` (if non-null) is filled with a short status string:
+//   "sent"     — immediately wrapped & sent
+//   "queued"   — parked for drain after SESSION_OPEN completes
+//   "<error>"  — failure reason on false return
+bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
+                                uint32_t msgId,
+                                const uint8_t* plaintext, uint16_t plaintextLen,
+                                uint8_t ttl,
+                                char* outStatus, size_t outStatusLen) {
+  auto setStatus = [&](const char* msg) {
+    if (outStatus && outStatusLen) { strncpy(outStatus, msg, outStatusLen - 1); outStatus[outStatusLen - 1] = 0; }
+  };
+  if (!dst || (plaintextLen > 0 && !plaintext)) {
+    setStatus("invalid args");
+    return false;
+  }
+  if (plaintextLen > (uint16_t)(ESPNOW_V4_MAX_PAYLOAD - 16)) {
+    setStatus("payload too large for SESSION_FRAME (max 202 plaintext bytes)");
+    return false;
+  }
+  const PeerIdentity* pid = peerIdentityFindByMac(dst);
+  if (!pid) {
+    setStatus("no peer identity — run espnowkeyex first");
+    return false;
+  }
+  SessionState* s = sessionFindByPeer(dst, pid->meshId);
+  if (s && s->state == SESSION_ACTIVE) {
+    // Fast path — already have an active session.
+    char err[96] = {0};
+    bool ok = v4_send_session_wrapped(dst, type, baseFlags, msgId,
+                                      plaintext, plaintextLen, ttl, err, sizeof(err));
+    if (!ok) {
+      setStatus(err[0] ? err : "wrap-or-send failed");
+      return false;
+    }
+    setStatus("sent");
+    return true;
+  }
+  // Slow path — no active session. Queue the frame, then kick a SESSION_OPEN
+  // unless one is already in flight (s exists and is ESTABLISHING).
+  if (!pendingFrameQueue(dst, type, baseFlags, msgId, ttl, plaintext, plaintextLen)) {
+    setStatus("pending queue full");
+    return false;
+  }
+  if (!s || s->state == SESSION_FREE || s->state == SESSION_CLOSED) {
+    // No handshake started yet — kick one.
+    if (!espnowSessionOpenInitiate(dst, nullptr)) {
+      // Initiate failed (e.g., peer identity vanished mid-call). Yank the
+      // frame back out of the queue rather than leaving it to expire.
+      // pendingFrameDrainForPeer is a hammer — but it'll log the drain
+      // failure (no session) which is informative. Simpler is to just let
+      // the timeout sweep eat it; the user already got an error log from
+      // espnowSessionOpenInitiate.
+      setStatus("queued; SESSION_OPEN kick failed (see log)");
+      return true;  // still "queued" — the timeout sweep will clean it up
+    }
+    INFO_ESPNOWF("encrypted send: no session yet for %02X:%02X:%02X:%02X:%02X:%02X — "
+                 "queued msgId=%lu, kicked SESSION_OPEN",
+                 dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
+                 (unsigned long)msgId);
+  } else {
+    // Already ESTABLISHING / REKEYING — just queue, the existing handshake
+    // will drain us.
+    INFO_ESPNOWF("encrypted send: handshake already in flight to %02X:%02X:%02X:%02X:%02X:%02X — "
+                 "queued msgId=%lu",
+                 dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
+                 (unsigned long)msgId);
+  }
+  setStatus("queued");
   return true;
 }
 
@@ -2122,7 +2204,12 @@ static void v4h_time_sync(const V4RxCtx& ctx) {
 
 // TEXT — deferred to task via ring buffer (gEspNow->textQueue).
 static void v4h_text(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message detected, payload: %.80s",
+  // Bound the printf by both 80 chars AND the actual payloadLen — the
+  // SESSION_FRAME unwrap path delivers a non-null-terminated buffer, so a
+  // plain `%.80s` would scan past the valid bytes into adjacent stack memory.
+  int printLen = ctx.payloadLen > 80 ? 80 : (int)ctx.payloadLen;
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message detected, payload: %.*s",
+         ctx.payloadLen > 0 ? printLen : 7,
          ctx.payloadLen > 0 ? (const char*)ctx.payload : "(empty)");
   if (ctx.payloadLen > 0 && ctx.payloadLen <= ESPNOW_V4_MAX_PAYLOAD && gEspNow) {
     int head = gEspNow->textQueueHead;
@@ -6014,6 +6101,10 @@ void processMeshHeartbeats() {
   }
 
   if (!gEspNow || !gEspNow->initialized || gMeshActivitySuspended) return;
+
+  // 1b. Phase 3.5 — sweep expired pending encrypted frames (queued while
+  // waiting for SESSION_OPEN that never completed). 5-second budget per slot.
+  pendingFrameTimeoutSweep((uint32_t)millis());
 
   // 2. Send periodic V3 mesh heartbeat (if we have active peers OR paired devices)
   static const uint32_t HB_INTERVAL_MS = 5000;
@@ -10313,19 +10404,27 @@ const char* cmd_espnow_send(const String& argsInput) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  // Parse: <name_or_mac> [--encrypt] <message>
+  // Parse: <name_or_mac> [--plaintext | --encrypt] <message>
+  // Default (no flag) = encrypted via SESSION_FRAME, auto-kicking SESSION_OPEN
+  // if no active session yet. --plaintext = explicit opt-out (the old default).
+  // --encrypt is still accepted as a no-op for muscle memory after step-1's
+  // opt-in flag became the default in step-3.
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: espnow send <name_or_mac> [--encrypt] <message>";
+  if (!a.hasMinArgs(2)) return "Usage: espnow send <name_or_mac> [--plaintext|--encrypt] <message>";
 
   String target = a.arg(0);
-  bool encrypt = false;
+  bool encrypt = true;  // default ON in step 3
   String message;
-  if (a.arg(1) == "--encrypt") {
+  if (a.arg(1) == "--plaintext") {
+    if (!a.hasMinArgs(3)) return "Usage: espnow send <name_or_mac> --plaintext <message>";
+    encrypt = false;
+    message = a.remaining(1);
+  } else if (a.arg(1) == "--encrypt") {
     if (!a.hasMinArgs(3)) return "Usage: espnow send <name_or_mac> --encrypt <message>";
     encrypt = true;
-    message = a.remaining(1);  // everything after "--encrypt"
+    message = a.remaining(1);
   } else {
-    message = a.remaining(0);  // everything after target
+    message = a.remaining(0);
   }
 
   DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] message.length()=%d encrypt=%d",
@@ -10356,21 +10455,35 @@ const char* cmd_espnow_send(const String& argsInput) {
   if (encrypt) {
     // Plaintext + 16-byte Poly1305 tag must fit in ESPNOW_V4_MAX_PAYLOAD (218 B).
     if (msgLen > (size_t)(ESPNOW_V4_MAX_PAYLOAD - 16)) {
-      return "Error: --encrypt message too long (max 202 plaintext bytes; fragment support is Phase 3.5+).";
+      return "Error: encrypted message too long (max 202 plaintext bytes; fragment support is Phase 3.5+).";
     }
-    char err[96] = {0};
-    if (!v4_send_session_wrapped(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
-                                 msgId,
-                                 (const uint8_t*)message.c_str(), (uint16_t)msgLen,
-                                 1, err, sizeof(err))) {
+    char status[96] = {0};
+    if (!v4_send_encrypted_or_queue(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
+                                    msgId,
+                                    (const uint8_t*)message.c_str(), (uint16_t)msgLen,
+                                    1, status, sizeof(status))) {
       if (!ensureDebugBuffer()) return "Error: encrypted send failed.";
-      snprintf(getDebugBuffer(), 1024, "Error: %s.", err[0] ? err : "encrypted send failed");
+      snprintf(getDebugBuffer(), 1024, "Error: %s.", status[0] ? status : "encrypted send failed");
       return getDebugBuffer();
     }
     if (!ensureDebugBuffer()) return "Encrypted message sent";
-    snprintf(getDebugBuffer(), 1024,
-             "Encrypted message sent via SESSION_FRAME (ID: %lu, %u plaintext bytes)",
-             (unsigned long)msgId, (unsigned)msgLen);
+    // Use the literal phrase "message sent" in both branches so the web UI's
+    // substring-based parser (WebPage_ESPNow.h doSendMessage) shows ✓✓ Delivered
+    // for both warm and queued paths. The queued case appends a parenthetical
+    // note for users reading the raw CLI text directly.
+    if (strcmp(status, "sent") == 0) {
+      snprintf(getDebugBuffer(), 1024,
+               "Encrypted message sent via SESSION_FRAME (ID: %lu, %u plaintext bytes)",
+               (unsigned long)msgId, (unsigned)msgLen);
+    } else if (strcmp(status, "queued") == 0) {
+      snprintf(getDebugBuffer(), 1024,
+               "Encrypted message sent (queued for SESSION_OPEN, drains on CONFIRM ~200ms; "
+               "ID: %lu, %u plaintext bytes)",
+               (unsigned long)msgId, (unsigned)msgLen);
+    } else {
+      snprintf(getDebugBuffer(), 1024,
+               "Encrypted send: %s (ID: %lu)", status, (unsigned long)msgId);
+    }
     return getDebugBuffer();
   }
 
