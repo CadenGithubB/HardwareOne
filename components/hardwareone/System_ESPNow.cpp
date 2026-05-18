@@ -29,6 +29,7 @@
 #include "System_ESPNow.h"
 #include "System_ESPNow_Wire.h"      // V3 wire schema (Phase 0 extraction)
 #include "System_ESPNow_Crypto.h"    // Phase 3.0: libsodium init / RNG / Ed25519 keygen
+#include "System_ESPNow_Files.h"    // Phase 4: concurrent file-transfer slot table
 #include <sodium.h>                 // Phase 3.5 task #32: sodium_memcmp (constant-time)
 #include "System_ESPNow_Handlers_Crypto.h"  // Phase 3.3: KEY_EX handlers + initiator
 #include "System_ESPNow_Identity.h"  // Phase 3.0: long-term Ed25519 identity load/store
@@ -340,24 +341,9 @@ uint32_t gLastHeartbeatSentMs = 0;
 
 static MeshRetryEntry gMeshRetryQueue[MESH_RETRY_QUEUE_SIZE];
 // Note: gMeshRetryMutex is now defined in mutex_system.cpp
-// ESP-NOW file transfer support
-struct FileTransfer {
-  char filename[64];        // Destination filename
-  uint32_t totalSize;       // Total file size in bytes
-  uint32_t receivedBytes;   // Bytes received so far
-  uint16_t totalChunks;     // Expected number of chunks
-  uint16_t receivedChunks;  // Chunks received so far
-  uint16_t chunkSize;
-  char hash[16];            // Transfer hash for validation
-  unsigned long startTime;  // Transfer start time
-  bool active;              // Transfer in progress
-  uint8_t senderMac[6];     // MAC address of sender
-  uint8_t* dataBuffer;      // PSRAM buffer for incoming file data (avoids callback filesystem I/O)
-  uint32_t bufferSize;      // Size of allocated buffer
-  uint8_t* chunkMap;
-  uint16_t chunkMapBytes;
-};
-static FileTransfer* gActiveFileTransfer = nullptr;
+// Phase 4: per-transfer state lives in System_ESPNow_Files.{h,cpp}'s slot
+// table. The old single-flight FileTransfer struct + gActiveFileTransfer
+// pointer + gFileTransferLocked flag are gone.
 
 // ============================================================================
 // ESP-NOW Mesh Chunking Pattern (New Architecture)
@@ -375,11 +361,9 @@ static TopologyStream gTopoStreams[MAX_CONCURRENT_TOPO_STREAMS];  // Array of co
 EXT_RAM_BSS_ATTR static TopoDeviceEntry gTopoDeviceCache[MAX_TOPO_DEVICE_CACHE];
 static BufferedPeerMessage gPeerBuffer[MAX_BUFFERED_PEERS];
 
-// ESP-NOW file transfer support (NEW PATTERN - Single Stream with Lock)
-// Only one file transfer at a time, requires handshake to acquire lock
-static bool gFileTransferLocked = false;           // File transfer lock state
-static uint8_t gFileTransferOwnerMac[6] = {0};     // MAC of device holding the lock
-static unsigned long gFileTransferLockTime = 0;    // When lock was acquired (for timeout)
+// Phase 4: per-transfer state moved to System_ESPNow_Files (multi-slot).
+// gFileTransferLocked / gFileTransferOwnerMac / gFileTransferLockTime
+// were removed — the slot table is the new concurrency primitive.
 
 // ESP-NOW output streaming support - MIGRATED TO gEspNow struct
 static const unsigned long STREAM_MIN_INTERVAL_MS = 100;  // Rate limit: max 10 messages/second
@@ -3106,196 +3090,108 @@ static void v4h_stream(const V4RxCtx& ctx) {
 // FILE_START — initialize a file transfer; allocate PSRAM buffer + chunk bitmap.
 // Rejects if a different sender already has an active transfer. Stale transfers
 // (>30s) and same-sender restarts are tolerated by cleaning up first.
+// Phase 4: route into the multi-slot file-transfer table. Single global
+// gActiveFileTransfer pointer + gFileTransferLocked flag are gone; up to
+// kFileSlots concurrent transfers from distinct (peerMac, msgId) pairs.
+// Same-destination-path conflict rejected here via fileSlotsAllocate.
 static void v4h_file_start(const V4RxCtx& ctx) {
   if (ctx.payloadLen < sizeof(V4PayloadFileStart)) return;
   const V4PayloadFileStart* fs = (const V4PayloadFileStart*)ctx.payload;
 
-  if (gActiveFileTransfer) {
-    bool isStale = (millis() - gActiveFileTransfer->startTime) > 30000;
-    bool sameSender = (memcmp(gActiveFileTransfer->senderMac, ctx.recv_info->src_addr, 6) == 0);
-    if (!isStale && !sameSender) {
-      ERROR_ESPNOWF("[V4_FILE] Rejected: transfer already in progress from different sender");
-      return;
-    }
-    if (gActiveFileTransfer->chunkMap) {
-      heap_caps_free(gActiveFileTransfer->chunkMap);
-      gActiveFileTransfer->chunkMap = nullptr;
-    }
-    if (gActiveFileTransfer->dataBuffer) {
-      heap_caps_free(gActiveFileTransfer->dataBuffer);
-    }
-    delete gActiveFileTransfer;
-    gActiveFileTransfer = nullptr;
-  }
-
-  if (fs->fileSize > 65536) {
-    ERROR_ESPNOWF("[V4_FILE] File too large for buffer: %lu bytes (max 64KB)", (unsigned long)fs->fileSize);
+  const char* err = nullptr;
+  FileTransferSlot* slot = fileSlotsAllocate(ctx.recv_info->src_addr,
+                                              ctx.h->msgId,
+                                              fs->filename,
+                                              fs->fileSize,
+                                              fs->chunkCount,
+                                              fs->chunkSize,
+                                              &err);
+  if (!slot) {
+    ERROR_ESPNOWF("[V4_FILE] FILE_START rejected for '%s' from %s: %s",
+                  fs->filename, ctx.deviceName, err ? err : "(unknown)");
     return;
   }
-  if (fs->fileSize == 0) {
-    DEBUG_ESPNOWF("[V4_FILE] Warning: zero-size file transfer: %s", fs->filename);
-  }
-  if (fs->chunkSize == 0 || (fs->chunkCount == 0 && fs->fileSize > 0)) {
-    ERROR_ESPNOWF("[V4_FILE] Rejected invalid chunk params: chunkSize=%u chunkCount=%u",
-                  (unsigned)fs->chunkSize, (unsigned)fs->chunkCount);
-    return;
-  }
-
-  gActiveFileTransfer = new FileTransfer();
-  if (!gActiveFileTransfer) {
-    ERROR_ESPNOWF("[V4_FILE] Failed to allocate FileTransfer");
-    return;
-  }
-  memset(gActiveFileTransfer, 0, sizeof(FileTransfer));
-
-  uint32_t allocSize = fs->fileSize > 0 ? fs->fileSize : 1;
-  gActiveFileTransfer->dataBuffer = (uint8_t*)heap_caps_malloc(allocSize, MALLOC_CAP_SPIRAM);
-  if (!gActiveFileTransfer->dataBuffer) {
-    ERROR_ESPNOWF("[V4_FILE] Failed to allocate %lu byte PSRAM buffer", (unsigned long)allocSize);
-    delete gActiveFileTransfer;
-    gActiveFileTransfer = nullptr;
-    return;
-  }
-  gActiveFileTransfer->bufferSize = fs->fileSize;
-
-  strncpy(gActiveFileTransfer->filename, fs->filename, 63);
-  gActiveFileTransfer->filename[63] = '\0';
-  gActiveFileTransfer->totalSize = fs->fileSize;
-  gActiveFileTransfer->totalChunks = fs->chunkCount;
-  gActiveFileTransfer->chunkSize = fs->chunkSize;
-  gActiveFileTransfer->receivedBytes = 0;
-  gActiveFileTransfer->receivedChunks = 0;
-
-  gActiveFileTransfer->chunkMap = nullptr;
-  gActiveFileTransfer->chunkMapBytes = (uint16_t)((fs->chunkCount + 7) / 8);
-  if (gActiveFileTransfer->chunkMapBytes == 0) gActiveFileTransfer->chunkMapBytes = 1;
-  gActiveFileTransfer->chunkMap = (uint8_t*)heap_caps_malloc(gActiveFileTransfer->chunkMapBytes, MALLOC_CAP_8BIT);
-  if (!gActiveFileTransfer->chunkMap) {
-    ERROR_ESPNOWF("[V4_FILE] Failed to allocate chunk bitmap (%u bytes)", (unsigned)gActiveFileTransfer->chunkMapBytes);
-    heap_caps_free(gActiveFileTransfer->dataBuffer);
-    delete gActiveFileTransfer;
-    gActiveFileTransfer = nullptr;
-    return;
-  }
-  memset(gActiveFileTransfer->chunkMap, 0, gActiveFileTransfer->chunkMapBytes);
-  snprintf(gActiveFileTransfer->hash, sizeof(gActiveFileTransfer->hash), "%lu", (unsigned long)ctx.h->msgId);
-  gActiveFileTransfer->active = true;
-  gActiveFileTransfer->startTime = millis();
-  memcpy(gActiveFileTransfer->senderMac, ctx.recv_info->src_addr, 6);
-
   DEBUG_ESPNOWF("[V4_FILE_RX] FILE_START: %s (%lu bytes, %u chunks, chunkSize=%u) from %s",
                fs->filename, (unsigned long)fs->fileSize, fs->chunkCount, fs->chunkSize, ctx.deviceName);
-  DEBUG_ESPNOWF("[V4_FILE_RX] Allocated: dataBuffer=%lu bytes, chunkMap=%u bytes",
-               (unsigned long)gActiveFileTransfer->bufferSize, (unsigned)gActiveFileTransfer->chunkMapBytes);
 }
 
-// FILE_DATA — receive a chunk into the active transfer's PSRAM buffer.
+// FILE_DATA — route the chunk to its owning slot in the multi-slot table.
 // Original branch had inline `if (!isPaired) return true;` — using REQ_PAIRED
 // flag yields identical behavior (silent drop for unpaired senders).
 static void v4h_file_data(const V4RxCtx& ctx) {
-  if (!gActiveFileTransfer || !gActiveFileTransfer->active || !gActiveFileTransfer->dataBuffer) {
-    DEBUG_ESPNOWF("[V4_FILE_RX] FILE_DATA ignored: no active transfer (active=%d)",
-                 gActiveFileTransfer ? gActiveFileTransfer->active : 0);
+  if (ctx.payloadLen < 3) return;
+  FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId);
+  if (!slot) {
+    DEBUG_ESPNOWF("[V4_FILE_RX] FILE_DATA ignored: no slot for msgId=%lu from %s",
+                 (unsigned long)ctx.h->msgId, ctx.deviceName);
     return;
   }
-  if (memcmp(gActiveFileTransfer->senderMac, ctx.recv_info->src_addr, 6) != 0) {
-    return;  // Silently ignore data from different sender
-  }
-  if (ctx.payloadLen < 3) return;
   const V4PayloadFileData* fd = (const V4PayloadFileData*)ctx.payload;
   uint16_t dataLen = ctx.payloadLen - 2;
-  if (!gActiveFileTransfer->chunkMap || gActiveFileTransfer->chunkSize == 0 || gActiveFileTransfer->totalChunks == 0) {
-    return;
+  if (!fileSlotsWriteChunk(slot, fd->chunkIndex, fd->data, dataLen)) {
+    return;  // bounds violation already logged inside the helper
   }
-  uint16_t idx = fd->chunkIndex;
-  if (idx >= gActiveFileTransfer->totalChunks) return;
-  uint32_t offset = (uint32_t)idx * (uint32_t)gActiveFileTransfer->chunkSize;
-  if (offset + dataLen > gActiveFileTransfer->bufferSize) {
-    ERROR_ESPNOWF("[V4_FILE] Buffer overflow: offset=%lu + len=%u > size=%lu",
-                 (unsigned long)offset, dataLen, (unsigned long)gActiveFileTransfer->bufferSize);
-    return;
-  }
-  uint16_t byteIndex = (uint16_t)(idx / 8);
-  uint8_t bitMask = (uint8_t)(1u << (idx % 8));
-  bool alreadyHave = (byteIndex < gActiveFileTransfer->chunkMapBytes) && ((gActiveFileTransfer->chunkMap[byteIndex] & bitMask) != 0);
-  if (alreadyHave) {
-    DEBUG_ESPNOWF("[V4_FILE_RX] Chunk %u: DUPLICATE", idx);
-  } else {
-    DEBUG_ESPNOWF("[V4_FILE_RX] Chunk %u: offset=%lu len=%u", idx, (unsigned long)offset, dataLen);
-  }
-  memcpy(gActiveFileTransfer->dataBuffer + offset, fd->data, dataLen);
-  if (!alreadyHave) {
-    if (byteIndex < gActiveFileTransfer->chunkMapBytes) {
-      gActiveFileTransfer->chunkMap[byteIndex] |= bitMask;
-    }
-    gActiveFileTransfer->receivedBytes += dataLen;
-    gActiveFileTransfer->receivedChunks++;
-    if ((gActiveFileTransfer->receivedChunks % 10) == 0) {
-      DEBUG_ESPNOWF("[V4_FILE_RX] Progress: %u/%u chunks, %lu/%lu bytes",
-                   gActiveFileTransfer->receivedChunks,
-                   gActiveFileTransfer->totalChunks,
-                   (unsigned long)gActiveFileTransfer->receivedBytes,
-                   (unsigned long)gActiveFileTransfer->totalSize);
-    }
+  uint16_t recv = fileSlotsGetReceivedChunks(slot);
+  if ((recv % 10) == 0) {
+    DEBUG_ESPNOWF("[V4_FILE_RX] Progress: %u/%u chunks, %lu/%lu bytes",
+                 recv,
+                 fileSlotsGetTotalChunks(slot),
+                 (unsigned long)fileSlotsGetReceivedBytes(slot),
+                 (unsigned long)fileSlotsGetTotalSize(slot));
   }
 }
 
-// FILE_END — finalize transfer; route manifest/settings to bond processors,
-// otherwise write to filesystem. Sends ACK back; cleans up state.
+// FILE_END — finalize the slot's transfer; route manifest/settings to bond
+// processors, otherwise write to filesystem. Sends ACK back; releases slot.
+// Slot identity: (peerMac, msgId) — the FILE_START's msgId is the transferId
+// used by every chunk and the FILE_END itself.
 static void v4h_file_end(const V4RxCtx& ctx) {
-  if (!gActiveFileTransfer || !gActiveFileTransfer->active) {
-    ERROR_ESPNOWF("[V4_FILE] Received FILE_END without active transfer");
-    return;
-  }
-  if (memcmp(gActiveFileTransfer->senderMac, ctx.recv_info->src_addr, 6) != 0) {
-    ERROR_ESPNOWF("[V4_FILE] FILE_END from different sender than FILE_START");
+  FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId);
+  if (!slot) {
+    ERROR_ESPNOWF("[V4_FILE] FILE_END for unknown msgId=%lu from %s — slot already released or never started",
+                  (unsigned long)ctx.h->msgId, ctx.deviceName);
     return;
   }
   const V4PayloadFileEnd* fe = (const V4PayloadFileEnd*)ctx.payload;
-  String senderMacStr = formatMacAddress(gActiveFileTransfer->senderMac);
+  const uint8_t* sndMac    = fileSlotsGetSenderMac(slot);
+  const char*    filename  = fileSlotsGetFilename(slot);
+  const uint8_t* dataBuf   = fileSlotsGetBuffer(slot);
+  uint32_t       recvBytes = fileSlotsGetReceivedBytes(slot);
+  String senderMacStr = formatMacAddress(sndMac);
 
   DEBUG_ESPNOWF("[V4_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, success=%d)",
-               gActiveFileTransfer->filename,
-               (unsigned long)gActiveFileTransfer->receivedBytes,
-               gActiveFileTransfer->receivedChunks,
-               gActiveFileTransfer->totalChunks,
+               filename, (unsigned long)recvBytes,
+               fileSlotsGetReceivedChunks(slot),
+               fileSlotsGetTotalChunks(slot),
                fe->success);
 
-  bool isComplete = (gActiveFileTransfer->totalSize == 0) ||
-                    ((gActiveFileTransfer->receivedChunks == gActiveFileTransfer->totalChunks) &&
-                     (gActiveFileTransfer->receivedBytes == gActiveFileTransfer->totalSize));
-
-  if (!isComplete) {
+  if (!fileSlotsIsComplete(slot)) {
     BROADCAST_PRINTF("[V4_FILE] REJECTED incomplete transfer '%s': %u/%u chunks, %lu/%lu bytes",
-                 gActiveFileTransfer->filename,
-                 (unsigned)gActiveFileTransfer->receivedChunks,
-                 (unsigned)gActiveFileTransfer->totalChunks,
-                 (unsigned long)gActiveFileTransfer->receivedBytes,
-                 (unsigned long)gActiveFileTransfer->totalSize);
-    if (gActiveFileTransfer->chunkMap) heap_caps_free(gActiveFileTransfer->chunkMap);
-    if (gActiveFileTransfer->dataBuffer) heap_caps_free(gActiveFileTransfer->dataBuffer);
-    delete gActiveFileTransfer;
-    gActiveFileTransfer = nullptr;
+                 filename,
+                 (unsigned)fileSlotsGetReceivedChunks(slot),
+                 (unsigned)fileSlotsGetTotalChunks(slot),
+                 (unsigned long)recvBytes,
+                 (unsigned long)fileSlotsGetTotalSize(slot));
+    fileSlotsRelease(slot);
     return;
   }
 
-  if (fe->success && gActiveFileTransfer->dataBuffer) {
+  if (fe->success && dataBuf) {
 #if ENABLE_BONDED_MODE
-    if (strcmp(gActiveFileTransfer->filename, "_manifest_out.json") == 0) {
-      String manifestStr((char*)gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
-      processBondModeManifestResp(gActiveFileTransfer->senderMac, senderMacStr, manifestStr);
-      BROADCAST_PRINTF("[V4_FILE] Manifest processed: %lu bytes", (unsigned long)gActiveFileTransfer->receivedBytes);
-    } else if (strcmp(gActiveFileTransfer->filename, "_settings_out.json") == 0) {
-      DEBUG_ESPNOWF("[FILE_END] Detected settings file: %s (%lu bytes)",
-                    gActiveFileTransfer->filename, (unsigned long)gActiveFileTransfer->receivedBytes);
-      String settingsStr((char*)gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
+    if (strcmp(filename, "_manifest_out.json") == 0) {
+      String manifestStr((char*)dataBuf, recvBytes);
+      processBondModeManifestResp((uint8_t*)sndMac, senderMacStr, manifestStr);
+      BROADCAST_PRINTF("[V4_FILE] Manifest processed: %lu bytes", (unsigned long)recvBytes);
+    } else if (strcmp(filename, "_settings_out.json") == 0) {
+      DEBUG_ESPNOWF("[FILE_END] Detected settings file: %s (%lu bytes)", filename, (unsigned long)recvBytes);
+      String settingsStr((char*)dataBuf, recvBytes);
       DEBUG_ESPNOWF("[FILE_END] Calling processBondSettings (settingsStr len=%d)", settingsStr.length());
-      processBondSettings(gActiveFileTransfer->senderMac, senderMacStr, settingsStr);
-      BROADCAST_PRINTF("[V4_FILE] Settings processed: %lu bytes", (unsigned long)gActiveFileTransfer->receivedBytes);
+      processBondSettings((uint8_t*)sndMac, senderMacStr, settingsStr);
+      BROADCAST_PRINTF("[V4_FILE] Settings processed: %lu bytes", (unsigned long)recvBytes);
     } else
 #endif // ENABLE_BONDED_MODE
     {
-      String senderMacHex = macToHexString(gActiveFileTransfer->senderMac);
+      String senderMacHex = macToHexString(sndMac);
       senderMacHex.replace(":", "");
       char deviceDir[64];
       snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderMacHex.c_str());
@@ -3305,17 +3201,17 @@ static void v4h_file_end(const V4RxCtx& ctx) {
       VFS::mkdirGuarded("/espnow/received", VFS::systemAuth("espnow.v4_file_write_mkdir"));
       VFS::mkdirGuarded(deviceDir, VFS::systemAuth("espnow.v4_file_write_mkdir"));
       char filepath[128];
-      snprintf(filepath, sizeof(filepath), "%s/%s", deviceDir, gActiveFileTransfer->filename);
+      snprintf(filepath, sizeof(filepath), "%s/%s", deviceDir, filename);
       File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("espnow.v4_file_write"), true);
       if (f) {
-        f.write(gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
+        f.write(dataBuf, recvBytes);
         f.close();
-        BROADCAST_PRINTF("[V4_FILE] Complete: %s (%lu bytes)", gActiveFileTransfer->filename, (unsigned long)gActiveFileTransfer->receivedBytes);
+        BROADCAST_PRINTF("[V4_FILE] Complete: %s (%lu bytes)", filename, (unsigned long)recvBytes);
 
-        if (strcmp(gActiveFileTransfer->filename, "automations.json") == 0) {
-          String senderName = getEspNowDeviceName(gActiveFileTransfer->senderMac);
-          if (senderName.length() == 0) senderName = formatMacAddress(gActiveFileTransfer->senderMac);
-          String jsonStr((char*)gActiveFileTransfer->dataBuffer, gActiveFileTransfer->receivedBytes);
+        if (strcmp(filename, "automations.json") == 0) {
+          String senderName = getEspNowDeviceName(sndMac);
+          if (senderName.length() == 0) senderName = formatMacAddress(sndMac);
+          String jsonStr((char*)dataBuf, recvBytes);
           PSRAM_JSON_DOC(adoc);
           DeserializationError aerr = deserializeJson(adoc, jsonStr);
           if (!aerr && adoc["automations"].is<JsonArray>()) {
@@ -3348,25 +3244,14 @@ static void v4h_file_end(const V4RxCtx& ctx) {
       }
     }
 
-    logFileTransferEvent(gActiveFileTransfer->senderMac, senderMacStr.c_str(),
-                        gActiveFileTransfer->filename, MSG_FILE_RECV_SUCCESS);
+    logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_SUCCESS);
     if (gEspNow) gEspNow->fileTransfersReceived++;
   } else {
-    logFileTransferEvent(gActiveFileTransfer->senderMac, senderMacStr.c_str(),
-                        gActiveFileTransfer->filename, MSG_FILE_RECV_FAILED);
+    logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
   }
 
   v4_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
-
-  if (gActiveFileTransfer->chunkMap) {
-    heap_caps_free(gActiveFileTransfer->chunkMap);
-    gActiveFileTransfer->chunkMap = nullptr;
-  }
-  if (gActiveFileTransfer->dataBuffer) {
-    heap_caps_free(gActiveFileTransfer->dataBuffer);
-  }
-  delete gActiveFileTransfer;
-  gActiveFileTransfer = nullptr;
+  fileSlotsRelease(slot);
 }
 
 // ----- Handler table ------
@@ -6294,6 +6179,9 @@ void processMeshHeartbeats() {
   // after 10s; resolved entries cleared after 30s so the polling window has
   // time to surface them to the web UI).
   sendStatusSweep((uint32_t)millis());
+  // 1d. Phase 4 — stale file-transfer slot sweep. Slots with no frame in
+  // kFileSlotTimeoutMs (30s) are released, freeing their PSRAM buffer.
+  fileSlotsTimeoutSweep((uint32_t)millis());
   // 1d. Phase 3.6 — zero expired prev-keys (held briefly after a REKEY so
   // in-flight frames sent under the old keys still decrypt).
   sessionRekeyPrevKeysSweep((uint32_t)millis());
@@ -6458,18 +6346,9 @@ void processMeshHeartbeats() {
     broadcast_tracker_check_timeouts();
   }
   
-  // 6b. Clean up abandoned file transfers (no FILE_END received within 30s)
-  if (gActiveFileTransfer && gActiveFileTransfer->active &&
-      (now - gActiveFileTransfer->startTime) > 30000) {
-    BROADCAST_PRINTF("[V4_FILE] Abandoned transfer '%s' after 30s (%u/%u chunks)",
-                     gActiveFileTransfer->filename,
-                     (unsigned)gActiveFileTransfer->receivedChunks,
-                     (unsigned)gActiveFileTransfer->totalChunks);
-    if (gActiveFileTransfer->chunkMap) heap_caps_free(gActiveFileTransfer->chunkMap);
-    if (gActiveFileTransfer->dataBuffer) heap_caps_free(gActiveFileTransfer->dataBuffer);
-    delete gActiveFileTransfer;
-    gActiveFileTransfer = nullptr;
-  }
+  // 6b. Abandoned file-transfer cleanup is now driven by step 1d above
+  // (fileSlotsTimeoutSweep) which handles all kFileSlots slots, not just
+  // a single global pointer. This block is intentionally removed.
   
   // 7. Process deferred CMD (remote command received from another device)
   if (gEspNow->deferredCmdPending) {
@@ -7433,17 +7312,25 @@ static bool deinitEspNow() {
     broadcastOutput("[ESP-NOW] Output streaming stopped");
   }
 
-  // 3. Cleanup active file transfer
-  if (gActiveFileTransfer) {
-    if (gActiveFileTransfer->chunkMap) {
-      heap_caps_free(gActiveFileTransfer->chunkMap);
+  // 3. Cleanup active file transfers (Phase 4 multi-slot: walk + release all
+  // slots; equivalent to the old single-slot delete).
+  {
+    uint8_t active = fileSlotsActiveCount();
+    if (active > 0) {
+      for (uint8_t i = 0; i < fileSlotsSlotCount(); i++) {
+        FileTransferSlotInfo info;
+        if (!fileSlotsSnapshot(i, &info)) continue;
+        // Re-find the slot by (mac, msgId) and release. The handle-by-index
+        // option would be cleaner but the public API is intentionally
+        // opaque; the find-by-msg lookup is fine for shutdown cost.
+        FileTransferSlot* slot = fileSlotsFindByMsg(info.peerMac, info.msgId);
+        if (slot) fileSlotsRelease(slot);
+      }
+      char msg[80];
+      snprintf(msg, sizeof(msg), "[ESP-NOW] %u active file transfer%s cleaned up",
+               (unsigned)active, active == 1 ? "" : "s");
+      broadcastOutput(msg);
     }
-    if (gActiveFileTransfer->dataBuffer) {
-      heap_caps_free(gActiveFileTransfer->dataBuffer);
-    }
-    delete gActiveFileTransfer;
-    gActiveFileTransfer = nullptr;
-    broadcastOutput("[ESP-NOW] Active file transfer cleaned up");
   }
 
   // 4. Clear retry queue entries
@@ -9149,44 +9036,39 @@ const char* cmd_test_cleanup(const String& argsInput) {
   return "OK";
 }
 
-// Test file lock
+// Phase 4: was cmd_test_filelock (exercised the old single-slot lock).
+// Repurposed to dump the multi-slot table for diagnostics. Kept the same
+// command name so anyone with muscle memory still gets useful output.
 const char* cmd_test_filelock(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  broadcastOutput("\n=== Testing File Transfer Lock ===");
-  
-  uint8_t testMac[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
-  
-  // Check for stale locks (30 second timeout)
-  const unsigned long LOCK_TIMEOUT_MS = 30000;
-  if (gFileTransferLocked && (millis() - gFileTransferLockTime > LOCK_TIMEOUT_MS)) {
-    broadcastOutput("[WARN] Stale lock detected (>30s), auto-releasing...");
-    gFileTransferLocked = false;
-    memset(gFileTransferOwnerMac, 0, 6);
-  }
-  
-  BROADCAST_PRINTF("Lock status: %s", gFileTransferLocked ? "LOCKED" : "FREE");
-  
-  if (gFileTransferLocked) {
-    BROADCAST_PRINTF("Lock owner: %s", MAC_STR(gFileTransferOwnerMac));
-    BROADCAST_PRINTF("Lock age: %lums", millis() - gFileTransferLockTime);
-  }
-  
-  if (!gFileTransferLocked) {
-    broadcastOutput("\nAcquiring lock...");
-    gFileTransferLocked = true;
-    memcpy(gFileTransferOwnerMac, testMac, 6);
-    gFileTransferLockTime = millis();
-    BROADCAST_PRINTF("✓ Lock acquired by: %s", MAC_STR(gFileTransferOwnerMac));
+
+  broadcastOutput("\n=== File Transfer Slot Table (Phase 4) ===");
+  uint8_t total  = fileSlotsSlotCount();
+  uint8_t active = fileSlotsActiveCount();
+  BROADCAST_PRINTF("Slots: %u/%u in use", (unsigned)active, (unsigned)total);
+  if (active == 0) {
+    broadcastOutput("  (all slots idle)");
   } else {
-    broadcastOutput("\nLock already held, releasing...");
-    gFileTransferLocked = false;
-    memset(gFileTransferOwnerMac, 0, 6);
-    broadcastOutput("✓ Lock released");
+    uint32_t nowMs = (uint32_t)millis();
+    for (uint8_t i = 0; i < total; i++) {
+      FileTransferSlotInfo info;
+      if (!fileSlotsSnapshot(i, &info)) continue;
+      static const char* kStates[] = { "FREE", "RECEIVING", "COMPLETING", "FAILED" };
+      const char* stateStr = (info.state < 4) ? kStates[info.state] : "?";
+      BROADCAST_PRINTF("  [%u] %s '%s' from %02X:%02X:%02X:%02X:%02X:%02X "
+                       "msgId=%lu %lu/%lu bytes %u/%u chunks ageMs=%lu",
+                       (unsigned)i, stateStr, info.filename,
+                       info.peerMac[0], info.peerMac[1], info.peerMac[2],
+                       info.peerMac[3], info.peerMac[4], info.peerMac[5],
+                       (unsigned long)info.msgId,
+                       (unsigned long)info.receivedBytes,
+                       (unsigned long)info.totalSize,
+                       (unsigned)info.receivedChunks,
+                       (unsigned)info.totalChunks,
+                       (unsigned long)(nowMs - info.startedMs));
+    }
   }
-  
-  broadcastOutput("\n=== File Lock Test Complete ===");
-  broadcastOutput("Run again to toggle lock state");
+  broadcastOutput("=== End slot table ===");
   return "OK";
 }
 

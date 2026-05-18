@@ -69,6 +69,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
   #include "System_ESPNow.h"
   #include "System_ESPNow_Crypto.h"
   #include "System_ESPNow_Identity.h"
+  #include "System_ESPNow_Files.h"
   #include "System_ESPNow_MeshKeys.h"
   #include "System_ESPNow_Sessions.h"
 #endif
@@ -1590,6 +1591,11 @@ void hardwareone_setup() {
     // Phase 3.4 — allocate the in-RAM SessionState table. Sessions vanish
     // on reboot by design (forward secrecy); just need the slot table ready.
     sessionsInit();
+
+    // Phase 4 — file-transfer slot table + boot-time cleanup of stale
+    // .part files from any previous crashed-mid-transfer boot.
+    fileSlotsInit();
+    fileSlotsBootCleanup();
   }
 
   if (gSettings.espnowenabled && identityOk) {
