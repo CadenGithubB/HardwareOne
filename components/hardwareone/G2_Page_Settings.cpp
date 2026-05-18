@@ -133,12 +133,24 @@ static void formatSettingValue(const SettingEntry& e, char* out, size_t cap) {
       break;
     }
     case SETTING_INT: {
-      // Registry stores several integer-ish fields as raw void*
-      // (uint8_t / uint16_t / uint32_t / int). Read as int — the type
-      // system here is too loose to do better without extending
-      // SettingEntry. Good enough for read-only display.
       int v = *(int*)e.valuePtr;
       snprintf(out, cap, "%d", v);
+      break;
+    }
+    // Width-correct reads for the explicit uint tags (added 2026-05-18 after
+    // the heap-corruption fix). Old code read 4 bytes through a uint8 ptr,
+    // showing garbage values in the UI; mostly cosmetic on the read path
+    // but the write path (handleSettingCommand) actually corrupted memory.
+    case SETTING_U8: {
+      snprintf(out, cap, "%u", (unsigned)*(uint8_t*)e.valuePtr);
+      break;
+    }
+    case SETTING_U16: {
+      snprintf(out, cap, "%u", (unsigned)*(uint16_t*)e.valuePtr);
+      break;
+    }
+    case SETTING_U32: {
+      snprintf(out, cap, "%lu", (unsigned long)*(uint32_t*)e.valuePtr);
       break;
     }
     case SETTING_FLOAT: {

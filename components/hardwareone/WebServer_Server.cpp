@@ -2647,11 +2647,16 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
       entry["key"] = e->jsonKey;
       entry["label"] = e->label ? e->label : e->jsonKey;
       
-      // Type as string
+      // Type as string. SETTING_U8/U16/U32 (added 2026-05-18) all report
+      // as "int" externally — the UI doesn't need to know the on-device
+      // storage width, and the validation min/max already constrains range.
       switch (e->type) {
-        case SETTING_INT: entry["type"] = "int"; break;
-        case SETTING_FLOAT: entry["type"] = "float"; break;
-        case SETTING_BOOL: entry["type"] = "bool"; break;
+        case SETTING_INT:
+        case SETTING_U8:
+        case SETTING_U16:
+        case SETTING_U32:    entry["type"] = "int"; break;
+        case SETTING_FLOAT:  entry["type"] = "float"; break;
+        case SETTING_BOOL:   entry["type"] = "bool"; break;
         case SETTING_STRING: entry["type"] = "string"; break;
       }
       
@@ -2671,23 +2676,28 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
       }
       
       // Min/max for numeric types
-      if (e->type == SETTING_INT || e->type == SETTING_FLOAT) {
+      if (e->type == SETTING_INT || e->type == SETTING_U8 ||
+          e->type == SETTING_U16 || e->type == SETTING_U32 ||
+          e->type == SETTING_FLOAT) {
         if (e->minVal != 0 || e->maxVal != 0) {
           entry["min"] = e->minVal;
           entry["max"] = e->maxVal;
         }
       }
-      
+
       // Options for select fields
       if (e->options) {
         entry["options"] = e->options;
       }
-      
+
       // Default value
       switch (e->type) {
-        case SETTING_INT: entry["default"] = e->intDefault; break;
-        case SETTING_FLOAT: entry["default"] = e->floatDefault; break;
-        case SETTING_BOOL: entry["default"] = (bool)e->intDefault; break;
+        case SETTING_INT:
+        case SETTING_U8:
+        case SETTING_U16:
+        case SETTING_U32:    entry["default"] = e->intDefault; break;
+        case SETTING_FLOAT:  entry["default"] = e->floatDefault; break;
+        case SETTING_BOOL:   entry["default"] = (bool)e->intDefault; break;
         case SETTING_STRING: entry["default"] = e->stringDefault ? e->stringDefault : ""; break;
       }
     }
