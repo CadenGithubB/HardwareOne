@@ -232,6 +232,14 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
                            uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen,
                            uint8_t ttl);
+// Phase 3.5 task #51 — encrypted multi-frame send. Splits payload into
+// fragments of ≤ESPNOW_V4_MAX_PLAINTEXT bytes, AEAD-seals each fragment
+// independently under the peer's session key, sends with fragIndex/fragCount
+// set in the outer header, ACK-waits per fragment with retry.
+bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
+                               uint32_t msgId,
+                               const uint8_t* payload, uint16_t payloadLen,
+                               uint8_t ttl);
 bool v4_broadcast_topo_request(uint32_t reqId);
 bool v4_send_worker_status(const uint8_t* dst, const V4PayloadWorkerStatus& status, const char* jsonMetadata, uint16_t jsonLen);
 bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen);
@@ -1829,21 +1837,193 @@ bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t 
   return true;
 }
 
+// Phase 3.5 task #51 — encrypted multi-frame send.
+//
+// Splits `payload` into fragments of up to ESPNOW_V4_MAX_PLAINTEXT bytes each
+// and sends them as independent SESSION_FRAMEs sharing the same `msgId`. The
+// outer header carries fragIndex / fragCount per fragment; each fragment gets
+// its own AEAD seal (fresh frameSeq, fresh nonce). The receiver decrypts each
+// fragment as it arrives and reassembles the plaintext slices into the final
+// payload via the existing fragmentation reassembler.
+//
+// Why per-fragment seal instead of seal-then-chunk: AEAD is all-or-nothing —
+// you can't open a partial ciphertext. Sealing once and slicing the cipher
+// across frames would force the receiver to buffer everything before
+// authenticating, which both delays detection of tampered fragments and
+// requires a separate "deferred-auth" buffer pool. Per-fragment sealing
+// reuses every existing knob (replay window, ACK retry, GC) and authenticates
+// each frame on arrival.
+//
+// Single-frame fast path: if payloadLen ≤ MAX_PLAINTEXT we just delegate to
+// v4_send_session_wrapped (no fragmentation overhead).
+//
+// Returns true only if every fragment was ACKed within retry budget.
+bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
+                               uint32_t msgId,
+                               const uint8_t* payload, uint16_t payloadLen,
+                               uint8_t ttl) {
+  if (!dst || (payloadLen > 0 && !payload)) return false;
+
+  // Single-frame fast path — no need to fragment.
+  if (payloadLen <= ESPNOW_V4_MAX_PLAINTEXT) {
+    char err[64] = {0};
+    return v4_send_session_wrapped(dst, type, baseFlags, msgId,
+                                   payload, payloadLen, ttl, err, sizeof(err));
+  }
+
+  // fragIndex/fragCount are uint8_t in the header, so the wire caps us at
+  // 255 fragments × 200 plaintext bytes = ~51 KB. CMD_RESP / STREAM /
+  // METADATA_PUSH are the realistic callers — they should be well under this.
+  //
+  // Important: fragSize must equal V4_MAX_FRAGMENT_PAYLOAD (200) — the
+  // existing reassembler uses that stride to compute buffer offsets.
+  // Plaintext+encrypted-chunked are interleaved through the same buffer pool,
+  // and the wire cipher is fragSize + 16 (AEAD tag) = 216 ≤ MAX_PAYLOAD (218).
+  uint16_t fragSize = V4_MAX_FRAGMENT_PAYLOAD;
+  uint32_t fragCountU = (payloadLen + fragSize - 1) / fragSize;
+  if (fragCountU > 255) {
+    WARN_ESPNOWF("[V4_ENC_FRAG_TX] payload too large: %u bytes requires %u frags (max 255)",
+                 payloadLen, (unsigned)fragCountU);
+    return false;
+  }
+  uint8_t fragCount = (uint8_t)fragCountU;
+
+  // Look up session up-front so we fail fast if encryption isn't set up.
+  const PeerIdentity* pid = peerIdentityFindByMac(dst);
+  if (!pid) {
+    WARN_ESPNOWF("[V4_ENC_FRAG_TX] no peer identity for dst — cannot encrypt");
+    return false;
+  }
+  SessionState* s = sessionFindByPeer(dst, pid->meshId);
+  if (!s || s->state != SESSION_ACTIVE) {
+    WARN_ESPNOWF("[V4_ENC_FRAG_TX] no ACTIVE session for dst — cannot encrypt");
+    return false;
+  }
+
+  char dstMac[18];
+  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ==============================");
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] Starting encrypted fragmented send to %s", dstMac);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] msgId=%lu type=%u payloadLen=%u fragCount=%u",
+         (unsigned long)msgId, type, payloadLen, fragCount);
+
+  uint8_t myMac[6];
+  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+
+  const uint8_t MAX_RETRIES = 3;
+  const uint32_t ACK_TIMEOUT_MS = 200;
+
+  uint16_t offset = 0;
+  for (uint8_t fragIdx = 0; fragIdx < fragCount; fragIdx++) {
+    uint16_t fragLen = (offset + fragSize <= payloadLen) ? fragSize
+                                                          : (uint16_t)(payloadLen - offset);
+
+    bool fragSent = false;
+    for (uint8_t retry = 0; retry < MAX_RETRIES && !fragSent; retry++) {
+      if (retry > 0) {
+        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] retry %u/%u for fragment %u/%u",
+               retry + 1, MAX_RETRIES, fragIdx + 1, fragCount);
+      }
+
+      // Build the outer header for this fragment. sessionWrapFrame will
+      // OR in SESSION_FRAME, write the AEAD tag, and stamp sessionId /
+      // frameSeq from the session state.
+      uint8_t frame[sizeof(EspNowV4Header) + ESPNOW_V4_MAX_PAYLOAD];
+      EspNowV4Header* h = reinterpret_cast<EspNowV4Header*>(frame);
+      memset(h, 0, sizeof(*h));
+      h->magic           = (uint16_t)ESPNOW_V4_MAGIC;
+      h->ver             = ESPNOW_V4_VERSION;
+      h->type            = type;
+      h->flags           = baseFlags | ESPNOW_V4_FLAG_ACK_REQ;  // per-fragment ACK
+      h->headerLen       = (uint8_t)sizeof(EspNowV4Header);
+      h->msgId           = msgId;
+      memcpy(h->origin, myMac, 6);
+      h->ttl             = ttl;
+      h->fragIndex       = fragIdx;
+      h->fragCount       = fragCount;
+      h->meshFingerprint = fingerprintForPeer(dst);
+
+      uint8_t* outPayload = frame + sizeof(EspNowV4Header);
+      if (!sessionWrapFrame(s, h, payload + offset, fragLen, outPayload)) {
+        WARN_ESPNOWF("[V4_ENC_FRAG_TX] AEAD seal failed for frag %u/%u — aborting",
+                     fragIdx + 1, fragCount);
+        return false;
+      }
+
+      // Allocate ACK wait slot — same machinery as plaintext fragmentation.
+      // ACKs themselves are plaintext (TYPE_ACK opcode), matched by
+      // (msgId, fragIndex). The encrypted-vs-plaintext distinction is
+      // invisible at the ACK layer.
+      V4FragAckWait* ackWait = v4_frag_ack_alloc(dst, msgId, fragIdx);
+      if (!ackWait) {
+        WARN_ESPNOWF("[V4_ENC_FRAG_TX] no ACK slot for frag %u/%u", fragIdx + 1, fragCount);
+        return false;
+      }
+      ackWait->acked = false;
+      ackWait->sentMs = millis();
+
+      size_t totalLen = sizeof(EspNowV4Header) + fragLen + ESPNOW_V4_AEAD_TAG_LEN;
+      captureEspNowFrame("TX", dst, 0, frame, (int)totalLen);
+      esp_err_t rc = esp_now_send(dst, frame, totalLen);
+      if (rc != ESP_OK) {
+        WARN_ESPNOWF("[V4_ENC_FRAG_TX] esp_now_send rc=%d for frag %u/%u (retry %u)",
+                     (int)rc, fragIdx + 1, fragCount, retry);
+        ackWait->active = false;
+        vTaskDelay(pdMS_TO_TICKS(50 * (retry + 1)));
+        continue;
+      }
+      if (gEspNow) { gEspNow->routerMetrics.v4FragTx++; }
+
+      uint32_t waitStart = millis();
+      while ((millis() - waitStart) < ACK_TIMEOUT_MS) {
+        if (ackWait->acked) {
+          fragSent = true;
+          DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ✓ frag %u/%u ACK in %lu ms",
+                 fragIdx + 1, fragCount, (unsigned long)(millis() - waitStart));
+          break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+      }
+      ackWait->active = false;
+
+      if (!fragSent) {
+        WARN_ESPNOWF("[V4_ENC_FRAG_TX] ✗ frag %u/%u ACK timeout (retry %u)",
+                     fragIdx + 1, fragCount, retry);
+      }
+    }
+
+    if (!fragSent) {
+      WARN_ESPNOWF("[V4_ENC_FRAG_TX] FAILED: frag %u/%u no ACK after %u retries — aborting send",
+                   fragIdx + 1, fragCount, MAX_RETRIES);
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ==============================");
+      return false;
+    }
+
+    offset += fragLen;
+  }
+
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ✓ SUCCESS: all %u fragments sent + ACKed", fragCount);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ==============================");
+  return true;
+}
+
 // Phase 3.5 follow-on (A1+A2) — encrypted-or-plaintext-chunked dispatcher.
 // Used by CMD_RESP and STREAM senders that previously called v4_send_chunked
 // directly (bypassing the helper-level encryption flip in task #6). Logic:
-//   - If payload fits in a single SESSION_FRAME (<= MAX_PLAINTEXT 202B),
-//     route through v4_send_encrypted_or_queue. Returns true on send-or-queue.
-//   - If encryption isn't possible (no peer identity / queue full) OR payload
-//     exceeds MAX_PLAINTEXT, fall back to plaintext v4_send_chunked. Debug-
-//     logs the fallback so the regression is visible.
-// Task #51 (encrypted fragmentation) will replace the plaintext fallback for
-// large payloads; this helper is the seam where that work plugs in.
+//   - Single-frame (≤ MAX_PLAINTEXT): try v4_send_encrypted_or_queue (handles
+//     session-not-ready by queueing + auto-kicking SESSION_OPEN). On hard
+//     failure, fall back to plaintext v4_send_chunked.
+//   - Multi-frame (> MAX_PLAINTEXT): Phase 3.5 task #51 — if an ACTIVE session
+//     exists, use v4_send_encrypted_chunked. If no session OR encrypted-
+//     chunked fails, fall back to plaintext v4_send_chunked. We don't queue
+//     multi-frame payloads (the pendingFrame queue is single-frame), so a
+//     missing session degrades to plaintext rather than blocking the caller.
 bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
                            uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen,
                            uint8_t ttl) {
   if (!dst) return false;
+
   if (payloadLen <= ESPNOW_V4_MAX_PLAINTEXT) {
     char status[64] = {0};
     if (v4_send_encrypted_or_queue(dst, type, flags, msgId, payload, payloadLen,
@@ -1854,12 +2034,27 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
            "[V4_TX] smart-send: encrypt failed (%s) for type=%u msgId=%lu — "
            "falling back to plaintext chunked",
            status[0] ? status : "no detail", type, (unsigned long)msgId);
-  } else {
-    DEBUGF(DEBUG_ESPNOW_CORE,
-           "[V4_TX] smart-send: payload %u > MAX_PLAINTEXT %u for type=%u msgId=%lu — "
-           "plaintext chunked (task #51 will encrypt these)",
-           payloadLen, ESPNOW_V4_MAX_PLAINTEXT, type, (unsigned long)msgId);
+    return v4_send_chunked(dst, type, flags, msgId, payload, payloadLen, ttl);
   }
+
+  // Multi-frame: prefer encrypted-chunked if a session is ready.
+  const PeerIdentity* pid = peerIdentityFindByMac(dst);
+  if (pid) {
+    SessionState* s = sessionFindByPeer(dst, pid->meshId);
+    if (s && s->state == SESSION_ACTIVE) {
+      if (v4_send_encrypted_chunked(dst, type, flags, msgId, payload, payloadLen, ttl)) {
+        return true;
+      }
+      DEBUGF(DEBUG_ESPNOW_CORE,
+             "[V4_TX] smart-send: encrypted-chunked failed for type=%u msgId=%lu "
+             "(%u bytes) — falling back to plaintext chunked",
+             type, (unsigned long)msgId, payloadLen);
+      return v4_send_chunked(dst, type, flags, msgId, payload, payloadLen, ttl);
+    }
+  }
+  DEBUGF(DEBUG_ESPNOW_CORE,
+         "[V4_TX] smart-send: no session for type=%u msgId=%lu (%u bytes) — plaintext chunked",
+         type, (unsigned long)msgId, payloadLen);
   return v4_send_chunked(dst, type, flags, msgId, payload, payloadLen, ttl);
 }
 
@@ -3345,36 +3540,13 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     return true;
   }
 
-  // Phase 3.5a: if the frame is SESSION_FRAME-wrapped, decrypt + replay-check
-  // into a stack buffer, then dispatch the handler with the plaintext payload.
-  // Only invoked when the sender opted in to wrapping (via espnowsessionsend
-  // CLI or future TX-path integration). Non-wrapped frames flow through
-  // unchanged, preserving all existing behaviour.
-  uint8_t plainBuf[ESPNOW_V4_MAX_PAYLOAD];
-  uint16_t plainLen = 0;
-  const uint8_t* dispatchPayload    = payload;
-  uint16_t       dispatchPayloadLen = payloadLen;
-  if (h->flags & ESPNOW_V4_FLAG_SESSION_FRAME) {
-    SessionState* s = sessionFindBySessionId(h->sessionId, recv_info->src_addr);
-    if (!s || s->state != SESSION_ACTIVE) {
-      WARN_ESPNOWF("V4_RX session frame for sessionId=%u from %02X:%02X:%02X:%02X:%02X:%02X "
-                   "— no active session, dropping",
-                   (unsigned)h->sessionId,
-                   recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
-                   recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
-      v4_dispatch_post_cleanup(recv_info, h);
-      return true;
-    }
-    if (!sessionUnwrapFrame(s, h, payload, payloadLen, plainBuf, &plainLen)) {
-      // sessionUnwrapFrame already logged the reason (AEAD-fail or replay).
-      v4_dispatch_post_cleanup(recv_info, h);
-      return true;
-    }
-    dispatchPayload    = plainBuf;
-    dispatchPayloadLen = plainLen;
-  }
-
-  V4RxCtx ctx{recv_info, h, dispatchPayload, dispatchPayloadLen, isPaired, deviceName};
+  // Phase 3.5 task #51 — SESSION_FRAME unwrap was previously performed here,
+  // gated on h->flags & SESSION_FRAME. It now lives upstream in
+  // v4_try_handle_incoming (right after BROADCAST_AUTH), so encrypted-chunked
+  // payloads can be unwrapped per-fragment before the reassembler. By the
+  // time we reach this point, `payload` is already plaintext and the
+  // SESSION_FRAME flag has been cleared in the local header copy.
+  V4RxCtx ctx{recv_info, h, payload, payloadLen, isPaired, deviceName};
   e->handler(ctx);
   v4_dispatch_post_cleanup(recv_info, h);
   return true;
@@ -3461,6 +3633,62 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     }
     // Tag verified — strip it so downstream handlers see only the real payload.
     payloadLen = corePayloadLen;
+  }
+
+  // === Phase 3.5 task #51 — SESSION_FRAME per-fragment early unwrap ===
+  //
+  // For fragmented encrypted sends, each fragment carries its own AEAD seal
+  // (the cipher cannot be sliced across frames — AEAD is all-or-nothing). We
+  // decrypt each fragment HERE, before the reassembly path below, so the
+  // reassembler accumulates plaintext slices. A single-fragment SESSION_FRAME
+  // (fragCount == 1) is also unwrapped here, which moves the previous
+  // dispatch-time unwrap forward; the dispatch path is now strictly
+  // plaintext.
+  //
+  // We mutate a local header copy to clear the SESSION_FRAME flag for
+  // downstream code (which checks h->flags & SESSION_FRAME to decide whether
+  // to unwrap again). The original wire-buffer header is left untouched.
+  //
+  // sessionUnwrapFrame performs replay-window insertion per fragment —
+  // fragments and their retries all consume distinct frameSeqs, so the
+  // 64-slot window only ever sees forward motion.
+  EspNowV4Header headerCopy;
+  uint8_t plainBuf[ESPNOW_V4_MAX_PAYLOAD];
+  if (h->flags & ESPNOW_V4_FLAG_SESSION_FRAME) {
+    SessionState* s = sessionFindBySessionId(h->sessionId, recv_info->src_addr);
+    if (!s || (s->state != SESSION_ACTIVE && s->state != SESSION_REKEYING)) {
+      WARN_ESPNOWF("[V4_RX] SESSION_FRAME no active session for sessionId=%u "
+                   "from %02X:%02X:%02X:%02X:%02X:%02X — dropping (frag %u/%u)",
+                   (unsigned)h->sessionId,
+                   recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
+                   recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5],
+                   h->fragIndex + 1, h->fragCount);
+      return true;
+    }
+    uint16_t plainLen = 0;
+    if (!sessionUnwrapFrame(s, h, payload, payloadLen, plainBuf, &plainLen)) {
+      // sessionUnwrapFrame already logged the reason (AEAD-fail or replay).
+      return true;
+    }
+    // Acknowledge requested ACK *only* for authenticated frames (we mustn't
+    // ACK a forged SESSION_FRAME — the AEAD verify is the gate). The plain-
+    // text ACK-send below still fires for non-SESSION frames; we replicate
+    // the per-fragment-or-not branch here for clarity.
+    if (h->flags & ESPNOW_V4_FLAG_ACK_REQ) {
+      if (h->fragCount > 1) {
+        v4_send_frag_ack(recv_info->src_addr, h->msgId, h->fragIndex, h->fragCount);
+      } else {
+        v4_send_ack(recv_info->src_addr, h->msgId);
+      }
+    }
+    headerCopy = *h;
+    headerCopy.flags &= ~ESPNOW_V4_FLAG_SESSION_FRAME;
+    headerCopy.flags &= ~ESPNOW_V4_FLAG_ACK_REQ;  // already ACKed above
+    h = &headerCopy;
+    payload = plainBuf;
+    payloadLen = plainLen;
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] SESSION_FRAME unwrapped: type=%u msgId=%lu frag=%u/%u plainLen=%u",
+           h->type, (unsigned long)h->msgId, h->fragIndex + 1, h->fragCount, plainLen);
   }
 
   // === V4 FRAGMENTATION REASSEMBLY ===
