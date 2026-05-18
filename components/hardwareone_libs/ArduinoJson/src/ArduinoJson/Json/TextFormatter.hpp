@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <string.h>  // for strlen
+#include <stdio.h>   // HardwareOne defensive patch: printf for NULL-guard diagnostics
 
 #include <ArduinoJson/Json/EscapeSequence.hpp>
 #include <ArduinoJson/Numbers/FloatParts.hpp>
@@ -37,7 +38,17 @@ class TextFormatter {
   }
 
   void writeString(const char* value) {
+    // HardwareOne defensive patch (2026-05-18): handle NULL gracefully
+    // instead of crashing in *value/strlen. The hardwareone codebase has
+    // at least one path that stores a NULL const char* into a JsonVariant
+    // (root cause still being chased); without this guard the serializer
+    // crashes with LoadProhibited at strlen(NULL) inside writeRaw.
     ARDUINOJSON_ASSERT(value != NULL);
+    if (!value) {
+      writeRaw("null");  // emit JSON null instead of crashing
+      printf("\n[ArduinoJson] writeString(const char*) got NULL — emitting 'null'");
+      return;
+    }
     writeRaw('\"');
     while (*value)
       writeChar(*value++);
@@ -45,7 +56,13 @@ class TextFormatter {
   }
 
   void writeString(const char* value, size_t n) {
+    // HardwareOne defensive patch (2026-05-18): handle NULL gracefully.
     ARDUINOJSON_ASSERT(value != NULL);
+    if (!value) {
+      writeRaw("null");
+      printf("\n[ArduinoJson] writeString(const char*, %zu) got NULL — emitting 'null'", n);
+      return;
+    }
     writeRaw('\"');
     while (n--)
       writeChar(*value++);
@@ -150,10 +167,24 @@ class TextFormatter {
   }
 
   void writeRaw(const char* s) {
+    // HardwareOne defensive patch (2026-05-18): NULL-check before strlen.
+    // This is the exact crash site decoded from the 2026-05-18 field-test
+    // panic (LoadProhibited, EXCVADDR=0, PC inside strlen). A NULL const
+    // char* was reaching this overload through writeChar's '\\u0000' literal
+    // path or a JsonVariant with stored NULL string. Skipping the write
+    // produces no output (caller's responsibility to never pass NULL).
+    if (!s) {
+      printf("\n[ArduinoJson] writeRaw(NULL) — skipping");
+      return;
+    }
     writer_.write(reinterpret_cast<const uint8_t*>(s), strlen(s));
   }
 
   void writeRaw(const char* s, size_t n) {
+    if (!s && n > 0) {
+      printf("\n[ArduinoJson] writeRaw(NULL, %zu) — skipping", n);
+      return;
+    }
     writer_.write(reinterpret_cast<const uint8_t*>(s), n);
   }
 

@@ -85,6 +85,21 @@ struct ExecReq {
   typedef void (*DeferredFn)(void* arg);
   DeferredFn deferredFn;            // If non-NULL, called instead of executeCommand
   void*      deferredArg;
+
+  // 2026-05-18 — Use-after-free fix.
+  // submitSync used to free `r` when its 10s wait timed out. cmd_exec_task,
+  // which may still be inside executeCommand on a long-running command
+  // (PBKDF2 ~12 s, or a future even-slower op), would then double-free OR
+  // ps_alloc would hand the same address back to the next submit, racing the
+  // old cmd_exec_task against new ExecReq data. Caused String::buffer
+  // corruption that surfaced as strlen(NULL) inside ArduinoJson.
+  //
+  // Flag is set by the caller (submitSync) when it gives up. cmd_exec_task
+  // checks it after executeCommand returns; if true, cmd_exec_task owns
+  // the cleanup. If false, the caller still owns it (current behaviour).
+  // `volatile` is enough — the only mutation is a single-byte write under
+  // observation, no rmw, no atomicity needed.
+  volatile bool abandoned;
 };
 
 #endif // SYSTEM_COMMANDTYPES_H
