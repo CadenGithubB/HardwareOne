@@ -214,16 +214,46 @@ bool replayCheckAndInsert(SessionState* s, uint32_t frameSeq) {
 
 }  // namespace
 
+// Phase 5 follow-up: tag each failure path so the caller's log
+// ("sessionWrapFrame failed") is no longer opaque. A field-test fallback
+// from v4_send_payload_smart didn't tell us which branch fired — these
+// WARNs close that gap. State enum names mirror SessionStateLifecycle:
+//   FREE=0, ESTABLISHING=1, ACTIVE=2, REKEYING=3, CLOSED=4.
+static const char* kSessionStateNames[] = {
+  "FREE", "ESTABLISHING", "ACTIVE", "REKEYING", "CLOSED"
+};
+static const char* sessionStateName(uint8_t s) {
+  return (s < sizeof(kSessionStateNames) / sizeof(kSessionStateNames[0]))
+           ? kSessionStateNames[s] : "?";
+}
+
 bool sessionWrapFrame(SessionState* s,
                       struct EspNowV4Header* headerInOut,
                       const uint8_t* plaintext, uint16_t plaintextLen,
                       uint8_t* outCipherWithTag) {
-  if (!s || s->state != SESSION_ACTIVE) return false;
-  if (!headerInOut || !plaintext || !outCipherWithTag) return false;
+  if (!s) {
+    WARN_ESPNOWF("session: wrap reject — null session pointer");
+    return false;
+  }
+  if (s->state != SESSION_ACTIVE) {
+    // Most common cause for an intermittent fallback: caller looked up the
+    // session and saw ACTIVE, but by the time wrap runs the state flipped
+    // (REKEYING during a rekey round, CLOSED if peer tore down, etc.).
+    WARN_ESPNOWF("session: wrap reject (sessionId=%u) — state=%s (need ACTIVE)",
+                 (unsigned)s->sessionId, sessionStateName(s->state));
+    return false;
+  }
+  if (!headerInOut || !plaintext || !outCipherWithTag) {
+    WARN_ESPNOWF("session: wrap reject (sessionId=%u) — null arg (hdr=%p pt=%p out=%p)",
+                 (unsigned)s->sessionId,
+                 (const void*)headerInOut, (const void*)plaintext,
+                 (const void*)outCipherWithTag);
+    return false;
+  }
   if (s->txSeqNext == 0xFFFFFFFFu) {
     // Refuse to wrap around — caller should rekey via Phase 3.6's REKEY path
     // (not yet implemented; for now this is just a hard stop).
-    WARN_ESPNOWF("session: txSeqNext exhausted (sessionId=%u) — rekey needed",
+    WARN_ESPNOWF("session: wrap reject (sessionId=%u) — txSeqNext exhausted (rekey needed)",
                  (unsigned)s->sessionId);
     return false;
   }
