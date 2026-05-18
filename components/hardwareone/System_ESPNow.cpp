@@ -1258,12 +1258,9 @@ void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords) {
     e["enabled"]   = m.enabled;
     e["isDefault"] = m.isDefault;
     // Phase 3.1: persist the PBKDF2-stretched hash in hex. Irreversible, so
-    // safe at rest in plaintext. Boot-time stretching is skipped when this
-    // is present — keeps cold-boot fast after the first generation.
-    // IMPORTANT: ArduinoJson stores const char* by reference (zero-copy).
-    // We wrap in String() to force a deep copy into ArduinoJson's pool,
-    // otherwise the stack buffer goes out of scope before serializeJson()
-    // runs and we crash on strlen(NULL).
+    // safe at rest in plaintext. Wrap the hex buffer in String() to force
+    // deep-copy into ArduinoJson's pool — the stack `hex[]` goes out of
+    // scope before serializeJson() runs (task #14 fix).
     if (m.passphraseHashValid) {
       char hex[65];
       static const char* kHex = "0123456789abcdef";
@@ -6309,12 +6306,17 @@ String getEspNowDeviceName(const uint8_t* mac) {
 
 static void fillMeshStatusPeerJsonObject(JsonObject peer, uint32_t now, const uint8_t* mac,
                                         const char* nameOpt, MeshPeerHealth* ph) {
-  // Zero-allocation MAC formatting directly into stack buffer
+  // MAC formatted into stack buffer — must wrap in String() so ArduinoJson
+  // deep-copies (otherwise the stored char* dangles after we return).
   char macBuf[18];
   snprintf(macBuf, sizeof(macBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  peer["mac"] = macBuf;
-  // Zero-allocation name lookup: check meta then paired registry, no String heap alloc
+  peer["mac"] = String(macBuf);
+  // Name lookup: check meta then paired registry. The resolved name may be
+  // a pointer into a global (gMeshPeerMeta entry, which outlives this fn) or
+  // a stack-local (nameBuf). Wrap the final assignment in String() so we
+  // never store a dangling stack pointer in the doc regardless of which
+  // branch resolved the name.
   const char* resolvedName = (nameOpt && nameOpt[0]) ? nameOpt : nullptr;
   char nameBuf[48] = "Unknown";
   if (!resolvedName && gMeshPeerMeta) {
@@ -6334,7 +6336,7 @@ static void fillMeshStatusPeerJsonObject(JsonObject peer, uint32_t now, const ui
       }
     }
   }
-  peer["name"] = resolvedName ? resolvedName : "Unknown";
+  peer["name"] = String(resolvedName ? resolvedName : "Unknown");
   if (ph) {
     uint32_t elHb = now - ph->lastMeshHeartbeatMs;
     if (elHb > 0x80000000UL) elHb = 0;
@@ -9538,7 +9540,8 @@ const char* cmd_espnow_list(const String& argsInput) {
     JsonObject d = devices.add<JsonObject>();
     char listMacBuf[18];
     formatMacAddressBuf(gEspNow->devices[i].mac, listMacBuf, sizeof(listMacBuf));
-    d["mac"]       = listMacBuf;
+    // Wrap in String() — same dangling-stack-buffer fix as meshesCmd_listjson.
+    d["mac"]       = String(listMacBuf);
     d["name"]      = gEspNow->devices[i].name;
     d["encrypted"] = gEspNow->devices[i].encrypted;
     // Phase 2.8: surface which mesh slot this peer was paired into so
@@ -9594,7 +9597,8 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
              gEspNow->unpairedDevices[i].mac[0], gEspNow->unpairedDevices[i].mac[1],
              gEspNow->unpairedDevices[i].mac[2], gEspNow->unpairedDevices[i].mac[3],
              gEspNow->unpairedDevices[i].mac[4], gEspNow->unpairedDevices[i].mac[5]);
-    dev["mac"] = unpairedMacBuf;
+    // String() wrap forces deep-copy into the doc pool (task #14 pattern).
+    dev["mac"] = String(unpairedMacBuf);
     dev["name"] = gEspNow->unpairedDevices[i].name.length() > 0 ? gEspNow->unpairedDevices[i].name : "Unknown";
     dev["rssi"] = gEspNow->unpairedDevices[i].rssi;
     dev["heartbeatCount"] = gEspNow->unpairedDevices[i].heartbeatCount;
@@ -9623,7 +9627,7 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
                  gMeshRetryQueue[i].dstMac[0], gMeshRetryQueue[i].dstMac[1],
                  gMeshRetryQueue[i].dstMac[2], gMeshRetryQueue[i].dstMac[3],
                  gMeshRetryQueue[i].dstMac[4], gMeshRetryQueue[i].dstMac[5]);
-        retry["dst"] = retryMacBuf;
+        retry["dst"] = String(retryMacBuf);
         retry["retryCount"] = gMeshRetryQueue[i].retryCount;
         retry["secondsWaiting"] = elapsed / 1000;
         
@@ -9636,10 +9640,10 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
 
   // Serialize to gDebugBuffer
   if (!ensureDebugBuffer()) return "{\"error\":\"Buffer unavailable\"}";
-  
+
   size_t len = serializeJson(doc, getDebugBuffer(), 1024);
   if (len >= 1024) return "{\"error\":\"Response too large\"}";
-  
+
   return getDebugBuffer();
 }
 
@@ -9738,7 +9742,11 @@ static const char* meshesCmd_listjson() {
     o["fingerprint"]   = (int)m.fingerprint;
     char fpHex[8];
     snprintf(fpHex, sizeof(fpHex), "0x%04X", (unsigned)m.fingerprint);
-    o["fingerprintHex"] = fpHex;
+    // Wrap in String() — passing a raw stack-local char* causes ArduinoJson
+    // to store by reference (zero-copy). The buffer's lifetime is just this
+    // loop iteration, so subsequent iterations reuse the stack slot and the
+    // earlier entry's pointer dangles. Same pattern as the task #14 fix.
+    o["fingerprintHex"] = String(fpHex);
     o["isDefault"]     = m.isDefault;
     o["hasPassphrase"] = (m.passphrase.length() > 0);
     if (m.isDefault && m.enabled) defaultSlot = (int)i;
@@ -9901,8 +9909,8 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
       }
       // Phase 3.1: passphrase changed → cached stretched hash is stale.
       // Invalidate first (so callers can't accidentally use a stale subkey),
-      // then re-stretch and re-derive synchronously. Stretching is ~1-2 s
-      // so callers experience a brief pause — acceptable for a CLI command.
+      // then re-stretch and re-derive synchronously. PBKDF2 stretching is
+      // ~12 s with HW SHA accel — submitSync's 60 s timeout covers it.
       meshKeysInvalidate(i);
       gSettings.meshes[i].passphraseHashValid = false;
       if (passphrase.length() > 0) {

@@ -777,6 +777,21 @@ static void commandExecTask(void* pv) {
       DEBUG_CMD_FLOWF("[cmd_exec] done ok=%d out_len=%zu heap=%lu",
                   r->ok ? 1 : 0, strlen(r->out), (unsigned long)ESP.getFreeHeap());
       
+      // 2026-05-18 — if submitSync gave up waiting (>60 s) it sets
+      // r->abandoned = true and returns without freeing. We MUST clean up
+      // here instead, otherwise the ExecReq + its `done` semaphore leak
+      // forever (and ps_alloc would eventually exhaust PSRAM).
+      if (r->abandoned) {
+        Serial.printf("[DBG_CMD] cmd_exec: r=%p was abandoned by caller — cleaning up\n", r);
+        if (r->done) {
+          vSemaphoreDelete(r->done);
+          r->done = nullptr;
+        }
+        r->~ExecReq();
+        free(r);
+        vTaskDelay(pdMS_TO_TICKS(1));
+        continue;
+      }
       // Handle completion: async callback OR semaphore
       if (r->asyncCallback) {
         r->asyncCallback(r->ok, r->out, r->asyncUserData);

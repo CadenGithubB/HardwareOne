@@ -3260,11 +3260,21 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
   }
   
   DEBUG_CMD_FLOWF("[submitSync] queued '%.40s' waiting...", r->line);
-  if (xSemaphoreTake(r->done, pdMS_TO_TICKS(10000)) != pdTRUE) {
-    DEBUG_CMD_FLOWF("[submitSync] TIMEOUT for '%.40s'", r->line);
-    vSemaphoreDelete(r->done);
-    r->~ExecReq();
-    free(r);
+  // Timeout bumped from 10s → 60s to cover PBKDF2 (~12 s) and any other
+  // long-running synchronous command. The bigger fix is the `abandoned`
+  // flag below — even if a future command runs longer than 60 s, we no
+  // longer free `r` from under cmd_exec_task. See ExecReq::abandoned.
+  if (xSemaphoreTake(r->done, pdMS_TO_TICKS(60000)) != pdTRUE) {
+    Serial.printf("[DBG_CMD] [submitSync] TIMEOUT — abandoning r=%p line='%.60s'\n",
+                  r, r->line);
+    DEBUG_CMD_FLOWF("[submitSync] TIMEOUT for '%.40s' — handing ownership to cmd_exec_task",
+                    r->line);
+    // CRITICAL: cmd_exec_task may still be inside executeCommand at this
+    // point. We MUST NOT free `r` or delete the semaphore — that would
+    // produce a use-after-free or double-free. Instead, mark `r` as
+    // abandoned; cmd_exec_task sees the flag after executeCommand returns
+    // and takes over the cleanup (vSemaphoreDelete + ~ExecReq + free).
+    r->abandoned = true;
     out = "[ERROR] Command timed out";
     return false;
   }
